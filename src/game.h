@@ -1,6 +1,18 @@
 #pragma once
 #include "grid.h"
 #include "blocks.cpp"
+#include "menu.h"
+
+/*
+
+enum GameState{
+    MENU,
+    PLAYING,
+    GAME_OVER
+};
+
+*/
+
 
 class Game{
 public:
@@ -12,22 +24,27 @@ public:
     bool gameOver;
     int score;
     Music music;
+    // GameState gameState;
+    // Menu menu;
 
 private:
     void MoveBlockLeft();
     void MoveBlockRight();
     void MoveBlockDrop();
-    bool IsBlockOutside();
+    void DropExpectation();
+    bool IsBlockOutside(const Block& block);
     void RotateBlock();
     void LockBlock();
-    bool BlockFits();
+    bool BlockFits(const Block& Block);
     void Reset();
     void UpdateScore(int linesCleared, int levelUp);
     std::vector<Block> blocks;
     std::vector<Block> GetAllBlocks();
     Grid grid;
+    Block MakeGhostBlock(const Block& block);
     Block GetRandomBlock();
     Block currentBlock;
+    Block ghostBlock;
     Block nextBlock;
     Sound rotateSound;
     Sound clearSound;

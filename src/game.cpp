@@ -7,6 +7,7 @@ Game::Game()
     blocks = GetAllBlocks();
     currentBlock = GetRandomBlock();
     nextBlock = GetRandomBlock();
+    ghostBlock = MakeGhostBlock(currentBlock);
     gameOver = false;
     score = 0;
     InitAudioDevice();
@@ -14,11 +15,13 @@ Game::Game()
     PlayMusicStream(music);
     rotateSound = LoadSound("Sounds/rotate.mp3");
     clearSound = LoadSound("Sounds/clear.mp3");
+    //dropSound
+    //levelUpSound
 }
 
 Game::~Game()
 {
-    UnloadMusicStream(music);\
+    UnloadMusicStream(music);
     UnloadSound(rotateSound);
     UnloadSound(clearSound);
     CloseAudioDevice();
@@ -44,7 +47,9 @@ std::vector<Block> Game::GetAllBlocks()
 void Game::Draw()
 {
     grid.Draw();
+    ghostBlock.Draw(11, 11);
     currentBlock.Draw(11, 11);
+    
     switch(nextBlock.id)
     {
         case 3:
@@ -90,15 +95,21 @@ void Game::HandleInput()
         MoveBlockDrop();
         break;
     }
+
+    DropExpectation();
 }
 
 void Game::MoveBlockLeft()
 {
     if (!gameOver) {
         currentBlock.Move(0, -1);
-        if (IsBlockOutside() || BlockFits() == false)
+        if (IsBlockOutside(currentBlock) || BlockFits(currentBlock) == false)
         {
             currentBlock.Move(0, 1);
+        }
+        else
+        {
+            ghostBlock = MakeGhostBlock(currentBlock);
         }
     }
 }
@@ -107,9 +118,13 @@ void Game::MoveBlockRight()
 {
     if (!gameOver) {
         currentBlock.Move(0, 1);
-        if (IsBlockOutside() || BlockFits() == false)
+        if (IsBlockOutside(currentBlock) || BlockFits(currentBlock) == false)
         {
             currentBlock.Move(0, -1);
+        }
+        else
+        {
+            ghostBlock = MakeGhostBlock(currentBlock);
         }
     }
 }
@@ -118,7 +133,7 @@ void Game::MoveBlockDown()
 {
     if (!gameOver) {
         currentBlock.Move(1, 0);
-        if (IsBlockOutside() || BlockFits() == false)
+        if (IsBlockOutside(currentBlock) || BlockFits(currentBlock) == false)
         {
             currentBlock.Move(-1, 0);
             LockBlock();
@@ -129,7 +144,7 @@ void Game::MoveBlockDown()
 void Game::MoveBlockDrop()
 {
     if (!gameOver) {
-        while (IsBlockOutside() == false && BlockFits() == true)
+        while (IsBlockOutside(currentBlock) == false && BlockFits(currentBlock) == true)
         {
             currentBlock.Move(1, 0);
         }
@@ -138,9 +153,21 @@ void Game::MoveBlockDrop()
     }
 }
 
-bool Game::IsBlockOutside()
+void Game::DropExpectation()
 {
-    std::vector<Position> tiles = currentBlock.GetCellPositions();
+    if (!gameOver) {
+        while(IsBlockOutside(ghostBlock) == false && BlockFits(ghostBlock) == true)
+        {
+            ghostBlock.Move(1, 0);
+        }
+
+        ghostBlock.Move(-1, 0);
+    }
+}
+
+bool Game::IsBlockOutside(const Block& block)
+{
+    std::vector<Position> tiles = block.GetCellPositions();
     for (Position item : tiles)
     {
         if (grid.IsCellOutside(item.row, item.column))
@@ -155,13 +182,14 @@ void Game::RotateBlock()
 {
     if (!gameOver) {
         currentBlock.Rotate();
-        if (IsBlockOutside() || BlockFits() == false)
+        if (IsBlockOutside(currentBlock) == true || BlockFits(currentBlock) == false)
         {
             currentBlock.UndoRotation();
         }
         else
         {
             PlaySound(rotateSound);
+            ghostBlock = MakeGhostBlock(currentBlock);
         }
     }
 }
@@ -174,7 +202,8 @@ void Game::LockBlock()
         grid.grid[item.row][item.column] = currentBlock.id;
     }
     currentBlock = nextBlock;
-    if (BlockFits() == false)
+    ghostBlock = MakeGhostBlock(currentBlock);
+    if (BlockFits(currentBlock) == false)
     {
         gameOver = true;
     }
@@ -188,9 +217,9 @@ void Game::LockBlock()
     }
 }
 
-bool Game::BlockFits()
+bool Game::BlockFits(const Block& block)
 {
-    std::vector<Position> tiles = currentBlock.GetCellPositions();
+    std::vector<Position> tiles = block.GetCellPositions();
     for(Position item : tiles)
     {
         if (grid.IsCellEmpty(item.row, item.column) == false)
@@ -207,6 +236,7 @@ void Game::Reset()
     blocks = GetAllBlocks();
     currentBlock = GetRandomBlock();
     nextBlock = GetRandomBlock();
+    ghostBlock = MakeGhostBlock(currentBlock);
     score = 0;
 }
 
@@ -230,4 +260,12 @@ void Game::UpdateScore(int linesCleared, int levelUp)
         break;
     }
     score += levelUp * 1000;
+}
+
+Block Game::MakeGhostBlock(const Block& block)
+{
+    ghostBlock = block;
+    ghostBlock.id = 8;
+
+    return ghostBlock;
 }

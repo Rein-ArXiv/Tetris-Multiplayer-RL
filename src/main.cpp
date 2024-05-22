@@ -49,7 +49,6 @@ int main()
         DrawTextEx(font, scoreText, {320 + (170 - textSize.x)/2, 65}, 38, 2, WHITE);
         DrawRectangleRounded({320, 215, 170, 180}, 0.3, 6, lightBlue);
         game.Draw();
-        void HandleInput();
         if (game.gameOver)
         {
             DrawTextEx(font, "GAME OVER", {120, 300}, 60, 2, WHITE);

@@ -14,12 +14,12 @@ enum class PacketType {
     GAME_STATE,
     PLAYER_LIST,
     GARBAGE_LINES,
-    CHAT_MESSAGE
+    CHAT_MESSAGE,
     ADD_AI,             // AI 플레이어 추가 요청
     REMOVE_AI,          // AI 플레이어 제거 요청
     AI_MODELS,          // 사용 가능한 AI 모델 목록
     CHANGE_GAME_MODE,   // 게임 모드 변경 요청
-    GAME_MODE_CHANGED,  // 게임 모드 변경 알림
+    GAME_MODE_CHANGED  // 게임 모드 변경 알림
 };
 
 // 패킷 기본 구조

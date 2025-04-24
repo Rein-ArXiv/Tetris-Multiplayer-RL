@@ -1,0 +1,8 @@
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/tetris_server.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/tetris_client.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/edit_cache.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/rebuild_cache.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/list_install_components.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/install.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/install/local.dir
+/home/rein/github/Tetris-Multiplayer/build/CMakeFiles/install/strip.dir

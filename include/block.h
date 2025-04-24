@@ -4,6 +4,8 @@
 #include <vector>
 #include <array>
 #include <ncurses.h>
+#include <algorithm>
+#include <climts>
 #include "position.h"
 
 // 블록 타입 정의
@@ -38,6 +40,12 @@ public:
     
     // Ghost Block (Drop 위치 보여주는 Block)
     static Block CreateGhostBlock(const Block& sourceBlock);
+
+    // Block관련 위치 반환
+    std::vector<Position> GetCells() const;
+
+    int GetLeftmostColumn() const;
+    int GetRightmostColumn() const;
     
 private:
     void InitializeBlocks();

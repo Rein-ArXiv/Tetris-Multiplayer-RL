@@ -18,6 +18,9 @@ set(SERVER_SOURCES
     src/grid.cpp
     src/block.cpp
     src/position.cpp
+    src/ai_bot.cpp
+    src/ai_player.cpp
+    src/game_mode.cpp
 )
 
 set(CLIENT_SOURCES
@@ -28,6 +31,9 @@ set(CLIENT_SOURCES
     src/grid.cpp
     src/block.cpp
     src/position.cpp
+    src/ai_bot.cpp
+    src/ai_player.cpp
+    src/game_mode.cpp
 )
 
 # 헤더 파일 경로 설정
@@ -35,7 +41,7 @@ include_directories(include)
 
 # ASIO 라이브러리 설정 (헤더 전용 라이브러리)
 add_definitions(-DASIO_STANDALONE)
-include_directories(${CMAKE_SOURCE_DIR}/external/asio/include)
+include_directories(${CMAKE_SOURCE_DIR}/external/include)
 
 # ncurses 라이브러리 찾기
 find_package(Curses REQUIRED)

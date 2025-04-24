@@ -67,6 +67,9 @@ public:
     
     // 멀티플레이어용 함수
     void AddGarbageLines(int count) { grid.AddGarbageLines(count); }
+
+    // AI 확인용 함수
+    const Grid& GetGrid() const { return grid; }
     
 private:
     // 게임 블록 관리

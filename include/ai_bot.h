@@ -7,6 +7,8 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <random>
+#include <map>
 #include "game.h"
 
 // 지원하는 AI 모델 유형
@@ -37,6 +39,38 @@ public:
     // 모델 이름 반환
     virtual std::string GetModelName() const = 0;
 };
+
+class DummyAIBot : public AIBot {
+public:
+    DummyAIBot(AIModelType modelType);
+    ~DummyAIBot() override = default;
+    
+    // 게임 상태를 관찰하고 다음 액션 결정
+    InputAction DecideAction(const Game& game) override;
+    
+    // 모델 타입 반환
+    AIModelType GetModelType() const override { return modelType; }
+    
+    // 모델 이름 반환
+    std::string GetModelName() const override { return AIModelTypeToString(modelType) + " Bot"; }
+    
+private:
+    AIModelType modelType;
+    std::mt19937 rng;
+    
+    // 모델 타입별 전략
+    std::vector<float> GetActionProbabilities(const Game& game);
+    
+    // 전략별 히트맵 (각 모델 타입마다 다른 행동 패턴)
+    std::map<AIModelType, std::vector<float>> strategyHeatmap = {
+        {AIModelType::DQN,     {0.3f, 0.3f, 0.2f, 0.1f, 0.1f}},  // 좌/우 이동 선호
+        {AIModelType::RAINBOW, {0.2f, 0.2f, 0.4f, 0.1f, 0.1f}},  // 회전 선호
+        {AIModelType::A3C,     {0.2f, 0.2f, 0.2f, 0.2f, 0.2f}},  // 균등한 선택
+        {AIModelType::PPO,     {0.1f, 0.1f, 0.3f, 0.1f, 0.4f}},  // 하드 드롭 선호
+        {AIModelType::MUZERO,  {0.25f, 0.25f, 0.3f, 0.1f, 0.1f}} // 좌/우 이동 + 회전 선호
+    };
+};
+    
 
 // SafeTensor 기반 AI 봇 (실제 구현)
 class SafeTensorBot : public AIBot {
@@ -74,6 +108,9 @@ class AIBotManager {
 public:
     static AIBotManager& Instance();
     
+    // 더미 봇 생성
+    std::shared_ptr<AIBot> CreateDummyBot(AIModelType modelType);
+
     // 특정 모델 유형의 AI 봇 생성
     std::shared_ptr<AIBot> CreateBot(AIModelType modelType);
     

@@ -28,12 +28,14 @@ public:
     // 네트워크 관련
     void SetLastInputAction(InputAction action) { lastAction = action; }
     InputAction GetLastInputAction() const { return lastAction; }
-    
+
+protected:
+    Game game;
+
 private:
     int id;
     std::string name;
     PlayerType type;
-    Game game;
     InputAction lastAction;
 };
 

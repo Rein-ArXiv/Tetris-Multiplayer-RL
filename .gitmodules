@@ -1,3 +1,6 @@
-[submodule "Libraries"]
-	path = Libraries
+[submodule "Libraries/pybind11"]
+	path = Libraries/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "Libraries/asio"]
+	path = Libraries/asio
+	url = https://github.com/chriskohlhoff/asio.git

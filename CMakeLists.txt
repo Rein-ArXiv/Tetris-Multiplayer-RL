@@ -1,8 +1,8 @@
-# CMAKE 최소 버전
+# CMAKE Version
 cmake_minimum_required(VERSION 3.10)
 
-# 프로젝트 이름 및 언어 설정
-project(TetrisMultiplayer CXX)
+# Declare Project
+project(TetrisRL)
 
 # C++ 표준 설정
 set(CMAKE_CXX_STANDARD 17)
@@ -36,7 +36,7 @@ set(CLIENT_SOURCES
     src/game_mode.cpp
 )
 
-# 헤더 파일 경로 설정
+# Include Header Files
 include_directories(include)
 
 # ASIO 라이브러리 설정 (헤더 전용 라이브러리)

@@ -1,6 +1,8 @@
 #include "session.h"
 #include <random>
 #include <chrono>
+#include <iostream>
+#include <thread>
 
 namespace net {
 
@@ -10,47 +12,35 @@ Session::~Session() { Close(); }
 
 // [NET] 호스트: 연결 수락 후 HELLO/SEED를 송신하여 파라미터를 알립니다.
 bool Session::Host(uint16_t port, const SeedParams& sp) {
-    auto server = tcp_listen(port, 1);
-    if (!server.valid()) return false;
-    auto client = tcp_accept(server);
-    tcp_close(server);
-    if (!client.valid()) return false;
-    sock = client;
-    connected = true;
-    // 연결 직후 HELLO/SEED 송신
-    {
-        std::vector<uint8_t> pl; le_write_u16(pl, 1); // proto ver 1
-        auto fr = build_frame(MsgType::HELLO, pl);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-    }
+    // 비동기 수락: UI가 멈추지 않도록 별도 스레드에서 accept
+    if (listening) return false;
     seedParams = sp;
-    {
-        std::vector<uint8_t> pl; 
-        le_write_u64(pl, seedParams.seed);
-        le_write_u32(pl, seedParams.start_tick);
-        pl.push_back(seedParams.input_delay);
-        pl.push_back((uint8_t)seedParams.role);
-        auto fr = build_frame(MsgType::SEED, pl);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-    }
-    // Host knows parameters already; mark ready to allow UI to proceed.
-    ready = true;
-    th = std::thread(&Session::ioThread, this);
+    listening = true;
+    ath = std::thread(&Session::acceptThread, this, port);
     return true;
 }
 
 // [NET] 피어: 원격에 접속 후 HELLO를 보내고 SEED를 기다립니다.
 bool Session::Connect(const std::string& host, uint16_t port) {
+    std::cout << "[NET] Connecting to " << host << ":" << port << std::endl;
     sock = tcp_connect(host, port);
-    if (!sock.valid()) return false;
+    if (!sock.valid()) {
+        std::cout << "[NET] Failed to connect to " << host << ":" << port << std::endl;
+        return false;
+    }
+    std::cout << "[NET] Connected to " << host << ":" << port << std::endl;
     connected = true;
+
+    // I/O 스레드 시작
+    th = std::thread(&Session::ioThread, this);
+
     // Peer: HELLO 전송, SEED 수신 대기
     {
         std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        std::cout << "[NET] Sent HELLO message" << std::endl;
     }
-    th = std::thread(&Session::ioThread, this);
     return true;
 }
 
@@ -80,43 +70,142 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
 // [NET] 스레드 조인 및 소켓 닫기
 void Session::Close() {
     quit = true;
+    // 중단: 수락 대기 소켓 닫기
+    if (listening && listenSock.valid()) tcp_close(listenSock);
+    if (ath.joinable()) ath.join();
     if (th.joinable()) th.join();
     if (sock.valid()) tcp_close(sock);
-    connected = false; ready = false;
+    connected = false; ready = false; listening = false;
 }
 
 // [NET] I/O 스레드: 수신 → 프레이밍 파싱 → 핸들링, 송신 큐 비우기
 void Session::ioThread() {
+    std::cout << "[NET] I/O thread started" << std::endl;
+    auto startTime = std::chrono::steady_clock::now();
+    const auto CONNECTION_TIMEOUT = std::chrono::seconds(10); // 10초 타임아웃
+
     while (!quit.load()) {
-        // 수신
-        if (!tcp_recv_some(sock, recvBuf)) { quit = true; break; }
-        std::vector<Frame> frames; parse_frames(recvBuf, frames);
-        for (auto& f : frames) handleFrame(f);
+        bool hasActivity = false;
+
+        // 연결 타임아웃 체크
+        if (!ready.load()) {
+            auto elapsed = std::chrono::steady_clock::now() - startTime;
+            if (elapsed > CONNECTION_TIMEOUT) {
+                std::cout << "[NET] Connection timeout after 10 seconds" << std::endl;
+                connectionFailed = true;
+                quit = true;
+                break;
+            }
+        }
+
+        // 수신 (논블로킹으로 체크)
+        size_t prevSize = recvBuf.size();
+        if (tcp_recv_some(sock, recvBuf)) {
+            if (recvBuf.size() > prevSize) {
+                hasActivity = true;
+                std::cout << "[NET] Received " << (recvBuf.size() - prevSize) << " bytes" << std::endl;
+                std::vector<Frame> frames;
+                parse_frames(recvBuf, frames);
+                if (!frames.empty()) {
+                    std::cout << "[NET] Parsed " << frames.size() << " frames" << std::endl;
+                }
+                for (auto& f : frames) handleFrame(f);
+            }
+        } else {
+            std::cout << "[NET] Connection lost or receive failed" << std::endl;
+            connectionFailed = true;
+            quit = true;
+            break;
+        }
+
         // 송신
         {
             std::lock_guard<std::mutex> lk(sendMu);
             while (!sendQ.empty()) {
+                hasActivity = true;
                 auto& pkt = sendQ.front();
-                if (!tcp_send_all(sock, pkt.data(), pkt.size())) { quit = true; break; }
+                std::cout << "[NET] Sending packet of size " << pkt.size() << std::endl;
+                if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
+                    std::cout << "[NET] Send failed!" << std::endl;
+                    quit = true;
+                    break;
+                }
                 sendQ.pop_front();
             }
         }
+
+        // CPU 사용률 절약을 위한 짧은 대기
+        if (!hasActivity) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
+    std::cout << "[NET] I/O thread exiting" << std::endl;
+}
+
+void Session::acceptThread(uint16_t port)
+{
+    std::cout << "[NET] Starting to listen on port " << port << std::endl;
+    listenSock = tcp_listen(port, 1);
+    if (!listenSock.valid()) {
+        std::cout << "[NET] Failed to listen on port " << port << std::endl;
+        listening = false;
+        return;
+    }
+    std::cout << "[NET] Listening on port " << port << ", waiting for connection..." << std::endl;
+    auto client = tcp_accept(listenSock);
+    tcp_close(listenSock);
+    listenSock = TcpSocket{};
+    if (!client.valid()) {
+        std::cout << "[NET] Failed to accept client connection" << std::endl;
+        listening = false;
+        return;
+    }
+    std::cout << "[NET] Client connected!" << std::endl;
+    sock = client;
+    connected = true;
+    listening = false;
+
+    // I/O 스레드 먼저 시작
+    th = std::thread(&Session::ioThread, this);
+
+    // 연결 직후 HELLO/SEED 송신
+    {
+        std::vector<uint8_t> pl; le_write_u16(pl, 1); // proto ver 1
+        auto fr = build_frame(MsgType::HELLO, pl);
+        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        std::cout << "[NET] Queued HELLO message" << std::endl;
+    }
+    {
+        std::vector<uint8_t> pl;
+        le_write_u64(pl, seedParams.seed);
+        le_write_u32(pl, seedParams.start_tick);
+        pl.push_back(seedParams.input_delay);
+        pl.push_back((uint8_t)seedParams.role);
+        auto fr = build_frame(MsgType::SEED, pl);
+        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        std::cout << "[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")" << std::endl;
+    }
+    // [FIX] 호스트는 SEED를 보낸 후 ready 상태가 됩니다
+    ready = true;
+    std::cout << "[NET] Host session is ready!" << std::endl;
 }
 
 // [NET] 수신 프레임 해석: HELLO/SEED/INPUT/ACK/PING/PONG
 void Session::handleFrame(const Frame& f) {
     switch (f.type) {
     case MsgType::HELLO: {
+        std::cout << "[NET] Received HELLO message" << std::endl;
         // HELLO 수신 시 간단 ACK 응답
         std::vector<uint8_t> pl; pl.push_back(1); // ok
         auto fr = build_frame(MsgType::HELLO_ACK, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        std::cout << "[NET] Queued HELLO_ACK response" << std::endl;
     } break;
     case MsgType::HELLO_ACK: {
-        // nop
+        std::cout << "[NET] Received HELLO_ACK message" << std::endl;
     } break;
     case MsgType::SEED: {
+        std::cout << "[NET] Received SEED message" << std::endl;
         // 시드/시작틱/입력지연/역할 적용(합의 완료)
         if (f.payload.size() >= 8+4+1+1) {
             const uint8_t* p = f.payload.data();
@@ -124,7 +213,13 @@ void Session::handleFrame(const Frame& f) {
             seedParams.start_tick = le_read_u32(p+8);
             seedParams.input_delay = p[12];
             seedParams.role = (Role)p[13];
+            std::cout << "[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
+                      << ", start_tick=" << std::dec << seedParams.start_tick
+                      << ", input_delay=" << (int)seedParams.input_delay << std::endl;
             ready = true;
+            std::cout << "[NET] Client session is ready!" << std::endl;
+        } else {
+            std::cout << "[NET] Invalid SEED message size: " << f.payload.size() << std::endl;
         }
     } break;
     case MsgType::INPUT: {

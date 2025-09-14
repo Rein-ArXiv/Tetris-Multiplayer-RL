@@ -6,6 +6,7 @@
 #include "../core/replay.h"
 #include "../core/hash.h"
 #include "../net/session.h"
+#include "../net/socket.h"
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -32,6 +33,12 @@ enum class AppMode { Menu, ConnectInput, Single, Net };
 
 int main(int argc, char** argv)
 {
+    // [NET] 네트워킹 초기화
+    if (!net::net_init()) {
+        std::cerr << "Failed to initialize networking\n";
+        return 1;
+    }
+
     // [NET] 멀티보드 뷰를 고려하여 기본 폭을 늘립니다.
     InitWindow(720, 640, "Tetris");
     SetTargetFPS(60);                       // Set FPS
@@ -52,7 +59,7 @@ int main(int argc, char** argv)
 
     uint64_t sessionSeed = 0xDEADBEEFCAFEBABEull;
     net::Session session;
-    uint32_t startDelay = 120; uint8_t inputDelay = 4;
+    uint32_t startDelay = 120; uint8_t inputDelay = 2;  // 입력 지연 4틱 → 2틱으로 감소
     // [NET] 틱 카운터: 입력 수집/전송된 틱(localTickNext), 시뮬레이션 완료된 틱(simTick)
     uint32_t localTickNext = 0;
     uint32_t simTick = 0;
@@ -77,10 +84,7 @@ int main(int argc, char** argv)
     std::unique_ptr<Game> gameSingle;
     std::unique_ptr<Game> gameLocal;
     std::unique_ptr<Game> gameRemote;
-    if (app == AppMode::Net) {
-        gameLocal = std::make_unique<Game>(sessionSeed);
-        gameRemote = std::make_unique<Game>(sessionSeed ^ 0xA5A5A5A5u);
-    }
+    // [NET] 게임 보드는 세션 ready 후에 올바른 시드로 생성합니다
 
     // [NET] 리플레이 기록(간단). F5로 시작, F6로 저장 종료.
     bool recording = false;
@@ -108,38 +112,50 @@ int main(int argc, char** argv)
             }
             else
             {
-                if (app == AppMode::Net && session.isConnected() && session.isReady() && gameLocal && gameRemote) {
-                    // 시작 전 카운트다운
-                    if (startDelay > 0) { startDelay--; accumulator -= SECONDS_PER_TICK; continue; }
-
-                    // 로컬 입력을 해당 틱에 기록하고 전송
+                if (app == AppMode::Net && session.isConnected()) {
+                    // 준비 이전에도 입력 전송(원격 버퍼링)
                     localInputs[localTickNext] = inputMask;
                     session.SendInput(localTickNext, inputMask);
                     localTickNext++;
 
-                    // 안전 틱 계산: 양측 입력이 존재한다고 기대할 수 있는 마지막 틱
-                    // 간단 근사: min(로컬로 전송 완료한 마지막 틱, 원격이 보낸 마지막 틱) - inputDelay
-                    int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
-                    int64_t lastRemote = (int64_t)session.maxRemoteTick();
-                    int64_t safeTickInclusive = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
+                    // 세션 레디 후 보드 초기화(양쪽 동일 시드 사용)
+                    if (session.isReady() && (!gameLocal || !gameRemote)) {
+                        sessionSeed = session.params().seed;
+                        inputDelay = session.params().input_delay;
+                        // [FIX] 양쪽 보드 모두 동일한 시드 사용하여 같은 블록 순서 보장
+                        gameLocal = std::make_unique<Game>(sessionSeed);
+                        gameRemote = std::make_unique<Game>(sessionSeed);
+                        localInputs.clear();
+                        localTickNext = 0; simTick = 0; startDelay = session.params().start_tick;
+                        accumulator -= SECONDS_PER_TICK; continue;
+                    }
 
-                    // safeTickInclusive까지 시뮬레이션을 진행
-                    while ((int64_t)simTick <= safeTickInclusive) {
-                        uint8_t li = 0, ri = 0;
-                        auto it = localInputs.find(simTick);
-                        if (it != localInputs.end()) li = it->second;
-                        if (!session.GetRemoteInput(simTick, ri)) {
-                            // 계산상 가능해야 하나, 구멍이 있으면 보류
-                            break;
-                        }
-                        // [NET] 각 보드에 각자 입력 적용(멀티보드 시뮬)
-                        if (gameLocal && gameRemote) {
+                    if (session.isReady()) {
+                        // 시작 전 카운트다운
+                        if (startDelay > 0) { startDelay--; accumulator -= SECONDS_PER_TICK; continue; }
+
+                        // [FIX] 호스트와 클라이언트 모두 동일한 Lockstep 로직 적용
+                        // 안전 틱 계산: 양측 입력이 존재한다고 기대할 수 있는 마지막 틱
+                        int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
+                        int64_t lastRemote = (int64_t)session.maxRemoteTick();
+                        int64_t safeTickInclusive = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
+
+                        // safeTickInclusive까지 시뮬레이션을 진행
+                        while ((int64_t)simTick <= safeTickInclusive && gameLocal && gameRemote) {
+                            uint8_t li = 0, ri = 0;
+                            auto it = localInputs.find(simTick);
+                            if (it != localInputs.end()) li = it->second;
+                            if (!session.GetRemoteInput(simTick, ri)) {
+                                // 계산상 가능해야 하나, 구멍이 있으면 보류
+                                break;
+                            }
+                            // [NET] 각 보드에 각자 입력 적용(멀티보드 시뮬)
                             gameLocal->SubmitInput(li);
                             gameRemote->SubmitInput(ri);
                             gameLocal->Tick();
                             gameRemote->Tick();
+                            simTick++;
                         }
-                        simTick++;
                     }
                 } else if (app == AppMode::Single && gameSingle) {
                     gameSingle->SubmitInput(inputMask);
@@ -168,7 +184,7 @@ int main(int argc, char** argv)
             // Navigate
             if (IsKeyPressed(KEY_DOWN)) menuIndex = (menuIndex+1) % 4;
             if (IsKeyPressed(KEY_UP)) menuIndex = (menuIndex+3) % 4;
-            if (IsKeyPressed(KEY_ENTER)) {
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
                 if (menuIndex == 0) {
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
@@ -177,8 +193,6 @@ int main(int argc, char** argv)
                     sessionSeed = ((uint64_t)GetTime()*1000000.0) + 0xC0FFEEULL;
                     net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
                     if (!session.Host(hostPort, sp)) { TraceLog(LOG_ERROR, "Host failed"); }
-                    gameLocal = std::make_unique<Game>(sessionSeed);
-                    gameRemote = std::make_unique<Game>(sessionSeed ^ 0xA5A5A5A5u);
                 } else if (menuIndex == 2) {
                     app = AppMode::ConnectInput; connectText.clear(); connectError = false;
                 } else if (menuIndex == 3) {
@@ -197,16 +211,20 @@ int main(int argc, char** argv)
                 ch = GetCharPressed();
             }
             if (IsKeyPressed(KEY_BACKSPACE) && !connectText.empty()) connectText.pop_back();
-            if (IsKeyPressed(KEY_ENTER)) {
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
                 auto pos = connectText.find(":");
                 if (pos != std::string::npos) {
                     hostIp = connectText.substr(0,pos);
                     try { hostPort = (uint16_t)std::stoi(connectText.substr(pos+1)); } catch(...) { hostPort=7777; }
                     netMode = true; isHost = false; app = AppMode::Net; connectError = false;
-                    if (!session.Connect(hostIp, hostPort)) { TraceLog(LOG_ERROR, "Connect failed"); app = AppMode::Menu; }
+                    if (!session.Connect(hostIp, hostPort)) {
+                        TraceLog(LOG_ERROR, "Connect failed to %s:%d", hostIp.c_str(), hostPort);
+                        connectError = true;
+                        connectText = "Connection failed! Check IP/port";
+                        app = AppMode::ConnectInput;
+                    }
                     else {
-                        gameLocal = std::make_unique<Game>(sessionSeed);
-                        gameRemote = std::make_unique<Game>(sessionSeed ^ 0xA5A5A5A5u);
+                        // 보드는 ready 후 세션 시드로 생성
                     }
                 } else {
                     connectError = true;
@@ -281,16 +299,54 @@ int main(int argc, char** argv)
                 DrawTextEx(font, "Press Any key To Restart", {200, 350}, 25, 2, WHITE);
                 if (GetKeyPressed() != 0) {
                     gameLocal = std::make_unique<Game>(sessionSeed);
-                    gameRemote = std::make_unique<Game>(sessionSeed ^ 0xA5A5A5A5u);
+                    gameRemote = std::make_unique<Game>(sessionSeed);
                     localInputs.clear();
                     localTickNext = 0; simTick = 0;
                 }
             }
             if (!session.isConnected()) {
+                if (session.isListening()) DrawTextEx(font, TextFormat("Hosting on port %u...", (unsigned)hostPort), {180, 530}, 22, 2, WHITE);
                 DrawTextEx(font, "Waiting for connection...", {180, 560}, 22, 2, WHITE);
             } else if (!session.isReady()) {
                 DrawTextEx(font, "Waiting for session ready...", {170, 560}, 22, 2, WHITE);
             }
+        }
+        // [NET] 보드 초기화 전 대기 화면
+        if (app == AppMode::Net && (!gameLocal || !gameRemote)) {
+            ClearBackground(darkBlue);
+            if (isHost) {
+                std::string localIP = net::get_local_ip();
+                std::string publicIP = net::get_public_ip();
+
+                if (session.isListening()) {
+                    DrawTextEx(font, TextFormat("Hosting on port %u", (unsigned)hostPort), {180, 120}, 28, 2, WHITE);
+
+                    // 로컬 IP (같은 WiFi용)
+                    DrawTextEx(font, "Same WiFi:", {50, 160}, 20, 2, GRAY);
+                    DrawTextEx(font, TextFormat("%s:%u", localIP.c_str(), (unsigned)hostPort), {50, 180}, 18, 2, YELLOW);
+
+                    // 공인 IP (인터넷용)
+                    if (!publicIP.empty()) {
+                        DrawTextEx(font, "Internet:", {350, 160}, 20, 2, GRAY);
+                        DrawTextEx(font, TextFormat("%s:%u", publicIP.c_str(), (unsigned)hostPort), {350, 180}, 18, 2, GREEN);
+                        DrawTextEx(font, "(Need port forwarding)", {300, 200}, 16, 2, GRAY);
+                    } else {
+                        DrawTextEx(font, "Internet: Failed to get public IP", {350, 160}, 16, 2, RED);
+                        DrawTextEx(font, "Check internet connection", {300, 180}, 14, 2, GRAY);
+                    }
+                }
+                DrawTextEx(font, "Waiting for connection...", {250, 250}, 24, 2, WHITE);
+            } else {
+                if (session.hasFailed()) {
+                    DrawTextEx(font, "Connection Failed!", {200, 200}, 28, 2, RED);
+                    DrawTextEx(font, "Check IP address and port", {160, 240}, 20, 2, GRAY);
+                    DrawTextEx(font, "Press ESC to go back", {200, 280}, 20, 2, WHITE);
+                } else {
+                    DrawTextEx(font, "Connecting...", {240, 220}, 28, 2, WHITE);
+                }
+            }
+            DrawTextEx(font, "Press ESC to cancel", {220, 350}, 20, 2, GRAY);
+            if (IsKeyPressed(KEY_ESCAPE)) { session.Close(); app = AppMode::Menu; }
         }
 
         // [NET] 상태 표시(HUD 최소): 연결 여부/시드/틱 등
@@ -305,5 +361,6 @@ int main(int argc, char** argv)
     }
 
     CloseWindow();
+    net::net_shutdown();
     return 0;
 }

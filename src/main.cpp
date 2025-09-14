@@ -84,6 +84,12 @@ int main(int argc, char** argv)
     std::unique_ptr<Game> gameSingle;
     std::unique_ptr<Game> gameLocal;
     std::unique_ptr<Game> gameRemote;
+
+    // [FIX] IP 주소를 한 번만 조회하여 캐시
+    static std::string cachedLocalIP = "";
+    static std::string cachedPublicIP = "";
+    static bool ipCached = false;
+
     // [NET] 게임 보드는 세션 ready 후에 올바른 시드로 생성합니다
 
     // [NET] 리플레이 기록(간단). F5로 시작, F6로 저장 종료.
@@ -113,6 +119,7 @@ int main(int argc, char** argv)
             else
             {
                 if (app == AppMode::Net && session.isConnected()) {
+
                     // 준비 이전에도 입력 전송(원격 버퍼링)
                     localInputs[localTickNext] = inputMask;
                     session.SendInput(localTickNext, inputMask);
@@ -140,26 +147,28 @@ int main(int argc, char** argv)
                         int64_t lastRemote = (int64_t)session.maxRemoteTick();
                         int64_t safeTickInclusive = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
 
-                        // safeTickInclusive까지 시뮬레이션을 진행
-                        while ((int64_t)simTick <= safeTickInclusive && gameLocal && gameRemote) {
-                            uint8_t li = 0, ri = 0;
-                            auto it = localInputs.find(simTick);
-                            if (it != localInputs.end()) li = it->second;
-                            if (!session.GetRemoteInput(simTick, ri)) {
-                                // 계산상 가능해야 하나, 구멍이 있으면 보류
-                                break;
+                        // [OPTIMIZED] 실행할 틱이 있을 때만 처리하여 성능 개선
+                        if ((int64_t)simTick <= safeTickInclusive && gameLocal && gameRemote) {
+                            while ((int64_t)simTick <= safeTickInclusive) {
+                                uint8_t li = 0, ri = 0;
+                                auto it = localInputs.find(simTick);
+                                if (it != localInputs.end()) li = it->second;
+                                if (!session.GetRemoteInput(simTick, ri)) {
+                                    break; // 입력 없으면 대기
+                                }
+
+                                gameLocal->SubmitInput(li);
+                                gameRemote->SubmitInput(ri);
+                                gameLocal->Tick();
+                                gameRemote->Tick();
+                                simTick++;
                             }
-                            // [NET] 각 보드에 각자 입력 적용(멀티보드 시뮬)
-                            gameLocal->SubmitInput(li);
-                            gameRemote->SubmitInput(ri);
-                            gameLocal->Tick();
-                            gameRemote->Tick();
-                            simTick++;
                         }
                     }
                 } else if (app == AppMode::Single && gameSingle) {
                     gameSingle->SubmitInput(inputMask);
                     gameSingle->Tick();
+                } else {
                 }
             }
             if (recording)
@@ -213,21 +222,44 @@ int main(int argc, char** argv)
             if (IsKeyPressed(KEY_BACKSPACE) && !connectText.empty()) connectText.pop_back();
             if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
                 auto pos = connectText.find(":");
-                if (pos != std::string::npos) {
+                if (pos != std::string::npos && pos > 0 && pos < connectText.length() - 1) {
                     hostIp = connectText.substr(0,pos);
-                    try { hostPort = (uint16_t)std::stoi(connectText.substr(pos+1)); } catch(...) { hostPort=7777; }
-                    netMode = true; isHost = false; app = AppMode::Net; connectError = false;
-                    if (!session.Connect(hostIp, hostPort)) {
-                        TraceLog(LOG_ERROR, "Connect failed to %s:%d", hostIp.c_str(), hostPort);
+                    std::string portStr = connectText.substr(pos+1);
+
+                    // IP 주소와 포트 유효성 검사
+                    try {
+                        hostPort = (uint16_t)std::stoi(portStr);
+                        if (hostPort == 0) throw std::exception();
+                    } catch(...) {
                         connectError = true;
-                        connectText = "Connection failed! Check IP/port";
-                        app = AppMode::ConnectInput;
+                        connectText = "Invalid port number!";
                     }
-                    else {
-                        // 보드는 ready 후 세션 시드로 생성
+
+                    // IP 주소 기본 형식 검사 - 오류가 없을 때만 진행
+                    if (!connectError && (hostIp.empty() || hostIp.find_first_not_of("0123456789.") != std::string::npos)) {
+                        connectError = true;
+                        connectText = "Invalid IP address format!";
+                    }
+
+                    // 오류가 없을 때만 연결 시도
+                    if (!connectError) {
+                        netMode = true; isHost = false; app = AppMode::Net;
+                        std::cout << "[NET] Attempting to connect to " << hostIp << ":" << hostPort << std::endl;
+
+                        if (!session.Connect(hostIp, hostPort)) {
+                            TraceLog(LOG_ERROR, "Connect failed to %s:%d", hostIp.c_str(), hostPort);
+                            connectError = true;
+                            connectText = "Connection failed! Check IP/port/firewall";
+                            app = AppMode::ConnectInput;
+                        }
+                        else {
+                            std::cout << "[NET] Connection initiated successfully" << std::endl;
+                            // 보드는 ready 후 세션 시드로 생성
+                        }
                     }
                 } else {
                     connectError = true;
+                    connectText = "Format: IP:PORT (e.g. 192.168.1.100:7777)";
                 }
             }
             if (IsKeyPressed(KEY_ESCAPE)) { app = AppMode::Menu; }
@@ -315,24 +347,28 @@ int main(int argc, char** argv)
         if (app == AppMode::Net && (!gameLocal || !gameRemote)) {
             ClearBackground(darkBlue);
             if (isHost) {
-                std::string localIP = net::get_local_ip();
-                std::string publicIP = net::get_public_ip();
+                // [FIX] IP 주소를 한 번만 조회 (성능 개선)
+                if (!ipCached) {
+                    cachedLocalIP = net::get_local_ip();
+                    cachedPublicIP = net::get_public_ip();
+                    ipCached = true;
+                }
 
                 if (session.isListening()) {
                     DrawTextEx(font, TextFormat("Hosting on port %u", (unsigned)hostPort), {180, 120}, 28, 2, WHITE);
 
                     // 로컬 IP (같은 WiFi용)
                     DrawTextEx(font, "Same WiFi:", {50, 160}, 20, 2, GRAY);
-                    DrawTextEx(font, TextFormat("%s:%u", localIP.c_str(), (unsigned)hostPort), {50, 180}, 18, 2, YELLOW);
+                    DrawTextEx(font, TextFormat("%s:%u", cachedLocalIP.c_str(), (unsigned)hostPort), {50, 180}, 18, 2, YELLOW);
 
                     // 공인 IP (인터넷용)
-                    if (!publicIP.empty()) {
+                    if (!cachedPublicIP.empty()) {
                         DrawTextEx(font, "Internet:", {350, 160}, 20, 2, GRAY);
-                        DrawTextEx(font, TextFormat("%s:%u", publicIP.c_str(), (unsigned)hostPort), {350, 180}, 18, 2, GREEN);
+                        DrawTextEx(font, TextFormat("%s:%u", cachedPublicIP.c_str(), (unsigned)hostPort), {350, 180}, 18, 2, GREEN);
                         DrawTextEx(font, "(Need port forwarding)", {300, 200}, 16, 2, GRAY);
                     } else {
-                        DrawTextEx(font, "Internet: Failed to get public IP", {350, 160}, 16, 2, RED);
-                        DrawTextEx(font, "Check internet connection", {300, 180}, 14, 2, GRAY);
+                        DrawTextEx(font, "Internet: Getting IP...", {350, 160}, 16, 2, GRAY);
+                        DrawTextEx(font, "This may take a few seconds", {300, 180}, 14, 2, GRAY);
                     }
                 }
                 DrawTextEx(font, "Waiting for connection...", {250, 250}, 24, 2, WHITE);

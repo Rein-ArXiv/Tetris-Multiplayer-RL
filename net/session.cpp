@@ -134,9 +134,9 @@ void Session::ioThread() {
             }
         }
 
-        // CPU 사용률 절약을 위한 짧은 대기
+        // CPU 사용률 절약을 위한 짧은 대기 (호스트 부하 감소)
         if (!hasActivity) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));  // 1ms → 2ms로 증가
         }
     }
     std::cout << "[NET] I/O thread exiting" << std::endl;

@@ -1,5 +1,6 @@
 #include <raylib.h>
 #include <iostream>
+#include <cstdio>
 #include "game.h"
 #include "colors.h"
 

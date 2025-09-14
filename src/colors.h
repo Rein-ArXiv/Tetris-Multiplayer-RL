@@ -2,7 +2,7 @@
 #include <raylib.h>
 #include <vector>
 
-extern const Color darkGray;
+extern const Color darkGrey;
 extern const Color green;
 extern const Color red;
 extern const Color orange;

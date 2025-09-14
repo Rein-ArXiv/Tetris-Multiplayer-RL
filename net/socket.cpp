@@ -2,10 +2,14 @@
 #include <cstring>
 
 #ifdef _WIN32
-#  define NOMINMAX
+#  ifndef NOMINMAX
+#    define NOMINMAX 1
+#  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
-#  pragma comment(lib, "ws2_32.lib")
+#  ifdef _MSC_VER
+#    pragma comment(lib, "ws2_32.lib")
+#  endif
 using socklen_t = int;
 #else
 #  include <sys/types.h>
@@ -21,6 +25,7 @@ namespace net {
 
 static bool g_inited = false;
 
+// [NET] 네트워킹 초기화(Windows 전용)
 bool net_init() {
     if (g_inited) return true;
 #ifdef _WIN32
@@ -34,6 +39,7 @@ bool net_init() {
 #endif
 }
 
+// [NET] 네트워킹 정리(Windows 전용)
 void net_shutdown() {
     if (!g_inited) return;
 #ifdef _WIN32
@@ -42,6 +48,7 @@ void net_shutdown() {
     g_inited = false;
 }
 
+// [NET] 빠른 재바인드를 위한 SO_REUSEADDR 설정
 static int set_reuse(int fd) {
     int yes = 1;
 #ifdef _WIN32
@@ -51,6 +58,7 @@ static int set_reuse(int fd) {
 #endif
 }
 
+// [NET] 포트에서 연결 대기 소켓을 생성합니다.
 TcpSocket tcp_listen(uint16_t port, int backlog) {
     TcpSocket s{};
     if (!net_init()) return s;
@@ -81,6 +89,7 @@ TcpSocket tcp_listen(uint16_t port, int backlog) {
     return s;
 }
 
+// [NET] 대기 소켓에서 1개 연결을 수락합니다.
 TcpSocket tcp_accept(const TcpSocket& server) {
     TcpSocket c{};
     if (!server.valid()) return c;
@@ -91,6 +100,7 @@ TcpSocket tcp_accept(const TcpSocket& server) {
     return c;
 }
 
+// [NET] 원격 호스트로 TCP 연결을 시도합니다.
 TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     TcpSocket s{};
     if (!net_init()) return s;
@@ -119,6 +129,7 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     return s;
 }
 
+// [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
     const uint8_t* p = static_cast<const uint8_t*>(data);
     size_t sent = 0;
@@ -134,6 +145,7 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
     return true;
 }
 
+// [NET] 수신 가능한 만큼 한 번 읽어 누적 버퍼에 추가합니다.
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
     uint8_t tmp[4096];
 #ifdef _WIN32
@@ -146,6 +158,7 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
     return true;
 }
 
+// [NET] 소켓 종료
 void tcp_close(TcpSocket& s) {
     if (!s.valid()) return;
 #ifdef _WIN32

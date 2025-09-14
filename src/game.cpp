@@ -1,6 +1,21 @@
 #include "game.h"
+#include "../core/hash.h"
 
 // [NET] seed는 모든 참가자가 동일해야 동일한 블록 순서를 보장합니다.
+int Game::s_audioRef = 0;
+
+void Game::AudioInit()
+{
+    if (s_audioRef == 0) InitAudioDevice();
+    s_audioRef++;
+}
+
+void Game::AudioShutdown()
+{
+    s_audioRef--;
+    if (s_audioRef <= 0) { s_audioRef = 0; CloseAudioDevice(); }
+}
+
 Game::Game(uint64_t seed)
     : rng(seed ? seed : 0xC0FFEE123456789ull),
       gravityCounterTicks(0),
@@ -13,7 +28,7 @@ Game::Game(uint64_t seed)
     ghostBlock = MakeGhostBlock(currentBlock);
     gameOver = false;
     score = 0;
-    InitAudioDevice();
+    AudioInit();
     music = LoadMusicStream("Sounds/music.mp3");
     PlayMusicStream(music);
     rotateSound = LoadSound("Sounds/rotate.mp3");
@@ -27,7 +42,7 @@ Game::~Game()
     UnloadMusicStream(music);
     UnloadSound(rotateSound);
     UnloadSound(clearSound);
-    CloseAudioDevice();
+    AudioShutdown();
 }
 
 Block Game::GetRandomBlock()
@@ -80,6 +95,29 @@ void Game::SubmitInput(uint8_t inputMask)
     if (hasInput(inputMask, INPUT_DROP))  MoveBlockDrop();
 
     DropExpectation();
+}
+
+void Game::DrawBoardAt(int offsetX, int offsetY)
+{
+    grid.DrawAt(offsetX, offsetY);
+    ghostBlock.Draw(offsetX, offsetY);
+    currentBlock.Draw(offsetX, offsetY);
+}
+
+void Game::DrawNextAt(int offsetX, int offsetY)
+{
+    switch(nextBlock.id)
+    {
+        case 3: // I
+            nextBlock.Draw(offsetX - 15, offsetY - 10);
+            break;
+        case 4: // O
+            nextBlock.Draw(offsetX - 15, offsetY + 10);
+            break;
+        default:
+            nextBlock.Draw(offsetX, offsetY);
+            break;
+    }
 }
 
 // [NET] 입력과 분리된 시간 진행. Lockstep에서는 '모든 참가자의 해당 틱 입력 수신' 이후에만 Tick을 진행합니다.

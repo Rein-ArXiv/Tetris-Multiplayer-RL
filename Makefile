@@ -373,6 +373,7 @@ SOURCES := $(wildcard $(SRC_DIR)/*.cpp)
 SOURCES := $(filter-out $(SRC_DIR)/blocks.cpp,$(SOURCES))
 # Add core sources
 SOURCES += core/replay.cpp
+SOURCES += net/socket.cpp net/framing.cpp net/session.cpp
 
 # For Android platform we call a custom Makefile.Android
 ifeq ($(PLATFORM),PLATFORM_ANDROID)

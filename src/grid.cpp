@@ -46,6 +46,18 @@ void Grid::Draw()
     }
 }
 
+void Grid::DrawAt(int offsetX, int offsetY)
+{
+    for (int row = 0; row < numRows; row++)
+    {
+        for (int column = 0; column < numCols; column++)
+        {
+            int cellValue = grid[row][column];
+            DrawRectangle(column * cellSize + offsetX, row * cellSize + offsetY, cellSize - 1, cellSize - 1, colors[cellValue]);
+        }
+    }
+}
+
 bool Grid::IsCellOutside(int row, int column)
 {
     if (row >= 0 && row < numRows && column >= 0 && column < numCols)

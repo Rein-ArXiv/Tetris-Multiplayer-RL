@@ -72,6 +72,12 @@
 - 현재 동작
   - TCP로 연결 → HELLO/SEED 교환 → 입력을 틱 단위로 교환 → 안전하게 진행
   - HUD 하단에 네트 상태가 간단 출력됩니다.
+  - 입력 지연(input delay)과 안전 틱(safe tick) 근사치로 진행합니다.
+    - `localSent`: 로컬이 전송 완료한 마지막 틱
+    - `remoteMax`: 원격에서 수신한 마지막 틱
+    - `sim`: 시뮬레이션이 완료된 마지막 틱
+    - 진행 기준: `safe = min(localSent, remoteMax) - inputDelay`까지 시뮬레이션
+  - 2보드 렌더(학습용 레이아웃): 좌(Local)와 우(Remote) 보드가 동시에 출력됩니다.
 - 주의: 초기 버전은 입력 지연/재전송/스냅샷이 최소화되어 있으며, 학습 목적으로 단순화되어 있습니다.
 
 **멀티플레이 UX(계획)**
@@ -96,6 +102,11 @@
 - 리소스 경로: 실행 디렉터리를 프로젝트 루트로.
 - Windows DLL 누락: `lib/libstdc++-6.dll`, `lib/libgcc_s_dw2-1.dll`을 exe 옆 또는 PATH에 추가.
 - raylib 링크 실패(Linux): `pkg-config raylib` 확인, `/usr/local` 설치 또는 CMake에 경로 지정.
+
+**추가 문서**
+- 프레이밍 상세: `docs/FRAMING.md`
+- 세션/락스텝 개념: `docs/SESSION.md`
+- HUD/UI 개요: `docs/HUD.md`
 
 ## 네트워크 개념 정리(이 구현과의 연관)
 

@@ -12,6 +12,10 @@ public:
     Game(uint64_t seed = 0);
     ~Game();
     void Draw();
+    // [NET] 보드만 지정 좌표에 그립니다(점수/패널 제외). 멀티뷰에 사용.
+    void DrawBoardAt(int offsetX, int offsetY);
+    // [NET] 다음 블록 프리뷰를 지정 좌표에 그립니다.
+    void DrawNextAt(int offsetX, int offsetY);
     // [NET] 한 틱의 입력(로컬/원격)을 적용합니다. Lockstep에선 수신된 입력을 이 경로로 합칩니다.
     void SubmitInput(uint8_t inputMask);
     // [NET] 틱을 1 증가시켜 중력/낙하 등 시간진행을 수행합니다(입력과 분리).
@@ -20,6 +24,8 @@ public:
     bool gameOver;
     int score;
     Music music;
+    // [NET] 상태 검증/로그용 해시
+    unsigned long long ComputeStateHash() const;
     // GameState gameState;
     // Menu menu;
 
@@ -40,8 +46,6 @@ private:
     Block MakeGhostBlock(const Block& block);
     Block GetRandomBlock();
     XorShift64Star rng; // [NET] RNG 상태는 시뮬레이션 상태의 일부(스냅샷/해시에 포함 권장)
-    // [NET] 현재 시뮬레이션 상태의 간단 해시(검증/로그)
-    unsigned long long ComputeStateHash() const;
     Block currentBlock;
     Block ghostBlock;
     Block nextBlock;
@@ -52,4 +56,7 @@ private:
     // Tick-based gravity
     int gravityCounterTicks;      // [NET] 고정틱 기반 중력 카운터(결정론)
     int dropIntervalTicks;        // [NET] 자동 낙하 간격(틱)
+    static void AudioInit();
+    static void AudioShutdown();
+    static int s_audioRef;
 };

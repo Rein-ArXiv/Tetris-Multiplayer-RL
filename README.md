@@ -1,4 +1,6 @@
-# C++와 Raylib로 만든 테트리스
+# Tetris Multiplayer with Lockstep Networking
+
+C++와 Raylib로 구현한 P2P Lockstep 네트워킹 기반 멀티플레이어 테트리스입니다.
 
 ## Windows 빌드 방법 (w64devkit + raylib)
 
@@ -26,12 +28,23 @@
   - `cmake --build . -j`
   - 실행: `./tetris`
 
-## 멀티플레이 준비 1단계(이미 반영됨)
-- 결정론 틱 기반 로직 도입: 고정 60Hz 틱, 입력은 틱 단위 비트마스크로 처리
-- 자체 PRNG(XorShift64*)로 RNG 결정론화, 시드 기반 재현 가능
-- 리플레이/네트코드 확장을 위한 입력 샘플링 경로 분리(`SubmitInput`, `Tick`)
+## 현재 구현 상태
 
-이후 단계에서 P2P Lockstep 또는 서버 권위 모델을 점진적으로 추가할 수 있습니다.
+✅ **완료된 기능들**:
+- 결정론적 게임 코어 (고정 60Hz 틱, XorShift64* RNG)
+- TCP 소켓 추상화 (Windows/Linux 지원)
+- 메시지 프레이밍 시스템 (길이 프리픽스 + 체크섬)
+- P2P Lockstep 세션 관리
+- 입력 동기화 및 안전 틱 계산
+- 리플레이 시스템 (기록/재생)
+- 상태 해시 검증 (desync 감지)
+- 멀티스레드 네트워킹 (Main/IO/Accept 스레드)
+
+🚧 **최적화 예정**:
+- 패킷 배치 전송 (현재: 60Hz → 목표: 20-30Hz)
+- 입력 압축 (Run-Length Encoding)
+- 연결 복구 및 재동기화
+- 스냅샷 시스템
 **프로젝트 구조**
 - `src/` 게임 렌더링/오디오/입력(raylib 의존)
 - `core/` 결정론 코어(틱, 입력 비트마스크, RNG, 해시, 리플레이)
@@ -66,33 +79,64 @@
 - 스냅샷/복구: 주기 스냅샷과 해시 비교로 desync 시 재동기.
 - 서버 권위(옵션): 시드/시작틱/스냅샷 배포, 관전자/재접속.
 
-**원격 1:1 빠른 시작(실험용)**
-- 호스트: `./tetris --host 7777`
-- 피어: `./tetris --connect <host_ip>:7777`
-- 현재 동작
-  - TCP로 연결 → HELLO/SEED 교환 → 입력을 틱 단위로 교환 → 안전하게 진행
-  - HUD 하단에 네트 상태가 간단 출력됩니다.
-  - 입력 지연(input delay)과 안전 틱(safe tick) 근사치로 진행합니다.
-    - `localSent`: 로컬이 전송 완료한 마지막 틱
-    - `remoteMax`: 원격에서 수신한 마지막 틱
-    - `sim`: 시뮬레이션이 완료된 마지막 틱
-    - 진행 기준: `safe = min(localSent, remoteMax) - inputDelay`까지 시뮬레이션
-  - 2보드 렌더(학습용 레이아웃): 좌(Local)와 우(Remote) 보드가 동시에 출력됩니다.
-- 주의: 초기 버전은 입력 지연/재전송/스냅샷이 최소화되어 있으며, 학습 목적으로 단순화되어 있습니다.
+## 멀티플레이어 사용법
+
+### 네트워크 게임 시작
+```bash
+# 호스트 (게임 파라미터 결정)
+./tetris --host 7777
+
+# 클라이언트 (호스트에 연결)
+./tetris --connect 192.168.1.100:7777
+```
+
+### 게임 진행 방식
+1. **연결 설정**: TCP 핸드셰이크 → HELLO/SEED 메시지 교환
+2. **Lockstep 동기화**: 양쪽 입력이 모두 도착할 때까지 대기
+3. **안전 틱 계산**: `safe = min(localSent, remoteMax) - inputDelay`
+4. **결정론적 진행**: 동일한 입력 순서로 게임 상태 동기화
+
+### 네트워크 상태 표시
+HUD 하단에 실시간 네트워크 정보가 표시됩니다:
+- **NET**: 연결 상태 (CONNECTED/DISCONNECTED)
+- **TICKS**: `localSent=N remoteMax=M sim=K`
+  - `localSent`: 전송 완료한 마지막 틱
+  - `remoteMax`: 상대방으로부터 받은 마지막 틱
+  - `sim`: 시뮬레이션 완료한 마지막 틱
+
+### 듀얼 보드 렌더링
+좌측(Local)과 우측(Remote) 보드가 동시 표시되어 양쪽 게임 상태를 비교할 수 있습니다.
 
 **멀티플레이 UX(계획)**
 - 메인 메뉴: Single / Multiplayer
 - Multiplayer: Quick Match(매치메이킹) / Create Room(방 코드 표시) / Join Room(코드 입력)
 - 로비 서버(간단 TCP): 방 생성/참가/큐 매칭/파라미터 배포 → P2P 연결 시작
 
-**To‑Do**
-- 로컬 2P + 보드 렌더 오프셋, P1/P2 키 바인딩 분리
-- 리플레이 재생기(자동 재생/검증)
-- 상태 스냅샷 직렬화/역직렬화
-- 네트워크 입력 큐/세션(입력 지연, ACK, 타임아웃) 스캐폴딩
-- TCP 전송층(Windows/Linux) → localhost 2프로세스 테스트
-- 가비지 규칙 훅 연결(라인 클리어 시 전송)
-- 상태 해시 로그/비교 도구
+## 개발 로드맵
+
+### 🎯 다음 단계 (우선순위 높음)
+- [ ] 패킷 배치 전송 구현 (60Hz → 20-30Hz 최적화)
+- [ ] 입력 압축 (Run-Length Encoding, 비트패킹)
+- [ ] 연결 복구 메커니즘 (재접속, 타임아웃 처리)
+- [ ] 스냅샷 기반 재동기화
+
+### 🔧 네트워킹 개선
+- [ ] UDP 옵션 구현 (선택적 재전송)
+- [ ] NAT 홀펀칭 (P2P 연결성 향상)
+- [ ] 대역폭 모니터링 및 적응적 전송
+- [ ] 지연 예측 및 버퍼링 최적화
+
+### 🎮 게임플레이 확장
+- [ ] 가비지 라인 공격 시스템
+- [ ] T-Spin 감지 및 점수 보너스
+- [ ] 관전자 모드
+- [ ] 토너먼트/랭킹 시스템
+
+### 🛠️ 개발 도구
+- [ ] 네트워크 시뮬레이터 (지연/지터/패킷손실)
+- [ ] 리플레이 분석 도구
+- [ ] 성능 프로파일러
+- [ ] 자동화된 동기화 테스트
 
 **FAQ**
 - 같은 시드를 쓰면 블록 순서가 항상 같나요? → 네. 다만 방마다 새로운 시드를 생성해 매번 다르게 구성하는 게 일반적입니다.
@@ -103,10 +147,21 @@
 - Windows DLL 누락: `lib/libstdc++-6.dll`, `lib/libgcc_s_dw2-1.dll`을 exe 옆 또는 PATH에 추가.
 - raylib 링크 실패(Linux): `pkg-config raylib` 확인, `/usr/local` 설치 또는 CMake에 경로 지정.
 
-**추가 문서**
-- 프레이밍 상세: `docs/FRAMING.md`
-- 세션/락스텝 개념: `docs/SESSION.md`
-- HUD/UI 개요: `docs/HUD.md`
+## 📚 기술 문서
+
+네트워킹 시스템의 상세한 구현과 개념을 학습할 수 있는 문서들:
+
+### 아키텍처 개요
+- [`docs/NETWORKING_OVERVIEW.md`](docs/NETWORKING_OVERVIEW.md) - 전체 네트워크 아키텍처 설명
+
+### 계층별 구현 가이드
+- [`docs/SOCKET_LAYER.md`](docs/SOCKET_LAYER.md) - TCP 소켓 추상화 계층
+- [`docs/FRAMING_PROTOCOL.md`](docs/FRAMING_PROTOCOL.md) - 메시지 프레이밍 프로토콜
+- [`docs/SESSION_LAYER.md`](docs/SESSION_LAYER.md) - Lockstep 동기화 세션 관리
+
+### 참조 및 예제
+- 각 문서에는 완전한 API 참조와 실제 사용 예제가 포함되어 있습니다
+- 네트워킹 개념 학습부터 실제 구현까지 단계별 가이드 제공
 
 ## 네트워크 개념 정리(이 구현과의 연관)
 
@@ -161,10 +216,27 @@
 - TCP: 대체로 문제 적음. UDP P2P는 NAT 홀펀칭/STUN/릴레이 고려.
 - 포트 선택/Keepalive: 유휴 연결 유지, 방화벽 타임아웃 회피.
 
-### 성능/대역폭/프레이밍
-- 네트 틱(예: 20~30Hz)과 시뮬 틱(60Hz) 분리 가능. 입력을 묶어 전송.
-- Nagle/Delayed ACK: 저지연이 중요하면 비활성 고려(TCP_NODELAY).
-- MTU/분할: UDP는 1200바이트 내 패킷 유지 권장. 조각화 회피.
+### 성능/대역폭 최적화
+
+**현재 구현**: 60Hz 개별 전송 (학습용 단순화)
+```cpp
+// 매 틱마다 전송 (60 packets/sec)
+session.SendInput(tick, input);  // 현재 방식
+```
+
+**최적화 방향**: 배치 전송으로 20-30Hz 달성
+```cpp
+// 3틱마다 묶어서 전송 (20 packets/sec)
+if (tick % 3 == 0) {
+    session.SendInputBatch(startTick, inputArray);  // 목표 방식
+}
+```
+
+**추가 최적화 기법**:
+- Nagle/Delayed ACK: 저지연 우선시 시 TCP_NODELAY 적용
+- 입력 압축: Run-Length Encoding으로 반복 입력 압축
+- 적응적 전송: 입력 변화 시에만 전송
+- MTU 고려: UDP 사용 시 1200바이트 내 패킷 유지
 
 ### 스레딩/동시성(클라이언트)
 - 메인 스레드: 렌더/오디오/입력 샘플링.

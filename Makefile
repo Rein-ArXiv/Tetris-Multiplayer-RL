@@ -310,7 +310,7 @@ ifeq ($(PLATFORM),PLATFORM_DESKTOP)
     ifeq ($(PLATFORM_OS),WINDOWS)
         # Libraries for Windows desktop compilation
         # NOTE: WinMM library required to set high-res timer resolution
-        LDLIBS = -lraylib -lopengl32 -lgdi32 -lwinmm
+        LDLIBS = -lraylib -lopengl32 -lgdi32 -lwinmm -lws2_32
         # Required for physac examples
         #LDLIBS += -static -lpthread
     endif
@@ -371,6 +371,8 @@ OBJ_DIR = obj
 # C++ sources (exclude blocks.cpp which is included via headers)
 SOURCES := $(wildcard $(SRC_DIR)/*.cpp)
 SOURCES := $(filter-out $(SRC_DIR)/blocks.cpp,$(SOURCES))
+# Add core sources
+SOURCES += core/replay.cpp
 
 # For Android platform we call a custom Makefile.Android
 ifeq ($(PLATFORM),PLATFORM_ANDROID)

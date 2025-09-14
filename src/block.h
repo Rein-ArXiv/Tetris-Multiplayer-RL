@@ -22,4 +22,9 @@ private:
     std::vector<Color> colors;
     int rowOffset;
     int columnOffset;
+public:
+    // [NET] 결정론 상태 해시/스냅샷을 위해 내부 좌표/회전 접근자 제공
+    int GetRotationState() const { return rotationState; }
+    int GetRowOffset() const { return rowOffset; }
+    int GetColumnOffset() const { return columnOffset; }
 };

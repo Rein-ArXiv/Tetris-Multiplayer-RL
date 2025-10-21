@@ -1,249 +1,66 @@
 # Tetris Multiplayer with Lockstep Networking
 
-C++와 Raylib로 구현한 P2P Lockstep 네트워킹 기반 멀티플레이어 테트리스입니다.
+C++와 Raylib로 구현한 P2P Lockstep 네트워킹 기반 멀티플레이어 테트리스.
 
-## Windows 빌드 방법 (w64devkit + raylib)
+## 빠른 시작
 
-- 준비물
-  - raylib 공식 Windows 배포본 설치: `C:/raylib` 폴더에 w64devkit과 raylib 소스가 있다고 가정합니다.
-  - `C:/raylib/w64devkit/w64devkit.exe`로 셸을 실행하면 컴파일러 PATH가 자동 설정됩니다.
-
-- 빌드
-  - 프로젝트 루트에서 아래 명령을 실행하세요.
-    - `mingw32-make PLATFORM=PLATFORM_DESKTOP RAYLIB_PATH=C:/raylib/raylib`
-  - 빌드가 성공하면 루트 디렉터리에 `tetris.exe`가 생성됩니다.
-
-- 실행
-  - `tetris.exe`를 프로젝트 루트(리소스 경로 유지)에서 실행하세요.
-  - 필요 시 `lib/libstdc++-6.dll`, `lib/libgcc_s_dw2-1.dll`을 실행 파일과 같은 폴더에 두거나 PATH에 w64devkit을 추가하세요.
-
-참고: VS Code를 사용할 경우 `.vscode/tasks.json`의 "build release" 또는 F5(런) 구성을 사용하면 자동으로 빌드/실행이 가능합니다.
-
-## Linux 빌드 방법 (CMake)
-
-- 전제: raylib가 시스템에 설치되어 있어야 합니다. 예) Homebrew/Linuxbrew 또는 `make install`로 `/usr/local`에 설치
-- 빌드
-  - `mkdir -p build && cd build`
-  - `cmake ..` (pkg-config가 raylib을 찾으면 자동 연결, 그 외엔 `/usr/local` 기본 경로 사용)
-  - `cmake --build . -j`
-  - 실행: `./tetris`
-
-## 현재 구현 상태
-
-✅ **완료된 기능들**:
-- 결정론적 게임 코어 (고정 60Hz 틱, XorShift64* RNG)
-- TCP 소켓 추상화 (Windows/Linux 지원)
-- 메시지 프레이밍 시스템 (길이 프리픽스 + 체크섬)
-- P2P Lockstep 세션 관리
-- 입력 동기화 및 안전 틱 계산
-- 리플레이 시스템 (기록/재생)
-- 상태 해시 검증 (desync 감지)
-- 멀티스레드 네트워킹 (Main/IO/Accept 스레드)
-
-🚧 **최적화 예정**:
-- 패킷 배치 전송 (현재: 60Hz → 목표: 20-30Hz)
-- 입력 압축 (Run-Length Encoding)
-- 연결 복구 및 재동기화
-- 스냅샷 시스템
-**프로젝트 구조**
-- `src/` 게임 렌더링/오디오/입력(raylib 의존)
-- `core/` 결정론 코어(틱, 입력 비트마스크, RNG, 해시, 리플레이)
-- `Font/`, `Sounds/` 리소스 폴더
-- `CMakeLists.txt` Linux/Windows 공용 빌드 스크립트
-- `Makefile` w64devkit 환경에 맞춘 Windows 빌드 스크립트
-
-**조작/핫키**
-- 이동/회전: `←/→/↓/↑`
-- 하드드롭: `Space`
-- 리스타트: 게임오버 화면에서 임의 키
-- 리플레이 기록 시작/저장: `F5` 시작, `F6` 저장(`out/replay.txt`)
-- 상태 해시 출력: `H` (콘솔 출력)
-
-**결정론 코어 개념**
-- 고정 틱(`TICKS_PER_SECOND = 60`): 모든 로직은 틱 단위로만 진행합니다.
-- 입력 비트마스크(`core/input.h`): 매 틱의 입력을 바이트로 표현(`LEFT/RIGHT/DOWN/ROTATE/DROP`).
-- RNG 결정론화(`core/rng.h`): `XorShift64*` 사용, 세션 시드가 같으면 동일한 블록 순서.
-- 상태 해시(`Game::ComputeStateHash`): 그리드/블록/RNG/점수/중력을 FNV-1a 64비트로 해싱.
-- 리플레이(`core/replay.*`): 텍스트 기반 `seed/ticks/p1 p2` 입력 기록/로드.
-
-**핵심 API 요약**
-- `Game::SubmitInput(uint8_t mask)`: 한 틱의 입력(로컬/원격 합산)을 적용.
-- `Game::Tick()`: 시간을 1틱 진행(중력/낙하). Lockstep에선 모든 참가자 입력 수신 후 호출.
-- `Game::ComputeStateHash()`: 현재 상태를 64비트 해시로 반환.
-- `XorShift64Star`: `next()`, `nextUInt(max)`, `getState()` 제공. 세션 시드로 초기화 필요.
-- 상수/입력 정의: `core/constants.h`, `core/input.h`.
-
-**네트워킹 로드맵(학습 중심)**
-- 로컬 2P(한 프로세스): 동일 시드로 `Game` 두 개 운용, 보드 나란히 렌더, 해시로 동기 검증.
-- Lockstep 스캐폴딩: HELLO/SEED/START/INPUT/ACK, 입력 지연 버퍼, 안전 틱 경계. TCP부터.
-- 스냅샷/복구: 주기 스냅샷과 해시 비교로 desync 시 재동기.
-- 서버 권위(옵션): 시드/시작틱/스냅샷 배포, 관전자/재접속.
-
-## 멀티플레이어 사용법
-
-### 네트워크 게임 시작
+### Windows (w64devkit + raylib)
 ```bash
-# 호스트 (게임 파라미터 결정)
+mingw32-make PLATFORM=PLATFORM_DESKTOP RAYLIB_PATH=C:/raylib/raylib
+```
+
+### Linux/Mac (CMake)
+```bash
+mkdir -p build && cd build
+cmake ..
+cmake --build . -j
+./tetris
+```
+
+## 멀티플레이어 실행
+
+```bash
+# 호스트
 ./tetris --host 7777
 
-# 클라이언트 (호스트에 연결)
+# 클라이언트
 ./tetris --connect 192.168.1.100:7777
 ```
 
-### 게임 진행 방식
-1. **연결 설정**: TCP 핸드셰이크 → HELLO/SEED 메시지 교환
-2. **Lockstep 동기화**: 양쪽 입력이 모두 도착할 때까지 대기
-3. **안전 틱 계산**: `safe = min(localSent, remoteMax) - inputDelay`
-4. **결정론적 진행**: 동일한 입력 순서로 게임 상태 동기화
+## 핵심 기능
 
-### 네트워크 상태 표시
-HUD 하단에 실시간 네트워크 정보가 표시됩니다:
-- **NET**: 연결 상태 (CONNECTED/DISCONNECTED)
-- **TICKS**: `localSent=N remoteMax=M sim=K`
-  - `localSent`: 전송 완료한 마지막 틱
-  - `remoteMax`: 상대방으로부터 받은 마지막 틱
-  - `sim`: 시뮬레이션 완료한 마지막 틱
+- ✅ 결정론적 P2P Lockstep 동기화
+- ✅ 고정 60Hz 틱 시스템
+- ✅ 플랫폼 독립적 네트워킹 (Windows/Linux)
+- ✅ 리플레이 시스템 (F5: 기록, F6: 저장)
+- ✅ 상태 해시 검증 (H: 해시 출력)
+- ✅ 멀티스레드 I/O
 
-### 듀얼 보드 렌더링
-좌측(Local)과 우측(Remote) 보드가 동시 표시되어 양쪽 게임 상태를 비교할 수 있습니다.
+## 핫키
 
-**멀티플레이 UX(계획)**
-- 메인 메뉴: Single / Multiplayer
-- Multiplayer: Quick Match(매치메이킹) / Create Room(방 코드 표시) / Join Room(코드 입력)
-- 로비 서버(간단 TCP): 방 생성/참가/큐 매칭/파라미터 배포 → P2P 연결 시작
+- **화살표**: 이동/회전
+- **Space**: 하드 드롭
+- **F5/F6**: 리플레이 기록/저장
+- **H**: 상태 해시 출력
+- **R** (게임 오버): 재시작
+- **ESC** (게임 오버): 타이틀
 
-## 개발 로드맵
+## 문서
 
-### 🎯 다음 단계 (우선순위 높음)
-- [ ] 패킷 배치 전송 구현 (60Hz → 20-30Hz 최적화)
-- [ ] 입력 압축 (Run-Length Encoding, 비트패킹)
-- [ ] 연결 복구 메커니즘 (재접속, 타임아웃 처리)
-- [ ] 스냅샷 기반 재동기화
+**완전 가이드**: [`DOCUMENTATION.md`](DOCUMENTATION.md) - 모든 기술 문서 통합본
 
-### 🔧 네트워킹 개선
-- [ ] UDP 옵션 구현 (선택적 재전송)
-- [ ] NAT 홀펀칭 (P2P 연결성 향상)
-- [ ] 대역폭 모니터링 및 적응적 전송
-- [ ] 지연 예측 및 버퍼링 최적화
+**개발 지침**: [`CLAUDE.md`](CLAUDE.md) - Claude Code용 프로젝트 가이드
 
-### 🎮 게임플레이 확장
-- [ ] 가비지 라인 공격 시스템
-- [ ] T-Spin 감지 및 점수 보너스
-- [ ] 관전자 모드
-- [ ] 토너먼트/랭킹 시스템
+## 프로젝트 구조
 
-### 🛠️ 개발 도구
-- [ ] 네트워크 시뮬레이터 (지연/지터/패킷손실)
-- [ ] 리플레이 분석 도구
-- [ ] 성능 프로파일러
-- [ ] 자동화된 동기화 테스트
-
-**FAQ**
-- 같은 시드를 쓰면 블록 순서가 항상 같나요? → 네. 다만 방마다 새로운 시드를 생성해 매번 다르게 구성하는 게 일반적입니다.
-- Linux 지원이 복잡한가요? → CMake로 빌드 가능하며 TCP부터 시작하면 플랫폼 차이는 작습니다.
-
-**문제 해결**
-- 리소스 경로: 실행 디렉터리를 프로젝트 루트로.
-- Windows DLL 누락: `lib/libstdc++-6.dll`, `lib/libgcc_s_dw2-1.dll`을 exe 옆 또는 PATH에 추가.
-- raylib 링크 실패(Linux): `pkg-config raylib` 확인, `/usr/local` 설치 또는 CMake에 경로 지정.
-
-## 📚 기술 문서
-
-네트워킹 시스템의 상세한 구현과 개념을 학습할 수 있는 문서들:
-
-### 아키텍처 개요
-- [`docs/NETWORKING_OVERVIEW.md`](docs/NETWORKING_OVERVIEW.md) - 전체 네트워크 아키텍처 설명
-
-### 계층별 구현 가이드
-- [`docs/SOCKET_LAYER.md`](docs/SOCKET_LAYER.md) - TCP 소켓 추상화 계층
-- [`docs/FRAMING_PROTOCOL.md`](docs/FRAMING_PROTOCOL.md) - 메시지 프레이밍 프로토콜
-- [`docs/SESSION_LAYER.md`](docs/SESSION_LAYER.md) - Lockstep 동기화 세션 관리
-
-### 참조 및 예제
-- 각 문서에는 완전한 API 참조와 실제 사용 예제가 포함되어 있습니다
-- 네트워킹 개념 학습부터 실제 구현까지 단계별 가이드 제공
-
-## 네트워크 개념 정리(이 구현과의 연관)
-
-아래 개념들은 본 프로젝트가 채택한 “결정론 틱 + 입력 동기화” 설계와 직접 연결됩니다. 학습용으로 핵심만 요약합니다.
-
-### 아키텍처 모델
-- 클라이언트/서버(서버 권위): 치팅 억제, 재접속/관전자/스냅샷 배포 용이. 서버 구현/호스팅 필요.
-- P2P Lockstep(결정론 동기): 입력만 교환해 대역폭 적음. 지연=입력지연로 체감. 치팅 취약.
-- P2P Rollback(예측/되감기): 지연 체감 낮음. 상태 스냅샷/되감기/재적용이 필요해 복잡.
-
-### 시간/동기화
-- 고정 틱(Fixed Timestep): `TICKS_PER_SECOND=60` 같은 공통 기준으로 로직 실행. 렌더와 분리.
-- 시작 틱/세션 시드 합의: HELLO/SEED/START로 동일한 시작점 보장.
-- 시계 드리프트: 네트 틱과 시뮬레이션 틱을 분리하거나 보정(작은 가감속)으로 수렴.
-
-### 지연/지터/패킷 유실 대응
-- 입력 지연 버퍼(Input Delay): RTT 일부만큼 유예 후 ‘안전 틱’까지 진행.
-- 재전송/ACK: 입력 패킷은 누락되면 재전송. 누적 ACK 또는 선택적 ACK 사용.
-- 타임아웃/재연결: 일정 틱 이상 미수신 시 일시 정지/재접속 절차.
-
-### 신뢰성/순서 보장
-- TCP: 순서/신뢰 보장, 구현 단순. HOL 블로킹 영향 존재.
-- UDP(+ARQ): 시퀀스 번호, ACK 비트필드(Selective Repeat), 재전송/중복 제거 구현 필요.
-- 메시지 ID/틱 번호: 재정렬/중복제거/멱등 처리를 위해 필수 메타데이터.
-
-### 패킷/직렬화
-- 길이 프리픽스 + 타입 헤더 + 페이로드 + CRC/해시(FNV-1a 등)로 간단한 바이너리 프로토콜.
-- 엔디안/정렬: 리틀엔디안 고정, 고정 폭 정수 사용(`uint8/16/32`), 패딩 주의.
-- 입력 압축: 연속 틱 범위를 묶거나 런-렝스, 비트패킹으로 대역폭 절감.
-
-### 상태 동기화/복구
-- 상태 해시(본 프로젝트: `Game::ComputeStateHash()`): 틱별로 비교해 desync 즉시 검출.
-- 스냅샷/델타: 주기적 전체 스냅샷 또는 델타를 보내 재동기화.
-- 리플레이: 시드+틱 입력만으로 재현. 디버깅/재현성 검증에 핵심.
-
-### 입력 동기화(락스텝)와 롤백
-- Lockstep: 틱 N의 모든 입력을 모은 뒤 1회 진행 → 결정론 보장.
-- Rollback: 예측으로 진행 후 원본 입력 도착 시 해당 틱으로 되감아 다시 시뮬레이션.
-- 결정론 전제: 고정 틱/순수 로직/RNG 시드/호출 순서 고정이 필수.
-
-### RNG/시드 운용
-- 세션 시드: 방/매치마다 새로 생성해 매번 다른 시퀀스.
-- RNG 스트림 분리: 블록 RNG와 가비지 RNG를 분리해 소비 순서 간섭 제거.
-- 가방 셔플(Fisher–Yates): 가방 인덱스 기반으로 독립 셔플 시 랜덤 접근 가능.
-
-### 보안/치팅/권한
-- 서버 권위: 상태 변경은 서버에서 검증/적용. 클라이언트는 입력만 전송.
-- 입력 무결성: 서명/해시로 위·변조 탐지(학습 단계에선 로그/해시 비교부터).
-- 속도핵/타임워프: 서버 기준 틱/속도로 판정, 비정상 패턴 거부/제재.
-
-### NAT/연결성
-- TCP: 대체로 문제 적음. UDP P2P는 NAT 홀펀칭/STUN/릴레이 고려.
-- 포트 선택/Keepalive: 유휴 연결 유지, 방화벽 타임아웃 회피.
-
-### 성능/대역폭 최적화
-
-**현재 구현**: 60Hz 개별 전송 (학습용 단순화)
-```cpp
-// 매 틱마다 전송 (60 packets/sec)
-session.SendInput(tick, input);  // 현재 방식
+```
+src/     게임 로직, UI (raylib)
+core/    결정론 시스템 (틱, RNG, 해시, 리플레이)
+net/     네트워킹 계층 (Socket → Framing → Session)
 ```
 
-**최적화 방향**: 배치 전송으로 20-30Hz 달성
-```cpp
-// 3틱마다 묶어서 전송 (20 packets/sec)
-if (tick % 3 == 0) {
-    session.SendInputBatch(startTick, inputArray);  // 목표 방식
-}
-```
+## 요구사항
 
-**추가 최적화 기법**:
-- Nagle/Delayed ACK: 저지연 우선시 시 TCP_NODELAY 적용
-- 입력 압축: Run-Length Encoding으로 반복 입력 압축
-- 적응적 전송: 입력 변화 시에만 전송
-- MTU 고려: UDP 사용 시 1200바이트 내 패킷 유지
-
-### 스레딩/동시성(클라이언트)
-- 메인 스레드: 렌더/오디오/입력 샘플링.
-- 네트 스레드: 소켓 I/O, 패킷 파싱 → lock-free 큐/뮤텍스로 메인과 교환.
-- 데이터 경합: 프레임 스냅샷/이중 버퍼로 렌더-시뮬레이션 분리.
-
-### 디버깅/계측
-- 해시/로그: 틱별 입력/해시 기록 비교.
-- 네트 조건 시뮬레이터: 지연/지터/유실/중복 삽입기로 회복력 테스트.
-- 리플레이 우선: 버그 재현성 확보가 생산성의 핵심.
+- **Windows**: raylib (C:/raylib), w64devkit
+- **Linux**: raylib (pkg-config 또는 /usr/local)
+- **공통**: C++17

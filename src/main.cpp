@@ -15,9 +15,8 @@
 #include "game.h"
 #include "colors.h"
 
-// [NET] 현재는 로컬 키보드 입력을 샘플링합니다.
-// Lockstep/서버 권위로 확장 시, 네트워크 스레드가 수신한 '틱별 입력'을 큐에 넣고
-// 여기서는 해당 틱의 입력을 큐에서 꺼내 Game::SubmitInput에 전달합니다.
+// 키보드 입력을 비트마스크로 변환 (core/input.h 참조)
+// Lockstep 전체 흐름: docs/QUICK_START.md
 static uint8_t SampleInput()
 {
     uint8_t mask = INPUT_NONE;
@@ -30,6 +29,16 @@ static uint8_t SampleInput()
 }
 
 enum class AppMode { Menu, ConnectInput, Single, Net };
+
+// 게임 오버 상태 머신
+enum class GameOverState {
+    None,                    // 게임 중
+    ShowingGameOver,         // "GAME OVER" 표시, 선택 대기
+    WaitingForRemote,        // 내 선택 완료, 상대 선택 대기
+    ShowingDisagreement,     // 불일치 메시지 표시 (3초)
+    RestartingGame,          // 재시작 준비
+    GoingToTitle,            // 타이틀 복귀
+};
 
 int main(int argc, char** argv)
 {
@@ -98,6 +107,13 @@ int main(int argc, char** argv)
     replay.seed = sessionSeed;
     replay.frames.clear();
 
+    // 게임 오버 상태 관리
+    GameOverState gameOverState = GameOverState::None;
+    net::GameOverChoice myGameOverChoice = net::GameOverChoice::None;
+    float gameOverTimer = 0.0f;
+    const float GAME_OVER_TIMEOUT = 30.0f;
+    const float DISAGREEMENT_COUNTDOWN = 3.0f;
+
     float accumulator = 0.0f;
     while(WindowShouldClose() == false)     // Press ESC or click X button
     {
@@ -125,11 +141,10 @@ int main(int argc, char** argv)
                     session.SendInput(localTickNext, inputMask);
                     localTickNext++;
 
-                    // 세션 레디 후 보드 초기화(양쪽 동일 시드 사용)
+                    // 핸드셰이크 완료 → 양쪽 동일 시드로 보드 초기화 (결정론 보장)
                     if (session.isReady() && (!gameLocal || !gameRemote)) {
                         sessionSeed = session.params().seed;
                         inputDelay = session.params().input_delay;
-                        // [FIX] 양쪽 보드 모두 동일한 시드 사용하여 같은 블록 순서 보장
                         gameLocal = std::make_unique<Game>(sessionSeed);
                         gameRemote = std::make_unique<Game>(sessionSeed);
                         localInputs.clear();
@@ -141,21 +156,18 @@ int main(int argc, char** argv)
                         // 시작 전 카운트다운
                         if (startDelay > 0) { startDelay--; accumulator -= SECONDS_PER_TICK; continue; }
 
-                        // [FIX] 호스트와 클라이언트 모두 동일한 Lockstep 로직 적용
-                        // 안전 틱 계산: 양측 입력이 존재한다고 기대할 수 있는 마지막 틱
+                        // Lockstep 안전 틱 계산 (상세: docs/QUICK_START.md#q1)
                         int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
                         int64_t lastRemote = (int64_t)session.maxRemoteTick();
                         int64_t safeTickInclusive = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
 
-                        // [OPTIMIZED] 실행할 틱이 있을 때만 처리하여 성능 개선
+                        // 안전 틱까지 시뮬레이션 진행
                         if ((int64_t)simTick <= safeTickInclusive && gameLocal && gameRemote) {
                             while ((int64_t)simTick <= safeTickInclusive) {
                                 uint8_t li = 0, ri = 0;
                                 auto it = localInputs.find(simTick);
                                 if (it != localInputs.end()) li = it->second;
-                                if (!session.GetRemoteInput(simTick, ri)) {
-                                    break; // 입력 없으면 대기
-                                }
+                                if (!session.GetRemoteInput(simTick, ri)) break;
 
                                 gameLocal->SubmitInput(li);
                                 gameRemote->SubmitInput(ri);
@@ -326,15 +338,129 @@ int main(int argc, char** argv)
             DrawTextEx(font, TextFormat("Score: %d", gameLocal->score), {leftOrigin.x, 620-28}, 20, 1, WHITE);
             DrawTextEx(font, TextFormat("Score: %d", gameRemote->score), {rightOrigin.x, 620-28}, 20, 1, WHITE);
 
-            if (gameLocal->gameOver || gameRemote->gameOver) {
-                DrawTextEx(font, "GAME OVER", {220, 300}, 60, 2, WHITE);
-                DrawTextEx(font, "Press Any key To Restart", {200, 350}, 25, 2, WHITE);
-                if (GetKeyPressed() != 0) {
-                    gameLocal = std::make_unique<Game>(sessionSeed);
-                    gameRemote = std::make_unique<Game>(sessionSeed);
-                    localInputs.clear();
-                    localTickNext = 0; simTick = 0;
+            // 게임 오버 감지 및 상태 전환
+            if ((gameLocal->gameOver || gameRemote->gameOver) && gameOverState == GameOverState::None) {
+                gameOverState = GameOverState::ShowingGameOver;
+                myGameOverChoice = net::GameOverChoice::None;
+                gameOverTimer = 0.0f;
+                std::cout << "[GAME] Game over detected, entering choice screen" << std::endl;
+            }
+
+            // 게임 오버 상태별 처리
+            if (gameOverState == GameOverState::ShowingGameOver) {
+                DrawTextEx(font, "GAME OVER", {220, 280}, 60, 2, WHITE);
+                DrawTextEx(font, "[R] Restart", {240, 350}, 28, 2, GREEN);
+                DrawTextEx(font, "[ESC] Go to Title", {200, 385}, 28, 2, YELLOW);
+
+                if (IsKeyPressed(KEY_R)) {
+                    myGameOverChoice = net::GameOverChoice::Restart;
+                    session.SendGameOverChoice(myGameOverChoice);
+                    gameOverState = GameOverState::WaitingForRemote;
+                    gameOverTimer = 0.0f;
+                    std::cout << "[GAME] Selected: Restart, waiting for opponent..." << std::endl;
+                } else if (IsKeyPressed(KEY_ESCAPE)) {
+                    myGameOverChoice = net::GameOverChoice::GoToTitle;
+                    session.SendGameOverChoice(myGameOverChoice);
+                    gameOverState = GameOverState::WaitingForRemote;
+                    gameOverTimer = 0.0f;
+                    std::cout << "[GAME] Selected: GoToTitle, waiting for opponent..." << std::endl;
                 }
+            }
+            else if (gameOverState == GameOverState::WaitingForRemote) {
+                DrawTextEx(font, "GAME OVER", {220, 280}, 60, 2, WHITE);
+                DrawTextEx(font, "Waiting for opponent...", {180, 450}, 24, 2, GRAY);
+
+                // 타임아웃 시간 표시
+                gameOverTimer += GetFrameTime();
+                int remaining = (int)(GAME_OVER_TIMEOUT - gameOverTimer);
+                if (remaining < 0) remaining = 0;
+                DrawTextEx(font, TextFormat("Timeout in %ds", remaining), {250, 480}, 20, 2, GRAY);
+
+                net::GameOverChoice remoteChoice;
+                if (session.GetRemoteGameOverChoice(remoteChoice)) {
+                    std::cout << "[GAME] Received opponent choice: " << (int)remoteChoice << std::endl;
+
+                    if (myGameOverChoice == remoteChoice) {
+                        // 양쪽 선택 일치
+                        if (myGameOverChoice == net::GameOverChoice::Restart) {
+                            std::cout << "[GAME] Both chose Restart, restarting game..." << std::endl;
+                            gameOverState = GameOverState::RestartingGame;
+                        } else {
+                            std::cout << "[GAME] Both chose GoToTitle, returning to menu..." << std::endl;
+                            gameOverState = GameOverState::GoingToTitle;
+                        }
+                    } else {
+                        // 불일치
+                        std::cout << "[GAME] Choices differ! My:" << (int)myGameOverChoice
+                                  << " Remote:" << (int)remoteChoice << std::endl;
+                        gameOverState = GameOverState::ShowingDisagreement;
+                        gameOverTimer = 0.0f;
+                    }
+                }
+
+                // 타임아웃 처리
+                if (gameOverTimer >= GAME_OVER_TIMEOUT) {
+                    std::cout << "[GAME] Timeout waiting for opponent, disconnecting..." << std::endl;
+                    gameOverState = GameOverState::GoingToTitle;
+                }
+            }
+            else if (gameOverState == GameOverState::ShowingDisagreement) {
+                DrawTextEx(font, "CHOICES DIFFER", {220, 300}, 40, 2, RED);
+                DrawTextEx(font, "Returning to title in...", {180, 360}, 28, 2, YELLOW);
+
+                gameOverTimer += GetFrameTime();
+                int countdown = (int)(DISAGREEMENT_COUNTDOWN - gameOverTimer) + 1;
+                if (countdown < 0) countdown = 0;
+                DrawTextEx(font, TextFormat("%d", countdown), {350, 410}, 60, 2, WHITE);
+
+                if (gameOverTimer >= DISAGREEMENT_COUNTDOWN) {
+                    std::cout << "[GAME] Countdown finished, going to title" << std::endl;
+                    gameOverState = GameOverState::GoingToTitle;
+                }
+            }
+            else if (gameOverState == GameOverState::RestartingGame) {
+                // 새 게임 시작 - 호스트가 새 시드 생성 및 전송
+                if (session.params().role == net::Role::Host) {
+                    sessionSeed = ((uint64_t)GetTime() * 1000000.0) + rand();
+                    session.SendNewSeed(sessionSeed);
+                    std::cout << "[GAME] Host sending new seed: 0x" << std::hex << sessionSeed << std::dec << std::endl;
+                } else {
+                    // 클라이언트는 호스트로부터 새 SEED 메시지를 받을 때까지 대기
+                    // SEED 메시지 수신 시 seedParams가 자동으로 업데이트됨 (session.cpp handleFrame에서 처리)
+                    sessionSeed = session.params().seed;
+                    std::cout << "[GAME] Client using received seed: 0x" << std::hex << sessionSeed << std::dec << std::endl;
+                }
+
+                // 게임 재시작
+                gameLocal = std::make_unique<Game>(sessionSeed);
+                gameRemote = std::make_unique<Game>(sessionSeed);
+                localInputs.clear();
+                localTickNext = 0;
+                simTick = 0;
+                startDelay = session.params().start_tick;
+
+                session.ClearGameOverChoices();
+                gameOverState = GameOverState::None;
+                std::cout << "[GAME] Game restarted successfully" << std::endl;
+            }
+            else if (gameOverState == GameOverState::GoingToTitle) {
+                // 타이틀로 복귀 (연결 유지 또는 종료)
+                std::cout << "[GAME] Returning to title menu" << std::endl;
+
+                // 게임 정리
+                gameLocal.reset();
+                gameRemote.reset();
+                localInputs.clear();
+                localTickNext = 0;
+                simTick = 0;
+
+                // 연결 유지 여부 결정 (현재는 유지)
+                // session.Close();  // 연결 종료하려면 주석 해제
+
+                session.ClearGameOverChoices();
+                gameOverState = GameOverState::None;
+
+                app = AppMode::Menu;
             }
             if (!session.isConnected()) {
                 if (session.isListening()) DrawTextEx(font, TextFormat("Hosting on port %u...", (unsigned)hostPort), {180, 530}, 22, 2, WHITE);

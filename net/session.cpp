@@ -6,13 +6,10 @@
 
 namespace net {
 
-// [NET] 세션 수명: 생성/Close에서 스레드와 소켓을 정리합니다.
 Session::Session() {}
 Session::~Session() { Close(); }
 
-// [NET] 호스트: 연결 수락 후 HELLO/SEED를 송신하여 파라미터를 알립니다.
 bool Session::Host(uint16_t port, const SeedParams& sp) {
-    // 비동기 수락: UI가 멈추지 않도록 별도 스레드에서 accept
     if (listening) return false;
     seedParams = sp;
     listening = true;
@@ -20,7 +17,6 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
     return true;
 }
 
-// [NET] 피어: 원격에 접속 후 HELLO를 보내고 SEED를 기다립니다.
 bool Session::Connect(const std::string& host, uint16_t port) {
     std::cout << "[NET] Connecting to " << host << ":" << port << std::endl;
     sock = tcp_connect(host, port);
@@ -30,11 +26,7 @@ bool Session::Connect(const std::string& host, uint16_t port) {
     }
     std::cout << "[NET] Connected to " << host << ":" << port << std::endl;
     connected = true;
-
-    // I/O 스레드 시작
     th = std::thread(&Session::ioThread, this);
-
-    // Peer: HELLO 전송, SEED 수신 대기
     {
         std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
@@ -44,7 +36,6 @@ bool Session::Connect(const std::string& host, uint16_t port) {
     return true;
 }
 
-// [NET] 한 틱의 입력을 전송합니다. 지금은 단일 틱만 담지만, 묶어서 보낼 수도 있습니다.
 void Session::SendInput(uint32_t tick, uint8_t mask) {
     auto cur = lastLocalTick.load();
     if (tick > cur) lastLocalTick.store(tick);
@@ -59,7 +50,27 @@ void Session::SendHash(uint32_t tick, uint64_t hash) {
     std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
 }
 
-// [NET] 원격 입력 조회: 해당 틱의 입력이 도착했는지 확인
+void Session::SendGameOverChoice(GameOverChoice choice) {
+    localGameOverChoice.store((uint8_t)choice);
+    std::vector<uint8_t> pl;
+    pl.push_back((uint8_t)choice);
+    auto fr = build_frame(MsgType::GAME_OVER_CHOICE, pl);
+    std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+    std::cout << "[NET] Sent game over choice: " << (int)choice << std::endl;
+}
+
+void Session::SendNewSeed(uint64_t newSeed) {
+    seedParams.seed = newSeed;
+    std::vector<uint8_t> pl;
+    le_write_u64(pl, seedParams.seed);
+    le_write_u32(pl, seedParams.start_tick);
+    pl.push_back(seedParams.input_delay);
+    pl.push_back((uint8_t)seedParams.role);
+    auto fr = build_frame(MsgType::SEED, pl);
+    std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+    std::cout << "[NET] Sent new seed: 0x" << std::hex << newSeed << std::dec << std::endl;
+}
+
 bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
     std::lock_guard<std::mutex> lk(inMu);
     auto it = remoteInputs.find(tick);
@@ -67,10 +78,8 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
     outMask = it->second; return true;
 }
 
-// [NET] 스레드 조인 및 소켓 닫기
 void Session::Close() {
     quit = true;
-    // 중단: 수락 대기 소켓 닫기
     if (listening && listenSock.valid()) tcp_close(listenSock);
     if (ath.joinable()) ath.join();
     if (th.joinable()) th.join();
@@ -78,16 +87,14 @@ void Session::Close() {
     connected = false; ready = false; listening = false;
 }
 
-// [NET] I/O 스레드: 수신 → 프레이밍 파싱 → 핸들링, 송신 큐 비우기
 void Session::ioThread() {
     std::cout << "[NET] I/O thread started" << std::endl;
     auto startTime = std::chrono::steady_clock::now();
-    const auto CONNECTION_TIMEOUT = std::chrono::seconds(10); // 10초 타임아웃
+    const auto CONNECTION_TIMEOUT = std::chrono::seconds(10);
 
     while (!quit.load()) {
         bool hasActivity = false;
 
-        // 연결 타임아웃 체크
         if (!ready.load()) {
             auto elapsed = std::chrono::steady_clock::now() - startTime;
             if (elapsed > CONNECTION_TIMEOUT) {
@@ -98,7 +105,6 @@ void Session::ioThread() {
             }
         }
 
-        // 수신 (논블로킹으로 체크)
         size_t prevSize = recvBuf.size();
         if (tcp_recv_some(sock, recvBuf)) {
             if (recvBuf.size() > prevSize) {
@@ -118,7 +124,6 @@ void Session::ioThread() {
             break;
         }
 
-        // 송신
         {
             std::lock_guard<std::mutex> lk(sendMu);
             while (!sendQ.empty()) {
@@ -134,9 +139,8 @@ void Session::ioThread() {
             }
         }
 
-        // CPU 사용률 절약을 위한 짧은 대기 (호스트 부하 감소)
         if (!hasActivity) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));  // 1ms → 2ms로 증가
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
     std::cout << "[NET] I/O thread exiting" << std::endl;
@@ -164,13 +168,9 @@ void Session::acceptThread(uint16_t port)
     sock = client;
     connected = true;
     listening = false;
-
-    // I/O 스레드 먼저 시작
     th = std::thread(&Session::ioThread, this);
-
-    // 연결 직후 HELLO/SEED 송신
     {
-        std::vector<uint8_t> pl; le_write_u16(pl, 1); // proto ver 1
+        std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
         std::cout << "[NET] Queued HELLO message" << std::endl;
@@ -185,18 +185,15 @@ void Session::acceptThread(uint16_t port)
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
         std::cout << "[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")" << std::endl;
     }
-    // [FIX] 호스트는 SEED를 보낸 후 ready 상태가 됩니다
     ready = true;
     std::cout << "[NET] Host session is ready!" << std::endl;
 }
 
-// [NET] 수신 프레임 해석: HELLO/SEED/INPUT/ACK/PING/PONG
 void Session::handleFrame(const Frame& f) {
     switch (f.type) {
     case MsgType::HELLO: {
         std::cout << "[NET] Received HELLO message" << std::endl;
-        // HELLO 수신 시 간단 ACK 응답
-        std::vector<uint8_t> pl; pl.push_back(1); // ok
+        std::vector<uint8_t> pl; pl.push_back(1);
         auto fr = build_frame(MsgType::HELLO_ACK, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
         std::cout << "[NET] Queued HELLO_ACK response" << std::endl;
@@ -206,7 +203,6 @@ void Session::handleFrame(const Frame& f) {
     } break;
     case MsgType::SEED: {
         std::cout << "[NET] Received SEED message" << std::endl;
-        // 시드/시작틱/입력지연/역할 적용(합의 완료)
         if (f.payload.size() >= 8+4+1+1) {
             const uint8_t* p = f.payload.data();
             seedParams.seed = le_read_u64(p);
@@ -237,14 +233,12 @@ void Session::handleFrame(const Frame& f) {
                     if (tick > lastRemoteTick) lastRemoteTick = tick;
                 }
             }
-            // 간단 ACK(학습용): up_to_tick를 돌려보냄
             std::vector<uint8_t> ack; le_write_u32(ack, lastRemoteTick.load());
             auto fr = build_frame(MsgType::ACK, ack);
             std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
         }
     } break;
     case MsgType::ACK: {
-        // 학습용: 미사용
     } break;
     case MsgType::HASH: {
         if (f.payload.size() == 4+8) {
@@ -253,6 +247,13 @@ void Session::handleFrame(const Frame& f) {
             uint64_t h = le_read_u64(p+4);
             lastHashTickRemote.store(t);
             lastHashRemote.store(h);
+        }
+    } break;
+    case MsgType::GAME_OVER_CHOICE: {
+        if (f.payload.size() >= 1) {
+            uint8_t choice = f.payload[0];
+            remoteGameOverChoice.store(choice);
+            std::cout << "[NET] Received game over choice: " << (int)choice << std::endl;
         }
     } break;
     case MsgType::PING: {
@@ -270,6 +271,18 @@ bool Session::GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
     tick = lastHashTickRemote.load();
     hash = lastHashRemote.load();
     return tick != 0;
+}
+
+bool Session::GetRemoteGameOverChoice(GameOverChoice& outChoice) const {
+    uint8_t val = remoteGameOverChoice.load();
+    if (val == 0) return false;
+    outChoice = (GameOverChoice)val;
+    return true;
+}
+
+void Session::ClearGameOverChoices() {
+    localGameOverChoice.store(0);
+    remoteGameOverChoice.store(0);
 }
 
 }

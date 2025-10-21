@@ -65,6 +65,7 @@ public:
     uint32_t maxRemoteTick() const { return lastRemoteTick; }
     uint32_t maxLocalTick() const { return lastLocalTick; }
 
+    void ClearInputs();  // 재시작 시 입력 큐 초기화
     void Close();  // 세션 종료 (스레드 정리, 소켓 닫기)
 
 private:

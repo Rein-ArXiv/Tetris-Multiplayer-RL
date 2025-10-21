@@ -36,6 +36,8 @@ enum class GameOverState {
     ShowingGameOver,         // "GAME OVER" 표시, 선택 대기
     WaitingForRemote,        // 내 선택 완료, 상대 선택 대기
     ShowingDisagreement,     // 불일치 메시지 표시 (3초)
+    SendingNewSeed,          // 호스트: 새 SEED 전송 후 대기
+    WaitingForNewSeed,       // 클라이언트: 새 SEED 대기
     RestartingGame,          // 재시작 준비
     GoingToTitle,            // 타이틀 복귀
 };
@@ -77,16 +79,24 @@ int main(int argc, char** argv)
     // App mode: if no CLI, show menu; else jump directly
     AppMode app = netMode ? AppMode::Net : AppMode::Menu;
     int menuIndex = 0; // 0:Single, 1:Host, 2:Connect, 3:Exit
-    std::string connectText; bool connectError = false;
+    std::string connectText;
+    std::string connectErrorMsg;  // 오류 메시지 별도 저장
+    bool connectError = false;
     
     // If CLI selected netMode, start network immediately
     if (app == AppMode::Net) {
         if (isHost) {
             sessionSeed = ((uint64_t)GetTime()*1000000.0) + 0xC0FFEEULL;
             net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
-            if (!session.Host(hostPort, sp)) { TraceLog(LOG_ERROR, "Host failed"); }
+            if (!session.Host(hostPort, sp)) {
+                TraceLog(LOG_ERROR, "Host failed");
+                return 1;  // CLI 모드에서는 종료
+            }
         } else {
-            if (!session.Connect(hostIp, hostPort)) { TraceLog(LOG_ERROR, "Connect failed"); }
+            if (!session.Connect(hostIp, hostPort)) {
+                TraceLog(LOG_ERROR, "Connect failed");
+                return 1;  // CLI 모드에서는 종료
+            }
         }
     }
 
@@ -113,6 +123,8 @@ int main(int argc, char** argv)
     float gameOverTimer = 0.0f;
     const float GAME_OVER_TIMEOUT = 30.0f;
     const float DISAGREEMENT_COUNTDOWN = 3.0f;
+    uint64_t lastReceivedSeed = 0;  // 클라이언트: 새 시드 감지용
+    bool newSeedSent = false;  // 호스트: 새 시드 전송 플래그
 
     float accumulator = 0.0f;
     while(WindowShouldClose() == false)     // Press ESC or click X button
@@ -120,10 +132,18 @@ int main(int argc, char** argv)
         if (gameSingle) UpdateMusicStream(gameSingle->music);
         if (gameLocal) UpdateMusicStream(gameLocal->music);
 
+        // Delta time clamping: 창 이동/리사이즈로 인한 프레임 스파이크 방지
+        float deltaTime = GetFrameTime();
+        const float MAX_DELTA = 0.1f;  // 최대 100ms (10 FPS)
+        if (deltaTime > MAX_DELTA) {
+            std::cout << "[WARNING] Large delta time detected: " << deltaTime << "s, clamping to " << MAX_DELTA << "s" << std::endl;
+            deltaTime = MAX_DELTA;
+        }
+
         // Fixed-timestep simulation
         // [NET] Lockstep: 입력을 해당 틱에 모두 수신했다면 그 틱을 한 번만 진행합니다.
         // 본 로컬 버전에선 네트워크 큐 대신 로컬 키 입력을 즉시 적용합니다.
-        accumulator += GetFrameTime();
+        accumulator += deltaTime;
         while (accumulator >= SECONDS_PER_TICK)
         {
             uint8_t inputMask = SampleInput();
@@ -210,12 +230,20 @@ int main(int argc, char** argv)
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
                 } else if (menuIndex == 1) {
-                    isHost = true; netMode = true; app = AppMode::Net;
+                    isHost = true; netMode = true;
                     sessionSeed = ((uint64_t)GetTime()*1000000.0) + 0xC0FFEEULL;
                     net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
-                    if (!session.Host(hostPort, sp)) { TraceLog(LOG_ERROR, "Host failed"); }
+                    if (session.Host(hostPort, sp)) {
+                        app = AppMode::Net;
+                    } else {
+                        TraceLog(LOG_ERROR, "Host failed - port already in use?");
+                        // 실패 시 메뉴에 그대로 유지
+                    }
                 } else if (menuIndex == 2) {
-                    app = AppMode::ConnectInput; connectText.clear(); connectError = false;
+                    app = AppMode::ConnectInput;
+                    connectText.clear();
+                    connectError = false;
+                    connectErrorMsg.clear();
                 } else if (menuIndex == 3) {
                     CloseWindow(); return 0;
                 }
@@ -224,7 +252,10 @@ int main(int argc, char** argv)
             DrawTextEx(font, "Enter IP:port", {180, 200}, 40, 2, WHITE);
             DrawRectangle(180, 250, 360, 44, lightBlue);
             DrawTextEx(font, connectText.c_str(), {190, 256}, 32, 2, WHITE);
-            if (connectError) DrawTextEx(font, "Invalid endpoint", {180, 310}, 24, 2, red);
+            if (connectError) {
+                DrawTextEx(font, connectErrorMsg.c_str(), {180, 310}, 22, 2, red);
+            }
+            DrawTextEx(font, "[Q] Back to Menu", {220, 420}, 20, 2, GRAY);
             // Text input
             int ch = GetCharPressed();
             while (ch > 0) {
@@ -244,13 +275,13 @@ int main(int argc, char** argv)
                         if (hostPort == 0) throw std::exception();
                     } catch(...) {
                         connectError = true;
-                        connectText = "Invalid port number!";
+                        connectErrorMsg = "Invalid port number!";
                     }
 
                     // IP 주소 기본 형식 검사 - 오류가 없을 때만 진행
                     if (!connectError && (hostIp.empty() || hostIp.find_first_not_of("0123456789.") != std::string::npos)) {
                         connectError = true;
-                        connectText = "Invalid IP address format!";
+                        connectErrorMsg = "Invalid IP address format!";
                     }
 
                     // 오류가 없을 때만 연결 시도
@@ -261,7 +292,7 @@ int main(int argc, char** argv)
                         if (!session.Connect(hostIp, hostPort)) {
                             TraceLog(LOG_ERROR, "Connect failed to %s:%d", hostIp.c_str(), hostPort);
                             connectError = true;
-                            connectText = "Connection failed! Check IP/port/firewall";
+                            connectErrorMsg = "Connection failed! Check IP/port/firewall";
                             app = AppMode::ConnectInput;
                         }
                         else {
@@ -271,10 +302,10 @@ int main(int argc, char** argv)
                     }
                 } else {
                     connectError = true;
-                    connectText = "Format: IP:PORT (e.g. 192.168.1.100:7777)";
+                    connectErrorMsg = "Format: IP:PORT (e.g. 192.168.1.100:7777)";
                 }
             }
-            if (IsKeyPressed(KEY_ESCAPE)) { app = AppMode::Menu; }
+            if (IsKeyPressed(KEY_Q)) { app = AppMode::Menu; }
         }
 
         // Single board rendering
@@ -310,16 +341,19 @@ int main(int argc, char** argv)
         if (app == AppMode::Single && gameSingle && gameSingle->gameOver)
         {
             DrawTextEx(font, "GAME OVER", {120, 300}, 60, 2, WHITE);
-            DrawTextEx(font, "Press Any key To Restart", {85, 350}, 25, 2, WHITE);
-            // Restart if any key pressed
-            if (GetKeyPressed() != 0)
+            DrawTextEx(font, "[R] Restart", {200, 350}, 28, 2, GREEN);
+            DrawTextEx(font, "[Q] Go to Title", {180, 385}, 28, 2, YELLOW);
+
+            if (IsKeyPressed(KEY_R))
             {
                 gameSingle->gameOver = false;
-                // Reinitialize the game state deterministically (same seed)
-                // Alternatively, could reseed for variation
-                // [NET] 온라인에선 서버/호스트가 정한 시드/시작틱을 다시 적용해야 합니다.
                 gameSingle = std::make_unique<Game>(sessionSeed);
                 if (recording) replay.frames.clear();
+            }
+            else if (IsKeyPressed(KEY_Q))
+            {
+                gameSingle.reset();
+                app = AppMode::Menu;
             }
         }
         // [NET] 멀티 모드 그리기: 좌우 보드 (연결/준비 이전에도 레이아웃 표시)
@@ -350,7 +384,7 @@ int main(int argc, char** argv)
             if (gameOverState == GameOverState::ShowingGameOver) {
                 DrawTextEx(font, "GAME OVER", {220, 280}, 60, 2, WHITE);
                 DrawTextEx(font, "[R] Restart", {240, 350}, 28, 2, GREEN);
-                DrawTextEx(font, "[ESC] Go to Title", {200, 385}, 28, 2, YELLOW);
+                DrawTextEx(font, "[Q] Go to Title (immediate)", {170, 385}, 28, 2, YELLOW);
 
                 if (IsKeyPressed(KEY_R)) {
                     myGameOverChoice = net::GameOverChoice::Restart;
@@ -358,12 +392,10 @@ int main(int argc, char** argv)
                     gameOverState = GameOverState::WaitingForRemote;
                     gameOverTimer = 0.0f;
                     std::cout << "[GAME] Selected: Restart, waiting for opponent..." << std::endl;
-                } else if (IsKeyPressed(KEY_ESCAPE)) {
-                    myGameOverChoice = net::GameOverChoice::GoToTitle;
-                    session.SendGameOverChoice(myGameOverChoice);
-                    gameOverState = GameOverState::WaitingForRemote;
-                    gameOverTimer = 0.0f;
-                    std::cout << "[GAME] Selected: GoToTitle, waiting for opponent..." << std::endl;
+                } else if (IsKeyPressed(KEY_Q)) {
+                    // Q는 즉시 타이틀로 (상대방 대기 없이)
+                    std::cout << "[GAME] Immediately going to title (Q pressed)" << std::endl;
+                    gameOverState = GameOverState::GoingToTitle;
                 }
             }
             else if (gameOverState == GameOverState::WaitingForRemote) {
@@ -371,7 +403,7 @@ int main(int argc, char** argv)
                 DrawTextEx(font, "Waiting for opponent...", {180, 450}, 24, 2, GRAY);
 
                 // 타임아웃 시간 표시
-                gameOverTimer += GetFrameTime();
+                gameOverTimer += deltaTime;
                 int remaining = (int)(GAME_OVER_TIMEOUT - gameOverTimer);
                 if (remaining < 0) remaining = 0;
                 DrawTextEx(font, TextFormat("Timeout in %ds", remaining), {250, 480}, 20, 2, GRAY);
@@ -383,8 +415,17 @@ int main(int argc, char** argv)
                     if (myGameOverChoice == remoteChoice) {
                         // 양쪽 선택 일치
                         if (myGameOverChoice == net::GameOverChoice::Restart) {
-                            std::cout << "[GAME] Both chose Restart, restarting game..." << std::endl;
-                            gameOverState = GameOverState::RestartingGame;
+                            std::cout << "[GAME] Both chose Restart" << std::endl;
+                            if (session.params().role == net::Role::Host) {
+                                std::cout << "[GAME] Host: sending new seed..." << std::endl;
+                                gameOverTimer = 0.0f;  // 타이머 리셋
+                                gameOverState = GameOverState::SendingNewSeed;
+                            } else {
+                                std::cout << "[GAME] Client: waiting for new seed..." << std::endl;
+                                lastReceivedSeed = sessionSeed;  // 현재 시드 저장
+                                gameOverTimer = 0.0f;  // 타이머 리셋
+                                gameOverState = GameOverState::WaitingForNewSeed;
+                            }
                         } else {
                             std::cout << "[GAME] Both chose GoToTitle, returning to menu..." << std::endl;
                             gameOverState = GameOverState::GoingToTitle;
@@ -408,7 +449,7 @@ int main(int argc, char** argv)
                 DrawTextEx(font, "CHOICES DIFFER", {220, 300}, 40, 2, RED);
                 DrawTextEx(font, "Returning to title in...", {180, 360}, 28, 2, YELLOW);
 
-                gameOverTimer += GetFrameTime();
+                gameOverTimer += deltaTime;
                 int countdown = (int)(DISAGREEMENT_COUNTDOWN - gameOverTimer) + 1;
                 if (countdown < 0) countdown = 0;
                 DrawTextEx(font, TextFormat("%d", countdown), {350, 410}, 60, 2, WHITE);
@@ -418,33 +459,71 @@ int main(int argc, char** argv)
                     gameOverState = GameOverState::GoingToTitle;
                 }
             }
-            else if (gameOverState == GameOverState::RestartingGame) {
-                // 새 게임 시작 - 호스트가 새 시드 생성 및 전송
-                if (session.params().role == net::Role::Host) {
+            else if (gameOverState == GameOverState::SendingNewSeed) {
+                // 호스트: 새 시드 전송 및 대기
+                DrawTextEx(font, "GAME OVER", {220, 280}, 60, 2, WHITE);
+                DrawTextEx(font, "Sending new seed...", {180, 450}, 24, 2, GRAY);
+
+                // 새 시드 생성 및 전송 (최초 1회)
+                if (!newSeedSent) {
                     sessionSeed = ((uint64_t)GetTime() * 1000000.0) + rand();
                     session.SendNewSeed(sessionSeed);
-                    std::cout << "[GAME] Host sending new seed: 0x" << std::hex << sessionSeed << std::dec << std::endl;
-                } else {
-                    // 클라이언트는 호스트로부터 새 SEED 메시지를 받을 때까지 대기
-                    // SEED 메시지 수신 시 seedParams가 자동으로 업데이트됨 (session.cpp handleFrame에서 처리)
-                    sessionSeed = session.params().seed;
-                    std::cout << "[GAME] Client using received seed: 0x" << std::hex << sessionSeed << std::dec << std::endl;
+                    std::cout << "[GAME] Host generating and sending new seed: 0x" << std::hex << sessionSeed << std::dec << std::endl;
+                    newSeedSent = true;
                 }
 
-                // 게임 재시작
-                gameLocal = std::make_unique<Game>(sessionSeed);
-                gameRemote = std::make_unique<Game>(sessionSeed);
+                // 1.5초 대기 (Client가 받을 시간)
+                gameOverTimer += deltaTime;
+                if (gameOverTimer >= 1.5f) {
+                    std::cout << "[GAME] Host proceeding to restart" << std::endl;
+                    newSeedSent = false;  // 다음 재시작을 위해 리셋
+                    gameOverState = GameOverState::RestartingGame;
+                }
+            }
+            else if (gameOverState == GameOverState::WaitingForNewSeed) {
+                // 클라이언트: 호스트로부터 새 SEED 대기
+                DrawTextEx(font, "GAME OVER", {220, 280}, 60, 2, WHITE);
+                DrawTextEx(font, "Waiting for new seed...", {180, 450}, 24, 2, GRAY);
+
+                // SEED 메시지가 업데이트되었는지 확인
+                uint64_t newSeed = session.params().seed;
+
+                if (newSeed != lastReceivedSeed) {
+                    std::cout << "[GAME] Client received new seed from host: 0x" << std::hex << newSeed << std::dec << std::endl;
+                    lastReceivedSeed = newSeed;
+                    gameOverState = GameOverState::RestartingGame;
+                }
+
+                // 타임아웃 처리 (10초)
+                gameOverTimer += deltaTime;
+                if (gameOverTimer >= 10.0f) {
+                    std::cout << "[GAME] Timeout waiting for new seed" << std::endl;
+                    gameOverState = GameOverState::GoingToTitle;
+                }
+            }
+            else if (gameOverState == GameOverState::RestartingGame) {
+                // 새 게임 시작 (양쪽 모두 동일한 절차)
+                // 중요: 양쪽 모두 session.params().seed를 사용하여 동기화 보장
+                sessionSeed = session.params().seed;
+                std::cout << "[GAME] Restarting with seed: 0x" << std::hex << sessionSeed << std::dec << std::endl;
+
+                // 입력 큐 초기화 (중요: 이전 게임의 입력 제거)
+                session.ClearInputs();
                 localInputs.clear();
                 localTickNext = 0;
                 simTick = 0;
                 startDelay = session.params().start_tick;
+
+                // 게임 재시작
+                gameLocal = std::make_unique<Game>(sessionSeed);
+                gameRemote = std::make_unique<Game>(sessionSeed);
 
                 session.ClearGameOverChoices();
                 gameOverState = GameOverState::None;
                 std::cout << "[GAME] Game restarted successfully" << std::endl;
             }
             else if (gameOverState == GameOverState::GoingToTitle) {
-                // 타이틀로 복귀 (연결 유지 또는 종료)
+                // 타이틀로 복귀
                 std::cout << "[GAME] Returning to title menu" << std::endl;
 
                 // 게임 정리
@@ -454,8 +533,9 @@ int main(int argc, char** argv)
                 localTickNext = 0;
                 simTick = 0;
 
-                // 연결 유지 여부 결정 (현재는 유지)
-                // session.Close();  // 연결 종료하려면 주석 해제
+                // 연결 종료
+                session.Close();
+                ipCached = false;  // IP 캐시 리셋
 
                 session.ClearGameOverChoices();
                 gameOverState = GameOverState::None;
@@ -498,17 +578,22 @@ int main(int argc, char** argv)
                     }
                 }
                 DrawTextEx(font, "Waiting for connection...", {250, 250}, 24, 2, WHITE);
+                DrawTextEx(font, "[Q] Back to Menu", {240, 320}, 20, 2, GRAY);
             } else {
                 if (session.hasFailed()) {
                     DrawTextEx(font, "Connection Failed!", {200, 200}, 28, 2, RED);
                     DrawTextEx(font, "Check IP address and port", {160, 240}, 20, 2, GRAY);
-                    DrawTextEx(font, "Press ESC to go back", {200, 280}, 20, 2, WHITE);
+                    DrawTextEx(font, "[Q] Back to Menu", {220, 320}, 20, 2, YELLOW);
                 } else {
                     DrawTextEx(font, "Connecting...", {240, 220}, 28, 2, WHITE);
+                    DrawTextEx(font, "[Q] Cancel", {260, 320}, 20, 2, GRAY);
                 }
             }
-            DrawTextEx(font, "Press ESC to cancel", {220, 350}, 20, 2, GRAY);
-            if (IsKeyPressed(KEY_ESCAPE)) { session.Close(); app = AppMode::Menu; }
+            if (IsKeyPressed(KEY_Q)) {
+                session.Close();
+                ipCached = false;  // IP 캐시 리셋
+                app = AppMode::Menu;
+            }
         }
 
         // [NET] 상태 표시(HUD 최소): 연결 여부/시드/틱 등

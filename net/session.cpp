@@ -11,6 +11,20 @@ Session::~Session() { Close(); }
 
 bool Session::Host(uint16_t port, const SeedParams& sp) {
     if (listening) return false;
+
+    // Close() 이후 재사용을 위한 상태 리셋
+    quit = false;
+    connectionFailed = false;
+    connected = false;
+    ready = false;
+    {
+        std::lock_guard<std::mutex> lk(inMu);
+        remoteInputs.clear();
+    }
+    lastRemoteTick = 0;
+    lastLocalTick = 0;
+    recvBuf.clear();
+
     seedParams = sp;
     listening = true;
     ath = std::thread(&Session::acceptThread, this, port);
@@ -19,9 +33,25 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
 
 bool Session::Connect(const std::string& host, uint16_t port) {
     std::cout << "[NET] Connecting to " << host << ":" << port << std::endl;
+
+    // Close() 이후 재사용을 위한 상태 리셋
+    quit = false;
+    connectionFailed = false;
+    connected = false;
+    ready = false;
+    listening = false;
+    {
+        std::lock_guard<std::mutex> lk(inMu);
+        remoteInputs.clear();
+    }
+    lastRemoteTick = 0;
+    lastLocalTick = 0;
+    recvBuf.clear();
+
     sock = tcp_connect(host, port);
     if (!sock.valid()) {
         std::cout << "[NET] Failed to connect to " << host << ":" << port << std::endl;
+        connectionFailed = true;
         return false;
     }
     std::cout << "[NET] Connected to " << host << ":" << port << std::endl;
@@ -283,6 +313,14 @@ bool Session::GetRemoteGameOverChoice(GameOverChoice& outChoice) const {
 void Session::ClearGameOverChoices() {
     localGameOverChoice.store(0);
     remoteGameOverChoice.store(0);
+}
+
+void Session::ClearInputs() {
+    std::lock_guard<std::mutex> lk(inMu);
+    remoteInputs.clear();
+    lastRemoteTick.store(0);
+    lastLocalTick.store(0);
+    std::cout << "[NET] Cleared input queues for restart" << std::endl;
 }
 
 }

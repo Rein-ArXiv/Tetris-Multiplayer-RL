@@ -45,12 +45,6 @@ cmake --build . -j
 - **R** (게임 오버): 재시작
 - **Q** (게임 오버/취소): 타이틀/취소
 
-## 문서
-
-**완전 가이드**: [`DOCUMENTATION.md`](DOCUMENTATION.md) - 모든 기술 문서 통합본
-
-**개발 지침**: [`CLAUDE.md`](CLAUDE.md) - Claude Code용 프로젝트 가이드
-
 ## 프로젝트 구조
 
 ```

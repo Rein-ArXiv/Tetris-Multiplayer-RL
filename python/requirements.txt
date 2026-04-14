@@ -1,0 +1,11 @@
+# Local netbot + test runtime.
+#
+# These are the packages the Windows netbot client and the pytest suite need.
+# The native `tetris_py` module is built separately via CMake (see python/sim/README.md).
+numpy>=1.24
+torch>=2.1
+pytest>=7.4
+# Gymnasium is optional — only needed if you want common.env.TetrisPlacementEnv
+# (e.g. plugging the env into SB3 / CleanRL / LightZero). The netbot client
+# itself does not import it.
+gymnasium>=0.29

@@ -1,0 +1,108 @@
+==== seed 0x0000000000000001 ====
+seed=0x0000000000000001
+initial_hash=0xcc2d3effa32a9fd7
+step=000 mask=0x00 ticks=30 total_ticks=30 score=0 over=0 hash=0x8a23577169682cf6
+step=001 mask=0x01 ticks=1 total_ticks=31 score=0 over=0 hash=0x31f0f6dfb2adf666
+step=002 mask=0x01 ticks=1 total_ticks=32 score=0 over=0 hash=0x3928bfc345816a66
+step=003 mask=0x01 ticks=1 total_ticks=33 score=0 over=0 hash=0xf5ff525b37f2c096
+step=004 mask=0x08 ticks=1 total_ticks=34 score=0 over=0 hash=0x8c3eacaddbbc4f60
+step=005 mask=0x10 ticks=2 total_ticks=36 score=0 over=0 hash=0x3c78ecd28a5a0d2a
+step=006 mask=0x00 ticks=5 total_ticks=41 score=0 over=0 hash=0xd6def0c7d6102d67
+step=007 mask=0x02 ticks=1 total_ticks=42 score=0 over=0 hash=0xa21d2b1fd1ccdee3
+step=008 mask=0x02 ticks=1 total_ticks=43 score=0 over=0 hash=0x7399519f88e2d123
+step=009 mask=0x08 ticks=1 total_ticks=44 score=0 over=0 hash=0x7909874692fb8201
+step=010 mask=0x08 ticks=1 total_ticks=45 score=0 over=0 hash=0xd9e21d38b1a6c01f
+step=011 mask=0x04 ticks=1 total_ticks=46 score=0 over=0 hash=0x33f70a5f93dfc6a9
+step=012 mask=0x04 ticks=1 total_ticks=47 score=0 over=0 hash=0x92a575d9c20e9c5f
+step=013 mask=0x10 ticks=2 total_ticks=49 score=0 over=0 hash=0xe38eb01c3ff5f64a
+step=014 mask=0x00 ticks=10 total_ticks=59 score=0 over=0 hash=0x1daf49ee770cdc44
+step=015 mask=0x01 ticks=1 total_ticks=60 score=0 over=0 hash=0xcbf201bd6e39cb83
+step=016 mask=0x10 ticks=1 total_ticks=61 score=0 over=0 hash=0xc3a192b6f9b6c791
+step=017 mask=0x00 ticks=5 total_ticks=66 score=0 over=0 hash=0x69dbb2e67e682996
+step=018 mask=0x02 ticks=1 total_ticks=67 score=0 over=0 hash=0xbc79ad23f41bcf00
+step=019 mask=0x02 ticks=1 total_ticks=68 score=0 over=0 hash=0xc0fe98c5fda30e9e
+step=020 mask=0x02 ticks=1 total_ticks=69 score=0 over=0 hash=0x393226c1a90bcc7c
+step=021 mask=0x02 ticks=1 total_ticks=70 score=0 over=0 hash=0xd467e9c40db0ee9e
+step=022 mask=0x08 ticks=1 total_ticks=71 score=0 over=0 hash=0x5aa4bc097a56085e
+step=023 mask=0x10 ticks=1 total_ticks=72 score=0 over=0 hash=0x624325c85c6bfdb3
+step=024 mask=0x00 ticks=120 total_ticks=192 score=0 over=0 hash=0x89f7dcc721ae06b7
+step=025 mask=0x09 ticks=1 total_ticks=193 score=0 over=0 hash=0xaa6c5e9c1512df96
+step=026 mask=0x10 ticks=1 total_ticks=194 score=0 over=0 hash=0x3dec15a630087372
+step=027 mask=0x00 ticks=30 total_ticks=224 score=0 over=0 hash=0x541dfce2593548ef
+step=028 mask=0x0a ticks=1 total_ticks=225 score=0 over=0 hash=0x653b6554362f9b30
+step=029 mask=0x10 ticks=1 total_ticks=226 score=0 over=0 hash=0xdf49554ba09376e5
+step=030 mask=0x00 ticks=180 total_ticks=406 score=0 over=0 hash=0xd350ce8a41726d7b
+final_hash=0xd350ce8a41726d7b final_score=0 final_over=0
+
+==== seed 0x00000000deadbeef ====
+seed=0x00000000deadbeef
+initial_hash=0xd77933a6a8081b5c
+step=000 mask=0x00 ticks=30 total_ticks=30 score=0 over=0 hash=0x0aad37951829e5fd
+step=001 mask=0x01 ticks=1 total_ticks=31 score=0 over=0 hash=0x2830b7f62ea461ad
+step=002 mask=0x01 ticks=1 total_ticks=32 score=0 over=0 hash=0x31827bccf2c1d271
+step=003 mask=0x01 ticks=1 total_ticks=33 score=0 over=0 hash=0x4a4e45b117eb06d9
+step=004 mask=0x08 ticks=1 total_ticks=34 score=0 over=0 hash=0x105735131aceeb77
+step=005 mask=0x10 ticks=2 total_ticks=36 score=0 over=0 hash=0x35e9dab87f2e9477
+step=006 mask=0x00 ticks=5 total_ticks=41 score=0 over=0 hash=0x9a2ed8d8c0e7987a
+step=007 mask=0x02 ticks=1 total_ticks=42 score=0 over=0 hash=0xc043fd3c344812aa
+step=008 mask=0x02 ticks=1 total_ticks=43 score=0 over=0 hash=0xa504ad6e2cb9e336
+step=009 mask=0x08 ticks=1 total_ticks=44 score=0 over=0 hash=0xd856e621e780a5c8
+step=010 mask=0x08 ticks=1 total_ticks=45 score=0 over=0 hash=0x283ec2885375522a
+step=011 mask=0x04 ticks=1 total_ticks=46 score=0 over=0 hash=0xa6bebab443d6c1c8
+step=012 mask=0x04 ticks=1 total_ticks=47 score=0 over=0 hash=0x4aa2b1b34fe5198a
+step=013 mask=0x10 ticks=2 total_ticks=49 score=0 over=0 hash=0xe75a320ead376630
+step=014 mask=0x00 ticks=10 total_ticks=59 score=0 over=0 hash=0xb50e20798201f83e
+step=015 mask=0x01 ticks=1 total_ticks=60 score=0 over=0 hash=0xa41d37d5a72b15d3
+step=016 mask=0x10 ticks=1 total_ticks=61 score=0 over=0 hash=0x68f9eb84fc724892
+step=017 mask=0x00 ticks=5 total_ticks=66 score=0 over=0 hash=0xca94539283a25e95
+step=018 mask=0x02 ticks=1 total_ticks=67 score=0 over=0 hash=0xe657afe52aad8707
+step=019 mask=0x02 ticks=1 total_ticks=68 score=0 over=0 hash=0x7bbd13cfff27d6ed
+step=020 mask=0x02 ticks=1 total_ticks=69 score=0 over=0 hash=0x96eea4fdbdfde8d3
+step=021 mask=0x02 ticks=1 total_ticks=70 score=0 over=0 hash=0x2551db95f010b18d
+step=022 mask=0x08 ticks=1 total_ticks=71 score=0 over=0 hash=0x2f1077b240ab5571
+step=023 mask=0x10 ticks=1 total_ticks=72 score=0 over=0 hash=0x4f88360e8c7690fa
+step=024 mask=0x00 ticks=120 total_ticks=192 score=0 over=0 hash=0xbb4d4ebe3522619e
+step=025 mask=0x09 ticks=1 total_ticks=193 score=0 over=0 hash=0xc9d6328449edce3f
+step=026 mask=0x10 ticks=1 total_ticks=194 score=0 over=0 hash=0x4e997009e9991bce
+step=027 mask=0x00 ticks=30 total_ticks=224 score=0 over=0 hash=0x021111975d26fe93
+step=028 mask=0x0a ticks=1 total_ticks=225 score=0 over=0 hash=0x033fc60dc331d558
+step=029 mask=0x10 ticks=1 total_ticks=226 score=0 over=0 hash=0xb2e94782a8ba4938
+step=030 mask=0x00 ticks=180 total_ticks=406 score=0 over=0 hash=0x1e5064224b99fa02
+final_hash=0x1e5064224b99fa02 final_score=0 final_over=0
+
+==== seed 0x0c0ffee123456789 ====
+seed=0x0c0ffee123456789
+initial_hash=0x3b01a166645c727e
+step=000 mask=0x00 ticks=30 total_ticks=30 score=0 over=0 hash=0xdbddd34073fc2973
+step=001 mask=0x01 ticks=1 total_ticks=31 score=0 over=0 hash=0x95cf2c1ff318842f
+step=002 mask=0x01 ticks=1 total_ticks=32 score=0 over=0 hash=0x4c896f6ad5b29a5b
+step=003 mask=0x01 ticks=1 total_ticks=33 score=0 over=0 hash=0x8db196552bf178a7
+step=004 mask=0x08 ticks=1 total_ticks=34 score=0 over=0 hash=0x75893e61b986f95d
+step=005 mask=0x10 ticks=2 total_ticks=36 score=0 over=0 hash=0x6814384b192cc074
+step=006 mask=0x00 ticks=5 total_ticks=41 score=0 over=0 hash=0x0ba3c267e3553479
+step=007 mask=0x02 ticks=1 total_ticks=42 score=0 over=0 hash=0x6a5d33e05185e065
+step=008 mask=0x02 ticks=1 total_ticks=43 score=0 over=0 hash=0x7e3e4f08eb981fdd
+step=009 mask=0x08 ticks=1 total_ticks=44 score=0 over=0 hash=0xaf1f400df41fc147
+step=010 mask=0x08 ticks=1 total_ticks=45 score=0 over=0 hash=0x94d01a63553c6779
+step=011 mask=0x04 ticks=1 total_ticks=46 score=0 over=0 hash=0xef5cbc88b247d9af
+step=012 mask=0x04 ticks=1 total_ticks=47 score=0 over=0 hash=0x6f96908148b37ae1
+step=013 mask=0x10 ticks=2 total_ticks=49 score=0 over=0 hash=0x21bba983263fa16c
+step=014 mask=0x00 ticks=10 total_ticks=59 score=0 over=0 hash=0xd7f1ff36d765cb62
+step=015 mask=0x01 ticks=1 total_ticks=60 score=0 over=0 hash=0x24354f291fda8def
+step=016 mask=0x10 ticks=1 total_ticks=61 score=0 over=0 hash=0xb687ee053d51674d
+step=017 mask=0x00 ticks=5 total_ticks=66 score=0 over=0 hash=0x564283e228b22d0a
+step=018 mask=0x02 ticks=1 total_ticks=67 score=0 over=0 hash=0x909eda7f372a58f8
+step=019 mask=0x02 ticks=1 total_ticks=68 score=0 over=0 hash=0x4df937023b87eef6
+step=020 mask=0x02 ticks=1 total_ticks=69 score=0 over=0 hash=0x20417d3825e000a8
+step=021 mask=0x02 ticks=1 total_ticks=70 score=0 over=0 hash=0xc7f79707404b6c32
+step=022 mask=0x08 ticks=1 total_ticks=71 score=0 over=0 hash=0x26b24decb2ade8ca
+step=023 mask=0x10 ticks=1 total_ticks=72 score=0 over=0 hash=0x8f285f2ed4d2a787
+step=024 mask=0x00 ticks=120 total_ticks=192 score=0 over=0 hash=0x1d3130845b2c798b
+step=025 mask=0x09 ticks=1 total_ticks=193 score=0 over=0 hash=0x5ccf0c3f66a61aaa
+step=026 mask=0x10 ticks=1 total_ticks=194 score=0 over=0 hash=0xa61fce163b0d5882
+step=027 mask=0x00 ticks=30 total_ticks=224 score=0 over=0 hash=0xd7bf9534f5933ebf
+step=028 mask=0x0a ticks=1 total_ticks=225 score=0 over=0 hash=0xd10fa24f107f85be
+step=029 mask=0x10 ticks=1 total_ticks=226 score=0 over=0 hash=0x8e718abf23fdf50a
+step=030 mask=0x00 ticks=180 total_ticks=406 score=0 over=0 hash=0x0969734f576b7858
+final_hash=0x0969734f576b7858 final_score=0 final_over=0
+

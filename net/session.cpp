@@ -25,7 +25,7 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
     lastLocalTick = 0;
     recvBuf.clear();
 
-    seedParams = sp;
+    { std::lock_guard<std::mutex> lk(seedMu); seedParams = sp; }
     listening = true;
     ath = std::thread(&Session::acceptThread, this, port);
     return true;
@@ -90,12 +90,15 @@ void Session::SendGameOverChoice(GameOverChoice choice) {
 }
 
 void Session::SendNewSeed(uint64_t newSeed) {
-    seedParams.seed = newSeed;
     std::vector<uint8_t> pl;
-    le_write_u64(pl, seedParams.seed);
-    le_write_u32(pl, seedParams.start_tick);
-    pl.push_back(seedParams.input_delay);
-    pl.push_back((uint8_t)seedParams.role);
+    {
+        std::lock_guard<std::mutex> lk(seedMu);
+        seedParams.seed = newSeed;
+        le_write_u64(pl, seedParams.seed);
+        le_write_u32(pl, seedParams.start_tick);
+        pl.push_back(seedParams.input_delay);
+        pl.push_back((uint8_t)seedParams.role);
+    }
     auto fr = build_frame(MsgType::SEED, pl);
     std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
     std::cout << "[NET] Sent new seed: 0x" << std::hex << newSeed << std::dec << std::endl;
@@ -110,10 +113,12 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
 
 void Session::Close() {
     quit = true;
+    // 소켓을 먼저 닫아야 accept()/recv()에서 블로킹 중인 스레드가 해제됨
     if (listening && listenSock.valid()) tcp_close(listenSock);
+    if (sock.valid()) tcp_close(sock);
+    // 소켓 닫힌 후 스레드 join (블로킹 해제됨)
     if (ath.joinable()) ath.join();
     if (th.joinable()) th.join();
-    if (sock.valid()) tcp_close(sock);
     connected = false; ready = false; listening = false;
 }
 
@@ -154,18 +159,20 @@ void Session::ioThread() {
             break;
         }
 
-        {
-            std::lock_guard<std::mutex> lk(sendMu);
-            while (!sendQ.empty()) {
-                hasActivity = true;
-                auto& pkt = sendQ.front();
-                std::cout << "[NET] Sending packet of size " << pkt.size() << std::endl;
-                if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
-                    std::cout << "[NET] Send failed!" << std::endl;
-                    quit = true;
-                    break;
-                }
+        while (true) {
+            std::vector<uint8_t> pkt;
+            {
+                std::lock_guard<std::mutex> lk(sendMu);
+                if (sendQ.empty()) break;
+                pkt = std::move(sendQ.front());
                 sendQ.pop_front();
+                hasActivity = true;
+            }
+            // sendMu released before blocking I/O — main thread can SendInput() freely
+            if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
+                std::cout << "[NET] Send failed!" << std::endl;
+                quit = true;
+                break;
             }
         }
 
@@ -207,13 +214,19 @@ void Session::acceptThread(uint16_t port)
     }
     {
         std::vector<uint8_t> pl;
-        le_write_u64(pl, seedParams.seed);
-        le_write_u32(pl, seedParams.start_tick);
-        pl.push_back(seedParams.input_delay);
-        pl.push_back((uint8_t)seedParams.role);
+        {
+            std::lock_guard<std::mutex> lk(seedMu);
+            le_write_u64(pl, seedParams.seed);
+            le_write_u32(pl, seedParams.start_tick);
+            pl.push_back(seedParams.input_delay);
+            pl.push_back((uint8_t)seedParams.role);
+        }
         auto fr = build_frame(MsgType::SEED, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-        std::cout << "[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")" << std::endl;
+        {
+            std::lock_guard<std::mutex> lk2(seedMu);
+            std::cout << "[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")" << std::endl;
+        }
     }
     ready = true;
     std::cout << "[NET] Host session is ready!" << std::endl;
@@ -235,10 +248,13 @@ void Session::handleFrame(const Frame& f) {
         std::cout << "[NET] Received SEED message" << std::endl;
         if (f.payload.size() >= 8+4+1+1) {
             const uint8_t* p = f.payload.data();
+            std::lock_guard<std::mutex> lk(seedMu);
             seedParams.seed = le_read_u64(p);
             seedParams.start_tick = le_read_u32(p+8);
             seedParams.input_delay = p[12];
-            seedParams.role = (Role)p[13];
+            uint8_t rawRole = p[13];
+            seedParams.role = (rawRole == (uint8_t)Role::Host || rawRole == (uint8_t)Role::Peer)
+                            ? (Role)rawRole : Role::Peer;
             std::cout << "[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
                       << ", start_tick=" << std::dec << seedParams.start_tick
                       << ", input_delay=" << (int)seedParams.input_delay << std::endl;
@@ -249,10 +265,12 @@ void Session::handleFrame(const Frame& f) {
         }
     } break;
     case MsgType::INPUT: {
-        if (f.payload.size() >= 4+2) {
+        if (f.payload.size() >= 6) {
             const uint8_t* p = f.payload.data();
             uint32_t from = le_read_u32(p);
             uint16_t cnt = le_read_u16(p+4);
+            // 페이로드 크기 검증: 헤더(6) + cnt 바이트가 실제 크기 이내인지 확인
+            if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
             const uint8_t* arr = p+6;
             for (uint16_t i=0;i<cnt;++i) {
                 uint32_t tick = from + i;

@@ -11,7 +11,6 @@
 #include "framing.h"
 
 // P2P Lockstep 세션: 결정론적 멀티플레이어 (모든 입력 도착 시까지 시뮬레이션 대기)
-// 상세: DOCUMENTATION.md
 
 namespace net {
 
@@ -47,7 +46,10 @@ public:
     bool isReady() const { return ready; }
     bool isListening() const { return listening; }
     bool hasFailed() const { return connectionFailed; }
-    SeedParams params() const { return seedParams; }
+    SeedParams params() const {
+        std::lock_guard<std::mutex> lk(seedMu);
+        return seedParams;
+    }
 
     // 게임 데이터 송신
     void SendInput(uint32_t tick, uint8_t mask);
@@ -85,6 +87,7 @@ private:
     std::atomic<bool> listening{false};
     std::atomic<bool> connectionFailed{false};
 
+    mutable std::mutex seedMu;
     SeedParams seedParams{};
     std::vector<uint8_t> recvBuf;
 

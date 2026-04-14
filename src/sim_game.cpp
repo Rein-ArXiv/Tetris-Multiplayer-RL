@@ -1,0 +1,326 @@
+#include "sim_game.h"
+#include "../core/hash.h"
+
+// [NET/RL] This file is the single source of truth for game logic.
+// Ported line-for-line from src/game.cpp to preserve deterministic state hashes.
+// Do NOT add raylib/audio/rendering here — those belong in the Game wrapper.
+
+SimGame::SimGame(uint64_t seed)
+    : gameOver(false),
+      score(0),
+      rng(seed ? seed : 0xC0FFEE123456789ull),
+      gravityCounterTicks(0),
+      dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
+{
+    blocks = GetAllBlocks();
+    currentBlock = GetRandomBlock();
+    nextBlock = GetRandomBlock();
+    ghostBlock = MakeGhostBlock(currentBlock);
+    // sim_grid is zero-initialized by its default constructor.
+}
+
+SimBlock SimGame::GetRandomBlock()
+{
+    // [NET] '가방'이 비면 새 가방을 채웁니다. RNG 호출 횟수가 틱/입력 흐름에 따라
+    // 달라지지 않도록 주의 — 이 함수가 RNG의 유일한 호출 지점입니다.
+    if (blocks.empty())
+    {
+        blocks = GetAllBlocks();
+    }
+    int randomIndex = rng.nextUInt(static_cast<uint32_t>(blocks.size()));
+    SimBlock block = blocks[randomIndex];
+    blocks.erase(blocks.begin() + randomIndex);
+    return block;
+}
+
+std::vector<SimBlock> SimGame::GetAllBlocks() const
+{
+    // Order MUST match original Game::GetAllBlocks exactly: I,J,L,O,S,T,Z.
+    // The order determines which id is at which vector index, and the RNG
+    // selects by index — changing order breaks state hash parity.
+    return {SimIBlock(), SimJBlock(), SimLBlock(), SimOBlock(), SimSBlock(), SimTBlock(), SimZBlock()};
+}
+
+SimBlock SimGame::MakeGhostBlock(const SimBlock& block) const
+{
+    SimBlock ghost = block;
+    ghost.id = 8;
+    return ghost;
+}
+
+void SimGame::SubmitInput(uint8_t inputMask)
+{
+    if (gameOver) return;
+
+    if (hasInput(inputMask, INPUT_LEFT))   MoveBlockLeft();
+    if (hasInput(inputMask, INPUT_RIGHT))  MoveBlockRight();
+    if (hasInput(inputMask, INPUT_DOWN))   MoveBlockDown();
+    if (hasInput(inputMask, INPUT_ROTATE)) RotateBlockImpl();
+    if (hasInput(inputMask, INPUT_DROP))   MoveBlockDrop();
+
+    DropExpectation();
+}
+
+void SimGame::Tick()
+{
+    if (gameOver) return;
+    gravityCounterTicks++;
+    if (gravityCounterTicks >= dropIntervalTicks)
+    {
+        gravityCounterTicks = 0;
+        MoveBlockDown();
+    }
+}
+
+void SimGame::MoveBlockLeft()
+{
+    if (gameOver) return;
+    currentBlock.Move(0, -1);
+    if (IsBlockOutside(currentBlock) || BlockFits(currentBlock) == false)
+    {
+        currentBlock.Move(0, 1);
+    }
+    else
+    {
+        ghostBlock = MakeGhostBlock(currentBlock);
+    }
+}
+
+void SimGame::MoveBlockRight()
+{
+    if (gameOver) return;
+    currentBlock.Move(0, 1);
+    if (IsBlockOutside(currentBlock) || BlockFits(currentBlock) == false)
+    {
+        currentBlock.Move(0, -1);
+    }
+    else
+    {
+        ghostBlock = MakeGhostBlock(currentBlock);
+    }
+}
+
+void SimGame::MoveBlockDown()
+{
+    if (gameOver) return;
+    currentBlock.Move(1, 0);
+    if (IsBlockOutside(currentBlock) || BlockFits(currentBlock) == false)
+    {
+        currentBlock.Move(-1, 0);
+        LockBlock();
+    }
+}
+
+void SimGame::MoveBlockDrop()
+{
+    if (gameOver) return;
+    while (IsBlockOutside(currentBlock) == false && BlockFits(currentBlock) == true)
+    {
+        currentBlock.Move(1, 0);
+    }
+    currentBlock.Move(-1, 0);
+    LockBlock();
+}
+
+void SimGame::DropExpectation()
+{
+    if (gameOver) return;
+    while (IsBlockOutside(ghostBlock) == false && BlockFits(ghostBlock) == true)
+    {
+        ghostBlock.Move(1, 0);
+    }
+    ghostBlock.Move(-1, 0);
+}
+
+bool SimGame::IsBlockOutside(const SimBlock& block) const
+{
+    std::vector<Position> tiles = block.GetCellPositions();
+    for (const Position& item : tiles)
+    {
+        if (sim_grid.IsCellOutside(item.row, item.column))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SimGame::RotateBlockImpl()
+{
+    if (gameOver) return;
+    currentBlock.Rotate();
+    if (IsBlockOutside(currentBlock) == true || BlockFits(currentBlock) == false)
+    {
+        currentBlock.UndoRotation();
+    }
+    else
+    {
+        rotateSoundEvent = true;
+        ghostBlock = MakeGhostBlock(currentBlock);
+    }
+}
+
+void SimGame::LockBlock()
+{
+    std::vector<Position> tiles = currentBlock.GetCellPositions();
+    for (const Position& item : tiles)
+    {
+        sim_grid.grid[item.row][item.column] = currentBlock.id;
+    }
+    currentBlock = nextBlock;
+    ghostBlock = MakeGhostBlock(currentBlock);
+    if (BlockFits(currentBlock) == false)
+    {
+        gameOver = true;
+    }
+
+    nextBlock = GetRandomBlock();
+    int rowsCleared = sim_grid.ClearFullRows();
+    if (rowsCleared > 0)
+    {
+        clearSoundEvent = true;
+        UpdateScore(rowsCleared, 0);
+        // [NET] 대전 규칙: rowsCleared>0이면 상대에게 Garbage 전송 이벤트를 큐에 넣는 훅이 들어갑니다.
+        // ex) OnLinesCleared(rowsCleared) → NetSession.Enqueue(GARBAGE, rowsCleared)
+    }
+}
+
+bool SimGame::BlockFits(const SimBlock& block) const
+{
+    std::vector<Position> tiles = block.GetCellPositions();
+    for (const Position& item : tiles)
+    {
+        if (sim_grid.IsCellEmpty(item.row, item.column) == false)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void SimGame::UpdateScore(int linesCleared, int levelUp)
+{
+    switch (linesCleared)
+    {
+    case 1: score += 100;  break;
+    case 2: score += 300;  break;
+    case 3: score += 600;  break;
+    case 4: score += 1000; break;
+    default: break;
+    }
+    score += levelUp * 1000;
+}
+
+uint64_t SimGame::StateHash() const
+{
+    uint64_t h = 14695981039346656037ull;
+    // Grid bytes — layout must match old Grid::grid exactly.
+    h = fnv1a64(&sim_grid.grid[0][0], sizeof(sim_grid.grid), h);
+    // Current block state
+    h = fnv1a64_value(currentBlock.id, h);
+    int curRot = currentBlock.GetRotationState();
+    int curRow = currentBlock.GetRowOffset();
+    int curCol = currentBlock.GetColumnOffset();
+    h = fnv1a64_value(curRot, h);
+    h = fnv1a64_value(curRow, h);
+    h = fnv1a64_value(curCol, h);
+    // Next block state
+    h = fnv1a64_value(nextBlock.id, h);
+    int nxtRot = nextBlock.GetRotationState();
+    int nxtRow = nextBlock.GetRowOffset();
+    int nxtCol = nextBlock.GetColumnOffset();
+    h = fnv1a64_value(nxtRot, h);
+    h = fnv1a64_value(nxtRow, h);
+    h = fnv1a64_value(nxtCol, h);
+    // RNG / score / flags / gravity
+    uint64_t rngState = rng.getState();
+    h = fnv1a64_value(rngState, h);
+    h = fnv1a64_value(score, h);
+    int over = gameOver ? 1 : 0;
+    h = fnv1a64_value(over, h);
+    h = fnv1a64_value(gravityCounterTicks, h);
+    h = fnv1a64_value(dropIntervalTicks, h);
+    return h;
+}
+
+// ============================================================================
+// Placement-level API (for RL training — not exercised by the lockstep game).
+// ============================================================================
+
+std::vector<SimGame::Placement> SimGame::LegalPlacements() const
+{
+    std::vector<Placement> out;
+    if (gameOver) return out;
+
+    const int numRotations = static_cast<int>(currentBlock.cells.size());
+    for (int rot = 0; rot < numRotations; rot++)
+    {
+        for (int col = 0; col < SimGrid::kCols; col++)
+        {
+            // Start from a fresh copy of the live piece.
+            SimBlock test = currentBlock;
+            // Rotate in place to the target rotation.
+            while (test.rotationState != rot)
+            {
+                test.Rotate();
+            }
+            // Slide horizontally to the target column offset.
+            int delta = col - test.columnOffset;
+            test.columnOffset += delta;
+            // Reject if the rotated & translated piece is invalid at spawn height.
+            if (IsBlockOutside(test) || !BlockFits(test)) continue;
+            // Hard drop simulation.
+            while (IsBlockOutside(test) == false && BlockFits(test) == true)
+            {
+                test.rowOffset++;
+            }
+            test.rowOffset--;
+            if (IsBlockOutside(test) || !BlockFits(test)) continue;
+            out.push_back({col, rot});
+        }
+    }
+    return out;
+}
+
+int SimGame::ApplyPlacement(int col, int rot)
+{
+    if (gameOver) return -1;
+
+    // Build target configuration from the live currentBlock.
+    SimBlock target = currentBlock;
+    const int numRotations = static_cast<int>(target.cells.size());
+    if (rot < 0 || rot >= numRotations) return -1;
+    while (target.rotationState != rot)
+    {
+        target.Rotate();
+    }
+    int delta = col - target.columnOffset;
+    target.columnOffset += delta;
+    if (IsBlockOutside(target) || !BlockFits(target)) return -1;
+    // Hard drop
+    while (IsBlockOutside(target) == false && BlockFits(target) == true)
+    {
+        target.rowOffset++;
+    }
+    target.rowOffset--;
+    if (IsBlockOutside(target) || !BlockFits(target)) return -1;
+
+    // Snapshot the score before lock so we can compute cleared lines from delta.
+    int scoreBefore = score;
+
+    // Commit: overwrite currentBlock with the landed configuration and lock.
+    currentBlock = target;
+    LockBlock();
+
+    // Derive cleared-line count from score delta (cheap; exact match with UpdateScore).
+    int scoreDelta = score - scoreBefore;
+    switch (scoreDelta)
+    {
+    case 0:    return 0;
+    case 100:  return 1;
+    case 300:  return 2;
+    case 600:  return 3;
+    case 1000: return 4;
+    default:   return 0; // unexpected — treat as no lines cleared
+    }
+}

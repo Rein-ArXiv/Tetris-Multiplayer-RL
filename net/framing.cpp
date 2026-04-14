@@ -51,14 +51,18 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
     size_t offset = 0;
     while (true) {
         // 길이(u16)를 읽을 만큼 데이터가 준비되었는지 확인
-        if (streamBuf.size() - offset < LEN_FIELD) break;
+        // 주의: size_t는 unsigned이므로 뺄셈 대신 덧셈으로 비교 (언더플로 방지)
+        if (offset + LEN_FIELD > streamBuf.size()) break;
 
         // LEN = TYPE + PAYLOAD 길이
         const uint16_t len = le_read_u16(&streamBuf[offset]);
 
         // 전체 프레임이 모였는지 확인: len 필드 + 본문(len) + 체크섬
         const size_t need = LEN_FIELD + static_cast<size_t>(len) + CHECKSUM_FIELD;
-        if (streamBuf.size() - offset < need) break;
+        if (offset + need > streamBuf.size()) break;
+
+        // len=0 이면 TYPE 바이트조차 없는 잘못된 프레임 — 스킵
+        if (len < TYPE_FIELD) { offset += need; continue; }
 
         // TYPE 바이트와 PAYLOAD 범위 계산
         const uint8_t type = streamBuf[offset + LEN_FIELD];

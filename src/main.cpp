@@ -139,60 +139,7 @@ static bool parse_port(const std::string& s, uint16_t& port_out)
     port_out = (uint16_t)p; return true;
 }
 
-enum class AppMode { Menu, ConnectInput, Single, Net };
-
-// 릴레이 서버에 큐 등록 → MATCH_FOUND 수신 → 소켓/역할/시드 반환.
-// 실패 시 !sock.valid().
-struct QueueResult {
-    net::TcpSocket sock{};
-    net::Role      role{net::Role::Peer};
-    uint64_t       seed{0};
-};
-
-static QueueResult join_queue(const std::string& host, uint16_t port)
-{
-    QueueResult r{};
-    net::TcpSocket s = net::tcp_connect(host, port);
-    if (!s.valid()) {
-        std::cout << "[QUEUE] Failed to connect to relay " << host << ":" << port << "\n";
-        return r;
-    }
-    std::cout << "[QUEUE] Connected to relay " << host << ":" << port << ", sending QUEUE_JOIN\n";
-
-    auto join = net::build_frame(net::MsgType::QUEUE_JOIN, {});
-    if (!net::tcp_send_all(s, join.data(), join.size())) {
-        std::cout << "[QUEUE] Failed to send QUEUE_JOIN\n";
-        net::tcp_close(s); return r;
-    }
-
-    std::vector<uint8_t> buf; buf.reserve(32);
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (!net::tcp_recv_some(s, buf)) {
-            std::cout << "[QUEUE] Relay disconnected before MATCH_FOUND\n";
-            net::tcp_close(s); return r;
-        }
-        std::vector<net::Frame> frames;
-        net::parse_frames(buf, frames);
-        for (auto& f : frames) {
-            if (f.type == net::MsgType::MATCH_FOUND && f.payload.size() >= 9) {
-                uint8_t roleByte = f.payload[0];
-                uint64_t seed    = net::le_read_u64(f.payload.data() + 1);
-                r.sock = s;
-                r.role = (roleByte == (uint8_t)net::Role::Host) ? net::Role::Host : net::Role::Peer;
-                r.seed = seed;
-                std::cout << "[QUEUE] MATCH_FOUND role="
-                          << (r.role == net::Role::Host ? "HOST" : "GUEST")
-                          << " seed=0x" << std::hex << seed << std::dec << "\n";
-                return r;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    std::cout << "[QUEUE] Timeout waiting for MATCH_FOUND\n";
-    net::tcp_close(s);
-    return r;
-}
+enum class AppMode { Menu, ConnectInput, Single, BotSingle, Net };
 
 enum class GameOverState {
     None,
@@ -278,14 +225,10 @@ int main(int argc, char** argv)
 
     if (app == AppMode::Net) {
         if (queueMode) {
-            QueueResult qr = join_queue(queueHost, queuePort);
-            if (!qr.sock.valid()) {
-                fprintf(stderr, "Queue join failed\n"); return 1;
-            }
-            sessionSeed = qr.seed;
-            isHost = (qr.role == net::Role::Host);
-            if (!session.Adopt(qr.sock, qr.role, qr.seed, startDelay, inputDelay)) {
-                fprintf(stderr, "Session::Adopt failed\n"); return 1;
+            // 비동기 큐잉 — 즉시 리턴, 매칭 대기 중에도 렌더 루프는 계속 돈다.
+            // isReady() 가 true 가 되면 seed/role 이 session.params() 에 채워져 있다.
+            if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay)) {
+                fprintf(stderr, "Queue join failed to start\n"); return 1;
             }
         } else if (isHost) {
             sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + 0xC0FFEEULL;
@@ -401,27 +344,48 @@ int main(int argc, char** argv)
         if (app == AppMode::Menu)
         {
             draw_text("TETRIS", 220, 100, 60, WHITE);
-            const char* items[] = {"Single Player", "Host (port 7777)",
-                                   "Connect (enter IP:port)", "Exit"};
-            for (int i = 0; i < 4; ++i)
+            // 봇 추론(ONNX) 경로는 아직 연결 전 — Plan Section C 에서 `model/policy.onnx`
+            // 가 함께 올라올 때까지는 "Single vs Bot" 을 회색 비활성 표시로 둔다.
+            const bool botAvailable = false;
+            constexpr Color DISABLED = {70, 70, 70, 255};
+            const char* items[] = {
+                "Single Player",
+                "Single vs Bot",
+                "Host (port 7777)",
+                "Connect (enter IP:port)",
+                "Exit",
+            };
+            constexpr int kMenuCount = 5;
+            for (int i = 0; i < kMenuCount; ++i)
             {
                 Color c = (i == menuIndex) ? WHITE : GRAY;
+                if (i == 1 && !botAvailable) c = DISABLED;
                 draw_text(items[i], 180, 220 + i * 40, 32, c);
             }
-            if (platform_key_pressed(PKEY_DOWN)) menuIndex = (menuIndex + 1) % 4;
-            if (platform_key_pressed(PKEY_UP))   menuIndex = (menuIndex + 3) % 4;
+            if (!botAvailable && menuIndex == 1) {
+                draw_text("(model/policy.onnx not found)", 180, 220 + 1 * 40 + 28, 14, DISABLED);
+            }
+            if (platform_key_pressed(PKEY_DOWN)) menuIndex = (menuIndex + 1) % kMenuCount;
+            if (platform_key_pressed(PKEY_UP))   menuIndex = (menuIndex + kMenuCount - 1) % kMenuCount;
             if (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE))
             {
                 if (menuIndex == 0) {
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
                 } else if (menuIndex == 1) {
+                    if (botAvailable) {
+                        app = AppMode::BotSingle;
+                        gameSingle = std::make_unique<Game>(sessionSeed);
+                        // 우측 보드(gameLocal/gameRemote 재사용 예정)는 Section C 에서 합류.
+                    }
+                    // 비활성 상태에선 Enter 를 흡수(이동/사운드 없음).
+                } else if (menuIndex == 2) {
                     isHost = true; netMode = true;
                     sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + 0xC0FFEEULL;
                     net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
                     if (session.Host(hostPort, sp)) app = AppMode::Net;
                     else fprintf(stderr, "Host failed - port already in use?\n");
-                } else if (menuIndex == 2) {
+                } else if (menuIndex == 3) {
                     app = AppMode::ConnectInput;
                     connectText.clear(); connectError = false; connectErrorMsg.clear();
                 } else {
@@ -675,7 +639,24 @@ int main(int argc, char** argv)
         // ── 멀티 대기 화면 ─────────────────────────────────────────────────────
         if (app == AppMode::Net && (!gameLocal || !gameRemote))
         {
-            if (isHost)
+            if (queueMode)
+            {
+                if (session.hasFailed()) {
+                    draw_text("Matchmaking failed",            190, 200, 28, RED);
+                    draw_text("(relay unreachable or timeout)", 140, 240, 18, GRAY);
+                    draw_text("[Q] Back to Menu",              220, 320, 20, YELLOW);
+                } else if (!session.isConnected()) {
+                    draw_text(fmt_buf("Connecting to relay %s:%u...",
+                                       queueHost.c_str(), (unsigned)queuePort),
+                              80, 220, 22, WHITE);
+                    draw_text("[Q] Cancel", 260, 320, 20, GRAY);
+                } else {
+                    draw_text("Searching for opponent...", 160, 220, 26, WHITE);
+                    draw_text("(connected, waiting for match)", 150, 250, 16, GRAY);
+                    draw_text("[Q] Cancel", 260, 320, 20, GRAY);
+                }
+            }
+            else if (isHost)
             {
                 if (!localIpDone) {
                     cachedLocalIP = net::get_local_ip(); localIpDone = true;
@@ -717,7 +698,9 @@ int main(int argc, char** argv)
             }
             if (platform_key_pressed(PKEY_Q))
             {
+                if (queueMode) session.QueueCancel();
                 session.Close();
+                queueMode = false; netMode = false;
                 localIpDone = false; publicIpLaunched = false;
                 cachedLocalIP.clear(); cachedPublicIP.clear();
                 app = AppMode::Menu;

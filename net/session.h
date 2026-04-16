@@ -48,6 +48,17 @@ public:
     bool Adopt(TcpSocket socket, Role role, uint64_t seed,
                uint32_t start_tick = 120, uint8_t input_delay = 2);
 
+    // 비동기 릴레이 큐잉 — 메인 스레드를 블록하지 않는다.
+    //   1) tcp_connect + QUEUE_JOIN 송신
+    //   2) MATCH_FOUND 대기 (최대 5분, 내부 큐 스레드)
+    //   3) 수신 시 seedParams 채우고 ioThread 시작 → ready=true
+    // 호출 즉시 true 리턴 (큐 스레드가 기동된 경우). 연결 자체가 실패하면 false.
+    // 호출부는 isReady() / hasFailed() 로 진행 상태를 폴링한다.
+    bool QueueJoin(const std::string& host, uint16_t port,
+                   uint32_t start_tick = 120, uint8_t input_delay = 2);
+    // 매칭 대기 중 취소. 소켓을 닫아 큐 스레드를 즉시 해제.
+    void QueueCancel();
+
     // 세션 상태
     bool isConnected() const { return connected; }
     bool isReady() const { return ready; }
@@ -81,12 +92,15 @@ private:
     void ioThread();  // I/O 루프 (송수신, 메시지 파싱)
     void handleFrame(const Frame& f);  // 메시지 처리
     void acceptThread(uint16_t port);  // 호스트 전용: 연결 대기
+    void queueThread(std::string host, uint16_t port,
+                     uint32_t start_tick, uint8_t input_delay);  // 릴레이 큐잉 전용
 
     TcpSocket sock{};
     TcpSocket listenSock{};
 
     std::thread th;
     std::thread ath;
+    std::thread qth;
 
     std::atomic<bool> quit{false};
     std::atomic<bool> connected{false};

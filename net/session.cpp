@@ -155,8 +155,102 @@ void Session::Close() {
     if (sock.valid()) tcp_close(sock);
     // 소켓 닫힌 후 스레드 join (블로킹 해제됨)
     if (ath.joinable()) ath.join();
+    if (qth.joinable()) qth.join();
     if (th.joinable()) th.join();
     connected = false; ready = false; listening = false;
+}
+
+bool Session::QueueJoin(const std::string& host, uint16_t port,
+                        uint32_t start_tick, uint8_t input_delay) {
+    if (qth.joinable() || th.joinable() || ath.joinable()) return false;
+
+    // Close() 이후 재사용을 위한 상태 리셋
+    quit = false;
+    connectionFailed = false;
+    connected = false;
+    ready = false;
+    listening = false;
+    {
+        std::lock_guard<std::mutex> lk(inMu);
+        remoteInputs.clear();
+    }
+    lastRemoteTick = 0;
+    lastLocalTick = 0;
+    recvBuf.clear();
+
+    qth = std::thread(&Session::queueThread, this, host, port, start_tick, input_delay);
+    return true;
+}
+
+void Session::QueueCancel() {
+    // 큐잉 중에만 호출 — sock 을 닫아 recv 블록을 해제, quit 로 루프 종료.
+    quit = true;
+    if (sock.valid()) tcp_close(sock);
+    // qth.join() 은 Close() 에서 처리 — 여기선 블록 없이 신호만 보낸다.
+}
+
+void Session::queueThread(std::string host, uint16_t port,
+                          uint32_t start_tick, uint8_t input_delay) {
+    std::cout << "[QUEUE] Connecting to relay " << host << ":" << port << std::endl;
+    TcpSocket s = tcp_connect(host, port);
+    if (!s.valid()) {
+        std::cout << "[QUEUE] Failed to connect to relay" << std::endl;
+        connectionFailed = true;
+        return;
+    }
+    sock = s;
+    connected = true;
+    std::cout << "[QUEUE] Connected, sending QUEUE_JOIN" << std::endl;
+
+    auto join = build_frame(MsgType::QUEUE_JOIN, {});
+    if (!tcp_send_all(sock, join.data(), join.size())) {
+        std::cout << "[QUEUE] Failed to send QUEUE_JOIN" << std::endl;
+        connectionFailed = true; quit = true;
+        return;
+    }
+
+    // MATCH_FOUND 대기 — 최대 5분, 2ms 폴링.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+    std::vector<uint8_t> buf;
+    while (!quit.load()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::cout << "[QUEUE] Timeout waiting for MATCH_FOUND" << std::endl;
+            connectionFailed = true; quit = true;
+            return;
+        }
+        if (!tcp_recv_some(sock, buf)) {
+            std::cout << "[QUEUE] Relay disconnected before MATCH_FOUND" << std::endl;
+            connectionFailed = true; quit = true;
+            return;
+        }
+        std::vector<Frame> frames;
+        parse_frames(buf, frames);
+        for (auto& f : frames) {
+            if (f.type == MsgType::MATCH_FOUND && f.payload.size() >= 9) {
+                uint8_t roleByte = f.payload[0];
+                uint64_t seed = le_read_u64(f.payload.data() + 1);
+                Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
+                {
+                    std::lock_guard<std::mutex> lk(seedMu);
+                    seedParams.seed = seed;
+                    seedParams.start_tick = start_tick;
+                    seedParams.input_delay = input_delay;
+                    seedParams.role = role;
+                }
+                std::cout << "[QUEUE] MATCH_FOUND role="
+                          << (role == Role::Host ? "HOST" : "GUEST")
+                          << " seed=0x" << std::hex << seed << std::dec << std::endl;
+                // ioThread 로 핸드오프 — 이미 수신된 recvBuf 잔여 바이트는 비움.
+                recvBuf.clear();
+                ready = true;
+                th = std::thread(&Session::ioThread, this);
+                return;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    // quit 로 나온 경우 (QueueCancel)
+    std::cout << "[QUEUE] Cancelled" << std::endl;
 }
 
 void Session::ioThread() {

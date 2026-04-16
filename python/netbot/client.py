@@ -166,30 +166,35 @@ def run() -> int:
         # Accumulator-style next deadline -> drift-free 60Hz pacing.
         next_deadline += TICK_PERIOD
 
-        # ---- Decide this tick's input ---------------------------------
+        # ---- Start-delay gate -----------------------------------------
+        # C++ src/main.cpp:309 과 동일 규약 — start_delay 가 살아 있는 동안에는
+        # INPUT 프레임을 아예 보내지 않고 local_tick_next 도 올리지 않는다.
+        # 이전 코드는 INPUT_NONE 을 send_input() 해서 상대의 input_delay 만큼
+        # 뒤늦게 적용되었고, 두 사이드의 틱 시작점이 어긋날 여지가 있었다.
         if start_delay > 0:
-            mask = INPUT_NONE
             start_delay -= 1
-        else:
-            cur_id = sim_self.current_block_id()
-            if cur_id != last_piece_id or not pending_inputs:
-                col, rot = runner.select_placement(sim_self)
-                if col < 0:
-                    fb = fallback_placement(sim_self)
-                    if fb is None:
-                        log.warning("No legal placements available")
-                        col, rot = 0, 0
-                    else:
-                        col, rot = fb
-                seq = expand_placement(
-                    sim_self.current_col(),
-                    sim_self.current_rotation(),
-                    col,
-                    rot,
-                )
-                pending_inputs = deque(seq)
-                last_piece_id = cur_id
-            mask = pending_inputs.popleft() if pending_inputs else INPUT_NONE
+            continue
+
+        # ---- Decide this tick's input ---------------------------------
+        cur_id = sim_self.current_block_id()
+        if cur_id != last_piece_id or not pending_inputs:
+            col, rot = runner.select_placement(sim_self)
+            if col < 0:
+                fb = fallback_placement(sim_self)
+                if fb is None:
+                    log.warning("No legal placements available")
+                    col, rot = 0, 0
+                else:
+                    col, rot = fb
+            seq = expand_placement(
+                sim_self.current_col(),
+                sim_self.current_rotation(),
+                col,
+                rot,
+            )
+            pending_inputs = deque(seq)
+            last_piece_id = cur_id
+        mask = pending_inputs.popleft() if pending_inputs else INPUT_NONE
 
         sess.send_input(local_tick_next, mask)
         local_tick_next += 1

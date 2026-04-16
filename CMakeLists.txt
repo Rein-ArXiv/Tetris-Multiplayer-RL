@@ -69,6 +69,7 @@ if (TETRIS_BUILD_GAME)
         net/framing.cpp
         net/session.cpp
         renderer/renderer.cpp
+        renderer/shake.cpp
     )
 
     set(TETRIS_GAME_HEADERS
@@ -82,6 +83,7 @@ if (TETRIS_BUILD_GAME)
         platform/platform.h
         renderer/renderer.h
         renderer/shaders.h
+        renderer/shake.h
         audio/audio.h
     )
 

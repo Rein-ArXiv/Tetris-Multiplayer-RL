@@ -64,6 +64,14 @@ public:
     uint64_t StateHash() const;
     uint64_t RngState() const { return rng.getState(); }
 
+    // ---- Combat API (Section I) ----
+    // attackLinesSent: 세션 전체 누적 공격 라인 수. 외부에서 델타를 뽑아
+    //   상대 SimGame::AddPendingGarbage 로 전달한다. 네트워크 프레임 없음.
+    // pendingGarbage: 다음 LockBlock 시점에 하단으로 삽입될 가비지 행 수.
+    int AttackLinesSent() const { return attackLinesSent; }
+    int PendingGarbage() const { return pendingGarbage; }
+    void AddPendingGarbage(int rows) { if (rows > 0) pendingGarbage += rows; }
+
     // ---- Public mutable state (for raylib wrapper backward-compat) ----
     // main.cpp reads/writes Game::gameOver and reads Game::score via reference
     // members; exposing them here lets the Game wrapper alias them directly.
@@ -76,6 +84,12 @@ public:
     mutable bool rotateSoundEvent = false;
     mutable bool clearSoundEvent = false;
 
+    // ---- Combat event flags (Section I) ----
+    // LockBlock 내부에서 세팅되고 렌더러(쉐이크/이펙트)가 소비 후 클리어.
+    mutable int  lastLinesCleared = 0;    // 마지막 LockBlock의 라인 클리어 수 (0..4)
+    mutable int  lastGarbageReceived = 0; // 마지막 LockBlock에서 실제 주입된 가비지 행 수
+    mutable bool gameOverEvent = false;   // 이 틱에 gameOver 로 전이한 경우 1회
+
 private:
     void MoveBlockLeft();
     void MoveBlockRight();
@@ -84,6 +98,7 @@ private:
     void RotateBlockImpl();
     void LockBlock();
     void UpdateScore(int linesCleared, int levelUp);
+    void InsertGarbage(int rows);
 
     bool IsBlockOutside(const SimBlock& block) const;
     bool BlockFits(const SimBlock& block) const;
@@ -95,10 +110,17 @@ private:
     SimGrid sim_grid;
     std::vector<SimBlock> blocks;
     XorShift64Star rng;
+    // 가비지 홀 컬럼용 별도 RNG 스트림. 시드에서 유도되어 양쪽 클라이언트가
+    // 동일한 홀 시퀀스를 뽑는다. piece-bag RNG 와 상태가 섞이지 않음이 중요.
+    XorShift64Star garbageRng;
     SimBlock currentBlock;
     SimBlock ghostBlock;
     SimBlock nextBlock;
 
     int gravityCounterTicks;
     int dropIntervalTicks;
+
+    // Combat state
+    int attackLinesSent = 0;
+    int pendingGarbage = 0;
 };

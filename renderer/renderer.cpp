@@ -68,6 +68,8 @@ static GLint  s_rect_proj  = -1;
 static GLint  s_rect_color = -1;
 
 static float  s_proj[16];
+static int    s_view_ox = 0;
+static int    s_view_oy = 0;
 
 // text 백엔드(stb) 가 공용으로 사용할 수 있게 셰이더/VAO 접근자 노출
 GLuint renderer_get_rect_prog()  { return s_rect_prog;  }
@@ -158,6 +160,25 @@ void renderer_begin(Color bg)
 }
 
 void renderer_end() {}
+
+void renderer_set_view_offset(int dx, int dy)
+{
+    s_view_ox = dx;
+    s_view_oy = dy;
+    // 시야를 (dx, dy) 만큼 옮기려면 ortho 의 l/r/t/b 를 정반대로 시프트.
+    // 예: dx=+5 → 모든 것을 오른쪽으로 5px 이동시키려면 투영창의 원점을 왼쪽으로 5px.
+    float l = (float)(-dx),          r = (float)(s_screen_w - dx);
+    float t = (float)(-dy),          b = (float)(s_screen_h - dy);
+    float n = -1.0f, f = 1.0f;
+    memset(s_proj, 0, 16 * sizeof(float));
+    s_proj[0]  =  2.0f / (r - l);
+    s_proj[5]  =  2.0f / (t - b);
+    s_proj[10] = -2.0f / (f - n);
+    s_proj[12] = -(r + l) / (r - l);
+    s_proj[13] = -(t + b) / (t - b);
+    s_proj[14] = -(f + n) / (f - n);
+    s_proj[15] = 1.0f;
+}
 
 void renderer_shutdown()
 {

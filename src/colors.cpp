@@ -12,8 +12,9 @@ const Color blue      = { 13,  64, 216, 255};
 const Color lightBlue = { 59,  85, 162, 255};
 const Color darkBlue  = { 44,  44, 127, 255};
 const Color gray      = {127, 127, 127, 255};
+const Color garbageColor = { 80,  80,  90, 255};  // id=9 — 가비지 셀 (어두운 회색)
 
 std::vector<Color> GetCellColors()
 {
-    return {darkGrey, green, red, orange, yellow, purple, cyan, blue, gray};
+    return {darkGrey, green, red, orange, yellow, purple, cyan, blue, gray, garbageColor};
 }

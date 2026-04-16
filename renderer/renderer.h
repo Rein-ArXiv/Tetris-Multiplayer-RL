@@ -16,6 +16,10 @@ void renderer_init(int screen_w, int screen_h);
 // raylib::BeginDrawing() + ClearBackground() 대체.
 void renderer_begin(Color bg);
 
+// Section I — 전체 뷰를 (dx, dy) 픽셀만큼 시프트. 화면 흔들림에 사용.
+// 이 호출 이후의 draw_rect/draw_text 가 전부 오프셋됨. 프레임 끝에 (0,0) 리셋 권장.
+void renderer_set_view_offset(int dx, int dy);
+
 // 프레임 종료 (현재는 빈 함수 — platform_end_frame이 SwapBuffers 담당).
 // raylib::EndDrawing() 대체 (SwapBuffers는 platform_end_frame에서).
 void renderer_end();

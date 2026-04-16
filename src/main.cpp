@@ -47,6 +47,7 @@
 #include "colors.h"
 #include "../platform/platform.h"
 #include "../renderer/renderer.h"
+#include "../renderer/shake.h"
 
 // TextFormat 대체: snprintf 로 포맷 문자열을 임시 버퍼에 쓰고 반환.
 // raylib의 TextFormat은 정적 버퍼를 쓰므로 중첩 호출에 주의.
@@ -283,6 +284,30 @@ int main(int argc, char** argv)
     uint32_t desyncTick = 0;
     bool desyncDetected = false;
 
+    // Section I — 공격 라인 전달 상태. lockstep 을 통해 양쪽이 동일한 attack 값을
+    // 산출하므로 네트워크 프레임은 필요 없다. 매 Tick 뒤 누적치의 델타만큼을
+    // 반대편 pendingGarbage 에 주입한다. Game 객체 재생성 시 0 으로 리셋.
+    int lastAttackLocal  = 0;
+    int lastAttackRemote = 0;
+
+    // Section I — 화면 흔들림. 이벤트성 트리거 → 감쇠. 결정론 영향 없음.
+    ShakeState shake{};
+
+    // Section I — 콜아웃 텍스트 ("DOUBLE!" / "TRIPLE!" / "TETRIS!").
+    struct Callout { const char* text = nullptr; float timeLeft = 0.0f; };
+    Callout coLocal{};
+    Callout coRemote{};
+    auto trigger_callout = [](Callout& c, int lines) {
+        const char* t = nullptr;
+        switch (lines) {
+            case 2: t = "DOUBLE!"; break;
+            case 3: t = "TRIPLE!"; break;
+            case 4: t = "TETRIS!"; break;
+            default: break;
+        }
+        if (t) { c.text = t; c.timeLeft = 1.0f; }
+    };
+
     float accumulator = 0.0f;
 
     // ── 메인 루프 ───────────────────────────────────────────────────────────
@@ -313,6 +338,7 @@ int main(int argc, char** argv)
                     localInputs.clear();
                     localTickNext = 0; simTick = 0;
                     startDelay = session.params().start_tick;
+                    lastAttackLocal = 0; lastAttackRemote = 0;
                     accumulator -= SECONDS_PER_TICK; continue;
                 }
 
@@ -336,6 +362,48 @@ int main(int argc, char** argv)
                             gameRemote->SubmitInput(ri);
                             gameLocal->Tick();
                             gameRemote->Tick();
+
+                            // Section I: 양쪽 SimGame 이 lockstep 으로 동일한 attack 값을
+                            // 산출하므로 로컬에서 델타를 계산해 반대편 pendingGarbage 로 전달.
+                            // 주의: 이 코드는 "로컬 뷰에서 보이는 가비지 큐"를 다룬다 —
+                            //   gameRemote (상대 화면 미러) 에는 local 의 공격이 들어가고
+                            //   gameLocal  (내 화면)        에는 remote 의 공격이 들어간다.
+                            {
+                                int attL = gameLocal->sim.AttackLinesSent()  - lastAttackLocal;
+                                int attR = gameRemote->sim.AttackLinesSent() - lastAttackRemote;
+                                if (attL > 0) gameRemote->sim.AddPendingGarbage(attL);
+                                if (attR > 0) gameLocal->sim.AddPendingGarbage(attR);
+                                lastAttackLocal  = gameLocal->sim.AttackLinesSent();
+                                lastAttackRemote = gameRemote->sim.AttackLinesSent();
+
+                                // Section I: Shake 트리거. 라인 수·받은 가비지·topout 별 세기.
+                                auto trigger_for_lines = [&](int lines) {
+                                    switch (lines) {
+                                        case 1: shake_trigger(shake, 2.0f, 0.10f); break;
+                                        case 2: shake_trigger(shake, 4.0f, 0.15f); break;
+                                        case 3: shake_trigger(shake, 6.0f, 0.20f); break;
+                                        case 4: shake_trigger(shake, 8.0f, 0.25f); break;
+                                    }
+                                };
+                                // 내 보드에서 클리어 / 가비지 받음 → 내 화면이 흔들린다.
+                                if (gameLocal->sim.lastLinesCleared > 0) {
+                                    trigger_for_lines(gameLocal->sim.lastLinesCleared);
+                                    trigger_callout(coLocal, gameLocal->sim.lastLinesCleared);
+                                }
+                                if (gameLocal->sim.lastGarbageReceived > 0)
+                                    shake_trigger(shake, 6.0f, 0.20f);
+                                if (gameLocal->sim.gameOverEvent)
+                                    shake_trigger(shake, 16.0f, 0.50f);
+                                gameLocal->sim.lastLinesCleared = 0;
+                                gameLocal->sim.lastGarbageReceived = 0;
+                                gameLocal->sim.gameOverEvent = false;
+                                // 상대 측 클리어도 콜아웃으로 알림.
+                                if (gameRemote->sim.lastLinesCleared > 0)
+                                    trigger_callout(coRemote, gameRemote->sim.lastLinesCleared);
+                                gameRemote->sim.lastLinesCleared = 0;
+                                gameRemote->sim.lastGarbageReceived = 0;
+                                gameRemote->sim.gameOverEvent = false;
+                            }
                             simTick++;
 
                             // F.2: 600틱마다 로컬 해시 송신 + 링 기록.
@@ -355,6 +423,21 @@ int main(int argc, char** argv)
             {
                 gameSingle->SubmitInput(inputMask);
                 gameSingle->Tick();
+                // Section I: 싱글 모드에서도 자기 클리어/게임오버 shake.
+                if (gameSingle->sim.lastLinesCleared > 0) {
+                    switch (gameSingle->sim.lastLinesCleared) {
+                        case 1: shake_trigger(shake, 2.0f, 0.10f); break;
+                        case 2: shake_trigger(shake, 4.0f, 0.15f); break;
+                        case 3: shake_trigger(shake, 6.0f, 0.20f); break;
+                        case 4: shake_trigger(shake, 8.0f, 0.25f); break;
+                    }
+                    trigger_callout(coLocal, gameSingle->sim.lastLinesCleared);
+                }
+                if (gameSingle->sim.gameOverEvent)
+                    shake_trigger(shake, 16.0f, 0.50f);
+                gameSingle->sim.lastLinesCleared = 0;
+                gameSingle->sim.lastGarbageReceived = 0;
+                gameSingle->sim.gameOverEvent = false;
             }
 
             if (recording)
@@ -418,6 +501,17 @@ int main(int argc, char** argv)
         }
 
         // 3) 렌더링
+        // Section I: shake 업데이트 + 뷰 오프셋 적용. 메뉴/네트 대기 등도 통과하지만
+        // trigger 가 걸리지 않으면 dx=dy=0 이라 영향 없음.
+        shake_update(shake, deltaTime);
+        if (coLocal.timeLeft  > 0.0f) coLocal.timeLeft  -= deltaTime;
+        if (coRemote.timeLeft > 0.0f) coRemote.timeLeft -= deltaTime;
+        {
+            float sdx = 0.0f, sdy = 0.0f;
+            shake_offset(shake, sdx, sdy);
+            renderer_set_view_offset((int)sdx, (int)sdy);
+        }
+
         renderer_begin(darkBlue);
 
         // ── 메뉴 ────────────────────────────────────────────────────────────
@@ -541,6 +635,11 @@ int main(int argc, char** argv)
             draw_text(scoreText, 320 + (170 - tw) / 2, 65, 38, WHITE);
             draw_rect_rounded(320, 215, 170, 180, 0.3f, lightBlue);
             gameSingle->Draw();
+            // Section I — 싱글 모드 콜아웃.
+            if (coLocal.text && coLocal.timeLeft > 0.0f) {
+                int tw = measure_text(coLocal.text, 56);
+                draw_text(coLocal.text, 150 - tw / 2, 280, 56, YELLOW);
+            }
         }
 
         // F5/F6 리플레이
@@ -590,6 +689,16 @@ int main(int argc, char** argv)
             gameRemote->DrawBoardAt(rightX, 11);
             draw_text(fmt_buf("Score: %d", gameLocal->score),  leftX,  640 - 28, 20, WHITE);
             draw_text(fmt_buf("Score: %d", gameRemote->score), rightX, 640 - 28, 20, WHITE);
+
+            // Section I — 양측 보드 중앙에 콜아웃. 보드 폭 300px 가정.
+            if (coLocal.text && coLocal.timeLeft > 0.0f) {
+                int tw = measure_text(coLocal.text, 40);
+                draw_text(coLocal.text, leftX + (300 - tw) / 2, 280, 40, YELLOW);
+            }
+            if (coRemote.text && coRemote.timeLeft > 0.0f) {
+                int tw = measure_text(coRemote.text, 40);
+                draw_text(coRemote.text, rightX + (300 - tw) / 2, 280, 40, YELLOW);
+            }
 
             if ((gameLocal->gameOver || gameRemote->gameOver) &&
                 gameOverState == GameOverState::None)
@@ -688,6 +797,7 @@ int main(int argc, char** argv)
                 startDelay = session.params().start_tick;
                 gameLocal  = std::make_unique<Game>(sessionSeed);
                 gameRemote = std::make_unique<Game>(sessionSeed);
+                lastAttackLocal = 0; lastAttackRemote = 0;
                 session.ClearGameOverChoices();
                 if (recording) { replay.frames.clear(); replay.seed = sessionSeed; }
                 gameOverState = GameOverState::None;

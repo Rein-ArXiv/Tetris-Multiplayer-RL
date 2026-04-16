@@ -9,6 +9,8 @@ SimGame::SimGame(uint64_t seed)
     : gameOver(false),
       score(0),
       rng(seed ? seed : 0xC0FFEE123456789ull),
+      // splitmix-style fork: 시드와 상호 상관관계가 약한 별도 스트림.
+      garbageRng((seed ? seed : 0xC0FFEE123456789ull) ^ 0x9E3779B97F4A7C15ull),
       gravityCounterTicks(0),
       dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 {
@@ -160,6 +162,17 @@ void SimGame::RotateBlockImpl()
     }
 }
 
+// Attack 테이블 (Section I.1) — Double/Triple/Tetris 만. T-spin 은 후순위.
+static int attack_lines_for(int rowsCleared)
+{
+    switch (rowsCleared) {
+        case 2: return 1;   // Double → 1 가비지
+        case 3: return 2;   // Triple → 2 가비지
+        case 4: return 4;   // Tetris → 4 가비지
+        default: return 0;  // Single or none
+    }
+}
+
 void SimGame::LockBlock()
 {
     std::vector<Position> tiles = currentBlock.GetCellPositions();
@@ -169,6 +182,7 @@ void SimGame::LockBlock()
     }
     currentBlock = nextBlock;
     ghostBlock = MakeGhostBlock(currentBlock);
+    bool wasGameOver = gameOver;
     if (BlockFits(currentBlock) == false)
     {
         gameOver = true;
@@ -176,12 +190,52 @@ void SimGame::LockBlock()
 
     nextBlock = GetRandomBlock();
     int rowsCleared = sim_grid.ClearFullRows();
+    lastLinesCleared = rowsCleared;
     if (rowsCleared > 0)
     {
         clearSoundEvent = true;
         UpdateScore(rowsCleared, 0);
-        // [NET] 대전 규칙: rowsCleared>0이면 상대에게 Garbage 전송 이벤트를 큐에 넣는 훅이 들어갑니다.
-        // ex) OnLinesCleared(rowsCleared) → NetSession.Enqueue(GARBAGE, rowsCleared)
+        attackLinesSent += attack_lines_for(rowsCleared);
+    }
+
+    // 가비지 주입 — 라인 클리어 적용 후, 다음 피스가 확정된 이 시점에서 하단으로 올라온다.
+    // 주의: 클리어 없이 그냥 놓은 경우에도 pendingGarbage 가 있으면 받는다.
+    int inserted = 0;
+    if (pendingGarbage > 0 && !gameOver)
+    {
+        inserted = pendingGarbage;
+        InsertGarbage(pendingGarbage);
+        pendingGarbage = 0;
+        // 가비지가 올라와 currentBlock 스폰 위치를 막았으면 topout.
+        if (!BlockFits(currentBlock)) gameOver = true;
+    }
+    lastGarbageReceived = inserted;
+
+    if (gameOver && !wasGameOver) gameOverEvent = true;
+}
+
+void SimGame::InsertGarbage(int rows)
+{
+    if (rows <= 0) return;
+    if (rows > SimGrid::kRows) rows = SimGrid::kRows;
+
+    // 기존 행을 위로 밀어올린다 — 상단 rows 만큼은 소실 (오버플로우는 게임오버 처리).
+    for (int r = 0; r + rows < SimGrid::kRows; r++)
+    {
+        for (int c = 0; c < SimGrid::kCols; c++)
+        {
+            sim_grid.grid[r][c] = sim_grid.grid[r + rows][c];
+        }
+    }
+    // 하단 rows 행은 가비지 (id=9, 홀 1개). 한 공격 묶음은 동일 홀 컬럼 공유.
+    int hole = static_cast<int>(garbageRng.nextUInt(SimGrid::kCols));
+    for (int i = 0; i < rows; i++)
+    {
+        int gr = SimGrid::kRows - 1 - i;
+        for (int c = 0; c < SimGrid::kCols; c++)
+        {
+            sim_grid.grid[gr][c] = (c == hole) ? 0 : 9;
+        }
     }
 }
 
@@ -240,6 +294,12 @@ uint64_t SimGame::StateHash() const
     h = fnv1a64_value(over, h);
     h = fnv1a64_value(gravityCounterTicks, h);
     h = fnv1a64_value(dropIntervalTicks, h);
+    // Combat state — 양쪽이 동일한 입력에서 동일한 값을 도출하므로 해시에 포함하면
+    // 가비지 로직 버그가 HASH 자동 검증(F.2)에서 즉시 DESYNC 로 잡힌다.
+    uint64_t gRng = garbageRng.getState();
+    h = fnv1a64_value(gRng, h);
+    h = fnv1a64_value(attackLinesSent, h);
+    h = fnv1a64_value(pendingGarbage, h);
     return h;
 }
 

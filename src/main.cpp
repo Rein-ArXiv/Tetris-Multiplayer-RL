@@ -265,6 +265,12 @@ int main(int argc, char** argv)
     uint64_t lastReceivedSeed = 0;
     bool newSeedSent = false;
 
+    // Section A — 링크 단절 grace. linkStatus() == Lost 를 처음 본 순간부터
+    // 10초 카운트다운 후 타이틀로. 도중에 Stalled→OK 로 회복하면 리셋.
+    bool linkLostActive = false;
+    float linkLostCountdown = 0.0f;
+    const float LINK_LOST_GRACE = 10.0f;
+
     float accumulator = 0.0f;
 
     // ── 메인 루프 ───────────────────────────────────────────────────────────
@@ -335,6 +341,39 @@ int main(int argc, char** argv)
                 replay.frames.push_back(fr);
             }
             accumulator -= SECONDS_PER_TICK;
+        }
+
+        // Section A — 링크 Lost 감지 + grace 카운트다운 (Net 모드 한정).
+        // 게임 중이든 GameOverState 대기 중이든 10초 후 타이틀로 강제 복귀.
+        if (app == AppMode::Net) {
+            net::LinkStatus ls = session.linkStatus();
+            if (ls == net::LinkStatus::Lost) {
+                if (!linkLostActive) {
+                    linkLostActive = true;
+                    linkLostCountdown = LINK_LOST_GRACE;
+                    std::cout << "[NET] Peer lost — returning to title in "
+                              << LINK_LOST_GRACE << "s\n";
+                } else {
+                    linkLostCountdown -= deltaTime;
+                    if (linkLostCountdown <= 0.0f) {
+                        std::cout << "[NET] Grace elapsed — returning to menu\n";
+                        session.Close();
+                        gameLocal.reset(); gameRemote.reset();
+                        gameOverState = GameOverState::None;
+                        queueMode = false; netMode = false;
+                        linkLostActive = false; linkLostCountdown = 0.0f;
+                        app = AppMode::Menu;
+                    }
+                }
+            } else if (linkLostActive) {
+                // Stalled 는 유지하되 Lost 에서 회복되면 카운트다운 취소.
+                linkLostActive = false;
+                linkLostCountdown = 0.0f;
+                std::cout << "[NET] Peer recovered — cancelling grace\n";
+            }
+        } else if (linkLostActive) {
+            linkLostActive = false;
+            linkLostCountdown = 0.0f;
         }
 
         // 3) 렌더링
@@ -721,6 +760,18 @@ int main(int argc, char** argv)
                                   (unsigned)session.maxRemoteTick(),
                                   (unsigned)simTick, (unsigned)inputDelay),
                           10, 606, 10, RAYWHITE);
+            }
+
+            // 링크 상태 오버레이 — Stalled 는 은은하게, Lost 는 grace 카운트다운.
+            net::LinkStatus ls = session.linkStatus();
+            if (linkLostActive) {
+                int remain = (int)(linkLostCountdown + 0.999f);
+                draw_rect(60, 240, 600, 120, {0, 0, 0, 200});
+                draw_text("Opponent disconnected", 130, 260, 32, RED);
+                draw_text(fmt_buf("Returning to title in %d...", remain),
+                          130, 308, 24, WHITE);
+            } else if (ls == net::LinkStatus::Stalled && gameLocal && gameRemote) {
+                draw_text("Opponent frozen - waiting...", 60, 560, 14, YELLOW);
             }
         }
 

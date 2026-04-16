@@ -17,6 +17,12 @@ namespace net {
 // 네트워크 역할
 enum class Role : uint8_t { Host=1, Peer=2 };
 
+// 링크 건강 상태 — 마지막 PONG 수신 경과 시간 기반
+//   OK     : 마지막 PONG < 2s (정상)
+//   Stalled: 2s ≤ 경과 < 10s (상대가 잠시 얼어붙음, Windows 창 드래그 등)
+//   Lost   : 경과 ≥ 10s 혹은 hasFailed() — 연결 공식 단절로 간주
+enum class LinkStatus : uint8_t { OK=0, Stalled=1, Lost=2 };
+
 // 게임 오버 후 선택
 enum class GameOverChoice : uint8_t {
     None = 0,
@@ -64,6 +70,8 @@ public:
     bool isReady() const { return ready; }
     bool isListening() const { return listening; }
     bool hasFailed() const { return connectionFailed; }
+    // PING/PONG 기반 링크 건강 상태 — ready=true 이후 유효.
+    LinkStatus linkStatus() const;
     SeedParams params() const {
         std::lock_guard<std::mutex> lk(seedMu);
         return seedParams;
@@ -125,6 +133,11 @@ private:
 
     std::atomic<uint8_t> localGameOverChoice{0};
     std::atomic<uint8_t> remoteGameOverChoice{0};
+
+    // PING/PONG 하트비트 — steady_clock milliseconds.
+    // lastPongMs 는 ready=true 전환 시점에 now 로 초기화.
+    std::atomic<int64_t> lastPongMs{0};
+    std::atomic<int64_t> lastPingSentMs{0};
 };
 
 }

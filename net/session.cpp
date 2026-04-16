@@ -6,8 +6,24 @@
 
 namespace net {
 
+static int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 Session::Session() {}
 Session::~Session() { Close(); }
+
+LinkStatus Session::linkStatus() const {
+    if (connectionFailed.load()) return LinkStatus::Lost;
+    if (!ready.load()) return LinkStatus::OK;
+    int64_t last = lastPongMs.load();
+    if (last == 0) return LinkStatus::OK;  // 첫 PONG 전에는 판단 유예
+    int64_t ago = now_ms() - last;
+    if (ago >= 10000) return LinkStatus::Lost;
+    if (ago >=  2000) return LinkStatus::Stalled;
+    return LinkStatus::OK;
+}
 
 bool Session::Host(uint16_t port, const SeedParams& sp) {
     if (listening) return false;
@@ -60,6 +76,8 @@ bool Session::Adopt(TcpSocket socket, Role role, uint64_t seed,
     sock = socket;
     connected = true;
     // HELLO/SEED 핸드셰이크 생략 — 릴레이가 MATCH_FOUND 로 seed/role 을 이미 확정
+    lastPongMs.store(now_ms());
+    lastPingSentMs.store(0);
     ready = true;
     th = std::thread(&Session::ioThread, this);
     std::cout << "[NET] Adopted relay socket: role="
@@ -242,6 +260,8 @@ void Session::queueThread(std::string host, uint16_t port,
                           << " seed=0x" << std::hex << seed << std::dec << std::endl;
                 // ioThread 로 핸드오프 — 이미 수신된 recvBuf 잔여 바이트는 비움.
                 recvBuf.clear();
+                lastPongMs.store(now_ms());
+                lastPingSentMs.store(0);
                 ready = true;
                 th = std::thread(&Session::ioThread, this);
                 return;
@@ -268,6 +288,19 @@ void Session::ioThread() {
                 connectionFailed = true;
                 quit = true;
                 break;
+            }
+        }
+
+        // 1Hz PING 송신 — ready=true 이후에만. 상대가 얼어붙어도 여기선 계속
+        // 큐에 쌓이지만 tcp_send_all 자체가 막히지는 않는다(커널 버퍼 여유 범위).
+        if (ready.load()) {
+            int64_t now = now_ms();
+            int64_t lastSent = lastPingSentMs.load();
+            if (lastSent == 0 || (now - lastSent) >= 1000) {
+                lastPingSentMs.store(now);
+                std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
+                auto fr = build_frame(MsgType::PING, pl);
+                std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
             }
         }
 
@@ -359,6 +392,8 @@ void Session::acceptThread(uint16_t port)
             std::cout << "[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")" << std::endl;
         }
     }
+    lastPongMs.store(now_ms());
+    lastPingSentMs.store(0);
     ready = true;
     std::cout << "[NET] Host session is ready!" << std::endl;
 }
@@ -389,6 +424,8 @@ void Session::handleFrame(const Frame& f) {
             std::cout << "[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
                       << ", start_tick=" << std::dec << seedParams.start_tick
                       << ", input_delay=" << (int)seedParams.input_delay << std::endl;
+            lastPongMs.store(now_ms());
+            lastPingSentMs.store(0);
             ready = true;
             std::cout << "[NET] Client session is ready!" << std::endl;
         } else {
@@ -436,11 +473,14 @@ void Session::handleFrame(const Frame& f) {
         }
     } break;
     case MsgType::PING: {
+        // 상대의 PING 은 즉시 PONG 으로 에코 — io 스레드가 계속 돌고 있으면
+        // 메인 스레드가 얼어도(창 드래그 등) 상대는 우리를 살아있다고 판정.
         std::vector<uint8_t> pong = f.payload; auto fr = build_frame(MsgType::PONG, pong);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
     } break;
     case MsgType::PONG: {
-        // RTT 측정 지점
+        // 최신 PONG 도착 시각 기록 — linkStatus() 가 이 값을 기준으로 판정.
+        lastPongMs.store(now_ms());
     } break;
     default: break;
     }

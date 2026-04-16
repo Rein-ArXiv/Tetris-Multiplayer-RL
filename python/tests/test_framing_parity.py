@@ -18,6 +18,7 @@ import pytest
 
 from netbot.framing import (
     FNV1A32_OFFSET,
+    MAX_PAYLOAD_BYTES,
     MsgType,
     build_frame,
     fnv1a32,
@@ -101,3 +102,36 @@ def test_parse_frames_drops_bad_checksum() -> None:
     assert out == []  # bad-checksum frame is dropped
     # And the bytes are consumed (parser advances past the corrupt frame).
     assert len(frame) == 0
+
+
+# ---- Relay / matchmaking enum parity --------------------------------------
+def test_queue_join_and_match_found_round_trip() -> None:
+    q = build_frame(MsgType.QUEUE_JOIN, b"")
+    mf_payload = bytes([1]) + struct.pack("<Q", 0xCAFEBABEDEADBEEF)  # role=HOST, seed
+    mf = build_frame(MsgType.MATCH_FOUND, mf_payload)
+    stream = bytearray(q + mf)
+    parsed = parse_frames(stream)
+    assert parsed == [
+        (MsgType.QUEUE_JOIN, b""),
+        (MsgType.MATCH_FOUND, mf_payload),
+    ]
+    assert len(stream) == 0
+
+
+# ---- Payload size guard ---------------------------------------------------
+def test_build_frame_rejects_oversized_payload() -> None:
+    too_big = b"\x00" * (MAX_PAYLOAD_BYTES + 1)
+    with pytest.raises(ValueError):
+        build_frame(MsgType.HELLO, too_big)
+
+
+def test_parse_frames_discards_stream_when_length_exceeds_cap() -> None:
+    # Forge a frame header that declares a payload above the cap.
+    bad = bytearray()
+    bad += struct.pack("<H", MAX_PAYLOAD_BYTES + 2)  # LEN = TYPE + oversized
+    bad.append(int(MsgType.HELLO))
+    # Don't bother supplying the huge body — the parser should bail before
+    # waiting for the bytes to arrive.
+    out = parse_frames(bad)
+    assert out == []
+    assert len(bad) == 0  # entire buffer dropped

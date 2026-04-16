@@ -19,6 +19,12 @@ enum class MsgType : uint8_t {
     PONG = 7,
     HASH = 8,
     GAME_OVER_CHOICE = 9,
+
+    // 릴레이/매치메이킹 확장 (클라 ↔ 릴레이 서버 간에만 사용 — 릴레이가
+    // MATCH_FOUND 를 보낸 후에는 투명하게 바이트 스트림만 포워딩하므로
+    // 게임 루프는 이 두 타입을 직접 소비하지 않는다.)
+    QUEUE_JOIN  = 10,  // C→S : 빈 페이로드 (익명 큐잉)
+    MATCH_FOUND = 12,  // S→C : [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
 };
 
 // 파싱된 메시지 프레임

@@ -41,6 +41,13 @@ public:
     bool Host(uint16_t port, const SeedParams& sp);  // 호스트: 포트 대기, 파라미터 결정
     bool Connect(const std::string& host, uint16_t port);  // 클라이언트: 호스트 연결
 
+    // 릴레이 서버가 페어링한 후 MATCH_FOUND 로 받은 정보를 주입.
+    // - 이미 연결된 소켓을 그대로 채택 (HELLO/SEED 핸드셰이크 생략)
+    // - role/seed 는 릴레이가 결정해 보내줌
+    // - ready=true 즉시, 게임 시작 가능
+    bool Adopt(TcpSocket socket, Role role, uint64_t seed,
+               uint32_t start_tick = 120, uint8_t input_delay = 2);
+
     // 세션 상태
     bool isConnected() const { return connected; }
     bool isReady() const { return ready; }

@@ -27,12 +27,15 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <charconv>
 #include "../core/constants.h"
 #include "../core/input.h"
 #include "../core/replay.h"
 #include "../core/hash.h"
 #include "../net/session.h"
 #include "../net/socket.h"
+#include "../net/framing.h"
+#include <thread>
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -79,7 +82,117 @@ static uint8_t ConsumeInput()
     return mask;
 }
 
+// `host:port` 형태 엔드포인트 파서. IPv6 브래킷 표기(`[::1]:7777`)도 허용.
+//  - port 미지정 시 default_port 사용
+//  - `:` 없거나 host 가 비었거나 port 가 0/범위초과 이면 false
+//  - 예외 없이 std::from_chars 로 파싱 — 악의적 입력에도 크래시 안 함
+static bool parse_endpoint(const std::string& s,
+                           std::string& host_out,
+                           uint16_t& port_out,
+                           uint16_t default_port)
+{
+    if (s.empty()) return false;
+
+    // IPv6 브래킷: `[addr]` 또는 `[addr]:port`
+    if (s.front() == '[') {
+        auto rb = s.find(']');
+        if (rb == std::string::npos || rb == 1) return false;  // `[]` 또는 닫힘 없음
+        host_out = s.substr(1, rb - 1);
+        if (rb + 1 == s.size()) {                               // port 생략
+            port_out = default_port; return true;
+        }
+        if (s[rb + 1] != ':') return false;                     // `]` 뒤에 `:` 만 허용
+        std::string portStr = s.substr(rb + 2);
+        if (portStr.empty()) return false;
+        unsigned long p = 0;
+        auto [ptr, ec] = std::from_chars(portStr.data(), portStr.data() + portStr.size(), p);
+        if (ec != std::errc() || ptr != portStr.data() + portStr.size()) return false;
+        if (p < 1 || p > 65535) return false;
+        port_out = (uint16_t)p; return true;
+    }
+
+    // IPv4 / hostname: `host` 또는 `host:port`
+    auto pos = s.find(':');
+    if (pos == std::string::npos) {                             // port 생략
+        host_out = s; port_out = default_port;
+        return !host_out.empty();
+    }
+    if (pos == 0) return false;                                 // host 비어 있음
+    host_out = s.substr(0, pos);
+    std::string portStr = s.substr(pos + 1);
+    if (portStr.empty()) return false;
+    unsigned long p = 0;
+    auto [ptr, ec] = std::from_chars(portStr.data(), portStr.data() + portStr.size(), p);
+    if (ec != std::errc() || ptr != portStr.data() + portStr.size()) return false;
+    if (p < 1 || p > 65535) return false;
+    port_out = (uint16_t)p; return true;
+}
+
+// `--host` 용 순수 포트 파서. 1..65535 만 허용.
+static bool parse_port(const std::string& s, uint16_t& port_out)
+{
+    if (s.empty()) return false;
+    unsigned long p = 0;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), p);
+    if (ec != std::errc() || ptr != s.data() + s.size()) return false;
+    if (p < 1 || p > 65535) return false;
+    port_out = (uint16_t)p; return true;
+}
+
 enum class AppMode { Menu, ConnectInput, Single, Net };
+
+// 릴레이 서버에 큐 등록 → MATCH_FOUND 수신 → 소켓/역할/시드 반환.
+// 실패 시 !sock.valid().
+struct QueueResult {
+    net::TcpSocket sock{};
+    net::Role      role{net::Role::Peer};
+    uint64_t       seed{0};
+};
+
+static QueueResult join_queue(const std::string& host, uint16_t port)
+{
+    QueueResult r{};
+    net::TcpSocket s = net::tcp_connect(host, port);
+    if (!s.valid()) {
+        std::cout << "[QUEUE] Failed to connect to relay " << host << ":" << port << "\n";
+        return r;
+    }
+    std::cout << "[QUEUE] Connected to relay " << host << ":" << port << ", sending QUEUE_JOIN\n";
+
+    auto join = net::build_frame(net::MsgType::QUEUE_JOIN, {});
+    if (!net::tcp_send_all(s, join.data(), join.size())) {
+        std::cout << "[QUEUE] Failed to send QUEUE_JOIN\n";
+        net::tcp_close(s); return r;
+    }
+
+    std::vector<uint8_t> buf; buf.reserve(32);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!net::tcp_recv_some(s, buf)) {
+            std::cout << "[QUEUE] Relay disconnected before MATCH_FOUND\n";
+            net::tcp_close(s); return r;
+        }
+        std::vector<net::Frame> frames;
+        net::parse_frames(buf, frames);
+        for (auto& f : frames) {
+            if (f.type == net::MsgType::MATCH_FOUND && f.payload.size() >= 9) {
+                uint8_t roleByte = f.payload[0];
+                uint64_t seed    = net::le_read_u64(f.payload.data() + 1);
+                r.sock = s;
+                r.role = (roleByte == (uint8_t)net::Role::Host) ? net::Role::Host : net::Role::Peer;
+                r.seed = seed;
+                std::cout << "[QUEUE] MATCH_FOUND role="
+                          << (r.role == net::Role::Host ? "HOST" : "GUEST")
+                          << " seed=0x" << std::hex << seed << std::dec << "\n";
+                return r;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::cout << "[QUEUE] Timeout waiting for MATCH_FOUND\n";
+    net::tcp_close(s);
+    return r;
+}
 
 enum class GameOverState {
     None,
@@ -104,23 +217,47 @@ int main(int argc, char** argv)
     renderer_init(720, 640);
     renderer_load_font("Font/monogram.ttf");
 
-    bool netMode = false, isHost = false;
+    bool netMode = false, isHost = false, queueMode = false;
     std::string hostIp;
     uint16_t hostPort = 7777;
+    std::string queueHost;
+    uint16_t queuePort = 7777;
 
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
         if (a == "--host") {
             isHost = true; netMode = true;
-            if (i + 1 < argc) { hostPort = (uint16_t)std::stoi(argv[++i]); }
+            if (i + 1 < argc) {
+                std::string portStr = argv[++i];
+                if (!parse_port(portStr, hostPort)) {
+                    fprintf(stderr, "error: --host expects a port in 1..65535, got '%s'\n", portStr.c_str());
+                    return 2;
+                }
+            }
         } else if (a == "--connect") {
             netMode = true;
             if (i + 1 < argc) {
                 std::string ep = argv[++i];
-                auto pos = ep.find(':');
-                hostIp = ep.substr(0, pos);
-                hostPort = (uint16_t)std::stoi(ep.substr(pos + 1));
+                if (!parse_endpoint(ep, hostIp, hostPort, 7777)) {
+                    fprintf(stderr, "error: --connect expects host[:port], got '%s'\n", ep.c_str());
+                    return 2;
+                }
+            } else {
+                fprintf(stderr, "error: --connect requires an argument (host[:port])\n");
+                return 2;
+            }
+        } else if (a == "--queue") {
+            netMode = true; queueMode = true;
+            if (i + 1 < argc) {
+                std::string ep = argv[++i];
+                if (!parse_endpoint(ep, queueHost, queuePort, 7777)) {
+                    fprintf(stderr, "error: --queue expects host[:port], got '%s'\n", ep.c_str());
+                    return 2;
+                }
+            } else {
+                fprintf(stderr, "error: --queue requires an argument (host[:port])\n");
+                return 2;
             }
         }
     }
@@ -140,7 +277,17 @@ int main(int argc, char** argv)
     bool connectError = false;
 
     if (app == AppMode::Net) {
-        if (isHost) {
+        if (queueMode) {
+            QueueResult qr = join_queue(queueHost, queuePort);
+            if (!qr.sock.valid()) {
+                fprintf(stderr, "Queue join failed\n"); return 1;
+            }
+            sessionSeed = qr.seed;
+            isHost = (qr.role == net::Role::Host);
+            if (!session.Adopt(qr.sock, qr.role, qr.seed, startDelay, inputDelay)) {
+                fprintf(stderr, "Session::Adopt failed\n"); return 1;
+            }
+        } else if (isHost) {
             sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + 0xC0FFEEULL;
             net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
             if (!session.Host(hostPort, sp)) {

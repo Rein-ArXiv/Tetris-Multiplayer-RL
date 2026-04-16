@@ -33,6 +33,10 @@ LEN_FIELD_BYTES = 2
 TYPE_FIELD_BYTES = 1
 CHECKSUM_FIELD_BYTES = 4
 MIN_FRAME_BYTES = LEN_FIELD_BYTES + TYPE_FIELD_BYTES + CHECKSUM_FIELD_BYTES  # 7
+# Matches net/framing.cpp: MAX_PAYLOAD_BYTES guard.
+# u16의 자연 한계(65535)는 사실상 상한이 없으므로, 실사용 최대(CHAT 200자 UTF-8 ~800B,
+# HASH/INPUT은 수십 B)에 맞춰 실질적인 하드 리미트로 4KB를 건다.
+MAX_PAYLOAD_BYTES = 4096
 
 
 class MsgType(enum.IntEnum):
@@ -45,6 +49,12 @@ class MsgType(enum.IntEnum):
     PONG = 7
     HASH = 8
     GAME_OVER_CHOICE = 9
+
+    # Relay / matchmaking extensions (only used between client and relay server).
+    # After MATCH_FOUND the relay forwards raw bytes, so these types never reach
+    # the lockstep game loop — they live at the "outer" protocol layer.
+    QUEUE_JOIN = 10   # C→S: empty payload (anonymous queue)
+    MATCH_FOUND = 12  # S→C: [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
 
 
 def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:
@@ -91,6 +101,8 @@ def build_frame(msg_type: MsgType | int, payload: bytes | bytearray) -> bytes:
     identical, including the empty-payload checksum=0 short-circuit.
     """
     payload_bytes = bytes(payload)
+    if len(payload_bytes) > MAX_PAYLOAD_BYTES:
+        raise ValueError(f"frame payload exceeds MAX_PAYLOAD_BYTES: {len(payload_bytes)}")
     out = bytearray()
     length = TYPE_FIELD_BYTES + len(payload_bytes)
     if length > 0xFFFF:
@@ -120,6 +132,12 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
             break
 
         length = le_read_u16(stream_buf, offset)
+        # Drop the whole stream if a frame declares a payload larger than the
+        # cap — matches the C++ behaviour and prevents an attacker from
+        # making our recv buffer grow without bound.
+        if length > MAX_PAYLOAD_BYTES + TYPE_FIELD_BYTES:
+            del stream_buf[:]
+            return out
         need = LEN_FIELD_BYTES + length + CHECKSUM_FIELD_BYTES
         if buf_len - offset < need:
             break

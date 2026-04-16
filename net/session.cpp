@@ -31,6 +31,43 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
     return true;
 }
 
+bool Session::Adopt(TcpSocket socket, Role role, uint64_t seed,
+                    uint32_t start_tick, uint8_t input_delay) {
+    if (!socket.valid()) return false;
+
+    // Close() 이후 재사용을 위한 상태 리셋
+    quit = false;
+    connectionFailed = false;
+    connected = false;
+    ready = false;
+    listening = false;
+    {
+        std::lock_guard<std::mutex> lk(inMu);
+        remoteInputs.clear();
+    }
+    lastRemoteTick = 0;
+    lastLocalTick = 0;
+    recvBuf.clear();
+
+    {
+        std::lock_guard<std::mutex> lk(seedMu);
+        seedParams.seed = seed;
+        seedParams.start_tick = start_tick;
+        seedParams.input_delay = input_delay;
+        seedParams.role = role;
+    }
+
+    sock = socket;
+    connected = true;
+    // HELLO/SEED 핸드셰이크 생략 — 릴레이가 MATCH_FOUND 로 seed/role 을 이미 확정
+    ready = true;
+    th = std::thread(&Session::ioThread, this);
+    std::cout << "[NET] Adopted relay socket: role="
+              << (role == Role::Host ? "HOST" : "GUEST")
+              << " seed=0x" << std::hex << seed << std::dec << std::endl;
+    return true;
+}
+
 bool Session::Connect(const std::string& host, uint16_t port) {
     std::cout << "[NET] Connecting to " << host << ":" << port << std::endl;
 

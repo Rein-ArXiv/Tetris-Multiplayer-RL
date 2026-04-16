@@ -60,6 +60,12 @@ Thumbs.db
 *.swo
 *~
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
 # 리플레이 출력
 out/replay.txt
 

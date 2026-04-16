@@ -8,6 +8,9 @@ namespace {
     constexpr size_t CHECKSUM_FIELD = 4;  // u32
     // 프레임 최소 크기: len(2) + type(1) + chk(4)
     constexpr size_t MIN_FRAME_BYTES = LEN_FIELD + TYPE_FIELD + CHECKSUM_FIELD; // 7 bytes
+    // PAYLOAD 상한 — 실사용 최대는 CHAT 200자 UTF-8 (~800 B), HASH/INPUT 은 수십 B.
+    // u16 의 자연 한계(65535) 는 사실상 상한 없음 — 이 상수로 실질 가드를 건다.
+    constexpr size_t MAX_PAYLOAD_BYTES = 4096;
 }
 
 namespace net {
@@ -35,6 +38,8 @@ uint64_t le_read_u64(const uint8_t* p) {
 }
 
 std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload) {
+    // 발신 측에서도 페이로드 상한을 검사 — 초과 시 빈 벡터로 실패.
+    if (payload.size() > MAX_PAYLOAD_BYTES) return {};
     // LEN = TYPE(1) + PAYLOAD(N)
     std::vector<uint8_t> out; out.reserve(LEN_FIELD + TYPE_FIELD + payload.size() + CHECKSUM_FIELD);
     const uint16_t len = static_cast<uint16_t>(TYPE_FIELD + payload.size());
@@ -56,6 +61,14 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
 
         // LEN = TYPE + PAYLOAD 길이
         const uint16_t len = le_read_u16(&streamBuf[offset]);
+
+        // 페이로드 상한 초과 선언 시 전체 스트림을 버린다.
+        // 부분 수신 상태에서 len 만 받았더라도 판정 가능 — 수신 버퍼가
+        // MAX_PAYLOAD_BYTES+TYPE+CHK 이상으로 불어나지 않도록 조기 차단.
+        if (static_cast<size_t>(len) > MAX_PAYLOAD_BYTES + TYPE_FIELD) {
+            streamBuf.clear();
+            return false;
+        }
 
         // 전체 프레임이 모였는지 확인: len 필드 + 본문(len) + 체크섬
         const size_t need = LEN_FIELD + static_cast<size_t>(len) + CHECKSUM_FIELD;

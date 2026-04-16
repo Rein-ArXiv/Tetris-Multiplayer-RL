@@ -271,6 +271,18 @@ int main(int argc, char** argv)
     float linkLostCountdown = 0.0f;
     const float LINK_LOST_GRACE = 10.0f;
 
+    // F.2 — 자동 HASH 검증. 매 600틱(~10s) 로컬 해시를 SendHash 하고 링으로
+    // 기억. 상대의 HASH(tick, h) 가 들어오면 같은 틱의 로컬 해시와 비교 →
+    // 불일치 시 DESYNC 오버레이 + stderr 로그.
+    struct HashSnap { uint32_t tick = 0; uint64_t hash = 0; bool valid = false; };
+    constexpr uint32_t HASH_PERIOD_TICKS = 600;
+    constexpr size_t HASH_RING = 4;
+    HashSnap localHashRing[HASH_RING]{};
+    uint32_t lastHashSentTick = (uint32_t)-1;        // 중복 송신 방지
+    uint32_t lastRemoteHashSeenTick = 0;
+    uint32_t desyncTick = 0;
+    bool desyncDetected = false;
+
     float accumulator = 0.0f;
 
     // ── 메인 루프 ───────────────────────────────────────────────────────────
@@ -325,6 +337,16 @@ int main(int argc, char** argv)
                             gameLocal->Tick();
                             gameRemote->Tick();
                             simTick++;
+
+                            // F.2: 600틱마다 로컬 해시 송신 + 링 기록.
+                            if (simTick > 0 && simTick % HASH_PERIOD_TICKS == 0 &&
+                                simTick != lastHashSentTick) {
+                                uint64_t h = gameLocal->ComputeStateHash();
+                                session.SendHash(simTick, h);
+                                auto& slot = localHashRing[(simTick / HASH_PERIOD_TICKS) % HASH_RING];
+                                slot.tick = simTick; slot.hash = h; slot.valid = true;
+                                lastHashSentTick = simTick;
+                            }
                         }
                     }
                 }
@@ -374,6 +396,25 @@ int main(int argc, char** argv)
         } else if (linkLostActive) {
             linkLostActive = false;
             linkLostCountdown = 0.0f;
+        }
+
+        // F.2 — 원격 HASH 수신 감지 + 링 비교. 같은 틱의 로컬 해시가 링에
+        // 있어야 비교 가능 (링 크기 4 → 과거 40초 이력 커버).
+        if (app == AppMode::Net && gameLocal) {
+            uint32_t rt = 0; uint64_t rh = 0;
+            if (session.GetLastRemoteHash(rt, rh) && rt != 0 && rt != lastRemoteHashSeenTick) {
+                lastRemoteHashSeenTick = rt;
+                auto& slot = localHashRing[(rt / HASH_PERIOD_TICKS) % HASH_RING];
+                if (slot.valid && slot.tick == rt) {
+                    if (slot.hash != rh) {
+                        fprintf(stderr, "[DESYNC] tick=%u local=0x%016llx remote=0x%016llx\n",
+                                rt, (unsigned long long)slot.hash, (unsigned long long)rh);
+                        desyncDetected = true;
+                        desyncTick = rt;
+                    }
+                }
+                // 같은 틱이 링에 없을 수도 있음(시작 직후 등) — 이 경우 무시.
+            }
         }
 
         // 3) 렌더링
@@ -772,6 +813,15 @@ int main(int argc, char** argv)
                           130, 308, 24, WHITE);
             } else if (ls == net::LinkStatus::Stalled && gameLocal && gameRemote) {
                 draw_text("Opponent frozen - waiting...", 60, 560, 14, YELLOW);
+            }
+
+            // F.2 DESYNC 배너 — 한 번 감지되면 세션 종료까지 유지.
+            if (desyncDetected) {
+                draw_rect(60, 180, 600, 52, {40, 0, 0, 220});
+                draw_text(fmt_buf("DESYNC DETECTED at tick %u", desyncTick),
+                          120, 192, 20, RED);
+                draw_text("(state hashes diverged - lockstep broken)",
+                          90, 214, 14, YELLOW);
             }
         }
 

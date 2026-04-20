@@ -156,6 +156,18 @@ static char   s_char_queue[64] = {};
 static int    s_char_head = 0;
 static int    s_char_tail = 0;
 
+// ─── 마우스 상태 ──────────────────────────────────────────────────────────────
+// 키와 동일한 level/edge 패턴: state 는 현재, prev 는 직전 프레임 스냅샷.
+//   pressed  = state && !prev
+//   released = !state && prev
+// down       = state
+// WM_MOUSEMOVE 는 창 밖으로 나갔다 돌아와도 좌표 업데이트가 이어짐.
+static int    s_mouse_x = 0;
+static int    s_mouse_y = 0;
+static bool   s_mouse_state[3] = {}; // 0=L, 1=R, 2=M
+static bool   s_mouse_prev[3]  = {};
+static float  s_mouse_wheel_accum = 0.0f;
+
 // 타이머
 static LARGE_INTEGER s_freq;
 static LARGE_INTEGER s_frame_start;
@@ -172,7 +184,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_SYSKEYDOWN:
         // wParam 은 VK_* 코드 (0–255). PlatformKey 값과 직접 대응.
         if (wParam < 256) s_key_state[wParam] = true;
-        if (wParam == VK_ESCAPE) s_should_close = true;
         return 0;
 
     case WM_KEYUP:
@@ -197,6 +208,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         s_win_w = LOWORD(lParam);
         s_win_h = HIWORD(lParam);
         if (s_hglrc) glViewport(0, 0, s_win_w, s_win_h);
+        return 0;
+
+    case WM_MOUSEMOVE:
+        // LOWORD/HIWORD 로 16-bit signed 가 아닌 unsigned 가 나올 수 있어
+        // GET_X_LPARAM / GET_Y_LPARAM 매크로(windowsx.h) 를 써야 음수 안전.
+        // 여기선 클라이언트 영역 내부에서만 의미가 있으므로 단순 LOWORD 사용.
+        s_mouse_x = (int)(short)LOWORD(lParam);
+        s_mouse_y = (int)(short)HIWORD(lParam);
+        return 0;
+
+    case WM_LBUTTONDOWN: s_mouse_state[0] = true;  SetCapture(hwnd); return 0;
+    case WM_LBUTTONUP:   s_mouse_state[0] = false; ReleaseCapture(); return 0;
+    case WM_RBUTTONDOWN: s_mouse_state[1] = true;  SetCapture(hwnd); return 0;
+    case WM_RBUTTONUP:   s_mouse_state[1] = false; ReleaseCapture(); return 0;
+    case WM_MBUTTONDOWN: s_mouse_state[2] = true;  SetCapture(hwnd); return 0;
+    case WM_MBUTTONUP:   s_mouse_state[2] = false; ReleaseCapture(); return 0;
+
+    case WM_MOUSEWHEEL:
+        // wParam 상위 16bit = 휠 델타 (WHEEL_DELTA=120 단위). +값=위로.
+        s_mouse_wheel_accum += (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
         return 0;
 
     case WM_CLOSE:
@@ -306,8 +337,11 @@ bool platform_should_close()
 // 3. 델타타임 계산 후 반환
 float platform_begin_frame()
 {
-    // 이전 프레임 키 상태 스냅샷 → platform_key_pressed 구현에 사용
+    // 이전 프레임 키/마우스 상태 스냅샷 → pressed/released 구현에 사용.
+    // wheel 누적치는 이번 프레임 동안만 유효하므로 프레임 시작 시 0 으로 리셋.
     memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
+    memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_mouse_wheel_accum = 0.0f;
 
     // PeekMessage: 메시지가 있으면 처리하고 없으면 즉시 반환 (논블로킹)
     // GetMessage와 달리 메시지가 없어도 멈추지 않아 게임 루프에 적합
@@ -358,6 +392,30 @@ char platform_get_char_pressed()
     s_char_head = (s_char_head + 1) % 64;
     return c;
 }
+
+// ─── 마우스 API ───────────────────────────────────────────────────────────────
+int platform_mouse_x() { return s_mouse_x; }
+int platform_mouse_y() { return s_mouse_y; }
+
+bool platform_mouse_pressed(int button)
+{
+    if (button < 0 || button >= 3) return false;
+    return s_mouse_state[button] && !s_mouse_prev[button];
+}
+
+bool platform_mouse_down(int button)
+{
+    if (button < 0 || button >= 3) return false;
+    return s_mouse_state[button];
+}
+
+bool platform_mouse_released(int button)
+{
+    if (button < 0 || button >= 3) return false;
+    return !s_mouse_state[button] && s_mouse_prev[button];
+}
+
+float platform_mouse_wheel() { return s_mouse_wheel_accum; }
 
 double platform_get_time()
 {

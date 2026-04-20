@@ -70,6 +70,7 @@ __pycache__/
 out/replay.txt
 
 # 문서 파일 (README.md만 유지)
+docs_backup_*/
 DOCUMENTATION.md
 CLAUDE.md
 TECHNICAL_DEEP_DIVE.md

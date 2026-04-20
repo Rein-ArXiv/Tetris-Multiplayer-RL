@@ -30,6 +30,21 @@ enum class GameOverChoice : uint8_t {
     GoToTitle = 2,
 };
 
+// 커스텀 룸 상태 머신 (로비 대기 페이즈).
+// MATCH_FOUND 수신 후에는 Session 이 일반 게임 세션으로 전환되므로
+// 이 상태는 더 이상 의미 없다 (isReady() 사용).
+enum class RoomState : uint8_t {
+    Idle            = 0,
+    Connecting      = 1,   // tcp_connect + ROOM_CREATE/ROOM_JOIN 송신 중
+    Waiting         = 2,   // 방에 나 혼자 (peer_count=1)
+    WaitingWithPeer = 3,   // 두 명 입장 (peer_count=2), READY 대기
+    NotFound        = 4,   // 코드에 해당하는 방 없음
+    Full            = 5,   // 방이 이미 2명이어서 입장 불가
+    GoneFull        = 6,   // 상대가 퇴장해 다시 혼자 (서버가 ROOM_INFO(3) 푸시)
+    Failed          = 7,   // 소켓 오류 / 연결 실패
+    Starting        = 8,   // MATCH_FOUND 수신, 곧 게임 시작
+};
+
 // 게임 시작 파라미터 (호스트가 결정 → SEED 메시지로 전달)
 struct SeedParams {
     uint64_t seed{0};
@@ -65,6 +80,28 @@ public:
     // 매칭 대기 중 취소. 소켓을 닫아 큐 스레드를 즉시 해제.
     void QueueCancel();
 
+    // 커스텀 룸 경로 — QueueJoin 과 유사한 비동기 구조.
+    //   RoomCreate : 서버가 5자리 코드 발급 후 ROOM_INFO 회신
+    //   RoomJoin   : 기존 코드로 입장
+    // 두 메서드 모두 즉시 true 를 리턴하고, 진행 상태는 roomState() 로 폴링.
+    // MATCH_FOUND 도착 시 QueueJoin 과 동일하게 ioThread 기동 + ready=true.
+    bool RoomCreate(const std::string& host, uint16_t port,
+                    uint32_t start_tick = 120, uint8_t input_delay = 2);
+    bool RoomJoin(const std::string& host, uint16_t port,
+                  const std::string& code,
+                  uint32_t start_tick = 120, uint8_t input_delay = 2);
+    // READY 플래그 송신 (양쪽 true 시 서버가 MATCH_FOUND 발행).
+    void RoomSendReady(bool ready);
+    // ROOM_LEAVE 송신 후 소켓 종료 — 큰 방을 떠난다.
+    void RoomLeave();
+
+    RoomState   roomState() const { return roomState_.load(); }
+    int         roomPeerCount() const { return roomPeerCount_.load(); }
+    std::string roomCode() const {
+        std::lock_guard<std::mutex> lk(roomMu_);
+        return roomCode_;
+    }
+
     // 세션 상태
     bool isConnected() const { return connected; }
     bool isReady() const { return ready; }
@@ -89,6 +126,12 @@ public:
     bool GetRemoteGameOverChoice(GameOverChoice& outChoice) const;
     void ClearGameOverChoices();
 
+    // 채팅 (Section E) — CHAT 프레임은 릴레이를 투명 통과.
+    //   SendChat: UTF-8 텍스트를 프레임 1개에 담아 송신. 최대 200자 가정(상한은 MAX_PAYLOAD_BYTES).
+    //   PullChat: 수신 큐에서 한 줄 꺼냄. 없으면 false.
+    void SendChat(const std::string& text);
+    bool PullChat(std::string& outText);
+
     // 안전 틱 계산용: safeTick = min(local, remote) - inputDelay
     uint32_t maxRemoteTick() const { return lastRemoteTick; }
     uint32_t maxLocalTick() const { return lastLocalTick; }
@@ -102,6 +145,11 @@ private:
     void acceptThread(uint16_t port);  // 호스트 전용: 연결 대기
     void queueThread(std::string host, uint16_t port,
                      uint32_t start_tick, uint8_t input_delay);  // 릴레이 큐잉 전용
+    // 커스텀 룸 대기 스레드: ROOM_CREATE 또는 ROOM_JOIN 전송 후 ROOM_INFO/MATCH_FOUND 수신.
+    // joinCode 가 비어 있으면 CREATE, 아니면 JOIN.
+    void roomThread(std::string host, uint16_t port,
+                    std::string joinCode,
+                    uint32_t start_tick, uint8_t input_delay);
 
     TcpSocket sock{};
     TcpSocket listenSock{};
@@ -109,6 +157,16 @@ private:
     std::thread th;
     std::thread ath;
     std::thread qth;
+    std::thread rth;  // 룸 대기 스레드
+
+    // 룸 상태 (roomThread 만 기록, 메인 스레드만 읽음)
+    std::atomic<RoomState> roomState_{RoomState::Idle};
+    std::atomic<int>       roomPeerCount_{0};
+    mutable std::mutex     roomMu_;
+    std::string            roomCode_;  // 서버가 준 코드 (CREATE) 또는 시도한 코드 (JOIN)
+    // 룸 스레드로 전달될 아웃바운드 프레임 큐 (READY/ROOM_LEAVE 등).
+    std::mutex                        roomSendMu_;
+    std::deque<std::vector<uint8_t>>  roomSendQ_;
 
     std::atomic<bool> quit{false};
     std::atomic<bool> connected{false};
@@ -128,8 +186,12 @@ private:
     std::atomic<uint32_t> lastRemoteTick{0};
     std::atomic<uint32_t> lastLocalTick{0};
 
-    std::atomic<uint32_t> lastHashTickRemote{0};
-    std::atomic<uint64_t> lastHashRemote{0};
+    // 주의: tick 과 hash 는 pair 로 원자 갱신되어야 한다. 두 atomic 을 쪼개서
+    // 쓰면 store 사이에 reader 가 들어가 새 tick + 옛 hash 를 읽어 DESYNC 오탐.
+    // 단일 mutex 로 pair 전체를 보호. HASH 프레임은 10s 주기라 lock 부담 없음.
+    mutable std::mutex hashMu_;
+    uint32_t lastHashTickRemote{0};
+    uint64_t lastHashRemote{0};
 
     std::atomic<uint8_t> localGameOverChoice{0};
     std::atomic<uint8_t> remoteGameOverChoice{0};
@@ -138,6 +200,10 @@ private:
     // lastPongMs 는 ready=true 전환 시점에 now 로 초기화.
     std::atomic<int64_t> lastPongMs{0};
     std::atomic<int64_t> lastPingSentMs{0};
+
+    // 채팅 수신 큐 — io 스레드가 채우고 메인 스레드가 PullChat 으로 비움.
+    std::mutex               chatMu_;
+    std::deque<std::string>  chatQ_;
 };
 
 }

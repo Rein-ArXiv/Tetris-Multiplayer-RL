@@ -104,8 +104,17 @@ class BotSession:
     # ---- connection lifecycle -------------------------------------------
     def connect(self) -> None:
         """Open the TCP connection and queue the initial HELLO frame."""
-        self.sock = socket.create_connection((self.host, self.port))
-        self.sock.setblocking(False)
+        sock = socket.create_connection((self.host, self.port))
+        try:
+            sock.setblocking(False)
+        except OSError:
+            # setblocking 실패 시 fd 가 새어나가지 않도록 즉시 닫는다.
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
+        self.sock = sock
         self.connected = True
         # HELLO payload is a single u16=1 (matches Session::Connect)
         self.send_queue.append(build_frame(MsgType.HELLO, struct.pack("<H", 1)))
@@ -199,6 +208,11 @@ class BotSession:
             if len(payload) >= 4 + 2:
                 from_tick = le_read_u32(payload, 0)
                 count = struct.unpack_from("<H", payload, 4)[0]
+                # Match session.cpp:698 — reject if the claimed count doesn't
+                # fit in the payload. Without this a malformed/truncated frame
+                # silently drops ticks instead of failing loudly.
+                if 6 + count > len(payload):
+                    return
                 masks = payload[6 : 6 + count]
                 for i, mask in enumerate(masks):
                     tick = from_tick + i
@@ -228,7 +242,7 @@ class BotSession:
             self.send_queue.append(build_frame(MsgType.PONG, payload))
 
         elif msg_type is MsgType.PONG:
-            # RTT measurement hook — not implemented yet.
+            # RTT measurement can be added here if the bot needs latency stats.
             pass
 
     # ---- send helpers ----------------------------------------------------

@@ -23,6 +23,10 @@ option(TETRIS_BUILD_GAME  "Build the handmade game executable"              ON)
 option(TETRIS_BUILD_PY    "Build the pybind11 module (tetris_py)"           OFF)
 option(TETRIS_BUILD_TEST  "Build the SimGame determinism test"              ON)
 option(TETRIS_BUILD_RELAY "Build the tetris_relay matchmaking server"       OFF)
+# TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
+# OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 실행 시 모델 로드가
+# 항상 실패 → 메뉴에서 Single vs Bot 이 회색 비활성으로 표시된다.
+option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
 
 # TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
 # Default ON on non-Windows so macOS/Linux users get it automatically.
@@ -58,11 +62,15 @@ set(TETRIS_SIM_HEADERS
 # Target: tetris (Handmade Win32 + OpenGL game)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_GAME)
-    # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹
+    # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇
+    #   bot/*.cpp 는 TETRIS_BUILD_BOT 과 관계없이 항상 컴파일한다 — OFF 일 때
+    #   bot_onnx.cpp 는 자동으로 스텁 모드(TETRIS_HAS_ONNXRUNTIME 미정의)로
+    #   빌드되어 main.cpp 의 호출부만 정상 링크된다.
     set(TETRIS_GAME_COMMON
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
         src/game.cpp
+        src/gui.cpp
         src/colors.cpp
         core/replay.cpp
         net/socket.cpp
@@ -70,6 +78,9 @@ if (TETRIS_BUILD_GAME)
         net/session.cpp
         renderer/renderer.cpp
         renderer/shake.cpp
+        renderer/image.cpp
+        bot/placement.cpp
+        bot/bot_onnx.cpp
     )
 
     set(TETRIS_GAME_HEADERS
@@ -84,7 +95,10 @@ if (TETRIS_BUILD_GAME)
         renderer/renderer.h
         renderer/shaders.h
         renderer/shake.h
+        renderer/image.h
         audio/audio.h
+        bot/placement.h
+        bot/bot_onnx.h
     )
 
     if (TETRIS_USE_SDL2)
@@ -110,7 +124,7 @@ if (TETRIS_BUILD_GAME)
         if (APPLE)
             target_link_libraries(tetris PRIVATE "-framework OpenGL")
         elseif (WIN32)
-            target_link_libraries(tetris PRIVATE opengl32 ws2_32)
+            target_link_libraries(tetris PRIVATE opengl32 gdiplus ws2_32)
         else()
             find_package(OpenGL REQUIRED)
             target_link_libraries(tetris PRIVATE OpenGL::GL)
@@ -129,16 +143,85 @@ if (TETRIS_BUILD_GAME)
         target_include_directories(tetris PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
         if (WIN32)
-            target_link_libraries(tetris PRIVATE opengl32 gdi32 winmm ws2_32 xaudio2 ole32)
+            target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()
     endif()
 
-    # Copy assets (fonts + sounds)
-    add_custom_target(copy_assets ALL
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Font ${CMAKE_CURRENT_BINARY_DIR}/Font
+    # ------------------------------------------------------------------------
+    # Optional: ONNX Runtime for Section C (Single vs Bot inference)
+    # third_party/onnxruntime/ 에 공식 CPU 번들을 풀어두면 링크된다.
+    # 없거나 OFF 면 bot/bot_onnx.cpp 가 스텁으로 빌드됨 → Load 항상 실패.
+    # ------------------------------------------------------------------------
+    if (TETRIS_BUILD_BOT)
+        set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
+        if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
+            message(FATAL_ERROR
+                "TETRIS_BUILD_BOT=ON 이지만 ${ORT_ROOT}/include/onnxruntime_cxx_api.h 가 없습니다. "
+                "third_party/fetch_onnxruntime.sh 로 벤더링하거나 TETRIS_BUILD_BOT=OFF 로 빌드하세요.")
+        endif()
+        target_compile_definitions(tetris PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
+        target_include_directories(tetris PRIVATE "${ORT_ROOT}/include")
+        if (WIN32)
+            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
+        elseif (APPLE)
+            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
+        else()
+            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
+        endif()
+    endif()
+
+    # ------------------------------------------------------------------------
+    # Section G — 플랫폼별 배포 설정 (rpath, macOS .app 번들 메타)
+    # ------------------------------------------------------------------------
+    if (APPLE)
+        # macOS .app 번들 — scripts/release_macos.sh 가 이 구조를 전제.
+        # Info.plist 를 configure_file 로 @변수@ 치환 후 빌드 디렉터리에 생성.
+        set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.rein.tetris")
+        set(MACOSX_BUNDLE_BUNDLE_NAME "Tetris")
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platform/macos/Info.plist.in")
+            if (NOT DEFINED PROJECT_VERSION)
+                set(PROJECT_VERSION "1.0.0")
+            endif()
+            configure_file(
+                "${CMAKE_CURRENT_SOURCE_DIR}/platform/macos/Info.plist.in"
+                "${CMAKE_CURRENT_BINARY_DIR}/Info.plist"
+                @ONLY)
+        endif()
+        # dylib 탐색: @executable_path/../Frameworks 를 rpath 에 추가.
+        set_target_properties(tetris PROPERTIES
+            BUILD_RPATH "@executable_path/../Frameworks"
+            INSTALL_RPATH "@executable_path/../Frameworks")
+    elseif (UNIX)
+        # Linux — 번들에 동봉된 .so 를 찾기 위해 $ORIGIN/lib 을 rpath 로 설정.
+        set_target_properties(tetris PROPERTIES
+            BUILD_RPATH "$ORIGIN/lib"
+            INSTALL_RPATH "$ORIGIN/lib")
+    endif()
+
+    # tetris_relay 도 Linux rpath 필요 (릴레이 단독 배포 시)
+    if (UNIX AND NOT APPLE AND TETRIS_BUILD_RELAY)
+        # tetris_relay 는 아래에서 별도 정의되지만, 이 시점에 아직 없을 수 있으므로
+        # TETRIS_BUILD_RELAY 블록에서 직접 설정한다 (아래 참조).
+    endif()
+
+    # Copy assets (fonts + sounds + icons + model)
+    #   assets/ 와 model/ 은 없을 수도 있으므로 directory 존재 검사 후 복사.
+    set(_copy_cmds
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Font   ${CMAKE_CURRENT_BINARY_DIR}/Font
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Sounds ${CMAKE_CURRENT_BINARY_DIR}/Sounds
+    )
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+        list(APPEND _copy_cmds
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${CMAKE_CURRENT_BINARY_DIR}/assets)
+    endif()
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/model")
+        list(APPEND _copy_cmds
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/model ${CMAKE_CURRENT_BINARY_DIR}/model)
+    endif()
+    add_custom_target(copy_assets ALL
+        ${_copy_cmds}
         DEPENDS tetris
     )
 endif()
@@ -192,11 +275,13 @@ if (TETRIS_BUILD_RELAY)
         server/matchmaker.cpp
         server/player_conn.cpp
         server/relay.cpp
+        server/room.cpp
         net/socket.cpp
         net/framing.cpp
         server/matchmaker.h
         server/player_conn.h
         server/relay.h
+        server/room.h
         net/socket.h
         net/framing.h
     )
@@ -207,5 +292,11 @@ if (TETRIS_BUILD_RELAY)
         # Linux/macOS: std::thread 는 pthread 를 필요로 함 (libstdc++)
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_relay PRIVATE Threads::Threads)
+    endif()
+    # Section G: Linux 배포 번들용 rpath
+    if (UNIX AND NOT APPLE)
+        set_target_properties(tetris_relay PROPERTIES
+            BUILD_RPATH "$ORIGIN/lib"
+            INSTALL_RPATH "$ORIGIN/lib")
     endif()
 endif()

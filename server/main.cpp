@@ -15,6 +15,7 @@
 #include "matchmaker.h"
 #include "player_conn.h"
 #include "relay.h"
+#include "room.h"
 #include "../net/socket.h"
 
 #include <atomic>
@@ -87,7 +88,8 @@ int main(int argc, char** argv) {
     std::cout << "[relay] local IP: " << net::get_local_ip() << "\n";
     std::cout << "[relay] Ctrl+C to stop\n";
 
-    relay::Matchmaker mm;
+    relay::Matchmaker   mm;
+    relay::RoomRegistry rr;
 
     // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작
     std::thread matcher([&mm] {
@@ -112,11 +114,12 @@ int main(int argc, char** argv) {
         const uint32_t id = next_conn_id++;
         std::cout << "[relay] accept conn=" << id << "\n";
         std::thread(relay::playerConnThread,
-                    std::move(client), id, std::ref(mm)).detach();
+                    std::move(client), id, std::ref(mm), std::ref(rr)).detach();
     }
 
     std::cout << "[relay] shutting down...\n";
     mm.shutdown();
+    rr.shutdown();
     if (matcher.joinable()) matcher.join();
     net::net_shutdown();
     std::cout << "[relay] done\n";

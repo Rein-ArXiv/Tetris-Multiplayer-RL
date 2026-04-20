@@ -26,8 +26,8 @@ cmake --build build -j --target tetris_py
 cp build/tetris_py*.so python/sim/
 ```
 
-`-DTETRIS_BUILD_GAME=OFF` skips the raylib executable, which means you do not
-need raylib installed at all on Colab — only the headless sim is built.
+`-DTETRIS_BUILD_GAME=OFF` skips the game executable, so Colab only builds the
+headless sim module.
 
 ## Windows (MSVC or w64devkit)
 
@@ -44,7 +44,7 @@ copy build\Release\tetris_py*.pyd python\sim\
 ```
 
 Note that on Windows you can leave `-DTETRIS_BUILD_GAME=ON` (the default) so
-the same configure pass also builds the `tetris.exe` raylib game.
+the same configure pass also builds the handmade OpenGL `tetris.exe`.
 
 ## Smoke test
 

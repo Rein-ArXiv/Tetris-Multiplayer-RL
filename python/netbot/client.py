@@ -70,8 +70,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--hash-interval",
         type=int,
-        default=60,
-        help="Send a HASH cross-check every N ticks (0 to disable)",
+        # C++ 클라의 HASH_PERIOD_TICKS 와 동일 (600틱 = 10초). 다른 값을 쓰면
+        # C++ 호스트 쪽 링과 tick 이 맞지 않아 DESYNC 오탐 가능.
+        default=600,
+        help="Send a HASH cross-check every N ticks (0 to disable). "
+        "Default matches C++ HASH_PERIOD_TICKS=600.",
     )
     parser.add_argument(
         "--log-level",
@@ -140,7 +143,15 @@ def run() -> int:
     sim_self = SimGame(seed)
     sim_opp = SimGame(seed)
 
-    runner = make_runner(args.policy, args.device)
+    # 체크포인트 로드는 60Hz 루프 진입 전에 완료해야 한다. 로드 실패(파일 부재,
+    # 아키텍처 버전 불일치, 디바이스 문제 등)를 여기서 잡아 세션을 깔끔히 닫고
+    # 종료하지 않으면 호스트 쪽은 상대가 사라졌다고 오해하여 세션이 stall 된다.
+    try:
+        runner = make_runner(args.policy, args.device)
+    except Exception as exc:
+        log.error("Failed to initialize runner: %s", exc)
+        sess.close()
+        return 4
 
     pending_inputs: deque[int] = deque()
     last_piece_id = sim_self.current_block_id()
@@ -216,21 +227,27 @@ def run() -> int:
             sim_tick += 1
 
         # ---- Periodic hash cross-check --------------------------------
+        # C++ 클라와 규약 맞춤:
+        #   tick = sim_tick (현재 틱 — sim_tick-1 아님)
+        #   hash = state_self ^ state_opp (결합 XOR, single sim 아님)
+        # lockstep 불변식: HOST.gameLocal == NETBOT.sim_opp,
+        #                 HOST.gameRemote == NETBOT.sim_self.
+        # 따라서 HOST 의 XOR(gameLocal ^ gameRemote) == NETBOT 의 XOR(self ^ opp).
         if (
             args.hash_interval
             and sim_tick > 0
             and sim_tick % args.hash_interval == 0
         ):
-            h = sim_self.state_hash()
-            sess.send_hash(sim_tick - 1, h)
+            local_xor = sim_self.state_hash() ^ sim_opp.state_hash()
+            sess.send_hash(sim_tick, local_xor)
             if (
-                sess.last_remote_hash_tick == sim_tick - 1
-                and sess.last_remote_hash != sim_opp.state_hash()
+                sess.last_remote_hash_tick == sim_tick
+                and sess.last_remote_hash != local_xor
             ):
                 log.warning(
-                    "DESYNC at tick %d: opp_hash=0x%016x remote=0x%016x",
-                    sim_tick - 1,
-                    sim_opp.state_hash(),
+                    "DESYNC at tick %d: local_xor=0x%016x remote=0x%016x",
+                    sim_tick,
+                    local_xor,
                     sess.last_remote_hash,
                 )
 

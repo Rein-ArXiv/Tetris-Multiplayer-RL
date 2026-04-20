@@ -136,6 +136,13 @@ static char s_char_queue[64] = {};
 static int  s_char_head = 0;
 static int  s_char_tail = 0;
 
+// 마우스 상태 — Win32 백엔드와 동일 의미
+static int   s_mouse_x = 0;
+static int   s_mouse_y = 0;
+static bool  s_mouse_state[3] = {};
+static bool  s_mouse_prev[3]  = {};
+static float s_mouse_wheel_accum = 0.0f;
+
 static uint64_t s_freq        = 1;
 static uint64_t s_init_time   = 0;
 static uint64_t s_frame_start = 0;
@@ -157,6 +164,11 @@ static int sdl_to_vk(SDL_Keycode k)
     case SDLK_r:        return PKEY_R;
     case SDLK_h:        return PKEY_H;
     case SDLK_p:        return PKEY_P;
+    case SDLK_c:        return PKEY_C;
+    case SDLK_j:        return PKEY_J;
+    case SDLK_t:        return PKEY_T;
+    case SDLK_y:        return PKEY_Y;
+    case SDLK_n:        return PKEY_N;
     case SDLK_F5:       return PKEY_F5;
     case SDLK_F6:       return PKEY_F6;
     default: return -1;
@@ -220,6 +232,8 @@ bool platform_should_close() { return s_should_close; }
 float platform_begin_frame()
 {
     memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
+    memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_mouse_wheel_accum = 0.0f;
 
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
@@ -229,7 +243,6 @@ float platform_begin_frame()
         case SDL_KEYDOWN: {
             int vk = sdl_to_vk(ev.key.keysym.sym);
             if (vk >= 0 && vk < 256) s_key_state[vk] = true;
-            if (ev.key.keysym.sym == SDLK_ESCAPE) s_should_close = true;
         } break;
         case SDL_KEYUP: {
             int vk = sdl_to_vk(ev.key.keysym.sym);
@@ -247,6 +260,25 @@ float platform_begin_frame()
                 }
             }
         } break;
+        case SDL_MOUSEMOTION:
+            s_mouse_x = ev.motion.x;
+            s_mouse_y = ev.motion.y;
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP: {
+            int b = -1;
+            if      (ev.button.button == SDL_BUTTON_LEFT)   b = 0;
+            else if (ev.button.button == SDL_BUTTON_RIGHT)  b = 1;
+            else if (ev.button.button == SDL_BUTTON_MIDDLE) b = 2;
+            if (b >= 0) {
+                s_mouse_state[b] = (ev.type == SDL_MOUSEBUTTONDOWN);
+                s_mouse_x = ev.button.x;
+                s_mouse_y = ev.button.y;
+            }
+        } break;
+        case SDL_MOUSEWHEEL:
+            s_mouse_wheel_accum += (float)ev.wheel.y;
+            break;
         case SDL_WINDOWEVENT:
             if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
                 ev.window.event == SDL_WINDOWEVENT_RESIZED) {
@@ -289,6 +321,30 @@ char platform_get_char_pressed()
     s_char_head = (s_char_head + 1) % 64;
     return c;
 }
+
+// ─── 마우스 API (Win32 백엔드와 동일 시그니처) ─────────────────────────────────
+int platform_mouse_x() { return s_mouse_x; }
+int platform_mouse_y() { return s_mouse_y; }
+
+bool platform_mouse_pressed(int button)
+{
+    if (button < 0 || button >= 3) return false;
+    return s_mouse_state[button] && !s_mouse_prev[button];
+}
+
+bool platform_mouse_down(int button)
+{
+    if (button < 0 || button >= 3) return false;
+    return s_mouse_state[button];
+}
+
+bool platform_mouse_released(int button)
+{
+    if (button < 0 || button >= 3) return false;
+    return !s_mouse_state[button] && s_mouse_prev[button];
+}
+
+float platform_mouse_wheel() { return s_mouse_wheel_accum; }
 
 double platform_get_time()
 {

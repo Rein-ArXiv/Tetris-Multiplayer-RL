@@ -4,7 +4,7 @@
 #include <vector>
 
 // TCP 소켓 추상화: 플랫폼 독립적 네트워킹 (Windows WinSock / Linux BSD)
-// 상세: DOCUMENTATION.md
+// 상세: ARCHITECTURE.md §7.1
 
 namespace net {
 

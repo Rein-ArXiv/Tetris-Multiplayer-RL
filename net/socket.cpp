@@ -19,6 +19,7 @@ using socklen_t = int;
 #  include <sys/socket.h>
 #  include <netdb.h>
 #  include <netinet/in.h>
+#  include <netinet/tcp.h>
 #  include <arpa/inet.h>
 #  include <unistd.h>
 #  include <fcntl.h>
@@ -73,6 +74,21 @@ static bool set_nonblocking(int fd) {
 #endif
 }
 
+// [NET] Nagle 비활성화 (TCP_NODELAY).
+//   기본 Nagle 알고리즘은 작은 패킷(<MSS) 을 최대 200ms 까지 버퍼링해 모아
+//   보낸다. 우리 INPUT 프레임은 7바이트 / 60Hz 로 송신 → Nagle ON 이면 각
+//   프레임이 수십~200ms 지연되어 도착한다. lockstep 의 safeTick 은 상대 INPUT
+//   도착까지 대기하므로 → 체감상 "호스트가 렉 걸림".
+//   게임 트래픽은 지연이 대역폭보다 압도적으로 치명적 → 반드시 NODELAY.
+static int set_nodelay(int fd) {
+    int yes = 1;
+#ifdef _WIN32
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
+#else
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+#endif
+}
+
 // [NET] 포트에서 연결 대기 소켓을 생성합니다.
 TcpSocket tcp_listen(uint16_t port, int backlog) {
     TcpSocket s{};
@@ -111,8 +127,9 @@ TcpSocket tcp_accept(const TcpSocket& server) {
     sockaddr_in addr{}; socklen_t alen = sizeof(addr);
     int fd = (int)::accept(server.fd, (sockaddr*)&addr, &alen);
     if (fd < 0) return c;
-    // 수락된 소켓을 논블로킹으로 설정
+    // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
+    set_nodelay(fd);
     c.fd = fd;
     return c;
 }
@@ -142,8 +159,9 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     }
     freeaddrinfo(res);
     if (fd < 0) return s;
-    // 연결된 소켓을 논블로킹으로 설정
+    // 연결된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
+    set_nodelay(fd);
     s.fd = fd;
     return s;
 }

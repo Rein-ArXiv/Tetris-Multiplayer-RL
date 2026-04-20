@@ -1,9 +1,47 @@
 #include "matchmaker.h"
 
+#include "../net/framing.h"
+
 #include <chrono>
+#include <iostream>
 #include <utility>
+#include <vector>
 
 namespace relay {
+
+namespace {
+
+bool waitingPlayerStillActive(PlayerInfo& p) {
+    std::vector<uint8_t> stream;
+    if (!net::tcp_recv_some(p.sock, stream)) {
+        std::cerr << "[matchmaker] conn=" << p.conn_id
+                  << " left queue before match\n";
+        net::tcp_close(p.sock);
+        return false;
+    }
+
+    if (!stream.empty()) {
+        std::vector<net::Frame> frames;
+        if (!net::parse_frames(stream, frames)) {
+            std::cerr << "[matchmaker] conn=" << p.conn_id
+                      << " sent malformed queue frame\n";
+            net::tcp_close(p.sock);
+            return false;
+        }
+        for (const auto& f : frames) {
+            if (f.type == net::MsgType::QUEUE_CANCEL) {
+                std::cerr << "[matchmaker] conn=" << p.conn_id
+                          << " cancelled queue\n";
+                net::tcp_close(p.sock);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+}  // namespace
 
 Matchmaker::Matchmaker() {
     // 서버 부팅 시각 기반 초기 seed. 재시작마다 다른 게임이 나오도록.
@@ -37,9 +75,21 @@ void Matchmaker::enqueue(PlayerInfo p) {
 
 std::optional<Match> Matchmaker::waitForPair() {
     std::unique_lock<std::mutex> lk(mu);
-    // predicate 형태의 wait: spurious wakeup 에 안전
-    cv.wait(lk, [this] { return stopping.load() || waiting.size() >= 2; });
-    if (stopping.load()) return std::nullopt;
+    while (true) {
+        // predicate 형태의 wait: spurious wakeup 에 안전
+        cv.wait(lk, [this] { return stopping.load() || waiting.size() >= 2; });
+        if (stopping.load()) return std::nullopt;
+
+        while (!waiting.empty() && !waitingPlayerStillActive(waiting.front())) {
+            waiting.pop_front();
+        }
+        if (waiting.size() < 2) continue;
+
+        while (waiting.size() >= 2 && !waitingPlayerStillActive(waiting[1])) {
+            waiting.erase(waiting.begin() + 1);
+        }
+        if (waiting.size() >= 2) break;
+    }
 
     Match m;
     m.a = std::move(waiting.front()); waiting.pop_front();

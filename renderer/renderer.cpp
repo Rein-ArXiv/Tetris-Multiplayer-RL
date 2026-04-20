@@ -57,6 +57,10 @@ extern void   (APIENTRY *glDeleteProgram)(GLuint);
 void renderer_text_set_screen_height(int h);
 void renderer_text_shutdown();
 
+// 스프라이트/이미지 서브시스템 훅
+void image_init();
+void image_shutdown();
+
 // ─── 렌더러 상태 ──────────────────────────────────────────────────────────────
 static int    s_screen_w = 0;
 static int    s_screen_h = 0;
@@ -151,6 +155,14 @@ void renderer_init(int screen_w, int screen_h)
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
+
+    // 알파 블렌딩 — 고스트 블록 반투명, UI 페이드 등에 필요.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // 스프라이트(이미지 쿼드) 셰이더/VAO — 지연 초기화하면 호출 순서에
+    // 민감해지므로 여기서 함께 준비한다. image_load/draw_image 가 이후 동작.
+    image_init();
 }
 
 void renderer_begin(Color bg)
@@ -182,6 +194,7 @@ void renderer_set_view_offset(int dx, int dy)
 
 void renderer_shutdown()
 {
+    image_shutdown();
     renderer_text_shutdown();
     if (s_rect_prog) { glDeleteProgram(s_rect_prog); s_rect_prog = 0; }
     if (s_rect_vbo)  { glDeleteBuffers(1, &s_rect_vbo); s_rect_vbo = 0; }

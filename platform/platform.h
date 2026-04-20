@@ -42,6 +42,11 @@ enum PlatformKey : int {
     PKEY_R      = 'R',
     PKEY_H      = 'H',
     PKEY_P      = 'P',
+    PKEY_C      = 'C',
+    PKEY_J      = 'J',
+    PKEY_T      = 'T',
+    PKEY_Y      = 'Y',
+    PKEY_N      = 'N',
     PKEY_F5     = 0x74,  // VK_F5
     PKEY_F6     = 0x75,  // VK_F6
 };
@@ -76,6 +81,20 @@ bool   platform_key_down(int key);
 
 // WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0). GetCharPressed() 대체.
 char   platform_get_char_pressed();
+
+// ─── 마우스 ───────────────────────────────────────────────────────────────────
+// 버튼 인덱스: 0 = Left, 1 = Right, 2 = Middle.
+// 좌표는 클라이언트 영역 기준 (0,0 = 좌상단). 창 밖이면 마지막 값 유지.
+int    platform_mouse_x();
+int    platform_mouse_y();
+// 이번 프레임에 처음 눌림 (edge). IsMouseButtonPressed 대체.
+bool   platform_mouse_pressed(int button);
+// 현재 누르고 있음 (level). IsMouseButtonDown 대체.
+bool   platform_mouse_down(int button);
+// 이번 프레임에 뗌 (edge). IsMouseButtonReleased 대체.
+bool   platform_mouse_released(int button);
+// 이번 프레임 휠 스크롤 누적 (위로 양수). 없으면 0. GetMouseWheelMove 대체.
+float  platform_mouse_wheel();
 
 // platform_init 이후 경과 초. GetTime() 대체.
 double platform_get_time();

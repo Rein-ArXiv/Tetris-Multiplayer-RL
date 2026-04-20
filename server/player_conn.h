@@ -11,10 +11,15 @@
 namespace relay {
 
 class Matchmaker;
+class RoomRegistry;
 
 // playerConnThread 는 detached 스레드에서 실행됨.
-// 성공 시: matchmaker 에 PlayerInfo 등록 후 즉시 종료 (fd 소유권 이전).
-// 실패 시: tcp_close(sock) 후 종료.
-void playerConnThread(net::TcpSocket sock, uint32_t conn_id, Matchmaker& mm);
+// 첫 프레임이:
+//   - QUEUE_JOIN   → matchmaker 에 등록 후 종료
+//   - ROOM_CREATE  → RoomRegistry::handleCreate 로 이관 (내부에서 블로킹)
+//   - ROOM_JOIN    → RoomRegistry::handleJoin  로 이관 (내부에서 블로킹)
+// 타임아웃/EOF/알 수 없는 프레임: tcp_close(sock) 후 종료.
+void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
+                      Matchmaker& mm, RoomRegistry& rr);
 
 }  // namespace relay

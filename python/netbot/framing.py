@@ -53,8 +53,19 @@ class MsgType(enum.IntEnum):
     # Relay / matchmaking extensions (only used between client and relay server).
     # After MATCH_FOUND the relay forwards raw bytes, so these types never reach
     # the lockstep game loop — they live at the "outer" protocol layer.
-    QUEUE_JOIN = 10   # C→S: empty payload (anonymous queue)
-    MATCH_FOUND = 12  # S→C: [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
+    QUEUE_JOIN = 10     # C→S: empty payload (anonymous queue)
+    QUEUE_CANCEL = 11   # C→S: empty payload (cancel matchmaking)
+    MATCH_FOUND = 12    # S→C: [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
+
+    # Custom rooms (Section D) — 5-char code flow
+    ROOM_CREATE = 13    # C→S: empty payload; server mints a code and echoes ROOM_INFO
+    ROOM_JOIN = 14      # C→S: [code_len:1][code:N]
+    ROOM_INFO = 15      # S→C: [code_len:1][code:N][status:1][peer_count:1]
+                        #   status: 0=waiting 1=full 2=notfound 3=gonefull
+    ROOM_LEAVE = 16     # C→S: empty payload
+    READY = 17          # C→S, S→C(forward): [ready:1] (1=ready, 0=not)
+
+    CHAT = 20           # bidirectional: [text_len:2 LE][utf8:N] (relay passes through)
 
 
 def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:

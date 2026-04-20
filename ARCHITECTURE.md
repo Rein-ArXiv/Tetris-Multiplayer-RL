@@ -47,14 +47,18 @@
 
 | 시나리오 | 실행 방법 | 의존성 |
 |---|---|---|
-| 로컬 1인/2인 멀티플레이 | `tetris.exe` | raylib, WinSock2 |
+| 로컬 1인/2인 멀티플레이 | `tetris` | OpenGL + (Win32 핸드메이드 \| SDL2), WinSock2/BSD 소켓 |
+| 매칭/릴레이 서버 | `tetris_relay` | WinSock2/BSD 소켓 (헤드리스, GUI/오디오 없음) |
 | Colab RL 학습 | `from sim import SimGame` (pybind11) | pybind11, numpy, torch |
-| 로컬 봇 대전 | `python -m netbot.client --connect ...` | SimGame .pyd + torch |
+| 로컬 봇 대전 (TCP) | `python -m netbot.client --connect ...` | SimGame .pyd + torch |
+| 로컬 봇 대전 (인-프로세스) | 메뉴 → Single vs Bot | ONNX Runtime + `model/policy.onnx` |
 
 **설계 원칙:**
-- `SimGame`이 **모든 게임 로직의 단일 진실 공급원(single source of truth)**. raylib/오디오 없음.
+- `SimGame`이 **모든 게임 로직의 단일 진실 공급원(single source of truth)**. 렌더링/오디오 없음.
+- 렌더링 의존성 없음: 프로젝트는 raylib을 **링크하지 않는다**. Windows는 핸드메이드 Win32+OpenGL, macOS/Linux는 SDL2+OpenGL 백엔드를 사용.
 - 결정론: XorShift64\* RNG + FNV-1a64 상태 해시 → 플랫폼 무관 동일 결과.
 - lockstep 네트워킹: 양측이 같은 시드 + 같은 입력 순서를 가지므로 별도 상태 동기화 패킷 불필요.
+- 네트워크 확장: PING/PONG 하트비트(LinkStatus OK/Stalled/Lost), 5자리 코드 커스텀 룸, 인-게임 채팅, 10초 주기 자동 HASH 검증 + DESYNC 배너.
 
 ---
 
@@ -63,12 +67,12 @@
 ```
 Tetris-Multiplayer-RL/
 │
-├── src/                    ← C++ 게임 로직 (SimGame + raylib 래퍼)
+├── src/                    ← C++ 게임 로직 (SimGame + 렌더링 래퍼)
 │   ├── sim_game.h/.cpp     ← 헤드리스 시뮬레이터 (핵심)
 │   ├── sim_grid.h          ← 20×10 보드 (헤드리스)
 │   ├── sim_block.h         ← 테트로미노 상태 (헤드리스)
 │   ├── sim_blocks.h        ← L/J/I/O/S/T/Z 팩토리
-│   ├── game.h/.cpp         ← raylib 래퍼 (SimGame 위임)
+│   ├── game.h/.cpp         ← 렌더링 래퍼 (SimGame 위임, OpenGL 2D 렌더러 사용)
 │   ├── colors.h/.cpp       ← 색상 팔레트
 │   ├── position.h/.cpp     ← (row, col) 좌표
 │   └── main.cpp            ← 진입점 + FSM + 60Hz 루프
@@ -80,10 +84,35 @@ Tetris-Multiplayer-RL/
 │   ├── hash.h              ← FNV-1a 64-bit 해시
 │   ├── replay.h/.cpp       ← 입력 리플레이 저장/로드
 │
+├── platform/               ← 창/입력 백엔드 (2개 중 택1)
+│   ├── platform.h          ← 공용 인터페이스
+│   ├── win32.cpp           ← Handmade Win32 (Windows 기본)
+│   ├── sdl.cpp             ← SDL2 (macOS/Linux 기본, Windows 옵션)
+│   └── macos/Info.plist.in ← .app 번들 메타 (Section G)
+│
+├── renderer/               ← OpenGL 2D 렌더러
+│   ├── renderer.h/.cpp     ← 사각형/라인/투영 행렬
+│   ├── shaders.h           ← GLSL 인라인 셰이더
+│   ├── text_win32.cpp      ← Win32 GDI 텍스트
+│   ├── text_stb.cpp        ← stb_truetype 텍스트 (SDL2 경로)
+│   ├── shake.h/.cpp        ← 화면 흔들림 (Section I)
+│   └── image.h/.cpp        ← PNG 이미지/콜아웃 (Section I)
+│
+├── bot/                    ← ONNX Runtime 인-프로세스 추론 (Section C)
+│   ├── bot_onnx.h/.cpp     ← Ort::Session 래퍼 (TETRIS_BUILD_BOT=ON 시)
+│   └── placement.h/.cpp    ← 행동 선택 → 프레임 마스크 시퀀스
+│
+├── server/                 ← 헤드리스 매치메이커/릴레이 (tetris_relay)
+│   ├── main.cpp            ← 진입점
+│   ├── player_conn.h/.cpp  ← 플레이어 소켓 상태 머신
+│   ├── matchmaker.h/.cpp   ← 랜덤 큐 페어링
+│   ├── room.h/.cpp         ← 5자리 코드 커스텀 룸 (Section D)
+│   └── relay.h/.cpp        ← 페어 간 바이트 포워더
+│
 ├── net/                    ← 네트워킹 3계층
 │   ├── socket.h/.cpp       ← 크로스플랫폼 TCP
-│   ├── framing.h/.cpp      ← 메시지 직렬화
-│   └── session.h/.cpp      ← lockstep P2P 세션
+│   ├── framing.h/.cpp      ← 메시지 직렬화 (HELLO/SEED/INPUT/ACK/HASH/PING/PONG/ROOM_*/CHAT/...)
+│   └── session.h/.cpp      ← lockstep P2P 세션 + Host/Connect/QueueJoin/RoomCreate/RoomJoin
 │
 ├── bindings/
 │   └── tetris_py.cpp       ← pybind11 SimGame 노출
@@ -126,7 +155,7 @@ Tetris-Multiplayer-RL/
 flowchart TB
     subgraph CPP["C++ (src/ + core/ + net/)"]
         direction TB
-        subgraph PURE["순수 시뮬 (raylib 없음)"]
+        subgraph PURE["순수 시뮬 (렌더링 의존성 없음)"]
             SG[SimGame<br/>sim_game.h/.cpp]
             SGR[SimGrid<br/>sim_grid.h]
             SB[SimBlock / SimBlocks<br/>sim_block.h / sim_blocks.h]
@@ -140,10 +169,12 @@ flowchart TB
             SG --> CORE_INPUT
         end
 
-        subgraph GAME["raylib 래퍼"]
+        subgraph GAME["렌더링 래퍼"]
             G[Game<br/>src/game.h/.cpp]
             G -- "sim 멤버" --> SG
-            G -- "오디오/드로잉" --> RL[raylib]
+            G -- "드로잉" --> REN[renderer/*.cpp<br/>OpenGL 2D]
+            G -- "오디오" --> AUD[audio/*.cpp<br/>XAudio2 / SDL_OpenAudioDevice]
+            REN --> PLAT[platform/*.cpp<br/>Win32 or SDL2]
         end
 
         subgraph NET["네트워킹"]
@@ -206,7 +237,7 @@ flowchart TB
 
 **파일:** `src/sim_game.h` (105줄), `src/sim_game.cpp` (327줄)
 
-`SimGame`은 **raylib·오디오·OS API에 전혀 의존하지 않는** 순수 C++ 테트리스 엔진입니다. 단독으로 빌드 가능하며, pybind11 모듈과 결정론 테스트가 이 파일만 사용합니다.
+`SimGame`은 **렌더링·오디오·OS API에 전혀 의존하지 않는** 순수 C++ 테트리스 엔진입니다. 단독으로 빌드 가능하며, pybind11 모듈과 결정론 테스트가 이 파일만 사용합니다.
 
 #### 데이터 멤버
 
@@ -290,12 +321,12 @@ Tick()
 MoveBlockLeft/Right(delta)
   ├── currentBlock.Move(0, delta)
   ├── IsBlockOutside || !BlockFits → 되돌리기 (Undo)
-  └── 성공 시 MakeGhostBlock()
+  └── 성공 시 lastMoveWasRotate=false, MakeGhostBlock()
 
 MoveBlockDown()
   ├── currentBlock.Move(1, 0)
   ├── IsBlockOutside || !BlockFits → 되돌리기 → LockBlock()
-  └── 성공 시 MakeGhostBlock()
+  └── 성공 시 lastMoveWasRotate=false, MakeGhostBlock()
 
 MoveBlockDrop()
   └── while(아직 이동 가능): MoveBlockDown()
@@ -304,13 +335,15 @@ MoveBlockDrop()
 RotateBlockImpl()
   ├── currentBlock.Rotate()
   ├── IsBlockOutside || !BlockFits → UndoRotation()
-  └── 성공 시: rotateSoundEvent=true, MakeGhostBlock()
+  └── 성공 시: lastMoveWasRotate=true, rotateSoundEvent=true, MakeGhostBlock()
 
 LockBlock()
+  ├── IsTSpinLock() → T-piece + 마지막 성공 이동이 회전 + pivot 모서리 3개 막힘
   ├── GetCellPositions() → grid에 id 기록
   ├── grid.ClearFullRows() → 지운 줄 수
-  ├── UpdateScore(linesCleared)
+  ├── UpdateScore(linesCleared, tSpin)
   ├── lines > 0 → clearSoundEvent=true
+  ├── attack_lines_for(linesCleared, tSpin)
   ├── currentBlock = nextBlock
   ├── nextBlock = GetRandomBlock()
   ├── MakeGhostBlock()
@@ -323,8 +356,9 @@ BlockFits(block)
 IsBlockOutside(block)
   └── 임의 타일이 [0,20)×[0,10) 벗어나면 true
 
-UpdateScore(lines)
-  └── +100/300/600/1000 (1/2/3/4줄)
+UpdateScore(lines, tSpin)
+  ├── 일반 클리어: +100/300/600/1000 (1/2/3/4줄)
+  └── T-spin: +400/800/1200/1600 (0/1/2/3줄)
 
 StateHash()
   └── FNV-1a64 체인:
@@ -333,6 +367,7 @@ StateHash()
       + nextBlock (id/rot/row/col)
       + rng.getState()
       + score + gameOver + gravityCounterTicks
+      + softDropCounterTicks + lastMoveWasRotate
 
 LegalPlacements()
   └── for rot in [0, cells.size()):
@@ -564,7 +599,7 @@ uint64_t fnv1a64_value(const T& v, uint64_t seed = FNV1A64_OFFSET);
 uint64_t h = fnv1a64(sim_grid.grid, sizeof(sim_grid.grid));
 h = fnv1a64_value(currentBlock.id, h);
 h = fnv1a64_value(currentBlock.rotationState, h);
-// ... (row/col, nextBlock, rng state, score, gameOver, gravityTicks)
+// ... (row/col, nextBlock, rng, score, timers, level, T-spin setup, combat)
 ```
 
 ---
@@ -834,15 +869,13 @@ stateDiagram-v2
 ### 60Hz 고정 틱 루프 (핵심 루프)
 
 ```cpp
-while (!WindowShouldClose()) {
-    UpdateMusicStream(..);
-
-    double dt = GetFrameTime();
-    if (dt > 0.1) dt = 0.1;              // 100ms 클램프
+while (!platform_should_close()) {
+    float dt = platform_begin_frame();   // 내부에서 100ms 클램프
+    AccumulateInput(chatComposing);
     accumulator += dt;
 
     while (accumulator >= SECONDS_PER_TICK) {
-        uint8_t mask = SampleInput();
+        uint8_t mask = ConsumeInput(chatComposing);
 
         if (mode == Single) {
             gameSingle.SubmitInput(mask);
@@ -866,28 +899,35 @@ while (!WindowShouldClose()) {
         accumulator -= SECONDS_PER_TICK;
     }
 
-    BeginDrawing();
+    renderer_begin({8, 10, 20, 255});
     // ... 모드별 렌더링 ...
-    EndDrawing();
+    renderer_end();
+    platform_end_frame();
 }
 ```
 
-### SampleInput()
+### AccumulateInput() / ConsumeInput()
 
 ```cpp
-static uint8_t SampleInput() {
-    uint8_t mask = INPUT_NONE;
-    if (IsKeyPressed(KEY_LEFT))  mask |= INPUT_LEFT;
-    if (IsKeyPressed(KEY_RIGHT)) mask |= INPUT_RIGHT;
-    if (IsKeyDown(KEY_DOWN))     mask |= INPUT_DOWN;   // 매 틱 발동 (DAS/ARR 개선 대상)
-    if (IsKeyPressed(KEY_UP))    mask |= INPUT_ROTATE;
-    if (IsKeyPressed(KEY_SPACE)) mask |= INPUT_DROP;
+static void AccumulateInput(bool suppress = false) {
+    if (suppress) { s_pendingInput = 0; return; }
+    if (platform_key_pressed(PKEY_LEFT))  s_pendingInput |= INPUT_LEFT;
+    if (platform_key_pressed(PKEY_RIGHT)) s_pendingInput |= INPUT_RIGHT;
+    if (platform_key_pressed(PKEY_UP))    s_pendingInput |= INPUT_ROTATE;
+    if (platform_key_pressed(PKEY_SPACE)) s_pendingInput |= INPUT_DROP;
+}
+
+static uint8_t ConsumeInput(bool suppress = false) {
+    uint8_t mask = s_pendingInput;
+    s_pendingInput = 0;
+    if (suppress) return 0;
+    mask |= HorizontalRepeatInput();       // LEFT/RIGHT DAS/ARR
+    if (platform_key_down(PKEY_DOWN)) mask |= INPUT_DOWN;
     return mask;
 }
 ```
 
-> **TODO:** 아래키의 `IsKeyDown`이 60fps로 매 틱 발동되어 너무 빠릅니다.
-> 계획된 개선: DAS(지연 10프레임) + ARR(반복 3프레임) 적용.
+> 클라이언트는 입력 edge/hold 를 누적한 뒤 `ConsumeInput()` 으로 틱마다 소비합니다. LEFT/RIGHT 반복은 클라이언트 DAS/ARR 카운터가 만들고, DOWN 반복 속도는 `SimGame` 의 `softDropCounterTicks` 가 제한합니다.
 
 ---
 
@@ -895,7 +935,7 @@ static uint8_t SampleInput() {
 
 **파일:** `bindings/tetris_py.cpp` (134줄)
 
-`SimGame`을 Python에 노출합니다. raylib/오디오 의존성 없음.
+`SimGame`을 Python에 노출합니다. 렌더링/오디오 의존성 없음.
 
 ### 노출 클래스
 
@@ -1205,10 +1245,6 @@ def expand_placement(cur_col, cur_rot, tgt_col, tgt_rot) -> list[int]:
     # 3) 하드드롭: INPUT_DROP
     return seq
 
-def validate_sequence(sim, sequence) -> bool:
-    # 현재 스텁: 항상 True 반환
-    # TODO: sim 사본에서 dry-run 후 착지 위치 검증
-
 def fallback_placement(sim) -> tuple[int, int] | None:
     # 첫 번째 합법적 배치 반환 (폴백)
 ```
@@ -1326,15 +1362,18 @@ assert fnv1a32(b"foobar") == 0xBF9CF968
 
 ## 12. 빌드 시스템 (CMakeLists.txt)
 
-**세 개의 독립적인 빌드 타겟:**
+**독립적인 빌드 타겟 (CMake 옵션):**
 
 | 옵션 | 기본값 | 타겟 | 의존성 |
 |---|---|---|---|
-| `TETRIS_BUILD_GAME=ON` | ON | `tetris.exe` | raylib, WinSock2 |
-| `TETRIS_BUILD_PY=OFF` | OFF | `tetris_py.so/.pyd` | pybind11, Python |
-| `TETRIS_BUILD_TEST=ON` | ON | `sim_hash_dump.exe` | 없음 |
+| `TETRIS_BUILD_GAME=ON`   | ON  | `tetris`        | OpenGL + (Win32 \| SDL2), WinSock2/BSD 소켓 |
+| `TETRIS_BUILD_RELAY=ON`  | OFF | `tetris_relay`  | WinSock2/BSD 소켓만 (GUI/오디오 없음) |
+| `TETRIS_BUILD_PY=ON`     | OFF | `tetris_py.so/.pyd` | pybind11, Python |
+| `TETRIS_BUILD_TEST=ON`   | ON  | `sim_hash_dump` | 없음 |
+| `TETRIS_BUILD_BOT=OFF`   | OFF | (tetris 에 합쳐짐) | ONNX Runtime (third_party/onnxruntime/) |
+| `TETRIS_USE_SDL2=…`      | OS별  | (tetris 백엔드) | Windows OFF / 그 외 ON — SDL2 경로 강제 |
 
-**공통 소스** (모든 타겟 공유):
+**공통 소스** (게임/바인딩/테스트가 공유):
 
 ```cmake
 set(TETRIS_SIM_SOURCES src/sim_game.cpp src/position.cpp)
@@ -1342,7 +1381,7 @@ set(TETRIS_SIM_HEADERS src/sim_game.h src/sim_grid.h src/sim_block.h src/sim_blo
                         src/position.h core/constants.h core/input.h core/rng.h core/hash.h)
 ```
 
-**Colab 빌드 (raylib 없이):**
+**Colab / 헤드리스 빌드 (그래픽 없이 pybind11 만):**
 ```bash
 cmake -S . -B build \
     -DTETRIS_BUILD_GAME=OFF \
@@ -1352,19 +1391,30 @@ cmake --build build -j --target tetris_py
 cp build/tetris_py*.so python/sim/
 ```
 
-**Windows 전체 빌드:**
+**Windows 전체 빌드 (Handmade 기본):**
 ```powershell
 $PYBIND11_DIR = python -m pybind11 --cmakedir
 cmake -S . -B build `
-    -G "MinGW Makefiles" `
     -DCMAKE_BUILD_TYPE=Release `
     -DTETRIS_BUILD_GAME=ON `
     -DTETRIS_BUILD_PY=ON `
     -DTETRIS_BUILD_TEST=ON `
-    -DRAYLIB_ROOT=D:/Utils/raylib/raylib `
     -Dpybind11_DIR="$PYBIND11_DIR"
+cmake --build build --config Release -j
+copy build\Release\tetris_py*.pyd python\sim\
+```
+
+**릴레이 서버만:**
+```bash
+cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON
+cmake --build build -j --target tetris_relay
+```
+
+**봇(ONNX) 활성화:**
+```bash
+bash third_party/fetch_onnxruntime.sh    # CPU 번들 벤더링
+cmake -S . -B build -DTETRIS_BUILD_BOT=ON
 cmake --build build -j
-copy build\tetris_py*.pyd python\sim\
 ```
 
 > `set(PYBIND11_FINDPYTHON ON)` — cmake 4.0+에서 `FindPythonInterp` 제거로 인한 필수 설정.
@@ -1391,16 +1441,16 @@ copy build\tetris_py*.pyd python\sim\
 ### 단일 플레이어
 
 ```
-키보드 → SampleInput() → uint8_t mask
+키보드 → AccumulateInput()/ConsumeInput() → uint8_t mask
        → Game::SubmitInput(mask) → SimGame::SubmitInput()
        → SimGame::Tick() (중력)
-       → Game::Draw() → raylib 화면
+       → Game::Draw() → renderer/*.cpp → OpenGL → platform (Win32/SDL2) → 화면
 ```
 
 ### 멀티플레이어 (lockstep)
 
 ```
-키보드 → SampleInput() → mask
+키보드 → AccumulateInput()/ConsumeInput() → mask
        → session.SendInput(tick, mask) → TCP → 상대
        → localInputs[tick] = mask
 
@@ -1469,7 +1519,7 @@ BotSession.connect() → TCP → tetris.exe
 | `SimGame::LockBlock()` | sim_game.cpp | MoveBlockDown (충돌), MoveBlockDrop |
 | `SimGame::BlockFits(block)` | sim_game.cpp | 이동/회전 시도마다, LockBlock 후 |
 | `SimGame::IsBlockOutside(block)` | sim_game.cpp | 이동/회전 시도마다 |
-| `SimGame::UpdateScore(lines)` | sim_game.cpp | LockBlock |
+| `SimGame::UpdateScore(lines, tSpin)` | sim_game.cpp | LockBlock |
 | `SimGame::StateHash()` | sim_game.cpp | main.cpp H키 디버그, sim_hash_dump, bindings |
 | `SimGame::LegalPlacements()` | sim_game.cpp | bindings (env.py, policy_runner.py) |
 | `SimGame::ApplyPlacement(col,rot)` | sim_game.cpp | bindings (env.py step) |
@@ -1486,7 +1536,7 @@ BotSession.connect() → TCP → tetris.exe
 | `Session::Host(port,params)` | session.cpp | main.cpp --host |
 | `Session::Connect(host,port)` | session.cpp | main.cpp --connect |
 | `Session::SendInput(tick,mask)` | session.cpp | main.cpp 매 틱 |
-| `Session::SendHash(tick,hash)` | session.cpp | (현재 미사용 — 미래 디싱크 감지) |
+| `Session::SendHash(tick,hash)` | session.cpp | 10초 주기 HASH 교환 + DESYNC 감지 |
 | `Session::SendGameOverChoice(c)` | session.cpp | main.cpp 게임오버 협상 |
 | `Session::SendNewSeed(seed)` | session.cpp | main.cpp 재시작 (Host) |
 | `Session::GetRemoteInput(tick,m)` | session.cpp | main.cpp safeTick 루프 |

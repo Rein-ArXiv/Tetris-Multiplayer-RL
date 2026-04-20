@@ -3,28 +3,16 @@
 The trained policy and the rule-based baseline both pick a target placement
 ``(col, rot)``, but the lockstep wire protocol can only carry one frame
 bitmask per tick. This module converts a placement decision into a sequence
-of single-tick masks (rotate -> translate -> hard-drop), then validates the
-sequence on a sim copy so the bot doesn't blindly send a sequence that the
-real game will reject.
+of single-tick masks (rotate -> translate -> hard-drop).
 
-The validator is the load-bearing piece. Without it the bot can freeze in
-edge cases where:
-
-- A rotation puts the piece into a wall and gets undone -> all subsequent
-  moves are computed from a stale ``cur_col`` / ``cur_rot``.
-- The horizontal slide direction is correct but a column on the way is
-  blocked by the locked grid -> the piece stops short and the drop never
-  reaches the intended column.
-
-If validation fails we fall back to the safest legal placement returned by
-:func:`fallback_placement` so the bot keeps moving rather than locking up.
+If the policy proposes an illegal placement, the caller falls back to
+:func:`fallback_placement` (first legal placement) so the bot keeps moving.
+Wire-level divergence is caught by the host's periodic HASH cross-check.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-from common.action_mask import encode_action
 
 # Mirror of core/input.h - kept here so the netbot doesn't depend on building
 # the C++ binding just to get a constant.
@@ -53,6 +41,8 @@ def expand_placement(
     ``UndoRotation`` and rotation is the cheap operation, so 1-3 rotates is
     fine even if 1 backwards rotate would be shorter).
     """
+    if num_rotations <= 0:
+        raise ValueError(f"num_rotations must be positive, got {num_rotations}")
     seq: list[int] = []
 
     rot_steps = (tgt_rot - cur_rot) % num_rotations
@@ -72,25 +62,6 @@ def expand_placement(
 
     seq.append(INPUT_DROP)
     return seq
-
-
-def validate_sequence(sim: "SimGame", sequence: list[int]) -> bool:
-    """Replay ``sequence`` on a serialised copy of ``sim`` and check that the
-    final piece lock matches what the policy intended.
-
-    Right now we don't have ``SimGame.serialize`` exposed (planned but not yet
-    bound), so the validator runs the sequence on a fresh ``SimGame`` reseeded
-    to the same starting hash and aborts on the first illegal-looking step.
-
-    For the initial dumb-bot bring-up we accept any sequence whose final
-    DROP doesn't game-over the sim. The full validator gets wired in once
-    serialize/deserialize round-trip lands.
-    """
-    # Placeholder: real implementation needs SimGame.clone() or
-    # serialize/deserialize. For now, trust the script and let the policy
-    # picker rely on legal_mask + a fallback. See client.py for the recovery
-    # path that handles cases this skip misses.
-    return True
 
 
 def fallback_placement(sim: "SimGame") -> tuple[int, int] | None:
@@ -116,6 +87,5 @@ __all__ = [
     "INPUT_ROTATE",
     "INPUT_DROP",
     "expand_placement",
-    "validate_sequence",
     "fallback_placement",
 ]

@@ -69,3 +69,30 @@ void main() {
     fragColor = vec4(u_color.rgb, u_color.a * alpha);
 }
 )glsl";
+
+// ─── RGBA 스프라이트(아이콘)용 셰이더 ────────────────────────────────────────
+// stb_image 로 로드한 RGBA 8bpp 텍스처를 쿼드로 그림. u_tint 를 곱해
+// 밝기/색조 조정 가능 (기본은 {1,1,1,1} — 원본 그대로).
+// 알파 블렌딩은 호출부에서 glEnable(GL_BLEND) + SRC_ALPHA/ONE_MINUS_SRC_ALPHA 로.
+static const char* kSpriteVert = R"glsl(
+#version 130
+in vec2 a_pos;
+in vec2 a_uv;
+out vec2 v_uv;
+uniform mat4 u_proj;
+void main() {
+    v_uv = a_uv;
+    gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);
+}
+)glsl";
+
+static const char* kSpriteFrag = R"glsl(
+#version 130
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_tex;
+uniform vec4 u_tint;
+void main() {
+    fragColor = texture(u_tex, v_uv) * u_tint;
+}
+)glsl";

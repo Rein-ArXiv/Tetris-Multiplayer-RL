@@ -1,5 +1,29 @@
 # 매치메이킹 서버 — C++ 설계 및 구현 가이드
 
+> 이 문서는 현재 릴레이(`tetris_relay`) 사용 설명서가 아니라 장기 설계안입니다.
+> 지금 구현된 범위는 익명 FIFO 큐, 5자리 커스텀 룸, READY, CHAT, 투명 바이트 릴레이까지입니다.
+> ELO, SQLite, 인증, HTTP API, `tetris_server` 항목은 이 문서에서 잡아둔 다음 단계입니다.
+
+## 현재 구현된 릴레이 프로토콜
+
+현재 `tetris_relay` 는 DB 없는 TCP 릴레이다. 클라이언트는 첫 프레임으로
+`QUEUE_JOIN`, `ROOM_CREATE`, `ROOM_JOIN` 중 하나를 보내고, 서버는 두 플레이어가
+확정되는 순간 `MATCH_FOUND` 를 양쪽에 보낸 뒤 이후 바이트를 그대로 포워딩한다.
+
+| 값 | 이름 | 방향 | 페이로드 |
+|----|------|------|---------|
+| 10 | `QUEUE_JOIN` | C→S | 빈 페이로드 |
+| 11 | `QUEUE_CANCEL` | C→S | 빈 페이로드 |
+| 12 | `MATCH_FOUND` | S→C | `[role:1][seed:8 LE]`, role 1=HOST, 2=GUEST |
+| 13 | `ROOM_CREATE` | C→S | 빈 페이로드 |
+| 14 | `ROOM_JOIN` | C→S | `[code_len:1][code:N]` |
+| 15 | `ROOM_INFO` | S→C | `[code_len:1][code:N][status:1][peer_count:1]` |
+| 16 | `ROOM_LEAVE` | C→S | 빈 페이로드 |
+| 17 | `READY` | C↔S | `[ready:1]` |
+| 20 | `CHAT` | C↔C | `[text_len:2 LE][utf8:N]`, 릴레이 투명 포워딩 |
+
+아래 5장 이후의 ELO/SQLite/HTTP API 설계는 이 현재 구현 위에 얹을 다음 단계다.
+
 > **설계 원칙**
 > - 릴레이 서버 / 매치메이킹 / DB / HTTP API → **C++**  
 >   (기존 `net/socket.cpp`, `net/framing.cpp` 직접 재사용)
@@ -1100,7 +1124,7 @@ CREATE INDEX IF NOT EXISTS idx_elo_pid        ON elo_history(player_id);
 
 ```
 C++ (이 문서의 전체 범위)
-├── tetris.exe          게임 + raylib UI
+├── tetris.exe          게임 + OpenGL UI
 ├── tetris_server.exe   릴레이 + 매치메이킹 + DB + HTTP API
 └── sim_hash_dump.exe   결정론 테스트
 

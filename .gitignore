@@ -14,6 +14,7 @@ tetris.exe
 
 # 빌드 디렉터리
 build/
+build-*/
 out/
 bin/
 obj/
@@ -69,10 +70,9 @@ __pycache__/
 # 리플레이 출력
 out/replay.txt
 
-# 문서 파일 (README.md만 유지)
+# 문서 파일 (README*.md만 유지)
+*.md
+!README.md
+!**/README*.md
 docs_backup_*/
-DOCUMENTATION.md
-CLAUDE.md
-TECHNICAL_DEEP_DIVE.md
-CODE_ANALYSIS_KR.md
 .claude/

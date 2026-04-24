@@ -23,19 +23,30 @@
 #include <string>
 #include <unordered_map>
 
+namespace meta::client { class MetaClient; }
+
 namespace relay {
 
 class RoomRegistry {
 public:
     RoomRegistry();
 
+    // 매치 성립 시 startPump 에 넘겨줄 meta 클라이언트.
+    // 미설정 시 unranked (MATCH_SUMMARY 투명 포워딩).
+    void setMeta(meta::client::MetaClient* meta) { meta_ = meta; }
+
     // playerConnThread 에서 ROOM_CREATE 수신 직후 호출.
     // 방을 만들고 roomLoop_ 안에서 블로킹하다가 종료 시 리턴.
-    void handleCreate(net::TcpSocket sock, uint32_t conn_id);
+    // player_id=0 은 unranked (meta 연동 안 됨). 매치 성립 시 startPump 에 전달.
+    void handleCreate(net::TcpSocket sock, uint32_t conn_id,
+                      int64_t player_id, int elo,
+                      const std::string& username, const std::string& token);
 
     // playerConnThread 에서 ROOM_JOIN 수신 직후 호출.
     // 실패(notfound/full) 시 ROOM_INFO 회신 후 소켓 닫고 바로 리턴.
-    void handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id);
+    void handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
+                    int64_t player_id, int elo,
+                    const std::string& username, const std::string& token);
 
     // 모든 roomLoop_ 를 종료시킨다.
     void shutdown();
@@ -54,6 +65,16 @@ private:
         bool           matchStarted = false;  // 한쪽이 starter 로 선점
         bool           hostExited   = false;  // player thread 가 read 루프를 빠져나옴
         bool           guestExited  = false;
+
+        // 인증 메타 (meta 연동 시 채워짐. 0 = unranked)
+        int64_t        hostPlayerId  = 0;
+        int            hostElo       = 1200;
+        std::string    hostUsername;
+        std::string    hostToken;
+        int64_t        guestPlayerId = 0;
+        int            guestElo      = 1200;
+        std::string    guestUsername;
+        std::string    guestToken;
     };
 
     std::string generateCode_();   // mu 잡은 상태에서 호출
@@ -71,6 +92,7 @@ private:
     uint64_t                code_rng_state_ = 0;
     uint64_t                seed_state_     = 0;
     uint32_t                next_match_id_  = 100000;  // 매치메이킹과 match_id 충돌 피해
+    meta::client::MetaClient* meta_ = nullptr;
 };
 
 }  // namespace relay

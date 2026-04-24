@@ -130,6 +130,9 @@ bool Session::Connect(const std::string& host, uint16_t port) {
 }
 
 void Session::SendInput(uint32_t tick, uint8_t mask) {
+    // 메인 스레드 활성 시각 갱신 — ioThread 의 스톨 감지 (창 드래그 대응) 이 이 값
+    // 을 기준으로 동작한다.
+    lastMainActivityMs_.store(now_ms());
     auto cur = lastLocalTick.load();
     if (tick > cur) lastLocalTick.store(tick);
     std::vector<uint8_t> pl; le_write_u32(pl, tick); le_write_u16(pl, 1); pl.push_back(mask);
@@ -189,6 +192,31 @@ bool Session::PullChat(std::string& outText) {
     return true;
 }
 
+void Session::SendMatchSummary(uint8_t won,
+                               uint32_t my_score, uint32_t my_lines,
+                               uint32_t opp_score, uint32_t opp_lines,
+                               uint32_t duration_s) {
+    // 페이로드: [won:1][my_score:4][my_lines:4][opp_score:4][opp_lines:4][duration:4] (21B)
+    std::vector<uint8_t> pl;
+    pl.reserve(21);
+    pl.push_back(won ? 1 : 0);
+    le_write_u32(pl, my_score);
+    le_write_u32(pl, my_lines);
+    le_write_u32(pl, opp_score);
+    le_write_u32(pl, opp_lines);
+    le_write_u32(pl, duration_s);
+    auto fr = build_frame(MsgType::MATCH_SUMMARY, pl);
+    std::lock_guard<std::mutex> lk(sendMu);
+    sendQ.push_back(std::move(fr));
+}
+
+bool Session::GetMatchResult(MatchResult& out) const {
+    std::lock_guard<std::mutex> lk(matchResultMu_);
+    if (!matchResultValid_) return false;
+    out = matchResult_;
+    return true;
+}
+
 bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
     std::lock_guard<std::mutex> lk(inMu);
     auto it = remoteInputs.find(tick);
@@ -221,6 +249,17 @@ void Session::Close() {
         std::lock_guard<std::mutex> lk(roomSendMu_);
         roomSendQ_.clear();
     }
+    queueMatched_.store(false);
+    queueLocalReady_.store(false);
+    queuePeerReady_.store(false);
+    {
+        std::lock_guard<std::mutex> lk(queueSendMu_);
+        queueSendQ_.clear();
+    }
+    // 스톨 heartbeat 상태 초기화 — 다음 세션에서 첫 SendInput 까지는 비활성.
+    lastMainActivityMs_.store(0);
+    heartbeatTickEnd_.store(0);
+    lastHeartbeatMs_ = 0;
     {
         std::lock_guard<std::mutex> lk(chatMu_);
         chatQ_.clear();
@@ -232,7 +271,8 @@ void Session::Close() {
 }
 
 bool Session::QueueJoin(const std::string& host, uint16_t port,
-                        uint32_t start_tick, uint8_t input_delay) {
+                        uint32_t start_tick, uint8_t input_delay,
+                        const std::string& auth_token) {
     if (qth.joinable() || th.joinable() || ath.joinable()) return false;
 
     // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
@@ -250,8 +290,12 @@ bool Session::QueueJoin(const std::string& host, uint16_t port,
     recvBuf.clear();
     { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
     { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    queueMatched_.store(false);
+    queueLocalReady_.store(false);
+    queuePeerReady_.store(false);
+    { std::lock_guard<std::mutex> lk(queueSendMu_); queueSendQ_.clear(); }
 
-    qth = std::thread(&Session::queueThread, this, host, port, start_tick, input_delay);
+    qth = std::thread(&Session::queueThread, this, host, port, start_tick, input_delay, auth_token);
     return true;
 }
 
@@ -269,8 +313,37 @@ void Session::QueueCancel() {
     // qth.join() 은 Close() 에서 처리 — 여기선 블록 없이 신호만 보낸다.
 }
 
+void Session::QueueConfirm() {
+    // 로비에서 "수락" 버튼 — READY(1) 을 queueThread outbound 큐에 적재.
+    // 실제 전송은 queueThread 가 처리하고, peer READY(1) 까지 오면 ioThread 로 전환.
+    if (queueLocalReady_.exchange(true)) return;  // idempotent
+    std::vector<uint8_t> pl; pl.push_back(1);
+    auto fr = build_frame(MsgType::READY, pl);
+    std::lock_guard<std::mutex> lk(queueSendMu_);
+    queueSendQ_.push_back(std::move(fr));
+}
+
+void Session::QueueDecline() {
+    // 로비에서 "거절". READY(0) 을 동기적으로 송신한 뒤 quit 을 세팅한다.
+    //   이전 구현은 queueSendQ_ 에 밀어넣고 quit=true 를 즉시 세팅했지만 —
+    //   queueThread 는 while(!quit) 상단에서 quit 을 먼저 보고 drain 없이 바로
+    //   종료, main.cpp 가 곧바로 Close() 로 소켓을 닫아 READY(0) 이 실제로
+    //   송신되지 않고 relay 쪽은 EOF 로만 본다. 그 결과 상대는 "거절" 이 아니라
+    //   "상대 timeout/EOF" 로 판정받는 경계 케이스가 있었다.
+    //   여기서 직접 tcp_send_all 을 호출하되, queueThread drain 과 같은 fd 에
+    //   interleaved 쓰기가 되지 않도록 queueSockSendMu_ 로 직렬화.
+    std::vector<uint8_t> pl; pl.push_back(0);
+    auto fr = build_frame(MsgType::READY, pl);
+    if (sock.valid()) {
+        std::lock_guard<std::mutex> lk(queueSockSendMu_);
+        tcp_send_all(sock, fr.data(), fr.size());
+    }
+    quit = true;
+}
+
 bool Session::RoomCreate(const std::string& host, uint16_t port,
-                         uint32_t start_tick, uint8_t input_delay) {
+                         uint32_t start_tick, uint8_t input_delay,
+                         const std::string& auth_token) {
     if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
     quit = false;
     connectionFailed = false;
@@ -288,13 +361,14 @@ bool Session::RoomCreate(const std::string& host, uint16_t port,
     { std::lock_guard<std::mutex> lk(roomMu_); roomCode_.clear(); }
     { std::lock_guard<std::mutex> lk(roomSendMu_); roomSendQ_.clear(); }
     rth = std::thread(&Session::roomThread, this, host, port,
-                      std::string{}, start_tick, input_delay);
+                      std::string{}, start_tick, input_delay, auth_token);
     return true;
 }
 
 bool Session::RoomJoin(const std::string& host, uint16_t port,
                        const std::string& code,
-                       uint32_t start_tick, uint8_t input_delay) {
+                       uint32_t start_tick, uint8_t input_delay,
+                       const std::string& auth_token) {
     if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
     if (code.empty() || code.size() > 255) return false;
     quit = false;
@@ -313,7 +387,7 @@ bool Session::RoomJoin(const std::string& host, uint16_t port,
     { std::lock_guard<std::mutex> lk(roomMu_); roomCode_ = code; }
     { std::lock_guard<std::mutex> lk(roomSendMu_); roomSendQ_.clear(); }
     rth = std::thread(&Session::roomThread, this, host, port,
-                      code, start_tick, input_delay);
+                      code, start_tick, input_delay, auth_token);
     return true;
 }
 
@@ -338,7 +412,8 @@ void Session::RoomLeave() {
 
 void Session::roomThread(std::string host, uint16_t port,
                          std::string joinCode,
-                         uint32_t start_tick, uint8_t input_delay) {
+                         uint32_t start_tick, uint8_t input_delay,
+                         std::string auth_token) {
     const bool doCreate = joinCode.empty();
     std::cout << "[ROOM] Connecting to relay " << host << ":" << port
               << " for " << (doCreate ? "CREATE" : ("JOIN " + joinCode)) << std::endl;
@@ -359,14 +434,23 @@ void Session::roomThread(std::string host, uint16_t port,
     sock = s;
     connected = true;
 
-    // 첫 프레임 송신
+    // 첫 프레임 송신. 페이로드 끝에 [tok_len:1][token:N] 추가.
+    // 토큰 길이는 최대 255 로 clamp — 실제로는 32 hex chars 표준.
+    auto append_token = [&](std::vector<uint8_t>& pl) {
+        const size_t n = std::min<size_t>(auth_token.size(), 255);
+        pl.push_back(static_cast<uint8_t>(n));
+        for (size_t i = 0; i < n; ++i) pl.push_back(static_cast<uint8_t>(auth_token[i]));
+    };
     std::vector<uint8_t> first;
     if (doCreate) {
-        first = build_frame(MsgType::ROOM_CREATE, {});
+        std::vector<uint8_t> pl;
+        append_token(pl);
+        first = build_frame(MsgType::ROOM_CREATE, pl);
     } else {
         std::vector<uint8_t> pl;
         pl.push_back(static_cast<uint8_t>(joinCode.size()));
         for (char c : joinCode) pl.push_back(static_cast<uint8_t>(c));
+        append_token(pl);
         first = build_frame(MsgType::ROOM_JOIN, pl);
     }
     if (!tcp_send_all(sock, first.data(), first.size())) {
@@ -478,7 +562,8 @@ void Session::roomThread(std::string host, uint16_t port,
 }
 
 void Session::queueThread(std::string host, uint16_t port,
-                          uint32_t start_tick, uint8_t input_delay) {
+                          uint32_t start_tick, uint8_t input_delay,
+                          std::string auth_token) {
     std::cout << "[QUEUE] Connecting to relay " << host << ":" << port << std::endl;
     TcpSocket s = tcp_connect(host, port);
     if (!s.valid()) {
@@ -495,7 +580,14 @@ void Session::queueThread(std::string host, uint16_t port,
     connected = true;
     std::cout << "[QUEUE] Connected, sending QUEUE_JOIN" << std::endl;
 
-    auto join = build_frame(MsgType::QUEUE_JOIN, {});
+    // QUEUE_JOIN 페이로드: [tok_len:1][token:N]
+    std::vector<uint8_t> joinPl;
+    {
+        const size_t n = std::min<size_t>(auth_token.size(), 255);
+        joinPl.push_back(static_cast<uint8_t>(n));
+        for (size_t i = 0; i < n; ++i) joinPl.push_back(static_cast<uint8_t>(auth_token[i]));
+    }
+    auto join = build_frame(MsgType::QUEUE_JOIN, joinPl);
     if (!tcp_send_all(sock, join.data(), join.size())) {
         std::cout << "[QUEUE] Failed to send QUEUE_JOIN" << std::endl;
         connectionFailed = true; quit = true;
@@ -503,10 +595,11 @@ void Session::queueThread(std::string host, uint16_t port,
     }
 
     // MATCH_FOUND 대기 — 최대 5분, 2ms 폴링.
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+    auto matchDeadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
     std::vector<uint8_t> buf;
-    while (!quit.load()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
+    bool matched = false;
+    while (!quit.load() && !matched) {
+        if (std::chrono::steady_clock::now() >= matchDeadline) {
             std::cout << "[QUEUE] Timeout waiting for MATCH_FOUND" << std::endl;
             connectionFailed = true; quit = true;
             return;
@@ -532,20 +625,94 @@ void Session::queueThread(std::string host, uint16_t port,
                 }
                 std::cout << "[QUEUE] MATCH_FOUND role="
                           << (role == Role::Host ? "HOST" : "GUEST")
-                          << " seed=0x" << std::hex << seed << std::dec << std::endl;
-                // ioThread 로 핸드오프 — 이미 수신된 recvBuf 잔여 바이트는 비움.
-                recvBuf.clear();
-                lastPongMs.store(now_ms());
-                lastPingSentMs.store(0);
-                ready = true;
-                th = std::thread(&Session::ioThread, this);
-                return;
+                          << " seed=0x" << std::hex << seed << std::dec
+                          << " — waiting for user to accept..." << std::endl;
+                matched = true;
+                queueMatched_.store(true);
+                break;
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (!matched) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    // quit 로 나온 경우 (QueueCancel)
-    std::cout << "[QUEUE] Cancelled" << std::endl;
+    if (!matched) {
+        std::cout << "[QUEUE] Cancelled" << std::endl;
+        return;
+    }
+
+    // 수락 로비 단계: 서버가 양쪽 READY(1) 을 수집할 때까지 대기.
+    // · outbound: QueueConfirm/QueueDecline 이 queueSendQ_ 에 적재한 READY 프레임 drain.
+    // · inbound : 릴레이가 포워딩한 peer 의 READY 수신. READY(1) → queuePeerReady_=true,
+    //             READY(0) → 상대가 거절 → connectionFailed.
+    //   양쪽 ready 가 되면 릴레이가 바로 게임 바이트 포워딩을 시작하므로, 여기서도
+    //   ready=true 로 전환해 ioThread 기동.
+    auto lobbyDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+    while (!quit.load()) {
+        if (std::chrono::steady_clock::now() >= lobbyDeadline) {
+            std::cout << "[QUEUE] Lobby timeout (peer did not accept)" << std::endl;
+            connectionFailed = true; quit = true;
+            return;
+        }
+
+        // outbound drain — QueueConfirm 결과 (QueueDecline 은 동기 송신 후 quit).
+        // tcp_send_all 은 main thread 의 QueueDecline 과 같은 fd 로 동시 진입
+        // 가능하므로 queueSockSendMu_ 로 직렬화.
+        while (true) {
+            std::vector<uint8_t> pkt;
+            {
+                std::lock_guard<std::mutex> lk(queueSendMu_);
+                if (queueSendQ_.empty()) break;
+                pkt = std::move(queueSendQ_.front());
+                queueSendQ_.pop_front();
+            }
+            std::lock_guard<std::mutex> lkSock(queueSockSendMu_);
+            if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
+                std::cout << "[QUEUE] Lobby send failed" << std::endl;
+                connectionFailed = true; quit = true; break;
+            }
+        }
+        if (quit.load()) break;
+
+        if (!tcp_recv_some(sock, buf)) {
+            std::cout << "[QUEUE] Lobby: peer/relay disconnected" << std::endl;
+            connectionFailed = true; quit = true;
+            return;
+        }
+        std::vector<Frame> frames;
+        parse_frames(buf, frames);
+        bool peerDeclined = false;
+        for (auto& f : frames) {
+            if (f.type == MsgType::READY) {
+                uint8_t v = f.payload.empty() ? 0 : f.payload[0];
+                if (v == 0) {
+                    std::cout << "[QUEUE] Peer declined" << std::endl;
+                    peerDeclined = true;
+                } else {
+                    queuePeerReady_.store(true);
+                }
+            }
+            // 그 외 프레임(CHAT 등)은 이 단계에선 무시.
+        }
+        if (peerDeclined) {
+            connectionFailed = true; quit = true;
+            return;
+        }
+
+        if (queueLocalReady_.load() && queuePeerReady_.load()) {
+            // 양쪽 수락 완료 → 게임 세션으로 전환.
+            std::cout << "[QUEUE] Both accepted, starting game session" << std::endl;
+            queueMatched_.store(false);
+            recvBuf.clear();
+            lastPongMs.store(now_ms());
+            lastPingSentMs.store(0);
+            ready = true;
+            th = std::thread(&Session::ioThread, this);
+            return;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    // quit 로 나옴 (QueueDecline/QueueCancel/Close).
+    std::cout << "[QUEUE] Lobby cancelled" << std::endl;
 }
 
 void Session::ioThread() {
@@ -576,6 +743,31 @@ void Session::ioThread() {
                 std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
                 auto fr = build_frame(MsgType::PING, pl);
                 std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+            }
+
+            // 메인 스레드 스톨 자동 heartbeat — 창 드래그 시 메인 루프가 WM_ENTERSIZEMOVE
+            // 모달에 갇혀 SendInput 이 멈춰도, ioThread 는 계속 돌고 있으므로 이 쪽에서
+            // INPUT(tick,0) 을 대신 송신해 lockstep 을 계속 진행시킨다.
+            //   · lastMainActivityMs_ == 0  → 첫 입력 전 (게임 시작 전) 이라 건너뜀.
+            //   · 스톨 기준: 300ms 이상 SendInput 없음. 일반 60Hz 틱 (=16ms) 에선 트리거 안 됨.
+            //   · 전송 주기: 16ms (60Hz) — 실제 게임 틱과 동일 속도로 catch-up.
+            int64_t mainAct = lastMainActivityMs_.load();
+            if (mainAct > 0 && (now - mainAct) > 300) {
+                if (lastHeartbeatMs_ == 0 || (now - lastHeartbeatMs_) >= 16) {
+                    lastHeartbeatMs_ = now;
+                    uint32_t nextTick = lastLocalTick.load() + 1;
+                    std::vector<uint8_t> pl;
+                    le_write_u32(pl, nextTick);
+                    le_write_u16(pl, 1);
+                    pl.push_back(0);
+                    auto fr = build_frame(MsgType::INPUT, pl);
+                    lastLocalTick.store(nextTick);
+                    heartbeatTickEnd_.store(nextTick);
+                    std::lock_guard<std::mutex> lk(sendMu);
+                    sendQ.push_back(std::move(fr));
+                }
+            } else {
+                lastHeartbeatMs_ = 0;
             }
         }
 
@@ -778,6 +970,18 @@ void Session::handleFrame(const Frame& f) {
         std::lock_guard<std::mutex> lk(chatMu_);
         chatQ_.push_back(std::move(text));
     } break;
+    case MsgType::MATCH_RESULT: {
+        // [elo_before:4 LE][elo_after:4 LE][delta:4 LE signed]  (12 bytes)
+        if (f.payload.size() < 12) break;
+        const uint8_t* p = f.payload.data();
+        MatchResult r;
+        r.elo_before = static_cast<int32_t>(le_read_u32(p));
+        r.elo_after  = static_cast<int32_t>(le_read_u32(p + 4));
+        r.delta      = static_cast<int32_t>(le_read_u32(p + 8));
+        std::lock_guard<std::mutex> lk(matchResultMu_);
+        matchResult_ = r;
+        matchResultValid_ = true;
+    } break;
     default: break;
     }
 }
@@ -799,6 +1003,12 @@ bool Session::GetRemoteGameOverChoice(GameOverChoice& outChoice) const {
 void Session::ClearGameOverChoices() {
     localGameOverChoice.store(0);
     remoteGameOverChoice.store(0);
+    // 다음 라운드의 MATCH_RESULT 를 새로 받을 수 있도록 상태도 함께 리셋.
+    {
+        std::lock_guard<std::mutex> lk(matchResultMu_);
+        matchResultValid_ = false;
+        matchResult_ = MatchResult{};
+    }
 }
 
 void Session::ClearInputs() {
@@ -835,6 +1045,10 @@ void Session::ClearInputs() {
         lastHashTickRemote = 0;
         lastHashRemote = 0;
     }
+    // 재시작 경계에서 heartbeat 상태도 리셋 — 새 라운드의 tick 0 부터 다시 감지.
+    lastMainActivityMs_.store(0);
+    heartbeatTickEnd_.store(0);
+    lastHeartbeatMs_ = 0;
     std::cout << "[NET] Cleared input queues for restart" << std::endl;
 }
 

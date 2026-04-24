@@ -19,13 +19,20 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <string>
 
 namespace relay {
 
-// 큐에 들어간 플레이어 정보
+// 큐에 들어간 플레이어 정보.
+// player_id / elo / username / token 은 meta /v1/auth/verify 성공 시 채워진다.
+// meta 비활성화(--meta 없음) 또는 토큰 미제공 시 player_id=0 (unranked).
 struct PlayerInfo {
     net::TcpSocket sock;
     uint32_t       conn_id{0};  // 로깅용
+    int64_t        player_id{0};
+    int            elo{1200};
+    std::string    username;    // empty = guest (no nickname yet)
+    std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
 };
 
 // 매칭 결과 (2 명)

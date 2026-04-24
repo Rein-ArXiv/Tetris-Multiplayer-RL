@@ -11,10 +11,27 @@
 #pragma once
 #include "matchmaker.h"
 
+namespace meta::client { class MetaClient; }
+
 namespace relay {
 
 // 페어링된 Match 를 받아 MATCH_FOUND 전송 후 양방향 포워딩 시작.
 // 내부에서 소유권 이전 → detached 스레드들이 수명 관리.
-void startPump(Match match);
+//
+// meta: non-null 이고 양쪽 player_id != 0 일 때만 경기 종료 후
+//   MATCH_SUMMARY 교차검증 + /v1/matches POST + MATCH_RESULT 송신.
+//   nullptr 이거나 unranked 매치면 MATCH_SUMMARY 도 투명 포워딩.
+//
+// 커스텀 룸 경로 전용 — 양쪽이 이미 룸 로비에서 READY 로 수락한 상태라
+// 바로 게임 포워딩을 연다.
+void startPump(Match match, meta::client::MetaClient* meta);
+
+// 랜덤 큐 페어링 전용 — MATCH_FOUND 를 보낸 뒤 양쪽이 READY(1) 을 보낼 때까지
+// 대기하는 "수락 로비" 단계를 끼워넣는다.
+//   · 30초 안에 양쪽 READY(1) 수신 → 게임 포워딩 시작 (startPump 와 동일 경로).
+//   · 한쪽이 READY(0) / QUEUE_CANCEL / EOF / 타임아웃 → 양 소켓 close.
+//   · 수락 로비 동안 READY 는 상대에게 그대로 forward 해 UI 반영 가능.
+// matcher 스레드를 블록하지 않도록 내부에서 자체 스레드 detach.
+void startQueuePump(Match match, meta::client::MetaClient* meta);
 
 }  // namespace relay

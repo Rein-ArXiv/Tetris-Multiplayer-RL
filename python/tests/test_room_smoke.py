@@ -76,8 +76,8 @@ def test_room_create_join_ready_match_found() -> None:
     a_buf = bytearray()
     b_buf = bytearray()
     try:
-        # A: create room. Server replies with ROOM_INFO(code, waiting, 1).
-        a.sendall(build_frame(MsgType.ROOM_CREATE, b""))
+        # A: create room. tok_len=0 → unranked (relay 가 --meta 없이 띄워졌다고 가정).
+        a.sendall(build_frame(MsgType.ROOM_CREATE, b"\x00"))
         deadline = time.monotonic() + RECV_TIMEOUT
         payload, _ = _recv_until(a, MsgType.ROOM_INFO, deadline, a_buf)
         code, status, peer_count = _parse_room_info(payload)
@@ -85,8 +85,8 @@ def test_room_create_join_ready_match_found() -> None:
         assert status == 0  # waiting
         assert peer_count == 1
 
-        # B: join with code. Both sides receive ROOM_INFO(waiting, 2).
-        join_payload = bytes([len(code)]) + code.encode("ascii")
+        # B: join with code. payload = [code_len][code][tok_len=0].
+        join_payload = bytes([len(code)]) + code.encode("ascii") + b"\x00"
         b.sendall(build_frame(MsgType.ROOM_JOIN, join_payload))
 
         deadline = time.monotonic() + RECV_TIMEOUT
@@ -130,7 +130,9 @@ def test_room_join_nonexistent_code_gets_notfound() -> None:
     buf = bytearray()
     try:
         code = "ZZZZZ"
-        s.sendall(build_frame(MsgType.ROOM_JOIN, bytes([len(code)]) + code.encode()))
+        # ROOM_JOIN payload = [code_len][code][tok_len=0]
+        s.sendall(build_frame(MsgType.ROOM_JOIN,
+                               bytes([len(code)]) + code.encode() + b"\x00"))
         deadline = time.monotonic() + RECV_TIMEOUT
         payload, _ = _recv_until(s, MsgType.ROOM_INFO, deadline, buf)
         rcode, status, _ = _parse_room_info(payload)

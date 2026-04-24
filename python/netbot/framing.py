@@ -53,17 +53,23 @@ class MsgType(enum.IntEnum):
     # Relay / matchmaking extensions (only used between client and relay server).
     # After MATCH_FOUND the relay forwards raw bytes, so these types never reach
     # the lockstep game loop — they live at the "outer" protocol layer.
-    QUEUE_JOIN = 10     # C→S: empty payload (anonymous queue)
+    QUEUE_JOIN = 10     # C→S: [tok_len:1][token:N]  (tok_len=0 → unranked)
     QUEUE_CANCEL = 11   # C→S: empty payload (cancel matchmaking)
     MATCH_FOUND = 12    # S→C: [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
 
     # Custom rooms (Section D) — 5-char code flow
-    ROOM_CREATE = 13    # C→S: empty payload; server mints a code and echoes ROOM_INFO
-    ROOM_JOIN = 14      # C→S: [code_len:1][code:N]
+    ROOM_CREATE = 13    # C→S: [tok_len:1][token:N]
+    ROOM_JOIN = 14      # C→S: [code_len:1][code:N][tok_len:1][token:N]
     ROOM_INFO = 15      # S→C: [code_len:1][code:N][status:1][peer_count:1]
                         #   status: 0=waiting 1=full 2=notfound 3=gonefull
     ROOM_LEAVE = 16     # C→S: empty payload
     READY = 17          # C→S, S→C(forward): [ready:1] (1=ready, 0=not)
+
+    # Section K — 메타/ELO 연동.
+    MATCH_SUMMARY = 18  # C→S: [won:1][my_score:4][my_lines:4]
+                        #      [opp_score_observed:4][opp_lines_observed:4]
+                        #      [duration_s:4]   (LE, 21 bytes total)
+    MATCH_RESULT  = 19  # S→C: [elo_before:4][elo_after:4][delta:4 LE signed]
 
     CHAT = 20           # bidirectional: [text_len:2 LE][utf8:N] (relay passes through)
 

@@ -17,6 +17,7 @@
 #include "relay.h"
 #include "room.h"
 #include "../net/socket.h"
+#include "../meta/http_client.h"
 
 #include <atomic>
 #include <chrono>
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -46,20 +48,26 @@ void signalHandler(int /*sig*/) {
 
 void printUsage() {
     std::cout <<
-        "Usage: tetris_relay [--port N]\n"
+        "Usage: tetris_relay [--port N] [--meta URL]\n"
         "  --port N         TCP listen port (default 7777)\n"
+        "  --meta URL       tetris_meta base URL (e.g. http://mac-mini:8080)\n"
+        "                   If omitted, relay runs unranked (no token verify,\n"
+        "                   no /v1/matches POST).\n"
         "  -h, --help       Show this help\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    uint16_t port = 7777;
+    uint16_t    port = 7777;
+    std::string metaUrl;  // empty = unranked
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--port" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::atoi(argv[++i]));
+        } else if (a == "--meta" && i + 1 < argc) {
+            metaUrl = argv[++i];
         } else if (a == "-h" || a == "--help") {
             printUsage();
             return 0;
@@ -91,12 +99,32 @@ int main(int argc, char** argv) {
     relay::Matchmaker   mm;
     relay::RoomRegistry rr;
 
-    // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작
-    std::thread matcher([&mm] {
+    // meta 클라이언트 (옵션). URL 미지정 시 nullptr → unranked.
+    std::unique_ptr<meta::client::MetaClient> metaClient;
+    if (!metaUrl.empty()) {
+        metaClient = std::make_unique<meta::client::MetaClient>(metaUrl);
+        if (!metaClient->valid()) {
+            std::cerr << "[relay] invalid --meta URL: " << metaUrl
+                      << " — running unranked.\n";
+            metaClient.reset();
+        } else {
+            std::cout << "[relay] meta=" << metaUrl << "\n";
+        }
+    } else {
+        std::cout << "[relay] meta=none (unranked mode)\n";
+    }
+
+    // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작.
+    // meta 가 있으면 post_match 를 호출할 수 있도록 포인터를 startPump 에 넘긴다.
+    meta::client::MetaClient* mcPtr = metaClient.get();
+    rr.setMeta(mcPtr);
+    std::thread matcher([&mm, mcPtr] {
         while (true) {
             auto match = mm.waitForPair();
             if (!match) break;  // shutdown
-            relay::startPump(std::move(*match));
+            // 랜덤 큐 경로: MATCH_FOUND → 양쪽 READY(1) 수락 대기 → 게임 포워딩.
+            // (커스텀 룸 경로는 room.cpp 가 READY 를 자체 확인한 뒤 startPump 를 호출한다.)
+            relay::startQueuePump(std::move(*match), mcPtr);
         }
     });
 
@@ -114,7 +142,7 @@ int main(int argc, char** argv) {
         const uint32_t id = next_conn_id++;
         std::cout << "[relay] accept conn=" << id << "\n";
         std::thread(relay::playerConnThread,
-                    std::move(client), id, std::ref(mm), std::ref(rr)).detach();
+                    std::move(client), id, std::ref(mm), std::ref(rr), mcPtr).detach();
     }
 
     std::cout << "[relay] shutting down...\n";

@@ -52,6 +52,7 @@
 #include "../renderer/image.h"
 #include "../bot/bot_onnx.h"
 #include "../bot/placement.h"
+#include "../meta/http_client.h"
 #include <deque>
 
 // TextFormat 대체: snprintf 로 포맷 문자열을 임시 버퍼에 쓰고 반환.
@@ -75,13 +76,21 @@ static uint8_t s_pendingInput = 0;
 static int s_leftHoldTicks = 0;
 static int s_rightHoldTicks = 0;
 
+// DAS (Delayed Auto Shift) + ARR (Auto Repeat Rate) — 꾹 누르고 있을 때 자동 반복.
+//   · DAS : 첫 눌림 이후 자동 반복이 시작되기까지의 대기 시간 (틱).
+//   · ARR : DAS 이후 실제 반복 간격 (틱). 작을수록 빠르게 주르륵.
+// 60Hz 기준, Tetris Guideline 기본 세팅에 맞춤:
+//   DAS=8  → 약 133ms (Guideline 기본 ~170ms, 경쟁 세팅 100~133ms 중 중간).
+//   ARR=3  → 약 50ms (20칸/초). Guideline 기본값 (Tetris Friends 등) 과 동일 체감.
+// 더 공격적으로 하고 싶으면 ARR 을 2 (30칸/초) 나 1 (60칸/초) 로 줄여도 된다.
+static constexpr int kHorizontalDasTicks = 8;
+static constexpr int kHorizontalArrTicks = 3;
+
 static uint8_t HorizontalRepeatInput()
 {
-    constexpr int kHorizontalDasTicks = 10; // 60Hz 기준 약 167ms
-    constexpr int kHorizontalArrTicks = 2;  // DAS 이후 30칸/초
-
     const bool leftDown = platform_key_down(PKEY_LEFT);
     const bool rightDown = platform_key_down(PKEY_RIGHT);
+    // 양손 다 떼거나 둘 다 누르면 DAS 카운터 리셋 — 방향이 확정되면 0 부터 재시작.
     if (leftDown == rightDown)
     {
         s_leftHoldTicks = 0;
@@ -95,6 +104,9 @@ static uint8_t HorizontalRepeatInput()
 
     uint8_t bit = leftDown ? INPUT_LEFT : INPUT_RIGHT;
     uint8_t out = 0;
+    // ticks == kHorizontalDasTicks 인 순간부터 ARR 주기로 반복 발사.
+    // AccumulateInput 가 edge 눌림 틱에 이미 한 번 쏘므로, 그 사이의 DAS 구간은
+    // 의도된 "버튼 눌렸지만 피스가 정지" 구간 (double-tap 로 한 칸 톡 움직일 여유).
     if (ticks >= kHorizontalDasTicks &&
         ((ticks - kHorizontalDasTicks) % kHorizontalArrTicks) == 0)
     {
@@ -252,6 +264,11 @@ int main(int argc, char** argv)
     std::string relayHost = "127.0.0.1";
     uint16_t    relayPort = 7777;
 
+    // tetris_meta 베이스 URL (guest 토큰 발급 + ELO). `--meta http://host:port`.
+    // 환경변수 TETRIS_META_URL 이 있으면 그것을 기본값으로 사용.
+    std::string metaUrl;
+    if (const char* env = std::getenv("TETRIS_META_URL")) metaUrl = env;
+
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -299,12 +316,71 @@ int main(int argc, char** argv)
                 fprintf(stderr, "error: --relay requires an argument (host[:port])\n");
                 return 2;
             }
+        } else if (a == "--meta") {
+            if (i + 1 < argc) {
+                metaUrl = argv[++i];
+            } else {
+                fprintf(stderr, "error: --meta requires a URL (http://host:port)\n");
+                return 2;
+            }
+        }
+    }
+
+    // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
+    //   metaUrl 이 설정된 경우에만 활성화. 실패 시 unranked 모드로 폴백하고
+    //   메뉴에 "ranking offline" 배너를 노출.
+    std::unique_ptr<meta::client::MetaClient> metaClient;
+    std::string authToken;
+    int    myElo       = 1200;
+    bool   metaOnline  = false;  // guest 부트스트랩이 성공했는지
+    if (!metaUrl.empty()) {
+        metaClient = std::make_unique<meta::client::MetaClient>(metaUrl);
+        if (metaClient->valid()) {
+            // 작은 람다 — 새 guest 발급 + 파일 저장 + 상태 갱신.
+            auto bootstrap_new_guest = [&](const char* why) {
+                auto g = metaClient->request_guest();
+                if (g) {
+                    authToken = g->token;
+                    myElo     = g->elo;
+                    meta::client::save_token(authToken);
+                    std::cout << "[meta] " << why << " — new guest player_id="
+                              << g->player_id << " elo=" << g->elo << "\n";
+                    metaOnline = true;
+                } else {
+                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — unranked mode\n", why);
+                }
+            };
+
+            authToken = meta::client::load_token();
+            if (authToken.empty()) {
+                bootstrap_new_guest("first run");
+            } else {
+                // 기존 토큰 — verify. unknown_token 이면 stale → 새로 발급.
+                // 네트워크 실패는 토큰 유지 + 다음 실행에 재시도.
+                meta::client::MetaClient::VerifyOutcome outcome{};
+                auto a = metaClient->verify_token(authToken, 3, &outcome);
+                if (a) {
+                    myElo = a->elo;
+                    std::cout << "[meta] token ok player_id=" << a->player_id
+                              << " elo=" << a->elo << "\n";
+                    metaOnline = true;
+                } else if (outcome == meta::client::MetaClient::VerifyOutcome::UnknownToken) {
+                    fprintf(stderr, "[meta] token unknown (DB reset?) — re-issuing\n");
+                    authToken.clear();
+                    bootstrap_new_guest("token unknown");
+                } else {
+                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, unranked\n");
+                    // 파일은 유지 — 다음 실행에 재시도.
+                }
+            }
         }
     }
 
     uint64_t sessionSeed = 0xDEADBEEFCAFEBABEull;
     net::Session session;
-    uint32_t startDelay = 120;
+    // 3-2-1-START 카운트다운. 60Hz × 3초 = 180틱. 이 동안 input/sim 은 정지 — 양쪽이
+    // 게임 루프 진입을 맞추는 동기화 창구 역할도 겸한다.
+    uint32_t startDelay = 180;
     uint8_t  inputDelay = 2;
     uint32_t localTickNext = 0;
     uint32_t simTick = 0;
@@ -340,7 +416,7 @@ int main(int argc, char** argv)
         if (queueMode) {
             // 비동기 큐잉 — 즉시 리턴, 매칭 대기 중에도 렌더 루프는 계속 돈다.
             // isReady() 가 true 가 되면 seed/role 이 session.params() 에 채워져 있다.
-            if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay)) {
+            if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
                 fprintf(stderr, "Queue join failed to start\n"); return 1;
             }
         } else if (isHost) {
@@ -399,6 +475,14 @@ int main(int argc, char** argv)
 
     GameOverState gameOverState = GameOverState::None;
     net::GameOverChoice myGameOverChoice = net::GameOverChoice::None;
+    // Section K — MATCH_SUMMARY / MATCH_RESULT 상태 (Net 모드 전용).
+    //   gameStartTime_: 라운드 시작 real time (seconds). MATCH_SUMMARY 의 duration 계산용.
+    //   summarySent_: 한 라운드에 한 번만 송신하도록 플래그.
+    //   lastMatchResult*: 게임오버 화면에 표시.
+    double              gameStartTime_  = 0.0;
+    bool                summarySent_    = false;
+    bool                haveMatchResult = false;
+    net::Session::MatchResult lastMatchResult{};
     float gameOverTimer = 0.0f;
     const float GAME_OVER_TIMEOUT      = 30.0f;
     const float DISAGREEMENT_COUNTDOWN = 3.0f;
@@ -410,6 +494,11 @@ int main(int argc, char** argv)
     bool linkLostActive = false;
     float linkLostCountdown = 0.0f;
     const float LINK_LOST_GRACE = 10.0f;
+
+    // startDelay 카운트다운이 0 에 닿는 순간 "START!" 를 잠깐 번쩍인다. 프레임 단위로
+    // 감소하므로 deltaTime 을 이용. 카운트다운 자체는 60Hz 틱 기준 startDelay 로 표시.
+    float startFlashTimer = 0.0f;
+    const float START_FLASH_DURATION = 0.7f;
 
     // F.2 — 자동 HASH 검증. 매 600틱(~10s) 로컬 해시를 SendHash 하고 링으로
     // 기억. 상대의 HASH(tick, h) 가 들어오면 같은 틱의 로컬 해시와 비교 →
@@ -585,6 +674,20 @@ int main(int argc, char** argv)
                 if (gameLocal && gameRemote && startDelay == 0 &&
                     gameOverState == GameOverState::None)
                 {
+                    // 창 드래그 등으로 메인 스레드가 멈춘 동안 ioThread 가 자동으로
+                    // INPUT(t,0) 을 상대에게 흘려 lockstep 을 계속 돌렸다면, 우리도
+                    // 그 구간을 0 으로 채워 localInputs 와 peer 관측치가 일치하도록
+                    // 맞춘다. 그렇지 않으면 같은 tick 에 우리 sim 은 inputMask 를 쓰고
+                    // peer 는 0 을 써 DESYNC.
+                    //   hbEnd==0 은 "heartbeat 한 번도 안 터짐" 을 의미 — 게임 시작
+                    //   tick 0 과 구별하기 위해 반드시 hbEnd>0 조건으로 가드한다.
+                    uint32_t hbEnd = session.heartbeatTickEnd();
+                    if (hbEnd > 0 && hbEnd >= localTickNext) {
+                        for (uint32_t t = localTickNext; t <= hbEnd; ++t) {
+                            localInputs[t] = 0;
+                        }
+                        localTickNext = hbEnd + 1;
+                    }
                     localInputs[localTickNext] = inputMask;
                     session.SendInput(localTickNext, inputMask);
                     localTickNext++;
@@ -600,6 +703,11 @@ int main(int argc, char** argv)
                     localTickNext = 0; simTick = 0;
                     startDelay = session.params().start_tick;
                     lastAttackLocal = 0; lastAttackRemote = 0;
+                    // Section K — 라운드 시작 표지.
+                    gameStartTime_  = platform_get_time();
+                    summarySent_    = false;
+                    haveMatchResult = false;
+                    lastMatchResult = {};
                     // DESYNC 디버깅: 양쪽 창 로그를 비교해 초기 seed + 초기 hash 가
                     // 같은지 먼저 확인. 여기가 다르면 lockstep 출발점부터 갈림.
                     fprintf(stderr, "[INIT] seed=0x%016llx inputDelay=%u startDelay=%u\n",
@@ -614,7 +722,12 @@ int main(int argc, char** argv)
 
                 if (session.isReady())
                 {
-                    if (startDelay > 0) { startDelay--; accumulator -= SECONDS_PER_TICK; continue; }
+                    if (startDelay > 0) {
+                        startDelay--;
+                        // 카운트다운이 방금 끝났다 — "START!" 배너 반짝이게.
+                        if (startDelay == 0) startFlashTimer = START_FLASH_DURATION;
+                        accumulator -= SECONDS_PER_TICK; continue;
+                    }
 
                     int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
                     int64_t lastRemote    = (int64_t)session.maxRemoteTick();
@@ -873,6 +986,21 @@ int main(int argc, char** argv)
                 draw_text("(model/policy.onnx not found)", 250,
                           byStart + 1 * (bh + 10) + bh + 2, 12, DISABLED);
             }
+
+            // Section K — 메타/랭킹 상태 표시.
+            if (metaUrl.empty()) {
+                draw_text("ranking: disabled (--meta http://host:port to enable)",
+                          140, 540, 12, DISABLED);
+            } else if (!metaOnline) {
+                draw_text("ranking server offline - playing unranked",
+                          200, 540, 12, RED);
+            } else {
+                char eloBuf[64];
+                std::snprintf(eloBuf, sizeof(eloBuf),
+                              "ranking: online   ELO %d", myElo);
+                int tw = measure_text(eloBuf, 14);
+                draw_text(eloBuf, (720 - tw) / 2, 540, 14, GREEN);
+            }
             draw_text("(direct Host/Connect: use --host / --connect CLI)",
                       180, 570, 12, DISABLED);
 
@@ -888,7 +1016,9 @@ int main(int argc, char** argv)
                     lastAttackHuman = 0; lastAttackBot = 0;
                 } else if (activated == 2) {
                     queueHost = relayHost; queuePort = relayPort;
-                    if (session.QueueJoin(queueHost, queuePort, startDelay, inputDelay)) {
+                    // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
+                    // 토큰 없이는 verify 실패로 즉시 close 된다.
+                    if (session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
                         netMode = true; queueMode = true; isHost = false;
                         app = AppMode::Net;
                     }
@@ -982,7 +1112,7 @@ int main(int argc, char** argv)
                     draw_text(roomErrorMsg.c_str(), 180, 390, 18, RED);
 
                 if (platform_key_pressed(PKEY_C)) {
-                    if (session.RoomCreate(roomRelayHost, roomRelayPort, startDelay, inputDelay)) {
+                    if (session.RoomCreate(roomRelayHost, roomRelayPort, startDelay, inputDelay, authToken)) {
                         app = AppMode::RoomWaiting;
                         roomLocalReady = false;
                     } else {
@@ -1022,7 +1152,7 @@ int main(int argc, char** argv)
                     if (roomCodeInput.size() != 5) {
                         roomErrorMsg = "Code must be exactly 5 characters";
                     } else if (session.RoomJoin(roomRelayHost, roomRelayPort,
-                                                roomCodeInput, startDelay, inputDelay)) {
+                                                roomCodeInput, startDelay, inputDelay, authToken)) {
                         app = AppMode::RoomWaiting;
                         roomLocalReady = false;
                     } else {
@@ -1332,19 +1462,98 @@ int main(int argc, char** argv)
                 draw_text(coRemote.text, rightX + (300 - tw) / 2, 280, 40, YELLOW);
             }
 
+            // 3-2-1-START! 카운트다운 오버레이. startDelay 는 60Hz 틱 단위,
+            //   180→121 → "3", 120→61 → "2", 60→1 → "1".
+            //   0 이 된 직후 startFlashTimer 가 START_FLASH_DURATION 로 세팅되어
+            //   "START!" 가 잠깐 번쩍이고 사라진다.
+            if (startDelay > 0) {
+                const int seconds = static_cast<int>((startDelay - 1) / 60) + 1;  // 1, 2, 3
+                char buf[4]; snprintf(buf, sizeof(buf), "%d", seconds);
+                constexpr int fontSize = 120;
+                const int tw = measure_text(buf, fontSize);
+                // 반투명 어두운 판을 배경으로 깔아 숫자가 보드 위에서 확실히 읽히게.
+                draw_rect(0, 240, 720, 160, {0, 0, 0, 140});
+                draw_text(buf, 360 - tw / 2, 260, fontSize, YELLOW);
+                draw_text("Get Ready", 305, 380, 20, {200, 210, 230, 255});
+            } else if (startFlashTimer > 0.0f) {
+                startFlashTimer -= deltaTime;
+                const char* txt = "START!";
+                constexpr int fontSize = 80;
+                const int tw = measure_text(txt, fontSize);
+                // 알파를 남은 시간에 비례시켜 자연스러운 페이드아웃.
+                const float t  = startFlashTimer / START_FLASH_DURATION;
+                const uint8_t a = (uint8_t)(255.0f * (t > 0.0f ? t : 0.0f));
+                draw_rect(0, 260, 720, 110, {0, 0, 0, (uint8_t)(140 * t)});
+                draw_text(txt, 360 - tw / 2, 280, fontSize, Color{120, 230, 140, a});
+            }
+
             if ((gameLocal->gameOver || gameRemote->gameOver) &&
                 gameOverState == GameOverState::None)
             {
                 gameOverState = GameOverState::ShowingGameOver;
                 myGameOverChoice = net::GameOverChoice::None;
                 gameOverTimer = 0.0f;
+
+                // Section K — MATCH_SUMMARY 송신 (ranked + meta 연동 시에만 의미 있음).
+                //   · won: "내가 이김" = 상대만 gameOver 이고 나는 살아있음
+                //   · my_score/lines: 내 SimGame
+                //   · opp_score/lines: 내가 관측한 상대 SimGame (lockstep 결정론으로
+                //     양쪽 클라가 동일 값). relay 에서 교차검증에 사용.
+                if (!summarySent_) {
+                    summarySent_ = true;
+                    const bool   iWon       = !gameLocal->gameOver && gameRemote->gameOver;
+                    const uint32_t my_score = (uint32_t)gameLocal->score;
+                    const uint32_t my_lines = (uint32_t)gameLocal->sim.totalLinesCleared;
+                    const uint32_t op_score = (uint32_t)gameRemote->score;
+                    const uint32_t op_lines = (uint32_t)gameRemote->sim.totalLinesCleared;
+                    const uint32_t dur_s    = (uint32_t)std::max(0.0,
+                                                    platform_get_time() - gameStartTime_);
+                    session.SendMatchSummary(iWon ? 1 : 0,
+                                             my_score, my_lines,
+                                             op_score, op_lines, dur_s);
+                }
+            }
+
+            // Section K — MATCH_RESULT 폴링 (relay 가 /v1/matches 완료 후 송신).
+            if (!haveMatchResult) {
+                net::Session::MatchResult mr;
+                if (session.GetMatchResult(mr)) {
+                    haveMatchResult = true;
+                    lastMatchResult = mr;
+                    myElo = mr.elo_after;  // 클라 내부 상태 갱신
+                }
             }
 
             if (gameOverState == GameOverState::ShowingGameOver)
             {
                 draw_text("GAME OVER",                  220, 280, 60, WHITE);
-                draw_text("[R] Restart",                240, 350, 28, GREEN);
-                draw_text("[Q] Go to Title (immediate)",170, 385, 28, YELLOW);
+                // Section K — ELO 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
+                // ELO 변화 없음이라는 사실만 보장 — 구체적 이유는 세 가지:
+                //   (1) meta 미연동 / meta POST 실패 → "ranking offline".
+                //   (2) 교차검증 실패 (양측 summary 불일치) → winner=null 로 DB 에는
+                //       기록되지만 ELO 미반영 → "unranked (validation failed)".
+                //   (3) unranked 매치 (둘 중 하나라도 player_id==0) → 릴레이가 summary 투명 포워딩.
+                // MATCH_RESULT 프레임 자체에는 이유가 실리지 않으므로 UI 는 "ELO 변동 없음"
+                // 의 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
+                if (haveMatchResult) {
+                    if (lastMatchResult.delta == 0 &&
+                        lastMatchResult.elo_before == lastMatchResult.elo_after) {
+                        draw_text("no ELO change (offline / unranked / invalid)",
+                                  150, 343, 14, GRAY);
+                    } else {
+                        char buf[64];
+                        std::snprintf(buf, sizeof(buf), "ELO %d  %+d",
+                                      lastMatchResult.elo_after, lastMatchResult.delta);
+                        Color col = lastMatchResult.delta >= 0 ? GREEN : RED;
+                        int tw = measure_text(buf, 26);
+                        draw_text(buf, 360 - tw / 2, 340, 26, col);
+                    }
+                } else {
+                    draw_text("...waiting for ranking server",
+                              175, 343, 14, {120, 130, 170, 255});
+                }
+                draw_text("[R] Restart",                240, 380, 28, GREEN);
+                draw_text("[Q] Go to Title (immediate)",170, 415, 28, YELLOW);
                 if (platform_key_pressed(PKEY_R)) {
                     myGameOverChoice = net::GameOverChoice::Restart;
                     session.SendGameOverChoice(myGameOverChoice);
@@ -1430,6 +1639,11 @@ int main(int argc, char** argv)
                 gameLocal  = std::make_unique<Game>(sessionSeed);
                 gameRemote = std::make_unique<Game>(sessionSeed);
                 lastAttackLocal = 0; lastAttackRemote = 0;
+                // Section K — 새 라운드.
+                gameStartTime_  = platform_get_time();
+                summarySent_    = false;
+                haveMatchResult = false;
+                lastMatchResult = {};
                 session.ClearGameOverChoices();
                 // HASH 관련 상태 초기화 — 이전 라운드의 slot 이 남아있으면
                 // 새 라운드 tick 600 snapshot 을 이전 라운드 스냅샷과 비교하거나,
@@ -1480,13 +1694,55 @@ int main(int argc, char** argv)
             {
                 if (session.hasFailed()) {
                     gui_text_center(360, 190, "Matchmaking Failed", 28, RED);
-                    gui_text_center(360, 232, "relay unreachable or timeout", 16, GRAY);
+                    const char* sub = session.isQueueMatched()
+                        ? "opponent declined or timed out"
+                        : "relay unreachable or timeout";
+                    gui_text_center(360, 232, sub, 16, GRAY);
                     gui_text_center(360, 400, "[Q] Back to Menu", 20, YELLOW);
                 } else if (!session.isConnected()) {
                     gui_text_center(360, 185, "Connecting to Relay...", 24, WHITE);
                     draw_text(fmt_buf("%s:%u", queueHost.c_str(), (unsigned)queuePort),
                               220, 218, 16, {120,130,170,255});
                     gui_text_center(360, 400, "[Q] Cancel", 18, GRAY);
+                } else if (session.isQueueMatched()) {
+                    // 매칭 성사 → 수락 로비. Y/Enter 로 Accept, N/Esc/Q 로 Decline.
+                    gui_text_center(360, 180, "Match Found!", 32, GREEN);
+                    gui_text_center(360, 222, "Both players must accept to start.", 15, {120,130,170,255});
+
+                    // 두 슬롯 아이콘 + ready 표시.
+                    if (iconYou)      draw_image(iconYou,      250, 260, 64, 64);
+                    if (iconOpponent) draw_image(iconOpponent, 406, 260, 64, 64);
+                    gui_text_center(282, 330, "You",      18, WHITE);
+                    gui_text_center(438, 330, "Opponent", 18, WHITE);
+
+                    const bool meReady   = session.queueLocalReady();
+                    const bool peerReady = session.queuePeerReady();
+                    gui_text_center(282, 352, meReady   ? "READY"   : "Waiting",
+                                    18, meReady ? GREEN : YELLOW);
+                    gui_text_center(438, 352, peerReady ? "READY"   : "Waiting",
+                                    18, peerReady ? GREEN : YELLOW);
+
+                    if (!meReady) {
+                        gui_text_center(360, 405, "[Y/Enter] Accept   [N/Q] Decline", 18, WHITE);
+                    } else if (!peerReady) {
+                        gui_text_center(360, 405, "Waiting for opponent...", 18, {120,130,170,255});
+                    } else {
+                        gui_text_center(360, 405, "Starting...", 20, GREEN);
+                    }
+
+                    if (!meReady && (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER)))
+                    {
+                        session.QueueConfirm();
+                    }
+                    // Decline 키는 아래 공용 [Q] 분기에서 QueueDecline 을 타도록 처리.
+                    if (platform_key_pressed(PKEY_N)) {
+                        session.QueueDecline();
+                        session.Close();
+                        queueMode = false; netMode = false;
+                        localIpDone = false; publicIpLaunched = false;
+                        cachedLocalIP.clear(); cachedPublicIP.clear();
+                        app = AppMode::Menu;
+                    }
                 } else {
                     gui_text_center(360, 185, "Searching for Opponent", 26, WHITE);
                     gui_text_center(360, 224, "Connected — waiting for match...", 15, {120,130,170,255});
@@ -1534,7 +1790,12 @@ int main(int argc, char** argv)
             }
             if (platform_key_pressed(PKEY_Q))
             {
-                if (queueMode) session.QueueCancel();
+                if (queueMode) {
+                    // 매칭 성사 이전: QueueCancel (relay 에 QUEUE_CANCEL 통보).
+                    // 수락 로비 중: QueueDecline (READY(0) 통보 → 상대도 취소 알림).
+                    if (session.isQueueMatched()) session.QueueDecline();
+                    else                           session.QueueCancel();
+                }
                 session.Close();
                 queueMode = false; netMode = false;
                 localIpDone = false; publicIpLaunched = false;
@@ -1546,6 +1807,9 @@ int main(int argc, char** argv)
         // ── NET HUD (최소) ────────────────────────────────────────────────────
         if (app == AppMode::Net)
         {
+#ifndef NDEBUG
+            // 디버그 빌드 전용 오버레이 — seed/tick 상태. Release 빌드에서는 숨긴다
+            // (일반 플레이어에겐 노이즈). 필요 시 DESYNC 배너 / 링크 상태는 계속 보임.
             draw_text(fmt_buf("NET: %s", session.isConnected() ? "CONNECTED" : "DISCONNECTED"),
                       10, 580, 10, RAYWHITE);
             if (session.isReady())
@@ -1558,6 +1822,7 @@ int main(int argc, char** argv)
                                   (unsigned)simTick, (unsigned)inputDelay),
                           10, 606, 10, RAYWHITE);
             }
+#endif
 
             // 링크 상태 오버레이 — Stalled 는 은은하게, Lost 는 grace 카운트다운.
             net::LinkStatus ls = session.linkStatus();

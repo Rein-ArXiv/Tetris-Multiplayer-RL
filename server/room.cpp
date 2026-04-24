@@ -74,7 +74,9 @@ void RoomRegistry::sendRoomInfo_(const net::TcpSocket& sock, const std::string& 
     net::tcp_send_all(sock, f.data(), f.size());
 }
 
-void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id) {
+void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
+                                int64_t player_id, int elo,
+                                const std::string& username, const std::string& token) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
     {
@@ -90,13 +92,19 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id) {
         r.hostSock     = sock;
         r.hostConn     = conn_id;
         r.hostPresent  = true;
+        r.hostPlayerId = player_id;
+        r.hostElo      = elo;
+        r.hostUsername = username;
+        r.hostToken    = token;
     }
     std::cerr << "[room] conn=" << conn_id << " created code=" << code << "\n";
     sendRoomInfo_(sock, code, kStatusWaiting, 1);
     roomLoop_(code, /*isHost=*/true);
 }
 
-void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id) {
+void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
+                              int64_t player_id, int elo,
+                              const std::string& username, const std::string& token) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     bool entered = false;
     {
@@ -122,6 +130,10 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         r.guestSock     = sock;
         r.guestConn     = conn_id;
         r.guestPresent  = true;
+        r.guestPlayerId = player_id;
+        r.guestElo      = elo;
+        r.guestUsername = username;
+        r.guestToken    = token;
         net::TcpSocket hs = r.hostSock;
         net::TcpSocket gs = r.guestSock;
         lk.unlock();
@@ -265,17 +277,25 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
                 return;
             }
 
-            m.a.sock     = r.hostSock;
-            m.a.conn_id  = r.hostConn;
-            m.b.sock     = r.guestSock;
-            m.b.conn_id  = r.guestConn;
-            m.seed       = nextSeed_();
-            m.match_id   = nextMatchId_();
+            m.a.sock      = r.hostSock;
+            m.a.conn_id   = r.hostConn;
+            m.a.player_id = r.hostPlayerId;
+            m.a.elo       = r.hostElo;
+            m.a.username  = r.hostUsername;
+            m.a.token     = r.hostToken;
+            m.b.sock      = r.guestSock;
+            m.b.conn_id   = r.guestConn;
+            m.b.player_id = r.guestPlayerId;
+            m.b.elo       = r.guestElo;
+            m.b.username  = r.guestUsername;
+            m.b.token     = r.guestToken;
+            m.seed        = nextSeed_();
+            m.match_id    = nextMatchId_();
             rooms.erase(it);
         }
         std::cerr << "[room] code=" << code << " -> match id=" << m.match_id
                   << " seed=0x" << std::hex << m.seed << std::dec << "\n";
-        relay::startPump(std::move(m));
+        relay::startPump(std::move(m), meta_);
         return;
     }
 

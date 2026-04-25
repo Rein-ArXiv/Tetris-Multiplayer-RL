@@ -206,6 +206,10 @@ private:
     std::mutex                        roomSendMu_;
     std::deque<std::vector<uint8_t>>  roomSendQ_;
 
+    // 룸 단계 sock 쓰기 직렬화. roomThread drain 과 main thread 의 RoomLeave 동기
+    // 송신이 같은 fd 에 interleaved tcp_send_all 을 걸지 않도록.
+    std::mutex                        roomSockSendMu_;
+
     // 랜덤 큐 로비 단계 sock 쓰기 직렬화. queueThread drain 과 main thread 의
     // QueueDecline 동기 송신이 같은 fd 에 interleaved tcp_send_all 을 걸지 않도록.
     std::mutex                        queueSockSendMu_;

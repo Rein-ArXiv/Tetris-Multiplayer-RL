@@ -268,6 +268,14 @@ void Session::Close() {
     // 연결의 stale 프레임이 새 연결의 ioThread 에서 선두로 나가는 것 방지.
     { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
     { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    // MATCH_RESULT 도 초기화. ClearGameOverChoices 만 의존하면 타이틀→새 매치
+    // 경로에서 이전 라운드 결과가 새 매치 게임오버 시점에 즉시 읽히는 경계가
+    // 있었다. Close 는 세션 경계마다 반드시 실행되므로 여기서 보장.
+    {
+        std::lock_guard<std::mutex> lk(matchResultMu_);
+        matchResultValid_ = false;
+        matchResult_ = MatchResult{};
+    }
 }
 
 bool Session::QueueJoin(const std::string& host, uint16_t port,
@@ -399,15 +407,17 @@ void Session::RoomSendReady(bool readyFlag) {
 }
 
 void Session::RoomLeave() {
-    // 가능하면 ROOM_LEAVE 프레임을 먼저 큐에 넣고, quit 를 세워 스레드가
-    // 그 프레임을 송신한 뒤 소켓을 닫도록 유도한다.
+    // ROOM_LEAVE 는 동기적으로 직접 송신한다 — 이전 구현은 roomSendQ_ 에 넣고
+    // quit=true 를 즉시 세팅했지만, roomThread 루프가 while(!quit) 상단에서
+    // quit 을 먼저 보고 drain 없이 종료, main.cpp 는 곧바로 Close() 로 소켓을
+    // 닫아 ROOM_LEAVE 가 실제로 송신되지 않는 경계가 있었다. (QueueDecline 과
+    // 동일한 패턴 — roomSockSendMu_ 로 roomThread drain 과의 interleave 방지.)
     auto fr = build_frame(MsgType::ROOM_LEAVE, {});
-    {
-        std::lock_guard<std::mutex> lk(roomSendMu_);
-        roomSendQ_.push_back(std::move(fr));
+    if (sock.valid()) {
+        std::lock_guard<std::mutex> lk(roomSockSendMu_);
+        tcp_send_all(sock, fr.data(), fr.size());
     }
     quit = true;
-    // roomThread 가 즉시 깨어나 큐를 drain 후 닫는다. 소켓은 roomThread 가 닫는다.
 }
 
 void Session::roomThread(std::string host, uint16_t port,
@@ -463,7 +473,8 @@ void Session::roomThread(std::string host, uint16_t port,
 
     std::vector<uint8_t> buf;
     while (!quit.load()) {
-        // 아웃바운드 drain (READY / ROOM_LEAVE)
+        // 아웃바운드 drain (READY) — ROOM_LEAVE 는 RoomLeave() 가 동기 송신.
+        // roomSockSendMu_ 로 RoomLeave 의 직접 송신과 직렬화.
         while (true) {
             std::vector<uint8_t> pkt;
             {
@@ -472,6 +483,7 @@ void Session::roomThread(std::string host, uint16_t port,
                 pkt = std::move(roomSendQ_.front());
                 roomSendQ_.pop_front();
             }
+            std::lock_guard<std::mutex> lkSock(roomSockSendMu_);
             if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
                 std::cout << "[ROOM] Send failed" << std::endl;
                 roomState_.store(RoomState::Failed);
@@ -493,6 +505,7 @@ void Session::roomThread(std::string host, uint16_t port,
 
         std::vector<Frame> frames;
         parse_frames(buf, frames);
+        bool matchFound = false;
         for (auto& f : frames) {
             if (f.type == MsgType::ROOM_INFO) {
                 // [code_len:1][code:N][status:1][peer_count:1]
@@ -538,14 +551,28 @@ void Session::roomThread(std::string host, uint16_t port,
                 std::cout << "[ROOM] MATCH_FOUND role="
                           << (role == Role::Host ? "HOST" : "GUEST")
                           << " seed=0x" << std::hex << seed << std::dec << std::endl;
-                recvBuf.clear();
-                lastPongMs.store(now_ms());
-                lastPingSentMs.store(0);
-                roomState_.store(RoomState::Starting);
-                ready = true;
-                th = std::thread(&Session::ioThread, this);
-                return;
+                matchFound = true;
+                // 계속 루프를 돌며 남은 frames 를 검사 — 릴레이가 MATCH_FOUND 직후
+                // 게임 포워딩을 시작하므로 같은 recv 에 실린 게임 프레임을 놓치지
+                // 않도록 아래 else 브랜치에서 recvBuf 에 복원한다.
+            } else if (matchFound) {
+                // MATCH_FOUND 가 먼저 온 뒤 같은 recv 에 실린 게임 프레임 (INPUT/PING 등).
+                // 버리면 lockstep 1 tick stall 또는 첫 PING 유실. 재직렬화해 recvBuf
+                // 맨 뒤에 쌓는다 — ioThread 가 첫 루프에서 parse_frames 로 소비.
+                auto bytes = build_frame(f.type, f.payload);
+                recvBuf.insert(recvBuf.end(), bytes.begin(), bytes.end());
             }
+            // 그 외 (matchFound 이전의 예기치 못한 프레임)는 로비 단계라 관심 없음.
+        }
+        if (matchFound) {
+            // parse_frames 가 뜯어내고 남은 incomplete-tail 바이트도 그대로 이관.
+            recvBuf.insert(recvBuf.end(), buf.begin(), buf.end());
+            lastPongMs.store(now_ms());
+            lastPingSentMs.store(0);
+            roomState_.store(RoomState::Starting);
+            ready = true;
+            th = std::thread(&Session::ioThread, this);
+            return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -611,6 +638,9 @@ void Session::queueThread(std::string host, uint16_t port,
         }
         std::vector<Frame> frames;
         parse_frames(buf, frames);
+        // MATCH_FOUND 뒤에 같은 recv 에 실린 프레임을 다음 단계(로비)로 넘기기 위한 보존 버퍼.
+        // build_frame 은 동일 payload 에 대해 bit-identical 재생산되므로 체크섬 포함 복원 가능.
+        std::vector<uint8_t> preserve;
         for (auto& f : frames) {
             if (f.type == MsgType::MATCH_FOUND && f.payload.size() >= 9) {
                 uint8_t roleByte = f.payload[0];
@@ -629,8 +659,18 @@ void Session::queueThread(std::string host, uint16_t port,
                           << " — waiting for user to accept..." << std::endl;
                 matched = true;
                 queueMatched_.store(true);
-                break;
+            } else if (matched) {
+                // MATCH_FOUND 직후 같은 recv 에 실린 lobby/게임 프레임 (상대의 빠른
+                // READY 또는 이미 포워딩 시작된 바이트). 재직렬화해 보존.
+                auto bytes = build_frame(f.type, f.payload);
+                preserve.insert(preserve.end(), bytes.begin(), bytes.end());
             }
+        }
+        // preserve + buf(partial tail) 순서로 합쳐야 스트림 시간 순서가 보존된다.
+        // buf.insert(end) 는 partial tail 뒤에 붙여 다음 parse 때 오프셋이 어긋나므로 금지.
+        if (!preserve.empty()) {
+            preserve.insert(preserve.end(), buf.begin(), buf.end());
+            buf = std::move(preserve);
         }
         if (!matched) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -680,6 +720,10 @@ void Session::queueThread(std::string host, uint16_t port,
         std::vector<Frame> frames;
         parse_frames(buf, frames);
         bool peerDeclined = false;
+        // 로비 외 프레임(INPUT/PING/HASH 등)은 재직렬화해 recvBuf 에 바로 적재한다.
+        // 릴레이는 양쪽 READY 를 본 순간부터 게임 바이트 포워딩을 시작하므로, 상대
+        // ioThread 가 먼저 보낸 프레임이 같은 recv 에 묶여 로비 단계 queueThread
+        // 로 들어올 수 있다. 버리면 첫 PING/INPUT 유실 → lockstep stall.
         for (auto& f : frames) {
             if (f.type == MsgType::READY) {
                 uint8_t v = f.payload.empty() ? 0 : f.payload[0];
@@ -689,8 +733,11 @@ void Session::queueThread(std::string host, uint16_t port,
                 } else {
                     queuePeerReady_.store(true);
                 }
+            } else {
+                // 게임/기타 프레임 — 재직렬화해 recvBuf 로 이관(ioThread 가 소비).
+                auto bytes = build_frame(f.type, f.payload);
+                recvBuf.insert(recvBuf.end(), bytes.begin(), bytes.end());
             }
-            // 그 외 프레임(CHAT 등)은 이 단계에선 무시.
         }
         if (peerDeclined) {
             connectionFailed = true; quit = true;
@@ -699,9 +746,13 @@ void Session::queueThread(std::string host, uint16_t port,
 
         if (queueLocalReady_.load() && queuePeerReady_.load()) {
             // 양쪽 수락 완료 → 게임 세션으로 전환.
+            // parse_frames 가 뜯어내고 남은 partial tail 도 recvBuf 뒤에 붙여
+            // ioThread 첫 루프에서 이어서 파싱되게 한다. (이미 보존된
+            // 완성 프레임이 앞에 있고, 그 뒤에 partial 이 붙는 순서 → 스트림
+            // 시간 순서 보존.)
             std::cout << "[QUEUE] Both accepted, starting game session" << std::endl;
+            recvBuf.insert(recvBuf.end(), buf.begin(), buf.end());
             queueMatched_.store(false);
-            recvBuf.clear();
             lastPongMs.store(now_ms());
             lastPingSentMs.store(0);
             ready = true;
@@ -773,11 +824,17 @@ void Session::ioThread() {
 
         size_t prevSize = recvBuf.size();
         if (tcp_recv_some(sock, recvBuf)) {
-            if (recvBuf.size() > prevSize) {
-                hasActivity = true;
-                // 주의: 이 루프는 60Hz+ 로 돈다. 여기서 std::cout 으로 매 recv/parse
-                // 를 찍으면 Windows 콘솔 I/O 가 blocking 해 Host 쪽 프레임이 밀린다.
-                // 로그가 필요하면 NET_TRACE 매크로 등으로 gate 해 debug 빌드에서만.
+            const bool newBytes = (recvBuf.size() > prevSize);
+            if (newBytes) hasActivity = true;
+            // 주의: 이 루프는 60Hz+ 로 돈다. 여기서 std::cout 으로 매 recv/parse
+            // 를 찍으면 Windows 콘솔 I/O 가 blocking 해 Host 쪽 프레임이 밀린다.
+            // 로그가 필요하면 NET_TRACE 매크로 등으로 gate 해 debug 빌드에서만.
+            //
+            // 조건은 newBytes 뿐 아니라 "recvBuf 가 비어있지 않은 경우" 로 확장한다.
+            // queueThread 로비 / roomThread MATCH_FOUND 분기가 ioThread 전환 시
+            // 재직렬화된 프레임을 recvBuf 에 pre-load 해 두는데, 첫 recv 가 0 바이트
+            // 를 리턴하면 parse_frames 자체가 스킵되어 preload 가 소비되지 않는다.
+            if (newBytes || !recvBuf.empty()) {
                 std::vector<Frame> frames;
                 parse_frames(recvBuf, frames);
                 for (auto& f : frames) handleFrame(f);

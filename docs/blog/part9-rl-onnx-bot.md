@@ -1054,13 +1054,13 @@ cmake --build build --config Debug
 
 콘솔 출력에 다음 중 하나가 떠야 한다:
 
-```
+```text
 [bot] model/policy.onnx not found — using fallback heuristic
 ```
 
 또는 ORT 자체가 없는 빌드라면:
 
-```
+```text
 [bot] onnxruntime not vendored — rebuild with TETRIS_HAS_ONNXRUNTIME
 ```
 

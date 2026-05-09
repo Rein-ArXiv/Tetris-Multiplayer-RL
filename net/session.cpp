@@ -1,4 +1,5 @@
 #include "session.h"
+#include <algorithm>
 #include <random>
 #include <chrono>
 #include <iostream>

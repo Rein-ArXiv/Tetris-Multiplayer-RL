@@ -215,7 +215,7 @@ static GLuint link_program(const char* vert_src, const char* frag_src)
 
 `glGetShaderInfoLog`가 반환하는 에러 메시지는 GPU 드라이버가 생성한다. NVIDIA, AMD, Intel 각 드라이버마다 포맷이 다르지만, 대체로 다음 형태다:
 
-```
+```text
 0(3) : error C0000: syntax error, unexpected '}', expecting ',' or ';' at token "}"
 ```
 
@@ -294,7 +294,7 @@ void renderer_init(int screen_w, int screen_h)
 
 `glVertexAttribPointer`의 파라미터가 이해하기 어렵다면, 이렇게 생각하면 된다:
 
-```
+```text
 VBO 내부 메모리 레이아웃:
 [x0][y0] [x1][y1] [x2][y2] [x3][y3] [x4][y4] [x5][y5]
  ↑stride=8 bytes↑
@@ -325,7 +325,7 @@ VBO 내부 메모리 레이아웃:
 
 게임 코드는 픽셀 좌표로 생각한다: "x=11, y=11에서 시작하는 478x598 사각형". 그러나 GPU의 출력 공간인 **NDC(Normalized Device Coordinates)** 는 x, y 모두 $[-1, +1]$ 범위다:
 
-```
+```text
 화면 좌표 (Screen Coordinates)      NDC (Normalized Device Coordinates)
 (0,0)──────────(500,0)              (-1,+1)─────(+1,+1)
   │                 │                  │             │
@@ -413,7 +413,7 @@ $$\begin{bmatrix} 0.004 & 0 & 0 & -1 \\ 0 & -0.00323 & 0 & 1 \\ 0 & 0 & -1 & 0 \
 
 GPU는 삼각형만 래스터라이즈한다. 사각형을 그리려면 삼각형 2개로 분해해야 한다:
 
-```
+```text
 (x, y)───────────(x+w, y)
   │ ╲    △2         │
   │   ╲              │
@@ -489,7 +489,7 @@ void draw_rect(int x, int y, int w, int h, Color c)
 
 둥근 모서리 사각형은 단순한 삼각형 2개로는 불가능하다. 곡선을 근사하기 위해 다음과 같이 분해한다:
 
-```
+```text
           ╭──────── center strip ────────╮
           │    (fx+r, fy) ~ (fx+fw-r, fy+fh)    │
     ╭─────┼──────────────────────────────┼─────╮
@@ -1190,7 +1190,7 @@ static const uint8_t kFont5x7[95][5] = {
 
 예를 들어 'A' (= 0x7E, 0x11, 0x11, 0x11, 0x7E) 는:
 
-```
+```text
 열0: 0x7E = 0111_1110   →  .XXXXXX.   (세로로 읽음)
 열1: 0x11 = 0001_0001   →  X...X
 열2: 0x11 = 0001_0001   →  X...X

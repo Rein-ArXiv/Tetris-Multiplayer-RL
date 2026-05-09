@@ -23,10 +23,13 @@
 //   WHITE, GRAY, GREEN, YELLOW, RED, RAYWHITE → platform.h 의 동명 상수
 //   Vector2                 → float x, y 직접 사용
 
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <exception>
 #include <charconv>
 #include "../core/constants.h"
 #include "../core/input.h"

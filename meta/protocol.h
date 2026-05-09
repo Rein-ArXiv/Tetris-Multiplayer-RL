@@ -14,6 +14,7 @@
 // malformed JSON 은 find_int/find_string 이 -1 또는 빈 문자열 반환 → 호출자가 400.
 
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <sstream>
 #include <string>

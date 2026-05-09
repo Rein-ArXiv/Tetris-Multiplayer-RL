@@ -138,7 +138,7 @@ sequenceDiagram
 
 `tetris_meta` 가 추가하는 외부 코드는 단 두 파일이다.
 
-```
+```text
 third_party/
   sqlite3.c         (~9MB amalgamation — SQLite 공식)
   sqlite3.h
@@ -2184,7 +2184,7 @@ TETRIS_META_URL=http://127.0.0.1:8080 ./build/tetris --queue 127.0.0.1:7777
 
 relay 로그:
 
-```
+```text
 [relay] accept conn=1
 [conn 1] QUEUE_JOIN authed player_id=2 elo=1200
 [conn 1] QUEUE_JOIN -> queued
@@ -2196,7 +2196,7 @@ relay 로그:
 
 한 판이 끝나면 (한쪽이 게임오버 트리거):
 
-```
+```text
 [relay] match=1 got MATCH_SUMMARY from A won=1 score=5340
 [relay] match=1 got MATCH_SUMMARY from B won=0 score=2100
 [relay] match=1 saved meta match=1 a=+12 b=-12

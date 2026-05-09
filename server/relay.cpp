@@ -4,6 +4,7 @@
 #include "../net/socket.h"
 #include "../meta/http_client.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -274,9 +275,22 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         // 프레임은 기존처럼 투명 포워딩한다.
 
         bool sendFailed = false;
+        constexpr size_t kRelayMaxPayload = 4096;  // net/framing.cpp 의 MAX_PAYLOAD_BYTES 와 동일
         while (streamBuf.size() >= 2) {
             const uint16_t payloadAndType = static_cast<uint16_t>(streamBuf[0]) |
                                             (static_cast<uint16_t>(streamBuf[1]) << 8);
+
+            // 페이로드 상한 초과 선언이면 framing.cpp::parse_frames 와 동일하게
+            // 스트림 전체를 버린다. 손상/악성 LEN 으로 forwarder 가 64KB 까지
+            // 버퍼링하는 것을 방지한다.
+            if (static_cast<size_t>(payloadAndType) > kRelayMaxPayload + 1u) {
+                std::cerr << "[relay] match=" << ch->match_id
+                          << " dropping over-sized frame (len=" << payloadAndType
+                          << ") from " << (a_to_b ? "A" : "B") << "\n";
+                streamBuf.clear();
+                break;
+            }
+
             const size_t totalNeeded = 2u + payloadAndType + 4u;  // LEN(2)+LEN+CHK(4)
             if (streamBuf.size() < totalNeeded) break;
 
@@ -428,9 +442,10 @@ void startForwarding(Match match, meta::client::MetaClient* meta) {
 void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
     constexpr auto kConfirmTimeout = std::chrono::seconds(30);
     constexpr auto kPollInterval   = std::chrono::milliseconds(10);
-    constexpr size_t LEN_FIELD      = 2;
-    constexpr size_t TYPE_FIELD     = 1;
-    constexpr size_t CHECKSUM_FIELD = 4;
+    constexpr size_t LEN_FIELD          = 2;
+    constexpr size_t TYPE_FIELD         = 1;
+    constexpr size_t CHECKSUM_FIELD     = 4;
+    constexpr size_t MAX_PAYLOAD_BYTES  = 4096;  // net/framing.cpp 와 동일 한도
 
     bool aReady = false;
     bool bReady = false;
@@ -454,6 +469,15 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
                                      const net::TcpSocket& peer) -> int {
         while (buf.size() >= LEN_FIELD + CHECKSUM_FIELD) {
             const uint16_t len = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+
+            // 페이로드 상한 초과 — framing.cpp::parse_frames 와 동일하게
+            // 스트림 전체를 버리고 ready/cancel 어느 것도 소비하지 않는다.
+            // 호출자는 이 사이드를 abort 처리한다.
+            if ((size_t)len > MAX_PAYLOAD_BYTES + TYPE_FIELD) {
+                buf.clear();
+                return -1;
+            }
+
             const size_t totalNeeded = LEN_FIELD + (size_t)len + CHECKSUM_FIELD;
             if (buf.size() < totalNeeded) return 0;  // 미완성 — 다음 recv 대기.
 

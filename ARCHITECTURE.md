@@ -157,9 +157,28 @@ Tetris-Multiplayer-RL/
 │   │   ├── policy_runner.py  ← 정책/규칙 기반 행동 선택
 │   │   └── client.py       ← 60Hz 메인 루프 진입점
 │   ├── train/              ← Colab 전용
-│   │   └── setup_colab.ipynb
+│   │   ├── setup_colab.ipynb     ← Drive 마운트 + 빌드 + PPO 학습 노트북
+│   │   └── README_colab.md       ← Colab 셀 사용법 / 시크릿 / 체크포인트 위치
 │   ├── tests/              ← pytest 스위트
-│   ├── legacy/             ← 이전 Pygame 구현 (참조용, 비빌드)
+│   │   ├── conftest.py                       ← sys.path 부트스트랩 (python/ + 빌드된 tetris_py)
+│   │   ├── _sim_hash_dump.txt                ← 결정론 회귀 골든 출력 (Linux 기준)
+│   │   ├── test_framing_parity.py            ← Python framing.py ↔ C++ framing.cpp 바이트 동등
+│   │   ├── test_determinism_crossplatform.py ← SimGame 시드/입력 동일 시 hash 일치
+│   │   ├── test_checkpoint_roundtrip.py      ← save→load ARCH_VERSION 가드
+│   │   ├── test_placement_parity.py          ← Python ↔ C++ placement 진리표
+│   │   ├── test_relay_smoke.py               ← relay 단독 페어링 + 포워딩
+│   │   ├── test_room_smoke.py                ← 5자리 코드 룸 등록/입장
+│   │   ├── test_meta_db_smoke.py             ← Database registerGuest/saveMatch 트랜잭션
+│   │   ├── test_match_summary_crosscheck.py  ← cross_ok 진리표 (§13)
+│   │   └── test_relay_meta_smoke.py          ← relay + meta 통합 (토큰 검증 + ELO POST)
+│   ├── legacy/             ← 이전 Pygame 구현 (참조용, 비빌드 — 신규 기여자는 src/sim_* 만 보면 된다)
+│   │   ├── README.md           ← legacy 디렉터리의 위상과 폐기 사유
+│   │   ├── main.py             ← 옛 Pygame 진입점
+│   │   ├── game.py             ← 옛 Pygame 게임 루프 (SimGame 의 전신)
+│   │   ├── grid.py             ← 옛 보드 (sim_grid.h 의 Python 원형)
+│   │   ├── block.py / blocks.py ← 옛 테트로미노 (sim_block.h / sim_blocks.h 의 Python 원형)
+│   │   ├── colors.py           ← 옛 색상 팔레트
+│   │   └── position.py         ← (row, col) 좌표 (현 src/position.h 와 동일 구조)
 │   ├── requirements.txt
 │   └── requirements-colab.txt
 │
@@ -1978,9 +1997,16 @@ diff windows_hashes.txt linux_hashes.txt   # 반드시 비어야 함
 
 | 파일 | 테스트 대상 | 외부 의존성 |
 |---|---|---|
+| `conftest.py` | `sys.path` 부트스트랩 — `python/` 와 빌드된 `tetris_py.{so,pyd}` 위치 자동 추가 | 없음 |
 | `test_framing_parity.py` | FNV-1a32 벡터, 프레임 레이아웃, 라운드트립, 불완전 버퍼, 체크섬 오류 | 없음 |
 | `test_checkpoint_roundtrip.py` | 저장/로드 왕복, arch_version 불일치, class 불일치 | torch |
 | `test_determinism_crossplatform.py` | Python SimGame 결정론, C++ 참조 덤프와 비교 | tetris_py (skip if not built) |
+| `test_placement_parity.py` | Python ↔ C++ `pick_placement` 결과 진리표 일치 | tetris_py |
+| `test_relay_smoke.py` | `tetris_relay` 단독 — 큐 페어링 + 바이트 포워딩 | `tetris_relay` 빌드 |
+| `test_room_smoke.py` | 5자리 코드 룸 등록/입장/READY 전파 | `tetris_relay` 빌드 |
+| `test_meta_db_smoke.py` | `Database::registerGuest`/`saveMatch` 트랜잭션, ELO 갱신 단조성 | `tetris_meta` 빌드 + 임시 SQLite 파일 |
+| `test_match_summary_crosscheck.py` | `cross_ok` 진리표 — 양쪽 score/lines/won 일치 시에만 ELO 적용 (§12.3) | `tetris_relay` + `tetris_meta` |
+| `test_relay_meta_smoke.py` | relay + meta 통합 — 토큰 검증, MATCH_SUMMARY POST, 리더보드 갱신 | 둘 다 빌드 |
 
 `test_framing_parity.py`의 FNV-1a32 참조 벡터 (공식 테스트 벡터):
 ```python

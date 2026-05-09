@@ -135,7 +135,7 @@ s_hwnd = CreateWindowExA(
 
 `AdjustWindowRect`는 흔히 놓치기 쉬운 함수다. `CreateWindowEx`의 너비/높이 파라미터는 타이틀바와 테두리를 **포함**한 전체 크기다. 게임이 원하는 것은 **클라이언트 영역**(실제 그림이 그려지는 부분)의 크기다. `AdjustWindowRect`가 이 차이를 보정한다:
 
-```
+```text
 원하는 클라이언트 영역: 500 x 620
 타이틀바 높이: ~31px, 테두리: ~1px 양쪽
 AdjustWindowRect 결과: rect = {-1, -31, 501, 621}
@@ -407,7 +407,7 @@ enum PlatformKey : int {
 
 **WM_CHAR**: `TranslateMessage`가 WM_KEYDOWN을 분석해서 생성하는 문자 이벤트다. IP 주소 입력(숫자, 점, 콜론)에 사용한다. **원형 버퍼**(circular buffer)로 구현하여 여러 키 입력이 한 프레임에 들어와도 순서대로 처리한다:
 
-```
+```text
 s_char_queue: [ . ] [ 1 ] [ 2 ] [ 7 ] [ . ] [ 0 ] [ . ] [ 0 ] [ . ] [ 1 ] ...
                 ^head                                                    ^tail
 ```
@@ -1025,7 +1025,7 @@ AdjustWindowRect(&rect, style, FALSE);
 
 `QueryPerformanceFrequency` 가 돌려주는 값은 현재 하드웨어 소스의 틱 주파수다. 이 프로젝트의 개발 환경에서는:
 
-```
+```text
 QueryPerformanceFrequency → 10,000,000 (10 MHz)
 → 한 틱 = 100 ns
 → 60 Hz 프레임(16.67 ms) 안에 166,700 틱

@@ -15,17 +15,19 @@
 
 프로토콜 확장(`net/framing.h`):
 
-```
-QUEUE_JOIN    = 10   C→S, empty payload
+```text
+QUEUE_JOIN    = 10   C→S, [tok_len:1][token:N]                      tok_len 0 = unranked
 QUEUE_CANCEL  = 11   C→S, empty payload
-MATCH_FOUND   = 12   S→C, [role:1][seed:8 LE]   role: 1=HOST, 2=GUEST
-ROOM_CREATE   = 13   C→S, empty payload
-ROOM_JOIN     = 14   C→S, [code_len:1][code:N]
+MATCH_FOUND   = 12   S→C, [role:1][seed:8 LE]                       role: 1=HOST, 2=GUEST
+ROOM_CREATE   = 13   C→S, [tok_len:1][token:N]                      tok_len 0 = unranked
+ROOM_JOIN     = 14   C→S, [code_len:1][code:N][tok_len:1][token:N]  tok_len 0 = unranked
 ROOM_INFO     = 15   S→C, [code_len:1][code:N][status:1][peer_count:1]
 ROOM_LEAVE    = 16   C→S, empty payload
 READY         = 17   C→S/S→C, [ready:1]
 CHAT          = 20   C↔C, [text_len:2 LE][utf8:N]
 ```
+
+`QUEUE_JOIN` / `ROOM_CREATE` / `ROOM_JOIN` 의 `[tok_len:1][token:N]` 부분은 ranked 모드에서 클라이언트가 `tetris_meta` 로부터 발급받은 32 hex guest 토큰을 그대로 싣는다. `--meta` 가 미지정이면 클라가 `tok_len=0` 을 송신하고 릴레이는 unranked 로 처리한다.
 
 `QUEUE_JOIN`/`ROOM_*`/`READY` 로 `MATCH_FOUND` 를 받은 뒤에는 `Session::Adopt()` 경로로 들어갑니다. 릴레이는 그 뒤의 프레임을 그대로 포워딩하고, 이 경로에서는 일반 P2P 의 `HELLO`/`SEED` 핸드셰이크를 다시 하지 않습니다.
 

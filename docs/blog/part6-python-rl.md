@@ -663,7 +663,7 @@ CMake 옵션 `TETRIS_BUILD_BOT=ON` 로 빌드하면 `TETRIS_HAS_ONNXRUNTIME` 매
 `bot_onnx.cpp` 가 스텁 모드로 컴파일되어 `Load()` 가 항상 false 를 반환한다 —
 `TETRIS_BUILD_BOT` 플래그만 바꿔서 배포본을 재빌드할 수 있는 구조.
 
-```
+```text
 Menu ─┬─ Single              ← 1P 연습
       ├─ Single vs Bot       ← [이 부록] 같은 프로세스 안에서 ONNX 추론
       ├─ Multi (direct)      ← --host / --connect
@@ -691,7 +691,7 @@ Netbot 경로가 여전히 "권위적" — 실 대전 프로토콜을 타므로 
 을 어떻게 돌리는지** 들여다 본다. 소스 트리로 보면 `python/netbot/` 이 세 층으로
 나뉘어 있다:
 
-```
+```text
 python/netbot/
 ├── framing.py          ← 프레임 직렬화/파싱 (Part 5 의 net/framing.* 포팅)
 ├── session.py          ← TCP 세션 · HELLO/SEED 핸드셰이크 · INPUT 큐
@@ -847,7 +847,7 @@ ONNX 쪽 세부는 [Part 9](./part9-rl-onnx-bot.md) 에서 다룬다.
 
 ### 11.1 와이어 포맷 복기
 
-```
+```text
 [LEN u16 LE][TYPE u8][PAYLOAD LEN-1 bytes][CHECKSUM u32 LE]
 ```
 

@@ -28,7 +28,7 @@ Python (학습 / 봇)
 
 > 이 프로젝트는 raylib을 링크하지 않습니다. Windows는 핸드메이드 Win32+OpenGL
 > (`platform/win32.cpp`), macOS/Linux 는 SDL2+OpenGL (`platform/sdl.cpp`)을
-> 직접 구현해서 사용합니다. 자세한 과정은 `docs/blog/part0` ~ `part9` 참조.
+> 직접 구현해서 사용합니다. 자세한 과정은 `docs/blog/part0` ~ `part10` 참조.
 
 > _"게임 로직을 고치려면 SimGame을 고쳐라. 화면을 고치려면 Game을 고쳐라."_
 

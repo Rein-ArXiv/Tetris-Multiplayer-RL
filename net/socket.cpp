@@ -1,4 +1,6 @@
 #include "socket.h"
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <chrono>

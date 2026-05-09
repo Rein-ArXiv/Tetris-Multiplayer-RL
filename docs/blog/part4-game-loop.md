@@ -141,7 +141,7 @@ while (!platform_should_close())
 
 문제: FPS가 높으면 60Hz 틱 사이에 여러 프레임이 지나간다. 키를 눌렀다 뗀 프레임이 틱 프레임과 어긋나면, 틱이 그 입력을 보지 못한다.
 
-```
+```text
 시간축 →
 
 프레임:  F1    F2    F3    F4    F5    F6    F7    F8
@@ -490,7 +490,7 @@ flowchart TB
 
 **원인:** `accumulator += deltaTime`과 `accumulator -= SECONDS_PER_TICK`에서 float의 유한 정밀도로 인한 오차가 매 프레임 누적된다.
 
-```
+```text
 이론: 1000프레임 × 1/60 = 16.6667초 동안 정확히 1000틱
 실제: float 누적 오차로 999틱 또는 1001틱
 ```

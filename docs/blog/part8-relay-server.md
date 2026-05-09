@@ -348,7 +348,7 @@ private:
 
 **MATCH_FOUND 포맷.** `net/framing.h` 에 정의된 대로:
 
-```
+```text
 MATCH_FOUND (12) 페이로드 = [role:1][seed:8 LE]
   role: 1 = HOST,  2 = GUEST
   seed:  8바이트 LE — 양쪽 클라이언트가 공유할 lockstep RNG 시드
@@ -1007,7 +1007,7 @@ cmake --build build --target tetris_relay tetris --config Release
 
 서버 로그:
 
-```
+```text
 [relay] accept conn=1
 [conn 1] QUEUE_JOIN -> queued
 [relay] accept conn=2

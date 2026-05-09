@@ -701,7 +701,7 @@ BGM 은 상황이 다르다. 우리 프로젝트의 BGM 은 2\~4 분 내외로, 
 
 `drmp3_open_memory_and_read_pcm_frames_s16` 한 줄 뒤에 실제로는 다음이 일어난다:
 
-```
+```text
 1. MP3 프레임 헤더 스캔 → 총 프레임 수 추정 (ID3v1/v2 스킵)
 2. 최종 PCM 크기 만큼 malloc
 3. 루프로 drmp3_read_pcm_frames_s16 호출해 전부 채움
@@ -1157,7 +1157,7 @@ if (v.pos + sc > total) {
 
 이 원칙을 모든 함수에 적용한다:
 
-```
+```text
 audio_init() 실패
   → s_initialized = false
     → audio_load_sound() → return 0
@@ -1336,7 +1336,7 @@ sequenceDiagram
 
 SDL 백엔드의 흐름은 거의 동일하다. 차이를 도식으로 겹쳐 그리면:
 
-```
+```text
 audio_init:        CoInitializeEx + XAudio2Create + CreateMasteringVoice
                vs  SDL_InitSubSystem + SDL_OpenAudioDevice + SDL_PauseAudioDevice(0)
 

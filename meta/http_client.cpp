@@ -15,6 +15,7 @@
 // 이 파일을 한 타겟당 한 번만 추가해야 한다.
 #include "httplib.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>

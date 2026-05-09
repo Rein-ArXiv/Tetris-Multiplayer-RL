@@ -152,7 +152,7 @@ bool IsCellEmpty(int row, int column) const
 
 표준 테트리스의 7종 테트로미노. 각 블록은 4개의 셀로 구성된다:
 
-```
+```text
 L (id=1)  J (id=2)  I (id=3)  O (id=4)  S (id=5)  T (id=6)  Z (id=7)
 
     #       #         ####      ##        ##          #        ##
@@ -182,7 +182,7 @@ public:
 
 회전 상태 0~3은 시계 방향 90도씩 회전한 형태다:
 
-```
+```text
 rot=0     rot=1     rot=2     rot=3
   #         #         .         #
  ###       ##        ###       ##
@@ -236,7 +236,7 @@ std::vector<Position> GetCellPositions() const
 
 예: T 블록(rot=0)이 rowOffset=5, columnOffset=3일 때:
 
-```
+```text
 cells[0] = {(0,1), (1,0), (1,1), (1,2)}
 
 절대 좌표 = {(5,4), (6,3), (6,4), (6,5)}
@@ -344,7 +344,7 @@ void SimGame::MoveBlockDrop()
 
 라인 클리어에서 가장 흔한 실수는 순방향(row 0 -> 19)으로 순회하는 것이다. 순방향 순회의 문제:
 
-```
+```text
 순방향 순회 시:
 row 17: ■■■■■■■■■■ ← 가득 참, 삭제 → 위의 row를 아래로 이동
 row 18: ■■■■■■■■■■ ← 이제 이 자리에 옛 row 17의 위 행이 옴
@@ -378,7 +378,7 @@ int ClearFullRows()
 
 2줄 동시 클리어의 경우:
 
-```
+```text
 초기 상태:          row 17 클리어 후:      row 18 클리어 후:     비-풀 행 이동 후:
 row 15: ..■■....   row 15: ..■■....     row 15: ..■■....    row 15: ..........
 row 16: .■■■■...   row 16: .■■■■...     row 16: .■■■■...    row 16: ..........
@@ -474,7 +474,7 @@ SimBlock SimGame::GetRandomBlock()
 
 만약 입력 처리 코드에서 RNG를 호출하면 (예: 파티클 이펙트용 난수), 입력 타이밍에 따라 RNG 상태가 달라지고, 같은 시드 + 같은 입력이라도 블록 순서가 달라진다. 결정론이 깨진다.
 
-```
+```text
 불변 조건: RNG 호출 순서 = 블록 생성 순서 (입력/타이밍과 무관)
 
 위반 예시:
@@ -859,7 +859,7 @@ void SimGame::InsertGarbage(int rows)
 
 결과 시각화 (3줄 가비지, 구멍 = 컬럼 4):
 
-```
+```text
     주입 전:                   주입 후:
 row 0:  ..........             row 0:  .....(소실)..
 row 1:  ..........             row 1:  ..........
@@ -899,7 +899,7 @@ SimGame::SimGame(uint64_t seed)
 
 **왜 스트림을 분리하는가?** 피스 RNG와 가비지 RNG가 **같은 인스턴스**였다면:
 
-```
+```text
 상상의 시나리오 (실제로는 이렇게 하지 않음):
   Tick 100: 내가 4줄 클리어 → attack=4 → 상대 pendingGarbage=4
   Tick 110: 상대가 2줄 클리어 → attack=1 → 내 pendingGarbage=1
@@ -1112,7 +1112,7 @@ const Step kScript[] = {
 
 출력 형식:
 
-```
+```text
 ==== seed 0x0000000000000001 ====
 seed=0x0000000000000001
 initial_hash=0x<16자리>

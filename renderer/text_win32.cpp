@@ -76,6 +76,7 @@ static HFONT get_cached_font(int size)
 void draw_text(const char* text, int x, int y, int size, Color c)
 {
     if (!text || !text[0]) return;
+    if (!glWindowPos2i) return;
     GLuint base = get_font_list(size);
     if (!base) return;
 

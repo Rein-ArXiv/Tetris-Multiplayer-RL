@@ -1,52 +1,111 @@
-# Tetris Multiplayer with Lockstep Networking
+# Tetris Multiplayer RL
 
-결정론적 P2P Lockstep 네트워킹 기반 멀티플레이어 테트리스. C++17로 작성했고,
-렌더링은 raylib 없이 **Win32 + OpenGL (핸드메이드)** 또는 **SDL2 + OpenGL**
-백엔드를 직접 구현했다. ONNX Runtime으로 RL 봇 추론, 파이썬 학습 파이프라인,
-커스텀 매치메이킹 릴레이 서버, ELO/리더보드용 메타 서버까지 모두 포함한다.
+결정론적 lockstep 네트워킹을 기반으로 만든 멀티플레이어 테트리스입니다.
+C++17, CMake, OpenGL 기반이며 raylib 없이 직접 구현한 Win32 백엔드와
+SDL2 백엔드를 함께 사용합니다.
+
+이 저장소에는 게임 클라이언트, 릴레이/룸 서버, HTTP+SQLite 메타 서버,
+결정론 회귀 테스트, Python 시뮬레이션 바인딩, RL 학습용 환경/모델/export
+코드, 선택형 ONNX Runtime 봇 추론 코드가 포함되어 있습니다.
+
+## 현재 상태
+
+- Windows 기본 빌드는 Handmade Win32 + OpenGL + XAudio2 경로입니다.
+- macOS/Linux 기본 빌드는 SDL2 + OpenGL 경로입니다.
+- `tetris`, `sim_hash_dump`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
+- `Single vs Bot`은 선택 기능입니다. `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/policy.onnx`가 모두 있어야 활성화됩니다.
+- Python 쪽은 Colab 부트스트랩, Gymnasium 환경, 정책 모델, 체크포인트, ONNX export까지 있습니다.
+- 실제 RL 학습 알고리즘(PPO, MuZero, DQN 등)과 훈련 노트북은 아직 직접 작성해야 합니다.
 
 ## 빠른 시작
 
-### 공통 (CMake)
-```bash
-mkdir -p build && cd build
-cmake ..
-cmake --build . -j
-./tetris
+### Windows
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Release
+.\build\Release\tetris.exe
 ```
 
-- Windows 기본값: Handmade Win32 + XAudio2 경로 (`TETRIS_USE_SDL2=OFF`).
-- macOS / Linux 기본값: SDL2 + OpenGL 경로 (`TETRIS_USE_SDL2=ON`).
-- `-DTETRIS_USE_SDL2=ON` 을 Windows 에서도 지정하면 SDL2 경로로 빌드.
+릴리스 번들은 다음 스크립트로 만듭니다.
 
-### 주요 CMake 옵션
-| 플래그 | 기본 | 결과 바이너리 | 설명 / 의존성 |
-|---|---|---|---|
-| `TETRIS_BUILD_GAME`  | ON  | `tetris`        | 게임 실행 파일. `third_party/httplib.h` 필요 (guest 토큰 발급용) |
-| `TETRIS_BUILD_TEST`  | ON  | `sim_hash_dump` | 결정론 회귀 테스트 |
-| `TETRIS_BUILD_PY`    | OFF | `tetris_py`     | pybind11 모듈 |
-| `TETRIS_BUILD_RELAY` | OFF | `tetris_relay`  | 헤드리스 릴레이/룸 서버. `third_party/httplib.h` 필요 (meta 호출용) |
-| `TETRIS_BUILD_META`  | OFF | `tetris_meta`   | HTTP+SQLite 메타 서버 (ELO/리더보드). `third_party/sqlite3.{c,h}` + `httplib.h` 필요 |
-| `TETRIS_BUILD_BOT`   | OFF | (tetris 안)     | ONNX Runtime 링크 (Single vs Bot 활성화) |
+```powershell
+.\scripts\release_win.ps1
+```
 
-## 멀티플레이어 실행 (익명/싱글 빠른 시작)
+산출물은 `dist\tetris-win-x64.zip`에 생성됩니다. 봇 포함 빌드는 ONNX Runtime과
+`model/policy.onnx`가 준비된 뒤 실행합니다.
+
+```powershell
+.\scripts\release_win.ps1 -Bot
+```
+
+### Linux / macOS
+
+Linux에서는 SDL2와 OpenGL 개발 패키지가 필요합니다.
 
 ```bash
-# 다이렉트 호스팅
+# Ubuntu/Debian 예시
+sudo apt install build-essential cmake libsdl2-dev libgl1-mesa-dev
+```
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/tetris
+```
+
+루트 `Makefile`은 CMake wrapper입니다.
+
+```bash
+make
+make release-linux
+```
+
+## 주요 CMake 옵션
+
+| 옵션 | 기본값 | 결과 | 설명 |
+|---|---:|---|---|
+| `TETRIS_BUILD_GAME` | ON | `tetris` | 게임 클라이언트 |
+| `TETRIS_BUILD_TEST` | ON | `sim_hash_dump` | 결정론 해시 회귀 테스트 |
+| `TETRIS_BUILD_RELAY` | OFF | `tetris_relay` | TCP 릴레이/룸/매치메이킹 서버 |
+| `TETRIS_BUILD_META` | OFF | `tetris_meta` | HTTP+SQLite guest/ELO/리더보드 서버 |
+| `TETRIS_BUILD_PY` | OFF | `tetris_py` | pybind11 기반 Python 시뮬레이션 모듈 |
+| `TETRIS_BUILD_BOT` | OFF | `tetris` 내부 | ONNX Runtime 기반 로컬 봇 추론 |
+| `TETRIS_USE_SDL2` | Windows OFF, 그 외 ON | 백엔드 선택 | SDL2 창/입력/오디오 백엔드 사용 |
+
+서버까지 함께 빌드하려면 다음처럼 구성합니다.
+
+```bash
+cmake -S . -B build -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON
+cmake --build build --config Release
+```
+
+Visual Studio 같은 multi-config generator에서는 `--config Release`를 사용하고,
+Linux/macOS Makefile 또는 Ninja에서는 `-DCMAKE_BUILD_TYPE=Release`를 사용합니다.
+
+## 멀티플레이 실행
+
+직접 호스트/접속:
+
+```bash
 ./tetris --host 7777
-
-# 다이렉트 접속
 ./tetris --connect 192.168.1.100:7777
+```
 
-# 릴레이 기반 랜덤 매칭
+릴레이 랜덤 매칭:
+
+```bash
 ./tetris --queue relay.example.com:7777
+```
 
-# 커스텀 룸 (5자리 코드)
-# CLI로 릴레이 주소를 지정한 뒤, Create/Join/Ready는 게임 메뉴에서 진행
+커스텀 룸:
+
+```bash
 ./tetris --relay relay.example.com:7777
 ```
 
-클라이언트가 지원하는 네트워크 CLI:
+클라이언트 CLI 옵션:
 
 | 옵션 | 용도 |
 |---|---|
@@ -54,128 +113,157 @@ cmake --build . -j
 | `--connect <host[:port]>` | 직접 호스트에 접속 |
 | `--queue <host[:port]>` | 릴레이 랜덤 큐에 즉시 참가 |
 | `--relay <host[:port]>` | 메뉴의 Matchmaking/Custom Room에서 사용할 릴레이 주소 지정 |
-| `--meta <http://host:port>` | tetris_meta 베이스 URL (ELO/리더보드 활성화). 환경변수 `TETRIS_META_URL` 도 동일 |
+| `--meta <http://host:port>` | ELO/리더보드용 `tetris_meta` URL |
 
-## 랭킹 멀티플레이 (3-tier)
+`--meta`는 환경변수 `TETRIS_META_URL`로도 지정할 수 있습니다.
 
-ELO/리더보드를 쓰려면 `tetris_meta` 메타 서버 + `tetris_relay` 릴레이를
-함께 띄운다. 권장 배치는 메타 = 항상 켜져 있는 기기 (예: Mac mini), 릴레이 =
-저전력 모바일 Linux (Termux/proot 가능), 클라이언트 = 데스크톱.
+## 서버 구성
 
-```mermaid
-graph LR
-    C[tetris<br/>client<br/>desktop]
-    M[tetris_meta<br/>HTTP + SQLite<br/>ELO 관리<br/>Mac mini]
-    R[tetris_relay<br/>TCP forwarder<br/>매치메이킹<br/>mobile Linux]
+랭킹 멀티플레이를 쓰려면 `tetris_meta`와 `tetris_relay`를 함께 실행합니다.
+`tetris_meta`는 guest 토큰, ELO, 리더보드를 담당하고, `tetris_relay`는 TCP
+매치메이킹과 프레임 포워딩을 담당합니다.
 
-    C -- "HTTP /v1/* (guest, auth, leaderboard)" --> M
-    C -- "TCP framing (QUEUE_JOIN + 게임 트래픽)" --> R
-    R -- "HTTP /v1/auth/verify, /v1/matches" --> M
-```
+메타 서버:
 
-서버 기기 (Mac mini 등):
 ```bash
-cmake -B build -DTETRIS_BUILD_META=ON -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=OFF
-cmake --build build --target tetris_meta
-./build/tetris_meta --db tetris.db --http 0.0.0.0:8080
+cmake -S . -B build-meta -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_META=ON
+cmake --build build-meta --config Release
+./build-meta/tetris_meta --db tetris.db --http 0.0.0.0:8080
 ```
 
-모바일 Linux (relay):
+릴레이 서버:
+
 ```bash
-cmake -B build -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_GAME=OFF
-cmake --build build --target tetris_relay
-./build/tetris_relay --port 7777 --meta http://mac-mini.local:8080
+cmake -S . -B build-relay -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON
+cmake --build build-relay --config Release
+./build-relay/tetris_relay --port 7777 --meta http://127.0.0.1:8080
 ```
 
-데스크톱 (client):
+클라이언트:
+
 ```bash
-./tetris.exe --meta http://mac-mini.local:8080 --queue mac-mini.local:7777
-# 또는 환경변수
-TETRIS_META_URL=http://mac-mini.local:8080 ./tetris --queue mac-mini.local:7777
+./tetris --meta http://127.0.0.1:8080 --queue 127.0.0.1:7777
 ```
 
-`--meta` 가 비어 있으면 클라이언트/릴레이 모두 unranked 모드로 폴백한다
-(메뉴에 "ranking server offline" 또는 "ranking: disabled" 배너가 뜬다).
+`--meta`가 없거나 메타 서버가 응답하지 않으면 unranked 모드로 동작합니다.
 
-## 익명 토큰 / 랭킹
+## RL / Bot
 
-- 첫 실행 시 `tetris_meta` 가 살아 있으면 클라이언트가 `POST /v1/guest`
-  로 자동 guest 토큰을 발급받아 표준 user-data 경로에 저장한다.
-- 토큰 파일을 지우거나 잃어버리면 다음 실행에서 새로 발급받는다 —
-  이전 ELO/매치 이력은 잃는다.
-- 메타 서버 DB 가 리셋돼서 토큰이 unknown 으로 떨어지면 클라이언트가
-  자동으로 새 guest 를 발급받는다.
-- 토큰 저장 경로 (`meta/http_client.cpp::token_file_path()`):
-  - Windows: `%APPDATA%\Tetris\token`
-  - macOS: `~/Library/Application Support/Tetris/token`
-  - Linux: `$XDG_DATA_HOME/Tetris/token` (없으면 `~/.local/share/Tetris/token`)
+두 종류의 봇 경로가 있습니다.
 
-## tetris_meta 빌드 전 third_party 준비
+- Python netbot: `.pt` 체크포인트를 읽어 네트워크 클라이언트처럼 접속합니다.
+- In-game bot: `model/policy.onnx`를 C++ 게임이 직접 읽고 `Single vs Bot`에서 사용합니다.
 
-`tetris_meta` 는 다음 두 라이브러리에 의존한다 (둘 다 single-file, 헤더/번들):
+현재 구현된 것은 학습 기반입니다.
 
-- SQLite amalgamation (`sqlite3.h`, `sqlite3.c`) — https://www.sqlite.org/download.html
-- cpp-httplib (`httplib.h`) — https://github.com/yhirose/cpp-httplib
+- `bindings/tetris_py.cpp`: C++ `SimGame`을 Python으로 노출
+- `python/common/env.py`: Gymnasium placement 환경
+- `python/common/models.py`: `TetrisPolicyNet`
+- `python/common/checkpoint.py`: 체크포인트 저장/로드
+- `python/netbot/export_onnx.py`: `.pt` 체크포인트를 ONNX로 export
+- `bot/bot_onnx.cpp`: C++ ONNX Runtime 추론
 
-다운로드 후 `third_party/` 에 그대로 복사하면 끝. `tetris_relay` 와
-`tetris` (game) 도 메타 호출용으로 `httplib.h` 만 필요하다 — `sqlite3.{c,h}`
-는 메타 서버에서만 쓴다.
+아직 포함되지 않은 것:
 
-## 핵심 기능
+- PPO/MuZero/DQN 같은 실제 학습 루프
+- Colab에서 바로 긴 학습을 수행하는 완성 training notebook
+- 대전/가비지까지 반영한 경쟁형 RL 환경
 
-- 결정론적 P2P Lockstep 동기화 (고정 60Hz 틱)
-- DAS(133ms) / ARR(50ms) 기반 좌우 홀드 반복 + 소프트 드롭 속도 제한
-- 10초 주기 자동 HASH 검증 + DESYNC 배너
-- T-spin 점수/공격 판정 + 공격 라인 / 가비지 큐 / 화면 흔들림 / 콜아웃
-- PING/PONG 하트비트 + 링크 단절 grace 복귀
-- 메인 스레드 스톨 자동 heartbeat (창 드래그 시 상대방 게임 정지 방지)
-- 5자리 코드 기반 커스텀 룸 + 랜덤 큐 매칭 서버
-- 랜덤 큐 매치 수락 로비 (Y/N 수락 후 게임 시작) + 3-2-1-START 카운트다운
-- 인-게임 채팅 (릴레이 투명 통과)
-- 리플레이 기록 (F5/F6) / 상태 해시 출력 (H)
-- ONNX Runtime 로컬 봇 추론 (Single vs Bot)
-- 파이썬 lockstep 봇 클라이언트 + RL 학습 파이프라인
-- HTTP+SQLite 메타 서버 (guest 토큰 / ELO / 리더보드)
-- Win32 핸드메이드 / SDL2 / 파이썬 pybind11 전부 지원
+Colab 기본 흐름:
+
+```bash
+# Colab에서 setup_colab.ipynb 실행 후
+cd python
+python -m netbot.export_onnx checkpoints/run.pt ../model/policy.onnx
+```
+
+Windows에서 in-game bot을 빌드하려면 ONNX Runtime을 `third_party/onnxruntime`에
+준비한 뒤 실행합니다.
+
+```powershell
+.\scripts\release_win.ps1 -Bot
+```
+
+## 결정론 테스트
+
+`sim_hash_dump`는 Windows/Linux/macOS에서 같은 입력 시퀀스가 같은 상태 해시를
+내는지 확인하기 위한 기준 프로그램입니다.
+
+```bash
+cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_TEST=ON
+cmake --build build --config Release --target sim_hash_dump
+./build/sim_hash_dump
+```
+
+Windows Visual Studio 빌드에서는 실행 파일 위치가 다릅니다.
+
+```powershell
+.\build\Release\sim_hash_dump.exe
+```
+
+Python 테스트는 Python 의존성이 설치되어 있어야 합니다.
+
+```bash
+pip install -r python/requirements.txt
+python -m pytest python/tests
+```
+
+## 주요 기능
+
+- 고정 60Hz 기반 결정론적 lockstep 시뮬레이션
+- 7-bag RNG, 상태 해시, 리플레이 기록
+- DAS/ARR 기반 좌우 반복 입력
+- T-spin, 콤보, back-to-back, garbage queue
+- P2P direct host/connect
+- 릴레이 기반 랜덤 큐와 5자리 커스텀 룸
+- 인게임 채팅, PING/PONG heartbeat, desync 배너
+- HTTP+SQLite guest 토큰, ELO, 리더보드
+- Python 시뮬레이션 바인딩과 RL 실험용 환경
+- 선택형 ONNX Runtime 로컬 봇 추론
 
 ## 핫키
 
-- **화살표**: 이동/회전 (좌우는 홀드 반복 지원)
-- **Space**: 하드 드롭
-- **F5/F6**: 리플레이 기록/저장
-- **H**: 상태 해시 출력
-- **R** (게임 오버): 재시작
-- **Q** (게임 오버/취소): 타이틀/취소
+| 키 | 동작 |
+|---|---|
+| Arrow Left / Right | 좌우 이동 |
+| Arrow Up | 회전 |
+| Arrow Down | 소프트 드롭 |
+| Space | 하드 드롭 |
+| F5 / F6 | 리플레이 기록 / 저장 |
+| H | 상태 해시 출력 |
+| R | 게임 오버 후 재시작 |
+| Q | 게임 오버 후 타이틀 복귀 또는 취소 |
 
 ## 프로젝트 구조
 
+```text
+src/        게임 조립 코드와 SimGame 기반 Game 래퍼
+core/       입력 상수, RNG, 해시, 리플레이
+platform/   Win32 / SDL2 창, 입력, 이벤트
+renderer/   OpenGL 렌더러, 텍스트, 이미지, 화면 흔들림
+audio/      XAudio2 / SDL audio mixer
+net/        TCP socket, framing, lockstep session
+server/     relay, room, matchmaking server
+meta/       HTTP+SQLite meta server와 meta client
+bot/        placement helper와 ONNX Runtime bot
+bindings/   pybind11 tetris_py 모듈
+python/     RL common layer, netbot, tests, Colab setup
+scripts/    Windows/Linux/macOS release scripts
+docs/blog/  구현 과정을 정리한 블로그 시리즈
 ```
-src/       게임 로직 (Game = SimGame + Draw)
-core/      결정론 시스템 (틱, RNG, 해시, 리플레이)
-net/       네트워킹 (Socket → Framing → Session, PING/ROOM/CHAT 포함)
-server/    릴레이 + 룸 매치메이커 (tetris_relay) — transparent forwarder + meta 호출 (token verify, MATCH_SUMMARY 가로채기)
-meta/      HTTP+SQLite 메타 서버 (ELO, 리더보드, guest 토큰) + 클라이언트 라이브러리
-bot/       ONNX Runtime 로컬 봇 추론
-platform/  창 + 입력 (win32.cpp / sdl.cpp)
-renderer/  OpenGL 2D 렌더러 + 텍스트 + shake + image
-audio/     XAudio2 / SDL_OpenAudioDevice 기반 자체 믹서
-bindings/  pybind11 → tetris_py 모듈
-python/    RL 학습 + 네트봇 클라이언트 (common, netbot, sim, tests)
-docs/blog/ 각 계층을 처음부터 만드는 11부 시리즈 (part0-10)
-```
-
-## 더 읽기
-
-- **`docs/blog/part0` ~ `part10`** — 셋업, 창/렌더러/로직/루프/네트/RL/오디오,
-  릴레이 서버, ONNX 봇, 메타 서버와 랭킹까지 raylib 없이 직접 만드는 과정 블로그 시리즈.
-- **`GUIDE.md`** — 코드를 처음 읽을 때 어디서부터 볼지 안내.
-- **`ARCHITECTURE.md`** — 모든 모듈의 상세 레퍼런스. §11 (메타 서버), §12 (랭킹 흐름) 도 여기 있음.
-- **`DEPLOY.md`** — 플랫폼별 릴리스 번들 제작 절차.
 
 ## 요구사항
 
-- **공통**: C++17, CMake 3.15+
-- **Windows (Handmade)**: Windows SDK (WinSock2, XAudio2, GDI+)
-- **macOS / Linux / Windows (SDL2)**: SDL2 개발 헤더 + OpenGL
-- **RL / 봇**: Python 3.10+, PyTorch, pybind11, ONNX Runtime (선택)
-- **tetris_meta**: 추가 third_party 없음 — SQLite amalgamation + cpp-httplib 단일 헤더만 `third_party/` 에 두면 빌드됨
+- 공통: C++17, CMake 3.15+
+- Windows: Visual Studio Build Tools 또는 동등한 MSVC 환경, Windows SDK
+- Linux/macOS SDL2 빌드: SDL2 개발 헤더, OpenGL
+- Python/RL: Python 3.10+, PyTorch, Gymnasium, pybind11, pytest
+- Meta server: vendored `third_party/sqlite3.{c,h}`와 `third_party/httplib.h`
+- In-game bot: ONNX Runtime CPU bundle, `model/policy.onnx`
+
+## 주의 사항
+
+- `dist/`는 릴리스 스크립트가 만드는 산출물이며 보통 Git에 커밋하지 않습니다.
+- `TETRIS_BUILD_BOT=OFF`이면 게임은 정상 빌드되지만 `Single vs Bot`은 비활성화됩니다.
+- `Sounds/drop.mp3`, `Sounds/garbage.mp3`는 코드에서 참조하지만 현재 기본 사운드 폴더에는 없을 수 있습니다. 없어도 빌드는 실패하지 않고 해당 효과음만 재생되지 않습니다.
+- 코드를 처음 읽는다면 `GUIDE.md`, `ARCHITECTURE.md`, `docs/blog/part0`부터 순서대로 보는 것을 권장합니다.

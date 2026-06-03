@@ -37,6 +37,24 @@ instead of the older PPO-only notebook. It includes setup, smoke test, selected
 algorithm training, ONNX export, and `model/bots.cfg` generation in one file.
 `train_ppo_colab.ipynb` is kept only as a small PPO-specific example.
 
+## Export Troubleshooting
+
+`CalledProcessError` from an ONNX export cell means the subprocess failed; the
+real cause is in that subprocess's stdout/stderr. The current notebooks print
+both before raising.
+
+Common fixes:
+
+- Re-run the setup/dependency cell after `git pull`. It installs `torch`,
+  `onnx`, and `onnxscript` from `python/requirements-colab.txt`.
+- Run export from `/content/Tetris-Multiplayer-RL/python`, or use
+  `train_model_zoo_colab.ipynb`, which sets the working directory explicitly.
+- If the message says `checkpoint not found`, finish the training cell first or
+  export the latest `checkpoints/<run>.pt` instead of a missing
+  `checkpoints/<run>.eval_best.pt`.
+- If `SimGame.clone()` is missing, delete `build/` and `python/sim/tetris_py*.so`
+  and rebuild the native module. The setup notebook already does this.
+
 ## Baseline PPO
 
 Quick smoke test:

@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import inspect
 from pathlib import Path
 
 try:
@@ -48,6 +49,8 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
     """
     ckpt_path = Path(ckpt_path)
     out_path = Path(out_path)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     model = load_checkpoint(ckpt_path, device="cpu")
@@ -58,16 +61,40 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
     dummy_current = torch.zeros(1, NUM_PIECE_TYPES, dtype=torch.float32)
     dummy_next = torch.zeros(1, NUM_PIECE_TYPES, dtype=torch.float32)
 
-    torch.onnx.export(
-        model,
-        (dummy_board, dummy_current, dummy_next),
-        str(out_path),
-        input_names=INPUT_NAMES,
-        output_names=OUTPUT_NAMES,
-        opset_version=opset,
-        dynamic_axes=None,
-        do_constant_folding=True,
-    )
+    kwargs = {
+        "input_names": INPUT_NAMES,
+        "output_names": OUTPUT_NAMES,
+        "opset_version": opset,
+        "dynamic_axes": None,
+        "do_constant_folding": True,
+    }
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        # Keep this simple policy net on the stable legacy exporter path. Newer
+        # PyTorch releases default to the dynamo exporter, which additionally
+        # needs onnxscript and can fail in Colab runtimes that only have onnx.
+        kwargs["dynamo"] = False
+
+    print(f"[export_onnx] torch {torch.__version__}, opset {opset}")
+    try:
+        torch.onnx.export(
+            model,
+            (dummy_board, dummy_current, dummy_next),
+            str(out_path),
+            **kwargs,
+        )
+    except Exception as exc:
+        message = str(exc)
+        if (
+            "Module onnx is not installed" in message
+            or "No module named 'onnx'" in message
+            or "No module named 'onnxscript'" in message
+        ):
+            raise SystemExit(
+                "ONNX export dependency is missing. In Colab, run the setup "
+                "cell again so `pip install -r python/requirements-colab.txt` "
+                "installs onnx/onnxscript, then rerun this export cell."
+            ) from exc
+        raise
     print(f"[export_onnx] wrote {out_path} from {ckpt_path}")
 
 

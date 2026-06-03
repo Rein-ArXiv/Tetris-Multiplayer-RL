@@ -19,13 +19,9 @@ out/
 bin/
 obj/
 
-# VS Code
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/c_cpp_properties.json
+# VS Code / 워크스페이스
+.vscode/
+*.code-workspace
 
 # Visual Studio
 .vs/
@@ -71,12 +67,10 @@ __pycache__/
 # 리플레이 출력
 out/replay.txt
 
-# 문서 파일 (README*.md만 유지)
+# 문서 파일 (README*.md 만 유지, docs/ 디렉터리 전체 제외)
 *.md
 !README.md
 !**/README*.md
-!ARCHITECTURE.md
-!GUIDE.md
-!docs/**/*.md
+docs/
 docs_backup_*/
 .claude/

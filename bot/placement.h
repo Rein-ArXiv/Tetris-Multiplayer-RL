@@ -46,6 +46,12 @@ std::vector<uint8_t> expand_placement(int cur_col,
 // 합법 수가 없으면 false.
 bool fallback_placement(const SimGame& sim, int& col_out, int& rot_out);
 
+// 1-ply 그리디 휴리스틱 (El-Tetris 가중치: 높이/줄/구멍/요철). 각 합법 placement 를
+// SimGame 복사본에 적용해 결과 보드를 평가하고 최고 점수를 고른다. ONNX/모델 없이
+// 동작하는 테스트용 봇 — netbot 의 BCTS RuleBasedRunner 의 C++ 간이판.
+// 합법 수가 없으면 false.
+bool heuristic_placement(const SimGame& sim, int& col_out, int& rot_out);
+
 // board_out: 길이 kBoardRows * kBoardCols (=200) float32. 점유=1, 비점유=0.
 //            ghost(id=8) 와 empty(0) 는 0 으로, 그 외 locked 는 1.
 // current_out, next_out: 길이 kNumPieceTypes (=7) float32 one-hot.

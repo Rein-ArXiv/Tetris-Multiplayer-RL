@@ -14,8 +14,8 @@ manual equivalent is:
 
 ```bash
 sudo apt-get install -y cmake g++ python3-dev
-pip install pybind11 numpy torch
-PYBIND11_DIR=$(python -m pybind11 --cmakedir)
+uv sync --dev
+PYBIND11_DIR=$(uv run python -m pybind11 --cmakedir)
 
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
@@ -32,8 +32,8 @@ headless sim module.
 ## Windows (MSVC or w64devkit)
 
 ```cmd
-pip install pybind11 numpy torch
-for /f "delims=" %i in ('python -m pybind11 --cmakedir') do set PYBIND11_DIR=%i
+uv sync --dev
+for /f "delims=" %i in ('uv run python -m pybind11 --cmakedir') do set PYBIND11_DIR=%i
 
 cmake -S . -B build ^
     -DCMAKE_BUILD_TYPE=Release ^

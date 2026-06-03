@@ -1,0 +1,11 @@
+# ~/.cloudflared/config.yml 또는 /etc/cloudflared/config.yml
+#
+# Cloudflare Tunnel 로 Mac mini 의 local Caddy 를 public HTTPS 로 노출하는 예시.
+# 이 경우 공유기 포트포워딩은 필요 없다.
+tunnel: tetris-meta
+credentials-file: /etc/cloudflared/tetris-meta.json
+
+ingress:
+  - hostname: api.example.com
+    service: http://127.0.0.1:8088
+  - service: http_status:404

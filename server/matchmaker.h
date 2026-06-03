@@ -7,8 +7,10 @@
 // 학습 포인트:
 //   - std::condition_variable 의 전형적 predicate wait 패턴
 //   - shutdown 시 대기 스레드 깨우기 (notify_all + 상태 플래그)
-//   - 소켓 핸들(TcpSocket = { int fd }) 은 trivially copyable 이므로
-//     move 후에도 원본이 살아있음. 의도적으로 "마지막 소유자" 규칙으로 관리.
+//   - 소켓 핸들(TcpSocket) 은 shared_ptr<int> 기반 참조 카운트 소유 핸들이다.
+//     복사본들이 같은 fd 소유권을 공유하며, 마지막 복사본이 소멸할 때 fd 가
+//     정확히 한 번 ::close 된다. 따라서 move/복사 후에도 fd 는 살아있고, 모든
+//     복사본이 사라질 때까지 OS 가 그 fd 번호를 새 연결에 재사용하지 않는다.
 
 #pragma once
 #include "../net/socket.h"
@@ -33,6 +35,7 @@ struct PlayerInfo {
     int            elo{1200};
     std::string    username;    // empty = guest (no nickname yet)
     std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
+    std::string    selected_icon_id{"default"};
 };
 
 // 매칭 결과 (2 명)

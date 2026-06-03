@@ -29,8 +29,8 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
-#include <exception>
 #include <charconv>
+#include <cctype>
 #include "../core/constants.h"
 #include "../core/input.h"
 #include "../core/replay.h"
@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <future>
 #include <chrono>
+#include <system_error>
 #include "game.h"
 #include "gui.h"
 #include "colors.h"
@@ -58,6 +59,14 @@
 #include "../meta/http_client.h"
 #include <deque>
 
+#ifndef TETRIS_DEFAULT_RELAY_ENDPOINT
+#define TETRIS_DEFAULT_RELAY_ENDPOINT "127.0.0.1:7777"
+#endif
+
+#ifndef TETRIS_DEFAULT_META_URL
+#define TETRIS_DEFAULT_META_URL ""
+#endif
+
 // TextFormat 대체: snprintf 로 포맷 문자열을 임시 버퍼에 쓰고 반환.
 // raylib의 TextFormat은 정적 버퍼를 쓰므로 중첩 호출에 주의.
 static const char* fmt_buf(const char* fmt, ...)
@@ -65,6 +74,134 @@ static const char* fmt_buf(const char* fmt, ...)
     static char buf[512];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
     return buf;
+}
+
+static void draw_popup_panel(int x, int y, int w, int h)
+{
+    gui_modal_dim(720, 640);
+    draw_rect_rounded(x, y, w, h, 0.15f, {24, 28, 44, 245});
+}
+
+enum class DefaultIconKind { Player, Opponent, Bot };
+
+static std::string trim_copy(const std::string& s)
+{
+    size_t b = 0;
+    while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    size_t e = s.size();
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+static std::unordered_map<std::string, std::string> load_image_manifest(const char* path)
+{
+    std::unordered_map<std::string, std::string> out;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return out;
+
+    char line[512];
+    while (std::fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        const size_t hash = s.find('#');
+        if (hash != std::string::npos) s.resize(hash);
+        const size_t eq = s.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = trim_copy(s.substr(0, eq));
+        std::string val = trim_copy(s.substr(eq + 1));
+        if (!key.empty() && !val.empty()) out[key] = val;
+    }
+    std::fclose(f);
+    return out;
+}
+
+static void set_icon_px(std::vector<uint8_t>& px, int x, int y, Color c)
+{
+    if (x < 0 || y < 0 || x >= 32 || y >= 32) return;
+    const size_t i = (static_cast<size_t>(y) * 32 + x) * 4;
+    px[i + 0] = c.r;
+    px[i + 1] = c.g;
+    px[i + 2] = c.b;
+    px[i + 3] = c.a;
+}
+
+static ImageHandle make_default_icon(DefaultIconKind kind)
+{
+    std::vector<uint8_t> px(32 * 32 * 4, 0);
+    Color bg;
+    Color fg;
+    Color accent;
+    switch (kind) {
+    case DefaultIconKind::Player:
+        bg = {22, 66, 86, 235}; fg = {116, 230, 180, 255}; accent = {210, 255, 235, 255}; break;
+    case DefaultIconKind::Opponent:
+        bg = {86, 32, 44, 235}; fg = {245, 105, 120, 255}; accent = {255, 210, 215, 255}; break;
+    case DefaultIconKind::Bot:
+    default:
+        bg = {50, 46, 92, 235}; fg = {245, 205, 85, 255}; accent = {255, 245, 180, 255}; break;
+    }
+
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            const bool border = (x < 2 || y < 2 || x >= 30 || y >= 30);
+            set_icon_px(px, x, y, border ? accent : bg);
+        }
+    }
+
+    if (kind == DefaultIconKind::Player) {
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                const int dx = x - 16;
+                const int dy = y - 10;
+                if (dx * dx + dy * dy <= 25) set_icon_px(px, x, y, accent);
+                if (y >= 18 && y <= 25 && std::abs(x - 16) + std::abs(y - 21) <= 10)
+                    set_icon_px(px, x, y, fg);
+            }
+        }
+    } else if (kind == DefaultIconKind::Opponent) {
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                const int d = std::abs(x - 16) + std::abs(y - 16);
+                if (d <= 10) set_icon_px(px, x, y, fg);
+                if (d <= 4) set_icon_px(px, x, y, accent);
+            }
+        }
+    } else {
+        for (int y = 8; y <= 23; ++y)
+            for (int x = 7; x <= 24; ++x)
+                set_icon_px(px, x, y, fg);
+        for (int x = 13; x <= 18; ++x) set_icon_px(px, x, 5, accent);
+        for (int y = 12; y <= 14; ++y) {
+            for (int x = 11; x <= 13; ++x) set_icon_px(px, x, y, bg);
+            for (int x = 18; x <= 20; ++x) set_icon_px(px, x, y, bg);
+        }
+        for (int x = 12; x <= 19; ++x) set_icon_px(px, x, 20, bg);
+    }
+
+    return image_create_rgba(px.data(), 32, 32);
+}
+
+static ImageHandle load_configured_image(
+    const std::unordered_map<std::string, std::string>& manifest,
+    const char* key,
+    const char* defaultPath,
+    DefaultIconKind fallbackKind)
+{
+    auto it = manifest.find(key);
+    if (it != manifest.end()) {
+        ImageHandle h = image_load(it->second.c_str());
+        if (h) return h;
+        std::fprintf(stderr, "[IMG] configured asset '%s' failed: %s\n",
+                     key, it->second.c_str());
+        if (it->second == defaultPath) {
+            std::fprintf(stderr, "[IMG] using generated fallback for '%s'\n", key);
+            return make_default_icon(fallbackKind);
+        }
+    }
+
+    ImageHandle h = image_load(defaultPath);
+    if (h) return h;
+    std::fprintf(stderr, "[IMG] using generated fallback for '%s'\n", key);
+    return make_default_icon(fallbackKind);
 }
 
 // 키보드 입력 → 비트마스크 (core/input.h 의 INPUT_* 상수)
@@ -214,11 +351,18 @@ static bool parse_port(const std::string& s, uint16_t& port_out)
 }
 
 enum class AppMode {
-    Menu, ConnectInput, Single, BotSingle, Net,
+    Menu, ConnectInput, Single, BotSingle, BotSelect, Net,
     // Section D — 커스텀 룸 경로. 릴레이 주소는 CLI 기본값 사용이라
     // 별도 IP 입력 화면(이전의 MatchmakingAddr / RoomRelay)은 제거됨.
     RoomLobby,    // Create / Join 선택 (+ Join 시 코드 입력)
     RoomWaiting,  // 방 안에서 상대/Ready 대기
+};
+
+enum class BotMatchResult {
+    None,
+    Win,
+    Lose,
+    Draw,
 };
 
 enum class RoomLobbyStage { Choose, EnterCode };
@@ -242,19 +386,46 @@ int main(int argc, char** argv)
     }
 
     // ── 플랫폼 + 렌더러 초기화 ─────────────────────────────────────────────
-    platform_init(720, 640, "Tetris (Handmade)");
+    platform_init(720, 640, "Entris");
     renderer_init(720, 640);
-    renderer_load_font("Font/monogram.ttf");
+    renderer_load_font("Font/NanumGothic.ttf");
 
-    // 아이콘 (선택) — 파일이 없으면 0 이 리턴되고 draw_image 는 no-op.
+    // 아이콘 — assets/images.cfg 에서 경로를 읽고, 누락/실패 시 기본 경로와
+    // 절차적 fallback 텍스처 순서로 복구한다.
     //   YOU       : 로컬 플레이어 슬롯 (모든 2-보드 모드)
     //   OPPONENT  : 상대 슬롯 (Net / CustomRoom)
     //   BOT       : BotSingle 모드 상대 슬롯
-    //   사용자가 assets/icons/ 에 드롭하면 자동 반영. 파일이 없어도 프로그램은
-    //   정상 작동하며, 단지 아이콘 쿼드 자리만 비어 있게 됨.
-    ImageHandle iconYou      = image_load("assets/icons/player.png");
-    ImageHandle iconOpponent = image_load("assets/icons/opponent.png");
-    ImageHandle iconBot      = image_load("assets/icons/bot.png");
+    const auto imageManifest = load_image_manifest("assets/images.cfg");
+    ImageHandle iconDefaultPlayer = load_configured_image(
+        imageManifest, "player_icon", "assets/icons/player.png", DefaultIconKind::Player);
+    ImageHandle iconDefaultOpponent = load_configured_image(
+        imageManifest, "opponent_icon", "assets/icons/opponent.png", DefaultIconKind::Opponent);
+    ImageHandle iconBot = load_configured_image(
+        imageManifest, "bot_icon", "assets/icons/bot.png", DefaultIconKind::Bot);
+    std::unordered_map<std::string, ImageHandle> playerIconCatalog;
+    std::vector<ImageHandle> playerIconCatalogHandles;
+    playerIconCatalog["default"] = iconDefaultPlayer;
+    for (const auto& kv : imageManifest) {
+        const std::string prefix = "icon.";
+        if (kv.first.compare(0, prefix.size(), prefix) != 0) continue;
+        std::string id = kv.first.substr(prefix.size());
+        if (id.empty() || id == "default") continue;
+        ImageHandle h = image_load(kv.second.c_str());
+        if (!h) {
+            std::fprintf(stderr, "[IMG] catalog icon '%s' failed: %s\n",
+                         id.c_str(), kv.second.c_str());
+            continue;
+        }
+        playerIconCatalog[id] = h;
+        playerIconCatalogHandles.push_back(h);
+    }
+    auto resolvePlayerIcon = [&](const std::string& id) -> ImageHandle {
+        auto it = playerIconCatalog.find(id);
+        if (it != playerIconCatalog.end()) return it->second;
+        return iconDefaultPlayer;
+    };
+    ImageHandle iconYou = iconDefaultPlayer;
+    ImageHandle iconOpponent = iconDefaultOpponent;
 
     bool netMode = false, isHost = false, queueMode = false;
     std::string hostIp;
@@ -263,13 +434,28 @@ int main(int argc, char** argv)
     uint16_t queuePort = 7777;
 
     // 메뉴에서 Matchmaking/Custom Room 을 고를 때 사용할 릴레이 주소.
-    // 기본은 로컬 릴레이. 다른 공개 릴레이로 바꾸려면 `--relay host:port`.
+    // 기본은 CMake 옵션(TETRIS_DEFAULT_RELAY_ENDPOINT) 또는 환경변수로 주입한다.
+    // 개인 IP 를 release 바이너리에 하드코딩하지 않는다.
     std::string relayHost = "127.0.0.1";
     uint16_t    relayPort = 7777;
+    if (!parse_endpoint(TETRIS_DEFAULT_RELAY_ENDPOINT, relayHost, relayPort, 7777)) {
+        std::fprintf(stderr,
+                     "warning: invalid TETRIS_DEFAULT_RELAY_ENDPOINT '%s', using 127.0.0.1:7777\n",
+                     TETRIS_DEFAULT_RELAY_ENDPOINT);
+        relayHost = "127.0.0.1";
+        relayPort = 7777;
+    }
+    if (const char* env = std::getenv("TETRIS_RELAY_ENDPOINT")) {
+        if (!parse_endpoint(env, relayHost, relayPort, 7777)) {
+            std::fprintf(stderr,
+                         "warning: invalid TETRIS_RELAY_ENDPOINT '%s', keeping %s:%u\n",
+                         env, relayHost.c_str(), static_cast<unsigned>(relayPort));
+        }
+    }
 
-    // tetris_meta 베이스 URL (guest 토큰 발급 + ELO). `--meta http://host:port`.
+    // tetris_meta 베이스 URL (guest 토큰 발급 + ELO). `--meta http(s)://host[:port]`.
     // 환경변수 TETRIS_META_URL 이 있으면 그것을 기본값으로 사용.
-    std::string metaUrl;
+    std::string metaUrl = TETRIS_DEFAULT_META_URL;
     if (const char* env = std::getenv("TETRIS_META_URL")) metaUrl = env;
 
     for (int i = 1; i < argc; ++i)
@@ -323,7 +509,7 @@ int main(int argc, char** argv)
             if (i + 1 < argc) {
                 metaUrl = argv[++i];
             } else {
-                fprintf(stderr, "error: --meta requires a URL (http://host:port)\n");
+                fprintf(stderr, "error: --meta requires a URL (http(s)://host[:port])\n");
                 return 2;
             }
         }
@@ -335,6 +521,8 @@ int main(int argc, char** argv)
     std::unique_ptr<meta::client::MetaClient> metaClient;
     std::string authToken;
     int    myElo       = 1200;
+    int    myBp        = 0;
+    std::string mySelectedIconId = "default";
     bool   metaOnline  = false;  // guest 부트스트랩이 성공했는지
     if (!metaUrl.empty()) {
         metaClient = std::make_unique<meta::client::MetaClient>(metaUrl);
@@ -345,9 +533,13 @@ int main(int argc, char** argv)
                 if (g) {
                     authToken = g->token;
                     myElo     = g->elo;
+                    myBp      = g->bp;
+                    mySelectedIconId = g->selected_icon_id.empty() ? "default" : g->selected_icon_id;
                     meta::client::save_token(authToken);
                     std::cout << "[meta] " << why << " — new guest player_id="
-                              << g->player_id << " elo=" << g->elo << "\n";
+                              << g->player_id << " elo=" << g->elo
+                              << " bp=" << g->bp
+                              << " icon=" << mySelectedIconId << "\n";
                     metaOnline = true;
                 } else {
                     fprintf(stderr, "[meta] guest bootstrap failed (%s) — unranked mode\n", why);
@@ -364,8 +556,12 @@ int main(int argc, char** argv)
                 auto a = metaClient->verify_token(authToken, 3, &outcome);
                 if (a) {
                     myElo = a->elo;
+                    myBp  = a->bp;
+                    mySelectedIconId = a->selected_icon_id.empty() ? "default" : a->selected_icon_id;
                     std::cout << "[meta] token ok player_id=" << a->player_id
-                              << " elo=" << a->elo << "\n";
+                              << " elo=" << a->elo
+                              << " bp=" << a->bp
+                              << " icon=" << mySelectedIconId << "\n";
                     metaOnline = true;
                 } else if (outcome == meta::client::MetaClient::VerifyOutcome::UnknownToken) {
                     fprintf(stderr, "[meta] token unknown (DB reset?) — re-issuing\n");
@@ -378,6 +574,7 @@ int main(int argc, char** argv)
             }
         }
     }
+    iconYou = resolvePlayerIcon(mySelectedIconId);
 
     uint64_t sessionSeed = 0xDEADBEEFCAFEBABEull;
     net::Session session;
@@ -425,6 +622,7 @@ int main(int argc, char** argv)
         } else if (isHost) {
             sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + 0xC0FFEEULL;
             net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
+            sp.local_icon_id = mySelectedIconId;
             if (!session.Host(hostPort, sp)) {
                 fprintf(stderr, "Host failed\n"); return 1;
             }
@@ -454,16 +652,33 @@ int main(int argc, char** argv)
     std::unique_ptr<Game> gameBot;
     bot::BotOnnx botOnnx;
     std::deque<uint8_t> botInputQueue;
-    bool botAvailable = false;
+    // 봇 로스터 — model/ 의 *.onnx 를 스캔해 (표시이름, 경로) 목록으로 만든다.
+    // 알고리즘이 다른 모델(ppo/sac/human/...)을 떨궈두면 각각 별도 봇으로 나타나고,
+    // C++ 봇은 동일한 ONNX 계약만 보므로 코드 변경이 필요 없다. 모델은 선택 시점에
+    // BotOnnx::Load 로 적재한다(시작 시 일괄 로드하지 않음).
+    std::vector<std::pair<std::string, std::string>> botRoster;  // (name, path)
+    // 내장 휴리스틱 봇 — ONNX/모델 없이 항상 가능한 테스트 상대. 경로 "@heuristic"
+    // 은 파일이 아니라 C++ 그리디 휴리스틱(bot::heuristic_placement)을 쓰라는 sentinel.
+    botRoster.emplace_back("Heuristic (test)", "@heuristic");
     {
-        std::string err;
-        if (botOnnx.Load("model/policy.onnx", &err)) {
-            botAvailable = true;
-        } else {
-            // 조용한 실패 — 메뉴에서 해당 항목이 회색으로 비활성화된다.
-            fprintf(stderr, "[bot] policy.onnx not loaded: %s\n", err.c_str());
-        }
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        std::vector<std::pair<std::string, std::string>> models;
+        if (fs::exists("model", ec))
+            for (const auto& e : fs::directory_iterator("model", ec))
+                if (e.path().extension() == ".onnx")
+                    models.emplace_back(e.path().stem().string(), e.path().string());
+        std::sort(models.begin(), models.end());
+        for (size_t i = 0; i < models.size(); ++i)   // 기본 "policy" 는 모델 중 맨 앞
+            if (models[i].first == "policy") { std::swap(models[0], models[i]); break; }
+        for (auto& m : models) botRoster.push_back(std::move(m));
     }
+    const bool botAvailable = !botRoster.empty();   // 항상 true (heuristic 포함)
+    int         botSelectIndex = 0;
+    std::string botSelectError;
+    std::string selectedBotName = "Bot";
+    bool        botUsesHeuristic = false;
+    BotMatchResult botMatchResult = BotMatchResult::None;
     int lastAttackHuman = 0, lastAttackBot = 0;
 
     static std::string cachedLocalIP;
@@ -490,7 +705,6 @@ int main(int argc, char** argv)
     const float GAME_OVER_TIMEOUT      = 30.0f;
     const float DISAGREEMENT_COUNTDOWN = 3.0f;
     uint64_t lastReceivedSeed = 0;
-    bool newSeedSent = false;
 
     // Section A — 링크 단절 grace. linkStatus() == Lost 를 처음 본 순간부터
     // 10초 카운트다운 후 타이틀로. 도중에 Stalled→OK 로 회복하면 리셋.
@@ -674,8 +888,11 @@ int main(int argc, char** argv)
                 //      교환 대기 동안에도 보내면 "끝난 라운드의 INPUT" 이 새 라운드의
                 //      같은 tick 번호 공간과 섞임. 프로토콜에 round-id 가 없으므로
                 //      수신 측 emplace 가 stale 로 선점할 위험.
+                //   4) 아직 양쪽 보드가 gameOver 가 아님 — 같은 프레임에 게임오버가
+                //      난 뒤 렌더 단계에서 FSM 이 전환되기 전이라도 추가 INPUT 금지.
                 if (gameLocal && gameRemote && startDelay == 0 &&
-                    gameOverState == GameOverState::None)
+                    gameOverState == GameOverState::None &&
+                    !gameLocal->gameOver && !gameRemote->gameOver)
                 {
                     // 창 드래그 등으로 메인 스레드가 멈춘 동안 ioThread 가 자동으로
                     // INPUT(t,0) 을 상대에게 흘려 lockstep 을 계속 돌렸다면, 우리도
@@ -698,13 +915,19 @@ int main(int argc, char** argv)
 
                 if (session.isReady() && (!gameLocal || !gameRemote))
                 {
-                    sessionSeed = session.params().seed;
-                    inputDelay  = session.params().input_delay;
+                    auto sp = session.params();
+                    sessionSeed = sp.seed;
+                    inputDelay  = sp.input_delay;
+                    const std::string localIconId =
+                        (sp.local_icon_id.empty() || sp.local_icon_id == "default")
+                        ? mySelectedIconId : sp.local_icon_id;
+                    iconYou = resolvePlayerIcon(localIconId);
+                    iconOpponent = resolvePlayerIcon(sp.remote_icon_id);
                     gameLocal   = std::make_unique<Game>(sessionSeed);
                     gameRemote  = std::make_unique<Game>(sessionSeed);
                     localInputs.clear();
                     localTickNext = 0; simTick = 0;
-                    startDelay = session.params().start_tick;
+                    startDelay = sp.start_tick;
                     lastAttackLocal = 0; lastAttackRemote = 0;
                     // Section K — 라운드 시작 표지.
                     gameStartTime_  = platform_get_time();
@@ -723,7 +946,7 @@ int main(int argc, char** argv)
                     accumulator -= SECONDS_PER_TICK; continue;
                 }
 
-                if (session.isReady())
+                if (session.isReady() && gameOverState == GameOverState::None)
                 {
                     if (startDelay > 0) {
                         startDelay--;
@@ -736,7 +959,8 @@ int main(int argc, char** argv)
                     int64_t lastRemote    = (int64_t)session.maxRemoteTick();
                     int64_t safeTick      = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
 
-                    if ((int64_t)simTick <= safeTick && gameLocal && gameRemote)
+                    if ((int64_t)simTick <= safeTick && gameLocal && gameRemote &&
+                        !gameLocal->gameOver && !gameRemote->gameOver)
                     {
                         while ((int64_t)simTick <= safeTick)
                         {
@@ -783,6 +1007,9 @@ int main(int argc, char** argv)
                                 slot.tick = simTick; slot.hash = h; slot.valid = true;
                                 lastHashSentTick = simTick;
                             }
+
+                            if (gameLocal->gameOver || gameRemote->gameOver)
+                                break;
                         }
                     }
                 }
@@ -794,14 +1021,19 @@ int main(int argc, char** argv)
                 apply_self_fx(gameSingle->sim, coLocal);
             }
             // ── Section C — BotSingle 틱 ───────────────────────────────────────
-            else if (app == AppMode::BotSingle && gameSingle && gameBot)
+            else if (app == AppMode::BotSingle && gameSingle && gameBot &&
+                     botMatchResult == BotMatchResult::None)
             {
                 // 1) 봇 입력 큐가 비었으면 새 placement 계산.
                 //    Infer 실패 또는 합법 수 없음 → INPUT_NONE 로 대기 (게임오버면 자연스럽게
                 //    gameBot 가 멈춰 있음).
                 if (botInputQueue.empty() && !gameBot->sim.IsGameOver()) {
                     int tgtCol = -1, tgtRot = -1;
-                    bool ok = botOnnx.IsLoaded() && botOnnx.Infer(gameBot->sim, tgtCol, tgtRot);
+                    bool ok;
+                    if (botUsesHeuristic)
+                        ok = bot::heuristic_placement(gameBot->sim, tgtCol, tgtRot);
+                    else
+                        ok = botOnnx.IsLoaded() && botOnnx.Infer(gameBot->sim, tgtCol, tgtRot);
                     if (!ok) ok = bot::fallback_placement(gameBot->sim, tgtCol, tgtRot);
                     if (ok) {
                         int curCol = gameBot->sim.CurrentCol();
@@ -834,6 +1066,16 @@ int main(int argc, char** argv)
                 apply_self_fx(gameSingle->sim, coLocal);
                 apply_peer_fx(gameBot->sim,    coRemote);
 
+                if (gameSingle->gameOver || gameBot->gameOver) {
+                    if (gameSingle->gameOver && gameBot->gameOver)
+                        botMatchResult = BotMatchResult::Draw;
+                    else if (gameBot->gameOver)
+                        botMatchResult = BotMatchResult::Win;
+                    else
+                        botMatchResult = BotMatchResult::Lose;
+                    botInputQueue.clear();
+                }
+
                 // 상대(봇) 피스가 락되면 큐를 비우고 다음 피스에서 다시 Infer.
                 // expand_placement 는 마지막에 INPUT_DROP 을 넣으므로 시퀀스 끝에서
                 // 자연스럽게 큐가 비워진다 — 별도 처리 불필요.
@@ -847,9 +1089,11 @@ int main(int argc, char** argv)
             accumulator -= SECONDS_PER_TICK;
         }
 
-        // Section A — 링크 Lost 감지 + grace 카운트다운 (Net 모드 한정).
-        // 게임 중이든 GameOverState 대기 중이든 10초 후 타이틀로 강제 복귀.
-        if (app == AppMode::Net) {
+        // Section A — 링크 Lost 감지 + grace 카운트다운.
+        // 실제 게임 세션(gameLocal/gameRemote 생성 이후)의 상대 단절에만 적용한다.
+        // relay 접속 실패/매치메이킹 실패는 "opponent disconnected" 가 아니라
+        // 아래 Net 대기 카드의 Matchmaking Failed / Connection Failed 로 보여야 한다.
+        if (app == AppMode::Net && gameLocal && gameRemote) {
             net::LinkStatus ls = session.linkStatus();
             if (ls == net::LinkStatus::Lost) {
                 if (!linkLostActive) {
@@ -986,13 +1230,13 @@ int main(int argc, char** argv)
 
             if (!botAvailable) {
                 // Bot 모드가 disabled 임을 안내.
-                draw_text("(model/policy.onnx not found)", 250,
+                draw_text("(no model/*.onnx found)", 260,
                           byStart + 1 * (bh + 10) + bh + 2, 12, DISABLED);
             }
 
             // Section K — 메타/랭킹 상태 표시.
             if (metaUrl.empty()) {
-                draw_text("ranking: disabled (--meta http://host:port to enable)",
+                draw_text("ranking: disabled (--meta https://host to enable)",
                           140, 540, 12, DISABLED);
             } else if (!metaOnline) {
                 draw_text("ranking server offline - playing unranked",
@@ -1000,7 +1244,7 @@ int main(int argc, char** argv)
             } else {
                 char eloBuf[64];
                 std::snprintf(eloBuf, sizeof(eloBuf),
-                              "ranking: online   ELO %d", myElo);
+                              "ranking: online   ELO %d   BP %d", myElo, myBp);
                 int tw = measure_text(eloBuf, 14);
                 draw_text(eloBuf, (720 - tw) / 2, 540, 14, GREEN);
             }
@@ -1012,11 +1256,10 @@ int main(int argc, char** argv)
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
                 } else if (activated == 1) {
-                    app = AppMode::BotSingle;
-                    gameSingle = std::make_unique<Game>(sessionSeed);
-                    gameBot    = std::make_unique<Game>(sessionSeed);
-                    botInputQueue.clear();
-                    lastAttackHuman = 0; lastAttackBot = 0;
+                    // 봇 선택 화면으로. 실제 BotSingle 진입은 거기서 모델 로드 성공 후.
+                    app = AppMode::BotSelect;
+                    botSelectIndex = 0;
+                    botSelectError.clear();
                 } else if (activated == 2) {
                     queueHost = relayHost; queuePort = relayPort;
                     // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
@@ -1033,6 +1276,58 @@ int main(int argc, char** argv)
                     roomErrorMsg.clear();
                 } else {
                     platform_shutdown(); return 0;
+                }
+            }
+        }
+
+        // ── 봇 선택 화면 ─────────────────────────────────────────────────────
+        //   model/*.onnx 로스터에서 상대 봇을 고른다. 선택 시 그 모델을 로드하고
+        //   성공하면 BotSingle 로 진입. (알고리즘별 모델을 떨궈두면 여기에 나열됨.)
+        if (app == AppMode::BotSelect)
+        {
+            draw_text("Select Bot", 255, 90, 44, WHITE);
+            draw_text("model/*.onnx", 295, 145, 16, GRAY);
+
+            const int n = (int)botRoster.size();
+            if (n > 0 && platform_key_pressed(PKEY_DOWN)) botSelectIndex = (botSelectIndex + 1) % n;
+            if (n > 0 && platform_key_pressed(PKEY_UP))   botSelectIndex = (botSelectIndex + n - 1) % n;
+
+            const int bw = 360, bh = 44, bx = (720 - bw) / 2, byStart = 200;
+            int chosen = -1;
+            for (int i = 0; i < n; ++i) {
+                const int by = byStart + i * (bh + 8);
+                if (gui_button_highlighted(bx, by, bw, bh, botRoster[i].first.c_str(),
+                                           (i == botSelectIndex), 24))
+                    chosen = i;
+            }
+            if (n > 0 && (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE)))
+                chosen = botSelectIndex;
+
+            if (!botSelectError.empty())
+                draw_text(botSelectError.c_str(), bx, byStart + n * (bh + 8) + 12, 16, RED);
+            draw_text("[Up/Down] Select   [Enter] Play   [Q] Back", 170, 560, 18, GRAY);
+
+            if (platform_key_pressed(PKEY_Q)) app = AppMode::Menu;
+
+            if (chosen >= 0 && chosen < n) {
+                const std::string& path = botRoster[chosen].second;
+                bool ready = true;
+                if (path == "@heuristic") {
+                    botUsesHeuristic = true;          // 내장 휴리스틱 — 로드 불필요
+                } else {
+                    std::string err;
+                    ready = botOnnx.Load(path, &err);
+                    botUsesHeuristic = false;
+                    if (!ready) botSelectError = "Load failed: " + err;
+                }
+                if (ready) {
+                    selectedBotName = botRoster[chosen].first;
+                    app = AppMode::BotSingle;
+                    gameSingle = std::make_unique<Game>(sessionSeed);
+                    gameBot    = std::make_unique<Game>(sessionSeed);
+                    botInputQueue.clear();
+                    botMatchResult = BotMatchResult::None;
+                    lastAttackHuman = 0; lastAttackBot = 0;
                 }
             }
         }
@@ -1058,36 +1353,26 @@ int main(int argc, char** argv)
                 connectText.pop_back();
             if (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE))
             {
-                auto pos = connectText.find(':');
-                if (pos != std::string::npos && pos > 0 && pos < connectText.length() - 1)
+                std::string parsedHost;
+                uint16_t parsedPort = 7777;
+                connectError = false;
+                if (!parse_endpoint(connectText, parsedHost, parsedPort, 7777) ||
+                    parsedHost.find_first_not_of("0123456789.") != std::string::npos)
                 {
-                    hostIp = connectText.substr(0, pos);
-                    std::string portStr = connectText.substr(pos + 1);
-                    connectError = false;
-                    try {
-                        hostPort = (uint16_t)std::stoi(portStr);
-                        if (hostPort == 0) throw std::exception();
-                    } catch (...) {
-                        connectError = true; connectErrorMsg = "Invalid port number!";
-                    }
-                    if (!connectError && (hostIp.empty() ||
-                        hostIp.find_first_not_of("0123456789.") != std::string::npos))
-                    {
-                        connectError = true; connectErrorMsg = "Invalid IP address format!";
-                    }
-                    if (!connectError)
-                    {
-                        netMode = true; isHost = false; app = AppMode::Net;
-                        std::cout << "[NET] Connecting to " << hostIp << ":" << hostPort << "\n";
-                        if (!session.Connect(hostIp, hostPort)) {
-                            connectError = true;
-                            connectErrorMsg = "Connection failed! Check IP/port/firewall";
-                            app = AppMode::ConnectInput;
-                        }
-                    }
-                } else {
                     connectError = true;
                     connectErrorMsg = "Format: IP:PORT (e.g. 192.168.1.100:7777)";
+                }
+                if (!connectError)
+                {
+                    hostIp = parsedHost;
+                    hostPort = parsedPort;
+                    netMode = true; isHost = false; app = AppMode::Net;
+                    std::cout << "[NET] Connecting to " << hostIp << ":" << hostPort << "\n";
+                    if (!session.Connect(hostIp, hostPort)) {
+                        connectError = true;
+                        connectErrorMsg = "Connection failed! Check IP/port/firewall";
+                        app = AppMode::ConnectInput;
+                    }
                 }
             }
             if (platform_key_pressed(PKEY_Q)) app = AppMode::Menu;
@@ -1125,6 +1410,9 @@ int main(int argc, char** argv)
                     roomStage = RoomLobbyStage::EnterCode;
                     roomCodeInput.clear();
                     roomErrorMsg.clear();
+                    // 여기까지 오며 누른 키(J, 메뉴 네비게이션의 C/Q 등)가 문자 버퍼에
+                    // 남아 다음 프레임 코드칸에 새는 것을 방지 — 버퍼를 비우고 입력 시작.
+                    while (platform_get_char_pressed()) {}
                 } else if (platform_key_pressed(PKEY_Q)) {
                     app = AppMode::Menu;
                 }
@@ -1238,6 +1526,11 @@ int main(int argc, char** argv)
         // ── 1인 모드 ─────────────────────────────────────────────────────────
         if (app == AppMode::Single && gameSingle)
         {
+            // 플레이어 아이콘 + 라벨 (BotSingle/Net 와 동일 컨벤션). 아이콘 파일이
+            // 없으면 image_load 가 0 을 반환해 draw_image 가 no-op 이 된다.
+            if (iconYou) draw_image(iconYou, 11, 6, 32, 32);
+            draw_text("You", 11 + 38, 8, 22, WHITE);
+
             // 우측 정보 패널 (보드 오른쪽 x=316 ~ 720)
             constexpr int pX = 320, pW = 175;
             constexpr Color panelBg   = {18, 22, 42, 255};
@@ -1263,11 +1556,10 @@ int main(int argc, char** argv)
             draw_text(fmt_buf("%d",  gameSingle->sim.totalLinesCleared),
                       pX + pW/2 + 14, 126, 28, WHITE);
 
-            // NEXT
-            draw_rect_rounded(pX, 186, pW, 130, 0.3f, panelBg);
+            // NEXT — 표준 테트리스처럼 다음 3개를 미리 보여준다.
+            draw_rect_rounded(pX, 186, pW, 226, 0.3f, panelBg);
             draw_text("NEXT", pX + 12, 192, 14, labelClr);
-            // 3칸 기준 60px → (175-60)/2 = 57 ≈ 55 offset 으로 대략 중앙정렬
-            gameSingle->DrawNextMini(pX + 50, 215, 20);
+            gameSingle->DrawNextQueueMini(pX + 55, 218, 16, SimGame::kNextPreviewCount, 58);
 
             // 보드 shake
             {
@@ -1295,7 +1587,8 @@ int main(int argc, char** argv)
             recording = false;
         }
 
-        // H 키: 해시 출력
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+        // H 키: 해시 출력 (debug UI 빌드 전용)
         if (platform_key_pressed(PKEY_H))
         {
             unsigned long long h1 = gameSingle ? gameSingle->ComputeStateHash() : 0;
@@ -1304,6 +1597,7 @@ int main(int argc, char** argv)
             std::cout << "Hash single=0x" << std::hex << h1
                       << " local=0x" << hL << " remote=0x" << hR << std::dec << "\n";
         }
+#endif
 
         // ── Section C — BotSingle 렌더 + 게임오버 ─────────────────────────
         if (app == AppMode::BotSingle && gameSingle && gameBot)
@@ -1312,7 +1606,7 @@ int main(int argc, char** argv)
             if (iconYou) draw_image(iconYou, leftX,  6, 32, 32);
             if (iconBot) draw_image(iconBot, rightX, 6, 32, 32);
             draw_text("You", leftX  + 38, 8, 22, WHITE);
-            draw_text("Bot", rightX + 38, 8, 22, WHITE);
+            draw_text(selectedBotName.c_str(), rightX + 38, 8, 22, WHITE);
             // 보드별 shake (Net 과 같은 구조).
             {
                 float sdx = 0.f, sdy = 0.f;
@@ -1330,13 +1624,13 @@ int main(int argc, char** argv)
             }
             renderer_set_view_offset(0, 0);
 
-            // Next 프리뷰 — Multi 와 동일 레이아웃.
+            // Next 프리뷰 — 각 플레이어의 다음 3개를 보드 사이 갭에 표시.
             {
                 int midX = leftX + 300 + 5;
                 draw_text("Next", midX,  20, 16, GRAY);
-                gameSingle->DrawNextMini(midX, 44, 14);
-                draw_text("Bot",  midX, 160, 16, GRAY);
-                gameBot->DrawNextMini(midX, 184, 14);
+                gameSingle->DrawNextQueueMini(midX, 44, 11, SimGame::kNextPreviewCount, 48);
+                draw_text("Bot",  midX, 296, 16, GRAY);
+                gameBot->DrawNextQueueMini(midX, 320, 11, SimGame::kNextPreviewCount, 48);
             }
 
             // 스코어/레벨 하단 패널
@@ -1359,31 +1653,32 @@ int main(int argc, char** argv)
                 draw_text(coRemote.text, rightX + (300 - tw) / 2, 280, 40, YELLOW);
             }
 
-            // 한 쪽이 끝나면 승패 표시 + [R]/[Q].
-            if (gameSingle->gameOver || gameBot->gameOver)
+            // 한 쪽이 끝나면 그 순간의 결과를 고정하고 시뮬을 멈춘다.
+            if (botMatchResult != BotMatchResult::None)
             {
                 const char* label;
                 Color labelC;
-                if (gameSingle->gameOver && !gameBot->gameOver) {
-                    label = "LOSE"; labelC = RED;
-                } else if (gameBot->gameOver && !gameSingle->gameOver) {
-                    label = "WIN";  labelC = GREEN;
-                } else {
-                    label = "DRAW"; labelC = YELLOW;
+                switch (botMatchResult) {
+                case BotMatchResult::Win:  label = "WIN";  labelC = GREEN;  break;
+                case BotMatchResult::Lose: label = "LOSE"; labelC = RED;    break;
+                case BotMatchResult::Draw: label = "DRAW"; labelC = YELLOW; break;
+                default:                   label = "";     labelC = WHITE;  break;
                 }
-                int tw = measure_text(label, 60);
-                draw_text(label, 360 - tw / 2, 280, 60, labelC);
-                draw_text("[R] Restart",     280, 350, 28, GREEN);
-                draw_text("[Q] Go to Title", 260, 385, 28, YELLOW);
+                draw_popup_panel(180, 235, 360, 190);
+                gui_text_center(360, 262, label, 60, labelC);
+                gui_text_center(360, 345, "[R] Restart", 28, GREEN);
+                gui_text_center(360, 382, "[Q] Go to Title", 28, YELLOW);
                 if (platform_key_pressed(PKEY_R)) {
                     gameSingle = std::make_unique<Game>(sessionSeed);
                     gameBot    = std::make_unique<Game>(sessionSeed);
                     botInputQueue.clear();
+                    botMatchResult = BotMatchResult::None;
                     lastAttackHuman = 0; lastAttackBot = 0;
                 } else if (platform_key_pressed(PKEY_Q)) {
                     gameSingle.reset();
                     gameBot.reset();
                     botInputQueue.clear();
+                    botMatchResult = BotMatchResult::None;
                     app = AppMode::Menu;
                 }
             }
@@ -1392,9 +1687,10 @@ int main(int argc, char** argv)
         // 1인 게임 오버
         if (app == AppMode::Single && gameSingle && gameSingle->gameOver)
         {
-            draw_text("GAME OVER",    120, 300, 60, WHITE);
-            draw_text("[R] Restart",  200, 350, 28, GREEN);
-            draw_text("[Q] Go to Title", 180, 385, 28, YELLOW);
+            draw_popup_panel(150, 235, 420, 190);
+            gui_text_center(360, 262, "GAME OVER", 60, WHITE);
+            gui_text_center(360, 345, "[R] Restart", 28, GREEN);
+            gui_text_center(360, 382, "[Q] Go to Title", 28, YELLOW);
             if (platform_key_pressed(PKEY_R))
             {
                 gameSingle = std::make_unique<Game>(sessionSeed);
@@ -1434,14 +1730,14 @@ int main(int argc, char** argv)
             }
             renderer_set_view_offset(0, 0);  // UI/오버레이는 정적
 
-            // Next 프리뷰 — 두 보드 사이 60px 갭을 활용 (cellSize=14).
-            //   Local 용: 상단, Remote 용: 그 아래. 라벨 포함.
+            // Next 프리뷰 — 두 보드 사이 60px 갭을 활용.
+            //   Local/Remote 모두 lockstep 미러에서 다음 3개를 바로 읽는다.
             {
                 int midX = leftX + 300 + 5;               // 보드 사이 갭 시작 (316)
                 draw_text("Next",  midX, 20, 16, GRAY);
-                gameLocal->DrawNextMini(midX, 44, 14);    // ~56x56 영역
-                draw_text("Opp",   midX, 160, 16, GRAY);
-                gameRemote->DrawNextMini(midX, 184, 14);
+                gameLocal->DrawNextQueueMini(midX, 44, 11, SimGame::kNextPreviewCount, 48);
+                draw_text("Opp",   midX, 296, 16, GRAY);
+                gameRemote->DrawNextQueueMini(midX, 320, 11, SimGame::kNextPreviewCount, 48);
             }
 
             // 스코어/레벨 하단 패널
@@ -1471,7 +1767,7 @@ int main(int argc, char** argv)
             //   "START!" 가 잠깐 번쩍이고 사라진다.
             if (startDelay > 0) {
                 const int seconds = static_cast<int>((startDelay - 1) / 60) + 1;  // 1, 2, 3
-                char buf[4]; snprintf(buf, sizeof(buf), "%d", seconds);
+                char buf[16]; snprintf(buf, sizeof(buf), "%d", seconds);
                 constexpr int fontSize = 120;
                 const int tw = measure_text(buf, fontSize);
                 // 반투명 어두운 판을 배경으로 깔아 숫자가 보드 위에서 확실히 읽히게.
@@ -1529,7 +1825,8 @@ int main(int argc, char** argv)
 
             if (gameOverState == GameOverState::ShowingGameOver)
             {
-                draw_text("GAME OVER",                  220, 280, 60, WHITE);
+                draw_popup_panel(95, 235, 530, 225);
+                gui_text_center(360, 262, "GAME OVER", 60, WHITE);
                 // Section K — ELO 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
                 // ELO 변화 없음이라는 사실만 보장 — 구체적 이유는 세 가지:
                 //   (1) meta 미연동 / meta POST 실패 → "ranking offline".
@@ -1541,22 +1838,22 @@ int main(int argc, char** argv)
                 if (haveMatchResult) {
                     if (lastMatchResult.delta == 0 &&
                         lastMatchResult.elo_before == lastMatchResult.elo_after) {
-                        draw_text("no ELO change (offline / unranked / invalid)",
-                                  150, 343, 14, GRAY);
+                        gui_text_center(360, 343,
+                                        "no ELO change (offline / unranked / invalid)",
+                                        14, GRAY);
                     } else {
                         char buf[64];
                         std::snprintf(buf, sizeof(buf), "ELO %d  %+d",
                                       lastMatchResult.elo_after, lastMatchResult.delta);
                         Color col = lastMatchResult.delta >= 0 ? GREEN : RED;
-                        int tw = measure_text(buf, 26);
-                        draw_text(buf, 360 - tw / 2, 340, 26, col);
+                        gui_text_center(360, 340, buf, 26, col);
                     }
                 } else {
-                    draw_text("...waiting for ranking server",
-                              175, 343, 14, {120, 130, 170, 255});
+                    gui_text_center(360, 343, "...waiting for ranking server",
+                                    14, {120, 130, 170, 255});
                 }
-                draw_text("[R] Restart",                240, 380, 28, GREEN);
-                draw_text("[Q] Go to Title (immediate)",170, 415, 28, YELLOW);
+                gui_text_center(360, 380, "[R] Restart", 28, GREEN);
+                gui_text_center(360, 415, "[Q] Go to Title (immediate)", 28, YELLOW);
                 if (platform_key_pressed(PKEY_R)) {
                     myGameOverChoice = net::GameOverChoice::Restart;
                     session.SendGameOverChoice(myGameOverChoice);
@@ -1568,11 +1865,12 @@ int main(int argc, char** argv)
             }
             else if (gameOverState == GameOverState::WaitingForRemote)
             {
-                draw_text("GAME OVER",                220, 280, 60, WHITE);
-                draw_text("Waiting for opponent...", 180, 450, 24, GRAY);
+                draw_popup_panel(130, 250, 460, 220);
+                gui_text_center(360, 277, "GAME OVER", 60, WHITE);
+                gui_text_center(360, 365, "Waiting for opponent...", 24, GRAY);
                 gameOverTimer += deltaTime;
                 int remaining = std::max(0, (int)(GAME_OVER_TIMEOUT - gameOverTimer));
-                draw_text(fmt_buf("Timeout in %ds", remaining), 250, 480, 20, GRAY);
+                gui_text_center(360, 397, fmt_buf("Timeout in %ds", remaining), 20, GRAY);
 
                 net::GameOverChoice remoteChoice;
                 if (session.GetRemoteGameOverChoice(remoteChoice))
@@ -1581,6 +1879,13 @@ int main(int argc, char** argv)
                     {
                         if (myGameOverChoice == net::GameOverChoice::Restart)
                         {
+                            session.ClearInputs();
+                            localInputs.clear();
+                            localTickNext = 0;
+                            simTick = 0;
+                            accumulator = 0.0;
+                            startFlashTimer = 0.0f;
+
                             if (session.params().role == net::Role::Host)
                                 gameOverState = GameOverState::SendingNewSeed;
                             else {
@@ -1601,30 +1906,36 @@ int main(int argc, char** argv)
             }
             else if (gameOverState == GameOverState::ShowingDisagreement)
             {
-                draw_text("CHOICES DIFFER",        220, 300, 40, RED);
-                draw_text("Returning to title...", 180, 360, 28, YELLOW);
+                draw_popup_panel(130, 250, 460, 220);
+                gui_text_center(360, 285, "CHOICES DIFFER", 40, RED);
+                gui_text_center(360, 360, "Returning to title...", 28, YELLOW);
                 gameOverTimer += deltaTime;
                 int countdown = std::max(0, (int)(DISAGREEMENT_COUNTDOWN - gameOverTimer) + 1);
-                draw_text(fmt_buf("%d", countdown), 350, 410, 60, WHITE);
+                gui_text_center(360, 405, fmt_buf("%d", countdown), 60, WHITE);
                 if (gameOverTimer >= DISAGREEMENT_COUNTDOWN)
                     gameOverState = GameOverState::GoingToTitle;
             }
             else if (gameOverState == GameOverState::SendingNewSeed)
             {
-                draw_text("GAME OVER",          220, 280, 60, WHITE);
-                draw_text("Sending new seed...",180, 450, 24, GRAY);
-                if (!newSeedSent) {
-                    sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + rand();
-                    session.SendNewSeed(sessionSeed);
-                    newSeedSent = true;
-                }
-                gameOverTimer += deltaTime;
-                if (gameOverTimer >= 1.5f) { newSeedSent = false; gameOverState = GameOverState::RestartingGame; }
+                draw_popup_panel(130, 250, 460, 190);
+                gui_text_center(360, 277, "GAME OVER", 60, WHITE);
+                gui_text_center(360, 365, "Starting new round...", 24, GRAY);
+                // 새 시드를 보내고 곧장 새 라운드로 진입한다. 예전엔 여기서 1.5초를
+                // 고정 대기했는데, 그 시차만큼 host 의 카운트다운이 guest 보다 늦게
+                // 시작돼(guest 가 먼저 끝나 입력 송신 시작) 재시작 라운드 내내 한쪽
+                // 입력이 lockstep safeTick 에 묶여 영구 렉이 났다. 이제 최초 게임
+                // 시작과 동일하게 "시드 전송 → 즉시 시작" 으로 양쪽 시작 시차를 ~RTT
+                // 수준으로 줄인다. SEED 프레임은 RestartingGame 의 ClearInputs() 가
+                // 보존(INPUT/HASH 만 드롭)하므로 곧장 넘어가도 안전하다.
+                sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + rand();
+                session.SendNewSeed(sessionSeed);
+                gameOverState = GameOverState::RestartingGame;
             }
             else if (gameOverState == GameOverState::WaitingForNewSeed)
             {
-                draw_text("GAME OVER",             220, 280, 60, WHITE);
-                draw_text("Waiting for new seed...",180, 450, 24, GRAY);
+                draw_popup_panel(130, 250, 460, 190);
+                gui_text_center(360, 277, "GAME OVER", 60, WHITE);
+                gui_text_center(360, 365, "Waiting for new seed...", 24, GRAY);
                 uint64_t newSeed = session.params().seed;
                 if (newSeed != lastReceivedSeed) {
                     lastReceivedSeed = newSeed;
@@ -1635,10 +1946,18 @@ int main(int argc, char** argv)
             }
             else if (gameOverState == GameOverState::RestartingGame)
             {
-                sessionSeed = session.params().seed;
+                auto sp = session.params();
+                sessionSeed = sp.seed;
                 session.ClearInputs();
                 localInputs.clear(); localTickNext = 0; simTick = 0;
-                startDelay = session.params().start_tick;
+                accumulator = 0.0;
+                startFlashTimer = 0.0f;
+                startDelay = sp.start_tick;
+                const std::string localIconId =
+                    (sp.local_icon_id.empty() || sp.local_icon_id == "default")
+                    ? mySelectedIconId : sp.local_icon_id;
+                iconYou = resolvePlayerIcon(localIconId);
+                iconOpponent = resolvePlayerIcon(sp.remote_icon_id);
                 gameLocal  = std::make_unique<Game>(sessionSeed);
                 gameRemote = std::make_unique<Game>(sessionSeed);
                 lastAttackLocal = 0; lastAttackRemote = 0;
@@ -1669,6 +1988,8 @@ int main(int argc, char** argv)
                 cachedLocalIP.clear(); cachedPublicIP.clear();
                 session.ClearGameOverChoices();
                 gameOverState = GameOverState::None;
+                iconYou = resolvePlayerIcon(mySelectedIconId);
+                iconOpponent = iconDefaultOpponent;
                 app = AppMode::Menu;
             }
 
@@ -1810,7 +2131,7 @@ int main(int argc, char** argv)
         // ── NET HUD (최소) ────────────────────────────────────────────────────
         if (app == AppMode::Net)
         {
-#ifndef NDEBUG
+#if defined(TETRIS_ENABLE_DEBUG_UI)
             // 디버그 빌드 전용 오버레이 — seed/tick 상태. Release 빌드에서는 숨긴다
             // (일반 플레이어에겐 노이즈). 필요 시 DESYNC 배너 / 링크 상태는 계속 보임.
             draw_text(fmt_buf("NET: %s", session.isConnected() ? "CONNECTED" : "DISCONNECTED"),
@@ -1946,6 +2267,8 @@ int main(int argc, char** argv)
                     netMode = false; isHost = false; queueMode = false;
                     gameLocal.reset();
                     gameRemote.reset();
+                    iconYou = resolvePlayerIcon(mySelectedIconId);
+                    iconOpponent = iconDefaultOpponent;
                 }
                 // Single/BotSingle: 게임 객체 파기 → 메뉴로.
                 if (app == AppMode::Single) {
@@ -1955,6 +2278,7 @@ int main(int argc, char** argv)
                     gameSingle.reset();
                     gameBot.reset();
                     botInputQueue.clear();
+                    botMatchResult = BotMatchResult::None;
                 }
                 app = AppMode::Menu;
             }
@@ -1964,8 +2288,9 @@ int main(int argc, char** argv)
         platform_end_frame();
     }
 
-    image_unload(iconYou);
-    image_unload(iconOpponent);
+    for (ImageHandle h : playerIconCatalogHandles) image_unload(h);
+    image_unload(iconDefaultPlayer);
+    image_unload(iconDefaultOpponent);
     image_unload(iconBot);
     renderer_shutdown();
     platform_shutdown();

@@ -36,6 +36,7 @@ struct AuthOutcome {
     int         elo = 1200;
     std::string username;
     std::string token;
+    std::string selected_icon_id{"default"};
 };
 std::optional<AuthOutcome>
 authenticate(meta::client::MetaClient* meta, const std::string& token,
@@ -63,9 +64,11 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
     o.elo       = auth->elo;
     o.username  = auth->username;
     o.token     = token;
+    o.selected_icon_id = auth->selected_icon_id.empty() ? "default" : auth->selected_icon_id;
     std::cerr << "[conn " << conn_id << "] " << what
               << " authed player_id=" << auth->player_id
-              << " elo=" << auth->elo << "\n";
+              << " elo=" << auth->elo
+              << " icon=" << o.selected_icon_id << "\n";
     return o;
 }
 
@@ -108,6 +111,7 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     pi.elo       = auth->elo;
                     pi.username  = std::move(auth->username);
                     pi.token     = std::move(auth->token);
+                    pi.selected_icon_id = std::move(auth->selected_icon_id);
                     std::cerr << "[conn " << conn_id << "] QUEUE_JOIN -> queued\n";
                     mm.enqueue(std::move(pi));
                     return;
@@ -125,7 +129,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     std::cerr << "[conn " << conn_id << "] ROOM_CREATE\n";
                     rr.handleCreate(std::move(sock), conn_id,
                                     auth->player_id, auth->elo,
-                                    auth->username, auth->token);
+                                    auth->username, auth->token,
+                                    auth->selected_icon_id);
                     return;
                 }
                 if (f.type == net::MsgType::ROOM_JOIN) {
@@ -143,7 +148,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     std::cerr << "[conn " << conn_id << "] ROOM_JOIN " << code << "\n";
                     rr.handleJoin(code, std::move(sock), conn_id,
                                   auth->player_id, auth->elo,
-                                  auth->username, auth->token);
+                                  auth->username, auth->token,
+                                  auth->selected_icon_id);
                     return;
                 }
                 // HELLO 등 낯선 프레임은 초기 phase 에서는 무시 + 계속 대기

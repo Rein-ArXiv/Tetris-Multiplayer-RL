@@ -22,6 +22,9 @@ public:
     void DrawNextAt(int offsetX, int offsetY);
     // 축소 프리뷰 — 멀티/봇 모드용 (cellSize 작게). 보드 사이 좁은 갭에 들어감.
     void DrawNextMini(int offsetX, int offsetY, int cellSize);
+    void DrawNextQueueMini(int offsetX, int offsetY, int cellSize,
+                           int maxCount = SimGame::kNextPreviewCount,
+                           int ySpacing = 48);
     // 가비지 큐 미리보기 바 — 보드 왼쪽(offsetX-8 위치)에 빨간 바 세로 그리기.
     // pending: 주입 대기 중인 행 수. 최대 표시 12행.
     static void DrawGarbageBar(int boardX, int boardY, int pending);
@@ -44,6 +47,7 @@ public:
 private:
     void DrawGrid(int offsetX, int offsetY) const;
     void DrawBlock(const SimBlock& block, int offsetX, int offsetY) const;
+    void DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const;
 
     std::vector<Color> cellColors;
 
@@ -52,5 +56,6 @@ private:
     AudioHandle sndClear   = 0;
     AudioHandle sndDrop    = 0;
     AudioHandle sndGarbage = 0;
-    AudioHandle sndMusic   = 0;
+    bool audioInitCalled = false;
+    bool musicUser = false;
 };

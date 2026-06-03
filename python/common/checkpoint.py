@@ -55,8 +55,15 @@ def load_checkpoint(
     device: str | torch.device = "cpu",
 ) -> TetrisPolicyNet:
     """Load a checkpoint, raising ``RuntimeError`` on arch-version mismatch."""
-    payload = torch.load(str(path), map_location=device, weights_only=False)
+    payload = torch.load(str(path), map_location=device, weights_only=True)
+    if not isinstance(payload, dict) or "state_dict" not in payload:
+        raise RuntimeError("Checkpoint does not contain a TetrisPolicyNet state_dict.")
+    state_dict = payload["state_dict"]
+    if not isinstance(state_dict, dict):
+        raise RuntimeError("Checkpoint state_dict is not a mapping.")
     meta = payload.get(CHECKPOINT_META_KEY, {})
+    if not isinstance(meta, dict):
+        raise RuntimeError("Checkpoint metadata is not a mapping.")
     recorded = meta.get("arch_version")
     if recorded != TetrisPolicyNet.ARCH_VERSION:
         raise RuntimeError(
@@ -72,6 +79,6 @@ def load_checkpoint(
         )
 
     model = TetrisPolicyNet()
-    model.load_state_dict(payload["state_dict"])
+    model.load_state_dict(state_dict)
     model.to(device).eval()
     return model

@@ -7,9 +7,37 @@
 
 namespace net {
 
+#if defined(TETRIS_ENABLE_NET_TRACE)
+#define NET_TRACE(expr) do { std::cout << expr << std::endl; } while (0)
+#else
+#define NET_TRACE(expr) do {} while (0)
+#endif
+#define NET_WARN(expr) do { std::cerr << expr << std::endl; } while (0)
+
 static int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::string read_short_string(const std::vector<uint8_t>& payload, size_t& pos)
+{
+    if (pos >= payload.size()) return {};
+    const uint8_t n = payload[pos++];
+    if (payload.size() < pos + n) return {};
+    std::string out(payload.begin() + pos, payload.begin() + pos + n);
+    pos += n;
+    return out;
+}
+
+static void parse_match_icons(const std::vector<uint8_t>& payload,
+                              std::string& local_icon,
+                              std::string& remote_icon)
+{
+    size_t pos = 9;  // [role:1][seed:8]
+    std::string mine = read_short_string(payload, pos);
+    std::string peer = read_short_string(payload, pos);
+    local_icon  = mine.empty() ? "default" : mine;
+    remote_icon = peer.empty() ? "default" : peer;
 }
 
 Session::Session() {}
@@ -80,21 +108,28 @@ bool Session::Adopt(TcpSocket socket, Role role, uint64_t seed,
         seedParams.role = role;
     }
 
-    sock = socket;
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (quit.load()) {
+            tcp_close(socket);
+            return false;
+        }
+        sock = socket;
+    }
     connected = true;
     // HELLO/SEED 핸드셰이크 생략 — 릴레이가 MATCH_FOUND 로 seed/role 을 이미 확정
     lastPongMs.store(now_ms());
     lastPingSentMs.store(0);
     ready = true;
     th = std::thread(&Session::ioThread, this);
-    std::cout << "[NET] Adopted relay socket: role="
+    NET_TRACE("[NET] Adopted relay socket: role="
               << (role == Role::Host ? "HOST" : "GUEST")
-              << " seed=0x" << std::hex << seed << std::dec << std::endl;
+              << " seed=0x" << std::hex << seed << std::dec);
     return true;
 }
 
 bool Session::Connect(const std::string& host, uint16_t port) {
-    std::cout << "[NET] Connecting to " << host << ":" << port << std::endl;
+    NET_TRACE("[NET] Connecting to " << host << ":" << port);
 
     // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
     quit = false;
@@ -112,20 +147,28 @@ bool Session::Connect(const std::string& host, uint16_t port) {
     { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
     { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
 
-    sock = tcp_connect(host, port);
-    if (!sock.valid()) {
-        std::cout << "[NET] Failed to connect to " << host << ":" << port << std::endl;
+    TcpSocket connectedSock = tcp_connect(host, port);
+    if (!connectedSock.valid()) {
+        NET_WARN("[NET] Failed to connect to " << host << ":" << port);
         connectionFailed = true;
         return false;
     }
-    std::cout << "[NET] Connected to " << host << ":" << port << std::endl;
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (quit.load()) {
+            tcp_close(connectedSock);
+            return false;
+        }
+        sock = connectedSock;
+    }
+    NET_TRACE("[NET] Connected to " << host << ":" << port);
     connected = true;
     th = std::thread(&Session::ioThread, this);
     {
         std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-        std::cout << "[NET] Sent HELLO message" << std::endl;
+        NET_TRACE("[NET] Sent HELLO message");
     }
     return true;
 }
@@ -153,7 +196,7 @@ void Session::SendGameOverChoice(GameOverChoice choice) {
     pl.push_back((uint8_t)choice);
     auto fr = build_frame(MsgType::GAME_OVER_CHOICE, pl);
     std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-    std::cout << "[NET] Sent game over choice: " << (int)choice << std::endl;
+    NET_TRACE("[NET] Sent game over choice: " << (int)choice);
 }
 
 void Session::SendNewSeed(uint64_t newSeed) {
@@ -168,7 +211,7 @@ void Session::SendNewSeed(uint64_t newSeed) {
     }
     auto fr = build_frame(MsgType::SEED, pl);
     std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-    std::cout << "[NET] Sent new seed: 0x" << std::hex << newSeed << std::dec << std::endl;
+    NET_TRACE("[NET] Sent new seed: 0x" << std::hex << newSeed << std::dec);
 }
 
 void Session::SendChat(const std::string& text) {
@@ -227,18 +270,30 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
 
 void Session::Close() {
     quit = true;
-    // 소켓을 먼저 닫아야 accept()/recv()에서 블로킹 중인 스레드가 해제됨
-    if (listening && listenSock.valid()) tcp_close(listenSock);
-    if (sock.valid()) tcp_close(sock);
-    // 소켓 닫힌 후 스레드 join (블로킹 해제됨)
+    // 소켓을 먼저 닫아(shutdown) accept()/recv() 블로킹 스레드를 깨운다.
+    //   sockMu_ 로 워커 스레드의 publish 와 직렬화 — Close 가 quit 를 먼저 세팅하므로
+    //   워커는 이 잠금 이후 publish 하지 않거나(잠금 안에서 quit 재확인), 이미 publish
+    //   한 값을 우리가 본다. (shared_ptr 멤버 data race 방지)
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (listening && listenSock.valid()) tcp_close(listenSock);
+        if (sock.valid()) tcp_close(sock);
+    }
+    // shutdown 후 스레드 join (블로킹 해제됨). join 은 반드시 잠금 밖에서.
     if (ath.joinable()) ath.join();
     if (qth.joinable()) qth.join();
     if (rth.joinable()) rth.join();
     if (th.joinable()) th.join();
-    // tcp_connect 중이던 queueThread/roomThread 가 Close 후 sock 을 뒤늦게 할당했을
-    // 가능성이 있으므로 join 후 한 번 더 닫는다. (누수 방지)
-    if (sock.valid()) tcp_close(sock);
-    if (listenSock.valid()) tcp_close(listenSock);
+    // join 후엔 워커가 모두 종료됐다. 늦게 publish 됐을 수 있으니 한 번 더 닫고,
+    // 소유자 복사본을 명시적으로 비운다 — 마지막 참조를 버려 실제 fd 를 닫고
+    // valid() 를 false 로 되돌린다(연결 종료 후 fd 잔존 회귀 방지).
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (sock.valid()) tcp_close(sock);
+        if (listenSock.valid()) tcp_close(listenSock);
+        sock = TcpSocket{};
+        listenSock = TcpSocket{};
+    }
     connected = false; ready = false; listening = false;
     roomState_.store(RoomState::Idle);
     roomPeerCount_.store(0);
@@ -260,7 +315,7 @@ void Session::Close() {
     // 스톨 heartbeat 상태 초기화 — 다음 세션에서 첫 SendInput 까지는 비활성.
     lastMainActivityMs_.store(0);
     heartbeatTickEnd_.store(0);
-    lastHeartbeatMs_ = 0;
+    lastHeartbeatMs_.store(0);
     {
         std::lock_guard<std::mutex> lk(chatMu_);
         chatQ_.clear();
@@ -311,14 +366,16 @@ bool Session::QueueJoin(const std::string& host, uint16_t port,
 void Session::QueueCancel() {
     // 큐잉 중에만 호출 — 가능하면 릴레이에 명시 취소를 먼저 보낸 뒤,
     // sock 을 닫아 recv 블록을 해제하고 quit 로 루프 종료.
-    if (sock.valid()) {
+    TcpSocket s;
+    { std::lock_guard<std::mutex> lk(sockMu_); s = sock; }
+    if (s.valid()) {
         auto fr = build_frame(MsgType::QUEUE_CANCEL, {});
         if (!fr.empty()) {
-            tcp_send_all(sock, fr.data(), fr.size());
+            tcp_send_all(s, fr.data(), fr.size());
         }
     }
     quit = true;
-    if (sock.valid()) tcp_close(sock);
+    if (s.valid()) tcp_close(s);
     // qth.join() 은 Close() 에서 처리 — 여기선 블록 없이 신호만 보낸다.
 }
 
@@ -343,9 +400,11 @@ void Session::QueueDecline() {
     //   interleaved 쓰기가 되지 않도록 queueSockSendMu_ 로 직렬화.
     std::vector<uint8_t> pl; pl.push_back(0);
     auto fr = build_frame(MsgType::READY, pl);
-    if (sock.valid()) {
+    TcpSocket s;
+    { std::lock_guard<std::mutex> lk(sockMu_); s = sock; }
+    if (s.valid()) {
         std::lock_guard<std::mutex> lk(queueSockSendMu_);
-        tcp_send_all(sock, fr.data(), fr.size());
+        tcp_send_all(s, fr.data(), fr.size());
     }
     quit = true;
 }
@@ -414,9 +473,11 @@ void Session::RoomLeave() {
     // 닫아 ROOM_LEAVE 가 실제로 송신되지 않는 경계가 있었다. (QueueDecline 과
     // 동일한 패턴 — roomSockSendMu_ 로 roomThread drain 과의 interleave 방지.)
     auto fr = build_frame(MsgType::ROOM_LEAVE, {});
-    if (sock.valid()) {
+    TcpSocket s;
+    { std::lock_guard<std::mutex> lk(sockMu_); s = sock; }
+    if (s.valid()) {
         std::lock_guard<std::mutex> lk(roomSockSendMu_);
-        tcp_send_all(sock, fr.data(), fr.size());
+        tcp_send_all(s, fr.data(), fr.size());
     }
     quit = true;
 }
@@ -426,23 +487,26 @@ void Session::roomThread(std::string host, uint16_t port,
                          uint32_t start_tick, uint8_t input_delay,
                          std::string auth_token) {
     const bool doCreate = joinCode.empty();
-    std::cout << "[ROOM] Connecting to relay " << host << ":" << port
-              << " for " << (doCreate ? "CREATE" : ("JOIN " + joinCode)) << std::endl;
+    NET_TRACE("[ROOM] Connecting to relay " << host << ":" << port
+              << " for " << (doCreate ? "CREATE" : ("JOIN " + joinCode)));
     TcpSocket s = tcp_connect(host, port);
     if (!s.valid()) {
-        std::cout << "[ROOM] Failed to connect" << std::endl;
+        NET_WARN("[ROOM] Failed to connect");
         roomState_.store(RoomState::Failed);
         connectionFailed = true;
         return;
     }
     // connect 중에 Close()가 호출됐다면 sock 할당 전에 로컬에서 닫고 빠져나간다.
     // 그렇지 않으면 Close 의 sock.valid() 체크가 이미 지나간 뒤 할당되어 fd 누수.
-    if (quit.load()) {
-        tcp_close(s);
-        roomState_.store(RoomState::Idle);
-        return;
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (quit.load()) {
+            tcp_close(s);
+            roomState_.store(RoomState::Idle);
+            return;
+        }
+        sock = s;
     }
-    sock = s;
     connected = true;
 
     // 첫 프레임 송신. 페이로드 끝에 [tok_len:1][token:N] 추가.
@@ -465,7 +529,7 @@ void Session::roomThread(std::string host, uint16_t port,
         first = build_frame(MsgType::ROOM_JOIN, pl);
     }
     if (!tcp_send_all(sock, first.data(), first.size())) {
-        std::cout << "[ROOM] Failed to send first frame" << std::endl;
+        NET_WARN("[ROOM] Failed to send first frame");
         roomState_.store(RoomState::Failed);
         connectionFailed = true;
         quit = true;
@@ -486,7 +550,7 @@ void Session::roomThread(std::string host, uint16_t port,
             }
             std::lock_guard<std::mutex> lkSock(roomSockSendMu_);
             if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
-                std::cout << "[ROOM] Send failed" << std::endl;
+                NET_WARN("[ROOM] Send failed");
                 roomState_.store(RoomState::Failed);
                 connectionFailed = true;
                 quit = true;
@@ -497,7 +561,7 @@ void Session::roomThread(std::string host, uint16_t port,
         if (quit.load()) break;
 
         if (!tcp_recv_some(sock, buf)) {
-            std::cout << "[ROOM] Disconnected" << std::endl;
+            NET_WARN("[ROOM] Disconnected");
             roomState_.store(RoomState::Failed);
             connectionFailed = true;
             quit = true;
@@ -529,29 +593,36 @@ void Session::roomThread(std::string host, uint16_t port,
                     case 3: roomState_.store(RoomState::GoneFull); break;
                     default: break;
                 }
-                std::cout << "[ROOM] INFO code=" << code
+                NET_TRACE("[ROOM] INFO code=" << code
                           << " status=" << (int)status
-                          << " peers=" << (int)peerCount << std::endl;
+                          << " peers=" << (int)peerCount);
                 // NotFound/Full: 서버가 소켓을 닫을 예정이라 이 스레드도 곧 EOF로 종료된다.
             } else if (f.type == MsgType::READY) {
                 // 상대방의 READY 에코 — UI 표시용으로만 사용 (세션에 저장 안 함).
                 // peerReady 상태는 main.cpp 쪽에서 별도 플래그로 추적할 수 있도록 로그만.
-                std::cout << "[ROOM] peer READY="
-                          << (f.payload.empty() ? 0 : (int)f.payload[0]) << std::endl;
+                NET_TRACE("[ROOM] peer READY="
+                          << (f.payload.empty() ? 0 : (int)f.payload[0]));
             } else if (f.type == MsgType::MATCH_FOUND && f.payload.size() >= 9) {
                 uint8_t roleByte = f.payload[0];
                 uint64_t seed = le_read_u64(f.payload.data() + 1);
                 Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
+                std::string localIcon = "default";
+                std::string remoteIcon = "default";
+                parse_match_icons(f.payload, localIcon, remoteIcon);
                 {
                     std::lock_guard<std::mutex> lk(seedMu);
                     seedParams.seed = seed;
                     seedParams.start_tick = start_tick;
                     seedParams.input_delay = input_delay;
                     seedParams.role = role;
+                    seedParams.local_icon_id = localIcon;
+                    seedParams.remote_icon_id = remoteIcon;
                 }
-                std::cout << "[ROOM] MATCH_FOUND role="
+                NET_TRACE("[ROOM] MATCH_FOUND role="
                           << (role == Role::Host ? "HOST" : "GUEST")
-                          << " seed=0x" << std::hex << seed << std::dec << std::endl;
+                          << " seed=0x" << std::hex << seed << std::dec
+                          << " icons local=" << localIcon
+                          << " remote=" << remoteIcon);
                 matchFound = true;
                 // 계속 루프를 돌며 남은 frames 를 검사 — 릴레이가 MATCH_FOUND 직후
                 // 게임 포워딩을 시작하므로 같은 recv 에 실린 게임 프레임을 놓치지
@@ -578,10 +649,13 @@ void Session::roomThread(std::string host, uint16_t port,
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     // quit 에 의해 종료된 경로 — 소켓 정리
-    std::cout << "[ROOM] Leaving / cancelled" << std::endl;
-    if (sock.valid()) {
-        tcp_close(sock);
-        sock = TcpSocket{};
+    NET_TRACE("[ROOM] Leaving / cancelled");
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (sock.valid()) {
+            tcp_close(sock);
+            sock = TcpSocket{};
+        }
     }
     connected = false;
     if (roomState_.load() != RoomState::Starting) {
@@ -592,21 +666,24 @@ void Session::roomThread(std::string host, uint16_t port,
 void Session::queueThread(std::string host, uint16_t port,
                           uint32_t start_tick, uint8_t input_delay,
                           std::string auth_token) {
-    std::cout << "[QUEUE] Connecting to relay " << host << ":" << port << std::endl;
+    NET_TRACE("[QUEUE] Connecting to relay " << host << ":" << port);
     TcpSocket s = tcp_connect(host, port);
     if (!s.valid()) {
-        std::cout << "[QUEUE] Failed to connect to relay" << std::endl;
+        NET_WARN("[QUEUE] Failed to connect to relay");
         connectionFailed = true;
         return;
     }
     // connect 중에 QueueCancel/Close 가 호출됐다면 sock 할당 전에 로컬에서 닫는다.
-    if (quit.load()) {
-        tcp_close(s);
-        return;
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (quit.load()) {
+            tcp_close(s);
+            return;
+        }
+        sock = s;
     }
-    sock = s;
     connected = true;
-    std::cout << "[QUEUE] Connected, sending QUEUE_JOIN" << std::endl;
+    NET_TRACE("[QUEUE] Connected, sending QUEUE_JOIN");
 
     // QUEUE_JOIN 페이로드: [tok_len:1][token:N]
     std::vector<uint8_t> joinPl;
@@ -617,7 +694,7 @@ void Session::queueThread(std::string host, uint16_t port,
     }
     auto join = build_frame(MsgType::QUEUE_JOIN, joinPl);
     if (!tcp_send_all(sock, join.data(), join.size())) {
-        std::cout << "[QUEUE] Failed to send QUEUE_JOIN" << std::endl;
+        NET_WARN("[QUEUE] Failed to send QUEUE_JOIN");
         connectionFailed = true; quit = true;
         return;
     }
@@ -628,12 +705,12 @@ void Session::queueThread(std::string host, uint16_t port,
     bool matched = false;
     while (!quit.load() && !matched) {
         if (std::chrono::steady_clock::now() >= matchDeadline) {
-            std::cout << "[QUEUE] Timeout waiting for MATCH_FOUND" << std::endl;
+            NET_WARN("[QUEUE] Timeout waiting for MATCH_FOUND");
             connectionFailed = true; quit = true;
             return;
         }
         if (!tcp_recv_some(sock, buf)) {
-            std::cout << "[QUEUE] Relay disconnected before MATCH_FOUND" << std::endl;
+            NET_WARN("[QUEUE] Relay disconnected before MATCH_FOUND");
             connectionFailed = true; quit = true;
             return;
         }
@@ -647,17 +724,24 @@ void Session::queueThread(std::string host, uint16_t port,
                 uint8_t roleByte = f.payload[0];
                 uint64_t seed = le_read_u64(f.payload.data() + 1);
                 Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
+                std::string localIcon = "default";
+                std::string remoteIcon = "default";
+                parse_match_icons(f.payload, localIcon, remoteIcon);
                 {
                     std::lock_guard<std::mutex> lk(seedMu);
                     seedParams.seed = seed;
                     seedParams.start_tick = start_tick;
                     seedParams.input_delay = input_delay;
                     seedParams.role = role;
+                    seedParams.local_icon_id = localIcon;
+                    seedParams.remote_icon_id = remoteIcon;
                 }
-                std::cout << "[QUEUE] MATCH_FOUND role="
+                NET_TRACE("[QUEUE] MATCH_FOUND role="
                           << (role == Role::Host ? "HOST" : "GUEST")
                           << " seed=0x" << std::hex << seed << std::dec
-                          << " — waiting for user to accept..." << std::endl;
+                          << " icons local=" << localIcon
+                          << " remote=" << remoteIcon
+                          << " — waiting for user to accept...");
                 matched = true;
                 queueMatched_.store(true);
             } else if (matched) {
@@ -676,7 +760,7 @@ void Session::queueThread(std::string host, uint16_t port,
         if (!matched) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (!matched) {
-        std::cout << "[QUEUE] Cancelled" << std::endl;
+        NET_TRACE("[QUEUE] Cancelled");
         return;
     }
 
@@ -689,7 +773,7 @@ void Session::queueThread(std::string host, uint16_t port,
     auto lobbyDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
     while (!quit.load()) {
         if (std::chrono::steady_clock::now() >= lobbyDeadline) {
-            std::cout << "[QUEUE] Lobby timeout (peer did not accept)" << std::endl;
+            NET_WARN("[QUEUE] Lobby timeout (peer did not accept)");
             connectionFailed = true; quit = true;
             return;
         }
@@ -707,14 +791,14 @@ void Session::queueThread(std::string host, uint16_t port,
             }
             std::lock_guard<std::mutex> lkSock(queueSockSendMu_);
             if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
-                std::cout << "[QUEUE] Lobby send failed" << std::endl;
+                NET_WARN("[QUEUE] Lobby send failed");
                 connectionFailed = true; quit = true; break;
             }
         }
         if (quit.load()) break;
 
         if (!tcp_recv_some(sock, buf)) {
-            std::cout << "[QUEUE] Lobby: peer/relay disconnected" << std::endl;
+            NET_WARN("[QUEUE] Lobby: peer/relay disconnected");
             connectionFailed = true; quit = true;
             return;
         }
@@ -729,7 +813,7 @@ void Session::queueThread(std::string host, uint16_t port,
             if (f.type == MsgType::READY) {
                 uint8_t v = f.payload.empty() ? 0 : f.payload[0];
                 if (v == 0) {
-                    std::cout << "[QUEUE] Peer declined" << std::endl;
+                    NET_TRACE("[QUEUE] Peer declined");
                     peerDeclined = true;
                 } else {
                     queuePeerReady_.store(true);
@@ -751,7 +835,7 @@ void Session::queueThread(std::string host, uint16_t port,
             // ioThread 첫 루프에서 이어서 파싱되게 한다. (이미 보존된
             // 완성 프레임이 앞에 있고, 그 뒤에 partial 이 붙는 순서 → 스트림
             // 시간 순서 보존.)
-            std::cout << "[QUEUE] Both accepted, starting game session" << std::endl;
+            NET_TRACE("[QUEUE] Both accepted, starting game session");
             recvBuf.insert(recvBuf.end(), buf.begin(), buf.end());
             queueMatched_.store(false);
             lastPongMs.store(now_ms());
@@ -764,11 +848,11 @@ void Session::queueThread(std::string host, uint16_t port,
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     // quit 로 나옴 (QueueDecline/QueueCancel/Close).
-    std::cout << "[QUEUE] Lobby cancelled" << std::endl;
+    NET_TRACE("[QUEUE] Lobby cancelled");
 }
 
 void Session::ioThread() {
-    std::cout << "[NET] I/O thread started" << std::endl;
+    NET_TRACE("[NET] I/O thread started");
     auto startTime = std::chrono::steady_clock::now();
     const auto CONNECTION_TIMEOUT = std::chrono::seconds(10);
 
@@ -778,7 +862,7 @@ void Session::ioThread() {
         if (!ready.load()) {
             auto elapsed = std::chrono::steady_clock::now() - startTime;
             if (elapsed > CONNECTION_TIMEOUT) {
-                std::cout << "[NET] Connection timeout after 10 seconds" << std::endl;
+                NET_WARN("[NET] Connection timeout after 10 seconds");
                 connectionFailed = true;
                 quit = true;
                 break;
@@ -805,8 +889,9 @@ void Session::ioThread() {
             //   · 전송 주기: 16ms (60Hz) — 실제 게임 틱과 동일 속도로 catch-up.
             int64_t mainAct = lastMainActivityMs_.load();
             if (mainAct > 0 && (now - mainAct) > 300) {
-                if (lastHeartbeatMs_ == 0 || (now - lastHeartbeatMs_) >= 16) {
-                    lastHeartbeatMs_ = now;
+                int64_t lastHeartbeat = lastHeartbeatMs_.load();
+                if (lastHeartbeat == 0 || (now - lastHeartbeat) >= 16) {
+                    lastHeartbeatMs_.store(now);
                     uint32_t nextTick = lastLocalTick.load() + 1;
                     std::vector<uint8_t> pl;
                     le_write_u32(pl, nextTick);
@@ -819,7 +904,7 @@ void Session::ioThread() {
                     sendQ.push_back(std::move(fr));
                 }
             } else {
-                lastHeartbeatMs_ = 0;
+                lastHeartbeatMs_.store(0);
             }
         }
 
@@ -841,7 +926,7 @@ void Session::ioThread() {
                 for (auto& f : frames) handleFrame(f);
             }
         } else {
-            std::cout << "[NET] Connection lost or receive failed" << std::endl;
+            NET_WARN("[NET] Connection lost or receive failed");
             connectionFailed = true;
             quit = true;
             break;
@@ -858,7 +943,7 @@ void Session::ioThread() {
             }
             // sendMu released before blocking I/O — main thread can SendInput() freely
             if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
-                std::cout << "[NET] Send failed!" << std::endl;
+                NET_WARN("[NET] Send failed!");
                 quit = true;
                 break;
             }
@@ -868,35 +953,52 @@ void Session::ioThread() {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
-    std::cout << "[NET] I/O thread exiting" << std::endl;
+    NET_TRACE("[NET] I/O thread exiting");
 }
 
 void Session::acceptThread(uint16_t port)
 {
-    std::cout << "[NET] Starting to listen on port " << port << std::endl;
-    listenSock = tcp_listen(port, 1);
+    NET_TRACE("[NET] Starting to listen on port " << port);
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (quit.load()) { listening = false; return; }
+        listenSock = tcp_listen(port, 1);
+    }
     if (!listenSock.valid()) {
-        std::cout << "[NET] Failed to listen on port " << port << std::endl;
+        NET_WARN("[NET] Failed to listen on port " << port);
         listening = false;
         return;
     }
-    std::cout << "[NET] Listening on port " << port << ", waiting for connection..." << std::endl;
-    auto client = tcp_accept(listenSock);
-    tcp_close(listenSock);
-    listenSock = TcpSocket{};
-    if (!client.valid()) {
-        std::cout << "[NET] Failed to accept client connection" << std::endl;
+    // listen 소켓을 논블로킹으로 — tcp_close 는 shutdown 만 하므로 블로킹 accept 를
+    // 깨우지 못한다. quit 를 폴링하며 accept 해 Close() 시 정상 종료시킨다.
+    tcp_set_nonblocking(listenSock);
+    NET_TRACE("[NET] Listening on port " << port << ", waiting for connection...");
+    TcpSocket client;
+    while (!quit.load()) {
+        client = tcp_accept(listenSock);
+        if (client.valid()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (listenSock.valid()) tcp_close(listenSock);
+        listenSock = TcpSocket{};
+    }
+    if (quit.load() || !client.valid()) {
+        if (client.valid()) tcp_close(client);
         listening = false;
         return;
     }
-    // accept 중에 Close() 가 호출됐다면 (quit 세팅) 여기서 바로 닫고 빠져나간다.
-    if (quit.load()) {
-        tcp_close(client);
-        listening = false;
-        return;
+    NET_TRACE("[NET] Client connected!");
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (quit.load()) {
+            tcp_close(client);
+            listening = false;
+            return;
+        }
+        sock = client;
     }
-    std::cout << "[NET] Client connected!" << std::endl;
-    sock = client;
     connected = true;
     listening = false;
     th = std::thread(&Session::ioThread, this);
@@ -904,7 +1006,7 @@ void Session::acceptThread(uint16_t port)
         std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-        std::cout << "[NET] Queued HELLO message" << std::endl;
+        NET_TRACE("[NET] Queued HELLO message");
     }
     {
         std::vector<uint8_t> pl;
@@ -919,29 +1021,29 @@ void Session::acceptThread(uint16_t port)
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
         {
             std::lock_guard<std::mutex> lk2(seedMu);
-            std::cout << "[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")" << std::endl;
+            NET_TRACE("[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")");
         }
     }
     lastPongMs.store(now_ms());
     lastPingSentMs.store(0);
     ready = true;
-    std::cout << "[NET] Host session is ready!" << std::endl;
+    NET_TRACE("[NET] Host session is ready!");
 }
 
 void Session::handleFrame(const Frame& f) {
     switch (f.type) {
     case MsgType::HELLO: {
-        std::cout << "[NET] Received HELLO message" << std::endl;
+        NET_TRACE("[NET] Received HELLO message");
         std::vector<uint8_t> pl; pl.push_back(1);
         auto fr = build_frame(MsgType::HELLO_ACK, pl);
         std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
-        std::cout << "[NET] Queued HELLO_ACK response" << std::endl;
+        NET_TRACE("[NET] Queued HELLO_ACK response");
     } break;
     case MsgType::HELLO_ACK: {
-        std::cout << "[NET] Received HELLO_ACK message" << std::endl;
+        NET_TRACE("[NET] Received HELLO_ACK message");
     } break;
     case MsgType::SEED: {
-        std::cout << "[NET] Received SEED message" << std::endl;
+        NET_TRACE("[NET] Received SEED message");
         if (f.payload.size() >= 8+4+1+1) {
             const uint8_t* p = f.payload.data();
             std::lock_guard<std::mutex> lk(seedMu);
@@ -951,15 +1053,15 @@ void Session::handleFrame(const Frame& f) {
             uint8_t rawRole = p[13];
             seedParams.role = (rawRole == (uint8_t)Role::Host || rawRole == (uint8_t)Role::Peer)
                             ? (Role)rawRole : Role::Peer;
-            std::cout << "[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
+            NET_TRACE("[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
                       << ", start_tick=" << std::dec << seedParams.start_tick
-                      << ", input_delay=" << (int)seedParams.input_delay << std::endl;
+                      << ", input_delay=" << (int)seedParams.input_delay);
             lastPongMs.store(now_ms());
             lastPingSentMs.store(0);
             ready = true;
-            std::cout << "[NET] Client session is ready!" << std::endl;
+            NET_TRACE("[NET] Client session is ready!");
         } else {
-            std::cout << "[NET] Invalid SEED message size: " << f.payload.size() << std::endl;
+            NET_WARN("[NET] Invalid SEED message size: " << f.payload.size());
         }
     } break;
     case MsgType::INPUT: {
@@ -970,12 +1072,22 @@ void Session::handleFrame(const Frame& f) {
             // 페이로드 크기 검증: 헤더(6) + cnt 바이트가 실제 크기 이내인지 확인
             if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
             const uint8_t* arr = p+6;
-            for (uint16_t i=0;i<cnt;++i) {
-                uint32_t tick = from + i;
-                uint8_t m = arr[i];
-                {
-                    std::lock_guard<std::mutex> lk(inMu);
-                    remoteInputs.emplace(tick, m);
+            // [보안] 신뢰할 수 없는 피어의 INPUT 처리:
+            //  - remoteInputs 무한 증가로 인한 메모리 고갈을 막기 위해 누적 크기를 제한.
+            //  - tick 래핑/원거리 tick 주입으로 인한 desync 를 막기 위해 현재 수신
+            //    지점(lastRemoteTick) 기준 윈도우를 벗어난 tick 은 폐기.
+            constexpr size_t   kMaxRemoteInputs = 8192;  // 버퍼링 가능한 최대 tick 수
+            constexpr uint32_t kMaxTickWindow   = 4096;  // 현재 지점 대비 허용 거리(과거/미래)
+            {
+                std::lock_guard<std::mutex> lk(inMu);
+                const uint32_t cur = lastRemoteTick.load();
+                for (uint16_t i=0;i<cnt;++i) {
+                    const uint32_t tick = from + i;
+                    const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
+                    if (dist > kMaxTickWindow) continue;  // 윈도우 밖(가비지/래핑) 폐기
+                    if (remoteInputs.size() >= kMaxRemoteInputs &&
+                        remoteInputs.find(tick) == remoteInputs.end()) continue;  // 버퍼 포화
+                    remoteInputs.emplace(tick, arr[i]);
                     if (tick > lastRemoteTick) lastRemoteTick = tick;
                 }
             }
@@ -1003,9 +1115,9 @@ void Session::handleFrame(const Frame& f) {
             if (choice == (uint8_t)GameOverChoice::Restart ||
                 choice == (uint8_t)GameOverChoice::GoToTitle) {
                 remoteGameOverChoice.store(choice);
-                std::cout << "[NET] Received game over choice: " << (int)choice << std::endl;
+                NET_TRACE("[NET] Received game over choice: " << (int)choice);
             } else {
-                std::cout << "[NET] Dropping invalid game-over choice: " << (int)choice << std::endl;
+                NET_WARN("[NET] Dropping invalid game-over choice: " << (int)choice);
             }
         }
     } break;
@@ -1106,8 +1218,8 @@ void Session::ClearInputs() {
     // 재시작 경계에서 heartbeat 상태도 리셋 — 새 라운드의 tick 0 부터 다시 감지.
     lastMainActivityMs_.store(0);
     heartbeatTickEnd_.store(0);
-    lastHeartbeatMs_ = 0;
-    std::cout << "[NET] Cleared input queues for restart" << std::endl;
+    lastHeartbeatMs_.store(0);
+    NET_TRACE("[NET] Cleared input queues for restart");
 }
 
 }

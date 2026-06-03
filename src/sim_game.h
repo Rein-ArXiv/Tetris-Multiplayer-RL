@@ -21,6 +21,8 @@
 class SimGame
 {
 public:
+    static constexpr int kNextPreviewCount = 3;
+
     explicit SimGame(uint64_t seed = 0);
 
     // ---- Placement-level action API (for RL training) ----
@@ -49,13 +51,14 @@ public:
 
     const SimBlock& CurrentBlock() const { return currentBlock; }
     const SimBlock& GhostBlock() const { return ghostBlock; }
-    const SimBlock& NextBlock() const { return nextBlock; }
+    const SimBlock& NextBlock() const { return nextBlocks.front(); }
+    const std::vector<SimBlock>& NextBlocks() const { return nextBlocks; }
 
     int CurrentBlockId() const { return currentBlock.id; }
     int CurrentRotation() const { return currentBlock.rotationState; }
     int CurrentRow() const { return currentBlock.rowOffset; }
     int CurrentCol() const { return currentBlock.columnOffset; }
-    int NextBlockId() const { return nextBlock.id; }
+    int NextBlockId() const { return NextBlock().id; }
     int Score() const { return score; }
     bool IsGameOver() const { return gameOver; }
 
@@ -135,7 +138,7 @@ private:
     XorShift64Star garbageRng;
     SimBlock currentBlock;
     SimBlock ghostBlock;
-    SimBlock nextBlock;
+    std::vector<SimBlock> nextBlocks;
 
     int gravityCounterTicks;
     int dropIntervalTicks;

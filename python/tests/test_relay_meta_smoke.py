@@ -25,6 +25,8 @@ import pytest
 
 from netbot.framing import MsgType, build_frame, parse_frames
 
+TEST_RELAY_SECRET = "test-relay-secret"
+
 
 def _find_bin(name: str, env_var: str) -> Path | None:
     env = os.environ.get(env_var)
@@ -107,7 +109,8 @@ def meta_and_relay(tmp_path):
 
     db = tmp_path / "test.db"
     meta_proc = subprocess.Popen(
-        [str(meta_bin), "--db", str(db), "--http", f"127.0.0.1:{meta_port}"],
+        [str(meta_bin), "--db", str(db), "--http", f"127.0.0.1:{meta_port}",
+         "--relay-secret", TEST_RELAY_SECRET],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if not _wait_listen(meta_port, 5.0):
@@ -116,7 +119,8 @@ def meta_and_relay(tmp_path):
 
     relay_proc = subprocess.Popen(
         [str(relay_bin), "--port", str(relay_port),
-         "--meta", f"http://127.0.0.1:{meta_port}"],
+         "--meta", f"http://127.0.0.1:{meta_port}",
+         "--meta-secret", TEST_RELAY_SECRET],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if not _wait_listen(relay_port, 5.0):
@@ -200,3 +204,26 @@ def test_empty_token_rejected_when_meta_active(meta_and_relay):
         assert data == b""
     finally:
         s.close()
+
+
+def test_relay_refuses_meta_without_secret(tmp_path):
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if not relay_bin:
+        pytest.skip("tetris_relay binary missing")
+
+    relay_port = _free_port()
+    env = os.environ.copy()
+    env.pop("TETRIS_RELAY_SECRET", None)
+    proc = subprocess.Popen(
+        [str(relay_bin), "--port", str(relay_port),
+         "--meta", "http://127.0.0.1:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    try:
+        rc = proc.wait(timeout=3)
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        assert rc == 2
+        assert "refusing to start" in stderr
+    finally:
+        if proc.poll() is None:
+            proc.kill()

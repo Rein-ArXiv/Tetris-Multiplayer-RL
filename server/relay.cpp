@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -379,12 +380,31 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
     }
 }
 
-// MATCH_FOUND 프레임 전송. 페이로드: [role:1][seed:8 LE]
-bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed) {
+// MATCH_FOUND 프레임 전송.
+// 페이로드: [role:1][seed:8 LE][my_icon_len:1][my_icon:N][peer_icon_len:1][peer_icon:N]
+// 뒤쪽 icon 필드는 구버전 클라와의 완만한 호환을 위해 optional 처럼 파싱한다.
+bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
+                    const std::string& my_icon,
+                    const std::string& peer_icon) {
+    const std::string my = my_icon.empty() ? "default" : my_icon;
+    const std::string peer = peer_icon.empty() ? "default" : peer_icon;
+    const size_t my_len = std::min<size_t>(my.size(), 255);
+    const size_t peer_len = std::min<size_t>(peer.size(), 255);
+
     std::vector<uint8_t> payload;
-    payload.reserve(9);
+    payload.reserve(9 + 1 + my_len + 1 + peer_len);
     payload.push_back(role);
     net::le_write_u64(payload, seed);
+    auto append_icon = [&](const std::string& icon, size_t n) {
+        payload.push_back(static_cast<uint8_t>(n));
+        const size_t old_size = payload.size();
+        payload.resize(old_size + n);
+        if (n > 0) {
+            std::memcpy(payload.data() + old_size, icon.data(), n);
+        }
+    };
+    append_icon(my, my_len);
+    append_icon(peer, peer_len);
     auto frame = net::build_frame(net::MsgType::MATCH_FOUND, payload);
     return net::tcp_send_all(sock, frame.data(), frame.size());
 }
@@ -607,8 +627,10 @@ void startPump(Match match, meta::client::MetaClient* meta) {
     constexpr uint8_t ROLE_HOST  = 1;
     constexpr uint8_t ROLE_GUEST = 2;
 
-    const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed);
-    const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed);
+    const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
+                                     match.a.selected_icon_id, match.b.selected_icon_id);
+    const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
+                                     match.b.selected_icon_id, match.a.selected_icon_id);
 
     if (!ok_a || !ok_b) {
         std::cerr << "[relay] MATCH_FOUND send failed, match=" << match.match_id << "\n";
@@ -624,8 +646,10 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
     constexpr uint8_t ROLE_HOST  = 1;
     constexpr uint8_t ROLE_GUEST = 2;
 
-    const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed);
-    const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed);
+    const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
+                                     match.a.selected_icon_id, match.b.selected_icon_id);
+    const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
+                                     match.b.selected_icon_id, match.a.selected_icon_id);
 
     if (!ok_a || !ok_b) {
         std::cerr << "[relay] MATCH_FOUND send failed, match=" << match.match_id << "\n";

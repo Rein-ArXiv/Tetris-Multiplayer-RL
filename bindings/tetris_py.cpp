@@ -107,9 +107,15 @@ PYBIND11_MODULE(tetris_py, m)
              py::return_value_policy::reference_internal,
              "Ghost/preview piece at the hard-drop target.")
         .def("next_block",
-             &SimGame::NextBlock,
-             py::return_value_policy::reference_internal,
-             "Next piece in the preview slot.")
+             [](const SimGame& g) { return g.NextBlock(); },
+             "Copy of the first piece in the preview queue.")
+        .def("next_block_ids", [](const SimGame& g) {
+            std::vector<int> ids;
+            const auto& next = g.NextBlocks();
+            ids.reserve(next.size());
+            for (const SimBlock& block : next) ids.push_back(block.id);
+            return ids;
+        }, "Piece ids in the visible next preview queue.")
 
         .def("current_block_id", &SimGame::CurrentBlockId)
         .def("current_rotation", &SimGame::CurrentRotation)

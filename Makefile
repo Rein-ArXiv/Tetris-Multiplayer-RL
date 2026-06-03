@@ -4,7 +4,7 @@
 # Linux/macOS users can type `make` from the repository root without falling
 # into the old raylib sample build path.
 
-.PHONY: all configure build game test relay meta py clean release-linux
+.PHONY: all configure build game test relay meta py python-sync python-test python-test-core clean release-linux
 
 BUILD_DIR ?= build
 CONFIG ?= Release
@@ -37,6 +37,18 @@ meta: configure
 py: CMAKE_ARGS += -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_PY=ON
 py: configure
 	$(CMAKE) --build $(BUILD_DIR) --config $(CONFIG) --target tetris_py
+
+python-sync:
+	uv sync --dev
+
+python-test:
+	uv run python -m pytest python/tests
+
+python-test-core:
+	uv run python -m pytest \
+		python/tests/test_framing_parity.py \
+		python/tests/test_checkpoint_roundtrip.py \
+		-q
 
 clean:
 	$(CMAKE) -E rm -rf $(BUILD_DIR)

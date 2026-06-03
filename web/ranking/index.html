@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entris Ranking</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111318;
+      --panel: #1b2029;
+      --line: #303846;
+      --text: #eef2f6;
+      --muted: #9aa6b2;
+      --accent: #57c7a0;
+      --danger: #ff6f7c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(920px, calc(100vw - 32px));
+      margin: 32px auto;
+    }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .status.error { color: var(--danger); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    td.rank { width: 72px; color: var(--accent); font-weight: 700; }
+    td.player { width: 100%; white-space: normal; overflow-wrap: anywhere; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    @media (max-width: 560px) {
+      main { width: 100%; margin: 0; }
+      header { padding: 18px 14px 8px; align-items: start; }
+      table { border-left: 0; border-right: 0; }
+      th, td { padding: 10px 9px; }
+      .losses-col { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Entris Ranking</h1>
+      <div id="status" class="status">Loading...</div>
+    </header>
+
+    <table aria-label="Entris leaderboard">
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Player</th>
+          <th class="num">ELO</th>
+          <th class="num">Wins</th>
+          <th class="num losses-col">Losses</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </main>
+
+  <script>
+    const rows = document.getElementById('rows');
+    const status = document.getElementById('status');
+
+    function cell(className, text) {
+      const td = document.createElement('td');
+      if (className) td.className = className;
+      td.textContent = text;
+      return td;
+    }
+
+    function playerName(row) {
+      return row.username || `Guest ${row.player_id}`;
+    }
+
+    async function loadLeaderboard() {
+      try {
+        const response = await fetch('/v1/leaderboard?limit=50', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        rows.replaceChildren();
+        for (const row of data) {
+          const tr = document.createElement('tr');
+          tr.append(
+            cell('rank', `#${row.rank}`),
+            cell('player', playerName(row)),
+            cell('num', row.elo),
+            cell('num', row.wins),
+            cell('num losses-col', row.losses)
+          );
+          rows.appendChild(tr);
+        }
+        status.className = 'status';
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        status.className = 'status error';
+        status.textContent = 'Ranking unavailable';
+      }
+    }
+
+    loadLeaderboard();
+    setInterval(loadLeaderboard, 30000);
+  </script>
+</body>
+</html>

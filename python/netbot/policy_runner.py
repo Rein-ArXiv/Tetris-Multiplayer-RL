@@ -16,12 +16,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
-import torch
 
-from common.action_mask import decode_action, legal_mask
-from common.checkpoint import load_checkpoint
+from common.action_mask import decode_action
 from common.features import bcts_score
-from common.obs import build_observation
 
 if TYPE_CHECKING:
     from sim import SimGame
@@ -35,21 +32,35 @@ class PolicyRunner:
     """Argmax over masked policy logits from a trained ``TetrisPolicyNet``."""
 
     def __init__(self, checkpoint_path: str, device: str = "cpu") -> None:
+        try:
+            import torch
+            from common.checkpoint import load_checkpoint
+        except ImportError as exc:
+            raise RuntimeError(
+                "PolicyRunner requires PyTorch. Run this path in Colab or install "
+                "the optional train/export dependencies; the rule-based runner and "
+                "C++ ONNX bot do not need torch."
+            ) from exc
         self.device = device
+        self.torch = torch
         self.model = load_checkpoint(checkpoint_path, device=device)
         self.model.eval()
 
-    @torch.no_grad()
     def select_placement(self, sim: "SimGame") -> tuple[int, int]:
-        obs = build_observation(sim)
-        batched = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
-        logits, _value = self.model(**batched)
-        mask = legal_mask(sim).to(self.device)
-        masked_logits = logits.squeeze(0).masked_fill(~mask, float("-inf"))
-        if torch.isinf(masked_logits).all():
-            # No legal actions — caller should treat this as game over.
-            return -1, -1
-        action = int(torch.argmax(masked_logits).item())
+        from common.action_mask import legal_mask
+        from common.obs import build_observation
+
+        torch = self.torch
+        with torch.no_grad():
+            obs = build_observation(sim)
+            batched = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+            logits, _value = self.model(**batched)
+            mask = legal_mask(sim).to(self.device)
+            masked_logits = logits.squeeze(0).masked_fill(~mask, float("-inf"))
+            if torch.isinf(masked_logits).all():
+                # No legal actions — caller should treat this as game over.
+                return -1, -1
+            action = int(torch.argmax(masked_logits).item())
         return decode_action(action)
 
 

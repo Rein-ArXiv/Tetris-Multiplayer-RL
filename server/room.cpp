@@ -76,7 +76,8 @@ void RoomRegistry::sendRoomInfo_(const net::TcpSocket& sock, const std::string& 
 
 void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
                                 int64_t player_id, int elo,
-                                const std::string& username, const std::string& token) {
+                                const std::string& username, const std::string& token,
+                                const std::string& selected_icon_id) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
     {
@@ -96,6 +97,7 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
         r.hostElo      = elo;
         r.hostUsername = username;
         r.hostToken    = token;
+        r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
     }
     std::cerr << "[room] conn=" << conn_id << " created code=" << code << "\n";
     sendRoomInfo_(sock, code, kStatusWaiting, 1);
@@ -104,7 +106,8 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
 
 void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
                               int64_t player_id, int elo,
-                              const std::string& username, const std::string& token) {
+                              const std::string& username, const std::string& token,
+                              const std::string& selected_icon_id) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     bool entered = false;
     {
@@ -134,6 +137,7 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         r.guestElo      = elo;
         r.guestUsername = username;
         r.guestToken    = token;
+        r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
         net::TcpSocket hs = r.hostSock;
         net::TcpSocket gs = r.guestSock;
         lk.unlock();
@@ -283,12 +287,14 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
             m.a.elo       = r.hostElo;
             m.a.username  = r.hostUsername;
             m.a.token     = r.hostToken;
+            m.a.selected_icon_id = r.hostSelectedIconId;
             m.b.sock      = r.guestSock;
             m.b.conn_id   = r.guestConn;
             m.b.player_id = r.guestPlayerId;
             m.b.elo       = r.guestElo;
             m.b.username  = r.guestUsername;
             m.b.token     = r.guestToken;
+            m.b.selected_icon_id = r.guestSelectedIconId;
             m.seed        = nextSeed_();
             m.match_id    = nextMatchId_();
             rooms.erase(it);
@@ -305,10 +311,11 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
     }
 
     // 일반 종료(ROOM_LEAVE / EOF / shutdown) — 상대에게 알리고 내 소켓 닫음.
-    // 주의: peer 통지(sendRoomInfo_)는 반드시 lock 보유 상태에서 보낸다.
-    //   lock 밖에서 peerSock 사본으로 send 하는 동안, 상대 스레드가 자신의 종료
-    //   경로에 들어가 같은 fd 를 tcp_close 하면 send 중에 fd 가 사라진다(UAC).
-    //   ROOM_INFO 는 <50 B 단일 프레임이라 lock hold 시간 영향 미미.
+    // 주의: peer 통지(sendRoomInfo_)는 lock 보유 상태에서 보낸다. fd 소유권은
+    //   shared_ptr 기반 TcpSocket 이 지켜 주지만, room entry 의 present/ready
+    //   변경과 ROOM_INFO 발송 순서는 같은 lock 으로 직렬화해야 상대 동시 종료와
+    //   상태 통지가 역전되지 않는다. ROOM_INFO 는 <50 B 단일 프레임이라 lock
+    //   hold 시간 영향이 작다.
     bool eraseRoom = false;
     {
         std::lock_guard<std::mutex> lk(mu);

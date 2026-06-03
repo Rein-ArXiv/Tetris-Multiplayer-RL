@@ -1,0 +1,20 @@
+[Unit]
+Description=Tetris Meta API and SQLite Database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tetris
+Group=tetris
+WorkingDirectory=/opt/tetris
+EnvironmentFile=/etc/tetris/meta.env
+ExecStart=/opt/tetris/tetris_meta --db /srv/tetris/db/tetris.db --http 127.0.0.1:8080
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/srv/tetris
+
+[Install]
+WantedBy=multi-user.target

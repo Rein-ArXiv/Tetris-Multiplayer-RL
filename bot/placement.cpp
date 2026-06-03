@@ -78,4 +78,53 @@ void observe(const SimGame& sim,
     if (nid >= 1 && nid <= kNumPieceTypes) next_out[nid - 1]    = 1.0f;
 }
 
+namespace {
+// locked 셀 판정 — 0(빈칸)도 8(ghost)도 아닌 것만 고정 블록으로 친다(observe 와 동일).
+inline bool is_locked(int v) { return v > 0 && v != 8; }
+
+// El-Tetris 가중치로 결과 보드를 평가한다. 높을수록 좋음.
+//   score = -0.51*총높이 + 0.76*삭제줄 - 0.36*구멍 - 0.18*요철
+double eval_board(const int (&grid)[kBoardRows][kBoardCols], int lines_cleared)
+{
+    int heights[kBoardCols] = {0};
+    int holes = 0;
+    for (int c = 0; c < kBoardCols; ++c) {
+        int top = -1;
+        for (int r = 0; r < kBoardRows; ++r)
+            if (is_locked(grid[r][c])) { top = r; break; }
+        if (top < 0) continue;                 // 빈 컬럼
+        heights[c] = kBoardRows - top;
+        for (int r = top; r < kBoardRows; ++r)
+            if (!is_locked(grid[r][c])) ++holes;
+    }
+    int agg_height = 0, bumpiness = 0;
+    for (int c = 0; c < kBoardCols; ++c) agg_height += heights[c];
+    for (int c = 0; c + 1 < kBoardCols; ++c) {
+        int d = heights[c] - heights[c + 1];
+        bumpiness += (d < 0 ? -d : d);
+    }
+    return -0.510066 * agg_height + 0.760666 * lines_cleared
+           - 0.356630 * holes - 0.184483 * bumpiness;
+}
+}  // namespace
+
+bool heuristic_placement(const SimGame& sim, int& col_out, int& rot_out)
+{
+    auto placements = sim.LegalPlacements();
+    if (placements.empty()) return false;
+
+    bool   found = false;
+    double best  = 0.0;
+    for (const auto& p : placements) {
+        SimGame trial = sim;                   // 값 복사 — 실제 sim 은 불변
+        int cleared = trial.ApplyPlacement(p.col, p.rot);
+        if (cleared < 0) continue;             // 비합법(이론상 없음)
+        double s = eval_board(trial.Grid(), cleared);
+        if (!found || s > best) {
+            best = s; col_out = p.col; rot_out = p.rot; found = true;
+        }
+    }
+    return found;
+}
+
 }  // namespace bot

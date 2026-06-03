@@ -4,12 +4,11 @@
 #   .\scripts\release_win.ps1                        # 기본: BOT=OFF
 #   .\scripts\release_win.ps1 -Bot                   # BOT=ON (ORT 필요)
 #   .\scripts\release_win.ps1 -Sdl2                  # SDL2 백엔드
+#   .\scripts\release_win.ps1 -RelayEndpoint "relay.example.com:7777" -MetaUrl "https://api.example.com"
 #
 # 산출물: dist\tetris-win-x64.zip
 #   tetris-win-x64\
 #     tetris.exe
-#     tetris_relay.exe
-#     sim_hash_dump.exe
 #     Font\
 #     Sounds\
 #     assets\          (있으면)
@@ -17,7 +16,11 @@
 #     onnxruntime.dll  (BOT 모드일 때)
 param(
     [switch]$Bot,
-    [switch]$Sdl2
+    [switch]$Sdl2,
+    [string]$RelayEndpoint = "",
+    [string]$MetaUrl = "",
+    [switch]$DebugUi,
+    [switch]$NetTrace
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,8 +42,9 @@ $cmakeArgs = @(
     "-S", $Root,
     "-DCMAKE_BUILD_TYPE=Release",
     "-DTETRIS_BUILD_GAME=ON",
-    "-DTETRIS_BUILD_RELAY=ON",
-    "-DTETRIS_BUILD_TEST=ON"
+    "-DTETRIS_BUILD_RELAY=OFF",
+    "-DTETRIS_BUILD_META=OFF",
+    "-DTETRIS_BUILD_TEST=OFF"
 )
 
 if ($Sdl2) {
@@ -54,6 +58,18 @@ if ($Bot) {
 } else {
     $cmakeArgs += "-DTETRIS_BUILD_BOT=OFF"
 }
+if ($RelayEndpoint -ne "") {
+    $cmakeArgs += "-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RelayEndpoint"
+}
+if ($MetaUrl -ne "") {
+    $cmakeArgs += "-DTETRIS_DEFAULT_META_URL=$MetaUrl"
+}
+if ($DebugUi) {
+    $cmakeArgs += "-DTETRIS_ENABLE_DEBUG_UI=ON"
+}
+if ($NetTrace) {
+    $cmakeArgs += "-DTETRIS_ENABLE_NET_TRACE=ON"
+}
 
 # Visual Studio 가 있으면 자동 감지. 명시적으로 지정하고 싶으면 -G 인자 추가.
 Write-Host "[release_win] CMake configure ..."
@@ -61,7 +77,7 @@ cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { Write-Error "CMake configure failed."; exit 1 }
 
 Write-Host "[release_win] CMake build (Release) ..."
-cmake --build $BuildDir --config Release -j
+cmake --build $BuildDir --config Release -j --target tetris
 if ($LASTEXITCODE -ne 0) { Write-Error "CMake build failed."; exit 1 }
 
 # ── 산출물 수집 ──────────────────────────────────────────────────────────────
@@ -70,8 +86,6 @@ New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 $Rel = "$BuildDir\Release"
 Copy-Item "$Rel\tetris.exe"         "$DistDir\"
-Copy-Item "$Rel\tetris_relay.exe"   "$DistDir\"
-Copy-Item "$Rel\sim_hash_dump.exe"  "$DistDir\"
 
 # Font + Sounds
 Copy-Item -Recurse "$Root\Font"   "$DistDir\Font"

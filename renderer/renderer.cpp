@@ -2,7 +2,7 @@
 //
 // 텍스트 렌더링은 백엔드별로 분리:
 //   - renderer/text_win32.cpp : GDI + wglUseFontBitmaps (Windows 기본)
-//   - renderer/text_stb.cpp   : stb_easy_font (SDL2 빌드에서 사용)
+//   - renderer/text_stb.cpp   : stb_truetype TTF 글리프 아틀라스 (SDL2 빌드에서 사용)
 //
 // 학습 포인트:
 //   이 파일이 하는 일 = raylib 의 rlgl.h + rshapes.c 에 해당.

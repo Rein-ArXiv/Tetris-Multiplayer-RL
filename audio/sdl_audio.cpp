@@ -161,13 +161,18 @@ AudioHandle audio_load_sound(const char* filepath)
 
     FILE* f = fopen(filepath, "rb");
     if (!f) { fprintf(stderr, "[audio] open %s failed\n", filepath); return 0; }
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
     long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
     if (sz <= 0) { fclose(f); return 0; }
     std::vector<uint8_t> raw((size_t)sz);
-    fread(raw.data(), 1, raw.size(), f);
+    const size_t nread = fread(raw.data(), 1, raw.size(), f);
     fclose(f);
+    if (nread != raw.size()) {
+        fprintf(stderr, "[audio] read %s failed (%zu/%zu bytes)\n",
+                filepath, nread, raw.size());
+        return 0;
+    }
 
     drmp3_config cfg{};
     drmp3_uint64 frames = 0;

@@ -24,11 +24,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 from . import NUM_PIECE_TYPES
 
 if TYPE_CHECKING:
+    import torch
     from sim import SimGame
 
 
@@ -39,6 +39,8 @@ def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
     before passing to the network — done at the call site so that batched
     rollouts and single-step inference share this builder.
     """
+    import torch
+
     raw = np.asarray(sim.grid(), dtype=np.float32)  # (20, 10)
     occupied = ((raw > 0) & (raw != 8)).astype(np.float32)
     board = occupied[None, :, :]  # (1, 20, 10)

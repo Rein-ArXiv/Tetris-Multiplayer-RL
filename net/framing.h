@@ -29,7 +29,8 @@ enum class MsgType : uint8_t {
     // 토큰이 없거나 relay 가 meta 에 연결 못 하면 소켓을 즉시 close.
     QUEUE_JOIN    = 10,  // C→S : [tok_len:1][token:N]   (tok_len==0 이면 미인증)
     QUEUE_CANCEL  = 11,  // C→S : 빈 페이로드 (매치메이킹 큐 취소)
-    MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
+    MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
+                         //        [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
 
     // 커스텀 룸 (Section D)
     //   플레이어가 5자리 코드로 방을 만들어 친구와 페어링.
@@ -47,7 +48,7 @@ enum class MsgType : uint8_t {
                          //        [opp_score_observed:4 LE][opp_lines_observed:4 LE]
                          //        [duration_s:4 LE]  (총 21 바이트)
     MATCH_RESULT  = 19,  // S→C : [elo_before:4 LE][elo_after:4 LE][delta:4 LE signed]
-                         //   delta=0 이면 ranking offline (meta 장애).
+                         //   delta=0 은 offline/unranked/검증 실패 등 ELO 변동 없음.
 
     CHAT        = 20,  // 양방향 : [text_len:2 LE][utf8:N] (릴레이가 통과 포워딩)
 };

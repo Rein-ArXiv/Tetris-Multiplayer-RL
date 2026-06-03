@@ -60,10 +60,14 @@ def _wait_listen(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
-def _post(url: str, body: dict | None = None, timeout: float = 5.0) -> tuple[int, dict]:
+def _post(url: str, body: dict | None = None, timeout: float = 5.0,
+          headers: dict[str, str] | None = None) -> tuple[int, dict]:
     data = json.dumps(body or {}).encode()
+    req_headers = {"Content-Type": "application/json"}
+    if headers:
+        req_headers.update(headers)
     req = urllib.request.Request(url, data=data,
-                                  headers={"Content-Type": "application/json"},
+                                  headers=req_headers,
                                   method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -89,7 +93,8 @@ def meta_server(tmp_path):
     port = _free_port()
     db = tmp_path / "test.db"
     proc = subprocess.Popen(
-        [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}"],
+        [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}",
+         "--allow-public-matches"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
@@ -123,6 +128,26 @@ def test_guest_then_verify(meta_server):
     assert code == 404
 
 
+def test_matches_secret_required_by_default(tmp_path):
+    bin_path = _find_meta_bin()
+    if not bin_path:
+        pytest.skip("tetris_meta binary not built (set TETRIS_META_BIN to override)")
+    port = _free_port()
+    db = tmp_path / "strict.db"
+    proc = subprocess.Popen(
+        [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        rc = proc.wait(timeout=3)
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        assert rc != 0
+        assert "refusing to start" in stderr
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_match_post_updates_elo(meta_server):
     base = meta_server
     _, p1 = _post(f"{base}/v1/guest")
@@ -141,6 +166,49 @@ def test_match_post_updates_elo(meta_server):
     assert body["b"]["delta"] == -12
     assert body["a"]["elo_after"] == 1212
     assert body["b"]["elo_after"] == 1188
+
+
+def test_matches_requires_relay_secret_when_configured(tmp_path):
+    bin_path = _find_meta_bin()
+    if not bin_path:
+        pytest.skip("tetris_meta binary not built (set TETRIS_META_BIN to override)")
+    port = _free_port()
+    db = tmp_path / "secret.db"
+    secret = "test-relay-secret"
+    proc = subprocess.Popen(
+        [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}",
+         "--relay-secret", secret],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        if not _wait_listen(port, timeout_s=5.0):
+            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            pytest.fail(f"tetris_meta did not listen on :{port}\n{stderr}")
+        base = f"http://127.0.0.1:{port}"
+        _, p1 = _post(f"{base}/v1/guest")
+        _, p2 = _post(f"{base}/v1/guest")
+        payload = {
+            "player_a": p1["player_id"], "player_b": p2["player_id"],
+            "winner": p1["player_id"],
+            "score_a": 1, "score_b": 0,
+            "lines_a": 0, "lines_b": 0,
+            "duration_s": 1,
+        }
+
+        code, body = _post(f"{base}/v1/matches", payload)
+        assert code == 403
+        assert body.get("error") == "forbidden"
+
+        code, body = _post(f"{base}/v1/matches", payload,
+                           headers={"X-Relay-Secret": secret})
+        assert code == 200
+        assert body["a"]["delta"] == 12
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def test_draw_keeps_elo(meta_server):

@@ -14,12 +14,14 @@
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include "platform.h"
 #include "gl_defs.h"
 
 #ifdef __APPLE__
   #define GL_SILENCE_DEPRECATION
   #include <OpenGL/gl.h>
+  #include <unistd.h>
 #else
   #include <GL/gl.h>
 #endif
@@ -74,7 +76,9 @@ PFNGLBINDBUFFERPROC              glBindBuffer              = nullptr;
 PFNGLBUFFERDATAPROC              glBufferData              = nullptr;
 PFNGLVERTEXATTRIBPOINTERPROC     glVertexAttribPointer     = nullptr;
 PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray = nullptr;
-PFNGLACTIVETEXTUREPROC           glActiveTexture           = nullptr;
+// gl.h declares core glActiveTexture (GL 1.3) on Linux/mac, so our hand-loaded
+// pointer uses the distinct name glActiveTextureProc to avoid the clash.
+PFNGLACTIVETEXTUREPROC           glActiveTextureProc       = nullptr;
 PFNGLGETSHADERIVPROC             glGetShaderiv             = nullptr;
 PFNGLGETSHADERINFOLOGPROC        glGetShaderInfoLog        = nullptr;
 PFNGLGETPROGRAMIVPROC            glGetProgramiv            = nullptr;
@@ -112,7 +116,9 @@ static void gl_load_functions()
     LOAD_GL(PFNGLBUFFERDATAPROC,              glBufferData)
     LOAD_GL(PFNGLVERTEXATTRIBPOINTERPROC,     glVertexAttribPointer)
     LOAD_GL(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray)
-    LOAD_GL(PFNGLACTIVETEXTUREPROC,           glActiveTexture)
+    // glActiveTexture is hand-loaded under the distinct name (see decl above).
+    glActiveTextureProc = (PFNGLACTIVETEXTUREPROC)SDL_GL_GetProcAddress("glActiveTexture");
+    if (!glActiveTextureProc) fprintf(stderr, "[GL] SDL_GL_GetProcAddress failed: glActiveTexture\n");
     LOAD_GL(PFNGLGETSHADERIVPROC,             glGetShaderiv)
     LOAD_GL(PFNGLGETSHADERINFOLOGPROC,        glGetShaderInfoLog)
     LOAD_GL(PFNGLGETPROGRAMIVPROC,            glGetProgramiv)
@@ -146,6 +152,22 @@ static float s_mouse_wheel_accum = 0.0f;
 static uint64_t s_freq        = 1;
 static uint64_t s_init_time   = 0;
 static uint64_t s_frame_start = 0;
+
+#ifdef __APPLE__
+static void set_macos_resource_cwd()
+{
+    char* base = SDL_GetBasePath();  // .../Tetris.app/Contents/MacOS/ in bundles
+    if (!base) return;
+    std::string resources = std::string(base) + "../Resources";
+    SDL_free(base);
+    if (access(resources.c_str(), R_OK) == 0) {
+        if (chdir(resources.c_str()) != 0) {
+            std::fprintf(stderr, "[SDL] chdir to app Resources failed: %s\n",
+                         resources.c_str());
+        }
+    }
+}
+#endif
 
 // ─── SDL_Keycode → PlatformKey(=Win32 VK) 매핑 ──────────────────────────────
 static int sdl_to_vk(SDL_Keycode k)
@@ -183,6 +205,9 @@ void platform_init(int w, int h, const char* title)
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
         return;
     }
+#ifdef __APPLE__
+    set_macos_resource_cwd();
+#endif
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);

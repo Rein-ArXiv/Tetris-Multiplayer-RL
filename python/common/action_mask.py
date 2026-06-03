@@ -10,11 +10,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import torch
-
 from . import NUM_PLACEMENTS, NUM_ROTATIONS
 
 if TYPE_CHECKING:
+    import torch
     from sim import SimGame
 
 
@@ -35,6 +34,8 @@ def legal_mask(sim: "SimGame") -> torch.Tensor:
     ``sim.legal_placements()``. The result lives on CPU; move to the policy
     device at the call site.
     """
+    import torch
+
     mask = torch.zeros(NUM_PLACEMENTS, dtype=torch.bool)
     for placement in sim.legal_placements():
         mask[encode_action(placement.col, placement.rot)] = True

@@ -2,7 +2,7 @@
 
 // meta/protocol.h — JSON 수동 직렬화/파싱 헬퍼.
 //
-// 우리 4개 엔드포인트는 모두 "평면적인 primitive 필드"로만 구성되므로
+// 우리 엔드포인트들은 대부분 "평면적인 primitive 필드"로만 구성되므로
 // nlohmann/json 같은 풀스펙 라이브러리는 과하다. 이 헤더의 함수들은
 // 특정 응답 shape 마다 전용으로 만들어져 있어 읽기 쉽고 빠르다.
 //
@@ -60,12 +60,17 @@ inline std::string error_json(const char* err, const char* reason = nullptr)
 
 // POST /v1/guest 응답
 inline std::string guest_response(int64_t player_id,
-                                  const std::string& token, int elo)
+                                  const std::string& token,
+                                  int elo,
+                                  int bp,
+                                  const std::string& selected_icon_id)
 {
     std::ostringstream ss;
     ss << "{\"player_id\":" << player_id
        << ",\"token\":\""   << json_escape(token) << "\""
        << ",\"elo\":"       << elo
+       << ",\"bp\":"        << bp
+       << ",\"selected_icon_id\":\"" << json_escape(selected_icon_id) << "\""
        << "}";
     return ss.str();
 }
@@ -73,14 +78,42 @@ inline std::string guest_response(int64_t player_id,
 // POST /v1/auth/verify 응답
 inline std::string auth_response(int64_t player_id,
                                  const std::optional<std::string>& username,
-                                 int elo)
+                                 int elo,
+                                 int bp,
+                                 const std::string& selected_icon_id)
 {
     std::ostringstream ss;
     ss << "{\"player_id\":" << player_id
        << ",\"username\":";
     if (username) ss << "\"" << json_escape(*username) << "\"";
     else          ss << "null";
-    ss << ",\"elo\":" << elo << "}";
+    ss << ",\"elo\":" << elo
+       << ",\"bp\":" << bp
+       << ",\"selected_icon_id\":\"" << json_escape(selected_icon_id) << "\""
+       << "}";
+    return ss.str();
+}
+
+struct IconRow {
+    std::string id;
+    std::string name;
+    int         price_bp;
+    bool        default_owned;
+};
+inline std::string icon_catalog_response(const std::vector<IconRow>& rows)
+{
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto& r = rows[i];
+        ss << "{\"id\":\"" << json_escape(r.id) << "\""
+           << ",\"name\":\"" << json_escape(r.name) << "\""
+           << ",\"price_bp\":" << r.price_bp
+           << ",\"default_owned\":" << (r.default_owned ? "true" : "false")
+           << "}";
+        if (i + 1 < rows.size()) ss << ",";
+    }
+    ss << "]";
     return ss.str();
 }
 
@@ -212,7 +245,11 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
     bool neg = (body[i] == '-');
     if (body[i] == '+' || body[i] == '-') ++i;
     while (i < body.size() && body[i] >= '0' && body[i] <= '9') {
-        val = val * 10 + (body[i] - '0');
+        int d = body[i] - '0';
+        // 오버플로 방지: int64 범위를 벗어나는 입력은 파싱 실패(nullopt)로 처리.
+        // 필수 숫자 필드라면 상위(api_server)에서 400 으로 거부된다.
+        if (val > (INT64_MAX - d) / 10) return std::nullopt;
+        val = val * 10 + d;
         ++i;
     }
     return neg ? -val : val;

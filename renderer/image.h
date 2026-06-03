@@ -25,6 +25,10 @@ using ImageHandle = int;  // 0 = invalid/미로드
 // 성공 시 양수 핸들.
 ImageHandle image_load(const char* path);
 
+// RGBA8 픽셀 배열에서 이미지 생성. 기본/절차적 fallback 아이콘 등에 사용.
+// pixels 는 w*h*4 바이트이며 호출 시점에 GPU 로 복사된다.
+ImageHandle image_create_rgba(const uint8_t* pixels, int w, int h);
+
 // 해제. 핸들이 0 이거나 유효하지 않으면 no-op.
 void image_unload(ImageHandle h);
 

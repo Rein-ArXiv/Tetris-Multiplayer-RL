@@ -1,0 +1,19 @@
+[Unit]
+Description=Tetris Multiplayer Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tetris
+Group=tetris
+WorkingDirectory=/opt/tetris
+EnvironmentFile=/etc/tetris/relay.env
+ExecStart=/opt/tetris/tetris_relay --port 7777 --meta https://api.example.com
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

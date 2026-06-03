@@ -1,8 +1,8 @@
 """Convert a trained TetrisPolicyNet checkpoint to ONNX for the C++ netbot.
 
 The C++ runtime uses onnxruntime (see ``bot/bot_onnx.cpp``) rather than libtorch
-or a Python subprocess. The short version is "12 MB DLL vs. 250 MB libtorch,
-sub-1ms infer, no Python on the end user's machine."
+or a Python subprocess. Training/export can stay in Colab; deployment only
+needs the exported ONNX file and the ONNX Runtime CPU bundle.
 
 Input/output names are load-bearing: ``bot/bot_onnx.cpp`` looks them up by
 string. If you rename one here, the C++ side must change in lockstep (and the
@@ -20,7 +20,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import torch
+try:
+    import torch
+except ImportError as exc:  # pragma: no cover - depends on optional local env
+    raise SystemExit(
+        "export_onnx requires PyTorch. Run this in Colab, or install the "
+        "optional export dependencies (`uv sync --extra export`)."
+    ) from exc
 
 from common import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES
 from common.checkpoint import load_checkpoint

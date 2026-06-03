@@ -16,24 +16,57 @@
 #include "httplib.h"
 
 #include <cstdlib>
+#include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 #include <sstream>
 #include <string>
+#include <system_error>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace meta::client {
 
 namespace {
 
-// URL 파서 — "http://host[:port]" 만 허용. 실패 시 valid=false.
-bool parse_http_url(const std::string& url, std::string& host, int& port)
+bool parse_port(const std::string& s, int& out)
 {
-    const std::string scheme = "http://";
-    if (url.size() < scheme.size() ||
-        url.compare(0, scheme.size(), scheme) != 0) return false;
+    if (s.empty()) return false;
+    int value = 0;
+    auto* first = s.data();
+    auto* last = s.data() + s.size();
+    auto res = std::from_chars(first, last, value);
+    if (res.ec != std::errc{} || res.ptr != last) return false;
+    if (value < 1 || value > 65535) return false;
+    out = value;
+    return true;
+}
 
-    std::string rest = url.substr(scheme.size());
+// URL 파서 — "http://host[:port]" / "https://host[:port]" 허용.
+bool parse_meta_url(const std::string& url, std::string& host, int& port, bool& https)
+{
+    const std::string httpScheme = "http://";
+    const std::string httpsScheme = "https://";
+    std::string rest;
+    if (url.compare(0, httpScheme.size(), httpScheme) == 0) {
+        https = false;
+        port = 80;
+        rest = url.substr(httpScheme.size());
+    } else if (url.compare(0, httpsScheme.size(), httpsScheme) == 0) {
+        https = true;
+        port = 443;
+        rest = url.substr(httpsScheme.size());
+    } else {
+        return false;
+    }
+
     if (rest.empty()) return false;
 
     // 옵션 경로(/...)가 따라오면 잘라낸다 — 우리 클라이언트는 호스트만 필요.
@@ -43,44 +76,82 @@ bool parse_http_url(const std::string& url, std::string& host, int& port)
     auto colon = hostport.rfind(':');
     if (colon == std::string::npos) {
         host = hostport;
-        port = 80;
     } else {
         host = hostport.substr(0, colon);
-        try {
-            port = std::stoi(hostport.substr(colon + 1));
-        } catch (...) { return false; }
-        if (port < 1 || port > 65535) return false;
+        if (!parse_port(hostport.substr(colon + 1), port)) return false;
     }
     return !host.empty();
 }
 
-httplib::Client make_client(const std::string& host, int port, int timeout_s)
+template <typename ClientT>
+void configure_client(ClientT& cli, int timeout_s)
 {
-    httplib::Client cli(host, port);
     cli.set_connection_timeout(timeout_s, 0);
     cli.set_read_timeout      (timeout_s, 0);
     cli.set_write_timeout     (timeout_s, 0);
-    return cli;
+}
+
+std::optional<AuthInfo> parse_auth_info_body(const std::string& body)
+{
+    auto pid = proto::find_int   (body, "player_id");
+    auto uname = proto::find_string(body, "username");  // null 이면 ""
+    auto elo = proto::find_int   (body, "elo");
+    auto bp  = proto::find_int   (body, "bp");
+    auto icon = proto::find_string(body, "selected_icon_id");
+    if (!pid || !elo || !bp || icon.empty()) return std::nullopt;
+    return AuthInfo{ *pid, std::move(uname), static_cast<int>(*elo),
+                     static_cast<int>(*bp), std::move(icon) };
 }
 
 } // namespace
 
 // -----------------------------------------------------------------------------
-MetaClient::MetaClient(const std::string& base_url)
-    : base_url_(base_url)
+MetaClient::MetaClient(const std::string& base_url, std::string relay_secret)
+    : base_url_(base_url), relay_secret_(std::move(relay_secret))
 {
-    valid_ = parse_http_url(base_url, host_, port_);
+    valid_ = parse_meta_url(base_url, host_, port_, https_);
     if (!valid_) {
         std::fprintf(stderr, "[meta-client] invalid URL: %s\n", base_url.c_str());
+        return;
     }
+#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
+    if (https_) {
+        valid_ = false;
+        std::fprintf(stderr,
+                     "[meta-client] HTTPS URL requires OpenSSL build support: %s\n",
+                     base_url.c_str());
+    }
+#endif
 }
+
+namespace {
+
+httplib::Result post_json(const MetaClient& mc, const std::string& host, int port,
+                          bool https, const char* path, const httplib::Headers& headers,
+                          const std::string& body, int timeout_s)
+{
+    (void)mc;
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    if (https) {
+        httplib::SSLClient cli(host, port);
+        configure_client(cli, timeout_s);
+        return cli.Post(path, headers, body, "application/json");
+    }
+#else
+    (void)https;
+#endif
+    httplib::Client cli(host, port);
+    configure_client(cli, timeout_s);
+    return cli.Post(path, headers, body, "application/json");
+}
+
+} // namespace
 
 std::optional<GuestInfo>
 MetaClient::request_guest(int timeout_s)
 {
     if (!valid_) return std::nullopt;
-    auto cli = make_client(host_, port_, timeout_s);
-    auto r = cli.Post("/v1/guest", "{}", "application/json");
+    auto r = post_json(*this, host_, port_, https_, "/v1/guest", {}, "{}", timeout_s);
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/guest network error\n");
         return std::nullopt;
@@ -93,11 +164,14 @@ MetaClient::request_guest(int timeout_s)
     auto pid = proto::find_int   (r->body, "player_id");
     auto tok = proto::find_string(r->body, "token");
     auto elo = proto::find_int   (r->body, "elo");
-    if (!pid || tok.empty() || !elo) {
+    auto bp  = proto::find_int   (r->body, "bp");
+    auto icon = proto::find_string(r->body, "selected_icon_id");
+    if (!pid || tok.empty() || !elo || !bp || icon.empty()) {
         std::fprintf(stderr, "[meta-client] /v1/guest bad response\n");
         return std::nullopt;
     }
-    return GuestInfo{ *pid, std::move(tok), static_cast<int>(*elo) };
+    return GuestInfo{ *pid, std::move(tok), static_cast<int>(*elo),
+                      static_cast<int>(*bp), std::move(icon) };
 }
 
 std::optional<AuthInfo>
@@ -109,9 +183,9 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
     if (!valid_)        { set_outcome(VerifyOutcome::NetworkError); return std::nullopt; }
     if (token.empty())  { set_outcome(VerifyOutcome::UnknownToken); return std::nullopt; }
 
-    auto cli = make_client(host_, port_, timeout_s);
     std::string body = std::string("{\"token\":\"") + proto::json_escape(token) + "\"}";
-    auto r = cli.Post("/v1/auth/verify", body, "application/json");
+    auto r = post_json(*this, host_, port_, https_, "/v1/auth/verify", {},
+                       body, timeout_s);
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/auth/verify network error\n");
         set_outcome(VerifyOutcome::NetworkError);
@@ -129,16 +203,42 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
         set_outcome(VerifyOutcome::NetworkError);
         return std::nullopt;
     }
-    auto pid = proto::find_int   (r->body, "player_id");
-    auto uname = proto::find_string(r->body, "username");  // null 이면 ""
-    auto elo = proto::find_int   (r->body, "elo");
-    if (!pid || !elo) {
+    auto parsed = parse_auth_info_body(r->body);
+    if (!parsed) {
         std::fprintf(stderr, "[meta-client] /v1/auth/verify bad response\n");
         set_outcome(VerifyOutcome::NetworkError);
         return std::nullopt;
     }
     set_outcome(VerifyOutcome::Ok);
-    return AuthInfo{ *pid, std::move(uname), static_cast<int>(*elo) };
+    return parsed;
+}
+
+std::optional<AuthInfo>
+MetaClient::purchase_icon(const std::string& token,
+                          const std::string& icon_id,
+                          int timeout_s)
+{
+    if (!valid_ || token.empty() || icon_id.empty()) return std::nullopt;
+    std::string body = std::string("{\"token\":\"") + proto::json_escape(token)
+                     + "\",\"icon_id\":\"" + proto::json_escape(icon_id) + "\"}";
+    auto r = post_json(*this, host_, port_, https_, "/v1/icons/buy", {},
+                       body, timeout_s);
+    if (!r || r->status != 200) return std::nullopt;
+    return parse_auth_info_body(r->body);
+}
+
+std::optional<AuthInfo>
+MetaClient::select_icon(const std::string& token,
+                        const std::string& icon_id,
+                        int timeout_s)
+{
+    if (!valid_ || token.empty() || icon_id.empty()) return std::nullopt;
+    std::string body = std::string("{\"token\":\"") + proto::json_escape(token)
+                     + "\",\"icon_id\":\"" + proto::json_escape(icon_id) + "\"}";
+    auto r = post_json(*this, host_, port_, https_, "/v1/icons/select", {},
+                       body, timeout_s);
+    if (!r || r->status != 200) return std::nullopt;
+    return parse_auth_info_body(r->body);
 }
 
 std::optional<MatchResult>
@@ -150,7 +250,6 @@ MetaClient::post_match(int64_t player_a, int64_t player_b,
                        int timeout_s)
 {
     if (!valid_) return std::nullopt;
-    auto cli = make_client(host_, port_, timeout_s);
 
     std::ostringstream ss;
     ss << "{"
@@ -167,7 +266,12 @@ MetaClient::post_match(int64_t player_a, int64_t player_b,
        << "}";
     std::string body = ss.str();
 
-    auto r = cli.Post("/v1/matches", body, "application/json");
+    httplib::Headers headers;
+    if (!relay_secret_.empty()) {
+        headers.emplace("X-Relay-Secret", relay_secret_);
+    }
+    auto r = post_json(*this, host_, port_, https_, "/v1/matches", headers,
+                       body, timeout_s);
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/matches network error\n");
         return std::nullopt;
@@ -283,10 +387,43 @@ bool save_token(const std::string& token)
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
 
+#ifndef _WIN32
+    const std::string line = token + "\n";
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) return false;
+    if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+        ::close(fd);
+        return false;
+    }
+    size_t written = 0;
+    while (written < line.size()) {
+        ssize_t n = ::write(fd, line.data() + written, line.size() - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            return false;
+        }
+        if (n == 0) {
+            ::close(fd);
+            return false;
+        }
+        written += static_cast<size_t>(n);
+    }
+    bool ok = (::close(fd) == 0);
+    ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+    return ok;
+#else
     std::ofstream f(path, std::ios::trunc);
     if (!f) return false;
     f << token << "\n";
-    return static_cast<bool>(f);
+    bool ok = static_cast<bool>(f);
+    f.close();
+    fs::permissions(path,
+                    fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace,
+                    ec);
+    return ok;
+#endif
 }
 
 } // namespace meta::client

@@ -22,7 +22,11 @@ SimGame::SimGame(uint64_t seed)
 {
     blocks = GetAllBlocks();
     currentBlock = GetRandomBlock();
-    nextBlock = GetRandomBlock();
+    nextBlocks.reserve(kNextPreviewCount);
+    for (int i = 0; i < kNextPreviewCount; ++i)
+    {
+        nextBlocks.push_back(GetRandomBlock());
+    }
     ghostBlock = MakeGhostBlock(currentBlock);
     // sim_grid is zero-initialized by its default constructor.
 }
@@ -245,7 +249,7 @@ void SimGame::LockBlock()
     {
         sim_grid.grid[item.row][item.column] = currentBlock.id;
     }
-    currentBlock = nextBlock;
+    currentBlock = NextBlock();
     ghostBlock = MakeGhostBlock(currentBlock);
     bool wasGameOver = gameOver;
     if (BlockFits(currentBlock) == false)
@@ -253,7 +257,8 @@ void SimGame::LockBlock()
         gameOver = true;
     }
 
-    nextBlock = GetRandomBlock();
+    nextBlocks.erase(nextBlocks.begin());
+    nextBlocks.push_back(GetRandomBlock());
     int rowsCleared = sim_grid.ClearFullRows();
     lastLinesCleared = rowsCleared;
     lastTSpinLines = tSpin ? rowsCleared : -1;
@@ -376,12 +381,16 @@ SimGame::HashBreakdown SimGame::StateHashBreakdown() const
     cb = fnv1a64_value(currentBlock.GetColumnOffset(), cb);
     b.currentBlock = cb;
 
-    // Next block
+    // Next preview queue
     uint64_t nb = BASE;
-    nb = fnv1a64_value(nextBlock.id, nb);
-    nb = fnv1a64_value(nextBlock.GetRotationState(), nb);
-    nb = fnv1a64_value(nextBlock.GetRowOffset(), nb);
-    nb = fnv1a64_value(nextBlock.GetColumnOffset(), nb);
+    nb = fnv1a64_value(static_cast<int>(nextBlocks.size()), nb);
+    for (const SimBlock& next : nextBlocks)
+    {
+        nb = fnv1a64_value(next.id, nb);
+        nb = fnv1a64_value(next.GetRotationState(), nb);
+        nb = fnv1a64_value(next.GetRowOffset(), nb);
+        nb = fnv1a64_value(next.GetColumnOffset(), nb);
+    }
     b.nextBlock = nb;
 
     // RNG
@@ -422,14 +431,15 @@ uint64_t SimGame::StateHash() const
     h = fnv1a64_value(curRot, h);
     h = fnv1a64_value(curRow, h);
     h = fnv1a64_value(curCol, h);
-    // Next block state
-    h = fnv1a64_value(nextBlock.id, h);
-    int nxtRot = nextBlock.GetRotationState();
-    int nxtRow = nextBlock.GetRowOffset();
-    int nxtCol = nextBlock.GetColumnOffset();
-    h = fnv1a64_value(nxtRot, h);
-    h = fnv1a64_value(nxtRow, h);
-    h = fnv1a64_value(nxtCol, h);
+    // Next preview queue state
+    h = fnv1a64_value(static_cast<int>(nextBlocks.size()), h);
+    for (const SimBlock& next : nextBlocks)
+    {
+        h = fnv1a64_value(next.id, h);
+        h = fnv1a64_value(next.GetRotationState(), h);
+        h = fnv1a64_value(next.GetRowOffset(), h);
+        h = fnv1a64_value(next.GetColumnOffset(), h);
+    }
     // RNG / score / flags / gravity
     uint64_t rngState = rng.getState();
     h = fnv1a64_value(rngState, h);

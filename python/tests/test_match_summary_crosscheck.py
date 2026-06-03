@@ -23,6 +23,8 @@ import pytest
 
 from netbot.framing import MsgType, build_frame, parse_frames
 
+TEST_RELAY_SECRET = "test-relay-secret"
+
 
 # ---- helpers (test_relay_meta_smoke.py 와 같은 패턴 — 코드 분리 우선) -----------
 
@@ -120,14 +122,19 @@ def _queue_accept(a: socket.socket, b: socket.socket) -> None:
     # 테스트의 _recv_until 은 첫 매치만 찾으므로 버퍼에 잔여 READY 가 남아도 무해.)
 
 
-def _spawn_meta(tmp_path):
+def _spawn_meta(tmp_path, relay_secret: str | None = TEST_RELAY_SECRET):
     bin_ = _find_bin("tetris_meta", "TETRIS_META_BIN")
     if not bin_:
         pytest.skip("tetris_meta binary missing")
     port = _free_port()
+    args = [str(bin_), "--db", str(tmp_path / "test.db"),
+            "--http", f"127.0.0.1:{port}"]
+    if relay_secret:
+        args += ["--relay-secret", relay_secret]
+    else:
+        args += ["--allow-public-matches"]
     proc = subprocess.Popen(
-        [str(bin_), "--db", str(tmp_path / "test.db"),
-         "--http", f"127.0.0.1:{port}"],
+        args,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if not _wait_listen(port, 5.0):
@@ -136,7 +143,7 @@ def _spawn_meta(tmp_path):
     return proc, f"http://127.0.0.1:{port}"
 
 
-def _spawn_relay(meta_url: str | None):
+def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SECRET):
     bin_ = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not bin_:
         pytest.skip("tetris_relay binary missing")
@@ -144,6 +151,8 @@ def _spawn_relay(meta_url: str | None):
     args = [str(bin_), "--port", str(port)]
     if meta_url:
         args += ["--meta", meta_url]
+        if relay_secret:
+            args += ["--meta-secret", relay_secret]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if not _wait_listen(port, 5.0):
         proc.kill()

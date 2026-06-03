@@ -1,10 +1,13 @@
-# Colab training extras (in addition to requirements.txt).
+# Colab training/export extras (in addition to requirements.txt).
 #
 # Add training-framework packages here as you decide on them. The shared
 # `common/` layer is framework-agnostic, so any of these can train against
 # `common.env.TetrisPlacementEnv` without code changes.
 -r requirements.txt
 pybind11>=2.11
+torch>=2.1
+gymnasium>=0.29
+onnx>=1.14
 
 # Pick whichever framework you want — none are required by default.
 # stable-baselines3>=2.2

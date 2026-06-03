@@ -104,6 +104,15 @@ def test_parse_frames_drops_bad_checksum() -> None:
     assert len(frame) == 0
 
 
+def test_parse_frames_drops_malformed_zero_length_frame() -> None:
+    # LEN=0 has no TYPE byte. C++ consumes that complete malformed frame and
+    # keeps parsing later bytes; Python should match that forgiving behavior.
+    stream = bytearray(struct.pack("<H", 0) + struct.pack("<I", 0))
+    out = parse_frames(stream)
+    assert out == []
+    assert len(stream) == 0
+
+
 # ---- Relay / matchmaking enum parity --------------------------------------
 def test_queue_join_and_match_found_round_trip() -> None:
     q = build_frame(MsgType.QUEUE_JOIN, b"")

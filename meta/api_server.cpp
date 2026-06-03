@@ -10,30 +10,84 @@
 #endif
 #include "httplib.h"
 
+#include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <mutex>
 #include <random>
 #include <string>
+#include <system_error>
+#include <unordered_map>
+#include <utility>
 
 namespace meta {
 
 namespace {
 
-// 32 hex chars 무작위 토큰 (16 바이트 엔트로피). std::random_device 는 플랫폼별
-// OS CSPRNG (Windows: CryptGenRandom, Linux: /dev/urandom) 을 래핑. 암호학적으로
-// 충분히 강함.
+// [보안] OS CSPRNG 에서 n 바이트의 무작위 데이터를 채운다.
+//   std::random_device 는 대부분의 타깃에서 OS CSPRNG 를 래핑하지만 일부
+//   구현(예: 구형 MinGW)에서는 결정적일 수 있다. 토큰/세션 비밀에는 OS
+//   엔트로피를 명시적으로 읽고, 실패 시에만 random_device 로 폴백한다.
+void fill_random(unsigned char* out, size_t n)
+{
+#ifndef _WIN32
+    // POSIX: /dev/urandom 에서 직접 읽는다(글리브C random_device 와 동일 소스지만 명시적).
+    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
+        size_t got = std::fread(out, 1, n, f);
+        std::fclose(f);
+        if (got == n) return;
+    }
+#endif
+    // 폴백(Windows 포함): random_device.
+    std::random_device rd;
+    size_t i = 0;
+    while (i < n) {
+        uint32_t x = rd();
+        size_t take = (n - i < 4) ? (n - i) : 4;
+        std::memcpy(out + i, &x, take);
+        i += take;
+    }
+}
+
+// 32 hex chars 무작위 토큰 (16 바이트 = 128비트 엔트로피).
 std::string gen_token()
 {
-    std::random_device rd;
-    std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFFu);
-
+    unsigned char raw[16];
+    fill_random(raw, sizeof(raw));
+    static const char hex[] = "0123456789abcdef";
     char buf[33];
-    for (int i = 0; i < 4; ++i) {
-        uint32_t x = dist(rd);
-        std::snprintf(buf + i * 8, 9, "%08x", x);
+    for (int i = 0; i < 16; ++i) {
+        buf[i * 2]     = hex[(raw[i] >> 4) & 0xF];
+        buf[i * 2 + 1] = hex[raw[i] & 0xF];
     }
     buf[32] = '\0';
     return std::string(buf, 32);
+}
+
+// [보안] 상수 시간 문자열 비교(타이밍 사이드채널 방지).
+//   내용에 따라 조기 종료/분기하지 않는다. 길이가 다르면 false.
+bool ct_equal(const std::string& a, const std::string& b)
+{
+    if (a.size() != b.size()) return false;
+    volatile unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    }
+    return diff == 0;
+}
+
+bool parse_int_param(const std::string& s, int& out)
+{
+    if (s.empty()) return false;
+    int value = 0;
+    auto* first = s.data();
+    auto* last = s.data() + s.size();
+    auto res = std::from_chars(first, last, value);
+    if (res.ec != std::errc{} || res.ptr != last) return false;
+    out = value;
+    return true;
 }
 
 // CORS + content-type 을 한 번에 세팅.
@@ -42,17 +96,44 @@ void set_json(httplib::Response& res, int status, const std::string& body)
     res.status = status;
     res.set_header("Access-Control-Allow-Origin",  "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.set_header("Access-Control-Allow-Headers", "Content-Type");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Secret");
     res.set_content(body, "application/json");
 }
 
 } // namespace
 
-ApiServer::ApiServer(Database& db) : db_(db) {}
+ApiServer::ApiServer(Database& db, std::string relay_secret)
+    : db_(db), relay_secret_(std::move(relay_secret)) {}
 
 bool ApiServer::listen(const std::string& host, int port)
 {
     httplib::Server svr;
+
+    // [보안] 요청 본문 상한 — 거대한 body 로 메모리를 소모시키는 플러딩 방지.
+    //   우리 엔드포인트의 정상 body 는 수백 바이트 수준이라 64KiB 면 충분.
+    svr.set_payload_max_length(64 * 1024);
+
+    // [보안] 간단한 per-IP 고정 윈도우 레이트 리밋(남용/DoS 완화).
+    //   1초 창에 IP 당 kMaxPerWindow 초과 요청은 429. 창 전환 시 맵을 비워
+    //   메모리 증가를 막는다(고정 윈도우라 경계에서 최대 2배 burst 허용 — 충분).
+    svr.set_pre_routing_handler(
+        [](const httplib::Request& req, httplib::Response& res) {
+            static std::mutex mu;
+            static std::unordered_map<std::string, int> hits;
+            static int64_t window = 0;
+            constexpr int kMaxPerWindow = 60;
+            const int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            std::lock_guard<std::mutex> lk(mu);
+            if (nowSec != window) { window = nowSec; hits.clear(); }
+            if (++hits[req.remote_addr] > kMaxPerWindow) {
+                res.status = 429;
+                res.set_header("Access-Control-Allow-Origin", "*");
+                res.set_content("{\"error\":\"rate_limited\"}", "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
 
     // ------- CORS preflight (브라우저 정적 페이지용) ------------------------
     svr.Options(R"(/v1/.*)",
@@ -60,7 +141,13 @@ bool ApiServer::listen(const std::string& host, int port)
             res.status = 204;
             res.set_header("Access-Control-Allow-Origin",  "*");
             res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            res.set_header("Access-Control-Allow-Headers", "Content-Type");
+            res.set_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Secret");
+        });
+
+    // ------- GET /healthz ---------------------------------------------------
+    svr.Get("/healthz",
+        [](const httplib::Request&, httplib::Response& res) {
+            set_json(res, 200, "{\"ok\":true}");
         });
 
     // ------- POST /v1/guest -------------------------------------------------
@@ -72,7 +159,8 @@ bool ApiServer::listen(const std::string& host, int port)
                 auto token = gen_token();
                 auto p = db_.registerGuest(token);
                 if (p) {
-                    set_json(res, 200, proto::guest_response(p->id, p->token, p->elo));
+                    set_json(res, 200, proto::guest_response(
+                        p->id, p->token, p->elo, p->bp, p->selected_icon_id));
                     std::fprintf(stderr, "[meta] guest player_id=%lld\n",
                                  static_cast<long long>(p->id));
                     return;
@@ -95,12 +183,87 @@ bool ApiServer::listen(const std::string& host, int port)
                 return;
             }
             set_json(res, 200,
-                proto::auth_response(p->id, p->username, p->elo));
+                proto::auth_response(p->id, p->username, p->elo,
+                                     p->bp, p->selected_icon_id));
+        });
+
+    // ------- GET /v1/icons/catalog -----------------------------------------
+    svr.Get("/v1/icons/catalog",
+        [this](const httplib::Request&, httplib::Response& res) {
+            auto icons = db_.iconCatalog();
+            std::vector<proto::IconRow> out;
+            out.reserve(icons.size());
+            for (const auto& icon : icons) {
+                out.push_back({icon.id, icon.name, icon.price_bp, icon.default_owned});
+            }
+            set_json(res, 200, proto::icon_catalog_response(out));
+        });
+
+    // ------- POST /v1/icons/buy --------------------------------------------
+    svr.Post("/v1/icons/buy",
+        [this](const httplib::Request& req, httplib::Response& res) {
+            std::string token = proto::find_string(req.body, "token");
+            std::string icon  = proto::find_string(req.body, "icon_id");
+            if (token.empty() || icon.empty()) {
+                set_json(res, 400, proto::error_json("bad_request", "missing token or icon_id"));
+                return;
+            }
+            std::optional<Player> p;
+            switch (db_.purchaseIcon(token, icon, p)) {
+            case IconPurchaseResult::Ok:
+                set_json(res, 200, proto::auth_response(
+                    p->id, p->username, p->elo, p->bp, p->selected_icon_id));
+                return;
+            case IconPurchaseResult::UnknownToken:
+                set_json(res, 404, proto::error_json("unknown_token")); return;
+            case IconPurchaseResult::InvalidIcon:
+                set_json(res, 400, proto::error_json("invalid_icon")); return;
+            case IconPurchaseResult::AlreadyOwned:
+                set_json(res, 409, proto::error_json("already_owned")); return;
+            case IconPurchaseResult::InsufficientBp:
+                set_json(res, 402, proto::error_json("insufficient_bp")); return;
+            case IconPurchaseResult::DbError:
+            default:
+                set_json(res, 500, proto::error_json("db_error")); return;
+            }
+        });
+
+    // ------- POST /v1/icons/select -----------------------------------------
+    svr.Post("/v1/icons/select",
+        [this](const httplib::Request& req, httplib::Response& res) {
+            std::string token = proto::find_string(req.body, "token");
+            std::string icon  = proto::find_string(req.body, "icon_id");
+            if (token.empty() || icon.empty()) {
+                set_json(res, 400, proto::error_json("bad_request", "missing token or icon_id"));
+                return;
+            }
+            std::optional<Player> p;
+            switch (db_.selectIcon(token, icon, p)) {
+            case IconSelectResult::Ok:
+                set_json(res, 200, proto::auth_response(
+                    p->id, p->username, p->elo, p->bp, p->selected_icon_id));
+                return;
+            case IconSelectResult::UnknownToken:
+                set_json(res, 404, proto::error_json("unknown_token")); return;
+            case IconSelectResult::InvalidIcon:
+                set_json(res, 400, proto::error_json("invalid_icon")); return;
+            case IconSelectResult::NotOwned:
+                set_json(res, 403, proto::error_json("not_owned")); return;
+            case IconSelectResult::DbError:
+            default:
+                set_json(res, 500, proto::error_json("db_error")); return;
+            }
         });
 
     // ------- POST /v1/matches ----------------------------------------------
     svr.Post("/v1/matches",
         [this](const httplib::Request& req, httplib::Response& res) {
+            if (!relay_secret_.empty() &&
+                !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
+                set_json(res, 403, proto::error_json("forbidden", "relay secret required"));
+                return;
+            }
+
             auto pa = proto::find_int(req.body, "player_a");
             auto pb = proto::find_int(req.body, "player_b");
             auto wn = proto::find_int(req.body, "winner");   // null 허용
@@ -165,9 +328,10 @@ bool ApiServer::listen(const std::string& host, int port)
         [this](const httplib::Request& req, httplib::Response& res) {
             int limit = 20;
             if (req.has_param("limit")) {
-                try {
-                    limit = std::stoi(req.get_param_value("limit"));
-                } catch (...) { limit = 20; }
+                int parsed = 20;
+                if (parse_int_param(req.get_param_value("limit"), parsed)) {
+                    limit = parsed;
+                }
             }
             auto rows = db_.leaderboard(limit);
 

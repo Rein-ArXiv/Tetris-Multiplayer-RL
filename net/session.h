@@ -51,6 +51,8 @@ struct SeedParams {
     uint32_t start_tick{120};
     uint8_t input_delay{2};
     Role role{Role::Host};
+    std::string local_icon_id{"default"};
+    std::string remote_icon_id{"default"};
 };
 
 class Session {
@@ -191,6 +193,12 @@ private:
 
     TcpSocket sock{};
     TcpSocket listenSock{};
+    // sock/listenSock 는 shared_ptr 멤버다. 워커 스레드(roomThread/queueThread/
+    // acceptThread)의 대입(publish)·해제와 메인 스레드(Close/QueueCancel/
+    // QueueDecline/RoomLeave)의 읽기가 같은 인스턴스에 동시 접근하면 shared_ptr
+    // data race 가 된다. 이 mutex 로 그 접근들을 직렬화한다. (ioThread 의 hot-path
+    // 읽기는 publish 이후에만 시작되고 join 전까지만 살아 있어 잠금 불필요.)
+    mutable std::mutex sockMu_;
 
     std::thread th;
     std::thread ath;
@@ -266,7 +274,7 @@ private:
     //   lastHeartbeatMs_     : heartbeat rate limit (16ms = 60Hz).
     std::atomic<int64_t>  lastMainActivityMs_{0};
     std::atomic<uint32_t> heartbeatTickEnd_{0};
-    int64_t               lastHeartbeatMs_{0};  // ioThread 전용
+    std::atomic<int64_t>  lastHeartbeatMs_{0};
 
     // 채팅 수신 큐 — io 스레드가 채우고 메인 스레드가 PullChat 으로 비움.
     std::mutex               chatMu_;

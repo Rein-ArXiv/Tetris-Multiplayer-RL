@@ -66,6 +66,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.venv/
 
 # 리플레이 출력
 out/replay.txt
@@ -74,5 +75,8 @@ out/replay.txt
 *.md
 !README.md
 !**/README*.md
+!ARCHITECTURE.md
+!GUIDE.md
+!docs/**/*.md
 docs_backup_*/
 .claude/

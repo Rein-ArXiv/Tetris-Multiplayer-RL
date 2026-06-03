@@ -40,13 +40,15 @@ public:
     // player_id=0 은 unranked (meta 연동 안 됨). 매치 성립 시 startPump 에 전달.
     void handleCreate(net::TcpSocket sock, uint32_t conn_id,
                       int64_t player_id, int elo,
-                      const std::string& username, const std::string& token);
+                      const std::string& username, const std::string& token,
+                      const std::string& selected_icon_id);
 
     // playerConnThread 에서 ROOM_JOIN 수신 직후 호출.
     // 실패(notfound/full) 시 ROOM_INFO 회신 후 소켓 닫고 바로 리턴.
     void handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
                     int64_t player_id, int elo,
-                    const std::string& username, const std::string& token);
+                    const std::string& username, const std::string& token,
+                    const std::string& selected_icon_id);
 
     // 모든 roomLoop_ 를 종료시킨다.
     void shutdown();
@@ -71,10 +73,12 @@ private:
         int            hostElo       = 1200;
         std::string    hostUsername;
         std::string    hostToken;
+        std::string    hostSelectedIconId{"default"};
         int64_t        guestPlayerId = 0;
         int            guestElo      = 1200;
         std::string    guestUsername;
         std::string    guestToken;
+        std::string    guestSelectedIconId{"default"};
     };
 
     std::string generateCode_();   // mu 잡은 상태에서 호출

@@ -1,7 +1,7 @@
 // renderer/image.cpp — PNG/JPG 로더 + 텍스처 쿼드 렌더
 //
 // Win32 경로에서는 GDI+ (gdiplus.lib) 가 PNG/JPG/BMP 디코딩을 담당한다.
-// 다른 플랫폼에서는 추후 stb_image 로 대체될 수 있으나 현재 구현은 Win32 전용.
+// 다른 플랫폼(Linux/macOS)에서는 third_party/stb_image.h 가 PNG/JPG 등을 디코딩한다.
 
 #include "image.h"
 #include "shaders.h"
@@ -24,6 +24,8 @@
   #pragma comment(lib, "gdiplus.lib")
 #else
   #include <GL/gl.h>
+  #define STB_IMAGE_IMPLEMENTATION
+  #include "../third_party/stb_image.h"
 #endif
 
 // ─── 외부 GL 심볼 (win32.cpp 에서 wglGetProcAddress 로 채움) ─────────────────
@@ -46,7 +48,7 @@ extern void   (APIENTRY *glBindBuffer)(GLenum, GLuint);
 extern void   (APIENTRY *glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
 extern void   (APIENTRY *glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
 extern void   (APIENTRY *glEnableVertexAttribArray)(GLuint);
-extern void   (APIENTRY *glActiveTexture)(GLenum);
+extern void   (APIENTRY *glActiveTextureProc)(GLenum);
 extern void   (APIENTRY *glDeleteVertexArrays)(GLsizei, const GLuint*);
 extern void   (APIENTRY *glDeleteBuffers)(GLsizei, const GLuint*);
 extern void   (APIENTRY *glDeleteProgram)(GLuint);
@@ -168,9 +170,17 @@ static bool decode_image_win32(const char* path, std::vector<uint8_t>& outPixels
     bmp.UnlockBits(&bd);
     return true;
 #else
-    (void)path; (void)outPixels; (void)outW; (void)outH;
-    fprintf(stderr, "[IMG] image loading unsupported on this platform\n");
-    return false;
+    // 비-Win32: stb_image 로 디코드 (강제 RGBA8 row-major).
+    int n = 0;
+    unsigned char* data = stbi_load(path, &outW, &outH, &n, 4);
+    if (!data) {
+        fprintf(stderr, "[IMG] stbi_load failed: %s (%s)\n", path, stbi_failure_reason());
+        return false;
+    }
+    if (outW <= 0 || outH <= 0) { stbi_image_free(data); return false; }
+    outPixels.assign(data, data + (size_t)outW * outH * 4);
+    stbi_image_free(data);
+    return true;
 #endif
 }
 
@@ -266,13 +276,9 @@ void image_shutdown()
 }
 
 // ─── 로드/해제 ───────────────────────────────────────────────────────────────
-ImageHandle image_load(const char* path)
+static ImageHandle image_create_texture_from_rgba(const uint8_t* pixels, int w, int h)
 {
-    if (!path || !*path) return 0;
-
-    std::vector<uint8_t> pixels;
-    int w = 0, h = 0;
-    if (!decode_image_win32(path, pixels, w, h)) return 0;
+    if (!pixels || w <= 0 || h <= 0) return 0;
 
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -283,7 +289,7 @@ ImageHandle image_load(const char* path)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glBindTexture(GL_TEXTURE_2D, 0);
 
     // 빈 슬롯 재사용 또는 push
@@ -295,6 +301,21 @@ ImageHandle image_load(const char* path)
     }
     s_images.push_back({true, tex, w, h});
     return (ImageHandle)(s_images.size() - 1);
+}
+
+ImageHandle image_load(const char* path)
+{
+    if (!path || !*path) return 0;
+
+    std::vector<uint8_t> pixels;
+    int w = 0, h = 0;
+    if (!decode_image_win32(path, pixels, w, h)) return 0;
+    return image_create_texture_from_rgba(pixels.data(), w, h);
+}
+
+ImageHandle image_create_rgba(const uint8_t* pixels, int w, int h)
+{
+    return image_create_texture_from_rgba(pixels, w, h);
 }
 
 void image_unload(ImageHandle h)
@@ -345,7 +366,7 @@ static void draw_image_impl(ImageHandle h, int x, int y, int w, int ht,
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    if (glActiveTexture) glActiveTexture(GL_TEXTURE0);
+    if (glActiveTextureProc) glActiveTextureProc(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s_images[h].tex);
 
     glBindVertexArray(s_sprite_vao);

@@ -10,7 +10,7 @@
 // 네트워크 실패/서버 에러는 std::nullopt 로 통합 처리 — 호출자가 장애 정책
 // (매치 거부 / result 미반영) 적용. 에러 원인은 stderr 로 간단 로그만.
 //
-// 구현: third_party/httplib.h 의 httplib::Client 위에 thin wrapper.
+// 구현: third_party/httplib.h 의 httplib::Client/SSLClient 위에 thin wrapper.
 
 #include <cstdint>
 #include <optional>
@@ -23,12 +23,16 @@ struct GuestInfo {
     int64_t     player_id;
     std::string token;
     int         elo;
+    int         bp;
+    std::string selected_icon_id;
 };
 
 struct AuthInfo {
     int64_t     player_id;
     std::string username;   // 비어 있으면 username=null
     int         elo;
+    int         bp;
+    std::string selected_icon_id;
 };
 
 struct MatchDelta {
@@ -46,9 +50,11 @@ struct MatchResult {
 // ---- 메타 서버 클라이언트 --------------------------------------------------
 class MetaClient {
 public:
-    // base_url 형식: "http://host:port" 또는 "http://host" (포트 생략 시 80).
+    // base_url 형식: "http://host:port", "https://host" 등.
+    // HTTPS 는 CMake 가 OpenSSL 을 찾은 빌드에서만 valid() == true.
     // 잘못된 URL 이면 valid() == false. 이후 모든 호출은 nullopt 반환.
-    explicit MetaClient(const std::string& base_url);
+    explicit MetaClient(const std::string& base_url,
+                        std::string relay_secret = {});
 
     bool valid() const { return valid_; }
     const std::string& baseUrl() const { return base_url_; }
@@ -61,13 +67,19 @@ public:
         NetworkError,   // 연결 실패 / 타임아웃 / 그 외 — 토큰은 유지하고 다음에 재시도
     };
 
-    // 3개 엔드포인트. timeout_s: 네트워크 전체 deadline. 계획문서의 기본값과 동일.
+    // 주요 엔드포인트. timeout_s: 네트워크 전체 deadline. 계획문서의 기본값과 동일.
     std::optional<GuestInfo>  request_guest  (int timeout_s = 5);
     // 기존 호출 호환: outcome 무시 시 nullopt 가 unknown 또는 network 실패.
     // 호출부가 회복 정책을 적용하려면 outcome 인자를 채워서 호출.
     std::optional<AuthInfo>   verify_token   (const std::string& token,
                                               int timeout_s = 3,
                                               VerifyOutcome* out_outcome = nullptr);
+    std::optional<AuthInfo>   purchase_icon  (const std::string& token,
+                                              const std::string& icon_id,
+                                              int timeout_s = 5);
+    std::optional<AuthInfo>   select_icon    (const std::string& token,
+                                              const std::string& icon_id,
+                                              int timeout_s = 5);
     std::optional<MatchResult> post_match    (int64_t player_a, int64_t player_b,
                                               std::optional<int64_t> winner,
                                               int score_a, int score_b,
@@ -79,7 +91,9 @@ private:
     std::string base_url_;
     std::string host_;
     int         port_ = 80;
+    bool        https_ = false;
     bool        valid_ = false;
+    std::string relay_secret_;
 };
 
 // ---- 클라이언트 토큰 저장 (플랫폼별 user-data 디렉토리) --------------------

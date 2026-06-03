@@ -159,6 +159,10 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
         if buf_len - offset < need:
             break
 
+        if length < TYPE_FIELD_BYTES:
+            offset += need
+            continue
+
         msg_type_byte = stream_buf[offset + LEN_FIELD_BYTES]
         payload_start = offset + LEN_FIELD_BYTES + TYPE_FIELD_BYTES
         payload_len = length - TYPE_FIELD_BYTES

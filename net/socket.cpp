@@ -1,7 +1,9 @@
 #include "socket.h"
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <thread>
 #include <chrono>
 #include <iostream>
@@ -31,6 +33,26 @@ namespace net {
 
 static bool g_inited = false;
 
+// [NET] 실제 fd 를 닫는다(플랫폼별). 오직 owning 핸들의 deleter 에서만 호출.
+static void close_fd(int fd) {
+    if (fd < 0) return;
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    ::close(fd);
+#endif
+}
+
+// [NET] 새로 생성된 fd 를 참조 카운트 소유 핸들로 감싼다.
+//   마지막 복사본이 사라질 때 deleter 가 close_fd 로 정확히 한 번 닫는다.
+static TcpSocket make_owned(int fd) {
+    TcpSocket s;
+    s.fdh = std::shared_ptr<int>(new int(fd), [](int* p) {
+        if (p) { close_fd(*p); delete p; }
+    });
+    return s;
+}
+
 // [NET] 네트워킹 초기화(Windows 전용)
 bool net_init() {
     if (g_inited) return true;
@@ -40,6 +62,9 @@ bool net_init() {
     g_inited = (r == 0);
     return g_inited;
 #else
+    // POSIX: writing to a closed peer can raise SIGPIPE and terminate the whole
+    // relay/client process before send() returns EPIPE. Treat it as an I/O error.
+    std::signal(SIGPIPE, SIG_IGN);
     g_inited = true;
     return true;
 #endif
@@ -93,58 +118,45 @@ static int set_nodelay(int fd) {
 
 // [NET] 포트에서 연결 대기 소켓을 생성합니다.
 TcpSocket tcp_listen(uint16_t port, int backlog) {
-    TcpSocket s{};
-    if (!net_init()) return s;
+    if (!net_init()) return TcpSocket{};
     int fd = (int)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd < 0) return s;
+    if (fd < 0) return TcpSocket{};
     set_reuse(fd);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (::bind(fd, (sockaddr*)&addr, sizeof(addr)) != 0) {
-#ifdef _WIN32
-        closesocket(fd);
-#else
-        close(fd);
-#endif
-        return s;
+        close_fd(fd);
+        return TcpSocket{};
     }
     if (::listen(fd, backlog) != 0) {
-#ifdef _WIN32
-        closesocket(fd);
-#else
-        close(fd);
-#endif
-        return s;
+        close_fd(fd);
+        return TcpSocket{};
     }
-    s.fd = fd;
-    return s;
+    return make_owned(fd);
 }
 
 // [NET] 대기 소켓에서 1개 연결을 수락합니다.
 TcpSocket tcp_accept(const TcpSocket& server) {
-    TcpSocket c{};
-    if (!server.valid()) return c;
+    if (!server.valid()) return TcpSocket{};
     sockaddr_in addr{}; socklen_t alen = sizeof(addr);
-    int fd = (int)::accept(server.fd, (sockaddr*)&addr, &alen);
-    if (fd < 0) return c;
+    int fd = (int)::accept(server.fd(), (sockaddr*)&addr, &alen);
+    if (fd < 0) return TcpSocket{};
     // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
-    c.fd = fd;
-    return c;
+    return make_owned(fd);
 }
 
 // [NET] 원격 호스트로 TCP 연결을 시도합니다.
 TcpSocket tcp_connect(const std::string& host, uint16_t port) {
-    TcpSocket s{};
-    if (!net_init()) return s;
+    if (!net_init()) return TcpSocket{};
 
     addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr; char portStr[16];
     std::snprintf(portStr, sizeof(portStr), "%u", (unsigned)port);
-    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0) return s;
+    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0) return TcpSocket{};
     int fd = -1;
     for (addrinfo* p = res; p; p = p->ai_next) {
         fd = (int)::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
@@ -152,51 +164,64 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
         if (::connect(fd, p->ai_addr, (int)p->ai_addrlen) == 0) {
             break;
         }
-#ifdef _WIN32
-        closesocket(fd);
-#else
-        close(fd);
-#endif
+        close_fd(fd);
         fd = -1;
     }
     freeaddrinfo(res);
-    if (fd < 0) return s;
+    if (fd < 0) return TcpSocket{};
     // 연결된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
-    s.fd = fd;
-    return s;
+    return make_owned(fd);
 }
 
 // [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
+    const int fd = s.fd();
+    if (fd < 0) return false;
     const uint8_t* p = static_cast<const uint8_t*>(data);
     size_t sent = 0;
+    constexpr auto kBlockedTimeout = std::chrono::seconds(5);
+    std::chrono::steady_clock::time_point blockedSince{};
     while (sent < len) {
 #ifdef _WIN32
-        int n = ::send(s.fd, (const char*)(p + sent), (int)(len - sent), 0);
+        int n = ::send(fd, (const char*)(p + sent), (int)(len - sent), 0);
         if (n < 0) {
             int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK) {
+            if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
+                if (err == WSAEWOULDBLOCK) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
+                    if (now - blockedSince >= kBlockedTimeout) return false;
+                }
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
         if (n == 0) return false; // 연결 종료
 #else
-        ssize_t n = ::send(s.fd, (const char*)(p + sent), (size_t)(len - sent), 0);
+        int flags = 0;
+#ifdef MSG_NOSIGNAL
+        flags |= MSG_NOSIGNAL;
+#endif
+        ssize_t n = ::send(fd, (const char*)(p + sent), (size_t)(len - sent), flags);
         if (n < 0) {
+            if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                auto now = std::chrono::steady_clock::now();
+                if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
+                if (now - blockedSince >= kBlockedTimeout) return false;
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
         if (n == 0) return false; // 연결 종료
 #endif
+        blockedSince = {};
         sent += (size_t)n;
     }
     return true;
@@ -204,9 +229,11 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
 
 // [NET] 수신 가능한 만큼 한 번 읽어 누적 버퍼에 추가합니다.
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
+    const int fd = s.fd();
+    if (fd < 0) return false;
     uint8_t tmp[4096];
 #ifdef _WIN32
-    int n = ::recv(s.fd, (char*)tmp, (int)sizeof(tmp), 0);
+    int n = ::recv(fd, (char*)tmp, (int)sizeof(tmp), 0);
     if (n < 0) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
@@ -221,7 +248,7 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
         return false;
     }
 #else
-    ssize_t n = ::recv(s.fd, tmp, sizeof(tmp), 0);
+    ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // 논블로킹에서 데이터 없음 - 정상
@@ -239,15 +266,32 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
     return true;
 }
 
-// [NET] 소켓 종료
+// [NET] 소켓 종료.
+//   ::shutdown 으로 같은 fd 를 폴링/대기 중인 다른 복사본의 recv 를 EOF 로
+//   깨워 루프를 빠져나가게 한다. 실제 ::close 는 마지막 TcpSocket 복사본이
+//   소멸할 때 deleter 에서 한 번만 일어난다(이중 close / fd 재사용 경합 방지).
+//   shutdown 은 일반 스레드에서 반복 호출해도 무해한 종료 신호로만 사용한다.
+//   TcpSocket 은 shared_ptr 를 읽으므로 tcp_close() 를 signal handler 에서 직접
+//   호출하면 안 된다.
+//   여기서 fdh 를 reset 하지 않는 이유: 같은 인스턴스를 다른 스레드가 읽고 있을
+//   수 있어(예: Session::sock 을 ioThread 가 read, 메인이 Close) reset 은
+//   shared_ptr 인스턴스에 대한 경합이 된다. 참조 해제는 RAII(소유 스레드의
+//   재대입/소멸)에 맡긴다.
 void tcp_close(TcpSocket& s) {
-    if (!s.valid()) return;
+    if (!s.fdh) return;
+    int fd = *s.fdh;
+    if (fd >= 0) {
 #ifdef _WIN32
-    closesocket(s.fd);
+        ::shutdown(fd, SD_BOTH);
 #else
-    close(s.fd);
+        ::shutdown(fd, SHUT_RDWR);
 #endif
-    s.fd = -1;
+    }
+}
+
+// [NET] 소켓을 논블로킹 모드로 전환(public 래퍼).
+void tcp_set_nonblocking(const TcpSocket& s) {
+    if (s.valid()) set_nonblocking(s.fd());
 }
 
 std::string get_local_ip() {
@@ -260,7 +304,7 @@ std::string get_local_ip() {
         hints.ai_family = AF_INET;  // IPv4만
         hints.ai_socktype = SOCK_STREAM;
 
-        if (getaddrinfo(hostname, nullptr, &hints, &info) == 0) {
+        if (getaddrinfo(hostname, nullptr, &hints, &info) == 0 && info != nullptr) {
             struct sockaddr_in* addr = (struct sockaddr_in*)info->ai_addr;
             result = inet_ntoa(addr->sin_addr);
             freeaddrinfo(info);

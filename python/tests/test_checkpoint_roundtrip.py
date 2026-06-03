@@ -19,7 +19,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from common.checkpoint import (
     CHECKPOINT_META_KEY,

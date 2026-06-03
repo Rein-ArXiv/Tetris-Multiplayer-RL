@@ -1,0 +1,17 @@
+# Cloudflare Tunnel 뒤의 local Caddy 예시.
+#
+# /srv/tetris/www 에 web/ranking/index.html 을 배치한다. public TLS 는 tunnel 이
+# 담당하므로 Caddy 는 loopback HTTP 만 듣는다.
+127.0.0.1:8088 {
+    encode zstd gzip
+
+    root * /srv/tetris/www
+
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle {
+        file_server
+    }
+}

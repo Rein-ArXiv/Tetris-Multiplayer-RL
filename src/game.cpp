@@ -9,6 +9,11 @@
 #include "../renderer/renderer.h"
 #include <climits>   // INT_MAX
 
+namespace {
+AudioHandle sharedMusic = 0;
+int sharedMusicUsers = 0;
+}
+
 Game::Game(uint64_t seed)
     : sim(seed),
       gameOver(sim.gameOver),
@@ -17,26 +22,43 @@ Game::Game(uint64_t seed)
     cellColors = GetCellColors();
 
     // 오디오 초기화 (참조 카운팅 -- 멀티플레이에서 두 번 호출해도 안전)
+    audioInitCalled = true;
     if (audio_init())
     {
         sndRotate  = audio_load_sound("Sounds/rotate.mp3");
         sndClear   = audio_load_sound("Sounds/clear.mp3");
         sndDrop    = audio_load_sound("Sounds/drop.mp3");
         sndGarbage = audio_load_sound("Sounds/garbage.mp3");
-        sndMusic   = audio_load_sound("Sounds/music.mp3");
-        audio_play_music(sndMusic);
+        if (sharedMusic == 0) {
+            sharedMusic = audio_load_sound("Sounds/music.mp3");
+        }
+        if (sharedMusic != 0) {
+            ++sharedMusicUsers;
+            musicUser = true;
+            audio_play_music(sharedMusic);
+        }
     }
 }
 
 Game::~Game()
 {
-    audio_stop_music();
+    if (musicUser) {
+        if (sharedMusicUsers > 0) --sharedMusicUsers;
+        if (sharedMusicUsers == 0 && sharedMusic != 0) {
+            audio_stop_music();
+            audio_unload_sound(sharedMusic);
+            sharedMusic = 0;
+        }
+        musicUser = false;
+    }
     audio_unload_sound(sndRotate);
     audio_unload_sound(sndClear);
     audio_unload_sound(sndDrop);
     audio_unload_sound(sndGarbage);
-    audio_unload_sound(sndMusic);
-    audio_shutdown();  // 참조 카운팅: 마지막 Game 소멸 시만 실제 해제
+    if (audioInitCalled) {
+        audio_shutdown();  // 참조 카운팅: 마지막 Game 소멸 시만 실제 해제
+        audioInitCalled = false;
+    }
 }
 
 void Game::SubmitInput(uint8_t inputMask)
@@ -155,11 +177,27 @@ void Game::DrawNextAt(int offsetX, int offsetY)
 
 void Game::DrawNextMini(int offsetX, int offsetY, int cellSize)
 {
-    const SimBlock& next = sim.NextBlock();
+    DrawBlockMini(sim.NextBlock(), offsetX, offsetY, cellSize);
+}
+
+void Game::DrawNextQueueMini(int offsetX, int offsetY, int cellSize,
+                             int maxCount, int ySpacing)
+{
+    const auto& queue = sim.NextBlocks();
+    int count = static_cast<int>(queue.size());
+    if (count > maxCount) count = maxCount;
+    for (int i = 0; i < count; ++i)
+    {
+        DrawBlockMini(queue[i], offsetX, offsetY + i * ySpacing, cellSize);
+    }
+}
+
+void Game::DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const
+{
     // SimBlock::GetCellPositions 는 블록의 로컬 좌표(0-based bounding box)를 반환.
     // cellSize 를 파라미터로 받아 축소 그리기. DrawBlock 과 달리 색상 팔레트를
     // 직접 인덱싱하고 전체 크기를 조절한다.
-    std::vector<Position> tiles = next.GetCellPositions();
+    std::vector<Position> tiles = block.GetCellPositions();
     // 블록을 bounding box 기준으로 정규화 — next 의 row/column 가 스폰 위치 기준이라
     // 그대로 그리면 오른쪽 하단으로 치우침. min row/col 를 빼서 (0,0) 에서 시작하게.
     int minRow = INT_MAX, minCol = INT_MAX;
@@ -173,6 +211,6 @@ void Game::DrawNextMini(int offsetX, int offsetY, int cellSize)
             (p.column - minCol) * cellSize + offsetX,
             (p.row    - minRow) * cellSize + offsetY,
             cellSize - 1, cellSize - 1,
-            cellColors[next.id]);
+            cellColors[block.id]);
     }
 }

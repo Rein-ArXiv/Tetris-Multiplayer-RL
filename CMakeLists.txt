@@ -32,6 +32,22 @@ option(TETRIS_BUILD_META  "Build the tetris_meta HTTP+SQLite metadata server" OF
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 실행 시 모델 로드가
 # 항상 실패 → 메뉴에서 Single vs Bot 이 회색 비활성으로 표시된다.
 option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
+option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is available" ON)
+option(TETRIS_ENABLE_DEBUG_UI "Enable in-game debug overlays in the game client" OFF)
+option(TETRIS_ENABLE_NET_TRACE "Enable verbose game-client net/session trace logs" OFF)
+set(TETRIS_DEFAULT_RELAY_ENDPOINT "127.0.0.1:7777" CACHE STRING
+    "Default relay endpoint embedded in the game client menu")
+set(TETRIS_DEFAULT_META_URL "" CACHE STRING
+    "Default tetris_meta base URL embedded in the game client")
+
+if (TETRIS_ENABLE_HTTPS)
+    find_package(OpenSSL QUIET)
+    if (OpenSSL_FOUND)
+        message(STATUS "OpenSSL found: HTTPS meta client enabled")
+    else()
+        message(WARNING "OpenSSL not found: https:// meta URLs will be rejected at runtime")
+    endif()
+endif()
 
 # TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
 # Default ON on non-Windows so macOS/Linux users get it automatically.
@@ -165,6 +181,21 @@ if (TETRIS_BUILD_GAME)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()
+    endif()
+
+    target_compile_definitions(tetris PRIVATE
+        TETRIS_DEFAULT_RELAY_ENDPOINT="${TETRIS_DEFAULT_RELAY_ENDPOINT}"
+        TETRIS_DEFAULT_META_URL="${TETRIS_DEFAULT_META_URL}")
+    if (TETRIS_ENABLE_DEBUG_UI)
+        target_compile_definitions(tetris PRIVATE TETRIS_ENABLE_DEBUG_UI=1)
+    endif()
+    if (TETRIS_ENABLE_NET_TRACE)
+        target_compile_definitions(tetris PRIVATE TETRIS_ENABLE_NET_TRACE=1)
+    endif()
+
+    if (TETRIS_ENABLE_HTTPS AND OpenSSL_FOUND)
+        target_compile_definitions(tetris PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+        target_link_libraries(tetris PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     endif()
 
     # ------------------------------------------------------------------------
@@ -324,6 +355,10 @@ if (TETRIS_BUILD_RELAY)
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_relay PRIVATE Threads::Threads)
     endif()
+    if (TETRIS_ENABLE_HTTPS AND OpenSSL_FOUND)
+        target_compile_definitions(tetris_relay PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+        target_link_libraries(tetris_relay PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    endif()
     # Section G: Linux 배포 번들용 rpath
     if (UNIX AND NOT APPLE)
         set_target_properties(tetris_relay PROPERTIES
@@ -361,11 +396,18 @@ if (TETRIS_BUILD_META)
             "(https://github.com/yhirose/cpp-httplib).")
     endif()
 
+    set(TETRIS_SQLITE3_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite3.c")
+    if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+        set_source_files_properties("${TETRIS_SQLITE3_SOURCE}" PROPERTIES COMPILE_OPTIONS "-w")
+    elseif (MSVC)
+        set_source_files_properties("${TETRIS_SQLITE3_SOURCE}" PROPERTIES COMPILE_OPTIONS "/w")
+    endif()
+
     add_executable(tetris_meta
         meta/main.cpp
         meta/database.cpp
         meta/api_server.cpp
-        third_party/sqlite3.c
+        ${TETRIS_SQLITE3_SOURCE}
         meta/database.h
         meta/api_server.h
         meta/elo.h

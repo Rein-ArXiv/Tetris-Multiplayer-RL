@@ -76,7 +76,7 @@ PFNGLBINDBUFFERPROC              glBindBuffer              = nullptr;
 PFNGLBUFFERDATAPROC              glBufferData              = nullptr;
 PFNGLVERTEXATTRIBPOINTERPROC     glVertexAttribPointer     = nullptr;
 PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray = nullptr;
-PFNGLACTIVETEXTUREPROC           glActiveTexture           = nullptr;
+PFNGLACTIVETEXTUREPROC           glActiveTextureProc       = nullptr;
 PFNGLGETSHADERIVPROC             glGetShaderiv             = nullptr;
 PFNGLGETSHADERINFOLOGPROC        glGetShaderInfoLog        = nullptr;
 PFNGLGETPROGRAMIVPROC            glGetProgramiv            = nullptr;
@@ -121,7 +121,8 @@ static void gl_load_functions()
     LOAD_GL(PFNGLDELETESHADERPROC,            glDeleteShader)
     LOAD_GL(PFNGLUNIFORM1IPROC,               glUniform1i)
     LOAD_GL(PFNGLUNIFORM1FPROC,               glUniform1f)
-    LOAD_GL(PFNGLACTIVETEXTUREPROC,           glActiveTexture)
+    glActiveTextureProc = (PFNGLACTIVETEXTUREPROC)wglGetProcAddress("glActiveTexture");
+    if (!glActiveTextureProc) fprintf(stderr, "[GL] wglGetProcAddress failed: glActiveTexture\n");
     LOAD_GL(PFNGLGETSHADERIVPROC,             glGetShaderiv)
     LOAD_GL(PFNGLGETSHADERINFOLOGPROC,        glGetShaderInfoLog)
     LOAD_GL(PFNGLGETPROGRAMIVPROC,            glGetProgramiv)

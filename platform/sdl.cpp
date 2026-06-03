@@ -191,6 +191,8 @@ static int sdl_to_vk(SDL_Keycode k)
     case SDLK_t:        return PKEY_T;
     case SDLK_y:        return PKEY_Y;
     case SDLK_n:        return PKEY_N;
+    case SDLK_LEFTBRACKET:  return PKEY_LBRACKET;
+    case SDLK_RIGHTBRACKET: return PKEY_RBRACKET;
     case SDLK_F5:       return PKEY_F5;
     case SDLK_F6:       return PKEY_F6;
     default: return -1;

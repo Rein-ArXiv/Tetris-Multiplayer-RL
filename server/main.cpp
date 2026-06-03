@@ -9,7 +9,7 @@
 //
 // 프로토콜(net/framing.h):
 //   C→S QUEUE_JOIN   (10) : [tok_len:1][token:N]
-//   S→C MATCH_FOUND  (12) : [role:1][seed:8 LE][my_icon][peer_icon]
+//   S→C MATCH_FOUND  (12) : [role:1][seed:8 LE][my_icon_len:1][my_icon:N][peer_icon_len:1][peer_icon:N]
 //   (이후 바이트는 투명 포워딩 — SEED/INPUT/HASH/GAME_OVER_CHOICE 그대로 통과)
 
 #include "matchmaker.h"

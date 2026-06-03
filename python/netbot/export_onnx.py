@@ -6,13 +6,13 @@ needs the exported ONNX file and the ONNX Runtime CPU bundle.
 
 Input/output names are load-bearing: ``bot/bot_onnx.cpp`` looks them up by
 string. If you rename one here, the C++ side must change in lockstep (and the
-existing ``model/policy.onnx`` bundles must be re-exported).
+existing ``model/*.onnx`` / ``model/bots/*.onnx`` bundles must be re-exported).
 
 Usage::
 
     uv run --directory python python -m netbot.export_onnx \\
         checkpoints/run42/step_2000000.pt \\
-        ../model/policy.onnx
+        ../model/bots/run42.onnx
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ckpt", help="path to trained .pt checkpoint (TetrisPolicyNet)")
-    ap.add_argument("out",  help="output .onnx path (e.g. ../model/policy.onnx)")
+    ap.add_argument("out",  help="output .onnx path (e.g. ../model/bots/run42.onnx)")
     ap.add_argument("--opset", type=int, default=17, help="ONNX opset (default: 17)")
     args = ap.parse_args()
     export(args.ckpt, args.out, args.opset)

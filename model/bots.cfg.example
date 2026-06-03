@@ -1,0 +1,21 @@
+# Optional in-game bot roster metadata.
+#
+# Format:
+#   path-or-filename|display name|input_interval_ticks
+#
+# The game auto-discovers model/*.onnx and model/bots/*.onnx even without this
+# file. Copy this file to model/bots.cfg only if you want stable display names
+# or per-bot default speeds.
+
+model/bots/aria_ppo.onnx|Aria PPO|1
+model/bots/aria_ppo_sparse.onnx|Aria PPO Sparse|2
+model/bots/aria_dqn.onnx|Aria DQN|2
+model/bots/aria_ddqn.onnx|Aria DDQN|2
+model/bots/aria_cbmpi.onnx|Aria CBMPI|2
+model/bots/aria_cbmpi_value.onnx|Aria CBMPI Value|2
+model/bots/aria_a2c.onnx|Aria A2C|2
+model/bots/aria_reinforce.onnx|Aria REINFORCE|3
+model/bots/aria_nstep_ac.onnx|Aria n-step AC|2
+model/bots/aria_cem.onnx|Aria CEM|2
+model/bots/aria_muzero.onnx|Aria MuZero|3
+@heuristic|Heuristic (test)|2

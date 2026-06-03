@@ -55,7 +55,8 @@ class MsgType(enum.IntEnum):
     # the lockstep game loop — they live at the "outer" protocol layer.
     QUEUE_JOIN = 10     # C→S: [tok_len:1][token:N]  (tok_len=0 → unranked)
     QUEUE_CANCEL = 11   # C→S: empty payload (cancel matchmaking)
-    MATCH_FOUND = 12    # S→C: [role:1][seed:8 LE]  role: 1=HOST, 2=GUEST
+    MATCH_FOUND = 12    # S→C: [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
+                        #      [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
 
     # Custom rooms (Section D) — 5-char code flow
     ROOM_CREATE = 13    # C→S: [tok_len:1][token:N]

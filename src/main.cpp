@@ -47,6 +47,7 @@
 #include <future>
 #include <chrono>
 #include <system_error>
+#include <unordered_set>
 #include "game.h"
 #include "gui.h"
 #include "colors.h"
@@ -84,6 +85,17 @@ static void draw_popup_panel(int x, int y, int w, int h)
 
 enum class DefaultIconKind { Player, Opponent, Bot };
 
+struct BotEntry {
+    std::string name;
+    std::string path;
+    int inputIntervalTicks = 1;  // 1 = consume one queued bot input every sim tick.
+};
+
+struct BotConfigOverride {
+    std::string name;
+    int inputIntervalTicks = 0;  // 0 = keep default.
+};
+
 static std::string trim_copy(const std::string& s)
 {
     size_t b = 0;
@@ -112,6 +124,137 @@ static std::unordered_map<std::string, std::string> load_image_manifest(const ch
     }
     std::fclose(f);
     return out;
+}
+
+static int clamp_bot_input_interval(int ticks)
+{
+    if (ticks < 1) return 1;
+    if (ticks > 30) return 30;
+    return ticks;
+}
+
+static std::string normalize_model_key(const std::filesystem::path& path)
+{
+    return path.lexically_normal().generic_string();
+}
+
+static std::string bot_name_from_path(const std::filesystem::path& path)
+{
+    std::string name = path.stem().string();
+    for (char& ch : name) {
+        if (ch == '_' || ch == '-') ch = ' ';
+    }
+    return name.empty() ? path.filename().string() : name;
+}
+
+static std::string truncate_middle(const std::string& s, size_t maxLen)
+{
+    if (s.size() <= maxLen) return s;
+    if (maxLen <= 3) return s.substr(0, maxLen);
+    const size_t left = (maxLen - 3) / 2;
+    const size_t right = maxLen - 3 - left;
+    return s.substr(0, left) + "..." + s.substr(s.size() - right);
+}
+
+static std::unordered_map<std::string, BotConfigOverride> load_bot_config(const char* path)
+{
+    std::unordered_map<std::string, BotConfigOverride> out;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return out;
+
+    char line[768];
+    while (std::fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        const size_t hash = s.find('#');
+        if (hash != std::string::npos) s.resize(hash);
+
+        std::vector<std::string> parts;
+        size_t pos = 0;
+        while (true) {
+            const size_t pipe = s.find('|', pos);
+            parts.push_back(trim_copy(s.substr(pos, pipe == std::string::npos ? pipe : pipe - pos)));
+            if (pipe == std::string::npos) break;
+            pos = pipe + 1;
+        }
+        if (parts.empty() || parts[0].empty()) continue;
+
+        BotConfigOverride cfg;
+        if (parts.size() >= 2) cfg.name = parts[1];
+        if (parts.size() >= 3 && !parts[2].empty()) {
+            int ticks = 0;
+            const std::string& raw = parts[2];
+            auto r = std::from_chars(raw.data(), raw.data() + raw.size(), ticks);
+            if (r.ec == std::errc()) cfg.inputIntervalTicks = clamp_bot_input_interval(ticks);
+        }
+        out[parts[0]] = cfg;
+    }
+    std::fclose(f);
+    return out;
+}
+
+static void apply_bot_config(
+    BotEntry& entry,
+    const std::unordered_map<std::string, BotConfigOverride>& cfg)
+{
+    auto apply = [&](const BotConfigOverride& c) {
+        if (!c.name.empty()) entry.name = c.name;
+        if (c.inputIntervalTicks > 0) entry.inputIntervalTicks = c.inputIntervalTicks;
+    };
+
+    auto it = cfg.find(entry.path);
+    if (it != cfg.end()) {
+        apply(it->second);
+        return;
+    }
+
+    std::filesystem::path p(entry.path);
+    it = cfg.find(p.filename().string());
+    if (it != cfg.end()) apply(it->second);
+}
+
+static std::vector<BotEntry> discover_bot_roster()
+{
+    std::vector<BotEntry> roster;
+    roster.push_back({"Heuristic (test)", "@heuristic", 2});
+
+    const auto cfg = load_bot_config("model/bots.cfg");
+    apply_bot_config(roster[0], cfg);
+
+    namespace fs = std::filesystem;
+    std::vector<BotEntry> models;
+    std::unordered_set<std::string> seen;
+
+    auto scan_dir = [&](const char* dir) {
+        std::error_code ec;
+        if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return;
+        for (fs::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            const fs::path path = it->path();
+            if (path.extension() != ".onnx") continue;
+            const std::string key = normalize_model_key(path);
+            if (!seen.insert(key).second) continue;
+            BotEntry entry{bot_name_from_path(path), key, 1};
+            apply_bot_config(entry, cfg);
+            models.push_back(std::move(entry));
+        }
+    };
+
+    scan_dir("model");
+    scan_dir("model/bots");
+
+    std::sort(models.begin(), models.end(), [](const BotEntry& a, const BotEntry& b) {
+        if (a.name == b.name) return a.path < b.path;
+        return a.name < b.name;
+    });
+    for (size_t i = 0; i < models.size(); ++i) {
+        if (std::filesystem::path(models[i].path).stem().string() == "policy") {
+            std::swap(models[0], models[i]);
+            break;
+        }
+    }
+
+    roster.insert(roster.end(), models.begin(), models.end());
+    return roster;
 }
 
 static void set_icon_px(std::vector<uint8_t>& px, int x, int y, Color c)
@@ -648,31 +791,17 @@ int main(int argc, char** argv)
     // BotSingle 모드에선 gameSingle 이 사람, gameBot 이 봇 보드. 둘 다 같은
     // seed 로 생성되지만 입력 스트림이 다르므로 자연스럽게 서로 다른 전개가 된다.
     // botInputQueue: BotOnnx::Infer → expand_placement 로 채운 틱 입력 마스크.
-    //   매 틱 하나 pop, 비어 있으면 새 placement 계산을 시도.
+    //   selectedBotInputIntervalTicks 마다 하나 pop 한다. 1이면 기존처럼 매 tick
+    //   입력하고, 값이 커질수록 같은 모델이라도 느리게 움직인다.
     std::unique_ptr<Game> gameBot;
     bot::BotOnnx botOnnx;
     std::deque<uint8_t> botInputQueue;
-    // 봇 로스터 — model/ 의 *.onnx 를 스캔해 (표시이름, 경로) 목록으로 만든다.
-    // 알고리즘이 다른 모델(ppo/sac/human/...)을 떨궈두면 각각 별도 봇으로 나타나고,
-    // C++ 봇은 동일한 ONNX 계약만 보므로 코드 변경이 필요 없다. 모델은 선택 시점에
-    // BotOnnx::Load 로 적재한다(시작 시 일괄 로드하지 않음).
-    std::vector<std::pair<std::string, std::string>> botRoster;  // (name, path)
-    // 내장 휴리스틱 봇 — ONNX/모델 없이 항상 가능한 테스트 상대. 경로 "@heuristic"
-    // 은 파일이 아니라 C++ 그리디 휴리스틱(bot::heuristic_placement)을 쓰라는 sentinel.
-    botRoster.emplace_back("Heuristic (test)", "@heuristic");
-    {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        std::vector<std::pair<std::string, std::string>> models;
-        if (fs::exists("model", ec))
-            for (const auto& e : fs::directory_iterator("model", ec))
-                if (e.path().extension() == ".onnx")
-                    models.emplace_back(e.path().stem().string(), e.path().string());
-        std::sort(models.begin(), models.end());
-        for (size_t i = 0; i < models.size(); ++i)   // 기본 "policy" 는 모델 중 맨 앞
-            if (models[i].first == "policy") { std::swap(models[0], models[i]); break; }
-        for (auto& m : models) botRoster.push_back(std::move(m));
-    }
+    int botInputCooldownTicks = 0;
+    int selectedBotInputIntervalTicks = 1;
+    // 봇 로스터 — model/*.onnx 와 model/bots/*.onnx 를 스캔한다. 10개 이상
+    // 모델을 떨궈두어도 선택 화면에서 스크롤/압축 표시된다. 표시 이름과 기본
+    // 속도는 model/bots.cfg 로 덮어쓸 수 있다.
+    std::vector<BotEntry> botRoster = discover_bot_roster();
     const bool botAvailable = !botRoster.empty();   // 항상 true (heuristic 포함)
     int         botSelectIndex = 0;
     std::string botSelectError;
@@ -1027,7 +1156,8 @@ int main(int argc, char** argv)
                 // 1) 봇 입력 큐가 비었으면 새 placement 계산.
                 //    Infer 실패 또는 합법 수 없음 → INPUT_NONE 로 대기 (게임오버면 자연스럽게
                 //    gameBot 가 멈춰 있음).
-                if (botInputQueue.empty() && !gameBot->sim.IsGameOver()) {
+                if (botInputQueue.empty() && botInputCooldownTicks <= 0 &&
+                    !gameBot->sim.IsGameOver()) {
                     int tgtCol = -1, tgtRot = -1;
                     bool ok;
                     if (botUsesHeuristic)
@@ -1043,9 +1173,12 @@ int main(int argc, char** argv)
                     }
                 }
                 uint8_t botMask = INPUT_NONE;
-                if (!botInputQueue.empty()) {
+                if (botInputCooldownTicks > 0) {
+                    --botInputCooldownTicks;
+                } else if (!botInputQueue.empty()) {
                     botMask = botInputQueue.front();
                     botInputQueue.pop_front();
+                    botInputCooldownTicks = selectedBotInputIntervalTicks - 1;
                 }
 
                 gameSingle->SubmitInput(inputMask);
@@ -1074,6 +1207,7 @@ int main(int argc, char** argv)
                     else
                         botMatchResult = BotMatchResult::Lose;
                     botInputQueue.clear();
+                    botInputCooldownTicks = 0;
                 }
 
                 // 상대(봇) 피스가 락되면 큐를 비우고 다음 피스에서 다시 Infer.
@@ -1230,7 +1364,7 @@ int main(int argc, char** argv)
 
             if (!botAvailable) {
                 // Bot 모드가 disabled 임을 안내.
-                draw_text("(no model/*.onnx found)", 260,
+                draw_text("(no bot roster entries found)", 250,
                           byStart + 1 * (bh + 10) + bh + 2, 12, DISABLED);
             }
 
@@ -1281,36 +1415,86 @@ int main(int argc, char** argv)
         }
 
         // ── 봇 선택 화면 ─────────────────────────────────────────────────────
-        //   model/*.onnx 로스터에서 상대 봇을 고른다. 선택 시 그 모델을 로드하고
+        //   model/*.onnx + model/bots/*.onnx 로스터에서 상대 봇을 고른다.
+        //   선택 시 그 모델을 로드하고
         //   성공하면 BotSingle 로 진입. (알고리즘별 모델을 떨궈두면 여기에 나열됨.)
         if (app == AppMode::BotSelect)
         {
-            draw_text("Select Bot", 255, 90, 44, WHITE);
-            draw_text("model/*.onnx", 295, 145, 16, GRAY);
+            draw_text("Select Bot", 255, 78, 44, WHITE);
+            draw_text("model/*.onnx + model/bots/*.onnx", 220, 132, 16, GRAY);
 
             const int n = (int)botRoster.size();
             if (n > 0 && platform_key_pressed(PKEY_DOWN)) botSelectIndex = (botSelectIndex + 1) % n;
             if (n > 0 && platform_key_pressed(PKEY_UP))   botSelectIndex = (botSelectIndex + n - 1) % n;
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+            if (n > 0 && platform_key_pressed(PKEY_LEFT)) {
+                botRoster[botSelectIndex].inputIntervalTicks =
+                    clamp_bot_input_interval(botRoster[botSelectIndex].inputIntervalTicks - 1);
+            }
+            if (n > 0 && platform_key_pressed(PKEY_RIGHT)) {
+                botRoster[botSelectIndex].inputIntervalTicks =
+                    clamp_bot_input_interval(botRoster[botSelectIndex].inputIntervalTicks + 1);
+            }
+#endif
 
-            const int bw = 360, bh = 44, bx = (720 - bw) / 2, byStart = 200;
+            const int bw = 560, bh = 32, bx = (720 - bw) / 2, byStart = 162;
+            const int gap = 5;
+            const int maxVisible = 10;
+            int first = 0;
+            if (n > maxVisible) {
+                first = botSelectIndex - maxVisible / 2;
+                if (first < 0) first = 0;
+                if (first > n - maxVisible) first = n - maxVisible;
+            }
+            const int visible = std::min(n, maxVisible);
             int chosen = -1;
-            for (int i = 0; i < n; ++i) {
-                const int by = byStart + i * (bh + 8);
-                if (gui_button_highlighted(bx, by, bw, bh, botRoster[i].first.c_str(),
-                                           (i == botSelectIndex), 24))
+            for (int row = 0; row < visible; ++row) {
+                const int i = first + row;
+                const int by = byStart + row * (bh + gap);
+                std::string label = botRoster[i].name;
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+                label += fmt_buf("  [%d tick/input]", botRoster[i].inputIntervalTicks);
+#endif
+                if (gui_button_highlighted(bx, by, bw, bh, label.c_str(),
+                                           (i == botSelectIndex), 18))
                     chosen = i;
             }
             if (n > 0 && (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE)))
                 chosen = botSelectIndex;
 
+            if (n > 0) {
+                const BotEntry& cur = botRoster[botSelectIndex];
+                const std::string pathLabel =
+                    (cur.path == "@heuristic") ? std::string("built-in heuristic")
+                                               : truncate_middle(cur.path, 72);
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+                draw_text(fmt_buf("Speed: one bot input every %d simulation tick(s)",
+                                  cur.inputIntervalTicks),
+                          bx, 540, 15, GRAY);
+                draw_text(pathLabel.c_str(), bx, 558, 13, {120,130,170,255});
+#else
+                draw_text(pathLabel.c_str(), bx, 540, 13, {120,130,170,255});
+#endif
+                if (n > maxVisible) {
+                    draw_text(fmt_buf("%d-%d / %d", first + 1, first + visible, n),
+                              bx + bw - 80, 138, 13, GRAY);
+                }
+            }
             if (!botSelectError.empty())
-                draw_text(botSelectError.c_str(), bx, byStart + n * (bh + 8) + 12, 16, RED);
-            draw_text("[Up/Down] Select   [Enter] Play   [Q] Back", 170, 560, 18, GRAY);
+                draw_text(truncate_middle(botSelectError, 78).c_str(), bx, 578, 13, RED);
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+            draw_text("[Up/Down] Select   [Left/Right] Speed   [Enter] Play   [Q] Back",
+                      68, 604, 16, GRAY);
+#else
+            draw_text("[Up/Down] Select   [Enter] Play   [Q] Back",
+                      150, 604, 16, GRAY);
+#endif
 
             if (platform_key_pressed(PKEY_Q)) app = AppMode::Menu;
 
             if (chosen >= 0 && chosen < n) {
-                const std::string& path = botRoster[chosen].second;
+                const BotEntry& entry = botRoster[chosen];
+                const std::string& path = entry.path;
                 bool ready = true;
                 if (path == "@heuristic") {
                     botUsesHeuristic = true;          // 내장 휴리스틱 — 로드 불필요
@@ -1321,11 +1505,13 @@ int main(int argc, char** argv)
                     if (!ready) botSelectError = "Load failed: " + err;
                 }
                 if (ready) {
-                    selectedBotName = botRoster[chosen].first;
+                    selectedBotName = entry.name;
+                    selectedBotInputIntervalTicks = clamp_bot_input_interval(entry.inputIntervalTicks);
                     app = AppMode::BotSingle;
                     gameSingle = std::make_unique<Game>(sessionSeed);
                     gameBot    = std::make_unique<Game>(sessionSeed);
                     botInputQueue.clear();
+                    botInputCooldownTicks = 0;
                     botMatchResult = BotMatchResult::None;
                     lastAttackHuman = 0; lastAttackBot = 0;
                 }
@@ -1602,11 +1788,29 @@ int main(int argc, char** argv)
         // ── Section C — BotSingle 렌더 + 게임오버 ─────────────────────────
         if (app == AppMode::BotSingle && gameSingle && gameBot)
         {
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+            if (platform_key_pressed(PKEY_LBRACKET)) {
+                selectedBotInputIntervalTicks =
+                    clamp_bot_input_interval(selectedBotInputIntervalTicks - 1);
+                if (botInputCooldownTicks >= selectedBotInputIntervalTicks)
+                    botInputCooldownTicks = selectedBotInputIntervalTicks - 1;
+            }
+            if (platform_key_pressed(PKEY_RBRACKET)) {
+                selectedBotInputIntervalTicks =
+                    clamp_bot_input_interval(selectedBotInputIntervalTicks + 1);
+            }
+#endif
+
             int leftX = 11, rightX = 11 + 300 + 60;
             if (iconYou) draw_image(iconYou, leftX,  6, 32, 32);
             if (iconBot) draw_image(iconBot, rightX, 6, 32, 32);
             draw_text("You", leftX  + 38, 8, 22, WHITE);
             draw_text(selectedBotName.c_str(), rightX + 38, 8, 22, WHITE);
+#if defined(TETRIS_ENABLE_DEBUG_UI)
+            draw_text(fmt_buf("%d tick/input", selectedBotInputIntervalTicks),
+                      rightX + 38, 31, 12, {120,130,170,255});
+            draw_text("[/]: bot speed", rightX + 154, 31, 12, {120,130,170,255});
+#endif
             // 보드별 shake (Net 과 같은 구조).
             {
                 float sdx = 0.f, sdy = 0.f;
@@ -1672,12 +1876,14 @@ int main(int argc, char** argv)
                     gameSingle = std::make_unique<Game>(sessionSeed);
                     gameBot    = std::make_unique<Game>(sessionSeed);
                     botInputQueue.clear();
+                    botInputCooldownTicks = 0;
                     botMatchResult = BotMatchResult::None;
                     lastAttackHuman = 0; lastAttackBot = 0;
                 } else if (platform_key_pressed(PKEY_Q)) {
                     gameSingle.reset();
                     gameBot.reset();
                     botInputQueue.clear();
+                    botInputCooldownTicks = 0;
                     botMatchResult = BotMatchResult::None;
                     app = AppMode::Menu;
                 }
@@ -2278,6 +2484,7 @@ int main(int argc, char** argv)
                     gameSingle.reset();
                     gameBot.reset();
                     botInputQueue.clear();
+                    botInputCooldownTicks = 0;
                     botMatchResult = BotMatchResult::None;
                 }
                 app = AppMode::Menu;

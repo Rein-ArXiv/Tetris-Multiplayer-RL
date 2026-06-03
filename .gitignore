@@ -49,6 +49,12 @@ Makefile.bak
 *.pdb
 *.ilk
 *.log
+tmp/
+
+# 학습/export 산출물과 로컬 봇 설정
+model/**/*.onnx
+model/*.onnx
+model/bots.cfg
 
 # OS 임시 파일
 .DS_Store

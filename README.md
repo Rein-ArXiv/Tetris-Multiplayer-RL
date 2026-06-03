@@ -13,11 +13,12 @@ SDL2 백엔드를 함께 사용합니다.
 - Windows 기본 빌드는 Handmade Win32 + OpenGL + XAudio2 경로입니다.
 - macOS/Linux 기본 빌드는 SDL2 + OpenGL 경로입니다.
 - `tetris`, `sim_hash_dump`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
-- `Single vs Bot`은 선택 기능입니다. `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/policy.onnx`가 모두 있어야 활성화됩니다.
-- Python 쪽은 Colab 부트스트랩, Gymnasium 환경, PPO baseline 학습 루프,
+- `Single vs Bot`에는 내장 휴리스틱 봇이 항상 표시됩니다. 학습 모델 봇은 `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/*.onnx` 또는 `model/bots/*.onnx`가 있을 때 선택할 수 있습니다.
+- Python 쪽은 Colab 부트스트랩, Gymnasium 환경,
+  PPO/DQN/DDQN/CBMPI/REINFORCE/A2C/n-step AC/CEM/MuZero-style 학습 루프,
   정책 모델, 체크포인트, ONNX export까지 있습니다.
 - 학습된 봇 모델은 기본 포함물이 아닙니다. 긴 학습은 Colab에서 수행하고, 로컬에서는 빌드/검증과 export된 모델 실행만 전제로 합니다.
-- MuZero, DQN, CE/CMA-ES 같은 추가 알고리즘은 아직 연구/구현 대상입니다.
+- 대전/가비지까지 포함한 경쟁형 RL 환경과 CE/CMA-ES 계열 탐색기는 아직 확장 대상입니다.
 
 ## 빠른 시작
 
@@ -35,8 +36,8 @@ cmake --build build --config Release
 .\scripts\release_win.ps1
 ```
 
-산출물은 `dist\tetris-win-x64.zip`에 생성됩니다. 봇 포함 빌드는 ONNX Runtime과
-`model/policy.onnx`가 준비된 뒤 실행합니다.
+산출물은 `dist\tetris-win-x64.zip`에 생성됩니다. 학습 모델 봇 포함 빌드는
+ONNX Runtime과 `model/bots/*.onnx`가 준비된 뒤 실행합니다.
 
 ```powershell
 .\scripts\release_win.ps1 -Bot
@@ -203,24 +204,30 @@ Oracle Free Tier/VPS relay + Mac mini meta 배포 절차는
 두 종류의 봇 경로가 있습니다.
 
 - Python netbot: `.pt` 체크포인트를 읽어 네트워크 클라이언트처럼 접속합니다.
-- In-game bot: `model/policy.onnx`를 C++ 게임이 직접 읽고 `Single vs Bot`에서 사용합니다.
+- In-game bot: `model/*.onnx`와 `model/bots/*.onnx`를 C++ 게임이 스캔해 `Single vs Bot` 로스터에 표시합니다.
 
 현재 구현된 것은 학습 기반입니다.
-현재 저장소 상태에서는 봇이 아직 학습되어 있지 않을 수 있으므로,
-`model/policy.onnx`가 없으면 `Single vs Bot`은 비활성화됩니다.
+현재 저장소 상태에서는 학습된 봇 모델이 기본 포함되어 있지 않을 수 있습니다.
+그 경우에도 `Heuristic (test)` 봇은 선택할 수 있고, ONNX 모델을 추가하면
+모델별 봇이 로스터에 따로 나타납니다.
 
 - `bindings/tetris_py.cpp`: C++ `SimGame`을 Python으로 노출
 - `python/common/env.py`: Gymnasium placement 환경
 - `python/common/models.py`: `TetrisPolicyNet`
 - `python/common/checkpoint.py`: 체크포인트 저장/로드
 - `python/train/ppo_tetris.py`: legal-action-masked PPO baseline 학습 루프 + greedy 평가
+- `python/train/dqn_tetris.py`: Double DQN 학습 루프
+- `python/train/cbmpi_tetris.py`: BCTS/value 기반 CBMPI-style 학습 루프
+- `python/train/policy_gradient_tetris.py`: REINFORCE/A2C/n-step AC 학습 루프
+- `python/train/cem_tetris.py`: Cross-Entropy Method 학습 루프
+- `python/train/muzero_tetris.py`: MuZero-style 학습 + deployable policy distillation
+- `python/train/train_model_zoo_colab.ipynb`: VSCode/Colab용 통합 학습/export 노트북
 - `python/train/train_ppo_colab.ipynb`: Colab용 PPO 실행 노트북
 - `python/netbot/export_onnx.py`: `.pt` 체크포인트를 ONNX로 export
 - `bot/bot_onnx.cpp`: C++ ONNX Runtime 추론
 
-아직 포함되지 않은 것:
+남은 확장 범위:
 
-- MuZero/DQN/CBMPI 같은 추가 알고리즘
 - 대전/가비지까지 반영한 경쟁형 RL 환경
 
 Colab 기본 흐름:
@@ -234,8 +241,14 @@ python -m train.ppo_tetris \
   --eval-every 10 \
   --eval-episodes 5
 
-python -m netbot.export_onnx checkpoints/aria_ppo_baseline.pt ../model/aria_ppo_baseline.onnx
+python -m netbot.export_onnx checkpoints/aria_ppo_baseline.pt ../model/bots/aria_ppo_baseline.onnx
 ```
+
+추가 알고리즘 실행 예시는 [`python/train/README_colab.md`](python/train/README_colab.md)를 참고하세요.
+DQN/DDQN/CBMPI/REINFORCE/A2C/n-step AC/CEM은 곧바로 export 가능한
+`TetrisPolicyNet` 체크포인트를 저장하고, MuZero-style 학습은 별도 native
+checkpoint와 distill된 `*.policy.pt`를 나눠 저장합니다.
+인게임 봇 로스터와 기본 속도 설정은 [`model/bots/README.md`](model/bots/README.md)를 참고하세요.
 
 Windows에서 in-game bot을 빌드하려면 ONNX Runtime을 `third_party/onnxruntime`에
 준비한 뒤 실행합니다.
@@ -330,11 +343,11 @@ docs/blog/  구현 과정을 정리한 블로그 시리즈
 - 텍스트/이미지(비-Win32): vendored `third_party/stb_truetype.h` + `third_party/stb_image.h` (헤더 온리, 추가 설치 불필요). SDL2 빌드 기본 폰트는 `Font/NanumGothic.ttf`(한글 지원), UI 아이콘은 `assets/images.cfg`에서 id별 경로를 읽고 선택/소유 검증은 `tetris_meta` DB가 담당
 - Python/RL: uv, Python 3.12+ (3.14 포함), pytest, pybind11. PyTorch/Gymnasium/ONNX는 `train`/`export` extra에서만 필요
 - Meta server: vendored `third_party/sqlite3.{c,h,ext.h}`와 `third_party/httplib.h`
-- In-game bot: ONNX Runtime CPU bundle, `model/policy.onnx`
+- In-game bot: ONNX Runtime CPU bundle, `model/bots/*.onnx` 또는 legacy `model/*.onnx`
 
 ## 주의 사항
 
 - `dist/`는 릴리스 스크립트가 만드는 산출물이며 보통 Git에 커밋하지 않습니다.
-- `TETRIS_BUILD_BOT=OFF`이면 게임은 정상 빌드되지만 `Single vs Bot`은 비활성화됩니다.
+- `TETRIS_BUILD_BOT=OFF`이면 ONNX 모델 로드는 실패하지만 내장 휴리스틱 봇으로 `Single vs Bot`을 실행할 수 있습니다.
 - `Sounds/drop.mp3`, `Sounds/garbage.mp3`는 코드에서 참조하지만 현재 기본 사운드 폴더에는 없을 수 있습니다. 없어도 빌드는 실패하지 않고 해당 효과음만 재생되지 않습니다.
 - 코드를 처음 읽는다면 `GUIDE.md`, `ARCHITECTURE.md`, [`docs/blog/README.md`](docs/blog/README.md)부터 순서대로 보는 것을 권장합니다.

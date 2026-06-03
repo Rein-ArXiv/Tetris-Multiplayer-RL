@@ -4,7 +4,8 @@ Trains the repo's canonical ``common.models.TetrisPolicyNet`` directly on
 ``common.env.TetrisPlacementEnv``. Training on *this* network (instead of a
 framework's own policy class) is deliberate: the checkpoint it writes loads
 straight into ``netbot`` and exports cleanly via ``netbot.export_onnx`` to the
-``model/policy.onnx`` the C++ in-game bot reads. No weight transfer needed.
+``model/bots/*.onnx`` files the C++ in-game bot roster reads. No weight
+transfer needed.
 
 Baseline run (from the ``python/`` directory)::
 
@@ -16,7 +17,7 @@ Resume / fine-tune::
 
 Then export for the C++/netbot side::
 
-    python -m netbot.export_onnx checkpoints/run.pt ../model/policy.onnx
+    python -m netbot.export_onnx checkpoints/run.pt ../model/bots/run.onnx
 
 This is the baseline loop for character-bot bring-up: single synchronous env,
 legal-action-masked PPO, periodic greedy evaluation, and checkpoint files that

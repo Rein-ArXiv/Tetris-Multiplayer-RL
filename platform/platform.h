@@ -47,6 +47,8 @@ enum PlatformKey : int {
     PKEY_T      = 'T',
     PKEY_Y      = 'Y',
     PKEY_N      = 'N',
+    PKEY_LBRACKET = 0xDB,  // VK_OEM_4: [
+    PKEY_RBRACKET = 0xDD,  // VK_OEM_6: ]
     PKEY_F5     = 0x74,  // VK_F5
     PKEY_F6     = 0x75,  // VK_F6
 };

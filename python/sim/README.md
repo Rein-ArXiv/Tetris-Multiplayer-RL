@@ -17,6 +17,8 @@ sudo apt-get install -y cmake g++ python3-dev
 uv sync --dev
 PYBIND11_DIR=$(uv run python -m pybind11 --cmakedir)
 
+rm -rf build
+rm -f python/sim/tetris_py*.so
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DTETRIS_BUILD_GAME=OFF \
@@ -54,6 +56,8 @@ from sim import SimGame
 g = SimGame(seed=42)
 print(hex(g.state_hash()))
 print(g.legal_placements()[:3])
+branch = g.clone()
+print(branch.apply_placement(g.legal_placements()[0].col, g.legal_placements()[0].rot))
 ```
 
 The printed `state_hash` value must be **identical** between Linux and Windows

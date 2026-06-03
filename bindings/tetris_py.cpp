@@ -73,6 +73,9 @@ PYBIND11_MODULE(tetris_py, m)
              "Apply a placement atomically (rotate -> translate -> hard drop -> "
              "lock). Returns the number of lines cleared, or -1 if the placement "
              "is illegal.")
+        .def("clone", [](const SimGame& g) {
+            return SimGame(g);
+        }, "Return a deep copy of the full deterministic sim state.")
 
         // Frame-level action API (lockstep net play)
         .def("submit_input", &SimGame::SubmitInput, py::arg("input_mask"),

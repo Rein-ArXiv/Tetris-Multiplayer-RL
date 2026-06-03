@@ -2,8 +2,9 @@
 
 The training side of Tetris-Multiplayer-RL lives in this directory. The
 training and `.pt -> .onnx` export path runs on **Google Colab Linux x86_64
-(GPU)**. Local deployment is inference-only: the C++ game loads the exported
-`model/*.onnx` with ONNX Runtime and does not need PyTorch.
+(GPU)**. Local deployment is inference-only: the C++ game loads exported
+`model/*.onnx` and `model/bots/*.onnx` files with ONNX Runtime and does not
+need PyTorch.
 
 The Python `netbot` can still run a `.pt` checkpoint for debugging, but that
 path imports PyTorch. On low-power deployment machines, export in Colab and
@@ -17,8 +18,8 @@ copy only the `.onnx` file.
    C++ sources used by the Windows game, and verifies that
    `from sim import SimGame` and `from common.models import TetrisPolicyNet`
    import cleanly.
-4. Run the baseline PPO loop, or open your own training notebook
-   (`train_muzero.ipynb`, `train_dqn.ipynb`, etc.) and
+4. Run one of the built-in trainers (`ppo_tetris.py`, `dqn_tetris.py`,
+   `cbmpi_tetris.py`, `muzero_tetris.py`), or open your own notebook and
    `import sys; sys.path.insert(0, '/content/Tetris-Multiplayer-RL/python')`
    so it picks up the freshly built `sim` module and the shared `common`
    layer.
@@ -27,7 +28,14 @@ copy only the `.onnx` file.
    local netbot's `load_checkpoint` refuses stale architectures with a
    `RuntimeError` instead of silently loading wrong-shape weights.
 6. Export `.pt` to `.onnx` in Colab, download it, and put only the result
-   under local `model/` for the in-game bot roster.
+   under local `model/bots/` for the in-game bot roster. The game still scans
+   legacy `model/*.onnx`, but `model/bots/*.onnx` is the preferred layout when
+   you have many models.
+
+If you use the VSCode Colab extension, open `train_model_zoo_colab.ipynb`
+instead of the older PPO-only notebook. It includes setup, smoke test, selected
+algorithm training, ONNX export, and `model/bots.cfg` generation in one file.
+`train_ppo_colab.ipynb` is kept only as a small PPO-specific example.
 
 ## Baseline PPO
 
@@ -67,7 +75,219 @@ run it in Colab or another training/export machine:
 ```bash
 python -m netbot.export_onnx \
   checkpoints/aria_ppo_baseline.eval_best.pt \
-  ../model/aria_ppo_baseline.onnx
+  ../model/bots/aria_ppo_baseline.onnx
+```
+
+## Additional Algorithms
+
+All commands below run from `/content/Tetris-Multiplayer-RL/python` after
+`setup_colab.ipynb` has built `tetris_py`. They are Colab/training-machine
+commands, not Mac mini deployment commands.
+
+### DQN / Double DQN
+
+`dqn_tetris.py` treats `TetrisPolicyNet.policy_logits` as Q-values over the
+40 placement actions. `--target-mode dqn` uses the classic target-network max;
+`--target-mode ddqn` uses Double DQN online-argmax/target-gather targets. The
+value head is unused. The saved `.pt` is still a canonical `TetrisPolicyNet`
+checkpoint, so export is identical to PPO.
+
+Smoke test:
+
+```bash
+python -m train.dqn_tetris \
+  --target-mode ddqn \
+  --steps 4096 \
+  --warmup 512 \
+  --batch 64 \
+  --eval-every 2048 \
+  --eval-episodes 1 \
+  --out checkpoints/dqn_smoke.pt
+```
+
+Longer run:
+
+```bash
+python -m train.dqn_tetris \
+  --target-mode ddqn \
+  --steps 500000 \
+  --out checkpoints/aria_dqn.pt \
+  --eval-every 25000 \
+  --eval-episodes 5
+
+python -m netbot.export_onnx \
+  checkpoints/aria_dqn.eval_best.pt \
+  ../model/bots/aria_dqn.onnx
+```
+
+Classic DQN is the same trainer with a different target:
+
+```bash
+python -m train.dqn_tetris \
+  --target-mode dqn \
+  --steps 500000 \
+  --out checkpoints/aria_dqn_classic.pt
+
+python -m netbot.export_onnx \
+  checkpoints/aria_dqn_classic.eval_best.pt \
+  ../model/bots/aria_dqn_classic.onnx
+```
+
+### CBMPI
+
+`cbmpi_tetris.py` alternates between one-step policy improvement and supervised
+policy fitting. The improvement step clones the current `SimGame`, applies
+each legal placement, and scores the post-placement board with BCTS features.
+`--value-weight` can add the current network's value estimate as a bootstrap;
+the default is `0.0` so the first iteration is not polluted by an untrained
+value head.
+
+This trainer requires the current pybind11 module because it uses
+`SimGame.clone()`. If Colab reports that `clone` is missing, rerun the setup
+notebook so `tetris_py` is rebuilt from the current repository.
+
+Smoke test:
+
+```bash
+python -m train.cbmpi_tetris \
+  --iterations 2 \
+  --states-per-iter 512 \
+  --epochs 1 \
+  --batch 64 \
+  --eval-episodes 1 \
+  --out checkpoints/cbmpi_smoke.pt
+```
+
+Longer run:
+
+```bash
+python -m train.cbmpi_tetris \
+  --iterations 20 \
+  --states-per-iter 20000 \
+  --out checkpoints/aria_cbmpi.pt \
+  --eval-episodes 5
+
+python -m netbot.export_onnx \
+  checkpoints/aria_cbmpi.eval_best.pt \
+  ../model/bots/aria_cbmpi.onnx
+```
+
+### Policy Gradient Family
+
+`policy_gradient_tetris.py` provides three deployable policy-gradient
+baselines:
+
+- `reinforce` — Monte-Carlo policy gradient with value baseline.
+- `a2c` — synchronous advantage actor-critic.
+- `nstep-ac` — actor-critic with shorter n-step rollouts.
+
+Smoke test:
+
+```bash
+python -m train.policy_gradient_tetris \
+  --algo a2c \
+  --steps 4096 \
+  --rollout 512 \
+  --eval-episodes 1 \
+  --out checkpoints/a2c_smoke.pt
+```
+
+Longer runs:
+
+```bash
+python -m train.policy_gradient_tetris \
+  --algo reinforce \
+  --steps 300000 \
+  --out checkpoints/aria_reinforce.pt
+
+python -m train.policy_gradient_tetris \
+  --algo a2c \
+  --steps 500000 \
+  --out checkpoints/aria_a2c.pt
+
+python -m train.policy_gradient_tetris \
+  --algo nstep-ac \
+  --steps 500000 \
+  --rollout 256 \
+  --out checkpoints/aria_nstep_ac.pt
+
+python -m netbot.export_onnx checkpoints/aria_reinforce.eval_best.pt ../model/bots/aria_reinforce.onnx
+python -m netbot.export_onnx checkpoints/aria_a2c.eval_best.pt ../model/bots/aria_a2c.onnx
+python -m netbot.export_onnx checkpoints/aria_nstep_ac.eval_best.pt ../model/bots/aria_nstep_ac.onnx
+```
+
+### Cross-Entropy Method
+
+`cem_tetris.py` samples episodes, keeps the top return percentile, and trains
+the policy by cross-entropy on elite actions. It is a good low-assumption
+baseline because it does not depend on bootstrapped Q targets.
+
+Smoke test:
+
+```bash
+python -m train.cem_tetris \
+  --iterations 2 \
+  --episodes-per-iter 8 \
+  --max-pieces 200 \
+  --epochs 1 \
+  --out checkpoints/cem_smoke.pt
+```
+
+Longer run:
+
+```bash
+python -m train.cem_tetris \
+  --iterations 50 \
+  --episodes-per-iter 64 \
+  --out checkpoints/aria_cem.pt
+
+python -m netbot.export_onnx \
+  checkpoints/aria_cem.eval_best.pt \
+  ../model/bots/aria_cem.onnx
+```
+
+### MuZero-style
+
+`muzero_tetris.py` trains a separate MuZero-style model with representation,
+dynamics, and prediction heads, then distills the MCTS visit targets into the
+canonical `TetrisPolicyNet`.
+
+There are two outputs:
+
+- `checkpoints/aria_muzero.pt` — native MuZero-style checkpoint for continued
+  MuZero training only.
+- `checkpoints/aria_muzero.policy.pt` — deployable `TetrisPolicyNet`
+  checkpoint produced by distillation.
+
+Export only the `.policy.pt` checkpoint.
+
+Smoke test:
+
+```bash
+python -m train.muzero_tetris \
+  --episodes 4 \
+  --max-pieces 100 \
+  --mcts-simulations 4 \
+  --warmup 16 \
+  --batch 16 \
+  --train-steps-per-episode 2 \
+  --distill-steps 20 \
+  --distill-batch 16 \
+  --out checkpoints/muzero_smoke.pt
+```
+
+Longer run:
+
+```bash
+python -m train.muzero_tetris \
+  --episodes 500 \
+  --mcts-simulations 32 \
+  --out checkpoints/aria_muzero.pt \
+  --distill-steps 2000
+
+python -m netbot.export_onnx \
+  checkpoints/aria_muzero.policy.pt \
+  ../model/bots/aria_muzero.onnx
 ```
 
 ## Cross-platform determinism gate
@@ -97,16 +317,26 @@ when deployed to the Windows netbot.
 
 - `setup_colab.ipynb` — environment bootstrap (run first, every cold runtime).
 - `README_colab.md`   — this file.
+- `train_model_zoo_colab.ipynb` — recommended VSCode/Colab notebook for
+  selecting and exporting any supported algorithm.
 - `ppo_tetris.py` — baseline legal-action-masked PPO trainer.
-- `train_ppo_colab.ipynb` — notebook wrapper around the baseline PPO trainer.
+- `dqn_tetris.py` — Double DQN trainer; writes deployable policy checkpoints.
+- `cbmpi_tetris.py` — BCTS/value-improved CBMPI-style trainer; writes
+  deployable policy checkpoints.
+- `policy_gradient_tetris.py` — REINFORCE, A2C, and n-step actor-critic.
+- `cem_tetris.py` — Cross-Entropy Method policy-search baseline.
+- `muzero_tetris.py` — MuZero-style trainer plus policy distillation.
+- `rl_common.py` — shared batching, masking, evaluation, and replay helpers.
+- `train_ppo_colab.ipynb` — legacy/small notebook wrapper around the baseline
+  PPO trainer only.
+- `../../model/bots/README.md` — in-game bot roster layout and speed metadata.
 - *Your* training notebooks — keep them in this directory so they're version-
   controlled with the code they depend on. They should `import` from
   `common` (architecture, obs, checkpoint) and from `sim` (the env).
 
 ## Frameworks
 
-The plan deliberately leaves the training algorithm and library choice open.
-The shared layer (`common/`) only fixes:
+The shared layer (`common/`) fixes the deployment contract:
 
 - the network architecture (`TetrisPolicyNet`)
 - the observation format (`build_observation`)
@@ -114,6 +344,8 @@ The shared layer (`common/`) only fixes:
 - a Gymnasium env wrapper (`common.env.TetrisPlacementEnv`) so SB3 / CleanRL /
   LightZero / RLlib can plug in without bespoke glue
 
-Pick whatever lets you iterate fastest. MuZero on LightZero, PPO on CleanRL,
-or hand-rolled PyTorch — they all read the same env and write the same
-checkpoint format, so the netbot doesn't care which one trained the model.
+PPO, DQN, and CBMPI in this directory train `TetrisPolicyNet` directly. MuZero
+uses a native MuZero-style model for training and writes a deployable
+`TetrisPolicyNet` only through the distillation step. External frameworks are
+still fine as long as their final export path writes the canonical checkpoint
+or an ONNX file with the same input/output contract.

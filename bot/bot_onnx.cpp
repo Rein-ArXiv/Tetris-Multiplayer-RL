@@ -40,10 +40,9 @@ struct BotOnnx::Impl {
             sessOpts.SetIntraOpNumThreads(1);
             sessOpts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         #if defined(_WIN32)
-            // 바이트 단위 widening(path.begin(), path.end())은 비ASCII 경로
-            // (예: 한글 사용자 폴더)를 깨뜨린다. filesystem::path 가 네이티브
-            // 인코딩 규칙으로 narrow→wide 변환을 수행하게 맡긴다.
-            const std::wstring wpath = std::filesystem::path(path).wstring();
+            // BotEntry 경로 문자열은 UTF-8로 정규화된다. u8path를 거쳐야 한글
+            // 사용자 폴더 같은 비ASCII 경로가 현재 C locale과 무관하게 보존된다.
+            const std::wstring wpath = std::filesystem::u8path(path).wstring();
             session = std::make_unique<Ort::Session>(env, wpath.c_str(), sessOpts);
         #else
             session = std::make_unique<Ort::Session>(env, path.c_str(), sessOpts);
@@ -95,16 +94,20 @@ struct BotOnnx::Impl {
         }
         if (outs.empty()) return false;
 
-        // 출력 shape 검증 — 모델이 kNumPlacements(40)보다 작은 policy 를 내보내면
-        // 아래 argmax 루프가 out-of-bounds read 를 한다. 로컬 파일이라도 잘못
-        // export 된 모델은 흔하므로 로드 대신 여기서 안전하게 실패시킨다.
-        {
+        // 잘못 export 된 출력은 shape/type 조회 자체가 예외를 던질 수 있다.
+        // 모든 검증과 데이터 접근을 ORT 예외 경계 안에 둔다.
+        const float* logits = nullptr;
+        try {
+            if (!outs[0].IsTensor()) return false;
             const auto info = outs[0].GetTensorTypeAndShapeInfo();
-            if (info.GetElementCount() < static_cast<size_t>(kNumPlacements))
+            if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+                info.GetElementCount() < static_cast<size_t>(kNumPlacements)) {
                 return false;
+            }
+            logits = outs[0].GetTensorData<float>();
+        } catch (const Ort::Exception&) {
+            return false;
         }
-
-        const float* logits = outs[0].GetTensorData<float>();
         // kNumPlacements = 40 고정.
 
         // 합법 마스크: LegalPlacements 를 돌려 (col, rot) 집합을 bitset 으로.

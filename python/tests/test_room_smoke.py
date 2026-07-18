@@ -121,6 +121,54 @@ def test_room_create_join_ready_match_found() -> None:
         b.close()
 
 
+def test_room_preserves_ready_coalesced_with_create_and_join() -> None:
+    """ROOM_CREATE/JOIN과 같은 TCP read에 온 READY도 다음 단계가 처리한다."""
+    try:
+        a = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    except OSError:
+        pytest.skip(f"relay not running on {RELAY_HOST}:{RELAY_PORT}")
+
+    b = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    a_buf = bytearray()
+    b_buf = bytearray()
+    try:
+        a.sendall(
+            build_frame(MsgType.ROOM_CREATE, b"\x00")
+            + build_frame(MsgType.READY, b"\x01")
+        )
+        deadline = time.monotonic() + RECV_TIMEOUT
+        payload, _ = _recv_until(a, MsgType.ROOM_INFO, deadline, a_buf)
+        code, status, peer_count = _parse_room_info(payload)
+        assert status == 0
+        assert peer_count == 1
+
+        join_payload = bytes([len(code)]) + code.encode("ascii") + b"\x00"
+        b.sendall(
+            build_frame(MsgType.ROOM_JOIN, join_payload)
+            + build_frame(MsgType.READY, b"\x01")
+        )
+
+        deadline = time.monotonic() + RECV_TIMEOUT
+        payload_b, earlier_b = _recv_until(
+            b, MsgType.MATCH_FOUND, deadline, b_buf
+        )
+        role_b, seed_b = _parse_match_found(payload_b)
+        assert any(t == MsgType.ROOM_INFO for t, _ in earlier_b)
+
+        deadline = time.monotonic() + RECV_TIMEOUT
+        payload_a, earlier_a = _recv_until(
+            a, MsgType.MATCH_FOUND, deadline, a_buf
+        )
+        role_a, seed_a = _parse_match_found(payload_a)
+        assert any(t == MsgType.ROOM_INFO for t, _ in earlier_a)
+
+        assert seed_a == seed_b
+        assert {role_a, role_b} == {1, 2}
+    finally:
+        a.close()
+        b.close()
+
+
 def test_room_join_nonexistent_code_gets_notfound() -> None:
     try:
         s = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)

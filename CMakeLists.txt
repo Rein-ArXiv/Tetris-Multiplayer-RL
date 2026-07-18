@@ -310,6 +310,16 @@ if (TETRIS_BUILD_TEST)
         ${TETRIS_SIM_HEADERS}
     )
     target_include_directories(sim_hash_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+    add_executable(worker_group_test
+        tests/worker_group_test.cpp
+        server/worker_group.h
+    )
+    target_include_directories(worker_group_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (NOT WIN32)
+        find_package(Threads REQUIRED)
+        target_link_libraries(worker_group_test PRIVATE Threads::Threads)
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------

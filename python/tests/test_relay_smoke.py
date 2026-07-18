@@ -99,3 +99,35 @@ def test_relay_queue_decline_closes_both() -> None:
     finally:
         a.close()
         b.close()
+
+
+def test_relay_preserves_cancel_coalesced_with_queue_join() -> None:
+    """QUEUE_JOIN과 같은 TCP read에 온 CANCEL은 큐 단계에서 유실되지 않는다."""
+    try:
+        cancelled = socket.create_connection(
+            (RELAY_HOST, RELAY_PORT), timeout=1.0
+        )
+    except OSError:
+        pytest.skip(f"relay not running on {RELAY_HOST}:{RELAY_PORT}")
+
+    b = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    c = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    try:
+        cancelled.sendall(
+            build_frame(MsgType.QUEUE_JOIN, b"\x00")
+            + build_frame(MsgType.QUEUE_CANCEL, b"")
+        )
+        # B가 들어오면 matcher가 선두의 취소 프레임을 확인하고 제거한다.
+        time.sleep(0.05)
+        b.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+        time.sleep(0.05)
+        c.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+
+        role_b, seed_b = _recv_match_found(b)
+        role_c, seed_c = _recv_match_found(c)
+        assert seed_b == seed_c
+        assert {role_b, role_c} == {1, 2}
+    finally:
+        cancelled.close()
+        b.close()
+        c.close()

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -14,7 +15,10 @@ namespace relay {
 // until every running callback has released its references.
 class WorkerGroup {
 public:
-    explicit WorkerGroup(const char* name) noexcept : name_(name) {}
+    explicit WorkerGroup(
+        const char* name,
+        size_t maxActive = std::numeric_limits<size_t>::max()) noexcept
+        : name_(name), maxActive_(maxActive) {}
 
     ~WorkerGroup()
     {
@@ -31,6 +35,11 @@ public:
         {
             std::lock_guard<std::mutex> lk(mu_);
             if (!accepting_) return false;
+            if (active_ >= maxActive_) {
+                std::fprintf(stderr, "[%s] worker limit reached (%zu)\n",
+                             name_, maxActive_);
+                return false;
+            }
             ++active_;
         }
 
@@ -91,6 +100,7 @@ private:
     std::mutex mu_;
     std::condition_variable cv_;
     size_t active_{0};
+    const size_t maxActive_;
     bool accepting_{true};
 };
 

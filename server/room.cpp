@@ -85,8 +85,8 @@ void RoomRegistry::sendRoomInfoIfCurrent_(
     uint8_t status, uint8_t peerCount, uint64_t expectedVersion) {
     // 새 상태가 먼저 기록됐다면 이전 알림을 생략한다. 이전 알림이 이미 송신
     // 중이면 새 알림은 같은 방의 게이트 뒤에서 기다리므로 wire 순서도 보장된다.
-    const size_t shard = std::hash<std::string>{}(code) % kRoomInfoShardCount;
-    std::lock_guard<std::mutex> sendLk(roomInfoMu_[shard]);
+    const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
+    std::lock_guard<std::mutex> sendLk(roomSendMu_[shard]);
     {
         std::lock_guard<std::mutex> lk(mu);
         auto it = rooms.find(code);
@@ -96,6 +96,14 @@ void RoomRegistry::sendRoomInfoIfCurrent_(
         }
     }
     sendRoomInfo_(sock, code, status, peerCount);
+}
+
+bool RoomRegistry::sendRoomFrame_(const std::string& code,
+                                  const net::TcpSocket& sock,
+                                  const std::vector<uint8_t>& frame) {
+    const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
+    std::lock_guard<std::mutex> sendLk(roomSendMu_[shard]);
+    return net::tcp_send_all(sock, frame.data(), frame.size());
 }
 
 void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
@@ -140,6 +148,11 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
     bool entered = false;
     uint64_t roomInfoVersion = 0;
     {
+        // send gate를 먼저 잡은 뒤 guestPresent를 공개한다. 반대 순서면 host
+        // roomLoop가 그 사이 guest를 발견하고 CHAT/READY를 ROOM_INFO보다 먼저
+        // 보낼 수 있다. 모든 중첩 잠금은 send gate -> state mu 순서를 따른다.
+        const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
+        std::unique_lock<std::mutex> sendLk(roomSendMu_[shard]);
         std::unique_lock<std::mutex> lk(mu);
         auto it = rooms.find(code);
         if (it == rooms.end()) {
@@ -171,9 +184,17 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         net::TcpSocket gs = r.guestSock;
         roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
         lk.unlock();
-        sendRoomInfoIfCurrent_(hs, code, kStatusWaiting, 2, roomInfoVersion);
-        sendRoomInfoIfCurrent_(gs, code, kStatusWaiting, 2, roomInfoVersion);
-        entered = true;
+        {
+            std::lock_guard<std::mutex> stateLk(mu);
+            auto current = rooms.find(code);
+            entered = current != rooms.end() &&
+                      current->second.roomInfoVersion == roomInfoVersion;
+        }
+        if (entered) {
+            // 두 참가자의 ROOM_INFO 사이에도 READY/CHAT이 끼지 않는다.
+            sendRoomInfo_(hs, code, kStatusWaiting, 2);
+            sendRoomInfo_(gs, code, kStatusWaiting, 2);
+        }
     }
     if (entered) {
         std::cerr << "[room] conn=" << conn_id << " joined " << code << "\n";
@@ -230,7 +251,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                     if (hasFwd) {
                         std::vector<uint8_t> p; p.push_back(ready ? 1 : 0);
                         auto out = net::build_frame(net::MsgType::READY, p);
-                        net::tcp_send_all(fwd, out.data(), out.size());
+                        sendRoomFrame_(code, fwd, out);
                     }
                 } else if (f.type == net::MsgType::ROOM_LEAVE) {
                     leaveRequested = true;
@@ -249,7 +270,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                     }
                     if (hasFwd) {
                         auto out = net::build_frame(net::MsgType::CHAT, f.payload);
-                        net::tcp_send_all(fwd, out.data(), out.size());
+                        sendRoomFrame_(code, fwd, out);
                     }
                 }
                 // 다른 타입(HELLO 등)은 이 단계에서는 무시

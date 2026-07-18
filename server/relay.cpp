@@ -23,7 +23,11 @@ namespace relay {
 namespace {
 
 std::atomic<bool> s_stopping{false};
-WorkerGroup s_workers{"relay"};
+// queue lobby와 양방향 forwarder도 모두 detached thread이므로 연결 워커와
+// 별도로 상한을 둔다. 빠른 QUEUE_JOIN 플러드가 첫-frame 워커를 즉시 통과해
+// 무제한 lobby thread를 만드는 경로까지 이 그룹이 차단한다.
+constexpr size_t kMaxRelayWorkers = 512;
+WorkerGroup s_workers{"relay", kMaxRelayWorkers};
 
 // MATCH_SUMMARY 페이로드 구조 (net/framing.h 에 명시된 정확히 21 바이트):
 //   [won:1][my_score:4 LE][my_lines:4 LE]

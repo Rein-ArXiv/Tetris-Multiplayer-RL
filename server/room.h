@@ -101,14 +101,17 @@ private:
                                 const std::string& code,
                                 uint8_t status, uint8_t peerCount,
                                 uint64_t expectedVersion);
+    bool sendRoomFrame_(const std::string& code,
+                        const net::TcpSocket& sock,
+                        const std::vector<uint8_t>& frame);
 
     std::mutex              mu;
     std::condition_variable cv;
     std::unordered_map<std::string, Entry> rooms;
-    // 방별 ROOM_INFO 순서를 유지하면서 느린 소켓 하나가 모든 방을 막지 않도록
-    // 코드 해시로 나눈 송신 게이트를 사용한다.
-    static constexpr size_t kRoomInfoShardCount = 64;
-    std::array<std::mutex, kRoomInfoShardCount> roomInfoMu_;
+    // 같은 방에서 동일 소켓으로 향하는 ROOM_INFO/READY/CHAT 프레임이 서로
+    // interleave되지 않도록 코드 해시로 나눈 송신 게이트를 사용한다.
+    static constexpr size_t kRoomSendShardCount = 64;
+    std::array<std::mutex, kRoomSendShardCount> roomSendMu_;
     std::atomic<bool>       stopping{false};
     uint64_t                code_rng_state_ = 0;
     uint64_t                seed_state_     = 0;

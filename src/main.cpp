@@ -136,7 +136,8 @@ static int clamp_bot_input_interval(int ticks)
 
 static std::string normalize_model_key(const std::filesystem::path& path)
 {
-    return path.lexically_normal().generic_string();
+    // BotOnnx의 Windows 로더가 UTF-8로 해석하는 경로 계약.
+    return path.lexically_normal().generic_u8string();
 }
 
 static std::string bot_name_from_path(const std::filesystem::path& path)

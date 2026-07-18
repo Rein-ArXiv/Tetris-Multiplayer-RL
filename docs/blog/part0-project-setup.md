@@ -118,7 +118,7 @@ Tetris-Multiplayer-RL/
 │
 ├── renderer/              ← CPU 2D 소프트웨어 렌더러
 │   ├── renderer.h/.cpp    ← ARGB32 framebuffer, rect, alpha blend
-│   ├── software_internal.h← 텍스트/이미지가 공유하는 픽셀 API
+│   ├── software_internal.h ← 텍스트/이미지가 공유하는 픽셀 API
 │   ├── text_software.cpp  ← stb_truetype CPU 글리프 캐시
 │   ├── shake.h/.cpp       ← 화면 흔들림
 │   └── image.h/.cpp       ← PNG decode, CPU sampling/tint/rotation
@@ -374,7 +374,7 @@ endif()
 - **`TETRIS_BUILD_RELAY`** — `tetris_relay` 매치메이킹 서버. 기본 OFF — 릴레이 호스트에서만 켠다.
 - **`TETRIS_BUILD_META`** — `tetris_meta` HTTP+SQLite 메타/RP 서버. 기본 OFF — 별도 호스트에서만 켠다.
 - **`TETRIS_BUILD_BOT`** — ONNX Runtime 링크. OFF 라도 `bot/bot_onnx.cpp` 는 컴파일되지만 `TETRIS_HAS_ONNXRUNTIME` 매크로가 미정의라 **스텁 모드**로 빌드돼, ONNX 모델에 대한 `Load()` 가 실패한다. 다만 "Single vs Bot" 자체는 내장 휴리스틱 봇으로 항상 열 수 있고, 학습 모델만 ONNX Runtime 이 있을 때 추가로 선택 가능하다.
-- **`TETRIS_USE_SDL2`** — 백엔드 선택. Windows 는 OFF(= Win32 handmade), 그 외는 ON(= SDL2). 이 값이 `platform/*.cpp`, `renderer/text_*.cpp`, `audio/*.cpp` 세 쌍의 선택을 동시에 결정한다.
+- **`TETRIS_USE_SDL2`** — 플랫폼 백엔드 선택. Windows 는 OFF(= Win32 창/GDI 표시/XAudio2), 그 외는 ON(= SDL2 창/surface 표시/audio). CPU 렌더러와 `text_software.cpp` 는 어느 쪽에서도 공통이다.
 
 CMake 명령줄에서는 `-DTETRIS_BUILD_RELAY=ON` 처럼 넘긴다.
 

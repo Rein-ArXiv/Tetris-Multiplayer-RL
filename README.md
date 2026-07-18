@@ -114,7 +114,7 @@ make release-linux
 | 옵션 | 기본값 | 결과 | 설명 |
 |---|---:|---|---|
 | `TETRIS_BUILD_GAME` | ON | `tetris` | 게임 클라이언트 |
-| `TETRIS_BUILD_TEST` | ON | `sim_hash_dump` | 결정론 해시 회귀 테스트 |
+| `TETRIS_BUILD_TEST` | ON | `sim_hash_dump`, `worker_group_test` | 결정론 해시와 relay worker 수명 회귀 테스트 |
 | `TETRIS_BUILD_RELAY` | OFF | `tetris_relay` | TCP 릴레이/룸/매치메이킹 서버 |
 | `TETRIS_BUILD_META` | OFF | `tetris_meta` | HTTP+SQLite guest/랭킹/리더보드 서버 |
 | `TETRIS_BUILD_PY` | OFF | `tetris_py` | pybind11 기반 Python 시뮬레이션 모듈 |

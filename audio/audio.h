@@ -36,3 +36,18 @@ void audio_play_music(AudioHandle handle);
 
 // BGM 정지.
 void audio_stop_music();
+
+// ─── 설정 토글 (렌더/오디오 전용 — SimGame/결정성 해시와 무관) ──────────────────
+// BGM on/off. off: 음악 보이스 정지. on: 마지막으로 재생한 음악을 다시 재생.
+// 내부에 s_musicEnabled + 마지막 음악 핸들을 기억해 on 시 자동 복원한다.
+void audio_set_music_enabled(bool on);
+
+// SFX on/off. off: audio_play_sound 가 no-op 이 된다.
+void audio_set_sfx_enabled(bool on);
+
+// ─── 볼륨 (0.0~1.0, 설정 화면 슬라이더가 구동) ─────────────────────────────────
+// BGM 볼륨. 0 == 음소거. 믹스 시점에 음악 샘플에 이 게인을 곱한다.
+void audio_set_music_volume(float v01);
+
+// SFX 볼륨. 0 == 음소거. 재생되는 각 효과음에 이 게인을 곱한다.
+void audio_set_sfx_volume(float v01);

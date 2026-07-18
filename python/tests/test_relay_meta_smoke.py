@@ -97,6 +97,47 @@ def _recv_match_found(sock: socket.socket, timeout: float = 5.0) -> tuple[int, i
     raise TimeoutError("no MATCH_FOUND within deadline")
 
 
+def test_relay_sigterm_drains_active_match() -> None:
+    """SIGTERM 중 active forwarder가 server-owned state보다 먼저 종료된다."""
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if not relay_bin:
+        pytest.skip("tetris_relay binary missing")
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [str(relay_bin), "--port", str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if not _wait_listen(port, 5.0):
+        proc.kill()
+        pytest.fail("tetris_relay failed to listen")
+
+    a = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    b = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    try:
+        a.sendall(_build_queue_join(""))
+        b.sendall(_build_queue_join(""))
+        _recv_match_found(a)
+        _recv_match_found(b)
+        a.sendall(build_frame(MsgType.READY, b"\x01"))
+        b.sendall(build_frame(MsgType.READY, b"\x01"))
+        time.sleep(0.1)
+
+        proc.terminate()
+        try:
+            return_code = proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("relay did not drain active match within 3 seconds")
+        assert return_code == 0
+    finally:
+        a.close()
+        b.close()
+        if proc.poll() is None:
+            proc.kill()
+
+
 @pytest.fixture
 def meta_and_relay(tmp_path):
     meta_bin  = _find_bin("tetris_meta",  "TETRIS_META_BIN")

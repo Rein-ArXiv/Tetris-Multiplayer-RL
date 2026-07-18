@@ -9,6 +9,7 @@
 
 #include <vector>
 #include <string>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -336,12 +337,14 @@ bool image_size(ImageHandle h, int& w_out, int& h_out)
 }
 
 // ─── 드로우 ──────────────────────────────────────────────────────────────────
+// 공통 제출 경로 — verts 는 (xy, uv) 6 vertex (24 float). draw_image 계열이
+// 축 정렬 쿼드를, draw_image_rotated 가 회전된 쿼드를 만들어 넘긴다.
+static void submit_sprite_verts(ImageHandle h, const float verts[24],
+                                float tr, float tg, float tb, float ta);
+
 static void draw_image_impl(ImageHandle h, int x, int y, int w, int ht,
                             float tr, float tg, float tb, float ta)
 {
-    if (h <= 0 || (size_t)h >= s_images.size() || !s_images[h].used) return;
-    if (!s_sprite_prog) return;
-
     float fx = (float)x, fy = (float)y;
     float fw = (float)w, fh = (float)ht;
 
@@ -357,6 +360,14 @@ static void draw_image_impl(ImageHandle h, int x, int y, int w, int ht,
         fx + fw, fy + fh,    1.0f, 1.0f,
         fx + fw, fy,         1.0f, 0.0f,
     };
+    submit_sprite_verts(h, verts, tr, tg, tb, ta);
+}
+
+static void submit_sprite_verts(ImageHandle h, const float verts[24],
+                                float tr, float tg, float tb, float ta)
+{
+    if (h <= 0 || (size_t)h >= s_images.size() || !s_images[h].used) return;
+    if (!s_sprite_prog) return;
 
     glUseProgram(s_sprite_prog);
     glUniformMatrix4fv(s_sprite_proj, 1, GL_FALSE, renderer_get_proj());
@@ -371,7 +382,8 @@ static void draw_image_impl(ImageHandle h, int x, int y, int w, int ht,
 
     glBindVertexArray(s_sprite_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_sprite_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+    // verts 는 배열 파라미터(=포인터) — sizeof(verts) 는 포인터 크기이므로 금지.
+    glBufferData(GL_ARRAY_BUFFER, 24 * sizeof(float), verts, GL_DYNAMIC_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 
@@ -389,4 +401,26 @@ void draw_image_tinted(ImageHandle h, int x, int y, int w, int h_px, Color tint)
     draw_image_impl(h, x, y, w, h_px,
                     tint.r / 255.0f, tint.g / 255.0f,
                     tint.b / 255.0f, tint.a / 255.0f);
+}
+
+void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
+                        float angle_deg)
+{
+    // 4 꼭짓점을 CPU 에서 (cx,cy) 중심으로 회전. 화면 y 가 아래로 증가하는
+    // 좌표계라 angle 양수 = 시계방향.
+    const float a  = angle_deg * 3.14159265f / 180.0f;
+    const float c  = std::cos(a), s = std::sin(a);
+    const float hw = (float)w * 0.5f, hh = (float)h_px * 0.5f;
+    auto rx = [&](float px, float py) { return (float)cx + px * c - py * s; };
+    auto ry = [&](float px, float py) { return (float)cy + px * s + py * c; };
+    const float verts[24] = {
+        // pos                          uv
+        rx(-hw, -hh), ry(-hw, -hh),     0.0f, 0.0f,
+        rx(-hw,  hh), ry(-hw,  hh),     0.0f, 1.0f,
+        rx( hw,  hh), ry( hw,  hh),     1.0f, 1.0f,
+        rx(-hw, -hh), ry(-hw, -hh),     0.0f, 0.0f,
+        rx( hw,  hh), ry( hw,  hh),     1.0f, 1.0f,
+        rx( hw, -hh), ry( hw, -hh),     1.0f, 0.0f,
+    };
+    submit_sprite_verts(h, verts, 1.0f, 1.0f, 1.0f, 1.0f);
 }

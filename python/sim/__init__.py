@@ -1,7 +1,7 @@
 """Headless Tetris simulation — Python wrapper around the C++ ``tetris_py`` module.
 
 This package re-exports the native pybind11 module ``tetris_py`` so that the rest
-of the codebase (training in Colab, netbot inference on Windows, tests) can use a
+of the codebase (training in Colab, parity/determinism tests) can use a
 single stable import path::
 
     from sim import SimGame, Placement

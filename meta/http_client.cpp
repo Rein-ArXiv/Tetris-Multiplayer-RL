@@ -97,10 +97,12 @@ std::optional<AuthInfo> parse_auth_info_body(const std::string& body)
     auto uname = proto::find_string(body, "username");  // null 이면 ""
     auto elo = proto::find_int   (body, "elo");
     auto bp  = proto::find_int   (body, "bp");
+    auto xp  = proto::find_int   (body, "xp");          // 구 서버 응답엔 없음 → 0
     auto icon = proto::find_string(body, "selected_icon_id");
     if (!pid || !elo || !bp || icon.empty()) return std::nullopt;
     return AuthInfo{ *pid, std::move(uname), static_cast<int>(*elo),
-                     static_cast<int>(*bp), std::move(icon) };
+                     static_cast<int>(*bp), static_cast<int>(xp.value_or(0)),
+                     std::move(icon) };
 }
 
 } // namespace
@@ -145,6 +147,23 @@ httplib::Result post_json(const MetaClient& mc, const std::string& host, int por
     return cli.Post(path, headers, body, "application/json");
 }
 
+httplib::Result get_path(const std::string& host, int port, bool https,
+                         const char* path, int timeout_s)
+{
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    if (https) {
+        httplib::SSLClient cli(host, port);
+        configure_client(cli, timeout_s);
+        return cli.Get(path);
+    }
+#else
+    (void)https;
+#endif
+    httplib::Client cli(host, port);
+    configure_client(cli, timeout_s);
+    return cli.Get(path);
+}
+
 } // namespace
 
 std::optional<GuestInfo>
@@ -165,13 +184,15 @@ MetaClient::request_guest(int timeout_s)
     auto tok = proto::find_string(r->body, "token");
     auto elo = proto::find_int   (r->body, "elo");
     auto bp  = proto::find_int   (r->body, "bp");
+    auto xp  = proto::find_int   (r->body, "xp");
     auto icon = proto::find_string(r->body, "selected_icon_id");
     if (!pid || tok.empty() || !elo || !bp || icon.empty()) {
         std::fprintf(stderr, "[meta-client] /v1/guest bad response\n");
         return std::nullopt;
     }
     return GuestInfo{ *pid, std::move(tok), static_cast<int>(*elo),
-                      static_cast<int>(*bp), std::move(icon) };
+                      static_cast<int>(*bp), static_cast<int>(xp.value_or(0)),
+                      std::move(icon) };
 }
 
 std::optional<AuthInfo>
@@ -213,31 +234,89 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
     return parsed;
 }
 
+std::optional<std::vector<IconEntry>>
+MetaClient::fetch_icon_catalog(int timeout_s)
+{
+    if (!valid_) return std::nullopt;
+    auto r = get_path(host_, port_, https_, "/v1/icons/catalog", timeout_s);
+    if (!r || r->status != 200) {
+        std::fprintf(stderr, "[meta-client] /v1/icons/catalog %s\n",
+                     r ? "HTTP error" : "network error");
+        return std::nullopt;
+    }
+    // 응답은 평탄한 객체들의 배열: [{"id":..,"name":..,"price_bp":..,"default_owned":..}, ...]
+    // 행 내부엔 중첩 객체가 없지만, name 문자열에 '}' 가 들어가도 깨지지 않도록
+    // 문자열 리터럴(따옴표, 백슬래시 이스케이프)을 건너뛰며 매칭 '}' 를 찾는다.
+    std::vector<IconEntry> out;
+    const std::string& body = r->body;
+    size_t pos = 0;
+    while ((pos = body.find('{', pos)) != std::string::npos) {
+        size_t end = std::string::npos;
+        bool inStr = false;
+        for (size_t i = pos + 1; i < body.size(); ++i) {
+            const char c = body[i];
+            if (inStr) {
+                if (c == '\\') { ++i; continue; }   // 이스케이프된 다음 char 스킵
+                if (c == '"')  inStr = false;
+            } else if (c == '"') {
+                inStr = true;
+            } else if (c == '}') {
+                end = i; break;
+            }
+        }
+        if (end == std::string::npos) break;
+        const std::string obj = body.substr(pos, end - pos + 1);
+        pos = end + 1;
+
+        IconEntry e;
+        e.id   = proto::find_string(obj, "id");
+        e.name = proto::find_string(obj, "name");
+        auto price = proto::find_int (obj, "price_bp");
+        auto owned = proto::find_bool(obj, "default_owned");
+        if (e.id.empty() || !price || !owned) continue;  // 알 수 없는 행은 스킵
+        e.price_bp      = static_cast<int>(*price);
+        e.default_owned = *owned;
+        if (e.name.empty()) e.name = e.id;
+        out.push_back(std::move(e));
+    }
+    if (out.empty()) {
+        std::fprintf(stderr, "[meta-client] /v1/icons/catalog empty/bad response\n");
+        return std::nullopt;
+    }
+    return out;
+}
+
 std::optional<AuthInfo>
 MetaClient::purchase_icon(const std::string& token,
                           const std::string& icon_id,
-                          int timeout_s)
+                          int timeout_s, int* out_http_status)
 {
+    if (out_http_status) *out_http_status = 0;
     if (!valid_ || token.empty() || icon_id.empty()) return std::nullopt;
     std::string body = std::string("{\"token\":\"") + proto::json_escape(token)
                      + "\",\"icon_id\":\"" + proto::json_escape(icon_id) + "\"}";
     auto r = post_json(*this, host_, port_, https_, "/v1/icons/buy", {},
                        body, timeout_s);
-    if (!r || r->status != 200) return std::nullopt;
+    if (!r) return std::nullopt;
+    if (out_http_status) *out_http_status = r->status;
+    if (r->status != 200) return std::nullopt;
     return parse_auth_info_body(r->body);
 }
 
 std::optional<AuthInfo>
 MetaClient::select_icon(const std::string& token,
                         const std::string& icon_id,
-                        int timeout_s)
+                        int timeout_s, int* out_http_status)
 {
+    if (out_http_status) *out_http_status = 0;
     if (!valid_ || token.empty() || icon_id.empty()) return std::nullopt;
     std::string body = std::string("{\"token\":\"") + proto::json_escape(token)
                      + "\",\"icon_id\":\"" + proto::json_escape(icon_id) + "\"}";
     auto r = post_json(*this, host_, port_, https_, "/v1/icons/select", {},
                        body, timeout_s);
-    if (!r || r->status != 200) return std::nullopt;
+    if (!r) return std::nullopt;
+    if (out_http_status) *out_http_status = r->status;
+    if (r->status != 200) return std::nullopt;
     return parse_auth_info_body(r->body);
 }
 
@@ -359,6 +438,13 @@ std::string token_file_path()
     auto base = user_data_dir();
     if (base.empty()) return {};
     return (base / "Tetris" / "token").string();
+}
+
+std::string settings_file_path()
+{
+    auto base = user_data_dir();
+    if (base.empty()) return {};
+    return (base / "Tetris" / "settings.cfg").string();
 }
 
 std::string load_token()

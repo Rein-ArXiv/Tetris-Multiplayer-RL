@@ -15,7 +15,7 @@ namespace relay {
 class Matchmaker;
 class RoomRegistry;
 
-// playerConnThread 는 detached 스레드에서 실행됨.
+// playerConnThread 는 서버가 활성 수를 추적하는 worker에서 실행됨.
 // 첫 프레임이:
 //   - QUEUE_JOIN   → matchmaker 에 등록 후 종료
 //   - ROOM_CREATE  → RoomRegistry::handleCreate 로 이관 (내부에서 블로킹)

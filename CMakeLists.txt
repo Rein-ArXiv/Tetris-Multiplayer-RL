@@ -14,8 +14,8 @@ endif()
 # -----------------------------------------------------------------------------
 # Build options
 #
-#   TETRIS_BUILD_GAME  — Handmade Win32+OpenGL game executable.
-#                         Currently Win32-only. SDL2 크로스플랫폼 경로는 Part A 에서.
+#   TETRIS_BUILD_GAME  — Game executable. Windows 기본은 handmade Win32+OpenGL,
+#                         macOS/Linux 기본은 SDL2+OpenGL.
 #   TETRIS_BUILD_PY    — pybind11 module (tetris_py) wrapping SimGame. Portable.
 #   TETRIS_BUILD_TEST  — SimGame determinism regression (sim_hash_dump). Portable.
 #   TETRIS_BUILD_RELAY — Headless matchmaking/relay server (server/*.cpp).
@@ -29,8 +29,8 @@ option(TETRIS_BUILD_RELAY "Build the tetris_relay matchmaking server"       OFF)
 # Typically deployed on a separate machine (e.g. Mac mini) to keep the relay stateless.
 option(TETRIS_BUILD_META  "Build the tetris_meta HTTP+SQLite metadata server" OFF)
 # TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
-# OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 실행 시 모델 로드가
-# 항상 실패 → 메뉴에서 Single vs Bot 이 회색 비활성으로 표시된다.
+# OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
+# 실패한다. Single vs Bot과 내장 휴리스틱 봇은 그대로 사용할 수 있다.
 option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
 option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is available" ON)
 option(TETRIS_ENABLE_DEBUG_UI "Enable in-game debug overlays in the game client" OFF)
@@ -276,7 +276,7 @@ if (TETRIS_BUILD_GAME)
 endif()
 
 # -----------------------------------------------------------------------------
-# Target: tetris_py (pybind11 module — Colab + local Python bot)
+# Target: tetris_py (pybind11 module — Colab training + parity tests)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_PY)
     # cmake 4.0+ removed FindPythonInterp/FindPythonLibs; tell pybind11 to use
@@ -371,10 +371,8 @@ endif()
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
 # 역할: 별도 기기(Mac mini 등)에서 돌아가는 독립 서비스.
-#       · SQLite 로 player/match/elo_history 영속화
-#       · cpp-httplib 로 4개 엔드포인트 제공:
-#           POST /v1/guest, POST /v1/auth/verify,
-#           POST /v1/matches, GET  /v1/leaderboard
+#       · SQLite 로 player/match/rating history/icon ownership 영속화
+#       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
 #       · relay 는 무상태 유지 — matchmaking 경로에서 HTTP 호출만 붙인다.
 #
 # 서드파티: third_party/sqlite3.{c,h} + third_party/httplib.h (헤더 온리).
@@ -411,6 +409,7 @@ if (TETRIS_BUILD_META)
         meta/database.h
         meta/api_server.h
         meta/elo.h
+        meta/levels.h
         meta/protocol.h
     )
     target_include_directories(tetris_meta PRIVATE

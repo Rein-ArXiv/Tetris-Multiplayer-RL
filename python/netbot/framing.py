@@ -66,7 +66,7 @@ class MsgType(enum.IntEnum):
     ROOM_LEAVE = 16     # C→S: empty payload
     READY = 17          # C→S, S→C(forward): [ready:1] (1=ready, 0=not)
 
-    # Section K — 메타/ELO 연동.
+    # Section K — 메타/RP 연동(프로토콜 필드명은 하위 호환상 elo 유지).
     MATCH_SUMMARY = 18  # C→S: [won:1][my_score:4][my_lines:4]
                         #      [opp_score_observed:4][opp_lines_observed:4]
                         #      [duration_s:4]   (LE, 21 bytes total)

@@ -160,7 +160,8 @@ bool ApiServer::listen(const std::string& host, int port)
                 auto p = db_.registerGuest(token);
                 if (p) {
                     set_json(res, 200, proto::guest_response(
-                        p->id, p->token, p->elo, p->bp, p->selected_icon_id));
+                        p->id, p->token, p->elo, p->bp, p->xp,
+                        p->selected_icon_id));
                     std::fprintf(stderr, "[meta] guest player_id=%lld\n",
                                  static_cast<long long>(p->id));
                     return;
@@ -184,7 +185,7 @@ bool ApiServer::listen(const std::string& host, int port)
             }
             set_json(res, 200,
                 proto::auth_response(p->id, p->username, p->elo,
-                                     p->bp, p->selected_icon_id));
+                                     p->bp, p->xp, p->selected_icon_id));
         });
 
     // ------- GET /v1/icons/catalog -----------------------------------------
@@ -212,7 +213,8 @@ bool ApiServer::listen(const std::string& host, int port)
             switch (db_.purchaseIcon(token, icon, p)) {
             case IconPurchaseResult::Ok:
                 set_json(res, 200, proto::auth_response(
-                    p->id, p->username, p->elo, p->bp, p->selected_icon_id));
+                    p->id, p->username, p->elo, p->bp, p->xp,
+                    p->selected_icon_id));
                 return;
             case IconPurchaseResult::UnknownToken:
                 set_json(res, 404, proto::error_json("unknown_token")); return;
@@ -241,7 +243,8 @@ bool ApiServer::listen(const std::string& host, int port)
             switch (db_.selectIcon(token, icon, p)) {
             case IconSelectResult::Ok:
                 set_json(res, 200, proto::auth_response(
-                    p->id, p->username, p->elo, p->bp, p->selected_icon_id));
+                    p->id, p->username, p->elo, p->bp, p->xp,
+                    p->selected_icon_id));
                 return;
             case IconSelectResult::UnknownToken:
                 set_json(res, 404, proto::error_json("unknown_token")); return;
@@ -284,7 +287,7 @@ bool ApiServer::listen(const std::string& host, int port)
                 return;
             }
             // winner 가 있다면 player_a 또는 player_b 중 하나여야 한다.
-            // 그렇지 않으면 ELO 갱신이 두 플레이어 모두 losses 만 누적하는 잘못된
+            // 그렇지 않으면 RP 갱신이 두 플레이어 모두 losses 만 누적하는 잘못된
             // 상태를 만든다 (saveMatch 가 winner != a && winner != b 인 분기에서
             // 둘 다 패배 처리). 외부에 노출되는 API 이므로 여기서 막는다.
             if (wn && (*wn != *pa && *wn != *pb)) {
@@ -338,7 +341,8 @@ bool ApiServer::listen(const std::string& host, int port)
             std::vector<proto::LeaderRow> out;
             out.reserve(rows.size());
             for (const auto& r : rows) {
-                out.push_back({ r.player_id, r.username, r.elo, r.wins, r.losses });
+                out.push_back({ r.player_id, r.username, r.elo, r.wins,
+                                r.losses, r.xp });
             }
             set_json(res, 200, proto::leaderboard_response(out));
         });

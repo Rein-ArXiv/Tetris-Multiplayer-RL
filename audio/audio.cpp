@@ -46,6 +46,16 @@ static std::vector<SoundData>    s_sounds;
 static AudioHandle               s_currentMusic = 0;
 static IXAudio2SourceVoice*      s_musicVoice   = nullptr;
 
+// 설정 토글 (렌더/오디오 전용 — SimGame/결정성과 무관).
+static bool                      s_musicEnabled = true;
+static bool                      s_sfxEnabled   = true;
+static AudioHandle               s_lastMusic    = 0;  // 마지막 요청 BGM (off→on 복원용)
+
+// 카테고리별 볼륨 (0.0~1.0). 설정 슬라이더가 구동. 음악은 음악 보이스에
+// SetVolume, SFX 는 재생 시점에 각 소스 보이스에 SetVolume 로 적용한다.
+static float                     s_musicVol     = 1.0f;
+static float                     s_sfxVol       = 1.0f;
+
 // SFX 보이스 풀
 static constexpr int             MAX_SFX_VOICES = 8;
 static IXAudio2SourceVoice*      s_sfxVoices[MAX_SFX_VOICES] = {};
@@ -251,6 +261,10 @@ void audio_unload_sound(AudioHandle handle)
     // BGM 이 이 핸들을 사용 중이면 정지
     if (s_currentMusic == handle)
         audio_stop_music();
+    // 음악이 토글 off 상태(s_currentMusic == 0)로 언로드되는 경우에도
+    // 언로드된 핸들로의 off→on 복원은 막는다.
+    if (s_lastMusic == handle)
+        s_lastMusic = 0;
 
     s_sounds[handle].pcmData.clear();
     s_sounds[handle].pcmData.shrink_to_fit();
@@ -260,6 +274,7 @@ void audio_unload_sound(AudioHandle handle)
 void audio_play_sound(AudioHandle handle)
 {
     if (!s_initialized) return;
+    if (!s_sfxEnabled) return;
     if (handle <= 0 || handle >= static_cast<int>(s_sounds.size())) return;
     if (!s_sounds[handle].valid) return;
 
@@ -324,18 +339,17 @@ void audio_play_sound(AudioHandle handle)
     buf.pAudioData = sd.pcmData.data();
     buf.Flags      = XAUDIO2_END_OF_STREAM;
 
+    s_sfxVoices[slot]->SetVolume(s_sfxVol);
     s_sfxVoices[slot]->SubmitSourceBuffer(&buf);
     s_sfxVoices[slot]->Start();
 }
 
-void audio_play_music(AudioHandle handle)
+// 실제 BGM 보이스를 생성·시작한다 (s_musicEnabled 검사는 호출부가 한다).
+static void start_music_voice(AudioHandle handle)
 {
     if (!s_initialized) return;
     if (handle <= 0 || handle >= static_cast<int>(s_sounds.size())) return;
     if (!s_sounds[handle].valid) return;
-
-    // 기존 BGM 정지
-    audio_stop_music();
 
     const SoundData& sd = s_sounds[handle];
 
@@ -354,9 +368,25 @@ void audio_play_music(AudioHandle handle)
     buf.Flags      = XAUDIO2_END_OF_STREAM;
     buf.LoopCount  = XAUDIO2_LOOP_INFINITE;
 
+    s_musicVoice->SetVolume(s_musicVol);
     s_musicVoice->SubmitSourceBuffer(&buf);
     s_musicVoice->Start();
     s_currentMusic = handle;
+}
+
+void audio_play_music(AudioHandle handle)
+{
+    if (!s_initialized) return;
+    if (handle <= 0 || handle >= static_cast<int>(s_sounds.size())) return;
+    if (!s_sounds[handle].valid) return;
+
+    // 기존 BGM 정지
+    audio_stop_music();
+
+    // off→on 복원을 위해 항상 마지막 요청 핸들을 기억하고,
+    // 음악이 켜져 있을 때만 실제로 시작한다.
+    s_lastMusic = handle;
+    if (s_musicEnabled) start_music_voice(handle);
 }
 
 void audio_stop_music()
@@ -369,4 +399,47 @@ void audio_stop_music()
         s_musicVoice = nullptr;
     }
     s_currentMusic = 0;
+    // 명시적 정지는 off→on 복원 대상도 지운다 (SDL 백엔드와 동일 의미).
+    // 토글 off 경로(audio_set_music_enabled)는 여길 거치지 않아 복원이 유지된다.
+    s_lastMusic = 0;
+}
+
+void audio_set_music_enabled(bool on)
+{
+    s_musicEnabled = on;
+    if (!s_initialized) return;
+    if (on) {
+        // 마지막으로 요청된 음악을 다시 재생 (아직 재생 중이 아니면).
+        if (!s_musicVoice && s_lastMusic > 0) start_music_voice(s_lastMusic);
+    } else {
+        // 음악 보이스만 정지. s_lastMusic 은 유지 — on 시 복원.
+        if (s_musicVoice)
+        {
+            s_musicVoice->Stop();
+            s_musicVoice->FlushSourceBuffers();
+            s_musicVoice->DestroyVoice();
+            s_musicVoice = nullptr;
+        }
+        s_currentMusic = 0;
+    }
+}
+
+void audio_set_sfx_enabled(bool on)
+{
+    s_sfxEnabled = on;
+}
+
+void audio_set_music_volume(float v01)
+{
+    if (v01 < 0.0f) v01 = 0.0f;
+    if (v01 > 1.0f) v01 = 1.0f;
+    s_musicVol = v01;
+    if (s_musicVoice) s_musicVoice->SetVolume(s_musicVol);  // 재생 중이면 즉시 반영
+}
+
+void audio_set_sfx_volume(float v01)
+{
+    if (v01 < 0.0f) v01 = 0.0f;
+    if (v01 > 1.0f) v01 = 1.0f;
+    s_sfxVol = v01;  // 다음 audio_play_sound 부터 적용
 }

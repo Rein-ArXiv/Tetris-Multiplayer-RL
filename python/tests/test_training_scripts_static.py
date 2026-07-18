@@ -14,6 +14,7 @@ def test_colab_training_scripts_parse() -> None:
     root = Path(__file__).resolve().parents[1]
     for rel in [
         "train/rl_common.py",
+        "train/ppo_tetris.py",
         "train/dqn_tetris.py",
         "train/cbmpi_tetris.py",
         "train/muzero_tetris.py",

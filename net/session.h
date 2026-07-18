@@ -154,7 +154,7 @@ public:
     // Section K — 랭킹 연동 (tetris_meta).
     //   SendMatchSummary: 게임오버 진입 시 1회 송신. won + 자기/상대 관측치.
     //   GetMatchResult:   relay 가 POST /v1/matches 결과를 돌려주면 채워짐.
-    //                     delta=0 은 "ranking offline" 시그널. 한번 돌아온 결과는
+    //                     delta=0 은 offline/검증 실패 등 RP 무변동. 한번 돌아온 결과는
     //                     호출 시마다 true 반환 (누적 플래그 아님 — Session 재사용 시
     //                     ClearGameOverChoices 에서 함께 리셋).
     void SendMatchSummary(uint8_t won,

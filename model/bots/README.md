@@ -1,6 +1,9 @@
 # Bot model roster
 
-Put exported ONNX policies here to make them appear separately in `Single vs Bot`.
+Put exported ONNX policies here to make them appear separately in
+`Single vs Bot`. The game must be built with `TETRIS_BUILD_BOT=ON` and a
+compatible ONNX Runtime bundle to load them. The built-in heuristic entry is
+available without either dependency.
 
 Example layout:
 

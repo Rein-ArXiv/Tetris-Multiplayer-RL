@@ -1,4 +1,4 @@
-// bot/placement.cpp — Python netbot 로직의 C++ 포트. 자세한 설명은 .h 참고.
+// bot/placement.cpp — placement/관측 로직의 C++ 구현. Python 동등성 계약은 .h 참고.
 #include "placement.h"
 
 #include "../src/sim_game.h"

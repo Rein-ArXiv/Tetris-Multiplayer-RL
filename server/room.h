@@ -70,12 +70,12 @@ private:
 
         // 인증 메타 (meta 연동 시 채워짐. 0 = unranked)
         int64_t        hostPlayerId  = 0;
-        int            hostElo       = 1200;
+        int            hostElo       = 0;
         std::string    hostUsername;
         std::string    hostToken;
         std::string    hostSelectedIconId{"default"};
         int64_t        guestPlayerId = 0;
-        int            guestElo      = 1200;
+        int            guestElo      = 0;
         std::string    guestUsername;
         std::string    guestToken;
         std::string    guestSelectedIconId{"default"};

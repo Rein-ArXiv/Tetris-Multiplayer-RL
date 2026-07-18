@@ -35,10 +35,11 @@ CREATE TABLE IF NOT EXISTS players (
   id          INTEGER PRIMARY KEY,
   username    TEXT,
   token       TEXT UNIQUE NOT NULL,
-  elo         INTEGER NOT NULL DEFAULT 1200,
+  elo         INTEGER NOT NULL DEFAULT 0,
   wins        INTEGER NOT NULL DEFAULT 0,
   losses      INTEGER NOT NULL DEFAULT 0,
   bp          INTEGER NOT NULL DEFAULT 0,
+  xp          INTEGER NOT NULL DEFAULT 0,
   selected_icon_id TEXT NOT NULL DEFAULT 'default',
   created_at  INTEGER NOT NULL
 );
@@ -73,6 +74,13 @@ CREATE TABLE IF NOT EXISTS elo_history (
   created_at  INTEGER NOT NULL
 );
 
+-- PRAGMA user_version 은 sqlite3 .dump/.restore 에 보존되지 않는다. 데이터
+-- 테이블의 marker도 함께 기록해 데이터 변환 마이그레이션을 멱등하게 만든다.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name        TEXT PRIMARY KEY,
+  applied_at  INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_players_elo    ON players(elo DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_played ON matches(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_elo_pid        ON elo_history(player_id);
@@ -86,6 +94,16 @@ const IconCatalogEntry kIconCatalog[] = {
     {"ruby",    "Ruby",    100, false},
     {"gold",    "Gold",    250, false},
 };
+
+// BP(Battle Point) 적립 — 아이콘 상점의 재화. winner 가 있는(ranked 판정된)
+// 매치만 적립한다 (RP 갱신 조건과 동일). 무승부/검증실패는 0.
+constexpr int kBpWin  = 30;
+constexpr int kBpLoss = 10;
+
+// XP(레벨 경험치) 적립 — BP 와 같은 조건(winner 있는 매치만). 절대 감소하지
+// 않는다. 레벨 곡선/최대치는 meta/levels.h.
+constexpr int kXpWin  = 100;
+constexpr int kXpLoss = 50;
 
 // username 컬럼을 Player 구조체로 복사. NULL 처리.
 std::optional<std::string> read_nullable_text(sqlite3_stmt* s, int col)
@@ -108,7 +126,7 @@ std::optional<Player> read_player_by_token(sqlite3* db, const std::string& token
 {
     StmtGuard g;
     const char* sql =
-        "SELECT id,username,token,elo,wins,losses,bp,selected_icon_id "
+        "SELECT id,username,token,elo,wins,losses,bp,xp,selected_icon_id "
         "FROM players WHERE token=?1";
     if (sqlite3_prepare_v2(db, sql, -1, &g.s, nullptr) != SQLITE_OK) {
         std::fprintf(stderr, "[db] getByToken prepare: %s\n", sqlite3_errmsg(db));
@@ -132,7 +150,8 @@ std::optional<Player> read_player_by_token(sqlite3* db, const std::string& token
     p.wins     = sqlite3_column_int  (g.s, 4);
     p.losses   = sqlite3_column_int  (g.s, 5);
     p.bp       = sqlite3_column_int  (g.s, 6);
-    const unsigned char* icon = sqlite3_column_text(g.s, 7);
+    p.xp       = sqlite3_column_int  (g.s, 7);
+    const unsigned char* icon = sqlite3_column_text(g.s, 8);
     p.selected_icon_id = icon ? reinterpret_cast<const char*>(icon) : kDefaultIconId;
     if (!find_icon_def(p.selected_icon_id)) p.selected_icon_id = kDefaultIconId;
     return p;
@@ -212,6 +231,57 @@ void Database::execSchema()
     };
     alter_if_needed("ALTER TABLE players ADD COLUMN bp INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE players ADD COLUMN selected_icon_id TEXT NOT NULL DEFAULT 'default'");
+    alter_if_needed("ALTER TABLE players ADD COLUMN xp INTEGER NOT NULL DEFAULT 0");
+
+    // ── 1회성 스케일 마이그레이션 (user_version 0 → 1) ─────────────────────
+    //   구 ELO 스케일(1200 시작)을 RP 스케일(0 시작/0 바닥)로 이관:
+    //   elo := max(0, elo - 1200). 신규 DB 는 이 시점에 players 가 비어 있어
+    //   no-op 이고, 버전만 1 로 올라간다. (meta/elo.h 참조)
+    int userVersion = 0;
+    {
+        sqlite3_stmt* s = nullptr;
+        if (sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &s, nullptr) == SQLITE_OK
+            && sqlite3_step(s) == SQLITE_ROW)
+            userVersion = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+    }
+    bool rpRebaseApplied = false;
+    {
+        StmtGuard g;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT 1 FROM schema_migrations WHERE name='elo_to_rp_v1'",
+                -1, &g.s, nullptr) != SQLITE_OK)
+            throw std::runtime_error("schema migration marker prepare failed");
+        rpRebaseApplied = sqlite3_step(g.s) == SQLITE_ROW;
+    }
+
+    if (!rpRebaseApplied) {
+        char* mErr = nullptr;
+        // user_version>=1 인 기존 DB는 구 구현에서 이미 리베이스됐다. 이 경우
+        // 데이터는 다시 건드리지 않고 dump에 보존될 marker만 백필한다.
+        const char* migrationSql = userVersion < 1
+            ? "BEGIN IMMEDIATE;"
+              "UPDATE players SET elo = MAX(0, elo - 1200);"
+              "UPDATE elo_history SET "
+                "elo_before = MAX(0, elo_before - 1200),"
+                "elo_after  = MAX(0, elo_after  - 1200),"
+                "delta = MAX(0, elo_after - 1200) - MAX(0, elo_before - 1200);"
+              "INSERT INTO schema_migrations(name,applied_at) "
+                "VALUES('elo_to_rp_v1',strftime('%s','now'));"
+              "PRAGMA user_version = 1;"
+              "COMMIT;"
+            : "BEGIN IMMEDIATE;"
+              "INSERT INTO schema_migrations(name,applied_at) "
+                "VALUES('elo_to_rp_v1',strftime('%s','now'));"
+              "COMMIT;";
+        if (sqlite3_exec(db_, migrationSql,
+                nullptr, nullptr, &mErr) != SQLITE_OK) {
+            std::string msg = mErr ? mErr : "";
+            sqlite3_free(mErr);
+            sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+            throw std::runtime_error("elo->rp rebase migration failed: " + msg);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -223,7 +293,7 @@ Database::registerGuest(const std::string& token)
     StmtGuard g;
     const char* sql =
         "INSERT INTO players(username,token,elo,wins,losses,created_at) "
-        "VALUES(NULL,?1,1200,0,0,?2)";
+        "VALUES(NULL,?1,0,0,0,?2)";
     if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) {
         std::fprintf(stderr, "[db] registerGuest prepare: %s\n", sqlite3_errmsg(db_));
         return std::nullopt;
@@ -242,10 +312,11 @@ Database::registerGuest(const std::string& token)
     Player p;
     p.id      = sqlite3_last_insert_rowid(db_);
     p.token   = token;
-    p.elo     = 1200;
+    p.elo     = 0;
     p.wins    = 0;
     p.losses  = 0;
     p.bp      = 0;
+    p.xp      = 0;
     p.selected_icon_id = kDefaultIconId;
     // username 은 기본 NULL
     insert_icon_ownership(db_, p.id, kDefaultIconId);
@@ -392,7 +463,7 @@ Database::saveMatch(const MatchRecord& m)
         match_id = sqlite3_last_insert_rowid(db_);
     }
 
-    // 2) ELO 읽기 + 계산
+    // 2) RP 읽기 + 계산(내부 컬럼/함수명 elo 는 하위 호환상 유지)
     auto get_elo = [&](int64_t pid, int& out) -> bool {
         StmtGuard g;
         if (sqlite3_prepare_v2(db_, "SELECT elo FROM players WHERE id=?1", -1,
@@ -425,16 +496,18 @@ Database::saveMatch(const MatchRecord& m)
         }
     }
 
-    // 3) UPDATE players (winner 가 있을 때만 elo + wins/losses 갱신).
+    // 3) UPDATE players (winner 가 있을 때만 elo + wins/losses + bp 갱신).
     if (m.winner) {
         auto update_player = [&](int64_t pid, int new_elo, bool won) -> bool {
             StmtGuard g;
             const char* sql = won
-                ? "UPDATE players SET elo=?1, wins=wins+1   WHERE id=?2"
-                : "UPDATE players SET elo=?1, losses=losses+1 WHERE id=?2";
+                ? "UPDATE players SET elo=?1, wins=wins+1,     bp=bp+?3, xp=xp+?4 WHERE id=?2"
+                : "UPDATE players SET elo=?1, losses=losses+1, bp=bp+?3, xp=xp+?4 WHERE id=?2";
             if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return false;
             sqlite3_bind_int  (g.s, 1, new_elo);
             sqlite3_bind_int64(g.s, 2, pid);
+            sqlite3_bind_int  (g.s, 3, won ? kBpWin : kBpLoss);
+            sqlite3_bind_int  (g.s, 4, won ? kXpWin : kXpLoss);
             return sqlite3_step(g.s) == SQLITE_DONE;
         };
         if (!update_player(m.player_a, elo_a_after, a_won)) return rollback("update player_a");
@@ -485,7 +558,7 @@ Database::leaderboard(int limit)
 
     StmtGuard g;
     const char* sql =
-        "SELECT id,username,elo,wins,losses FROM players "
+        "SELECT id,username,elo,wins,losses,xp FROM players "
         "ORDER BY elo DESC, id ASC LIMIT ?1";
     if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) {
         std::fprintf(stderr, "[db] leaderboard prepare: %s\n", sqlite3_errmsg(db_));
@@ -501,6 +574,7 @@ Database::leaderboard(int limit)
         r.elo       = sqlite3_column_int(g.s, 2);
         r.wins      = sqlite3_column_int(g.s, 3);
         r.losses    = sqlite3_column_int(g.s, 4);
+        r.xp        = sqlite3_column_int(g.s, 5);
         rows.push_back(std::move(r));
     }
     return rows;

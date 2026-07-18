@@ -20,6 +20,7 @@
 #include "../meta/http_client.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -146,6 +147,12 @@ int main(int argc, char** argv) {
     relay::Matchmaker   mm;
     relay::RoomRegistry rr;
 
+    // 연결 worker는 완료 즉시 detach되지만 활성 수를 추적한다. 종료 시 이 카운터를
+    // drain한 뒤 mm/rr/meta를 파괴해 참조 수명을 보장한다.
+    std::mutex connWorkerMu;
+    std::condition_variable connWorkerCv;
+    size_t activeConnWorkers = 0;
+
     // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작.
     // meta 가 있으면 post_match 를 호출할 수 있도록 포인터를 startPump 에 넘긴다.
     meta::client::MetaClient* mcPtr = metaClient.get();
@@ -173,16 +180,33 @@ int main(int argc, char** argv) {
         }
         const uint32_t id = next_conn_id++;
         std::cout << "[relay] accept conn=" << id << "\n";
-        std::thread(relay::playerConnThread,
-                    std::move(client), id, std::ref(mm), std::ref(rr), mcPtr).detach();
+        {
+            std::lock_guard<std::mutex> lk(connWorkerMu);
+            ++activeConnWorkers;
+        }
+        std::thread([client = std::move(client), id, &mm, &rr, mcPtr,
+                     &connWorkerMu, &connWorkerCv, &activeConnWorkers]() mutable {
+            relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
+            {
+                std::lock_guard<std::mutex> lk(connWorkerMu);
+                --activeConnWorkers;
+            }
+            connWorkerCv.notify_all();
+        }).detach();
     }
 
     std::cout << "[relay] shutting down...\n";
+    relay::beginShutdown();
     net::tcp_close(g_listen_sock);
     g_listen_sock = net::TcpSocket{};  // 마지막 참조 해제 → 실제 fd close
     mm.shutdown();
     rr.shutdown();
     if (matcher.joinable()) matcher.join();
+    {
+        std::unique_lock<std::mutex> lk(connWorkerMu);
+        connWorkerCv.wait(lk, [&] { return activeConnWorkers == 0; });
+    }
+    relay::waitForShutdown();
     net::net_shutdown();
     std::cout << "[relay] done\n";
     return 0;

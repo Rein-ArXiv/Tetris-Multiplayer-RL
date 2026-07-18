@@ -103,3 +103,22 @@ double platform_get_time();
 
 // renderer.cpp 에서 wglUseFontBitmaps 호출 시 HDC 필요
 void*  platform_get_hdc();
+
+// ─── 윈도우 설정 (렌더/UI 전용 — SimGame/결정성과 무관) ──────────────────────────
+// 창 크기를 (w,h) 로 바꾸고 화면 중앙에 재배치. glViewport 갱신.
+// GUI 는 platform_init 에 넘긴 논리 크기(720×640)를 기준 좌표로 쓰므로,
+// 마우스 좌표는 항상 논리 좌표로 역매핑된다 (아래 platform_mouse_x/y 참고).
+void   platform_set_window_size(int w, int h);
+
+// 전체화면 토글. on=true 면 데스크톱-해상도 전체화면(FULLSCREEN_DESKTOP),
+// off 면 창 모드로 복귀. 전체화면에서 모니터 종횡비가 논리(9:8) 와 다르면
+// 9:8 을 유지하는 레터박스 뷰포트로 그려 왜곡을 막는다.
+void   platform_set_fullscreen(bool on);
+
+// 이 백엔드가 전체화면을 실제로 지원하는가. SDL 백엔드는 true,
+// Win32 백엔드는 미구현이라 false. 설정 화면이 false 면 Fullscreen 행을
+// 비활성(회색) 으로 그려 "켜도 아무 일 없는" 거짓 토글을 막는다.
+bool   platform_fullscreen_supported();
+
+// VSync on/off. SDL_GL_SetSwapInterval(on?1:0).
+void   platform_set_vsync(bool on);

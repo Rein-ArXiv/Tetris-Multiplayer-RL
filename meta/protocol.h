@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "levels.h"   // xp -> level 유도 (응답에 level 을 함께 실어준다)
+
 namespace meta::proto {
 
 // --- JSON 문자열 escape (쌍따옴표/백슬래시/제어문자만. UTF-8 그대로 통과) -----
@@ -63,6 +65,7 @@ inline std::string guest_response(int64_t player_id,
                                   const std::string& token,
                                   int elo,
                                   int bp,
+                                  int xp,
                                   const std::string& selected_icon_id)
 {
     std::ostringstream ss;
@@ -70,6 +73,8 @@ inline std::string guest_response(int64_t player_id,
        << ",\"token\":\""   << json_escape(token) << "\""
        << ",\"elo\":"       << elo
        << ",\"bp\":"        << bp
+       << ",\"xp\":"        << xp
+       << ",\"level\":"     << levels::level_for_xp(xp)
        << ",\"selected_icon_id\":\"" << json_escape(selected_icon_id) << "\""
        << "}";
     return ss.str();
@@ -80,6 +85,7 @@ inline std::string auth_response(int64_t player_id,
                                  const std::optional<std::string>& username,
                                  int elo,
                                  int bp,
+                                 int xp,
                                  const std::string& selected_icon_id)
 {
     std::ostringstream ss;
@@ -89,6 +95,8 @@ inline std::string auth_response(int64_t player_id,
     else          ss << "null";
     ss << ",\"elo\":" << elo
        << ",\"bp\":" << bp
+       << ",\"xp\":" << xp
+       << ",\"level\":" << levels::level_for_xp(xp)
        << ",\"selected_icon_id\":\"" << json_escape(selected_icon_id) << "\""
        << "}";
     return ss.str();
@@ -117,7 +125,7 @@ inline std::string icon_catalog_response(const std::vector<IconRow>& rows)
     return ss.str();
 }
 
-// POST /v1/matches 응답 — 양 플레이어의 ELO 변동.
+// POST /v1/matches 응답 — 양 플레이어의 RP 변동(필드명 elo_* 는 하위 호환용).
 struct SideDelta {
     int elo_before;
     int elo_after;
@@ -145,6 +153,7 @@ struct LeaderRow {
     int         elo;
     int         wins;
     int         losses;
+    int         xp;
 };
 inline std::string leaderboard_response(const std::vector<LeaderRow>& rows)
 {
@@ -160,6 +169,7 @@ inline std::string leaderboard_response(const std::vector<LeaderRow>& rows)
         ss << ",\"elo\":" << r.elo
            << ",\"wins\":" << r.wins
            << ",\"losses\":" << r.losses
+           << ",\"level\":" << levels::level_for_xp(r.xp)
            << "}";
         if (i + 1 < rows.size()) ss << ",";
     }

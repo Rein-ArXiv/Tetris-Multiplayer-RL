@@ -38,6 +38,13 @@ void draw_image(ImageHandle h, int x, int y, int w, int h_px);
 // tint 는 RGBA 각 채널에 곱해짐. {255,255,255,255} = 원본.
 void draw_image_tinted(ImageHandle h, int x, int y, int w, int h_px, Color tint);
 
+// 회전 드로우 — (cx, cy) 가 중심, angle_deg 는 시계방향(화면 y 가 아래로
+// 증가하므로 표준 수학 좌표계의 반시계와 반대). 쿼드 4꼭짓점을 CPU 에서
+// 회전시켜 올리므로 셰이더는 draw_image 와 동일하다. 메뉴/상점의 실시간
+// 회전 아이콘용 (매 프레임 angle 을 증가시키며 호출).
+void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
+                        float angle_deg);
+
 // 이미지 크기 질의 — 원본 너비/높이가 필요할 때 (예: 자연 크기로 드로우).
 //   반환 false = 핸들 무효.
 bool image_size(ImageHandle h, int& w_out, int& h_out);

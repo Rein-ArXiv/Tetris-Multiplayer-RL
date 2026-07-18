@@ -1,10 +1,10 @@
 #pragma once
 
-// meta/api_server.h — cpp-httplib 위에 라우팅을 얹어 4개 엔드포인트 제공.
+// meta/api_server.h — cpp-httplib 기반 public/meta API 라우팅.
 //
 //   POST /v1/guest           익명 guest 플레이어 생성
 //   POST /v1/auth/verify     토큰 검증 (relay 가 QUEUE_JOIN 수신 후 호출)
-//   POST /v1/matches         경기 결과 저장 + ELO 업데이트 (relay secret 보호 가능)
+//   POST /v1/matches         경기 결과 저장 + RP 업데이트 (relay secret 보호 가능)
 //   GET  /v1/leaderboard     상위 N명 조회
 //   GET  /v1/icons/catalog   아이콘 카탈로그
 //   POST /v1/icons/buy       BP 차감 + 아이콘 소유권 부여

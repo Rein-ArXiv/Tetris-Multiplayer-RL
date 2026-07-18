@@ -6,8 +6,8 @@ Dellacherie's algorithm and many follow-up works. They're useful in two ways:
 1. As a sanity check: a linear combination of these features beats random play
    by orders of magnitude. If your trained policy can't outscore the BCTS
    baseline, training has a bug.
-2. As an actual baseline opponent for the netbot when no checkpoint exists yet
-   (``RuleBasedRunner`` in netbot/policy_runner.py).
+2. As a board evaluator inside training loops (``bcts_score`` is used by the
+   CBMPI/DQN reward shaping in python/train/).
 
 The feature set:
 

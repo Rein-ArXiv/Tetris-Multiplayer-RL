@@ -13,7 +13,8 @@
 //   · 런타임 실패 (schema/쿼리) → fprintf(stderr) 로 로그 + nullopt 반환.
 //     호출자가 HTTP 500 으로 바꿔서 클라이언트에게 전달.
 //
-// 스키마: players, matches, elo_history (3 테이블). WAL + foreign keys + NORMAL.
+// 스키마: players, player_icons, matches, elo_history, schema_migrations.
+// WAL + foreign keys + NORMAL.
 
 #include <cstdint>
 #include <mutex>
@@ -29,10 +30,11 @@ struct Player {
     int64_t     id;
     std::optional<std::string> username;
     std::string token;
-    int         elo;
+    int         elo;    // RP (0 시작 / 0 바닥 스케일 — meta/elo.h 참조)
     int         wins;
     int         losses;
     int         bp;
+    int         xp;     // 누적 경험치 (감소하지 않음 — 레벨은 meta/levels.h 로 유도)
     std::string selected_icon_id;
 };
 
@@ -44,7 +46,7 @@ struct IconCatalogEntry {
 };
 
 struct MatchRecord {
-    // winner=std::nullopt → 무승부/검증실패 (ELO 미반영).
+    // winner=std::nullopt → 무승부/검증실패 (RP 미반영).
     int64_t                    player_a;
     int64_t                    player_b;
     std::optional<int64_t>     winner;
@@ -73,6 +75,7 @@ struct LeaderRow {
     int                        elo;
     int                        wins;
     int                        losses;
+    int                        xp;
 };
 
 enum class IconSelectResult {
@@ -119,12 +122,12 @@ public:
                                     const std::string& icon_id,
                                     std::optional<Player>& out_player);
 
-    // 매치 기록 + ELO 업데이트 (winner != nullopt 일 때만).
+    // 매치 기록 + RP 업데이트 (winner != nullopt 일 때만).
     // 단일 트랜잭션 안에서 matches INSERT → players UPDATE × 2 → elo_history × 2.
     // 실패 시 nullopt (모두 롤백).
     std::optional<MatchInsertResult> saveMatch(const MatchRecord& m);
 
-    // ELO 내림차순 상위 N명. limit 은 1..100 으로 clamp.
+    // RP 내림차순 상위 N명. limit 은 1..100 으로 clamp.
     std::vector<LeaderRow> leaderboard(int limit);
 
 private:

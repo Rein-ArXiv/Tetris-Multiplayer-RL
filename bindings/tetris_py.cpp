@@ -3,7 +3,8 @@
 // Exposes the headless Tetris simulation to Python so that the same C++
 // source of truth drives both:
 //   - Colab training loops (placement-level API)
-//   - the local netbot client (frame-level API for lockstep TCP play)
+//   - parity/equivalence tests (frame-level API: framing + input-mask
+//     expansion checked against the C++ lockstep path)
 //
 // Build with -DTETRIS_BUILD_PY=ON. raylib is NOT required — this module only
 // links against the pure sim sources.
@@ -14,7 +15,7 @@
 //   for p in g.legal_placements():
 //       print(p.col, p.rot)
 //   g.apply_placement(4, 0)
-//   arr = g.grid()                # numpy (20, 10) int32 view
+//   arr = g.grid()                # numpy (20, 10) int32 copy
 //   h   = g.state_hash()          # bitwise-equal to C++ SimGame::StateHash()
 
 #include <pybind11/pybind11.h>
@@ -77,10 +78,32 @@ PYBIND11_MODULE(tetris_py, m)
             return SimGame(g);
         }, "Return a deep copy of the full deterministic sim state.")
 
+        // ---- Combat / garbage API (RL versus env) ----
+        // attack_lines_sent() is a running session total; the versus env takes
+        // the delta across an apply_placement() and routes it to the opponent
+        // via add_pending_garbage(). Pending garbage is injected at the bottom
+        // on that board's next lock (apply_placement / move_block_down).
+        .def("attack_lines_sent", &SimGame::AttackLinesSent,
+             "Cumulative attack lines this board has sent (monotonic). Take the "
+             "delta across a placement to get the attack from that placement.")
+        .def("pending_garbage", &SimGame::PendingGarbage,
+             "Garbage rows queued to be injected on this board's next lock.")
+        .def("add_pending_garbage", &SimGame::AddPendingGarbage, py::arg("rows"),
+             "Queue `rows` garbage lines onto this board (injected on next lock). "
+             "Negative/zero is ignored. Used to route an opponent's attack.")
+        .def("last_lines_cleared", [](const SimGame& g) { return g.lastLinesCleared; },
+             "Lines cleared by the most recent lock (0..4). Useful for reward.")
+        .def("last_garbage_received", [](const SimGame& g) { return g.lastGarbageReceived; },
+             "Garbage rows actually injected at the most recent lock.")
+        .def("total_lines_cleared", [](const SimGame& g) { return g.totalLinesCleared; },
+             "Cumulative lines cleared this game.")
+        .def("level", [](const SimGame& g) { return g.level; },
+             "Current gravity/speed level (1..20, +1 per 10 lines).")
+
         // Frame-level action API (lockstep net play)
         .def("submit_input", &SimGame::SubmitInput, py::arg("input_mask"),
-             "Apply a one-tick input bitmask (see core/input.h). Used by the "
-             "netbot client to feed frame-level actions into the lockstep loop.")
+             "Apply a one-tick input bitmask (see core/input.h). Retained for "
+             "frame-level parity/equivalence tests against the lockstep loop.")
         .def("tick", &SimGame::Tick,
              "Advance the gravity counter by one tick. Time-only progression "
              "separate from input.")

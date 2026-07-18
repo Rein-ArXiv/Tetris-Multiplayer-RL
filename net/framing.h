@@ -26,7 +26,8 @@ enum class MsgType : uint8_t {
     //
     // QUEUE_JOIN / ROOM_CREATE / ROOM_JOIN 은 모두 tetris_meta 인증 토큰을
     // 같이 실어 보낸다. 토큰은 32 hex chars (플랫폼 user-data 경로에 저장).
-    // 토큰이 없거나 relay 가 meta 에 연결 못 하면 소켓을 즉시 close.
+    // ranked relay(--meta)는 토큰이 없거나 검증에 실패하면 소켓을 close한다.
+    // unranked relay(meta 없음)는 tok_len==0을 허용한다.
     QUEUE_JOIN    = 10,  // C→S : [tok_len:1][token:N]   (tok_len==0 이면 미인증)
     QUEUE_CANCEL  = 11,  // C→S : 빈 페이로드 (매치메이킹 큐 취소)
     MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
@@ -42,13 +43,13 @@ enum class MsgType : uint8_t {
     ROOM_LEAVE  = 16,  // C→S : 빈 페이로드
     READY       = 17,  // C→S, S→C(forward) : [ready:1]  (1=ready, 0=not)
 
-    // Section K — 메타데이터/ELO 연동. 투명 릴레이 구간이 아니라 relay 가
+    // Section K — 메타데이터/RP 연동. 투명 릴레이 구간이 아니라 relay 가
     // 가로채서 meta 로 POST /v1/matches 를 날리고 MATCH_RESULT 로 돌려준다.
     MATCH_SUMMARY = 18,  // C→S : [won:1][my_score:4 LE][my_lines:4 LE]
                          //        [opp_score_observed:4 LE][opp_lines_observed:4 LE]
                          //        [duration_s:4 LE]  (총 21 바이트)
     MATCH_RESULT  = 19,  // S→C : [elo_before:4 LE][elo_after:4 LE][delta:4 LE signed]
-                         //   delta=0 은 offline/unranked/검증 실패 등 ELO 변동 없음.
+                         //   필드명 elo_* 는 하위 호환용. 값은 RP이며 delta=0은 무변동.
 
     CHAT        = 20,  // 양방향 : [text_len:2 LE][utf8:N] (릴레이가 통과 포워딩)
 };

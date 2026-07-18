@@ -1,21 +1,20 @@
 """Translate placement-level decisions into per-tick frame inputs.
 
-The trained policy and the rule-based baseline both pick a target placement
-``(col, rot)``, but the lockstep wire protocol can only carry one frame
-bitmask per tick. This module converts a placement decision into a sequence
-of single-tick masks (rotate -> translate -> hard-drop).
+The trained policy and rule-based baseline pick a target placement
+``(col, rot)``, while the C++ game loop consumes one input bitmask per tick.
+This parity helper converts a placement into the same single-tick sequence
+used by ``bot/placement.cpp`` (rotate -> translate -> hard-drop).
 
-If the policy proposes an illegal placement, the caller falls back to
-:func:`fallback_placement` (first legal placement) so the bot keeps moving.
-Wire-level divergence is caught by the host's periodic HASH cross-check.
+If a policy proposes an illegal placement, :func:`fallback_placement` returns
+the first legal placement. Regression tests keep this module aligned with the
+C++ implementation; the runtime in-process bot uses the C++ implementation.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-# Mirror of core/input.h - kept here so the netbot doesn't depend on building
-# the C++ binding just to get a constant.
+# Mirror of core/input.h for the Python/C++ placement parity layer.
 INPUT_NONE = 0
 INPUT_LEFT = 1 << 0
 INPUT_RIGHT = 1 << 1

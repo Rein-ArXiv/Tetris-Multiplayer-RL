@@ -2,15 +2,15 @@
 
 `sim` re-exports the native `tetris_py` pybind11 module so the rest of the
 codebase can write `from sim import SimGame` regardless of whether the build
-artifact is `tetris_py.cpython-311-x86_64-linux-gnu.so` (Colab) or
-`tetris_py.cp311-win_amd64.pyd` (Windows).
+artifact is a platform/version-specific `.so` (Linux/macOS) or `.pyd`
+(Windows).
 
 The native module is **not** auto-built. Build it once per platform.
 
 ## Linux / Colab
 
-The setup notebook (`python/train/setup_colab.ipynb`) does this for you. The
-manual equivalent is:
+The Colab notebook (`python/train/train_model_zoo_colab.ipynb`) does this in
+its setup cells. The manual equivalent is:
 
 ```bash
 sudo apt-get install -y cmake g++ python3-dev
@@ -62,8 +62,8 @@ print(branch.apply_placement(g.legal_placements()[0].col, g.legal_placements()[0
 
 The printed `state_hash` value must be **identical** between Linux and Windows
 builds with the same seed. If they diverge, the cross-platform determinism
-gate has failed and any RL policy trained on one platform will desync when
-deployed on the other.
+gate has failed; training and in-game inference may then observe different
+states and choose different placements.
 
 Use the C++ `sim_hash_dump` test driver to compare:
 

@@ -55,7 +55,8 @@ static TcpSocket make_owned(int fd) {
 
 // [NET] 네트워킹 초기화(Windows 전용)
 bool net_init() {
-    if (g_inited) return true;
+    if (g_inited)
+        return true;
 #ifdef _WIN32
     WSADATA wsaData;
     int r = WSAStartup(MAKEWORD(2,2), &wsaData);

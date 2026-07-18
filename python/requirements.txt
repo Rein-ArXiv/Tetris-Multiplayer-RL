@@ -1,4 +1,4 @@
-# pip fallback for lightweight local tests and rule-based netbot runtime.
+# pip fallback for lightweight local tests.
 #
 # The canonical local workflow is now the root pyproject.toml:
 #   uv sync --dev

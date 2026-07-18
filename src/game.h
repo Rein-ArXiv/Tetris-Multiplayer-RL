@@ -7,6 +7,10 @@
 #include "../platform/platform.h"  // Color (raylib 대체)
 #include "../audio/audio.h"
 
+// 고스트 피스 표시 on/off (렌더 전용 — 설정 화면이 구동). 기본 on.
+// main.cpp 의 GameSettings.ghostOn 변경 시 호출해 Draw 의 고스트 그리기를 게이트.
+void game_set_ghost_enabled(bool on);
+
 // [NET] Handmade 렌더러 래퍼 — SimGame 위에 draw_rect() 기반 렌더링 + XAudio2 오디오.
 // 렌더링은 renderer/renderer.h 의 draw_rect() 를 사용.
 // 오디오는 audio/audio.h 의 XAudio2 래퍼를 사용.

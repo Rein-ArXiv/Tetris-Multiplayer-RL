@@ -100,6 +100,10 @@ public:
     mutable bool clearSoundEvent   = false;
     mutable bool dropSoundEvent    = false;  // 하드드롭(Space) 시
     mutable bool garbageSoundEvent = false;  // 가비지 행 수신 시
+    // 하드드롭 화면 흔들림(약) 트리거용. dropSoundEvent 와 별개 — 그쪽은
+    // 오디오(game.cpp)가 소비·리셋하므로 흔들림이 그것에 의존하면 안 된다.
+    // 렌더 전용 1회 플래그 (해시/lockstep/replay 와 무관).
+    mutable bool hardDropEvent     = false;  // 하드드롭(Space) 시 (흔들림용)
 
     // ---- Combat event flags (Section I) ----
     // LockBlock 내부에서 세팅되고 렌더러(쉐이크/이펙트)가 소비 후 클리어.

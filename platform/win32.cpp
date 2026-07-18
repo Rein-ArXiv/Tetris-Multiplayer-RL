@@ -147,6 +147,12 @@ static bool   s_should_close = false;
 static int    s_win_w        = 0;
 static int    s_win_h        = 0;
 
+// 논리(디자인) 좌표계 크기 — platform_init 에 넘어온 값(720×640). GUI 가 이
+// 좌표계 기준으로 hit-test 하므로, 창이 스케일되면 마우스 좌표를 역매핑한다
+// (SDL 백엔드의 platform_mouse_x/y 와 동일 의미).
+static int    s_logical_w    = 0;
+static int    s_logical_h    = 0;
+
 // 키 상태 테이블: WM_KEYDOWN 에서 true, WM_KEYUP 에서 false
 static bool   s_key_state[256] = {};
 // 직전 프레임의 키 상태 스냅샷 — IsKeyPressed 구현에 사용
@@ -250,6 +256,8 @@ void platform_init(int w, int h, const char* title)
 {
     s_win_w = w;
     s_win_h = h;
+    s_logical_w = w;
+    s_logical_h = h;
 
     // 타이머 초기화: QueryPerformanceFrequency 는 CPU 클럭 주파수를 반환
     QueryPerformanceFrequency(&s_freq);
@@ -395,8 +403,18 @@ char platform_get_char_pressed()
 }
 
 // ─── 마우스 API ───────────────────────────────────────────────────────────────
-int platform_mouse_x() { return s_mouse_x; }
-int platform_mouse_y() { return s_mouse_y; }
+// 원시 클라이언트 픽셀 → 논리(720×640) 좌표 역매핑. platform_set_window_size 로
+// 창이 스케일돼도 GUI hit-test 가 논리 좌표 기준으로 동작하게 한다.
+int platform_mouse_x()
+{
+    if (s_win_w <= 0 || s_logical_w <= 0 || s_win_w == s_logical_w) return s_mouse_x;
+    return (int)((double)s_mouse_x * s_logical_w / s_win_w);
+}
+int platform_mouse_y()
+{
+    if (s_win_h <= 0 || s_logical_h <= 0 || s_win_h == s_logical_h) return s_mouse_y;
+    return (int)((double)s_mouse_y * s_logical_h / s_win_h);
+}
 
 bool platform_mouse_pressed(int button)
 {
@@ -431,7 +449,40 @@ void* platform_get_hdc()
     return (void*)s_hdc;
 }
 
-int platform_win_height()
+// ─── 윈도우 설정 API ──────────────────────────────────────────────────────────
+// SDL 백엔드(platform/sdl.cpp)가 런타임 대상이다. Win32 백엔드는 빌드만
+// 유지되도록 최소 구현/no-op 으로 둔다. 필요해지면 SetWindowPos /
+// ChangeDisplaySettings / wglSwapIntervalEXT 로 확장.
+void platform_set_window_size(int w, int h)
 {
-    return s_win_h;
+    if (!s_hwnd || w <= 0 || h <= 0) return;
+    // 클라이언트 영역이 정확히 (w,h) 가 되도록 외곽(테두리)을 더한다.
+    RECT r = { 0, 0, w, h };
+    DWORD style = (DWORD)GetWindowLongPtr(s_hwnd, GWL_STYLE);
+    AdjustWindowRect(&r, style, FALSE);
+    SetWindowPos(s_hwnd, nullptr, 0, 0,
+                 r.right - r.left, r.bottom - r.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    s_win_w = w; s_win_h = h;
+    if (s_hglrc) glViewport(0, 0, s_win_w, s_win_h);
+}
+
+void platform_set_fullscreen(bool /*on*/)
+{
+    // Win32 전체화면 미구현 (런타임 대상은 SDL). 레터박스 뷰포트도 SDL 쪽에만
+    // 있다 — 여기서는 의도적으로 no-op. (마우스 논리 매핑은 창 스케일용으로
+    // platform_mouse_x/y 에 구현되어 있음.)
+}
+
+// Win32 백엔드는 전체화면 미지원 — 설정 화면이 Fullscreen 행을 비활성으로
+// 그리게 한다 (켜도 no-op 인 거짓 토글 방지).
+bool platform_fullscreen_supported() { return false; }
+
+void platform_set_vsync(bool on)
+{
+    // wglSwapIntervalEXT 가 있으면 사용, 없으면 no-op.
+    typedef BOOL (APIENTRY *PFNWGLSWAPINTERVALEXTPROC)(int);
+    static PFNWGLSWAPINTERVALEXTPROC p =
+        (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
+    if (p) p(on ? 1 : 0);
 }

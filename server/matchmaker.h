@@ -32,7 +32,7 @@ struct PlayerInfo {
     net::TcpSocket sock;
     uint32_t       conn_id{0};  // 로깅용
     int64_t        player_id{0};
-    int            elo{1200};
+    int            elo{0};
     std::string    username;    // empty = guest (no nickname yet)
     std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
     std::string    selected_icon_id{"default"};

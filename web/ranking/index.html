@@ -99,7 +99,8 @@
         <tr>
           <th>Rank</th>
           <th>Player</th>
-          <th class="num">ELO</th>
+          <th class="num">Lv</th>
+          <th class="num">RP</th>
           <th class="num">Wins</th>
           <th class="num losses-col">Losses</th>
         </tr>
@@ -134,6 +135,7 @@
           tr.append(
             cell('rank', `#${row.rank}`),
             cell('player', playerName(row)),
+            cell('num', row.level ?? 1),
             cell('num', row.elo),
             cell('num', row.wins),
             cell('num losses-col', row.losses)

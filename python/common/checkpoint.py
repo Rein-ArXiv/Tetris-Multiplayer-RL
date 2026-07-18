@@ -3,8 +3,8 @@
 The single point of failure for the Colab-train -> local-deploy workflow is a
 silent architecture change: someone bumps a layer size in ``models.py``,
 forgets to bump ``ARCH_VERSION``, retrains in Colab, downloads the .pt file,
-and the netbot loads it (because the keys happen to align) and plays a
-confused policy.
+and ``export_onnx`` loads it (because the keys happen to align) and ships a
+confused policy to the in-game bot.
 
 The save/load helpers here:
 

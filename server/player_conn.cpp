@@ -2,6 +2,7 @@
 
 #include "matchmaker.h"
 #include "room.h"
+#include "relay.h"
 #include "../net/framing.h"
 #include "../meta/http_client.h"
 
@@ -29,11 +30,11 @@ std::string extract_token(const std::vector<uint8_t>& pl, size_t offset)
                        pl.begin() + offset + 1 + n);
 }
 
-// meta 가 nullptr 또는 token 이 비어 있으면 unranked (player_id=0, elo=1200).
+// meta 가 nullptr 또는 token 이 비어 있으면 unranked (player_id=0, elo=0).
 // verify 실패면 std::nullopt → 호출자가 소켓 close.
 struct AuthOutcome {
     int64_t     player_id = 0;
-    int         elo = 1200;
+    int         elo = 0;
     std::string username;
     std::string token;
     std::string selected_icon_id{"default"};
@@ -87,7 +88,7 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
     const auto deadline = std::chrono::steady_clock::now() + kJoinTimeout;
 
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (std::chrono::steady_clock::now() < deadline && !isShuttingDown()) {
         if (!net::tcp_recv_some(sock, stream)) {
             std::cerr << "[conn " << conn_id << "] disconnected before first frame\n";
             net::tcp_close(sock);
@@ -159,7 +160,9 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
         std::this_thread::sleep_for(kPollInterval);
     }
 
-    std::cerr << "[conn " << conn_id << "] first-frame timeout -> close\n";
+    if (!isShuttingDown()) {
+        std::cerr << "[conn " << conn_id << "] first-frame timeout -> close\n";
+    }
     net::tcp_close(sock);
 }
 

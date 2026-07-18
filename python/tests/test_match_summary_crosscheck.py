@@ -1,8 +1,8 @@
 """Cross-check + meta-failure tests for MATCH_SUMMARY → MATCH_RESULT path.
 
 Covers:
-  · 양쪽이 모순된 won/score 를 보고 → relay 가 winner=NULL → ELO 미반영 (delta=0).
-  · 양쪽이 일치하는 won/score 를 보고 → ELO 변동 (+ leaderboard 갱신).
+  · 양쪽이 모순된 won/score 를 보고 → relay 가 winner=NULL → RP 미반영 (delta=0).
+  · 양쪽이 일치하는 won/score 를 보고 → RP 변동 (+ leaderboard 갱신).
   · meta 미기동 상태에서 relay 에 접속 → 즉시 close (verify 거부).
 
 이 테스트들은 게임 시뮬을 실제로 돌리지 않고 클라 → relay 프레임만 직접 만들어
@@ -224,11 +224,11 @@ def test_consistent_summaries_apply_elo(meta_relay):
         ra = _recv_until(a, MsgType.MATCH_RESULT)
         rb = _recv_until(b, MsgType.MATCH_RESULT)
         assert ra is not None and rb is not None
-        # delta != 0 → ELO 적용됨.
+        # 승자 delta > 0 → RP 적용됨. 패자는 0(RP 바닥)에서 시작하므로
+        # 바닥 clamp 으로 delta 0 (meta/elo.h 의 0-시작/0-바닥 스케일).
         delta_a = struct.unpack_from("<i", ra, 8)[0]
         delta_b = struct.unpack_from("<i", rb, 8)[0]
-        assert delta_a > 0 and delta_b < 0
-        assert delta_a == -delta_b  # K-factor 동일 → 합 0
+        assert delta_a > 0 and delta_b == 0
     finally:
         a.close(); b.close()
 
@@ -291,7 +291,7 @@ def test_score_mismatch_no_elo(meta_relay):
         ra = _recv_until(a, MsgType.MATCH_RESULT)
         rb = _recv_until(b, MsgType.MATCH_RESULT)
         assert ra is not None and rb is not None
-        # score 교차 검증 실패 → winner=null → ELO 미반영.
+        # score 교차 검증 실패 → winner=null → RP 미반영.
         delta_a = struct.unpack_from("<i", ra, 8)[0]
         delta_b = struct.unpack_from("<i", rb, 8)[0]
         assert delta_a == 0 and delta_b == 0

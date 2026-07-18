@@ -58,6 +58,7 @@
 #include "../bot/bot_onnx.h"
 #include "../bot/placement.h"
 #include "../meta/http_client.h"
+#include "../meta/levels.h"
 #include <deque>
 
 #ifndef TETRIS_DEFAULT_RELAY_ENDPOINT
@@ -210,6 +211,102 @@ static void apply_bot_config(
     std::filesystem::path p(entry.path);
     it = cfg.find(p.filename().string());
     if (it != cfg.end()) apply(it->second);
+}
+
+// ── 게임 설정 (렌더/오디오 전용) ──────────────────────────────────────────────
+//   settings.cfg (key=value 텍스트) 에 저장. 시작 시 로드, 변경 시마다 저장.
+//   결정성 주의: 아래 플래그는 모두 렌더/오디오에만 영향 — SimGame 상태나
+//   결정성 해시, lockstep 입력 경로를 절대 건드리지 않는다.
+struct GameSettings {
+    int  bgmVol  = 100;   // BGM 볼륨 0~100 (0 == 음소거)
+    int  sfxVol  = 100;   // SFX 볼륨 0~100 (0 == 음소거)
+    bool shakeOn = true;  // 마스터 화면 흔들림 (가비지/게임오버 + 하드드롭)
+    bool hardDropShakeOn = true;  // 하드드롭 시 약한 흔들림 (shakeOn 의 하위)
+    int  windowScale = 0; // 창 스케일 프리셋 0/1/2 → 720x640 / 1080x960 / 1440x1280
+    bool fullscreen  = false;
+    bool vsyncOn     = true;
+    bool ghostOn     = true;  // 고스트 피스 표시
+};
+
+// 창 스케일 프리셋 (9:8 비율 유지). windowScale 인덱스 → (w,h).
+static constexpr int kWindowScaleCount = 3;
+static constexpr int kWindowScaleW[kWindowScaleCount] = { 720, 1080, 1440 };
+static constexpr int kWindowScaleH[kWindowScaleCount] = { 640,  960, 1280 };
+static const char*   kWindowScaleLabel[kWindowScaleCount] = {
+    "720 x 640", "1080 x 960", "1440 x 1280" };
+
+// 전역 설정. apply_self_fx/apply_peer_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
+static GameSettings g_settings;
+
+static bool parse_bool01(const std::string& v, bool fallback)
+{
+    const std::string s = trim_copy(v);
+    if (s == "1" || s == "true"  || s == "on")  return true;
+    if (s == "0" || s == "false" || s == "off") return false;
+    return fallback;
+}
+
+// 정수(예: 볼륨 0~100, 스케일 인덱스) 파싱. lo..hi 로 클램프. 비정상 시 fallback.
+static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
+{
+    const std::string s = trim_copy(v);
+    if (s.empty()) return fallback;
+    char* end = nullptr;
+    long n = std::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str()) return fallback;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return (int)n;
+}
+
+// settings.cfg 로드. 파일이 없으면 기본값 반환 (load_bot_config 와 동일한 스타일).
+static GameSettings load_settings(const char* path)
+{
+    GameSettings s;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return s;
+
+    char line[256];
+    while (std::fgets(line, sizeof(line), f)) {
+        std::string ln(line);
+        const size_t hash = ln.find('#');
+        if (hash != std::string::npos) ln.resize(hash);
+        const size_t eq = ln.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = trim_copy(ln.substr(0, eq));
+        const std::string val = ln.substr(eq + 1);
+        // 볼륨 키 — 신형. 구형 호환: 과거 bgm=1/sfx=0 (bool) 도 받아 0/100 으로.
+        if (key == "bgm_vol")        s.bgmVol = parse_int_clamped(val, s.bgmVol, 0, 100);
+        else if (key == "sfx_vol")   s.sfxVol = parse_int_clamped(val, s.sfxVol, 0, 100);
+        else if (key == "bgm")       s.bgmVol = parse_bool01(val, s.bgmVol > 0) ? 100 : 0;
+        else if (key == "sfx")       s.sfxVol = parse_bool01(val, s.sfxVol > 0) ? 100 : 0;
+        else if (key == "shake")     s.shakeOn = parse_bool01(val, s.shakeOn);
+        else if (key == "harddrop_shake") s.hardDropShakeOn = parse_bool01(val, s.hardDropShakeOn);
+        else if (key == "window_scale")   s.windowScale = parse_int_clamped(val, s.windowScale, 0, kWindowScaleCount - 1);
+        else if (key == "fullscreen")     s.fullscreen = parse_bool01(val, s.fullscreen);
+        else if (key == "vsync")          s.vsyncOn = parse_bool01(val, s.vsyncOn);
+        else if (key == "ghost")          s.ghostOn = parse_bool01(val, s.ghostOn);
+    }
+    std::fclose(f);
+    return s;
+}
+
+// 저장 성공 시 true. 실패(읽기전용 디렉터리 등)면 false — 호출부가
+// fallback 경로로 재시도할 수 있게 결과를 돌려준다.
+static bool save_settings(const char* path, const GameSettings& s)
+{
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fprintf(f, "bgm_vol=%d\n",        s.bgmVol);
+    std::fprintf(f, "sfx_vol=%d\n",        s.sfxVol);
+    std::fprintf(f, "shake=%d\n",          s.shakeOn ? 1 : 0);
+    std::fprintf(f, "harddrop_shake=%d\n", s.hardDropShakeOn ? 1 : 0);
+    std::fprintf(f, "window_scale=%d\n",   s.windowScale);
+    std::fprintf(f, "fullscreen=%d\n",     s.fullscreen ? 1 : 0);
+    std::fprintf(f, "vsync=%d\n",          s.vsyncOn ? 1 : 0);
+    std::fprintf(f, "ghost=%d\n",          s.ghostOn ? 1 : 0);
+    std::fclose(f);
+    return true;
 }
 
 static std::vector<BotEntry> discover_bot_roster()
@@ -494,7 +591,7 @@ static bool parse_port(const std::string& s, uint16_t& port_out)
 }
 
 enum class AppMode {
-    Menu, ConnectInput, Single, BotSingle, BotSelect, Net,
+    Menu, ConnectInput, Single, BotSingle, BotSelect, Net, Settings, Customize,
     // Section D — 커스텀 룸 경로. 릴레이 주소는 CLI 기본값 사용이라
     // 별도 IP 입력 화면(이전의 MatchmakingAddr / RoomRelay)은 제거됨.
     RoomLobby,    // Create / Join 선택 (+ Join 시 코드 입력)
@@ -532,6 +629,48 @@ int main(int argc, char** argv)
     platform_init(720, 640, "Entris");
     renderer_init(720, 640);
     renderer_load_font("Font/NanumGothic.ttf");
+
+    // ── settings.cfg 경로 결정 ────────────────────────────────────────────────
+    //   정식 위치는 쓰기 가능한 user-data 디렉터리(<user-data>/Tetris/settings.cfg).
+    //   macOS .app 번들의 cwd(Resources)는 읽기전용이라 거기 저장하면 조용히
+    //   실패한다. HOME/APPDATA 가 없으면 실행 디렉터리 "settings.cfg" 로 폴백.
+    //   기존 cwd 파일이 있고 user-data 에 아직 없으면 1회 마이그레이션한다.
+    std::string settingsPath = meta::client::settings_file_path();
+    if (settingsPath.empty()) {
+        settingsPath = "settings.cfg";
+    } else {
+        std::error_code ec;
+        if (!std::filesystem::exists(settingsPath, ec) &&
+            std::filesystem::exists("settings.cfg", ec)) {
+            // 레거시 cwd 설정을 user-data 로 옮긴다 (쓰기 실패해도 무방 — 아래
+            // 로드는 cwd 도 시도하지 않지만, 옮기기 성공 시 다음부터 정식 경로 사용).
+            std::filesystem::create_directories(
+                std::filesystem::path(settingsPath).parent_path(), ec);
+            save_settings(settingsPath.c_str(), load_settings("settings.cfg"));
+        }
+    }
+
+    // ── 사용자 설정 로드 (렌더/오디오 전용) ───────────────────────────────────
+    //   오디오 토글 플래그를 미리 세팅한다. 실제 audio_init 은 Game 생성자에서
+    //   호출되며, 그 시점의 첫 audio_play_music/sound 가 이 플래그를 존중한다.
+    //   shake 플래그는 트리거 시점(apply_self_fx/apply_peer_fx)에서 읽는다.
+    g_settings = load_settings(settingsPath.c_str());
+    // 오디오: 볼륨 슬라이더가 토글을 대체. 0 == 음소거. enabled 도 같이 세팅해
+    // off→on 복원 경로(audio_set_music_enabled)와 일관되게 유지한다.
+    audio_set_music_enabled(g_settings.bgmVol > 0);
+    audio_set_sfx_enabled(g_settings.sfxVol > 0);
+    audio_set_music_volume(g_settings.bgmVol / 100.0f);
+    audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
+
+    // 윈도우: 저장된 스케일 프리셋 적용 + (저장되어 있으면) 전체화면 + vsync.
+    //   렌더러 ortho 는 항상 720×640 — 창만 스케일/레터박스된다.
+    platform_set_window_size(kWindowScaleW[g_settings.windowScale],
+                             kWindowScaleH[g_settings.windowScale]);
+    if (g_settings.fullscreen) platform_set_fullscreen(true);
+    platform_set_vsync(g_settings.vsyncOn);
+
+    // 고스트 피스 표시.
+    game_set_ghost_enabled(g_settings.ghostOn);
 
     // 아이콘 — assets/images.cfg 에서 경로를 읽고, 누락/실패 시 기본 경로와
     // 절차적 fallback 텍스처 순서로 복구한다.
@@ -596,7 +735,7 @@ int main(int argc, char** argv)
         }
     }
 
-    // tetris_meta 베이스 URL (guest 토큰 발급 + ELO). `--meta http(s)://host[:port]`.
+    // tetris_meta 베이스 URL (guest 토큰 + RP/XP/BP). `--meta http(s)://host[:port]`.
     // 환경변수 TETRIS_META_URL 이 있으면 그것을 기본값으로 사용.
     std::string metaUrl = TETRIS_DEFAULT_META_URL;
     if (const char* env = std::getenv("TETRIS_META_URL")) metaUrl = env;
@@ -663,10 +802,15 @@ int main(int argc, char** argv)
     //   메뉴에 "ranking offline" 배너를 노출.
     std::unique_ptr<meta::client::MetaClient> metaClient;
     std::string authToken;
-    int    myElo       = 1200;
+    int    myElo       = 0;   // RP (0 시작 스케일 — meta/elo.h)
     int    myBp        = 0;
+    int    myXp        = 0;   // 누적 경험치 (레벨은 meta/levels.h 로 유도)
     std::string mySelectedIconId = "default";
     bool   metaOnline  = false;  // guest 부트스트랩이 성공했는지
+    // 랭크 매치 후 메뉴 복귀 시 1회 메타 갱신 필요 표시. MATCH_RESULT 프레임은
+    // elo_after 만 싣고 bp/xp 는 없으므로(net/session.h), 메뉴의 Lv/BP/RP 표기를
+    // 권위 있는 값으로 맞추려면 verify_token 으로 다시 읽어야 한다.
+    bool   metaRefreshPending = false;
     if (!metaUrl.empty()) {
         metaClient = std::make_unique<meta::client::MetaClient>(metaUrl);
         if (metaClient->valid()) {
@@ -677,6 +821,7 @@ int main(int argc, char** argv)
                     authToken = g->token;
                     myElo     = g->elo;
                     myBp      = g->bp;
+                    myXp      = g->xp;
                     mySelectedIconId = g->selected_icon_id.empty() ? "default" : g->selected_icon_id;
                     meta::client::save_token(authToken);
                     std::cout << "[meta] " << why << " — new guest player_id="
@@ -700,6 +845,7 @@ int main(int argc, char** argv)
                 if (a) {
                     myElo = a->elo;
                     myBp  = a->bp;
+                    myXp  = a->xp;
                     mySelectedIconId = a->selected_icon_id.empty() ? "default" : a->selected_icon_id;
                     std::cout << "[meta] token ok player_id=" << a->player_id
                               << " elo=" << a->elo
@@ -804,6 +950,45 @@ int main(int argc, char** argv)
     std::vector<BotEntry> botRoster = discover_bot_roster();
     const bool botAvailable = !botRoster.empty();   // 항상 true (heuristic 포함)
     int         botSelectIndex = 0;
+    int         settingsIndex = 0;   // 설정 화면 커서 (RowKind 인덱스)
+    bool        settingsDirty = false;  // 미저장 변경 (드래그 중 매 프레임 저장 방지)
+
+    // ── Customize(아이콘 상점) 화면 상태 ─────────────────────────────────────
+    //   카탈로그는 화면 진입 시 메타 서버에서 1회 fetch (R 로 재시도).
+    //   보유 여부 목록 엔드포인트는 없으므로 서버 응답(403 not_owned /
+    //   409 already_owned / select 성공)으로 lazily 학습한다 — 서버가 항상 권위.
+    std::vector<meta::client::IconEntry> shopCatalog;
+    bool        shopFetchTried = false;   // 진입 후 fetch 시도했는가
+    std::unordered_set<std::string> shopOwned;   // 확인된 보유 아이콘 id
+    int         shopIndex = 0;            // 카드 커서
+    std::string shopStatus;               // 하단 상태 메시지
+    std::string shopConfirmId;            // 구매 확인 대기 중 아이콘 id ("" 없음)
+    float       shopSpin = 0.f;           // 프리뷰 회전각 (deg)
+
+    // 상점 비동기 작업 — 블로킹 HTTP(verify/catalog/buy/select)가 렌더 스레드를
+    // 멈추지 않도록 std::future 로 띄우고 매 프레임 wait_for(0) 으로 폴링한다
+    // (publicIpTask 와 동일 패턴). 화면은 그동안 계속 그려져 프리뷰가 회전한다.
+    struct ShopResult {
+        int  kind = 0;                    // 1=catalog, 2=buy+select, 3=select
+        // catalog
+        bool verifyOk = false;
+        meta::client::AuthInfo verify{};
+        bool catalogOk = false;
+        std::vector<meta::client::IconEntry> catalog;
+        // buy/select
+        int  httpStatus = 0;              // 마지막 관련 HTTP 상태 (402/403/409 등)
+        bool ownedNow   = false;          // 구매 성공 또는 이미 보유
+        bool selectedOk = false;          // 선택 성공
+        bool haveAuth   = false;
+        meta::client::AuthInfo auth{};    // 최신 계정 스냅샷
+        std::string iconId, iconName;
+        int  price = 0;
+    };
+    std::future<ShopResult> shopOp;       // 진행 중 상점 작업
+    bool shopBusy = false;                // 작업 in-flight (새 작업/입력 차단)
+
+    // 메뉴 post-match 메타 갱신도 비동기 (랭크 매치 직후 2s 프리즈 방지).
+    std::future<std::optional<meta::client::AuthInfo>> metaRefreshOp;
     std::string botSelectError;
     std::string selectedBotName = "Bot";
     bool        botUsesHeuristic = false;
@@ -907,10 +1092,15 @@ int main(int argc, char** argv)
             trigger_tspin_callout(co, sim.lastTSpinLines);
         else if (sim.lastLinesCleared > 0)
             trigger_callout(co, sim.lastLinesCleared);
-        if (sim.lastGarbageReceived > 0)
+        if (g_settings.shakeOn && sim.lastGarbageReceived > 0)
             shake_trigger(shakeLeft, 6.0f, 0.20f);
-        if (sim.gameOverEvent)
+        if (g_settings.shakeOn && sim.gameOverEvent)
             shake_trigger(shakeLeft, 16.0f, 0.50f);
+        // 하드드롭 약한 흔들림. shake_trigger 는 더 강한 진행 중 흔들림을
+        // 덮어쓰지 않으므로 가비지/게임오버 흔들림을 끊지 않는다.
+        if (g_settings.shakeOn && g_settings.hardDropShakeOn && sim.hardDropEvent)
+            shake_trigger(shakeLeft, 2.5f, 0.10f);
+        sim.hardDropEvent = false;
         sim.lastLinesCleared = 0;
         sim.lastTSpinLines = -1;
         sim.lastGarbageReceived = 0;
@@ -921,10 +1111,13 @@ int main(int argc, char** argv)
             trigger_tspin_callout(co, sim.lastTSpinLines);
         else if (sim.lastLinesCleared > 0)
             trigger_callout(co, sim.lastLinesCleared);
-        if (sim.lastGarbageReceived > 0)
+        if (g_settings.shakeOn && sim.lastGarbageReceived > 0)
             shake_trigger(shakeRight, 6.0f, 0.20f);
-        if (sim.gameOverEvent)
+        if (g_settings.shakeOn && sim.gameOverEvent)
             shake_trigger(shakeRight, 16.0f, 0.50f);
+        if (g_settings.shakeOn && g_settings.hardDropShakeOn && sim.hardDropEvent)
+            shake_trigger(shakeRight, 2.5f, 0.10f);
+        sim.hardDropEvent = false;
         sim.lastLinesCleared = 0;
         sim.lastTSpinLines = -1;
         sim.lastGarbageReceived = 0;
@@ -1310,6 +1503,25 @@ int main(int argc, char** argv)
         //   마우스 클릭 = 해당 항목 즉시 활성화 (menuIndex 와 무관).
         if (app == AppMode::Menu)
         {
+            // 랭크 매치 직후 1회 메타 갱신 — bp/xp/level 을 권위 있는 값으로.
+            // 비동기로 띄워 메뉴가 멈추지 않게 한다 (MATCH_RESULT 는 elo_after 만
+            // 싣고 bp/xp 는 없으므로 verify 로 다시 읽어야 한다).
+            if (metaRefreshPending && metaOnline && metaClient
+                && !authToken.empty() && !metaRefreshOp.valid()) {
+                metaRefreshPending = false;
+                auto* mc = metaClient.get();
+                std::string tok = authToken;
+                metaRefreshOp = std::async(std::launch::async,
+                    [mc, tok]() { return mc->verify_token(tok, 3); });
+            }
+            if (metaRefreshOp.valid() &&
+                metaRefreshOp.wait_for(std::chrono::seconds(0)) ==
+                    std::future_status::ready) {
+                if (auto a = metaRefreshOp.get()) {
+                    myElo = a->elo; myBp = a->bp; myXp = a->xp;
+                }
+            }
+
             // 메뉴 배경 — 중앙에 미세한 그라데이션 느낌을 위해 두 레이어 오버레이.
             draw_rect(200, 60, 320, 5, {55, 62, 110, 180});   // 타이틀 위 강조선
             {
@@ -1324,15 +1536,19 @@ int main(int argc, char** argv)
                 "Single vs Bot",
                 "Matchmaking Multi",
                 "Custom Room Multi",
+                "Customize",
+                "Settings",
                 "Quit",
             };
-            constexpr int kMenuCount = 5;
+            constexpr int kMenuCount = 7;
 
-            // 버튼 레이아웃 — 중앙 정렬. 너비 300, 높이 46, 간격 10.
+            // 버튼 레이아웃 — 중앙 정렬. 7개가 ranking 표시줄(y=540) 위에
+            // 들어가도록 높이 42 / 간격 8 로 압축.
             const int bw = 300;
-            const int bh = 46;
+            const int bh = 42;
+            const int bgap = 8;
             const int bx = (720 - bw) / 2;
-            const int byStart = 210;
+            const int byStart = 190;
 
             // 키보드 네비게이션 (기존 동작 유지).
             if (platform_key_pressed(PKEY_DOWN)) menuIndex = (menuIndex + 1) % kMenuCount;
@@ -1342,7 +1558,7 @@ int main(int argc, char** argv)
 
             for (int i = 0; i < kMenuCount; ++i)
             {
-                const int by = byStart + i * (bh + 10);
+                const int by = byStart + i * (bh + bgap);
                 const bool disabled = (i == 1 && !botAvailable);
                 // Disabled 항목은 버튼 그리되 클릭 반환 무시(+ 라벨 회색).
                 if (disabled) {
@@ -1365,7 +1581,7 @@ int main(int argc, char** argv)
             if (!botAvailable) {
                 // Bot 모드가 disabled 임을 안내.
                 draw_text("(no bot roster entries found)", 250,
-                          byStart + 1 * (bh + 10) + bh + 2, 12, DISABLED);
+                          byStart + 1 * (bh + bgap) + bh + 2, 12, DISABLED);
             }
 
             // Section K — 메타/랭킹 상태 표시.
@@ -1378,7 +1594,8 @@ int main(int argc, char** argv)
             } else {
                 char eloBuf[64];
                 std::snprintf(eloBuf, sizeof(eloBuf),
-                              "ranking: online   ELO %d   BP %d", myElo, myBp);
+                              "ranking: online   Lv %d   RP %d   BP %d",
+                              meta::levels::level_for_xp(myXp), myElo, myBp);
                 int tw = measure_text(eloBuf, 14);
                 draw_text(eloBuf, (720 - tw) / 2, 540, 14, GREEN);
             }
@@ -1408,6 +1625,15 @@ int main(int argc, char** argv)
                     roomStage = RoomLobbyStage::Choose;
                     roomCodeInput.clear();
                     roomErrorMsg.clear();
+                } else if (activated == 4) {
+                    app = AppMode::Customize;
+                    shopFetchTried = false;   // 진입마다 카탈로그 재요청
+                    shopIndex = 0;
+                    shopStatus.clear();
+                    shopConfirmId.clear();
+                } else if (activated == 5) {
+                    app = AppMode::Settings;
+                    settingsIndex = 0;
                 } else {
                     platform_shutdown(); return 0;
                 }
@@ -1516,6 +1742,425 @@ int main(int argc, char** argv)
                     lastAttackHuman = 0; lastAttackBot = 0;
                 }
             }
+        }
+
+        // ── 설정 화면 ────────────────────────────────────────────────────────
+        //   해상도(창 스케일/전체화면) · 흔들림(마스터+하드드롭) · BGM/SFX 볼륨
+        //   슬라이더 · VSync · 고스트 피스. 모두 렌더/오디오/창/입력-UI 전용이라
+        //   SimGame/결정성 해시/lockstep/replay 와 무관하다.
+        //   변경 즉시 적용 + settings.cfg 저장.
+        if (app == AppMode::Settings)
+        {
+            {
+                const int tw = measure_text("Settings", 40);
+                draw_text("Settings", (720 - tw) / 2, 60, 40, WHITE);
+            }
+            draw_rect(200, 112, 320, 2, {45, 52, 90, 140});   // 타이틀 아래 구분선 (메뉴와 동일)
+
+            // 행 종류: 체크박스 / 볼륨 슬라이더 / 스케일 선택기.
+            enum RowKind { ROW_SCALE, ROW_FULLSCREEN, ROW_SHAKE, ROW_HARDDROP,
+                           ROW_BGM, ROW_SFX, ROW_VSYNC, ROW_GHOST };
+            constexpr int kSettingsRows = 8;
+
+            // 키보드 상하 커서 이동.
+            if (platform_key_pressed(PKEY_DOWN))
+                settingsIndex = (settingsIndex + 1) % kSettingsRows;
+            if (platform_key_pressed(PKEY_UP))
+                settingsIndex = (settingsIndex + kSettingsRows - 1) % kSettingsRows;
+
+            const bool kLeft  = platform_key_pressed(PKEY_LEFT);
+            const bool kRight = platform_key_pressed(PKEY_RIGHT);
+            const bool kEnter = platform_key_pressed(PKEY_ENTER)
+                             || platform_key_pressed(PKEY_SPACE);
+
+            // 변경이 발생했는지 추적 → 즉시 적용 + 저장.
+            bool changed = false;
+
+            const int labelX  = 150;   // 행 라벨 x
+            const int ctrlX   = 360;   // 컨트롤(체크박스/슬라이더/선택기) x
+            const int rowY0   = 130;
+            const int rowGap  = 52;
+            const int boxSize = 26;
+            const int ctrlW   = 220;   // 슬라이더/선택기 폭
+
+            auto rowY = [&](int i) { return rowY0 + i * rowGap; };
+
+            // 라벨 + 커서 강조 표식. 각 행 공통.
+            auto draw_label = [&](int i, const char* text) {
+                const Color c = (i == settingsIndex) ? YELLOW : WHITE;
+                draw_text(text, labelX, rowY(i) + 2, 22, c);
+            };
+
+            // ── ROW_SCALE: 창 스케일 선택기 ──────────────────────────────────
+            draw_label(ROW_SCALE, "Window");
+            {
+                int dir = gui_value_selector(ctrlX, rowY(ROW_SCALE), ctrlW, boxSize,
+                                             kWindowScaleLabel[g_settings.windowScale],
+                                             settingsIndex == ROW_SCALE);
+                if (settingsIndex == ROW_SCALE) {
+                    if (kLeft)  dir = -1;
+                    if (kRight) dir = +1;
+                }
+                if (dir != 0) {
+                    // 해상도 선택기는 양 끝에서 wrap 하지 않고 clamp (1440 에서
+                    // Right → 720 으로 점프하는 일반 picker 답지 않은 동작 방지).
+                    int ns = g_settings.windowScale + dir;
+                    if (ns < 0) ns = 0;
+                    if (ns > kWindowScaleCount - 1) ns = kWindowScaleCount - 1;
+                    if (ns != g_settings.windowScale) {
+                        g_settings.windowScale = ns;
+                        g_settings.fullscreen = false;  // 스케일 변경은 창모드로
+                        platform_set_window_size(kWindowScaleW[ns], kWindowScaleH[ns]);
+                        changed = true;
+                    }
+                }
+            }
+
+            // ── 체크박스 행 헬퍼 ────────────────────────────────────────────
+            auto checkbox_row = [&](int i, const char* label, bool& val) -> bool {
+                draw_label(i, label);
+                char rl[32];
+                std::snprintf(rl, sizeof(rl), "%s", val ? "ON" : "OFF");
+                bool clicked = gui_checkbox(ctrlX, rowY(i), boxSize, rl, val,
+                                            i == settingsIndex);
+                bool key = (i == settingsIndex) && (kEnter || kLeft || kRight);
+                if (clicked || key) { val = !val; return true; }
+                return false;
+            };
+
+            // ── ROW_FULLSCREEN ──────────────────────────────────────────────
+            // 백엔드가 전체화면을 지원할 때만 토글. 미지원(Win32) 이면 회색
+            // 비활성 라벨로 그려 "켜도 아무 일 없는" 거짓 토글을 막는다.
+            if (platform_fullscreen_supported()) {
+                if (checkbox_row(ROW_FULLSCREEN, "Fullscreen", g_settings.fullscreen)) {
+                    platform_set_fullscreen(g_settings.fullscreen);
+                    // 창모드 복귀 시 저장된 스케일 크기로 되돌린다.
+                    if (!g_settings.fullscreen)
+                        platform_set_window_size(kWindowScaleW[g_settings.windowScale],
+                                                 kWindowScaleH[g_settings.windowScale]);
+                    changed = true;
+                }
+            } else {
+                const Color c = (ROW_FULLSCREEN == settingsIndex) ? YELLOW : WHITE;
+                draw_text("Fullscreen", labelX, rowY(ROW_FULLSCREEN) + 2, 22, c);
+                draw_text("(unavailable)", ctrlX, rowY(ROW_FULLSCREEN) + 4, 18,
+                          Color{110, 116, 140, 255});
+            }
+
+            // ── ROW_SHAKE (마스터) ──────────────────────────────────────────
+            if (checkbox_row(ROW_SHAKE, "Screen shake", g_settings.shakeOn))
+                changed = true;
+
+            // ── ROW_HARDDROP ────────────────────────────────────────────────
+            if (checkbox_row(ROW_HARDDROP, "Hard-drop shake", g_settings.hardDropShakeOn))
+                changed = true;
+
+            // ── 볼륨 슬라이더 헬퍼 ──────────────────────────────────────────
+            auto slider_row = [&](int i, const char* label, int& vol) -> bool {
+                char lab[32];
+                std::snprintf(lab, sizeof(lab), "%s  %d%%", label, vol);
+                draw_label(i, lab);
+                int nv = gui_slider(ctrlX, rowY(i), ctrlW, boxSize, vol,
+                                    i == settingsIndex);
+                if (i == settingsIndex) {
+                    if (kLeft)  nv = vol - 5;
+                    if (kRight) nv = vol + 5;
+                    if (nv < 0)   nv = 0;
+                    if (nv > 100) nv = 100;
+                }
+                if (nv != vol) { vol = nv; return true; }
+                return false;
+            };
+
+            // ── ROW_BGM ─────────────────────────────────────────────────────
+            if (slider_row(ROW_BGM, "BGM", g_settings.bgmVol)) {
+                audio_set_music_enabled(g_settings.bgmVol > 0);
+                audio_set_music_volume(g_settings.bgmVol / 100.0f);
+                changed = true;
+            }
+            // ── ROW_SFX ─────────────────────────────────────────────────────
+            if (slider_row(ROW_SFX, "SFX", g_settings.sfxVol)) {
+                audio_set_sfx_enabled(g_settings.sfxVol > 0);
+                audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
+                changed = true;
+            }
+
+            // ── ROW_VSYNC ───────────────────────────────────────────────────
+            if (checkbox_row(ROW_VSYNC, "VSync", g_settings.vsyncOn)) {
+                platform_set_vsync(g_settings.vsyncOn);
+                changed = true;
+            }
+
+            // ── ROW_GHOST ───────────────────────────────────────────────────
+            if (checkbox_row(ROW_GHOST, "Ghost piece", g_settings.ghostOn)) {
+                game_set_ghost_enabled(g_settings.ghostOn);
+                changed = true;
+            }
+
+            // 슬라이더 드래그 중 매 프레임 파일을 쓰지 않도록, 변경은 dirty 로
+            // 모아 두고 마우스 버튼을 뗀 프레임(키보드 변경은 즉시)에 저장한다.
+            if (changed) settingsDirty = true;
+            if (settingsDirty && !platform_mouse_down(0)) {
+                save_settings(settingsPath.c_str(), g_settings);
+                settingsDirty = false;
+            }
+
+            // 마우스용 Back 버튼 — 키보드 Q/ESC 와 동일 동작.
+            const bool backClicked = gui_button(260, 544, 200, 40, "Back");
+
+            draw_text("[Up/Down] Select   [Left/Right] Adjust   [Q] Back",
+                      130, 604, 16, GRAY);
+
+            if (backClicked || platform_key_pressed(PKEY_Q)
+                || platform_key_pressed(PKEY_ESCAPE)) {
+                if (settingsDirty) {   // 드래그 채로 나가는 경우까지 저장 보장
+                    save_settings(settingsPath.c_str(), g_settings);
+                    settingsDirty = false;
+                }
+                app = AppMode::Menu;
+            }
+        }
+
+        // ── Customize(아이콘 상점) 화면 ──────────────────────────────────────
+        //   메타 서버의 /v1/icons/* 를 사용: 카탈로그 표시 → 클릭/Enter 로 선택.
+        //   미보유 아이콘은 1차 선택 시도에서 403(not_owned)을 받으면 구매 확인
+        //   상태로 전환, 같은 아이콘을 한 번 더 활성화하면 구매+선택한다.
+        //   BP 차감/보유 검증은 전부 서버가 권위 — 클라이언트는 결과만 반영.
+        //   HTTP 호출(≤3s)은 블로킹이지만 메뉴 전용 화면이라 게임플레이와 무관.
+        if (app == AppMode::Customize)
+        {
+            {
+                const int tw = measure_text("Customize", 40);
+                draw_text("Customize", (720 - tw) / 2, 60, 40, WHITE);
+            }
+            draw_rect(200, 112, 320, 2, {45, 52, 90, 140});   // 타이틀 아래 구분선
+
+            const bool shopOnline = metaOnline && metaClient && !authToken.empty();
+
+            // BP 잔액 — 우상단.
+            if (shopOnline) {
+                char bpBuf[48];
+                std::snprintf(bpBuf, sizeof(bpBuf), "Lv %d   BP %d",
+                              meta::levels::level_for_xp(myXp), myBp);
+                draw_text(bpBuf, 720 - 40 - measure_text(bpBuf, 22), 64, 22, GREEN);
+            }
+
+            // ── 비동기 작업 런처 (모두 metaClient raw 포인터 + 값 복사 캡처) ──
+            //   metaClient 는 앱 수명 내내 살아 있고, 각 호출이 stateless
+            //   httplib::Client 를 새로 만들므로 워커 스레드에서 호출해도 안전.
+            auto* mc = metaClient.get();
+            std::string tok = authToken;
+            auto launch_catalog = [&]() {
+                shopBusy = true;
+                shopStatus.clear();
+                shopOp = std::async(std::launch::async, [mc, tok]() {
+                    ShopResult r; r.kind = 1;
+                    if (auto a = mc->verify_token(tok, 3)) { r.verifyOk = true; r.verify = *a; }
+                    if (auto c = mc->fetch_icon_catalog(3)) {
+                        r.catalogOk = true; r.catalog = std::move(*c);
+                    }
+                    return r;
+                });
+            };
+            auto launch_select = [&](const meta::client::IconEntry& e) {
+                shopBusy = true;
+                std::string id = e.id, name = e.name; int price = e.price_bp;
+                shopOp = std::async(std::launch::async, [mc, tok, id, name, price]() {
+                    ShopResult r; r.kind = 3; r.iconId = id; r.iconName = name; r.price = price;
+                    int st = 0;
+                    auto a = mc->select_icon(tok, id, 3, &st);
+                    r.httpStatus = st;
+                    if (a) { r.selectedOk = true; r.ownedNow = true; r.haveAuth = true; r.auth = *a; }
+                    return r;
+                });
+            };
+            auto launch_buy = [&](const meta::client::IconEntry& e) {
+                shopBusy = true;
+                std::string id = e.id, name = e.name; int price = e.price_bp;
+                shopOp = std::async(std::launch::async, [mc, tok, id, name, price]() {
+                    ShopResult r; r.kind = 2; r.iconId = id; r.iconName = name; r.price = price;
+                    int st = 0;
+                    auto pa = mc->purchase_icon(tok, id, 3, &st);
+                    r.httpStatus = st;
+                    if (pa) { r.ownedNow = true; r.haveAuth = true; r.auth = *pa; }
+                    else if (st == 409) { r.ownedNow = true; }   // 이미 보유
+                    if (r.ownedNow) {
+                        int st2 = 0;
+                        auto sa = mc->select_icon(tok, id, 3, &st2);
+                        if (sa) { r.selectedOk = true; r.haveAuth = true; r.auth = *sa; }
+                    }
+                    return r;
+                });
+            };
+
+            // ── 진행 중 작업 폴링 + 결과 반영 ────────────────────────────────
+            if (shopOp.valid() &&
+                shopOp.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                ShopResult r = shopOp.get();
+                shopBusy = false;
+                if (r.kind == 1) {
+                    if (r.verifyOk) {
+                        myElo = r.verify.elo; myBp = r.verify.bp; myXp = r.verify.xp;
+                        if (!r.verify.selected_icon_id.empty()) {
+                            mySelectedIconId = r.verify.selected_icon_id;
+                            iconYou = resolvePlayerIcon(mySelectedIconId);
+                            shopOwned.insert(mySelectedIconId);
+                        }
+                    }
+                    if (r.catalogOk) {
+                        shopCatalog = std::move(r.catalog);
+                        for (const auto& e : shopCatalog)
+                            if (e.default_owned) shopOwned.insert(e.id);
+                        if (shopIndex >= (int)shopCatalog.size()) shopIndex = 0;
+                        shopStatus.clear();
+                    } else {
+                        shopStatus = "catalog fetch failed - [R] retry";
+                    }
+                } else {  // buy(2) / select(3)
+                    if (r.haveAuth) { myElo = r.auth.elo; myBp = r.auth.bp; myXp = r.auth.xp; }
+                    if (r.ownedNow) shopOwned.insert(r.iconId);
+                    if (r.selectedOk) {
+                        mySelectedIconId = r.auth.selected_icon_id;
+                        iconYou = resolvePlayerIcon(mySelectedIconId);
+                        shopStatus = (r.kind == 2 ? "purchased & selected: "
+                                                  : "selected: ") + r.iconName;
+                        shopConfirmId.clear();
+                    } else if (r.kind == 3 && r.httpStatus == 403) {
+                        // 미보유 → 구매 확인 단계로.
+                        shopConfirmId = r.iconId;
+                        shopStatus = "buy " + r.iconName + " for "
+                                   + std::to_string(r.price) + " BP? press again to confirm";
+                    } else if (r.kind == 2 && r.httpStatus == 402) {
+                        shopStatus = "not enough BP ("
+                                   + std::to_string(r.price) + " needed)";
+                    } else if (r.ownedNow && !r.selectedOk) {
+                        shopStatus = "purchased - select failed, try again";
+                    } else {
+                        shopStatus = (r.kind == 2 ? "purchase failed (network/server)"
+                                                  : "select failed (network/server)");
+                    }
+                }
+            }
+
+            // 카탈로그 fetch — 진입 후 1회 (R 로 재시도). verify 로 BP/XP 도 갱신.
+            if (shopOnline && !shopFetchTried && !shopBusy) {
+                shopFetchTried = true;
+                shopOwned.insert("default");
+                shopOwned.insert(mySelectedIconId);
+                launch_catalog();
+            }
+
+            if (!shopOnline) {
+                const char* why = metaUrl.empty()
+                    ? "ranking disabled - run with --meta https://host to enable"
+                    : "ranking server offline - icon shop unavailable";
+                gui_text_center(360, 300, why, 18, GRAY);
+            } else if (shopCatalog.empty()) {
+                gui_text_center(360, 300,
+                                shopBusy ? "loading catalog..." : "no catalog loaded - [R] retry",
+                                18, GRAY);
+            } else {
+                // ── 회전 프리뷰 — 커서가 가리키는 아이콘 ────────────────────
+                shopSpin += 90.0f * deltaTime;          // 4초에 한 바퀴
+                if (shopSpin >= 360.0f) shopSpin -= 360.0f;
+                draw_image_rotated(resolvePlayerIcon(shopCatalog[shopIndex].id),
+                                   360, 210, 96, 96, shopSpin);
+
+                // ── 카드 행 (카탈로그가 4개 이하인 동안은 한 줄 중앙 정렬) ──
+                const int n = (int)shopCatalog.size();
+                const int cardW = 140, cardH = 150, cardGap = 16;
+                int x0 = (720 - (n * cardW + (n - 1) * cardGap)) / 2;
+                if (x0 < 10) x0 = 10;
+                const int cardY = 300;
+
+                int activated = -1;
+                for (int i = 0; i < n; ++i) {
+                    const auto& e = shopCatalog[i];
+                    const int cx = x0 + i * (cardW + cardGap);
+                    const bool hover = gui_hover_rect(cx, cardY, cardW, cardH);
+                    const bool isSel = (e.id == mySelectedIconId);
+
+                    draw_rect_rounded(cx, cardY, cardW, cardH, 0.12f,
+                                      hover ? Color{38, 44, 70, 255}
+                                            : Color{25, 30, 45, 255});
+                    if (i == shopIndex) {   // 키보드 커서 테두리
+                        const Color bc = YELLOW;
+                        draw_rect(cx, cardY, cardW, 2, bc);
+                        draw_rect(cx, cardY + cardH - 2, cardW, 2, bc);
+                        draw_rect(cx, cardY, 2, cardH, bc);
+                        draw_rect(cx + cardW - 2, cardY, 2, cardH, bc);
+                    }
+
+                    draw_image(resolvePlayerIcon(e.id),
+                               cx + (cardW - 64) / 2, cardY + 12, 64, 64);
+                    {
+                        const int tw = measure_text(e.name.c_str(), 18);
+                        draw_text(e.name.c_str(), cx + (cardW - tw) / 2,
+                                  cardY + 84, 18, WHITE);
+                    }
+                    {
+                        char lab[32]; Color lc;
+                        if (isSel) {
+                            std::snprintf(lab, sizeof(lab), "SELECTED"); lc = GREEN;
+                        } else if (shopOwned.count(e.id)) {
+                            std::snprintf(lab, sizeof(lab), "OWNED");
+                            lc = Color{180, 190, 220, 255};
+                        } else {
+                            std::snprintf(lab, sizeof(lab), "%d BP", e.price_bp);
+                            lc = YELLOW;
+                        }
+                        const int tw = measure_text(lab, 16);
+                        draw_text(lab, cx + (cardW - tw) / 2, cardY + 112, 16, lc);
+                    }
+
+                    // 작업 중에는 클릭 무시 (중복 요청 방지).
+                    if (!shopBusy && hover && platform_mouse_pressed(0)) {
+                        shopIndex = i;
+                        activated = i;
+                    }
+                }
+
+                // 키보드 — 좌우 커서 이동(이동 시 구매 확인 취소), Enter 활성화.
+                if (platform_key_pressed(PKEY_LEFT)) {
+                    shopIndex = (shopIndex + n - 1) % n; shopConfirmId.clear();
+                }
+                if (platform_key_pressed(PKEY_RIGHT)) {
+                    shopIndex = (shopIndex + 1) % n;     shopConfirmId.clear();
+                }
+                if (!shopBusy &&
+                    (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE)))
+                    activated = shopIndex;
+
+                if (activated >= 0 && !shopBusy) {
+                    const meta::client::IconEntry e = shopCatalog[activated];
+                    if (e.id == mySelectedIconId) {
+                        shopStatus = "already selected";
+                        shopConfirmId.clear();
+                    } else if (shopConfirmId == e.id) {
+                        shopConfirmId.clear();
+                        launch_buy(e);             // 구매 확정 (두 번째 활성화)
+                    } else {
+                        launch_select(e);          // 1차: 선택 시도 (미보유면 403→확인)
+                    }
+                }
+            }
+
+            // 작업 중이면 상태줄을 "contacting server..." 로 덮어쓴다.
+            if (shopBusy)
+                gui_text_center(360, 500, "contacting server...", 16,
+                                Color{180, 190, 220, 255});
+            else if (!shopStatus.empty())
+                gui_text_center(360, 500, shopStatus.c_str(), 16, YELLOW);
+
+            if (shopOnline && platform_key_pressed(PKEY_R) && !shopBusy)   // 카탈로그 재요청
+                launch_catalog();
+
+            const bool backClicked = gui_button(260, 544, 200, 40, "Back");
+            draw_text("[Left/Right] Select   [Enter] Use / Buy   [R] Reload   [Q] Back",
+                      110, 604, 16, GRAY);
+            if (backClicked || platform_key_pressed(PKEY_Q)
+                || platform_key_pressed(PKEY_ESCAPE))
+                app = AppMode::Menu;
         }
 
         // ── IP 입력 화면 ─────────────────────────────────────────────────────
@@ -1844,8 +2489,8 @@ int main(int argc, char** argv)
                 draw_rect_rounded(rightX, 614, 120, 22, 0.4f, sb);
                 draw_text(fmt_buf("Score: %d", gameSingle->score), leftX  + 6, 616, 16, WHITE);
                 draw_text(fmt_buf("Score: %d", gameBot->score),    rightX + 6, 616, 16, WHITE);
-                draw_text(fmt_buf("Lv.%d", gameSingle->sim.level), leftX  + 6, 633, 14, {120,130,170,255});
-                draw_text(fmt_buf("Lv.%d", gameBot->sim.level),    rightX + 6, 633, 14, {120,130,170,255});
+                draw_text(fmt_buf("Spd.%d", gameSingle->sim.level), leftX  + 6, 633, 14, {120,130,170,255});
+                draw_text(fmt_buf("Spd.%d", gameBot->sim.level),    rightX + 6, 633, 14, {120,130,170,255});
             }
 
             if (coLocal.text && coLocal.timeLeft > 0.0f) {
@@ -1953,8 +2598,8 @@ int main(int argc, char** argv)
                 draw_rect_rounded(rightX, 614, 120, 22, 0.4f, sb);
                 draw_text(fmt_buf("Score: %d", gameLocal->score),  leftX  + 6, 616, 16, WHITE);
                 draw_text(fmt_buf("Score: %d", gameRemote->score), rightX + 6, 616, 16, WHITE);
-                draw_text(fmt_buf("Lv.%d", gameLocal->sim.level),  leftX  + 6, 633, 14, {120,130,170,255});
-                draw_text(fmt_buf("Lv.%d", gameRemote->sim.level), rightX + 6, 633, 14, {120,130,170,255});
+                draw_text(fmt_buf("Spd.%d", gameLocal->sim.level),  leftX  + 6, 633, 14, {120,130,170,255});
+                draw_text(fmt_buf("Spd.%d", gameRemote->sim.level), rightX + 6, 633, 14, {120,130,170,255});
             }
 
             // Section I — 양측 보드 중앙에 콜아웃. 보드 폭 300px 가정.
@@ -2026,6 +2671,8 @@ int main(int argc, char** argv)
                     haveMatchResult = true;
                     lastMatchResult = mr;
                     myElo = mr.elo_after;  // 클라 내부 상태 갱신
+                    // bp/xp 는 프레임에 없으므로 메뉴 복귀 시 verify 로 갱신.
+                    if (metaOnline) metaRefreshPending = true;
                 }
             }
 
@@ -2033,23 +2680,23 @@ int main(int argc, char** argv)
             {
                 draw_popup_panel(95, 235, 530, 225);
                 gui_text_center(360, 262, "GAME OVER", 60, WHITE);
-                // Section K — ELO 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
-                // ELO 변화 없음이라는 사실만 보장 — 구체적 이유는 세 가지:
+                // Section K — RP 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
+                // RP 변화 없음이라는 사실만 보장 — 구체적 이유는 세 가지:
                 //   (1) meta 미연동 / meta POST 실패 → "ranking offline".
                 //   (2) 교차검증 실패 (양측 summary 불일치) → winner=null 로 DB 에는
-                //       기록되지만 ELO 미반영 → "unranked (validation failed)".
+                //       기록되지만 RP 미반영 → "unranked (validation failed)".
                 //   (3) unranked 매치 (둘 중 하나라도 player_id==0) → 릴레이가 summary 투명 포워딩.
-                // MATCH_RESULT 프레임 자체에는 이유가 실리지 않으므로 UI 는 "ELO 변동 없음"
+                // MATCH_RESULT 프레임 자체에는 이유가 실리지 않으므로 UI 는 "RP 변동 없음"
                 // 의 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
                 if (haveMatchResult) {
                     if (lastMatchResult.delta == 0 &&
                         lastMatchResult.elo_before == lastMatchResult.elo_after) {
                         gui_text_center(360, 343,
-                                        "no ELO change (offline / unranked / invalid)",
+                                        "no RP change (offline / unranked / invalid)",
                                         14, GRAY);
                     } else {
                         char buf[64];
-                        std::snprintf(buf, sizeof(buf), "ELO %d  %+d",
+                        std::snprintf(buf, sizeof(buf), "RP %d  %+d",
                                       lastMatchResult.elo_after, lastMatchResult.delta);
                         Color col = lastMatchResult.delta >= 0 ? GREEN : RED;
                         gui_text_center(360, 340, buf, 26, col);

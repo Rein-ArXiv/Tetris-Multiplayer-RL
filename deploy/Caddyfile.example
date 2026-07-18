@@ -11,6 +11,10 @@
         reverse_proxy 127.0.0.1:8080
     }
 
+    handle /healthz {
+        reverse_proxy 127.0.0.1:8080
+    }
+
     handle {
         file_server
     }

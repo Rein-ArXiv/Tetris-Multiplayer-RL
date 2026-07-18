@@ -1,7 +1,8 @@
 // bot/bot_onnx.cpp — ONNX Runtime C++ API 래퍼. 헤더 설명은 bot_onnx.h 참조.
 //
-// 빌드 시 TETRIS_BUILD_BOT 옵션이 ON 이어야 이 파일이 컴파일된다. 헤더/링크는
-// third_party/onnxruntime/ 을 가리키도록 CMake 에서 설정.
+// 이 파일은 항상 컴파일된다. TETRIS_BUILD_BOT=ON 이면 CMake 가
+// TETRIS_HAS_ONNXRUNTIME 을 정의하고 third_party/onnxruntime/ 헤더/라이브러리를
+// 연결한다. OFF 이면 아래의 stub 구현이 빌드되어 Load() 가 실패한다.
 
 #include "bot_onnx.h"
 

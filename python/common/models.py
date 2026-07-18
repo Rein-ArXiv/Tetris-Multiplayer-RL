@@ -1,8 +1,8 @@
 """Policy / value network definitions for the Tetris RL bot.
 
-Both Colab training and local netbot inference import the **same** ``TetrisPolicyNet``
+Both Colab training and the ONNX export CLI import the **same** ``TetrisPolicyNet``
 class from this module — that's the contract that lets a checkpoint trained on
-Colab Linux load cleanly into the Windows netbot.
+Colab Linux export cleanly for the C++ in-game bot.
 
 If you change the architecture, **bump ``ARCH_VERSION``**. ``checkpoint.py``
 verifies that the loaded checkpoint's recorded version matches the current

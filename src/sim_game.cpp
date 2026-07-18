@@ -154,6 +154,7 @@ void SimGame::MoveBlockDrop()
     }
     currentBlock.Move(-1, 0);
     dropSoundEvent = true;
+    hardDropEvent  = true;   // 흔들림용 (렌더 전용, 해시 무관)
     LockBlock();
 }
 

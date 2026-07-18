@@ -5,7 +5,7 @@
 // relay 와 game client 양쪽에서 재사용한다.
 //   · game client   : request_guest()  (첫 실행 시 익명 토큰 발급)
 //   · tetris_relay  : verify_token()   (QUEUE_JOIN 수신 후 인증)
-//   · tetris_relay  : post_match()     (경기 결과 저장 + ELO 갱신)
+//   · tetris_relay  : post_match()     (경기 결과 저장 + RP 갱신)
 //
 // 네트워크 실패/서버 에러는 std::nullopt 로 통합 처리 — 호출자가 장애 정책
 // (매치 거부 / result 미반영) 적용. 에러 원인은 stderr 로 간단 로그만.
@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace meta::client {
 
@@ -22,8 +23,9 @@ namespace meta::client {
 struct GuestInfo {
     int64_t     player_id;
     std::string token;
-    int         elo;
+    int         elo;    // RP (0 시작 스케일)
     int         bp;
+    int         xp;     // 누적 경험치 — 레벨은 meta/levels.h 의 level_for_xp 로 유도
     std::string selected_icon_id;
 };
 
@@ -32,7 +34,16 @@ struct AuthInfo {
     std::string username;   // 비어 있으면 username=null
     int         elo;
     int         bp;
+    int         xp;
     std::string selected_icon_id;
+};
+
+// GET /v1/icons/catalog 의 행. 서버 meta/database.cpp 의 kIconCatalog 와 대응.
+struct IconEntry {
+    std::string id;            // "default" / "ruby" / "gold" ...
+    std::string name;          // 표시명
+    int         price_bp;      // 구매 가격 (BP)
+    bool        default_owned; // true 면 모든 플레이어가 기본 보유
 };
 
 struct MatchDelta {
@@ -74,12 +85,20 @@ public:
     std::optional<AuthInfo>   verify_token   (const std::string& token,
                                               int timeout_s = 3,
                                               VerifyOutcome* out_outcome = nullptr);
+    // 아이콘 카탈로그 전체. 실패(네트워크/파싱) 시 nullopt.
+    std::optional<std::vector<IconEntry>> fetch_icon_catalog(int timeout_s = 5);
+
+    // out_http_status: 0 = 네트워크 실패, 그 외 HTTP 상태 코드. UI 가
+    // 402(insufficient_bp) / 403(not_owned) / 409(already_owned) 를 구분해
+    // "구매 확인" 흐름을 만들 수 있게 한다. nullptr 면 무시.
     std::optional<AuthInfo>   purchase_icon  (const std::string& token,
                                               const std::string& icon_id,
-                                              int timeout_s = 5);
+                                              int timeout_s = 5,
+                                              int* out_http_status = nullptr);
     std::optional<AuthInfo>   select_icon    (const std::string& token,
                                               const std::string& icon_id,
-                                              int timeout_s = 5);
+                                              int timeout_s = 5,
+                                              int* out_http_status = nullptr);
     std::optional<MatchResult> post_match    (int64_t player_a, int64_t player_b,
                                               std::optional<int64_t> winner,
                                               int score_a, int score_b,
@@ -110,5 +129,11 @@ std::string load_token();
 
 // 토큰 저장 (부모 디렉토리 자동 생성). 실패 시 false.
 bool save_token(const std::string& token);
+
+// settings.cfg 의 권장 저장 경로 — 토큰과 같은 user-data 디렉토리
+// (<user-data>/Tetris/settings.cfg). HOME/APPDATA 를 못 찾으면 빈 문자열.
+// macOS .app 번들은 cwd(Resources)가 읽기전용이라, 실행 디렉터리 대신
+// 이 쓰기 가능한 경로를 써야 설정이 영속된다. 디렉토리 생성은 하지 않는다.
+std::string settings_file_path();
 
 } // namespace meta::client

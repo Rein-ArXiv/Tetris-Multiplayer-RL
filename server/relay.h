@@ -2,7 +2,7 @@
 //
 // 설계:
 //   1) startPump(Match) 호출 시점에 양쪽 클라이언트에 MATCH_FOUND 프레임 전송.
-//   2) 이후 두 개의 detached 스레드가 각 방향(A→B, B→A)으로 바이트를 흘려보냄.
+//   2) 이후 두 worker가 각 방향(A→B, B→A)으로 바이트를 흘려보냄.
 //      — 프레임 파싱 안 함. 체크섬 검증 안 함. 그냥 recv→send 파이프.
 //      — lockstep 게임 결정론은 클라가 책임지므로 서버는 투명 중계자.
 //   3) 한쪽이 끊기면 반대쪽 스레드도 read EOF 를 받아 종료 →
@@ -16,7 +16,7 @@ namespace meta::client { class MetaClient; }
 namespace relay {
 
 // 페어링된 Match 를 받아 MATCH_FOUND 전송 후 양방향 포워딩 시작.
-// 내부에서 소유권 이전 → detached 스레드들이 수명 관리.
+// 내부에서 소유권 이전. worker는 종료 시까지 relay runtime이 추적한다.
 //
 // meta: non-null 이고 양쪽 player_id != 0 일 때만 경기 종료 후
 //   MATCH_SUMMARY 교차검증 + /v1/matches POST + MATCH_RESULT 송신.
@@ -31,7 +31,14 @@ void startPump(Match match, meta::client::MetaClient* meta);
 //   · 30초 안에 양쪽 READY(1) 수신 → 게임 포워딩 시작 (startPump 와 동일 경로).
 //   · 한쪽이 READY(0) / QUEUE_CANCEL / EOF / 타임아웃 → 양 소켓 close.
 //   · 수락 로비 동안 READY 는 상대에게 그대로 forward 해 UI 반영 가능.
-// matcher 스레드를 블록하지 않도록 내부에서 자체 스레드 detach.
+// matcher 스레드를 블록하지 않도록 내부 worker에서 실행한다.
 void startQueuePump(Match match, meta::client::MetaClient* meta);
+
+// 서버 종료 프로토콜. beginShutdown 이후에는 새 pump를 받지 않고 기존 lobby와
+// forwarder가 루프를 빠져나온다. waitForShutdown은 모든 pump worker가 끝날 때까지
+// 기다리므로, worker가 참조하는 MetaClient와 net 전역 상태보다 먼저 호출해야 한다.
+void beginShutdown();
+void waitForShutdown();
+bool isShuttingDown();
 
 }  // namespace relay

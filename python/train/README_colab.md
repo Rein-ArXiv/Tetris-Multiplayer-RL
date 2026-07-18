@@ -6,36 +6,48 @@ training and `.pt -> .onnx` export path runs on **Google Colab Linux x86_64
 `model/*.onnx` and `model/bots/*.onnx` files with ONNX Runtime and does not
 need PyTorch.
 
-The Python `netbot` can still run a `.pt` checkpoint for debugging, but that
-path imports PyTorch. On low-power deployment machines, export in Colab and
-copy only the `.onnx` file.
-
 ## Workflow
 
-1. Open `setup_colab.ipynb` in Colab.
-2. Set `REPO_URL` to your fork.
-3. Run all cells. This clones the repo, builds `tetris_py.so` from the same
-   C++ sources used by the Windows game, and verifies that
-   `from sim import SimGame` and `from common.models import TetrisPolicyNet`
-   import cleanly.
-4. Run one of the built-in trainers (`ppo_tetris.py`, `dqn_tetris.py`,
-   `cbmpi_tetris.py`, `muzero_tetris.py`), or open your own notebook and
-   `import sys; sys.path.insert(0, '/content/Tetris-Multiplayer-RL/python')`
-   so it picks up the freshly built `sim` module and the shared `common`
-   layer.
-5. Save checkpoints with `common.checkpoint.save_checkpoint(...)` or the
-   built-in PPO trainer. Checkpoints embed the architecture version so the
-   local netbot's `load_checkpoint` refuses stale architectures with a
-   `RuntimeError` instead of silently loading wrong-shape weights.
-6. Export `.pt` to `.onnx` in Colab, download it, and put only the result
-   under local `model/bots/` for the in-game bot roster. The game still scans
-   legacy `model/*.onnx`, but `model/bots/*.onnx` is the preferred layout when
-   you have many models.
+`train_model_zoo_colab.ipynb` is the single entry point. Open it in Colab (or
+the VSCode Colab extension) and run from the top:
 
-If you use the VSCode Colab extension, open `train_model_zoo_colab.ipynb`
-instead of the older PPO-only notebook. It includes setup, smoke test, selected
-algorithm training, ONNX export, and `model/bots.cfg` generation in one file.
-`train_ppo_colab.ipynb` is kept only as a small PPO-specific example.
+1. Set `REPO_URL` to your fork and `ALGO` to the algorithm you want.
+2. The setup cells clone the repo, install deps from
+   `python/requirements-colab.txt`, build `tetris_py.so` from the same C++
+   sources used by the game, and run an import smoke test
+   (`from sim import SimGame`, `from common.models import TetrisPolicyNet`).
+3. The remaining cells train, export `.onnx`, generate `model/bots.cfg`, and
+   download the artifacts.
+4. Put the downloaded `.onnx` under local `model/bots/` for the in-game bot
+   roster. The game still scans legacy `model/*.onnx`, but `model/bots/*.onnx`
+   is the preferred layout when you have many models.
+
+Checkpoints embed the architecture version, so `load_checkpoint` (used by the
+export CLI) refuses stale architectures with a `RuntimeError` instead of
+silently loading wrong-shape weights.
+
+To run trainers manually instead, execute any command from the sections below
+inside the notebook runtime (after the setup cells), or in your own notebook
+after `import sys; sys.path.insert(0, '/content/Tetris-Multiplayer-RL/python')`.
+
+## Competitive versus environment
+
+`common.env_versus.TetrisVersusEnv` provides a two-board, garbage-trading
+Gymnasium environment. Its agent observation and 40-action mask match
+`TetrisPlacementEnv`, so it can reuse `TetrisPolicyNet`. Available opponents
+are `GreedyBCTSOpponent` (default), `RandomLegalOpponent`, and
+`PolicyOpponent` for a frozen policy snapshot.
+
+The current trainer CLIs instantiate `TetrisPlacementEnv` directly; selecting
+`TetrisVersusEnv` is not yet a command-line option. To train versus play, wire
+this environment into a trainer or wrapper explicitly. The regression test is:
+
+```bash
+python -m pytest tests/test_versus_env.py -q
+```
+
+It requires the built `tetris_py` module and Gymnasium; otherwise pytest skips
+the module.
 
 ## Export Troubleshooting
 
@@ -98,9 +110,9 @@ python -m netbot.export_onnx \
 
 ## Additional Algorithms
 
-All commands below run from `/content/Tetris-Multiplayer-RL/python` after
-`setup_colab.ipynb` has built `tetris_py`. They are Colab/training-machine
-commands, not Mac mini deployment commands.
+All commands below run from `/content/Tetris-Multiplayer-RL/python` after the
+zoo notebook's setup cells have built `tetris_py`. They are Colab/training-
+machine commands, not Mac mini deployment commands.
 
 ### DQN / Double DQN
 
@@ -314,7 +326,7 @@ Before trusting any training run, verify that Linux and Windows produce
 **bitwise-identical** state hashes. The C++ test driver
 `build/sim_hash_dump` is the ground truth.
 
-On Colab (cell 5 of the setup notebook does this):
+On Colab (the zoo notebook's smoke-test cell does this):
 
 ```bash
 build/sim_hash_dump > python/tests/_sim_hash_dump.txt
@@ -328,15 +340,16 @@ build\Release\sim_hash_dump.exe > python\tests\_sim_hash_dump.windows.txt
 
 `diff` the two files. They must be byte-identical. If they're not, the RNG
 or hash code has a platform-dependent bug (most likely `int` width or
-unsigned modulo behaviour) and any policy trained on Colab will desync
-when deployed to the Windows netbot.
+unsigned modulo behaviour) and any policy trained on Colab will behave
+differently when deployed to the in-game ONNX bot.
 
 ## What goes where
 
-- `setup_colab.ipynb` — environment bootstrap (run first, every cold runtime).
 - `README_colab.md`   — this file.
-- `train_model_zoo_colab.ipynb` — recommended VSCode/Colab notebook for
-  selecting and exporting any supported algorithm.
+- `setup_colab.ipynb` — standalone Colab bootstrap and native-module build.
+- `train_model_zoo_colab.ipynb` — the single Colab notebook: environment
+  bootstrap + training + export + roster generation for any supported
+  algorithm.
 - `ppo_tetris.py` — baseline legal-action-masked PPO trainer.
 - `dqn_tetris.py` — Double DQN trainer; writes deployable policy checkpoints.
 - `cbmpi_tetris.py` — BCTS/value-improved CBMPI-style trainer; writes
@@ -345,8 +358,8 @@ when deployed to the Windows netbot.
 - `cem_tetris.py` — Cross-Entropy Method policy-search baseline.
 - `muzero_tetris.py` — MuZero-style trainer plus policy distillation.
 - `rl_common.py` — shared batching, masking, evaluation, and replay helpers.
-- `train_ppo_colab.ipynb` — legacy/small notebook wrapper around the baseline
-  PPO trainer only.
+- `../common/env_versus.py` — two-board garbage environment and scripted/
+  policy opponents; not yet selected by the built-in trainer CLIs.
 - `../../model/bots/README.md` — in-game bot roster layout and speed metadata.
 - *Your* training notebooks — keep them in this directory so they're version-
   controlled with the code they depend on. They should `import` from

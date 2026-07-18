@@ -1,10 +1,11 @@
 """SimGame -> observation tensor builder.
 
-This module is the **only** place that converts a ``SimGame`` snapshot into a
-network input. Both the Colab training rollouts and the local netbot inference
-loop call ``build_observation`` — keeping the conversion in one spot is what
-prevents the classic "trained on one obs format, deployed on a slightly
-different one, model outputs garbage" failure mode.
+This module is the **only** Python place that converts a ``SimGame`` snapshot
+into a network input. The C++ in-game bot's ``observe()`` (bot/placement.cpp)
+mirrors this contract. There is not yet a direct Python-vs-C++ observation
+parity test, so schema changes must update both implementations and be checked
+with an ONNX smoke test. Keeping the conversion in one spot per language
+prevents the classic "trained on one format, deployed on another" failure.
 
 The schema:
 

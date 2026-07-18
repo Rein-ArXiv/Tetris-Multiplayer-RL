@@ -56,6 +56,9 @@ model/**/*.onnx
 model/*.onnx
 model/bots.cfg
 
+# 사용자 로컬 설정 (BGM/SFX/Shake 토글)
+settings.cfg
+
 # OS 임시 파일
 .DS_Store
 Thumbs.db
@@ -73,10 +76,11 @@ __pycache__/
 # 리플레이 출력
 out/replay.txt
 
-# 문서 파일 (README*.md 만 유지, docs/ 디렉터리 전체 제외)
+# 문서는 README만 추적한다.
 *.md
 !README.md
 !**/README*.md
 docs/
+DEBUG_REMAINING_CHECKLIST.md
 docs_backup_*/
 .claude/

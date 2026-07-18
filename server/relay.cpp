@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -20,6 +21,39 @@
 namespace relay {
 
 namespace {
+
+std::atomic<bool> s_stopping{false};
+std::mutex s_workerMu;
+std::condition_variable s_workerCv;
+size_t s_activeWorkers = 0;
+
+template <typename Fn>
+bool launchWorker(Fn&& fn)
+{
+    {
+        std::lock_guard<std::mutex> lk(s_workerMu);
+        if (s_stopping.load()) return false;
+        ++s_activeWorkers;
+    }
+    try {
+        std::thread([work = std::forward<Fn>(fn)]() mutable {
+            work();
+            {
+                std::lock_guard<std::mutex> lk(s_workerMu);
+                --s_activeWorkers;
+            }
+            s_workerCv.notify_all();
+        }).detach();
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lk(s_workerMu);
+            --s_activeWorkers;
+        }
+        s_workerCv.notify_all();
+        throw;
+    }
+    return true;
+}
 
 // MATCH_SUMMARY 페이로드 구조 (net/framing.h 에 명시된 정확히 21 바이트):
 //   [won:1][my_score:4 LE][my_lines:4 LE]
@@ -66,8 +100,8 @@ struct Channel {
 
     int64_t          playerA_id{0};
     int64_t          playerB_id{0};
-    int              playerA_elo{1200};
-    int              playerB_elo{1200};
+    int              playerA_elo{0};
+    int              playerB_elo{0};
 
     std::atomic<bool> closed{false};
     std::atomic<int>  forwarder_count{2};
@@ -161,7 +195,7 @@ void finalizeRanked(Channel& ch)
     }
 
     // cross_ok=false 여도 감사 목적으로 자가보고 값을 그대로 기록한다.
-    // winner=null 이므로 ELO 에는 영향 없음 — DB 에는 "누가 뭐라고 주장했나" 만 남는다.
+    // winner=null 이므로 RP 에는 영향 없음 — DB 에는 "누가 뭐라고 주장했나" 만 남는다.
     const int      duration_s = static_cast<int>(std::max(a.duration_s, b.duration_s));
     const int      score_a    = static_cast<int>(a.my_score);
     const int      score_b    = static_cast<int>(b.my_score);
@@ -236,7 +270,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         }
     }
 
-    while (!ch->closed.load()) {
+    while (!ch->closed.load() && !s_stopping.load()) {
         if (havePrefix) {
             havePrefix = false;  // raw 는 이미 준비돼 있음 — 바로 처리.
         } else {
@@ -271,7 +305,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         //   · TYPE 이 MATCH_SUMMARY 이면 수집만 하고 포워딩하지 않는다.
         //   · 그 외 TYPE 이면 잘라낸 바이트 전체를 to 로 송신.
         //
-        // MATCH_SUMMARY 는 relay 가 실제로 신뢰해 ELO 갱신에 쓰므로, 이 타입만큼은
+        // MATCH_SUMMARY 는 relay 가 실제로 신뢰해 RP 갱신에 쓰므로, 이 타입만큼은
         // 최소한 framing.cpp 와 동일한 payload checksum 을 재검증한다. 나머지
         // 프레임은 기존처럼 투명 포워딩한다.
 
@@ -409,7 +443,7 @@ bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
     return net::tcp_send_all(sock, frame.data(), frame.size());
 }
 
-// 포워더 채널을 열어 detached 스레드 2개로 양방향 바이트 포워딩 시작.
+// 포워더 채널을 열어 추적되는 worker 2개로 양방향 바이트 포워딩 시작.
 // MATCH_FOUND 는 이미 호출자가 송신했다고 가정.
 // prefixFromA/B: lobby 에서 이미 recv 했지만 forwarder 로 넘겨야 할 raw 바이트.
 //   (READY 교환 직후 상대가 바로 PING/INPUT 을 보내 lobby 가 그 바이트를 kernel 에서
@@ -436,8 +470,13 @@ void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
     ch->prefixFromA = std::move(prefixFromA);
     ch->prefixFromB = std::move(prefixFromB);
 
-    std::thread(forwarderLoop, ch, true ).detach();
-    std::thread(forwarderLoop, ch, false).detach();
+    const bool launchedA = launchWorker([ch] { forwarderLoop(ch, true); });
+    const bool launchedB = launchWorker([ch] { forwarderLoop(ch, false); });
+    if (!launchedA || !launchedB) {
+        ch->closed.store(true);
+        net::tcp_close(ch->A);
+        net::tcp_close(ch->B);
+    }
 }
 
 void startForwarding(Match match, meta::client::MetaClient* meta) {
@@ -445,7 +484,7 @@ void startForwarding(Match match, meta::client::MetaClient* meta) {
 }
 
 // 랜덤 큐 전용: MATCH_FOUND 이후 양쪽 READY(1) 확인까지 대기하는 로비 루프.
-// detached thread 로 돌아 matcher 를 블록하지 않는다.
+// 추적되는 worker에서 돌아 matcher를 블록하지 않는다.
 //
 // 규칙:
 //   · READY(1) 두 번 모두 수신 → startForwarding.
@@ -542,7 +581,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         return 0;
     };
 
-    while (!abort && !(aReady && bReady)) {
+    while (!abort && !(aReady && bReady) && !s_stopping.load()) {
         if (std::chrono::steady_clock::now() >= deadline) {
             std::cerr << "[relay] match=" << match.match_id
                       << " queue lobby timeout (aReady=" << aReady
@@ -608,7 +647,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         }
     }
 
-    if (abort) {
+    if (abort || s_stopping.load()) {
         net::tcp_close(match.a.sock);
         net::tcp_close(match.b.sock);
         return;
@@ -626,6 +665,12 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
 void startPump(Match match, meta::client::MetaClient* meta) {
     constexpr uint8_t ROLE_HOST  = 1;
     constexpr uint8_t ROLE_GUEST = 2;
+
+    if (s_stopping.load()) {
+        net::tcp_close(match.a.sock);
+        net::tcp_close(match.b.sock);
+        return;
+    }
 
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
                                      match.a.selected_icon_id, match.b.selected_icon_id);
@@ -646,6 +691,12 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
     constexpr uint8_t ROLE_HOST  = 1;
     constexpr uint8_t ROLE_GUEST = 2;
 
+    if (s_stopping.load()) {
+        net::tcp_close(match.a.sock);
+        net::tcp_close(match.b.sock);
+        return;
+    }
+
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
                                      match.a.selected_icon_id, match.b.selected_icon_id);
     const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
@@ -658,8 +709,30 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
         return;
     }
 
-    // matcher 스레드를 블록하지 않도록 로비 대기 루프는 detached thread 에서.
-    std::thread(queueLobbyThread, std::move(match), meta).detach();
+    // matcher 스레드를 블록하지 않되 종료 시 server가 drain할 수 있게 추적한다.
+    auto pending = std::make_shared<Match>(std::move(match));
+    if (!launchWorker([pending, meta] {
+            queueLobbyThread(std::move(*pending), meta);
+        })) {
+        net::tcp_close(pending->a.sock);
+        net::tcp_close(pending->b.sock);
+    }
+}
+
+void beginShutdown()
+{
+    s_stopping.store(true);
+}
+
+void waitForShutdown()
+{
+    std::unique_lock<std::mutex> lk(s_workerMu);
+    s_workerCv.wait(lk, [] { return s_activeWorkers == 0; });
+}
+
+bool isShuttingDown()
+{
+    return s_stopping.load();
 }
 
 }  // namespace relay

@@ -32,6 +32,25 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
 // 우상단 X 모양 아이콘 버튼. 인게임 "나가기" 버튼용.
 bool gui_close_button(int x, int y, int size);
 
+// 체크박스 + 라벨. (x,y) 좌상단, size = 박스 한 변(px).
+//   checked: 채워진 박스 vs 빈 박스로 그림.
+//   highlighted: 키보드 커서 강조 (gui_button_highlighted 와 동일 철학).
+//   반환: 좌클릭 엣지(true) — 호출부가 bool 을 토글한다.
+bool gui_checkbox(int x, int y, int size, const char* label, bool checked,
+                  bool highlighted = false);
+
+// 가로 슬라이더 (0~100%). 트랙 + 채워진 구간 + 노브를 그린다.
+//   valuePct: 현재 값(0~100). highlighted: 키보드 커서 강조.
+//   반환: 트랙 위를 좌클릭/드래그 중이면 그 위치에 해당하는 새 값(0~100),
+//         조작이 없으면 valuePct 를 그대로 반환. 호출부는 반환값을 저장한다.
+int  gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted);
+
+// 값 선택기: "◀ label ▶" 형태. 좌/우 화살표 버튼을 클릭하면 -1/+1 을 반환.
+//   (x,y) 좌상단, w/h 전체 박스 크기. label 은 중앙 표시(예: "1080x960").
+//   반환: 왼쪽 화살표 클릭 = -1, 오른쪽 = +1, 그 외 0. highlighted = 커서 강조.
+int  gui_value_selector(int x, int y, int w, int h, const char* label,
+                        bool highlighted);
+
 // 모달 배경(반투명 오버레이)을 전체 화면에 덮는다. 모달 창은 위에 겹쳐 그린다.
 // 화면 크기는 main.cpp 가 안다 → 인자로 받음.
 void gui_modal_dim(int screenW, int screenH);

@@ -12,6 +12,7 @@
 // 주의: main.cpp 와 game.cpp 는 수정하지 않는다. PlatformKey 값(Win32 VK)은 유지.
 
 #include <SDL2/SDL.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -132,8 +133,21 @@ static void gl_load_functions()
 static SDL_Window*   s_win           = nullptr;
 static SDL_GLContext s_glctx         = nullptr;
 static bool          s_should_close  = false;
-static int           s_win_w         = 0;
+static int           s_win_w         = 0;   // 실제 창(드로어블) 크기
 static int           s_win_h         = 0;
+
+// 논리(디자인) 좌표계 크기 — platform_init 에 넘어온 값(720×640). GUI 가 이
+// 좌표계를 기준으로 마우스 hit-test 한다. 창을 스케일/전체화면 해도 불변.
+static int           s_logical_w     = 0;
+static int           s_logical_h     = 0;
+
+// 현재 렌더(=마우스 매핑) 뷰포트. 스케일 프리셋에선 창 전체(offset 0),
+// 전체화면 레터박스에선 9:8 을 유지하는 중앙 정렬 사각형.
+static int           s_vp_x          = 0;
+static int           s_vp_y          = 0;
+static int           s_vp_w          = 0;
+static int           s_vp_h          = 0;
+static bool          s_fullscreen    = false;
 
 static bool s_key_state[256] = {};
 static bool s_key_prev [256] = {};
@@ -199,9 +213,46 @@ static int sdl_to_vk(SDL_Keycode k)
     }
 }
 
+// 현재 창 크기(s_win_w/h)와 논리 종횡비(s_logical_w/h)로부터 렌더 뷰포트를
+// 다시 계산해 glViewport 에 적용한다.
+//   - 창 종횡비 == 논리 종횡비:  레터박스 없이 창 전체(offset 0).
+//   - 다르면(전체화면 등):       9:8 을 유지하는 중앙 정렬 사각형 + 검은 바.
+// 마우스 역매핑(platform_mouse_x/y)도 같은 사각형을 쓴다.
+static void recompute_viewport()
+{
+    if (s_logical_w <= 0 || s_logical_h <= 0 || s_win_w <= 0 || s_win_h <= 0) {
+        s_vp_x = s_vp_y = 0;
+        s_vp_w = s_win_w; s_vp_h = s_win_h;
+        glViewport(0, 0, s_win_w, s_win_h);
+        return;
+    }
+    // 창과 논리 종횡비가 (거의) 같으면 레터박스 불필요 — 창 전체 사용.
+    const double winAR = (double)s_win_w / (double)s_win_h;
+    const double logAR = (double)s_logical_w / (double)s_logical_h;
+    if (std::abs(winAR - logAR) < 1e-3) {
+        s_vp_x = s_vp_y = 0;
+        s_vp_w = s_win_w; s_vp_h = s_win_h;
+    } else if (winAR > logAR) {
+        // 창이 더 넓음 → 좌우 필러박스. 높이를 꽉 채우고 폭을 맞춤.
+        s_vp_h = s_win_h;
+        s_vp_w = (int)((double)s_win_h * logAR + 0.5);
+        s_vp_x = (s_win_w - s_vp_w) / 2;
+        s_vp_y = 0;
+    } else {
+        // 창이 더 높음 → 상하 레터박스.
+        s_vp_w = s_win_w;
+        s_vp_h = (int)((double)s_win_w / logAR + 0.5);
+        s_vp_x = 0;
+        s_vp_y = (s_win_h - s_vp_h) / 2;
+    }
+    glViewport(s_vp_x, s_vp_y, s_vp_w, s_vp_h);
+}
+
 void platform_init(int w, int h, const char* title)
 {
     s_win_w = w; s_win_h = h;
+    s_logical_w = w; s_logical_h = h;
+    s_vp_x = s_vp_y = 0; s_vp_w = w; s_vp_h = h;
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
@@ -311,7 +362,7 @@ float platform_begin_frame()
                 ev.window.event == SDL_WINDOWEVENT_RESIZED) {
                 s_win_w = ev.window.data1;
                 s_win_h = ev.window.data2;
-                glViewport(0, 0, s_win_w, s_win_h);
+                recompute_viewport();
             }
             break;
         }
@@ -350,8 +401,20 @@ char platform_get_char_pressed()
 }
 
 // ─── 마우스 API (Win32 백엔드와 동일 시그니처) ─────────────────────────────────
-int platform_mouse_x() { return s_mouse_x; }
-int platform_mouse_y() { return s_mouse_y; }
+// 원시 창 픽셀 → 논리(720×640) 좌표 역매핑. 뷰포트 사각형(s_vp_*) 기준:
+//   logical = (raw - vpOffset) * logicalSize / vpSize.
+// 레터박스 바 영역(뷰포트 밖)을 클릭하면 음수/범위밖 좌표가 되어 어떤
+// 위젯에도 안 맞는다 — 의도된 동작.
+int platform_mouse_x()
+{
+    if (s_vp_w <= 0 || s_logical_w <= 0) return s_mouse_x;
+    return (int)((double)(s_mouse_x - s_vp_x) * s_logical_w / s_vp_w);
+}
+int platform_mouse_y()
+{
+    if (s_vp_h <= 0 || s_logical_h <= 0) return s_mouse_y;
+    return (int)((double)(s_mouse_y - s_vp_y) * s_logical_h / s_vp_h);
+}
 
 bool platform_mouse_pressed(int button)
 {
@@ -384,3 +447,43 @@ void* platform_get_hdc()
     // SDL 빌드에서는 text_stb 가 이 값을 사용하지 않음.
     return nullptr;
 }
+
+// ─── 윈도우 설정 API ──────────────────────────────────────────────────────────
+void platform_set_window_size(int w, int h)
+{
+    if (!s_win || w <= 0 || h <= 0) return;
+    if (s_fullscreen) {
+        // 전체화면 중에는 창 크기 변경이 의미 없다 — 먼저 창모드로 돌려야 함.
+        SDL_SetWindowFullscreen(s_win, 0);
+        s_fullscreen = false;
+    }
+    SDL_SetWindowSize(s_win, w, h);
+    SDL_SetWindowPosition(s_win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    // 드로어블 픽셀 크기를 직접 질의(HiDPI 대응). 실패 시 요청 크기 사용.
+    int dw = 0, dh = 0;
+    SDL_GL_GetDrawableSize(s_win, &dw, &dh);
+    s_win_w = (dw > 0) ? dw : w;
+    s_win_h = (dh > 0) ? dh : h;
+    recompute_viewport();
+}
+
+void platform_set_fullscreen(bool on)
+{
+    if (!s_win) return;
+    if (SDL_SetWindowFullscreen(s_win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
+        fprintf(stderr, "[SDL] SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+        return;
+    }
+    s_fullscreen = on;
+    int dw = 0, dh = 0;
+    SDL_GL_GetDrawableSize(s_win, &dw, &dh);
+    if (dw > 0 && dh > 0) { s_win_w = dw; s_win_h = dh; }
+    recompute_viewport();
+}
+
+void platform_set_vsync(bool on)
+{
+    SDL_GL_SetSwapInterval(on ? 1 : 0);
+}
+
+bool platform_fullscreen_supported() { return true; }

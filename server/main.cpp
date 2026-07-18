@@ -40,6 +40,13 @@ namespace {
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
+// 동시 연결 worker 상한 — 연결당 detached 스레드(스택 ~1MB)를 만들므로 상한이
+// 없으면 connect 플러딩만으로 메모리/핸들이 고갈된다. playerConnThread 는
+// 첫 프레임 대기(≤10s)와 룸 대기 동안 스레드를 점유하므로, 정상 부하(수십 명)
+// 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다.
+constexpr int     kMaxConnWorkers = 256;
+std::atomic<int>  g_activeConnWorkers{0};
+
 void signalHandler(int /*sig*/) {
     // async-signal-safe 하게 플래그만 세운다. listen 소켓은 논블로킹이라
     // accept 루프가 최대 ~10ms 안에 g_running 을 보고 빠져나온다. 핸들러에서
@@ -196,10 +203,23 @@ int main(int argc, char** argv) {
             continue;
         }
         const uint32_t id = next_conn_id++;
+        if (g_activeConnWorkers.load() >= kMaxConnWorkers) {
+            std::cerr << "[relay] rejecting conn=" << id
+                      << ": connection limit reached (" << kMaxConnWorkers << ")\n";
+            net::tcp_close(client);
+            continue;
+        }
         std::cout << "[relay] accept conn=" << id << "\n";
+        g_activeConnWorkers.fetch_add(1);
         if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr]() mutable {
+            // 예외 경로 포함 모든 반환에서 카운트를 되돌린다 (WorkerGroup 이
+            // 예외를 격리하므로 RAII 가드가 유일하게 안전한 지점).
+            struct CountGuard {
+                ~CountGuard() { g_activeConnWorkers.fetch_sub(1); }
+            } guard;
             relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
         })) {
+            g_activeConnWorkers.fetch_sub(1);
             std::cerr << "[relay] rejecting conn=" << id
                       << ": connection worker unavailable\n";
         }

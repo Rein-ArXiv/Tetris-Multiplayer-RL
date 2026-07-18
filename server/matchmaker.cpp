@@ -12,17 +12,19 @@ namespace relay {
 namespace {
 
 bool waitingPlayerStillActive(PlayerInfo& p) {
-    std::vector<uint8_t> stream;
-    if (!net::tcp_recv_some(p.sock, stream)) {
+    // p.streamBuf 에 누적 수신 — 로컬 버퍼를 쓰면 폴링 사이에 걸친 부분 프레임
+    // 바이트가 유실되어 스트림이 어긋난다. parse_frames 가 완성 프레임만큼만
+    // 소비하고 잔여 tail 은 다음 폴링/로비 단계로 넘어간다.
+    if (!net::tcp_recv_some(p.sock, p.streamBuf)) {
         std::cerr << "[matchmaker] conn=" << p.conn_id
                   << " left queue before match\n";
         net::tcp_close(p.sock);
         return false;
     }
 
-    if (!stream.empty()) {
+    if (!p.streamBuf.empty()) {
         std::vector<net::Frame> frames;
-        if (!net::parse_frames(stream, frames)) {
+        if (!net::parse_frames(p.streamBuf, frames)) {
             std::cerr << "[matchmaker] conn=" << p.conn_id
                       << " sent malformed queue frame\n";
             net::tcp_close(p.sock);

@@ -307,7 +307,10 @@ std::string get_local_ip() {
 
         if (getaddrinfo(hostname, nullptr, &hints, &info) == 0 && info != nullptr) {
             struct sockaddr_in* addr = (struct sockaddr_in*)info->ai_addr;
-            result = inet_ntoa(addr->sin_addr);
+            char ipbuf[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr->sin_addr, ipbuf, sizeof(ipbuf))) {
+                result = ipbuf;
+            }
             freeaddrinfo(info);
         }
     }
@@ -324,7 +327,10 @@ std::string get_local_ip() {
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
             socklen_t len = sizeof(addr);
             if (getsockname(sock, (struct sockaddr*)&addr, &len) == 0) {
-                result = inet_ntoa(addr.sin_addr);
+                char ipbuf[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &addr.sin_addr, ipbuf, sizeof(ipbuf))) {
+                    result = ipbuf;
+                }
             }
         }
         close(sock);

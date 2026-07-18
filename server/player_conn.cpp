@@ -30,6 +30,24 @@ std::string extract_token(const std::vector<uint8_t>& pl, size_t offset)
                        pl.begin() + offset + 1 + n);
 }
 
+// 첫 프레임(QUEUE_JOIN 등)과 같은 recv 에 실려 이미 파싱된 후속 프레임들과
+// 아직 완성되지 않은 partial tail 을 원본 바이트 스트림으로 복원한다.
+// build_frame 은 동일 payload 에 대해 bit-identical 하므로 재직렬화가 안전하다.
+// 이 잔여분을 다음 단계(matchmaker 큐 / roomLoop_)의 수신 버퍼로 이관하지 않으면
+// 그 프레임들(예: QUEUE_JOIN 직후의 QUEUE_CANCEL)이 조용히 유실된다.
+std::vector<uint8_t> residual_stream(const std::vector<net::Frame>& frames,
+                                     size_t next_idx,
+                                     const std::vector<uint8_t>& tail)
+{
+    std::vector<uint8_t> out;
+    for (size_t j = next_idx; j < frames.size(); ++j) {
+        auto bytes = net::build_frame(frames[j].type, frames[j].payload);
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    out.insert(out.end(), tail.begin(), tail.end());
+    return out;
+}
+
 // meta 가 nullptr 또는 token 이 비어 있으면 unranked (player_id=0, elo=0).
 // verify 실패면 std::nullopt → 호출자가 소켓 close.
 struct AuthOutcome {
@@ -98,7 +116,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
         if (!stream.empty()) {
             std::vector<net::Frame> frames;
             net::parse_frames(stream, frames);
-            for (const auto& f : frames) {
+            for (size_t i = 0; i < frames.size(); ++i) {
+                const net::Frame& f = frames[i];
                 if (f.type == net::MsgType::QUEUE_JOIN) {
                     // 페이로드: [tok_len:1][token:N]
                     std::string tok = extract_token(f.payload, 0);
@@ -113,6 +132,9 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     pi.username  = std::move(auth->username);
                     pi.token     = std::move(auth->token);
                     pi.selected_icon_id = std::move(auth->selected_icon_id);
+                    // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
+                    // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
+                    pi.streamBuf = residual_stream(frames, i + 1, stream);
                     std::cerr << "[conn " << conn_id << "] QUEUE_JOIN -> queued\n";
                     mm.enqueue(std::move(pi));
                     return;
@@ -131,7 +153,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     rr.handleCreate(std::move(sock), conn_id,
                                     auth->player_id, auth->elo,
                                     auth->username, auth->token,
-                                    auth->selected_icon_id);
+                                    auth->selected_icon_id,
+                                    residual_stream(frames, i + 1, stream));
                     return;
                 }
                 if (f.type == net::MsgType::ROOM_JOIN) {
@@ -150,7 +173,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     rr.handleJoin(code, std::move(sock), conn_id,
                                   auth->player_id, auth->elo,
                                   auth->username, auth->token,
-                                  auth->selected_icon_id);
+                                  auth->selected_icon_id,
+                                  residual_stream(frames, i + 1, stream));
                     return;
                 }
                 // HELLO 등 낯선 프레임은 초기 phase 에서는 무시 + 계속 대기

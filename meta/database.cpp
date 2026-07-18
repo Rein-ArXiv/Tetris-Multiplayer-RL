@@ -319,7 +319,12 @@ Database::registerGuest(const std::string& token)
     p.xp      = 0;
     p.selected_icon_id = kDefaultIconId;
     // username 은 기본 NULL
-    insert_icon_ownership(db_, p.id, kDefaultIconId);
+    if (!insert_icon_ownership(db_, p.id, kDefaultIconId)) {
+        // default 아이콘은 default_owned=true 라 실동작엔 지장 없지만, 소유 행
+        // 누락은 DB 이상 신호이므로 조용히 넘기지 않는다.
+        std::fprintf(stderr, "[db] registerGuest: default icon ownership insert "
+                     "failed for player_id=%lld\n", static_cast<long long>(p.id));
+    }
     return p;
 }
 

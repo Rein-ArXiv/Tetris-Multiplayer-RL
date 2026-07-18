@@ -16,12 +16,14 @@
 #include "../net/socket.h"
 #include "matchmaker.h"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace meta::client { class MetaClient; }
 
@@ -38,17 +40,22 @@ public:
     // playerConnThread 에서 ROOM_CREATE 수신 직후 호출.
     // 방을 만들고 roomLoop_ 안에서 블로킹하다가 종료 시 리턴.
     // player_id=0 은 unranked (meta 연동 안 됨). 매치 성립 시 startPump 에 전달.
+    // streamPrefix: playerConnThread 가 첫 프레임과 같은 recv 로 이미 끌어온
+    //   후속 바이트 (완성 프레임 재직렬화분 + partial tail). roomLoop_ 의 수신
+    //   버퍼 초기값이 된다 — 버리면 그 프레임들이 유실된다.
     void handleCreate(net::TcpSocket sock, uint32_t conn_id,
                       int64_t player_id, int elo,
                       const std::string& username, const std::string& token,
-                      const std::string& selected_icon_id);
+                      const std::string& selected_icon_id,
+                      std::vector<uint8_t> streamPrefix = {});
 
     // playerConnThread 에서 ROOM_JOIN 수신 직후 호출.
     // 실패(notfound/full) 시 ROOM_INFO 회신 후 소켓 닫고 바로 리턴.
     void handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
                     int64_t player_id, int elo,
                     const std::string& username, const std::string& token,
-                    const std::string& selected_icon_id);
+                    const std::string& selected_icon_id,
+                    std::vector<uint8_t> streamPrefix = {});
 
     // 모든 roomLoop_ 를 종료시킨다.
     void shutdown();
@@ -67,6 +74,7 @@ private:
         bool           matchStarted = false;  // 한쪽이 starter 로 선점
         bool           hostExited   = false;  // player thread 가 read 루프를 빠져나옴
         bool           guestExited  = false;
+        uint64_t       roomInfoVersion = 0;
 
         // 인증 메타 (meta 연동 시 채워짐. 0 = unranked)
         int64_t        hostPlayerId  = 0;
@@ -85,16 +93,26 @@ private:
     uint64_t    nextSeed_();       // mu 잡은 상태에서 호출
     uint32_t    nextMatchId_();    // mu 잡은 상태에서 호출
 
-    void roomLoop_(const std::string& code, bool isHost);
+    void roomLoop_(const std::string& code, bool isHost,
+                   std::vector<uint8_t> streamPrefix = {});
     void sendRoomInfo_(const net::TcpSocket& sock, const std::string& code,
                        uint8_t status, uint8_t peerCount);
+    void sendRoomInfoIfCurrent_(const net::TcpSocket& sock,
+                                const std::string& code,
+                                uint8_t status, uint8_t peerCount,
+                                uint64_t expectedVersion);
 
     std::mutex              mu;
     std::condition_variable cv;
     std::unordered_map<std::string, Entry> rooms;
+    // 방별 ROOM_INFO 순서를 유지하면서 느린 소켓 하나가 모든 방을 막지 않도록
+    // 코드 해시로 나눈 송신 게이트를 사용한다.
+    static constexpr size_t kRoomInfoShardCount = 64;
+    std::array<std::mutex, kRoomInfoShardCount> roomInfoMu_;
     std::atomic<bool>       stopping{false};
     uint64_t                code_rng_state_ = 0;
     uint64_t                seed_state_     = 0;
+    uint64_t                next_room_info_version_ = 1;
     uint32_t                next_match_id_  = 100000;  // 매치메이킹과 match_id 충돌 피해
     meta::client::MetaClient* meta_ = nullptr;
 };

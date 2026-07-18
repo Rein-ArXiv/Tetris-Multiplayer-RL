@@ -90,6 +90,32 @@ bool parse_int_param(const std::string& s, int& out)
     return true;
 }
 
+// [보안] 레이트리밋 키로 쓸 클라이언트 식별자.
+//   배포 구성(deploy/)은 meta 를 127.0.0.1 에 바인드하고 cloudflared/Caddy 를
+//   앞단에 둔다 — 이때 remote_addr 은 항상 프록시(루프백)라 전체 사용자가 1개
+//   버킷을 공유하게 되어 per-IP 제한이 무력화된다. 피어가 루프백(신뢰 프록시)일
+//   때만 프록시가 붙여 주는 실제 클라이언트 IP 헤더를 사용한다. 외부에서 직접
+//   접속한 피어의 헤더는 위조 가능하므로 무시한다.
+std::string rate_limit_key(const httplib::Request& req)
+{
+    const bool from_loopback =
+        req.remote_addr == "127.0.0.1" || req.remote_addr == "::1";
+    if (from_loopback) {
+        std::string ip = req.get_header_value("CF-Connecting-IP");
+        if (ip.empty()) {
+            ip = req.get_header_value("X-Forwarded-For");
+            // XFF 는 "client, proxy1, proxy2" — 첫 항목이 원 클라이언트.
+            const auto comma = ip.find(',');
+            if (comma != std::string::npos) ip.resize(comma);
+        }
+        // 공백 트림 후 비어있지 않으면 채택.
+        const auto b = ip.find_first_not_of(" \t");
+        const auto e = ip.find_last_not_of(" \t");
+        if (b != std::string::npos) return ip.substr(b, e - b + 1);
+    }
+    return req.remote_addr;
+}
+
 // CORS + content-type 을 한 번에 세팅.
 void set_json(httplib::Response& res, int status, const std::string& body)
 {
@@ -126,7 +152,7 @@ bool ApiServer::listen(const std::string& host, int port)
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             std::lock_guard<std::mutex> lk(mu);
             if (nowSec != window) { window = nowSec; hits.clear(); }
-            if (++hits[req.remote_addr] > kMaxPerWindow) {
+            if (++hits[rate_limit_key(req)] > kMaxPerWindow) {
                 res.status = 429;
                 res.set_header("Access-Control-Allow-Origin", "*");
                 res.set_content("{\"error\":\"rate_limited\"}", "application/json");
@@ -298,6 +324,17 @@ bool ApiServer::listen(const std::string& host, int port)
             if (*sa < 0 || *sb < 0 || *la < 0 || *lb < 0 || *du < 0) {
                 set_json(res, 400,
                     proto::error_json("bad_request", "scores/lines/duration must be non-negative"));
+                return;
+            }
+            // int64 → int 로 내려가기 전에 상한 검증 — 2^31 이상 값은 캐스팅에서
+            // 음수로 래핑되어 위의 non-negative 검사를 우회한다. 게임 상 도달
+            // 불가능한 1e8 을 하드 상한으로 거부.
+            constexpr int64_t kMaxStatValue = 100000000;
+            if (*sa > kMaxStatValue || *sb > kMaxStatValue ||
+                *la > kMaxStatValue || *lb > kMaxStatValue ||
+                *du > kMaxStatValue) {
+                set_json(res, 400,
+                    proto::error_json("bad_request", "scores/lines/duration out of range"));
                 return;
             }
 

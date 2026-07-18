@@ -486,13 +486,20 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
     constexpr size_t TYPE_FIELD         = 1;
     constexpr size_t CHECKSUM_FIELD     = 4;
     constexpr size_t MAX_PAYLOAD_BYTES  = 4096;  // net/framing.cpp 와 동일 한도
+    // ready 확정 후 forwarder 이관 전까지 쌓일 수 있는 raw 바이트 상한.
+    // 정상 클라이언트는 READY 직후 PING/INPUT 몇 프레임 수준(<1KB)이므로 64KB 면
+    // 충분하다. 상한이 없으면 악성 클라가 30초 동안 회선 속도로 밀어넣어 relay
+    // 메모리를 소모시킬 수 있다.
+    constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 
     bool aReady = false;
     bool bReady = false;
     bool abort  = false;
 
-    std::vector<uint8_t> bufA; bufA.reserve(64);
-    std::vector<uint8_t> bufB; bufB.reserve(64);
+    // 매치메이킹 큐 폴링 단계에서 이미 recv 된 잔여 바이트를 이어받는다
+    // (PlayerInfo::streamBuf 주석 참조). 없으면 그냥 빈 버퍼.
+    std::vector<uint8_t> bufA = std::move(match.a.streamBuf);
+    std::vector<uint8_t> bufB = std::move(match.b.streamBuf);
 
     const auto deadline = std::chrono::steady_clock::now() + kConfirmTimeout;
 
@@ -592,6 +599,16 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
                       << " queue lobby B disconnected (aReady=" << aReady
                       << " bReady=" << bReady << ")\n";
             if (aReady || !bReady) forward_ready(match.a.sock, 0);
+            abort = true; break;
+        }
+
+        // 로비 버퍼 상한 — ready 확정 뒤 forwarder 이관 대기 중인 raw 바이트가
+        // 무한정 쌓이는 것을 차단. 초과하는 쪽은 프로토콜을 벗어난 것으로 보고
+        // 매치를 중단한다.
+        if (bufA.size() > kMaxLobbyBufBytes || bufB.size() > kMaxLobbyBufBytes) {
+            std::cerr << "[relay] match=" << match.match_id
+                      << " queue lobby buffer overflow (A=" << bufA.size()
+                      << " B=" << bufB.size() << ") -> abort\n";
             abort = true; break;
         }
 

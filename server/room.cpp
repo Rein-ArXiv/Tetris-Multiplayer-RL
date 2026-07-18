@@ -5,7 +5,9 @@
 #include "../net/socket.h"
 
 #include <chrono>
+#include <functional>
 #include <iostream>
+#include <random>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -38,7 +40,11 @@ uint64_t xorshift64_(uint64_t& s) {
 RoomRegistry::RoomRegistry() {
     using clock = std::chrono::high_resolution_clock;
     const auto t = static_cast<uint64_t>(clock::now().time_since_epoch().count());
-    code_rng_state_ = t ? t : 0xC0FFEE0DDB0B0BAAULL;
+    // 룸코드는 추측되면 남의 방에 난입할 수 있으므로 부팅 시각만으로 시드하지
+    // 않는다 — random_device(주요 플랫폼에서 OS CSPRNG)를 섞어 예측을 차단.
+    std::random_device rd;
+    const uint64_t r = (static_cast<uint64_t>(rd()) << 32) | rd();
+    code_rng_state_ = (t ^ r) ? (t ^ r) : 0xC0FFEE0DDB0B0BAAULL;
     // seed stream 은 다른 상태 — 한 프로세스 안에서 matchmaker 와 충돌 최소화.
     seed_state_     = (t ? t : 0xDEADBEEFCAFEBABEULL) ^ 0x9E3779B97F4A7C15ULL;
 }
@@ -74,12 +80,32 @@ void RoomRegistry::sendRoomInfo_(const net::TcpSocket& sock, const std::string& 
     net::tcp_send_all(sock, f.data(), f.size());
 }
 
+void RoomRegistry::sendRoomInfoIfCurrent_(
+    const net::TcpSocket& sock, const std::string& code,
+    uint8_t status, uint8_t peerCount, uint64_t expectedVersion) {
+    // 새 상태가 먼저 기록됐다면 이전 알림을 생략한다. 이전 알림이 이미 송신
+    // 중이면 새 알림은 같은 방의 게이트 뒤에서 기다리므로 wire 순서도 보장된다.
+    const size_t shard = std::hash<std::string>{}(code) % kRoomInfoShardCount;
+    std::lock_guard<std::mutex> sendLk(roomInfoMu_[shard]);
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = rooms.find(code);
+        if (it == rooms.end() ||
+            it->second.roomInfoVersion != expectedVersion) {
+            return;
+        }
+    }
+    sendRoomInfo_(sock, code, status, peerCount);
+}
+
 void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
                                 int64_t player_id, int elo,
                                 const std::string& username, const std::string& token,
-                                const std::string& selected_icon_id) {
+                                const std::string& selected_icon_id,
+                                std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
+    uint64_t roomInfoVersion = 0;
     {
         std::unique_lock<std::mutex> lk(mu);
         code = generateCode_();
@@ -98,18 +124,21 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
         r.hostUsername = username;
         r.hostToken    = token;
         r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+        roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
     }
     std::cerr << "[room] conn=" << conn_id << " created code=" << code << "\n";
-    sendRoomInfo_(sock, code, kStatusWaiting, 1);
-    roomLoop_(code, /*isHost=*/true);
+    sendRoomInfoIfCurrent_(sock, code, kStatusWaiting, 1, roomInfoVersion);
+    roomLoop_(code, /*isHost=*/true, std::move(streamPrefix));
 }
 
 void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
                               int64_t player_id, int elo,
                               const std::string& username, const std::string& token,
-                              const std::string& selected_icon_id) {
+                              const std::string& selected_icon_id,
+                              std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     bool entered = false;
+    uint64_t roomInfoVersion = 0;
     {
         std::unique_lock<std::mutex> lk(mu);
         auto it = rooms.find(code);
@@ -140,18 +169,20 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
         net::TcpSocket hs = r.hostSock;
         net::TcpSocket gs = r.guestSock;
+        roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
         lk.unlock();
-        sendRoomInfo_(hs, code, kStatusWaiting, 2);
-        sendRoomInfo_(gs, code, kStatusWaiting, 2);
+        sendRoomInfoIfCurrent_(hs, code, kStatusWaiting, 2, roomInfoVersion);
+        sendRoomInfoIfCurrent_(gs, code, kStatusWaiting, 2, roomInfoVersion);
         entered = true;
     }
     if (entered) {
         std::cerr << "[room] conn=" << conn_id << " joined " << code << "\n";
-        roomLoop_(code, /*isHost=*/false);
+        roomLoop_(code, /*isHost=*/false, std::move(streamPrefix));
     }
 }
 
-void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
+void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
+                             std::vector<uint8_t> streamPrefix) {
     // 내 소켓 사본 확보 (lock 밖에서 recv 하기 위함)
     net::TcpSocket mySock;
     {
@@ -162,7 +193,10 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
         mySock = isHost ? r.hostSock : r.guestSock;
     }
 
-    std::vector<uint8_t> stream;
+    // playerConnThread 가 첫 프레임과 함께 끌어온 잔여 바이트를 수신 버퍼의
+    // 초기값으로 사용 — ROOM_CREATE/JOIN 직후 같은 recv 에 실려온 READY/CHAT
+    // 등이 유실되지 않는다.
+    std::vector<uint8_t> stream = std::move(streamPrefix);
     stream.reserve(256);
     bool leaveRequested   = false;
     bool peerStartedMatch = false;
@@ -311,12 +345,12 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
     }
 
     // 일반 종료(ROOM_LEAVE / EOF / shutdown) — 상대에게 알리고 내 소켓 닫음.
-    // 주의: peer 통지(sendRoomInfo_)는 lock 보유 상태에서 보낸다. fd 소유권은
-    //   shared_ptr 기반 TcpSocket 이 지켜 주지만, room entry 의 present/ready
-    //   변경과 ROOM_INFO 발송 순서는 같은 lock 으로 직렬화해야 상대 동시 종료와
-    //   상태 통지가 역전되지 않는다. ROOM_INFO 는 <50 B 단일 프레임이라 lock
-    //   hold 시간 영향이 작다.
-    bool eraseRoom = false;
+    // peer 통지는 상태 mutex 밖에서 보내되 방별 게이트로 직렬화한다.
+    // tcp_send_all 이 블록해도 다른 방의 처리는 계속되며, 버전 검증으로
+    // 새 입장 뒤 오래된 gonefull 이 도착하는 상태 역전을 막는다.
+    net::TcpSocket peerSock{};
+    bool notifyPeer = false;
+    uint64_t roomInfoVersion = 0;
     {
         std::lock_guard<std::mutex> lk(mu);
         auto it = rooms.find(code);
@@ -324,18 +358,16 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost) {
             auto& r = it->second;
             if (isHost) { r.hostPresent = false;  r.hostReady  = false; }
             else        { r.guestPresent = false; r.guestReady = false; }
-            net::TcpSocket peerSock{};
-            bool notifyPeer = false;
             if (isHost && r.guestPresent) { peerSock = r.guestSock; notifyPeer = true; }
             if (!isHost && r.hostPresent) { peerSock = r.hostSock;  notifyPeer = true; }
-            if (notifyPeer) sendRoomInfo_(peerSock, code, kStatusGoneFull, 1);
-            if (!r.hostPresent && !r.guestPresent) eraseRoom = true;
+            roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
+            if (!r.hostPresent && !r.guestPresent) rooms.erase(it);
         }
     }
 
-    if (eraseRoom) {
-        std::lock_guard<std::mutex> lk(mu);
-        rooms.erase(code);
+    if (notifyPeer) {
+        sendRoomInfoIfCurrent_(peerSock, code, kStatusGoneFull, 1,
+                               roomInfoVersion);
     }
 
     net::tcp_close(mySock);

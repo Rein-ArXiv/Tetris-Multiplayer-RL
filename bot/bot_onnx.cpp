@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 
 #if defined(TETRIS_HAS_ONNXRUNTIME)
@@ -39,7 +40,10 @@ struct BotOnnx::Impl {
             sessOpts.SetIntraOpNumThreads(1);
             sessOpts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         #if defined(_WIN32)
-            std::wstring wpath(path.begin(), path.end());
+            // 바이트 단위 widening(path.begin(), path.end())은 비ASCII 경로
+            // (예: 한글 사용자 폴더)를 깨뜨린다. filesystem::path 가 네이티브
+            // 인코딩 규칙으로 narrow→wide 변환을 수행하게 맡긴다.
+            const std::wstring wpath = std::filesystem::path(path).wstring();
             session = std::make_unique<Ort::Session>(env, wpath.c_str(), sessOpts);
         #else
             session = std::make_unique<Ort::Session>(env, path.c_str(), sessOpts);
@@ -90,6 +94,15 @@ struct BotOnnx::Impl {
             return false;
         }
         if (outs.empty()) return false;
+
+        // 출력 shape 검증 — 모델이 kNumPlacements(40)보다 작은 policy 를 내보내면
+        // 아래 argmax 루프가 out-of-bounds read 를 한다. 로컬 파일이라도 잘못
+        // export 된 모델은 흔하므로 로드 대신 여기서 안전하게 실패시킨다.
+        {
+            const auto info = outs[0].GetTensorTypeAndShapeInfo();
+            if (info.GetElementCount() < static_cast<size_t>(kNumPlacements))
+                return false;
+        }
 
         const float* logits = outs[0].GetTensorData<float>();
         // kNumPlacements = 40 고정.

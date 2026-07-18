@@ -1138,6 +1138,10 @@ void Session::handleFrame(const Frame& f) {
         if ((size_t)n + 2 > f.payload.size()) break;  // 손상 — 드롭
         std::string text((const char*)f.payload.data() + 2, n);
         std::lock_guard<std::mutex> lk(chatMu_);
+        // 큐 상한 — UI 가 PullChat 을 멈춘 상태에서 상대가 CHAT 을 플러딩해도
+        // 메모리가 무한 증가하지 않도록 가장 오래된 메시지부터 버린다.
+        constexpr size_t kMaxChatQueue = 256;
+        if (chatQ_.size() >= kMaxChatQueue) chatQ_.pop_front();
         chatQ_.push_back(std::move(text));
     } break;
     case MsgType::MATCH_RESULT: {

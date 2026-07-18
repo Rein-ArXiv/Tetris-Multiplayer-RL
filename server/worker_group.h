@@ -77,10 +77,13 @@ private:
 
     void finish() noexcept
     {
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            --active_;
-        }
+        // notify 는 반드시 lock 보유 중에 — unlock 후 notify 하면, 그 사이에
+        // wait() 쪽이 spurious wakeup 으로 active_==0 을 보고 반환해 cv_ 를
+        // 파괴한 뒤 (예: ~WorkerGroup) 이 스레드가 파괴된 cv_ 에 notify 하는
+        // use-after-free 경합이 생긴다. lock 안이면 waiter 는 lock 재획득
+        // 전까지 반환할 수 없어 cv_ 수명이 보장된다.
+        std::lock_guard<std::mutex> lk(mu_);
+        --active_;
         cv_.notify_all();
     }
 

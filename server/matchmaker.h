@@ -22,6 +22,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace relay {
 
@@ -36,6 +37,12 @@ struct PlayerInfo {
     std::string    username;    // empty = guest (no nickname yet)
     std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
     std::string    selected_icon_id{"default"};
+
+    // 큐 대기 중 이 소켓에서 recv 됐지만 아직 완성 프레임이 못 된 잔여 바이트.
+    // 폴링 1회마다 로컬 버퍼를 쓰면 프레임이 TCP 세그먼트 경계에 걸쳐 도착할 때
+    // 앞쪽 절반이 유실되어 스트림이 어긋난다 — 반드시 여기 누적하고, 매치 성립
+    // 후에는 lobby 버퍼의 초기값으로 이관한다 (relay.cpp queueLobbyThread).
+    std::vector<uint8_t> streamBuf;
 };
 
 // 매칭 결과 (2 명)

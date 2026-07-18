@@ -16,11 +16,11 @@
 #include "player_conn.h"
 #include "relay.h"
 #include "room.h"
+#include "worker_group.h"
 #include "../net/socket.h"
 #include "../meta/http_client.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -147,25 +147,42 @@ int main(int argc, char** argv) {
     relay::Matchmaker   mm;
     relay::RoomRegistry rr;
 
-    // 연결 worker는 완료 즉시 detach되지만 활성 수를 추적한다. 종료 시 이 카운터를
-    // drain한 뒤 mm/rr/meta를 파괴해 참조 수명을 보장한다.
-    std::mutex connWorkerMu;
-    std::condition_variable connWorkerCv;
-    size_t activeConnWorkers = 0;
+    // 연결 worker는 완료 즉시 detach되지만 WorkerGroup이 생성 실패와 실행 중
+    // 예외까지 처리한다. 종료 시 drain한 뒤 mm/rr/meta를 파괴해 참조 수명을 보장한다.
+    relay::WorkerGroup connWorkers{"relay-connection"};
 
     // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작.
     // meta 가 있으면 post_match 를 호출할 수 있도록 포인터를 startPump 에 넘긴다.
     meta::client::MetaClient* mcPtr = metaClient.get();
     rr.setMeta(mcPtr);
-    std::thread matcher([&mm, mcPtr] {
-        while (true) {
-            auto match = mm.waitForPair();
-            if (!match) break;  // shutdown
-            // 랜덤 큐 경로: MATCH_FOUND → 양쪽 READY(1) 수락 대기 → 게임 포워딩.
-            // (커스텀 룸 경로는 room.cpp 가 READY 를 자체 확인한 뒤 startPump 를 호출한다.)
-            relay::startQueuePump(std::move(*match), mcPtr);
-        }
-    });
+    std::thread matcher;
+    try {
+        matcher = std::thread([&mm, mcPtr] {
+            try {
+                while (true) {
+                    auto match = mm.waitForPair();
+                    if (!match) break;  // shutdown
+                    // 랜덤 큐 경로: MATCH_FOUND → 양쪽 READY(1) 수락 대기 → 게임 포워딩.
+                    // (커스텀 룸 경로는 room.cpp 가 READY 를 자체 확인한 뒤 startPump 를 호출한다.)
+                    relay::startQueuePump(std::move(*match), mcPtr);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[relay] matcher failed: " << e.what() << "\n";
+                g_running.store(false);
+                mm.shutdown();
+            } catch (...) {
+                std::cerr << "[relay] matcher failed: unknown exception\n";
+                g_running.store(false);
+                mm.shutdown();
+            }
+        });
+    } catch (const std::exception& e) {
+        std::cerr << "[relay] matcher launch failed: " << e.what() << "\n";
+        net::tcp_close(g_listen_sock);
+        g_listen_sock = net::TcpSocket{};
+        net::net_shutdown();
+        return 1;
+    }
 
     // accept 루프 (논블로킹 폴링)
     uint32_t next_conn_id = 1;
@@ -180,32 +197,23 @@ int main(int argc, char** argv) {
         }
         const uint32_t id = next_conn_id++;
         std::cout << "[relay] accept conn=" << id << "\n";
-        {
-            std::lock_guard<std::mutex> lk(connWorkerMu);
-            ++activeConnWorkers;
-        }
-        std::thread([client = std::move(client), id, &mm, &rr, mcPtr,
-                     &connWorkerMu, &connWorkerCv, &activeConnWorkers]() mutable {
+        if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr]() mutable {
             relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
-            {
-                std::lock_guard<std::mutex> lk(connWorkerMu);
-                --activeConnWorkers;
-            }
-            connWorkerCv.notify_all();
-        }).detach();
+        })) {
+            std::cerr << "[relay] rejecting conn=" << id
+                      << ": connection worker unavailable\n";
+        }
     }
 
     std::cout << "[relay] shutting down...\n";
     relay::beginShutdown();
+    connWorkers.stopAccepting();
     net::tcp_close(g_listen_sock);
     g_listen_sock = net::TcpSocket{};  // 마지막 참조 해제 → 실제 fd close
     mm.shutdown();
     rr.shutdown();
     if (matcher.joinable()) matcher.join();
-    {
-        std::unique_lock<std::mutex> lk(connWorkerMu);
-        connWorkerCv.wait(lk, [&] { return activeConnWorkers == 0; });
-    }
+    connWorkers.wait();
     relay::waitForShutdown();
     net::net_shutdown();
     std::cout << "[relay] done\n";

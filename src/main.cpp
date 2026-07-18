@@ -235,7 +235,7 @@ static constexpr int kWindowScaleH[kWindowScaleCount] = { 640,  960, 1280 };
 static const char*   kWindowScaleLabel[kWindowScaleCount] = {
     "720 x 640", "1080 x 960", "1440 x 1280" };
 
-// 전역 설정. apply_self_fx/apply_peer_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
+// 전역 설정. apply_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
 static GameSettings g_settings;
 
 static bool parse_bool01(const std::string& v, bool fallback)
@@ -291,22 +291,43 @@ static GameSettings load_settings(const char* path)
     return s;
 }
 
-// 저장 성공 시 true. 실패(읽기전용 디렉터리 등)면 false — 호출부가
-// fallback 경로로 재시도할 수 있게 결과를 돌려준다.
+// 저장 성공 시 true. 정식 user-data 경로의 부모 디렉터리가 없는 첫 실행도
+// 처리하며, 실패는 stderr에 남겨 설정 변경이 조용히 사라지지 않게 한다.
 static bool save_settings(const char* path, const GameSettings& s)
 {
+    namespace fs = std::filesystem;
+    const fs::path target(path);
+    const fs::path parent = target.parent_path();
+    if (!parent.empty()) {
+        std::error_code ec;
+        fs::create_directories(parent, ec);
+        if (ec) {
+            std::fprintf(stderr, "[settings] cannot create '%s': %s\n",
+                         parent.string().c_str(), ec.message().c_str());
+            return false;
+        }
+    }
+
     FILE* f = std::fopen(path, "wb");
-    if (!f) return false;
-    std::fprintf(f, "bgm_vol=%d\n",        s.bgmVol);
-    std::fprintf(f, "sfx_vol=%d\n",        s.sfxVol);
-    std::fprintf(f, "shake=%d\n",          s.shakeOn ? 1 : 0);
-    std::fprintf(f, "harddrop_shake=%d\n", s.hardDropShakeOn ? 1 : 0);
-    std::fprintf(f, "window_scale=%d\n",   s.windowScale);
-    std::fprintf(f, "fullscreen=%d\n",     s.fullscreen ? 1 : 0);
-    std::fprintf(f, "vsync=%d\n",          s.vsyncOn ? 1 : 0);
-    std::fprintf(f, "ghost=%d\n",          s.ghostOn ? 1 : 0);
-    std::fclose(f);
-    return true;
+    if (!f) {
+        std::fprintf(stderr, "[settings] cannot open '%s' for writing\n", path);
+        return false;
+    }
+
+    bool ok = true;
+    ok = ok && std::fprintf(f, "bgm_vol=%d\n",        s.bgmVol) >= 0;
+    ok = ok && std::fprintf(f, "sfx_vol=%d\n",        s.sfxVol) >= 0;
+    ok = ok && std::fprintf(f, "shake=%d\n",          s.shakeOn ? 1 : 0) >= 0;
+    ok = ok && std::fprintf(f, "harddrop_shake=%d\n", s.hardDropShakeOn ? 1 : 0) >= 0;
+    ok = ok && std::fprintf(f, "window_scale=%d\n",   s.windowScale) >= 0;
+    ok = ok && std::fprintf(f, "fullscreen=%d\n",     s.fullscreen ? 1 : 0) >= 0;
+    ok = ok && std::fprintf(f, "vsync=%d\n",          s.vsyncOn ? 1 : 0) >= 0;
+    ok = ok && std::fprintf(f, "ghost=%d\n",          s.ghostOn ? 1 : 0) >= 0;
+    if (std::fclose(f) != 0) ok = false;
+    if (!ok) {
+        std::fprintf(stderr, "[settings] failed while writing '%s'\n", path);
+    }
+    return ok;
 }
 
 static std::vector<BotEntry> discover_bot_roster()
@@ -653,7 +674,7 @@ int main(int argc, char** argv)
     // ── 사용자 설정 로드 (렌더/오디오 전용) ───────────────────────────────────
     //   오디오 토글 플래그를 미리 세팅한다. 실제 audio_init 은 Game 생성자에서
     //   호출되며, 그 시점의 첫 audio_play_music/sound 가 이 플래그를 존중한다.
-    //   shake 플래그는 트리거 시점(apply_self_fx/apply_peer_fx)에서 읽는다.
+    //   shake 플래그는 트리거 시점(apply_fx)에서 읽는다.
     g_settings = load_settings(settingsPath.c_str());
     // 오디오: 볼륨 슬라이더가 토글을 대체. 0 == 음소거. enabled 도 같이 세팅해
     // off→on 복원 경로(audio_set_music_enabled)와 일관되게 유지한다.
@@ -968,8 +989,14 @@ int main(int argc, char** argv)
     // 상점 비동기 작업 — 블로킹 HTTP(verify/catalog/buy/select)가 렌더 스레드를
     // 멈추지 않도록 std::future 로 띄우고 매 프레임 wait_for(0) 으로 폴링한다
     // (publicIpTask 와 동일 패턴). 화면은 그동안 계속 그려져 프리뷰가 회전한다.
+    enum class ShopOpKind {
+        None,
+        Catalog,
+        BuyAndSelect,
+        Select,
+    };
     struct ShopResult {
-        int  kind = 0;                    // 1=catalog, 2=buy+select, 3=select
+        ShopOpKind kind = ShopOpKind::None;
         // catalog
         bool verifyOk = false;
         meta::client::AuthInfo verify{};
@@ -1087,36 +1114,19 @@ int main(int argc, char** argv)
     //   라인 클리어는 shake 를 트리거하지 않는다 — 공격(가비지) 가 반대편 보드로
     //   가면 그쪽 apply_fx 가 그 측 shake 를 걸어준다 (일반 테트리스 전투 관례).
     //   자기 / 상대 구분 없이 같은 로직 — 호출부가 올바른 shake 상태를 주입.
-    auto apply_self_fx = [&](SimGame& sim, Callout& co) {
+    auto apply_fx = [&](SimGame& sim, Callout& co, ShakeState& shake) {
         if (sim.lastTSpinLines >= 0)
             trigger_tspin_callout(co, sim.lastTSpinLines);
         else if (sim.lastLinesCleared > 0)
             trigger_callout(co, sim.lastLinesCleared);
         if (g_settings.shakeOn && sim.lastGarbageReceived > 0)
-            shake_trigger(shakeLeft, 6.0f, 0.20f);
+            shake_trigger(shake, 6.0f, 0.20f);
         if (g_settings.shakeOn && sim.gameOverEvent)
-            shake_trigger(shakeLeft, 16.0f, 0.50f);
+            shake_trigger(shake, 16.0f, 0.50f);
         // 하드드롭 약한 흔들림. shake_trigger 는 더 강한 진행 중 흔들림을
         // 덮어쓰지 않으므로 가비지/게임오버 흔들림을 끊지 않는다.
         if (g_settings.shakeOn && g_settings.hardDropShakeOn && sim.hardDropEvent)
-            shake_trigger(shakeLeft, 2.5f, 0.10f);
-        sim.hardDropEvent = false;
-        sim.lastLinesCleared = 0;
-        sim.lastTSpinLines = -1;
-        sim.lastGarbageReceived = 0;
-        sim.gameOverEvent = false;
-    };
-    auto apply_peer_fx = [&](SimGame& sim, Callout& co) {
-        if (sim.lastTSpinLines >= 0)
-            trigger_tspin_callout(co, sim.lastTSpinLines);
-        else if (sim.lastLinesCleared > 0)
-            trigger_callout(co, sim.lastLinesCleared);
-        if (g_settings.shakeOn && sim.lastGarbageReceived > 0)
-            shake_trigger(shakeRight, 6.0f, 0.20f);
-        if (g_settings.shakeOn && sim.gameOverEvent)
-            shake_trigger(shakeRight, 16.0f, 0.50f);
-        if (g_settings.shakeOn && g_settings.hardDropShakeOn && sim.hardDropEvent)
-            shake_trigger(shakeRight, 2.5f, 0.10f);
+            shake_trigger(shake, 2.5f, 0.10f);
         sim.hardDropEvent = false;
         sim.lastLinesCleared = 0;
         sim.lastTSpinLines = -1;
@@ -1308,8 +1318,8 @@ int main(int argc, char** argv)
                                 lastAttackLocal  = gameLocal->sim.AttackLinesSent();
                                 lastAttackRemote = gameRemote->sim.AttackLinesSent();
 
-                                apply_self_fx(gameLocal->sim,  coLocal);
-                                apply_peer_fx(gameRemote->sim, coRemote);
+                                apply_fx(gameLocal->sim,  coLocal,  shakeLeft);
+                                apply_fx(gameRemote->sim, coRemote, shakeRight);
                             }
                             simTick++;
 
@@ -1340,7 +1350,7 @@ int main(int argc, char** argv)
             {
                 gameSingle->SubmitInput(inputMask);
                 gameSingle->Tick();
-                apply_self_fx(gameSingle->sim, coLocal);
+                apply_fx(gameSingle->sim, coLocal, shakeLeft);
             }
             // ── Section C — BotSingle 틱 ───────────────────────────────────────
             else if (app == AppMode::BotSingle && gameSingle && gameBot &&
@@ -1389,8 +1399,8 @@ int main(int argc, char** argv)
                     lastAttackBot   = gameBot->sim.AttackLinesSent();
                 }
 
-                apply_self_fx(gameSingle->sim, coLocal);
-                apply_peer_fx(gameBot->sim,    coRemote);
+                apply_fx(gameSingle->sim, coLocal,  shakeLeft);
+                apply_fx(gameBot->sim,    coRemote, shakeRight);
 
                 if (gameSingle->gameOver || gameBot->gameOver) {
                     if (gameSingle->gameOver && gameBot->gameOver)
@@ -1954,7 +1964,7 @@ int main(int argc, char** argv)
                 shopBusy = true;
                 shopStatus.clear();
                 shopOp = std::async(std::launch::async, [mc, tok]() {
-                    ShopResult r; r.kind = 1;
+                    ShopResult r; r.kind = ShopOpKind::Catalog;
                     if (auto a = mc->verify_token(tok, 3)) { r.verifyOk = true; r.verify = *a; }
                     if (auto c = mc->fetch_icon_catalog(3)) {
                         r.catalogOk = true; r.catalog = std::move(*c);
@@ -1966,7 +1976,8 @@ int main(int argc, char** argv)
                 shopBusy = true;
                 std::string id = e.id, name = e.name; int price = e.price_bp;
                 shopOp = std::async(std::launch::async, [mc, tok, id, name, price]() {
-                    ShopResult r; r.kind = 3; r.iconId = id; r.iconName = name; r.price = price;
+                    ShopResult r; r.kind = ShopOpKind::Select;
+                    r.iconId = id; r.iconName = name; r.price = price;
                     int st = 0;
                     auto a = mc->select_icon(tok, id, 3, &st);
                     r.httpStatus = st;
@@ -1978,7 +1989,8 @@ int main(int argc, char** argv)
                 shopBusy = true;
                 std::string id = e.id, name = e.name; int price = e.price_bp;
                 shopOp = std::async(std::launch::async, [mc, tok, id, name, price]() {
-                    ShopResult r; r.kind = 2; r.iconId = id; r.iconName = name; r.price = price;
+                    ShopResult r; r.kind = ShopOpKind::BuyAndSelect;
+                    r.iconId = id; r.iconName = name; r.price = price;
                     int st = 0;
                     auto pa = mc->purchase_icon(tok, id, 3, &st);
                     r.httpStatus = st;
@@ -1998,7 +2010,7 @@ int main(int argc, char** argv)
                 shopOp.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                 ShopResult r = shopOp.get();
                 shopBusy = false;
-                if (r.kind == 1) {
+                if (r.kind == ShopOpKind::Catalog) {
                     if (r.verifyOk) {
                         myElo = r.verify.elo; myBp = r.verify.bp; myXp = r.verify.xp;
                         if (!r.verify.selected_icon_id.empty()) {
@@ -2016,29 +2028,34 @@ int main(int argc, char** argv)
                     } else {
                         shopStatus = "catalog fetch failed - [R] retry";
                     }
-                } else {  // buy(2) / select(3)
+                } else if (r.kind == ShopOpKind::BuyAndSelect ||
+                           r.kind == ShopOpKind::Select) {
                     if (r.haveAuth) { myElo = r.auth.elo; myBp = r.auth.bp; myXp = r.auth.xp; }
                     if (r.ownedNow) shopOwned.insert(r.iconId);
                     if (r.selectedOk) {
                         mySelectedIconId = r.auth.selected_icon_id;
                         iconYou = resolvePlayerIcon(mySelectedIconId);
-                        shopStatus = (r.kind == 2 ? "purchased & selected: "
-                                                  : "selected: ") + r.iconName;
+                        shopStatus = (r.kind == ShopOpKind::BuyAndSelect
+                                          ? "purchased & selected: "
+                                          : "selected: ") + r.iconName;
                         shopConfirmId.clear();
-                    } else if (r.kind == 3 && r.httpStatus == 403) {
+                    } else if (r.kind == ShopOpKind::Select && r.httpStatus == 403) {
                         // 미보유 → 구매 확인 단계로.
                         shopConfirmId = r.iconId;
                         shopStatus = "buy " + r.iconName + " for "
                                    + std::to_string(r.price) + " BP? press again to confirm";
-                    } else if (r.kind == 2 && r.httpStatus == 402) {
+                    } else if (r.kind == ShopOpKind::BuyAndSelect && r.httpStatus == 402) {
                         shopStatus = "not enough BP ("
                                    + std::to_string(r.price) + " needed)";
                     } else if (r.ownedNow && !r.selectedOk) {
                         shopStatus = "purchased - select failed, try again";
                     } else {
-                        shopStatus = (r.kind == 2 ? "purchase failed (network/server)"
-                                                  : "select failed (network/server)");
+                        shopStatus = (r.kind == ShopOpKind::BuyAndSelect
+                                          ? "purchase failed (network/server)"
+                                          : "select failed (network/server)");
                     }
+                } else {
+                    shopStatus = "invalid shop operation result";
                 }
             }
 
@@ -2564,7 +2581,7 @@ int main(int argc, char** argv)
             draw_text("Opponent", rightX + 38,  8, 22, WHITE);
             // 보드별 shake — 각 보드 드로우 직전에 그 측 offset 을 적용.
             //   왼쪽(내 보드): shakeLeft. 오른쪽(상대 미러): shakeRight.
-            //   apply_self_fx 가 shakeLeft 를, apply_peer_fx 가 shakeRight 를 트리거.
+            //   apply_fx 호출부가 각 보드의 shakeLeft/shakeRight 를 주입한다.
             {
                 float sdx = 0.f, sdy = 0.f;
                 shake_offset(shakeLeft, sdx, sdy);

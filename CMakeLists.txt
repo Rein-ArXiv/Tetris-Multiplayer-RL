@@ -339,6 +339,7 @@ if (TETRIS_BUILD_RELAY)
         server/player_conn.h
         server/relay.h
         server/room.h
+        server/worker_group.h
         net/socket.h
         net/framing.h
         meta/http_client.h

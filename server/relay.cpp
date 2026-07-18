@@ -1,4 +1,5 @@
 #include "relay.h"
+#include "worker_group.h"
 
 #include "../net/framing.h"
 #include "../net/socket.h"
@@ -7,7 +8,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -23,37 +23,7 @@ namespace relay {
 namespace {
 
 std::atomic<bool> s_stopping{false};
-std::mutex s_workerMu;
-std::condition_variable s_workerCv;
-size_t s_activeWorkers = 0;
-
-template <typename Fn>
-bool launchWorker(Fn&& fn)
-{
-    {
-        std::lock_guard<std::mutex> lk(s_workerMu);
-        if (s_stopping.load()) return false;
-        ++s_activeWorkers;
-    }
-    try {
-        std::thread([work = std::forward<Fn>(fn)]() mutable {
-            work();
-            {
-                std::lock_guard<std::mutex> lk(s_workerMu);
-                --s_activeWorkers;
-            }
-            s_workerCv.notify_all();
-        }).detach();
-    } catch (...) {
-        {
-            std::lock_guard<std::mutex> lk(s_workerMu);
-            --s_activeWorkers;
-        }
-        s_workerCv.notify_all();
-        throw;
-    }
-    return true;
-}
+WorkerGroup s_workers{"relay"};
 
 // MATCH_SUMMARY 페이로드 구조 (net/framing.h 에 명시된 정확히 21 바이트):
 //   [won:1][my_score:4 LE][my_lines:4 LE]
@@ -247,6 +217,26 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
     const net::TcpSocket& to   = a_to_b ? ch->B : ch->A;
     const char*           dir  = a_to_b ? "A->B" : "B->A";
 
+    // 예외를 포함한 모든 반환 경로에서 반대편 루프를 멈추고 채널 카운트를
+    // 정리한다. WorkerGroup이 본문 예외를 격리하더라도 이 도메인 정리는
+    // forwarderLoop 안에서 수행되어야 상대 worker와 shutdown이 남지 않는다.
+    struct ForwarderCompletion {
+        std::shared_ptr<Channel> channel;
+        const char* direction;
+
+        ~ForwarderCompletion()
+        {
+            std::cerr << "[relay] match=" << channel->match_id
+                      << " " << direction << " end\n";
+            channel->closed.store(true);
+            if (--channel->forwarder_count == 0) {
+                net::tcp_close(channel->A);
+                net::tcp_close(channel->B);
+                std::cerr << "[relay] match=" << channel->match_id << " closed\n";
+            }
+        }
+    } completion{ch, dir};
+
     const bool rankedMatch = (ch->meta != nullptr) &&
                              (ch->playerA_id != 0) &&
                              (ch->playerB_id != 0);
@@ -400,18 +390,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         }
     }
 
-    std::cerr << "[relay] match=" << ch->match_id << " " << dir << " end\n";
-    ch->closed.store(true);
-
     // 연결 종료 직전 — 한쪽만 summary 보내고 끊긴 경우에도 상대에겐 delta=0 을
     // 돌려주고 싶지만, 복잡도 대비 이득이 작으므로 skip. finalize 는 "양쪽 모두
     // 도착했을 때" 만 호출됨.
-
-    if (--ch->forwarder_count == 0) {
-        net::tcp_close(ch->A);
-        net::tcp_close(ch->B);
-        std::cerr << "[relay] match=" << ch->match_id << " closed\n";
-    }
 }
 
 // MATCH_FOUND 프레임 전송.
@@ -470,8 +451,8 @@ void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
     ch->prefixFromA = std::move(prefixFromA);
     ch->prefixFromB = std::move(prefixFromB);
 
-    const bool launchedA = launchWorker([ch] { forwarderLoop(ch, true); });
-    const bool launchedB = launchWorker([ch] { forwarderLoop(ch, false); });
+    const bool launchedA = s_workers.launch([ch] { forwarderLoop(ch, true); });
+    const bool launchedB = s_workers.launch([ch] { forwarderLoop(ch, false); });
     if (!launchedA || !launchedB) {
         ch->closed.store(true);
         net::tcp_close(ch->A);
@@ -711,7 +692,7 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
 
     // matcher 스레드를 블록하지 않되 종료 시 server가 drain할 수 있게 추적한다.
     auto pending = std::make_shared<Match>(std::move(match));
-    if (!launchWorker([pending, meta] {
+    if (!s_workers.launch([pending, meta] {
             queueLobbyThread(std::move(*pending), meta);
         })) {
         net::tcp_close(pending->a.sock);
@@ -722,12 +703,12 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
 void beginShutdown()
 {
     s_stopping.store(true);
+    s_workers.stopAccepting();
 }
 
 void waitForShutdown()
 {
-    std::unique_lock<std::mutex> lk(s_workerMu);
-    s_workerCv.wait(lk, [] { return s_activeWorkers == 0; });
+    s_workers.wait();
 }
 
 bool isShuttingDown()

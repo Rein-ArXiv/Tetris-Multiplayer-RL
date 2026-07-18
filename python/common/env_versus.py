@@ -132,8 +132,6 @@ class PolicyOpponent(VersusOpponent):
         self._policy_fn = policy_fn
 
     def act(self, sim: Any) -> Optional[int]:
-        if not sim.legal_placements():
-            return None
         obs = {k: v.numpy() for k, v in build_observation(sim).items()}
         mask = legal_mask(sim).numpy()
         if not mask.any():

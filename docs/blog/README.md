@@ -40,8 +40,8 @@ graph TB
 |---:|---|---|
 | 0 | [Part 0: 프로젝트 셋업](./part0-project-setup.md) | 디렉토리 구조, CMake 타깃, 외부 의존성 경계 |
 | 1 | [Part 1: 결정론적 SimGame](./part1-deterministic-simulation.md) | 규칙, RNG, 가비지, 상태 해시와 headless 회귀 테스트 |
-| 2 | [Part 2: 플랫폼 계층](./part2-platform-window-input.md) | Win32/SDL2 창, OpenGL 컨텍스트, 시간과 입력 |
-| 3 | [Part 3: 렌더링과 UI](./part3-rendering-and-ui.md) | 사각형·텍스트·이미지 렌더러와 즉시모드 GUI |
+| 2 | [Part 2: 플랫폼 계층](./part2-platform-window-input.md) | Win32/SDL2 창, CPU 프레임버퍼 표시, 시간과 입력 |
+| 3 | [Part 3: 렌더링과 UI](./part3-rendering-and-ui.md) | 소프트웨어 래스터화, 알파 합성, 텍스트, 이미지, GUI |
 | 4 | [Part 4: Game과 메인 루프](./part4-game-wrapper-and-loop.md) | `Game` 래퍼, `main.cpp`, 60Hz fixed-step, 메뉴 |
 | 5 | [Part 5: 오디오](./part5-audio.md) | MP3 decode, 이벤트 소비, XAudio2/SDL2 백엔드 |
 | 6 | [Part 6: Lockstep](./part6-lockstep-networking.md) | TCP framing, HELLO/SEED/INPUT, 동기·해시 검증 |

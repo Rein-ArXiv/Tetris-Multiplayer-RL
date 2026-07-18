@@ -14,8 +14,8 @@ endif()
 # -----------------------------------------------------------------------------
 # Build options
 #
-#   TETRIS_BUILD_GAME  — Game executable. Windows 기본은 handmade Win32+OpenGL,
-#                         macOS/Linux 기본은 SDL2+OpenGL.
+#   TETRIS_BUILD_GAME  — Game executable. CPU software renderer with a thin
+#                         Win32 or SDL2 presentation backend.
 #   TETRIS_BUILD_PY    — pybind11 module (tetris_py) wrapping SimGame. Portable.
 #   TETRIS_BUILD_TEST  — SimGame determinism regression (sim_hash_dump). Portable.
 #   TETRIS_BUILD_RELAY — Headless matchmaking/relay server (server/*.cpp).
@@ -51,7 +51,7 @@ endif()
 
 # TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
 # Default ON on non-Windows so macOS/Linux users get it automatically.
-# On Windows, default OFF to preserve the handmade Win32+OpenGL path.
+# On Windows, default OFF to preserve the handmade Win32 window/audio path.
 if (WIN32)
     option(TETRIS_USE_SDL2 "Use SDL2 backend (cross-platform)" OFF)
 else()
@@ -80,7 +80,7 @@ set(TETRIS_SIM_HEADERS
 )
 
 # -----------------------------------------------------------------------------
-# Target: tetris (Handmade Win32 + OpenGL game)
+# Target: tetris (handmade CPU software-rendered game)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_GAME)
     # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇
@@ -105,6 +105,7 @@ if (TETRIS_BUILD_GAME)
         net/framing.cpp
         net/session.cpp
         renderer/renderer.cpp
+        renderer/text_software.cpp
         renderer/shake.cpp
         renderer/image.cpp
         bot/placement.cpp
@@ -122,7 +123,7 @@ if (TETRIS_BUILD_GAME)
         net/session.h
         platform/platform.h
         renderer/renderer.h
-        renderer/shaders.h
+        renderer/software_internal.h
         renderer/shake.h
         renderer/image.h
         audio/audio.h
@@ -138,7 +139,6 @@ if (TETRIS_BUILD_GAME)
             ${TETRIS_GAME_COMMON}
             ${TETRIS_GAME_HEADERS}
             platform/sdl.cpp
-            renderer/text_stb.cpp
             audio/sdl_audio.cpp
         )
         target_include_directories(tetris PRIVATE
@@ -153,23 +153,18 @@ if (TETRIS_BUILD_GAME)
             target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
         endif()
 
-        if (APPLE)
-            target_link_libraries(tetris PRIVATE "-framework OpenGL")
-        elseif (WIN32)
-            target_link_libraries(tetris PRIVATE opengl32 gdiplus ws2_32)
-        else()
-            find_package(OpenGL REQUIRED)
-            target_link_libraries(tetris PRIVATE OpenGL::GL)
+        if (WIN32)
+            target_link_libraries(tetris PRIVATE gdiplus ws2_32)
+        elseif (NOT APPLE)
             find_package(Threads REQUIRED)
             target_link_libraries(tetris PRIVATE Threads::Threads)
         endif()
     else()
-        # Handmade 경로: Win32 window + OpenGL + XAudio2 + GDI text
+        # Handmade 경로: Win32 window/presentation + XAudio2
         add_executable(tetris
             ${TETRIS_GAME_COMMON}
             ${TETRIS_GAME_HEADERS}
             platform/win32.cpp
-            renderer/text_win32.cpp
             audio/audio.cpp
         )
         target_include_directories(tetris PRIVATE
@@ -177,7 +172,7 @@ if (TETRIS_BUILD_GAME)
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
         if (WIN32)
-            target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
+            target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()

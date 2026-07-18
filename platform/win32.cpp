@@ -1,488 +1,359 @@
-// platform/win32.cpp — Win32 윈도우 + OpenGL 컨텍스트 + 입력 + 타이머
-//
-// 학습 포인트: raylib의 InitWindow() 는 이 파일 전체를 숨겨놓은 것입니다.
-// raylib/rcore.c 를 열면 이와 동일한 Win32 코드를 볼 수 있습니다.
-//
-// 핵심 개념:
-//   1. RegisterClassEx / CreateWindowEx  → OS가 창을 만드는 방법
-//   2. PIXELFORMATDESCRIPTOR             → 이 창에서 OpenGL을 쓸 것임을 OS에 알림
-//   3. wglCreateContext                  → OpenGL 렌더링 컨텍스트 생성
-//   4. WM_KEYDOWN/UP 메시지 처리         → 입력 상태 테이블 유지
-//   5. QueryPerformanceCounter           → 마이크로초 정밀도 타이머
-//   6. PeekMessage + DispatchMessage     → 논블로킹 메시지 루프
+// platform/win32.cpp — Win32 window/input/timer + GDI framebuffer presentation
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <GL/gl.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
-#include <cstdio>
+
 #include "platform.h"
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GL 2.0+ 함수 포인터 타입 정의
-// opengl32.lib 는 OpenGL 1.1 만 직접 export 합니다.
-// 2.0 이후 함수는 wglGetProcAddress() 로 런타임에 불러와야 합니다.
-// ─────────────────────────────────────────────────────────────────────────────
-#include "gl_defs.h"  // GLchar, GLsizeiptr, GL_ARRAY_BUFFER 등 (renderer.cpp 와 공유)
+static HWND s_hwnd = nullptr;
+static HDC s_hdc = nullptr;
+static HDC s_present_dc = nullptr;
+static HBITMAP s_present_bitmap = nullptr;
+static HGDIOBJ s_present_old_bitmap = nullptr;
+static int s_present_w = 0;
+static int s_present_h = 0;
+static bool s_should_close = false;
+static bool s_frame_pacing = true;
+static int s_win_w = 0;
+static int s_win_h = 0;
+static int s_logical_w = 0;
+static int s_logical_h = 0;
+static int s_vp_x = 0;
+static int s_vp_y = 0;
+static int s_vp_w = 0;
+static int s_vp_h = 0;
 
-typedef GLuint (APIENTRY *PFNGLCREATESHADERPROC)(GLenum);
-typedef void   (APIENTRY *PFNGLSHADERSOURCEPROC)(GLuint, GLsizei, const GLchar* const*, const GLint*);
-typedef void   (APIENTRY *PFNGLCOMPILESHADERPROC)(GLuint);
-typedef GLuint (APIENTRY *PFNGLCREATEPROGRAMPROC)(void);
-typedef void   (APIENTRY *PFNGLATTACHSHADERPROC)(GLuint, GLuint);
-typedef void   (APIENTRY *PFNGLLINKPROGRAMPROC)(GLuint);
-typedef void   (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint);
-typedef void   (APIENTRY *PFNGLDELETESHADERPROC)(GLuint);
-typedef GLint  (APIENTRY *PFNGLGETUNIFORMLOCATIONPROC)(GLuint, const GLchar*);
-typedef void   (APIENTRY *PFNGLUNIFORM4FPROC)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
-typedef void   (APIENTRY *PFNGLUNIFORMMATRIX4FVPROC)(GLint, GLsizei, GLboolean, const GLfloat*);
-typedef void   (APIENTRY *PFNGLUNIFORM1IPROC)(GLint, GLint);
-typedef void   (APIENTRY *PFNGLUNIFORM1FPROC)(GLint, GLfloat);
-typedef void   (APIENTRY *PFNGLGENVERTEXARRAYSPROC)(GLsizei, GLuint*);
-typedef void   (APIENTRY *PFNGLBINDVERTEXARRAYPROC)(GLuint);
-typedef void   (APIENTRY *PFNGLGENBUFFERSPROC)(GLsizei, GLuint*);
-typedef void   (APIENTRY *PFNGLBINDBUFFERPROC)(GLenum, GLuint);
-typedef void   (APIENTRY *PFNGLBUFFERDATAPROC)(GLenum, GLsizeiptr, const void*, GLenum);
-typedef void   (APIENTRY *PFNGLVERTEXATTRIBPOINTERPROC)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
-typedef void   (APIENTRY *PFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint);
-typedef void   (APIENTRY *PFNGLACTIVETEXTUREPROC)(GLenum);
-typedef void   (APIENTRY *PFNGLGETSHADERIVPROC)(GLuint, GLenum, GLint*);
-typedef void   (APIENTRY *PFNGLGETSHADERINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
-typedef void   (APIENTRY *PFNGLGETPROGRAMIVPROC)(GLuint, GLenum, GLint*);
-typedef void   (APIENTRY *PFNGLGETPROGRAMINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
-typedef void   (APIENTRY *PFNGLWINDOWPOS2IPROC)(GLint, GLint);
-typedef void   (APIENTRY *PFNGLDELETEVERTEXARRAYSPROC)(GLsizei, const GLuint*);
-typedef void   (APIENTRY *PFNGLDELETEBUFFERSPROC)(GLsizei, const GLuint*);
-typedef void   (APIENTRY *PFNGLDELETEPROGRAMPROC)(GLuint);
+static bool s_key_state[256]{};
+static bool s_key_prev[256]{};
+static char s_char_queue[64]{};
+static int s_char_head = 0;
+static int s_char_tail = 0;
 
-// ─── 전역 GL 함수 포인터 (renderer.cpp 에서도 extern 으로 선언해 사용) ──────
-PFNGLCREATESHADERPROC            glCreateShader            = nullptr;
-PFNGLSHADERSOURCEPROC            glShaderSource            = nullptr;
-PFNGLCOMPILESHADERPROC           glCompileShader           = nullptr;
-PFNGLCREATEPROGRAMPROC           glCreateProgram           = nullptr;
-PFNGLATTACHSHADERPROC            glAttachShader            = nullptr;
-PFNGLLINKPROGRAMPROC             glLinkProgram             = nullptr;
-PFNGLUSEPROGRAMPROC              glUseProgram              = nullptr;
-PFNGLDELETESHADERPROC            glDeleteShader            = nullptr;
-PFNGLGETUNIFORMLOCATIONPROC      glGetUniformLocation      = nullptr;
-PFNGLUNIFORM4FPROC               glUniform4f               = nullptr;
-PFNGLUNIFORMMATRIX4FVPROC        glUniformMatrix4fv        = nullptr;
-PFNGLUNIFORM1IPROC               glUniform1i               = nullptr;
-PFNGLUNIFORM1FPROC               glUniform1f               = nullptr;
-PFNGLGENVERTEXARRAYSPROC         glGenVertexArrays         = nullptr;
-PFNGLBINDVERTEXARRAYPROC         glBindVertexArray         = nullptr;
-PFNGLGENBUFFERSPROC              glGenBuffers              = nullptr;
-PFNGLBINDBUFFERPROC              glBindBuffer              = nullptr;
-PFNGLBUFFERDATAPROC              glBufferData              = nullptr;
-PFNGLVERTEXATTRIBPOINTERPROC     glVertexAttribPointer     = nullptr;
-PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray = nullptr;
-PFNGLACTIVETEXTUREPROC           glActiveTextureProc       = nullptr;
-PFNGLGETSHADERIVPROC             glGetShaderiv             = nullptr;
-PFNGLGETSHADERINFOLOGPROC        glGetShaderInfoLog        = nullptr;
-PFNGLGETPROGRAMIVPROC            glGetProgramiv            = nullptr;
-PFNGLGETPROGRAMINFOLOGPROC       glGetProgramInfoLog       = nullptr;
-PFNGLWINDOWPOS2IPROC             glWindowPos2i             = nullptr;
-PFNGLDELETEVERTEXARRAYSPROC      glDeleteVertexArrays      = nullptr;
-PFNGLDELETEBUFFERSPROC           glDeleteBuffers           = nullptr;
-PFNGLDELETEPROGRAMPROC           glDeleteProgram           = nullptr;
+static int s_mouse_x = 0;
+static int s_mouse_y = 0;
+static bool s_mouse_state[3]{};
+static bool s_mouse_prev[3]{};
+static float s_mouse_wheel = 0.0f;
 
-#define LOAD_GL(type, name) \
-    name = (type)wglGetProcAddress(#name); \
-    if (!name) fprintf(stderr, "[GL] wglGetProcAddress failed: " #name "\n");
+static LARGE_INTEGER s_frequency{};
+static LARGE_INTEGER s_init_time{};
+static LARGE_INTEGER s_frame_start{};
 
-static bool s_gl_load_ok = true;
-// 치명적 함수 전용: 로드 실패 시 s_gl_load_ok = false (렌더링 불가)
-#define LOAD_GL_CRITICAL(type, name) \
-    name = (type)wglGetProcAddress(#name); \
-    if (!name) { fprintf(stderr, "[GL] CRITICAL: " #name " not available\n"); s_gl_load_ok = false; }
-
-static void gl_load_functions()
+static bool ensure_present_backbuffer(int width, int height)
 {
-    s_gl_load_ok = true;
-    // 렌더링에 필수인 함수들 — 하나라도 실패하면 s_gl_load_ok = false
-    LOAD_GL_CRITICAL(PFNGLCREATESHADERPROC,            glCreateShader)
-    LOAD_GL_CRITICAL(PFNGLSHADERSOURCEPROC,            glShaderSource)
-    LOAD_GL_CRITICAL(PFNGLCOMPILESHADERPROC,           glCompileShader)
-    LOAD_GL_CRITICAL(PFNGLCREATEPROGRAMPROC,           glCreateProgram)
-    LOAD_GL_CRITICAL(PFNGLATTACHSHADERPROC,            glAttachShader)
-    LOAD_GL_CRITICAL(PFNGLLINKPROGRAMPROC,             glLinkProgram)
-    LOAD_GL_CRITICAL(PFNGLUSEPROGRAMPROC,              glUseProgram)
-    LOAD_GL_CRITICAL(PFNGLGETUNIFORMLOCATIONPROC,      glGetUniformLocation)
-    LOAD_GL_CRITICAL(PFNGLUNIFORM4FPROC,               glUniform4f)
-    LOAD_GL_CRITICAL(PFNGLUNIFORMMATRIX4FVPROC,        glUniformMatrix4fv)
-    LOAD_GL_CRITICAL(PFNGLGENVERTEXARRAYSPROC,         glGenVertexArrays)
-    LOAD_GL_CRITICAL(PFNGLBINDVERTEXARRAYPROC,         glBindVertexArray)
-    LOAD_GL_CRITICAL(PFNGLGENBUFFERSPROC,              glGenBuffers)
-    LOAD_GL_CRITICAL(PFNGLBINDBUFFERPROC,              glBindBuffer)
-    LOAD_GL_CRITICAL(PFNGLBUFFERDATAPROC,              glBufferData)
-    LOAD_GL_CRITICAL(PFNGLVERTEXATTRIBPOINTERPROC,     glVertexAttribPointer)
-    LOAD_GL_CRITICAL(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray)
-    // 비필수 (cleanup/debug/optional) — 실패해도 계속
-    LOAD_GL(PFNGLDELETESHADERPROC,            glDeleteShader)
-    LOAD_GL(PFNGLUNIFORM1IPROC,               glUniform1i)
-    LOAD_GL(PFNGLUNIFORM1FPROC,               glUniform1f)
-    glActiveTextureProc = (PFNGLACTIVETEXTUREPROC)wglGetProcAddress("glActiveTexture");
-    if (!glActiveTextureProc) fprintf(stderr, "[GL] wglGetProcAddress failed: glActiveTexture\n");
-    LOAD_GL(PFNGLGETSHADERIVPROC,             glGetShaderiv)
-    LOAD_GL(PFNGLGETSHADERINFOLOGPROC,        glGetShaderInfoLog)
-    LOAD_GL(PFNGLGETPROGRAMIVPROC,            glGetProgramiv)
-    LOAD_GL(PFNGLGETPROGRAMINFOLOGPROC,       glGetProgramInfoLog)
-    LOAD_GL(PFNGLWINDOWPOS2IPROC,             glWindowPos2i)
-    LOAD_GL(PFNGLDELETEVERTEXARRAYSPROC,      glDeleteVertexArrays)
-    LOAD_GL(PFNGLDELETEBUFFERSPROC,           glDeleteBuffers)
-    LOAD_GL(PFNGLDELETEPROGRAMPROC,           glDeleteProgram)
+    if (width <= 0 || height <= 0 || !s_hdc) return false;
+    if (s_present_dc && s_present_bitmap &&
+        s_present_w == width && s_present_h == height) return true;
 
-    if (!s_gl_load_ok)
-    {
-        fprintf(stderr, "[GL] FATAL: Critical GL functions unavailable. "
-                        "GPU driver may not support OpenGL 2.0+.\n");
+    if (s_present_bitmap) {
+        SelectObject(s_present_dc, s_present_old_bitmap);
+        DeleteObject(s_present_bitmap);
+        s_present_bitmap = nullptr;
+    }
+    if (!s_present_dc) s_present_dc = CreateCompatibleDC(s_hdc);
+    if (!s_present_dc) return false;
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* memory = nullptr;
+    s_present_bitmap = CreateDIBSection(
+        s_hdc, &info, DIB_RGB_COLORS, &memory, nullptr, 0);
+    if (!s_present_bitmap) return false;
+    s_present_old_bitmap = SelectObject(s_present_dc, s_present_bitmap);
+    SetStretchBltMode(s_present_dc, COLORONCOLOR);
+    s_present_w = width;
+    s_present_h = height;
+    return true;
+}
+
+static void recompute_viewport()
+{
+    if (s_win_w <= 0 || s_win_h <= 0 ||
+        s_logical_w <= 0 || s_logical_h <= 0) {
+        s_vp_x = s_vp_y = 0;
+        s_vp_w = s_win_w;
+        s_vp_h = s_win_h;
+        return;
+    }
+    const double window_aspect = (double)s_win_w / (double)s_win_h;
+    const double logical_aspect = (double)s_logical_w / (double)s_logical_h;
+    if (window_aspect > logical_aspect) {
+        s_vp_h = s_win_h;
+        s_vp_w = (int)std::lround((double)s_win_h * logical_aspect);
+        s_vp_x = (s_win_w - s_vp_w) / 2;
+        s_vp_y = 0;
+    } else {
+        s_vp_w = s_win_w;
+        s_vp_h = (int)std::lround((double)s_win_w / logical_aspect);
+        s_vp_x = 0;
+        s_vp_y = (s_win_h - s_vp_h) / 2;
     }
 }
 
-// ─── 정적 상태 ────────────────────────────────────────────────────────────────
-static HWND   s_hwnd         = nullptr;
-static HDC    s_hdc          = nullptr;
-static HGLRC  s_hglrc        = nullptr;
-static bool   s_should_close = false;
-static int    s_win_w        = 0;
-static int    s_win_h        = 0;
-
-// 논리(디자인) 좌표계 크기 — platform_init 에 넘어온 값(720×640). GUI 가 이
-// 좌표계 기준으로 hit-test 하므로, 창이 스케일되면 마우스 좌표를 역매핑한다
-// (SDL 백엔드의 platform_mouse_x/y 와 동일 의미).
-static int    s_logical_w    = 0;
-static int    s_logical_h    = 0;
-
-// 키 상태 테이블: WM_KEYDOWN 에서 true, WM_KEYUP 에서 false
-static bool   s_key_state[256] = {};
-// 직전 프레임의 키 상태 스냅샷 — IsKeyPressed 구현에 사용
-static bool   s_key_prev[256]  = {};
-
-// WM_CHAR 로 들어온 문자 큐 (원형 버퍼)
-static char   s_char_queue[64] = {};
-static int    s_char_head = 0;
-static int    s_char_tail = 0;
-
-// ─── 마우스 상태 ──────────────────────────────────────────────────────────────
-// 키와 동일한 level/edge 패턴: state 는 현재, prev 는 직전 프레임 스냅샷.
-//   pressed  = state && !prev
-//   released = !state && prev
-// down       = state
-// WM_MOUSEMOVE 는 창 밖으로 나갔다 돌아와도 좌표 업데이트가 이어짐.
-static int    s_mouse_x = 0;
-static int    s_mouse_y = 0;
-static bool   s_mouse_state[3] = {}; // 0=L, 1=R, 2=M
-static bool   s_mouse_prev[3]  = {};
-static float  s_mouse_wheel_accum = 0.0f;
-
-// 타이머
-static LARGE_INTEGER s_freq;
-static LARGE_INTEGER s_frame_start;
-static LARGE_INTEGER s_init_time;
-
-// ─── 윈도우 프로시저 (WndProc) ────────────────────────────────────────────────
-// OS 로부터 윈도우 메시지를 받는 콜백 함수.
-// 모든 키 입력, 윈도우 크기 변경, 창 닫기 이벤트를 여기서 처리합니다.
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
+                                    WPARAM wparam, LPARAM lparam)
 {
-    switch (msg)
-    {
+    switch (message) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        // wParam 은 VK_* 코드 (0–255). PlatformKey 값과 직접 대응.
-        if (wParam < 256) s_key_state[wParam] = true;
+        if (wparam < 256) s_key_state[wparam] = true;
         return 0;
-
     case WM_KEYUP:
     case WM_SYSKEYUP:
-        if (wParam < 256) s_key_state[wParam] = false;
+        if (wparam < 256) s_key_state[wparam] = false;
         return 0;
-
     case WM_CHAR:
-        // 텍스트 입력 문자 (ConnectInput 화면에서 IP 주소 입력 등)
-        if (wParam > 0 && wParam < 128)
-        {
-            int next = (s_char_tail + 1) % 64;
-            if (next != s_char_head)
-            {
-                s_char_queue[s_char_tail] = (char)wParam;
+        if (wparam > 0 && wparam < 128) {
+            const int next = (s_char_tail + 1) % 64;
+            if (next != s_char_head) {
+                s_char_queue[s_char_tail] = (char)wparam;
                 s_char_tail = next;
             }
         }
         return 0;
-
     case WM_SIZE:
-        s_win_w = LOWORD(lParam);
-        s_win_h = HIWORD(lParam);
-        if (s_hglrc) glViewport(0, 0, s_win_w, s_win_h);
+        s_win_w = LOWORD(lparam);
+        s_win_h = HIWORD(lparam);
+        recompute_viewport();
         return 0;
-
     case WM_MOUSEMOVE:
-        // LOWORD/HIWORD 로 16-bit signed 가 아닌 unsigned 가 나올 수 있어
-        // GET_X_LPARAM / GET_Y_LPARAM 매크로(windowsx.h) 를 써야 음수 안전.
-        // 여기선 클라이언트 영역 내부에서만 의미가 있으므로 단순 LOWORD 사용.
-        s_mouse_x = (int)(short)LOWORD(lParam);
-        s_mouse_y = (int)(short)HIWORD(lParam);
+        s_mouse_x = (int)(short)LOWORD(lparam);
+        s_mouse_y = (int)(short)HIWORD(lparam);
         return 0;
-
-    case WM_LBUTTONDOWN: s_mouse_state[0] = true;  SetCapture(hwnd); return 0;
-    case WM_LBUTTONUP:   s_mouse_state[0] = false; ReleaseCapture(); return 0;
-    case WM_RBUTTONDOWN: s_mouse_state[1] = true;  SetCapture(hwnd); return 0;
-    case WM_RBUTTONUP:   s_mouse_state[1] = false; ReleaseCapture(); return 0;
-    case WM_MBUTTONDOWN: s_mouse_state[2] = true;  SetCapture(hwnd); return 0;
-    case WM_MBUTTONUP:   s_mouse_state[2] = false; ReleaseCapture(); return 0;
-
+    case WM_LBUTTONDOWN:
+        s_mouse_state[0] = true; SetCapture(hwnd); return 0;
+    case WM_LBUTTONUP:
+        s_mouse_state[0] = false; ReleaseCapture(); return 0;
+    case WM_RBUTTONDOWN:
+        s_mouse_state[1] = true; SetCapture(hwnd); return 0;
+    case WM_RBUTTONUP:
+        s_mouse_state[1] = false; ReleaseCapture(); return 0;
+    case WM_MBUTTONDOWN:
+        s_mouse_state[2] = true; SetCapture(hwnd); return 0;
+    case WM_MBUTTONUP:
+        s_mouse_state[2] = false; ReleaseCapture(); return 0;
     case WM_MOUSEWHEEL:
-        // wParam 상위 16bit = 휠 델타 (WHEEL_DELTA=120 단위). +값=위로.
-        s_mouse_wheel_accum += (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
+        s_mouse_wheel += (float)(short)HIWORD(wparam) / (float)WHEEL_DELTA;
         return 0;
-
+    case WM_ERASEBKGND:
+        return 1;
     case WM_CLOSE:
         s_should_close = true;
         return 0;
-
     case WM_DESTROY:
         s_should_close = true;
         PostQuitMessage(0);
         return 0;
+    default:
+        return DefWindowProcA(hwnd, message, wparam, lparam);
     }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
-// ─── platform_init ────────────────────────────────────────────────────────────
-// raylib::InitWindow() 의 속을 드러낸 버전입니다.
-// 아래 단계가 그대로 raylib 내부에서 일어납니다.
-void platform_init(int w, int h, const char* title)
+void platform_init(int width, int height, const char* title)
 {
-    s_win_w = w;
-    s_win_h = h;
-    s_logical_w = w;
-    s_logical_h = h;
-
-    // 타이머 초기화: QueryPerformanceFrequency 는 CPU 클럭 주파수를 반환
-    QueryPerformanceFrequency(&s_freq);
+    s_win_w = s_logical_w = width;
+    s_win_h = s_logical_h = height;
+    recompute_viewport();
+    QueryPerformanceFrequency(&s_frequency);
     QueryPerformanceCounter(&s_init_time);
     s_frame_start = s_init_time;
 
-    // ── 1. 윈도우 클래스 등록 ──────────────────────────────────────────────
-    // OS 에 "이런 속성의 창 종류를 만들겠다"고 등록.
-    // CS_OWNDC: 이 창 전용 DC 를 유지 (OpenGL에 필수)
-    WNDCLASSEXA wc   = {};
-    wc.cbSize        = sizeof(WNDCLASSEXA);
-    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
-    wc.lpfnWndProc   = WndProc;
-    wc.hInstance     = GetModuleHandleA(nullptr);
-    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = "TetrisHandmade";
-    RegisterClassExA(&wc);
+    WNDCLASSEXA window_class{};
+    window_class.cbSize = sizeof(window_class);
+    window_class.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
+    window_class.lpfnWndProc = window_proc;
+    window_class.hInstance = GetModuleHandleA(nullptr);
+    window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    window_class.lpszClassName = "TetrisSoftwareRenderer";
+    RegisterClassExA(&window_class);
 
-    // ── 2. 창 생성 ────────────────────────────────────────────────────────
-    // AdjustWindowRect: 클라이언트 영역(게임 화면)이 정확히 w×h 가 되도록
-    //                   타이틀바/테두리를 포함한 전체 창 크기를 계산
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT  rect  = {0, 0, w, h};
+    const DWORD style =
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    RECT rect{0, 0, width, height};
     AdjustWindowRect(&rect, style, FALSE);
-
     s_hwnd = CreateWindowExA(
-        0, "TetrisHandmade", title, style,
+        0, window_class.lpszClassName, title, style,
         CW_USEDEFAULT, CW_USEDEFAULT,
         rect.right - rect.left, rect.bottom - rect.top,
-        nullptr, nullptr, wc.hInstance, nullptr);
-
-    // ── 3. Device Context (DC) 획득 ────────────────────────────────────────
-    // DC = 이 창의 "그림판 핸들". GDI와 OpenGL 모두 DC를 통해 창에 그림.
+        nullptr, nullptr, window_class.hInstance, nullptr);
+    if (!s_hwnd) {
+        s_should_close = true;
+        return;
+    }
     s_hdc = GetDC(s_hwnd);
-
-    // ── 4. OpenGL 픽셀 포맷 설정 ──────────────────────────────────────────
-    // OS에 "이 창은 OpenGL을 쓸 것이고, 더블 버퍼링, 32비트 색상이 필요"하다고 알림.
-    // SetPixelFormat은 창당 한 번만 호출 가능.
-    PIXELFORMATDESCRIPTOR pfd = {};
-    pfd.nSize      = sizeof(PIXELFORMATDESCRIPTOR);
-    pfd.nVersion   = 1;
-    pfd.dwFlags    = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.iPixelType = PFD_TYPE_RGBA;
-    pfd.cColorBits = 32;
-    pfd.cDepthBits = 24;
-    pfd.iLayerType = PFD_MAIN_PLANE;
-
-    int fmt = ChoosePixelFormat(s_hdc, &pfd);
-    SetPixelFormat(s_hdc, fmt, &pfd);
-
-    // ── 5. OpenGL 렌더링 컨텍스트 생성 ────────────────────────────────────
-    // wglCreateContext: GPU 드라이버에 "이 DC용 OpenGL 컨텍스트를 만들어라" 요청
-    // 컨텍스트 = GPU 상태 머신의 인스턴스 (바인딩된 버퍼, 셰이더, 텍스처 등)
-    // wglMakeCurrent: 이 스레드의 현재 GL 컨텍스트로 설정
-    s_hglrc = wglCreateContext(s_hdc);
-    wglMakeCurrent(s_hdc, s_hglrc);
-
-    // ── 6. OpenGL 2.0+ 함수 포인터 로드 ──────────────────────────────────
-    // opengl32.lib는 1.1만 노출. 나머지는 GPU 드라이버 DLL에서 직접 로드.
-    gl_load_functions();
-
-    // ── 7. 블렌딩 활성화 (투명도 지원) ────────────────────────────────────
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
+    SetStretchBltMode(s_hdc, COLORONCOLOR);
     ShowWindow(s_hwnd, SW_SHOW);
     UpdateWindow(s_hwnd);
 }
 
 void platform_shutdown()
 {
-    wglMakeCurrent(nullptr, nullptr);
-    wglDeleteContext(s_hglrc);
-    ReleaseDC(s_hwnd, s_hdc);
-    DestroyWindow(s_hwnd);
+    if (s_present_bitmap) {
+        SelectObject(s_present_dc, s_present_old_bitmap);
+        DeleteObject(s_present_bitmap);
+        s_present_bitmap = nullptr;
+        s_present_old_bitmap = nullptr;
+    }
+    if (s_present_dc) {
+        DeleteDC(s_present_dc);
+        s_present_dc = nullptr;
+    }
+    if (s_hdc && s_hwnd) {
+        ReleaseDC(s_hwnd, s_hdc);
+        s_hdc = nullptr;
+    }
+    if (s_hwnd) {
+        DestroyWindow(s_hwnd);
+        s_hwnd = nullptr;
+    }
+    UnregisterClassA("TetrisSoftwareRenderer", GetModuleHandleA(nullptr));
 }
 
-bool platform_should_close()
-{
-    return s_should_close;
-}
+bool platform_should_close() { return s_should_close; }
 
-// ─── platform_begin_frame ─────────────────────────────────────────────────────
-// 1. 이전 프레임 키 상태 저장 (IsKeyPressed 구현을 위해)
-// 2. PeekMessage 루프로 OS 메시지를 모두 처리 (입력, 창 이벤트 등)
-// 3. 델타타임 계산 후 반환
 float platform_begin_frame()
 {
-    // 이전 프레임 키/마우스 상태 스냅샷 → pressed/released 구현에 사용.
-    // wheel 누적치는 이번 프레임 동안만 유효하므로 프레임 시작 시 0 으로 리셋.
-    memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
-    memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
-    s_mouse_wheel_accum = 0.0f;
+    std::memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
+    std::memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_mouse_wheel = 0.0f;
 
-    // PeekMessage: 메시지가 있으면 처리하고 없으면 즉시 반환 (논블로킹)
-    // GetMessage와 달리 메시지가 없어도 멈추지 않아 게임 루프에 적합
-    MSG msg;
-    while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE))
-    {
-        if (msg.message == WM_QUIT) s_should_close = true;
-        TranslateMessage(&msg);   // WM_KEYDOWN → WM_CHAR 변환 (문자 입력용)
-        DispatchMessageA(&msg);   // WndProc 호출
+    MSG message;
+    while (PeekMessageA(&message, nullptr, 0, 0, PM_REMOVE)) {
+        if (message.message == WM_QUIT) s_should_close = true;
+        TranslateMessage(&message);
+        DispatchMessageA(&message);
     }
 
-    // 델타타임: QueryPerformanceCounter 두 번의 차이 / 주파수
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    float dt = (float)(now.QuadPart - s_frame_start.QuadPart)
-             / (float)s_freq.QuadPart;
+    float dt = (float)(now.QuadPart - s_frame_start.QuadPart) /
+               (float)s_frequency.QuadPart;
     s_frame_start = now;
+    return dt < 0.1f ? dt : 0.1f;
+}
 
-    // 창 드래그 등으로 발생하는 스파이크 클램핑 (원본 main.cpp 와 동일)
-    if (dt > 0.1f) dt = 0.1f;
-    return dt;
+void platform_present(const uint32_t* pixels, int width, int height,
+                      int pitch_bytes)
+{
+    if (!s_hdc || !pixels || width <= 0 || height <= 0) return;
+    (void)pitch_bytes; // renderer surface is tightly packed
+    if (!ensure_present_backbuffer(s_win_w, s_win_h)) return;
+
+    RECT client{0, 0, s_win_w, s_win_h};
+    FillRect(s_present_dc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height; // top-down rows
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    StretchDIBits(s_present_dc,
+                  s_vp_x, s_vp_y, s_vp_w, s_vp_h,
+                  0, 0, width, height,
+                  pixels, &info, DIB_RGB_COLORS, SRCCOPY);
+    BitBlt(s_hdc, 0, 0, s_win_w, s_win_h, s_present_dc, 0, 0, SRCCOPY);
 }
 
 void platform_end_frame()
 {
-    // 더블 버퍼 교체: 백 버퍼(GPU가 그린 것) → 프론트 버퍼(화면)
-    // raylib::EndDrawing()이 내부에서 호출하는 것과 동일
-    SwapBuffers(s_hdc);
+    if (!s_frame_pacing || s_frequency.QuadPart <= 0) return;
+    const double target = 1.0 / 60.0;
+    for (;;) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const double elapsed =
+            (double)(now.QuadPart - s_frame_start.QuadPart) /
+            (double)s_frequency.QuadPart;
+        const double remaining = target - elapsed;
+        if (remaining <= 0.0) break;
+        if (remaining > 0.002) Sleep((DWORD)((remaining - 0.001) * 1000.0));
+        else Sleep(0);
+    }
 }
 
 bool platform_key_pressed(int key)
 {
-    if (key < 0 || key >= 256) return false;
-    // 이번 프레임에 눌렸고 && 이전 프레임엔 안 눌렸으면 → "방금 눌림"
-    return s_key_state[key] && !s_key_prev[key];
+    return key >= 0 && key < 256 && s_key_state[key] && !s_key_prev[key];
 }
 
 bool platform_key_down(int key)
 {
-    if (key < 0 || key >= 256) return false;
-    return s_key_state[key];
+    return key >= 0 && key < 256 && s_key_state[key];
 }
 
 char platform_get_char_pressed()
 {
     if (s_char_head == s_char_tail) return 0;
-    char c = s_char_queue[s_char_head];
+    const char value = s_char_queue[s_char_head];
     s_char_head = (s_char_head + 1) % 64;
-    return c;
+    return value;
 }
 
-// ─── 마우스 API ───────────────────────────────────────────────────────────────
-// 원시 클라이언트 픽셀 → 논리(720×640) 좌표 역매핑. platform_set_window_size 로
-// 창이 스케일돼도 GUI hit-test 가 논리 좌표 기준으로 동작하게 한다.
 int platform_mouse_x()
 {
-    if (s_win_w <= 0 || s_logical_w <= 0 || s_win_w == s_logical_w) return s_mouse_x;
-    return (int)((double)s_mouse_x * s_logical_w / s_win_w);
+    if (s_vp_w <= 0) return s_mouse_x;
+    return (int)((double)(s_mouse_x - s_vp_x) * s_logical_w / s_vp_w);
 }
+
 int platform_mouse_y()
 {
-    if (s_win_h <= 0 || s_logical_h <= 0 || s_win_h == s_logical_h) return s_mouse_y;
-    return (int)((double)s_mouse_y * s_logical_h / s_win_h);
+    if (s_vp_h <= 0) return s_mouse_y;
+    return (int)((double)(s_mouse_y - s_vp_y) * s_logical_h / s_vp_h);
 }
 
 bool platform_mouse_pressed(int button)
 {
-    if (button < 0 || button >= 3) return false;
-    return s_mouse_state[button] && !s_mouse_prev[button];
+    return button >= 0 && button < 3 &&
+           s_mouse_state[button] && !s_mouse_prev[button];
 }
 
 bool platform_mouse_down(int button)
 {
-    if (button < 0 || button >= 3) return false;
-    return s_mouse_state[button];
+    return button >= 0 && button < 3 && s_mouse_state[button];
 }
 
 bool platform_mouse_released(int button)
 {
-    if (button < 0 || button >= 3) return false;
-    return !s_mouse_state[button] && s_mouse_prev[button];
+    return button >= 0 && button < 3 &&
+           !s_mouse_state[button] && s_mouse_prev[button];
 }
 
-float platform_mouse_wheel() { return s_mouse_wheel_accum; }
+float platform_mouse_wheel() { return s_mouse_wheel; }
 
 double platform_get_time()
 {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    return (double)(now.QuadPart - s_init_time.QuadPart)
-         / (double)s_freq.QuadPart;
+    return (double)(now.QuadPart - s_init_time.QuadPart) /
+           (double)s_frequency.QuadPart;
 }
 
-void* platform_get_hdc()
+void platform_set_window_size(int width, int height)
 {
-    return (void*)s_hdc;
-}
-
-// ─── 윈도우 설정 API ──────────────────────────────────────────────────────────
-// SDL 백엔드(platform/sdl.cpp)가 런타임 대상이다. Win32 백엔드는 빌드만
-// 유지되도록 최소 구현/no-op 으로 둔다. 필요해지면 SetWindowPos /
-// ChangeDisplaySettings / wglSwapIntervalEXT 로 확장.
-void platform_set_window_size(int w, int h)
-{
-    if (!s_hwnd || w <= 0 || h <= 0) return;
-    // 클라이언트 영역이 정확히 (w,h) 가 되도록 외곽(테두리)을 더한다.
-    RECT r = { 0, 0, w, h };
-    DWORD style = (DWORD)GetWindowLongPtr(s_hwnd, GWL_STYLE);
-    AdjustWindowRect(&r, style, FALSE);
+    if (!s_hwnd || width <= 0 || height <= 0) return;
+    RECT rect{0, 0, width, height};
+    const DWORD style = (DWORD)GetWindowLongPtr(s_hwnd, GWL_STYLE);
+    AdjustWindowRect(&rect, style, FALSE);
     SetWindowPos(s_hwnd, nullptr, 0, 0,
-                 r.right - r.left, r.bottom - r.top,
+                 rect.right - rect.left, rect.bottom - rect.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    s_win_w = w; s_win_h = h;
-    if (s_hglrc) glViewport(0, 0, s_win_w, s_win_h);
+    s_win_w = width;
+    s_win_h = height;
+    recompute_viewport();
 }
 
-void platform_set_fullscreen(bool /*on*/)
-{
-    // Win32 전체화면 미구현 (런타임 대상은 SDL). 레터박스 뷰포트도 SDL 쪽에만
-    // 있다 — 여기서는 의도적으로 no-op. (마우스 논리 매핑은 창 스케일용으로
-    // platform_mouse_x/y 에 구현되어 있음.)
-}
-
-// Win32 백엔드는 전체화면 미지원 — 설정 화면이 Fullscreen 행을 비활성으로
-// 그리게 한다 (켜도 no-op 인 거짓 토글 방지).
+void platform_set_fullscreen(bool) {}
 bool platform_fullscreen_supported() { return false; }
-
-void platform_set_vsync(bool on)
-{
-    // wglSwapIntervalEXT 가 있으면 사용, 없으면 no-op.
-    typedef BOOL (APIENTRY *PFNWGLSWAPINTERVALEXTPROC)(int);
-    static PFNWGLSWAPINTERVALEXTPROC p =
-        (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
-    if (p) p(on ? 1 : 0);
-}
+void platform_set_vsync(bool on) { s_frame_pacing = on; }

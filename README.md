@@ -1,8 +1,8 @@
 # Tetris Multiplayer RL
 
 결정론적 lockstep 네트워킹을 기반으로 만든 멀티플레이어 테트리스입니다.
-C++17, CMake, OpenGL 기반이며 raylib 없이 직접 구현한 Win32 백엔드와
-SDL2 백엔드를 함께 사용합니다.
+C++17과 CMake를 사용하며, raylib/OpenGL 없이 직접 구현한 CPU 2D
+소프트웨어 렌더러를 Win32 또는 SDL2 창에 표시합니다.
 
 이 저장소에는 게임 클라이언트, 릴레이/룸 서버, HTTP+SQLite 메타 서버,
 결정론 회귀 테스트, Python 시뮬레이션 바인딩, RL 학습용 환경/모델/export
@@ -10,8 +10,8 @@ SDL2 백엔드를 함께 사용합니다.
 
 ## 현재 상태
 
-- Windows 기본 빌드는 Handmade Win32 + OpenGL + XAudio2 경로입니다.
-- macOS/Linux 기본 빌드는 SDL2 + OpenGL 경로입니다.
+- Windows 기본 빌드는 Handmade Win32 + GDI 표시 + XAudio2 경로입니다.
+- macOS/Linux 기본 빌드는 SDL2 surface 표시 경로입니다.
 - `tetris`, `sim_hash_dump`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
 - `Single vs Bot`에는 내장 휴리스틱 봇이 항상 표시됩니다. 학습 모델 봇은 `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/*.onnx` 또는 `model/bots/*.onnx`가 있을 때 선택할 수 있습니다.
 - Python 쪽은 Colab 부트스트랩, Gymnasium 환경,
@@ -56,7 +56,7 @@ Meta는 guest token, RP/XP/BP, 아이콘과 경기 기록을 SQLite에 저장합
 |---|---|---|
 | 결정론 코어 | `src/sim_game.*`, `src/sim_grid.h`, `core/` | 규칙, 입력, RNG, 상태 해시 |
 | 클라이언트 | `src/main.cpp`, `src/game.*` | 화면 상태, fixed-step 루프, 게임 조립 |
-| 플랫폼·표현 | `platform/`, `renderer/`, `audio/` | Win32/SDL2, OpenGL, 오디오 |
+| 플랫폼·표현 | `platform/`, `renderer/`, `audio/` | CPU ARGB32 렌더러, Win32/SDL2 표시, 오디오 |
 | 네트워크 | `net/` | TCP 소켓, framing, lockstep session |
 | 온라인 서버 | `server/`, `meta/` | relay/room, 인증, 랭킹과 영속화 |
 | RL·봇 | `bindings/`, `python/`, `bot/` | Python 환경, 학습, ONNX 추론 |
@@ -89,11 +89,11 @@ ONNX Runtime과 `model/bots/*.onnx`가 준비된 뒤 실행합니다.
 
 ### Linux / macOS
 
-Linux에서는 SDL2와 OpenGL 개발 패키지가 필요합니다.
+Linux에서는 SDL2 개발 패키지가 필요합니다. OpenGL 개발 패키지는 필요하지 않습니다.
 
 ```bash
 # Ubuntu/Debian 예시
-sudo apt install build-essential cmake libsdl2-dev libgl1-mesa-dev
+sudo apt install build-essential cmake libsdl2-dev
 ```
 
 ```bash
@@ -371,8 +371,8 @@ uv sync --dev --extra train --extra export
 
 - 공통: C++17, CMake 3.15+
 - Windows: Visual Studio Build Tools 또는 동등한 MSVC 환경, Windows SDK
-- Linux/macOS SDL2 빌드: SDL2 개발 헤더, OpenGL
-- 텍스트/이미지(비-Win32): vendored `third_party/stb_truetype.h` + `third_party/stb_image.h` (헤더 온리, 추가 설치 불필요). SDL2 빌드 기본 폰트는 `Font/NanumGothic.ttf`(한글 지원), UI 아이콘은 `assets/images.cfg`에서 id별 경로를 읽고 선택/소유 검증은 `tetris_meta` DB가 담당
+- Linux/macOS SDL2 빌드: SDL2 개발 헤더
+- 텍스트/이미지: vendored `third_party/stb_truetype.h` + `third_party/stb_image.h` (비-Win32 이미지 디코드). 기본 폰트는 `Font/NanumGothic.ttf`이며 래스터화·합성은 모든 플랫폼에서 CPU로 수행됩니다.
 - Python/RL: uv, Python 3.12+ (3.14 포함), pytest, pybind11. PyTorch/Gymnasium/ONNX는 `train`/`export` extra에서만 필요
 - Meta server: vendored `third_party/sqlite3.{c,h,ext.h}`와 `third_party/httplib.h`
 - In-game bot: ONNX Runtime CPU bundle, `model/bots/*.onnx` 또는 legacy `model/*.onnx`

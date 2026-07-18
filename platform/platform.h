@@ -14,8 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── 색상 ─────────────────────────────────────────────────────────────────────
-// raylib의 Color { r, g, b, a } 와 동일한 레이아웃. glUniform4f 에 넘기기 전에
-// 각 채널을 /255.0f 로 정규화한다.
+// raylib의 Color { r, g, b, a } 와 동일한 레이아웃.
 struct Color { uint8_t r, g, b, a; };
 
 // 공통 색상 상수 (main.cpp 변경을 최소화하기 위해 raylib 이름 유지)
@@ -55,12 +54,10 @@ enum PlatformKey : int {
 
 // ─── 플랫폼 API ───────────────────────────────────────────────────────────────
 
-// 윈도우 생성 + OpenGL 컨텍스트 바인딩.
-// 내부에서: RegisterClassEx → CreateWindowEx → PIXELFORMATDESCRIPTOR →
-//           ChoosePixelFormat → SetPixelFormat → wglCreateContext
+// 윈도우와 입력/타이머 백엔드 초기화. 그래픽 API 컨텍스트는 만들지 않는다.
 void   platform_init(int w, int h, const char* title);
 
-// 윈도우 및 GL 컨텍스트 해제. CloseWindow() 대체.
+// 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
 void   platform_shutdown();
 
 // WM_QUIT 또는 ESC 키를 받으면 true 반환.
@@ -70,9 +67,12 @@ bool   platform_should_close();
 // GetFrameTime() 대체. MAX_DELTA = 100ms 클램핑 포함.
 float  platform_begin_frame();
 
-// 프레임 끝: SwapBuffers(hdc) — 더블 버퍼를 교체해 화면에 표시.
-// EndDrawing() 대체.
+// 프레임 끝. 소프트웨어 VSync가 켜졌다면 60 Hz에 맞춰 남은 시간을 쉰다.
 void   platform_end_frame();
+
+// CPU ARGB32 프레임버퍼를 창에 표시한다. pixels의 각 uint32_t는
+// 0xAARRGGBB이며, pitch_bytes는 한 행의 바이트 수다.
+void   platform_present(const uint32_t* pixels, int w, int h, int pitch_bytes);
 
 // 이 프레임에 처음 눌린 키인가? IsKeyPressed() 대체.
 // keyState[key] == true && keyPrev[key] == false
@@ -101,11 +101,8 @@ float  platform_mouse_wheel();
 // platform_init 이후 경과 초. GetTime() 대체.
 double platform_get_time();
 
-// renderer.cpp 에서 wglUseFontBitmaps 호출 시 HDC 필요
-void*  platform_get_hdc();
-
 // ─── 윈도우 설정 (렌더/UI 전용 — SimGame/결정성과 무관) ──────────────────────────
-// 창 크기를 (w,h) 로 바꾸고 화면 중앙에 재배치. glViewport 갱신.
+// 창 크기를 (w,h) 로 바꾸고 화면 중앙에 재배치. 표시 영역을 갱신.
 // GUI 는 platform_init 에 넘긴 논리 크기(720×640)를 기준 좌표로 쓰므로,
 // 마우스 좌표는 항상 논리 좌표로 역매핑된다 (아래 platform_mouse_x/y 참고).
 void   platform_set_window_size(int w, int h);
@@ -120,5 +117,5 @@ void   platform_set_fullscreen(bool on);
 // 비활성(회색) 으로 그려 "켜도 아무 일 없는" 거짓 토글을 막는다.
 bool   platform_fullscreen_supported();
 
-// VSync on/off. SDL_GL_SetSwapInterval(on?1:0).
+// 소프트웨어 프레임 페이싱 on/off. on이면 platform_end_frame이 60 Hz를 목표로 한다.
 void   platform_set_vsync(bool on);

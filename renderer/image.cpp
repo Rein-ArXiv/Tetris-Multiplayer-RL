@@ -1,426 +1,247 @@
-// renderer/image.cpp — PNG/JPG 로더 + 텍스처 쿼드 렌더
-//
-// Win32 경로에서는 GDI+ (gdiplus.lib) 가 PNG/JPG/BMP 디코딩을 담당한다.
-// 다른 플랫폼(Linux/macOS)에서는 third_party/stb_image.h 가 PNG/JPG 등을 디코딩한다.
+// renderer/image.cpp — image decode + CPU sprite sampling
 
 #include "image.h"
-#include "shaders.h"
-#include "../platform/gl_defs.h"
+#include "software_internal.h"
 
-#include <vector>
-#include <string>
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
-#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
 
 #if defined(_WIN32)
-  // NOMINMAX 금지 — <gdiplus.h> 가 전역 min/max 매크로를 요구.
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
-  #include <objidl.h>        // IStream (gdiplus prerequisites)
-  #include <algorithm>       // std::min/std::max — gdiplus namespace fallback
-  using std::min; using std::max;
+  #include <objidl.h>
+  using std::min;
+  using std::max;
   #include <gdiplus.h>
-  #include <GL/gl.h>
   #pragma comment(lib, "gdiplus.lib")
 #else
-  #include <GL/gl.h>
   #define STB_IMAGE_IMPLEMENTATION
   #include "../third_party/stb_image.h"
 #endif
 
-// ─── 외부 GL 심볼 (win32.cpp 에서 wglGetProcAddress 로 채움) ─────────────────
-extern GLuint (APIENTRY *glCreateShader)(GLenum);
-extern void   (APIENTRY *glShaderSource)(GLuint, GLsizei, const GLchar* const*, const GLint*);
-extern void   (APIENTRY *glCompileShader)(GLuint);
-extern GLuint (APIENTRY *glCreateProgram)(void);
-extern void   (APIENTRY *glAttachShader)(GLuint, GLuint);
-extern void   (APIENTRY *glLinkProgram)(GLuint);
-extern void   (APIENTRY *glUseProgram)(GLuint);
-extern void   (APIENTRY *glDeleteShader)(GLuint);
-extern GLint  (APIENTRY *glGetUniformLocation)(GLuint, const GLchar*);
-extern void   (APIENTRY *glUniform4f)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
-extern void   (APIENTRY *glUniform1i)(GLint, GLint);
-extern void   (APIENTRY *glUniformMatrix4fv)(GLint, GLsizei, GLboolean, const GLfloat*);
-extern void   (APIENTRY *glGenVertexArrays)(GLsizei, GLuint*);
-extern void   (APIENTRY *glBindVertexArray)(GLuint);
-extern void   (APIENTRY *glGenBuffers)(GLsizei, GLuint*);
-extern void   (APIENTRY *glBindBuffer)(GLenum, GLuint);
-extern void   (APIENTRY *glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
-extern void   (APIENTRY *glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
-extern void   (APIENTRY *glEnableVertexAttribArray)(GLuint);
-extern void   (APIENTRY *glActiveTextureProc)(GLenum);
-extern void   (APIENTRY *glDeleteVertexArrays)(GLsizei, const GLuint*);
-extern void   (APIENTRY *glDeleteBuffers)(GLsizei, const GLuint*);
-extern void   (APIENTRY *glDeleteProgram)(GLuint);
-extern void   (APIENTRY *glGetShaderiv)(GLuint, GLenum, GLint*);
-extern void   (APIENTRY *glGetShaderInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
-extern void   (APIENTRY *glGetProgramiv)(GLuint, GLenum, GLint*);
-extern void   (APIENTRY *glGetProgramInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
-
-// renderer.cpp 에서 제공하는 프로젝션 매트릭스 + 화면 정보
-extern const float* renderer_get_proj();
-
-#ifndef GL_BLEND
-#define GL_BLEND 0x0BE2
-#endif
-#ifndef GL_SRC_ALPHA
-#define GL_SRC_ALPHA 0x0302
-#endif
-#ifndef GL_ONE_MINUS_SRC_ALPHA
-#define GL_ONE_MINUS_SRC_ALPHA 0x0303
-#endif
-#ifndef GL_LINEAR
-#define GL_LINEAR 0x2601
-#endif
-#ifndef GL_TEXTURE_MIN_FILTER
-#define GL_TEXTURE_MIN_FILTER 0x2801
-#endif
-#ifndef GL_TEXTURE_MAG_FILTER
-#define GL_TEXTURE_MAG_FILTER 0x2800
-#endif
-#ifndef GL_TEXTURE_WRAP_S
-#define GL_TEXTURE_WRAP_S 0x2802
-#endif
-#ifndef GL_TEXTURE_WRAP_T
-#define GL_TEXTURE_WRAP_T 0x2803
-#endif
-#ifndef GL_UNPACK_ALIGNMENT
-#define GL_UNPACK_ALIGNMENT 0x0CF5
-#endif
-
-// ─── 상태 ────────────────────────────────────────────────────────────────────
 struct ImageEntry {
-    bool    used = false;
-    GLuint  tex  = 0;
-    int     w    = 0;
-    int     h    = 0;
+    bool used = false;
+    int w = 0;
+    int h = 0;
+    std::vector<uint32_t> pixels; // 0xAARRGGBB, straight alpha
 };
-static std::vector<ImageEntry> s_images;  // index 0 은 예약 (invalid handle)
 
-static GLuint s_sprite_prog = 0;
-static GLuint s_sprite_vao  = 0;
-static GLuint s_sprite_vbo  = 0;
-static GLint  s_sprite_proj = -1;
-static GLint  s_sprite_tint = -1;
-static GLint  s_sprite_tex  = -1;
+static std::vector<ImageEntry> s_images;
 
 #if defined(_WIN32)
 static ULONG_PTR s_gdiplus_token = 0;
-static bool      s_gdiplus_initialized = false;
+static bool s_gdiplus_initialized = false;
 #endif
 
-// ─── GDI+ 디코더 (Win32) ────────────────────────────────────────────────────
-//  성공 시 outPixels 에 RGBA8 row-major, width/height 채움.
-static bool decode_image_win32(const char* path, std::vector<uint8_t>& outPixels,
-                               int& outW, int& outH)
+static bool decode_image(const char* path, std::vector<uint8_t>& rgba,
+                         int& width, int& height)
 {
 #if defined(_WIN32)
     if (!s_gdiplus_initialized) {
-        Gdiplus::GdiplusStartupInput si;
-        if (Gdiplus::GdiplusStartup(&s_gdiplus_token, &si, nullptr) != Gdiplus::Ok) {
-            fprintf(stderr, "[IMG] GdiplusStartup failed\n");
+        Gdiplus::GdiplusStartupInput input;
+        if (Gdiplus::GdiplusStartup(&s_gdiplus_token, &input, nullptr) !=
+            Gdiplus::Ok) {
+            std::fprintf(stderr, "[image] GDI+ startup failed\n");
             return false;
         }
         s_gdiplus_initialized = true;
     }
+    const int wide_count = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
+    if (wide_count <= 0) return false;
+    std::wstring wide((size_t)wide_count, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide.data(), wide_count);
 
-    // UTF-8 → UTF-16
-    int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (wn <= 0) return false;
-    std::wstring wpath(wn, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath.data(), wn);
-    wpath.resize(wn - 1);
-
-    Gdiplus::Bitmap bmp(wpath.c_str());
-    if (bmp.GetLastStatus() != Gdiplus::Ok) {
-        fprintf(stderr, "[IMG] load failed: %s\n", path);
+    Gdiplus::Bitmap bitmap(wide.c_str());
+    if (bitmap.GetLastStatus() != Gdiplus::Ok) {
+        std::fprintf(stderr, "[image] load failed: %s\n", path);
         return false;
     }
+    width = (int)bitmap.GetWidth();
+    height = (int)bitmap.GetHeight();
+    if (width <= 0 || height <= 0) return false;
 
-    outW = (int)bmp.GetWidth();
-    outH = (int)bmp.GetHeight();
-    if (outW <= 0 || outH <= 0) return false;
-
-    Gdiplus::BitmapData bd{};
-    Gdiplus::Rect rc(0, 0, outW, outH);
-    if (bmp.LockBits(&rc, Gdiplus::ImageLockModeRead,
-                     PixelFormat32bppARGB, &bd) != Gdiplus::Ok) {
-        fprintf(stderr, "[IMG] LockBits failed: %s\n", path);
+    Gdiplus::BitmapData data{};
+    Gdiplus::Rect rect(0, 0, width, height);
+    if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead,
+                        PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
+        std::fprintf(stderr, "[image] pixel lock failed: %s\n", path);
         return false;
     }
-
-    // GDI+ 포맷은 BGRA (premultiplied 아님). OpenGL 은 RGBA 기대.
-    // row stride 는 bd.Stride (양수, top-down bitmap 의 경우).
-    outPixels.assign((size_t)outW * outH * 4, 0);
-    const uint8_t* srcBase = (const uint8_t*)bd.Scan0;
-    for (int y = 0; y < outH; ++y) {
-        const uint8_t* srcRow = srcBase + (ptrdiff_t)y * bd.Stride;
-        uint8_t* dstRow = outPixels.data() + (size_t)y * outW * 4;
-        for (int x = 0; x < outW; ++x) {
-            uint8_t b = srcRow[x * 4 + 0];
-            uint8_t g = srcRow[x * 4 + 1];
-            uint8_t r = srcRow[x * 4 + 2];
-            uint8_t a = srcRow[x * 4 + 3];
-            dstRow[x * 4 + 0] = r;
-            dstRow[x * 4 + 1] = g;
-            dstRow[x * 4 + 2] = b;
-            dstRow[x * 4 + 3] = a;
+    rgba.resize((size_t)width * (size_t)height * 4);
+    const uint8_t* base = static_cast<const uint8_t*>(data.Scan0);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* src = base + (ptrdiff_t)y * data.Stride;
+        uint8_t* dst = rgba.data() + (size_t)y * (size_t)width * 4;
+        for (int x = 0; x < width; ++x) {
+            dst[x * 4 + 0] = src[x * 4 + 2];
+            dst[x * 4 + 1] = src[x * 4 + 1];
+            dst[x * 4 + 2] = src[x * 4 + 0];
+            dst[x * 4 + 3] = src[x * 4 + 3];
         }
     }
-    bmp.UnlockBits(&bd);
+    bitmap.UnlockBits(&data);
     return true;
 #else
-    // 비-Win32: stb_image 로 디코드 (강제 RGBA8 row-major).
-    int n = 0;
-    unsigned char* data = stbi_load(path, &outW, &outH, &n, 4);
-    if (!data) {
-        fprintf(stderr, "[IMG] stbi_load failed: %s (%s)\n", path, stbi_failure_reason());
+    int channels = 0;
+    unsigned char* decoded = stbi_load(path, &width, &height, &channels, 4);
+    if (!decoded) {
+        std::fprintf(stderr, "[image] load failed: %s (%s)\n",
+                     path, stbi_failure_reason());
         return false;
     }
-    if (outW <= 0 || outH <= 0) { stbi_image_free(data); return false; }
-    outPixels.assign(data, data + (size_t)outW * outH * 4);
-    stbi_image_free(data);
+    if (width <= 0 || height <= 0) {
+        stbi_image_free(decoded);
+        return false;
+    }
+    rgba.assign(decoded, decoded + (size_t)width * (size_t)height * 4);
+    stbi_image_free(decoded);
     return true;
 #endif
-}
-
-// ─── 셰이더 초기화 — renderer.cpp 패턴과 동일 ───────────────────────────────
-static GLuint compile_shader_s(GLenum type, const char* src)
-{
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    GLint ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[512]; GLsizei len = 0;
-        glGetShaderInfoLog(s, sizeof(log), &len, log);
-        log[len < (GLsizei)sizeof(log) ? len : sizeof(log) - 1] = '\0';
-        fprintf(stderr, "[SPRITE GLSL] Compile error:\n%s\n", log);
-    }
-    return s;
-}
-
-static GLuint link_program_s(const char* vs, const char* fs)
-{
-    GLuint v = compile_shader_s(GL_VERTEX_SHADER,   vs);
-    GLuint f = compile_shader_s(GL_FRAGMENT_SHADER, fs);
-    GLuint p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, f);
-    glLinkProgram(p);
-    GLint ok = 0;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512]; GLsizei len = 0;
-        glGetProgramInfoLog(p, sizeof(log), &len, log);
-        log[len < (GLsizei)sizeof(log) ? len : sizeof(log) - 1] = '\0';
-        fprintf(stderr, "[SPRITE GLSL] Link error:\n%s\n", log);
-    }
-    glDeleteShader(v);
-    glDeleteShader(f);
-    return p;
 }
 
 void image_init()
 {
-    if (s_sprite_prog) return;  // 중복 호출 방어
-
-    s_sprite_prog = link_program_s(kSpriteVert, kSpriteFrag);
-    s_sprite_proj = glGetUniformLocation(s_sprite_prog, "u_proj");
-    s_sprite_tint = glGetUniformLocation(s_sprite_prog, "u_tint");
-    s_sprite_tex  = glGetUniformLocation(s_sprite_prog, "u_tex");
-
-    glGenVertexArrays(1, &s_sprite_vao);
-    glBindVertexArray(s_sprite_vao);
-
-    glGenBuffers(1, &s_sprite_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, s_sprite_vbo);
-    // 6 vertex × (xy+uv) = 24 float
-    glBufferData(GL_ARRAY_BUFFER, 6 * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-
-    // a_pos = location 0, a_uv = location 1
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
-                          4 * sizeof(float), (const void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
-                          4 * sizeof(float), (const void*)(2 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-
-    // 핸들 0 예약
-    if (s_images.empty()) s_images.push_back({});
+    if (s_images.empty()) s_images.resize(1); // handle 0 is invalid
 }
 
 void image_shutdown()
 {
-    for (auto& e : s_images) {
-        if (e.used && e.tex) glDeleteTextures(1, &e.tex);
-        e = {};
-    }
     s_images.clear();
-
-    if (s_sprite_vbo && glDeleteBuffers)       glDeleteBuffers(1, &s_sprite_vbo);
-    if (s_sprite_vao && glDeleteVertexArrays)  glDeleteVertexArrays(1, &s_sprite_vao);
-    if (s_sprite_prog && glDeleteProgram)      glDeleteProgram(s_sprite_prog);
-    s_sprite_vbo = s_sprite_vao = s_sprite_prog = 0;
-    s_sprite_proj = s_sprite_tint = s_sprite_tex = -1;
-
 #if defined(_WIN32)
     if (s_gdiplus_initialized) {
         Gdiplus::GdiplusShutdown(s_gdiplus_token);
         s_gdiplus_initialized = false;
+        s_gdiplus_token = 0;
     }
 #endif
 }
 
-// ─── 로드/해제 ───────────────────────────────────────────────────────────────
-static ImageHandle image_create_texture_from_rgba(const uint8_t* pixels, int w, int h)
+ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
 {
-    if (!pixels || w <= 0 || h <= 0) return 0;
-
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    // 빈 슬롯 재사용 또는 push
+    if (!rgba || width <= 0 || height <= 0) return 0;
+    ImageEntry entry;
+    entry.used = true;
+    entry.w = width;
+    entry.h = height;
+    entry.pixels.resize((size_t)width * (size_t)height);
+    for (size_t i = 0; i < entry.pixels.size(); ++i) {
+        const uint8_t* p = rgba + i * 4;
+        entry.pixels[i] = (uint32_t(p[3]) << 24) | (uint32_t(p[0]) << 16) |
+                          (uint32_t(p[1]) << 8) | uint32_t(p[2]);
+    }
     for (size_t i = 1; i < s_images.size(); ++i) {
         if (!s_images[i].used) {
-            s_images[i] = {true, tex, w, h};
+            s_images[i] = std::move(entry);
             return (ImageHandle)i;
         }
     }
-    s_images.push_back({true, tex, w, h});
+    s_images.push_back(std::move(entry));
     return (ImageHandle)(s_images.size() - 1);
 }
 
 ImageHandle image_load(const char* path)
 {
     if (!path || !*path) return 0;
-
-    std::vector<uint8_t> pixels;
-    int w = 0, h = 0;
-    if (!decode_image_win32(path, pixels, w, h)) return 0;
-    return image_create_texture_from_rgba(pixels.data(), w, h);
+    std::vector<uint8_t> rgba;
+    int width = 0;
+    int height = 0;
+    if (!decode_image(path, rgba, width, height)) return 0;
+    return image_create_rgba(rgba.data(), width, height);
 }
 
-ImageHandle image_create_rgba(const uint8_t* pixels, int w, int h)
+void image_unload(ImageHandle handle)
 {
-    return image_create_texture_from_rgba(pixels, w, h);
+    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
+    s_images[(size_t)handle] = {};
 }
 
-void image_unload(ImageHandle h)
+bool image_size(ImageHandle handle, int& width, int& height)
 {
-    if (h <= 0 || (size_t)h >= s_images.size()) return;
-    auto& e = s_images[h];
-    if (!e.used) return;
-    if (e.tex) glDeleteTextures(1, &e.tex);
-    e = {};
-}
-
-bool image_size(ImageHandle h, int& w_out, int& h_out)
-{
-    if (h <= 0 || (size_t)h >= s_images.size() || !s_images[h].used) return false;
-    w_out = s_images[h].w;
-    h_out = s_images[h].h;
+    if (handle <= 0 || (size_t)handle >= s_images.size() ||
+        !s_images[(size_t)handle].used) return false;
+    width = s_images[(size_t)handle].w;
+    height = s_images[(size_t)handle].h;
     return true;
 }
 
-// ─── 드로우 ──────────────────────────────────────────────────────────────────
-// 공통 제출 경로 — verts 는 (xy, uv) 6 vertex (24 float). draw_image 계열이
-// 축 정렬 쿼드를, draw_image_rotated 가 회전된 쿼드를 만들어 넘긴다.
-static void submit_sprite_verts(ImageHandle h, const float verts[24],
-                                float tr, float tg, float tb, float ta);
-
-static void draw_image_impl(ImageHandle h, int x, int y, int w, int ht,
-                            float tr, float tg, float tb, float ta)
+static Color sample_nearest(const ImageEntry& image, float u, float v, Color tint)
 {
-    float fx = (float)x, fy = (float)y;
-    float fw = (float)w, fh = (float)ht;
-
-    // (xy, uv) 6 vertex. UV 의 v 축은 텍스처 상단 = 0, 하단 = 1.
-    // GDI+ 비트맵은 top-down 으로 읽었으므로 v=0 이 top. OpenGL 텍스처의
-    // y 는 기본적으로 bottom 이지만 glTexImage2D 에서 첫 row 가 v=0 으로 저장됨.
-    float verts[24] = {
-        // pos        uv
-        fx,      fy,         0.0f, 0.0f,
-        fx,      fy + fh,    0.0f, 1.0f,
-        fx + fw, fy + fh,    1.0f, 1.0f,
-        fx,      fy,         0.0f, 0.0f,
-        fx + fw, fy + fh,    1.0f, 1.0f,
-        fx + fw, fy,         1.0f, 0.0f,
+    int sx = (int)(u * image.w);
+    int sy = (int)(v * image.h);
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+    if (sx >= image.w) sx = image.w - 1;
+    if (sy >= image.h) sy = image.h - 1;
+    const uint32_t pixel =
+        image.pixels[(size_t)sy * (size_t)image.w + (size_t)sx];
+    Color color{
+        (uint8_t)(((pixel >> 16) & 0xFFu) * tint.r / 255u),
+        (uint8_t)(((pixel >> 8) & 0xFFu) * tint.g / 255u),
+        (uint8_t)((pixel & 0xFFu) * tint.b / 255u),
+        (uint8_t)(((pixel >> 24) & 0xFFu) * tint.a / 255u)
     };
-    submit_sprite_verts(h, verts, tr, tg, tb, ta);
+    return color;
 }
 
-static void submit_sprite_verts(ImageHandle h, const float verts[24],
-                                float tr, float tg, float tb, float ta)
+static const ImageEntry* get_image(ImageHandle handle)
 {
-    if (h <= 0 || (size_t)h >= s_images.size() || !s_images[h].used) return;
-    if (!s_sprite_prog) return;
-
-    glUseProgram(s_sprite_prog);
-    glUniformMatrix4fv(s_sprite_proj, 1, GL_FALSE, renderer_get_proj());
-    glUniform4f(s_sprite_tint, tr, tg, tb, ta);
-    glUniform1i(s_sprite_tex, 0);  // sampler → TEXTURE0
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    if (glActiveTextureProc) glActiveTextureProc(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s_images[h].tex);
-
-    glBindVertexArray(s_sprite_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, s_sprite_vbo);
-    // verts 는 배열 파라미터(=포인터) — sizeof(verts) 는 포인터 크기이므로 금지.
-    glBufferData(GL_ARRAY_BUFFER, 24 * sizeof(float), verts, GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glBindVertexArray(0);
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    // 주의: GL_BLEND 는 켠 채로 둔다. draw_rect 계열은 알파 255 면 결과 동일.
+    if (handle <= 0 || (size_t)handle >= s_images.size()) return nullptr;
+    const ImageEntry& image = s_images[(size_t)handle];
+    return image.used ? &image : nullptr;
 }
 
-void draw_image(ImageHandle h, int x, int y, int w, int h_px)
+void draw_image_tinted(ImageHandle handle, int x, int y, int width, int height,
+                       Color tint)
 {
-    draw_image_impl(h, x, y, w, h_px, 1.0f, 1.0f, 1.0f, 1.0f);
+    const ImageEntry* image = get_image(handle);
+    if (!image || width <= 0 || height <= 0 || tint.a == 0) return;
+    for (int dy = 0; dy < height; ++dy) {
+        const float v = ((float)dy + 0.5f) / (float)height;
+        for (int dx = 0; dx < width; ++dx) {
+            const float u = ((float)dx + 0.5f) / (float)width;
+            const Color color = sample_nearest(*image, u, v, tint);
+            if (color.a) software_blend_pixel(x + dx, y + dy, color);
+        }
+    }
 }
 
-void draw_image_tinted(ImageHandle h, int x, int y, int w, int h_px, Color tint)
+void draw_image(ImageHandle handle, int x, int y, int width, int height)
 {
-    draw_image_impl(h, x, y, w, h_px,
-                    tint.r / 255.0f, tint.g / 255.0f,
-                    tint.b / 255.0f, tint.a / 255.0f);
+    draw_image_tinted(handle, x, y, width, height, WHITE);
 }
 
-void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
+void draw_image_rotated(ImageHandle handle, int cx, int cy, int width, int height,
                         float angle_deg)
 {
-    // 4 꼭짓점을 CPU 에서 (cx,cy) 중심으로 회전. 화면 y 가 아래로 증가하는
-    // 좌표계라 angle 양수 = 시계방향.
-    const float a  = angle_deg * 3.14159265f / 180.0f;
-    const float c  = std::cos(a), s = std::sin(a);
-    const float hw = (float)w * 0.5f, hh = (float)h_px * 0.5f;
-    auto rx = [&](float px, float py) { return (float)cx + px * c - py * s; };
-    auto ry = [&](float px, float py) { return (float)cy + px * s + py * c; };
-    const float verts[24] = {
-        // pos                          uv
-        rx(-hw, -hh), ry(-hw, -hh),     0.0f, 0.0f,
-        rx(-hw,  hh), ry(-hw,  hh),     0.0f, 1.0f,
-        rx( hw,  hh), ry( hw,  hh),     1.0f, 1.0f,
-        rx(-hw, -hh), ry(-hw, -hh),     0.0f, 0.0f,
-        rx( hw,  hh), ry( hw,  hh),     1.0f, 1.0f,
-        rx( hw, -hh), ry( hw, -hh),     1.0f, 0.0f,
-    };
-    submit_sprite_verts(h, verts, 1.0f, 1.0f, 1.0f, 1.0f);
+    const ImageEntry* image = get_image(handle);
+    if (!image || width <= 0 || height <= 0) return;
+    const float radians = angle_deg * 3.14159265358979323846f / 180.0f;
+    const float cosine = std::cos(radians);
+    const float sine = std::sin(radians);
+    const float half_w = (float)width * 0.5f;
+    const float half_h = (float)height * 0.5f;
+    const int extent_x = (int)std::ceil(std::abs(half_w * cosine) +
+                                       std::abs(half_h * sine));
+    const int extent_y = (int)std::ceil(std::abs(half_w * sine) +
+                                       std::abs(half_h * cosine));
+
+    // 목적지 픽셀 중심을 -angle로 역회전해 원본 UV를 얻는다.
+    for (int y = cy - extent_y; y < cy + extent_y; ++y) {
+        for (int x = cx - extent_x; x < cx + extent_x; ++x) {
+            const float dx = ((float)x + 0.5f) - (float)cx;
+            const float dy = ((float)y + 0.5f) - (float)cy;
+            const float local_x = dx * cosine + dy * sine;
+            const float local_y = -dx * sine + dy * cosine;
+            const float u = (local_x + half_w) / (float)width;
+            const float v = (local_y + half_h) / (float)height;
+            if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f) continue;
+            const Color color = sample_nearest(*image, u, v, WHITE);
+            if (color.a) software_blend_pixel(x, y, color);
+        }
+    }
 }

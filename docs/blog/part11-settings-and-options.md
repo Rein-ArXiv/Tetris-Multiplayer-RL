@@ -488,7 +488,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 ```cpp
             // ── ROW_VSYNC ───────────────────────────────────────────────────
-            if (checkbox_row(ROW_VSYNC, "VSync", g_settings.vsyncOn)) {
+            if (checkbox_row(ROW_VSYNC, "60 FPS pacing", g_settings.vsyncOn)) {
                 platform_set_vsync(g_settings.vsyncOn);
                 changed = true;
             }
@@ -541,7 +541,7 @@ static void build_ortho(float* m, float w, float h)
 }
 ```
 
-해상도 프리셋이 하는 일은 OpenGL **뷰포트**(`glViewport`) 만 키우는 것이다. ortho 가 720×640 으로 고정이므로, 뷰포트를 1080×960 으로 키우면 같은 그림이 1.5배로 스케일돼 그려진다. 게임 로직은 자기가 1440×1280 창에 떠 있는지 전혀 모른다 — `draw_rect(360, 320, ...)` 는 언제나 논리 중앙이다.
+해상도 프리셋이 하는 일은 720×640 CPU 프레임버퍼의 **표시 사각형**만 키우는 것이다. 플랫폼 계층이 완성된 프레임버퍼를 1080×960 창 표면으로 확대하므로, 게임 로직은 자기가 1440×1280 창에 떠 있는지 전혀 모른다 — `draw_rect(360, 320, ...)` 는 언제나 논리 중앙이다.
 
 이게 "프리셋이 그냥 스케일된다" 의 핵심이다. 세 프리셋이 모두 9:8 이므로, 720×640 의 ortho 와 종횡비가 같다. 같은 비율을 같은 비율로 키우면 **왜곡이 없다.**
 
@@ -555,7 +555,6 @@ static void recompute_viewport()
     if (s_logical_w <= 0 || s_logical_h <= 0 || s_win_w <= 0 || s_win_h <= 0) {
         s_vp_x = s_vp_y = 0;
         s_vp_w = s_win_w; s_vp_h = s_win_h;
-        glViewport(0, 0, s_win_w, s_win_h);
         return;
     }
     // 창과 논리 종횡비가 (거의) 같으면 레터박스 불필요 — 창 전체 사용.
@@ -577,7 +576,6 @@ static void recompute_viewport()
         s_vp_x = 0;
         s_vp_y = (s_win_h - s_vp_h) / 2;
     }
-    glViewport(s_vp_x, s_vp_y, s_vp_w, s_vp_h);
 }
 ```
 
@@ -621,11 +619,7 @@ void platform_set_window_size(int w, int h)
     }
     SDL_SetWindowSize(s_win, w, h);
     SDL_SetWindowPosition(s_win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
-    // 드로어블 픽셀 크기를 직접 질의(HiDPI 대응). 실패 시 요청 크기 사용.
-    int dw = 0, dh = 0;
-    SDL_GL_GetDrawableSize(s_win, &dw, &dh);
-    s_win_w = (dw > 0) ? dw : w;
-    s_win_h = (dh > 0) ? dh : h;
+    SDL_GetWindowSize(s_win, &s_win_w, &s_win_h);
     recompute_viewport();
 }
 ```
@@ -636,14 +630,14 @@ graph TB
         L[draw_rect / draw_text<br/>모든 게임 좌표]
     end
     subgraph Physical["물리 창 (예: 1440×1280)"]
-        VP["glViewport s_vp_*<br/>= 720×640 을 스케일"]
+        VP["표시 사각형 s_vp_*<br/>= 720×640 프레임버퍼를 스케일"]
     end
-    L -->|GPU 스케일| VP
+    L -->|OS surface 스케일| VP
     M["원시 마우스 픽셀<br/>s_mouse_x/y"] -->|"(raw - s_vp_offset)<br/>× logical / s_vp_size"| LM["논리 마우스<br/>platform_mouse_x/y"]
     LM -->|히트 테스트| L
 ```
 
-`win32.cpp` 에는 대응 구현/스텁이 있다. Win32 의 `platform_set_window_size` 는 클라이언트 영역이 정확히 (w,h) 가 되도록 외곽을 더해 창을 조정하고 `glViewport(0,0,w,h)` 를 친다. 전체화면은 no-op 스텁이다 — 런타임 배포 대상이 SDL 이라, 논리 매핑/레터박스는 SDL 쪽에만 둔다.
+`win32.cpp` 에도 같은 `s_vp_*` 계산과 마우스 역매핑이 있다. 클라이언트 영역이 정확히 `(w,h)`가 되도록 창 외곽을 조정하고, `StretchDIBits`의 목적지 사각형에 레터박스를 적용한다. 전체화면 토글만 no-op 스텁으로 남아 있다.
 
 ```cpp
 void platform_set_fullscreen(bool /*on*/)
@@ -728,18 +722,18 @@ void audio_set_sfx_volume(float v01)
 
 ## 7. VSync — 찢김 vs 입력 지연
 
-VSync 토글은 SDL 의 swap interval 을 켜고 끈다.
+기존 설정 키 이름은 호환성을 위해 `vsync`로 유지하지만, UI 의미는 **60 FPS pacing**이다. 소프트웨어 surface 표시에는 GPU swap interval이 없으므로 프레임 끝에 남은 시간을 쉰다.
 
 ```cpp
 void platform_set_vsync(bool on)
 {
-    SDL_GL_SetSwapInterval(on ? 1 : 0);
+    s_frame_pacing = on;
 }
 ```
 
-`SDL_GL_SetSwapInterval(1)` 은 버퍼 스왑을 모니터 수직 동기 신호에 맞춘다 — 프레임이 모니터 리프레시 경계에서만 교체되므로 **화면 찢김(tearing)** 이 사라진다. 대신 스왑이 다음 vblank 까지 블록되므로, 입력→화면 사이에 최대 한 리프레시 주기의 **추가 지연** 이 붙는다. `0` 은 즉시 스왑이라 지연이 줄지만 찢김이 보일 수 있다.
+ON이면 `platform_end_frame()`이 한 프레임을 약 16.67ms로 맞춘다. 이것은 CPU 사용량과 렌더 빈도를 안정시키지만 디스플레이 vblank와 직접 동기화하지 않으므로 tearing 제거를 보장하지는 않는다. OFF이면 게임 루프가 가능한 한 빠르게 렌더한다.
 
-이 트레이드오프는 취향과 환경에 달렸다 — 60Hz 모니터에서 부드러운 화면을 원하면 ON, 입력 반응을 1프레임이라도 당기고 싶은 경쟁 플레이어는 OFF 가 합리적이다. 결정성 관점에서는 둘 다 안전하다: VSync 는 *언제 그리느냐* 만 바꾸지 *무엇을 시뮬레이션하느냐* 는 건드리지 않는다. 게임 루프는 Part 4 의 60Hz fixed-step 누산기로 도므로, 렌더 프레임률이 흔들려도 시뮬레이션 틱 수는 동일하다.
+결정성 관점에서는 둘 다 안전하다. pacing은 *언제 그리느냐*만 바꾸고 *무엇을 시뮬레이션하느냐*는 건드리지 않는다. 게임 루프는 Part 4의 60Hz fixed-step 누산기로 도므로 렌더 프레임률이 흔들려도 시뮬레이션 틱 결과는 동일하다.
 
 ## 8. 하드드롭 흔들림과 고스트 토글
 
@@ -859,7 +853,7 @@ void Game::Draw()
 - `src/gui.cpp` 의 즉시모드 위젯 추가 — `gui_slider`(0~100 트랙/fill/노브) + `gui_value_selector`(`< 라벨 >`, -1/0/+1). 기존 `gui_checkbox` 재사용.
 - `platform/sdl.cpp` 의 해상도 시스템 — ortho 720×640 고정, `recompute_viewport()` 의 9:8 풀창 vs 전체화면 레터박스, `platform_mouse_x/y` 의 논리 좌표 역매핑(`(raw - vpOffset) * logical / vpSize`). `win32.cpp` 대응 구현/스텁.
 - `audio/sdl_audio.cpp` 의 BGM/SFX 카테고리 게인(믹스 시 샘플 곱) + `audio/audio.cpp` 의 XAudio2 보이스 `SetVolume` 미러.
-- `platform/sdl.cpp` 의 `platform_set_vsync`(`SDL_GL_SetSwapInterval`) — 찢김 vs 입력 지연.
+- `platform/*.cpp` 의 `platform_set_vsync` — 호환 설정 키를 60Hz 소프트웨어 프레임 페이싱으로 해석.
 - `src/sim_game.*` 의 렌더 전용 `hardDropEvent`(해시 제외) + `apply_self_fx`/`apply_peer_fx` 의 흔들림 게이팅(약한 하드드롭 흔들림이 강한 흔들림을 덮지 않음).
 - `src/game.cpp` 의 `game_set_ghost_enabled` + 두 draw 사이트(`Draw`/`DrawBoardAt`) 고스트 게이트.
 

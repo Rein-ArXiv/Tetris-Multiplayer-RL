@@ -1,4 +1,4 @@
-// src/main.cpp — Handmade 버전 (raylib 제거, Win32 + OpenGL 직접 사용)
+// src/main.cpp — Handmade 버전 (raylib/OpenGL 제거, CPU software renderer)
 //
 // 변경 사항:
 //   #include <raylib.h>     → platform/platform.h + renderer/renderer.h
@@ -6,7 +6,7 @@
 //   WindowShouldClose()     → platform_should_close()
 //   GetFrameTime()          → platform_begin_frame() 반환값
 //   BeginDrawing()          → renderer_begin()
-//   EndDrawing()            → renderer_end() + platform_end_frame()
+//   EndDrawing()            → renderer_end() (present) + platform_end_frame() (pace)
 //   IsKeyPressed(KEY_*)     → platform_key_pressed(PKEY_*)
 //   IsKeyDown(KEY_*)        → platform_key_down(PKEY_*)
 //   GetCharPressed()        → platform_get_char_pressed()
@@ -469,7 +469,7 @@ static ImageHandle load_configured_image(
 // 키보드 입력 → 비트마스크 (core/input.h 의 INPUT_* 상수)
 //
 // platform_key_pressed()는 "이번 프레임에 처음 눌림"을 감지하는 엣지 트리거.
-// vsync 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
+// frame pacing 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
 // 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
 // → 매 프레임 AccumulateInput()으로 엣지 입력을 누적하고,
 //   틱에서 ConsumeInput()으로 소비 + held 키(DOWN/LEFT/RIGHT)를 합산한다.
@@ -684,8 +684,8 @@ int main(int argc, char** argv)
     audio_set_music_volume(g_settings.bgmVol / 100.0f);
     audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
 
-    // 윈도우: 저장된 스케일 프리셋 적용 + (저장되어 있으면) 전체화면 + vsync.
-    //   렌더러 ortho 는 항상 720×640 — 창만 스케일/레터박스된다.
+    // 윈도우: 저장된 스케일 프리셋 + 전체화면 + 60 FPS pacing 적용.
+    //   CPU 프레임버퍼는 항상 720×640 — 표시 사각형만 스케일/레터박스된다.
     platform_set_window_size(kWindowScaleW[g_settings.windowScale],
                              kWindowScaleH[g_settings.windowScale]);
     if (g_settings.fullscreen) platform_set_fullscreen(true);
@@ -1897,7 +1897,7 @@ int main(int argc, char** argv)
             }
 
             // ── ROW_VSYNC ───────────────────────────────────────────────────
-            if (checkbox_row(ROW_VSYNC, "VSync", g_settings.vsyncOn)) {
+            if (checkbox_row(ROW_VSYNC, "60 FPS pacing", g_settings.vsyncOn)) {
                 platform_set_vsync(g_settings.vsyncOn);
                 changed = true;
             }

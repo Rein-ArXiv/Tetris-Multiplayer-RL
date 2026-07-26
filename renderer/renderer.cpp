@@ -260,7 +260,18 @@ void renderer_begin(Color bg)
     int vx = 0, vy = 0, vw = 0, vh = 0;
     platform_viewport(vx, vy, vw, vh);
 
-    if (vw <= 0 || vh <= 0) return;
+    // 창이 최소화되면 뷰포트가 0x0 이 된다. 지울 곳도 그릴 곳도 없으니
+    // 건너뛴다. 게임 코드는 최소화 여부를 모르고 계속 draw_* 를 부르지만,
+    // 그 정점들은 프레임 끝의 glb_flush 가 0x0 뷰포트로 흘려보내고 큐를
+    // 비우므로 쌓이지는 않는다. 다만 배처 상태는 여기서 맞춰 둔다 —
+    // 그러지 않으면 첫 프레임부터 최소화로 시작했을 때 glUseProgram 을
+    // 한 번도 부르지 않은 채 glDrawArrays 에 도달한다.
+    if (vw <= 0 || vh <= 0) {
+        gl_UseProgram(s_prog);
+        s_verts.clear();
+        s_batch_tex = s_white;
+        return;
+    }
     gl_Viewport(vx, vy, vw, vh);
 
     // 뷰포트는 논리 종횡비를 유지하므로 가로/세로 배율이 같다. 세로로 잰다.

@@ -916,7 +916,7 @@ option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
 
 ### 9.2 ORT 블록
 
-**현재 소스 발췌 — `CMakeLists.txt:196-217`**
+**현재 소스 발췌 — `CMakeLists.txt:209-225`**
 
 ```cmake
     # ------------------------------------------------------------------------
@@ -1462,7 +1462,7 @@ Python 쪽 `netbot/input_expander.py` 도 같은 규칙을 미러링한다. 현�
 
 봇은 `Single vs Bot` 안에서 같은 프로세스로 실행된다. 플레이어와 봇은 각각 `SimGame` 을 가지고, `main.cpp` 가 두 보드를 같은 60Hz 루프에서 진행시킨다. 아래가 그 루프의 봇 부분 전문이다.
 
-**현재 소스 발췌 — `src/main.cpp:1360-1386`**
+**현재 소스 발췌 — `src/main.cpp:1390-1413`**
 
 ```cpp
                 // 1) 봇 입력 큐가 비었으면 새 placement 계산.
@@ -1506,7 +1506,7 @@ Python 쪽 `netbot/input_expander.py` 도 같은 규칙을 미러링한다. 현�
 
 이것이 `Single vs Bot` 을 "봇 시연" 이 아니라 **대전**으로 만드는 배선이다.
 
-**현재 소스 발췌 — `src/main.cpp:1388-1401`**
+**현재 소스 발췌 — `src/main.cpp:1415-1428`**
 
 ```cpp
                 gameSingle->SubmitInput(inputMask);
@@ -1556,7 +1556,7 @@ sequenceDiagram
 
 학습 모델이 1개일 때는 `model/policy.onnx` 하나만 읽어도 충분했다. 지금은 알고리즘별로 10개 이상 모델을 비교해야 하므로 C++ 클라이언트는 로스터를 만든다.
 
-**현재 소스 발췌 — `src/main.cpp:334-377`**
+**현재 소스 발췌 — `src/main.cpp:355-398`**
 
 ```cpp
 static std::vector<BotEntry> discover_bot_roster()
@@ -1776,7 +1776,7 @@ cmake --build build --config Release
 
 반대로 ORT 없는 빌드에서 `.onnx` 모델을 선택하면 봇이 실행되지 않고 **봇 선택 화면에 오류 문자열이 그려진다.** 이건 stdout 로그가 아니다 — `src/main.cpp:1742` 가 `botSelectError = "Load failed: " + err;` 로 문자열을 만들고, `:1720-1721` 이 그것을 `draw_text` 로 화면에 그린다.
 
-**현재 소스 발췌 — `src/main.cpp:1720-1721`**
+**현재 소스 발췌 — `src/main.cpp:1752-1753`**
 
 ```cpp
             if (!botSelectError.empty())

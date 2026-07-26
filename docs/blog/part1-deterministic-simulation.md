@@ -2464,7 +2464,7 @@ set(TETRIS_SIM_HEADERS
 
 이 두 변수가 뒤에서 크게 갚는다. [Part 8](./part8-python-rl.md) 의 pybind11 모듈은 `${TETRIS_SIM_SOURCES}` 만 링크해 renderer·audio·net 심볼 없이 빌드되고, 아래 `sim_hash_dump` 도 마찬가지다. **`SimGame` 이 실수로 `renderer.h` 를 include 하는 순간 이 두 타깃의 링크가 깨진다** — 계층 경계가 문서가 아니라 빌드 시스템으로 강제되는 셈이다.
 
-**현재 소스 발췌 — `CMakeLists.txt:301-307`**
+**현재 소스 발췌 — `CMakeLists.txt:309-315`**
 
 ```cmake
 if (TETRIS_BUILD_TEST)

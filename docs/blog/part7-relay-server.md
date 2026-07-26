@@ -113,7 +113,7 @@ Part 7 이 추가하는 소스는 `server/*.cpp` 5개와 헤더 4개, `server/wo
 
 먼저 `TETRIS_BUILD_TEST` 블록에 `worker_group_test` 를 추가한다.
 
-**현재 소스 발췌 — `CMakeLists.txt:309-317`**
+**현재 소스 발췌 — `CMakeLists.txt:317-325`**
 
 ```cmake
     add_executable(worker_group_test
@@ -129,7 +129,7 @@ Part 7 이 추가하는 소스는 `server/*.cpp` 5개와 헤더 4개, `server/wo
 
 그리고 릴레이 본체.
 
-**현재 소스 발췌 — `CMakeLists.txt:326-374`**
+**현재 소스 발췌 — `CMakeLists.txt:334-382`**
 
 ```cmake
 if (TETRIS_BUILD_RELAY)

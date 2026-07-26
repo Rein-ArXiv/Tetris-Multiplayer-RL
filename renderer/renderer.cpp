@@ -21,6 +21,7 @@ static int s_screen_w = 0;
 static int s_screen_h = 0;
 static int s_view_ox  = 0;
 static int s_view_oy  = 0;
+static float s_render_scale = 1.0f;
 
 static GLuint s_prog        = 0;
 static GLuint s_vao         = 0;
@@ -190,6 +191,7 @@ void glb_quad(GLuint tex,
 GLuint glb_white_texture()   { return s_white; }
 int    glb_screen_width()    { return s_screen_w; }
 int    glb_screen_height()   { return s_screen_h; }
+float  glb_render_scale()    { return s_render_scale; }
 
 // ─── 공개 API ─────────────────────────────────────────────────────────────────
 
@@ -260,6 +262,9 @@ void renderer_begin(Color bg)
 
     if (vw <= 0 || vh <= 0) return;
     gl_Viewport(vx, vy, vw, vh);
+
+    // 뷰포트는 논리 종횡비를 유지하므로 가로/세로 배율이 같다. 세로로 잰다.
+    s_render_scale = (float)vh / (float)s_screen_h;
 
     // glClear 는 뷰포트가 아니라 시저 박스를 따른다. glViewport 만 좁혀 놓고
     // 지우면 레터박스 여백까지 배경색으로 칠해져 여백과 게임 화면의 경계가

@@ -387,6 +387,19 @@ void platform_set_window_size(int width, int height)
     recompute_viewport();
 }
 
+void platform_display_size(int& w_out, int& h_out)
+{
+    // SPI_GETWORKAREA 는 작업 표시줄을 뺀 영역이다. 실패하면 화면 전체.
+    RECT work{};
+    if (SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
+        w_out = work.right - work.left;
+        h_out = work.bottom - work.top;
+    } else {
+        w_out = GetSystemMetrics(SM_CXSCREEN);
+        h_out = GetSystemMetrics(SM_CYSCREEN);
+    }
+}
+
 void platform_set_fullscreen(bool) {}
 bool platform_fullscreen_supported() { return false; }
 void platform_set_vsync(bool on) { s_frame_pacing = on; }

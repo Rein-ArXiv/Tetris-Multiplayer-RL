@@ -229,12 +229,33 @@ struct GameSettings {
     bool ghostOn     = true;  // 고스트 피스 표시
 };
 
-// 창 스케일 프리셋 (9:8 비율 유지). windowScale 인덱스 → (w,h).
-static constexpr int kWindowScaleCount = 3;
-static constexpr int kWindowScaleW[kWindowScaleCount] = { 720, 1080, 1440 };
-static constexpr int kWindowScaleH[kWindowScaleCount] = { 640,  960, 1280 };
+// 창 크기 프리셋. UI 좌표계(논리 720x640)는 그대로 두고 창만 키운다.
+// 9:8 을 유지하므로 레터박스가 생기지 않고, GPU 가 그 해상도로 다시
+// 래스터화하므로 크게 잡을수록 선명해진다 (글자도 그 배율로 다시 굽는다).
+//
+// 마지막 항목은 4K 모니터의 세로 해상도(2160) 에 맞춘 것이다. 9:8 이라
+// 가로는 2430 이고, 남는 좌우는 전체화면에서 검은 여백이 된다.
+static constexpr int kWindowScaleCount = 5;
+static constexpr int kWindowScaleW[kWindowScaleCount] = { 720, 1080, 1440, 1800, 2430 };
+static constexpr int kWindowScaleH[kWindowScaleCount] = { 640,  960, 1280, 1600, 2160 };
 static const char*   kWindowScaleLabel[kWindowScaleCount] = {
-    "720 x 640", "1080 x 960", "1440 x 1280" };
+    "720 x 640", "1080 x 960", "1440 x 1280", "1800 x 1600", "2430 x 2160" };
+
+// 이 모니터에 실제로 들어가는 가장 큰 프리셋 인덱스.
+//
+// 화면보다 큰 창을 만들면 창의 일부가 화면 밖으로 나가 제목 표시줄조차
+// 잡을 수 없게 된다. 그래서 고를 수 있는 범위를 화면 크기로 잘라 둔다.
+// 모니터를 바꿔 끼울 수 있으므로 매번 다시 잰다.
+static int max_window_scale()
+{
+    int dw = 0, dh = 0;
+    platform_display_size(dw, dh);
+    if (dw <= 0 || dh <= 0) return kWindowScaleCount - 1;  // 못 재면 막지 않는다
+    int last = 0;
+    for (int i = 0; i < kWindowScaleCount; ++i)
+        if (kWindowScaleW[i] <= dw && kWindowScaleH[i] <= dh) last = i;
+    return last;
+}
 
 // 전역 설정. apply_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
 static GameSettings g_settings;
@@ -684,8 +705,14 @@ int main(int argc, char** argv)
     audio_set_music_volume(g_settings.bgmVol / 100.0f);
     audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
 
-    // 윈도우: 저장된 스케일 프리셋 + 전체화면 + 60 FPS pacing 적용.
-    //   CPU 프레임버퍼는 항상 720×640 — 표시 사각형만 스케일/레터박스된다.
+    // 윈도우: 저장된 크기 프리셋 + 전체화면 + 60 FPS pacing 적용.
+    //   UI 좌표계는 항상 논리 720x640 — 창은 그 위에 얹히는 뷰포트일 뿐이다.
+    //
+    // 저장된 값을 이 모니터 기준으로 한 번 더 자른다. 큰 화면에서 저장한
+    // 설정 파일을 작은 화면에 들고 오면 창이 화면 밖으로 나가는데, 그러면
+    // 설정 화면에 들어가 되돌릴 수조차 없다.
+    if (g_settings.windowScale > max_window_scale())
+        g_settings.windowScale = max_window_scale();
     platform_set_window_size(kWindowScaleW[g_settings.windowScale],
                              kWindowScaleH[g_settings.windowScale]);
     if (g_settings.fullscreen) platform_set_fullscreen(true);
@@ -1813,11 +1840,13 @@ int main(int argc, char** argv)
                     if (kRight) dir = +1;
                 }
                 if (dir != 0) {
-                    // 해상도 선택기는 양 끝에서 wrap 하지 않고 clamp (1440 에서
-                    // Right → 720 으로 점프하는 일반 picker 답지 않은 동작 방지).
+                    // 양 끝에서 wrap 하지 않고 clamp 한다 (가장 큰 값에서
+                    // Right → 720 으로 점프하는, picker 답지 않은 동작 방지).
+                    // 상한은 프리셋 개수가 아니라 이 모니터에 들어가는 최대치다.
+                    const int hi = max_window_scale();
                     int ns = g_settings.windowScale + dir;
                     if (ns < 0) ns = 0;
-                    if (ns > kWindowScaleCount - 1) ns = kWindowScaleCount - 1;
+                    if (ns > hi) ns = hi;
                     if (ns != g_settings.windowScale) {
                         g_settings.windowScale = ns;
                         g_settings.fullscreen = false;  // 스케일 변경은 창모드로

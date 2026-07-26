@@ -11,6 +11,12 @@
 // 아틀라스를 쓰는 이유는 텍스처 교체가 draw call 을 끊기 때문이다. 글자마다
 // 텍스처가 따로면 "Game Over" 한 줄에 draw call 이 9번 나간다. 한 장에 모아
 // 두면 화면의 모든 글자가 한 번에 나간다.
+//
+// 해상도에 대해: 사각형은 정점 좌표가 실수라 창을 4K 로 키워도 GPU 가 그
+// 해상도로 다시 래스터화한다 — 저절로 선명하다. 글자는 그렇지 않다. 한 번
+// 구운 비트맵을 확대하면 그 배율만큼 뭉갠다. 그래서 여기서는 배치는 논리
+// 좌표로 하되, **굽는 크기만** 화면 배율을 곱해 키운다. 22px 글자를 3.4배
+// 창에서 보면 실제로는 75px 로 구워 22px 자리에 그린다.
 
 #include "renderer.h"
 #include "gl_internal.h"
@@ -27,15 +33,24 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../third_party/stb_truetype.h"
 
-// 아틀라스 한 변. 1024² R8 = 1 MB. 이 게임이 쓰는 글꼴 크기 종류가 유한해서
-// (UI 14~64px 남짓) 실사용에서 넘친 적이 없다. 넘치면 아래 pack_glyph 가
-// 경고를 찍고 그 글자를 빈 칸으로 돌려준다 — 조용히 깨지지 않게 하려는 것이다.
-static constexpr int kAtlasDim = 1024;
+// 아틀라스 한 변. 2048² R8 = 4 MB 를 노린다. 1024 로도 논리 해상도에서는
+// 남지만, 4K 창에서는 같은 글자를 3~4배 크기로 굽기 때문에 금방 찬다.
+// 드라이버가 허용하는 상한이 더 낮을 수 있어 실제 값은 ensure_atlas 에서
+// GL_MAX_TEXTURE_SIZE 와 비교해 정한다.
+static constexpr int kAtlasWanted = 2048;
+static int s_atlas_dim = kAtlasWanted;
+
+// 굽는 크기를 1/8 단위로 반올림한다. 창을 드래그로 늘리는 동안 배율이
+// 연속으로 변하는데, 그때마다 새 크기로 다시 구우면 아틀라스가 순식간에
+// 찬다. 눈에 안 보이는 차이를 같은 크기로 묶어 재굽기를 줄인다.
+static constexpr float kScaleQuantum = 8.0f;
 
 struct Glyph {
-    int   w = 0, h = 0;          // 비트맵 크기 (픽셀)
-    int   xoff = 0, yoff = 0;    // 펜 위치 기준 오프셋
-    float advance = 0.0f;
+    int   bw = 0, bh = 0;        // 구워진 비트맵 크기 (실제 화면 픽셀)
+    float w = 0.0f, h = 0.0f;    // 그릴 크기 (논리 픽셀)
+    float xoff = 0.0f;           // 펜 위치 기준 오프셋 (논리 픽셀)
+    float yoff = 0.0f;
+    float advance = 0.0f;        // 다음 글자까지 (논리 픽셀)
     float u0 = 0.0f, v0 = 0.0f;  // 아틀라스 안에서의 위치
     float u1 = 0.0f, v1 = 0.0f;
 };
@@ -82,17 +97,26 @@ static uint32_t utf8_next(const char** text)
 static void ensure_atlas()
 {
     if (s_atlas) return;
+
+    GLint max_dim = 0;
+    gl_GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dim);
+    s_atlas_dim = (max_dim > 0 && max_dim < kAtlasWanted) ? (int)max_dim
+                                                          : kAtlasWanted;
+
     gl_GenTextures(1, &s_atlas);
     gl_BindTexture(GL_TEXTURE_2D, s_atlas);
     // 채널이 하나뿐이라 기본 4바이트 정렬 규칙이 맞지 않는다. 이걸 빠뜨리면
     // 폭이 4의 배수가 아닌 글자가 비스듬히 밀려 보인다.
     gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    std::vector<uint8_t> zero((size_t)kAtlasDim * kAtlasDim, 0);
-    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_R8, kAtlasDim, kAtlasDim, 0,
+    std::vector<uint8_t> zero((size_t)s_atlas_dim * s_atlas_dim, 0);
+    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_R8, s_atlas_dim, s_atlas_dim, 0,
                   GL_RED, GL_UNSIGNED_BYTE, zero.data());
-    // 글리프는 등배로 그리므로 LINEAR 가 오히려 번진다.
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // 굽는 크기를 1/8 단위로 반올림하므로 화면 픽셀과 텍셀이 정확히 1:1 은
+    // 아니다 (최대 6% 어긋난다). NEAREST 로 두면 그 어긋남이 글자 획 굵기가
+    // 들쭉날쭉해지는 형태로 보인다. LINEAR 가 그 차이를 흡수한다.
+    // 글리프 사이에 1픽셀 빈 줄을 두므로 이웃 글자가 번져 들어오지 않는다.
+    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     s_pen_x = s_pen_y = s_row_h = 0;
@@ -103,15 +127,25 @@ static void ensure_atlas()
 static bool pack_glyph(const uint8_t* bitmap, int w, int h, Glyph& out)
 {
     if (w <= 0 || h <= 0) return true;   // 공백 문자 — 자리를 차지하지 않는다
+    if (w > s_atlas_dim || h > s_atlas_dim) return false;  // 한 장에 안 들어가는 글자
 
-    if (s_pen_x + w > kAtlasDim) {       // 줄 바꿈
+    if (s_pen_x + w > s_atlas_dim) {       // 줄 바꿈
         s_pen_x = 0;
         s_pen_y += s_row_h + 1;
         s_row_h = 0;
     }
-    if (s_pen_y + h > kAtlasDim) {
-        std::fprintf(stderr, "[text] glyph atlas full (%dx%d)\n", kAtlasDim, kAtlasDim);
-        return false;
+    if (s_pen_y + h > s_atlas_dim) {
+        // 가득 찼다. 예전 크기로 구운 글자들이 대부분이므로 (창 크기가
+        // 바뀌면 이전 배율 비트맵은 다시 안 쓰인다) 통째로 버리고 처음부터
+        // 다시 채운다. 개별 항목을 쫓아내는 LRU 보다 단순하고, 실제로는
+        // 창 크기를 크게 바꿀 때 한 번씩만 일어난다.
+        //
+        // 버리기 전에 배치를 비운다. 이미 큐에 들어간 글자들의 UV 는 지금
+        // 아틀라스 내용을 가리키는데, 비우지 않고 덮어쓰면 그 글자들이
+        // 새로 구운 다른 글자의 그림으로 그려진다.
+        glb_flush();
+        s_cache.clear();
+        s_pen_x = s_pen_y = s_row_h = 0;
     }
 
     gl_BindTexture(GL_TEXTURE_2D, s_atlas);
@@ -119,38 +153,61 @@ static bool pack_glyph(const uint8_t* bitmap, int w, int h, Glyph& out)
     gl_TexSubImage2D(GL_TEXTURE_2D, 0, s_pen_x, s_pen_y, w, h,
                      GL_RED, GL_UNSIGNED_BYTE, bitmap);
 
-    out.u0 = (float)s_pen_x / (float)kAtlasDim;
-    out.v0 = (float)s_pen_y / (float)kAtlasDim;
-    out.u1 = (float)(s_pen_x + w) / (float)kAtlasDim;
-    out.v1 = (float)(s_pen_y + h) / (float)kAtlasDim;
+    out.u0 = (float)s_pen_x / (float)s_atlas_dim;
+    out.v0 = (float)s_pen_y / (float)s_atlas_dim;
+    out.u1 = (float)(s_pen_x + w) / (float)s_atlas_dim;
+    out.v1 = (float)(s_pen_y + h) / (float)s_atlas_dim;
 
     s_pen_x += w + 1;                     // 1픽셀 간격 — 샘플링 번짐 방지
     s_row_h = std::max(s_row_h, h);
     return true;
 }
 
-static const Glyph& glyph_for(uint32_t cp, int px)
+static Glyph glyph_for(uint32_t cp, int px)
 {
     px = px < 1 ? 1 : px;
-    const uint64_t key = (uint64_t(cp) << 32) | uint32_t(px);
+
+    // 실제로 구울 크기. 논리 크기 × 화면 배율을 1/8 단위로 반올림한다.
+    const float scale_q = std::max(
+        1.0f, std::round(glb_render_scale() * kScaleQuantum) / kScaleQuantum);
+    const int dev_px = std::max(1, (int)std::lround((float)px * scale_q));
+
+    // 캐시 키에 굽는 크기까지 넣는다. 같은 22px 글자라도 창 배율이 다르면
+    // 다른 비트맵이므로 따로 보관해야 한다.
+    const uint64_t key = (uint64_t(cp) << 32) |
+                         (uint64_t(uint16_t(px)) << 16) | uint16_t(dev_px);
     auto found = s_cache.find(key);
     if (found != s_cache.end()) return found->second;
 
     ensure_atlas();
 
     Glyph glyph;
-    const float scale = stbtt_ScaleForPixelHeight(&s_font, (float)px);
+
+    // 배치용 메트릭은 **논리 크기 기준**으로 낸다. 창을 늘렸다고 글자 간격이
+    // 달라지면 버튼 안의 텍스트가 넘치는 식으로 레이아웃이 흔들린다.
+    const float layout_scale = stbtt_ScaleForPixelHeight(&s_font, (float)px);
     int advance = 0;
     int left_bearing = 0;
     stbtt_GetCodepointHMetrics(&s_font, (int)cp, &advance, &left_bearing);
-    glyph.advance = (float)advance * scale;
+    glyph.advance = (float)advance * layout_scale;
 
+    // 비트맵만 확대된 크기로 굽는다.
+    const float bake_scale = stbtt_ScaleForPixelHeight(&s_font, (float)dev_px);
+    int bx = 0, by = 0;
     unsigned char* bitmap = stbtt_GetCodepointBitmap(
-        &s_font, scale, scale, (int)cp,
-        &glyph.w, &glyph.h, &glyph.xoff, &glyph.yoff);
-    if (bitmap && glyph.w > 0 && glyph.h > 0) {
-        if (!pack_glyph(bitmap, glyph.w, glyph.h, glyph)) {
-            glyph.w = glyph.h = 0;        // 자리 없음 — 그리지 않는다
+        &s_font, bake_scale, bake_scale, (int)cp,
+        &glyph.bw, &glyph.bh, &bx, &by);
+
+    // 화면 픽셀 단위로 나온 크기/오프셋을 논리 단위로 되돌린다.
+    const float inv = (float)px / (float)dev_px;
+    glyph.w    = (float)glyph.bw * inv;
+    glyph.h    = (float)glyph.bh * inv;
+    glyph.xoff = (float)bx * inv;
+    glyph.yoff = (float)by * inv;
+
+    if (bitmap && glyph.bw > 0 && glyph.bh > 0) {
+        if (!pack_glyph(bitmap, glyph.bw, glyph.bh, glyph)) {
+            glyph.bw = glyph.bh = 0;      // 자리 없음 — 그리지 않는다
         }
     }
     if (bitmap) stbtt_FreeBitmap(bitmap, nullptr);
@@ -248,12 +305,14 @@ void draw_text(const char* text, int x, int y, int size, Color color)
             pen_x += stbtt_GetCodepointKernAdvance(
                 &s_font, (int)previous, (int)cp) * scale;
 
-        const Glyph& glyph = glyph_for(cp, px);
-        if (glyph.w > 0 && glyph.h > 0) {
-            const float gx = std::floor(pen_x + (float)glyph.xoff);
-            const float gy = std::floor(baseline + (float)glyph.yoff);
+        const Glyph glyph = glyph_for(cp, px);
+        if (glyph.bw > 0 && glyph.bh > 0) {
+            // 위치는 논리 좌표 그대로. 정수로 내리지 않는다 — 확대된 비트맵을
+            // 논리 격자에 맞춰 반올림하면 배율만큼 어긋나 글자 간격이 튄다.
+            const float gx = pen_x + glyph.xoff;
+            const float gy = baseline + glyph.yoff;
             // channel = 1 — 셰이더가 R8 의 r 을 알파로 읽고 color 를 곱한다.
-            glb_rect(s_atlas, gx, gy, (float)glyph.w, (float)glyph.h,
+            glb_rect(s_atlas, gx, gy, glyph.w, glyph.h,
                      glyph.u0, glyph.v0, glyph.u1, glyph.v1,
                      color, 0.0f, 1.0f);
         }

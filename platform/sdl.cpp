@@ -343,6 +343,26 @@ void platform_set_window_size(int width, int height)
     recompute_viewport();
 }
 
+void platform_display_size(int& w_out, int& h_out)
+{
+    w_out = h_out = 0;
+    const int display = s_window ? SDL_GetWindowDisplayIndex(s_window) : 0;
+    SDL_Rect bounds{};
+    // usable bounds 는 작업 표시줄/독을 제외한 영역이다. 이걸 지원하지 않는
+    // 플랫폼도 있어 실패하면 데스크톱 모드 전체 크기로 물러난다.
+    if (display >= 0 && SDL_GetDisplayUsableBounds(display, &bounds) == 0 &&
+        bounds.w > 0 && bounds.h > 0) {
+        w_out = bounds.w;
+        h_out = bounds.h;
+        return;
+    }
+    SDL_DisplayMode mode{};
+    if (SDL_GetDesktopDisplayMode(display < 0 ? 0 : display, &mode) == 0) {
+        w_out = mode.w;
+        h_out = mode.h;
+    }
+}
+
 void platform_set_fullscreen(bool on)
 {
     if (!s_window) return;

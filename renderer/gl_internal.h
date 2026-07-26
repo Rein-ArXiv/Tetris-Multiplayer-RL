@@ -35,5 +35,13 @@ GLuint glb_white_texture();
 int glb_screen_width();
 int glb_screen_height();
 
+// 논리 픽셀 하나가 실제 화면에서 몇 픽셀인가. 뷰포트 높이 / 논리 높이.
+//
+// 도형은 이 값과 무관하게 선명하다 — 정점 좌표가 실수라 GPU 가 뷰포트
+// 해상도 그대로 래스터화한다. 문제는 글자다. 글리프는 CPU 에서 특정 픽셀
+// 크기로 한 번 구워지므로, 논리 크기로 구워 놓고 4K 로 늘리면 그 배율만큼
+// 흐려진다. text_gl.cpp 가 이 값을 곱해 실제 표시 크기로 굽는다.
+float glb_render_scale();
+
 // 폰트 서브시스템 정리 (text_gl.cpp 가 구현).
 void renderer_text_shutdown();

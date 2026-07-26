@@ -122,6 +122,11 @@ double platform_get_time();
 // 마우스 좌표는 항상 논리 좌표로 역매핑된다 (아래 platform_mouse_x/y 참고).
 void   platform_set_window_size(int w, int h);
 
+// 창을 놓을 수 있는 화면 영역(픽셀). 작업 표시줄 등을 뺀 크기다.
+// 설정 화면이 모니터보다 큰 창 프리셋을 감추는 데 쓴다 — 2430x2160 을
+// 1920x1080 모니터에서 고르면 창의 절반이 화면 밖으로 나간다.
+void   platform_display_size(int& w_out, int& h_out);
+
 // 전체화면 토글. on=true 면 데스크톱-해상도 전체화면(FULLSCREEN_DESKTOP),
 // off 면 창 모드로 복귀. 전체화면에서 모니터 종횡비가 논리(9:8) 와 다르면
 // 9:8 을 유지하는 레터박스 뷰포트로 그려 왜곡을 막는다.

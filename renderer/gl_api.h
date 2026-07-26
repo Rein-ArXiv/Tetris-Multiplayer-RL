@@ -56,6 +56,7 @@ using GLsizeiptr = std::ptrdiff_t;
 #define GL_LINK_STATUS                    0x8B82
 #define GL_INFO_LOG_LENGTH                0x8B84
 #define GL_SCISSOR_TEST                   0x0C11
+#define GL_MAX_TEXTURE_SIZE               0x0D33
 #define GL_VERSION                        0x1F02
 #define GL_RENDERER                       0x1F01
 #define GL_NO_ERROR                       0
@@ -74,6 +75,7 @@ using GLsizeiptr = std::ptrdiff_t;
     X(void,   DrawArrays,             (GLenum, GLint, GLsizei))                \
     X(GLenum, GetError,               (void))                                  \
     X(const unsigned char*, GetString,(GLenum))                                \
+    X(void,   GetIntegerv,            (GLenum, GLint*))                         \
     X(void,   PixelStorei,            (GLenum, GLint))                         \
     X(GLuint, CreateShader,           (GLenum))                                \
     X(void,   ShaderSource,           (GLuint, GLsizei, const GLchar* const*, const GLint*)) \

@@ -1673,7 +1673,12 @@ int main(int argc, char** argv)
                     app = AppMode::Settings;
                     settingsIndex = 0;
                 } else {
-                    platform_shutdown(); return 0;
+                    // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
+                    // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
+                    // renderer_shutdown 이 platform_shutdown 보다 먼저다.
+                    renderer_shutdown();
+                    platform_shutdown();
+                    return 0;
                 }
             }
         }

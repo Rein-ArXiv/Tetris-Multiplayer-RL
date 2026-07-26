@@ -1139,7 +1139,7 @@ sequenceDiagram
 
 ### 5.3 시뮬레이션 진행
 
-**현재 소스 발췌 — `src/main.cpp:1291-1307`** (Net 모드 틱 루프 내부)
+**현재 소스 발췌 — `src/main.cpp:1318-1334`** (Net 모드 틱 루프 내부)
 
 ```cpp
                     int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
@@ -1504,7 +1504,7 @@ void Session::SendHash(uint32_t tick, uint64_t hash) {
 
 ### 7.2 주기와 링 크기의 근거
 
-**현재 소스 발췌 — `src/main.cpp:1062-1072`**
+**현재 소스 발췌 — `src/main.cpp:1089-1099`**
 
 ```cpp
     // F.2 — 자동 HASH 검증. 매 600틱(~10s) 로컬 해시를 SendHash 하고 링으로
@@ -1558,7 +1558,7 @@ lockstep 에서 DESYNC 를 복구하는 방법은 원리적으로 두 가지뿐�
 
 멀티플레이에서는 게임 오버 후 양쪽이 "재시작" 과 "타이틀로" 중 하나를 고르고, 그 선택을 `GAME_OVER_CHOICE` 프레임으로 교환한다.
 
-**현재 소스 발췌 — `src/main.cpp:632-641`**
+**현재 소스 발췌 — `src/main.cpp:653-662`**
 
 ```cpp
 enum class GameOverState {
@@ -1596,7 +1596,7 @@ stateDiagram-v2
     GoingToTitle --> None: session.Close(), 메뉴 복귀
 ```
 
-타임아웃 상수는 `src/main.cpp:1047-1048` 의 `GAME_OVER_TIMEOUT = 30.0f`, `DISAGREEMENT_COUNTDOWN = 3.0f` 이고, `WaitingForNewSeed` 의 10초는 `src/main.cpp:2816` 에 리터럴로 있다.
+타임아웃 상수는 `src/main.cpp:1074-1075` 의 `GAME_OVER_TIMEOUT = 30.0f`, `DISAGREEMENT_COUNTDOWN = 3.0f` 이고, `WaitingForNewSeed` 의 10초는 `src/main.cpp:2850` 에 리터럴로 있다.
 
 ### 8.2 의견 불일치 처리
 
@@ -1627,7 +1627,7 @@ void Session::SendNewSeed(uint64_t newSeed) {
 
 Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다가 값이 바뀌면 `RestartingGame` 으로 넘어간다. SEED 프레임을 직접 감시하는 대신 세션 상태의 변화를 보는 구조라, `handleFrame` 에 콜백을 추가할 필요가 없다.
 
-여기서 한 가지 함정이 있었다. Host 쪽 `SendingNewSeed` 상태는 원래 1.5초를 고정 대기했는데, 그 시차만큼 Host 의 카운트다운이 Guest 보다 늦게 시작돼 재시작 라운드 내내 lockstep 이 한쪽 입력에 묶여 영구 렉이 났다. 지금은 "시드 전송 → 즉시 시작" 으로 양쪽 시차를 RTT 수준으로 줄인다(`src/main.cpp:2794-2800` 주석 참조). `ClearInputs()` 가 SEED 프레임을 **보존**하는 것이 이 즉시 전환의 전제 조건이다 — 자세한 이유는 "라운드 경계에서 지킬 것" 절에서 다룬다.
+여기서 한 가지 함정이 있었다. Host 쪽 `SendingNewSeed` 상태는 원래 1.5초를 고정 대기했는데, 그 시차만큼 Host 의 카운트다운이 Guest 보다 늦게 시작돼 재시작 라운드 내내 lockstep 이 한쪽 입력에 묶여 영구 렉이 났다. 지금은 "시드 전송 → 즉시 시작" 으로 양쪽 시차를 RTT 수준으로 줄인다(`src/main.cpp:2828-2834` 주석 참조). `ClearInputs()` 가 SEED 프레임을 **보존**하는 것이 이 즉시 전환의 전제 조건이다 — 자세한 이유는 "라운드 경계에서 지킬 것" 절에서 다룬다.
 
 ---
 
@@ -1859,7 +1859,7 @@ LinkStatus Session::linkStatus() const {
 
 `Lost` 는 좀 더 적극적이다. 처음 `Lost` 를 본 순간부터 main.cpp 가 10초짜리 별도 카운트다운을 돌리고, 그 사이에 `Stalled` 나 `OK` 로 회복하면 취소한다. 창 드래그가 10초를 넘기는 일은 거의 없으므로, 이 이중 grace 구조로 "창 드래그" 와 "진짜 단절" 이 자연스럽게 분리된다.
 
-**현재 소스 발췌 — `src/main.cpp:1430-1463`**
+**현재 소스 발췌 — `src/main.cpp:1457-1490`**
 
 ```cpp
         // Section A — 링크 Lost 감지 + grace 카운트다운.
@@ -1898,7 +1898,7 @@ LinkStatus Session::linkStatus() const {
         }
 ```
 
-조건이 `app == AppMode::Net` 만이 아니라 **`&& gameLocal && gameRemote`** 라는 점이 중요하다. 릴레이 접속 실패나 매치메이킹 타임아웃도 `linkStatus()` 를 `Lost` 로 만드는데(`connectionFailed` 경로), 그때는 게임 객체가 아직 없다. 가드가 없으면 "매치 상대를 찾는 중" 화면에 "상대가 연결을 끊었습니다 — 10초 후 타이틀로" 가 뜬다. 실제로는 상대가 있던 적이 없다. `LINK_LOST_GRACE` 는 `src/main.cpp:1055` 의 `10.0f` 다.
+조건이 `app == AppMode::Net` 만이 아니라 **`&& gameLocal && gameRemote`** 라는 점이 중요하다. 릴레이 접속 실패나 매치메이킹 타임아웃도 `linkStatus()` 를 `Lost` 로 만드는데(`connectionFailed` 경로), 그때는 게임 객체가 아직 없다. 가드가 없으면 "매치 상대를 찾는 중" 화면에 "상대가 연결을 끊었습니다 — 10초 후 타이틀로" 가 뜬다. 실제로는 상대가 있던 적이 없다. `LINK_LOST_GRACE` 는 `src/main.cpp:1082` 의 `10.0f` 다.
 
 ### 11.6 메인 스레드 스톨 자동 heartbeat (창 드래그 대응)
 
@@ -1949,7 +1949,7 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 **메인이 깨어난 뒤 catch-up**:
 
-**현재 소스 발췌 — `src/main.cpp:1230-1246`** (Net 모드 틱 루프, `SendInput` 직전)
+**현재 소스 발췌 — `src/main.cpp:1257-1273`** (Net 모드 틱 루프, `SendInput` 직전)
 
 ```cpp
                     // 창 드래그 등으로 메인 스레드가 멈춘 동안 ioThread 가 자동으로
@@ -2484,7 +2484,7 @@ sequenceDiagram
 
 수정 후의 현재 코드는 조건이 네 개다.
 
-**현재 소스 발췌 — `src/main.cpp:1211-1247`**
+**현재 소스 발췌 — `src/main.cpp:1238-1274`**
 
 ```cpp
             if (app == AppMode::Net && session.isConnected())
@@ -2911,7 +2911,7 @@ XOR 은 교환법칙과 결합법칙이 성립하므로:
 
 ### 17.3 수정 코드
 
-**현재 소스 발췌 — `src/main.cpp:1327-1342`** (틱 루프 내부, `simTick++` 직후)
+**현재 소스 발췌 — `src/main.cpp:1354-1369`** (틱 루프 내부, `simTick++` 직후)
 
 ```cpp
                             // F.2: 600틱마다 양쪽 경기판 해시를 결합해 송신 + 링 기록.
@@ -2956,7 +2956,7 @@ XOR 은 교환법칙과 결합법칙이 성립하므로:
 
 게임 객체가 생성되는 직후에 다음을 찍는다.
 
-**현재 소스 발췌 — `src/main.cpp:1270-1278`** (`gameLocal`/`gameRemote` 생성 직후)
+**현재 소스 발췌 — `src/main.cpp:1297-1305`** (`gameLocal`/`gameRemote` 생성 직후)
 
 ```cpp
                     // DESYNC 디버깅: 양쪽 창 로그를 비교해 초기 seed + 초기 hash 가
@@ -2980,7 +2980,7 @@ DESYNC 를 디버깅할 때 체크리스트:
 
 ### 18.2 DESYNC breakdown — 어느 필드가 깨졌나
 
-**현재 소스 발췌 — `src/main.cpp:1465-1499`**
+**현재 소스 발췌 — `src/main.cpp:1492-1526`**
 
 ```cpp
         // F.2 — 원격 HASH 수신 감지 + 링 비교. 같은 틱의 로컬 해시가 링에
@@ -3169,7 +3169,7 @@ Lockstep 관점에서 이건 §11 의 `Stalled` 상태에 해당한다. 상대 �
 | 2 | 환경변수 `TETRIS_RELAY_ENDPOINT` | `TETRIS_RELAY_ENDPOINT=1.2.3.4:7777 ./tetris` | 실행 시 |
 | 3 (가장 높음) | CLI 플래그 `--relay host[:port]` | `./tetris --relay 1.2.3.4:7777` | 실행 시 |
 
-**현재 소스 발췌 — `src/main.cpp:740-758`**
+**현재 소스 발췌 — `src/main.cpp:767-785`**
 
 ```cpp
     // 메뉴에서 Matchmaking/Custom Room 을 고를 때 사용할 릴레이 주소.
@@ -3197,7 +3197,7 @@ Lockstep 관점에서 이건 §11 의 `Stalled` 상태에 해당한다. 상대 �
 
 CLI 플래그는 argv 파서에서 마지막에 덮어쓴다.
 
-**현재 소스 발췌 — `src/main.cpp:801-812`**
+**현재 소스 발췌 — `src/main.cpp:828-839`**
 
 ```cpp
         } else if (a == "--relay") {
@@ -3216,7 +3216,7 @@ CLI 플래그는 argv 파서에서 마지막에 덮어쓴다.
 
 메뉴에서 Matchmaking 이나 Custom Room 을 선택하면 **즉시** `relayHost:relayPort` 로 `QueueJoin` / 룸 로비가 호출된다. 중간에 "IP 입력" 화면은 없다.
 
-`parse_endpoint`(`src/main.cpp:562`)는 `host:port`, `host`(기본 포트), IPv6 브래킷 표기(`[::1]:7777`)를 모두 파싱하는 공용 헬퍼다. 포트가 1..65535 범위인지, host 가 비어 있지 않은지 검증하고, `std::from_chars` 를 써서 예외 없이 동작한다.
+`parse_endpoint`(`src/main.cpp:583`)는 `host:port`, `host`(기본 포트), IPv6 브래킷 표기(`[::1]:7777`)를 모두 파싱하는 공용 헬퍼다. 포트가 1..65535 범위인지, host 가 비어 있지 않은지 검증하고, `std::from_chars` 를 써서 예외 없이 동작한다.
 
 ### 20.3 메뉴 전이
 
@@ -3582,9 +3582,10 @@ set(TETRIS_GAME_COMMON
     net/framing.cpp       # Part 6 신규
     net/session.cpp       # Part 6 신규
     renderer/renderer.cpp
-    renderer/text_software.cpp
+    renderer/gl_api.cpp
+    renderer/text_gl.cpp
     renderer/shake.cpp
-    renderer/image.cpp
+    renderer/image_gl.cpp
 )
 
 set(TETRIS_GAME_HEADERS
@@ -3597,7 +3598,9 @@ set(TETRIS_GAME_HEADERS
     net/session.h         # Part 6 신규
     platform/platform.h
     renderer/renderer.h
-    renderer/software_internal.h
+    renderer/gl_api.h
+    renderer/gl_internal.h
+    renderer/gl_shaders.h
     renderer/shake.h
     renderer/image.h
     audio/audio.h
@@ -3620,6 +3623,8 @@ if (TETRIS_USE_SDL2)
     else()
         target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
     endif()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(tetris PRIVATE OpenGL::GL)
     if (WIN32)
         target_link_libraries(tetris PRIVATE gdiplus ws2_32)   # Part 6: ws2_32
     elseif (NOT APPLE)
@@ -3637,7 +3642,7 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     if (WIN32)
-        target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
+        target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
     else()
         message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
     endif()
@@ -3714,7 +3719,7 @@ endif()
 
 Lockstep 을 만들다 보면 "같은 시드에서 정말로 같은 결과가 나오는가" 를 끊임없이 확인해야 한다. 이를 위한 세 단축키를 `src/main.cpp` 의 메인 루프 뒤쪽에 달아 두었다. 네트워크 계층을 건드리지 않고, 순수 키보드 핸들러 수준의 툴링이다.
 
-**현재 소스 발췌 — `src/main.cpp:2429-2449`**
+**현재 소스 발췌 — `src/main.cpp:2463-2483`**
 
 ```cpp
         // F5/F6 리플레이

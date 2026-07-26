@@ -105,7 +105,7 @@ WAL(Write-Ahead Logging) 은 이 구조에서 특히 잘 맞는다. 기본 rollb
 
 먼저 `tetris_meta` 타깃이다.
 
-**현재 소스 발췌 — `CMakeLists.txt:376-443`**
+**현재 소스 발췌 — `CMakeLists.txt:384-451`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -198,7 +198,7 @@ project(tetris CXX C)
 
 두 번째로, 게임 클라이언트가 `meta/http_client.cpp` 를 링크하게 된다. Part 4 에서 만든 `TETRIS_GAME_COMMON` 목록에 한 줄이 늘고, httplib 존재 검사가 앞에 붙는다.
 
-**현재 소스 발췌 — `CMakeLists.txt:85-114`**
+**현재 소스 발췌 — `CMakeLists.txt:85-115`**
 
 ```cmake
 if (TETRIS_BUILD_GAME)
@@ -224,18 +224,19 @@ if (TETRIS_BUILD_GAME)
         net/framing.cpp
         net/session.cpp
         renderer/renderer.cpp
-        renderer/text_software.cpp
+        renderer/gl_api.cpp
+        renderer/text_gl.cpp
         renderer/shake.cpp
-        renderer/image.cpp
+        renderer/image_gl.cpp
         bot/placement.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
     )
 ```
 
-relay 도 같은 파일을 링크한다(`CMakeLists.txt:342`). 즉 `meta/http_client.cpp` 는 **세 타깃 중 두 개**(`tetris`, `tetris_relay`)에 들어가고, `tetris_meta` 자신은 서버 측이라 링크하지 않는다.
+relay 도 같은 파일을 링크한다(`CMakeLists.txt:350`). 즉 `meta/http_client.cpp` 는 **세 타깃 중 두 개**(`tetris`, `tetris_relay`)에 들어가고, `tetris_meta` 자신은 서버 측이라 링크하지 않는다.
 
-HTTPS 는 선택 기능이다. `TETRIS_ENABLE_HTTPS` 가 켜져 있고 OpenSSL 이 발견되면 `CPPHTTPLIB_OPENSSL_SUPPORT` 를 정의하고 링크한다(`CMakeLists.txt:191-194`, `364-367`). 없으면 `https://` URL 은 런타임에 거부된다 — 조용히 평문으로 떨어지지 않는다. 이 게이팅은 뒤의 `MetaClient` 생성자에서 다시 본다.
+HTTPS 는 선택 기능이다. `TETRIS_ENABLE_HTTPS` 가 켜져 있고 OpenSSL 이 발견되면 `CPPHTTPLIB_OPENSSL_SUPPORT` 를 정의하고 링크한다(`CMakeLists.txt:199-202`, `372-375`). 없으면 `https://` URL 은 런타임에 거부된다 — 조용히 평문으로 떨어지지 않는다. 이 게이팅은 뒤의 `MetaClient` 생성자에서 다시 본다.
 
 이 시점의 CMake 확장은 최종 저장소와 동일하다. 이후 Part 는 이 블록을 바꾸지 않는다.
 
@@ -2417,7 +2418,7 @@ Windows 경로는 `std::filesystem::permissions` 로 사후에 권한을 좁힌�
 
 이제 `src/main.cpp` 쪽이다. 게임이 뜰 때 meta 를 어떻게 붙이는가.
 
-**현재 소스 발췌 — `src/main.cpp:822-888`**
+**현재 소스 발췌 — `src/main.cpp:849-915`**
 
 ```cpp
     // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
@@ -2516,7 +2517,7 @@ stateDiagram-v2
 
 meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 캐시 변수 `TETRIS_DEFAULT_META_URL`(컴파일 시 `#define` 으로 박힌다), 환경변수 `TETRIS_META_URL`, 커맨드라인 `--meta URL` 순이다.
 
-**현재 소스 발췌 — `src/main.cpp:760-763`**
+**현재 소스 발췌 — `src/main.cpp:787-790`**
 
 ```cpp
     // tetris_meta 베이스 URL (guest 토큰 + RP/XP/BP). `--meta http(s)://host[:port]`.
@@ -2535,7 +2536,7 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
 
 랭크 매치가 끝나고 메뉴로 돌아오면 한 번 더 갱신한다. `MATCH_RESULT` wire 프레임에는 `elo_before/after/delta` 세 값만 있고 BP/XP 가 없기 때문이다.
 
-**현재 소스 발췌 — `src/main.cpp:1517-1534`**
+**현재 소스 발췌 — `src/main.cpp:1544-1561`**
 
 ```cpp
             // 랭크 매치 직후 1회 메타 갱신 — bp/xp/level 을 권위 있는 값으로.
@@ -2564,7 +2565,7 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
 
 아이콘 상점은 이 장이 클라이언트에 추가하는 새 화면이다. 그리고 이 화면 때문에 **메인 메뉴 항목이 6 개에서 7 개로 늘어난다.**
 
-**현재 소스 발췌 — `src/main.cpp:1544-1554`**
+**현재 소스 발췌 — `src/main.cpp:1571-1581`**
 
 ```cpp
             constexpr Color DISABLED = {70, 70, 70, 255};
@@ -2590,9 +2591,9 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
 | 3 | Custom Room Multi | `AppMode::RoomLobby` |
 | **4** | **Customize** | `AppMode::Customize` — **이 장이 추가** |
 | **5** | **Settings** | `AppMode::Settings` — [Part 11](./part11-settings-and-options.md) |
-| 6 | Quit | `platform_shutdown(); return 0;` |
+| 6 | Quit | `renderer_shutdown(); platform_shutdown(); return 0;` |
 
-**현재 소스 발췌 — `src/main.cpp:1639-1650`**
+**현재 소스 발췌 — `src/main.cpp:1666-1682`**
 
 ```cpp
                 } else if (activated == 4) {
@@ -2605,19 +2606,24 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
                     app = AppMode::Settings;
                     settingsIndex = 0;
                 } else {
-                    platform_shutdown(); return 0;
+                    // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
+                    // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
+                    // renderer_shutdown 이 platform_shutdown 보다 먼저다.
+                    renderer_shutdown();
+                    platform_shutdown();
+                    return 0;
                 }
 ```
 
 이 인덱스 이동은 [Part 11](./part11-settings-and-options.md) 이 그대로 이어받는다. Settings 는 `activated == 5` 이지 4 가 아니다. 이 장에서 Customize 를 넣지 않는다면 Part 11 의 인덱스는 하나씩 앞으로 당겨져야 한다.
 
-버튼 레이아웃도 7 개에 맞춰 조정된다 — 높이 42, 간격 8 로 압축해야 y=540 의 랭킹 표시줄 위에 들어간다(`src/main.cpp:1556-1562`).
+버튼 레이아웃도 7 개에 맞춰 조정된다 — 높이 42, 간격 8 로 압축해야 y=540 의 랭킹 표시줄 위에 들어간다(`src/main.cpp:1583-1589`).
 
 ### 15.1 2 단계 구매 흐름 — 상태 코드가 상태 기계다
 
 이 화면의 설계에서 가장 흥미로운 부분은 **"소유 목록" 엔드포인트가 없다**는 것이다. `GET /v1/icons/owned` 같은 API 를 만들지 않았다. 대신 클라이언트는 조작의 **결과 상태 코드**로 소유 여부를 배운다.
 
-**현재 소스 발췌 — `src/main.cpp:1935-1940`**
+**현재 소스 발췌 — `src/main.cpp:1969-1974`**
 
 ```cpp
         // ── Customize(아이콘 상점) 화면 ──────────────────────────────────────
@@ -2661,7 +2667,7 @@ sequenceDiagram
 
 `launch_buy` 가 409 를 성공으로 취급한다는 점이 눈에 띈다.
 
-**현재 소스 발췌 — `src/main.cpp:1989-2007`**
+**현재 소스 발췌 — `src/main.cpp:2023-2041`**
 
 ```cpp
             auto launch_buy = [&](const meta::client::IconEntry& e) {
@@ -2689,7 +2695,7 @@ sequenceDiagram
 
 결과 반영은 `activated` 분기에서 이뤄진다.
 
-**현재 소스 발췌 — `src/main.cpp:2152-2163`**
+**현재 소스 발췌 — `src/main.cpp:2186-2197`**
 
 ```cpp
                 if (activated >= 0 && !shopBusy) {
@@ -2706,7 +2712,7 @@ sequenceDiagram
                 }
 ```
 
-`shopConfirmId` 문자열 하나가 "구매 확인 대기" 상태를 담는다. 커서를 좌우로 옮기면 이 값이 지워져(`src/main.cpp:2142-2147`) 다른 아이콘을 실수로 사는 일이 없다.
+`shopConfirmId` 문자열 하나가 "구매 확인 대기" 상태를 담는다. 커서를 좌우로 옮기면 이 값이 지워져(`src/main.cpp:2176-2181`) 다른 아이콘을 실수로 사는 일이 없다.
 
 이 설계가 주는 것은 **서버가 단일 진실 원천**이라는 성질이다. 클라이언트의 `shopOwned` 집합은 캐시일 뿐이고, 틀려도 서버가 바로잡는다. 소유 목록 API 를 만들었다면 그것과 실제 소유의 동기화를 걱정해야 했을 것이다.
 
@@ -2817,7 +2823,7 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
 
 클라이언트가 이 프레임을 만드는 곳은 게임오버 판정 직후다.
 
-**현재 소스 발췌 — `src/main.cpp:2665-2682`**
+**현재 소스 발췌 — `src/main.cpp:2699-2716`**
 
 ```cpp
                 // Section K — MATCH_SUMMARY 송신 (ranked + meta 연동 시에만 의미 있음).

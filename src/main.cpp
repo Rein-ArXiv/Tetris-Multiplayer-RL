@@ -223,7 +223,7 @@ struct GameSettings {
     int  sfxVol  = 100;   // SFX 볼륨 0~100 (0 == 음소거)
     bool shakeOn = true;  // 마스터 화면 흔들림 (가비지/게임오버 + 하드드롭)
     bool hardDropShakeOn = true;  // 하드드롭 시 약한 흔들림 (shakeOn 의 하위)
-    int  windowScale = 0; // 창 스케일 프리셋 0/1/2 → 720x640 / 1080x960 / 1440x1280
+    int  windowScale = 0; // 창 크기 프리셋 인덱스 0~4 (아래 kWindowScale* 참고)
     bool fullscreen  = false;
     bool vsyncOn     = true;
     bool ghostOn     = true;  // 고스트 피스 표시

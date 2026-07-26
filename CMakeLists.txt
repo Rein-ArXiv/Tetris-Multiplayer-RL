@@ -14,8 +14,8 @@ endif()
 # -----------------------------------------------------------------------------
 # Build options
 #
-#   TETRIS_BUILD_GAME  — Game executable. CPU software renderer with a thin
-#                         Win32 or SDL2 presentation backend.
+#   TETRIS_BUILD_GAME  — Game executable. OpenGL 3.3 Core renderer with a thin
+#                         Win32 or SDL2 window/context backend.
 #   TETRIS_BUILD_PY    — pybind11 module (tetris_py) wrapping SimGame. Portable.
 #   TETRIS_BUILD_TEST  — SimGame determinism regression (sim_hash_dump). Portable.
 #   TETRIS_BUILD_RELAY — Headless matchmaking/relay server (server/*.cpp).
@@ -80,7 +80,7 @@ set(TETRIS_SIM_HEADERS
 )
 
 # -----------------------------------------------------------------------------
-# Target: tetris (handmade CPU software-rendered game)
+# Target: tetris (handmade OpenGL 3.3 Core game client)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_GAME)
     # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇

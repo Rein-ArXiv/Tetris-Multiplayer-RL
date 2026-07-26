@@ -126,15 +126,15 @@ graph LR
 
 **Mastering Voice**: 모든 소스 보이스의 출력을 믹싱해 OS 의 기본 오디오 출력 장치로 보낸다. 애플리케이션당 보통 하나.
 
-이 구조는 [Part 3](./part3-rendering-and-ui.md) 의 소프트웨어 렌더링 파이프라인과 정확히 같은 3 단이다.
+이 구조는 [Part 3](./part3-rendering-and-ui.md) 의 렌더 파이프라인과 정확히 같은 3 단이다.
 
-| 소프트웨어 렌더러 (Part 3) | XAudio2 (Part 5) | 하는 일 |
+| GL 렌더러 (Part 3) | XAudio2 (Part 5) | 하는 일 |
 |---|---|---|
-| `blend_surface` — 개별 도형을 합성 | Source Voice — 개별 소리를 제출 | 소스 하나를 공용 버퍼에 얹는다 |
-| `s_pixels` — `uint32_t` 합성 버퍼 | Mastering Voice — 믹스 버스 | 여러 소스가 한 버퍼에 누적된다 |
-| `platform_present` — 창에 전송 | Mastering Voice → 기본 장치 | 합쳐진 결과를 장치로 내보낸다 |
+| `glb_rect` — 개별 도형을 정점으로 제출 | Source Voice — 개별 소리를 제출 | 소스 하나를 공용 버퍼에 얹는다 |
+| `s_verts` — 정점 배치 버퍼 | Mastering Voice — 믹스 버스 | 여러 소스가 한 버퍼에 누적된다 |
+| `glb_flush` + `platform_present` — draw call 과 버퍼 스왑 | Mastering Voice → 기본 장치 | 합쳐진 결과를 장치로 내보낸다 |
 
-렌더러가 "픽셀 하나에 여러 도형을 알파 합성해 쌓고, 끝나면 버퍼 전체를 한 번에 장치로 보낸다" 라면, 오디오는 "샘플 하나에 여러 보이스를 더해 쌓고, 채워지는 대로 장치로 보낸다" 다. 차이는 축이 공간이냐 시간이냐뿐이다. 이 대응은 비유가 아니라 구현 구조 그대로다 — §8 의 SDL 백엔드에서는 `mix_voice`(개별 소스) → `stream` 버퍼(합성) → SDL 드라이버(장치 출력)로 세 단계가 **우리 코드 안에 그대로** 드러난다. XAudio2 는 가운데 두 단계를 라이브러리가 감춰줄 뿐이다.
+렌더러가 "도형마다 정점을 한 버퍼에 쌓아 두고, 다 모이면 통째로 넘겨 한 번에 그린다" 라면, 오디오는 "샘플 하나에 여러 보이스를 더해 쌓고, 채워지는 대로 장치로 보낸다" 다. 차이는 축이 공간이냐 시간이냐뿐이다. 이 대응은 비유가 아니라 구현 구조 그대로다 — §8 의 SDL 백엔드에서는 `mix_voice`(개별 소스) → `stream` 버퍼(합성) → SDL 드라이버(장치 출력)로 세 단계가 **우리 코드 안에 그대로** 드러난다. XAudio2 는 가운데 두 단계를 라이브러리가 감춰줄 뿐이다.
 
 ### 1.2 COM 초기화
 
@@ -235,11 +235,11 @@ bool audio_init()
 
 | 플랫폼 계층 (Part 2/3) | XAudio2 (Part 5) | 공통점 |
 |---|---|---|
-| `platform_init` — 창 생성 + DC 획득 | `XAudio2Create` — 엔진 인스턴스 획득 | OS 서브시스템 핸들을 잡는다 |
-| `renderer_init` — `s_pixels` 프레임버퍼 확보 | `CreateMasteringVoice` — 믹스 버스 확보 | 우리가 채울 출력 버퍼를 만든다 |
-| `platform_present` — 프레임버퍼를 창에 전송 | Mastering Voice → 기본 장치 | 완성된 버퍼를 장치로 밀어낸다 |
+| `platform_init` — 창 생성 + GL 컨텍스트 획득 | `XAudio2Create` — 엔진 인스턴스 획득 | OS 서브시스템 핸들을 잡는다 |
+| `renderer_init` — 셰이더 프로그램과 정점 버퍼 확보 | `CreateMasteringVoice` — 믹스 버스 확보 | 우리가 채울 출력 경로를 만든다 |
+| `platform_present` — 백버퍼를 창에 스왑 | Mastering Voice → 기본 장치 | 완성된 버퍼를 장치로 밀어낸다 |
 
-`platform/platform.h` 의 `platform_init` 주석은 "윈도우와 입력/타이머 백엔드 초기화. 그래픽 API 컨텍스트는 만들지 않는다" 라고 못박는다. 즉 이 프로젝트에서 장치 컨텍스트를 잡는 초기화는 창 쪽과 오디오 쪽 **두 군데뿐**이고, 둘 다 실패해도 프로그램이 죽지 않게 설계된다.
+`platform/platform.h` 의 `platform_init` 주석은 "윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다" 라고 적어 둔다. 즉 이 프로젝트에서 장치 컨텍스트를 잡는 초기화는 창/GL 쪽과 오디오 쪽 **두 군데뿐**이다. 다만 대칭은 여기까지다 — GL 컨텍스트는 없으면 그릴 방법이 아예 없어서 즉시 실패하는 반면, 오디오는 장치를 못 잡아도 무음으로 계속 돈다.
 
 ### 1.4 내부 상태 전부
 
@@ -876,7 +876,7 @@ if (sndDrop == 0) sndDrop = sndRotate;      // 이렇게 하면 안 된다
 
 [Part 6](./part6-lockstep-networking.md) 의 멀티플레이 모드에서는 `Game` 인스턴스가 둘이다. 봇 대전도 마찬가지다.
 
-**현재 소스 발췌 — `src/main.cpp:947-949`**
+**현재 소스 발췌 — `src/main.cpp:974-976`**
 
 ```cpp
     std::unique_ptr<Game> gameSingle;
@@ -1061,7 +1061,7 @@ Game::~Game()
 
 이 2 단 구조의 값어치는 게임 재시작에서 드러난다. 게임 오버 후 R 을 누르면:
 
-**현재 소스 발췌 — `src/main.cpp:2538-2540`**
+**현재 소스 발췌 — `src/main.cpp:2572-2574`**
 
 ```cpp
                 if (platform_key_pressed(PKEY_R)) {
@@ -1136,7 +1136,7 @@ dr_mp3 는 두 가지 사용 방식을 제공한다.
 
 BGM 은 상황이 다르다. 이 프로젝트의 BGM 은 2~4 분 내외로, PCM 으로 풀면 20~40 MB 를 먹는다. 그래도 전체 디코드를 선택했다. 근거:
 
-1. **현대 시스템에서 수십 MB 는 무시 가능한 수준이다.** 이 게임의 프레임버퍼·에셋 전체와 비교해도 압도적으로 크긴 하지만, 절대량이 문제가 되는 규모가 아니다.
+1. **현대 시스템에서 수십 MB 는 무시 가능한 수준이다.** 이 게임이 GPU 에 올리는 텍스처·에셋 전체와 비교해도 압도적으로 크긴 하지만, 절대량이 문제가 되는 규모가 아니다.
 2. **게임 루프가 오디오를 전혀 돌보지 않아도 된다.** `XAUDIO2_LOOP_INFINITE` 덕에 `update()` 가 필요 없다. 이는 [Part 4](./part4-game-wrapper-and-loop.md) 의 결정론 루프와의 분리 유지에 직접 기여한다 — 오디오 스레드와의 동기화를 일체 도입하지 않는다.
 3. **실시간 스레드 오류 가능성이 0 이다.** 스트리밍은 XAudio2 콜백 스레드에서 `drmp3_read_pcm_frames_s16` 를 돌려야 한다. §2.2 에서 본 대로 MP3 디코딩은 프레임마다 CPU 사용량이 균일하지 않고 내부 버퍼 할당을 할 수 있다. 실시간 콜백은 "할당 없음, 디스크 I/O 없음, 가변 CPU 없음" 이 기본 원칙이다(§13.4).
 4. **비트 리저버 때문에 seek 이 비싸다.** 루프 지점으로 되감을 때 스트리밍이라면 앞 프레임 몇 개를 다시 흘려 디코딩해야 한다. 전체 디코드는 `pos = 0` 한 줄이다.
@@ -1302,7 +1302,7 @@ graph LR
     OUT --> DRV["SDL 드라이버 → 스피커"]
 ```
 
-`blend_surface` → `s_pixels` → `platform_present` 와 정확히 같은 모양이다. `mix_voice` 가 개별 소스를 합성하고, `stream` 이 합성 버퍼이며, SDL 드라이버가 장치 출력을 맡는다. 차이는 렌더러가 프레임마다 한 번 `std::fill` 로 버퍼를 지우는 자리에 오디오는 `memset(stream, 0, len)` 이 있다는 것뿐이다.
+`glb_rect` → `s_verts` → `glb_flush` 와 정확히 같은 모양이다. `mix_voice` 가 개별 소스를 합성하고, `stream` 이 합성 버퍼이며, SDL 드라이버가 장치 출력을 맡는다. 차이는 렌더러가 프레임마다 한 번 `gl_Clear` 로 화면을 지우는 자리에 오디오는 `memset(stream, 0, len)` 이 있다는 것뿐이다.
 
 ### 8.3 상태 구조
 
@@ -1414,7 +1414,7 @@ static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
 
 콜백을 한 줄씩 읽으면:
 
-- `memset(stream, 0, len)` — "무음" 으로 초기화. 활성 보이스가 하나도 없으면 무음 출력. 렌더러의 `renderer_begin` 이 배경색으로 프레임버퍼를 채우는 것과 같은 자리다.
+- `memset(stream, 0, len)` — "무음" 으로 초기화. 활성 보이스가 하나도 없으면 무음 출력. 렌더러의 `renderer_begin` 이 배경색으로 화면을 `gl_Clear` 하는 것과 같은 자리다.
 - `std::lock_guard<std::mutex> lk(s_mu)` — 콜백 **전체**가 한 락 안에 있다. 이게 단순한 안전장치가 아니라 정확성의 전제라는 점은 §13.5 에서 설명한다.
 - `mix_voice(s_bgm, ..., s_musicVol)` 뒤에 `mix_voice(s_sfx[i], ..., s_sfxVol)` × 8 — **다섯 번째 인자가 카테고리 게인**이다. BGM 보이스에는 음악 볼륨을, SFX 보이스 여덟 개에는 효과음 볼륨을 준다. 볼륨 분리가 정확히 이 인자 하나로 구현된다.
 
@@ -1839,7 +1839,7 @@ XAudio2 판과 의미가 같고 표현만 다르다. BGM 복원은 보이스 구
 
 설정은 `Game` 이 생기기 훨씬 전, `main()` 초반에 적용된다.
 
-**현재 소스 발췌 — `src/main.cpp:675-685`**
+**현재 소스 발췌 — `src/main.cpp:696-706`**
 
 ```cpp
     // ── 사용자 설정 로드 (렌더/오디오 전용) ───────────────────────────────────
@@ -1946,7 +1946,7 @@ endif()
 
 **non-Windows 는 기본 ON → SDL2 백엔드**, **Windows 는 기본 OFF → Handmade(XAudio2) 백엔드**. §8.1 에서 설명한 판단이 이 여덟 줄로 코드화돼 있다.
 
-옵션 이름의 주석은 "window + audio + text" 라고 적혀 있지만, **텍스트는 실제로 갈리지 않는다.** 텍스트 렌더링은 `renderer/text_software.cpp`(stb_truetype) 하나로 공통이고 두 분기 모두 `TETRIS_GAME_COMMON` 을 통해 그것을 쓴다. 이 옵션이 실제로 가르는 것은 **창/프레젠테이션 계층과 오디오 백엔드 둘뿐**이다.
+옵션 이름의 주석은 "window + audio + text" 라고 적혀 있지만, **텍스트는 실제로 갈리지 않는다.** 텍스트 렌더링은 `renderer/text_gl.cpp`(stb_truetype + 글리프 아틀라스) 하나로 공통이고 두 분기 모두 `TETRIS_GAME_COMMON` 을 통해 그것을 쓴다. 렌더러 전체가 그렇다 — 두 백엔드가 같은 OpenGL 3.3 Core 컨텍스트를 만들어 주므로 `renderer/*.cpp` 는 한 벌이다. 이 옵션이 실제로 가르는 것은 **창/컨텍스트 생성 계층과 오디오 백엔드 둘뿐**이다.
 
 ### 11.2 Part 5 시점의 CMakeLists
 
@@ -1963,9 +1963,10 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
         src/colors.cpp
         core/replay.cpp
         renderer/renderer.cpp
-        renderer/text_software.cpp
+        renderer/gl_api.cpp
+        renderer/text_gl.cpp
         renderer/shake.cpp
-        renderer/image.cpp
+        renderer/image_gl.cpp
     )
 
     set(TETRIS_GAME_HEADERS
@@ -1975,7 +1976,9 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
         core/replay.h
         platform/platform.h
         renderer/renderer.h
-        renderer/software_internal.h
+        renderer/gl_api.h
+        renderer/gl_internal.h
+        renderer/gl_shaders.h
         renderer/shake.h
         renderer/image.h
         audio/audio.h            # Part 5 에서 추가
@@ -1998,6 +2001,8 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
         else()
             target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
         endif()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(tetris PRIVATE OpenGL::GL)
         if (WIN32)
             target_link_libraries(tetris PRIVATE gdiplus ws2_32)
         elseif (NOT APPLE)
@@ -2015,7 +2020,7 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
             ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
         if (WIN32)
-            target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
+            target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()
@@ -2028,7 +2033,7 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
 
 완성된 저장소의 해당 구간은 다음과 같다. 위 체크포인트와의 차이는 `TETRIS_GAME_COMMON`/`TETRIS_GAME_HEADERS` 의 내용뿐이고, 분기 구조는 동일하다.
 
-**현재 소스 발췌 — `CMakeLists.txt:134-179`**
+**현재 소스 발췌 — `CMakeLists.txt:137-187`**
 
 ```cmake
     if (TETRIS_USE_SDL2)
@@ -2053,6 +2058,11 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
             target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
         endif()
 
+        # OpenGL 3.3 Core 렌더러. 함수 포인터는 런타임에 받지만 컨텍스트를
+        # 만드는 진입점(SDL 경유)과 GL 1.1 심볼 때문에 GL 라이브러리는 링크한다.
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(tetris PRIVATE OpenGL::GL)
+
         if (WIN32)
             target_link_libraries(tetris PRIVATE gdiplus ws2_32)
         elseif (NOT APPLE)
@@ -2072,7 +2082,7 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
         if (WIN32)
-            target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
+            target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()
@@ -2083,18 +2093,19 @@ Part 4 까지의 `tetris` 타깃에 오디오 파일 하나와 헤더 하나가 
 
 Handmade 경로의 Win32 링크 라인을 뜯어보면:
 
-- **gdi32**: 창 DC·메모리 DC·비트맵. `platform_present` 의 `StretchDIBits` 가 여기 있다.
-- **gdiplus**: **이미지 디코딩 전용**(`renderer/image.cpp`, Windows 한정). 텍스트 렌더링에는 쓰이지 않는다 — 텍스트는 `renderer/text_software.cpp` 의 stb_truetype 다.
+- **opengl32**: OpenGL 진입점과 WGL. `wglCreateContext` / `wglGetProcAddress` 가 여기 있고, 3.3 함수 포인터도 결국 이 DLL 에서 나온다.
+- **gdi32**: GL 컨텍스트를 창 DC 에 붙이는 데 필요하다. `ChoosePixelFormat` / `SetPixelFormat` / `SwapBuffers` 가 GDI 함수다 — 픽셀을 GDI 로 그리지는 않지만 픽셀 포맷 협상과 버퍼 스왑은 여전히 GDI 를 통한다.
+- **gdiplus**: **이미지 디코딩 전용**(`renderer/image_gl.cpp` 의 `decode_image`, Windows 한정). 텍스트 렌더링에는 쓰이지 않는다 — 텍스트는 `renderer/text_gl.cpp` 의 stb_truetype 다.
 - **winmm**: 멀티미디어 타이머(`timeBeginPeriod` 등). 60 FPS 페이싱에 쓴다.
 - **ws2_32**: 윈속 네트워킹([Part 6](./part6-lockstep-networking.md)).
 - **xaudio2**: XAudio2 COM 클래스 팩토리. Windows 10 SDK 에 포함.
 - **ole32**: `CoInitializeEx` / `CoUninitialize`. COM 런타임 함수.
 
-SDL2 경로의 Windows 분기는 `gdiplus ws2_32` 만 링크한다. `xaudio2` / `ole32` 는 SDL2 가 오디오를 담당하므로 필요 없고, `gdi32` 도 창 표시를 SDL 이 하므로 필요 없다. `gdiplus` 만 남는 이유는 이미지 디코딩이 여전히 Windows 전용 경로이기 때문이다. non-Windows 는 SDL2 와 (APPLE 이 아니면) `Threads::Threads` 만 붙는다. **`APPLE` 전용 분기는 없다** — macOS 는 `if (WIN32)` 도 `elseif (NOT APPLE)` 도 아니어서 어느 추가 링크도 받지 않고, SDL2 만으로 충분하다.
+SDL2 경로의 Windows 분기는 `gdiplus ws2_32` 만 추가로 링크한다. `xaudio2` / `ole32` 는 SDL2 가 오디오를 담당하므로 필요 없고, `opengl32` / `gdi32` 도 컨텍스트 생성과 스왑을 SDL 이 대신하므로 직접 부를 일이 없다 — GL 라이브러리 자체는 위의 `find_package(OpenGL)` 이 플랫폼 중립적으로 붙여 준다. `gdiplus` 만 남는 이유는 이미지 디코딩이 여전히 Windows 전용 경로이기 때문이다. non-Windows 는 SDL2, `OpenGL::GL`, 그리고 (APPLE 이 아니면) `Threads::Threads` 가 붙는다. **`APPLE` 전용 분기는 없다** — macOS 는 `if (WIN32)` 도 `elseif (NOT APPLE)` 도 아니어서 그 분기에서는 아무것도 받지 않고, SDL2 와 `OpenGL::GL` 만으로 충분하다.
 
 ### 11.4 에셋 복사
 
-**현재 소스 발췌 — `CMakeLists.txt:253-270`**
+**현재 소스 발췌 — `CMakeLists.txt:261-278`**
 
 ```cmake
     # Copy assets (fonts + sounds + icons + model)
@@ -2256,20 +2267,21 @@ audio_shutdown:    DestroyVoice(mastering) + Release(xaudio) + CoUninitialize
 
 같은 원칙이 플랫폼 계층의 종료에도 그대로 나타난다.
 
-**현재 소스 발췌 — `platform/win32.cpp:199-220`**
+**현재 소스 발췌 — `platform/win32.cpp:234-256`**
 
 ```cpp
 void platform_shutdown()
 {
-    if (s_present_bitmap) {
-        SelectObject(s_present_dc, s_present_old_bitmap);
-        DeleteObject(s_present_bitmap);
-        s_present_bitmap = nullptr;
-        s_present_old_bitmap = nullptr;
+    // 컨텍스트를 DC 보다 먼저 놓는다. 순서를 바꾸면 이미 해제된 DC 를
+    // 참조하는 상태로 wglDeleteContext 가 불린다.
+    if (s_hglrc) {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(s_hglrc);
+        s_hglrc = nullptr;
     }
-    if (s_present_dc) {
-        DeleteDC(s_present_dc);
-        s_present_dc = nullptr;
+    if (s_opengl32) {
+        FreeLibrary(s_opengl32);
+        s_opengl32 = nullptr;
     }
     if (s_hdc && s_hwnd) {
         ReleaseDC(s_hwnd, s_hdc);
@@ -2279,11 +2291,11 @@ void platform_shutdown()
         DestroyWindow(s_hwnd);
         s_hwnd = nullptr;
     }
-    UnregisterClassA("TetrisSoftwareRenderer", GetModuleHandleA(nullptr));
+    UnregisterClassA("TetrisWindow", GetModuleHandleA(nullptr));
 }
 ```
 
-순서는 `SelectObject`(원래 비트맵 복원) → `DeleteObject`(백버퍼) → `DeleteDC` → `ReleaseDC` → `DestroyWindow` → `UnregisterClassA` 다. 첫 줄이 핵심이다 — 백버퍼 비트맵이 메모리 DC 에 **선택된 상태**이므로, 먼저 원래 비트맵을 다시 선택해 떼어내지 않으면 `DeleteObject` 가 실패한다(사용 중인 GDI 객체는 삭제되지 않는다). 그 다음 비트맵을 담고 있던 DC, 그 DC 를 만들어준 창 DC, 창, 마지막으로 창 클래스 순이다.
+순서는 `wglMakeCurrent(nullptr)` + `wglDeleteContext` → `FreeLibrary` → `ReleaseDC` → `DestroyWindow` → `UnregisterClassA` 다. 첫 블록이 핵심이다 — GL 렌더링 컨텍스트는 창 DC 위에 얹혀 있으므로, DC 를 먼저 돌려주면 이미 무효해진 DC 를 참조하는 상태로 `wglDeleteContext` 가 불린다. 그 다음 함수 포인터를 얻으려고 열어 둔 `opengl32.dll`, 창 DC, 창, 마지막으로 창 클래스 순이다.
 
 오디오와 창, 도메인이 전혀 다른 두 서브시스템이 정확히 같은 규칙을 따른다. **"A 가 B 를 참조하면 A 를 먼저 없앤다."** 초기화 코드의 실패 경로가 역순으로 되감는 것도 (§1.3) 같은 규칙의 다른 표현이다.
 

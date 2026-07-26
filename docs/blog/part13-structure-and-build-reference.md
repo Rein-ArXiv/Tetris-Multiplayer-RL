@@ -20,7 +20,7 @@
 1. **전체 그림.** 다 만들고 나서 "그래서 이게 어떻게 하나로 묶이지" 를 확인한다. 디렉터리 경계, 다섯 개 타깃, 의존성, 플랫폼별 빌드가 §1~§6 이다.
 2. **고칠 때의 지도.** "보드를 20×10 이 아니라 다르게 하고 싶다", "홀드 기능을 넣고 싶다", "새 학습 알고리즘을 붙이고 싶다" 같은 상황에서 **어느 파일을 건드려야 하고 무엇이 함께 깨지는지**를 §7 이 안내한다.
 
-특히 두 번째가 중요하다. 이 저장소에는 컴파일러가 잡아주지 않는 계약이 몇 개 있다 — 결정론 해시, C++/Python 패리티, wire 포맷, ONNX 입출력 이름. 이것들은 어긋나도 빌드가 성공하고, 한참 뒤에 이상한 증상으로 나타난다. §8 이 그 목록이다.
+특히 두 번째가 중요하다. 이 저장소에는 컴파일러가 잡아주지 않는 계약이 몇 개 있다 — 결정론 해시, C++/Python 패리티, wire 포맷, ONNX 입출력 이름, 그리고 셰이더 정점 속성과 C++ 정점 버퍼의 대응. 이것들은 어긋나도 빌드가 성공하고, 한참 뒤에 이상한 증상으로 나타난다. §8 이 그 목록이다.
 
 ## 1. 레포 구조 한눈에
 
@@ -52,18 +52,21 @@ Tetris-Multiplayer-RL/
 │   ├── position.h/.cpp    ← (row, column)
 │   └── main.cpp           ← 진입점, 앱 모드 FSM, 60Hz 루프
 │
-├── platform/              ← 창/입력 백엔드 (둘 중 하나 선택)
+├── platform/              ← 창/입력/GL 컨텍스트 백엔드 (둘 중 하나 선택)
 │   ├── platform.h         ← 공용 인터페이스
-│   ├── win32.cpp          ← Win32 + GDI 표시 (Windows 기본)
-│   ├── sdl.cpp            ← SDL2 surface 표시 (macOS/Linux 기본)
+│   ├── win32.cpp          ← Win32 + WGL 3.3 Core 컨텍스트 (Windows 기본)
+│   ├── sdl.cpp            ← SDL2 + SDL_GL 3.3 Core 컨텍스트 (macOS/Linux 기본)
 │   └── macos/Info.plist.in
 │
-├── renderer/              ← CPU 2D 소프트웨어 렌더러
-│   ├── renderer.h/.cpp    ← ARGB32 framebuffer, rect, alpha blend
-│   ├── software_internal.h ← 텍스트/이미지가 공유하는 픽셀 API
-│   ├── text_software.cpp  ← stb_truetype CPU 글리프 캐시
+├── renderer/              ← OpenGL 3.3 Core 2D 렌더러
+│   ├── renderer.h/.cpp    ← 정점 배처, rect/rounded rect, 뷰포트·시저
+│   ├── gl_api.h/.cpp      ← X-매크로 GL 함수 포인터 테이블 + 로더
+│   ├── gl_shaders.h       ← GLSL 330 core 정점/조각 셰이더 (프로그램 하나)
+│   ├── gl_internal.h      ← 렌더러 내부 API (glb_rect / glb_quad / glb_flush …)
+│   ├── text_gl.cpp        ← stb_truetype 래스터화 + R8 글리프 아틀라스
 │   ├── shake.h/.cpp       ← 화면 흔들림
-│   └── image.h/.cpp       ← PNG decode, CPU sampling/tint/rotation
+│   ├── image.h            ← 이미지 핸들 인터페이스
+│   └── image_gl.cpp       ← PNG decode → GL 텍스처 업로드
 │
 ├── audio/                 ← 오디오 백엔드
 │   ├── audio.h            ← 공용 인터페이스
@@ -149,8 +152,8 @@ Tetris-Multiplayer-RL/
 |---|---|---|
 | `core/` | 순수 C++ 헬퍼(RNG·해시·상수·입력 비트마스크·리플레이) | 없음 |
 | `src/` | 테트리스 로직 + 렌더링 래퍼 + UI + 진입점 | `core/`, `renderer/`, `net/` |
-| `platform/` | OS 창/입력 추상화 (`platform.h` 한 인터페이스, 구현 2개) | Win32 API 또는 SDL2 |
-| `renderer/` | CPU 2D (ARGB32·사각형·텍스트·이미지·셰이크) | `stb_truetype`, `platform/` |
+| `platform/` | OS 창/입력/GL 컨텍스트 추상화 (`platform.h` 한 인터페이스, 구현 2개) | Win32 API + WGL 또는 SDL2 |
+| `renderer/` | OpenGL 3.3 Core 2D (사각형·텍스트·이미지·셰이크) | OpenGL 3.3 Core 드라이버, `stb_truetype`, `platform/` |
 | `audio/` | MP3 로드 + 재생 (공용 헤더, 백엔드 2개) | XAudio2 또는 SDL2_audio, `third_party/dr_mp3.h` |
 | `net/` | TCP 소켓 → 메시지 프레이밍 → lockstep 세션 | WinSock2 또는 BSD 소켓 + pthread |
 | `server/` | `tetris_relay` 바이너리: 매치메이킹 + 바이트 릴레이 | `net/` + `meta/http_client.cpp` + `third_party/httplib.h` |
@@ -174,17 +177,23 @@ Tetris-Multiplayer-RL/
 
 | 라이브러리 | 플랫폼 | 링크 이름 | 쓰임 |
 |---|---|---|---|
-| GDI / GDI+ | Windows | `gdi32`, `gdiplus` | CPU framebuffer 표시, PNG 로딩 |
+| OpenGL | Windows | `opengl32` | GL 컨텍스트 생성(WGL) + GL 1.1 심볼 |
+| OpenGL | Linux/macOS | `OpenGL::GL` | 같음 (`find_package(OpenGL REQUIRED)`) |
+| GDI / GDI+ | Windows | `gdi32`, `gdiplus` | 픽셀 포맷 설정·`SwapBuffers`(gdi32), PNG 디코딩(gdiplus) |
 | WinMM | Windows | `winmm` | `timeBeginPeriod` 로 고해상도 타이머 |
 | WinSock2 | Windows | `ws2_32` | TCP 소켓 |
 | XAudio2 | Windows | `xaudio2`, `ole32` | 오디오 재생 |
 | pthread | Linux/macOS | `Threads::Threads` | `std::thread` 런타임 |
 
-Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 있다. Linux 의 pthread 는 glibc 에 들어 있고, macOS 는 Xcode command-line tools 로 C++ toolchain 을 제공한다. 클라이언트는 OpenGL/DirectX/Vulkan 개발 패키지를 요구하지 않는다 — 화면 출력은 전부 CPU 에서 만들어진 픽셀 버퍼를 OS 표시 API 로 복사하는 것으로 끝난다.
+Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 있다 — `opengl32.lib` 도 포함이라 GL 을 위해 따로 받을 것이 없다. macOS 도 Xcode command-line tools 에 OpenGL 프레임워크가 들어 있다. **Linux 만 별도 개발 패키지가 필요하다** — Debian/Ubuntu 는 `libgl1-mesa-dev`, Fedora 는 `mesa-libGL-devel` 이다. 설치 절차는 [Part 0](./part0-project-setup.md) 에 있다.
+
+링크되는 것은 GL 라이브러리뿐이고, 3.3 Core 의 함수는 링커가 아니라 **런타임에 함수 포인터로 받는다**(`renderer/gl_api.cpp`). Windows 의 `opengl32.dll` 이 GL 1.1 까지만 export 하기 때문인데, 플랫폼마다 다른 코드를 두지 않으려고 세 플랫폼 모두 같은 조회 경로(`platform_gl_get_proc`)를 탄다. 그래서 GLEW/GLAD 같은 로더 의존성이 없다.
+
+런타임 요구사항도 하나 늘었다. 클라이언트를 실행하는 기계의 드라이버가 **OpenGL 3.3 Core 프로파일**을 줘야 한다. 못 주면 `gl_load_functions()` 가 빠진 진입점 이름을 전부 나열하고 실패한다. 서버 타깃(`tetris_relay`, `tetris_meta`)과 테스트 타깃은 GL 을 링크하지도, 요구하지도 않는다.
 
 ### 2.2 외부 라이브러리
 
-**SDL2** — macOS/Linux 의 창·입력, 그리고 해당 경로의 오디오.
+**SDL2** — macOS/Linux 의 창·입력·GL 컨텍스트, 그리고 해당 경로의 오디오.
 
 - Windows: 기본 비활성 (Win32 경로 사용). `-DTETRIS_USE_SDL2=ON` 으로 활성화 시 `-DSDL2_DIR=...` 로 위치 지정.
 - macOS: `brew install sdl2`
@@ -206,7 +215,7 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 
 **dr_mp3** — 단일 헤더 MP3 디코더 (public domain). `third_party/dr_mp3.h` 로 **이미 저장소에 벤더링**돼 있다. `audio/audio.cpp` 와 `audio/sdl_audio.cpp` 양쪽에서 사용한다.
 
-**stb 계열** — `third_party/stb_truetype.h` 와 `third_party/stb_image.h` 가 **저장소에 벤더링**돼 있다 (둘 다 public domain 단일 헤더). `renderer/text_software.cpp` 가 모든 플랫폼에서 `stb_truetype` 로 TTF 를 CPU coverage bitmap 으로 래스터화하고 직접 알파 합성한다. `renderer/image.cpp` 의 비-Win32 분기는 `stb_image` 로 PNG/JPG 를 디코딩한다 (Windows 는 GDI+ 사용 — 이미지 디코딩 전용이며 텍스트에는 쓰지 않는다). 각 헤더는 정확히 한 번역 단위에서 `STB_TRUETYPE_IMPLEMENTATION` / `STB_IMAGE_IMPLEMENTATION` 매크로와 함께 include 된다.
+**stb 계열** — `third_party/stb_truetype.h` 와 `third_party/stb_image.h` 가 **저장소에 벤더링**돼 있다 (둘 다 public domain 단일 헤더). `renderer/text_gl.cpp` 가 모든 플랫폼에서 `stb_truetype` 로 TTF 를 CPU coverage bitmap 으로 래스터화한 뒤, 그 비트맵을 R8 글리프 아틀라스 텍스처에 올린다 — **글자 모양을 만드는 일은 여전히 CPU 가 한다.** GPU 에는 TTF 아웃라인을 래스터화하는 기능이 없기 때문이고, GL 로 옮기면서 바뀐 것은 그 비트맵을 두는 곳이다. `renderer/image_gl.cpp` 의 비-Win32 분기는 `stb_image` 로 PNG/JPG 를 디코딩하고 결과를 GL 텍스처로 업로드한다 (Windows 는 GDI+ 사용 — 이미지 디코딩 전용이며 텍스트에는 쓰지 않는다). 각 헤더는 정확히 한 번역 단위에서 `STB_TRUETYPE_IMPLEMENTATION` / `STB_IMAGE_IMPLEMENTATION` 매크로와 함께 include 된다.
 
 **cpp-httplib / SQLite amalgamation** — `third_party/httplib.h`, `third_party/sqlite3.{c,h}`. 전자는 게임 클라이언트까지 포함한 세 바이너리가 모두 쓰고, 후자는 `tetris_meta` 전용이다. 둘 다 존재 검사를 통과하지 못하면 CMake 가 즉시 `FATAL_ERROR` 로 멈춘다.
 
@@ -255,10 +264,10 @@ uv sync --dev --extra train --extra export
 
 ### 2.4 타깃별 의존성 매트릭스
 
-| 타깃 | CPU 렌더러 | SDL2 | Win32 API | ONNX RT | pybind11 | 필요 조건 |
+| 타깃 | OpenGL | SDL2 | Win32 API | ONNX RT | pybind11 | 필요 조건 |
 |---|---|---|---|---|---|---|
-| `tetris` (Win32 경로) | ✓ | — | ✓ | 옵션 | — | Windows only, `httplib.h` 필수 |
-| `tetris` (SDL2 경로) | ✓ | ✓ | — | 옵션 | — | 전 플랫폼, `httplib.h` 필수 |
+| `tetris` (Win32 경로) | `opengl32` | — | ✓ | 옵션 | — | Windows only, `httplib.h` 필수, 런타임에 GL 3.3 Core |
+| `tetris` (SDL2 경로) | `OpenGL::GL` | ✓ | — | 옵션 | — | 전 플랫폼, `httplib.h` 필수, 런타임에 GL 3.3 Core |
 | `tetris_relay` | — | — | ws2_32만 | — | — | 헤드리스, Termux OK, `httplib.h` 필수 |
 | `tetris_meta` | — | — | ws2_32만 | — | — | `sqlite3.{c,h}` + `httplib.h` 필수 |
 | `sim_hash_dump` | — | — | — | — | — | 결정론 테스트, 전 플랫폼, 의존성 0 |
@@ -278,7 +287,7 @@ uv sync --dev --extra train --extra export
 | 0 | `src/main.cpp`(스텁) | 자작 `tetris` 스텁 |
 | 1 | `src/sim_game.cpp`, `src/position.cpp` + 시뮬 헤더 9개, `tests/sim_hash_dump.cpp` | `sim_hash_dump` |
 | 2 | `platform/platform.h`, `platform/win32.cpp` 또는 `platform/sdl.cpp` | Part 2 체크포인트 데모 |
-| 3 | `renderer/renderer.cpp`, `renderer/text_software.cpp`, `renderer/image.cpp`, `renderer/shake.cpp`, `src/gui.cpp`, `src/colors.cpp` | Part 3 체크포인트 데모 |
+| 3 | `renderer/renderer.cpp`, `renderer/gl_api.cpp`, `renderer/text_gl.cpp`, `renderer/image_gl.cpp`, `renderer/shake.cpp`, `src/gui.cpp`, `src/colors.cpp` | Part 3 체크포인트 데모 |
 | 4 | `src/game.cpp`, `src/main.cpp`(본체), `core/replay.cpp` | 싱글플레이 `tetris` |
 | 5 | `audio/audio.cpp` 또는 `audio/sdl_audio.cpp` | 소리 나는 `tetris` |
 | 6 | `net/socket.cpp`, `net/framing.cpp`, `net/session.cpp` | 직결 멀티 `tetris` |
@@ -322,8 +331,8 @@ MSVC 의 `/utf-8` 는 소스/실행 인코딩 모두 UTF-8 로 설정하는 플�
 # -----------------------------------------------------------------------------
 # Build options
 #
-#   TETRIS_BUILD_GAME  — Game executable. CPU software renderer with a thin
-#                         Win32 or SDL2 presentation backend.
+#   TETRIS_BUILD_GAME  — Game executable. OpenGL 3.3 Core renderer with a thin
+#                         Win32 or SDL2 window/context backend.
 #   TETRIS_BUILD_PY    — pybind11 module (tetris_py) wrapping SimGame. Portable.
 #   TETRIS_BUILD_TEST  — SimGame determinism regression (sim_hash_dump). Portable.
 #   TETRIS_BUILD_RELAY — Headless matchmaking/relay server (server/*.cpp).
@@ -414,7 +423,7 @@ else()
 endif()
 ```
 
-`TETRIS_USE_SDL2` 는 창/표시와 오디오만 바꾼다. 소프트웨어 렌더러와 텍스트 래스터화는 어느 쪽에서도 공통이다.
+`TETRIS_USE_SDL2` 는 창·GL 컨텍스트 생성과 오디오만 바꾼다. GL 렌더러와 셰이더, 텍스트 래스터화는 어느 쪽에서도 공통이다 — 두 백엔드가 같은 3.3 Core 프로파일을 요청하기 때문에 `#version 330 core` 셰이더 한 벌이 세 플랫폼에서 그대로 통한다.
 
 ### 3.3 공유 소스 목록
 
@@ -457,11 +466,11 @@ set(TETRIS_SIM_HEADERS
 
 (a) **의존성 선검사 + 공통 소스 묶음**:
 
-**현재 소스 발췌 — `CMakeLists.txt:82-114`**
+**현재 소스 발췌 — `CMakeLists.txt:82-115`**
 
 ```cmake
 # -----------------------------------------------------------------------------
-# Target: tetris (handmade CPU software-rendered game)
+# Target: tetris (handmade OpenGL 3.3 Core game client)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_GAME)
     # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇
@@ -486,9 +495,10 @@ if (TETRIS_BUILD_GAME)
         net/framing.cpp
         net/session.cpp
         renderer/renderer.cpp
-        renderer/text_software.cpp
+        renderer/gl_api.cpp
+        renderer/text_gl.cpp
         renderer/shake.cpp
-        renderer/image.cpp
+        renderer/image_gl.cpp
         bot/placement.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
@@ -501,7 +511,7 @@ if (TETRIS_BUILD_GAME)
 
 (b) **헤더 목록**. CMake 는 헤더를 컴파일하지 않지만, `add_executable` 에 나열해두면 IDE(Visual Studio 솔루션, Xcode 프로젝트)의 파일 트리에 나타나고 일부 제너레이터가 의존성 추적에 활용한다.
 
-**현재 소스 발췌 — `CMakeLists.txt:116-132`**
+**현재 소스 발췌 — `CMakeLists.txt:117-135`**
 
 ```cmake
     set(TETRIS_GAME_HEADERS
@@ -514,7 +524,9 @@ if (TETRIS_BUILD_GAME)
         net/session.h
         platform/platform.h
         renderer/renderer.h
-        renderer/software_internal.h
+        renderer/gl_api.h
+        renderer/gl_internal.h
+        renderer/gl_shaders.h
         renderer/shake.h
         renderer/image.h
         audio/audio.h
@@ -525,9 +537,11 @@ if (TETRIS_BUILD_GAME)
 
 `${TETRIS_SIM_HEADERS}` 를 앞에 펼쳐 넣으므로 시뮬 헤더 9개도 함께 나열된다. `src/gui.h` 와 `meta/http_client.h` 는 이 목록에 없다 — 빌드에는 영향이 없고 IDE 트리에만 안 보인다.
 
-(c) **백엔드 분기** — 소프트웨어 렌더러와 텍스트는 공통이고, `TETRIS_USE_SDL2` 에 따라 창/표시와 오디오 2개 파일만 교체된다.
+GL 헤더 셋(`gl_api.h` / `gl_internal.h` / `gl_shaders.h`)이 여기 나열돼 있다는 것은 이 셋이 **렌더러 내부 전용**이라는 뜻이기도 하다. `src/` 나 `game.cpp` 는 `renderer/renderer.h` 만 include 하고 GL 타입을 한 번도 보지 않는다. 셰이더 문자열조차 `gl_shaders.h` 안의 raw string literal 이라, 별도 애셋 파일이나 로딩 경로가 없다.
 
-**현재 소스 발췌 — `CMakeLists.txt:134-179`**
+(c) **백엔드 분기** — GL 렌더러와 텍스트는 공통이고, `TETRIS_USE_SDL2` 에 따라 창/컨텍스트와 오디오 2개 파일만 교체된다.
+
+**현재 소스 발췌 — `CMakeLists.txt:137-187`**
 
 ```cmake
     if (TETRIS_USE_SDL2)
@@ -552,6 +566,11 @@ if (TETRIS_BUILD_GAME)
             target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
         endif()
 
+        # OpenGL 3.3 Core 렌더러. 함수 포인터는 런타임에 받지만 컨텍스트를
+        # 만드는 진입점(SDL 경유)과 GL 1.1 심볼 때문에 GL 라이브러리는 링크한다.
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(tetris PRIVATE OpenGL::GL)
+
         if (WIN32)
             target_link_libraries(tetris PRIVATE gdiplus ws2_32)
         elseif (NOT APPLE)
@@ -571,7 +590,7 @@ if (TETRIS_BUILD_GAME)
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
         if (WIN32)
-            target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
+            target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()
@@ -580,31 +599,36 @@ if (TETRIS_BUILD_GAME)
 
 두 분기의 **짝** 관계를 정리하면:
 
-| 백엔드 | `platform/` | `renderer/` | `audio/` |
-|--------|-------------|------------|----------|
-| Win32  | `win32.cpp` | `renderer.cpp` + `text_software.cpp` | `audio.cpp` |
-| SDL2   | `sdl.cpp`   | 같은 공통 소프트웨어 렌더러 | `sdl_audio.cpp` |
+| 백엔드 | `platform/` | GL 컨텍스트 | `renderer/` | `audio/` |
+|--------|-------------|-------------|------------|----------|
+| Win32  | `win32.cpp` | WGL 2단계 (`wglCreateContextAttribsARB`) | 공통 GL 렌더러 | `audio.cpp` |
+| SDL2   | `sdl.cpp`   | `SDL_GL_CreateContext` + 프로파일 속성 | 같은 공통 GL 렌더러 | `sdl_audio.cpp` |
 
-CPU rasterization, 글리프 캐시, 이미지 sampling 코드는 두 경로에서 완전히 동일하다.
+셰이더, 정점 배처, 글리프 아틀라스, 이미지 텍스처 업로드 코드는 두 경로에서 완전히 동일하다. 백엔드가 다르게 하는 일은 "3.3 Core 컨텍스트를 만들어 current 로 만들고, `platform_gl_get_proc` 로 함수 주소를 넘겨주고, `platform_present()` 에서 버퍼를 교체한다" 세 가지뿐이다.
 
 헤더 `platform/platform.h`, `renderer/renderer.h`, `audio/audio.h` 는 양쪽이 동일한 인터페이스를 구현한다. 그래서 `src/main.cpp`, `src/game.cpp` 는 **한 줄도 바뀌지 않는다** — 선택은 전적으로 CMake 레벨.
 
+**두 경로 모두 GL 라이브러리를 링크한다는 점이 중요하다.** SDL2 경로는 `find_package(OpenGL REQUIRED)` 로 찾아 `OpenGL::GL` 을 걸고, Win32 경로는 링크 목록 맨 앞에 `opengl32` 을 둔다. 3.3 함수는 어차피 런타임에 함수 포인터로 받는데도 링크가 필요한 이유는 두 가지다 — 컨텍스트를 만드는 진입점(`wglCreateContext` 등)이 그 라이브러리에 있고, `glEnable` 같은 GL 1.1 심볼도 거기 있기 때문이다.
+
+`find_package(OpenGL REQUIRED)` 의 `REQUIRED` 는 의도적이다. GL 없이는 게임이 화면을 만들 수 없으므로 configure 단계에서 즉시 멈추는 편이 낫다. Linux 에서 `libgl1-mesa-dev` 를 깔지 않았다면 여기서 걸리고, 에러 메시지가 무엇이 없는지 바로 알려준다. `OpenGL::GL` 은 CMake 내장 `FindOpenGL` 이 만드는 IMPORTED 타깃으로, Linux 에서는 `libGL.so`, macOS 에서는 `OpenGL.framework`, Windows 에서는 `opengl32.lib` 로 각각 확장된다 — 플랫폼 분기를 CMake 가 대신 해준다.
+
 Win32 경로의 링크 목록을 한 줄씩 훑어보자:
 
-- `gdi32` — memory DIB backbuffer, `StretchDIBits`, `BitBlt`. 소프트웨어 렌더러가 만든 픽셀 버퍼를 창에 복사하는 데 쓴다.
-- `gdiplus` — `Gdiplus::Bitmap` PNG 로더 (`renderer/image.cpp`). **이미지 디코딩 전용**이며 텍스트 렌더링에는 관여하지 않는다.
+- `opengl32` — WGL 컨텍스트 생성(`wglCreateContext`, `wglMakeCurrent`, `wglGetProcAddress`)과 GL 1.1 심볼. 3.3 함수는 여기 없고 런타임에 받는다.
+- `gdi32` — `ChoosePixelFormat` / `SetPixelFormat` / `SwapBuffers`. GL 컨텍스트를 붙이기 전에 DC 의 픽셀 포맷을 정하는 데 필요하다.
+- `gdiplus` — `Gdiplus::Bitmap` PNG 로더 (`renderer/image_gl.cpp`). **이미지 디코딩 전용**이며 텍스트 렌더링에는 관여하지 않는다.
 - `winmm` — `timeBeginPeriod(1)` 로 `Sleep` 해상도 1ms 강제. 60 FPS 페이싱 정확도에 직결된다.
 - `ws2_32` — WinSock2 (`socket`, `connect`, `send`, `recv`).
 - `xaudio2` — XAudio2 상위 인터페이스.
 - `ole32` — `CoInitializeEx` (XAudio2 가 COM 위에 있음).
 
-**`opengl32` 은 목록에 없다.** SDL2 경로의 Windows 분기도 `gdiplus ws2_32` 둘뿐이다 — SDL2 는 창과 surface 표시만 담당하고, 픽셀은 여전히 CPU 가 만든다.
+SDL2 경로의 Windows 분기가 `gdiplus ws2_32` 둘뿐인 것은 GL 을 안 쓰기 때문이 아니라 **`OpenGL::GL` 이 바로 위에서 이미 걸렸기** 때문이다. 그 분기에 남은 것은 PNG 디코딩과 소켓뿐이다.
 
 SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 이유: `std::thread` 는 C++ 표준이지만 GCC/libstdc++ 는 내부적으로 pthread 를 호출한다. 대부분의 배포판에서는 `-lpthread` 를 걸지 않으면 `undefined reference to pthread_create` 로 링크 실패한다. `Threads::Threads` 타깃이 이 플래그를 자동으로 붙여준다. macOS 는 pthread 가 libSystem 에 있어 별도 링크가 필요 없으므로 `elseif (NOT APPLE)` 로 제외했다.
 
 (d) **컴파일 정의 주입** — 위에서 본 캐시 변수가 여기서 매크로가 된다.
 
-**현재 소스 발췌 — `CMakeLists.txt:181-194`**
+**현재 소스 발췌 — `CMakeLists.txt:189-202`**
 
 ```cmake
     target_compile_definitions(tetris PRIVATE
@@ -629,7 +653,7 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 
 (e) **선택적 ONNX Runtime** — `TETRIS_BUILD_BOT=ON` 이 켜졌을 때만.
 
-**현재 소스 발췌 — `CMakeLists.txt:196-217`**
+**현재 소스 발췌 — `CMakeLists.txt:204-225`**
 
 ```cmake
     # ------------------------------------------------------------------------
@@ -660,7 +684,7 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 
 (f) **rpath & .app 번들 메타** — 배포용 설정.
 
-**현재 소스 발췌 — `CMakeLists.txt:219-251`**
+**현재 소스 발췌 — `CMakeLists.txt:227-259`**
 
 ```cmake
     # ------------------------------------------------------------------------
@@ -711,7 +735,7 @@ Windows 는 rpath 개념이 없다 — DLL 은 "실행 파일과 같은 폴더" 
 
 실행 파일은 빌드 디렉터리에 생성되지만 `Font/NanumGothic.ttf` 나 `Sounds/music.mp3` 는 소스 디렉터리에 있다. 게임은 상대 경로 `Font/...` 로 리소스를 여는데, 빌드 디렉터리에서 실행하면 파일을 못 찾는다. 해결은 빌드 시 자동으로 복사하는 커스텀 타깃이다.
 
-**현재 소스 발췌 — `CMakeLists.txt:253-271`**
+**현재 소스 발췌 — `CMakeLists.txt:261-279`**
 
 ```cmake
     # Copy assets (fonts + sounds + icons + model)
@@ -745,7 +769,7 @@ endif()
 
 ### 3.6 타깃 2 — `tetris_py` (pybind11 모듈)
 
-**현재 소스 발췌 — `CMakeLists.txt:273-296`**
+**현재 소스 발췌 — `CMakeLists.txt:281-304`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -785,7 +809,7 @@ endif()
 
 ### 3.7 타깃 3 — `sim_hash_dump` / `worker_group_test` (회귀 테스트)
 
-**현재 소스 발췌 — `CMakeLists.txt:298-318`**
+**현재 소스 발췌 — `CMakeLists.txt:306-326`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -820,7 +844,7 @@ endif()
 
 ### 3.8 타깃 4 — `tetris_relay` (릴레이 서버)
 
-**현재 소스 발췌 — `CMakeLists.txt:320-374`**
+**현재 소스 발췌 — `CMakeLists.txt:328-382`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -886,7 +910,7 @@ endif()
 
 ### 3.9 타깃 5 — `tetris_meta` (HTTP+SQLite 메타 서버)
 
-**현재 소스 발췌 — `CMakeLists.txt:376-443`**
+**현재 소스 발췌 — `CMakeLists.txt:384-451`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -978,7 +1002,7 @@ CMake 는 `target_link_libraries` 에 적은 순서대로 링커에 전달한다
 2. MSVC 의 링커는 다수의 패스를 돌려 이 순서 민감도가 약하다.
 3. `SDL2::SDL2` 나 `OpenSSL::SSL` 같은 IMPORTED 타깃은 내부에 `INTERFACE_LINK_LIBRARIES` 를 달고 있어, CMake 가 자동으로 전이적 의존성을 해결한다.
 
-그래도 관례를 알아두면 좋다: **"사용하는 쪽 → 사용되는 쪽"** 순서다. 예컨대 `target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)` 에서 맨 뒤의 `ole32` 는 `xaudio2` 가 쓴다(COM). `tetris_meta` 의 `Threads::Threads ${CMAKE_DL_LIBS}` 도 sqlite3 오브젝트가 앞에 오고 그 심볼 제공자가 뒤에 오는 형태다.
+그래도 관례를 알아두면 좋다: **"사용하는 쪽 → 사용되는 쪽"** 순서다. 예컨대 `target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)` 에서 맨 뒤의 `ole32` 는 `xaudio2` 가 쓴다(COM). `tetris_meta` 의 `Threads::Threads ${CMAKE_DL_LIBS}` 도 sqlite3 오브젝트가 앞에 오고 그 심볼 제공자가 뒤에 오는 형태다.
 
 ---
 
@@ -1170,7 +1194,7 @@ cmake --build build --config Release
 
 **여기에 함정이 하나 있다.** 실행 파일은 `build\Release\` 에 생기는데 `copy_assets` 는 `${CMAKE_CURRENT_BINARY_DIR}` — 즉 `build\` 로 에셋을 복사한다. 그래서 `build\Release\` 로 들어가서 실행하면 폰트와 사운드를 찾지 못한다. 저장소 루트에서 경로를 지정해 실행하는 것이 가장 안전하다.
 
-Win32 백엔드가 기본이므로 SDL2 없이 빌드된다. 창은 `CreateWindowExA`, 화면 출력은 GDI, 오디오는 XAudio2 — 전부 Windows SDK 에 있다.
+Win32 백엔드가 기본이므로 SDL2 없이 빌드된다. 창은 `CreateWindowExA`, GL 컨텍스트는 WGL(`opengl32.lib`), 오디오는 XAudio2 — 전부 Windows SDK 에 있다.
 
 ### 6.2 Linux — 단일 구성
 
@@ -1182,13 +1206,13 @@ cmake --build build -j$(nproc)
 ./build/tetris
 ```
 
-SDL2 백엔드가 기본이다(`TETRIS_USE_SDL2` 가 비-Windows 에서 ON).
+SDL2 백엔드가 기본이다(`TETRIS_USE_SDL2` 가 비-Windows 에서 ON). `libgl1-mesa-dev` 가 없으면 `find_package(OpenGL REQUIRED)` 가 configure 단계에서 멈춘다.
 
 ### 6.3 macOS — rpath 와 `.app`
 
 빌드는 Linux 와 같다. 다른 점은 CMake 가 배포용 rpath 를 `@executable_path/../Frameworks` 로 박아둔다는 것이다. 번들 안에 dylib 을 넣고 배포할 수 있게 하려는 준비다 — 실제 번들 생성은 [Part 12](./part12-hardening-and-release.md) 의 릴리스 스크립트가 한다.
 
-그래픽 프레임워크는 하나도 링크하지 않는다. 화면 출력이 전부 CPU 이기 때문이다.
+그래픽 쪽은 `OpenGL::GL` 하나만 링크되고, 그것은 `find_package(OpenGL)` 이 찾아낸 시스템 `OpenGL.framework` 다 — 별도 설치가 없다. macOS 의 OpenGL 은 10.14 부터 deprecated 표시가 붙어 있지만 3.3 Core 는 여전히 동작하고, **Core 프로파일이 아니면 3.x 자체를 주지 않는다.** SDL 백엔드가 `SDL_GL_CONTEXT_PROFILE_CORE` 를 명시적으로 요청하는 이유가 이것이다. 요청하지 않으면 2.1 호환 컨텍스트가 나와 `#version 330 core` 셰이더가 거부된다.
 
 ### 6.4 Termux (Android) — 릴레이 전용 크로스 빌드
 
@@ -1213,7 +1237,7 @@ cmake --build build -j4
 ./build/tetris_relay --port 7777
 ```
 
-`apt install cmake g++` 두 패키지면 끝난다. SDL2 도, 오디오 라이브러리도, 그래픽 개발 패키지도 필요 없다. 같은 Wi-Fi 의 클라이언트가 휴대폰 내부 IP(보통 `192.168.x.x`)로 접속한다.
+`apt install cmake g++` 두 패키지면 끝난다. SDL2 도, 오디오 라이브러리도, OpenGL 개발 패키지도 필요 없다 — `TETRIS_BUILD_GAME=OFF` 면 `find_package(OpenGL)` 블록 자체가 실행되지 않는다. 같은 Wi-Fi 의 클라이언트가 휴대폰 내부 IP(보통 `192.168.x.x`)로 접속한다.
 
 운영용으로 쓸 것이라면 [Part 12](./part12-hardening-and-release.md) 의 보안 기본값 — `TETRIS_RELAY_SECRET` 없이는 meta 연동이 시작되지 않는다는 것 — 을 먼저 읽는 편이 좋다.
 
@@ -1227,12 +1251,13 @@ cmake --build build -j4
 | 설정 항목 하나 추가 | 쉬움 | §7.2 |
 | 새 UI 위젯 추가 | 쉬움 | §7.3 |
 | 봇 교체 / 새 모델 추가 | 쉬움 | §7.4 |
-| 새 학습 알고리즘 추가 | 보통 | §7.5 |
-| 새 네트워크 메시지 추가 | 보통 | §7.6 |
-| 메타 API 엔드포인트 추가 | 보통 | §7.7 |
-| 새 입력 추가 (홀드 등) | 어려움 | §7.8 |
-| 보드 크기 변경 | 어려움 | §7.9 |
-| GPU 표시 백엔드 추가 | 어려움 | §7.10 |
+| 셰이더 고치기 | 쉬움 | §7.5 |
+| 새 도형 추가 (정점 속성 늘리기) | 보통 | §7.6 |
+| 새 학습 알고리즘 추가 | 보통 | §7.7 |
+| 새 네트워크 메시지 추가 | 보통 | §7.8 |
+| 메타 API 엔드포인트 추가 | 보통 | §7.9 |
+| 새 입력 추가 (홀드 등) | 어려움 | §7.10 |
+| 보드 크기 변경 | 어려움 | §7.11 |
 
 난이도는 코드량이 아니라 **깨지는 계약의 수**로 매겼다. 아래로 갈수록 한 곳을 고치면 따라 고쳐야 할 곳이 늘어난다.
 
@@ -1284,7 +1309,7 @@ gui_checkbox · gui_slider · gui_value_selector · gui_modal_dim · gui_text_ce
 
 전부 **즉시모드**다. 위젯 객체도 상태도 없고, 매 프레임 "이 위치에 이걸 그리고 클릭됐으면 true 를 돌려줘" 를 호출한다. 그래서 새 위젯을 만드는 일은 `draw_rect` / `draw_text` / `gui_hover_rect` 를 조합하는 함수 하나를 쓰는 것이 전부다. 상태 관리는 호출부가 한다.
 
-렌더러 프리미티브가 부족하면 `renderer/renderer.h` 에 그리기 함수를 추가한다 ([Part 3](./part3-rendering-and-ui.md)). 새 프리미티브는 `software_blend_pixel` / `software_blend_coverage` 위에 올리면 클리핑과 view offset 이 자동으로 따라온다.
+렌더러 프리미티브가 부족하면 `renderer/renderer.h` 에 그리기 함수를 추가한다 ([Part 3](./part3-rendering-and-ui.md)). 새 프리미티브를 `glb_rect` (축 정렬 사각형) 또는 `glb_quad` (네 꼭짓점을 직접 주는 사각형) 위에 올리면 view offset 더하기, 화면 밖 컬링, 텍스처 전환 시 자동 flush 가 전부 따라온다. 정점 형식을 바꿔야 하는 경우라면 §7.6 을 먼저 읽는다.
 
 ### 7.4 봇 교체 / 새 모델 추가
 
@@ -1308,7 +1333,51 @@ gui_checkbox · gui_slider · gui_value_selector · gui_modal_dim · gui_text_ce
 
 이름이 하나라도 다르면 **로드는 성공하고 추론에서 실패한다.** 게임은 조용히 휴리스틱 봇으로 넘어가므로 증상이 "봇이 좀 약해졌네" 로만 보인다. 봇 선택 화면의 오류 메시지를 확인하는 습관이 필요하다.
 
-### 7.5 새 학습 알고리즘 추가
+### 7.5 셰이더 고치기
+
+렌더러가 쓰는 셰이더는 **정점 하나, 조각 하나, 프로그램 하나**가 전부이고, 둘 다 `renderer/gl_shaders.h` 안의 raw string literal 이다. 별도 `.glsl` 파일도, 로딩 경로도, 런타임 리로드도 없다. 문자열을 고치고 다시 빌드하면 끝이다.
+
+바꾸기 쉬운 것들:
+
+| 하고 싶은 것 | 어디를 |
+|---|---|
+| 모서리 안티앨리어싱 폭 조절 | 조각 셰이더의 `smoothstep(-0.5, 0.5, d)` 범위 |
+| 둥근 모서리 모양 변경 | `rounded_box_sdf()` 의 거리 함수 |
+| 전역 톤 보정·색맹 팔레트 | 조각 셰이더에서 `fragColor` 를 내보내기 직전 |
+| 좌표계 변경(예: y 위로 증가) | 정점 셰이더의 NDC 변환 두 줄 |
+
+**셰이더 컴파일 오류는 빌드가 아니라 실행 시점에 난다.** GLSL 은 사용자 기계의 드라이버가 컴파일하므로, `renderer_init` 이 컴파일 로그를 stderr 에 그대로 찍고 초기화를 중단한다. 로그를 삼키지 않는 것이 중요한 이유는 드라이버마다 GLSL 프론트엔드가 달라서다 — 내 기계에서 통과한 코드가 남의 기계에서 막힐 수 있고, 그때 남는 단서가 이 로그뿐이다.
+
+**주의할 계약:** 정점 셰이더의 `layout(location = N)` 번호와 `renderer.cpp` 의 `glVertexAttribPointer` 인덱스는 **같아야 한다.** 컴파일러도 링커도 이 대응을 검사하지 않는다 — §8 에 다시 나온다. 그리고 유니폼 이름(`u_screen`, `u_tex`)을 바꾸면 `renderer_init` 의 `gl_GetUniformLocation` 호출도 함께 고쳐야 한다. 이쪽은 실패해도 조용하다 — 위치가 `-1` 로 돌아오고 `glUniform*` 이 무시되어, 화면이 검거나 도형이 엉뚱한 곳에 그려진다.
+
+셰이더를 나누고 싶은 유혹은 참는 편이 좋다. 도형마다 프로그램을 두면 그릴 때마다 `glUseProgram` 이 끼어들어 배칭이 끊기고, 프레임당 draw call 이 3~5 회에서 수백 회로 늘어난다. 지금 구조는 "차이를 셰이더가 아니라 **정점 속성으로** 넘긴다" 는 선택 위에 서 있다.
+
+### 7.6 새 도형 추가 (정점 속성 늘리기)
+
+`draw_rect` / `draw_rect_rounded` 처럼 기존 정점 형식으로 표현되는 도형이라면 `renderer.cpp` 에 함수를 하나 더하고 `glb_rect` 를 부르면 끝이다. 예컨대 테두리만 있는 사각형은 `glb_rect` 네 번이면 된다.
+
+**정점 형식 자체를 늘려야 하는 경우**가 진짜 작업이다. 예를 들어 도형마다 그라디언트 방향을 주고 싶다면 속성이 하나 더 필요하다. 그때 고쳐야 할 곳이 **다섯 군데**이고, 하나라도 빠지면 컴파일은 되는데 화면이 조용히 깨진다.
+
+1. **`renderer/gl_shaders.h` 의 정점 선언** — `layout(location = 7) in float a_gradient;` 를 추가하고, `out`/`in` varying 을 정점·조각 셰이더 양쪽에 짝지어 넣는다.
+2. **`renderer/renderer.cpp` 의 `kFloatsPerVertex`** — 현재 14 다. 속성 하나를 늘리면 그 float 개수만큼 올린다. 이 상수 하나가 stride 계산과 `glDrawArrays` 의 정점 개수(`s_verts.size() / kFloatsPerVertex`) 를 동시에 결정하므로, 틀리면 정점이 어긋나 삼각형이 화면을 가로지르는 형태로 나타난다.
+3. **`renderer_init` 의 `attribs[]` 테이블** — `{ location, size, offset }` 항목을 추가한다. `offset` 은 float 단위이므로 앞 속성들의 누적 개수여야 한다. 이 테이블이 `glVertexAttribPointer` + `glEnableVertexAttribArray` 호출로 그대로 펼쳐진다.
+4. **`push_vertex()`** — 인자를 늘리고 `s_verts.insert` 의 초기화 리스트에 값을 **선언 순서대로** 넣는다. 순서가 어긋나면 색 자리에 좌표가 들어가는 식으로 조용히 망가진다.
+5. **정점을 채우는 모든 호출부** — `glb_rect`, `glb_quad`, 그리고 그 둘을 부르는 `renderer.cpp` 의 `draw_rect` / `draw_rect_rounded`, `text_gl.cpp` 의 글리프 사각형, `image_gl.cpp` 의 이미지·회전 이미지. 새 속성의 기본값을 뭘로 둘지 여기서 정해야 한다.
+
+**왜 컴파일러가 못 잡는가.** GPU 로 넘어가는 정점 버퍼는 그냥 `float` 배열이다. 타입 정보가 없고, "이 14 개 중 5~8 번째가 색" 이라는 해석은 전적으로 `glVertexAttribPointer` 가 준 offset/stride 에 달려 있다. C++ 쪽 구조체와 셰이더 쪽 선언을 이어주는 것은 사람이 맞춰 놓은 숫자 세 개(location, size, offset)뿐이고, 어긋나면 GL 은 에러를 내지 않고 그냥 다른 바이트를 읽는다.
+
+증상으로 원인을 되짚는 요령:
+
+| 증상 | 대개의 원인 |
+|---|---|
+| 도형이 화면 밖으로 늘어나거나 삼각형이 가로지른다 | `kFloatsPerVertex` 와 실제 push 개수 불일치 |
+| 색이 좌표처럼 요동친다 | `push_vertex` 의 값 순서 또는 `attribs[]` 의 offset |
+| 새 속성만 항상 0 | `glEnableVertexAttribArray` 누락 (테이블에 넣었는지 확인) |
+| 새 속성이 무시되고 최적화된 듯 보인다 | 셰이더에서 그 varying 을 실제로 쓰지 않아 드라이버가 제거 |
+
+마지막 줄이 특히 헷갈린다. GLSL 컴파일러는 결과에 영향을 주지 않는 입력을 **조용히 제거**하므로, 새 속성을 선언만 하고 `fragColor` 계산에 넣지 않으면 location 이 사라져 디버깅이 엉뚱한 방향으로 간다.
+
+### 7.7 새 학습 알고리즘 추가
 
 `python/train/` 에 스크립트를 하나 더한다. 기존 것들을 복사해 시작하는 편이 빠르다.
 
@@ -1324,7 +1393,7 @@ gui_checkbox · gui_slider · gui_value_selector · gui_modal_dim · gui_text_ce
 
 **함께 해야 할 일:** `python/tests/test_training_scripts_static.py` 가 `python/train/` 의 모든 스크립트를 정적으로 파싱해 argparse 규약을 검사한다. 새 스크립트도 자동으로 대상에 들어가므로 이 테스트를 돌려 본다.
 
-### 7.6 새 네트워크 메시지 추가
+### 7.8 새 네트워크 메시지 추가
 
 건드릴 곳이 **네 군데**이고, 하나라도 빠지면 조용히 어긋난다.
 
@@ -1343,7 +1412,7 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 
 자세한 프레임 구조는 [Part 6](./part6-lockstep-networking.md) 에 있다.
 
-### 7.7 메타 API 엔드포인트 추가
+### 7.9 메타 API 엔드포인트 추가
 
 1. **`meta/api_server.cpp`** — 라우팅에 핸들러를 추가한다.
 2. **`meta/protocol.h`** — 요청/응답 JSON 을 만들고 파싱하는 함수를 더한다. JSON 라이브러리를 쓰지 않고 직접 만든 최소 파서라, 필드를 추가하면 그 파서에도 손을 대야 한다.
@@ -1358,7 +1427,7 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 uv run python -m pytest python/tests/test_meta_db_smoke.py python/tests/test_relay_meta_smoke.py -q
 ```
 
-### 7.8 새 입력 추가 (홀드, 180도 회전 등)
+### 7.10 새 입력 추가 (홀드, 180도 회전 등)
 
 여기서부터 어려워진다. 입력 하나가 **다섯 계층**에 걸쳐 있다.
 
@@ -1374,7 +1443,7 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py python/tests/test_rel
 uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_framing_parity.py -q
 ```
 
-### 7.9 보드 크기 변경
+### 7.11 보드 크기 변경
 
 가장 넓게 퍼지는 변경이다. `src/sim_grid.h` 의 두 줄로 시작하지만 거기서 끝나지 않는다.
 
@@ -1398,16 +1467,6 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 **핵심 함정:** C++ 과 Python 이 보드 크기 상수를 **각자 갖고 있다.** 한쪽만 고치면 컴파일도 되고 학습도 돌지만, 관측 텐서의 모양이 달라져 봇이 엉뚱하게 행동한다. `python/tests/test_placement_parity.py` 가 이걸 잡는 유일한 방어선이다.
 
-### 7.10 GPU 표시 백엔드 추가
-
-렌더러를 GPU 로 옮기고 싶다면 **두 단계로 나눌 수 있다.**
-
-**1단계 — 표시만 GPU 로.** `platform_present()` 하나만 바꾸면 된다. 현재는 완성된 ARGB32 버퍼를 `StretchDIBits`(Win32) 또는 `SDL_BlitScaled`(SDL) 로 창에 복사한다. 이것을 텍스처 업로드 + 풀스크린 쿼드로 바꿔도 **렌더러는 전혀 모른다.** 확대 품질과 vsync 를 얻는다.
-
-**2단계 — 래스터화까지 GPU 로.** `renderer/renderer.h` 의 `draw_*` API 를 유지한 채 구현만 교체한다. 게임과 UI 코드는 그대로다. 다만 이 경우 [Part 3](./part3-rendering-and-ui.md) 이 설명한 결정론적 렌더 산출물은 포기하게 된다 — 벤더별 래스터화 규칙 차이 때문이다. 게임 로직의 결정론과는 무관하므로 멀티플레이는 영향받지 않는다.
-
-`platform.h` 인터페이스가 최소한으로 유지된 덕에 1단계는 파일 하나로 끝난다. 그것이 두 백엔드를 나란히 유지해 온 이유이기도 하다.
-
 ---
 
 ## 8. 컴파일러가 잡아주지 않는 계약
@@ -1423,8 +1482,14 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 | 체크포인트 `ARCH_VERSION` | 구조가 다른 가중치가 조용히 로드됨 | `test_checkpoint_roundtrip.py` |
 | 설정이 결정론에 영향을 주지 않는다 | 설정이 다른 두 클라이언트가 DESYNC | `sim_hash_dump` diff |
 | `MsgType` 값을 재사용하지 않는다 | 구버전과 붙었을 때 메시지 오해석 | 없음 — 리뷰로 지킨다 |
+| 셰이더의 `layout(location = N)` 과 `glVertexAttribPointer` 인덱스가 같다 | 화면이 조용히 깨진다 (색 자리에 좌표 등) | 없음 — 실행해서 눈으로 확인 |
+| `kFloatsPerVertex` 가 실제 push 하는 float 개수와 같다 | 정점이 어긋나 삼각형이 화면을 가로지른다 | 없음 — 실행해서 눈으로 확인 |
 
-마지막 두 줄에 테스트가 없다는 점을 짚어 둘 만하다. 자동으로 지킬 수 없는 것이 남아 있고, 그건 알고 있는 편이 낫다.
+테스트 칸이 비어 있는 네 줄을 짚어 둘 만하다. 자동으로 지킬 수 없는 것이 남아 있고, 그건 알고 있는 편이 낫다.
+
+**GL 쪽 두 줄이 특히 지독하다.** 정점 버퍼는 타입 없는 `float` 배열이라, C++ 이 밀어 넣은 값과 셰이더가 읽는 속성을 이어주는 것은 사람이 맞춰 놓은 숫자(location, size, offset, stride)뿐이다. 어긋나도 GL 은 에러를 내지 않고 다른 바이트를 읽으며, `glGetError()` 도 조용하다. 링커는 셰이더를 보지도 않는다 — 셰이더는 사용자 기계의 드라이버가 런타임에 컴파일하기 때문이다. 그래서 이 계약을 지키는 방법은 §7.6 의 다섯 군데를 한 커밋에서 함께 고치고, 실행해서 눈으로 확인하는 것뿐이다.
+
+**여기 없는 계약도 하나 짚어 둔다 — "렌더 출력이 어디서나 같다" 는 계약은 없다.** GPU 래스터화 규칙은 벤더·드라이버·창 크기에 따라 경계 픽셀이 달라질 수 있고, 이 프로젝트는 그것을 검사하지 않는다. lockstep 이 desync 검출에 쓰는 것은 `SimGame::StateHash()` 이고 그 해시는 grid·블록·RNG·점수만 먹는다. 두 결정성은 처음부터 별개였다 — **잃은 것은 픽셀 단위 재현성이고, 잃지 않은 것은 게임 진행의 재현성이다.** 멀티플레이가 기대는 것은 후자뿐이다.
 
 전체 회귀는 [Part 12](./part12-hardening-and-release.md) 의 검증 절에 한 세트로 정리돼 있다.
 
@@ -1436,8 +1501,8 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 ## 마치며
 
-이 시리즈는 엔진이 대신 해주던 일들을 하나씩 열어 보는 과정이었다. 창을 만들고, 픽셀을 찍고, 소리를 섞고, 두 대의 컴퓨터를 같은 상태로 붙들고, 그 위에서 신경망을 돌렸다. 각각은 엔진에서 체크박스 하나였던 것들이다.
+이 시리즈는 엔진이 대신 해주던 일들을 하나씩 열어 보는 과정이었다. 창을 만들고, GL 컨텍스트를 세워 삼각형을 밀어 넣고, 소리를 섞고, 두 대의 컴퓨터를 같은 상태로 붙들고, 그 위에서 신경망을 돌렸다. 각각은 엔진에서 체크박스 하나였던 것들이다.
 
-그래서 얻은 것은 테트리스가 아니라 **경계에 대한 감각**이다. 어디까지가 게임 규칙이고 어디부터가 표현인지, 무엇이 결정적이어야 하고 무엇은 달라도 되는지, 어떤 계약이 컴파일러의 보호를 받고 어떤 것은 사람이 지켜야 하는지. §8 의 일곱 줄이 그 요약이다.
+그래서 얻은 것은 테트리스가 아니라 **경계에 대한 감각**이다. 어디까지가 게임 규칙이고 어디부터가 표현인지, 무엇이 결정적이어야 하고 무엇은 달라도 되는지, 어떤 계약이 컴파일러의 보호를 받고 어떤 것은 사람이 지켜야 하는지. §8 의 아홉 줄이 그 요약이다.
 
 다음에 엔진을 쓸 때, 그 체크박스 뒤에 무엇이 있는지 알고 쓰게 된다면 이 시리즈는 제 몫을 한 것이다.

@@ -16,6 +16,9 @@ static HWND s_hwnd = nullptr;
 static HDC s_hdc = nullptr;
 static HGLRC s_hglrc = nullptr;
 static HMODULE s_opengl32 = nullptr;
+// WGL_EXT_swap_control. 확장이라 컨텍스트를 만든 뒤에야 조회할 수 있고,
+// 드라이버가 안 줄 수도 있어 함수 포인터로 들고 있는다.
+static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 static bool s_should_close = false;
 static bool s_frame_pacing = true;
 static int s_win_w = 0;
@@ -220,6 +223,10 @@ void platform_init(int width, int height, const char* title)
         s_hglrc = legacy;
     }
 
+    // 컨텍스트가 current 인 지금이 확장을 조회할 수 있는 시점이다.
+    s_wglSwapInterval = (BOOL (WINAPI*)(int))wglGetProcAddress("wglSwapIntervalEXT");
+    if (s_wglSwapInterval) s_wglSwapInterval(s_frame_pacing ? 1 : 0);
+
     ShowWindow(s_hwnd, SW_SHOW);
     UpdateWindow(s_hwnd);
 }
@@ -402,4 +409,12 @@ void platform_display_size(int& w_out, int& h_out)
 
 void platform_set_fullscreen(bool) {}
 bool platform_fullscreen_supported() { return false; }
-void platform_set_vsync(bool on) { s_frame_pacing = on; }
+void platform_set_vsync(bool on)
+{
+    // SDL 경로와 같은 조건을 만든다 — 확장이 있으면 진짜 vsync 로 vblank 까지
+    // 기다리고, 없으면 platform_end_frame 의 소프트웨어 페이싱만 남는다.
+    // 명시적으로 걸지 않으면 드라이버 기본값(대개 1)에 맡기게 되어 같은
+    // 코드가 기계마다 다르게 동작한다.
+    s_frame_pacing = on;
+    if (s_wglSwapInterval) s_wglSwapInterval(on ? 1 : 0);
+}

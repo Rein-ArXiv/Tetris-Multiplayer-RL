@@ -2,17 +2,17 @@
 #include "../platform/platform.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// renderer/renderer.h — CPU 2D 소프트웨어 렌더러 인터페이스
+// renderer/renderer.h — OpenGL 3.3 Core 2D 렌더러 인터페이스
 //
 // raylib의 BeginDrawing / DrawRectangle / DrawTextEx 등을 대체합니다.
-// 구현: renderer/renderer.cpp
+// 구현: renderer/renderer.cpp (배처), text_gl.cpp (글자), image_gl.cpp (이미지)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 고정 논리 해상도의 ARGB32 프레임버퍼와 이미지/폰트 서브시스템 생성.
-// platform_init() 이후 한 번만 호출.
+// 논리 해상도를 정하고 셰이더·정점 버퍼·이미지/폰트 서브시스템을 만든다.
+// GL 컨텍스트가 필요하므로 반드시 platform_init() 이후 한 번만 호출.
 void renderer_init(int screen_w, int screen_h);
 
-// 프레임 시작: CPU 프레임버퍼를 배경색으로 채운다.
+// 프레임 시작: 뷰포트를 창에 맞추고 배경색으로 지운다.
 // raylib::BeginDrawing() + ClearBackground() 대체.
 void renderer_begin(Color bg);
 
@@ -20,7 +20,7 @@ void renderer_begin(Color bg);
 // 이 호출 이후의 draw_rect/draw_text 가 전부 오프셋됨. 프레임 끝에 (0,0) 리셋 권장.
 void renderer_set_view_offset(int dx, int dy);
 
-// 프레임 종료: 완성된 CPU 프레임버퍼를 플랫폼 표시 계층에 전달.
+// 프레임 종료: 남은 정점을 마저 그리고 버퍼를 교체한다.
 void renderer_end();
 
 // 렌더러 리소스 해제: CPU 픽셀, 이미지, 글리프 캐시.

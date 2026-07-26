@@ -1,4 +1,4 @@
-// platform/sdl.cpp — SDL2 window/input/timer + surface framebuffer presentation
+// platform/sdl.cpp — SDL2 창/입력/타이머 + OpenGL 3.3 Core 컨텍스트
 
 #include <SDL2/SDL.h>
 

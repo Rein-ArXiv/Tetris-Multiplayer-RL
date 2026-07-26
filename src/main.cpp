@@ -1,4 +1,4 @@
-// src/main.cpp — Handmade 버전 (raylib/OpenGL 제거, CPU software renderer)
+// src/main.cpp — Handmade 버전 (raylib 제거, 자체 OpenGL 3.3 Core 렌더러)
 //
 // 변경 사항:
 //   #include <raylib.h>     → platform/platform.h + renderer/renderer.h
@@ -6,7 +6,7 @@
 //   WindowShouldClose()     → platform_should_close()
 //   GetFrameTime()          → platform_begin_frame() 반환값
 //   BeginDrawing()          → renderer_begin()
-//   EndDrawing()            → renderer_end() (present) + platform_end_frame() (pace)
+//   EndDrawing()            → renderer_end() (버퍼 교체) + platform_end_frame() (pace)
 //   IsKeyPressed(KEY_*)     → platform_key_pressed(PKEY_*)
 //   IsKeyDown(KEY_*)        → platform_key_down(PKEY_*)
 //   GetCharPressed()        → platform_get_char_pressed()

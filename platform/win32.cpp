@@ -1,4 +1,4 @@
-// platform/win32.cpp — Win32 window/input/timer + GDI framebuffer presentation
+// platform/win32.cpp — Win32 창/입력/타이머 + OpenGL 3.3 Core 컨텍스트
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

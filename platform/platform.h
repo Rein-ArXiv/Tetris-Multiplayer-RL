@@ -54,7 +54,8 @@ enum PlatformKey : int {
 
 // ─── 플랫폼 API ───────────────────────────────────────────────────────────────
 
-// 윈도우와 입력/타이머 백엔드 초기화. 그래픽 API 컨텍스트는 만들지 않는다.
+// 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
+// 컨텍스트 생성에 실패하면 프로그램을 계속 진행할 수 없으므로 즉시 실패한다.
 void   platform_init(int w, int h, const char* title);
 
 // 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
@@ -71,9 +72,22 @@ float  platform_begin_frame();
 // 프레임 끝. 소프트웨어 VSync가 켜졌다면 60 Hz에 맞춰 남은 시간을 쉰다.
 void   platform_end_frame();
 
-// CPU ARGB32 프레임버퍼를 창에 표시한다. pixels의 각 uint32_t는
-// 0xAARRGGBB이며, pitch_bytes는 한 행의 바이트 수다.
-void   platform_present(const uint32_t* pixels, int w, int h, int pitch_bytes);
+// 그린 프레임을 화면에 내보낸다 (버퍼 교체).
+void   platform_present();
+
+// ─── OpenGL 연동 ─────────────────────────────────────────────────────────────
+// GL 함수 포인터 조회. Windows 의 opengl32.dll 은 GL 1.1 만 export 하므로
+// 3.3 Core 의 거의 모든 함수는 런타임에 이 경로로 받아야 한다.
+// 렌더러가 gl_load_functions() 에서 이 함수를 반복 호출한다.
+void*  platform_gl_get_proc(const char* name);
+
+// 논리 화면이 실제로 그려질 창 안의 사각형(픽셀). 창 리사이즈를 따라간다.
+// 렌더러가 glViewport 에 그대로 넘기는 값이라 GL 규약대로 좌하단 원점이다.
+//
+// 창 종횡비가 논리 종횡비와 다르면 여기서 레터박스가 결정된다. 마우스 좌표를
+// 논리 좌표로 되돌리는 계산도 같은 사각형을 쓰므로, 이 둘이 어긋나면 클릭
+// 지점과 그려진 버튼이 서로 다른 곳을 가리키게 된다.
+void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 
 // 이 프레임에 처음 눌린 키인가? IsKeyPressed() 대체.
 // keyState[key] == true && keyPrev[key] == false

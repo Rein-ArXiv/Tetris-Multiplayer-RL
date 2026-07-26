@@ -10,13 +10,12 @@
 
 #include "platform.h"
 
+#include <cstdio>
+
 static HWND s_hwnd = nullptr;
 static HDC s_hdc = nullptr;
-static HDC s_present_dc = nullptr;
-static HBITMAP s_present_bitmap = nullptr;
-static HGDIOBJ s_present_old_bitmap = nullptr;
-static int s_present_w = 0;
-static int s_present_h = 0;
+static HGLRC s_hglrc = nullptr;
+static HMODULE s_opengl32 = nullptr;
 static bool s_should_close = false;
 static bool s_frame_pacing = true;
 static int s_win_w = 0;
@@ -44,37 +43,6 @@ static LARGE_INTEGER s_frequency{};
 static LARGE_INTEGER s_init_time{};
 static LARGE_INTEGER s_frame_start{};
 
-static bool ensure_present_backbuffer(int width, int height)
-{
-    if (width <= 0 || height <= 0 || !s_hdc) return false;
-    if (s_present_dc && s_present_bitmap &&
-        s_present_w == width && s_present_h == height) return true;
-
-    if (s_present_bitmap) {
-        SelectObject(s_present_dc, s_present_old_bitmap);
-        DeleteObject(s_present_bitmap);
-        s_present_bitmap = nullptr;
-    }
-    if (!s_present_dc) s_present_dc = CreateCompatibleDC(s_hdc);
-    if (!s_present_dc) return false;
-
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    void* memory = nullptr;
-    s_present_bitmap = CreateDIBSection(
-        s_hdc, &info, DIB_RGB_COLORS, &memory, nullptr, 0);
-    if (!s_present_bitmap) return false;
-    s_present_old_bitmap = SelectObject(s_present_dc, s_present_bitmap);
-    SetStretchBltMode(s_present_dc, COLORONCOLOR);
-    s_present_w = width;
-    s_present_h = height;
-    return true;
-}
 
 static void recompute_viewport()
 {
@@ -174,11 +142,13 @@ void platform_init(int width, int height, const char* title)
     window_class.lpfnWndProc = window_proc;
     window_class.hInstance = GetModuleHandleA(nullptr);
     window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    window_class.lpszClassName = "TetrisSoftwareRenderer";
+    window_class.lpszClassName = "TetrisWindow";
     RegisterClassExA(&window_class);
 
-    const DWORD style =
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    // SDL 쪽과 같은 조건을 준다 — 창 크기 조절 가능, 최대화 가능.
+    // WS_THICKFRAME 이 없으면 논리 해상도만 바꿀 수 있고 창은 고정되어,
+    // 같은 코드가 플랫폼마다 다르게 동작한다.
+    const DWORD style = WS_OVERLAPPEDWINDOW;
     RECT rect{0, 0, width, height};
     AdjustWindowRect(&rect, style, FALSE);
     s_hwnd = CreateWindowExA(
@@ -191,22 +161,81 @@ void platform_init(int width, int height, const char* title)
         return;
     }
     s_hdc = GetDC(s_hwnd);
-    SetStretchBltMode(s_hdc, COLORONCOLOR);
+
+    // OpenGL 3.3 Core 컨텍스트를 만든다. Windows 에서는 두 단계다.
+    //
+    // 1) PIXELFORMATDESCRIPTOR 로 "이 DC 에 GL 을 쓰겠다" 고 알리고
+    // 2) 레거시 컨텍스트를 먼저 만든 뒤, 그 컨텍스트가 current 인 상태에서만
+    //    조회 가능한 wglCreateContextAttribsARB 로 진짜 3.3 Core 를 만든다.
+    //
+    // 2단계를 건너뛰고 wglCreateContext 만 쓰면 드라이버 기본 호환 컨텍스트가
+    // 나온다. 그러면 #version 330 core 셰이더가 통하는지 여부가 드라이버에
+    // 따라 달라져 SDL 경로와 동작이 갈린다. 세 플랫폼이 같은 프로파일을
+    // 받아야 셰이더를 한 벌만 유지할 수 있다.
+    PIXELFORMATDESCRIPTOR pfd{};
+    pfd.nSize      = sizeof(pfd);
+    pfd.nVersion   = 1;
+    pfd.dwFlags    = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cAlphaBits = 8;
+    const int pf = ChoosePixelFormat(s_hdc, &pfd);
+    if (!pf || !SetPixelFormat(s_hdc, pf, &pfd)) {
+        std::fprintf(stderr, "[GL] SetPixelFormat failed\n");
+        s_should_close = true;
+        return;
+    }
+
+    HGLRC legacy = wglCreateContext(s_hdc);
+    if (!legacy) {
+        std::fprintf(stderr, "[GL] wglCreateContext failed\n");
+        s_should_close = true;
+        return;
+    }
+    wglMakeCurrent(s_hdc, legacy);
+
+    using CreateCtxAttribs = HGLRC (WINAPI*)(HDC, HGLRC, const int*);
+    auto wglCreateContextAttribsARB = (CreateCtxAttribs)
+        wglGetProcAddress("wglCreateContextAttribsARB");
+
+    if (wglCreateContextAttribsARB) {
+        const int attribs[] = {
+            0x2091 /* MAJOR_VERSION */, 3,
+            0x2092 /* MINOR_VERSION */, 3,
+            0x9126 /* PROFILE_MASK  */, 0x00000001 /* CORE_PROFILE_BIT */,
+            0
+        };
+        HGLRC core = wglCreateContextAttribsARB(s_hdc, nullptr, attribs);
+        if (core) {
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(legacy);
+            wglMakeCurrent(s_hdc, core);
+            s_hglrc = core;
+        } else {
+            std::fprintf(stderr, "[GL] 3.3 Core unavailable; keeping legacy context\n");
+            s_hglrc = legacy;
+        }
+    } else {
+        std::fprintf(stderr, "[GL] wglCreateContextAttribsARB missing; legacy context\n");
+        s_hglrc = legacy;
+    }
+
     ShowWindow(s_hwnd, SW_SHOW);
     UpdateWindow(s_hwnd);
 }
 
 void platform_shutdown()
 {
-    if (s_present_bitmap) {
-        SelectObject(s_present_dc, s_present_old_bitmap);
-        DeleteObject(s_present_bitmap);
-        s_present_bitmap = nullptr;
-        s_present_old_bitmap = nullptr;
+    // 컨텍스트를 DC 보다 먼저 놓는다. 순서를 바꾸면 이미 해제된 DC 를
+    // 참조하는 상태로 wglDeleteContext 가 불린다.
+    if (s_hglrc) {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(s_hglrc);
+        s_hglrc = nullptr;
     }
-    if (s_present_dc) {
-        DeleteDC(s_present_dc);
-        s_present_dc = nullptr;
+    if (s_opengl32) {
+        FreeLibrary(s_opengl32);
+        s_opengl32 = nullptr;
     }
     if (s_hdc && s_hwnd) {
         ReleaseDC(s_hwnd, s_hdc);
@@ -216,7 +245,7 @@ void platform_shutdown()
         DestroyWindow(s_hwnd);
         s_hwnd = nullptr;
     }
-    UnregisterClassA("TetrisSoftwareRenderer", GetModuleHandleA(nullptr));
+    UnregisterClassA("TetrisWindow", GetModuleHandleA(nullptr));
 }
 
 bool platform_should_close() { return s_should_close; }
@@ -242,28 +271,32 @@ float platform_begin_frame()
     return dt < 0.1f ? dt : 0.1f;
 }
 
-void platform_present(const uint32_t* pixels, int width, int height,
-                      int pitch_bytes)
+void platform_present()
 {
-    if (!s_hdc || !pixels || width <= 0 || height <= 0) return;
-    (void)pitch_bytes; // renderer surface is tightly packed
-    if (!ensure_present_backbuffer(s_win_w, s_win_h)) return;
+    if (s_hdc) SwapBuffers(s_hdc);
+}
 
-    RECT client{0, 0, s_win_w, s_win_h};
-    FillRect(s_present_dc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
+void* platform_gl_get_proc(const char* name)
+{
+    // wglGetProcAddress 는 GL 1.2 이상만 돌려준다. glEnable 같은 1.1 함수는
+    // NULL 이 나오므로 opengl32.dll 에서 직접 찾아야 한다. 이 폴백을
+    // 빠뜨리면 로더가 "missing entry point: glEnable" 로 멈춘다.
+    void* p = (void*)wglGetProcAddress(name);
+    if (p == nullptr || p == (void*)0x1 || p == (void*)0x2 ||
+        p == (void*)0x3 || p == (void*)-1) {
+        if (!s_opengl32) s_opengl32 = LoadLibraryA("opengl32.dll");
+        p = s_opengl32 ? (void*)GetProcAddress(s_opengl32, name) : nullptr;
+    }
+    return p;
+}
 
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height; // top-down rows
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    StretchDIBits(s_present_dc,
-                  s_vp_x, s_vp_y, s_vp_w, s_vp_h,
-                  0, 0, width, height,
-                  pixels, &info, DIB_RGB_COLORS, SRCCOPY);
-    BitBlt(s_hdc, 0, 0, s_win_w, s_win_h, s_present_dc, 0, 0, SRCCOPY);
+void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
+{
+    // s_vp_* 는 창 좌상단 원점, GL 은 좌하단 원점.
+    x_out = s_vp_x;
+    y_out = s_win_h - s_vp_y - s_vp_h;
+    w_out = s_vp_w;
+    h_out = s_vp_h;
 }
 
 void platform_end_frame()

@@ -23,6 +23,8 @@ static int s_win_w = 0;
 static int s_win_h = 0;
 static int s_logical_w = 0;
 static int s_logical_h = 0;
+static SDL_GLContext s_glctx = nullptr;
+
 static int s_vp_x = 0;
 static int s_vp_y = 0;
 static int s_vp_w = 0;
@@ -125,14 +127,33 @@ void platform_init(int width, int height, const char* title)
 #ifdef __APPLE__
     set_macos_resource_cwd();
 #endif
+    // OpenGL 3.3 Core 를 명시적으로 요청한다. 세 플랫폼 모두 같은 프로파일을
+    // 받아야 셰이더(#version 330 core)가 그대로 통한다. macOS 는 Core 프로파일이
+    // 아니면 3.x 자체를 주지 않으므로 이 설정이 필수다.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
     s_window = SDL_CreateWindow(
         title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        width, height, SDL_WINDOW_SHOWN);
+        width, height, SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!s_window) {
         std::fprintf(stderr, "[SDL] window creation failed: %s\n", SDL_GetError());
         s_should_close = true;
         return;
     }
+
+    s_glctx = SDL_GL_CreateContext(s_window);
+    if (!s_glctx) {
+        std::fprintf(stderr, "[SDL] GL 3.3 Core context failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(s_window);
+        s_window = nullptr;
+        s_should_close = true;
+        return;
+    }
+    SDL_GL_MakeCurrent(s_window, s_glctx);
+    SDL_GL_SetSwapInterval(s_frame_pacing ? 1 : 0);
     SDL_StartTextInput();
     s_frequency = SDL_GetPerformanceFrequency();
     s_init_time = SDL_GetPerformanceCounter();
@@ -142,6 +163,11 @@ void platform_init(int width, int height, const char* title)
 void platform_shutdown()
 {
     SDL_StopTextInput();
+    // 컨텍스트를 창보다 먼저 지운다 — 창이 사라진 뒤 GL 자원을 만지면 안 된다.
+    if (s_glctx) {
+        SDL_GL_DeleteContext(s_glctx);
+        s_glctx = nullptr;
+    }
     if (s_window) {
         SDL_DestroyWindow(s_window);
         s_window = nullptr;
@@ -216,34 +242,26 @@ float platform_begin_frame()
     return std::min(dt, 0.1f);
 }
 
-void platform_present(const uint32_t* pixels, int width, int height,
-                      int pitch_bytes)
+void platform_present()
 {
-    if (!s_window || !pixels || width <= 0 || height <= 0) return;
-    SDL_Surface* window_surface = SDL_GetWindowSurface(s_window);
-    if (!window_surface) {
-        std::fprintf(stderr, "[SDL] window surface failed: %s\n", SDL_GetError());
-        return;
-    }
-    s_win_w = window_surface->w;
-    s_win_h = window_surface->h;
-    recompute_viewport();
+    if (!s_window) return;
+    SDL_GL_SwapWindow(s_window);
+}
 
-    SDL_Surface* frame = SDL_CreateRGBSurfaceFrom(
-        const_cast<uint32_t*>(pixels), width, height, 32, pitch_bytes,
-        0x00FF0000u, 0x0000FF00u, 0x000000FFu, 0xFF000000u);
-    if (!frame) {
-        std::fprintf(stderr, "[SDL] framebuffer wrapper failed: %s\n",
-                     SDL_GetError());
-        return;
-    }
-    SDL_FillRect(window_surface, nullptr,
-                 SDL_MapRGB(window_surface->format, 0, 0, 0));
-    SDL_Rect destination{s_vp_x, s_vp_y, s_vp_w, s_vp_h};
-    if (SDL_BlitScaled(frame, nullptr, window_surface, &destination) != 0)
-        std::fprintf(stderr, "[SDL] framebuffer blit failed: %s\n", SDL_GetError());
-    SDL_FreeSurface(frame);
-    SDL_UpdateWindowSurface(s_window);
+void* platform_gl_get_proc(const char* name)
+{
+    return SDL_GL_GetProcAddress(name);
+}
+
+void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
+{
+    // s_vp_* 는 창 좌상단 원점이다. GL 은 좌하단 원점이라 y 를 뒤집어 준다.
+    // 지금은 뷰포트가 항상 세로 중앙이라 두 값이 같지만, 나중에 상단 고정
+    // 같은 배치로 바꾸면 이 변환이 없을 때만 조용히 어긋난다.
+    x_out = s_vp_x;
+    y_out = s_win_h - s_vp_y - s_vp_h;
+    w_out = s_vp_w;
+    h_out = s_vp_h;
 }
 
 void platform_end_frame()
@@ -339,4 +357,11 @@ void platform_set_fullscreen(bool on)
 }
 
 bool platform_fullscreen_supported() { return true; }
-void platform_set_vsync(bool on) { s_frame_pacing = on; }
+void platform_set_vsync(bool on)
+{
+    // 이제는 진짜 VSync 다. GL swap interval 1 이면 SDL_GL_SwapWindow 가
+    // vblank 까지 기다리므로 tearing 이 사라진다. 소프트웨어 페이싱과 달리
+    // 디스플레이 주사율에 실제로 동기화된다.
+    s_frame_pacing = on;
+    if (s_glctx) SDL_GL_SetSwapInterval(on ? 1 : 0);
+}

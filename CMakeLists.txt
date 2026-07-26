@@ -105,9 +105,10 @@ if (TETRIS_BUILD_GAME)
         net/framing.cpp
         net/session.cpp
         renderer/renderer.cpp
-        renderer/text_software.cpp
+        renderer/gl_api.cpp
+        renderer/text_gl.cpp
         renderer/shake.cpp
-        renderer/image.cpp
+        renderer/image_gl.cpp
         bot/placement.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
@@ -123,7 +124,9 @@ if (TETRIS_BUILD_GAME)
         net/session.h
         platform/platform.h
         renderer/renderer.h
-        renderer/software_internal.h
+        renderer/gl_api.h
+        renderer/gl_internal.h
+        renderer/gl_shaders.h
         renderer/shake.h
         renderer/image.h
         audio/audio.h
@@ -153,6 +156,11 @@ if (TETRIS_BUILD_GAME)
             target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
         endif()
 
+        # OpenGL 3.3 Core 렌더러. 함수 포인터는 런타임에 받지만 컨텍스트를
+        # 만드는 진입점(SDL 경유)과 GL 1.1 심볼 때문에 GL 라이브러리는 링크한다.
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(tetris PRIVATE OpenGL::GL)
+
         if (WIN32)
             target_link_libraries(tetris PRIVATE gdiplus ws2_32)
         elseif (NOT APPLE)
@@ -172,7 +180,7 @@ if (TETRIS_BUILD_GAME)
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
         if (WIN32)
-            target_link_libraries(tetris PRIVATE gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
+            target_link_libraries(tetris PRIVATE opengl32 gdi32 gdiplus winmm ws2_32 xaudio2 ole32)
         else()
             message(FATAL_ERROR "Handmade Win32 backend is Windows-only. Set -DTETRIS_USE_SDL2=ON.")
         endif()

@@ -33,7 +33,7 @@ LEN_FIELD_BYTES = 2
 TYPE_FIELD_BYTES = 1
 CHECKSUM_FIELD_BYTES = 4
 MIN_FRAME_BYTES = LEN_FIELD_BYTES + TYPE_FIELD_BYTES + CHECKSUM_FIELD_BYTES  # 7
-# Matches net/framing.cpp: MAX_PAYLOAD_BYTES guard.
+# net/framing.cpp의 MAX_PAYLOAD_BYTES와 같은 값이어야 한다.
 # u16의 자연 한계(65535)는 사실상 상한이 없으므로, 실사용 최대(CHAT 200자 UTF-8 ~800B,
 # HASH/INPUT은 수십 B)에 맞춰 실질적인 하드 리미트로 4KB를 건다.
 MAX_PAYLOAD_BYTES = 4096
@@ -50,15 +50,15 @@ class MsgType(enum.IntEnum):
     HASH = 8
     GAME_OVER_CHOICE = 9
 
-    # Relay / matchmaking extensions (only used between client and relay server).
-    # After MATCH_FOUND the relay forwards raw bytes, so these types never reach
-    # the lockstep game loop — they live at the "outer" protocol layer.
+    # 여기부터는 클라이언트와 relay 서버 사이에서만 오가는 매치메이킹용이다.
+    # MATCH_FOUND 이후로는 relay가 바이트를 그대로 흘려보내기만 하므로
+    # 이 메시지들이 lockstep 루프까지 내려오는 일은 없다.
     QUEUE_JOIN = 10     # C→S: [tok_len:1][token:N]  (tok_len=0 → unranked)
     QUEUE_CANCEL = 11   # C→S: empty payload (cancel matchmaking)
     MATCH_FOUND = 12    # S→C: [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
                         #      [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
 
-    # Custom rooms (Section D) — 5-char code flow
+    # 커스텀 방. 5자리 코드로 붙는다.
     ROOM_CREATE = 13    # C→S: [tok_len:1][token:N]
     ROOM_JOIN = 14      # C→S: [code_len:1][code:N][tok_len:1][token:N]
     ROOM_INFO = 15      # S→C: [code_len:1][code:N][status:1][peer_count:1]
@@ -84,7 +84,7 @@ def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:
     return h
 
 
-# ---- LE primitives ---------------------------------------------------------
+# --- little-endian 읽기/쓰기 ---
 
 def le_write_u16(buf: bytearray, value: int) -> None:
     buf += struct.pack("<H", value & 0xFFFF)
@@ -110,7 +110,7 @@ def le_read_u64(data: bytes, offset: int = 0) -> int:
     return struct.unpack_from("<Q", data, offset)[0]
 
 
-# ---- Framing ---------------------------------------------------------------
+# --- 프레임 만들기와 뜯기 ---
 
 def build_frame(msg_type: MsgType | int, payload: bytes | bytearray) -> bytes:
     """Serialise ``(msg_type, payload)`` into the wire format.
@@ -150,9 +150,10 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
             break
 
         length = le_read_u16(stream_buf, offset)
-        # Drop the whole stream if a frame declares a payload larger than the
-        # cap — matches the C++ behaviour and prevents an attacker from
-        # making our recv buffer grow without bound.
+        # 길이가 상한을 넘으면 스트림 전체를 버린다.
+        # 길이 필드가 깨졌다는 뜻이고, 그러면 다음 프레임이 어디서 시작하는지도
+        # 알 수 없다. 억지로 복구하려 들면 쓰레기를 계속 먹는다.
+        # 무한히 큰 길이를 보내 수신 버퍼를 불리는 공격도 여기서 막힌다.
         if length > MAX_PAYLOAD_BYTES + TYPE_FIELD_BYTES:
             del stream_buf[:]
             return out
@@ -177,7 +178,8 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
             try:
                 msg_type = MsgType(msg_type_byte)
             except ValueError:
-                # Unknown type — drop the frame defensively rather than crash.
+                # 모르는 타입은 그 프레임만 버리고 계속 읽는다.
+                # 나중에 메시지가 추가돼도 구버전 클라이언트가 죽지 않는다.
                 pass
             else:
                 out.append((msg_type, payload))

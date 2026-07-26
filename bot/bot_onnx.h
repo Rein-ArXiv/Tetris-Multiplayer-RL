@@ -4,29 +4,21 @@
 #include <string>
 #include <vector>
 
-// ─────────────────────────────────────────────────────────────────────────────
-// bot/bot_onnx.h — ONNX Runtime(C++) 기반 정책 추론 래퍼.
+// 학습한 정책을 게임 안에서 돌리기 위한 ONNX Runtime wrapper.
 //
-// 학습(Python PyTorch) 측에서 TetrisPolicyNet 을 export_onnx.py 로 .onnx 로
-// 내보낸 뒤, 런타임에서 이 파일이 그 모델을 로드해 forward 를 한 번 돌린다.
-// C++ 쪽은 PyTorch 의존성 없음 — onnxruntime.dll/.dylib/.so 하나면 충분.
+// 학습은 Colab에서 PyTorch로 하고, 그 결과를 export_onnx.py로 .onnx 파일에
+// 내보낸다. 게임 쪽은 그 파일만 읽으면 되므로 PyTorch를 설치할 필요가 없다.
+// 배포 머신에 필요한 것은 onnxruntime 공유 라이브러리 하나뿐이다.
 //
-// 학습 스크립트와의 계약(shape):
-//   입력:
-//     "board"   : (1, 1, 20, 10) float32, 점유 0/1
-//     "current" : (1, 7)         float32, one-hot
-//     "next"    : (1, 7)         float32, one-hot
-//   출력:
-//     "policy_logits" : (1, 40) float32
-//     "value"         : (1,)    float32   (사용 안 함, 로드만)
+// 학습 쪽과 맞춰야 하는 입출력 계약:
+//   입력  "board"   (1, 1, 20, 10) float32 — 칸이 차 있으면 1
+//         "current" (1, 7)         float32 — 현재 블록 one-hot
+//         "next"    (1, 7)         float32 — 다음 블록 one-hot
+//   출력  "policy_logits" (1, 40)  float32 — 40가지 placement의 점수
+//         "value"         (1,)     float32 — 학습에만 쓰고 여기선 무시
 //
-// 편의 Infer():
-//   1) SimGame 에서 observe 로 입력 텐서 채움
-//   2) session_.Run()
-//   3) LegalPlacements 마스크로 불법 액션 logits 를 -inf 로 치환
-//   4) argmax 후 (col, rot) 분해
-//   실패 또는 합법 수 0 → false 반환.
-// ─────────────────────────────────────────────────────────────────────────────
+// 이름과 shape이 어긋나면 로드는 되고 추론에서 터진다. 바꿀 일이 있으면
+// python/netbot/export_onnx.py의 INPUT_NAMES/OUTPUT_NAMES도 같이 고친다.
 
 class SimGame;
 
@@ -40,18 +32,23 @@ public:
     BotOnnx(const BotOnnx&) = delete;
     BotOnnx& operator=(const BotOnnx&) = delete;
 
-    // .onnx 파일 로드. 실패(파일 없음, 손상, 바인딩 불일치) 시 false.
-    // 실패 시 err_out 에 사람이 읽을 수 있는 사유가 담긴다.
+    // .onnx 파일을 읽는다. 파일이 없거나, 깨졌거나, 입출력 이름이 위 계약과
+    // 다르면 false. 이 경우 err_out에 화면에 그대로 띄울 수 있는 사유가 담긴다.
+    // 실패해도 예외를 던지지 않는다 — 모델이 없는 것은 정상 상황이고
+    // 호출자는 heuristic bot으로 넘어가면 된다.
     bool Load(const std::string& onnx_path, std::string* err_out = nullptr);
 
-    // 로드된 모델로 (col, rot) 산출. 내부에서 observe + masked argmax.
-    // 합법 수 0 → false.
+    // 현재 판을 보고 둘 곳을 정한다.
+    // 불법 수의 logit을 -inf로 눌러 놓고 최댓값을 고르므로, 모델이 이상한
+    // 값을 내도 규칙에 어긋난 수는 나오지 않는다.
+    // 둘 곳이 아예 없으면(게임 오버 직전) false.
     bool Infer(const SimGame& sim, int& col_out, int& rot_out);
 
     bool IsLoaded() const;
 
 private:
-    // PImpl — onnxruntime 헤더를 .cpp 안에만 가두기 위해.
+    // PImpl. onnxruntime 헤더를 .cpp 안에만 두려는 것이다.
+    // 이 헤더를 include하는 쪽은 ONNX Runtime 없이도 컴파일된다.
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

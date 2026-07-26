@@ -60,7 +60,8 @@ void   platform_init(int w, int h, const char* title);
 // 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
 void   platform_shutdown();
 
-// WM_QUIT 또는 ESC 키를 받으면 true 반환.
+// 창 닫기 요청(WM_CLOSE / WM_DESTROY / SDL_QUIT)을 받으면 true.
+// ESC 키는 여기 관여하지 않는다 — 화면별 뒤로가기로만 쓰인다.
 bool   platform_should_close();
 
 // 프레임 시작: 이전 키 상태 스냅샷 + 메시지 루프(PeekMessage) + 델타타임 반환.

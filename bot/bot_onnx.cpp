@@ -1,8 +1,10 @@
-// bot/bot_onnx.cpp — ONNX Runtime C++ API 래퍼. 헤더 설명은 bot_onnx.h 참조.
+// ONNX Runtime wrapper의 구현. 입출력 계약은 bot_onnx.h에 있다.
 //
-// 이 파일은 항상 컴파일된다. TETRIS_BUILD_BOT=ON 이면 CMake 가
-// TETRIS_HAS_ONNXRUNTIME 을 정의하고 third_party/onnxruntime/ 헤더/라이브러리를
-// 연결한다. OFF 이면 아래의 stub 구현이 빌드되어 Load() 가 실패한다.
+// 이 파일은 ONNX Runtime이 없어도 항상 컴파일된다.
+// TETRIS_BUILD_BOT=ON일 때만 CMake가 TETRIS_HAS_ONNXRUNTIME을 정의하고
+// 실제 구현이 빌드된다. 그렇지 않으면 파일 끝의 stub이 대신 들어가
+// Load()가 언제나 실패하고 게임은 heuristic bot으로 넘어간다.
+// 덕분에 ONNX Runtime을 받지 않은 사람도 저장소를 그대로 빌드할 수 있다.
 
 #include "bot_onnx.h"
 
@@ -30,7 +32,7 @@ struct BotOnnx::Impl {
     std::unique_ptr<Ort::Session> session;
     Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-    // 입출력 이름 — Python export_onnx 에서 고정.
+    // 이 이름들은 export_onnx.py가 박아 넣은 것과 한 글자도 달라선 안 된다.
     std::array<const char*, 3> inputNames  = {"board", "current", "next"};
     std::array<const char*, 2> outputNames = {"policy_logits", "value"};
 
@@ -40,8 +42,9 @@ struct BotOnnx::Impl {
             sessOpts.SetIntraOpNumThreads(1);
             sessOpts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         #if defined(_WIN32)
-            // BotEntry 경로 문자열은 UTF-8로 정규화된다. u8path를 거쳐야 한글
-            // 사용자 폴더 같은 비ASCII 경로가 현재 C locale과 무관하게 보존된다.
+            // 경로는 UTF-8로 들어온다. u8path를 거치지 않으면 Windows에서
+            // 한글 사용자 폴더 같은 경로가 현재 C 로캘 기준으로 잘못 해석돼
+            // "파일 없음"이 된다.
             const std::wstring wpath = std::filesystem::u8path(path).wstring();
             session = std::make_unique<Ort::Session>(env, wpath.c_str(), sessOpts);
         #else
@@ -94,8 +97,8 @@ struct BotOnnx::Impl {
         }
         if (outs.empty()) return false;
 
-        // 잘못 export 된 출력은 shape/type 조회 자체가 예외를 던질 수 있다.
-        // 모든 검증과 데이터 접근을 ORT 예외 경계 안에 둔다.
+        // 잘못 export된 모델은 shape을 물어보는 것만으로도 예외를 던진다.
+        // 그래서 검증과 데이터 접근을 통째로 try 안에 둔다.
         const float* logits = nullptr;
         try {
             if (!outs[0].IsTensor()) return false;
@@ -108,9 +111,9 @@ struct BotOnnx::Impl {
         } catch (const Ort::Exception&) {
             return false;
         }
-        // kNumPlacements = 40 고정.
+        // 출력은 항상 40개(10열 x 4회전)여야 한다.
 
-        // 합법 마스크: LegalPlacements 를 돌려 (col, rot) 집합을 bitset 으로.
+        // 규칙상 둘 수 있는 자리만 남긴다. 모델이 뭘 내놓든 불법 수는 못 고른다.
         auto placements = sim.LegalPlacements();
         if (placements.empty()) return false;
 
@@ -120,7 +123,7 @@ struct BotOnnx::Impl {
             if (a >= 0 && a < kNumPlacements) legal[a] = true;
         }
 
-        // masked argmax
+        // 남은 것 중 점수가 제일 높은 자리를 고른다 (greedy).
         int   bestIdx = -1;
         float bestVal = -std::numeric_limits<float>::infinity();
         for (int i = 0; i < kNumPlacements; ++i) {
@@ -131,8 +134,8 @@ struct BotOnnx::Impl {
             }
         }
         if (bestIdx < 0) {
-            // 모든 합법 logits 가 -inf 였다는 뜻 — 정상 케이스는 아님.
-            // fallback 으로 사전순 최소 합법 수를 선택.
+            // 합법 수는 있는데 전부 -inf인 경우. 모델이 NaN을 뱉으면 이렇게 된다.
+            // 게임이 멈추는 것보다는 아무 수나 두는 편이 낫다.
             return fallback_placement(sim, col_out, rot_out);
         }
         decode_action(bestIdx, col_out, rot_out);
@@ -162,8 +165,8 @@ bool BotOnnx::IsLoaded() const
 
 #else  // !TETRIS_HAS_ONNXRUNTIME
 
-// ORT 바이너리가 준비되기 전에도 빌드가 돌아가도록 스텁. Load 는 항상 실패.
-// Infer 경로는 호출자가 IsLoaded 로 가드하므로 도달하지 않는다.
+// ONNX Runtime이 없을 때 쓰는 stub. Load는 언제나 실패하고,
+// 호출자가 IsLoaded()로 걸러 주므로 Infer까지 오지 않는다.
 struct BotOnnx::Impl { bool loaded = false; };
 
 BotOnnx::BotOnnx() : impl_(std::make_unique<Impl>()) {}

@@ -1,4 +1,4 @@
-// bot/placement.cpp — placement/관측 로직의 C++ 구현. Python 동등성 계약은 .h 참고.
+// placement 계산과 관측 변환의 구현. Python 쪽과 맞춰야 하는 계약은 .h에 적어 뒀다.
 #include "placement.h"
 
 #include "../src/sim_game.h"
@@ -16,8 +16,9 @@ std::vector<uint8_t> expand_placement(int cur_col,
     std::vector<uint8_t> seq;
     seq.reserve(8);
 
-    // 회전은 항상 전진 방향 — SimBlock 이 Rotate 만 공개하고 역회전은 UndoRotate
-    // 용 내부 API 라서 1~3 회 로테이트로 통일 (Python 원본과 동일).
+    // 회전은 항상 시계 방향으로만 돈다. SimBlock에 반시계 회전이 없기 때문에
+    // 목표 rotation까지 1~3번 돌리는 식으로 맞춘다.
+    // UndoRotation은 "돌려보고 안 맞으면 되돌리기" 전용이라 여기선 쓸 수 없다.
     int rot_steps = ((tgt_rot - cur_rot) % kNumRotations + kNumRotations) % kNumRotations;
     for (int i = 0; i < rot_steps; ++i) {
         seq.push_back((uint8_t)INPUT_ROTATE);
@@ -40,7 +41,7 @@ bool fallback_placement(const SimGame& sim, int& col_out, int& rot_out)
     auto placements = sim.LegalPlacements();
     if (placements.empty()) return false;
 
-    // Python fallback_placement: sorted by (col, rot) — 최소값 선택.
+    // (col, rot) 사전순 첫 번째. 좋은 수를 찾는 게 아니라 아무거나 두는 것이다.
     auto best = std::min_element(
         placements.begin(), placements.end(),
         [](const SimGame::Placement& a, const SimGame::Placement& b) {
@@ -57,8 +58,8 @@ void observe(const SimGame& sim,
              float* current_out,
              float* next_out)
 {
-    // board: (20 * 10) row-major, 0 또는 1.
-    // python/common/obs.py 와 동일: (grid > 0) & (grid != 8).
+    // 굳은 블록만 1로 친다. ghost(8)는 화면에만 있는 것이라 0이다.
+    // python/common/obs.py의 (grid > 0) & (grid != 8)과 같은 조건이다.
     const auto& grid = sim.Grid();
     for (int r = 0; r < kBoardRows; ++r) {
         for (int c = 0; c < kBoardCols; ++c) {
@@ -67,7 +68,8 @@ void observe(const SimGame& sim,
         }
     }
 
-    // current / next one-hot — id 는 1..7 범위, 그 외(0 등) 는 모두 0.
+    // one-hot. 블록 ID는 1부터 시작하므로 인덱스는 하나씩 당긴다.
+    // 범위 밖 ID가 들어오면 전부 0인 벡터가 되는데, 이는 정상 상황이 아니다.
     for (int i = 0; i < kNumPieceTypes; ++i) {
         current_out[i] = 0.0f;
         next_out[i]    = 0.0f;
@@ -79,11 +81,13 @@ void observe(const SimGame& sim,
 }
 
 namespace {
-// locked 셀 판정 — 0(빈칸)도 8(ghost)도 아닌 것만 고정 블록으로 친다(observe 와 동일).
+// 굳은 블록인지 판정한다. observe와 같은 규칙을 써야 평가와 관측이 어긋나지 않는다.
 inline bool is_locked(int v) { return v > 0 && v != 8; }
 
-// El-Tetris 가중치로 결과 보드를 평가한다. 높을수록 좋음.
+// 보드를 한 숫자로 점수화한다. 클수록 좋은 판이다.
 //   score = -0.51*총높이 + 0.76*삭제줄 - 0.36*구멍 - 0.18*요철
+// 널리 쓰이는 Tetris 휴리스틱 가중치다. 구멍(위가 막힌 빈칸)에 큰 벌점을 주는
+// 것이 핵심이고, 나머지는 판을 낮고 평평하게 유지하라는 뜻이다.
 double eval_board(const int (&grid)[kBoardRows][kBoardCols], int lines_cleared)
 {
     int heights[kBoardCols] = {0};

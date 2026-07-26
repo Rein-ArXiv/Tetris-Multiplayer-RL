@@ -1,9 +1,14 @@
 """Legal action masks for the placement-level action space.
 
 The action space is fixed at ``NUM_PLACEMENTS == NUM_COLS * NUM_ROTATIONS == 40``,
-encoded as ``action_index = col * NUM_ROTATIONS + rot``. Some pieces have fewer
-than 4 unique rotations and some columns put the piece out of bounds; the legal
-mask zeros those out so the policy can never sample them.
+encoded as ``action_index = col * NUM_ROTATIONS + rot``.
+
+The mask zeros out placements that are out of bounds or blocked, so the policy
+can never sample an illegal move. It does **not** deduplicate: a piece whose
+rotations are not all distinct (O has one shape, I/S/Z have two) keeps every
+rotation index that lands legally, so the same resulting board can be reachable
+through more than one action. That dilutes the policy distribution slightly but
+keeps the action index identical on both sides of the pybind11 boundary.
 """
 
 from __future__ import annotations

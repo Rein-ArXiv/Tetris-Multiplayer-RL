@@ -51,8 +51,9 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
                 "gymnasium is required for TetrisPlacementEnv. "
                 "Install it with `pip install gymnasium`."
             )
-        # Imported lazily so the rest of common/ stays importable without the
-        # native module being built (used in unit tests that mock SimGame).
+        # 여기서 import하는 이유가 있다. 최상단에서 하면 tetris_py를 빌드하지 않은
+        # 환경에서 common 패키지 자체를 import할 수 없게 된다.
+        # 가짜 SimGame을 끼워 넣는 테스트도 이 지연 import 덕분에 가능하다.
         from sim import SimGame  # noqa: PLC0415
 
         self._SimGame = SimGame
@@ -101,8 +102,9 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         cleared = self.sim.apply_placement(col, rot)
 
         if cleared < 0:
-            # Illegal placement — don't advance, hand back zero reward.
-            # Frameworks that respect the legal_mask should never see this.
+            # 불법 수가 오면 판을 건드리지 않고 보상 0만 돌려준다.
+            # legal_mask를 제대로 쓰면 여기 올 일이 없지만, 마스킹을 빠뜨린
+            # 학습 코드가 조용히 이상한 상태로 가는 것보다는 낫다.
             reward = 0.0
             terminated = self.sim.game_over()
         else:
@@ -112,11 +114,12 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         truncated = False
         return self._observation(), reward, terminated, truncated, self._info()
 
-    # ---- Internals -------------------------------------------------------
+    # --- 내부 헬퍼 ---
     def _observation(self) -> dict[str, np.ndarray]:
         assert self.sim is not None
         obs = build_observation(self.sim)
-        # Gymnasium expects numpy, not torch.
+        # Gymnasium은 관측을 NumPy 배열로 받는다. 여기서 텐서로 바꾸면
+        # 환경을 감싸는 wrapper들이 깨진다. 텐서 변환은 학습 루프의 몫이다.
         return {k: v.numpy() for k, v in obs.items()}
 
     def _info(self) -> dict[str, Any]:

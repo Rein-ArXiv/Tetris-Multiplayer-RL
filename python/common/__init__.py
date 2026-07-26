@@ -15,21 +15,24 @@ Colab-training to local-inference boundary:
 - ``env_versus`` — two-board garbage environment with scripted/policy opponents
 
 The placement action space is fixed at ``COLS * ROTATIONS == 10 * 4 == 40``.
-Some pieces have fewer than 4 unique rotations; the legal mask zeros those out.
+Pieces with fewer than 4 distinct rotations (O, and the 2-state pieces) still
+enumerate all 4, so the mask keeps several *duplicate* actions that differ in
+index but land identically. This is deliberate: the action index must mean the
+same thing in C++ and Python, which rules out compacting the space per piece.
 """
 
 from __future__ import annotations
 
-# Action-space constants — kept here so models.py, obs.py, action_mask.py and
-# env.py all agree without circular imports.
+# action space 상수를 여기 모아 둔다. models.py, obs.py, action_mask.py, env.py가
+# 전부 이 값을 참조하는데, 어느 한 모듈에 두면 서로 import하다 순환이 생긴다.
 NUM_COLS = 10
 NUM_ROTATIONS = 4
 NUM_PLACEMENTS = NUM_COLS * NUM_ROTATIONS  # 40
 
-# Number of distinct piece IDs (1..7 — see src/sim_blocks.h).
+# 블록 종류 수. ID는 0이 아니라 1부터 시작한다(src/sim_blocks.h 기준).
 NUM_PIECE_TYPES = 7
 
-# Board dimensions — must match SimGrid::kRows / kCols.
+# 보드 크기. SimGrid::kRows / kCols와 어긋나면 관측 텐서 shape이 안 맞는다.
 BOARD_ROWS = 20
 BOARD_COLS = 10
 

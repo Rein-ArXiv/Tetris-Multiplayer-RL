@@ -3122,7 +3122,9 @@ int main(int argc, char** argv)
             bool clickYes = gui_button(bxYes, byPos, bw, bh, "예 (Y)", 22);
             bool clickNo  = gui_button(bxNo,  byPos, bw, bh, "아니오 (N)", 22);
 
-            // 키보드: Y = Yes, N = No, Enter = Yes (관성), Escape 는 창 닫기라 피함.
+            // 키보드: Y = Yes, N = No, Enter = Yes (관성).
+            // Escape 는 배정하지 않는다 — 다른 화면에서 전부 '뒤로가기'로
+            // 쓰고 있어서, 여기서만 '예'로 동작하면 일관성이 깨진다.
             if (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER))
                 clickYes = true;
             if (platform_key_pressed(PKEY_N))

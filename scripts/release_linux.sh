@@ -7,7 +7,8 @@
 #   RELAY_ENDPOINT=relay.example.com:7777 META_URL=https://api.example.com ./scripts/release_linux.sh
 #   DEBUG_UI=1 NET_TRACE=1 ./scripts/release_linux.sh
 #
-# 의존성: cmake, g++, libsdl2-dev, libgl1-mesa-dev.
+# 의존성: cmake, g++, libsdl2-dev.
+#   렌더링은 CPU 소프트웨어 래스터라이저라 OpenGL 개발 패키지는 필요 없다.
 # 산출물: dist/tetris-linux-x64.tar.gz
 #   tetris-linux-x64/
 #     tetris

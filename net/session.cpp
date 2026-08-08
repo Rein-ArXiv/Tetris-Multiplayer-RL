@@ -80,54 +80,6 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
     return true;
 }
 
-bool Session::Adopt(TcpSocket socket, Role role, uint64_t seed,
-                    uint32_t start_tick, uint8_t input_delay) {
-    if (!socket.valid()) return false;
-
-    // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
-    quit = false;
-    connectionFailed = false;
-    connected = false;
-    ready = false;
-    listening = false;
-    {
-        std::lock_guard<std::mutex> lk(inMu);
-        remoteInputs.clear();
-    }
-    lastRemoteTick = 0;
-    lastLocalTick = 0;
-    recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
-
-    {
-        std::lock_guard<std::mutex> lk(seedMu);
-        seedParams.seed = seed;
-        seedParams.start_tick = start_tick;
-        seedParams.input_delay = input_delay;
-        seedParams.role = role;
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(sockMu_);
-        if (quit.load()) {
-            tcp_close(socket);
-            return false;
-        }
-        sock = socket;
-    }
-    connected = true;
-    // HELLO/SEED 핸드셰이크 생략 — 릴레이가 MATCH_FOUND 로 seed/role 을 이미 확정
-    lastPongMs.store(now_ms());
-    lastPingSentMs.store(0);
-    ready = true;
-    th = std::thread(&Session::ioThread, this);
-    NET_TRACE("[NET] Adopted relay socket: role="
-              << (role == Role::Host ? "HOST" : "GUEST")
-              << " seed=0x" << std::hex << seed << std::dec);
-    return true;
-}
-
 bool Session::Connect(const std::string& host, uint16_t port) {
     NET_TRACE("[NET] Connecting to " << host << ":" << port);
 
@@ -167,7 +119,7 @@ bool Session::Connect(const std::string& host, uint16_t port) {
     {
         std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        pushSend(std::move(fr));
         NET_TRACE("[NET] Sent HELLO message");
     }
     return true;
@@ -181,13 +133,13 @@ void Session::SendInput(uint32_t tick, uint8_t mask) {
     if (tick > cur) lastLocalTick.store(tick);
     std::vector<uint8_t> pl; le_write_u32(pl, tick); le_write_u16(pl, 1); pl.push_back(mask);
     auto fr = build_frame(MsgType::INPUT, pl);
-    std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+    pushSend(std::move(fr));
 }
 
 void Session::SendHash(uint32_t tick, uint64_t hash) {
     std::vector<uint8_t> pl; le_write_u32(pl, tick); le_write_u64(pl, hash);
     auto fr = build_frame(MsgType::HASH, pl);
-    std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+    pushSend(std::move(fr));
 }
 
 void Session::SendGameOverChoice(GameOverChoice choice) {
@@ -195,7 +147,7 @@ void Session::SendGameOverChoice(GameOverChoice choice) {
     std::vector<uint8_t> pl;
     pl.push_back((uint8_t)choice);
     auto fr = build_frame(MsgType::GAME_OVER_CHOICE, pl);
-    std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+    pushSend(std::move(fr));
     NET_TRACE("[NET] Sent game over choice: " << (int)choice);
 }
 
@@ -210,7 +162,7 @@ void Session::SendNewSeed(uint64_t newSeed) {
         pl.push_back((uint8_t)seedParams.role);
     }
     auto fr = build_frame(MsgType::SEED, pl);
-    std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+    pushSend(std::move(fr));
     NET_TRACE("[NET] Sent new seed: 0x" << std::hex << newSeed << std::dec);
 }
 
@@ -224,8 +176,7 @@ void Session::SendChat(const std::string& text) {
     le_write_u16(pl, (uint16_t)n);
     pl.insert(pl.end(), text.begin(), text.begin() + n);
     auto fr = build_frame(MsgType::CHAT, pl);
-    std::lock_guard<std::mutex> lk(sendMu);
-    sendQ.push_back(std::move(fr));
+    pushSend(std::move(fr));
 }
 
 bool Session::PullChat(std::string& outText) {
@@ -250,8 +201,7 @@ void Session::SendMatchSummary(uint8_t won,
     le_write_u32(pl, opp_lines);
     le_write_u32(pl, duration_s);
     auto fr = build_frame(MsgType::MATCH_SUMMARY, pl);
-    std::lock_guard<std::mutex> lk(sendMu);
-    sendQ.push_back(std::move(fr));
+    pushSend(std::move(fr));
 }
 
 bool Session::GetMatchResult(MatchResult& out) const {
@@ -266,6 +216,31 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
     auto it = remoteInputs.find(tick);
     if (it == remoteInputs.end()) return false;
     outMask = it->second; return true;
+}
+
+// sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
+// 소켓이 막히면(상대가 멈췄거나 네트워크가 죽었거나) 큐가 무한히 자란다.
+//
+// 상한을 넘겼을 때 오래된 프레임을 버리는 선택지는 쓸 수 없다. lockstep 은
+// 모든 INPUT 이 순서대로 도착한다는 전제 위에 서 있어서, 한 프레임만 사라져도
+// 양쪽 시뮬레이션이 조용히 어긋난다. DESYNC 배너가 뜨기까지 한참 걸리고
+// 원인도 추적하기 어렵다.
+//
+// 그래서 큐가 넘치면 연결이 사실상 끊긴 것으로 보고 실패 처리한다.
+// 상위 UI 가 "상대 연결 끊김"을 띄우고 사용자가 재접속을 고르게 하는 편이,
+// 어긋난 채로 계속 도는 것보다 낫다.
+constexpr size_t kMaxSendQueue = 4096;   // 60Hz 기준 약 68초치 INPUT
+
+void Session::pushSend(std::vector<uint8_t>&& fr) {
+    std::lock_guard<std::mutex> lk(sendMu);
+    if (sendQ.size() >= kMaxSendQueue) {
+        NET_WARN("[NET] sendQ overflow (" << sendQ.size()
+                 << " frames) - treating peer as disconnected");
+        connectionFailed = true;
+        quit = true;
+        return;
+    }
+    sendQ.push_back(std::move(fr));
 }
 
 void Session::Close() {
@@ -878,7 +853,7 @@ void Session::ioThread() {
                 lastPingSentMs.store(now);
                 std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
                 auto fr = build_frame(MsgType::PING, pl);
-                std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+                pushSend(std::move(fr));
             }
 
             // 메인 스레드 스톨 자동 heartbeat — 창 드래그 시 메인 루프가 WM_ENTERSIZEMOVE
@@ -900,8 +875,7 @@ void Session::ioThread() {
                     auto fr = build_frame(MsgType::INPUT, pl);
                     lastLocalTick.store(nextTick);
                     heartbeatTickEnd_.store(nextTick);
-                    std::lock_guard<std::mutex> lk(sendMu);
-                    sendQ.push_back(std::move(fr));
+                    pushSend(std::move(fr));
                 }
             } else {
                 lastHeartbeatMs_.store(0);
@@ -1005,7 +979,7 @@ void Session::acceptThread(uint16_t port)
     {
         std::vector<uint8_t> pl; le_write_u16(pl, 1);
         auto fr = build_frame(MsgType::HELLO, pl);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        pushSend(std::move(fr));
         NET_TRACE("[NET] Queued HELLO message");
     }
     {
@@ -1018,7 +992,7 @@ void Session::acceptThread(uint16_t port)
             pl.push_back((uint8_t)seedParams.role);
         }
         auto fr = build_frame(MsgType::SEED, pl);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        pushSend(std::move(fr));
         {
             std::lock_guard<std::mutex> lk2(seedMu);
             NET_TRACE("[NET] Queued SEED message (seed=0x" << std::hex << seedParams.seed << std::dec << ")");
@@ -1036,7 +1010,7 @@ void Session::handleFrame(const Frame& f) {
         NET_TRACE("[NET] Received HELLO message");
         std::vector<uint8_t> pl; pl.push_back(1);
         auto fr = build_frame(MsgType::HELLO_ACK, pl);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        pushSend(std::move(fr));
         NET_TRACE("[NET] Queued HELLO_ACK response");
     } break;
     case MsgType::HELLO_ACK: {
@@ -1093,7 +1067,7 @@ void Session::handleFrame(const Frame& f) {
             }
             std::vector<uint8_t> ack; le_write_u32(ack, lastRemoteTick.load());
             auto fr = build_frame(MsgType::ACK, ack);
-            std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+            pushSend(std::move(fr));
         }
     } break;
     case MsgType::ACK: {
@@ -1125,7 +1099,7 @@ void Session::handleFrame(const Frame& f) {
         // 상대의 PING 은 즉시 PONG 으로 에코 — io 스레드가 계속 돌고 있으면
         // 메인 스레드가 얼어도(창 드래그 등) 상대는 우리를 살아있다고 판정.
         std::vector<uint8_t> pong = f.payload; auto fr = build_frame(MsgType::PONG, pong);
-        std::lock_guard<std::mutex> lk(sendMu); sendQ.push_back(std::move(fr));
+        pushSend(std::move(fr));
     } break;
     case MsgType::PONG: {
         // 최신 PONG 도착 시각 기록 — linkStatus() 가 이 값을 기준으로 판정.

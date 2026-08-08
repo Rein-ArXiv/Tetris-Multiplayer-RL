@@ -34,7 +34,8 @@ from common.checkpoint import load_checkpoint
 from common.models import TetrisPolicyNet
 
 
-# Must match bot/bot_onnx.cpp's inputNames / outputNames arrays.
+# bot/bot_onnx.cpp의 inputNames / outputNames와 한 글자도 달라선 안 된다.
+# 여기가 어긋나면 모델은 로드되고 추론에서 터진다.
 INPUT_NAMES = ["board", "current", "next"]
 OUTPUT_NAMES = ["policy_logits", "value"]
 
@@ -56,7 +57,8 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
     model = load_checkpoint(ckpt_path, device="cpu")
     model.eval()
 
-    # Dummy inputs matching common.obs.build_observation shapes with a batch dim.
+    # export할 때 넘기는 예제 입력. shape만 맞으면 되고 값은 의미 없다.
+    # common.obs.build_observation의 출력에 batch 차원 하나를 더한 모양이다.
     dummy_board = torch.zeros(1, 1, BOARD_ROWS, BOARD_COLS, dtype=torch.float32)
     dummy_current = torch.zeros(1, NUM_PIECE_TYPES, dtype=torch.float32)
     dummy_next = torch.zeros(1, NUM_PIECE_TYPES, dtype=torch.float32)
@@ -69,9 +71,10 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
         "do_constant_folding": True,
     }
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
-        # Keep this simple policy net on the stable legacy exporter path. Newer
-        # PyTorch releases default to the dynamo exporter, which additionally
-        # needs onnxscript and can fail in Colab runtimes that only have onnx.
+        # 구형 exporter를 명시적으로 쓴다. 최신 PyTorch가 기본으로 삼는
+        # dynamo exporter는 onnxscript를 따로 요구하는데, Colab에는 onnx만
+        # 깔려 있는 경우가 많아 export가 그냥 실패한다.
+        # 이 정도 크기의 conv + linear 모델에는 구형 경로로 충분하다.
         kwargs["dynamo"] = False
 
     print(f"[export_onnx] torch {torch.__version__}, opset {opset}")

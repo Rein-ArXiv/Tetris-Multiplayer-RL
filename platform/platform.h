@@ -14,8 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── 색상 ─────────────────────────────────────────────────────────────────────
-// raylib의 Color { r, g, b, a } 와 동일한 레이아웃. glUniform4f 에 넘기기 전에
-// 각 채널을 /255.0f 로 정규화한다.
+// raylib의 Color { r, g, b, a } 와 동일한 레이아웃.
 struct Color { uint8_t r, g, b, a; };
 
 // 공통 색상 상수 (main.cpp 변경을 최소화하기 위해 raylib 이름 유지)
@@ -55,24 +54,40 @@ enum PlatformKey : int {
 
 // ─── 플랫폼 API ───────────────────────────────────────────────────────────────
 
-// 윈도우 생성 + OpenGL 컨텍스트 바인딩.
-// 내부에서: RegisterClassEx → CreateWindowEx → PIXELFORMATDESCRIPTOR →
-//           ChoosePixelFormat → SetPixelFormat → wglCreateContext
+// 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
+// 컨텍스트 생성에 실패하면 프로그램을 계속 진행할 수 없으므로 즉시 실패한다.
 void   platform_init(int w, int h, const char* title);
 
-// 윈도우 및 GL 컨텍스트 해제. CloseWindow() 대체.
+// 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
 void   platform_shutdown();
 
-// WM_QUIT 또는 ESC 키를 받으면 true 반환.
+// 창 닫기 요청(WM_CLOSE / WM_DESTROY / SDL_QUIT)을 받으면 true.
+// ESC 키는 여기 관여하지 않는다 — 화면별 뒤로가기로만 쓰인다.
 bool   platform_should_close();
 
 // 프레임 시작: 이전 키 상태 스냅샷 + 메시지 루프(PeekMessage) + 델타타임 반환.
 // GetFrameTime() 대체. MAX_DELTA = 100ms 클램핑 포함.
 float  platform_begin_frame();
 
-// 프레임 끝: SwapBuffers(hdc) — 더블 버퍼를 교체해 화면에 표시.
-// EndDrawing() 대체.
+// 프레임 끝. 소프트웨어 VSync가 켜졌다면 60 Hz에 맞춰 남은 시간을 쉰다.
 void   platform_end_frame();
+
+// 그린 프레임을 화면에 내보낸다 (버퍼 교체).
+void   platform_present();
+
+// ─── OpenGL 연동 ─────────────────────────────────────────────────────────────
+// GL 함수 포인터 조회. Windows 의 opengl32.dll 은 GL 1.1 만 export 하므로
+// 3.3 Core 의 거의 모든 함수는 런타임에 이 경로로 받아야 한다.
+// 렌더러가 gl_load_functions() 에서 이 함수를 반복 호출한다.
+void*  platform_gl_get_proc(const char* name);
+
+// 논리 화면이 실제로 그려질 창 안의 사각형(픽셀). 창 리사이즈를 따라간다.
+// 렌더러가 glViewport 에 그대로 넘기는 값이라 GL 규약대로 좌하단 원점이다.
+//
+// 창 종횡비가 논리 종횡비와 다르면 여기서 레터박스가 결정된다. 마우스 좌표를
+// 논리 좌표로 되돌리는 계산도 같은 사각형을 쓰므로, 이 둘이 어긋나면 클릭
+// 지점과 그려진 버튼이 서로 다른 곳을 가리키게 된다.
+void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 
 // 이 프레임에 처음 눌린 키인가? IsKeyPressed() 대체.
 // keyState[key] == true && keyPrev[key] == false
@@ -101,14 +116,16 @@ float  platform_mouse_wheel();
 // platform_init 이후 경과 초. GetTime() 대체.
 double platform_get_time();
 
-// renderer.cpp 에서 wglUseFontBitmaps 호출 시 HDC 필요
-void*  platform_get_hdc();
-
 // ─── 윈도우 설정 (렌더/UI 전용 — SimGame/결정성과 무관) ──────────────────────────
-// 창 크기를 (w,h) 로 바꾸고 화면 중앙에 재배치. glViewport 갱신.
+// 창 크기를 (w,h) 로 바꾸고 화면 중앙에 재배치. 표시 영역을 갱신.
 // GUI 는 platform_init 에 넘긴 논리 크기(720×640)를 기준 좌표로 쓰므로,
 // 마우스 좌표는 항상 논리 좌표로 역매핑된다 (아래 platform_mouse_x/y 참고).
 void   platform_set_window_size(int w, int h);
+
+// 창을 놓을 수 있는 화면 영역(픽셀). 작업 표시줄 등을 뺀 크기다.
+// 설정 화면이 모니터보다 큰 창 프리셋을 감추는 데 쓴다 — 2430x2160 을
+// 1920x1080 모니터에서 고르면 창의 절반이 화면 밖으로 나간다.
+void   platform_display_size(int& w_out, int& h_out);
 
 // 전체화면 토글. on=true 면 데스크톱-해상도 전체화면(FULLSCREEN_DESKTOP),
 // off 면 창 모드로 복귀. 전체화면에서 모니터 종횡비가 논리(9:8) 와 다르면
@@ -120,5 +137,5 @@ void   platform_set_fullscreen(bool on);
 // 비활성(회색) 으로 그려 "켜도 아무 일 없는" 거짓 토글을 막는다.
 bool   platform_fullscreen_supported();
 
-// VSync on/off. SDL_GL_SetSwapInterval(on?1:0).
+// 소프트웨어 프레임 페이싱 on/off. on이면 platform_end_frame이 60 Hz를 목표로 한다.
 void   platform_set_vsync(bool on);

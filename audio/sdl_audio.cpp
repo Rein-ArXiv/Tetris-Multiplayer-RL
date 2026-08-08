@@ -10,9 +10,10 @@
 //   - 보이스 = { sound handle, read position, active, loop }.
 //   - audio_play_sound : 빈 SFX 슬롯 찾아 position=0, active=true 로 스타트.
 //   - audio_play_music : BGM 보이스 교체, loop=true.
-//   - 포맷 변환은 하지 않음 — 디바이스 포맷(2ch/44100/S16) 과 맞지 않는
-//     MP3 는 samplerate 를 그대로 출력해 약간 이상해질 수 있지만 게임 사운드
-//     수준에서는 충분.  필요 시 SDL_AudioStream 도입.
+//   - 로드 시점에 SDL_AudioStream 으로 디바이스 포맷(채널/샘플레이트) 에 맞춰
+//     한 번 변환해 둔다. 그래서 믹서는 리샘플링을 몰라도 되고, 콜백은 단순
+//     합산만 한다. 변환을 재생 시점이 아니라 로드 시점에 하는 이유는
+//     오디오 콜백 스레드에서 할당을 피하기 위해서다.
 
 #include "audio.h"
 
@@ -131,8 +132,11 @@ bool audio_init()
     want.samples  = 1024;
     want.callback = audio_callback;
 
-    s_dev = SDL_OpenAudioDevice(nullptr, 0, &want, &s_have,
-                                SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    // allowed_changes = 0 — 요청한 포맷을 그대로 받는다. 장치가 44100 을
+    // 지원하지 않으면 SDL 이 내부 변환기를 끼워 넣는다.
+    // 예전에는 SDL_AUDIO_ALLOW_FREQUENCY_CHANGE 를 줬는데, 그러면 48000 으로
+    // 열린 장치에서 44100 짜리 MP3 가 그대로 흘러 약 8.8% 빠르게 재생됐다.
+    s_dev = SDL_OpenAudioDevice(nullptr, 0, &want, &s_have, 0);
     if (s_dev == 0) {
         fprintf(stderr, "[audio] SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -197,12 +201,55 @@ AudioHandle audio_load_sound(const char* filepath)
     }
 
     SoundData sd;
-    sd.channels   = cfg.channels;
-    sd.sampleRate = cfg.sampleRate;
-    size_t total  = (size_t)frames * cfg.channels;
-    sd.pcm.assign(samples, samples + total);
-    sd.valid = true;
-    drmp3_free(samples, nullptr);
+    const size_t total = (size_t)frames * cfg.channels;
+
+    if ((int)cfg.channels == s_have.channels &&
+        (int)cfg.sampleRate == s_have.freq)
+    {
+        // 이미 디바이스 포맷 — 그대로 복사.
+        sd.pcm.assign(samples, samples + total);
+        sd.channels   = cfg.channels;
+        sd.sampleRate = cfg.sampleRate;
+        sd.valid      = true;
+        drmp3_free(samples, nullptr);
+    }
+    else
+    {
+        // 채널 수나 샘플레이트가 다르면 SDL 변환기를 통과시킨다.
+        SDL_AudioStream* conv = SDL_NewAudioStream(
+            AUDIO_S16SYS, (Uint8)cfg.channels, (int)cfg.sampleRate,
+            AUDIO_S16SYS, (Uint8)s_have.channels, s_have.freq);
+        if (!conv) {
+            fprintf(stderr, "[audio] SDL_NewAudioStream failed for %s: %s\n",
+                    filepath, SDL_GetError());
+            drmp3_free(samples, nullptr);
+            return 0;
+        }
+        const int inBytes = (int)(total * sizeof(int16_t));
+        if (SDL_AudioStreamPut(conv, samples, inBytes) != 0 ||
+            SDL_AudioStreamFlush(conv) != 0) {
+            fprintf(stderr, "[audio] resample failed for %s: %s\n",
+                    filepath, SDL_GetError());
+            SDL_FreeAudioStream(conv);
+            drmp3_free(samples, nullptr);
+            return 0;
+        }
+        drmp3_free(samples, nullptr);
+
+        const int outBytes = SDL_AudioStreamAvailable(conv);
+        if (outBytes <= 0) {
+            fprintf(stderr, "[audio] resample produced nothing for %s\n", filepath);
+            SDL_FreeAudioStream(conv);
+            return 0;
+        }
+        sd.pcm.resize((size_t)outBytes / sizeof(int16_t));
+        SDL_AudioStreamGet(conv, sd.pcm.data(), outBytes);
+        SDL_FreeAudioStream(conv);
+
+        sd.channels   = (uint32_t)s_have.channels;
+        sd.sampleRate = (uint32_t)s_have.freq;
+        sd.valid      = true;
+    }
 
     std::lock_guard<std::mutex> lk(s_mu);
     AudioHandle h = (AudioHandle)s_sounds.size();

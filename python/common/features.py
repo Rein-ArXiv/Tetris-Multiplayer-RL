@@ -34,7 +34,8 @@ def column_heights(board: np.ndarray) -> np.ndarray:
     column has height 0.
     """
     occupied = board > 0
-    # First occupied row per column, or BOARD_ROWS if the column is empty.
+    # 열마다 제일 위에 있는 블록의 행 번호. 빈 열은 BOARD_ROWS로 둔다.
+    # 이 값 하나로 높이, 구멍, 요철을 전부 계산할 수 있다.
     first_filled = np.where(
         occupied.any(axis=0),
         occupied.argmax(axis=0),
@@ -81,8 +82,9 @@ def well_sum(heights: np.ndarray) -> int:
         right = heights[i + 1] if i + 1 < BOARD_COLS else BOARD_ROWS
         depth = min(left, right) - heights[i]
         if depth > 0:
-            # Triangular sum: a depth-d well contributes d*(d+1)/2 (deeper cells
-            # are weighted more — matches the original BCTS formulation).
+            # 깊이 d인 well은 d*(d+1)/2점으로 센다.
+            # 깊을수록 벌점이 가파르게 커진다 — 1칸짜리 홈은 괜찮지만
+            # 4칸짜리 구덩이는 I 블록 없이는 못 메우기 때문이다.
             total += depth * (depth + 1) // 2
     return int(total)
 
@@ -99,9 +101,9 @@ def all_features(board: np.ndarray, rows_cleared: int) -> dict[str, int]:
     }
 
 
-# Dellacherie's classic linear weights — known to play decent Tetris on a
-# standard board. These are negative for "bad" features (we want to *minimize*
-# them) and positive for cleared lines.
+# 널리 쓰이는 Tetris 휴리스틱 가중치. 지운 줄에는 +, 나머지 전부에는 -를 준다.
+# 학습된 값이 아니라 사람이 손으로 맞춘 값이며, 그대로 써도 상당히 잘 둔다.
+# 이 점수는 클수록 좋은 판이라는 뜻이다.
 BCTS_WEIGHTS = {
     "aggregate_height": -0.510066,
     "bumpiness":        -0.184483,

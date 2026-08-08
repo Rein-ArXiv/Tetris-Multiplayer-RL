@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-# Mirror of core/input.h for the Python/C++ placement parity layer.
+# core/input.h의 비트값을 그대로 베껴 쓴다. 값이 하나라도 어긋나면
+# C++ bot과 Python이 같은 placement를 다른 키 입력으로 풀게 된다.
 INPUT_NONE = 0
 INPUT_LEFT = 1 << 0
 INPUT_RIGHT = 1 << 1

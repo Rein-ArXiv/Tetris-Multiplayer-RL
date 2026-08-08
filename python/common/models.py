@@ -55,7 +55,7 @@ class TetrisPolicyNet(nn.Module):
         self.n_placements = n_placements
         self.n_piece_types = n_piece_types
 
-        # ---- Convolutional trunk over the 20x10 board --------------------
+        # 보드를 훑는 conv 스택. 20x10을 그대로 이미지처럼 다룬다.
         layers: list[nn.Module] = []
         in_ch = board_channels
         for out_ch in conv_channels:
@@ -66,7 +66,8 @@ class TetrisPolicyNet(nn.Module):
 
         flat = conv_channels[-1] * BOARD_ROWS * BOARD_COLS
 
-        # ---- Fuse board features with current+next piece one-hots --------
+        # conv가 뽑은 보드 특징에 현재/다음 블록 one-hot을 이어 붙인다.
+        # 어떤 블록이 오는지 모르면 어디에 둘지 정할 수 없기 때문이다.
         self.fuse = nn.Sequential(
             nn.Linear(flat + 2 * n_piece_types, hidden),
             nn.ReLU(inplace=True),

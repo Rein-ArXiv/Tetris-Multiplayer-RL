@@ -64,12 +64,6 @@ public:
     bool Host(uint16_t port, const SeedParams& sp);  // 호스트: 포트 대기, 파라미터 결정
     bool Connect(const std::string& host, uint16_t port);  // 클라이언트: 호스트 연결
 
-    // 릴레이 서버가 페어링한 후 MATCH_FOUND 로 받은 정보를 주입.
-    // - 이미 연결된 소켓을 그대로 채택 (HELLO/SEED 핸드셰이크 생략)
-    // - role/seed 는 릴레이가 결정해 보내줌
-    // - ready=true 즉시, 게임 시작 가능
-    bool Adopt(TcpSocket socket, Role role, uint64_t seed,
-               uint32_t start_tick = 120, uint8_t input_delay = 2);
 
     // 비동기 릴레이 큐잉 — 메인 스레드를 블록하지 않는다.
     //   1) tcp_connect + QUEUE_JOIN 송신
@@ -245,6 +239,9 @@ private:
 
     std::mutex sendMu;
     std::deque<std::vector<uint8_t>> sendQ;
+    // 전송 큐에 프레임 하나를 넣는다. sendMu 는 이 안에서 잡는다.
+    // 상한을 넘으면 프레임을 버리는 대신 연결을 실패 처리한다 — 이유는 .cpp 참고.
+    void pushSend(std::vector<uint8_t>&& fr);
 
     std::mutex inMu;
     std::unordered_map<uint32_t, uint8_t> remoteInputs;

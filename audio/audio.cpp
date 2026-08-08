@@ -60,6 +60,10 @@ static float                     s_sfxVol       = 1.0f;
 static constexpr int             MAX_SFX_VOICES = 8;
 static IXAudio2SourceVoice*      s_sfxVoices[MAX_SFX_VOICES] = {};
 static WAVEFORMATEX              s_sfxFormats[MAX_SFX_VOICES] = {};
+// 각 보이스가 지금 어느 핸들의 PCM 을 물고 있는지. XAudio2 는 SubmitSourceBuffer 에
+// 넘긴 포인터를 재생이 끝날 때까지 그대로 참조하므로, 언로드 시 그 버퍼를
+// 해제하기 전에 해당 보이스를 먼저 멈춰야 한다.
+static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
 
 // ─── 내부 유틸 ──────────────────────────────────────────────────────────────────
 
@@ -169,6 +173,7 @@ void audio_shutdown()
             s_sfxVoices[i] = nullptr;
         }
         s_sfxFormats[i] = {};
+        s_sfxHandles[i] = 0;
     }
 
     // 사운드 데이터 해제
@@ -220,8 +225,16 @@ AudioHandle audio_load_sound(const char* filepath)
     }
 
     std::vector<uint8_t> fileData(static_cast<size_t>(fileSize));
-    fread(fileData.data(), 1, fileData.size(), f);
+    const size_t nread = fread(fileData.data(), 1, fileData.size(), f);
     fclose(f);
+    // 부분 읽기를 잡지 않으면 잘린 데이터가 그대로 디코더로 넘어가
+    // "MP3 decode failed" 로 오진된다. 실제 원인은 I/O 오류다.
+    if (nread != fileData.size())
+    {
+        fprintf(stderr, "[audio] Short read: %s (%zu/%zu bytes)\n",
+                filepath, nread, fileData.size());
+        return 0;
+    }
 
     // dr_mp3 로 디코딩 (signed 16-bit PCM)
     drmp3_config cfg = {};
@@ -266,6 +279,26 @@ void audio_unload_sound(AudioHandle handle)
     if (s_lastMusic == handle)
         s_lastMusic = 0;
 
+    // 이 핸들의 PCM 을 재생 중인 SFX 보이스를 먼저 멈춘다. 이 단계가 없으면
+    // 아래 pcmData 해제가 XAudio2 가 아직 읽고 있는 메모리를 날려버린다
+    // (효과음이 울리는 중에 Game 이 소멸하는 재시작 경로에서 실제로 발생).
+    for (int i = 0; i < MAX_SFX_VOICES; ++i)
+    {
+        if (!s_sfxVoices[i] || s_sfxHandles[i] != handle) continue;
+        s_sfxVoices[i]->Stop();
+        s_sfxVoices[i]->FlushSourceBuffers();
+        // Flush 는 즉시 반환하지만 오디오 스레드가 현재 quantum 을 끝낼 때까지
+        // 버퍼를 놓지 않을 수 있다. 큐가 빌 때까지만 짧게 기다린다.
+        for (int spin = 0; spin < 100; ++spin)
+        {
+            XAUDIO2_VOICE_STATE st;
+            s_sfxVoices[i]->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+            if (st.BuffersQueued == 0) break;
+            Sleep(1);
+        }
+        s_sfxHandles[i] = 0;
+    }
+
     s_sounds[handle].pcmData.clear();
     s_sounds[handle].pcmData.shrink_to_fit();
     s_sounds[handle].valid = false;
@@ -303,6 +336,7 @@ void audio_play_sound(AudioHandle handle)
             // 포맷 불일치 — 파괴 후 재생성
             s_sfxVoices[i]->DestroyVoice();
             s_sfxVoices[i] = nullptr;
+            s_sfxHandles[i] = 0;
             slot = i;
             break;
         }
@@ -314,6 +348,7 @@ void audio_play_sound(AudioHandle handle)
         slot = 0;
         s_sfxVoices[slot]->Stop();
         s_sfxVoices[slot]->FlushSourceBuffers();
+        s_sfxHandles[slot] = 0;
         if (!FormatMatches(s_sfxFormats[slot], sd.format))
         {
             s_sfxVoices[slot]->DestroyVoice();
@@ -342,6 +377,9 @@ void audio_play_sound(AudioHandle handle)
     s_sfxVoices[slot]->SetVolume(s_sfxVol);
     s_sfxVoices[slot]->SubmitSourceBuffer(&buf);
     s_sfxVoices[slot]->Start();
+    // 이 보이스가 물고 있는 PCM 의 주인을 기록해 둔다. audio_unload_sound 가
+    // 버퍼를 해제하기 전에 이 보이스를 멈춰야 하기 때문이다.
+    s_sfxHandles[slot] = handle;
 }
 
 // 실제 BGM 보이스를 생성·시작한다 (s_musicEnabled 검사는 호출부가 한다).

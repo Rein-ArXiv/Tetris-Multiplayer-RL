@@ -1,280 +1,353 @@
-// renderer/renderer.cpp — OpenGL 2D 렌더러 (rect / rounded rect)
+// renderer/renderer.cpp — OpenGL 3.3 Core 2D 렌더러
 //
-// 텍스트 렌더링은 백엔드별로 분리:
-//   - renderer/text_win32.cpp : GDI + wglUseFontBitmaps (Windows 기본)
-//   - renderer/text_stb.cpp   : stb_truetype TTF 글리프 아틀라스 (SDL2 빌드에서 사용)
+// 게임 코드가 부르는 draw_* 는 즉시 그리지 않고 정점을 큐에 쌓는다.
+// 텍스처가 바뀌는 지점과 프레임 끝에서만 실제 draw call 이 나간다.
 //
-// 학습 포인트:
-//   이 파일이 하는 일 = raylib 의 rlgl.h + rshapes.c 에 해당.
-//   핵심 개념: VAO(레이아웃) + VBO(GPU 버퍼) + 셰이더 프로그램.
+// 좌표계는 논리 픽셀(좌상단 원점)이고, NDC 변환은 vertex 셰이더가 한다.
+// 그래서 이 파일에는 투영 행렬이 없다 — u_screen 하나로 충분하다.
 
-#include <cstring>
-#include <cstdio>
-#include <cmath>
 #include "renderer.h"
-#include "shaders.h"
-#include "../platform/gl_defs.h"
+#include "gl_internal.h"
+#include "gl_shaders.h"
+#include "image.h"
 
-#if defined(_WIN32)
-  #define WIN32_LEAN_AND_MEAN
-  #include <windows.h>
-  #include <GL/gl.h>
-#elif defined(__APPLE__)
-  #define GL_SILENCE_DEPRECATION
-  #include <OpenGL/gl.h>
-#else
-  #include <GL/gl.h>
-#endif
+#include <cstdio>
+#include <cstring>
+#include <vector>
 
-// ─── GL 함수 포인터 (platform/*.cpp 에서 정의, 여기서 extern 선언) ───────────
-extern GLuint (APIENTRY *glCreateShader)(GLenum);
-extern void   (APIENTRY *glShaderSource)(GLuint, GLsizei, const GLchar* const*, const GLint*);
-extern void   (APIENTRY *glCompileShader)(GLuint);
-extern GLuint (APIENTRY *glCreateProgram)(void);
-extern void   (APIENTRY *glAttachShader)(GLuint, GLuint);
-extern void   (APIENTRY *glLinkProgram)(GLuint);
-extern void   (APIENTRY *glUseProgram)(GLuint);
-extern void   (APIENTRY *glDeleteShader)(GLuint);
-extern GLint  (APIENTRY *glGetUniformLocation)(GLuint, const GLchar*);
-extern void   (APIENTRY *glUniform4f)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
-extern void   (APIENTRY *glUniformMatrix4fv)(GLint, GLsizei, GLboolean, const GLfloat*);
-extern void   (APIENTRY *glGenVertexArrays)(GLsizei, GLuint*);
-extern void   (APIENTRY *glBindVertexArray)(GLuint);
-extern void   (APIENTRY *glGenBuffers)(GLsizei, GLuint*);
-extern void   (APIENTRY *glBindBuffer)(GLenum, GLuint);
-extern void   (APIENTRY *glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
-extern void   (APIENTRY *glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
-extern void   (APIENTRY *glEnableVertexAttribArray)(GLuint);
-extern void   (APIENTRY *glGetShaderiv)(GLuint, GLenum, GLint*);
-extern void   (APIENTRY *glGetShaderInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
-extern void   (APIENTRY *glGetProgramiv)(GLuint, GLenum, GLint*);
-extern void   (APIENTRY *glGetProgramInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
-extern void   (APIENTRY *glDeleteVertexArrays)(GLsizei, const GLuint*);
-extern void   (APIENTRY *glDeleteBuffers)(GLsizei, const GLuint*);
-extern void   (APIENTRY *glDeleteProgram)(GLuint);
+// ─── 상태 ─────────────────────────────────────────────────────────────────────
 
-// 텍스트 백엔드 — 화면 높이 전달용 훅 (win32/stb 양쪽 모두 정의)
-void renderer_text_set_screen_height(int h);
-void renderer_text_shutdown();
+static int s_screen_w = 0;
+static int s_screen_h = 0;
+static int s_view_ox  = 0;
+static int s_view_oy  = 0;
+static float s_render_scale = 1.0f;
 
-// 스프라이트/이미지 서브시스템 훅
-void image_init();
-void image_shutdown();
+static GLuint s_prog        = 0;
+static GLuint s_vao         = 0;
+static GLuint s_vbo         = 0;
+static GLuint s_white       = 0;
+static GLint  s_u_screen    = -1;
+static GLint  s_u_tex       = -1;
 
-// ─── 렌더러 상태 ──────────────────────────────────────────────────────────────
-static int    s_screen_w = 0;
-static int    s_screen_h = 0;
+// 정점 하나: pos(2) uv(2) color(4) local(2) half(2) radius(1) channel(1)
+static constexpr int kFloatsPerVertex = 14;
 
-static GLuint s_rect_prog  = 0;
-static GLuint s_rect_vao   = 0;
-static GLuint s_rect_vbo   = 0;
-static GLint  s_rect_proj  = -1;
-static GLint  s_rect_color = -1;
+static std::vector<float> s_verts;      // 프레임 내내 재사용 — 재할당 방지
+static GLuint             s_batch_tex = 0;
+static bool               s_ready     = false;
 
-static float  s_proj[16];
-static int    s_view_ox = 0;
-static int    s_view_oy = 0;
+// ─── 셰이더 ───────────────────────────────────────────────────────────────────
 
-// text 백엔드(stb) 가 공용으로 사용할 수 있게 셰이더/VAO 접근자 노출
-GLuint renderer_get_rect_prog()  { return s_rect_prog;  }
-GLuint renderer_get_rect_vao()   { return s_rect_vao;   }
-GLuint renderer_get_rect_vbo()   { return s_rect_vbo;   }
-GLint  renderer_get_rect_proj()  { return s_rect_proj;  }
-GLint  renderer_get_rect_color() { return s_rect_color; }
-const float* renderer_get_proj() { return s_proj;       }
-int    renderer_get_screen_h()   { return s_screen_h;   }
-
-static GLuint compile_shader(GLenum type, const char* src)
+static GLuint compile_shader(GLenum type, const char* src, const char* label)
 {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    GLint ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    GLuint s = gl_CreateShader(type);
+    gl_ShaderSource(s, 1, &src, nullptr);
+    gl_CompileShader(s);
+
+    GLint ok = GL_FALSE;
+    gl_GetShaderiv(s, GL_COMPILE_STATUS, &ok);
     if (!ok) {
-        char log[512]; GLsizei len = 0;
-        glGetShaderInfoLog(s, sizeof(log), &len, log);
-        log[len < (GLsizei)sizeof(log) ? len : sizeof(log) - 1] = '\0';
-        fprintf(stderr, "[GLSL] Compile error:\n%s\n", log);
+        // 셰이더는 사용자 기계에서 컴파일된다. 드라이버마다 GLSL 프론트엔드가
+        // 달라 내 기계에서 통과한 코드가 남의 기계에서 막힐 수 있으므로,
+        // 로그를 삼키지 않고 그대로 보여준다.
+        GLint len = 0;
+        gl_GetShaderiv(s, GL_INFO_LOG_LENGTH, &len);
+        std::vector<char> log(len > 1 ? (size_t)len : 1, '\0');
+        gl_GetShaderInfoLog(s, (GLsizei)log.size(), nullptr, log.data());
+        std::fprintf(stderr, "[GL] %s shader compile failed:\n%s\n", label, log.data());
+        gl_DeleteShader(s);
+        return 0;
     }
     return s;
 }
 
-static GLuint link_program(const char* vert_src, const char* frag_src)
+static GLuint link_program(const char* vs_src, const char* fs_src)
 {
-    GLuint v = compile_shader(GL_VERTEX_SHADER,   vert_src);
-    GLuint f = compile_shader(GL_FRAGMENT_SHADER, frag_src);
-    GLuint p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, f);
-    glLinkProgram(p);
-    GLint ok = 0;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512]; GLsizei len = 0;
-        glGetProgramInfoLog(p, sizeof(log), &len, log);
-        log[len < (GLsizei)sizeof(log) ? len : sizeof(log) - 1] = '\0';
-        fprintf(stderr, "[GLSL] Link error:\n%s\n", log);
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_src, "vertex");
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src, "fragment");
+    if (!vs || !fs) {
+        if (vs) gl_DeleteShader(vs);
+        if (fs) gl_DeleteShader(fs);
+        return 0;
     }
-    glDeleteShader(v);
-    glDeleteShader(f);
+
+    GLuint p = gl_CreateProgram();
+    gl_AttachShader(p, vs);
+    gl_AttachShader(p, fs);
+    gl_LinkProgram(p);
+
+    GLint ok = GL_FALSE;
+    gl_GetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        GLint len = 0;
+        gl_GetProgramiv(p, GL_INFO_LOG_LENGTH, &len);
+        std::vector<char> log(len > 1 ? (size_t)len : 1, '\0');
+        gl_GetProgramInfoLog(p, (GLsizei)log.size(), nullptr, log.data());
+        std::fprintf(stderr, "[GL] program link failed:\n%s\n", log.data());
+        gl_DeleteProgram(p);
+        p = 0;
+    }
+
+    // 링크가 끝나면 셰이더 객체는 프로그램이 참조를 들고 있으므로 놓아준다.
+    gl_DeleteShader(vs);
+    gl_DeleteShader(fs);
     return p;
 }
 
-static void build_ortho(float* m, float w, float h)
+// ─── 배처 ─────────────────────────────────────────────────────────────────────
+
+static void push_vertex(float x, float y, float u, float v, Color c,
+                        float lx, float ly, float hw, float hh,
+                        float radius, float channel)
 {
-    float l = 0.0f, r = w, t = 0.0f, b = h, n = -1.0f, f = 1.0f;
-    memset(m, 0, 16 * sizeof(float));
-    m[0]  =  2.0f / (r - l);
-    m[5]  =  2.0f / (t - b);
-    m[10] = -2.0f / (f - n);
-    m[12] = -(r + l) / (r - l);
-    m[13] = -(t + b) / (t - b);
-    m[14] = -(f + n) / (f - n);
-    m[15] = 1.0f;
+    s_verts.insert(s_verts.end(), {
+        x, y, u, v,
+        c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f,
+        lx, ly, hw, hh, radius, channel
+    });
 }
+
+// 텍스처가 바뀌면 지금까지 쌓인 것을 먼저 내보낸다. 한 draw call 은 한
+// 텍스처만 쓸 수 있기 때문이다.
+static void ensure_texture(GLuint tex)
+{
+    if (s_batch_tex != tex) {
+        glb_flush();
+        s_batch_tex = tex;
+    }
+}
+
+void glb_flush()
+{
+    if (!s_ready || s_verts.empty()) return;
+
+    gl_BindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    gl_BufferData(GL_ARRAY_BUFFER,
+                  (GLsizeiptr)(s_verts.size() * sizeof(float)),
+                  s_verts.data(), GL_STREAM_DRAW);
+
+    gl_ActiveTexture(GL_TEXTURE0);
+    gl_BindTexture(GL_TEXTURE_2D, s_batch_tex ? s_batch_tex : s_white);
+
+    gl_BindVertexArray(s_vao);
+    gl_DrawArrays(GL_TRIANGLES, 0,
+                  (GLsizei)(s_verts.size() / kFloatsPerVertex));
+
+    s_verts.clear();
+}
+
+void glb_rect(GLuint tex,
+              float x, float y, float w, float h,
+              float u0, float v0, float u1, float v1,
+              Color c, float radius, float channel)
+{
+    if (!s_ready || w <= 0.0f || h <= 0.0f || c.a == 0) return;
+
+    x += (float)s_view_ox;
+    y += (float)s_view_oy;
+
+    // 화면 밖은 정점을 만들지 않는다. GPU 가 어차피 버리지만 대역폭이 아깝다.
+    if (x + w <= 0.0f || y + h <= 0.0f ||
+        x >= (float)s_screen_w || y >= (float)s_screen_h) return;
+
+    ensure_texture(tex);
+
+    const float hw = w * 0.5f;
+    const float hh = h * 0.5f;
+
+    // TL, TR, BR / TL, BR, BL — 삼각형 두 개
+    const float xs[4] = { x,      x + w,  x + w,  x     };
+    const float ys[4] = { y,      y,      y + h,  y + h };
+    const float us[4] = { u0,     u1,     u1,     u0    };
+    const float vs[4] = { v0,     v0,     v1,     v1    };
+    const float lxs[4] = { -hw,    hw,     hw,    -hw   };
+    const float lys[4] = { -hh,   -hh,     hh,     hh   };
+
+    const int order[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; ++i) {
+        const int k = order[i];
+        push_vertex(xs[k], ys[k], us[k], vs[k], c,
+                    lxs[k], lys[k], hw, hh, radius, channel);
+    }
+}
+
+void glb_quad(GLuint tex,
+              const float px[4], const float py[4],
+              const float uu[4], const float vv[4],
+              Color c, float channel)
+{
+    if (!s_ready || c.a == 0) return;
+    ensure_texture(tex);
+
+    const int order[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; ++i) {
+        const int k = order[i];
+        push_vertex(px[k] + (float)s_view_ox, py[k] + (float)s_view_oy,
+                    uu[k], vv[k], c, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, channel);
+    }
+}
+
+GLuint glb_white_texture()   { return s_white; }
+int    glb_screen_width()    { return s_screen_w; }
+int    glb_screen_height()   { return s_screen_h; }
+float  glb_render_scale()    { return s_render_scale; }
+
+// ─── 공개 API ─────────────────────────────────────────────────────────────────
 
 void renderer_init(int screen_w, int screen_h)
 {
-    s_screen_w = screen_w;
-    s_screen_h = screen_h;
-    build_ortho(s_proj, (float)screen_w, (float)screen_h);
-    renderer_text_set_screen_height(screen_h);
+    s_screen_w = screen_w > 0 ? screen_w : 1;
+    s_screen_h = screen_h > 0 ? screen_h : 1;
+    s_view_ox = s_view_oy = 0;
 
-    s_rect_prog  = link_program(kRectVert, kRectFrag);
-    s_rect_proj  = glGetUniformLocation(s_rect_prog, "u_proj");
-    s_rect_color = glGetUniformLocation(s_rect_prog, "u_color");
+    if (!gl_load_functions()) {
+        std::fprintf(stderr, "[GL] renderer_init aborted.\n");
+        return;
+    }
 
-    glGenVertexArrays(1, &s_rect_vao);
-    glBindVertexArray(s_rect_vao);
+    s_prog = link_program(kQuadVert, kQuadFrag);
+    if (!s_prog) {
+        std::fprintf(stderr, "[GL] renderer_init aborted: shader program.\n");
+        return;
+    }
+    s_u_screen = gl_GetUniformLocation(s_prog, "u_screen");
+    s_u_tex    = gl_GetUniformLocation(s_prog, "u_tex");
 
-    glGenBuffers(1, &s_rect_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, s_rect_vbo);
-    glBufferData(GL_ARRAY_BUFFER, 6 * 2 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    gl_GenVertexArrays(1, &s_vao);
+    gl_BindVertexArray(s_vao);
+    gl_GenBuffers(1, &s_vbo);
+    gl_BindBuffer(GL_ARRAY_BUFFER, s_vbo);
 
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+    const GLsizei stride = kFloatsPerVertex * (GLsizei)sizeof(float);
+    struct { GLuint loc; GLint size; size_t offset; } attribs[] = {
+        { 0, 2, 0  }, { 1, 2, 2  }, { 2, 4, 4  },
+        { 3, 2, 8  }, { 4, 2, 10 }, { 5, 1, 12 }, { 6, 1, 13 },
+    };
+    for (const auto& a : attribs) {
+        gl_VertexAttribPointer(a.loc, a.size, GL_FLOAT, GL_FALSE, stride,
+                               (const void*)(a.offset * sizeof(float)));
+        gl_EnableVertexAttribArray(a.loc);
+    }
 
-    // 알파 블렌딩 — 고스트 블록 반투명, UI 페이드 등에 필요.
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // 단색 도형이 텍스처 없이도 같은 셰이더를 타도록 1x1 흰 픽셀을 둔다.
+    const unsigned char white[4] = { 255, 255, 255, 255 };
+    gl_GenTextures(1, &s_white);
+    gl_BindTexture(GL_TEXTURE_2D, s_white);
+    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // 스프라이트(이미지 쿼드) 셰이더/VAO — 지연 초기화하면 호출 순서에
-    // 민감해지므로 여기서 함께 준비한다. image_load/draw_image 가 이후 동작.
+    gl_Enable(GL_BLEND);
+    gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    s_verts.reserve(4096 * kFloatsPerVertex);
+    s_batch_tex = s_white;
+    s_ready = true;
+
     image_init();
 }
 
 void renderer_begin(Color bg)
 {
-    glClearColor(bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, bg.a / 255.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-}
+    if (!s_ready) return;
 
-void renderer_end() {}
+    // 창이 리사이즈됐으면 표시 영역을 따라간다. 논리 해상도는 그대로 두고
+    // 뷰포트만 바꾸므로, 창을 늘려도 UI 좌표계는 한 픽셀도 변하지 않는다.
+    // 종횡비가 다른 창에서는 뷰포트가 창보다 작아 가장자리에 여백이 남는다.
+    int vx = 0, vy = 0, vw = 0, vh = 0;
+    platform_viewport(vx, vy, vw, vh);
+
+    // 창이 최소화되면 뷰포트가 0x0 이 된다. 지울 곳도 그릴 곳도 없으니
+    // 건너뛴다. 게임 코드는 최소화 여부를 모르고 계속 draw_* 를 부르지만,
+    // 그 정점들은 프레임 끝의 glb_flush 가 0x0 뷰포트로 흘려보내고 큐를
+    // 비우므로 쌓이지는 않는다. 다만 배처 상태는 여기서 맞춰 둔다 —
+    // 그러지 않으면 첫 프레임부터 최소화로 시작했을 때 glUseProgram 을
+    // 한 번도 부르지 않은 채 glDrawArrays 에 도달한다.
+    if (vw <= 0 || vh <= 0) {
+        gl_UseProgram(s_prog);
+        s_verts.clear();
+        s_batch_tex = s_white;
+        return;
+    }
+    gl_Viewport(vx, vy, vw, vh);
+
+    // 뷰포트는 논리 종횡비를 유지하므로 가로/세로 배율이 같다. 세로로 잰다.
+    s_render_scale = (float)vh / (float)s_screen_h;
+
+    // glClear 는 뷰포트가 아니라 시저 박스를 따른다. glViewport 만 좁혀 놓고
+    // 지우면 레터박스 여백까지 배경색으로 칠해져 여백과 게임 화면의 경계가
+    // 사라진다. 그래서 두 번 지운다 — 창 전체를 검게, 뷰포트 안만 배경색으로.
+    gl_Disable(GL_SCISSOR_TEST);
+    gl_ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl_Clear(GL_COLOR_BUFFER_BIT);
+
+    gl_Enable(GL_SCISSOR_TEST);
+    gl_Scissor(vx, vy, vw, vh);
+    gl_ClearColor(bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1.0f);
+    gl_Clear(GL_COLOR_BUFFER_BIT);
+
+    // 시저는 켠 채로 둔다. 논리 좌표를 벗어나게 그리는 코드가 있어도
+    // 여백을 침범하지 못하게 하는 안전장치다.
+
+    gl_UseProgram(s_prog);
+    gl_Uniform2f(s_u_screen, (float)s_screen_w, (float)s_screen_h);
+    gl_Uniform1i(s_u_tex, 0);
+
+    s_verts.clear();
+    s_batch_tex = s_white;
+}
 
 void renderer_set_view_offset(int dx, int dy)
 {
+    // 오프셋이 바뀌기 전에 쌓인 것을 비운다. 그렇지 않으면 이전 오프셋으로
+    // 만들어진 정점과 새 오프셋 정점이 한 배치에 섞인다.
+    if (dx != s_view_ox || dy != s_view_oy) glb_flush();
     s_view_ox = dx;
     s_view_oy = dy;
-    // 시야를 (dx, dy) 만큼 옮기려면 ortho 의 l/r/t/b 를 정반대로 시프트.
-    // 예: dx=+5 → 모든 것을 오른쪽으로 5px 이동시키려면 투영창의 원점을 왼쪽으로 5px.
-    float l = (float)(-dx),          r = (float)(s_screen_w - dx);
-    float t = (float)(-dy),          b = (float)(s_screen_h - dy);
-    float n = -1.0f, f = 1.0f;
-    memset(s_proj, 0, 16 * sizeof(float));
-    s_proj[0]  =  2.0f / (r - l);
-    s_proj[5]  =  2.0f / (t - b);
-    s_proj[10] = -2.0f / (f - n);
-    s_proj[12] = -(r + l) / (r - l);
-    s_proj[13] = -(t + b) / (t - b);
-    s_proj[14] = -(f + n) / (f - n);
-    s_proj[15] = 1.0f;
+}
+
+void renderer_end()
+{
+    if (!s_ready) return;
+    glb_flush();
+    platform_present();
 }
 
 void renderer_shutdown()
 {
-    image_shutdown();
-    renderer_text_shutdown();
-    if (s_rect_prog) { glDeleteProgram(s_rect_prog); s_rect_prog = 0; }
-    if (s_rect_vbo)  { glDeleteBuffers(1, &s_rect_vbo); s_rect_vbo = 0; }
-    if (s_rect_vao)  { glDeleteVertexArrays(1, &s_rect_vao); s_rect_vao = 0; }
+    if (s_ready) {
+        image_shutdown();
+        renderer_text_shutdown();
+        if (s_white) gl_DeleteTextures(1, &s_white);
+        if (s_vbo)   gl_DeleteBuffers(1, &s_vbo);
+        if (s_vao)   gl_DeleteVertexArrays(1, &s_vao);
+        if (s_prog)  gl_DeleteProgram(s_prog);
+    }
+    s_white = s_vbo = s_vao = s_prog = 0;
+    s_verts.clear();
+    s_verts.shrink_to_fit();
+    s_ready = false;
 }
 
 void draw_rect(int x, int y, int w, int h, Color c)
 {
-    float fx = (float)x, fy = (float)y;
-    float fw = (float)w, fh = (float)h;
-    float verts[12] = {
-        fx,      fy,
-        fx,      fy + fh,
-        fx + fw, fy + fh,
-        fx,      fy,
-        fx + fw, fy + fh,
-        fx + fw, fy,
-    };
-    glUseProgram(s_rect_prog);
-    glUniformMatrix4fv(s_rect_proj, 1, GL_FALSE, s_proj);
-    glUniform4f(s_rect_color,
-        c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f);
-
-    glBindVertexArray(s_rect_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, s_rect_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glBindVertexArray(0);
+    glb_rect(s_white, (float)x, (float)y, (float)w, (float)h,
+             0.0f, 0.0f, 1.0f, 1.0f, c, 0.0f, 0.0f);
 }
 
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c)
 {
-    float minDim = (float)(w < h ? w : h);
-    float r = roundness * minDim * 0.5f;
-    if (r < 1.0f) { draw_rect(x, y, w, h, c); return; }
+    if (roundness < 0.0f) roundness = 0.0f;
+    if (roundness > 1.0f) roundness = 1.0f;
+    const float shorter = (float)(w < h ? w : h);
+    const float radius  = roundness * 0.5f * shorter;
 
-    float fx = (float)x, fy = (float)y, fw = (float)w, fh = (float)h;
-
-    const int N_SEG = 8;
-    const int MAX_VERTS = 18 + 4 * N_SEG * 3;
-    float verts[MAX_VERTS * 2];
-    int vi = 0;
-
-    auto V = [&](float px, float py) { verts[vi++] = px; verts[vi++] = py; };
-    auto Rect = [&](float rx, float ry, float rw, float rh) {
-        V(rx, ry);       V(rx, ry+rh);       V(rx+rw, ry+rh);
-        V(rx, ry);       V(rx+rw, ry+rh);    V(rx+rw, ry);
-    };
-
-    Rect(fx + r, fy,          fw - 2*r, fh);
-    Rect(fx,     fy + r,      r,        fh - 2*r);
-    Rect(fx + fw - r, fy + r, r,        fh - 2*r);
-
-    const float PI = 3.14159265358979f;
-    auto Corner = [&](float cx, float cy, float startAngle) {
-        float step = (PI * 0.5f) / N_SEG;
-        for (int i = 0; i < N_SEG; ++i) {
-            float a0 = startAngle + step * i;
-            float a1 = startAngle + step * (i + 1);
-            V(cx, cy);
-            V(cx + r * cosf(a0), cy + r * sinf(a0));
-            V(cx + r * cosf(a1), cy + r * sinf(a1));
-        }
-    };
-
-    Corner(fx + r,      fy + r,      PI);
-    Corner(fx + fw - r, fy + r,      PI * 1.5f);
-    Corner(fx + fw - r, fy + fh - r, 0.0f);
-    Corner(fx + r,      fy + fh - r, PI * 0.5f);
-
-    int numVerts = vi / 2;
-
-    glUseProgram(s_rect_prog);
-    glUniformMatrix4fv(s_rect_proj, 1, GL_FALSE, s_proj);
-    glUniform4f(s_rect_color,
-        c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f);
-
-    glBindVertexArray(s_rect_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, s_rect_vbo);
-    glBufferData(GL_ARRAY_BUFFER, vi * sizeof(float), verts, GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, numVerts);
-    glBindVertexArray(0);
+    // 반지름이 1픽셀 미만이면 SDF 를 켜지 않는다. 각진 사각형과 결과가
+    // 같으면서 경계가 불필요하게 흐려지는 것을 막는다.
+    glb_rect(s_white, (float)x, (float)y, (float)w, (float)h,
+             0.0f, 0.0f, 1.0f, 1.0f, c,
+             radius < 1.0f ? 0.0f : radius, 0.0f);
 }

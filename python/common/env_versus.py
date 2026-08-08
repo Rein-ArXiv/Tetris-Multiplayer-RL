@@ -70,7 +70,7 @@ def _terminal_bonus(
     return 0.0
 
 
-# ─── Opponents ───────────────────────────────────────────────────────────────
+# --- 상대 정책 ---
 class VersusOpponent:
     """Decides one placement for a board. Return an encoded action (0..39) or
     ``None`` if the board has no legal move (treated as a pass)."""
@@ -139,7 +139,7 @@ class PolicyOpponent(VersusOpponent):
         return int(self._policy_fn(obs, mask))
 
 
-# ─── Environment ─────────────────────────────────────────────────────────────
+# --- 대전 환경 ---
 class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
     """Single-agent view of a 2-board garbage-trading match."""
 
@@ -165,7 +165,8 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
 
         self._SimGame = SimGame
         self._seed = seed if seed is not None else 0
-        # Independent piece sequences by default (typical for versus play).
+        # 두 보드에 서로 다른 seed를 준다. 실제 대전도 블록 순서가 같지 않다.
+        # 같은 seed를 주면 상대 수를 그대로 따라 하는 것만 배우게 된다.
         self._opp_seed = opponent_seed if opponent_seed is not None else self._seed + 1
         self._opponent = opponent if opponent is not None else GreedyBCTSOpponent()
 
@@ -216,8 +217,8 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         cleared = self.simA.apply_placement(col, rot)
 
         if cleared < 0:
-            # Illegal placement — don't advance the agent board. A correct,
-            # mask-respecting policy never hits this; tolerate it defensively.
+            # 불법 수면 내 보드는 그대로 두고 넘어간다.
+            # 상대는 계속 두므로 결과적으로 한 수를 손해 보는 셈이다.
             return (
                 self._observation(self.simA),
                 0.0,
@@ -226,13 +227,14 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
                 self._info(0, 0),
             )
 
-        # Route the agent's attack to the opponent board.
+        # 이번 수로 보낸 공격을 상대 보드에 쌓는다.
+        # 누적값의 차이를 쓰는 이유는 SimGame이 총합만 들고 있기 때문이다.
         agent_attack = self.simA.attack_lines_sent() - self._last_attack_a
         self._last_attack_a = self.simA.attack_lines_sent()
         if agent_attack > 0:
             self.simB.add_pending_garbage(agent_attack)
 
-        # Opponent plays one piece (if still alive), routing its attack back.
+        # 상대도 한 수 둔다. 그쪽 공격은 반대로 내 보드에 쌓인다.
         opp_attack = 0
         if not self.simB.game_over():
             opp_action = self._opponent.act(self.simB)
@@ -253,7 +255,8 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
             reward += _terminal_bonus(
                 a_dead, b_dead, self.win_bonus, self.loss_penalty
             )
-            # Mutual top-out is an agent loss: do not reward suicidal attacks.
+            # 둘 다 동시에 죽으면 패배로 친다.
+            # 무승부를 인정하면 '같이 죽자'는 전략이 이득이 되어 버린다.
 
         self._pieces += 1
         truncated = self._pieces >= self.max_pieces
@@ -265,7 +268,7 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
             self._info(agent_attack, opp_attack),
         )
 
-    # ---- Internals -------------------------------------------------------
+    # --- 내부 헬퍼 ---
     def _observation(self, sim: Any) -> dict[str, np.ndarray]:
         return {k: v.numpy() for k, v in build_observation(sim).items()}
 

@@ -37,9 +37,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# Allow running as a plain script (`python train/ppo_tetris.py`) as well as a
-# module — make sure the python/ root (which holds common/, sim/, netbot/) is
-# importable.
+# python/ 을 import 경로에 넣는다. `python train/ppo_tetris.py` 로 직접 실행할 때와
+# `python -m train.ppo_tetris` 로 모듈 실행할 때 모두 common/, sim/, netbot/ 을
+# 찾을 수 있게 하려는 것이다. 모듈 실행이면 이미 잡혀 있으므로 건너뛴다.
 _PY_ROOT = Path(__file__).resolve().parent.parent
 if str(_PY_ROOT) not in sys.path:
     sys.path.insert(0, str(_PY_ROOT))
@@ -47,15 +47,17 @@ if str(_PY_ROOT) not in sys.path:
 from common import BOARD_COLS, BOARD_ROWS  # noqa: E402
 from common.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from common.env import TetrisPlacementEnv  # noqa: E402
+from common.env_versus import TetrisVersusEnv  # noqa: E402
 from common.models import TetrisPolicyNet, masked_log_softmax  # noqa: E402
 
 
-# ─── Reward shaping (optional, tunable) ──────────────────────────────────────
-# The env reward is just lines-cleared (0..4) per placement — very sparse early
-# in training (a fresh policy may go thousands of placements before its first
-# line). These dense, interpretable board features give a gradient before any
-# line clears: prefer low stacks, few holes, flat surfaces. Scaled by
-# --shaping-coef (set 0 for pure lines-cleared reward).
+# --- 보상 shaping (선택) ---
+# 환경이 주는 보상은 지운 줄 수(0~4)뿐이다. 문제는 이게 너무 드물다는 것이다.
+# 갓 시작한 정책은 첫 줄을 지우기까지 수천 수를 두는데, 그동안 받는 보상이
+# 전부 0이라 무엇이 나은 행동인지 배울 단서가 없다.
+# 그래서 판을 낮고 평평하게, 구멍 없이 유지하면 조금씩 점수를 주어
+# 줄을 지우기 전에도 방향을 잡게 한다.
+# --shaping-coef 로 세기를 조절하고, 0이면 순수 보상만 쓴다.
 _W_HOLE = 0.03
 _W_HEIGHT = 0.005
 _W_BUMP = 0.003
@@ -87,7 +89,7 @@ def shaping_reward(board: np.ndarray, coef: float) -> float:
     return -coef * penalty
 
 
-# ─── Policy evaluation helpers ───────────────────────────────────────────────
+# --- 평가 ---
 def _logp_entropy(logits: torch.Tensor, mask: torch.Tensor):
     """Masked log-probs + per-row entropy, NaN-safe for illegal actions."""
     logp = masked_log_softmax(logits, mask)          # (B, A); -inf on illegal
@@ -106,6 +108,18 @@ def to_batch(obs: dict, device) -> dict:
 
 
 @torch.no_grad()
+def make_env(kind: str, seed: int):
+    """학습/평가에 쓸 환경을 만든다.
+
+    single — 혼자 두는 판. 보상은 지운 줄 수뿐이다.
+    versus — 상대와 garbage를 주고받는 2-보드 판. 관측 형태가 single과 같아서
+             같은 TetrisPolicyNet을 그대로 쓸 수 있다.
+    """
+    if kind == "versus":
+        return TetrisVersusEnv(seed=seed)
+    return TetrisPlacementEnv(seed=seed)
+
+
 def evaluate_policy(
     model: TetrisPolicyNet,
     *,
@@ -113,6 +127,7 @@ def evaluate_policy(
     seed: int,
     device: torch.device,
     max_pieces: int,
+    env_kind: str = "single",
 ) -> dict[str, float]:
     """Run greedy placement evaluation on fixed seeds.
 
@@ -131,7 +146,7 @@ def evaluate_policy(
     was_training = model.training
     model.eval()
 
-    env = TetrisPlacementEnv(seed=seed)
+    env = make_env(env_kind, seed)
     lines_total = 0.0
     score_total = 0.0
     pieces_total = 0.0
@@ -179,13 +194,14 @@ def evaluate_policy(
     }
 
 
-# ─── Training ────────────────────────────────────────────────────────────────
+# --- 학습 루프 ---
 def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    env = TetrisPlacementEnv(seed=args.seed)
+    env = make_env(args.env, args.seed)
+    print(f"[ppo] env={args.env}")
 
     if args.resume and os.path.exists(args.resume):
         print(f"[ppo] resuming from {args.resume}")
@@ -212,7 +228,7 @@ def train(args: argparse.Namespace) -> None:
     t_start = time.time()
 
     while global_step < args.steps:
-        # --- Rollout buffer (one synchronous env) ---------------------------
+        # rollout 버퍼. 환경을 하나만 동기로 돌리므로 배열 하나면 충분하다.
         boards = torch.zeros(T, 1, BOARD_ROWS, BOARD_COLS, device=device)
         currents = torch.zeros(T, 7, device=device)
         nexts = torch.zeros(T, 7, device=device)
@@ -226,11 +242,11 @@ def train(args: argparse.Namespace) -> None:
         for t in range(T):
             mask_np = info["legal_mask"]
             if not mask_np.any():
-                # Defensive: a no-legal-action state should only happen at game
-                # over (already handled by the reset after a terminal step). If
-                # we ever see one here, reset and fill this slot with the fresh
-                # transition rather than leaving a zero/all-illegal buffer slot
-                # (which would produce NaN logits in the PPO update).
+                # 둘 곳이 없다는 것은 게임이 끝났다는 뜻이다.
+                # 여기 도달했다면 terminal 처리 후 reset을 빠뜨린 것이다.
+                # reset하고 이 슬롯을 새 transition으로 다시 채운다.
+                # 빈 채로 두면 전부 불법인 마스크가 남고, 그 상태로 PPO 갱신에
+                # 들어가면 logit이 전부 -inf가 되어 NaN이 퍼진다.
                 obs, info = env.reset()
                 ep_ret, ep_len, ep_lines = 0.0, 0, 0
                 mask_np = info["legal_mask"]
@@ -271,7 +287,7 @@ def train(args: argparse.Namespace) -> None:
                 ep_ret, ep_len, ep_lines = 0.0, 0, 0
                 obs, info = env.reset()
 
-        # --- Bootstrap value of the state after the rollout -----------------
+        # rollout이 끝난 지점의 가치. 잘려나간 뒷부분을 이 값으로 대신한다.
         with torch.no_grad():
             if info["legal_mask"].any():
                 b = to_batch(obs, device)
@@ -280,7 +296,7 @@ def train(args: argparse.Namespace) -> None:
             else:
                 last_value = torch.zeros((), device=device)
 
-        # --- GAE(λ) advantages + returns ------------------------------------
+        # GAE(λ)로 advantage와 return을 구한다.
         advantages = torch.zeros(T, device=device)
         lastgae = torch.zeros((), device=device)
         for t in reversed(range(T)):
@@ -292,7 +308,8 @@ def train(args: argparse.Namespace) -> None:
         returns = advantages + values
         adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # --- PPO update (K epochs over minibatches) -------------------------
+        # 같은 rollout을 K epoch 동안 재사용한다. PPO의 clipping이 있어서
+        # 여러 번 돌려도 정책이 한 번에 크게 망가지지 않는다.
         idx = np.arange(T)
         mb = args.minibatch
         pg_loss = v_loss = ent_loss = torch.zeros((), device=device)
@@ -323,7 +340,7 @@ def train(args: argparse.Namespace) -> None:
 
         update += 1
 
-        # --- Logging --------------------------------------------------------
+        # 진행 상황 출력
         if ep_returns:
             window = 50
             mret = float(np.mean(ep_returns[-window:]))
@@ -340,7 +357,7 @@ def train(args: argparse.Namespace) -> None:
             flush=True,
         )
 
-        # --- Greedy evaluation ---------------------------------------------
+        # greedy policy로 평가 (탐색 없이 최선 수만)
         eval_stats: dict[str, float] | None = None
         if args.eval_episodes > 0 and args.eval_every > 0 and update % args.eval_every == 0:
             eval_stats = evaluate_policy(
@@ -348,6 +365,7 @@ def train(args: argparse.Namespace) -> None:
                 episodes=args.eval_episodes,
                 seed=args.eval_seed,
                 device=device,
+                env_kind=args.env,
                 max_pieces=args.eval_max_pieces,
             )
             print(
@@ -374,7 +392,7 @@ def train(args: argparse.Namespace) -> None:
                     },
                 )
 
-        # --- Checkpointing --------------------------------------------------
+        # 체크포인트 저장
         if update % args.save_every == 0:
             save_checkpoint(model, out_path, extra={"training_steps": global_step,
                                                     "update": update})
@@ -429,6 +447,10 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="cap per eval episode so strong policies cannot run forever")
     p.add_argument("--eval-seed", type=int, default=100_000,
                    help="base seed for fixed-seed evaluation episodes")
+    p.add_argument("--env", type=str, default="single",
+                   choices=["single", "versus"],
+                   help="single = 1인 판, versus = garbage 교환 2-보드 판 "
+                        "(versus 는 gymnasium 필요)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")

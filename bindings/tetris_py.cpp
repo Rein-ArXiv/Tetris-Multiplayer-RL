@@ -1,22 +1,27 @@
-// [NET/RL] pybind11 bindings for SimGame.
+// SimGame을 Python에서 쓰기 위한 pybind11 binding.
 //
-// Exposes the headless Tetris simulation to Python so that the same C++
-// source of truth drives both:
-//   - Colab training loops (placement-level API)
-//   - parity/equivalence tests (frame-level API: framing + input-mask
-//     expansion checked against the C++ lockstep path)
+// 게임 규칙을 Python으로 다시 구현하지 않고 C++ SimGame을 그대로 노출한다.
+// 학습할 때와 실제로 플레이할 때의 규칙이 갈라지면 sim-to-real gap이 생기는데,
+// 구현이 하나뿐이면 그 문제가 아예 없다.
 //
-// Build with -DTETRIS_BUILD_PY=ON. raylib is NOT required — this module only
-// links against the pure sim sources.
+// 두 가지 방식의 API를 제공한다.
+//   - placement 단위: RL 학습용. "몇 번 열에 몇 번 회전해서 떨어뜨릴지"를 한 번에 지정
+//   - frame 단위: parity test용. 한 tick의 input mask를 그대로 적용해
+//                 C++ lockstep 경로와 결과가 같은지 대조
 //
-// Python-side usage:
+// TETRIS_BUILD_PY=ON으로 빌드한다. 순수 시뮬레이션 소스만 링크하므로
+// renderer나 audio 없이도 컴파일된다.
+//
+// 사용 예:
 //   from sim import SimGame
 //   g = SimGame(seed=42)
 //   for p in g.legal_placements():
 //       print(p.col, p.rot)
 //   g.apply_placement(4, 0)
-//   arr = g.grid()                # numpy (20, 10) int32 copy
-//   h   = g.state_hash()          # bitwise-equal to C++ SimGame::StateHash()
+//   arr = g.grid()                # (20, 10) int32 NumPy 배열 (복사본)
+//   h   = g.state_hash()          # C++ SimGame::StateHash()와 비트 단위로 동일
+//
+// 아래 docstring들은 Python 쪽 help()에 그대로 노출되므로 영어로 둔다.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -32,7 +37,7 @@ PYBIND11_MODULE(tetris_py, m)
 {
     m.doc() = "Headless Tetris simulation (pybind11 wrapper around SimGame)";
 
-    // ---- Placement struct ------------------------------------------------
+    // 한 번의 착수를 나타내는 (column, rotation) 쌍.
     py::class_<SimGame::Placement>(m, "Placement")
         .def_readonly("col", &SimGame::Placement::col)
         .def_readonly("rot", &SimGame::Placement::rot)
@@ -41,14 +46,14 @@ PYBIND11_MODULE(tetris_py, m)
                    ", rot=" + std::to_string(p.rot) + ")";
         });
 
-    // ---- SimBlock (read-only observation handle) -------------------------
+    // 관측용으로만 노출하는 테트로미노. Python 쪽에서 수정할 수 없다.
     py::class_<SimBlock>(m, "SimBlock")
         .def_readonly("id",             &SimBlock::id)
         .def_readonly("rotation_state", &SimBlock::rotationState)
         .def_readonly("row_offset",     &SimBlock::rowOffset)
         .def_readonly("column_offset",  &SimBlock::columnOffset)
         .def("cell_positions", [](const SimBlock& b) {
-            // Return list of (row, column) tuples for the current rotation.
+            // 현재 rotation 상태에서 이 블록이 차지하는 4칸의 절대 좌표.
             auto tiles = b.GetCellPositions();
             py::list out;
             for (const auto& t : tiles)
@@ -58,13 +63,14 @@ PYBIND11_MODULE(tetris_py, m)
             return out;
         });
 
-    // ---- SimGame ---------------------------------------------------------
+    // 시뮬레이션 본체.
     py::class_<SimGame>(m, "SimGame")
         .def(py::init<uint64_t>(), py::arg("seed") = 0,
              "Construct a new headless Tetris sim. seed=0 uses a fixed default "
              "so that unseeded runs are still deterministic across platforms.")
 
-        // Placement-level action API (RL training)
+        // --- placement 단위 API (RL 학습용) ---
+        // 중력을 기다리지 않고 한 수를 통째로 두므로 학습 한 스텝이 곧 한 착수다.
         .def("legal_placements", &SimGame::LegalPlacements,
              "Enumerate all legal (col, rot) placements for the current piece "
              "via rotate-then-translate-then-hard-drop. Returns a list of "
@@ -78,11 +84,11 @@ PYBIND11_MODULE(tetris_py, m)
             return SimGame(g);
         }, "Return a deep copy of the full deterministic sim state.")
 
-        // ---- Combat / garbage API (RL versus env) ----
-        // attack_lines_sent() is a running session total; the versus env takes
-        // the delta across an apply_placement() and routes it to the opponent
-        // via add_pending_garbage(). Pending garbage is injected at the bottom
-        // on that board's next lock (apply_placement / move_block_down).
+        // --- 공격/garbage API (2인 대전 환경용) ---
+        // attack_lines_sent()는 누적값이라 그 자체로는 쓸 일이 없다.
+        // apply_placement() 앞뒤로 읽어 그 차이를 상대 보드의
+        // add_pending_garbage()에 넘기는 식으로 공격을 전달한다.
+        // 쌓인 garbage는 받는 보드가 다음 블록을 lock하는 순간 바닥에서 올라온다.
         .def("attack_lines_sent", &SimGame::AttackLinesSent,
              "Cumulative attack lines this board has sent (monotonic). Take the "
              "delta across a placement to get the attack from that placement.")
@@ -100,7 +106,8 @@ PYBIND11_MODULE(tetris_py, m)
         .def("level", [](const SimGame& g) { return g.level; },
              "Current gravity/speed level (1..20, +1 per 10 lines).")
 
-        // Frame-level action API (lockstep net play)
+        // --- frame 단위 API (lockstep parity test용) ---
+        // 실제 게임 클라이언트와 같은 경로다. 학습에는 쓰지 않는다.
         .def("submit_input", &SimGame::SubmitInput, py::arg("input_mask"),
              "Apply a one-tick input bitmask (see core/input.h). Retained for "
              "frame-level parity/equivalence tests against the lockstep loop.")
@@ -110,11 +117,12 @@ PYBIND11_MODULE(tetris_py, m)
         .def("move_block_down", &SimGame::MoveBlockDown,
              "Single-step the current piece down by one row (locks on contact).")
 
-        // Observation accessors
+        // --- 관측 ---
         .def("grid", [](const SimGame& g) {
-            // Expose the 20x10 int grid as a numpy array. We COPY the buffer
-            // so Python can keep the array alive past the next mutation —
-            // a 200-int copy per call is negligible for training throughput.
+            // 내부 버퍼를 참조로 넘기지 않고 복사한다.
+            // 참조를 넘기면 다음 착수 때 Python이 들고 있던 배열의 내용이
+            // 조용히 바뀌어, replay buffer에 쌓아둔 관측이 전부 오염된다.
+            // 200개짜리 복사는 학습 속도에 영향을 주지 않는다.
             const auto& raw = g.Grid();
             auto arr = py::array_t<int32_t>({SimGrid::kRows, SimGrid::kCols});
             auto buf = arr.mutable_unchecked<2>();
@@ -151,7 +159,7 @@ PYBIND11_MODULE(tetris_py, m)
         .def("score",            &SimGame::Score)
         .def("game_over",        &SimGame::IsGameOver)
 
-        // Determinism / debugging
+        // --- 결정성 검증용 ---
         .def("state_hash", &SimGame::StateHash,
              "FNV-1a 64-bit hash of the full sim state. Bitwise-identical to "
              "Game::ComputeStateHash() — this is the gate the determinism "
@@ -159,7 +167,7 @@ PYBIND11_MODULE(tetris_py, m)
         .def("rng_state", &SimGame::RngState,
              "Raw XorShift64* RNG state (for debugging cross-platform drift).")
 
-        // Grid shape constants (useful for observation code on the Python side)
+        // 관측 벡터 크기를 Python 쪽에서 하드코딩하지 않도록 노출한다.
         .def_property_readonly_static("ROWS", [](py::object) { return SimGrid::kRows; })
         .def_property_readonly_static("COLS", [](py::object) { return SimGrid::kCols; });
 }

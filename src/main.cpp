@@ -1,4 +1,4 @@
-// src/main.cpp — Handmade 버전 (raylib 제거, Win32 + OpenGL 직접 사용)
+// src/main.cpp — Handmade 버전 (raylib 제거, 자체 OpenGL 3.3 Core 렌더러)
 //
 // 변경 사항:
 //   #include <raylib.h>     → platform/platform.h + renderer/renderer.h
@@ -6,7 +6,7 @@
 //   WindowShouldClose()     → platform_should_close()
 //   GetFrameTime()          → platform_begin_frame() 반환값
 //   BeginDrawing()          → renderer_begin()
-//   EndDrawing()            → renderer_end() + platform_end_frame()
+//   EndDrawing()            → renderer_end() (버퍼 교체) + platform_end_frame() (pace)
 //   IsKeyPressed(KEY_*)     → platform_key_pressed(PKEY_*)
 //   IsKeyDown(KEY_*)        → platform_key_down(PKEY_*)
 //   GetCharPressed()        → platform_get_char_pressed()
@@ -223,18 +223,39 @@ struct GameSettings {
     int  sfxVol  = 100;   // SFX 볼륨 0~100 (0 == 음소거)
     bool shakeOn = true;  // 마스터 화면 흔들림 (가비지/게임오버 + 하드드롭)
     bool hardDropShakeOn = true;  // 하드드롭 시 약한 흔들림 (shakeOn 의 하위)
-    int  windowScale = 0; // 창 스케일 프리셋 0/1/2 → 720x640 / 1080x960 / 1440x1280
+    int  windowScale = 0; // 창 크기 프리셋 인덱스 0~4 (아래 kWindowScale* 참고)
     bool fullscreen  = false;
     bool vsyncOn     = true;
     bool ghostOn     = true;  // 고스트 피스 표시
 };
 
-// 창 스케일 프리셋 (9:8 비율 유지). windowScale 인덱스 → (w,h).
-static constexpr int kWindowScaleCount = 3;
-static constexpr int kWindowScaleW[kWindowScaleCount] = { 720, 1080, 1440 };
-static constexpr int kWindowScaleH[kWindowScaleCount] = { 640,  960, 1280 };
+// 창 크기 프리셋. UI 좌표계(논리 720x640)는 그대로 두고 창만 키운다.
+// 9:8 을 유지하므로 레터박스가 생기지 않고, GPU 가 그 해상도로 다시
+// 래스터화하므로 크게 잡을수록 선명해진다 (글자도 그 배율로 다시 굽는다).
+//
+// 마지막 항목은 4K 모니터의 세로 해상도(2160) 에 맞춘 것이다. 9:8 이라
+// 가로는 2430 이고, 남는 좌우는 전체화면에서 검은 여백이 된다.
+static constexpr int kWindowScaleCount = 5;
+static constexpr int kWindowScaleW[kWindowScaleCount] = { 720, 1080, 1440, 1800, 2430 };
+static constexpr int kWindowScaleH[kWindowScaleCount] = { 640,  960, 1280, 1600, 2160 };
 static const char*   kWindowScaleLabel[kWindowScaleCount] = {
-    "720 x 640", "1080 x 960", "1440 x 1280" };
+    "720 x 640", "1080 x 960", "1440 x 1280", "1800 x 1600", "2430 x 2160" };
+
+// 이 모니터에 실제로 들어가는 가장 큰 프리셋 인덱스.
+//
+// 화면보다 큰 창을 만들면 창의 일부가 화면 밖으로 나가 제목 표시줄조차
+// 잡을 수 없게 된다. 그래서 고를 수 있는 범위를 화면 크기로 잘라 둔다.
+// 모니터를 바꿔 끼울 수 있으므로 매번 다시 잰다.
+static int max_window_scale()
+{
+    int dw = 0, dh = 0;
+    platform_display_size(dw, dh);
+    if (dw <= 0 || dh <= 0) return kWindowScaleCount - 1;  // 못 재면 막지 않는다
+    int last = 0;
+    for (int i = 0; i < kWindowScaleCount; ++i)
+        if (kWindowScaleW[i] <= dw && kWindowScaleH[i] <= dh) last = i;
+    return last;
+}
 
 // 전역 설정. apply_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
 static GameSettings g_settings;
@@ -469,7 +490,7 @@ static ImageHandle load_configured_image(
 // 키보드 입력 → 비트마스크 (core/input.h 의 INPUT_* 상수)
 //
 // platform_key_pressed()는 "이번 프레임에 처음 눌림"을 감지하는 엣지 트리거.
-// vsync 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
+// frame pacing 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
 // 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
 // → 매 프레임 AccumulateInput()으로 엣지 입력을 누적하고,
 //   틱에서 ConsumeInput()으로 소비 + held 키(DOWN/LEFT/RIGHT)를 합산한다.
@@ -684,8 +705,14 @@ int main(int argc, char** argv)
     audio_set_music_volume(g_settings.bgmVol / 100.0f);
     audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
 
-    // 윈도우: 저장된 스케일 프리셋 적용 + (저장되어 있으면) 전체화면 + vsync.
-    //   렌더러 ortho 는 항상 720×640 — 창만 스케일/레터박스된다.
+    // 윈도우: 저장된 크기 프리셋 + 전체화면 + 60 FPS pacing 적용.
+    //   UI 좌표계는 항상 논리 720x640 — 창은 그 위에 얹히는 뷰포트일 뿐이다.
+    //
+    // 저장된 값을 이 모니터 기준으로 한 번 더 자른다. 큰 화면에서 저장한
+    // 설정 파일을 작은 화면에 들고 오면 창이 화면 밖으로 나가는데, 그러면
+    // 설정 화면에 들어가 되돌릴 수조차 없다.
+    if (g_settings.windowScale > max_window_scale())
+        g_settings.windowScale = max_window_scale();
     platform_set_window_size(kWindowScaleW[g_settings.windowScale],
                              kWindowScaleH[g_settings.windowScale]);
     if (g_settings.fullscreen) platform_set_fullscreen(true);
@@ -1646,7 +1673,12 @@ int main(int argc, char** argv)
                     app = AppMode::Settings;
                     settingsIndex = 0;
                 } else {
-                    platform_shutdown(); return 0;
+                    // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
+                    // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
+                    // renderer_shutdown 이 platform_shutdown 보다 먼저다.
+                    renderer_shutdown();
+                    platform_shutdown();
+                    return 0;
                 }
             }
         }
@@ -1813,11 +1845,13 @@ int main(int argc, char** argv)
                     if (kRight) dir = +1;
                 }
                 if (dir != 0) {
-                    // 해상도 선택기는 양 끝에서 wrap 하지 않고 clamp (1440 에서
-                    // Right → 720 으로 점프하는 일반 picker 답지 않은 동작 방지).
+                    // 양 끝에서 wrap 하지 않고 clamp 한다 (가장 큰 값에서
+                    // Right → 720 으로 점프하는, picker 답지 않은 동작 방지).
+                    // 상한은 프리셋 개수가 아니라 이 모니터에 들어가는 최대치다.
+                    const int hi = max_window_scale();
                     int ns = g_settings.windowScale + dir;
                     if (ns < 0) ns = 0;
-                    if (ns > kWindowScaleCount - 1) ns = kWindowScaleCount - 1;
+                    if (ns > hi) ns = hi;
                     if (ns != g_settings.windowScale) {
                         g_settings.windowScale = ns;
                         g_settings.fullscreen = false;  // 스케일 변경은 창모드로
@@ -1897,7 +1931,7 @@ int main(int argc, char** argv)
             }
 
             // ── ROW_VSYNC ───────────────────────────────────────────────────
-            if (checkbox_row(ROW_VSYNC, "VSync", g_settings.vsyncOn)) {
+            if (checkbox_row(ROW_VSYNC, "60 FPS pacing", g_settings.vsyncOn)) {
                 platform_set_vsync(g_settings.vsyncOn);
                 changed = true;
             }
@@ -3122,7 +3156,9 @@ int main(int argc, char** argv)
             bool clickYes = gui_button(bxYes, byPos, bw, bh, "예 (Y)", 22);
             bool clickNo  = gui_button(bxNo,  byPos, bw, bh, "아니오 (N)", 22);
 
-            // 키보드: Y = Yes, N = No, Enter = Yes (관성), Escape 는 창 닫기라 피함.
+            // 키보드: Y = Yes, N = No, Enter = Yes (관성).
+            // Escape 는 배정하지 않는다 — 다른 화면에서 전부 '뒤로가기'로
+            // 쓰고 있어서, 여기서만 '예'로 동작하면 일관성이 깨진다.
             if (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER))
                 clickYes = true;
             if (platform_key_pressed(PKEY_N))

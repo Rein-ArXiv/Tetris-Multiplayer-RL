@@ -14,8 +14,8 @@ endif()
 # -----------------------------------------------------------------------------
 # Build options
 #
-#   TETRIS_BUILD_GAME  — Game executable. Windows 기본은 handmade Win32+OpenGL,
-#                         macOS/Linux 기본은 SDL2+OpenGL.
+#   TETRIS_BUILD_GAME  — Game executable. OpenGL 3.3 Core renderer with a thin
+#                         Win32 or SDL2 window/context backend.
 #   TETRIS_BUILD_PY    — pybind11 module (tetris_py) wrapping SimGame. Portable.
 #   TETRIS_BUILD_TEST  — SimGame determinism regression (sim_hash_dump). Portable.
 #   TETRIS_BUILD_RELAY — Headless matchmaking/relay server (server/*.cpp).
@@ -51,7 +51,7 @@ endif()
 
 # TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
 # Default ON on non-Windows so macOS/Linux users get it automatically.
-# On Windows, default OFF to preserve the handmade Win32+OpenGL path.
+# On Windows, default OFF to preserve the handmade Win32 window/audio path.
 if (WIN32)
     option(TETRIS_USE_SDL2 "Use SDL2 backend (cross-platform)" OFF)
 else()
@@ -80,7 +80,7 @@ set(TETRIS_SIM_HEADERS
 )
 
 # -----------------------------------------------------------------------------
-# Target: tetris (Handmade Win32 + OpenGL game)
+# Target: tetris (handmade OpenGL 3.3 Core game client)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_GAME)
     # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇
@@ -105,8 +105,10 @@ if (TETRIS_BUILD_GAME)
         net/framing.cpp
         net/session.cpp
         renderer/renderer.cpp
+        renderer/gl_api.cpp
+        renderer/text_gl.cpp
         renderer/shake.cpp
-        renderer/image.cpp
+        renderer/image_gl.cpp
         bot/placement.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
@@ -122,7 +124,9 @@ if (TETRIS_BUILD_GAME)
         net/session.h
         platform/platform.h
         renderer/renderer.h
-        renderer/shaders.h
+        renderer/gl_api.h
+        renderer/gl_internal.h
+        renderer/gl_shaders.h
         renderer/shake.h
         renderer/image.h
         audio/audio.h
@@ -138,7 +142,6 @@ if (TETRIS_BUILD_GAME)
             ${TETRIS_GAME_COMMON}
             ${TETRIS_GAME_HEADERS}
             platform/sdl.cpp
-            renderer/text_stb.cpp
             audio/sdl_audio.cpp
         )
         target_include_directories(tetris PRIVATE
@@ -153,23 +156,23 @@ if (TETRIS_BUILD_GAME)
             target_link_libraries(tetris PRIVATE ${SDL2_LIBRARIES})
         endif()
 
-        if (APPLE)
-            target_link_libraries(tetris PRIVATE "-framework OpenGL")
-        elseif (WIN32)
-            target_link_libraries(tetris PRIVATE opengl32 gdiplus ws2_32)
-        else()
-            find_package(OpenGL REQUIRED)
-            target_link_libraries(tetris PRIVATE OpenGL::GL)
+        # OpenGL 3.3 Core 렌더러. 함수 포인터는 런타임에 받지만 컨텍스트를
+        # 만드는 진입점(SDL 경유)과 GL 1.1 심볼 때문에 GL 라이브러리는 링크한다.
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(tetris PRIVATE OpenGL::GL)
+
+        if (WIN32)
+            target_link_libraries(tetris PRIVATE gdiplus ws2_32)
+        elseif (NOT APPLE)
             find_package(Threads REQUIRED)
             target_link_libraries(tetris PRIVATE Threads::Threads)
         endif()
     else()
-        # Handmade 경로: Win32 window + OpenGL + XAudio2 + GDI text
+        # Handmade 경로: Win32 window/presentation + XAudio2
         add_executable(tetris
             ${TETRIS_GAME_COMMON}
             ${TETRIS_GAME_HEADERS}
             platform/win32.cpp
-            renderer/text_win32.cpp
             audio/audio.cpp
         )
         target_include_directories(tetris PRIVATE

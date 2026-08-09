@@ -14,7 +14,7 @@
   1. 프레이밍 계약(부분 수신 · 잘못된 길이 · 체크섬 불일치)이 자동 테스트로 통과한다 — `python/tests/test_framing_parity.py`.
   2. 같은 머신에서 `--host` / `--connect` 두 인스턴스를 붙이면 양쪽 `[INIT] seed=...` 가 일치하고, 600틱마다 교환하는 결합 해시가 어긋나지 않는다(`[DESYNC]` 로그 0건).
 
-이 장은 **직결 P2P 세션**까지만 다룬다. `HELLO` / `HELLO_ACK` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT` 이 여기서 완성되고, 릴레이 서버를 경유하는 `QUEUE_*` / `ROOM_*` / `MATCH_FOUND` / `MATCH_SUMMARY` / `MATCH_RESULT` 와 그 클라이언트 측 스레드 (`Session::queueThread`, `Session::roomThread`)는 [Part 7](./part7-relay-server.md) 에서 구현한다. 두 파트의 경계는 말미의 "`Session` 공개 API 경계" 절에 표로 정리해 뒀다.
+이 장의 구현 산출물은 **직결 P2P lockstep 세션**이다. `HELLO` / `HELLO_ACK` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT`의 전송 계약과 `Session::ioThread`를 완성한다. 현재 `net/session.*`에는 릴레이와 랭킹 확장도 함께 있지만, `QUEUE_*` / `ROOM_*` / `MATCH_FOUND`는 Part 7, `MATCH_SUMMARY` / `MATCH_RESULT`의 서버 권위 의미는 Part 10의 소유다. 이 장의 현재 소스 발췌에 그런 타입이 보이더라도 직결 세션을 이해하는 데 필요한 wire 기반과 수신 안전성만 읽는다.
 
 ## 들어가며
 
@@ -66,7 +66,7 @@ lockstep 은 "틱 t 의 입력" 이 반드시 도착해야 진행한다. 하나�
 1. **head-of-line 블로킹.** TCP 는 앞의 세그먼트가 재전송되는 동안 뒤의 세그먼트를 애플리케이션에 넘기지 않는다. 커널이 이미 받아둔 틱 t+3 의 INPUT 이 있어도 틱 t 가 재전송 중이면 `recv` 가 반환하지 않는다. lockstep 은 어차피 t 를 기다려야 하므로 손해가 작지만, "새 입력만 최신으로 쓰고 옛것은 버린다" 는 UDP 식 최적화는 불가능하다.
 2. **바이트 스트림에는 메시지 경계가 없다.** UDP 는 데이터그램 하나가 곧 메시지지만, TCP 는 우리가 직접 프레이밍을 해야 한다. 이 프로젝트는 `길이 + 타입 + payload + 체크섬`을 한 프레임으로 정의하고 수신 버퍼에서 완성된 프레임만 꺼낸다.
 
-여기에 Nagle 알고리즘이 기본으로 켜져 있다는 세 번째 함정이 붙는데, 그건 `TCP_NODELAY` 절에서 실제 증상과 함께 다룬다.
+여기에 Nagle 알고리즘이 기본으로 켜져 있다는 세 번째 함정이 붙는다. 작은 INPUT 프레임을 더 큰 세그먼트로 합치느라 기다리면 lockstep의 체감 지연이 늘어나므로 연결 직후 `TCP_NODELAY`를 켠다. 이 선택은 처리량보다 작은 메시지의 즉시성을 우선한다.
 
 ---
 
@@ -513,7 +513,7 @@ $$h_0 = 2166136261, \quad h_i = (h_{i-1} \oplus \text{byte}_i) \times 16777619$$
 
 Part 1 에서 사용한 FNV-1a 64-bit 와 같은 알고리즘의 32비트 버전이다. CRC32 대신 이것을 고른 이유는 세 가지다.
 
-1. **구현이 5줄이다.** CRC32 는 테이블(1 KiB)이나 비트 단위 루프가 필요하고, 다항식·초기값·반전 규약을 맞추지 않으면 구현마다 값이 다르다. 이 프로젝트는 Python 미러(`python/netbot/framing.py`)와 바이트 단위로 일치해야 하므로 "규약이 하나뿐인 알고리즘" 이 유리하다.
+1. **구현과 검증 규약이 작다.** CRC32는 테이블이나 비트 단위 루프가 필요하고, 다항식·초기값·반전 규약을 맞추지 않으면 구현마다 값이 다르다. 이 프로젝트는 Python 미러(`python/netbot/framing.py`)와 바이트 단위로 일치해야 하므로 규약이 단순한 알고리즘이 유리하다.
 2. **이미 프로젝트에 있다.** Part 1 의 상태 해시가 FNV-1a 64 다. 상수 두 개만 32비트 버전으로 바꾸면 된다 — 새로 배울 것이 없다.
 3. **성능이 문제되지 않는다.** 최대 페이로드가 4 KiB, 실사용은 수십 바이트다.
 
@@ -530,7 +530,7 @@ TCP 가 이미 16비트 체크섬으로 세그먼트를 검증하고 그 아래 
 
 이 점은 분명히 해 둬야 한다. **FNV-1a 32 는 비암호학적 해시이고 키가 없다.** 공격자는 payload 를 원하는 대로 바꾼 뒤 같은 함수로 체크섬을 다시 계산해 붙이면 그만이다. 심지어 알고리즘을 몰라도 되는데, 프로토콜이 공개되어 있으므로 `build_frame` 을 그대로 재구현하면 된다.
 
-따라서 이 장 뒤의 "악성 프레임 방어" 절에서 다루는 검증들 — 페이로드 크기 검사, 길이 필드 재확인, enum 범위 검사, tick 윈도우, 큐 상한 — 은 체크섬으로 대체할 수 없다. 체크섬은 **사고**를 막고, 그 검증들이 **악의**를 막는다. 프레임 위조 자체를 막으려면 세션 키 기반 MAC(HMAC 등)이 필요한데, 이 프로젝트는 그 위협 모델을 채택하지 않았다 — 대신 "어떤 바이트가 들어와도 프로세스가 죽지 않고, 상대가 자기 게임만 망칠 수 있다" 를 목표로 한다.
+따라서 페이로드 크기, 내부 길이 필드, enum 범위, tick 윈도우와 큐 상한은 체크섬과 별도로 검증해야 한다. 체크섬은 전송 중 **사고**를 찾고, 범위 검증은 의도적인 자원 소모와 잘못된 상태 전이를 막는다. 프레임 위조 자체를 막으려면 세션 키 기반 MAC(HMAC 등)이 필요하지만 현재 프로토콜에는 없다. 현재 보안 목표는 임의 바이트가 들어와도 프로세스가 죽거나 무한히 자원을 쓰지 않게 하는 것이다.
 
 ### 2.4 상수와 `build_frame`
 
@@ -635,8 +635,8 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
 
 1. **누적 버퍼.** `streamBuf` 는 `tcp_recv_some` 이 호출될 때마다 뒤에 바이트가 붙는 버퍼다. `parse_frames` 는 앞에서부터 완성된 프레임만 뽑고, 아직 불완전한 꼬리는 남긴다. 다음 `recv` 에서 나머지가 도착하면 이어 붙여 파싱한다.
 2. **오버사이즈 선언은 즉시 차단.** `len > MAX_PAYLOAD_BYTES + TYPE_FIELD` 면 버퍼를 통째로 비우고 `false` 를 반환한다. 악의적 peer 가 `len = 65535` 를 선언하면 그 전에는 64 KiB 가 모일 때까지 기다려야 했다. **부분 수신 상태에서 `len` 2바이트만 받아도 판정할 수 있다**는 점이 이 검사의 핵심이다.
-3. **`len = 0` 은 스킵.** TYPE 바이트조차 없는 프레임이다. 뒤의 size_t 절에서 왜 이 한 줄이 크래시 방어인지 다룬다.
-4. **체크섬 불일치는 드롭이지 단절이 아니다.** 프레임 하나를 버리고 계속 진행한다. lockstep 이 한두 프레임에 과민 반응해 세션을 끊으면 오히려 복원력이 떨어진다.
+3. **`len = 0`은 스킵.** TYPE 바이트조차 없는 프레임이므로 `len - 1`을 계산하면 unsigned `size_t`에서 매우 큰 값으로 언더플로할 수 있다. payload 길이를 계산하기 전에 거부해야 한다.
+4. **체크섬 불일치는 현재 구현에서 드롭이지 단절이 아니다.** 파서는 손상된 프레임 하나를 소비하고 뒤 프레임을 계속 읽는다. 다만 `INPUT`처럼 진행에 필수인 프레임이 드롭되면 애플리케이션 계층 재전송이 없어 lockstep은 스스로 복구하지 못한다. 따라서 이 동작은 스트림 파서를 살려 두는 정책일 뿐, 게임 세션 복구 보장은 아니다. 손상 프레임을 즉시 연결 실패로 승격할지는 운영 보안 정책으로 별도 결정해야 한다.
 5. **알 수 없는 TYPE 은 그대로 통과시킨다.** `static_cast<MsgType>(type)` 은 범위 검사를 하지 않는다. 걸러내는 곳은 `Session::handleFrame` 의 `switch` 의 `default: break;` 다 — 새 타입이 추가된 상대 버전과 붙어도 파서가 죽지 않는 포워드 호환성.
 
 반환값도 계약이 있다. `true` 는 "정상적으로 파싱했다(0개일 수도 있음)", `false` 는 "스트림이 오염됐으니 세션을 끊어라" 다. 현재 `Session::ioThread` 는 반환값을 무시하지만, 릴레이 서버([Part 7](./part7-relay-server.md))는 이 값을 보고 연결을 끊는다.
@@ -707,9 +707,9 @@ enum class MsgType : uint8_t {
     HASH = 8,
     GAME_OVER_CHOICE = 9,
 
-    // 릴레이/매치메이킹 확장 (클라 ↔ 릴레이 서버 간에만 사용 — 릴레이가
-    // MATCH_FOUND 를 보낸 후에는 투명하게 바이트 스트림만 포워딩하므로
-    // 게임 루프는 이 두 타입을 직접 소비하지 않는다.)
+    // 릴레이/매치메이킹 확장. 큐·룸 제어는 relay와 Session이 소비하고,
+    // 매치 중 일반 게임 프레임은 전달한다. ranked MATCH_SUMMARY만 relay가
+    // 결과 검증을 위해 가로챈다. SimGame은 이 제어 타입을 직접 소비하지 않는다.
     //
     // QUEUE_JOIN / ROOM_CREATE / ROOM_JOIN 은 모두 tetris_meta 인증 토큰을
     // 같이 실어 보낸다. 토큰은 32 hex chars (플랫폼 user-data 경로에 저장).
@@ -718,7 +718,8 @@ enum class MsgType : uint8_t {
     QUEUE_JOIN    = 10,  // C→S : [tok_len:1][token:N]   (tok_len==0 이면 미인증)
     QUEUE_CANCEL  = 11,  // C→S : 빈 페이로드 (매치메이킹 큐 취소)
     MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
-                         //        [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
+                         //        [peer_icon_len:1][peer_icon:N][uuid_len:1][uuid:N]
+                         //        role: 1=HOST, 2=GUEST. 구 클라이언트는 UUID를 무시한다.
 
     // 커스텀 룸 (Section D)
     //   플레이어가 5자리 코드로 방을 만들어 친구와 페어링.
@@ -767,19 +768,19 @@ struct Frame {
 | PONG (7) | `[timestamp:u64]` | 양방향 | PING 에코 | Part 6 |
 | HASH (8) | `[tick:u32][hash:u64]` | 양방향 | 상태 해시 교차 검증 | Part 6 |
 | GAME_OVER_CHOICE (9) | `[choice:u8]` | 양방향 | 재시작/타이틀 협상 | Part 6 |
-| CHAT (20) | `[text_len:u16][utf8:N]` | 양방향 | 인게임 채팅 (릴레이 투명 통과) | Part 6 |
+| CHAT (20) | `[text_len:u16][utf8:N]` | 양방향 | 인게임 채팅 (릴레이가 raw frame으로 전달) | Part 6 |
 | QUEUE_JOIN (10) | `[tok_len:1][token:N]` | C→S | 랜덤 큐 참가 | [Part 7](./part7-relay-server.md) |
 | QUEUE_CANCEL (11) | 없음 | C→S | 큐 취소 | Part 7 |
-| MATCH_FOUND (12) | `[role:1][seed:8][my_icon][peer_icon]` | S→C | 페어링 완료 통지 | Part 7 |
+| MATCH_FOUND (12) | `[role:1][seed:8][my_icon][peer_icon][match_uuid]` | S→C | 페어링 완료와 결과 멱등 키 통지 | Part 7 |
 | ROOM_CREATE (13) | `[tok_len:1][token:N]` | C→S | 방 생성 | Part 7 |
 | ROOM_JOIN (14) | `[code_len:1][code:N][tok_len:1][token:N]` | C→S | 방 입장 | Part 7 |
-| ROOM_INFO (15) | `[code_len:1][code:N][status:1][peer_count:1]` | S→C | 방 상태 통지 | Part 7 (상태 머신은 이 장) |
+| ROOM_INFO (15) | `[code_len:1][code:N][status:1][peer_count:1]` | S→C | 방 상태 통지 | Part 7 |
 | ROOM_LEAVE (16) | 없음 | C→S | 방 퇴장 | Part 7 |
 | READY (17) | `[ready:1]` | 양방향 | 수락/거절 | Part 7 |
 | MATCH_SUMMARY (18) | 21바이트 (아래) | C→S | 랭킹 집계 요청 | Part 7 / [Part 10](./part10-meta-and-ranking.md) |
-| MATCH_RESULT (19) | `[elo_before:4][elo_after:4][delta:4 signed]` | S→C | RP 변동 결과 | 이 장에서 **수신 처리**, 발행은 Part 7 |
+| MATCH_RESULT (19) | `[elo_before:4][elo_after:4][delta:4 signed]` | S→C | RP 변동 결과 | 이 장에서 **수신 처리**, relay 판정·발행은 [Part 10](./part10-meta-and-ranking.md) |
 
-`MATCH_RESULT` 만 예외적으로 여기서 소비 계약까지 정한다. relay가 meta의 확정 결과를 담아 보내면 `Session::handleFrame`이 파싱하고 `Session::GetMatchResult`로 UI에 노출한다. 클라이언트는 점수 계산을 재현하지 않고 `elo_before`, `elo_after`, `rp_delta`, `bp_delta`, `xp_delta`를 서버 확정값으로 표시한다.
+`MATCH_RESULT`는 완성된 소스의 확장 타입이다. relay가 meta의 확정 결과를 담아 보내면 `Session::handleFrame`이 파싱하고 `Session::GetMatchResult`로 UI에 노출한다. wire에는 `elo_before`, `elo_after`, `delta`라는 하위 호환 이름의 RP 값만 들어간다. BP와 XP는 이 프레임에 없으므로 메뉴 복귀 뒤 meta profile을 다시 읽어 갱신한다. 랭킹 판정과 실패 정책은 Part 10이 설명한다.
 
 ---
 
@@ -948,7 +949,7 @@ void Session::acceptThread(uint16_t port)
 - `NET_TRACE` 는 **기본 빌드에서 완전히 사라진다.** `CMakeLists.txt` 의 `TETRIS_ENABLE_NET_TRACE` 옵션이 기본 OFF 이고, ON 일 때만 `target_compile_definitions` 로 `TETRIS_ENABLE_NET_TRACE=1` 이 주입된다 (`CMakeLists.txt`).
 - `NET_WARN` 은 항상 살아 있고 **stderr** 로 나간다. 연결 실패·타임아웃처럼 드물게 한 번 찍히는 이벤트만 이 매크로를 쓴다.
 
-왜 이렇게까지 하느냐면, 이 장 뒤의 "Host 렉 기타 원인" 절에서 다루듯 `ioThread` 의 hot path 에서 `std::cout` 을 부르는 것만으로 Windows 콘솔 I/O 가 블로킹돼 프레임이 밀렸기 때문이다. 로그를 지우는 대신 컴파일 타임에 없애는 방식으로 디버깅 가능성과 성능을 동시에 챙긴다.
+`ioThread`의 hot path에서 `std::cout`을 부르는 것만으로도 Windows 콘솔 I/O가 블로킹돼 프레임이 밀릴 수 있다. 로그를 지우는 대신 컴파일 타임에 없애면 디버깅 가능성을 보존하면서 릴리스 경로의 I/O를 제거할 수 있다.
 
 네트워크를 디버깅할 때는 이렇게 빌드한다.
 
@@ -1134,7 +1135,7 @@ sequenceDiagram
     Note over A,B: safeTick = min(7,5) - 2 = 3 → 틱 3 까지 실행
 ```
 
-`inputDelay` 의 역할은 지터(패킷 도착 시간의 변동) 흡수다. `inputDelay = 0` 이면 패킷이 조금만 늦어도 시뮬레이션이 멈춘다. `inputDelay = 2` 면 2틱(약 33ms)의 여유가 있다. 자세한 유도는 뒤의 "inputDelay / safeTick 심화" 절에서 이어진다.
+`inputDelay`의 역할은 지터(패킷 도착 시간의 변동) 흡수다. `inputDelay = 0`이면 패킷이 조금만 늦어도 시뮬레이션이 멈춘다. `inputDelay = 2`면 60Hz 기준 2틱의 입력 여유를 먼저 쌓고, `safeTick = min(localReceived, remoteReceived) - inputDelay`까지만 진행한다. 지연을 늘리면 정지는 줄지만 조작 반응이 늦어지는 직접적인 절충이다.
 
 ### 5.3 시뮬레이션 진행
 
@@ -1245,7 +1246,7 @@ graph TB
 
 `Session` 은 최대 네 개의 `std::thread` 멤버를 갖는다 — `th`(ioThread), `ath`(acceptThread), `qth`(queueThread), `rth`(roomThread). 동시에 사는 것은 많아야 둘이다(로비 스레드가 ioThread 를 띄우고 스스로 종료하는 구조).
 
-### 6.2 뮤텍스 — 왜 열두 개인가
+### 6.2 뮤텍스 — 페이즈별 소유권을 왜 나누는가
 
 | 뮤텍스 | 보호 대상 | 접근 스레드 | 담당 파트 |
 |--------|----------|------------|---|
@@ -1262,7 +1263,7 @@ graph TB
 | `queueSendMu_` | `queueSendQ_` | main(QueueConfirm), queueThread(drain) | Part 7 |
 | `queueSockSendMu_` | 로비 단계 소켓 쓰기 | queueThread drain, main 의 `QueueDecline` 동기 송신 | Part 7 |
 
-12개다. 각각은 실제 버그 하나씩에 대응하지만, 그렇게 늘어난 데는 구조적인 이유가 있다.
+잠금 목록은 기능 확장에 따라 달라질 수 있지만, 나뉜 이유는 구조적이다. 게임 전송, 큐 로비, 룸 로비, 결과 수신이 서로 다른 스레드와 수명을 가지므로 한 잠금에 모두 몰아넣지 않는다.
 
 **"왜 소켓 하나에 outbound writer 를 하나로 통일하지 않았나."** 가장 단순한 대안은 "소켓 하나 = 송신 큐 하나 = 드레이닝 스레드 하나" 다. 그러면 `sendMu` 하나만 남고 `roomSendMu_` / `queueSendMu_` / `*SockSendMu_` 네 개가 사라진다. 그런데 이 설계에는 그 통일을 막는 두 가지 제약이 있다.
 
@@ -1976,15 +1977,13 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 **`hbEnd == 0` 가드의 왜.** 이 가드를 처음 작성할 땐 `hbEnd >= localTickNext` 한 줄이면 된다고 착각했는데, 게임 시작 직후 `localTickNext = 0, hbEnd = 0` 에서 조건이 `0 >= 0 → true` 로 평가돼 `localInputs[0] = 0` 으로 덮어씌우고 `localTickNext` 가 1 로 점프하는 치명적 버그가 있었다. 결과적으로 `INPUT(0)` 이 전송되지 않아 상대 `remoteInputs[0]` 이 영원히 비어 있고, `safeTick = min(local, remote) - inputDelay` 계산에서 `remote = 0` 으로 막혀 **양쪽 sim 이 완전히 프리즈**. `hbEnd == 0` 을 "heartbeat 미발동" sentinel 로 명확히 구분해야 한다(heartbeat 은 `lastLocalTick + 1` 부터 시작하니 실제 발동 시엔 항상 `hbEnd ≥ 1`).
 
-### 11.7 왜 TCP keep-alive 를 안 쓰는가
+### 11.7 TCP keepalive와 PING/PONG은 서로 다른 실패를 본다
 
-TCP 스택 자체에 `SO_KEEPALIVE` 옵션이 있다. 그런데:
+현재 `tcp_accept`와 `tcp_connect`는 모든 연결 소켓에 `SO_KEEPALIVE`를 켠다. POSIX에서는 지원되는 옵션에 한해 idle, probe 간격, 실패 횟수도 짧게 요청한다. Windows 경로는 `SO_KEEPALIVE`를 켜지만 세부 시간값은 별도로 조정하지 않는다. `setsockopt` 실패는 연결 자체를 실패시키지 않으므로 실제 적용값은 OS 정책에 좌우된다.
 
-- **기본 타임아웃이 너무 길다** — 리눅스 `tcp_keepalive_time = 7200s`(2시간). Windows 도 비슷하다.
-- **OS 마다 튜닝 방법이 다르다** — 플랫폼별 `setsockopt` 상수가 다르고 Windows 는 `SIO_KEEPALIVE_VALS` ioctl 로만 조정 가능하다.
-- **게임 루프와 디커플되어 있다** — keep-alive 가 감지해도 우리 UI 에 "창 드래그 중" vs "단절" 을 구분해 보여주는 정보는 전달하지 못한다.
+커널 keepalive만으로 게임 상태를 판단할 수는 없다. 기본값이 길 수 있고, 감지 결과도 `LinkStatus`에 필요한 마지막 응답 시각과 원격 tick 진행 정보를 주지 않기 때문이다. 반대로 애플리케이션 PING/PONG만으로는 NAT와 커널이 보유한 반쪽 연결을 OS 수준에서 정리하는 역할을 완전히 대신하지 못한다.
 
-애플리케이션 레벨에서 PING/PONG 을 구현하면 이 문제가 모두 사라진다. 1Hz 라는 주기도 게임 틱(60Hz) 대비 부담이 없다 — PING 프레임은 `[len:2][type:1][payload:8][chk:4]` = 15바이트이고 PONG 도 같으므로, 한 방향당 초당 30바이트가 늘어날 뿐이다. INPUT 트래픽(840 B/s)의 4% 미만이다.
+따라서 두 계층을 함께 쓴다. TCP keepalive는 FIN/RST 없이 사라진 peer를 회수하는 커널 안전망이고, PING/PONG은 UI의 `OK`/`Stalled`/`Lost` 판정과 RTT 관측을 위한 게임 프로토콜이다. relay의 방향별 무활동 제한은 여기에 별도로 더해져, 매치 자원을 언제 회수하고 기권으로 볼지를 결정한다.
 
 ---
 
@@ -2283,17 +2282,17 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 
 다섯 번째가 이 목록에서 가장 늦게 추가됐고, 가장 놓치기 쉬운 규칙이다. 처음 네 규칙은 "프레임 하나를 안전하게 읽는" 문제고, 다섯 번째는 "프레임이 계속 오는" 문제다. fuzz 테스트(랜덤 프레임을 던져 크래시 유도)는 앞의 넷을 잡지만, 플러딩 테스트가 아니면 다섯 번째는 드러나지 않는다.
 
-[Part 7](./part7-relay-server.md) 의 릴레이 서버는 이 규칙들을 **더 엄격히** 적용한다 — 서버는 신뢰할 수 없는 클라이언트 둘의 중간에 있으므로, 한쪽이 보낸 모든 바이트를 파싱 + 재검증한 후에만 다른 쪽으로 포워딩한다.
+릴레이의 검증 범위는 모드에 따라 다르다. **unranked 매치는 게임 바이트를 그대로 양방향 전달**하고, 끝점 `Session`이 프레임과 payload를 검증한다. **ranked 매치는 전송 경계를 찾기 위해 프레임 길이를 읽고, `MATCH_SUMMARY`일 때만 checksum과 결과 payload를 검증**한다. 그 외 게임 프레임은 wire byte를 바꾸지 않고 상대에게 보낸다. relay가 전체 게임 프로토콜을 재구현하지 않는 것은 결정론 시뮬레이션과 중계 서버의 소유권을 분리하기 위해서다.
 
 ---
 
 ## 13. 백프레셔와 큐 바운드
 
-앞 절의 다섯 번째 규칙을 프로젝트 전체 관점에서 한 장에 모은다. "어디가 자랄 수 있고, 무엇이 그것을 막는가."
+수신 버퍼·입력 큐·송신 큐·채팅 문자열처럼 외부 입력에 따라 자랄 수 있는 상태를 한곳에 모아, 각 상한과 초과 정책을 대조한다.
 
 | 큐 / 버퍼 | 소유 | 상한 | 초과 시 동작 | 정의 위치 |
 |---|---|---|---|---|
-| `recvBuf` (프레임 파싱 전 누적) | `Session` (ioThread) | `MAX_PAYLOAD_BYTES + 7` 근방 | `parse_frames` 가 오버사이즈 LEN 선언 시 `clear()` + `false` | `net/framing.cpp` |
+| `recvBuf` (프레임 파싱 전 누적) | `Session` (ioThread) | 파싱 후에는 최대 크기 프레임의 불완전 tail만 유지 | 매 recv 후 완성 프레임 제거, 오버사이즈 LEN 선언 시 `clear()` + `false` | `net/framing.cpp`, `net/session.cpp` |
 | 단일 프레임 payload | 프로토콜 | 4096 B | 송신: 빈 벡터 반환 / 수신: 스트림 폐기 | `net/framing.cpp` |
 | `remoteInputs` (수신 입력 맵) | `Session` | 8192 엔트리 | 신규 키 거부(기존 값 유지) | `net/session.cpp` |
 | INPUT tick 윈도우 | `Session` | ±4096 틱 | 해당 tick 폐기 | `net/session.cpp` |
@@ -2421,7 +2420,7 @@ GUEST 창:
 
 lockstep 이 정상이면 **HOST.gameLocal ≡ GUEST.gameRemote** 여야 한다(둘 다 "호스트 입력으로 돌린 결과"). 같은 방식으로 **HOST.gameRemote ≡ GUEST.gameLocal** 이어야 한다. 그런데 관찰 결과는 후자만 일치했다. 즉 **"게스트 → 호스트 방향의 입력 전달"** 은 깨끗하고 **"호스트 → 게스트 방향의 입력 전달"** 만 오염됐다.
 
-한쪽 방향만 선택적으로 깨지는 건 의심의 여지없이 **프로토콜 버그가 아니라 타이밍 버그** 다. 프레이밍 · 체크섬 · 파싱 로직이 비대칭일 수는 없다. 같은 `build_frame` 과 같은 `parse_frames` 가 양쪽에서 돌기 때문이다. 비대칭을 만들 수 있는 것은 **양쪽이 서로 다른 시각에 다른 상태로 들어간 경우**뿐이다.
+한쪽 방향만 선택적으로 깨진다는 사실은 **세션 진입 타이밍을 우선 의심할 근거**였다. 양쪽이 같은 `build_frame`과 `parse_frames`를 쓰므로 정적 포맷 오류라면 대칭으로 재현될 가능성이 높다. 그렇다고 비대칭 증상이 타이밍 버그를 증명하는 것은 아니다. 방향별 네트워크 손상, 송신 큐 상태, 데이터 레이스도 후보이므로 로그와 상태 해시로 하나씩 배제해야 한다.
 
 ### 14.3 원인 — stale 프레임 backlog
 
@@ -2591,7 +2590,7 @@ sequenceDiagram
 
 `std::unordered_map::emplace` vs `operator[]` 의 차이는 문서상 뻔하지만, 네트워크 경로의 "같은 키가 두 번 들어올 수 있다" 가 전제되지 않으면 간과된다. `remoteInputs` 가 `operator[]`(= 덮어쓰기)였다면 이 버그는 DESYNC 대신 "첫 수 틱의 상대 입력이 조금 이상함" 으로 숨어들어 더 찾기 어려웠을 수 있다. emplace 의 엄격함 덕분에 DESYNC 가 **즉시 · 결정론적으로** 터져 추적이 가능했다 — "엄격한 의미론" 이 디버깅에 도움 된 사례다.
 
-두 번째 교훈은 **비대칭 증상은 정보다** 라는 것이다. 프로토콜 계층은 대칭이므로, 비대칭 증상은 프로토콜이 아니라 "양쪽이 서로 다른 시각에 진입한 상태"를 가리킨다. 이 추론 하나로 후보가 프레이밍·체크섬·파서 전체에서 "세션 진입 타이밍" 으로 좁혀졌다.
+두 번째 교훈은 **비대칭 증상은 후보의 우선순위를 바꾸는 정보**라는 것이다. 공용 framing 코드보다 방향별 큐와 페이즈 전환을 먼저 보게 만들었고, 실제 로그가 "양쪽이 서로 다른 시각에 세션 상태로 들어갔다"는 원인을 확인해 주었다. 증상만으로 다른 원인을 단정하지 않고, 관측 자료와 함께 범위를 좁히는 방식이 중요하다.
 
 ### 14.8 라운드 경계에서 지킬 것 — `ClearInputs()`
 
@@ -3021,7 +3020,8 @@ DESYNC 를 디버깅할 때 체크리스트:
 
 `rt != 0` 가드가 있는 이유: `GetLastRemoteHash` 는 `tick != 0` 을 반환값으로 쓰지만, `lastRemoteHashSeenTick` 의 초기값도 0 이라 가드를 빼면 "아직 아무 HASH 도 안 받은 상태" 와 "tick 0 의 HASH" 를 구별하지 못한다. `simTick > 0` 조건 때문에 tick 0 의 HASH 는 애초에 송신되지 않지만, 조건을 두 곳에서 일치시켜 두는 편이 안전하다.
 
-`StateHashBreakdown()` 은 Part 1 에서 정의한 `SimGame` 메서드로, 전체 해시 대신 6개 섹션별 해시를 구조체로 리턴한다.
+`StateHashBreakdown()`은 `SimGame`의 전체 해시를 원인 도메인별 독립 해시로
+나눠 구조체로 반환한다. 필드 개수보다 각 묶음의 이름과 책임이 진단 계약이다.
 
 | 섹션 | 포함 상태 | DESYNC 시 의심 |
 |---|---|---|
@@ -3138,431 +3138,18 @@ Lockstep 관점에서 이건 §11 의 `Stalled` 상태에 해당한다. 상대 �
 남는 한계는 **드래그한 본인의 시뮬레이션이 멈춘다**는 것이다. 그 구간의 자기 입력은 전부 0 으로 기록되므로, 드래그 중에는 조작이 불가능하다. 이건 lockstep 모델의 본질적 한계가 아니라 OS 모달 루프의 성질이고, 완전한 해결은 게임 루프를 별도 스레드로 분리하는 것이다 — 렌더링과 입력 처리까지 얽히므로 이 프로젝트는 채택하지 않았다.
 
 ---
-## 20. 릴레이 주소 관리 — 세 단계 우선순위
 
-네트워크 버그들을 고치는 중 한 가지 UX 이슈도 같이 정리했다. 매치메이킹/룸 기능이 개발 초기에 "릴레이 IP 를 매번 입력" 방식이었는데, 테스트할 때마다 타이핑하는 게 거슬렸다.
+## 20. 현재 `Session`의 확장 경계
 
-### 20.1 기존 흐름
+완성된 `net/session.*`는 직결 P2P 외에 relay 큐·커스텀 룸·랭킹 결과 수신까지 한 객체에 담는다. 그러나 구현 순서와 설명 책임은 분리한다. 이 장에서 확보한 것은 소켓 소유권, framing, `ioThread`, lockstep 입력과 해시 교환이다.
 
-```text
-메뉴 → [Matchmaking] 선택
-     → "Relay IP:port 를 입력하세요:" 화면
-     → 사용자가 127.0.0.1:7777 타이핑
-     → QueueJoin 호출
-     → 매치 대기
-```
+- relay endpoint의 빌드 기본값·환경변수·`--relay` 우선순위와 `queueThread`/`roomThread` 전환은 Part 7의 클라이언트 릴레이 경계에 속한다.
+- `RoomState`와 `ROOM_INFO` 매핑은 Part 7의 룸 상태 기계가 소유한다.
+- `MATCH_SUMMARY`/`MATCH_RESULT`의 RP 의미, 결과 교차검증, BP·XP 갱신은 Part 10의 랭킹 신뢰 경계가 소유한다.
 
-전용 화면 enum 값 두 개가 `Screen` 상태 머신에 있었고, 각각 렌더링 + 텍스트 입력 핸들러 + 유효성 검증 블록을 포함했다. 문제는 세 가지였다.
+이 구분은 파일 위치보다 데이터 권위를 우선한다. 같은 `Session` 클래스에 메서드가 있다는 이유만으로 P2P transport를 배우는 시점에 계정·DB 정책까지 끌어오지 않는다. 확장 경로도 결국 이 장의 `recvBuf`, 송신 직렬화, `Close()` 수명 계약을 재사용한다는 사실만 여기서 고정한다.
 
-- 같은 주소를 매번 치는 게 번거롭다
-- 오타 가능성(IPv4 점/포트 콜론 혼동)
-- 릴레이 주소를 배포 시점에 바꾸기 어렵다(= UI 문자열로 고정)
-
-### 20.2 현재 — 세 단계 우선순위
-
-지금은 릴레이 주소를 결정하는 경로가 세 단계로 정리돼 있다.
-
-| 우선순위 | 출처 | 설정 방법 | 결정 시점 |
-|---:|---|---|---|
-| 1 (가장 낮음) | CMake 캐시 변수 `TETRIS_DEFAULT_RELAY_ENDPOINT` | `-DTETRIS_DEFAULT_RELAY_ENDPOINT=relay.example.com:7777` | 빌드 시 |
-| 2 | 환경변수 `TETRIS_RELAY_ENDPOINT` | `TETRIS_RELAY_ENDPOINT=1.2.3.4:7777 ./tetris` | 실행 시 |
-| 3 (가장 높음) | CLI 플래그 `--relay host[:port]` | `./tetris --relay 1.2.3.4:7777` | 실행 시 |
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-    // 메뉴에서 Matchmaking/Custom Room 을 고를 때 사용할 릴레이 주소.
-    // 기본은 CMake 옵션(TETRIS_DEFAULT_RELAY_ENDPOINT) 또는 환경변수로 주입한다.
-    // 개인 IP 를 release 바이너리에 하드코딩하지 않는다.
-    std::string relayHost = "127.0.0.1";
-    uint16_t    relayPort = 7777;
-    if (!parse_endpoint(TETRIS_DEFAULT_RELAY_ENDPOINT, relayHost, relayPort, 7777)) {
-        std::fprintf(stderr,
-                     "warning: invalid TETRIS_DEFAULT_RELAY_ENDPOINT '%s', using 127.0.0.1:7777\n",
-                     TETRIS_DEFAULT_RELAY_ENDPOINT);
-        relayHost = "127.0.0.1";
-        relayPort = 7777;
-    }
-    if (const char* env = std::getenv("TETRIS_RELAY_ENDPOINT")) {
-        if (!parse_endpoint(env, relayHost, relayPort, 7777)) {
-            std::fprintf(stderr,
-                         "warning: invalid TETRIS_RELAY_ENDPOINT '%s', keeping %s:%u\n",
-                         env, relayHost.c_str(), static_cast<unsigned>(relayPort));
-        }
-    }
-```
-
-`TETRIS_DEFAULT_RELAY_ENDPOINT` 는 매크로다. `CMakeLists.txt` 가 캐시 변수로 선언하고(기본값 `"127.0.0.1:7777"`), `CMakeLists.txt` 이 `target_compile_definitions` 로 문자열 리터럴을 주입한다. 즉 **소스에는 개인 IP 가 절대 들어가지 않는다.**
-
-CLI 플래그는 argv 파서에서 마지막에 덮어쓴다.
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-        } else if (a == "--relay") {
-            if (i + 1 < argc) {
-                std::string ep = argv[++i];
-                if (!parse_endpoint(ep, relayHost, relayPort, 7777)) {
-                    fprintf(stderr, "error: --relay expects host[:port], got '%s'\n", ep.c_str());
-                    return 2;
-                }
-            } else {
-                fprintf(stderr, "error: --relay requires an argument (host[:port])\n");
-                return 2;
-            }
-        } else if (a == "--meta") {
-```
-
-메뉴에서 Matchmaking 이나 Custom Room 을 선택하면 **즉시** `relayHost:relayPort` 로 `QueueJoin` / 룸 로비가 호출된다. 중간에 "IP 입력" 화면은 없다.
-
-`parse_endpoint`(`src/main.cpp`)는 `host:port`, `host`(기본 포트), IPv6 브래킷 표기(`[::1]:7777`)를 모두 파싱하는 공용 헬퍼다. 포트가 1..65535 범위인지, host 가 비어 있지 않은지 검증하고, `std::from_chars` 를 써서 예외 없이 동작한다.
-
-### 20.3 메뉴 전이
-
-```mermaid
-stateDiagram-v2
-    [*] --> Menu
-    Menu --> Matchmaking: QueueJoin(relayHost, relayPort)
-    Menu --> RoomLobby: RoomCreate / RoomJoin(relayHost, relayPort)
-    Matchmaking --> Playing: 양쪽 수락 (READY)
-    RoomLobby --> Playing: MATCH_FOUND
-    Playing --> Menu: GameOver / Lost
-```
-
-옛 버전은 Menu 와 Matchmaking / RoomLobby 사이에 IP 입력 상태가 하나씩 더 있었다. 이제는 1-hop 이다.
-
-### 20.4 배포 시나리오
-
-**시나리오 A: 빌드 시점에 기본값 고정**
-
-```bash
-cmake -S . -B build -DTETRIS_USE_SDL2=ON \
-      -DTETRIS_DEFAULT_RELAY_ENDPOINT=relay.example.com:7777
-cmake --build build --target tetris
-```
-
-사용자는 실행 파일만 실행하면 끝이다. 소스를 고치지 않으므로 배포용 브랜치를 따로 유지할 필요가 없고, 릴레이 주소가 바뀌면 CI 의 CMake 인자 한 줄만 바꾸면 된다.
-
-**시나리오 B: 런처/스크립트로 환경변수 전달**
-
-```bash
-TETRIS_RELAY_ENDPOINT=relay.example.com:7777 ./tetris
-```
-
-배포된 바이너리를 그대로 두고 실행 스크립트만 교체한다. 같은 빌드로 스테이징 릴레이와 프로덕션 릴레이를 오갈 수 있다.
-
-**시나리오 C: 사용자가 직접 지정**
-
-```bash
-./tetris --relay 192.168.1.10
-```
-
-파워유저가 친구 PC 를 릴레이로 돌리는 경우. 방화벽을 뚫지 않고 LAN 파티에 유용하다.
-
-**시나리오 D: 두 대 직접 연결 (릴레이 없이)**
-
-```bash
-./tetris --host 7777
-./tetris --connect 1.2.3.4:7777
-```
-
-`--relay` 와 무관하게 이 장이 만든 직결 P2P 경로를 쓴다. 매치메이킹/룸을 거치지 않는다.
-
-어느 쪽이든 **릴레이 주소를 결정하는 주체가 유저 타이핑이 아니라 배포자(또는 파워유저의 CLI)** 로 이동했다. 일반 플레이어는 주소를 의식하지 않아도 된다.
-
----
-
-## 21. 룸 상태 머신과 MATCH_RESULT
-
-이 장은 직결 P2P 세션까지가 범위지만, **`Session` 이 소유하는 상태**는 릴레이 경로까지 포함한다. 그중 두 가지 — `RoomState` 상태 머신과 `MATCH_RESULT` 수신 처리 — 는 `net/` 안에서 완결되므로 여기서 정의한다. 그 상태를 **만들어내는** 서버 쪽 로직은 [Part 7](./part7-relay-server.md) 이다.
-
-### 21.1 `RoomState` — 9개 상태
-
-**현재 소스 발췌 — `net/session.h`**
-
-```cpp
-// 커스텀 룸 상태 머신 (로비 대기 페이즈).
-// MATCH_FOUND 수신 후에는 Session 이 일반 게임 세션으로 전환되므로
-// 이 상태는 더 이상 의미 없다 (isReady() 사용).
-enum class RoomState : uint8_t {
-    Idle            = 0,
-    Connecting      = 1,   // tcp_connect + ROOM_CREATE/ROOM_JOIN 송신 중
-    Waiting         = 2,   // 방에 나 혼자 (peer_count=1)
-    WaitingWithPeer = 3,   // 두 명 입장 (peer_count=2), READY 대기
-    NotFound        = 4,   // 코드에 해당하는 방 없음
-    Full            = 5,   // 방이 이미 2명이어서 입장 불가
-    GoneFull        = 6,   // 상대가 퇴장해 다시 혼자 (서버가 ROOM_INFO(3) 푸시)
-    Failed          = 7,   // 소켓 오류 / 연결 실패
-    Starting        = 8,   // MATCH_FOUND 수신, 곧 게임 시작
-};
-```
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Connecting: RoomCreate() / RoomJoin(code)
-
-    Connecting --> Failed: tcp_connect 실패 / 첫 프레임 송신 실패
-    Connecting --> Waiting: ROOM_INFO(status=0, peer_count=1)
-    Connecting --> WaitingWithPeer: ROOM_INFO(status=0, peer_count=2)
-    Connecting --> NotFound: ROOM_INFO(status=2)
-    Connecting --> Full: ROOM_INFO(status=1)
-
-    Waiting --> WaitingWithPeer: ROOM_INFO(status=0, peer_count=2)
-    WaitingWithPeer --> GoneFull: ROOM_INFO(status=3) 상대 퇴장
-    GoneFull --> WaitingWithPeer: 새 상대 입장
-    Waiting --> Failed: recv 실패 / 릴레이 단절
-    WaitingWithPeer --> Failed: recv 실패 / 릴레이 단절
-
-    WaitingWithPeer --> Starting: MATCH_FOUND (양쪽 READY 후 서버가 발행)
-
-    Starting --> [*]: ioThread 기동, isReady() 로 전환
-    NotFound --> Idle: RoomLeave() / Close()
-    Full --> Idle: RoomLeave() / Close()
-    Failed --> Idle: Close()
-```
-
-상태 전이의 실체는 `roomThread` 안의 `switch` 하나다.
-
-**현재 소스 발췌 — `net/session.cpp`** (`roomThread` 의 ROOM_INFO 처리 중)
-
-```cpp
-                switch (status) {
-                    case 0: roomState_.store(peerCount >= 2 ? RoomState::WaitingWithPeer
-                                                            : RoomState::Waiting); break;
-                    case 1: roomState_.store(RoomState::Full); break;
-                    case 2: roomState_.store(RoomState::NotFound); break;
-                    case 3: roomState_.store(RoomState::GoneFull); break;
-                    default: break;
-                }
-```
-
-와이어의 `status` 바이트와 클라이언트 상태가 1:1 대응이 아니라는 점이 포인트다. 서버는 `status = 0`(waiting) 하나만 보내고 `peer_count` 를 따로 싣는다. 클라이언트가 그 둘을 조합해 `Waiting` / `WaitingWithPeer` 로 나눈다 — UI 가 "코드를 친구에게 알려주세요" 와 "준비 버튼을 누르세요" 를 구분해야 하기 때문이다.
-
-`default: break;` 가 있으므로 서버가 미래에 새 status 값을 추가해도 클라이언트는 직전 상태를 유지한다. 알 수 없는 값에 반응하지 않는 쪽이 안전하다.
-
-`roomState()` 는 atomic 조회라 메인 스레드가 매 프레임 폴링해도 부담이 없다.
-
-**현재 소스 발췌 — `net/session.h`**
-
-```cpp
-    RoomState   roomState() const { return roomState_.load(); }
-    int         roomPeerCount() const { return roomPeerCount_.load(); }
-    std::string roomCode() const {
-        std::lock_guard<std::mutex> lk(roomMu_);
-        return roomCode_;
-    }
-```
-
-`roomCode_` 만 문자열이라 뮤텍스가 필요하다. 나머지 둘은 atomic 이다.
-
-### 21.2 인증 토큰은 어디서 붙는가
-
-`QUEUE_JOIN` / `ROOM_CREATE` / `ROOM_JOIN` 세 프레임은 모두 페이로드 **끝**에 `[tok_len:1][token:N]` 을 붙인다. 이 토큰은 [Part 10](./part10-meta-and-ranking.md) 의 `tetris_meta` 서버가 발급한 32자 hex 문자열이고, 랭크 릴레이는 이게 없으면 연결을 끊는다.
-
-세 메서드 모두 시그니처 마지막에 기본값 있는 토큰 인자를 갖는다.
-
-**현재 소스 발췌 — `net/session.h`**
-
-```cpp
-    bool QueueJoin(const std::string& host, uint16_t port,
-                   uint32_t start_tick = 120, uint8_t input_delay = 2,
-                   const std::string& auth_token = {});
-```
-
-**현재 소스 발췌 — `net/session.h`**
-
-```cpp
-    bool RoomCreate(const std::string& host, uint16_t port,
-                    uint32_t start_tick = 120, uint8_t input_delay = 2,
-                    const std::string& auth_token = {});
-    bool RoomJoin(const std::string& host, uint16_t port,
-                  const std::string& code,
-                  uint32_t start_tick = 120, uint8_t input_delay = 2,
-                  const std::string& auth_token = {});
-```
-
-실제로 바이트를 붙이는 곳은 `roomThread` 의 로컬 람다다.
-
-**현재 소스 발췌 — `net/session.cpp`** (`roomThread` 본문 중)
-
-```cpp
-    auto append_token = [&](std::vector<uint8_t>& pl) {
-        const size_t n = std::min<size_t>(auth_token.size(), 255);
-        pl.push_back(static_cast<uint8_t>(n));
-        for (size_t i = 0; i < n; ++i) pl.push_back(static_cast<uint8_t>(auth_token[i]));
-    };
-    std::vector<uint8_t> first;
-    if (doCreate) {
-        std::vector<uint8_t> pl;
-        append_token(pl);
-        first = build_frame(MsgType::ROOM_CREATE, pl);
-    } else {
-        std::vector<uint8_t> pl;
-        pl.push_back(static_cast<uint8_t>(joinCode.size()));
-        for (char c : joinCode) pl.push_back(static_cast<uint8_t>(c));
-        append_token(pl);
-        first = build_frame(MsgType::ROOM_JOIN, pl);
-    }
-```
-
-`ROOM_JOIN` 의 최종 레이아웃이 `[code_len:1][code:N][tok_len:1][token:M]` 인 이유가 이 코드에 그대로 보인다 — 코드 먼저, 토큰은 뒤에 append. 길이가 앞서는 가변 필드를 연달아 놓는 방식이라 파서가 순차적으로 읽으면 된다. 서버 쪽 파싱과 5자 코드 검증은 [Part 7](./part7-relay-server.md) 이 다룬다.
-
-`RoomJoin` 은 진입 시점에 코드 길이만 검사한다.
-
-**현재 소스 발췌 — `net/session.cpp`** (`RoomJoin` 본문 중)
-
-```cpp
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
-    quit = false;
-    connectionFailed = false;
-    connected = false;
-    ready = false;
-    listening = false;
-    { std::lock_guard<std::mutex> lk(inMu); remoteInputs.clear(); }
-    lastRemoteTick = 0;
-    lastLocalTick = 0;
-    recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
-    roomState_.store(RoomState::Connecting);
-    roomPeerCount_.store(0);
-    { std::lock_guard<std::mutex> lk(roomMu_); roomCode_.clear(); }
-    { std::lock_guard<std::mutex> lk(roomSendMu_); roomSendQ_.clear(); }
-    rth = std::thread(&Session::roomThread, this, host, port,
-                      std::string{}, start_tick, input_delay, auth_token);
-    return true;
-}
-
-bool Session::RoomJoin(const std::string& host, uint16_t port,
-                       const std::string& code,
-                       uint32_t start_tick, uint8_t input_delay,
-                       const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
-    if (code.empty() || code.size() > 255) return false;
-```
-
-`255` 는 `u8` 길이 필드의 한계다. "정확히 5자" 규칙은 서버가 강제하므로, 클라이언트는 **와이어 포맷을 깨뜨릴 수 있는 값만** 막는다. 이 분업이 중요하다 — 클라이언트에 규칙을 복제하면 서버 규칙이 바뀔 때 두 곳을 고쳐야 하고, 어차피 클라이언트 검증은 공격자가 우회할 수 있다.
-
-첫 줄의 `joinable()` 네 개 검사는 "이미 다른 세션이 돌고 있으면 거부" 다. `Close()` 를 부르지 않고 `RoomJoin` 을 두 번 부르면 스레드 멤버를 덮어써서 `std::terminate` 가 난다.
-
-### 21.3 MATCH_SUMMARY 송신
-
-게임오버 시점에 클라이언트가 자기 관측치를 릴레이로 보낸다.
-
-**현재 소스 발췌 — `net/session.cpp`**
-
-```cpp
-void Session::SendMatchSummary(uint8_t won,
-                               uint32_t my_score, uint32_t my_lines,
-                               uint32_t opp_score, uint32_t opp_lines,
-                               uint32_t duration_s) {
-    // 페이로드: [won:1][my_score:4][my_lines:4][opp_score:4][opp_lines:4][duration:4] (21B)
-    std::vector<uint8_t> pl;
-    pl.reserve(21);
-    pl.push_back(won ? 1 : 0);
-    le_write_u32(pl, my_score);
-    le_write_u32(pl, my_lines);
-    le_write_u32(pl, opp_score);
-    le_write_u32(pl, opp_lines);
-    le_write_u32(pl, duration_s);
-    auto fr = build_frame(MsgType::MATCH_SUMMARY, pl);
-    pushSend(std::move(fr));
-}
-
-bool Session::GetMatchResult(MatchResult& out) const {
-    std::lock_guard<std::mutex> lk(matchResultMu_);
-    if (!matchResultValid_) return false;
-    out = matchResult_;
-    return true;
-}
-
-bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
-    std::lock_guard<std::mutex> lk(inMu);
-    auto it = remoteInputs.find(tick);
-    if (it == remoteInputs.end()) return false;
-    outMask = it->second; return true;
-}
-
-// sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
-// 소켓이 막히면(상대가 멈췄거나 네트워크가 죽었거나) 큐가 무한히 자란다.
-//
-// 상한을 넘겼을 때 오래된 프레임을 버리는 선택지는 쓸 수 없다. lockstep 은
-// 모든 INPUT 이 순서대로 도착한다는 전제 위에 서 있어서, 한 프레임만 사라져도
-// 양쪽 시뮬레이션이 조용히 어긋난다. DESYNC 배너가 뜨기까지 한참 걸리고
-// 원인도 추적하기 어렵다.
-//
-// 그래서 큐가 넘치면 연결이 사실상 끊긴 것으로 보고 실패 처리한다.
-// 상위 UI 가 "상대 연결 끊김"을 띄우고 사용자가 재접속을 고르게 하는 편이,
-// 어긋난 채로 계속 도는 것보다 낫다.
-constexpr size_t kMaxSendQueue = 4096;   // 60Hz 기준 약 68초치 INPUT
-
-void Session::pushSend(std::vector<uint8_t>&& fr) {
-    std::lock_guard<std::mutex> lk(sendMu);
-    if (sendQ.size() >= kMaxSendQueue) {
-        NET_WARN("[NET] sendQ overflow (" << sendQ.size()
-                 << " frames) - treating peer as disconnected");
-        connectionFailed = true;
-        quit = true;
-        return;
-    }
-    sendQ.push_back(std::move(fr));
-}
-```
-
-`opp_score` / `opp_lines` 가 "상대가 보고한 값" 이 아니라 **"내가 관측한 상대 값"** 이라는 점이 핵심이다. lockstep 덕분에 내 `gameRemote` 는 상대 보드의 정확한 미러이므로, 양쪽이 독립적으로 같은 숫자를 보고한다. 릴레이는 두 보고를 교차 검증할 수 있다 — 한쪽이 점수를 부풀려 보고하면 상대 보고와 어긋난다. 이 교차 검증 로직과 meta 서버 연동은 [Part 7](./part7-relay-server.md) 및 [Part 10](./part10-meta-and-ranking.md) 이 다룬다.
-
-이 프레임은 **게임 sendQ 를 그대로 탄다.** 즉 릴레이가 투명 포워딩하는 구간에 섞여 들어가는데, 릴레이는 이 타입만 가로채서 소비하고 상대에게 전달하지 않는다.
-
-### 21.4 MATCH_RESULT 수신
-
-릴레이가 meta 서버 응답을 받아 돌려주는 12바이트 프레임이다. 처리 코드는 §12 의 `handleFrame` 전체 인용에 있는 `case MsgType::MATCH_RESULT` 분기다. 세 필드를 `int32_t` 로 읽어 단일 슬롯에 저장하고 유효 플래그를 세운다.
-
-노출은 `GetMatchResult` 다.
-
-**현재 소스 발췌 — `net/session.cpp`**
-
-```cpp
-bool Session::GetMatchResult(MatchResult& out) const {
-    std::lock_guard<std::mutex> lk(matchResultMu_);
-    if (!matchResultValid_) return false;
-    out = matchResult_;
-    return true;
-}
-```
-
-**현재 소스 발췌 — `net/session.h`**
-
-```cpp
-    void SendMatchSummary(uint8_t won,
-                          uint32_t my_score, uint32_t my_lines,
-                          uint32_t opp_score, uint32_t opp_lines,
-                          uint32_t duration_s);
-    struct MatchResult { int32_t elo_before; int32_t elo_after; int32_t delta; };
-    bool GetMatchResult(MatchResult& out) const;
-```
-
-세 가지 주의점.
-
-- **필드명 `elo_*` 는 하위 호환용이다.** 실제 값은 RP(랭크 포인트)이고, `delta = 0` 은 "RP 변동 없음"(오프라인 매치, 토큰 미인증, meta 서버 응답 실패)을 뜻한다. 와이어 포맷을 바꾸지 않으려고 이름만 남겼다.
-- **부호 있는 값을 부호 없는 리더로 읽고 캐스팅한다.** `le_read_u32` 는 `uint32_t` 를 반환하고, `static_cast<int32_t>` 로 넘긴다. 2의 보수 표현을 가정하는데, C++20 부터는 표준이 이를 보장하고 그 이전에도 실질적으로 모든 플랫폼이 그렇다. `delta` 가 음수(RP 하락)일 수 있으므로 이 캐스팅이 필요하다.
-- **한 번 세워진 `matchResultValid_` 는 호출할 때마다 true 를 반환한다.** 소비형 큐가 아니라 단일 슬롯이다. 라운드 경계에서 `ClearGameOverChoices()` 가, 세션 경계에서 `Close()` 가 리셋한다. `Close()` 에서도 리셋하는 이유는 주석에 적힌 그대로 — 타이틀 → 새 매치 경로에서 이전 라운드 결과가 새 매치의 게임오버 시점에 즉시 읽히는 경계가 있었기 때문이다.
-
-### 21.5 릴레이 경로의 타임아웃
-
-로비 단계에는 두 개의 상한이 있다. 둘 다 `queueThread` 안에 있다.
-
-| 단계 | 상한 | 근거 위치 | 초과 시 |
-|---|---|---|---|
-| MATCH_FOUND 대기 (큐 매칭) | **5분** | `net/session.cpp` (`std::chrono::minutes(5)`) | `connectionFailed = true` → UI 가 "Matchmaking Failed" |
-| 양쪽 수락 대기 (로비) | **45초** | `net/session.cpp` (`std::chrono::seconds(45)`) | `connectionFailed = true` → "peer did not accept" |
-| 핸드셰이크 (ioThread) | **10초** | `net/session.cpp` (`CONNECTION_TIMEOUT`) | 연결 실패 처리 |
-
-즉 "매칭은 수 초~수 분" 이라는 표현의 실제 상한은 **5분**이고, 상대가 수락 버튼을 누르길 기다리는 시간은 **45초**다. `queueThread`가 매치 발견·수락 단계와 타임아웃을 관리하고, 성립 뒤 `roomThread`가 같은 소켓과 남은 수신 버퍼를 게임 세션으로 전환한다.
-
----
-
-## 22. CMakeLists 확장
+## 21. CMakeLists 확장
 
 이 장은 `net/socket.cpp`, `net/framing.cpp`, `net/session.cpp`를 추가하고 플랫폼별 소켓·스레드 라이브러리를 링크한다.
 
@@ -3647,19 +3234,14 @@ else()
     endif()
 endif()
 
-# Part 6 신규 — 릴레이 주소 기본값 주입 + net trace 스위치
+# Part 6 신규 — 상세 네트워크 로그를 선택적으로 컴파일
 option(TETRIS_ENABLE_NET_TRACE "Enable verbose game-client net/session trace logs" OFF)
-set(TETRIS_DEFAULT_RELAY_ENDPOINT "127.0.0.1:7777" CACHE STRING
-    "Default relay endpoint embedded in the game client menu")
-
-target_compile_definitions(tetris PRIVATE
-    TETRIS_DEFAULT_RELAY_ENDPOINT="${TETRIS_DEFAULT_RELAY_ENDPOINT}")
 if (TETRIS_ENABLE_NET_TRACE)
     target_compile_definitions(tetris PRIVATE TETRIS_ENABLE_NET_TRACE=1)
 endif()
 ```
 
-이 체크포인트의 `TETRIS_GAME_COMMON`은 lockstep까지의 소스만 포함한다. 완성형은 봇 배치·ONNX 추론과 meta HTTP 클라이언트를 같은 클라이언트 타깃에 더하고, `third_party/httplib.h` 존재 여부와 `TETRIS_DEFAULT_META_URL`도 구성 시점에 검증한다. 디버그 단축키는 `TETRIS_ENABLE_DEBUG_UI`가 켜진 전용 빌드에만 컴파일된다.
+이 체크포인트의 `TETRIS_GAME_COMMON`은 lockstep까지의 소스만 포함한다. 완성형 타깃은 같은 목록에 relay endpoint·큐·룸, 봇, meta HTTP 클라이언트를 더한다. 이들은 lockstep 계약을 바꾸는 대신 각자의 상태 소유자로 남는다. 디버그 단축키는 `TETRIS_ENABLE_DEBUG_UI`가 켜진 전용 빌드에만 컴파일된다.
 
 링크 라이브러리에 대해:
 
@@ -3669,9 +3251,9 @@ endif()
 
 ---
 
-## 23. `Session` 공개 API 경계
+## 22. `Session` 공개 API 소유권 지도
 
-이 장이 끝나면 `net/session.h` 의 공개 API 가 다음 상태가 된다. Part 7 을 시작할 때 무엇이 이미 있고 무엇을 새로 구현하는지 명확히 하기 위한 표다.
+완성된 `net/session.h`의 공개 API를 기능 소유 문서별로 나누면 다음과 같다. 같은 클래스에 선언돼 있어도 직결 lockstep 메서드는 이 장, 큐·룸 메서드는 Part 7이 구현 책임을 가진다.
 
 | 메서드 / 접근자 | 역할 | 구현 위치 |
 |---|---|---|
@@ -3692,25 +3274,25 @@ endif()
 | `maxRemoteTick()` / `maxLocalTick()` | safeTick 계산용 watermark | **Part 6** |
 | `heartbeatTickEnd()` | ioThread 자동 heartbeat 의 최대 tick | **Part 6** |
 | `ClearInputs()` | 라운드 경계 큐 정리 | **Part 6** |
-| `GetMatchResult(out)` | MATCH_RESULT 수신 결과 조회 | **Part 6** (프레임 발행은 Part 7) |
-| `SendMatchSummary(...)` | 게임 결과 보고 송신 | **Part 6** (서버 소비는 Part 7 / Part 10) |
-| `roomState()` / `roomPeerCount()` / `roomCode()` | 룸 로비 상태 조회 | **Part 6** (상태를 채우는 `roomThread` 는 Part 7) |
 | `QueueJoin(...)` / `QueueCancel()` | 릴레이 랜덤 큐 참가/취소 | [Part 7](./part7-relay-server.md) |
 | `isQueueMatched()` / `queueLocalReady()` / `queuePeerReady()` | 수락 로비 상태 | Part 7 |
 | `QueueConfirm()` / `QueueDecline()` | 수락 로비 수락/거절 | Part 7 |
 | `RoomCreate(...)` / `RoomJoin(...)` | 커스텀 룸 생성/입장 | Part 7 |
 | `RoomSendReady(bool)` / `RoomLeave()` | 룸 준비/퇴장 | Part 7 |
+| `roomState()` / `roomPeerCount()` / `roomCode()` | 룸 대기 화면에 필요한 상태 조회 | Part 7 |
+| `SendMatchSummary(...)` / `GetMatchResult(...)` | 결과 보고와 relay가 확정한 RP 결과 조회 | [Part 10](./part10-meta-and-ranking.md) |
 
 이 표에 한때 `Adopt(socket, role, seed, ...)`라는 항목이 하나 더 있었다. 릴레이가 페어링한 소켓을 채택해 HELLO/SEED 핸드셰이크를 생략하려는 API였지만 호출부가 없어 제거됐다. 실제 경로는 `queueThread` / `roomThread`가 `seedParams`와 `ready`를 채운 뒤 `ioThread`를 직접 띄운다. 별도 채택 객체를 만들면 매치메이킹 중 이미 읽어 둔 `recvBuf`의 소유권까지 옮겨야 하므로, 같은 `Session` 안에서 전환하는 편이 프레임 손실을 막는다.
 
-### 23.1 Part 7 이 확장하는 지점
+### 22.1 완성형 relay와의 연결 경계
 
-[Part 7](./part7-relay-server.md) 은 두 방향으로 확장한다.
+완성형 relay 구조는 이 장의 lockstep 계약에 아래 경계를 연결한다. 서버 내부 구현은 [relay 서버](./part7-relay-server.md)에 모아 두었다.
 
-- **서버 측** — `server/*.cpp` 를 새로 만든다. `net/socket.cpp` 와 `net/framing.cpp` 를 그대로 재사용하고, `net/session.cpp` 는 쓰지 않는다 (서버는 세션 상태를 갖지 않는 투명 중계기다).
-- **클라이언트 측** — 이 장이 선언만 해 둔 `queueThread` / `roomThread` 를 구현한다. 두 스레드는 `ioThread` 와 같은 소켓을 다른 페이즈에서 쓰므로, §6.2 의 뮤텍스 분할과 §6.3 의 `recvBuf` preload 계약이 그 전제 조건이다.
+- **서버 측** — `server/*.cpp`가 `net/socket.cpp`와 `net/framing.cpp`를 재사용하고 `net/session.cpp`는 쓰지 않는다. 입장·룸 제어 프레임과 ranked 결과 요약은 해석하지만, 성립된 게임의 일반 프레임은 게임 상태를 만들지 않고 전달한다.
+- **클라이언트 측** — `queueThread` / `roomThread`가 큐와 룸 페이즈를 소유한다. 두 스레드는 `ioThread`와 같은 소켓을 다른 페이즈에서 쓰므로, §6.2의 뮤텍스 분할과 §6.3의 `recvBuf` preload 계약이 핸드오프를 보호한다.
+- **배포 설정** — CMake 기본 endpoint, `TETRIS_RELAY_ENDPOINT`, `--relay` 순으로 값을 덮어쓴다. 주소는 UI에 하드코딩하지 않고 배포자와 실행 환경이 정한다.
 
-이 장의 lockstep 루프 자체는 릴레이가 붙어도 **전혀 달라지지 않는다.** 릴레이는 MATCH_FOUND 이후 바이트를 투명하게 포워딩할 뿐이므로, `handleFrame` 이 보는 프레임 열은 직결 P2P 와 동일하다.
+릴레이가 붙어도 lockstep의 `INPUT`·`ACK`·`PING/PONG`·`HASH` 처리 규칙은 달라지지 않는다. relay는 일반 게임 프레임을 전달하고 ranked `MATCH_SUMMARY`만 서버 결과 검증을 위해 가로챈다. 클라이언트 `Session::handleFrame`에는 서버가 돌려주는 `MATCH_RESULT` 경로가 추가되지만, `SimGame`의 틱 진행과 입력 순서는 직결 P2P와 같다.
 
 ---
 
@@ -3771,7 +3353,9 @@ cmake --build build --target tetris
 
 - **결정론 회귀 테스트**: Part 1 에서 만든 `sim_hash_dump` 는 시드 + 스텝 시퀀스를 받아 상태 해시를 찍어주는 헤드리스 유틸이다. 크로스 플랫폼 (Win/macOS/Linux, MSVC/Clang/GCC)에서 돌려 해시가 동일하면 바이트 단위 결정론이 확인된다.
 - **DESYNC 재현**: 의심스러운 DESYNC 가 발생한 매치에서 F5/F6 으로 확보한 리플레이가 있으면, 로컬에서 같은 입력으로 반복 재생하면서 §18 의 `[INIT]` 덤프 + DESYNC breakdown 로그를 뽑아 원인 탐색에 쓸 수 있다.
-- **봇 데모**: [Part 9](./part9-rl-onnx-bot.md) 에서 만들 ONNX 봇의 플레이를 녹화해 재생하는 용도로도 쓴다.
+- **봇 데모**: 현재 인프로세스 ONNX 봇의 입력을 함께 기록해 같은 시드로
+  재생할 수 있다. 리플레이는 봇 모델을 다시 추론하지 않고 저장된 틱 입력을
+  사용하므로 모델 파일이 없어도 당시 판의 상태 전이를 재현한다.
 
 ---
 
@@ -3794,15 +3378,15 @@ Relay → Client: ROOM_INFO{code:"A1B2C", status:0, peer_count:1}
 (친구 측) Client2 → Relay: ROOM_JOIN{code:"A1B2C", token}
 Relay → Client1, Client2: ROOM_INFO{..., peer_count:2}
 Client1, Client2 → Relay: READY{1}
-Relay → Client1: MATCH_FOUND{role=HOST, seed, my_icon, peer_icon}
-Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon}
+Relay → Client1: MATCH_FOUND{role=HOST, seed, my_icon, peer_icon, match_uuid}
+Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon, match_uuid}
 ```
 
-클라이언트 측 상태 머신은 §21.1, 서버 구현은 [Part 7](./part7-relay-server.md).
+클라이언트와 서버의 룸 상태 기계는 [Part 7](./part7-relay-server.md)의 `RoomRegistry`와 `roomThread` 설명에 함께 있다.
 
 ### B.3 인-게임 채팅
 
-프레임 타입 `CHAT`, 페이로드 `[text_len:u16][utf8:N]`. 릴레이는 투명 통과. `Session::SendChat(text)` / `Session::PullChat(outText)`. UTF-8 한글 포함, 호출부에서 200자 이내 권장(최종 방어는 송신 1024 B, 프레임 상한 4096 B). 수신 큐 상한은 256줄. 상세는 §12.4.
+프레임 타입 `CHAT`, 페이로드 `[text_len:u16][utf8:N]`. 릴레이는 게임 내용을 해석하지 않고 raw frame으로 전달한다. `Session::SendChat(text)` / `Session::PullChat(outText)`. UTF-8 한글 포함, 호출부에서 200자 이내 권장(최종 방어는 송신 1024 B, 프레임 상한 4096 B). 수신 큐 상한은 256줄. 상세는 §12.4.
 
 ### B.4 비동기 릴레이 큐
 
@@ -3814,7 +3398,7 @@ Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon}
 
 ### B.6 랭킹 연동 (MATCH_SUMMARY / MATCH_RESULT)
 
-게임오버 시 `SendMatchSummary` 로 21바이트 결과 보고를 보내고, 릴레이가 meta 서버에 POST 한 뒤 12바이트 `MATCH_RESULT` 로 RP 변동을 돌려준다. 클라이언트 측 처리는 §21.3~§21.4, 서버 측은 [Part 7](./part7-relay-server.md) 과 [Part 10](./part10-meta-and-ranking.md).
+게임오버 시 `SendMatchSummary`로 결과 보고를 보내고, relay가 meta 서버에 POST한 뒤 `MATCH_RESULT`로 RP 변동을 돌려준다. payload 형식과 클라이언트 수신 슬롯, 결과 교차검증은 [Part 10](./part10-meta-and-ranking.md)의 wire 이름·랭킹 연동 설명이 소유한다.
 
 ---
 

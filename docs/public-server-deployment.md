@@ -18,8 +18,9 @@ graph TB
     M --> DB[(SQLite DB)]
 ```
 
-- `tetris_relay` 는 무상태다. Oracle Free Tier/VPS 가 회수되어도 같은 secret 과
-  같은 meta URL 로 새로 띄우면 된다.
+- `tetris_relay` 는 영속 DB를 갖지 않지만 실행 중 queue·room·socket·인증 캐시와
+  계정 lease는 메모리에 가진다. 같은 secret과 meta URL로 새 인스턴스를 띄울 수는
+  있어도 기존 대기열과 진행 중 매치는 이어지지 않는다.
 - 초기 보유 장비 구성은 Mac mini가 relay, Galaxy S7 Termux가 meta+SQLite를 맡는다.
 - meta는 relay와 같은 기계면 loopback, 다른 기계면 방화벽으로 제한한 사설망 주소에 bind한다. 공인망에 8080을 직접 열지 않는다.
 - public HTTPS 는 Caddy 직접 노출 또는 Cloudflare Tunnel 이 담당한다.
@@ -33,12 +34,16 @@ graph TB
 
 Mac mini는 TCP 7777 relay만 실행하고, S7은 Termux에서 HTTP+SQLite meta를 실행한다.
 relay가 사설망의 S7에 접근할 수 있게 하고 S7의 8080은 인터넷에서 직접 접근할 수
-없게 막는다. 2011 Mac mini의 loopback 부하 측정에서는 200명 relay 전달이 성공했지만,
-실제 회선·열·공격을 포함한 보장은 아니므로 초기 경보 기준은 더 낮게 잡고 WAN soak를
-거친다. 재현 명령과 측정표는 [`blog/part12-hardening-and-release.md`](blog/part12-hardening-and-release.md)에 있다.
+없게 막는다. 2011 Mac mini의 120 frame/s loopback probe는 100명과 150명에서 목표율을
+유지했지만 180명 이상에서는 같은 장비의 부하 발생기가 뒤처졌다. 따라서 200명은 현재
+보장 용량이 아니다. 초기 운영 목표와 경보 기준은 100명으로 잡고, 별도 기계에서
+WAN/LAN soak를 통과한 뒤 올린다. 현재 relay 자체에는 “정확히 100명” CLI 제한이
+없으므로 hard cap이 필요하면 TCP frontend의 connection limit을 쓰거나 worker 예산을
+조정한 빌드를 배포한다. 재현 명령과 측정 해석은
+[`blog/part12-hardening-and-release.md`](blog/part12-hardening-and-release.md)에 있다.
 
-S7은 부팅 자동 시작, wake lock, 상시 전원, 발열 관리가 필요하다. SQLite DB와 WAL은
-Mac mini나 Windows 노트북으로 주기적으로 백업한다. Android 절전이나 재부팅이 길어지면
+S7은 부팅 자동 시작, wake lock, 상시 전원, 발열 관리가 필요하다. SQLite 온라인 backup
+API로 만든 검증된 스냅샷을 Mac mini나 Windows 노트북으로 주기적으로 옮긴다. Android 절전이나 재부팅이 길어지면
 신규 인증과 결과 저장이 실패하므로 장기 public 운영의 단일 원본으로는 위험하다.
 
 ### 장기 권장: 사설 meta + VPS relay + Tunnel
@@ -133,8 +138,11 @@ cp web/ranking/index.html /srv/tetris/www/index.html
 export TETRIS_RELAY_SECRET='64-hex-secret-here'
 ./build-meta/tetris_meta \
   --db /srv/tetris/db/tetris.db \
-  --http 127.0.0.1:8080
+  --http 192.168.1.70:8080
 ```
+
+`192.168.1.70`은 예시다. S7의 고정 사설/VPN 주소로 바꾸고 Mac mini에서만 접근을
+허용한다. meta와 proxy를 같은 호스트에서 실행할 때는 대신 `127.0.0.1:8080`을 쓴다.
 
 기대 로그:
 
@@ -142,7 +150,7 @@ export TETRIS_RELAY_SECRET='64-hex-secret-here'
 [meta] opening db: /srv/tetris/db/tetris.db
 [meta] schema ready
 [meta] /v1/matches requires X-Relay-Secret
-[meta] HTTP listening on 127.0.0.1:8080
+[meta] HTTP listening on 192.168.1.70:8080
 ```
 
 ## 3. Edge proxy 호스트: local Caddy site
@@ -162,11 +170,11 @@ Caddy를 맡으면 `reverse_proxy` 대상을 S7의 고정 사설 주소 또는 V
     root * /srv/tetris/www
 
     handle /v1/* {
-        reverse_proxy 127.0.0.1:8080
+        reverse_proxy s7-meta.private:8080
     }
 
     handle /healthz {
-        reverse_proxy 127.0.0.1:8080
+        reverse_proxy s7-meta.private:8080
     }
 
     handle {
@@ -174,6 +182,9 @@ Caddy를 맡으면 `reverse_proxy` 대상을 S7의 고정 사설 주소 또는 V
     }
 }
 ```
+
+`s7-meta.private`는 S7의 고정 사설/VPN 주소로 바꾼다. Caddy와 meta를 같은
+호스트로 옮겼을 때만 `127.0.0.1:8080`을 사용한다.
 
 수동 실행:
 
@@ -204,7 +215,7 @@ cloudflared tunnel route dns tetris-meta api.example.com
 
 ```yaml
 tunnel: tetris-meta
-credentials-file: /Users/YOUR_USER/.cloudflared/TUNNEL_ID.json
+credentials-file: /home/tetris/.cloudflared/TUNNEL_ID.json
 
 ingress:
   - hostname: api.example.com
@@ -234,11 +245,11 @@ api.example.com {
     root * /srv/tetris/www
 
     handle /v1/* {
-        reverse_proxy 127.0.0.1:8080
+        reverse_proxy s7-meta.private:8080
     }
 
     handle /healthz {
-        reverse_proxy 127.0.0.1:8080
+        reverse_proxy s7-meta.private:8080
     }
 
     handle {
@@ -246,6 +257,8 @@ api.example.com {
     }
 }
 ```
+
+여기서도 `s7-meta.private`는 공인 주소가 아니라 고정 사설/VPN 주소다.
 
 relay 가 meta 와 같은 기기에 있을 때는 `/v1/matches` 를 public 에서 막고 relay 만
 localhost 로 쓰게 만들 수 있다. 지금 권장 구조처럼 relay 가 외부 VPS 에 있으면
@@ -372,6 +385,12 @@ relay로 옮기는 resume protocol이나 공유 session directory가 없으므�
 시점의 매치는 종료되고 클라이언트가 재접속해야 한다. standby는 새 매치의 복구 시간을
 줄이는 장치이지 진행 중 매치의 무중단 분산 처리가 아니다.
 
+성공한 인증 캐시와 같은 `player_id`의 중복 ranked 접속을 막는 session lease도 relay
+프로세스 로컬이다. 따라서 두 relay를 동시에 public active로 열면 계정별 단일 접속
+보장이 서버 사이에서는 성립하지 않는다. 현재 구현은 한 active에 새 연결을 모으고
+장애 때 standby로 전환하는 구성까지만 안전 경계로 삼는다. 또한 meta가 이미 내려간 뒤
+standby를 처음 기동하면 인증 캐시가 비어 있으므로 신규 ranked 입장은 fail closed된다.
+
 S7 SQLite를 두 meta가 동시에 쓰게 하거나 파일 동기화 프로그램으로 실시간 복제하지
 않는다. active meta는 하나로 유지하고 `.backup` 산출물을 standby에 복원한다. multi-active가
 필요해지는 규모에서는 PostgreSQL 같은 네트워크 DB, durable result outbox, session-aware
@@ -383,12 +402,18 @@ routing을 함께 설계해야 한다.
 - `/v1/matches` 는 secret 없이는 403 이어야 한다.
 - `TETRIS_RELAY_SECRET` 는 relay/meta 서버만 가진다.
 - release client 에 집 IP, relay secret, DB 경로를 넣지 않는다.
-- DB 파일은 정기 백업한다. 최소한 `tetris.db`, `tetris.db-wal`,
-  `tetris.db-shm` 을 같은 시점에 백업한다.
-- `sqlite3` CLI 가 있으면 `scripts/backup_meta_db.sh` 의 `.backup` 경로를 사용한다.
-- meta는 public 요청을 IP당 60/s, 올바른 relay secret을 가진 내부 요청을 별도 512/s
-  버킷으로 제한한다. reverse proxy의 실제 client IP 헤더는 loopback peer에서만 신뢰한다.
-  `/v1/guest`의 사용자별/IP별 제한은 Caddy·Tunnel 같은 edge에도 별도로 둔다.
+- 실행 중인 WAL DB의 파일들을 차례로 복사하지 않는다. `sqlite3` CLI를 설치하고
+  `scripts/backup_meta_db.sh`의 `.backup` + `integrity_check` 경로를 사용한다.
+- CLI가 없는 비상 복사는 meta를 완전히 중지한 오프라인 상태에서만 수행하고,
+  복원본을 `PRAGMA integrity_check`로 검증한다.
+- meta는 public 요청을 선택된 client key당 60/s, 올바른 relay secret을 가진 내부 요청을
+  별도 512/s 버킷으로 제한한다. reverse proxy의 실제 client IP 헤더는 loopback
+  peer에서만 신뢰한다. Mac mini proxy → S7 meta 분리 배치에서는 public 요청이
+  Mac mini IP의 공유 버킷을 쓰므로 `/v1/guest` 등의 실제 사용자별 제한은
+  HTTPS edge에 별도로 둔다. 위의 기본 Caddyfile과 Tunnel 연결만으로 rate limit이
+  자동 생성되지는 않는다. 사용하는 edge의 제한 정책, rate-limit 기능이 있는
+  frontend, 또는 명시적으로 설치한 Caddy 확장을 따로 구성해야 사용자별 제한이
+  생긴다. 그 전에는 meta의 공유 버킷이 전체 public 요청을 보수적으로 제한한다.
 - Caddy/Tunnel HTTPS 를 사용한다. public HTTP 로 토큰을 보내지 않는다.
 - Oracle/VPS 가 회수되면 새 relay 를 띄우고 같은 secret + 같은 meta URL 을 넣는다.
 

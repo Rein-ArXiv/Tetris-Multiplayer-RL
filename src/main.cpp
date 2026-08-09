@@ -847,15 +847,18 @@ int main(int argc, char** argv)
     }
 
     // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
-    //   metaUrl 이 설정된 경우에만 활성화. 실패 시 unranked 모드로 폴백하고
-    //   메뉴에 "ranking offline" 배너를 노출.
+    //   metaUrl 이 설정된 경우에만 활성화. 부트스트랩 실패는 현재 랭킹 정보를
+    //   읽지 못한 상태이지, 반드시 unranked relay 로 전환됐다는 뜻은 아니다.
+    //   네트워크 장애 때는 저장 토큰을 유지하고 계속 relay 입장에 보낸다.
+    //   ranked relay 는 자신의 meta 연결 또는 성공 인증 캐시로 별도 판정하며,
+    //   둘 다 없으면 입장을 거부한다.
     std::unique_ptr<meta::client::MetaClient> metaClient;
     std::string authToken;
     int    myElo       = 0;   // RP (0 시작 스케일 — meta/elo.h)
     int    myBp        = 0;
     int    myXp        = 0;   // 누적 경험치 (레벨은 meta/levels.h 로 유도)
     std::string mySelectedIconId = "default";
-    bool   metaOnline  = false;  // guest 부트스트랩이 성공했는지
+    bool   metaOnline  = false;  // 이 실행에서 guest/verify 응답을 받았는지
     // 랭크 매치 후 메뉴 복귀 시 1회 메타 갱신 필요 표시. MATCH_RESULT 프레임은
     // elo_after 만 싣고 bp/xp 는 없으므로(net/session.h), 메뉴의 Lv/BP/RP 표기를
     // 권위 있는 값으로 맞추려면 verify_token 으로 다시 읽어야 한다.
@@ -879,7 +882,7 @@ int main(int argc, char** argv)
                               << " icon=" << mySelectedIconId << "\n";
                     metaOnline = true;
                 } else {
-                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — unranked mode\n", why);
+                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — ranking offline\n", why);
                 }
             };
 
@@ -906,8 +909,11 @@ int main(int argc, char** argv)
                     authToken.clear();
                     bootstrap_new_guest("token unknown");
                 } else {
-                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, unranked\n");
-                    // 파일은 유지 — 다음 실행에 재시도.
+                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, ranking offline\n");
+                    // 파일과 authToken 은 유지한다. 다음 실행에 verify 를 재시도하고,
+                    // 현재 실행에서도 relay 에는 이 토큰을 보낸다. relay 쪽 meta와
+                    // 인증 캐시도 쓸 수 없다면 ranked 입장은 실패한다. unranked
+                    // 플레이에는 meta 없이 기동한 relay 가 따로 필요하다.
                 }
             }
         }
@@ -1526,8 +1532,9 @@ int main(int argc, char** argv)
         }
 
         // 3) 렌더링
-        // Section I: shake 업데이트 (2개 독립 상태). 뷰 오프셋은 보드별 드로우
-        // 직전에 개별 적용하고, UI/오버레이 그릴 땐 0 으로 리셋.
+        // Section I: shake 업데이트. 각 보드는 독립 ShakeState를 가지며, 해당
+        // 보드를 그리기 직전에만 오프셋을 적용한다. UI/오버레이로 넘어갈 때
+        // 0으로 되돌려 가비지를 받은 보드만 흔들리게 한다.
         shake_update(shakeLeft,  deltaTime);
         shake_update(shakeRight, deltaTime);
         if (coLocal.timeLeft  > 0.0f) coLocal.timeLeft  -= deltaTime;
@@ -1569,19 +1576,29 @@ int main(int argc, char** argv)
             draw_rect(200, 152, 320, 2, {45, 52, 90, 140});   // 타이틀 아래 구분선
 
             constexpr Color DISABLED = {70, 70, 70, 255};
-            const char* items[] = {
-                "Single Play",
-                "Single vs Bot",
-                "Matchmaking Multi",
-                "Custom Room Multi",
-                "Customize",
-                "Settings",
-                "Quit",
+            enum class MenuAction {
+                Single, BotSelect, Matchmaking, CustomRoom,
+                Customize, Settings, Quit,
             };
-            constexpr int kMenuCount = 7;
+            struct MenuItem {
+                const char* label;
+                MenuAction action;
+            };
+            constexpr MenuItem items[] = {
+                {"Single Play",       MenuAction::Single},
+                {"Single vs Bot",     MenuAction::BotSelect},
+                {"Matchmaking Multi", MenuAction::Matchmaking},
+                {"Custom Room Multi", MenuAction::CustomRoom},
+                {"Customize",         MenuAction::Customize},
+                {"Settings",          MenuAction::Settings},
+                {"Quit",              MenuAction::Quit},
+            };
+            constexpr int kMenuCount =
+                static_cast<int>(sizeof(items) / sizeof(items[0]));
 
-            // 버튼 레이아웃 — 중앙 정렬. 7개가 ranking 표시줄(y=540) 위에
-            // 들어가도록 높이 42 / 간격 8 로 압축.
+            // 메뉴 순서는 표시용 배열 한 곳에서만 정한다. label 과 action 을 함께
+            // 묶어 두면 항목을 삽입해도 아래 dispatch 가 숫자 index 와 어긋나지 않는다.
+            // 버튼은 ranking 표시줄 위의 고정 영역에 들어가도록 압축 배치한다.
             const int bw = 300;
             const int bh = 42;
             const int bgap = 8;
@@ -1593,33 +1610,38 @@ int main(int argc, char** argv)
             if (platform_key_pressed(PKEY_UP))   menuIndex = (menuIndex + kMenuCount - 1) % kMenuCount;
 
             int activated = -1;  // 이번 프레임 활성화된 항목(-1 = 없음)
+            int botItemIndex = -1;
 
             for (int i = 0; i < kMenuCount; ++i)
             {
                 const int by = byStart + i * (bh + bgap);
-                const bool disabled = (i == 1 && !botAvailable);
+                const bool isBotItem = items[i].action == MenuAction::BotSelect;
+                if (isBotItem) botItemIndex = i;
+                const bool disabled = isBotItem && !botAvailable;
                 // Disabled 항목은 버튼 그리되 클릭 반환 무시(+ 라벨 회색).
                 if (disabled) {
                     draw_rect_rounded(bx, by, bw, bh, 0.25f, {25, 30, 45, 255});
-                    const int tw = measure_text(items[i], 24);
-                    draw_text(items[i], bx + (bw - tw) / 2, by + (bh - 24) / 2,
+                    const int tw = measure_text(items[i].label, 24);
+                    draw_text(items[i].label, bx + (bw - tw) / 2, by + (bh - 24) / 2,
                               24, DISABLED);
                     continue;
                 }
-                bool clicked = gui_button_highlighted(bx, by, bw, bh, items[i],
+                bool clicked = gui_button_highlighted(bx, by, bw, bh, items[i].label,
                                                       (i == menuIndex), 24);
                 if (clicked) activated = i;
             }
 
             // 키보드 Enter/Space 로도 현재 강조된 항목 활성화.
             if (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE)) {
-                if (!(menuIndex == 1 && !botAvailable)) activated = menuIndex;
+                const bool disabled =
+                    items[menuIndex].action == MenuAction::BotSelect && !botAvailable;
+                if (!disabled) activated = menuIndex;
             }
 
-            if (!botAvailable) {
+            if (!botAvailable && botItemIndex >= 0) {
                 // Bot 모드가 disabled 임을 안내.
                 draw_text("(no bot roster entries found)", 250,
-                          byStart + 1 * (bh + bgap) + bh + 2, 12, DISABLED);
+                          byStart + botItemIndex * (bh + bgap) + bh + 2, 12, DISABLED);
             }
 
             // Section K — 메타/랭킹 상태 표시.
@@ -1627,8 +1649,8 @@ int main(int argc, char** argv)
                 draw_text("ranking: disabled (--meta https://host to enable)",
                           140, 540, 12, DISABLED);
             } else if (!metaOnline) {
-                draw_text("ranking server offline - playing unranked",
-                          200, 540, 12, RED);
+                draw_text("ranking: offline (ranked queue may be unavailable)",
+                          175, 540, 12, RED);
             } else {
                 char eloBuf[64];
                 std::snprintf(eloBuf, sizeof(eloBuf),
@@ -1641,15 +1663,18 @@ int main(int argc, char** argv)
                       180, 570, 12, DISABLED);
 
             if (activated >= 0) {
-                if (activated == 0) {
+                switch (items[activated].action) {
+                case MenuAction::Single:
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
-                } else if (activated == 1) {
+                    break;
+                case MenuAction::BotSelect:
                     // 봇 선택 화면으로. 실제 BotSingle 진입은 거기서 모델 로드 성공 후.
                     app = AppMode::BotSelect;
                     botSelectIndex = 0;
                     botSelectError.clear();
-                } else if (activated == 2) {
+                    break;
+                case MenuAction::Matchmaking:
                     queueHost = relayHost; queuePort = relayPort;
                     // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
                     // 토큰 없이는 verify 실패로 즉시 close 된다.
@@ -1657,22 +1682,26 @@ int main(int argc, char** argv)
                         netMode = true; queueMode = true; isHost = false;
                         app = AppMode::Net;
                     }
-                } else if (activated == 3) {
+                    break;
+                case MenuAction::CustomRoom:
                     roomRelayHost = relayHost; roomRelayPort = relayPort;
                     app = AppMode::RoomLobby;
                     roomStage = RoomLobbyStage::Choose;
                     roomCodeInput.clear();
                     roomErrorMsg.clear();
-                } else if (activated == 4) {
+                    break;
+                case MenuAction::Customize:
                     app = AppMode::Customize;
                     shopFetchTried = false;   // 진입마다 카탈로그 재요청
                     shopIndex = 0;
                     shopStatus.clear();
                     shopConfirmId.clear();
-                } else if (activated == 5) {
+                    break;
+                case MenuAction::Settings:
                     app = AppMode::Settings;
                     settingsIndex = 0;
-                } else {
+                    break;
+                case MenuAction::Quit:
                     // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
                     // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
                     // renderer_shutdown 이 platform_shutdown 보다 먼저다.
@@ -2733,18 +2762,19 @@ int main(int argc, char** argv)
                 draw_popup_panel(95, 235, 530, 225);
                 gui_text_center(360, 262, "GAME OVER", 60, WHITE);
                 // Section K — RP 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
-                // RP 변화 없음이라는 사실만 보장 — 구체적 이유는 세 가지:
-                //   (1) meta 미연동 / meta POST 실패 → "ranking offline".
+                // RP 변화 없음이라는 사실만 보장한다. 가능한 이유의 예:
+                //   (1) meta POST 실패 → "ranking offline".
                 //   (2) 교차검증 실패 (양측 summary 불일치) → winner=null 로 DB 에는
-                //       기록되지만 RP 미반영 → "unranked (validation failed)".
-                //   (3) unranked 매치 (둘 중 하나라도 player_id==0) → 릴레이가 summary 투명 포워딩.
-                // MATCH_RESULT 프레임 자체에는 이유가 실리지 않으므로 UI 는 "RP 변동 없음"
-                // 의 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
+                //       기록되지만 RP 미반영 → "validation failed".
+                //   (3) 바닥 RP 사용자의 패배처럼 정상 계산 결과가 0인 경우.
+                // unranked relay 는 MATCH_RESULT 자체를 보내지 않으므로 이 분기에
+                // 도달하지 않는다. 프레임에는 원인 코드가 없으므로 UI 는 "RP 변동 없음"
+                // 이라는 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
                 if (haveMatchResult) {
                     if (lastMatchResult.delta == 0 &&
                         lastMatchResult.elo_before == lastMatchResult.elo_after) {
                         gui_text_center(360, 343,
-                                        "no RP change (offline / unranked / invalid)",
+                                        "no RP change (offline / invalid / RP floor)",
                                         14, GRAY);
                     } else {
                         char buf[64];

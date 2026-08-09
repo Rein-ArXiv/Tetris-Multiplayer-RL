@@ -27,7 +27,8 @@ public:
     explicit ApiServer(Database& db, std::string relay_secret = {});
 
     // 포트 리스닝을 시작 (블로킹). 호출자가 main 에서 직접 부름.
-    // host 는 "0.0.0.0" 또는 "127.0.0.1".
+    // host 는 loopback 또는 고정된 사설/VPN 인터페이스처럼 이 프로세스가
+    // 실제로 bind 할 주소다. 공인 인터페이스 직접 노출보다 앞단 프록시를 권장한다.
     // 반환: 리스닝 실패 시 false, 정상 종료 시 true.
     bool listen(const std::string& host, int port);
 

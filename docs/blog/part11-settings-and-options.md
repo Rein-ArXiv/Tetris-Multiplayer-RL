@@ -10,12 +10,12 @@
   - [Part 3](./part3-rendering-and-ui.md) 의 `gui_hover_rect` / `gui_button` / `gui_checkbox` 와 OpenGL 3.3 Core 렌더러(`renderer_init` · `renderer_begin` · `renderer_end`)
   - [Part 4](./part4-game-wrapper-and-loop.md) 의 `AppMode` 메뉴 루프와 `Game`
   - [Part 5](./part5-audio.md) 의 `audio_set_music_enabled` / `audio_set_sfx_enabled` / `audio_set_music_volume` / `audio_set_sfx_volume`
-  - [Part 10](./part10-meta-and-ranking.md) 의 `meta::client::settings_file_path()` 와, 메인 메뉴를 7 항목으로 늘린 `Customize` 화면
+  - [Part 10](./part10-meta-and-ranking.md)의 `meta::client::settings_file_path()`와 `Customize` 화면이 연결된 메인 메뉴
 - **이번 Part의 파일:**
-  - `src/main.cpp` — `struct GameSettings`, 창 크기 프리셋 5개와 `max_window_scale()`, `load_settings` / `save_settings`, `settingsPath` 결정 + 레거시 마이그레이션, 시작 시 적용, 메뉴 index 5 연결, `AppMode::Settings` 화면 블록, `apply_fx` 의 흔들림 게이팅
+  - `src/main.cpp` — `struct GameSettings`, 창 크기 프리셋과 `max_window_scale()`, `load_settings` / `save_settings`, `settingsPath` 결정 + 레거시 마이그레이션, 시작 시 적용, `AppMode::Settings` 전이, `apply_fx` 의 흔들림 게이팅
   - `src/gui.h` / `src/gui.cpp` — `gui_slider`, `gui_value_selector`
   - `platform/platform.h` — `platform_set_window_size` / `platform_display_size` / `platform_set_fullscreen` / `platform_fullscreen_supported` / `platform_set_vsync`
-  - `platform/sdl.cpp` / `platform/win32.cpp` — 위 다섯 함수의 구현, `recompute_viewport()`, `platform_mouse_x/y` 의 논리 역매핑, `platform_set_vsync` 의 GL swap interval 전환
+  - `platform/sdl.cpp` / `platform/win32.cpp` — 위 플랫폼 API의 구현, `recompute_viewport()`, `platform_mouse_x/y`의 논리 역매핑, GL swap interval 전환
   - `audio/audio.h` 의 볼륨 API 는 [Part 5](./part5-audio.md) 가 이미 만들었다 — 이 장은 그것을 **부르기만** 한다
   - `src/sim_game.h` / `src/sim_game.cpp` — 렌더 전용 1 회 플래그 `hardDropEvent`
   - `src/game.h` / `src/game.cpp` — `game_set_ghost_enabled()` 와 게이트된 고스트 draw 사이트
@@ -38,6 +38,8 @@
 - `src/sim_game.h` / `src/sim_game.cpp` — 렌더 전용 1회 플래그 `hardDropEvent`.
 - `src/game.h` / `src/game.cpp` — `game_set_ghost_enabled()` 와 게이트된 고스트 draw 사이트.
 - `renderer/renderer.cpp` — 논리 좌표계가 720×640 으로 고정이고 창 크기는 `glViewport` 사각형만 바꾼다는 사실(창 크기 프리셋이 게임 좌표를 흔들지 않는 근거).
+
+설정 기능 자체는 Part 4의 앱 루프와 Part 5의 오디오 API 뒤에 붙일 수 있지만, **현재 코드의 저장 경로 헬퍼가 `meta/http_client.*` 안에 있다.** 그래서 현재 저장소를 그대로 누적 구현하는 순서에서는 Part 10 뒤에 놓인다. 이는 설정이 랭킹을 필요로 한다는 뜻이 아니라 user-data 경로 책임이 meta 모듈에 섞인 구현 결합이다. 이 헬퍼를 `platform/user_data.*` 같은 공용 모듈로 옮기면 설정 장은 Part 5 직후로 이동할 수 있다. 문서 순서는 현재 빌드 가능한 코드를 우선하고, 이 결합을 숨기지 않는다.
 
 **결정성 불변식을 맨 앞에 못박는다.** 이 장이 추가하는 모든 것은 *렌더 · 오디오 · 창 · 입력 UI* 전용이다. `SimGame` 의 상태도, 결정성 해시도, lockstep 입력 경로도, 리플레이도 단 한 비트도 건드리지 않는다. 유일하게 sim 에 새로 들어가는 필드(`hardDropEvent`) 조차 *해시에서 제외된* `mutable` 렌더 플래그다. 그래서 설정을 어떻게 바꾸든 같은 입력 시퀀스는 양쪽 클라이언트에서 같은 게임을 만든다.
 
@@ -62,7 +64,7 @@ struct GameSettings {
 };
 ```
 
-여덟 개 필드, 전부 기본값이 "현재 동작 유지" 다 — 설정 파일이 없으면 게임은 이 장 이전과 똑같이 720×640·풀볼륨·흔들림 ON 으로 뜬다.
+모든 필드의 기본값은 “설정 파일이 없던 기존 동작 유지”다. 첫 실행에는 720×640·풀볼륨·흔들림 ON으로 뜨며, 필드가 늘어나도 오래된 설정 파일은 누락 항목의 기본값을 그대로 쓴다.
 
 ## 2. `GameSettings` 영속 — `settings.cfg`
 
@@ -212,9 +214,16 @@ static const char*   kWindowScaleLabel[kWindowScaleCount] = {
     "720 x 640", "1080 x 960", "1440 x 1280", "1800 x 1600", "2430 x 2160" };
 ```
 
-다섯 프리셋 전부 720:640 = **9:8** 비율을 유지한다. 이게 §5 의 왜곡 없는 스케일링의 전제다. 배수로 보면 1× / 1.5× / 2× / 2.5× / 3.375× 다. 마지막 항목만 딱 떨어지지 않는데, 이것은 배수에서 출발한 값이 아니라 **4K 모니터의 세로 해상도 2160 에서 거꾸로 계산한 값**이기 때문이다. 9:8 을 유지하려면 가로가 2430 이 되고, 3840 폭의 4K 모니터에서 전체화면으로 띄우면 좌우에 검은 여백이 남는다.
+현재 배열의 모든 프리셋은 720:640 = **9:8** 비율을 유지한다. 이것이 §5의
+왜곡 없는 스케일링 전제다. 마지막 항목은 정수 배수에서 출발한 값이 아니라
+4K 모니터의 세로 해상도 2160에서 거꾸로 계산했다. 9:8을 유지하면 가로가
+2430이 되고, 3840 폭의 전체화면에서는 좌우에 검은 여백이 남는다.
 
-프리셋이 세 개에서 다섯 개로 늘어난 것은 렌더러를 GPU 로 옮긴 결과다. CPU 래스터라이저 시절에는 창을 키울수록 채워야 할 픽셀 수가 그대로 CPU 부담이 됐지만, 지금은 정점 몇 개를 더 넘길 뿐이라 2430×2160 이 720×640 보다 눈에 띄게 비싸지 않다.
+GPU 렌더러로 옮기면서 큰 창을 CPU 프레임버퍼로 직접 채우는 비용은 사라졌지만,
+해상도가 공짜가 된 것은 아니다. 뷰포트가 커지면 GPU가 처리하는 fragment 수와
+메모리 대역폭은 여전히 늘고, 글리프도 큰 배율로 다시 래스터화한다. 이 게임의
+단순한 장면에서는 보통 감당할 수 있지만, 프리셋 추가 여부는 대상 GPU의
+frame time과 글리프 생성 spike를 측정해 정한다.
 
 그런데 프리셋을 크게 만들어 두면 새로운 문제가 생긴다 — **모니터보다 큰 창**이다. 1920×1080 모니터에서 2430×2160 창을 만들면 창의 절반이 화면 밖으로 나간다. 그냥 보기 나쁜 정도가 아니다. 제목 표시줄이 화면 위쪽으로 밀려나면 **창을 손으로 끌어 되돌릴 수도 없고**, 설정 화면의 선택기가 화면 밖에 있으면 설정으로 되돌릴 수도 없다. 사용자가 스스로 빠져나올 수 없는 상태를 만드는 것은 설정 UI 가 저지를 수 있는 최악의 실수다.
 
@@ -240,7 +249,7 @@ static int max_window_scale()
 }
 ```
 
-세 가지 판단이 이 15 줄에 들어 있다.
+이 짧은 구현에는 서로 다른 세 가지 판단이 들어 있다.
 
 **(1) 캐시하지 않는다.** 결과를 static 변수에 담아두면 한 번만 재고 끝인데, 노트북에 외장 모니터를 꽂거나 창을 다른 모니터로 옮기면 그 값이 거짓이 된다. `platform_display_size()` 는 SDL 에서 `SDL_GetDisplayUsableBounds`, Win32 에서 `SPI_GETWORKAREA` 한 번이라 호출이 싸다. 설정 화면을 그리는 프레임에서만 부르므로 매번 재도 부담이 없다.
 
@@ -353,7 +362,7 @@ static GameSettings g_settings;
 
 ## 3. 즉시모드 위젯 확장 — 슬라이더와 선택기
 
-설정 화면은 즉시모드 GUI(immediate-mode) 로 만든다. 위젯 트리도, retained 상태도 없다 — 매 프레임 렌더 루프 안에서 위젯 함수를 부르면 그 함수가 그 자리에서 그리고, 그 프레임의 입력을 보고 결과를 반환한다. [Part 3](./part3-rendering-and-ui.md) 의 `gui_hover_rect` / `gui_button` / `gui_checkbox` 가 이미 그 방식이었고, 설정 화면을 위해 두 위젯을 더한다.
+설정 화면은 즉시모드 GUI(immediate-mode)로 만든다. 위젯 트리도 retained 상태도 없다. 매 프레임 렌더 루프 안에서 위젯 함수를 부르면 그 함수가 그 자리에서 그리고 입력 결과를 반환한다. 기존 `gui_hover_rect` / `gui_button` / `gui_checkbox` 계약에 값 선택용 `gui_slider`와 `gui_value_selector`를 더한다.
 
 ### 3.1 `gui_slider` — 0~100 트랙
 
@@ -438,7 +447,7 @@ int gui_value_selector(int x, int y, int w, int h, const char* label,
 }
 ```
 
-기존 `gui_checkbox` 는 그대로 쓴다 — `bool` 토글 행(전체화면·흔들림·VSync·고스트)에 재사용한다. 세 위젯의 헤더 선언은 다음과 같다.
+기존 `gui_checkbox`는 `bool` 토글 행(전체화면·흔들림·VSync·고스트)에 재사용한다. 설정 화면에서 함께 쓰는 위젯의 헤더 선언은 다음과 같다.
 
 **현재 소스 발췌 — `src/gui.h`**
 
@@ -464,41 +473,43 @@ int  gui_value_selector(int x, int y, int w, int h, const char* label,
 
 ### 4.1 메뉴 연결
 
-메인 메뉴에 `"Settings"` 항목을 끼운다. 메뉴는 문자열 배열 + 인덱스로 도는 즉시모드 리스트다.
+메인 메뉴에 `"Settings"` 항목을 연결한다. 메뉴는 라벨과 동작을 함께 가진 즉시모드 리스트다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-            const char* items[] = {
-                "Single Play",
-                "Single vs Bot",
-                "Matchmaking Multi",
-                "Custom Room Multi",
-                "Customize",
-                "Settings",
-                "Quit",
+            enum class MenuAction {
+                Single, BotSelect, Matchmaking, CustomRoom,
+                Customize, Settings, Quit,
             };
-            constexpr int kMenuCount = 7;
-
-            // 버튼 레이아웃 — 중앙 정렬. 7개가 ranking 표시줄(y=540) 위에
-            // 들어가도록 높이 42 / 간격 8 로 압축.
-            const int bw = 300;
-            const int bh = 42;
-            const int bgap = 8;
-            const int bx = (720 - bw) / 2;
-            const int byStart = 190;
+            struct MenuItem {
+                const char* label;
+                MenuAction action;
+            };
+            constexpr MenuItem items[] = {
+                {"Single Play",       MenuAction::Single},
+                {"Single vs Bot",     MenuAction::BotSelect},
+                {"Matchmaking Multi", MenuAction::Matchmaking},
+                {"Custom Room Multi", MenuAction::CustomRoom},
+                {"Customize",         MenuAction::Customize},
+                {"Settings",          MenuAction::Settings},
+                {"Quit",              MenuAction::Quit},
+            };
+            constexpr int kMenuCount =
+                static_cast<int>(sizeof(items) / sizeof(items[0]));
 ```
 
-항목이 **일곱 개**라는 점에 주의하라. 인덱스 4는 `"Customize"` 이고 `"Settings"` 는 **인덱스 5**다. `"Customize"` 는 [Part 10](./part10-meta-and-ranking.md) 이 아이콘 상점을 붙이면서 추가한 항목이라, 이 장을 Part 10 없이 먼저 구현한다면 여섯 항목이 된다. 그 경우 아래 `activated` 비교값도 하나씩 당겨야 한다.
+`Settings`는 현재 `Customize` 뒤에 보이지만 진입 동작은 배열 위치에 의존하지 않는다. 렌더 루프가 선택된 `MenuItem::action`을 switch에 넘기므로 항목을 삽입하거나 순서를 바꿔도 라벨과 동작이 함께 이동한다.
 
-항목이 늘면서 버튼 높이가 42, 간격이 8로 압축된 것도 같은 이유다. 일곱 개가 `y=540` 의 랭킹 표시줄 위에 들어가야 한다.
+버튼 높이와 간격은 랭킹 표시줄을 침범하지 않도록 고정 영역 안에 맞춘다. 항목을 추가할 때는 문서의 개수에 맞추지 말고 작은 창에서 마지막 버튼의 hit box와 상태 표시줄이 겹치지 않는지 확인한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-                } else if (activated == 5) {
+                case MenuAction::Settings:
                     app = AppMode::Settings;
                     settingsIndex = 0;
+                    break;
 ```
 
 `settingsIndex = 0` 으로 커서를 첫 행에 되돌리는 것이 중요하다. 이걸 빼면 지난번 나갈 때의 커서 위치가 남아, 설정 화면을 다시 열었을 때 엉뚱한 행이 선택돼 있다.
@@ -517,7 +528,7 @@ stateDiagram-v2
 
 ### 4.2 행 구성과 내비게이션
 
-설정 화면은 8개의 타입별 행으로 이뤄진다. 행 종류를 `enum RowKind` 로 두고, 위에서부터 스케일 선택기 → 전체화면 → 흔들림(마스터/하드드롭) → 볼륨 슬라이더(BGM/SFX) → VSync → 고스트 순이다.
+설정 화면은 선택기·체크박스·슬라이더 행을 조합한다. `enum RowKind`가 위젯 종류를 구분하고, 현재 항목은 스케일 → 전체화면 → 흔들림 → BGM/SFX 볼륨 → VSync → 고스트 순으로 배치된다. 행 개수나 배열 index보다 항목 ID와 표시 순서를 함께 관리하는 것이 중요하다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -614,7 +625,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 `gui_value_selector` 로 만드는 다른 행들은 wrap 이 자연스러울 수 있지만, 창 크기는 다르다. 사용자가 Right 를 연타해 최대 크기로 올리려는 의도가 명확한데 한 번 더 눌렀다고 최소로 되돌아가면, 창이 갑자기 작아지고 마우스 위치까지 어긋난다. 목록의 끝이 벽처럼 느껴져야 한다.
 
-**그 "끝" 이 어디인가가 §2.2 와 이어진다.** 상한은 `kWindowScaleCount - 1` (항상 4) 이 아니라 `max_window_scale()` 이다. 1920×1053 짜리 화면에서는 그 값이 1 이므로 1080×960 에서 Right 를 더 눌러도 아무 일이 일어나지 않는다. 사용자 눈에는 "프리셋이 두 개뿐인 게임" 으로 보이고, 4K 모니터에 꽂으면 같은 실행 파일에서 다섯 개가 보인다. 고를 수 없는 항목을 회색으로 그려 보여주는 방법도 있었지만, 선택기는 한 번에 한 값만 보이는 위젯이라 "이 값은 안 됩니다" 를 표시할 자리가 없다. 목록 자체를 줄이는 편이 단순하다.
+그 "끝"은 배열의 마지막 원소가 아니라 `max_window_scale()`이 돌려주는 **현재 화면에 들어가는 마지막 프리셋**이다. 작은 화면에서는 큰 프리셋이 선택 순환에 나타나지 않고, 같은 실행 파일을 더 큰 화면에서 실행하면 선택 범위가 넓어진다. 고를 수 없는 값을 회색으로 잠시 보여주는 방법도 있지만, 한 번에 한 값만 보이는 선택기에서는 목록 자체를 실제 선택 가능 범위로 자르는 편이 명확하다.
 
 `if (ns != g_settings.windowScale)` 가드도 여기서 값을 한다. clamp 라 양 끝에서 `dir` 을 눌러도 `ns` 가 그대로이므로, 이 가드가 없으면 매 프레임 `platform_set_window_size` 를 다시 불러 창이 계속 중앙으로 재배치된다.
 
@@ -672,7 +683,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
                 changed = true;
 ```
 
-`platform_fullscreen_supported()` 는 이 장이 플랫폼 계층에 추가하는 세 번째 질의 함수다. 두 백엔드의 답이 다르다.
+`platform_fullscreen_supported()`는 UI가 지원 여부를 묻는 질의 함수다. 두 백엔드의 답이 다르다.
 
 **현재 소스 발췌 — `platform/sdl.cpp`**
 
@@ -721,7 +732,7 @@ Win32 백엔드는 전체화면을 구현하지 않았다. 창 스타일 전환�
 
 중요한 것은 **미구현을 감추지 않는다**는 점이다. 함수를 no-op 으로 두고 체크박스는 그대로 그렸다면, Windows 사용자는 토글을 켰는데 아무 일도 일어나지 않고 설정만 `fullscreen=1` 로 저장되는 상태를 만난다. 다음 실행에서도 여전히 창모드다. 대신 `(unavailable)` 회색 라벨을 그려 "이 백엔드에는 없는 기능" 임을 화면에서 바로 알린다. 라벨 색은 커서가 그 행에 있으면 노란색으로 유지해, 커서 이동 자체는 자연스럽게 되도록 했다.
 
-`platform_set_vsync` 는 두 백엔드가 같은 일을 하되 조회 경로가 다르다. SDL 은 `SDL_GL_SetSwapInterval` 한 줄이고, Win32 는 `WGL_EXT_swap_control` 확장으로 받아 둔 함수 포인터를 쓴다 — §7 에서 다시 다룬다.
+`platform_set_vsync` 는 두 백엔드가 같은 일을 하되 호출 경로가 다르다. SDL 은 `SDL_GL_SetSwapInterval`을 부르고, Win32는 `WGL_EXT_swap_control`에서 얻은 함수 포인터를 사용한다. 둘 다 요청이 실패할 수 있으므로 설정값을 저장하는 것과 실제 적용 성공 여부를 구분해 로그로 남긴다.
 
 볼륨 슬라이더 헬퍼는 `gui_slider` 를 감싸고, 키보드 Left/Right 는 5% 단위로 움직인다.
 
@@ -985,7 +996,7 @@ graph TB
     LM -->|히트 테스트| L
 ```
 
-`win32.cpp` 에도 같은 `s_vp_*` 계산과 마우스 역매핑이 있다. `AdjustWindowRect` 로 클라이언트 영역이 정확히 요청 크기가 되도록 창 외곽을 보정하고, `platform_viewport()` 가 같은 y 뒤집기를 한다. 다른 것은 전부 대칭이고 전체화면만 no-op 스텁이다 — 그 스텁과 `platform_fullscreen_supported()` 의 관계는 앞의 ROW_FULLSCREEN 절에서 이미 봤다.
+`win32.cpp`에도 같은 `s_vp_*` 계산과 마우스 역매핑이 있다. `AdjustWindowRect`로 클라이언트 영역이 정확히 요청 크기가 되도록 창 외곽을 보정하고, `platform_viewport()`가 같은 y 뒤집기를 한다. 전체화면만 no-op 스텁이며 `platform_fullscreen_supported()`가 false를 돌려 UI 항목을 비활성화하므로, 지원하지 않는 기능을 성공한 것처럼 저장하지 않는다.
 
 ## 6. 오디오 볼륨 — 카테고리별 게인
 
@@ -1236,7 +1247,10 @@ void Game::Draw()
 이 장의 모든 변경이 lockstep/리플레이에 영향이 없는 이유를 한자리에 모은다.
 
 - **입력 비트마스크 불변.** lockstep 이 주고받는 것은 틱별 입력 비트마스크(Part 6) 다. 설정 화면은 이 비트마스크를 만들지도, 보내지도, 바꾸지도 않는다. 설정 행을 조작하는 Up/Down/Left/Right 는 *UI 내비게이션* 일 뿐 게임 입력이 아니다 — 애초에 게임 중이 아니라 메뉴 컨텍스트(`AppMode::Settings`) 에서만 동작한다.
-- **`SimGame` 상태 불변.** 볼륨·창 크기·VSync·흔들림·고스트 중 무엇도 `SimGame` 의 grid/블록/RNG/score 를 건드리지 않는다. 새로 들어간 단 하나의 sim 필드 `hardDropEvent` 는 `mutable` 렌더 플래그이고, `StateHashBreakdown()` 의 해시 대상에서 빠져 있다(§8.1).
+- **`SimGame` 상태 불변.** 볼륨·창 크기·VSync·흔들림·고스트 중 무엇도
+  `SimGame`의 grid/블록/RNG/score를 건드리지 않는다. `hardDropEvent`는
+  `mutable` 렌더 이벤트이며 `StateHashBreakdown()`의 해시 대상에서 빠져
+  있다(§8.1).
 - **해시 패리티 유지.** 같은 입력 시퀀스는 설정과 무관하게 양쪽에서 같은 상태 해시를 만든다. 한쪽이 720×640·무음·흔들림 OFF, 다른 쪽이 전체화면·풀볼륨·흔들림 ON 이어도 두 클라이언트의 desync 검출(HASH 비교) 은 통과한다.
 - **렌더/오디오/창 격리.** 적용 경로가 전부 `platform_*`/`audio_*`/`game_*`(렌더 게이트) 로만 흐른다. 시뮬레이션 코드(`sim_game.cpp` 의 상태 전이) 는 이 호출들을 단 한 줄도 부르지 않는다.
 
@@ -1246,9 +1260,11 @@ void Game::Draw()
 
 ## 이 장에서 완성된 것
 
-- `src/main.cpp` 의 `GameSettings`(8필드) + `settings.cfg` 영속 — `load_settings`/`save_settings`, backward-tolerant 파싱(구형 `bgm`/`sfx` bool → 0/100 승격), 시작 시 `platform_*`/`audio_*`/`game_*` 적용.
-- 창 크기 프리셋 다섯 개(720×640 ~ 2430×2160, 전부 9:8) 와 `max_window_scale()` — `platform_display_size()` 로 사용 가능 화면을 재서 선택 범위를 자르고, 저장된 값도 시작할 때 한 번 자른다.
-- 메뉴 `"Settings"` 항목 → `AppMode::Settings` 화면(8행) — Up/Down 행 이동, Left/Right/Enter 값 조정, 마우스 직접 클릭, 변경 즉시 적용 + 단발 `save_settings`.
+- `src/main.cpp`의 `GameSettings` + `settings.cfg` 영속 — `load_settings`/`save_settings`, backward-tolerant 파싱(구형 `bgm`/`sfx` bool → 0/100 승격), 시작 시 `platform_*`/`audio_*`/`game_*` 적용.
+- 9:8 창 크기 프리셋 배열과 `max_window_scale()` —
+  `platform_display_size()`로 사용 가능 화면을 재서 선택 범위를 자르고,
+  저장된 값도 시작할 때 한 번 자른다.
+- 메뉴 `"Settings"` 항목 → `AppMode::Settings` 화면 — Up/Down 항목 이동, Left/Right/Enter 값 조정, 마우스 직접 클릭, 변경 즉시 적용 + 단발 `save_settings`.
 - `src/gui.cpp` 의 즉시모드 위젯 추가 — `gui_slider`(0~100 트랙/fill/노브) + `gui_value_selector`(`< 라벨 >`, -1/0/+1). 기존 `gui_checkbox` 재사용.
 - `platform/sdl.cpp` 의 창 크기 시스템 — 논리 좌표계 720×640 고정, `recompute_viewport()` 의 2분기(9:8 프리셋은 레터박스 0 이 자동으로 나옴) vs 전체화면 레터박스, `platform_viewport()` 의 GL 좌하단 원점 변환, `platform_mouse_x/y` 의 논리 좌표 역매핑(`(raw - vpOffset) * logical / vpSize`). `win32.cpp` 대응 구현/스텁.
 - `audio/sdl_audio.cpp` 의 BGM/SFX 카테고리 게인(믹스 시 샘플 곱) + `audio/audio.cpp` 의 XAudio2 보이스 `SetVolume` 미러.
@@ -1291,7 +1307,7 @@ cmake --build build-sim --target sim_hash_dump
 
 화면에서 확인할 것:
 
-- 메인 메뉴 → `Settings` 진입. Up/Down 으로 8행을 순환, 커서 행 라벨이 노란색.
+- 메인 메뉴 → `Settings` 진입. Up/Down으로 설정 항목을 순환하면 현재 커서 라벨이 노란색으로 표시된다.
 - `Window` 선택기가 **이 모니터에 들어가는 프리셋까지만** 움직인다. 1920×1080 모니터라면 작업 표시줄을 뺀 높이가 1080 미만이라 `1080 x 960` 에서 더 이상 올라가지 않는다. 4K 모니터에서는 `2430 x 2160` 까지 간다.
 - 크기를 1080×960/1440×1280 으로 바꾼 뒤 버튼/슬라이더를 클릭하면 **클릭이 정확히 정렬** 된다(마우스 논리 역매핑). 어긋나면 §5.3 누락.
 - 창을 키우면 글자 획과 둥근 모서리가 **더 선명해진다.** 720×640 과 1440×1280 의 `TETRIS` 타이틀을 나란히 보면 확대된 저해상도 이미지가 아니라 다시 그려진 그림이라는 것이 보인다.

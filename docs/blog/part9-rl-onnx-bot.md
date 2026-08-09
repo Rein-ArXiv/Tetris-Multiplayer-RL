@@ -449,7 +449,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 **`state_hash()` 를 노출한다.** [Part 1](./part1-deterministic-simulation.md) 의 FNV-1a 해시를 Python 에서 바로 찍어볼 수 있다. `test_determinism_crossplatform.py` 같은 테스트가 여기를 통해 Python 런과 C++ 런의 상태가 틱 단위로 일치하는지 검증한다.
 
-**`clone()` 은 전체 deterministic state 의 값 복사다.** CBMPI-style policy improvement 는 현재 상태에서 합법 placement 를 하나씩 가정 적용해 후속 보드를 평가한다. 원본 `SimGame` 을 건드리면 rollout 이 망가지므로, `clone()` 으로 branch 를 만든 뒤 `apply_placement()` 를 호출한다. Colab 에서 `AttributeError: 'tetris_py.SimGame' object has no attribute 'clone'` 가 나오면 최신 소스를 pull 한 뒤 `build/` 와 `python/sim/tetris_py*.so` 를 지우고 네이티브 모듈을 다시 빌드해야 한다. 이 의존이 알고리즘별로 갈린다는 점은 §7 의 비교 표에서 다시 다룬다.
+**`clone()` 은 전체 deterministic state 의 값 복사다.** CBMPI-style policy improvement 는 현재 상태에서 합법 placement 를 하나씩 가정 적용해 후속 보드를 평가한다. 원본 `SimGame` 을 건드리면 rollout 이 망가지므로, `clone()` 으로 branch 를 만든 뒤 `apply_placement()` 를 호출한다. Colab 에서 `AttributeError: 'tetris_py.SimGame' object has no attribute 'clone'` 가 나오면 최신 소스를 pull 한 뒤 `build/` 와 `python/sim/tetris_py*.so` 를 지우고 네이티브 모듈을 다시 빌드해야 한다. PPO처럼 현재 관측만 소비하는 학습기와 달리, 후보 상태를 직접 펼치는 알고리즘만 이 복제 API에 의존한다.
 
 **`seed=0` 이 deterministic default.** Gym env 가 `TetrisPlacementEnv(seed=0)` 으로 초기화해도 플랫폼 간 동일한 피스 시퀀스를 받는다.
 
@@ -709,7 +709,7 @@ export 가 끝나면 `model/bots/<bot_name>.onnx` 파일이 남는다. C++ 런�
 
 ## 7. 학습 알고리즘 비교
 
-`python/train/` 에는 7개 trainer 파일이 있고 노트북의 `ALGO` 값으로는 11가지를 고른다. 전부 같은 배포 계약을 지키지만 — **최종 산출물이 `TetrisPolicyNet` 체크포인트여야 한다** — 그 안에서 갈리는 지점이 있다.
+`python/train/`의 trainer와 노트북의 `ALGO` 선택지는 모두 같은 배포 계약을 지킨다. **최종 산출물이 `TetrisPolicyNet` 체크포인트여야 한다**는 점은 같지만, 학습 중 시뮬레이션 복제 여부와 export에 넘길 체크포인트 형식은 알고리즘마다 다르다. 지원 목록 자체는 아래 표보다 `train_model_zoo_colab.ipynb`의 `command_for`와 각 trainer CLI를 기준으로 확인한다.
 
 | ALGO | 파일 | 계열 | 샘플 재사용 | `clone()` | 배포 체크포인트 |
 |---|---|---|---|---|---|
@@ -841,7 +841,7 @@ uses the classic target-network max. Checkpoints saved here load directly in
 | `setup_colab.ipynb` | 저장소 clone 과 네이티브 모듈 빌드만 하는 독립 bootstrap 노트북. |
 | `python/train/README_colab.md` | 알고리즘별 smoke/long 명령과 export troubleshooting 문서. |
 
-### 8.1 저장소 기본값은 `'long'` 이다 — 첫 실행 전에 바꿔라
+### 8.1 안전한 기본값은 `smoke`, 장기 학습은 명시적으로 선택한다
 
 노트북 상단 설정 셀은 이렇게 되어 있다.
 
@@ -855,18 +855,16 @@ ALGO = 'ddqn'
 RUN_NAME = f'aria_{ALGO}'
 
 # Smoke 값으로 먼저 검증하고, 잘 돌면 아래 TRAIN_PRESET을 'long'으로 바꾸세요.
-TRAIN_PRESET = 'long'  # 'smoke' or 'long'
+TRAIN_PRESET = 'smoke'  # 'smoke' or 'long'
 
 print('algo    :', ALGO)
 print('run name:', RUN_NAME)
 print('preset  :', TRAIN_PRESET)
 ```
 
-주석은 "smoke 로 먼저 검증하라" 고 말하는데 **값 자체는 이미 `'long'`** 이다. 노트북을 그대로 위에서 아래로 실행하면 첫 실행이 곧바로 long run 이 된다 — `ddqn` 기준으로 500,000 스텝이다. 파이프라인이 어디선가 깨져 있으면 그 사실을 몇 시간 뒤에 알게 된다.
+저장소 기본값과 안내 문장은 모두 `smoke`로 맞춰져 있다. 노트북을 그대로 실행하면 네이티브 모듈 빌드부터 짧은 학습, 체크포인트와 ONNX 산출물 생성까지 같은 경로를 작은 작업량으로 먼저 밟는다. 이 단계는 학습 성능을 평가하는 것이 아니라 **전체 파이프라인이 연결됐는지** 확인한다.
 
-**첫 실행 전에 `TRAIN_PRESET = 'smoke'` 로 바꿔라.** 노트북의 학습 실행 셀 위 마크다운도 같은 것을 요구한다: `처음에는 반드시 TRAIN_PRESET = 'smoke'로 한 번 통과시킨 뒤, long으로 바꿔 학습하세요.` 즉 문서와 기본값이 어긋나 있는 상태이며, 이 문서는 **문서 쪽을 실제 값에 맞추고 독자에게 수동 변경을 요구**한다.
-
-`ALGO` 는 §7 의 표에 있는 11개 값 중 하나다. `smoke` 는 학습 성능을 보려는 값이 아니라 **전체 파이프라인이 깨지지 않았는지** 보는 값이다. smoke 로 다음이 모두 통과해야 long 을 돌린다.
+`ALGO`는 `command_for`가 지원하는 이름을 사용한다. 표는 알고리즘 간 차이를 설명하기 위한 지도이며, 새 알고리즘 추가로 목록이 바뀌어도 지원 여부는 노트북과 trainer CLI가 결정한다. smoke에서는 다음 계약을 확인한다.
 
 1. `tetris_py` 빌드와 `from sim import SimGame`.
 2. `SimGame.clone()` 존재 확인 (§7.1 — stale `.so` 탐지).
@@ -874,7 +872,7 @@ print('preset  :', TRAIN_PRESET)
 4. `.pt` 체크포인트 생성.
 5. `netbot.export_onnx` 로 `model/bots/<RUN_NAME>.onnx` 생성.
 
-smoke 가 통과하면 `RUN_NAME` 을 바꿔 long run 을 시작한다. 같은 이름을 쓰면 smoke 체크포인트를 덮어쓴다.
+smoke가 통과한 뒤에만 `TRAIN_PRESET = 'long'`으로 바꾸고, `RUN_NAME`도 장기 학습용으로 구분한다. 같은 이름을 쓰면 smoke 체크포인트를 덮어쓴다.
 
 ```python
 ALGO = 'ddqn'
@@ -1452,7 +1450,13 @@ C++ 의 `%` 는 피연산자가 음수일 때 결과가 음수가 될 수 있다
 
 왜 "역회전 없이 1~3 회 전진 회전" 인가? `SimBlock` 은 `Rotate()` 만 공개하고 `UndoRotation()` 은 collision 탐색 내부에서만 쓰는 사설 API 다. 역회전을 공용 입력으로 만들면 lockstep 입력 비트가 하나 늘고 서버-클라 간 상태 전이가 하나 늘어난다. "회전은 항상 전진" 이라는 단일 규약이 구현 단순성과 결정론을 산다. 최악의 경우 3 번 회전해야 하는데, 1 틱당 한 번씩이라 3 틱이면 끝난다.
 
-Python 쪽 `netbot/input_expander.py` 도 같은 규칙을 미러링한다. 현재 `test_placement_parity.py` 는 Python 구현의 손계산 진리표와 구조적 불변식을 고정하며, C++ 함수를 직접 호출하는 비교 binding 은 아직 없다. 그 한계가 정확히 무엇을 의미하는지는 [Part 8](./part8-python-rl.md) 의 패리티 레이어 절에서 다뤘다.
+Python 쪽 `netbot/input_expander.py`도 같은 규칙을 미러링한다. 현재
+`test_placement_parity.py`는 Python 구현의 손계산 진리표와 구조적 불변식을
+고정하지만 C++ 함수를 직접 호출해 결과를 대조하지는 않는다. 따라서 Python 쪽
+회귀는 잘 잡아도, C++과 Python에 같은 오해를 서로 다르게 구현한 경우까지 자동으로
+검출한다고 주장할 수 없다. 완전한 교차 패리티를 원하면 `expand_placement`를 작은
+binding이나 dump 도구로 노출하고 동일한 보드·목표 placement를 양쪽에 넣어 마스크
+시퀀스를 바이트 단위로 비교해야 한다.
 
 ---
 
@@ -1554,7 +1558,7 @@ sequenceDiagram
 
 ### 13.3 봇 로스터
 
-학습 모델이 1개일 때는 `model/policy.onnx` 하나만 읽어도 충분했다. 지금은 알고리즘별로 10개 이상 모델을 비교해야 하므로 C++ 클라이언트는 로스터를 만든다.
+고정된 모델 하나만 배포할 때는 `model/policy.onnx`만 읽어도 충분하다. 여러 알고리즘과 체크포인트를 비교하려면 파일마다 표시명·속도·선택 상태가 필요하므로 C++ 클라이언트는 로스터를 만든다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -1639,7 +1643,7 @@ model/bots/aria_muzero.onnx|Aria MuZero|3
 @heuristic|Heuristic (test)|2
 ```
 
-주석 8줄 + 엔트리 12줄이다. 마지막 `@heuristic` 은 파일이 아니라 내장 휴리스틱을 가리키는 예약 키 — `discover_bot_roster` 가 로스터 0번 항목에 그 경로를 넣기 때문에(§13.3) 같은 문법으로 이름과 속도를 덮어쓸 수 있다.
+마지막 `@heuristic`은 파일이 아니라 내장 휴리스틱을 가리키는 예약 키다. `discover_bot_roster`가 내장 항목에 그 경로를 넣기 때문에(§13.3) 같은 문법으로 이름과 속도를 덮어쓸 수 있다.
 
 파서 동작에서 문서화되지 않으면 헷갈리는 것이 네 가지 있다.
 
@@ -1748,7 +1752,7 @@ void OnTick(SimGame& sim, BotOnnx& bot)
 - `bot/placement.cpp` — `observe`(Python `build_observation` 과 동등), `fallback_placement`(사전순 최소), `heuristic_placement`(1-ply 그리디), `expand_placement`(rotate → translate → drop).
 - `CMakeLists.txt` 의 `TETRIS_BUILD_BOT` 블록 — `TETRIS_HAS_ONNXRUNTIME` 정의와 플랫폼별 ORT 링크.
 - `src/main.cpp` — 봇 로스터 스캔, `model/bots.cfg` 오버라이드, `Single vs Bot` 틱 루프와 두 보드 간 가비지 교환.
-- 알고리즘 11종의 학습 → export → 배포 경로와 그 분기 지점(`clone()` 요구, `.policy.pt` 경유) 정리.
+- 지원 알고리즘의 학습 → export → 배포 경로와 그 분기 지점(`clone()` 요구, `.policy.pt` 경유) 정리.
 
 ## 수동 테스트
 
@@ -1879,9 +1883,9 @@ print(out[0].shape, out[1].shape)   # (1, 40) (1,)
 - `python/common/env_versus.py` — `TetrisVersusEnv` (2-보드 가비지 교환)
 - `python/common/checkpoint.py` — `ARCH_VERSION` / `class` 검증 포함 save/load
 - `python/common/features.py` — BCTS 특성과 `bcts_score`
-- `python/train/rl_common.py` — 7개 trainer 의 공통 배칭·마스킹·평가·리플레이
+- `python/train/rl_common.py` — trainer가 공유하는 배칭·마스킹·평가·리플레이
 - `python/netbot/export_onnx.py` — `.pt` → `.onnx` 변환
-- `python/train/*.py` — §7 의 알고리즘 11종
+- `python/train/*.py` — 알고리즘별 trainer와 공통 학습 코드
 - `python/train/train_model_zoo_colab.ipynb` — 권장 Colab 노트북
 - `python/train/setup_colab.ipynb` — 독립 bootstrap 노트북
 

@@ -91,7 +91,8 @@ struct Channel {
     std::mutex             sendMuA;
     std::mutex             sendMuB;
 
-    // meta 호출 경로 (nullptr 이면 MATCH_SUMMARY 는 투명 포워딩)
+    // meta 호출 경로. nullptr이면 unranked raw 전달이며 MATCH_SUMMARY도
+    // 서버 결과로 해석하지 않는다.
     meta::client::MetaClient* meta{nullptr};
 };
 
@@ -237,8 +238,8 @@ void finalizeForfeit(Channel& ch, int loserSide)
 //   a_to_b == true  → A 에서 읽어 B 로 쓰기. MATCH_SUMMARY 는 가로챔.
 //   a_to_b == false → B → A.
 //
-// MATCH_SUMMARY 는 반드시 ranked + meta 연동 + 양쪽 player_id != 0 일 때만
-// 가로챈다. 그 외의 경우(unranked / no meta)는 투명 포워딩.
+// MATCH_SUMMARY는 ranked + meta 연동 + 양쪽 player_id != 0일 때만 가로챈다.
+// unranked/no-meta 경로는 프레임 경계도 만들지 않고 받은 byte를 그대로 전달한다.
 void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 {
     const net::TcpSocket& from = a_to_b ? ch->A : ch->B;
@@ -332,8 +333,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         }
 
         if (!rankedMatch) {
-            // 투명 포워딩 — MATCH_SUMMARY 도 통과 (클라는 서버 응답 못 받아도 OK).
-            // sendMuA/B 로 보호해 finalizeRanked / 반대 방향 forwarder 와 직렬화.
+            // Unranked raw 전달 — MATCH_SUMMARY도 평범한 wire byte일 뿐이며
+            // MATCH_RESULT는 만들지 않는다. sendMuA/B로 보호해 반대 방향
+            // forwarder와 같은 destination socket에 쓰는 순서를 직렬화한다.
             const bool ok = a_to_b ? sendToB(*ch, raw.data(), raw.size())
                                    : sendToA(*ch, raw.data(), raw.size());
             if (!ok) {
@@ -440,8 +442,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 }
 
 // MATCH_FOUND 프레임 전송.
-// 페이로드: [role:1][seed:8 LE][my_icon_len:1][my_icon:N][peer_icon_len:1][peer_icon:N]
-// 뒤쪽 icon 필드는 구버전 클라와의 완만한 호환을 위해 optional 처럼 파싱한다.
+// 페이로드: [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
+//             [peer_icon_len:1][peer_icon:N][uuid_len:1][match_uuid:N]
+// 뒤쪽 icon/UUID 필드는 구버전 클라와의 완만한 호환을 위해 optional 처럼 파싱한다.
 bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
                     const std::string& my_icon,
                     const std::string& peer_icon,

@@ -1,6 +1,9 @@
 """Exercise a relay with real TCP pairs and report Linux process usage.
 
-Run from the repository root. This is an operator load probe, not a pytest.
+The payload is a small PING frame because the relay's unranked forwarding path
+does not interpret ordinary game frames.  The default rate approximates one
+60 Hz INPUT plus its ACK in each client direction.  Run from the repository
+root.  This is an operator load probe, not a pytest or a WAN latency test.
 """
 from __future__ import annotations
 
@@ -118,8 +121,17 @@ def run(relay_bin: Path, matches: int, duration: float, interval: float) -> None
         end = time.monotonic()
         end_ticks, rss_kib, threads = process_sample(proc.pid)
         cpu_percent = 100.0 * (end_ticks - start_ticks) / ticks_per_second / (end - start)
-        print(f"players={matches * 2} matches={matches} duration_s={end - start:.1f}")
+        players = matches * 2
+        achieved_rate = delivered / players / (end - start)
+        requested_rate = 1.0 / interval
+        rate_ratio = achieved_rate / requested_rate
+        print(f"players={players} matches={matches} duration_s={end - start:.1f}")
         print(f"cpu_percent={cpu_percent:.1f} rss_mib={rss_kib / 1024:.1f} threads={threads}")
+        print(
+            f"requested_frames_per_player_s={requested_rate:.1f} "
+            f"achieved_frames_per_player_s={achieved_rate:.1f} "
+            f"rate_ratio={rate_ratio:.3f}"
+        )
         print(f"delivered_frames={delivered} failures=0")
     finally:
         for sock in sockets:
@@ -135,9 +147,19 @@ def run(relay_bin: Path, matches: int, duration: float, interval: float) -> None
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--relay-bin", type=Path, required=True)
-    parser.add_argument("--matches", type=int, default=100)
+    parser.add_argument(
+        "--matches",
+        type=int,
+        default=50,
+        help="simultaneous two-player matches (default: 50, or 100 players)",
+    )
     parser.add_argument("--duration", type=float, default=30.0)
-    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0 / 120.0,
+        help="seconds between frames from each client (default: 1/120, INPUT+ACK approximation)",
+    )
     args = parser.parse_args()
     if args.matches < 1 or args.duration <= 0 or args.interval <= 0:
         parser.error("matches, duration, and interval must be positive")

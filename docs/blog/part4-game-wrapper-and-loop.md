@@ -28,61 +28,35 @@ Part 1에서 게임 로직을, Part 2~3에서 창과 렌더러를 만들었다. 
 
 ---
 
-## 1. `src/main.cpp` 지도 — 한 파일을 다섯 장에 나눠 쌓는다
+## 1. `src/main.cpp` 지도 — 조립 지점의 책임 나누기
 
-이 장을 읽기 전에 알아야 할 사실이 하나 있다. **`src/main.cpp` 는 3207줄로 저장소에서 가장 큰 파일이고, 한 장에서 완성되지 않는다.** Part 4가 골격(입력 누적, 고정 틱 루프, 메뉴, Single 모드, 게임오버, 나가기 모달)을 세우고, Part 6·7·9·10·11이 각자의 블록을 같은 루프 안으로 밀어 넣는다.
+이 장을 읽기 전에 알아야 할 사실이 하나 있다. **`src/main.cpp`는 여러 기능이 합류하는 저장소의 조립 지점이며, 한 장의 범위로 완성되지 않는다.** 이 장은 입력 누적, 고정 틱 루프, 메뉴, Single 모드, 게임오버, 나가기 모달이라는 골격에 집중한다. 네트워크·봇·랭킹·설정은 같은 루프에 연결되지만 각각의 소유 문서에서 읽는 편이 흐름을 놓치지 않는다.
 
-그래서 이 장의 `main.cpp` 인용은 대부분 **최종 형태의 일부**다. 어느 영역이 어느 장의 소관인지 먼저 지도를 그려 둔다.
+그래서 이 장의 `main.cpp` 인용은 대부분 **최종 형태의 일부**다. 줄 위치가 아니라
+대표 심볼과 상태의 소유자를 기준으로 읽으면 기능이 추가되어도 지도가 낡지 않는다.
 
-| 최종 소스 줄 범위 | 영역 | 담당 Part |
+| 책임 영역 | 대표 심볼·상태 | 설명을 소유하는 문서 |
 |---|---|---|
-| `74-215` | `fmt_buf`, `draw_popup_panel`, 이미지 매니페스트/봇 설정 로더 | Part 3 유틸 + Part 9/10 |
-| `217-353` | `GameSettings`, `load_settings`, `save_settings`, 창 스케일 프리셋 | [Part 11](./part11-settings-and-options.md) |
-| `355-398` | `discover_bot_roster` | [Part 9](./part9-rl-onnx-bot.md) |
-| `400-488` | 기본 아이콘 생성 · `load_configured_image` | [Part 10](./part10-meta-and-ranking.md) |
-| **`490-577`** | **`s_pendingInput` · `HorizontalRepeatInput` · `AccumulateInput` · `ConsumeInput`** | **Part 4** |
-| `579-634` | `parse_endpoint`, `parse_port` | [Part 6](./part6-lockstep-networking.md) |
-| **`636-662`** | **`AppMode` · `BotMatchResult` · `RoomLobbyStage` · `GameOverState`** | **Part 4가 뼈대, 각 모드는 소관 Part** |
-| `664-847` | `platform_init` / `renderer_init` / `settings.cfg` 로드 | Part 4 + Part 11 |
-| `849-983` | 메타 서버 + 게스트 토큰 부트스트랩 | Part 10 |
-| `985-1003` | 봇 로스터 · `botInputQueue` · `botInputCooldownTicks` | Part 9 |
-| `1005-1057` | Customize(아이콘 상점) 상태 | Part 10 |
-| `1059-1061` | `recording` · `ReplayData replay` | Part 4 |
-| `1063-1105` | `GameOverState` FSM 변수 · 해시 링 · `lastAttackLocal/Remote` | Part 6 |
-| **`1107-1163`** | **`shakeLeft`/`shakeRight` · `Callout` · `trigger_callout` · `apply_fx`** | **Part 4** |
-| **`1167-1172`** | **메인 루프 진입 · `platform_begin_frame` · `AccumulateInput`** | **Part 4** |
-| `1174-1226` | 채팅 (Net 전용) | Part 6 |
-| **`1228-1236`, `1449-1455`** | **`tickPauseForDialog` 가드 · 고정 틱 while · 리플레이 기록** | **Part 4** |
-| `1238-1376` | Net 분기 (INPUT 송신 · `safeTick` 캐치업 · HASH) | Part 6 |
-| **`1377-1382`** | **Single 분기** | **Part 4** |
-| `1383-1447` | BotSingle 분기 (봇 페이싱 · 가비지 교환) | Part 9 |
-| `1457-1526` | 링크 손실 grace · DESYNC 링 비교 | Part 6 |
-| **`1528-1537`** | **`shake_update` ×2 · 콜아웃 감쇠 · `renderer_begin`** | **Part 4** |
-| **`1539-1684`** | **메뉴** (`Customize`/`Settings` 항목은 Part 10/11) | **Part 4** |
-| `1686-1789` | 봇 선택 화면 | Part 9 |
-| `1790-1967` | 설정 화면 | Part 11 |
-| `1969-2216` | Customize(아이콘 상점) 화면 | Part 10 |
-| `2218-2268` | IP 직접 입력 화면 | Part 6 |
-| `2269-2408` | 커스텀 룸 로비 / 대기 | [Part 7](./part7-relay-server.md) |
-| **`2409-2461`** | **Single 렌더 (우측 패널 · 보드 shake · 콜아웃)** | **Part 4** |
-| **`2463-2483`** | **F5/F6 리플레이 · `H` 해시 덤프(debug UI 빌드 전용)** | **Part 4** |
-| `2485-2588` | BotSingle 렌더 + WIN/LOSE/DRAW | Part 9 |
-| **`2590-2606`** | **Single `GAME OVER` 팝업** | **Part 4** |
-| `2608-2911` | Net 렌더 (두 보드 · 카운트다운 · 게임오버 협상) | Part 6 |
-| `2913-3034` | Net 대기 화면 | Part 6 / Part 7 |
-| `3036-3109` | NET HUD (RTT · 채팅 오버레이) | Part 6 |
-| **`3111-3193`** | **인게임 X 버튼 + 나가기 확인 모달** | **Part 4** |
-| **`3195-3207`** | **`renderer_end` · `platform_end_frame` · 자원 해제** | **Part 4** |
+| 입력 수집과 반복 | `s_pendingInput`, `HorizontalRepeatInput`, `AccumulateInput`, `ConsumeInput` | **Part 4** |
+| 앱 모드와 객체 수명 | `AppMode`, 모드별 `unique_ptr`, `MenuAction`, `GameOverState` | **Part 4**가 공통 전환 규칙을 설명하고 각 기능 문서가 자기 모드를 설명 |
+| 초기화와 종료 | `platform_init`, `renderer_init`, `renderer_shutdown`, `platform_shutdown` | **Part 4**, 설정 적용은 [Part 11](./part11-settings-and-options.md) |
+| 고정 틱과 리플레이 | `accumulator`, `SECONDS_PER_TICK`, `ReplayData` | **Part 4** |
+| 렌더 전용 효과 | `Callout`, 보드별 `ShakeState`, `apply_fx` | **Part 4** |
+| 직결·relay 게임 세션 | `Session`, `safeTick`, HASH/DESYNC, 채팅과 링크 상태 | [Part 6](./part6-lockstep-networking.md), 큐·룸 전환은 [Part 7](./part7-relay-server.md) |
+| 봇 선택과 실행 | `discover_bot_roster`, `botInputQueue`, `BotSingle` | [Part 9](./part9-rl-onnx-bot.md) |
+| 계정·랭킹·꾸미기 | meta 부트스트랩, 인증 토큰, `Customize`, 매치 결과 표시 | [Part 10](./part10-meta-and-ranking.md) |
+| 사용자 설정 | `GameSettings`, 설정 로드·저장, `AppMode::Settings` | [Part 11](./part11-settings-and-options.md) |
+| 화면별 렌더 | Menu·Single·Net·Bot·Room·Settings·Customize 분기 | 공통 렌더 수명은 **Part 4**, 화면별 상태 의미는 각 소유 문서 |
 
 ```mermaid
 graph TB
     subgraph P4["Part 4 — 이 장이 세우는 골격"]
-        IN["469-556<br/>AccumulateInput / ConsumeInput"]
-        MODE["615-641<br/>AppMode"]
-        FX["1084-1136<br/>shake / callout / apply_fx"]
-        LOOP["1141-1428<br/>고정 틱 루프"]
-        RND["1501-1510 · 2375-2449 · 2556-2572<br/>렌더 골격 + 게임오버"]
-        MODAL["3077-3171<br/>나가기 모달 + 종료"]
+        IN["AccumulateInput / ConsumeInput"]
+        MODE["AppMode와 모드별 자원 수명"]
+        FX["보드별 shake / callout / apply_fx"]
+        LOOP["고정 틱 루프와 리플레이"]
+        RND["렌더 수명 + Single + 게임오버"]
+        MODAL["나가기 모달 + 공통 종료"]
     end
     LOOP --> P6["Part 6<br/>Net 분기<br/>Net 렌더"]
     LOOP --> P9["Part 9<br/>봇 페이싱<br/>봇 렌더"]
@@ -91,7 +65,7 @@ graph TB
     MODE --> P11["Part 11<br/>설정 로드<br/>설정 화면"]
 ```
 
-이 장을 마치면 `main.cpp` 는 대략 900줄짜리 파일이 된다. 나머지 2200줄은 뒤의 다섯 장이 채운다. 그래서 이 장에서는 **루프의 형태**를 확정하는 데 집중한다 — 나중에 들어올 블록들이 전부 같은 자리(고정 틱 while 안, 또는 렌더 단계)에 끼워지도록.
+이 장에서는 `main.cpp`의 최종 분량을 예측하는 대신 **루프의 형태**를 확정한다. 시뮬레이션 갱신은 고정 틱 while 안에, 화면 출력은 렌더 단계에 둔다는 경계가 잡혀 있으면 네트워크·봇·추가 UI도 결정론을 흔들지 않고 같은 구조에 들어올 수 있다.
 
 ---
 
@@ -202,7 +176,7 @@ private:
 };
 ```
 
-`sndRotate` 부터 `musicUser` 까지 여섯 멤버와 `~Game()` 선언은 [Part 5](./part5-audio.md) 소관이다. Part 4 체크포인트의 `Game` 은 이 여섯 줄과 `#include "../audio/audio.h"` 가 없는 형태다. 나머지는 이 장에서 전부 쓴다.
+`sndRotate`부터 `musicUser`까지의 오디오 멤버와 `~Game()` 선언은 오디오 계층이 연결될 때 추가된다. Part 4 체크포인트의 `Game`은 `audio/audio.h`를 포함하지 않고 시뮬레이션·렌더링 책임만 가진다.
 
 주목할 점 두 가지.
 
@@ -455,7 +429,12 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
         }
 ```
 
-`chatComposing` 은 텍스트 입력 중 이동·회전 키가 게임 명령으로도 소비되는 것을 막는다. Part 4 체크포인트에서는 `AccumulateInput();` / `ConsumeInput();` 처럼 인자 없이 부르며, 두 함수의 `bool suppress = false` 기본값이 같은 동작을 보존한다. `tickPauseForDialog` 는 이 장 부록 C의 나가기 모달이 쓰는 가드이고, `apply_fx` 는 부록 A에서 다룬다.
+`chatComposing`은 텍스트 입력 중 이동·회전 키가 게임 명령으로도 소비되는 것을
+막는다. Part 4 체크포인트에서는 `AccumulateInput();` / `ConsumeInput();`처럼
+인자 없이 부르며, 두 함수의 `bool suppress = false` 기본값이 같은 동작을 보존한다.
+`tickPauseForDialog`는 확인 모달이 열린 동안 simulation tick만 멈춰 뒤의 게임이
+계속 진행되지 않게 한다. `apply_fx`는 tick이 만든 이벤트를 소비해 callout과 보드별
+shake로 바꾸지만 `SimGame`의 결정 상태에는 값을 되돌려 쓰지 않는다.
 
 리플레이 기록은 `core/replay.h` 의 `FrameInputs` 구조체 하나로 끝난다. 틱마다 `p1`/`p2` 각 1바이트만 밀어 넣으면 시드와 함께 그 판 전체가 재현된다 — 고정 틱의 직접적인 배당금이다. `F5` 로 기록을 시작하고 `F6` 으로 `out/replay.txt` 에 저장한다 (`src/main.cpp`).
 
@@ -702,12 +681,16 @@ enum InputBits : uint8_t {
 inline bool hasInput(uint8_t mask, InputBits bit) { return (mask & bit) != 0; }
 ```
 
-5개 입력을 8비트(1바이트)에 패킹한다. 이 설계의 이점:
+현재 입력 계약은 한 틱의 조작을 `uint8_t` 비트마스크 하나에 담는다. 열거값에
+나열된 조작은 서로 다른 비트를 차지하므로 동시에 눌린 키도 한 값으로 보존된다.
+이 설계의 이점은 다음과 같다.
 
-1. **직렬화 효율**: 네트워크 전송 시 틱당 1바이트만 필요 (Part 6의 `INPUT` 프레임)
+1. **직렬화 효율**: lockstep의 `INPUT` payload가 플레이어마다 틱당 1바이트다.
 2. **OR 누적**: `s_pendingInput |= INPUT_LEFT` 로 간단히 비트 합산
 3. **리플레이 저장**: `FrameInputs` 가 `p1`/`p2` 각 1바이트 — 60 Hz × 2 = 120 B/s
-4. **RL 액션 공간**: Part 8의 Python 환경이 같은 5비트를 그대로 액션으로 쓴다
+4. **언어 간 계약**: Python framing과 placement 입력 확장기도 같은 마스크를
+   생성한다. RL의 배치 행동 공간은 별도 표현이지만, 선택한 배치를 틱 입력으로
+   풀어낼 때 이 계약으로 합류한다.
 
 ### 7.2 동시 입력과 처리 순서
 
@@ -770,7 +753,7 @@ Part 4 체크포인트에서는 본문이 `sim.SubmitInput(inputMask);` 한 줄�
 
 ---
 
-## 8. `AppMode` — 하나의 루프, 아홉 개의 화면
+## 8. `AppMode` — 하나의 루프, 여러 화면
 
 `main.cpp` 는 화면마다 루프를 따로 두지 않는다. **단 하나의 `while (!platform_should_close())` 안에서 `AppMode` 열거값으로 분기**한다. 시뮬 단계에도 렌더 단계에도 같은 `app` 변수가 쓰이고, 모드 전환은 그 변수에 대입하는 것뿐이다.
 
@@ -786,44 +769,48 @@ enum class AppMode {
 };
 ```
 
-이 장이 만드는 것은 `Menu` 와 `Single` 둘뿐이다. 나머지 일곱 개는 각자의 장에서 값 하나와 렌더 블록 하나가 추가되는 식으로 자란다.
+현재 `AppMode`는 메뉴, 싱글플레이, 봇, 네트워크 큐·룸, 설정과 꾸미기 화면을
+한 루프 안에서 구분하는 완성된 상태 집합이다. 아래 전이도는 각 모드가 어떤
+행동으로 생성되고 어떤 자원을 정리하며 빠져나오는지를 한 번에 보여 준다.
+`Menu`와 `Single`만 떼어 구현해도 같은 구조를 검증할 수 있지만, 모드를 늘릴
+때는 열거값뿐 아니라 생성·입력·렌더·정리 경계를 함께 추가해야 한다.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Menu
-    Menu --> Single: activated == 0<br/>make_unique&lt;Game&gt;(sessionSeed)
+    Menu --> Single: MenuAction::Single<br/>make_unique&lt;Game&gt;(sessionSeed)
     Single --> Menu: 게임오버 [Q] / 모달 Yes
     Single --> Single: 게임오버 [R] (재생성)
 
-    Menu --> BotSelect: activated == 1 (Part 9)
-    BotSelect --> BotSingle: 모델/휴리스틱 선택 (Part 9)
+    Menu --> BotSelect: MenuAction::BotSelect
+    BotSelect --> BotSingle: 모델/휴리스틱 선택
     BotSelect --> Menu: ESC
     BotSingle --> Menu: [Q] / 모달 Yes
     BotSingle --> BotSingle: [R] (양쪽 재생성)
 
-    Menu --> Net: activated == 2<br/>session.QueueJoin (Part 6)
-    Menu --> RoomLobby: activated == 3 (Part 7)
-    RoomLobby --> RoomWaiting: Create / Join 성공 (Part 7)
-    RoomWaiting --> Net: MATCH_FOUND (Part 7)
+    Menu --> Net: MenuAction::Matchmaking<br/>session.QueueJoin
+    Menu --> RoomLobby: MenuAction::CustomRoom
+    RoomLobby --> RoomWaiting: Create / Join 성공
+    RoomWaiting --> Net: MATCH_FOUND
     RoomWaiting --> Menu: ESC
     RoomLobby --> Menu: ESC
-    Net --> Menu: 링크 Lost grace 만료 / 모달 Yes (Part 6)
+    Net --> Menu: 링크 Lost grace 만료 / 모달 Yes
 
-    Menu --> Customize: activated == 4 (Part 10)
+    Menu --> Customize: MenuAction::Customize
     Customize --> Menu: ESC
-    Menu --> Settings: activated == 5 (Part 11)
+    Menu --> Settings: MenuAction::Settings
     Settings --> Menu: ESC
-    Menu --> [*]: activated == 6 (Quit)
+    Menu --> [*]: MenuAction::Quit
 
-    ConnectInput --> Net: --connect CLI 경로 (Part 6)
+    ConnectInput --> Net: --connect CLI 경로
 ```
 
-현재 메뉴는 `Single Play`, `Single vs Bot`, `Matchmaking Multi`, `Custom Room Multi`, `Customize`, `Settings`, `Quit`을 제공한다(`src/main.cpp`). 이 체크포인트는 첫 항목과 종료 항목으로 메인 루프 전환만 검증한다. 완성형은 각 항목을 봇 세션, relay 큐·룸, 꾸미기, 설정 상태에 연결하며 메뉴 렌더와 선택 규칙은 부록 D의 한 함수에 모여 있다. 항목 수보다 배열 순서와 dispatch가 같은 인덱스를 공유한다는 계약이 중요하다.
+현재 메뉴는 싱글플레이, 봇, relay 큐·룸, 꾸미기, 설정, 종료 동작을 제공한다(`src/main.cpp`). 이 체크포인트는 싱글플레이와 종료로 메인 루프 전환을 검증한다. 완성형은 `MenuItem { label, action }` 배열과 `MenuAction` switch를 사용하므로 표시 순서를 바꿔도 dispatch가 다른 화면을 가리키지 않는다. 메뉴 렌더와 선택 규칙은 부록 D의 한 경계에 모여 있다.
 
 **모드 전환의 규칙 두 가지.**
 
 1. **`AppMode` 를 바꿀 때 그 모드가 쓰는 `unique_ptr` 를 함께 세팅하거나 비운다.** `app = AppMode::Single;` 다음 줄이 항상 `gameSingle = std::make_unique<Game>(...)` 이고, 나가는 쪽은 항상 `gameSingle.reset();` 이다. 렌더 블록이 전부 `if (app == AppMode::Single && gameSingle)` 처럼 **모드 + 포인터**를 같이 검사하기 때문에, 한쪽만 바꿔도 화면이 조용히 비는 대신 안전하게 넘어간다.
-2. **`ESC` 는 창을 닫지 않는다.** `platform_should_close()` 는 `WM_CLOSE`/`WM_DESTROY` (SDL 은 `SDL_QUIT`) 에만 반응한다. `ESC` 는 채팅 취소(`src/main.cpp`), 설정 나가기, Customize 나가기, 룸 퇴장 네 곳에만 바인딩돼 있다. **인게임에서 ESC 를 눌러도 아무 일도 일어나지 않는다** — 나가기 모달은 우상단 X 버튼(`gui_close_button`) 전용이다(부록 C).
+2. **`ESC`는 창을 닫지 않는다.** `platform_should_close()`는 `WM_CLOSE`/`WM_DESTROY`(SDL은 `SDL_QUIT`)에만 반응한다. `ESC`는 채팅 취소와 메뉴형 화면의 뒤로가기처럼 각 앱 모드가 해석한다. **인게임에서 ESC를 눌러도 아무 일도 일어나지 않는다** — 나가기 모달은 우상단 X 버튼(`gui_close_button`) 전용이다(부록 C).
 
 ---
 
@@ -1043,8 +1030,9 @@ flowchart TB
 
 ```cpp
         // 3) 렌더링
-        // Section I: shake 업데이트 (2개 독립 상태). 뷰 오프셋은 보드별 드로우
-        // 직전에 개별 적용하고, UI/오버레이 그릴 땐 0 으로 리셋.
+        // Section I: shake 업데이트. 각 보드는 독립 ShakeState를 가지며, 해당
+        // 보드를 그리기 직전에만 오프셋을 적용한다. UI/오버레이로 넘어갈 때
+        // 0으로 되돌려 가비지를 받은 보드만 흔들리게 한다.
         shake_update(shakeLeft,  deltaTime);
         shake_update(shakeRight, deltaTime);
         if (coLocal.timeLeft  > 0.0f) coLocal.timeLeft  -= deltaTime;
@@ -1278,7 +1266,13 @@ const Color ghostColor   = {200, 200, 210,  70};
 
 ### 14.2 다크 네이비 배경 + 보드 테두리
 
-배경은 `renderer_begin({8, 10, 20, 255})`(`src/main.cpp`) 한 줄이다. `renderer_begin` 은 이 색을 `gl_ClearColor` 에 걸고 뷰포트 안쪽을 `gl_Clear` 로 지운다(`renderer/renderer.cpp`). 레터박스 여백을 먼저 검게 지우는 이유 등 나머지는 [Part 3](./part3-rendering-and-ui.md) 에서 다뤘고, 이 절의 관심사는 그 색 하나다. 채도를 약간만 깔아두면 블록의 빨강·청록·노랑이 더 선명하게 떠 보인다. 완전한 검정 (`{0,0,0,255}`) 위에서는 다크 컬러 블록(J = blue, T = purple)이 묻힌다. `src/colors.cpp` 의 `darkBlue` 는 이름과 달리 배경으로 쓰이지 않는다 — 배경은 언제나 `{8, 10, 20, 255}` 리터럴이다.
+배경은 `renderer_begin({8, 10, 20, 255})`(`src/main.cpp`) 한 줄이다.
+`renderer_begin`은 창 전체를 검정으로 먼저 지워 레터박스 여백을 만들고,
+논리 뷰포트 안쪽만 이 색으로 다시 지운다(`renderer/renderer.cpp`). 채도를
+약간만 깔아두면 블록의 빨강·청록·노랑이 더 선명하게 떠 보이고, 완전한 검정
+위에서 어두운 J·T 블록이 묻히는 것도 피한다. `src/colors.cpp`의 `darkBlue`는
+이름과 달리 배경색이 아니며, 현재 배경 계약은 `renderer_begin`에 전달하는
+`{8, 10, 20, 255}`다.
 
 보드 자체에는 페인터스 알고리즘으로 1 px 테두리를 만든다.
 
@@ -1465,7 +1459,7 @@ cmake --build build
 
 ### (6) `ESC` 가 창을 닫는다는 착각
 
-`platform/platform.h` 의 주석은 `platform_should_close()` 를 "WM_QUIT 또는 ESC 키를 받으면 true" 라고 설명하지만, 실제 구현(`platform/win32.cpp`, `platform/sdl.cpp`) 은 `WM_CLOSE`/`WM_DESTROY`(SDL 은 `SDL_QUIT`)만 본다. 인게임에서 ESC 를 눌러도 창은 닫히지 않고, 나가기 모달도 열리지 않는다. 모달은 우상단 X 버튼 전용이다.
+`platform/platform.h`의 주석과 두 백엔드는 같은 계약을 갖는다. `platform_should_close()`는 `WM_CLOSE`/`WM_DESTROY`(SDL은 `SDL_QUIT`)만 보고, ESC는 앱 모드가 해석할 입력으로 남긴다. 이 구분이 없으면 플랫폼 계층이 설정·상점·룸의 "뒤로가기" 의미를 가로챈다. 인게임 ESC는 창을 닫거나 나가기 모달을 열지 않으며, 모달은 우상단 X 버튼 전용이다.
 
 ---
 
@@ -1476,9 +1470,7 @@ cmake --build build
 1. **시뮬레이션 속도 독립**: FPS와 무관하게 정확히 60Hz
 2. **입력 무손실**: 엣지 트리거 입력을 비트 OR로 누적하여 틱 간 프레임에서의 소실 방지
 
-그리고 이 장은 세 번째 것을 함께 만들었다 — **모든 후속 기능이 끼워질 자리**. 시뮬은 고정 틱 while 안, 화면은 `renderer_begin`/`renderer_end` 사이, 모드는 `AppMode` 분기. Part 6의 lockstep 도, Part 9의 봇도, Part 10의 랭킹 HUD 도 새 루프를 만들지 않고 이 세 자리 중 하나에 들어간다.
-
-다음 [Part 5](./part5-audio.md) 에서는 `Game` 이 시뮬레이션 이벤트를 오디오로 소비하는 경계와 `sharedMusic` 참조 카운트를 완성한다. [Part 6](./part6-lockstep-networking.md) 에서는 이 고정 틱 위에 TCP lockstep 을 구축한다.
+그리고 이 장은 세 번째 것을 함께 만들었다 — **다른 기능이 끼워질 자리**. 시뮬은 고정 틱 while 안, 화면은 `renderer_begin`/`renderer_end` 사이, 모드는 `AppMode` 분기에 놓인다. 오디오는 `Game`이 시뮬레이션 이벤트를 소비하는 경계에, lockstep은 고정 틱의 입력 공급 경계에, 봇은 같은 틱 루프의 상대 입력 생산자에 붙는다. 랭킹 HUD는 렌더 구간에서 서버가 확정한 결과만 읽는다. 어느 기능도 별도의 메인 루프를 만들지 않는다.
 
 ---
 
@@ -1848,7 +1840,7 @@ Sim 은 자기가 흔들리고 있는지 모른다. 렌더러는 자기가 왜 �
 
 ## 부록 C. 인게임 나가기 모달
 
-이 부록의 Single/BotSingle 경로는 이 장에서 바로 만들 수 있다. Net 분기는 [Part 6](./part6-lockstep-networking.md) 의 `Session` 과 `AppMode::Net` 이 완성된 뒤 추가한다 — 아래 `session.Close()` 를 Part 4 체크포인트에 미리 넣지 않는다.
+이 부록의 Single/BotSingle 경로는 이 장의 파일만으로 만들 수 있다. Part 4 체크포인트에는 `Session` 타입과 `AppMode::Net`이 존재하지 않으므로 `session.Close()` 같은 완성형 네트워크 정리 코드를 미리 넣지 않는다. 현재 저장소의 Net 분기는 `net/session.*`가 연결된 완성 상태다.
 
 ### C.1 왜 모달이 필요한가
 
@@ -1995,7 +1987,7 @@ flowchart TB
 
 **Y/N 키 병행.** 마우스 클릭(`gui_button` 반환값)과 키보드 엣지 (`platform_key_pressed(PKEY_Y)`)를 `clickYes`/`clickNo` bool 로 합쳐 처리한다. 한 프레임에 둘 다 트리거돼도 같은 분기로 들어가니 중복 처리 걱정이 없다. Enter 는 Yes 의 별칭이다.
 
-**`Escape`는 배정하지 않는다 — 다만 해당 키 처리 주석의 이유는 부정확하다.** `platform_should_close()`는 `WM_CLOSE`/`WM_DESTROY`(SDL은 `SDL_QUIT`)에만 반응하므로 ESC로 창이 닫히지 않는다. 실제 이유는 ESC가 채팅 취소·설정/상점 나가기·룸 퇴장에 이미 "한 단계 물러나기"로 배정돼 있다는 것이다. Yes에 붙이면 같은 키가 취소와 확정 종료 두 의미를 갖고, No에 붙이면 버튼 반환 경로와 키보드 경로가 비대칭이 되므로 Y/N으로 통일했다.
+**`Escape`는 배정하지 않는다.** 소스 주석이 적듯 ESC는 채팅 취소·설정/상점 나가기·룸 퇴장에서 "한 단계 물러나기"로 쓰인다. Yes에 붙이면 같은 키가 취소와 확정 종료 두 의미를 갖고, No에 붙이면 버튼 반환 경로와 키보드 경로가 비대칭이 되므로 모달은 Y/N으로 통일했다.
 
 ### C.5 Net 모드에서 Yes 를 눌렀을 때
 
@@ -2094,19 +2086,29 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
 
 ```cpp
             constexpr Color DISABLED = {70, 70, 70, 255};
-            const char* items[] = {
-                "Single Play",
-                "Single vs Bot",
-                "Matchmaking Multi",
-                "Custom Room Multi",
-                "Customize",
-                "Settings",
-                "Quit",
+            enum class MenuAction {
+                Single, BotSelect, Matchmaking, CustomRoom,
+                Customize, Settings, Quit,
             };
-            constexpr int kMenuCount = 7;
+            struct MenuItem {
+                const char* label;
+                MenuAction action;
+            };
+            constexpr MenuItem items[] = {
+                {"Single Play",       MenuAction::Single},
+                {"Single vs Bot",     MenuAction::BotSelect},
+                {"Matchmaking Multi", MenuAction::Matchmaking},
+                {"Custom Room Multi", MenuAction::CustomRoom},
+                {"Customize",         MenuAction::Customize},
+                {"Settings",          MenuAction::Settings},
+                {"Quit",              MenuAction::Quit},
+            };
+            constexpr int kMenuCount =
+                static_cast<int>(sizeof(items) / sizeof(items[0]));
 
-            // 버튼 레이아웃 — 중앙 정렬. 7개가 ranking 표시줄(y=540) 위에
-            // 들어가도록 높이 42 / 간격 8 로 압축.
+            // 메뉴 순서는 표시용 배열 한 곳에서만 정한다. label 과 action 을 함께
+            // 묶어 두면 항목을 삽입해도 아래 dispatch 가 숫자 index 와 어긋나지 않는다.
+            // 버튼은 ranking 표시줄 위의 고정 영역에 들어가도록 압축 배치한다.
             const int bw = 300;
             const int bh = 42;
             const int bgap = 8;
@@ -2122,27 +2124,32 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
 
 ```cpp
             int activated = -1;  // 이번 프레임 활성화된 항목(-1 = 없음)
+            int botItemIndex = -1;
 
             for (int i = 0; i < kMenuCount; ++i)
             {
                 const int by = byStart + i * (bh + bgap);
-                const bool disabled = (i == 1 && !botAvailable);
+                const bool isBotItem = items[i].action == MenuAction::BotSelect;
+                if (isBotItem) botItemIndex = i;
+                const bool disabled = isBotItem && !botAvailable;
                 // Disabled 항목은 버튼 그리되 클릭 반환 무시(+ 라벨 회색).
                 if (disabled) {
                     draw_rect_rounded(bx, by, bw, bh, 0.25f, {25, 30, 45, 255});
-                    const int tw = measure_text(items[i], 24);
-                    draw_text(items[i], bx + (bw - tw) / 2, by + (bh - 24) / 2,
+                    const int tw = measure_text(items[i].label, 24);
+                    draw_text(items[i].label, bx + (bw - tw) / 2, by + (bh - 24) / 2,
                               24, DISABLED);
                     continue;
                 }
-                bool clicked = gui_button_highlighted(bx, by, bw, bh, items[i],
+                bool clicked = gui_button_highlighted(bx, by, bw, bh, items[i].label,
                                                       (i == menuIndex), 24);
                 if (clicked) activated = i;
             }
 
             // 키보드 Enter/Space 로도 현재 강조된 항목 활성화.
             if (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE)) {
-                if (!(menuIndex == 1 && !botAvailable)) activated = menuIndex;
+                const bool disabled =
+                    items[menuIndex].action == MenuAction::BotSelect && !botAvailable;
+                if (!disabled) activated = menuIndex;
             }
 ```
 
@@ -2150,15 +2157,18 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
 
 ```cpp
             if (activated >= 0) {
-                if (activated == 0) {
+                switch (items[activated].action) {
+                case MenuAction::Single:
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
-                } else if (activated == 1) {
+                    break;
+                case MenuAction::BotSelect:
                     // 봇 선택 화면으로. 실제 BotSingle 진입은 거기서 모델 로드 성공 후.
                     app = AppMode::BotSelect;
                     botSelectIndex = 0;
                     botSelectError.clear();
-                } else if (activated == 2) {
+                    break;
+                case MenuAction::Matchmaking:
                     queueHost = relayHost; queuePort = relayPort;
                     // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
                     // 토큰 없이는 verify 실패로 즉시 close 된다.
@@ -2166,22 +2176,26 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
                         netMode = true; queueMode = true; isHost = false;
                         app = AppMode::Net;
                     }
-                } else if (activated == 3) {
+                    break;
+                case MenuAction::CustomRoom:
                     roomRelayHost = relayHost; roomRelayPort = relayPort;
                     app = AppMode::RoomLobby;
                     roomStage = RoomLobbyStage::Choose;
                     roomCodeInput.clear();
                     roomErrorMsg.clear();
-                } else if (activated == 4) {
+                    break;
+                case MenuAction::Customize:
                     app = AppMode::Customize;
                     shopFetchTried = false;   // 진입마다 카탈로그 재요청
                     shopIndex = 0;
                     shopStatus.clear();
                     shopConfirmId.clear();
-                } else if (activated == 5) {
+                    break;
+                case MenuAction::Settings:
                     app = AppMode::Settings;
                     settingsIndex = 0;
-                } else {
+                    break;
+                case MenuAction::Quit:
                     // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
                     // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
                     // renderer_shutdown 이 platform_shutdown 보다 먼저다.
@@ -2192,23 +2206,23 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
             }
 ```
 
-Part 4 체크포인트에서는 `items[]` 가 `"Single Play"` 와 `"Quit"` 두 개 (`kMenuCount = 2`)이고, 디스패치도 `activated == 0` 과 `else` 두 갈래다. 나머지 다섯 항목은 각자의 장에서 배열에 문자열 하나, 디스패치에 `else if` 하나씩 늘어난다 — `activated` 로 수렴시켜 둔 덕분에 확장이 딱 그 두 곳으로 끝난다.
+Part 4 체크포인트의 `items[]`는 `"Single Play"`와 `"Quit"`만 담는다. 완성형은 기능이 늘어난 뒤 발견된 순서 불일치 위험을 없애기 위해 label과 action을 한 테이블로 묶는다. 배열은 표시 순서만 소유하고 switch는 의미를 소유하므로, 항목 이동이 다른 화면 진입으로 변하지 않는다.
 
 코드 구조는 세 단계다.
 
-1. **키보드 커서 이동** — `PKEY_DOWN`/`PKEY_UP` 엣지로 `menuIndex` 를 수정. 마우스와 독립. 엣지 트리거로 처리하는 이유는 §5의 입력 논의와 같다 — held 로 하면 프레임당 여러 칸씩 점프한다. 여기서 `% kMenuCount` 로 **wrap** 한다는 점을 기억해 두면 좋다. Part 11의 해상도 선택기는 반대로 clamp 하는데, 그 이유는 그 장에 적혀 있다.
-2. **버튼 렌더 루프** — 각 항목을 `gui_button_highlighted` 로 그리며 "이게 키보드 커서 항목인지" 를 `(i == menuIndex)` 로 전달. 클릭이 감지되면 `activated = i`.
-3. **키보드 활성화** — Enter/Space 엣지가 들어오면 `activated = menuIndex`.
+1. **키보드 커서 이동** — `PKEY_DOWN`/`PKEY_UP` 엣지로 `menuIndex`를 수정한다. held로 처리하면 렌더 프레임마다 여러 칸씩 점프하므로 edge 입력을 쓰며, `% kMenuCount`로 양끝을 순환한다. 값의 범위를 벗어나면 안 되는 해상도 선택기처럼 선형 수치를 다루는 UI는 wrap 대신 clamp가 맞다.
+2. **버튼 렌더 루프** — 각 `MenuItem::label`을 `gui_button_highlighted`로 그리며 키보드 커서 여부를 `(i == menuIndex)`로 전달한다. 봇 활성 조건도 위치가 아니라 `MenuAction::BotSelect`인지로 판정한다.
+3. **입력 통합과 dispatch** — 마우스 클릭과 Enter/Space 엣지는 모두 `activated`에 모인다. 이후 `items[activated].action` switch가 앱 모드를 바꾼다.
 
 마지막 `if (activated >= 0)` 분기가 한 곳에 모여 있어 "선택됐다" 는 사건을 마우스/키보드가 완전히 같은 경로로 처리한다. 같은 프레임에 둘 다 트리거되어도 `activated` 는 마지막으로 설정된 값으로 덮일 뿐 이중 실행되지 않는다.
 
-`activated == 1` 이 곧장 게임을 시작하지 않고 `AppMode::BotSelect` 로 넘어가는 것은 Part 9의 로스터 구조 때문이다. 처음에는 단일 `model/policy.onnx` 를 바로 로드하는 설계였지만, 학습 알고리즘이 늘면서 클라이언트가 `model/*.onnx` 와 `model/bots/*.onnx` 를 스캔해 목록을 만들도록 확장됐다.
+`MenuAction::BotSelect`가 곧장 게임을 시작하지 않고 `AppMode::BotSelect`로 넘어가는 것은 로스터 구조 때문이다. 단일 `model/policy.onnx`를 바로 로드하던 구조에서 여러 모델을 스캔하는 구조로 바뀌었기 때문에, 모델 또는 휴리스틱을 고르는 화면이 명시적인 상태로 남는다.
 
 ### D.4 disabled 항목 처리
 
 `botAvailable` 은 로스터가 비었을 때만 false 가 된다. 현재 로스터 생성 함수는 항상 `Heuristic (test)` 를 먼저 넣으므로 정상 빌드에서 이 분기는 거의 타지 않지만, 방어 코드는 남아 있다. 이 경우 해당 버튼은 **gui 함수를 호출하지 않는다.** 대신 `draw_rect_rounded` 로 배경을 직접 그리고 라벨 색을 `DISABLED` 로 찍은 뒤 `continue` 한다.
 
-`gui_button_highlighted` 를 호출하지 않으므로 hover 색이 뜨지 않고 클릭 반환도 없다 — 마우스를 올려도 반응이 없는 "죽은 버튼" 처럼 보인다. `continue` 로 루프를 건너뛰므로 `clicked` 변수 자체가 존재하지 않아 실수로 `activated = i` 가 될 수 없다. 키보드 쪽에서는 Enter 분기의 `!(menuIndex == 1 && !botAvailable)` 이 한 번 더 막는다. 커서를 올릴 수는 있어도 Enter 가 먹지 않는 이중 가드다.
+`gui_button_highlighted`를 호출하지 않으므로 hover 색이 뜨지 않고 클릭 반환도 없다 — 마우스를 올려도 반응이 없는 "죽은 버튼"처럼 보인다. `continue`로 루프를 건너뛰므로 `clicked` 변수 자체가 존재하지 않아 실수로 `activated = i`가 될 수 없다. 키보드 쪽에서도 `items[menuIndex].action == MenuAction::BotSelect && !botAvailable`인지 검사한다. 항목 위치가 바뀌어도 Enter가 비활성 동작을 실행하지 않는 이중 가드다.
 
 ### D.5 이전 키보드-전용 구조와의 비교
 
@@ -2237,10 +2251,10 @@ if (platform_key_pressed(PKEY_ENTER)) {
 
 - `Game` 래퍼 — `SimGame` 을 소유하고 `gameOver`/`score` 를 참조 별칭으로 노출하며, `Draw`/`DrawBoardAt`/`DrawNextQueueMini`/`DrawGarbageBar` 로 상태를 픽셀로 바꾼다. CMake 의 `TETRIS_SIM_SOURCES` / `TETRIS_GAME_COMMON` 분리가 이 경계를 링크 단계에서 강제한다.
 - `AccumulateInput()` / `ConsumeInput()` + `SECONDS_PER_TICK` 어큐뮬레이터로 입력 수집과 60 Hz 시뮬레이션을 분리했다. DAS 8틱 / ARR 3틱의 좌우 반복까지 포함.
-- 하나의 `while (!platform_should_close())` 안에서 `AppMode` 로 아홉 화면을 분기하는 구조를 확정했다. 이 장이 채운 것은 `Menu` 와 `Single` 이고, 나머지 일곱은 뒤의 장이 같은 자리에 끼운다.
+- 하나의 `while (!platform_should_close())` 안에서 `AppMode`로 화면을 분기하는 구조를 확정했다. 이 체크포인트는 `Menu`와 `Single`을 채우며, 새 화면은 같은 상태 전환 계약에 맞춰 추가한다.
 - Single 모드의 `GAME OVER` 팝업과 `[R]` 재시작(같은 시드로 `Game` 재생성) / `[Q]` 타이틀.
-- `apply_fx` 람다 하나로 다섯 개 이벤트 플래그의 소비·리셋을 단일화하고, shake 대상을 인자로 주입해 자기/상대 보드의 연출 규칙이 갈라질 수 없게 만들었다.
-- 보드별 `ShakeState` 두 개와 `renderer_set_view_offset` 정수 오프셋으로 "가비지를 받은 쪽 보드만 흔들리고 UI 는 고정" 을 구현했다.
+- `apply_fx` 람다로 렌더 이벤트 플래그의 소비·리셋을 단일화하고, shake 대상을 인자로 주입해 자기/상대 보드의 연출 규칙이 갈라질 수 없게 만들었다.
+- 보드별 `ShakeState`와 `renderer_set_view_offset` 정수 오프셋으로 "가비지를 받은 쪽 보드만 흔들리고 UI는 고정"을 구현했다.
 - `quitDialogOpen` + `tickPauseForDialog` — 루프 구조를 건드리지 않고 시간 공급만 끊는 일시정지, 그리고 우상단 X 버튼 전용 확인 모달.
 - `core/replay.cpp` 의 `FrameInputs` 기록(F5/F6)과 `CMakeLists.txt` 의 `tetris` 타깃.
 

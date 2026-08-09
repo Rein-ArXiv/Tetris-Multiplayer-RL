@@ -6,10 +6,10 @@
 
 ## 이 장의 구현 계약
 
-- **선행 상태:** Part 1의 headless `SimGame` API(`LegalPlacements`, `ApplyPlacement`, `Grid`, `StateHash`)와 `sim_hash_dump` 결정론 기준 파일, Part 6의 `net/framing.*` wire 규약.
+- **선행 상태:** 학습 코어에는 Part 1의 headless `SimGame` API(`LegalPlacements`, `ApplyPlacement`, `Grid`, `StateHash`)와 `sim_hash_dump` 결정론 기준 파일만 필요하다. `python/netbot/framing.py` 패리티 절을 함께 구현할 때만 Part 6의 `net/framing.*` wire 규약이 추가로 필요하다.
 - **이번 장의 파일:** `bindings/tetris_py.cpp`, `python/sim/`, `python/common/`, `python/train/`, `python/netbot/framing.py`, `python/netbot/input_expander.py`, `python/tests/`.
 - **연결점:** Python은 게임 규칙을 다시 구현하지 않고 C++ 객체를 바인딩해 관측, 합법 행동 마스크, Gym 환경을 만든다. wire/입력 전개 계층만 Python으로 다시 쓰고, 그 재구현은 패리티 테스트로 C++ 과 고정한다.
-- **완료 게이트:** 아래 다섯 항목. 각각에 대응하는 명령은 말미의 `수동 테스트` 에 있다.
+- **완료 게이트:** 아래 계약을 각각 검증한다. 대응 명령은 이 장의 `수동 테스트` 에 있다.
   1. 네이티브 모듈 import (`from sim import SimGame`)
   2. C++ 결정론 기준과의 상태 해시 비교
   3. 환경 reset/step (단일 보드 + 2-보드 versus)
@@ -219,7 +219,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 `__repr__` 를 붙여둔 덕에 `print(g.legal_placements())` 가 `[Placement(col=3, rot=0), ...]` 로 읽힌다. 학습 루프를 디버깅할 때 이 한 줄이 체감 차이를 만든다.
 
-`bindings/tetris_py.cpp` 전문은 [Part 9](./part9-rl-onnx-bot.md) 의 "pybind11 바인딩" 절에 1:1 로 인용돼 있다. 이 장에서는 설계 결정이 걸려 있는 네 덩어리 — placement API, 가비지 API, `grid()` 복사, `reference_internal` — 만 본다.
+이 장에서는 `bindings/tetris_py.cpp` 전체를 반복하기보다 설계 결정이 걸린 placement API, 가비지 API, `grid()` 복사, `reference_internal` 수명 계약을 나눠 본다. 실제 변경 때는 같은 파일의 전체 바인딩 목록과 Python 소비자를 함께 대조한다.
 
 ### 2.2 두 개의 액션 API
 
@@ -259,7 +259,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 ### 2.3 전투 · 가비지 API — 2-보드 학습의 배선
 
-단일 보드 학습만 할 거라면 필요 없지만, §6 의 versus 환경과 Part 9 의 `Single vs Bot` 가비지 교환이 모두 이 일곱 개 위에 올라간다.
+단일 보드 학습만 할 때는 가비지·공격 바인딩이 필요 없지만, versus 환경과 `Single vs Bot`의 가비지 교환은 이 공개 API 집합에 의존한다.
 
 **현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
@@ -989,7 +989,7 @@ this environment into a trainer or wrapper explicitly. The regression test is:
 
 이어지는 줄이 회귀 테스트 명령(`python -m pytest tests/test_versus_env.py -q`)과 "네이티브 모듈과 Gymnasium 이 없으면 pytest 가 모듈을 skip 한다" 는 단서다.
 
-즉 `TetrisVersusEnv` 는 **검증된 채로 대기 중인 부품**이다. 회귀 테스트 7개가 가비지 주입, 관측 shape, 완주, 동시 탑아웃 패널티, 스택 상승, 결정론, 공격 라우팅 총량 일치를 잠그고 있어서, 학습기에 연결하는 작업은 env 생성 한 줄을 바꾸는 일로 줄어든다. 다만 **현재 저장소를 그대로 실행하면 단일 보드로 학습된다** 는 사실을 문서가 숨기면 안 된다.
+즉 `TetrisVersusEnv`는 **검증된 채로 대기 중인 부품**이다. `python/tests/test_versus_env.py`가 가비지 주입, 관측 shape, 완주, 동시 탑아웃 패널티, 스택 상승, 결정론, 공격 라우팅 총량 일치를 잠근다. 다만 **현재 저장소의 기본 학습 진입점은 단일 보드 환경을 사용한다**는 사실을 문서가 숨기면 안 된다. 대전 학습을 시작하려면 trainer가 환경을 선택하는 지점과 상대 정책 구성까지 명시적으로 연결해야 한다.
 
 가장 엄격한 테스트는 공격 총량 회계다.
 
@@ -1248,7 +1248,7 @@ def load_checkpoint(
 
 ### 8.4 게이트가 요구하는 것
 
-이 장의 완료 게이트 4번(체크포인트 round-trip)은 `python/tests/test_checkpoint_roundtrip.py` 다. 그 안에 위 4단계 중 3·4번을 정확히 겨냥한 테스트가 하나씩 있다.
+체크포인트 round-trip 계약은 `python/tests/test_checkpoint_roundtrip.py`가 검증한다. 특히 잘못된 클래스와 오래된 아키텍처를 거부하는 경로를 각각 직접 밟는다.
 
 **현재 소스 발췌 — `python/tests/test_checkpoint_roundtrip.py`**
 
@@ -1471,7 +1471,7 @@ advantage가 준비되면 같은 rollout을 `--epochs`번, `--minibatch` 단위�
 
 ### 9.8 공통 기반 — `python/train/rl_common.py`
 
-7개 trainer 가 각자 rollout 루프를 갖지만, 그 아래의 부품은 공유한다.
+trainer마다 rollout 루프는 다르지만, 그 아래의 부품은 공유한다.
 
 **현재 소스 발췌 — `python/train/rl_common.py`**
 
@@ -1707,7 +1707,7 @@ def test_fnv1a32_known_values(data: bytes, expected: int) -> None:
 
 FNV 원저자 Landon Curt Noll 이 배포한 벡터다. 여기서 하나라도 틀리면 해시 구현이 깨진 것이지 미묘한 설정 이슈가 아니다.
 
-### 12.3 `parse_frames` 의 네 가지 방어 — 특히 LEN=0
+### 12.3 `parse_frames`의 방어 경계 — 특히 LEN=0
 
 C++ parser 와 동작이 어긋나기 쉬운 지점이 파서 쪽에 몰려 있다.
 
@@ -1723,10 +1723,8 @@ C++ parser 와 동작이 어긋나기 쉬운 지점이 파서 쪽에 몰려 있�
             break
 
         length = le_read_u16(stream_buf, offset)
-        # 길이가 상한을 넘으면 스트림 전체를 버린다.
-        # 길이 필드가 깨졌다는 뜻이고, 그러면 다음 프레임이 어디서 시작하는지도
-        # 알 수 없다. 억지로 복구하려 들면 쓰레기를 계속 먹는다.
-        # 무한히 큰 길이를 보내 수신 버퍼를 불리는 공격도 여기서 막힌다.
+        # 길이가 상한을 넘으면 스트림 전체를 버린다. 길이 필드가 깨진 뒤에는
+        # 다음 프레임의 시작점을 알 수 없고, body를 기다리면 수신 버퍼가 커진다.
         if length > MAX_PAYLOAD_BYTES + TYPE_FIELD_BYTES:
             del stream_buf[:]
             return out
@@ -1751,8 +1749,8 @@ C++ parser 와 동작이 어긋나기 쉬운 지점이 파서 쪽에 몰려 있�
             try:
                 msg_type = MsgType(msg_type_byte)
             except ValueError:
-                # 모르는 타입은 그 프레임만 버리고 계속 읽는다.
-                # 나중에 메시지가 추가돼도 구버전 클라이언트가 죽지 않는다.
+                # 모르는 타입은 그 프레임만 소비하고 계속 읽는다. 선택 기능이
+                # 추가돼도 구버전 Python 소비자가 예외로 종료되지 않게 한다.
                 pass
             else:
                 out.append((msg_type, payload))
@@ -1765,12 +1763,12 @@ C++ parser 와 동작이 어긋나기 쉬운 지점이 파서 쪽에 몰려 있�
     return out
 ```
 
-1. **partial frame 보존** — 바이트가 부족하면 `break` 하고 버퍼를 그대로 둔다. 호출자가 다음 `recv` 로 채운 뒤 다시 부른다. TCP 스트림이 아무 경계에서나 끊긴다는 성질을 흡수한다.
-2. **오버사이즈 방어** — `length` 가 cap 을 넘으면 바디를 기다리지 않고 버퍼 **전체를 폐기**한다. 악의적 peer 가 `LEN=65535` 를 흘려 recv 버퍼를 부풀리는 것을 즉시 자른다.
-3. **LEN=0 은 malformed 프레임** — `length < TYPE_FIELD_BYTES` 면 TYPE 바이트조차 없다는 뜻이다. 이 세 줄(`offset += need; continue`)이 그 프레임을 **소비하고 건너뛴다**. C++ 파서와 동일한 관용적 동작이며, 빠뜨리면 `payload_len` 이 음수가 되어 슬라이싱이 이상해지거나 같은 위치를 무한히 재파싱한다.
-4. **체크섬 불일치·미지 타입은 drop 하되 소비** — 바이트를 남기면 다음 pump 마다 같은 프레임을 다시 파싱하며 루프가 얼어붙는다. drop 하되 `offset` 은 전진.
+- **partial frame 보존** — 바이트가 부족하면 `break`하고 버퍼를 그대로 둔다. 호출자가 다음 `recv`로 채운 뒤 다시 부르므로 TCP 스트림이 어느 경계에서 끊겨도 재조립된다.
+- **오버사이즈 방어** — `length`가 cap을 넘으면 body를 기다리지 않고 버퍼 **전체를 폐기**한다. 이미 프레임 경계를 신뢰할 수 없고, 기다리면 공격자가 수신 버퍼를 부풀릴 수 있다.
+- **LEN=0 처리** — `length < TYPE_FIELD_BYTES`면 TYPE 바이트조차 없다. 그 완성된 malformed frame은 소비하고 건너뛰어 unsigned 길이 계산과 반복 재파싱을 막는다.
+- **체크섬 불일치·미지 타입 소비** — 결과에는 넣지 않지만 `offset`은 전진한다. 바이트를 남기면 다음 호출도 같은 프레임에서 멈춘다.
 
-3번은 전용 테스트가 있다.
+LEN=0 경계에는 전용 테스트가 있다.
 
 **현재 소스 발췌 — `python/tests/test_framing_parity.py`**
 
@@ -1784,7 +1782,7 @@ def test_parse_frames_drops_malformed_zero_length_frame() -> None:
     assert len(stream) == 0
 ```
 
-이 밖에 `test_framing_parity.py`는 5종 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 폐기, `MsgType` 정수값 고정, UTF-8 CHAT 통과를 잠근다. 길이에는 type 한 바이트가 포함되고 checksum은 type+payload에 적용되며, 불완전 프레임은 버퍼에 남고 과대 선언은 스트림 전체를 폐기한다는 wire 규약을 C++과 Python 양쪽에서 검증한다.
+이 밖에 `test_framing_parity.py`는 대표 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 폐기, `MsgType` 정수값 고정, UTF-8 CHAT 통과를 잠근다. 길이에는 type 한 바이트가 포함되고 checksum은 **payload에만** 적용된다. 불완전 프레임은 버퍼에 남고 과대 선언은 스트림 전체를 폐기한다는 wire 규약까지 C++과 Python 양쪽에서 검증한다.
 
 ### 12.4 `expand_placement` — placement 를 프레임 마스크로
 
@@ -2006,7 +2004,7 @@ graph LR
 
 ## 수동 테스트
 
-완료 게이트 다섯 항목에 1:1 대응하는 명령이다. 전부 저장소 루트에서 실행한다.
+완료 게이트에 대응하는 명령이다. 전부 저장소 루트에서 실행한다.
 
 **게이트 1·2·3 — 네이티브 모듈 + 결정론 + 환경**
 
@@ -2025,7 +2023,7 @@ uv run python -m pytest python/tests/test_determinism_crossplatform.py \
                        python/tests/test_versus_env.py -q
 ```
 
-기대 결과: `import sim` 이 성공하고 합법 배치 수와 상태 해시가 출력된다. 확인된 결과는 `test_determinism_crossplatform.py` 3개, `test_placement_parity.py` 1608개(파라미터화 조합) 통과다. `test_versus_env.py` 의 7개 테스트는 `gymnasium` 이 있어야 돌아간다 — 없으면 모듈 전체가 `SKIPPED [1] ... could not import 'gymnasium'` 로 빠진다. **skip 을 통과로 오인하지 마라.** `-rs` 를 붙이면 skip 사유가 출력된다. `_sim_hash_dump.txt` 가 없으면 결정론 비교 테스트도 조용히 skip 된다.
+기대 결과: `import sim` 이 성공하고 합법 배치 수와 상태 해시가 출력되며, 지정한 테스트 파일에서 수집된 항목이 실패하지 않는다. `test_versus_env.py` 는 `gymnasium` 과 네이티브 모듈이 있어야 실제 실행된다. 의존성이 없으면 모듈 전체가 skip될 수 있으므로 **skip 을 통과로 오인하지 말고** `-rs` 로 사유를 확인한다. `_sim_hash_dump.txt` 가 없을 때 결정론 비교가 skip되는지도 같은 방식으로 구분한다.
 
 **게이트 4·5 — 체크포인트 round-trip + 패리티 · 정적 테스트**
 

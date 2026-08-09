@@ -63,7 +63,7 @@ graph TB
     G -- "platform_key_pressed()<br/>platform_mouse_x()" --> H
 ```
 
-두 구현은 서로를 전혀 모른다. 공유하는 것은 헤더 하나뿐이고, 공유하는 상태는 없다. 각 `.cpp` 가 자기 파일 스코프의 `static` 변수로 키 배열·마우스 상태·뷰포트 사각형·컨텍스트 핸들을 따로 들고 있다. 이 중복은 의도적이다. 공통 상태를 별도 파일로 빼면 "어느 백엔드가 언제 그 상태를 갱신하는가" 라는 추적 문제가 생기는데, 각각 400줄 안쪽인 파일에서는 중복이 더 싸다.
+두 구현은 서로를 전혀 모른다. 공유하는 것은 헤더 하나뿐이고, 공유하는 상태는 없다. 각 `.cpp`가 자기 파일 스코프의 `static` 변수로 키 배열·마우스 상태·뷰포트 사각형·컨텍스트 핸들을 따로 들고 있다. 이 중복은 의도적이다. 공통 상태를 별도 파일로 빼면 "어느 백엔드가 언제 그 상태를 갱신하는가"라는 추적 문제가 생긴다. 작은 플랫폼 경계에서는 상태 소유자가 분명한 편이 중복 제거보다 중요하다.
 
 ### 1.1 왜 창과 컨텍스트를 직접 만드는가
 
@@ -95,7 +95,7 @@ graph TB
 // 구현은 platform/win32.cpp에 있습니다.
 //
 // 학습 포인트:
-//   raylib::InitWindow() 는 아래 platform_init() 이 호출하는 80줄을 숨겨놓은 것.
+//   raylib::InitWindow()가 숨기던 창·GL 컨텍스트 초기화를 platform_init()이 맡는다.
 //   raylib::IsKeyPressed()는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
 //   raylib::GetFrameTime()은 QueryPerformanceCounter 두 번의 차이.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ void*  platform_gl_get_proc(const char* name);
 void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 ```
 
-이 두 함수가 이 계층과 렌더러 사이의 전체 접촉면이다. `platform_gl_get_proc` 은 "GL 함수의 주소를 어떻게 얻는가" 라는 플랫폼 차이를 하나로 덮고, `platform_viewport` 는 "논리 화면이 창 안 어디에 놓이는가" 를 한 사각형으로 답한다. 둘 다 §3 과 §8 에서 자세히 본다.
+이 두 함수가 이 계층과 렌더러 사이의 전체 접촉면이다. `platform_gl_get_proc`은 Windows의 WGL 조회와 SDL의 조회 방식을 하나의 함수로 덮고, `platform_viewport`는 논리 화면의 위치와 크기를 GL 좌표계의 한 사각형으로 돌려준다. 렌더러와 마우스 역매핑이 이 같은 사각형을 공유해야 화면과 클릭 위치가 어긋나지 않는다.
 
 키 입력과 문자 입력.
 
@@ -274,7 +274,7 @@ void   platform_set_vsync(bool on);
 
 `platform_fullscreen_supported()` 가 별도로 존재하는 이유를 눈여겨볼 만하다. Win32 백엔드는 전체화면을 구현하지 않았다. 설정 화면이 "Fullscreen" 토글을 무조건 그리면 Windows 사용자는 켜도 아무 일이 없는 죽은 스위치를 보게 된다. 그래서 **지원 여부를 질의하는 함수를 계약에 넣고**, [Part 11](./part11-settings-and-options.md) 의 설정 화면이 이 값으로 행을 회색 처리한다. "기능이 없다" 를 런타임에 표현할 수 있게 만든 인터페이스 설계다.
 
-`platform_display_size` 도 같은 종류의 함수다. 창 크기 프리셋을 고르는 UI 가 모니터보다 큰 값을 제시하면 안 되므로, "이 화면에 창을 놓을 수 있는 최대 크기" 를 물어볼 수단이 필요하다. 구현은 §8.4 에서 본다.
+`platform_display_size`도 같은 종류의 함수다. 창 크기 프리셋을 고르는 UI가 모니터보다 큰 값을 제시하면 안 되므로, 작업 표시줄·dock을 제외한 사용 가능 영역을 플랫폼 독립적인 폭과 높이로 돌려준다. 설정 UI는 이 값으로 실제 화면에 들어가는 프리셋만 선택 가능하게 만든다.
 
 ## 3. GL 컨텍스트 — 이 계층의 새 책임
 
@@ -284,7 +284,9 @@ void   platform_set_vsync(bool on);
 
 컨텍스트는 창에도 묶인다. 정확히는 창의 드로어블(Win32 에서는 픽셀 포맷이 설정된 DC)에 묶인다. 창 없이 컨텍스트를 만들 수 없고, 창을 만든 코드가 아닌 곳에서 컨텍스트를 만들기도 번거롭다. 그래서 이 프로젝트는 **컨텍스트 생성을 `platform_init` 안에 둔다.** 렌더러가 자기 초기화 시점에 컨텍스트를 만들게 하면 창 핸들을 렌더러에 노출해야 하고, 그 핸들의 타입은 백엔드마다 다르다. 계약이 오염된다.
 
-초기화 순서는 다음과 같다. 이 장은 앞의 세 단계를 만들고, Part 3 이 뒤의 두 단계를 만든다.
+완성된 프로그램의 초기화 순서는 아래와 같다. 이 장의 검증 범위는 창과 GL context가
+유효하고 `platform_gl_get_proc`로 심볼을 얻을 수 있는 지점까지다. renderer와 font는
+그 context를 소비하는 별도 계층이므로 플랫폼 체크포인트에는 필요하지 않다.
 
 ```mermaid
 sequenceDiagram
@@ -480,7 +482,7 @@ void platform_init(int width, int height, const char* title)
 }
 ```
 
-100줄이지만 하는 일은 다섯 덩어리다. 창 클래스 등록 → 창 생성 → 픽셀 포맷 설정 → 컨텍스트 생성 → vsync 확장 조회. 순서대로 본다.
+코드의 역할은 창 클래스 등록 → 창 생성 → 픽셀 포맷 설정 → 컨텍스트 생성 → vsync 확장 조회로 나뉜다. 소스 길이보다 이 초기화 순서가 계약이다.
 
 ### 4.1 창 클래스와 스타일
 
@@ -555,7 +557,7 @@ void* platform_gl_get_proc(const char* name)
 
 반대로 `wglGetProcAddress` 는 **드라이버 확장만** 돌려준다. GL 1.1 함수인 `glEnable`, `glClear`, `glViewport` 를 물어보면 `NULL` 을 준다. 두 경로가 정확히 상보적이라, 어느 쪽도 단독으로는 전체 함수 집합을 덮지 못한다.
 
-그래서 이 함수는 `wglGetProcAddress` 를 먼저 시도하고, 실패하면 `opengl32.dll` 을 직접 열어 `GetProcAddress` 로 찾는다. `s_opengl32` 는 그 모듈 핸들을 캐시해 두는 자리다. 40여 개 함수를 로드할 때마다 `LoadLibraryA` 를 부르지 않기 위한 것이다.
+그래서 이 함수는 `wglGetProcAddress` 를 먼저 시도하고, 실패하면 `opengl32.dll` 을 직접 열어 `GetProcAddress` 로 찾는다. `s_opengl32` 는 그 모듈 핸들을 캐시해 두는 자리다. 여러 GL 진입점을 순회하는 동안 `LoadLibraryA`를 반복하지 않게 한다.
 
 `0x1 / 0x2 / 0x3 / -1` 을 실패로 취급하는 검사는 유명한 함정이다. **일부 드라이버는 실패 시 `NULL` 이 아니라 이런 작은 값을 돌려준다.** MSDN 의 `wglGetProcAddress` 문서에도 명시되어 있다. 이 검사가 없으면 `0x1` 을 함수 포인터로 믿고 호출해 즉시 크래시한다. 원인이 "함수 주소 조회" 에 있다는 것을 스택 트레이스로 알아내기가 매우 어렵다.
 
@@ -572,7 +574,7 @@ void* platform_gl_get_proc(const char* name)
 
 한 줄이다. 이 비대칭이 SDL 을 쓰는 실질적 이득의 좋은 예다 — 이 계층은 "이름을 주면 주소를 돌려주는 함수" 라는 계약만 노출하고, 그 뒤가 12줄인지 1줄인지는 렌더러가 알 필요가 없다.
 
-이 함수를 실제로 쓰는 쪽은 Part 3 의 `gl_load_functions()` 다. X-매크로로 만든 테이블을 순회하며 이름을 하나씩 넘기고, 하나라도 못 받으면 빠진 이름을 전부 모아 보고한 뒤 실패한다. 이 장의 데모에서도 축소판을 만들어 본다.
+완성형 renderer의 `gl_load_functions()`는 이 API로 X-매크로 테이블을 순회한다. 진입점 이름을 하나씩 넘기고, 하나라도 못 받으면 빠진 이름을 모두 모아 보고한 뒤 실패한다. 이 체크포인트 데모는 같은 계약을 작은 로더로 검증한다.
 
 ## 5. `window_proc` — 모든 입력이 들어오는 한 곳
 
@@ -649,7 +651,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 
 **`WM_SIZE` 가 뷰포트를 다시 계산한다.** 창 스타일이 `WS_OVERLAPPEDWINDOW` 가 되면서 이 메시지가 실제로 자주 온다. 사용자가 테두리를 끄는 동안 매 픽셀마다 도착한다. 여기서 하는 일은 `s_win_w/h` 갱신과 `recompute_viewport()` 뿐이고, `glViewport` 는 부르지 않는다. GL 호출은 렌더링 스레드의 프레임 안에서만 일어나야 하고, 실제로 Part 3 의 렌더러가 매 프레임 `platform_viewport()` 를 읽어 그때 설정한다.
 
-**`SetCapture` / `ReleaseCapture`.** 버튼을 누른 순간 마우스를 캡처하면, 커서가 창 밖으로 나가도 `WM_MOUSEMOVE` 와 `WM_LBUTTONUP` 이 계속 이 창으로 온다. 이게 없으면 **드래그 도중 창 밖에서 버튼을 놓았을 때 `s_mouse_state[0]` 이 영원히 `true` 로 남는다.** 슬라이더를 끝까지 끌었다가 창 밖에서 손을 떼는 것은 아주 흔한 동작이라, [Part 11](./part11-settings-and-options.md) 의 `gui_slider` 드래그가 이 코드에 직접 의존한다. 캡처 중에는 좌표가 음수이거나 창 크기를 넘을 수 있다는 점도 기억해 둘 것 — 뒤의 마우스 역매핑 절에서 이 값이 문제가 된다.
+**`SetCapture` / `ReleaseCapture`.** 버튼을 누른 순간 마우스를 캡처하면, 커서가 창 밖으로 나가도 `WM_MOUSEMOVE`와 `WM_LBUTTONUP`이 계속 이 창으로 온다. 이게 없으면 **드래그 도중 창 밖에서 버튼을 놓았을 때 `s_mouse_state[0]`이 영원히 `true`로 남는다.** 슬라이더 같은 드래그 UI가 이 계약에 의존한다. 캡처 중 좌표는 음수이거나 창 크기를 넘을 수 있으므로, viewport 역매핑은 창 바깥 좌표도 안전하게 변환하고 위젯 hit test가 최종 범위를 판정해야 한다.
 
 **`WM_ERASEBKGND` 에서 `return 1`.** "배경은 내가 지웠다" 는 뜻이다. 이 응답을 하지 않으면 GDI 가 창 클래스의 배경 브러시로 클라이언트 영역을 칠하고, 그 위에 다음 `SwapBuffers` 결과가 얹힌다. 그 사이에 흰색/회색 면이 한 순간 보인다. 창 크기 조절이 가능해진 지금은 이 방어가 예전보다 훨씬 자주 발동한다 — 테두리를 끄는 동안 프레임마다 배경 지우기 요청이 오기 때문이다. 창 클래스에 `hbrBackground` 를 지정하지 않은 것과 짝을 이루는 방어다.
 
@@ -1145,7 +1147,7 @@ void platform_shutdown()
 
 프로세스 종료 시 OS 가 어차피 회수하므로 실용적 영향은 작다. 그럼에도 명시적으로 정리하는 이유는 **소유 관계를 코드로 문서화**하기 위해서다. 나중에 창을 두 번 열고 닫는 경로(예: 픽셀 포맷을 바꾸기 위한 창 재생성)가 생기면 이 순서가 곧바로 필요해진다.
 
-한 가지 실제 순서 의존을 적어 둔다. Part 3 이 만드는 `renderer_shutdown()` 은 `platform_shutdown()` 보다 **반드시 먼저** 불려야 한다. 텍스처·버퍼·셰이더를 지우는 `glDeleteTextures` 같은 호출은 컨텍스트가 current 인 상태에서만 유효하기 때문이다. 컨텍스트가 사라진 뒤 부르면 아무 일도 일어나지 않거나(운이 좋으면) 크래시한다. `src/main.cpp` 의 정상 종료 경로는 이 순서를 지킨다.
+한 가지 실제 순서 의존을 적어 둔다. 완성형의 `renderer_shutdown()`은 `platform_shutdown()`보다 **반드시 먼저** 불려야 한다. 텍스처·버퍼·셰이더를 지우는 `glDeleteTextures` 같은 호출은 컨텍스트가 current 인 상태에서만 유효하기 때문이다. 컨텍스트가 사라진 뒤 부르면 아무 일도 일어나지 않거나(운이 좋으면) 크래시한다. `src/main.cpp`의 정상 종료 경로는 이 순서를 지킨다.
 
 ## 12. SDL2 백엔드
 
@@ -1165,7 +1167,7 @@ void platform_shutdown()
 | 페이싱 | spin + `Sleep` | 단발 `SDL_Delay` |
 | 전체화면 | 미구현 | `SDL_WINDOW_FULLSCREEN_DESKTOP` |
 
-`platform_viewport`, `platform_mouse_x/y`, `recompute_viewport`, `platform_display_size` 는 앞 절들에서 두 구현을 나란히 봤으므로 여기서는 다루지 않는다.
+`platform_viewport`, `platform_mouse_x/y`, `recompute_viewport`, `platform_display_size`는 두 백엔드가 같은 논리 좌표 계약을 공유한다. 이 체크포인트에서는 창 생성·입력·시간 API가 그 계약으로 함께 동작하는지를 검증한다.
 
 ### 12.1 키 역매핑
 
@@ -1260,7 +1262,7 @@ void platform_init(int width, int height, const char* title)
 }
 ```
 
-Win32 의 96줄이 여기서는 45줄이다. 차이의 대부분이 컨텍스트 생성에서 나온다.
+SDL2 경로가 Win32 경로보다 짧은 이유의 대부분은 컨텍스트 생성과 이벤트 변환을 라이브러리가 맡기 때문이다.
 
 **속성은 창을 만들기 전에 건다.** `SDL_GL_SetAttribute` 는 전역 상태를 설정하는 함수이고, 그 값을 읽는 시점은 `SDL_CreateWindow` 와 `SDL_GL_CreateContext` 다. 순서를 뒤집어 창을 먼저 만들면 속성이 반영되지 않는다. Win32 의 "레거시 컨텍스트를 먼저 만들고 확장 함수를 조회한다" 는 우회를 SDL 이 내부에서 대신 해 준다 — 플랫폼별로 WGL/GLX/NSOpenGL 을 알맞게 골라서.
 
@@ -1410,7 +1412,7 @@ bool platform_fullscreen_supported() { return true; }
 
 `SDL_WINDOW_FULLSCREEN_DESKTOP` 은 해상도를 바꾸지 않고 데스크톱 크기의 borderless 창으로 만든다. 진짜 모드 전환(`SDL_WINDOW_FULLSCREEN`)보다 전환이 빠르고 Alt+Tab 이 매끄럽다. 전환 후 `SDL_GetWindowSize` 로 새 크기를 읽고 `recompute_viewport()` 를 부른다 — 이벤트가 오기를 기다리지 않고 즉시 갱신하는 것이 중요하다. 16:9 모니터에서 9:8 논리 화면을 띄우면 좌우에 굵은 검은 바가 생긴다. 왜곡 대신 레터박스를 택한 결과다.
 
-Win32 백엔드의 대응 함수는 §10.2 에서 본 두 줄이 전부다. `platform_set_fullscreen` 은 no-op 이고 `platform_fullscreen_supported()` 는 `false` 다. 이 비대칭을 상위 계층이 알 수 있게 만든 것이 앞서 본 `platform_fullscreen_supported()` 계약이다. Windows 에서 전체화면을 구현하려면 창 스타일을 `WS_POPUP` 으로 바꾸고 모니터 작업 영역 크기로 `SetWindowPos` 를 하고, 복귀용으로 이전 스타일과 사각형을 저장해 둬야 한다. 30줄 남짓이지만 현재 구현되어 있지 않다.
+Win32 백엔드의 대응 구현은 `platform_set_fullscreen`이 no-op이고 `platform_fullscreen_supported()`가 `false`인 것이 전부다. 이 비대칭을 상위 계층이 알 수 있게 만든 것이 `platform_fullscreen_supported()` 계약이다. Windows에서 전체화면을 구현하려면 창 스타일을 `WS_POPUP`으로 바꾸고 모니터 작업 영역 크기로 `SetWindowPos`를 호출하며, 복귀용 이전 스타일과 사각형을 보관해야 한다. 코드 양보다 창 상태 복원 규칙이 핵심이며 현재는 구현되어 있지 않다.
 
 ## 14. CMakeLists 확장
 
@@ -1517,7 +1519,7 @@ endif()
 #include "platform/platform.h"
 
 // GL 헤더를 include 하지 않는다. 이 데모가 쓰는 일곱 함수의 타입만 직접 적는다.
-// Part 3 의 renderer/gl_api.h 가 같은 일을 40여 개 함수로 확장한다.
+// 완성형 renderer/gl_api.h도 같은 패턴으로 필요한 GL 진입점을 로드한다.
 using GLenum     = unsigned int;
 using GLbitfield = unsigned int;
 using GLint      = int;
@@ -1625,7 +1627,7 @@ int main()
 
 이 데모는 이 시점에 존재하는 API 만 쓴다. `renderer_*`, `draw_*`, `gui_*` 는 하나도 등장하지 않는다.
 
-`load_gl` 이 하는 일이 Part 3 `gl_load_functions()` 의 축소판이다. 이름을 넘기고 주소를 받아 슬롯을 채우고, 실패하면 **어느 함수가 없었는지 이름을 찍는다.** `ok = load_gl(...) && ok` 순서로 쓴 것도 의도적이다 — `&&` 의 단축 평가 때문에 `ok && load_gl(...)` 로 쓰면 첫 실패 이후의 함수는 시도조차 하지 않아 "빠진 것이 하나뿐" 이라는 잘못된 인상을 준다. 빠진 심볼은 전부 모아서 보여주는 편이 훨씬 빨리 원인을 알려 준다.
+`load_gl`은 완성형 `gl_load_functions()`와 같은 로더 계약의 축소판이다. 이름을 넘기고 주소를 받아 슬롯을 채우고, 실패하면 **어느 함수가 없었는지 이름을 찍는다.** `ok = load_gl(...) && ok` 순서로 쓴 것도 의도적이다 — `&&` 의 단축 평가 때문에 `ok && load_gl(...)` 로 쓰면 첫 실패 이후의 함수는 시도조차 하지 않아 "빠진 것이 하나뿐" 이라는 잘못된 인상을 준다. 빠진 심볼은 전부 모아서 보여주는 편이 훨씬 빨리 원인을 알려 준다.
 
 빌드와 실행:
 
@@ -1671,7 +1673,7 @@ t=  1.57 dt=0.1000 vp=(275,0 450x400) mouse=( 205, 511) L=0 wheel=+2
 
 ## 이 장에서 완성된 것
 
-- `platform/platform.h` — `struct Color`, `enum PlatformKey`, 23개 함수로 이루어진 OS 추상화 계약. 시리즈의 나머지 전부가 이 헤더에 의존한다.
+- `platform/platform.h` — `struct Color`, `enum PlatformKey`와 창·입력·시간·GL 컨텍스트 함수로 이루어진 OS 추상화 계약. 시리즈의 나머지 계층은 이 헤더에 의존한다.
 - `platform/win32.cpp` — Win32 창, 2단계 WGL 3.3 Core 컨텍스트 생성, `wglGetProcAddress` + `opengl32.dll` 폴백 함수 조회, `window_proc` 기반 입력, `QueryPerformanceCounter` 타이머, `SwapBuffers` 표시, spin+`Sleep` 페이싱.
 - `platform/sdl.cpp` — 같은 계약의 SDL2 구현. `SDL_GL_SetAttribute` 로 3.3 Core 요청, `SDL_GL_SwapWindow` 표시, 진짜 vsync(`SDL_GL_SetSwapInterval`), `sdl_to_platform_key` 역매핑, `SDL_TEXTINPUT` 문자 입력, 전체화면과 macOS 번들 경로 처리.
 - 논리 해상도(720×640)와 창 크기를 분리하는 레터박스 뷰포트. `platform_viewport` 가 GL 좌하단 원점으로 내보내고, `platform_mouse_x/y` 가 **같은 사각형**으로 역매핑한다.
@@ -1679,7 +1681,7 @@ t=  1.57 dt=0.1000 vp=(275,0 450x400) mouse=( 205, 511) L=0 wheel=+2
 - 100ms 델타타임 클램프 — 창 드래그·리사이즈·모달·백그라운드 복귀 시의 시간 점프 방어.
 - `CMakeLists.txt` 의 백엔드 선택 스위치(`TETRIS_USE_SDL2`), GL 링크, Part 2 데모 타깃.
 
-아직 없는 것: 그리는 코드가 없다. 셰이더도, 정점 버퍼도, `draw_rect` 도, `draw_text` 도 없다. 이 장의 데모가 화면에 뭔가를 낼 수 있었던 것은 시저 박스와 `glClear` 라는 편법 덕분이다. 그 자리를 [Part 3](./part3-rendering-and-ui.md) 의 렌더러가 채운다.
+이 체크포인트에는 셰이더, 정점 버퍼, `draw_rect`, `draw_text`가 없다. 화면 출력은 시저 박스와 `glClear`만으로 플랫폼 계약을 검증한다. 완성형 [렌더러](./part3-rendering-and-ui.md)는 같은 GL 컨텍스트 위에서 도형·텍스트·이미지를 그리며, 플랫폼 계층의 공개 API는 그대로 사용한다.
 
 ## 수동 테스트
 
@@ -1707,7 +1709,7 @@ cmake --build build-sim --target sim_hash_dump
 ./build-sim/sim_hash_dump | diff - python/tests/_sim_hash_dump.txt && echo "결정론 OK"
 ```
 
-기대 결과: `결정론 OK`. 플랫폼 계층은 `SimGame` 과 링크되지 않으므로 해시가 바뀔 이유가 없다. GPU 를 쓰기 시작해도 이 값은 움직이지 않는다 — 렌더 경로와 시뮬레이션 경로가 만나지 않기 때문이다. 이 확인은 앞으로 각 장에서 반복한다.
+기대 결과: `결정론 OK`. 플랫폼 계층은 `SimGame`과 링크되지 않으므로 해시가 바뀔 이유가 없다. GPU 사용 여부와 상관없이 렌더 경로와 시뮬레이션 경로가 만나지 않는다는 계층 계약을 이 검사로 확인한다.
 
 ```bash
 # 4. 델타타임 클램프 육안 확인 (데모 실행 중)

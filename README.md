@@ -1,8 +1,8 @@
 # Tetris Multiplayer RL
 
 결정론적 lockstep 네트워킹을 기반으로 만든 멀티플레이어 테트리스입니다.
-C++17과 CMake를 사용하며, raylib/OpenGL 없이 직접 구현한 CPU 2D
-소프트웨어 렌더러를 Win32 또는 SDL2 창에 표시합니다.
+C++17과 CMake를 사용하며, 엔진 없이 직접 구현한 OpenGL 3.3 Core 2D
+배치 렌더러를 Win32/WGL 또는 SDL2 창과 컨텍스트 위에서 실행합니다.
 
 이 저장소에는 게임 클라이언트, 릴레이/룸 서버, HTTP+SQLite 메타 서버,
 결정론 회귀 테스트, Python 시뮬레이션 바인딩, RL 학습용 환경/모델/export
@@ -10,8 +10,8 @@ C++17과 CMake를 사용하며, raylib/OpenGL 없이 직접 구현한 CPU 2D
 
 ## 현재 상태
 
-- Windows 기본 빌드는 Handmade Win32 + GDI 표시 + XAudio2 경로입니다.
-- macOS/Linux 기본 빌드는 SDL2 surface 표시 경로입니다.
+- Windows 기본 빌드는 Handmade Win32/WGL 창·입력 + OpenGL 렌더러 + XAudio2 경로입니다.
+- macOS/Linux 기본 빌드는 SDL2 창·입력·GL 컨텍스트 + 같은 OpenGL 렌더러 + SDL audio 경로입니다.
 - `tetris`, `sim_hash_dump`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
 - `Single vs Bot`에는 내장 휴리스틱 봇이 항상 표시됩니다. 학습 모델 봇은 `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/*.onnx` 또는 `model/bots/*.onnx`가 있을 때 선택할 수 있습니다.
 - Python 쪽은 Colab 부트스트랩, Gymnasium 환경,
@@ -27,7 +27,7 @@ flowchart TB
     Client["tetris client<br/>src + platform + renderer + audio"]
     Sim["deterministic SimGame<br/>src/sim_game + core"]
     Session["lockstep session<br/>net/socket + framing + session"]
-    Relay["tetris_relay<br/>queue + room + byte forwarding"]
+    Relay["tetris_relay<br/>admission + auth + queue/room + selective forwarding"]
     Meta["tetris_meta<br/>HTTP API + SQLite"]
     PyBind["tetris_py<br/>pybind11"]
     Train["Python RL<br/>env + model zoo + checkpoint"]
@@ -56,7 +56,7 @@ Meta는 guest token, RP/XP/BP, 아이콘과 경기 기록을 SQLite에 저장합
 |---|---|---|
 | 결정론 코어 | `src/sim_game.*`, `src/sim_grid.h`, `core/` | 규칙, 입력, RNG, 상태 해시 |
 | 클라이언트 | `src/main.cpp`, `src/game.*` | 화면 상태, fixed-step 루프, 게임 조립 |
-| 플랫폼·표현 | `platform/`, `renderer/`, `audio/` | CPU ARGB32 렌더러, Win32/SDL2 표시, 오디오 |
+| 플랫폼·표현 | `platform/`, `renderer/`, `audio/` | Win32/WGL 또는 SDL2 컨텍스트, OpenGL 배치 렌더러, 오디오 |
 | 네트워크 | `net/` | TCP 소켓, framing, lockstep session |
 | 온라인 서버 | `server/`, `meta/` | relay/room, 인증, 랭킹과 영속화 |
 | RL·봇 | `bindings/`, `python/`, `bot/` | Python 환경, 학습, ONNX 추론 |
@@ -89,11 +89,12 @@ ONNX Runtime과 `model/bots/*.onnx`가 준비된 뒤 실행합니다.
 
 ### Linux / macOS
 
-Linux에서는 SDL2 개발 패키지가 필요합니다. OpenGL 개발 패키지는 필요하지 않습니다.
+Linux 게임 빌드는 SDL2와 OpenGL 개발 패키지가 필요합니다. relay/meta만 빌드하고
+`TETRIS_BUILD_GAME=OFF`로 두면 그래픽 개발 패키지는 필요하지 않습니다.
 
 ```bash
 # Ubuntu/Debian 예시
-sudo apt install build-essential cmake libsdl2-dev
+sudo apt install build-essential cmake libsdl2-dev libgl1-mesa-dev
 ```
 
 ```bash
@@ -119,7 +120,7 @@ make release-linux
 | `TETRIS_BUILD_META` | OFF | `tetris_meta` | HTTP+SQLite guest/랭킹/리더보드 서버 |
 | `TETRIS_BUILD_PY` | OFF | `tetris_py` | pybind11 기반 Python 시뮬레이션 모듈 |
 | `TETRIS_BUILD_BOT` | OFF | `tetris` 내부 | ONNX Runtime 기반 로컬 봇 추론 |
-| `TETRIS_USE_SDL2` | Windows OFF, 그 외 ON | 백엔드 선택 | SDL2 창/입력/surface 표시/오디오 사용 |
+| `TETRIS_USE_SDL2` | Windows OFF, 그 외 ON | 백엔드 선택 | SDL2 창·입력·OpenGL 컨텍스트·오디오 사용 |
 | `TETRIS_ENABLE_HTTPS` | ON | `tetris`, `tetris_relay` | OpenSSL이 있으면 `https://` meta URL 지원 |
 | `TETRIS_ENABLE_DEBUG_UI` | OFF | `tetris` | 개발용 NET HUD / 해시 덤프 핫키 활성화 |
 | `TETRIS_ENABLE_NET_TRACE` | OFF | `tetris` | 클라이언트 net/session 상세 trace 로그 활성화 |
@@ -199,9 +200,10 @@ META_URL=https://api.example.com \
 `tetris_meta`는 guest 토큰, RP/XP/BP, 리더보드를 담당하고, `tetris_relay`는 TCP
 매치메이킹과 프레임 포워딩을 담당합니다.
 
-메타 서버는 DB를 가진 프로세스이므로 public `8080`으로 직접 열지 않는 구성이 안전합니다.
-운영에서는 `127.0.0.1:8080`에만 바인딩하고 Caddy/Nginx가 HTTPS `443`에서 필요한
-endpoint만 프록시하게 둡니다.
+메타 서버는 DB를 가진 프로세스이므로 public `8080`으로 직접 열지 않습니다. meta와
+HTTPS 프록시가 같은 호스트면 `127.0.0.1:8080`에만 바인딩합니다. 현재 시험 구성처럼
+Galaxy S7 Termux가 meta+SQLite, Linux Mac mini가 relay/proxy를 맡으면 S7의 고정
+사설/VPN 주소에 바인딩하고 방화벽에서 Mac mini만 허용합니다.
 
 메타 서버:
 
@@ -234,13 +236,21 @@ systemd/Caddy/cloudflared 예시, DB 백업 스크립트가 함께 들어갑니�
 ./tetris --meta https://api.example.com --queue relay.example.com:7777
 ```
 
-`--meta`가 없거나 메타 서버가 응답하지 않으면 unranked 모드로 동작합니다.
+`--meta` 없는 relay는 명시적인 unranked 모드로 동작합니다. 반대로 ranked relay의
+meta가 응답하지 않으면 최근 성공 인증 캐시만 제한적으로 사용할 수 있고, 차가운
+relay나 cache miss는 입장을 거부합니다. 게임 클라이언트의 랭킹 UI가 offline이라는
+사실만으로 자동 unranked 전환이 일어나지는 않습니다.
 `tetris_meta`는 기본적으로 `TETRIS_RELAY_SECRET` 또는 `--relay-secret` 없이
 시작하지 않습니다. 로컬 테스트에서만 `--allow-public-matches`를 명시해
 `POST /v1/matches` 공개 허용 모드로 띄울 수 있습니다. 일반 유저에게는
 `GET /v1/leaderboard`, `POST /v1/guest`, `POST /v1/auth/verify`, 아이콘
 카탈로그·구매·선택 API를 HTTPS로 제공하고, `POST /v1/matches`는 반드시
 relay secret으로 보호해야 합니다.
+
+보유 장비 배치, S7 백업, Windows standby의 새 연결 전환 범위, 200명 목표의 실제
+부하 측정 해석은 [`docs/public-server-deployment.md`](docs/public-server-deployment.md)를
+기준으로 합니다. 현재 Mac mini 단독 측정은 200명 보장 근거가 아니므로 초기 운영
+목표를 낮게 두고 별도 발생기의 LAN/WAN soak 후 단계적으로 늘립니다.
 ## RL / Bot
 
 봇은 인게임 봇 한 경로입니다: `model/*.onnx`와 `model/bots/*.onnx`를 C++
@@ -371,8 +381,8 @@ uv sync --dev --extra train --extra export
 
 - 공통: C++17, CMake 3.15+
 - Windows: Visual Studio Build Tools 또는 동등한 MSVC 환경, Windows SDK
-- Linux/macOS SDL2 빌드: SDL2 개발 헤더
-- 텍스트/이미지: vendored `third_party/stb_truetype.h` + `third_party/stb_image.h` (비-Win32 이미지 디코드). 기본 폰트는 `Font/NanumGothic.ttf`이며 래스터화·합성은 모든 플랫폼에서 CPU로 수행됩니다.
+- Linux SDL2 게임 빌드: SDL2와 OpenGL 개발 헤더. macOS는 SDL2와 시스템 OpenGL 프레임워크를 사용
+- 텍스트/이미지: vendored `third_party/stb_truetype.h` + `third_party/stb_image.h` (비-Win32 이미지 디코드). 기본 폰트는 `Font/NanumGothic.ttf`이며 글리프 래스터화와 이미지 디코드는 CPU, 텍스처 샘플링·합성은 GPU가 맡습니다.
 - Python/RL: uv, Python 3.12+ (3.14 포함), pytest, pybind11. PyTorch/Gymnasium/ONNX는 `train`/`export` extra에서만 필요
 - Meta server: vendored `third_party/sqlite3.{c,h,ext.h}`와 `third_party/httplib.h`
 - In-game bot: ONNX Runtime CPU bundle, `model/bots/*.onnx` 또는 legacy `model/*.onnx`

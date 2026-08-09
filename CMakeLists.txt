@@ -26,7 +26,7 @@ option(TETRIS_BUILD_PY    "Build the pybind11 module (tetris_py)"           OFF)
 option(TETRIS_BUILD_TEST  "Build the SimGame determinism test"              ON)
 option(TETRIS_BUILD_RELAY "Build the tetris_relay matchmaking server"       OFF)
 # TETRIS_BUILD_META — HTTP + SQLite metadata server (guest/auth/matches/leaderboard).
-# Typically deployed on a separate machine (e.g. Mac mini) to keep the relay stateless.
+# Typically deployed separately so the relay owns no durable database state.
 option(TETRIS_BUILD_META  "Build the tetris_meta HTTP+SQLite metadata server" OFF)
 # TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
@@ -49,7 +49,8 @@ if (TETRIS_ENABLE_HTTPS)
     endif()
 endif()
 
-# TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
+# TETRIS_USE_SDL2 — Use SDL2 for the cross-platform window/input/GL context and audio backend.
+# Text and images still go through the shared OpenGL renderer.
 # Default ON on non-Windows so macOS/Linux users get it automatically.
 # On Windows, default OFF to preserve the handmade Win32 window/audio path.
 if (WIN32)
@@ -328,8 +329,8 @@ endif()
 # -----------------------------------------------------------------------------
 # Target: tetris_relay (matchmaking / relay server)
 #
-# 역할: TCP accept → QUEUE_JOIN 수신 → 2명 모이면 MATCH_FOUND 전송 + 바이트 포워딩.
-#       GUI/오디오/시뮬 없음 — net/ 만 재사용. Termux(Ubuntu proot ARM64) 포함 크로스.
+# 역할: TCP 접속 제한·인증·매칭·룸·결과 검증을 맡고, 게임 프레임은 전달한다.
+#       GUI/오디오/시뮬 없음 — net/ 만 재사용. Linux/macOS/Windows 서버용.
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_RELAY)
     # relay 가 meta HTTP API 를 호출하려면 httplib 헤더와 http_client.cpp 필요.
@@ -349,7 +350,9 @@ if (TETRIS_BUILD_RELAY)
         net/framing.cpp
         meta/http_client.cpp
         server/matchmaker.h
+        server/match_uuid.h
         server/player_conn.h
+        server/player_session.h
         server/relay.h
         server/room.h
         server/worker_group.h
@@ -384,10 +387,10 @@ endif()
 # -----------------------------------------------------------------------------
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
-# 역할: 별도 기기(Mac mini 등)에서 돌아가는 독립 서비스.
+# 역할: 별도 영속 호스트(S7 Termux 등)에서 돌아가는 독립 서비스.
 #       · SQLite 로 player/match/rating history/icon ownership 영속화
 #       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
-#       · relay 는 무상태 유지 — matchmaking 경로에서 HTTP 호출만 붙인다.
+#       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.
 #
 # 서드파티: third_party/sqlite3.{c,h} + third_party/httplib.h (헤더 온리).
 #           두 파일 모두 벤더링(check-in)되어 있어야 한다 — repo 루트의
@@ -438,7 +441,8 @@ if (TETRIS_BUILD_META)
         SQLITE_DEFAULT_FOREIGN_KEYS=1
     )
     if (WIN32)
-        target_link_libraries(tetris_meta PRIVATE ws2_32)
+        # BCryptGenRandom is the fail-closed CSPRNG used for guest tokens.
+        target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_meta PRIVATE Threads::Threads ${CMAKE_DL_LIBS})

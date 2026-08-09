@@ -328,7 +328,8 @@ bool SimGame::BlockFits(const SimBlock& block) const
 
 void SimGame::UpdateScore(int linesCleared, int levelUp, bool tSpin)
 {
-    // 점수: 레벨 배율 적용 (표준 NES 테트리스 방식).
+    // 프로젝트 점수표에 현재 레벨을 배율로 적용한다. NES와 마찬가지로
+    // 높은 레벨의 생존을 더 보상하지만 base 점수 자체는 이 게임 고유 값이다.
     if (tSpin)
     {
         switch (linesCleared)
@@ -358,8 +359,8 @@ void SimGame::UpdateScore(int linesCleared, int levelUp, bool tSpin)
     int newLevel = totalLinesCleared / 10 + 1;
     if (newLevel > level) {
         level = (newLevel > 20) ? 20 : newLevel;
-        // 레벨별 중력: 1→30틱, 5→20틱, 10→12틱, 15→7틱, 20→3틱
-        // TICKS_PER_SECOND=60 기준. max(3, 30 - (level-1)*1.5)
+        // 레벨별 중력: 1→30틱, 5→25틱, 10→18틱, 15→11틱, 20→3틱.
+        // TICKS_PER_SECOND=60 기준으로 30에서 3까지 정수 선형 보간한다.
         int newInterval = 30 - (level - 1) * 27 / 19;  // 레벨1=30, 레벨20=3
         if (newInterval < 3) newInterval = 3;
         dropIntervalTicks = newInterval;

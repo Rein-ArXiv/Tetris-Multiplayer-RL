@@ -16,14 +16,14 @@
 
 두 가지 용도를 노린다.
 
-1. **전체 그림.** 다 만들고 나서 "그래서 이게 어떻게 하나로 묶이지" 를 확인한다. 디렉터리 경계, 다섯 개 타깃, 의존성, 플랫폼별 빌드가 §1~§6 이다.
+1. **전체 그림.** 다 만들고 나서 “그래서 이게 어떻게 하나로 묶이지”를 확인한다. 디렉터리 경계, 빌드 타깃, 의존성, 플랫폼별 구성을 조회한다.
 2. **고칠 때의 지도.** "보드를 20×10 이 아니라 다르게 하고 싶다", "홀드 기능을 넣고 싶다", "새 학습 알고리즘을 붙이고 싶다" 같은 상황에서 **어느 파일을 건드려야 하고 무엇이 함께 깨지는지**를 §7 이 안내한다.
 
 특히 두 번째가 중요하다. 이 저장소에는 컴파일러가 잡아주지 않는 계약이 몇 개 있다 — 결정론 해시, C++/Python 패리티, wire 포맷, ONNX 입출력 이름, 그리고 셰이더 정점 속성과 C++ 정점 버퍼의 대응. 이것들은 어긋나도 빌드가 성공하고, 한참 뒤에 이상한 증상으로 나타난다. §8 이 그 목록이다.
 
 ## 1. 레포 구조 한눈에
 
-완성된 저장소 최상위는 다음과 같다. 지금은 비어 있지만, 각 디렉터리가 어느 Part 에서 채워지는지 미리 알아두면 이후 장의 "이번 Part의 파일" 목록이 어디에 놓이는지 바로 감이 온다.
+완성된 저장소의 주요 경로는 다음과 같다. 이 트리는 파일 개수를 고정하는 재고표가 아니라 책임 경계를 찾는 지도다. 세부 파일 목록은 `rg --files`와 현재 `CMakeLists.txt`를 기준으로 확인한다.
 
 ```text
 Tetris-Multiplayer-RL/
@@ -83,6 +83,8 @@ Tetris-Multiplayer-RL/
 │   ├── matchmaker.h/.cpp
 │   ├── room.h/.cpp        ← 5자리 코드 커스텀 룸
 │   ├── relay.h/.cpp       ← 바이트 포워더
+│   ├── match_uuid.h       ← 경기 결과 멱등성 키 생성
+│   ├── player_session.h   ← ranked player 단일 활성 session lease
 │   └── worker_group.h     ← 워커 스레드 수명 관리 (헤더 온리)
 │
 ├── meta/                  ← tetris_meta (HTTP+SQLite 메타/랭킹 서버)
@@ -117,6 +119,7 @@ Tetris-Multiplayer-RL/
 │   │   ├── rl_common.py
 │   │   └── setup_colab.ipynb / train_model_zoo_colab.ipynb
 │   ├── tests/             ← pytest 스위트
+│   ├── tools/             ← 실제 TCP relay 수용량 측정 도구
 │   └── legacy/            ← 이전 Pygame 구현 (비빌드, 참조용)
 │
 ├── third_party/
@@ -151,9 +154,9 @@ Tetris-Multiplayer-RL/
 |---|---|---|
 | `core/` | 순수 C++ 헬퍼(RNG·해시·상수·입력 비트마스크·리플레이) | 없음 |
 | `src/` | 테트리스 로직 + 렌더링 래퍼 + UI + 진입점 | `core/`, `renderer/`, `net/` |
-| `platform/` | OS 창/입력/GL 컨텍스트 추상화 (`platform.h` 한 인터페이스, 구현 2개) | Win32 API + WGL 또는 SDL2 |
+| `platform/` | OS 창/입력/GL 컨텍스트 추상화 (`platform.h` 공용 계약과 플랫폼별 구현) | Win32 API + WGL 또는 SDL2 |
 | `renderer/` | OpenGL 3.3 Core 2D (사각형·텍스트·이미지·셰이크) | OpenGL 3.3 Core 드라이버, `stb_truetype`, `platform/` |
-| `audio/` | MP3 로드 + 재생 (공용 헤더, 백엔드 2개) | XAudio2 또는 SDL2_audio, `third_party/dr_mp3.h` |
+| `audio/` | MP3 로드 + 재생 (공용 헤더와 플랫폼별 백엔드) | XAudio2 또는 SDL2_audio, `third_party/dr_mp3.h` |
 | `net/` | TCP 소켓 → 메시지 프레이밍 → lockstep 세션 | WinSock2 또는 BSD 소켓 + pthread |
 | `server/` | `tetris_relay` 바이너리: 매치메이킹 + 바이트 릴레이 | `net/` + `meta/http_client.cpp` + `third_party/httplib.h` |
 | `meta/` | `tetris_meta` 바이너리: HTTP+SQLite 메타/랭킹 + 게임·릴레이용 HTTP 클라이언트 | `third_party/sqlite3.c`, `third_party/httplib.h` |
@@ -164,7 +167,7 @@ Tetris-Multiplayer-RL/
 | `scripts/` | 플랫폼별 배포 번들 빌더 + 운영 백업 스크립트 | — |
 | `docs/` | 블로그 및 설계 문서 | — |
 
-이 구조에서 **화살표는 항상 아래로만 흐른다**. `core/` 는 어디도 include 하지 않고, `src/` 는 `core/` 와 `renderer/` 와 `net/` 을 쓰지만 그 반대는 없다. `server/` 는 `net/` 과 `meta/http_client.cpp` 만 건드리지 `src/` 는 절대 건드리지 않는다 — 이 덕분에 릴레이 서버는 GUI/오디오 없이 빌드할 수 있고 Termux 에서도 돈다. `python/` 은 `bindings/` 를 거쳐 `SimGame` 에만 닿는다 — 렌더링과 네트워크는 Python 관점에서 보이지 않는다.
+의존성은 하위 계층에서 UI로 역류하지 않게 유지한다. `core/`는 플랫폼을 모르고, `server/`는 `net/`과 meta HTTP 클라이언트를 쓰되 `src/`의 게임·화면 코드를 링크하지 않는다. relay는 입장·룸·ranked summary 같은 제어 프레임은 해석하지만 게임 시뮬레이션 상태를 만들지 않는다. `python/`의 학습 경로는 `bindings/`를 거쳐 `SimGame`에 닿고, wire 테스트 도구만 framing 규약을 별도로 미러링한다.
 
 ---
 
@@ -207,7 +210,7 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 
 **OpenSSL** — `TETRIS_ENABLE_HTTPS=ON`(기본값) 이고 시스템에 있으면 자동으로 붙는다. 없으면 경고만 내고 빌드는 계속되며, 런타임에 `https://` 메타 URL 이 거부된다.
 
-**ONNX Runtime** — 봇(`Single vs Bot`) 의 CPU 추론 전용. 용량 때문에 git 서브모듈 대신 **별도 스크립트로 다운로드**한다 (뒤의 `fetch_onnxruntime.sh` 절).
+**ONNX Runtime** — 봇(`Single vs Bot`)의 CPU 추론 전용. 용량 때문에 git 서브모듈 대신 `third_party/fetch_onnxruntime.sh`로 다운로드하며, CMake는 벤더링된 헤더와 라이브러리를 명시적으로 검사한다.
 
 - 공식 GitHub release 에서 CPU 빌드만 벤더링: Windows `.zip`, macOS `.tgz`(universal2), Linux `.tgz`(x64 또는 aarch64).
 - `third_party/onnxruntime/include/onnxruntime_cxx_api.h` 가 있어야 `TETRIS_BUILD_BOT=ON` 이 성공.
@@ -279,12 +282,12 @@ uv sync --dev --extra train --extra export
 
 ## 3. CMakeLists.txt 해부
 
-이 절에서는 최종 `CMakeLists.txt` 를 섹션별로 전부 발췌하며 설명한다. 각 블록의 줄 번호는 실제 파일 기준이다. 이 파일은 한 번에 다 쓰는 것이 아니라 Part 1 부터 Part 10 까지 조금씩 자라난다 — 각 Part 가 자기 `CMakeLists 확장` 절에서 그 시점의 축소판을 보여준다.
+이 절에서는 최종 `CMakeLists.txt`를 책임별 블록으로 발췌해 설명한다. 줄 번호는 사용하지 않고 타깃·옵션·변수 이름으로 현재 소스를 찾는다. 각 Part의 `CMakeLists 확장`은 그 기능이 처음 빌드 가능한 체크포인트를 보여주며, 이 장은 완성된 타깃 관계를 조회하는 레퍼런스다.
 
 | Part | 추가되는 소스 | 그 시점에 빌드 가능한 타깃 |
 |---|---|---|
 | 0 | `src/main.cpp`(스텁) | 자작 `tetris` 스텁 |
-| 1 | `src/sim_game.cpp`, `src/position.cpp` + 시뮬 헤더 9개, `tests/sim_hash_dump.cpp` | `sim_hash_dump` |
+| 1 | `src/sim_game.cpp`, `src/position.cpp`, 관련 시뮬 헤더, `tests/sim_hash_dump.cpp` | `sim_hash_dump` |
 | 2 | `platform/platform.h`, `platform/win32.cpp` 또는 `platform/sdl.cpp` | Part 2 체크포인트 데모 |
 | 3 | `renderer/renderer.cpp`, `renderer/gl_api.cpp`, `renderer/text_gl.cpp`, `renderer/image_gl.cpp`, `renderer/shake.cpp`, `src/gui.cpp`, `src/colors.cpp` | Part 3 체크포인트 데모 |
 | 4 | `src/game.cpp`, `src/main.cpp`(본체), `core/replay.cpp` | 싱글플레이 `tetris` |
@@ -342,7 +345,7 @@ option(TETRIS_BUILD_PY    "Build the pybind11 module (tetris_py)"           OFF)
 option(TETRIS_BUILD_TEST  "Build the SimGame determinism test"              ON)
 option(TETRIS_BUILD_RELAY "Build the tetris_relay matchmaking server"       OFF)
 # TETRIS_BUILD_META — HTTP + SQLite metadata server (guest/auth/matches/leaderboard).
-# Typically deployed on a separate machine (e.g. Mac mini) to keep the relay stateless.
+# Typically deployed separately so the relay owns no durable database state.
 option(TETRIS_BUILD_META  "Build the tetris_meta HTTP+SQLite metadata server" OFF)
 # TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
@@ -412,7 +415,8 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
+# TETRIS_USE_SDL2 — Use SDL2 for the cross-platform window/input/GL context and audio backend.
+# Text and images still go through the shared OpenGL renderer.
 # Default ON on non-Windows so macOS/Linux users get it automatically.
 # On Windows, default OFF to preserve the handmade Win32 window/audio path.
 if (WIN32)
@@ -455,9 +459,9 @@ set(TETRIS_SIM_HEADERS
 
 주석의 "no raylib" 는 역사적 흔적이다 — 이 저장소의 초기 버전이 raylib 기반이었고, 시뮬레이션을 렌더링에서 떼어내는 리팩터링의 결과가 이 변수다. 이 두 변수는 `tetris`, `tetris_py`, `sim_hash_dump` 세 타깃이 공유한다.
 
-`sim_grid.h` / `sim_block.h` / `sim_blocks.h` 가 헤더만 있는 이유는 이들이 구조체 + inline 멤버 함수만 담기 때문이다. 반면 `SimGame` 은 `.cpp` 로 분리했는데, 이유는 **구현 분량과 인터페이스/구현 분리**다. `sim_game.cpp` 는 500줄이 넘고 게임 규칙 전체(락, 라인 클리어, 점수, 가비지, 배치 열거)를 담는데, 이것이 헤더에 있으면 `sim_game.h` 를 include 하는 모든 번역 단위가 매번 다시 컴파일한다. RNG 와 해시 구현은 여기 없다 — `core/rng.h` 와 `core/hash.h` 에 헤더 전용 inline 으로 들어 있다. 두 파일 다 짧고 다른 곳에서도 쓰이므로 헤더가 맞는 자리다.
+`sim_grid.h` / `sim_block.h` / `sim_blocks.h`가 헤더만 있는 이유는 이들이 구조체와 inline 멤버 함수를 담기 때문이다. 반면 `SimGame`은 `.cpp`로 분리해 게임 규칙 구현(락, 라인 클리어, 점수, 가비지, 배치 열거)이 공개 인터페이스를 포함하는 모든 번역 단위에서 반복 컴파일되지 않게 한다. RNG와 해시 구현은 여기 없다. 재사용되는 작은 inline 계약이라 `core/rng.h`와 `core/hash.h`에 헤더 전용으로 둔다.
 
-`src/position.cpp` 는 생성자 하나뿐인 6줄짜리 파일이지만 여전히 `.cpp` 다. 이것도 역사적 이유다 — 원본 구조를 그대로 계승했다.
+`src/position.cpp`는 단순한 생성자만 담고 있어 헤더 inline으로 합칠 수도 있지만, 원본 구조를 계승해 별도 번역 단위로 남아 있다. 새 동작을 여기에 더하기보다 좌표 값 타입이라는 작은 책임을 유지하는 편이 낫다.
 
 ### 3.4 타깃 1 — `tetris` (게임 클라이언트)
 
@@ -534,11 +538,11 @@ if (TETRIS_BUILD_GAME)
     )
 ```
 
-`${TETRIS_SIM_HEADERS}` 를 앞에 펼쳐 넣으므로 시뮬 헤더 9개도 함께 나열된다. `src/gui.h` 와 `meta/http_client.h` 는 이 목록에 없다 — 빌드에는 영향이 없고 IDE 트리에만 안 보인다.
+`${TETRIS_SIM_HEADERS}`를 앞에 펼쳐 넣으므로 시뮬 공개 헤더도 함께 나열된다. `src/gui.h`와 `meta/http_client.h`는 이 목록에 없다. 헤더 누락은 컴파일 자체에는 영향을 주지 않지만 일부 IDE의 타깃 트리 표시에는 영향을 줄 수 있다.
 
 GL 헤더 셋(`gl_api.h` / `gl_internal.h` / `gl_shaders.h`)이 여기 나열돼 있다는 것은 이 셋이 **렌더러 내부 전용**이라는 뜻이기도 하다. `src/` 나 `game.cpp` 는 `renderer/renderer.h` 만 include 하고 GL 타입을 한 번도 보지 않는다. 셰이더 문자열조차 `gl_shaders.h` 안의 raw string literal 이라, 별도 애셋 파일이나 로딩 경로가 없다.
 
-(c) **백엔드 분기** — GL 렌더러와 텍스트는 공통이고, `TETRIS_USE_SDL2` 에 따라 창/컨텍스트와 오디오 2개 파일만 교체된다.
+(c) **백엔드 분기** — GL 렌더러와 텍스트는 공통이고, `TETRIS_USE_SDL2`에 따라 창/컨텍스트와 오디오 구현을 교체한다.
 
 **현재 소스 발췌 — `CMakeLists.txt`**
 
@@ -804,7 +808,7 @@ endif()
 - Python ABI 에 맞는 심볼 내보내기 설정(`-fvisibility=hidden` + `PYBIND11_MODULE`)
 - Python 인터프리터 자동 감지(CMake 4.0+ 호환을 위해 `PYBIND11_FINDPYTHON` 힌트)
 
-소스에는 `bindings/tetris_py.cpp` + 공유 시뮬 2개가 들어간다. 렌더러·네트워크·플랫폼은 한 줄도 없다. Python 은 `SimGame` 만 보고, 자기 쪽 렌더링/네트워크는 Python 레이어에서 따로 구현한다. 자세한 것은 [Part 8](./part8-python-rl.md).
+소스에는 `bindings/tetris_py.cpp`와 `TETRIS_SIM_SOURCES`가 들어간다. 렌더러·네트워크·플랫폼은 링크하지 않는다. Python은 `SimGame`만 보고, 학습 환경과 패리티 도구는 Python 레이어에서 따로 구성한다.
 
 ### 3.7 타깃 3 — `sim_hash_dump` / `worker_group_test` (회귀 테스트)
 
@@ -834,12 +838,12 @@ if (TETRIS_BUILD_TEST)
 endif()
 ```
 
-`TETRIS_BUILD_TEST` 하나가 **두 개의 실행 파일**을 만든다.
+`TETRIS_BUILD_TEST`는 서로 다른 계약을 검증하는 회귀 실행 파일들을 만든다. 현재 핵심 역할은 다음과 같다.
 
 - `sim_hash_dump` — 오직 순수 시뮬만 링크. OS API 없음, 네트워크 없음. 고정 입력 스크립트를 여러 시드로 돌려 각 스텝의 `StateHash()`를 stdout에 찍으며, 순수 시뮬레이션 소스 집합이 처음 생길 때부터 계층 경계를 검증한다.
-- `worker_group_test` — 릴레이 서버의 워커 스레드 수명 관리(`server/worker_group.h`)를 검증한다. 이 블록은 [Part 7](./part7-relay-server.md) 에서 이 `if` 안에 추가된다. Part 1 시점에는 존재하지 않는다.
+- `worker_group_test` — 릴레이 서버의 워커 스레드 수명 관리(`server/worker_group.h`)를 검증한다. 순수 시뮬레이션 검사와 같은 빌드 옵션 아래에 있지만 relay 동시성 계약을 소유하는 독립 타깃이다.
 
-`sim_hash_dump` 의 출력은 `python/tests/_sim_hash_dump.txt` 에 골든 파일로 고정돼 있어, `diff` 한 줄로 결정론 회귀를 검증한다. 플랫폼 간 `StateHash` 가 한 비트라도 다르면 멀티플레이가 desync 된다 — 이 바이너리가 마지막 방어선이다. 구체적으로는 31 스텝짜리 고정 스크립트(총 406 틱)를 **스텝 단위**로 출력하며, 기본 시드는 `0x1`, `0xDEADBEEF`, `0xC0FFEE123456789` 세 개이고 argv 로 시드 목록을 덮어쓸 수 있다.
+`sim_hash_dump`의 출력은 `python/tests/_sim_hash_dump.txt` 골든 파일과 비교한다. 플랫폼 간 `StateHash`가 한 비트라도 다르면 멀티플레이가 desync될 수 있다. 입력 스크립트·기본 시드·출력 행 수는 `tests/sim_hash_dump.cpp`가 소유하며, 문서는 고정된 개수를 복제하지 않는다. argv로 별도 시드를 넘겨 추가 진단할 수 있다.
 
 ### 3.8 타깃 4 — `tetris_relay` (릴레이 서버)
 
@@ -849,8 +853,8 @@ endif()
 # -----------------------------------------------------------------------------
 # Target: tetris_relay (matchmaking / relay server)
 #
-# 역할: TCP accept → QUEUE_JOIN 수신 → 2명 모이면 MATCH_FOUND 전송 + 바이트 포워딩.
-#       GUI/오디오/시뮬 없음 — net/ 만 재사용. Termux(Ubuntu proot ARM64) 포함 크로스.
+# 역할: TCP 접속 제한·인증·매칭·룸·결과 검증을 맡고, 게임 프레임은 전달한다.
+#       GUI/오디오/시뮬 없음 — net/ 만 재사용. Linux/macOS/Windows 서버용.
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_RELAY)
     # relay 가 meta HTTP API 를 호출하려면 httplib 헤더와 http_client.cpp 필요.
@@ -870,7 +874,9 @@ if (TETRIS_BUILD_RELAY)
         net/framing.cpp
         meta/http_client.cpp
         server/matchmaker.h
+        server/match_uuid.h
         server/player_conn.h
+        server/player_session.h
         server/relay.h
         server/room.h
         server/worker_group.h
@@ -903,7 +909,7 @@ if (TETRIS_BUILD_RELAY)
 endif()
 ```
 
-주목: 소스 목록에 `src/` 가 **한 파일도 없다**. `server/` + `net/` + `meta/http_client.cpp` 뿐이고 `net/session.cpp` 조차 없다 — 릴레이는 프레임을 해석하지 않고 바이트를 그대로 옮긴다. 다만 ranked 매치에서 meta API 를 호출할 수 있어야 하므로 `third_party/httplib.h` 는 릴레이 단독 빌드에도 필요하고, HTTPS 를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
+주목: 소스 목록에 `src/`가 없다. relay는 `SimGame`을 실행하지 않으며 `net/session.cpp`도 링크하지 않는다. unranked 매치에서는 raw byte를 전달하고, ranked 매치에서만 프레임 경계를 읽어 `MATCH_SUMMARY`를 검증·가로챈다. meta API를 호출할 수 있어야 하므로 `third_party/httplib.h`는 relay 단독 빌드에도 필요하고, HTTPS를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
 
 실행 인자는 `--port PORT` 형태다. 기본 포트는 `7777` 이지만, 저장소의 relay/room smoke 테스트는 `7788` 을 하드코딩하고 있다 — [Part 7](./part7-relay-server.md) 의 테스트 절차를 따를 때 포트를 맞춰야 한다.
 
@@ -915,10 +921,10 @@ endif()
 # -----------------------------------------------------------------------------
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
-# 역할: 별도 기기(Mac mini 등)에서 돌아가는 독립 서비스.
+# 역할: 별도 영속 호스트(S7 Termux 등)에서 돌아가는 독립 서비스.
 #       · SQLite 로 player/match/rating history/icon ownership 영속화
 #       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
-#       · relay 는 무상태 유지 — matchmaking 경로에서 HTTP 호출만 붙인다.
+#       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.
 #
 # 서드파티: third_party/sqlite3.{c,h} + third_party/httplib.h (헤더 온리).
 #           두 파일 모두 벤더링(check-in)되어 있어야 한다 — repo 루트의
@@ -969,7 +975,8 @@ if (TETRIS_BUILD_META)
         SQLITE_DEFAULT_FOREIGN_KEYS=1
     )
     if (WIN32)
-        target_link_libraries(tetris_meta PRIVATE ws2_32)
+        # BCryptGenRandom is the fail-closed CSPRNG used for guest tokens.
+        target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_meta PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -985,9 +992,9 @@ endif()
 이 블록에서 놓치기 쉬운 네 가지:
 
 1. **두 개의 존재 검사.** `sqlite3.c` 와 `sqlite3.h` 를 `OR` 로 함께 보고, `httplib.h` 를 따로 본다. 에러 메시지가 다운로드 URL 까지 알려준다.
-2. **`-w` / `/w` 경고 억제.** SQLite amalgamation 은 20만 줄이 넘는 단일 C 파일이고, 프로젝트의 경고 설정으로 컴파일하면 수천 개의 경고가 쏟아진다. `set_source_files_properties` 로 **이 파일 하나에만** 경고를 끈다. 프로젝트 전역 경고 설정을 낮추는 것과는 전혀 다르다.
+2. **`-w` / `/w` 경고 억제.** SQLite amalgamation은 큰 외부 단일 C 파일이라 프로젝트의 경고 정책과 함께 컴파일하면 저장소가 통제하지 않는 진단이 쏟아질 수 있다. `set_source_files_properties`로 **이 파일 하나에만** 경고를 끈다. 프로젝트 전역 경고 설정을 낮추는 것과는 전혀 다르다.
 3. **`meta/levels.h`.** XP → 레벨 곡선 테이블이며 헤더 목록에 포함돼 있다.
-4. **`Threads::Threads ${CMAKE_DL_LIBS}`.** 이것이 빠지면 Linux 에서 링크가 깨진다. SQLite amalgamation 은 `pthread_*` 뮤텍스와 확장 로딩용 `dlopen`/`dlsym` 을 호출하는데, 이들은 각각 pthread 와 libdl 에 있다. `${CMAKE_DL_LIBS}` 는 플랫폼에 따라 `dl` 또는 빈 문자열로 확장되는 CMake 내장 변수다.
+4. **플랫폼별 시스템 라이브러리.** Linux/macOS는 `Threads::Threads ${CMAKE_DL_LIBS}`로 SQLite의 스레드·동적 로딩 심볼을 제공한다. Windows는 HTTP socket용 `ws2_32`와 guest token CSPRNG인 `BCryptGenRandom`용 `bcrypt`를 링크한다.
 
 `tetris_meta` 는 게임 클라이언트와 독립된 HTTP+SQLite 프로세스다. 실행 인자는 `--db PATH`, `--http HOST:PORT`, `--relay-secret SECRET`, `--allow-public-matches` 이며, 기본값은 `tetris.db` 와 `127.0.0.1:8080` 이다. 운영에서는 Caddy/Tunnel 뒤에 두고 `/v1/matches` 에 `X-Relay-Secret` 을 요구한다. secret 이 없으면 기본적으로 시작하지 않고, `--allow-public-matches` 는 로컬 테스트 전용이다.
 
@@ -1255,8 +1262,9 @@ cmake --build build -j4
 | 새 학습 알고리즘 추가 | 보통 | §7.7 |
 | 새 네트워크 메시지 추가 | 보통 | §7.8 |
 | 메타 API 엔드포인트 추가 | 보통 | §7.9 |
-| 새 입력 추가 (홀드 등) | 어려움 | §7.10 |
-| 보드 크기 변경 | 어려움 | §7.11 |
+| 새 블록·규칙 변형 추가 | 어려움 | §7.10 |
+| 새 입력 추가 (홀드 등) | 어려움 | §7.11 |
+| 보드 크기 변경 | 어려움 | §7.12 |
 
 난이도는 코드량이 아니라 **깨지는 계약의 수**로 매겼다. 아래로 갈수록 한 곳을 고치면 따라 고쳐야 할 곳이 늘어난다.
 
@@ -1378,30 +1386,32 @@ gui_checkbox · gui_slider · gui_value_selector · gui_modal_dim · gui_text_ce
 
 ### 7.7 새 학습 알고리즘 추가
 
-`python/train/` 에 스크립트를 하나 더한다. 기존 것들을 복사해 시작하는 편이 빠르다.
+`python/train/`에 스크립트를 더할 때는 **학습 모델**과 **게임에 배포할 정책 모델**이 같은지 먼저 결정한다. 알고리즘이 달라도 `TetrisPolicyNet`을 직접 학습한다면 기존 스크립트의 저장과 평가 경로를 재사용할 수 있다.
 
-지켜야 할 계약은 **하나뿐**이다. 최종 산출물을 같은 형식의 체크포인트로 저장할 것.
+직접 배포할 정책의 계약은 다음과 같다.
 
 - `common.models.TetrisPolicyNet` 을 학습 대상으로 쓴다.
 - `common.checkpoint.save_checkpoint()` 로 저장한다.
-- 구조를 바꿨다면 `ARCH_VERSION` 을 올린다.
+- 입력 shape, layer 구조, 출력 계약을 바꿨다면 `TetrisPolicyNet.ARCH_VERSION`을 올린다.
 
-이 계약만 지키면 `python/netbot/export_onnx.py` 가 그대로 ONNX 로 내보내고, C++ 런타임이 그대로 실행한다. **학습 쪽이 PPO 든 DQN 이든 MuZero 든 배포 파이프라인은 모른다.**
+이 계약을 지키면 `python/netbot/export_onnx.py`가 체크포인트를 ONNX로 내보내고 C++ netbot이 실행한다. 현재 PPO·DQN·CBMPI 계열은 이 경로를 직접 쓴다.
+
+MuZero-style 학습은 예외다. `MuZeroNet`의 representation·dynamics·prediction 구조를 담은 네이티브 체크포인트는 현재 C++ bot이 실행할 수 없다. `python/train/muzero_tetris.py`는 탐색 정책을 `TetrisPolicyNet`으로 증류해 `*.policy.pt`를 따로 저장하며, 이 증류된 파일이 기존 ONNX export의 입력이다. 새 모델 구조를 그대로 배포하고 싶다면 전용 exporter와 `bot/bot_onnx.cpp`의 입출력·추론 계약까지 함께 바꿔야 한다.
 
 공통 부품은 `python/train/rl_common.py` 에 있다 — replay buffer, ε 스케줄, soft update, greedy 평가. 환경은 `common/env.py`(1인)와 `common/env_versus.py`(2보드 대전) 중 고른다.
 
-**함께 해야 할 일:** `python/tests/test_training_scripts_static.py` 가 `python/train/` 의 모든 스크립트를 정적으로 파싱해 argparse 규약을 검사한다. 새 스크립트도 자동으로 대상에 들어가므로 이 테스트를 돌려 본다.
+**함께 해야 할 일:** `python/tests/test_training_scripts_static.py`의 대상 목록에 새 스크립트를 추가한다. 이 테스트는 파일을 자동 발견하지 않으며, 등록된 학습 진입점의 Python 문법을 PyTorch import 없이 검증한다. 알고리즘별 저장·재개·export 계약은 별도 테스트가 필요하다.
 
 ### 7.8 새 네트워크 메시지 추가
 
-건드릴 곳이 **네 군데**이고, 하나라도 빠지면 조용히 어긋난다.
+새 메시지는 C++ wire 정의, 소비자, Python mirror, relay 정책을 함께 검토한다. 하나라도 빠지면 빌드는 성공해도 양쪽 해석이 어긋날 수 있다.
 
 1. **`net/framing.h`** — `enum class MsgType` 에 값 추가. **기존 값을 재사용하거나 중간에 끼워 넣지 마라.** 구버전과 붙었을 때 다른 메시지로 해석된다. 항상 뒤에 붙인다.
 2. **`net/session.cpp`** — 송신 함수를 만들고 `handleFrame()` 의 `switch` 에 수신 분기를 추가한다.
 3. **`python/netbot/framing.py`** — 같은 값을 Python 쪽 `MsgType` 에도 추가한다. 패리티 테스트가 이 둘을 대조한다.
 4. **릴레이 통과 여부 결정** — `server/relay.cpp` 의 forwarder 는 기본적으로 바이트를 그대로 흘려보내므로 대개 아무것도 안 해도 된다. 다만 서버가 **들여다봐야 하는** 메시지라면(`MATCH_SUMMARY` 처럼) 파서에 분기를 추가한다.
 
-**설계 지침:** 파서는 모르는 타입을 만나면 그 프레임만 버리고 계속 읽는다. 그래서 새 메시지를 추가해도 구버전 클라이언트가 죽지는 않는다 — 다만 그 기능이 동작하지 않을 뿐이다. 이 성질에 기대려면 새 메시지는 **없어도 게임이 굴러가는 것**이어야 한다. `INPUT` 처럼 필수인 것을 새로 만들면 그 전제가 깨진다.
+**설계 지침:** C++ `parse_frames`는 type byte를 enum으로 보존하고 `Session::handleFrame`의 `default`가 모르는 타입을 무시한다. Python 파서는 `MsgType`에 없는 값을 그 프레임만 소비하고 버린다. relay의 일반 포워더는 모르는 게임 프레임도 raw bytes로 전달한다. 따라서 선택 기능은 구버전에서 무시될 수 있지만, `INPUT`처럼 진행에 필수인 메시지를 호환 협상 없이 추가하면 한쪽만 조용히 멈춘다. “모르는 타입을 무시한다”는 동작을 프로토콜 버전 협상 대신 사용하지 않는다.
 
 **함께 해야 할 일:**
 
@@ -1426,11 +1436,23 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 uv run python -m pytest python/tests/test_meta_db_smoke.py python/tests/test_relay_meta_smoke.py -q
 ```
 
-### 7.10 새 입력 추가 (홀드, 180도 회전 등)
+### 7.10 새 블록·규칙 변형 추가
 
-여기서부터 어려워진다. 입력 하나가 **다섯 계층**에 걸쳐 있다.
+색이나 파티클만 바꾸는 스킨 작업과 새로운 모양을 게임에 넣는 규칙 변경을 분리한다. 스킨은 `src/colors.cpp`, 이미지 manifest, `Game`의 draw 경로만 바꾸면 되고 `StateHash()`는 그대로여야 한다. 새로운 piece ID나 특수 능력은 아래 계약을 함께 바꾼다.
 
-1. **`core/input.h`** — `enum InputBits` 에 비트 추가. 현재 5개를 쓰고 있어 1바이트에 3개가 남는다. **8개를 넘기면 프레이밍 포맷이 바뀐다** — `INPUT` 페이로드가 tick 당 1바이트라는 전제가 곳곳에 박혀 있다.
+1. **형상과 ID:** `src/sim_blocks.h`에 회전별 셀 좌표와 고유 ID를 정의하고 `src/sim_game.cpp`의 `SimGame::GetAllBlocks()` 반환 목록에 넣는다. 현재 생성기는 그 목록을 무작위 비복원 추출하는 bag이므로, ID·목록 순서·구성을 바꾸면 같은 seed에서도 piece 열이 달라진다. 새 모드는 기존 replay·lockstep과 호환되지 않는다.
+2. **표현:** `src/colors.cpp`의 `GetCellColors()`가 새 ID를 안전하게 인덱싱할 수 있어야 하고, `Game::DrawNextAt` 계열에서 폭과 중심이 다른 모양의 preview 위치를 확인한다. 셀 수가 달라도 `SimBlock`의 vector는 담을 수 있지만 점수·충돌·T-spin 같은 규칙이 테트로미노를 전제하는지는 별도로 검토한다.
+3. **결정론과 버전 경계:** 가방 구성, piece 상태, 특수 능력에 필요한 상태를 `StateHash()`와 `StateHashBreakdown()`에 포함한다. 기존 클라이언트와 섞이지 않도록 handshake에 명시적 ruleset/version 협상이 생기기 전에는 동일 relay 풀에서 서로 다른 규칙 빌드를 매칭하지 않는다.
+4. **Python과 봇:** `python/common/__init__.py`의 `NUM_PIECE_TYPES`, `bot/placement.h`의 `kNumPieceTypes`, C++·Python 관측 one-hot shape를 함께 바꾼다. 입력 shape가 달라지므로 `TetrisPolicyNet.ARCH_VERSION`을 올리고 기존 체크포인트와 ONNX 모델을 거부·재학습한다. C++/Python placement 패리티도 다시 검증한다.
+5. **콘텐츠 정책:** 표준 모드는 기존 tetromino와 공격표를 유지하고, 확장 블록은 별도 ruleset으로 두는 편이 안전하다. 그래야 랭킹, 밸런스 수치, replay가 서로 다른 규칙의 결과를 같은 것으로 취급하지 않는다.
+
+따라서 “블록 추가”의 첫 구현은 shape class가 아니라 **ruleset 식별과 호환 정책**이다. 온라인 기능 없이 로컬 실험만 할 때도 골든 해시가 의도적으로 바뀌었는지 검토하고, 새 모드용 기준 파일을 기존 기준과 구분한다.
+
+### 7.11 새 입력 추가 (홀드, 180도 회전 등)
+
+입력 하나는 공용 비트 정의, 시뮬레이션, 플랫폼 매핑, 앱 입력 수집, 봇 행동 공간에 걸쳐 있다.
+
+1. **`core/input.h`** — `enum InputBits`에 비트를 추가한다. 모든 입력 플래그는 현재 wire 단위인 `uint8_t` 안에 들어가야 한다. **비트 폭을 넘기면 프레이밍 포맷과 리플레이 계약이 함께 바뀐다** — `INPUT` payload가 tick당 1바이트라는 전제를 C++·Python·테스트가 공유한다.
 2. **`src/sim_game.cpp`** — `SubmitInput()` 에 처리 추가. 새 상태가 생긴다면 (홀드는 "홀드한 블록" 이라는 상태가 생긴다) **`StateHash()` 에도 반드시 넣는다.** 빠뜨리면 두 클라이언트가 다른 상태인데 해시가 같아져, DESYNC 감지가 실패한다.
 3. **`platform/win32.cpp` / `platform/sdl.cpp`** — 키를 읽는다. 두 백엔드 모두.
 4. **`src/main.cpp`** — 키를 입력 마스크로 모으는 곳에 추가.
@@ -1442,7 +1464,7 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py python/tests/test_rel
 uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_framing_parity.py -q
 ```
 
-### 7.11 보드 크기 변경
+### 7.12 보드 크기 변경
 
 가장 넓게 퍼지는 변경이다. `src/sim_grid.h` 의 두 줄로 시작하지만 거기서 끝나지 않는다.
 
@@ -1486,7 +1508,7 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 테스트 칸이 비어 있는 네 줄을 짚어 둘 만하다. 자동으로 지킬 수 없는 것이 남아 있고, 그건 알고 있는 편이 낫다.
 
-**GL 쪽 두 줄이 특히 지독하다.** 정점 버퍼는 타입 없는 `float` 배열이라, C++ 이 밀어 넣은 값과 셰이더가 읽는 속성을 이어주는 것은 사람이 맞춰 놓은 숫자(location, size, offset, stride)뿐이다. 어긋나도 GL 은 에러를 내지 않고 다른 바이트를 읽으며, `glGetError()` 도 조용하다. 링커는 셰이더를 보지도 않는다 — 셰이더는 사용자 기계의 드라이버가 런타임에 컴파일하기 때문이다. 그래서 이 계약을 지키는 방법은 §7.6 의 다섯 군데를 한 커밋에서 함께 고치고, 실행해서 눈으로 확인하는 것뿐이다.
+**GL 쪽 두 줄이 특히 지독하다.** 정점 버퍼는 타입 없는 `float` 배열이라, C++이 밀어 넣은 값과 셰이더가 읽는 속성을 이어주는 것은 사람이 맞춰 놓은 location·size·offset·stride뿐이다. 어긋나도 GL은 에러를 내지 않고 다른 바이트를 읽으며, `glGetError()`도 조용하다. 링커는 사용자 기계의 드라이버가 런타임에 컴파일하는 셰이더를 보지 못한다. 정점 작성 코드, stride/offset 선언, attribute location, 셰이더 입력을 한 변경으로 맞추고 렌더 데모에서 실제 픽셀을 확인해야 한다.
 
 **여기 없는 계약도 하나 짚어 둔다 — "렌더 출력이 어디서나 같다" 는 계약은 없다.** GPU 래스터화 규칙은 벤더·드라이버·창 크기에 따라 경계 픽셀이 달라질 수 있고, 이 프로젝트는 그것을 검사하지 않는다. lockstep 이 desync 검출에 쓰는 것은 `SimGame::StateHash()` 이고 그 해시는 grid·블록·RNG·점수만 먹는다. 두 결정성은 처음부터 별개였다 — **잃은 것은 픽셀 단위 재현성이고, 잃지 않은 것은 게임 진행의 재현성이다.** 멀티플레이가 기대는 것은 후자뿐이다.
 
@@ -1494,7 +1516,7 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 ## 이 장에서 완성된 것
 
-- 완성된 저장소의 디렉터리 경계와 다섯 개 타깃의 관계를 한자리에서 본다.
+- 완성된 저장소의 디렉터리 경계와 빌드 타깃 관계를 한자리에서 본다.
 - `CMakeLists.txt` 의 각 옵션이 어떤 소스와 라이브러리를 끌어오는지 추적할 수 있다.
 - 무언가를 고치고 싶을 때 어느 파일을 건드려야 하고 무엇이 함께 깨지는지 안다.
 
@@ -1502,6 +1524,6 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 이 시리즈는 엔진이 대신 해주던 일들을 하나씩 열어 보는 과정이었다. 창을 만들고, GL 컨텍스트를 세워 삼각형을 밀어 넣고, 소리를 섞고, 두 대의 컴퓨터를 같은 상태로 붙들고, 그 위에서 신경망을 돌렸다. 각각은 엔진에서 체크박스 하나였던 것들이다.
 
-그래서 얻은 것은 테트리스가 아니라 **경계에 대한 감각**이다. 어디까지가 게임 규칙이고 어디부터가 표현인지, 무엇이 결정적이어야 하고 무엇은 달라도 되는지, 어떤 계약이 컴파일러의 보호를 받고 어떤 것은 사람이 지켜야 하는지. §8 의 아홉 줄이 그 요약이다.
+그래서 얻은 것은 테트리스가 아니라 **경계에 대한 감각**이다. 어디까지가 게임 규칙이고 어디부터가 표현인지, 무엇이 결정적이어야 하고 무엇은 달라도 되는지, 어떤 계약이 컴파일러의 보호를 받고 어떤 것은 사람이 지켜야 하는지. §8의 계약 표가 그 요약이다.
 
 다음에 엔진을 쓸 때, 그 체크박스 뒤에 무엇이 있는지 알고 쓰게 된다면 이 시리즈는 제 몫을 한 것이다.

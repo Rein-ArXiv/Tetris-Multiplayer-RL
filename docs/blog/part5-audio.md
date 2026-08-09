@@ -658,7 +658,7 @@ void audio_stop_music()
 | 대기 시간 | 로딩 시 수백 ms | 없음 |
 | 필요한 것 | `SubmitSourceBuffer` 1 회 | `IXAudio2VoiceCallback` 구현 |
 
-이 프로젝트는 프리로드를 택했다. 근거는 §6 에서 수치로 뜯어본다.
+이 프로젝트는 프리로드를 택했다. 에셋 집합이 작고 고정되어 있어 시작 시 decode 비용을 감당할 수 있고, 그 대가로 재생 경로에서는 디스크 I/O·MP3 decode·가변 할당을 제거할 수 있기 때문이다.
 
 ---
 
@@ -1521,7 +1521,7 @@ void audio_shutdown()
 관전 포인트.
 
 - `want.samples = 1024`. 콜백이 한 번에 요청하는 프레임 수. 1024 프레임은 44.1 kHz 에서 약 **23.2 ms** 블록이다. 이것이 SDL 백엔드의 콜백 블록 크기이자 지연의 하한선이다. XAudio2 쪽은 `audio.cpp` 에 버퍼 크기를 명시하지 않으므로 OS/드라이버 기본값을 따르며, 실제 지연은 대상 장치에서 측정해야 한다.
-- `SDL_AUDIO_ALLOW_FREQUENCY_CHANGE`. 디바이스가 44.1 kHz 를 지원하지 않으면 48 kHz 등으로 열릴 수 있고, 실제 값이 `s_have.freq` 에 들어온다. 이 플래그와 "리샘플링 안 함" 정책의 조합은 잠재 버그다 — §13.6 에서 따로 다룬다.
+- `SDL_AUDIO_ALLOW_FREQUENCY_CHANGE`. 디바이스가 요청 주파수를 지원하지 않으면 다른 값으로 열릴 수 있고, 실제 값이 `s_have.freq` 에 들어온다. 현재 mixer가 source를 device 주파수로 리샘플링하지 않으므로 두 값이 다르면 재생 속도와 pitch가 함께 달라질 수 있다. 운영 빌드는 실제 주파수가 요청값과 같은지 확인하고, 폭넓은 장치를 지원하려면 `SDL_AudioStream` 같은 변환 단계를 넣어야 한다.
 - `SDL_PauseAudioDevice(s_dev, 0)` — 열기만 하면 일시정지 상태다. `0` 이 "재생 시작", `1` 이 "일시정지". 이 한 줄을 빠뜨리면 완벽히 초기화됐는데 무음이다.
 - `SDL_InitSubSystem(SDL_INIT_AUDIO)` — SDL 창/이벤트를 이미 쓰고 있어도 오디오 서브시스템은 별도로 올린다. XAudio2 백엔드의 `CoInitializeEx` 에 대응한다.
 - 종료에서 `SDL_PauseAudioDevice(s_dev, 1)` 을 `SDL_CloseAudioDevice` 보다 **먼저** 부른다. 콜백을 멈춘 뒤에 장치를 닫아야 콜백이 해제된 상태를 만지지 않는다. §13.3 의 "의존하는 쪽을 먼저" 원칙의 SDL 판이다.
@@ -1719,7 +1719,7 @@ XAudio2 쪽 `audio_play_music` 이 `s_lastMusic` 기록과 `start_music_voice` �
 
 ### 9.1 왜 지금 만드는가
 
-`audio.h` 의 나머지 네 함수 — `audio_set_music_enabled`, `audio_set_sfx_enabled`, `audio_set_music_volume`, `audio_set_sfx_volume` — 는 [Part 11](./part11-settings-and-options.md) 의 설정 화면이 구동하지만 **정의는 이 장의 파일에 있다.** 미루면 두 가지가 깨진다.
+`audio.h`의 설정 API인 `audio_set_music_enabled`, `audio_set_sfx_enabled`, `audio_set_music_volume`, `audio_set_sfx_volume`은 설정 화면이 호출하지만 **정의는 오디오 계층에 있다.** UI보다 먼저 이 계약을 만들지 않으면 시작 시 기본값 적용과 백엔드 간 동등성이 깨진다.
 
 1. 앞에서 인용한 `audio_play_sound` 의 `if (!s_sfxEnabled) return;` 과 `SetVolume(s_sfxVol)`, `mix_voice` 의 `gain` 인자가 참조할 상태가 없다. 이 장의 코드가 컴파일되지 않는다.
 2. Part 11 대로 UI 를 붙이는 순간 정의 없는 심볼 네 개로 링크 에러가 난다.
@@ -1855,7 +1855,7 @@ XAudio2 판과 의미가 같고 표현만 다르다. BGM 복원은 보이스 구
     audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
 ```
 
-이 시점에는 오디오 장치가 아직 열려 있지 않다(`s_initialized == false`). 네 세터는 이 상태에서 전역 기본값만 안전하게 갱신한다. 장치가 열린 뒤에는 설정 화면의 슬라이더와 토글이 같은 네 함수를 다시 호출하고, 선택값은 `src/settings.cpp`가 `settings.cfg`에 저장한다.
+이 시점에는 오디오 장치가 아직 열려 있지 않다(`s_initialized == false`). 설정 세터는 이 상태에서 전역 기본값만 안전하게 갱신한다. 장치가 열린 뒤에는 슬라이더와 토글이 같은 API를 다시 호출하고, 선택값은 설정 파일에 저장된다.
 
 ---
 
@@ -1934,7 +1934,8 @@ audio_init() 실패
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
+# TETRIS_USE_SDL2 — Use SDL2 for the cross-platform window/input/GL context and audio backend.
+# Text and images still go through the shared OpenGL renderer.
 # Default ON on non-Windows so macOS/Linux users get it automatically.
 # On Windows, default OFF to preserve the handmade Win32 window/audio path.
 if (WIN32)
@@ -1944,9 +1945,13 @@ else()
 endif()
 ```
 
-**non-Windows 는 기본 ON → SDL2 백엔드**, **Windows 는 기본 OFF → Handmade(XAudio2) 백엔드**. §8.1 에서 설명한 판단이 이 여덟 줄로 코드화돼 있다.
+**non-Windows는 기본 ON → SDL2 백엔드**, **Windows는 기본 OFF → Handmade(XAudio2) 백엔드**다. CMake 옵션 블록이 이 플랫폼 기본값을 코드화한다.
 
-옵션 이름의 주석은 "window + audio + text" 라고 적혀 있지만, **텍스트는 실제로 갈리지 않는다.** 텍스트 렌더링은 `renderer/text_gl.cpp`(stb_truetype + 글리프 아틀라스) 하나로 공통이고 두 분기 모두 `TETRIS_GAME_COMMON` 을 통해 그것을 쓴다. 렌더러 전체가 그렇다 — 두 백엔드가 같은 OpenGL 3.3 Core 컨텍스트를 만들어 주므로 `renderer/*.cpp` 는 한 벌이다. 이 옵션이 실제로 가르는 것은 **창/컨텍스트 생성 계층과 오디오 백엔드 둘뿐**이다.
+옵션 주석이 밝히듯 이 분기가 고르는 것은 **창·입력·GL 컨텍스트 계층과 오디오
+백엔드**다. 텍스트는 `renderer/text_gl.cpp`(stb_truetype + 글리프 아틀라스)
+하나로 공통이고 두 분기 모두 `TETRIS_GAME_COMMON`을 통해 사용한다. 이미지와
+도형도 같은 OpenGL renderer를 공유하므로 플랫폼 백엔드 선택이 글자 배치나
+게임 좌표 계약을 갈라놓지 않는다.
 
 ### 11.2 Part 5 시점의 CMakeLists
 
@@ -2416,7 +2421,7 @@ static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
 | SFX 재생 | fire-and-forget | Source Voice 풀 8 + `SubmitSourceBuffer` | `Voice` 구조체 풀 8 + 콜백 믹스 |
 | BGM 재생 | 무한 루프 | `XAUDIO2_LOOP_INFINITE` | `v.pos = 0` (콜백 내) |
 | 믹싱 | 다중 소스 합산 | XAudio2 엔진 (숨겨짐) | 게인 곱 + 포화 합산 (`mix_voice`) |
-| 볼륨/토글 | 설정 4 함수 | 보이스 `SetVolume` + 조기 반환 | 콜백 `gain` 인자 + 조기 반환 |
+| 볼륨/토글 | `audio_set_*` 설정 API | 보이스 `SetVolume` + 조기 반환 | 콜백 `gain` 인자 + 조기 반환 |
 | 스레드 보호 | 콜백 ↔ 메인 | COM 내부 락 | `std::mutex s_mu` |
 | 이벤트 시그널링 | SimGame → Game | `mutable bool` 4 종 | 동일 |
 | 장치 참조 카운팅 | 멀티플레이 안전 | `s_refCount` | `s_refCount` |
@@ -2428,13 +2433,13 @@ static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
 
 ## 이 장에서 완성된 것
 
-- `audio/audio.h` — 11 개 함수(재생 7 + 설정 4)로 된 백엔드 독립 인터페이스.
+- `audio/audio.h` — 로드·재생·해제와 설정을 묶은 백엔드 독립 인터페이스.
 - Windows 네이티브 XAudio2 백엔드(`audio/audio.cpp`): COM 초기화 → 엔진 생성 → Mastering Voice → Source Voice 풀 8 → dr_mp3 전체 디코드 → BGM 무한 루프.
 - 크로스플랫폼 SDL2 백엔드(`audio/sdl_audio.cpp`): `SDL_OpenAudioDevice` 콜백 + 직접 작성한 소프트웨어 믹서(모노→스테레오 승격, 카테고리 게인, 포화 합산) + `Voice` 구조체 풀 8. 같은 `audio.h` API 전부.
 - `SimGame` 의 일회성 이벤트 플래그 4 종과 그것을 `Game::SubmitInput`/`Game::Tick` 에서만 소비하는 경로. 시뮬레이션은 오디오를 모르고, `apply_fx` 도 오디오를 모른다.
 - 에셋 폴백: `drop.mp3` / `garbage.mp3` 가 없으면 재생 시점에 rotate / clear 로 대체.
 - 두 단계 참조 카운팅: 장치 수명(`s_refCount`)과 BGM 에셋 수명 (`sharedMusic`/`sharedMusicUsers`). 멀티플레이 두 인스턴스와 게임 재시작 모두에서 장치 재개방·BGM 재디코딩이 일어나지 않는다.
-- 설정 토글/볼륨 4 함수의 정의. [Part 11](./part11-settings-and-options.md) 은 여기에 슬라이더 UI 와 영속화만 붙인다.
+- 설정 토글·볼륨 API의 정의. 설정 화면은 여기에 슬라이더 UI와 영속화만 붙인다.
 - `CMakeLists.txt` 의 `TETRIS_USE_SDL2` 분기 — 오디오 `.cpp` 를 정확히 하나만 넣는다.
 - 두 백엔드 모두에서 "오디오 실패 = 무음, 게임은 계속" 원칙 유지.
 

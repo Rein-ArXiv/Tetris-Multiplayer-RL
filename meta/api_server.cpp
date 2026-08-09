@@ -9,14 +9,21 @@
   #endif
 #endif
 #include "httplib.h"
+#ifdef _WIN32
+  #include <bcrypt.h>
+#else
+  #include <fcntl.h>
+  #include <unistd.h>
+#endif
 
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
-#include <cstring>
+#include <limits>
 #include <mutex>
-#include <random>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -26,31 +33,45 @@ namespace meta {
 
 namespace {
 
-// Prefer the OS entropy source; random_device is the portability fallback.
-void fill_random(unsigned char* out, size_t n)
+// 인증 토큰은 플랫폼 CSPRNG에서만 만든다. 엔트로피 소스가 실패했을 때
+// random_device나 시간값으로 폴백하면 "서비스 가용" 상태처럼 보이면서 예측 가능한
+// 토큰을 발급할 수 있다. 이 경우 guest 요청 자체를 실패-폐쇄하는 편이 안전하다.
+bool fill_random(unsigned char* out, size_t n)
 {
-#ifndef _WIN32
-    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
-        size_t got = std::fread(out, 1, n, f);
-        std::fclose(f);
-        if (got == n) return;
+#ifdef _WIN32
+    if (n > static_cast<size_t>(std::numeric_limits<ULONG>::max())) return false;
+    return BCryptGenRandom(nullptr, out, static_cast<ULONG>(n),
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#else
+    // Linux와 macOS에서 공통으로 쓸 수 있는 커널 난수 장치를 직접 읽는다.
+    // read는 요청한 길이보다 짧게 성공할 수 있고 signal에 끊길 수도 있으므로
+    // 한 번의 호출 결과를 토큰 전체로 착각하지 않는다.
+    int flags = O_RDONLY;
+    #ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+    #endif
+    const int fd = ::open("/dev/urandom", flags);
+    if (fd < 0) return false;
+    size_t done = 0;
+    while (done < n) {
+        const ssize_t got = ::read(fd, out + done, n - done);
+        if (got > 0) {
+            done += static_cast<size_t>(got);
+            continue;
+        }
+        if (got < 0 && errno == EINTR) continue;
+        break;
     }
+    ::close(fd);
+    return done == n;
 #endif
-    std::random_device rd;
-    size_t i = 0;
-    while (i < n) {
-        uint32_t x = rd();
-        size_t take = (n - i < 4) ? (n - i) : 4;
-        std::memcpy(out + i, &x, take);
-        i += take;
-    }
 }
 
 // 32 hex chars 무작위 토큰 (16 바이트 = 128비트 엔트로피).
-std::string gen_token()
+std::optional<std::string> gen_token()
 {
     unsigned char raw[16];
-    fill_random(raw, sizeof(raw));
+    if (!fill_random(raw, sizeof(raw))) return std::nullopt;
     static const char hex[] = "0123456789abcdef";
     char buf[33];
     for (int i = 0; i < 16; ++i) {
@@ -94,7 +115,10 @@ bool valid_match_uuid(const std::string& s)
     return true;
 }
 
-// Trust forwarding headers only from a loopback reverse proxy.
+// 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
+// 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
+// 버킷을 우회할 수 있다. Mac mini proxy → S7 meta 같은 분리 배치에서는 모든
+// 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은 edge가 맡아야 한다.
 std::string rate_limit_key(const httplib::Request& req)
 {
     const bool from_loopback =
@@ -181,7 +205,14 @@ bool ApiServer::listen(const std::string& host, int port)
             // registerGuest 가 nullopt 반환 시 한 번만 재시도.
             for (int attempt = 0; attempt < 2; ++attempt) {
                 auto token = gen_token();
-                auto p = db_.registerGuest(token);
+                if (!token) {
+                    std::fprintf(stderr, "[meta] OS CSPRNG unavailable; refusing guest token\n");
+                    set_json(res, 500,
+                             proto::error_json("entropy_unavailable",
+                                               "secure token generation failed"));
+                    return;
+                }
+                auto p = db_.registerGuest(*token);
                 if (p) {
                     set_json(res, 200, proto::guest_response(
                         p->id, p->token, p->elo, p->bp, p->xp,

@@ -5,9 +5,10 @@
 
 ## 권장 읽기 순서
 
-1. [`blog/README.md`](blog/README.md) — 전체 증축 순서와 Part별 완료 기준
-2. Part 0~7로 공통 게임·네트워크 수직 슬라이스를 구현
-3. 목적에 따라 서비스·출시(Part 10→11→12) 또는 AI(Part 8→9) 경로 진행
+1. [`blog/README.md`](blog/README.md) — 의존성에 따른 구현 경로와 Part별 완료 기준
+2. Part 0~4로 규칙 엔진부터 실행 가능한 게임 클라이언트까지 구현
+3. 목적에 따라 온라인 서비스(Part 5→6→7→10→11→12), 학습 전용 AI
+   (Part 0→1→8), 인게임 AI(Part 0~4 + Part 8→9) 경로 진행
    (Part 13은 순서대로 읽는 장이 아니라 완성 구조를 찾는 레퍼런스다)
 4. [`README.md`](../README.md) — 완성된 프로젝트의 빠른 실행 요약
 5. [`GUIDE.md`](../GUIDE.md) — 완성 코드의 흐름을 짧게 복습
@@ -22,7 +23,7 @@
 |---|---|---|
 | 현재 품질과 위험 확인 | [`code-review.md`](code-review.md) | [`ARCHITECTURE.md`](../ARCHITECTURE.md) §15 |
 | 처음 빌드하고 실행 | [`README.md`](../README.md) | [`DEPLOY.md`](../DEPLOY.md) |
-| 이론과 코드를 누적 구현 | [`blog/README.md`](blog/README.md) | 공통 Part 0~7 뒤 서비스 또는 AI 경로 |
+| 이론과 코드를 누적 구현 | [`blog/README.md`](blog/README.md) | 클라이언트·온라인 서비스·학습·인게임 AI 중 목적별 경로 |
 | 완성 구조 확인 · 고칠 곳 찾기 | [`blog/part13-structure-and-build-reference.md`](blog/part13-structure-and-build-reference.md) | [`ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | 완성 코드를 빠르게 이해 | [`GUIDE.md`](../GUIDE.md) | 실제 코드 → [`ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | 공개 서버 운영 | [`DEPLOY.md`](../DEPLOY.md) | [`public-server-deployment.md`](public-server-deployment.md) |

@@ -6,7 +6,7 @@
 
 ## 이번 Part의 구현 계약
 
-- **선행 상태:** [Part 7](./part7-relay-server.md) 의 `tetris_relay`(`Matchmaker`, `RoomRegistry`, `forwarderLoop`)와 [Part 6](./part6-lockstep-networking.md) 의 `net::MsgType::MATCH_SUMMARY` / `MATCH_RESULT` wire 경계가 동작한다. 클라이언트는 [Part 4](./part4-game-wrapper-and-loop.md) 의 `AppMode` 메뉴 루프와 [Part 3](./part3-rendering-and-ui.md) 의 `gui_button` / `gui_hover_rect` 를 가지고 있다.
+- **선행 상태:** [Part 7](./part7-relay-server.md)의 `tetris_relay`(`Matchmaker`, `RoomRegistry`, `forwarderLoop`)와 [Part 6](./part6-lockstep-networking.md)의 framing·`Session` 수신 기반이 동작한다. 이 장이 `MATCH_SUMMARY` / `MATCH_RESULT`에 랭킹 의미를 부여하고 relay의 선택적 해석 경계를 완성한다. 클라이언트는 [Part 4](./part4-game-wrapper-and-loop.md)의 `AppMode` 메뉴 루프와 [Part 3](./part3-rendering-and-ui.md)의 기본 GUI 위젯을 가지고 있다.
 - **이번 Part의 파일:**
   - 새로 만드는 것: `meta/database.h`, `meta/database.cpp`, `meta/api_server.h`, `meta/api_server.cpp`, `meta/elo.h`, `meta/levels.h`, `meta/protocol.h`, `meta/main.cpp`, `meta/http_client.h`, `meta/http_client.cpp`, `web/ranking/index.html`
   - 벤더링하는 것: `third_party/sqlite3.c`, `third_party/sqlite3.h`, `third_party/httplib.h`
@@ -34,7 +34,7 @@ graph TB
         C2["meta::client::MetaClient<br/>meta/http_client.cpp"]
         C1 --> C2
     end
-    subgraph Relay["tetris_relay (무상태)"]
+    subgraph Relay["tetris_relay (비영속 상태)"]
         R1[server/player_conn.cpp<br/>authenticate]
         R2[server/relay.cpp<br/>forwarderLoop / finalizeRanked]
         R3["meta::client::MetaClient<br/>같은 .cpp 를 링크"]
@@ -67,9 +67,9 @@ graph TB
 
 **(a) 파일 JSON/CSV.** 의존성이 0 이고 손으로 읽을 수 있다. 그러나 "BP 를 차감하고 `player_icons` 에 행을 넣는다" 같은 두 단계 갱신을 원자적으로 만들 방법이 없다. 프로세스가 중간에 죽으면 BP 만 사라진 플레이어가 생긴다. 파일 전체를 쓰고 rename 하는 방식으로 원자성을 흉내낼 수는 있지만, 플레이어가 수천 명이 되면 매 요청마다 전체 파일을 다시 쓰게 된다.
 
-**(b) PostgreSQL.** 동시성과 운영 도구가 훌륭하지만 이 프로젝트에는 과하다. 별도 데몬, 별도 사용자/권한, 별도 백업 파이프라인, 별도 포트가 생긴다. 배포 대상이 "집에 있는 Mac mini 한 대"인 상황에서 얻는 것보다 잃는 것이 크다.
+**(b) PostgreSQL.** 동시성과 운영 도구가 훌륭하지만 초기 자가 호스팅 규모에는 과하다. 별도 데몬, 별도 사용자·권한, 별도 백업 파이프라인과 네트워크 경계가 생긴다. 여러 meta 인스턴스와 진정한 active-active 운영이 필요해질 때는 이 비용이 타당해진다.
 
-**(c) SQLite.** 트랜잭션·인덱스·타입·외래키를 전부 갖췄고, 배포 산출물은 파일 하나다. `cp tetris.db backup.db` 가 곧 백업이고, amalgamation(`sqlite3.c`) 한 파일을 프로젝트에 넣으면 링크 의존성도 없다. 이 프로젝트의 쓰기 트래픽은 "매치가 끝날 때마다 트랜잭션 하나"라 초당 수십 건도 되지 않는다.
+**(c) SQLite.** 트랜잭션·인덱스·타입·외래키를 갖췄고, DB 엔진은 amalgamation(`sqlite3.c`)으로 바이너리에 포함할 수 있다. 저장 모델도 “매치 종료 시 짧은 트랜잭션” 중심이라 단일 writer 구조로 시작하기에 알맞다. 다만 WAL 모드의 실행 중 DB는 `.db` 파일 하나를 `cp`해서 백업하면 안 된다. 일관된 온라인 백업은 SQLite backup API를 사용하고, 단순 파일 복사는 meta를 멈춘 오프라인 상태에서만 한다.
 
 (c) 를 고른 대가는 **처리량 상한**이다. `Database` 는 SQLite connection 하나를 공유하고 그 위를 `std::mutex` 로 완전히 직렬화한다. 즉 동시 요청이 100 개 들어와도 DB 작업은 한 줄로 선다. 이것은 최적화가 아니라 의도적 단순화다 — `meta/database.h` 상단이 그 이유를 명시한다.
 
@@ -95,13 +95,14 @@ graph TB
 // WAL + foreign keys + NORMAL.
 ```
 
-WAL(Write-Ahead Logging) 은 이 구조에서 특히 잘 맞는다. 기본 rollback journal 모드에서는 쓰기 트랜잭션이 DB 파일 전체에 배타 락을 걸어 읽기까지 막지만, WAL 은 쓰기를 별도 로그 파일에 붙이고 읽기는 원래 파일에서 계속 진행시킨다. `POST /v1/matches` 가 트랜잭션을 잡고 있는 동안에도 `GET /v1/leaderboard` 가 막히지 않는다는 뜻이다. 우리는 커넥션이 하나뿐이라 이 이점을 절반만 쓰지만, WAL 은 크래시 복구 특성도 더 낫기 때문에 그대로 켠다.
+WAL(Write-Ahead Logging)은 writer와 별도 connection의 reader가 서로 덜 막히게 하는 저장 방식이다. 그러나 현재 `Database`는 connection 하나와 mutex 하나를 공유하므로, 같은 프로세스의 `POST /v1/matches`가 DB 작업을 하는 동안 `GET /v1/leaderboard`도 그 mutex에서 기다린다. 현재 선택의 직접적인 이점은 안전한 크래시 복구와 짧은 트랜잭션이고, 나중에 읽기 전용 connection을 분리할 때 WAL의 동시 읽기 장점을 온전히 사용할 수 있다.
 
 `synchronous = NORMAL` 은 매 커밋마다 fsync 를 부르지 않는 절충이다. OS 가 죽으면 마지막 몇 트랜잭션을 잃을 수 있지만 프로세스가 죽는 것만으로는 잃지 않는다. "마지막 한 판의 RP 가 유실될 수 있음"은 이 게임에서 감당 가능한 위험이고, 그 대가로 커밋 지연이 크게 줄어든다.
 
 ## 2. CMakeLists 확장
 
-이 장은 서드파티 두 개(SQLite amalgamation, cpp-httplib)와 새 타깃 하나를 추가하고, 기존 게임 클라이언트에 소스 파일 하나를 붙인다.
+이 장은 SQLite amalgamation과 cpp-httplib를 빌드 경계에 넣고, `tetris_meta` 타깃과
+게임·relay가 공유하는 HTTP client 경로를 연결한다.
 
 먼저 `tetris_meta` 타깃이다.
 
@@ -111,10 +112,10 @@ WAL(Write-Ahead Logging) 은 이 구조에서 특히 잘 맞는다. 기본 rollb
 # -----------------------------------------------------------------------------
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
-# 역할: 별도 기기(Mac mini 등)에서 돌아가는 독립 서비스.
+# 역할: 별도 영속 호스트(S7 Termux 등)에서 돌아가는 독립 서비스.
 #       · SQLite 로 player/match/rating history/icon ownership 영속화
 #       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
-#       · relay 는 무상태 유지 — matchmaking 경로에서 HTTP 호출만 붙인다.
+#       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.
 #
 # 서드파티: third_party/sqlite3.{c,h} + third_party/httplib.h (헤더 온리).
 #           두 파일 모두 벤더링(check-in)되어 있어야 한다 — repo 루트의
@@ -165,7 +166,8 @@ if (TETRIS_BUILD_META)
         SQLITE_DEFAULT_FOREIGN_KEYS=1
     )
     if (WIN32)
-        target_link_libraries(tetris_meta PRIVATE ws2_32)
+        # BCryptGenRandom is the fail-closed CSPRNG used for guest tokens.
+        target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_meta PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -178,12 +180,14 @@ if (TETRIS_BUILD_META)
 endif()
 ```
 
-읽을 거리가 네 군데 있다.
+이 블록에서 놓치기 쉬운 지점은 다음과 같다.
 
 - **존재 검사 FATAL_ERROR.** 두 서드파티는 저장소에 체크인돼 있어야 한다. 없으면 configure 단계에서 즉시 죽는다. 컴파일이 한참 돌다가 `#include "sqlite3.h"` 에서 실패하는 것보다 낫다.
-- **`COMPILE_OPTIONS "-w"`.** amalgamation 은 20만 줄짜리 C 파일이고 프로젝트의 경고 설정과 맞지 않는다. 그 파일 하나만 경고를 끈다. 우리가 고칠 코드가 아니다.
+- **`COMPILE_OPTIONS "-w"`.** amalgamation은 큰 외부 단일 C 파일이라 프로젝트의 경고 설정과 맞지 않을 수 있다. 그 파일 하나만 경고를 끈다. 우리가 고칠 코드가 아니다.
 - **`SQLITE_THREADSAFE=1`.** `database.h` 가 전제한 serialized 모드를 명시적으로 건다. 기본값이지만 배포판에 따라 다를 수 있어 못 박는다.
 - **`SQLITE_DEFAULT_FOREIGN_KEYS=1`.** SQLite 는 역사적 이유로 외래키를 기본 비활성으로 둔다. 스키마의 `REFERENCES` 가 장식이 되지 않도록 컴파일 시점에 켜고, 런타임에도 `PRAGMA foreign_keys = ON` 으로 한 번 더 건다.
+- **Windows `bcrypt`.** guest token을 `BCryptGenRandom`으로 만들기 위한 시스템
+  라이브러리다. HTTP socket용 `ws2_32`와 목적이 다르므로 둘 다 필요하다.
 
 프로젝트 루트에는 `project(tetris CXX C)` 로 C 언어가 이미 켜져 있다. `sqlite3.c` 때문이다.
 
@@ -236,9 +240,9 @@ if (TETRIS_BUILD_GAME)
 
 relay도 같은 파일을 링크한다(`CMakeLists.txt`). `meta/http_client.cpp`는 HTTP를 호출하는 `tetris`와 `tetris_relay`에 들어가고, 요청을 받는 `tetris_meta`는 서버 측 구현만 링크한다. 타깃 수가 늘어도 호출자와 제공자를 구분하는 이 기준을 따른다.
 
-HTTPS 는 선택 기능이다. `TETRIS_ENABLE_HTTPS` 가 켜져 있고 OpenSSL 이 발견되면 `CPPHTTPLIB_OPENSSL_SUPPORT` 를 정의하고 링크한다(`CMakeLists.txt`, `372-375`). 없으면 `https://` URL 은 런타임에 거부된다 — 조용히 평문으로 떨어지지 않는다. 이 게이팅은 뒤의 `MetaClient` 생성자에서 다시 본다.
+HTTPS는 선택 기능이다. `TETRIS_ENABLE_HTTPS`가 켜져 있고 OpenSSL이 발견되면 `CPPHTTPLIB_OPENSSL_SUPPORT`를 정의하고 링크한다(`CMakeLists.txt`의 OpenSSL 옵션 블록). 없으면 `https://` URL은 런타임에 거부된다. 조용히 평문으로 떨어지지 않는다. 같은 계약은 `MetaClient` 생성자가 실제 URL을 받을 때도 검사한다.
 
-이 시점의 CMake 확장은 최종 저장소와 동일하다. 이후 Part 는 이 블록을 바꾸지 않는다.
+이 CMake 블록은 현재 최종 저장소의 meta 타깃과 같다. 관련 의존성이나 소스가 바뀌면 이 발췌와 Part 13의 빌드 레퍼런스를 함께 갱신한다.
 
 빌드 명령은 다음과 같다.
 
@@ -249,7 +253,7 @@ cmake --build build --target tetris_relay tetris_meta
 
 `tetris_meta` 와 `tetris_relay` 두 실행 파일이 생긴다. 게임 클라이언트를 함께 빌드하려면 `-DTETRIS_BUILD_GAME=ON`(기본값)으로 두면 된다.
 
-## 3. 데이터 모델 — 다섯 테이블과 조회·멱등성 인덱스
+## 3. 데이터 모델 — 영속 상태와 조회·멱등성 인덱스
 
 스키마는 `meta/database.cpp` 안의 문자열 리터럴 하나다. 서버가 뜰 때마다 `CREATE TABLE IF NOT EXISTS` 로 통째로 실행하므로, 새 DB 파일을 지정하면 그 자리에서 스키마가 만들어진다.
 
@@ -371,7 +375,7 @@ Database::~Database()
 
 `sqlite3_busy_timeout(db_, 5000)` 은 §1 의 mutex 직렬화와 짝을 이룬다. 우리 프로세스 안에서는 mutex 가 이미 모든 접근을 한 줄로 세우므로 SQLITE_BUSY 가 날 일이 없지만, **같은 DB 파일을 다른 프로세스가 열고 있을 때**(운영 중 `sqlite3` 셸로 조회, 백업 스크립트, 잘못 띄운 두 번째 `tetris_meta`)는 얘기가 다르다. 그때 기본 동작은 즉시 `SQLITE_BUSY` 반환이고, 우리 코드는 그것을 "DB 오류"로 보고 HTTP 500 을 돌려준다. 5 초 대기를 걸어두면 대부분의 짧은 외부 락은 그냥 지나간다.
 
-## 4. 스키마 진화 — 두 가지 마이그레이션
+## 4. 스키마 진화 — 컬럼 추가와 데이터 변환
 
 `execSchema()` 는 스키마 실행 후 두 종류의 마이그레이션을 돌린다. **컬럼 추가**와 **데이터 변환**이다. 둘의 멱등성 확보 방식이 다르다는 점이 이 절의 핵심이다.
 
@@ -479,8 +483,8 @@ SQLite 의 관용적인 답은 `PRAGMA user_version` 이다. 파일 헤더의 �
 
 ```mermaid
 flowchart TD
-    A[execSchema 시작] --> B["CREATE TABLE IF NOT EXISTS ×5<br/>CREATE INDEX ×4"]
-    B --> C["ALTER TABLE ADD COLUMN ×3<br/>duplicate column name 은 무시"]
+    A[execSchema 시작] --> B["현재 스키마의 테이블·인덱스를<br/>IF NOT EXISTS로 확보"]
+    B --> C["players에 필요한 컬럼 보강<br/>duplicate column name만 무시"]
     C --> D{"schema_migrations 에<br/>elo_to_rp_v1 있음?"}
     D -- 예 --> Z[완료 — 아무것도 안 함]
     D -- 아니오 --> E{"PRAGMA user_version < 1?"}
@@ -732,9 +736,9 @@ constexpr int kXpLoss = 50;
 
 `ruby` 100 BP, `gold` 250 BP 라는 가격은 이 적립 곡선에서 나왔다. 승률 50% 로 플레이하면 판당 평균 20 BP 이므로 ruby 는 약 5 판, gold 는 약 13 판이다. "몇 판 하면 첫 아이템이 잡힌다"가 목표였다.
 
-## 7. `saveMatch` — 한 트랜잭션에 담기는 다섯 가지 갱신
+## 7. `saveMatch` — 경기 결과를 한 트랜잭션에 묶기
 
-매치 하나가 저장될 때 바뀌는 것은 다섯 가지다. matches 행 하나, players 행 둘, elo_history 행 둘. 이 중 어느 하나라도 빠지면 DB 는 모순 상태가 된다 — 예를 들어 players 의 RP 는 올랐는데 elo_history 가 없으면 "언제 올랐는지 모르는 점수"가 생긴다.
+매치 저장은 감사용 `matches` 행, 양쪽 `players` 집계, 각 플레이어의 `elo_history`를 함께 바꾼다. 어느 일부만 반영돼도 DB는 모순 상태가 된다. 예를 들어 players의 RP는 올랐는데 history가 없으면 "언제 올랐는지 모르는 점수"가 생긴다.
 
 **현재 소스 발췌 — `meta/database.cpp`**
 
@@ -1052,7 +1056,7 @@ std::optional<Player> read_player_by_token(sqlite3* db, const std::string& token
 
 한 줄로 "카탈로그는 언제든 줄여도 된다"는 성질을 얻는다. `players` 테이블을 일괄 UPDATE 할 필요가 없다.
 
-### 8.3 구매 — 다섯 단계 검증과 조건부 UPDATE
+### 8.3 구매 — 검증과 조건부 UPDATE
 
 **현재 소스 발췌 — `meta/database.cpp`**
 
@@ -1511,7 +1515,7 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
             if (!valid_match_uuid(matchUuid) ||
                 !pa || !pb || !sa || !sb || !la || !lb || !du) {
                 set_json(res, 400,
-                    proto::error_json("bad_request", "missing required fields"));
+                    proto::error_json("bad_request", "invalid match_uuid or missing fields"));
                 return;
             }
             if (*pa == *pb) {
@@ -1631,7 +1635,9 @@ bool ApiServer::listen(const std::string& host, int port)
         });
 ```
 
-public 요청은 IP당 초당 60회, 올바른 `X-Relay-Secret`을 가진 relay 요청은 별도 namespace에서 초당 512회다. relay 한 대가 200명의 인증을 meta에 전달할 때 모두 relay IP로 보이므로 public 버킷을 공유시키면 정상적인 재접속 burst가 429를 맞는다. secret 비교를 먼저 통과한 내부 호출만 높은 상한을 쓰고, 임의 헤더를 붙인 외부 요청은 public 버킷에 남는다.
+public 요청은 **선택된 client key**마다 초당 60회, 올바른 `X-Relay-Secret`을 가진 relay 요청은 별도 namespace에서 초당 512회다. 같은 호스트의 loopback 프록시에서는 전달 헤더의 원 IP가 client key가 된다. Mac mini 프록시와 S7 meta처럼 호스트가 갈리면 안전을 위해 전달 헤더를 신뢰하지 않으므로 모든 공개 요청이 Mac mini의 사설 IP 버킷을 공유한다. 이 배치에서는 Caddy/Tunnel edge가 실제 client별 제한을 맡고 meta의 60회 버킷은 전체 burst를 막는 마지막 방어선이다.
+
+relay 한 대가 여러 플레이어의 인증을 meta에 전달할 때도 직접 peer는 relay IP 하나다. secret 비교를 먼저 통과한 내부 호출만 더 큰 별도 버킷을 쓰므로 정상적인 인증 burst가 public 요청과 경쟁하지 않는다. 임의 헤더를 붙인 외부 요청은 secret 비교를 통과하지 못해 public namespace에 남는다.
 
 고정 윈도우는 창 경계에서 순간적으로 상한의 두 배까지 통과할 수 있다. 대신 상태가 `(문자열 → 정수)` 맵 하나뿐이고 창이 바뀔 때 통째로 비워 메모리가 누적되지 않는다. 이 규모에서는 정확한 과금보다 플러딩 완화와 예측 가능한 비용이 우선이다.
 
@@ -1642,12 +1648,10 @@ public 요청은 IP당 초당 60회, 올바른 `X-Relay-Secret`을 가진 relay 
 **현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-// [보안] 레이트리밋 키로 쓸 클라이언트 식별자.
-//   배포 구성(deploy/)은 meta 를 127.0.0.1 에 바인드하고 cloudflared/Caddy 를
-//   앞단에 둔다 — 이때 remote_addr 은 항상 프록시(루프백)라 전체 사용자가 1개
-//   버킷을 공유하게 되어 per-IP 제한이 무력화된다. 피어가 루프백(신뢰 프록시)일
-//   때만 프록시가 붙여 주는 실제 클라이언트 IP 헤더를 사용한다. 외부에서 직접
-//   접속한 피어의 헤더는 위조 가능하므로 무시한다.
+// 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
+// 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
+// 버킷을 우회할 수 있다. Mac mini proxy → S7 meta 같은 분리 배치에서는 모든
+// 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은 edge가 맡아야 한다.
 std::string rate_limit_key(const httplib::Request& req)
 {
     const bool from_loopback =
@@ -1669,9 +1673,15 @@ std::string rate_limit_key(const httplib::Request& req)
 }
 ```
 
-문제는 이렇다. 배포 구성에서 `tetris_meta` 는 `127.0.0.1:8080` 에만 bind 하고 앞에 Caddy 와 Cloudflare Tunnel 이 선다. 그러면 모든 요청의 `remote_addr` 이 `127.0.0.1` 이다. 순진하게 `remote_addr` 을 키로 쓰면 **전 세계 사용자가 하나의 버킷을 공유**하게 되어, 정상 사용자 몇 명만으로도 초당 60 회를 넘겨 서로를 차단한다. 리밋이 보호가 아니라 장애가 된다.
+프록시와 meta가 같은 호스트라면 `tetris_meta`는 `127.0.0.1:8080`에 bind하고 모든 요청의 `remote_addr`은 프록시의 loopback 주소가 된다. 순진하게 그 값만 키로 쓰면 **모든 사용자가 하나의 버킷을 공유**하므로 전달 헤더에서 원 client 주소를 복원해야 한다.
 
-해결은 프록시가 붙여 주는 `CF-Connecting-IP` 또는 `X-Forwarded-For` 를 쓰는 것이다. 그런데 이 헤더들은 **클라이언트가 직접 넣을 수도 있다**. meta 포트가 어쩌다 외부에 노출되면 공격자가 매 요청마다 다른 `X-Forwarded-For` 를 붙여 리밋을 완전히 우회한다.
+그렇다고 `CF-Connecting-IP`나 `X-Forwarded-For`를 언제나 믿을 수는 없다. 이 헤더들은 **클라이언트가 직접 넣을 수도 있다.** meta 포트가 외부나 LAN에 노출된 상태에서 무조건 신뢰하면 공격자가 요청마다 값을 바꿔 리밋을 우회한다. 현재 구현은 직접 peer가 loopback일 때만 헤더를 사용한다.
+
+프록시와 meta가 다른 호스트인 S7 분리 배치에서는 이 조건이 거짓이다. meta의 키는
+프록시 사설 IP가 되고 public 버킷은 공유된다. 이것은 버그를 숨긴 per-client 제한이
+아니라 보수적인 전체 한도다. client별 제한은 Caddy/Tunnel에서 걸고, meta 로그의
+429를 감시한다. 별도 프록시를 신뢰하는 기능을 추가하려면 임의 사설망 전체가 아니라
+명시적인 proxy 주소 allowlist와 방화벽을 함께 구현해야 한다.
 
 그래서 신뢰 조건을 건다 — **직접 peer 가 루프백일 때만** forwarded 헤더를 믿는다. 루프백에서 오는 요청은 정의상 같은 기계의 프록시가 보낸 것이다. 이 신뢰 모델은 "meta 를 외부에 직접 공개하지 않는다"는 배포 설정과 한 묶음이며, 둘 중 하나만 지키면 성립하지 않는다.
 
@@ -1682,36 +1692,45 @@ std::string rate_limit_key(const httplib::Request& req)
 **현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-// [보안] OS CSPRNG 에서 n 바이트의 무작위 데이터를 채운다.
-//   std::random_device 는 대부분의 타깃에서 OS CSPRNG 를 래핑하지만 일부
-//   구현(예: 구형 MinGW)에서는 결정적일 수 있다. 토큰/세션 비밀에는 OS
-//   엔트로피를 명시적으로 읽고, 실패 시에만 random_device 로 폴백한다.
-void fill_random(unsigned char* out, size_t n)
+// 인증 토큰은 플랫폼 CSPRNG에서만 만든다. 엔트로피 소스가 실패했을 때
+// random_device나 시간값으로 폴백하면 "서비스 가용" 상태처럼 보이면서 예측 가능한
+// 토큰을 발급할 수 있다. 이 경우 guest 요청 자체를 실패-폐쇄하는 편이 안전하다.
+bool fill_random(unsigned char* out, size_t n)
 {
-#ifndef _WIN32
-    // POSIX: /dev/urandom 에서 직접 읽는다(글리브C random_device 와 동일 소스지만 명시적).
-    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
-        size_t got = std::fread(out, 1, n, f);
-        std::fclose(f);
-        if (got == n) return;
+#ifdef _WIN32
+    if (n > static_cast<size_t>(std::numeric_limits<ULONG>::max())) return false;
+    return BCryptGenRandom(nullptr, out, static_cast<ULONG>(n),
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#else
+    // Linux와 macOS에서 공통으로 쓸 수 있는 커널 난수 장치를 직접 읽는다.
+    // read는 요청한 길이보다 짧게 성공할 수 있고 signal에 끊길 수도 있으므로
+    // 한 번의 호출 결과를 토큰 전체로 착각하지 않는다.
+    int flags = O_RDONLY;
+    #ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+    #endif
+    const int fd = ::open("/dev/urandom", flags);
+    if (fd < 0) return false;
+    size_t done = 0;
+    while (done < n) {
+        const ssize_t got = ::read(fd, out + done, n - done);
+        if (got > 0) {
+            done += static_cast<size_t>(got);
+            continue;
+        }
+        if (got < 0 && errno == EINTR) continue;
+        break;
     }
+    ::close(fd);
+    return done == n;
 #endif
-    // 폴백(Windows 포함): random_device.
-    std::random_device rd;
-    size_t i = 0;
-    while (i < n) {
-        uint32_t x = rd();
-        size_t take = (n - i < 4) ? (n - i) : 4;
-        std::memcpy(out + i, &x, take);
-        i += take;
-    }
 }
 
 // 32 hex chars 무작위 토큰 (16 바이트 = 128비트 엔트로피).
-std::string gen_token()
+std::optional<std::string> gen_token()
 {
     unsigned char raw[16];
-    fill_random(raw, sizeof(raw));
+    if (!fill_random(raw, sizeof(raw))) return std::nullopt;
     static const char hex[] = "0123456789abcdef";
     char buf[33];
     for (int i = 0; i < 16; ++i) {
@@ -1735,7 +1754,7 @@ bool ct_equal(const std::string& a, const std::string& b)
 }
 ```
 
-`std::random_device` 를 직접 쓰지 않는 이유가 주석에 있다. 표준은 이 클래스가 "비결정적"이길 권장할 뿐 **강제하지 않는다.** 실제로 일부 MinGW 배포판은 `random_device` 가 매 실행 같은 수열을 내는 것으로 유명했다. 그 구현에서 토큰을 만들면 모든 플레이어가 같은 토큰을 받는다. POSIX 에서는 `/dev/urandom` 을 명시적으로 읽고, 실패했을 때만 폴백한다.
+`std::random_device` 를 직접 쓰지 않는 이유가 주석에 있다. 표준은 이 클래스가 "비결정적"이길 권장할 뿐 **강제하지 않는다.** 실제로 일부 구형 구현은 결정적일 수 있다. Windows는 운영체제 CSPRNG인 `BCryptGenRandom`을 직접 호출하고, POSIX/Termux는 `/dev/urandom`을 부분 읽기와 `EINTR`까지 처리하며 끝까지 읽는다. 둘 중 어느 경로든 실패하면 500 `entropy_unavailable`로 guest 발급을 거부한다. 약한 폴백으로 보안 경계를 조용히 낮추지 않는다.
 
 128 비트 엔트로피는 충돌을 사실상 배제한다. 생일 문제로 계산하면 50% 충돌 확률에 도달하는 데 약 2^64 개의 토큰이 필요하다. 그래도 `POST /v1/guest` 핸들러는 `registerGuest` 가 실패하면 새 토큰으로 한 번 더 시도한다 — UNIQUE 제약 위반은 충돌이 아니라 다른 이유로도 날 수 있으므로, 재시도가 비용이 거의 없다면 하는 편이 낫다.
 
@@ -1757,7 +1776,7 @@ bool ct_equal(const std::string& a, const std::string& b)
 
 ### 12.2 이 설계가 감수하는 것
 
-토큰이 곧 계정이라는 것은 세 가지를 뜻한다.
+토큰이 곧 계정이라는 사실은 분실·이전·유출·부계정 정책에 직접 영향을 준다.
 
 **(a) 토큰 파일을 잃으면 계정을 잃는다.** 복구 수단이 없다. 디스크를 갈아엎거나 설정 폴더를 지우면 다음 실행에 새 guest 가 발급되고 RP 는 0 이다. 이것을 완화하려면 "토큰 문자열을 보여주고 옮겨 적게 하는" UI 가 필요한데, 현재 구현에는 없다. 파일 경로를 문서화해 사용자가 직접 백업할 수 있게 하는 것이 현재의 답이다.
 
@@ -1798,11 +1817,7 @@ sequenceDiagram
 
 secret 이 유출되면 무엇이 가능한가. 유출자는 **임의의 player_id 쌍에 대해 임의의 결과를 기록**할 수 있다. RP 를 원하는 대로 올리거나 내리고, 존재하지 않는 매치를 `matches` 테이블에 남길 수 있다. 반면 할 수 없는 것도 있다 — 토큰을 알아낼 수는 없고(`/v1/matches` 응답에 토큰이 없다), 아이콘을 사거나 계정 정보를 읽을 수는 없다(그쪽은 토큰 축이다). 피해는 RP 무결성에 한정된다.
 
-secret 을 다루는 규칙은 셋이다.
-
-**1) 커맨드라인에 쓰지 않는다.** `--relay-secret <값>` 은 `ps` 로 보인다. 환경변수를 쓴다 — 두 프로세스 모두 `TETRIS_RELAY_SECRET` 을 기본값으로 읽는다 (`meta/main.cpp`, `server/main.cpp`).
-
-**2) 셸 히스토리에도 남기지 않는다.** 배포에서는 `export` 대신 systemd 의 `EnvironmentFile` 로 주입한다. 파일은 `root:tetris` 소유의 `0640` 으로 두고, `tetris` 사용자만 읽는다.
+secret은 커맨드라인에 쓰지 않는다. `--relay-secret <값>`은 `ps`로 보이고 셸에서 직접 `export`하면 history에 남기 쉽다. 두 프로세스가 기본으로 읽는 `TETRIS_RELAY_SECRET`을 systemd의 `EnvironmentFile` 같은 서버 비밀 저장 경로로 주입한다. 파일은 `root:tetris` 소유의 `0640`처럼 서비스 계정만 읽을 수 있는 권한으로 둔다.
 
 **현재 소스 발췌 — `deploy/systemd/tetris-relay.env.example`**
 
@@ -1814,17 +1829,9 @@ secret 을 다루는 규칙은 셋이다.
 TETRIS_RELAY_SECRET=change-this-long-random-secret
 ```
 
-`tetris-relay.service`와 `tetris-meta.service`가 각각 `EnvironmentFile=`로 이 파일을 읽는다. 두 서비스는 같은 secret을 읽되 relay만 외부 게임 포트를 열고, meta는 loopback 또는 사설망 주소에 바인딩해 Caddy나 relay를 통해서만 접근시킨다.
+`tetris-relay.service`와 `tetris-meta.service`는 각자의 환경 파일에서 같은 값을 읽는다. relay만 외부 게임 포트를 열고, meta는 loopback 또는 제한된 사설망 주소 뒤에 둔다.
 
-**3) 회전 절차를 미리 정해둔다.** secret 은 언젠가 바꿔야 한다. 두 프로세스가 같은 값을 공유하므로 순진하게 바꾸면 창이 생긴다.
-
-meta 는 secret 이 **비어 있지 않을 때만** 검사하므로(`!relay_secret_.empty() && !ct_equal(...)`), 무중단 회전이 필요하면 다음 순서가 안전하다.
-
-1. 새 secret 을 정한다.
-2. **relay 를 먼저** 새 값으로 재시작한다. 이 순간부터 relay 의 POST 는 403 을 받고, `finalizeRanked` 는 delta 0 `MATCH_RESULT` 를 보낸다. 게임은 계속 돌지만 그 사이의 매치는 RP 에 반영되지 않는다.
-3. **meta 를 새 값으로 재시작**한다. 이때부터 정상화된다.
-
-역순(meta 먼저)으로 하면 창의 길이는 같지만 relay 가 그동안 유효한 secret 을 계속 보내다가 갑자기 거부당하는 형태라 로그 해석이 헷갈린다. 어느 쪽이든 창은 **두 재시작 사이의 시간**이므로, 매치가 적은 시간대에 수행하고 두 명령을 붙여 실행하는 것이 실무적인 답이다. 진짜 무중단이 필요하면 meta 가 secret 목록을 받아 둘 다 허용하는 기간을 두는 방식으로 확장해야 한다.
+현재 서버는 secret을 하나만 허용하므로 **무손실 무중단 회전은 지원하지 않는다.** 정기 회전은 유지보수 시간을 잡아 relay를 먼저 내려 새 ranked 입장을 막고, 양쪽 환경 파일을 함께 바꾼 뒤 meta와 relay를 차례로 올린다. relay 종료 중에는 단절을 플레이어 기권으로 저장하지 않는다. 유출 사고에서는 서비스 연속성보다 위조 요청 차단이 우선이므로 meta에 새 secret을 먼저 적용하고 relay를 뒤따라 갱신한다. 두 방식 모두 이미 진행 중인 경기나 짧은 불일치 구간의 결과가 누락될 수 있다. 무중단이 필요하면 meta가 일정 시간 old/new secret을 함께 허용하고 relay 전환 완료 후 old 값을 폐기하는 기능을 코드로 추가해야 한다.
 
 로컬 개발에서는 secret 없이 띄우고 싶을 수 있다. 그때는 **명시적 플래그**가 필요하다.
 
@@ -1876,7 +1883,7 @@ int main(int argc, char** argv)
 
 서버 쪽이 끝났으니 호출자 쪽으로 넘어간다. `meta/http_client.h` 는 게임 클라이언트와 relay 가 **같은 소스 파일을 각자 링크해서** 쓰는 얇은 래퍼다.
 
-헤더 전체를 싣는다. 이 파일이 이후 절들의 지도다.
+헤더 전체를 싣는다. 요청·응답 타입과 공개 메서드를 먼저 보면 이어지는 구현을 API 단위로 나눠 읽을 수 있다.
 
 **현재 소스 발췌 — `meta/http_client.h`**
 
@@ -2097,7 +2104,7 @@ OpenSSL 없이 빌드된 바이너리에 `https://` URL 을 주면 `valid_ = fal
 
 이 게이팅은 컴파일 타임 매크로에 걸려 있으므로 릴리스 빌드에서 `TETRIS_ENABLE_HTTPS=ON` + OpenSSL 발견을 확인해야 한다. `[meta-client] HTTPS URL requires OpenSSL build support` 로그가 뜨면 그 원인이다.
 
-`valid_` 가 false 인 객체가 예외를 던지지 않고 조용히 살아 있다는 점도 설계다. 호출부는 `metaClient->valid()` 한 번만 확인하면 되고, 나머지 코드는 "meta 가 꺼져 있는 경우"를 이미 다루고 있으므로 자연스럽게 unranked 로 흘러간다.
+`valid_` 가 false 인 객체가 예외를 던지지 않고 조용히 살아 있다는 점도 설계다. 호출부는 `metaClient->valid()` 한 번만 확인하면 되고 랭킹 UI 를 offline 으로 둘 수 있다. 이것이 자동으로 unranked 매치를 연다는 뜻은 아니다. 게임 클라이언트의 meta 상태와 relay 의 운영 모드는 서로 독립적이며, ranked relay 는 유효한 토큰과 자신의 meta 연결 또는 아직 살아 있는 성공 인증 캐시가 필요하다.
 
 ### 13.2 타임아웃 정책 — 엔드포인트마다 다른 이유
 
@@ -2106,14 +2113,14 @@ OpenSSL 없이 빌드된 바이너리에 `https://` URL 을 주면 `valid_ = fal
 | 메서드 | 기본 timeout | 누가 기다리는가 | 근거 |
 |---|---:|---|---|
 | `request_guest` | 5 s | 게임 시작 시 사용자 | 첫 실행 1 회. 조금 느려도 재시도할 수 없으니 여유를 준다 |
-| `verify_token` | 3 s | 게임 시작 시 사용자 / relay 의 QUEUE_JOIN | 실패해도 unranked 로 진행 가능. 시작이 3 초 이상 멈추면 안 된다 |
+| `verify_token` | 3 s | 게임 시작 시 사용자 / relay 의 QUEUE_JOIN | 클라이언트는 토큰을 보존하지만 ranked relay 는 인증할 수 없으면 입장을 거부한다. 시작을 오래 멈추지 않도록 짧게 둔다 |
 | `fetch_icon_catalog` | 5 s | Customize 화면 | 화면 진입 시 1 회. 실패 시 `[R]` 로 재시도 가능 |
 | `purchase_icon` / `select_icon` | 5 s | Customize 화면 | 사용자가 결과를 기다리는 명시적 조작 |
 | `post_match` | 10 s | 게임오버 화면의 양 클라이언트 | DB 트랜잭션 + 커밋이 걸린다. 여기서 포기하면 RP 가 유실된다 |
 
 원칙은 두 가지다. **사용자가 대기 화면 없이 기다리는 호출은 짧게**, **실패하면 데이터가 사라지는 호출은 길게.**
 
-`post_match` 가 유독 긴 이유가 후자다. 이 호출이 타임아웃되면 relay 는 delta 0 `MATCH_RESULT` 를 보내고 그 매치의 RP·BP·XP 는 영원히 반영되지 않는다. 재시도 큐도 없다. 반면 `verify_token` 이 타임아웃되면 토큰 파일은 그대로 남고 다음 실행에 다시 시도하므로 잃는 것이 없다.
+`post_match`가 유독 긴 이유가 후자다. 네트워크 실패·429·5xx에는 같은 `match_uuid`로 짧게 재시도하지만, 모든 시도가 실패하면 relay는 delta 0 `MATCH_RESULT`를 보내고 종료한다. 프로세스 밖 durable outbox가 없으므로 그 결과는 나중에 자동 복구되지 않는다. 반면 `verify_token`이 타임아웃돼도 토큰 파일은 그대로 남아 다음 접속에서 다시 검증할 수 있다.
 
 실제 호출부는 기본값을 그대로 쓰지 않는 곳도 있다. 클라이언트의 Customize 화면은 `mc->select_icon(tok, id, 3, &st)` 처럼 3 초를 쓴다 — 비동기로 돌지만 화면에 "contacting server..." 가 떠 있으므로 짧게 끊는 편이 낫다.
 
@@ -2489,15 +2496,18 @@ Windows 경로는 `std::filesystem::permissions` 로 사후에 권한을 좁힌�
 
 ```cpp
     // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
-    //   metaUrl 이 설정된 경우에만 활성화. 실패 시 unranked 모드로 폴백하고
-    //   메뉴에 "ranking offline" 배너를 노출.
+    //   metaUrl 이 설정된 경우에만 활성화. 부트스트랩 실패는 현재 랭킹 정보를
+    //   읽지 못한 상태이지, 반드시 unranked relay 로 전환됐다는 뜻은 아니다.
+    //   네트워크 장애 때는 저장 토큰을 유지하고 계속 relay 입장에 보낸다.
+    //   ranked relay 는 자신의 meta 연결 또는 성공 인증 캐시로 별도 판정하며,
+    //   둘 다 없으면 입장을 거부한다.
     std::unique_ptr<meta::client::MetaClient> metaClient;
     std::string authToken;
     int    myElo       = 0;   // RP (0 시작 스케일 — meta/elo.h)
     int    myBp        = 0;
     int    myXp        = 0;   // 누적 경험치 (레벨은 meta/levels.h 로 유도)
     std::string mySelectedIconId = "default";
-    bool   metaOnline  = false;  // guest 부트스트랩이 성공했는지
+    bool   metaOnline  = false;  // 이 실행에서 guest/verify 응답을 받았는지
     // 랭크 매치 후 메뉴 복귀 시 1회 메타 갱신 필요 표시. MATCH_RESULT 프레임은
     // elo_after 만 싣고 bp/xp 는 없으므로(net/session.h), 메뉴의 Lv/BP/RP 표기를
     // 권위 있는 값으로 맞추려면 verify_token 으로 다시 읽어야 한다.
@@ -2521,7 +2531,7 @@ Windows 경로는 `std::filesystem::permissions` 로 사후에 권한을 좁힌�
                               << " icon=" << mySelectedIconId << "\n";
                     metaOnline = true;
                 } else {
-                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — unranked mode\n", why);
+                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — ranking offline\n", why);
                 }
             };
 
@@ -2548,8 +2558,11 @@ Windows 경로는 `std::filesystem::permissions` 로 사후에 권한을 좁힌�
                     authToken.clear();
                     bootstrap_new_guest("token unknown");
                 } else {
-                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, unranked\n");
-                    // 파일은 유지 — 다음 실행에 재시도.
+                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, ranking offline\n");
+                    // 파일과 authToken 은 유지한다. 다음 실행에 verify 를 재시도하고,
+                    // 현재 실행에서도 relay 에는 이 토큰을 보낸다. relay 쪽 meta와
+                    // 인증 캐시도 쓸 수 없다면 ranked 입장은 실패한다. unranked
+                    // 플레이에는 meta 없이 기동한 relay 가 따로 필요하다.
                 }
             }
         }
@@ -2568,18 +2581,18 @@ stateDiagram-v2
     LoadToken --> Verify: 32 hex 토큰 있음
     Verify --> Online: Ok — RP/BP/XP/아이콘 복원
     Verify --> NewGuest: UnknownToken (404)
-    Verify --> Unranked: NetworkError — 토큰 파일 유지
+    Verify --> Offline: NetworkError — 토큰 파일 유지
     NewGuest --> Online: request_guest 성공 + save_token
-    NewGuest --> Unranked: 실패
+    NewGuest --> Offline: 실패
     Disabled --> [*]
-    Unranked --> [*]
+    Offline --> [*]
     Online --> [*]
 ```
 
 세 종착지가 UI 에 그대로 드러난다.
 
 - **Disabled**: `ranking: disabled (--meta https://host to enable)`
-- **Unranked**: `ranking server offline - playing unranked` (빨간색)
+- **Offline**: `ranking: offline (ranked queue may be unavailable)` (빨간색). 저장 토큰이 있으면 relay 입장에는 계속 전달하지만, ranked relay 가 인증하지 못하면 연결이 거부된다
 - **Online**: `ranking: online   Lv 3   RP 128   BP 90` (초록색)
 
 meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 캐시 변수 `TETRIS_DEFAULT_META_URL`(컴파일 시 `#define` 으로 박힌다), 환경변수 `TETRIS_META_URL`, 커맨드라인 `--meta URL` 순이다.
@@ -2599,7 +2612,7 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
 | `TETRIS_META_URL=http://127.0.0.1:8080` | 환경변수 | 개발 중 서버 전환 |
 | `--meta http://127.0.0.1:8080` | CLI 인자 | 1 회성 테스트 |
 
-이 표는 [Part 6](./part6-lockstep-networking.md) 의 `TETRIS_RELAY_ENDPOINT` 표와 같은 형식이다. 두 설정이 나란히 동작한다 — relay 주소와 meta 주소는 독립이며, 실제 배포에서도 서로 다른 기계에 있을 수 있다.
+동일한 우선순위를 쓰는 relay 주소 설정은 [Part 7](./part7-relay-server.md)에 정리돼 있다. 두 설정은 독립적이다. relay와 meta를 한 기계에 놓을 수도 있고, 부하와 신뢰 경계에 따라 다른 기계로 나눌 수도 있다.
 
 랭크 매치가 끝나고 메뉴로 돌아오면 한 번 더 갱신한다. `MATCH_RESULT` wire 프레임에는 `elo_before/after/delta` 세 값만 있고 BP/XP 가 없기 때문이다.
 
@@ -2628,51 +2641,52 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
 
 `std::async` + 매 프레임 `wait_for(0)` 폴링이 이 코드베이스에서 블로킹 HTTP를 다루는 표준 패턴이다. 렌더 스레드는 멈추지 않고 결과가 준비된 프레임에 값이 반영된다. Customize의 카탈로그 조회·구매·선택도 같은 패턴을 써서 UI 상태 전이만 달라진다.
 
-## 15. Customize 화면 — 메인 메뉴가 7 항목이 된다
+## 15. Customize 화면 — 프로필과 아이콘 상점 연결
 
-아이콘 상점은 이 장이 클라이언트에 추가하는 새 화면이다. 메뉴 배열과 dispatch에 `Customize`를 같은 위치로 추가해야 하며, 숫자로 고정한 메뉴 개수는 배열에서 유도한다.
+아이콘 상점은 클라이언트의 `Customize` 화면이다. 메뉴 라벨과 동작을 따로 둔 숫자 분기는 항목 삽입 시 쉽게 어긋나므로, 현재 코드는 둘을 `MenuItem` 하나에 묶고 개수도 배열에서 유도한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             constexpr Color DISABLED = {70, 70, 70, 255};
-            const char* items[] = {
-                "Single Play",
-                "Single vs Bot",
-                "Matchmaking Multi",
-                "Custom Room Multi",
-                "Customize",
-                "Settings",
-                "Quit",
+            enum class MenuAction {
+                Single, BotSelect, Matchmaking, CustomRoom,
+                Customize, Settings, Quit,
             };
-            constexpr int kMenuCount = 7;
+            struct MenuItem {
+                const char* label;
+                MenuAction action;
+            };
+            constexpr MenuItem items[] = {
+                {"Single Play",       MenuAction::Single},
+                {"Single vs Bot",     MenuAction::BotSelect},
+                {"Matchmaking Multi", MenuAction::Matchmaking},
+                {"Custom Room Multi", MenuAction::CustomRoom},
+                {"Customize",         MenuAction::Customize},
+                {"Settings",          MenuAction::Settings},
+                {"Quit",              MenuAction::Quit},
+            };
+            constexpr int kMenuCount =
+                static_cast<int>(sizeof(items) / sizeof(items[0]));
 ```
 
-인덱스는 이렇게 굳는다.
-
-| index | 항목 | 진입 |
-|---:|---|---|
-| 0 | Single Play | `AppMode::Single` |
-| 1 | Single vs Bot | `AppMode::BotSelect` |
-| 2 | Matchmaking Multi | `session.QueueJoin(...)` → `AppMode::Net` |
-| 3 | Custom Room Multi | `AppMode::RoomLobby` |
-| **4** | **Customize** | `AppMode::Customize` — **이 장이 추가** |
-| **5** | **Settings** | `AppMode::Settings` — [Part 11](./part11-settings-and-options.md) |
-| 6 | Quit | `renderer_shutdown(); platform_shutdown(); return 0;` |
+활성화 결과는 배열 위치가 아니라 `MenuAction`으로 분기한다. `Customize`의 상태 초기화와 `Settings`의 진입 상태가 이 switch 안에서 각자 소유된다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-                } else if (activated == 4) {
+                case MenuAction::Customize:
                     app = AppMode::Customize;
                     shopFetchTried = false;   // 진입마다 카탈로그 재요청
                     shopIndex = 0;
                     shopStatus.clear();
                     shopConfirmId.clear();
-                } else if (activated == 5) {
+                    break;
+                case MenuAction::Settings:
                     app = AppMode::Settings;
                     settingsIndex = 0;
-                } else {
+                    break;
+                case MenuAction::Quit:
                     // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
                     // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
                     // renderer_shutdown 이 platform_shutdown 보다 먼저다.
@@ -2682,9 +2696,7 @@ meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 
                 }
 ```
 
-이 인덱스 이동은 [Part 11](./part11-settings-and-options.md) 이 그대로 이어받는다. Settings 는 `activated == 5` 이지 4 가 아니다. 이 장에서 Customize 를 넣지 않는다면 Part 11 의 인덱스는 하나씩 앞으로 당겨져야 한다.
-
-버튼 레이아웃도 7 개에 맞춰 조정된다 — 높이 42, 간격 8 로 압축해야 y=540 의 랭킹 표시줄 위에 들어간다(`src/main.cpp`).
+항목 순서를 바꿔도 라벨과 action이 함께 이동하므로 다른 화면으로 잘못 진입하지 않는다. 새 동작을 추가할 때만 `MenuAction`과 switch를 함께 확장한다. 버튼은 랭킹 표시줄 위의 고정 영역에 배치되므로 항목을 늘렸다면 특정 개수를 문서에 맞추는 대신 가장 작은 지원 해상도에서 겹침과 키보드·마우스 포커스를 다시 확인한다.
 
 ### 15.1 2 단계 구매 흐름 — 상태 코드가 상태 기계다
 
@@ -3032,7 +3044,7 @@ void finalizeRanked(Channel& ch)
 
 **막는 것:** 한쪽 클라이언트만 조작한 경우. 조작된 값은 상대의 관측과 어긋나므로 `cross_ok = false` 가 되고 `winner = null` 로 기록된다. RP 는 변하지 않는다.
 
-**막지 못하는 것:** 양쪽이 담합해 같은 거짓말을 하는 경우. 두 계정을 모두 통제하는 공격자는 일관된 위조 summary 쌍을 만들 수 있다. §12.2 (d) 에서 짚은 부계정 문제와 같은 뿌리다. 근본 대책은 relay 가 게임을 직접 시뮬레이션해 결과를 스스로 계산하는 것이지만, 그것은 relay 를 무상태로 두겠다는 이 아키텍처의 전제를 포기하는 일이다.
+**막지 못하는 것:** 양쪽이 담합해 같은 거짓말을 하는 경우. 두 계정을 모두 통제하는 공격자는 일관된 위조 summary 쌍을 만들 수 있다. §12.2 (d)에서 짚은 부계정 문제와 같은 뿌리다. 근본 대책은 relay가 게임을 직접 시뮬레이션해 결과를 스스로 계산하는 것이다. 그러면 현재의 비영속성은 유지할 수 있어도 relay가 게임 규칙과 CPU 비용을 소유하게 되어 배포·버전 호환·수평 확장의 성격이 크게 달라진다.
 
 `duration_s = std::max(a.duration_s, b.duration_s)` 는 교차검증 대상이 아니다. 두 클라이언트의 실제 벽시계 시간은 시작 시점 차이 때문에 몇 초 어긋날 수 있고, 그 차이로 매치를 무효화하는 것은 과하다. 통계값이므로 큰 쪽을 택한다.
 
@@ -3165,7 +3177,7 @@ curl -sS 'http://127.0.0.1:8080/v1/leaderboard?limit=20'
 
 - `/healthz` → `{"ok":true}`
 - `/v1/guest` → `elo=0`, `bp=0`, `xp=0`, `level=1`, `selected_icon_id="default"`, 32 자 hex `token`
-- `/v1/icons/catalog` → `default` / `ruby` / `gold` 세 항목
+- `/v1/icons/catalog` → 현재 카탈로그의 `default` / `ruby` / `gold` 항목
 - `/v1/leaderboard` → 방금 만든 guest 가 `rank=1` 로 보이는 배열
 
 방어선도 직접 확인할 수 있다.
@@ -3227,9 +3239,9 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py \
                        python/tests/test_match_summary_crosscheck.py -q
 ```
 
-기대 결과: 세 테스트 파일의 모든 수집 항목이 통과하고 skip이 없어야 한다.
+기대 결과: 지정한 테스트 모듈의 수집 항목이 실패하지 않고, 바이너리나 환경 누락으로 skip되지 않아야 한다. `pytest -rs`로 skip 사유를 확인한다.
 
-세 파일이 고정하는 계약은 이렇다.
+이 테스트 묶음이 고정하는 계약은 이렇다.
 
 | 테스트 | 고정하는 계약 |
 |---|---|
@@ -3249,7 +3261,7 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py \
 - HTTP 방어선 — 64 KiB body 상한, per-IP 고정 윈도우 레이트 리밋(루프백 peer 일 때만 forwarded 헤더 신뢰), 상수 시간 secret 비교, 통계값 1e8 상한.
 - `meta::client::MetaClient` — 게임 클라이언트와 relay 가 공유하는 HTTP 래퍼. HTTPS 는 OpenSSL 빌드에서만 유효하고, `VerifyOutcome` 3 분기로 "토큰이 죽었다"와 "서버가 잠깐 안 된다"를 구분한다.
 - 플랫폼별 user-data 경로 — `token_file_path()` / `settings_file_path()`, POSIX 0600 토큰 저장, 32-hex 형식 검증.
-- 클라이언트 — 토큰 부트스트랩 3 분기, `AppMode::Customize` 아이콘 상점 (메인 메뉴가 **7 항목**이 되고 Customize 가 index 4, Settings 가 index 5), 랭크 매치 후 비동기 `verify_token` 갱신.
+- 클라이언트 — 토큰 부트스트랩의 성공·stale token·offline 분기, `AppMode::Customize` 아이콘 상점, 랭크 매치 후 비동기 `verify_token` 갱신. 메뉴 배열의 숫자 index가 아니라 `AppMode` 전이를 계약으로 본다.
 - relay — `--meta` / `--meta-secret`(secret 없으면 exit 2), `authenticate` 의 unranked/reject 진리표, `finalizeRanked` 의 선점 · 교차검증 3 조건 · 실패해도 delta 0 `MATCH_RESULT` 보장.
 - `web/ranking/index.html` — same-origin `/v1/leaderboard?limit=50` 를 30 초마다 fetch 하는 정적 페이지.
 
@@ -3277,4 +3289,4 @@ kill %1
 
 기대 결과: `{"ok":true}`, `elo=0`/`bp=0`/`xp=0`/`level=1`/`selected_icon_id=default` 를 담은 guest 응답, 그리고 `elo_history matches player_icons players schema_migrations` 다섯 테이블.
 
-다음 [Part 11](./part11-settings-and-options.md) 에서는 이 클라이언트에 설정 영속화와 해상도·오디오·프레임 페이싱 옵션을 추가한다. 저장 위치는 이 장에서 만든 `meta::client::settings_file_path()` 를 쓰고, 메인 메뉴는 이 장이 7 항목으로 늘려둔 그대로 이어받는다. 그러면서도 여기까지 만든 결정론과 wire 계약은 한 비트도 건드리지 않는다.
+이 장이 만든 `meta::client::settings_file_path()`는 현재 설정 영속화도 재사용한다. 네트워크와 무관한 경로 헬퍼가 meta 모듈에 있다는 결합 때문에 설정 구현 순서가 이 장 뒤로 밀리며, 이를 해소하려면 공용 user-data 모듈로 옮겨야 한다. 어느 위치에 있든 설정·아이콘 UI는 표현 계층만 바꾸고 결정론과 wire 계약은 건드리지 않는다는 경계를 지킨다.

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from netbot.framing import MsgType, build_frame, parse_frames
+from netbot.framing import FramingError, MsgType, build_frame, parse_frames
 
 TEST_RELAY_SECRET = "test-relay-secret"
 
@@ -36,9 +36,15 @@ def _find_bin(name: str, env_var: str) -> Path | None:
     repo = Path(__file__).resolve().parents[2]
     suffix = ".exe" if os.name == "nt" else ""
     base = name + suffix
+    # Release 후보 추가 — 문서 권장 'cmake --build build --config Release' 는
+    # Windows 멀티컨피그에서 build/Release/ (또는 build-meta/·build-relay/
+    # 의 Release/) 아래에 exe 를 두는데, 이 경로가 빠져 있어 빌드해 두고도
+    # 테스트가 조용히 skip 되고 있었다.
     for c in [
+        repo / f"build-{name.split('_')[1]}" / "Release" / base,
         repo / f"build-{name.split('_')[1]}" / "Debug" / base,
         repo / f"build-{name.split('_')[1]}" / base,
+        repo / "build" / "Release" / base,
         repo / "build" / "Debug" / base,
         repo / "build" / base,
     ]:
@@ -103,7 +109,15 @@ def _recv_until(sock: socket.socket, want_type: MsgType,
         if not chunk:
             return None
         buf.extend(chunk)
-        for t, p in parse_frames(buf):
+        try:
+            frames = parse_frames(buf)
+        except FramingError:
+            # C++ 대응(parse_frames false → 호출자 close): relay 가 오버사이즈
+            # 길이를 선언했다는 뜻. 버퍼는 parse_frames 가 이미 비웠으니
+            # 소켓만 닫고 그대로 테스트 실패로 띄운다.
+            sock.close()
+            raise
+        for t, p in frames:
             if t == want_type:
                 return bytes(p)
     return None
@@ -114,12 +128,22 @@ def _await_match_found(sock: socket.socket, timeout: float = 5.0) -> bool:
 
 
 def _queue_accept(a: socket.socket, b: socket.socket) -> None:
-    """MATCH_FOUND 수신 후 수락 로비 통과용 — 양쪽 READY(1) 송신 + peer forward 흡수."""
+    """MATCH_FOUND 수신 후 수락 로비 통과용 — 양쪽 READY(1) 송신 + peer forward 수신 확인.
+
+    송신만 하고 리턴하면 안 된다: 호출자가 곧바로 close 하는 테스트
+    (몰수패 시나리오) 에서, 로비가 우리 READY 를 아직 처리하기 전에 EOF 를
+    먼저 관측하면 몰수패가 아니라 로비 abort 경로로 빠지는 경합이 있었다.
+    relay 는 각 READY(1) 을 소비하는 즉시 상대에게 forward 하므로, 양쪽에서
+    forward 된 상대 READY(1) 를 수신 확인하면 "로비가 양쪽 READY 를 모두
+    처리했고 매치가 forwarder 단계로 넘어간다" 가 보장된다 — 이후의 close
+    는 결정적으로 게임 중 disconnect 로 취급된다.
+    """
     a.sendall(build_frame(MsgType.READY, bytes([1])))
     b.sendall(build_frame(MsgType.READY, bytes([1])))
-    # relay 가 상대 READY(1) 을 forward 한다. 뒤따르는 MATCH_SUMMARY parse 와 섞이지
-    # 않도록 여기서 drain. (드롭 안 해도 parse_frames 가 타입으로 구분하긴 하지만
-    # 테스트의 _recv_until 은 첫 매치만 찾으므로 버퍼에 잔여 READY 가 남아도 무해.)
+    ready_from_b = _recv_until(a, MsgType.READY)
+    ready_from_a = _recv_until(b, MsgType.READY)
+    assert ready_from_b == b"\x01" and ready_from_a == b"\x01", \
+        "lobby must forward peer READY(1) to both sides"
 
 
 def _spawn_meta(tmp_path, relay_secret: str | None = TEST_RELAY_SECRET):
@@ -313,6 +337,20 @@ def test_disconnect_before_summary_is_forfeit(meta_relay):
         assert _await_match_found(a)
         assert _await_match_found(b)
         _queue_accept(a, b)
+
+        # relay 의 몰수패 처리(finalizeForfeit)는 요약 0개면 담합 RP 파밍
+        # 방지를 위해 meta 에 아무것도 반영하지 않는다 (delta=0). RP/BP/XP
+        # 반영을 검증하는 이 테스트는 "생존자 요약 1개" 분기여야 하므로,
+        # b(생존자) 가 먼저 승리 요약을 제출한 뒤 a 가 끊긴다.
+        b.sendall(_summary(won=1, my_score=5000, my_lines=20,
+                           opp_score=1000, opp_lines=3))
+        # MATCH_SUMMARY 는 relay 가 가로채 forward 하지 않으므로 처리 완료를
+        # 직접 관측할 수 없다. 같은 소켓으로 뒤이어 보낸 게임 프레임(PING)은
+        # forward 되므로, 그것이 a 에 도착했다면 TCP/포워더의 순서 보존에
+        # 의해 요약도 이미 소비·기록된 것이다 — 그 뒤에 close 해야 요약
+        # 도착 전에 forwarder 가 내려가는 경합 없이 몰수패가 결정적이다.
+        b.sendall(build_frame(MsgType.PING, b"\x00" * 8))
+        assert _recv_until(a, MsgType.PING) is not None
 
         a.close()
         result = _recv_until(b, MsgType.MATCH_RESULT)

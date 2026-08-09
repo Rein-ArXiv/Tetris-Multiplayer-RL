@@ -47,4 +47,34 @@ if [ "$INTEGRITY" != "ok" ]; then
 fi
 
 tar -czf "$OUT_DIR/$BASE.tar.gz" -C "$OUT_DIR" "$BASE.db"
+
+# tar.gz 에 스냅샷이 들어갔으니 중간 산출물 .db 는 지운다. 남겨두면 백업마다
+# 압축본 + 비압축 원본이 이중으로 쌓여 디스크가 두 배로 소모된다. 삭제 실패는
+# 경고만 남긴다 — 백업 본체는 이미 성공했으므로 여기서 스크립트를 죽이지 않는다.
+rm -f -- "$OUT_DB" || echo "[backup_meta_db] warning: could not remove $OUT_DB" >&2
+
+# ── 보존 정책 ─────────────────────────────────────────────────────────────────
+# 최근 백업 KEEP개(기본 14, 환경변수 KEEP 로 조정)만 남기고 오래된 tar.gz 를
+# 삭제한다. 정리는 부가 작업이므로 어떤 실패도 백업 성공을 뒤집어선 안 된다
+# (set -e 아래에서 if ! ... 로 감싸 실패를 흡수한다).
+KEEP="${KEEP:-14}"
+case "$KEEP" in
+    ''|*[!0-9]*)
+        # 숫자가 아니면 산술 확장에서 스크립트가 죽으므로 기본값으로 대체.
+        echo "[backup_meta_db] warning: invalid KEEP='$KEEP'; using 14" >&2
+        KEEP=14
+        ;;
+esac
+prune_old_backups() {
+    # 파일명은 이 스크립트가 만든 UTC 타임스탬프 형식뿐이라 공백/개행이 없고,
+    # ls -1t(수정시각 내림차순) 기준 KEEP+1 번째부터가 "오래된" 백업이다.
+    ls -1t "$OUT_DIR"/tetris-*.tar.gz 2>/dev/null | tail -n +"$((KEEP + 1))" |
+    while IFS= read -r old; do
+        rm -f -- "$old" || echo "[backup_meta_db] warning: failed to prune $old" >&2
+    done
+}
+if ! prune_old_backups; then
+    echo "[backup_meta_db] warning: retention cleanup failed (backup itself is OK)" >&2
+fi
+
 echo "[backup_meta_db] Done: $OUT_DIR/$BASE.tar.gz (integrity_check=ok)"

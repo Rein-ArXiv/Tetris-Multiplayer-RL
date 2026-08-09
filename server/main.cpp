@@ -137,6 +137,12 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT,  signalHandler);
     std::signal(SIGTERM, signalHandler);
+#if defined(_WIN32)
+    // Windows 콘솔의 CTRL_BREAK_EVENT 는 CRT 가 SIGBREAK 로 전달한다. Python
+    // 테스트가 TerminateProcess(핸들러 실행 기회가 아예 없다) 대신
+    // CTRL_BREAK_EVENT 로 우아한 종료 경로를 검증할 수 있도록 함께 등록한다.
+    std::signal(SIGBREAK, signalHandler);
+#endif
 
     if (!net::net_init()) {
         std::cerr << "net_init() failed\n";
@@ -207,7 +213,14 @@ int main(int argc, char** argv) {
             continue;
         }
         const uint32_t id = next_conn_id++;
-        const std::string peerIp = net::tcp_peer_ip(client);
+        std::string peerIp = net::tcp_peer_ip(client);
+        if (peerIp.empty()) {
+            // getpeername 실패 시 모든 연결이 "unknown" 단일 버킷(상한 16)을
+            // 공유하면 무관한 연결끼리 서로를 굶긴다. fd 는 이 연결이 살아있는
+            // 동안 프로세스 내에서 유일하므로 연결별 고유 키로 대신 사용한다
+            // (per-IP 상한은 못 걸지만, 실패 케이스끼리의 공멸보다 낫다).
+            peerIp = "fd:" + std::to_string(client.fd());
+        }
         if (!ipAdmission.acquire(peerIp)) {
             std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
                       << ": per-IP handshake limit\n";

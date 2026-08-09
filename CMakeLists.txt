@@ -62,7 +62,7 @@ endif()
 # -----------------------------------------------------------------------------
 # Sources shared between all targets
 # -----------------------------------------------------------------------------
-# Pure (no raylib) logic — used by game, pybind11 module, and tests.
+# Pure simulation logic (no renderer/platform deps) — used by game, pybind11 module, and tests.
 set(TETRIS_SIM_SOURCES
     src/sim_game.cpp
     src/position.cpp
@@ -305,7 +305,7 @@ if (TETRIS_BUILD_PY)
 endif()
 
 # -----------------------------------------------------------------------------
-# Target: sim_hash_dump (determinism regression test — raylib-free)
+# Target: sim_hash_dump (determinism regression test — renderer-free)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_TEST)
     add_executable(sim_hash_dump
@@ -387,7 +387,7 @@ endif()
 # -----------------------------------------------------------------------------
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
-# 역할: 별도 영속 호스트(S7 Termux 등)에서 돌아가는 독립 서비스.
+# 역할: 별도 영속 호스트(저전력 Android/Termux 단말 등)에서 돌아가는 독립 서비스.
 #       · SQLite 로 player/match/rating history/icon ownership 영속화
 #       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
 #       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.

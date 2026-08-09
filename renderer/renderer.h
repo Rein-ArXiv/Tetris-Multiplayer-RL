@@ -4,7 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // renderer/renderer.h — OpenGL 3.3 Core 2D 렌더러 인터페이스
 //
-// raylib의 BeginDrawing / DrawRectangle / DrawTextEx 등을 대체합니다.
+// 기성 즉시 그리기 라이브러리의 프레임·사각형·텍스트 그리기 API 를 대체합니다.
 // 구현: renderer/renderer.cpp (배처), text_gl.cpp (글자), image_gl.cpp (이미지)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -17,7 +17,6 @@
 bool renderer_init(int screen_w, int screen_h);
 
 // 프레임 시작: 뷰포트를 창에 맞추고 배경색으로 지운다.
-// raylib::BeginDrawing() + ClearBackground() 대체.
 void renderer_begin(Color bg);
 
 // Section I — 전체 뷰를 (dx, dy) 픽셀만큼 시프트. 화면 흔들림에 사용.
@@ -41,23 +40,23 @@ void renderer_load_font(const char* path);
 // 아래 함수들은 즉시 그리지 않는다. 정점을 배처에 쌓아 두고, 텍스처가 바뀌는
 // 지점과 프레임 끝(renderer_end)에서만 실제 draw call 이 나간다.
 
-// 색칠된 사각형. DrawRectangle() 대체.
+// 색칠된 사각형.
 // 1x1 흰 텍스처를 입힌 쿼드 두 삼각형으로 배처에 들어가고, 알파 블렌딩은
 // GPU 가 한다.
 void draw_rect(int x, int y, int w, int h, Color c);
 
-// 둥근 모서리 사각형. DrawRectangleRounded() 대체.
+// 둥근 모서리 사각형.
 // roundness: 0.0(직각) ~ 1.0(완전 둥근). 반지름 = roundness * min(w,h)/2.
 // 모서리는 fragment 셰이더가 SDF 로 깎으므로 안티앨리어싱이 함께 적용된다.
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c);
 
-// 텍스트 그리기. DrawTextEx() / DrawText() 대체.
+// 텍스트 그리기.
 // 글리프는 아틀라스의 R8 텍셀이며, 셰이더가 r 채널을 알파로 읽어 색을 곱한다.
 // 글자 모양은 CPU 가 굽고 합성은 GPU 가 맡는다. 배치는 논리 좌표로 하되
 // 비트맵은 화면 배율로 구워 확대해도 선명하다.
 void draw_text(const char* text, int x, int y, int size, Color c);
 
-// 텍스트 폭 측정. MeasureTextEx() 대체.
+// 텍스트 폭 측정.
 // TTF advance metric 으로 측정한다. 창 배율과 무관한 논리 픽셀 값이라
 // 창을 늘려도 레이아웃이 흔들리지 않는다.
 int  measure_text(const char* text, int size);

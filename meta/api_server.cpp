@@ -117,8 +117,9 @@ bool valid_match_uuid(const std::string& s)
 
 // 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
 // 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
-// 버킷을 우회할 수 있다. Mac mini proxy → S7 meta 같은 분리 배치에서는 모든
-// 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은 edge가 맡아야 한다.
+// 버킷을 우회할 수 있다. 소형 리눅스 프록시 → 저전력 Android(Termux) meta 같은
+// 분리 배치에서는 모든 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은
+// edge가 맡아야 한다.
 std::string rate_limit_key(const httplib::Request& req)
 {
     const bool from_loopback =
@@ -126,9 +127,15 @@ std::string rate_limit_key(const httplib::Request& req)
     if (from_loopback) {
         std::string ip = req.get_header_value("CF-Connecting-IP");
         if (ip.empty()) {
+            // [보안] XFF 는 "client, proxy1, proxy2, ..." 순서로, 경유하는
+            // 프록시가 자기 앞단의 주소를 **뒤에 append** 한다. 즉 첫 토큰은
+            // 클라이언트가 요청에 미리 심어 위조할 수 있는 값이고(매 요청
+            // 다른 값을 넣으면 60/s 공개 버킷을 무한 우회), 신뢰할 수 있는
+            // 것은 우리가 믿는 프록시가 마지막에 붙인 rightmost 토큰뿐이다.
+            // 따라서 첫 토큰이 아니라 마지막 토큰을 rate limit 키로 쓴다.
             ip = req.get_header_value("X-Forwarded-For");
-            const auto comma = ip.find(',');
-            if (comma != std::string::npos) ip.resize(comma);
+            const auto comma = ip.rfind(',');
+            if (comma != std::string::npos) ip.erase(0, comma + 1);
         }
         const auto b = ip.find_first_not_of(" \t");
         const auto e = ip.find_last_not_of(" \t");

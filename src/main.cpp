@@ -663,6 +663,100 @@ enum class GameOverState {
 
 int main(int argc, char** argv)
 {
+    // ── CLI 인자 파싱 — 모든 초기화보다 앞 ──────────────────────────────────
+    //   예전에는 platform_init/renderer_init 뒤에서 파싱했기 때문에, 잘못된
+    //   인자의 return 2 경로가 창·GL 컨텍스트·WSA 를 만들어 놓은 채 아무 정리
+    //   없이 프로세스를 끝냈다. 파싱은 순수 문자열 처리라 어떤 서브시스템도
+    //   필요 없으므로 제일 앞으로 올린다 — 인자 오류는 아직 자원이 하나도
+    //   없는 시점에 끝나서 정리할 것 자체가 없다.
+    bool netMode = false, isHost = false, queueMode = false;
+    std::string hostIp;
+    uint16_t hostPort = 7777;
+    std::string queueHost;
+    uint16_t queuePort = 7777;
+
+    // 메뉴에서 Matchmaking/Custom Room 을 고를 때 사용할 릴레이 주소.
+    // 기본은 CMake 옵션(TETRIS_DEFAULT_RELAY_ENDPOINT) 또는 환경변수로 주입한다.
+    // 개인 IP 를 release 바이너리에 하드코딩하지 않는다.
+    std::string relayHost = "127.0.0.1";
+    uint16_t    relayPort = 7777;
+    if (!parse_endpoint(TETRIS_DEFAULT_RELAY_ENDPOINT, relayHost, relayPort, 7777)) {
+        std::fprintf(stderr,
+                     "warning: invalid TETRIS_DEFAULT_RELAY_ENDPOINT '%s', using 127.0.0.1:7777\n",
+                     TETRIS_DEFAULT_RELAY_ENDPOINT);
+        relayHost = "127.0.0.1";
+        relayPort = 7777;
+    }
+    if (const char* env = std::getenv("TETRIS_RELAY_ENDPOINT")) {
+        if (!parse_endpoint(env, relayHost, relayPort, 7777)) {
+            std::fprintf(stderr,
+                         "warning: invalid TETRIS_RELAY_ENDPOINT '%s', keeping %s:%u\n",
+                         env, relayHost.c_str(), static_cast<unsigned>(relayPort));
+        }
+    }
+
+    // tetris_meta 베이스 URL (guest 토큰 + RP/XP/BP). `--meta http(s)://host[:port]`.
+    // 환경변수 TETRIS_META_URL 이 있으면 그것을 기본값으로 사용.
+    std::string metaUrl = TETRIS_DEFAULT_META_URL;
+    if (const char* env = std::getenv("TETRIS_META_URL")) metaUrl = env;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string a = argv[i];
+        if (a == "--host") {
+            isHost = true; netMode = true;
+            if (i + 1 < argc) {
+                std::string portStr = argv[++i];
+                if (!parse_port(portStr, hostPort)) {
+                    fprintf(stderr, "error: --host expects a port in 1..65535, got '%s'\n", portStr.c_str());
+                    return 2;
+                }
+            }
+        } else if (a == "--connect") {
+            netMode = true;
+            if (i + 1 < argc) {
+                std::string ep = argv[++i];
+                if (!parse_endpoint(ep, hostIp, hostPort, 7777)) {
+                    fprintf(stderr, "error: --connect expects host[:port], got '%s'\n", ep.c_str());
+                    return 2;
+                }
+            } else {
+                fprintf(stderr, "error: --connect requires an argument (host[:port])\n");
+                return 2;
+            }
+        } else if (a == "--queue") {
+            netMode = true; queueMode = true;
+            if (i + 1 < argc) {
+                std::string ep = argv[++i];
+                if (!parse_endpoint(ep, queueHost, queuePort, 7777)) {
+                    fprintf(stderr, "error: --queue expects host[:port], got '%s'\n", ep.c_str());
+                    return 2;
+                }
+            } else {
+                fprintf(stderr, "error: --queue requires an argument (host[:port])\n");
+                return 2;
+            }
+        } else if (a == "--relay") {
+            if (i + 1 < argc) {
+                std::string ep = argv[++i];
+                if (!parse_endpoint(ep, relayHost, relayPort, 7777)) {
+                    fprintf(stderr, "error: --relay expects host[:port], got '%s'\n", ep.c_str());
+                    return 2;
+                }
+            } else {
+                fprintf(stderr, "error: --relay requires an argument (host[:port])\n");
+                return 2;
+            }
+        } else if (a == "--meta") {
+            if (i + 1 < argc) {
+                metaUrl = argv[++i];
+            } else {
+                fprintf(stderr, "error: --meta requires a URL (http(s)://host[:port])\n");
+                return 2;
+            }
+        }
+    }
+
     if (!net::net_init()) {
         fprintf(stderr, "Failed to initialize networking\n");
         return 1;
@@ -778,94 +872,6 @@ int main(int argc, char** argv)
     ImageHandle iconYou = iconDefaultPlayer;
     ImageHandle iconOpponent = iconDefaultOpponent;
 
-    bool netMode = false, isHost = false, queueMode = false;
-    std::string hostIp;
-    uint16_t hostPort = 7777;
-    std::string queueHost;
-    uint16_t queuePort = 7777;
-
-    // 메뉴에서 Matchmaking/Custom Room 을 고를 때 사용할 릴레이 주소.
-    // 기본은 CMake 옵션(TETRIS_DEFAULT_RELAY_ENDPOINT) 또는 환경변수로 주입한다.
-    // 개인 IP 를 release 바이너리에 하드코딩하지 않는다.
-    std::string relayHost = "127.0.0.1";
-    uint16_t    relayPort = 7777;
-    if (!parse_endpoint(TETRIS_DEFAULT_RELAY_ENDPOINT, relayHost, relayPort, 7777)) {
-        std::fprintf(stderr,
-                     "warning: invalid TETRIS_DEFAULT_RELAY_ENDPOINT '%s', using 127.0.0.1:7777\n",
-                     TETRIS_DEFAULT_RELAY_ENDPOINT);
-        relayHost = "127.0.0.1";
-        relayPort = 7777;
-    }
-    if (const char* env = std::getenv("TETRIS_RELAY_ENDPOINT")) {
-        if (!parse_endpoint(env, relayHost, relayPort, 7777)) {
-            std::fprintf(stderr,
-                         "warning: invalid TETRIS_RELAY_ENDPOINT '%s', keeping %s:%u\n",
-                         env, relayHost.c_str(), static_cast<unsigned>(relayPort));
-        }
-    }
-
-    // tetris_meta 베이스 URL (guest 토큰 + RP/XP/BP). `--meta http(s)://host[:port]`.
-    // 환경변수 TETRIS_META_URL 이 있으면 그것을 기본값으로 사용.
-    std::string metaUrl = TETRIS_DEFAULT_META_URL;
-    if (const char* env = std::getenv("TETRIS_META_URL")) metaUrl = env;
-
-    for (int i = 1; i < argc; ++i)
-    {
-        std::string a = argv[i];
-        if (a == "--host") {
-            isHost = true; netMode = true;
-            if (i + 1 < argc) {
-                std::string portStr = argv[++i];
-                if (!parse_port(portStr, hostPort)) {
-                    fprintf(stderr, "error: --host expects a port in 1..65535, got '%s'\n", portStr.c_str());
-                    return 2;
-                }
-            }
-        } else if (a == "--connect") {
-            netMode = true;
-            if (i + 1 < argc) {
-                std::string ep = argv[++i];
-                if (!parse_endpoint(ep, hostIp, hostPort, 7777)) {
-                    fprintf(stderr, "error: --connect expects host[:port], got '%s'\n", ep.c_str());
-                    return 2;
-                }
-            } else {
-                fprintf(stderr, "error: --connect requires an argument (host[:port])\n");
-                return 2;
-            }
-        } else if (a == "--queue") {
-            netMode = true; queueMode = true;
-            if (i + 1 < argc) {
-                std::string ep = argv[++i];
-                if (!parse_endpoint(ep, queueHost, queuePort, 7777)) {
-                    fprintf(stderr, "error: --queue expects host[:port], got '%s'\n", ep.c_str());
-                    return 2;
-                }
-            } else {
-                fprintf(stderr, "error: --queue requires an argument (host[:port])\n");
-                return 2;
-            }
-        } else if (a == "--relay") {
-            if (i + 1 < argc) {
-                std::string ep = argv[++i];
-                if (!parse_endpoint(ep, relayHost, relayPort, 7777)) {
-                    fprintf(stderr, "error: --relay expects host[:port], got '%s'\n", ep.c_str());
-                    return 2;
-                }
-            } else {
-                fprintf(stderr, "error: --relay requires an argument (host[:port])\n");
-                return 2;
-            }
-        } else if (a == "--meta") {
-            if (i + 1 < argc) {
-                metaUrl = argv[++i];
-            } else {
-                fprintf(stderr, "error: --meta requires a URL (http(s)://host[:port])\n");
-                return 2;
-            }
-        }
-    }
-
     // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
     //   metaUrl 이 설정된 경우에만 활성화. 부트스트랩 실패는 현재 랭킹 정보를
     //   읽지 못한 상태이지, 반드시 unranked relay 로 전환됐다는 뜻은 아니다.
@@ -955,6 +961,11 @@ int main(int argc, char** argv)
     std::string connectText;
     std::string connectErrorMsg;
     bool connectError = false;
+    // 메뉴에서 QueueJoin 이 기동 자체를 거부(즉시 false — 이전 세션 스레드가
+    // 아직 정리 중인 경우 등)했을 때 켠다. session.hasFailed() 는 세션이 기동한
+    // "뒤"의 실패만 알리므로, 이 경우를 그냥 두면 버튼을 눌러도 아무 일도 없는
+    // 무반응이 된다 — 대기 화면의 기존 실패 카드를 재사용해 이유를 보여준다.
+    bool queueJoinStartFailed = false;
 
     // Section D — 커스텀 룸 클라이언트 UI 상태.
     std::string     roomRelayHost;              // RoomRelay 입력 후 저장
@@ -977,23 +988,40 @@ int main(int argc, char** argv)
     std::deque<ChatLine> chatHistory;
 
     if (app == AppMode::Net) {
+        bool sessionStartOk = true;   // 실패 시 아래에서 공통 정리 후 종료
         if (queueMode) {
             // 비동기 큐잉 — 즉시 리턴, 매칭 대기 중에도 렌더 루프는 계속 돈다.
             // isReady() 가 true 가 되면 seed/role 이 session.params() 에 채워져 있다.
             if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
-                fprintf(stderr, "Queue join failed to start\n"); return 1;
+                fprintf(stderr, "Queue join failed to start\n"); sessionStartOk = false;
             }
         } else if (isHost) {
             sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + 0xC0FFEEULL;
             net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
             sp.local_icon_id = mySelectedIconId;
             if (!session.Host(hostPort, sp)) {
-                fprintf(stderr, "Host failed\n"); return 1;
+                fprintf(stderr, "Host failed\n"); sessionStartOk = false;
             }
         } else {
             if (!session.Connect(hostIp, hostPort)) {
-                fprintf(stderr, "Connect failed\n"); return 1;
+                fprintf(stderr, "Connect failed\n"); sessionStartOk = false;
             }
+        }
+        if (!sessionStartOk) {
+            // 세션 기동 실패도 초기화 실패 경로와 같은 순서로 정리한다. 예전엔
+            // 그냥 return 1 이라 GL/창/WSA 정리가 전부 누락됐다. 이 시점엔
+            // 아이콘 텍스처까지 이미 로드돼 있으므로, 파일 하단의 정상 종료와
+            // 동일하게 image_unload → renderer_shutdown → platform_shutdown →
+            // net_shutdown 순서를 지킨다 (GL 객체는 컨텍스트가 살아 있을 때만
+            // 지울 수 있다).
+            for (ImageHandle h : playerIconCatalogHandles) image_unload(h);
+            image_unload(iconDefaultPlayer);
+            image_unload(iconDefaultOpponent);
+            image_unload(iconBot);
+            renderer_shutdown();
+            platform_shutdown();
+            net::net_shutdown();
+            return 1;
         }
     }
 
@@ -1190,8 +1218,12 @@ int main(int argc, char** argv)
 
     float accumulator = 0.0f;
 
+    // 메뉴 Quit 요청 플래그. return 으로 즉시 끝내지 않고 메인 루프를 빠져나가
+    // 파일 하단의 공통 정리 경로를 타기 위한 것 (MenuAction::Quit 참고).
+    bool quitRequested = false;
+
     // ── 메인 루프 ───────────────────────────────────────────────────────────
-    while (!platform_should_close())
+    while (!quitRequested && !platform_should_close())
     {
         // 1) 입력 처리 + 델타타임
         float deltaTime = platform_begin_frame();
@@ -1208,6 +1240,11 @@ int main(int argc, char** argv)
             // 수신 드레인 — 여러 줄이 쌓여도 한 프레임에 모두 흡수.
             std::string incoming;
             while (session.PullChat(incoming)) {
+                // 수신 클램프 — 우리 클라이언트는 송신 전에 kChatMaxChars 로
+                // 자르지만, 프로토콜상 CHAT 프레임은 페이로드 한도(4KB) 까지
+                // 올 수 있다. 조작 클라이언트가 초장문을 보내면 오버레이가
+                // 화면 밖까지 그려지므로 표시 전에 같은 한도로 자른다.
+                if (incoming.size() > kChatMaxChars) incoming.resize(kChatMaxChars);
                 chatHistory.push_back({"Opponent", std::move(incoming), 0.0f});
                 while (chatHistory.size() > kChatHistoryMax) chatHistory.pop_front();
             }
@@ -1624,6 +1661,13 @@ int main(int argc, char** argv)
             const int bgap = 8;
             const int bx = (720 - bw) / 2;
             const int byStart = 190;
+            // 항목을 추가하면 버튼 열이 아래 랭킹 표시줄(y=540)과 겹칠 수 있다.
+            // 겹침을 런타임에 눈으로 발견하는 대신 컴파일 타임에 잡는다 —
+            // items[] 에 항목을 넣으면 kMenuCount 가 자동으로 늘어나 이 검증에
+            // 걸리므로, 높이/간격을 줄이거나 시작 y 를 올려야 컴파일이 된다.
+            static_assert(byStart + kMenuCount * (bh + bgap) <= 540,
+                          "menu buttons overlap the ranking line at y=540 - "
+                          "shrink bh/bgap or raise byStart");
 
             // 키보드 네비게이션 (기존 동작 유지).
             if (platform_key_pressed(PKEY_DOWN)) menuIndex = (menuIndex + 1) % kMenuCount;
@@ -1698,10 +1742,18 @@ int main(int argc, char** argv)
                     queueHost = relayHost; queuePort = relayPort;
                     // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
                     // 토큰 없이는 verify 실패로 즉시 close 된다.
-                    if (session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
-                        netMode = true; queueMode = true; isHost = false;
-                        app = AppMode::Net;
+                    queueJoinStartFailed = false;
+                    if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
+                        // 즉시 false = 큐 기동 거부 (이전 세션 스레드 정리 중 등).
+                        // 예전엔 여기서 아무것도 안 해서 클릭이 씹힌 것처럼
+                        // 보였다 — 같은 대기 화면으로 넘어가되 플래그를 세워
+                        // 기존 Matchmaking Failed 카드를 재사용해 알려준다.
+                        // [Q] 복귀 시 session.Close() 가 잔여 스레드를 정리하므로
+                        // 재시도가 가능해진다.
+                        queueJoinStartFailed = true;
                     }
+                    netMode = true; queueMode = true; isHost = false;
+                    app = AppMode::Net;
                     break;
                 case MenuAction::CustomRoom:
                     roomRelayHost = relayHost; roomRelayPort = relayPort;
@@ -1722,12 +1774,15 @@ int main(int argc, char** argv)
                     settingsIndex = 0;
                     break;
                 case MenuAction::Quit:
-                    // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
-                    // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
-                    // renderer_shutdown 이 platform_shutdown 보다 먼저다.
-                    renderer_shutdown();
-                    platform_shutdown();
-                    return 0;
+                    // 메뉴의 Quit. 예전에는 여기서 renderer/platform 만 내리고
+                    // 바로 return 0 해서, 하단 정리 경로의 image_unload 와
+                    // net_shutdown(WSACleanup) 이 통째로 생략됐다 — "같은 순서를
+                    // 지킨다" 는 약속과 실제 동작이 달랐다. 이제 종료 플래그로
+                    // 메인 루프만 빠져나가 파일 하단의 공통 정리 경로
+                    // (image_unload → renderer_shutdown → platform_shutdown →
+                    // net_shutdown)를 그대로 타게 한다.
+                    quitRequested = true;
+                    break;
                 }
             }
         }
@@ -2971,11 +3026,17 @@ int main(int argc, char** argv)
 
             if (queueMode)
             {
-                if (session.hasFailed()) {
+                if (session.hasFailed() || queueJoinStartFailed) {
                     gui_text_center(360, 190, "Matchmaking Failed", 28, RED);
-                    const char* sub = session.isQueueMatched()
-                        ? "opponent declined or timed out"
-                        : "relay unreachable or timeout";
+                    // 실패 사유는 프레임에 실려 오지 않는다. relay 접속 불가뿐
+                    // 아니라 토큰 거절(ranked 인증 실패)로 relay 가 연결을 끊은
+                    // 경우도 이 경로로 오므로, 네트워크 문제로 단정하던 문구
+                    // ("relay unreachable or timeout")를 중립적으로 바꿨다.
+                    const char* sub = queueJoinStartFailed
+                        ? "could not start queueing - try again"
+                        : (session.isQueueMatched()
+                               ? "opponent declined or timed out"
+                               : "rejected by relay or unreachable");
                     gui_text_center(360, 232, sub, 16, GRAY);
                     gui_text_center(360, 400, "[Q] Back to Menu", 20, YELLOW);
                 } else if (!session.isConnected()) {
@@ -3069,14 +3130,16 @@ int main(int argc, char** argv)
             }
             if (platform_key_pressed(PKEY_Q))
             {
-                if (queueMode) {
+                if (queueMode && !queueJoinStartFailed) {
                     // 매칭 성사 이전: QueueCancel (relay 에 QUEUE_CANCEL 통보).
                     // 수락 로비 중: QueueDecline (READY(0) 통보 → 상대도 취소 알림).
+                    // (큐 기동 자체가 거부된 경우엔 취소를 통보할 큐 세션이 없다.)
                     if (session.isQueueMatched()) session.QueueDecline();
                     else                           session.QueueCancel();
                 }
                 session.Close();
                 queueMode = false; netMode = false;
+                queueJoinStartFailed = false;
                 localIpDone = false; publicIpLaunched = false;
                 cachedLocalIP.clear(); cachedPublicIP.clear();
                 app = AppMode::Menu;
@@ -3209,9 +3272,14 @@ int main(int argc, char** argv)
             // 키보드: Y = Yes, N = No, Enter = Yes (관성).
             // Escape 는 배정하지 않는다 — 다른 화면에서 전부 '뒤로가기'로
             // 쓰고 있어서, 여기서만 '예'로 동작하면 일관성이 깨진다.
-            if (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER))
+            // 채팅 입력 중(chatComposing)에는 키를 모달로 보내지 않는다 —
+            // 채팅에 'y' 를 치다 그대로 '예' 가 눌려 즉시 몰수패가 되는 입력
+            // 충돌. Enter 도 채팅 송신과 겹치므로 함께 무시한다 (마우스 클릭은
+            // 그대로 동작).
+            if (!chatComposing &&
+                (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER)))
                 clickYes = true;
-            if (platform_key_pressed(PKEY_N))
+            if (!chatComposing && platform_key_pressed(PKEY_N))
                 clickNo = true;
 
             if (clickNo) {

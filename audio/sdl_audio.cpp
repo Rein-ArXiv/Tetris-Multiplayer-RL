@@ -1,9 +1,9 @@
 // audio/sdl_audio.cpp — SDL2 오디오 백엔드 (Mac/Linux/Windows 크로스플랫폼)
 //
-// audio/audio.cpp (XAudio2) 와 동일한 audio.h API 전체(재생 7개 + 설정 토글/
-// 볼륨 4개)를 SDL_OpenAudioDevice 콜백으로 재구현.
-//   raylib 대응: rAudio -> miniaudio. 여기서는 SDL_AudioSpec.callback 에서
-//   직접 softwaremix 수행 (int16 합산 + 포화 클램핑).
+// audio/audio.cpp (XAudio2) 와 동일한 audio.h 재생·설정 API 를
+// SDL_OpenAudioDevice 콜백으로 재구현.
+//   기성 프레임워크의 오디오 모듈이 하던 믹싱을 여기서는 SDL_AudioSpec.callback
+//   에서 직접 수행 (int16 합산 + 포화 클램핑).
 //
 // 구조:
 //   - SDL 콜백에서 BGM 보이스 + SFX 보이스 풀(8) 을 믹스.

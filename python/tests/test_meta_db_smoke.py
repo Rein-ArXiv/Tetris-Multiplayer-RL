@@ -32,10 +32,17 @@ def _find_meta_bin() -> Path | None:
         p = Path(env)
         return p if p.exists() else None
     repo = Path(__file__).resolve().parents[2]
+    # Release 후보를 Debug 앞에 둔다 — 문서가 권장하는 빌드 커맨드
+    # 'cmake --build build --config Release' 는 Windows 멀티컨피그 생성기에서
+    # build/Release/ (별도 빌드 트리면 build-meta/Release/) 아래에 exe 를
+    # 떨어뜨리는데, 예전 후보 목록에는 이 경로가 없어 테스트가 조용히
+    # skip 되고 있었다.
     candidates = [
+        repo / "build-meta" / "Release" / "tetris_meta.exe",
         repo / "build-meta" / "Debug" / "tetris_meta.exe",
         repo / "build-meta" / "tetris_meta.exe",
         repo / "build-meta" / "tetris_meta",
+        repo / "build" / "Release" / "tetris_meta.exe",
         repo / "build" / "Debug" / "tetris_meta.exe",
         repo / "build" / "tetris_meta",
     ]

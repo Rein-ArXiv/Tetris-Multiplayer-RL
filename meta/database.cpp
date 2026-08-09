@@ -455,7 +455,8 @@ Database::saveMatch(const MatchRecord& m)
     {
         StmtGuard g;
         const char* sql =
-            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after "
+            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after,"
+            "player_a,player_b "
             "FROM matches WHERE match_uuid=?1";
         if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
         sqlite3_bind_text(g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
@@ -466,6 +467,21 @@ Database::saveMatch(const MatchRecord& m)
             const int aa = sqlite3_column_int(g.s, 2);
             const int bb = sqlite3_column_int(g.s, 3);
             const int ba = sqlite3_column_int(g.s, 4);
+            // 같은 match_uuid 재전송인데 참가자가 다르면 uuid 충돌이거나 relay
+            // 버그(재사용/뒤바뀐 payload)다. 저장된 결과를 그대로 반환하는 기존
+            // 동작은 유지하되(멱등성 보장), stderr 경고로 조기 발견을 돕는다.
+            const int64_t stored_a = sqlite3_column_int64(g.s, 5);
+            const int64_t stored_b = sqlite3_column_int64(g.s, 6);
+            if (stored_a != m.player_a || stored_b != m.player_b) {
+                std::fprintf(stderr,
+                    "[db] saveMatch: match_uuid=%s replay with mismatched players "
+                    "(stored a=%lld b=%lld, request a=%lld b=%lld); returning stored result\n",
+                    m.match_uuid.c_str(),
+                    static_cast<long long>(stored_a),
+                    static_cast<long long>(stored_b),
+                    static_cast<long long>(m.player_a),
+                    static_cast<long long>(m.player_b));
+            }
             r.a = {ab, aa, aa - ab};
             r.b = {bb, ba, ba - bb};
             return r;

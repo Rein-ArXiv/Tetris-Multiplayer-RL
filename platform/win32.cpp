@@ -108,6 +108,12 @@ static UINT dpi_for_window(HWND hwnd)
     return 96;
 }
 
+// 구형 SDK 헤더(WINVER < 0x0605)에는 이 메시지 상수가 없을 수 있다.
+// 값은 Windows 10 1607+ 에서 문서화된 고정값이다.
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
 static void adjust_window_rect(RECT& rect, DWORD style, HWND hwnd)
 {
     HMODULE user32 = GetModuleHandleA("user32.dll");
@@ -188,6 +194,21 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
     case WM_MOUSEWHEEL:
         s_mouse_wheel += (float)(short)HIWORD(wparam) / (float)WHEEL_DELTA;
         return 0;
+    case WM_DPICHANGED: {
+        // per-monitor v2 에서는 DPI 가 다른 모니터로 창을 옮겨도 OS 가 창을
+        // 대신 리스케일해 주지 않는다 — 앱 책임이다. 이 처리가 없으면 150%
+        // 모니터에서 100% 모니터로 옮긴 창이 물리적으로 1.5배 크기로 남는다.
+        // OS 가 lparam 에 "새 DPI 에서 같은 물리 크기가 되는" 제안 RECT 를
+        // 담아 주므로 그대로 적용한다. 크기가 실제로 바뀌면 WM_SIZE 가
+        // 뒤따라 들어와 기존 뷰포트 재계산 경로(recompute_viewport)를 탄다.
+        const RECT* suggested = (const RECT*)lparam;
+        SetWindowPos(hwnd, nullptr,
+                     suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_CLOSE:

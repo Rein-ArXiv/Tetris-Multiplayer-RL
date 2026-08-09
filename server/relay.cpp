@@ -189,11 +189,13 @@ void finalizeRanked(Channel& ch)
     sendToB(ch, frB);
 }
 
-// A peer lost before both summaries is a server-observed forfeit.
-void finalizeForfeit(Channel& ch, int loserSide)
+// A peer lost before finalizeRanked ran. 몰수패 처리 진입점 — 요약이 몇 개
+// 수집됐는지에 따라 세 갈래로 나뉜다 (각 분기 주석 참고).
+// disconnectSide 는 "먼저 끊긴 쪽"(1=A, 2=B, 0=미상)일 뿐 패자가 아니다 —
+// 승자 판정에는 쓰지 않고 MATCH_RESULT 송신 대상(생존자) 선정에만 쓴다.
+void finalizeForfeit(Channel& ch, int disconnectSide)
 {
-    if (!ch.meta || ch.playerA_id == 0 || ch.playerB_id == 0 ||
-        (loserSide != 1 && loserSide != 2)) return;
+    if (!ch.meta || ch.playerA_id == 0 || ch.playerB_id == 0) return;
 
     Summary a{}, b{};
     bool haveA = false;
@@ -201,14 +203,49 @@ void finalizeForfeit(Channel& ch, int loserSide)
     {
         std::lock_guard<std::mutex> lk(ch.sumMu);
         if (ch.summaryHandled) return;
-        ch.summaryHandled = true;
         haveA = ch.summaryA.has_value();
         haveB = ch.summaryB.has_value();
+        // 양쪽 요약이 다 모였으면 몰수패가 아니다 — summaryHandled 를 여기서
+        // 선점하지 않고 finalizeRanked 의 교차검증 경로에 맡긴다 (락 밖에서 위임).
+        if (!(haveA && haveB)) {
+            ch.summaryHandled = true;
+        }
         if (haveA) a = *ch.summaryA;
         if (haveB) b = *ch.summaryB;
     }
 
-    const int64_t winner = loserSide == 1 ? ch.playerB_id : ch.playerA_id;
+    // (1) 양쪽 요약 존재: 회선이 끊겼어도 경기 자체는 완주된 것이다 (예: 승패
+    //     확정 직후 요약만 보내고 즉시 종료). 교차검증으로 승자를 확정한다.
+    if (haveA && haveB) {
+        finalizeRanked(ch);
+        return;
+    }
+
+    // (2) 요약이 하나도 없음(즉시 이탈, 무경기): meta 에 post_match 를 보내지
+    //     않는다 — RP 미반영. 커스텀 룸에서 READY 직후 끊기를 반복하는 담합
+    //     RP 파밍과, 동시 단절 시 disconnect_side 관측 순서 하나로 임의 승자를
+    //     만들어 RP 를 오염시키는 것을 함께 막는다. 생존자에게는 델타 0 의
+    //     MATCH_RESULT 를 보내 결과 대기 화면에서 빠져나오게 한다.
+    if (!haveA && !haveB) {
+        auto frA = build_match_result(ch.playerA_elo, ch.playerA_elo, 0);
+        auto frB = build_match_result(ch.playerB_elo, ch.playerB_elo, 0);
+        // disconnectSide==0(순서 미상)이면 양쪽 다 시도 — 죽은 소켓으로의
+        // send 는 무해하게 실패한다.
+        if (disconnectSide != 1) sendToA(ch, frA);
+        if (disconnectSide != 2) sendToB(ch, frB);
+        std::cerr << "[relay] match=" << ch.match_id
+                  << " no summaries -> no meta post (delta=0)\n";
+        return;
+    }
+
+    // (3) 한쪽 요약만 존재: 그 요약의 won 플래그를 존중해 승자를 정한다.
+    //     종전에는 disconnectSide 를 무조건 패자로 기록했는데, 그러면 이긴 쪽이
+    //     승리 요약을 제출한 직후 회선이 끊겼을 때 제출된 승리 요약이 무시되고
+    //     승자가 패자로 뒤집히는 버그가 있었다.
+    int64_t winner = 0;
+    if (haveA) winner = a.won ? ch.playerA_id : ch.playerB_id;
+    else       winner = b.won ? ch.playerB_id : ch.playerA_id;
+
     const int scoreA = static_cast<int>(haveA ? a.my_score : b.opp_score);
     const int scoreB = static_cast<int>(haveB ? b.my_score : a.opp_score);
     const int linesA = static_cast<int>(haveA ? a.my_lines : b.opp_lines);
@@ -226,11 +263,13 @@ void finalizeForfeit(Channel& ch, int loserSide)
 
     auto frA = build_match_result(res->a.elo_before, res->a.elo_after, res->a.delta);
     auto frB = build_match_result(res->b.elo_before, res->b.elo_after, res->b.delta);
-    // Send only to the surviving peer.
-    if (loserSide == 1) sendToB(ch, frB);
-    else                sendToA(ch, frA);
-    std::cerr << "[relay] match=" << ch.match_id << " forfeit loser="
-              << (loserSide == 1 ? "A" : "B") << " saved meta match="
+    // 끊긴 쪽 소켓은 이미 죽어 있으므로 생존 가능성이 있는 쪽에만 보낸다.
+    if (disconnectSide != 1) sendToA(ch, frA);
+    if (disconnectSide != 2) sendToB(ch, frB);
+    std::cerr << "[relay] match=" << ch.match_id << " forfeit winner="
+              << (winner == ch.playerA_id ? "A" : "B")
+              << " (summary from " << (haveA ? "A" : "B")
+              << ", disconnect=" << disconnectSide << ") saved meta match="
               << res->match_id << "\n";
 }
 
@@ -350,13 +389,14 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         // Non-summary frames retain their original wire bytes.
 
         bool sendFailed = false;
-        constexpr size_t kRelayMaxPayload = 4096;  // net/framing.cpp 의 MAX_PAYLOAD_BYTES 와 동일
         while (streamBuf.size() >= 2) {
             const uint16_t payloadAndType = static_cast<uint16_t>(streamBuf[0]) |
                                             (static_cast<uint16_t>(streamBuf[1]) << 8);
 
             // Reject oversized declarations before the buffer grows.
-            if (static_cast<size_t>(payloadAndType) > kRelayMaxPayload + 1u) {
+            // 상한은 net/framing.h 가 공개하는 값을 직접 참조 — 로컬 사본이
+            // framing 구현과 어긋나는 drift 를 막는다.
+            if (static_cast<size_t>(payloadAndType) > net::kMaxPayloadBytes + 1u) {
                 std::cerr << "[relay] match=" << ch->match_id
                           << " dropping over-sized frame (len=" << payloadAndType
                           << ") from " << (a_to_b ? "A" : "B") << "\n";
@@ -426,9 +466,12 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             streamBuf.erase(streamBuf.begin(), streamBuf.begin() + totalNeeded);
         }
 
-        if (sendFailed) break;
-
         // 양쪽 MATCH_SUMMARY 모두 모였다면 finalize. (매 루프 체크 — 가벼움)
+        // sendFailed 로 빠져나가기 "직전"에도 반드시 수행한다 — 양 방향이 거의
+        // 동시에 send 실패로 죽는 타이밍에는, 이 배치에서 마지막 요약을 방금
+        // 가로챘는데도 어느 쪽도 루프를 한 바퀴 더 돌지 못해 교차검증이 생략되고
+        // forfeit 경로로 흘러가는 경합이 있었다. (finalizeForfeit 도 양쪽 요약이
+        // 있으면 위임하지만, 소켓이 닫히기 전에 결과를 보내려면 여기가 먼저다.)
         bool both = false;
         {
             std::lock_guard<std::mutex> lk(ch->sumMu);
@@ -437,6 +480,8 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         if (both) {
             finalizeRanked(*ch);
         }
+
+        if (sendFailed) break;
     }
 
 }
@@ -521,7 +566,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
     constexpr size_t LEN_FIELD          = 2;
     constexpr size_t TYPE_FIELD         = 1;
     constexpr size_t CHECKSUM_FIELD     = 4;
-    constexpr size_t MAX_PAYLOAD_BYTES  = 4096;  // net/framing.cpp 와 동일 한도
+    // 페이로드 상한은 net::kMaxPayloadBytes (framing.h) 를 직접 참조한다.
     // Bound bytes received between READY and forwarder ownership.
     constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 
@@ -550,7 +595,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
             // 페이로드 상한 초과 — framing.cpp::parse_frames 와 동일하게
             // 스트림 전체를 버리고 ready/cancel 어느 것도 소비하지 않는다.
             // 호출자는 이 사이드를 abort 처리한다.
-            if ((size_t)len > MAX_PAYLOAD_BYTES + TYPE_FIELD) {
+            if ((size_t)len > net::kMaxPayloadBytes + TYPE_FIELD) {
                 buf.clear();
                 return -1;
             }

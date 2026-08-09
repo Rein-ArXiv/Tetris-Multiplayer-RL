@@ -14,6 +14,7 @@
 #  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <mstcpip.h>   // SIO_KEEPALIVE_VALS / tcp_keepalive (set_keepalive 에서 사용)
 #  ifdef _MSC_VER
 #    pragma comment(lib, "ws2_32.lib")
 #  endif
@@ -117,6 +118,19 @@ static void set_keepalive(int fd) {
     int yes = 1;
 #ifdef _WIN32
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&yes, sizeof(yes));
+    // Windows 기본 KeepAliveTime 은 2시간이라 SO_KEEPALIVE 만으로는 'FIN/RST 없이
+    // 사라진 피어 감지'가 사실상 동작하지 않는다(POSIX 분기의 idle 15s / interval 5s
+    // 와 비대칭). SIO_KEEPALIVE_VALS 로 같은 값을 명시해 양 플랫폼 감지 시간을 맞춘다.
+    // (Vista+ 는 probe 재전송 횟수가 10회 고정 — 대략 15s + 10*5s 내 감지.)
+    tcp_keepalive ka{};
+    ka.onoff = 1;
+    ka.keepalivetime = 15000;     // idle 15초 후 첫 probe (ms)
+    ka.keepaliveinterval = 5000;  // probe 간격 5초 (ms)
+    DWORD bytesReturned = 0;
+    // keepalive 는 best-effort 폴백이라 setsockopt/WSAIoctl 실패는 조용히 무시한다
+    // (실패해도 연결 자체는 정상 동작하고, 상위의 PING/PONG 타임아웃이 최후 방어선).
+    WSAIoctl((SOCKET)fd, SIO_KEEPALIVE_VALS, &ka, sizeof(ka),
+             nullptr, 0, &bytesReturned, nullptr, nullptr);
 #else
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
 #  if defined(TCP_KEEPIDLE)
@@ -301,6 +315,9 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
 }
 
 // shutdown wakes peer threads; the final handle owner closes the fd.
+// 불변식: signal handler 에서 tcp_close() 호출 금지 — shared_ptr(fdh) 읽기는 async-signal-safe 가 아니다.
+// 불변식: 여기서 fdh.reset() 금지 — 같은 인스턴스를 읽는 다른 스레드와 shared_ptr
+//         인스턴스 경합이 된다. 참조 해제는 소유 스레드의 RAII(재대입/소멸)에 맡긴다.
 void tcp_close(TcpSocket& s) {
     if (!s.fdh) return;
     int fd = *s.fdh;

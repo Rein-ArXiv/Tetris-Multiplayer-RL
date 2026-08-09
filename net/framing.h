@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -7,6 +8,20 @@
 // 상세: ARCHITECTURE.md §7.2 (MsgType 표) 및 §11/§12 (메타 + 랭킹 흐름)
 
 namespace net {
+
+// 프레임 한계/헤더 필드 크기 — C++ 쪽 단일 진실 공급원(과거엔 framing.cpp 익명
+// 네임스페이스에 있던 값을 공개 승격했고, server/relay.cpp 도 이 상수를 참조한다).
+// 주의: 같은 값이 Python 미러(python/netbot/framing.py)에 중복돼 있고, 패리티
+//   테스트(python/tests/test_framing_parity.py)가 이 값을 고정한다. 한쪽만 올리면
+//   반대편 파서가 정상 프레임의 LEN 을 한도 초과로 보고 스트림 오염으로 오판해
+//   연결을 끊으므로, 반드시 양쪽을 함께 바꿔야 한다.
+// kMaxPayloadBytes 는 단순 메모리 최적화가 아니라 wire 보안 경계다: 악성 길이
+//   선언을 받은 파서가 끝없이 body 를 기다리며 수신 버퍼를 키우는 것을 막는다.
+//   정상 메시지 중 가장 큰 CHAT 도 이 한도 아래에 들어온다.
+constexpr std::size_t kMaxPayloadBytes    = 4096;  // PAYLOAD 상한 (바이트)
+constexpr std::size_t kFrameLenBytes      = 2;     // LEN 필드 (u16 LE)
+constexpr std::size_t kFrameTypeBytes     = 1;     // TYPE 필드 (u8)
+constexpr std::size_t kFrameChecksumBytes = 4;     // CHECKSUM 필드 (u32 LE, FNV-1a)
 
 // 메시지 타입
 enum class MsgType : uint8_t {

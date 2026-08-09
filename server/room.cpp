@@ -23,6 +23,12 @@ constexpr size_t kCodeAlphabetN     = sizeof(kCodeAlphabet) - 1;
 constexpr size_t kCodeLen           = 5;
 constexpr auto   kPollInterval      = std::chrono::milliseconds(10);
 
+// roomLoop_ 대기 단계 데드라인 — queueLobbyThread 의 kConfirmTimeout 과 같은 결.
+// 방이 무기한 열려 있으면 워커 슬롯·IP admission·세션 lease 가 그만큼 잠긴 채
+// 새 연결을 굶기므로, 진행이 없는 방은 서버가 먼저 정리한다.
+constexpr auto   kRoomGuestWaitTimeout = std::chrono::minutes(15);  // 개설 후 게스트 무입장
+constexpr auto   kRoomReadyTimeout     = std::chrono::seconds(60);  // 게스트 입장 후 READY 미확정
+
 // ROOM_INFO status 바이트 (plan §D.2 / framing.h)
 constexpr uint8_t kStatusWaiting    = 0;
 constexpr uint8_t kStatusFull       = 1;
@@ -227,8 +233,33 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
     bool leaveRequested   = false;
     bool peerStartedMatch = false;
     bool iAmStarter       = false;
+    bool timedOut         = false;
+
+    // 단계별 데드라인. 게스트 스레드의 대기는 시작부터 끝까지 READY 단계이고
+    // (호스트가 떠난 방은 재입장 경로가 없어 더 진행될 수 없다), 호스트 스레드는
+    // 게스트 입·퇴장을 관측하는 순간 단계가 전환되므로 아래 상태 체크에서
+    // bothPresent 변화를 보고 데드라인을 다시 건다.
+    auto armDeadline = [](bool bothPresent) {
+        const auto now = std::chrono::steady_clock::now();
+        return bothPresent
+            ? std::chrono::steady_clock::time_point(now + kRoomReadyTimeout)
+            : std::chrono::steady_clock::time_point(now + kRoomGuestWaitTimeout);
+    };
+    bool bothPresentPrev = !isHost;  // 게스트는 입장 시점에 이미 양측 재실
+    auto deadline        = armDeadline(bothPresentPrev);
 
     while (!stopping.load()) {
+        // 데드라인은 활동(채팅/READY 토글)으로 연장하지 않는다 — 활동 기준이면
+        // 채팅만 계속 보내며 워커 슬롯을 무한정 점유할 수 있다.
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::cerr << "[room] code=" << code << " "
+                      << (isHost ? "host" : "guest")
+                      << (bothPresentPrev ? " ready-wait" : " guest-wait")
+                      << " timeout -> closing\n";
+            timedOut = true;
+            break;
+        }
+
         if (!net::tcp_recv_some(mySock, stream)) {
             // EOF — 소켓 닫힘
             break;
@@ -285,11 +316,13 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         if (leaveRequested) break;
 
         // 상태 변화 체크
+        bool bothPresentNow = false;
         {
             std::lock_guard<std::mutex> lk(mu);
             auto it = rooms.find(code);
             if (it == rooms.end()) break;
             auto& r = it->second;
+            bothPresentNow = r.hostPresent && r.guestPresent;
 
             if (r.matchStarted) {
                 // 상대가 starter 로 선점함 — 내 read 루프를 내려놓고 exit 플래그 세팅
@@ -306,6 +339,15 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                 cv.notify_all();
                 break;
             }
+        }
+
+        // 호스트의 대기 단계 전환: 게스트 입장 → READY 대기(60s), 게스트 퇴장 →
+        // 다시 게스트 대기(15m). 게스트 스레드는 단계가 바뀌지 않으므로 최초
+        // 데드라인을 유지한다 — 호스트가 떠난 zombie 방에 눌러앉는 것도 이
+        // 데드라인이 정리한다.
+        if (isHost && bothPresentNow != bothPresentPrev) {
+            bothPresentPrev = bothPresentNow;
+            deadline = armDeadline(bothPresentNow);
         }
 
         std::this_thread::sleep_for(kPollInterval);
@@ -373,8 +415,18 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         return;
     }
 
-    // 일반 종료(ROOM_LEAVE / EOF / shutdown) — 상대에게 알리고 내 소켓 닫음.
-    // peer 통지는 상태 mutex 밖에서 보내되 방별 게이트로 직렬화한다.
+    if (timedOut) {
+        // 정중한 종료 통지: 데드라인 초과로 닫을 때 EOF 만 던지면 클라이언트는
+        // 네트워크 오류로 오인한다. 전용 타임아웃 status 가 없어 gonefull(방 종료)
+        // 을 재사용해 대기 화면을 정리할 기회를 준다. 상대 스레드가 같은 소켓에
+        // READY/CHAT 을 포워딩 중일 수 있으므로 방 게이트로 직렬화.
+        const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
+        std::lock_guard<std::mutex> sendLk(roomSendMu_[shard]);
+        sendRoomInfo_(mySock, code, kStatusGoneFull, 1);
+    }
+
+    // 일반 종료(ROOM_LEAVE / EOF / 대기 타임아웃 / shutdown) — 상대에게 알리고
+    // 내 소켓 닫음. peer 통지는 상태 mutex 밖에서 보내되 방별 게이트로 직렬화한다.
     // tcp_send_all 이 블록해도 다른 방의 처리는 계속되며, 버전 검증으로
     // 새 입장 뒤 오래된 gonefull 이 도착하는 상태 역전을 막는다.
     net::TcpSocket peerSock{};
@@ -385,8 +437,11 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         auto it = rooms.find(code);
         if (it != rooms.end()) {
             auto& r = it->second;
-            if (isHost) { r.hostPresent = false;  r.hostReady  = false; }
-            else        { r.guestPresent = false; r.guestReady = false; }
+            // 떠나는 쪽의 세션 lease 는 즉시 반납한다 — 상대가 남아 방 Entry 가
+            // 유지되는 동안에도 이 플레이어가 새 연결로 재인증할 수 있어야 하고,
+            // 타임아웃 정리 시 자원 회수가 방 소멸 시점까지 미뤄지지 않게 한다.
+            if (isHost) { r.hostPresent = false;  r.hostReady  = false; r.hostSessionLease.reset(); }
+            else        { r.guestPresent = false; r.guestReady = false; r.guestSessionLease.reset(); }
             if (isHost && r.guestPresent) { peerSock = r.guestSock; notifyPeer = true; }
             if (!isHost && r.hostPresent) { peerSock = r.hostSock;  notifyPeer = true; }
             roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;

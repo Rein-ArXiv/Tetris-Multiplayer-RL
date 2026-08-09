@@ -3,7 +3,7 @@
 #include <map>
 #include "position.h"
 
-// [NET/RL] Pure, headless block state. No raylib, no audio, no rendering.
+// [NET/RL] Pure, headless block state. No renderer, no audio, no rendering.
 // Holds shape data (cells per rotation), position offsets, and rotation state.
 // Used by SimGame for deterministic simulation (Colab training + Windows inference).
 class SimBlock

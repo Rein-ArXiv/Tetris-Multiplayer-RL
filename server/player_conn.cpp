@@ -147,7 +147,10 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
 } // namespace
 
 // 정상 클라이언트는 connect 직후 첫 프레임을 보낸다.
-static constexpr auto kJoinTimeout  = std::chrono::seconds(3);
+// 3s 는 위성/모바일 등 고지연 회선에서 meta 토큰 검증 왕복까지 겹치면 정상
+// 접속도 끊는 사례가 있어 5s 로 완화 — slow-loris 류 슬롯 점유 방어에는
+// 여전히 충분히 짧다.
+static constexpr auto kJoinTimeout  = std::chrono::seconds(5);
 static constexpr auto kPollInterval = std::chrono::milliseconds(10);
 
 void playerConnThread(net::TcpSocket sock, uint32_t conn_id,

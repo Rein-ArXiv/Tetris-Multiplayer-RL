@@ -1,4 +1,5 @@
 #include "matchmaker.h"
+#include "match_uuid.h"
 
 #include "../net/framing.h"
 
@@ -98,6 +99,7 @@ std::optional<Match> Matchmaker::waitForPair() {
     m.b = std::move(waiting.front()); waiting.pop_front();
     m.seed = nextSeed();
     m.match_id = next_match_id++;
+    m.match_uuid = new_match_uuid();
     return m;
 }
 

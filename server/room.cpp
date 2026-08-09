@@ -1,6 +1,7 @@
 #include "room.h"
 
 #include "relay.h"
+#include "match_uuid.h"
 #include "../net/framing.h"
 #include "../net/socket.h"
 
@@ -110,6 +111,7 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
                                 int64_t player_id, int elo,
                                 const std::string& username, const std::string& token,
                                 const std::string& selected_icon_id,
+                                std::shared_ptr<PlayerSessionLease> session_lease,
                                 std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
@@ -132,6 +134,7 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
         r.hostUsername = username;
         r.hostToken    = token;
         r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+        r.hostSessionLease = std::move(session_lease);
         roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
     }
     std::cerr << "[room] conn=" << conn_id << " created code=" << code << "\n";
@@ -143,6 +146,7 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
                               int64_t player_id, int elo,
                               const std::string& username, const std::string& token,
                               const std::string& selected_icon_id,
+                              std::shared_ptr<PlayerSessionLease> session_lease,
                               std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     bool entered = false;
@@ -180,6 +184,7 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         r.guestUsername = username;
         r.guestToken    = token;
         r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+        r.guestSessionLease = std::move(session_lease);
         net::TcpSocket hs = r.hostSock;
         net::TcpSocket gs = r.guestSock;
         roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
@@ -343,6 +348,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             m.a.username  = r.hostUsername;
             m.a.token     = r.hostToken;
             m.a.selected_icon_id = r.hostSelectedIconId;
+            m.a.session_lease = r.hostSessionLease;
             m.b.sock      = r.guestSock;
             m.b.conn_id   = r.guestConn;
             m.b.player_id = r.guestPlayerId;
@@ -350,8 +356,10 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             m.b.username  = r.guestUsername;
             m.b.token     = r.guestToken;
             m.b.selected_icon_id = r.guestSelectedIconId;
+            m.b.session_lease = r.guestSessionLease;
             m.seed        = nextSeed_();
             m.match_id    = nextMatchId_();
+            m.match_uuid  = new_match_uuid();
             rooms.erase(it);
         }
         std::cerr << "[room] code=" << code << " -> match id=" << m.match_id

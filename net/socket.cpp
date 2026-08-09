@@ -102,18 +102,38 @@ static bool set_nonblocking(int fd) {
 #endif
 }
 
-// [NET] Nagle 비활성화 (TCP_NODELAY).
-//   기본 Nagle 알고리즘은 작은 패킷(<MSS) 을 최대 200ms 까지 버퍼링해 모아
-//   보낸다. 우리 INPUT 프레임은 7바이트 / 60Hz 로 송신 → Nagle ON 이면 각
-//   프레임이 수십~200ms 지연되어 도착한다. lockstep 의 safeTick 은 상대 INPUT
-//   도착까지 대기하므로 → 체감상 "호스트가 렉 걸림".
-//   게임 트래픽은 지연이 대역폭보다 압도적으로 치명적 → 반드시 NODELAY.
+// Lockstep favors latency over batching small INPUT frames.
 static int set_nodelay(int fd) {
     int yes = 1;
 #ifdef _WIN32
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
 #else
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+#endif
+}
+
+// Kernel fallback for peers that disappear without FIN/RST.
+static void set_keepalive(int fd) {
+    int yes = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&yes, sizeof(yes));
+#else
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+#  if defined(TCP_KEEPIDLE)
+    int idle = 15;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#  elif defined(TCP_KEEPALIVE)
+    int idle = 15;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));
+#  endif
+#  if defined(TCP_KEEPINTVL)
+    int interval = 5;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+#  endif
+#  if defined(TCP_KEEPCNT)
+    int probes = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
+#  endif
 #endif
 }
 
@@ -147,6 +167,7 @@ TcpSocket tcp_accept(const TcpSocket& server) {
     // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
+    set_keepalive(fd);
     return make_owned(fd);
 }
 
@@ -173,7 +194,19 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     // 연결된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
+    set_keepalive(fd);
     return make_owned(fd);
+}
+
+std::string tcp_peer_ip(const TcpSocket& s) {
+    if (!s.valid()) return {};
+    sockaddr_storage addr{};
+    socklen_t len = sizeof(addr);
+    if (::getpeername(s.fd(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) return {};
+    char host[NI_MAXHOST]{};
+    if (::getnameinfo(reinterpret_cast<sockaddr*>(&addr), len,
+                      host, sizeof(host), nullptr, 0, NI_NUMERICHOST) != 0) return {};
+    return host;
 }
 
 // [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
@@ -267,17 +300,7 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
     return true;
 }
 
-// [NET] 소켓 종료.
-//   ::shutdown 으로 같은 fd 를 폴링/대기 중인 다른 복사본의 recv 를 EOF 로
-//   깨워 루프를 빠져나가게 한다. 실제 ::close 는 마지막 TcpSocket 복사본이
-//   소멸할 때 deleter 에서 한 번만 일어난다(이중 close / fd 재사용 경합 방지).
-//   shutdown 은 일반 스레드에서 반복 호출해도 무해한 종료 신호로만 사용한다.
-//   TcpSocket 은 shared_ptr 를 읽으므로 tcp_close() 를 signal handler 에서 직접
-//   호출하면 안 된다.
-//   여기서 fdh 를 reset 하지 않는 이유: 같은 인스턴스를 다른 스레드가 읽고 있을
-//   수 있어(예: Session::sock 을 ioThread 가 read, 메인이 Close) reset 은
-//   shared_ptr 인스턴스에 대한 경합이 된다. 참조 해제는 RAII(소유 스레드의
-//   재대입/소멸)에 맡긴다.
+// shutdown wakes peer threads; the final handle owner closes the fd.
 void tcp_close(TcpSocket& s) {
     if (!s.fdh) return;
     int fd = *s.fdh;

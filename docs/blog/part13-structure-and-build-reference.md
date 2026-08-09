@@ -1,8 +1,7 @@
 # Part 13: 완성 구조와 확장 레퍼런스
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 13**
 >
-> [시리즈 목차](./README.md) · [이전: Part 12 — 검수와 배포](./part12-hardening-and-release.md) · **Part 13**
 
 ---
 
@@ -144,7 +143,7 @@ Tetris-Multiplayer-RL/
 └── assets/                ← images.cfg + icons/player.png, opponent.png, bot.png
 ```
 
-`Sounds/` 에 드롭·가비지 효과음 파일이 추가로 있으면 로드하고, 없으면 조용히 건너뛴다 — 자세한 규칙은 [Part 5](./part5-audio.md) 에서 다룬다.
+`Sounds/`에 드롭·가비지 효과음 파일이 있으면 각각 로드하고, 없으면 해당 효과만 조용히 건너뛴다. 필수 BGM/SFX 하나의 실패가 전체 오디오 초기화나 게임 실행을 막지 않으며, 성공한 핸들만 `Game` 소멸 시 해제한다.
 
 한 줄 책임 정리:
 
@@ -231,7 +230,7 @@ python/requirements-colab.txt  → requirements.txt + pybind11 + torch + gymnasi
 
 루트 `pyproject.toml` 의 핵심은 다음이다.
 
-**현재 소스 발췌 — `pyproject.toml:7-20`**
+**현재 소스 발췌 — `pyproject.toml`**
 
 ```toml
 dependencies = [
@@ -300,7 +299,7 @@ uv sync --dev --extra train --extra export
 
 ### 3.1 프롤로그
 
-**현재 소스 발췌 — `CMakeLists.txt:1-12`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 cmake_minimum_required(VERSION 3.15)
@@ -325,7 +324,7 @@ MSVC 의 `/utf-8` 는 소스/실행 인코딩 모두 UTF-8 로 설정하는 플�
 
 ### 3.2 옵션 플래그와 캐시 변수
 
-**현재 소스 발췌 — `CMakeLists.txt:14-41`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -389,11 +388,11 @@ cmake -S . -B build \
 | 2 | 환경변수 `TETRIS_RELAY_ENDPOINT` | 환경변수 `TETRIS_META_URL` | 파싱 실패 시 경고 후 이전 값 유지 |
 | 3 (최고) | CLI `--host` / `--queue` / `--room` | CLI `--meta` | 그 실행에만 적용 |
 
-빈 문자열 메타 URL 은 "메타 서버 없음" 을 뜻한다 — 게스트 토큰 발급과 랭킹 조회가 비활성화되고 게임은 로컬/직결 모드로만 동작한다. 자세한 동작은 [Part 10](./part10-meta-and-ranking.md) 에서 다룬다.
+빈 문자열 메타 URL은 "메타 서버 없음"을 뜻한다. 게스트 토큰 발급, 랭킹·아이콘 조회, ranked 결과 저장이 비활성화되고 게임은 로컬·직결·unranked relay 모드로 동작한다. relay에 `--meta`를 주지 않은 경우도 같은 `player_id=0` 계약을 쓴다.
 
 바로 아래에서 OpenSSL 을 찾는다.
 
-**현재 소스 발췌 — `CMakeLists.txt:43-50`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 if (TETRIS_ENABLE_HTTPS)
@@ -410,7 +409,7 @@ endif()
 
 플랫폼 백엔드 기본값:
 
-**현재 소스 발췌 — `CMakeLists.txt:52-59`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # TETRIS_USE_SDL2 — Use the SDL2 cross-platform backend (window + audio + text).
@@ -429,7 +428,7 @@ endif()
 
 모든 타깃이 쓰는 순수 시뮬 파일들을 변수로 뽑아 둔다.
 
-**현재 소스 발췌 — `CMakeLists.txt:61-80`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -466,7 +465,7 @@ set(TETRIS_SIM_HEADERS
 
 (a) **의존성 선검사 + 공통 소스 묶음**:
 
-**현재 소스 발췌 — `CMakeLists.txt:82-115`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -511,7 +510,7 @@ if (TETRIS_BUILD_GAME)
 
 (b) **헤더 목록**. CMake 는 헤더를 컴파일하지 않지만, `add_executable` 에 나열해두면 IDE(Visual Studio 솔루션, Xcode 프로젝트)의 파일 트리에 나타나고 일부 제너레이터가 의존성 추적에 활용한다.
 
-**현재 소스 발췌 — `CMakeLists.txt:117-135`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     set(TETRIS_GAME_HEADERS
@@ -541,7 +540,7 @@ GL 헤더 셋(`gl_api.h` / `gl_internal.h` / `gl_shaders.h`)이 여기 나열돼
 
 (c) **백엔드 분기** — GL 렌더러와 텍스트는 공통이고, `TETRIS_USE_SDL2` 에 따라 창/컨텍스트와 오디오 2개 파일만 교체된다.
 
-**현재 소스 발췌 — `CMakeLists.txt:137-187`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     if (TETRIS_USE_SDL2)
@@ -628,7 +627,7 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 
 (d) **컴파일 정의 주입** — 위에서 본 캐시 변수가 여기서 매크로가 된다.
 
-**현재 소스 발췌 — `CMakeLists.txt:189-202`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     target_compile_definitions(tetris PRIVATE
@@ -653,7 +652,7 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 
 (e) **선택적 ONNX Runtime** — `TETRIS_BUILD_BOT=ON` 이 켜졌을 때만.
 
-**현재 소스 발췌 — `CMakeLists.txt:204-225`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     # ------------------------------------------------------------------------
@@ -684,7 +683,7 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 
 (f) **rpath & .app 번들 메타** — 배포용 설정.
 
-**현재 소스 발췌 — `CMakeLists.txt:227-259`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     # ------------------------------------------------------------------------
@@ -735,7 +734,7 @@ Windows 는 rpath 개념이 없다 — DLL 은 "실행 파일과 같은 폴더" 
 
 실행 파일은 빌드 디렉터리에 생성되지만 `Font/NanumGothic.ttf` 나 `Sounds/music.mp3` 는 소스 디렉터리에 있다. 게임은 상대 경로 `Font/...` 로 리소스를 여는데, 빌드 디렉터리에서 실행하면 파일을 못 찾는다. 해결은 빌드 시 자동으로 복사하는 커스텀 타깃이다.
 
-**현재 소스 발췌 — `CMakeLists.txt:261-279`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     # Copy assets (fonts + sounds + icons + model)
@@ -769,7 +768,7 @@ endif()
 
 ### 3.6 타깃 2 — `tetris_py` (pybind11 모듈)
 
-**현재 소스 발췌 — `CMakeLists.txt:281-304`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -809,7 +808,7 @@ endif()
 
 ### 3.7 타깃 3 — `sim_hash_dump` / `worker_group_test` (회귀 테스트)
 
-**현재 소스 발췌 — `CMakeLists.txt:306-326`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -837,14 +836,14 @@ endif()
 
 `TETRIS_BUILD_TEST` 하나가 **두 개의 실행 파일**을 만든다.
 
-- `sim_hash_dump` — 오직 순수 시뮬만 링크. OS API 없음, 네트워크 없음. 고정 입력 스크립트를 여러 시드로 돌려 각 스텝의 `StateHash()` 를 stdout 에 찍는다. 이 블록은 [Part 1](./part1-deterministic-simulation.md) 에서 추가된다.
+- `sim_hash_dump` — 오직 순수 시뮬만 링크. OS API 없음, 네트워크 없음. 고정 입력 스크립트를 여러 시드로 돌려 각 스텝의 `StateHash()`를 stdout에 찍으며, 순수 시뮬레이션 소스 집합이 처음 생길 때부터 계층 경계를 검증한다.
 - `worker_group_test` — 릴레이 서버의 워커 스레드 수명 관리(`server/worker_group.h`)를 검증한다. 이 블록은 [Part 7](./part7-relay-server.md) 에서 이 `if` 안에 추가된다. Part 1 시점에는 존재하지 않는다.
 
 `sim_hash_dump` 의 출력은 `python/tests/_sim_hash_dump.txt` 에 골든 파일로 고정돼 있어, `diff` 한 줄로 결정론 회귀를 검증한다. 플랫폼 간 `StateHash` 가 한 비트라도 다르면 멀티플레이가 desync 된다 — 이 바이너리가 마지막 방어선이다. 구체적으로는 31 스텝짜리 고정 스크립트(총 406 틱)를 **스텝 단위**로 출력하며, 기본 시드는 `0x1`, `0xDEADBEEF`, `0xC0FFEE123456789` 세 개이고 argv 로 시드 목록을 덮어쓸 수 있다.
 
 ### 3.8 타깃 4 — `tetris_relay` (릴레이 서버)
 
-**현재 소스 발췌 — `CMakeLists.txt:328-382`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -910,7 +909,7 @@ endif()
 
 ### 3.9 타깃 5 — `tetris_meta` (HTTP+SQLite 메타 서버)
 
-**현재 소스 발췌 — `CMakeLists.txt:384-451`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -1012,7 +1011,7 @@ ONNX Runtime CPU 바이너리는 플랫폼별 번들이 크고, 사용자마다 
 
 ### 4.1 플랫폼 감지
 
-**현재 소스 발췌 — `third_party/fetch_onnxruntime.sh:1-36`**
+**현재 소스 발췌 — `third_party/fetch_onnxruntime.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -1059,7 +1058,7 @@ detect_platform() {
 
 ### 4.2 다운로드와 배치
 
-**현재 소스 발췌 — `third_party/fetch_onnxruntime.sh:38-103`**
+**현재 소스 발췌 — `third_party/fetch_onnxruntime.sh`**
 
 ```bash
 PLATFORM="$(detect_platform)"
@@ -1300,7 +1299,7 @@ cmake --build build --target sim_hash_dump
 
 ### 7.3 새 UI 위젯 추가
 
-`src/gui.h` / `src/gui.cpp` 에 함수를 하나 더한다. 현재 아홉 개가 있다.
+`src/gui.h` / `src/gui.cpp`에 선언과 구현을 함께 추가한다. 현재 공개 함수 목록은 헤더가 유일한 기준이며, 모든 위젯은 같은 즉시 모드 입력 규칙을 따른다.
 
 ```text
 gui_hover_rect · gui_button · gui_button_highlighted · gui_close_button
@@ -1447,7 +1446,7 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 가장 넓게 퍼지는 변경이다. `src/sim_grid.h` 의 두 줄로 시작하지만 거기서 끝나지 않는다.
 
-**현재 소스 발췌 — `src/sim_grid.h:10-11`**
+**현재 소스 발췌 — `src/sim_grid.h`**
 
 ```cpp
     static constexpr int kRows = 20;

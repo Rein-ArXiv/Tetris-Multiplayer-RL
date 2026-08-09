@@ -1,6 +1,6 @@
 # Part 9: 강화학습과 ONNX 인-프로세스 봇
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지 [시리즈 목차](./README.md) · [이전: Part 8 — Python RL](./part8-python-rl.md) · **Part 9** · [다음: Part 10 — 메타와 랭킹](./part10-meta-and-ranking.md)
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 9**
 
 ---
 
@@ -25,7 +25,7 @@ Part 8 이 만든 것은 평가 함수(`bcts_score`)와 그것을 쓰는 학습�
 1. **피처 엔지니어링의 상한.** 선형 평가 함수는 "좋은 보드" 를 사람이 정의한 것이다. §11.2 의 `eval_board` 가 쓰는 특성은 **총높이 · 삭제줄 · 구멍 · 요철(bumpiness) 네 개뿐**이다. T-spin, 다단 콤보, 백-투-백 테트리스 같은 공격 최적화는 이 네 숫자로 표현되지 않으므로 봇이 그런 수를 절대 찾지 않는다. §13.2 에서 보듯 `Single vs Bot` 은 두 보드가 실제로 가비지를 주고받는 구조라, 점수가 아니라 **공격량**이 승부를 가른다. 거기서 천장이 보인다.
 2. **학습 가능성.** "다음 달에 보상 함수를 바꿔서 다시 훈련" 은 휴리스틱으로는 불가능하다. RL 은 그 반복 루프 자체를 프로젝트의 1급 시민으로 만든다.
 
-참고로 이 평가 함수 계열의 이름은 BCTS 이며, 근거는 `python/common/features.py:3` 의 `These are the classic BCTS (Building Controllers for Tetris) features` 다 — Thiery & Scherrer(2009). Bertsekas-Tsitsiklis 계열의 근사 동적 계획법과는 다른 계보이며, 저장소 안에 그 귀속을 뒷받침하는 근거는 없다. 가중치 숫자의 출처가 저장소 안에서 갈린다는 점은 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에 정리돼 있다.
+참고로 이 평가 함수 계열의 이름은 BCTS 이며, 근거는 `python/common/features.py` 의 `These are the classic BCTS (Building Controllers for Tetris) features` 다 — Thiery & Scherrer(2009). Bertsekas-Tsitsiklis 계열의 근사 동적 계획법과는 다른 계보이며, 저장소 안에 그 귀속을 뒷받침하는 근거는 없다. 가중치 숫자의 출처가 저장소 안에서 갈린다는 점은 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에 정리돼 있다.
 
 ### 1.2 왜 인-프로세스 추론인가
 
@@ -132,7 +132,7 @@ sequenceDiagram
 
 `board` 에서 **떨어지는 피스와 고스트는 제외**한다. 정책이 추론할 대상은 "커밋된 보드 상태 + 이번에 내려줄 피스" 이지 화면에 보이는 시각 요소가 아니다. 고스트 블록의 cell id 값은 8 이라 `(v > 0) && (v != 8)` 로 방어적으로 걸러낸다.
 
-**현재 소스 발췌 — `python/common/obs.py:36-56`**
+**현재 소스 발췌 — `python/common/obs.py`**
 
 ```python
 def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
@@ -160,7 +160,7 @@ def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
 
 C++ 쪽 `observe` 가 같은 결과를 만든다.
 
-**현재 소스 발췌 — `bot/placement.cpp:56-81`**
+**현재 소스 발췌 — `bot/placement.cpp`**
 
 ```cpp
 void observe(const SimGame& sim,
@@ -197,7 +197,7 @@ void observe(const SimGame& sim,
 
 placement-level 이다. 한 피스당 가능한 놓임새를 `(col, rot)` 쌍으로 본다. `col ∈ [0, 10)`, `rot ∈ [0, 4)`, 총 40 개. 로테이션 수가 피스 종류에 따라 실질적 다양성이 달라지지만 공간은 항상 40 으로 고정하고, 합법 마스크로 유효 동작만 통과시킨다.
 
-**현재 소스 발췌 — `python/common/action_mask.py:25-47`**
+**현재 소스 발췌 — `python/common/action_mask.py`**
 
 ```python
 def encode_action(col: int, rot: int) -> int:
@@ -231,7 +231,7 @@ placement-level 을 택한 이유와 그 대가(중력 타이밍·T-spin·tuck �
 
 env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
 
-**현재 소스 발췌 — `python/common/env.py:101-115`**
+**현재 소스 발췌 — `python/common/env.py`**
 
 ```python
         col, rot = decode_action(int(action))
@@ -261,7 +261,7 @@ env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
 
 학습 전체가 이 한 파일에 의존한다. 전문을 인용한다.
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:1-173`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
 // SimGame을 Python에서 쓰기 위한 pybind11 binding.
@@ -445,7 +445,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 **`grid()` 는 항상 복사한다.** 파일 상단 usage 주석의 `# numpy (20, 10) int32 copy` 와 `grid()` 람다 안의 `We COPY the buffer` 가 같은 사실을 두 번 말한다. 200 개 int 복사는 훈련 throughput 에 거의 영향이 없고, "Python 이 numpy 배열을 쥐고 있는데 SimGame 이 그 아래에서 mutate 해서 다음 프레임에 다른 값이 보인다" 는 미묘한 버그를 완전히 봉쇄한다. `return_value_policy::reference_internal` 은 `current_block`/`ghost_block` 처럼 멤버 수명이 안정적인 조회에만 쓴다. `next_block` 은 preview 큐 원소라 큐 갱신 때 참조가 무효화될 수 있어 복사로 반환한다.
 
-**전투/가비지 API 일곱 개가 2-보드 구성의 토대다.** 이 블록은 이 장의 §13.2 (`src/main.cpp` 의 `Single vs Bot` 가비지 교환)와 `python/common/env_versus.py`(2-보드 RL 환경)가 **공통으로 올라타는 배선**이다. `attack_lines_sent()` 가 누적 총계라서 양쪽 모두 "배치 전후 차분" 이라는 같은 패턴을 쓰고, `add_pending_garbage()` 로 상대 보드에 라우팅하고, 실제 주입은 받는 보드의 다음 잠금에서 일어난다. C++ 게임과 Python 학습 환경이 같은 함수 호출 순서를 갖는 것이 이 API 설계의 목적이다.
+**전투/가비지 API가 2-보드 구성의 토대다.** `src/main.cpp`의 `Single vs Bot` 가비지 교환과 `python/common/env_versus.py`의 2-보드 RL 환경이 이 배선을 공유한다. `attack_lines_sent()`가 누적 총계라서 양쪽 모두 "배치 전후 차분" 패턴을 쓰고, `add_pending_garbage()`로 상대 보드에 라우팅하며 실제 주입은 받는 보드의 다음 잠금에서 일어난다. C++ 게임과 Python 학습 환경이 같은 호출 순서를 갖는 것이 API 설계의 목적이다.
 
 **`state_hash()` 를 노출한다.** [Part 1](./part1-deterministic-simulation.md) 의 FNV-1a 해시를 Python 에서 바로 찍어볼 수 있다. `test_determinism_crossplatform.py` 같은 테스트가 여기를 통해 Python 런과 C++ 런의 상태가 틱 단위로 일치하는지 검증한다.
 
@@ -474,7 +474,7 @@ print(hex(g.state_hash()))         # 0x...
 
 `common/models.py` 의 `TetrisPolicyNet`. 학습 파이프라인의 심장이지만 이번 파트의 주제는 아니므로 forward 계약만 본다.
 
-**현재 소스 발췌 — `python/common/models.py:22-41`**
+**현재 소스 발췌 — `python/common/models.py`**
 
 ```python
 class TetrisPolicyNet(nn.Module):
@@ -499,7 +499,7 @@ class TetrisPolicyNet(nn.Module):
     ARCH_VERSION = 1
 ```
 
-**현재 소스 발췌 — `python/common/models.py:81-95`**
+**현재 소스 발췌 — `python/common/models.py`**
 
 ```python
     def forward(
@@ -527,7 +527,7 @@ class TetrisPolicyNet(nn.Module):
 
 학습 시 마스킹에 쓰는 `masked_log_softmax` 도 같은 파일에 있다.
 
-**현재 소스 발췌 — `python/common/models.py:98-107`**
+**현재 소스 발췌 — `python/common/models.py`**
 
 ```python
 def masked_log_softmax(
@@ -550,7 +550,7 @@ def masked_log_softmax(
 
 체크포인트(`.pt`)는 PyTorch 포맷이다. 이걸 ONNX 그래프로 변환해야 C++ 런타임이 읽을 수 있다. `INPUT_NAMES`/`OUTPUT_NAMES` 상수와 `torch.onnx.export` 호출이 한 맥락에서 보여야 하므로 파일 전문을 인용한다.
 
-**현재 소스 발췌 — `python/netbot/export_onnx.py:1-114`**
+**현재 소스 발췌 — `python/netbot/export_onnx.py`**
 
 ```python
 """Convert a trained TetrisPolicyNet checkpoint to ONNX for the C++ netbot.
@@ -680,7 +680,7 @@ OUTPUT_NAMES = ["policy_logits", "value"]
 
 ONNX 그래프는 텐서 이름으로 식별된다. `torch.onnx.export` 가 이 이름들을 graph node 에 박아넣고, `onnxruntime` 의 `Session::Run` 호출은 정확히 같은 문자열로 입출력을 끼워 맞춘다. C++ 쪽에 같은 배열이 다시 등장한다.
 
-**현재 소스 발췌 — `bot/bot_onnx.cpp:36-37`**
+**현재 소스 발췌 — `bot/bot_onnx.cpp`**
 
 ```cpp
     std::array<const char*, 3> inputNames  = {"board", "current", "next"};
@@ -731,7 +731,7 @@ export 가 끝나면 `model/bots/<bot_name>.onnx` 파일이 남는다. C++ 런�
 
 CBMPI(Classification-Based Modified Policy Iteration)는 "현재 정책보다 나은 행동" 을 **실제 시뮬레이션으로** 만들어낸 다음, 그 행동을 지도학습으로 정책에 집어넣는다. 개선 단계가 진짜 후속 보드를 필요로 하므로 sim 을 분기해야 한다.
 
-**현재 소스 발췌 — `python/train/cbmpi_tetris.py:1-17`**
+**현재 소스 발췌 — `python/train/cbmpi_tetris.py`**
 
 ```python
 """CBMPI-style trainer for the Tetris placement bot.
@@ -755,7 +755,7 @@ Run from ``python/`` after the Colab setup notebook builds ``tetris_py``::
 
 그리고 `clone` 이 없으면 즉시 명확한 예외를 던진다.
 
-**현재 소스 발췌 — `python/train/cbmpi_tetris.py:46-52`**
+**현재 소스 발췌 — `python/train/cbmpi_tetris.py`**
 
 ```python
 def _sim_clone(sim):
@@ -775,7 +775,7 @@ def _sim_clone(sim):
 
 MuZero-style trainer 는 representation / dynamics / prediction 세 네트워크를 가진 **다른 구조**를 학습한다. 그 native 체크포인트는 `TetrisPolicyNet` 이 아니므로 C++ ONNX 봇이 읽을 수 없다. 그래서 학습 뒤 distillation 단계가 MCTS 방문 분포를 정책망에 증류해 별도 파일로 저장한다.
 
-**현재 소스 발췌 — `python/train/muzero_tetris.py:1-16`**
+**현재 소스 발췌 — `python/train/muzero_tetris.py`**
 
 ```python
 """MuZero-style trainer for the Tetris placement bot.
@@ -812,7 +812,7 @@ python -m netbot.export_onnx checkpoints/aria_muzero.policy.pt ../model/bots/ari
 
 `TetrisPolicyNet` 은 actor-critic 형태(policy head + value head)인데, DQN 은 Q-value 하나만 필요하다. 이 프로젝트는 네트워크를 새로 만들지 않고 **해석을 바꾼다.**
 
-**현재 소스 발췌 — `python/train/dqn_tetris.py:1-8`**
+**현재 소스 발췌 — `python/train/dqn_tetris.py`**
 
 ```python
 """DQN / Double DQN trainer for the Tetris placement bot.
@@ -825,7 +825,7 @@ uses the classic target-network max. Checkpoints saved here load directly in
 ``netbot.export_onnx``.
 ```
 
-이게 가능한 이유는 런타임 추론이 **argmax** 이기 때문이다(§10.3). 정책 logit 의 argmax 든 Q-value 의 argmax 든 C++ 쪽 코드는 완전히 같다. `value` 출력은 ONNX 그래프에는 남아 있지만 C++ 이 `outs[1]` 을 읽지 않는다 — `bot/bot_onnx.h:18` 의 `"value" (1,) float32 — 학습에만 쓰고 여기선 무시` 주석이 그 사실을 적어둔 것이다.
+이게 가능한 이유는 런타임 추론이 **argmax** 이기 때문이다(§10.3). 정책 logit 의 argmax 든 Q-value 의 argmax 든 C++ 쪽 코드는 완전히 같다. `value` 출력은 ONNX 그래프에는 남아 있지만 C++ 이 `outs[1]` 을 읽지 않는다 — `bot/bot_onnx.h` 의 `"value" (1,) float32 — 학습에만 쓰고 여기선 무시` 주석이 그 사실을 적어둔 것이다.
 
 즉 **"학습 쪽은 무엇을 쓰든 상관없다"** 는 이 파트의 주장이 여기서 구체화된다. `TetrisPolicyNet` 과 같은 입출력 규약의 체크포인트를 만들면, `export_onnx` → C++ 런타임 파이프라인이 그대로 실행한다. 알고리즘 교체는 `.pt`/`.onnx` 파일과 roster entry 를 바꾸는 일이 된다.
 
@@ -903,7 +903,7 @@ export 실패가 `CalledProcessError` 로만 보이면 wrapper 에러일 뿐이�
 
 ### 9.1 옵션 선언
 
-**현재 소스 발췌 — `CMakeLists.txt:31-34`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
@@ -916,7 +916,7 @@ option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
 
 ### 9.2 ORT 블록
 
-**현재 소스 발췌 — `CMakeLists.txt:209-225`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
     # ------------------------------------------------------------------------
@@ -969,7 +969,7 @@ cmake --build build
 
 먼저 누가 무엇을 소유하는지 확정한다.
 
-**현재 소스 발췌 — `bot/bot_onnx.h:27-54`**
+**현재 소스 발췌 — `bot/bot_onnx.h`**
 
 ```cpp
 class BotOnnx {
@@ -1029,7 +1029,7 @@ graph TB
 
 ### 10.2 세션 생성
 
-**현재 소스 발췌 — `bot/bot_onnx.cpp:25-37`**
+**현재 소스 발췌 — `bot/bot_onnx.cpp`**
 
 ```cpp
 namespace bot {
@@ -1049,7 +1049,7 @@ struct BotOnnx::Impl {
 
 `<filesystem>` include 가 목록에 있는 것에 주목한다 — 바로 아래 Windows 경로 변환이 `std::filesystem::u8path` 를 쓴다. ORT 헤더는 `#if` 안에 있지만 표준 헤더들은 밖에 있다: 스텁 빌드도 같은 파일을 컴파일하기 때문이다.
 
-**현재 소스 발췌 — `bot/bot_onnx.cpp:39-63`**
+**현재 소스 발췌 — `bot/bot_onnx.cpp`**
 
 ```cpp
     bool LoadModel(const std::string& path, std::string* err_out)
@@ -1096,7 +1096,7 @@ struct BotOnnx::Impl {
 
 `InferOnce` 안에 세 덩어리가 모두 들어 있다: (a) `Ort::Value::CreateTensor<float>` 로 입력 텐서 3개 구성, (b) `session->Run` 호출, (c) logits 배열에서 masked argmax.
 
-**현재 소스 발췌 — `bot/bot_onnx.cpp:65-143`**
+**현재 소스 발췌 — `bot/bot_onnx.cpp`**
 
 ```cpp
     bool InferOnce(const SimGame& sim, int& col_out, int& rot_out)
@@ -1198,7 +1198,7 @@ struct BotOnnx::Impl {
 
 ### 10.4 PIMPL 바깥 인터페이스
 
-**현재 소스 발췌 — `bot/bot_onnx.cpp:146-164`**
+**현재 소스 발췌 — `bot/bot_onnx.cpp`**
 
 ```cpp
 BotOnnx::BotOnnx() : impl_(std::make_unique<Impl>()) {}
@@ -1228,7 +1228,7 @@ bool BotOnnx::IsLoaded() const
 
 `third_party/onnxruntime/` 이 아직 벤더링되지 않았을 수도 있다 (새 머신에서 `fetch_onnxruntime.sh` 를 안 돌렸거나, `TETRIS_BUILD_BOT=OFF` 로 빌드했거나). 이 경우에도 전체 프로젝트가 빌드되어야 한다.
 
-**현재 소스 발췌 — `bot/bot_onnx.cpp:170-187`**
+**현재 소스 발췌 — `bot/bot_onnx.cpp`**
 
 ```cpp
 struct BotOnnx::Impl { bool loaded = false; };
@@ -1276,9 +1276,9 @@ stateDiagram-v2
 
 ## 11. `bot/placement.cpp` — fallback 과 진짜 휴리스틱
 
-이 파일은 네 개의 함수를 담는다. 순서대로 `expand_placement`(§12), `fallback_placement`, 익명 네임스페이스의 `is_locked`/`eval_board`, `heuristic_placement`. 그리고 그 사이에 `observe`(§3.1)가 있다. 파일 헤더와 include 목록이 그 범위를 그대로 보여준다.
+이 파일은 placement 전개, 결정론적 fallback, board 평가, heuristic 선택을 한 흐름에 모은다. `observe`는 같은 상태 표현을 정책 입력으로 바꾼다. 함수 개수보다 “합법 후보 생성 → 평가 → 하나 선택”이라는 순서와 deterministic tie-break가 파일의 계약이다.
 
-**현재 소스 발췌 — `bot/placement.cpp:1-9`**
+**현재 소스 발췌 — `bot/placement.cpp`**
 
 ```cpp
 // placement 계산과 관측 변환의 구현. Python 쪽과 맞춰야 하는 계약은 .h에 적어 뒀다.
@@ -1296,7 +1296,7 @@ include 가 네 개뿐이다 — ORT 도, 렌더러도, 네트워크도 없다. 
 
 ### 11.1 `fallback_placement` — 최후의 안전망
 
-**현재 소스 발췌 — `bot/placement.cpp:39-54`**
+**현재 소스 발췌 — `bot/placement.cpp`**
 
 ```cpp
 bool fallback_placement(const SimGame& sim, int& col_out, int& rot_out)
@@ -1328,7 +1328,7 @@ bool fallback_placement(const SimGame& sim, int& col_out, int& rot_out)
 
 `bot/placement.cpp`에는 fallback과 **별개로** 실제로 "잘 두는" 1-ply 그리디 휴리스틱이 있다. 파일 순서상 `observe` 다음, 파일 끝부분이다.
 
-**현재 소스 발췌 — `bot/placement.cpp:83-132`**
+**현재 소스 발췌 — `bot/placement.cpp`**
 
 ```cpp
 namespace {
@@ -1396,7 +1396,7 @@ bool heuristic_placement(const SimGame& sim, int& col_out, int& rot_out)
 | `fallback_placement` | (col, rot) 사전순 최소 1개 | 무전략 (거의 항상 왼쪽) | ONNX 추론 실패 시 안전망 |
 | `heuristic_placement` | 모든 합법 placement 를 복사본에 적용 → `eval_board` 최고점 선택 | 1-ply 그리디 베이스라인 | 모델 없이 "잘 두는" 봇 |
 
-`eval_board` 의 가중치 `-0.510066`(총높이) / `0.760666`(삭제줄) / `-0.356630`(구멍) / `-0.184483`(요철)은 Python `BCTS_WEIGHTS` 의 같은 네 항목과 **비트 단위로 같은 값**이다. 이름 표기는 저장소 안에서 갈린다 — 여기 주석은 "El-Tetris 가중치", `python/common/features.py:102` 는 "Dellacherie's classic linear weights". 그 불일치와 출처 문제는 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에서 다뤘다.
+`eval_board` 의 가중치 `-0.510066`(총높이) / `0.760666`(삭제줄) / `-0.356630`(구멍) / `-0.184483`(요철)은 Python `BCTS_WEIGHTS` 의 같은 네 항목과 **비트 단위로 같은 값**이다. 이름 표기는 저장소 안에서 갈린다 — 여기 주석은 "El-Tetris 가중치", `python/common/features.py` 는 "Dellacherie's classic linear weights". 그 불일치와 출처 문제는 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에서 다뤘다.
 
 이 1-ply 그리디가 "휴리스틱 → RL" 비교의 출발점이다. RL 정책이 이 베이스라인을 못 넘으면 학습에 문제가 있는 것이다. `heuristic_placement` 도 `BotOnnx::Infer` 와 같은 `(const SimGame&, int& col, int& rot)` 시그니처라, 호출 사이트에서 모델 추론과 자리만 바꿔 끼울 수 있다 — §13.1 이 정확히 그렇게 한다.
 
@@ -1406,7 +1406,7 @@ bool heuristic_placement(const SimGame& sim, int& col_out, int& rot_out)
 
 정책은 "col 4, rot 2로 놓자"고 결정하지만 게임 루프는 틱별 `uint8_t` 입력 마스크를 받는다. placement 하나를 회전·이동·드롭 마스크 시퀀스로 **펼쳐야** 한다.
 
-**현재 소스 발췌 — `bot/placement.cpp:11-37`**
+**현재 소스 발췌 — `bot/placement.cpp`**
 
 ```cpp
 std::vector<uint8_t> expand_placement(int cur_col,
@@ -1462,7 +1462,7 @@ Python 쪽 `netbot/input_expander.py` 도 같은 규칙을 미러링한다. 현�
 
 봇은 `Single vs Bot` 안에서 같은 프로세스로 실행된다. 플레이어와 봇은 각각 `SimGame` 을 가지고, `main.cpp` 가 두 보드를 같은 60Hz 루프에서 진행시킨다. 아래가 그 루프의 봇 부분 전문이다.
 
-**현재 소스 발췌 — `src/main.cpp:1390-1413`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
                 // 1) 봇 입력 큐가 비었으면 새 placement 계산.
@@ -1506,7 +1506,7 @@ Python 쪽 `netbot/input_expander.py` 도 같은 규칙을 미러링한다. 현�
 
 이것이 `Single vs Bot` 을 "봇 시연" 이 아니라 **대전**으로 만드는 배선이다.
 
-**현재 소스 발췌 — `src/main.cpp:1415-1428`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
                 gameSingle->SubmitInput(inputMask);
@@ -1556,7 +1556,7 @@ sequenceDiagram
 
 학습 모델이 1개일 때는 `model/policy.onnx` 하나만 읽어도 충분했다. 지금은 알고리즘별로 10개 이상 모델을 비교해야 하므로 C++ 클라이언트는 로스터를 만든다.
 
-**현재 소스 발췌 — `src/main.cpp:355-398`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 static std::vector<BotEntry> discover_bot_roster()
@@ -1613,7 +1613,7 @@ static std::vector<BotEntry> discover_bot_roster()
 
 표시명과 기본 속도는 선택 파일 `model/bots.cfg` 로 덮어쓴다. 저장소에 `model/bots.cfg.example` 이 그대로 복사해 쓸 수 있는 형태로 들어 있다.
 
-**현재 소스 발췌 — `model/bots.cfg.example:1-21`**
+**현재 소스 발췌 — `model/bots.cfg.example`**
 
 ```text
 # Optional in-game bot roster metadata.
@@ -1647,7 +1647,7 @@ model/bots/aria_muzero.onnx|Aria MuZero|3
 
 **2. 키 매칭은 전체 경로 우선, 실패 시 파일명 fallback.**
 
-**현재 소스 발췌 — `src/main.cpp:197-215`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 static void apply_bot_config(
@@ -1675,7 +1675,7 @@ static void apply_bot_config(
 
 **3. `input_interval_ticks` 는 1~30 으로 클램프된다.**
 
-**현재 소스 발췌 — `src/main.cpp:130-135`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 static int clamp_bot_input_interval(int ticks)
@@ -1690,7 +1690,7 @@ static int clamp_bot_input_interval(int ticks)
 
 **4. 값이 비었거나 파싱 실패면 "기본값 유지" 다.** `BotConfigOverride` 의 `inputIntervalTicks` 초기값이 `0` 이고 `apply_bot_config` 가 `> 0` 일 때만 덮어쓰므로, 세 번째 필드를 생략하면 로스터가 정한 기본값(모델 1, 휴리스틱 2)이 그대로 남는다. 이름도 비어 있으면 덮어쓰지 않는다.
 
-속도 단축키는 debug UI 빌드 전용이다. `TETRIS_ENABLE_DEBUG_UI` 가 정의된 빌드에서만 봇 선택 화면의 Left/Right, 게임 중 `[`/`]` 로 임시 조절 UI 가 보인다 (`CMakeLists.txt:36`, 기본 OFF). 배포 빌드는 `model/bots.cfg` 와 기본값만 사용한다.
+속도 단축키는 debug UI 빌드 전용이다. `TETRIS_ENABLE_DEBUG_UI` 가 정의된 빌드에서만 봇 선택 화면의 Left/Right, 게임 중 `[`/`]` 로 임시 조절 UI 가 보인다 (`CMakeLists.txt`, 기본 OFF). 배포 빌드는 `model/bots.cfg` 와 기본값만 사용한다.
 
 ### 13.5 정리 — 봇도 사람과 같은 입구를 쓴다
 
@@ -1774,9 +1774,9 @@ cmake --build build --config Release
 
 메뉴에서 "Single vs Bot" 을 열면 `Heuristic (test)` 가 보여야 한다. 이 상태에서도 "Single Play", "Matchmaking Multi", "Custom Room Multi" 는 그대로 사용할 수 있어야 한다. `.onnx` 파일이 하나도 없으면 ONNX 로드 시도 자체가 없으므로 오류 표시도 없어야 정상이다.
 
-반대로 ORT 없는 빌드에서 `.onnx` 모델을 선택하면 봇이 실행되지 않고 **봇 선택 화면에 오류 문자열이 그려진다.** 이건 stdout 로그가 아니다 — `src/main.cpp:1742` 가 `botSelectError = "Load failed: " + err;` 로 문자열을 만들고, `:1720-1721` 이 그것을 `draw_text` 로 화면에 그린다.
+반대로 ORT 없는 빌드에서 `.onnx` 모델을 선택하면 봇이 실행되지 않고 **봇 선택 화면에 오류 문자열이 그려진다.** 이건 stdout 로그가 아니다 — `src/main.cpp` 가 `botSelectError = "Load failed: " + err;` 로 문자열을 만들고,  이 그것을 `draw_text` 로 화면에 그린다.
 
-**현재 소스 발췌 — `src/main.cpp:1752-1753`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             if (!botSelectError.empty())
@@ -1887,10 +1887,8 @@ print(out[0].shape, out[1].shape)   # (1, 40) (1,)
 
 긴 학습과 `.pt -> .onnx` export 는 Colab 에서 수행하고, 로컬 배포 머신에는 export 된 `model/bots/*.onnx` 와 선택적 `model/bots.cfg` 만 둔다.
 
-## 다음 장 예고
+## 적용 범위
 
-Part 10에서는 C++ 클라이언트와 relay 위에 **`tetris_meta` 메타 서버와 랭킹**을 얹는다. Part 9가 "학습된 정책을 게임 프로세스 안으로 들여오는 법"이었다면, 다음 장은 "클라이언트를 토큰·RP·리더보드가 있는 서비스에 연결하는 법"이다.
-
-즉 다음 장의 관심사는 모델 정확도가 아니라 서비스 경계다. guest 토큰 발급, relay의 `/v1/auth/verify` 검증, `MATCH_SUMMARY` 교차검증, `/v1/matches` 저장, 그리고 게임오버 화면의 RP delta 표시가 이어진다.
-
-**적용 범위:** Part 10의 meta 통합은 C++ 게임 클라이언트와 relay에 적용된다. 인프로세스 봇은 `Single vs Bot` 전용이며 ranked relay 매칭에는 참여하지 않는다.
+인프로세스 봇은 `Single vs Bot` 전용이며 ranked relay 매칭에는 참여하지 않는다.
+guest 토큰, RP, 리더보드, 경기 결과 저장은 C++ 클라이언트와 relay, `tetris_meta`의
+서비스 경계에 속하고 모델 추론 계약과 분리된다.

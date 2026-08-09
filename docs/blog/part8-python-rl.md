@@ -1,6 +1,6 @@
 # Part 8: Python 바인딩과 강화학습 — pybind11에서 Colab 학습까지
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지 [시리즈 목차](./README.md) · [이전: Part 7 — 릴레이](./part7-relay-server.md) · **Part 8** · [다음: Part 9 — ONNX 봇](./part9-rl-onnx-bot.md)
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 8**
 
 ---
 
@@ -72,7 +72,7 @@ RL 프로젝트에서 가장 흔한 선택은 "학습용 시뮬레이터를 Pyth
 
 저장소가 이 결정을 코드 주석으로 세 군데에 못 박아 놓았다.
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:1-10`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
 // SimGame을 Python에서 쓰기 위한 pybind11 binding.
@@ -87,7 +87,7 @@ RL 프로젝트에서 가장 흔한 선택은 "학습용 시뮬레이터를 Pyth
 //                 C++ lockstep 경로와 결과가 같은지 대조
 ```
 
-**현재 소스 발췌 — `python/common/obs.py:1-8`**
+**현재 소스 발췌 — `python/common/obs.py`**
 
 ```python
 """SimGame -> observation tensor builder.
@@ -128,7 +128,7 @@ pybind11의 결정적 장점: C++ 클래스를 그대로 Python에 노출할 수
 
 이 장이 추가하는 소스는 `bindings/tetris_py.cpp` 하나다. 빌드 파일에는 새 타깃 블록 하나가 늘어난다.
 
-**현재 소스 발췌 — `CMakeLists.txt:284-304`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -161,7 +161,7 @@ endif()
 
 여기서 초심자가 반드시 밟는 함정이 두 개 있다.
 
-1. **`TETRIS_BUILD_GAME` 은 기본 ON 이다** (`CMakeLists.txt:24`). `-DTETRIS_BUILD_PY=ON` 만 주면 게임 타깃까지 configure 되고, `third_party/httplib.h` 가 없으면 그 단계에서 FATAL_ERROR 로 죽는다. **반드시 `-DTETRIS_BUILD_GAME=OFF` 를 함께 준다.**
+1. **`TETRIS_BUILD_GAME` 은 기본 ON 이다** (`CMakeLists.txt`). `-DTETRIS_BUILD_PY=ON` 만 주면 게임 타깃까지 configure 되고, `third_party/httplib.h` 가 없으면 그 단계에서 FATAL_ERROR 로 죽는다. **반드시 `-DTETRIS_BUILD_GAME=OFF` 를 함께 준다.**
 2. **pybind11 을 pip 로 깔아도 CMake 가 못 찾는 경우가 흔하다.** 위 FATAL_ERROR 메시지가 그대로 해답을 알려준다 — `-Dpybind11_DIR=$(python -m pybind11 --cmakedir)`.
 
 검증된 형태는 이것이다.
@@ -183,7 +183,7 @@ cp build/tetris_py*.so python/sim/          # Windows: build\Release\tetris_py*.
 
 `PYBIND11_MODULE` 매크로 하나가 모듈 전체를 만든다. `SimGame::Placement`, `SimBlock`, `SimGame` 세 클래스를 등록한다.
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:36-64`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
 PYBIND11_MODULE(tetris_py, m)
@@ -223,7 +223,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 ### 2.2 두 개의 액션 API
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:74-85`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         .def("legal_placements", &SimGame::LegalPlacements,
@@ -240,7 +240,7 @@ PYBIND11_MODULE(tetris_py, m)
         }, "Return a deep copy of the full deterministic sim state.")
 ```
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:111-118`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         .def("submit_input", &SimGame::SubmitInput, py::arg("input_mask"),
@@ -261,7 +261,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 단일 보드 학습만 할 거라면 필요 없지만, §6 의 versus 환경과 Part 9 의 `Single vs Bot` 가비지 교환이 모두 이 일곱 개 위에 올라간다.
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:92-107`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         .def("attack_lines_sent", &SimGame::AttackLinesSent,
@@ -288,7 +288,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 ### 2.4 `grid()`는 복사한다
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:121-133`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         .def("grid", [](const SimGame& g) {
@@ -320,7 +320,7 @@ game.apply_placement(4, 0)   # SimGame 내부 상태 변경
 
 ### 2.5 `reference_internal` 은 무엇을 보장하고 무엇을 보장하지 않는가
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp:135-145`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         .def("current_block",
@@ -368,7 +368,7 @@ print(block.id)                # 같은 참조인데 값이 바뀌었다 — 이
 
 ### 3.1 관측 구성
 
-**현재 소스 발췌 — `python/common/obs.py:36-56`**
+**현재 소스 발췌 — `python/common/obs.py`**
 
 ```python
 def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
@@ -430,7 +430,7 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 
 ### 4.1 배치 수준 행동
 
-**현재 소스 발췌 — `python/common/__init__.py:28-37`**
+**현재 소스 발췌 — `python/common/__init__.py`**
 
 ```python
 NUM_COLS = 10
@@ -449,7 +449,7 @@ BOARD_COLS = 10
 
 $$\text{action} = \text{col} \times 4 + \text{rot}$$
 
-**현재 소스 발췌 — `python/common/action_mask.py:25-47`**
+**현재 소스 발췌 — `python/common/action_mask.py`**
 
 ```python
 def encode_action(col: int, rot: int) -> int:
@@ -485,7 +485,7 @@ def legal_mask(sim: "SimGame") -> torch.Tensor:
 
 여기서 흔한 오해를 하나 정정한다. "O 블록(정사각형)은 회전이 하나뿐이므로 합법 행동이 10개다" 라는 서술은 **틀렸다.** `LegalPlacements()` 는 회전 수를 피스 모양이 아니라 `cells` 배열 크기로 정한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:474-475`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
     const int numRotations = static_cast<int>(currentBlock.cells.size());
@@ -494,7 +494,7 @@ def legal_mask(sim: "SimGame") -> torch.Tensor:
 
 그리고 O 블록은 **동일한 cells 를 4번 등록**한다.
 
-**현재 소스 발췌 — `src/sim_blocks.h:51-63`**
+**현재 소스 발췌 — `src/sim_blocks.h`**
 
 ```cpp
 class SimOBlock : public SimBlock
@@ -522,7 +522,7 @@ public:
 
 지금은 두 docstring 모두 실제 동작과 인덱스 대칭이라는 이유까지 함께 적도록 고쳐져 있다.
 
-**현재 소스 발췌 — `python/common/action_mask.py:1-12`**
+**현재 소스 발췌 — `python/common/action_mask.py`**
 
 ```python
 """Legal action masks for the placement-level action space.
@@ -554,7 +554,7 @@ keeps the action index identical on both sides of the pybind11 boundary.
 1. **불법 행동은 0 보상 no-op 다.** `TetrisPlacementEnv.step` 은 `cleared < 0` 이면 sim 을 진행시키지 않고 0 을 돌려준다(§5.2). 에이전트가 그 행동을 반복하면 에피소드가 진행되지 않은 채 rollout 슬롯만 소모된다. gradient 는 "아무것도 안 하는 행동" 을 학습하게 되고, 이건 신호가 아니라 잡음이다.
 2. **마스킹 없이는 확률이 새 나간다.** 학습 후반에 정책이 날카로워져도, 불법 행동에 남은 잔여 확률은 사라지지 않는다. `-inf` 마스킹은 그 확률을 **정확히 0** 으로 만들어 남은 확률 질량 전부를 합법 행동 위에 재정규화한다. 이건 탐색 효율의 문제가 아니라 분포의 정의 문제다.
 
-**현재 소스 발췌 — `python/common/models.py:98-107`**
+**현재 소스 발췌 — `python/common/models.py`**
 
 ```python
 def masked_log_softmax(
@@ -581,7 +581,7 @@ placement-level 을 택한 이득은 명확하다. 프레임 단위 액션이면
 
 **3. tuck / slide 배치가 액션 공간에서 아예 배제된다.** 이건 구조적이다. `LegalPlacements()` 는 회전·이동을 **spawn 높이에서 먼저 검증**하고, 통과한 것만 하드 드롭한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:479-496`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
             // Start from a fresh copy of the live piece.
@@ -614,7 +614,7 @@ placement-level 을 택한 이득은 명확하다. 프레임 단위 액션이면
 
 ### 5.1 인터페이스
 
-**현재 소스 발췌 — `python/common/env.py:43-82`**
+**현재 소스 발췌 — `python/common/env.py`**
 
 ```python
 class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
@@ -663,7 +663,7 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
 
 ### 5.2 step()
 
-**현재 소스 발췌 — `python/common/env.py:96-115`**
+**현재 소스 발췌 — `python/common/env.py`**
 
 ```python
     def step(
@@ -694,7 +694,7 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
 
 ### 5.3 info dict
 
-**현재 소스 발췌 — `python/common/env.py:125-131`**
+**현재 소스 발췌 — `python/common/env.py`**
 
 ```python
     def _info(self) -> dict[str, Any]:
@@ -718,7 +718,7 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
 
 `python/common/env_versus.py` 가 그 간극을 메운다. 두 개의 `SimGame` 을 두고 한쪽은 학습 에이전트가, 다른 쪽은 상대(opponent)가 조종하며, §2.3 의 가비지 API로 공격을 서로 라우팅한다. 모듈 도입부가 이 배선이 C++ 게임의 미러링임을 명시한다.
 
-**현재 소스 발췌 — `python/common/env_versus.py:1-38`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 """Two-board competitive (versus) Tetris environment.
@@ -778,7 +778,7 @@ graph TB
 
 ### 6.2 상대 3종
 
-**현재 소스 발췌 — `python/common/env_versus.py:74-96`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 class VersusOpponent:
@@ -808,7 +808,7 @@ class RandomLegalOpponent(VersusOpponent):
 
 기본 상대는 1-ply 그리디 BCTS다. §10 의 `bcts_score()` 를 실제로 **선택 루프에 연결하는 유일한 Python 구현체**이기도 하다.
 
-**현재 소스 발췌 — `python/common/env_versus.py:99-123`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 class GreedyBCTSOpponent(VersusOpponent):
@@ -842,7 +842,7 @@ class GreedyBCTSOpponent(VersusOpponent):
 
 세 번째 상대가 자기 대전(self-play)의 진입점이다.
 
-**현재 소스 발췌 — `python/common/env_versus.py:126-139`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 class PolicyOpponent(VersusOpponent):
@@ -865,7 +865,7 @@ class PolicyOpponent(VersusOpponent):
 
 ### 6.3 step — 공격 라우팅과 보상
 
-**현재 소스 발췌 — `python/common/env_versus.py:211-269`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
     def step(
@@ -937,7 +937,7 @@ $$r = \text{cleared} + w_{\text{attack}} \cdot \text{attack} + \begin{cases} +\t
 
 승패 처리에 미묘한 결정이 하나 숨어 있다.
 
-**현재 소스 발췌 — `python/common/env_versus.py:62-70`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 def _terminal_bonus(
@@ -955,7 +955,7 @@ def _terminal_bonus(
 
 ### 6.4 info 로 나가는 경쟁 신호
 
-**현재 소스 발췌 — `python/common/env_versus.py:275-287`**
+**현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
     def _info(self, agent_attack: int, opp_attack: int) -> dict[str, Any]:
@@ -979,7 +979,7 @@ def _terminal_bonus(
 
 여기가 중요하다. `python/train/*.py` 의 모든 trainer 는 `TetrisPlacementEnv` 를 **직접 생성**한다. `--env versus` 같은 옵션은 없다.
 
-**현재 소스 발췌 — `python/train/README_colab.md:41-43`**
+**현재 소스 발췌 — `python/train/README_colab.md`**
 
 ```markdown
 The current trainer CLIs instantiate `TetrisPlacementEnv` directly; selecting
@@ -993,7 +993,7 @@ this environment into a trainer or wrapper explicitly. The regression test is:
 
 가장 엄격한 테스트는 공격 총량 회계다.
 
-**현재 소스 발췌 — `python/tests/test_versus_env.py:115-138`**
+**현재 소스 발췌 — `python/tests/test_versus_env.py`**
 
 ```python
 def test_env_attack_routes_to_opponent():
@@ -1030,7 +1030,7 @@ def test_env_attack_routes_to_opponent():
 uv run python -m pytest python/tests/test_versus_env.py -q
 ```
 
-파일 첫머리의 `pytest.importorskip("sim")` / `pytest.importorskip("gymnasium")` 때문에, `tetris_py` 를 빌드하지 않았거나 `gymnasium` 이 없으면 **모듈 전체가 조용히 skip 된다**. 그러면 `1 skipped` 만 뜨고 초록으로 보인다. 이 테스트 7개가 실제로 돌았는지는 `-rs` 를 붙여 skip 사유를 확인하거나, `7 passed` 를 눈으로 확인해야 알 수 있다. `uv sync --dev` 만으로는 `gymnasium` 이 설치되지 않는다 (`train` extra 에 있다).
+파일 첫머리의 `pytest.importorskip("sim")` / `pytest.importorskip("gymnasium")` 때문에, `tetris_py`를 빌드하지 않았거나 `gymnasium`이 없으면 **모듈 전체가 skip**된다. 초록색 종료 코드만으로는 실제 실행 여부를 알 수 없으므로 `-rs`로 skip 사유를 확인한다. `uv sync --dev`만으로는 `gymnasium`이 설치되지 않으며 `train` extra가 필요하다.
 
 ---
 
@@ -1038,7 +1038,7 @@ uv run python -m pytest python/tests/test_versus_env.py -q
 
 ### 7.1 아키텍처
 
-**현재 소스 발췌 — `python/common/models.py:43-79`**
+**현재 소스 발췌 — `python/common/models.py`**
 
 ```python
     def __init__(
@@ -1142,7 +1142,7 @@ ARCH_VERSION = 1
 
 모듈 docstring 이 이 파일의 존재 이유를 한 문단으로 적어 놓았다.
 
-**현재 소스 발췌 — `python/common/checkpoint.py:1-17`**
+**현재 소스 발췌 — `python/common/checkpoint.py`**
 
 ```python
 """Save / load wrappers with arch-version guarding.
@@ -1166,7 +1166,7 @@ shape or layer order.
 
 ### 8.2 저장
 
-**현재 소스 발췌 — `python/common/checkpoint.py:28-50`**
+**현재 소스 발췌 — `python/common/checkpoint.py`**
 
 ```python
 CHECKPOINT_META_KEY = "__meta__"
@@ -1200,7 +1200,7 @@ def save_checkpoint(
 
 ### 8.3 로드 — 검증 네 단계
 
-**현재 소스 발췌 — `python/common/checkpoint.py:53-84`**
+**현재 소스 발췌 — `python/common/checkpoint.py`**
 
 ```python
 def load_checkpoint(
@@ -1250,7 +1250,7 @@ def load_checkpoint(
 
 이 장의 완료 게이트 4번(체크포인트 round-trip)은 `python/tests/test_checkpoint_roundtrip.py` 다. 그 안에 위 4단계 중 3·4번을 정확히 겨냥한 테스트가 하나씩 있다.
 
-**현재 소스 발췌 — `python/tests/test_checkpoint_roundtrip.py:67-80`**
+**현재 소스 발췌 — `python/tests/test_checkpoint_roundtrip.py`**
 
 ```python
 def test_class_mismatch_raises(tmp_path: Path) -> None:
@@ -1275,7 +1275,7 @@ def test_class_mismatch_raises(tmp_path: Path) -> None:
 
 ## 9. PPO baseline 학습 루프
 
-여기까지 관측·행동·환경·정책망·체크포인트를 모두 갖췄다. 이제 이것들을 묶어 정책을 **학습**하는 루프가 필요하다. `python/train/ppo_tetris.py` 는 저장소의 첫 학습 baseline 이다. 현재 저장소에는 DQN/DDQN, CBMPI-style, REINFORCE, A2C, n-step actor-critic, CEM, MuZero-style 학습기도 있고, 그 비교는 [Part 9](./part9-rl-onnx-bot.md) 의 알고리즘 비교 표에서 다룬다. 모든 배포 가능한 trainer 가 최종 산출물을 같은 `TetrisPolicyNet` 체크포인트로 저장한다는 계약을 공유하며, 이 절은 그 계약을 가장 잘 보여주는 PPO 루프를 기준으로 설명한다.
+여기까지 관측·행동·환경·정책망·체크포인트를 모두 갖췄다. `python/train/ppo_tetris.py`는 이것들을 묶는 첫 학습 baseline이다. 저장소의 DQN/DDQN, CBMPI-style, REINFORCE, A2C, n-step actor-critic, CEM, MuZero-style 학습기도 표본 효율·안정성·구현 복잡도는 다르지만, 배포 가능한 trainer가 같은 `TetrisPolicyNet` 체크포인트를 저장한다는 계약은 공유한다. 이 절은 그 공통 경계를 가장 선명하게 보여 주는 PPO 루프를 기준으로 설명한다.
 
 학습 명령을 돌리려면 torch/gymnasium 이 필요하다. 저장소 루트에서는 `uv sync --dev --extra train`, Colab 에서는 노트북 setup 셀이 `pip install -r python/requirements-colab.txt` 로 설치한다. §12 의 패리티 테스트만 돌릴 거라면 `uv sync --dev` 로 충분하다.
 
@@ -1304,7 +1304,7 @@ graph LR
 
 `build_argparser()`의 기본값이 베이스라인 설정이다.
 
-**현재 소스 발췌 — `python/train/ppo_tetris.py:426-438`**
+**현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
     p.add_argument("--steps", type=int, default=1_000_000, help="total env steps")
@@ -1341,7 +1341,7 @@ graph LR
 
 학습기는 벡터화 없이 **단일 동기 env**로 시작한다. 매 스텝, 합법 마스크를 적용한 정책 분포에서 행동을 샘플하고, transition을 버퍼에 쌓는다.
 
-**현재 소스 발췌 — `python/train/ppo_tetris.py:242-265`**
+**현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
         for t in range(T):
@@ -1372,13 +1372,13 @@ graph LR
 
 `masked_log_softmax`(§4.3)로 만든 분포에서 `torch.multinomial`로 샘플하므로 **항상 합법 배치만** 뽑힌다. 방어 분기 주석이 그 마스킹이 왜 필수인지도 알려준다 — 전부 불법인 슬롯을 버퍼에 남기면 PPO 업데이트에서 NaN logits 가 나온다.
 
-매 transition의 보상은 env 보상(`reward`, §5.2의 라인 클리어 수)에 **shaping 항** (`shaped`)을 더한 값이다 — 이것이 다음 절의 주제다.
+매 transition의 보상은 env 보상(`reward`, 라인 클리어 수)에 **shaping 항**(`shaped`)을 더한 값이다. shaping은 높이·구멍·표면 굴곡 같은 중간 신호를 주되, 종료와 라인 클리어라는 환경 보상의 목적을 뒤집지 않는 작은 계수로 제한한다.
 
 ### 9.4 Dense 보상 shaping
 
 §5.2의 env 보상은 "이번 배치로 클리어된 줄 수(0~4)"뿐이라 학습 초기에 극도로 희박하다. 갓 초기화된 정책은 첫 라인 클리어까지 수천 배치를 헛돈다. `ppo_tetris.py`는 라인 클리어 전에도 gradient를 주기 위해 **보드 특성 기반 dense shaping**을 기본으로 더한다.
 
-**현재 소스 발췌 — `python/train/ppo_tetris.py:61-89`**
+**현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
 _W_HOLE = 0.03
@@ -1418,7 +1418,7 @@ penalty는 구멍 수·전체 높이·울퉁불퉁함의 가중합이고, 최종
 
 rollout이 끝나면 마지막 상태의 가치를 bootstrap하고, 시간 역순으로 GAE(Generalized Advantage Estimation)를 누적한다.
 
-**현재 소스 발췌 — `python/train/ppo_tetris.py:300-309`**
+**현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
         advantages = torch.zeros(T, device=device)
@@ -1439,7 +1439,7 @@ rollout이 끝나면 마지막 상태의 가치를 bootstrap하고, 시간 역�
 
 advantage가 준비되면 같은 rollout을 `--epochs`번, `--minibatch` 단위로 돌며 정책을 갱신한다. 핵심은 **importance ratio를 [1-ε, 1+ε]로 clip**하는 PPO surrogate다.
 
-**현재 소스 발췌 — `python/train/ppo_tetris.py:326-335`**
+**현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
                 ratio = (new_logp - logps[jt]).exp()
@@ -1458,7 +1458,7 @@ advantage가 준비되면 같은 rollout을 `--epochs`번, `--minibatch` 단위�
 
 ### 9.7 update — backward + grad clip
 
-**현재 소스 발췌 — `python/train/ppo_tetris.py:336-339`**
+**현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
                 opt.zero_grad()
@@ -1473,7 +1473,7 @@ advantage가 준비되면 같은 rollout을 `--epochs`번, `--minibatch` 단위�
 
 7개 trainer 가 각자 rollout 루프를 갖지만, 그 아래의 부품은 공유한다.
 
-**현재 소스 발췌 — `python/train/rl_common.py:1-8`**
+**현재 소스 발췌 — `python/train/rl_common.py`**
 
 ```python
 """Shared helpers for the hand-rolled Colab training scripts.
@@ -1518,7 +1518,7 @@ python -m train.ppo_tetris --resume checkpoints/run.pt --steps 500000
 
 RL 학습 전에, 손으로 설계한 평가 함수로 "괜찮은" 수준의 AI를 만들 수 있다. `python/common/features.py` 가 특성 계산과 가중치를 제공한다.
 
-**현재 소스 발췌 — `python/common/features.py:107-119`**
+**현재 소스 발췌 — `python/common/features.py`**
 
 ```python
 BCTS_WEIGHTS = {
@@ -1553,9 +1553,9 @@ def bcts_score(board: np.ndarray, rows_cleared: int) -> float:
 
 이 네 개의 소수점 여섯 자리 숫자(`-0.510066`, `0.760666`, `-0.35663`, `-0.184483`)는 온라인에서 널리 인용되는 선형 평가 가중치다. 그런데 **이 저장소 안에서 귀속이 서로 다르다.**
 
-- `python/common/features.py:102` 는 `Dellacherie's classic linear weights` 라고 적는다.
-- `bot/placement.cpp:85` 는 같은 숫자를 `El-Tetris 가중치` 라고 적는다.
-- 모듈 docstring(`features.py:3`)은 특성 **집합**을 BCTS = "Building Controllers for Tetris"(Thiery & Scherrer, 2009)로 귀속한다.
+- `python/common/features.py` 는 `Dellacherie's classic linear weights` 라고 적는다.
+- `bot/placement.cpp` 는 같은 숫자를 `El-Tetris 가중치` 라고 적는다.
+- 모듈 docstring(`features.py`)은 특성 **집합**을 BCTS = "Building Controllers for Tetris"(Thiery & Scherrer, 2009)로 귀속한다.
 
 셋 다 완전히 같은 대상을 가리키지는 않는다. Dellacherie(2003)는 이 계열 선형 평가의 **특성 집합**을 정립한 쪽이고, "Building Controllers for Tetris" 는 그 특성 집합에 BCTS 라는 이름과 체계적 가중치 탐색을 붙인 논문이다. 위 숫자 자체가 어느 쪽에서 온 값인지는 **이 저장소 안의 근거만으로는 확정할 수 없다.**
 
@@ -1567,16 +1567,16 @@ def bcts_score(board: np.ndarray, rows_cleared: int) -> float:
 
 | 구현체 | 위치 | 용도 |
 |---|---|---|
-| `GreedyBCTSOpponent.act` | `python/common/env_versus.py:99-123` (§6.2) | versus 환경의 기본 상대 |
-| `bot::heuristic_placement` | `bot/placement.cpp:111-128` | 인게임 봇 — [Part 9](./part9-rl-onnx-bot.md) 에서 소개 |
+| `GreedyBCTSOpponent.act` | `python/common/env_versus.py` (§6.2) | versus 환경의 기본 상대 |
+| `bot::heuristic_placement` | `bot/placement.cpp` | 인게임 봇 — [Part 9](./part9-rl-onnx-bot.md) 에서 소개 |
 
-즉 **Part 8 은 아직 휴리스틱 봇을 게임에 붙이지 않는다.** 이 장이 만드는 것은 평가 함수와, 그것을 쓰는 학습용 상대까지다. 인게임 휴리스틱 봇은 Part 9 가 처음 소개한다.
+이 문서의 경계는 평가 함수와 그것을 쓰는 학습용 상대까지다. 인게임 경로에서는 `bot/placement.cpp`가 같은 특징량·합법 배치 계약을 C++ 선택 루프로 구현하고 `src/main.cpp`의 BotSingle 세션이 호출한다.
 
 ### 10.4 휴리스틱을 베이스라인 하한으로 쓰는 이유
 
 학습 없이도 1-ply 그리디 BCTS 는 상당히 많은 줄을 클리어한다. 이것이 RL 학습의 **베이스라인 하한**이 된다: 학습된 정책이 이 휴리스틱을 이기지 못하면 학습 파이프라인 어딘가에 버그가 있다고 봐야 한다. `features.py` 모듈 docstring 이 그 용법을 명시한다.
 
-**현재 소스 발췌 — `python/common/features.py:6-10`**
+**현재 소스 발췌 — `python/common/features.py`**
 
 ```python
 1. As a sanity check: a linear combination of these features beats random play
@@ -1604,7 +1604,7 @@ def bcts_score(board: np.ndarray, rows_cleared: int) -> float:
 
 ### 11.2 C++ 레퍼런스는 Part 1 의 `sim_hash_dump`
 
-기준 파일을 만드는 쪽은 [Part 1](./part1-deterministic-simulation.md) 의 `tests/sim_hash_dump.cpp` 다. 입력 스크립트(`kScript`)의 구조, `mask == 0xFF` 규약, 기본 시드 세 개, 스텝 단위 출력 형식은 그 장에서 다룬다. 이 장은 그 출력을 **소비**한다.
+기준 파일을 만드는 쪽은 `tests/sim_hash_dump.cpp`다. `kScript`의 각 바이트는 한 틱 입력이고 `0xFF`는 별도의 placement 명령을 뜻한다. 기본 시드 세 개를 같은 순서로 실행해 `seed step hash`를 출력하며, Python 테스트는 그 출력을 **소비**해 바인딩 경계에서도 상태 전이가 같은지 확인한다.
 
 ```bash
 cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_TEST=ON
@@ -1616,7 +1616,7 @@ cmake --build build --target sim_hash_dump
 
 Python 쪽은 같은 스크립트를 미러링한 `SCRIPT` 리스트와, C++ `run_and_dump` 를 따라 하는 `_run_script` 를 갖는다.
 
-**현재 소스 발췌 — `python/tests/test_determinism_crossplatform.py:79-100`**
+**현재 소스 발췌 — `python/tests/test_determinism_crossplatform.py`**
 
 ```python
 def _run_script(seed: int) -> list[tuple[int, int, int, bool, int]]:
@@ -1647,7 +1647,7 @@ def _run_script(seed: int) -> list[tuple[int, int, int, bool, int]]:
 
 `SCRIPT` 상단에 달린 주석이 이 파일의 유지보수 계약이다.
 
-**현재 소스 발췌 — `python/tests/test_determinism_crossplatform.py:25-26`**
+**현재 소스 발췌 — `python/tests/test_determinism_crossplatform.py`**
 
 ```python
 # Mirror of the script in tests/sim_hash_dump.cpp. Keep these two in sync —
@@ -1673,7 +1673,7 @@ def _run_script(seed: int) -> list[tuple[int, int, int, bool, int]]:
 
 가장 미묘한 것은 FNV-1a32 다.
 
-**현재 소스 발췌 — `python/netbot/framing.py:78-84`**
+**현재 소스 발췌 — `python/netbot/framing.py`**
 
 ```python
 def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:
@@ -1689,7 +1689,7 @@ C++ 의 `uint32_t h` 는 곱셈 후 상위 비트가 **자동으로** 잘린다.
 
 결과가 어긋나면 무슨 일이 생기는가: Python 하네스가 만든 프레임을 C++ relay 가 체크섬 불일치로 **조용히 drop** 한다. 예외도 로그도 없고, 테스트는 그냥 타임아웃된다. 그래서 공식 FNV 테스트 벡터로 먼저 잠근다.
 
-**현재 소스 발췌 — `python/tests/test_framing_parity.py:33-43`**
+**현재 소스 발췌 — `python/tests/test_framing_parity.py`**
 
 ```python
 @pytest.mark.parametrize(
@@ -1711,7 +1711,7 @@ FNV 원저자 Landon Curt Noll 이 배포한 벡터다. 여기서 하나라도 �
 
 C++ parser 와 동작이 어긋나기 쉬운 지점이 파서 쪽에 몰려 있다.
 
-**현재 소스 발췌 — `python/netbot/framing.py:144-192`**
+**현재 소스 발췌 — `python/netbot/framing.py`**
 
 ```python
     out: list[tuple[MsgType, bytes]] = []
@@ -1772,7 +1772,7 @@ C++ parser 와 동작이 어긋나기 쉬운 지점이 파서 쪽에 몰려 있�
 
 3번은 전용 테스트가 있다.
 
-**현재 소스 발췌 — `python/tests/test_framing_parity.py:107-113`**
+**현재 소스 발췌 — `python/tests/test_framing_parity.py`**
 
 ```python
 def test_parse_frames_drops_malformed_zero_length_frame() -> None:
@@ -1784,13 +1784,13 @@ def test_parse_frames_drops_malformed_zero_length_frame() -> None:
     assert len(stream) == 0
 ```
 
-이 밖에 `test_framing_parity.py` 는 5종 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 폐기, `MsgType` 정수값 고정 (와이어 계약 방지턱), UTF-8 CHAT 통과를 잠근다. 각 케이스가 방어하는 wire 규약 자체는 [Part 6](./part6-lockstep-networking.md) 의 프레이밍 절에서 설명한다.
+이 밖에 `test_framing_parity.py`는 5종 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 폐기, `MsgType` 정수값 고정, UTF-8 CHAT 통과를 잠근다. 길이에는 type 한 바이트가 포함되고 checksum은 type+payload에 적용되며, 불완전 프레임은 버퍼에 남고 과대 선언은 스트림 전체를 폐기한다는 wire 규약을 C++과 Python 양쪽에서 검증한다.
 
 ### 12.4 `expand_placement` — placement 를 프레임 마스크로
 
 정책이 "이 블록은 `(col=4, rot=2)` 에 놓자" 라고 결정하면, lockstep 와이어에 태우려면 **프레임 단위 마스크 시퀀스**로 풀어야 한다.
 
-**현재 소스 발췌 — `python/netbot/input_expander.py:19-24`**
+**현재 소스 발췌 — `python/netbot/input_expander.py`**
 
 ```python
 INPUT_NONE = 0
@@ -1801,7 +1801,7 @@ INPUT_ROTATE = 1 << 3
 INPUT_DROP = 1 << 4
 ```
 
-**현재 소스 발췌 — `python/netbot/input_expander.py:30-64`**
+**현재 소스 발췌 — `python/netbot/input_expander.py`**
 
 ```python
 def expand_placement(
@@ -1853,7 +1853,7 @@ def expand_placement(
 
 ### 12.5 `fallback_placement` 와 실제 호출자
 
-**현재 소스 발췌 — `python/netbot/input_expander.py:67-79`**
+**현재 소스 발췌 — `python/netbot/input_expander.py`**
 
 ```python
 def fallback_placement(sim: "SimGame") -> tuple[int, int] | None:
@@ -1882,7 +1882,7 @@ def fallback_placement(sim: "SimGame") -> tuple[int, int] | None:
 
 솔직하게 적어야 하는 부분이다. `python/netbot/__init__.py` 와 `input_expander.py` 의 docstring 이 이 모듈의 위치를 명시한다.
 
-**현재 소스 발췌 — `python/netbot/input_expander.py:8-10`**
+**현재 소스 발췌 — `python/netbot/input_expander.py`**
 
 ```python
 If a policy proposes an illegal placement, :func:`fallback_placement` returns
@@ -1952,7 +1952,7 @@ C++ implementation; the runtime in-process bot uses the C++ implementation.
 
 ---
 
-## 13. Part 9 로 연결
+## 13. 학습과 배포의 경계
 
 이 장에서 다룬 것:
 
@@ -1963,25 +1963,27 @@ C++ implementation; the runtime in-process bot uses the C++ implementation.
 - BCTS 평가 함수와 베이스라인 논리
 - 결정론 기준 비교, wire·입력 전개 패리티
 
-아직 다루지 않은 것:
+학습 결과가 게임 안에서 실행되려면 다음 경계를 통과한다.
 
-- **PPO 외 알고리즘 비교** — DQN/DDQN, CBMPI-style, REINFORCE, A2C, n-step actor-critic, CEM, MuZero-style. 특히 `clone()` 요구 여부와 배포 체크포인트 형식이 알고리즘마다 갈린다
+- **알고리즘 비교** — DQN/DDQN, CBMPI-style, REINFORCE, A2C, n-step actor-critic, CEM, MuZero-style은 `python/train/`의 공통 환경을 사용한다. `clone()` 요구 여부와 배포 체크포인트 형식은 알고리즘마다 다르다
 - **Colab 워크플로우** — `train_model_zoo_colab.ipynb` 의 setup → smoke → long → export
 - **체크포인트 → ONNX 변환** — `torch.onnx.export` 설정과 batch=1 고정 런타임
 - **ONNX Runtime 을 C++ 에서 로드** — `Ort::Session`, 입력 바인딩, 출력 계약 검증
 - **인게임 휴리스틱 봇** — `bot::heuristic_placement` (§10.3)
 - **메뉴의 "Single vs Bot" 통합** — `TETRIS_BUILD_BOT` 플래그, 스텁 모드, `model/bots/*.onnx` 로스터, 두 보드 간 가비지 교환
 
-이 내용들은 [Part 9: RL + ONNX 봇](./part9-rl-onnx-bot.md) 과 `python/train/README_colab.md` 에서 다룬다.
+`python/train/README_colab.md`는 Colab 실행 절차를 제공한다. 런타임 계약은
+`bot/bot_onnx.cpp`, `bot/placement.cpp`, `python/netbot/export_onnx.py`에서 서로
+대응한다.
 
 ```mermaid
 graph LR
-    A["Part 8<br/>(이 파트)"] --> B["pybind11 바인딩"]
+    A["학습 환경"] --> B["pybind11 바인딩"]
     A --> C["관측 / 액션 / 환경"]
     A --> D["체크포인트 계약"]
     A --> E["framing · 입력 전개 패리티"]
 
-    F["Part 9"] --> G["알고리즘 비교 + Colab"]
+    F["배포 환경"] --> G["알고리즘 비교 + Colab"]
     F --> H["체크포인트 → ONNX"]
     F --> I["ORT 인-프로세스 추론"]
     F --> J["Single vs Bot + 가비지 교환"]
@@ -2039,8 +2041,8 @@ uv run python -m pytest python/tests/test_framing_parity.py \
 
 | 환경 | 결과 |
 |---|---|
-| `uv sync --dev` (torch 없음) | `17 passed, 1 skipped` — `test_checkpoint_roundtrip.py` 가 모듈 단위로 skip |
-| `uv sync --dev --extra train` (또는 `--extra export`) | `21 passed` |
+| `uv sync --dev` (torch 없음) | torch·Gym·native module 의존 테스트는 skip될 수 있으므로 `-rs`로 확인 |
+| `uv sync --dev --extra train` (또는 `--extra export`) | 해당 기능의 테스트가 skip이 아니라 실제 실행으로 통과해야 함 |
 
 `test_checkpoint_roundtrip.py` 첫머리의 `torch = pytest.importorskip("torch")` 가 그 분기를 만든다. torch 는 `[project.optional-dependencies]` 의 `train` / `export` extra 에만 있고 `dev` 그룹에는 없다(`pyproject.toml`). 게이트 4를 실제로 통과시키려면 extra 를 설치하거나 Colab 에서 돌려야 한다.
 

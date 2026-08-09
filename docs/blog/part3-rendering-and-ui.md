@@ -1,8 +1,7 @@
 # Part 3: 렌더링과 UI — OpenGL 3.3 Core 2D 렌더러
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 3**
 >
-> [시리즈 목차](./README.md) · [이전: Part 2 — 플랫폼 계층](./part2-platform-window-input.md) · **Part 3** · [다음: Part 4 — Game과 메인 루프](./part4-game-wrapper-and-loop.md)
 
 ---
 
@@ -171,7 +170,7 @@ static void blend_surface(int x, int y, Color c, uint8_t coverage)
 
 이것이 그 시절 렌더러의 심장이었다. 위 코드는 과거 커밋에서 가져온 것이고 현재 저장소에는 없다. 같은 자리에 지금 있는 것이 이 함수다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:335-339`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void draw_rect(int x, int y, int w, int h, Color c)
@@ -233,13 +232,13 @@ GPU 로 가기로 했다면 다음 질문은 "어느 API 로" 다. 2020년대에
 
 Linux 의 `libGL.so` 와 macOS 의 OpenGL 프레임워크에는 심볼이 있어서 그냥 링크해도 된다. 그런데 그렇게 하면 플랫폼마다 다른 선언과 다른 빌드 설정이 필요해진다. **세 플랫폼이 같은 조회 경로를 타게 하는 편이 훨씬 단순하다.** 그래서 이 렌더러는 어디서든 함수 포인터를 런타임에 받는다.
 
-GLEW 나 glad 같은 로더를 쓰면 이 일을 대신해 준다. 쓰지 않은 이유는 의존성 하나를 아끼려는 것이 아니라, **"GL 함수가 어디서 오는가" 가 이 프로젝트에서 감출 이유가 없는 지식이기 때문이다.** 필요한 함수가 44개라서 직접 들고 있어도 부담이 없다.
+GLEW나 glad 같은 로더를 쓰면 이 일을 대신해 준다. 쓰지 않은 이유는 의존성 하나를 아끼려는 것이 아니라, **"GL 함수가 어디서 오는가"가 이 프로젝트에서 감출 이유가 없는 지식이기 때문이다.** 렌더러가 실제로 쓰는 심볼만 X-매크로 한 목록에 두므로 API가 늘어도 선언·정의·로딩 검사를 함께 갱신할 수 있다.
 
 ### 4.1 타입과 상수를 직접 선언한다
 
 `GL/gl.h` 를 포함하지 않는다. 시스템 헤더는 플랫폼마다 버전이 다르고, Windows 의 것은 1.1 상수만 들어 있다. 필요한 것만 직접 적는다.
 
-**현재 소스 발췌 — `renderer/gl_api.h:16-25`**
+**현재 소스 발췌 — `renderer/gl_api.h`**
 
 ```cpp
 using GLenum     = unsigned int;
@@ -256,7 +255,7 @@ using GLsizeiptr = std::ptrdiff_t;
 
 상수도 마찬가지로 값만 적어 둔다. GL 의 enum 값은 표준으로 고정돼 있어서 이렇게 적어도 안전하다.
 
-**현재 소스 발췌 — `renderer/gl_api.h:27-62`**
+**현재 소스 발췌 — `renderer/gl_api.h`**
 
 ```cpp
 #define GL_FALSE                          0
@@ -303,7 +302,7 @@ using GLsizeiptr = std::ptrdiff_t;
 
 함수 하나를 추가할 때 손대야 할 곳이 세 군데다. 포인터 선언(`extern`), 포인터 정의, 그리고 로딩 코드. 셋을 손으로 맞추면 언젠가 어긋난다. 그래서 목록을 **한 번만** 적고 세 번 펼친다.
 
-**현재 소스 발췌 — `renderer/gl_api.h:64-119`**
+**현재 소스 발췌 — `renderer/gl_api.h`**
 
 ```cpp
 // ─── 함수 포인터 ──────────────────────────────────────────────────────────────
@@ -372,7 +371,7 @@ bool gl_load_functions();
 
 같은 목록을 두 번 더 펼친다. 한 번은 포인터 정의로, 한 번은 로딩 코드로.
 
-**현재 소스 발췌 — `renderer/gl_api.cpp:6-38`**
+**현재 소스 발췌 — `renderer/gl_api.cpp`**
 
 ```cpp
 #define GL_DEFINE(ret, name, args) ret (*gl_##name) args = nullptr;
@@ -426,7 +425,7 @@ Win32 백엔드의 `platform_gl_get_proc` 에는 함정이 하나 있다. `wglGe
 
 ## 5. 모듈 구조와 소유권
 
-렌더러는 파일 여섯 개다. GL 상태와 정점 큐는 **정확히 한 파일**이 소유한다.
+렌더러는 GL 로딩, 배칭, 텍스트, 이미지, 화면 효과로 나뉜다. GL 상태와 정점 큐는 **`renderer/renderer.cpp` 한 파일**이 소유한다.
 
 ```mermaid
 graph TB
@@ -435,7 +434,7 @@ graph TB
         API1["draw_rect · draw_rect_rounded"]
         LIFE["renderer_init / begin / set_view_offset / end / shutdown"]
     end
-    API["renderer/gl_api.h · gl_api.cpp<br/>함수 포인터 44개 + 로더"]
+    API["renderer/gl_api.h · gl_api.cpp<br/>사용 GL 심볼 + 로더"]
     SH["renderer/gl_shaders.h<br/>GLSL 330 core 소스 한 벌"]
     GI["renderer/gl_internal.h<br/>glb_rect / glb_quad / glb_flush<br/>glb_white_texture / glb_render_scale"]
     TXT["renderer/text_gl.cpp<br/>stb_truetype + R8 글리프 아틀라스"]
@@ -458,9 +457,9 @@ graph TB
     LIFE --> PLAT
 ```
 
-의존 방향이 한쪽이다. `text_gl.cpp` 와 `image_gl.cpp` 는 `renderer.cpp` 의 내부를 모르고, 오직 `gl_internal.h` 가 노출한 함수 여덟 개만 부른다. 반대로 `renderer.cpp` 는 텍스트와 이미지가 무엇을 그리는지 모른다 — `renderer_init` 에서 `image_init()` 을, `renderer_shutdown` 에서 `image_shutdown()` 과 `renderer_text_shutdown()` 을 부르는 수명 관리가 전부다.
+의존 방향이 한쪽이다. `text_gl.cpp`와 `image_gl.cpp`는 `renderer.cpp`의 내부를 모르고, `gl_internal.h`가 노출한 배칭·텍스처 경계만 부른다. 반대로 `renderer.cpp`는 텍스트와 이미지가 무엇을 그리는지 모른다. 초기화와 종료 시점의 수명 호출만 조정한다.
 
-**현재 소스 발췌 — `renderer/gl_internal.h:12-32`**
+**현재 소스 발췌 — `renderer/gl_internal.h`**
 
 ```cpp
 // 축 정렬 사각형 하나를 큐에 넣는다. 좌표는 논리 픽셀, 좌상단 원점.
@@ -486,7 +485,7 @@ void glb_flush();
 GLuint glb_white_texture();
 ```
 
-**현재 소스 발췌 — `renderer/gl_internal.h:34-47`**
+**현재 소스 발췌 — `renderer/gl_internal.h`**
 
 ```cpp
 // 현재 논리 해상도. 텍스트/이미지 쪽이 화면 밖 조기 반환에 쓴다.
@@ -511,7 +510,7 @@ void renderer_text_shutdown();
 
 공개 API 는 `renderer.h` 다. 게임 코드가 보는 전부다.
 
-**현재 소스 발췌 — `renderer/renderer.h:34-50`**
+**현재 소스 발췌 — `renderer/renderer.h`**
 
 ```cpp
 // ─── 그리기 함수 ──────────────────────────────────────────────────────────────
@@ -564,7 +563,7 @@ pos(2)  uv(2)  color(4)  local(2)  half(2)  radius(1)  channel(1)
 
 ### 6.2 정점 셰이더
 
-**현재 소스 발췌 — `renderer/gl_shaders.h:16-49`**
+**현재 소스 발췌 — `renderer/gl_shaders.h`**
 
 ```cpp
 static const char* kQuadVert = R"glsl(
@@ -611,7 +610,7 @@ y 를 뒤집는 것은 **좌표계 규약이 다르기 때문**이다. 화면 �
 
 ### 6.3 조각 셰이더와 SDF 둥근 사각형
 
-**현재 소스 발췌 — `renderer/gl_shaders.h:51-92`**
+**현재 소스 발췌 — `renderer/gl_shaders.h`**
 
 ```cpp
 static const char* kQuadFrag = R"glsl(
@@ -689,7 +688,7 @@ d = |max(q, 0)| + min(max(q.x, q.y), 0) - r
 
 ### 7.1 상태
 
-**현재 소스 발췌 — `renderer/renderer.cpp:18-38`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 // ─── 상태 ─────────────────────────────────────────────────────────────────────
@@ -719,7 +718,7 @@ GL 객체가 넷(프로그램·VAO·VBO·흰 텍스처), 유니폼 위치가 둘
 
 ### 7.2 정점 추가와 flush
 
-**현재 소스 발췌 — `renderer/renderer.cpp:100-109`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 static void push_vertex(float x, float y, float u, float v, Color c,
@@ -736,7 +735,7 @@ static void push_vertex(float x, float y, float u, float v, Color c,
 
 `Color` 의 0~255 바이트를 여기서 0~1 float 으로 바꾼다. GL 3.3 에서는 `glVertexAttribPointer` 의 `normalized` 인자로 정수 속성을 자동 정규화할 수도 있어서 색을 4바이트로 보낼 수 있지만, 그러면 정점 구조가 float 과 byte 가 섞인 형태가 되어 오프셋 계산이 복잡해진다. 정점 수가 프레임당 수천 개 수준이라 대역폭이 문제되지 않으므로 전부 float 으로 통일했다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:111-119`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 // 텍스처가 바뀌면 지금까지 쌓인 것을 먼저 내보낸다. 한 draw call 은 한
@@ -750,7 +749,7 @@ static void ensure_texture(GLuint tex)
 }
 ```
 
-**현재 소스 발췌 — `renderer/renderer.cpp:121-138`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void glb_flush()
@@ -779,7 +778,7 @@ void glb_flush()
 
 ### 7.3 사각형을 정점 여섯 개로
 
-**현재 소스 발췌 — `renderer/renderer.cpp:140-173`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void glb_rect(GLuint tex,
@@ -828,7 +827,7 @@ void glb_rect(GLuint tex,
 
 회전 이미지는 축 정렬이 아니라서 별도 진입점을 쓴다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:175-189`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void glb_quad(GLuint tex,
@@ -850,7 +849,7 @@ void glb_quad(GLuint tex,
 
 `local`/`half`/`radius` 자리에 전부 0 을 넣는다. 회전된 사각형에는 모서리 둥글리기를 적용하지 않는다는 뜻이고, 셰이더의 `if (v_radius > 0.0)` 가 그 자리를 건너뛴다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:191-194`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 GLuint glb_white_texture()   { return s_white; }
@@ -882,7 +881,7 @@ float  glb_render_scale()    { return s_render_scale; }
 
 그 매핑을 담당하는 것이 `glViewport` 다. 창 종횡비가 논리 종횡비(9:8)와 다르면 뷰포트가 창보다 작아지고, 남는 부분이 검은 여백 — 레터박스가 된다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:253-301`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void renderer_begin(Color bg)
@@ -971,13 +970,13 @@ void renderer_begin(Color bg)
 
 **도형은 이 값을 쓰지 않는다.** 정점 좌표가 실수이고 NDC 변환도 실수라, GPU 는 뷰포트 해상도 그대로 래스터화한다. 논리 좌표 (20.0, 20.0)-(140.0, 70.0) 짜리 사각형은 3.375배 창에서 (67.5, 67.5)-(472.5, 236.25) 픽셀에 그려지고, 경계는 그 해상도의 픽셀 격자에 맞춰 계산된다. 확대한 그림이 아니라 처음부터 그 크기로 그린 그림이다.
 
-이 값이 필요한 곳은 딱 하나, **글자**다. 글리프는 CPU 에서 특정 픽셀 크기로 구워지므로 확대하면 뭉갠다. 그 처리는 텍스트 절에서 다룬다.
+이 값이 필요한 곳은 딱 하나, **글자**다. 글리프는 CPU 에서 특정 픽셀 크기로 구워지므로 화면 배율이 바뀌면 같은 아틀라스를 단순 확대하지 않고 배율에 맞는 크기로 다시 래스터화해야 한다.
 
 ## 9. view offset 과 화면 흔들림
 
 `renderer_set_view_offset(dx, dy)` 는 그 이후의 모든 그리기를 정수 픽셀만큼 민다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:303-310`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void renderer_set_view_offset(int dx, int dy)
@@ -998,7 +997,7 @@ void renderer_set_view_offset(int dx, int dy)
 
 흔들림 상태 머신은 별도 파일에 있고, 렌더러의 GL 전환과 무관하게 그대로다.
 
-**현재 소스 발췌 — `renderer/shake.h:4-26`**
+**현재 소스 발췌 — `renderer/shake.h`**
 
 ```cpp
 // Section I — 화면 흔들림 상태 머신.
@@ -1026,7 +1025,7 @@ void shake_update(ShakeState& s, float dt);
 void shake_offset(ShakeState& s, float& outDx, float& outDy);
 ```
 
-**현재 소스 발췌 — `renderer/shake.cpp:39-58`**
+**현재 소스 발췌 — `renderer/shake.cpp`**
 
 ```cpp
 void shake_offset(ShakeState& s, float& outDx, float& outDy)
@@ -1114,7 +1113,7 @@ TTF 파일을 파싱해 베지어 outline 을 추출하고, 그것을 안티에�
 
 ### 10.4 UTF-8 디코딩
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:68-95`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 static uint32_t utf8_next(const char** text)
@@ -1161,7 +1160,7 @@ static uint32_t utf8_next(const char** text)
 
 해법은 글리프 비트맵을 **한 장의 큰 텍스처에 모아 넣고** 각 글자가 그 안의 사각형 영역을 가리키게 하는 것이다. 그러면 화면의 모든 글자가 같은 텍스처를 쓰므로 한 draw call 에 들어간다.
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:36-46`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 // 아틀라스 한 변. 2048² R8 = 4 MB 를 노린다. 1024 로도 논리 해상도에서는
@@ -1177,7 +1176,7 @@ static int s_atlas_dim = kAtlasWanted;
 static constexpr float kScaleQuantum = 8.0f;
 ```
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:48-66`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 struct Glyph {
@@ -1205,7 +1204,7 @@ static int    s_row_h    = 0;
 
 ### 11.2 아틀라스 텍스처 만들기
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:97-123`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 static void ensure_atlas()
@@ -1245,11 +1244,11 @@ static void ensure_atlas()
 
 참고로 이 글을 쓰며 확인한 2011년 내장 그래픽(Intel HD Graphics 3000)은 8192 를 보고한다. 2048 이 문제가 되는 기계는 이제 흔치 않지만, 한 줄로 막을 수 있는 실패를 굳이 남겨 둘 이유도 없다.
 
-필터를 `GL_LINEAR` 로 둔 이유는 다음 절(해상도 대응)에서 설명한다. 텍셀과 화면 픽셀이 정확히 1:1 이 아니게 된 결과다.
+필터를 `GL_LINEAR` 로 둔 이유는 논리 좌표와 실제 창 픽셀이 배율 변환 때문에 항상 1:1은 아니기 때문이다. 최근접 필터는 그 경계에서 이미지와 회전된 쿼드의 계단 현상을 두드러지게 만든다.
 
 ### 11.3 shelf packing
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:125-164`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 // shelf packing: 왼쪽에서 오른쪽으로 채우다 폭이 모자라면 다음 줄로 내린다.
@@ -1318,7 +1317,7 @@ static bool pack_glyph(const uint8_t* bitmap, int w, int h, Glyph& out)
 
 해결의 원리는 한 문장이다. **배치는 논리 크기로, 굽기는 화면 크기로.**
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:166-215`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 static Glyph glyph_for(uint32_t cp, int px)
@@ -1425,7 +1424,7 @@ Mesa Intel HD Graphics 3000, 1215×1080 창(논리 720×640 대비 약 1.69배)�
 
 ### 13.1 폰트 로딩과 실패 모드
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:217-255`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 void renderer_load_font(const char* path)
@@ -1485,7 +1484,7 @@ void renderer_load_font(const char* path)
 
 ### 13.2 측정
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:257-281`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 int measure_text(const char* text, int size)
@@ -1523,7 +1522,7 @@ int measure_text(const char* text, int size)
 
 ### 13.3 배치
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:283-322`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 void draw_text(const char* text, int x, int y, int size, Color color)
@@ -1587,7 +1586,7 @@ pen_x   += kerning + advance
 
 ### 13.4 정리
 
-**현재 소스 발췌 — `renderer/text_gl.cpp:324-334`**
+**현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
 void renderer_text_shutdown()
@@ -1607,9 +1606,9 @@ void renderer_text_shutdown()
 
 ## 14. 이미지 (1) — 저장소와 핸들 수명
 
-이미지 시스템의 공개 API 는 여덟 개다.
+이미지 시스템의 공개 API는 생성·해제·크기 조회와 기본·tint·회전 그리기로 나뉜다.
 
-**현재 소스 발췌 — `renderer/image.h:19-51`**
+**현재 소스 발췌 — `renderer/image.h`**
 
 ```cpp
 using ImageHandle = int;  // 0 = invalid/미로드
@@ -1650,7 +1649,7 @@ void image_shutdown();
 
 저장소는 벡터 하나다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:39-51`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 struct ImageEntry {
@@ -1670,7 +1669,7 @@ static bool s_gdiplus_initialized = false;
 
 소프트웨어 시절 이 구조체에는 `std::vector<uint32_t> pixels` 가 들어 있었다. 지금은 `GLuint tex` 하나다. **픽셀 데이터가 CPU 메모리에 남지 않는다** — 업로드가 끝나면 디코더가 만든 임시 버퍼는 해제되고, 그림은 GPU 쪽에만 존재한다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:119-139`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 void image_init()
@@ -1702,7 +1701,7 @@ void image_shutdown()
 
 생성과 해제는 슬롯 재사용 방식이다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:141-170`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
@@ -1743,7 +1742,7 @@ ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
 
 `GL_CLAMP_TO_EDGE` 는 UV 가 `[0,1]` 을 벗어날 때 가장자리 텍셀을 반복한다. 기본값인 `GL_REPEAT` 를 두면 부동소수 오차로 UV 가 아주 살짝 1 을 넘는 순간 **반대편 가장자리 픽셀이 나타난다.** 아이콘 오른쪽 끝에 왼쪽 끝 색이 한 줄 비치는 식이다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:172-197`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 ImageHandle image_load(const char* path)
@@ -1782,7 +1781,7 @@ bool image_size(ImageHandle handle, int& width, int& height)
 
 파일 포맷 디코딩은 플랫폼별로 갈리는 유일한 렌더러 코드다. 그리고 **GL 전환에서 한 글자도 바뀌지 않은 코드**이기도 하다. PNG/JPG 를 푸는 일은 GPU 가 할 수 있는 종류의 작업이 아니고, 어차피 로드 시점에 한 번뿐이다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:53-117`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 static bool decode_image(const char* path, std::vector<uint8_t>& rgba,
@@ -1858,7 +1857,7 @@ Windows 에서는 GDI+ 가 PNG/JPG/BMP 를 디코드한다. 시스템에 이미 
 
 **여기 이 시리즈에서 가장 놓치기 쉬운 네 줄이 있다.** 위 `decode_image` 안쪽 루프의 본문이다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:93-96`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
             dst[x * 4 + 0] = src[x * 4 + 2];
@@ -1883,7 +1882,7 @@ Linux/macOS 에서는 벤더링된 `third_party/stb_image.h` 를 쓴다. `stbi_l
 
 ### 16.1 그리기는 사각형 하나
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:199-213`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 void draw_image_tinted(ImageHandle handle, int x, int y, int width, int height,
@@ -1913,7 +1912,7 @@ void draw_image(ImageHandle handle, int x, int y, int width, int height)
 
 ### 16.2 회전
 
-**현재 소스 발췌 — `renderer/image_gl.cpp:215-242`**
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 void draw_image_rotated(ImageHandle handle, int cx, int cy, int width, int height,
@@ -1954,7 +1953,7 @@ void draw_image_rotated(ImageHandle handle, int cx, int cy, int width, int heigh
 4. UV 가 `[0,1)` 밖이면 건너뜀 (이게 클리핑이었다)
 5. 안이면 샘플링해 합성
 
-지금은 **네 꼭짓점을 정변환하는 것이 전부다.** 픽셀 순회도, 역변환도, 범위 검사도 없다. 그 일을 래스터라이저와 텍스처 샘플러가 한다 — 삼각형 내부를 채우면서 UV 를 무게중심 보간으로 자동으로 만들어 준다. 코드가 30줄에서 10줄로 줄어든 것보다, **하는 일의 성격이 "픽셀 계산" 에서 "기하 서술" 로 바뀐 것**이 중요하다.
+지금은 **네 꼭짓점을 정변환하는 것이 전부다.** 픽셀 순회도, 역변환도, 범위 검사도 없다. 그 일을 래스터라이저와 텍스처 샘플러가 하며 삼각형 내부의 UV도 자동 보간한다. 코드 길이보다 **하는 일의 성격이 "픽셀 계산"에서 "기하 서술"로 바뀐 것**이 중요하다.
 
 변환식은 표준 2D 회전에 부호를 맞춘 것이다.
 
@@ -2001,7 +2000,7 @@ sequenceDiagram
 
 팔레트는 파일 상단의 익명 네임스페이스에 있다.
 
-**현재 소스 발췌 — `src/gui.cpp:4-13`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 namespace {
@@ -2018,7 +2017,7 @@ constexpr Color kCloseHover   = {230,  60,  60, 255};
 
 ### 17.1 hit-test
 
-**현재 소스 발췌 — `src/gui.cpp:15-20`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 bool gui_hover_rect(int x, int y, int w, int h)
@@ -2037,7 +2036,7 @@ bool gui_hover_rect(int x, int y, int w, int h)
 
 ### 17.2 버튼
 
-**현재 소스 발췌 — `src/gui.cpp:22-39`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 bool gui_button(int x, int y, int w, int h, const char* label, int fontSize)
@@ -2070,7 +2069,7 @@ bool gui_button(int x, int y, int w, int h, const char* label, int fontSize)
 
 ### 17.3 체크박스
 
-**현재 소스 발췌 — `src/gui.cpp:78-110`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 bool gui_checkbox(int x, int y, int size, const char* label, bool checked,
@@ -2147,11 +2146,11 @@ void gui_modal_dim(int screenW, int screenH);
 void gui_text_center(int centerX, int y, const char* text, int fontSize, Color c);
 ```
 
-> 이 시점의 `gui.h` 는 위젯 여섯 개만 선언한다. 메뉴 커서 강조용 `gui_button_highlighted` 는 [Part 4](./part4-game-wrapper-and-loop.md) 에서, 슬라이더 `gui_slider` 와 값 선택기 `gui_value_selector` 는 [Part 11](./part11-settings-and-options.md) 에서 추가한다.
+> 이 체크포인트의 `gui.h`는 버튼·체크박스·모달에 필요한 기본 위젯을 선언한다. 완성형 `gui/gui.h`는 같은 즉시 모드 입력·그리기 계약으로 메뉴 커서 강조, 슬라이더, 값 선택기를 더한다. 위젯 수는 늘어도 별도 객체 트리나 숨은 상태를 만들지 않는다.
 
 ### 17.4 나머지 위젯
 
-**현재 소스 발췌 — `src/gui.cpp:60-76`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 bool gui_close_button(int x, int y, int size)
@@ -2177,7 +2176,7 @@ bool gui_close_button(int x, int y, int size)
 
 이 버튼이 **인게임에서 게임을 나가는 유일한 경로**다. ESC 는 채팅 취소·설정 나가기·룸 퇴장에만 바인딩돼 있고, 인게임 모달을 열지 않는다.
 
-**현재 소스 발췌 — `src/gui.cpp:175-184`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 void gui_modal_dim(int screenW, int screenH)
@@ -2198,7 +2197,7 @@ void gui_text_center(int centerX, int y, const char* text, int fontSize, Color c
 
 색 팔레트는 `src/colors.cpp` 에 있다. 게임 보드의 셀 인덱스 0~9 를 `Color` 로 매핑한다.
 
-**현재 소스 발췌 — `src/colors.cpp:1-22`**
+**현재 소스 발췌 — `src/colors.cpp`**
 
 ```cpp
 #include "colors.h"
@@ -2233,7 +2232,7 @@ std::vector<Color> GetCellColors()
 
 ### 18.1 셰이더 컴파일
 
-**현재 소스 발췌 — `renderer/renderer.cpp:42-63`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 static GLuint compile_shader(GLenum type, const char* src, const char* label)
@@ -2264,7 +2263,7 @@ static GLuint compile_shader(GLenum type, const char* src, const char* label)
 
 그래서 **컴파일 로그를 절대 삼키면 안 된다.** 실패 시 사용자가 보내온 stderr 한 조각이 원인 파악의 유일한 단서다. `GL_INFO_LOG_LENGTH` 로 길이를 물어 버퍼를 잡고 그대로 찍는다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:65-96`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 static GLuint link_program(const char* vs_src, const char* fs_src)
@@ -2307,7 +2306,7 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
 
 ### 18.2 초기화
 
-**현재 소스 발췌 — `renderer/renderer.cpp:198-251`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void renderer_init(int screen_w, int screen_h)
@@ -2368,7 +2367,7 @@ void renderer_init(int screen_w, int screen_h)
 
 순서가 곧 의존 관계다. 함수 포인터 → 셰이더 프로그램 → 유니폼 위치 → VAO/VBO/정점 속성 → 흰 텍스처 → 블렌드 상태 → 정점 큐 예약 → 이미지 서브시스템.
 
-**VAO 는 "정점을 어떻게 읽을지" 를 기억하는 객체다.** `glVertexAttribPointer` 를 부르면 그 설정이 현재 바인딩된 VAO 에 저장되고, 이후에는 `glBindVertexArray(s_vao)` 한 번으로 일곱 개 속성 설정이 통째로 복원된다. GL 3.3 Core 에서는 VAO 없이 그릴 수 없다 — 이것이 호환 프로파일과의 눈에 띄는 차이 중 하나다.
+**VAO는 "정점을 어떻게 읽을지"를 기억하는 객체다.** `glVertexAttribPointer`를 부르면 그 설정이 현재 바인딩된 VAO에 저장되고, 이후에는 `glBindVertexArray(s_vao)` 한 번으로 정점 속성 설정이 통째로 복원된다. GL 3.3 Core에서는 VAO 없이 그릴 수 없다. 이것이 호환 프로파일과의 눈에 띄는 차이다.
 
 속성 테이블이 정점 형식의 정의 그 자체다. `{ 위치, 성분 수, float 단위 오프셋 }` 순으로 `{0,2,0}, {1,2,2}, {2,4,4}, {3,2,8}, {4,2,10}, {5,1,12}, {6,1,13}` — 합이 14 이고, 이 숫자들이 `gl_shaders.h` 의 `layout(location = N)` 과 일대일로 대응한다. 둘이 어긋나면 컴파일도 링크도 통과하고 **화면에만 이상한 그림이 나온다.** GL 에서 가장 진단하기 어려운 종류의 버그이므로, 두 파일을 나란히 놓고 대조하는 습관이 필요하다.
 
@@ -2380,7 +2379,7 @@ void renderer_init(int screen_w, int screen_h)
 
 ### 18.3 프레임의 끝
 
-**현재 소스 발췌 — `renderer/renderer.cpp:312-317`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void renderer_end()
@@ -2397,9 +2396,9 @@ void renderer_end()
 
 한 가지 짚어 둘 것은 **`glDrawArrays` 가 반환해도 그림이 완성된 것이 아니라는 점**이다. 명령이 큐에 들어갔을 뿐이고, GPU 는 나중에 처리한다. 소프트웨어 렌더러에서는 함수가 반환되면 픽셀이 이미 메모리에 있었다. 디버깅할 때 이 차이가 중요하다 — draw call 직후에 무언가를 검사해 봐야 아무것도 볼 수 없다.
 
-### 18.4 도형 API 두 개
+### 18.4 도형 API
 
-**현재 소스 발췌 — `renderer/renderer.cpp:341-353`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c)
@@ -2425,7 +2424,7 @@ void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c)
 
 ### 18.5 종료 순서 — 여기서는 강제다
 
-**현재 소스 발췌 — `renderer/renderer.cpp:319-333`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void renderer_shutdown()
@@ -2909,7 +2908,7 @@ cmake --build build --config Release --target part3_render_demo
 
 ## 이 장에서 완성된 것
 
-- `renderer/gl_api.h` · `renderer/gl_api.cpp` — X-매크로로 정의한 GL 함수 포인터 44개와 로더. 빠진 심볼을 전부 모아 보고하고, 성공하면 버전·렌더러 이름을 찍는다.
+- `renderer/gl_api.h` · `renderer/gl_api.cpp` — X-매크로로 정의한 사용 GL 심볼과 로더. 빠진 심볼을 전부 모아 보고하고, 성공하면 버전·렌더러 이름을 찍는다.
 - `renderer/gl_shaders.h` — GLSL 330 core 정점/조각 셰이더 한 벌. 투영 행렬 없는 NDC 변환, SDF 둥근 사각형, `a_channel` 로 R8/RGBA 텍스처를 한 경로에서 처리.
 - `renderer/renderer.cpp` — 셰이더 프로그램·VAO/VBO·1×1 흰 텍스처 소유. 14 float 정점 배처, 텍스처 교체 지점에서만 draw call, 레터박스 뷰포트와 이중 clear, `renderer_set_view_offset`.
 - `renderer/gl_internal.h` — 텍스트·이미지 서브시스템이 배처에 접근하는 유일한 통로.
@@ -2965,4 +2964,6 @@ cmake --build build-sim --target sim_hash_dump
 
 동시에 무엇을 포기했는지도 분명하다. 렌더 산출물의 픽셀 단위 재현성은 사라졌고, 그 대신 해상도 대응과 안티앨리어싱과 진짜 VSync 를 얻었다. **게임 로직의 결정성은 처음부터 다른 계층의 성질이었으므로 그대로 남아 있다.** 계층을 나눠 두면 한쪽을 통째로 갈아치워도 다른 쪽 테스트가 한 줄도 바뀌지 않는다는 것을, 이 전환이 그대로 보여주었다.
 
-다음 Part 에서는 Part 1 의 `SimGame` 과 이 렌더러를 잇는 `Game` 래퍼, 그리고 고정 스텝 누산기를 가진 `main()` 프레임 루프를 만든다. 그 순간 처음으로 `tetris` 실행 파일이 빌드된다.
+`Game` 래퍼는 `SimGame`의 상태와 이벤트를 이 렌더러에 연결하고, `main()`의 고정
+스텝 누산기는 시뮬레이션 시간과 렌더 프레임을 분리한다. 이 연결까지 갖춰져야 완성된
+`tetris` 실행 파일이 만들어진다.

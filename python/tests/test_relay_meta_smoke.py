@@ -247,6 +247,36 @@ def test_empty_token_rejected_when_meta_active(meta_and_relay):
         s.close()
 
 
+def test_same_player_cannot_queue_twice(meta_and_relay):
+    base = meta_and_relay["meta_url"]
+    rh = meta_and_relay["relay_host"]
+    rp = meta_and_relay["relay_port"]
+    p1 = _post(f"{base}/v1/guest")
+    p2 = _post(f"{base}/v1/guest")
+
+    first = socket.create_connection((rh, rp), timeout=2.0)
+    duplicate = socket.create_connection((rh, rp), timeout=2.0)
+    peer = socket.create_connection((rh, rp), timeout=2.0)
+    try:
+        first.sendall(_build_queue_join(p1["token"]))
+        time.sleep(0.1)
+        duplicate.sendall(_build_queue_join(p1["token"]))
+        duplicate.settimeout(3.0)
+        try:
+            data = duplicate.recv(4096)
+        except ConnectionResetError:
+            data = b""
+        assert data == b""
+
+        peer.sendall(_build_queue_join(p2["token"]))
+        role_first, seed_first = _recv_match_found(first)
+        role_peer, seed_peer = _recv_match_found(peer)
+        assert seed_first == seed_peer
+        assert {role_first, role_peer} == {1, 2}
+    finally:
+        first.close(); duplicate.close(); peer.close()
+
+
 def test_relay_refuses_meta_without_secret(tmp_path):
     relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not relay_bin:

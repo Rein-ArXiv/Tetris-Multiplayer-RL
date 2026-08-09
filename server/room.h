@@ -47,6 +47,7 @@ public:
                       int64_t player_id, int elo,
                       const std::string& username, const std::string& token,
                       const std::string& selected_icon_id,
+                      std::shared_ptr<PlayerSessionLease> session_lease,
                       std::vector<uint8_t> streamPrefix = {});
 
     // playerConnThread 에서 ROOM_JOIN 수신 직후 호출.
@@ -55,6 +56,7 @@ public:
                     int64_t player_id, int elo,
                     const std::string& username, const std::string& token,
                     const std::string& selected_icon_id,
+                    std::shared_ptr<PlayerSessionLease> session_lease,
                     std::vector<uint8_t> streamPrefix = {});
 
     // 모든 roomLoop_ 를 종료시킨다.
@@ -82,11 +84,13 @@ private:
         std::string    hostUsername;
         std::string    hostToken;
         std::string    hostSelectedIconId{"default"};
+        std::shared_ptr<PlayerSessionLease> hostSessionLease;
         int64_t        guestPlayerId = 0;
         int            guestElo      = 0;
         std::string    guestUsername;
         std::string    guestToken;
         std::string    guestSelectedIconId{"default"};
+        std::shared_ptr<PlayerSessionLease> guestSessionLease;
     };
 
     std::string generateCode_();   // mu 잡은 상태에서 호출

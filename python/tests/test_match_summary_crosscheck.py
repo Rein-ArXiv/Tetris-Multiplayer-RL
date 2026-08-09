@@ -299,6 +299,34 @@ def test_score_mismatch_no_elo(meta_relay):
         a.close(); b.close()
 
 
+def test_disconnect_before_summary_is_forfeit(meta_relay):
+    base = meta_relay["meta_url"]
+    rport = meta_relay["relay_port"]
+    p1 = _post(f"{base}/v1/guest")
+    p2 = _post(f"{base}/v1/guest")
+
+    a = socket.create_connection(("127.0.0.1", rport), timeout=2.0)
+    b = socket.create_connection(("127.0.0.1", rport), timeout=2.0)
+    try:
+        a.sendall(_qjoin(p1["token"]))
+        b.sendall(_qjoin(p2["token"]))
+        assert _await_match_found(a)
+        assert _await_match_found(b)
+        _queue_accept(a, b)
+
+        a.close()
+        result = _recv_until(b, MsgType.MATCH_RESULT)
+        assert result is not None
+        assert struct.unpack_from("<i", result, 8)[0] > 0
+
+        winner = _post(f"{base}/v1/auth/verify", {"token": p2["token"]})
+        loser = _post(f"{base}/v1/auth/verify", {"token": p1["token"]})
+        assert winner["bp"] == 30 and winner["xp"] == 100
+        assert loser["bp"] == 10 and loser["xp"] == 50
+    finally:
+        a.close(); b.close()
+
+
 def test_relay_without_meta_rejects_token(tmp_path):
     """meta 미기동인 채 --meta URL 만 주면 verify 가 실패해야 한다."""
     # 임의의 free port 를 --meta 로 쓰지만 그 포트에 아무것도 안 띄움 → connect 실패.

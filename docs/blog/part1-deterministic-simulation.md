@@ -1,6 +1,6 @@
 # Part 1: 테트리스 시뮬레이션 엔진 — 결정론적 게임 로직
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지 [시리즈 목차](./README.md) · [이전: Part 0 — 셋업](./part0-project-setup.md) · **Part 1** · [다음: Part 2 — 플랫폼 계층](./part2-platform-window-input.md)
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 1**
 
 ---
 
@@ -72,7 +72,7 @@ graph TB
 
 본격적인 시뮬레이션에 들어가기 전에, 나머지 전부가 include 하게 될 작은 파일 셋을 먼저 둔다. 셋 다 짧고 의존성이 없다.
 
-**현재 소스 발췌 — `core/constants.h:1-8`**
+**현재 소스 발췌 — `core/constants.h`**
 
 ```cpp
 #pragma once
@@ -86,7 +86,7 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
 
 `TICKS_PER_SECOND` 는 이 프로젝트 전체에서 가장 널리 퍼지는 상수다. 중력 간격, 소프트 드롭 레이트, 네트워크 틱 번호, 게임 시작 지연이 전부 이 값에 걸려 있다. **시간을 초가 아니라 틱으로 세는 것이 결정론의 출발점**이다 — 초를 쓰면 부동소수 누적 오차가 두 클라이언트를 갈라놓는다.
 
-**현재 소스 발췌 — `core/input.h:1-17`**
+**현재 소스 발췌 — `core/input.h`**
 
 ```cpp
 #pragma once
@@ -107,11 +107,11 @@ enum InputBits : uint8_t {
 inline bool hasInput(uint8_t mask, InputBits bit) { return (mask & bit) != 0; }
 ```
 
-한 틱의 입력 전체가 **1바이트**다. 이 선택이 뒤에서 크게 갚는다. [Part 6](./part6-lockstep-networking.md) 의 INPUT 프레임은 이 바이트를 그대로 실어 보내고, `core/replay.cpp` 의 리플레이 파일도 같은 바이트를 저장한다. 직렬화 코드가 따로 필요 없다는 뜻이다.
+한 틱의 입력 전체가 **1바이트**다. INPUT 네트워크 프레임과 `core/replay.cpp` 의 리플레이 파일이 이 바이트를 그대로 공유하므로 별도 직렬화가 필요 없다. 규칙 엔진의 입력 단위가 테스트·네트워크·재생 파일의 공통 계약이 된 셈이다.
 
 비트가 다섯 개뿐이라는 점도 눈여겨보라. 반시계 회전, 홀드, 180도 회전이 없다. §3 의 SRS 논의와 이어지는 제약이다.
 
-**현재 소스 발췌 — `src/position.h:1-8`**
+**현재 소스 발췌 — `src/position.h`**
 
 ```cpp
 #pragma once
@@ -124,7 +124,7 @@ public:
 };
 ```
 
-**현재 소스 발췌 — `src/position.cpp:1-7`**
+**현재 소스 발췌 — `src/position.cpp`**
 
 ```cpp
 #include "position.h"
@@ -203,7 +203,7 @@ graph TB
 
 ### 2.3 경계 검사와 빈칸 판별
 
-**현재 소스 발췌 — `src/sim_grid.h:26-50`**
+**현재 소스 발췌 — `src/sim_grid.h`**
 
 ```cpp
     bool IsCellOutside(int row, int column) const
@@ -290,7 +290,7 @@ rot=0     rot=1     rot=2     rot=3
 
 이 구현에서는 **Super Rotation System(SRS)** 의 wall kick을 적용하지 않는다. 회전 후 벽이나 다른 블록과 겹치면 단순히 회전을 취소(undo)한다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:184-198`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::RotateBlockImpl()
@@ -322,7 +322,7 @@ SRS wall kick 은 회전 실패 시 블록을 좌우/상하로 밀어보는 추�
 
 블록의 셀 위치는 **상대 좌표**(cells) + **오프셋**(rowOffset, columnOffset)으로 계산된다:
 
-**현재 소스 발췌 — `src/sim_block.h:20-30`**
+**현재 소스 발췌 — `src/sim_block.h`**
 
 ```cpp
     std::vector<Position> GetCellPositions() const
@@ -388,7 +388,7 @@ void SimGame::MoveBlockLeft()
 
 **1단계 — 경계 검사 (IsBlockOutside):**
 
-**현재 소스 발췌 — `src/sim_game.cpp:171-182`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 bool SimGame::IsBlockOutside(const SimBlock& block) const
@@ -409,7 +409,7 @@ bool SimGame::IsBlockOutside(const SimBlock& block) const
 
 **2단계 — 점유 검사 (BlockFits):**
 
-**현재 소스 발췌 — `src/sim_game.cpp:316-327`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 bool SimGame::BlockFits(const SimBlock& block) const
@@ -430,7 +430,7 @@ bool SimGame::BlockFits(const SimBlock& block) const
 
 ### 4.3 하드 드롭
 
-**현재 소스 발췌 — `src/sim_game.cpp:148-159`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::MoveBlockDrop()
@@ -451,7 +451,7 @@ void SimGame::MoveBlockDrop()
 
 마지막 두 줄이 이 함수의 유일하게 미묘한 부분이다. **같은 사건에 대해 플래그를 두 개 세운다.**
 
-**현재 소스 발췌 — `src/sim_game.h:96-113`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
     // ---- One-shot event flags for audio in the Game wrapper ----
@@ -555,7 +555,7 @@ unsigned 정수에서 `0 - 1`은 언더플로되어 매우 큰 양수가 된다.
 **Part 1 체크포인트 — `src/sim_game.cpp` (중간 단계)**
 
 ```cpp
-// src/sim_game.cpp — 중간 단계(staged) 형태. 최종형은 후속 섹션 A·B 참조.
+// src/sim_game.cpp — 점수표만 먼저 붙인 중간 단계.
 void SimGame::UpdateScore(int linesCleared, int levelUp)
 {
     switch (linesCleared)
@@ -577,7 +577,7 @@ void SimGame::UpdateScore(int linesCleared, int levelUp)
 | 3줄 (Triple) | 600 | 6배 |
 | 4줄 (Tetris) | 1000 | 10배 — 4줄 동시 클리어의 보상이 압도적 |
 
-이 점수 체계는 NES Tetris(1989)를 간략화한 것이다. 원작은 레벨에 비례하는 곱셈을 적용하는데, 이 sim 도 후속 섹션에서 레벨 배율 (점수 × `level`) 과 10 라인마다 레벨업 + 중력 가속을 도입한다. **최종 시그니처는 3-인자 `UpdateScore(linesCleared, levelUp, tSpin)`** 로 확장되고, 각 점수에 `* level` 배율이 곱해지며 T-spin 분기가 추가된다. 위 2-인자 함수는 그 첫 단계 형태일 뿐이고, 실제 저장소에 컴파일되는 최종 형태는 후속 "레벨 시스템과 T-spin" 섹션 B 에 전체 인용되어 있다.
+이 점수 체계는 NES Tetris(1989)를 간략화한 것이다. 완성형 sim은 레벨 배율(점수 × `level`), 라인 누적에 따른 레벨업·중력 가속, T-spin 분기를 함께 적용한다. `UpdateScore(linesCleared, levelUp, tSpin)`가 이 정보를 한 잠금 사건에서 받아 점수와 레벨을 갱신한다. 위의 단순형은 점수표를 먼저 이해하기 위한 체크포인트이고, 이 문서의 `레벨 시스템과 T-spin` 블록이 현재 계약이다.
 
 점수가 비선형적으로 증가하는 것이 핵심 게임 디자인이다: 4줄 동시 클리어(Tetris)의 보상이 1줄씩 4번 클리어(400점)보다 2.5배 높으므로, 플레이어에게 "I 블록을 기다려서 4줄을 한꺼번에 클리어"하는 전략적 선택을 유도한다.
 
@@ -593,7 +593,7 @@ void SimGame::UpdateScore(int linesCleared, int levelUp)
 
 Tetris Guideline(The Tetris Company)이 정의하는 공식 랜덤 알고리즘: 7종 블록을 "가방"에 넣고 섞은 후, 하나씩 꺼낸다. 가방이 비면 다시 채운다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:34-46`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 SimBlock SimGame::GetRandomBlock()
@@ -654,7 +654,7 @@ SimBlock SimGame::GetRandomBlock()
 
 이 프로젝트에서는 RNG 알고리즘, 분포 함수, 상태 크기를 모두 직접 소유한다.
 
-**현재 소스 발췌 — `core/rng.h:1-31`**
+**현재 소스 발췌 — `core/rng.h`**
 
 ```cpp
 #pragma once
@@ -690,7 +690,7 @@ private:
 };
 ```
 
-앞에서 미룬 "두 가지 이유" 가 이 31줄에 다 들어 있다.
+이 구현에는 상태 크기와 플랫폼 간 재현성을 위해 자체 RNG를 택한 이유가 함께 드러난다.
 
 **첫째, 상태가 `uint64_t` 하나다.** 마지막 줄의 `getState()` 가 그 결과다. §9 에서 만들 상태 해시는 RNG 를 포함해야 하는데 — 포함하지 않으면 두 클라이언트의 블록 순서가 갈라져도 해시가 같아진다 — `mt19937` 이라면 624워드 내부 배열과 인덱스를 전부 긁어와야 한다. 여기서는 8바이트를 그대로 해시 체인에 흘려보내면 끝이다. 리플레이 스냅샷도 마찬가지다.
 
@@ -736,7 +736,7 @@ FNV-1a는 비암호학적 해시 함수로, 단순하고 빠르다:
 
 $$h_0 = 14695981039346656037$$ $$h_i = (h_{i-1} \oplus \text{byte}_i) \times 1099511628211$$
 
-**현재 소스 발췌 — `core/hash.h:17-19`**
+**현재 소스 발췌 — `core/hash.h`**
 
 ```cpp
 inline uint64_t fnv1a64_value(const T& v, uint64_t seed = 14695981039346656037ull) {
@@ -750,7 +750,7 @@ inline uint64_t fnv1a64_value(const T& v, uint64_t seed = 14695981039346656037ul
 
 전체 `StateHash()` 구현은 다음과 같다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:422-463`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 uint64_t SimGame::StateHash() const
@@ -841,7 +841,7 @@ $n = 10^6$ (백만 틱)에서: $P \approx \frac{10^{12}}{3.7 \times 10^{19}} \ap
 
 `attack_lines_for(n, tSpin)` 함수가 "라인 클리어 n줄 → 공격 x줄" 매핑을 결정한다. 일반 클리어와 T-spin은 같은 라인 수라도 공격량이 다르므로 `tSpin` 플래그를 함께 받는다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:200-217`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 static int attack_lines_for(int rowsCleared, bool tSpin)
@@ -878,7 +878,7 @@ Single을 공격에서 제외한 것은 **스팸 방지**다. 플레이어가 �
 
 T-spin은 별도 판정으로 다룬다. 마지막 성공 이동이 회전이고, T-piece pivot 주변 네 모서리 중 3개 이상이 벽이나 기존 블록으로 막히면 T-spin이다. 이 판정은 `LockBlock()` 시작 시점, 현재 블록이 preview 큐 첫 블록으로 교체되기 전에 실행한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:219-243`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 bool SimGame::IsTSpinLock() const
@@ -912,7 +912,7 @@ bool SimGame::IsTSpinLock() const
 
 `SimGame`은 공격을 직접 상대에게 전송하지 않는다. 대신 **누적 카운터** `attackLinesSent`에 쌓아둘 뿐이다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:245-289`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::LockBlock()
@@ -964,7 +964,7 @@ void SimGame::LockBlock()
 
 외부(네트 레이어)는 매 틱 `AttackLinesSent()`를 폴링하고, 이전 틱 대비 **델타**를 뽑아 상대 SimGame의 `AddPendingGarbage()`로 전달한다. 접근자와 전달자는 다음과 같다:
 
-**현재 소스 발췌 — `src/sim_game.h:86-88`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
     int AttackLinesSent() const { return attackLinesSent; }
@@ -975,7 +975,7 @@ void SimGame::LockBlock()
 ```mermaid
 graph TB
     subgraph PeerA["피어 A (내 SimGame)"]
-        A1["4줄 클리어<br/>attackLinesSent<br/>10 → 14 (+4)"]
+        A1["4줄 클리어<br/>attackLinesSent<br/>→ 14 (+4)"]
         A2["외부: 델타 4 감지<br/>(local sim 기준)"]
         A3["상대 B 쪽에<br/>AddPendingGarbage(4)"]
         A1 --> A2 --> A3
@@ -999,7 +999,7 @@ graph TB
 
 대기 중인 가비지(`pendingGarbage`)는 **다음 `LockBlock` 시점에** 필드 하단으로 밀려 올라온다. 지금 떨어지고 있는 피스가 락되기 전까지는 주입되지 않는다 — 플레이어가 예측 불가능한 중간 주입으로 게임을 망치는 것을 막는다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:276-288`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
     int inserted = 0;
@@ -1027,7 +1027,7 @@ graph TB
 
 주입 로직은 3단계로 되어 있다. 기존 행을 위로 밀어올리고 → 하단에 가비지 행을 채우고 → 하나의 칼럼을 "구멍"으로 비운다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:291-314`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::InsertGarbage(int rows)
@@ -1079,13 +1079,13 @@ row 19: .■■■■.....             row 19: 9999.99999
 
 여기서 크리티컬한 결정: **가비지 홀 컬럼을 뽑을 때 쓰는 RNG**는 피스 가방용 `rng`와 **별개 인스턴스** `garbageRng`다.
 
-**현재 소스 발췌 — `src/sim_game.h:142-142`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
     XorShift64Star garbageRng;
 ```
 
-**현재 소스 발췌 — `src/sim_game.cpp:8-13`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 SimGame::SimGame(uint64_t seed)
@@ -1130,7 +1130,7 @@ SimGame::SimGame(uint64_t seed)
 
 `SimGame`은 렌더/오디오 레이어와 한 방향으로만 통신한다: 이벤트 플래그를 세팅하고, 외부가 소비한다.
 
-**현재 소스 발췌 — `src/sim_game.h:23-33`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
 public:
@@ -1245,7 +1245,7 @@ graph TB
 
 입력을 넣는 쪽은 쓰기만 하고, 상태를 읽는 쪽은 읽기만 한다. 두 방향이 한 모듈에서 섞이는 순간 "누가 이 값을 바꿨는지" 를 추적할 수 없게 되고, 그러면 결정론도 무너진다.
 
-지금은 양쪽 다 테스트 프로그램 하나다. 뒤에서 여기에 다른 것들이 붙지만 **규칙은 그대로다** — 붙는 것이 무엇이든 `SimGame` 의 상태를 우회해서 건드리지 않는다. 위의 네 가지 허용 목록이 그 계약이다.
+이 경계에는 테스트 프로그램뿐 아니라 렌더링 클라이언트, 네트워크 세션, Python 바인딩도 연결된다. 어느 소비자도 `SimGame` 상태를 우회해 건드리지 않으며, 위 네 가지 허용 목록이 모든 연결의 공통 계약이다.
 
 ### 11.3 부동소수 금지
 
@@ -1348,7 +1348,7 @@ final_hash=0x<16자리> final_score=<N> final_over=<0|1>
 
 Python 측 대응이 `python/tests/test_determinism_crossplatform.py`다:
 
-**현재 소스 발췌 — `python/tests/test_determinism_crossplatform.py:79-136`**
+**현재 소스 발췌 — `python/tests/test_determinism_crossplatform.py`**
 
 ```python
 def _run_script(seed: int) -> list[tuple[int, int, int, bool, int]]:
@@ -1431,7 +1431,7 @@ C++ 구현은 각각 `uint32_t`, `uint64_t`를 쓰므로 곱셈 오버플로가 
 
 Python은 임의 정밀도 정수라 자동 truncation이 **없다**. 그래서 매 단계 수동 마스킹이 필요하다:
 
-**현재 소스 발췌 — `python/netbot/framing.py:78-118`**
+**현재 소스 발췌 — `python/netbot/framing.py`**
 
 ```python
 def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:
@@ -1578,7 +1578,7 @@ void SimGame::SubmitInput(uint8_t inputMask)
 
 **After (카운터 게이팅, 실제 저장소 코드):**
 
-**현재 소스 발췌 — `src/sim_game.cpp:63-90`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::SubmitInput(uint8_t inputMask)
@@ -1670,7 +1670,7 @@ h = fnv1a64_value(softDropCounterTicks, h);   // ← 이 한 줄
 
 `SimGame` 헤더에서 `softDropCounterTicks` 는 in-class initializer 를 갖는다:
 
-**현재 소스 발췌 — `src/sim_game.h:153-153`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
     int softDropCounterTicks = 0;
@@ -1678,7 +1678,7 @@ h = fnv1a64_value(softDropCounterTicks, h);   // ← 이 한 줄
 
 이것만으로 충분해 보인다. 그러나 `sim_game.cpp` 생성자는 **mem-init list 에 명시적으로 한 번 더** 초기화한다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:8-32`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 SimGame::SimGame(uint64_t seed)
@@ -1783,7 +1783,7 @@ HashBreakdown StateHashBreakdown() const;
 
 ### 13.3 전체 구현
 
-**현재 소스 발췌 — `src/sim_game.cpp:369-420`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 SimGame::HashBreakdown SimGame::StateHashBreakdown() const
@@ -1896,7 +1896,7 @@ if (localHash != remoteHash) {
 
 고스트 블록은 현재 블록을 아래로 투영(hard drop 시뮬레이션)하여 착지 위치를 미리 보여주는 시각적 가이드다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:161-169`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::DropExpectation()
@@ -1922,7 +1922,7 @@ void SimGame::DropExpectation()
 
 `LockBlock`은 sim의 중심 상태 전이다. 피스 고정, 다음 피스 준비, 게임오버 판정, 라인 클리어, 가비지 주입 — 모두 이 함수에서 일어난다. 전체를 한 번에 인용한다 (생략 없음):
 
-**현재 소스 발췌 — `src/sim_game.cpp:245-289`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::LockBlock()
@@ -2034,7 +2034,7 @@ stateDiagram-v2
 
 ---
 
-## 후속: 레벨 시스템과 T-spin
+## 레벨 시스템과 T-spin
 
 지금까지의 sim 은 점수가 고정 테이블이었고 (섹션 6), `dropIntervalTicks` 는 생성자에서 한 번 정해지면 끝까지 고정 (`TICKS_PER_SECOND/2 = 30 틱 ≈ 0.5 초`) 이었다. 이러면 5 분짜리 게임도 50 분짜리 게임도 똑같은 속도라 단조롭다. NES Tetris 가 정착시킨 관행 — **10 라인마다 레벨 +1, 레벨이 오를수록 중력이 가속, 점수에 레벨 배율** — 을 그대로 도입한다.
 
@@ -2044,7 +2044,7 @@ T-spin 은 별개 주제지만 레벨과 동시에 들어왔다. "T 피스를 �
 
 `SimGame` 에 두 필드를 추가:
 
-**현재 소스 발췌 — `src/sim_game.h:116-117`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
     int totalLinesCleared = 0;  // 누적 클리어 라인 수
@@ -2053,7 +2053,7 @@ T-spin 은 별개 주제지만 레벨과 동시에 들어왔다. "T 피스를 �
 
 `UpdateScore` 가 새 시그니처로 바뀐다 — 라인 수 + 레벨업 보너스 + T-spin 여부:
 
-**현재 소스 발췌 — `src/sim_game.cpp:329-367`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::UpdateScore(int linesCleared, int levelUp, bool tSpin)
@@ -2113,7 +2113,7 @@ Lv 20 의 3 틱 (= 0.05 초) 은 사실상 "보자마자 떨어진다" 수준. �
 
 `level` 과 `totalLinesCleared` 둘 다 `StateHash` 에 들어간다 — 섹션 11.4 의 "해시에 포함되는 모든 것" 목록에 추가된 항목이다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:402-409`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
     sf = fnv1a64_value(score, sf);
@@ -2137,7 +2137,7 @@ Lv 20 의 3 틱 (= 0.05 초) 은 사실상 "보자마자 떨어진다" 수준. �
 
 `lastMoveWasRotate` 플래그가 매 동작에서 갱신된다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:184-198`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::RotateBlockImpl()
@@ -2161,7 +2161,7 @@ void SimGame::RotateBlockImpl()
 
 판정 함수:
 
-**현재 소스 발췌 — `src/sim_game.cpp:219-243`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 bool SimGame::IsTSpinLock() const
@@ -2195,7 +2195,7 @@ T 피스의 bounding box 가 3×3 이므로 `(rowOffset+1, columnOffset+1)` 이 
 
 `LockBlock` 의 첫 줄에서 잠금 직전 상태로 호출:
 
-**현재 소스 발췌 — `src/sim_game.cpp:245-289`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::LockBlock()
@@ -2251,7 +2251,7 @@ void SimGame::LockBlock()
 
 T-spin 인지 아닌지에 따라 가비지 라인 수가 다르다:
 
-**현재 소스 발췌 — `src/sim_game.cpp:200-217`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 static int attack_lines_for(int rowsCleared, bool tSpin)
@@ -2360,7 +2360,7 @@ cmake --build build --config Release
 
 **해결:** `GetAllBlocks()` 순서를 원본과 **정확히** 일치시킨다. 코드 주석으로 순서를 명시:
 
-**현재 소스 발췌 — `src/sim_game.cpp:48-54`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 std::vector<SimBlock> SimGame::GetAllBlocks() const
@@ -2435,9 +2435,9 @@ dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 
 ## 부록 A. CMakeLists 확장
 
-[Part 0](./part0-project-setup.md) 은 실행 파일 하나짜리 뼈대로 끝났고, "최종 타깃 구조는 각 Part 에서 조금씩 확장한다" 고 예고했다. 이 장이 그 첫 확장이다. 시뮬레이션 소스를 변수로 묶고, 그 위에 결정론 테스트 타깃을 세운다.
+실행 파일 하나였던 빌드 뼈대에 처음으로 재사용 가능한 계층을 만든다. 시뮬레이션 소스를 변수로 묶고, 그 위에 결정론 테스트 타깃을 세운다.
 
-**현재 소스 발췌 — `CMakeLists.txt:63-80`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 # -----------------------------------------------------------------------------
@@ -2462,9 +2462,9 @@ set(TETRIS_SIM_HEADERS
 
 `.cpp` 가 둘뿐인 것이 이 계층의 성격을 그대로 보여준다. `SimGrid`, `SimBlock`, `SimBlocks` 는 전부 헤더 전용이다 — 구조체와 inline 함수만 담고 있어 별도 번역 단위가 필요 없다. `SimGame` 만 구현 분량이 커서 `.cpp` 로 분리했다.
 
-이 두 변수가 뒤에서 크게 갚는다. [Part 8](./part8-python-rl.md) 의 pybind11 모듈은 `${TETRIS_SIM_SOURCES}` 만 링크해 renderer·audio·net 심볼 없이 빌드되고, 아래 `sim_hash_dump` 도 마찬가지다. **`SimGame` 이 실수로 `renderer.h` 를 include 하는 순간 이 두 타깃의 링크가 깨진다** — 계층 경계가 문서가 아니라 빌드 시스템으로 강제되는 셈이다.
+pybind11 모듈과 `sim_hash_dump` 는 `${TETRIS_SIM_SOURCES}` 만 링크해 renderer·audio·net 심볼 없이 빌드된다. **`SimGame` 이 실수로 `renderer.h` 를 include 하는 순간 이 두 타깃의 빌드가 깨진다.** 계층 경계가 문서가 아니라 빌드 시스템으로 강제되는 셈이다.
 
-**현재 소스 발췌 — `CMakeLists.txt:309-315`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 if (TETRIS_BUILD_TEST)
@@ -2488,7 +2488,7 @@ if (TETRIS_BUILD_TEST)
 
 ### B.1 공개 API — `src/sim_game.h`
 
-**현재 소스 발췌 — `src/sim_game.h:1-162`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
 #pragma once
@@ -2657,7 +2657,7 @@ private:
 
 ### B.2 테트로미노 — `src/sim_block.h`
 
-**현재 소스 발췌 — `src/sim_block.h:1-61`**
+**현재 소스 발췌 — `src/sim_block.h`**
 
 ```cpp
 #pragma once
@@ -2727,7 +2727,7 @@ public:
 
 ### B.3 그리드 — `src/sim_grid.h`
 
-**현재 소스 발췌 — `src/sim_grid.h:1-102`**
+**현재 소스 발췌 — `src/sim_grid.h`**
 
 ```cpp
 #pragma once
@@ -2838,7 +2838,7 @@ private:
 
 ### B.4 중력 — `SimGame::Tick`
 
-**현재 소스 발췌 — `src/sim_game.cpp:92-101`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::Tick()
@@ -2853,11 +2853,11 @@ void SimGame::Tick()
 }
 ```
 
-이 장에서 **시간이 흐르는 유일한 지점**이다. `dropIntervalTicks` 는 레벨에 따라 줄어들고(후속 절 참조), `gravityCounterTicks` 가 거기 도달하면 한 칸 내린다. `Tick()` 을 호출하지 않으면 게임은 영원히 정지해 있다 — 이 성질 덕분에 [Part 8](./part8-python-rl.md) 의 RL 환경이 중력 없이 배치만 반복할 수 있다.
+이 장에서 **시간이 흐르는 유일한 지점**이다. `dropIntervalTicks` 는 아래의 `레벨 시스템과 T-spin` 규칙에 따라 줄어들고, `gravityCounterTicks` 가 거기 도달하면 한 칸 내린다. `Tick()` 을 호출하지 않으면 게임은 영원히 정지해 있다. 이 성질 덕분에 RL 환경은 중력 없이 배치만 반복할 수 있다.
 
 ### B.5 이동 — `MoveBlockRight` / `MoveBlockDown`
 
-**현재 소스 발췌 — `src/sim_game.cpp:118-131`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::MoveBlockRight()
@@ -2876,7 +2876,7 @@ void SimGame::MoveBlockRight()
 }
 ```
 
-**현재 소스 발췌 — `src/sim_game.cpp:133-146`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 void SimGame::MoveBlockDown()
@@ -2901,7 +2901,7 @@ void SimGame::MoveBlockDown()
 
 ### B.6 고스트 — `MakeGhostBlock`
 
-**현재 소스 발췌 — `src/sim_game.cpp:56-61`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 SimBlock SimGame::MakeGhostBlock(const SimBlock& block) const
@@ -2916,7 +2916,7 @@ SimBlock SimGame::MakeGhostBlock(const SimBlock& block) const
 
 ### B.7 배치 단위 API — `LegalPlacements` / `ApplyPlacement`
 
-**현재 소스 발췌 — `src/sim_game.cpp:469-537`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 std::vector<SimGame::Placement> SimGame::LegalPlacements() const
@@ -3071,19 +3071,17 @@ uv run python -m pytest python/tests/test_determinism_crossplatform.py -v
 
 기대 결과: `test_initial_hash_stable_across_seeds`, `test_script_replay_stable`, `test_matches_cpp_reference_dump` 세 개 모두 PASS.
 
-### 이 장에서 확인할 수 없는 것
+### 통합 환경에서 확인하는 것
 
-가비지 교환이 실제로 두 클라이언트 사이에서 같은 구멍 컬럼을 만드는지는 게임 클라이언트와 릴레이가 있어야 눈으로 볼 수 있다. `garbageRng` 의 결정론은 지금 골든 해시의 `combat` 섹션이 이미 잠그고 있으므로, 육안 확인은 [Part 7](./part7-relay-server.md) 까지 미룬다.
+가비지 교환이 두 클라이언트에서 같은 구멍 컬럼을 만드는지는 relay 통합 테스트와
+실제 두 클라이언트 실행으로 확인한다. `garbageRng` 자체의 결정론은 골든 해시의
+`combat` 섹션이 고정한다.
 
-마찬가지로 소프트 드롭 레이트(§12)와 레벨 표시를 초시계로 재는 검증도 [Part 4](./part4-game-wrapper-and-loop.md) 에서 화면이 생긴 뒤에 할 수 있다. 지금은 `sim_hash_dump` 의 `ticks=` 열로 대신 확인한다 — DOWN 이 눌린 스텝의 틱 소비가 스크립트의 기대와 맞는지 보면 된다.
-
-## 다음 장 예고
-
-Part 2~3에서는 이 엔진을 화면에 연결할 플랫폼·렌더링 계층을 만든다. Part 4에서 `Game`과 메인 루프를 합치며, 이 장의 `SubmitInput`/`Tick` API가 고정 스텝의 단위가 된다.
-
-Part 6에서는 이 장의 `StateHash()` 가 네트워크 디싱크 감지의 핵심 도구가 된다. 두 피어가 10초마다 해시를 교환하고, 다르면 DESYNC 배너를 띄우는 F.2 자동 검증이 여기서 만든 기초 위에 올라간다.
-
-Part 8에서는 이 장의 `ApplyPlacement(col, rot)`가 RL 환경의 action 공간이 되고, Part 9에서는 학습 결과를 ONNX로 C++ 게임에 다시 가져온다.
+소프트 드롭 레이트와 레벨 표시는 화면에서 초시계로도 확인할 수 있다. 헤드리스
+환경에서는 `sim_hash_dump` 의 `ticks=` 열을 보고 DOWN 입력의 틱 소비가 기대와
+맞는지 확인한다. `SubmitInput`과 `Tick`은 게임 루프와 lockstep의 고정 스텝 단위이고,
+`StateHash`는 피어 간 desync 감지에 쓰인다. `ApplyPlacement`는 같은 규칙을 배치 수준
+행동으로 표현해 Python 학습 환경이 사용한다.
 
 ---
 

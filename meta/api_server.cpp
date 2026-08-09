@@ -26,21 +26,16 @@ namespace meta {
 
 namespace {
 
-// [보안] OS CSPRNG 에서 n 바이트의 무작위 데이터를 채운다.
-//   std::random_device 는 대부분의 타깃에서 OS CSPRNG 를 래핑하지만 일부
-//   구현(예: 구형 MinGW)에서는 결정적일 수 있다. 토큰/세션 비밀에는 OS
-//   엔트로피를 명시적으로 읽고, 실패 시에만 random_device 로 폴백한다.
+// Prefer the OS entropy source; random_device is the portability fallback.
 void fill_random(unsigned char* out, size_t n)
 {
 #ifndef _WIN32
-    // POSIX: /dev/urandom 에서 직접 읽는다(글리브C random_device 와 동일 소스지만 명시적).
     if (FILE* f = std::fopen("/dev/urandom", "rb")) {
         size_t got = std::fread(out, 1, n, f);
         std::fclose(f);
         if (got == n) return;
     }
 #endif
-    // 폴백(Windows 포함): random_device.
     std::random_device rd;
     size_t i = 0;
     while (i < n) {
@@ -90,12 +85,16 @@ bool parse_int_param(const std::string& s, int& out)
     return true;
 }
 
-// [보안] 레이트리밋 키로 쓸 클라이언트 식별자.
-//   배포 구성(deploy/)은 meta 를 127.0.0.1 에 바인드하고 cloudflared/Caddy 를
-//   앞단에 둔다 — 이때 remote_addr 은 항상 프록시(루프백)라 전체 사용자가 1개
-//   버킷을 공유하게 되어 per-IP 제한이 무력화된다. 피어가 루프백(신뢰 프록시)일
-//   때만 프록시가 붙여 주는 실제 클라이언트 IP 헤더를 사용한다. 외부에서 직접
-//   접속한 피어의 헤더는 위조 가능하므로 무시한다.
+bool valid_match_uuid(const std::string& s)
+{
+    if (s.size() != 32) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+// Trust forwarding headers only from a loopback reverse proxy.
 std::string rate_limit_key(const httplib::Request& req)
 {
     const bool from_loopback =
@@ -104,11 +103,9 @@ std::string rate_limit_key(const httplib::Request& req)
         std::string ip = req.get_header_value("CF-Connecting-IP");
         if (ip.empty()) {
             ip = req.get_header_value("X-Forwarded-For");
-            // XFF 는 "client, proxy1, proxy2" — 첫 항목이 원 클라이언트.
             const auto comma = ip.find(',');
             if (comma != std::string::npos) ip.resize(comma);
         }
-        // 공백 트림 후 비어있지 않으면 채택.
         const auto b = ip.find_first_not_of(" \t");
         const auto e = ip.find_last_not_of(" \t");
         if (b != std::string::npos) return ip.substr(b, e - b + 1);
@@ -135,24 +132,25 @@ bool ApiServer::listen(const std::string& host, int port)
 {
     httplib::Server svr;
 
-    // [보안] 요청 본문 상한 — 거대한 body 로 메모리를 소모시키는 플러딩 방지.
-    //   우리 엔드포인트의 정상 body 는 수백 바이트 수준이라 64KiB 면 충분.
+    // Normal requests are only a few hundred bytes.
     svr.set_payload_max_length(64 * 1024);
 
-    // [보안] 간단한 per-IP 고정 윈도우 레이트 리밋(남용/DoS 완화).
-    //   1초 창에 IP 당 kMaxPerWindow 초과 요청은 429. 창 전환 시 맵을 비워
-    //   메모리 증가를 막는다(고정 윈도우라 경계에서 최대 2배 burst 허용 — 충분).
+    // Bounded one-second request window per client IP.
     svr.set_pre_routing_handler(
-        [](const httplib::Request& req, httplib::Response& res) {
+        [this](const httplib::Request& req, httplib::Response& res) {
             static std::mutex mu;
             static std::unordered_map<std::string, int> hits;
             static int64_t window = 0;
-            constexpr int kMaxPerWindow = 60;
+            const bool trustedRelay = !relay_secret_.empty() &&
+                ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_);
+            const int maxPerWindow = trustedRelay ? 512 : 60;
             const int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             std::lock_guard<std::mutex> lk(mu);
             if (nowSec != window) { window = nowSec; hits.clear(); }
-            if (++hits[rate_limit_key(req)] > kMaxPerWindow) {
+            const std::string key = (trustedRelay ? "relay:" : "public:") +
+                                    rate_limit_key(req);
+            if (++hits[key] > maxPerWindow) {
                 res.status = 429;
                 res.set_header("Access-Control-Allow-Origin", "*");
                 res.set_content("{\"error\":\"rate_limited\"}", "application/json");
@@ -293,6 +291,7 @@ bool ApiServer::listen(const std::string& host, int port)
                 return;
             }
 
+            const std::string matchUuid = proto::find_string(req.body, "match_uuid");
             auto pa = proto::find_int(req.body, "player_a");
             auto pb = proto::find_int(req.body, "player_b");
             auto wn = proto::find_int(req.body, "winner");   // null 허용
@@ -302,9 +301,9 @@ bool ApiServer::listen(const std::string& host, int port)
             auto lb = proto::find_int(req.body, "lines_b");
             auto du = proto::find_int(req.body, "duration_s");
 
-            if (!pa || !pb || !sa || !sb || !la || !lb || !du) {
+            if (!valid_match_uuid(matchUuid) || !pa || !pb || !sa || !sb || !la || !lb || !du) {
                 set_json(res, 400,
-                    proto::error_json("bad_request", "missing required fields"));
+                    proto::error_json("bad_request", "invalid match_uuid or missing fields"));
                 return;
             }
             if (*pa == *pb) {
@@ -312,10 +311,7 @@ bool ApiServer::listen(const std::string& host, int port)
                     proto::error_json("bad_request", "player_a == player_b"));
                 return;
             }
-            // winner 가 있다면 player_a 또는 player_b 중 하나여야 한다.
-            // 그렇지 않으면 RP 갱신이 두 플레이어 모두 losses 만 누적하는 잘못된
-            // 상태를 만든다 (saveMatch 가 winner != a && winner != b 인 분기에서
-            // 둘 다 패배 처리). 외부에 노출되는 API 이므로 여기서 막는다.
+            // A winner must identify one side of this match.
             if (wn && (*wn != *pa && *wn != *pb)) {
                 set_json(res, 400,
                     proto::error_json("bad_request", "winner must be player_a, player_b, or null"));
@@ -326,9 +322,7 @@ bool ApiServer::listen(const std::string& host, int port)
                     proto::error_json("bad_request", "scores/lines/duration must be non-negative"));
                 return;
             }
-            // int64 → int 로 내려가기 전에 상한 검증 — 2^31 이상 값은 캐스팅에서
-            // 음수로 래핑되어 위의 non-negative 검사를 우회한다. 게임 상 도달
-            // 불가능한 1e8 을 하드 상한으로 거부.
+            // Validate before narrowing int64 JSON values to int.
             constexpr int64_t kMaxStatValue = 100000000;
             if (*sa > kMaxStatValue || *sb > kMaxStatValue ||
                 *la > kMaxStatValue || *lb > kMaxStatValue ||
@@ -339,6 +333,7 @@ bool ApiServer::listen(const std::string& host, int port)
             }
 
             MatchRecord m;
+            m.match_uuid = matchUuid;
             m.player_a   = *pa;
             m.player_b   = *pb;
             m.winner     = wn;  // optional passthrough

@@ -15,9 +15,11 @@
 // 이 파일을 한 타겟당 한 번만 추가해야 한다.
 #include "httplib.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -205,7 +208,11 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
     if (token.empty())  { set_outcome(VerifyOutcome::UnknownToken); return std::nullopt; }
 
     std::string body = std::string("{\"token\":\"") + proto::json_escape(token) + "\"}";
-    auto r = post_json(*this, host_, port_, https_, "/v1/auth/verify", {},
+    httplib::Headers headers;
+    if (!relay_secret_.empty()) {
+        headers.emplace("X-Relay-Secret", relay_secret_);
+    }
+    auto r = post_json(*this, host_, port_, https_, "/v1/auth/verify", headers,
                        body, timeout_s);
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/auth/verify network error\n");
@@ -321,7 +328,8 @@ MetaClient::select_icon(const std::string& token,
 }
 
 std::optional<MatchResult>
-MetaClient::post_match(int64_t player_a, int64_t player_b,
+MetaClient::post_match(const std::string& match_uuid,
+                       int64_t player_a, int64_t player_b,
                        std::optional<int64_t> winner,
                        int score_a, int score_b,
                        int lines_a, int lines_b,
@@ -332,7 +340,8 @@ MetaClient::post_match(int64_t player_a, int64_t player_b,
 
     std::ostringstream ss;
     ss << "{"
-       << "\"player_a\":" << player_a
+       << "\"match_uuid\":\"" << proto::json_escape(match_uuid) << "\""
+       << ",\"player_a\":" << player_a
        << ",\"player_b\":" << player_b
        << ",\"winner\":";
     if (winner) ss << *winner;
@@ -349,8 +358,16 @@ MetaClient::post_match(int64_t player_a, int64_t player_b,
     if (!relay_secret_.empty()) {
         headers.emplace("X-Relay-Secret", relay_secret_);
     }
+    const int per_attempt_timeout = std::max(1, timeout_s / 3);
     auto r = post_json(*this, host_, port_, https_, "/v1/matches", headers,
-                       body, timeout_s);
+                       body, per_attempt_timeout);
+    for (int attempt = 1;
+         attempt < 3 && (!r || r->status == 429 || r->status >= 500);
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+        r = post_json(*this, host_, port_, https_, "/v1/matches", headers,
+                      body, per_attempt_timeout);
+    }
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/matches network error\n");
         return std::nullopt;

@@ -6,11 +6,12 @@
 ## 권장 읽기 순서
 
 1. [`blog/README.md`](blog/README.md) — 전체 증축 순서와 Part별 완료 기준
-2. [`blog/part0-project-setup.md`](blog/part0-project-setup.md)부터 Part 12까지 순서대로 구현
-   (Part 13은 순서대로 읽는 장이 아니라, 다 만든 뒤 찾아보는 구조·확장 레퍼런스다)
-3. [`README.md`](../README.md) — 완성된 프로젝트의 빠른 실행 요약
-4. [`GUIDE.md`](../GUIDE.md) — 완성 코드의 흐름을 짧게 복습
-5. [`ARCHITECTURE.md`](../ARCHITECTURE.md) — 최종 모듈 계약을 찾아보는 레퍼런스
+2. Part 0~7로 공통 게임·네트워크 수직 슬라이스를 구현
+3. 목적에 따라 서비스·출시(Part 10→11→12) 또는 AI(Part 8→9) 경로 진행
+   (Part 13은 순서대로 읽는 장이 아니라 완성 구조를 찾는 레퍼런스다)
+4. [`README.md`](../README.md) — 완성된 프로젝트의 빠른 실행 요약
+5. [`GUIDE.md`](../GUIDE.md) — 완성 코드의 흐름을 짧게 복습
+6. [`ARCHITECTURE.md`](../ARCHITECTURE.md) — 최종 모듈 계약을 찾아보는 레퍼런스
 
 이 프로젝트의 주 학습 문서는 `docs/blog/part0~12`이고, `part13`은 그 위의 레퍼런스다. `README.md`, `GUIDE.md`,
 `ARCHITECTURE.md`는 Part를 대체하는 본문이 아니라 완성 상태의 요약과 조회용 문서다.
@@ -21,7 +22,7 @@
 |---|---|---|
 | 현재 품질과 위험 확인 | [`code-review.md`](code-review.md) | [`ARCHITECTURE.md`](../ARCHITECTURE.md) §15 |
 | 처음 빌드하고 실행 | [`README.md`](../README.md) | [`DEPLOY.md`](../DEPLOY.md) |
-| 이론과 코드를 누적 구현 | [`blog/README.md`](blog/README.md) | Part 0부터 Part 12까지 |
+| 이론과 코드를 누적 구현 | [`blog/README.md`](blog/README.md) | 공통 Part 0~7 뒤 서비스 또는 AI 경로 |
 | 완성 구조 확인 · 고칠 곳 찾기 | [`blog/part13-structure-and-build-reference.md`](blog/part13-structure-and-build-reference.md) | [`ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | 완성 코드를 빠르게 이해 | [`GUIDE.md`](../GUIDE.md) | 실제 코드 → [`ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | 공개 서버 운영 | [`DEPLOY.md`](../DEPLOY.md) | [`public-server-deployment.md`](public-server-deployment.md) |

@@ -1,6 +1,6 @@
 # Part 11: 설정 화면 — 해상도 · 오디오 · VSync, 그리고 결정성 불변식
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지 [시리즈 목차](./README.md) · [이전: Part 10 — 메타와 랭킹](./part10-meta-and-ranking.md) · **Part 11** · [다음: Part 12 — 검수와 배포](./part12-hardening-and-release.md)
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 11**
 
 ---
 
@@ -27,14 +27,14 @@
 
 > **현재 저장 위치:** 초기 구현은 실행 디렉터리의 `settings.cfg`를 사용했지만, 현재 코드는 token과 같은 플랫폼별 user-data 디렉터리에 저장한다. 경로를 구할 수 없을 때만 실행 디렉터리로 폴백하고, 기존 cwd 파일은 1회 마이그레이션한다. 아래에서 `"settings.cfg"` 리터럴을 쓰는 코드는 도입 과정을 보여주는 중간 스냅샷이며 최종 코드는 `settingsPath`를 사용한다.
 
-여기까지 게임은 "기능은 다 있는데 손볼 데가 없는" 상태다. 창은 720×640 고정, 볼륨은 켜짐/꺼짐, 화면 흔들림과 고스트 피스는 항상 ON. 이 장은 그 모든 것을 **인게임 설정 화면(`AppMode::Settings`)** 하나로 묶는다 — 창 크기 프리셋 다섯 개·전체화면, BGM/SFX 볼륨 슬라이더, VSync, 화면 흔들림(마스터 + 하드드롭), 고스트 피스 토글. 변경은 즉시 반영되고 `settings.cfg` 에 저장돼 재시작에도 살아남는다.
+여기까지 게임은 "기능은 다 있는데 손볼 데가 없는" 상태다. 창은 720×640 고정, 볼륨은 켜짐/꺼짐, 화면 흔들림과 고스트 피스는 항상 ON. 이 장은 창 크기·전체화면, BGM/SFX 볼륨, VSync, 화면 흔들림, 고스트 피스를 **인게임 설정 화면(`AppMode::Settings`)**과 한 설정 모델로 묶는다. 변경은 즉시 반영되고 `settings.cfg`에 저장돼 재시작에도 살아남는다.
 
 이 장의 파일 경계는 다음과 같다.
 
-- `src/main.cpp` — `struct GameSettings` + `settings.cfg` 영속(load/save), 저장 경로 결정과 레거시 마이그레이션, 시작 시 적용, 메뉴 항목 연결, `if (app == AppMode::Settings)` 화면 블록(8행 · 키보드/마우스 내비 · 즉시 적용+저장), 그리고 `apply_fx` 의 하드드롭 흔들림 게이팅.
-- `src/gui.h` / `src/gui.cpp` — 즉시모드 위젯 두 개를 추가: `gui_slider`(0~100) 와 `gui_value_selector`(`< 라벨 >`). 히트 테스트 헬퍼 `gui_hover_rect` 와 `gui_button` / `gui_checkbox` 는 [Part 3](./part3-rendering-and-ui.md) 이 이미 만들었다 — 그대로 재사용한다.
+- `src/main.cpp` — `struct GameSettings` + `settings.cfg` 영속(load/save), 저장 경로 결정과 레거시 마이그레이션, 시작 시 적용, 메뉴 연결, Settings 화면의 키보드/마우스 내비·즉시 적용, 그리고 `apply_fx`의 하드드롭 흔들림 게이팅.
+- `src/gui.h` / `src/gui.cpp` — 즉시모드 `gui_slider`(0~100)와 `gui_value_selector`(`< 라벨 >`)를 추가하고 기존 hit-test·button·checkbox 계약을 재사용한다.
 - `platform/platform.h` / `platform/sdl.cpp` — `platform_set_window_size` / `platform_display_size` / `platform_set_fullscreen` / `platform_fullscreen_supported` / `platform_set_vsync`, 논리 좌표 추적(`s_logical_w/h`), 표시 사각형(`s_vp_*`), `recompute_viewport()`, 그리고 마우스 좌표의 논리 역매핑. `win32.cpp` 에는 대응 구현/스텁이 있다.
-- `audio/audio.h` — 볼륨/토글 API 네 개(`audio_set_music_enabled`, `audio_set_sfx_enabled`, `audio_set_music_volume`, `audio_set_sfx_volume`)와 그 뒤의 카테고리 게인은 [Part 5](./part5-audio.md) 가 만들었다. 이 장은 **슬라이더 UI 와 설정 영속화**만 얹는다.
+- `audio/audio.h` — 음악·효과음 토글과 볼륨 API, 그 뒤의 카테고리 게인은 오디오 계층이 소유한다. 이 장은 **슬라이더 UI와 설정 영속화**만 얹는다.
 - `src/sim_game.h` / `src/sim_game.cpp` — 렌더 전용 1회 플래그 `hardDropEvent`.
 - `src/game.h` / `src/game.cpp` — `game_set_ghost_enabled()` 와 게이트된 고스트 draw 사이트.
 - `renderer/renderer.cpp` — 논리 좌표계가 720×640 으로 고정이고 창 크기는 `glViewport` 사각형만 바꾼다는 사실(창 크기 프리셋이 게임 좌표를 흔들지 않는 근거).
@@ -43,7 +43,7 @@
 
 이 불변식은 코드 주석에도 박혀 있다. `GameSettings` 정의 바로 위:
 
-**현재 소스 발췌 — `src/main.cpp:217-230`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 // ── 게임 설정 (렌더/오디오 전용) ──────────────────────────────────────────────
@@ -72,7 +72,7 @@ struct GameSettings {
 
 먼저 두 개의 관대한 파서 헬퍼를 둔다. bool 은 `1/true/on` 과 `0/false/off` 를 모두 받고, 정수는 범위로 클램프한다.
 
-**현재 소스 발췌 — `src/main.cpp:263-282`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 static bool parse_bool01(const std::string& v, bool fallback)
@@ -101,7 +101,7 @@ static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
 
 로더는 파일이 없으면 그냥 기본값 구조체를 돌려준다 — 첫 실행에 설정 파일이 없는 건 에러가 아니다.
 
-**현재 소스 발췌 — `src/main.cpp:284-314`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 // settings.cfg 로드. 파일이 없으면 기본값 반환 (load_bot_config 와 동일한 스타일).
@@ -141,7 +141,7 @@ static GameSettings load_settings(const char* path)
 
 세이브는 항상 신형 키로만 쓴다. 정수는 그대로, bool 은 `0/1` 로. 그런데 이 함수는 "쓰고 닫는다" 보다 할 일이 조금 더 많다.
 
-**현재 소스 발췌 — `src/main.cpp:316-353`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 // 저장 성공 시 true. 정식 user-data 경로의 부모 디렉터리가 없는 첫 실행도
@@ -196,7 +196,7 @@ static bool save_settings(const char* path, const GameSettings& s)
 
 창 크기 프리셋과 그 라벨은 상수 테이블로 둔다. 배열 인덱스 0~4 가 곧 `windowScale` 값이다.
 
-**현재 소스 발췌 — `src/main.cpp:232-242`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 // 창 크기 프리셋. UI 좌표계(논리 720x640)는 그대로 두고 창만 키운다.
@@ -220,7 +220,7 @@ static const char*   kWindowScaleLabel[kWindowScaleCount] = {
 
 그래서 고를 수 있는 상한을 화면 크기로 자른다.
 
-**현재 소스 발췌 — `src/main.cpp:244-258`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 // 이 모니터에 실제로 들어가는 가장 큰 프리셋 인덱스.
@@ -252,7 +252,7 @@ static int max_window_scale()
 
 전역 설정 변수는 바로 아래에 둔다.
 
-**현재 소스 발췌 — `src/main.cpp:260-261`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 // 전역 설정. apply_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
@@ -265,7 +265,7 @@ static GameSettings g_settings;
 
 그래서 저장 위치를 토큰과 같은 user-data 디렉터리로 옮긴다. 경로를 구하는 함수는 Part 10 이 만든 `meta::client::settings_file_path()` 다.
 
-**현재 소스 발췌 — `src/main.cpp:676-694`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
     // ── settings.cfg 경로 결정 ────────────────────────────────────────────────
@@ -309,7 +309,7 @@ static GameSettings g_settings;
 
 설정은 `platform_init`/`renderer_init` 직후, 게임 루프 진입 전에 한 번 적용한다. 순서가 중요하다 — 창과 렌더러가 떠 있어야 창 크기·프레임 페이싱을 바꿀 수 있고, 오디오는 첫 재생이 일어나기 전에 볼륨 플래그가 서 있어야 한다.
 
-**현재 소스 발췌 — `src/main.cpp:696-722`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
     // ── 사용자 설정 로드 (렌더/오디오 전용) ───────────────────────────────────
@@ -359,7 +359,7 @@ static GameSettings g_settings;
 
 슬라이더는 트랙(가는 가로 바)·채워진 구간(fill)·노브로 그린다. 반환값은 새 퍼센트값이다 — 드래그 중이면 마우스 x 를 0~100 으로 환산해 돌려주고, 아니면 입력값을 그대로 돌려준다.
 
-**현재 소스 발췌 — `src/gui.cpp:112-146`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 int gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted)
@@ -407,7 +407,7 @@ int gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted)
 
 선택기는 양끝 화살표 `<` `>` 와 가운데 라벨로 된 위젯이다. 클릭한 쪽에 따라 `-1`/`0`/`+1` 을 반환한다 — 값 자체는 호출부가 관리하고, 위젯은 "어느 방향으로 한 칸" 만 알려준다.
 
-**현재 소스 발췌 — `src/gui.cpp:148-173`**
+**현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 int gui_value_selector(int x, int y, int w, int h, const char* label,
@@ -440,19 +440,19 @@ int gui_value_selector(int x, int y, int w, int h, const char* label,
 
 기존 `gui_checkbox` 는 그대로 쓴다 — `bool` 토글 행(전체화면·흔들림·VSync·고스트)에 재사용한다. 세 위젯의 헤더 선언은 다음과 같다.
 
-**현재 소스 발췌 — `src/gui.h:39-39`**
+**현재 소스 발췌 — `src/gui.h`**
 
 ```cpp
 bool gui_checkbox(int x, int y, int size, const char* label, bool checked,
 ```
 
-**현재 소스 발췌 — `src/gui.h:46-46`**
+**현재 소스 발췌 — `src/gui.h`**
 
 ```cpp
 int  gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted);
 ```
 
-**현재 소스 발췌 — `src/gui.h:51-51`**
+**현재 소스 발췌 — `src/gui.h`**
 
 ```cpp
 int  gui_value_selector(int x, int y, int w, int h, const char* label,
@@ -466,7 +466,7 @@ int  gui_value_selector(int x, int y, int w, int h, const char* label,
 
 메인 메뉴에 `"Settings"` 항목을 끼운다. 메뉴는 문자열 배열 + 인덱스로 도는 즉시모드 리스트다.
 
-**현재 소스 발췌 — `src/main.cpp:1572-1589`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             const char* items[] = {
@@ -493,7 +493,7 @@ int  gui_value_selector(int x, int y, int w, int h, const char* label,
 
 항목이 늘면서 버튼 높이가 42, 간격이 8로 압축된 것도 같은 이유다. 일곱 개가 `y=540` 의 랭킹 표시줄 위에 들어가야 한다.
 
-**현재 소스 발췌 — `src/main.cpp:1672-1674`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
                 } else if (activated == 5) {
@@ -519,7 +519,7 @@ stateDiagram-v2
 
 설정 화면은 8개의 타입별 행으로 이뤄진다. 행 종류를 `enum RowKind` 로 두고, 위에서부터 스케일 선택기 → 전체화면 → 흔들림(마스터/하드드롭) → 볼륨 슬라이더(BGM/SFX) → VSync → 고스트 순이다.
 
-**현재 소스 발췌 — `src/main.cpp:1795-1820`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
         if (app == AppMode::Settings)
@@ -554,7 +554,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 행 레이아웃 상수와 라벨/커서 강조 헬퍼:
 
-**현재 소스 발췌 — `src/main.cpp:1822-1835`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             const int labelX  = 150;   // 행 라벨 x
@@ -579,7 +579,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 첫 행은 `gui_value_selector` 로 만든다. 마우스 화살표 클릭은 `dir` 로, 키보드 Left/Right 도 `dir` 로 모인 뒤 한 군데서 처리한다.
 
-**현재 소스 발췌 — `src/main.cpp:1837-1862`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             // ── ROW_SCALE: 창 스케일 선택기 ──────────────────────────────────
@@ -624,7 +624,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 나머지 행은 두 람다로 처리한다. 체크박스 헬퍼는 클릭이든 키보드든 토글이 일어나면 `true` 를 돌려준다.
 
-**현재 소스 발췌 — `src/main.cpp:1865-1874`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             auto checkbox_row = [&](int i, const char* label, bool& val) -> bool {
@@ -641,7 +641,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 전체화면 행은 토글 후 즉시 `platform_set_fullscreen` 을 부르고, 창모드로 돌아올 때는 저장된 스케일 크기로 복원한다. 다만 그 앞에 게이트가 하나 더 있다.
 
-**현재 소스 발췌 — `src/main.cpp:1876-1901`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             // ── ROW_FULLSCREEN ──────────────────────────────────────────────
@@ -674,7 +674,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
 
 `platform_fullscreen_supported()` 는 이 장이 플랫폼 계층에 추가하는 세 번째 질의 함수다. 두 백엔드의 답이 다르다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:366-387`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_set_fullscreen(bool on)
@@ -701,7 +701,7 @@ void platform_set_vsync(bool on)
 }
 ```
 
-**현재 소스 발췌 — `platform/win32.cpp:410-420`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_set_fullscreen(bool) {}
@@ -725,7 +725,7 @@ Win32 백엔드는 전체화면을 구현하지 않았다. 창 스타일 전환�
 
 볼륨 슬라이더 헬퍼는 `gui_slider` 를 감싸고, 키보드 Left/Right 는 5% 단위로 움직인다.
 
-**현재 소스 발췌 — `src/main.cpp:1904-1931`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             auto slider_row = [&](int i, const char* label, int& vol) -> bool {
@@ -760,7 +760,7 @@ Win32 백엔드는 전체화면을 구현하지 않았다. 창 스타일 전환�
 
 마지막 두 토글은 VSync 와 고스트다.
 
-**현재 소스 발췌 — `src/main.cpp:1934-1967`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             if (checkbox_row(ROW_VSYNC, "60 FPS pacing", g_settings.vsyncOn)) {
@@ -815,7 +815,7 @@ Back 버튼이 필요한 이유도 분명하다. 이 화면은 슬라이더 때�
 
 창 크기를 바꿀 때 실제로 바뀌는 것은 `glViewport` 의 사각형 하나다. 그 계산이 `renderer_begin` 에 있다.
 
-**현재 소스 발췌 — `renderer/renderer.cpp:253-301`**
+**현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
 void renderer_begin(Color bg)
@@ -885,7 +885,7 @@ void renderer_begin(Color bg)
 
 `recompute_viewport()` 가 창 크기에 맞춰 뷰포트 사각형(`s_vp_*`) 을 다시 잡는다. 창 종횡비가 논리 종횡비와 (거의) 같으면 레터박스 없이 창 전체를 쓰고, 다르면(전체화면에서 모니터가 16:9 라면) 9:8 을 유지하는 중앙 사각형 + 검은 바를 만든다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:93-115`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 static void recompute_viewport()
@@ -931,7 +931,7 @@ static void recompute_viewport()
 
 `platform_mouse_x/y` 가 원시 창 픽셀을 뷰포트 사각형 기준으로 역매핑한다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:296-306`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 int platform_mouse_x()
@@ -951,7 +951,7 @@ int platform_mouse_y()
 
 레터박스 바를 클릭하면 대체로 음수나 범위 밖 좌표가 나와 어떤 위젯에도 맞지 않는다. 다만 **완전히 안전하지는 않다.** `(int)` 캐스트는 0 쪽으로 절단하므로, 확대 배율이 1보다 크면 뷰포트 바로 왼쪽 1픽셀이 `-0.5 → 0` 으로 접혀 논리 좌표 0(화면 안)이 된다. 1080×960 전체화면에서 좌측 바 경계를 정확히 누르면 재현된다. 엄밀히 막으려면 `s_mouse_x < s_vp_x` 를 따로 검사하거나 `std::floor` 를 써야 한다. 현재 UI 는 좌측 끝 1픽셀에 클릭 가능한 위젯을 두지 않아 증상이 드러나지 않을 뿐이다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:333-344`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_set_window_size(int width, int height)
@@ -991,7 +991,7 @@ graph TB
 
 볼륨은 BGM/SFX 두 카테고리로 나뉜다. SDL 백엔드는 소프트웨어 믹서라, 각 보이스를 합산하기 전에 카테고리 게인을 곱한다. `audio_set_music_volume`/`audio_set_sfx_volume` 은 0~1 로 클램프해 전역 게인 변수에 저장한다.
 
-**현재 소스 발췌 — `audio/sdl_audio.cpp:328-342`**
+**현재 소스 발췌 — `audio/sdl_audio.cpp`**
 
 ```cpp
 void audio_set_music_volume(float v01)
@@ -1013,7 +1013,7 @@ void audio_set_sfx_volume(float v01)
 
 믹스 콜백은 BGM 보이스에 `s_musicVol` 을, SFX 보이스들에 `s_sfxVol` 을 넘긴다.
 
-**현재 소스 발췌 — `audio/sdl_audio.cpp:104-114`**
+**현재 소스 발췌 — `audio/sdl_audio.cpp`**
 
 ```cpp
 static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
@@ -1031,7 +1031,7 @@ static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
 
 `mix_voice` 는 각 샘플에 게인을 곱한 뒤 포화 합산(saturating add) 한다. 게인이 0 이면 그 카테고리는 무음이 된다 — 그래서 슬라이더 0% 가 곧 음소거다.
 
-**현재 소스 발췌 — `audio/sdl_audio.cpp:93-100`**
+**현재 소스 발췌 — `audio/sdl_audio.cpp`**
 
 ```cpp
         for (int c = 0; c < outChannels; ++c) {
@@ -1046,7 +1046,7 @@ static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
 
 Windows 의 XAudio2 백엔드(`audio/audio.cpp`) 는 같은 시그니처를 보이스 단위 `SetVolume` 으로 미러링한다 — 소프트웨어 믹스 대신 하드웨어/드라이버 보이스에 볼륨을 위임한다. 음악은 재생 중인 마스터 보이스에 즉시 반영하고, SFX 는 다음 재생부터 각 소스 보이스에 적용한다.
 
-**현재 소스 발췌 — `audio/audio.cpp:470-483`**
+**현재 소스 발췌 — `audio/audio.cpp`**
 
 ```cpp
 void audio_set_music_volume(float v01)
@@ -1071,7 +1071,7 @@ void audio_set_sfx_volume(float v01)
 
 설정 키 이름은 `vsync` 이고 화면 라벨은 `60 FPS pacing` 인데, 이 이름들은 소프트웨어 렌더러 시절의 흔적이다. 그때는 완성된 픽셀 버퍼를 OS 2D blit 으로 창에 붙였기 때문에 디스플레이의 vblank 를 기다릴 방법이 없었고, 프레임 끝에서 남은 시간을 `Sleep` 으로 쉬는 것이 할 수 있는 전부였다. 렌더러가 GL 로 바뀌면서 사정이 달라졌다 — **swap interval 이 생겼다.**
 
-**현재 소스 발췌 — `platform/sdl.cpp:380-387`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_set_vsync(bool on)
@@ -1092,7 +1092,7 @@ void platform_set_vsync(bool on)
 
 Win32 백엔드도 같은 일을 하지만 조회 경로가 한 단계 더 있다. `wglSwapIntervalEXT` 는 코어가 아니라 **`WGL_EXT_swap_control` 확장**이라 링커가 찾을 수 없고, 컨텍스트가 current 인 상태에서 `wglGetProcAddress` 로 받아야 한다.
 
-**현재 소스 발췌 — `platform/win32.cpp:19-21`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 // WGL_EXT_swap_control. 확장이라 컨텍스트를 만든 뒤에야 조회할 수 있고,
@@ -1100,7 +1100,7 @@ Win32 백엔드도 같은 일을 하지만 조회 경로가 한 단계 더 있�
 static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 ```
 
-**현재 소스 발췌 — `platform/win32.cpp:226-228`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
     // 컨텍스트가 current 인 지금이 확장을 조회할 수 있는 시점이다.
@@ -1120,7 +1120,7 @@ static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 
 문제는 "하드드롭이 일어났다" 를 어떻게 아느냐다. 이미 `dropSoundEvent` 라는 1회 플래그가 있지만, 그건 **오디오(game.cpp) 가 소비·리셋** 한다. 흔들림이 그 플래그에 의존하면 오디오가 먼저 리셋해버려 흔들림이 누락될 수 있다. 그래서 흔들림 전용 1회 플래그 `hardDropEvent` 를 별도로 둔다.
 
-**현재 소스 발췌 — `src/sim_game.h:99-106`**
+**현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
     mutable bool rotateSoundEvent  = false;
@@ -1135,7 +1135,7 @@ static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 
 하드드롭(`MoveBlockDrop`) 에서 두 플래그를 함께 세운다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:155-158`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
     currentBlock.Move(-1, 0);
@@ -1146,7 +1146,7 @@ static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 
 **이 플래그가 결정성 해시에 들어가지 않는 이유** 는 기존 `*SoundEvent` 들과 같다 — `mutable` 이고, sim *상태* 가 아니라 "이번 틱에 이런 일이 있었다" 는 *렌더 측 알림* 이다. `StateHashBreakdown()` 은 grid·블록·RNG·score/플래그/중력/레벨만 해시한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp:369-375`**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
 SimGame::HashBreakdown SimGame::StateHashBreakdown() const
@@ -1164,7 +1164,7 @@ SimGame::HashBreakdown SimGame::StateHashBreakdown() const
 
 흔들림은 매 틱 이펙트 적용 람다에서 트리거된다. 여기서 `g_settings.shakeOn`/`hardDropShakeOn` 을 읽어 게이트하고, 소비한 플래그를 리셋한다.
 
-**현재 소스 발췌 — `src/main.cpp:1140-1163`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
     // 보드별 이벤트 처리: callout + (가비지를 받을 때만) shake + 소비 플래그 리셋.
@@ -1203,7 +1203,7 @@ SimGame::HashBreakdown SimGame::StateHashBreakdown() const
 
 고스트는 전역 플래그 하나로 draw 사이트를 게이트한다.
 
-**현재 소스 발췌 — `src/game.cpp:18-18`**
+**현재 소스 발췌 — `src/game.cpp`**
 
 ```cpp
 void game_set_ghost_enabled(bool on) { g_ghostEnabled = on; }
@@ -1211,7 +1211,7 @@ void game_set_ghost_enabled(bool on) { g_ghostEnabled = on; }
 
 `Game::Draw`(단일 보드) 와 `Game::DrawBoardAt`(2보드) 둘 다 고스트 블록을 그리기 전에 플래그를 확인한다.
 
-**현재 소스 발췌 — `src/game.cpp:129-133`**
+**현재 소스 발췌 — `src/game.cpp`**
 
 ```cpp
 void Game::Draw()
@@ -1221,7 +1221,7 @@ void Game::Draw()
     DrawBlock(sim.CurrentBlock(), 11, 11);
 ```
 
-**현재 소스 발췌 — `src/game.cpp:152-154`**
+**현재 소스 발췌 — `src/game.cpp`**
 
 ```cpp
     DrawGrid(offsetX, offsetY);
@@ -1307,4 +1307,4 @@ cmake --build build-sim --target sim_hash_dump
 
 렌더러가 GPU 로 옮겨간 덕에 이 장이 얻은 것도 분명하다. 창을 키우면 확대된 그림이 아니라 그 해상도로 다시 그려진 그림이 나오고, VSync 는 이름값을 하는 진짜 vsync 가 됐다. 다만 **GPU 래스터화 결과 자체는 드라이버와 하드웨어에 따라 경계 픽셀 한두 개가 달라질 수 있다** — 잃은 것은 그것이고, 잃지 않은 것은 `SimGame::StateHash()` 다. lockstep 이 검사하는 것은 화면이 아니라 그 해시이므로 두 결정성은 처음부터 별개였다.
 
-이 옵션 화면까지 완성하면 사용자는 자기 모니터·자기 취향으로 게임을 시작할 수 있다. 다음 Part 12는 이 상태를 배포와 회귀 검증 관점에서 닫는다. 이후 키 리바인딩, 색맹 팔레트, 입력 지연 프로파일도 같은 패턴(`GameSettings` 한 필드 + 한 행 + 한 적용 경로)으로 확장할 수 있다.
+이 옵션 화면까지 완성하면 사용자는 자기 모니터·자기 취향으로 게임을 시작할 수 있다. 배포 전 회귀 검증은 `GameSettings`의 기본값, 구 설정 파일 호환, 저장 후 재시작, 런타임 즉시 적용을 함께 확인해야 한다. 키 리바인딩, 색맹 팔레트, 입력 지연 프로파일도 같은 패턴(`GameSettings` 한 필드 + 한 행 + 한 적용 경로)으로 확장할 수 있다.

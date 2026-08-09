@@ -51,6 +51,7 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len);  // 전체 
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf);  // 논블로킹 수신 (누적 버퍼에 추가)
 void tcp_close(TcpSocket& s);  // shutdown(SHUT_RDWR) 으로 피어/폴러(recv)를 EOF 로 깨운다. 실제 ::close 는 마지막 TcpSocket 복사본 소멸 시 RAII 로 일어난다(멱등).
 void tcp_set_nonblocking(const TcpSocket& s);  // 소켓을 논블로킹으로 전환. listen 소켓 accept 폴링용(shutdown 은 블로킹 accept 를 깨우지 못하므로).
+std::string tcp_peer_ip(const TcpSocket& s);   // admission/rate-limit용 숫자형 peer IP
 
 // IP 주소 조회
 std::string get_local_ip();    // 로컬 네트워크 IP

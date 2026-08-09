@@ -1,8 +1,7 @@
 # Part 0: 준비물 — 도구를 갖추고 빈 프로젝트를 세운다
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 0**
 >
-> [시리즈 목차](./README.md) · **Part 0** · [다음: Part 1 — 결정론적 SimGame](./part1-deterministic-simulation.md)
 
 ---
 
@@ -134,7 +133,7 @@ glxinfo | grep "OpenGL core profile version"
 
 원격 데스크톱이나 헤드리스 VM 에서는 이 조건이 깨지기 쉽다. 다만 그런 환경에서 돌리는 것은 대개 릴레이 서버([Part 7](./part7-relay-server.md))나 결정론 테스트인데, 둘 다 화면을 만들지 않으므로 GL 이 없어도 빌드되고 실행된다.
 
-### 2.5 Python — 나중에 필요하지만 지금 깔아두면 편하다
+### 2.5 Python — 테스트와 학습 도구
 
 Python 은 [Part 8](./part8-python-rl.md) 의 강화학습부터 본격적으로 쓴다. 다만 결정론 검증 테스트가 [Part 1](./part1-deterministic-simulation.md) 부터 Python 으로 돌아가므로, 지금 환경만 잡아두면 좋다.
 
@@ -156,9 +155,9 @@ uv sync --dev
 
 `--dev` 는 `pytest` 와 `pybind11` 까지만 깐다. **PyTorch 는 들어오지 않는다.** 학습은 Colab 에서 하고 배포 머신에는 torch 를 두지 않는다는 방침이라, 무거운 것들은 별도 extra 로 분리해 뒀다. 학습을 직접 돌릴 때가 되면 [Part 8](./part8-python-rl.md) 에서 안내한다.
 
-### 2.6 나중에 필요한 것
+### 2.6 기능별 선택 의존성
 
-지금 준비하지 않아도 된다. 해당 장에서 다룬다.
+기본 싱글플레이 빌드에는 아래 패키지가 필요 없다. 강화학습·인게임 봇·HTTPS 메타 서버처럼 해당 기능을 켤 때만 설치하면 된다.
 
 | 준비물 | 언제 | 왜 지금 아닌가 |
 |---|---|---|
@@ -204,7 +203,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(tetris src/main.cpp)
 ```
 
-일곱 줄이다. 언어는 `CXX` 만 켠다 — C 언어는 `third_party/sqlite3.c` 가 들어오는 [Part 10](./part10-meta-and-ranking.md) 에서 추가한다. `CMAKE_CXX_STANDARD 17` 은 이 프로젝트가 C++17 기능(`std::optional`, 구조적 바인딩, `std::filesystem`)을 쓰기 때문이고, `REQUIRED ON` 은 컴파일러가 C++17 을 못 하면 조용히 낮추지 말고 실패하라는 뜻이다.
+일곱 줄이다. 이 체크포인트에는 C++ 소스만 있으므로 언어도 `CXX` 하나다. 완성형 프로젝트는 내장 SQLite의 `third_party/sqlite3.c` 를 함께 컴파일하므로 `LANGUAGES C CXX` 로 넓어진다. `CMAKE_CXX_STANDARD 17` 은 이 프로젝트가 `std::optional`, 구조적 바인딩, `std::filesystem` 을 쓰기 때문이고, `REQUIRED ON` 은 컴파일러가 C++17 을 못 하면 조용히 낮추지 말고 실패하라는 뜻이다.
 
 **Part 0 체크포인트 — `src/main.cpp`**
 
@@ -244,7 +243,7 @@ tetris project skeleton
 
 그래서 **매 장 끝에서 빌드가 성공하고 무언가 실행된다.** 이것이 이 시리즈의 규칙이다. 열 장을 만든 뒤에야 처음 실행해 보는 일은 없다. 각 장의 마지막에 빌드 명령과 기대 결과가 적혀 있으니 그대로 따라가면 된다.
 
-빌드 명령은 장마다 조금씩 다르다. 아직 없는 파일을 CMake 가 찾지 않도록 옵션을 주는 구간이 있기 때문인데, **그 옵션이 무엇이고 왜 필요한지는 그것을 처음 만드는 장에서 설명한다.** 지금 외워 둘 것은 없다.
+빌드 명령은 보유한 소스와 검증 대상에 따라 달라진다. 중간 체크포인트에서는 아직 만들지 않은 클라이언트·relay·meta 타깃을 `TETRIS_BUILD_GAME`, `TETRIS_BUILD_RELAY`, `TETRIS_BUILD_META` 옵션으로 끄고, 확인하려는 타깃만 켠다. 이 원칙을 지키면 CMake가 존재하지 않는 소스를 찾는 구성 오류와 실제 컴파일 오류를 구분할 수 있다.
 
 만들다가 "전체 구조가 어떻게 되더라" 가 궁금해지면 [Part 13](./part13-structure-and-build-reference.md) 을 펼치면 된다. 완성된 뒤의 디렉터리 지도와 빌드 파일 전체 해부, 그리고 "이걸 고치려면 어디를 건드리나" 가 거기 있다. **지금은 읽지 않는 편이 낫다** — 아직 만들지 않은 것들의 목록이라 길잡이가 아니라 부담이 된다.
 
@@ -272,8 +271,6 @@ uv sync --dev
 uv run python -c "import sys; print(sys.version)"
 ```
 
-기대 결과: Python 3.12 이상의 버전 문자열. 아직 돌릴 테스트는 없다 — 첫 테스트는 [Part 1](./part1-deterministic-simulation.md) 의 결정론 검증이다.
-
-## 다음 장 예고
-
-[Part 1](./part1-deterministic-simulation.md) 은 화면도 소리도 없는 상태에서 테트리스 **규칙**만 만든다. 창을 띄우기 전에 규칙부터 만드는 이유는, 그래야 규칙을 테스트로 고정할 수 있기 때문이다. 그 장이 끝나면 눈에 보이는 것은 없지만, 같은 시드와 같은 입력이 언제나 같은 해시를 낸다는 것을 자동으로 검증할 수 있게 된다. 그 해시가 이후 멀티플레이 전체를 떠받친다.
+기대 결과: Python 3.12 이상의 버전 문자열. 이 체크포인트는 툴체인과 빈 실행 파일이
+정상이라는 사실만 확인한다. 게임 규칙을 추가할 때는 화면보다 먼저 결정론 테스트를
+세워, 같은 시드와 입력이 같은 상태 해시를 만드는 계약을 고정한다.

@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "player_session.h"
+
 namespace relay {
 
 // 큐에 들어간 플레이어 정보.
@@ -37,6 +39,7 @@ struct PlayerInfo {
     std::string    username;    // empty = guest (no nickname yet)
     std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
     std::string    selected_icon_id{"default"};
+    std::shared_ptr<PlayerSessionLease> session_lease;
 
     // 큐 대기 중 이 소켓에서 recv 됐지만 아직 완성 프레임이 못 된 잔여 바이트.
     // 폴링 1회마다 로컬 버퍼를 쓰면 프레임이 TCP 세그먼트 경계에 걸쳐 도착할 때
@@ -53,6 +56,7 @@ struct Match {
     PlayerInfo b;
     uint64_t   seed{0};     // 서버가 부여한 결정론적 seed
     uint32_t   match_id{0}; // 로깅용 단조 증가 번호
+    std::string match_uuid; // meta 결과 멱등성 키 (프로세스 재시작에도 충돌 방지)
 };
 
 class Matchmaker {

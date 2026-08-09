@@ -1,15 +1,12 @@
 #include "framing.h"
 #include <cstring>
 
-// [NET] 읽기 쉬운 상수들
 namespace {
     constexpr size_t LEN_FIELD = 2;       // u16
     constexpr size_t TYPE_FIELD = 1;      // u8
     constexpr size_t CHECKSUM_FIELD = 4;  // u32
-    // 프레임 최소 크기: len(2) + type(1) + chk(4)
     constexpr size_t MIN_FRAME_BYTES = LEN_FIELD + TYPE_FIELD + CHECKSUM_FIELD; // 7 bytes
-    // PAYLOAD 상한 — 실사용 최대는 CHAT 200자 UTF-8 (~800 B), HASH/INPUT 은 수십 B.
-    // u16 의 자연 한계(65535) 는 사실상 상한 없음 — 이 상수로 실질 가드를 건다.
+    // Normal chat is the largest message and remains below this limit.
     constexpr size_t MAX_PAYLOAD_BYTES = 4096;
 }
 
@@ -55,34 +52,28 @@ std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload)
 bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
     size_t offset = 0;
     while (true) {
-        // 길이(u16)를 읽을 만큼 데이터가 준비되었는지 확인
-        // 주의: size_t는 unsigned이므로 뺄셈 대신 덧셈으로 비교 (언더플로 방지)
+        // Addition avoids unsigned underflow in a subtraction check.
         if (offset + LEN_FIELD > streamBuf.size()) break;
 
         // LEN = TYPE + PAYLOAD 길이
         const uint16_t len = le_read_u16(&streamBuf[offset]);
 
-        // 페이로드 상한 초과 선언 시 전체 스트림을 버린다.
-        // 부분 수신 상태에서 len 만 받았더라도 판정 가능 — 수신 버퍼가
-        // MAX_PAYLOAD_BYTES+TYPE+CHK 이상으로 불어나지 않도록 조기 차단.
+        // Reject an oversized declaration before buffering the payload.
         if (static_cast<size_t>(len) > MAX_PAYLOAD_BYTES + TYPE_FIELD) {
             streamBuf.clear();
             return false;
         }
 
-        // 전체 프레임이 모였는지 확인: len 필드 + 본문(len) + 체크섬
         const size_t need = LEN_FIELD + static_cast<size_t>(len) + CHECKSUM_FIELD;
         if (offset + need > streamBuf.size()) break;
 
-        // len=0 이면 TYPE 바이트조차 없는 잘못된 프레임 — 스킵
+        // A zero length frame has no type byte.
         if (len < TYPE_FIELD) { offset += need; continue; }
 
-        // TYPE 바이트와 PAYLOAD 범위 계산
         const uint8_t type = streamBuf[offset + LEN_FIELD];
         const uint8_t* payload = &streamBuf[offset + LEN_FIELD + TYPE_FIELD];
         const size_t payloadLen = static_cast<size_t>(len) - TYPE_FIELD; // LEN - TYPE(1)
 
-        // 체크섬 읽고 유효성 검사(FNV-1a32)
         const size_t chkPos = offset + LEN_FIELD + static_cast<size_t>(len);
         const uint32_t chk = le_read_u32(&streamBuf[chkPos]);
         const uint32_t calc = (payloadLen == 0) ? 0u : fnv1a32(payload, payloadLen);
@@ -93,10 +84,9 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
             out.push_back(std::move(f));
         }
 
-        // 다음 프레임으로 이동
         offset += need;
     }
-    // 파싱된 부분 제거, 나머지는 다음 수신과 합쳐서 재시도
+    // Keep the incomplete tail for the next receive.
     if (offset > 0) streamBuf.erase(streamBuf.begin(), streamBuf.begin() + offset);
     return true;
 }

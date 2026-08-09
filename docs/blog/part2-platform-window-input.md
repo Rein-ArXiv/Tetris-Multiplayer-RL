@@ -1,8 +1,7 @@
 # Part 2: 플랫폼 계층 — 창, 입력, GL 컨텍스트
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 2**
 >
-> [시리즈 목차](./README.md) · [이전: Part 1 — 결정론적 SimGame](./part1-deterministic-simulation.md) · **Part 2** · [다음: Part 3 — 렌더링과 UI](./part3-rendering-and-ui.md)
 
 ---
 
@@ -10,7 +9,7 @@
 
 - **선행 상태:** [Part 1](./part1-deterministic-simulation.md) 까지 만든 `src/sim_game.cpp`, `src/position.cpp`, `core/` 헤더들, `tests/sim_hash_dump.cpp`. 이 코드는 창도 그래픽도 없이 `SimGame::Update()` 만으로 동작한다.
 - **이번 Part의 파일:** `platform/platform.h`, `platform/win32.cpp`, `platform/sdl.cpp`, `CMakeLists.txt`.
-- **연결점:** 아직 게임 코드와 붙지 않는다. 이 장은 상위 계층이 앞으로 쓸 **계약**(`Color`, `PlatformKey`, `platform_*` 함수 23개)과 그 계약의 두 구현을 만든다. 이 장이 만드는 OpenGL 3.3 Core 컨텍스트 위에 실제로 그리는 쪽은 [Part 3](./part3-rendering-and-ui.md) 이고, 이 계층을 프레임 루프에 엮는 쪽은 [Part 4](./part4-game-wrapper-and-loop.md) 의 `main()` 이다.
+- **연결점:** 아직 게임 코드와 붙지 않는다. 이 장은 상위 계층이 앞으로 쓸 **계약**(`Color`, `PlatformKey`, `platform_*` API)과 그 계약의 Win32/SDL2 구현을 만든다. OpenGL 3.3 Core 컨텍스트 위의 그리기는 renderer가 맡고, `main()`은 이 계층을 프레임 루프에 연결한다.
 - **완료 게이트:** 이 장 말미의 `part2_present_demo` 를 빌드해 실행. stdout 첫 줄에 `3.3` 과 `Core Profile` 을 포함한 GL 버전 문자열이 찍히고, 창 안에 레터박스된 남색 사각형이 보이며, 흰 사각형 하나가 마우스 커서를 정확히 따라다닌다. 창을 드래그해 종횡비를 바꿔도 이 셋이 유지된다.
 
 `tetris` 타깃은 이 시점에 **빌드할 수 없다.** `CMakeLists.txt` 의 `tetris` 는 `src/main.cpp`, `src/game.cpp`, `src/gui.cpp`, `net/*.cpp`, `renderer/*.cpp`, `bot/*.cpp`, `meta/http_client.cpp` 를 전부 요구하고, configure 단계에서 `third_party/httplib.h` 존재 검사에도 걸린다. 그래서 이 장의 완료 게이트는 독자가 직접 만드는 작은 데모 실행 파일이다.
@@ -46,11 +45,11 @@ flowchart LR
 
 경계선이 미묘한 항목이 하나 있다. **GL 컨텍스트 생성은 플랫폼 계층이 소유하고, GL 함수 포인터 로딩과 셰이더는 렌더러가 소유한다.** 컨텍스트는 창에 묶여 있어서 창을 만드는 코드와 분리할 수 없고, 컨텍스트를 만드는 API 는 Win32 와 SDL 이 완전히 다르다. 반면 함수 포인터 테이블과 셰이더는 두 백엔드가 똑같이 쓰는 것이라 렌더러에 두는 편이 중복이 없다. 그 사이를 잇는 것이 이 장에서 새로 만드는 `platform_gl_get_proc` 한 함수다.
 
-이 구분이 중요한 이유는 두 개의 구현이 존재하기 때문이다. `platform/win32.cpp` 와 `platform/sdl.cpp` 는 **같은 헤더를 구현하는 형제**이고, 링크 시점에 정확히 하나만 선택된다. 인터페이스가 넓어지면 두 파일이 같은 속도로 넓어진다. 그래서 계약은 의도적으로 23개 함수로 묶여 있다.
+이 구분이 중요한 이유는 두 구현이 존재하기 때문이다. `platform/win32.cpp`와 `platform/sdl.cpp`는 **같은 헤더를 구현하는 형제**이고 링크 시점에 하나만 선택된다. 인터페이스가 넓어지면 두 파일이 같은 속도로 넓어지므로, 계약은 창·프레임·시간·입력·표시 제어라는 작은 책임 집합으로 제한한다.
 
 ```mermaid
 graph TB
-    H["platform/platform.h<br/>struct Color · enum PlatformKey · platform_* 23개"]
+    H["platform/platform.h<br/>Color · PlatformKey · platform_* API"]
     W["platform/win32.cpp<br/>Win32 + WGL"]
     S["platform/sdl.cpp<br/>SDL2 + SDL_GL"]
     R["renderer/renderer.cpp<br/>Part 3"]
@@ -86,7 +85,7 @@ graph TB
 
 `platform.h` 의 주석이 이 계층의 의도를 명시한다.
 
-**현재 소스 발췌 — `platform/platform.h:4-14`**
+**현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +105,7 @@ graph TB
 
 이 헤더는 시리즈 전체가 의존하는 두 개의 타입을 정의한다. `struct Color` 는 렌더러·GUI·게임 코드가 전부 쓰고, `enum PlatformKey` 는 입력을 처리하는 모든 곳이 쓴다.
 
-**현재 소스 발췌 — `platform/platform.h:16-53`**
+**현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
 // ─── 색상 ─────────────────────────────────────────────────────────────────────
@@ -159,7 +158,7 @@ enum PlatformKey : int {
 
 이어서 함수 계약이다. 프레임 수명주기 관련 부분을 먼저 본다.
 
-**현재 소스 발췌 — `platform/platform.h:57-76`**
+**현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
 // 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
@@ -186,11 +185,11 @@ void   platform_present();
 
 `platform_present()` 에 **인자가 하나도 없다는 점**이 이 계약의 성격을 그대로 보여준다. 화면에 내보낼 픽셀을 이 함수에 넘기지 않는다. 그림은 이미 GPU 쪽 백버퍼에 들어가 있고, 이 함수가 하는 일은 "백버퍼와 프론트버퍼를 바꿔 달라" 는 요청 한 번뿐이다. 전달할 데이터가 없으므로 인자도 없다.
 
-`platform_begin_frame` 의 주석에 있는 **"MAX_DELTA = 100ms 클램핑 포함"** 이 이 계층의 계약 중 가장 자주 잊히는 항목이다. 자세한 이유는 아래 시간 절에서 다룬다.
+`platform_begin_frame` 의 주석에 있는 **"MAX_DELTA = 100ms 클램핑 포함"** 이 이 계층의 계약 중 가장 자주 잊히는 항목이다. 창 이동이나 디버거 정지로 큰 `dt` 가 들어왔을 때 메인 루프가 수백 틱을 한꺼번에 따라잡는 것을 막는 상한이다.
 
 다음은 이 장에서 새로 생긴 GL 연동 두 함수다.
 
-**현재 소스 발췌 — `platform/platform.h:78-90`**
+**현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
 // ─── OpenGL 연동 ─────────────────────────────────────────────────────────────
@@ -212,7 +211,7 @@ void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 
 키 입력과 문자 입력.
 
-**현재 소스 발췌 — `platform/platform.h:92-100`**
+**현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
 // 이 프레임에 처음 눌린 키인가? IsKeyPressed() 대체.
@@ -228,7 +227,7 @@ char   platform_get_char_pressed();
 
 마우스와 창 설정은 다음과 같다.
 
-**현재 소스 발췌 — `platform/platform.h:102-141`**
+**현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
 // ─── 마우스 ───────────────────────────────────────────────────────────────────
@@ -332,7 +331,7 @@ sequenceDiagram
 
 파일 상단은 전부 `static` 상태다.
 
-**현재 소스 발췌 — `platform/win32.cpp:15-47`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 static HWND s_hwnd = nullptr;
@@ -376,7 +375,7 @@ GL 관련 상태는 셋이다. `s_hglrc` 는 컨텍스트 핸들, `s_opengl32` �
 
 초기화는 다음과 같다. 창 생성과 컨텍스트 생성이 한 함수 안에 이어져 있다.
 
-**현재 소스 발췌 — `platform/win32.cpp:133-232`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_init(int width, int height, const char* title)
@@ -528,13 +527,13 @@ void platform_init(int width, int height, const char* title)
 
 두 개의 `else` 분기는 폴백이다. `wglCreateContextAttribsARB` 자체가 없거나(아주 오래된 드라이버), 3.3 Core 요청이 거부되면 레거시 컨텍스트를 그대로 쓴다. 이 경우 셰이더 컴파일이 실패할 가능성이 높지만, **왜 실패했는지 알 수 있는 메시지가 stderr 에 남는다**는 것이 폴백의 실제 가치다. 아무 말 없이 검은 창을 띄우는 것보다 낫다.
 
-함수 마지막의 두 줄이 같은 규칙을 한 번 더 보여준다. `wglSwapIntervalEXT` 도 확장이라 컨텍스트가 current 인 상태에서만 조회된다. 그래서 컨텍스트 생성이 끝난 **바로 이 자리**가 조회 시점이고, `ShowWindow` 보다 앞이다. 받아 온 함수가 있으면 즉시 한 번 호출해 초기 vsync 상태를 건다 — 걸지 않으면 드라이버 기본값에 맡기게 되어 같은 실행 파일이 기계마다 다른 프레임률로 돈다. 이 함수가 무엇인지는 §10.2 에서 다룬다.
+함수 마지막의 두 줄이 같은 규칙을 한 번 더 보여준다. `wglSwapIntervalEXT` 도 확장이라 컨텍스트가 current 인 상태에서만 조회된다. 그래서 컨텍스트 생성이 끝난 **바로 이 자리**가 조회 시점이고, `ShowWindow` 보다 앞이다. 받아 온 함수가 있으면 즉시 한 번 호출해 초기 vsync 상태를 건다. 이 함수는 buffer swap을 수직 동기화에 맞출지 정하며, 조회하거나 호출할 수 없는 드라이버에서는 지원 없음으로 처리한다.
 
 ### 4.4 `platform_gl_get_proc` — Windows 만의 문제
 
 컨텍스트가 준비되면 GL 함수를 부를 수 있다. 그런데 Windows 에서는 함수 이름을 그냥 부를 수 없다.
 
-**현재 소스 발췌 — `platform/win32.cpp:286-298`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void* platform_gl_get_proc(const char* name)
@@ -562,7 +561,7 @@ void* platform_gl_get_proc(const char* name)
 
 SDL 쪽은 이 모든 것을 SDL 이 처리해 준다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:251-254`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void* platform_gl_get_proc(const char* name)
@@ -579,7 +578,7 @@ void* platform_gl_get_proc(const char* name)
 
 Win32 의 입력은 콜백으로 들어온다. 창 프로시저 하나가 키보드·마우스·창 크기·종료를 전부 받는다.
 
-**현재 소스 발췌 — `platform/win32.cpp:74-131`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
@@ -642,7 +641,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 }
 ```
 
-58줄에 이 계층의 입력 정책이 전부 들어 있다. 하나씩 본다.
+이 함수에 입력 계층의 프레임별 상태 전이 정책이 모여 있다. 동작 순서대로 본다.
 
 **`wparam < 256` 검사.** `s_key_state` 는 256칸 배열이다. `VK_*` 상수는 0~255 범위지만 IME 나 일부 장치가 그보다 큰 값을 보낼 수 있다. 검사 없이 인덱싱하면 스택 밖 쓰기다.
 
@@ -664,7 +663,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 
 게임 코드가 필요로 하는 질문은 세 가지다. "지금 눌려 있는가", "이번 프레임에 처음 눌렸는가", "이번 프레임에 뗐는가". 첫 번째는 level, 나머지 둘은 edge 다.
 
-**현재 소스 발췌 — `platform/win32.cpp:326-334`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 bool platform_key_pressed(int key)
@@ -697,7 +696,7 @@ stateDiagram-v2
 
 edge 검출이 성립하려면 **`previous` 를 갱신하는 시점이 딱 한 곳**이어야 한다. 그 자리가 `platform_begin_frame` 의 첫 두 줄이다.
 
-**현재 소스 발췌 — `platform/win32.cpp:260-279`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 float platform_begin_frame()
@@ -752,7 +751,7 @@ OS 는 키를 누르고 있으면 자동 반복(auto-repeat) `WM_KEYDOWN` 을 �
 
 버퍼는 64칸 원형 큐다. `window_proc` 의 `WM_CHAR` 분기가 밀어 넣고, 게임이 다음 함수로 하나씩 꺼낸다.
 
-**현재 소스 발췌 — `platform/win32.cpp:336-342`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 char platform_get_char_pressed()
@@ -778,7 +777,7 @@ char platform_get_char_pressed()
 
 둘을 잇는 것이 뷰포트 사각형이다.
 
-**현재 소스 발췌 — `platform/win32.cpp:50-72`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 static void recompute_viewport()
@@ -816,7 +815,7 @@ static void recompute_viewport()
 
 렌더러가 읽는 것은 `s_vp_*` 가 아니라 다음 함수의 출력이다.
 
-**현재 소스 발췌 — `platform/win32.cpp:300-307`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
@@ -831,7 +830,7 @@ void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
 
 SDL 쪽도 같은 변환을 한다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:256-265`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
@@ -860,7 +859,7 @@ void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
 
 표시가 논리 → 창 방향이면 마우스는 반대 방향이다.
 
-**현재 소스 발췌 — `platform/win32.cpp:344-354`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 int platform_mouse_x()
@@ -896,7 +895,7 @@ CPU 로 픽셀을 만들던 시절에는 이 구조에 대가가 있었다. 720�
 
 창 크기 프리셋을 고르는 설정 화면([Part 11](./part11-settings-and-options.md))에는 질문이 하나 필요하다. "이 모니터에 이 크기의 창이 들어가는가."
 
-**현재 소스 발췌 — `platform/win32.cpp:397-408`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_display_size(int& w_out, int& h_out)
@@ -913,7 +912,7 @@ void platform_display_size(int& w_out, int& h_out)
 }
 ```
 
-**현재 소스 발췌 — `platform/sdl.cpp:346-364`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_display_size(int& w_out, int& h_out)
@@ -949,7 +948,7 @@ SDL 쪽이 `SDL_GetWindowDisplayIndex` 로 **창이 놓인 모니터**를 먼저
 
 이 계층에서 가장 짧은 함수가 여기 있다.
 
-**현재 소스 발췌 — `platform/win32.cpp:281-284`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_present()
@@ -958,7 +957,7 @@ void platform_present()
 }
 ```
 
-**현재 소스 발췌 — `platform/sdl.cpp:245-249`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_present()
@@ -1000,7 +999,7 @@ GL 컨텍스트를 쓰는 지금은 그 전부가 필요 없다. 46만 픽셀을
 
 `platform_set_vsync(bool)` 은 헤더의 주석이 말하는 것보다 넓은 일을 한다. 주석은 "소프트웨어 프레임 페이싱 on/off" 라고 되어 있는데, 그것은 그래픽 컨텍스트 없이 60 Hz 를 맞추려면 타이머로 재는 수밖에 없기 때문에 붙은 설명이다. 타이머는 모니터가 언제 새 프레임을 읽어 가는지 모르므로 그렇게 맞춘 60 FPS 는 vsync 가 아니다. GL 컨텍스트가 생긴 지금은 **swap interval** 이라는 진짜 수단이 함께 켜진다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:380-387`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_set_vsync(bool on)
@@ -1017,7 +1016,7 @@ swap interval 이 1 이면 `SDL_GL_SwapWindow` 가 디스플레이의 수직 귀
 
 Win32 백엔드도 같은 일을 한다. 다만 그 함수를 얻는 과정이 한 단계 더 있다.
 
-**현재 소스 발췌 — `platform/win32.cpp:410-420`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_set_fullscreen(bool) {}
@@ -1039,7 +1038,7 @@ void platform_set_vsync(bool on)
 
 소프트웨어 페이싱은 사라지지 않고 안전망으로 남았다.
 
-**현재 소스 발췌 — `platform/win32.cpp:309-324`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_end_frame()
@@ -1068,7 +1067,7 @@ void platform_end_frame()
 
 SDL 백엔드에도 같은 함수가 있다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:267-276`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_end_frame()
@@ -1093,7 +1092,7 @@ void platform_end_frame()
 
 자원은 생성의 정확한 역순으로 정리한다. GL 컨텍스트가 목록의 맨 앞에 온다.
 
-**현재 소스 발췌 — `platform/win32.cpp:234-256`**
+**현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_shutdown()
@@ -1125,7 +1124,7 @@ void platform_shutdown()
 
 SDL 쪽도 같은 규칙을 자기 API 로 표현한다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:163-176`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_shutdown()
@@ -1172,7 +1171,7 @@ void platform_shutdown()
 
 `PlatformKey` 값이 `VK_*` 라서, SDL 은 자기 키코드를 그쪽으로 번역해야 한다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:64-91`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 static int sdl_to_platform_key(SDL_Keycode key)
@@ -1211,7 +1210,7 @@ static int sdl_to_platform_key(SDL_Keycode key)
 
 ### 12.2 창과 컨텍스트 생성
 
-**현재 소스 발췌 — `platform/sdl.cpp:117-161`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_init(int width, int height, const char* title)
@@ -1277,7 +1276,7 @@ Win32 의 96줄이 여기서는 45줄이다. 차이의 대부분이 컨텍스트
 
 ### 12.3 이벤트 루프
 
-**현재 소스 발췌 — `platform/sdl.cpp:180-243`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 float platform_begin_frame()
@@ -1363,7 +1362,7 @@ Win32 의 `platform_begin_frame` + `window_proc` 을 합친 것과 같은 일을
 
 해결은 실행 파일 위치 기준으로 작업 디렉터리를 옮기는 것이다.
 
-**현재 소스 발췌 — `platform/sdl.cpp:49-62`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 #ifdef __APPLE__
@@ -1390,7 +1389,7 @@ static void set_macos_resource_cwd()
 
 ### 13.2 전체화면은 SDL 백엔드 전용
 
-**현재 소스 발췌 — `platform/sdl.cpp:366-379`**
+**현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_set_fullscreen(bool on)
@@ -1499,7 +1498,7 @@ endif()
 
 **Linux 에서는 GL 개발 패키지가 필요하다.** `sudo apt install libgl1-mesa-dev`(Debian/Ubuntu) 또는 `sudo dnf install mesa-libGL-devel`(Fedora). macOS 는 Xcode Command Line Tools 에 OpenGL 프레임워크가 들어 있고, Windows 는 `opengl32.lib` 이 Windows SDK 에 들어 있어 추가 설치가 필요 없다.
 
-이 시점의 `CMakeLists.txt` 는 `sim_hash_dump` 와 데모 두 타깃만 안다. 최종 저장소 파일에는 여기에 `tetris`(Part 4), `tetris_py`(Part 8), `tetris_relay`(Part 7), `tetris_meta`(Part 10), `worker_group_test`, `copy_assets` 가 더해지고, `project(tetris CXX C)` 로 C 언어가 활성화되며(SQLite amalgamation 때문), 실제 `TETRIS_GAME_COMMON` 변수에는 `renderer/renderer.cpp`, `renderer/gl_api.cpp`, `renderer/text_gl.cpp`, `renderer/shake.cpp`, `renderer/image_gl.cpp` 다섯 개의 렌더러 소스가 들어간다. 그 확장은 각 Part 에서 순서대로 진행한다.
+이 체크포인트의 `CMakeLists.txt`는 `sim_hash_dump`와 플랫폼 데모만 구성한다. 완성형은 게임, Python 모듈, relay, meta, worker test, asset 복사 타깃을 더하고 SQLite amalgamation 때문에 C 언어도 활성화한다. `TETRIS_GAME_COMMON`에는 renderer 소스 집합이 들어가지만 server·headless 타깃에는 섞이지 않는다. 실제 파일 목록은 현재 `CMakeLists.txt`가 기준이고, 문서는 타깃별 의존 방향을 설명한다.
 
 ## 15. Part 2 체크포인트 데모
 
@@ -1721,6 +1720,7 @@ cmake --build build-sim --target sim_hash_dump
 
 플랫폼 계층은 운영체제만 할 수 있는 일 — 창, 이벤트 큐, 타이머, 그래픽 컨텍스트, 버퍼 교체 — 만 소유한다. 무엇을 그리는지는 모른다. 그 무지가 이 경계의 가치다. `platform_present()` 에 인자가 하나도 없다는 사실이 그 경계를 가장 잘 보여준다.
 
-경계가 좁아진 만큼 이 계층이 새로 진 책임도 분명하다. **세 플랫폼이 정확히 같은 3.3 Core 컨텍스트를 받게 하는 것.** 그 약속이 지켜지는 한, 다음 장의 렌더러는 `#version 330 core` 셰이더 한 벌과 GL 함수 포인터 테이블 하나로 세 OS 를 전부 감당할 수 있다.
-
-다음 Part 에서는 이 컨텍스트 위에 셰이더 프로그램 하나를 올리고, 사각형·둥근 사각형·글리프·이미지를 **전부 같은 방식으로** — 텍스처를 입힌 사각형으로 — 그리는 렌더러를 만든다.
+경계가 좁아진 만큼 이 계층이 진 책임도 분명하다. **세 플랫폼이 정확히 같은 3.3
+Core 컨텍스트를 제공하는 것**이다. 이 계약 위에서 렌더러는 `#version 330 core`
+셰이더와 GL 함수 포인터 테이블 한 벌을 공유한다. 사각형, 글리프, 이미지는 모두 이
+컨텍스트 위의 텍스처 사각형으로 표현되며 플랫폼 계층은 그 의미를 알지 못한다.

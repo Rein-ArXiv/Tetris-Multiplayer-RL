@@ -142,6 +142,12 @@ ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
 {
     if (!rgba || width <= 0 || height <= 0) return 0;
 
+    // 슬롯 0 은 "무효 핸들" 로 예약돼 있다. image_shutdown 이 벡터를 비운 뒤
+    // 여기로 들어오면 push_back 결과가 인덱스 0 이 되어, 호출자에게는 실패로
+    // 보이는데 텍스처는 이미 만들어진 상태로 새어 나간다. image_init 은
+    // 멱등이므로 여기서 한 번 더 불러 그 경로를 막는다.
+    image_init();
+
     ImageEntry entry;
     entry.used = true;
     entry.w = width;

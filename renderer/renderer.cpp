@@ -195,7 +195,7 @@ float  glb_render_scale()    { return s_render_scale; }
 
 // ─── 공개 API ─────────────────────────────────────────────────────────────────
 
-void renderer_init(int screen_w, int screen_h)
+bool renderer_init(int screen_w, int screen_h)
 {
     s_screen_w = screen_w > 0 ? screen_w : 1;
     s_screen_h = screen_h > 0 ? screen_h : 1;
@@ -203,13 +203,13 @@ void renderer_init(int screen_w, int screen_h)
 
     if (!gl_load_functions()) {
         std::fprintf(stderr, "[GL] renderer_init aborted.\n");
-        return;
+        return false;
     }
 
     s_prog = link_program(kQuadVert, kQuadFrag);
     if (!s_prog) {
         std::fprintf(stderr, "[GL] renderer_init aborted: shader program.\n");
-        return;
+        return false;
     }
     s_u_screen = gl_GetUniformLocation(s_prog, "u_screen");
     s_u_tex    = gl_GetUniformLocation(s_prog, "u_tex");
@@ -248,6 +248,7 @@ void renderer_init(int screen_w, int screen_h)
     s_ready = true;
 
     image_init();
+    return true;
 }
 
 void renderer_begin(Color bg)

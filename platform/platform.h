@@ -56,7 +56,14 @@ enum PlatformKey : int {
 
 // 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
 // 컨텍스트 생성에 실패하면 프로그램을 계속 진행할 수 없으므로 즉시 실패한다.
+// 실패 시 platform_should_close() 가 true 가 되므로 호출자는 반드시 확인한다.
 void   platform_init(int w, int h, const char* title);
+
+// 창을 띄우지 못했거나 렌더러를 만들지 못했을 때 사용자에게 이유를 보여준다.
+// GUI 프로그램은 stderr 가 보이지 않는다 — 콘솔 없이 실행하면 진단 메시지가
+// 그대로 사라져 사용자에게는 "검은 창" 또는 "아무 일도 안 일어남" 만 남는다.
+// Windows 는 MessageBox, SDL 은 SDL_ShowSimpleMessageBox 로 띄운다.
+void   platform_fatal_error(const char* message);
 
 // 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
 void   platform_shutdown();

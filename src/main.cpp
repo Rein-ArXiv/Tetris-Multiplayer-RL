@@ -669,8 +669,28 @@ int main(int argc, char** argv)
     }
 
     // ── 플랫폼 + 렌더러 초기화 ─────────────────────────────────────────────
+    //
+    // 두 단계 모두 실패할 수 있고, 실패한 채로 진행하면 게임 루프는 정상적으로
+    // 도는데 화면만 검게 남는다. GUI 프로그램이라 stderr 도 보이지 않아
+    // 사용자에게는 단서가 하나도 없다 — 여기서 이유를 띄우고 끝낸다.
     platform_init(720, 640, "Entris");
-    renderer_init(720, 640);
+    if (platform_should_close()) {
+        platform_fatal_error(
+            "창을 만들지 못했거나 OpenGL 3.3 Core 컨텍스트를 얻지 못했습니다.\n"
+            "그래픽 드라이버를 최신 버전으로 업데이트한 뒤 다시 실행해 주세요.");
+        platform_shutdown();
+        net::net_shutdown();
+        return 1;
+    }
+    if (!renderer_init(720, 640)) {
+        platform_fatal_error(
+            "OpenGL 3.3 렌더러를 초기화하지 못했습니다.\n"
+            "그래픽 드라이버가 OpenGL 3.3 Core 를 지원하는지 확인해 주세요.");
+        renderer_shutdown();
+        platform_shutdown();
+        net::net_shutdown();
+        return 1;
+    }
     renderer_load_font("Font/NanumGothic.ttf");
 
     // ── settings.cfg 경로 결정 ────────────────────────────────────────────────

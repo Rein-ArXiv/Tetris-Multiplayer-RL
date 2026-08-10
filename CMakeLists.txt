@@ -343,6 +343,18 @@ if (TETRIS_BUILD_TEST)
         find_package(Threads REQUIRED)
         target_link_libraries(reactor_test PRIVATE Threads::Threads)
     endif()
+
+    # loop_primitives_test — 이벤트 루프 지원 도구(TimerQueue, Offload) 회귀.
+    add_executable(loop_primitives_test
+        tests/loop_primitives_test.cpp
+        server/timer_queue.h
+        server/offload.h
+    )
+    target_include_directories(loop_primitives_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (NOT WIN32)
+        find_package(Threads REQUIRED)
+        target_link_libraries(loop_primitives_test PRIVATE Threads::Threads)
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------

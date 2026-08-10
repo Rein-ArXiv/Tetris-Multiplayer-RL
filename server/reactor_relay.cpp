@@ -15,8 +15,9 @@
 // 그리고 "양방향이 동시에 죽을 때 교차검증이 생략되는" 경합까지. 남은 락은 오프로드
 // 워커와 공유하는 지점(인증 캐시, 세션 lease)뿐이다.
 //
-// 이번 단계의 범위: 큐 경로(QUEUE_JOIN) 전체. 룸 경로(ROOM_CREATE/ROOM_JOIN)는
-// 아직 이관하지 않아 거절한다 — 그 경로가 필요하면 스레드 모델 바이너리를 쓴다.
+// 룸 경로는 스레드 모델의 starter/exit 조건변수 배리어가 통째로 사라진다. 그 배리어는
+// 두 스레드가 같은 fd 를 동시에 읽지 않게 하려고 있었는데, 소켓 소유자가 하나뿐이면
+// 애초에 막을 것이 없다 — 양쪽 READY 를 관측한 그 자리에서 곧바로 포워딩으로 넘긴다.
 
 #include "../net/framing.h"
 #include "../net/reactor.h"
@@ -99,10 +100,28 @@ std::string extract_token(const std::vector<uint8_t>& pl, size_t off) {
     return std::string(pl.begin() + off + 1, pl.begin() + off + 1 + n);
 }
 
+// ── 룸 코드 ──────────────────────────────────────────────────────────────────
+// 헷갈리는 글자(I, O, 0, 1)를 뺀 알파벳 — 사람이 불러 주고 받아 적는 코드다.
+constexpr char   kCodeAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+constexpr size_t kCodeAlphabetN  = sizeof(kCodeAlphabet) - 1;
+constexpr size_t kCodeLen        = 5;
+constexpr auto   kRoomGuestWait  = std::chrono::minutes(15);  // 개설 후 게스트 무입장
+constexpr auto   kRoomReadyWait  = std::chrono::seconds(60);  // 입장 후 READY 미확정
+
+// ROOM_INFO status
+constexpr uint8_t kStatusWaiting  = 0;
+constexpr uint8_t kStatusFull     = 1;
+constexpr uint8_t kStatusNotFound = 2;
+constexpr uint8_t kStatusGoneFull = 3;
+
 // ── 연결 상태 ────────────────────────────────────────────────────────────────
 struct Channel;
+struct Room;
 
-enum class Stage { FirstFrame, Auth, Queued, Lobby, Forward, Dead };
+enum class Stage { FirstFrame, Auth, Queued, Room, Lobby, Forward, Dead };
+
+// 첫 프레임이 정한 진로. 인증이 끝난 뒤 어디로 보낼지 기억해 둔다.
+enum class Intent { Queue, RoomCreate, RoomJoin };
 
 struct Conn {
     net::TcpSocket sock;
@@ -122,6 +141,14 @@ struct Conn {
     int         elo = 0;
     std::string username, token, icon{"default"};
     std::shared_ptr<PlayerSessionLease> lease;
+
+    // 첫 프레임이 정한 진로 (인증 후 분기)
+    Intent      intent = Intent::Queue;
+    std::string join_code;
+
+    // 룸
+    Room* room = nullptr;
+    bool  is_host = false;
 
     // 매치
     Channel* ch = nullptr;
@@ -155,6 +182,12 @@ struct Channel {
     bool summary_handled = false;
     bool finalize_inflight = false;
     int  disconnect_side = 0;  // 1=A, 2=B, 0=미상 — 승패가 아니라 통지 대상 선정용
+};
+
+struct Room {
+    std::string code;
+    Conn* host  = nullptr;
+    Conn* guest = nullptr;
 };
 
 // ── 루프 ─────────────────────────────────────────────────────────────────────
@@ -251,6 +284,20 @@ private:
         release_admission(c->admission_key);
         c->lease.reset();
 
+        if (c->room) {
+            Room* r = c->room;
+            c->room = nullptr;
+            (c->is_host ? r->host : r->guest) = nullptr;
+            Conn* peer = c->is_host ? r->guest : r->host;
+            if (peer && peer->stage != Stage::Dead) {
+                // 상대는 방에 남는다 — 다시 혼자가 됐음을 알리고 대기 데드라인을
+                // 게스트 대기 기준으로 되돌린다(스레드 모델의 재무장과 같다).
+                peer->ready = false;
+                send_room_info(peer, r->code, kStatusGoneFull, 1);
+                timers_.arm(peer, Clock::now() + kRoomGuestWait);
+            }
+            if (!r->host && !r->guest) rooms_.erase(r->code);
+        }
         if (c->ch) {
             Channel* ch = c->ch;
             (c->is_a ? ch->a : ch->b) = nullptr;
@@ -400,6 +447,7 @@ private:
 
         switch (c->stage) {
             case Stage::FirstFrame: on_first_frame(c); break;
+            case Stage::Room:       on_room(c);        break;
             case Stage::Lobby:      on_lobby(c);       break;
             case Stage::Forward:    on_forward(c);     break;
             case Stage::Queued:     on_queued(c);      break;
@@ -414,9 +462,10 @@ private:
         net::parse_frames(c->rx, frames);
         for (size_t i = 0; i < frames.size(); ++i) {
             const net::Frame& f = frames[i];
-            if (f.type == net::MsgType::QUEUE_JOIN) {
-                std::string tok = extract_token(f.payload, 0);
-                // 첫 명령 뒤에 이미 도착한 프레임/부분 바이트를 보존한다.
+
+            // 첫 명령과 같은 recv 로 이미 도착한 프레임/부분 바이트를 보존한다.
+            // 버리면 CREATE/JOIN 과 붙어 온 READY 가 유실된다.
+            auto keep_residual = [&] {
                 std::vector<uint8_t> residual;
                 for (size_t j = i + 1; j < frames.size(); ++j) {
                     auto bytes = net::build_frame(frames[j].type, frames[j].payload);
@@ -424,6 +473,12 @@ private:
                 }
                 residual.insert(residual.end(), c->rx.begin(), c->rx.end());
                 c->rx = std::move(residual);
+            };
+
+            if (f.type == net::MsgType::QUEUE_JOIN) {
+                std::string tok = extract_token(f.payload, 0);
+                keep_residual();
+                c->intent = Intent::Queue;
                 begin_auth(c, std::move(tok));
                 return;
             }
@@ -431,12 +486,41 @@ private:
                 close_conn(c, "큐 진입 전 QUEUE_CANCEL");
                 return;
             }
-            if (f.type == net::MsgType::ROOM_CREATE || f.type == net::MsgType::ROOM_JOIN) {
-                // 룸 경로는 아직 이 바이너리에 이관되지 않았다.
-                close_conn(c, "room 경로 미지원(reactor 빌드)");
+            if (f.type == net::MsgType::ROOM_CREATE) {
+                std::string tok = extract_token(f.payload, 0);
+                keep_residual();
+                c->intent = Intent::RoomCreate;
+                begin_auth(c, std::move(tok));
+                return;
+            }
+            if (f.type == net::MsgType::ROOM_JOIN) {
+                // 페이로드: [code_len:1][code:N][tok_len:1][token:M]
+                if (f.payload.empty()) continue;
+                const uint8_t n = f.payload[0];
+                if (n == 0 || n > kCodeLen || f.payload.size() < 1u + n) continue;
+                c->join_code.assign(f.payload.begin() + 1, f.payload.begin() + 1 + n);
+                std::string tok = extract_token(f.payload, 1u + n);
+                keep_residual();
+                c->intent = Intent::RoomJoin;
+                begin_auth(c, std::move(tok));
                 return;
             }
             // HELLO 등 낯선 프레임은 무시하고 계속 기다린다.
+        }
+    }
+
+    // 인증이 끝난 뒤 첫 프레임이 정한 진로로 보낸다.
+    void after_auth(Conn* c) {
+        // per-IP 상한은 "동시 핸드셰이크" 예산이지 세션 예산이 아니다. 인증까지
+        // 끝났으면 그 자리를 놓아줘야 같은 IP 뒤에 오는 접속이 굶지 않는다 —
+        // 붙들고 있으면 NAT 뒤 다수 사용자나 loopback 테스트가 상한에 걸린다.
+        release_admission(c->admission_key);
+        c->admission_key.clear();
+
+        switch (c->intent) {
+            case Intent::Queue:      enter_queue(c); break;
+            case Intent::RoomCreate: room_create(c); break;
+            case Intent::RoomJoin:   room_join(c);   break;
         }
     }
 
@@ -447,7 +531,7 @@ private:
 
         if (!meta_) {                    // unranked: 검증 없이 통과
             c->token = std::move(token);
-            enter_queue(c);
+            after_auth(c);
             return;
         }
         if (token.empty()) {
@@ -501,6 +585,132 @@ private:
         return nullptr;
     }
 
+    // ── 룸 ───────────────────────────────────────────────────────────────────
+    void send_room_info(Conn* c, const std::string& code,
+                        uint8_t status, uint8_t peer_count) {
+        std::vector<uint8_t> pl;
+        pl.reserve(1 + code.size() + 2);
+        pl.push_back((uint8_t)code.size());
+        pl.insert(pl.end(), code.begin(), code.end());
+        pl.push_back(status);
+        pl.push_back(peer_count);
+        auto fr = net::build_frame(net::MsgType::ROOM_INFO, pl);
+        queue_send(c, fr.data(), fr.size());
+    }
+
+    std::string generate_code() {
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            std::string code(kCodeLen, 'A');
+            uint64_t x = next_seed();
+            for (size_t i = 0; i < kCodeLen; ++i) {
+                code[i] = kCodeAlphabet[x % kCodeAlphabetN];
+                x /= kCodeAlphabetN;
+                if (x == 0) x = next_seed();
+            }
+            if (!rooms_.count(code)) return code;
+        }
+        return {};
+    }
+
+    void room_create(Conn* c) {
+        std::string code = generate_code();
+        if (code.empty()) { close_conn(c, "룸 코드 발급 실패"); return; }
+        auto up = std::make_unique<Room>();
+        up->code = code;
+        up->host = c;
+        Room* r = up.get();
+        rooms_[code] = std::move(up);
+
+        c->room = r;
+        c->is_host = true;
+        c->stage = Stage::Room;
+        send_room_info(c, code, kStatusWaiting, 1);
+        // 게스트가 안 들어오면 슬롯을 무한정 점유하지 않도록 데드라인을 건다.
+        timers_.arm(c, Clock::now() + kRoomGuestWait);
+        std::cerr << "[conn " << c->id << "] ROOM_CREATE " << code << "\n";
+        if (!c->rx.empty()) on_room(c);
+    }
+
+    void room_join(Conn* c) {
+        auto it = rooms_.find(c->join_code);
+        if (it == rooms_.end()) {
+            send_room_info(c, c->join_code, kStatusNotFound, 0);
+            close_conn(c, "존재하지 않는 룸 코드");
+            return;
+        }
+        Room* r = it->second.get();
+        if (r->guest || !r->host) {
+            send_room_info(c, c->join_code, kStatusFull, r->host ? 1 : 0);
+            close_conn(c, "룸이 가득 참");
+            return;
+        }
+        r->guest = c;
+        c->room = r;
+        c->is_host = false;
+        c->stage = Stage::Room;
+        std::cerr << "[conn " << c->id << "] ROOM_JOIN " << r->code << "\n";
+
+        // 양쪽에 "둘 다 있음" 을 알리고, 대기 데드라인을 READY 기준으로 다시 건다.
+        send_room_info(r->host, r->code, kStatusWaiting, 2);
+        send_room_info(c,       r->code, kStatusWaiting, 2);
+        const TimePoint dl = Clock::now() + kRoomReadyWait;
+        timers_.arm(r->host, dl);
+        timers_.arm(c, dl);
+
+        if (!c->rx.empty()) on_room(c);
+        // 호스트가 CREATE 와 같은 recv 로 보냈던 READY 가 남아 있을 수 있다.
+        if (alive(r->host) && !r->host->rx.empty()) on_room(r->host);
+    }
+
+    void on_room(Conn* c) {
+        Room* r = c->room;
+        if (!r) return;
+        std::vector<net::Frame> frames;
+        net::parse_frames(c->rx, frames);
+        for (const auto& f : frames) {
+            Conn* peer = c->is_host ? r->guest : r->host;
+            if (f.type == net::MsgType::READY) {
+                const bool ready = !f.payload.empty() && f.payload[0] != 0;
+                c->ready = ready;
+                if (peer && peer->stage != Stage::Dead) {
+                    std::vector<uint8_t> pl{(uint8_t)(ready ? 1 : 0)};
+                    auto fr = net::build_frame(net::MsgType::READY, pl);
+                    queue_send(peer, fr.data(), fr.size());
+                }
+            } else if (f.type == net::MsgType::ROOM_LEAVE) {
+                close_conn(c, "ROOM_LEAVE");
+                return;
+            } else if (f.type == net::MsgType::CHAT) {
+                if (peer && peer->stage != Stage::Dead) {
+                    auto fr = net::build_frame(net::MsgType::CHAT, f.payload);
+                    queue_send(peer, fr.data(), fr.size());
+                }
+            }
+            // 그 밖의 프레임은 룸 단계에서 무시한다.
+        }
+        if (r->host && r->guest && r->host->ready && r->guest->ready) {
+            start_room_match(r);
+        }
+    }
+
+    // 룸에서는 READY 가 이미 확정됐으므로 로비를 건너뛰고 바로 포워딩으로 간다.
+    void start_room_match(Room* r) {
+        Conn* host = r->host;
+        Conn* guest = r->guest;
+        rooms_.erase(r->code);          // 방은 역할을 다했다
+        host->room = nullptr;
+        guest->room = nullptr;
+
+        Channel* ch = make_channel(host, guest);
+        if (!send_match_found(host,  1, ch->seed, host->icon,  guest->icon, ch->match_uuid) ||
+            !send_match_found(guest, 2, ch->seed, guest->icon, host->icon,  ch->match_uuid)) {
+            close_conn(host,  "MATCH_FOUND 송신 실패");
+            close_conn(guest, "MATCH_FOUND 송신 실패");
+            return;
+        }
+        begin_forwarding(ch);
+    }
+
     // ── 큐 ───────────────────────────────────────────────────────────────────
     void enter_queue(Conn* c) {
         c->stage = Stage::Queued;
@@ -544,7 +754,9 @@ private:
         return seed_state_;
     }
 
-    void start_match(Conn* a, Conn* b) {
+    // 큐·룸 두 경로가 공유하는 채널 생성. 스테이지는 호출자가 정한다 — 큐는
+    // READY 핸드셰이크(로비)를 거치고, 룸은 이미 READY 라 곧장 포워딩으로 간다.
+    Channel* make_channel(Conn* a, Conn* b) {
         auto up = std::make_unique<Channel>();
         Channel* ch = up.get();
         ch->match_id   = next_match_id_++;
@@ -558,12 +770,19 @@ private:
         ch->ranked = (meta_ != nullptr) && a->player_id != 0 && b->player_id != 0;
         channels_[ch->match_id] = std::move(up);
 
-        a->ch = ch; a->is_a = true;  a->stage = Stage::Lobby;
-        b->ch = ch; b->is_a = false; b->stage = Stage::Lobby;
+        a->ch = ch; a->is_a = true;
+        b->ch = ch; b->is_a = false;
 
         std::cerr << "[relay] match=" << ch->match_id << " paired conn "
                   << a->id << " x " << b->id
                   << (ch->ranked ? " (ranked)" : " (unranked)") << "\n";
+        return ch;
+    }
+
+    void start_match(Conn* a, Conn* b) {
+        Channel* ch = make_channel(a, b);
+        a->stage = Stage::Lobby;
+        b->stage = Stage::Lobby;
 
         if (!send_match_found(a, 1, ch->seed, a->icon, b->icon, ch->match_uuid) ||
             !send_match_found(b, 2, ch->seed, b->icon, a->icon, ch->match_uuid)) {
@@ -741,6 +960,7 @@ private:
     void on_timeout(Conn* c) {
         switch (c->stage) {
             case Stage::FirstFrame: close_conn(c, "첫 프레임 타임아웃"); break;
+            case Stage::Room:       close_conn(c, "룸 대기 타임아웃");   break;
             case Stage::Lobby:      close_conn(c, "로비 타임아웃");      break;
             case Stage::Forward:    close_conn(c, "idle 타임아웃");      break;
             default: break;
@@ -879,6 +1099,7 @@ private:
 
     std::unordered_map<Conn*, std::unique_ptr<Conn>>     conns_;
     std::unordered_map<uint32_t, std::unique_ptr<Channel>> channels_;
+    std::unordered_map<std::string, std::unique_ptr<Room>>  rooms_;
     std::deque<Conn*>          queue_;
     std::vector<Conn*>         dying_;
     std::unordered_map<std::string, int> admission_;

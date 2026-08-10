@@ -31,7 +31,6 @@ Tetris-Multiplayer-RL/
 ├── Makefile               ← cmake 호출을 감싼 얇은 편의 래퍼
 ├── pyproject.toml         ← Python 의존성 (uv)
 ├── README.md              ← 완성 상태의 실행·아키텍처 요약
-├── ARCHITECTURE.md / GUIDE.md / DEPLOY.md
 │
 ├── core/                  ← 순수 유틸 (외부 의존 없음)
 │   ├── constants.h        ← TICKS_PER_SECOND=60, SECONDS_PER_TICK
@@ -140,13 +139,14 @@ Tetris-Multiplayer-RL/
 │
 ├── deploy/                ← Caddy / cloudflared / systemd 예시 설정
 ├── docs/                  ← blog/ (이 시리즈) + 설계·운영 문서
+├── web/                   ← 정적 랭킹 페이지 (ranking/index.html)
 ├── model/                 ← bots/*.onnx 배포 슬롯 + bots.cfg.example
 ├── Font/                  ← NanumGothic.ttf (한글 TTF), monogram.ttf
 ├── Sounds/                ← music.mp3, rotate.mp3, clear.mp3
 └── assets/                ← images.cfg + icons/player.png, opponent.png, bot.png
 ```
 
-`Sounds/`에 드롭·가비지 효과음 파일이 있으면 각각 로드하고, 없으면 해당 효과만 조용히 건너뛴다. 필수 BGM/SFX 하나의 실패가 전체 오디오 초기화나 게임 실행을 막지 않으며, 성공한 핸들만 `Game` 소멸 시 해제한다.
+`Sounds/`에 드롭·가비지 전용 효과음 파일(`drop.mp3`, `garbage.mp3`)이 있으면 각각 로드하고, 없으면 무음으로 두지 않고 **재생 시점에 대체음을 낸다** — 드롭은 `rotate.mp3`, 가비지는 `clear.mp3` 로 폴백해 조작 피드백을 유지한다(`src/game.cpp` 의 `SubmitInput`/`Tick`). 핸들을 alias 하는 것이 아니라 재생하는 순간 대체 핸들을 고르는 방식이라, 소멸자에서 같은 핸들을 두 번 해제할 일이 없다. BGM/SFX 하나의 로드 실패가 전체 오디오 초기화나 게임 실행을 막지 않으며, 성공한 핸들만 `Game` 소멸 시 해제한다.
 
 한 줄 책임 정리:
 
@@ -165,9 +165,10 @@ Tetris-Multiplayer-RL/
 | `python/` | 학습·export, framing/placement 패리티, pytest | 기본: numpy, pytest, pybind11 / 학습·export: torch, gymnasium, onnx, onnxscript |
 | `third_party/` | 벤더링된 단일 헤더 + 외부 바이너리 설치 스크립트 | — |
 | `scripts/` | 플랫폼별 배포 번들 빌더 + 운영 백업 스크립트 | — |
+| `web/` | 정적 랭킹 웹 페이지 — `tetris_meta` 의 leaderboard API(`/v1/leaderboard`)를 same-origin 으로 조회 | 브라우저 + 리버스 프록시 라우팅 (`deploy/`) |
 | `docs/` | 블로그 및 설계 문서 | — |
 
-의존성은 하위 계층에서 UI로 역류하지 않게 유지한다. `core/`는 플랫폼을 모르고, `server/`는 `net/`과 meta HTTP 클라이언트를 쓰되 `src/`의 게임·화면 코드를 링크하지 않는다. relay는 입장·룸·ranked summary 같은 제어 프레임은 해석하지만 게임 시뮬레이션 상태를 만들지 않는다. `python/`의 학습 경로는 `bindings/`를 거쳐 `SimGame`에 닿고, wire 테스트 도구만 framing 규약을 별도로 미러링한다.
+의존성은 하위 계층에서 UI로 역류하지 않게 유지한다. `core/`는 플랫폼을 모르고, `server/`는 `net/`과 meta HTTP 클라이언트를 쓰되 `src/`의 게임·화면 코드를 링크하지 않는다. relay는 입장·룸·ranked summary 같은 제어 프레임은 해석하지만 게임 시뮬레이션 상태를 만들지 않는다. `python/`의 학습 경로는 `bindings/`를 거쳐 `SimGame`에 닿고, wire 테스트 도구만 framing 규약을 별도로 미러링한다. `web/`은 어떤 빌드 타깃에도 들어가지 않는다 — 정적 HTML 하나가 리버스 프록시를 통해 meta 서버와 같은 origin 에서 서빙되며, 그래서 CORS 설정 없이 leaderboard API 를 그대로 호출할 수 있다.
 
 ---
 
@@ -189,9 +190,9 @@ Tetris-Multiplayer-RL/
 
 Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 있다 — `opengl32.lib` 도 포함이라 GL 을 위해 따로 받을 것이 없다. macOS 도 Xcode command-line tools 에 OpenGL 프레임워크가 들어 있다. **Linux 만 별도 개발 패키지가 필요하다** — Debian/Ubuntu 는 `libgl1-mesa-dev`, Fedora 는 `mesa-libGL-devel` 이다. 설치 절차는 [Part 0](./part0-project-setup.md) 에 있다.
 
-링크되는 것은 GL 라이브러리뿐이고, 3.3 Core 의 함수는 링커가 아니라 **런타임에 함수 포인터로 받는다**(`renderer/gl_api.cpp`). Windows 의 `opengl32.dll` 이 GL 1.1 까지만 export 하기 때문인데, 플랫폼마다 다른 코드를 두지 않으려고 세 플랫폼 모두 같은 조회 경로(`platform_gl_get_proc`)를 탄다. 그래서 GLEW/GLAD 같은 로더 의존성이 없다.
+링크되는 것은 GL 라이브러리뿐이고, 3.3 Core 의 함수는 링커가 아니라 **런타임에 함수 포인터로 받는다**(`renderer/gl_api.cpp`). Windows 의 `opengl32.dll` 이 GL 1.1 까지만 export 하기 때문인데, 플랫폼마다 다른 코드를 두지 않으려고 세 플랫폼 모두 같은 조회 경로(`platform_gl_get_proc`)를 탄다. 그래서 별도의 GL 로더 라이브러리 의존성이 없다.
 
-런타임 요구사항도 하나 늘었다. 클라이언트를 실행하는 기계의 드라이버가 **OpenGL 3.3 Core 프로파일**을 줘야 한다. 못 주면 `gl_load_functions()` 가 빠진 진입점 이름을 전부 나열하고 실패한다. 서버 타깃(`tetris_relay`, `tetris_meta`)과 테스트 타깃은 GL 을 링크하지도, 요구하지도 않는다.
+런타임 요구사항도 하나 늘었다. 클라이언트를 실행하는 기계의 드라이버가 **OpenGL 3.3 Core 프로파일**을 줘야 한다. 못 주면 `gl_load_functions()` 가 빠진 진입점 이름을 전부 나열하고 실패한다. 이때 `renderer_init` 은 `false` 를 반환하고, 호출자(`src/main.cpp`)가 `platform_fatal_error` 로 네이티브 메시지박스를 띄운 뒤 정리하고 종료한다 — 상세 원인(빠진 진입점 이름)은 여전히 stderr 에만 남는다. 서버 타깃(`tetris_relay`, `tetris_meta`)과 테스트 타깃은 GL 을 링크하지도, 요구하지도 않는다.
 
 ### 2.2 외부 라이브러리
 
@@ -223,7 +224,7 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 
 ### 2.3 Python 환경
 
-저장소 루트에는 `pyproject.toml` 이 있다. 로컬 기본 환경은 가볍게 유지하고, PyTorch/Gymnasium/ONNX 는 학습·export extra 로만 설치한다. Mac mini 같은 배포 머신에서 torch 를 끌어오지 않기 위해서다.
+저장소 루트에는 `pyproject.toml` 이 있다. 로컬 기본 환경은 가볍게 유지하고, PyTorch/Gymnasium/ONNX 는 학습·export extra 로만 설치한다. 저사양 배포 머신에서 torch 를 끌어오지 않기 위해서다.
 
 ```text
 pyproject.toml                 → numpy 기본, pytest/pybind11 dev, torch/gymnasium/onnx/onnxscript extra
@@ -364,7 +365,7 @@ set(TETRIS_DEFAULT_META_URL "" CACHE STRING
 
 - **`TETRIS_BUILD_GAME`** — 게임 실행 파일(`tetris`). 기본 ON. Windows 에서는 Win32 경로, 그 외는 SDL2 경로로 빌드된다. **기본값이 ON 이라는 점이 중요하다** — 아직 `src/game.cpp` 나 `renderer/*.cpp` 가 없는 Part 1~3 시점에는 반드시 `-DTETRIS_BUILD_GAME=OFF` 를 명시해야 configure 가 통과한다.
 - **`TETRIS_BUILD_PY`** — pybind11 모듈(`tetris_py`). 기본 OFF — Colab 학습 환경이나 native Sim 테스트에 사용한다. 배포 클라이언트와 인게임 ONNX 봇에는 필요 없다.
-- **`TETRIS_BUILD_TEST`** — 회귀 테스트. 기본 ON — GUI 가 없으므로 어느 플랫폼에서든 빌드된다. `sim_hash_dump` 와 `worker_group_test` **두 개**를 만든다.
+- **`TETRIS_BUILD_TEST`** — 회귀 테스트. 기본 ON — GUI 가 없으므로 어느 플랫폼에서든 빌드된다. `sim_hash_dump` 와 `worker_group_test` 를 만든다.
 - **`TETRIS_BUILD_RELAY`** — `tetris_relay` 매치메이킹 서버. 기본 OFF — 릴레이 호스트에서만 켠다.
 - **`TETRIS_BUILD_META`** — `tetris_meta` HTTP+SQLite 메타/RP 서버. 기본 OFF — 별도 호스트에서만 켠다.
 - **`TETRIS_BUILD_BOT`** — ONNX Runtime 링크. OFF 라도 `bot/bot_onnx.cpp` 는 컴파일되지만 `TETRIS_HAS_ONNXRUNTIME` 매크로가 미정의라 **스텁 모드**로 빌드돼, ONNX 모델에 대한 `Load()` 가 실패한다. 다만 "Single vs Bot" 자체는 내장 휴리스틱 봇으로 항상 열 수 있고, 학습 모델만 ONNX Runtime 이 있을 때 추가로 선택 가능하다.
@@ -383,13 +384,15 @@ cmake -S . -B build \
       -DTETRIS_DEFAULT_META_URL=https://meta.example.com
 ```
 
-이 값들은 컴파일 타임 매크로로 주입되고(아래 `target_compile_definitions` 참조), 런타임에 환경변수와 CLI 인자가 차례로 덮어쓴다. `src/main.cpp` 의 인자 파싱이 읽는 우선순위는 다음과 같다:
+이 값들은 컴파일 타임 매크로로 주입되고(아래 `target_compile_definitions` 참조), 런타임에 환경변수와 CLI 인자가 차례로 덮어쓴다. `src/main.cpp` 의 인자 파싱은 모든 초기화보다 앞에 있어서, 잘못된 인자는 창·GL 컨텍스트·소켓 같은 자원이 하나도 생기기 전에 종료 코드 2 로 끝난다. 읽는 우선순위는 다음과 같다:
 
 | 우선순위 | 릴레이 주소 | 메타 URL | 비고 |
 |---|---|---|---|
 | 1 (최저) | CMake `TETRIS_DEFAULT_RELAY_ENDPOINT` (기본 `127.0.0.1:7777`) | CMake `TETRIS_DEFAULT_META_URL` (기본 빈 문자열) | 바이너리에 박힌 값 |
 | 2 | 환경변수 `TETRIS_RELAY_ENDPOINT` | 환경변수 `TETRIS_META_URL` | 파싱 실패 시 경고 후 이전 값 유지 |
-| 3 (최고) | CLI `--host` / `--queue` / `--room` | CLI `--meta` | 그 실행에만 적용 |
+| 3 (최고) | CLI `--relay host[:port]` (메뉴의 Matchmaking·Custom Room 이 쓰는 릴레이 주소) | CLI `--meta URL` | 그 실행에만 적용 |
+
+릴레이 주소를 덮어쓰는 플래그는 `--relay` 하나다. 나머지 네트워크 플래그는 이 우선순위 사슬 밖의 별도 경로다 — `--queue host[:port]` 는 메뉴를 거치지 않고 그 주소의 매치메이킹 큐로 즉시 입장하는 자체 endpoint 를 가지며, `--host PORT` 와 `--connect host[:port]` 는 릴레이를 아예 거치지 않는 직결 P2P 전용이라 릴레이 주소와 무관하다. `--host` 는 대기 포트 하나만 받는다 — 여기에 주소를 넘기면 포트 파싱 오류로 즉시 종료되고, 포트만 넘기면 릴레이 주소는 그대로 둔 채 직결 호스트 모드로 들어간다.
 
 빈 문자열 메타 URL은 "메타 서버 없음"을 뜻한다. 게스트 토큰 발급, 랭킹·아이콘 조회, ranked 결과 저장이 비활성화되고 게임은 로컬·직결·unranked relay 모드로 동작한다. relay에 `--meta`를 주지 않은 경우도 같은 `player_id=0` 계약을 쓴다.
 
@@ -438,7 +441,7 @@ endif()
 # -----------------------------------------------------------------------------
 # Sources shared between all targets
 # -----------------------------------------------------------------------------
-# Pure (no raylib) logic — used by game, pybind11 module, and tests.
+# Pure simulation logic (no renderer/platform deps) — used by game, pybind11 module, and tests.
 set(TETRIS_SIM_SOURCES
     src/sim_game.cpp
     src/position.cpp
@@ -457,7 +460,7 @@ set(TETRIS_SIM_HEADERS
 )
 ```
 
-주석의 "no raylib" 는 역사적 흔적이다 — 이 저장소의 초기 버전이 raylib 기반이었고, 시뮬레이션을 렌더링에서 떼어내는 리팩터링의 결과가 이 변수다. 이 두 변수는 `tetris`, `tetris_py`, `sim_hash_dump` 세 타깃이 공유한다.
+이 변수에는 역사가 있다 — 이 저장소의 초기 버전은 기성 게임 프레임워크 위에서 시뮬레이션과 렌더링이 붙어 있었고, 그 결합을 떼어내 "렌더러·플랫폼 의존이 없는 순수 시뮬" 만 남긴 리팩터링의 결과가 이 목록이다. 이 두 변수는 `tetris`, `tetris_py`, `sim_hash_dump` 타깃이 공유한다.
 
 `sim_grid.h` / `sim_block.h` / `sim_blocks.h`가 헤더만 있는 이유는 이들이 구조체와 inline 멤버 함수를 담기 때문이다. 반면 `SimGame`은 `.cpp`로 분리해 게임 규칙 구현(락, 라인 클리어, 점수, 가비지, 배치 열거)이 공개 인터페이스를 포함하는 모든 번역 단위에서 반복 컴파일되지 않게 한다. RNG와 해시 구현은 여기 없다. 재사용되는 작은 inline 계약이라 `core/rng.h`와 `core/hash.h`에 헤더 전용으로 둔다.
 
@@ -465,7 +468,7 @@ set(TETRIS_SIM_HEADERS
 
 ### 3.4 타깃 1 — `tetris` (게임 클라이언트)
 
-이 섹션은 `TETRIS_BUILD_GAME=ON` 일 때만 활성화된다. 내부 구조는 다섯 단계다.
+이 섹션은 `TETRIS_BUILD_GAME=ON` 일 때만 활성화된다. 내부는 (a)~(f) 블록으로 나눠 본다.
 
 (a) **의존성 선검사 + 공통 소스 묶음**:
 
@@ -816,7 +819,7 @@ endif()
 
 ```cmake
 # -----------------------------------------------------------------------------
-# Target: sim_hash_dump (determinism regression test — raylib-free)
+# Target: sim_hash_dump (determinism regression test — renderer-free)
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_TEST)
     add_executable(sim_hash_dump
@@ -911,7 +914,7 @@ endif()
 
 주목: 소스 목록에 `src/`가 없다. relay는 `SimGame`을 실행하지 않으며 `net/session.cpp`도 링크하지 않는다. unranked 매치에서는 raw byte를 전달하고, ranked 매치에서만 프레임 경계를 읽어 `MATCH_SUMMARY`를 검증·가로챈다. meta API를 호출할 수 있어야 하므로 `third_party/httplib.h`는 relay 단독 빌드에도 필요하고, HTTPS를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
 
-실행 인자는 `--port PORT` 형태다. 기본 포트는 `7777` 이지만, 저장소의 relay/room smoke 테스트는 `7788` 을 하드코딩하고 있다 — [Part 7](./part7-relay-server.md) 의 테스트 절차를 따를 때 포트를 맞춰야 한다.
+실행 인자는 `--port PORT` 와 meta 연동용 `--meta URL` / `--meta-secret SECRET` 이다(secret 은 환경변수 `TETRIS_RELAY_SECRET` 로도 줄 수 있고, `--meta` 를 줬는데 secret 이 없으면 기동을 거부한다). 기본 포트는 `7777` 이지만, 저장소의 relay/room smoke 테스트는 `7788` 을 하드코딩하고 있다 — [Part 7](./part7-relay-server.md) 의 테스트 절차를 따를 때 포트를 맞춰야 한다.
 
 ### 3.9 타깃 5 — `tetris_meta` (HTTP+SQLite 메타 서버)
 
@@ -921,7 +924,7 @@ endif()
 # -----------------------------------------------------------------------------
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
-# 역할: 별도 영속 호스트(S7 Termux 등)에서 돌아가는 독립 서비스.
+# 역할: 별도 영속 호스트(저전력 Android/Termux 단말 등)에서 돌아가는 독립 서비스.
 #       · SQLite 로 player/match/rating history/icon ownership 영속화
 #       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
 #       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.
@@ -1353,7 +1356,7 @@ gui_checkbox · gui_slider · gui_value_selector · gui_modal_dim · gui_text_ce
 | 전역 톤 보정·색맹 팔레트 | 조각 셰이더에서 `fragColor` 를 내보내기 직전 |
 | 좌표계 변경(예: y 위로 증가) | 정점 셰이더의 NDC 변환 두 줄 |
 
-**셰이더 컴파일 오류는 빌드가 아니라 실행 시점에 난다.** GLSL 은 사용자 기계의 드라이버가 컴파일하므로, `renderer_init` 이 컴파일 로그를 stderr 에 그대로 찍고 초기화를 중단한다. 로그를 삼키지 않는 것이 중요한 이유는 드라이버마다 GLSL 프론트엔드가 달라서다 — 내 기계에서 통과한 코드가 남의 기계에서 막힐 수 있고, 그때 남는 단서가 이 로그뿐이다.
+**셰이더 컴파일 오류는 빌드가 아니라 실행 시점에 난다.** GLSL 은 사용자 기계의 드라이버가 컴파일하므로, `renderer_init` 이 컴파일 로그를 stderr 에 그대로 찍고 초기화를 중단한다. 이때 `renderer_init` 은 `false` 를 반환하고 `main` 이 `platform_fatal_error` 로 네이티브 메시지박스를 띄운 뒤 종료한다 — 컴파일 로그 자체는 여전히 stderr 에만 남으므로, 셰이더를 고치는 동안은 콘솔에서 실행한다. 로그를 삼키지 않는 것이 중요한 이유는 드라이버마다 GLSL 프론트엔드가 달라서다 — 내 기계에서 통과한 코드가 남의 기계에서 막힐 수 있고, 그때 남는 단서가 이 로그뿐이다.
 
 **주의할 계약:** 정점 셰이더의 `layout(location = N)` 번호와 `renderer.cpp` 의 `glVertexAttribPointer` 인덱스는 **같아야 한다.** 컴파일러도 링커도 이 대응을 검사하지 않는다 — §8 에 다시 나온다. 그리고 유니폼 이름(`u_screen`, `u_tex`)을 바꾸면 `renderer_init` 의 `gl_GetUniformLocation` 호출도 함께 고쳐야 한다. 이쪽은 실패해도 조용하다 — 위치가 `-1` 로 돌아오고 `glUniform*` 이 무시되어, 화면이 검거나 도형이 엉뚱한 곳에 그려진다.
 

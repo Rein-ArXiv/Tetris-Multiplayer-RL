@@ -1,25 +1,14 @@
-// src/main.cpp — Handmade 버전 (raylib 제거, 자체 OpenGL 3.3 Core 렌더러)
+// src/main.cpp — Handmade 버전 (기성 프레임워크 제거, 자체 OpenGL 3.3 Core 렌더러)
 //
-// 변경 사항:
-//   #include <raylib.h>     → platform/platform.h + renderer/renderer.h
-//   InitWindow()            → platform_init()
-//   WindowShouldClose()     → platform_should_close()
-//   GetFrameTime()          → platform_begin_frame() 반환값
-//   BeginDrawing()          → renderer_begin()
-//   EndDrawing()            → renderer_end() (버퍼 교체) + platform_end_frame() (pace)
-//   IsKeyPressed(KEY_*)     → platform_key_pressed(PKEY_*)
-//   IsKeyDown(KEY_*)        → platform_key_down(PKEY_*)
-//   GetCharPressed()        → platform_get_char_pressed()
-//   DrawRectangle(...)      → draw_rect(...)
-//   DrawRectangleRounded()  → draw_rect_rounded(...)
-//   DrawTextEx(font, ...)   → draw_text(...)
-//   DrawText(...)           → draw_text(...)
-//   MeasureTextEx(...)      → measure_text(...)
-//   TextFormat(fmt, ...)    → snprintf 로컬 버퍼
-//   GetTime()               → platform_get_time()
-//   TraceLog(LOG_ERROR, ...) → fprintf(stderr, ...)
-//   UpdateMusicStream(...)  → audio/ 모듈 (XAudio2 루프 재생, per-frame 업데이트 불필요)
-//   CloseWindow()           → platform_shutdown()
+// 진입점과 게임 루프의 소유자. 기성 즉시 그리기 라이브러리가 한 번에 해 주던
+// 일들을 자체 계층이 나눠 맡는다:
+//   창·컨텍스트·입력·시간  → platform/platform.h (platform_init,
+//                            platform_should_close, platform_begin_frame/
+//                            platform_end_frame, platform_key_* / PKEY_*)
+//   2D 드로잉·텍스트       → renderer/renderer.h (renderer_begin/renderer_end,
+//                            draw_rect, draw_rect_rounded, draw_text, measure_text)
+//   오디오                 → audio/ 모듈 (루프 재생, per-frame 업데이트 불필요)
+//   포맷 문자열·로그       → snprintf 로컬 버퍼, fprintf(stderr, ...)
 //   WHITE, GRAY, GREEN, YELLOW, RED, RAYWHITE → platform.h 의 동명 상수
 //   Vector2                 → float x, y 직접 사용
 
@@ -69,8 +58,8 @@
 #define TETRIS_DEFAULT_META_URL ""
 #endif
 
-// TextFormat 대체: snprintf 로 포맷 문자열을 임시 버퍼에 쓰고 반환.
-// raylib의 TextFormat은 정적 버퍼를 쓰므로 중첩 호출에 주의.
+// 포맷 문자열 헬퍼: snprintf 로 임시 버퍼에 쓰고 반환.
+// 정적 버퍼를 쓰므로 중첩 호출에 주의.
 static const char* fmt_buf(const char* fmt, ...)
 {
     static char buf[512];
@@ -490,8 +479,8 @@ static ImageHandle load_configured_image(
 // 키보드 입력 → 비트마스크 (core/input.h 의 INPUT_* 상수)
 //
 // platform_key_pressed()는 "이번 프레임에 처음 눌림"을 감지하는 엣지 트리거.
-// frame pacing 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
-// 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
+// frame pacing 을 꺼도 렌더 루프는 240fps 상한까지 돌므로 60Hz 틱 사이에
+// 여러 프레임이 지나가고, 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
 // → 매 프레임 AccumulateInput()으로 엣지 입력을 누적하고,
 //   틱에서 ConsumeInput()으로 소비 + held 키(DOWN/LEFT/RIGHT)를 합산한다.
 //   좌우 held 반복은 DAS/ARR로 속도를 제한한다.

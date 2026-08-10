@@ -13,14 +13,14 @@
 
 ## 들어가며
 
-완성형 엔진에서 효과음 하나를 재생하는 것은 대개 인스펙터에서 클립을 끌어다 놓고 함수 하나를 부르는 일이다. 그보다 한 단계 낮은 raylib 같은 프레임워크에서도 세 줄이면 끝난다:
+완성형 엔진에서 효과음 하나를 재생하는 것은 대개 인스펙터에서 클립을 끌어다 놓고 함수 하나를 부르는 일이다. 그보다 한 단계 낮은 기성 게임 프레임워크에서도 세 줄이면 끝난다:
 
 **예시(실제 저장소에는 없음)**
 
 ```cpp
-InitAudioDevice();
-Sound rotate = LoadSound("Sounds/rotate.mp3");
-PlaySound(rotate);
+audio_device_open();
+sound rotate = sound_load("Sounds/rotate.mp3");
+sound_play(rotate);
 ```
 
 이 세 줄이 실제로 하는 일은 다음과 같다:
@@ -29,9 +29,9 @@ PlaySound(rotate);
 2. MP3 바이너리를 PCM 샘플로 디코딩하고
 3. 디코딩된 PCM 데이터를 오디오 그래프의 소스 노드에 제출해 스피커로 출력한다
 
-raylib 내부에서는 [miniaudio](https://miniaud.io/) 라는 단일 헤더 라이브러리가 이 과정을 처리하고, miniaudio 는 다시 플랫폼별 백엔드(Windows: WASAPI, macOS: Core Audio, Linux: PulseAudio/ALSA)를 추상화한다. 결국 `InitAudioDevice()` 한 줄은 OS 오디오 서브시스템 전체를 초기화하는 것이다.
+그런 프레임워크 내부에서는 단일 헤더 믹서 라이브러리가 이 과정을 처리하고, 그 라이브러리가 다시 플랫폼별 백엔드(Windows: WASAPI, macOS: Core Audio, Linux: PulseAudio/ALSA)를 추상화한다. 결국 "장치를 연다" 는 한 줄은 OS 오디오 서브시스템 전체를 초기화하는 것이다.
 
-이 장에서는 Windows 의 네이티브 오디오 API 인 **XAudio2** 를 직접 사용해 같은 기능을 구현한다. [Part 2](./part2-platform-window-input.md) 에서 `InitWindow()` 를 Win32 API 로 풀어냈듯, 여기서는 `InitAudioDevice()` + `LoadSound()` + `PlaySound()` 를 XAudio2 + dr_mp3 로 풀어낸다. 뒤이어 Linux/macOS 이식을 위한 **SDL2 오디오 백엔드**(`audio/sdl_audio.cpp`)를 같은 `audio.h` 인터페이스에 맞춰 구현한다. 두 백엔드는 빌드 타임에 선택되며, 위쪽 게임 코드는 한 줄도 바뀌지 않는다.
+이 장에서는 Windows 의 네이티브 오디오 API 인 **XAudio2** 를 직접 사용해 같은 기능을 구현한다. [Part 2](./part2-platform-window-input.md) 에서 "창을 하나 연다" 는 한 줄을 Win32 API 로 풀어냈듯, 여기서는 위의 세 줄 — 장치 초기화·로드·재생 — 을 XAudio2 + dr_mp3 로 풀어낸다. 뒤이어 Linux/macOS 이식을 위한 **SDL2 오디오 백엔드**(`audio/sdl_audio.cpp`)를 같은 `audio.h` 인터페이스에 맞춰 구현한다. 두 백엔드는 빌드 타임에 선택되며, 위쪽 게임 코드는 한 줄도 바뀌지 않는다.
 
 인터페이스 파일 전체가 이 장의 계약이다.
 
@@ -42,11 +42,12 @@ raylib 내부에서는 [miniaudio](https://miniaud.io/) 라는 단일 헤더 라
 
 // audio/audio.h -- XAudio2 오디오 인터페이스
 //
-// raylib의 InitAudioDevice / LoadSound / PlaySound / LoadMusicStream 을 대체한다.
+// 기성 즉시 그리기 라이브러리의 오디오 장치 초기화 / 사운드 로드·재생 /
+// 음악 스트림 API 를 대체한다.
 // 구현: audio/audio.cpp (XAudio2 + dr_mp3)
 //
 // 학습 포인트:
-//   raylib::InitAudioDevice()는 내부적으로 miniaudio(ma_device)를 초기화한다.
+//   기성 프레임워크의 "오디오 초기화 한 줄"은 내부 믹서 라이브러리를 감싼 것이다.
 //   우리는 XAudio2 COM 인터페이스를 직접 사용한다.
 //   XAudio2 오디오 그래프: Source Voice -> Mastering Voice -> 스피커
 
@@ -241,9 +242,9 @@ bool audio_init()
 
 `platform/platform.h` 의 `platform_init` 주석은 "윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다" 라고 적어 둔다. 즉 이 프로젝트에서 장치 컨텍스트를 잡는 초기화는 창/GL 쪽과 오디오 쪽 **두 군데뿐**이다. 다만 대칭은 여기까지다 — GL 컨텍스트는 없으면 그릴 방법이 아예 없어서 즉시 실패하는 반면, 오디오는 장치를 못 잡아도 무음으로 계속 돈다.
 
-### 1.4 내부 상태 전부
+### 1.4 내부 상태
 
-XAudio2 백엔드가 들고 있는 전역은 이게 전부다.
+XAudio2 백엔드가 들고 있는 전역은 다음과 같다. 전부가 이 한 화면에 들어온다는 사실 자체가 이 백엔드의 크기를 보여준다.
 
 **현재 소스 발췌 — `audio/audio.cpp`**
 
@@ -282,9 +283,15 @@ static float                     s_sfxVol       = 1.0f;
 static constexpr int             MAX_SFX_VOICES = 8;
 static IXAudio2SourceVoice*      s_sfxVoices[MAX_SFX_VOICES] = {};
 static WAVEFORMATEX              s_sfxFormats[MAX_SFX_VOICES] = {};
+// 각 보이스가 지금 어느 핸들의 PCM 을 물고 있는지. XAudio2 는 SubmitSourceBuffer 에
+// 넘긴 포인터를 재생이 끝날 때까지 그대로 참조하므로, 언로드 시 그 버퍼를
+// 해제하기 전에 해당 보이스를 먼저 멈춰야 한다.
+static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
 ```
 
 참조 카운트 심볼의 이름은 `s_refCount` 다. 이 파일과 `audio/sdl_audio.cpp` 양쪽에 같은 이름으로 존재하며, 두 백엔드의 수명 계약이 동일하다는 표시다(§5).
+
+마지막 `s_sfxHandles` 는 언로드 안전용 추적 배열이다. 재생 API 를 읽을 때는 "슬롯이 어느 사운드를 물고 있는지 적어 둔다" 정도만 알면 되고, 이 배열이 왜 필요해졌는지 — 없던 시절에 어떤 use-after-free 가 숨어 있었는지 — 는 §13.5 가 다룬다.
 
 `s_musicEnabled` / `s_sfxEnabled` / `s_musicVol` / `s_sfxVol` 네 개가 §9 의 설정 API 가 조작하는 상태다. `s_lastMusic` 은 "BGM 을 껐다 켰을 때 무엇을 다시 틀지" 를 기억하는 슬롯이다.
 
@@ -557,7 +564,7 @@ void audio_play_sound(AudioHandle handle)
 
 **두 번째 줄 `if (!s_sfxEnabled) return;`** 이 SFX 토글의 전부다. 켜고 끄는 상태를 재생 지점 한 곳에서만 검사하니, 호출부(즉 `Game`)는 토글의 존재를 모른다.
 
-**끝에서 세 번째 줄 `SetVolume(s_sfxVol)`** 이 SFX 볼륨의 전부다. 슬롯을 확보한 직후, 버퍼를 제출하기 **전에** 게인을 건다. 슬롯은 재사용되므로 매 재생마다 다시 걸어야 한다. `audio_set_sfx_enabled` 와 `audio_set_sfx_volume` 은 전역 기본값을 갱신하고, 살아 있는 voice에도 새 값을 적용해 다음 재생과 현재 재생이 어긋나지 않게 한다.
+**버퍼 제출 직전의 `SetVolume(s_sfxVol)`** 이 SFX 볼륨의 전부다. 슬롯을 확보한 직후, 버퍼를 제출하기 **전에** 게인을 건다. 슬롯은 재사용되므로 매 재생마다 다시 걸어야 한다. 뒤집어 말하면 `audio_set_sfx_enabled` 와 `audio_set_sfx_volume` 은 **전역 기본값만** 갱신하며 이미 울리고 있는 보이스는 건드리지 않는다 — 새 값은 다음 `audio_play_sound` 부터 적용된다. 살아 있는 보이스에 즉시 반영되는 것은 음악 볼륨뿐이다(§9.3).
 
 **왜 보이스 풀인가?** `CreateSourceVoice` 는 내부적으로 메모리 할당과 DSP 그래프 노드 생성을 수반한다. 재생할 때마다 생성/파괴하면 **마이크로 히칭**(micro-hitching)이 발생할 수 있다. 8 개의 보이스를 만들어 재사용하면 이 비용이 사라진다(§7).
 
@@ -636,7 +643,7 @@ void audio_stop_music()
 }
 ```
 
-`XAUDIO2_LOOP_INFINITE`(255)는 XAudio2 가 버퍼 끝에 도달하면 자동으로 처음부터 다시 재생하게 한다. 이 방식이면 **게임 루프에서 별도의 `update()` 호출이 필요 없다**. raylib 의 `UpdateMusicStream()` 은 스트리밍 방식이라 매 프레임 새 데이터를 채워야 했지만, 여기서는 전체 PCM 을 프리로드하므로 한 번 제출하면 끝이다.
+`XAUDIO2_LOOP_INFINITE`(255)는 XAudio2 가 버퍼 끝에 도달하면 자동으로 처음부터 다시 재생하게 한다. 이 방식이면 **게임 루프에서 별도의 `update()` 호출이 필요 없다**. 기성 프레임워크의 음악 재생은 대개 스트리밍 방식이라 매 프레임 "음악 갱신" 호출로 새 데이터를 채워 줘야 하지만, 여기서는 전체 PCM 을 프리로드하므로 한 번 제출하면 끝이다.
 
 두 함수의 역할 분리를 정리하면:
 
@@ -666,7 +673,7 @@ void audio_stop_music()
 
 ### 4.1 문제 설정
 
-[Part 1](./part1-deterministic-simulation.md) 에서 설계한 `SimGame` 은 **순수 시뮬레이션 엔진**이다. 렌더링도 오디오도 모른다. 헤더 첫 줄이 그렇게 선언한다 — "Headless Tetris simulation. No raylib, no audio, no I/O." 그렇다면 "블록이 회전했을 때 소리를 재생한다" 는 로직을 어디에 넣을 것인가.
+[Part 1](./part1-deterministic-simulation.md) 에서 설계한 `SimGame` 은 **순수 시뮬레이션 엔진**이다. 렌더링도 오디오도 모른다. 헤더 첫 줄이 그렇게 선언한다 — "Headless Tetris simulation. No renderer, no audio, no I/O." 그렇다면 "블록이 회전했을 때 소리를 재생한다" 는 로직을 어디에 넣을 것인가.
 
 `SimGame` 안에서 `audio_play_sound` 를 부르면 세 가지가 동시에 깨진다.
 
@@ -841,9 +848,9 @@ void Game::Tick()
 | 라인 클리어 | `LockBlock` | `SubmitInput`(하드드롭) **또는** `Tick`(중력) | `Game::Tick` 직후 |
 | 가비지 수신 | `LockBlock` | 위와 동일 | `Game::Tick` 직후 |
 
-### 4.5 에셋 폴백 — 저장소에는 mp3 가 셋뿐이다
+### 4.5 에셋 폴백 — 없는 파일은 이웃 소리로 대체한다
 
-`Sounds/` 에 실제로 있는 파일은 `clear.mp3`, `music.mp3`, `rotate.mp3` **셋뿐**이다. `drop.mp3` 와 `garbage.mp3` 는 처음부터 없다. 그래서 `audio_load_sound("Sounds/drop.mp3")` 는 stderr 에 한 줄 찍고 0 을 반환하고, `sndDrop` 은 0 으로 남는다.
+`Sounds/` 에 실제로 있는 파일은 `clear.mp3`, `music.mp3`, `rotate.mp3` 다. `drop.mp3` 와 `garbage.mp3` 는 처음부터 없다. 그래서 `audio_load_sound("Sounds/drop.mp3")` 는 stderr 에 한 줄 찍고 0 을 반환하고, `sndDrop` 은 0 으로 남는다.
 
 그 결과가 위 코드의 `sndDrop ? sndDrop : sndRotate` 다. **하드드롭은 무음이 아니라 회전음이 난다.** 가비지 수신은 클리어음이 난다. 전용 에셋이 준비되면 파일만 `Sounds/` 에 넣으면 되고 코드는 그대로다.
 
@@ -1059,14 +1066,16 @@ Game::~Game()
 
 ### 5.4 왜 재시작해도 BGM 이 끊기지 않는가
 
-이 2 단 구조의 값어치는 게임 재시작에서 드러난다. 게임 오버 후 R 을 누르면:
+이 2 단 구조의 값어치는 게임 재시작에서 드러난다. Single 모드에서 게임 오버 후 R 을 누르면:
 
-**현재 소스 발췌 — `src/main.cpp`**
+**현재 소스 발췌 — `src/main.cpp`** (Single 모드 게임오버 팝업의 `[R]` 분기. `Game` 이 둘인 봇 대전·Net 재시작도 같은 모양의 대입을 반복한다)
 
 ```cpp
-                if (platform_key_pressed(PKEY_R)) {
-                    gameSingle = std::make_unique<Game>(sessionSeed);
-                    gameBot    = std::make_unique<Game>(sessionSeed);
+            if (platform_key_pressed(PKEY_R))
+            {
+                gameSingle = std::make_unique<Game>(sessionSeed);
+                if (recording) replay.frames.clear();
+            }
 ```
 
 `std::unique_ptr::operator=` 의 순서가 결정적이다. **새 객체가 먼저 완전히 생성되고, 그 다음에 옛 객체가 파괴된다.** 시간순으로 따라가면:
@@ -1163,7 +1172,7 @@ BGM 은 상황이 다르다. 이 프로젝트의 BGM 은 2~4 분 내외로, PCM 
 
 ### 7.1 동시에 울릴 수 있는 소리 계산
 
-동시에 재생될 수 있는 효과음 최댓값을 worst-case 로 계산한다.
+동시에 재생될 수 있는 효과음 최댓값을 worst-case 로 계산한다. 아래 표는 **설계 당시 여유를 둔 상한 추정**이다 — warning·levelup·hold·move·counter 처럼 아직 에셋이 없는 가상의 효과음 종류까지 포함해, 효과음을 늘려도 풀 크기를 다시 정하지 않도록 잡은 것이다.
 
 | 상황 | 동시 발생 SFX |
 |------|---------------|
@@ -1254,10 +1263,10 @@ XAudio2 는 Windows 전용이다. 헤더 `xaudio2.h` 와 링크 대상 `xaudio2.
 ```cpp
 // audio/sdl_audio.cpp — SDL2 오디오 백엔드 (Mac/Linux/Windows 크로스플랫폼)
 //
-// audio/audio.cpp (XAudio2) 와 동일한 audio.h 재생·설정 API를
+// audio/audio.cpp (XAudio2) 와 동일한 audio.h 재생·설정 API 를
 // SDL_OpenAudioDevice 콜백으로 재구현.
-//   raylib 대응: rAudio -> miniaudio. 여기서는 SDL_AudioSpec.callback 에서
-//   직접 softwaremix 수행 (int16 합산 + 포화 클램핑).
+//   기성 프레임워크의 오디오 모듈이 하던 믹싱을 여기서는 SDL_AudioSpec.callback
+//   에서 직접 수행 (int16 합산 + 포화 클램핑).
 //
 // 구조:
 //   - SDL 콜백에서 BGM 보이스 + SFX 보이스 풀(8) 을 믹스.
@@ -1420,7 +1429,7 @@ static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
 
 `mix_voice` 의 포인트는 셋이다.
 
-**1) 모노 → 스테레오 승격.** 소스가 1 채널이면 `l = src[pos]`, `r = l` 로 양쪽 귀에 복제. 2 채널이면 그대로 통과. XAudio2 는 이 변환을 내부 채널 매트릭스로 해줬지만 SDL 경로는 우리가 한다. 다만 이 구현은 **에너지를 보존하지 않는다.** 같은 샘플을 양 채널에 복제하면 음향 파워가 두 배, 즉 체감 +3 dB 다. 제대로 하려면 $1/\sqrt{2}$ (≈0.707)를 곱해야 한다. 이 프로젝트의 에셋이 전부 스테레오라 실제로 이 경로를 타지 않기 때문에 문제가 드러나지 않는다. 모노 효과음을 추가하는 순간 그것만 유독 크게 들릴 것이다.
+**1) 모노 → 스테레오 승격.** 소스가 1 채널이면 `l = src[pos]`, `r = l` 로 양쪽 귀에 복제. 2 채널이면 그대로 통과. XAudio2 는 이 변환을 내부 채널 매트릭스로 해줬지만 SDL 경로는 우리가 한다. 다만 이 복제는 **에너지를 보존하지 않는다** — 같은 샘플을 양 채널에 넣으면 음향 파워가 두 배, 즉 체감 +3 dB 라, 제대로 하려면 $1/\sqrt{2}$ (≈0.707)를 곱해야 한다. 현재 구현에서 이 분기는 **방어용**이다. 정상 로드 경로에서는 §8.7 의 로드 시점 변환이 모노 소스를 미리 디바이스 포맷(스테레오)으로 승격해 두므로, `mix_voice` 가 실제로 이 경로를 타는 일은 없다. 로드 시점 변환이 없던 시절에는 진짜 함정이었다(§13.6).
 
 **2) 게인 적용과 정수 절삭.** `s = (int)(s * gain);` 은 `float` 곱 후 0 방향으로 자른다. 볼륨 0.5 에서 원본 샘플 `3` 은 `1` 이 되고 `1` 은 `0` 이 된다. 디더링이 없으므로 아주 작은 진폭의 신호는 낮은 볼륨에서 계단 잡음으로 바뀐다. 게임 효과음 수준에서는 인지되지 않지만, 이것이 "정수 믹서" 의 대가다. 게인을 **합산 전에** 적용한다는 순서도 중요하다 — 합산 후에 적용하면 이미 클리핑된 값에 게인을 걸게 되어 볼륨을 낮춰도 왜곡이 남는다.
 
@@ -1521,7 +1530,7 @@ void audio_shutdown()
 관전 포인트.
 
 - `want.samples = 1024`. 콜백이 한 번에 요청하는 프레임 수. 1024 프레임은 44.1 kHz 에서 약 **23.2 ms** 블록이다. 이것이 SDL 백엔드의 콜백 블록 크기이자 지연의 하한선이다. XAudio2 쪽은 `audio.cpp` 에 버퍼 크기를 명시하지 않으므로 OS/드라이버 기본값을 따르며, 실제 지연은 대상 장치에서 측정해야 한다.
-- `SDL_AUDIO_ALLOW_FREQUENCY_CHANGE`. 디바이스가 요청 주파수를 지원하지 않으면 다른 값으로 열릴 수 있고, 실제 값이 `s_have.freq` 에 들어온다. 현재 mixer가 source를 device 주파수로 리샘플링하지 않으므로 두 값이 다르면 재생 속도와 pitch가 함께 달라질 수 있다. 운영 빌드는 실제 주파수가 요청값과 같은지 확인하고, 폭넓은 장치를 지원하려면 `SDL_AudioStream` 같은 변환 단계를 넣어야 한다.
+- `SDL_OpenAudioDevice` 의 마지막 인자 `allowed_changes = 0`. 장치가 요청 포맷을 그대로 못 주면 SDL 이 장치와 콜백 사이에 자체 변환기를 끼워 넣으므로, `s_have` 는 **항상 요청 포맷과 같다** — 믹서가 44.1 kHz 스테레오라는 가정을 흔들림 없이 쓸 수 있는 근거다. 소스 쪽에 남을 수 있는 채널·샘플레이트 차이는 로드 시점의 `SDL_AudioStream` 변환(§8.7)이 흡수한다. 발췌의 주석이 말하는 "예전에는" — 재협상을 허용해 놓고 변환은 안 해서 8.8 % 빠르게 재생되던 버그 — 는 §13.6 에 있다.
 - `SDL_PauseAudioDevice(s_dev, 0)` — 열기만 하면 일시정지 상태다. `0` 이 "재생 시작", `1` 이 "일시정지". 이 한 줄을 빠뜨리면 완벽히 초기화됐는데 무음이다.
 - `SDL_InitSubSystem(SDL_INIT_AUDIO)` — SDL 창/이벤트를 이미 쓰고 있어도 오디오 서브시스템은 별도로 올린다. XAudio2 백엔드의 `CoInitializeEx` 에 대응한다.
 - 종료에서 `SDL_PauseAudioDevice(s_dev, 1)` 을 `SDL_CloseAudioDevice` 보다 **먼저** 부른다. 콜백을 멈춘 뒤에 장치를 닫아야 콜백이 해제된 상태를 만지지 않는다. §13.3 의 "의존하는 쪽을 먼저" 원칙의 SDL 판이다.
@@ -1620,16 +1629,16 @@ AudioHandle audio_load_sound(const char* filepath)
 }
 ```
 
-**dr_mp3 호출이 XAudio2 백엔드와 완전히 같다.** 디코딩은 백엔드에 의존하지 않는 공통 단계다. 다른 점 넷.
+**dr_mp3 호출이 XAudio2 백엔드와 완전히 같다.** 디코딩은 백엔드에 의존하지 않는 공통 단계다. 다른 점은 다음과 같다.
 
 1. `SoundData` 가 `WAVEFORMATEX` 대신 `channels` / `sampleRate` 를 따로 저장한다. Windows 전용 구조체를 끌어오지 않기 위함이다.
 2. PCM 을 `std::vector<uint8_t>` 가 아니라 `std::vector<int16_t>` 로 든다. 믹서가 샘플 단위로 접근하므로 캐스팅이 없다.
-3. **파일 I/O 오류 검사가 더 촘촘하다.** `fseek` 반환값을 두 번 검사하고, `fread` 의 부분 읽기(`nread != raw.size()`)를 잡아 에러를 찍고 0 을 반환한다. XAudio2 쪽은 `fread` 반환값을 보지 않는다 — 짧게 읽힌 파일은 dr_mp3 의 디코드 실패로 잡히긴 하지만, 진단 메시지가 "decode failed" 가 되어 원인이 흐려진다. 두 백엔드 중 이쪽이 본받을 형태다.
-4. **`audio_unload_sound` 가 그 핸들을 쓰는 보이스를 먼저 정리한다.** `s_bgm` 과 `s_sfx[]` 를 훑어 리셋한 뒤에야 PCM 을 비운다. 이 순서가 없으면 콜백이 해제된 버퍼를 읽는다. XAudio2 백엔드는 이 정리를 하지 않는데, 그 결과가 §13.5 의 위험이다.
+3. **부분 읽기(short read)는 두 백엔드 모두 잡는다.** 잡지 않으면 잘린 데이터가 디코더로 넘어가 "decode failed" 로 오진되고 실제 원인(I/O 오류)이 흐려진다 — XAudio2 쪽 소스 주석이 그 이유를 그대로 적어 둔다(§2.3). 다만 진단 메시지 형식이 다르고(SDL 은 `[audio] read <경로> failed (n/m bytes)`, XAudio2 는 `[audio] Short read: <경로> (n/m bytes)` — §10), `fseek` 반환값까지 검사하는 것은 SDL 쪽뿐이다.
+4. **언로드 전에 그 핸들을 쓰는 보이스를 먼저 정리하는 것도 양쪽 공통이다.** SDL 은 `audio_unload_sound` 가 `s_bgm` 과 `s_sfx[]` 를 훑어 리셋한 뒤에야 PCM 을 비우고, XAudio2 는 `s_sfxHandles` 로 해당 보이스를 찾아 정지시키고 Flush 완료까지 기다린다(§13.5). 이 순서가 없으면 오디오 스레드가 해제된 버퍼를 읽는다.
 
 `std::lock_guard` 의 위치도 보라. 디코딩(수백 ms 걸릴 수 있는 작업)은 락 **밖**에서 하고, `s_sounds.push_back` 만 락 안에서 한다. 락 구간을 최소로 잡는 기본기다.
 
-로드된 PCM 의 샘플레이트가 디바이스의 `s_have.freq` 와 다르면? 현재 구현은 **재샘플링하지 않는다**. 44.1 kHz 로 인코딩된 MP3 를 48 kHz 디바이스에서 재생하면 약 9 % 빠르게 재생된다. §13.6 참조.
+로드된 PCM 의 포맷이 디바이스의 `s_have` 와 다르면? 위 발췌의 `else` 분기가 **로드 시점에 이미 변환**하므로, 믹서는 언제나 디바이스 포맷의 PCM 만 본다. 재생 경로 어디에도 리샘플링 코드가 없는 것은 그 일이 필요 없어서가 아니라 로드 단계로 옮겨졌기 때문이다. 여기에 이르기까지의 사고 — 한때 왜 8.8 % 빠르게 재생됐고 어떻게 두 겹으로 고쳤는지 — 는 §13.6 에 있다.
 
 ### 8.8 재생 API
 
@@ -1701,12 +1710,12 @@ XAudio2 쪽 `audio_play_music` 이 `s_lastMusic` 기록과 `start_music_voice` �
 | 믹싱 | Mastering Voice (엔진/드라이버) | `mix_voice` 의 포화 합산 |
 | 루프 | `XAUDIO2_LOOP_INFINITE` | `v.pos = 0` |
 | 볼륨 | 보이스별 `SetVolume` (재생 시작 시) | 콜백의 `gain` 인자 (매 샘플) |
-| 샘플레이트 변환 | Source Voice 내부 SRC | 없음 (§13.6) |
-| 채널 변환 | Source Voice 내부 매트릭스 | `mix_voice` 의 모노→스테레오 복제 |
+| 샘플레이트 변환 | Source Voice 내부 SRC (재생 시) | 로드 시 `SDL_AudioStream` 변환 (§13.6) |
+| 채널 변환 | Source Voice 내부 매트릭스 | 로드 시 `SDL_AudioStream` 변환 + `mix_voice` 의 방어용 모노→스테레오 복제 |
 | 동시 SFX | 8 (Source Voice 풀) | 8 (`Voice` 구조체 풀) |
 | 콜백 블록 | 코드에서 미지정 — 대상 장치에서 측정 | 약 23.2 ms (`samples=1024 @ 44.1 kHz`) |
 | 레이스 보호 | XAudio2 내부 락 | `std::mutex s_mu` |
-| 언로드 시 보이스 정리 | 하지 않음 (§13.5) | `s_bgm`/`s_sfx[]` 를 리셋 |
+| 언로드 시 보이스 정리 | `s_sfxHandles` 로 추적해 정지 + Flush 완료 대기 (§13.5) | `s_bgm`/`s_sfx[]` 를 리셋 |
 | 의존성 | `xaudio2.lib`, `ole32.lib` (OS 내장) | `libSDL2` |
 | 바이너리 추가 | ~0 | ~1 MB (`SDL2.dll`) |
 | 공통 | dr_mp3 로 동일하게 디코드하고 `audio.h` 계약을 동일하게 구현 | |
@@ -1855,6 +1864,8 @@ XAudio2 판과 의미가 같고 표현만 다르다. BGM 복원은 보이스 구
     audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
 ```
 
+`load_settings` 와 `GameSettings`(`g_settings`)·`settingsPath` 는 [Part 11](./part11-settings-and-options.md) 이 도입하는 설정 영속화 계층이다. Part 5 체크포인트에는 그 계층이 아직 없으므로, 네 세터를 기본값으로 직접 호출하는 것으로 충분하다 — 이 절의 논점은 매핑 코드가 아니라 **호출 시점**이다.
+
 이 시점에는 오디오 장치가 아직 열려 있지 않다(`s_initialized == false`). 설정 세터는 이 상태에서 전역 기본값만 안전하게 갱신한다. 장치가 열린 뒤에는 슬라이더와 토글이 같은 API를 다시 호출하고, 선택값은 설정 파일에 저장된다.
 
 ---
@@ -1886,6 +1897,7 @@ audio_init() 실패
 | MP3 파일 누락 | `fopen` 실패 | `[audio] Cannot open: <경로>` 로그, 핸들 0 반환 |
 | MP3 파일 손상 | `drmp3_open_memory...` nullptr 반환 | `[audio] MP3 decode failed: <경로>` 로그, 핸들 0 반환 |
 | 빈 파일 | `fileSize <= 0` | `[audio] Empty file: <경로>` 로그, 핸들 0 반환 |
+| 부분 읽기 | `nread != fileData.size()` | `[audio] Short read: <경로> (n/m bytes)` 로그, 핸들 0 반환 |
 | Source Voice 생성 실패 | `CreateSourceVoice` HRESULT 실패 | 해당 효과음만 건너뜀 |
 | 오래된 Windows (7 이전) | XAudio2.9 미포함 | `XAudio2Create` 실패 → 전체 무음 |
 | COM 스레딩 충돌 | `RPC_E_CHANGED_MODE` | 경고만, `s_comOwned = false` 로 진행 |
@@ -1899,7 +1911,7 @@ audio_init() 실패
 | MP3 파일 누락 | `fopen` 실패 | `[audio] open <경로> failed` 로그, 핸들 0 반환 |
 | 부분 읽기 | `nread != raw.size()` | `[audio] read <경로> failed (n/m bytes)` 로그, 핸들 0 반환 |
 | Bluetooth 헤드셋 연결 해제 | 콜백 호출이 중단됨 | SDL 이 기본 장치로 폴백 (SDL 2.0.16+) |
-| 샘플레이트 재협상 | `s_have.freq != 44100` | 장치는 열리지만 재생 속도가 틀어진다 — §13.6 |
+| 장치가 44.1 kHz 미지원 | 증상 없음 — SDL 이 내부 변환기를 끼워 `s_have` 는 요청 포맷 유지 | `allowed_changes=0` 이라 재협상 자체가 일어나지 않는다 (§13.6) |
 | 콜백 안에서 예외 | 오디오 스레드 크래시 | 우리 코드에 예외 경로 없음 — 의도된 설계 |
 | 락 경합 | 콜백 지연 → 오디오 글리치 | `s_mu` 는 짧게 유지, 락 안에서 I/O·할당 금지 |
 
@@ -2328,22 +2340,7 @@ SDL 백엔드에서 대응되는 것은 `SDL_PauseAudioDevice(s_dev, 1)` → `SD
 
 문제는 이걸 막을 정보가 아예 없었다는 것이다. 보이스 풀은 슬롯마다 포맷 (`s_sfxFormats`)만 기억하고 **어느 핸들의 PCM 을 물고 있는지는 기록하지 않았다.** 그래서 언로드가 "이 핸들을 쓰는 보이스" 를 찾을 방법 자체가 없었다.
 
-지금은 슬롯별로 핸들을 추적한다.
-
-**현재 소스 발췌 — `audio/audio.cpp`**
-
-```cpp
-// SFX 보이스 풀
-static constexpr int             MAX_SFX_VOICES = 8;
-static IXAudio2SourceVoice*      s_sfxVoices[MAX_SFX_VOICES] = {};
-static WAVEFORMATEX              s_sfxFormats[MAX_SFX_VOICES] = {};
-// 각 보이스가 지금 어느 핸들의 PCM 을 물고 있는지. XAudio2 는 SubmitSourceBuffer 에
-// 넘긴 포인터를 재생이 끝날 때까지 그대로 참조하므로, 언로드 시 그 버퍼를
-// 해제하기 전에 해당 보이스를 먼저 멈춰야 한다.
-static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
-```
-
-그 배열이 있으니 언로드가 정리할 수 있다.
+지금은 §1.4 에서 본 `s_sfxHandles` 배열이 그 정보를 든다 — 재생 시점에 `audio_play_sound` 가 "이 슬롯은 지금 이 핸들의 PCM 을 물고 있다" 를 적어 두고(§3.1 발췌의 마지막 줄), 언로드가 그것을 보고 정리한다.
 
 **현재 소스 발췌 — `audio/audio.cpp`**
 
@@ -2398,9 +2395,7 @@ static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
     s_dev = SDL_OpenAudioDevice(nullptr, 0, &want, &s_have, 0);
 ```
 
-덤으로 얻은 것이 하나 더 있다. 모노 소스를 스테레오로 올릴 때 예전 `mix_voice` 는 `r = l` 로 양 채널에 같은 값을 복제했는데, 이는 에너지를 보존하지 않아 모노 효과음만 체감상 3 dB 크게 들린다. 이제 그 변환도 SDL 이 처리하므로 문제가 사라졌다.
-
-지금 이 프로젝트가 셋 중 아무것도 하지 않은 것은 의식적 유예이지 해결이 아니다.
+덤으로 얻은 것이 하나 더 있다. 모노 소스의 스테레오 승격도 이제 로드 시점에 SDL 변환기가 처리하므로, `mix_voice` 의 `r = l` 복제 경로 — 에너지를 보존하지 않아 모노 효과음만 체감상 3 dB 크게 들리는 — 는 정상 로드 경로에서 더 이상 실행되지 않는다. 코드에는 방어용으로만 남아 있다(§8.4).
 
 ### 13.7 락 경합 (SDL)
 
@@ -2408,7 +2403,7 @@ static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
 
 **원인:** `audio_load_sound` 가 디코딩 후 `s_mu` 를 잡고 `s_sounds.push_back` 한다. 벡터가 재할당되면 그 복사 시간만큼 락이 유지되고, 콜백이 같은 락을 기다리다 마감을 놓친다.
 
-**해결:** 대량 로드는 `Game` 생성자에서 한 번에 해두고 런타임에는 `audio_play_sound` 만 호출한다. 이미 이 프로젝트의 패턴이다. 사운드가 다섯 개뿐이라 재할당도 몇 번 일어나지 않는다. 필요해지면 `s_sounds.reserve(N)` 한 줄로 재할당을 없앨 수 있다.
+**해결:** 대량 로드는 `Game` 생성자에서 한 번에 해두고 런타임에는 `audio_play_sound` 만 호출한다. 이미 이 프로젝트의 패턴이다. 로드가 게임 모드 진입 시 한 줌에 그치니 재할당도 드물다. 필요해지면 `s_sounds.reserve(N)` 한 줄로 재할당을 없앨 수 있다.
 
 ---
 
@@ -2509,4 +2504,3 @@ mv Sounds/rotate.mp3.bak Sounds/rotate.mp3
 ### 학습 자료
 - Somberg, Guy (ed.). "Game Audio Programming: Principles and Practices." CRC Press.
 - Bencina, Ross. "Real-time audio programming 101: time waits for nothing." http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing
-- raylib. "raudio.c — Audio module (miniaudio backend)." https://github.com/raysan5/raylib/blob/master/src/raudio.c

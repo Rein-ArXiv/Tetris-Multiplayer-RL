@@ -6,7 +6,7 @@
 
 ## 이 장의 구현 계약
 
-- **선행 상태:** Part 8의 관측 schema(`build_observation`), 40-action 인코딩 (`encode_action`), `TetrisPolicyNet` 과 `load_checkpoint` 계약, `python/netbot/input_expander.py` 의 전개 규칙.
+- **선행 상태:** Part 4까지 완성된 실행 가능한 클라이언트(메뉴 루프·렌더러·60Hz 틱 루프 — 이 장의 봇 선택 화면과 `AppMode::BotSingle` 이 그 위에 얹힌다), 그리고 Part 8의 관측 schema(`build_observation`), 40-action 인코딩 (`encode_action`), `TetrisPolicyNet` 과 `load_checkpoint` 계약, `python/netbot/input_expander.py` 의 전개 규칙.
 - **이번 장의 파일:** `python/netbot/export_onnx.py`, `bot/placement.h`, `bot/placement.cpp`, `bot/bot_onnx.h`, `bot/bot_onnx.cpp`, `model/bots/`, `model/bots.cfg`, `src/main.cpp` 의 봇 선택 화면과 `AppMode::BotSingle` 루프, `CMakeLists.txt` 의 `TETRIS_BUILD_BOT` 블록.
 - **연결점:** 학습 정책을 ONNX로 내보내고 C++에서 같은 관측을 만들어 placement를 추론한 뒤, 인간 입력과 같은 `SubmitInput` 경로로 실행한다. 두 보드는 [Part 6](./part6-lockstep-networking.md) 의 네트워크 경로와 동일한 구조로 가비지를 교환한다.
 - **완료 게이트:**
@@ -25,7 +25,7 @@ Part 8 이 만든 것은 평가 함수(`bcts_score`)와 그것을 쓰는 학습�
 1. **피처 엔지니어링의 상한.** 선형 평가 함수는 "좋은 보드" 를 사람이 정의한 것이다. §11.2 의 `eval_board` 가 쓰는 특성은 **총높이 · 삭제줄 · 구멍 · 요철(bumpiness) 네 개뿐**이다. T-spin, 다단 콤보, 백-투-백 테트리스 같은 공격 최적화는 이 네 숫자로 표현되지 않으므로 봇이 그런 수를 절대 찾지 않는다. §13.2 에서 보듯 `Single vs Bot` 은 두 보드가 실제로 가비지를 주고받는 구조라, 점수가 아니라 **공격량**이 승부를 가른다. 거기서 천장이 보인다.
 2. **학습 가능성.** "다음 달에 보상 함수를 바꿔서 다시 훈련" 은 휴리스틱으로는 불가능하다. RL 은 그 반복 루프 자체를 프로젝트의 1급 시민으로 만든다.
 
-참고로 이 평가 함수 계열의 이름은 BCTS 이며, 근거는 `python/common/features.py` 의 `These are the classic BCTS (Building Controllers for Tetris) features` 다 — Thiery & Scherrer(2009). Bertsekas-Tsitsiklis 계열의 근사 동적 계획법과는 다른 계보이며, 저장소 안에 그 귀속을 뒷받침하는 근거는 없다. 가중치 숫자의 출처가 저장소 안에서 갈린다는 점은 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에 정리돼 있다.
+참고로 이 평가 함수 계열의 이름은 BCTS 이며, 근거는 `python/common/features.py` 의 `These are the classic BCTS (Building Controllers for Tetris) features` 다 — Thiery & Scherrer(2009). Bertsekas-Tsitsiklis 계열의 근사 동적 계획법과는 다른 계보이며, 저장소 안에 그 귀속을 뒷받침하는 근거는 없다. 가중치 숫자 자체의 원전은 저장소 안의 근거만으로는 확정할 수 없어 두 구현 모두 "널리 쓰이는 휴리스틱 가중치" 로만 표기한다 — 그 판단의 배경은 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에 정리돼 있다.
 
 ### 1.2 왜 인-프로세스 추론인가
 
@@ -259,76 +259,11 @@ env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
 
 ## 4. pybind11 바인딩
 
-학습 전체가 이 한 파일에 의존한다. 전문을 인용한다.
+학습 전체가 `bindings/tetris_py.cpp` 한 파일에 의존한다. 모듈 등록 전체(`Placement`·`SimBlock`·`SimGame` 클래스와 개별 메서드의 해설)는 [Part 8](./part8-python-rl.md) 이 절별로 해부했으므로, 여기서는 **런타임 계약에 직접 걸리는 표면**만 다시 본다 — 시드 기본값, placement API 와 `clone()`, 전투/가비지 API, 관측 복사, 결정론 해시다.
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp`**
+**현재 소스 발췌 — `bindings/tetris_py.cpp`** (`SimGame` 등록부 앞부분. `Placement`·`SimBlock` 등록, frame 단위 API, 조회 접근자는 생략)
 
 ```cpp
-// SimGame을 Python에서 쓰기 위한 pybind11 binding.
-//
-// 게임 규칙을 Python으로 다시 구현하지 않고 C++ SimGame을 그대로 노출한다.
-// 학습할 때와 실제로 플레이할 때의 규칙이 갈라지면 sim-to-real gap이 생기는데,
-// 구현이 하나뿐이면 그 문제가 아예 없다.
-//
-// 두 가지 방식의 API를 제공한다.
-//   - placement 단위: RL 학습용. "몇 번 열에 몇 번 회전해서 떨어뜨릴지"를 한 번에 지정
-//   - frame 단위: parity test용. 한 tick의 input mask를 그대로 적용해
-//                 C++ lockstep 경로와 결과가 같은지 대조
-//
-// TETRIS_BUILD_PY=ON으로 빌드한다. 순수 시뮬레이션 소스만 링크하므로
-// renderer나 audio 없이도 컴파일된다.
-//
-// 사용 예:
-//   from sim import SimGame
-//   g = SimGame(seed=42)
-//   for p in g.legal_placements():
-//       print(p.col, p.rot)
-//   g.apply_placement(4, 0)
-//   arr = g.grid()                # (20, 10) int32 NumPy 배열 (복사본)
-//   h   = g.state_hash()          # C++ SimGame::StateHash()와 비트 단위로 동일
-//
-// 아래 docstring들은 Python 쪽 help()에 그대로 노출되므로 영어로 둔다.
-
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <pybind11/numpy.h>
-
-#include "../src/sim_game.h"
-#include "../src/sim_grid.h"
-#include "../src/sim_block.h"
-
-namespace py = pybind11;
-
-PYBIND11_MODULE(tetris_py, m)
-{
-    m.doc() = "Headless Tetris simulation (pybind11 wrapper around SimGame)";
-
-    // 한 번의 착수를 나타내는 (column, rotation) 쌍.
-    py::class_<SimGame::Placement>(m, "Placement")
-        .def_readonly("col", &SimGame::Placement::col)
-        .def_readonly("rot", &SimGame::Placement::rot)
-        .def("__repr__", [](const SimGame::Placement& p) {
-            return "Placement(col=" + std::to_string(p.col) +
-                   ", rot=" + std::to_string(p.rot) + ")";
-        });
-
-    // 관측용으로만 노출하는 테트로미노. Python 쪽에서 수정할 수 없다.
-    py::class_<SimBlock>(m, "SimBlock")
-        .def_readonly("id",             &SimBlock::id)
-        .def_readonly("rotation_state", &SimBlock::rotationState)
-        .def_readonly("row_offset",     &SimBlock::rowOffset)
-        .def_readonly("column_offset",  &SimBlock::columnOffset)
-        .def("cell_positions", [](const SimBlock& b) {
-            // 현재 rotation 상태에서 이 블록이 차지하는 4칸의 절대 좌표.
-            auto tiles = b.GetCellPositions();
-            py::list out;
-            for (const auto& t : tiles)
-            {
-                out.append(py::make_tuple(t.row, t.column));
-            }
-            return out;
-        });
-
     // 시뮬레이션 본체.
     py::class_<SimGame>(m, "SimGame")
         .def(py::init<uint64_t>(), py::arg("seed") = 0,
@@ -363,26 +298,11 @@ PYBIND11_MODULE(tetris_py, m)
         .def("add_pending_garbage", &SimGame::AddPendingGarbage, py::arg("rows"),
              "Queue `rows` garbage lines onto this board (injected on next lock). "
              "Negative/zero is ignored. Used to route an opponent's attack.")
-        .def("last_lines_cleared", [](const SimGame& g) { return g.lastLinesCleared; },
-             "Lines cleared by the most recent lock (0..4). Useful for reward.")
-        .def("last_garbage_received", [](const SimGame& g) { return g.lastGarbageReceived; },
-             "Garbage rows actually injected at the most recent lock.")
-        .def("total_lines_cleared", [](const SimGame& g) { return g.totalLinesCleared; },
-             "Cumulative lines cleared this game.")
-        .def("level", [](const SimGame& g) { return g.level; },
-             "Current gravity/speed level (1..20, +1 per 10 lines).")
+```
 
-        // --- frame 단위 API (lockstep parity test용) ---
-        // 실제 게임 클라이언트와 같은 경로다. 학습에는 쓰지 않는다.
-        .def("submit_input", &SimGame::SubmitInput, py::arg("input_mask"),
-             "Apply a one-tick input bitmask (see core/input.h). Retained for "
-             "frame-level parity/equivalence tests against the lockstep loop.")
-        .def("tick", &SimGame::Tick,
-             "Advance the gravity counter by one tick. Time-only progression "
-             "separate from input.")
-        .def("move_block_down", &SimGame::MoveBlockDown,
-             "Single-step the current piece down by one row (locks on contact).")
+**현재 소스 발췌 — `bindings/tetris_py.cpp`** (`grid()` — 관측 복사)
 
+```cpp
         // --- 관측 ---
         .def("grid", [](const SimGame& g) {
             // 내부 버퍼를 참조로 넘기지 않고 복사한다.
@@ -397,34 +317,11 @@ PYBIND11_MODULE(tetris_py, m)
                     buf(r, c) = raw[r][c];
             return arr;
         }, "Return the 20x10 grid as a numpy int32 array (copied).")
+```
 
-        .def("current_block",
-             &SimGame::CurrentBlock,
-             py::return_value_policy::reference_internal,
-             "Current falling piece.")
-        .def("ghost_block",
-             &SimGame::GhostBlock,
-             py::return_value_policy::reference_internal,
-             "Ghost/preview piece at the hard-drop target.")
-        .def("next_block",
-             [](const SimGame& g) { return g.NextBlock(); },
-             "Copy of the first piece in the preview queue.")
-        .def("next_block_ids", [](const SimGame& g) {
-            std::vector<int> ids;
-            const auto& next = g.NextBlocks();
-            ids.reserve(next.size());
-            for (const SimBlock& block : next) ids.push_back(block.id);
-            return ids;
-        }, "Piece ids in the visible next preview queue.")
+**현재 소스 발췌 — `bindings/tetris_py.cpp`** (결정론 검증 표면)
 
-        .def("current_block_id", &SimGame::CurrentBlockId)
-        .def("current_rotation", &SimGame::CurrentRotation)
-        .def("current_row",      &SimGame::CurrentRow)
-        .def("current_col",      &SimGame::CurrentCol)
-        .def("next_block_id",    &SimGame::NextBlockId)
-        .def("score",            &SimGame::Score)
-        .def("game_over",        &SimGame::IsGameOver)
-
+```cpp
         // --- 결정성 검증용 ---
         .def("state_hash", &SimGame::StateHash,
              "FNV-1a 64-bit hash of the full sim state. Bitwise-identical to "
@@ -432,18 +329,13 @@ PYBIND11_MODULE(tetris_py, m)
              "regression test checks.")
         .def("rng_state", &SimGame::RngState,
              "Raw XorShift64* RNG state (for debugging cross-platform drift).")
-
-        // 관측 벡터 크기를 Python 쪽에서 하드코딩하지 않도록 노출한다.
-        .def_property_readonly_static("ROWS", [](py::object) { return SimGrid::kRows; })
-        .def_property_readonly_static("COLS", [](py::object) { return SimGrid::kCols; });
-}
 ```
 
-바인딩 설계 원칙 몇 가지.
+이 밖에 조회 접근자(`current_block_id`, `score`, `game_over` 등)와 관측 벡터 크기 상수(`SimGame.ROWS`/`COLS`), frame 단위 API(`submit_input`/`tick`)가 같은 등록부에 이어진다. 바인딩 설계 원칙 몇 가지.
 
 **두 API를 동시에 제공한다.** `apply_placement`는 학습용(한 번의 호출이 rotate → translate → hard-drop → lock까지 원자적으로 실행)이고, `submit_input`과 `tick`은 C++ lockstep 경로와 프레임 단위 동등성을 검증하는 API다. 인게임 봇은 `SimGame`에 같은 프레임 입력을 넣는다.
 
-**`grid()` 는 항상 복사한다.** 파일 상단 usage 주석의 `# numpy (20, 10) int32 copy` 와 `grid()` 람다 안의 `We COPY the buffer` 가 같은 사실을 두 번 말한다. 200 개 int 복사는 훈련 throughput 에 거의 영향이 없고, "Python 이 numpy 배열을 쥐고 있는데 SimGame 이 그 아래에서 mutate 해서 다음 프레임에 다른 값이 보인다" 는 미묘한 버그를 완전히 봉쇄한다. `return_value_policy::reference_internal` 은 `current_block`/`ghost_block` 처럼 멤버 수명이 안정적인 조회에만 쓴다. `next_block` 은 preview 큐 원소라 큐 갱신 때 참조가 무효화될 수 있어 복사로 반환한다.
+**`grid()` 는 항상 복사한다.** 파일 상단 usage 주석의 `# (20, 10) int32 NumPy 배열 (복사본)` 과 `grid()` 람다 첫 줄의 `내부 버퍼를 참조로 넘기지 않고 복사한다` 가 같은 사실을 두 번 말한다. 200 개 int 복사는 훈련 throughput 에 거의 영향이 없고, "Python 이 numpy 배열을 쥐고 있는데 SimGame 이 그 아래에서 mutate 해서 다음 프레임에 다른 값이 보인다" 는 미묘한 버그를 완전히 봉쇄한다. `return_value_policy::reference_internal` 은 `current_block`/`ghost_block` 처럼 멤버 수명이 안정적인 조회에만 쓴다. `next_block` 은 preview 큐 원소라 큐 갱신 때 참조가 무효화될 수 있어 복사로 반환한다.
 
 **전투/가비지 API가 2-보드 구성의 토대다.** `src/main.cpp`의 `Single vs Bot` 가비지 교환과 `python/common/env_versus.py`의 2-보드 RL 환경이 이 배선을 공유한다. `attack_lines_sent()`가 누적 총계라서 양쪽 모두 "배치 전후 차분" 패턴을 쓰고, `add_pending_garbage()`로 상대 보드에 라우팅하며 실제 주입은 받는 보드의 다음 잠금에서 일어난다. C++ 게임과 Python 학습 환경이 같은 호출 순서를 갖는 것이 API 설계의 목적이다.
 
@@ -833,7 +725,7 @@ uses the classic target-network max. Checkpoints saved here load directly in
 
 ## 8. Colab model zoo — smoke 에서 long 으로
 
-로컬 배포 머신이 Mac mini 2011 같은 약한 장비라면, 여기서 PyTorch 학습을 돌리지 않는다. 로컬은 빌드·정적 테스트·ONNX 추론만 맡고, 학습과 `.pt -> .onnx` export 는 Colab 에서 끝낸다. 현재 저장소의 권장 진입점은 `python/train/train_model_zoo_colab.ipynb` 다.
+로컬 배포 머신이 저사양 장비라면, 여기서 PyTorch 학습을 돌리지 않는다. 로컬은 빌드·정적 테스트·ONNX 추론만 맡고, 학습과 `.pt -> .onnx` export 는 Colab 에서 끝낸다. 현재 저장소의 권장 진입점은 `python/train/train_model_zoo_colab.ipynb` 다.
 
 | 파일 | 용도 |
 |------|------|
@@ -1220,7 +1112,7 @@ bool BotOnnx::IsLoaded() const
 }
 ```
 
-세 개의 공개 함수: `Load`, `Infer`, `IsLoaded`. 호출자 입장에서는 ORT 가 존재하는지, 모델이 로드됐는지, 추론이 성공했는지만 신경 쓰면 된다. ORT 헤더는 이 번역 단위에만 노출된다. `~BotOnnx() = default` 가 헤더가 아니라 `.cpp` 에 있는 것도 PIMPL 의 필수 요건이다 — 소멸자가 `Impl` 의 완전한 정의를 봐야 하기 때문이다.
+공개 표면은 `Load` · `Infer` · `IsLoaded` 다. 호출자 입장에서는 ORT 가 존재하는지, 모델이 로드됐는지, 추론이 성공했는지만 신경 쓰면 된다. ORT 헤더는 이 번역 단위에만 노출된다. `~BotOnnx() = default` 가 헤더가 아니라 `.cpp` 에 있는 것도 PIMPL 의 필수 요건이다 — 소멸자가 `Impl` 의 완전한 정의를 봐야 하기 때문이다.
 
 ### 10.5 ONNX Runtime 이 없는 빌드
 
@@ -1290,7 +1182,7 @@ stateDiagram-v2
 namespace bot {
 ```
 
-include 가 네 개뿐이다 — ORT 도, 렌더러도, 네트워크도 없다. 이 파일은 `TETRIS_BUILD_BOT` 과 무관하게 항상 컴파일되고 항상 동작한다. **모델이 없어도 봇이 돌아가는 근거가 여기 있다.**
+include 목록에 ORT 도, 렌더러도, 네트워크도 없다. 이 파일은 `TETRIS_BUILD_BOT` 과 무관하게 항상 컴파일되고 항상 동작한다. **모델이 없어도 봇이 돌아가는 근거가 여기 있다.**
 
 ### 11.1 `fallback_placement` — 최후의 안전망
 
@@ -1394,7 +1286,7 @@ bool heuristic_placement(const SimGame& sim, int& col_out, int& rot_out)
 | `fallback_placement` | (col, rot) 사전순 최소 1개 | 무전략 (거의 항상 왼쪽) | ONNX 추론 실패 시 안전망 |
 | `heuristic_placement` | 모든 합법 placement 를 복사본에 적용 → `eval_board` 최고점 선택 | 1-ply 그리디 베이스라인 | 모델 없이 "잘 두는" 봇 |
 
-`eval_board` 의 가중치 `-0.510066`(총높이) / `0.760666`(삭제줄) / `-0.356630`(구멍) / `-0.184483`(요철)은 Python `BCTS_WEIGHTS` 의 같은 네 항목과 **비트 단위로 같은 값**이다. 이름 표기는 저장소 안에서 갈린다 — 여기 주석은 "El-Tetris 가중치", `python/common/features.py` 는 "Dellacherie's classic linear weights". 그 불일치와 출처 문제는 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에서 다뤘다.
+`eval_board` 의 가중치 `-0.510066`(총높이) / `0.760666`(삭제줄) / `-0.356630`(구멍) / `-0.184483`(요철)은 Python `BCTS_WEIGHTS` 의 같은 네 항목과 **비트 단위로 같은 값**이다. 두 파일의 주석 표기도 지금은 `널리 쓰이는 Tetris 휴리스틱 가중치` 로 통일돼 있다 — 숫자의 원전을 저장소 안의 근거만으로는 확정할 수 없어 특정 이름을 박지 않은 것인데, 그 출처 판단은 [Part 8](./part8-python-rl.md) 의 BCTS 가중치 절에서 다뤘다.
 
 이 1-ply 그리디가 "휴리스틱 → RL" 비교의 출발점이다. RL 정책이 이 베이스라인을 못 넘으면 학습에 문제가 있는 것이다. `heuristic_placement` 도 `BotOnnx::Infer` 와 같은 `(const SimGame&, int& col, int& rot)` 시그니처라, 호출 사이트에서 모델 추론과 자리만 바꿔 끼울 수 있다 — §13.1 이 정확히 그렇게 한다.
 
@@ -1554,7 +1446,7 @@ sequenceDiagram
 
 이 배선 때문에 §1.1 에서 말한 "휴리스틱의 천장" 이 실제로 관측 가능해진다. `eval_board` 는 `lines_cleared` 에 `0.760666` 가중치를 줄 뿐, "4줄을 한 번에 지워 4줄짜리 공격을 보낸다" 와 "1줄씩 네 번 지운다" 를 구분하지 않는다. 공격량은 줄 수에 선형이 아니므로(테트리스가 훨씬 강한 공격), 휴리스틱은 구조적으로 공격 최적화를 못 한다.
 
-그리고 이것이 `python/common/env_versus.py` 를 만든 이유다 — 학습 환경이 이 배선을 그대로 미러링해야 학습된 정책이 실제 대전에서 의미가 있다. 그 환경의 보상은 `lines_cleared + attack_weight * attack_sent` 로 공격에 명시적 가중치를 준다. 다만 [Part 8](./part8-python-rl.md) 에 적었듯 **현재 trainer CLI 는 아직 그 환경을 선택할 수 없다.**
+그리고 이것이 `python/common/env_versus.py` 를 만든 이유다 — 학습 환경이 이 배선을 그대로 미러링해야 학습된 정책이 실제 대전에서 의미가 있다. 그 환경의 보상은 `lines_cleared + attack_weight * attack_sent` 로 공격에 명시적 가중치를 준다. PPO trainer 는 `--env versus` 로 이 환경을 바로 선택할 수 있다(기본값은 `single`). 나머지 trainer 들은 아직 단일 보드 환경 전용이다 — 그 경계는 [Part 8](./part8-python-rl.md) 의 versus 선택 절에 정리돼 있다.
 
 ### 13.3 봇 로스터
 
@@ -1778,7 +1670,7 @@ cmake --build build --config Release
 
 메뉴에서 "Single vs Bot" 을 열면 `Heuristic (test)` 가 보여야 한다. 이 상태에서도 "Single Play", "Matchmaking Multi", "Custom Room Multi" 는 그대로 사용할 수 있어야 한다. `.onnx` 파일이 하나도 없으면 ONNX 로드 시도 자체가 없으므로 오류 표시도 없어야 정상이다.
 
-반대로 ORT 없는 빌드에서 `.onnx` 모델을 선택하면 봇이 실행되지 않고 **봇 선택 화면에 오류 문자열이 그려진다.** 이건 stdout 로그가 아니다 — `src/main.cpp` 가 `botSelectError = "Load failed: " + err;` 로 문자열을 만들고,  이 그것을 `draw_text` 로 화면에 그린다.
+반대로 ORT 없는 빌드에서 `.onnx` 모델을 선택하면 봇이 실행되지 않고 **봇 선택 화면에 오류 문자열이 그려진다.** 이건 stdout 로그가 아니다 — `src/main.cpp` 가 `botSelectError = "Load failed: " + err;` 로 문자열을 만들고, 봇 선택 화면이 그것을 `draw_text` 로 화면에 그린다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 

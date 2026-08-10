@@ -3,7 +3,7 @@
 
 // [NET/RL] This file is the single source of truth for game logic.
 // Ported line-for-line from src/game.cpp to preserve deterministic state hashes.
-// Do NOT add raylib/audio/rendering here — those belong in the Game wrapper.
+// Do NOT add rendering/audio/platform deps here — those belong in the Game wrapper.
 
 SimGame::SimGame(uint64_t seed)
     : gameOver(false),

@@ -11,8 +11,14 @@
 
 relay worker 수명은 종료 신호와 drain 대기를 추가해 보완했고, active match 중
 SIGTERM 회귀 테스트로 고정했다. 연결 setup과 진행 중 매치에는 IP·시간·전송량
-상한을 두고, 계정 중복 session, 갑작스러운 단절 기권, match 저장 재시도도 자동
-검증한다. 남은 가장 큰 유지보수 과제는 `src/main.cpp`의 집중된 책임이다.
+상한을 두고, 계정 중복 session, 단절 몰수 처리, match 저장 재시도도 자동
+검증한다. 이번 주기의 하드닝으로 클라이언트 초기화 실패는 침묵하지 않고
+(`renderer_init` bool 반환 + `platform_fatal_error` 통지 후 종료), Win32는
+per-monitor DPI 인식으로 물리 픽셀 기준 창·프리셋을 만들며, meta의 rate limit은
+X-Forwarded-For의 rightmost 토큰만 신뢰해 첫 토큰 위조 우회를 막는다. 방치된
+custom room은 대기 데드라인(게스트 무입장 15분, READY 미확정 60초)으로 서버가
+정리하고, TCP keepalive는 Windows에서도 POSIX와 같은 15s/5s로 동작한다. 남은
+가장 큰 유지보수 과제는 `src/main.cpp`의 집중된 책임이다.
 
 ## 우선순위별 검수 결과
 
@@ -27,14 +33,20 @@ SIGTERM 회귀 테스트로 고정했다. 연결 setup과 진행 중 매치에�
 
 - `test_relay_sigterm_drains_active_match`가 실제 forwarder를 연 상태에서 SIGTERM을 보낸다.
 - relay가 3초 안에 exit code 0으로 종료되지 않으면 실패한다.
-- first-frame worker도 전역 종료 상태를 확인해 3초 timeout 전에 빠져나온다.
+- first-frame worker도 전역 종료 상태를 확인해 5초 timeout 전에 빠져나온다.
+- Windows에서는 CTRL_BREAK_EVENT(SIGBREAK) 등록으로 같은 우아한 종료 경로를 검증한다.
 
 ### 해결됨 — ranked 결과 중복과 단절 회피
 
 relay가 생성한 `match_uuid`를 meta의 unique index와 결과 snapshot에 보존한다. HTTP
 응답 유실로 동일 POST가 재시도되어도 최초 match 결과를 반환하고 RP/BP/XP와 승패를
-다시 갱신하지 않는다. 한 peer가 summary 전에 끊기면 서버가 관측한 방향을 기권으로
-저장하되, relay 자체 종료 중에는 플레이어 패배로 만들지 않는다.
+다시 갱신하지 않는다. `post_match` 재시도에는 wall-clock 예산이 걸려 매치 종료
+흐름이 재시도 대기로 늘어지지 않는다. 몰수 판정은 수집된 summary 개수로 갈린다 —
+양쪽 summary가 있으면 교차검증 경로에 위임하고, 한쪽만 있으면 그 summary의 승패
+주장을 존중하며(끊긴 순서 `disconnect_side`는 승자 판정이 아니라 생존자 통지
+대상 선정에만 쓴다), summary가 하나도 없는 무경기는 meta에 저장하지 않고 델타 0
+결과만 통지해 즉시 이탈 반복형 RP 파밍과 임의 승자 오염을 막는다. relay 자체 종료
+중에는 몰수를 만들지 않는다.
 
 검증:
 
@@ -49,7 +61,26 @@ relay가 생성한 `match_uuid`를 meta의 unique index와 결과 snapshot에 �
 시점을 나타낼 수 있어 “전부 복사했다”는 사실만으로는 일관된 스냅샷이 되지 않는다.
 현재 스크립트는 SQLite online backup API만 사용하고, 복사본의
 `PRAGMA integrity_check`가 `ok`인 경우에만 아카이브한다. CLI가 없으면 명시적으로
-실패하며, 파일 복사는 meta를 중지한 오프라인 절차로 분리했다.
+실패하며, 파일 복사는 meta를 중지한 오프라인 절차로 분리했다. 아카이브 후 중간
+산출물 `.db` 스냅샷을 정리하고 최근 `KEEP`개(기본 14)만 남기는 보존 정책이 스크립트
+자체에 들어가, 저장 공간이 작은 meta 호스트에서 백업이 디스크를 채우는 경로를 막는다.
+정리 실패는 경고만 남기고 이미 성공한 백업을 뒤집지 않는다.
+
+### 해결됨 — 클라이언트 초기화 실패의 침묵
+
+기존에는 GL 3.3 Core 컨텍스트나 렌더러 초기화가 실패해도 프로그램이 검은 창 또는
+레거시 컨텍스트로 계속 진행해 원인을 알 수 없었다. 현재는 `platform_init` 실패가
+`platform_should_close()`를 세우고, `renderer_init`이 bool을 반환하며, `main()`이
+두 신호를 확인해 `platform_fatal_error` 메시지박스로 이유를 알린 뒤 종료 코드 1로
+끝난다. 함께 들어간 하드닝: Win32 per-monitor DPI 인식과 `AdjustWindowRectExForDpi`
+기반 창 보정, `WM_DPICHANGED` 처리, vsync OFF 시 240fps 상한, `image_init` 멱등화.
+
+### 해결됨 — X-Forwarded-For 첫 토큰 신뢰로 인한 rate limit 우회
+
+meta의 `rate_limit_key`가 XFF의 첫 토큰을 신뢰해, loopback 프록시 뒤 배치에서
+클라이언트가 매 요청 다른 XFF를 심으면 public 60/s 버킷을 무한 우회할 수 있었다.
+현재는 신뢰 프록시가 마지막에 append한 rightmost 토큰만 사용한다. `CF-Connecting-IP`
+우선 로직은 유지된다.
 
 ### P2 — `src/main.cpp`의 책임 집중
 
@@ -101,44 +132,45 @@ parser 계약 테스트 확대가 필요하다.
 | 플랫폼 교체 | 양호 | `platform.h`, `audio.h` 뒤에 Win32/SDL 구현 분리 |
 | 네트워크 프로토콜 | 보통 이상 | framing/session/relay 분리와 parity 테스트 존재 |
 | 서버 종료 수명 | 양호 | worker 활성 수 추적, 신규 pump 차단, SIGTERM drain 테스트 |
-| 접속·단절 방어 | 양호 | IP별 setup 제한, keepalive, idle·대역폭 상한, session lease, 기권 처리 |
+| 접속·단절 방어 | 양호 | IP별 setup 제한, 양 플랫폼 15s/5s keepalive, idle·대역폭 상한, 방 대기 데드라인, session lease, summary 기반 몰수 처리 |
+| 클라이언트 초기화 | 양호 | 초기화 실패 신호(bool/`platform_should_close`) + `platform_fatal_error` 통지 후 종료, DPI 인식 |
 | UI 확장성 | 개선 필요 | mode별 책임이 `src/main.cpp`에 집중 |
 | Meta 저장소 | 양호 | DB 직렬화, transaction, migration, UUID 멱등 저장, 일관된 online backup 경로 존재 |
 | RL 경계 | 양호 | pybind simulation, common env/model, export 경로가 분리됨 |
 
-## 2026-08-09 검증 결과
+## 2026-08-10 검증 결과
 
-현재 작업 트리에서 다음을 확인했다.
+GL 하드닝(초기화 실패 신호, DPI 인식, 240fps 상한, `image_init` 멱등화)과 서버
+하드닝(몰수 재설계, 방 대기 데드라인, XFF rightmost, keepalive 정합, 백업 보존
+정책)이 반영된 현재 작업 트리에서 다음을 확인했다.
 
 ```bash
 git diff --check
-cmake --build /tmp/tetris-game-build --parallel
-cmake --build /tmp/tetris-hardening-build --parallel
-/tmp/tetris-hardening-build/sim_hash_dump > /tmp/tetris_sim_hash_dump.out
+cmake --build build-release --parallel          # Release: tetris + tetris_relay + tetris_meta
+./build-release/sim_hash_dump > /tmp/tetris_sim_hash_dump.out
 diff -u python/tests/_sim_hash_dump.txt /tmp/tetris_sim_hash_dump.out
-.venv/bin/python -m pytest python/tests -q
+.venv/bin/python -m pytest python/tests -q -rs
+./build-release/tetris                          # [GL] 3.3 Core 기동 로그 확인
 ```
 
 결과:
 
-- SDL/OpenGL 게임 클라이언트와 relay/meta 대상 빌드 통과
-- 결정론 골든 비교 통과
-- 소켓을 쓰지 않는 Python 회귀 항목 통과
+- Release 구성의 게임 클라이언트와 relay/meta 대상 빌드가 경고 없이 통과
+- 결정론 골든 비교(`sim_hash_dump`) 일치
+- Python 회귀 1657 passed, 5 skipped — 이전 주기에 socket 권한으로 막혔던 meta/relay
+  loopback 스모크가 실제 실행으로 전환된 수집 결과다. 남은 skip은 선택 의존성 부재
+  사유로, `-rs` 출력에서 의도와 일치함을 확인했다
+- SDL/OpenGL 클라이언트가 GL 3.3 Core 컨텍스트로 기동하는 것을 확인
 
-이 검수 주기의 앞선 네트워크 허용 실행에서는 meta/relay loopback 통합 테스트가
-통과했다. 마지막 문서·메뉴 action·CSPRNG 읽기 변경 뒤 재실행은 샌드박스의 socket
-권한과 승인 한도 때문에 `PermissionError` 단계에서 막혔다. 제품 assertion 실패로
-해석할 결과는 아니지만, **최종 merge 전에는 권한 있는 CI나 로컬 호스트에서 전체
-통합 테스트를 다시 통과시켜야 한다.** 이 문서는 실행하지 못한 검증을 통과로
-간주하지 않는다.
+이 문서는 실행하지 못한 검증을 통과로 간주하지 않는다.
 
 ## 변경 시 반드시 지킬 계약
 
 - `SimGame` 변경: 같은 seed와 tick input은 모든 플랫폼에서 같은 `StateHash`를 만든다.
 - framing 변경: C++과 `python/netbot/framing.py`의 바이트 표현이 같다.
 - placement 변경: C++ bot과 Python input expander의 action 해석이 같다.
-- ranked match 변경: 양쪽 summary가 일치할 때만 RP/BP/XP를 반영한다.
-- ranked 단절 변경: summary 전 peer 단절은 기권이고 relay 종료는 기권이 아니다.
+- ranked match 변경: 양쪽 summary가 있으면 교차검증 일치가 반영 조건이고, 한쪽만 있으면 그 summary의 승패를 따르며, summary가 없으면 RP를 반영하지 않는다.
+- ranked 단절 변경: `disconnect_side`는 통지 대상 선정 전용이다 — 승자 판정에 쓰지 않는다. relay 종료는 몰수가 아니다.
 - match 저장 변경: 동일 `match_uuid` 재시도는 최초 결과를 반환하고 보상을 중복 반영하지 않는다.
 - DB 변경: 기존 `PRAGMA user_version` 데이터가 반복 실행에도 한 번만 이관된다.
 - 서버 변경: unranked는 meta 없이 동작하고, ranked match POST는 relay secret을 요구한다.
@@ -146,6 +178,9 @@ diff -u python/tests/_sim_hash_dump.txt /tmp/tetris_sim_hash_dump.out
 ## 아직 자동 검증하지 못한 범위
 
 - Windows Win32/WGL·GDI+ 이미지 decode·XAudio2 실제 실행
+- Win32 DPI 인식의 시각 효과 — 고배율(125%/150%) 모니터에서 프리셋 창이 물리 픽셀로
+  정확히 잡히는지, `WM_DPICHANGED`로 모니터 간 이동 시 창 크기가 유지되는지는
+  고배율 모니터 실기에서 눈으로 확인해야 한다
 - macOS SDL 앱 번들 실제 실행
 - ONNX Runtime을 포함한 모델별 인게임 추론
 - 장시간 실제 WAN lockstep과 패킷 지연/단절 복구

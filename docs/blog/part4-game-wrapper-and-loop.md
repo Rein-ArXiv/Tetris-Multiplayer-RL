@@ -22,7 +22,7 @@
 
 Part 1에서 게임 로직을, Part 2~3에서 창과 렌더러를 만들었다. 이제 이것들을 `Game`과 `main.cpp`의 **게임 루프**로 묶는다.
 
-게임 루프의 핵심 문제: 프레임 페이싱을 끄면 FPS가 수천에 달한다. 틱당 한 프레임이면 초당 수천 번의 `MoveBlockDown()`이 실행되어 블록이 눈 깜짝할 새에 바닥에 닿는다. 페이싱을 켜더라도 60 FPS PC와 144 FPS PC에서 게임 속도가 다르다.
+게임 루프의 핵심 문제: `update()` 호출 빈도가 렌더 프레임률에 묶이면 게임 속도가 하드웨어에 종속된다. 이 저장소의 플랫폼 계층은 페이싱을 꺼도 `platform_end_frame` 이 240 fps 상한(`kUncappedMaxFps`, `platform/win32.cpp`·`platform/sdl.cpp`)을 걸어 렌더 루프가 수천 fps 로 CPU/GPU 를 태우는 것만은 막아 두었다. 그러나 상한은 자원 정책이지 정답이 아니다 — 상한 240 에서도 틱당 한 프레임이면 초당 240 번의 `MoveBlockDown()` 이 실행되어 블록이 4배 빨리 떨어진다. 페이싱을 켜더라도 60 FPS PC와 144 FPS PC에서 게임 속도가 다르다.
 
 해결: **렌더링 속도와 시뮬레이션 속도를 분리**한다. 렌더링은 가능한 한 빠르게 (또는 프레임 페이싱에 맞춰), 시뮬레이션은 **정확히 60Hz**로 실행한다. 이 패턴이 고정 틱 어큐뮬레이터(fixed-tick accumulator)다.
 
@@ -39,7 +39,7 @@ Part 1에서 게임 로직을, Part 2~3에서 창과 렌더러를 만들었다. 
 |---|---|---|
 | 입력 수집과 반복 | `s_pendingInput`, `HorizontalRepeatInput`, `AccumulateInput`, `ConsumeInput` | **Part 4** |
 | 앱 모드와 객체 수명 | `AppMode`, 모드별 `unique_ptr`, `MenuAction`, `GameOverState` | **Part 4**가 공통 전환 규칙을 설명하고 각 기능 문서가 자기 모드를 설명 |
-| 초기화와 종료 | `platform_init`, `renderer_init`, `renderer_shutdown`, `platform_shutdown` | **Part 4**, 설정 적용은 [Part 11](./part11-settings-and-options.md) |
+| 초기화와 종료 | `platform_init`, `renderer_init`, `platform_fatal_error`, `renderer_shutdown`, `platform_shutdown` | **Part 4**, 설정 적용은 [Part 11](./part11-settings-and-options.md) |
 | 고정 틱과 리플레이 | `accumulator`, `SECONDS_PER_TICK`, `ReplayData` | **Part 4** |
 | 렌더 전용 효과 | `Callout`, 보드별 `ShakeState`, `apply_fx` | **Part 4** |
 | 직결·relay 게임 세션 | `Session`, `safeTick`, HASH/DESYNC, 채팅과 링크 상태 | [Part 6](./part6-lockstep-networking.md), 큐·룸 전환은 [Part 7](./part7-relay-server.md) |
@@ -92,7 +92,7 @@ graph TB
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# Pure (no raylib) logic — used by game, pybind11 module, and tests.
+# Pure simulation logic (no renderer/platform deps) — used by game, pybind11 module, and tests.
 set(TETRIS_SIM_SOURCES
     src/sim_game.cpp
     src/position.cpp
@@ -312,10 +312,13 @@ while (!quit) {
 
 | 환경 | FPS | update() 호출 | 결과 |
 |------|-----|-------------|------|
-| 프레임 페이싱 OFF | 3000+ | 초당 3000+ | 블록이 50배 빨리 떨어짐 |
+| 프레임 페이싱 OFF (240fps 상한) | ~240 | 초당 ~240 | 블록이 4배 빨리 떨어짐 |
+| 상한마저 없다면 | 수천 | 초당 수천 | 즉시 낙하 + CPU/GPU 낭비 |
 | 60Hz 페이싱 | 60 | 초당 60 | 의도한 속도 |
 | 144Hz 모니터 | 144 | 초당 144 | 2.4배 빠름 |
 | 배터리 절약 모드 노트북 | 30 | 초당 30 | 절반 속도 |
+
+표의 첫 두 행이 서로 다른 층의 문제라는 점을 구분해야 한다. `platform_end_frame` 의 240 fps 상한은 **자원 소모**를 막는 플랫폼 정책이고, 시뮬레이션 속도의 하드웨어 종속은 **정확성** 문제다. 상한을 아무리 조여도 두 번째 문제는 사라지지 않는다 — 240 이든 144 든 60 이 아닌 모든 값에서 게임 속도가 달라진다. 그래서 해법은 프레임률을 제어하는 것이 아니라 시뮬레이션을 프레임률에서 떼어내는 것이어야 한다.
 
 `deltaTime`을 곱해 이동량을 조절하는 방법도 있지만, 테트리스처럼 이산적(discrete) 셀 단위로 이동하는 게임에서는 적합하지 않다. 블록은 "0.7셀만큼 이동"할 수 없다.
 
@@ -384,8 +387,12 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
+    // 메뉴 Quit 요청 플래그. return 으로 즉시 끝내지 않고 메인 루프를 빠져나가
+    // 파일 하단의 공통 정리 경로를 타기 위한 것 (MenuAction::Quit 참고).
+    bool quitRequested = false;
+
     // ── 메인 루프 ───────────────────────────────────────────────────────────
-    while (!platform_should_close())
+    while (!quitRequested && !platform_should_close())
     {
         // 1) 입력 처리 + 델타타임
         float deltaTime = platform_begin_frame();
@@ -429,6 +436,12 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
         }
 ```
 
+루프를 빠져나가는 길은 두 갈래다. `platform_should_close()`(창 닫기 요청 또는
+초기화 실패 — §12.1), 그리고 메뉴의 Quit 이 세우는 `quitRequested` 플래그. 어느
+쪽이든 루프 아래의 **공통 정리 경로 하나**로 합류한다. Quit 이 그 자리에서
+`return 0` 하지 않고 플래그만 세우는 이유가 그것이다 — 종료 경로가 둘이 되면
+한쪽에만 정리 코드가 추가되는 비대칭이 생긴다(§12.1).
+
 `chatComposing`은 텍스트 입력 중 이동·회전 키가 게임 명령으로도 소비되는 것을
 막는다. Part 4 체크포인트에서는 `AccumulateInput();` / `ConsumeInput();`처럼
 인자 없이 부르며, 두 함수의 `bool suppress = false` 기본값이 같은 동작을 보존한다.
@@ -471,9 +484,9 @@ T1 시점에 pressed는 이미 false → 입력 소실!
 
 ### 5.2 증상
 
-프레임 페이싱 없이 FPS가 수천일 때, 방향키를 빠르게 누르면 일부 입력이 "씹힌다". 특히 스페이스바(하드 드롭)가 간헐적으로 무시되는 것이 가장 눈에 띈다.
+페이싱을 끄면 FPS 가 상한인 240 까지 올라간다 — 60 Hz 틱 하나에 렌더 프레임 네 개꼴이다. 이 상태에서 방향키를 빠르게 누르면 일부 입력이 "씹힌다". 특히 스페이스바(하드 드롭)가 간헐적으로 무시되는 것이 가장 눈에 띈다. 틱이 실행되지 않는 프레임에서 눌렀다 뗀 엣지 입력을 틱이 볼 방법이 없기 때문이다.
 
-이 문제는 `platform_set_vsync(true)`(60 FPS)이면 잘 드러나지 않는다. 프레임과 틱이 거의 1:1 대응하기 때문이다. 그러나 페이싱을 끄면 즉시 발생한다.
+이 문제는 `platform_set_vsync(true)`(60 FPS)이면 잘 드러나지 않는다. 프레임과 틱이 거의 1:1 대응하기 때문이다. 그러나 페이싱을 끄는 순간 틱당 프레임 수가 늘어나 즉시 발생한다. 입력 소실은 FPS 의 절대값이 아니라 **"틱보다 프레임이 잦다"는 구조**에서 나오므로, 상한을 240 에서 어느 값으로 바꾸든 문제의 본질은 같다.
 
 ### 5.3 해결: AccumulateInput / ConsumeInput
 
@@ -501,8 +514,8 @@ flowchart LR
 // 키보드 입력 → 비트마스크 (core/input.h 의 INPUT_* 상수)
 //
 // platform_key_pressed()는 "이번 프레임에 처음 눌림"을 감지하는 엣지 트리거.
-// frame pacing 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
-// 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
+// frame pacing 없이 FPS가 상한(240)까지 오르면 60Hz 틱 사이에 여러 프레임이
+// 지나가므로, 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
 // → 매 프레임 AccumulateInput()으로 엣지 입력을 누적하고,
 //   틱에서 ConsumeInput()으로 소비 + held 키(DOWN/LEFT/RIGHT)를 합산한다.
 //   좌우 held 반복은 DAS/ARR로 속도를 제한한다.
@@ -755,7 +768,7 @@ Part 4 체크포인트에서는 본문이 `sim.SubmitInput(inputMask);` 한 줄�
 
 ## 8. `AppMode` — 하나의 루프, 여러 화면
 
-`main.cpp` 는 화면마다 루프를 따로 두지 않는다. **단 하나의 `while (!platform_should_close())` 안에서 `AppMode` 열거값으로 분기**한다. 시뮬 단계에도 렌더 단계에도 같은 `app` 변수가 쓰이고, 모드 전환은 그 변수에 대입하는 것뿐이다.
+`main.cpp` 는 화면마다 루프를 따로 두지 않는다. **단 하나의 `while (!quitRequested && !platform_should_close())` 안에서 `AppMode` 열거값으로 분기**한다(§4.3). 시뮬 단계에도 렌더 단계에도 같은 `app` 변수가 쓰이고, 모드 전환은 그 변수에 대입하는 것뿐이다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -810,7 +823,7 @@ stateDiagram-v2
 **모드 전환의 규칙 두 가지.**
 
 1. **`AppMode` 를 바꿀 때 그 모드가 쓰는 `unique_ptr` 를 함께 세팅하거나 비운다.** `app = AppMode::Single;` 다음 줄이 항상 `gameSingle = std::make_unique<Game>(...)` 이고, 나가는 쪽은 항상 `gameSingle.reset();` 이다. 렌더 블록이 전부 `if (app == AppMode::Single && gameSingle)` 처럼 **모드 + 포인터**를 같이 검사하기 때문에, 한쪽만 바꿔도 화면이 조용히 비는 대신 안전하게 넘어간다.
-2. **`ESC`는 창을 닫지 않는다.** `platform_should_close()`는 `WM_CLOSE`/`WM_DESTROY`(SDL은 `SDL_QUIT`)에만 반응한다. `ESC`는 채팅 취소와 메뉴형 화면의 뒤로가기처럼 각 앱 모드가 해석한다. **인게임에서 ESC를 눌러도 아무 일도 일어나지 않는다** — 나가기 모달은 우상단 X 버튼(`gui_close_button`) 전용이다(부록 C).
+2. **`ESC`는 창을 닫지 않는다.** `platform_should_close()`는 창 닫기 요청(`WM_CLOSE`/`WM_DESTROY`, SDL은 `SDL_QUIT`)에 반응하고, 예외 하나로 `platform_init` 이 실패했을 때도 true 가 된다 — `main()` 진입부가 그 신호로 초기화 실패를 감지한다(§12.1). `ESC`는 채팅 취소와 메뉴형 화면의 뒤로가기처럼 각 앱 모드가 해석한다. **인게임에서 ESC를 눌러도 아무 일도 일어나지 않는다** — 나가기 모달은 우상단 X 버튼(`gui_close_button`) 전용이다(부록 C).
 
 ---
 
@@ -1005,9 +1018,59 @@ $$\text{safeTick} = \min(\text{lastLocalSent},\ \text{lastRemote}) - \text{input
 
 ---
 
-## 12. 전체 프레임 흐름
+## 12. main() 진입부와 전체 프레임 흐름
 
-한 프레임의 전체 실행 순서:
+### 12.1 main() 진입부 — 실패는 조용히 지나가지 않는다
+
+§1 의 표가 "초기화와 종료" 를 이 장의 소유로 못 박았으니, 루프에 들어가기 전에 그 계약을 확정한다. `main()` 의 부팅 순서는 **실패했을 때 되감을 자원이 적은 것부터** 다.
+
+1. **CLI 인자 파싱** — 순수 문자열 처리라 어떤 서브시스템도 필요 없다. 그래서 모든 초기화보다 앞에 있다. 잘못된 인자의 `return 2` 경로는 아직 자원이 하나도 없는 시점에 끝나므로 정리할 것 자체가 없다. 예전에는 창과 GL 컨텍스트를 만든 뒤에 파싱했는데, 그러면 인자 오류가 만들다 만 자원을 버려둔 채 프로세스를 끝냈다.
+2. **네트워크 스택 초기화**(`net::net_init()`, Windows 의 WSAStartup) — 실패하면 stderr 한 줄과 `return 1`. 이 시점에도 되감을 것이 없다.
+3. **플랫폼과 렌더러** — 여기부터가 실패를 사용자에게 보여야 하는 구간이다.
+
+**현재 소스 발췌 — `src/main.cpp`**
+
+```cpp
+    // ── 플랫폼 + 렌더러 초기화 ─────────────────────────────────────────────
+    //
+    // 두 단계 모두 실패할 수 있고, 실패한 채로 진행하면 게임 루프는 정상적으로
+    // 도는데 화면만 검게 남는다. GUI 프로그램이라 stderr 도 보이지 않아
+    // 사용자에게는 단서가 하나도 없다 — 여기서 이유를 띄우고 끝낸다.
+    platform_init(720, 640, "Entris");
+    if (platform_should_close()) {
+        platform_fatal_error(
+            "창을 만들지 못했거나 OpenGL 3.3 Core 컨텍스트를 얻지 못했습니다.\n"
+            "그래픽 드라이버를 최신 버전으로 업데이트한 뒤 다시 실행해 주세요.");
+        platform_shutdown();
+        net::net_shutdown();
+        return 1;
+    }
+    if (!renderer_init(720, 640)) {
+        platform_fatal_error(
+            "OpenGL 3.3 렌더러를 초기화하지 못했습니다.\n"
+            "그래픽 드라이버가 OpenGL 3.3 Core 를 지원하는지 확인해 주세요.");
+        renderer_shutdown();
+        platform_shutdown();
+        net::net_shutdown();
+        return 1;
+    }
+    renderer_load_font("Font/NanumGothic.ttf");
+```
+
+가드가 두 개인 것은 두 초기화가 실패를 알리는 방식이 다르기 때문이다.
+
+- **`platform_init` 은 반환값이 없다.** 대신 실패하면 `platform_should_close()` 를 즉시 true 로 만든다. `platform/platform.h` 의 계약이 그렇게 명시한다 — "실패 시 platform_should_close() 가 true 가 되므로 호출자는 반드시 확인한다." 창 생성 실패든 OpenGL 3.3 Core 컨텍스트 획득 실패든, 계속 진행할 수 없는 상태를 하나의 신호로 합친다. 이 신호를 확인하지 않으면 메인 루프 조건의 `!platform_should_close()` 가 첫 반복에서 곧바로 거짓이 되어 **아무 화면도 없이 조용히 종료**된다 — 사용자 입장에서는 "더블클릭했는데 아무 일도 안 일어남" 이다.
+- **`renderer_init` 은 `bool` 을 반환한다.** GL 3.3 진입점 누락이나 셰이더 컴파일·링크 실패면 false 다. `renderer/renderer.h` 의 계약이 후속 동작까지 적어 둔다 — 실패 후의 `draw_*` 는 전부 무시되므로, 반환값을 무시하면 게임 루프는 멀쩡히 도는데 **화면만 검게 남는다.**
+
+두 실패 모두 `platform_fatal_error` 로 이유를 띄운다. 이 함수가 존재하는 이유는 GUI 프로세스의 근본 제약이다: 콘솔 없이 실행된 프로그램의 stderr 는 어디에도 보이지 않는다. 진단을 로그에만 남기면 개발자에게는 충분해도 사용자에게는 "검은 창" 만 남는다. 그래서 플랫폼 계층이 Windows 에서는 `MessageBoxA`, SDL 에서는 `SDL_ShowSimpleMessageBox` 로 **사용자에게 보이는 곳**에 이유를 띄운다(`platform/platform.h`). 일반화하면 — fail-fast 는 "빨리 죽는다" 가 아니라 **"이유를 말할 수 있는 마지막 지점에서 죽는다"** 이다. 레거시 GL 컨텍스트로 계속 진행하면 어차피 셰이더 단계에서 검은 화면으로 실패하는데, 그때는 원인을 설명할 문맥이 이미 사라져 있다.
+
+정리 순서도 규칙이 있다. **획득의 역순** — `renderer_shutdown()` → `platform_shutdown()` → `net::net_shutdown()`. GL 텍스처·버퍼·셰이더는 GL 컨텍스트가 살아 있을 때만 지울 수 있으므로, 컨텍스트를 소유한 플랫폼 계층보다 렌더러가 먼저 내려가야 한다. `platform_init` 실패 분기에 `renderer_shutdown` 이 없는 것도 같은 규칙이다 — 아직 획득하지 않은 것은 되감지 않는다. 파일 맨 아래의 정상 종료 경로도 같은 순서(`image_unload` → `renderer_shutdown` → `platform_shutdown` → `net_shutdown`)를 지키고, 메뉴 Quit 은 `quitRequested` 플래그로 루프만 빠져나와 이 **하나뿐인 정리 경로**에 합류한다(§4.3). 종료 경로가 하나면 "Quit 으로 나갈 때만 소켓 정리가 빠진다" 류의 비대칭이 구조적으로 불가능하다.
+
+Part 4 체크포인트에는 `net::net_init()`/`net_shutdown()` 이 아직 없다 — [Part 6](./part6-lockstep-networking.md) 이 추가한다. 두 가드와 `platform_fatal_error`, 역순 정리 규칙은 체크포인트에서도 그대로다.
+
+### 12.2 한 프레임의 전체 실행 순서
+
+루프 안으로 들어오면, 한 프레임은 언제나 같은 순서로 돈다.
 
 ```mermaid
 flowchart TB
@@ -1022,7 +1085,7 @@ flowchart TB
     H --> I["renderer_begin({8,10,20,255})<br/>glViewport + glClear ×2"]
     I --> J["draw_rect / draw_text<br/>모드별 렌더 블록 (정점 큐에 누적)"]
     J --> K["renderer_end()<br/>glb_flush + platform_present"]
-    K --> L["platform_end_frame()<br/>소프트웨어 60Hz 프레임 페이싱"]
+    K --> L["platform_end_frame()<br/>60Hz 페이싱 / 240fps 상한"]
     L --> A
 ```
 
@@ -1059,7 +1122,7 @@ flowchart TB
 | `draw_rect` 등 | 그리지 않는다. `glb_rect` 가 정점 6개를 `s_verts` 에 쌓는다 | `renderer/renderer.cpp` |
 | `renderer_end()` | `glb_flush()` 로 남은 정점을 draw call 로 내보낸 뒤 `platform_present()` | `renderer/renderer.cpp` |
 | `platform_present` | Win32: `SwapBuffers(s_hdc)` / SDL2: `SDL_GL_SwapWindow` — **여기가 화면 출력** | `platform/win32.cpp` |
-| `platform_end_frame()` | **소프트웨어 60 Hz 프레임 페이싱** — 남은 시간만큼 spin + `Sleep`. 화면 출력 아님 | `platform/win32.cpp` |
+| `platform_end_frame()` | **소프트웨어 프레임 페이싱** — 페이싱 ON 이면 60 Hz, OFF 면 240 fps 상한(`kUncappedMaxFps`)을 목표로 남은 시간만큼 `Sleep`. 화면 출력 아님 | `platform/win32.cpp` |
 
 시뮬레이션이 렌더링 **이전**에 실행되므로, 렌더링은 항상 최신 상태를 그린다. 만약 순서를 바꾸면 (렌더링 → 시뮬레이션), 화면에 1틱 전의 상태가 그려지는 "1프레임 지연"이 발생한다.
 
@@ -1250,7 +1313,7 @@ void main() {
 
 그 뒤 $\text{out} = S \cdot a + D \cdot (1 - a)$ 를 GPU 의 블렌드 유닛이 부동소수로 계산한다. 사각형·텍스트·이미지·둥근 사각형이 전부 이 프로그램 **하나**를 지나므로 알파 합성 코드가 저장소에 딱 한 벌이다.
 
-뷰 오프셋도 같은 자리로 모인다. `draw_*` 는 배처의 `glb_rect` / `glb_quad` 를 부르고, 그 안에서 정점을 만들 때 `s_view_ox` / `s_view_oy` 를 더한다(`renderer/renderer.cpp`, `186`). 텍스트·이미지·둥근 사각형이 각자 오프셋을 챙길 필요가 없다.
+뷰 오프셋도 같은 자리로 모인다. `draw_*` 는 배처의 `glb_rect` / `glb_quad` 를 부르고, 그 안에서 정점을 만들 때 `s_view_ox` / `s_view_oy` 를 더한다(`renderer/renderer.cpp` 의 `glb_rect`). 텍스트·이미지·둥근 사각형이 각자 오프셋을 챙길 필요가 없다.
 
 그래서 색 팔레트의 알파 값이 **곧바로 합성 가중치**가 된다.
 
@@ -1459,7 +1522,7 @@ cmake --build build
 
 ### (6) `ESC` 가 창을 닫는다는 착각
 
-`platform/platform.h`의 주석과 두 백엔드는 같은 계약을 갖는다. `platform_should_close()`는 `WM_CLOSE`/`WM_DESTROY`(SDL은 `SDL_QUIT`)만 보고, ESC는 앱 모드가 해석할 입력으로 남긴다. 이 구분이 없으면 플랫폼 계층이 설정·상점·룸의 "뒤로가기" 의미를 가로챈다. 인게임 ESC는 창을 닫거나 나가기 모달을 열지 않으며, 모달은 우상단 X 버튼 전용이다.
+`platform/platform.h`의 주석과 두 백엔드는 같은 계약을 갖는다. `platform_should_close()`는 창 닫기 요청(`WM_CLOSE`/`WM_DESTROY`, SDL은 `SDL_QUIT`)과 `platform_init` 실패 신호(§12.1)만 보고, ESC는 앱 모드가 해석할 입력으로 남긴다. 이 구분이 없으면 플랫폼 계층이 설정·상점·룸의 "뒤로가기" 의미를 가로챈다. 인게임 ESC는 창을 닫거나 나가기 모달을 열지 않으며, 모달은 우상단 X 버튼 전용이다.
 
 ---
 
@@ -1626,6 +1689,8 @@ Sim 의 플래그가 한 방향으로만 흐른다는 것이 핵심이다. 보�
     };
 ```
 
+Part 4 체크포인트에서는 `g_settings` 게이트 없이 항상 `shake_trigger` 를 부른다. `shakeOn`/`hardDropShakeOn` 두 스위치와 `GameSettings`(`g_settings`)는 [Part 11](./part11-settings-and-options.md) 이 도입하므로, 체크포인트를 그대로 따라 짤 때는 세 `if` 의 `g_settings.` 조건을 빼면 된다.
+
 **세 인자가 곧 이 람다의 설계 문서다.** `SimGame&` 는 읽고 리셋할 대상, `Callout&` 는 텍스트가 뜰 자리, `ShakeState&` 는 흔들릴 보드. 세 가지가 "어느 보드인가" 하나로 묶여 있고, 호출부가 그 세 짝을 함께 넘긴다. 자기/상대 구분이 람다 안에 전혀 없으므로 **연출 규칙이 갈라질 수 없다.**
 
 로직을 뜯어보면:
@@ -1638,7 +1703,7 @@ Sim 의 플래그가 한 방향으로만 흐른다는 것이 핵심이다. 보�
 
 ### A.4 세 모드에서 어떻게 불리는가
 
-호출부는 세 군데다. Sim 진행 경로는 전혀 다르지만 소비/리셋은 같은 함수를 탄다.
+모드마다 Sim 진행 경로는 전혀 다르지만, 소비/리셋은 전부 같은 함수를 탄다.
 
 | 모드 | 호출 | 위치 |
 |---|---|---|
@@ -1722,7 +1787,7 @@ sequenceDiagram
     ShakeState shakeRight{};
 ```
 
-`ShakeState` 가 **두 개**다. 프레임 시작부에서는 둘 다 감쇠시키고 오프셋은 0으로 되돌린다(§12의 `src/main.cpp` 인용). 그리고 보드를 그릴 때마다 그 보드의 오프셋을 걸었다가, 보드가 끝나면 다시 0으로 되돌린다.
+`ShakeState` 가 **두 개**다. 프레임 시작부에서는 둘 다 감쇠시키고 오프셋은 0으로 되돌린다(§12.2의 `src/main.cpp` 인용). 그리고 보드를 그릴 때마다 그 보드의 오프셋을 걸었다가, 보드가 끝나면 다시 0으로 되돌린다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -1820,10 +1885,10 @@ void renderer_set_view_offset(int dx, int dy)
 | 성질 | 이유 |
 |---|---|
 | 클리핑이 자동 | 오프셋을 더한 뒤 화면 밖 판정(`renderer/renderer.cpp`)을 타므로, 밀려 나간 사각형은 정점조차 만들어지지 않는다. 걸쳐 있는 것은 뷰포트와 시저 박스가 잘라 낸다 |
-| 상태가 프레임을 넘어 남는다 | 전역 두 개라서 리셋하지 않으면 다음 프레임까지 유효 — 그래서 프레임 진입부에서 0을 찍는다(§12) |
+| 상태가 프레임을 넘어 남는다 | 전역 두 개라서 리셋하지 않으면 다음 프레임까지 유효 — 그래서 프레임 진입부에서 0을 찍는다(§12.2) |
 | 비용이 0에 가깝다 | 사각형 하나당 float 덧셈 두 번. 픽셀 수와 무관하다 |
 
-렌더러 쪽 전체 파이프라인(`glb_rect` → 정점 큐 → `glb_flush` → `platform_present`)은 [Part 3](./part3-rendering-and-ui.md) 에서 다뤘다.
+렌더러 쪽 전체 파이프라인은 `glb_rect` 가 정점을 큐에 쌓고, `glb_flush` 가 쌓인 것을 draw call 로 내보내고, `platform_present` 가 백버퍼를 창에 붙이는 구조다 — 뷰 오프셋은 그중 첫 단계, 정점을 만드는 자리에 끼어드는 정수 두 개일 뿐이다.
 
 ### B.6 체크리스트 요약
 
@@ -1941,9 +2006,14 @@ flowchart TB
             // 키보드: Y = Yes, N = No, Enter = Yes (관성).
             // Escape 는 배정하지 않는다 — 다른 화면에서 전부 '뒤로가기'로
             // 쓰고 있어서, 여기서만 '예'로 동작하면 일관성이 깨진다.
-            if (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER))
+            // 채팅 입력 중(chatComposing)에는 키를 모달로 보내지 않는다 —
+            // 채팅에 'y' 를 치다 그대로 '예' 가 눌려 즉시 몰수패가 되는 입력
+            // 충돌. Enter 도 채팅 송신과 겹치므로 함께 무시한다 (마우스 클릭은
+            // 그대로 동작).
+            if (!chatComposing &&
+                (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER)))
                 clickYes = true;
-            if (platform_key_pressed(PKEY_N))
+            if (!chatComposing && platform_key_pressed(PKEY_N))
                 clickNo = true;
 
             if (clickNo) {
@@ -1985,7 +2055,7 @@ flowchart TB
 
 **모드별 문구.** Net 의 두 번째 줄 "게임은 상대방이 계속 진행합니다" 는 심리적 브레이크 역할이다. 사용자가 "상대에게 미안하지만 나가야겠다" 라고 의식적으로 결정하게 만든다.
 
-**Y/N 키 병행.** 마우스 클릭(`gui_button` 반환값)과 키보드 엣지 (`platform_key_pressed(PKEY_Y)`)를 `clickYes`/`clickNo` bool 로 합쳐 처리한다. 한 프레임에 둘 다 트리거돼도 같은 분기로 들어가니 중복 처리 걱정이 없다. Enter 는 Yes 의 별칭이다.
+**Y/N 키 병행.** 마우스 클릭(`gui_button` 반환값)과 키보드 엣지 (`platform_key_pressed(PKEY_Y)`)를 `clickYes`/`clickNo` bool 로 합쳐 처리한다. 한 프레임에 둘 다 트리거돼도 같은 분기로 들어가니 중복 처리 걱정이 없다. Enter 는 Yes 의 별칭이다. 단 `!chatComposing` 가드가 앞에 선다 — Net 모드에서 채팅을 치는 중에 모달이 떠 있으면, 문장에 들어간 'y' 나 송신용 Enter 가 그대로 "예" 로 해석되어 **즉시 몰수패**가 되는 입력 충돌이 있었다. 같은 키 이벤트를 여러 소비자가 보는 구조에서는 "지금 이 키의 소유자가 누구인가" 를 프레임마다 명시해야 하고, 채팅 입력 중에는 소유자가 채팅이다(마우스 클릭은 채팅과 겹치지 않으므로 그대로 동작한다).
 
 **`Escape`는 배정하지 않는다.** 소스 주석이 적듯 ESC는 채팅 취소·설정/상점 나가기·룸 퇴장에서 "한 단계 물러나기"로 쓰인다. Yes에 붙이면 같은 키가 취소와 확정 종료 두 의미를 갖고, No에 붙이면 버튼 반환 경로와 키보드 경로가 비대칭이 되므로 모달은 Y/N으로 통일했다.
 
@@ -2114,6 +2184,13 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
             const int bgap = 8;
             const int bx = (720 - bw) / 2;
             const int byStart = 190;
+            // 항목을 추가하면 버튼 열이 아래 랭킹 표시줄(y=540)과 겹칠 수 있다.
+            // 겹침을 런타임에 눈으로 발견하는 대신 컴파일 타임에 잡는다 —
+            // items[] 에 항목을 넣으면 kMenuCount 가 자동으로 늘어나 이 검증에
+            // 걸리므로, 높이/간격을 줄이거나 시작 y 를 올려야 컴파일이 된다.
+            static_assert(byStart + kMenuCount * (bh + bgap) <= 540,
+                          "menu buttons overlap the ranking line at y=540 - "
+                          "shrink bh/bgap or raise byStart");
 
             // 키보드 네비게이션 (기존 동작 유지).
             if (platform_key_pressed(PKEY_DOWN)) menuIndex = (menuIndex + 1) % kMenuCount;
@@ -2172,10 +2249,18 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
                     queueHost = relayHost; queuePort = relayPort;
                     // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
                     // 토큰 없이는 verify 실패로 즉시 close 된다.
-                    if (session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
-                        netMode = true; queueMode = true; isHost = false;
-                        app = AppMode::Net;
+                    queueJoinStartFailed = false;
+                    if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
+                        // 즉시 false = 큐 기동 거부 (이전 세션 스레드 정리 중 등).
+                        // 예전엔 여기서 아무것도 안 해서 클릭이 씹힌 것처럼
+                        // 보였다 — 같은 대기 화면으로 넘어가되 플래그를 세워
+                        // 기존 Matchmaking Failed 카드를 재사용해 알려준다.
+                        // [Q] 복귀 시 session.Close() 가 잔여 스레드를 정리하므로
+                        // 재시도가 가능해진다.
+                        queueJoinStartFailed = true;
                     }
+                    netMode = true; queueMode = true; isHost = false;
+                    app = AppMode::Net;
                     break;
                 case MenuAction::CustomRoom:
                     roomRelayHost = relayHost; roomRelayPort = relayPort;
@@ -2196,12 +2281,15 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
                     settingsIndex = 0;
                     break;
                 case MenuAction::Quit:
-                    // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
-                    // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
-                    // renderer_shutdown 이 platform_shutdown 보다 먼저다.
-                    renderer_shutdown();
-                    platform_shutdown();
-                    return 0;
+                    // 메뉴의 Quit. 예전에는 여기서 renderer/platform 만 내리고
+                    // 바로 return 0 해서, 하단 정리 경로의 image_unload 와
+                    // net_shutdown(WSACleanup) 이 통째로 생략됐다 — "같은 순서를
+                    // 지킨다" 는 약속과 실제 동작이 달랐다. 이제 종료 플래그로
+                    // 메인 루프만 빠져나가 파일 하단의 공통 정리 경로
+                    // (image_unload → renderer_shutdown → platform_shutdown →
+                    // net_shutdown)를 그대로 타게 한다.
+                    quitRequested = true;
+                    break;
                 }
             }
 ```
@@ -2215,6 +2303,10 @@ Part 4 체크포인트의 `items[]`는 `"Single Play"`와 `"Quit"`만 담는다.
 3. **입력 통합과 dispatch** — 마우스 클릭과 Enter/Space 엣지는 모두 `activated`에 모인다. 이후 `items[activated].action` switch가 앱 모드를 바꾼다.
 
 마지막 `if (activated >= 0)` 분기가 한 곳에 모여 있어 "선택됐다" 는 사건을 마우스/키보드가 완전히 같은 경로로 처리한다. 같은 프레임에 둘 다 트리거되어도 `activated` 는 마지막으로 설정된 값으로 덮일 뿐 이중 실행되지 않는다.
+
+레이아웃 상수 아래의 `static_assert` 는 §12.1 과 같은 태도의 컴파일 타임 판이다. 메뉴 항목을 하나 추가하면 버튼 열이 아래 랭킹 표시줄과 겹칠 수 있는데, 이런 겹침은 런타임에 눈으로 발견하면 이미 늦다. `items[]` 에 항목을 넣는 순간 `kMenuCount` 가 늘어 부등식이 깨지고 **컴파일이 거부**되므로, 레이아웃 불변식이 코드를 고치는 사람에게 강제로 전달된다.
+
+dispatch 의 세부도 실패를 조용히 삼키지 않는 방향으로 정리돼 있다. `MenuAction::Matchmaking` 의 `session.QueueJoin` 이 즉시 false 를 돌려주는 경우(이전 세션 스레드가 아직 정리 중인 때 등)에 예전 코드는 아무것도 하지 않아 **클릭이 씹힌 것처럼** 보였다 — 지금은 `queueJoinStartFailed` 플래그를 세운 채 같은 대기 화면으로 넘어가, 거기서 실패 카드를 띄우고 `[Q]` 복귀로 재시도할 수 있게 한다. `MenuAction::Quit` 은 그 자리에서 종료하지 않고 `quitRequested` 플래그만 세워 루프를 빠져나간다 — 파일 하단의 공통 정리 경로 하나에 합류하기 위해서다(§12.1). 소스 주석이 적어 두었듯, 예전에는 여기서 곧바로 `return 0` 해서 `image_unload` 와 `net_shutdown` 이 이 경로에서만 생략되는 비대칭이 있었다.
 
 `MenuAction::BotSelect`가 곧장 게임을 시작하지 않고 `AppMode::BotSelect`로 넘어가는 것은 로스터 구조 때문이다. 단일 `model/policy.onnx`를 바로 로드하던 구조에서 여러 모델을 스캔하는 구조로 바뀌었기 때문에, 모델 또는 휴리스틱을 고르는 화면이 명시적인 상태로 남는다.
 
@@ -2251,7 +2343,8 @@ if (platform_key_pressed(PKEY_ENTER)) {
 
 - `Game` 래퍼 — `SimGame` 을 소유하고 `gameOver`/`score` 를 참조 별칭으로 노출하며, `Draw`/`DrawBoardAt`/`DrawNextQueueMini`/`DrawGarbageBar` 로 상태를 픽셀로 바꾼다. CMake 의 `TETRIS_SIM_SOURCES` / `TETRIS_GAME_COMMON` 분리가 이 경계를 링크 단계에서 강제한다.
 - `AccumulateInput()` / `ConsumeInput()` + `SECONDS_PER_TICK` 어큐뮬레이터로 입력 수집과 60 Hz 시뮬레이션을 분리했다. DAS 8틱 / ARR 3틱의 좌우 반복까지 포함.
-- 하나의 `while (!platform_should_close())` 안에서 `AppMode`로 화면을 분기하는 구조를 확정했다. 이 체크포인트는 `Menu`와 `Single`을 채우며, 새 화면은 같은 상태 전환 계약에 맞춰 추가한다.
+- 하나의 `while (!quitRequested && !platform_should_close())` 안에서 `AppMode`로 화면을 분기하는 구조를 확정했다. 이 체크포인트는 `Menu`와 `Single`을 채우며, 새 화면은 같은 상태 전환 계약에 맞춰 추가한다.
+- `main()` 진입부의 초기화 실패 처리 — `platform_should_close()` 확인과 `renderer_init` 의 bool 반환값 검사, 실패 시 `platform_fatal_error` 메시지박스와 획득 역순 정리(`renderer_shutdown` → `platform_shutdown`) 후 `return 1`(§12.1).
 - Single 모드의 `GAME OVER` 팝업과 `[R]` 재시작(같은 시드로 `Game` 재생성) / `[Q]` 타이틀.
 - `apply_fx` 람다로 렌더 이벤트 플래그의 소비·리셋을 단일화하고, shake 대상을 인자로 주입해 자기/상대 보드의 연출 규칙이 갈라질 수 없게 만들었다.
 - 보드별 `ShakeState`와 `renderer_set_view_offset` 정수 오프셋으로 "가비지를 받은 쪽 보드만 흔들리고 UI는 고정"을 구현했다.
@@ -2277,7 +2370,7 @@ cmake --build build --config Release
 ```
 
 - 단일 구성 제너레이터(Makefiles/Ninja)에서는 `--config` 가 무시되고 산출물은 `build/tetris` 다. 두 플랫폼 경로를 섞어 쓰지 않는다.
-- `--target tetris` 로 타깃을 지정하면 `copy_assets`(ALL 타깃)가 돌지 않아 빌드 디렉터리에 `Font/`·`Sounds/` 가 없다. **타깃을 지정하지 말고 `cmake --build build` 를 쓰거나, 저장소 루트에서 실행**한다.
+- `--target tetris` 로 타깃을 지정하면 `copy_assets`(ALL 타깃)가 돌지 않아 빌드 디렉터리에 `Font/`(이후 파트가 `Sounds/` 등을 더한다)가 없다. **타깃을 지정하지 말고 `cmake --build build` 를 쓰거나, 저장소 루트에서 실행**한다.
 
 기대 결과:
 

@@ -44,7 +44,7 @@ flowchart LR
 | 선택지 | 얻는 것 | 잃는 것 |
 |---|---|---|
 | 완성형 엔진의 스프라이트 시스템 | 배칭·아틀라스·셰이더가 전부 준비돼 있고 에디터로 배치까지 | 픽셀이 만들어지는 과정을 볼 수 없다. [Part 0](./part0-project-setup.md) 에서 이미 제외한 선택지 |
-| raylib / SDL_Renderer 등 2D 라이브러리 | 즉시 동작. 배칭·아틀라스가 이미 최적화됨 | 그리기 명령이 삼각형과 픽셀이 되는 과정이 전부 라이브러리 안에 있다. 이 프로젝트의 학습 목표와 정면 충돌 |
+| 즉시 그리기 방식의 기성 2D 렌더링 라이브러리 | 즉시 동작. 배칭·아틀라스가 이미 최적화됨 | 그리기 명령이 삼각형과 픽셀이 되는 과정이 전부 라이브러리 안에 있다. 이 프로젝트의 학습 목표와 정면 충돌 |
 | CPU 소프트웨어 래스터라이저 | 전 과정이 저장소 안 C++ 루프. 디버거로 픽셀 하나를 따라갈 수 있다 | 창을 키우는 순간 비용이 면적에 비례해 늘고, 확대된 글자가 뭉갠다. 안티앨리어싱과 진짜 VSync 가 없다 |
 | Vulkan / DirectX 12 | 명시적 동기화·다중 큐·메모리 관리를 직접 제어 | 스왑체인·디스크립터·동기화·검증 계층을 먼저 설계해야 해 작은 2D 게임의 학습 범위를 크게 넘어간다 |
 | **OpenGL 3.3 Core (이 프로젝트)** | 작은 2D 렌더러로 GPU 래스터화에 도달하며 셰이더·텍스처·배칭이라는 핵심 개념이 모두 등장 | 최신 API의 명시적 제어권은 없다. 드라이버가 감추는 부분(동기화·메모리 배치)은 그대로 감춰진다 |
@@ -131,7 +131,7 @@ graph TB
 
 두 블록은 독립적이다. 창을 띄우는 모든 프로그램이 뒤쪽 경로를 지난다 — 터미널도 마찬가지다. 반면 앞쪽 연산 유닛은 쓰지 않을 수도 있고, 실제로 이 렌더러의 이전 버전은 쓰지 않았다.
 
-이 구분이 하드웨어 시장에도 그대로 나타난다. Intel `F` 접미사 모델이나 내장 그래픽 없는 Ryzen 은 **모니터를 꽂을 수 없다.** 그때 그래픽 카드가 필요한 이유는 연산이 아니라 디스플레이 컨트롤러 때문이다. 반대로 서버에 흔한 BMC 칩은 3D 기능이 거의 없는 순수 프레임버퍼 장치라 화면은 나오지만 게임은 못 돌린다.
+이 구분이 하드웨어 시장에도 그대로 나타난다. 내장 그래픽을 뺀 일부 데스크톱 CPU 모델은 **모니터를 꽂을 수 없다.** 그때 그래픽 카드가 필요한 이유는 연산이 아니라 디스플레이 컨트롤러 때문이다. 반대로 서버 보드에 흔한 원격 관리 컨트롤러는 3D 기능이 거의 없는 순수 프레임버퍼 장치라 화면은 나오지만 게임은 못 돌린다.
 
 그리고 **화면에 내보내지 않는다면 그래픽 하드웨어는 아예 필요 없다.** 이 저장소의 `sim_hash_dump` 와 `tetris_relay` 가 그 증거다. 두 타깃은 `renderer/` 를 링크조차 하지 않으므로 GL 드라이버가 없는 헤드리스 서버에서 그대로 빌드되고 실행된다. 이 사실은 이 장이 GPU 로 옮겨간 뒤에도 변하지 않는다 — 렌더러는 게임 클라이언트에만 붙는다.
 
@@ -203,7 +203,7 @@ GPU 로 가기로 했다면 다음 질문은 "어느 API 로" 다. 2020년대에
 
 **Vulkan / DirectX 12 는 이 프로젝트의 문제를 풀지 않는다.** 두 API 의 존재 이유는 명시적 제어다. 메모리 힙을 직접 고르고, 파이프라인 배리어로 동기화를 직접 걸고, 커맨드 버퍼를 여러 스레드에서 동시에 기록한다. 그 대가로 삼각형 하나를 화면에 띄우기까지 인스턴스·물리 디바이스·큐 패밀리·스왑체인·이미지 뷰·렌더 패스·프레임버퍼·디스크립터 셋 레이아웃·파이프라인 레이아웃·그래픽스 파이프라인·커맨드 풀·세마포어·펜스를 만들어야 한다. 이 게임이 한 프레임에 내는 draw call 은 열 개 안팎이다. **제어할 것이 없는 곳에서 제어권을 사면 복잡도만 남는다.**
 
-**세 플랫폼이 같은 코드를 쓰는 것이 중요하다.** DirectX 12 는 Windows 전용이다. Vulkan 은 macOS 에서 MoltenVK 라는 변환 계층을 거쳐야 한다. Metal 을 직접 쓰면 macOS 전용 백엔드가 하나 더 늘어난다. 이 프로젝트는 Windows·Linux·macOS 를 모두 대상으로 하고, 렌더러 코드를 **한 벌만** 유지하는 것이 유지보수 예산의 전제였다. OpenGL 3.3 Core 는 세 플랫폼에서 같은 프로파일, 같은 GLSL 버전, 같은 셰이더 소스로 동작한다.
+**세 플랫폼이 같은 코드를 쓰는 것이 중요하다.** DirectX 12 는 Windows 전용이다. Vulkan 은 macOS 에서 별도 변환 계층을 거쳐야 한다. Metal 을 직접 쓰면 macOS 전용 백엔드가 하나 더 늘어난다. 이 프로젝트는 Windows·Linux·macOS 를 모두 대상으로 하고, 렌더러 코드를 **한 벌만** 유지하는 것이 유지보수 예산의 전제였다. OpenGL 3.3 Core 는 세 플랫폼에서 같은 프로파일, 같은 GLSL 버전, 같은 셰이더 소스로 동작한다.
 
 **왜 하필 3.3 인가.** 위로도 아래로도 이유가 있다.
 
@@ -232,7 +232,7 @@ GPU 로 가기로 했다면 다음 질문은 "어느 API 로" 다. 2020년대에
 
 Linux 의 `libGL.so` 와 macOS 의 OpenGL 프레임워크에는 심볼이 있어서 그냥 링크해도 된다. 그런데 그렇게 하면 플랫폼마다 다른 선언과 다른 빌드 설정이 필요해진다. **세 플랫폼이 같은 조회 경로를 타게 하는 편이 훨씬 단순하다.** 그래서 이 렌더러는 어디서든 함수 포인터를 런타임에 받는다.
 
-GLEW나 glad 같은 로더를 쓰면 이 일을 대신해 준다. 쓰지 않은 이유는 의존성 하나를 아끼려는 것이 아니라, **"GL 함수가 어디서 오는가"가 이 프로젝트에서 감출 이유가 없는 지식이기 때문이다.** 렌더러가 실제로 쓰는 심볼만 X-매크로 한 목록에 두므로 API가 늘어도 선언·정의·로딩 검사를 함께 갱신할 수 있다.
+기성 GL 로더 라이브러리를 쓰면 이 일을 대신해 준다. 쓰지 않은 이유는 의존성 하나를 아끼려는 것이 아니라, **"GL 함수가 어디서 오는가"가 이 프로젝트에서 감출 이유가 없는 지식이기 때문이다.** 렌더러가 실제로 쓰는 심볼만 X-매크로 한 목록에 두므로 API가 늘어도 선언·정의·로딩 검사를 함께 갱신할 수 있다.
 
 ### 4.1 타입과 상수를 직접 선언한다
 
@@ -416,10 +416,10 @@ bool gl_load_functions()
 로딩에 성공하면 버전과 렌더러 이름을 찍는다. 이 한 줄이 실전에서 가장 자주 쓰이는 진단 도구다.
 
 ```text
-[GL] 3.3 (Core Profile) Mesa 26.0.3-1ubuntu1 | Mesa Intel(R) HD Graphics 3000 (SNB GT2)
+[GL] 3.3 (Core Profile) Mesa <드라이버 버전> | <드라이버가 보고한 렌더러 이름>
 ```
 
-두 번째 필드가 `llvmpipe` 나 `softpipe` 로 나오면 **하드웨어 가속이 아니라 Mesa 의 소프트웨어 GL 구현으로 떨어진 것이다.** 화면은 정상적으로 나오지만 프레임이 느려진다. 위 로그는 2011년 Sandy Bridge 내장 그래픽이 진짜로 그리고 있다는 뜻이다 — 이 렌더러가 요구하는 하드웨어의 하한이 어느 정도인지 보여주는 예이기도 하다.
+두 번째 필드가 `llvmpipe` 나 `softpipe` 로 나오면 **하드웨어 가속이 아니라 Mesa 의 소프트웨어 GL 구현으로 떨어진 것이다.** 화면은 정상적으로 나오지만 프레임이 느려진다. 반대로 실제 GPU 이름이 나오면 하드웨어가 진짜로 그리고 있다는 뜻이다 — 이 글을 쓰며 확인한 환경에서는 십수 년 된 저사양 내장 그래픽도 이 조건을 통과했다. 이 렌더러가 요구하는 하드웨어의 하한이 그만큼 낮다는 예이기도 하다.
 
 Win32 백엔드의 `platform_gl_get_proc` 에는 함정이 하나 있다. `wglGetProcAddress` 는 **GL 1.2 이상의 함수만** 돌려주고 1.1 함수에는 `NULL` 이나 `0x1`, `0x2`, `0x3`, `-1` 같은 쓰레기 값을 준다. 위 목록의 `glEnable`, `glClear`, `glViewport`, `glTexImage2D` 등이 전부 1.1 함수다. 그래서 그 값들이 나오면 `GetProcAddress(LoadLibrary("opengl32.dll"))` 로 물러나야 한다. 이 폴백이 없으면 **`glEnable` 조차 못 찾아 로더가 통째로 실패한다.** SDL 경로는 `SDL_GL_GetProcAddress` 한 줄이면 되고, 이 처리를 SDL 이 대신해 준다.
 
@@ -514,25 +514,33 @@ void renderer_text_shutdown();
 
 ```cpp
 // ─── 그리기 함수 ──────────────────────────────────────────────────────────────
+//
+// 아래 함수들은 즉시 그리지 않는다. 정점을 배처에 쌓아 두고, 텍스처가 바뀌는
+// 지점과 프레임 끝(renderer_end)에서만 실제 draw call 이 나간다.
 
-// 색칠된 사각형. DrawRectangle() 대체.
-// 1x1 흰 텍스처를 입힌 사각형 하나를 배처에 넣는다.
+// 색칠된 사각형.
+// 1x1 흰 텍스처를 입힌 쿼드 두 삼각형으로 배처에 들어가고, 알파 블렌딩은
+// GPU 가 한다.
 void draw_rect(int x, int y, int w, int h, Color c);
 
-// 둥근 모서리 사각형. DrawRectangleRounded() 대체.
+// 둥근 모서리 사각형.
 // roundness: 0.0(직각) ~ 1.0(완전 둥근). 반지름 = roundness * min(w,h)/2.
+// 모서리는 fragment 셰이더가 SDF 로 깎으므로 안티앨리어싱이 함께 적용된다.
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c);
 
-// 텍스트 그리기. DrawTextEx() / DrawText() 대체.
-// stb_truetype로 구운 글리프를 R8 아틀라스에서 샘플링한다.
+// 텍스트 그리기.
+// 글리프는 아틀라스의 R8 텍셀이며, 셰이더가 r 채널을 알파로 읽어 색을 곱한다.
+// 글자 모양은 CPU 가 굽고 합성은 GPU 가 맡는다. 배치는 논리 좌표로 하되
+// 비트맵은 화면 배율로 구워 확대해도 선명하다.
 void draw_text(const char* text, int x, int y, int size, Color c);
 
-// 텍스트 폭 측정. MeasureTextEx() 대체.
-// TTF advance metric으로 측정.
+// 텍스트 폭 측정.
+// TTF advance metric 으로 측정한다. 창 배율과 무관한 논리 픽셀 값이라
+// 창을 늘려도 레이아웃이 흔들리지 않는다.
 int  measure_text(const char* text, int size);
 ```
 
-이 네 선언이 GL 을 한 글자도 언급하지 않는다는 점이 중요하다. `src/gui.cpp` 와 [Part 4](./part4-game-wrapper-and-loop.md) 이후의 게임 코드는 렌더러가 GPU 를 쓰는지 CPU 를 쓰는지 모른다. 실제로 이 프로젝트는 그 백엔드를 두 번 갈아치우는 동안 이 헤더를 거의 그대로 유지했다.
+이 선언들이 GL 을 한 글자도 언급하지 않는다는 점이 중요하다. `src/gui.cpp` 와 [Part 4](./part4-game-wrapper-and-loop.md) 이후의 게임 코드는 렌더러가 GPU 를 쓰는지 CPU 를 쓰는지 모른다. 실제로 이 프로젝트는 그 백엔드를 두 번 갈아치우는 동안 이 헤더를 거의 그대로 유지했다.
 
 ## 6. 셰이더 하나로 전부 그리기
 
@@ -714,7 +722,7 @@ static GLuint             s_batch_tex = 0;
 static bool               s_ready     = false;
 ```
 
-GL 객체가 넷(프로그램·VAO·VBO·흰 텍스처), 유니폼 위치가 둘, 정점 큐가 하나. 이게 전부다. `s_ready` 는 초기화가 끝났는지를 나타내고, 모든 그리기 함수가 이 값을 먼저 본다 — GL 초기화에 실패해도 게임 코드가 크래시하지 않고 조용히 아무것도 그리지 않게 하는 장치다.
+GL 객체가 넷(프로그램·VAO·VBO·흰 텍스처), 유니폼 위치가 둘, 정점 큐가 하나. 이게 전부다. `s_ready` 는 초기화가 끝났는지를 나타낸다. 초기화 실패를 알리는 1차 통지는 `renderer_init` 의 `bool` 반환값이고 — 호출자는 그것을 확인하고 사용자에게 이유를 알린 뒤 종료할 의무가 있다 — `s_ready` 는 그 계약이 어겨졌을 때를 위한 2차 방어다. 반환값을 무시하고 그리기 함수를 불러도 크래시하지 않고 조용히 아무것도 그리지 않도록, 모든 그리기 함수가 이 값을 먼저 본다.
 
 ### 7.2 정점 추가와 flush
 
@@ -869,7 +877,7 @@ float  glb_render_scale()    { return s_render_scale; }
 | 프레임 끝 | `renderer_end` | 남은 것을 내보내야 화면에 나온다 |
 | 글리프 아틀라스 재활용 직전 | `pack_glyph` | 큐에 든 글자들의 UV 가 곧 덮어써질 내용을 가리킨다 |
 
-그래서 프레임당 draw call 수는 **텍스처가 몇 개인가가 아니라 몇 번 바뀌는가**로 정해진다. 텍스처는 둘뿐(흰 텍스처와 글리프 아틀라스)이지만, 도형과 글자를 번갈아 그리면 그 횟수만큼 끊긴다. 실측값은 §19 에 있다 — 인게임 9 회, 메뉴 16 회다.
+그래서 프레임당 draw call 수는 **텍스처가 몇 개인가가 아니라 몇 번 바뀌는가**로 정해진다. 텍스처 종류는 몇 안 되지만(흰 텍스처·글리프 아틀라스·아이콘 텍스처), 도형과 글자를 번갈아 그리면 그 횟수만큼 끊긴다. 즉 이 값은 코드에 고정된 상수가 아니라 화면 구성에 따라 변하는 관찰값이다 — 수치를 문서에 박아 두는 대신, flush 횟수를 직접 세어 확인하는 측정 방법을 §19 에 둔다.
 
 여기서 **이 배처가 하지 않는 것**을 분명히 해 둘 필요가 있다. 상용 2D 배처는 흔히 텍스처별로 정점을 모아 두었다가 마지막에 텍스처 순서로 정렬해 draw call 을 최소화한다. 이 배처는 **정렬하지 않는다.** 순서를 바꾸면 알파 블렌딩 결과가 달라지기 때문이다.
 
@@ -894,9 +902,12 @@ void renderer_begin(Color bg)
     int vx = 0, vy = 0, vw = 0, vh = 0;
     platform_viewport(vx, vy, vw, vh);
 
-    // 창이 최소화되면 뷰포트가 0x0 이 된다. 그릴 곳이 없으니 건너뛰되,
-    // 배처 상태는 맞춰 둔다 — 최소화된 채로 시작하면 glUseProgram 을
-    // 한 번도 부르지 않은 채 glDrawArrays 에 도달하기 때문이다.
+    // 창이 최소화되면 뷰포트가 0x0 이 된다. 지울 곳도 그릴 곳도 없으니
+    // 건너뛴다. 게임 코드는 최소화 여부를 모르고 계속 draw_* 를 부르지만,
+    // 그 정점들은 프레임 끝의 glb_flush 가 0x0 뷰포트로 흘려보내고 큐를
+    // 비우므로 쌓이지는 않는다. 다만 배처 상태는 여기서 맞춰 둔다 —
+    // 그러지 않으면 첫 프레임부터 최소화로 시작했을 때 glUseProgram 을
+    // 한 번도 부르지 않은 채 glDrawArrays 에 도달한다.
     if (vw <= 0 || vh <= 0) {
         gl_UseProgram(s_prog);
         s_verts.clear();
@@ -1242,7 +1253,7 @@ static void ensure_atlas()
 
 `GL_MAX_TEXTURE_SIZE` 를 물어보는 이유는 2048 이 어디서나 되는 값이 아니기 때문이다. GL 3.3 이 보장하는 하한은 2048 보다 작고, 실제 상한은 드라이버와 하드웨어가 정한다. 한도를 넘긴 `glTexImage2D` 는 `GL_INVALID_VALUE` 를 내고 텍스처를 만들지 않는데, 이 렌더러는 그 자리에서 `glGetError` 를 보지 않으므로 **글자가 전부 안 보이는 형태로만 드러난다.** 물어보는 쪽이 싸다.
 
-참고로 이 글을 쓰며 확인한 2011년 내장 그래픽(Intel HD Graphics 3000)은 8192 를 보고한다. 2048 이 문제가 되는 기계는 이제 흔치 않지만, 한 줄로 막을 수 있는 실패를 굳이 남겨 둘 이유도 없다.
+참고로 이 글을 쓰며 확인한 십수 년 된 저사양 내장 그래픽도 8192 를 보고한다. 2048 이 문제가 되는 기계는 이제 흔치 않지만, 한 줄로 막을 수 있는 실패를 굳이 남겨 둘 이유도 없다.
 
 필터를 `GL_LINEAR` 로 둔 이유는 논리 좌표와 실제 창 픽셀이 배율 변환 때문에 항상 1:1은 아니기 때문이다. 최근접 필터는 그 경계에서 이미지와 회전된 쿼드의 계단 현상을 두드러지게 만든다.
 
@@ -1409,7 +1420,7 @@ key = (code point << 32) | (논리 크기 << 16) | 굽는 크기
 
 ### 12.4 실측
 
-Mesa Intel HD Graphics 3000, 1215×1080 창(논리 720×640 대비 약 1.69배)에서 64px "TETRIS" 를 그려 놓고 글자 경계의 부분 덮임 픽셀 비율을 측정하면 이렇다.
+리눅스 Mesa 드라이버의 구형 저사양 내장 그래픽, 1215×1080 창(논리 720×640 대비 약 1.69배)에서 64px "TETRIS" 를 그려 놓고 글자 경계의 부분 덮임 픽셀 비율을 측정하면 이렇다.
 
 | | 글자 크기 (화면 픽셀) | 부분 덮임(경계) 픽셀 비율 |
 |---|---|---|
@@ -1618,7 +1629,8 @@ using ImageHandle = int;  // 0 = invalid/미로드
 ImageHandle image_load(const char* path);
 
 // RGBA8 픽셀 배열에서 이미지 생성. 기본/절차적 fallback 아이콘 등에 사용.
-// pixels 는 w*h*4 바이트이며 호출 시점에 GL 텍스처로 업로드된다.
+// pixels는 w*h*4 바이트이며 호출 중 GL_RGBA8 텍스처로 복사된다. 반환 뒤에는
+// 호출자 버퍼를 보관하지 않는다.
 ImageHandle image_create_rgba(const uint8_t* pixels, int w, int h);
 
 // 해제. 핸들이 0 이거나 유효하지 않으면 no-op.
@@ -1630,9 +1642,10 @@ void draw_image(ImageHandle h, int x, int y, int w, int h_px);
 // tint 는 RGBA 각 채널에 곱해짐. {255,255,255,255} = 원본.
 void draw_image_tinted(ImageHandle h, int x, int y, int w, int h_px, Color tint);
 
-// 회전 드로우 — (cx, cy) 가 중심, angle_deg 는 시계방향(화면 y 가 아래로
-// 증가하므로 표준 수학 좌표계의 반시계와 반대). 네 꼭짓점을 CPU 에서
-// 회전시켜 쿼드 하나로 넘긴다. 메뉴/상점의 실시간 회전 아이콘용이다.
+// 회전 드로우 — (cx, cy)가 중심, angle_deg는 시계방향(화면 y가 아래로
+// 증가하므로 표준 수학 좌표계의 반시계와 반대). CPU에서 쿼드 꼭짓점만
+// 회전하고 내부 픽셀 보간은 GPU 래스터라이저가 맡는다. 메뉴/상점의 실시간
+// 회전 아이콘용이다.
 void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
                         float angle_deg);
 
@@ -1640,12 +1653,12 @@ void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
 //   반환 false = 핸들 무효.
 bool image_size(ImageHandle h, int& w_out, int& h_out);
 
-// 내부: renderer_init 시점 호출 — 이미지 핸들 저장소 초기화.
+// 내부: renderer_init 시점 호출 — GL 텍스처 핸들 저장소 초기화.
 void image_init();
 void image_shutdown();
 ```
 
-이 헤더는 GL 전환에서 **한 줄도 바뀌지 않았다.** 게임 코드가 보는 계약이 그대로라는 뜻이고, 그것이 핸들 기반 API 를 쓴 이유이기도 하다.
+선언부는 GL 전환 전과 같다 — 바뀐 것은 구현이 무엇을 보관하는지 설명하는 주석뿐이다. 게임 코드가 보는 계약(정수 핸들 하나, 실패는 0)이 그대로라는 뜻이고, 그것이 핸들 기반 API 를 쓴 이유이기도 하다.
 
 저장소는 벡터 하나다.
 
@@ -1697,7 +1710,7 @@ void image_shutdown()
 
 `image_init()` 이 벡터를 크기 1 로 만든다. **인덱스 0 은 영원히 사용되지 않는 자리이고, 그래서 `ImageHandle` 0 이 "무효" 를 뜻할 수 있다.** 별도의 sentinel 값이나 `std::optional` 없이 정수 하나로 유효성을 표현하는 고전적 기법이다.
 
-**`renderer_init` 의 마지막 줄에서 `image_init()` 을 부르는 것을 빠뜨리면 안 된다.** 빠지면 첫 번째 `image_create_rgba` 가 빈 벡터에 `push_back` 한 뒤 인덱스 **0** 을 반환하고, 그 0 은 곧 "무효 핸들" 이다. 결과는 **모든 아이콘이 조용히 사라지는** 증상이다. 그리기 함수는 오류를 내지 않고 그냥 아무것도 안 그린다. `if (s_images.empty())` 검사 덕분에 두 번 불러도 안전하다.
+핸들 0 이 "무효" 로 남으려면 **슬롯 0 예약이라는 불변식이 언제나 참**이어야 한다. 이 불변식이 깨지는 경로가 실제로 있다 — `image_init` 이 아직 불리지 않았거나, `image_shutdown` 이 벡터를 통째로 비운 뒤 이미지를 다시 만들면, `image_create_rgba` 의 `push_back` 이 인덱스 **0** 을 돌려준다. 호출자에게는 실패로 보이는데 GL 텍스처는 이미 만들어져 새어 나가는, 조용히 어긋나는 실패다. 그래서 `image_create_rgba` 는 진입부에서 멱등 `image_init()` 을 스스로 한 번 더 불러 그 경로를 원천 차단한다. `if (s_images.empty())` 덕분에 몇 번을 불러도 결과가 같으므로, 불변식을 **의존하는 지점에서 스스로 복구**하는 비용이 사실상 0 이다. 이런 자가 방어는 실패를 숨기는 것과 다르다 — 잘못된 입력(널 픽셀 포인터, 0 이하 크기)은 여전히 0 으로 거부되고, 복구되는 것은 호출 순서라는 우연뿐이다.
 
 생성과 해제는 슬롯 재사용 방식이다.
 
@@ -1707,6 +1720,12 @@ void image_shutdown()
 ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
 {
     if (!rgba || width <= 0 || height <= 0) return 0;
+
+    // 슬롯 0 은 "무효 핸들" 로 예약돼 있다. image_shutdown 이 벡터를 비운 뒤
+    // 여기로 들어오면 push_back 결과가 인덱스 0 이 되어, 호출자에게는 실패로
+    // 보이는데 텍스처는 이미 만들어진 상태로 새어 나간다. image_init 은
+    // 멱등이므로 여기서 한 번 더 불러 그 경로를 막는다.
+    image_init();
 
     ImageEntry entry;
     entry.used = true;
@@ -1992,7 +2011,7 @@ sequenceDiagram
     G-->>M: true / false
 ```
 
-위젯 객체도, 레이아웃 트리도, 이벤트 콜백도 없다. **그리는 행위와 입력을 판정하는 행위가 같은 함수 호출 하나**다. Dear ImGui 가 대중화한 패턴이고, 이 프로젝트 규모에서는 retained-mode UI 보다 압도적으로 짧다. 대가는 매 프레임 전부 다시 그린다는 것인데, 어차피 `renderer_begin` 이 화면을 통째로 지우므로 추가 비용이 없다.
+위젯 객체도, 레이아웃 트리도, 이벤트 콜백도 없다. **그리는 행위와 입력을 판정하는 행위가 같은 함수 호출 하나**다. 즉시모드 GUI 라이브러리들이 대중화한 패턴이고, 이 프로젝트 규모에서는 retained-mode UI 보다 압도적으로 짧다. 대가는 매 프레임 전부 다시 그린다는 것인데, 어차피 `renderer_begin` 이 화면을 통째로 지우므로 추가 비용이 없다.
 
 **GPU 구현으로 바꿔도 호출 계층의 API는 유지됐다.** `renderer.h`가 도형·텍스트·이미지 명령만 노출하고 GL 객체를 숨기기 때문이다. 다만 배칭이 들어오면 기존 호출 순서가 화면의 겹침 순서와 계속 일치하는지는 별도로 확인해야 한다.
 
@@ -2259,7 +2278,7 @@ static GLuint compile_shader(GLenum type, const char* src, const char* label)
 }
 ```
 
-**셰이더는 사용자 기계에서 컴파일된다.** 이것이 GPU 프로그래밍의 특이한 점이다. C++ 코드는 개발자 기계에서 한 번 컴파일되어 기계어로 배포되지만, GLSL 소스는 문자열로 실행 파일에 들어가서 사용자의 드라이버가 컴파일한다. NVIDIA·AMD·Intel·Mesa 가 각자 다른 GLSL 프론트엔드를 갖고 있고, 표준에서 애매한 부분의 해석이 갈린다. 내 기계에서 통과한 셰이더가 남의 기계에서 막힐 수 있다.
+**셰이더는 사용자 기계에서 컴파일된다.** 이것이 GPU 프로그래밍의 특이한 점이다. C++ 코드는 개발자 기계에서 한 번 컴파일되어 기계어로 배포되지만, GLSL 소스는 문자열로 실행 파일에 들어가서 사용자의 드라이버가 컴파일한다. GPU 벤더별 드라이버와 오픈소스 구현이 각자 다른 GLSL 프론트엔드를 갖고 있고, 표준에서 애매한 부분의 해석이 갈린다. 내 기계에서 통과한 셰이더가 남의 기계에서 막힐 수 있다.
 
 그래서 **컴파일 로그를 절대 삼키면 안 된다.** 실패 시 사용자가 보내온 stderr 한 조각이 원인 파악의 유일한 단서다. `GL_INFO_LOG_LENGTH` 로 길이를 물어 버퍼를 잡고 그대로 찍는다.
 
@@ -2306,10 +2325,12 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
 
 ### 18.2 초기화
 
+초기화는 실패할 수 있는 단계가 앞쪽에 몰려 있다 — 함수 포인터 로딩과 셰이더 프로그램 링크다. 이 함수는 그 실패를 삼키지 않고 **`bool` 반환으로 호출자에게 알린다.** 렌더러가 스스로 프로세스를 끝내 버리면 호출자가 다른 서브시스템을 정리할 기회를 빼앗고, 반대로 아무 일 없는 척 진행하면 검은 화면만 남는다. 실패 여부를 판정할 수 있는 쪽(렌더러)이 판정하고, 사용자에게 어떻게 알릴지는 문맥을 아는 쪽(호출자)이 정한다 — 라이브러리 계층의 오류 처리에서 일반적으로 통하는 분리다.
+
 **현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
-void renderer_init(int screen_w, int screen_h)
+bool renderer_init(int screen_w, int screen_h)
 {
     s_screen_w = screen_w > 0 ? screen_w : 1;
     s_screen_h = screen_h > 0 ? screen_h : 1;
@@ -2317,13 +2338,13 @@ void renderer_init(int screen_w, int screen_h)
 
     if (!gl_load_functions()) {
         std::fprintf(stderr, "[GL] renderer_init aborted.\n");
-        return;
+        return false;
     }
 
     s_prog = link_program(kQuadVert, kQuadFrag);
     if (!s_prog) {
         std::fprintf(stderr, "[GL] renderer_init aborted: shader program.\n");
-        return;
+        return false;
     }
     s_u_screen = gl_GetUniformLocation(s_prog, "u_screen");
     s_u_tex    = gl_GetUniformLocation(s_prog, "u_tex");
@@ -2362,6 +2383,7 @@ void renderer_init(int screen_w, int screen_h)
     s_ready = true;
 
     image_init();
+    return true;
 }
 ```
 
@@ -2375,7 +2397,9 @@ void renderer_init(int screen_w, int screen_h)
 
 `gl_Enable(GL_BLEND)` 와 `gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` 는 프레임마다 다시 세우지 않는다. 이 렌더러는 블렌드 모드를 바꾸지 않으므로 초기화에서 한 번이면 된다. 이것도 상태 머신을 좁게 유지한 결과다.
 
-**실패해도 크래시하지 않는다.** 함수 로딩이나 셰이더 링크가 실패하면 `s_ready` 가 `false` 로 남고 그대로 반환한다. 이후 모든 `glb_*` 와 `renderer_*` 가 첫 줄에서 빠져나가므로, 게임은 검은 화면으로나마 계속 돈다. 로그에는 이유가 남아 있다.
+**실패 통지는 두 겹이다.** 1차는 반환값이다. 함수 로딩이나 셰이더 링크가 실패하면 `false` 를 돌려주고, `renderer.h` 의 주석이 호출자의 의무를 명시한다 — 반환값을 확인하고 사용자에게 이유를 알린 뒤 종료해야 한다. 완성된 클라이언트의 `main()` 이 실제로 그렇게 한다: `renderer_init` 이 `false` 면 [Part 2](./part2-platform-window-input.md) 플랫폼 계층의 `platform_fatal_error` 로 메시지박스를 띄우고, 자원을 정리한 뒤 종료 코드 1 로 끝난다. GUI 프로세스는 stderr 가 사용자에게 보이지 않으므로, 로그만 남기고 검은 창으로 돌게 두면 사용자에게는 단서가 하나도 없다.
+
+2차는 `s_ready` 다. 실패 경로에서 `s_ready` 가 `false` 로 남으므로, 호출자가 이 계약을 어기고 그대로 진행해도 모든 `glb_*` 와 `renderer_*` 가 첫 줄에서 빠져나가 크래시는 없다. 이것은 주 경로가 아니라 계약 위반 호출에 대한 방어다. 실패를 알리는 채널(반환값)과 실패 뒤에도 깨지지 않게 하는 안전장치(조기 반환)를 이렇게 분리해 두면, 안전장치가 실패 자체를 숨기는 일이 없다.
 
 ### 18.3 프레임의 끝
 
@@ -2459,7 +2483,7 @@ platform_init  →  renderer_init  →  (프레임 루프)  →  renderer_shutdo
 
 내부 순서에도 이유가 있다. `image_shutdown` 과 `renderer_text_shutdown` 이 먼저다. 두 서브시스템이 자기 텍스처(아이콘들, 글리프 아틀라스)를 갖고 있고, 그것들이 정리된 뒤에 렌더러 자신의 자원(흰 텍스처·VBO·VAO·프로그램)을 지운다. 만든 순서의 역순이다.
 
-`if (s_ready)` 검사가 초기화 실패 경로를 막는다. `gl_load_functions()` 가 실패했다면 함수 포인터가 전부 `nullptr` 이므로 `gl_DeleteTextures` 를 부르는 순간 널 포인터 호출이 된다.
+`if (s_ready)` 검사가 초기화 실패 경로를 막는다. `gl_load_functions()` 가 실패했다면 함수 포인터가 전부 `nullptr` 이므로 `gl_DeleteTextures` 를 부르는 순간 널 포인터 호출이 된다. `renderer_init` 이 `false` 를 돌려준 뒤의 정리 경로가 `renderer_shutdown()` 을 불러도 안전한 이유가 이 검사다.
 
 ```mermaid
 sequenceDiagram
@@ -2728,7 +2752,7 @@ endif()
 
 **`third_party` 를 include 경로에 넣는 이유**는 `text_gl.cpp` 가 `stb_truetype.h` 를, 비Windows 빌드의 `image_gl.cpp` 가 `stb_image.h` 를 상대 경로로 포함하기 때문이다. `gdiplus` 링크는 Windows 에서 이미지 디코딩에 필요하다 — SDL2 백엔드를 Windows 에서 쓸 때도 마찬가지다.
 
-런타임에는 **OpenGL 3.3 Core를 제공하는 드라이버와 컨텍스트**가 필요하다. GPU 출시 연도만으로 지원 여부를 단정할 수는 없으며, 원격 데스크톱·가상 머신·낡은 드라이버에서는 하드웨어가 지원해도 더 낮은 컨텍스트가 잡힐 수 있다. 플랫폼 계층은 3.3 Core를 요청하고, GL loader는 실제 버전 문자열을 로그로 남긴 뒤 필요한 심볼을 전부 확인한다. 필수 심볼이 빠졌거나 셰이더가 컴파일되지 않으면 렌더러 초기화가 실패한다.
+런타임에는 **OpenGL 3.3 Core를 제공하는 드라이버와 컨텍스트**가 필요하다. GPU 출시 연도만으로 지원 여부를 단정할 수는 없으며, 원격 데스크톱·가상 머신·낡은 드라이버에서는 하드웨어가 지원해도 더 낮은 컨텍스트가 잡힐 수 있다. 플랫폼 계층은 3.3 Core를 요청하고, GL loader는 실제 버전 문자열을 로그로 남긴 뒤 필요한 심볼을 전부 확인한다. 필수 심볼이 빠졌거나 셰이더가 컴파일되지 않으면 렌더러 초기화가 실패하고, 그 실패는 `renderer_init` 의 `false` 반환으로 호출자에게 전해진다.
 
 ## 23. Part 3 체크포인트 데모
 
@@ -2769,11 +2793,20 @@ static ImageHandle make_test_icon()
 int main()
 {
     platform_init(720, 640, "Part 3 renderer demo");
-    renderer_init(720, 640);            // 여기서 [GL] 버전 로그가 찍힌다
+    // 성공하면 stderr 에 [GL] 버전 로그가 찍힌다. 실패(false)를 무시하면 검은
+    // 창만 남으므로, Part 2 플랫폼 계층의 platform_fatal_error 로 이유를
+    // 메시지박스에 띄우고 끝낸다 — GUI 앱은 stderr 가 사용자에게 안 보인다.
+    if (!renderer_init(720, 640)) {
+        platform_fatal_error("OpenGL 3.3 렌더러를 초기화하지 못했습니다.\n"
+                             "stderr 의 [GL] 로그에서 이유를 확인하세요.");
+        renderer_shutdown();   // s_ready 가 아니면 GL 을 건드리지 않는다
+        platform_shutdown();
+        return 1;
+    }
     renderer_load_font("Font/NanumGothic.ttf");
 
     const ImageHandle icon = make_test_icon();
-    std::printf("icon handle = %d (0 이면 image_init 누락)\n", icon);
+    std::printf("icon handle = %d (0 이면 입력 픽셀/크기 오류)\n", icon);
 
     const int presets[3][2] = { {720, 640}, {1080, 960}, {1440, 1280} };
     int preset = 0;
@@ -2882,10 +2915,10 @@ cmake --build build --config Release --target part3_render_demo
 .\build\Release\part3_render_demo.exe
 ```
 
-실행 직후 stderr 첫 줄에 GL 정보가 찍힌다. 이 줄이 없으면 렌더러가 초기화되지 않은 것이다.
+실행 직후 stderr 첫 줄에 GL 정보가 찍힌다. 이 줄 대신 `[GL] renderer_init aborted` 계열 로그가 남으면 `renderer_init` 이 `false` 를 돌려준 것이고, 데모는 메시지박스로 이유를 알린 뒤 종료 코드 1 로 끝난다.
 
 ```text
-[GL] 3.3 (Core Profile) Mesa 26.0.3-1ubuntu1 | Mesa Intel(R) HD Graphics 3000 (SNB GT2)
+[GL] 3.3 (Core Profile) Mesa <드라이버 버전> | <드라이버가 보고한 렌더러 이름>
 ```
 
 ### 23.1 검증 체크리스트 — 화면에서 눈으로 확인
@@ -2913,9 +2946,10 @@ cmake --build build --config Release --target part3_render_demo
 
 추가로 GUI 동작을 확인한다. 버튼 위에 커서를 올리면 밝아지고, 누르고 있으면 더 어두워지며, **누른 첫 프레임에만** stdout 에 `button clicked` 가 한 번 찍힌다. 체크박스는 라벨 텍스트를 클릭해도 토글된다. 우상단 X 는 마우스를 올리면 빨갛게 변한다.
 
-stdout의 `icon handle`이 **0이 아닌지**도 확인한다. 0은 이미지 생성 실패를
-뜻하며, 초기화 순서와 입력 픽셀을 먼저 점검해야 한다. 유효 핸들의 구체적인
-숫자는 슬롯 사용 순서에 따라 달라질 수 있으므로 계약으로 삼지 않는다.
+stdout의 `icon handle`이 **0이 아닌지**도 확인한다. `image_create_rgba` 가
+진입부에서 멱등 `image_init()` 을 스스로 부르므로, 0 은 초기화 순서 문제가
+아니라 **입력 인자 오류**(널 픽셀 포인터, 0 이하의 크기)를 뜻한다. 유효 핸들의
+구체적인 숫자는 슬롯 사용 순서에 따라 달라질 수 있으므로 계약으로 삼지 않는다.
 
 체크리스트 17번이 이 장에서 가장 잡기 어려운 버그를 겨냥한다. 창 크기를 계속 바꾸면 매번 새 배율로 글자를 굽고, 2048² 아틀라스가 결국 가득 찬다. 그 순간 `pack_glyph` 가 `glb_flush()` 없이 `s_cache.clear()` 를 하면 **그 프레임의 글자들이 서로 뒤바뀐 모양으로 한 번 깜빡인다.** 정상이라면 아무 일도 일어나지 않은 것처럼 보인다.
 
@@ -2928,7 +2962,7 @@ stdout의 `icon handle`이 **0이 아닌지**도 확인한다. 0은 이미지 �
 
 - `renderer/gl_api.h` · `renderer/gl_api.cpp` — X-매크로로 정의한 사용 GL 심볼과 로더. 빠진 심볼을 전부 모아 보고하고, 성공하면 버전·렌더러 이름을 찍는다.
 - `renderer/gl_shaders.h` — GLSL 330 core 정점/조각 셰이더 한 벌. 투영 행렬 없는 NDC 변환, SDF 둥근 사각형, `a_channel` 로 R8/RGBA 텍스처를 한 경로에서 처리.
-- `renderer/renderer.cpp` — 셰이더 프로그램·VAO/VBO·1×1 흰 텍스처 소유. 14 float 정점 배처, 텍스처 교체 지점에서만 draw call, 레터박스 뷰포트와 이중 clear, `renderer_set_view_offset`.
+- `renderer/renderer.cpp` — 셰이더 프로그램·VAO/VBO·1×1 흰 텍스처 소유. 실패를 `bool` 로 호출자에게 알리는 `renderer_init`, 14 float 정점 배처, 텍스처 교체 지점에서만 draw call, 레터박스 뷰포트와 이중 clear, `renderer_set_view_offset`.
 - `renderer/gl_internal.h` — 텍스트·이미지 서브시스템이 배처에 접근하는 유일한 통로.
 - `renderer/text_gl.cpp` — stb_truetype 래스터화, 2048² R8 글리프 아틀라스와 shelf packing, 화면 배율로 굽고 논리 크기로 배치하는 DPI 대응, 커닝과 멀티라인을 공유하는 `measure_text` / `draw_text`.
 - `renderer/image_gl.cpp` — GDI+(Windows) / stb_image(그 외) 디코딩, RGBA8 텍스처 업로드, 슬롯 재사용 핸들 저장소, tint 와 꼭짓점 회전.

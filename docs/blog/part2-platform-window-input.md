@@ -71,9 +71,9 @@ graph TB
 
 | 선택지 | 얻는 것 | 잃는 것 |
 |---|---|---|
-| Unity · Unreal · Godot | 창·입력·렌더·오디오·에디터·빌드 파이프라인 전부 | 프레임 타이밍과 입력 큐잉이 블랙박스. lockstep 결정론을 보장하기 어렵다 |
-| raylib | `InitWindow` 한 줄로 창·컨텍스트·입력·2D 드로잉·오디오 전부 | 내부가 블랙박스. 창 생성 80줄과 컨텍스트 생성 과정, `IsKeyPressed` 의 실체를 볼 수 없다 |
-| GLFW + GLEW/GLAD | 창·입력·3.3 Core 컨텍스트 요청·확장 로딩이 전부 몇 줄 | 컨텍스트 생성과 함수 포인터 로딩이 바로 이 프로젝트의 학습 대상이다. 감추면 배울 게 없다 |
+| 완성형 상용 엔진 | 창·입력·렌더·오디오·에디터·빌드 파이프라인 전부 | 프레임 타이밍과 입력 큐잉이 블랙박스. lockstep 결정론을 보장하기 어렵다 |
+| 기성 즉시 그리기 라이브러리 | 초기화 한 줄로 창·컨텍스트·입력·2D 드로잉·오디오 전부 | 내부가 블랙박스. 창 생성과 컨텍스트 생성 과정, 키 입력 질의의 실체를 볼 수 없다 |
+| 창·컨텍스트 헬퍼 + GL 함수 로더 조합 | 창·입력·3.3 Core 컨텍스트 요청·확장 로딩이 전부 몇 줄 | 컨텍스트 생성과 함수 포인터 로딩이 바로 이 프로젝트의 학습 대상이다. 감추면 배울 게 없다 |
 | SDL_Renderer (SDL2 가속 경로) | 크로스 플랫폼 2D 배칭. 백엔드 선택 자동 | 셰이더를 직접 쓸 수 없다. 배칭·상태 전환 정책이 블랙박스라 draw call 수를 통제하지 못한다 |
 | Win32/SDL 창 + 직접 만든 GL 3.3 Core 컨텍스트 (이 프로젝트) | 창 생성·메시지 루프·픽셀 포맷·컨텍스트 생성·함수 조회 전 과정을 소유 | 코드 두 벌. WGL 2단계 생성 같은 플랫폼 세부를 직접 감당해야 한다 |
 
@@ -91,13 +91,14 @@ graph TB
 // ─────────────────────────────────────────────────────────────────────────────
 // platform/platform.h  — OS 추상화 인터페이스
 //
-// raylib의 InitWindow / IsKeyPressed / GetFrameTime 등을 대체합니다.
-// 구현은 platform/win32.cpp에 있습니다.
+// 기성 즉시 그리기 라이브러리의 창·입력·시간 API 를 대체한다.
+// 구현은 platform/win32.cpp 와 platform/sdl.cpp 에 있다.
 //
 // 학습 포인트:
-//   raylib::InitWindow()가 숨기던 창·GL 컨텍스트 초기화를 platform_init()이 맡는다.
-//   raylib::IsKeyPressed()는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
-//   raylib::GetFrameTime()은 QueryPerformanceCounter 두 번의 차이.
+//   라이브러리가 "창을 하나 연다" 한 줄로 숨기던 창·GL 컨텍스트 초기화를
+//   platform_init() 이 맡는다.
+//   "이 키가 눌렸는가" 조회는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
+//   프레임 델타타임은 QueryPerformanceCounter 두 번의 차이.
 // ─────────────────────────────────────────────────────────────────────────────
 ```
 
@@ -109,10 +110,10 @@ graph TB
 
 ```cpp
 // ─── 색상 ─────────────────────────────────────────────────────────────────────
-// raylib의 Color { r, g, b, a } 와 동일한 레이아웃.
+// 이전에 쓰던 즉시 그리기 라이브러리의 색 구조체 { r, g, b, a } 와 동일한 레이아웃.
 struct Color { uint8_t r, g, b, a; };
 
-// 공통 색상 상수 (main.cpp 변경을 최소화하기 위해 raylib 이름 유지)
+// 공통 색상 상수 (main.cpp 변경을 최소화하기 위해 이전 라이브러리의 이름 유지)
 constexpr Color WHITE    = {255, 255, 255, 255};
 constexpr Color GRAY     = {130, 130, 130, 255};
 constexpr Color GREEN    = {0,   228,  48, 255};
@@ -154,7 +155,7 @@ enum PlatformKey : int {
 
 **둘째, `PlatformKey` 의 값이 Win32 `VK_*` 상수와 그대로 같다.** `PKEY_LEFT = 0x25` 는 `VK_LEFT` 다. 그래서 Win32 백엔드는 매핑 테이블이 필요 없다 — `WM_KEYDOWN` 의 `wParam` 을 그대로 `s_key_state[]` 인덱스로 쓴다. 이 설계의 대가는 SDL 쪽이 치른다. SDL 은 자기 `SDL_Keycode` 를 `PlatformKey` 로 **역매핑**해야 하고, 그 매핑 테이블이 `sdl_to_platform_key` 다. 테이블에 없는 키는 `-1` 로 버려진다. 즉 **게임이 쓰는 키만 SDL 에서 살아난다** — 새 키를 바인딩하려면 `PlatformKey` 에 상수를 추가하고 `sdl_to_platform_key` 에 `case` 를 추가하는 두 곳 편집이 항상 짝이다.
 
-**셋째, 색 상수 이름이 raylib 그대로다.** `WHITE`, `GRAY`, `GREEN`, `YELLOW`, `RED`, `RAYWHITE`. 이 프로젝트는 raylib 에서 출발해 자작 계층으로 갈아탄 이력이 있고, 상위 코드의 diff 를 줄이려고 이름을 유지했다. `RAYWHITE` 라는 이름이 남아 있는 이유가 그것이다.
+**셋째, 색 상수 이름이 출발점이었던 기성 즉시 그리기 라이브러리 그대로다.** `WHITE`, `GRAY`, `GREEN`, `YELLOW`, `RED`, `RAYWHITE`. 이 프로젝트는 그런 라이브러리에서 출발해 자작 계층으로 갈아탄 이력이 있고, 상위 코드의 diff 를 줄이려고 이름을 유지했다. `RAYWHITE` 라는 상수가 남아 있는 이유가 그것이다.
 
 이어서 함수 계약이다. 프레임 수명주기 관련 부분을 먼저 본다.
 
@@ -163,9 +164,16 @@ enum PlatformKey : int {
 ```cpp
 // 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
 // 컨텍스트 생성에 실패하면 프로그램을 계속 진행할 수 없으므로 즉시 실패한다.
+// 실패 시 platform_should_close() 가 true 가 되므로 호출자는 반드시 확인한다.
 void   platform_init(int w, int h, const char* title);
 
-// 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
+// 창을 띄우지 못했거나 렌더러를 만들지 못했을 때 사용자에게 이유를 보여준다.
+// GUI 프로그램은 stderr 가 보이지 않는다 — 콘솔 없이 실행하면 진단 메시지가
+// 그대로 사라져 사용자에게는 "검은 창" 또는 "아무 일도 안 일어남" 만 남는다.
+// Windows 는 MessageBox, SDL 은 SDL_ShowSimpleMessageBox 로 띄운다.
+void   platform_fatal_error(const char* message);
+
+// 윈도우 및 플랫폼 자원 해제.
 void   platform_shutdown();
 
 // 창 닫기 요청(WM_CLOSE / WM_DESTROY / SDL_QUIT)을 받으면 true.
@@ -173,10 +181,11 @@ void   platform_shutdown();
 bool   platform_should_close();
 
 // 프레임 시작: 이전 키 상태 스냅샷 + 메시지 루프(PeekMessage) + 델타타임 반환.
-// GetFrameTime() 대체. MAX_DELTA = 100ms 클램핑 포함.
+// MAX_DELTA = 100ms 클램핑 포함.
 float  platform_begin_frame();
 
-// 프레임 끝. 소프트웨어 VSync가 켜졌다면 60 Hz에 맞춰 남은 시간을 쉰다.
+// 프레임 끝. 페이싱이 켜져 있으면 60 Hz 를 목표로 남은 시간을 쉬고,
+// 꺼져 있어도 240 fps 렌더 상한은 유지한다.
 void   platform_end_frame();
 
 // 그린 프레임을 화면에 내보낸다 (버퍼 교체).
@@ -184,6 +193,8 @@ void   platform_present();
 ```
 
 `platform_present()` 에 **인자가 하나도 없다는 점**이 이 계약의 성격을 그대로 보여준다. 화면에 내보낼 픽셀을 이 함수에 넘기지 않는다. 그림은 이미 GPU 쪽 백버퍼에 들어가 있고, 이 함수가 하는 일은 "백버퍼와 프론트버퍼를 바꿔 달라" 는 요청 한 번뿐이다. 전달할 데이터가 없으므로 인자도 없다.
+
+`platform_fatal_error` 가 계약에 들어 있는 것도 눈여겨볼 항목이다. 이 계층에서 무언가를 "보여주는" 함수는 원래 `platform_present` 하나인데, 초기화가 실패하면 보여줄 프레임 자체가 없다. 그 상황에서도 사용자에게 이유를 전달할 마지막 통로가 필요하고, 그것이 이 함수다. stderr 만으로 왜 부족한지는 §3.3 에서 구현과 함께 다룬다.
 
 `platform_begin_frame` 의 주석에 있는 **"MAX_DELTA = 100ms 클램핑 포함"** 이 이 계층의 계약 중 가장 자주 잊히는 항목이다. 창 이동이나 디버거 정지로 큰 `dt` 가 들어왔을 때 메인 루프가 수백 틱을 한꺼번에 따라잡는 것을 막는 상한이다.
 
@@ -214,14 +225,14 @@ void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 **현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
-// 이 프레임에 처음 눌린 키인가? IsKeyPressed() 대체.
+// 이 프레임에 처음 눌린 키인가? (edge)
 // keyState[key] == true && keyPrev[key] == false
 bool   platform_key_pressed(int key);
 
-// 현재 눌려있는 키인가? IsKeyDown() 대체.
+// 현재 눌려있는 키인가? (level)
 bool   platform_key_down(int key);
 
-// WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0). GetCharPressed() 대체.
+// WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0).
 char   platform_get_char_pressed();
 ```
 
@@ -235,16 +246,16 @@ char   platform_get_char_pressed();
 // 좌표는 클라이언트 영역 기준 (0,0 = 좌상단). 창 밖이면 마지막 값 유지.
 int    platform_mouse_x();
 int    platform_mouse_y();
-// 이번 프레임에 처음 눌림 (edge). IsMouseButtonPressed 대체.
+// 이번 프레임에 처음 눌림 (edge).
 bool   platform_mouse_pressed(int button);
-// 현재 누르고 있음 (level). IsMouseButtonDown 대체.
+// 현재 누르고 있음 (level).
 bool   platform_mouse_down(int button);
-// 이번 프레임에 뗌 (edge). IsMouseButtonReleased 대체.
+// 이번 프레임에 뗌 (edge).
 bool   platform_mouse_released(int button);
-// 이번 프레임 휠 스크롤 누적 (위로 양수). 없으면 0. GetMouseWheelMove 대체.
+// 이번 프레임 휠 스크롤 누적 (위로 양수). 없으면 0.
 float  platform_mouse_wheel();
 
-// platform_init 이후 경과 초. GetTime() 대체.
+// platform_init 이후 경과 초.
 double platform_get_time();
 
 // ─── 윈도우 설정 (렌더/UI 전용 — SimGame/결정성과 무관) ──────────────────────────
@@ -300,18 +311,18 @@ sequenceDiagram
     D-->>P: HGLRC / SDL_GLContext
     P->>D: make current
     M->>R: renderer_init()
-    R->>P: platform_gl_get_proc("glCreateShader") x 40+
+    R->>P: platform_gl_get_proc("glCreateShader") 등 반복 조회
     P-->>R: 함수 주소
     R->>D: 셰이더 컴파일 · VAO/VBO 생성
 ```
 
 ### 3.1 왜 3.3 Core 를 명시적으로 요청하는가
 
-"컨텍스트를 만들어 달라" 고만 하면 드라이버는 **기본 호환(compatibility) 컨텍스트**를 준다. 그 컨텍스트가 지원하는 GLSL 버전은 드라이버마다 다르다. Windows 의 NVIDIA 드라이버는 4.6 호환을 주고, Linux 의 Mesa 는 설정에 따라 다르고, **macOS 는 Core 프로파일을 명시하지 않으면 아예 2.1 만 준다.**
+"컨텍스트를 만들어 달라" 고만 하면 드라이버는 **기본 호환(compatibility) 컨텍스트**를 준다. 그 컨텍스트가 지원하는 GLSL 버전은 드라이버마다 다르다. Windows 의 어떤 드라이버는 4.6 호환을 주고, Linux 의 Mesa 는 설정에 따라 다르고, **macOS 는 Core 프로파일을 명시하지 않으면 아예 2.1 만 준다.**
 
 이 차이는 셰이더 소스를 갈라놓는다. `#version 130` 으로 쓴 셰이더는 Windows/Linux 호환 컨텍스트에서는 통하지만 macOS Core 프로파일에서는 거부된다. 그러면 플랫폼별 셰이더를 따로 유지해야 하고, 한쪽만 고치는 순간 다른 쪽이 조용히 깨진다.
 
-그래서 세 플랫폼 모두에 **3.3 Core 를 명시적으로 요청**한다. 요청이 성공하면 어디서든 `#version 330 core` 셰이더 한 벌이 그대로 통한다. 요청 방법은 백엔드마다 다르다 — SDL 은 창을 만들기 전에 속성을 걸고, Win32 는 컨텍스트를 두 번 만든다. 아래 §4.3 이 그 이유다.
+그래서 세 플랫폼 모두에 **3.3 Core 를 명시적으로 요청**한다. 요청이 성공하면 어디서든 `#version 330 core` 셰이더 한 벌이 그대로 통한다. 요청 방법은 백엔드마다 다르다 — SDL 은 창을 만들기 전에 속성을 걸고, Win32 는 컨텍스트를 두 번 만든다. 아래 §4.5 가 그 이유다.
 
 3.3 을 고른 기준은 필요한 기능의 하한선이다. VAO, `glBindBuffer`/`glBufferData` 스트리밍, `layout(location = N)` 정점 속성, 텍스처 유닛 — 이 프로젝트가 쓰는 기능은 전부 3.3 안에 있다. 그 위 버전을 요구하면 지원 하드웨어만 줄어든다. 반대로 3.3 은 2010년 이후 GPU 라면 사실상 전부 지원한다.
 
@@ -319,12 +330,49 @@ sequenceDiagram
 
 컨텍스트 생성 실패는 복구 경로가 없는 실패다. 컨텍스트가 없으면 함수 포인터도 못 받고, 셰이더도 못 만들고, 화면에 아무것도 나오지 않는다. 소프트웨어 폴백을 준비해 두는 선택지도 있지만 그건 렌더러를 두 벌 유지한다는 뜻이다.
 
-그래서 두 백엔드 모두 실패하면 `stderr` 에 이유를 한 줄 찍고 `s_should_close = true` 로 만든다. `main()` 의 루프 조건이 `!platform_should_close()` 이므로 프로그램은 창 하나 못 띄우고 정상 종료 경로로 빠진다. **조용히 검은 화면을 띄우는 대신 이유를 남기고 끝내는 것**이 이런 종류의 실패를 다루는 올바른 방법이다.
+한 단계 약한 폴백도 있다 — 3.3 Core 를 못 받았을 때 드라이버가 주는 레거시 호환 컨텍스트로라도 계속 가는 것이다. 이 프로젝트도 예전에는 그렇게 했다. 그러나 이 폴백은 실패를 뒤로 미룰 뿐이다. 그 위에 올라갈 셰이더가 전부 `#version 330 core` 라서, 레거시 컨텍스트에서는 셰이더 컴파일이 실패하고 결과는 어차피 검은 창이다. "덜 예쁘게라도 동작" 이 아니라 **원인에서 더 멀어진 자리에서 실패**하는 것뿐이다. 그래서 지금 구현은 이유를 말할 수 있는 자리 — 컨텍스트 생성 지점 — 에서 즉시 실패한다.
+
+실패의 구체적 형태는 이렇다. 두 백엔드 모두 실패하면 `stderr` 에 이유를 한 줄 찍고 `s_should_close = true` 로 만든다. 호출자는 `platform_init` 직후 `platform_should_close()` 를 확인하는 것이 계약이다 — 완성형 `src/main.cpp` 는 이 검사에서 실패를 발견하면 `platform_fatal_error` 로 이유를 띄우고 종료 코드 1 로 끝난다. **조용히 검은 화면을 띄우는 대신 이유를 남기고 끝내는 것**이 이런 종류의 실패를 다루는 올바른 방법이다.
+
+### 3.3 stderr 만으로는 부족하다 — `platform_fatal_error`
+
+"이유를 남기고 끝낸다" 에는 함정이 하나 있다. **누구에게 남기는가.** 터미널에서 실행하는 개발자에게는 stderr 한 줄이면 충분하다. 그런데 배포된 GUI 프로그램은 콘솔 없이 실행된다 — Windows 에서 GUI 서브시스템 실행 파일을 더블클릭하면 stderr 는 어디에도 연결되어 있지 않고, 거기 쓴 진단 문자열은 그대로 사라진다. 사용자가 보는 것은 "아무 일도 일어나지 않음" 뿐이고, 원인을 알 방법이 없다.
+
+그래서 이 계층의 계약에는 실패를 **사용자가 볼 수 있는 채널**로 내보내는 함수가 하나 있다.
+
+**현재 소스 발췌 — `platform/win32.cpp`**
+
+```cpp
+void platform_fatal_error(const char* message)
+{
+    if (!message || !*message) return;
+    std::fprintf(stderr, "[fatal] %s\n", message);
+    // 창이 이미 죽었을 수 있으므로 부모는 넘기지 않는다.
+    MessageBoxA(nullptr, message, "Entris", MB_OK | MB_ICONERROR);
+}
+```
+
+**현재 소스 발췌 — `platform/sdl.cpp`**
+
+```cpp
+void platform_fatal_error(const char* message)
+{
+    if (!message || !*message) return;
+    std::fprintf(stderr, "[fatal] %s\n", message);
+    // 창이 없거나 이미 파괴됐을 수 있다 — nullptr 부모로 띄운다.
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Entris", message, nullptr);
+}
+```
+
+세 가지 설계 판단이 담겨 있다. **stderr 에도 같이 남긴다** — 메시지박스는 사람이 닫으면 사라지지만 stderr 는 터미널 실행과 로그 수집에서 여전히 유효하다. 두 채널은 대체가 아니라 병행이다. **부모 창을 넘기지 않는다** — 이 함수가 불리는 시점은 창 생성 자체가 실패했거나 창이 이미 파괴된 뒤일 수 있다. 부모 핸들을 요구하면 "창이 없어서 실패했다" 는 보고를 창이 없어서 못 하는 순환에 빠진다. **메시지박스는 OS 가 그린다** — 우리 렌더러가 죽은 상황을 보고하는 수단이므로, 우리 렌더러에 의존하지 않는 표시 수단(Win32 `MessageBoxA`, SDL `SDL_ShowSimpleMessageBox`)이어야 한다.
+
+일반화하면 이렇다. **실패 보고는 그 실패가 망가뜨린 채널에 의존하면 안 된다.** 렌더러 초기화 실패를 렌더러로 그려서 알릴 수 없고, 콘솔 없는 프로세스의 실패를 콘솔로 알릴 수 없다. 실패 경로는 정상 경로보다 적은 전제 위에서 동작해야 하고, 그 전제를 계약("OS 네이티브 메시지박스만 쓴다")으로 못 박아 두는 것이 이 함수의 존재 이유다. 호출부는 완성형 `src/main.cpp` 의 부팅 절차다 — `platform_init` 과 렌더러 초기화 각각의 실패 검사에서 이 함수로 이유를 띄운 뒤 종료 코드 1 로 끝난다.
 
 ## 4. Win32: 창과 3.3 Core 컨텍스트 만들기
 
-`platform/win32.cpp` 가 담당하는 OS 기능은 다섯 가지다.
+`platform/win32.cpp` 가 담당하는 OS 기능은 다음과 같다.
 
+- `SetProcessDpiAwarenessContext`(폴백 포함) / `AdjustWindowRectExForDpi` — DPI 인식 선언과 DPI 보정 창 크기 계산
 - `RegisterClassExA` / `CreateWindowExA` — 창 생성
 - `ChoosePixelFormat` / `wglCreateContext` / `wglCreateContextAttribsARB` — GL 컨텍스트 생성
 - `PeekMessageA` / `TranslateMessage` / `DispatchMessageA` — 논블로킹 이벤트 처리
@@ -373,15 +421,127 @@ static LARGE_INTEGER s_frame_start{};
 
 이름에 규칙이 있다. `s_win_*` 은 실제 창 크기, `s_logical_*` 은 게임이 쓰는 좌표계 크기(720×640), `s_vp_*` 은 그 둘 사이의 레터박스 사각형이다. 세 그룹을 섞지 않는 것이 이 파일을 읽는 요령이다.
 
-GL 관련 상태는 셋이다. `s_hglrc` 는 컨텍스트 핸들, `s_opengl32` 는 `opengl32.dll` 의 모듈 핸들(§4.4), `s_wglSwapInterval` 은 vsync 를 켜고 끄는 확장 함수의 주소(§10.2)다. 함수 포인터를 변수로 들고 있는 이유는 그 함수가 **표준이 아니라 확장**이기 때문이다 — 헤더에 선언이 없고, 드라이버가 제공하지 않을 수도 있고, 조회하려면 컨텍스트가 이미 current 여야 한다. 프레임버퍼도, backbuffer 비트맵도, GDI 메모리 DC 도 없다. 픽셀을 담을 CPU 메모리가 이 파일에 하나도 없다는 것이 이 계층이 그리기에서 완전히 빠져 있다는 증거다.
+GL 관련 상태는 셋이다. `s_hglrc` 는 컨텍스트 핸들, `s_opengl32` 는 `opengl32.dll` 의 모듈 핸들(§4.6), `s_wglSwapInterval` 은 vsync 를 켜고 끄는 확장 함수의 주소(§10.2)다. 함수 포인터를 변수로 들고 있는 이유는 그 함수가 **표준이 아니라 확장**이기 때문이다 — 헤더에 선언이 없고, 드라이버가 제공하지 않을 수도 있고, 조회하려면 컨텍스트가 이미 current 여야 한다. 프레임버퍼도, backbuffer 비트맵도, GDI 메모리 DC 도 없다. 픽셀을 담을 CPU 메모리가 이 파일에 하나도 없다는 것이 이 계층이 그리기에서 완전히 빠져 있다는 증거다.
 
-초기화는 다음과 같다. 창 생성과 컨텍스트 생성이 한 함수 안에 이어져 있다.
+### 4.1 DPI 인식 — 창을 만들기 전에
+
+창 생성 코드로 들어가기 전에 먼저 처리해야 하는 것이 하나 있다. **DPI 인식 선언**이다.
+
+Windows 는 디스플레이 배율(125%, 150%, …)을 모르는 오래된 프로그램을 위해 **DPI 가상화**라는 호환 장치를 둔다. 프로세스가 "나는 DPI 를 안다" 고 선언하지 않으면 OS 는 그 프로세스에게 96 DPI 짜리 가상 좌표계를 보여준다. 이 세계에서 창 크기·마우스 좌표·화면 크기는 전부 가상 단위이고, OS 가 뒤에서 실제 픽셀로 확대해 준다. 오래된 프로그램은 고치지 않아도 되지만 대가가 있다 — 150% 모니터에서 2430×2160 창을 요청하면 실제로는 1620×1440 백버퍼가 만들어지고, 거기 그린 결과를 OS 가 비트맵처럼 1.5배 확대한다. GPU 가 창 해상도 그대로 래스터화한다는 이 구조의 장점(§8.3)이 정확히 그 배율만큼 상쇄되어 화면이 흐려진다. `SPI_GETWORKAREA` 같은 조회도 가상 해상도를 돌려주므로, 모니터에 들어가는 창 프리셋을 고르는 계산(§8.4)까지 어긋난다.
+
+그래서 Win32 백엔드는 초기화의 첫 순서로 DPI 인식을 선언한다.
+
+**현재 소스 발췌 — `platform/win32.cpp`**
+
+```cpp
+// 이 선언이 없으면 프로세스는 DPI-unaware 로 취급된다. 그러면 150% 스케일
+// 모니터에서 우리가 2430x2160 창을 요청해도 OS 는 1620x1440 짜리 백버퍼를
+// 주고 그것을 확대해서 보여준다. 요청한 픽셀 크기 그대로의 백버퍼를 받지
+// 못해 화면이 흐려지고, SPI_GETWORKAREA 도 가상 해상도를 돌려줘 창 프리셋
+// 목록이 잘못 잘린다.
+//
+// 매니페스트 대신 런타임 조회로 켜는 이유: 매니페스트는 빌드 설정에 묻혀
+// 보이지 않고, 구형 Windows 에서는 최신 API 자체가 없어 어차피 단계적
+// 폴백이 필요하다. 여기서는 신형 → 구형 순으로 시도한다.
+//   · Windows 10 1703+ : per-monitor v2 (창 프레임/비클라이언트도 같이 스케일)
+//   · Windows 8.1      : per-monitor v1
+//   · Vista+           : system-DPI aware
+static void enable_dpi_awareness()
+{
+    // user32 는 GUI 프로세스에 이미 로드돼 있다 — GetModuleHandle 로 충분하다.
+    if (HMODULE user32 = GetModuleHandleA("user32.dll")) {
+        using SetCtxFn = BOOL (WINAPI*)(void*);
+        if (auto set_ctx = (SetCtxFn)GetProcAddress(
+                user32, "SetProcessDpiAwarenessContext")) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+            if (set_ctx((void*)-4)) return;
+        }
+    }
+    if (HMODULE shcore = LoadLibraryA("shcore.dll")) {
+        using SetAwarenessFn = HRESULT (WINAPI*)(int);
+        auto set_awareness =
+            (SetAwarenessFn)GetProcAddress(shcore, "SetProcessDpiAwareness");
+        // PROCESS_PER_MONITOR_DPI_AWARE == 2
+        const bool ok = set_awareness && SUCCEEDED(set_awareness(2));
+        FreeLibrary(shcore);
+        if (ok) return;
+    }
+    SetProcessDPIAware();
+}
+```
+
+**순서 제약이 하나 있다. 창이 하나라도 생긴 뒤에는 프로세스의 DPI 인식 수준을 바꿀 수 없다.** 그래서 이 함수는 `platform_init` 의 첫 줄이고, `CreateWindowExA` 는 물론 창 클래스 등록보다도 앞이다. DPI 인식은 "이 프로세스의 좌표를 어떤 단위로 해석할 것인가" 라는 프로세스 단위 약속이라, 이미 어느 한쪽 해석으로 만들어진 창이 존재하면 도중에 바꿀 수 없는 것이 자연스럽다.
+
+폴백 사다리를 런타임 조회로 내려가는 것도 의도다. per-monitor v2 API 는 Windows 10 1703 이상에만 있고, 그보다 오래된 시스템에는 v1(8.1)이나 system-DPI(Vista) API 만 있다. 신형 API 를 import 테이블에 박으면 구형 Windows 에서는 실행 파일 로드 자체가 실패하므로, `GetProcAddress` 로 있는지 물어보고 있는 것부터 쓴다. §4.6 의 GL 함수 조회와 같은 원리다 — 세대별로 갈라지는 플랫폼 API 는 링크 타임이 아니라 런타임에 붙잡는다.
+
+선언에는 책임이 따라온다. 가상화는 편의와 제어의 거래여서, OS 의 자동 보정을 끄는 순간 그 보정이 하던 일이 전부 앱 몫이 된다. 이 프로젝트에서는 두 가지다.
+
+**첫째, 창 크기 계산이 DPI 별로 달라진다.** 창 테두리와 캡션의 두께가 모니터 DPI 를 따라 변하므로, 클라이언트 영역 크기에서 창 전체 크기를 계산할 때 그 모니터 DPI 기준의 여백을 써야 한다.
+
+**현재 소스 발췌 — `platform/win32.cpp`**
+
+```cpp
+// 창 테두리 두께는 모니터 DPI 에 따라 다르다. per-monitor 인식을 켜 놓고
+// AdjustWindowRect(시스템 DPI 기준)를 쓰면 클라이언트 영역이 요청한 크기와
+// 어긋나 프리셋 해상도가 정확히 나오지 않는다.
+static UINT dpi_for_window(HWND hwnd)
+{
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    if (!user32) return 96;
+    if (hwnd) {
+        using GetDpiForWindowFn = UINT (WINAPI*)(HWND);
+        if (auto get_dpi =
+                (GetDpiForWindowFn)GetProcAddress(user32, "GetDpiForWindow")) {
+            const UINT dpi = get_dpi(hwnd);
+            if (dpi > 0) return dpi;
+        }
+    }
+    using GetDpiForSystemFn = UINT (WINAPI*)(void);
+    if (auto get_sys_dpi =
+            (GetDpiForSystemFn)GetProcAddress(user32, "GetDpiForSystem")) {
+        const UINT dpi = get_sys_dpi();
+        if (dpi > 0) return dpi;
+    }
+    return 96;
+}
+
+// 구형 SDK 헤더(WINVER < 0x0605)에는 이 메시지 상수가 없을 수 있다.
+// 값은 Windows 10 1607+ 에서 문서화된 고정값이다.
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
+static void adjust_window_rect(RECT& rect, DWORD style, HWND hwnd)
+{
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    using AdjustForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    auto adjust = user32
+        ? (AdjustForDpiFn)GetProcAddress(user32, "AdjustWindowRectExForDpi")
+        : nullptr;
+    if (adjust && adjust(&rect, style, FALSE, 0, dpi_for_window(hwnd))) return;
+    AdjustWindowRect(&rect, style, FALSE);
+}
+```
+
+`dpi_for_window` 는 조회 대상 창이 있으면 그 창이 놓인 모니터의 DPI 를, 아직 창이 없으면(첫 창을 만들기 전) 시스템 DPI 를, 그마저 조회할 API 가 없으면 기준값 96 을 쓴다. `adjust_window_rect` 는 그 DPI 로 `AdjustWindowRectExForDpi` 를 시도하고, 구형 시스템에서는 원형 `AdjustWindowRect` 로 물러난다 — 구형 시스템은 per-monitor 인식도 못 켰을 것이므로 시스템 DPI 기준 계산이 그대로 맞는다. 폴백 사다리의 층이 서로 아귀가 맞아야 한다는 것이 이런 코드의 요점이다.
+
+**둘째, 모니터 사이를 이동할 때의 리스케일이 앱 책임이 된다.** per-monitor 인식을 선언하면 OS 는 더 이상 창을 대신 확대·축소해 주지 않는다. 아무 처리도 하지 않는 앱의 창을 150% 모니터에서 100% 모니터로 끌고 가면 물리적으로 1.5배 크기로 남는다. 대신 OS 는 `WM_DPICHANGED` 메시지로 "새 DPI 에서 같은 물리 크기가 되는" 제안 사각형을 보내 주고, 그것을 적용하는 것은 앱의 몫이다. 이 프로젝트의 처리는 §5 의 `window_proc` 에 있다 — 제안 사각형을 `SetWindowPos` 로 그대로 적용하면 크기 변화가 `WM_SIZE` 로 이어져 기존 뷰포트 재계산 경로를 탄다.
+
+SDL 백엔드는 반대 방향의 선택을 했다. `SDL_WINDOW_ALLOW_HIGHDPI` 를 쓰지 않아 창 크기와 마우스 좌표를 point 단위 하나로 통일한다(§12.2). 고해상도 백버퍼의 이득 대신 좌표 단위가 어긋날 가능성을 없앤 것이다. 어느 쪽이든 원칙은 같다 — **창 크기·마우스 좌표·백버퍼 크기가 같은 단위를 쓰는지**를 백엔드마다 명시적으로 정해 두어야, §8 의 레터박스·역매핑 계산이 성립한다.
+
+### 4.2 `platform_init` — 순서가 계약이다
+
+초기화는 다음과 같다. DPI 선언, 창 생성, 컨텍스트 생성이 한 함수 안에 이어져 있다.
 
 **현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_init(int width, int height, const char* title)
 {
+    // 창을 만들기 전에 켜야 한다. 창이 하나라도 생긴 뒤에는 프로세스 DPI
+    // 인식 수준을 바꿀 수 없다.
+    enable_dpi_awareness();
+
     s_win_w = s_logical_w = width;
     s_win_h = s_logical_h = height;
     recompute_viewport();
@@ -403,7 +563,7 @@ void platform_init(int width, int height, const char* title)
     // 같은 코드가 플랫폼마다 다르게 동작한다.
     const DWORD style = WS_OVERLAPPEDWINDOW;
     RECT rect{0, 0, width, height};
-    AdjustWindowRect(&rect, style, FALSE);
+    adjust_window_rect(rect, style, nullptr);
     s_hwnd = CreateWindowExA(
         0, window_class.lpszClassName, title, style,
         CW_USEDEFAULT, CW_USEDEFAULT,
@@ -451,6 +611,11 @@ void platform_init(int width, int height, const char* title)
     auto wglCreateContextAttribsARB = (CreateCtxAttribs)
         wglGetProcAddress("wglCreateContextAttribsARB");
 
+    // 3.3 Core 를 못 받으면 여기서 멈춘다. 예전에는 legacy 컨텍스트를 들고
+    // 계속 진행했지만, 그 다음 단계인 #version 330 core 셰이더가 그런 환경에서
+    // 대부분 실패한다. 즉 그 폴백은 "덜 예쁘게라도 동작" 이 아니라 "검은 창"
+    // 으로 끝나므로, 이유를 말할 수 있는 지금 실패하는 편이 정직하다.
+    HGLRC core = nullptr;
     if (wglCreateContextAttribsARB) {
         const int attribs[] = {
             0x2091 /* MAJOR_VERSION */, 3,
@@ -458,20 +623,26 @@ void platform_init(int width, int height, const char* title)
             0x9126 /* PROFILE_MASK  */, 0x00000001 /* CORE_PROFILE_BIT */,
             0
         };
-        HGLRC core = wglCreateContextAttribsARB(s_hdc, nullptr, attribs);
-        if (core) {
-            wglMakeCurrent(nullptr, nullptr);
-            wglDeleteContext(legacy);
-            wglMakeCurrent(s_hdc, core);
-            s_hglrc = core;
-        } else {
-            std::fprintf(stderr, "[GL] 3.3 Core unavailable; keeping legacy context\n");
-            s_hglrc = legacy;
-        }
+        core = wglCreateContextAttribsARB(s_hdc, nullptr, attribs);
+        if (!core)
+            std::fprintf(stderr, "[GL] OpenGL 3.3 Core context creation failed\n");
     } else {
-        std::fprintf(stderr, "[GL] wglCreateContextAttribsARB missing; legacy context\n");
-        s_hglrc = legacy;
+        std::fprintf(stderr, "[GL] wglCreateContextAttribsARB missing — "
+                             "driver is too old for OpenGL 3.3 Core\n");
     }
+
+    if (!core) {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(legacy);
+        s_hglrc = nullptr;
+        s_should_close = true;
+        return;
+    }
+
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(legacy);
+    wglMakeCurrent(s_hdc, core);
+    s_hglrc = core;
 
     // 컨텍스트가 current 인 지금이 확장을 조회할 수 있는 시점이다.
     s_wglSwapInterval = (BOOL (WINAPI*)(int))wglGetProcAddress("wglSwapIntervalEXT");
@@ -482,19 +653,19 @@ void platform_init(int width, int height, const char* title)
 }
 ```
 
-코드의 역할은 창 클래스 등록 → 창 생성 → 픽셀 포맷 설정 → 컨텍스트 생성 → vsync 확장 조회로 나뉜다. 소스 길이보다 이 초기화 순서가 계약이다.
+코드의 역할은 DPI 인식 선언 → 창 클래스 등록 → 창 생성 → 픽셀 포맷 설정 → 컨텍스트 생성(실패 시 하드 페일) → vsync 확장 조회로 나뉜다. 소스 길이보다 이 초기화 순서가 계약이다.
 
-### 4.1 창 클래스와 스타일
+### 4.3 창 클래스와 스타일
 
 **`CS_OWNDC`.** 창 클래스 스타일에 이 플래그를 주면 창마다 전용 DC 가 유지된다. `GetDC` 로 한 번 얻은 `s_hdc` 를 프로그램 수명 내내 재사용할 수 있다. GL 을 쓸 때 이건 편의가 아니라 **거의 필수**다. 픽셀 포맷은 DC 가 아니라 창에 한 번 설정되고, 컨텍스트는 그 포맷과 호환되는 DC 에서만 current 가 된다. `CS_OWNDC` 없이 매 프레임 `GetDC`/`ReleaseDC` 를 돌면 시스템 DC 캐시에서 매번 다른 DC 가 나올 수 있고, `SetPixelFormat` 한 DC 와 `SwapBuffers` 하는 DC 가 달라지는 상황을 다루게 된다.
 
-**`AdjustWindowRect`.** `CreateWindowExA` 에 넘기는 크기는 **창 전체(테두리+캡션 포함)** 크기다. 클라이언트 영역이 720×640 이 되게 하려면 스타일에 따른 비클라이언트 여백을 더해야 한다. `AdjustWindowRect(&rect, style, FALSE)` 가 `{0,0,720,640}` 을 그 여백만큼 부풀려 준다. 이 호출을 빼면 캡션 높이만큼 게임 화면이 잘린다.
+**`adjust_window_rect`.** `CreateWindowExA` 에 넘기는 크기는 **창 전체(테두리+캡션 포함)** 크기다. 클라이언트 영역이 720×640 이 되게 하려면 스타일에 따른 비클라이언트 여백을 더해야 한다. §4.1 의 `adjust_window_rect(rect, style, nullptr)` 가 `{0,0,720,640}` 을 현재 DPI 기준의 여백만큼 부풀려 준다. 이 호출을 빼면 캡션 높이만큼 게임 화면이 잘리고, DPI 보정 없는 원형 `AdjustWindowRect` 를 쓰면 고배율 모니터에서 클라이언트 영역이 요청한 크기와 어긋난다.
 
 **창 스타일이 `WS_OVERLAPPEDWINDOW` 다.** 이 상수는 `WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` 의 묶음이다. 핵심은 `WS_THICKFRAME` 이고, 그것이 있어야 **사용자가 테두리를 끌어 창 크기를 바꿀 수 있다.** SDL 백엔드가 `SDL_WINDOW_RESIZABLE` 로 창을 만드므로, 같은 조건을 주지 않으면 같은 코드가 OS 마다 다르게 동작한다. 창 크기가 자유로워지면 논리 9:8 과 다른 종횡비가 흔해지고, 그때 레터박스와 마우스 역매핑이 실제로 시험대에 오른다 — §8 의 내용이 여기서부터 의미를 갖는다.
 
 **클래스 이름은 `"TetrisWindow"` 다.** 특별한 의미는 없지만 `platform_shutdown` 의 `UnregisterClassA` 와 문자열이 정확히 일치해야 한다. 두 곳에 리터럴로 적혀 있으므로 한쪽만 고치면 클래스가 해제되지 않는다.
 
-### 4.2 픽셀 포맷
+### 4.4 픽셀 포맷
 
 `PIXELFORMATDESCRIPTOR` 는 "이 창에 어떤 종류의 프레임버퍼를 달아 달라" 는 요청서다. 여기서 요구하는 것은 네 가지다.
 
@@ -507,7 +678,7 @@ void platform_init(int width, int height, const char* title)
 
 **엣지 케이스 하나.** `SetPixelFormat` 은 **창 하나당 한 번만** 성공한다. 이미 포맷이 설정된 창에 다른 포맷을 걸 수 없다. 그래서 멀티샘플 설정 같은 것을 런타임에 바꾸려면 창을 새로 만들어야 한다. 이 프로젝트가 창 재생성 경로를 만들지 않은 이유 중 하나이기도 하다.
 
-### 4.3 왜 컨텍스트를 두 번 만드는가
+### 4.5 왜 컨텍스트를 두 번 만드는가
 
 이 파일에서 가장 이상해 보이는 코드가 여기다. 컨텍스트를 만들고, current 로 걸고, 함수 하나를 조회하고, 그 함수로 컨텍스트를 다시 만들고, 처음 만든 것을 지운다.
 
@@ -527,11 +698,11 @@ void platform_init(int width, int height, const char* title)
 
 **이 2단계를 건너뛰는 것이 이 프로젝트가 실제로 겪은 결함이었다.** 이전 시도에서는 `wglCreateContext` 로 만든 기본 컨텍스트를 그대로 썼다. Windows 와 Linux 에서는 우연히 동작했다 — 드라이버가 준 호환 컨텍스트가 셰이더를 받아 줬기 때문이다. 그런데 macOS 는 Core 프로파일을 명시하지 않으면 GL 2.1 만 준다. 같은 셰이더가 macOS 에서만 컴파일 실패하고, 원인이 셰이더가 아니라 **컨텍스트 생성 코드**에 있어서 찾는 데 오래 걸렸다. 지금은 세 플랫폼이 같은 3.3 Core 를 받고 `#version 330 core` 셰이더 한 벌을 공유한다.
 
-두 개의 `else` 분기는 폴백이다. `wglCreateContextAttribsARB` 자체가 없거나(아주 오래된 드라이버), 3.3 Core 요청이 거부되면 레거시 컨텍스트를 그대로 쓴다. 이 경우 셰이더 컴파일이 실패할 가능성이 높지만, **왜 실패했는지 알 수 있는 메시지가 stderr 에 남는다**는 것이 폴백의 실제 가치다. 아무 말 없이 검은 창을 띄우는 것보다 낫다.
+실패 경로는 §3.2 의 정책 그대로다. `wglCreateContextAttribsARB` 자체가 없으면(아주 오래된 드라이버) `[GL] wglCreateContextAttribsARB missing — driver is too old for OpenGL 3.3 Core` 를, 3.3 Core 요청이 거부되면 `[GL] OpenGL 3.3 Core context creation failed` 를 stderr 에 남긴다. 어느 쪽이든 `core` 는 null 이고, 확장 조회용으로 만든 레거시 컨텍스트를 삭제한 뒤 `s_should_close = true` 로 멈춘다. 레거시 컨텍스트를 들고 계속 가는 폴백은 두지 않는다 — 그 컨텍스트에서는 `#version 330 core` 셰이더가 컴파일되지 않아 결과가 어차피 검은 창이므로, 원인을 지목할 수 있는 이 자리에서 실패하는 편이 정직하다. 레거시 컨텍스트의 유일한 역할은 확장 함수 조회이고, 성공 경로든 실패 경로든 이 함수를 벗어나기 전에 삭제된다.
 
-함수 마지막의 두 줄이 같은 규칙을 한 번 더 보여준다. `wglSwapIntervalEXT` 도 확장이라 컨텍스트가 current 인 상태에서만 조회된다. 그래서 컨텍스트 생성이 끝난 **바로 이 자리**가 조회 시점이고, `ShowWindow` 보다 앞이다. 받아 온 함수가 있으면 즉시 한 번 호출해 초기 vsync 상태를 건다. 이 함수는 buffer swap을 수직 동기화에 맞출지 정하며, 조회하거나 호출할 수 없는 드라이버에서는 지원 없음으로 처리한다.
+함수 마지막의 확장 조회가 같은 규칙을 한 번 더 보여준다. `wglSwapIntervalEXT` 도 확장이라 컨텍스트가 current 인 상태에서만 조회된다. 그래서 컨텍스트 생성이 끝난 **바로 이 자리**가 조회 시점이고, `ShowWindow` 보다 앞이다. 받아 온 함수가 있으면 즉시 한 번 호출해 초기 vsync 상태를 건다. 이 함수는 buffer swap을 수직 동기화에 맞출지 정하며, 조회하거나 호출할 수 없는 드라이버에서는 지원 없음으로 처리한다.
 
-### 4.4 `platform_gl_get_proc` — Windows 만의 문제
+### 4.6 `platform_gl_get_proc` — Windows 만의 문제
 
 컨텍스트가 준비되면 GL 함수를 부를 수 있다. 그런데 Windows 에서는 함수 이름을 그냥 부를 수 없다.
 
@@ -572,13 +743,13 @@ void* platform_gl_get_proc(const char* name)
 }
 ```
 
-한 줄이다. 이 비대칭이 SDL 을 쓰는 실질적 이득의 좋은 예다 — 이 계층은 "이름을 주면 주소를 돌려주는 함수" 라는 계약만 노출하고, 그 뒤가 12줄인지 1줄인지는 렌더러가 알 필요가 없다.
+한 줄이다. 이 비대칭이 SDL 을 쓰는 실질적 이득의 좋은 예다 — 이 계층은 "이름을 주면 주소를 돌려주는 함수" 라는 계약만 노출하고, 그 뒤가 폴백 사다리인지 위임 한 번인지는 렌더러가 알 필요가 없다.
 
 완성형 renderer의 `gl_load_functions()`는 이 API로 X-매크로 테이블을 순회한다. 진입점 이름을 하나씩 넘기고, 하나라도 못 받으면 빠진 이름을 모두 모아 보고한 뒤 실패한다. 이 체크포인트 데모는 같은 계약을 작은 로더로 검증한다.
 
 ## 5. `window_proc` — 모든 입력이 들어오는 한 곳
 
-Win32 의 입력은 콜백으로 들어온다. 창 프로시저 하나가 키보드·마우스·창 크기·종료를 전부 받는다.
+Win32 의 입력은 콜백으로 들어온다. 창 프로시저 하나가 키보드·마우스·창 크기·DPI 변화·종료를 전부 받는다.
 
 **현재 소스 발췌 — `platform/win32.cpp`**
 
@@ -628,6 +799,19 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
     case WM_MOUSEWHEEL:
         s_mouse_wheel += (float)(short)HIWORD(wparam) / (float)WHEEL_DELTA;
         return 0;
+    case WM_DPICHANGED: {
+        // per-monitor 인식에서는 모니터 간 이동 리스케일이 앱 책임이다 (§4.1).
+        // OS 가 lparam 에 "새 DPI 에서 같은 물리 크기가 되는" 제안 RECT 를
+        // 담아 주므로 그대로 적용한다. 크기가 실제로 바뀌면 WM_SIZE 가
+        // 뒤따라 들어와 기존 뷰포트 재계산 경로(recompute_viewport)를 탄다.
+        const RECT* suggested = (const RECT*)lparam;
+        SetWindowPos(hwnd, nullptr,
+                     suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_CLOSE:
@@ -650,6 +834,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 **`WM_SYSKEYDOWN` 도 같이 받는다.** Alt 조합 키는 `WM_KEYDOWN` 이 아니라 `WM_SYSKEYDOWN` 으로 온다. 두 케이스를 같은 분기에 두지 않으면 Alt 를 누른 채로는 방향키가 먹지 않는다.
 
 **`WM_SIZE` 가 뷰포트를 다시 계산한다.** 창 스타일이 `WS_OVERLAPPEDWINDOW` 가 되면서 이 메시지가 실제로 자주 온다. 사용자가 테두리를 끄는 동안 매 픽셀마다 도착한다. 여기서 하는 일은 `s_win_w/h` 갱신과 `recompute_viewport()` 뿐이고, `glViewport` 는 부르지 않는다. GL 호출은 렌더링 스레드의 프레임 안에서만 일어나야 하고, 실제로 Part 3 의 렌더러가 매 프레임 `platform_viewport()` 를 읽어 그때 설정한다.
+
+**`WM_DPICHANGED` 는 §4.1 이 선언한 책임의 이행부다.** per-monitor DPI 인식을 선언한 순간 모니터 간 이동 시의 창 리스케일은 앱 몫이 되었다. OS 가 lparam 에 담아 주는 제안 사각형("새 DPI 에서 같은 물리 크기")을 `SetWindowPos` 로 그대로 적용한다. 크기가 실제로 바뀌면 `WM_SIZE` 가 뒤따라 들어오므로 뷰포트 재계산 경로는 하나로 유지된다 — DPI 전용 재계산 코드를 따로 두지 않는 것이 요점이다.
 
 **`SetCapture` / `ReleaseCapture`.** 버튼을 누른 순간 마우스를 캡처하면, 커서가 창 밖으로 나가도 `WM_MOUSEMOVE`와 `WM_LBUTTONUP`이 계속 이 창으로 온다. 이게 없으면 **드래그 도중 창 밖에서 버튼을 놓았을 때 `s_mouse_state[0]`이 영원히 `true`로 남는다.** 슬라이더 같은 드래그 UI가 이 계약에 의존한다. 캡처 중 좌표는 음수이거나 창 크기를 넘을 수 있으므로, viewport 역매핑은 창 바깥 좌표도 안전하게 변환하고 위젯 hit test가 최종 범위를 판정해야 한다.
 
@@ -969,7 +1155,7 @@ void platform_present()
 }
 ```
 
-두 줄과 세 줄이다. 여기서 픽셀이 이동하지 않는다. 그림은 이미 GPU 안의 백버퍼에 들어 있고, 이 호출은 드라이버에게 **백버퍼와 프론트버퍼의 역할을 바꿔 달라**고 요청할 뿐이다. 실제로는 포인터 두 개를 교환하는 수준의 일이고, 그마저도 컴포지터가 관여하면 형태가 달라진다.
+두 구현 모두 몸통이 널 가드와 버퍼 교체 요청 하나뿐이다. 여기서 픽셀이 이동하지 않는다. 그림은 이미 GPU 안의 백버퍼에 들어 있고, 이 호출은 드라이버에게 **백버퍼와 프론트버퍼의 역할을 바꿔 달라**고 요청할 뿐이다. 실제로는 포인터 두 개를 교환하는 수준의 일이고, 그마저도 컴포지터가 관여하면 형태가 달라진다.
 
 **CPU 로 픽셀을 만드는 구조였다면 이 자리가 훨씬 무거웠을 것이다.** 720×640 배열을 창 크기 backbuffer 에 확대 복사하고(Win32 라면 `StretchDIBits`), 그 backbuffer 를 창 DC 로 옮기고(`BitBlt`), 창 크기가 바뀔 때마다 backbuffer 를 다시 만들어야 한다. SDL 이라면 `SDL_CreateRGBSurfaceFrom` + `SDL_BlitScaled` + `SDL_UpdateWindowSurface` 3단이다. 그러면 이 계층이 픽셀의 생김새까지 알아야 한다 — 채널이 어떤 순서로 놓이는지, 리틀 엔디언에서 바이트 배치가 어떻게 되는지, 한 행의 바이트 수(pitch)가 폭과 다를 수 있는지. 계약에 인자가 네 개쯤 붙고, 두 백엔드가 그 인자를 서로 다르게 해석하기 시작한다.
 
@@ -977,7 +1163,7 @@ GL 컨텍스트를 쓰는 지금은 그 전부가 필요 없다. 46만 픽셀을
 
 **레터박스 바는 누가 칠하는가.** 이전에는 이 함수가 `FillRect(BLACK_BRUSH)` 로 창 전체를 지운 뒤 뷰포트에만 그림을 얹었다. 지금은 플랫폼 계층이 관여하지 않는다. Part 3 의 `renderer_begin` 이 프레임 시작에 두 번 지운다 — 시저를 끄고 창 전체를 검게, 시저를 뷰포트로 켜고 배경색으로. **`glClear` 는 뷰포트가 아니라 시저 박스를 따르기 때문**에 이 두 단계가 필요하다. 이 장의 데모에서 같은 기법을 직접 써 본다.
 
-**`SwapBuffers` 에 `PFD_DOUBLEBUFFER` 가 전제된다.** §4.2 에서 픽셀 포맷에 이 플래그를 넣은 이유가 여기다. 싱글 버퍼 포맷을 골랐다면 `SwapBuffers` 는 아무 일도 하지 않고, 그리는 과정이 그대로 화면에 노출된다.
+**`SwapBuffers` 에 `PFD_DOUBLEBUFFER` 가 전제된다.** §4.4 에서 픽셀 포맷에 이 플래그를 넣은 이유가 여기다. 싱글 버퍼 포맷을 골랐다면 `SwapBuffers` 는 아무 일도 하지 않고, 그리는 과정이 그대로 화면에 노출된다.
 
 ## 10. 시간 — 델타타임 클램프와 페이싱
 
@@ -1034,19 +1220,24 @@ void platform_set_vsync(bool on)
 }
 ```
 
-`s_wglSwapInterval` 은 §4.3 끝에서 `wglGetProcAddress("wglSwapIntervalEXT")` 로 받아 둔 함수 포인터다. `WGL_EXT_swap_control` 은 코어 GL 이 아니라 **확장**이라서 세 가지가 전부 참이어야 쓸 수 있다. 컨텍스트가 current 여야 조회되고, 드라이버가 제공해야 하고, 조회 결과가 유효해야 한다. 그래서 `if (s_wglSwapInterval)` 검사가 붙는다. 확장이 없는 환경에서도 프로그램은 그대로 돌고, 다만 프레임 조절이 소프트웨어 쪽에만 의존하게 된다.
+`s_wglSwapInterval` 은 §4.5 끝에서 `wglGetProcAddress("wglSwapIntervalEXT")` 로 받아 둔 함수 포인터다. `WGL_EXT_swap_control` 은 코어 GL 이 아니라 **확장**이라서 세 가지가 전부 참이어야 쓸 수 있다. 컨텍스트가 current 여야 조회되고, 드라이버가 제공해야 하고, 조회 결과가 유효해야 한다. 그래서 `if (s_wglSwapInterval)` 검사가 붙는다. 확장이 없는 환경에서도 프로그램은 그대로 돌고, 다만 프레임 조절이 소프트웨어 쪽에만 의존하게 된다.
 
 두 백엔드 모두 초기값을 `platform_init` 안에서 한 번 건다(`s_frame_pacing` 초기값이 `true` 이므로 vsync 켜진 상태로 시작한다). **명시적으로 거는 것이 중요하다.** 걸지 않으면 드라이버 제어판 설정이나 컴포지터 정책이 값을 정하게 되고, 같은 실행 파일이 기계마다 다른 프레임률로 도는데 코드에는 그 이유가 어디에도 없다.
 
-소프트웨어 페이싱은 사라지지 않고 안전망으로 남았다.
+소프트웨어 페이싱은 사라지지 않았다. 안전망이라는 원래 역할에 더해, vsync 를 껐을 때의 렌더 상한이라는 두 번째 역할을 갖는다.
 
 **현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 void platform_end_frame()
 {
-    if (!s_frame_pacing || s_frequency.QuadPart <= 0) return;
-    const double target = 1.0 / 60.0;
+    if (s_frequency.QuadPart <= 0) return;
+    // vsync 가 켜져 있으면 60Hz 를 목표로 맞춘다 (고주사율 모니터에서 SwapBuffers
+    // 가 8ms 만에 돌아와도 여기서 남은 시간을 채운다).
+    // 꺼져 있으면 상한만 건다 — 완전히 풀어 놓으면 고정 틱 시뮬레이션은 그대로인
+    // 채 렌더 루프만 수천 fps 로 돌아 CPU/GPU 를 태운다(노트북 발열·배터리).
+    constexpr double kUncappedMaxFps = 240.0;
+    const double target = s_frame_pacing ? (1.0 / 60.0) : (1.0 / kUncappedMaxFps);
     for (;;) {
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
@@ -1061,7 +1252,9 @@ void platform_end_frame()
 }
 ```
 
-기준점이 `s_frame_start` 라는 것에 주목. 이 값은 `platform_begin_frame` 에서 갱신된다. 즉 페이싱은 "프레임 시작 이후 16.67ms 가 될 때까지" 기다린다. 업데이트·드로우 큐 제출·`SwapBuffers` 에 걸린 시간을 이미 뺀 값이다.
+`target` 선택식이 이 함수의 요점이다. 페이싱이 켜져 있으면 60Hz 목표로 남은 시간을 채우고, **꺼져 있어도 `kUncappedMaxFps = 240` 상한은 유지한다.** vsync 를 끈다고 무제한이 되는 것이 아니다. 고정 틱 시뮬레이션은 어차피 60Hz 그대로인데, 상한이 없으면 렌더 루프만 수천 fps 로 돌며 거의 같은 화면을 다시 그리는 데 CPU 와 GPU 를 태운다 — 노트북이라면 발열과 배터리로 즉시 체감된다. 240 은 vsync 없이 렌더 지연을 실험할 여지를 남기면서 그 낭비를 끊는 절충값이다.
+
+기준점이 `s_frame_start` 라는 것에 주목. 이 값은 `platform_begin_frame` 에서 갱신된다. 즉 페이싱은 "프레임 시작 이후 목표 시간이 될 때까지" 기다린다. 업데이트·드로우 큐 제출·`SwapBuffers` 에 걸린 시간을 이미 뺀 값이다.
 
 루프 구조는 **거친 대기 + 정밀 스핀** 조합이다. 남은 시간이 2ms 를 넘으면 `Sleep` 으로 1ms 여유를 남기고 자고, 그보다 적게 남으면 `Sleep(0)` 으로 타임슬라이스만 양보하며 돈다. `Sleep(0)` 은 같은 우선순위의 다른 스레드에게 기회를 주고 즉시 돌아온다.
 
@@ -1074,8 +1267,11 @@ SDL 백엔드에도 같은 함수가 있다.
 ```cpp
 void platform_end_frame()
 {
-    if (!s_frame_pacing || s_frequency == 0) return;
-    const double target = 1.0 / 60.0;
+    if (s_frequency == 0) return;
+    // vsync 가 켜져 있으면 60Hz 목표, 꺼져 있으면 상한만 건다.
+    // (win32.cpp 의 같은 함수와 같은 이유 — 무제한 렌더 루프 방지)
+    constexpr double kUncappedMaxFps = 240.0;
+    const double target = s_frame_pacing ? (1.0 / 60.0) : (1.0 / kUncappedMaxFps);
     const uint64_t now = SDL_GetPerformanceCounter();
     const double elapsed = (double)(now - s_frame_start) / (double)s_frequency;
     const double remaining = target - elapsed;
@@ -1084,9 +1280,9 @@ void platform_end_frame()
 }
 ```
 
-**vsync 가 실제로 걸려 있으면 두 백엔드의 `platform_end_frame` 은 거의 항상 아무 일도 하지 않는다.** 버퍼 교체가 이미 vblank 까지 기다렸으므로 `elapsed` 가 16.67ms 를 넘고 `remaining` 이 음수가 되기 때문이다. 그런데도 이 코드를 남겨 두는 이유는 swap interval 이 항상 걸리는 것이 아니기 때문이다. Windows 에 `WGL_EXT_swap_control` 이 없는 경우, 드라이버 제어판에서 vsync 를 강제로 끈 경우, 컴포지터가 요청을 무시하는 경우 — 어느 쪽이든 게임은 수천 FPS 로 돌며 GPU 와 CPU 를 모두 태운다. 소프트웨어 페이싱이 그 마지막 안전망이다.
+**vsync 가 실제로 걸려 있으면 두 백엔드의 `platform_end_frame` 은 거의 항상 아무 일도 하지 않는다.** 버퍼 교체가 이미 vblank 까지 기다렸으므로 `elapsed` 가 16.67ms 를 넘고 `remaining` 이 음수가 되기 때문이다. 그런데도 이 코드를 남겨 두는 이유는 swap interval 이 항상 걸리는 것이 아니기 때문이다. Windows 에 `WGL_EXT_swap_control` 이 없는 경우, 드라이버 제어판에서 vsync 를 강제로 끈 경우, 컴포지터가 요청을 무시하는 경우 — 어느 쪽이든 하드웨어 동기화 없이 도는 루프를 이 타이머 페이싱이 받아 낸다.
 
-정리하면 프레임 조절은 2단 구조다. **1단은 swap interval**(가능하면 진짜 vblank 동기화), **2단은 `platform_end_frame` 의 타이머 페이싱**(1단이 없을 때의 상한). `platform_set_vsync` 는 두 단을 한 플래그로 함께 켜고 끈다.
+정리하면 프레임 조절은 세 모드로 동작한다. **vsync 켜짐** — swap interval 1 의 vblank 동기화가 1차 수단이고, `platform_end_frame` 의 타이머 페이싱이 60Hz 목표의 안전망으로 뒤를 받친다. **vsync 꺼짐** — swap interval 0 이 되고, 타이머 페이싱이 240fps 상한만 건다. **확장 부재** — swap interval 을 걸 수단 자체가 없으므로 타이머 페이싱이 유일한 조절 수단으로 남는다. `platform_set_vsync` 는 `s_frame_pacing` 플래그 하나로 swap interval 과 타이머 목표치를 함께 바꾼다.
 
 **시뮬레이션 결정론에는 어느 쪽도 영향이 없다.** Part 4 의 고정 스텝 누산기가 렌더 빈도와 무관하게 60Hz 틱을 만들고, `SimGame` 은 dt 를 아예 보지 않는다. 프레임이 30 FPS 로 떨어져도, 144 FPS 로 올라가도 틱 수열은 같다.
 
@@ -1122,7 +1318,7 @@ void platform_shutdown()
 }
 ```
 
-`wglMakeCurrent(nullptr, nullptr)` → `wglDeleteContext` → `FreeLibrary` → `ReleaseDC` → `DestroyWindow` → `UnregisterClassA`. 각 단계가 앞 단계에 의존한다. **current 인 컨텍스트는 삭제되지 않고**(§4.3 에서 레거시 컨텍스트를 지울 때와 같은 규칙이다), 컨텍스트는 자기가 묶인 DC 보다 먼저 사라져야 하고, 창이 살아 있는 동안 얻은 DC 는 창보다 먼저 놓아야 하고, 창이 하나라도 남아 있으면 클래스는 등록 해제되지 않는다.
+`wglMakeCurrent(nullptr, nullptr)` → `wglDeleteContext` → `FreeLibrary` → `ReleaseDC` → `DestroyWindow` → `UnregisterClassA`. 각 단계가 앞 단계에 의존한다. **current 인 컨텍스트는 삭제되지 않고**(§4.5 에서 레거시 컨텍스트를 지울 때와 같은 규칙이다), 컨텍스트는 자기가 묶인 DC 보다 먼저 사라져야 하고, 창이 살아 있는 동안 얻은 DC 는 창보다 먼저 놓아야 하고, 창이 하나라도 남아 있으면 클래스는 등록 해제되지 않는다.
 
 SDL 쪽도 같은 규칙을 자기 API 로 표현한다.
 
@@ -1166,6 +1362,8 @@ void platform_shutdown()
 | vsync | `wglSwapIntervalEXT` (확장, 없을 수 있음) | `SDL_GL_SetSwapInterval(0/1)` |
 | 페이싱 | spin + `Sleep` | 단발 `SDL_Delay` |
 | 전체화면 | 미구현 | `SDL_WINDOW_FULLSCREEN_DESKTOP` |
+| 치명 오류 표시 | `MessageBoxA` | `SDL_ShowSimpleMessageBox` |
+| DPI | `SetProcessDpiAwarenessContext` 폴백 사다리 + `WM_DPICHANGED` | `SDL_WINDOW_ALLOW_HIGHDPI` 미사용 — point 단위 유지 |
 
 `platform_viewport`, `platform_mouse_x/y`, `recompute_viewport`, `platform_display_size`는 두 백엔드가 같은 논리 좌표 계약을 공유한다. 이 체크포인트에서는 창 생성·입력·시간 API가 그 계약으로 함께 동작하는지를 검증한다.
 
@@ -1206,7 +1404,7 @@ static int sdl_to_platform_key(SDL_Keycode key)
 }
 ```
 
-두 가지가 눈에 띈다. `SDLK_RETURN` 과 `SDLK_KP_ENTER`(숫자패드 엔터)가 같은 `PKEY_ENTER` 로 합쳐진다. 그리고 **테이블에 없는 키는 `-1`** 이다. 호출부가 `if (key >= 0 && key < 256)` 로 걸러 버린다. 게임이 쓰지 않는 키는 아예 상태 배열에 들어오지 않으므로, `s_key_state` 는 SDL 빌드에서 `PlatformKey` 에 나열된 21개 슬롯만 사용된다.
+두 가지가 눈에 띈다. `SDLK_RETURN` 과 `SDLK_KP_ENTER`(숫자패드 엔터)가 같은 `PKEY_ENTER` 로 합쳐진다. 그리고 **테이블에 없는 키는 `-1`** 이다. 호출부가 `if (key >= 0 && key < 256)` 로 걸러 버린다. 게임이 쓰지 않는 키는 아예 상태 배열에 들어오지 않으므로, `s_key_state` 는 SDL 빌드에서 `PlatformKey` 에 나열된 키의 슬롯만 사용된다.
 
 이 설계의 실제 결과: 새 단축키를 추가하려면 반드시 두 곳을 같이 고쳐야 한다. `platform.h` 의 `PlatformKey` 에 상수 추가, `sdl_to_platform_key` 에 `case` 추가. 한쪽만 고치면 Windows 에서는 되고 Linux/macOS 에서는 안 되는 버그가 된다.
 
@@ -1270,7 +1468,7 @@ SDL2 경로가 Win32 경로보다 짧은 이유의 대부분은 컨텍스트 생
 
 **`SDL_WINDOW_RESIZABLE` 이 붙었다.** Win32 의 `WS_OVERLAPPEDWINDOW` 와 짝을 이루는 설정이다. 두 백엔드가 같은 조건이어야 "Linux 에서는 창이 늘어나는데 Windows 에서는 안 된다" 같은 차이가 생기지 않는다.
 
-**`SDL_WINDOW_ALLOW_HIGHDPI` 는 여전히 없다.** Retina 디스플레이에서 SDL 이 픽셀 배율을 적용하지 않는다는 뜻이다. 결과적으로 마우스 좌표와 창 크기가 **둘 다 point 단위**로 일치한다. 배율이 섞이면 `recompute_viewport` 의 창 크기와 `SDL_MOUSEMOTION` 의 좌표가 다른 단위가 되어, §8.1 에서 본 것과 똑같은 종류의 어긋남이 생긴다.
+**`SDL_WINDOW_ALLOW_HIGHDPI` 는 여전히 없다.** macOS 의 HiDPI 디스플레이에서 SDL 이 픽셀 배율을 적용하지 않는다는 뜻이다. 결과적으로 마우스 좌표와 창 크기가 **둘 다 point 단위**로 일치한다. 배율이 섞이면 `recompute_viewport` 의 창 크기와 `SDL_MOUSEMOTION` 의 좌표가 다른 단위가 되어, §8.1 에서 본 것과 똑같은 종류의 어긋남이 생긴다. Win32 백엔드가 §4.1 에서 DPI 인식을 켠 것과 반대 방향의 선택이지만, "창 크기와 마우스 좌표가 같은 단위" 라는 목표는 같다.
 
 **컨텍스트 생성 실패 시 창을 먼저 정리한다.** `SDL_DestroyWindow` 를 부르고 `s_window = nullptr` 로 만든 뒤 `s_should_close = true`. 이렇게 해 두면 `platform_shutdown` 이 나중에 불려도 이미 파괴된 창을 다시 파괴하지 않는다.
 
@@ -1504,7 +1702,7 @@ endif()
 
 ## 15. Part 2 체크포인트 데모
 
-플랫폼 계층만으로 실행 가능한 최소 프로그램을 만든다. 렌더러가 없으므로 셰이더도 정점 버퍼도 쓸 수 없다. 대신 **GL 1.1 수준의 함수 여섯 개만으로** 이 장이 만든 것을 전부 검증한다 — 컨텍스트가 3.3 Core 인지, 함수 포인터 조회가 되는지, 뷰포트가 창 크기를 따라가는지, 마우스 역매핑이 뷰포트와 일치하는지, 버퍼 교체가 되는지.
+플랫폼 계층만으로 실행 가능한 최소 프로그램을 만든다. 렌더러가 없으므로 셰이더도 정점 버퍼도 쓸 수 없다. 대신 **GL 1.1 수준의 함수 몇 개만으로** 이 장이 만든 것을 전부 검증한다 — 컨텍스트가 3.3 Core 인지, 함수 포인터 조회가 되는지, 뷰포트가 창 크기를 따라가는지, 마우스 역매핑이 뷰포트와 일치하는지, 버퍼 교체가 되는지.
 
 핵심 기법은 **시저 박스 + `glClear`** 다. `glClear` 는 뷰포트가 아니라 시저 박스가 지정한 사각형만 지운다. 그래서 시저를 옮겨 가며 세 번 지우면 셰이더 없이도 사각형 세 개를 그린 것과 같은 효과가 난다. Part 3 의 `renderer_begin` 도 같은 이유로 시저를 쓴다.
 
@@ -1518,7 +1716,7 @@ endif()
 
 #include "platform/platform.h"
 
-// GL 헤더를 include 하지 않는다. 이 데모가 쓰는 일곱 함수의 타입만 직접 적는다.
+// GL 헤더를 include 하지 않는다. 이 데모가 쓰는 함수의 타입만 직접 적는다.
 // 완성형 renderer/gl_api.h도 같은 패턴으로 필요한 GL 진입점을 로드한다.
 using GLenum     = unsigned int;
 using GLbitfield = unsigned int;
@@ -1647,12 +1845,12 @@ cmake --build build --config Release --target part2_present_demo
 .\build\Release\part2_present_demo.exe
 ```
 
-`-DTETRIS_BUILD_GAME=OFF` 가 필수다. 켜져 있으면 아직 없는 `src/main.cpp`, `renderer/*.cpp`, `net/*.cpp` 때문에 configure 단계에서 죽는다.
+`-DTETRIS_BUILD_GAME=OFF` 는 **저장소 전체의 완성형 `CMakeLists.txt`** 로 configure 하는 경우를 위한 방어다 — 그 파일은 게임 타깃이 기본 ON 이라, 아직 없는 `src/main.cpp`, `renderer/*.cpp`, `net/*.cpp` 때문에 configure 단계에서 죽는다. §14 의 체크포인트 `CMakeLists.txt` 에는 그 옵션 자체가 없으므로 이 플래그는 조용히 무시된다 — 붙여 두면 어느 쪽 파일로도 같은 명령이 통한다.
 
-stdout 예시(Mesa Intel HD Graphics 3000, 도중에 창을 1000×400 으로 늘림):
+stdout 예시(Mesa 드라이버를 쓰는 소형 리눅스 머신 — 도중에 창을 1000×400 으로 늘림):
 
 ```text
-[GL] 3.3 (Core Profile) Mesa 26.0.3-1ubuntu1 | Mesa Intel(R) HD Graphics 3000 (SNB GT2)
+[GL] 3.3 (Core Profile) Mesa 26.0.3-1ubuntu1 | <드라이버가 보고한 렌더러 이름>
 t=  0.03 dt=0.0331 vp=(0,0 720x640) mouse=( 106, 277) L=0 wheel=+0
 t=  0.55 dt=0.0169 vp=(0,0 720x640) mouse=( 412, 288) L=0 wheel=+0
 t=  1.05 dt=0.0167 vp=(0,0 720x640) mouse=( 412, 288) L=1 wheel=+0
@@ -1661,8 +1859,8 @@ t=  1.57 dt=0.1000 vp=(275,0 450x400) mouse=( 205, 511) L=0 wheel=+2
 
 ### 15.1 이 화면에서 확인할 것
 
-1. **컨텍스트가 진짜 3.3 Core** — 첫 줄에 `3.3` 과 `Core Profile` 이 함께 보인다. Windows 에서 `[GL] 3.3 Core unavailable` 이나 `wglCreateContextAttribsARB missing` 이 stderr 에 찍혔다면 §4.3 의 2단계가 실패해 레거시 컨텍스트로 떨어진 것이다. 그 상태로도 이 데모는 돌지만 Part 3 의 셰이더는 통하지 않는다.
-2. **함수 포인터 조회** — `missing entry point` 가 하나도 없다. Windows 에서 `glEnable` 이 빠졌다면 §4.4 의 `opengl32.dll` 폴백이 동작하지 않은 것이다.
+1. **컨텍스트가 진짜 3.3 Core** — 첫 줄에 `3.3` 과 `Core Profile` 이 함께 보인다. Windows 에서 `[GL] OpenGL 3.3 Core context creation failed` 나 `[GL] wglCreateContextAttribsARB missing — driver is too old for OpenGL 3.3 Core` 가 stderr 에 찍혔다면 §4.5 의 2단계가 실패한 것이다. 이때 `platform_should_close()` 가 곧바로 true 이므로 데모는 `main` 첫머리의 검사에서 창을 띄우지 않고 종료 코드 1 로 끝난다 — §3.2 의 하드 페일 정책이 그대로 관측된다.
+2. **함수 포인터 조회** — `missing entry point` 가 하나도 없다. Windows 에서 `glEnable` 이 빠졌다면 §4.6 의 `opengl32.dll` 폴백이 동작하지 않은 것이다.
 3. **레터박스** — 창을 가로로 늘리면 좌우에 검은 바가 생기고 남색 사각형이 9:8 을 유지한다. 세로로 늘리면 위아래에 생긴다. 로그의 `vp=` 값이 창 크기를 따라 바뀐다.
 4. **마우스와 뷰포트의 일치** — 흰 사각형이 실제 커서 위치에 정확히 붙어 있다. **창 종횡비를 바꿔도 유지되어야 한다.** 창을 늘렸을 때 흰 사각형이 커서에서 옆으로 밀려나면 뷰포트와 마우스 역매핑이 서로 다른 사각형을 쓰고 있다는 뜻이다 — §8.1 이 설명한 실제 버그의 증상이 정확히 이 모습이었다.
 5. **y 뒤집기** — 커서를 창 위쪽으로 올리면 흰 사각형도 위로 간다. 아래로 가면 `platform_viewport` 나 데모의 `py` 계산에서 y 뒤집기가 빠진 것이다.
@@ -1673,8 +1871,8 @@ t=  1.57 dt=0.1000 vp=(275,0 450x400) mouse=( 205, 511) L=0 wheel=+2
 
 ## 이 장에서 완성된 것
 
-- `platform/platform.h` — `struct Color`, `enum PlatformKey`와 창·입력·시간·GL 컨텍스트 함수로 이루어진 OS 추상화 계약. 시리즈의 나머지 계층은 이 헤더에 의존한다.
-- `platform/win32.cpp` — Win32 창, 2단계 WGL 3.3 Core 컨텍스트 생성, `wglGetProcAddress` + `opengl32.dll` 폴백 함수 조회, `window_proc` 기반 입력, `QueryPerformanceCounter` 타이머, `SwapBuffers` 표시, spin+`Sleep` 페이싱.
+- `platform/platform.h` — `struct Color`, `enum PlatformKey`와 창·입력·시간·GL 컨텍스트 함수, 그리고 부팅 실패를 사용자에게 보여주는 `platform_fatal_error` 로 이루어진 OS 추상화 계약. 시리즈의 나머지 계층은 이 헤더에 의존한다.
+- `platform/win32.cpp` — per-monitor DPI 인식(`WM_DPICHANGED` 리스케일 포함) 위의 Win32 창, 2단계 WGL 3.3 Core 컨텍스트 생성(실패 시 하드 페일), `wglGetProcAddress` + `opengl32.dll` 폴백 함수 조회, `window_proc` 기반 입력, `QueryPerformanceCounter` 타이머, `SwapBuffers` 표시, spin+`Sleep` 페이싱(vsync 꺼짐 시 240fps 상한).
 - `platform/sdl.cpp` — 같은 계약의 SDL2 구현. `SDL_GL_SetAttribute` 로 3.3 Core 요청, `SDL_GL_SwapWindow` 표시, 진짜 vsync(`SDL_GL_SetSwapInterval`), `sdl_to_platform_key` 역매핑, `SDL_TEXTINPUT` 문자 입력, 전체화면과 macOS 번들 경로 처리.
 - 논리 해상도(720×640)와 창 크기를 분리하는 레터박스 뷰포트. `platform_viewport` 가 GL 좌하단 원점으로 내보내고, `platform_mouse_x/y` 가 **같은 사각형**으로 역매핑한다.
 - `platform_display_size` — 작업 표시줄을 뺀 사용 가능 화면 크기. Part 11 의 창 프리셋 제한에 쓰인다.

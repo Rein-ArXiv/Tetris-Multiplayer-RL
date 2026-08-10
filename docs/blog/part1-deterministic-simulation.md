@@ -25,7 +25,7 @@
 2. **Headless RL 학습**: GPU 렌더링 없이 순수 시뮬레이션만 반복할 수 있다. 실제 처리량은 CPU, pybind11 호출 방식, 병렬화 방식에 따라 달라지므로 이 문서에서는 고정 수치를 제시하지 않는다. 학습은 Google Colab에서 Linux 환경으로 돌리고, 배포 머신에서는 추론만 한다.
 3. **크로스 플랫폼 이식**: 렌더링 없는 순수 C++ 로직이므로 Win32 API에 의존하지 않는다. Linux, macOS, WASM 어디서든 컴파일 가능하다.
 
-이 장의 실제 파일 경계는 `src/sim_game.{h,cpp}`, `src/sim_grid.h`, `src/sim_block.h`, `src/sim_blocks.h`, `core/rng.h`, `core/hash.h`다.
+이 장의 실제 파일 경계는 구현 계약 표의 목록 그대로다 — 시뮬레이션 본체(`src/sim_game.{h,cpp}`, `src/sim_grid.h`, `src/sim_block.h`, `src/sim_blocks.h`), 공용 기반(`core/constants.h`, `core/input.h`, `core/rng.h`, `core/hash.h`, `src/position.{h,cpp}`), 검증 도구(`tests/sim_hash_dump.cpp`)다.
 
 ---
 
@@ -70,7 +70,7 @@ graph TB
 
 ### 1.1 먼저 만드는 시뮬레이션 파일
 
-본격적인 시뮬레이션에 들어가기 전에, 나머지 전부가 include 하게 될 작은 파일 셋을 먼저 둔다. 셋 다 짧고 의존성이 없다.
+본격적인 시뮬레이션에 들어가기 전에, 나머지 전부가 include 하게 될 작은 파일들을 먼저 둔다. 모두 짧고 의존성이 없다.
 
 **현재 소스 발췌 — `core/constants.h`**
 
@@ -78,8 +78,9 @@ graph TB
 #pragma once
 
 // Simulation tick rate (logic updates per second)
-// 시뮬레이션의 시간 단위. 초가 아니라 '틱' 으로 센다.
-// 부동소수 누적 오차가 두 실행 사이에 차이를 만들지 않게 하려는 것이다.
+// [NET] Lockstep/rollback 네트코드에서 '틱'은 동기 단위입니다.
+// 모든 피어/서버가 동일한 틱 카운터를 기준으로
+// 같은 입력을 같은 순서로 적용해야 결정론이 보장됩니다.
 constexpr int TICKS_PER_SECOND = 60;
 constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
 ```
@@ -93,8 +94,9 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
 #include <cstdint>
 
 // Bitmask representing per-tick inputs
-// 한 틱의 입력 전체를 1바이트에 담는다.
-// (틱 번호, 이 1바이트) 쌍만 있으면 게임을 그대로 재현할 수 있다.
+// [NET] 틱마다 입력을 비트마스크로 수집/전송하면,
+// '틱, 입력마스크'만으로 시뮬레이션을 재현할 수 있습니다(리플레이/Lockstep).
+// 직렬화가 간단하고 대역폭 효율이 좋습니다.
 enum InputBits : uint8_t {
     INPUT_NONE   = 0,
     INPUT_LEFT   = 1 << 0,
@@ -107,7 +109,7 @@ enum InputBits : uint8_t {
 inline bool hasInput(uint8_t mask, InputBits bit) { return (mask & bit) != 0; }
 ```
 
-한 틱의 입력 전체가 **1바이트**다. INPUT 네트워크 프레임과 `core/replay.cpp` 의 리플레이 파일이 이 바이트를 그대로 공유하므로 별도 직렬화가 필요 없다. 규칙 엔진의 입력 단위가 테스트·네트워크·재생 파일의 공통 계약이 된 셈이다.
+한 틱의 입력 전체가 **1바이트**다. [Part 6](./part6-lockstep-networking.md) 의 INPUT 네트워크 프레임과 [Part 4](./part4-game-wrapper-and-loop.md) 에서 만들 리플레이 파일(`core/replay.cpp`)이 이 바이트를 그대로 공유하게 되므로 별도 직렬화가 필요 없다. 규칙 엔진의 입력 단위가 테스트·네트워크·재생 파일의 공통 계약이 되는 셈이다.
 
 `InputBits`는 현재 wire 단위인 `uint8_t` 안에 들어가며 반시계 회전, 홀드, 180도 회전은 지원하지 않는다. 입력을 추가할 때는 비트만 늘리는 것으로 끝나지 않고 SRS 규칙, 리플레이, lockstep payload, Python 행동 변환을 같은 계약으로 갱신해야 한다.
 
@@ -175,29 +177,27 @@ graph TB
 
 셀 값의 의미:
 
-셀 값(id)을 색상으로 변환하는 것은 `colors.cpp` 의 `GetCellColors()` 가 반환하는 팔레트 벡터다. id 가 곧 이 벡터의 인덱스이므로, 아래 색상 열은 `GetCellColors()` 의 원소 순서와 1:1로 대응한다:
+| 값 | 의미 |
+|----|------|
+| 0 | 빈칸 |
+| 1 | L 블록 |
+| 2 | J 블록 |
+| 3 | I 블록 |
+| 4 | O 블록 |
+| 5 | S 블록 |
+| 6 | T 블록 |
+| 7 | Z 블록 |
+| 8 | 고스트 |
+| 9 | 가비지 |
 
-| 값 | 의미 | 색상 (렌더링) |
-|----|------|-------------|
-| 0 | 빈칸 | darkGrey (배경) |
-| 1 | L 블록 | green (초록) |
-| 2 | J 블록 | red (빨강) |
-| 3 | I 블록 | orange (주황) |
-| 4 | O 블록 | yellow (노랑) |
-| 5 | S 블록 | purple (보라) |
-| 6 | T 블록 | cyan (청록) |
-| 7 | Z 블록 | blue (파랑) |
-| 8 | 고스트 | ghostColor (반투명 흰회색) |
-| 9 | 가비지 | garbageColor (어두운 회색) |
-
-> **참고:** 색상은 표준 테트리스 가이드라인의 피스별 관용색과 다르다. 이 프로젝트는 원본 raylib 코드의 팔레트(`GetCellColors()`)를 비트 호환을 위해 그대로 계승했으므로, "L=초록, I=주황"처럼 id→색 매핑이 관용과 어긋난다. id→피스 매핑(L=1, J=2, I=3, O=4, S=5, T=6, Z=7) 자체는 `sim_blocks.h` 와 일치한다.
+이 장의 계약은 셀 값의 **의미**까지다. 0 은 빈칸, 1~7 은 피스 id(L=1, J=2, I=3, O=4, S=5, T=6, Z=7 — `sim_blocks.h` 의 정의와 일치), 8 은 고스트, 9 는 가비지다. 이 id 는 [Part 3](./part3-rendering-and-ui.md) 에서 만들 `GetCellColors()` 팔레트 벡터의 인덱스가 된다 — 어느 id 가 어떤 색인지는 렌더링 계층의 계약이므로 색상표도 거기서 다룬다. sim 은 색을 모른 채 정수만 다룬다.
 
 ### 2.2 왜 int인가
 
 셀 값이 0~9이므로 `uint8_t`면 충분하다. 그러나 `int` (4바이트)를 사용하는 이유:
 
 1. **연속 메모리 레이아웃**: `int grid[20][10]`은 800바이트 연속 메모리. `fnv1a64(&grid[0][0], sizeof(grid), h)`로 한 번에 해시할 수 있다.
-2. **원본 호환성**: 원래 raylib 기반 코드(`Grid` 클래스)가 `int`를 사용했고, 상태 해시의 비트 단위 일치를 유지해야 한다.
+2. **원본 호환성**: 리팩토링 이전의 기성 게임 프레임워크 기반 코드(`Grid` 클래스)가 `int`를 사용했고, 상태 해시의 비트 단위 일치를 유지해야 한다.
 
 그리드 전체가 800바이트라서 상태 복사와 해시 순회 비용은 작다. 정확히 몇 개의 캐시 라인을 건드리는지는 시작 주소 정렬과 CPU에 따라 달라지므로, 여기서 중요한 계약은 **작고 연속된 고정 크기 배열**이라는 점이다.
 
@@ -252,28 +252,31 @@ L (id=1)  J (id=2)  I (id=3)  O (id=4)  S (id=5)  T (id=6)  Z (id=7)
   ###       ###                 ##       ##          ###        ##
 ```
 
+id 는 각 블록 클래스가 스스로 들고 있는 값이다(L=1, J=2, I=3, O=4, S=5, T=6, Z=7). 생성 팩토리 `GetAllBlocks()` 는 일곱 블록을 **I,J,L,O,S,T,Z** 순서의 벡터로 반환하므로, 벡터 인덱스와 id 는 서로 다른 체계다. RNG 가 인덱스로 뽑기 때문에 이 벡터 순서 자체가 결정론 계약이 된다 — '오류와 함정' 의 해시 패리티 함정에서 다시 본다.
+
 ### 3.2 회전 상태 룩업 테이블
 
 각 블록은 최대 4개의 회전 상태를 가진다. 회전 상태별로 4개 셀의 **상대 좌표**(오프셋)를 미리 정의해둔다:
 
-**예시(실제 저장소에는 없음)**
+**현재 소스 발췌 — `src/sim_blocks.h`**
 
 ```cpp
-// src/sim_blocks.h — T 블록 예시
 class SimTBlock : public SimBlock
 {
 public:
     SimTBlock()
     {
         id = 6;
-        cells[0] = {Position(0,1), Position(1,0), Position(1,1), Position(1,2)};
-        cells[1] = {Position(0,1), Position(1,1), Position(1,2), Position(2,1)};
-        cells[2] = {Position(1,0), Position(1,1), Position(1,2), Position(2,1)};
-        cells[3] = {Position(0,1), Position(1,0), Position(1,1), Position(2,1)};
-        Move(0, 3);  // 초기 위치: 3열 오프셋 (필드 중앙)
+        cells[0] = {Position(0, 1), Position(1, 0), Position(1, 1), Position(1, 2)};
+        cells[1] = {Position(0, 1), Position(1, 1), Position(1, 2), Position(2, 1)};
+        cells[2] = {Position(1, 0), Position(1, 1), Position(1, 2), Position(2, 1)};
+        cells[3] = {Position(0, 1), Position(1, 0), Position(1, 1), Position(2, 1)};
+        Move(0, 3);
     }
 };
 ```
+
+생성자 끝의 `Move(0, 3)` 은 초기 스폰 위치다 — 3열 오프셋이 10열 필드의 가로 중앙에 해당한다. 나머지 여섯 블록도 같은 파일에서 같은 꼴로 정의된다.
 
 회전 상태 0~3은 시계 방향 90도씩 회전한 형태다:
 
@@ -310,7 +313,7 @@ void SimGame::RotateBlockImpl()
 }
 ```
 
-`lastMoveWasRotate = true;` 한 줄을 지금 넣어 두는 것이 중요하다. 이 플래그가 T-spin 판정의 전제이고(§B 에서 `IsTSpinLock` 이 읽는다), **상태 해시에도 들어간다**. 빠뜨리면 이 장의 완료 게이트인 골든 해시 비교가 `step=004` 부터 어긋난다 — 회전이 일어나는 첫 스텝이 거기다. 회전이 **성공했을 때만** 세운다는 점도 같이 봐야 한다. `UndoRotation()` 으로 되돌린 회전은 "회전한 적 없음" 이다.
+`lastMoveWasRotate = true;` 한 줄을 지금 넣어 두는 것이 중요하다. 이 플래그가 T-spin 판정의 전제이고('레벨 시스템과 T-spin' 절의 `IsTSpinLock` 이 읽는다), **상태 해시에도 들어간다**. 빠뜨리면 이 장의 완료 게이트인 골든 해시 비교가 `step=004` 부터 어긋난다 — 회전이 일어나는 첫 스텝이 거기다. 회전이 **성공했을 때만** 세운다는 점도 같이 봐야 한다. `UndoRotation()` 으로 되돌린 회전은 "회전한 적 없음" 이다.
 
 SRS wall kick 은 회전 실패 시 블록을 좌우/상하로 밀어보는 추가 로직이다. Tetris Guideline 이 정의하는 공식 규칙이지만 이 프로젝트에서는 단순성을 위해 생략했다. SRS 를 구현하려면 **회전 전이**(4회전 × 2방향 = 8전이)마다 5개의 kick offset 을 정의한 표가 필요하고, JLSTZ 계열과 I 블록이 서로 다른 표를 쓴다.
 
@@ -363,10 +366,9 @@ flowchart LR
     B -->|No| D["유지<br/>고스트 갱신"]
 ```
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
-// 좌측 이동 — src/sim_game.cpp
 void SimGame::MoveBlockLeft()
 {
     if (gameOver) return;
@@ -377,10 +379,13 @@ void SimGame::MoveBlockLeft()
     }
     else
     {
+        lastMoveWasRotate = false;                           // 마지막 성공 동작 = 이동
         ghostBlock = MakeGhostBlock(currentBlock);           // 3) 고스트 갱신
     }
 }
 ```
+
+성공 분기의 `lastMoveWasRotate = false;` 는 §3.3 에서 회전이 세운 플래그를 내리는 반대편이다. "마지막 **성공한** 동작이 회전이었나" 를 추적해야 T-spin 판정('레벨 시스템과 T-spin' 절)이 성립하므로, 이동 계열 함수의 성공 분기는 전부 이 한 줄을 가진다. 실패해서 복원된 이동은 동작으로 치지 않는다.
 
 ### 4.2 두 단계 검사
 
@@ -523,15 +528,15 @@ int ClearFullRows()
 2줄 동시 클리어의 경우:
 
 ```text
-초기 상태:          row 17 클리어 후:      row 18 클리어 후:     비-풀 행 이동 후:
+초기 상태:          row 18 클리어 후:      row 17 클리어 후:     비-풀 행 이동 후:
 row 15: ..■■....   row 15: ..■■....     row 15: ..■■....    row 15: ..........
 row 16: .■■■■...   row 16: .■■■■...     row 16: .■■■■...    row 16: ..........
-row 17: ■■■■■■■■■■ row 17: ..........   row 17: ..........    row 17: ..■■......
-row 18: ■■■■■■■■■■ row 18: ■■■■■■■■■■  row 18: ..........    row 18: .■■■■.....
+row 17: ■■■■■■■■■■ row 17: ■■■■■■■■■■  row 17: ..........    row 17: ..■■......
+row 18: ■■■■■■■■■■ row 18: ..........   row 18: ..........    row 18: .■■■■.....
 row 19: .■■■■■■..  row 19: .■■■■■■..   row 19: .■■■■■■..    row 19: .■■■■■■..
 ```
 
-역순 순회이므로 row 19 → 18 → 17 → 16 → 15 순서로 처리한다. row 18과 17이 풀이면 `completed=2`. row 16은 `MoveRowDown(16, 2)` → row 18로 복사. row 15는 `MoveRowDown(15, 2)` → row 17로 복사.
+역순 순회이므로 row 19 → 18 → 17 → 16 → 15 순서로 처리한다 — row 18 이 먼저, 그 다음 row 17 이 지워진다. 둘 다 풀이면 `completed=2`. row 16은 `MoveRowDown(16, 2)` → row 18로 복사. row 15는 `MoveRowDown(15, 2)` → row 17로 복사.
 
 ### 5.3 size_t 주의점
 
@@ -598,7 +603,7 @@ Tetris Guideline(The Tetris Company)이 정의하는 공식 랜덤 알고리즘:
 ```cpp
 SimBlock SimGame::GetRandomBlock()
 {
-    // '가방' 이 비면 새로 채운다. RNG 를 부르는 횟수가 입력에 따라
+    // [NET] '가방'이 비면 새 가방을 채웁니다. RNG 호출 횟수가 틱/입력 흐름에 따라
     // 달라지지 않도록 주의 — 이 함수가 RNG의 유일한 호출 지점입니다.
     if (blocks.empty())
     {
@@ -662,8 +667,8 @@ SimBlock SimGame::GetRandomBlock()
 #include <cstdint>
 
 // Simple xorshift64* RNG for deterministic cross-platform randomness
-// 같은 시드 + 같은 호출 순서 = 같은 난수열. 이것이 이 클래스의 전부다.
-// 블록 순서와 가비지 구멍 위치가 여기 달려 있다.
+// [NET] 네트코드에서 RNG는 '세션 시드'를 통해 모든 참가자가 동일하게 초기화해야 합니다.
+// 블록 순서/가비지 홀/이벤트가 RNG에 의존하면, 시드와 호출 순서가 같아야 결과가 같습니다.
 class XorShift64Star {
 public:
     explicit XorShift64Star(uint64_t seed = 88172645463393265ull) : state(seed ? seed : 88172645463393265ull) {}
@@ -683,7 +688,7 @@ public:
         return static_cast<uint32_t>(next() % (max ? max : 1u));
     }
 
-    // 내부 상태를 그대로 꺼낸다 — 상태 해시에 섞어 넣기 위해서다.
+    // [NET] 상태 해시/스냅샷 포함을 위해 내부 상태 접근자 제공
     uint64_t getState() const { return state; }
 
 private:
@@ -740,10 +745,24 @@ $$h_0 = 14695981039346656037$$ $$h_i = (h_{i-1} \oplus \text{byte}_i) \times 109
 **현재 소스 발췌 — `core/hash.h`**
 
 ```cpp
+// FNV-1a 64-bit hash for quick state checksums
+inline uint64_t fnv1a64(const void* data, size_t len, uint64_t seed = 14695981039346656037ull) {
+    const uint8_t* ptr = static_cast<const uint8_t*>(data);
+    uint64_t hash = seed;
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= ptr[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+template<typename T>
 inline uint64_t fnv1a64_value(const T& v, uint64_t seed = 14695981039346656037ull) {
     return fnv1a64(&v, sizeof(T), seed);
 }
 ```
+
+바이트 순회 원본이 `fnv1a64` 이고, `fnv1a64_value` 는 값 하나를 그 바이트 표현 그대로 흘려 넣는 template 래퍼다. `seed` 파라미터가 앞선 해시 결과를 이어받으므로 여러 필드를 하나의 체인으로 누적할 수 있다 — 9.3 절의 `StateHash()` 가 이 방식을 쓴다.
 
 초기값 $14695981039346656037$은 FNV offset basis, 곱셈 상수 $1099511628211$은 FNV prime이다. 이 두 상수는 Fowler, Noll, Vo가 64비트 해시에 대해 경험적으로 최적화한 값이다.
 
@@ -797,6 +816,8 @@ uint64_t SimGame::StateHash() const
     return h;
 }
 ```
+
+발췌에는 `softDropCounterTicks`(§12 에서 도입)와 `totalLinesCleared`·`level`·`lastMoveWasRotate`('레벨 시스템과 T-spin' 절에서 도입)처럼 이 장 후반에야 설명하는 필드가 미리 들어 있다. 지금 볼 것은 개별 필드가 아니라 **결정론에 영향을 주는 상태를 전부, 고정된 순서로 섞는다**는 구조다.
 
 해시에 포함되는 항목은 다음이다. 그리드처럼 배열 크기가 명확한 항목은 byte 수를 적고, 구조체/컨테이너가 얽힌 항목은 컴파일러·표준 라이브러리·패딩에 따라 `sizeof` 가 달라질 수 있으므로 총합 수치를 문서에 고정하지 않는다.
 
@@ -911,29 +932,11 @@ bool SimGame::IsTSpinLock() const
 
 ### 10.2 공격 누적과 전달
 
-`SimGame`은 공격을 직접 상대에게 전송하지 않는다. 대신 **누적 카운터** `attackLinesSent`에 쌓아둘 뿐이다:
+`SimGame`은 공격을 직접 상대에게 전송하지 않는다. 대신 **누적 카운터** `attackLinesSent`에 쌓아둘 뿐이다. 아래는 `LockBlock` 중 클리어·공격 부분만 발췌한 것이다 — 전문과 전체 실행 순서는 §15.1 에서 다룬다:
 
 **현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
-void SimGame::LockBlock()
-{
-    const bool tSpin = IsTSpinLock();
-    std::vector<Position> tiles = currentBlock.GetCellPositions();
-    for (const Position& item : tiles)
-    {
-        sim_grid.grid[item.row][item.column] = currentBlock.id;
-    }
-    currentBlock = NextBlock();
-    ghostBlock = MakeGhostBlock(currentBlock);
-    bool wasGameOver = gameOver;
-    if (BlockFits(currentBlock) == false)
-    {
-        gameOver = true;
-    }
-
-    nextBlocks.erase(nextBlocks.begin());
-    nextBlocks.push_back(GetRandomBlock());
     int rowsCleared = sim_grid.ClearFullRows();
     lastLinesCleared = rowsCleared;
     lastTSpinLines = tSpin ? rowsCleared : -1;
@@ -943,25 +946,9 @@ void SimGame::LockBlock()
         UpdateScore(rowsCleared, 0, tSpin);
         attackLinesSent += attack_lines_for(rowsCleared, tSpin);
     }
-    lastMoveWasRotate = false;
-
-    // 가비지 주입 — 라인 클리어 적용 후, 다음 피스가 확정된 이 시점에서 하단으로 올라온다.
-    // 주의: 클리어 없이 그냥 놓은 경우에도 pendingGarbage 가 있으면 받는다.
-    int inserted = 0;
-    if (pendingGarbage > 0 && !gameOver)
-    {
-        inserted = pendingGarbage;
-        InsertGarbage(pendingGarbage);
-        pendingGarbage = 0;
-        // 가비지가 올라와 currentBlock 스폰 위치를 막았으면 topout.
-        if (!BlockFits(currentBlock)) gameOver = true;
-    }
-    lastGarbageReceived = inserted;
-    if (inserted > 0) garbageSoundEvent = true;
-
-    if (gameOver && !wasGameOver) gameOverEvent = true;
-}
 ```
+
+`tSpin` 은 `LockBlock` 첫 줄에서 `IsTSpinLock()` 로 확정해 둔 값이다. 클리어가 있거나 T-spin 이면 점수와 함께 `attackLinesSent` 가 공격 테이블만큼 늘어난다.
 
 외부(네트 레이어)는 매 틱 `AttackLinesSent()`를 폴링하고, 이전 틱 대비 **델타**를 뽑아 상대 SimGame의 `AddPendingGarbage()`로 전달한다. 접근자와 전달자는 다음과 같다:
 
@@ -994,7 +981,7 @@ graph TB
 
 여기서 주목할 점은 **네트워크로 "공격 보냄" 이벤트를 별도로 전송하지 않는다**는 것이다. 양쪽이 같은 입력으로 같은 시뮬을 돌리면, A가 4줄을 지웠다는 사실을 B쪽 시뮬레이션도 자기 눈으로 본다 — A의 상대편 뷰는 어차피 B가 돌리는 시뮬과 동일하기 때문이다. 공격은 입력의 **함수**이지 별도 메시지가 아니다.
 
-이 설계가 네트 프레임 포맷을 단순하게 유지한다. Part 6에서 보듯 와이어 프로토콜에는 `INPUT` 타입 하나만 있고, 가비지/공격 관련 메시지 타입은 존재하지 않는다.
+이 설계가 네트 프레임 포맷을 단순하게 유지한다. [Part 6](./part6-lockstep-networking.md) 의 와이어 프로토콜에서 **게임플레이 상태를 옮기는 타입은 `INPUT` 하나뿐**이고, 가비지/공격 전용 메시지 타입은 존재하지 않는다. 프로토콜의 나머지 타입(HELLO 류 협상, HASH 검증, 큐·룸 제어 등)은 게임 상태가 아니라 세션을 다룬다.
 
 ### 10.3 가비지 주입 타이밍
 
@@ -1272,7 +1259,7 @@ sim 내부는 금지.
 
 중력 타이머도 정수다:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+**예시(설명용 축약 — 실제 코드는 §12.6 의 생성자)**
 
 ```cpp
 // src/sim_game.cpp
@@ -1312,7 +1299,7 @@ dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 
 `tests/sim_hash_dump.cpp`는 결정론 회귀 테스트의 지상 진리원(ground truth)이다. 고정된 입력 스크립트를 여러 시드로 실행하고, 매 스텝의 `StateHash()`를 stdout에 찍는다.
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+**예시(설명용 축약 — 전체 스크립트는 `tests/sim_hash_dump.cpp`)**
 
 ```cpp
 // tests/sim_hash_dump.cpp — 스크립트 일부
@@ -1341,7 +1328,7 @@ final_hash=0x<16자리> final_score=<N> final_over=<0|1>
 
 이 출력이 세 가지 게이트로 쓰인다:
 
-1. **리팩토링 패리티**: 구 `Game::ComputeStateHash()`와 신 `SimGame::StateHash()`가 같은 스크립트에서 동일한 해시를 출력. 과거에 이 sim은 raylib 의존성을 제거하기 위해 리팩토링되었는데, 이 게이트가 비트 단위 비호환을 막았다.
+1. **리팩토링 패리티**: 구 `Game::ComputeStateHash()`와 신 `SimGame::StateHash()`가 같은 스크립트에서 동일한 해시를 출력. 과거에 이 sim은 기성 게임 프레임워크 의존성을 제거하기 위해 리팩토링되었는데, 이 게이트가 비트 단위 비호환을 막았다.
 
 2. **크로스 플랫폼 패리티**: Windows (MSVC) 빌드와 Linux (gcc, Colab) 빌드가 동일한 해시를 출력해야 한다. `int` 크기, unsigned modulo, FNV-1a 바이트 순회는 이론상 모두 플랫폼 독립이지만 실제로 검증할 가치가 있다.
 
@@ -1480,7 +1467,7 @@ def build_frame(msg_type: MsgType | int, payload: bytes | bytearray) -> bytes:
 
 `h = (h * FNV1A32_PRIME) & FNV1A32_MASK`의 `& 0xFFFFFFFF`가 없으면 Python은 곱셈 결과를 $2^{32}$ 이상까지 확장해버리고, 몇 바이트만 지나도 C++ 결과와 완전히 다른 값이 나온다.
 
-이 마스킹 누락은 초기 개발에서 실제로 발생한 버그였다. 체크섬이 맞지 않아 프레임이 "조용히 무시"되고, 클라이언트가 HELLO에 응답을 못 받는 상황이 관찰되었다. Wireshark로 캡쳐된 바이트와 `parse_frames` 로그를 대조해서야 원인을 찾아냈다.
+이 마스킹 누락은 초기 개발에서 실제로 발생한 버그였다. 체크섬이 맞지 않아 프레임이 "조용히 무시"되고, 클라이언트가 HELLO에 응답을 못 받는 상황이 관찰되었다. 패킷 캡처 도구로 잡은 바이트와 `parse_frames` 로그를 대조해서야 원인을 찾아냈다.
 
 교훈: 언어를 이식할 때 정수 오버플로 시맨틱은 맨 먼저 확인해야 한다. C++에서 당연한 것이 Python에서 당연하지 않다.
 
@@ -1509,7 +1496,7 @@ struct Renderer
 
 ### 12.1 문제: 60Hz 에서 60셀/초는 너무 빠르다
 
-여기까지 만든 `SubmitInput` 은 단순한 매핑 테이블이다: 입력 비트가 세팅되어 있으면 해당 동작을 실행한다. 좌/우/회전/하드드롭 자체는 한 틱에 한 번 실행되며, 좌우 키를 오래 누르는 반복 입력은 `main.cpp` 의 DAS/ARR 카운터가 비트마스크를 만들어 준다.
+여기까지 만든 `SubmitInput` 은 단순한 매핑 테이블이다: 입력 비트가 세팅되어 있으면 해당 동작을 실행한다. 좌/우/회전/하드드롭 자체는 한 틱에 한 번 실행되며, 좌우 키를 오래 누르고 있을 때의 반복 입력은 sim 밖 — 입력 수집 계층 — 의 책임이다. 키 홀드를 반복 비트마스크로 바꾸는 규칙(경쟁 테트리스에서 DAS/ARR 로 부르는 것)은 [Part 4](./part4-game-wrapper-and-loop.md) 의 입력 수집기에서 만든다. sim 은 "이 틱에 이 비트가 켜져 있었다" 만 안다.
 
 문제는 **소프트 드롭(DOWN 홀드)** 이다. 플레이어는 DOWN 을 누르고 있는 동안 블록이 "부드럽게 가속되어 떨어지기를" 기대한다. 그런데 `SubmitInput` 이 매 틱 호출되고 DOWN 비트가 켜져 있으면 그대로 `MoveBlockDown()` 이 호출된다. 60Hz 고정 스텝(Part 4에서 정의)에서 이것은 **초당 60셀 하강** 을 뜻한다.
 
@@ -1656,7 +1643,7 @@ graph TB
 
 실제 `StateHash()` 구현에서 해당 라인을 보면:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+**예시(설명용 축약 — 전문은 §9.3)**
 
 ```cpp
 // src/sim_game.cpp — StateHash() 내부 발췌
@@ -1718,6 +1705,8 @@ SimGame::SimGame(uint64_t seed)
 결과적으로 "StateHash 가 참조하는 모든 스칼라 필드는 mem-init list 에 나타난다" 는 규칙이 생긴다. 체크리스트로 쓰기 좋다.
 
 ### 12.7 수동 확인
+
+이 확인은 **완성형 저장소 기준**이다 — 게임 클라이언트는 [Part 4](./part4-game-wrapper-and-loop.md) 에서 완성되므로, 이 장 시점의 헤드리스 확인은 문서 말미 수동 테스트의 `sim_hash_dump` 게이트가 담당한다. 클라이언트가 생긴 뒤에는 아래 화면 확인을 언제든 반복할 수 있다.
 
 빌드 후:
 
@@ -2202,7 +2191,7 @@ bool SimGame::IsTSpinLock() const
 
 T 피스의 bounding box 가 3×3 이므로 `(rowOffset+1, columnOffset+1)` 이 항상 중심이다 — 회전 상태와 무관. 4 모서리 중 3+ 가 막혀 있으면 "T 가 끼워들어간 모양" 이라는 휴리스틱이 성립한다.
 
-`LockBlock` 의 첫 줄에서 잠금 직전 상태로 호출:
+`LockBlock` 의 첫 줄에서 잠금 직전 상태로 호출한다 (전문은 §15.1):
 
 **현재 소스 발췌 — `src/sim_game.cpp`**
 
@@ -2210,78 +2199,13 @@ T 피스의 bounding box 가 3×3 이므로 `(rowOffset+1, columnOffset+1)` 이 
 void SimGame::LockBlock()
 {
     const bool tSpin = IsTSpinLock();
-    std::vector<Position> tiles = currentBlock.GetCellPositions();
-    for (const Position& item : tiles)
-    {
-        sim_grid.grid[item.row][item.column] = currentBlock.id;
-    }
-    currentBlock = NextBlock();
-    ghostBlock = MakeGhostBlock(currentBlock);
-    bool wasGameOver = gameOver;
-    if (BlockFits(currentBlock) == false)
-    {
-        gameOver = true;
-    }
-
-    nextBlocks.erase(nextBlocks.begin());
-    nextBlocks.push_back(GetRandomBlock());
-    int rowsCleared = sim_grid.ClearFullRows();
-    lastLinesCleared = rowsCleared;
-    lastTSpinLines = tSpin ? rowsCleared : -1;
-    if (rowsCleared > 0 || tSpin)
-    {
-        if (rowsCleared > 0) clearSoundEvent = true;
-        UpdateScore(rowsCleared, 0, tSpin);
-        attackLinesSent += attack_lines_for(rowsCleared, tSpin);
-    }
-    lastMoveWasRotate = false;
-
-    // 가비지 주입 — 라인 클리어 적용 후, 다음 피스가 확정된 이 시점에서 하단으로 올라온다.
-    // 주의: 클리어 없이 그냥 놓은 경우에도 pendingGarbage 가 있으면 받는다.
-    int inserted = 0;
-    if (pendingGarbage > 0 && !gameOver)
-    {
-        inserted = pendingGarbage;
-        InsertGarbage(pendingGarbage);
-        pendingGarbage = 0;
-        // 가비지가 올라와 currentBlock 스폰 위치를 막았으면 topout.
-        if (!BlockFits(currentBlock)) gameOver = true;
-    }
-    lastGarbageReceived = inserted;
-    if (inserted > 0) garbageSoundEvent = true;
-
-    if (gameOver && !wasGameOver) gameOverEvent = true;
-}
 ```
 
-`tSpin` 이 true 면 `attack_lines_for` 가 가비지 라인을 부풀려 산정한다.
+첫 줄이어야 하는 이유가 있다. 바로 다음 단계에서 현재 피스가 그리드에 기록되고 `currentBlock` 이 preview 큐의 다음 피스로 교체되는데, 교체 뒤의 pivot 좌표는 다음 피스의 스폰 위치를 가리키므로 판정이 무의미해진다. 이렇게 확정한 `tSpin` 은 클리어 수가 나온 뒤 `UpdateScore(rowsCleared, 0, tSpin)` 와 `attack_lines_for(rowsCleared, tSpin)` 로 전달되어, true 면 가비지 라인을 부풀려 산정한다.
 
 ### C. attack_lines_for — 공격 테이블
 
-T-spin 인지 아닌지에 따라 가비지 라인 수가 다르다:
-
-**현재 소스 발췌 — `src/sim_game.cpp`**
-
-```cpp
-static int attack_lines_for(int rowsCleared, bool tSpin)
-{
-    if (tSpin)
-    {
-        switch (rowsCleared) {
-            case 1: return 2;   // T-spin Single
-            case 2: return 4;   // T-spin Double
-            case 3: return 6;   // T-spin Triple
-            default: return 0;  // T-spin no-line
-        }
-    }
-    switch (rowsCleared) {
-        case 2: return 1;   // Double → 1 가비지
-        case 3: return 2;   // Triple → 2 가비지
-        case 4: return 4;   // Tetris → 4 가비지
-        default: return 0;  // Single or none
-    }
-}
-```
+T-spin 인지 아닌지에 따라 가비지 라인 수가 다르다. 매핑 함수 `attack_lines_for` 는 §10.1 에서 전문을 인용했다 — T-spin 분기가 같은 클리어 수를 한 단계씩 세게 갚는 것이 전부이므로, 여기서는 두 열을 나란히 놓은 표로 정리한다.
 
 | 클리어 | 일반 | T-spin |
 |--------|------|--------|
@@ -2317,6 +2241,8 @@ flowchart TB
 
 ### E. 여기서 빌드해보자
 
+이 확인은 **완성형 저장소 기준**이다 — 게임 클라이언트는 [Part 4](./part4-game-wrapper-and-loop.md), 멀티 모드와 해시 출력은 [Part 6](./part6-lockstep-networking.md) 에서 완성된다. 이 장까지의 파일만으로는 클라이언트가 빌드되지 않으므로(문서 말미의 수동 테스트 참조), 지금 시점의 완료 게이트는 `sim_hash_dump` 다.
+
 ```bash
 cmake --build build --config Release
 ./build/Release/tetris.exe
@@ -2324,8 +2250,8 @@ cmake --build build --config Release
 
 기대 동작:
 - 첫 라인 클리어 후 화면 우측 패널의 LEVEL 이 1, LINES 가 1~9 누적. 10 라인 누적 시 LEVEL 이 2 로 올라가고 블록 낙하 속도가 눈에 띄게 빨라진다.
-- T 피스를 좁은 슬롯에 회전으로 끼워넣고 라인을 지우면 점수 증가폭이 일반 클리어 (1 줄 = 100×Lv) 보다 훨씬 크다 (T-spin Single = 800×Lv). 멀티 모드라면 상대 보드 상단에 가비지 2 줄이 올라온다.
-- `H` 키로 해시를 출력했을 때 `level=N, lines=M` 부분이 양쪽 클라에서 정확히 일치 (lockstep 가속).
+- T 피스를 좁은 슬롯에 회전으로 끼워넣고 라인을 지우면 점수 증가폭이 일반 클리어 (1 줄 = 100×Lv) 보다 훨씬 크다 (T-spin Single = 800×Lv). 멀티 모드라면 상대 보드 하단에 가비지 2 줄이 올라온다 (기존 스택은 위로 밀림).
+- `TETRIS_ENABLE_DEBUG_UI` 를 켜고 빌드한 경우 `H` 키를 누르면 stdout 에 `Hash single=0x... local=0x... remote=0x...` 형식으로 상태 해시가 찍힌다. `level` 과 `totalLinesCleared` 가 해시에 포함되므로, 멀티 모드에서 양쪽 클라이언트의 해시가 일치하면 lockstep 가속(레벨·중력)도 일치한다는 뜻이다. 눈으로 확인하려면 양쪽 화면의 LEVEL/LINES 패널을 비교한다.
 
 ---
 
@@ -2397,7 +2323,7 @@ std::vector<SimBlock> SimGame::GetAllBlocks() const
 
 **해결:** 부동소수를 완전히 제거. `gravityCounterTicks` 는 단순 `int`로 카운트. 0.5초 = 30틱을 직접 상수로 박는다:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+**예시(설명용 축약 — 실제 코드는 §12.6 의 생성자)**
 
 ```cpp
 gravityCounterTicks(0),
@@ -2450,7 +2376,9 @@ dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 
 ```cmake
 # -----------------------------------------------------------------------------
-# Pure (no raylib) logic — used by game, pybind11 module, and tests.
+# Sources shared between all targets
+# -----------------------------------------------------------------------------
+# Pure simulation logic (no renderer/platform deps) — used by game, pybind11 module, and tests.
 set(TETRIS_SIM_SOURCES
     src/sim_game.cpp
     src/position.cpp
@@ -2469,7 +2397,7 @@ set(TETRIS_SIM_HEADERS
 )
 ```
 
-`.cpp` 가 둘뿐인 것이 이 계층의 성격을 그대로 보여준다. `SimGrid`, `SimBlock`, `SimBlocks` 는 전부 헤더 전용이다 — 구조체와 inline 함수만 담고 있어 별도 번역 단위가 필요 없다. `SimGame` 만 구현 분량이 커서 `.cpp` 로 분리했다.
+목록에서 구현 파일보다 헤더가 압도적으로 많은 구성이 이 계층의 성격을 그대로 보여준다. `SimGrid`, `SimBlock`, `SimBlocks` 는 전부 헤더 전용이다 — 구조체와 inline 함수만 담고 있어 별도 번역 단위가 필요 없다. `SimGame` 만 구현 분량이 커서 `.cpp` 로 분리했다.
 
 pybind11 모듈과 `sim_hash_dump` 는 `${TETRIS_SIM_SOURCES}` 만 링크해 renderer·audio·net 심볼 없이 빌드된다. **`SimGame` 이 실수로 `renderer.h` 를 include 하는 순간 이 두 타깃의 빌드가 깨진다.** 계층 경계가 문서가 아니라 빌드 시스템으로 강제되는 셈이다.
 
@@ -2493,7 +2421,7 @@ if (TETRIS_BUILD_TEST)
 
 ## 부록 B. 이 장의 전체 소스
 
-본문은 규칙과 설계 근거를 따라가느라 함수를 필요한 순서대로 꺼내 썼다. 여기서는 빠진 조각을 채워 **이 장의 산출물 전체**를 한자리에 모은다. 본문에서 이미 전문을 인용한 것(`LockBlock`, `UpdateScore`, `StateHash`, `IsTSpinLock`, `GetRandomBlock`, `RotateBlockImpl`, `MoveBlockDrop`, `MoveBlockLeft`, `InsertGarbage`)은 반복하지 않는다.
+본문은 규칙과 설계 근거를 따라가느라 함수를 필요한 순서대로 꺼내 썼다. 여기서는 빠진 조각을 채워 **이 장의 산출물 전체**를 한자리에 모은다. 본문에서 이미 전문을 인용한 것(생성자와 `SubmitInput`, `GetRandomBlock`, `GetAllBlocks`, `MoveBlockLeft`, `MoveBlockDrop`, `DropExpectation`, `IsBlockOutside`, `BlockFits`, `RotateBlockImpl`, `attack_lines_for`, `IsTSpinLock`, `LockBlock`, `InsertGarbage`, `UpdateScore`, `StateHash`, `StateHashBreakdown`)은 반복하지 않는다.
 
 ### B.1 공개 API — `src/sim_game.h`
 
@@ -2510,7 +2438,7 @@ if (TETRIS_BUILD_TEST)
 #include "../core/input.h"
 #include "../core/constants.h"
 
-// 화면도 소리도 파일 I/O 도 없는 순수 테트리스 시뮬레이션.
+// [NET/RL] Headless Tetris simulation. No renderer, no audio, no I/O.
 //
 // SimGame is the single source of truth for game logic and must produce the
 // same state transitions as the old Game class (verified via ComputeStateHash).
@@ -2674,7 +2602,7 @@ private:
 #include <map>
 #include "position.h"
 
-// 테트로미노 하나의 상태. 그리는 방법은 모른다.
+// [NET/RL] Pure, headless block state. No renderer, no audio, no rendering.
 // Holds shape data (cells per rotation), position offsets, and rotation state.
 // Used by SimGame for deterministic simulation (Colab training + Windows inference).
 class SimBlock
@@ -2741,7 +2669,7 @@ public:
 ```cpp
 #pragma once
 
-// 20x10 보드. 그리는 방법은 모른다.
+// [NET/RL] Pure, headless grid. No renderer, no rendering.
 // Layout (int grid[kRows][kCols]) must match the old Grid class so that
 // ComputeStateHash produces identical bytes when fnv1a64 is applied to the
 // contiguous memory range.
@@ -2904,7 +2832,7 @@ void SimGame::MoveBlockDown()
 }
 ```
 
-세 이동 함수(`Left`/`Right`/`Down`)가 같은 형태를 공유한다: 옮겨 보고, 안 되면 되돌리고, 되면 `lastMoveWasRotate = false` 를 세운다. 그 한 줄이 T-spin 판정의 반쪽이다 — 회전으로 끼워 넣은 것과 밀어 넣은 것을 구분한다.
+세 이동 함수(`Left`/`Right`/`Down`)가 같은 형태를 공유한다: 옮겨 보고, 안 되면 되돌리고, 되면 `lastMoveWasRotate = false` 를 세운다 (`MoveBlockLeft` 전문은 §4.1 에 있다). 그 한 줄이 T-spin 판정의 반쪽이다 — 회전으로 끼워 넣은 것과 밀어 넣은 것을 구분한다.
 
 `MoveBlockDown` 만 다른 점이 하나 있다. 되돌린 뒤 **`LockBlock()` 을 부른다.** 아래로 못 간다는 것은 바닥이나 다른 블록에 닿았다는 뜻이므로 거기서 굳는다. `MoveBlockLeft`/`Right` 는 벽에 막혀도 그냥 제자리에 있을 뿐이다.
 
@@ -3012,7 +2940,7 @@ int SimGame::ApplyPlacement(int col, int rot)
 - `src/sim_game.{h,cpp}`, `src/sim_grid.h`, `src/sim_block.h`, `src/sim_blocks.h`: 순수 C++ 테트리스 시뮬레이션 엔진.
 - `core/rng.h`, `core/hash.h`: XorShift64* RNG와 FNV-1a 해시.
 - `tests/sim_hash_dump.cpp`: 고정 스크립트로 결정론을 검증하는 회귀 테스트.
-- Python 바인딩 (`python/sim/__init__.py`) 이 같은 C++ 심을 pybind11로 노출 — 동일한 스크립트가 Python 에서도 동일한 해시 시퀀스를 산출.
+- (전망) 같은 C++ 심이 [Part 8](./part8-python-rl.md) 에서 pybind11 로 노출되면, 동일한 스크립트가 Python 에서도 동일한 해시 시퀀스를 재현한다 — 이 장의 골든 해시가 그 교차 검증의 기준선이 된다.
 
 핵심 설계 결정:
 
@@ -3062,7 +2990,7 @@ step=001 mask=0x01 ticks=1 total_ticks=31 score=0 over=0 hash=0x9c0bc617492ab83f
 
 이 게이트는 강력하지만 만능이 아니다. **`kScript` 가 밟는 경로만** 지킨다.
 
-예를 들어 §B.5 의 `MoveBlockLeft` 에서 `lastMoveWasRotate = false;` 한 줄을 지우고 다시 돌려 보면 — 해시는 **여전히 일치한다.** 스크립트에 "회전한 직후 좌우로 밀고 나서 잠그는" 시퀀스가 없어 그 줄이 결과를 바꾸는 상황에 도달하지 못하기 때문이다. 반대로 `RotateBlockImpl` 의 `lastMoveWasRotate = true;` 를 지우면 `step=004` 부터 즉시 갈라진다.
+예를 들어 §4.1 의 `MoveBlockLeft` 에서 `lastMoveWasRotate = false;` 한 줄을 지우고 다시 돌려 보면 — 해시는 **여전히 일치한다.** 스크립트에 "회전한 직후 좌우로 밀고 나서 잠그는" 시퀀스가 없어 그 줄이 결과를 바꾸는 상황에 도달하지 못하기 때문이다. 반대로 `RotateBlockImpl` 의 `lastMoveWasRotate = true;` 를 지우면 `step=004` 부터 즉시 갈라진다.
 
 즉 이 테스트는 **회귀 방지 장치**이지 정확성 증명이 아니다. 새 규칙을 추가할 때는 그 규칙을 밟는 스텝을 `kScript` 에 함께 넣어야 그때부터 잠긴다.
 
@@ -3102,5 +3030,5 @@ uv run python -m pytest python/tests/test_determinism_crossplatform.py -v
 4. **Fowler-Noll-Vo hash** (www.isthe.com/chongo/tech/comp/fnv/). FNV-1a 64-bit의 초기값, 소수, 충돌 특성
 5. **NES Tetris scoring** (Tetris Wiki, tetris.wiki/Scoring). 원작 NES 점수 체계 (레벨 x 라인 보너스)
 6. **"Game Programming Patterns"** (Robert Nystrom, 2014). Chapter 2 "Command" — 입력을 커맨드 객체로 추상화하는 패턴
-7. **Tetr.io / Jstris attack tables**. 현대 경쟁 테트리스의 공격 테이블 구조. T-spin / B2B / Combo 보너스 설계 레퍼런스
+7. **현대 경쟁 테트리스 구현들의 공격 테이블**. T-spin / B2B / Combo 보너스 설계 레퍼런스
 8. **splitmix64** (Sebastiano Vigna, xorshift.di.unimi.it). 황금비 상수 `0x9E3779B97F4A7C15` 의 유도 — 독립 RNG 스트림 분기에 사용

@@ -57,7 +57,7 @@ struct GameSettings {
     int  sfxVol  = 100;   // SFX 볼륨 0~100 (0 == 음소거)
     bool shakeOn = true;  // 마스터 화면 흔들림 (가비지/게임오버 + 하드드롭)
     bool hardDropShakeOn = true;  // 하드드롭 시 약한 흔들림 (shakeOn 의 하위)
-    int  windowScale = 0; // 창 크기 프리셋 인덱스 0~4 (아래 kWindowScale* 표 참조)
+    int  windowScale = 0; // 창 크기 프리셋 인덱스 0~4 (아래 kWindowScale* 참고)
     bool fullscreen  = false;
     bool vsyncOn     = true;
     bool ghostOn     = true;  // 고스트 피스 표시
@@ -251,7 +251,7 @@ static int max_window_scale()
 
 이 짧은 구현에는 서로 다른 세 가지 판단이 들어 있다.
 
-**(1) 캐시하지 않는다.** 결과를 static 변수에 담아두면 한 번만 재고 끝인데, 노트북에 외장 모니터를 꽂거나 창을 다른 모니터로 옮기면 그 값이 거짓이 된다. `platform_display_size()` 는 SDL 에서 `SDL_GetDisplayUsableBounds`, Win32 에서 `SPI_GETWORKAREA` 한 번이라 호출이 싸다. 설정 화면을 그리는 프레임에서만 부르므로 매번 재도 부담이 없다.
+**(1) 캐시하지 않는다.** 결과를 static 변수에 담아두면 한 번만 재고 끝인데, 노트북에 외장 모니터를 꽂거나 창을 다른 모니터로 옮기면 그 값이 거짓이 된다. `platform_display_size()` 는 SDL 에서 `SDL_GetDisplayUsableBounds`, Win32 에서 `SPI_GETWORKAREA` 한 번이라 호출이 싸다. 설정 화면을 그리는 프레임에서만 부르므로 매번 재도 부담이 없다. 한 가지 전제가 이 비교를 성립시킨다 — Win32 백엔드는 시작 시 per-monitor DPI 인식을 켜므로(§5.3) `SPI_GETWORKAREA` 가 OS 배율로 축소된 가상 해상도가 아니라 **물리 픽셀**을 돌려주고, 그래서 물리 픽셀 단위인 프리셋 값과 같은 자로 비교된다. DPI-unaware 프로세스였다면 150% 모니터에서 사용 가능 영역이 실제보다 작게 보고돼 멀쩡히 들어가는 프리셋까지 잘렸을 것이다.
 
 **(2) 못 재면 막지 않는다.** `platform_display_size()` 가 0 을 돌려주면 상한을 최대 인덱스로 둔다. 화면 크기를 모른다는 이유로 사용자가 고를 수 있는 항목을 줄이는 것보다, 못 재는 환경에서는 제한을 풀어 두는 쪽이 낫다는 판단이다.
 
@@ -732,7 +732,7 @@ Win32 백엔드는 전체화면을 구현하지 않았다. 창 스타일 전환�
 
 중요한 것은 **미구현을 감추지 않는다**는 점이다. 함수를 no-op 으로 두고 체크박스는 그대로 그렸다면, Windows 사용자는 토글을 켰는데 아무 일도 일어나지 않고 설정만 `fullscreen=1` 로 저장되는 상태를 만난다. 다음 실행에서도 여전히 창모드다. 대신 `(unavailable)` 회색 라벨을 그려 "이 백엔드에는 없는 기능" 임을 화면에서 바로 알린다. 라벨 색은 커서가 그 행에 있으면 노란색으로 유지해, 커서 이동 자체는 자연스럽게 되도록 했다.
 
-`platform_set_vsync` 는 두 백엔드가 같은 일을 하되 호출 경로가 다르다. SDL 은 `SDL_GL_SetSwapInterval`을 부르고, Win32는 `WGL_EXT_swap_control`에서 얻은 함수 포인터를 사용한다. 둘 다 요청이 실패할 수 있으므로 설정값을 저장하는 것과 실제 적용 성공 여부를 구분해 로그로 남긴다.
+`platform_set_vsync` 는 두 백엔드가 같은 일을 하되 호출 경로가 다르다. SDL 은 `SDL_GL_SetSwapInterval`을 부르고, Win32는 `WGL_EXT_swap_control`에서 얻은 함수 포인터를 사용한다. 두 호출 모두 드라이버가 거부할 수 있지만 **현재 구현은 반환값을 확인하지 않는다** — 확장/컨텍스트가 아예 없는 경우만 널 검사로 건너뛰고, 적용 실패는 화면의 tearing 여부로만 드러난다. 설정값(`s_frame_pacing`)의 저장과 드라이버 적용의 성공은 별개의 사건이므로, 진단 가능성을 높이려면 반환값을 로그로 남기는 후속 개선이 가능하다.
 
 볼륨 슬라이더 헬퍼는 `gui_slider` 를 감싸고, 키보드 Left/Right 는 5% 단위로 움직인다.
 
@@ -996,7 +996,7 @@ graph TB
     LM -->|히트 테스트| L
 ```
 
-`win32.cpp`에도 같은 `s_vp_*` 계산과 마우스 역매핑이 있다. `AdjustWindowRect`로 클라이언트 영역이 정확히 요청 크기가 되도록 창 외곽을 보정하고, `platform_viewport()`가 같은 y 뒤집기를 한다. 전체화면만 no-op 스텁이며 `platform_fullscreen_supported()`가 false를 돌려 UI 항목을 비활성화하므로, 지원하지 않는 기능을 성공한 것처럼 저장하지 않는다.
+`win32.cpp`에도 같은 `s_vp_*` 계산과 마우스 역매핑이 있다. 창 외곽 보정은 SDL 보다 한 층 더 필요하다 — `platform_init` 이 per-monitor DPI 인식을 켜므로 창 테두리 두께가 **모니터 DPI 에 따라 달라지고**, 시스템 DPI 만 아는 `AdjustWindowRect` 로 보정하면 클라이언트 영역이 요청 크기와 어긋나 프리셋 해상도가 정확히 나오지 않는다. 그래서 `adjust_window_rect` 래퍼가 `AdjustWindowRectExForDpi` 에 창의 실제 DPI(`GetDpiForWindow`)를 넘겨 보정하고, 그 API 가 없는 구형 Windows 에서만 `AdjustWindowRect` 로 폴백한다. DPI 인식을 켠 대가로 모니터 간 이동도 앱 책임이 되는데, `WM_DPICHANGED` 가 OS 제안 RECT 를 그대로 적용해 창의 물리 크기를 유지하고 뒤따르는 `WM_SIZE` 가 기존 `recompute_viewport()` 경로를 태운다. `platform_viewport()`의 y 뒤집기는 SDL 과 같다. 전체화면만 no-op 스텁이며 `platform_fullscreen_supported()`가 false를 돌려 UI 항목을 비활성화하므로, 지원하지 않는 기능을 성공한 것처럼 저장하지 않는다.
 
 ## 6. 오디오 볼륨 — 카테고리별 게인
 
@@ -1097,7 +1097,12 @@ void platform_set_vsync(bool on)
 
 `SDL_GL_SetSwapInterval(1)` 은 드라이버에게 "버퍼를 교체하기 전에 vblank 를 기다리라" 고 지시한다. 이후 `platform_present()` 의 `SDL_GL_SwapWindow` 가 화면 주사가 한 바퀴 끝나는 순간에만 반환하므로, 화면 중간에서 이전 프레임과 새 프레임이 갈라지는 **tearing 이 원천적으로 사라진다.** 소프트웨어 페이싱은 "대략 16.67ms 마다 그린다" 였지 "디스플레이와 같은 박자로 그린다" 가 아니었으므로 이 보장을 줄 수 없었다.
 
-같은 함수가 `s_frame_pacing` 도 함께 세운다는 점을 놓치면 안 된다. 이 플래그는 여전히 `platform_end_frame()` 의 소프트웨어 페이싱을 켠다. 즉 SDL 백엔드에서 VSync 를 켜면 **두 장치가 동시에 걸린다** — GPU 는 vblank 를 기다리고, 그 뒤에도 프레임 예산 16.67ms 가 남았으면 CPU 가 마저 쉰다. 둘 중 느린 쪽이 이기므로 144Hz 모니터에서는 소프트웨어 페이싱이 60 FPS 상한을 잡고, 60Hz 모니터에서는 swap interval 쪽이 먼저 걸려 페이싱이 사실상 no-op 이 된다. 게임 로직이 60Hz 고정 스텝이라 그 이상 그릴 이유가 없으므로 상한을 그대로 둔 것이다.
+같은 함수가 `s_frame_pacing` 도 함께 세운다는 점을 놓치면 안 된다. 이 플래그가 고르는 것은 `platform_end_frame()` 소프트웨어 페이싱의 **목표치**이고, 페이싱 자체는 어느 쪽이든 항상 돈다. 두 모드가 대비를 이룬다.
+
+- **VSync ON = 60Hz 목표.** 두 장치가 동시에 걸린다 — GPU 는 vblank 를 기다리고, 그 뒤에도 프레임 예산 16.67ms 가 남았으면 CPU 가 마저 쉰다. 둘 중 느린 쪽이 이기므로 144Hz 모니터에서는 소프트웨어 페이싱이 60 FPS 상한을 잡고, 60Hz 모니터에서는 swap interval 쪽이 먼저 걸려 페이싱이 사실상 no-op 이 된다. 게임 로직이 60Hz 고정 스텝이라 그 이상 그릴 이유가 없다.
+- **VSync OFF = 240fps 상한.** 무제한이 아니다. swap interval 은 0 이 되지만 `platform_end_frame()` 이 `kUncappedMaxFps`(240) 상한의 페이싱을 남긴다(`target = s_frame_pacing ? 1/60 : 1/240` — 두 백엔드 동일). 고정 틱 시뮬레이션은 여전히 초당 60틱만 진행하는데, 상한이 없으면 렌더 루프만 수천 fps 로 공회전하며 같은 화면을 다시 그리느라 CPU/GPU 를 태운다 — 노트북 발열과 배터리에 그대로 청구되는 비용이다. 240 은 60 의 정수배라 틱당 최대 4 렌더 프레임으로, tearing 실험이나 지연 측정에는 충분히 풀려 있으면서 공회전 비용은 묶는다.
+
+일반화하면, 렌더 상한은 항상 두 겹으로 생각해야 한다 — 디스플레이와 동기화하는 상한(vblank)과 자원 소모를 묶는 상한(소프트웨어 캡). 전자를 끄는 것이 후자까지 끄는 것이어서는 안 된다.
 
 `SDL_GL_SetSwapInterval` 은 컨텍스트가 있어야 의미가 있으므로 `if (s_glctx)` 가드가 붙어 있다. `platform_init` 이 컨텍스트를 만든 직후에도 같은 호출을 한 번 해두어(`SDL_GL_SetSwapInterval(s_frame_pacing ? 1 : 0)`), 설정 화면을 한 번도 열지 않은 첫 실행에서도 기본값이 반영된다.
 
@@ -1121,7 +1126,7 @@ static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 
 `platform_init` 이 3.3 Core 컨텍스트를 current 로 만든 직후에 조회하고, 그 자리에서 기본값도 한 번 건다. **명시적으로 걸어 두는 것이 핵심이다.** 걸지 않으면 swap interval 이 드라이버 기본값에 맡겨지는데, 그 값은 대개 1 이지만 보장은 아니다. 제어판에서 "수직 동기 끄기" 를 켜 둔 기계에서는 게임의 VSync 설정이 ON 인데도 tearing 이 보이는, **같은 코드가 기계마다 다르게 동작하는** 상황이 된다. 확장 자체가 없는 드라이버라면 포인터가 null 로 남고 소프트웨어 페이싱만 동작한다 — 그 경우에도 크래시하지 않도록 널 검사를 붙였다.
 
-결정성 관점에서는 둘 다 안전하다. VSync 든 페이싱이든 *언제 그리느냐*만 바꾸고 *무엇을 시뮬레이션하느냐*는 건드리지 않는다. 게임 루프는 Part 4의 60Hz fixed-step 누산기로 도므로 렌더 프레임률이 흔들려도 시뮬레이션 틱 결과는 동일하다.
+결정성 관점에서는 둘 다 안전하다. VSync 든 페이싱이든 *언제 그리느냐*만 바꾸고 *무엇을 시뮬레이션하느냐*는 건드리지 않는다. 게임 루프는 경과 시간을 누산해 60Hz 고정 스텝으로만 시뮬레이션을 진행하므로, 렌더 프레임률이 60 이든 240 이든 흔들리든 시뮬레이션 틱 결과는 동일하다.
 
 ## 8. 하드드롭 흔들림과 고스트 토글
 
@@ -1268,7 +1273,7 @@ void Game::Draw()
 - `src/gui.cpp` 의 즉시모드 위젯 추가 — `gui_slider`(0~100 트랙/fill/노브) + `gui_value_selector`(`< 라벨 >`, -1/0/+1). 기존 `gui_checkbox` 재사용.
 - `platform/sdl.cpp` 의 창 크기 시스템 — 논리 좌표계 720×640 고정, `recompute_viewport()` 의 2분기(9:8 프리셋은 레터박스 0 이 자동으로 나옴) vs 전체화면 레터박스, `platform_viewport()` 의 GL 좌하단 원점 변환, `platform_mouse_x/y` 의 논리 좌표 역매핑(`(raw - vpOffset) * logical / vpSize`). `win32.cpp` 대응 구현/스텁.
 - `audio/sdl_audio.cpp` 의 BGM/SFX 카테고리 게인(믹스 시 샘플 곱) + `audio/audio.cpp` 의 XAudio2 보이스 `SetVolume` 미러.
-- `platform/sdl.cpp` 의 `platform_set_vsync` — GL swap interval 0/1 전환(진짜 vsync) + 60Hz 소프트웨어 페이싱 상한. `win32.cpp` 는 아직 페이싱만.
+- `platform/sdl.cpp`·`platform/win32.cpp` 의 `platform_set_vsync` — GL swap interval 0/1 전환(진짜 vsync) + 60Hz 소프트웨어 페이싱. `win32.cpp` 는 `WGL_EXT_swap_control` 확장이 있으면 SDL 과 같은 진짜 vsync 이고, 확장이 없는 드라이버에서만 페이싱만 남는다. vsync OFF 는 무제한이 아니라 240fps 상한(`kUncappedMaxFps`) 소프트웨어 페이싱이다.
 - `src/sim_game.*` 의 렌더 전용 `hardDropEvent`(해시 제외) + 단일 `apply_fx` 람다의 흔들림 게이팅(약한 하드드롭 흔들림이 강한 흔들림을 덮지 않음).
 - `src/game.cpp` 의 `game_set_ghost_enabled` + 두 draw 사이트(`Draw`/`DrawBoardAt`) 고스트 게이트.
 
@@ -1314,7 +1319,7 @@ cmake --build build-sim --target sim_hash_dump
 - `settings.cfg` 를 손으로 `window_scale=4` 로 고친 뒤 작은 모니터에서 실행하면, 창이 화면 밖으로 나가지 않고 들어가는 최대 프리셋으로 잘려서 뜬다.
 - `Fullscreen` ON — 모니터가 9:8 이 아니면 좌우 필러박스(또는 상하 레터박스) 가 생기고, 그려지는 내용은 **늘어나지 않는다**(왜곡 없음). 여백은 배경색이 아니라 **검은색**이고, 레터박스 바를 클릭해도 위젯이 반응하지 않는다.
 - `BGM`/`SFX` 슬라이더를 0% 로 내리면 즉시 **무음**, 다시 올리면 복원.
-- `Ghost piece` OFF → 인게임에서 고스트 미표시. `VSync` OFF → 창을 빠르게 흔들 때 화면 중간이 갈라지는 tearing 이 보이고, ON 이면 사라진다. `Hard-drop shake` OFF 인데 `Screen shake` ON 이면 하드드롭만 안 흔들리고 가비지/게임오버 흔들림은 유지.
+- `Ghost piece` OFF → 인게임에서 고스트 미표시. `VSync` OFF → 창을 빠르게 흔들 때 화면 중간이 갈라지는 tearing 이 보이고, ON 이면 사라진다. OFF 여도 프레임률이 무한정 치솟지 않고 240fps 상한(§7)에 머무는 것이 정상이다. `Hard-drop shake` OFF 인데 `Screen shake` ON 이면 하드드롭만 안 흔들리고 가비지/게임오버 흔들림은 유지.
 - `settings.cfg` 에 `bgm_vol`/`window_scale`/`ghost` 등 키가 저장되고, 게임을 껐다 켜면 그 값으로 복원된다.
 
 ## 마치며

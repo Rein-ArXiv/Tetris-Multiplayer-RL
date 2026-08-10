@@ -3,13 +3,13 @@
 이 시리즈의 목표는 두 가지다.
 
 1. 빈 작업 디렉터리에서 공통 게임·네트워크 뼈대를 만든 뒤, 서비스 운영과 AI 경로를 각자의 의존 순서로 구현해 현재 저장소와 같은 기능 경계를 재현한다.
-2. 완성형 게임 엔진(Unity·Unreal·Godot)이 대신 해주던 일들이 실제로 무엇인지 한 번씩 열어 본다. 창 생성부터 오디오 믹싱, lockstep 동기화, 신경망 추론까지다.
+2. 완성형 게임 엔진이 대신 해주던 일들이 실제로 무엇인지 한 번씩 열어 본다. 창 생성부터 오디오 믹싱, lockstep 동기화, 신경망 추론까지다.
 
 과거 작업 시간순이 아니라 **구현 의존성 순서**로 읽는다. 먼저 렌더링과 무관한 `SimGame`을 완성해 테스트 가능한 규칙 엔진을 만들고, 그 위에 플랫폼·렌더링· `Game`/`main.cpp`를 쌓는다. 이후에만 네트워크와 서버, Python/RL, 메타 서비스를 추가한다. 완성 상태의 모듈 관계는 루트 [`README.md`의 아키텍처](../../README.md#아키텍처)에서 짧게 복습할 수 있다.
 
 ## 코드 블록 읽는 법
 
-모든 코드 블록에는 **바로 위 줄**에 세 라벨 중 하나가 붙어 있다. 순수 셸 명령 블록과 mermaid 다이어그램만 예외다.
+모든 코드 블록에는 **바로 위 줄**에 세 라벨 중 하나가 붙어 있다. 셸 명령, 콘솔 출력, 설정·데이터 형식 예시, mermaid 다이어그램은 앞 문장이 용도를 밝히면 라벨 없이 실린다.
 
 | 라벨 | 형식 | 의미 |
 |---|---|---|
@@ -45,7 +45,7 @@ graph TB
 
 ## 읽는 순서
 
-모든 독자가 Part 0~7을 먼저 읽어야 하는 것은 아니다. 공통 기반은 Part 0~4이고, 여기서 목적에 따라 의존 경로가 갈린다.
+모든 독자가 Part 0~7을 먼저 읽어야 하는 것은 아니다. 모든 트랙의 공통 기반은 Part 0~1(빌드 뼈대와 결정론 코어)이고, 화면이 필요한 트랙이 Part 2~4(클라이언트 기반)를 더한다. 위 의존 그래프에서 Part 8이 Part 1에만 매달려 있는 이유가 이것이다 — 학습 코어는 `SimGame`만 의존한다. 여기서 목적에 따라 의존 경로가 갈린다.
 
 - **게임 클라이언트 기반:** Part 0 → 1 → 2 → 3 → 4. 규칙 엔진, 플랫폼, 렌더러, 실제 게임 루프를 만든다.
 - **온라인 서비스·출시:** 클라이언트 기반 → Part 5 → 6 → 7 → 10 → 11 → 12. 오디오, lockstep, relay, 계정·결과 영속화, 사용자 설정, 운영 검증 순서다.
@@ -177,12 +177,12 @@ graph TB
         ORT[ONNX Runtime<br/>model/bots/*.onnx]
     end
 
-    subgraph RelayHost["Linux Mac mini"]
+    subgraph RelayHost["소형 리눅스 머신"]
         R[tetris_relay<br/>public TCP 7777]
         E[HTTPS proxy / Tunnel]
     end
 
-    subgraph MetaHost["Galaxy S7 Termux"]
+    subgraph MetaHost["저전력 Android(Termux) 단말"]
         M[tetris_meta<br/>private HTTP 8080]
         DB[(SQLite)]
     end
@@ -203,13 +203,14 @@ graph TB
 
 - 유저 머신은 내장 휴리스틱 봇을 항상 사용할 수 있고, 학습 모델은 `model/bots/*.onnx`와 ONNX Runtime만 있으면 인게임 봇 로스터에 나타난다.
 - PyTorch는 학습과 `.pt -> .onnx` export에만 필요하다.
-- Mac mini 같은 약한 배포 머신에서는 torch를 설치하지 않아도 된다.
+- 저사양 배포 머신에서는 torch를 설치하지 않아도 된다.
 - `tetris_meta`는 기본적으로 relay secret 없이 시작하지 않는다.
-- meta와 proxy가 같은 호스트면 `127.0.0.1`에 bind한다. 현재 S7 분리 배치에서는
-  S7의 고정 사설/VPN 주소에 bind하고 방화벽으로 Mac mini만 허용하며, Mac mini의
-  proxy/Tunnel이 public TLS와 client별 rate limit을 맡는다. S7 meta는 비루프백
-  전달 헤더를 신뢰하지 않아 public 요청을 Mac mini IP의 공유 버킷으로 제한한다.
+- meta와 proxy가 같은 호스트면 `127.0.0.1`에 bind한다. 현재처럼 meta를 저전력
+  Android(Termux) 단말로 분리한 배치에서는 meta 단말의 고정 사설/VPN 주소에
+  bind하고 방화벽으로 relay 호스트만 허용하며, relay 호스트의 proxy/Tunnel이
+  public TLS와 client별 rate limit을 맡는다. meta는 비루프백 전달 헤더를
+  신뢰하지 않아 public 요청을 relay 호스트 IP의 공유 버킷으로 제한한다.
 - 로컬 검수는 C++ 빌드, 결정론 덤프, framing/placement 테스트, meta/relay smoke까지다. 학습은 하지 않는다.
 - 현재 UI는 RP(0 시작/0 바닥), 누적 XP 레벨, BP 아이콘 상점을 사용한다.
 - `python/netbot/`은 framing/input 패리티와 ONNX export 도구다. 실제 봇 실행 경로는 인프로세스 ONNX/휴리스틱 봇이다.
-- `python/common/env_versus.py`는 가비지 교환형 2-보드 RL 환경을 제공하지만, 기본 trainer CLI는 아직 단일 보드 환경을 직접 생성한다 ([Part 8](./part8-python-rl.md) 참조).
+- `python/common/env_versus.py`는 가비지 교환형 2-보드 RL 환경을 제공한다. PPO trainer(`python/train/ppo_tetris.py`)는 `--env versus`로 이 환경을 선택할 수 있고 기본값은 단일 보드다. 다른 trainer는 아직 단일 보드 환경만 직접 생성한다 ([Part 8](./part8-python-rl.md) 참조).

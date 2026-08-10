@@ -1,6 +1,6 @@
 #pragma once
 #include <vector>
-#include "../platform/platform.h"   // Color 정의 (raylib Color 대체)
+#include "../platform/platform.h"   // Color 정의
 
 // 테트리스 블록 색상
 extern const Color darkGrey;

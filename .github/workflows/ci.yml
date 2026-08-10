@@ -1,0 +1,112 @@
+# 서버·시뮬레이션 회귀 CI
+#
+# 이 저장소는 Windows 개발기에서 만들어지지만 릴레이의 배포 주타깃은 Linux 다. 그래서
+# 개발기에서 영영 실행할 수 없는 코드 경로가 생긴다 — net/reactor_epoll.cpp 와, 소켓을
+# 루프 사이로 옮기는 샤딩(--loops N)이 그것이다. Windows 의 IOCP 는 핸들을 완료 포트
+# 하나에 고정하므로 그 경로는 단일 루프로 물러선다. 이 워크플로의 존재 이유가 정확히
+# 그 공백을 메우는 것이다: 두 OS 에서 같은 계약을 돌려 확인한다.
+#
+# 게임 클라이언트(TETRIS_BUILD_GAME)는 끈다. GL/SDL/오디오는 서버 회귀와 무관하고
+# 러너에 그래픽 스택을 요구하면 CI 가 불안정해진다.
+
+name: CI
+
+on:
+  push:
+    branches: ["main", "reactor/event-loop"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DTETRIS_BUILD_GAME=OFF
+          -DTETRIS_BUILD_RELAY=ON
+          -DTETRIS_BUILD_META=ON
+          -DTETRIS_BUILD_TEST=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # 산출물 경로가 생성기마다 다르다. 단일 구성(Makefiles/Ninja)은 build/,
+      # multi-config(Visual Studio)는 build/Release/ 다.
+      - name: Locate binaries
+        shell: bash
+        run: |
+          if [ -d build/Release ]; then BIN=build/Release; EXT=.exe; else BIN=build; EXT=; fi
+          echo "BIN=$BIN"   >> "$GITHUB_ENV"
+          echo "EXT=$EXT"   >> "$GITHUB_ENV"
+          ls "$BIN"
+
+      - name: Determinism (golden hash)
+        shell: bash
+        run: |
+          "./$BIN/sim_hash_dump$EXT" | diff - python/tests/_sim_hash_dump.txt
+          echo "결정론 OK"
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          "./$BIN/worker_group_test$EXT"
+          "./$BIN/reactor_test$EXT"          # Linux 에서는 epoll, Windows 에서는 IOCP 백엔드
+          "./$BIN/loop_primitives_test$EXT"
+
+      - uses: astral-sh/setup-uv@v5
+      - name: Python deps
+        run: uv sync --dev
+
+      # 스모크 테스트는 wire 레벨이라 서버 구현을 모른다. 그래서 같은 스위트를 두
+      # 바이너리에 겨눠 "두 구현이 같은 계약을 말하는가" 를 직접 확인할 수 있다.
+      - name: Smoke — thread-model relay
+        shell: bash
+        run: |
+          "./$BIN/tetris_relay$EXT" --port 7788 &
+          sleep 2
+          TETRIS_META_BIN="$PWD/$BIN/tetris_meta$EXT" \
+          TETRIS_RELAY_BIN="$PWD/$BIN/tetris_relay$EXT" \
+          uv run python -m pytest python/tests -q --no-header
+          kill %1 || true
+
+      - name: Smoke — reactor relay (single loop)
+        shell: bash
+        run: |
+          "./$BIN/tetris_relay_reactor$EXT" --port 7788 --loops 1 &
+          sleep 2
+          TETRIS_META_BIN="$PWD/$BIN/tetris_meta$EXT" \
+          TETRIS_RELAY_BIN="$PWD/$BIN/tetris_relay_reactor$EXT" \
+          uv run python -m pytest \
+            python/tests/test_relay_smoke.py \
+            python/tests/test_room_smoke.py \
+            python/tests/test_relay_meta_smoke.py \
+            python/tests/test_match_summary_crosscheck.py \
+            -q --no-header
+          kill %1 || true
+
+      # 샤딩은 소켓을 루프 사이로 옮길 수 있어야 성립한다. Linux(epoll)에서만 실제로
+      # 나뉘고, Windows 에서는 릴레이가 이유를 로그로 남기고 단일 루프로 물러선다.
+      # 양쪽 모두 같은 스모크를 통과해야 한다 — 폴백도 정상 동작이어야 하기 때문이다.
+      - name: Smoke — reactor relay (sharded)
+        shell: bash
+        run: |
+          "./$BIN/tetris_relay_reactor$EXT" --port 7788 --loops 4 &
+          sleep 2
+          TETRIS_META_BIN="$PWD/$BIN/tetris_meta$EXT" \
+          TETRIS_RELAY_BIN="$PWD/$BIN/tetris_relay_reactor$EXT" \
+          uv run python -m pytest \
+            python/tests/test_relay_smoke.py \
+            python/tests/test_room_smoke.py \
+            -q --no-header
+          kill %1 || true

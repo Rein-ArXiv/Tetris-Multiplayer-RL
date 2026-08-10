@@ -86,6 +86,9 @@ public:
         return static_cast<int>(out.size());
     }
 
+    // epoll 인스턴스에서 빼고 다른 인스턴스에 다시 넣으면 그만이다.
+    bool can_migrate_sockets() const override { return true; }
+
     void wake() override {
         uint64_t one = 1;
         // 논블로킹 write 실패(버퍼 포화)는 이미 미소비 wake 가 대기 중이라는 뜻이라

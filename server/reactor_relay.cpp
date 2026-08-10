@@ -15,6 +15,16 @@
 // 그리고 "양방향이 동시에 죽을 때 교차검증이 생략되는" 경합까지. 남은 락은 오프로드
 // 워커와 공유하는 지점(인증 캐시, 세션 lease)뿐이다.
 //
+// 샤딩(--loops N): 매치메이킹 큐와 룸 코드 표는 본질적으로 전역이라 루프마다 복제할
+// 수 없다 — 서로 다른 루프의 큐에 선 두 사람은 영영 만나지 못하고, 한 루프에서 발급한
+// 룸 코드는 다른 루프에서 "없는 방"이 된다. 그래서 나누는 축을 연결이 아니라 매치로
+// 잡는다: 앞단 루프 하나가 accept·인증·큐·룸·로비를 전부 소유하고(연결 수명당 몇 번뿐인
+// 값싼 일), 포워딩이 시작되는 순간 두 소켓과 채널을 포워딩 샤드로 넘긴다(패킷마다 도는
+// 비싼 일). 샤드는 서로 아무것도 공유하지 않으므로 락이 필요 없다 — 유일한 락은 넘겨줄
+// 때 쓰는 우편함이다.
+//
+// 루프 클래스는 하나뿐이다. 앞단이냐 샤드냐는 리스너를 가졌는지의 차이일 뿐이다.
+//
 // 룸 경로는 스레드 모델의 starter/exit 조건변수 배리어가 통째로 사라진다. 그 배리어는
 // 두 스레드가 같은 fd 를 동시에 읽지 않게 하려고 있었는데, 소켓 소유자가 하나뿐이면
 // 애초에 막을 것이 없다 — 양쪽 READY 를 관측한 그 자리에서 곧바로 포워딩으로 넘긴다.
@@ -37,8 +47,10 @@
 #include <deque>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -219,6 +231,36 @@ public:
         return true;
     }
 
+    // 포워딩 전담 샤드 — 리스너가 없다. 넘겨받은 매치만 돌린다.
+    bool init_shard(size_t index) {
+        shard_index_ = index;
+        reactor_ = net::Reactor::create();
+        if (!reactor_) {
+            std::cerr << "[relay] shard " << index << " reactor 생성 실패\n";
+            return false;
+        }
+        offload_ = std::make_unique<Offload>(2, [this] { reactor_->wake(); });
+        return true;
+    }
+
+    // 앞단이 포워딩을 넘길 샤드 목록. 비어 있으면 앞단이 직접 전달한다(단일 루프).
+    void set_shards(std::vector<RelayLoop*> shards) { shards_ = std::move(shards); }
+
+    // 이 백엔드에서 매치를 다른 루프로 넘길 수 있는가(IOCP 는 불가 — reactor.h 참조).
+    bool can_shard() const { return reactor_ && reactor_->can_migrate_sockets(); }
+
+    // 앞단 스레드가 호출한다 — 이 클래스에서 유일하게 교차 스레드로 불리는 지점이다.
+    // 우편함에 넣고 깨우면 나머지는 샤드 스레드가 자기 문맥에서 처리한다. 소켓 등록도
+    // 그때 한다 — Reactor 인스턴스는 소유 스레드 전용이기 때문이다.
+    void hand_off(std::unique_ptr<Conn> a, std::unique_ptr<Conn> b,
+                  std::unique_ptr<Channel> ch) {
+        {
+            std::lock_guard<std::mutex> lk(inbox_mu_);
+            inbox_.push_back(Handoff{std::move(a), std::move(b), std::move(ch)});
+        }
+        reactor_->wake();
+    }
+
     void run() {
         std::vector<net::Event>   events;
         std::vector<void*>        expired;
@@ -234,6 +276,9 @@ public:
                 std::cerr << "[relay] poll 오류 — 종료\n";
                 break;
             }
+
+            // 0) 앞단이 넘긴 매치를 이 루프의 소유로 받아들인다
+            drain_inbox();
 
             // 1) 오프로드 완료분을 루프 스레드에서 실행 (소켓 I/O 단일 스레드 유지)
             conts.clear();
@@ -266,6 +311,39 @@ public:
     }
 
 private:
+    // ── 샤드 인계 ────────────────────────────────────────────────────────────
+    struct Handoff {
+        std::unique_ptr<Conn>    a, b;
+        std::unique_ptr<Channel> ch;
+    };
+
+    void drain_inbox() {
+        std::vector<Handoff> batch;
+        {
+            std::lock_guard<std::mutex> lk(inbox_mu_);
+            if (inbox_.empty()) return;
+            batch.swap(inbox_);
+        }
+        for (auto& h : batch) {
+            Conn* a = h.a.get();
+            Conn* b = h.b.get();
+            Channel* ch = h.ch.get();
+            channels_[ch->match_id] = std::move(h.ch);
+            conns_[a] = std::move(h.a);
+            conns_[b] = std::move(h.b);
+            // fd 자체는 프로세스 전역이지만 관심 등록은 루프마다 따로다.
+            if (!reactor_->add(a->fd, net::kRead, a) ||
+                !reactor_->add(b->fd, net::kRead, b)) {
+                close_conn(a, "샤드 등록 실패");
+                close_conn(b, "샤드 등록 실패");
+                continue;
+            }
+            std::cerr << "[shard " << shard_index_ << "] match=" << ch->match_id
+                      << " 인계 받음\n";
+            begin_forwarding(ch);
+        }
+    }
+
     // ── 수명 관리 ────────────────────────────────────────────────────────────
     bool alive(Conn* c) const {
         auto it = conns_.find(c);
@@ -714,11 +792,17 @@ private:
     // ── 큐 ───────────────────────────────────────────────────────────────────
     void enter_queue(Conn* c) {
         c->stage = Stage::Queued;
+        // 큐에 세우기 전에 이미 도착해 있는 QUEUE_CANCEL 을 먼저 본다. 순서를
+        // 뒤집으면(넣고 → 짝짓고 → 취소 확인) 상대가 이미 대기 중일 때 취소한
+        // 사람이 그 자리에서 매칭돼 버린다. 스레드 모델도 페어링 직전에 대기자
+        // 생존을 확인해 같은 것을 막는다.
+        if (!c->rx.empty()) {
+            on_queued(c);
+            if (!alive(c)) return;
+        }
         queue_.push_back(c);
         std::cerr << "[conn " << c->id << "] queued (" << queue_.size() << " 대기)\n";
         try_pair();
-        // 큐에 남았다면 이미 도착한 QUEUE_CANCEL 을 지금 처리한다.
-        if (c->stage == Stage::Queued && !c->rx.empty()) on_queued(c);
     }
 
     // 큐 대기 중에는 QUEUE_CANCEL 만 본다. 그 외 바이트는 쌓아 두고 매치 성립 시
@@ -879,9 +963,29 @@ private:
         if (ch->a && ch->b && ch->a->ready && ch->b->ready) begin_forwarding(ch);
     }
 
+    // 포워딩 시작 지점이자 샤딩의 경계다. 앞단이라면 여기서 매치를 통째로 샤드에
+    // 넘긴다 — 이 뒤로는 패킷마다 도는 비싼 일만 남고, 그 일에는 공유 상태가 없다.
     void begin_forwarding(Channel* ch) {
         Conn* a = ch->a; Conn* b = ch->b;
         if (!a || !b) return;
+
+        if (!shards_.empty()) {
+            RelayLoop* target = shards_[next_shard_ % shards_.size()];
+            ++next_shard_;
+            // 이 루프의 관심에서 떼고 타이머를 접은 뒤 소유권을 통째로 옮긴다.
+            reactor_->remove(a->fd);
+            reactor_->remove(b->fd);
+            timers_.cancel(a);
+            timers_.cancel(b);
+            auto na = conns_.extract(a);
+            auto nb = conns_.extract(b);
+            auto nc = channels_.extract(ch->match_id);
+            if (!na || !nb || !nc) return;   // 있을 수 없는 상태 — 방어
+            target->hand_off(std::move(na.mapped()), std::move(nb.mapped()),
+                             std::move(nc.mapped()));
+            return;
+        }
+
         const TimePoint now = Clock::now();
         for (Conn* c : {a, b}) {
             c->stage = Stage::Forward;
@@ -1105,6 +1209,13 @@ private:
     std::unordered_map<std::string, int> admission_;
     std::unordered_set<uint32_t> pending_auth_;
 
+    // 샤딩. shards_ 는 앞단만 채운다(샤드에서는 비어 있어 재인계가 일어나지 않는다).
+    std::vector<RelayLoop*> shards_;
+    size_t                  shard_index_ = 0;
+    size_t                  next_shard_  = 0;
+    std::mutex              inbox_mu_;
+    std::vector<Handoff>    inbox_;
+
     uint32_t next_conn_id_  = 1;
     uint32_t next_match_id_ = 1;
     uint64_t seed_state_    = 0;
@@ -1115,6 +1226,7 @@ private:
 
 int main(int argc, char** argv) {
     uint16_t port = 7777;
+    int loops = 1;                      // 1 = 단일 루프(앞단이 포워딩까지)
     std::string meta_url, meta_secret;
 
     for (int i = 1; i < argc; ++i) {
@@ -1127,10 +1239,11 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--port")             port = (uint16_t)std::stoi(next("--port"));
+        else if (a == "--loops")       loops = std::max(1, std::stoi(next("--loops")));
         else if (a == "--meta")        meta_url = next("--meta");
         else if (a == "--meta-secret") meta_secret = next("--meta-secret");
         else if (a == "-h" || a == "--help") {
-            std::cout << "Usage: tetris_relay_reactor [--port N] [--meta URL]"
+            std::cout << "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]"
                          " [--meta-secret S]\n"
                          "  단일 이벤트 루프(epoll/IOCP) 릴레이. 큐 경로만 지원.\n";
             return 0;
@@ -1172,11 +1285,44 @@ int main(int argc, char** argv) {
         note = "meta=" + meta_url;
     }
 
-    relay::RelayLoop loop(meta.get(), note);
-    int rc = 0;
-    if (!loop.init(port)) rc = 1;
-    else loop.run();
+    // 앞단 루프 하나 + 포워딩 샤드 (loops-1)개. --loops 1 이면 단일 루프 모드로,
+    // 앞단이 포워딩까지 직접 한다 — 이 저장소 규모에서는 그쪽이 기본이다.
+    relay::RelayLoop front(meta.get(), note);
+    if (!front.init(port)) {
+        net::net_shutdown();
+        return 1;
+    }
+
+    if (loops > 1 && !front.can_shard()) {
+        // 소켓을 다른 완료 포트로 옮길 수 없는 백엔드(IOCP)에서는 인계가 성립하지
+        // 않는다. 조용히 반쯤 도는 대신 이유를 밝히고 단일 루프로 물러선다.
+        std::cout << "[relay] 이 플랫폼의 reactor 백엔드는 루프 간 소켓 이동을 "
+                     "지원하지 않아 단일 루프로 실행합니다\n";
+        loops = 1;
+    }
+
+    std::vector<std::unique_ptr<relay::RelayLoop>> shards;
+    std::vector<relay::RelayLoop*>                 shard_ptrs;
+    for (int i = 1; i < loops; ++i) {
+        auto s = std::make_unique<relay::RelayLoop>(meta.get(), note);
+        if (!s->init_shard((size_t)i)) {
+            net::net_shutdown();
+            return 1;
+        }
+        shard_ptrs.push_back(s.get());
+        shards.push_back(std::move(s));
+    }
+    front.set_shards(shard_ptrs);
+    if (!shard_ptrs.empty()) {
+        std::cout << "[relay] forwarding shards: " << shard_ptrs.size() << "\n";
+    }
+
+    std::vector<std::thread> threads;
+    for (auto* s : shard_ptrs) threads.emplace_back([s] { s->run(); });
+
+    front.run();                       // 앞단은 이 스레드에서 돈다
+    for (auto& th : threads) th.join(); // g_running 이 내려가면 샤드도 함께 빠져나온다
 
     net::net_shutdown();
-    return rc;
+    return 0;
 }

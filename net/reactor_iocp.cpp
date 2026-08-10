@@ -168,6 +168,10 @@ public:
         return static_cast<int>(out.size());
     }
 
+    // 소켓 핸들은 CreateIoCompletionPort 로 한 번 결합되면 수명 동안 그 포트에
+    // 묶인다. 다른 포트로 다시 결합할 방법이 없으므로 루프 간 이동을 지원하지 않는다.
+    bool can_migrate_sockets() const override { return false; }
+
     void wake() override {
         // IOCP 는 PostQueuedCompletionStatus 를 스레드 안전하게 보장한다.
         ::PostQueuedCompletionStatus(iocp_, 0, kWakeKey, nullptr);

@@ -67,6 +67,39 @@ void test_timer_queue() {
     check(tq.timeout_ms(base) == -1, "빈 큐는 timeout -1");
 }
 
+// 세대(seq) 재사용 회귀.
+//
+// 발화·취소가 token 을 map 에서 지우면, 같은 token 으로 다시 arm 할 때 세대가
+// 1 부터 다시 시작한다. 힙에 남아 있던 낡은 항목의 세대와 값이 같아지면 그 낡은
+// 항목이 "유효" 로 오인되어 (a) 엉뚱한 시점에 조기 만기가 발화하고 (b) 그 발화가
+// live_ 를 소진해 진짜 만기는 영영 오지 않는다.
+//
+// 릴레이에서 이 조건은 드물지 않다: 룸이 게스트 입장 시 데드라인을 재무장하고,
+// 연결 상태 객체가 파괴된 자리에 새 연결이 같은 주소로 할당되면 token 이 재사용된다.
+void test_timer_generation_reuse() {
+    relay::TimerQueue tq;
+    auto base = Clock::now();
+    int conn;  // 토큰(연결 상태 객체 주소 대용)
+
+    tq.arm(&conn, base + ms(1000));  // 최초 무장 (예: 게스트 대기)
+    tq.arm(&conn, base + ms(100));   // 재무장 (예: READY 대기) — 낡은 항목이 남는다
+
+    std::vector<void*> out;
+    tq.expired(base + ms(150), out);
+    check(out.size() == 1, "재무장된 만기가 발화");
+    out.clear();
+
+    // 같은 주소로 새 연결이 들어와 먼 미래로 무장한다.
+    tq.arm(&conn, base + ms(2000));
+
+    tq.expired(base + ms(1000), out);
+    check(out.empty(), "낡은 항목이 조기 만기를 일으키지 않음");
+    out.clear();
+
+    tq.expired(base + ms(2000), out);
+    check(out.size() == 1 && out[0] == &conn, "진짜 만기가 유실되지 않음");
+}
+
 void test_offload() {
     std::atomic<int> wakes{0};
     relay::Offload off(2, [&] { ++wakes; });
@@ -122,6 +155,7 @@ void test_offload() {
 
 int main() {
     test_timer_queue();
+    test_timer_generation_reuse();
     test_offload();
     if (g_failures == 0) {
         std::fprintf(stderr, "[loop-prim] all checks passed\n");

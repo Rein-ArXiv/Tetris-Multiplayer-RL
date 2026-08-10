@@ -142,9 +142,23 @@ int main() {
     waker.join();
     check(woke.load(), "wake() unblocked poll within 2s");
 
-    reactor->remove(client.fd());
-    reactor->remove(server.fd());
+    // 무장된 상태에서의 remove — 연결 정리 경로가 실제로 쓰는 순서다.
+    // IOCP 백엔드는 커널이 아직 OVERLAPPED 를 들고 있으므로 상태 객체를 바로
+    // 해제하면 뒤늦은 완료 통지가 해제된 메모리를 가리킨다. 취소 완료를 회수할
+    // 때까지 살려 두는지 확인한다(여기서 죽거나 제거된 token 이 다시 나오면 실패).
+    check(reactor->remove(client.fd()), "remove(client) while read-armed");
     net::tcp_close(client);
+    std::vector<net::Event> after;
+    bool leaked_removed_token = false;
+    for (int i = 0; i < 3; ++i) {
+        reactor->poll(after, 50);
+        for (const auto& e : after) {
+            if (e.token == &client_tag) leaked_removed_token = true;
+        }
+    }
+    check(!leaked_removed_token, "removed token no longer reported");
+
+    check(reactor->remove(server.fd()), "remove(server)");
     net::tcp_close(server);
     net::tcp_close(listener);
     net::net_shutdown();

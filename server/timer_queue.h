@@ -21,8 +21,17 @@
 //   얻는다. 각 token 의 "살아 있는 세대(seq)"를 map 에 두고, 힙에서 꺼낸 항목의
 //   seq 가 최신이 아니면 낡은 것으로 보고 버린다.
 //
+//   세대는 인스턴스 전역에서 단조 증가한다 — token 별로 세지 않는다. 발화·취소가
+//   token 을 map 에서 지우므로 token 별 카운터였다면 다음 arm 이 1 부터 다시
+//   시작하고, 힙에 남은 낡은 항목의 세대와 값이 같아져 그 낡은 항목이 유효한 것으로
+//   오인된다(조기 만기 + 진짜 만기 유실). 연결 상태 객체가 파괴된 자리에 새 연결이
+//   같은 주소로 할당되면 token 까지 재사용되므로 실제로 일어날 수 있는 경로다.
+//
 //   token 은 연결 상태 객체 포인터다(reactor 의 Event::token 과 같은 값). 타이머는
 //   token 을 해석하지 않는다.
+//
+//   동시성: 루프 스레드 전용이다(thread-safe 가 아니다). 오프로드 워커는 데드라인을
+//   직접 만지지 말고 continuation 안에서 — 즉 루프 스레드에서 — arm/cancel 해야 한다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace relay {
@@ -34,7 +43,8 @@ public:
 
     // token 의 데드라인을 when 으로 설정/교체한다. 이미 있으면 이전 것은 무효화된다.
     void arm(void* token, TimePoint when) {
-        uint64_t seq = ++live_[token];
+        const uint64_t seq = ++next_seq_;  // 전역 단조 — 세대 값은 재사용되지 않는다
+        live_[token] = seq;
         heap_.push(Entry{when, token, seq});
     }
 
@@ -102,6 +112,7 @@ private:
 
     std::priority_queue<Entry, std::vector<Entry>, Later> heap_;
     std::unordered_map<void*, uint64_t> live_;
+    uint64_t next_seq_ = 0;
 };
 
 } // namespace relay

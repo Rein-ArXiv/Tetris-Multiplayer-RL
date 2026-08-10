@@ -52,6 +52,19 @@ public:
     }
 
     ~IocpReactor() override {
+        // 취소를 기다리는 좀비가 남아 있으면 그 완료를 먼저 회수한다. 커널은 완료
+        // 시점에 OVERLAPPED 에 쓰므로, in-flight 인 채로 해제하면 그 쓰기가 해제된
+        // 메모리를 향한다. 완료는 취소·소켓 close 로 반드시 오지만 무한정 기다리지는
+        // 않는다(정상 종료 경로에서는 즉시 회수된다).
+        for (int spins = 0; !zombies_.empty() && spins < 64; ++spins) {
+            ULONG got = 0;
+            OVERLAPPED_ENTRY batch[32];
+            if (!::GetQueuedCompletionStatusEx(iocp_, batch, 32, &got, 50, FALSE)) break;
+            for (ULONG i = 0; i < got; ++i) {
+                if (batch[i].lpCompletionKey == kWakeKey) continue;
+                zombies_.erase(CONTAINING_RECORD(batch[i].lpOverlapped, SockState, ov));
+            }
+        }
         if (iocp_) ::CloseHandle(iocp_);
     }
 
@@ -80,9 +93,21 @@ public:
     }
 
     bool remove(int fd) override {
-        // 걸려 있던 zero-byte recv 는 소켓 close 시 커널이 취소·완료시킨다. 여기서는
-        // 상태만 버린다(연결 close 는 호출자의 TcpSocket RAII 소관).
-        return socks_.erase(fd) > 0;
+        auto it = socks_.find(fd);
+        if (it == socks_.end()) return false;
+
+        SockState* raw = it->second.get();
+        if (raw->read_armed) {
+            // 커널이 아직 &raw->ov 를 들고 있다. 여기서 상태 객체를 해제하면 뒤늦게
+            // 도착하는 완료 통지의 CONTAINING_RECORD 가 해제된 메모리를 가리킨다
+            // (use-after-free). 취소를 요청하고, 그 완료를 회수할 때까지 객체를
+            // 살려 둔다 — 소켓이 닫히거나 취소되면 커널은 반드시 완료를 큐잉하므로
+            // poll() 이 이 좀비를 정확히 한 번 걷어 간다.
+            ::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<SOCKET>(fd)), &raw->ov);
+            zombies_.emplace(raw, std::move(it->second));
+        }
+        socks_.erase(it);
+        return true;
     }
 
     int poll(std::vector<Event>& out, int timeout_ms) override {
@@ -124,6 +149,12 @@ public:
                 continue;  // wake — 이벤트로 노출하지 않는다
             }
             SockState* st = CONTAINING_RECORD(e.lpOverlapped, SockState, ov);
+            // remove() 로 이미 떠난 연결의 취소 완료라면 여기서 회수하고 버린다.
+            auto zit = zombies_.find(st);
+            if (zit != zombies_.end()) {
+                zombies_.erase(zit);
+                continue;
+            }
             st->read_armed = false;  // 이 완료로 무장이 소진됐다
             Event ev;
             ev.token    = st->token;
@@ -170,19 +201,34 @@ private:
 
     void synth_writable(std::vector<Event>& out) {
         // kWrite 관심 fd 에 낙관적 writable 을 합성한다(위 주석의 한계 참조).
+        // 이미 이번 배치에 이벤트가 있는 token 은 그 자리에 writable 을 합친다 —
+        // epoll 백엔드가 fd 하나당 이벤트 하나를 돌려주므로 동작을 맞춘다. 그렇지
+        // 않으면 같은 연결이 배치 안에 두 번 나타나 루프가 백엔드마다 다른 형태를
+        // 처리해야 한다.
+        std::unordered_map<void*, size_t> idx;
+        for (size_t i = 0; i < out.size(); ++i) idx.emplace(out[i].token, i);
+
         for (auto& [fd, st] : socks_) {
             (void)fd;
-            if (st->interest & kWrite) {
-                Event ev;
-                ev.token = st->token;
-                ev.writable = true;
-                out.push_back(ev);
+            if (!(st->interest & kWrite)) continue;
+            auto it = idx.find(st->token);
+            if (it != idx.end()) {
+                out[it->second].writable = true;
+                continue;
             }
+            Event ev;
+            ev.token = st->token;
+            ev.writable = true;
+            idx.emplace(st->token, out.size());
+            out.push_back(ev);
         }
     }
 
     HANDLE iocp_ = nullptr;
     std::unordered_map<int, std::unique_ptr<SockState>> socks_;
+    // remove() 됐지만 커널이 아직 OVERLAPPED 를 들고 있는 상태 객체. 취소 완료가
+    // 회수될 때까지만 살아 있다.
+    std::unordered_map<SockState*, std::unique_ptr<SockState>> zombies_;
     std::vector<OVERLAPPED_ENTRY> entries_;
 };
 

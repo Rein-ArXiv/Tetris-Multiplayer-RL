@@ -791,29 +791,29 @@ enum class AppMode {
 ```mermaid
 stateDiagram-v2
     [*] --> Menu
-    Menu --> Single: MenuAction::Single<br/>make_unique&lt;Game&gt;(sessionSeed)
+    Menu --> Single: MenuAction = Single<br/>Game 생성 (sessionSeed)
     Single --> Menu: 게임오버 [Q] / 모달 Yes
     Single --> Single: 게임오버 [R] (재생성)
 
-    Menu --> BotSelect: MenuAction::BotSelect
+    Menu --> BotSelect: MenuAction = BotSelect
     BotSelect --> BotSingle: 모델/휴리스틱 선택
     BotSelect --> Menu: ESC
     BotSingle --> Menu: [Q] / 모달 Yes
     BotSingle --> BotSingle: [R] (양쪽 재생성)
 
-    Menu --> Net: MenuAction::Matchmaking<br/>session.QueueJoin
-    Menu --> RoomLobby: MenuAction::CustomRoom
+    Menu --> Net: MenuAction = Matchmaking<br/>session.QueueJoin
+    Menu --> RoomLobby: MenuAction = CustomRoom
     RoomLobby --> RoomWaiting: Create / Join 성공
     RoomWaiting --> Net: MATCH_FOUND
     RoomWaiting --> Menu: ESC
     RoomLobby --> Menu: ESC
     Net --> Menu: 링크 Lost grace 만료 / 모달 Yes
 
-    Menu --> Customize: MenuAction::Customize
+    Menu --> Customize: MenuAction = Customize
     Customize --> Menu: ESC
-    Menu --> Settings: MenuAction::Settings
+    Menu --> Settings: MenuAction = Settings
     Settings --> Menu: ESC
-    Menu --> [*]: MenuAction::Quit
+    Menu --> [*]: MenuAction = Quit
 
     ConnectInput --> Net: --connect CLI 경로
 ```

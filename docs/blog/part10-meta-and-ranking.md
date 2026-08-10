@@ -2641,7 +2641,7 @@ stateDiagram-v2
     [*] --> CheckUrl
     CheckUrl --> Disabled: metaUrl 비어 있음
     CheckUrl --> CheckValid: metaUrl 있음
-    CheckValid --> Disabled: MetaClient::valid() == false<br/>(URL 오류 / HTTPS 미지원 빌드)
+    CheckValid --> Disabled: valid() == false<br/>(URL 오류 / HTTPS 미지원 빌드)
     CheckValid --> LoadToken: valid
     LoadToken --> NewGuest: 파일 없음/형식 불일치
     LoadToken --> Verify: 32 hex 토큰 있음

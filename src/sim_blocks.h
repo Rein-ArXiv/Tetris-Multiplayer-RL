@@ -2,7 +2,7 @@
 #include "sim_block.h"
 #include "position.h"
 
-// [NET/RL] Pure block shape factories — 헤드리스 SimGame 전용. raylib 의존성 없음.
+// [NET/RL] Pure block shape factories — 헤드리스 SimGame 전용. 렌더러 의존성 없음.
 // 7-bag 의 ID 와 rotation 테이블은 결정론 보장을 위해 절대 변경하지 말 것
 // (변경 시 StateHash 가 어긋나 cross-platform / replay 회귀가 깨진다).
 

@@ -139,7 +139,7 @@ public:
     bool GetRemoteGameOverChoice(GameOverChoice& outChoice) const;
     void ClearGameOverChoices();
 
-    // 채팅 (Section E) — CHAT 프레임은 릴레이를 투명 통과.
+    // 채팅 (Section E) — CHAT 프레임은 릴레이 내용을 해석하지 않고 raw 전달.
     //   SendChat: UTF-8 텍스트를 프레임 1개에 담아 송신. 최대 200자 가정(상한은 MAX_PAYLOAD_BYTES).
     //   PullChat: 수신 큐에서 한 줄 꺼냄. 없으면 false.
     void SendChat(const std::string& text);

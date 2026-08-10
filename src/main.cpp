@@ -1,25 +1,14 @@
-// src/main.cpp — Handmade 버전 (raylib 제거, 자체 OpenGL 3.3 Core 렌더러)
+// src/main.cpp — Handmade 버전 (기성 프레임워크 제거, 자체 OpenGL 3.3 Core 렌더러)
 //
-// 변경 사항:
-//   #include <raylib.h>     → platform/platform.h + renderer/renderer.h
-//   InitWindow()            → platform_init()
-//   WindowShouldClose()     → platform_should_close()
-//   GetFrameTime()          → platform_begin_frame() 반환값
-//   BeginDrawing()          → renderer_begin()
-//   EndDrawing()            → renderer_end() (버퍼 교체) + platform_end_frame() (pace)
-//   IsKeyPressed(KEY_*)     → platform_key_pressed(PKEY_*)
-//   IsKeyDown(KEY_*)        → platform_key_down(PKEY_*)
-//   GetCharPressed()        → platform_get_char_pressed()
-//   DrawRectangle(...)      → draw_rect(...)
-//   DrawRectangleRounded()  → draw_rect_rounded(...)
-//   DrawTextEx(font, ...)   → draw_text(...)
-//   DrawText(...)           → draw_text(...)
-//   MeasureTextEx(...)      → measure_text(...)
-//   TextFormat(fmt, ...)    → snprintf 로컬 버퍼
-//   GetTime()               → platform_get_time()
-//   TraceLog(LOG_ERROR, ...) → fprintf(stderr, ...)
-//   UpdateMusicStream(...)  → audio/ 모듈 (XAudio2 루프 재생, per-frame 업데이트 불필요)
-//   CloseWindow()           → platform_shutdown()
+// 진입점과 게임 루프의 소유자. 기성 즉시 그리기 라이브러리가 한 번에 해 주던
+// 일들을 자체 계층이 나눠 맡는다:
+//   창·컨텍스트·입력·시간  → platform/platform.h (platform_init,
+//                            platform_should_close, platform_begin_frame/
+//                            platform_end_frame, platform_key_* / PKEY_*)
+//   2D 드로잉·텍스트       → renderer/renderer.h (renderer_begin/renderer_end,
+//                            draw_rect, draw_rect_rounded, draw_text, measure_text)
+//   오디오                 → audio/ 모듈 (루프 재생, per-frame 업데이트 불필요)
+//   포맷 문자열·로그       → snprintf 로컬 버퍼, fprintf(stderr, ...)
 //   WHITE, GRAY, GREEN, YELLOW, RED, RAYWHITE → platform.h 의 동명 상수
 //   Vector2                 → float x, y 직접 사용
 
@@ -69,8 +58,8 @@
 #define TETRIS_DEFAULT_META_URL ""
 #endif
 
-// TextFormat 대체: snprintf 로 포맷 문자열을 임시 버퍼에 쓰고 반환.
-// raylib의 TextFormat은 정적 버퍼를 쓰므로 중첩 호출에 주의.
+// 포맷 문자열 헬퍼: snprintf 로 임시 버퍼에 쓰고 반환.
+// 정적 버퍼를 쓰므로 중첩 호출에 주의.
 static const char* fmt_buf(const char* fmt, ...)
 {
     static char buf[512];
@@ -490,8 +479,8 @@ static ImageHandle load_configured_image(
 // 키보드 입력 → 비트마스크 (core/input.h 의 INPUT_* 상수)
 //
 // platform_key_pressed()는 "이번 프레임에 처음 눌림"을 감지하는 엣지 트리거.
-// frame pacing 없이 FPS가 수천이면 60Hz 틱 사이에 수십 프레임이 지나가므로,
-// 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
+// frame pacing 을 꺼도 렌더 루프는 240fps 상한까지 돌므로 60Hz 틱 사이에
+// 여러 프레임이 지나가고, 눌린 프레임과 틱 프레임이 어긋나면 입력이 소실된다.
 // → 매 프레임 AccumulateInput()으로 엣지 입력을 누적하고,
 //   틱에서 ConsumeInput()으로 소비 + held 키(DOWN/LEFT/RIGHT)를 합산한다.
 //   좌우 held 반복은 DAS/ARR로 속도를 제한한다.
@@ -663,101 +652,12 @@ enum class GameOverState {
 
 int main(int argc, char** argv)
 {
-    if (!net::net_init()) {
-        fprintf(stderr, "Failed to initialize networking\n");
-        return 1;
-    }
-
-    // ── 플랫폼 + 렌더러 초기화 ─────────────────────────────────────────────
-    platform_init(720, 640, "Entris");
-    renderer_init(720, 640);
-    renderer_load_font("Font/NanumGothic.ttf");
-
-    // ── settings.cfg 경로 결정 ────────────────────────────────────────────────
-    //   정식 위치는 쓰기 가능한 user-data 디렉터리(<user-data>/Tetris/settings.cfg).
-    //   macOS .app 번들의 cwd(Resources)는 읽기전용이라 거기 저장하면 조용히
-    //   실패한다. HOME/APPDATA 가 없으면 실행 디렉터리 "settings.cfg" 로 폴백.
-    //   기존 cwd 파일이 있고 user-data 에 아직 없으면 1회 마이그레이션한다.
-    std::string settingsPath = meta::client::settings_file_path();
-    if (settingsPath.empty()) {
-        settingsPath = "settings.cfg";
-    } else {
-        std::error_code ec;
-        if (!std::filesystem::exists(settingsPath, ec) &&
-            std::filesystem::exists("settings.cfg", ec)) {
-            // 레거시 cwd 설정을 user-data 로 옮긴다 (쓰기 실패해도 무방 — 아래
-            // 로드는 cwd 도 시도하지 않지만, 옮기기 성공 시 다음부터 정식 경로 사용).
-            std::filesystem::create_directories(
-                std::filesystem::path(settingsPath).parent_path(), ec);
-            save_settings(settingsPath.c_str(), load_settings("settings.cfg"));
-        }
-    }
-
-    // ── 사용자 설정 로드 (렌더/오디오 전용) ───────────────────────────────────
-    //   오디오 토글 플래그를 미리 세팅한다. 실제 audio_init 은 Game 생성자에서
-    //   호출되며, 그 시점의 첫 audio_play_music/sound 가 이 플래그를 존중한다.
-    //   shake 플래그는 트리거 시점(apply_fx)에서 읽는다.
-    g_settings = load_settings(settingsPath.c_str());
-    // 오디오: 볼륨 슬라이더가 토글을 대체. 0 == 음소거. enabled 도 같이 세팅해
-    // off→on 복원 경로(audio_set_music_enabled)와 일관되게 유지한다.
-    audio_set_music_enabled(g_settings.bgmVol > 0);
-    audio_set_sfx_enabled(g_settings.sfxVol > 0);
-    audio_set_music_volume(g_settings.bgmVol / 100.0f);
-    audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
-
-    // 윈도우: 저장된 크기 프리셋 + 전체화면 + 60 FPS pacing 적용.
-    //   UI 좌표계는 항상 논리 720x640 — 창은 그 위에 얹히는 뷰포트일 뿐이다.
-    //
-    // 저장된 값을 이 모니터 기준으로 한 번 더 자른다. 큰 화면에서 저장한
-    // 설정 파일을 작은 화면에 들고 오면 창이 화면 밖으로 나가는데, 그러면
-    // 설정 화면에 들어가 되돌릴 수조차 없다.
-    if (g_settings.windowScale > max_window_scale())
-        g_settings.windowScale = max_window_scale();
-    platform_set_window_size(kWindowScaleW[g_settings.windowScale],
-                             kWindowScaleH[g_settings.windowScale]);
-    if (g_settings.fullscreen) platform_set_fullscreen(true);
-    platform_set_vsync(g_settings.vsyncOn);
-
-    // 고스트 피스 표시.
-    game_set_ghost_enabled(g_settings.ghostOn);
-
-    // 아이콘 — assets/images.cfg 에서 경로를 읽고, 누락/실패 시 기본 경로와
-    // 절차적 fallback 텍스처 순서로 복구한다.
-    //   YOU       : 로컬 플레이어 슬롯 (모든 2-보드 모드)
-    //   OPPONENT  : 상대 슬롯 (Net / CustomRoom)
-    //   BOT       : BotSingle 모드 상대 슬롯
-    const auto imageManifest = load_image_manifest("assets/images.cfg");
-    ImageHandle iconDefaultPlayer = load_configured_image(
-        imageManifest, "player_icon", "assets/icons/player.png", DefaultIconKind::Player);
-    ImageHandle iconDefaultOpponent = load_configured_image(
-        imageManifest, "opponent_icon", "assets/icons/opponent.png", DefaultIconKind::Opponent);
-    ImageHandle iconBot = load_configured_image(
-        imageManifest, "bot_icon", "assets/icons/bot.png", DefaultIconKind::Bot);
-    std::unordered_map<std::string, ImageHandle> playerIconCatalog;
-    std::vector<ImageHandle> playerIconCatalogHandles;
-    playerIconCatalog["default"] = iconDefaultPlayer;
-    for (const auto& kv : imageManifest) {
-        const std::string prefix = "icon.";
-        if (kv.first.compare(0, prefix.size(), prefix) != 0) continue;
-        std::string id = kv.first.substr(prefix.size());
-        if (id.empty() || id == "default") continue;
-        ImageHandle h = image_load(kv.second.c_str());
-        if (!h) {
-            std::fprintf(stderr, "[IMG] catalog icon '%s' failed: %s\n",
-                         id.c_str(), kv.second.c_str());
-            continue;
-        }
-        playerIconCatalog[id] = h;
-        playerIconCatalogHandles.push_back(h);
-    }
-    auto resolvePlayerIcon = [&](const std::string& id) -> ImageHandle {
-        auto it = playerIconCatalog.find(id);
-        if (it != playerIconCatalog.end()) return it->second;
-        return iconDefaultPlayer;
-    };
-    ImageHandle iconYou = iconDefaultPlayer;
-    ImageHandle iconOpponent = iconDefaultOpponent;
-
+    // ── CLI 인자 파싱 — 모든 초기화보다 앞 ──────────────────────────────────
+    //   예전에는 platform_init/renderer_init 뒤에서 파싱했기 때문에, 잘못된
+    //   인자의 return 2 경로가 창·GL 컨텍스트·WSA 를 만들어 놓은 채 아무 정리
+    //   없이 프로세스를 끝냈다. 파싱은 순수 문자열 처리라 어떤 서브시스템도
+    //   필요 없으므로 제일 앞으로 올린다 — 인자 오류는 아직 자원이 하나도
+    //   없는 시점에 끝나서 정리할 것 자체가 없다.
     bool netMode = false, isHost = false, queueMode = false;
     std::string hostIp;
     uint16_t hostPort = 7777;
@@ -846,16 +746,134 @@ int main(int argc, char** argv)
         }
     }
 
+    if (!net::net_init()) {
+        fprintf(stderr, "Failed to initialize networking\n");
+        return 1;
+    }
+
+    // ── 플랫폼 + 렌더러 초기화 ─────────────────────────────────────────────
+    //
+    // 두 단계 모두 실패할 수 있고, 실패한 채로 진행하면 게임 루프는 정상적으로
+    // 도는데 화면만 검게 남는다. GUI 프로그램이라 stderr 도 보이지 않아
+    // 사용자에게는 단서가 하나도 없다 — 여기서 이유를 띄우고 끝낸다.
+    platform_init(720, 640, "Entris");
+    if (platform_should_close()) {
+        platform_fatal_error(
+            "창을 만들지 못했거나 OpenGL 3.3 Core 컨텍스트를 얻지 못했습니다.\n"
+            "그래픽 드라이버를 최신 버전으로 업데이트한 뒤 다시 실행해 주세요.");
+        platform_shutdown();
+        net::net_shutdown();
+        return 1;
+    }
+    if (!renderer_init(720, 640)) {
+        platform_fatal_error(
+            "OpenGL 3.3 렌더러를 초기화하지 못했습니다.\n"
+            "그래픽 드라이버가 OpenGL 3.3 Core 를 지원하는지 확인해 주세요.");
+        renderer_shutdown();
+        platform_shutdown();
+        net::net_shutdown();
+        return 1;
+    }
+    renderer_load_font("Font/NanumGothic.ttf");
+
+    // ── settings.cfg 경로 결정 ────────────────────────────────────────────────
+    //   정식 위치는 쓰기 가능한 user-data 디렉터리(<user-data>/Tetris/settings.cfg).
+    //   macOS .app 번들의 cwd(Resources)는 읽기전용이라 거기 저장하면 조용히
+    //   실패한다. HOME/APPDATA 가 없으면 실행 디렉터리 "settings.cfg" 로 폴백.
+    //   기존 cwd 파일이 있고 user-data 에 아직 없으면 1회 마이그레이션한다.
+    std::string settingsPath = meta::client::settings_file_path();
+    if (settingsPath.empty()) {
+        settingsPath = "settings.cfg";
+    } else {
+        std::error_code ec;
+        if (!std::filesystem::exists(settingsPath, ec) &&
+            std::filesystem::exists("settings.cfg", ec)) {
+            // 레거시 cwd 설정을 user-data 로 옮긴다 (쓰기 실패해도 무방 — 아래
+            // 로드는 cwd 도 시도하지 않지만, 옮기기 성공 시 다음부터 정식 경로 사용).
+            std::filesystem::create_directories(
+                std::filesystem::path(settingsPath).parent_path(), ec);
+            save_settings(settingsPath.c_str(), load_settings("settings.cfg"));
+        }
+    }
+
+    // ── 사용자 설정 로드 (렌더/오디오 전용) ───────────────────────────────────
+    //   오디오 토글 플래그를 미리 세팅한다. 실제 audio_init 은 Game 생성자에서
+    //   호출되며, 그 시점의 첫 audio_play_music/sound 가 이 플래그를 존중한다.
+    //   shake 플래그는 트리거 시점(apply_fx)에서 읽는다.
+    g_settings = load_settings(settingsPath.c_str());
+    // 오디오: 볼륨 슬라이더가 토글을 대체. 0 == 음소거. enabled 도 같이 세팅해
+    // off→on 복원 경로(audio_set_music_enabled)와 일관되게 유지한다.
+    audio_set_music_enabled(g_settings.bgmVol > 0);
+    audio_set_sfx_enabled(g_settings.sfxVol > 0);
+    audio_set_music_volume(g_settings.bgmVol / 100.0f);
+    audio_set_sfx_volume(g_settings.sfxVol / 100.0f);
+
+    // 윈도우: 저장된 크기 프리셋 + 전체화면 + 60 FPS pacing 적용.
+    //   UI 좌표계는 항상 논리 720x640 — 창은 그 위에 얹히는 뷰포트일 뿐이다.
+    //
+    // 저장된 값을 이 모니터 기준으로 한 번 더 자른다. 큰 화면에서 저장한
+    // 설정 파일을 작은 화면에 들고 오면 창이 화면 밖으로 나가는데, 그러면
+    // 설정 화면에 들어가 되돌릴 수조차 없다.
+    if (g_settings.windowScale > max_window_scale())
+        g_settings.windowScale = max_window_scale();
+    platform_set_window_size(kWindowScaleW[g_settings.windowScale],
+                             kWindowScaleH[g_settings.windowScale]);
+    if (g_settings.fullscreen) platform_set_fullscreen(true);
+    platform_set_vsync(g_settings.vsyncOn);
+
+    // 고스트 피스 표시.
+    game_set_ghost_enabled(g_settings.ghostOn);
+
+    // 아이콘 — assets/images.cfg 에서 경로를 읽고, 누락/실패 시 기본 경로와
+    // 절차적 fallback 텍스처 순서로 복구한다.
+    //   YOU       : 로컬 플레이어 슬롯 (모든 2-보드 모드)
+    //   OPPONENT  : 상대 슬롯 (Net / CustomRoom)
+    //   BOT       : BotSingle 모드 상대 슬롯
+    const auto imageManifest = load_image_manifest("assets/images.cfg");
+    ImageHandle iconDefaultPlayer = load_configured_image(
+        imageManifest, "player_icon", "assets/icons/player.png", DefaultIconKind::Player);
+    ImageHandle iconDefaultOpponent = load_configured_image(
+        imageManifest, "opponent_icon", "assets/icons/opponent.png", DefaultIconKind::Opponent);
+    ImageHandle iconBot = load_configured_image(
+        imageManifest, "bot_icon", "assets/icons/bot.png", DefaultIconKind::Bot);
+    std::unordered_map<std::string, ImageHandle> playerIconCatalog;
+    std::vector<ImageHandle> playerIconCatalogHandles;
+    playerIconCatalog["default"] = iconDefaultPlayer;
+    for (const auto& kv : imageManifest) {
+        const std::string prefix = "icon.";
+        if (kv.first.compare(0, prefix.size(), prefix) != 0) continue;
+        std::string id = kv.first.substr(prefix.size());
+        if (id.empty() || id == "default") continue;
+        ImageHandle h = image_load(kv.second.c_str());
+        if (!h) {
+            std::fprintf(stderr, "[IMG] catalog icon '%s' failed: %s\n",
+                         id.c_str(), kv.second.c_str());
+            continue;
+        }
+        playerIconCatalog[id] = h;
+        playerIconCatalogHandles.push_back(h);
+    }
+    auto resolvePlayerIcon = [&](const std::string& id) -> ImageHandle {
+        auto it = playerIconCatalog.find(id);
+        if (it != playerIconCatalog.end()) return it->second;
+        return iconDefaultPlayer;
+    };
+    ImageHandle iconYou = iconDefaultPlayer;
+    ImageHandle iconOpponent = iconDefaultOpponent;
+
     // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
-    //   metaUrl 이 설정된 경우에만 활성화. 실패 시 unranked 모드로 폴백하고
-    //   메뉴에 "ranking offline" 배너를 노출.
+    //   metaUrl 이 설정된 경우에만 활성화. 부트스트랩 실패는 현재 랭킹 정보를
+    //   읽지 못한 상태이지, 반드시 unranked relay 로 전환됐다는 뜻은 아니다.
+    //   네트워크 장애 때는 저장 토큰을 유지하고 계속 relay 입장에 보낸다.
+    //   ranked relay 는 자신의 meta 연결 또는 성공 인증 캐시로 별도 판정하며,
+    //   둘 다 없으면 입장을 거부한다.
     std::unique_ptr<meta::client::MetaClient> metaClient;
     std::string authToken;
     int    myElo       = 0;   // RP (0 시작 스케일 — meta/elo.h)
     int    myBp        = 0;
     int    myXp        = 0;   // 누적 경험치 (레벨은 meta/levels.h 로 유도)
     std::string mySelectedIconId = "default";
-    bool   metaOnline  = false;  // guest 부트스트랩이 성공했는지
+    bool   metaOnline  = false;  // 이 실행에서 guest/verify 응답을 받았는지
     // 랭크 매치 후 메뉴 복귀 시 1회 메타 갱신 필요 표시. MATCH_RESULT 프레임은
     // elo_after 만 싣고 bp/xp 는 없으므로(net/session.h), 메뉴의 Lv/BP/RP 표기를
     // 권위 있는 값으로 맞추려면 verify_token 으로 다시 읽어야 한다.
@@ -879,7 +897,7 @@ int main(int argc, char** argv)
                               << " icon=" << mySelectedIconId << "\n";
                     metaOnline = true;
                 } else {
-                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — unranked mode\n", why);
+                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — ranking offline\n", why);
                 }
             };
 
@@ -906,8 +924,11 @@ int main(int argc, char** argv)
                     authToken.clear();
                     bootstrap_new_guest("token unknown");
                 } else {
-                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, unranked\n");
-                    // 파일은 유지 — 다음 실행에 재시도.
+                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, ranking offline\n");
+                    // 파일과 authToken 은 유지한다. 다음 실행에 verify 를 재시도하고,
+                    // 현재 실행에서도 relay 에는 이 토큰을 보낸다. relay 쪽 meta와
+                    // 인증 캐시도 쓸 수 없다면 ranked 입장은 실패한다. unranked
+                    // 플레이에는 meta 없이 기동한 relay 가 따로 필요하다.
                 }
             }
         }
@@ -929,6 +950,11 @@ int main(int argc, char** argv)
     std::string connectText;
     std::string connectErrorMsg;
     bool connectError = false;
+    // 메뉴에서 QueueJoin 이 기동 자체를 거부(즉시 false — 이전 세션 스레드가
+    // 아직 정리 중인 경우 등)했을 때 켠다. session.hasFailed() 는 세션이 기동한
+    // "뒤"의 실패만 알리므로, 이 경우를 그냥 두면 버튼을 눌러도 아무 일도 없는
+    // 무반응이 된다 — 대기 화면의 기존 실패 카드를 재사용해 이유를 보여준다.
+    bool queueJoinStartFailed = false;
 
     // Section D — 커스텀 룸 클라이언트 UI 상태.
     std::string     roomRelayHost;              // RoomRelay 입력 후 저장
@@ -951,23 +977,40 @@ int main(int argc, char** argv)
     std::deque<ChatLine> chatHistory;
 
     if (app == AppMode::Net) {
+        bool sessionStartOk = true;   // 실패 시 아래에서 공통 정리 후 종료
         if (queueMode) {
             // 비동기 큐잉 — 즉시 리턴, 매칭 대기 중에도 렌더 루프는 계속 돈다.
             // isReady() 가 true 가 되면 seed/role 이 session.params() 에 채워져 있다.
             if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
-                fprintf(stderr, "Queue join failed to start\n"); return 1;
+                fprintf(stderr, "Queue join failed to start\n"); sessionStartOk = false;
             }
         } else if (isHost) {
             sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + 0xC0FFEEULL;
             net::SeedParams sp{sessionSeed, startDelay, inputDelay, net::Role::Host};
             sp.local_icon_id = mySelectedIconId;
             if (!session.Host(hostPort, sp)) {
-                fprintf(stderr, "Host failed\n"); return 1;
+                fprintf(stderr, "Host failed\n"); sessionStartOk = false;
             }
         } else {
             if (!session.Connect(hostIp, hostPort)) {
-                fprintf(stderr, "Connect failed\n"); return 1;
+                fprintf(stderr, "Connect failed\n"); sessionStartOk = false;
             }
+        }
+        if (!sessionStartOk) {
+            // 세션 기동 실패도 초기화 실패 경로와 같은 순서로 정리한다. 예전엔
+            // 그냥 return 1 이라 GL/창/WSA 정리가 전부 누락됐다. 이 시점엔
+            // 아이콘 텍스처까지 이미 로드돼 있으므로, 파일 하단의 정상 종료와
+            // 동일하게 image_unload → renderer_shutdown → platform_shutdown →
+            // net_shutdown 순서를 지킨다 (GL 객체는 컨텍스트가 살아 있을 때만
+            // 지울 수 있다).
+            for (ImageHandle h : playerIconCatalogHandles) image_unload(h);
+            image_unload(iconDefaultPlayer);
+            image_unload(iconDefaultOpponent);
+            image_unload(iconBot);
+            renderer_shutdown();
+            platform_shutdown();
+            net::net_shutdown();
+            return 1;
         }
     }
 
@@ -1164,8 +1207,12 @@ int main(int argc, char** argv)
 
     float accumulator = 0.0f;
 
+    // 메뉴 Quit 요청 플래그. return 으로 즉시 끝내지 않고 메인 루프를 빠져나가
+    // 파일 하단의 공통 정리 경로를 타기 위한 것 (MenuAction::Quit 참고).
+    bool quitRequested = false;
+
     // ── 메인 루프 ───────────────────────────────────────────────────────────
-    while (!platform_should_close())
+    while (!quitRequested && !platform_should_close())
     {
         // 1) 입력 처리 + 델타타임
         float deltaTime = platform_begin_frame();
@@ -1182,6 +1229,11 @@ int main(int argc, char** argv)
             // 수신 드레인 — 여러 줄이 쌓여도 한 프레임에 모두 흡수.
             std::string incoming;
             while (session.PullChat(incoming)) {
+                // 수신 클램프 — 우리 클라이언트는 송신 전에 kChatMaxChars 로
+                // 자르지만, 프로토콜상 CHAT 프레임은 페이로드 한도(4KB) 까지
+                // 올 수 있다. 조작 클라이언트가 초장문을 보내면 오버레이가
+                // 화면 밖까지 그려지므로 표시 전에 같은 한도로 자른다.
+                if (incoming.size() > kChatMaxChars) incoming.resize(kChatMaxChars);
                 chatHistory.push_back({"Opponent", std::move(incoming), 0.0f});
                 while (chatHistory.size() > kChatHistoryMax) chatHistory.pop_front();
             }
@@ -1526,8 +1578,9 @@ int main(int argc, char** argv)
         }
 
         // 3) 렌더링
-        // Section I: shake 업데이트 (2개 독립 상태). 뷰 오프셋은 보드별 드로우
-        // 직전에 개별 적용하고, UI/오버레이 그릴 땐 0 으로 리셋.
+        // Section I: shake 업데이트. 각 보드는 독립 ShakeState를 가지며, 해당
+        // 보드를 그리기 직전에만 오프셋을 적용한다. UI/오버레이로 넘어갈 때
+        // 0으로 되돌려 가비지를 받은 보드만 흔들리게 한다.
         shake_update(shakeLeft,  deltaTime);
         shake_update(shakeRight, deltaTime);
         if (coLocal.timeLeft  > 0.0f) coLocal.timeLeft  -= deltaTime;
@@ -1569,57 +1622,79 @@ int main(int argc, char** argv)
             draw_rect(200, 152, 320, 2, {45, 52, 90, 140});   // 타이틀 아래 구분선
 
             constexpr Color DISABLED = {70, 70, 70, 255};
-            const char* items[] = {
-                "Single Play",
-                "Single vs Bot",
-                "Matchmaking Multi",
-                "Custom Room Multi",
-                "Customize",
-                "Settings",
-                "Quit",
+            enum class MenuAction {
+                Single, BotSelect, Matchmaking, CustomRoom,
+                Customize, Settings, Quit,
             };
-            constexpr int kMenuCount = 7;
+            struct MenuItem {
+                const char* label;
+                MenuAction action;
+            };
+            constexpr MenuItem items[] = {
+                {"Single Play",       MenuAction::Single},
+                {"Single vs Bot",     MenuAction::BotSelect},
+                {"Matchmaking Multi", MenuAction::Matchmaking},
+                {"Custom Room Multi", MenuAction::CustomRoom},
+                {"Customize",         MenuAction::Customize},
+                {"Settings",          MenuAction::Settings},
+                {"Quit",              MenuAction::Quit},
+            };
+            constexpr int kMenuCount =
+                static_cast<int>(sizeof(items) / sizeof(items[0]));
 
-            // 버튼 레이아웃 — 중앙 정렬. 7개가 ranking 표시줄(y=540) 위에
-            // 들어가도록 높이 42 / 간격 8 로 압축.
+            // 메뉴 순서는 표시용 배열 한 곳에서만 정한다. label 과 action 을 함께
+            // 묶어 두면 항목을 삽입해도 아래 dispatch 가 숫자 index 와 어긋나지 않는다.
+            // 버튼은 ranking 표시줄 위의 고정 영역에 들어가도록 압축 배치한다.
             const int bw = 300;
             const int bh = 42;
             const int bgap = 8;
             const int bx = (720 - bw) / 2;
             const int byStart = 190;
+            // 항목을 추가하면 버튼 열이 아래 랭킹 표시줄(y=540)과 겹칠 수 있다.
+            // 겹침을 런타임에 눈으로 발견하는 대신 컴파일 타임에 잡는다 —
+            // items[] 에 항목을 넣으면 kMenuCount 가 자동으로 늘어나 이 검증에
+            // 걸리므로, 높이/간격을 줄이거나 시작 y 를 올려야 컴파일이 된다.
+            static_assert(byStart + kMenuCount * (bh + bgap) <= 540,
+                          "menu buttons overlap the ranking line at y=540 - "
+                          "shrink bh/bgap or raise byStart");
 
             // 키보드 네비게이션 (기존 동작 유지).
             if (platform_key_pressed(PKEY_DOWN)) menuIndex = (menuIndex + 1) % kMenuCount;
             if (platform_key_pressed(PKEY_UP))   menuIndex = (menuIndex + kMenuCount - 1) % kMenuCount;
 
             int activated = -1;  // 이번 프레임 활성화된 항목(-1 = 없음)
+            int botItemIndex = -1;
 
             for (int i = 0; i < kMenuCount; ++i)
             {
                 const int by = byStart + i * (bh + bgap);
-                const bool disabled = (i == 1 && !botAvailable);
+                const bool isBotItem = items[i].action == MenuAction::BotSelect;
+                if (isBotItem) botItemIndex = i;
+                const bool disabled = isBotItem && !botAvailable;
                 // Disabled 항목은 버튼 그리되 클릭 반환 무시(+ 라벨 회색).
                 if (disabled) {
                     draw_rect_rounded(bx, by, bw, bh, 0.25f, {25, 30, 45, 255});
-                    const int tw = measure_text(items[i], 24);
-                    draw_text(items[i], bx + (bw - tw) / 2, by + (bh - 24) / 2,
+                    const int tw = measure_text(items[i].label, 24);
+                    draw_text(items[i].label, bx + (bw - tw) / 2, by + (bh - 24) / 2,
                               24, DISABLED);
                     continue;
                 }
-                bool clicked = gui_button_highlighted(bx, by, bw, bh, items[i],
+                bool clicked = gui_button_highlighted(bx, by, bw, bh, items[i].label,
                                                       (i == menuIndex), 24);
                 if (clicked) activated = i;
             }
 
             // 키보드 Enter/Space 로도 현재 강조된 항목 활성화.
             if (platform_key_pressed(PKEY_ENTER) || platform_key_pressed(PKEY_SPACE)) {
-                if (!(menuIndex == 1 && !botAvailable)) activated = menuIndex;
+                const bool disabled =
+                    items[menuIndex].action == MenuAction::BotSelect && !botAvailable;
+                if (!disabled) activated = menuIndex;
             }
 
-            if (!botAvailable) {
+            if (!botAvailable && botItemIndex >= 0) {
                 // Bot 모드가 disabled 임을 안내.
                 draw_text("(no bot roster entries found)", 250,
-                          byStart + 1 * (bh + bgap) + bh + 2, 12, DISABLED);
+                          byStart + botItemIndex * (bh + bgap) + bh + 2, 12, DISABLED);
             }
 
             // Section K — 메타/랭킹 상태 표시.
@@ -1627,8 +1702,8 @@ int main(int argc, char** argv)
                 draw_text("ranking: disabled (--meta https://host to enable)",
                           140, 540, 12, DISABLED);
             } else if (!metaOnline) {
-                draw_text("ranking server offline - playing unranked",
-                          200, 540, 12, RED);
+                draw_text("ranking: offline (ranked queue may be unavailable)",
+                          175, 540, 12, RED);
             } else {
                 char eloBuf[64];
                 std::snprintf(eloBuf, sizeof(eloBuf),
@@ -1641,44 +1716,62 @@ int main(int argc, char** argv)
                       180, 570, 12, DISABLED);
 
             if (activated >= 0) {
-                if (activated == 0) {
+                switch (items[activated].action) {
+                case MenuAction::Single:
                     app = AppMode::Single;
                     gameSingle = std::make_unique<Game>(sessionSeed);
-                } else if (activated == 1) {
+                    break;
+                case MenuAction::BotSelect:
                     // 봇 선택 화면으로. 실제 BotSingle 진입은 거기서 모델 로드 성공 후.
                     app = AppMode::BotSelect;
                     botSelectIndex = 0;
                     botSelectError.clear();
-                } else if (activated == 2) {
+                    break;
+                case MenuAction::Matchmaking:
                     queueHost = relayHost; queuePort = relayPort;
                     // Section K — meta 연동 시 토큰 전달. relay 가 --meta 로 띄워졌으면
                     // 토큰 없이는 verify 실패로 즉시 close 된다.
-                    if (session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
-                        netMode = true; queueMode = true; isHost = false;
-                        app = AppMode::Net;
+                    queueJoinStartFailed = false;
+                    if (!session.QueueJoin(queueHost, queuePort, startDelay, inputDelay, authToken)) {
+                        // 즉시 false = 큐 기동 거부 (이전 세션 스레드 정리 중 등).
+                        // 예전엔 여기서 아무것도 안 해서 클릭이 씹힌 것처럼
+                        // 보였다 — 같은 대기 화면으로 넘어가되 플래그를 세워
+                        // 기존 Matchmaking Failed 카드를 재사용해 알려준다.
+                        // [Q] 복귀 시 session.Close() 가 잔여 스레드를 정리하므로
+                        // 재시도가 가능해진다.
+                        queueJoinStartFailed = true;
                     }
-                } else if (activated == 3) {
+                    netMode = true; queueMode = true; isHost = false;
+                    app = AppMode::Net;
+                    break;
+                case MenuAction::CustomRoom:
                     roomRelayHost = relayHost; roomRelayPort = relayPort;
                     app = AppMode::RoomLobby;
                     roomStage = RoomLobbyStage::Choose;
                     roomCodeInput.clear();
                     roomErrorMsg.clear();
-                } else if (activated == 4) {
+                    break;
+                case MenuAction::Customize:
                     app = AppMode::Customize;
                     shopFetchTried = false;   // 진입마다 카탈로그 재요청
                     shopIndex = 0;
                     shopStatus.clear();
                     shopConfirmId.clear();
-                } else if (activated == 5) {
+                    break;
+                case MenuAction::Settings:
                     app = AppMode::Settings;
                     settingsIndex = 0;
-                } else {
-                    // 메뉴의 Quit. 아래 정상 종료 경로와 같은 순서를 지킨다 —
-                    // GL 객체는 컨텍스트가 살아 있을 때만 지울 수 있으므로
-                    // renderer_shutdown 이 platform_shutdown 보다 먼저다.
-                    renderer_shutdown();
-                    platform_shutdown();
-                    return 0;
+                    break;
+                case MenuAction::Quit:
+                    // 메뉴의 Quit. 예전에는 여기서 renderer/platform 만 내리고
+                    // 바로 return 0 해서, 하단 정리 경로의 image_unload 와
+                    // net_shutdown(WSACleanup) 이 통째로 생략됐다 — "같은 순서를
+                    // 지킨다" 는 약속과 실제 동작이 달랐다. 이제 종료 플래그로
+                    // 메인 루프만 빠져나가 파일 하단의 공통 정리 경로
+                    // (image_unload → renderer_shutdown → platform_shutdown →
+                    // net_shutdown)를 그대로 타게 한다.
+                    quitRequested = true;
+                    break;
                 }
             }
         }
@@ -2733,18 +2826,19 @@ int main(int argc, char** argv)
                 draw_popup_panel(95, 235, 530, 225);
                 gui_text_center(360, 262, "GAME OVER", 60, WHITE);
                 // Section K — RP 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
-                // RP 변화 없음이라는 사실만 보장 — 구체적 이유는 세 가지:
-                //   (1) meta 미연동 / meta POST 실패 → "ranking offline".
+                // RP 변화 없음이라는 사실만 보장한다. 가능한 이유의 예:
+                //   (1) meta POST 실패 → "ranking offline".
                 //   (2) 교차검증 실패 (양측 summary 불일치) → winner=null 로 DB 에는
-                //       기록되지만 RP 미반영 → "unranked (validation failed)".
-                //   (3) unranked 매치 (둘 중 하나라도 player_id==0) → 릴레이가 summary 투명 포워딩.
-                // MATCH_RESULT 프레임 자체에는 이유가 실리지 않으므로 UI 는 "RP 변동 없음"
-                // 의 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
+                //       기록되지만 RP 미반영 → "validation failed".
+                //   (3) 바닥 RP 사용자의 패배처럼 정상 계산 결과가 0인 경우.
+                // unranked relay 는 MATCH_RESULT 자체를 보내지 않으므로 이 분기에
+                // 도달하지 않는다. 프레임에는 원인 코드가 없으므로 UI 는 "RP 변동 없음"
+                // 이라는 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
                 if (haveMatchResult) {
                     if (lastMatchResult.delta == 0 &&
                         lastMatchResult.elo_before == lastMatchResult.elo_after) {
                         gui_text_center(360, 343,
-                                        "no RP change (offline / unranked / invalid)",
+                                        "no RP change (offline / invalid / RP floor)",
                                         14, GRAY);
                     } else {
                         char buf[64];
@@ -2921,11 +3015,17 @@ int main(int argc, char** argv)
 
             if (queueMode)
             {
-                if (session.hasFailed()) {
+                if (session.hasFailed() || queueJoinStartFailed) {
                     gui_text_center(360, 190, "Matchmaking Failed", 28, RED);
-                    const char* sub = session.isQueueMatched()
-                        ? "opponent declined or timed out"
-                        : "relay unreachable or timeout";
+                    // 실패 사유는 프레임에 실려 오지 않는다. relay 접속 불가뿐
+                    // 아니라 토큰 거절(ranked 인증 실패)로 relay 가 연결을 끊은
+                    // 경우도 이 경로로 오므로, 네트워크 문제로 단정하던 문구
+                    // ("relay unreachable or timeout")를 중립적으로 바꿨다.
+                    const char* sub = queueJoinStartFailed
+                        ? "could not start queueing - try again"
+                        : (session.isQueueMatched()
+                               ? "opponent declined or timed out"
+                               : "rejected by relay or unreachable");
                     gui_text_center(360, 232, sub, 16, GRAY);
                     gui_text_center(360, 400, "[Q] Back to Menu", 20, YELLOW);
                 } else if (!session.isConnected()) {
@@ -3019,14 +3119,16 @@ int main(int argc, char** argv)
             }
             if (platform_key_pressed(PKEY_Q))
             {
-                if (queueMode) {
+                if (queueMode && !queueJoinStartFailed) {
                     // 매칭 성사 이전: QueueCancel (relay 에 QUEUE_CANCEL 통보).
                     // 수락 로비 중: QueueDecline (READY(0) 통보 → 상대도 취소 알림).
+                    // (큐 기동 자체가 거부된 경우엔 취소를 통보할 큐 세션이 없다.)
                     if (session.isQueueMatched()) session.QueueDecline();
                     else                           session.QueueCancel();
                 }
                 session.Close();
                 queueMode = false; netMode = false;
+                queueJoinStartFailed = false;
                 localIpDone = false; publicIpLaunched = false;
                 cachedLocalIP.clear(); cachedPublicIP.clear();
                 app = AppMode::Menu;
@@ -3159,9 +3261,14 @@ int main(int argc, char** argv)
             // 키보드: Y = Yes, N = No, Enter = Yes (관성).
             // Escape 는 배정하지 않는다 — 다른 화면에서 전부 '뒤로가기'로
             // 쓰고 있어서, 여기서만 '예'로 동작하면 일관성이 깨진다.
-            if (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER))
+            // 채팅 입력 중(chatComposing)에는 키를 모달로 보내지 않는다 —
+            // 채팅에 'y' 를 치다 그대로 '예' 가 눌려 즉시 몰수패가 되는 입력
+            // 충돌. Enter 도 채팅 송신과 겹치므로 함께 무시한다 (마우스 클릭은
+            // 그대로 동작).
+            if (!chatComposing &&
+                (platform_key_pressed(PKEY_Y) || platform_key_pressed(PKEY_ENTER)))
                 clickYes = true;
-            if (platform_key_pressed(PKEY_N))
+            if (!chatComposing && platform_key_pressed(PKEY_N))
                 clickNo = true;
 
             if (clickNo) {

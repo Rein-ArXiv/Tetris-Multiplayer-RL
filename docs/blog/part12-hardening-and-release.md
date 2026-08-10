@@ -1,8 +1,7 @@
 # Part 12: 검수와 배포 안정화 — 보안 기본값과 릴리스
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 12**
 >
-> [시리즈 목차](./README.md) · [이전: Part 11 — 설정과 옵션](./part11-settings-and-options.md) · **Part 12** · [다음: Part 13 — 구조와 확장 레퍼런스](./part13-structure-and-build-reference.md)
 
 ---
 
@@ -11,7 +10,7 @@
 - **선행 상태:** Part 0~11 의 모든 경로. 특히 `net/socket.{h,cpp}`, `net/session.cpp`, `server/main.cpp`·`relay.cpp`·`worker_group.h`, `meta/main.cpp`·`api_server.cpp`· `http_client.cpp`, 그리고 루트 `CMakeLists.txt` 의 옵션 집합.
 - **이번 Part의 파일:** 새 소스는 없다. 손대는 것은 보안 경계의 기존 파일과 `scripts/release_linux.sh`, `scripts/release_macos.sh`, `scripts/release_win.ps1`, `scripts/release_server_linux.sh`, `scripts/backup_meta_db.sh`, `deploy/systemd/tetris-relay.service`, `deploy/systemd/tetris-meta.service`, `deploy/systemd/tetris-relay.env.example`, `deploy/systemd/tetris-meta.env.example`, `deploy/Caddyfile.example`, `deploy/cloudflared/config.yml.example`.
 - **연결점:** 새 기능을 더하는 장이 아니다. Part 6~7 의 소켓/세션 계층, Part 10 의 meta 계층, Part 11 의 사용자 데이터 경로가 실패했을 때 무엇이 일어나는지를 닫는다.
-- **완료 게이트:** 이 장의 `## 12. 전체 회귀 검증` 7단계를 전부 통과하고, `## 수동 테스트` 의 5개 운영 시나리오를 눈으로 확인한다. 구체적으로는 전체 빌드, `sim_hash_dump` 골든 해시 diff, `worker_group_test`, torch 없이 도는 pytest 21개, meta+relay 통합 pytest 22개, 포트 7788 relay/room smoke 6개, 릴리스 스크립트 문법 검사다.
+- **완료 게이트:** 이 장의 `전체 회귀 검증`과 `수동 테스트`를 통과한다. 전체 빌드, `sim_hash_dump` 골든 해시 diff, `worker_group_test`, 기본 Python 계약, meta+relay 통합, 포트 7788 relay/room smoke, 릴리스 스크립트 문법을 각각 확인한다. 완료 여부는 고정된 테스트 개수가 아니라 지정한 계약의 실패·의도하지 않은 skip 유무로 판정한다.
 
 ## 1. 들어가며 — 이 장의 범위
 
@@ -26,8 +25,8 @@ Part 11 까지 기능은 다 들어왔다. guest 발급, 토큰 인증, RP/XP/BP
 | 문서 | 역할 |
 |---|---|
 | 이 장 (`docs/blog/part12-hardening-and-release.md`) | **왜** 이런 기본값인가, 그리고 릴리스 전에 **무엇을 돌려야** 하는가 |
-| `DEPLOY.md` (482줄) | 기기별 빌드·실행 매트릭스, CMake 옵션 표, 번들 스크립트 사용법의 정본 |
-| `docs/public-server-deployment.md` (397줄) | Mac mini meta + VPS relay + Cloudflare Tunnel 구성의 단계별 절차 정본 |
+| [`part13-structure-and-build-reference.md`](./part13-structure-and-build-reference.md) | 완성 구조, 플랫폼별 빌드 매트릭스, CMake 옵션 표, 번들 스크립트 사용법의 정본 |
+| `docs/public-server-deployment.md` | 소형 리눅스 relay + 저전력 Android(Termux) meta 시험 운영, VPS/Tunnel 확장, standby 전환 절차의 정본 |
 
 즉 이 장은 **원칙과 회귀**를 맡고, 실제 배포 절차의 명령 나열은 저 두 문서를 따른다. 이 장에 나오는 설정 파일은 전부 `deploy/` 의 실제 템플릿이므로 두 문서와 같은 파일을 가리킨다.
 
@@ -66,47 +65,56 @@ std::string gen_token_naive()
 
 표준은 `std::random_device` 가 비결정적 엔트로피원이라고 *권장* 할 뿐, **보장하지 않는다.** 악명 높은 사례가 구형 MinGW 의 libstdc++ 로, `random_device` 가 매 실행마다 같은 시퀀스를 뱉는 결정적 PRNG 로 구현돼 있었다. 토큰은 사실상 비밀번호이므로, 결정적 토큰은 곧 누구나 예측 가능한 비밀번호다. "대부분의 플랫폼에서 OS CSPRNG 를 래핑하므로 충분히 강하다" 는 가정은 *대부분* 이라는 말 때문에 깨진다.
 
-그래서 실제 `meta/api_server.cpp` 는 OS 엔트로피를 **명시적으로** 읽는다. POSIX 에서는 `/dev/urandom` 을 직접 열고, 실패할 때만 `random_device` 로 폴백한다.
+그래서 실제 `meta/api_server.cpp` 는 OS 엔트로피를 **명시적으로** 읽는다. Windows는 `BCryptGenRandom`, POSIX/Termux는 `/dev/urandom`을 사용한다. OS CSPRNG가 실패하면 약한 난수로 폴백하지 않고 guest 발급을 실패-폐쇄한다.
 
-**현재 소스 발췌 — `meta/api_server.cpp:29-52`**
+**현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-// [보안] OS CSPRNG 에서 n 바이트의 무작위 데이터를 채운다.
-//   std::random_device 는 대부분의 타깃에서 OS CSPRNG 를 래핑하지만 일부
-//   구현(예: 구형 MinGW)에서는 결정적일 수 있다. 토큰/세션 비밀에는 OS
-//   엔트로피를 명시적으로 읽고, 실패 시에만 random_device 로 폴백한다.
-void fill_random(unsigned char* out, size_t n)
+// 인증 토큰은 플랫폼 CSPRNG에서만 만든다. 엔트로피 소스가 실패했을 때
+// random_device나 시간값으로 폴백하면 "서비스 가용" 상태처럼 보이면서 예측 가능한
+// 토큰을 발급할 수 있다. 이 경우 guest 요청 자체를 실패-폐쇄하는 편이 안전하다.
+bool fill_random(unsigned char* out, size_t n)
 {
-#ifndef _WIN32
-    // POSIX: /dev/urandom 에서 직접 읽는다(글리브C random_device 와 동일 소스지만 명시적).
-    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
-        size_t got = std::fread(out, 1, n, f);
-        std::fclose(f);
-        if (got == n) return;
+#ifdef _WIN32
+    if (n > static_cast<size_t>(std::numeric_limits<ULONG>::max())) return false;
+    return BCryptGenRandom(nullptr, out, static_cast<ULONG>(n),
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#else
+    // Linux와 macOS에서 공통으로 쓸 수 있는 커널 난수 장치를 직접 읽는다.
+    // read는 요청한 길이보다 짧게 성공할 수 있고 signal에 끊길 수도 있으므로
+    // 한 번의 호출 결과를 토큰 전체로 착각하지 않는다.
+    int flags = O_RDONLY;
+    #ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+    #endif
+    const int fd = ::open("/dev/urandom", flags);
+    if (fd < 0) return false;
+    size_t done = 0;
+    while (done < n) {
+        const ssize_t got = ::read(fd, out + done, n - done);
+        if (got > 0) {
+            done += static_cast<size_t>(got);
+            continue;
+        }
+        if (got < 0 && errno == EINTR) continue;
+        break;
     }
+    ::close(fd);
+    return done == n;
 #endif
-    // 폴백(Windows 포함): random_device.
-    std::random_device rd;
-    size_t i = 0;
-    while (i < n) {
-        uint32_t x = rd();
-        size_t take = (n - i < 4) ? (n - i) : 4;
-        std::memcpy(out + i, &x, take);
-        i += take;
-    }
 }
 ```
 
 `gen_token` 은 이 16 바이트를 hex 로 인코딩만 한다.
 
-**현재 소스 발췌 — `meta/api_server.cpp:54-67`**
+**현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
 // 32 hex chars 무작위 토큰 (16 바이트 = 128비트 엔트로피).
-std::string gen_token()
+std::optional<std::string> gen_token()
 {
     unsigned char raw[16];
-    fill_random(raw, sizeof(raw));
+    if (!fill_random(raw, sizeof(raw))) return std::nullopt;
     static const char hex[] = "0123456789abcdef";
     char buf[33];
     for (int i = 0; i < 16; ++i) {
@@ -118,9 +126,13 @@ std::string gen_token()
 }
 ```
 
-Linux 에서 `/dev/urandom` 은 부팅 직후 엔트로피 풀이 차기 전이라도 블록되지 않고 암호학적으로 안전한 바이트를 준다(`getrandom(2)` 의 기본 동작과 같은 풀). Windows 빌드는 `_WIN32` 가드로 `/dev/urandom` 경로를 건너뛰고 `random_device` 로 가는데, MSVC 의 `random_device` 는 `BCryptGenRandom` 을 래핑하므로 안전하다. 결정적 구현이 문제인 건 어디까지나 일부 구형 MinGW 였다.
-
-폴백 경로가 `rd()` 를 raw 로 `memcpy` 하고 `std::uniform_int_distribution` 을 쓰지 않는 것도 의도적이다. 분포 어댑터는 구현마다 매핑이 달라 같은 엔진에서도 다른 값을 낸다 — 여기서는 균등 분포가 아니라 *비트* 가 필요하므로 어댑터를 거칠 이유가 없다.
+POSIX 경로는 `read` 한 번이 요청한 길이를 모두 돌려준다고 가정하지 않는다.
+부분 읽기를 누적하고 시그널로 중단된 `EINTR`만 재시도하며, 열린 난수 fd는
+자식 프로세스에 상속되지 않도록 가능한 플랫폼에서 `O_CLOEXEC`를 사용한다.
+Windows 경로는 CMake에서 `bcrypt`를 링크해 표준 라이브러리 구현과 무관하게
+시스템 CSPRNG를 직접 사용한다. 어느 쪽이든 실패하면 `POST /v1/guest`가 500
+`entropy_unavailable`을 돌려준다. 이 실패는 운영 경보 대상이지만, 예측 가능한
+계정을 발급하는 것보다 안전하다.
 
 ## 3. relay 보안 기본값 — 시작 거부
 
@@ -130,7 +142,7 @@ Part 10 의 가장 중요한 보안 경계는 `POST /v1/matches` 였다. 이 end
 
 이런 *조용한 실패* 가 가장 나쁘다. 그래서 `server/main.cpp` 는 "meta 는 켰는데 secret 이 없는" 조합을 **시작 시점에 거부** 한다.
 
-**현재 소스 발췌 — `server/main.cpp:112-130`**
+**현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
     // meta 클라이언트 (옵션). URL 미지정 시 nullptr → unranked.
@@ -157,7 +169,7 @@ Part 10 의 가장 중요한 보안 경계는 `POST /v1/matches` 였다. 이 end
 설계 포인트 세 가지.
 
 - **secret 은 두 경로로 받는다.** `main()` 진입 직후 `TETRIS_RELAY_SECRET` 환경변수를 읽어 두고, CLI 파싱에서 `--meta-secret` 이 나오면 그 값으로 덮어쓴다. 운영에서는 환경변수가 편하다 — 프로세스 목록(`ps`)에 secret 이 노출되지 않고, systemd 의 `EnvironmentFile=` 로 파일에서 주입할 수 있다(§11.1). CLI 인자는 로컬 테스트용이다.
-- **`--meta` 없이는 secret 도 불필요.** meta 연동을 안 켜면 relay 는 [Part 7](./part7-relay-server.md) 의 무상태 transparent forwarder 그대로다 — unranked 매치(player_id=0, RP 미반영)만 돌린다. 즉 "기본값은 안전" 이면서 "로컬 테스트는 마찰 없음" 을 동시에 만족한다.
+- **`--meta` 없이는 secret도 불필요.** meta 연동을 안 켜면 relay는 영속 상태와 ranked 결과 처리를 사용하지 않고 unranked 매치(`player_id=0`, RP 미반영)만 돌린다. 큐·룸·소켓 같은 실행 중 상태와 연결 제한은 그대로 유지된다. 이 경로 덕분에 로컬 테스트는 별도 계정 서버 없이 가능하다.
 - **URL 자체도 검증한다.** `MetaClient::valid()` 가 false 면 역시 종료 코드 2 다. `valid()` 가 false 가 되는 경우는 두 가지인데, 파싱 실패와 **OpenSSL 없이 빌드된 바이너리에 `https://` URL 을 준 경우**다(§10.3).
 
 빌드해서 secret 없이 띄우면 즉시 종료된다.
@@ -175,7 +187,7 @@ $ echo $?
 
 같은 "시작 시점에 거부" 원칙이 포트 파싱에도 적용된다. `atoi` 는 실패를 `0` 으로 돌려주므로 `--port abc` 가 조용히 포트 0(커널이 임의 포트 배정)으로 뜬다. 운영자는 `ss -ltn` 을 보기 전까지 모른다.
 
-**현재 소스 발췌 — `server/main.cpp:56-78`**
+**현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
 void printUsage() {
@@ -209,7 +221,7 @@ bool parsePort(const std::string& s, uint16_t& out) {
 
 relay 가 "secret 없이 meta 를 부르는 것" 을 막았다면, meta 는 대칭으로 *자기 자신* 이 무방비로 뜨는 것을 막는다. `meta/main.cpp` 는 secret 도 없고 `--allow-public-matches` 도 없으면 시작을 거부한다.
 
-**현재 소스 발췌 — `meta/main.cpp:129-135`**
+**현재 소스 발췌 — `meta/main.cpp`**
 
 ```cpp
     if (args.relay_secret.empty() && !args.allow_public_matches) {
@@ -226,9 +238,10 @@ relay 가 "secret 없이 meta 를 부르는 것" 을 막았다면, meta 는 대�
 meta 프로세스 *내부* 의 나머지 하드닝은 Part 10 에서 이미 구현·해설했으므로 여기서 코드를 다시 싣지 않고 목록으로만 회수한다.
 
 - **OS CSPRNG 토큰** — `fill_random` + `gen_token` (§2).
-- **상수 시간 secret 비교** — `X-Relay-Secret` 검증의 타이밍 사이드채널 방지 ([Part 10](./part10-meta-and-ranking.md) 의 `const_time_eq`).
+- **상수 시간 secret 비교** — `X-Relay-Secret` 검증의 타이밍 사이드채널 방지
+  (`meta/api_server.cpp`의 `ct_equal`).
 - **요청 본문 상한** — `set_payload_max_length(64 * 1024)` 로 거대 body 플러딩 차단.
-- **per-IP 레이트 리밋** — 고정 윈도우 카운터. 키 선택은 §9.2 에서 다시 본다.
+- **per-IP 레이트 리밋** — 고정 윈도우 카운터. 직접 연결은 소켓 peer IP를 키로 쓰고, 직접 peer가 loopback인 로컬 프록시 구성에서만 전달된 client IP 헤더를 신뢰한다.
 - **`find_int` 오버플로 가드** — `INT64_MAX` 초과 입력에 `std::nullopt` (§8.5).
 - **토큰 파일 0600** — guest 토큰을 비밀번호처럼 보호 (§5).
 
@@ -238,7 +251,7 @@ meta 프로세스 *내부* 의 나머지 하드닝은 Part 10 에서 이미 구�
 
 클라이언트는 guest 토큰을 한 번 발급받아 디스크에 저장하고, 재접속마다 그 파일을 읽어 같은 player 로 인식된다. 이 토큰은 곧 계정이다 — 유출되면 남이 내 RP 와 아이콘을 그대로 가져간다. 따라서 파일 권한이 중요하다.
 
-**현재 소스 발췌 — `meta/http_client.cpp:467-513`**
+**현재 소스 발췌 — `meta/http_client.cpp`**
 
 ```cpp
 bool save_token(const std::string& token)
@@ -300,7 +313,7 @@ bool save_token(const std::string& token)
 
 권한 이야기를 하려면 경로부터 정확해야 한다.
 
-**현재 소스 발췌 — `meta/http_client.cpp:405-432`**
+**현재 소스 발췌 — `meta/http_client.cpp`**
 
 ```cpp
 namespace {
@@ -357,7 +370,7 @@ relay 의 핵심 루프는 한 소켓에서 읽어 다른 소켓에 쓰는 것�
 
 해결은 시그널을 무시하는 것이다. 무시하면 `send` 는 `-1` 과 `errno=EPIPE` 를 반환하고, relay 는 그 매치만 정리하고 계속 돈다. 등록 위치가 중요하다 — `server/main.cpp` 가 아니라 `net/socket.cpp` 의 `net_init()` 안이다. 소켓을 쓰는 모든 프로세스(relay 든 game 클라이언트든)가 `net_init()` 을 거치므로, 무시 설정을 네트워킹 초기화에 묶어 두면 한 곳에서 모든 바이너리가 보호된다.
 
-**현재 소스 발췌 — `net/socket.cpp:56-72`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 네트워킹 초기화(Windows 전용)
@@ -385,47 +398,59 @@ bool net_init() {
 
 SIGINT/SIGTERM 은 `server/main.cpp` 가 등록한다. 핸들러가 하는 일은 하나뿐이다.
 
-**현재 소스 발췌 — `server/main.cpp:40-54`**
+**현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
-// 동시 연결 worker 상한 — 연결당 detached 스레드를 만들므로 상한이
-// 없으면 connect 플러딩만으로 메모리/핸들이 고갈된다. playerConnThread 는
-// 첫 프레임 대기(≤10s)와 룸 대기 동안 스레드를 점유하므로, 정상 부하(수십 명)
-// 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다.
+// Bound thread and handle use during connection setup.
 constexpr size_t kMaxConnWorkers = 256;
+constexpr size_t kMaxHandshakesPerIp = 16;
 
 void signalHandler(int /*sig*/) {
-    // async-signal-safe 하게 플래그만 세운다. listen 소켓은 논블로킹이라
-    // accept 루프가 최대 ~10ms 안에 g_running 을 보고 빠져나온다. 핸들러에서
-    // 소켓(shared_ptr) 을 건드리지 않는다 — atomic store 만 사용.
+    // The signal handler only touches an atomic flag.
     g_running.store(false);
 }
 ```
 
+상수가 둘이다. `kMaxConnWorkers`(256)는 프로세스 전체의 연결 setup 스레드 상한이다 — 연결당 detached 스레드를 만들므로 상한이 없으면 connect 플러딩만으로 메모리와 핸들이 고갈된다. `playerConnThread` 는 첫 프레임 대기(≤5초)와 룸 대기 동안 스레드를 점유하므로 정상 부하(수백 명) 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다. `kMaxHandshakesPerIp`(16)는 그 예산을 **출처별로 한 번 더 나눈** 값인데, accept 루프에서 함께 본다(아래).
+
 시그널 핸들러 안에서는 *async-signal-safe* 한 연산만 허용된다. 핸들러는 임의 시점에 다른 코드를 끊고 들어오므로 `malloc`, `mutex`, 그리고 내부에서 참조 카운트를 조작하는 `shared_ptr` 연산 등은 데드락이나 메모리 손상을 일으킬 수 있다. 가장 보수적인 POSIX 형태는 `volatile sig_atomic_t` 플래그다. 현재 코드는 일반 플랫폼에서 lock-free 로 동작하는 `std::atomic<bool>` store 만 사용하는데, 이 선택은 "핸들러에서 복잡한 정리를 하지 않는다" 는 운영 패턴의 일부로 이해해야 한다.
+
+등록은 플랫폼별로 한 곳 다르다. Windows 콘솔에는 SIGTERM 에 해당하는 신호가 사실상 없고, `CTRL_BREAK_EVENT` 를 CRT 가 `SIGBREAK` 로 전달한다. 이것까지 등록해 두어야 Windows 에서도 "핸들러가 실행될 기회 자체가 없는" `TerminateProcess` 가 아니라 우아한 종료 경로를 밟을 수 있고, Python 통합 테스트가 그 경로를 검증할 수 있다.
+
+**현재 소스 발췌 — `server/main.cpp`**
+
+```cpp
+    std::signal(SIGINT,  signalHandler);
+    std::signal(SIGTERM, signalHandler);
+#if defined(_WIN32)
+    // Windows 콘솔의 CTRL_BREAK_EVENT 는 CRT 가 SIGBREAK 로 전달한다. Python
+    // 테스트가 TerminateProcess(핸들러 실행 기회가 아예 없다) 대신
+    // CTRL_BREAK_EVENT 로 우아한 종료 경로를 검증할 수 있도록 함께 등록한다.
+    std::signal(SIGBREAK, signalHandler);
+#endif
+```
 
 핵심은 **핸들러가 listen 소켓을 닫지 않는다** 는 것이다. `tcp_close()` 는 `shared_ptr` 를 읽으므로 시그널 핸들러에서 부르면 안전하지 않다(§7). 대신 listen 소켓을 *논블로킹* 으로 만들어 두고, accept 루프가 폴링하면서 매 회 `g_running` 을 확인한다.
 
-**현재 소스 발췌 — `server/main.cpp:140-148`**
+**현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
-    g_listen_sock = net::tcp_listen(port, /*backlog=*/16);
+    g_listen_sock = net::tcp_listen(port, /*backlog=*/256);
     if (!g_listen_sock.valid()) {
         std::cerr << "tcp_listen(" << port << ") failed — port in use?\n";
         net::net_shutdown();
         return 1;
     }
-    // listen 소켓을 논블로킹으로 — 시그널 핸들러가 fd 를 닫지 않고 g_running
-    // 플래그만 세워도 accept 루프가 폴링으로 빠져나오게 한다(async-signal-safe).
+    // Nonblocking accept lets the loop observe the shutdown flag.
     net::tcp_set_nonblocking(g_listen_sock);
 ```
 
-accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓을 돌려주면) 10ms 자고 재폴링한다.
+accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓을 돌려주면) 10ms 자고 재폴링한다. 연결이 들어오면 워커에 넘기기 전에 **peer IP 별 입장 예산**을 먼저 확인한다.
 
-**현재 소스 발췌 — `server/main.cpp:193-212`**
+**현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
     // accept 루프 (논블로킹 폴링)
@@ -440,21 +465,71 @@ accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓�
             continue;
         }
         const uint32_t id = next_conn_id++;
+        std::string peerIp = net::tcp_peer_ip(client);
+        if (peerIp.empty()) {
+            // getpeername 실패 시 모든 연결이 "unknown" 단일 버킷(상한 16)을
+            // 공유하면 무관한 연결끼리 서로를 굶긴다. fd 는 이 연결이 살아있는
+            // 동안 프로세스 내에서 유일하므로 연결별 고유 키로 대신 사용한다
+            // (per-IP 상한은 못 걸지만, 실패 케이스끼리의 공멸보다 낫다).
+            peerIp = "fd:" + std::to_string(client.fd());
+        }
+        if (!ipAdmission.acquire(peerIp)) {
+            std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP handshake limit\n";
+            net::tcp_close(client);
+            continue;
+        }
         std::cout << "[relay] accept conn=" << id << "\n";
-        if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr]() mutable {
+        if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr,
+                                 &ipAdmission, peerIp]() mutable {
+            struct Release {
+                IpAdmission& owner; const std::string& ip;
+                ~Release() { owner.release(ip); }
+            } release{ipAdmission, peerIp};
             relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
         })) {
+            ipAdmission.release(peerIp);
             std::cerr << "[relay] rejecting conn=" << id
                       << ": connection worker unavailable\n";
         }
     }
 ```
 
+`IpAdmission` 은 IP → 진행 중 setup 수의 맵 하나다.
+
+**현재 소스 발췌 — `server/main.cpp`**
+
+```cpp
+class IpAdmission {
+public:
+    bool acquire(const std::string& ip) {
+        std::lock_guard<std::mutex> lk(mu_);
+        size_t& n = active_[ip.empty() ? "unknown" : ip];
+        if (n >= kMaxHandshakesPerIp) return false;
+        ++n;
+        return true;
+    }
+    void release(const std::string& ip) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = active_.find(ip.empty() ? "unknown" : ip);
+        if (it == active_.end()) return;
+        if (--it->second == 0) active_.erase(it);
+    }
+private:
+    std::mutex mu_;
+    std::unordered_map<std::string, size_t> active_;
+};
+```
+
+전역 상한(`kMaxConnWorkers`=256)과 IP별 상한(`kMaxHandshakesPerIp`=16)은 지키는 대상이 다르다. 전역 상한은 **프로세스**를 지킨다 — 스레드·핸들이 무한정 늘어나 서버 자체가 죽는 것을 막는다. 그러나 전역 상한만 있으면 한 IP 가 연결 256개를 먼저 채워 다른 모든 사용자를 굶길 수 있다. IP별 상한은 **출처 간 공정성**을 지킨다 — 한 출처가 점유할 수 있는 setup 슬롯을 16개로 잘라, 플러딩하는 쪽만 거부되고 나머지는 계속 들어온다. 예산을 겹으로 두되 각 겹이 다른 실패 모드를 막게 하는 이 구조는 rate limit 일반론이기도 하다(meta 의 per-IP 버킷도 같은 계열, §9.2). 해제는 워커 람다 안의 RAII 소멸자가 보장하므로 `playerConnThread` 가 어떤 경로로 끝나든(정상·타임아웃·예외) 카운트가 샌다는 걱정이 없고, `launch` 자체가 실패한 경로만 명시적 `release` 로 되돌린다.
+
+`tcp_peer_ip` 가 빈 문자열을 돌려주는 실패 경로의 처리도 눈여겨볼 만하다. 실패한 연결을 전부 `"unknown"` 버킷 하나에 몰면 서로 무관한 연결끼리 상한 16을 나눠 갖는 공멸이 된다. 대신 fd 값을 연결별 고유 키로 쓴다 — fd 는 그 연결이 살아 있는 동안 프로세스 안에서 유일하므로 충돌이 없다. per-IP 상한이라는 원래 목적은 이 경로에서 포기하지만, "제한 장치의 실패가 무고한 사용자를 막는" 역전보다는 낫다는 판단이다.
+
 ### 6.3 종료 순서
 
 루프를 빠져나온 *뒤에야* — 정상 스레드 컨텍스트에서 — 소켓을 닫고 워커를 정리한다. 순서가 그대로 의미다.
 
-**현재 소스 발췌 — `server/main.cpp:214-226`**
+**현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
     std::cout << "[relay] shutting down...\n";
@@ -480,7 +555,7 @@ accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓�
 4. `matcher.join()` → `connWorkers.wait()` → `waitForShutdown()` — **역순 drain**. 워커가 `mm`/`rr` 을 raw reference 로 들고 있으므로, 스택에 있는 `mm`/`rr` 이 파괴되기 전에 모든 워커가 끝나야 한다. `waitForShutdown()` 은 `relay.cpp` 의 전역 `WorkerGroup`(§8.4)까지 비운다.
 5. `net_shutdown()` — 마지막.
 
-이 순서를 지키지 않으면 종료 중 use-after-free 가 난다. 그래서 이 경로에는 자동 회귀가 붙어 있다 — §8.4 에서 다시 본다.
+이 순서를 지키지 않으면 종료 중 use-after-free가 난다. relay/meta smoke 테스트는 활성 연결이 있는 상태에서 종료 신호를 보내고, 프로세스가 워커를 drain한 뒤 정상 종료하는지 자동으로 확인한다.
 
 ```mermaid
 sequenceDiagram
@@ -522,7 +597,7 @@ SIGPIPE 가 "죽은 소켓에 쓰는" 문제라면, fd 소유권은 "살아있�
 
 수정은 fd 를 참조 카운트 소유 핸들로 감싸는 것이다. 실제 `::close` 는 "마지막 복사본이 사라지는 순간" 딱 한 번만 일어나게 한다.
 
-**현재 소스 발췌 — `net/socket.h:12-38`**
+**현재 소스 발췌 — `net/socket.h`**
 
 ```cpp
 // TCP 소켓 핸들 — 참조 카운트 소유(ref-counted owning handle).
@@ -556,7 +631,7 @@ struct TcpSocket {
 
 새 fd 를 만드는 모든 경로(`tcp_listen`/`tcp_accept`/`tcp_connect`)는 `make_owned` 로 감싼다. deleter 가 정확히 한 번 `close_fd` 를 부른다.
 
-**현재 소스 발췌 — `net/socket.cpp:46-54`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 새로 생성된 fd 를 참조 카운트 소유 핸들로 감싼다.
@@ -588,20 +663,13 @@ graph TB
 - **종료 신호** — `tcp_close()` 는 `::shutdown(SHUT_RDWR)` *만* 한다. 같은 fd 를 `recv` 로 대기 중인 다른 복사본을 EOF 로 깨워 루프를 빠져나가게 하는 용도다. 실제 fd 를 닫지 않으므로 fd 정수는 아직 재사용되지 않는다.
 - **실제 close** — 마지막 `TcpSocket` 복사본이 소멸(또는 재대입)할 때 deleter 에서 한 번. 이 시점엔 모든 스레드가 그 복사본을 버린 뒤이므로 fd 재사용 경합이 없다.
 
-**현재 소스 발췌 — `net/socket.cpp:270-291`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 소켓 종료.
-//   ::shutdown 으로 같은 fd 를 폴링/대기 중인 다른 복사본의 recv 를 EOF 로
-//   깨워 루프를 빠져나가게 한다. 실제 ::close 는 마지막 TcpSocket 복사본이
-//   소멸할 때 deleter 에서 한 번만 일어난다(이중 close / fd 재사용 경합 방지).
-//   shutdown 은 일반 스레드에서 반복 호출해도 무해한 종료 신호로만 사용한다.
-//   TcpSocket 은 shared_ptr 를 읽으므로 tcp_close() 를 signal handler 에서 직접
-//   호출하면 안 된다.
-//   여기서 fdh 를 reset 하지 않는 이유: 같은 인스턴스를 다른 스레드가 읽고 있을
-//   수 있어(예: Session::sock 을 ioThread 가 read, 메인이 Close) reset 은
-//   shared_ptr 인스턴스에 대한 경합이 된다. 참조 해제는 RAII(소유 스레드의
-//   재대입/소멸)에 맡긴다.
+// shutdown wakes peer threads; the final handle owner closes the fd.
+// 불변식: signal handler 에서 tcp_close() 호출 금지 — shared_ptr(fdh) 읽기는 async-signal-safe 가 아니다.
+// 불변식: 여기서 fdh.reset() 금지 — 같은 인스턴스를 읽는 다른 스레드와 shared_ptr
+//         인스턴스 경합이 된다. 참조 해제는 소유 스레드의 RAII(재대입/소멸)에 맡긴다.
 void tcp_close(TcpSocket& s) {
     if (!s.fdh) return;
     int fd = *s.fdh;
@@ -621,7 +689,7 @@ void tcp_close(TcpSocket& s) {
 
 `net/session.cpp` 의 `Close()` 가 이 계약을 그대로 구현한다.
 
-**현재 소스 발췌 — `net/session.cpp:246-310`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::Close() {
@@ -709,7 +777,7 @@ relay 와 host 는 공개 IP 에서 임의의 피어로부터 바이트를 받�
 
 lockstep 의 INPUT 프레임은 `[from:4][cnt:2][inputs:cnt]` 다 ([Part 6](./part6-lockstep-networking.md)). 신뢰할 수 없는 피어는 `cnt` 를 거대하게, `from` 을 아무 tick 으로나 보낼 수 있다.
 
-**현재 소스 발췌 — `net/session.cpp:1041-1072`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
     case MsgType::INPUT: {
@@ -756,7 +824,7 @@ lockstep 의 INPUT 프레임은 `[from:4][cnt:2][inputs:cnt]` 다 ([Part 6](./pa
 
 논블로킹 소켓에 `send` 가 `EWOULDBLOCK` 을 반환하면 커널 송신 버퍼가 가득 찼다는 뜻이다 — 보통 상대가 느리거나, *고의로 천천히 읽는* 피어다. 무한정 재시도하면 한 느린 피어가 송신 스레드를 영원히 붙잡는다.
 
-**현재 소스 발췌 — `net/socket.cpp:179-229`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
@@ -825,19 +893,19 @@ TCP 는 메시지가 아니라 바이트 스트림이다. 한 `recv` 가 정확�
 
 여기서 일반화할 규칙은 **상태 머신의 소유권 이전 단위가 fd 하나가 아니라 `(fd, already-read bytes)`** 라는 것이다. 그리고 그 버퍼에는 상한이 있어야 한다.
 
-**현재 소스 발췌 — `server/relay.cpp:493-497`**
+**현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-    // ready 확정 후 forwarder 이관 전까지 쌓일 수 있는 raw 바이트 상한.
-    // 정상 클라이언트는 READY 직후 PING/INPUT 몇 프레임 수준(<1KB)이므로 64KB 면
-    // 충분하다. 상한이 없으면 악성 클라가 30초 동안 회선 속도로 밀어넣어 relay
-    // 메모리를 소모시킬 수 있다.
+    // 페이로드 상한은 net::kMaxPayloadBytes (framing.h) 를 직접 참조한다.
+    // Bound bytes received between READY and forwarder ownership.
     constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 ```
 
+64KB 인 근거: 정상 클라이언트가 READY 직후 forwarder 이관 전까지 보내는 것은 PING/INPUT 몇 프레임 수준(1KB 미만)이라 여유가 크고, 상한이 없으면 악성 클라이언트가 30초 수락 대기 동안 회선 속도로 밀어넣어 relay 메모리를 소모시킬 수 있다. 첫 줄 주석이 가리키듯 프레임 한 개의 페이로드 상한은 이제 `net/framing.h` 가 `net::kMaxPayloadBytes` 로 공개한다 — 과거에는 relay 가 같은 숫자를 자체 상수로 중복 정의했는데, 프로토콜 한계는 프로토콜을 정의하는 헤더가 한 곳에서 소유해야 두 값이 어긋나는 사고가 없다.
+
 클라이언트 쪽 수신 `CHAT` 큐도 같은 이유로 유한하다.
 
-**현재 소스 발췌 — `net/session.cpp:1115-1119`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
         // 큐 상한 — UI 가 PullChat 을 멈춘 상태에서 상대가 CHAT 을 플러딩해도
@@ -851,7 +919,7 @@ TCP 는 메시지가 아니라 바이트 스트림이다. 한 `recv` 가 정확�
 
 relay 는 연결, 30초 수락 lobby, 양방향 forwarder 에 스레드를 쓴다. callback 예외가 스레드 entry 밖으로 빠지면 `std::terminate` 로 프로세스가 끝나고, 스레드 생성 전에 올린 수동 카운터를 실패 경로에서 내리지 않으면 shutdown 이 영구 대기한다. `server/worker_group.h` 의 `WorkerGroup` 이 이 정책을 한곳에 모은다.
 
-**현재 소스 발췌 — `server/worker_group.h:32-67`**
+**현재 소스 발췌 — `server/worker_group.h`**
 
 ```cpp
     template <typename Fn>
@@ -898,7 +966,7 @@ relay 는 연결, 30초 수락 lobby, 양방향 forwarder 에 스레드를 쓴�
 
 `finish()` 자체에도 함정이 하나 있다.
 
-**현재 소스 발췌 — `server/worker_group.h:87-97`**
+**현재 소스 발췌 — `server/worker_group.h`**
 
 ```cpp
     void finish() noexcept
@@ -918,13 +986,11 @@ relay 는 연결, 30초 수락 lobby, 양방향 forwarder 에 스레드를 쓴�
 
 동시성 예산은 두 그룹으로 나뉜다.
 
-**현재 소스 발췌 — `server/relay.cpp:25-30`**
+**현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
 std::atomic<bool> s_stopping{false};
-// queue lobby와 양방향 forwarder도 모두 detached thread이므로 연결 워커와
-// 별도로 상한을 둔다. 빠른 QUEUE_JOIN 플러드가 첫-frame 워커를 즉시 통과해
-// 무제한 lobby thread를 만드는 경로까지 이 그룹이 차단한다.
+// Lobby and forwarder threads have a separate bound from handshake workers.
 constexpr size_t kMaxRelayWorkers = 512;
 WorkerGroup s_workers{"relay", kMaxRelayWorkers};
 ```
@@ -935,7 +1001,7 @@ WorkerGroup s_workers{"relay", kMaxRelayWorkers};
 
 이 경로에는 자동 회귀가 붙어 있다. `python/tests/test_relay_meta_smoke.py` 의 `test_relay_sigterm_drains_active_match` 가 매치를 붙여 놓은 상태에서 relay 에 SIGTERM 을 보내고, 프로세스가 종료 코드 0 으로 깨끗이 내려오는지 확인한다.
 
-**현재 소스 발췌 — `python/tests/test_relay_meta_smoke.py:100-104`**
+**현재 소스 발췌 — `python/tests/test_relay_meta_smoke.py`**
 
 ```python
 def test_relay_sigterm_drains_active_match() -> None:
@@ -947,9 +1013,9 @@ def test_relay_sigterm_drains_active_match() -> None:
 
 `_find_bin` 이 바이너리를 못 찾으면 **skip** 한다는 점을 기억해 둘 것. 회귀를 돌렸다고 믿었는데 실제로는 아무것도 검증하지 않는 전형적인 함정이다. §12 의 회귀 절차가 relay/meta 를 먼저 빌드하는 이유가 이것이다.
 
-### 8.5 정수 오버플로 가드 (교차 참조)
+### 8.5 정수 오버플로 가드
 
-마지막 표면은 meta 의 JSON 정수 파싱이다. `POST /v1/matches` 의 `score_a` 같은 필드에 `99999999999999999999` 같은 값이 들어오면 `int64_t` 로 변환하다 오버플로한다. `proto::find_int` 는 `INT64_MAX` 를 넘기면 잘못된 값 대신 `std::nullopt` 를 돌려준다. 이 가드는 meta 프로세스 내부 하드닝이라 [Part 10](./part10-meta-and-ranking.md) 에서 상세히 다뤘다 — 여기서는 "untrusted-input 방어선의 일부" 로만 짚는다.
+마지막 표면은 meta의 JSON 정수 파싱이다. `POST /v1/matches`의 `score_a` 같은 필드에 `99999999999999999999` 같은 값이 들어오면 `int64_t` 변환이 오버플로한다. `proto::find_int`는 숫자를 한 자리씩 읽으면서 `(INT64_MAX - digit) / 10`을 넘는지 먼저 검사하고, 초과하면 `std::nullopt`를 돌려준다. handler는 이를 필드 누락과 같은 잘못된 요청으로 거부하므로 wraparound된 음수나 작은 양수가 DB에 도달하지 않는다. 파서의 전체 계약과 API 사용처는 [메타·랭킹 문서](./part10-meta-and-ranking.md)에서도 확인할 수 있다.
 
 ## 9. 네트워크 경계 — 리버스 프록시와 TLS 종단
 
@@ -959,7 +1025,7 @@ def test_relay_sigterm_drains_active_match() -> None:
 
 두 서버의 노출 정책이 다르다.
 
-- **`tetris_relay` 는 public TCP 7777** 이다. 자체 바이너리 프로토콜을 쓰고, TLS 를 하지 않으며, 무상태다. 유출될 영속 상태가 없고, 인증은 meta 에 토큰을 물어보는 방식이라 relay 자체는 secret 을 저장하지 않는다(공유 secret 하나 제외).
+- **`tetris_relay` 는 public TCP 7777** 이다. 자체 바이너리 프로토콜을 쓰고 TLS를 하지 않는다. DB 같은 영속 상태는 없지만 실행 중 queue·room·socket·인증 캐시·계정 lease는 메모리에 가진다. 재시작하면 계정 데이터는 잃지 않되 진행 중 매치와 대기열은 모두 끊긴다. meta 호출용 공유 secret도 서버 설정에만 둔다.
 - **`tetris_meta` 는 `127.0.0.1:8080`** 에만 bind 한다. SQLite DB 를 소유하고, 토큰을 발급하며, RP 를 쓴다. 여기가 뚫리면 전부 끝이다. 그래서 외부에서 직접 닿을 수 없게 두고, 앞단에 리버스 프록시를 세운다.
 
 ```mermaid
@@ -992,7 +1058,7 @@ graph TB
 
 `deploy/Caddyfile.example` 이 그 앞단이다.
 
-**현재 소스 발췌 — `deploy/Caddyfile.example:1-21`**
+**현재 소스 발췌 — `deploy/Caddyfile.example`**
 
 ```caddyfile
 # Cloudflare Tunnel 뒤의 local Caddy 예시.
@@ -1018,18 +1084,18 @@ graph TB
 }
 ```
 
-이 21줄이 세 가지를 동시에 성립시킨다.
+이 짧은 설정이 세 가지를 동시에 성립시킨다.
 
 1. **same-origin fetch.** 랭킹 페이지 `web/ranking/index.html` 은 API 주소를 하드코딩하지 않고 상대 경로로 부른다 — `fetch('/v1/leaderboard?limit=50', ...)`. 정적 파일과 `/v1/*` 가 **같은 origin** 에서 나오기 때문에 가능한 코드다. CORS 프리플라이트도, 배포마다 바꿔야 하는 API 베이스 URL 도 없다. Caddy 를 빼고 페이지를 다른 호스트에 올리는 순간 이 한 줄이 깨진다.
 2. **meta 의 loopback bind 정당화.** `handle /v1/*` 의 `reverse_proxy 127.0.0.1:8080` 이 유일한 진입로다. meta 를 `0.0.0.0` 에 열 이유가 없다.
 3. **TLS 를 아무도 직접 하지 않는다.** Caddy 는 `127.0.0.1:8088` 만 듣는다. 인증서 관리와 public TLS 는 전부 tunnel 쪽이다.
 
-**현재 소스 발췌 — `deploy/cloudflared/config.yml.example:1-11`**
+**현재 소스 발췌 — `deploy/cloudflared/config.yml.example`**
 
 ```yaml
 # ~/.cloudflared/config.yml 또는 /etc/cloudflared/config.yml
 #
-# Cloudflare Tunnel 로 Mac mini 의 local Caddy 를 public HTTPS 로 노출하는 예시.
+# Cloudflare Tunnel 로 프록시 호스트의 local Caddy 를 public HTTPS 로 노출하는 예시.
 # 이 경우 공유기 포트포워딩은 필요 없다.
 tunnel: tetris-meta
 credentials-file: /etc/cloudflared/tetris-meta.json
@@ -1040,21 +1106,20 @@ ingress:
   - service: http_status:404
 ```
 
-터널 방식의 실질적 이점은 **인바운드 포트를 하나도 열지 않는다**는 것이다. `cloudflared` 가 밖으로 나가는 연결을 만들어 유지하므로 가정용 회선이나 NAT 뒤의 Mac mini 도 공유기 포트포워딩 없이 public HTTPS 엔드포인트를 가질 수 있다. 대신 edge 사업자를 신뢰하게 되고, `X-Forwarded-For` 같은 헤더의 신뢰 여부가 §9.2 의 문제로 넘어온다. 터널을 쓰지 않고 Caddy 를 직접 노출하는 대안은 `docs/public-server-deployment.md` 가 다룬다.
+터널 방식의 실질적 이점은 **인바운드 포트를 하나도 열지 않는다**는 것이다. `cloudflared` 가 밖으로 나가는 연결을 만들어 유지하므로 가정용 회선이나 NAT 뒤의 소형 리눅스 머신도 공유기 포트포워딩 없이 public HTTPS 엔드포인트를 가질 수 있다. 대신 edge 사업자를 신뢰하게 되고, `X-Forwarded-For` 같은 헤더의 신뢰 여부가 §9.2 의 문제로 넘어온다. 터널을 쓰지 않고 Caddy 를 직접 노출하는 대안은 `docs/public-server-deployment.md` 가 다룬다.
 
 ### 9.2 프록시 뒤에서 레이트 리밋 키가 무너지는 문제
 
 프록시를 세우면 조용히 깨지는 것이 하나 있다. Part 10 의 per-IP 레이트 리밋이다. meta 입장에서 `req.remote_addr` 은 **항상 `127.0.0.1`**(프록시)이므로, 전 세계 사용자가 버킷 하나를 공유하게 되고 제한이 무력화된다. 정확히는 "무력화" 보다 나쁘다 — 한 명이 한도를 채우면 전원이 429 를 받는다.
 
-**현재 소스 발췌 — `meta/api_server.cpp:93-117`**
+**현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-// [보안] 레이트리밋 키로 쓸 클라이언트 식별자.
-//   배포 구성(deploy/)은 meta 를 127.0.0.1 에 바인드하고 cloudflared/Caddy 를
-//   앞단에 둔다 — 이때 remote_addr 은 항상 프록시(루프백)라 전체 사용자가 1개
-//   버킷을 공유하게 되어 per-IP 제한이 무력화된다. 피어가 루프백(신뢰 프록시)일
-//   때만 프록시가 붙여 주는 실제 클라이언트 IP 헤더를 사용한다. 외부에서 직접
-//   접속한 피어의 헤더는 위조 가능하므로 무시한다.
+// 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
+// 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
+// 버킷을 우회할 수 있다. 소형 리눅스 프록시 → 저전력 Android(Termux) meta 같은
+// 분리 배치에서는 모든 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은
+// edge가 맡아야 한다.
 std::string rate_limit_key(const httplib::Request& req)
 {
     const bool from_loopback =
@@ -1062,12 +1127,16 @@ std::string rate_limit_key(const httplib::Request& req)
     if (from_loopback) {
         std::string ip = req.get_header_value("CF-Connecting-IP");
         if (ip.empty()) {
+            // [보안] XFF 는 "client, proxy1, proxy2, ..." 순서로, 경유하는
+            // 프록시가 자기 앞단의 주소를 **뒤에 append** 한다. 즉 첫 토큰은
+            // 클라이언트가 요청에 미리 심어 위조할 수 있는 값이고(매 요청
+            // 다른 값을 넣으면 60/s 공개 버킷을 무한 우회), 신뢰할 수 있는
+            // 것은 우리가 믿는 프록시가 마지막에 붙인 rightmost 토큰뿐이다.
+            // 따라서 첫 토큰이 아니라 마지막 토큰을 rate limit 키로 쓴다.
             ip = req.get_header_value("X-Forwarded-For");
-            // XFF 는 "client, proxy1, proxy2" — 첫 항목이 원 클라이언트.
-            const auto comma = ip.find(',');
-            if (comma != std::string::npos) ip.resize(comma);
+            const auto comma = ip.rfind(',');
+            if (comma != std::string::npos) ip.erase(0, comma + 1);
         }
-        // 공백 트림 후 비어있지 않으면 채택.
         const auto b = ip.find_first_not_of(" \t");
         const auto e = ip.find_last_not_of(" \t");
         if (b != std::string::npos) return ip.substr(b, e - b + 1);
@@ -1076,30 +1145,38 @@ std::string rate_limit_key(const httplib::Request& req)
 }
 ```
 
-"신뢰 프록시" 판정이 `from_loopback` 하나라는 점이 핵심이다. 헤더는 **누구나 위조할 수 있다.** 만약 meta 를 `0.0.0.0` 에 열어 두고 헤더를 무조건 믿으면, 공격자는 `X-Forwarded-For` 를 매 요청마다 바꿔 레이트 리밋을 완전히 우회한다. 그래서 조건이 뒤집혀 있다 — **peer 가 루프백일 때만** 헤더를 믿는다. 이 코드가 안전한 이유는 `§9.1` 의 배포 형태(meta 는 loopback bind, 프록시도 같은 호스트)가 전제되기 때문이다. meta 를 다른 머신에서 프록시하려면 이 판정 조건부터 바꿔야 한다.
+"신뢰 프록시" 판정이 `from_loopback` 하나라는 점이 핵심이다. 헤더는 **누구나 위조할 수 있다.** meta를 넓은 주소에 열어 두고 헤더를 무조건 믿으면 공격자는 `X-Forwarded-For`를 매 요청마다 바꿔 리밋을 완전히 우회한다. 그래서 **peer가 loopback일 때만** 헤더를 믿는다.
 
-정리하면 배포 형태와 코드가 한 쌍이다. `deploy/Caddyfile.example` 없이 `rate_limit_key` 만 보면 "왜 루프백만 믿지?" 가 이해되지 않고, `rate_limit_key` 없이 Caddyfile 만 보면 레이트 리밋이 조용히 죽는다.
+loopback 프록시를 신뢰하기로 한 다음에도 **XFF 안에서 어느 토큰을 믿느냐**가 남는다. XFF 는 요청이 프록시를 거칠 때마다 그 프록시가 자기가 본 peer 주소를 목록 **뒤에** 덧붙이는 구조라, 첫 토큰은 클라이언트가 요청에 미리 심어 보낼 수 있는 값이다. 실제로 Caddy 의 `reverse_proxy` 기본 동작은 클라이언트가 보낸 XFF 를 지우지 않고 실제 IP 를 뒤에 append 하므로, 첫 토큰을 키로 쓰면 공격자가 `X-Forwarded-For: <매번 다른 난수>` 한 줄로 요청마다 새 버킷을 배정받아 60/s 공개 버킷이 무의미해진다. 신뢰할 수 있는 것은 우리가 믿는 프록시가 마지막에 붙인 **rightmost 토큰**뿐이고, 코드의 `rfind(',')` 가 그 토큰을 취한다. `CF-Connecting-IP` 를 먼저 보는 이유도 같은 계열이다 — 이 헤더는 터널 edge 가 단일 값으로 덮어쓰므로 목록 파싱 문제가 아예 없다. 일반화하면, 체인형 헤더에서 신뢰 경계는 "내가 믿는 마지막 홉이 쓴 것"이지 "목록의 처음"이 아니다.
+
+두 배치의 결과가 다르다.
+
+- proxy와 meta가 같은 호스트면 원 client IP를 복원해 meta에서도 per-client 버킷을 쓴다.
+- proxy 호스트와 meta 단말이 분리되면 meta는 proxy의 사설 IP만 보고 public 요청 전체가
+  한 버킷을 공유한다. Caddy/Tunnel에서 실제 client별 제한을 걸고, meta 버킷은
+  전체 burst의 마지막 방어선으로 사용한다.
+
+별도 호스트 프록시의 전달 헤더를 meta에서도 신뢰하려면 정확한 proxy IP allowlist와
+방화벽을 함께 구현해야 한다. 현재 코드에는 그 옵션이 없으므로 사설망 전체를
+암묵적으로 신뢰한다고 가정하지 않는다.
 
 ### 9.3 secret 회전과 유출 대응
 
-공유 secret 은 relay 와 meta 두 곳에 같은 값이 있다. 회전 절차는 다음과 같다.
+공유 secret은 relay와 meta 두 곳에 같은 값이 있다. 현재 구현은 old/new 값을 동시에 허용하지 않으므로 정기 회전에는 짧은 유지보수 시간이 필요하다.
 
 ```bash
-# 1) 새 secret 생성
-NEW=$(openssl rand -hex 32)
-
-# 2) meta 먼저 교체 — 아직 relay 는 옛 secret 을 보낸다
-sudo sed -i "s/^TETRIS_RELAY_SECRET=.*/TETRIS_RELAY_SECRET=$NEW/" /etc/tetris/meta.env
+# 새 값을 안전한 로컬 비밀 저장소에 만든 뒤 relay 입장을 먼저 닫는다.
+openssl rand -hex 32
+sudo systemctl stop tetris-relay
+sudoedit /etc/tetris/meta.env
+sudoedit /etc/tetris/relay.env
 sudo systemctl restart tetris-meta
-
-# 3) relay 교체
-sudo sed -i "s/^TETRIS_RELAY_SECRET=.*/TETRIS_RELAY_SECRET=$NEW/" /etc/tetris/relay.env
-sudo systemctl restart tetris-relay
+sudo systemctl start tetris-relay
 ```
 
-2 와 3 사이에는 relay 의 `POST /v1/matches` 가 403 을 받는 구간이 있다. 그 사이에 끝난 매치의 RP 는 반영되지 않는다 — 무중단 회전을 하려면 meta 가 secret 두 개를 동시에 허용하는 기능이 필요하고, 현재 구현에는 없다. 회전은 트래픽이 적은 시간에 수행하고, 두 재시작 사이를 짧게 유지한다.
+두 환경 파일에는 같은 새 값을 넣는다. 커맨드라인 인자나 `sed` 치환 문자열에 secret을 직접 싣지 않아 프로세스 목록과 셸 history 노출을 피한다. relay를 먼저 내리면 진행 중 매치는 종료되지만 서버 종료를 플레이어 기권으로 기록하지 않고, 서로 다른 secret으로 새 ranked 매치를 받는 구간도 만들지 않는다.
 
-secret 이 유출됐다고 판단되면 순서가 반대다. **relay 를 먼저 내려서** 정상 매치가 403 으로 실패하도록 만드는 것보다, meta 를 먼저 새 secret 으로 재시작해 공격자의 위조 POST 를 즉시 차단하는 편이 손해가 작다. RP 조작이 이미 일어났다면 §11.2 의 백업에서 복구한다.
+secret이 유출됐다고 판단되면 위조 POST 차단이 먼저다. meta에 새 값을 적용해 즉시 재시작한 뒤 relay를 갱신한다. 그 짧은 구간의 정상 결과는 403으로 누락될 수 있지만 공격자가 계속 결과를 조작하는 것보다 손해가 작다. 무중단·무손실 회전이 필요하면 meta에 dual-secret 유예 기능과 전환 상태 관측을 먼저 구현해야 한다. RP 조작이 이미 일어났다면 검증된 백업과 감사용 `matches` 기록을 기준으로 복구 범위를 판단한다.
 
 ## 10. 릴리스 빌드와 패키징
 
@@ -1109,7 +1186,7 @@ secret 이 유출됐다고 판단되면 순서가 반대다. **relay 를 먼저 
 
 게임 클라이언트는 두 가지 컴파일 타임 기본값을 받는다 — 메뉴에 박히는 기본 relay 엔드포인트와 meta URL.
 
-**현재 소스 발췌 — `CMakeLists.txt:38-41`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 set(TETRIS_DEFAULT_RELAY_ENDPOINT "127.0.0.1:7777" CACHE STRING
@@ -1152,7 +1229,7 @@ META_URL=https://api.example.com \
 
 서버 측은 별도 스크립트로 묶는다. `scripts/release_server_linux.sh` 는 게임 클라이언트 없이 relay+meta 만 Release+HTTPS 로 빌드한다.
 
-**현재 소스 발췌 — `scripts/release_server_linux.sh:28-37`**
+**현재 소스 발췌 — `scripts/release_server_linux.sh`**
 
 ```bash
 CMAKE_ARGS=(
@@ -1171,7 +1248,7 @@ CMAKE_ARGS=(
 
 `-DTETRIS_ENABLE_HTTPS=ON` 은 이름과 달리 **서버가 TLS 를 종단한다는 뜻이 아니다.** TLS 종단은 §9.1 의 tunnel/Caddy 가 한다. 이 옵션이 켜는 것은 **meta 클라이언트 쪽**, 즉 relay 안에 들어 있는 `meta::client::MetaClient` 가 `https://` URL 을 다룰 수 있느냐다.
 
-**현재 소스 발췌 — `CMakeLists.txt:35`**
+**현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
 option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is available" ON)
@@ -1179,7 +1256,7 @@ option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is
 
 기본값이 ON 이고, ON 이면 `find_package(OpenSSL QUIET)` 를 시도한다. OpenSSL 이 없으면 configure 는 성공하지만 경고가 뜨고, `CPPHTTPLIB_OPENSSL_SUPPORT` 가 정의되지 않은 채 빌드된다. 그 결과가 런타임 게이트다.
 
-**현재 소스 발췌 — `meta/http_client.cpp:119-126`**
+**현재 소스 발췌 — `meta/http_client.cpp`**
 
 ```cpp
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
@@ -1202,7 +1279,7 @@ option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is
 
 `deploy/systemd/tetris-meta.service` 를 통째로 본다.
 
-**현재 소스 발췌 — `deploy/systemd/tetris-meta.service:1-23`**
+**현재 소스 발췌 — `deploy/systemd/tetris-meta.service`**
 
 ```ini
 [Unit]
@@ -1238,7 +1315,7 @@ WantedBy=multi-user.target
 
 **(3) secret 주입.** `EnvironmentFile=/etc/tetris/meta.env` 다. `Environment=` 로 unit 안에 직접 쓰지 않는 이유가 있다 — unit 파일은 `systemctl cat` 으로 누구나 읽을 수 있고 보통 git 에 들어간다. secret 은 별도 파일로 빼서 권한을 조인다.
 
-**현재 소스 발췌 — `deploy/systemd/tetris-meta.env.example:1-5`**
+**현재 소스 발췌 — `deploy/systemd/tetris-meta.env.example`**
 
 ```bash
 # /etc/tetris/meta.env
@@ -1271,13 +1348,15 @@ relay unit 은 `ReadWritePaths` 가 없고 `ExecStart` 가 다를 뿐 구조가 
 
 ### 11.2 백업과 복구
 
-영속 상태는 meta 의 SQLite DB 하나뿐이므로 백업도 그 한 파일이 전부다. `scripts/backup_meta_db.sh` 는 `sqlite3` CLI 가 있으면 온라인 백업 API(`.backup`)로 일관된 스냅샷을 뜨고, 없으면 DB/WAL/SHM 세 파일을 함께 보관한다(WAL 모드라 셋이 한 세트다 — `.db` 하나만 복사하면 커밋됐지만 아직 체크포인트되지 않은 트랜잭션이 통째로 사라진다).
+영속 상태는 meta의 SQLite DB에 모인다. 하지만 WAL 모드로 열린 저장소의 물리 파일은 `.db`, `-wal`, `-shm`으로 나뉠 수 있으므로 실행 중인 `.db` 하나를 복사해서는 안 된다. `scripts/backup_meta_db.sh`는 `sqlite3` CLI의 온라인 backup API(`.backup`)로 논리적으로 일관된 단일 DB 스냅샷을 만들고, 복사본에 `PRAGMA integrity_check`가 `ok`를 반환한 뒤에만 아카이브한다. CLI가 없으면 위험한 순차 파일 복사로 폴백하지 않고 실패한다.
 
 ```bash
 ./scripts/backup_meta_db.sh /srv/tetris/db/tetris.db /srv/tetris/backups
 ```
 
-`.backup` 은 라이브 DB 를 잠그지 않고 일관된 복사본을 만들므로, meta 가 떠 있는 상태에서도 안전하게 백업할 수 있다. cron 이나 systemd timer 에 걸어 두면 된다.
+backup API는 페이지를 복사하는 동안 SQLite의 동시성 규칙을 따르면서 일관된 스냅샷을 만들므로 meta가 떠 있는 상태에서도 사용할 수 있다. Termux 환경에는 먼저 `pkg install sqlite`로 CLI를 설치하고, cron이나 별도 스케줄러가 스크립트의 종료 코드를 확인하게 한다. 파일 복사만 할 수 있는 비상 상황이라면 meta를 먼저 완전히 멈춘 뒤 오프라인 복사하고, 복원 연습에서 무결성을 검증한다.
+
+스크립트는 만들기만 하지 않고 **치우기까지** 한다. 아카이브(`tar.gz`)가 완성되면 중간 산출물 `.db` 스냅샷을 지운다 — 남겨두면 백업마다 압축본과 비압축 원본이 이중으로 쌓여 디스크가 두 배로 소모된다. 그리고 보존 정책으로 최근 `KEEP` 개(기본 14, 환경변수 `KEEP` 로 조정)의 `tar.gz` 만 남기고 오래된 것을 삭제한다. 보존 정책이 스케줄러 설정이 아니라 백업 스크립트 자신 안에 있는 것이 요점이다 — 정리를 별도 작업으로 빼면 백업만 이관되고 정리는 잊히는 배포가 반드시 생기고, 정리 없는 백업은 저장 공간이 작은 호스트(Termux 단말이 정확히 그렇다)에서 디스크를 채워 **백업이 백업 대상을 죽이는** 결말이 된다. 실패 방향도 본작업과 반대다: 스냅샷 생성·무결성 검증은 fail-closed(하나라도 실패하면 스크립트 실패)지만, 정리는 부가 작업이므로 어떤 실패도 이미 성공한 백업을 뒤집지 않고 경고만 남긴다.
 
 스크립트가 다루지 않는 쪽이 **복구** 다. 절차는 다음과 같다.
 
@@ -1288,10 +1367,10 @@ sudo systemctl stop tetris-meta
 # 2) 현재 상태를 옆으로 치운다 (복구가 잘못됐을 때 되돌릴 유일한 수단)
 sudo mv /srv/tetris/db/tetris.db /srv/tetris/db/tetris.db.bad
 
-# 3) 백업 아카이브에서 꺼낸다
-tar -xzf /srv/tetris/backups/tetris-20260726T031500Z.tar.gz -C /tmp
+# 3) 백업 아카이브에서 꺼낸다. 마지막 숫자는 백업 프로세스 PID라 실행마다 다르다.
+tar -xzf /srv/tetris/backups/tetris-20260726T031500Z-12345.tar.gz -C /tmp
 sudo install -o tetris -g tetris -m 0600 \
-     /tmp/tetris-20260726T031500Z.db /srv/tetris/db/tetris.db
+     /tmp/tetris-20260726T031500Z-12345.db /srv/tetris/db/tetris.db
 
 # 4) 무결성 확인 — 여기서 ok 가 안 나오면 그 백업은 못 쓴다
 sudo -u tetris sqlite3 /srv/tetris/db/tetris.db 'PRAGMA integrity_check;'
@@ -1307,9 +1386,60 @@ sudo systemctl start tetris-meta
 - **WAL/SHM 잔재.** 새 `.db` 옆에 옛 `-wal` 이 남아 있으면 SQLite 가 그것을 적용하려 들어 상태가 섞인다. 반드시 지운다.
 - **마이그레이션 방향.** `meta/database.cpp` 의 스키마 부트스트랩은 `PRAGMA user_version` 과 `schema_migrations` 테이블을 **둘 다** 확인해 elo→RP 리베이스를 한 번만 적용한다(`PRAGMA user_version` 이 `.dump`/`.restore` 에 보존되지 않기 때문에 마커 테이블을 함께 둔 것이다). 방향은 앞으로만 있고 **down 마이그레이션은 없다.** 새 스키마의 meta 가 한 번 열어 버린 DB 는 옛 바이너리로 되돌릴 수 없다. 그래서 meta 를 업그레이드하기 직전에 반드시 백업을 뜨고, 롤백은 "옛 바이너리 + 업그레이드 직전 백업" 쌍으로만 한다.
 
+### 11.3 소형 리눅스 relay + 저전력 Android(Termux) meta의 용량과 장애 경계
+
+목표 배치는 소형 리눅스 머신이 `tetris_relay`, 저전력 Android 단말의 Termux가 `tetris_meta`와 SQLite를 맡는 형태다. 이 분리는 게임 패킷의 지속적인 양방향 전달과 짧은 HTTP/DB 트랜잭션을 서로 다른 장애 영역으로 나눈다. 다만 이 단말은 서버급 저장장치·전원·열 관리가 없고 Android가 백그라운드 프로세스를 중단할 수 있으므로, **유일한 DB 원본**으로 두는 순간 성능보다 가용성과 복구가 먼저 문제가 된다.
+
+`python/tools/relay_capacity.py`는 실제 TCP 클라이언트 쌍을 만들고 `QUEUE_JOIN → MATCH_FOUND → READY`를 거친 뒤 작은 wire frame을 양방향으로 반복한다. 기본 전송률은 클라이언트마다 초당 120 frame으로, 60Hz `INPUT`과 그 수신에 따른 `ACK`를 근사한다. unranked relay는 일반 게임 frame의 내용을 해석하지 않으므로 이 측정에서는 같은 크기대의 `PING`을 사용한다. Linux의 `/proc`에서 relay CPU, RSS, thread 수를 읽는다.
+
+기본 동시 부하는 50매치, 즉 100플레이어다. 200플레이어 목표를 시험하려면
+`--matches 100`을 명시한다. 인자의 단위가 플레이어가 아니라 2인 매치이므로,
+운영 상한을 바꿀 때는 출력의 `players` 값을 기준으로 기록한다.
+
+이 도구는 **relay 프로세스의 연결·스레드·전달 비용을 보는 local probe**다. 게임 시뮬레이션, TLS edge, meta 요청, WAN 지연·손실은 포함하지 않는다. 부하 발생기도 같은 relay 머신에서 실행되므로 목표 전송률을 놓치면 “relay만의 한계”와 “발생기까지 합친 장비 전체의 한계”가 섞인다 — 특히 발생기가 단일 스레드 폐루프(모든 쌍에 순차 송신 후 순차 수신)라, 스케일을 올리면 relay 보다 발생기가 먼저 포화될 수 있다. 그래서 도구가 스스로 해석 장치를 출력한다. 발생기 자신의 CPU 시간을 `os.times()` 로 함께 샘플링해 `generator_cpu_ratio` 로 찍고, 그 값이 0.9 이상이면 "생성기 병목 — 결과 신뢰 불가" 경고를 낸다(병목이 발생기라면 relay 는 더 여유가 있을 수 있다는 뜻이다). 라운드 단위 실패도 측정을 통째로 버리지 않고 `failures` 로 집계해 부분 요약을 남긴다. 출력 말미의 캐비앳 두 줄도 같은 목적이다 — 같은 머신에서 CPU 를 경쟁한다는 것, 그리고 이 수치가 **unranked raw 포워딩 기준**이라 ranked 는 프레임 파싱과 meta POST 비용이 추가된다는 것. 측정 도구는 숫자만이 아니라 그 숫자를 어디까지 믿어도 되는지를 함께 내놓아야 한다. 최종 용량 판정에는 다른 기계에서 부하를 보내는 LAN/WAN soak가 필요하다.
+
+```bash
+# --matches는 플레이어 수가 아니라 2인 매치 쌍의 수다.
+# 초기 운영 목표인 100명을 재현하려면 50쌍을 연다.
+python3 python/tools/relay_capacity.py \
+  --relay-bin ./build/tetris_relay --matches 50 --duration 30
+```
+
+도구 출력의 `players`가 실제 동시 연결 수이고 `matches`의 두 배다. 표의 다른 부하
+단계는 이 인자만 바꿔 각각 독립 실행했으며, 한 프로세스에 연결을 누적한 결과가 아니다.
+
+코어 4개/스레드 8개, RAM 16GiB의 소형 리눅스 머신 loopback 환경에서 120 frame/s를 요청한 결과는 다음과 같다. CPU 100%는 논리 CPU 하나를 완전히 쓰는 값이다. 수치는 그 시점의 샘플이며 지속적인 기준값은 도구 출력과 운영 지표로 다시 확인한다.
+
+| 동시 플레이어 | 목표/달성 frame·s⁻¹·player⁻¹ | relay CPU | RSS | thread | 판정 |
+|---:|---:|---:|---:|---:|---|
+| 100 | 120 / 120 | 167.7% | 11.6 MiB | 102 | local 목표 유지 |
+| 150 | 120 / 120 | 244.6% | 12.5 MiB | 152 | local 목표 유지, 운영 여유는 별도 확인 |
+| 180 | 120 / 94.3 | 308.4% | 13.2 MiB | 182 | 같은 장비의 발생기가 목표율을 유지하지 못함 |
+| 200 | 120 / 91.9 | 308.5% | 13.6 MiB | 202 | 200명 목표 미검증 |
+
+이 결과로 확정할 수 있는 것은 **100명은 local 목표율을 유지했고, 150명까지는 실험상 도달했지만, 180명부터 같은 장비의 부하 발생기가 뒤처졌다는 것**이다. 따라서 200명은 현재 구현의 보장 용량이 아니라 추가 최적화·외부 부하 시험의 목표다. 초기 public 운영은 100명에서 경보와 입장 제한을 걸고, 별도 발생기에서 150명 soak를 통과한 뒤 단계적으로 올리는 편이 안전하다. 200명을 이 소형 리눅스 머신 한 대에서 받으려면 busy-polling thread-per-direction 구조를 event-driven I/O로 바꾸거나, ranked 전역 lease를 추가한 뒤 여러 relay shard로 나누는 방안을 먼저 검토한다. WAN 시험에서는 p95/p99 RTT, 목표 frame rate, process CPU, fd/thread 수, disconnect 비율, 회선 업로드, thermal throttling을 함께 본다.
+
+Android(Termux) meta는 매치 시작 인증과 종료 저장 때만 호출되므로 정상 200명 게임 트래픽을 모두 받지는 않는다. relay의 5분 성공 인증 캐시가 짧은 meta 재연결을 흡수하고, `/v1/matches`는 `match_uuid`로 재시도되어도 한 번만 RP를 반영한다. 그래도 새 사용자의 로그인, 아이콘 구매, 결과 확정은 장기 장애 중 실패한다. Termux 프로세스는 부팅 자동 시작, wake lock, 충전·발열 관리가 필요하고 온라인 backup API로 만든 DB 스냅샷을 주기적으로 다른 기계에 옮겨야 한다.
+
+주 relay 머신, meta 단말, Windows standby 장비를 자동 분산으로 엮는 문제는 **전환이 되는 것 / 안 되는 것 / 하지 말 것**으로 나눠 보아야 한다. 절차의 정본은 `docs/public-server-deployment.md` 이고, 여기서는 경계와 그 이유만 정리한다.
+
+**전환이 되는 것 — 새 연결의 active-passive.** Windows standby 장비에 같은 버전·같은 secret·같은 meta URL 의 `tetris_relay` 를 준비해 두고, health check 나 외부 TCP 프록시가 주 relay 장애를 감지하면 **새 연결만** standby 로 보낸다. standby 는 새 매치의 복구 시간을 줄이는 장치다.
+
+**전환이 안 되는 것 — 진행 중 매치와 인증 상태.**
+
+- room, queue, socket, summary 는 relay 프로세스 메모리에 있다. 진행 중 매치를 다른 프로세스로 옮기는 resume protocol 이 없으므로, 주 relay 가 죽은 시점의 매치는 종료되고 클라이언트가 재접속해야 한다.
+- 5분 성공 인증 캐시도 프로세스 메모리에만 있다. 처음 올린 standby 는 캐시가 비어 있어, meta 까지 내려간 상태라면 기존 사용자의 새 ranked 접속도 인증하지 못한다(fail closed).
+- 계정별 `PlayerSessionLease` 도 프로세스 로컬이다. 두 relay 를 동시에 active 로 열면 같은 계정이 각 서버에 하나씩 들어오는 것을 서버 사이에서는 막지 못한다.
+
+**하지 말 것.**
+
+- active-active relay — 외부 session directory 와 sticky routing 을 구현하기 전에는 계정별 단일 접속 보장이 깨진다. active-passive 를 지킨다.
+- meta 단말의 SQLite 파일을 두 meta 가 동시에 쓰거나 파일 동기화 도구로 실시간 복제하는 것 — single-writer active meta 와 검증된 `.backup` 복원 절차를 유지한다.
+- multi-active 를 "서버 실행 파일 한 대 더" 로 해결하려는 것 — 공유 durable result queue, 클라이언트-서버형 네트워크 DB, 클라이언트 reconnect/resume protocol 까지 함께 설계해야 하는 문제다.
+
 ## 12. 전체 회귀 검증
 
-이 장의 완료 게이트다. 아래 7단계는 순서대로 실행하며, 전부 통과해야 릴리스를 태그한다. 각 단계의 확인된 결과를 함께 적어 뒀다.
+이 장의 완료 게이트다. 아래 명령은 빌드 산출물이 필요한 순서대로 실행하며, 전부 통과해야 릴리스를 태그한다. 테스트가 추가되더라도 개수를 문서에 고정하지 않고, 각 파일이 수집한 계약과 skip 사유를 확인한다.
 
 ```bash
 # 1) 전체 빌드
@@ -1322,17 +1452,17 @@ cmake --build build -j8
 # 3) 워커 그룹 단위 테스트
 ./build/worker_group_test
 
-# 4) torch 없이 도는 테스트 (확인: 21 passed)
+# 4) torch 없이 도는 테스트 — 수집 항목 전부 통과, skip 사유 확인
 uv run python -m pytest python/tests/test_framing_parity.py \
                        python/tests/test_checkpoint_roundtrip.py \
                        python/tests/test_training_scripts_static.py -q
 
-# 5) meta + relay 통합 (확인: 22 passed)
+# 5) meta + relay 통합 — 수집 항목 전부 통과
 uv run python -m pytest python/tests/test_meta_db_smoke.py \
                        python/tests/test_relay_meta_smoke.py \
                        python/tests/test_match_summary_crosscheck.py -q
 
-# 6) relay / room smoke — 포트 7788 고정 (확인: 6 passed)
+# 6) relay / room smoke — 포트 7788 고정, skip 없이 통과
 ./build/tetris_relay --port 7788 &
 sleep 1
 uv run python -m pytest python/tests/test_relay_smoke.py python/tests/test_room_smoke.py -q
@@ -1345,6 +1475,8 @@ bash -n scripts/release_linux.sh scripts/release_server_linux.sh \
 
 각 단계가 지키는 계약은 이렇다.
 
+완료 기준은 고정된 통과 개수가 아니라 pytest가 수집한 항목이 실패하지 않고, 선택 의존성이나 네이티브 모듈 부재로 생긴 skip의 사유가 의도와 일치하는 것이다. `-rs`로 사유를 확인하고, 기능을 켠 릴리스 검증에서는 해당 의존성을 설치해 skip을 실제 실행으로 바꾼다.
+
 | 단계 | 무엇을 지키는가 |
 | --- | --- |
 | 1 | `tetris`, `tetris_relay`, `tetris_meta`, `sim_hash_dump`, `worker_group_test`, `copy_assets` 가 전부 빌드된다. `TETRIS_BUILD_TEST` 는 기본 ON 이라 따로 넘기지 않는다 |
@@ -1355,7 +1487,7 @@ bash -n scripts/release_linux.sh scripts/release_server_linux.sh \
 | 6 | 랜덤 큐와 커스텀 룸의 페어링·seed 일치 |
 | 7 | 릴리스 스크립트가 문법 오류로 배포 당일에 죽지 않는다 |
 
-**6단계의 포트 7788 은 협상 대상이 아니다.** `python/tests/test_relay_smoke.py` 와 `test_room_smoke.py` 는 `RELAY_PORT = 7788` 을 하드코딩한다. 기본 7777 로 띄우면 테스트는 실패하지 않고 **조용히 skip** 된다. §8.4 에서 본 `_find_bin` skip 과 같은 함정이다 — `-q` 출력의 `passed` 개수를 위 표의 값과 대조하는 습관이 필요하다.
+**relay/room smoke의 포트 7788은 협상 대상이 아니다.** `python/tests/test_relay_smoke.py`와 `test_room_smoke.py`는 `RELAY_PORT = 7788`을 사용한다. 기본 7777로 띄우면 실패가 아니라 **skip**이 될 수 있으므로 `-rs` 출력에서 두 파일이 실제 실행됐는지 확인한다.
 
 네이티브 시뮬레이션 모듈(`tetris_py`)이 필요한 테스트는 별도다. 게임 클라이언트를 끄고 pybind11 모듈만 빌드해 `python/sim/` 에 놓은 뒤 돌린다.
 
@@ -1381,17 +1513,20 @@ meta+relay 통합 테스트는 `build/`, `build-relay/`, `build-meta/` 를 자�
 - `net/session.cpp` INPUT 프레임 바운드 검증(`kMaxTickWindow`/`kMaxRemoteInputs` + 페이로드 경계) + `tcp_send_all` 5초 slow-loris 타임아웃.
 - 단계 전환의 잔여 TCP stream 인계, queue lobby 64 KiB 와 CHAT 256개 상한.
 - `WorkerGroup` 의 상한(연결 256 / relay 512), 생성 실패 rollback, callback 예외 격리, lock 보유 중 notify, 종료 drain. 회귀는 `test_relay_sigterm_drains_active_match`.
+- 첫 프레임 5초, peer IP별 setup 16개(`IpAdmission`), listen backlog 256, 양 플랫폼 15초/5초로 정합한 TCP keepalive, 매치 방향별 15초 idle·64KiB/s 경계.
+- player별 단일 활성 session lease, meta 네트워크 장애에만 쓰는 5분/4096개 인증 캐시, 단절 시 몰수 처리 — 남아 있는 요약의 승패 주장을 존중하고, 요약이 하나도 없는 무경기는 meta POST 를 생략해 RP 를 반영하지 않는다(델타 0 통지만).
 - `server/main.cpp` 의 relay 시작 거부(`--meta` 인데 secret 없음) + `meta/main.cpp` 의 meta 시작 거부(secret 도 `--allow-public-matches` 도 없음).
 - `meta/http_client.cpp` `save_token` 의 `0600`/`fchmod` 토큰 파일과 플랫폼별 user-data 경로(Windows 는 `%APPDATA%` Roaming).
-- `meta/api_server.cpp` `fill_random`/`gen_token` 의 OS CSPRNG 토큰, `rate_limit_key` 의 신뢰 프록시 판정.
+- `meta/api_server.cpp` `fill_random`/`gen_token` 의 OS CSPRNG 토큰, `rate_limit_key` 의 신뢰 프록시 판정과 XFF rightmost 토큰 파싱(첫 토큰 위조 우회 차단).
+- relay UUID를 보존하는 match 저장 멱등성, 429·5xx·네트워크 오류 최대 3회 재시도, public 60/s와 trusted relay 512/s의 분리 버킷.
 - `deploy/Caddyfile.example` + `deploy/cloudflared/config.yml.example` — meta 를 loopback 에 두고 same-origin `/v1/` 을 성립시키는 리버스 프록시/TLS 종단 배치.
 - `deploy/systemd/*.service` 의 `User=tetris`, `EnvironmentFile=`, `Restart=always`, `NoNewPrivileges`/`PrivateTmp`/`ProtectSystem=strict`/`ProtectHome` + meta 만 `ReadWritePaths=/srv/tetris`.
 - `scripts/release_{linux,macos,server_linux}.sh` · `release_win.ps1` · `backup_meta_db.sh` 와 CMake Release/엔드포인트 주입, `TETRIS_ENABLE_HTTPS` 게이트.
-- §12 의 7단계 전체 회귀 절차.
+- §12의 빌드·결정론·네트워크·meta·패키징 전체 회귀 절차.
 
 ## 수동 테스트
 
-§12 의 7단계 자동 회귀를 먼저 통과시킨 뒤, 자동화하기 어려운 아래 다섯 가지를 눈으로 확인한다.
+§12의 자동 회귀를 먼저 통과시킨 뒤, 자동화하기 어려운 운영 항목을 눈으로 확인한다.
 
 ```bash
 # 0) 서버 바이너리 준비
@@ -1425,7 +1560,7 @@ stat -c '%a' "${XDG_DATA_HOME:-$HOME/.local/share}/Tetris/token"   # → 600
 
 ## 회고 — 이 시리즈가 감춘 것
 
-12개 장을 지나오며 의도적으로 단순화하거나 아예 다루지 않은 한계가 있다. 이 코드를 기반으로 뭔가를 더 만들 사람에게는 이 목록이 기능 목록보다 유용하다.
+이 시리즈가 의도적으로 단순화하거나 아예 다루지 않은 한계가 있다. 이 코드를 기반으로 기능을 확장할 때는 아래 목록이 현재 기능 재고보다 더 중요한 경계가 된다.
 
 **1. lockstep 은 지연을 숨기지 않는다.** [Part 6](./part6-lockstep-networking.md) 의 모델은 두 클라이언트가 같은 tick 을 같은 입력으로 진행한다. 이 방식의 정확성은 완벽하지만 — desync 가 나면 해시로 즉시 잡힌다 — 대가로 **모든 입력이 왕복 지연만큼 늦게 반영된다.** 입력 지연(input delay) 프레임을 늘리면 끊김은 줄지만 조작감이 나빠지고, 줄이면 반대가 된다. 이 트레이드오프를 피하려면 롤백 넷코드(입력을 예측해 즉시 반영하고, 실제 입력이 도착하면 과거 상태에서 재시뮬레이션)가 필요하다. `SimGame` 이 결정론적이고 상태가 값 타입이라 롤백의 전제 조건 자체는 이미 갖춰져 있지만, 이 시리즈는 거기까지 가지 않는다.
 
@@ -1437,12 +1572,12 @@ stat -c '%a' "${XDG_DATA_HOME:-$HOME/.local/share}/Tetris/token"   # → 600
 
 **5. trainer CLI 는 2-보드 환경을 선택할 수 없다.** `python/common/env_versus.py` 는 가비지 교환형 2-보드 RL 환경을 제공하고 `python/tests/test_versus_env.py` 가 그것을 검증한다. 그런데 `python/train/` 의 기본 trainer CLI 는 아직 단일 보드 환경을 직접 생성한다 — 대전 환경으로 학습하려면 코드를 고쳐야 한다. [Part 8](./part8-python-rl.md) 의 관측/행동 공간은 이미 양쪽을 지원하므로 남은 것은 CLI 배선이다.
 
-**6. 인증은 guest 토큰 하나뿐이다.** 정식 계정도, 토큰 폐기(revocation)도, 다중 기기 로그인도 없다. 토큰 파일을 잃으면 그 player 는 영영 복구할 수 없고, 토큰이 유출되면 막을 방법이 없다. §5 의 `0600` 은 그 사실을 완화할 뿐 해결하지 않는다.
+**6. 인증은 guest 토큰 하나뿐이다.** 정식 계정, 토큰 폐기(revocation), 계정 복구가 없다. relay는 같은 player_id의 동시 ranked session을 막지만 토큰 자체가 유출된 뒤 소유자를 구분할 방법은 없다. 토큰 파일을 잃으면 그 player를 복구할 수 없고, §5의 `0600`은 유출 가능성을 낮출 뿐 수명주기를 해결하지 않는다.
 
 **7. relay 는 평문이다.** §9.1 에서 정당화했듯 relay 는 영속 상태가 없고 인증도 meta 에 위임하지만, 게임 트래픽 자체는 감청·변조 가능하다. 같은 매치에 있는 두 클라이언트는 해시 검증으로 desync 를 잡으므로 중간자가 게임 상태를 조작하면 매치가 깨지긴 한다 — 그래도 이것은 탐지이지 방어가 아니다.
 
 ## 마치며
 
-이 장은 새 기능을 한 줄도 더하지 않았다. 그런데도 코드베이스의 성격을 바꿨다 — "내 노트북에서 도는 데모" 에서 "공개 IP 에 올려도 되는 서비스" 로. 그 차이는 화려한 기능이 아니라 *기본값* 과 *검증 절차* 에 있었다. 안전한 기본값(secret 없으면 시작 거부), 실패해도 죽지 않는 기본값(SIGPIPE 무시, fd 단일 소유, 워커 예외 격리), 신뢰하지 않는 기본값(INPUT 바운드, 송신 타임아웃, 토큰 0600, 루프백 피어만 신뢰), 그리고 그것들이 여전히 성립함을 매번 확인하는 7단계 회귀가 합쳐져 운영 가능한 표면이 된다.
+이 장의 하드닝은 코드베이스를 "내 노트북에서 도는 데모"에서 제한된 공개 시험 운영이 가능한 서비스로 옮겼다. 평문 relay, 단일 프로세스 room 상태, guest 토큰 복구 부재, 저전력 단말 단일 DB 같은 남은 경계 때문에 무조건 안전하다는 뜻은 아니다. 차이를 만든 것은 *기본값*과 *검증 절차*였다. secret 없이는 시작하지 않고, SIGPIPE·fd 수명·worker 예외가 프로세스를 무너뜨리지 않으며, 입력·송신·토큰·프록시를 기본적으로 신뢰하지 않고, 회귀와 부하 측정으로 그 계약을 반복 확인한다.
 
-[Part 1](./part1-deterministic-simulation.md) 의 결정론적 `SimGame` 하나에서 시작해 플랫폼 계층, OpenGL 렌더러, 게임 루프, 오디오, lockstep, 릴레이, Python 바인딩, RL, ONNX 봇, 메타 서비스, 설정을 차례로 쌓았다. 각 계층이 아래 계층의 좁은 API 만 부르고 위 계층을 모른다는 규칙을 지킨 덕분에, 같은 `SimGame` 코드가 게임 클라이언트에서도 학습 환경에서도 그대로 돌아간다. 위 회고에 적은 다음 확장들 — 롤백 넷코드, 가비지 상쇄, 정식 계정, 리플레이, self-play — 도 그 경계를 유지한 채 추가할 수 있다.
+[Part 1](./part1-deterministic-simulation.md)의 결정론적 `SimGame` 하나에서 시작해 플랫폼 계층, OpenGL 렌더러, 게임 루프, 오디오, lockstep, 릴레이, Python 바인딩, RL, ONNX 봇, 메타 서비스, 설정을 쌓았다. 각 계층이 아래 계층의 좁은 API만 부르고 위 계층을 모른다는 규칙을 지킨 덕분에, 같은 `SimGame` 코드가 게임 클라이언트에서도 학습 환경에서도 그대로 돌아간다. 회고에서 확인한 롤백 넷코드, 가비지 상쇄, 정식 계정, 리플레이, self-play도 이 경계를 유지해야 기존 검증 자산을 재사용할 수 있다.

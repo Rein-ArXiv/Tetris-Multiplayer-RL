@@ -4,7 +4,7 @@
 #include "../core/rng.h"
 #include "../core/input.h"
 #include "../core/constants.h"
-#include "../platform/platform.h"  // Color (raylib 대체)
+#include "../platform/platform.h"  // Color
 #include "../audio/audio.h"
 
 // 고스트 피스 표시 on/off (렌더 전용 — 설정 화면이 구동). 기본 on.

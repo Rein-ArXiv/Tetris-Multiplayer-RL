@@ -14,6 +14,9 @@ This module exposes:
 - :func:`build_frame` for serialisation
 - :func:`parse_frames` for stream parsing — operates on a ``bytearray`` and
   trims consumed bytes in place, just like the C++ ``erase`` does
+- :class:`FramingError` — 오버사이즈 길이 선언 등 스트림을 오염시키는 위반.
+  C++ 의 ``parse_frames`` return false 에 대응하며, 받은 호출자는 연결을
+  닫아야 한다.
 - Little-endian read/write helpers
 
 The unit test ``python/tests/test_framing_parity.py`` round-trips against
@@ -33,10 +36,30 @@ LEN_FIELD_BYTES = 2
 TYPE_FIELD_BYTES = 1
 CHECKSUM_FIELD_BYTES = 4
 MIN_FRAME_BYTES = LEN_FIELD_BYTES + TYPE_FIELD_BYTES + CHECKSUM_FIELD_BYTES  # 7
-# net/framing.cpp의 MAX_PAYLOAD_BYTES와 같은 값이어야 한다.
-# u16의 자연 한계(65535)는 사실상 상한이 없으므로, 실사용 최대(CHAT 200자 UTF-8 ~800B,
-# HASH/INPUT은 수십 B)에 맞춰 실질적인 하드 리미트로 4KB를 건다.
+# net/framing.h 의 net::kMaxPayloadBytes 와 같은 값이어야 한다 (패리티 테스트가 고정).
+# u16의 자연 한계(65535)는 이 프로토콜에서 실질적인 상한이 아니다. 현재의
+# 정상 메시지는 4KiB 안에 들어오므로 C++ 파서와 같은 hard limit를 둔다.
+# 이 값은 단순 메모리 최적화가 아니라, 악성 길이 선언을 받은 파서가 끝없이
+# body를 기다리며 수신 버퍼를 키우지 않게 하는 wire 보안 경계다.
 MAX_PAYLOAD_BYTES = 4096
+
+
+class FramingError(Exception):
+    """스트림 자체를 오염시키는 프레이밍 위반 (오버사이즈 길이 선언).
+
+    C++ 의 ``net::parse_frames`` 는 이 상황에서 수신 버퍼를 비우고
+    ``return false`` 하며, 호출자(relay/Session)는 false 를 보고 연결을
+    닫는다. Python 은 반환값이 조용히 무시되기 쉬우므로 예외로 승격해
+    호출자가 반드시 연결 종료로 대응하게 강제한다.
+
+    ``frames`` 속성에는 오염 지점 이전까지 정상 파싱된 프레임들이 담긴다
+    (C++ 에서 out 파라미터에 이미 쌓인 프레임과 동일).
+    """
+
+    def __init__(self, message: str,
+                 frames: list[tuple["MsgType", bytes]] | None = None):
+        super().__init__(message)
+        self.frames: list[tuple[MsgType, bytes]] = frames if frames is not None else []
 
 
 class MsgType(enum.IntEnum):
@@ -50,13 +73,12 @@ class MsgType(enum.IntEnum):
     HASH = 8
     GAME_OVER_CHOICE = 9
 
-    # 여기부터는 클라이언트와 relay 서버 사이에서만 오가는 매치메이킹용이다.
-    # MATCH_FOUND 이후로는 relay가 바이트를 그대로 흘려보내기만 하므로
-    # 이 메시지들이 lockstep 루프까지 내려오는 일은 없다.
+    # 큐·룸 제어는 relay와 Session이 소비하고, 일반 게임 프레임은 전달한다.
+    # ranked MATCH_SUMMARY만 relay가 결과 검증을 위해 가로챈다.
     QUEUE_JOIN = 10     # C→S: [tok_len:1][token:N]  (tok_len=0 → unranked)
     QUEUE_CANCEL = 11   # C→S: empty payload (cancel matchmaking)
     MATCH_FOUND = 12    # S→C: [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
-                        #      [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
+                        #      [peer_icon_len:1][peer_icon:N][uuid_len:1][uuid:N]
 
     # 커스텀 방. 5자리 코드로 붙는다.
     ROOM_CREATE = 13    # C→S: [tok_len:1][token:N]
@@ -66,7 +88,7 @@ class MsgType(enum.IntEnum):
     ROOM_LEAVE = 16     # C→S: empty payload
     READY = 17          # C→S, S→C(forward): [ready:1] (1=ready, 0=not)
 
-    # Section K — 메타/RP 연동(프로토콜 필드명은 하위 호환상 elo 유지).
+    # 메타/RP 연동. 프로토콜 필드명 elo는 하위 호환을 위해 유지한다.
     MATCH_SUMMARY = 18  # C→S: [won:1][my_score:4][my_lines:4]
                         #      [opp_score_observed:4][opp_lines_observed:4]
                         #      [duration_s:4]   (LE, 21 bytes total)
@@ -140,6 +162,15 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
     place — partial frames at the end are left for the next call. Frames whose
     checksum doesn't match are silently dropped (same behaviour as the C++
     parser, which keeps the lockstep loop forgiving rather than fatal).
+
+    Raises:
+        FramingError: 선언된 길이(LEN)가 상한
+            ``MAX_PAYLOAD_BYTES + TYPE_FIELD_BYTES`` 를 넘는 경우.
+            ``stream_buf`` 는 비워진 상태로 던져진다 (버퍼 리셋은 여기서
+            이미 완료). C++ 대응 동작: ``net::parse_frames`` 가
+            ``return false`` 하고 호출자가 소켓을 close 한다 — Python
+            호출자도 이 예외를 받으면 연결을 닫는 것으로 대응해야 한다.
+            오염 전까지 파싱된 프레임은 예외의 ``frames`` 속성으로 전달된다.
     """
     out: list[tuple[MsgType, bytes]] = []
     offset = 0
@@ -150,13 +181,22 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
             break
 
         length = le_read_u16(stream_buf, offset)
-        # 길이가 상한을 넘으면 스트림 전체를 버린다.
-        # 길이 필드가 깨졌다는 뜻이고, 그러면 다음 프레임이 어디서 시작하는지도
-        # 알 수 없다. 억지로 복구하려 들면 쓰레기를 계속 먹는다.
-        # 무한히 큰 길이를 보내 수신 버퍼를 불리는 공격도 여기서 막힌다.
+        # 길이가 상한을 넘으면 스트림 전체를 버린다. 길이 필드가 깨졌다는
+        # 뜻이므로 다음 프레임의 시작점을 더는 신뢰할 수 없다. 억지로 한
+        # 프레임만 건너뛰면 쓰레기 바이트를 새 header로 오인할 수 있고,
+        # 선언된 body를 기다리면 공격자가 수신 버퍼를 계속 키울 수 있다.
+        #
+        # 예전에는 여기서 그냥 out 을 반환해 정상 종료와 구분이 안 됐다.
+        # C++ 은 return false 로 호출자에게 "연결을 끊어라" 를 알리므로,
+        # Python 도 같은 신호를 FramingError 로 준다 (버퍼는 비운 뒤 raise —
+        # 호출자는 연결 종료만 책임지면 된다).
         if length > MAX_PAYLOAD_BYTES + TYPE_FIELD_BYTES:
             del stream_buf[:]
-            return out
+            raise FramingError(
+                f"declared frame length {length} exceeds cap "
+                f"{MAX_PAYLOAD_BYTES + TYPE_FIELD_BYTES}",
+                frames=out,
+            )
         need = LEN_FIELD_BYTES + length + CHECKSUM_FIELD_BYTES
         if buf_len - offset < need:
             break
@@ -178,8 +218,8 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
             try:
                 msg_type = MsgType(msg_type_byte)
             except ValueError:
-                # 모르는 타입은 그 프레임만 버리고 계속 읽는다.
-                # 나중에 메시지가 추가돼도 구버전 클라이언트가 죽지 않는다.
+                # 모르는 타입은 그 프레임만 소비하고 계속 읽는다. 선택 기능이
+                # 추가돼도 구버전 Python 소비자가 예외로 종료되지 않게 한다.
                 pass
             else:
                 out.append((msg_type, payload))

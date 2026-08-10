@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -7,6 +8,20 @@
 // 상세: ARCHITECTURE.md §7.2 (MsgType 표) 및 §11/§12 (메타 + 랭킹 흐름)
 
 namespace net {
+
+// 프레임 한계/헤더 필드 크기 — C++ 쪽 단일 진실 공급원(과거엔 framing.cpp 익명
+// 네임스페이스에 있던 값을 공개 승격했고, server/relay.cpp 도 이 상수를 참조한다).
+// 주의: 같은 값이 Python 미러(python/netbot/framing.py)에 중복돼 있고, 패리티
+//   테스트(python/tests/test_framing_parity.py)가 이 값을 고정한다. 한쪽만 올리면
+//   반대편 파서가 정상 프레임의 LEN 을 한도 초과로 보고 스트림 오염으로 오판해
+//   연결을 끊으므로, 반드시 양쪽을 함께 바꿔야 한다.
+// kMaxPayloadBytes 는 단순 메모리 최적화가 아니라 wire 보안 경계다: 악성 길이
+//   선언을 받은 파서가 끝없이 body 를 기다리며 수신 버퍼를 키우는 것을 막는다.
+//   정상 메시지 중 가장 큰 CHAT 도 이 한도 아래에 들어온다.
+constexpr std::size_t kMaxPayloadBytes    = 4096;  // PAYLOAD 상한 (바이트)
+constexpr std::size_t kFrameLenBytes      = 2;     // LEN 필드 (u16 LE)
+constexpr std::size_t kFrameTypeBytes     = 1;     // TYPE 필드 (u8)
+constexpr std::size_t kFrameChecksumBytes = 4;     // CHECKSUM 필드 (u32 LE, FNV-1a)
 
 // 메시지 타입
 enum class MsgType : uint8_t {
@@ -20,9 +35,9 @@ enum class MsgType : uint8_t {
     HASH = 8,
     GAME_OVER_CHOICE = 9,
 
-    // 릴레이/매치메이킹 확장 (클라 ↔ 릴레이 서버 간에만 사용 — 릴레이가
-    // MATCH_FOUND 를 보낸 후에는 투명하게 바이트 스트림만 포워딩하므로
-    // 게임 루프는 이 두 타입을 직접 소비하지 않는다.)
+    // 릴레이/매치메이킹 확장. 큐·룸 제어는 relay와 Session이 소비하고,
+    // 매치 중 일반 게임 프레임은 전달한다. ranked MATCH_SUMMARY만 relay가
+    // 결과 검증을 위해 가로챈다. SimGame은 이 제어 타입을 직접 소비하지 않는다.
     //
     // QUEUE_JOIN / ROOM_CREATE / ROOM_JOIN 은 모두 tetris_meta 인증 토큰을
     // 같이 실어 보낸다. 토큰은 32 hex chars (플랫폼 user-data 경로에 저장).
@@ -31,11 +46,12 @@ enum class MsgType : uint8_t {
     QUEUE_JOIN    = 10,  // C→S : [tok_len:1][token:N]   (tok_len==0 이면 미인증)
     QUEUE_CANCEL  = 11,  // C→S : 빈 페이로드 (매치메이킹 큐 취소)
     MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
-                         //        [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
+                         //        [peer_icon_len:1][peer_icon:N][uuid_len:1][uuid:N]
+                         //        role: 1=HOST, 2=GUEST. 구 클라이언트는 UUID를 무시한다.
 
-    // 커스텀 룸 (Section D)
+    // 커스텀 룸
     //   플레이어가 5자리 코드로 방을 만들어 친구와 페어링.
-    //   서버가 둘 다 Ready 상태를 확인하면 MATCH_FOUND 로 기존 릴레이 경로 진입.
+    //   서버가 둘 다 Ready 상태를 확인하면 MATCH_FOUND 로 릴레이 경로에 진입.
     ROOM_CREATE = 13,  // C→S : [tok_len:1][token:N]
     ROOM_JOIN   = 14,  // C→S : [code_len:1][code:N][tok_len:1][token:N]
     ROOM_INFO   = 15,  // S→C : [code_len:1][code:N][status:1][peer_count:1]
@@ -43,8 +59,8 @@ enum class MsgType : uint8_t {
     ROOM_LEAVE  = 16,  // C→S : 빈 페이로드
     READY       = 17,  // C→S, S→C(forward) : [ready:1]  (1=ready, 0=not)
 
-    // Section K — 메타데이터/RP 연동. 투명 릴레이 구간이 아니라 relay 가
-    // 가로채서 meta 로 POST /v1/matches 를 날리고 MATCH_RESULT 로 돌려준다.
+    // 메타데이터/RP 연동. relay가 MATCH_SUMMARY를 가로채 결과를 검증하고,
+    // meta의 POST /v1/matches 응답을 MATCH_RESULT로 돌려준다.
     MATCH_SUMMARY = 18,  // C→S : [won:1][my_score:4 LE][my_lines:4 LE]
                          //        [opp_score_observed:4 LE][opp_lines_observed:4 LE]
                          //        [duration_s:4 LE]  (총 21 바이트)

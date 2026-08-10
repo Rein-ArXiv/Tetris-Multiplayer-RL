@@ -1,7 +1,8 @@
 // audio/audio.cpp -- XAudio2 + dr_mp3 구현
 //
 // 학습 포인트:
-//   이 파일이 하는 일 = raylib의 raudio.c (miniaudio 래퍼) 를 직접 구현한 것.
+//   이 파일이 하는 일 = 기성 프레임워크의 오디오 모듈(내부 믹서 라이브러리 래퍼)이
+//   해 주던 일을 직접 구현한 것.
 //   XAudio2 그래프: Source Voice -> Mastering Voice -> 스피커
 //   MP3 디코딩은 dr_mp3 (단일 헤더, public domain).
 //

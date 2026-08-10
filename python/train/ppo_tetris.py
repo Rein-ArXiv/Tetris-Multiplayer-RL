@@ -107,7 +107,6 @@ def to_batch(obs: dict, device) -> dict:
     }
 
 
-@torch.no_grad()
 def make_env(kind: str, seed: int):
     """학습/평가에 쓸 환경을 만든다.
 
@@ -120,6 +119,7 @@ def make_env(kind: str, seed: int):
     return TetrisPlacementEnv(seed=seed)
 
 
+@torch.no_grad()
 def evaluate_policy(
     model: TetrisPolicyNet,
     *,

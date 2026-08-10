@@ -23,16 +23,11 @@ namespace relay {
 namespace {
 
 std::atomic<bool> s_stopping{false};
-// queue lobby와 양방향 forwarder도 모두 detached thread이므로 연결 워커와
-// 별도로 상한을 둔다. 빠른 QUEUE_JOIN 플러드가 첫-frame 워커를 즉시 통과해
-// 무제한 lobby thread를 만드는 경로까지 이 그룹이 차단한다.
+// Lobby and forwarder threads have a separate bound from handshake workers.
 constexpr size_t kMaxRelayWorkers = 512;
 WorkerGroup s_workers{"relay", kMaxRelayWorkers};
 
-// MATCH_SUMMARY 페이로드 구조 (net/framing.h 에 명시된 정확히 21 바이트):
-//   [won:1][my_score:4 LE][my_lines:4 LE]
-//   [opp_score_observed:4 LE][opp_lines_observed:4 LE]
-//   [duration_s:4 LE]
+// MATCH_SUMMARY is a fixed 21-byte payload; see net/framing.h.
 struct Summary {
     uint8_t  won;
     uint32_t my_score;
@@ -64,21 +59,23 @@ std::vector<uint8_t> build_match_result(int32_t elo_before, int32_t elo_after, i
     return net::build_frame(net::MsgType::MATCH_RESULT, pl);
 }
 
-// 양 방향 스레드가 공유하는 채널 상태.
-// · forwarder_count 가 0 이 되는 순간 양 소켓 close.
-// · summaryA/B 는 forwarderLoop 가 MATCH_SUMMARY 프레임을 가로챌 때 채워짐.
+// State shared by both forwarding directions.
 struct Channel {
     net::TcpSocket   A;            // HOST 소켓
     net::TcpSocket   B;            // GUEST 소켓
     uint32_t         match_id{0};
+    std::string      match_uuid;
 
     int64_t          playerA_id{0};
     int64_t          playerB_id{0};
     int              playerA_elo{0};
     int              playerB_elo{0};
+    std::shared_ptr<PlayerSessionLease> playerA_session;
+    std::shared_ptr<PlayerSessionLease> playerB_session;
 
     std::atomic<bool> closed{false};
     std::atomic<int>  forwarder_count{2};
+    std::atomic<int>  disconnect_side{0}; // 1=A, 2=B; first observed failure wins
 
     // MATCH_SUMMARY 수집
     std::mutex              sumMu;
@@ -86,26 +83,16 @@ struct Channel {
     std::optional<Summary>  summaryB;
     bool                    summaryHandled{false};   // 한 번만 처리
 
-    // Lobby 단계에서 recv 됐지만 아직 포워딩되지 못한 raw 바이트.
-    //   READY 교환 중 상대가 먼저 게임 프레임(PING 등)을 보내면 TCP 버퍼를 lobby
-    //   스레드가 이미 kernel→userspace 로 끌어온 상태다. 그 바이트는 forwarder 가
-    //   다시 recv 할 수 없으므로, 첫 iteration 에서 streamBuf / 상대 소켓으로 재주입.
+    // Bytes read by the lobby after READY are handed to the forwarders.
     std::vector<uint8_t>   prefixFromA;
     std::vector<uint8_t>   prefixFromB;
 
-    // 목적지 소켓별 send mutex — forwarderLoop 두 방향이 같은 목적지에 동시
-    // tcp_send_all 을 호출하는 것을 직렬화.  배경:
-    //   · A→B forwarder 는 B 에 tcp_send_all.
-    //   · B→A forwarder 는 A 에 tcp_send_all.
-    //   · finalizeRanked 는 A 와 B 양쪽에 MATCH_RESULT 를 직접 송신.
-    // tcp_send_all 은 partial send 루프라 두 스레드가 같은 fd 에 interleaved 로
-    // 진입하면 프레임 바이트가 섞일 위험이 있다 — 손상된 프레임 → 체크섬 실패 →
-    // 그 프레임만 드롭되면 그나마 낫지만, MATCH_RESULT 같이 재전송이 없는 건
-    // 유실된다. 목적지별 mutex 로 원자성 보장.
+    // Serialize partial sends to each destination socket.
     std::mutex             sendMuA;
     std::mutex             sendMuB;
 
-    // meta 호출 경로 (nullptr 이면 MATCH_SUMMARY 는 투명 포워딩)
+    // meta 호출 경로. nullptr이면 unranked raw 전달이며 MATCH_SUMMARY도
+    // 서버 결과로 해석하지 않는다.
     meta::client::MetaClient* meta{nullptr};
 };
 
@@ -131,10 +118,7 @@ bool sendToB(Channel& ch, const uint8_t* data, size_t len)
     return net::tcp_send_all(ch.B, data, len);
 }
 
-// 두 MATCH_SUMMARY 가 모두 도착했을 때 교차검증 + meta POST + MATCH_RESULT 송신.
-// 양방향 forwarderLoop 중 먼저 양쪽 수집 완료를 본 스레드 하나가 실행한다.
-// 실패/meta-down 상황에서도
-// 양 클라에 MATCH_RESULT(delta=0) 는 반드시 송신해 "ranking offline" 표시 가능.
+// Cross-check both summaries and publish one ranked result.
 void finalizeRanked(Channel& ch)
 {
     // 선점 — 한 번만 실행.
@@ -147,10 +131,7 @@ void finalizeRanked(Channel& ch)
     const Summary a = *ch.summaryA;
     const Summary b = *ch.summaryB;
 
-    // 교차검증 (계획문서 규칙):
-    //   1) 한 명만 승리 주장해야 한다 (won_a XOR won_b).
-    //   2) a.my_score == b.opp_score_observed 이고 반대도 성립.
-    //   3) 라인수도 동일.
+    // Both sides must agree on winner, score, and lines.
     const bool exclusive_win = (a.won ^ b.won) != 0;
     const bool scores_match  = (a.my_score == b.opp_score) && (b.my_score == a.opp_score);
     const bool lines_match   = (a.my_lines == b.opp_lines) && (b.my_lines == a.opp_lines);
@@ -168,8 +149,7 @@ void finalizeRanked(Channel& ch)
                   << ") -> winner=null\n";
     }
 
-    // cross_ok=false 여도 감사 목적으로 자가보고 값을 그대로 기록한다.
-    // winner=null 이므로 RP 에는 영향 없음 — DB 에는 "누가 뭐라고 주장했나" 만 남는다.
+    // A mismatch is stored as a draw and does not change RP.
     const int      duration_s = static_cast<int>(std::max(a.duration_s, b.duration_s));
     const int      score_a    = static_cast<int>(a.my_score);
     const int      score_b    = static_cast<int>(b.my_score);
@@ -181,7 +161,7 @@ void finalizeRanked(Channel& ch)
     int eloBBefore = ch.playerB_elo, eloBAfter = ch.playerB_elo;
 
     if (ch.meta) {
-        auto res = ch.meta->post_match(ch.playerA_id, ch.playerB_id, winner,
+        auto res = ch.meta->post_match(ch.match_uuid, ch.playerA_id, ch.playerB_id, winner,
                                        score_a, score_b, lines_a, lines_b,
                                        duration_s);
         if (res) {
@@ -209,52 +189,144 @@ void finalizeRanked(Channel& ch)
     sendToB(ch, frB);
 }
 
+// A peer lost before finalizeRanked ran. 몰수패 처리 진입점 — 요약이 몇 개
+// 수집됐는지에 따라 세 갈래로 나뉜다 (각 분기 주석 참고).
+// disconnectSide 는 "먼저 끊긴 쪽"(1=A, 2=B, 0=미상)일 뿐 패자가 아니다 —
+// 승자 판정에는 쓰지 않고 MATCH_RESULT 송신 대상(생존자) 선정에만 쓴다.
+void finalizeForfeit(Channel& ch, int disconnectSide)
+{
+    if (!ch.meta || ch.playerA_id == 0 || ch.playerB_id == 0) return;
+
+    Summary a{}, b{};
+    bool haveA = false;
+    bool haveB = false;
+    {
+        std::lock_guard<std::mutex> lk(ch.sumMu);
+        if (ch.summaryHandled) return;
+        haveA = ch.summaryA.has_value();
+        haveB = ch.summaryB.has_value();
+        // 양쪽 요약이 다 모였으면 몰수패가 아니다 — summaryHandled 를 여기서
+        // 선점하지 않고 finalizeRanked 의 교차검증 경로에 맡긴다 (락 밖에서 위임).
+        if (!(haveA && haveB)) {
+            ch.summaryHandled = true;
+        }
+        if (haveA) a = *ch.summaryA;
+        if (haveB) b = *ch.summaryB;
+    }
+
+    // (1) 양쪽 요약 존재: 회선이 끊겼어도 경기 자체는 완주된 것이다 (예: 승패
+    //     확정 직후 요약만 보내고 즉시 종료). 교차검증으로 승자를 확정한다.
+    if (haveA && haveB) {
+        finalizeRanked(ch);
+        return;
+    }
+
+    // (2) 요약이 하나도 없음(즉시 이탈, 무경기): meta 에 post_match 를 보내지
+    //     않는다 — RP 미반영. 커스텀 룸에서 READY 직후 끊기를 반복하는 담합
+    //     RP 파밍과, 동시 단절 시 disconnect_side 관측 순서 하나로 임의 승자를
+    //     만들어 RP 를 오염시키는 것을 함께 막는다. 생존자에게는 델타 0 의
+    //     MATCH_RESULT 를 보내 결과 대기 화면에서 빠져나오게 한다.
+    if (!haveA && !haveB) {
+        auto frA = build_match_result(ch.playerA_elo, ch.playerA_elo, 0);
+        auto frB = build_match_result(ch.playerB_elo, ch.playerB_elo, 0);
+        // disconnectSide==0(순서 미상)이면 양쪽 다 시도 — 죽은 소켓으로의
+        // send 는 무해하게 실패한다.
+        if (disconnectSide != 1) sendToA(ch, frA);
+        if (disconnectSide != 2) sendToB(ch, frB);
+        std::cerr << "[relay] match=" << ch.match_id
+                  << " no summaries -> no meta post (delta=0)\n";
+        return;
+    }
+
+    // (3) 한쪽 요약만 존재: 그 요약의 won 플래그를 존중해 승자를 정한다.
+    //     종전에는 disconnectSide 를 무조건 패자로 기록했는데, 그러면 이긴 쪽이
+    //     승리 요약을 제출한 직후 회선이 끊겼을 때 제출된 승리 요약이 무시되고
+    //     승자가 패자로 뒤집히는 버그가 있었다.
+    int64_t winner = 0;
+    if (haveA) winner = a.won ? ch.playerA_id : ch.playerB_id;
+    else       winner = b.won ? ch.playerB_id : ch.playerA_id;
+
+    const int scoreA = static_cast<int>(haveA ? a.my_score : b.opp_score);
+    const int scoreB = static_cast<int>(haveB ? b.my_score : a.opp_score);
+    const int linesA = static_cast<int>(haveA ? a.my_lines : b.opp_lines);
+    const int linesB = static_cast<int>(haveB ? b.my_lines : a.opp_lines);
+    const int duration = static_cast<int>(std::max(a.duration_s, b.duration_s));
+
+    auto res = ch.meta->post_match(ch.match_uuid, ch.playerA_id, ch.playerB_id,
+                                   winner, scoreA, scoreB, linesA, linesB,
+                                   duration, 3);
+    if (!res) {
+        std::cerr << "[relay] match=" << ch.match_id
+                  << " forfeit meta POST failed\n";
+        return;
+    }
+
+    auto frA = build_match_result(res->a.elo_before, res->a.elo_after, res->a.delta);
+    auto frB = build_match_result(res->b.elo_before, res->b.elo_after, res->b.delta);
+    // 끊긴 쪽 소켓은 이미 죽어 있으므로 생존 가능성이 있는 쪽에만 보낸다.
+    if (disconnectSide != 1) sendToA(ch, frA);
+    if (disconnectSide != 2) sendToB(ch, frB);
+    std::cerr << "[relay] match=" << ch.match_id << " forfeit winner="
+              << (winner == ch.playerA_id ? "A" : "B")
+              << " (summary from " << (haveA ? "A" : "B")
+              << ", disconnect=" << disconnectSide << ") saved meta match="
+              << res->match_id << "\n";
+}
+
 // 한 방향 포워딩 루프.
 //   a_to_b == true  → A 에서 읽어 B 로 쓰기. MATCH_SUMMARY 는 가로챔.
 //   a_to_b == false → B → A.
 //
-// MATCH_SUMMARY 는 반드시 ranked + meta 연동 + 양쪽 player_id != 0 일 때만
-// 가로챈다. 그 외의 경우(unranked / no meta)는 투명 포워딩.
+// MATCH_SUMMARY는 ranked + meta 연동 + 양쪽 player_id != 0일 때만 가로챈다.
+// unranked/no-meta 경로는 프레임 경계도 만들지 않고 받은 byte를 그대로 전달한다.
 void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 {
     const net::TcpSocket& from = a_to_b ? ch->A : ch->B;
     const net::TcpSocket& to   = a_to_b ? ch->B : ch->A;
     const char*           dir  = a_to_b ? "A->B" : "B->A";
+    int disconnectSide = 0;
 
-    // 예외를 포함한 모든 반환 경로에서 반대편 루프를 멈추고 채널 카운트를
-    // 정리한다. WorkerGroup이 본문 예외를 격리하더라도 이 도메인 정리는
-    // forwarderLoop 안에서 수행되어야 상대 worker와 shutdown이 남지 않는다.
+    // Every exit stops the peer direction and releases the channel once.
     struct ForwarderCompletion {
         std::shared_ptr<Channel> channel;
         const char* direction;
+        int* failureSide;
 
         ~ForwarderCompletion()
         {
             std::cerr << "[relay] match=" << channel->match_id
                       << " " << direction << " end\n";
+            if (*failureSide != 0 && !s_stopping.load()) {
+                int expected = 0;
+                channel->disconnect_side.compare_exchange_strong(expected, *failureSide);
+            }
             channel->closed.store(true);
             if (--channel->forwarder_count == 0) {
+                if (!s_stopping.load()) {
+                    finalizeForfeit(*channel, channel->disconnect_side.load());
+                }
                 net::tcp_close(channel->A);
                 net::tcp_close(channel->B);
                 std::cerr << "[relay] match=" << channel->match_id << " closed\n";
             }
         }
-    } completion{ch, dir};
+    } completion{ch, dir, &disconnectSide};
 
     const bool rankedMatch = (ch->meta != nullptr) &&
                              (ch->playerA_id != 0) &&
                              (ch->playerB_id != 0);
 
-    // parse_frames 는 스트림 버퍼가 필요. MATCH_SUMMARY 만 따로 빼내고 나머지는
-    // 원본 바이트 그대로 to 에 보내야 한다 — 이를 위해 raw 와 parsed 두 경로를
-    // 유지한다. rankedMatch=false 면 파싱하지 않고 raw 를 그대로 전달.
+    // Ranked mode intercepts summaries; unranked mode forwards raw bytes.
     std::vector<uint8_t> raw; raw.reserve(4096);
     std::vector<uint8_t> streamBuf; streamBuf.reserve(4096);
 
-    // Lobby 에서 남긴 prefix 바이트가 있으면 첫 iteration 의 raw 로 사용한다.
-    //   · unranked 모드: 그대로 to 로 송신.
-    //   · ranked 모드: streamBuf 에 들어가 프레이밍 파서가 처리.
+    // Consume lobby-prefetched bytes before reading the socket.
     bool havePrefix = false;
+    auto lastActivity = std::chrono::steady_clock::now();
+    auto byteWindowStart = lastActivity;
+    size_t byteWindow = 0;
+    constexpr auto kIdleTimeout = std::chrono::seconds(15);
+    constexpr size_t kMaxBytesPerSecond = 64 * 1024;
     {
         std::vector<uint8_t>& pref = a_to_b ? ch->prefixFromA : ch->prefixFromB;
         if (!pref.empty()) {
@@ -269,50 +341,62 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             havePrefix = false;  // raw 는 이미 준비돼 있음 — 바로 처리.
         } else {
             raw.clear();
-            if (!net::tcp_recv_some(from, raw)) break;
+            if (!net::tcp_recv_some(from, raw)) {
+                disconnectSide = a_to_b ? 1 : 2;
+                break;
+            }
             if (raw.empty()) {
+                if (std::chrono::steady_clock::now() - lastActivity >= kIdleTimeout) {
+                    disconnectSide = a_to_b ? 1 : 2;
+                    std::cerr << "[relay] match=" << ch->match_id << " " << dir
+                              << " idle timeout\n";
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
         }
 
+        const auto now = std::chrono::steady_clock::now();
+        lastActivity = now;
+        if (now - byteWindowStart >= std::chrono::seconds(1)) {
+            byteWindowStart = now;
+            byteWindow = 0;
+        }
+        byteWindow += raw.size();
+        if (byteWindow > kMaxBytesPerSecond) {
+            disconnectSide = a_to_b ? 1 : 2;
+            std::cerr << "[relay] match=" << ch->match_id << " " << dir
+                      << " byte rate exceeded\n";
+            break;
+        }
+
         if (!rankedMatch) {
-            // 투명 포워딩 — MATCH_SUMMARY 도 통과 (클라는 서버 응답 못 받아도 OK).
-            // sendMuA/B 로 보호해 finalizeRanked / 반대 방향 forwarder 와 직렬화.
+            // Unranked raw 전달 — MATCH_SUMMARY도 평범한 wire byte일 뿐이며
+            // MATCH_RESULT는 만들지 않는다. sendMuA/B로 보호해 반대 방향
+            // forwarder와 같은 destination socket에 쓰는 순서를 직렬화한다.
             const bool ok = a_to_b ? sendToB(*ch, raw.data(), raw.size())
                                    : sendToA(*ch, raw.data(), raw.size());
-            if (!ok) break;
+            if (!ok) {
+                disconnectSide = a_to_b ? 2 : 1;
+                break;
+            }
             continue;
         }
 
-        // ranked: 프레임 단위로 파싱해 MATCH_SUMMARY 를 가로챈다.
-        // parse_frames 는 streamBuf 를 소비형으로 다룸 (완성된 프레임만큼 앞에서 제거).
+        // Ranked mode parses frame boundaries to intercept MATCH_SUMMARY.
         streamBuf.insert(streamBuf.end(), raw.begin(), raw.end());
-        // 프레임 경계를 파악하기 위해 build_frame 의 역함수가 필요. 우리 프레임
-        // 포맷은 [LEN:2][TYPE:1][PAYLOAD:LEN-1][CHK:4] — LEN 앞 2바이트로 총
-        // 바이트 수 (= LEN + 2 + 4) 를 알 수 있다. parse_frames 는 체크섬까지
-        // 확인해 프레임 객체를 주지만, raw 바이트는 소비하고 버린다. 그래서
-        // MATCH_SUMMARY 가 아닌 프레임은 원본을 다시 재조립해 to 로 보내야 한다.
-        //
-        // 간단하게 가기 위해 우리는 streamBuf 를 직접 프레이밍한다:
-        //   · LEN 을 읽어 완성된 프레임이 있으면 (2+len+4 bytes) 잘라낸다.
-        //   · TYPE 이 MATCH_SUMMARY 이면 수집만 하고 포워딩하지 않는다.
-        //   · 그 외 TYPE 이면 잘라낸 바이트 전체를 to 로 송신.
-        //
-        // MATCH_SUMMARY 는 relay 가 실제로 신뢰해 RP 갱신에 쓰므로, 이 타입만큼은
-        // 최소한 framing.cpp 와 동일한 payload checksum 을 재검증한다. 나머지
-        // 프레임은 기존처럼 투명 포워딩한다.
+        // Non-summary frames retain their original wire bytes.
 
         bool sendFailed = false;
-        constexpr size_t kRelayMaxPayload = 4096;  // net/framing.cpp 의 MAX_PAYLOAD_BYTES 와 동일
         while (streamBuf.size() >= 2) {
             const uint16_t payloadAndType = static_cast<uint16_t>(streamBuf[0]) |
                                             (static_cast<uint16_t>(streamBuf[1]) << 8);
 
-            // 페이로드 상한 초과 선언이면 framing.cpp::parse_frames 와 동일하게
-            // 스트림 전체를 버린다. 손상/악성 LEN 으로 forwarder 가 64KB 까지
-            // 버퍼링하는 것을 방지한다.
-            if (static_cast<size_t>(payloadAndType) > kRelayMaxPayload + 1u) {
+            // Reject oversized declarations before the buffer grows.
+            // 상한은 net/framing.h 가 공개하는 값을 직접 참조 — 로컬 사본이
+            // framing 구현과 어긋나는 drift 를 막는다.
+            if (static_cast<size_t>(payloadAndType) > net::kMaxPayloadBytes + 1u) {
                 std::cerr << "[relay] match=" << ch->match_id
                           << " dropping over-sized frame (len=" << payloadAndType
                           << ") from " << (a_to_b ? "A" : "B") << "\n";
@@ -374,6 +458,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                 const bool ok = a_to_b ? sendToB(*ch, streamBuf.data(), totalNeeded)
                                        : sendToA(*ch, streamBuf.data(), totalNeeded);
                 if (!ok) {
+                    disconnectSide = a_to_b ? 2 : 1;
                     sendFailed = true;
                     break;
                 }
@@ -381,9 +466,12 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             streamBuf.erase(streamBuf.begin(), streamBuf.begin() + totalNeeded);
         }
 
-        if (sendFailed) break;
-
         // 양쪽 MATCH_SUMMARY 모두 모였다면 finalize. (매 루프 체크 — 가벼움)
+        // sendFailed 로 빠져나가기 "직전"에도 반드시 수행한다 — 양 방향이 거의
+        // 동시에 send 실패로 죽는 타이밍에는, 이 배치에서 마지막 요약을 방금
+        // 가로챘는데도 어느 쪽도 루프를 한 바퀴 더 돌지 못해 교차검증이 생략되고
+        // forfeit 경로로 흘러가는 경합이 있었다. (finalizeForfeit 도 양쪽 요약이
+        // 있으면 위임하지만, 소켓이 닫히기 전에 결과를 보내려면 여기가 먼저다.)
         bool both = false;
         {
             std::lock_guard<std::mutex> lk(ch->sumMu);
@@ -392,26 +480,28 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         if (both) {
             finalizeRanked(*ch);
         }
+
+        if (sendFailed) break;
     }
 
-    // 연결 종료 직전 — 한쪽만 summary 보내고 끊긴 경우에도 상대에겐 delta=0 을
-    // 돌려주고 싶지만, 복잡도 대비 이득이 작으므로 skip. finalize 는 "양쪽 모두
-    // 도착했을 때" 만 호출됨.
 }
 
 // MATCH_FOUND 프레임 전송.
-// 페이로드: [role:1][seed:8 LE][my_icon_len:1][my_icon:N][peer_icon_len:1][peer_icon:N]
-// 뒤쪽 icon 필드는 구버전 클라와의 완만한 호환을 위해 optional 처럼 파싱한다.
+// 페이로드: [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
+//             [peer_icon_len:1][peer_icon:N][uuid_len:1][match_uuid:N]
+// 뒤쪽 icon/UUID 필드는 구버전 클라와의 완만한 호환을 위해 optional 처럼 파싱한다.
 bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
                     const std::string& my_icon,
-                    const std::string& peer_icon) {
+                    const std::string& peer_icon,
+                    const std::string& match_uuid) {
     const std::string my = my_icon.empty() ? "default" : my_icon;
     const std::string peer = peer_icon.empty() ? "default" : peer_icon;
     const size_t my_len = std::min<size_t>(my.size(), 255);
     const size_t peer_len = std::min<size_t>(peer.size(), 255);
 
     std::vector<uint8_t> payload;
-    payload.reserve(9 + 1 + my_len + 1 + peer_len);
+    const size_t uuid_len = std::min<size_t>(match_uuid.size(), 255);
+    payload.reserve(9 + 1 + my_len + 1 + peer_len + 1 + uuid_len);
     payload.push_back(role);
     net::le_write_u64(payload, seed);
     auto append_icon = [&](const std::string& icon, size_t n) {
@@ -424,15 +514,13 @@ bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
     };
     append_icon(my, my_len);
     append_icon(peer, peer_len);
+    payload.push_back(static_cast<uint8_t>(uuid_len));
+    payload.insert(payload.end(), match_uuid.begin(), match_uuid.begin() + uuid_len);
     auto frame = net::build_frame(net::MsgType::MATCH_FOUND, payload);
     return net::tcp_send_all(sock, frame.data(), frame.size());
 }
 
-// 포워더 채널을 열어 추적되는 worker 2개로 양방향 바이트 포워딩 시작.
-// MATCH_FOUND 는 이미 호출자가 송신했다고 가정.
-// prefixFromA/B: lobby 에서 이미 recv 했지만 forwarder 로 넘겨야 할 raw 바이트.
-//   (READY 교환 직후 상대가 바로 PING/INPUT 을 보내 lobby 가 그 바이트를 kernel 에서
-//    끌어왔을 때, 이 상태를 잃지 않도록 한다.)
+// Start both forwarding directions after MATCH_FOUND has been sent.
 void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
                                 std::vector<uint8_t> prefixFromA,
                                 std::vector<uint8_t> prefixFromB) {
@@ -447,10 +535,13 @@ void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
     ch->A           = match.a.sock;
     ch->B           = match.b.sock;
     ch->match_id    = match.match_id;
+    ch->match_uuid  = match.match_uuid;
     ch->playerA_id  = match.a.player_id;
     ch->playerB_id  = match.b.player_id;
     ch->playerA_elo = match.a.elo;
     ch->playerB_elo = match.b.elo;
+    ch->playerA_session = std::move(match.a.session_lease);
+    ch->playerB_session = std::move(match.b.session_lease);
     ch->meta        = meta;
     ch->prefixFromA = std::move(prefixFromA);
     ch->prefixFromB = std::move(prefixFromB);
@@ -468,40 +559,22 @@ void startForwarding(Match match, meta::client::MetaClient* meta) {
     startForwardingWithPrefix(std::move(match), meta, {}, {});
 }
 
-// 랜덤 큐 전용: MATCH_FOUND 이후 양쪽 READY(1) 확인까지 대기하는 로비 루프.
-// 추적되는 worker에서 돌아 matcher를 블록하지 않는다.
-//
-// 규칙:
-//   · READY(1) 두 번 모두 수신 → startForwarding.
-//   · READY(0) / QUEUE_CANCEL / EOF / send 실패 / 30s 타임아웃 → 양측 close.
-//   · 수락 상태는 상대에게 그대로 forward — 클라 UI 에서 "peer ready" 표시용.
-//
-// 주의 — 프레임 소비 정책:
-//   클라이언트는 상대 READY(1) 포워딩을 본 순간 ioThread 로 전환해 곧바로 PING 등
-//   게임 프레임을 송신할 수 있다. 그 바이트는 아직 forwarder 가 recv 하기 전 lobby
-//   스레드 차원의 TCP 버퍼에 쌓일 수 있으므로, 이 함수는 parse_frames(전체 소비)
-//   대신 "한 프레임씩 앞에서 파싱" 방식으로 동작한다. READY/QUEUE_CANCEL 은 직접
-//   처리하고, 그 외 타입을 만나면 더 파싱하지 않고 멈춰 나머지 바이트를
-//   Channel::prefixFromA / prefixFromB 로 forwarder 에게 이관한다.
+// Queue lobby forwards READY state and preserves early game frames.
 void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
     constexpr auto kConfirmTimeout = std::chrono::seconds(30);
     constexpr auto kPollInterval   = std::chrono::milliseconds(10);
     constexpr size_t LEN_FIELD          = 2;
     constexpr size_t TYPE_FIELD         = 1;
     constexpr size_t CHECKSUM_FIELD     = 4;
-    constexpr size_t MAX_PAYLOAD_BYTES  = 4096;  // net/framing.cpp 와 동일 한도
-    // ready 확정 후 forwarder 이관 전까지 쌓일 수 있는 raw 바이트 상한.
-    // 정상 클라이언트는 READY 직후 PING/INPUT 몇 프레임 수준(<1KB)이므로 64KB 면
-    // 충분하다. 상한이 없으면 악성 클라가 30초 동안 회선 속도로 밀어넣어 relay
-    // 메모리를 소모시킬 수 있다.
+    // 페이로드 상한은 net::kMaxPayloadBytes (framing.h) 를 직접 참조한다.
+    // Bound bytes received between READY and forwarder ownership.
     constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 
     bool aReady = false;
     bool bReady = false;
     bool abort  = false;
 
-    // 매치메이킹 큐 폴링 단계에서 이미 recv 된 잔여 바이트를 이어받는다
-    // (PlayerInfo::streamBuf 주석 참조). 없으면 그냥 빈 버퍼.
+    // Continue from bytes already read during matchmaking.
     std::vector<uint8_t> bufA = std::move(match.a.streamBuf);
     std::vector<uint8_t> bufB = std::move(match.b.streamBuf);
 
@@ -513,9 +586,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         return net::tcp_send_all(dst, fr.data(), fr.size());
     };
 
-    // "한 프레임씩 처리" — READY/QUEUE_CANCEL 은 소비하고 action 실행.
-    // 그 외 타입(게임 프레임)을 만나면 즉시 멈춰 버퍼의 현재 상태를 그대로 보존한다.
-    // 반환값: 0=진행 계속, 1=이 사이드 ready 확정, 2=이 사이드 decline/cancel, -1=send 실패.
+    // Return 0=continue, 1=ready, 2=decline, -1=send failure.
     auto consume_ready_frames = [&](std::vector<uint8_t>& buf,
                                      const net::TcpSocket& peer) -> int {
         while (buf.size() >= LEN_FIELD + CHECKSUM_FIELD) {
@@ -524,7 +595,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
             // 페이로드 상한 초과 — framing.cpp::parse_frames 와 동일하게
             // 스트림 전체를 버리고 ready/cancel 어느 것도 소비하지 않는다.
             // 호출자는 이 사이드를 abort 처리한다.
-            if ((size_t)len > MAX_PAYLOAD_BYTES + TYPE_FIELD) {
+            if ((size_t)len > net::kMaxPayloadBytes + TYPE_FIELD) {
                 buf.clear();
                 return -1;
             }
@@ -675,9 +746,11 @@ void startPump(Match match, meta::client::MetaClient* meta) {
     }
 
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
-                                     match.a.selected_icon_id, match.b.selected_icon_id);
+                                     match.a.selected_icon_id, match.b.selected_icon_id,
+                                     match.match_uuid);
     const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
-                                     match.b.selected_icon_id, match.a.selected_icon_id);
+                                     match.b.selected_icon_id, match.a.selected_icon_id,
+                                     match.match_uuid);
 
     if (!ok_a || !ok_b) {
         std::cerr << "[relay] MATCH_FOUND send failed, match=" << match.match_id << "\n";
@@ -700,9 +773,11 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
     }
 
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
-                                     match.a.selected_icon_id, match.b.selected_icon_id);
+                                     match.a.selected_icon_id, match.b.selected_icon_id,
+                                     match.match_uuid);
     const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
-                                     match.b.selected_icon_id, match.a.selected_icon_id);
+                                     match.b.selected_icon_id, match.a.selected_icon_id,
+                                     match.match_uuid);
 
     if (!ok_a || !ok_b) {
         std::cerr << "[relay] MATCH_FOUND send failed, match=" << match.match_id << "\n";

@@ -20,6 +20,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 import pytest
@@ -31,10 +32,17 @@ def _find_meta_bin() -> Path | None:
         p = Path(env)
         return p if p.exists() else None
     repo = Path(__file__).resolve().parents[2]
+    # Release 후보를 Debug 앞에 둔다 — 문서가 권장하는 빌드 커맨드
+    # 'cmake --build build --config Release' 는 Windows 멀티컨피그 생성기에서
+    # build/Release/ (별도 빌드 트리면 build-meta/Release/) 아래에 exe 를
+    # 떨어뜨리는데, 예전 후보 목록에는 이 경로가 없어 테스트가 조용히
+    # skip 되고 있었다.
     candidates = [
+        repo / "build-meta" / "Release" / "tetris_meta.exe",
         repo / "build-meta" / "Debug" / "tetris_meta.exe",
         repo / "build-meta" / "tetris_meta.exe",
         repo / "build-meta" / "tetris_meta",
+        repo / "build" / "Release" / "tetris_meta.exe",
         repo / "build" / "Debug" / "tetris_meta.exe",
         repo / "build" / "tetris_meta",
     ]
@@ -84,6 +92,10 @@ def _get(url: str, timeout: float = 5.0) -> tuple[int, list | dict]:
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode() or "{}")
+
+
+def _match_uuid() -> str:
+    return uuid.uuid4().hex
 
 
 @pytest.fixture
@@ -161,6 +173,7 @@ def test_match_post_updates_elo(meta_server):
     # p1 wins; both at 0(RP), K=32, expected=0.5 → 승자 +16,
     # 패자는 0-16 이 바닥(0) 에 clamp 되어 delta 0.
     code, body = _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a":   p1["player_id"], "player_b": p2["player_id"],
         "winner":     p1["player_id"],
         "score_a":    5000, "score_b": 3000,
@@ -202,6 +215,7 @@ def test_matches_requires_relay_secret_when_configured(tmp_path):
         _, p1 = _post(f"{base}/v1/guest")
         _, p2 = _post(f"{base}/v1/guest")
         payload = {
+            "match_uuid": _match_uuid(),
             "player_a": p1["player_id"], "player_b": p2["player_id"],
             "winner": p1["player_id"],
             "score_a": 1, "score_b": 0,
@@ -231,6 +245,7 @@ def test_draw_keeps_elo(meta_server):
     _, p2 = _post(f"{base}/v1/guest")
 
     code, body = _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a": p1["player_id"], "player_b": p2["player_id"],
         "winner": None,
         "score_a": 0, "score_b": 0, "lines_a": 0, "lines_b": 0,
@@ -240,12 +255,37 @@ def test_draw_keeps_elo(meta_server):
     assert body["a"]["delta"] == 0 and body["b"]["delta"] == 0
 
 
+def test_match_post_is_idempotent(meta_server):
+    base = meta_server
+    _, p1 = _post(f"{base}/v1/guest")
+    _, p2 = _post(f"{base}/v1/guest")
+    payload = {
+        "match_uuid": _match_uuid(),
+        "player_a": p1["player_id"], "player_b": p2["player_id"],
+        "winner": p1["player_id"],
+        "score_a": 10, "score_b": 5, "lines_a": 4, "lines_b": 2,
+        "duration_s": 30,
+    }
+
+    code, first = _post(f"{base}/v1/matches", payload)
+    assert code == 200
+    code, retry = _post(f"{base}/v1/matches", payload)
+    assert code == 200
+    assert retry == first
+
+    _, winner = _post(f"{base}/v1/auth/verify", {"token": p1["token"]})
+    _, loser = _post(f"{base}/v1/auth/verify", {"token": p2["token"]})
+    assert (winner["elo"], winner["bp"], winner["xp"]) == (16, 30, 100)
+    assert (loser["elo"], loser["bp"], loser["xp"]) == (0, 10, 50)
+
+
 def test_bad_request(meta_server):
     base = meta_server
     code, _ = _post(f"{base}/v1/matches", {"player_a": 1, "player_b": 2})
     assert code == 400
 
     code, _ = _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a": 1, "player_b": 1, "winner": 1,
         "score_a": 0, "score_b": 0, "lines_a": 0, "lines_b": 0,
         "duration_s": 1,
@@ -261,6 +301,7 @@ def test_winner_must_be_one_of_players(meta_server):
 
     # winner 가 player_a/b 중 하나가 아니면 400.
     code, body = _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a": p1["player_id"], "player_b": p2["player_id"],
         "winner":   p3["player_id"],   # 둘 다 아님
         "score_a": 1000, "score_b": 500,
@@ -272,6 +313,7 @@ def test_winner_must_be_one_of_players(meta_server):
 
     # 음수 점수도 거부.
     code, _ = _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a": p1["player_id"], "player_b": p2["player_id"],
         "winner":   p1["player_id"],
         "score_a": -1, "score_b": 0, "lines_a": 0, "lines_b": 0, "duration_s": 1,
@@ -301,6 +343,7 @@ def test_leaderboard_order(meta_server):
     _, p2 = _post(f"{base}/v1/guest")
     _, p3 = _post(f"{base}/v1/guest")
     _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a": p1["player_id"], "player_b": p2["player_id"],
         "winner": p1["player_id"],
         "score_a": 1, "score_b": 0, "lines_a": 0, "lines_b": 0,
@@ -344,6 +387,7 @@ def test_icons_buy_and_select_flow(meta_server):
     # 매치 4승 → 120 BP 적립 (kBpWin=30).
     for _ in range(4):
         _post(f"{base}/v1/matches", {
+            "match_uuid": _match_uuid(),
             "player_a": p1["player_id"], "player_b": p2["player_id"],
             "winner": p1["player_id"],
             "score_a": 1, "score_b": 0, "lines_a": 0, "lines_b": 0,
@@ -374,6 +418,7 @@ def test_bp_xp_accrual(meta_server):
     _, winner = _post(f"{base}/v1/guest")
     _, loser = _post(f"{base}/v1/guest")
     _post(f"{base}/v1/matches", {
+        "match_uuid": _match_uuid(),
         "player_a": winner["player_id"], "player_b": loser["player_id"],
         "winner": winner["player_id"],
         "score_a": 9, "score_b": 1, "lines_a": 2, "lines_b": 0,

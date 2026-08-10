@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS player_icons (
 
 CREATE TABLE IF NOT EXISTS matches (
   id          INTEGER PRIMARY KEY,
+  match_uuid  TEXT UNIQUE,
   player_a    INTEGER NOT NULL REFERENCES players(id),
   player_b    INTEGER NOT NULL REFERENCES players(id),
   winner      INTEGER          REFERENCES players(id),
@@ -61,7 +62,11 @@ CREATE TABLE IF NOT EXISTS matches (
   lines_a     INTEGER NOT NULL,
   lines_b     INTEGER NOT NULL,
   duration_s  INTEGER NOT NULL,
-  created_at  INTEGER NOT NULL
+  created_at  INTEGER NOT NULL,
+  elo_a_before INTEGER NOT NULL DEFAULT 0,
+  elo_a_after  INTEGER NOT NULL DEFAULT 0,
+  elo_b_before INTEGER NOT NULL DEFAULT 0,
+  elo_b_after  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS elo_history (
@@ -232,6 +237,25 @@ void Database::execSchema()
     alter_if_needed("ALTER TABLE players ADD COLUMN bp INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE players ADD COLUMN selected_icon_id TEXT NOT NULL DEFAULT 'default'");
     alter_if_needed("ALTER TABLE players ADD COLUMN xp INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE matches ADD COLUMN match_uuid TEXT");
+    alter_if_needed("ALTER TABLE matches ADD COLUMN elo_a_before INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE matches ADD COLUMN elo_a_after INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE matches ADD COLUMN elo_b_before INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE matches ADD COLUMN elo_b_after INTEGER NOT NULL DEFAULT 0");
+    // Old tables receive this column through ALTER before the index is created.
+    {
+        char* indexErr = nullptr;
+        const int indexRc = sqlite3_exec(
+            db_,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_uuid ON matches(match_uuid) "
+            "WHERE match_uuid IS NOT NULL",
+            nullptr, nullptr, &indexErr);
+        if (indexRc != SQLITE_OK) {
+            std::string msg = indexErr ? indexErr : "";
+            sqlite3_free(indexErr);
+            throw std::runtime_error("schema index migration failed: " + msg);
+        }
+    }
 
     // ── 1회성 스케일 마이그레이션 (user_version 0 → 1) ─────────────────────
     //   구 ELO 스케일(1200 시작)을 RP 스케일(0 시작/0 바닥)로 이관:
@@ -427,6 +451,43 @@ Database::saveMatch(const MatchRecord& m)
 {
     std::lock_guard<std::mutex> lk(mu_);
 
+    // Return the original result without applying a retried match twice.
+    {
+        StmtGuard g;
+        const char* sql =
+            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after,"
+            "player_a,player_b "
+            "FROM matches WHERE match_uuid=?1";
+        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(g.s) == SQLITE_ROW) {
+            MatchInsertResult r;
+            r.match_id = sqlite3_column_int64(g.s, 0);
+            const int ab = sqlite3_column_int(g.s, 1);
+            const int aa = sqlite3_column_int(g.s, 2);
+            const int bb = sqlite3_column_int(g.s, 3);
+            const int ba = sqlite3_column_int(g.s, 4);
+            // 같은 match_uuid 재전송인데 참가자가 다르면 uuid 충돌이거나 relay
+            // 버그(재사용/뒤바뀐 payload)다. 저장된 결과를 그대로 반환하는 기존
+            // 동작은 유지하되(멱등성 보장), stderr 경고로 조기 발견을 돕는다.
+            const int64_t stored_a = sqlite3_column_int64(g.s, 5);
+            const int64_t stored_b = sqlite3_column_int64(g.s, 6);
+            if (stored_a != m.player_a || stored_b != m.player_b) {
+                std::fprintf(stderr,
+                    "[db] saveMatch: match_uuid=%s replay with mismatched players "
+                    "(stored a=%lld b=%lld, request a=%lld b=%lld); returning stored result\n",
+                    m.match_uuid.c_str(),
+                    static_cast<long long>(stored_a),
+                    static_cast<long long>(stored_b),
+                    static_cast<long long>(m.player_a),
+                    static_cast<long long>(m.player_b));
+            }
+            r.a = {ab, aa, aa - ab};
+            r.b = {bb, ba, ba - bb};
+            return r;
+        }
+    }
+
     // 트랜잭션 시작. IMMEDIATE: 쓰기 락 즉시 확보해 reader 때문에 밀리지 않게.
     char* err = nullptr;
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, &err) != SQLITE_OK) {
@@ -450,20 +511,21 @@ Database::saveMatch(const MatchRecord& m)
         StmtGuard g;
         const char* sql =
             "INSERT INTO matches"
-            "(player_a,player_b,winner,score_a,score_b,lines_a,lines_b,duration_s,created_at)"
-            " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)";
+            "(match_uuid,player_a,player_b,winner,score_a,score_b,lines_a,lines_b,duration_s,created_at)"
+            " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
         if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
             return rollback("matches prepare");
-        sqlite3_bind_int64(g.s, 1, m.player_a);
-        sqlite3_bind_int64(g.s, 2, m.player_b);
-        if (m.winner) sqlite3_bind_int64(g.s, 3, *m.winner);
-        else          sqlite3_bind_null (g.s, 3);
-        sqlite3_bind_int  (g.s, 4, m.score_a);
-        sqlite3_bind_int  (g.s, 5, m.score_b);
-        sqlite3_bind_int  (g.s, 6, m.lines_a);
-        sqlite3_bind_int  (g.s, 7, m.lines_b);
-        sqlite3_bind_int  (g.s, 8, m.duration_s);
-        sqlite3_bind_int64(g.s, 9, ts);
+        sqlite3_bind_text (g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(g.s, 2, m.player_a);
+        sqlite3_bind_int64(g.s, 3, m.player_b);
+        if (m.winner) sqlite3_bind_int64(g.s, 4, *m.winner);
+        else          sqlite3_bind_null (g.s, 4);
+        sqlite3_bind_int  (g.s, 5, m.score_a);
+        sqlite3_bind_int  (g.s, 6, m.score_b);
+        sqlite3_bind_int  (g.s, 7, m.lines_a);
+        sqlite3_bind_int  (g.s, 8, m.lines_b);
+        sqlite3_bind_int  (g.s, 9, m.duration_s);
+        sqlite3_bind_int64(g.s, 10, ts);
         if (sqlite3_step(g.s) != SQLITE_DONE) return rollback("matches step");
         match_id = sqlite3_last_insert_rowid(db_);
     }
@@ -499,6 +561,22 @@ Database::saveMatch(const MatchRecord& m)
             elo_b_after = u.new_winner;
             elo_a_after = u.new_loser;
         }
+    }
+
+    // Draws also need an exact response for idempotent retries.
+    {
+        StmtGuard g;
+        const char* sql =
+            "UPDATE matches SET elo_a_before=?1,elo_a_after=?2,"
+            "elo_b_before=?3,elo_b_after=?4 WHERE id=?5";
+        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
+            return rollback("match result prepare");
+        sqlite3_bind_int(g.s, 1, elo_a_before);
+        sqlite3_bind_int(g.s, 2, elo_a_after);
+        sqlite3_bind_int(g.s, 3, elo_b_before);
+        sqlite3_bind_int(g.s, 4, elo_b_after);
+        sqlite3_bind_int64(g.s, 5, match_id);
+        if (sqlite3_step(g.s) != SQLITE_DONE) return rollback("match result step");
     }
 
     // 3) UPDATE players (winner 가 있을 때만 elo + wins/losses + bp 갱신).

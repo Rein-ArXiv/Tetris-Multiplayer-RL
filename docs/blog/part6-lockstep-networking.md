@@ -1,21 +1,20 @@
 # Part 6: 결정론적 멀티플레이 — TCP Lockstep 네트워킹
 
-> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL까지
+> **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 6**
 >
-> [시리즈 목차](./README.md) · [이전: Part 5 — 오디오 계층](./part5-audio.md) · **Part 6** · [다음: Part 7 — 릴레이 서버](./part7-relay-server.md)
 
 ---
 
 ## 이번 Part의 구현 계약
 
-- **선행 상태:** Part 1 의 결정론적 `SimGame` 과 `ComputeStateHash()` / `StateHashBreakdown()`, Part 4 의 60Hz 고정 틱 루프와 틱별 입력 마스크 (`ConsumeInput`), `Game` 래퍼.
-- **이번 Part의 파일:** `net/socket.h`, `net/socket.cpp`, `net/framing.h`, `net/framing.cpp`, `net/session.h`, `net/session.cpp` 를 새로 만들고, `src/main.cpp` 에 `AppMode::Net` 경로를 추가한다. `CMakeLists.txt` 에 세 개의 `net/*.cpp` 와 소켓 라이브러리 링크가 붙는다.
+- **선행 상태:** Part 1 의 결정론적 `SimGame` 과 그 상태 해시(`StateHash()` / `StateHashBreakdown()`), Part 4 의 60Hz 고정 틱 루프와 틱별 입력 마스크 (`ConsumeInput`), 그리고 `SimGame` 을 감싸며 해시를 `ComputeStateHash()` 로 노출하는 `Game` 래퍼. 이 장에서 `gameLocal->ComputeStateHash()` 는 Part 4 래퍼의 메서드고, 섹션별 breakdown 은 `gameLocal->sim.StateHashBreakdown()` 처럼 내부 `SimGame` 에서 직접 꺼낸다.
+- **이번 Part의 파일:** `net/socket.h`, `net/socket.cpp`, `net/framing.h`, `net/framing.cpp`, `net/session.h`, `net/session.cpp` 를 새로 만들고, `src/main.cpp` 에 `AppMode::Net` 경로를 추가한다. `CMakeLists.txt` 에 새 `net/*.cpp` 소스와 소켓 라이브러리 링크가 붙는다.
 - **연결점:** 상태가 아니라 **시드와 틱별 입력**만 교환한다. `main.cpp` 의 틱 루프가 `Session::SendInput` 으로 자기 입력을 밀어 넣고, `Session::GetRemoteInput` 으로 상대 입력을 당겨온 뒤, safeTick 이전까지만 두 `SimGame` 을 진행시킨다.
 - **완료 게이트:**
-  1. 프레이밍 계약(부분 수신 · 잘못된 길이 · 체크섬 불일치)이 자동 테스트로 통과한다 — `python/tests/test_framing_parity.py`.
+  1. 프레이밍 계약(부분 수신 · 잘못된 길이 · 체크섬 불일치)이 자동 테스트로 통과한다 — `python/tests/test_framing_parity.py`. 이 패리티 하네스(`python/netbot/framing.py` 미러 포함)는 [Part 8](./part8-python-rl.md) 이 구현한다 — 여기서는 완성 저장소에서 실행만 한다.
   2. 같은 머신에서 `--host` / `--connect` 두 인스턴스를 붙이면 양쪽 `[INIT] seed=...` 가 일치하고, 600틱마다 교환하는 결합 해시가 어긋나지 않는다(`[DESYNC]` 로그 0건).
 
-이 장은 **직결 P2P 세션**까지만 다룬다. `HELLO` / `HELLO_ACK` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT` 이 여기서 완성되고, 릴레이 서버를 경유하는 `QUEUE_*` / `ROOM_*` / `MATCH_FOUND` / `MATCH_SUMMARY` / `MATCH_RESULT` 와 그 클라이언트 측 스레드 (`Session::queueThread`, `Session::roomThread`)는 [Part 7](./part7-relay-server.md) 에서 구현한다. 두 파트의 경계는 말미의 "`Session` 공개 API 경계" 절에 표로 정리해 뒀다.
+이 장의 구현 산출물은 **직결 P2P lockstep 세션**이다. `HELLO` / `HELLO_ACK` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT`의 전송 계약과 `Session::ioThread`를 완성한다. 현재 `net/session.*`에는 릴레이와 랭킹 확장도 함께 있지만, `QUEUE_*` / `ROOM_*` / `MATCH_FOUND`는 Part 7, `MATCH_SUMMARY` / `MATCH_RESULT`의 서버 권위 의미는 Part 10의 소유다. 이 장의 현재 소스 발췌에 그런 타입이 보이더라도 직결 세션을 이해하는 데 필요한 wire 기반과 수신 안전성만 읽는다.
 
 ## 들어가며
 
@@ -35,7 +34,7 @@
 
 Rollback(GGPO 계열)은 상대 입력이 없어도 "직전 입력이 유지될 것" 이라고 **예측**해서 시뮬레이션을 계속 돌리고, 실제 입력이 도착하면 그 틱까지 되감아 재시뮬레이션한다. 격투 게임에서 사실상 표준이 된 이유는 명확하다 — 한 프레임 (16.7ms) 의 입력 타이밍이 승패를 가르기 때문이다.
 
-테트리스는 그 조건이 다르다. Part 1 의 `SimGame` 은 생성자에서 `dropIntervalTicks` 를 `TICKS_PER_SECOND / 2`, 즉 **30틱(500ms)** 으로 잡고 (`src/sim_game.cpp:15`), 레벨이 오를 때마다 `30 - (level-1)*27/19` 로 줄이되 하한을 3틱으로 clamp 한다(`src/sim_game.cpp:360-364`). 즉 피스가 한 칸 내려가는 데 걸리는 시간은 레벨 1 에서 500ms, 최고 레벨 20 에서도 50ms 다.
+테트리스는 그 조건이 다르다. Part 1 의 `SimGame` 은 생성자에서 `dropIntervalTicks` 를 `TICKS_PER_SECOND / 2`, 즉 **30틱(500ms)** 으로 잡고 (`src/sim_game.cpp`), 레벨이 오를 때마다 `30 - (level-1)*27/19` 로 줄이되 하한을 3틱으로 clamp 한다(`src/sim_game.cpp`). 즉 피스가 한 칸 내려가는 데 걸리는 시간은 레벨 1 에서 500ms, 최고 레벨 20 에서도 50ms 다.
 
 기본 `input_delay = 2` 가 만드는 체감 지연은 33ms —
 
@@ -65,9 +64,9 @@ lockstep 은 "틱 t 의 입력" 이 반드시 도착해야 진행한다. 하나�
 대가는 두 가지다.
 
 1. **head-of-line 블로킹.** TCP 는 앞의 세그먼트가 재전송되는 동안 뒤의 세그먼트를 애플리케이션에 넘기지 않는다. 커널이 이미 받아둔 틱 t+3 의 INPUT 이 있어도 틱 t 가 재전송 중이면 `recv` 가 반환하지 않는다. lockstep 은 어차피 t 를 기다려야 하므로 손해가 작지만, "새 입력만 최신으로 쓰고 옛것은 버린다" 는 UDP 식 최적화는 불가능하다.
-2. **바이트 스트림에는 메시지 경계가 없다.** UDP 는 데이터그램 하나가 곧 메시지지만, TCP 는 우리가 직접 프레이밍을 해야 한다. 다음 절의 길이-접두사 프레이밍이 그 대응이다.
+2. **바이트 스트림에는 메시지 경계가 없다.** UDP 는 데이터그램 하나가 곧 메시지지만, TCP 는 우리가 직접 프레이밍을 해야 한다. 이 프로젝트는 `길이 + 타입 + payload + 체크섬`을 한 프레임으로 정의하고 수신 버퍼에서 완성된 프레임만 꺼낸다.
 
-여기에 Nagle 알고리즘이 기본으로 켜져 있다는 세 번째 함정이 붙는데, 그건 `TCP_NODELAY` 절에서 실제 증상과 함께 다룬다.
+여기에 Nagle 알고리즘이 기본으로 켜져 있다는 세 번째 함정이 붙는다. 작은 INPUT 프레임을 더 큰 세그먼트로 합치느라 기다리면 lockstep의 체감 지연이 늘어나므로 연결 직후 `TCP_NODELAY`를 켠다. 이 선택은 처리량보다 작은 메시지의 즉시성을 우선한다.
 
 ---
 
@@ -100,7 +99,7 @@ sequenceDiagram
 
 소켓 래퍼의 첫 번째 책임은 플랫폼 차이를 숨기는 것이지만, 더 중요한 책임은 **fd 정수의 소유권**을 명확히 하는 것이다.
 
-**현재 소스 발췌 — `net/socket.h:12-38`**
+**현재 소스 발췌 — `net/socket.h`**
 
 ```cpp
 // TCP 소켓 핸들 — 참조 카운트 소유(ref-counted owning handle).
@@ -134,7 +133,7 @@ struct TcpSocket {
 
 fd 를 닫는 코드는 딱 두 곳뿐이다 — 생성 실패 경로와 deleter.
 
-**현재 소스 발췌 — `net/socket.cpp:36-54`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 실제 fd 를 닫는다(플랫폼별). 오직 owning 핸들의 deleter 에서만 호출.
@@ -164,7 +163,7 @@ static TcpSocket make_owned(int fd) {
 
 `tcp_listen()` 은 raw fd 를 만들되, 반환 직전에만 `make_owned(fd)` 로 감싼다. 실패 경로에서는 아직 소유 핸들이 없으므로 `close_fd` 를 직접 부른다.
 
-**현재 소스 발췌 — `net/socket.cpp:83-91`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 빠른 재바인드를 위한 SO_REUSEADDR 설정
@@ -178,7 +177,7 @@ static int set_reuse(int fd) {
 }
 ```
 
-**현재 소스 발췌 — `net/socket.cpp:120-139`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 포트에서 연결 대기 소켓을 생성합니다.
@@ -205,9 +204,9 @@ TcpSocket tcp_listen(uint16_t port, int backlog) {
 
 **SO_REUSEADDR**: 설정하지 않으면 프로그램을 재시작했을 때 "Address already in use" 에러가 난다. 이전 연결의 TCP TIME_WAIT 상태(기본 2분)가 남아 있기 때문이다. `SO_REUSEADDR` 는 TIME_WAIT 중인 포트에 재바인드를 허용한다.
 
-수락은 `tcp_accept` 다. 수락된 자식 소켓에만 논블로킹 + NODELAY 를 건다 — listen 소켓에 걸어도 자식으로 상속되지 않는 플랫폼이 있다.
+수락은 `tcp_accept` 다. 수락된 자식 소켓에만 논블로킹 + NODELAY + keepalive 를 건다 — listen 소켓에 걸어도 자식으로 상속되지 않는 플랫폼이 있다. NODELAY 의 근거는 §15, keepalive 가 어떤 실패를 감지하는지는 §11.7 이 다룬다.
 
-**현재 소스 발췌 — `net/socket.cpp:141-151`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 대기 소켓에서 1개 연결을 수락합니다.
@@ -216,16 +215,17 @@ TcpSocket tcp_accept(const TcpSocket& server) {
     sockaddr_in addr{}; socklen_t alen = sizeof(addr);
     int fd = (int)::accept(server.fd(), (sockaddr*)&addr, &alen);
     if (fd < 0) return TcpSocket{};
-    // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
+    // 수락된 소켓을 논블로킹 + NODELAY + keepalive 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
+    set_keepalive(fd);
     return make_owned(fd);
 }
 ```
 
 ### 1.4 클라이언트: connect
 
-**현재 소스 발췌 — `net/socket.cpp:153-177`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 원격 호스트로 TCP 연결을 시도합니다.
@@ -248,9 +248,10 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     }
     freeaddrinfo(res);
     if (fd < 0) return TcpSocket{};
-    // 연결된 소켓을 논블로킹 + NODELAY 로 설정.
+    // 연결된 소켓을 논블로킹 + NODELAY + keepalive 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
+    set_keepalive(fd);
     return make_owned(fd);
 }
 ```
@@ -261,7 +262,7 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
 
 ### 1.5 논블로킹 I/O
 
-**현재 소스 발췌 — `net/socket.cpp:93-103`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 논블로킹 모드 설정
@@ -285,7 +286,7 @@ static bool set_nonblocking(int fd) {
 
 논블로킹 소켓에서 `send` 는 요청한 바이트를 다 보내지 못하고 일부만 보낼 수 있다. `tcp_send_all` 은 그 위에 "전부 보내거나 실패한다" 는 계약을 세운다.
 
-**현재 소스 발췌 — `net/socket.cpp:179-229`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
@@ -349,7 +350,7 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
 
 수신은 대칭적으로 단순하다. "지금 읽을 수 있는 만큼만 누적 버퍼 뒤에 붙인다."
 
-**현재 소스 발췌 — `net/socket.cpp:231-268`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 수신 가능한 만큼 한 번 읽어 누적 버퍼에 추가합니다.
@@ -396,7 +397,7 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
 
 ### 1.7 `tcp_close` 는 닫지 않는다
 
-**현재 소스 발췌 — `net/socket.cpp:270-291`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 소켓 종료.
@@ -427,7 +428,7 @@ void tcp_close(TcpSocket& s) {
 
 한 가지 예외가 있다. `shutdown` 은 **블로킹 `accept` 를 깨우지 못하는** 플랫폼이 있다. 그래서 listen 소켓만은 논블로킹으로 전환해 `quit` 플래그를 폴링한다 — 그 공개 래퍼가 `tcp_set_nonblocking` 이다.
 
-**현재 소스 발췌 — `net/socket.cpp:293-296`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] 소켓을 논블로킹 모드로 전환(public 래퍼).
@@ -474,7 +475,7 @@ LEN            = TYPE(1) + PAYLOAD(N)
 
 모든 다중 바이트 필드는 **리틀 엔디안**으로 직렬화된다. x86/x64 · ARM(리틀 엔디안 모드)이 모두 리틀 엔디안이므로 실질적으로 바이트 스왑이 필요 없지만, 읽기/쓰기 헬퍼가 시프트 연산으로 명시적으로 조립하므로 빅 엔디안 기기에서도 같은 바이트열이 나온다.
 
-**현재 소스 발췌 — `net/framing.cpp:24-38`**
+**현재 소스 발췌 — `net/framing.cpp`**
 
 ```cpp
 void le_write_u16(std::vector<uint8_t>& v, uint16_t x) {
@@ -498,7 +499,7 @@ uint64_t le_read_u64(const uint8_t* p) {
 
 ### 2.3 FNV-1a 32-bit 체크섬
 
-**현재 소스 발췌 — `net/framing.cpp:18-22`**
+**현재 소스 발췌 — `net/framing.cpp`**
 
 ```cpp
 uint32_t fnv1a32(const uint8_t* data, size_t len, uint32_t seed) {
@@ -508,13 +509,13 @@ uint32_t fnv1a32(const uint8_t* data, size_t len, uint32_t seed) {
 }
 ```
 
-기본 seed 는 헤더에 있다 — `net/framing.h:64` 의 `uint32_t seed=2166136261u`.
+기본 seed 는 헤더에 있다 — `net/framing.h` 의 `uint32_t seed=2166136261u`.
 
 $$h_0 = 2166136261, \quad h_i = (h_{i-1} \oplus \text{byte}_i) \times 16777619$$
 
 Part 1 에서 사용한 FNV-1a 64-bit 와 같은 알고리즘의 32비트 버전이다. CRC32 대신 이것을 고른 이유는 세 가지다.
 
-1. **구현이 5줄이다.** CRC32 는 테이블(1 KiB)이나 비트 단위 루프가 필요하고, 다항식·초기값·반전 규약을 맞추지 않으면 구현마다 값이 다르다. 이 프로젝트는 Python 미러(`python/netbot/framing.py`)와 바이트 단위로 일치해야 하므로 "규약이 하나뿐인 알고리즘" 이 유리하다.
+1. **구현과 검증 규약이 작다.** CRC32는 테이블이나 비트 단위 루프가 필요하고, 다항식·초기값·반전 규약을 맞추지 않으면 구현마다 값이 다르다. 이 프로젝트는 Python 미러(`python/netbot/framing.py`)와 바이트 단위로 일치해야 하므로 규약이 단순한 알고리즘이 유리하다.
 2. **이미 프로젝트에 있다.** Part 1 의 상태 해시가 FNV-1a 64 다. 상수 두 개만 32비트 버전으로 바꾸면 된다 — 새로 배울 것이 없다.
 3. **성능이 문제되지 않는다.** 최대 페이로드가 4 KiB, 실사용은 수십 바이트다.
 
@@ -531,37 +532,41 @@ TCP 가 이미 16비트 체크섬으로 세그먼트를 검증하고 그 아래 
 
 이 점은 분명히 해 둬야 한다. **FNV-1a 32 는 비암호학적 해시이고 키가 없다.** 공격자는 payload 를 원하는 대로 바꾼 뒤 같은 함수로 체크섬을 다시 계산해 붙이면 그만이다. 심지어 알고리즘을 몰라도 되는데, 프로토콜이 공개되어 있으므로 `build_frame` 을 그대로 재구현하면 된다.
 
-따라서 이 장 뒤의 "악성 프레임 방어" 절에서 다루는 검증들 — 페이로드 크기 검사, 길이 필드 재확인, enum 범위 검사, tick 윈도우, 큐 상한 — 은 체크섬으로 대체할 수 없다. 체크섬은 **사고**를 막고, 그 검증들이 **악의**를 막는다. 프레임 위조 자체를 막으려면 세션 키 기반 MAC(HMAC 등)이 필요한데, 이 프로젝트는 그 위협 모델을 채택하지 않았다 — 대신 "어떤 바이트가 들어와도 프로세스가 죽지 않고, 상대가 자기 게임만 망칠 수 있다" 를 목표로 한다.
+따라서 페이로드 크기, 내부 길이 필드, enum 범위, tick 윈도우와 큐 상한은 체크섬과 별도로 검증해야 한다. 체크섬은 전송 중 **사고**를 찾고, 범위 검증은 의도적인 자원 소모와 잘못된 상태 전이를 막는다. 프레임 위조 자체를 막으려면 세션 키 기반 MAC(HMAC 등)이 필요하지만 현재 프로토콜에는 없다. 현재 보안 목표는 임의 바이트가 들어와도 프로세스가 죽거나 무한히 자원을 쓰지 않게 하는 것이다.
 
 ### 2.4 상수와 `build_frame`
 
-파일 상단에는 익명 namespace 로 필드 크기 상수를 묶어 둔다 — 매직 넘버를 코드 본문에 박아두지 않기 위함이다.
+프레임 한계와 필드 크기는 `net/framing.h` 의 공개 `constexpr` 상수다. 처음에는 `framing.cpp` 의 익명 네임스페이스에 숨겨 두었지만, 릴레이 서버가 ranked 경로에서 프레임 경계를 직접 읽게 되면서 같은 값이 두 곳에 복제됐다. 프로토콜 한계는 구현 세부가 아니라 **wire 계약의 일부**다 — 계약에 속한 수는 계약을 선언하는 헤더에서 한 번만 정의해야, 한쪽만 값을 바꿔 반대편 파서가 정상 프레임을 "스트림 오염" 으로 오판하는 사고가 원천 차단된다. 그래서 헤더로 승격했고, `server/relay.cpp` 도 이 상수를 참조한다.
 
-**현재 소스 발췌 — `net/framing.cpp:4-14`**
+**현재 소스 발췌 — `net/framing.h`**
 
 ```cpp
-// [NET] 읽기 쉬운 상수들
-namespace {
-    constexpr size_t LEN_FIELD = 2;       // u16
-    constexpr size_t TYPE_FIELD = 1;      // u8
-    constexpr size_t CHECKSUM_FIELD = 4;  // u32
-    // 프레임 최소 크기: len(2) + type(1) + chk(4)
-    constexpr size_t MIN_FRAME_BYTES = LEN_FIELD + TYPE_FIELD + CHECKSUM_FIELD; // 7 bytes
-    // PAYLOAD 상한 — 실사용 최대는 CHAT 200자 UTF-8 (~800 B), HASH/INPUT 은 수십 B.
-    // u16 의 자연 한계(65535) 는 사실상 상한 없음 — 이 상수로 실질 가드를 건다.
-    constexpr size_t MAX_PAYLOAD_BYTES = 4096;
-}
+// 프레임 한계/헤더 필드 크기 — C++ 쪽 단일 진실 공급원(과거엔 framing.cpp 익명
+// 네임스페이스에 있던 값을 공개 승격했고, server/relay.cpp 도 이 상수를 참조한다).
+// 주의: 같은 값이 Python 미러(python/netbot/framing.py)에 중복돼 있고, 패리티
+//   테스트(python/tests/test_framing_parity.py)가 이 값을 고정한다. 한쪽만 올리면
+//   반대편 파서가 정상 프레임의 LEN 을 한도 초과로 보고 스트림 오염으로 오판해
+//   연결을 끊으므로, 반드시 양쪽을 함께 바꿔야 한다.
+// kMaxPayloadBytes 는 단순 메모리 최적화가 아니라 wire 보안 경계다: 악성 길이
+//   선언을 받은 파서가 끝없이 body 를 기다리며 수신 버퍼를 키우는 것을 막는다.
+//   정상 메시지 중 가장 큰 CHAT 도 이 한도 아래에 들어온다.
+constexpr std::size_t kMaxPayloadBytes    = 4096;  // PAYLOAD 상한 (바이트)
+constexpr std::size_t kFrameLenBytes      = 2;     // LEN 필드 (u16 LE)
+constexpr std::size_t kFrameTypeBytes     = 1;     // TYPE 필드 (u8)
+constexpr std::size_t kFrameChecksumBytes = 4;     // CHECKSUM 필드 (u32 LE, FNV-1a)
 ```
 
-**현재 소스 발췌 — `net/framing.cpp:40-53`**
+`kMaxPayloadBytes = 4096` 을 두는 이유는 u16 `LEN` 의 자연 한계(65535)가 사실상 "상한 없음" 이기 때문이다. 실사용 최대는 CHAT 200자 UTF-8(~800 B)이고 HASH/INPUT 은 수십 바이트라, 4 KiB 면 정상 트래픽에 닿지 않으면서 악성 길이 선언을 조기에 자를 수 있다. C++ 안에서는 이 헤더가 단일 진실 공급원이지만 언어 경계는 컴파일러가 지켜 주지 않는다 — Python 미러(`python/netbot/framing.py`)가 같은 값을 자체 상수로 다시 들고, 패리티 테스트(`python/tests/test_framing_parity.py`)가 양쪽 값을 고정한다. 컴파일 타임 공유가 불가능한 곳에서는 테스트가 상수의 계약을 대신 지킨다.
+
+**현재 소스 발췌 — `net/framing.cpp`**
 
 ```cpp
 std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload) {
     // 발신 측에서도 페이로드 상한을 검사 — 초과 시 빈 벡터로 실패.
-    if (payload.size() > MAX_PAYLOAD_BYTES) return {};
+    if (payload.size() > kMaxPayloadBytes) return {};
     // LEN = TYPE(1) + PAYLOAD(N)
-    std::vector<uint8_t> out; out.reserve(LEN_FIELD + TYPE_FIELD + payload.size() + CHECKSUM_FIELD);
-    const uint16_t len = static_cast<uint16_t>(TYPE_FIELD + payload.size());
+    std::vector<uint8_t> out; out.reserve(kFrameLenBytes + kFrameTypeBytes + payload.size() + kFrameChecksumBytes);
+    const uint16_t len = static_cast<uint16_t>(kFrameTypeBytes + payload.size());
     le_write_u16(out, len);
     out.push_back(static_cast<uint8_t>(t));
     out.insert(out.end(), payload.begin(), payload.end());
@@ -579,7 +584,7 @@ std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload)
 
 ### 2.5 `parse_frames` — 부분 수신 처리
 
-**현재 소스 발췌 — `net/framing.cpp:55-102`**
+**현재 소스 발췌 — `net/framing.cpp`**
 
 ```cpp
 bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
@@ -587,33 +592,33 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
     while (true) {
         // 길이(u16)를 읽을 만큼 데이터가 준비되었는지 확인
         // 주의: size_t는 unsigned이므로 뺄셈 대신 덧셈으로 비교 (언더플로 방지)
-        if (offset + LEN_FIELD > streamBuf.size()) break;
+        if (offset + kFrameLenBytes > streamBuf.size()) break;
 
         // LEN = TYPE + PAYLOAD 길이
         const uint16_t len = le_read_u16(&streamBuf[offset]);
 
         // 페이로드 상한 초과 선언 시 전체 스트림을 버린다.
         // 부분 수신 상태에서 len 만 받았더라도 판정 가능 — 수신 버퍼가
-        // MAX_PAYLOAD_BYTES+TYPE+CHK 이상으로 불어나지 않도록 조기 차단.
-        if (static_cast<size_t>(len) > MAX_PAYLOAD_BYTES + TYPE_FIELD) {
+        // 상한 이상으로 불어나기 전에 조기 차단.
+        if (static_cast<size_t>(len) > kMaxPayloadBytes + kFrameTypeBytes) {
             streamBuf.clear();
             return false;
         }
 
         // 전체 프레임이 모였는지 확인: len 필드 + 본문(len) + 체크섬
-        const size_t need = LEN_FIELD + static_cast<size_t>(len) + CHECKSUM_FIELD;
+        const size_t need = kFrameLenBytes + static_cast<size_t>(len) + kFrameChecksumBytes;
         if (offset + need > streamBuf.size()) break;
 
         // len=0 이면 TYPE 바이트조차 없는 잘못된 프레임 — 스킵
-        if (len < TYPE_FIELD) { offset += need; continue; }
+        if (len < kFrameTypeBytes) { offset += need; continue; }
 
         // TYPE 바이트와 PAYLOAD 범위 계산
-        const uint8_t type = streamBuf[offset + LEN_FIELD];
-        const uint8_t* payload = &streamBuf[offset + LEN_FIELD + TYPE_FIELD];
-        const size_t payloadLen = static_cast<size_t>(len) - TYPE_FIELD; // LEN - TYPE(1)
+        const uint8_t type = streamBuf[offset + kFrameLenBytes];
+        const uint8_t* payload = &streamBuf[offset + kFrameLenBytes + kFrameTypeBytes];
+        const size_t payloadLen = static_cast<size_t>(len) - kFrameTypeBytes; // LEN - TYPE(1)
 
         // 체크섬 읽고 유효성 검사(FNV-1a32)
-        const size_t chkPos = offset + LEN_FIELD + static_cast<size_t>(len);
+        const size_t chkPos = offset + kFrameLenBytes + static_cast<size_t>(len);
         const uint32_t chk = le_read_u32(&streamBuf[chkPos]);
         const uint32_t calc = (payloadLen == 0) ? 0u : fnv1a32(payload, payloadLen);
 
@@ -635,9 +640,9 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
 핵심 동작 다섯 가지.
 
 1. **누적 버퍼.** `streamBuf` 는 `tcp_recv_some` 이 호출될 때마다 뒤에 바이트가 붙는 버퍼다. `parse_frames` 는 앞에서부터 완성된 프레임만 뽑고, 아직 불완전한 꼬리는 남긴다. 다음 `recv` 에서 나머지가 도착하면 이어 붙여 파싱한다.
-2. **오버사이즈 선언은 즉시 차단.** `len > MAX_PAYLOAD_BYTES + TYPE_FIELD` 면 버퍼를 통째로 비우고 `false` 를 반환한다. 악의적 peer 가 `len = 65535` 를 선언하면 그 전에는 64 KiB 가 모일 때까지 기다려야 했다. **부분 수신 상태에서 `len` 2바이트만 받아도 판정할 수 있다**는 점이 이 검사의 핵심이다.
-3. **`len = 0` 은 스킵.** TYPE 바이트조차 없는 프레임이다. 뒤의 size_t 절에서 왜 이 한 줄이 크래시 방어인지 다룬다.
-4. **체크섬 불일치는 드롭이지 단절이 아니다.** 프레임 하나를 버리고 계속 진행한다. lockstep 이 한두 프레임에 과민 반응해 세션을 끊으면 오히려 복원력이 떨어진다.
+2. **오버사이즈 선언은 즉시 차단.** `len > kMaxPayloadBytes + kFrameTypeBytes` 면 버퍼를 통째로 비우고 `false` 를 반환한다. 악의적 peer 가 `len = 65535` 를 선언하면 그 전에는 64 KiB 가 모일 때까지 기다려야 했다. **부분 수신 상태에서 `len` 2바이트만 받아도 판정할 수 있다**는 점이 이 검사의 핵심이다.
+3. **`len = 0`은 스킵.** TYPE 바이트조차 없는 프레임이므로 `len - 1`을 계산하면 unsigned `size_t`에서 매우 큰 값으로 언더플로할 수 있다. payload 길이를 계산하기 전에 거부해야 한다.
+4. **체크섬 불일치는 현재 구현에서 드롭이지 단절이 아니다.** 파서는 손상된 프레임 하나를 소비하고 뒤 프레임을 계속 읽는다. 다만 `INPUT`처럼 진행에 필수인 프레임이 드롭되면 애플리케이션 계층 재전송이 없어 lockstep은 스스로 복구하지 못한다. 따라서 이 동작은 스트림 파서를 살려 두는 정책일 뿐, 게임 세션 복구 보장은 아니다. 손상 프레임을 즉시 연결 실패로 승격할지는 운영 보안 정책으로 별도 결정해야 한다.
 5. **알 수 없는 TYPE 은 그대로 통과시킨다.** `static_cast<MsgType>(type)` 은 범위 검사를 하지 않는다. 걸러내는 곳은 `Session::handleFrame` 의 `switch` 의 `default: break;` 다 — 새 타입이 추가된 상대 버전과 붙어도 파서가 죽지 않는 포워드 호환성.
 
 반환값도 계약이 있다. `true` 는 "정상적으로 파싱했다(0개일 수도 있음)", `false` 는 "스트림이 오염됐으니 세션을 끊어라" 다. 현재 `Session::ioThread` 는 반환값을 무시하지만, 릴레이 서버([Part 7](./part7-relay-server.md))는 이 값을 보고 연결을 끊는다.
@@ -653,7 +658,7 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
 const size_t payloadLen = (size_t)len - 1;  // len=0 → SIZE_MAX!
 ```
 
-`size_t` 는 unsigned 이므로 `0 - 1 = SIZE_MAX`(64비트에서 약 $1.8 \times 10^{19}$). 이 값으로 `fnv1a32(payload, payloadLen)` 을 호출하면 수십 엑사바이트를 읽으려 해서 크래시한다. 현재 코드가 `if (len < TYPE_FIELD) { offset += need; continue; }` 로 이 경로를 먼저 차단하는 이유다.
+`size_t` 는 unsigned 이므로 `0 - 1 = SIZE_MAX`(64비트에서 약 $1.8 \times 10^{19}$). 이 값으로 `fnv1a32(payload, payloadLen)` 을 호출하면 수십 엑사바이트를 읽으려 해서 크래시한다. 현재 코드가 `if (len < kFrameTypeBytes) { offset += need; continue; }` 로 이 경로를 먼저 차단하는 이유다.
 
 같은 계열의 두 번째 함정은 비교식이다.
 
@@ -677,7 +682,9 @@ JSON 이나 MessagePack 도 60Hz 에 충분히 빠르다. 그럼에도 고정 �
 - **파싱에 할당이 없다.** `le_read_u32(p)` 는 포인터 산술이다. JSON 파서는 문자열 토큰마다 할당을 한다 — ioThread 의 hot path 에 두고 싶지 않은 성질이다.
 - **게임 로직의 해시와 같은 FNV-1a 를 재사용한다.** 배운 것 하나로 두 곳을 덮는다.
 
-이 규약이 정말로 지켜지는지 확인하는 자동 테스트가 있다. `python/netbot/framing.py` 가 같은 와이어 포맷을 Python 으로 구현하고, `python/tests/test_framing_parity.py` 가 고정 벡터와 round-trip 으로 `build_frame` / `parse_frames` 의 동치성을 검증한다 — 빈 payload 체크섬 0 규약, `MAX_PAYLOAD_BYTES` 초과 시 스트림 폐기, 부분 수신 재조립, 체크섬 불일치 드롭이 모두 테스트 항목이다. Python 쪽 구현과 그 함정(`& 0xFFFFFFFF` 마스킹)은 [Part 8](./part8-python-rl.md) 의 `python/netbot/framing.py` 절에서 다룬다.
+이 규약이 정말로 지켜지는지 확인하는 자동 테스트가 있다. `python/netbot/framing.py` 가 같은 와이어 포맷을 Python 으로 구현하고, `python/tests/test_framing_parity.py` 가 고정 벡터와 round-trip 으로 `build_frame` / `parse_frames` 의 동치성을 검증한다 — 미러와 테스트의 구현은 [Part 8](./part8-python-rl.md) 이 소유하고, 이 장은 완성 저장소에서 계약의 소비자로 실행만 한다. 빈 payload 체크섬 0, cap 초과 스트림 폐기, 부분 수신 재조립, 체크섬 불일치 drop이 모두 테스트 항목이다. Python은 정수가 넘치지 않으므로 FNV-1a의 각 곱셈 뒤에 `& 0xFFFFFFFF`를 적용해야 C++의 `uint32_t` wraparound와 같아진다.
+
+미러가 값만 복제하는 것은 아니다. §2.4 의 payload 상한(`net::kMaxPayloadBytes`)은 Python 쪽 상수로 중복돼 있고 패리티 테스트가 두 값을 함께 고정한다. 오버사이즈 선언에 대한 반응도 언어 관례에 맞게 번역됐다 — C++ `parse_frames` 는 `false` 를 반환해 호출자에게 "연결을 끊어라" 를 알리는데, 반환값은 조용히 무시되기 쉬우므로 Python 미러는 같은 상황에서 `FramingError` 예외를 던진다. 처리하지 않으면 전파되는 예외가, 그 언어에서 이 계약을 가장 무시하기 어려운 형태다.
 
 이 시점에서 다음이 통과한다.
 
@@ -686,14 +693,14 @@ uv sync --dev
 uv run python -m pytest python/tests/test_framing_parity.py -q
 ```
 
-확인된 결과: `16 passed`.
+기대 결과: framing 패리티 파일에서 수집된 모든 항목이 통과한다.
 
 ---
 ## 3. 메시지 타입
 
 `MsgType` 은 1바이트 enum 이다. 이 장이 만드는 직결 세션은 1~9 와 20(CHAT)만 쓰고, 10~19 는 릴레이 서버와 주고받는 확장이다.
 
-**현재 소스 발췌 — `net/framing.h:11-55`**
+**현재 소스 발췌 — `net/framing.h`**
 
 ```cpp
 // 메시지 타입
@@ -708,9 +715,9 @@ enum class MsgType : uint8_t {
     HASH = 8,
     GAME_OVER_CHOICE = 9,
 
-    // 릴레이/매치메이킹 확장 (클라 ↔ 릴레이 서버 간에만 사용 — 릴레이가
-    // MATCH_FOUND 를 보낸 후에는 투명하게 바이트 스트림만 포워딩하므로
-    // 게임 루프는 이 두 타입을 직접 소비하지 않는다.)
+    // 릴레이/매치메이킹 확장. 큐·룸 제어는 relay와 Session이 소비하고,
+    // 매치 중 일반 게임 프레임은 전달한다. ranked MATCH_SUMMARY만 relay가
+    // 결과 검증을 위해 가로챈다. SimGame은 이 제어 타입을 직접 소비하지 않는다.
     //
     // QUEUE_JOIN / ROOM_CREATE / ROOM_JOIN 은 모두 tetris_meta 인증 토큰을
     // 같이 실어 보낸다. 토큰은 32 hex chars (플랫폼 user-data 경로에 저장).
@@ -719,11 +726,12 @@ enum class MsgType : uint8_t {
     QUEUE_JOIN    = 10,  // C→S : [tok_len:1][token:N]   (tok_len==0 이면 미인증)
     QUEUE_CANCEL  = 11,  // C→S : 빈 페이로드 (매치메이킹 큐 취소)
     MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
-                         //        [peer_icon_len:1][peer_icon:N]  role: 1=HOST, 2=GUEST
+                         //        [peer_icon_len:1][peer_icon:N][uuid_len:1][uuid:N]
+                         //        role: 1=HOST, 2=GUEST. 구 클라이언트는 UUID를 무시한다.
 
-    // 커스텀 룸 (Section D)
+    // 커스텀 룸
     //   플레이어가 5자리 코드로 방을 만들어 친구와 페어링.
-    //   서버가 둘 다 Ready 상태를 확인하면 MATCH_FOUND 로 기존 릴레이 경로 진입.
+    //   서버가 둘 다 Ready 상태를 확인하면 MATCH_FOUND 로 릴레이 경로에 진입.
     ROOM_CREATE = 13,  // C→S : [tok_len:1][token:N]
     ROOM_JOIN   = 14,  // C→S : [code_len:1][code:N][tok_len:1][token:N]
     ROOM_INFO   = 15,  // S→C : [code_len:1][code:N][status:1][peer_count:1]
@@ -731,8 +739,8 @@ enum class MsgType : uint8_t {
     ROOM_LEAVE  = 16,  // C→S : 빈 페이로드
     READY       = 17,  // C→S, S→C(forward) : [ready:1]  (1=ready, 0=not)
 
-    // Section K — 메타데이터/RP 연동. 투명 릴레이 구간이 아니라 relay 가
-    // 가로채서 meta 로 POST /v1/matches 를 날리고 MATCH_RESULT 로 돌려준다.
+    // 메타데이터/RP 연동. relay가 MATCH_SUMMARY를 가로채 결과를 검증하고,
+    // meta의 POST /v1/matches 응답을 MATCH_RESULT로 돌려준다.
     MATCH_SUMMARY = 18,  // C→S : [won:1][my_score:4 LE][my_lines:4 LE]
                          //        [opp_score_observed:4 LE][opp_lines_observed:4 LE]
                          //        [duration_s:4 LE]  (총 21 바이트)
@@ -745,7 +753,7 @@ enum class MsgType : uint8_t {
 
 파싱 결과는 타입 + 바이트 배열 한 쌍이다.
 
-**현재 소스 발췌 — `net/framing.h:57-61`**
+**현재 소스 발췌 — `net/framing.h`**
 
 ```cpp
 // 파싱된 메시지 프레임
@@ -768,19 +776,19 @@ struct Frame {
 | PONG (7) | `[timestamp:u64]` | 양방향 | PING 에코 | Part 6 |
 | HASH (8) | `[tick:u32][hash:u64]` | 양방향 | 상태 해시 교차 검증 | Part 6 |
 | GAME_OVER_CHOICE (9) | `[choice:u8]` | 양방향 | 재시작/타이틀 협상 | Part 6 |
-| CHAT (20) | `[text_len:u16][utf8:N]` | 양방향 | 인게임 채팅 (릴레이 투명 통과) | Part 6 |
+| CHAT (20) | `[text_len:u16][utf8:N]` | 양방향 | 인게임 채팅 (릴레이가 raw frame으로 전달) | Part 6 |
 | QUEUE_JOIN (10) | `[tok_len:1][token:N]` | C→S | 랜덤 큐 참가 | [Part 7](./part7-relay-server.md) |
 | QUEUE_CANCEL (11) | 없음 | C→S | 큐 취소 | Part 7 |
-| MATCH_FOUND (12) | `[role:1][seed:8][my_icon][peer_icon]` | S→C | 페어링 완료 통지 | Part 7 |
+| MATCH_FOUND (12) | `[role:1][seed:8][my_icon][peer_icon][match_uuid]` | S→C | 페어링 완료와 결과 멱등 키 통지 | Part 7 |
 | ROOM_CREATE (13) | `[tok_len:1][token:N]` | C→S | 방 생성 | Part 7 |
 | ROOM_JOIN (14) | `[code_len:1][code:N][tok_len:1][token:N]` | C→S | 방 입장 | Part 7 |
-| ROOM_INFO (15) | `[code_len:1][code:N][status:1][peer_count:1]` | S→C | 방 상태 통지 | Part 7 (상태 머신은 이 장) |
+| ROOM_INFO (15) | `[code_len:1][code:N][status:1][peer_count:1]` | S→C | 방 상태 통지 | Part 7 |
 | ROOM_LEAVE (16) | 없음 | C→S | 방 퇴장 | Part 7 |
 | READY (17) | `[ready:1]` | 양방향 | 수락/거절 | Part 7 |
 | MATCH_SUMMARY (18) | 21바이트 (아래) | C→S | 랭킹 집계 요청 | Part 7 / [Part 10](./part10-meta-and-ranking.md) |
-| MATCH_RESULT (19) | `[elo_before:4][elo_after:4][delta:4 signed]` | S→C | RP 변동 결과 | 이 장에서 **수신 처리**, 발행은 Part 7 |
+| MATCH_RESULT (19) | `[elo_before:4][elo_after:4][delta:4 signed]` | S→C | RP 변동 결과 | 이 장에서 **수신 처리**, relay 판정·발행은 [Part 10](./part10-meta-and-ranking.md) |
 
-`MATCH_RESULT` 만 예외적으로 이 장이 다룬다. `Session::handleFrame` 이 실제로 이 프레임을 소비하고 `Session::GetMatchResult` 로 노출하기 때문이다 — 프레임을 **만드는** 쪽(릴레이 ↔ meta 서버)은 Part 7 과 Part 10 이다. 자세한 내용은 "룸 상태 머신과 MATCH_RESULT" 절에서 다룬다.
+`MATCH_RESULT`는 완성된 소스의 확장 타입이다. relay가 meta의 확정 결과를 담아 보내면 `Session::handleFrame`이 파싱하고 `Session::GetMatchResult`로 UI에 노출한다. wire에는 `elo_before`, `elo_after`, `delta`라는 하위 호환 이름의 RP 값만 들어간다. BP와 XP는 이 프레임에 없으므로 메뉴 복귀 뒤 meta profile을 다시 읽어 갱신한다. 랭킹 판정과 실패 정책은 Part 10이 설명한다.
 
 ---
 
@@ -819,7 +827,7 @@ sequenceDiagram
 
 `Host()` 는 스레드를 띄우기 전에 **이전 세션의 잔재를 전부 지운다**. 같은 `Session` 객체를 재사용하는 경로(타이틀 복귀 후 재접속)에서 이전 연결의 `sendQ` 가 새 연결의 첫 송신으로 새어 나가는 것을 막기 위함이다.
 
-**현재 소스 발췌 — `net/session.cpp:57-81`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 bool Session::Host(uint16_t port, const SeedParams& sp) {
@@ -851,7 +859,7 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
 
 `acceptThread` 전체는 다음과 같다.
 
-**현재 소스 발췌 — `net/session.cpp:933-1005`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::acceptThread(uint16_t port)
@@ -935,7 +943,7 @@ void Session::acceptThread(uint16_t port)
 
 위 코드에 보이는 `NET_TRACE` 는 `std::cout` 이 아니다. 세션 파일 상단에서 컴파일 타임 스위치로 정의된다.
 
-**현재 소스 발췌 — `net/session.cpp:10-15`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 #if defined(TETRIS_ENABLE_NET_TRACE)
@@ -946,10 +954,10 @@ void Session::acceptThread(uint16_t port)
 #define NET_WARN(expr) do { std::cerr << expr << std::endl; } while (0)
 ```
 
-- `NET_TRACE` 는 **기본 빌드에서 완전히 사라진다.** `CMakeLists.txt:37` 의 `TETRIS_ENABLE_NET_TRACE` 옵션이 기본 OFF 이고, ON 일 때만 `target_compile_definitions` 로 `TETRIS_ENABLE_NET_TRACE=1` 이 주입된다 (`CMakeLists.txt:187-189`).
+- `NET_TRACE` 는 **기본 빌드에서 완전히 사라진다.** `CMakeLists.txt` 의 `TETRIS_ENABLE_NET_TRACE` 옵션이 기본 OFF 이고, ON 일 때만 `target_compile_definitions` 로 `TETRIS_ENABLE_NET_TRACE=1` 이 주입된다 (`CMakeLists.txt`).
 - `NET_WARN` 은 항상 살아 있고 **stderr** 로 나간다. 연결 실패·타임아웃처럼 드물게 한 번 찍히는 이벤트만 이 매크로를 쓴다.
 
-왜 이렇게까지 하느냐면, 이 장 뒤의 "Host 렉 기타 원인" 절에서 다루듯 `ioThread` 의 hot path 에서 `std::cout` 을 부르는 것만으로 Windows 콘솔 I/O 가 블로킹돼 프레임이 밀렸기 때문이다. 로그를 지우는 대신 컴파일 타임에 없애는 방식으로 디버깅 가능성과 성능을 동시에 챙긴다.
+`ioThread`의 hot path에서 `std::cout`을 부르는 것만으로도 Windows 콘솔 I/O가 블로킹돼 프레임이 밀릴 수 있다. 로그를 지우는 대신 컴파일 타임에 없애면 디버깅 가능성을 보존하면서 릴리스 경로의 I/O를 제거할 수 있다.
 
 네트워크를 디버깅할 때는 이렇게 빌드한다.
 
@@ -960,7 +968,7 @@ cmake --build build --target tetris
 
 ### 4.3 클라이언트 흐름
 
-**현재 소스 발췌 — `net/session.cpp:83-126`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 bool Session::Connect(const std::string& host, uint16_t port) {
@@ -1015,11 +1023,11 @@ bool Session::Connect(const std::string& host, uint16_t port) {
 2. **잠금 안에서 `quit` 를 재확인하고, 이미 종료 중이면 로컬 소켓을 닫고 빠져나온다.** 이걸 빼면 `Close()` 가 `sock.valid()` 를 확인한 직후에 publish 되어 fd 가 누수된다.
 3. **`ioThread` 를 먼저 띄우고 HELLO 를 큐에 넣는다.** 순서가 반대여도 동작하지만, 이 순서면 "큐에 넣는 순간 이미 드레이너가 돌고 있다" 가 보장된다.
 
-클라이언트는 HELLO 를 보내고 호스트의 SEED 를 받으면 `ready = true` 가 된다 (SEED 를 처리하는 `handleFrame` 분기에서). 즉 **`connected` 와 `ready` 는 다른 시점**이며, 이 차이가 이 장 최대의 버그를 낳는다 — "대기 중 stale INPUT backlog" 절에서 다룬다.
+클라이언트는 HELLO 를 보내고 호스트의 SEED 를 받으면 `ready = true` 가 된다(SEED를 처리하는 `handleFrame` 분기). 즉 **`connected` 와 `ready` 는 다른 시점**이다. `SendInput`은 둘 다 참일 때만 전송해야 하며, 그렇지 않으면 매치 대기 중 쌓인 INPUT이 준비 직후 한꺼번에 흘러가 첫 틱부터 DESYNC를 만든다.
 
 ### 4.4 SEED 파라미터
 
-**현재 소스 발췌 — `net/session.h:48-56`**
+**현재 소스 발췌 — `net/session.h`**
 
 ```cpp
 // 게임 시작 파라미터 (호스트가 결정 → SEED 메시지로 전달)
@@ -1043,7 +1051,7 @@ SEED 프레임의 와이어 페이로드는 앞의 네 필드만이다 (`[seed:u
 
 `params()` 접근자는 복사본을 반환한다 — 호출자가 잠금을 신경 쓰지 않아도 되게.
 
-**현재 소스 발췌 — `net/session.h:125-128`**
+**현재 소스 발췌 — `net/session.h`**
 
 ```cpp
     SeedParams params() const {
@@ -1135,11 +1143,11 @@ sequenceDiagram
     Note over A,B: safeTick = min(7,5) - 2 = 3 → 틱 3 까지 실행
 ```
 
-`inputDelay` 의 역할은 지터(패킷 도착 시간의 변동) 흡수다. `inputDelay = 0` 이면 패킷이 조금만 늦어도 시뮬레이션이 멈춘다. `inputDelay = 2` 면 2틱(약 33ms)의 여유가 있다. 자세한 유도는 뒤의 "inputDelay / safeTick 심화" 절에서 이어진다.
+`inputDelay`의 역할은 지터(패킷 도착 시간의 변동) 흡수다. `inputDelay = 0`이면 패킷이 조금만 늦어도 시뮬레이션이 멈춘다. `inputDelay = 2`면 60Hz 기준 2틱의 입력 여유를 먼저 쌓고, `safeTick = min(localReceived, remoteReceived) - inputDelay`까지만 진행한다. 지연을 늘리면 정지는 줄지만 조작 반응이 늦어지는 직접적인 절충이다.
 
 ### 5.3 시뮬레이션 진행
 
-**현재 소스 발췌 — `src/main.cpp:1318-1334`** (Net 모드 틱 루프 내부)
+**현재 소스 발췌 — `src/main.cpp`** (Net 모드 틱 루프 내부)
 
 ```cpp
                     int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
@@ -1176,7 +1184,7 @@ sequenceDiagram
 
 `GetRemoteInput` 자체는 단순한 맵 조회다.
 
-**현재 소스 발췌 — `net/session.cpp:214-219`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
@@ -1189,7 +1197,7 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
 
 송신도 대칭적으로 짧다. 틱 하나당 프레임 하나 — `count` 는 항상 1 이다.
 
-**현재 소스 발췌 — `net/session.cpp:128-137`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::SendInput(uint32_t tick, uint8_t mask) {
@@ -1244,9 +1252,9 @@ graph TB
     J -->|"기동 + recvBuf preload"| IO
 ```
 
-`Session` 은 최대 네 개의 `std::thread` 멤버를 갖는다 — `th`(ioThread), `ath`(acceptThread), `qth`(queueThread), `rth`(roomThread). 동시에 사는 것은 많아야 둘이다(로비 스레드가 ioThread 를 띄우고 스스로 종료하는 구조).
+`Session` 의 `std::thread` 멤버는 `th`(ioThread), `ath`(acceptThread), `qth`(queueThread), `rth`(roomThread) 다. 이 중 동시에 사는 것은 많아야 둘이다 — 로비 스레드가 ioThread 를 띄우고 스스로 종료하는 구조이기 때문이다.
 
-### 6.2 뮤텍스 — 왜 열두 개인가
+### 6.2 뮤텍스 — 페이즈별 소유권을 왜 나누는가
 
 | 뮤텍스 | 보호 대상 | 접근 스레드 | 담당 파트 |
 |--------|----------|------------|---|
@@ -1263,7 +1271,7 @@ graph TB
 | `queueSendMu_` | `queueSendQ_` | main(QueueConfirm), queueThread(drain) | Part 7 |
 | `queueSockSendMu_` | 로비 단계 소켓 쓰기 | queueThread drain, main 의 `QueueDecline` 동기 송신 | Part 7 |
 
-12개다. 각각은 실제 버그 하나씩에 대응하지만, 그렇게 늘어난 데는 구조적인 이유가 있다.
+잠금 목록은 기능 확장에 따라 달라질 수 있지만, 나뉜 이유는 구조적이다. 게임 전송, 큐 로비, 룸 로비, 결과 수신이 서로 다른 스레드와 수명을 가지므로 한 잠금에 모두 몰아넣지 않는다.
 
 **"왜 소켓 하나에 outbound writer 를 하나로 통일하지 않았나."** 가장 단순한 대안은 "소켓 하나 = 송신 큐 하나 = 드레이닝 스레드 하나" 다. 그러면 `sendMu` 하나만 남고 `roomSendMu_` / `queueSendMu_` / `*SockSendMu_` 네 개가 사라진다. 그런데 이 설계에는 그 통일을 막는 두 가지 제약이 있다.
 
@@ -1274,7 +1282,7 @@ graph TB
 
 ### 6.3 `ioThread` — 루프 전체
 
-**현재 소스 발췌 — `net/session.cpp:829-931`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::ioThread() {
@@ -1396,7 +1404,7 @@ void Session::ioThread() {
 
 ### 6.4 종료 프로토콜
 
-**현재 소스 발췌 — `net/session.cpp:246-310`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::Close() {
@@ -1490,7 +1498,7 @@ void Session::Close() {
 
 주기적으로 양쪽 피어가 자기 상태 해시를 교환한다.
 
-**현재 소스 발췌 — `net/session.cpp:139-143`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::SendHash(uint32_t tick, uint64_t hash) {
@@ -1504,7 +1512,7 @@ void Session::SendHash(uint32_t tick, uint64_t hash) {
 
 ### 7.2 주기와 링 크기의 근거
 
-**현재 소스 발췌 — `src/main.cpp:1089-1099`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
     // F.2 — 자동 HASH 검증. 매 600틱(~10s) 로컬 해시를 SendHash 하고 링으로
@@ -1520,7 +1528,7 @@ void Session::SendHash(uint32_t tick, uint64_t hash) {
     bool desyncDetected = false;
 ```
 
-- **600틱 = 10초.** 프레임 하나가 19바이트(len 2 + type 1 + payload 12 + 체크섬 4)이고 이걸 0.1Hz 로 보내므로 대역폭은 사실상 0 이다. 그럼에도 더 자주 보내지 않는 이유는, 검증 주기를 줄여도 **감지 시점만 당겨질 뿐 복구가 되지 않기 때문**이다(다음 항목). 반대로 더 드물게 하면 DESYNC 가 난 뒤 화면이 오래 갈라진 채 방치된다. 10초는 "사용자가 이상함을 느끼기 시작하는 시간" 과 맞춘 값이다.
+- **600틱 = 10초.** 프레임 하나가 19바이트(len 2 + type 1 + payload 12 + 체크섬 4)이고 이걸 0.1Hz로 보내므로 대역폭은 사실상 0이다. 검증 주기를 줄여도 **감지 시점만 당겨질 뿐 상태를 복구하지는 못한다.** 반대로 더 드물게 하면 DESYNC가 난 뒤 화면이 오래 갈라진 채 방치된다. 10초는 사용자가 이상함을 느끼기 시작하는 시간과 맞춘 값이다.
 - **링 크기 4 → 과거 40초 이력.** 상대의 HASH 는 네트워크 지연과 양쪽 시뮬레이션 진행 차이 때문에 내가 그 틱을 지난 뒤에 도착한다. 슬롯이 하나뿐이면 "상대의 tick 600 해시가 도착했을 때 나는 이미 tick 1200 을 기록해 덮어썼다" 가 되어 비교가 영원히 실패한다. 4칸이면 40초 뒤처진 HASH 까지 비교 가능하다 — lockstep 특성상 양쪽 진행 차이가 40초까지 벌어지는 일은 없다(그 전에 `Lost` 판정).
 - **인덱스는 `(tick / HASH_PERIOD_TICKS) % HASH_RING`.** 링에 넣을 때와 비교할 때 같은 식을 쓰므로, `slot.tick == rt` 확인만으로 "덮어써졌는가" 를 판정한다.
 
@@ -1558,7 +1566,7 @@ lockstep 에서 DESYNC 를 복구하는 방법은 원리적으로 두 가지뿐�
 
 멀티플레이에서는 게임 오버 후 양쪽이 "재시작" 과 "타이틀로" 중 하나를 고르고, 그 선택을 `GAME_OVER_CHOICE` 프레임으로 교환한다.
 
-**현재 소스 발췌 — `src/main.cpp:653-662`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
 enum class GameOverState {
@@ -1596,7 +1604,7 @@ stateDiagram-v2
     GoingToTitle --> None: session.Close(), 메뉴 복귀
 ```
 
-타임아웃 상수는 `src/main.cpp:1074-1075` 의 `GAME_OVER_TIMEOUT = 30.0f`, `DISAGREEMENT_COUNTDOWN = 3.0f` 이고, `WaitingForNewSeed` 의 10초는 `src/main.cpp:2850` 에 리터럴로 있다.
+타임아웃 상수는 `src/main.cpp` 의 `GAME_OVER_TIMEOUT = 30.0f`, `DISAGREEMENT_COUNTDOWN = 3.0f` 이고, `WaitingForNewSeed` 의 10초는 `src/main.cpp` 에 리터럴로 있다.
 
 ### 8.2 의견 불일치 처리
 
@@ -1606,7 +1614,7 @@ stateDiagram-v2
 
 Host 역할인 쪽이 새 시드를 만들어 SEED 프레임으로 보낸다.
 
-**현재 소스 발췌 — `net/session.cpp:154-167`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::SendNewSeed(uint64_t newSeed) {
@@ -1627,7 +1635,7 @@ void Session::SendNewSeed(uint64_t newSeed) {
 
 Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다가 값이 바뀌면 `RestartingGame` 으로 넘어간다. SEED 프레임을 직접 감시하는 대신 세션 상태의 변화를 보는 구조라, `handleFrame` 에 콜백을 추가할 필요가 없다.
 
-여기서 한 가지 함정이 있었다. Host 쪽 `SendingNewSeed` 상태는 원래 1.5초를 고정 대기했는데, 그 시차만큼 Host 의 카운트다운이 Guest 보다 늦게 시작돼 재시작 라운드 내내 lockstep 이 한쪽 입력에 묶여 영구 렉이 났다. 지금은 "시드 전송 → 즉시 시작" 으로 양쪽 시차를 RTT 수준으로 줄인다(`src/main.cpp:2828-2834` 주석 참조). `ClearInputs()` 가 SEED 프레임을 **보존**하는 것이 이 즉시 전환의 전제 조건이다 — 자세한 이유는 "라운드 경계에서 지킬 것" 절에서 다룬다.
+여기서 한 가지 함정이 있었다. Host 쪽 `SendingNewSeed` 상태는 원래 1.5초를 고정 대기했는데, 그 시차만큼 Host 의 카운트다운이 Guest 보다 늦게 시작돼 재시작 라운드 내내 lockstep 이 한쪽 입력에 묶여 영구 렉이 났다. 지금은 "시드 전송 → 즉시 시작" 으로 양쪽 시차를 RTT 수준으로 줄인다. `ClearInputs()` 는 이전 라운드 INPUT만 버리고 이미 도착한 SEED는 보존해야 Guest가 새 라운드 시작 신호를 잃지 않는다.
 
 ---
 
@@ -1681,7 +1689,7 @@ Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다
 
 **원인:** Win32 의 모달 메시지 루프(`WM_ENTERSIZEMOVE`)가 게임 루프를 점유한다. 그 동안 `SendInput()` 이 호출되지 않으므로 상대방의 `maxRemoteTick()` 이 증가하지 않고 `safeTick` 이 정체된다.
 
-**해결(저장소에서 완화함):** 완전한 해결은 Rollback 네트코드로의 전환이 필요하지만, 이 저장소는 **ioThread 자동 heartbeat** 로 실질적으로 완화한다. 상세 구현과 그 함정은 "PING/PONG 하트비트와 LinkStatus" 절에서 다룬다.
+**해결(저장소에서 완화함):** 완전한 해결은 Rollback 네트코드로의 전환이 필요하지만, 이 저장소는 **ioThread 자동 heartbeat** 로 실질적으로 완화한다. 메인 스레드가 멈춰도 ioThread가 빈 INPUT을 발행하고, 복귀한 메인 스레드는 `heartbeatTickEnd()`까지의 로컬 입력을 0으로 채운다. PING/PONG은 이 틱 보완과 별도로 링크 지연·단절 상태를 갱신한다.
 
 > **레퍼런스:** Mark Terrano & Paul Bettner, "1500 Archers on a 28.8: Network Programming in Age of Empires and Beyond" (GDC 1999). Lockstep 모델의 원전. "if one player is slow, everyone is slow."
 
@@ -1775,7 +1783,7 @@ sequenceDiagram
 
 ### 11.1 상태 정의
 
-**현재 소스 발췌 — `net/session.h:20-24`**
+**현재 소스 발췌 — `net/session.h`**
 
 ```cpp
 // 링크 건강 상태 — 마지막 PONG 수신 경과 시간 기반
@@ -1789,7 +1797,7 @@ PING 페이로드는 `[timestamp:u64 LE]` 하나다. PONG 은 수신한 PING 의
 
 ### 11.2 송신: ioThread 의 1Hz 타이머
 
-**현재 소스 발췌 — `net/session.cpp:847-857`** (`ioThread` 본문 중)
+**현재 소스 발췌 — `net/session.cpp`** (`ioThread` 본문 중)
 
 ```cpp
         // 1Hz PING 송신 — ready=true 이후에만. 상대가 얼어붙어도 여기선 계속
@@ -1811,7 +1819,7 @@ PING 페이로드는 `[timestamp:u64 LE]` 하나다. PONG 은 수신한 PING 의
 
 ### 11.3 수신: handleFrame 의 두 분기
 
-**현재 소스 발췌 — `net/session.cpp:1098-1107`** (`handleFrame` 의 switch 중)
+**현재 소스 발췌 — `net/session.cpp`** (`handleFrame` 의 switch 중)
 
 ```cpp
     case MsgType::PING: {
@@ -1830,7 +1838,7 @@ PING 페이로드는 `[timestamp:u64 LE]` 하나다. PONG 은 수신한 PING 의
 
 ### 11.4 판정: `linkStatus()`
 
-**현재 소스 발췌 — `net/session.cpp:46-55`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 LinkStatus Session::linkStatus() const {
@@ -1859,7 +1867,7 @@ LinkStatus Session::linkStatus() const {
 
 `Lost` 는 좀 더 적극적이다. 처음 `Lost` 를 본 순간부터 main.cpp 가 10초짜리 별도 카운트다운을 돌리고, 그 사이에 `Stalled` 나 `OK` 로 회복하면 취소한다. 창 드래그가 10초를 넘기는 일은 거의 없으므로, 이 이중 grace 구조로 "창 드래그" 와 "진짜 단절" 이 자연스럽게 분리된다.
 
-**현재 소스 발췌 — `src/main.cpp:1457-1490`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
         // Section A — 링크 Lost 감지 + grace 카운트다운.
@@ -1898,7 +1906,7 @@ LinkStatus Session::linkStatus() const {
         }
 ```
 
-조건이 `app == AppMode::Net` 만이 아니라 **`&& gameLocal && gameRemote`** 라는 점이 중요하다. 릴레이 접속 실패나 매치메이킹 타임아웃도 `linkStatus()` 를 `Lost` 로 만드는데(`connectionFailed` 경로), 그때는 게임 객체가 아직 없다. 가드가 없으면 "매치 상대를 찾는 중" 화면에 "상대가 연결을 끊었습니다 — 10초 후 타이틀로" 가 뜬다. 실제로는 상대가 있던 적이 없다. `LINK_LOST_GRACE` 는 `src/main.cpp:1082` 의 `10.0f` 다.
+조건이 `app == AppMode::Net` 만이 아니라 **`&& gameLocal && gameRemote`** 라는 점이 중요하다. 릴레이 접속 실패나 매치메이킹 타임아웃도 `linkStatus()` 를 `Lost` 로 만드는데(`connectionFailed` 경로), 그때는 게임 객체가 아직 없다. 가드가 없으면 "매치 상대를 찾는 중" 화면에 "상대가 연결을 끊었습니다 — 10초 후 타이틀로" 가 뜬다. 실제로는 상대가 있던 적이 없다. `LINK_LOST_GRACE` 는 `src/main.cpp` 의 `10.0f` 다.
 
 ### 11.6 메인 스레드 스톨 자동 heartbeat (창 드래그 대응)
 
@@ -1912,7 +1920,7 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 **해결**: `ioThread` 가 main thread 의 스톨을 직접 감지해 **대신 `INPUT(tick, 0)` heartbeat 을 송신**한다. ioThread 는 별개 스레드라 창 드래그에 전혀 영향받지 않는다.
 
-**현재 소스 발췌 — `net/session.cpp:859-882`** (`ioThread` 본문 중, PING 송신 바로 뒤)
+**현재 소스 발췌 — `net/session.cpp`** (`ioThread` 본문 중, PING 송신 바로 뒤)
 
 ```cpp
             // 메인 스레드 스톨 자동 heartbeat — 창 드래그 시 메인 루프가 WM_ENTERSIZEMOVE
@@ -1949,7 +1957,7 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 **메인이 깨어난 뒤 catch-up**:
 
-**현재 소스 발췌 — `src/main.cpp:1257-1273`** (Net 모드 틱 루프, `SendInput` 직전)
+**현재 소스 발췌 — `src/main.cpp`** (Net 모드 틱 루프, `SendInput` 직전)
 
 ```cpp
                     // 창 드래그 등으로 메인 스레드가 멈춘 동안 ioThread 가 자동으로
@@ -1977,15 +1985,57 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 **`hbEnd == 0` 가드의 왜.** 이 가드를 처음 작성할 땐 `hbEnd >= localTickNext` 한 줄이면 된다고 착각했는데, 게임 시작 직후 `localTickNext = 0, hbEnd = 0` 에서 조건이 `0 >= 0 → true` 로 평가돼 `localInputs[0] = 0` 으로 덮어씌우고 `localTickNext` 가 1 로 점프하는 치명적 버그가 있었다. 결과적으로 `INPUT(0)` 이 전송되지 않아 상대 `remoteInputs[0]` 이 영원히 비어 있고, `safeTick = min(local, remote) - inputDelay` 계산에서 `remote = 0` 으로 막혀 **양쪽 sim 이 완전히 프리즈**. `hbEnd == 0` 을 "heartbeat 미발동" sentinel 로 명확히 구분해야 한다(heartbeat 은 `lastLocalTick + 1` 부터 시작하니 실제 발동 시엔 항상 `hbEnd ≥ 1`).
 
-### 11.7 왜 TCP keep-alive 를 안 쓰는가
+### 11.7 TCP keepalive와 PING/PONG은 서로 다른 실패를 본다
 
-TCP 스택 자체에 `SO_KEEPALIVE` 옵션이 있다. 그런데:
+현재 `tcp_accept`와 `tcp_connect`는 모든 연결 소켓에 `set_keepalive` 를 걸어 `SO_KEEPALIVE`를 켠다. 켜는 것만으로는 부족하다 — 감지 시간의 기본값이 플랫폼마다 크게 다르기 때문이다. POSIX에서는 지원되는 옵션에 한해 idle 15초 · probe 간격 5초 · 실패 허용 횟수를 짧게 요청하고, Windows에서는 `SIO_KEEPALIVE_VALS` ioctl로 같은 idle 15초 / 간격 5초를 명시한다. Windows 기본 KeepAliveTime은 2시간이라 `SO_KEEPALIVE`만 켜서는 "FIN/RST 없이 사라진 피어 감지"가 사실상 동작하지 않는다 — 두 플랫폼의 감지 시간을 같은 자리로 맞추는 정합화다.
 
-- **기본 타임아웃이 너무 길다** — 리눅스 `tcp_keepalive_time = 7200s`(2시간). Windows 도 비슷하다.
-- **OS 마다 튜닝 방법이 다르다** — 플랫폼별 `setsockopt` 상수가 다르고 Windows 는 `SIO_KEEPALIVE_VALS` ioctl 로만 조정 가능하다.
-- **게임 루프와 디커플되어 있다** — keep-alive 가 감지해도 우리 UI 에 "창 드래그 중" vs "단절" 을 구분해 보여주는 정보는 전달하지 못한다.
+**현재 소스 발췌 — `net/socket.cpp`**
 
-애플리케이션 레벨에서 PING/PONG 을 구현하면 이 문제가 모두 사라진다. 1Hz 라는 주기도 게임 틱(60Hz) 대비 부담이 없다 — PING 프레임은 `[len:2][type:1][payload:8][chk:4]` = 15바이트이고 PONG 도 같으므로, 한 방향당 초당 30바이트가 늘어날 뿐이다. INPUT 트래픽(840 B/s)의 4% 미만이다.
+```cpp
+// FIN/RST 없이 사라진 피어를 커널이 회수하게 하는 폴백.
+static void set_keepalive(int fd) {
+    int yes = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&yes, sizeof(yes));
+    // Windows 기본 KeepAliveTime 은 2시간이라 SO_KEEPALIVE 만으로는 'FIN/RST 없이
+    // 사라진 피어 감지'가 사실상 동작하지 않는다(POSIX 분기의 idle 15s / interval 5s
+    // 와 비대칭). SIO_KEEPALIVE_VALS 로 같은 값을 명시해 양 플랫폼 감지 시간을 맞춘다.
+    // (Vista+ 는 probe 재전송 횟수가 10회 고정 — 대략 15s + 10*5s 내 감지.)
+    tcp_keepalive ka{};
+    ka.onoff = 1;
+    ka.keepalivetime = 15000;     // idle 15초 후 첫 probe (ms)
+    ka.keepaliveinterval = 5000;  // probe 간격 5초 (ms)
+    DWORD bytesReturned = 0;
+    // keepalive 는 best-effort 폴백이라 setsockopt/WSAIoctl 실패는 조용히 무시한다
+    // (실패해도 연결 자체는 정상 동작하고, 상위의 PING/PONG 타임아웃이 최후 방어선).
+    WSAIoctl((SOCKET)fd, SIO_KEEPALIVE_VALS, &ka, sizeof(ka),
+             nullptr, 0, &bytesReturned, nullptr, nullptr);
+#else
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+#  if defined(TCP_KEEPIDLE)
+    int idle = 15;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#  elif defined(TCP_KEEPALIVE)
+    int idle = 15;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));
+#  endif
+#  if defined(TCP_KEEPINTVL)
+    int interval = 5;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+#  endif
+#  if defined(TCP_KEEPCNT)
+    int probes = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
+#  endif
+#endif
+}
+```
+
+반환값이 없고 `setsockopt`/`WSAIoctl` 실패를 조용히 무시하는 것은 의도다. keepalive는 연결의 성립 조건이 아니라 회수용 안전망이고, 실패해도 연결은 정상 동작하며 최후 방어선은 상위의 PING/PONG 타임아웃이다. 실패를 오류로 승격하면 "keepalive 옵션이 없는 플랫폼에서는 접속 자체가 안 되는" 더 나쁜 결과가 된다.
+
+커널 keepalive만으로 게임 상태를 판단할 수는 없다. 조정이 best-effort라 실제 적용값이 보장되지 않고, 감지 결과도 `LinkStatus`에 필요한 마지막 응답 시각과 원격 tick 진행 정보를 주지 않기 때문이다. 반대로 애플리케이션 PING/PONG만으로는 NAT와 커널이 보유한 반쪽 연결을 OS 수준에서 정리하는 역할을 완전히 대신하지 못한다.
+
+따라서 두 계층을 함께 쓴다. TCP keepalive는 FIN/RST 없이 사라진 peer를 회수하는 커널 안전망이고, PING/PONG은 UI의 `OK`/`Stalled`/`Lost` 판정과 RTT 관측을 위한 게임 프로토콜이다. relay의 방향별 무활동 제한은 여기에 별도로 더해져, 매치 자원을 언제 회수하고 기권으로 볼지를 결정한다.
 
 ---
 
@@ -1995,7 +2045,7 @@ TCP 스택 자체에 `SO_KEEPALIVE` 옵션이 있다. 그런데:
 
 이 원칙을 위반한 옛 코드에서 여러 버그가 나왔다. 먼저 최종형을 통째로 보자.
 
-**현재 소스 발췌 — `net/session.cpp:1007-1135`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::handleFrame(const Frame& f) {
@@ -2135,7 +2185,7 @@ void Session::handleFrame(const Frame& f) {
 
 INPUT 페이로드는 `[from_tick:u32][count:u16][mask0:u8]...[maskN-1:u8]` 형태다. `count` 는 "이 프레임에 실린 마스크 개수". 구 코드는 `count` 를 믿고 `arr[i]` 로 바로 읽었다 — `count = 10000` 이 왔는데 payload 는 6바이트(헤더만) 이면 버퍼 경계 밖으로 나가 크래시한다.
 
-**현재 소스 발췌 — `net/session.cpp:1047-1047`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
             if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
@@ -2145,9 +2195,9 @@ INPUT 페이로드는 `[from_tick:u32][count:u16][mask0:u8]...[maskN-1:u8]` 형�
 
 ### 12.2 INPUT — tick 윈도우와 맵 상한
 
-`count` 검사만으로는 부족하다. 프레임 하나가 실을 수 있는 마스크는 4096개 (`MAX_PAYLOAD_BYTES`) 로 제한되지만, **프레임을 여러 번 보내는 것은 막지 못한다.** 악의적 peer 가 `from_tick` 을 매번 바꿔가며 INPUT 을 계속 흘리면 `remoteInputs` 가 무한히 커진다 — `unordered_map` 이므로 노드당 수십 바이트, 초당 수 MB 로 늘어난다.
+`count` 검사만으로는 부족하다. 프레임 하나가 실을 수 있는 마스크는 payload 상한(`net::kMaxPayloadBytes` = 4096바이트)에서 INPUT 헤더 6바이트(`[from_tick:4][count:2]`)를 뺀 4090개로 제한되지만, **프레임을 여러 번 보내는 것은 막지 못한다.** 악의적 peer 가 `from_tick` 을 매번 바꿔가며 INPUT 을 계속 흘리면 `remoteInputs` 가 무한히 커진다 — `unordered_map` 이므로 노드당 수십 바이트, 초당 수 MB 로 늘어난다.
 
-**현재 소스 발췌 — `net/session.cpp:1053-1054`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
             constexpr size_t   kMaxRemoteInputs = 8192;  // 버퍼링 가능한 최대 tick 수
@@ -2175,7 +2225,7 @@ CHAT 페이로드는 `[text_len:u16 LE][utf8:N]`. 구 코드는 `text_len` 을 �
 
 두 번째 방어는 **수신 큐 상한**이다.
 
-**현재 소스 발췌 — `net/session.cpp:1117-1119`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
         constexpr size_t kMaxChatQueue = 256;
@@ -2187,11 +2237,11 @@ CHAT 페이로드는 `[text_len:u16 LE][utf8:N]`. 구 코드는 `text_len` 을 �
 
 송신 측에서도 클램프를 건다.
 
-**현재 소스 발췌 — `net/session.cpp:169-244`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::SendChat(const std::string& text) {
-    // 길이 상한 — 프레임 페이로드 한도(MAX_PAYLOAD_BYTES=4096)보다 훨씬 작게 클램프.
+    // 길이 상한 — 프레임 페이로드 한도(net::kMaxPayloadBytes = 4096)보다 훨씬 작게 클램프.
     // UTF-8 을 자르면 부분 바이트가 될 수 있으므로 호출부에서 이미 200자 이내로
     // 잘라놓는 것이 원칙. 여기서는 최종 방어만.
     constexpr size_t kMax = 1024;
@@ -2210,65 +2260,9 @@ bool Session::PullChat(std::string& outText) {
     chatQ_.pop_front();
     return true;
 }
-
-void Session::SendMatchSummary(uint8_t won,
-                               uint32_t my_score, uint32_t my_lines,
-                               uint32_t opp_score, uint32_t opp_lines,
-                               uint32_t duration_s) {
-    // 페이로드: [won:1][my_score:4][my_lines:4][opp_score:4][opp_lines:4][duration:4] (21B)
-    std::vector<uint8_t> pl;
-    pl.reserve(21);
-    pl.push_back(won ? 1 : 0);
-    le_write_u32(pl, my_score);
-    le_write_u32(pl, my_lines);
-    le_write_u32(pl, opp_score);
-    le_write_u32(pl, opp_lines);
-    le_write_u32(pl, duration_s);
-    auto fr = build_frame(MsgType::MATCH_SUMMARY, pl);
-    pushSend(std::move(fr));
-}
-
-bool Session::GetMatchResult(MatchResult& out) const {
-    std::lock_guard<std::mutex> lk(matchResultMu_);
-    if (!matchResultValid_) return false;
-    out = matchResult_;
-    return true;
-}
-
-bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
-    std::lock_guard<std::mutex> lk(inMu);
-    auto it = remoteInputs.find(tick);
-    if (it == remoteInputs.end()) return false;
-    outMask = it->second; return true;
-}
-
-// sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
-// 소켓이 막히면(상대가 멈췄거나 네트워크가 죽었거나) 큐가 무한히 자란다.
-//
-// 상한을 넘겼을 때 오래된 프레임을 버리는 선택지는 쓸 수 없다. lockstep 은
-// 모든 INPUT 이 순서대로 도착한다는 전제 위에 서 있어서, 한 프레임만 사라져도
-// 양쪽 시뮬레이션이 조용히 어긋난다. DESYNC 배너가 뜨기까지 한참 걸리고
-// 원인도 추적하기 어렵다.
-//
-// 그래서 큐가 넘치면 연결이 사실상 끊긴 것으로 보고 실패 처리한다.
-// 상위 UI 가 "상대 연결 끊김"을 띄우고 사용자가 재접속을 고르게 하는 편이,
-// 어긋난 채로 계속 도는 것보다 낫다.
-constexpr size_t kMaxSendQueue = 4096;   // 60Hz 기준 약 68초치 INPUT
-
-void Session::pushSend(std::vector<uint8_t>&& fr) {
-    std::lock_guard<std::mutex> lk(sendMu);
-    if (sendQ.size() >= kMaxSendQueue) {
-        NET_WARN("[NET] sendQ overflow (" << sendQ.size()
-                 << " frames) - treating peer as disconnected");
-        connectionFailed = true;
-        quit = true;
-        return;
-    }
-    sendQ.push_back(std::move(fr));
-}
 ```
 
-UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" 단위로 자르는 것이 원칙이고, `SendChat` 은 "바이트" 단위 최종 방어다.
+UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" 단위로 자르는 것이 원칙이고, `SendChat` 은 "바이트" 단위 최종 방어다. `SendChat` 이 마지막에 부르는 `pushSend` 는 모든 송신이 공유하는 단일 관문인데, 그 큐 자체의 상한은 §13 의 백프레셔 주제이므로 거기서 다룬다.
 
 ### 12.5 SEED — role 바이트 범위 검증
 
@@ -2284,26 +2278,26 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 
 다섯 번째가 이 목록에서 가장 늦게 추가됐고, 가장 놓치기 쉬운 규칙이다. 처음 네 규칙은 "프레임 하나를 안전하게 읽는" 문제고, 다섯 번째는 "프레임이 계속 오는" 문제다. fuzz 테스트(랜덤 프레임을 던져 크래시 유도)는 앞의 넷을 잡지만, 플러딩 테스트가 아니면 다섯 번째는 드러나지 않는다.
 
-[Part 7](./part7-relay-server.md) 의 릴레이 서버는 이 규칙들을 **더 엄격히** 적용한다 — 서버는 신뢰할 수 없는 클라이언트 둘의 중간에 있으므로, 한쪽이 보낸 모든 바이트를 파싱 + 재검증한 후에만 다른 쪽으로 포워딩한다.
+릴레이의 검증 범위는 모드에 따라 다르다. **unranked 매치는 게임 바이트를 그대로 양방향 전달**하고, 끝점 `Session`이 프레임과 payload를 검증한다. **ranked 매치는 전송 경계를 찾기 위해 프레임 길이를 읽고, `MATCH_SUMMARY`일 때만 checksum과 결과 payload를 검증**한다. 그 외 게임 프레임은 wire byte를 바꾸지 않고 상대에게 보낸다. relay가 전체 게임 프로토콜을 재구현하지 않는 것은 결정론 시뮬레이션과 중계 서버의 소유권을 분리하기 위해서다.
 
 ---
 
 ## 13. 백프레셔와 큐 바운드
 
-앞 절의 다섯 번째 규칙을 프로젝트 전체 관점에서 한 장에 모은다. "어디가 자랄 수 있고, 무엇이 그것을 막는가."
+수신 버퍼·입력 큐·송신 큐·채팅 문자열처럼 외부 입력에 따라 자랄 수 있는 상태를 한곳에 모아, 각 상한과 초과 정책을 대조한다.
 
 | 큐 / 버퍼 | 소유 | 상한 | 초과 시 동작 | 정의 위치 |
 |---|---|---|---|---|
-| `recvBuf` (프레임 파싱 전 누적) | `Session` (ioThread) | `MAX_PAYLOAD_BYTES + 7` 근방 | `parse_frames` 가 오버사이즈 LEN 선언 시 `clear()` + `false` | `net/framing.cpp:13` |
-| 단일 프레임 payload | 프로토콜 | 4096 B | 송신: 빈 벡터 반환 / 수신: 스트림 폐기 | `net/framing.cpp:13` |
-| `remoteInputs` (수신 입력 맵) | `Session` | 8192 엔트리 | 신규 키 거부(기존 값 유지) | `net/session.cpp:1079` |
-| INPUT tick 윈도우 | `Session` | ±4096 틱 | 해당 tick 폐기 | `net/session.cpp:1080` |
-| `chatQ_` (수신 채팅 큐) | `Session` | 256줄 | 가장 오래된 것 pop | `net/session.cpp:1143` |
-| CHAT 송신 텍스트 | `Session` | 1024 B | 잘라서 송신 | `net/session.cpp:221` |
-| `tcp_send_all` 커널 버퍼 대기 | `net/socket.cpp` | 5초 | `false` 반환 → 연결 실패 처리 | `net/socket.cpp:185` |
-| 릴레이 로비 수신 버퍼 | 릴레이 서버 | 64 KiB | 연결 종료 | `server/relay.cpp:497` (Part 7) |
-| 릴레이 연결 워커 | 릴레이 서버 | 256 | 신규 연결 거부 | `server/main.cpp:47` (Part 7) |
-| 릴레이 중계 워커 | 릴레이 서버 | 512 | 신규 매치 거부 | `server/relay.cpp:29` (Part 7) |
+| `recvBuf` (프레임 파싱 전 누적) | `Session` (ioThread) | 파싱 후에는 최대 크기 프레임의 불완전 tail만 유지 | 매 recv 후 완성 프레임 제거, 오버사이즈 LEN 선언 시 `clear()` + `false` | `net/framing.cpp`, `net/session.cpp` |
+| 단일 프레임 payload | 프로토콜 | 4096 B (`net::kMaxPayloadBytes`) | 송신: 빈 벡터 반환 / 수신: 스트림 폐기 | `net/framing.h` |
+| `remoteInputs` (수신 입력 맵) | `Session` | 8192 엔트리 | 신규 키 거부(기존 값 유지) | `net/session.cpp` |
+| INPUT tick 윈도우 | `Session` | ±4096 틱 | 해당 tick 폐기 | `net/session.cpp` |
+| `chatQ_` (수신 채팅 큐) | `Session` | 256줄 | 가장 오래된 것 pop | `net/session.cpp` |
+| CHAT 송신 텍스트 | `Session` | 1024 B | 잘라서 송신 | `net/session.cpp` |
+| `tcp_send_all` 커널 버퍼 대기 | `net/socket.cpp` | 5초 | `false` 반환 → 연결 실패 처리 | `net/socket.cpp` |
+| 릴레이 로비 수신 버퍼 | 릴레이 서버 | 64 KiB | 연결 종료 | `server/relay.cpp` (Part 7) |
+| 릴레이 연결 워커 | 릴레이 서버 | 256 | 신규 연결 거부 | `server/main.cpp` (Part 7) |
+| 릴레이 중계 워커 | 릴레이 서버 | 512 | 신규 매치 거부 | `server/relay.cpp` (Part 7) |
 | **`sendQ` (게임 송신 큐)** | `Session` | 4096 프레임 | 연결 실패 처리 | `Session::pushSend` |
 
 마지막 줄이 이 표에서 가장 늦게 채워진 칸이다. `sendQ` 는 오랫동안 이 시스템에서 **유일하게 상한이 없는 큐**였다. 왜 그랬는지, 그리고 왜 결국 상한을 걸었는지가 이 절의 주제다.
@@ -2314,7 +2308,7 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 
 - **정상 상태**: 틱당 INPUT 1개(60Hz)를 넣고 ioThread 가 즉시 뺀다. 큐 길이는 0~2 를 오간다.
 - **상대가 데이터를 안 읽는 경우**: `tcp_send_all` 이 커널 버퍼 포화로 1ms 씩 자며 재시도한다. 이 동안 메인 스레드는 계속 넣는다 → 큐가 자란다. 그러나 `kBlockedTimeout = 5초` 가 지나면 `tcp_send_all` 이 `false` 를 반환하고 ioThread 가 `quit = true` 로 종료한다. **최악의 성장량은 5초 × 60프레임 × 14바이트 ≈ 4 KB** 다.
-- **`connected == true` 인데 `ready == false` 인 긴 구간**: 여기가 진짜 위험했다. 릴레이 매치메이킹 대기는 최대 5분이고, 그 동안 메인 스레드가 `SendInput` 을 계속 부르면 큐가 300초 × 60 × 14바이트 ≈ 250 KB(프레임 18,000개) 까지 자란다. 메모리 자체는 문제가 아니지만 **그 프레임들이 매치 성립 직후 한꺼번에 나간다**는 것이 문제였다. 다음 절의 DESYNC 가 정확히 이 시나리오다.
+- **`connected == true` 인데 `ready == false` 인 긴 구간**: 여기가 진짜 위험했다. 릴레이 매치메이킹 대기는 최대 5분이고, 그 동안 메인 스레드가 `SendInput` 을 계속 부르면 큐가 300초 × 60 × 14바이트 ≈ 250 KB(프레임 18,000개) 까지 자란다. 메모리보다 심각한 문제는 **매치 성립 직후 과거 프레임이 한꺼번에 전송돼 현재 틱과 섞이는 것**이다. `connected && ready && started` 전송 조건이 이 stale backlog를 상류에서 차단한다.
 
 ### 13.2 왜 상한을 걸지 않았나
 
@@ -2322,7 +2316,7 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 
 즉 상한을 걸려면 타입별 정책이 필요하고, 그건 `ClearInputs()` 가 이미 하는 일과 같은 종류의 로직이다.
 
-**현재 소스 발췌 — `net/session.cpp:1168-1178`** (`ClearInputs` 본문 중)
+**현재 소스 발췌 — `net/session.cpp`** (`ClearInputs` 본문 중)
 
 ```cpp
     }
@@ -2338,11 +2332,11 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
     // 프레임 레이아웃: [len:2][type:1][payload:N][chk:4] → byte[2] == MsgType.
 ```
 
-이 코드가 보여주듯 "타입을 보고 선택적으로 버리는" 로직은 이미 존재한다. 한동안 `sendQ` 에 상한이 없었던 이유는 **근본 원인을 상류에서 막았기 때문**이다 — `SendInput` 을 호출하는 조건 자체를 네 겹으로 좁혀서 큐가 자랄 구간을 없앴다. 다음 절의 주제다.
+이 코드가 보여주듯 "타입을 보고 선택적으로 버리는" 로직은 이미 존재한다. `sendQ`의 stale INPUT은 임의 cap으로 잘라 상태를 숨기지 않고, `SendInput` 호출 조건을 네 겹으로 좁혀 생성 자체를 막는다. 큐의 크기보다 어느 세션 상태에서 어떤 프레임을 만들 수 있는지가 핵심 불변식이다.
 
 그러나 상류 가드는 남은 리스크였다. 하나라도 뚫리면(예: 새 UI 경로가 추가되면서 게임 객체 없이 `SendInput` 을 부르면) 다시 같은 사고가 난다. 그래서 모든 송신을 한 함수로 모으고 거기에 상한을 걸었다.
 
-**현재 소스 발췌 — `net/session.cpp:221-244`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 // sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
@@ -2422,7 +2416,7 @@ GUEST 창:
 
 lockstep 이 정상이면 **HOST.gameLocal ≡ GUEST.gameRemote** 여야 한다(둘 다 "호스트 입력으로 돌린 결과"). 같은 방식으로 **HOST.gameRemote ≡ GUEST.gameLocal** 이어야 한다. 그런데 관찰 결과는 후자만 일치했다. 즉 **"게스트 → 호스트 방향의 입력 전달"** 은 깨끗하고 **"호스트 → 게스트 방향의 입력 전달"** 만 오염됐다.
 
-한쪽 방향만 선택적으로 깨지는 건 의심의 여지없이 **프로토콜 버그가 아니라 타이밍 버그** 다. 프레이밍 · 체크섬 · 파싱 로직이 비대칭일 수는 없다. 같은 `build_frame` 과 같은 `parse_frames` 가 양쪽에서 돌기 때문이다. 비대칭을 만들 수 있는 것은 **양쪽이 서로 다른 시각에 다른 상태로 들어간 경우**뿐이다.
+한쪽 방향만 선택적으로 깨진다는 사실은 **세션 진입 타이밍을 우선 의심할 근거**였다. 양쪽이 같은 `build_frame`과 `parse_frames`를 쓰므로 정적 포맷 오류라면 대칭으로 재현될 가능성이 높다. 그렇다고 비대칭 증상이 타이밍 버그를 증명하는 것은 아니다. 방향별 네트워크 손상, 송신 큐 상태, 데이터 레이스도 후보이므로 로그와 상태 해시로 하나씩 배제해야 한다.
 
 ### 14.3 원인 — stale 프레임 backlog
 
@@ -2482,9 +2476,9 @@ sequenceDiagram
 
 ### 14.4 수정 — 네 겹 가드
 
-수정 후의 현재 코드는 조건이 네 개다.
+수정 후 코드는 전송 가능 상태를 다음 조건으로 명시한다.
 
-**현재 소스 발췌 — `src/main.cpp:1238-1274`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             if (app == AppMode::Net && session.isConnected())
@@ -2592,13 +2586,13 @@ sequenceDiagram
 
 `std::unordered_map::emplace` vs `operator[]` 의 차이는 문서상 뻔하지만, 네트워크 경로의 "같은 키가 두 번 들어올 수 있다" 가 전제되지 않으면 간과된다. `remoteInputs` 가 `operator[]`(= 덮어쓰기)였다면 이 버그는 DESYNC 대신 "첫 수 틱의 상대 입력이 조금 이상함" 으로 숨어들어 더 찾기 어려웠을 수 있다. emplace 의 엄격함 덕분에 DESYNC 가 **즉시 · 결정론적으로** 터져 추적이 가능했다 — "엄격한 의미론" 이 디버깅에 도움 된 사례다.
 
-두 번째 교훈은 **비대칭 증상은 정보다** 라는 것이다. 프로토콜 계층은 대칭이므로, 비대칭 증상은 프로토콜이 아니라 "양쪽이 서로 다른 시각에 진입한 상태"를 가리킨다. 이 추론 하나로 후보가 프레이밍·체크섬·파서 전체에서 "세션 진입 타이밍" 으로 좁혀졌다.
+두 번째 교훈은 **비대칭 증상은 후보의 우선순위를 바꾸는 정보**라는 것이다. 공용 framing 코드보다 방향별 큐와 페이즈 전환을 먼저 보게 만들었고, 실제 로그가 "양쪽이 서로 다른 시각에 세션 상태로 들어갔다"는 원인을 확인해 주었다. 증상만으로 다른 원인을 단정하지 않고, 관측 자료와 함께 범위를 좁히는 방식이 중요하다.
 
 ### 14.8 라운드 경계에서 지킬 것 — `ClearInputs()`
 
 이 버그의 일반형은 "게임으로 간주하면 안 되는 시간에 INPUT 을 보낸다" 이다. 회귀를 막는 첫 번째 방어선은 §14.4 의 네 겹 가드지만, 두 번째 방어선이 하나 더 있다. 재시작 경계에서 호출하는 `ClearInputs()` 다.
 
-**현재 소스 발췌 — `net/session.cpp:1162-1201`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 void Session::ClearInputs() {
@@ -2722,7 +2716,7 @@ Nagle 의 관점에서 보면:
 
 ### 15.3 수정 — `set_nodelay` 헬퍼
 
-**현재 소스 발췌 — `net/socket.cpp:105-118`**
+**현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 // [NET] Nagle 비활성화 (TCP_NODELAY).
@@ -2745,7 +2739,7 @@ static int set_nodelay(int fd) {
 
 `IPPROTO_TCP` / `TCP_NODELAY` 는 `<netinet/tcp.h>`(POSIX) 또는 `<winsock2.h>`(Windows)에 정의되어 있다. Windows 에서도 상수 이름과 인자 의미는 동일하고, `setsockopt` 의 네 번째 인자가 `const char*` 로 캐스팅되어야 하는 것만 차이다.
 
-이 헬퍼는 소켓이 "연결된 직후" 두 곳에서 호출된다 — §1.3 의 `tcp_accept` 와 §1.4 의 `tcp_connect`. 두 함수 모두 `set_nonblocking(fd); set_nodelay(fd);` 를 `make_owned(fd)` 직전에 부른다.
+이 헬퍼는 소켓이 "연결된 직후" 두 곳에서 호출된다 — §1.3 의 `tcp_accept` 와 §1.4 의 `tcp_connect`. 두 함수 모두 `set_nonblocking` → `set_nodelay` → `set_keepalive`(§11.7) 를 거쳐 `make_owned(fd)` 로 감싼다.
 
 중요: `tcp_listen` 의 리턴 소켓(= listen 소켓)에는 NODELAY 를 걸지 않는다. listen 소켓은 데이터를 주고받지 않고 `accept` 만 한다. 이건 "listen 소켓의 설정이 accept 자식으로 상속되는가" 문제인데, `SO_REUSEADDR` 등 일부는 상속되고 `TCP_NODELAY` 는 상속되지 않는 플랫폼이 있다. 자식 소켓에 직접 거는 것이 안전하다.
 
@@ -2827,7 +2821,7 @@ bool GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
 
 두 필드를 atomic 에서 plain 으로 되돌리고 mutex 로 묶는다.
 
-**현재 소스 발췌 — `net/session.h:254-256`**
+**현재 소스 발췌 — `net/session.h`**
 
 ```cpp
     mutable std::mutex hashMu_;
@@ -2839,7 +2833,7 @@ bool GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
 
 수신 측은 §12 의 `handleFrame` 전체 인용에 있는 `case MsgType::HASH` 분기다 — `hashMu_` 를 잡은 뒤 두 필드를 연달아 쓴다. 조회 측은 다음과 같다.
 
-**현재 소스 발췌 — `net/session.cpp:1137-1142`**
+**현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 bool Session::GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
@@ -2911,7 +2905,7 @@ XOR 은 교환법칙과 결합법칙이 성립하므로:
 
 ### 17.3 수정 코드
 
-**현재 소스 발췌 — `src/main.cpp:1354-1369`** (틱 루프 내부, `simTick++` 직후)
+**현재 소스 발췌 — `src/main.cpp`** (틱 루프 내부, `simTick++` 직후)
 
 ```cpp
                             // F.2: 600틱마다 양쪽 경기판 해시를 결합해 송신 + 링 기록.
@@ -2942,7 +2936,7 @@ XOR 은 교환법칙과 결합법칙이 성립하므로:
 
 ### 17.5 DESYNC breakdown 과의 연관
 
-다음 절에서 설명할 `StateHashBreakdown` 은 6섹션(`grid`, `currentBlock`, `nextBlock`, `rng`, `scoreFlags`, `combat`)의 개별 해시를 리턴한다. DESYNC 발생 시 이 breakdown 을 찍어서 어느 섹션이 먼저 깨졌는지 본다.
+`StateHashBreakdown` 은 상태를 원인 도메인별 묶음(`grid`, `currentBlock`, `nextBlock`, `rng`, `scoreFlags`, `combat`)으로 나눈 개별 해시를 리턴한다. DESYNC 발생 시 전체 해시만 비교하지 않고 이 breakdown을 함께 찍어 어느 상태 묶음이 먼저 깨졌는지 좁힌다.
 
 그런데 주의: 송신되는 combined hash(XOR)는 **섹션 분리가 불가능** 하다. `grid_L ⊕ grid_R` 과 `cur_L ⊕ cur_R` 이 다시 섞이면 개별 값을 복원할 수 없다. 그래서 DESYNC 로그는 상대 combined hash 는 그대로 두고 **자기 쪽의 gameLocal / gameRemote breakdown 만** 출력한다. 상대도 같은 시점에 DESYNC 를 찍으므로, 양쪽 콘솔 로그를 나란히 놓으면 어느 필드가 먼저 갈라졌는지 좁힐 수 있다.
 
@@ -2956,7 +2950,7 @@ XOR 은 교환법칙과 결합법칙이 성립하므로:
 
 게임 객체가 생성되는 직후에 다음을 찍는다.
 
-**현재 소스 발췌 — `src/main.cpp:1297-1305`** (`gameLocal`/`gameRemote` 생성 직후)
+**현재 소스 발췌 — `src/main.cpp`** (`gameLocal`/`gameRemote` 생성 직후)
 
 ```cpp
                     // DESYNC 디버깅: 양쪽 창 로그를 비교해 초기 seed + 초기 hash 가
@@ -2980,7 +2974,7 @@ DESYNC 를 디버깅할 때 체크리스트:
 
 ### 18.2 DESYNC breakdown — 어느 필드가 깨졌나
 
-**현재 소스 발췌 — `src/main.cpp:1492-1526`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
         // F.2 — 원격 HASH 수신 감지 + 링 비교. 같은 틱의 로컬 해시가 링에
@@ -3022,7 +3016,8 @@ DESYNC 를 디버깅할 때 체크리스트:
 
 `rt != 0` 가드가 있는 이유: `GetLastRemoteHash` 는 `tick != 0` 을 반환값으로 쓰지만, `lastRemoteHashSeenTick` 의 초기값도 0 이라 가드를 빼면 "아직 아무 HASH 도 안 받은 상태" 와 "tick 0 의 HASH" 를 구별하지 못한다. `simTick > 0` 조건 때문에 tick 0 의 HASH 는 애초에 송신되지 않지만, 조건을 두 곳에서 일치시켜 두는 편이 안전하다.
 
-`StateHashBreakdown()` 은 Part 1 에서 정의한 `SimGame` 메서드로, 전체 해시 대신 6개 섹션별 해시를 구조체로 리턴한다.
+`StateHashBreakdown()`은 `SimGame`의 전체 해시를 원인 도메인별 독립 해시로
+나눠 구조체로 반환한다. 필드 개수보다 각 묶음의 이름과 책임이 진단 계약이다.
 
 | 섹션 | 포함 상태 | DESYNC 시 의심 |
 |---|---|---|
@@ -3043,7 +3038,7 @@ DESYNC 를 디버깅할 때 체크리스트:
 2. **리다이렉션 분리** — `tetris > out.log 2> err.log` 같이 DESYNC 로그만 따로 분리하고 싶을 때 편하다.
 3. **`NET_WARN` 과 일관** — 세션 계층의 경고도 stderr 로 나간다.
 
-`fprintf` 대신 `std::cout` 을 썼다면 main thread 가 `std::cout` 의 내부 mutex 와 flush 를 경유해 stdio 동기화 버퍼를 거친다 — Windows 에서는 콘솔 I/O 가 blocking 이라 찍는 순간 main thread 가 수 ms 밀린다. DESYNC 로그는 디버깅 용도상 1회 burst 이므로 이 정도 대가는 괜찮지만, 정상 게임 루프 안에서는 피해야 한다. 다음 절의 주제다.
+`fprintf` 대신 `std::cout` 을 썼다면 main thread 가 `std::cout` 의 내부 mutex 와 flush 를 경유해 stdio 동기화 버퍼를 거친다. Windows 콘솔 I/O는 blocking이라 정상 게임 루프의 상시 로그가 틱을 밀 수 있다. DESYNC breakdown은 이상이 감지된 순간 한 번만 출력하고, 평상시 텔레메트리는 카운터로 모아 루프 밖에서 읽는다.
 
 ---
 
@@ -3139,433 +3134,20 @@ Lockstep 관점에서 이건 §11 의 `Stalled` 상태에 해당한다. 상대 �
 남는 한계는 **드래그한 본인의 시뮬레이션이 멈춘다**는 것이다. 그 구간의 자기 입력은 전부 0 으로 기록되므로, 드래그 중에는 조작이 불가능하다. 이건 lockstep 모델의 본질적 한계가 아니라 OS 모달 루프의 성질이고, 완전한 해결은 게임 루프를 별도 스레드로 분리하는 것이다 — 렌더링과 입력 처리까지 얽히므로 이 프로젝트는 채택하지 않았다.
 
 ---
-## 20. 릴레이 주소 관리 — 세 단계 우선순위
 
-네트워크 버그들을 고치는 중 한 가지 UX 이슈도 같이 정리했다. 매치메이킹/룸 기능이 개발 초기에 "릴레이 IP 를 매번 입력" 방식이었는데, 테스트할 때마다 타이핑하는 게 거슬렸다.
+## 20. 현재 `Session`의 확장 경계
 
-### 20.1 기존 흐름
+완성된 `net/session.*`는 직결 P2P 외에 relay 큐·커스텀 룸·랭킹 결과 수신까지 한 객체에 담는다. 그러나 구현 순서와 설명 책임은 분리한다. 이 장에서 확보한 것은 소켓 소유권, framing, `ioThread`, lockstep 입력과 해시 교환이다.
 
-```text
-메뉴 → [Matchmaking] 선택
-     → "Relay IP:port 를 입력하세요:" 화면
-     → 사용자가 127.0.0.1:7777 타이핑
-     → QueueJoin 호출
-     → 매치 대기
-```
+- relay endpoint의 빌드 기본값·환경변수·`--relay` 우선순위와 `queueThread`/`roomThread` 전환은 Part 7의 클라이언트 릴레이 경계에 속한다.
+- `RoomState`와 `ROOM_INFO` 매핑은 Part 7의 룸 상태 기계가 소유한다.
+- `MATCH_SUMMARY`/`MATCH_RESULT`의 RP 의미, 결과 교차검증, BP·XP 갱신은 Part 10의 랭킹 신뢰 경계가 소유한다.
 
-전용 화면 enum 값 두 개가 `Screen` 상태 머신에 있었고, 각각 렌더링 + 텍스트 입력 핸들러 + 유효성 검증 블록을 포함했다. 문제는 세 가지였다.
+이 구분은 파일 위치보다 데이터 권위를 우선한다. 같은 `Session` 클래스에 메서드가 있다는 이유만으로 P2P transport를 배우는 시점에 계정·DB 정책까지 끌어오지 않는다. 확장 경로도 결국 이 장의 `recvBuf`, 송신 직렬화, `Close()` 수명 계약을 재사용한다는 사실만 여기서 고정한다.
 
-- 같은 주소를 매번 치는 게 번거롭다
-- 오타 가능성(IPv4 점/포트 콜론 혼동)
-- 릴레이 주소를 배포 시점에 바꾸기 어렵다(= UI 문자열로 고정)
+## 21. CMakeLists 확장
 
-### 20.2 현재 — 세 단계 우선순위
-
-지금은 릴레이 주소를 결정하는 경로가 세 단계로 정리돼 있다.
-
-| 우선순위 | 출처 | 설정 방법 | 결정 시점 |
-|---:|---|---|---|
-| 1 (가장 낮음) | CMake 캐시 변수 `TETRIS_DEFAULT_RELAY_ENDPOINT` | `-DTETRIS_DEFAULT_RELAY_ENDPOINT=relay.example.com:7777` | 빌드 시 |
-| 2 | 환경변수 `TETRIS_RELAY_ENDPOINT` | `TETRIS_RELAY_ENDPOINT=1.2.3.4:7777 ./tetris` | 실행 시 |
-| 3 (가장 높음) | CLI 플래그 `--relay host[:port]` | `./tetris --relay 1.2.3.4:7777` | 실행 시 |
-
-**현재 소스 발췌 — `src/main.cpp:767-785`**
-
-```cpp
-    // 메뉴에서 Matchmaking/Custom Room 을 고를 때 사용할 릴레이 주소.
-    // 기본은 CMake 옵션(TETRIS_DEFAULT_RELAY_ENDPOINT) 또는 환경변수로 주입한다.
-    // 개인 IP 를 release 바이너리에 하드코딩하지 않는다.
-    std::string relayHost = "127.0.0.1";
-    uint16_t    relayPort = 7777;
-    if (!parse_endpoint(TETRIS_DEFAULT_RELAY_ENDPOINT, relayHost, relayPort, 7777)) {
-        std::fprintf(stderr,
-                     "warning: invalid TETRIS_DEFAULT_RELAY_ENDPOINT '%s', using 127.0.0.1:7777\n",
-                     TETRIS_DEFAULT_RELAY_ENDPOINT);
-        relayHost = "127.0.0.1";
-        relayPort = 7777;
-    }
-    if (const char* env = std::getenv("TETRIS_RELAY_ENDPOINT")) {
-        if (!parse_endpoint(env, relayHost, relayPort, 7777)) {
-            std::fprintf(stderr,
-                         "warning: invalid TETRIS_RELAY_ENDPOINT '%s', keeping %s:%u\n",
-                         env, relayHost.c_str(), static_cast<unsigned>(relayPort));
-        }
-    }
-```
-
-`TETRIS_DEFAULT_RELAY_ENDPOINT` 는 매크로다. `CMakeLists.txt:38-39` 가 캐시 변수로 선언하고(기본값 `"127.0.0.1:7777"`), `CMakeLists.txt:181-183` 이 `target_compile_definitions` 로 문자열 리터럴을 주입한다. 즉 **소스에는 개인 IP 가 절대 들어가지 않는다.**
-
-CLI 플래그는 argv 파서에서 마지막에 덮어쓴다.
-
-**현재 소스 발췌 — `src/main.cpp:828-839`**
-
-```cpp
-        } else if (a == "--relay") {
-            if (i + 1 < argc) {
-                std::string ep = argv[++i];
-                if (!parse_endpoint(ep, relayHost, relayPort, 7777)) {
-                    fprintf(stderr, "error: --relay expects host[:port], got '%s'\n", ep.c_str());
-                    return 2;
-                }
-            } else {
-                fprintf(stderr, "error: --relay requires an argument (host[:port])\n");
-                return 2;
-            }
-        } else if (a == "--meta") {
-```
-
-메뉴에서 Matchmaking 이나 Custom Room 을 선택하면 **즉시** `relayHost:relayPort` 로 `QueueJoin` / 룸 로비가 호출된다. 중간에 "IP 입력" 화면은 없다.
-
-`parse_endpoint`(`src/main.cpp:583`)는 `host:port`, `host`(기본 포트), IPv6 브래킷 표기(`[::1]:7777`)를 모두 파싱하는 공용 헬퍼다. 포트가 1..65535 범위인지, host 가 비어 있지 않은지 검증하고, `std::from_chars` 를 써서 예외 없이 동작한다.
-
-### 20.3 메뉴 전이
-
-```mermaid
-stateDiagram-v2
-    [*] --> Menu
-    Menu --> Matchmaking: QueueJoin(relayHost, relayPort)
-    Menu --> RoomLobby: RoomCreate / RoomJoin(relayHost, relayPort)
-    Matchmaking --> Playing: 양쪽 수락 (READY)
-    RoomLobby --> Playing: MATCH_FOUND
-    Playing --> Menu: GameOver / Lost
-```
-
-옛 버전은 Menu 와 Matchmaking / RoomLobby 사이에 IP 입력 상태가 하나씩 더 있었다. 이제는 1-hop 이다.
-
-### 20.4 배포 시나리오
-
-**시나리오 A: 빌드 시점에 기본값 고정**
-
-```bash
-cmake -S . -B build -DTETRIS_USE_SDL2=ON \
-      -DTETRIS_DEFAULT_RELAY_ENDPOINT=relay.example.com:7777
-cmake --build build --target tetris
-```
-
-사용자는 실행 파일만 실행하면 끝이다. 소스를 고치지 않으므로 배포용 브랜치를 따로 유지할 필요가 없고, 릴레이 주소가 바뀌면 CI 의 CMake 인자 한 줄만 바꾸면 된다.
-
-**시나리오 B: 런처/스크립트로 환경변수 전달**
-
-```bash
-TETRIS_RELAY_ENDPOINT=relay.example.com:7777 ./tetris
-```
-
-배포된 바이너리를 그대로 두고 실행 스크립트만 교체한다. 같은 빌드로 스테이징 릴레이와 프로덕션 릴레이를 오갈 수 있다.
-
-**시나리오 C: 사용자가 직접 지정**
-
-```bash
-./tetris --relay 192.168.1.10
-```
-
-파워유저가 친구 PC 를 릴레이로 돌리는 경우. 방화벽을 뚫지 않고 LAN 파티에 유용하다.
-
-**시나리오 D: 두 대 직접 연결 (릴레이 없이)**
-
-```bash
-./tetris --host 7777
-./tetris --connect 1.2.3.4:7777
-```
-
-`--relay` 와 무관하게 이 장이 만든 직결 P2P 경로를 쓴다. 매치메이킹/룸을 거치지 않는다.
-
-어느 쪽이든 **릴레이 주소를 결정하는 주체가 유저 타이핑이 아니라 배포자(또는 파워유저의 CLI)** 로 이동했다. 일반 플레이어는 주소를 의식하지 않아도 된다.
-
----
-
-## 21. 룸 상태 머신과 MATCH_RESULT
-
-이 장은 직결 P2P 세션까지가 범위지만, **`Session` 이 소유하는 상태**는 릴레이 경로까지 포함한다. 그중 두 가지 — `RoomState` 상태 머신과 `MATCH_RESULT` 수신 처리 — 는 `net/` 안에서 완결되므로 여기서 정의한다. 그 상태를 **만들어내는** 서버 쪽 로직은 [Part 7](./part7-relay-server.md) 이다.
-
-### 21.1 `RoomState` — 9개 상태
-
-**현재 소스 발췌 — `net/session.h:33-46`**
-
-```cpp
-// 커스텀 룸 상태 머신 (로비 대기 페이즈).
-// MATCH_FOUND 수신 후에는 Session 이 일반 게임 세션으로 전환되므로
-// 이 상태는 더 이상 의미 없다 (isReady() 사용).
-enum class RoomState : uint8_t {
-    Idle            = 0,
-    Connecting      = 1,   // tcp_connect + ROOM_CREATE/ROOM_JOIN 송신 중
-    Waiting         = 2,   // 방에 나 혼자 (peer_count=1)
-    WaitingWithPeer = 3,   // 두 명 입장 (peer_count=2), READY 대기
-    NotFound        = 4,   // 코드에 해당하는 방 없음
-    Full            = 5,   // 방이 이미 2명이어서 입장 불가
-    GoneFull        = 6,   // 상대가 퇴장해 다시 혼자 (서버가 ROOM_INFO(3) 푸시)
-    Failed          = 7,   // 소켓 오류 / 연결 실패
-    Starting        = 8,   // MATCH_FOUND 수신, 곧 게임 시작
-};
-```
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Connecting: RoomCreate() / RoomJoin(code)
-
-    Connecting --> Failed: tcp_connect 실패 / 첫 프레임 송신 실패
-    Connecting --> Waiting: ROOM_INFO(status=0, peer_count=1)
-    Connecting --> WaitingWithPeer: ROOM_INFO(status=0, peer_count=2)
-    Connecting --> NotFound: ROOM_INFO(status=2)
-    Connecting --> Full: ROOM_INFO(status=1)
-
-    Waiting --> WaitingWithPeer: ROOM_INFO(status=0, peer_count=2)
-    WaitingWithPeer --> GoneFull: ROOM_INFO(status=3) 상대 퇴장
-    GoneFull --> WaitingWithPeer: 새 상대 입장
-    Waiting --> Failed: recv 실패 / 릴레이 단절
-    WaitingWithPeer --> Failed: recv 실패 / 릴레이 단절
-
-    WaitingWithPeer --> Starting: MATCH_FOUND (양쪽 READY 후 서버가 발행)
-
-    Starting --> [*]: ioThread 기동, isReady() 로 전환
-    NotFound --> Idle: RoomLeave() / Close()
-    Full --> Idle: RoomLeave() / Close()
-    Failed --> Idle: Close()
-```
-
-상태 전이의 실체는 `roomThread` 안의 `switch` 하나다.
-
-**현재 소스 발췌 — `net/session.cpp:563-570`** (`roomThread` 의 ROOM_INFO 처리 중)
-
-```cpp
-                switch (status) {
-                    case 0: roomState_.store(peerCount >= 2 ? RoomState::WaitingWithPeer
-                                                            : RoomState::Waiting); break;
-                    case 1: roomState_.store(RoomState::Full); break;
-                    case 2: roomState_.store(RoomState::NotFound); break;
-                    case 3: roomState_.store(RoomState::GoneFull); break;
-                    default: break;
-                }
-```
-
-와이어의 `status` 바이트와 클라이언트 상태가 1:1 대응이 아니라는 점이 포인트다. 서버는 `status = 0`(waiting) 하나만 보내고 `peer_count` 를 따로 싣는다. 클라이언트가 그 둘을 조합해 `Waiting` / `WaitingWithPeer` 로 나눈다 — UI 가 "코드를 친구에게 알려주세요" 와 "준비 버튼을 누르세요" 를 구분해야 하기 때문이다.
-
-`default: break;` 가 있으므로 서버가 미래에 새 status 값을 추가해도 클라이언트는 직전 상태를 유지한다. 알 수 없는 값에 반응하지 않는 쪽이 안전하다.
-
-`roomState()` 는 atomic 조회라 메인 스레드가 매 프레임 폴링해도 부담이 없다.
-
-**현재 소스 발췌 — `net/session.h:111-116`**
-
-```cpp
-    RoomState   roomState() const { return roomState_.load(); }
-    int         roomPeerCount() const { return roomPeerCount_.load(); }
-    std::string roomCode() const {
-        std::lock_guard<std::mutex> lk(roomMu_);
-        return roomCode_;
-    }
-```
-
-`roomCode_` 만 문자열이라 뮤텍스가 필요하다. 나머지 둘은 atomic 이다.
-
-### 21.2 인증 토큰은 어디서 붙는가
-
-`QUEUE_JOIN` / `ROOM_CREATE` / `ROOM_JOIN` 세 프레임은 모두 페이로드 **끝**에 `[tok_len:1][token:N]` 을 붙인다. 이 토큰은 [Part 10](./part10-meta-and-ranking.md) 의 `tetris_meta` 서버가 발급한 32자 hex 문자열이고, 랭크 릴레이는 이게 없으면 연결을 끊는다.
-
-세 메서드 모두 시그니처 마지막에 기본값 있는 토큰 인자를 갖는다.
-
-**현재 소스 발췌 — `net/session.h:74-76`**
-
-```cpp
-    bool QueueJoin(const std::string& host, uint16_t port,
-                   uint32_t start_tick = 120, uint8_t input_delay = 2,
-                   const std::string& auth_token = {});
-```
-
-**현재 소스 발췌 — `net/session.h:99-105`**
-
-```cpp
-    bool RoomCreate(const std::string& host, uint16_t port,
-                    uint32_t start_tick = 120, uint8_t input_delay = 2,
-                    const std::string& auth_token = {});
-    bool RoomJoin(const std::string& host, uint16_t port,
-                  const std::string& code,
-                  uint32_t start_tick = 120, uint8_t input_delay = 2,
-                  const std::string& auth_token = {});
-```
-
-실제로 바이트를 붙이는 곳은 `roomThread` 의 로컬 람다다.
-
-**현재 소스 발췌 — `net/session.cpp:489-505`** (`roomThread` 본문 중)
-
-```cpp
-    auto append_token = [&](std::vector<uint8_t>& pl) {
-        const size_t n = std::min<size_t>(auth_token.size(), 255);
-        pl.push_back(static_cast<uint8_t>(n));
-        for (size_t i = 0; i < n; ++i) pl.push_back(static_cast<uint8_t>(auth_token[i]));
-    };
-    std::vector<uint8_t> first;
-    if (doCreate) {
-        std::vector<uint8_t> pl;
-        append_token(pl);
-        first = build_frame(MsgType::ROOM_CREATE, pl);
-    } else {
-        std::vector<uint8_t> pl;
-        pl.push_back(static_cast<uint8_t>(joinCode.size()));
-        for (char c : joinCode) pl.push_back(static_cast<uint8_t>(c));
-        append_token(pl);
-        first = build_frame(MsgType::ROOM_JOIN, pl);
-    }
-```
-
-`ROOM_JOIN` 의 최종 레이아웃이 `[code_len:1][code:N][tok_len:1][token:M]` 인 이유가 이 코드에 그대로 보인다 — 코드 먼저, 토큰은 뒤에 append. 길이가 앞서는 가변 필드를 연달아 놓는 방식이라 파서가 순차적으로 읽으면 된다. 서버 쪽 파싱과 5자 코드 검증은 [Part 7](./part7-relay-server.md) 이 다룬다.
-
-`RoomJoin` 은 진입 시점에 코드 길이만 검사한다.
-
-**현재 소스 발췌 — `net/session.cpp:390-416`** (`RoomJoin` 본문 중)
-
-```cpp
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
-    quit = false;
-    connectionFailed = false;
-    connected = false;
-    ready = false;
-    listening = false;
-    { std::lock_guard<std::mutex> lk(inMu); remoteInputs.clear(); }
-    lastRemoteTick = 0;
-    lastLocalTick = 0;
-    recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
-    roomState_.store(RoomState::Connecting);
-    roomPeerCount_.store(0);
-    { std::lock_guard<std::mutex> lk(roomMu_); roomCode_.clear(); }
-    { std::lock_guard<std::mutex> lk(roomSendMu_); roomSendQ_.clear(); }
-    rth = std::thread(&Session::roomThread, this, host, port,
-                      std::string{}, start_tick, input_delay, auth_token);
-    return true;
-}
-
-bool Session::RoomJoin(const std::string& host, uint16_t port,
-                       const std::string& code,
-                       uint32_t start_tick, uint8_t input_delay,
-                       const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
-    if (code.empty() || code.size() > 255) return false;
-```
-
-`255` 는 `u8` 길이 필드의 한계다. "정확히 5자" 규칙은 서버가 강제하므로, 클라이언트는 **와이어 포맷을 깨뜨릴 수 있는 값만** 막는다. 이 분업이 중요하다 — 클라이언트에 규칙을 복제하면 서버 규칙이 바뀔 때 두 곳을 고쳐야 하고, 어차피 클라이언트 검증은 공격자가 우회할 수 있다.
-
-첫 줄의 `joinable()` 네 개 검사는 "이미 다른 세션이 돌고 있으면 거부" 다. `Close()` 를 부르지 않고 `RoomJoin` 을 두 번 부르면 스레드 멤버를 덮어써서 `std::terminate` 가 난다.
-
-### 21.3 MATCH_SUMMARY 송신
-
-게임오버 시점에 클라이언트가 자기 관측치를 릴레이로 보낸다.
-
-**현재 소스 발췌 — `net/session.cpp:190-244`**
-
-```cpp
-void Session::SendMatchSummary(uint8_t won,
-                               uint32_t my_score, uint32_t my_lines,
-                               uint32_t opp_score, uint32_t opp_lines,
-                               uint32_t duration_s) {
-    // 페이로드: [won:1][my_score:4][my_lines:4][opp_score:4][opp_lines:4][duration:4] (21B)
-    std::vector<uint8_t> pl;
-    pl.reserve(21);
-    pl.push_back(won ? 1 : 0);
-    le_write_u32(pl, my_score);
-    le_write_u32(pl, my_lines);
-    le_write_u32(pl, opp_score);
-    le_write_u32(pl, opp_lines);
-    le_write_u32(pl, duration_s);
-    auto fr = build_frame(MsgType::MATCH_SUMMARY, pl);
-    pushSend(std::move(fr));
-}
-
-bool Session::GetMatchResult(MatchResult& out) const {
-    std::lock_guard<std::mutex> lk(matchResultMu_);
-    if (!matchResultValid_) return false;
-    out = matchResult_;
-    return true;
-}
-
-bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
-    std::lock_guard<std::mutex> lk(inMu);
-    auto it = remoteInputs.find(tick);
-    if (it == remoteInputs.end()) return false;
-    outMask = it->second; return true;
-}
-
-// sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
-// 소켓이 막히면(상대가 멈췄거나 네트워크가 죽었거나) 큐가 무한히 자란다.
-//
-// 상한을 넘겼을 때 오래된 프레임을 버리는 선택지는 쓸 수 없다. lockstep 은
-// 모든 INPUT 이 순서대로 도착한다는 전제 위에 서 있어서, 한 프레임만 사라져도
-// 양쪽 시뮬레이션이 조용히 어긋난다. DESYNC 배너가 뜨기까지 한참 걸리고
-// 원인도 추적하기 어렵다.
-//
-// 그래서 큐가 넘치면 연결이 사실상 끊긴 것으로 보고 실패 처리한다.
-// 상위 UI 가 "상대 연결 끊김"을 띄우고 사용자가 재접속을 고르게 하는 편이,
-// 어긋난 채로 계속 도는 것보다 낫다.
-constexpr size_t kMaxSendQueue = 4096;   // 60Hz 기준 약 68초치 INPUT
-
-void Session::pushSend(std::vector<uint8_t>&& fr) {
-    std::lock_guard<std::mutex> lk(sendMu);
-    if (sendQ.size() >= kMaxSendQueue) {
-        NET_WARN("[NET] sendQ overflow (" << sendQ.size()
-                 << " frames) - treating peer as disconnected");
-        connectionFailed = true;
-        quit = true;
-        return;
-    }
-    sendQ.push_back(std::move(fr));
-}
-```
-
-`opp_score` / `opp_lines` 가 "상대가 보고한 값" 이 아니라 **"내가 관측한 상대 값"** 이라는 점이 핵심이다. lockstep 덕분에 내 `gameRemote` 는 상대 보드의 정확한 미러이므로, 양쪽이 독립적으로 같은 숫자를 보고한다. 릴레이는 두 보고를 교차 검증할 수 있다 — 한쪽이 점수를 부풀려 보고하면 상대 보고와 어긋난다. 이 교차 검증 로직과 meta 서버 연동은 [Part 7](./part7-relay-server.md) 및 [Part 10](./part10-meta-and-ranking.md) 이 다룬다.
-
-이 프레임은 **게임 sendQ 를 그대로 탄다.** 즉 릴레이가 투명 포워딩하는 구간에 섞여 들어가는데, 릴레이는 이 타입만 가로채서 소비하고 상대에게 전달하지 않는다.
-
-### 21.4 MATCH_RESULT 수신
-
-릴레이가 meta 서버 응답을 받아 돌려주는 12바이트 프레임이다. 처리 코드는 §12 의 `handleFrame` 전체 인용에 있는 `case MsgType::MATCH_RESULT` 분기다. 세 필드를 `int32_t` 로 읽어 단일 슬롯에 저장하고 유효 플래그를 세운다.
-
-노출은 `GetMatchResult` 다.
-
-**현재 소스 발췌 — `net/session.cpp:207-212`**
-
-```cpp
-bool Session::GetMatchResult(MatchResult& out) const {
-    std::lock_guard<std::mutex> lk(matchResultMu_);
-    if (!matchResultValid_) return false;
-    out = matchResult_;
-    return true;
-}
-```
-
-**현재 소스 발췌 — `net/session.h:154-159`**
-
-```cpp
-    void SendMatchSummary(uint8_t won,
-                          uint32_t my_score, uint32_t my_lines,
-                          uint32_t opp_score, uint32_t opp_lines,
-                          uint32_t duration_s);
-    struct MatchResult { int32_t elo_before; int32_t elo_after; int32_t delta; };
-    bool GetMatchResult(MatchResult& out) const;
-```
-
-세 가지 주의점.
-
-- **필드명 `elo_*` 는 하위 호환용이다.** 실제 값은 RP(랭크 포인트)이고, `delta = 0` 은 "RP 변동 없음"(오프라인 매치, 토큰 미인증, meta 서버 응답 실패)을 뜻한다. 와이어 포맷을 바꾸지 않으려고 이름만 남겼다.
-- **부호 있는 값을 부호 없는 리더로 읽고 캐스팅한다.** `le_read_u32` 는 `uint32_t` 를 반환하고, `static_cast<int32_t>` 로 넘긴다. 2의 보수 표현을 가정하는데, C++20 부터는 표준이 이를 보장하고 그 이전에도 실질적으로 모든 플랫폼이 그렇다. `delta` 가 음수(RP 하락)일 수 있으므로 이 캐스팅이 필요하다.
-- **한 번 세워진 `matchResultValid_` 는 호출할 때마다 true 를 반환한다.** 소비형 큐가 아니라 단일 슬롯이다. 라운드 경계에서 `ClearGameOverChoices()` 가, 세션 경계에서 `Close()` 가 리셋한다. `Close()` 에서도 리셋하는 이유는 주석에 적힌 그대로 — 타이틀 → 새 매치 경로에서 이전 라운드 결과가 새 매치의 게임오버 시점에 즉시 읽히는 경계가 있었기 때문이다.
-
-### 21.5 릴레이 경로의 타임아웃
-
-로비 단계에는 두 개의 상한이 있다. 둘 다 `queueThread` 안에 있다.
-
-| 단계 | 상한 | 근거 위치 | 초과 시 |
-|---|---|---|---|
-| MATCH_FOUND 대기 (큐 매칭) | **5분** | `net/session.cpp:703` (`std::chrono::minutes(5)`) | `connectionFailed = true` → UI 가 "Matchmaking Failed" |
-| 양쪽 수락 대기 (로비) | **45초** | `net/session.cpp:773` (`std::chrono::seconds(45)`) | `connectionFailed = true` → "peer did not accept" |
-| 핸드셰이크 (ioThread) | **10초** | `net/session.cpp:857` (`CONNECTION_TIMEOUT`) | 연결 실패 처리 |
-
-즉 "매칭은 수 초~수 분" 이라는 표현의 실제 상한은 **5분**이고, 상대가 수락 버튼을 누르길 기다리는 시간은 **45초**다. 두 스레드의 구현 자체는 [Part 7](./part7-relay-server.md) 에서 다룬다.
-
----
-
-## 22. CMakeLists 확장
-
-이 장은 소스 파일 세 개를 새로 추가한다 — `net/socket.cpp`, `net/framing.cpp`, `net/session.cpp`. 그리고 플랫폼별 소켓/스레드 라이브러리 링크가 필요하다.
+이 장은 `net/socket.cpp`, `net/framing.cpp`, `net/session.cpp`를 추가하고 플랫폼별 소켓·스레드 라이브러리를 링크한다.
 
 **Part 6 체크포인트 — `CMakeLists.txt`** (게임 타깃 부분만)
 
@@ -3648,19 +3230,14 @@ else()
     endif()
 endif()
 
-# Part 6 신규 — 릴레이 주소 기본값 주입 + net trace 스위치
+# Part 6 신규 — 상세 네트워크 로그를 선택적으로 컴파일
 option(TETRIS_ENABLE_NET_TRACE "Enable verbose game-client net/session trace logs" OFF)
-set(TETRIS_DEFAULT_RELAY_ENDPOINT "127.0.0.1:7777" CACHE STRING
-    "Default relay endpoint embedded in the game client menu")
-
-target_compile_definitions(tetris PRIVATE
-    TETRIS_DEFAULT_RELAY_ENDPOINT="${TETRIS_DEFAULT_RELAY_ENDPOINT}")
 if (TETRIS_ENABLE_NET_TRACE)
     target_compile_definitions(tetris PRIVATE TETRIS_ENABLE_NET_TRACE=1)
 endif()
 ```
 
-이 시점의 `TETRIS_GAME_COMMON` 은 `bot/placement.cpp`, `bot/bot_onnx.cpp`, `meta/http_client.cpp` 를 포함하지 않고, `third_party/httplib.h` 존재 검사와 `TETRIS_DEFAULT_META_URL` 정의도 없다. 셋은 각각 [Part 9](./part9-rl-onnx-bot.md)(봇)와 [Part 10](./part10-meta-and-ranking.md) (meta HTTP 클라이언트)에서 추가된다. `TETRIS_ENABLE_DEBUG_UI` 옵션은 [Part 12](./part12-hardening-and-release.md) 가 최종 정리한다.
+이 체크포인트의 `TETRIS_GAME_COMMON`은 lockstep까지의 소스만 포함한다. 완성형 타깃은 같은 목록에 relay endpoint·큐·룸, 봇, meta HTTP 클라이언트를 더한다. 이들은 lockstep 계약을 바꾸는 대신 각자의 상태 소유자로 남는다. 디버그 단축키는 `TETRIS_ENABLE_DEBUG_UI`가 켜진 전용 빌드에만 컴파일된다.
 
 링크 라이브러리에 대해:
 
@@ -3670,9 +3247,9 @@ endif()
 
 ---
 
-## 23. `Session` 공개 API 경계
+## 22. `Session` 공개 API 소유권 지도
 
-이 장이 끝나면 `net/session.h` 의 공개 API 가 다음 상태가 된다. Part 7 을 시작할 때 무엇이 이미 있고 무엇을 새로 구현하는지 명확히 하기 위한 표다.
+완성된 `net/session.h`의 공개 API를 기능 소유 문서별로 나누면 다음과 같다. 같은 클래스에 선언돼 있어도 직결 lockstep 메서드는 이 장, 큐·룸 메서드는 Part 7이 구현 책임을 가진다.
 
 | 메서드 / 접근자 | 역할 | 구현 위치 |
 |---|---|---|
@@ -3693,25 +3270,25 @@ endif()
 | `maxRemoteTick()` / `maxLocalTick()` | safeTick 계산용 watermark | **Part 6** |
 | `heartbeatTickEnd()` | ioThread 자동 heartbeat 의 최대 tick | **Part 6** |
 | `ClearInputs()` | 라운드 경계 큐 정리 | **Part 6** |
-| `GetMatchResult(out)` | MATCH_RESULT 수신 결과 조회 | **Part 6** (프레임 발행은 Part 7) |
-| `SendMatchSummary(...)` | 게임 결과 보고 송신 | **Part 6** (서버 소비는 Part 7 / Part 10) |
-| `roomState()` / `roomPeerCount()` / `roomCode()` | 룸 로비 상태 조회 | **Part 6** (상태를 채우는 `roomThread` 는 Part 7) |
 | `QueueJoin(...)` / `QueueCancel()` | 릴레이 랜덤 큐 참가/취소 | [Part 7](./part7-relay-server.md) |
 | `isQueueMatched()` / `queueLocalReady()` / `queuePeerReady()` | 수락 로비 상태 | Part 7 |
 | `QueueConfirm()` / `QueueDecline()` | 수락 로비 수락/거절 | Part 7 |
 | `RoomCreate(...)` / `RoomJoin(...)` | 커스텀 룸 생성/입장 | Part 7 |
 | `RoomSendReady(bool)` / `RoomLeave()` | 룸 준비/퇴장 | Part 7 |
+| `roomState()` / `roomPeerCount()` / `roomCode()` | 룸 대기 화면에 필요한 상태 조회 | Part 7 |
+| `SendMatchSummary(...)` / `GetMatchResult(...)` | 결과 보고와 relay가 확정한 RP 결과 조회 | [Part 10](./part10-meta-and-ranking.md) |
 
-이 표에 한때 `Adopt(socket, role, seed, ...)` 라는 항목이 하나 더 있었다. "릴레이가 페어링한 소켓을 그대로 채택해 HELLO/SEED 핸드셰이크를 생략한다" 는 목적으로 선언·정의됐지만 **저장소 전체에 호출부가 한 곳도 없었고, 지금은 제거됐다.** 실제 릴레이 경로는 `queueThread` / `roomThread` 가 자기 안에서 `seedParams` 를 채우고 `ready = true` 를 세운 뒤 `ioThread` 를 직접 띄우는 방식으로 인라인 전환한다. 왜 전용 API 가 오히려 방해가 되는지는 [Part 7](./part7-relay-server.md) 의 `recvBuf` 인계 절에서 다룬다.
+이 표에 한때 `Adopt(socket, role, seed, ...)`라는 항목이 하나 더 있었다. 릴레이가 페어링한 소켓을 채택해 HELLO/SEED 핸드셰이크를 생략하려는 API였지만 호출부가 없어 제거됐다. 실제 경로는 `queueThread` / `roomThread`가 `seedParams`와 `ready`를 채운 뒤 `ioThread`를 직접 띄운다. 별도 채택 객체를 만들면 매치메이킹 중 이미 읽어 둔 `recvBuf`의 소유권까지 옮겨야 하므로, 같은 `Session` 안에서 전환하는 편이 프레임 손실을 막는다.
 
-### 23.1 Part 7 이 확장하는 지점
+### 22.1 완성형 relay와의 연결 경계
 
-[Part 7](./part7-relay-server.md) 은 두 방향으로 확장한다.
+완성형 relay 구조는 이 장의 lockstep 계약에 아래 경계를 연결한다. 서버 내부 구현은 [relay 서버](./part7-relay-server.md)에 모아 두었다.
 
-- **서버 측** — `server/*.cpp` 를 새로 만든다. `net/socket.cpp` 와 `net/framing.cpp` 를 그대로 재사용하고, `net/session.cpp` 는 쓰지 않는다 (서버는 세션 상태를 갖지 않는 투명 중계기다).
-- **클라이언트 측** — 이 장이 선언만 해 둔 `queueThread` / `roomThread` 를 구현한다. 두 스레드는 `ioThread` 와 같은 소켓을 다른 페이즈에서 쓰므로, §6.2 의 뮤텍스 분할과 §6.3 의 `recvBuf` preload 계약이 그 전제 조건이다.
+- **서버 측** — `server/*.cpp`가 `net/socket.cpp`와 `net/framing.cpp`를 재사용하고 `net/session.cpp`는 쓰지 않는다. 입장·룸 제어 프레임과 ranked 결과 요약은 해석하지만, 성립된 게임의 일반 프레임은 게임 상태를 만들지 않고 전달한다.
+- **클라이언트 측** — `queueThread` / `roomThread`가 큐와 룸 페이즈를 소유한다. 두 스레드는 `ioThread`와 같은 소켓을 다른 페이즈에서 쓰므로, §6.2의 뮤텍스 분할과 §6.3의 `recvBuf` preload 계약이 핸드오프를 보호한다.
+- **배포 설정** — CMake 기본 endpoint, `TETRIS_RELAY_ENDPOINT`, `--relay` 순으로 값을 덮어쓴다. 주소는 UI에 하드코딩하지 않고 배포자와 실행 환경이 정한다.
 
-이 장의 lockstep 루프 자체는 릴레이가 붙어도 **전혀 달라지지 않는다.** 릴레이는 MATCH_FOUND 이후 바이트를 투명하게 포워딩할 뿐이므로, `handleFrame` 이 보는 프레임 열은 직결 P2P 와 동일하다.
+릴레이가 붙어도 lockstep의 `INPUT`·`ACK`·`PING/PONG`·`HASH` 처리 규칙은 달라지지 않는다. relay는 일반 게임 프레임을 전달하고 ranked `MATCH_SUMMARY`만 서버 결과 검증을 위해 가로챈다. 클라이언트 `Session::handleFrame`에는 서버가 돌려주는 `MATCH_RESULT` 경로가 추가되지만, `SimGame`의 틱 진행과 입력 순서는 직결 P2P와 같다.
 
 ---
 
@@ -3719,7 +3296,7 @@ endif()
 
 Lockstep 을 만들다 보면 "같은 시드에서 정말로 같은 결과가 나오는가" 를 끊임없이 확인해야 한다. 이를 위한 세 단축키를 `src/main.cpp` 의 메인 루프 뒤쪽에 달아 두었다. 네트워크 계층을 건드리지 않고, 순수 키보드 핸들러 수준의 툴링이다.
 
-**현재 소스 발췌 — `src/main.cpp:2463-2483`**
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
         // F5/F6 리플레이
@@ -3747,7 +3324,7 @@ Lockstep 을 만들다 보면 "같은 시드에서 정말로 같은 결과가 �
 
 ### A.1 H — 상태 해시 즉석 덤프
 
-**`H` 는 기본 빌드에 없다.** `#if defined(TETRIS_ENABLE_DEBUG_UI)` 로 감싸져 있고, 그 옵션은 `CMakeLists.txt:36` 에서 기본 OFF 다. 쓰려면 이렇게 빌드한다.
+**`H` 는 기본 빌드에 없다.** `#if defined(TETRIS_ENABLE_DEBUG_UI)` 로 감싸져 있고, 그 옵션은 `CMakeLists.txt` 에서 기본 OFF 다. 쓰려면 이렇게 빌드한다.
 
 ```bash
 cmake -S . -B build -DTETRIS_USE_SDL2=ON -DTETRIS_ENABLE_DEBUG_UI=ON
@@ -3772,7 +3349,10 @@ cmake --build build --target tetris
 
 - **결정론 회귀 테스트**: Part 1 에서 만든 `sim_hash_dump` 는 시드 + 스텝 시퀀스를 받아 상태 해시를 찍어주는 헤드리스 유틸이다. 크로스 플랫폼 (Win/macOS/Linux, MSVC/Clang/GCC)에서 돌려 해시가 동일하면 바이트 단위 결정론이 확인된다.
 - **DESYNC 재현**: 의심스러운 DESYNC 가 발생한 매치에서 F5/F6 으로 확보한 리플레이가 있으면, 로컬에서 같은 입력으로 반복 재생하면서 §18 의 `[INIT]` 덤프 + DESYNC breakdown 로그를 뽑아 원인 탐색에 쓸 수 있다.
-- **봇 데모**: [Part 9](./part9-rl-onnx-bot.md) 에서 만들 ONNX 봇의 플레이를 녹화해 재생하는 용도로도 쓴다.
+- **봇 데모**: 인프로세스 ONNX 봇([Part 9](./part9-rl-onnx-bot.md))의 입력을
+  함께 기록해 같은 시드로 재생할 수 있다. 리플레이는 봇 모델을 다시 추론하지
+  않고 저장된 틱 입력을 사용하므로 모델 파일이 없어도 당시 판의 상태 전이를
+  재현한다.
 
 ---
 
@@ -3782,7 +3362,7 @@ cmake --build build --target tetris
 
 ### B.1 PING/PONG 하트비트 + LinkStatus
 
-TCP 는 keep-alive 가 수 분 단위라서 "상대가 창을 드래그 해서 얼어붙음" 과 "상대가 사라짐" 을 즉시 구분할 수 없다. 1Hz 로 양쪽이 `PING(timestamp_u64)` 을 보내고 받은 쪽은 즉시 같은 payload 로 `PONG` 에코. ioThread 가 PING 을 송신하고 PONG 수신 시각(`lastPongMs`)을 갱신한다. 상세는 §11.
+OS 기본 TCP keep-alive 는 수 분 단위인 데다 "상대가 창을 드래그 해서 얼어붙음" 과 "상대가 사라짐" 을 구분하지 못한다. 1Hz 로 양쪽이 `PING(timestamp_u64)` 을 보내고 받은 쪽은 즉시 같은 payload 로 `PONG` 에코. ioThread 가 PING 을 송신하고 PONG 수신 시각(`lastPongMs`)을 갱신한다. 상세는 §11 — 커널 keepalive 를 짧게 조정해 별도 안전망으로 쓰는 역할 분담은 §11.7.
 
 ### B.2 5자리 코드 기반 커스텀 룸
 
@@ -3795,15 +3375,15 @@ Relay → Client: ROOM_INFO{code:"A1B2C", status:0, peer_count:1}
 (친구 측) Client2 → Relay: ROOM_JOIN{code:"A1B2C", token}
 Relay → Client1, Client2: ROOM_INFO{..., peer_count:2}
 Client1, Client2 → Relay: READY{1}
-Relay → Client1: MATCH_FOUND{role=HOST, seed, my_icon, peer_icon}
-Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon}
+Relay → Client1: MATCH_FOUND{role=HOST, seed, my_icon, peer_icon, match_uuid}
+Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon, match_uuid}
 ```
 
-클라이언트 측 상태 머신은 §21.1, 서버 구현은 [Part 7](./part7-relay-server.md).
+클라이언트와 서버의 룸 상태 기계는 [Part 7](./part7-relay-server.md)의 `RoomRegistry`와 `roomThread` 설명에 함께 있다.
 
 ### B.3 인-게임 채팅
 
-프레임 타입 `CHAT`, 페이로드 `[text_len:u16][utf8:N]`. 릴레이는 투명 통과. `Session::SendChat(text)` / `Session::PullChat(outText)`. UTF-8 한글 포함, 호출부에서 200자 이내 권장(최종 방어는 송신 1024 B, 프레임 상한 4096 B). 수신 큐 상한은 256줄. 상세는 §12.4.
+프레임 타입 `CHAT`, 페이로드 `[text_len:u16][utf8:N]`. 릴레이는 게임 내용을 해석하지 않고 raw frame으로 전달한다. `Session::SendChat(text)` / `Session::PullChat(outText)`. UTF-8 한글 포함, 호출부에서 200자 이내 권장(최종 방어는 송신 1024 B, 프레임 상한 4096 B). 수신 큐 상한은 256줄. 상세는 §12.4.
 
 ### B.4 비동기 릴레이 큐
 
@@ -3815,7 +3395,7 @@ Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon}
 
 ### B.6 랭킹 연동 (MATCH_SUMMARY / MATCH_RESULT)
 
-게임오버 시 `SendMatchSummary` 로 21바이트 결과 보고를 보내고, 릴레이가 meta 서버에 POST 한 뒤 12바이트 `MATCH_RESULT` 로 RP 변동을 돌려준다. 클라이언트 측 처리는 §21.3~§21.4, 서버 측은 [Part 7](./part7-relay-server.md) 과 [Part 10](./part10-meta-and-ranking.md).
+게임오버 시 `SendMatchSummary`로 결과 보고를 보내고, relay가 meta 서버에 POST한 뒤 `MATCH_RESULT`로 RP 변동을 돌려준다. payload 형식과 클라이언트 수신 슬롯, 결과 교차검증은 [Part 10](./part10-meta-and-ranking.md)의 wire 이름·랭킹 연동 설명이 소유한다.
 
 ---
 
@@ -3837,7 +3417,7 @@ uv sync --dev
 uv run python -m pytest python/tests/test_framing_parity.py -q
 ```
 
-확인된 결과: `16 passed`.
+기대 결과: framing 패리티 파일에서 수집된 모든 항목이 통과한다.
 
 ### 직결 P2P 세션 (수동, 두 인스턴스)
 

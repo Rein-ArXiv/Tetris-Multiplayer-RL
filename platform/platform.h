@@ -4,20 +4,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // platform/platform.h  — OS 추상화 인터페이스
 //
-// raylib의 InitWindow / IsKeyPressed / GetFrameTime 등을 대체합니다.
+// 기성 즉시 그리기 라이브러리의 창·입력·시간 API 를 대체한다.
 // 구현은 platform/win32.cpp에 있습니다.
 //
 // 학습 포인트:
-//   raylib::InitWindow() 는 아래 platform_init() 이 호출하는 80줄을 숨겨놓은 것.
-//   raylib::IsKeyPressed()는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
-//   raylib::GetFrameTime()은 QueryPerformanceCounter 두 번의 차이.
+//   "창을 하나 연다" 한 줄은 아래 platform_init() 이 호출하는 80줄을 숨겨놓은 것.
+//   "이 키가 눌렸는가" 조회는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
+//   프레임 델타타임은 QueryPerformanceCounter 두 번의 차이.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── 색상 ─────────────────────────────────────────────────────────────────────
-// raylib의 Color { r, g, b, a } 와 동일한 레이아웃.
+// 이전에 쓰던 즉시 그리기 라이브러리의 색 구조체 { r, g, b, a } 와 동일한 레이아웃.
 struct Color { uint8_t r, g, b, a; };
 
-// 공통 색상 상수 (main.cpp 변경을 최소화하기 위해 raylib 이름 유지)
+// 공통 색상 상수 (main.cpp 변경을 최소화하기 위해 이전 라이브러리의 이름 유지)
 constexpr Color WHITE    = {255, 255, 255, 255};
 constexpr Color GRAY     = {130, 130, 130, 255};
 constexpr Color GREEN    = {0,   228,  48, 255};
@@ -56,9 +56,16 @@ enum PlatformKey : int {
 
 // 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
 // 컨텍스트 생성에 실패하면 프로그램을 계속 진행할 수 없으므로 즉시 실패한다.
+// 실패 시 platform_should_close() 가 true 가 되므로 호출자는 반드시 확인한다.
 void   platform_init(int w, int h, const char* title);
 
-// 윈도우 및 플랫폼 자원 해제. CloseWindow() 대체.
+// 창을 띄우지 못했거나 렌더러를 만들지 못했을 때 사용자에게 이유를 보여준다.
+// GUI 프로그램은 stderr 가 보이지 않는다 — 콘솔 없이 실행하면 진단 메시지가
+// 그대로 사라져 사용자에게는 "검은 창" 또는 "아무 일도 안 일어남" 만 남는다.
+// Windows 는 MessageBox, SDL 은 SDL_ShowSimpleMessageBox 로 띄운다.
+void   platform_fatal_error(const char* message);
+
+// 윈도우 및 플랫폼 자원 해제.
 void   platform_shutdown();
 
 // 창 닫기 요청(WM_CLOSE / WM_DESTROY / SDL_QUIT)을 받으면 true.
@@ -66,7 +73,7 @@ void   platform_shutdown();
 bool   platform_should_close();
 
 // 프레임 시작: 이전 키 상태 스냅샷 + 메시지 루프(PeekMessage) + 델타타임 반환.
-// GetFrameTime() 대체. MAX_DELTA = 100ms 클램핑 포함.
+// MAX_DELTA = 100ms 클램핑 포함.
 float  platform_begin_frame();
 
 // 프레임 끝. 소프트웨어 VSync가 켜졌다면 60 Hz에 맞춰 남은 시간을 쉰다.
@@ -89,14 +96,14 @@ void*  platform_gl_get_proc(const char* name);
 // 지점과 그려진 버튼이 서로 다른 곳을 가리키게 된다.
 void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 
-// 이 프레임에 처음 눌린 키인가? IsKeyPressed() 대체.
+// 이 프레임에 처음 눌린 키인가? (edge)
 // keyState[key] == true && keyPrev[key] == false
 bool   platform_key_pressed(int key);
 
-// 현재 눌려있는 키인가? IsKeyDown() 대체.
+// 현재 눌려있는 키인가? (level)
 bool   platform_key_down(int key);
 
-// WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0). GetCharPressed() 대체.
+// WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0).
 char   platform_get_char_pressed();
 
 // ─── 마우스 ───────────────────────────────────────────────────────────────────
@@ -104,16 +111,16 @@ char   platform_get_char_pressed();
 // 좌표는 클라이언트 영역 기준 (0,0 = 좌상단). 창 밖이면 마지막 값 유지.
 int    platform_mouse_x();
 int    platform_mouse_y();
-// 이번 프레임에 처음 눌림 (edge). IsMouseButtonPressed 대체.
+// 이번 프레임에 처음 눌림 (edge).
 bool   platform_mouse_pressed(int button);
-// 현재 누르고 있음 (level). IsMouseButtonDown 대체.
+// 현재 누르고 있음 (level).
 bool   platform_mouse_down(int button);
-// 이번 프레임에 뗌 (edge). IsMouseButtonReleased 대체.
+// 이번 프레임에 뗌 (edge).
 bool   platform_mouse_released(int button);
-// 이번 프레임 휠 스크롤 누적 (위로 양수). 없으면 0. GetMouseWheelMove 대체.
+// 이번 프레임 휠 스크롤 누적 (위로 양수). 없으면 0.
 float  platform_mouse_wheel();
 
-// platform_init 이후 경과 초. GetTime() 대체.
+// platform_init 이후 경과 초.
 double platform_get_time();
 
 // ─── 윈도우 설정 (렌더/UI 전용 — SimGame/결정성과 무관) ──────────────────────────

@@ -15,9 +15,11 @@
 // 이 파일을 한 타겟당 한 번만 추가해야 한다.
 #include "httplib.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -205,7 +208,11 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
     if (token.empty())  { set_outcome(VerifyOutcome::UnknownToken); return std::nullopt; }
 
     std::string body = std::string("{\"token\":\"") + proto::json_escape(token) + "\"}";
-    auto r = post_json(*this, host_, port_, https_, "/v1/auth/verify", {},
+    httplib::Headers headers;
+    if (!relay_secret_.empty()) {
+        headers.emplace("X-Relay-Secret", relay_secret_);
+    }
+    auto r = post_json(*this, host_, port_, https_, "/v1/auth/verify", headers,
                        body, timeout_s);
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/auth/verify network error\n");
@@ -321,7 +328,8 @@ MetaClient::select_icon(const std::string& token,
 }
 
 std::optional<MatchResult>
-MetaClient::post_match(int64_t player_a, int64_t player_b,
+MetaClient::post_match(const std::string& match_uuid,
+                       int64_t player_a, int64_t player_b,
                        std::optional<int64_t> winner,
                        int score_a, int score_b,
                        int lines_a, int lines_b,
@@ -332,7 +340,8 @@ MetaClient::post_match(int64_t player_a, int64_t player_b,
 
     std::ostringstream ss;
     ss << "{"
-       << "\"player_a\":" << player_a
+       << "\"match_uuid\":\"" << proto::json_escape(match_uuid) << "\""
+       << ",\"player_a\":" << player_a
        << ",\"player_b\":" << player_b
        << ",\"winner\":";
     if (winner) ss << *winner;
@@ -349,8 +358,38 @@ MetaClient::post_match(int64_t player_a, int64_t player_b,
     if (!relay_secret_.empty()) {
         headers.emplace("X-Relay-Secret", relay_secret_);
     }
+    // [예산] 재시도를 포함한 전체 wall-clock 을 timeout_s 로 상한한다.
+    // 시도별 타임아웃은 connect/read/write 각각에 걸리므로 한 시도가 그 몇 배로
+    // 늘어질 수 있고, 기존처럼 3회를 무조건 돌면 최악 ~9초까지 블로킹돼 매치
+    // 종료 흐름이 눈에 띄게 지연됐다. 남은 예산 기준으로 시도별 타임아웃을
+    // 줄이고, 예산이 소진되면 재시도를 포기한다 (relay 가 멱등 재전송하므로
+    // 여기서 무리하게 기다릴 이유가 없다).
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::seconds(std::max(1, timeout_s));
+    auto remaining_s = [&]() -> int {
+        const auto left = std::chrono::duration_cast<std::chrono::seconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        return static_cast<int>(left);
+    };
+
+    const int per_attempt_timeout = std::max(1, timeout_s / 3);
     auto r = post_json(*this, host_, port_, https_, "/v1/matches", headers,
-                       body, timeout_s);
+                       body, std::min(per_attempt_timeout,
+                                      std::max(1, remaining_s())));
+    for (int attempt = 1;
+         attempt < 3 && (!r || r->status == 429 || r->status >= 500);
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+        const int left = remaining_s();
+        if (left <= 0) {
+            std::fprintf(stderr,
+                         "[meta-client] /v1/matches retry budget exhausted "
+                         "after attempt %d\n", attempt);
+            break;
+        }
+        r = post_json(*this, host_, port_, https_, "/v1/matches", headers,
+                      body, std::min(per_attempt_timeout, left));
+    }
     if (!r) {
         std::fprintf(stderr, "[meta-client] /v1/matches network error\n");
         return std::nullopt;

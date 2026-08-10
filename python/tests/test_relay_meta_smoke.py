@@ -14,16 +14,19 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import signal
 import socket
 import struct
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
 
 import pytest
 
-from netbot.framing import MsgType, build_frame, parse_frames
+from netbot.framing import FramingError, MsgType, build_frame, parse_frames
 
 TEST_RELAY_SECRET = "test-relay-secret"
 
@@ -36,9 +39,15 @@ def _find_bin(name: str, env_var: str) -> Path | None:
     repo = Path(__file__).resolve().parents[2]
     suffix = ".exe" if os.name == "nt" else ""
     base = name + suffix
+    # Release 후보 추가 — 문서 권장 'cmake --build build --config Release' 는
+    # Windows 멀티컨피그에서 build/Release/ (또는 build-meta/·build-relay/
+    # 의 Release/) 아래에 exe 를 두는데, 이 경로가 빠져 있어 빌드해 두고도
+    # 테스트가 조용히 skip 되고 있었다.
     for c in [
+        repo / f"build-{name.split('_')[1]}" / "Release" / base,
         repo / f"build-{name.split('_')[1]}" / "Debug" / base,
         repo / f"build-{name.split('_')[1]}" / base,
+        repo / "build" / "Release" / base,
         repo / "build" / "Debug" / base,
         repo / "build" / base,
     ]:
@@ -89,7 +98,15 @@ def _recv_match_found(sock: socket.socket, timeout: float = 5.0) -> tuple[int, i
         if not chunk:
             raise RuntimeError("relay closed before MATCH_FOUND")
         buf.extend(chunk)
-        for t, p in parse_frames(buf):
+        try:
+            frames = parse_frames(buf)
+        except FramingError:
+            # C++ 대응(parse_frames false → 호출자 close): relay 가 오버사이즈
+            # 길이를 선언했다는 뜻. 버퍼는 parse_frames 가 이미 비웠으니
+            # 소켓만 닫고 그대로 테스트 실패로 띄운다.
+            sock.close()
+            raise
+        for t, p in frames:
             if t == MsgType.MATCH_FOUND:
                 role = p[0]
                 seed = struct.unpack_from("<Q", p, 1)[0]
@@ -104,10 +121,19 @@ def test_relay_sigterm_drains_active_match() -> None:
         pytest.skip("tetris_relay binary missing")
 
     port = _free_port()
+    # Windows 의 proc.terminate() 는 TerminateProcess(handle, 1) — 시그널
+    # 핸들러가 실행될 기회 자체가 없어 graceful shutdown 경로를 검증하지
+    # 못한다. 대신 relay 를 새 프로세스 그룹으로 띄우고 CTRL_BREAK_EVENT
+    # (자식 입장에서는 SIGBREAK — 서버가 핸들러를 등록해 둠) 를 보내
+    # 핸들러 경유 종료를 유도한다. POSIX 는 기존 SIGTERM(terminate()) 유지.
+    creationflags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    )
     proc = subprocess.Popen(
         [str(relay_bin), "--port", str(port)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        creationflags=creationflags,
     )
     if not _wait_listen(port, 5.0):
         proc.kill()
@@ -124,12 +150,18 @@ def test_relay_sigterm_drains_active_match() -> None:
         b.sendall(build_frame(MsgType.READY, b"\x01"))
         time.sleep(0.1)
 
-        proc.terminate()
+        if sys.platform == "win32":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
         try:
             return_code = proc.wait(timeout=3.0)
         except subprocess.TimeoutExpired:
             proc.kill()
             pytest.fail("relay did not drain active match within 3 seconds")
+        # POSIX 는 SIGTERM 핸들러, Windows 는 SIGBREAK 핸들러를 거쳐 정상
+        # 종료하므로 양쪽 다 종료 코드 0 을 기대한다 (0 이 아니면 핸들러를
+        # 안 거쳤거나 drain 에 실패한 것).
         assert return_code == 0
     finally:
         a.close()
@@ -245,6 +277,52 @@ def test_empty_token_rejected_when_meta_active(meta_and_relay):
         assert data == b""
     finally:
         s.close()
+
+
+def test_same_player_cannot_queue_twice(meta_and_relay):
+    base = meta_and_relay["meta_url"]
+    rh = meta_and_relay["relay_host"]
+    rp = meta_and_relay["relay_port"]
+    p1 = _post(f"{base}/v1/guest")
+    p2 = _post(f"{base}/v1/guest")
+
+    first = socket.create_connection((rh, rp), timeout=2.0)
+    duplicate = socket.create_connection((rh, rp), timeout=2.0)
+    peer = socket.create_connection((rh, rp), timeout=2.0)
+    try:
+        # 예전에는 first 송신 후 time.sleep(0.1) 으로 "first 가 먼저 큐에
+        # 들어간다" 는 순서를 가정했지만, relay 의 verify 는 접속별 스레드에서
+        # 돌기 때문에 어느 쪽이 먼저 처리될지는 보장이 없다 (느린 CI 에서
+        # flaky). 순서 가정을 버리고 대칭으로 검증한다: 같은 player 의 두
+        # 큐 진입 중 정확히 하나만 relay 가 닫아야 하고, 살아남은 쪽이 누구든
+        # peer 와 정상 매칭되면 통과다.
+        first.sendall(_build_queue_join(p1["token"]))
+        duplicate.sendall(_build_queue_join(p1["token"]))
+
+        rejected = None
+        deadline = time.monotonic() + 5.0
+        while rejected is None and time.monotonic() < deadline:
+            readable, _, _ = select.select([first, duplicate], [], [], 0.1)
+            for sock in readable:
+                try:
+                    data = sock.recv(4096)
+                except ConnectionResetError:
+                    data = b""
+                # 거절된 쪽은 EOF(또는 reset)만 보여야 한다 — 프레임이 오면
+                # 같은 player 둘이 서로 매칭됐다는 뜻이므로 즉시 실패.
+                assert data == b"", "rejected side must see EOF, not frames"
+                rejected = sock
+                break
+        assert rejected is not None, "relay must close one of the duplicate joins"
+        survivor = first if rejected is duplicate else duplicate
+
+        peer.sendall(_build_queue_join(p2["token"]))
+        role_survivor, seed_survivor = _recv_match_found(survivor)
+        role_peer, seed_peer = _recv_match_found(peer)
+        assert seed_survivor == seed_peer
+        assert {role_survivor, role_peer} == {1, 2}
+    finally:
+        first.close(); duplicate.close(); peer.close()
 
 
 def test_relay_refuses_meta_without_secret(tmp_path):

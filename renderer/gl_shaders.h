@@ -81,8 +81,8 @@ void main() {
     // 불필요하게 흐려지는 것을 막는다.
     if (v_radius > 0.0) {
         float d = rounded_box_sdf(v_local, v_half, v_radius);
-        // 1픽셀 폭으로 부드럽게 자른다 — CPU 구현의 hard edge 와 달리
-        // 모서리 안티앨리어싱이 공짜로 따라온다.
+        // 1픽셀 폭으로 부드럽게 자른다 — 모서리 안티앨리어싱이
+        // 별도 코드 없이 따라온다.
         c.a *= 1.0 - smoothstep(-0.5, 0.5, d);
     }
 

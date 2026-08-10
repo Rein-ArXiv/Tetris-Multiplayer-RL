@@ -38,9 +38,25 @@ Gymnasium environment. Its agent observation and 40-action mask match
 are `GreedyBCTSOpponent` (default), `RandomLegalOpponent`, and
 `PolicyOpponent` for a frozen policy snapshot.
 
-The current trainer CLIs instantiate `TetrisPlacementEnv` directly; selecting
-`TetrisVersusEnv` is not yet a command-line option. To train versus play, wire
-this environment into a trainer or wrapper explicitly. The regression test is:
+The PPO trainer selects the environment on the command line: `--env versus`
+switches training and periodic evaluation to `TetrisVersusEnv` (the default is
+`--env single`). The other trainer CLIs still instantiate `TetrisPlacementEnv`
+directly; to train versus play with them, wire this environment into the
+trainer or a wrapper explicitly.
+
+Versus smoke test:
+
+```bash
+python -m train.ppo_tetris \
+  --env versus \
+  --steps 4096 \
+  --rollout 512 \
+  --eval-every 1 \
+  --eval-episodes 1 \
+  --out checkpoints/versus_smoke.pt
+```
+
+The environment's regression test is:
 
 ```bash
 python -m pytest tests/test_versus_env.py -q
@@ -112,7 +128,7 @@ python -m netbot.export_onnx \
 
 All commands below run from `/content/Tetris-Multiplayer-RL/python` after the
 zoo notebook's setup cells have built `tetris_py`. They are Colab/training-
-machine commands, not Mac mini deployment commands.
+machine commands, not deployment-machine commands.
 
 ### DQN / Double DQN
 
@@ -359,7 +375,8 @@ differently when deployed to the in-game ONNX bot.
 - `muzero_tetris.py` — MuZero-style trainer plus policy distillation.
 - `rl_common.py` — shared batching, masking, evaluation, and replay helpers.
 - `../common/env_versus.py` — two-board garbage environment and scripted/
-  policy opponents; not yet selected by the built-in trainer CLIs.
+  policy opponents; selectable via `ppo_tetris.py --env versus`, still unwired
+  in the other trainer CLIs.
 - `../../model/bots/README.md` — in-game bot roster layout and speed metadata.
 - *Your* training notebooks — keep them in this directory so they're version-
   controlled with the code they depend on. They should `import` from

@@ -8,7 +8,7 @@
 #include "../core/input.h"
 #include "../core/constants.h"
 
-// [NET/RL] Headless Tetris simulation. No raylib, no audio, no I/O.
+// [NET/RL] Headless Tetris simulation. No renderer, no audio, no I/O.
 //
 // SimGame is the single source of truth for game logic and must produce the
 // same state transitions as the old Game class (verified via ComputeStateHash).

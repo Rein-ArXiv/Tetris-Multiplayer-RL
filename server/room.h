@@ -33,8 +33,8 @@ class RoomRegistry {
 public:
     RoomRegistry();
 
-    // 매치 성립 시 startPump 에 넘겨줄 meta 클라이언트.
-    // 미설정 시 unranked (MATCH_SUMMARY 투명 포워딩).
+    // 매치 성립 시 startPump에 넘겨줄 meta 클라이언트. 미설정이면 매치는
+    // unranked가 되고 relay는 MATCH_SUMMARY를 포함한 수신 byte를 가로채지 않는다.
     void setMeta(meta::client::MetaClient* meta) { meta_ = meta; }
 
     // playerConnThread 에서 ROOM_CREATE 수신 직후 호출.
@@ -47,6 +47,7 @@ public:
                       int64_t player_id, int elo,
                       const std::string& username, const std::string& token,
                       const std::string& selected_icon_id,
+                      std::shared_ptr<PlayerSessionLease> session_lease,
                       std::vector<uint8_t> streamPrefix = {});
 
     // playerConnThread 에서 ROOM_JOIN 수신 직후 호출.
@@ -55,6 +56,7 @@ public:
                     int64_t player_id, int elo,
                     const std::string& username, const std::string& token,
                     const std::string& selected_icon_id,
+                    std::shared_ptr<PlayerSessionLease> session_lease,
                     std::vector<uint8_t> streamPrefix = {});
 
     // 모든 roomLoop_ 를 종료시킨다.
@@ -82,11 +84,13 @@ private:
         std::string    hostUsername;
         std::string    hostToken;
         std::string    hostSelectedIconId{"default"};
+        std::shared_ptr<PlayerSessionLease> hostSessionLease;
         int64_t        guestPlayerId = 0;
         int            guestElo      = 0;
         std::string    guestUsername;
         std::string    guestToken;
         std::string    guestSelectedIconId{"default"};
+        std::shared_ptr<PlayerSessionLease> guestSessionLease;
     };
 
     std::string generateCode_();   // mu 잡은 상태에서 호출

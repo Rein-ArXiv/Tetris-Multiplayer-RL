@@ -264,10 +264,21 @@ void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
     h_out = s_vp_h;
 }
 
+void platform_fatal_error(const char* message)
+{
+    if (!message || !*message) return;
+    std::fprintf(stderr, "[fatal] %s\n", message);
+    // 창이 없거나 이미 파괴됐을 수 있다 — nullptr 부모로 띄운다.
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Entris", message, nullptr);
+}
+
 void platform_end_frame()
 {
-    if (!s_frame_pacing || s_frequency == 0) return;
-    const double target = 1.0 / 60.0;
+    if (s_frequency == 0) return;
+    // vsync 가 켜져 있으면 60Hz 목표, 꺼져 있으면 상한만 건다.
+    // (win32.cpp 의 같은 함수와 같은 이유 — 무제한 렌더 루프 방지)
+    constexpr double kUncappedMaxFps = 240.0;
+    const double target = s_frame_pacing ? (1.0 / 60.0) : (1.0 / kUncappedMaxFps);
     const uint64_t now = SDL_GetPerformanceCounter();
     const double elapsed = (double)(now - s_frame_start) / (double)s_frequency;
     const double remaining = target - elapsed;

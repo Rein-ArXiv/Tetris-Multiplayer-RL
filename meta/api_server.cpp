@@ -9,14 +9,21 @@
   #endif
 #endif
 #include "httplib.h"
+#ifdef _WIN32
+  #include <bcrypt.h>
+#else
+  #include <fcntl.h>
+  #include <unistd.h>
+#endif
 
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
-#include <cstring>
+#include <limits>
 #include <mutex>
-#include <random>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -26,36 +33,45 @@ namespace meta {
 
 namespace {
 
-// [보안] OS CSPRNG 에서 n 바이트의 무작위 데이터를 채운다.
-//   std::random_device 는 대부분의 타깃에서 OS CSPRNG 를 래핑하지만 일부
-//   구현(예: 구형 MinGW)에서는 결정적일 수 있다. 토큰/세션 비밀에는 OS
-//   엔트로피를 명시적으로 읽고, 실패 시에만 random_device 로 폴백한다.
-void fill_random(unsigned char* out, size_t n)
+// 인증 토큰은 플랫폼 CSPRNG에서만 만든다. 엔트로피 소스가 실패했을 때
+// random_device나 시간값으로 폴백하면 "서비스 가용" 상태처럼 보이면서 예측 가능한
+// 토큰을 발급할 수 있다. 이 경우 guest 요청 자체를 실패-폐쇄하는 편이 안전하다.
+bool fill_random(unsigned char* out, size_t n)
 {
-#ifndef _WIN32
-    // POSIX: /dev/urandom 에서 직접 읽는다(글리브C random_device 와 동일 소스지만 명시적).
-    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
-        size_t got = std::fread(out, 1, n, f);
-        std::fclose(f);
-        if (got == n) return;
+#ifdef _WIN32
+    if (n > static_cast<size_t>(std::numeric_limits<ULONG>::max())) return false;
+    return BCryptGenRandom(nullptr, out, static_cast<ULONG>(n),
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#else
+    // Linux와 macOS에서 공통으로 쓸 수 있는 커널 난수 장치를 직접 읽는다.
+    // read는 요청한 길이보다 짧게 성공할 수 있고 signal에 끊길 수도 있으므로
+    // 한 번의 호출 결과를 토큰 전체로 착각하지 않는다.
+    int flags = O_RDONLY;
+    #ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+    #endif
+    const int fd = ::open("/dev/urandom", flags);
+    if (fd < 0) return false;
+    size_t done = 0;
+    while (done < n) {
+        const ssize_t got = ::read(fd, out + done, n - done);
+        if (got > 0) {
+            done += static_cast<size_t>(got);
+            continue;
+        }
+        if (got < 0 && errno == EINTR) continue;
+        break;
     }
+    ::close(fd);
+    return done == n;
 #endif
-    // 폴백(Windows 포함): random_device.
-    std::random_device rd;
-    size_t i = 0;
-    while (i < n) {
-        uint32_t x = rd();
-        size_t take = (n - i < 4) ? (n - i) : 4;
-        std::memcpy(out + i, &x, take);
-        i += take;
-    }
 }
 
 // 32 hex chars 무작위 토큰 (16 바이트 = 128비트 엔트로피).
-std::string gen_token()
+std::optional<std::string> gen_token()
 {
     unsigned char raw[16];
-    fill_random(raw, sizeof(raw));
+    if (!fill_random(raw, sizeof(raw))) return std::nullopt;
     static const char hex[] = "0123456789abcdef";
     char buf[33];
     for (int i = 0; i < 16; ++i) {
@@ -90,12 +106,20 @@ bool parse_int_param(const std::string& s, int& out)
     return true;
 }
 
-// [보안] 레이트리밋 키로 쓸 클라이언트 식별자.
-//   배포 구성(deploy/)은 meta 를 127.0.0.1 에 바인드하고 cloudflared/Caddy 를
-//   앞단에 둔다 — 이때 remote_addr 은 항상 프록시(루프백)라 전체 사용자가 1개
-//   버킷을 공유하게 되어 per-IP 제한이 무력화된다. 피어가 루프백(신뢰 프록시)일
-//   때만 프록시가 붙여 주는 실제 클라이언트 IP 헤더를 사용한다. 외부에서 직접
-//   접속한 피어의 헤더는 위조 가능하므로 무시한다.
+bool valid_match_uuid(const std::string& s)
+{
+    if (s.size() != 32) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+// 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
+// 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
+// 버킷을 우회할 수 있다. 소형 리눅스 프록시 → 저전력 Android(Termux) meta 같은
+// 분리 배치에서는 모든 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은
+// edge가 맡아야 한다.
 std::string rate_limit_key(const httplib::Request& req)
 {
     const bool from_loopback =
@@ -103,12 +127,16 @@ std::string rate_limit_key(const httplib::Request& req)
     if (from_loopback) {
         std::string ip = req.get_header_value("CF-Connecting-IP");
         if (ip.empty()) {
+            // [보안] XFF 는 "client, proxy1, proxy2, ..." 순서로, 경유하는
+            // 프록시가 자기 앞단의 주소를 **뒤에 append** 한다. 즉 첫 토큰은
+            // 클라이언트가 요청에 미리 심어 위조할 수 있는 값이고(매 요청
+            // 다른 값을 넣으면 60/s 공개 버킷을 무한 우회), 신뢰할 수 있는
+            // 것은 우리가 믿는 프록시가 마지막에 붙인 rightmost 토큰뿐이다.
+            // 따라서 첫 토큰이 아니라 마지막 토큰을 rate limit 키로 쓴다.
             ip = req.get_header_value("X-Forwarded-For");
-            // XFF 는 "client, proxy1, proxy2" — 첫 항목이 원 클라이언트.
-            const auto comma = ip.find(',');
-            if (comma != std::string::npos) ip.resize(comma);
+            const auto comma = ip.rfind(',');
+            if (comma != std::string::npos) ip.erase(0, comma + 1);
         }
-        // 공백 트림 후 비어있지 않으면 채택.
         const auto b = ip.find_first_not_of(" \t");
         const auto e = ip.find_last_not_of(" \t");
         if (b != std::string::npos) return ip.substr(b, e - b + 1);
@@ -135,24 +163,25 @@ bool ApiServer::listen(const std::string& host, int port)
 {
     httplib::Server svr;
 
-    // [보안] 요청 본문 상한 — 거대한 body 로 메모리를 소모시키는 플러딩 방지.
-    //   우리 엔드포인트의 정상 body 는 수백 바이트 수준이라 64KiB 면 충분.
+    // Normal requests are only a few hundred bytes.
     svr.set_payload_max_length(64 * 1024);
 
-    // [보안] 간단한 per-IP 고정 윈도우 레이트 리밋(남용/DoS 완화).
-    //   1초 창에 IP 당 kMaxPerWindow 초과 요청은 429. 창 전환 시 맵을 비워
-    //   메모리 증가를 막는다(고정 윈도우라 경계에서 최대 2배 burst 허용 — 충분).
+    // Bounded one-second request window per client IP.
     svr.set_pre_routing_handler(
-        [](const httplib::Request& req, httplib::Response& res) {
+        [this](const httplib::Request& req, httplib::Response& res) {
             static std::mutex mu;
             static std::unordered_map<std::string, int> hits;
             static int64_t window = 0;
-            constexpr int kMaxPerWindow = 60;
+            const bool trustedRelay = !relay_secret_.empty() &&
+                ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_);
+            const int maxPerWindow = trustedRelay ? 512 : 60;
             const int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             std::lock_guard<std::mutex> lk(mu);
             if (nowSec != window) { window = nowSec; hits.clear(); }
-            if (++hits[rate_limit_key(req)] > kMaxPerWindow) {
+            const std::string key = (trustedRelay ? "relay:" : "public:") +
+                                    rate_limit_key(req);
+            if (++hits[key] > maxPerWindow) {
                 res.status = 429;
                 res.set_header("Access-Control-Allow-Origin", "*");
                 res.set_content("{\"error\":\"rate_limited\"}", "application/json");
@@ -183,7 +212,14 @@ bool ApiServer::listen(const std::string& host, int port)
             // registerGuest 가 nullopt 반환 시 한 번만 재시도.
             for (int attempt = 0; attempt < 2; ++attempt) {
                 auto token = gen_token();
-                auto p = db_.registerGuest(token);
+                if (!token) {
+                    std::fprintf(stderr, "[meta] OS CSPRNG unavailable; refusing guest token\n");
+                    set_json(res, 500,
+                             proto::error_json("entropy_unavailable",
+                                               "secure token generation failed"));
+                    return;
+                }
+                auto p = db_.registerGuest(*token);
                 if (p) {
                     set_json(res, 200, proto::guest_response(
                         p->id, p->token, p->elo, p->bp, p->xp,
@@ -293,6 +329,7 @@ bool ApiServer::listen(const std::string& host, int port)
                 return;
             }
 
+            const std::string matchUuid = proto::find_string(req.body, "match_uuid");
             auto pa = proto::find_int(req.body, "player_a");
             auto pb = proto::find_int(req.body, "player_b");
             auto wn = proto::find_int(req.body, "winner");   // null 허용
@@ -302,9 +339,9 @@ bool ApiServer::listen(const std::string& host, int port)
             auto lb = proto::find_int(req.body, "lines_b");
             auto du = proto::find_int(req.body, "duration_s");
 
-            if (!pa || !pb || !sa || !sb || !la || !lb || !du) {
+            if (!valid_match_uuid(matchUuid) || !pa || !pb || !sa || !sb || !la || !lb || !du) {
                 set_json(res, 400,
-                    proto::error_json("bad_request", "missing required fields"));
+                    proto::error_json("bad_request", "invalid match_uuid or missing fields"));
                 return;
             }
             if (*pa == *pb) {
@@ -312,10 +349,7 @@ bool ApiServer::listen(const std::string& host, int port)
                     proto::error_json("bad_request", "player_a == player_b"));
                 return;
             }
-            // winner 가 있다면 player_a 또는 player_b 중 하나여야 한다.
-            // 그렇지 않으면 RP 갱신이 두 플레이어 모두 losses 만 누적하는 잘못된
-            // 상태를 만든다 (saveMatch 가 winner != a && winner != b 인 분기에서
-            // 둘 다 패배 처리). 외부에 노출되는 API 이므로 여기서 막는다.
+            // A winner must identify one side of this match.
             if (wn && (*wn != *pa && *wn != *pb)) {
                 set_json(res, 400,
                     proto::error_json("bad_request", "winner must be player_a, player_b, or null"));
@@ -326,9 +360,7 @@ bool ApiServer::listen(const std::string& host, int port)
                     proto::error_json("bad_request", "scores/lines/duration must be non-negative"));
                 return;
             }
-            // int64 → int 로 내려가기 전에 상한 검증 — 2^31 이상 값은 캐스팅에서
-            // 음수로 래핑되어 위의 non-negative 검사를 우회한다. 게임 상 도달
-            // 불가능한 1e8 을 하드 상한으로 거부.
+            // Validate before narrowing int64 JSON values to int.
             constexpr int64_t kMaxStatValue = 100000000;
             if (*sa > kMaxStatValue || *sb > kMaxStatValue ||
                 *la > kMaxStatValue || *lb > kMaxStatValue ||
@@ -339,6 +371,7 @@ bool ApiServer::listen(const std::string& host, int port)
             }
 
             MatchRecord m;
+            m.match_uuid = matchUuid;
             m.player_a   = *pa;
             m.player_b   = *pb;
             m.winner     = wn;  // optional passthrough

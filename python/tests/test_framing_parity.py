@@ -19,6 +19,7 @@ import pytest
 from netbot.framing import (
     FNV1A32_OFFSET,
     MAX_PAYLOAD_BYTES,
+    FramingError,
     MsgType,
     build_frame,
     fnv1a32,
@@ -187,7 +188,22 @@ def test_parse_frames_discards_stream_when_length_exceeds_cap() -> None:
     bad += struct.pack("<H", MAX_PAYLOAD_BYTES + 2)  # LEN = TYPE + oversized
     bad.append(int(MsgType.HELLO))
     # Don't bother supplying the huge body — the parser should bail before
-    # waiting for the bytes to arrive.
-    out = parse_frames(bad)
-    assert out == []
+    # waiting for the bytes to arrive. C++ 은 버퍼를 비우고 false 를 반환하고,
+    # Python 은 같은 신호를 FramingError 로 준다 (호출자가 연결을 닫는 계약).
+    with pytest.raises(FramingError) as exc_info:
+        parse_frames(bad)
+    assert exc_info.value.frames == []  # 오염 전 정상 프레임 없음
     assert len(bad) == 0  # entire buffer dropped
+
+
+def test_parse_frames_keeps_frames_before_corruption() -> None:
+    # 정상 프레임 뒤에 오버사이즈 선언이 붙으면, 앞의 프레임은 예외의
+    # frames 속성으로 전달된다 (C++ 의 out 파라미터에 쌓인 것과 동일).
+    buf = bytearray(build_frame(MsgType.PING, b""))
+    buf += struct.pack("<H", MAX_PAYLOAD_BYTES + 2)
+    buf.append(int(MsgType.HELLO))
+    with pytest.raises(FramingError) as exc_info:
+        parse_frames(buf)
+    kept = exc_info.value.frames
+    assert [t for t, _ in kept] == [MsgType.PING]
+    assert len(buf) == 0

@@ -2,11 +2,12 @@
 
 // audio/audio.h -- XAudio2 오디오 인터페이스
 //
-// raylib의 InitAudioDevice / LoadSound / PlaySound / LoadMusicStream 을 대체한다.
+// 기성 즉시 그리기 라이브러리의 오디오 장치 초기화 / 사운드 로드·재생 /
+// 음악 스트림 API 를 대체한다.
 // 구현: audio/audio.cpp (XAudio2 + dr_mp3)
 //
 // 학습 포인트:
-//   raylib::InitAudioDevice()는 내부적으로 miniaudio(ma_device)를 초기화한다.
+//   기성 프레임워크의 "오디오 초기화 한 줄"은 내부 믹서 라이브러리를 감싼 것이다.
 //   우리는 XAudio2 COM 인터페이스를 직접 사용한다.
 //   XAudio2 오디오 그래프: Source Voice -> Mastering Voice -> 스피커
 

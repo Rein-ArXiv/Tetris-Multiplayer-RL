@@ -1,8 +1,9 @@
-// src/game.cpp — raylib 래퍼 → Handmade 렌더러 래퍼
+// src/game.cpp — 기성 프레임워크 래퍼 → Handmade 렌더러 래퍼
 //
 // 학습 포인트:
-//   이 파일이 하는 일 = 원래 raylib::DrawRectangle 을 직접 구현한 것.
-//   draw_rect(x, y, w, h, color) → renderer.cpp → CPU ARGB32 framebuffer
+//   이 파일이 하는 일 = 기성 라이브러리가 해 주던 사각형·텍스트 그리기를
+//   자체 렌더러 호출로 옮긴 것.
+//   draw_rect(x, y, w, h, color) → renderer.cpp 의 GL 배처 → GPU 가 그린다
 
 #include "game.h"
 #include "colors.h"

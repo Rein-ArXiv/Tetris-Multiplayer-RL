@@ -1,16 +1,4 @@
-// server/main.cpp — Tetris Multiplayer 릴레이 서버
-//
-// 빠른 요약:
-//   1) TCP 포트(기본 7777) listen
-//   2) accept 될 때마다 playerConnThread 스폰 → 해당 스레드가
-//      QUEUE_JOIN 프레임을 기다렸다가 matchmaker 큐에 등록
-//   3) matcher 스레드가 2명이 모이면 꺼내 relay::startPump() 호출 →
-//      양쪽에 MATCH_FOUND 전송 + 바이트 포워딩 시작
-//
-// 프로토콜(net/framing.h):
-//   C→S QUEUE_JOIN   (10) : [tok_len:1][token:N]
-//   S→C MATCH_FOUND  (12) : [role:1][seed:8 LE][my_icon_len:1][my_icon:N][peer_icon_len:1][peer_icon:N]
-//   (이후 바이트는 투명 포워딩 — SEED/INPUT/HASH/GAME_OVER_CHOICE 그대로 통과)
+// Relay process entry point. Protocol details live in net/framing.h and docs.
 
 #include "matchmaker.h"
 #include "player_conn.h"
@@ -31,25 +19,43 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 
 namespace {
 
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
-// 동시 연결 worker 상한 — 연결당 detached 스레드를 만들므로 상한이
-// 없으면 connect 플러딩만으로 메모리/핸들이 고갈된다. playerConnThread 는
-// 첫 프레임 대기(≤10s)와 룸 대기 동안 스레드를 점유하므로, 정상 부하(수십 명)
-// 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다.
+// Bound thread and handle use during connection setup.
 constexpr size_t kMaxConnWorkers = 256;
+constexpr size_t kMaxHandshakesPerIp = 16;
+
+class IpAdmission {
+public:
+    bool acquire(const std::string& ip) {
+        std::lock_guard<std::mutex> lk(mu_);
+        size_t& n = active_[ip.empty() ? "unknown" : ip];
+        if (n >= kMaxHandshakesPerIp) return false;
+        ++n;
+        return true;
+    }
+    void release(const std::string& ip) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = active_.find(ip.empty() ? "unknown" : ip);
+        if (it == active_.end()) return;
+        if (--it->second == 0) active_.erase(it);
+    }
+private:
+    std::mutex mu_;
+    std::unordered_map<std::string, size_t> active_;
+};
 
 void signalHandler(int /*sig*/) {
-    // async-signal-safe 하게 플래그만 세운다. listen 소켓은 논블로킹이라
-    // accept 루프가 최대 ~10ms 안에 g_running 을 보고 빠져나온다. 핸들러에서
-    // 소켓(shared_ptr) 을 건드리지 않는다 — atomic store 만 사용.
+    // The signal handler only touches an atomic flag.
     g_running.store(false);
 }
 
@@ -131,20 +137,25 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT,  signalHandler);
     std::signal(SIGTERM, signalHandler);
+#if defined(_WIN32)
+    // Windows 콘솔의 CTRL_BREAK_EVENT 는 CRT 가 SIGBREAK 로 전달한다. Python
+    // 테스트가 TerminateProcess(핸들러 실행 기회가 아예 없다) 대신
+    // CTRL_BREAK_EVENT 로 우아한 종료 경로를 검증할 수 있도록 함께 등록한다.
+    std::signal(SIGBREAK, signalHandler);
+#endif
 
     if (!net::net_init()) {
         std::cerr << "net_init() failed\n";
         return 1;
     }
 
-    g_listen_sock = net::tcp_listen(port, /*backlog=*/16);
+    g_listen_sock = net::tcp_listen(port, /*backlog=*/256);
     if (!g_listen_sock.valid()) {
         std::cerr << "tcp_listen(" << port << ") failed — port in use?\n";
         net::net_shutdown();
         return 1;
     }
-    // listen 소켓을 논블로킹으로 — 시그널 핸들러가 fd 를 닫지 않고 g_running
-    // 플래그만 세워도 accept 루프가 폴링으로 빠져나오게 한다(async-signal-safe).
+    // Nonblocking accept lets the loop observe the shutdown flag.
     net::tcp_set_nonblocking(g_listen_sock);
     std::cout << "[relay] listening on 0.0.0.0:" << port << "\n";
     std::cout << "[relay] local IP: " << net::get_local_ip() << "\n";
@@ -153,9 +164,9 @@ int main(int argc, char** argv) {
     relay::Matchmaker   mm;
     relay::RoomRegistry rr;
 
-    // 연결 worker는 완료 즉시 detach되지만 WorkerGroup이 생성 실패와 실행 중
-    // 예외까지 처리한다. 종료 시 drain한 뒤 mm/rr/meta를 파괴해 참조 수명을 보장한다.
+    // Drain workers before destroying the state they reference.
     relay::WorkerGroup connWorkers{"relay-connection", kMaxConnWorkers};
+    IpAdmission ipAdmission;
 
     // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작.
     // meta 가 있으면 post_match 를 호출할 수 있도록 포인터를 startPump 에 넘긴다.
@@ -202,10 +213,30 @@ int main(int argc, char** argv) {
             continue;
         }
         const uint32_t id = next_conn_id++;
+        std::string peerIp = net::tcp_peer_ip(client);
+        if (peerIp.empty()) {
+            // getpeername 실패 시 모든 연결이 "unknown" 단일 버킷(상한 16)을
+            // 공유하면 무관한 연결끼리 서로를 굶긴다. fd 는 이 연결이 살아있는
+            // 동안 프로세스 내에서 유일하므로 연결별 고유 키로 대신 사용한다
+            // (per-IP 상한은 못 걸지만, 실패 케이스끼리의 공멸보다 낫다).
+            peerIp = "fd:" + std::to_string(client.fd());
+        }
+        if (!ipAdmission.acquire(peerIp)) {
+            std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP handshake limit\n";
+            net::tcp_close(client);
+            continue;
+        }
         std::cout << "[relay] accept conn=" << id << "\n";
-        if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr]() mutable {
+        if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr,
+                                 &ipAdmission, peerIp]() mutable {
+            struct Release {
+                IpAdmission& owner; const std::string& ip;
+                ~Release() { owner.release(ip); }
+            } release{ipAdmission, peerIp};
             relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
         })) {
+            ipAdmission.release(peerIp);
             std::cerr << "[relay] rejecting conn=" << id
                       << ": connection worker unavailable\n";
         }

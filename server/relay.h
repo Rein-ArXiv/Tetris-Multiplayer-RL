@@ -1,12 +1,20 @@
-// server/relay.h — 페어링된 두 소켓 간 양방향 바이트 포워딩
+// server/relay.h — 페어링된 두 소켓의 로비와 양방향 게임 전송
 //
 // 설계:
-//   1) startPump(Match) 호출 시점에 양쪽 클라이언트에 MATCH_FOUND 프레임 전송.
-//   2) 이후 두 worker가 각 방향(A→B, B→A)으로 바이트를 흘려보냄.
-//      — 프레임 파싱 안 함. 체크섬 검증 안 함. 그냥 recv→send 파이프.
-//      — lockstep 게임 결정론은 클라가 책임지므로 서버는 투명 중계자.
-//   3) 한쪽이 끊기면 반대쪽 스레드도 read EOF 를 받아 종료 →
-//      마지막 스레드가 양 fd 닫고 자원 해제 (shared_ptr refcount 로 관리).
+//   1) startPump/startQueuePump가 양쪽에 MATCH_FOUND(role, seed, icons,
+//      match_uuid)를 보내고, 커스텀 룸은 바로 게임으로, 랜덤 큐는 양쪽
+//      READY(1)를 확인한 뒤 게임으로 전환한다.
+//   2) 게임 중에는 방향별 worker(A→B, B→A)가 같은 Channel을 공유한다.
+//      unranked 매치는 raw byte를 전달한다. ranked 매치는 프레임 경계를 읽어
+//      MATCH_SUMMARY만 체크섬·크기 검증 후 가로채고, 나머지 wire byte는 그대로
+//      전달한다. lockstep 상태 계산 자체는 여전히 클라이언트 책임이다.
+//   3) 방향별 15초 idle timeout과 64 KiB/s 상한으로 멈춘 연결과 flood를
+//      끊는다. 한쪽 소켓 오류/EOF가 먼저 관측되면 상대 방향도 종료시키고,
+//      ranked 매치는 그 단절을 서버 관측 기권으로 meta에 기록한다. 두 정상
+//      MATCH_SUMMARY가 모이면 교차검증한 결과를 멱등 match_uuid로 저장한다.
+//   4) 소켓, 계정 session lease, summary, 송신 mutex는 shared Channel이 소유한다.
+//      마지막 forwarder가 양 소켓을 shutdown하고 Channel 소멸이 실제 handle과
+//      lease를 해제한다. worker는 전역 WorkerGroup이 추적해 서버 종료 때 drain한다.
 
 #pragma once
 #include "matchmaker.h"
@@ -20,7 +28,7 @@ namespace relay {
 //
 // meta: non-null 이고 양쪽 player_id != 0 일 때만 경기 종료 후
 //   MATCH_SUMMARY 교차검증 + /v1/matches POST + MATCH_RESULT 송신.
-//   nullptr 이거나 unranked 매치면 MATCH_SUMMARY 도 투명 포워딩.
+//   nullptr 이거나 unranked 매치면 MATCH_SUMMARY를 포함한 raw byte를 전달한다.
 //
 // 커스텀 룸 경로 전용 — 양쪽이 이미 룸 로비에서 READY 로 수락한 상태라
 // 바로 게임 포워딩을 연다.

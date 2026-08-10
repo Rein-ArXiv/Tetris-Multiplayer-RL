@@ -46,6 +46,7 @@ struct IconCatalogEntry {
 };
 
 struct MatchRecord {
+    std::string                    match_uuid;  // 32 lowercase hex, unique/idempotent
     // winner=std::nullopt → 무승부/검증실패 (RP 미반영).
     int64_t                    player_a;
     int64_t                    player_b;
@@ -122,7 +123,8 @@ public:
                                     const std::string& icon_id,
                                     std::optional<Player>& out_player);
 
-    // 매치 기록 + RP 업데이트 (winner != nullopt 일 때만).
+    // 매치 기록 + RP 업데이트 (winner != nullopt 일 때만). 같은 match_uuid가
+    // 재전송되면 저장된 최초 결과를 반환하고 RP/BP/XP를 다시 적용하지 않는다.
     // 단일 트랜잭션 안에서 matches INSERT → players UPDATE × 2 → elo_history × 2.
     // 실패 시 nullopt (모두 롤백).
     std::optional<MatchInsertResult> saveMatch(const MatchRecord& m);

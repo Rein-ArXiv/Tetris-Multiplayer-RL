@@ -99,7 +99,8 @@ public:
                                               const std::string& icon_id,
                                               int timeout_s = 5,
                                               int* out_http_status = nullptr);
-    std::optional<MatchResult> post_match    (int64_t player_a, int64_t player_b,
+    std::optional<MatchResult> post_match    (const std::string& match_uuid,
+                                              int64_t player_a, int64_t player_b,
                                               std::optional<int64_t> winner,
                                               int score_a, int score_b,
                                               int lines_a, int lines_b,

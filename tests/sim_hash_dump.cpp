@@ -1,4 +1,4 @@
-// [NET/RL] Determinism regression test — raylib-free.
+// [NET/RL] Determinism regression test — renderer-free.
 //
 // Runs SimGame through a FIXED deterministic sequence of inputs and ticks,
 // then dumps the state hash at well-known checkpoints. This binary is the
@@ -21,7 +21,7 @@
 //   sim_hash_dump              -> prints hash checkpoints to stdout
 //   sim_hash_dump > out.txt    -> capture for diff
 //
-// The test does NOT depend on net/, raylib, or any I/O other than stdout.
+// The test does NOT depend on net/, the renderer, or any I/O other than stdout.
 
 #include <cstdint>
 #include <cstdio>
@@ -36,9 +36,9 @@ namespace {
 
 struct Step
 {
-    // For each step we (optionally) submit an input mask, then advance N ticks.
-    // mask == 0xFF means "no input this step" (0 is a valid NONE mask that we
-    // still want to be able to submit explicitly).
+    // For each step we submit an input mask, then advance N ticks.
+    // The mask is submitted unconditionally — INPUT_NONE (0) is a valid mask
+    // and the sim treats it as a no-op, so "no input this step" is just 0.
     uint8_t mask;
     int     ticks;
 };

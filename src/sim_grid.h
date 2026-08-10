@@ -1,6 +1,6 @@
 #pragma once
 
-// [NET/RL] Pure, headless grid. No raylib, no rendering.
+// [NET/RL] Pure, headless grid. No renderer, no rendering.
 // Layout (int grid[kRows][kCols]) must match the old Grid class so that
 // ComputeStateHash produces identical bytes when fnv1a64 is applied to the
 // contiguous memory range.

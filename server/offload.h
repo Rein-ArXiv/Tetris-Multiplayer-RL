@@ -60,12 +60,19 @@ public:
     ~Offload() { shutdown(); }
 
     // 블로킹 job 을 워커 풀에 제출한다. 루프 스레드에서 호출.
-    void submit(Job job) {
+    //
+    // 종료가 시작된 뒤에는 거절하고 false 를 돌려준다. 검사가 없으면 워커가 이미
+    // 빠져나간 뒤 제출된 job 이 큐에 남은 채 아무도 실행하지 않아, 호출자는 성공한
+    // 줄 알지만 결과(예: 경기 결과 저장)는 조용히 사라진다. 호출자는 false 를 보고
+    // 그 자리에서 대체 처리(로그·폴백)를 해야 한다.
+    bool submit(Job job) {
         {
             std::lock_guard<std::mutex> lk(mu_);
+            if (stopping_) return false;
             jobs_.push_back(std::move(job));
         }
         cv_.notify_one();
+        return true;
     }
 
     // 완료된 continuation 들을 걷어 out 으로 옮긴다(루프 스레드에서 호출). wake()

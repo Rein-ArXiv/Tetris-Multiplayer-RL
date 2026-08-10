@@ -148,7 +148,20 @@ void test_offload() {
     }
     check(collected == 8 && done.load() == 8, "8개 job 전부 회수·실행");
 
+    check(off.submit([]() -> relay::Offload::Cont { return {}; }),
+          "종료 전 submit 은 수락");
+
     off.shutdown();  // idempotent — 소멸자도 부르지만 무해
+
+    // 종료 후 제출은 거절돼야 한다. 수락하면 워커가 이미 빠져나갔으므로 그 job 은
+    // 영영 실행되지 않고, 호출자는 성공한 줄 알지만 결과가 조용히 사라진다.
+    std::atomic<bool> ghost{false};
+    bool accepted = off.submit([&]() -> relay::Offload::Cont {
+        ghost = true;
+        return {};
+    });
+    check(!accepted, "종료 후 submit 은 거절");
+    check(!ghost.load(), "거절된 job 은 실행되지 않음");
 }
 
 } // namespace

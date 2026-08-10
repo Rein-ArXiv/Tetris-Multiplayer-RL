@@ -48,6 +48,16 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port);  // 클라이언�
 
 // TCP 데이터 송수신
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len);  // 전체 데이터 송신 (부분 전송 시 재시도)
+
+// 논블로킹 부분 송신. 커널 송신 버퍼가 받아 준 만큼만 보내고 그 길이를 out_sent 에
+// 넣는다. 버퍼가 가득 차 한 바이트도 못 보낸 경우(WOULDBLOCK)는 오류가 아니라
+// out_sent == 0 으로 나타나며 반환값은 true 다 — 호출자는 남은 바이트를 보류
+// 버퍼에 쌓고 쓰기 준비성(Reactor 의 kWrite)을 기다렸다가 다시 부른다.
+// 반환 false 는 연결이 끊겼거나 회복 불가 오류라는 뜻이다.
+//
+// tcp_send_all 과의 차이: 저쪽은 다 보낼 때까지 최대 5초 잠들며 재시도하므로
+// 이벤트 루프에서 부르면 그 사이 모든 연결의 전달이 멈춘다. 루프는 이 함수를 쓴다.
+bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out_sent);
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf);  // 논블로킹 수신 (누적 버퍼에 추가)
 void tcp_close(TcpSocket& s);  // shutdown(SHUT_RDWR) 으로 피어/폴러(recv)를 EOF 로 깨운다. 실제 ::close 는 마지막 TcpSocket 복사본 소멸 시 RAII 로 일어난다(멱등).
 void tcp_set_nonblocking(const TcpSocket& s);  // 소켓을 논블로킹으로 전환. listen 소켓 accept 폴링용(shutdown 은 블로킹 accept 를 깨우지 못하므로).

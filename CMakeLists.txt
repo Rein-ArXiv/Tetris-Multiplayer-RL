@@ -416,6 +416,53 @@ if (TETRIS_BUILD_RELAY)
 endif()
 
 # -----------------------------------------------------------------------------
+# Target: tetris_relay_reactor (단일 이벤트 루프 릴레이 — 실험용)
+#
+# tetris_relay 와 같은 wire 프로토콜을 구현하되 연결당 스레드 대신 net::Reactor
+# (epoll/IOCP) 한 스레드로 돈다. 두 바이너리를 나란히 두는 이유는 이관을 증분으로
+# 검증하기 위해서다 — 스모크 테스트를 TETRIS_RELAY_BIN 으로 이쪽에 겨눠 같은
+# 계약을 통과하는지 확인한 뒤에야 기본 릴레이를 교체한다.
+# -----------------------------------------------------------------------------
+if (TETRIS_BUILD_RELAY)
+    add_executable(tetris_relay_reactor
+        server/reactor_relay.cpp
+        net/socket.cpp
+        net/framing.cpp
+        net/reactor_epoll.cpp
+        net/reactor_iocp.cpp
+        meta/http_client.cpp
+        net/reactor.h
+        net/socket.h
+        net/framing.h
+        server/offload.h
+        server/timer_queue.h
+        server/player_session.h
+        server/match_uuid.h
+        meta/http_client.h
+        meta/protocol.h
+    )
+    target_include_directories(tetris_relay_reactor PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    if (WIN32)
+        target_link_libraries(tetris_relay_reactor PRIVATE ws2_32)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(tetris_relay_reactor PRIVATE Threads::Threads)
+    endif()
+    if (TETRIS_ENABLE_HTTPS AND OpenSSL_FOUND)
+        target_compile_definitions(tetris_relay_reactor PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+        target_link_libraries(tetris_relay_reactor PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+    if (UNIX AND NOT APPLE)
+        set_target_properties(tetris_relay_reactor PROPERTIES
+            BUILD_RPATH "$ORIGIN/lib"
+            INSTALL_RPATH "$ORIGIN/lib")
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
 # Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
 #
 # 역할: 별도 영속 호스트(저전력 Android/Termux 단말 등)에서 돌아가는 독립 서비스.

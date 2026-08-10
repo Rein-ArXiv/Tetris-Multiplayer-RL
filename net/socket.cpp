@@ -224,6 +224,44 @@ std::string tcp_peer_ip(const TcpSocket& s) {
 }
 
 // [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
+// 논블로킹 부분 송신 — 이벤트 루프용. 계약은 net/socket.h 참조.
+bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out_sent) {
+    out_sent = 0;
+    const int fd = s.fd();
+    if (fd < 0) return false;
+    if (len == 0) return true;
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    size_t sent = 0;
+    while (sent < len) {
+#ifdef _WIN32
+        int n = ::send(fd, (const char*)(p + sent), (int)(len - sent), 0);
+        if (n < 0) {
+            int err = WSAGetLastError();
+            if (err == WSAEINTR) continue;
+            // 버퍼 가득참 — 오류가 아니다. 보낸 만큼만 보고하고 돌아간다.
+            if (err == WSAEWOULDBLOCK) break;
+            return false;
+        }
+        if (n == 0) return false;  // 연결 종료
+#else
+        int flags = 0;
+#ifdef MSG_NOSIGNAL
+        flags |= MSG_NOSIGNAL;
+#endif
+        ssize_t n = ::send(fd, (const char*)(p + sent), (size_t)(len - sent), flags);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            return false;
+        }
+        if (n == 0) return false;  // 연결 종료
+#endif
+        sent += (size_t)n;
+    }
+    out_sent = sent;
+    return true;
+}
+
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
     const int fd = s.fd();
     if (fd < 0) return false;

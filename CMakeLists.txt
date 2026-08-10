@@ -324,6 +324,25 @@ if (TETRIS_BUILD_TEST)
         find_package(Threads REQUIRED)
         target_link_libraries(worker_group_test PRIVATE Threads::Threads)
     endif()
+
+    # reactor_test — 이벤트 루프(net::Reactor) 준비성·wake 계약 회귀.
+    # 플랫폼별 백엔드(Windows=IOCP, Linux/기타=epoll)를 각자 검증한다. 두 백엔드
+    # 소스를 모두 나열하되 파일 내부 #ifdef 가 해당 플랫폼만 컴파일한다.
+    add_executable(reactor_test
+        tests/reactor_test.cpp
+        net/reactor_epoll.cpp
+        net/reactor_iocp.cpp
+        net/socket.cpp
+        net/reactor.h
+        net/socket.h
+    )
+    target_include_directories(reactor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (WIN32)
+        target_link_libraries(reactor_test PRIVATE ws2_32)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(reactor_test PRIVATE Threads::Threads)
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------

@@ -26,6 +26,7 @@
 
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace net {
@@ -39,8 +40,11 @@ constexpr ULONG_PTR kSockKey = 2;
 struct SockState {
     WSAOVERLAPPED ov{};        // zero-byte WSARecv 용. CONTAINING_RECORD 로 역참조.
     void*    token       = nullptr;
+    int      fd          = -1;     // 완료에서 되짚어 재무장할 때 필요하다
     unsigned interest    = 0;
     bool     read_armed  = false;  // zero-byte recv 가 걸려 있는가
+    bool     arm_queued  = false;  // 재무장 대기열에 이미 들어 있는가(중복 방지)
+    bool     poll_always = false;  // 무장 불가(리스너 등) — 매 poll 보고
     char     dummy       = 0;      // 길이 0 버퍼의 앵커
 };
 
@@ -79,8 +83,24 @@ public:
         }
         auto st = std::make_unique<SockState>();
         st->token    = token;
+        st->fd       = fd;
         st->interest = interest;
-        socks_[fd]   = std::move(st);
+        // listen 소켓은 zero-byte WSARecv 를 받지 못한다(수신 큐가 아니라 백로그를
+        // 가진 소켓이다). IOCP 로 accept 준비성을 제대로 얻으려면 AcceptEx 로 수락
+        // 소켓을 미리 걸어 둬야 하는데, 그건 Reactor 인터페이스가 accept 를 알아야
+        // 한다는 뜻이라 준비성 추상화가 깨진다. 대신 이런 소켓은 매 poll 마다 readable
+        // 로 보고하고 호출자가 accept 를 시도하게 둔다 — 대상이 리스너 몇 개뿐이라
+        // 비용이 연결 수에 비례하지 않는다.
+        int listening = 0;
+        int optlen = sizeof(listening);
+        if (::getsockopt(s, SOL_SOCKET, SO_ACCEPTCONN,
+                         reinterpret_cast<char*>(&listening), &optlen) == 0 && listening) {
+            st->poll_always = true;
+        }
+        SockState* raw = st.get();
+        socks_[fd] = std::move(st);
+        if (raw->poll_always) poll_always_.insert(fd);
+        track_interest(raw);
         return true;
     }
 
@@ -89,6 +109,7 @@ public:
         if (it == socks_.end()) return false;
         it->second->token    = token;
         it->second->interest = interest;
+        track_interest(it->second.get());
         return true;
     }
 
@@ -106,6 +127,9 @@ public:
             ::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<SOCKET>(fd)), &raw->ov);
             zombies_.emplace(raw, std::move(it->second));
         }
+        write_interest_.erase(fd);
+        poll_always_.erase(fd);
+        // need_arm_ 에 남은 항목은 드레인 때 socks_ 조회로 걸러진다(지연 무효화).
         socks_.erase(it);
         return true;
     }
@@ -113,16 +137,21 @@ public:
     int poll(std::vector<Event>& out, int timeout_ms) override {
         out.clear();
 
-        // 1) read 관심이 있으나 아직 안 걸린 소켓에 zero-byte recv 를 (재)무장한다.
-        bool any_write = false;
-        for (auto& [fd, st] : socks_) {
-            if ((st->interest & kRead) && !st->read_armed) {
-                arm_read(fd, *st, out);
-            }
-            if (st->interest & kWrite) any_write = true;
+        // 1) 재무장이 필요한 소켓에만 zero-byte recv 를 건다. 전체를 훑지 않는 것이
+        //    핵심이다 — 준비된 것만 만지는 것이 이 모델의 존재 이유인데, 매 poll 마다
+        //    등록된 소켓을 전부 순회하면 연결 수에 비례하는 비용이 그대로 되돌아온다.
+        for (size_t i = 0; i < need_arm_.size(); ++i) {
+            const int fd = need_arm_[i];
+            auto it = socks_.find(fd);
+            if (it == socks_.end()) continue;           // remove() 된 낡은 항목
+            SockState& st = *it->second;
+            st.arm_queued = false;
+            if ((st.interest & kRead) && !st.read_armed) arm_read(fd, st, out);
         }
+        need_arm_.clear();
 
         // 2) 보류 송신이 있으면 유휴 스핀을 피하되 재시도가 늦지 않게 타임아웃을 죈다.
+        const bool any_write = !write_interest_.empty() || !poll_always_.empty();
         DWORD wait_ms = (timeout_ms < 0) ? INFINITE : static_cast<DWORD>(timeout_ms);
         if (any_write && (wait_ms == INFINITE || wait_ms > kWritePollMs)) {
             wait_ms = kWritePollMs;
@@ -155,7 +184,15 @@ public:
                 zombies_.erase(zit);
                 continue;
             }
-            st->read_armed = false;  // 이 완료로 무장이 소진됐다
+            st->read_armed = false;      // 이 완료로 무장이 소진됐다
+            queue_arm(st);               // 다음 poll 에서 다시 걸도록 예약
+
+            // 무장을 건 뒤 관심에서 kRead 가 빠졌다면(루프가 backpressure 로 읽기를
+            // 멈춘 경우) 이 완료는 알리지 않는다. epoll 은 modify 가 즉시 반영되지만
+            // IOCP 는 이미 커널에 건 연산을 되돌릴 수 없어, 그대로 내보내면 읽지 말라고
+            // 한 소켓에서 한 번 더 읽게 되어 backpressure 가 새어 나간다.
+            if (!(st->interest & kRead)) continue;
+
             Event ev;
             ev.token    = st->token;
             ev.readable = true;  // zero-byte recv 완료 = 읽을 수 있음(또는 EOF/에러)
@@ -194,7 +231,11 @@ private:
         } else if (::WSAGetLastError() == WSA_IO_PENDING) {
             st.read_armed = true;
         } else {
-            // 무장 실패(소켓 오류) — 즉시 readable+error 로 노출해 루프가 확정 처리.
+            // 무장 실패 — 즉시 readable+error 로 노출해 루프가 확정 처리하게 한다.
+            // 여기서 끝내면 이 fd 는 다시 무장되지 않아 조용히 죽은 소켓이 되므로,
+            // 매 poll 보고 대상으로 돌려 호출자가 상태를 확인할 기회를 계속 준다.
+            st.poll_always = true;
+            poll_always_.insert(fd);
             Event ev;
             ev.token = st.token;
             ev.readable = true;
@@ -209,23 +250,53 @@ private:
         // epoll 백엔드가 fd 하나당 이벤트 하나를 돌려주므로 동작을 맞춘다. 그렇지
         // 않으면 같은 연결이 배치 안에 두 번 나타나 루프가 백엔드마다 다른 형태를
         // 처리해야 한다.
+        if (write_interest_.empty() && poll_always_.empty()) return;
         std::unordered_map<void*, size_t> idx;
         for (size_t i = 0; i < out.size(); ++i) idx.emplace(out[i].token, i);
 
-        for (auto& [fd, st] : socks_) {
-            (void)fd;
-            if (!(st->interest & kWrite)) continue;
-            auto it = idx.find(st->token);
+        // 이미 이번 배치에 이벤트가 있으면 그 자리에 비트를 합치고, 없으면 새로 넣는다.
+        auto mark = [&](SockState& st, bool readable, bool writable) {
+            auto it = idx.find(st.token);
             if (it != idx.end()) {
-                out[it->second].writable = true;
-                continue;
+                if (readable) out[it->second].readable = true;
+                if (writable) out[it->second].writable = true;
+                return;
             }
             Event ev;
-            ev.token = st->token;
-            ev.writable = true;
-            idx.emplace(st->token, out.size());
+            ev.token    = st.token;
+            ev.readable = readable;
+            ev.writable = writable;
+            idx.emplace(st.token, out.size());
             out.push_back(ev);
+        };
+
+        // 쓰기 관심이 걸린 소켓만 본다 — 보류 송신은 드문 상태라 이 집합은 대개 비어 있다.
+        for (int fd : write_interest_) {
+            auto sit = socks_.find(fd);
+            if (sit == socks_.end()) continue;
+            mark(*sit->second, false, true);
         }
+        // 무장할 수 없는 소켓(리스너)은 준비성을 알 방법이 없으므로 매번 알린다.
+        for (int fd : poll_always_) {
+            auto sit = socks_.find(fd);
+            if (sit == socks_.end()) continue;
+            SockState& st = *sit->second;
+            if (st.interest & kRead) mark(st, true, false);
+        }
+    }
+
+    // 관심 변화를 두 색인에 반영한다. 재무장 대기열은 중복 없이 한 번만 쌓는다.
+    void track_interest(SockState* st) {
+        if (st->interest & kWrite) write_interest_.insert(st->fd);
+        else                       write_interest_.erase(st->fd);
+        if ((st->interest & kRead) && !st->read_armed) queue_arm(st);
+    }
+
+    void queue_arm(SockState* st) {
+        if (st->arm_queued || st->poll_always) return;
+        if (!(st->interest & kRead)) return;
+        st->arm_queued = true;
+        need_arm_.push_back(st->fd);
     }
 
     HANDLE iocp_ = nullptr;
@@ -233,6 +304,10 @@ private:
     // remove() 됐지만 커널이 아직 OVERLAPPED 를 들고 있는 상태 객체. 취소 완료가
     // 회수될 때까지만 살아 있다.
     std::unordered_map<SockState*, std::unique_ptr<SockState>> zombies_;
+    // poll 을 O(등록 수)가 아니라 O(할 일)로 유지하는 두 색인.
+    std::vector<int>           need_arm_;        // 재무장 대기 (지연 무효화)
+    std::unordered_set<int>    write_interest_;  // kWrite 가 걸린 소켓
+    std::unordered_set<int>    poll_always_;     // 리스너 등 무장 불가 소켓
     std::vector<OVERLAPPED_ENTRY> entries_;
 };
 

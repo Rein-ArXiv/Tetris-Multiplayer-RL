@@ -857,16 +857,21 @@ stateDiagram-v2
     int poll(std::vector<Event>& out, int timeout_ms) override {
         out.clear();
 
-        // 1) read 관심이 있으나 아직 안 걸린 소켓에 zero-byte recv 를 (재)무장한다.
-        bool any_write = false;
-        for (auto& [fd, st] : socks_) {
-            if ((st->interest & kRead) && !st->read_armed) {
-                arm_read(fd, *st, out);
-            }
-            if (st->interest & kWrite) any_write = true;
+        // 1) 재무장이 필요한 소켓에만 zero-byte recv 를 건다. 전체를 훑지 않는 것이
+        //    핵심이다 — 준비된 것만 만지는 것이 이 모델의 존재 이유인데, 매 poll 마다
+        //    등록된 소켓을 전부 순회하면 연결 수에 비례하는 비용이 그대로 되돌아온다.
+        for (size_t i = 0; i < need_arm_.size(); ++i) {
+            const int fd = need_arm_[i];
+            auto it = socks_.find(fd);
+            if (it == socks_.end()) continue;           // remove() 된 낡은 항목
+            SockState& st = *it->second;
+            st.arm_queued = false;
+            if ((st.interest & kRead) && !st.read_armed) arm_read(fd, st, out);
         }
+        need_arm_.clear();
 
         // 2) 보류 송신이 있으면 유휴 스핀을 피하되 재시도가 늦지 않게 타임아웃을 죈다.
+        const bool any_write = !write_interest_.empty() || !poll_always_.empty();
         DWORD wait_ms = (timeout_ms < 0) ? INFINITE : static_cast<DWORD>(timeout_ms);
         if (any_write && (wait_ms == INFINITE || wait_ms > kWritePollMs)) {
             wait_ms = kWritePollMs;
@@ -899,7 +904,15 @@ stateDiagram-v2
                 zombies_.erase(zit);
                 continue;
             }
-            st->read_armed = false;  // 이 완료로 무장이 소진됐다
+            st->read_armed = false;      // 이 완료로 무장이 소진됐다
+            queue_arm(st);               // 다음 poll 에서 다시 걸도록 예약
+
+            // 무장을 건 뒤 관심에서 kRead 가 빠졌다면(루프가 backpressure 로 읽기를
+            // 멈춘 경우) 이 완료는 알리지 않는다. epoll 은 modify 가 즉시 반영되지만
+            // IOCP 는 이미 커널에 건 연산을 되돌릴 수 없어, 그대로 내보내면 읽지 말라고
+            // 한 소켓에서 한 번 더 읽게 되어 backpressure 가 새어 나간다.
+            if (!(st->interest & kRead)) continue;
+
             Event ev;
             ev.token    = st->token;
             ev.readable = true;  // zero-byte recv 완료 = 읽을 수 있음(또는 EOF/에러)
@@ -913,7 +926,7 @@ stateDiagram-v2
     }
 ```
 
-**무장은 매 `poll` 마다 갱신된다.** 완료가 하나 오면 그 무장은 소진되므로(`read_armed = false`) 다음 `poll` 이 다시 건다. epoll 의 레벨 트리거가 커널 안에서 자동으로 유지되는 것과 달리, 여기서는 "재무장" 이 명시적 작업이다. 이 순회가 등록된 소켓 전체를 도는 선형 비용이라는 점은 정직하게 짚어 둔다 — 수백에서 수천 연결 규모에서는 캐시 친화적인 짧은 순회라 측정에 잡히지 않지만, 규모가 더 커지면 "무장이 필요한 소켓" 만 담는 별도 목록을 유지해야 한다. 조기 최적화를 피한 대신 한계 지점을 기록해 두는 쪽을 택했다.
+**무장은 소진되고 다시 걸린다.** 완료가 하나 오면 그 무장은 소진되므로(`read_armed = false`) 다시 걸어야 한다. epoll 의 레벨 트리거가 커널 안에서 자동으로 유지되는 것과 달리, 여기서는 재무장이 명시적 작업이다. 처음에는 매 `poll` 마다 등록된 소켓 전체를 훑으며 무장이 빠진 것을 찾았는데, 그것은 이 모델로 옮긴 이유 자체를 깎아먹는다 — 준비된 것만 만지겠다고 와서 매 반복 연결 수만큼의 비용을 다시 치르는 셈이기 때문이다. 그래서 재무장 대기열(`need_arm_`)과 쓰기 관심 집합(`write_interest_`)을 따로 두고, `poll` 은 **할 일의 수에 비례**해서만 움직인다. 대기열의 항목은 `remove()` 로 이미 사라진 fd 를 담고 있을 수 있으므로 꺼낼 때 조회로 걸러 낸다 — 타이머 힙에서 쓴 것과 같은 지연 무효화다.
 
 **`GetQueuedCompletionStatusEx` 는 완료를 배치로 꺼낸다.** 하나씩 꺼내는 `GetQueuedCompletionStatus` 를 쓰면 완료마다 커널 왕복이 생긴다. 배치 API 는 `epoll_wait` 과 같은 모양이라 계약을 맞추기도 쉽다.
 
@@ -921,7 +934,30 @@ stateDiagram-v2
 
 **타임아웃 반환의 미묘한 점.** 인터페이스는 "0 = 타임아웃" 이라고 적었지만, 이 백엔드는 `WAIT_TIMEOUT` 경로에서도 합성 writable 을 실어 0 이 아닌 값을 돌려줄 수 있다. 그래서 루프는 반환값으로 "만기를 처리할 때인가" 를 판단하면 안 된다. 실제 루프는 매 반복에서 현재 시각을 다시 재고 만기를 확인하므로 이 차이에 영향을 받지 않는다. **계약 문구와 구현이 완전히 겹치지 않는 지점은 숨기지 말고 상위의 요구사항으로 승격시켜 적어 두는 편이 낫다** — "루프는 poll 의 반환값과 무관하게 매 반복 만기를 확인한다" 가 그 요구사항이다.
 
-### 5.6 쓰기 준비성이 없다 — 낙관적 합성이라는 절충
+### 5.6 무장할 수 없는 소켓 — 리스너
+
+zero-byte `WSARecv` 는 수신 큐를 가진 소켓에만 통한다. **listen 소켓에는 통하지 않는다.** 그 소켓이 가진 것은 바이트가 아니라 완성된 연결의 백로그이고, `WSARecv` 는 거기에 걸리지 않는다. IOCP 로 accept 준비성을 제대로 받으려면 `AcceptEx` 로 수락용 소켓을 미리 만들어 걸어 두고 완료를 받아야 하는데, 그러면 `Reactor` 가 accept 라는 개념을 알아야 한다. 준비성만 다루기로 한 추상화가 깨진다.
+
+여기서 택한 답은 그 소켓을 **매 `poll` 마다 readable 로 보고**하고 실제 판정은 호출자의 `accept` 시도에 맡기는 것이다. 등록 시점에 `SO_ACCEPTCONN` 으로 리스너를 가려내 별도 집합에 넣는다.
+
+**현재 소스 발췌 — `net/reactor_iocp.cpp`**
+
+```cpp
+        int listening = 0;
+        int optlen = sizeof(listening);
+        if (::getsockopt(s, SOL_SOCKET, SO_ACCEPTCONN,
+                         reinterpret_cast<char*>(&listening), &optlen) == 0 && listening) {
+            st->poll_always = true;
+        }
+```
+
+이 집합은 리스너 몇 개뿐이라 비용이 연결 수에 비례하지 않는다. 즉 앞 절에서 세운 "할 일에 비례" 원칙을 깨지 않는다. 대신 그 소켓이 있는 동안 대기 시간을 짧게 죄어 accept 응답성을 유지한다.
+
+이 절을 따로 두는 이유는 여기서 실제로 크게 데었기 때문이다. 전체 순회를 쓰던 초기 구현에서는 리스너의 무장 실패가 **매 `poll` 마다 재시도**되었고, 그 실패가 곧 readable 이벤트가 되어 accept 가 돌아갔다. 우연히 동작한 것이다. 순회를 걷어 내는 순간 리스너는 두 번 다시 무장되지 않았고, 첫 연결 이후 **신규 접속이 조용히 수락되지 않았다**. 성능 최적화가 기능을 끈 것인데, 무장 실패를 "예외적 오류" 로만 보고 정상 흐름의 일부로 인식하지 못한 것이 원인이었다.
+
+일반화: **어떤 동작이 오류 경로의 부작용으로 유지되고 있다면, 그것은 기능이 아니라 사고다.** 그 사고에 의존하는 코드는 무관해 보이는 정리 작업에 함께 무너진다. 지금은 리스너를 명시적으로 분류하고, 무장이 실패한 소켓도 같은 집합으로 돌려 다시는 조용히 사라지지 않게 했다.
+
+### 5.7 쓰기 준비성이 없다 — 낙관적 합성이라는 절충
 
 IOCP 에는 write 준비성 통지가 없다. 완료 모델에서 송신은 "보내 달라고 걸고 다 보냈다는 통지를 받는" 것이지, "지금 보내면 막히지 않는다" 를 물어보는 개념이 아니다.
 
@@ -936,7 +972,7 @@ IOCP 에는 write 준비성 통지가 없다. 완료 모델에서 송신은 "보
 
 검토했다가 버린 대안도 남겨 둔다. `WSAEventSelect` 로 `FD_WRITE` 를 이벤트 객체에 받는 방법이 있지만, 이벤트 객체 대기는 IOCP 대기와 섞이지 않고 한 번에 기다릴 수 있는 객체 수에 작은 상한이 있다. `select` 의 writefds 는 매 호출 O(n) 이라 애초에 이 장의 목적과 어긋난다. **한 프로세스에서 두 종류의 대기 원시를 동시에 쓰려는 시도는 거의 항상 잘못된 방향이다** — 단일 대기 지점이라는 이벤트 루프의 전제 자체가 무너진다.
 
-### 5.7 두 백엔드가 같은 모양의 이벤트를 돌려줘야 하는 이유
+### 5.8 두 백엔드가 같은 모양의 이벤트를 돌려줘야 하는 이유
 
 **현재 소스 발췌 — `net/reactor_iocp.cpp`**
 
@@ -947,22 +983,38 @@ IOCP 에는 write 준비성 통지가 없다. 완료 모델에서 송신은 "보
         // epoll 백엔드가 fd 하나당 이벤트 하나를 돌려주므로 동작을 맞춘다. 그렇지
         // 않으면 같은 연결이 배치 안에 두 번 나타나 루프가 백엔드마다 다른 형태를
         // 처리해야 한다.
+        if (write_interest_.empty() && poll_always_.empty()) return;
         std::unordered_map<void*, size_t> idx;
         for (size_t i = 0; i < out.size(); ++i) idx.emplace(out[i].token, i);
 
-        for (auto& [fd, st] : socks_) {
-            (void)fd;
-            if (!(st->interest & kWrite)) continue;
-            auto it = idx.find(st->token);
+        // 이미 이번 배치에 이벤트가 있으면 그 자리에 비트를 합치고, 없으면 새로 넣는다.
+        auto mark = [&](SockState& st, bool readable, bool writable) {
+            auto it = idx.find(st.token);
             if (it != idx.end()) {
-                out[it->second].writable = true;
-                continue;
+                if (readable) out[it->second].readable = true;
+                if (writable) out[it->second].writable = true;
+                return;
             }
             Event ev;
-            ev.token = st->token;
-            ev.writable = true;
-            idx.emplace(st->token, out.size());
+            ev.token    = st.token;
+            ev.readable = readable;
+            ev.writable = writable;
+            idx.emplace(st.token, out.size());
             out.push_back(ev);
+        };
+
+        // 쓰기 관심이 걸린 소켓만 본다 — 보류 송신은 드문 상태라 이 집합은 대개 비어 있다.
+        for (int fd : write_interest_) {
+            auto sit = socks_.find(fd);
+            if (sit == socks_.end()) continue;
+            mark(*sit->second, false, true);
+        }
+        // 무장할 수 없는 소켓(리스너)은 준비성을 알 방법이 없으므로 매번 알린다.
+        for (int fd : poll_always_) {
+            auto sit = socks_.find(fd);
+            if (sit == socks_.end()) continue;
+            SockState& st = *sit->second;
+            if (st.interest & kRead) mark(st, true, false);
         }
     }
 ```
@@ -984,7 +1036,7 @@ epoll 은 `epoll_wait` 한 번의 반환 배치에서 한 fd 를 최대 한 번 
 
 이 넷은 헤더의 함수 시그니처에 나타나지 않으므로 **주석과 문서로 못박아야 한다.** 명시되지 않은 성질은 결국 "먼저 만든 구현의 우연한 동작" 이 사실상의 계약이 되고, 두 번째 구현이 그것을 어기는 날 원인 찾기 어려운 버그로 돌아온다.
 
-### 5.8 샤딩 불가 — 능력 질의가 실제로 쓰이는 곳
+### 5.9 샤딩 불가 — 능력 질의가 실제로 쓰이는 곳
 
 `can_migrate_sockets()` 가 이 백엔드에서 `false` 인 이유는 단순하고 회피 불가능하다. `CreateIoCompletionPort` 로 소켓을 완료 포트에 결합하면 그 결합은 소켓 수명 동안 유지되고, 해제하거나 다른 포트로 다시 결합하는 API 가 없다.
 
@@ -2697,6 +2749,18 @@ stateDiagram-v2
 `on_queued` 가 사본을 떠서 파싱하는 것도 같은 이유다. 원본 `rx` 를 소비해 버리면 취소가 아닌 프레임이 사라진다. 그리고 취소가 이미 와 있어 연결이 닫힌 경우를 대비해, 호출한 쪽은 곧바로 생존을 다시 확인한 뒤에만 큐에 넣는다 — 죽은 연결을 큐에 넣으면 짝짓기가 시체와 성립한다.
 
 **일반화.** 스트림 프로토콜에서 **도착 순서와 처리 순서는 자동으로 같지 않다.** 상태 전이를 하기 전에 이미 버퍼에 들어와 있는 입력을 새 상태의 규칙으로 먼저 소비해야, 전이 직후의 판단이 과거 입력을 놓치지 않는다. 덧붙여, 이런 버그는 타이밍에 따라 갈리므로 **"가끔 통과하는 테스트"를 운으로 넘기지 않는 습관**이 실제 방어선이다. 뭉쳐 오는 경우를 강제로 만들어 고정하는 테스트가 없으면, 이 종류는 개발 환경에서 사라졌다가 운영에서 돌아온다.
+
+### 12.5 최적화가 기능을 껐다 — 오류 경로에 얹혀 있던 accept
+
+**증상.** IOCP 백엔드의 `poll` 에서 등록 소켓 전체 순회를 걷어 내고 재무장 대기열로 바꾸자, 릴레이가 첫 연결 이후 **신규 접속을 받지 않았다.** 스모크 테스트가 무더기로 타임아웃으로 넘어갔는데, 정작 실패 지점은 accept 와 아무 관련이 없어 보이는 곳들이었다.
+
+**원인.** listen 소켓에는 zero-byte `WSARecv` 를 걸 수 없다. 전체 순회를 돌던 시절에는 매 `poll` 마다 그 무장을 다시 시도했고, 매번 실패해 `readable + error` 이벤트를 하나 뱉었다. 릴레이는 그 이벤트를 받아 `accept` 를 시도했다. 즉 **accept 는 오류 경로의 부작용으로 폴링되고 있었다.** 순회를 없애자 그 실패 재시도가 사라졌고, 리스너는 두 번 다시 무장 대기열에 들어가지 못했다.
+
+**왜 그런 코드를 쓰게 되는가.** 무장 실패를 "예외적 오류" 로 분류했기 때문이다. 정상 흐름의 일부라고는 생각하지 않았으므로 재무장 대상에서 빠져도 이상하지 않아 보였다. 게다가 전체 순회가 그 분류 실수를 가려 주고 있었다 — 무엇이 대기열에 들어가야 하는지 정확히 알 필요가 없는 구조였기 때문이다.
+
+**고친 방법.** 등록 시점에 `SO_ACCEPTCONN` 으로 리스너를 가려내 "매 `poll` 보고" 집합에 넣고, 무장이 실패한 소켓도 같은 집합으로 보낸다. 그 집합이 비어 있지 않으면 대기 시간을 짧게 죄어 accept 응답성을 지킨다. 결과적으로 accept 지연은 예전의 루프 타임아웃 주기에서 그보다 훨씬 짧은 재시도 주기로 **오히려 좋아졌다.**
+
+**일반화.** 어떤 동작이 오류 경로의 부작용으로 유지되고 있다면 그것은 기능이 아니라 사고다. 그리고 그 사고는 대개 **전수 순회처럼 "굳이 정확히 몰라도 되게 해 주는" 구조 뒤에 숨는다.** 그 구조를 정밀한 것으로 바꾸는 순간, 숨어 있던 암묵적 의존이 한꺼번에 드러난다. 최적화가 기능을 끄는 일이 벌어지는 전형적인 경로이며, 그래서 성능 변경에도 기능 회귀 스위트를 그대로 돌려야 한다.
 
 ## 13. 확인한 계약
 

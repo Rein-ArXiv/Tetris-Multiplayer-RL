@@ -717,10 +717,10 @@ def summarize(directory: Path) -> int:
               f"{'us/frame':>10}{'handoff':>9}{'dead':>6}")
     print(header)
     print("-" * len(header))
-    buckets: dict[tuple[str, int], list[float]] = {}
+    buckets: dict[tuple[str, int], list[dict]] = {}
     for index, run in enumerate(runs):
         key = (run["mode"], run["loops"])
-        buckets.setdefault(key, []).append(run["delivered_frames_per_s"])
+        buckets.setdefault(key, []).append(run)
         print(f"{run['mode']:<9}{run['loops']:>6}{run.get('label', index):>5}"
               f"{run['delivered_frames_per_s']:>12,.0f}"
               f"{run['delivered_mib_per_s']:>9.2f}"
@@ -732,22 +732,41 @@ def summarize(directory: Path) -> int:
               f"{run.get('dead_sockets', 0):>6}")
 
     print()
-    print("중앙값과 loops=1 대비 배율:")
+    print("중앙값과 loops=1 대비 배율 (spread = (max-min)/중앙값):")
     modes = sorted({mode for mode, _ in buckets})
     for mode in modes:
         loop_counts = sorted(loops for m, loops in buckets if m == mode)
         if not loop_counts:
             continue
-        baseline_key = (mode, loop_counts[0])
-        baseline = statistics.median(buckets[baseline_key])
+        baseline = statistics.median(
+            r["delivered_frames_per_s"] for r in buckets[(mode, loop_counts[0])])
         for loops in loop_counts:
-            values = buckets[(mode, loops)]
-            median = statistics.median(values)
-            spread = (max(values) - min(values)) / median * 100 if median else 0.0
+            group = buckets[(mode, loops)]
+            rates = [r["delivered_frames_per_s"] for r in group]
+            median = statistics.median(rates)
+            spread = (max(rates) - min(rates)) / median * 100 if median else 0.0
             ratio = median / baseline if baseline else 0.0
-            print(f"  {mode:<9} loops={loops:<3} n={len(values)} "
-                  f"median={median:>11,.0f} frames/s  "
-                  f"spread={spread:5.1f}%  x{ratio:.2f}")
+            cores = statistics.median(r["relay_cpu_cores"] for r in group)
+            gen = statistics.median(r["generator_cpu_cores"] for r in group)
+            per_frame = statistics.median(
+                r.get("relay_us_per_frame", 0) for r in group)
+            print(f"  {mode:<9} loops={loops:<3} n={len(group)} "
+                  f"median={median:>11,.0f} f/s  spread={spread:5.1f}%  "
+                  f"x{ratio:<5.2f} relay={cores:5.2f}코어  "
+                  f"{per_frame:5.2f}us/frame  gen={gen:4.2f}코어")
+        # 처리량 배율과 CPU 배율을 나란히 놓으면 "샤딩이 코어를 더 쓰고 그만큼
+        # 덜 벌었는지" 가 바로 보인다. 배율만 적으면 그 대가가 숨는다.
+        if len(loop_counts) > 1:
+            base_cores = statistics.median(
+                r["relay_cpu_cores"] for r in buckets[(mode, loop_counts[0])])
+            top = loop_counts[-1]
+            top_cores = statistics.median(
+                r["relay_cpu_cores"] for r in buckets[(mode, top)])
+            top_rate = statistics.median(
+                r["delivered_frames_per_s"] for r in buckets[(mode, top)])
+            if base_cores > 0 and baseline > 0:
+                print(f"    -> loops={top}: 처리량 x{top_rate / baseline:.2f} 를 "
+                      f"CPU x{top_cores / base_cores:.2f} 로 샀다")
 
     print()
     for run in runs:

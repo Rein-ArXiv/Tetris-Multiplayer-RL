@@ -9,8 +9,9 @@
 # 왜 반복해서 도는가
 #   공유 러너는 이웃 부하와 CPU 크레딧에 따라 흔들린다. 한 번 재고 "N배" 라고
 #   말하면 그 숫자는 대체로 거짓이다. 각 구성을 여러 번 돌리고 중앙값과 변동폭을
-#   같이 낸다. 회차 안에서 loops=1 과 loops=4 를 붙여 돌려, 러너 상태의 표류가
-#   두 구성에 같이 걸리게 한다.
+#   같이 낸다. 한 회차 안에서 모든 loops 값을 연달아 돌려, 러너 상태의 표류가
+#   특정 구성에만 걸리지 않게 한다. loops 를 1 부터 훑는 이유는 배율 하나보다
+#   "샤드를 늘리면 어디서 더 안 늘어나는가" 가 훨씬 많은 것을 말해 주기 때문이다.
 #
 # 왜 코어 수를 찍는가
 #   샤드가 3개여도 코어가 2개면 그 이상 나눌 수 없다. 부하 생성기도 같은
@@ -48,9 +49,9 @@ on:
       kib_per_conn:
         description: "연결당 목표 송신량 KiB/s (릴레이 상한 64 미만)"
         default: "40"
-      loops_sharded:
-        description: "샤딩 구성의 --loops 값 (앞단 1 + 샤드 N-1)"
-        default: "4"
+      loops_list:
+        description: "돌려 볼 --loops 값들 (공백 구분). 1 은 기준선이므로 반드시 포함"
+        default: "1 2 3 4"
       workers:
         description: "부하 생성기 프로세스 수"
         default: "2"
@@ -96,11 +97,11 @@ jobs:
       - name: Benchmark
         # push 트리거로 들어오면 inputs 가 비어 있다 — 같은 값을 여기서도 받친다.
         env:
-          REPEATS: ${{ inputs.repeats || '1' }}
-          MATCHES: ${{ inputs.matches || '64' }}
-          DURATION: ${{ inputs.duration || '10' }}
+          REPEATS: ${{ inputs.repeats || '3' }}
+          MATCHES: ${{ inputs.matches || '128' }}
+          DURATION: ${{ inputs.duration || '20' }}
           KIB: ${{ inputs.kib_per_conn || '40' }}
-          SHARDED: ${{ inputs.loops_sharded || '4' }}
+          LOOPS_LIST: ${{ inputs.loops_list || '1 2 3 4' }}
           WORKERS: ${{ inputs.workers || '2' }}
         run: |
           set -u
@@ -115,7 +116,7 @@ jobs:
               else
                 META=""
               fi
-              for loops in 1 "$SHARDED"; do
+              for loops in $LOOPS_LIST; do
                 echo "::group::rep=$rep mode=$mode loops=$loops"
                 if ! uv run python python/tools/relay_shard_bench.py \
                   --relay-bin build/tetris_relay_reactor \

@@ -131,6 +131,21 @@ def thread_cpu_seconds(pid: int) -> dict[str, float]:
     return out
 
 
+def system_cpu_seconds() -> dict[str, float]:
+    """머신 전체 CPU 회계 (/proc/stat 첫 줄).
+
+    릴레이가 코어 3개를 100% 로 쓰는데 처리량이 3배가 아니라면, 남은 원인은
+    둘 중 하나다 — 샤딩이 원래 그만큼밖에 못 벌거나, 기계에 더 줄 코어가
+    없거나. 프로세스 CPU 만 봐서는 두 설명을 가를 수 없다. loopback 은 커널
+    softirq 에서 상당한 일을 하는데 그건 어느 프로세스에도 잡히지 않는다.
+    """
+    tick = os.sysconf("SC_CLK_TCK")
+    with open("/proc/stat", encoding="utf-8") as fh:
+        parts = fh.readline().split()[1:]
+    names = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"]
+    return {name: int(value) / tick for name, value in zip(names, parts)}
+
+
 def rss_mib(pid: int) -> float:
     try:
         with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
@@ -597,6 +612,7 @@ def run_once(args) -> dict:
             time.sleep(sleep_for)
         cpu_before = proc_cpu_seconds(relay_proc.pid)
         threads_before = thread_cpu_seconds(relay_proc.pid)
+        system_before = system_cpu_seconds()
         wall_before = time.monotonic()
 
         sleep_for = end - time.monotonic()
@@ -604,6 +620,7 @@ def run_once(args) -> dict:
             time.sleep(sleep_for)
         cpu_after = proc_cpu_seconds(relay_proc.pid)
         threads_after = thread_cpu_seconds(relay_proc.pid)
+        system_after = system_cpu_seconds()
         wall_after = time.monotonic()
         result["relay_rss_mib"] = round(rss_mib(relay_proc.pid), 1)
 
@@ -639,6 +656,14 @@ def run_once(args) -> dict:
             "relay_busy_threads": sum(1 for v in thread_deltas if v / elapsed >= 0.10),
             "generator_cpu_cores": round(gen_cpu / elapsed, 3),
             "dead_sockets": dead,
+            "system_idle_cores": round(
+                (system_after["idle"] - system_before["idle"]) / elapsed, 2),
+            "system_softirq_cores": round(
+                (system_after["softirq"] - system_before["softirq"]) / elapsed, 2),
+            "system_busy_cores": round(
+                sum(system_after[k] - system_before[k]
+                    for k in system_after if k not in ("idle", "iowait"))
+                / elapsed, 2),
         })
         if result["delivered_frames_per_s"] > 0:
             result["relay_us_per_frame"] = round(
@@ -714,7 +739,7 @@ def summarize(directory: Path) -> int:
     print()
     header = (f"{'mode':<9}{'loops':>6}{'rep':>5}{'frames/s':>12}{'MiB/s':>9}"
               f"{'relay_cor':>11}{'busy_thr':>10}{'gen_cor':>9}"
-              f"{'us/frame':>10}{'handoff':>9}{'dead':>6}")
+              f"{'sysidle':>9}{'us/frame':>10}{'handoff':>9}{'dead':>6}")
     print(header)
     print("-" * len(header))
     buckets: dict[tuple[str, int], list[dict]] = {}
@@ -727,6 +752,7 @@ def summarize(directory: Path) -> int:
               f"{run['relay_cpu_cores']:>11.2f}"
               f"{run['relay_busy_threads']:>10}"
               f"{run['generator_cpu_cores']:>9.2f}"
+              f"{run.get('system_idle_cores', 0):>9.2f}"
               f"{run.get('relay_us_per_frame', 0):>10.2f}"
               f"{run.get('handoffs', 0):>9}"
               f"{run.get('dead_sockets', 0):>6}")
@@ -750,10 +776,13 @@ def summarize(directory: Path) -> int:
             gen = statistics.median(r["generator_cpu_cores"] for r in group)
             per_frame = statistics.median(
                 r.get("relay_us_per_frame", 0) for r in group)
+            idle = statistics.median(
+                r.get("system_idle_cores", 0) for r in group)
             print(f"  {mode:<9} loops={loops:<3} n={len(group)} "
                   f"median={median:>11,.0f} f/s  spread={spread:5.1f}%  "
                   f"x{ratio:<5.2f} relay={cores:5.2f}코어  "
-                  f"{per_frame:5.2f}us/frame  gen={gen:4.2f}코어")
+                  f"{per_frame:5.2f}us/frame  gen={gen:4.2f}코어  "
+                  f"놀고있는코어={idle:4.2f}")
         # 처리량 배율과 CPU 배율을 나란히 놓으면 "샤딩이 코어를 더 쓰고 그만큼
         # 덜 벌었는지" 가 바로 보인다. 배율만 적으면 그 대가가 숨는다.
         if len(loop_counts) > 1:

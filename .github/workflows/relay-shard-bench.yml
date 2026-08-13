@@ -16,9 +16,24 @@
 #   샤드가 3개여도 코어가 2개면 그 이상 나눌 수 없다. 부하 생성기도 같은
 #   머신에서 코어를 먹는다. nproc 없이는 "왜 3배가 아닌가" 를 설명할 수 없다.
 
+#
+# 트리거가 왜 둘인가
+#   workflow_dispatch 가 본래 의도한 트리거다. 다만 dispatch API 는 워크플로를
+#   기본 브랜치에서 찾는다 — 아직 main 에 없는 파일은 브랜치에 있어도 "없는
+#   워크플로" 가 되어 손으로 돌릴 수가 없다. 그래서 이 파일과 벤치 도구가 바뀔
+#   때만 걸리는 좁은 path 필터를 push 에 걸어 둔다. 매 push 마다 도는 것과는
+#   다르다 — 서버 코드나 문서를 고쳐도 이 워크플로는 깨어나지 않는다. 반복
+#   측정은 새 push 가 아니라 같은 커밋의 재실행(rerun)으로 얻는다. main 에
+#   올라간 뒤에는 push 트리거를 지우고 dispatch 만 남기면 된다.
+
 name: relay shard bench
 
 on:
+  push:
+    branches: ["reactor/event-loop"]
+    paths:
+      - ".github/workflows/relay-shard-bench.yml"
+      - "python/tools/relay_shard_bench.py"
   workflow_dispatch:
     inputs:
       repeats:
@@ -79,13 +94,14 @@ jobs:
       # (unranked 는 recv 이벤트당 send 한 번, ranked 는 프레임당 send 한 번)
       # 샤딩이 값을 하는 지점도 다르다. 한쪽만 재면 결론이 반쪽이 된다.
       - name: Benchmark
+        # push 트리거로 들어오면 inputs 가 비어 있다 — 같은 값을 여기서도 받친다.
         env:
-          REPEATS: ${{ inputs.repeats }}
-          MATCHES: ${{ inputs.matches }}
-          DURATION: ${{ inputs.duration }}
-          KIB: ${{ inputs.kib_per_conn }}
-          SHARDED: ${{ inputs.loops_sharded }}
-          WORKERS: ${{ inputs.workers }}
+          REPEATS: ${{ inputs.repeats || '1' }}
+          MATCHES: ${{ inputs.matches || '16' }}
+          DURATION: ${{ inputs.duration || '6' }}
+          KIB: ${{ inputs.kib_per_conn || '40' }}
+          SHARDED: ${{ inputs.loops_sharded || '4' }}
+          WORKERS: ${{ inputs.workers || '2' }}
         run: |
           set -eu
           mkdir -p bench-out

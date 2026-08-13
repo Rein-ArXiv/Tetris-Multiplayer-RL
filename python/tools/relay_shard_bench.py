@@ -517,8 +517,14 @@ def run_once(args) -> dict:
     target_bytes = int(args.kib_per_conn * 1024)
     interval = len(burst) / target_bytes
 
+    base_mode = "ranked" if args.meta_bin else "unranked"
+    busy_procs: list[subprocess.Popen] = []
+
     result: dict = {
-        "mode": "ranked" if args.meta_bin else "unranked",
+        # 대조군은 같은 mode/loops 를 쓰므로 이름으로 갈라 놔야 요약에서 섞이지
+        # 않는다.
+        "mode": base_mode + (f"+busy{args.busy_cores}" if args.busy_cores else ""),
+        "busy_cores": args.busy_cores,
         "loops": args.loops,
         "matches": args.matches,
         "players": players,
@@ -587,6 +593,15 @@ def run_once(args) -> dict:
         slices: list[list[socket.socket]] = [[] for _ in range(args.workers)]
         for index, sock in enumerate(flat):
             slices[index % args.workers].append(sock)
+
+        # 대조군: 코어를 이만큼 다른 일에 뺏긴 상태에서 재 본다. 샤드를 늘려도
+        # 처리량이 그만큼 안 오를 때, 원인이 샤딩의 한계인지 이 기계에 줄 코어가
+        # 없어서인지를 가르는 유일한 방법이다 — 루프 하나짜리 릴레이에서 같은
+        # 만큼의 코어를 빼앗아 보고 같은 폭으로 느려지면 답은 기계 쪽이다.
+        for _ in range(args.busy_cores):
+            busy_procs.append(subprocess.Popen(
+                [sys.executable, "-c", "while True: pass"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
 
         ctx = mp.get_context("fork")
         base = time.monotonic() + 0.5      # fork 비용을 흡수할 여유
@@ -707,6 +722,10 @@ def run_once(args) -> dict:
                         target.write_bytes(path.read_bytes())
                     except OSError:
                         pass
+        for proc in busy_procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5.0)
         for sock_a, sock_b in pairs:
             for sock in (sock_a, sock_b):
                 try:
@@ -837,6 +856,9 @@ def main() -> None:
                         help="프레임 페이로드 바이트 (0 이면 최소 7바이트 프레임)")
     parser.add_argument("--tick", type=float, default=0.005,
                         help="워커 루프 한 바퀴의 목표 주기(초)")
+    parser.add_argument("--busy-cores", type=int, default=0,
+                        help="측정 동안 코어를 태우는 대조군 프로세스 수 "
+                             "(샤딩 한계와 기계 한계를 가르는 용도)")
     parser.add_argument("--handshake-per-second", type=float, default=120.0,
                         help="쌍 생성 속도 상한 (meta 의 relay 버킷 512/s 보호)")
     parser.add_argument("--label", default="0", help="반복 회차 표시용")

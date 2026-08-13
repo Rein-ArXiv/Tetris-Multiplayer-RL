@@ -69,6 +69,12 @@ jobs:
         run: |
           echo "nproc          = $(nproc)"
           echo "model          = $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+          # vCPU 4개가 물리 코어 4개라는 뜻은 아니다. SMT 형제끼리는 실행 자원을
+          # 나눠 쓰므로, 스레드를 3개로 늘렸을 때 3배가 안 나오는 이유가 여기
+          # 있을 수 있다. 배율을 해석하려면 이 줄이 필요하다.
+          echo "threads/core   = $(lscpu | awk -F: '/Thread\(s\) per core/{print $2}' | xargs)"
+          echo "cores/socket   = $(lscpu | awk -F: '/Core\(s\) per socket/{print $2}' | xargs)"
+          echo "cpu0 siblings  = $(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || echo unknown)"
           echo "mem            = $(free -m | awk '/^Mem:/{print $2" MiB"}')"
           echo "kernel         = $(uname -r)"
           echo "ulimit -n      = $(ulimit -n)"
@@ -133,6 +139,30 @@ jobs:
                 fi
                 echo "::endgroup::"
               done
+            done
+          done
+
+          # 대조군. 샤드 3개가 각각 코어를 꽉 채우고도 3배를 못 낸다면, 원인은
+          # 샤딩이 거기까지인 것이거나 이 기계가 코어를 그만큼 못 주는 것이다.
+          # 루프 하나짜리 릴레이에서 코어를 같은 만큼 빼앗아 보면 갈린다 —
+          # 여기서 같은 폭으로 느려지면 배율의 부족분은 기계 몫이다.
+          for rep in $(seq 1 "$REPEATS"); do
+            for busy in 1 2; do
+              echo "::group::rep=$rep control ranked loops=1 busy=$busy"
+              if ! uv run python python/tools/relay_shard_bench.py \
+                --relay-bin build/tetris_relay_reactor \
+                --meta-bin build/tetris_meta \
+                --loops 1 --busy-cores "$busy" \
+                --matches "$MATCHES" \
+                --workers "$WORKERS" \
+                --duration "$DURATION" \
+                --kib-per-conn "$KIB" \
+                --label "$rep" \
+                --json "bench-out/zcontrol-busy${busy}-rep${rep}.json"; then
+                echo "::error::rep=$rep control busy=$busy 측정 실패"
+                failed=1
+              fi
+              echo "::endgroup::"
             done
           done
           exit "$failed"

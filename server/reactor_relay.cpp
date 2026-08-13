@@ -33,6 +33,7 @@
 #include "../net/reactor.h"
 #include "../net/socket.h"
 #include "../meta/http_client.h"
+#include "ip_admission.h"
 #include "match_uuid.h"
 #include "offload.h"
 #include "player_session.h"
@@ -68,8 +69,10 @@ constexpr auto   kLobbyTimeout      = std::chrono::seconds(30);
 constexpr auto   kIdleTimeout       = std::chrono::seconds(15);
 constexpr size_t kMaxBytesPerSecond = 64 * 1024;
 constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
-constexpr size_t kMaxHandshakesPerIp = 16;
 constexpr size_t kMaxConns          = 512;
+// per-IP 상한(핸드셰이크/세션)은 server/ip_admission.h 가 스레드 모델과 공통으로
+// 정의한다. 표가 프로세스 전역이라 샤드 스레드가 인계받은 연결을 닫아도 앞단이
+// 센 수가 함께 줄어든다 — 루프마다 표를 두면 인계 후 반납이 엉뚱한 표로 간다.
 // 보류 송신이 이만큼 쌓이면 그 소켓으로 흘려보내는 쪽의 읽기를 멈춘다(backpressure).
 // 스레드 모델은 tcp_send_all 이 최대 5초 잠들며 버텼지만, 루프는 잠들 수 없으므로
 // 상대가 안 읽으면 읽기를 멈춰 메모리를 지킨다.
@@ -146,7 +149,10 @@ struct Conn {
     bool     want_write = false;
     bool     read_paused = false;   // 상대의 tx 가 차서 읽기를 멈춘 상태
 
-    std::string admission_key;
+    // per-IP 입장 슬롯. handshake 는 인증이 끝나는 순간(after_auth) 놓아주고,
+    // session 은 이 Conn 이 죽을 때까지 붙들고 있는다.
+    std::shared_ptr<IpAdmission> handshake_slot;
+    std::shared_ptr<IpAdmission> session_slot;
 
     // 인증 결과
     int64_t     player_id = 0;
@@ -359,7 +365,8 @@ private:
         reactor_->remove(c->fd);
         timers_.cancel(c);
         net::tcp_close(c->sock);
-        release_admission(c->admission_key);
+        c->handshake_slot.reset();
+        c->session_slot.reset();
         c->lease.reset();
 
         if (c->room) {
@@ -400,13 +407,6 @@ private:
         }
     }
 
-    void release_admission(const std::string& key) {
-        if (key.empty()) return;
-        auto it = admission_.find(key);
-        if (it == admission_.end()) return;
-        if (--it->second <= 0) admission_.erase(it);
-    }
-
     // ── accept ───────────────────────────────────────────────────────────────
     void on_accept() {
         // 준비된 연결을 다 비운다 — 레벨 트리거라도 한 번에 처리하는 편이 낫다.
@@ -421,26 +421,35 @@ private:
             }
             std::string key = net::tcp_peer_ip(s);
             if (key.empty()) key = "fd:" + std::to_string(s.fd());  // 공멸 방지
-            if (admission_[key] >= kMaxHandshakesPerIp) {
-                std::cerr << "[relay] per-IP handshake 상한 (" << key << ") — 거절\n";
-                admission_.erase(key);  // 방금 만든 0 항목이면 지운다
+            // 두 상한을 독립적으로 건다 — 세션 슬롯을 못 얻어도, 핸드셰이크
+            // 슬롯을 못 얻어도 거절이다.
+            auto session_slot =
+                IpAdmission::acquire(key, IpAdmission::Kind::Session);
+            if (!session_slot) {
+                std::cerr << "[relay] per-IP session 상한 (" << key << ") — 거절\n";
                 net::tcp_close(s);
                 continue;
             }
-            ++admission_[key];
+            auto handshake_slot =
+                IpAdmission::acquire(key, IpAdmission::Kind::Handshake);
+            if (!handshake_slot) {
+                std::cerr << "[relay] per-IP handshake 상한 (" << key << ") — 거절\n";
+                net::tcp_close(s);
+                continue;
+            }
 
             auto c = std::make_unique<Conn>();
             c->sock = std::move(s);
             c->fd   = c->sock.fd();
             c->id   = next_conn_id_++;
-            c->admission_key = key;
+            c->handshake_slot = std::move(handshake_slot);
+            c->session_slot   = std::move(session_slot);
             c->last_activity = Clock::now();
             Conn* raw = c.get();
             if (!reactor_->add(raw->fd, net::kRead, raw)) {
                 std::cerr << "[relay] fd 등록 실패 — 거절\n";
-                release_admission(key);
                 net::tcp_close(raw->sock);
-                continue;
+                continue;   // c 소멸 → 두 슬롯 자동 반납
             }
             timers_.arm(raw, Clock::now() + kFirstFrameTimeout);
             conns_[raw] = std::move(c);
@@ -589,11 +598,11 @@ private:
 
     // 인증이 끝난 뒤 첫 프레임이 정한 진로로 보낸다.
     void after_auth(Conn* c) {
-        // per-IP 상한은 "동시 핸드셰이크" 예산이지 세션 예산이 아니다. 인증까지
-        // 끝났으면 그 자리를 놓아줘야 같은 IP 뒤에 오는 접속이 굶지 않는다 —
-        // 붙들고 있으면 NAT 뒤 다수 사용자나 loopback 테스트가 상한에 걸린다.
-        release_admission(c->admission_key);
-        c->admission_key.clear();
+        // 핸드셰이크 예산은 여기서 끝난다. 붙들고 있으면 상한 16 이 "동시 세션"
+        // 예산으로 변해 NAT 뒤 다수 사용자나 loopback 테스트가 걸린다.
+        // 세션 예산(session_slot)은 그대로 유지된다 — 인증을 통과했다고 해서
+        // 한 주소가 전역 상한까지 연결을 쌓을 수 있어서는 안 된다.
+        c->handshake_slot.reset();
 
         switch (c->intent) {
             case Intent::Queue:      enter_queue(c); break;
@@ -655,7 +664,7 @@ private:
                   << " elo=" << c->elo << "\n";
         // unranked 경로(begin_auth 의 !meta_ 분기)와 반드시 같은 문을 통과해야 한다.
         // 여기서 enter_queue 를 직접 부르면 두 가지가 조용히 깨진다:
-        //   - admission 슬롯이 안 풀려 per-IP "동시 핸드셰이크" 예산이 "동시 세션"
+        //   - 핸드셰이크 슬롯이 안 풀려 per-IP "동시 핸드셰이크" 예산이 "동시 세션"
         //     예산으로 변한다 (NAT 뒤 다수 사용자가 서로를 굶긴다).
         //   - c->intent 가 무시되어 랭크드 ROOM_CREATE/ROOM_JOIN 이 매치메이킹으로
         //     끌려간다.
@@ -1212,7 +1221,6 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Room>>  rooms_;
     std::deque<Conn*>          queue_;
     std::vector<Conn*>         dying_;
-    std::unordered_map<std::string, int> admission_;
     std::unordered_set<uint32_t> pending_auth_;
 
     // 샤딩. shards_ 는 앞단만 채운다(샤드에서는 비어 있어 재인계가 일어나지 않는다).
@@ -1248,10 +1256,23 @@ int main(int argc, char** argv) {
         else if (a == "--loops")       loops = std::max(1, std::stoi(next("--loops")));
         else if (a == "--meta")        meta_url = next("--meta");
         else if (a == "--meta-secret") meta_secret = next("--meta-secret");
+        else if (a == "--max-sessions-per-ip") {
+            const int n = std::stoi(next("--max-sessions-per-ip"));
+            if (n < 1 || n > 100000) {
+                std::cerr << "[relay] --max-sessions-per-ip 은 1..100000\n";
+                return 2;
+            }
+            relay::IpAdmission::set_session_limit((size_t)n);
+        }
         else if (a == "-h" || a == "--help") {
-            std::cout << "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]"
-                         " [--meta-secret S]\n"
-                         "  단일 이벤트 루프(epoll/IOCP) 릴레이. 큐 경로만 지원.\n";
+            std::cout <<
+                "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
+                "                            [--meta-secret S] [--max-sessions-per-ip N]\n"
+                "  단일 이벤트 루프(epoll/IOCP) 릴레이. 큐 경로만 지원.\n"
+                "  --max-sessions-per-ip N\n"
+                "              한 주소가 연결 수명 동안 붙들 수 있는 동시 연결 수\n"
+                "              (기본 " << relay::kMaxSessionsPerIp << "). 인증이 끝나면 반납하는 per-IP 핸드셰이크\n"
+                "              예산(" << relay::kMaxHandshakesPerIp << ")과는 별개로 검사한다.\n";
             return 0;
         }
     }
@@ -1298,6 +1319,8 @@ int main(int argc, char** argv) {
         net::net_shutdown();
         return 1;
     }
+    std::cout << "[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
+              << " sessions=" << relay::IpAdmission::session_limit() << "\n";
 
     if (loops > 1 && !front.can_shard()) {
         // 소켓을 다른 완료 포트로 옮길 수 없는 백엔드(IOCP)에서는 인계가 성립하지

@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "ip_admission.h"
 #include "player_session.h"
 
 namespace relay {
@@ -40,6 +41,9 @@ struct PlayerInfo {
     std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
     std::string    selected_icon_id{"default"};
     std::shared_ptr<PlayerSessionLease> session_lease;
+    // per-IP 세션 슬롯. 이 연결이 살아 있는 내내 유지돼야 하므로 소켓을 따라
+    // 큐 → 로비 → 포워딩 Channel 로 함께 옮겨 간다 (session_lease 와 같은 결).
+    std::shared_ptr<IpAdmission> ip_session;
 
     // 큐 대기 중 이 소켓에서 recv 됐지만 아직 완성 프레임이 못 된 잔여 바이트.
     // 폴링 1회마다 로컬 버퍼를 쓰면 프레임이 TCP 세그먼트 경계에 걸쳐 도착할 때

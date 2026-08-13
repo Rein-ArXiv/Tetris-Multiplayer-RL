@@ -72,6 +72,11 @@ struct Channel {
     int              playerB_elo{0};
     std::shared_ptr<PlayerSessionLease> playerA_session;
     std::shared_ptr<PlayerSessionLease> playerB_session;
+    // per-IP 세션 슬롯 — 채널이 소켓을 소유하는 동안 함께 붙들고 있어야 한다.
+    // 여기서 놓치면 Match 가 소멸하는 순간 슬롯이 풀려, 경기 중인 연결이
+    // per-IP 세션 수에서 빠진다.
+    std::shared_ptr<IpAdmission> playerA_ip;
+    std::shared_ptr<IpAdmission> playerB_ip;
 
     std::atomic<bool> closed{false};
     std::atomic<int>  forwarder_count{2};
@@ -542,6 +547,8 @@ void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
     ch->playerB_elo = match.b.elo;
     ch->playerA_session = std::move(match.a.session_lease);
     ch->playerB_session = std::move(match.b.session_lease);
+    ch->playerA_ip      = std::move(match.a.ip_session);
+    ch->playerB_ip      = std::move(match.b.ip_session);
     ch->meta        = meta;
     ch->prefixFromA = std::move(prefixFromA);
     ch->prefixFromB = std::move(prefixFromB);

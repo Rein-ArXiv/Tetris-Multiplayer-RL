@@ -380,6 +380,7 @@ if (TETRIS_BUILD_RELAY)
         net/socket.cpp
         net/framing.cpp
         meta/http_client.cpp
+        server/ip_admission.h
         server/matchmaker.h
         server/match_uuid.h
         server/player_conn.h
@@ -434,6 +435,7 @@ if (TETRIS_BUILD_RELAY)
         net/reactor.h
         net/socket.h
         net/framing.h
+        server/ip_admission.h
         server/offload.h
         server/timer_queue.h
         server/player_session.h

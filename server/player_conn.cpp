@@ -155,7 +155,9 @@ static constexpr auto kPollInterval = std::chrono::milliseconds(10);
 
 void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                       Matchmaker& mm, RoomRegistry& rr,
-                      meta::client::MetaClient* meta) {
+                      meta::client::MetaClient* meta,
+                      std::shared_ptr<IpAdmission> handshake_slot,
+                      std::shared_ptr<IpAdmission> session_slot) {
     std::vector<uint8_t> stream;
     stream.reserve(64);
 
@@ -178,6 +180,9 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     std::string tok = extract_token(f.payload, 0);
                     auto auth = authenticate(meta, tok, conn_id, "QUEUE_JOIN");
                     if (!auth) { net::tcp_close(sock); return; }
+                    // 핸드셰이크 끝 — 같은 IP 뒤에 오는 접속이 굶지 않게 슬롯을
+                    // 놓아준다. 세션 슬롯은 아래에서 PlayerInfo 로 넘어간다.
+                    handshake_slot.reset();
 
                     PlayerInfo pi;
                     pi.sock      = std::move(sock);
@@ -188,6 +193,7 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     pi.token     = std::move(auth->token);
                     pi.selected_icon_id = std::move(auth->selected_icon_id);
                     pi.session_lease = std::move(auth->session_lease);
+                    pi.ip_session    = std::move(session_slot);
                     // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
                     // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
                     pi.streamBuf = residual_stream(frames, i + 1, stream);
@@ -205,12 +211,14 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     std::string tok = extract_token(f.payload, 0);
                     auto auth = authenticate(meta, tok, conn_id, "ROOM_CREATE");
                     if (!auth) { net::tcp_close(sock); return; }
+                    handshake_slot.reset();   // 핸드셰이크 끝 (위 QUEUE_JOIN 주석 참고)
                     std::cerr << "[conn " << conn_id << "] ROOM_CREATE\n";
                     rr.handleCreate(std::move(sock), conn_id,
                                     auth->player_id, auth->elo,
                                     auth->username, auth->token,
                                     auth->selected_icon_id,
                                     std::move(auth->session_lease),
+                                    std::move(session_slot),
                                     residual_stream(frames, i + 1, stream));
                     return;
                 }
@@ -226,12 +234,14 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     std::string tok = extract_token(f.payload, 1u + n);
                     auto auth = authenticate(meta, tok, conn_id, "ROOM_JOIN");
                     if (!auth) { net::tcp_close(sock); return; }
+                    handshake_slot.reset();   // 핸드셰이크 끝 (위 QUEUE_JOIN 주석 참고)
                     std::cerr << "[conn " << conn_id << "] ROOM_JOIN " << code << "\n";
                     rr.handleJoin(code, std::move(sock), conn_id,
                                   auth->player_id, auth->elo,
                                   auth->username, auth->token,
                                   auth->selected_icon_id,
                                   std::move(auth->session_lease),
+                                  std::move(session_slot),
                                   residual_stream(frames, i + 1, stream));
                     return;
                 }

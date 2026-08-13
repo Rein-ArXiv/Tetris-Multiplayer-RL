@@ -1,5 +1,6 @@
 // Relay process entry point. Protocol details live in net/framing.h and docs.
 
+#include "ip_admission.h"
 #include "matchmaker.h"
 #include "player_conn.h"
 #include "relay.h"
@@ -19,11 +20,9 @@
 #include <functional>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <system_error>
 #include <thread>
-#include <unordered_map>
 
 namespace {
 
@@ -32,27 +31,9 @@ net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링
 
 // Bound thread and handle use during connection setup.
 constexpr size_t kMaxConnWorkers = 256;
-constexpr size_t kMaxHandshakesPerIp = 16;
 
-class IpAdmission {
-public:
-    bool acquire(const std::string& ip) {
-        std::lock_guard<std::mutex> lk(mu_);
-        size_t& n = active_[ip.empty() ? "unknown" : ip];
-        if (n >= kMaxHandshakesPerIp) return false;
-        ++n;
-        return true;
-    }
-    void release(const std::string& ip) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = active_.find(ip.empty() ? "unknown" : ip);
-        if (it == active_.end()) return;
-        if (--it->second == 0) active_.erase(it);
-    }
-private:
-    std::mutex mu_;
-    std::unordered_map<std::string, size_t> active_;
-};
+// per-IP 상한은 server/ip_admission.h 가 두 릴레이 바이너리에 공통으로 정의한다
+// (핸드셰이크 슬롯 = 인증까지, 세션 슬롯 = 연결이 죽을 때까지).
 
 void signalHandler(int /*sig*/) {
     // The signal handler only touches an atomic flag.
@@ -62,13 +43,35 @@ void signalHandler(int /*sig*/) {
 void printUsage() {
     std::cout <<
         "Usage: tetris_relay [--port N] [--meta URL] [--meta-secret SECRET]\n"
+        "                    [--max-sessions-per-ip N]\n"
         "  --port N         TCP listen port (default 7777)\n"
         "  --meta URL       tetris_meta base URL (e.g. https://api.example.com)\n"
         "                   If omitted, relay runs unranked (no token verify,\n"
         "                   no /v1/matches POST).\n"
         "  --meta-secret S  Send X-Relay-Secret on /v1/matches.\n"
         "                   Defaults to TETRIS_RELAY_SECRET if set.\n"
+        "  --max-sessions-per-ip N\n"
+        "                   Concurrent connections one address may hold for the\n"
+        "                   life of the connection (default "
+        << relay::kMaxSessionsPerIp << ").\n"
+        "                   Separate from the per-IP handshake budget ("
+        << relay::kMaxHandshakesPerIp << "), which\n"
+        "                   is released as soon as a connection authenticates.\n"
+        "                   Raise it only for a deployment that legitimately\n"
+        "                   shares one address across many players.\n"
         "  -h, --help       Show this help\n";
+}
+
+bool parseCount(const std::string& s, size_t& out) {
+    if (s.empty()) return false;
+    unsigned long long value = 0;
+    auto* first = s.data();
+    auto* last = s.data() + s.size();
+    auto res = std::from_chars(first, last, value);
+    if (res.ec != std::errc{} || res.ptr != last) return false;
+    if (value < 1 || value > 100000) return false;
+    out = static_cast<size_t>(value);
+    return true;
 }
 
 bool parsePort(const std::string& s, uint16_t& out) {
@@ -105,6 +108,15 @@ int main(int argc, char** argv) {
             metaUrl = argv[++i];
         } else if (a == "--meta-secret" && i + 1 < argc) {
             metaSecret = argv[++i];
+        } else if (a == "--max-sessions-per-ip" && i + 1 < argc) {
+            const std::string arg = argv[++i];
+            size_t n = 0;
+            if (!parseCount(arg, n)) {
+                std::cerr << "Invalid --max-sessions-per-ip value: " << arg
+                          << " (expected 1..100000)\n";
+                return 2;
+            }
+            relay::IpAdmission::set_session_limit(n);
         } else if (a == "-h" || a == "--help") {
             printUsage();
             return 0;
@@ -166,7 +178,8 @@ int main(int argc, char** argv) {
 
     // Drain workers before destroying the state they reference.
     relay::WorkerGroup connWorkers{"relay-connection", kMaxConnWorkers};
-    IpAdmission ipAdmission;
+    std::cout << "[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
+              << " sessions=" << relay::IpAdmission::session_limit() << "\n";
 
     // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작.
     // meta 가 있으면 post_match 를 호출할 수 있도록 포인터를 startPump 에 넘긴다.
@@ -221,22 +234,35 @@ int main(int argc, char** argv) {
             // (per-IP 상한은 못 걸지만, 실패 케이스끼리의 공멸보다 낫다).
             peerIp = "fd:" + std::to_string(client.fd());
         }
-        if (!ipAdmission.acquire(peerIp)) {
+        // 두 상한을 독립적으로 건다. 세션 슬롯은 연결이 죽을 때까지(소켓과 함께
+        // 큐·룸·포워딩으로 옮겨 다니며) 붙들고, 핸드셰이크 슬롯은 인증이 끝나는
+        // 순간 playerConnThread 가 놓아준다.
+        auto sessionSlot = relay::IpAdmission::acquire(
+            peerIp, relay::IpAdmission::Kind::Session);
+        if (!sessionSlot) {
+            std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP session limit\n";
+            net::tcp_close(client);
+            continue;
+        }
+        auto handshakeSlot = relay::IpAdmission::acquire(
+            peerIp, relay::IpAdmission::Kind::Handshake);
+        if (!handshakeSlot) {
             std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
                       << ": per-IP handshake limit\n";
             net::tcp_close(client);
             continue;
         }
         std::cout << "[relay] accept conn=" << id << "\n";
+        // launch 가 실패하면 람다(그리고 두 슬롯 사본)가 그대로 소멸하므로
+        // 별도의 반납 경로가 필요 없다.
         if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr,
-                                 &ipAdmission, peerIp]() mutable {
-            struct Release {
-                IpAdmission& owner; const std::string& ip;
-                ~Release() { owner.release(ip); }
-            } release{ipAdmission, peerIp};
-            relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
+                                 handshakeSlot = std::move(handshakeSlot),
+                                 sessionSlot = std::move(sessionSlot)]() mutable {
+            relay::playerConnThread(std::move(client), id, mm, rr, mcPtr,
+                                    std::move(handshakeSlot),
+                                    std::move(sessionSlot));
         })) {
-            ipAdmission.release(peerIp);
             std::cerr << "[relay] rejecting conn=" << id
                       << ": connection worker unavailable\n";
         }

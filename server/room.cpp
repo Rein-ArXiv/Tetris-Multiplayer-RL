@@ -118,6 +118,7 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
                                 const std::string& username, const std::string& token,
                                 const std::string& selected_icon_id,
                                 std::shared_ptr<PlayerSessionLease> session_lease,
+                                std::shared_ptr<IpAdmission> ip_session,
                                 std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
@@ -141,6 +142,7 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
         r.hostToken    = token;
         r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
         r.hostSessionLease = std::move(session_lease);
+        r.hostIpSession    = std::move(ip_session);
         roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
     }
     std::cerr << "[room] conn=" << conn_id << " created code=" << code << "\n";
@@ -153,6 +155,7 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
                               const std::string& username, const std::string& token,
                               const std::string& selected_icon_id,
                               std::shared_ptr<PlayerSessionLease> session_lease,
+                              std::shared_ptr<IpAdmission> ip_session,
                               std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     bool entered = false;
@@ -191,6 +194,7 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         r.guestToken    = token;
         r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
         r.guestSessionLease = std::move(session_lease);
+        r.guestIpSession    = std::move(ip_session);
         net::TcpSocket hs = r.hostSock;
         net::TcpSocket gs = r.guestSock;
         roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
@@ -391,6 +395,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             m.a.token     = r.hostToken;
             m.a.selected_icon_id = r.hostSelectedIconId;
             m.a.session_lease = r.hostSessionLease;
+            m.a.ip_session    = r.hostIpSession;
             m.b.sock      = r.guestSock;
             m.b.conn_id   = r.guestConn;
             m.b.player_id = r.guestPlayerId;
@@ -399,6 +404,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             m.b.token     = r.guestToken;
             m.b.selected_icon_id = r.guestSelectedIconId;
             m.b.session_lease = r.guestSessionLease;
+            m.b.ip_session    = r.guestIpSession;
             m.seed        = nextSeed_();
             m.match_id    = nextMatchId_();
             m.match_uuid  = new_match_uuid();
@@ -437,11 +443,17 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         auto it = rooms.find(code);
         if (it != rooms.end()) {
             auto& r = it->second;
-            // 떠나는 쪽의 세션 lease 는 즉시 반납한다 — 상대가 남아 방 Entry 가
-            // 유지되는 동안에도 이 플레이어가 새 연결로 재인증할 수 있어야 하고,
-            // 타임아웃 정리 시 자원 회수가 방 소멸 시점까지 미뤄지지 않게 한다.
-            if (isHost) { r.hostPresent = false;  r.hostReady  = false; r.hostSessionLease.reset(); }
-            else        { r.guestPresent = false; r.guestReady = false; r.guestSessionLease.reset(); }
+            // 떠나는 쪽의 세션 lease 와 per-IP 세션 슬롯은 즉시 반납한다 —
+            // 상대가 남아 방 Entry 가 유지되는 동안에도 이 플레이어가 새 연결로
+            // 재인증할 수 있어야 하고, 타임아웃 정리 시 자원 회수가 방 소멸
+            // 시점까지 미뤄지지 않게 한다. (이 소켓은 아래에서 닫힌다.)
+            if (isHost) {
+                r.hostPresent = false;  r.hostReady  = false;
+                r.hostSessionLease.reset(); r.hostIpSession.reset();
+            } else {
+                r.guestPresent = false; r.guestReady = false;
+                r.guestSessionLease.reset(); r.guestIpSession.reset();
+            }
             if (isHost && r.guestPresent) { peerSock = r.guestSock; notifyPeer = true; }
             if (!isHost && r.hostPresent) { peerSock = r.hostSock;  notifyPeer = true; }
             roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;

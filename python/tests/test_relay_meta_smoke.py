@@ -30,6 +30,11 @@ from netbot.framing import FramingError, MsgType, build_frame, parse_frames
 
 TEST_RELAY_SECRET = "test-relay-secret"
 
+# server/ip_admission.h 의 kMaxHandshakesPerIp / kMaxSessionsPerIp 와 같아야 한다.
+# 두 릴레이 바이너리가 이 헤더를 공유하므로 값도 하나뿐이다.
+RELAY_MAX_HANDSHAKES_PER_IP = 16
+RELAY_MAX_SESSIONS_PER_IP = 64
+
 
 def _find_bin(name: str, env_var: str) -> Path | None:
     env = os.environ.get(env_var)
@@ -402,26 +407,21 @@ def test_ranked_room_create_join_pairs(meta_and_relay):
 
 
 def test_ranked_auth_releases_handshake_slot(meta_and_relay):
-    """per-IP 상한은 '동시 핸드셰이크' 예산이지 '동시 세션' 예산이 아니다.
+    """per-IP 핸드셰이크 예산은 인증이 끝나는 순간 반납돼야 한다.
 
-    인증 완료 시점에 슬롯을 놓아주지 않으면 같은 IP 뒤에 오는 접속이 굶는다.
-    NAT 뒤 다수 사용자가 서로를 밀어내고, loopback 테스트도 상한에 걸린다.
-    상한(16)보다 넉넉히 많은 연결을 한 주소에서 붙여 확인한다.
+    반납하지 않으면 상한(16)이 사실상 '동시 세션 16'이 되어 같은 IP 뒤에 오는
+    접속이 굶는다 — NAT 뒤 다수 사용자가 서로를 밀어내고, loopback 테스트도
+    상한에 걸린다. 핸드셰이크 상한보다 넉넉히 많되 세션 상한(아래 테스트)에는
+    닿지 않는 수를 한 주소에서 붙여 확인한다.
 
-    두 릴레이 구현의 정책이 다르다: 스레드 모델은 슬롯을 연결 수명 동안 붙들고
-    (main.cpp 의 Release RAII 가 연결 스레드 종료 시 푼다) reactor 만 인증 완료
-    시점에 놓아준다. 어느 쪽으로 통일할지는 별도 결정 사항이므로, 이 테스트는
-    reactor 계약만 못 박는다.
+    두 바이너리가 같은 정책을 갖게 된 뒤로는 reactor 전용 skip 가드가 없다.
     """
-    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
-    if relay_bin is None or "reactor" not in relay_bin.name:
-        pytest.skip("스레드 모델은 per-IP 슬롯을 연결 수명 동안 유지 — 알려진 정책 차이")
-
     base = meta_and_relay["meta_url"]
     rh   = meta_and_relay["relay_host"]
     rp   = meta_and_relay["relay_port"]
 
-    total = 24  # kMaxHandshakesPerIp = 16 보다 확실히 크게
+    total = RELAY_MAX_HANDSHAKES_PER_IP + 8   # 핸드셰이크 상한보다 확실히 크게
+    assert total < RELAY_MAX_SESSIONS_PER_IP, "세션 상한에 닿으면 다른 것을 재게 된다"
     socks: list[socket.socket] = []
     try:
         for i in range(total):
@@ -429,13 +429,84 @@ def test_ranked_auth_releases_handshake_slot(meta_and_relay):
             s = socket.create_connection((rh, rp), timeout=2.0)
             socks.append(s)
             s.sendall(_build_room_create(tok))
-            # 슬롯이 새면 17번째부터 relay 가 EOF 로 끊는다.
+            # 슬롯이 안 풀리면 17번째부터 relay 가 EOF 로 끊는다.
             code, _, _ = _parse_room_info(
                 _recv_frame(s, MsgType.ROOM_INFO, bytearray(), timeout=5.0))
             assert len(code) == 5, f"connection {i} got a malformed room code"
     finally:
         for s in socks:
             s.close()
+
+
+def test_per_ip_session_cap_rejects_excess_connections(tmp_path):
+    """세션 슬롯은 연결이 죽을 때까지 유지된다 — 한 IP 가 서버를 독식하지 못하게.
+
+    핸드셰이크 슬롯만 두면 인증만 통과시키며 전역 상한(reactor kMaxConns=512,
+    스레드 모델 포워딩 워커 512)까지 한 주소가 전부 차지할 수 있다. 상한이
+    아니라 속도 제한일 뿐이다.
+
+    한 주소에서 kMaxSessionsPerIp 개를 붙여 전부 살아남는지 (상한이 정상
+    사용자 집단을 자르지 않는지) 확인하고, 그 다음 하나가 거절되는지 (상한이
+    실제로 존재하는지) 확인한다. 두 방향 모두 필요하다.
+
+    unranked(tok_len=0) 로 돌리므로 meta 는 필요 없다. ROOM_CREATE 를 쓰는
+    이유는 연결이 응답(ROOM_INFO)을 받은 뒤에도 계속 살아 있어 세션 슬롯을
+    붙들고 있기 때문이다 — 큐 경로는 둘씩 짝지어져 상태가 복잡해진다.
+    """
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if not relay_bin:
+        pytest.skip("tetris_relay binary missing")
+
+    port = _free_port()
+    # 로그는 버린다. 릴레이는 연결마다 여러 줄을 찍는데, PIPE 로 받아 놓고 아무도
+    # 읽지 않으면 64 KiB 짜리 파이프 버퍼가 차는 순간 릴레이가 write 에서 멈춘다 —
+    # 연결 수십 개를 붙이는 이 테스트에서는 그게 "상한에 걸렸다" 와 구분되지 않는
+    # 타임아웃으로 나타난다.
+    proc = subprocess.Popen(
+        [str(relay_bin), "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if not _wait_listen(port, 5.0):
+        proc.kill()
+        pytest.fail("relay failed to listen")
+    # _wait_listen 의 탐침 연결도 슬롯을 하나 썼다. 그 반납이 끝나기 전에 세기
+    # 시작하면 마지막 하나가 억울하게 거절된다.
+    time.sleep(0.3)
+
+    socks: list[socket.socket] = []
+    try:
+        for i in range(RELAY_MAX_SESSIONS_PER_IP):
+            s = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+            socks.append(s)
+            s.sendall(build_frame(MsgType.ROOM_CREATE, b"\x00"))
+            code, _, _ = _parse_room_info(
+                _recv_frame(s, MsgType.ROOM_INFO, bytearray(), timeout=5.0))
+            assert len(code) == 5, (
+                f"connection {i} was refused below the per-IP session cap "
+                f"({RELAY_MAX_SESSIONS_PER_IP}) — 상한이 너무 빡빡하다")
+
+        # 상한을 한 칸 넘긴 연결: relay 가 accept 직후 닫아야 한다.
+        extra = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        socks.append(extra)
+        extra.sendall(build_frame(MsgType.ROOM_CREATE, b"\x00"))
+        extra.settimeout(3.0)
+        try:
+            data = extra.recv(4096)
+        except ConnectionResetError:
+            data = b""
+        except socket.timeout:
+            pytest.fail("상한 초과 연결이 ROOM_INFO 도 못 받고 닫히지도 않았다")
+        assert data == b"", (
+            "per-IP 세션 상한을 넘긴 연결이 살아남았다 — 한 주소가 전역 상한까지 "
+            "연결을 쌓을 수 있다는 뜻")
+    finally:
+        for s in socks:
+            s.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def test_relay_refuses_meta_without_secret(tmp_path):

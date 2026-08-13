@@ -48,6 +48,7 @@ public:
                       const std::string& username, const std::string& token,
                       const std::string& selected_icon_id,
                       std::shared_ptr<PlayerSessionLease> session_lease,
+                      std::shared_ptr<IpAdmission> ip_session = {},
                       std::vector<uint8_t> streamPrefix = {});
 
     // playerConnThread 에서 ROOM_JOIN 수신 직후 호출.
@@ -57,6 +58,7 @@ public:
                     const std::string& username, const std::string& token,
                     const std::string& selected_icon_id,
                     std::shared_ptr<PlayerSessionLease> session_lease,
+                    std::shared_ptr<IpAdmission> ip_session = {},
                     std::vector<uint8_t> streamPrefix = {});
 
     // 모든 roomLoop_ 를 종료시킨다.
@@ -85,12 +87,16 @@ private:
         std::string    hostToken;
         std::string    hostSelectedIconId{"default"};
         std::shared_ptr<PlayerSessionLease> hostSessionLease;
+        // per-IP 세션 슬롯 — 소켓이 이 방에 머무는 동안 방이 대신 붙들고 있다가
+        // 매치 성립 시 Match 로, 퇴장 시 즉시 반납한다.
+        std::shared_ptr<IpAdmission> hostIpSession;
         int64_t        guestPlayerId = 0;
         int            guestElo      = 0;
         std::string    guestUsername;
         std::string    guestToken;
         std::string    guestSelectedIconId{"default"};
         std::shared_ptr<PlayerSessionLease> guestSessionLease;
+        std::shared_ptr<IpAdmission> guestIpSession;
     };
 
     std::string generateCode_();   // mu 잡은 상태에서 호출

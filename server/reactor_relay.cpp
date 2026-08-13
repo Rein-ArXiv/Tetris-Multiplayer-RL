@@ -653,7 +653,13 @@ private:
         }
         std::cerr << "[conn " << c->id << "] authed player_id=" << c->player_id
                   << " elo=" << c->elo << "\n";
-        enter_queue(c);
+        // unranked 경로(begin_auth 의 !meta_ 분기)와 반드시 같은 문을 통과해야 한다.
+        // 여기서 enter_queue 를 직접 부르면 두 가지가 조용히 깨진다:
+        //   - admission 슬롯이 안 풀려 per-IP "동시 핸드셰이크" 예산이 "동시 세션"
+        //     예산으로 변한다 (NAT 뒤 다수 사용자가 서로를 굶긴다).
+        //   - c->intent 가 무시되어 랭크드 ROOM_CREATE/ROOM_JOIN 이 매치메이킹으로
+        //     끌려간다.
+        after_auth(c);
     }
 
     Conn* find_by_id(uint32_t id) {

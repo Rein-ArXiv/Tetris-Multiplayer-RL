@@ -114,6 +114,41 @@ def _recv_match_found(sock: socket.socket, timeout: float = 5.0) -> tuple[int, i
     raise TimeoutError("no MATCH_FOUND within deadline")
 
 
+def _recv_frame(sock: socket.socket, want: MsgType, buf: bytearray,
+                timeout: float = 5.0) -> bytes:
+    """want 타입 프레임이 올 때까지 읽는다. buf 는 호출자가 보관 — 한 read 에
+    여러 프레임이 실려 오는 경우 나머지를 잃지 않기 위해서다."""
+    sock.settimeout(timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        for t, p in parse_frames(buf):
+            if t == want:
+                return p
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"no {want!r} within deadline")
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise RuntimeError(f"relay closed before {want!r}")
+        buf.extend(chunk)
+
+
+def _build_room_create(token: str) -> bytes:
+    return build_frame(MsgType.ROOM_CREATE,
+                       bytes([len(token)]) + token.encode("ascii"))
+
+
+def _build_room_join(code: str, token: str) -> bytes:
+    payload = (bytes([len(code)]) + code.encode("ascii")
+               + bytes([len(token)]) + token.encode("ascii"))
+    return build_frame(MsgType.ROOM_JOIN, payload)
+
+
+def _parse_room_info(payload: bytes) -> tuple[str, int, int]:
+    code_len = payload[0]
+    code = payload[1:1 + code_len].decode("ascii")
+    return code, payload[1 + code_len], payload[2 + code_len]
+
+
 def test_relay_sigterm_drains_active_match() -> None:
     """SIGTERM 중 active forwarder가 server-owned state보다 먼저 종료된다."""
     relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
@@ -323,6 +358,84 @@ def test_same_player_cannot_queue_twice(meta_and_relay):
         assert {role_survivor, role_peer} == {1, 2}
     finally:
         first.close(); duplicate.close(); peer.close()
+
+
+def test_ranked_room_create_join_pairs(meta_and_relay):
+    """인증된 연결의 ROOM_CREATE/ROOM_JOIN 이 룸으로 가야 한다.
+
+    룸 스모크는 tok_len=0 (unranked) 으로만 이 경로를 밟기 때문에, 인증을 거친
+    뒤 진로를 고르는 분기가 오래 무검증으로 남아 있었다. reactor 릴레이에서
+    실제로 그 분기가 빠져 랭크드 룸 요청이 전부 매치메이킹 큐로 끌려갔다.
+    """
+    base = meta_and_relay["meta_url"]
+    rh   = meta_and_relay["relay_host"]
+    rp   = meta_and_relay["relay_port"]
+
+    p1 = _post(f"{base}/v1/guest")
+    p2 = _post(f"{base}/v1/guest")
+
+    a = socket.create_connection((rh, rp), timeout=2.0)
+    b = socket.create_connection((rh, rp), timeout=2.0)
+    a_buf, b_buf = bytearray(), bytearray()
+    try:
+        a.sendall(_build_room_create(p1["token"]))
+        # 큐로 샜다면 여기서 ROOM_INFO 대신 아무것도 오지 않는다.
+        code, status, peers = _parse_room_info(_recv_frame(a, MsgType.ROOM_INFO, a_buf))
+        assert len(code) == 5
+        assert (status, peers) == (0, 1)
+
+        b.sendall(_build_room_join(code, p2["token"]))
+        _, status_b, peers_b = _parse_room_info(_recv_frame(b, MsgType.ROOM_INFO, b_buf))
+        assert (status_b, peers_b) == (0, 2)
+
+        a.sendall(build_frame(MsgType.READY, b"\x01"))
+        b.sendall(build_frame(MsgType.READY, b"\x01"))
+
+        mf_a = _recv_frame(a, MsgType.MATCH_FOUND, a_buf)
+        mf_b = _recv_frame(b, MsgType.MATCH_FOUND, b_buf)
+        role_a, seed_a = mf_a[0], struct.unpack_from("<Q", mf_a, 1)[0]
+        role_b, seed_b = mf_b[0], struct.unpack_from("<Q", mf_b, 1)[0]
+        assert seed_a == seed_b
+        assert {role_a, role_b} == {1, 2}
+    finally:
+        a.close(); b.close()
+
+
+def test_ranked_auth_releases_handshake_slot(meta_and_relay):
+    """per-IP 상한은 '동시 핸드셰이크' 예산이지 '동시 세션' 예산이 아니다.
+
+    인증 완료 시점에 슬롯을 놓아주지 않으면 같은 IP 뒤에 오는 접속이 굶는다.
+    NAT 뒤 다수 사용자가 서로를 밀어내고, loopback 테스트도 상한에 걸린다.
+    상한(16)보다 넉넉히 많은 연결을 한 주소에서 붙여 확인한다.
+
+    두 릴레이 구현의 정책이 다르다: 스레드 모델은 슬롯을 연결 수명 동안 붙들고
+    (main.cpp 의 Release RAII 가 연결 스레드 종료 시 푼다) reactor 만 인증 완료
+    시점에 놓아준다. 어느 쪽으로 통일할지는 별도 결정 사항이므로, 이 테스트는
+    reactor 계약만 못 박는다.
+    """
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if relay_bin is None or "reactor" not in relay_bin.name:
+        pytest.skip("스레드 모델은 per-IP 슬롯을 연결 수명 동안 유지 — 알려진 정책 차이")
+
+    base = meta_and_relay["meta_url"]
+    rh   = meta_and_relay["relay_host"]
+    rp   = meta_and_relay["relay_port"]
+
+    total = 24  # kMaxHandshakesPerIp = 16 보다 확실히 크게
+    socks: list[socket.socket] = []
+    try:
+        for i in range(total):
+            tok = _post(f"{base}/v1/guest")["token"]
+            s = socket.create_connection((rh, rp), timeout=2.0)
+            socks.append(s)
+            s.sendall(_build_room_create(tok))
+            # 슬롯이 새면 17번째부터 relay 가 EOF 로 끊는다.
+            code, _, _ = _parse_room_info(
+                _recv_frame(s, MsgType.ROOM_INFO, bytearray(), timeout=5.0))
+            assert len(code) == 5, f"connection {i} got a malformed room code"
+    finally:
+        for s in socks:
+            s.close()
 
 
 def test_relay_refuses_meta_without_secret(tmp_path):

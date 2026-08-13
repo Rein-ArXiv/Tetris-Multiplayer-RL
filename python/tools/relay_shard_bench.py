@@ -60,12 +60,11 @@ import os
 import signal
 import socket
 import statistics
+import http.client
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -85,13 +84,20 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def wait_listen(port: int, timeout: float = 15.0) -> bool:
+def wait_listen(port: int, timeout: float = 15.0, proc=None) -> bool:
+    """포트가 열릴 때까지 기다린다.
+
+    proc 를 주면 그 프로세스가 죽는 즉시 포기한다 — bind 실패로 이미 끝난
+    프로세스를 타임아웃 끝까지 기다리는 것은 순전한 낭비다.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                 return True
         except OSError:
+            if proc is not None and proc.poll() is not None:
+                return False
             time.sleep(0.05)
     return False
 
@@ -312,29 +318,45 @@ def fetch_guest_tokens(meta_port: int, count: int, per_second: float = 45.0) -> 
 
     meta 는 공개 버킷에 초당 60 요청 상한을 두므로 그 아래로 페이싱한다. 상한을
     넘기면 429 가 오고 그 연결은 토큰 없이 릴레이에 붙어 거절당한다.
+
+    연결 하나를 keep-alive 로 재사용한다. 요청마다 새로 붙으면 수백 개의 임시
+    포트를 태우고 그만큼 TIME_WAIT 을 남기는데, 그 임시 포트는 곧이어 릴레이가
+    listen 할 포트와 같은 풀에서 나온다 — 실제로 그 충돌로 릴레이가 bind 에
+    실패한 적이 있다.
     """
     tokens: list[str] = []
-    url = f"http://127.0.0.1:{meta_port}/v1/guest"
     interval = 1.0 / per_second
     next_at = time.monotonic()
-    for _ in range(count):
-        sleep_for = next_at - time.monotonic()
-        if sleep_for > 0:
-            time.sleep(sleep_for)
-        next_at += interval
-        request = urllib.request.Request(
-            url, data=b"{}", method="POST",
-            headers={"Content-Type": "application/json"})
-        for attempt in range(5):
-            try:
-                with urllib.request.urlopen(request, timeout=10.0) as response:
-                    tokens.append(json.loads(response.read().decode())["token"])
-                break
-            except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt < 4:
-                    time.sleep(0.5)
-                    continue
-                raise
+    headers = {"Content-Type": "application/json"}
+    conn = http.client.HTTPConnection("127.0.0.1", meta_port, timeout=10.0)
+    try:
+        for _ in range(count):
+            sleep_for = next_at - time.monotonic()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            next_at += interval
+            for attempt in range(5):
+                try:
+                    conn.request("POST", "/v1/guest", body=b"{}", headers=headers)
+                    response = conn.getresponse()
+                    body = response.read()
+                    if response.status == 429 and attempt < 4:
+                        time.sleep(0.5)
+                        continue
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"POST /v1/guest returned HTTP {response.status}: "
+                            f"{body[:200]!r}")
+                    tokens.append(json.loads(body)["token"])
+                    break
+                except (http.client.HTTPException, OSError):
+                    conn.close()
+                    conn = http.client.HTTPConnection(
+                        "127.0.0.1", meta_port, timeout=10.0)
+                    if attempt == 4:
+                        raise
+    finally:
+        conn.close()
     return tokens
 
 
@@ -496,10 +518,7 @@ def run_once(args) -> dict:
     }
 
     try:
-        relay_port = free_port()
-        relay_cmd = [str(args.relay_bin), "--port", str(relay_port),
-                     "--loops", str(args.loops)]
-
+        relay_extra: list[str] = []
         tokens = [""] * players
         if args.meta_bin:
             meta_port = free_port()
@@ -514,13 +533,28 @@ def run_once(args) -> dict:
             token_start = time.monotonic()
             tokens = fetch_guest_tokens(meta_port, players)
             result["token_fetch_s"] = round(time.monotonic() - token_start, 1)
-            relay_cmd += ["--meta", f"http://127.0.0.1:{meta_port}",
-                          "--meta-secret", args.meta_secret]
+            relay_extra = ["--meta", f"http://127.0.0.1:{meta_port}",
+                           "--meta-secret", args.meta_secret]
 
-        with open(relay_log, "wb") as log:
-            relay_proc = subprocess.Popen(relay_cmd, stdout=log, stderr=log)
-        if not wait_listen(relay_port):
-            raise RuntimeError("relay did not start listening")
+        # 릴레이 포트는 여기서 잡는다. 미리 잡아 두면 그 사이에 나가는 연결이
+        # 같은 임시 포트 풀에서 그 포트를 가져갈 수 있고, 실제로 그렇게 됐다.
+        # 잡는 순간과 bind 사이의 틈은 없앨 수 없으니 몇 번 다시 시도한다.
+        relay_port = 0
+        for attempt in range(5):
+            relay_port = free_port()
+            with open(relay_log, "wb") as log:
+                relay_proc = subprocess.Popen(
+                    [str(args.relay_bin), "--port", str(relay_port),
+                     "--loops", str(args.loops)] + relay_extra,
+                    stdout=log, stderr=log)
+            if wait_listen(relay_port, timeout=10.0, proc=relay_proc):
+                break
+            if relay_proc.poll() is None:
+                relay_proc.kill()
+            relay_proc.wait(timeout=5.0)
+            relay_proc = None
+            if attempt == 4:
+                raise RuntimeError("relay did not start listening")
 
         setup_start = time.monotonic()
         pairs = handshake_pairs(relay_port, tokens, args.matches, frame,

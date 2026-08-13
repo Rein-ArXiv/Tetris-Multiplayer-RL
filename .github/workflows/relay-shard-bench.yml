@@ -1,0 +1,135 @@
+# 포워딩 샤딩(--loops N) 처리량 벤치 — 손으로 돌리는 워크플로
+#
+# 왜 별도 워크플로인가
+#   샤딩은 소켓을 루프 사이로 옮길 수 있어야 성립하고, 그건 epoll 백엔드에서만
+#   된다. Windows 개발기에서는 영영 못 재는 수치다. 그렇다고 ci.yml 에 넣으면
+#   push 마다 수 분씩 러너를 태우게 되는데, 성능 수치는 회귀 게이트가 아니라
+#   사람이 읽고 판단하는 물건이다. 그래서 workflow_dispatch 전용으로 뗀다.
+#
+# 왜 반복해서 도는가
+#   공유 러너는 이웃 부하와 CPU 크레딧에 따라 흔들린다. 한 번 재고 "N배" 라고
+#   말하면 그 숫자는 대체로 거짓이다. 각 구성을 여러 번 돌리고 중앙값과 변동폭을
+#   같이 낸다. 회차 안에서 loops=1 과 loops=4 를 붙여 돌려, 러너 상태의 표류가
+#   두 구성에 같이 걸리게 한다.
+#
+# 왜 코어 수를 찍는가
+#   샤드가 3개여도 코어가 2개면 그 이상 나눌 수 없다. 부하 생성기도 같은
+#   머신에서 코어를 먹는다. nproc 없이는 "왜 3배가 아닌가" 를 설명할 수 없다.
+
+name: relay shard bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: "각 구성 반복 횟수 (변동폭 확인용, 최소 3 권장)"
+        default: "3"
+      matches:
+        description: "동시 매치 수 (연결은 그 두 배)"
+        default: "128"
+      duration:
+        description: "측정 구간 길이(초). 워밍업은 별도"
+        default: "20"
+      kib_per_conn:
+        description: "연결당 목표 송신량 KiB/s (릴레이 상한 64 미만)"
+        default: "40"
+      loops_sharded:
+        description: "샤딩 구성의 --loops 값 (앞단 1 + 샤드 N-1)"
+        default: "4"
+      workers:
+        description: "부하 생성기 프로세스 수"
+        default: "2"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 수치를 해석하려면 어떤 기계에서 났는지가 수치만큼 중요하다.
+      - name: Runner facts
+        run: |
+          echo "nproc          = $(nproc)"
+          echo "model          = $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+          echo "mem            = $(free -m | awk '/^Mem:/{print $2" MiB"}')"
+          echo "kernel         = $(uname -r)"
+          echo "ulimit -n      = $(ulimit -n)"
+          echo "rmem_max       = $(cat /proc/sys/net/core/rmem_max)"
+          echo "wmem_max       = $(cat /proc/sys/net/core/wmem_max)"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DTETRIS_BUILD_GAME=OFF
+          -DTETRIS_BUILD_RELAY=ON
+          -DTETRIS_BUILD_META=ON
+          -DTETRIS_BUILD_TEST=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - uses: astral-sh/setup-uv@v5
+      - name: Python deps
+        run: uv sync --dev
+
+      # unranked 와 ranked 를 둘 다 돈다. 두 경로의 포워딩 비용 구조가 달라서
+      # (unranked 는 recv 이벤트당 send 한 번, ranked 는 프레임당 send 한 번)
+      # 샤딩이 값을 하는 지점도 다르다. 한쪽만 재면 결론이 반쪽이 된다.
+      - name: Benchmark
+        env:
+          REPEATS: ${{ inputs.repeats }}
+          MATCHES: ${{ inputs.matches }}
+          DURATION: ${{ inputs.duration }}
+          KIB: ${{ inputs.kib_per_conn }}
+          SHARDED: ${{ inputs.loops_sharded }}
+          WORKERS: ${{ inputs.workers }}
+        run: |
+          set -eu
+          mkdir -p bench-out
+          for rep in $(seq 1 "$REPEATS"); do
+            for mode in unranked ranked; do
+              if [ "$mode" = "ranked" ]; then
+                META="--meta-bin build/tetris_meta"
+              else
+                META=""
+              fi
+              for loops in 1 "$SHARDED"; do
+                echo "::group::rep=$rep mode=$mode loops=$loops"
+                uv run python python/tools/relay_shard_bench.py \
+                  --relay-bin build/tetris_relay_reactor \
+                  $META \
+                  --loops "$loops" \
+                  --matches "$MATCHES" \
+                  --workers "$WORKERS" \
+                  --duration "$DURATION" \
+                  --kib-per-conn "$KIB" \
+                  --label "$rep" \
+                  --json "bench-out/${mode}-loops${loops}-rep${rep}.json"
+                echo "::endgroup::"
+              done
+            done
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          uv run python python/tools/relay_shard_bench.py --summarize bench-out \
+            | tee summary.txt
+          {
+            echo '### relay shard bench'
+            echo ''
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: relay-shard-bench
+          path: |
+            bench-out/
+            summary.txt

@@ -509,6 +509,65 @@ def test_per_ip_session_cap_rejects_excess_connections(tmp_path):
             proc.kill()
 
 
+def test_reactor_loops_two_falls_back_to_single_loop():
+    """--loops 2 는 스레드만 하나 더 쓰고 아무것도 사지 못한다.
+
+    앞단 루프는 샤드가 하나라도 생기면 포워딩을 전부 넘기고 자기는 하지 않는다.
+    그래서 포워딩 일꾼 수는 loops-1 이고, loops=2 의 일꾼은 1개 — 앞단이 직접
+    포워딩하는 loops=1 과 같은 수다. 측정에서도 두 구성의 처리량 차이는 0.14%
+    (374,360 vs 373,827 frames/s) 로 오차 범위였고, 늘어나는 것은 스레드 하나와
+    매치마다 도는 우편함 인계뿐이다.
+
+    릴레이는 이 값을 거절하는 대신 1 로 낮춘다 (틀린 설정이 아니라 무의미한
+    설정이고, 이미 그 인자를 박아 둔 스크립트를 멈춰 세울 이유가 없다). 대신
+    조용히 넘어가지 않는다 — 이 테스트가 그 "조용하지 않음"을 못 박는다.
+
+    이 인자는 reactor 바이너리 전용이므로 TETRIS_RELAY_BIN 이 무엇을 가리키든
+    reactor 를 이름으로 직접 찾는다 (그래야 스레드 모델 스모크에서도 돈다).
+    """
+    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
+    if not reactor_bin:
+        pytest.skip("tetris_relay_reactor binary missing")
+
+    # --help 는 실효 병렬도가 loops-1 이라는 사실을 밝혀야 한다. 이 문장이
+    # 사라지면 사용자는 --loops 2 가 왜 손해인지 알 길이 없다.
+    help_proc = subprocess.run([str(reactor_bin), "--help"],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=10)
+    help_text = help_proc.stdout.decode("utf-8", errors="replace")
+    assert "loops-1" in help_text, "--help 가 실효 병렬도(loops-1)를 말하지 않는다"
+
+    port = _free_port()
+    # 종료를 핸들러 경유로 유도해야 stdout 버퍼가 flush 된다 (파이프로 받으면
+    # 완전 버퍼링이라 강제 종료 시 아무것도 안 남는다).
+    creationflags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    )
+    proc = subprocess.Popen(
+        [str(reactor_bin), "--port", str(port), "--loops", "2"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        creationflags=creationflags,
+    )
+    try:
+        if not _wait_listen(port, 5.0):
+            proc.kill()
+            pytest.fail("tetris_relay_reactor failed to listen")
+        if sys.platform == "win32":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
+        out = proc.communicate(timeout=10)[0].decode("utf-8", errors="replace")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    assert "--loops 2" in out, (
+        "--loops 2 를 조용히 받아들였다 — 사용자는 손해를 본 줄도 모른다:\n" + out)
+    assert "forwarding shards" not in out, (
+        "--loops 2 가 샤드를 만들었다 — 일꾼 수는 그대로인데 스레드와 인계 "
+        "비용만 늘어난 구성이다:\n" + out)
+
+
 def test_relay_refuses_meta_without_secret(tmp_path):
     relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not relay_bin:

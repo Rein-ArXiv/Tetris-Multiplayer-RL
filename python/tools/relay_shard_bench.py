@@ -822,6 +822,13 @@ def summarize(directory: Path) -> int:
             if key in run:
                 print(f"  [!] {run['mode']} loops={run['loops']} "
                       f"rep={run.get('label')}: {run[key]}")
+        # loops=2 는 릴레이가 스스로 1 로 낮춘다 (포워딩 일꾼 수가 loops-1 이라
+        # loops=1 과 같은데 스레드와 매치 인계 비용만 늘기 때문). 폴백도 인계 0 도
+        # 그 설계의 결과이지 이상 징후가 아니므로 경고 대신 사실만 적는다.
+        if run["loops"] == 2:
+            print(f"  [i] {run['mode']} loops=2: 릴레이가 단일 루프로 낮춰 "
+                  f"실행했다 — 포워딩 일꾼 수가 loops-1 이라 loops=1 과 같다")
+            continue
         if run["loops"] > 1 and run.get("shard_fallback"):
             print(f"  [!] {run['mode']} loops={run['loops']}: "
                   f"백엔드가 샤딩을 지원하지 않아 단일 루프로 폴백했다")

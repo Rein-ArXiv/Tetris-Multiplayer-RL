@@ -50,8 +50,11 @@ on:
         description: "연결당 목표 송신량 KiB/s (릴레이 상한 64 미만)"
         default: "40"
       loops_list:
-        description: "돌려 볼 --loops 값들 (공백 구분). 1 은 기준선이므로 반드시 포함"
-        default: "1 2 3 4"
+        description: >-
+          돌려 볼 --loops 값들 (공백 구분). 1 은 기준선이므로 반드시 포함.
+          2 는 릴레이가 스스로 1 로 낮춘다 (포워딩 일꾼 수 = loops-1) — 넣어도
+          기준선을 한 번 더 재는 것과 같다
+        default: "1 3 4"
       workers:
         description: "부하 생성기 프로세스 수"
         default: "2"
@@ -107,7 +110,7 @@ jobs:
           MATCHES: ${{ inputs.matches || '128' }}
           DURATION: ${{ inputs.duration || '20' }}
           KIB: ${{ inputs.kib_per_conn || '40' }}
-          LOOPS_LIST: ${{ inputs.loops_list || '1 2 3 4' }}
+          LOOPS_LIST: ${{ inputs.loops_list || '1 3 4' }}
           WORKERS: ${{ inputs.workers || '2' }}
         run: |
           set -u

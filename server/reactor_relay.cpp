@@ -1268,13 +1268,39 @@ int main(int argc, char** argv) {
             std::cout <<
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
                 "                            [--meta-secret S] [--max-sessions-per-ip N]\n"
-                "  단일 이벤트 루프(epoll/IOCP) 릴레이. 큐 경로만 지원.\n"
+                "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
+                "\n"
+                "  --loops N   루프 스레드 수 (기본 1). 앞단 루프 하나가 accept·인증·큐·\n"
+                "              룸·로비를 전부 소유하고, 포워딩은 샤드 (N-1)개가 나눠 갖는다.\n"
+                "              앞단은 샤드가 하나라도 있으면 포워딩을 전부 넘기고 자기는\n"
+                "              하지 않으므로 포워딩의 실효 병렬도는 loops-1 이다. 그래서\n"
+                "              --loops 2 는 --loops 1 과 일꾼 수가 같아 이득이 없고,\n"
+                "              릴레이가 이를 단일 루프로 낮춰 실행한다. 실제로 나누려면 3 이상.\n"
+                "              소켓을 루프 사이로 옮길 수 없는 백엔드(Windows IOCP)에서는\n"
+                "              값과 무관하게 단일 루프로 실행한다.\n"
                 "  --max-sessions-per-ip N\n"
                 "              한 주소가 연결 수명 동안 붙들 수 있는 동시 연결 수\n"
                 "              (기본 " << relay::kMaxSessionsPerIp << "). 인증이 끝나면 반납하는 per-IP 핸드셰이크\n"
                 "              예산(" << relay::kMaxHandshakesPerIp << ")과는 별개로 검사한다.\n";
             return 0;
         }
+    }
+
+    // --loops 2 는 아무것도 사지 못한다. 포워딩 일꾼 수가 loops-1 이므로
+    // loops=2 의 일꾼은 1개 — 앞단이 직접 포워딩하는 loops=1 과 같은 수다.
+    // 측정에서도 두 구성의 차이는 0.14%(374,360 vs 373,827 frames/s)로 오차
+    // 범위였고, 늘어나는 것은 스레드 하나와 매치마다 도는 우편함 인계뿐이다.
+    //
+    // 거절(exit 2)이 아니라 1 로 낮추는 쪽을 골랐다: --loops 2 는 틀린 설정이
+    // 아니라 무의미한 설정이고, 튜닝 값 하나 때문에 기동을 거부하면 이미 그
+    // 인자를 박아 둔 배포·벤치 스크립트가 통째로 멈춘다. 낮춘 구성은 같은
+    // 처리량에 스레드는 하나 적고 인계도 없으므로 엄격히 낫다. 다만 조용히
+    // 넘어가면 사용자는 손해를 본 줄도 모르므로 이유를 찍는다.
+    if (loops == 2) {
+        std::cout << "[relay] --loops 2 는 포워딩 일꾼이 1개로 --loops 1 과 같고"
+                     " (실효 병렬도 = loops-1) 스레드와 매치 인계 비용만 늘어"
+                     " 단일 루프로 실행합니다 — 실제로 나누려면 --loops 3 이상\n";
+        loops = 1;
     }
     if (meta_secret.empty()) {
         if (const char* env = std::getenv("TETRIS_RELAY_SECRET")) meta_secret = env;
@@ -1312,8 +1338,9 @@ int main(int argc, char** argv) {
         note = "meta=" + meta_url;
     }
 
-    // 앞단 루프 하나 + 포워딩 샤드 (loops-1)개. --loops 1 이면 단일 루프 모드로,
-    // 앞단이 포워딩까지 직접 한다 — 이 저장소 규모에서는 그쪽이 기본이다.
+    // 앞단 루프 하나 + 포워딩 샤드 (loops-1)개 — 포워딩의 실효 병렬도가 loops-1
+    // 인 이유가 이것이다. --loops 1 이면 단일 루프 모드로 앞단이 포워딩까지 직접
+    // 한다 — 이 저장소 규모에서는 그쪽이 기본이다.
     relay::RelayLoop front(meta.get(), note);
     if (!front.init(port)) {
         net::net_shutdown();

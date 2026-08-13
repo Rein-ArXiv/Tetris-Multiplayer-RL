@@ -72,6 +72,55 @@ def test_relay_pairs_two_clients() -> None:
         b.close()
 
 
+def test_relay_returns_session_slots_when_matches_end() -> None:
+    """끝난 매치의 per-IP 세션 슬롯은 돌아와야 한다.
+
+    슬롯은 accept 부터 연결이 죽을 때까지 유지되므로, 반납이 새면 한 주소는
+    kMaxSessionsPerIp(64) 번의 매치만에 스스로를 잠근다 — 서버를 재시작하기
+    전까지 그 주소에서는 아무도 접속할 수 없다.
+
+    reactor 에서 이 경로가 특히 미끄럽다: 포워딩이 시작되는 순간 연결이 샤드
+    스레드로 넘어가므로, 반납을 수행하는 close_conn 이 슬롯을 발급한 앞단 루프가
+    아닌 다른 스레드에서 돈다. 입장 표가 루프마다 있으면 그 반납은 엉뚱한 표로
+    가고 앞단이 센 수는 영영 줄지 않는다. (그래서 표는 프로세스 전역이다.)
+
+    상한보다 많은 연결을 여러 라운드로 나눠 붙였다 떼며 확인한다 — 누적이
+    상한을 넘어도 계속 붙을 수 있어야 한다.
+    """
+    # 라운드마다 2연결. 누적이 상한(64)을 확실히 넘도록 잡는다.
+    rounds = 40
+    try:
+        probe = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    except OSError:
+        pytest.skip(f"relay not running on {RELAY_HOST}:{RELAY_PORT}")
+    probe.close()
+
+    for index in range(rounds):
+        a = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=2.0)
+        b = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=2.0)
+        try:
+            a.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+            b.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+            try:
+                _recv_match_found(a)
+                _recv_match_found(b)
+            except (RuntimeError, ConnectionResetError) as exc:
+                # 릴레이가 끊었다 = 슬롯이 안 돌아왔다. 앞선 라운드가 모두
+                # 성공했으므로 상한 자체는 넉넉했다는 뜻이고, 누적 연결 수가
+                # 상한을 넘은 지점에서 끊긴 것은 반납이 샜다는 뜻이다.
+                pytest.fail(
+                    f"round {index} (누적 {2 * index} 연결) 에서 릴레이가 끊었다 — "
+                    f"끝난 매치의 per-IP 세션 슬롯이 반납되지 않는다: {exc}")
+            # 양쪽 READY(1) 로 포워딩까지 밀어 올린다. reactor 는 바로 이
+            # 지점에서 매치를 샤드로 넘기므로, 여기까지 가야 "다른 스레드가
+            # 반납한다" 는 경로를 밟는다.
+            a.sendall(build_frame(MsgType.READY, bytes([1])))
+            b.sendall(build_frame(MsgType.READY, bytes([1])))
+        finally:
+            a.close()
+            b.close()
+
+
 def test_relay_queue_decline_closes_both() -> None:
     """한쪽이 수락 로비에서 READY(0) 을 보내면 양 소켓이 모두 닫혀야 한다."""
     try:

@@ -175,10 +175,25 @@ def token_payload(token: str) -> bytes:
     return bytes([len(raw)]) + raw
 
 
-def connect(port: int) -> socket.socket:
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+def connect(port: int, source_ip: str) -> socket.socket:
+    """source_ip 에서 나가는 연결을 만든다.
+
+    릴레이는 peer IP 당 동시 핸드셰이크를 16개로 묶는다. 부하를 전부 127.0.0.1
+    에서 내면 그 한 버킷에 다 몰린다 — 127.0.0.0/8 은 전부 loopback 이므로
+    출발지를 흩어 각 버킷을 여유 있게 유지한다. 서버의 admission 정책을
+    측정 편의로 건드리지 않으려는 것이지, 그 정책을 우회하려는 게 아니다.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind((source_ip, 0))
+    sock.settimeout(5.0)
+    sock.connect(("127.0.0.1", port))
+    sock.settimeout(None)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return sock
+
+
+def source_ips(count: int) -> list[str]:
+    return [f"127.0.{(i // 250) + 1}.{(i % 250) + 1}" for i in range(max(count, 1))]
 
 
 def handshake_pairs(port: int, tokens: list[str], matches: int,
@@ -199,13 +214,15 @@ def handshake_pairs(port: int, tokens: list[str], matches: int,
     ready_frame = build_frame(MsgType.READY, b"\x01")
     step = 1.0 / pace_per_second if pace_per_second > 0 else 0.0
     next_at = time.monotonic()
+    # 연결당 하나씩 다른 출발지를 준다 — per-IP 버킷(16)에 절대 닿지 않게.
+    ips = source_ips(matches * 2)
     for index in range(matches):
         delay = next_at - time.monotonic()
         if delay > 0:
             time.sleep(delay)
         next_at += step
-        sock_a = connect(port)
-        sock_b = connect(port)
+        sock_a = connect(port, ips[2 * index])
+        sock_b = connect(port, ips[2 * index + 1])
         reader_a, reader_b = Reader(sock_a), Reader(sock_b)
         sock_a.sendall(build_frame(MsgType.QUEUE_JOIN, token_payload(tokens[2 * index])))
         sock_b.sendall(build_frame(MsgType.QUEUE_JOIN, token_payload(tokens[2 * index + 1])))
@@ -451,6 +468,7 @@ def load_worker(pipe, socks, cfg) -> None:
 def run_once(args) -> dict:
     workdir = Path(tempfile.mkdtemp(prefix="shardbench-"))
     relay_log = workdir / "relay.log"
+    meta_log = workdir / "meta.log"
     meta_proc = None
     relay_proc = None
     pairs: list[tuple[socket.socket, socket.socket]] = []
@@ -485,11 +503,12 @@ def run_once(args) -> dict:
         tokens = [""] * players
         if args.meta_bin:
             meta_port = free_port()
-            meta_proc = subprocess.Popen(
-                [str(args.meta_bin), "--db", str(workdir / "bench.db"),
-                 "--http", f"127.0.0.1:{meta_port}",
-                 "--relay-secret", args.meta_secret],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(meta_log, "wb") as log:
+                meta_proc = subprocess.Popen(
+                    [str(args.meta_bin), "--db", str(workdir / "bench.db"),
+                     "--http", f"127.0.0.1:{meta_port}",
+                     "--relay-secret", args.meta_secret],
+                    stdout=log, stderr=log)
             if not wait_listen(meta_port):
                 raise RuntimeError("tetris_meta did not start listening")
             token_start = time.monotonic()
@@ -604,7 +623,31 @@ def run_once(args) -> dict:
                 "생성기가 자기 코어를 포화시켰다 — 이 수치는 릴레이 용량이 "
                 "아니라 생성기 한계일 수 있다")
         return result
+    except BaseException:
+        # 여기서 죽으면 원인은 거의 항상 서버 쪽 로그에 한 줄로 적혀 있다
+        # (per-IP 상한, meta verify 실패, 중복 세션 …). 로그를 안 보여 주면
+        # 원인 하나 확인하는 데 CI 왕복을 통째로 태우게 된다.
+        print("--- 실패: 서버 로그 꼬리 ---", file=sys.stderr)
+        for name, path in (("relay", relay_log), ("meta", meta_log)):
+            if not path.exists():
+                continue
+            tail = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            print(f"[{name}] 마지막 {min(len(tail), 30)}줄:", file=sys.stderr)
+            for line in tail[-30:]:
+                print(f"  {line}", file=sys.stderr)
+        raise
     finally:
+        if args.json:
+            # 아티팩트에 로그를 함께 남긴다 — 나중에 수치가 이상해 보일 때
+            # 릴레이가 그 순간 뭐라고 말했는지 확인할 방법이 이것뿐이다.
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            for name, path in (("relay", relay_log), ("meta", meta_log)):
+                if path.exists():
+                    target = args.json.parent / f"{args.json.stem}.{name}.log"
+                    try:
+                        target.write_bytes(path.read_bytes())
+                    except OSError:
+                        pass
         for sock_a, sock_b in pairs:
             for sock in (sock_a, sock_b):
                 try:

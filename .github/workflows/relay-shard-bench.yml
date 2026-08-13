@@ -97,14 +97,17 @@ jobs:
         # push 트리거로 들어오면 inputs 가 비어 있다 — 같은 값을 여기서도 받친다.
         env:
           REPEATS: ${{ inputs.repeats || '1' }}
-          MATCHES: ${{ inputs.matches || '16' }}
-          DURATION: ${{ inputs.duration || '6' }}
+          MATCHES: ${{ inputs.matches || '64' }}
+          DURATION: ${{ inputs.duration || '10' }}
           KIB: ${{ inputs.kib_per_conn || '40' }}
           SHARDED: ${{ inputs.loops_sharded || '4' }}
           WORKERS: ${{ inputs.workers || '2' }}
         run: |
-          set -eu
+          set -u
           mkdir -p bench-out
+          # 한 구성이 죽어도 나머지는 계속 돈다. 4번째 구성에서 넘어졌다고
+          # 앞의 세 구성이 이미 벌어 둔 수치까지 버릴 이유가 없다.
+          failed=0
           for rep in $(seq 1 "$REPEATS"); do
             for mode in unranked ranked; do
               if [ "$mode" = "ranked" ]; then
@@ -114,7 +117,7 @@ jobs:
               fi
               for loops in 1 "$SHARDED"; do
                 echo "::group::rep=$rep mode=$mode loops=$loops"
-                uv run python python/tools/relay_shard_bench.py \
+                if ! uv run python python/tools/relay_shard_bench.py \
                   --relay-bin build/tetris_relay_reactor \
                   $META \
                   --loops "$loops" \
@@ -123,11 +126,15 @@ jobs:
                   --duration "$DURATION" \
                   --kib-per-conn "$KIB" \
                   --label "$rep" \
-                  --json "bench-out/${mode}-loops${loops}-rep${rep}.json"
+                  --json "bench-out/${mode}-loops${loops}-rep${rep}.json"; then
+                  echo "::error::rep=$rep mode=$mode loops=$loops 측정 실패"
+                  failed=1
+                fi
                 echo "::endgroup::"
               done
             done
           done
+          exit "$failed"
 
       - name: Summary
         if: always()

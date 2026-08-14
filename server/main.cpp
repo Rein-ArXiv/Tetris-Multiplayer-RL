@@ -44,7 +44,10 @@ void signalHandler(int /*sig*/) {
 void printUsage() {
     std::cout <<
         "Usage: tetris_relay [--port N] [--meta URL] [--meta-secret SECRET]\n"
-        "                    [--max-sessions-per-ip N]\n"
+        "                    [--max-sessions-per-ip N] [--log-level L]\n"
+        "  --log-level L    error|warn|info|debug (default info). 운영에서는 warn 이\n"
+        "                   접속·매치 줄까지 지운다. TETRIS_RELAY_LOG_LEVEL 로도\n"
+        "                   정할 수 있고 이 인자가 이긴다.\n"
         "  --port N         TCP listen port (default 7777)\n"
         "  --meta URL       tetris_meta base URL (e.g. https://api.example.com)\n"
         "                   If omitted, relay runs unranked (no token verify,\n"
@@ -97,9 +100,28 @@ int main(int argc, char** argv) {
         metaSecret = env;
     }
 
+    // 환경변수 먼저, 인자 나중 — 루프 릴레이와 같은 규칙이다. 두 바이너리가 로그
+    // 설정을 다르게 받으면 운영자가 바이너리마다 다른 것을 외워야 한다.
+    // 잘못된 값은 알린 뒤 기본값으로 간다. 로그 설정 하나로 서버가 안 뜨는 쪽이
+    // 더 나쁜 실패다.
+    if (const char* env = std::getenv("TETRIS_RELAY_LOG_LEVEL")) {
+        relay::LogLevel lv{};
+        if (relay::parse_log_level(env, lv)) relay::set_log_level(lv);
+        else RLOG_WARN("[relay] TETRIS_RELAY_LOG_LEVEL 값을 알 수 없어 무시합니다: "
+                       << env);
+    }
+
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--port" && i + 1 < argc) {
+        if (a == "--log-level" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            relay::LogLevel lv{};
+            if (!relay::parse_log_level(v, lv)) {
+                RLOG_ERROR("[relay] --log-level 은 error|warn|info|debug 여야 합니다: " << v);
+                return 2;
+            }
+            relay::set_log_level(lv);
+        } else if (a == "--port" && i + 1 < argc) {
             const std::string portArg = argv[++i];
             if (!parsePort(portArg, port)) {
                 RLOG_ERROR("Invalid --port value: " << portArg

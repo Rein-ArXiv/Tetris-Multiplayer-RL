@@ -2875,20 +2875,20 @@ relay 는 `--meta` 가 주어진 경우에만 ranked 로 동작한다. 그리고
     std::unique_ptr<meta::client::MetaClient> metaClient;
     if (!metaUrl.empty()) {
         if (metaSecret.empty()) {
-            std::cerr << "[relay] refusing to start: --meta set but no relay secret. "
-                      << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
-                      << "POST /v1/matches without it).\n";
+            RLOG_ERROR("[relay] refusing to start: --meta set but no relay secret. "
+                       << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
+                       << "POST /v1/matches without it).");
             return 2;
         }
         metaClient = std::make_unique<meta::client::MetaClient>(metaUrl, metaSecret);
         if (!metaClient->valid()) {
-            std::cerr << "[relay] invalid --meta URL: " << metaUrl << "\n";
+            RLOG_ERROR("[relay] invalid --meta URL: " << metaUrl);
             return 2;
         } else {
-            std::cout << "[relay] meta enabled: " << metaUrl << "\n";
+            RLOG_INFO("[relay] meta enabled: " << metaUrl);
         }
     } else {
-        std::cout << "[relay] meta=none (unranked mode)\n";
+        RLOG_INFO("[relay] meta=none (unranked mode)");
     }
 ```
 
@@ -2917,13 +2917,13 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
     AuthOutcome o;
     if (!meta) {
         // unranked: meta 미연동 — 토큰이 있더라도 무시.
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " unranked (no meta)\n";
+        RLOG_DEBUG("[conn " << conn_id << "] " << what
+                   << " unranked (no meta)");
         return o;
     }
     if (token.empty()) {
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " missing token -> reject\n";
+        RLOG_INFO("[conn " << conn_id << "] " << what
+                  << " missing token -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
     meta::client::MetaClient::VerifyOutcome verify_outcome{};
@@ -2933,14 +2933,14 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
         if (verify_outcome == meta::client::MetaClient::VerifyOutcome::NetworkError) {
             auth = cached_auth(token);
             if (auth) {
-                std::cerr << "[conn " << conn_id << "] " << what
-                          << " meta offline; accepted cached auth\n";
+                RLOG_WARN("[conn " << conn_id << "] " << what
+                          << " meta offline; accepted cached auth");
             }
         }
     }
     if (!auth) {
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " meta verify failed -> reject\n";
+        RLOG_INFO("[conn " << conn_id << "] " << what
+                  << " meta verify failed -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
     if (verify_outcome == meta::client::MetaClient::VerifyOutcome::Ok) {
@@ -2953,14 +2953,15 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
     o.selected_icon_id = auth->selected_icon_id.empty() ? "default" : auth->selected_icon_id;
     o.session_lease = PlayerSessionLease::acquire(o.player_id);
     if (!o.session_lease) {
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " duplicate active player_id=" << o.player_id << " -> reject\n";
+        RLOG_INFO("[conn " << conn_id << "] " << what
+                  << " duplicate active session -> reject player_id="
+                  << o.player_id << " match_uuid=-");
         return std::nullopt;
     }
-    std::cerr << "[conn " << conn_id << "] " << what
-              << " authed player_id=" << auth->player_id
-              << " elo=" << auth->elo
-              << " icon=" << o.selected_icon_id << "\n";
+    RLOG_DEBUG("[conn " << conn_id << "] " << what
+               << " authed player_id=" << auth->player_id
+               << " elo=" << auth->elo
+               << " icon=" << o.selected_icon_id);
     return o;
 }
 ```
@@ -3058,11 +3059,12 @@ void finalizeRanked(Channel& ch)
         winner = (a.won == 1) ? ch.playerA_id : ch.playerB_id;
     }
     if (!cross_ok) {
-        std::cerr << "[relay] match=" << ch.match_id
+        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
                   << " cross-check FAIL (exclusive_win=" << exclusive_win
                   << " scores=" << scores_match
                   << " lines=" << lines_match
-                  << ") -> winner=null\n";
+                  << ") -> winner=null");
     }
 
     // cross_ok=false 여도 감사 목적으로 자가보고 값을 그대로 기록한다.
@@ -3084,17 +3086,17 @@ void finalizeRanked(Channel& ch)
         if (res) {
             eloABefore = res->a.elo_before; eloAAfter = res->a.elo_after; deltaA = res->a.delta;
             eloBBefore = res->b.elo_before; eloBAfter = res->b.elo_after; deltaB = res->b.delta;
-            std::cerr << "[relay] match=" << ch.match_id
+            RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
                       << " saved meta match=" << res->match_id
                       << " a=" << (deltaA >= 0 ? "+" : "") << deltaA
-                      << " b=" << (deltaB >= 0 ? "+" : "") << deltaB << "\n";
+                      << " b=" << (deltaB >= 0 ? "+" : "") << deltaB);
         } else {
-            std::cerr << "[relay] match=" << ch.match_id
-                      << " meta POST failed — MATCH_RESULT delta=0\n";
+            RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                      << " meta POST failed — MATCH_RESULT delta=0");
         }
     } else {
-        std::cerr << "[relay] match=" << ch.match_id
-                  << " no meta — MATCH_RESULT delta=0\n";
+        RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " no meta — MATCH_RESULT delta=0");
     }
 
     // MATCH_RESULT 송신 — 성공 실패 관계없이 양 클라에 한 번씩.

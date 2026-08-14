@@ -89,8 +89,9 @@ lockstep 은 평균으로 진행하지 않는다. **가장 늦게 도착한 입�
             if (raw.empty()) {
                 if (std::chrono::steady_clock::now() - lastActivity >= kIdleTimeout) {
                     disconnectSide = a_to_b ? 1 : 2;
-                    std::cerr << "[relay] match=" << ch->match_id << " " << dir
-                              << " idle timeout\n";
+                    RLOG_INFO("[relay] match=" << ch->match_id
+                              << " uuid=" << ch->match_uuid << " " << dir
+                              << " close: idle timeout");
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -573,15 +574,23 @@ epoll 은 준비성 모델의 원산지라 구현이 가장 곧다. 커널이 �
 ```cpp
     bool ctl(int op, int fd, unsigned interest, void* token) {
         epoll_event ev{};
-        ev.events = EPOLLRDHUP;
-        if (interest & kRead)  ev.events |= EPOLLIN;
+        ev.events = 0;
+        if (interest & kRead)  ev.events |= EPOLLIN | EPOLLRDHUP;
         if (interest & kWrite) ev.events |= EPOLLOUT;
+        // EPOLLRDHUP 는 읽기 관심과 함께일 때만 건다. 무조건 걸면 interest 가 0 인
+        // 소켓 — 즉 호출자가 백프레셔로 읽기를 멈춰 둔 소켓 — 도 상대가 half-close
+        // 하는 순간부터 레벨 트리거로 계속 보고된다. 멈춰 세운 의미가 사라지고
+        // 루프가 그 fd 로 스핀한다. 진짜 종료는 읽기를 재개할 때 EOF 로 알게 된다.
         ev.data.ptr = token;
         return ::epoll_ctl(epfd_, op, fd, &ev) == 0;
     }
 ```
 
-`EPOLLRDHUP` 는 관심과 무관하게 항상 켠다. 이것은 "피어가 쓰기 방향을 닫았다"(half-close, 즉 상대의 `shutdown(SHUT_WR)` 또는 FIN)를 알려주는 비트다. 왜 무조건 켜는가 — 릴레이에서 상대의 이탈은 **가장 시간에 민감한 이벤트**이기 때문이다. 상대가 나갔다는 사실을 늦게 알면 남은 쪽은 멈춘 화면을 보며 기다리고, 기권 판정도 그만큼 늦는다.
+`EPOLLRDHUP` 는 "피어가 쓰기 방향을 닫았다"(half-close, 즉 상대의 `shutdown(SHUT_WR)` 또는 FIN)를 알려주는 비트다. 릴레이에서 상대의 이탈은 **가장 시간에 민감한 이벤트**라 — 늦게 알면 남은 쪽이 멈춘 화면을 보며 기다리고 기권 판정도 그만큼 늦는다 — 처음에는 관심과 무관하게 항상 켰다.
+
+그 "항상" 이 나중에 버그가 됐다. 백프레셔가 들어오면서 **관심이 0 인 소켓**이 생겼기 때문이다. 읽기를 일부러 멈춰 둔 소켓인데, `EPOLLRDHUP` 만 남아 있으니 상대가 half-close 하는 순간부터 레벨 트리거가 그 fd 를 끝없이 보고한다. 멈춰 세운 의미가 사라지고 루프가 그 fd 로 스핀한다. 그래서 지금은 읽기 관심과 함께일 때만 건다 — 진짜 종료는 읽기를 재개할 때 EOF 로 알게 되므로 잃는 것이 없다.
+
+일반화하면 이렇다. **"항상 켜 두면 손해 볼 것 없다" 는 판단은 관심을 끄는 기능이 없을 때만 참이다.** 나중에 "아무것도 구독하지 않음" 이라는 상태가 생기면, 무조건 켠 비트가 그 상태를 무효로 만든다. 구독 모델에 새 상태를 추가할 때는 기존의 무조건 구독을 전부 다시 봐야 한다.
 
 `ev.data.ptr` 에 token 을 그대로 넣는 것이 3.4 에서 말한 "커널이 들고 있어 주는 한 워드" 다. `epoll_event` 의 `data` 는 union 이라 `fd` 대신 포인터를 저장할 수 있고, 이벤트가 돌아올 때 그대로 실려 온다. 조회 자료구조가 필요 없다.
 
@@ -1364,8 +1373,21 @@ sequenceDiagram
         // 찾고, 없으면 조용히 버린다.
         const uint32_t cid = c->id;
         meta::client::MetaClient* meta = meta_;
+        // 취소 깃발은 Conn 보다 오래 산다 — 워커가 작업을 집는 시점에 Conn 은
+        // 이미 없을 수 있고, 그때 읽어야 하는 것이 바로 이 값이다.
+        c->auth_cancel = std::make_shared<std::atomic<bool>>(false);
+        auto cancel = c->auth_cancel;
+        pending_auth_.insert(cid);
         const bool queued = offload_->submit(
-            [this, meta, token, cid]() -> Offload::Cont {
+            [this, meta, token, cid, cancel]() -> Offload::Cont {
+                // 큐에서 기다리는 동안 그 연결이 죽었으면 왕복 자체를 하지
+                // 않는다. 이 검사가 없으면 이미 아무도 기다리지 않는 응답을
+                // 위해 워커 하나가 왕복 한 번을 통째로 쓰고, 그 시간은 뒤에
+                // 선 진짜 사용자가 낸다.
+                if (cancel->load(std::memory_order_acquire) ||
+                    !g_running.load(std::memory_order_relaxed)) {
+                    return {};   // continuation 없음 — 루프는 이 작업을 보지도 않는다
+                }
                 meta::client::MetaClient::VerifyOutcome outcome{};
                 auto auth = meta->verify_token(token, 3, &outcome);
                 return [this, cid, auth, token]() { resume_auth(cid, auth, token); };
@@ -1391,6 +1413,43 @@ sequenceDiagram
 일반화하면 이렇다. **비동기 경계를 넘어가는 것은 참조가 아니라 "다시 찾을 수 있는 이름"이어야 하고, 그 재조회는 반드시 실패할 수 있어야 한다.** 왕복 시간이 대상의 수명보다 짧다는 보장이 없는 모든 곳에 적용된다.
 
 수명을 늘리는 쪽(공유 포인터로 객체를 살려 두기)도 가능한 답이지만 문제를 절반만 푼다. 메모리 안전은 얻어도, 이미 끊긴 연결의 상태 객체가 인위적으로 살아남아 그 위에서 로직이 계속 도는 것은 여전히 틀린 동작이다. 소켓은 이미 닫혔는데 그 객체에 대고 프레임을 만들어 봐야 갈 곳이 없다. id 재조회는 "이 연결이 아직 유효한가"라는 질문을 코드에 명시적으로 남긴다는 점에서 의도를 더 정확히 표현한다. `find_by_id` 가 선형 탐색인 것도 이 맥락에서 정당하다 — 인증 완료는 연결 수명당 한 번이고, 매 프레임 도는 경로가 아니다.
+
+#### 상한이 걸린 곳과 일이 쌓이는 곳이 어긋나면 안 된다
+
+id 재조회는 **use-after-free** 를 막는다. 그것으로 끝난 줄 알았는데 아니었다. 위 발췌의 취소 깃발과 `pending_auth_` 는 그 뒤에 붙은 것이고, 붙은 이유가 이 장에서 가장 값진 진단 하나다.
+
+문제를 이렇게 재현할 수 있다. 붙어서 `QUEUE_JOIN` 한 프레임만 던지고 곧바로 끊는다. 이것을 반복한다. 인증도, 프로토콜 준수도, 데이터도 필요 없다.
+
+기존 코드에서 무슨 일이 일어났는가. `begin_auth` 가 메타 왕복을 워커 풀에 올리고, `close_conn` 이 per-IP 슬롯은 반납했지만 **큐에 올린 작업은 그대로 남겼다.** 그래서 이 반복은 **어떤 상한에도 닿지 않는다** — 연결은 즉시 닫히니 동시 연결 수도, per-IP 세션 수도 늘지 않는다. 그런데 워커 큐만 계속 길어진다. 메타가 250 ms 로 답하는 환경에서 이 유령 작업 백여 개면, 아무 상관 없는 사람의 `ROOM_CREATE` 응답이 0.25초에서 7초 가까이로 밀렸다. 같은 큐가 종료도 지연시켰다 — 정상 종료는 이 큐를 비우고 나가기 때문이다.
+
+진단을 한 문장으로 줄이면 이렇다. **상한이 걸린 곳(연결)과 일이 쌓이는 곳(오프로드 큐)이 어긋나 있었다.** 상한은 연결 수를 셌고, 자원을 먹는 것은 연결이 남긴 작업이었다. 둘의 수명이 갈리는 순간 상한은 아무것도 지키지 못한다.
+
+그리고 이 어긋남은 **스레드 모델에서는 존재할 수 없었다.** 거기서는 인증이 그 연결 자신의 워커 스레드에서 돌았다. 연결이 죽으면 스레드가 죽고, 스레드가 죽으면 작업도 죽는다. 작업과 슬롯의 수명이 같다는 성질을 코드가 어디에도 적어 두지 않은 채 **공짜로** 갖고 있었던 것이다. 일을 별도 풀로 옮기는 순간 그 성질이 조용히 사라졌고, 사라졌다는 사실을 알려주는 컴파일 오류 같은 것은 없었다.
+
+고침은 두 겹이다. 첫째, 작업이 취소 깃발을 들고 다니고 `close_conn` 이 그것을 세운다. 워커는 왕복을 시작하기 전에 깃발을 읽고, 서 있으면 버린다. 이것이 스레드 모델의 성질을 손으로 복원한 부분이다.
+
+둘째, **취소만으로는 절반이다.** 취소는 "죽은 연결" 의 일을 지울 뿐이고, 살아 있는 연결이 한꺼번에 몰려오면 줄은 여전히 길어진다. 그래서 큐 자체에 깊이 상한을 둔다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp` (`begin_auth` 의 큐 깊이 검사)**
+
+```cpp
+        if (pending_auth_.size() >= g_max_pending_auth) {
+            g_reject_auth_backlog.fetch_add(1, std::memory_order_relaxed);
+            RLOG_WARN("[relay] 거절: 인증 대기 상한 (" << pending_auth_.size()
+                      << "/" << g_max_pending_auth << ")");
+            reject_conn(c, net::RejectReason::AuthBacklog,
+                        "server is busy authenticating, try again shortly",
+                        "인증 대기 상한");
+            return;
+        }
+```
+
+기본값 64 의 근거는 **대기 시간**이다. 왕복 250 ms, 워커 넷을 가정하면 64번째 사람은 16번의 왕복, 약 4초를 기다린다 — 클라이언트의 접속 타임아웃과 같은 자릿수라, 여기까지 받아 준 사람은 실제로 응답을 볼 가망이 있다. 그 뒤에 오는 사람을 조용히 줄에 세우면 기다린 끝에 자기 클라이언트가 먼저 포기하므로, **세우는 대신 지금 사유를 밝히고 보낸다.** 거절된 쪽은 다시 시도하면 되고, 줄은 계속 빠진다.
+
+반대편 논거도 분명하다. 재시작 직후처럼 정상 사용자가 한꺼번에 몰리면 상한을 넘긴 사람들이 거절을 받는다. 그래도 조용히 몇십 초를 기다리게 하는 것보다는 낫다 — 클라이언트가 "잠시 후 다시" 를 띄울 수 있기 때문이다. 메타가 더 빠른 환경이라면 `--max-pending-auth` 로 올리면 된다. 워커 수를 대신 늘리지 않은 이유는, 그쪽이 성능이 제한된 보조 기기에 동시 요청을 더 밀어 넣어 **왕복 자체를 느리게** 만들기 때문이다. 병목이 우리 쪽 병렬도가 아니라 상대편 처리량일 때는 동시성을 올리는 것이 해결이 아니라 악화다.
+
+> **일반 규칙: 상한은 자원이 실제로 쌓이는 지점에 걸어라.**
+> 요청 수를 세면서 정작 자원은 요청이 남긴 작업이 먹는 구조, 세션 수를 세면서 자원은 세션이 연 커서가 먹는 구조 — 전부 같은 모양이다. 그리고 큐를 도입하면 "그 큐의 깊이" 라는 새 자원이 생기므로, 새 큐에는 새 상한이 필요하다. 상한 없는 큐는 상한 없는 버퍼와 정확히 같은 것이고, 단지 단위가 바이트가 아니라 대기 시간일 뿐이다.
 
 #### 실패와 종료 — 조용히 사라지는 결과 막기
 
@@ -1437,7 +1496,7 @@ sequenceDiagram
 
 루프의 종료 경로는 `shutdown()` 으로 진행 중 작업을 끝까지 기다린 뒤 마지막 `drain()` 을 돌리고, **그 다음에** 연결과 채널을 파기한다. 순서를 뒤집으면 남아 있던 continuation 이 이미 파괴된 상태를 만진다. 대기가 무한정 길어지지 않는다는 근거도 있다 — 새 연결을 받지 않는 상태이므로 큐 깊이는 그 순간 종료된 매치 수로 한정되고 드레인 중에 자라지 않는다. 진행 중인 HTTP 도 자체 타임아웃이 있다. **"끝날 때까지 기다린다"는 대기의 상한을 말할 수 있을 때만 안전한 설계다.**
 
-워커 수에 상한을 두는 것도 같은 계열의 판단이다. 앞단 루프는 넷, 포워딩 전담 샤드는 둘을 쓴다. 상한은 동시 블로킹 왕복 수의 상한이자 메타에 가하는 부하의 상한이다. 요청마다 스레드를 만들면 메타가 느려지는 순간 스레드가 폭증하고, 릴레이가 메타를 더 밀어붙여 상황을 악화시킨다. 상한이 있으면 초과분은 큐에서 기다리고, 그 대기는 "인증이 조금 느려짐"으로 나타난다 — **열화가 국소적이고 점진적**이다. 전원 정지와 비교하면 이것이 이 구조가 사는 이유 전체다.
+워커 수에 상한을 두는 것도 같은 계열의 판단이다. 앞단 루프는 넷, 포워딩 전담 샤드는 둘을 쓴다. 상한은 동시 블로킹 왕복 수의 상한이자 메타에 가하는 부하의 상한이다. 요청마다 스레드를 만들면 메타가 느려지는 순간 스레드가 폭증하고, 릴레이가 메타를 더 밀어붙여 상황을 악화시킨다. 상한이 있으면 초과분은 큐에서 기다리고, 그 대기는 "인증이 조금 느려짐"으로 나타난다 — **열화가 국소적이고 점진적**이다. 전원 정지와 비교하면 이것이 이 구조가 사는 이유 전체다. 다만 그 대기 자체에도 끝이 있어야 한다는 것이 위에서 본 큐 깊이 상한이다.
 
 #### 계약을 고정하는 검사
 
@@ -1581,7 +1640,18 @@ struct Conn {
     bool     want_write = false;
     bool     read_paused = false;   // 상대의 tx 가 차서 읽기를 멈춘 상태
 
-    std::string admission_key;
+    // per-IP 입장 슬롯. handshake 는 인증이 끝나는 순간(after_auth) 놓아주고,
+    // session 은 이 Conn 이 죽을 때까지 붙들고 있는다.
+    std::shared_ptr<IpAdmission> handshake_slot;
+    std::shared_ptr<IpAdmission> session_slot;
+
+    // 오프로드에 던져 둔 인증 작업의 취소 깃발. Conn 이 사라진 뒤에도 워커가
+    // 읽어야 하므로 Conn 이 아니라 shared_ptr 안에 산다. 세우는 쪽은 루프
+    // 스레드(close_conn), 읽는 쪽은 워커 스레드라서 atomic 이다.
+    std::shared_ptr<std::atomic<bool>> auth_cancel;
+
+    // 서버 전용 프레임 위조를 이미 한 번 로그로 남겼는가 (연결당 한 줄).
+    bool warned_server_only = false;
 
     // 인증 결과
     int64_t     player_id = 0;
@@ -1606,6 +1676,10 @@ struct Conn {
     TimePoint last_activity{};
     TimePoint byte_window_start{};
     size_t    byte_window = 0;
+    // 백프레셔에서 풀려난 직후, 적체를 빼내는 동안 레이트 상한을 면제하는 시각.
+    // 멈춰 있는 동안 상대의 커널 버퍼에 쌓인 것은 우리가 안 읽어서 생긴 적체이지
+    // 상대가 규정을 넘겨 보낸 게 아니다. 커널 버퍼는 유한하므로 면제도 유한하다.
+    TimePoint rate_grace_until{};
 };
 ```
 
@@ -1613,7 +1687,7 @@ struct Conn {
 
 - **전이가 잦고 얕다.** 한 연결의 수명 동안 단계 전이는 손에 꼽고, 전이 때마다 객체를 새로 만들어 옮겨 담으면 `rx` 버퍼와 소켓 핸들을 계속 이사시켜야 한다. 특히 `rx` 는 절대 버리면 안 되는 값이다 — 첫 명령과 같은 recv 로 딸려 온 후속 프레임이 거기 들어 있고, 버리면 `ROOM_CREATE` 뒤에 붙어 온 `READY` 가 통째로 사라진다.
 - **주소가 곧 토큰이다.** reactor 에 등록한 `void* token` 과 만기 힙의 키가 전부 `Conn*` 이다. 단계마다 객체를 갈아 끼우면 등록을 매번 다시 해야 하고, 실수로 낡은 포인터가 힙에 남으면 엉뚱한 연결이 만기를 맞는다.
-- **필드 몇 개의 낭비는 실제로 문제가 아니다.** 연결 상한이 512인 규모에서 쓰이지 않는 문자열 몇 개는 측정되지 않는 비용이다. 파생 클래스로 얻는 메모리 절약보다 "한 자리만 보면 이 연결의 전부를 알 수 있다" 는 디버깅 편의가 크다.
+- **필드 몇 개의 낭비는 실제로 문제가 아니다.** 연결 상한이 수천 규모인 서버에서 쓰이지 않는 문자열 몇 개는 측정되지 않는 비용이다. 파생 클래스로 얻는 메모리 절약보다 "한 자리만 보면 이 연결의 전부를 알 수 있다" 는 디버깅 편의가 크다.
 
 일반화하면, **상태 객체를 쪼갤지 말지는 상태의 개수가 아니라 전이 비용과 식별자 안정성으로 판단한다.** 전이가 드물고 각 단계가 무거운 고유 자원을 가진다면 쪼개는 편이 맞고, 전이 사이에 반드시 살아남아야 하는 버퍼가 있다면 합치는 편이 맞다.
 
@@ -1682,12 +1756,26 @@ struct Channel {
     // 들고 있을 수 있다. 표시만 하고 배치 끝(sweep)에서 해제한다.
     void close_conn(Conn* c, const char* why) {
         if (!c || c->stage == Stage::Dead) return;
-        std::cerr << "[conn " << c->id << "] close: " << why << "\n";
+        // 이 연결로 흘려보내느라 우리가 멈춰 세운 쪽이 있으면 먼저 풀어 준다.
+        // room/ch 를 끊기 전에 해야 상대를 찾을 수 있다.
+        pause_peer_read(c, false);
+        // ident_of 는 c->ch 를 읽는다 — 아래에서 채널을 끊기 전에 찍어야 한다.
+        RLOG_INFO("[conn " << c->id << "] close: " << why << ident_of(c));
         c->stage = Stage::Dead;
+        // 보류 송신은 여기서 포기한다 — 소켓을 닫는 마당에 흘려보낼 곳이 없다.
+        // 전역 예산도 같이 돌려준다.
+        release_tx(c);
         reactor_->remove(c->fd);
         timers_.cancel(c);
         net::tcp_close(c->sock);
-        release_admission(c->admission_key);
+        // 인증 슬롯과 인증 작업은 반드시 함께 죽어야 한다.
+        if (c->auth_cancel) {
+            c->auth_cancel->store(true, std::memory_order_release);
+            c->auth_cancel.reset();
+        }
+        pending_auth_.erase(c->id);
+        c->handshake_slot.reset();
+        c->session_slot.reset();
         c->lease.reset();
 
         if (c->room) {
@@ -1709,16 +1797,26 @@ struct Channel {
             (c->is_a ? ch->a : ch->b) = nullptr;
             if (ch->disconnect_side == 0) ch->disconnect_side = c->is_a ? 1 : 2;
             on_channel_peer_lost(ch);
+            // 살아남은 쪽도 정리한다. 스레드 모델은 방향별 스레드가 함께 접히면서
+            // 두 소켓이 같이 닫혔는데, 루프 모델에는 그 동반 종료가 없어 남은 쪽이
+            // 아무 통지도 못 받은 채 타임아웃까지 기다렸다.
+            if (ch->finalize_inflight) ch->close_survivor_pending = true;
+            else close_channel_survivor(ch, "상대 이탈");
         }
         // 큐 대기 중이었다면 큐에서도 뺀다.
         for (auto it = queue_.begin(); it != queue_.end(); ++it) {
             if (*it == c) { queue_.erase(it); break; }
         }
         dying_.push_back(c);
+        // 전역 동시 연결 수는 여기서 줄인다. 샤드로 인계된 연결도 결국 이 경로를
+        // 지나므로, 어느 루프가 닫든 정확히 한 번 줄어든다.
+        g_conn_count.fetch_sub(1, std::memory_order_relaxed);
     }
 ```
 
-`close_conn` 이 하는 일은 두 종류로 갈린다. **즉시 해야 하는 것** — reactor 관심 해제, 만기 취소, `shutdown` 으로 피어 깨우기, 입장 예산 반납, 세션 lease 반납, 그리고 자신을 가리키던 모든 참조(룸 슬롯, 채널 슬롯, 큐)를 끊는 것. 이걸 미루면 죽은 연결이 다음 이벤트를 받거나, 룸에 남은 상대가 유령을 상대로 READY 를 기다린다. **미뤄야 하는 것** — 객체의 메모리 해제. 그것만 `dying_` 에 적어 두고 배치 끝에 처리한다.
+`close_conn` 이 하는 일은 두 종류로 갈린다. **즉시 해야 하는 것** — reactor 관심 해제, 만기 취소, `shutdown` 으로 피어 깨우기, 두 종류의 per-IP 입장 슬롯 반납, 세션 lease 반납, 오프로드 큐에 던져 둔 인증 작업 취소, 전역 tx 예산과 전역 연결 수 반납, 상대를 잃은 쪽에 대한 통지와 종료, 그리고 자신을 가리키던 모든 참조(룸 슬롯, 채널 슬롯, 큐)를 끊는 것. 이걸 미루면 죽은 연결이 다음 이벤트를 받거나, 룸에 남은 상대가 유령을 상대로 READY 를 기다린다. **미뤄야 하는 것** — 객체의 메모리 해제. 그것만 `dying_` 에 적어 두고 배치 끝에 처리한다.
+
+이 함수가 이렇게 길어진 것 자체가 이 장의 교훈 하나를 압축한다. 스레드 모델에서는 이 정리의 절반이 **공짜였다.** 인증은 그 연결의 워커에서 돌았으니 워커가 죽으면 작업도 같이 죽었고, 매치는 방향별 스레드 한 쌍이라 한쪽이 접히면 두 소켓이 함께 닫혔다. 루프 모델에는 그 동반 종료가 없다 — 스레드가 곧 수명 경계 역할을 하던 것을, 이제는 손으로 적어 줘야 한다. 무엇을 손으로 적어야 하는지는 §12 의 사례들이 하나씩 보여준다.
 
 **현재 소스 발췌 — `server/reactor_relay.cpp`**
 
@@ -1729,7 +1827,12 @@ struct Channel {
         // 양쪽이 사라지고 finalize 도 끝난 채널을 정리한다.
         for (auto it = channels_.begin(); it != channels_.end();) {
             Channel* ch = it->second.get();
-            if (!ch->a && !ch->b && !ch->finalize_inflight) it = channels_.erase(it);
+            if (!ch->a && !ch->b && !ch->finalize_inflight) {
+                // 활성 매치 수는 여기서만 줄인다 — 샤드 인계(extract)는 소유만
+                // 옮길 뿐 매치가 끝난 것이 아니다.
+                g_match_count.fetch_sub(1, std::memory_order_relaxed);
+                it = channels_.erase(it);
+            }
             else ++it;
         }
     }
@@ -1827,8 +1930,11 @@ bool sendToA(Channel& ch, const std::vector<uint8_t>& frame)
 ```cpp
         ~ForwarderCompletion()
         {
-            std::cerr << "[relay] match=" << channel->match_id
-                      << " " << direction << " end\n";
+            RLOG_INFO("[relay] match=" << channel->match_id
+                      << " uuid=" << channel->match_uuid
+                      << " player_id=" << channel->playerA_id
+                      << " x " << channel->playerB_id
+                      << " " << direction << " end");
             if (*failureSide != 0 && !s_stopping.load()) {
                 int expected = 0;
                 channel->disconnect_side.compare_exchange_strong(expected, *failureSide);
@@ -1840,7 +1946,10 @@ bool sendToA(Channel& ch, const std::vector<uint8_t>& frame)
                 }
                 net::tcp_close(channel->A);
                 net::tcp_close(channel->B);
-                std::cerr << "[relay] match=" << channel->match_id << " closed\n";
+                RLOG_INFO("[relay] match=" << channel->match_id
+                          << " uuid=" << channel->match_uuid
+                          << " player_id=" << channel->playerA_id
+                          << " x " << channel->playerB_id << " closed");
             }
         }
 ```
@@ -1885,7 +1994,10 @@ bool sendToA(Channel& ch, const std::vector<uint8_t>& frame)
     void start_room_match(Room* r) {
         Conn* host = r->host;
         Conn* guest = r->guest;
-        rooms_.erase(r->code);          // 방은 역할을 다했다
+        // 키를 값으로 복사한 뒤 지운다. r->code 를 그대로 넘기면 지워질 원소 안의
+        // 문자열을 키로 쓰는 셈이라, 노드가 파괴되는 순간 참조가 죽는다.
+        const std::string code = r->code;
+        rooms_.erase(code);             // 방은 역할을 다했다
         host->room = nullptr;
         guest->room = nullptr;
 ```
@@ -1980,13 +2092,40 @@ bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out
             if (!net::tcp_send_some(dst->sock, data, len, sent)) return false;
         }
         if (sent < len) {
+            const size_t added = len - sent;
             dst->tx.insert(dst->tx.end(), data + sent, data + len);
+            const size_t total = g_tx_total.fetch_add(added,
+                                     std::memory_order_relaxed) + added;
+            // 최고 수위. 예산에 얼마나 근접했는지는 순간값만 봐서는 알 수 없다 —
+            // 상태 줄 사이에서 치솟았다 빠지면 어느 줄에도 안 남는다.
+            for (size_t peak = g_tx_peak.load(std::memory_order_relaxed);
+                 total > peak;) {
+                if (g_tx_peak.compare_exchange_weak(peak, total,
+                                                    std::memory_order_relaxed)) break;
+            }
             arm_write(dst, true);
+            if (dst->tx.size() > kSendHardCap) {
+                close_conn(dst, "송신 버퍼 하드 상한 초과");
+                return false;
+            }
+            if (total > g_tx_budget) {
+                // 프로세스 전체 예산 초과. 연결당 상한 안에 있어도 여기서 끊는다 —
+                // 지킬 대상이 이 연결이 아니라 프로세스이기 때문이다.
+                g_reject_tx_budget.fetch_add(1, std::memory_order_relaxed);
+                RLOG_WARN("[relay] 거절: tx 전역 예산 초과 (" << total << " > "
+                          << g_tx_budget << ")" << ident_of(dst));
+                reject_conn(dst, net::RejectReason::TxBudget,
+                            "server memory budget exhausted",
+                            "tx 전역 예산 초과");
+                return false;
+            }
             if (dst->tx.size() > kSendHighWater) pause_peer_read(dst, true);
         }
         return true;
     }
 ```
+
+읽는 순서가 곧 정책의 층위다. 쌓고 → 회계하고 → **연결당 하드 상한** → **프로세스 전역 예산** → 마지막으로 완만한 수단인 **일시정지**. 왜 세 층인지는 §9.3 과 §9.5 에서 하나씩 푼다. 우선 뼈대부터 본다.
 
 `if (dst->tx.empty())` 조건이 반드시 필요하다. 보류 버퍼에 이미 바이트가 남아 있는데 새 데이터를 소켓으로 직접 보내면 **순서가 뒤집힌다** — 나중 바이트가 먼저 나가고 앞선 바이트는 버퍼에 남는다. 프레임 스트림에서 이건 즉시 파싱 붕괴다. 규칙은 단순하다: 보류 버퍼가 비어 있지 않은 동안에는 소켓으로 가는 유일한 경로가 보류 버퍼여야 한다.
 
@@ -2018,7 +2157,10 @@ bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out
             close_conn(c, "send 실패");
             return;
         }
-        if (sent) c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
+        if (sent) {
+            c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
+            g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
+        }
         if (c->tx.empty()) {
             arm_write(c, false);
             pause_peer_read(c, false);   // 밀림이 풀렸으니 상대 읽기 재개
@@ -2040,26 +2182,86 @@ bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out
 // 보류 송신이 이만큼 쌓이면 그 소켓으로 흘려보내는 쪽의 읽기를 멈춘다(backpressure).
 // 스레드 모델은 tcp_send_all 이 최대 5초 잠들며 버텼지만, 루프는 잠들 수 없으므로
 // 상대가 안 읽으면 읽기를 멈춰 메모리를 지킨다.
-constexpr size_t kSendHighWater     = 256 * 1024;
+// 락스텝 프레임은 틱당 수십 바이트다 — 60Hz 로 방향당 1 KB/s 도 안 된다. 64 KiB 가
+// 밀렸다는 것은 이미 1분 넘게 못 흘려보냈다는 뜻이고, 그쯤이면 경기가 성립하지
+// 않는다. 예전 값(256 KiB / 1 MiB)은 게임 트래픽 기준으로 지나치게 컸다.
+constexpr size_t kSendHighWater     = 64 * 1024;
+// 그리고 하드 상한. 일시정지는 최선의 노력일 뿐 보장이 아니다 — 흘려보내는 쪽이
+// 아예 없거나(룸에 혼자 남아 서버가 직접 쓰는 경우) 상대가 영영 안 읽으면 tx 는
+// 계속 자란다. 상한 없는 버퍼는 상한이 아니므로 여기서 연결을 끊는다.
+constexpr size_t kSendHardCap       = 256 * 1024;
+// 백프레셔에서 풀린 뒤 적체를 빼내는 데 주는 면제 시간. 짧게 잡는다 — 커널 버퍼는
+// 유한해서 이 안에 다 들어오고, 그 뒤에는 다시 정상 요금이 매겨진다.
+constexpr auto   kRateGraceAfterResume = std::chrono::seconds(3);
+```
+
+**수치의 근거가 "넉넉하게" 여서는 안 된다.** 처음 고른 값은 고수위 256 KiB, 하드 상한 1 MiB 였는데, 그건 어떤 트래픽을 상정한 값이 아니라 그냥 큰 수였다. 실제 트래픽에서 역산하면 답이 나온다. 락스텝 프레임은 틱당 수십 바이트고 60Hz 면 방향당 1 KB/s 도 안 된다. 그러면 64 KiB 가 밀렸다는 것은 **1분 넘게 한 바이트도 못 흘려보냈다**는 뜻이고, 그 정도로 뒤처진 매치는 이미 경기가 아니다. 상한은 "이만큼이면 넉넉하다" 가 아니라 "이만큼이면 이미 고장이다" 로 정하는 편이 언제나 낫다 — 후자만이 검증 가능한 문장이기 때문이다.
+
+멈추는 쪽을 찾는 함수는 이렇다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp`**
+
+```cpp
+    // dst 로 흘려보내는 쪽. 포워딩 중이면 채널 상대, 룸 단계면 룸 상대다.
+    // 예전에는 채널만 봤는데, 룸 단계 Conn 은 채널이 없어 백프레셔가 통째로
+    // 무효였다 — 상대가 안 읽는 동안 CHAT 이 룸 대기 시간 내내 tx 에 쌓였다.
+    Conn* feeder_of(Conn* dst) {
+        if (Channel* ch = dst->ch) return (dst == ch->a) ? ch->b : ch->a;
+        if (Room* r = dst->room)   return dst->is_host ? r->guest : r->host;
+        return nullptr;
+    }
 ```
 
 **현재 소스 발췌 — `server/reactor_relay.cpp`**
 
 ```cpp
     void pause_peer_read(Conn* dst, bool pause) {
-        Channel* ch = dst->ch;
-        if (!ch) return;
-        Conn* src = (dst == ch->a) ? ch->b : ch->a;
+        Conn* src = feeder_of(dst);
         if (!src || src->stage == Stage::Dead) return;
         if (src->read_paused == pause) return;
         src->read_paused = pause;
         unsigned interest = (pause ? 0u : net::kRead) |
                             (src->want_write ? net::kWrite : 0u);
         reactor_->modify(src->fd, interest, src);
+        // 재개하는 순간 유휴 데드라인을 새로 건다. 멈춰 있는 동안에는 읽기 이벤트가
+        // 없어 last_activity 가 굳어 있었으므로, 그대로 두면 풀자마자 만기로 끊긴다.
+        if (!pause) {
+            src->last_activity = Clock::now();
+            // 바이트 창도 같이 연다. 멈춰 있는 동안 상대의 커널 송신 버퍼에는
+            // 백로그가 쌓이고, 재개하는 순간 그게 한꺼번에 들어온다 — 창을 안 열면
+            // 우리가 막아 놓고 그 대가를 상대에게 "레이트 초과" 로 청구하게 된다.
+            src->byte_window_start = src->last_activity;
+            src->byte_window = 0;
+            // 창을 여는 것만으론 부족하다. 적체는 한 번의 버스트로 들어오므로 새 창을
+            // 그 자리에서 다시 넘긴다. 빼내는 동안은 아예 면제한다.
+            src->rate_grace_until = src->last_activity + kRateGraceAfterResume;
+            if (src->stage == Stage::Forward) {
+                timers_.arm(src, src->last_activity + kIdleTimeout);
+            }
+        }
     }
 ```
 
 주목할 점은 **멈추는 대상이 밀린 소켓이 아니라 그 반대쪽**이라는 것이다. B 로 나가는 버퍼가 찼으면 멈춰야 하는 것은 A 의 **읽기**다. 이 방향 뒤집기가 backpressure 의 전부이고, 처음 구현할 때 가장 헷갈리는 지점이기도 하다.
+
+그리고 **멈춤을 도입하면 멈춤을 전제로 하던 다른 계산이 전부 틀어진다.** 이 함수의 절반이 재개 처리인 이유가 그것이다. 입을 막아 둔 연결은 읽기 이벤트를 못 받으니 유휴 시계가 얼어붙고, 그대로 두면 풀리자마자 "15초간 조용했다" 는 판정으로 끊긴다 — 우리가 막아 놓고 상대를 벌주는 셈이다. 바이트 레이트도 같다. 멈춰 있는 동안 상대의 커널 버퍼에 고인 것이 재개하는 순간 한 버스트로 들어오는데, 그 버스트는 상대가 규정을 넘겨 보낸 것이 아니라 **우리가 안 읽어서 생긴 적체**다. 새 창을 열어 주는 것만으로도 모자라 짧은 면제 시간을 두는 이유가 여기 있다. 일반화하면 이렇다: **흐름을 인위적으로 멈추는 기제를 넣을 때는, 시간을 재는 모든 값이 그 멈춤을 알고 있는지 확인해야 한다.** 모르는 값이 하나라도 남으면 그 값은 피해자를 가해자로 오인한다.
+
+세 번째 층은 `Stage::Forward` 의 만기 처리에 있다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp` (`on_timeout` 의 포워딩 분기)**
+
+```cpp
+            case Stage::Forward:
+                // 우리가 백프레셔로 입을 막아 둔 연결은 유휴가 아니다 — 읽기 이벤트가
+                // 안 나는 게 당연하다. 여기서 끊으면 "느리게 읽는 상대" 때문에 "정상
+                // 플레이어" 가 끊긴다. 멈춰 있을 수 있는 시간은 tx 하드 상한이 따로
+                // 묶으므로, 여기서는 데드라인만 다시 건다.
+                if (c->read_paused) { timers_.arm(c, Clock::now() + kIdleTimeout); break; }
+                close_conn(c, "idle 타임아웃");
+                break;
+```
+
+이것이 이 기제에서 가장 값비쌌던 실수다. 초기 구현은 멈춤을 유휴와 구별하지 않았고, 그래서 **가장 눈에 띄는 증상이 "잘못된 사람이 끊긴다"** 였다. A 가 규칙대로 보내고 B 가 안 읽으면, 서버는 A 의 입을 막은 뒤 15초 후 A 를 끊고 B 를 남겼다. 방어 기제가 방어 대상을 골라 처벌한 것이다. 상한과 만기를 함께 두는 시스템에서는 **"이 연결이 조용한 이유가 우리 때문인가" 를 항상 되물어야 한다.**
 
 ### 9.4 이것이 왜 일반 규칙인가
 
@@ -2067,8 +2269,8 @@ constexpr size_t kSendHighWater     = 256 * 1024;
 
 - **무한 버퍼링.** 구현이 가장 쉽다. 그리고 공개 포트에 올리는 순간 메모리 고갈 공격 벡터가 된다. "정상 클라이언트는 읽는다" 는 가정은 공개 서버에서 성립하지 않는다.
 - **넘치면 버리기.** 손실 허용 프로토콜(상태 스냅샷을 주기적으로 보내는 UDP 스트림, 최신 값만 의미 있는 pub/sub)에서는 정답이다. 여기서는 불가능하다 — 길이 기반 프레이밍 위의 순서 보장 스트림에서 중간을 버리면 상대 파서가 영구히 어긋난다. **버려도 되는지는 전송 계층이 아니라 상위 프로토콜이 정한다.**
-- **넘치면 끊기.** 정당한 정책이고 구현도 가장 짧다. 다만 순간적인 스파이크(클라이언트가 잠깐 로딩하느라 못 읽는 상황)에도 매치를 죽인다. 워터마크를 크게 잡으면 결국 이 정책에 가까워진다.
-- **읽기 멈추기(선택한 답).** 흐름 제어를 TCP 자신에게 되돌려준다. 우리가 `recv` 를 멈추면 그 소켓의 커널 수신 버퍼가 차고, 그러면 우리가 광고하는 수신 윈도가 0으로 줄고, 그러면 **원 송신자가 스스로 멈춘다.** 즉 backpressure 가 프록시에서 끝나지 않고 파이프라인 끝까지 전파된다. 이것이 결정적인 차이다.
+- **넘치면 끊기.** 정당한 정책이고 구현도 가장 짧다. 다만 순간적인 스파이크(클라이언트가 잠깐 로딩하느라 못 읽는 상황)에도 매치를 죽인다. 이 릴레이는 이것을 **바깥 층**으로 쓴다 — 일시정지가 듣지 않는 경우의 하드 상한이다. 단독 정책으로 쓰지 않을 뿐, 최후 수단으로는 반드시 필요하다.
+- **읽기 멈추기(선택한 답의 안쪽 층).** 흐름 제어를 TCP 자신에게 되돌려준다. 우리가 `recv` 를 멈추면 그 소켓의 커널 수신 버퍼가 차고, 그러면 우리가 광고하는 수신 윈도가 0으로 줄고, 그러면 **원 송신자가 스스로 멈춘다.** 즉 backpressure 가 프록시에서 끝나지 않고 파이프라인 끝까지 전파된다. 이것이 결정적인 차이다.
 
 > **프록시류 시스템의 일반 규칙: 쓸 수 있는 속도보다 빠르게 읽지 마라.**
 > 서로 다른 속도를 가진 두 파이프를 잇는 모든 구성요소 — 리버스 프록시, 메시지 브로커, 로그 수집기, 스트림 처리 파이프라인, 심지어 렌더 스레드와 게임 스레드를 잇는 큐 — 에 같은 규칙이 적용된다. 중간 버퍼는 속도 차이를 **흡수**할 수는 있어도 **해소**하지 못한다. 흡수는 유한하고, 유한한 것에 상한을 두지 않으면 그것이 곧 장애 지점이다.
@@ -2077,7 +2279,9 @@ constexpr size_t kSendHighWater     = 256 * 1024;
 
 **고수위와 저수위를 갈라 두는 편이 낫다.** 이 코드는 재개 임계값이 고수위와 같아서, 버퍼가 경계 근처에서 오르내리면 `modify` 호출이 잦아진다. 저수위를 고수위의 절반쯤으로 따로 두면(히스테리시스) 그 진동이 사라진다. 규모가 커지면 실제로 측정되는 비용이므로, 지금 구조가 어디까지 감당하는지 알아 두는 편이 좋다.
 
-**backpressure 는 반드시 데드라인과 짝지어야 한다.** 읽기를 멈춘 연결은 읽기 이벤트를 받지 못하므로 idle 데드라인이 재무장되지 않고, 밀림이 15초 넘게 풀리지 않으면 idle 판정으로 끊긴다. 결과적으로 "무한정 버퍼링" 도 "무한정 정지" 도 아닌 상한이 생기는데, 이건 의도한 결과이면서 동시에 정확히 겨냥한 측정은 아니다 — 재는 값이 "밀린 시간" 이 아니라 "읽지 않은 시간" 이기 때문이다. 상한을 명시적으로 두고 싶다면 "보류 버퍼가 비지 않은 채 흐른 시간" 을 별도 데드라인으로 재는 편이 읽기 쉽다. 어느 쪽이든 원칙은 같다: **멈춤에는 반드시 끝이 있어야 한다.** 끝없는 멈춤은 자원을 붙든 채 관측되지 않는 상태이고, 그것이 프록시에서 가장 다루기 어려운 장애 형태다.
+**멈춤에는 반드시 끝이 있어야 한다.** 초기 구현은 그 끝을 유휴 데드라인에 맡겼다 — 읽기를 멈춘 연결은 읽기 이벤트를 못 받으니 15초 뒤 만기로 끊기고, 그러면 "무한정 정지" 는 없다는 논리였다. 그 논리에는 두 가지 결함이 있었다. 첫째, 재는 값이 "밀린 시간" 이 아니라 "읽지 않은 시간" 이라 **끊기는 대상이 원인이 아니라 피해자**였다. 둘째, 만기를 상한으로 쓰면 상한의 단위가 시간이라 메모리를 못 묶는다 — 15초 안에 얼마나 쌓이는지는 상대가 정한다.
+
+지금은 끝이 세 겹으로 명시돼 있다. 연결당 하드 상한(바이트), 프로세스 전역 예산(바이트), 그리고 유휴 만기(시간)인데 유휴 만기는 멈춰 있는 동안 적용되지 않는다. 원칙은 이렇게 바뀐다: **멈춤의 끝은 멈춤을 일으킨 자원의 단위로 재라.** 메모리 때문에 멈췄으면 끝도 메모리로 재고, 시간으로 재는 만기는 멈춤과 무관한 다른 실패(사라진 피어)를 위해 남겨 둔다. 두 축을 섞으면 한 축의 상한이 다른 축의 원인을 처벌한다.
 
 마지막으로 예외 하나. 랭크 결과 프레임은 보류 버퍼를 쓰지 않는다.
 
@@ -2097,6 +2301,174 @@ constexpr size_t kSendHighWater     = 256 * 1024;
 ```
 
 이 시점에는 `Conn` 이 이미 사라졌을 수 있어 보류 버퍼를 붙일 자리가 없다. 채널이 붙들고 있는 소켓 복사본으로 한 번 시도하고, 커널이 받아 주지 않으면 포기한다. 프레임이 작고(정수 세 개) 상대가 그 순간 읽고 있을 확률이 높으므로 실용적인 타협이다. 다만 이건 **의식적으로 남겨 둔 최선 노력(best-effort) 경로**이며, 결과가 반드시 전달돼야 한다면 답은 더 큰 버퍼가 아니라 클라이언트가 재접속 후 결과를 조회하는 별도 경로다. 보장이 필요한 전달을 연결 수명에 묶지 않는 것 — 이것도 이 프로젝트를 떠나서도 반복되는 규칙이다.
+
+### 9.5 연결당 상한은 메모리를 묶지 못한다 — 곱셈 문제
+
+여기까지의 상한은 전부 **연결당**이다. 그리고 연결당 상한에는 조용한 결함이 하나 있다: **곱해진다.**
+
+연결당 보류 송신을 1 MiB 로 묶고 동시 연결을 4096 까지 받는다고 하자. 두 값 모두 각각은 합리적이고, 각각의 근거도 댈 수 있다. 그런데 두 값을 곱하면 최악의 상주 메모리가 4 GiB 다. 어느 쪽 상수를 읽어도 그 숫자는 보이지 않는다. 더 나쁜 것은 이 곱셈이 **한쪽만 만져도 따라 움직인다**는 점이다. 운영자가 접속자를 더 받으려고 연결 상한을 두 배로 올리면 메모리 천장도 두 배가 되는데, 그 사람은 메모리 설정을 건드린 적이 없다.
+
+커널은 이 문제를 오래전에 겪었고 답도 내놨다. 소켓 하나가 쓸 수 있는 송신 버퍼(`wmem`)와, 시스템 전체의 TCP 메모리 총량(`tcp_mem`)이 **따로** 있다. 둘은 대체 관계가 아니라 서로 다른 질문에 답한다.
+
+| 상한 | 답하는 질문 | 걸렸을 때의 의미 |
+|---|---|---|
+| 연결당 상한 | 언제 **이 상대**를 밀어낼 것인가 | 이 연결이 비정상적으로 뒤처졌다 |
+| 전역 예산 | 언제 **프로세스**가 위험한가 | 서버 전체가 감당 못 하는 상태다 |
+
+하나로 다른 하나를 대신할 수 없다. 연결당 상한만 두면 총량을 모르고, 전역 예산만 두면 정상 부하에서 한 연결이 예산을 독차지하는 것을 못 막는다. 그래서 **둘 다** 둔다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp`**
+
+```cpp
+constexpr size_t      kDefaultTxBudget = 64 * 1024 * 1024;
+size_t                g_tx_budget      = kDefaultTxBudget;
+std::atomic<size_t>   g_tx_total{0};
+```
+
+`g_tx_total` 은 바이트가 `tx` 에 들어갈 때 늘고 나갈 때 준다. 회계가 새면 예산은 서서히 조여들다 정상 트래픽을 끊게 되므로, **반납 경로를 하나도 빠뜨리지 않는 것**이 이 기제의 전부다. 반납 지점은 성격이 둘로 갈린다 — 살아서 빠져나가는 것(`on_writable` 이 커널에 넘긴 만큼)과, 죽으면서 통째로 버리는 것(`close_conn` 이 부르는 `release_tx`)이다. 둘 중 하나만 있어도 테스트는 대체로 통과하므로, 회귀 테스트를 쓸 때 두 경로를 따로 겨눠야 한다.
+
+예산을 넘겼을 때 **누구를 끊을지**는 그 자체로 결정이다. 가장 많이 쌓아 둔 연결을 골라 끊는 편이 공정하지만, 그러려면 다른 샤드 스레드가 소유한 표를 가로질러 훑어야 한다 — 이 장 §10 이 애써 없앤 교차 접근을 되살리는 일이다. 연결당 상한이 이미 한 연결의 몫을 64 KiB 로 좁혀 두었으므로, 전역 예산을 넘길 만큼 쌓는 쪽은 대체로 원인 쪽이다. **정확한 범인 색출을 위해 구조를 무너뜨리기보다, 근사적으로 옳은 단순한 정책을 택한다** — 넘긴 그 순간의 연결을 끊는다.
+
+수신 버퍼(`rx`)를 예산에 넣지 않은 것도 근거가 있다. `rx` 는 매 읽기마다 상한을 검사해 초과 시 연결을 끊으므로 최악이 이미 확정적이다. 전역 예산이 필요한 쪽은 "확정적이지 않은" 쪽뿐이고, 그게 `tx` 였다. **모든 버퍼에 전역 예산을 다는 것이 목표가 아니라, 상한이 없는 버퍼를 찾아 없애는 것이 목표다.**
+
+기본값은 64 MiB 이고 `--max-tx-mib` 로 조절한다. 이 값은 배포 대상(저전력 쿼드코어 리눅스 박스)의 RAM 에서 역산한 것이지 프로토콜에서 나온 값이 아니므로, 하드웨어가 다르면 운영자가 다시 정하는 것이 맞다.
+
+> **일반 규칙: 상한이 곱해지는 자리를 찾아라.**
+> "연결당 X" 와 "최대 연결 N" 이 같은 시스템에 있으면 실질 상한은 X·N 이고, 그 숫자는 어느 코드에도 안 적혀 있다. 스레드당 스택 × 스레드 수, 요청당 버퍼 × 동시 요청 수, 세션당 캐시 × 세션 수 — 전부 같은 모양이다. 곱이 위험한 크기라면 곱 자체에 상한을 걸어야 하고, 그 상한은 반드시 **밖에서 관측 가능**해야 한다.
+
+### 9.6 관측할 수 없는 예산은 운영도 검증도 못 한다
+
+전역 예산을 넣은 직후 회귀 테스트를 쓰려다 막혔다. 밖에서 보이는 것이 "접속이 되는가" 뿐인데, 예산이 바닥나도 `accept` 는 계속 되고 막히는 것은 버퍼링뿐이다. 그래서 **반납 회계를 통째로 들어낸 바이너리가 테스트를 그대로 통과했다.** 테스트를 잘못 쓴 것이 아니라, 소켓 바깥에서는 애초에 증상이 안 보이는 상태였다.
+
+같은 구멍이 세 군데 있었다. 예산 상태를 볼 수 없었고, 상한에 걸린 연결은 아무 말 없이 끊겼고, 로그는 부하가 오르면 서로 엉켰다. 셋 다 한 문장으로 요약된다 — **서버가 자기 상태를 말하지 못했다.**
+
+#### 로그 한 줄은 원자적이어야 한다
+
+기존 로그는 전부 `std::cerr << a << b << c` 형태였다. 이 표현은 원자적이지 않다. 삽입 연산자 하나하나가 별도의 출력 연산이라, 다른 스레드가 그 사이에 끼어들면 두 매치의 로그가 한 줄에 엉킨다. 스레드 모델은 연결마다 스레드를 두므로 상시로 그랬고, 루프 모델도 샤드 스레드와 오프로드 워커가 있어 부하가 오르면 실제로 섞였다. 섞인 로그는 "그 시각 그 사람이 왜 끊겼는지" 를 못 맞추므로 문의 대응에 쓸 수 없다.
+
+**현재 소스 발췌 — `server/log.h`**
+
+```cpp
+// 한 줄 버퍼. 조립이 끝나면 log_emit 이 타임스탬프와 레벨을 앞에 붙여 한 번에
+// 내보낸다. 인스턴스는 항상 스택에 있고 스레드를 넘지 않는다.
+class LogLine {
+public:
+    explicit LogLine(LogLevel lv) : lv_(lv) { buf_.reserve(160); }
+
+    LogLine& operator<<(const char* s);
+    LogLine& operator<<(const std::string& s);
+    LogLine& operator<<(char c);
+    LogLine& operator<<(bool b);
+    LogLine& operator<<(int v);
+    LogLine& operator<<(unsigned v);
+    LogLine& operator<<(long v);
+    LogLine& operator<<(unsigned long v);
+    LogLine& operator<<(long long v);
+    LogLine& operator<<(unsigned long long v);
+
+    LogLevel           level() const { return lv_; }
+    const std::string& text()  const { return buf_; }
+
+private:
+    LogLevel    lv_;
+    std::string buf_;
+};
+
+// 줄 하나를 완성해 단일 write 로 내보낸다.
+void log_emit(const LogLine& line);
+```
+
+인터페이스가 `operator<<` 인 것은 호출 지점의 문법을 그대로 두기 위해서다. 달라진 것은 **누적 대상**이다 — 스트림이 아니라 스택 위의 `std::string` 에 쌓이고, 줄이 끝나야 비로소 `write` 가 한 번 불린다.
+
+**현재 소스 발췌 — `server/log.cpp` (`log_emit` 의 조립부. 이어지는 부분 write 재시도 루프는 생략)**
+
+```cpp
+    // 최종 줄을 하나의 버퍼로 만든 뒤에야 write 를 부른다. 여기서 두 번 쓰면
+    // 이 모듈의 존재 이유가 사라진다.
+    std::string out;
+    out.reserve(line.text().size() + 32);
+    append_timestamp(out);
+    out.append(level_tag(line.level()));
+    out.append(line.text());
+    out.push_back('\n');
+```
+
+파이프로 받을 때 `PIPE_BUF`(4096) 이하의 `write` 는 커널이 쪼개지 않으므로, 이 로그의 줄 길이(수십~수백 바이트)에서는 인터리브가 구조적으로 불가능해진다. 원자성을 "잠금으로 지키는" 대신 **한 번의 시스템 콜로 만들어 구조적으로 얻는** 것이 요점이다. 로그 뮤텍스를 두는 방법도 있지만, 그러면 로그가 새로운 경합 지점이 되고 포워딩 경로와 CPU 를 다투게 된다.
+
+배포 대상이 저전력 쿼드코어라 CPU 예산도 설계 조건이었다. 두 가지를 지킨다. **포워딩 hot path 에는 호출 자체를 두지 않는다** — 접속·매치 시작/종료처럼 연결 수명당 몇 번뿐인 이벤트만 찍는다. 그리고 **임계값 아래의 호출은 인자를 만들지도 않는다.**
+
+**현재 소스 발췌 — `server/log.h`**
+
+```cpp
+// 임계값 아래면 인자를 평가조차 하지 않는다. do/while 로 감싸 if 문 뒤에서도
+// 안전하게 쓰인다.
+#define RELAY_LOG_AT(level, expr)                                              \
+    do {                                                                       \
+        if (::relay::log_enabled(level)) {                                     \
+            ::relay::LogLine _relay_ll{level};                                 \
+            _relay_ll << expr;                                                 \
+            ::relay::log_emit(_relay_ll);                                      \
+        }                                                                      \
+    } while (0)
+
+#define RLOG_ERROR(expr) RELAY_LOG_AT(::relay::LogLevel::Error, expr)
+#define RLOG_WARN(expr)  RELAY_LOG_AT(::relay::LogLevel::Warn,  expr)
+#define RLOG_INFO(expr)  RELAY_LOG_AT(::relay::LogLevel::Info,  expr)
+#define RLOG_DEBUG(expr) RELAY_LOG_AT(::relay::LogLevel::Debug, expr)
+```
+
+여기서 매크로를 쓴 이유가 그 지연 평가다. 함수였다면 `RLOG_DEBUG(expr)` 의 `expr` — 문자열 접합, 정수 포매팅 — 이 레벨과 무관하게 매번 계산되고, 그 비용은 "끄면 사라진다" 는 기대와 정반대로 항상 지불된다. 꺼진 레벨의 로그가 원자적 load 한 번으로 끝나야 "조사할 때만 debug 를 켠다" 는 운영이 성립한다. 레벨은 `Error < Warn < Info < Debug` 이고 기본은 `Info` — 접속 하나하나가 아니라 거절·종료·매치 수명·주기 상태만 남는 수준이다. `--log-level` 인자와 `TETRIS_RELAY_LOG_LEVEL` 환경변수로 정하며 인자가 이긴다.
+
+정수를 `std::to_chars` 로 찍는 것도 같은 예산 때문이다 — `ostringstream` 은 호출마다 로케일과 스트림 상태를 끌고 온다. 타임스탬프는 UTC 밀리초로 고정하는데, 메타 서버의 경기 기록이 UTC 라 두 로그를 같은 축에 놓고 맞춰 볼 수 있어야 하기 때문이다. 같은 이유로 종료 로그에 `match_uuid` 와 `player_id` 를 붙인다. **릴레이 로그와 경기 기록이 같은 키를 공유해야** 문의 하나를 끝까지 추적할 수 있고, 그 키를 나중에 끼워 넣는 것은 대개 불가능하다.
+
+#### 상태 한 줄
+
+**현재 소스 발췌 — `server/reactor_relay.cpp` (`maybe_emit_stats`)**
+
+```cpp
+    void maybe_emit_stats(TimePoint now) {
+        if (g_stats_interval_sec <= 0) return;
+        // 기본값(epoch)은 "아직 한 번도 안 찍었다" 는 뜻 — 기동 직후 기준선을
+        // 한 줄 남기고 시작한다. 그래야 첫 주기가 지나기 전에 죽은 프로세스도
+        // 최소한 출발점은 말한다.
+        if (next_stats_.time_since_epoch().count() != 0 && now < next_stats_) return;
+        next_stats_ = now + std::chrono::seconds(g_stats_interval_sec);
+        RLOG_INFO("[stats] conns=" << g_conn_count.load(std::memory_order_relaxed)
+                  << "/" << g_max_conns
+                  << " matches=" << g_match_count.load(std::memory_order_relaxed)
+                  << " tx=" << g_tx_total.load(std::memory_order_relaxed)
+                  << "/" << g_tx_budget
+                  << " tx_peak=" << g_tx_peak.load(std::memory_order_relaxed)
+                  << " reject_conn_cap="
+                  << g_reject_conn_cap.load(std::memory_order_relaxed)
+                  << " reject_ip_session="
+                  << g_reject_ip_session.load(std::memory_order_relaxed)
+                  << " reject_ip_handshake="
+                  << g_reject_ip_handshake.load(std::memory_order_relaxed)
+                  << " reject_tx_budget="
+                  << g_reject_tx_budget.load(std::memory_order_relaxed)
+                  // 인증 대기 줄은 밖에서 볼 방법이 이것뿐이다. 이 수가 늘고
+                  // 있으면 늦은 것은 릴레이가 아니라 meta 다.
+                  << " pending_auth=" << pending_auth_.size()
+                  << "/" << g_max_pending_auth
+                  << " reject_auth_backlog="
+                  << g_reject_auth_backlog.load(std::memory_order_relaxed));
+    }
+```
+
+설계에서 짚을 점이 넷이다.
+
+**카운터는 프로세스 전역이다.** 루프마다 자기 표만 세면 포워딩으로 넘어간 연결이 앞단의 수에서 사라져, 어느 줄도 프로세스의 실제 상태를 말하지 못한다. 샤딩을 도입하는 순간 "이 루프가 아는 것" 과 "프로세스가 가진 것" 이 갈리고, 관측은 반드시 후자를 봐야 한다.
+
+**최고 수위를 따로 둔다.** 순간값만 찍으면 상태 줄 사이에서 치솟았다 빠진 사용량은 어느 줄에도 안 남는다. 주기 샘플링은 구조적으로 스파이크를 놓치므로, 놓치면 안 되는 값은 샘플링이 아니라 **누적 극값**으로 재야 한다.
+
+**거절 카운터를 사유별로 나눈다.** 합계만 있으면 "무엇이 먼저 걸리는가" 를 말할 수 없고, 그러면 어느 상한을 올려야 하는지도 알 수 없다. 상한이 여럿인 시스템에서 사유 없는 거절 카운터는 사실상 정보가 없다.
+
+**분모를 같이 찍는다.** `conns=40/4096` 처럼 현재값과 상한을 함께 내면, 로그를 읽는 사람이 서버 설정을 따로 확인하지 않아도 여유를 안다. 값만 있는 지표는 언제나 "그래서 이게 큰 수인가" 라는 질문을 남긴다.
+
+주기 10초는 양쪽 실패 모드에서 역산했다. 너무 길면(60초+) 정작 필요한 순간에 해상도가 없다 — 예산 누수나 상한 충돌은 몇 초 만에 상태가 바뀌고, 한 라운드가 10초 남짓인 회귀 테스트는 표본을 아예 못 얻는다. 너무 짧으면(1초) 나머지 로그를 전부 덮는다 — 이 릴레이의 다른 줄은 연결 수명당 몇 개뿐이라, 한산한 서버의 로그가 상태 줄만 남는다. 10초는 하루 8,640줄로 접속·매치 로그와 같은 자릿수다. `--stats-interval-sec` 로 조절하고 0 이면 끈다.
+
+이 관측 지점이 생기고 나서야 tx 예산의 회귀 테스트가 진짜 회귀 테스트가 됐다. 반납 경로는 둘이고(죽을 때 남은 것을 버리는 경로, 살아서 커널에 넘기는 경로) 각각을 지운 바이너리에서 테스트가 실패하는 것을 이제 확인할 수 있다. **관측 가능성은 운영 편의가 아니라 테스트 가능성의 전제다** — 밖에서 볼 수 없는 상태는 밖에서 검증할 수도 없다.
 
 ## 10. 여러 루프로 나누기 — 무엇을 나눌 수 있는가
 
@@ -2269,8 +2641,8 @@ sequenceDiagram
                 close_conn(b, "샤드 등록 실패");
                 continue;
             }
-            std::cerr << "[shard " << shard_index_ << "] match=" << ch->match_id
-                      << " 인계 받음\n";
+            RLOG_DEBUG("[shard " << shard_index_ << "] match=" << ch->match_id
+                       << " uuid=" << ch->match_uuid << " 인계 받음");
             begin_forwarding(ch);
         }
     }
@@ -2292,7 +2664,7 @@ sequenceDiagram
         shard_index_ = index;
         reactor_ = net::Reactor::create();
         if (!reactor_) {
-            std::cerr << "[relay] shard " << index << " reactor 생성 실패\n";
+            RLOG_ERROR("[relay] shard " << index << " reactor 생성 실패");
             return false;
         }
         offload_ = std::make_unique<Offload>(2, [this] { reactor_->wake(); });
@@ -2486,7 +2858,7 @@ sequenceDiagram
 
 이관 과정에서 실제로 잡은 버그를 모았다. 공통점이 하나 있다. **스레드 모델에서는 스레드 스택과 소켓 수명이 대신 지켜 주던 불변식이, 루프로 옮기는 순간 자료구조의 수명 문제로 바뀐다.** 스레드 하나가 연결 하나를 처음부터 끝까지 붙들고 있을 때는 "이 연결의 상태"가 곧 그 스레드의 지역 변수였고, 스레드가 끝나면 함께 사라졌다. 루프는 모든 연결의 상태를 자기 컨테이너에 모아 두므로, 누가 언제 그 항목을 지우고 누가 아직 그 주소를 들고 있는지가 전부 명시적인 문제가 된다.
 
-아래 넷은 각각 증상 → 원인 → 왜 그런 코드를 쓰게 되는가 → 고친 방법 순으로 정리했다.
+아래 사례는 각각 증상 → 원인 → 왜 그런 코드를 쓰게 되는가 → 고친 방법 순으로 정리했다. 뒤로 갈수록 성격이 달라진다 — 앞쪽은 수명 관리의 실수이고, 뒤쪽은 **이관 자체가 만든 손실**, 즉 예전 구조가 말없이 지켜 주던 성질이 사라진 자리다.
 
 ### 12.1 타이머 세대 재사용 — 지연 무효화가 조용히 무너진다
 
@@ -2712,7 +3084,8 @@ stateDiagram-v2
             if (!alive(c)) return;
         }
         queue_.push_back(c);
-        std::cerr << "[conn " << c->id << "] queued (" << queue_.size() << " 대기)\n";
+        RLOG_DEBUG("[conn " << c->id << "] queued (" << queue_.size() << " 대기)"
+                   << " player_id=" << c->player_id);
         try_pair();
     }
 ```
@@ -2727,7 +3100,16 @@ stateDiagram-v2
     void on_queued(Conn* c) {
         std::vector<uint8_t> copy = c->rx;
         std::vector<net::Frame> frames;
-        net::parse_frames(copy, frames);
+        if (!net::parse_frames(copy, frames)) {
+            // 프레이밍 계약 위반(과대 길이 선언 등)은 스트림이 이미 어긋났다는 뜻이고,
+            // framing.h 의 계약도 "false 면 호출자가 닫는다" 다. 여기서 무시하면
+            // 피해가 이 연결에서 끝나지 않는다: 사본을 파싱하는 구조라 그 바이트가
+            // 진짜 버퍼 머리에 영원히 남아 이후 QUEUE_CANCEL 을 다시는 볼 수 없고,
+            // 그 상태로 정직한 상대와 매칭된 뒤 로비에서 같은 헤더에 걸려 죽는다 —
+            // 7바이트로 두 사람을 함께 가두는 셈이다.
+            close_conn(c, "큐 대기 중 프레이밍 위반");
+            return;
+        }
         for (const auto& f : frames) {
             if (f.type == net::MsgType::QUEUE_CANCEL) {
                 close_conn(c, "QUEUE_CANCEL");
@@ -2741,6 +3123,16 @@ stateDiagram-v2
 
 **일반화.** 스트림 프로토콜에서 **도착 순서와 처리 순서는 자동으로 같지 않다.** 상태 전이를 하기 전에 이미 버퍼에 들어와 있는 입력을 새 상태의 규칙으로 먼저 소비해야, 전이 직후의 판단이 과거 입력을 놓치지 않는다. 덧붙여, 이런 버그는 타이밍에 따라 갈리므로 **"가끔 통과하는 테스트"를 운으로 넘기지 않는 습관**이 실제 방어선이다. 뭉쳐 오는 경우를 강제로 만들어 고정하는 테스트가 없으면, 이 종류는 개발 환경에서 사라졌다가 운영에서 돌아온다.
 
+#### 반환값을 무시하면 피해가 이 연결에서 끝나지 않는다
+
+위 발췌의 `if (!net::parse_frames(...))` 는 나중에 붙은 것이다. 처음에는 반환값을 그냥 버렸다. 프레이밍 계약은 명시적이다 — `false` 는 "스트림이 어긋났으니 호출자가 연결을 닫는다" 는 뜻이고, 어긋난 스트림에서 이후 읽는 바이트는 전부 의미가 없다. 그 계약을 지키던 곳은 매치메이커뿐이었고, 첫 프레임·룸·큐 단계는 모두 무시하고 있었다.
+
+세 곳 중 큐가 유독 나빴던 이유는 **사본을 파싱하는 구조** 때문이다. 상한을 넘는 길이를 선언한 헤더 몇 바이트를 큐 대기 중에 흘려 넣으면, 사본 파싱은 거기서 멈추고 원본 `rx` 의 맨 앞에는 그 깨진 헤더가 **영원히** 남는다. 그 뒤로 무엇을 보내도 파서는 같은 자리에서 다시 멈추므로 `QUEUE_CANCEL` 이 다시는 관측되지 않는다.
+
+결과를 따라가 보면 피해자가 셋이다. 공격자는 취소한 줄 알고 떠나지만 연결은 큐에 남는다. 다음에 들어온 정직한 사용자가 그 유령과 짝지어지고, 로비 진입 순간 같은 헤더에 걸려 상대가 죽는다 — 그 사람은 상대를 잃은 로비에 홀로 남는다. 그리고 그 다음 사람은 짝을 못 찾는다. **깨진 헤더 몇 바이트로 무관한 두 사람을 묶어 둘 수 있었다.**
+
+일반화하면 이렇다. **"실패하면 닫는다" 는 계약은 한 곳이라도 안 지키면 계약이 아니다.** 그리고 계약을 어긴 대가는 어긴 그 연결이 아니라, 그 연결과 상태를 공유하게 되는 제3자가 치른다 — 매칭·룸·풀처럼 낯선 사람들을 엮는 구조에서는 언제나 그렇다. 반환값을 무시한 호출을 코드 리뷰에서 잡아야 하는 이유가 여기 있다. 무시된 반환값의 비용은 대개 지역적이지 않다.
+
 ### 12.5 최적화가 기능을 껐다 — 오류 경로에 얹혀 있던 accept
 
 **증상.** IOCP 백엔드의 `poll` 에서 등록 소켓 전체 순회를 걷어 내고 재무장 대기열로 바꾸자, 릴레이가 첫 연결 이후 **신규 접속을 받지 않았다.** 스모크 테스트가 무더기로 타임아웃으로 넘어갔는데, 정작 실패 지점은 accept 와 아무 관련이 없어 보이는 곳들이었다.
@@ -2753,18 +3145,95 @@ stateDiagram-v2
 
 **일반화.** 어떤 동작이 오류 경로의 부작용으로 유지되고 있다면 그것은 기능이 아니라 사고다. 그리고 그 사고는 대개 **전수 순회처럼 "굳이 정확히 몰라도 되게 해 주는" 구조 뒤에 숨는다.** 그 구조를 정밀한 것으로 바꾸는 순간, 숨어 있던 암묵적 의존이 한꺼번에 드러난다. 최적화가 기능을 끄는 일이 벌어지는 전형적인 경로이며, 그래서 성능 변경에도 기능 회귀 스위트를 그대로 돌려야 한다.
 
+### 12.6 이관하며 잃은 것 — 상대가 사라졌는데 아무도 말해 주지 않았다
+
+**증상.** 매치 중 한쪽이 그냥 사라지면, 남은 쪽은 아무 통지도 못 받은 채 끝난 경기를 붙들고 있었다. 수락 로비에서라면 30초, 포워딩 중이었고 하필 그 사람이 조용한 쪽이었다면 유휴 15초. 그동안 화면에는 아직 상대가 있다.
+
+이게 단순한 UX 문제가 아닌 이유는 **비용의 비대칭** 때문이다. 공격자가 치르는 비용은 TCP 연결 하나다. 큐에 들어가 `MATCH_FOUND` 만 받고 끊으면 된다. 그 대가로 정상 사용자 한 명의 30초를 태운다. 반복하면 큐가 사실상 마비된다 — 들어오는 사람마다 30초짜리 유령과 짝지어지기 때문이다.
+
+**원인, 그리고 이 절이 이 장에 있는 이유.** 스레드 모델에는 이 결함이 없었다. 매치가 **방향별 포워더 스레드 한 쌍**이었기 때문이다. 한쪽이 접히면 완료 소멸자가 `closed` 를 세우고, 반대 방향 루프는 다음 iteration 상단에서 그것을 보고 빠져나오고, 마지막 하나가 두 소켓을 함께 닫았다. **"한쪽이 죽으면 둘 다 닫힌다" 는 성질을 스레드 쌍이라는 구조가 공짜로 제공했다.**
+
+루프 모델에는 그 쌍이 없다. `Conn` 둘과 `Channel` 하나가 한 스레드의 표에 나란히 있을 뿐이고, 하나를 지운다고 다른 하나에 무슨 일이 일어나지는 않는다. 그리고 이관 과정에서 **그 자리를 대신할 코드를 아무도 쓰지 않았다.** 왜냐하면 원래 코드 어디에도 "상대가 죽으면 남은 쪽을 닫는다" 라고 적혀 있지 않았기 때문이다. 그것은 코드가 아니라 구조의 부산물이었다.
+
+**고친 방법.** `close_conn` 이 채널을 끊을 때 살아남은 쪽까지 책임진다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp`**
+
+```cpp
+    void close_channel_survivor(Channel* ch, const char* why) {
+        Conn* s = ch->a ? ch->a : ch->b;
+        if (!s || s->stage == Stage::Dead) return;
+        if (s->stage == Stage::Lobby) {
+            // 수락 로비에서는 "상대가 수락하지 않았다" 를 READY(0) 으로 알린다.
+            // 스레드 모델이 보내던 것과 같은 프레임이라 클라이언트가 이미 안다.
+            std::vector<uint8_t> pl{0};
+            auto fr = net::build_frame(net::MsgType::READY, pl);
+            queue_send(s, fr.data(), fr.size());
+        }
+        close_conn(s, why);
+    }
+```
+
+새 프레임을 발명하지 않은 것이 중요하다. `READY(0)` 은 스레드 모델이 같은 상황에서 보내던 프레임이라 **기존 클라이언트가 이미 해석할 줄 안다.** 잃어버린 성질을 복원할 때는 잃기 전의 관측 가능한 동작을 그대로 되살리는 편이 언제나 낫다 — 새 프레임을 만들면 서버는 고쳐지지만 구버전 클라이언트에서는 여전히 30초를 기다린다.
+
+한 가지 순서 제약이 있다. 랭크드 결과가 아직 날아가는 중이면 닫기를 **미룬다.**
+
+**현재 소스 발췌 — `server/reactor_relay.cpp` (`close_conn` 의 채널 정리 분기)**
+
+```cpp
+            if (ch->finalize_inflight) ch->close_survivor_pending = true;
+            else close_channel_survivor(ch, "상대 이탈");
+```
+
+`tcp_close` 는 양방향 `shutdown` 이라, 먼저 닫으면 뒤이어 도착할 `MATCH_RESULT` 가 나가지 못한다. 그래서 결과를 보내는 continuation 쪽으로 종료를 넘긴다. **"즉시 정리" 와 "결과 전달" 이 충돌할 때는 전달이 이긴다** — 사용자가 잃는 것이 다르기 때문이다. 소켓 몇 초는 자원이지만, 사라진 RP 는 신뢰다.
+
+> **일반 규칙: 구조를 바꿀 때는 "원래 공짜로 얻던 성질" 을 목록으로 적어라.**
+> 스레드 쌍, RAII 스코프, 요청당 프로세스, 트랜잭션 경계 — 이런 구조는 이름 붙은 기능이 아닌 **불변식**을 조용히 제공한다. 그 구조를 걷어내면 불변식도 함께 사라지는데, 사라졌다는 사실을 알려주는 컴파일 오류도 실패하는 테스트도 없다. 이관 전에 "이 구조가 나 대신 지켜 주던 것" 을 문장으로 적어 두고, 이관 후에 그 문장 하나하나가 여전히 참인지 확인해야 한다. 이 릴레이에서는 그 목록이 최소한 셋이었다 — 매치의 동반 종료, 인증 작업과 연결의 동일 수명, 그리고 소켓을 소유한 스레드가 곧 직렬화 지점이라는 것. 앞의 둘은 사고로 잃었다가 되찾았고, 마지막 하나는 의도적으로 다른 방식(단일 소유)으로 대체했다.
+
+### 12.7 상한이 세던 수가 실제 인구가 아니었다
+
+**증상.** `--max-conns 4096` 인데 4096 을 훨씬 넘겨 받아들였다. 다만 `--loops` 가 3 이상일 때만 그랬다.
+
+**원인.** 연결 상한 검사가 **앞단 루프 자신의 표**를 읽고 있었다. 그런데 그 표는 상한이 묶으려는 인구가 아니다. 포워딩이 시작되면 매치의 두 연결은 샤드 루프로 인계돼 앞단 표에서 빠지기 때문이다. 즉 **실제로 게임을 하고 있는 사람들이 통째로 안 세어졌고**, 상한이 보는 것은 accept·인증·큐·로비에 머무는 소수뿐이었다.
+
+기본값인 단일 루프에서는 이 결함이 드러나지 않는다. 샤드가 없으면 앞단 표와 실제 인구가 같은 수이기 때문이다. **기능을 켜야만 틀리는 코드**의 전형이고, 기본값으로만 테스트하는 습관이 놓치는 종류다.
+
+**고친 방법.** 세야 할 수는 이미 있었다. `g_conn_count` 는 등록에 성공한 뒤 늘고 `close_conn` 에서만 준다. 모든 연결이 어느 루프의 소유가 되었든 결국 `close_conn` 을 지나므로, **인계를 가로질러도 정확히 한 번 줄어든다** — 그것이 이 카운터를 옳게 만드는 성질이다. 상한은 그저 엉뚱한 곳을 보고 있었을 뿐이다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp` (`on_accept` 의 상한 검사)**
+
+```cpp
+            // 앞단 표(conns_)가 아니라 전역 카운터를 본다. 포워딩이 시작되면
+            // 연결이 샤드 루프로 인계돼 앞단 표에서 빠지므로, 표 크기로 재면
+            // --loops 가 3 이상일 때 경기 중인 사람들이 통째로 안 세어진다 —
+            // 상한이 4096 인데 실제로는 그보다 훨씬 많이 받아들이게 된다.
+            // 이 카운터는 등록에 성공한 뒤 늘고 close_conn 에서만 주는데, 샤드로
+            // 넘어간 연결도 결국 그 경로를 지나므로 어느 루프가 닫든 정확히 한 번이다.
+            if (g_conn_count.load(std::memory_order_relaxed) >= g_max_conns) {
+```
+
+이 결함을 찾아낸 것은 관측 작업이었다. 상태 줄을 만들면서 전역 카운터를 도입했고, 그러자 **"상한은 왜 이 수를 안 보고 있지?"** 라는 질문이 자연스럽게 나왔다. 관측 지표를 만드는 일이 종종 버그를 찾는 이유가 이것이다 — 지표는 "시스템의 진짜 상태" 를 한 자리에 모으라고 강요하고, 그 자리가 생기고 나면 그것을 안 보고 있던 코드가 눈에 띈다.
+
+**일반화.** **상한은 그 상한이 보호하려는 자원과 같은 범위(scope)를 세야 한다.** 소유권이 옮겨 다니는 시스템에서 "내 표의 크기" 는 인구가 아니라 내 몫일 뿐이다. 소유권 이동을 도입하는 리팩터링에서는, 개수를 세는 모든 코드를 함께 검토해야 한다 — 그 코드들은 대개 "옮겨 다니지 않던 시절" 에 쓰였다.
+
 ## 13. 확인한 계약
 
-- **wire 프로토콜은 바뀌지 않는다.** `tetris_relay_reactor` 는 `tetris_relay` 와 같은 프레임 형식(`[LEN u16 LE][TYPE u8][PAYLOAD][CHECKSUM u32 LE]`)과 같은 메시지 의미를 말한다. 기존 게임 클라이언트도, Python 테스트 하네스도 두 바이너리 어느 쪽에 붙어도 동작한다. 릴레이 교체가 클라이언트 릴리스와 묶이지 않는다.
-- **정책 상수가 보존된다.** 첫 프레임 데드라인, 큐 수락 로비 대기, 방향별 idle 한계, 룸의 게스트 무입장 대기와 READY 미확정 대기, 초당 수신 바이트 상한, per-IP 동시 핸드셰이크 상한, 프로세스 연결 상한 — 두 바이너리가 같은 값을 쓴다. I/O 모델을 바꾸는 작업에서 정책까지 함께 흔들면 어느 쪽이 회귀 원인인지 분리할 수 없다.
-- **ranked 경로의 개입 범위가 같다.** 릴레이는 `MATCH_SUMMARY` 만 가로채고, INPUT·HASH·CHAT 같은 일반 프레임은 원본 wire 바이트를 그대로 전달한다. unranked 매치는 프레임 경계조차 복원하지 않고 받은 바이트를 그대로 흘린다.
+- **wire 프로토콜은 바뀌지 않는다.** `tetris_relay_reactor` 는 `tetris_relay` 와 같은 프레임 형식(`[LEN u16 LE][TYPE u8][PAYLOAD][CHECKSUM u32 LE]`)과 같은 메시지 의미를 말한다. 기존 게임 클라이언트도, Python 테스트 하네스도 두 바이너리 어느 쪽에 붙어도 동작한다. 릴레이 교체가 클라이언트 릴리스와 묶이지 않는다. 리액터 릴레이만 보내는 `SERVER_REJECT` 도 이 성질을 깨지 않는다 — 모르는 타입은 파서가 그 프레임만 소비하고 넘어가므로, 구버전 클라이언트는 예전과 똑같이 조용한 끊김을 관측한다.
+- **공유 정책 상수가 보존된다.** 첫 프레임 데드라인, 큐 수락 로비 대기, 방향별 idle 한계, 룸의 게스트 무입장 대기와 READY 미확정 대기, 초당 수신 바이트 상한, per-IP 동시 핸드셰이크·세션 상한 — 두 바이너리가 같은 값을 쓴다. I/O 모델을 바꾸는 작업에서 정책까지 함께 흔들면 어느 쪽이 회귀 원인인지 분리할 수 없다.
+- **루프 모델만 갖는 상한이 따로 있다.** 프로세스 동시 연결(`--max-conns`), 보류 송신의 전역 예산(`--max-tx-mib`), 인증 대기 큐 깊이(`--max-pending-auth`)는 리액터 릴레이에만 있다. 스레드 모델의 천장은 포워딩 워커 수가 구조적으로 정해 주었지만 루프에는 그런 구조가 없어, 같은 보호를 명시적인 값으로 다시 세워야 했다. 상한에 걸린 연결은 조용히 끊기지 않고 `SERVER_REJECT` 로 사유를 먼저 받는다.
+- **ranked 경로의 개입 범위가 같다.** 릴레이는 `MATCH_SUMMARY` 만 가로채고, INPUT·HASH·CHAT 같은 일반 프레임은 원본 wire 바이트를 그대로 전달한다. unranked 매치도 프레임 경계는 훑는다 — 서버만 만들 수 있는 타입을 걸러 내기 위해서이며, 통과한 프레임은 여전히 원본 바이트 그대로 나간다.
+- **서버 전용 프레임은 중계되지 않는다.** 클라이언트가 올려보낸 `MATCH_FOUND`·`ROOM_INFO`·`MATCH_RESULT`·`SERVER_REJECT` 는 두 바이너리 모두 그 프레임만 버리고 연결은 살린다. 포워딩은 양방향이라 여기서 끊으면 위조한 쪽이 아니라 상대의 경기까지 함께 끝나기 때문이다.
 - **요약 교차검증이 유지된다.** 양쪽 요약이 모이면 승패가 배타적인지, 그리고 내 점수·라인이 상대가 보고한 상대 점수·라인과 대칭인지 확인한다. 하나라도 어긋나면 승자를 비운 채로 저장한다 — 판정 불능을 임의 승자로 메우지 않는다.
 - **몰수패는 세 갈래로 갈린다.** 양쪽 요약이 있으면 교차검증으로, 양쪽 다 없으면 meta 에 보내지 않고 변동 0 결과만 돌려주며(무경기 담합과 동시 단절 오염 차단), 한쪽만 있으면 그 요약의 승패 표기를 존중한다 — 끊긴 순서로 승자를 정하면 승리 요약을 낸 직후 회선이 끊긴 쪽이 패자로 뒤집힌다.
 - **소켓 I/O 는 루프 스레드에만 존재한다.** recv·send·accept·close·reactor 관심 변경·타이머 arm/cancel 은 전부 루프 스레드에서만 일어난다. 오프로드 워커는 블로킹 HTTP 왕복 같은 순수 바깥 일만 하고, 결과는 continuation 으로 루프에 되돌아와 그곳에서 상태를 만진다. 이 불변식이 방향별 송신 락, 요약 수집 락, 포워더 카운트 원자 변수를 통째로 없앴다.
 - **교차 스레드 지점이 열거 가능하다.** 워커에 job 을 넣고 완료분을 회수하는 지점, 루프를 깨우는 `wake()`, 그리고 포워딩 샤드로 매치를 넘기는 우편함 — 남은 동기화는 여기까지다. 나머지 상태는 소유 스레드 전용이며, 타이머 큐는 명시적으로 thread-safe 가 아니다.
 - **죽은 연결은 배치 경계에서만 해제된다.** 종료는 표시만 하고, 같은 이벤트 배치의 뒤쪽 항목이 그 포인터를 들고 있을 수 있으므로 실제 해제는 배치 끝의 정리 단계에서 한다. 배치 순회는 매 항목마다 생존을 다시 확인한다.
 - **연결이 사라져도 결과 프레임은 보낼 수 있다.** 채널이 양쪽 소켓 핸들의 사본을 들고 있어, 상태 객체가 정리된 뒤에도 `MATCH_RESULT` 를 내보낼 수 있다. 끊긴 쪽은 통지 대상에서 제외하되, 그 정보는 승패 판정에 쓰이지 않는다.
-- **backpressure 가 메모리를 지킨다.** 보류 송신이 상한을 넘으면 그 소켓으로 흘려보내는 쪽의 읽기 관심을 내리고, 배수되면 되돌린다. 루프는 잠들 수 없으므로 "느린 상대를 기다리며 버티기"가 아니라 "읽기를 멈추기"가 유일하게 옳은 대응이다.
+- **backpressure 가 메모리를 지킨다 — 세 겹으로.** 보류 송신이 고수위를 넘으면 그 소켓으로 흘려보내는 쪽의 읽기 관심을 내리고 배수되면 되돌린다. 일시정지는 보장이 아니므로 연결당 하드 상한이 그 위에 있고, 연결당 상한은 연결 수와 곱해지므로 프로세스 전역 예산이 다시 그 위에 있다. 루프는 잠들 수 없으므로 "느린 상대를 기다리며 버티기"는 답이 될 수 없다.
+- **우리가 멈춰 세운 연결을 우리가 벌주지 않는다.** 백프레셔로 읽기를 막아 둔 연결은 유휴 판정 대상이 아니고, 재개 직후의 적체 버스트도 레이트 초과로 계산하지 않는다. 방어 기제가 방어 대상을 끊는 것은 기제가 없는 것보다 나쁘다.
+- **상대가 사라지면 남은 쪽이 그 사실을 안다.** 채널의 한쪽이 죽으면 남은 쪽에 통지하고 닫는다. 로비 단계에서는 스레드 모델과 같은 `READY(0)` 을 보내므로 기존 클라이언트가 그대로 해석한다. 랭크드 결과가 아직 나가는 중이면 그것을 보낸 뒤에 닫는다.
+- **연결이 죽으면 그 연결이 남긴 일도 죽는다.** 오프로드 큐에 올린 인증 왕복은 취소 깃발로 함께 무효화된다. 상한이 걸린 곳과 일이 쌓이는 곳이 어긋나면 상한은 아무것도 지키지 못한다.
+- **서버가 자기 상태를 말한다.** 로그 한 줄은 조립 후 단일 `write` 로 나가 스레드 간에 엉키지 않고, `--log-level` 로 상세도를 정하며, 주기 `[stats]` 줄이 동시 연결·활성 매치·tx 사용량과 최고 수위·사유별 거절 카운터·인증 대기 깊이를 프로세스 전역 기준으로 내보낸다.
 - **샤딩은 매치 단위로만 나뉜다.** 큐와 룸 코드 표는 전역이라 앞단 루프 하나가 소유하고, 포워딩만 샤드로 넘어간다. 소켓을 다른 루프로 옮길 수 없는 백엔드에서는 조용히 반쯤 도는 대신 이유를 출력하고 단일 루프로 물러선다.
 - **종료 시 결과를 삼키지 않는다.** 새 job 은 막되 이미 제출된 결과 저장은 마치고, 회수된 continuation 을 실행한 뒤에 소켓을 닫는다. 저장할 수 없는 상황이면 조용히 넘기지 않고 로그로 남긴다.
 
@@ -2876,4 +3345,27 @@ Windows 에서는 환경 변수 지정 문법이 다르다(`$env:TETRIS_RELAY_BI
 ./build/tetris_relay_reactor --port 7788 --loops 3
 ```
 
-기대 결과: 소켓을 루프 간에 옮길 수 있는 백엔드에서는 포워딩 샤드 수가 출력되고, 매치가 성립할 때마다 샤드가 인계를 받았다는 로그가 찍힌다. 옮길 수 없는 백엔드에서는 그 이유를 밝히고 단일 루프로 물러섰다는 안내가 나온 뒤 정상 동작한다. 어느 쪽이든 14.3 의 스모크는 같은 결과로 통과해야 한다 — **샤딩은 성능 축의 선택이지 프로토콜 축의 변경이 아니다.**
+기대 결과: 소켓을 루프 간에 옮길 수 있는 백엔드에서는 포워딩 샤드 수가 출력되고, 매치가 성립할 때마다 샤드가 인계를 받았다는 로그가 찍힌다(인계 로그는 debug 레벨이므로 `--log-level debug` 가 필요하다). 옮길 수 없는 백엔드에서는 그 이유를 밝히고 단일 루프로 물러섰다는 안내가 나온 뒤 정상 동작한다. 어느 쪽이든 14.3 의 스모크는 같은 결과로 통과해야 한다 — **샤딩은 성능 축의 선택이지 프로토콜 축의 변경이 아니다.**
+
+### 14.6 상한과 상태 줄 확인
+
+상한은 걸어 보기 전까지 걸리는지 알 수 없고, 상태 줄은 그것을 밖에서 보는 유일한 창이다. 둘을 한 번에 확인한다.
+
+```bash
+./build/tetris_relay_reactor --port 7788 --max-conns 4 --loops 4 \
+                             --stats-interval-sec 1 --log-level debug
+```
+
+기대 결과: 연결을 넷까지 받고, 다섯 번째부터는 `SERVER_REJECT` 를 한 프레임 받은 뒤 끊긴다. 상태 줄의 `conns=` 가 `4/4` 에 머물고 `reject_conn_cap=` 이 거절한 수만큼 올라간다. **`--loops` 를 3 이상으로 주는 것이 이 검증의 핵심이다** — 샤드가 있어야 "포워딩으로 넘어간 연결이 상한 계산에서 빠지는" 결함이 드러난다. 단일 루프에서는 잘못된 구현도 정상으로 보인다.
+
+상한을 겨누는 검증에는 **거절이 실제로 사유와 함께 온다**는 확인이 함께 있어야 한다. 소켓이 닫히는 것만 보면 "상한에 걸려 거절됨" 과 "서버가 죽음" 이 구별되지 않는다. 적대적 스위트가 이 구별을 계약으로 못 박고 있다.
+
+```bash
+uv run python -m pytest python/tests/test_relay_adversarial.py -q -rs
+TETRIS_RELAY_BIN=./build/tetris_relay_reactor \
+uv run python -m pytest python/tests/test_relay_adversarial.py -q -rs
+```
+
+기대 결과: 두 바이너리 모두 통과한다. 이 파일은 잘못된 코드가 아니라 **잘못된 사용자**를 겨눈다 — 프레임 중간에 끊는 연결, 바이트를 한 개씩 흘리는 연결, 위조 프레임을 올려보내는 연결, 붙었다 끊기를 반복하는 연결. 모든 케이스가 두 가지를 함께 묻는다. 릴레이가 살아남는가, 그리고 **무관한 사용자가 그 대가를 치르지 않는가.** 두 번째 질문이 이 파일이 존재하는 이유이고, 이 장의 §12.6·§12.7 과 §6.2 의 큐 깊이 상한은 전부 그 질문이 찾아낸 것들이다.
+
+이 스위트에는 한 가지 규약이 더 있다. 아직 못 지키는 계약은 `xfail` 로 사유를 남겨 파이프라인을 붉게 만들지 않되, 고쳐지는 순간 `XPASS` 로 드러나 표시를 지울 때가 됐음을 알린다. **예외가 하나 있다 — 릴레이가 죽는 것은 `xfail` 로 덮지 않는다.** 픽스처가 매 테스트 끝에 프로세스 생존을 확인하고, 죽었으면 그대로 실패시킨다. 프로세스가 사라지는 것은 "아직 못 지킨 계약" 이 아니라 서비스가 없어진 것이고, 그 상태에서 초록을 보고하는 스위트는 있으나 마나다.

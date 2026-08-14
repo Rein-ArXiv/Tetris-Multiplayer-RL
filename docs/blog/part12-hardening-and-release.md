@@ -149,20 +149,20 @@ Part 10 의 가장 중요한 보안 경계는 `POST /v1/matches` 였다. 이 end
     std::unique_ptr<meta::client::MetaClient> metaClient;
     if (!metaUrl.empty()) {
         if (metaSecret.empty()) {
-            std::cerr << "[relay] refusing to start: --meta set but no relay secret. "
-                      << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
-                      << "POST /v1/matches without it).\n";
+            RLOG_ERROR("[relay] refusing to start: --meta set but no relay secret. "
+                       << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
+                       << "POST /v1/matches without it).");
             return 2;
         }
         metaClient = std::make_unique<meta::client::MetaClient>(metaUrl, metaSecret);
         if (!metaClient->valid()) {
-            std::cerr << "[relay] invalid --meta URL: " << metaUrl << "\n";
+            RLOG_ERROR("[relay] invalid --meta URL: " << metaUrl);
             return 2;
         } else {
-            std::cout << "[relay] meta enabled: " << metaUrl << "\n";
+            RLOG_INFO("[relay] meta enabled: " << metaUrl);
         }
     } else {
-        std::cout << "[relay] meta=none (unranked mode)\n";
+        RLOG_INFO("[relay] meta=none (unranked mode)");
     }
 ```
 
@@ -193,12 +193,22 @@ $ echo $?
 void printUsage() {
     std::cout <<
         "Usage: tetris_relay [--port N] [--meta URL] [--meta-secret SECRET]\n"
+        "                    [--max-sessions-per-ip N]\n"
         "  --port N         TCP listen port (default 7777)\n"
         "  --meta URL       tetris_meta base URL (e.g. https://api.example.com)\n"
         "                   If omitted, relay runs unranked (no token verify,\n"
         "                   no /v1/matches POST).\n"
         "  --meta-secret S  Send X-Relay-Secret on /v1/matches.\n"
         "                   Defaults to TETRIS_RELAY_SECRET if set.\n"
+        "  --max-sessions-per-ip N\n"
+        "                   Concurrent connections one address may hold for the\n"
+        "                   life of the connection (default "
+        << relay::kMaxSessionsPerIp << ").\n"
+        "                   Separate from the per-IP handshake budget ("
+        << relay::kMaxHandshakesPerIp << "), which\n"
+        "                   is released as soon as a connection authenticates.\n"
+        "                   Raise it only for a deployment that legitimately\n"
+        "                   shares one address across many players.\n"
         "  -h, --help       Show this help\n";
 }
 
@@ -449,7 +459,7 @@ void signalHandler(int /*sig*/) {
 ```cpp
     g_listen_sock = net::tcp_listen(port, /*backlog=*/256);
     if (!g_listen_sock.valid()) {
-        std::cerr << "tcp_listen(" << port << ") failed — port in use?\n";
+        RLOG_ERROR("tcp_listen(" << port << ") failed — port in use?");
         net::net_shutdown();
         return 1;
     }
@@ -482,29 +492,46 @@ accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓�
             // (per-IP 상한은 못 걸지만, 실패 케이스끼리의 공멸보다 낫다).
             peerIp = "fd:" + std::to_string(client.fd());
         }
-        if (!ipAdmission.acquire(peerIp)) {
-            std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
-                      << ": per-IP handshake limit\n";
+        // 두 상한을 독립적으로 건다. 세션 슬롯은 연결이 죽을 때까지(소켓과 함께
+        // 큐·룸·포워딩으로 옮겨 다니며) 붙들고, 핸드셰이크 슬롯은 인증이 끝나는
+        // 순간 playerConnThread 가 놓아준다.
+        auto sessionSlot = relay::IpAdmission::acquire(
+            peerIp, relay::IpAdmission::Kind::Session);
+        if (!sessionSlot) {
+            RLOG_INFO("[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP session limit player_id=0 match_uuid=-");
             net::tcp_close(client);
             continue;
         }
-        std::cout << "[relay] accept conn=" << id << "\n";
+        auto handshakeSlot = relay::IpAdmission::acquire(
+            peerIp, relay::IpAdmission::Kind::Handshake);
+        if (!handshakeSlot) {
+            RLOG_INFO("[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP handshake limit player_id=0 match_uuid=-");
+            net::tcp_close(client);
+            continue;
+        }
+        RLOG_DEBUG("[relay] accept conn=" << id << " ip=" << peerIp);
+        // launch 가 실패하면 람다(그리고 두 슬롯 사본)가 그대로 소멸하므로
+        // 별도의 반납 경로가 필요 없다.
         if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr,
-                                 &ipAdmission, peerIp]() mutable {
-            struct Release {
-                IpAdmission& owner; const std::string& ip;
-                ~Release() { owner.release(ip); }
-            } release{ipAdmission, peerIp};
-            relay::playerConnThread(std::move(client), id, mm, rr, mcPtr);
+                                 handshakeSlot = std::move(handshakeSlot),
+                                 sessionSlot = std::move(sessionSlot)]() mutable {
+            relay::playerConnThread(std::move(client), id, mm, rr, mcPtr,
+                                    std::move(handshakeSlot),
+                                    std::move(sessionSlot));
         })) {
-            ipAdmission.release(peerIp);
-            std::cerr << "[relay] rejecting conn=" << id
-                      << ": connection worker unavailable\n";
+            RLOG_WARN("[relay] rejecting conn=" << id
+                      << ": connection worker unavailable player_id=0 match_uuid=-");
         }
     }
 ```
 
 `IpAdmission` 은 종류별로 IP → 진행 중 수의 맵을 하나씩 갖는다. 슬롯을 잡으면 핸들을 돌려주고, 그 핸들의 마지막 사본이 사라질 때 카운터가 줄어든다 — 반납 시점을 호출자가 **수명으로** 정하게 하는 것이 이 설계의 요점이다.
+
+명시적인 반납 코드가 한 줄도 없다는 점을 짚어 둘 만하다. 예전에는 워커 람다 안에 반납용 RAII 객체를 두고, **워커 생성 자체가 실패한 경우**에는 accept 루프가 직접 반납했다. 두 경로가 나뉘어 있었고, 나뉜 순간부터 한쪽을 빠뜨릴 여지가 생긴다. 지금은 슬롯 핸들을 람다가 값으로 붙들므로 경로가 하나다 — `launch` 가 실패하면 람다가 그대로 소멸하고 그때 핸들도 함께 죽는다. **"실패 경로에서도 반납되게 하라" 를 규율로 지키는 것보다, 반납이 소유권에 딸려 오게 만드는 편이 언제나 낫다.**
+
+로그 레벨도 의도적으로 갈라 둔다. `accept` 한 줄 한 줄은 debug 이고, **거절은 info 다.** 한산한 서버에서도 접속 로그는 초당 여러 줄이 되지만 거절은 드물고, 드문 사건이야말로 기본 레벨에 남아야 나중에 문의를 맞춰 볼 수 있다. 거절 줄에 `player_id` 와 `match_uuid` 자리를 비워서라도 채워 두는 이유도 같다 — 모든 종료·거절 로그가 같은 필드 모양을 가져야 한 도구로 훑을 수 있다.
 
 **현재 소스 발췌 — `server/ip_admission.h`**
 
@@ -544,10 +571,11 @@ private:
     std::string key_;
     Kind        kind_;
 
-    static std::mutex mu_;
-    static std::unordered_map<std::string, size_t> handshakes_;
-    static std::unordered_map<std::string, size_t> sessions_;
-    static size_t session_limit_;
+    inline static std::mutex                             mu_;
+    inline static std::unordered_map<std::string, size_t> handshakes_;
+    inline static std::unordered_map<std::string, size_t> sessions_;
+    inline static size_t                                  session_limit_ =
+        kMaxSessionsPerIp;
 };
 ```
 
@@ -578,7 +606,7 @@ private:
 **현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
-    std::cout << "[relay] shutting down...\n";
+    RLOG_INFO("[relay] shutting down...");
     relay::beginShutdown();
     connWorkers.stopAccepting();
     net::tcp_close(g_listen_sock);
@@ -589,7 +617,7 @@ private:
     connWorkers.wait();
     relay::waitForShutdown();
     net::net_shutdown();
-    std::cout << "[relay] done\n";
+    RLOG_INFO("[relay] done");
     return 0;
 ```
 
@@ -817,7 +845,7 @@ void Session::Close() {
 
 ## 8. 신뢰할 수 없는 입력 · DoS 하드닝
 
-relay 와 host 는 공개 IP 에서 임의의 피어로부터 바이트를 받는다. 그 피어가 정상 클라이언트라는 보장은 없다. 방어선을 다섯 곳에 둔다.
+relay 와 host 는 공개 IP 에서 임의의 피어로부터 바이트를 받는다. 그 피어가 정상 클라이언트라는 보장은 없다. 방어선을 여러 층에 나눠 둔다 — 프레임 내용, 전송 속도, 단계별 버퍼, 워커 수, 정수 파싱, 그리고 프로세스 전체 자원 예산이다.
 
 ### 8.1 INPUT 프레임 바운드 검증
 
@@ -1061,7 +1089,37 @@ def test_relay_sigterm_drains_active_match() -> None:
 
 ### 8.5 정수 오버플로 가드
 
-마지막 표면은 meta의 JSON 정수 파싱이다. `POST /v1/matches`의 `score_a` 같은 필드에 `99999999999999999999` 같은 값이 들어오면 `int64_t` 변환이 오버플로한다. `proto::find_int`는 숫자를 한 자리씩 읽으면서 `(INT64_MAX - digit) / 10`을 넘는지 먼저 검사하고, 초과하면 `std::nullopt`를 돌려준다. handler는 이를 필드 누락과 같은 잘못된 요청으로 거부하므로 wraparound된 음수나 작은 양수가 DB에 도달하지 않는다. 파서의 전체 계약과 API 사용처는 [메타·랭킹 문서](./part10-meta-and-ranking.md)에서도 확인할 수 있다.
+프레임 바깥의 표면도 하나 짚어 둔다. meta의 JSON 정수 파싱이다. `POST /v1/matches`의 `score_a` 같은 필드에 `99999999999999999999` 같은 값이 들어오면 `int64_t` 변환이 오버플로한다. `proto::find_int`는 숫자를 한 자리씩 읽으면서 `(INT64_MAX - digit) / 10`을 넘는지 먼저 검사하고, 초과하면 `std::nullopt`를 돌려준다. handler는 이를 필드 누락과 같은 잘못된 요청으로 거부하므로 wraparound된 음수나 작은 양수가 DB에 도달하지 않는다. 파서의 전체 계약과 API 사용처는 [메타·랭킹 문서](./part10-meta-and-ranking.md)에서도 확인할 수 있다.
+
+### 8.6 프로세스 전체 자원 예산 — 그리고 거절에 사유 붙이기
+
+앞의 방어선은 전부 **하나짜리**를 겨눈다. 한 프레임, 한 연결, 한 요청. 그런데 공개 서버에서 실제로 무너지는 지점은 하나가 아니라 **총합**인 경우가 많고, 총합을 겨누는 상한은 따로 세워야 한다. 배포 대상인 이벤트 루프 릴레이(`tetris_relay_reactor`)는 그래서 운영자가 조절하는 예산을 셋 더 갖는다. 각각이 왜 필요한지는 [Part 14](./part14-event-loop-scaling.md) 가 설명하고, 여기서는 **운영자가 무엇을 정해야 하는가**를 정리한다.
+
+| 인자 | 기본값 | 무엇을 묶는가 | 올려야 할 때 / 내려야 할 때 |
+|---|---|---|---|
+| `--max-conns` | 4096 | 프로세스 전체 동시 연결 | 보통 이 값보다 루프 포화가 먼저 온다. 그때 늘릴 것은 `--loops` 이고, 이 값은 fd 를 지키는 마지막 방어선이다 |
+| `--max-tx-mib` | 64 | 보류 송신의 프로세스 전체 합계 | 연결당 상한은 `--max-conns` 와 곱해진다. 이 예산이 그 곱셈을 끊으므로, 박스의 RAM 에 맞춰 정한다 |
+| `--max-pending-auth` | 64 | meta 인증 왕복 대기 줄의 깊이 | meta 가 느릴수록 **낮게** 잡아야 줄이 짧아진다. 빠른 meta 를 쓰면 올려도 된다 |
+| `--max-sessions-per-ip` | 64 | 한 주소가 연결 수명 동안 붙드는 동시 연결 | 한 공인 주소를 정당하게 공유하는 집단(CGNAT, 공용 LAN)이 실제로 이 수를 넘길 때만 올린다 |
+
+세 번째 행의 방향이 직관과 반대라는 점을 짚어 둘 만하다. 대기 큐를 깊게 잡으면 더 많은 사람을 받아 주는 것 같지만, 인증이 느린 환경에서는 **줄 끝에 선 사람이 자기 클라이언트의 타임아웃에 먼저 걸린다.** 그러면 그 사람은 기다린 시간만 잃고 결과는 실패다. 짧은 줄에서 즉시 거절받는 편이 낫다 — 재시도하면 되기 때문이다. **받아 줄 수 없는 사람을 줄에 세우는 것은 친절이 아니라 지연된 실패다.**
+
+그리고 그 거절이 **사유를 밝힌다**는 것이 이 계열의 두 번째 변화다. 예전에는 어떤 상한에 걸리든 소켓이 그냥 닫혔다. 사용자 화면에서 그것은 회선 문제와 구별되지 않고, 문의가 들어와도 서버 로그와 시각을 맞춰 보기 전에는 아무 말도 못 한다. 지금은 닫기 직전에 `SERVER_REJECT` 프레임을 밀어 넣어 사유 코드를 함께 내려보낸다 — wire 계약과 하위 호환 근거는 [Part 6](./part6-lockstep-networking.md) 이 정의한다.
+
+운영 관점에서 중요한 성질이 둘이다. **전달은 최선의 노력이다** — 닫기 직전이라 커널이 RST 를 보내는 상황에서는 유실될 수 있으므로, 클라이언트는 프레임이 없어도 일반 문구로 물러설 수 있어야 한다. 그리고 **구버전 클라이언트의 동작은 예전과 정확히 같다** — 모르는 타입을 무시한 뒤 종료를 관측하므로 조용한 끊김이다. 릴레이를 먼저 배포하고 클라이언트를 나중에 올려도 안전하다는 뜻이고, 이 성질이 없으면 서버 변경이 클라이언트 릴리스와 묶인다.
+
+### 8.7 관측 — 상한은 볼 수 있어야 운영된다
+
+상한을 넣는 작업과 그 상한을 **밖에서 보이게** 만드는 작업은 별개이고, 후자를 빠뜨리면 앞의 표는 운영할 수 없는 설정이 된다. 실제로 그랬다 — 전역 tx 예산을 넣은 직후에는 회계를 통째로 들어낸 바이너리도 테스트를 통과했다. 밖에서 관측되는 것이 "접속이 되는가" 뿐이었기 때문이다.
+
+운영자가 쓰는 손잡이는 둘이다.
+
+- **`--log-level error|warn|info|debug`** (기본 `info`, 환경변수 `TETRIS_RELAY_LOG_LEVEL` 로도 지정하며 인자가 이긴다). `info` 는 거절·종료·매치 수명·주기 상태까지, `debug` 는 접속 하나하나와 인증·큐·룸 진행까지 남긴다. 포워딩 경로에는 어느 레벨에서도 로그가 없다 — 저전력 박스에서 트래픽 처리와 로깅이 CPU 를 다투지 않게 하는 것이 조건이었다.
+- **`--stats-interval-sec`** (기본 10, `0` 이면 끔). 동시 연결·활성 매치·tx 사용량과 최고 수위·사유별 거절 카운터·인증 대기 깊이를 한 줄에 낸다. 현재값과 상한을 함께 찍으므로, 로그만 보고도 여유를 안다.
+
+로그 줄 자체도 계약이 있다. **한 줄은 조립을 마친 뒤 한 번의 `write` 로 나간다.** 예전의 `std::cerr << a << b << c` 는 삽입 연산자마다 별도 출력이라 부하가 오르면 서로 다른 매치의 로그가 한 줄에 엉켰고, 엉킨 로그는 "그 시각 그 사람이 왜 끊겼는지" 를 못 맞추므로 문의 대응에 쓸 수 없다. 그리고 모든 종료·거절 줄에 `match_uuid` 와 `player_id` 가 붙는다 — meta 의 경기 기록과 **같은 키**로 이어져야 문의 하나를 릴레이 로그에서 DB 까지 추적할 수 있다. 타임스탬프를 UTC 로 고정한 이유도 같다.
+
+`journalctl` 로 받는 배치에서는 이것이 실질적인 차이를 만든다. 사유별 거절 카운터가 있으면 "무엇이 먼저 걸리는가" 를 한 줄로 알 수 있고, 그것이 곧 위 표에서 **어느 값을 만져야 하는지**다. 합계만 있는 지표는 그 질문에 답하지 못한다.
 
 ## 9. 네트워크 경계 — 리버스 프록시와 TLS 종단
 
@@ -1514,7 +1572,12 @@ sleep 1
 uv run python -m pytest python/tests/test_relay_smoke.py python/tests/test_room_smoke.py -q
 kill %1
 
-# 7) 릴리스 스크립트 문법 검사
+# 7) 적대적 입력 — 두 릴레이 바이너리 모두
+uv run python -m pytest python/tests/test_relay_adversarial.py -q -rs
+TETRIS_RELAY_BIN=./build/tetris_relay_reactor \
+uv run python -m pytest python/tests/test_relay_adversarial.py -q -rs
+
+# 8) 릴리스 스크립트 문법 검사
 bash -n scripts/release_linux.sh scripts/release_server_linux.sh \
         scripts/release_macos.sh scripts/backup_meta_db.sh
 ```
@@ -1525,13 +1588,18 @@ bash -n scripts/release_linux.sh scripts/release_server_linux.sh \
 
 | 단계 | 무엇을 지키는가 |
 | --- | --- |
-| 1 | `tetris`, `tetris_relay`, `tetris_meta`, `sim_hash_dump`, `worker_group_test`, `copy_assets` 가 전부 빌드된다. `TETRIS_BUILD_TEST` 는 기본 ON 이라 따로 넘기지 않는다 |
+| 1 | `tetris`, `tetris_relay`, `tetris_relay_reactor`, `tetris_meta`, `sim_hash_dump`, `worker_group_test`, `copy_assets` 가 전부 빌드된다. `TETRIS_BUILD_TEST` 는 기본 ON 이라 따로 넘기지 않는다 |
 | 2 | [Part 1](./part1-deterministic-simulation.md) 의 결정론 계약. 같은 seed·입력이 같은 `StateHash` 를 낸다 |
 | 3 | §8.4 의 `WorkerGroup` — 상한, 생성 실패 rollback, 예외 격리, drain |
 | 4 | framing 바이트 표현의 C++/Python 패리티, 체크포인트 왕복, 학습 스크립트 정적 검사 |
 | 5 | meta DB 스키마·마이그레이션, relay↔meta 연동, MATCH_SUMMARY 교차 검증, §8.4 의 SIGTERM drain |
 | 6 | 랜덤 큐와 커스텀 룸의 페어링·seed 일치 |
-| 7 | 릴리스 스크립트가 문법 오류로 배포 당일에 죽지 않는다 |
+| 7 | §8.6 의 상한들이 실제로 걸리고, 걸린 연결이 사유를 받고, **무관한 사용자가 그 대가를 치르지 않는다** |
+| 8 | 릴리스 스크립트가 문법 오류로 배포 당일에 죽지 않는다 |
+
+7단계는 다른 단계와 성격이 다르다. 나머지가 "정상 흐름이 여전히 도는가" 를 묻는다면, 이 파일은 **잘못된 사용자**를 겨눈다 — 프레임 중간에 끊는 연결, 바이트를 한 개씩 흘리는 연결, 위조 프레임을 올려보내는 연결, 붙었다 끊기만 반복하는 연결. 그리고 모든 케이스가 두 가지를 함께 묻는다: 릴레이가 살아남는가, 그리고 **그 행동의 대가를 무관한 사람이 치르지 않는가.** 두 번째 질문이 이 파일의 존재 이유이고, §8.6 의 인증 대기 상한도 [Part 14](./part14-event-loop-scaling.md) 가 다루는 상대 이탈 통지도 전부 그 질문이 찾아낸 것들이다.
+
+아직 못 지키는 계약은 `xfail` 로 사유를 남겨 파이프라인을 붉게 만들지 않되, 고쳐지면 `XPASS` 로 드러나 표시를 지울 때가 됐음을 알린다. **예외가 하나 있다 — 릴레이 프로세스가 죽는 것은 `xfail` 로 덮지 않는다.** 픽스처가 매 테스트 끝에 생존을 확인하고 죽었으면 그대로 실패시킨다. 프로세스가 사라지는 것은 "아직 못 지킨 계약" 이 아니라 서비스가 없어진 것이고, 그 위에서 초록을 보고하는 스위트는 있으나 마나다. 릴리스 게이트에 이런 성격의 스위트를 하나 두는 것과 두지 않는 것의 차이는 크다 — **기능 테스트는 우리가 상상한 사용자만 대변한다.**
 
 **relay/room smoke의 포트 7788은 협상 대상이 아니다.** `python/tests/test_relay_smoke.py`와 `test_room_smoke.py`는 `RELAY_PORT = 7788`을 사용한다. 기본 7777로 띄우면 실패가 아니라 **skip**이 될 수 있으므로 `-rs` 출력에서 두 파일이 실제 실행됐는지 확인한다.
 
@@ -1559,7 +1627,12 @@ meta+relay 통합 테스트는 `build/`, `build-relay/`, `build-meta/` 를 자�
 - `net/session.cpp` INPUT 프레임 바운드 검증(`kMaxTickWindow`/`kMaxRemoteInputs` + 페이로드 경계) + `tcp_send_all` 5초 slow-loris 타임아웃.
 - 단계 전환의 잔여 TCP stream 인계, queue lobby 64 KiB 와 CHAT 256개 상한.
 - `WorkerGroup` 의 상한(연결 256 / relay 512), 생성 실패 rollback, callback 예외 격리, lock 보유 중 notify, 종료 drain. 회귀는 `test_relay_sigterm_drains_active_match`.
-- 첫 프레임 5초, peer IP별 setup 16개(`IpAdmission`), listen backlog 256, 양 플랫폼 15초/5초로 정합한 TCP keepalive, 매치 방향별 15초 idle·64KiB/s 경계.
+- 첫 프레임 5초, peer IP별 핸드셰이크 예산과 연결 수명 동안 유지되는 세션 예산의 분리(`IpAdmission`, 후자는 `--max-sessions-per-ip` 로 조절), listen backlog 256, 양 플랫폼 15초/5초로 정합한 TCP keepalive, 매치 방향별 15초 idle·64KiB/s 경계.
+- 배포 대상 릴레이의 프로세스 전체 예산 — 동시 연결(`--max-conns`), 보류 송신 총합(`--max-tx-mib`), 인증 대기 큐 깊이(`--max-pending-auth`). 연결당 상한만으로는 묶이지 않는 총합을 겨눈다.
+- 상한에 걸린 연결에 `SERVER_REJECT` 로 사유 코드를 먼저 내려보내는 거절 계약. 구버전 클라이언트는 모르는 타입을 무시하므로 동작이 예전과 같다 — 릴레이 배포가 클라이언트 릴리스와 묶이지 않는다.
+- 클라이언트가 위조한 서버 전용 프레임(`net::is_server_only_type`)을 두 릴레이 바이너리 모두 중계하지 않는다. 그 프레임만 버리고 연결은 살린다.
+- 원자적 로깅(`server/log.h`) — 한 줄을 조립해 단일 `write` 로 내보내고, `--log-level` 로 상세도를 정하며, 모든 종료·거절 줄에 `match_uuid`·`player_id` 를 붙여 meta 기록과 같은 키로 잇는다.
+- 주기 상태 줄(`--stats-interval-sec`) — 동시 연결·활성 매치·tx 사용량과 최고 수위·사유별 거절 카운터·인증 대기 깊이를 프로세스 전역 기준으로 내보낸다. 관측할 수 없는 예산은 운영도 검증도 못 한다.
 - player별 단일 활성 session lease, meta 네트워크 장애에만 쓰는 5분/4096개 인증 캐시, 단절 시 몰수 처리 — 남아 있는 요약의 승패 주장을 존중하고, 요약이 하나도 없는 무경기는 meta POST 를 생략해 RP 를 반영하지 않는다(델타 0 통지만).
 - `server/main.cpp` 의 relay 시작 거부(`--meta` 인데 secret 없음) + `meta/main.cpp` 의 meta 시작 거부(secret 도 `--allow-public-matches` 도 없음).
 - `meta/http_client.cpp` `save_token` 의 `0600`/`fchmod` 토큰 파일과 플랫폼별 user-data 경로(Windows 는 `%APPDATA%` Roaming).
@@ -1568,7 +1641,7 @@ meta+relay 통합 테스트는 `build/`, `build-relay/`, `build-meta/` 를 자�
 - `deploy/Caddyfile.example` + `deploy/cloudflared/config.yml.example` — meta 를 loopback 에 두고 same-origin `/v1/` 을 성립시키는 리버스 프록시/TLS 종단 배치.
 - `deploy/systemd/*.service` 의 `User=tetris`, `EnvironmentFile=`, `Restart=always`, `NoNewPrivileges`/`PrivateTmp`/`ProtectSystem=strict`/`ProtectHome` + meta 만 `ReadWritePaths=/srv/tetris`.
 - `scripts/release_{linux,macos,server_linux}.sh` · `release_win.ps1` · `backup_meta_db.sh` 와 CMake Release/엔드포인트 주입, `TETRIS_ENABLE_HTTPS` 게이트.
-- §12의 빌드·결정론·네트워크·meta·패키징 전체 회귀 절차.
+- §12의 빌드·결정론·네트워크·meta·적대적 입력·패키징 전체 회귀 절차.
 
 ## 수동 테스트
 

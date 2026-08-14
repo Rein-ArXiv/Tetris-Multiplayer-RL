@@ -14,7 +14,7 @@
   1. 프레이밍 계약(부분 수신 · 잘못된 길이 · 체크섬 불일치)이 자동 테스트로 통과한다 — `python/tests/test_framing_parity.py`. 이 패리티 하네스(`python/netbot/framing.py` 미러 포함)는 [Part 8](./part8-python-rl.md) 이 구현한다 — 여기서는 완성 저장소에서 실행만 한다.
   2. 같은 머신에서 `--host` / `--connect` 두 인스턴스를 붙이면 양쪽 `[INIT] seed=...` 가 일치하고, 600틱마다 교환하는 결합 해시가 어긋나지 않는다(`[DESYNC]` 로그 0건).
 
-이 장의 구현 산출물은 **직결 P2P lockstep 세션**이다. `HELLO` / `HELLO_ACK` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT`의 전송 계약과 `Session::ioThread`를 완성한다. 현재 `net/session.*`에는 릴레이와 랭킹 확장도 함께 있지만, `QUEUE_*` / `ROOM_*` / `MATCH_FOUND`는 Part 7, `MATCH_SUMMARY` / `MATCH_RESULT`의 서버 권위 의미는 Part 10의 소유다. 이 장의 현재 소스 발췌에 그런 타입이 보이더라도 직결 세션을 이해하는 데 필요한 wire 기반과 수신 안전성만 읽는다.
+이 장의 구현 산출물은 **직결 P2P lockstep 세션**이다. `HELLO` / `HELLO_ACK` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT`의 전송 계약과 `Session::ioThread`를 완성한다. 현재 `net/session.*`에는 릴레이와 랭킹 확장도 함께 있지만, `QUEUE_*` / `ROOM_*` / `MATCH_FOUND`는 Part 7, `MATCH_SUMMARY` / `MATCH_RESULT`의 서버 권위 의미는 Part 10의 소유다. `SERVER_REJECT`의 **wire 계약과 하위 호환 근거**는 이 장이 갖고, 어떤 상한에서 그것을 발행하는지는 Part 7 과 [Part 14](./part14-event-loop-scaling.md) 가 갖는다. 이 장의 현재 소스 발췌에 그런 타입이 보이더라도 직결 세션을 이해하는 데 필요한 wire 기반과 수신 안전성만 읽는다.
 
 ## 들어가며
 
@@ -698,7 +698,7 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 ---
 ## 3. 메시지 타입
 
-`MsgType` 은 1바이트 enum 이다. 이 장이 만드는 직결 세션은 1~9 와 20(CHAT)만 쓰고, 10~19 는 릴레이 서버와 주고받는 확장이다.
+`MsgType` 은 1바이트 enum 이다. 이 장이 만드는 직결 세션은 1~9 와 20(CHAT)만 쓰고, 10~19 는 릴레이 서버와 주고받는 확장, 21 은 릴레이가 연결을 거절하며 사유를 밝히는 프레임이다.
 
 **현재 소스 발췌 — `net/framing.h`**
 
@@ -748,6 +748,14 @@ enum class MsgType : uint8_t {
                          //   필드명 elo_* 는 하위 호환용. 값은 RP이며 delta=0은 무변동.
 
     CHAT        = 20,  // 양방향 : [text_len:2 LE][utf8:N] (릴레이가 통과 포워딩)
+
+    // 서버가 연결을 거절하며 사유를 밝힌다.
+    //   S→C : [reason:1][text_len:1][utf8:N]
+    // 상한(전역 연결 수·per-IP·전역 tx 예산)에 걸린 연결은 예전에는 소켓이
+    // 그냥 닫혔다. 사용자에게는 원인 모를 끊김이고, 문의가 와도 서버 로그와
+    // 맞춰 보기 전에는 아무 말도 못 했다. 이 프레임을 먼저 내려보내면
+    // 클라이언트가 "서버 만원" 같은 문구를 띄울 수 있다.
+    SERVER_REJECT = 21,
 };
 ```
 
@@ -787,8 +795,70 @@ struct Frame {
 | READY (17) | `[ready:1]` | 양방향 | 수락/거절 | Part 7 |
 | MATCH_SUMMARY (18) | 21바이트 (아래) | C→S | 랭킹 집계 요청 | Part 7 / [Part 10](./part10-meta-and-ranking.md) |
 | MATCH_RESULT (19) | `[elo_before:4][elo_after:4][delta:4 signed]` | S→C | RP 변동 결과 | 이 장에서 **수신 처리**, relay 판정·발행은 [Part 10](./part10-meta-and-ranking.md) |
+| SERVER_REJECT (21) | `[reason:1][text_len:1][utf8:N]` | S→C | 상한에 걸린 연결에 사유를 밝히고 끊는다 | 계약은 이 장, 발행은 Part 7 |
 
 `MATCH_RESULT`는 완성된 소스의 확장 타입이다. relay가 meta의 확정 결과를 담아 보내면 `Session::handleFrame`이 파싱하고 `Session::GetMatchResult`로 UI에 노출한다. wire에는 `elo_before`, `elo_after`, `delta`라는 하위 호환 이름의 RP 값만 들어간다. BP와 XP는 이 프레임에 없으므로 메뉴 복귀 뒤 meta profile을 다시 읽어 갱신한다. 랭킹 판정과 실패 정책은 Part 10이 설명한다.
+
+### 3.2 방향 칸이 곧 신뢰 경계다 — 서버 전용 타입
+
+위 표에서 가장 무심코 지나치기 쉬운 칸이 **방향**이다. 그런데 이 프로토콜에서 방향은 문서화 편의가 아니라 **보안 계약**이다.
+
+이유는 릴레이의 구조에 있다. 매치가 성립하면 두 클라이언트는 같은 소켓 하나로 서버 프레임과 상대 프레임을 함께 받는다. 그리고 **받는 쪽은 둘을 구별할 방법이 없다.** 프레임에는 출처 필드가 없기 때문이다. `MATCH_RESULT` 가 왔다면 그것은 서버가 보낸 확정 결과라고 믿는 것 — 그 믿음 위에 프로토콜 전체가 서 있다.
+
+릴레이가 포워딩 중에 아무 타입이나 그대로 흘려보내면 그 믿음을 **상대 플레이어가 위조할 수 있다.** 매치 중인 사람이 `MATCH_RESULT` 를 한 프레임 올려보내면, 릴레이가 그것을 상대에게 넘기고, 상대 클라이언트는 없던 RP 변동을 화면에 띄운다. `ROOM_INFO` 나 `MATCH_FOUND` 를 보내면 상대를 있지도 않은 방·매치 상태로 밀어 넣을 수 있다.
+
+그래서 "이 타입을 서버만 만들 수 있는가" 를 산문이 아니라 **함수**로 적어 두 바이너리가 함께 호출한다.
+
+**현재 소스 발췌 — `net/framing.h`**
+
+```cpp
+constexpr bool is_server_only_type(uint8_t type) {
+    return type == static_cast<uint8_t>(MsgType::MATCH_FOUND)  ||
+           type == static_cast<uint8_t>(MsgType::ROOM_INFO)    ||
+           type == static_cast<uint8_t>(MsgType::MATCH_RESULT) ||
+           type == static_cast<uint8_t>(MsgType::SERVER_REJECT);
+}
+```
+
+목록의 근거는 전부 위 표의 방향 칸이다. `S→C` 로 적힌 타입은 서버가 만들어 내려보내는 것이고, 클라이언트가 같은 타입을 올려보낼 자리는 프로토콜 어디에도 없다.
+
+**여기 없는 것들의 근거도 같은 표다.** 이쪽이 더 중요하다 — "서버가 보내는 것처럼 보이는 타입" 을 이름만 보고 넣으면 멀쩡한 기능이 죽는다.
+
+- `HELLO_ACK` 은 이름과 달리 서버가 아니라 **상대 피어**가 보내는 응답이다. 직결 세션에서 HELLO 를 받은 쪽이 돌려주는 프레임이고, 릴레이 매치에서도 그대로 통과해야 한다. 막으면 매치가 아예 시작되지 않는다.
+- `READY` 는 표가 `C→S, S→C(forward)` 라고 못 박는다. 릴레이가 중계하는 것이 정상 동작이다.
+- `CHAT` 은 양방향이다.
+- `MATCH_SUMMARY` 는 `C→S` 라 클라이언트가 보내는 것이 맞다. 랭크드 릴레이가 이것을 가로채는 이유는 "서버 전용이라서" 가 아니라 **결과 교차검증에 쓰려고 소비하기** 때문이므로, 성격이 다른 목록이다.
+
+**위반한 프레임은 버리되 연결은 살린다.** 이것도 결정이다. 반칙한 쪽을 끊고 싶은 충동이 자연스럽지만, 포워딩은 양방향이라 여기서 연결을 끊으면 위조한 쪽만이 아니라 **상대의 경기까지 함께 끝난다.** 한 사람의 반칙으로 무관한 사람의 판을 깨는 것은, 이 프레임들을 막아서 지키려던 것과 정확히 같은 손해다. 그리고 프레임을 버리기만 해도 공격자가 얻는 것은 없다.
+
+> **일반 규칙: "누가 이 메시지를 만들 수 있는가" 를 타입 정의 옆에 값으로 적어라.**
+> 방향 주석은 사람이 읽는 문서이고, 사람은 새 타입을 추가할 때 그 문서를 갱신하는 것을 잊는다. 방향을 코드가 읽을 수 있는 술어로 만들어 두면, 그 술어를 부르는 모든 지점이 자동으로 새 타입을 반영한다. 그리고 이 판단은 반드시 **프로토콜을 정의하는 곳**에 있어야 한다 — 서버 구현마다 각자 목록을 들고 있으면, 그중 하나만 갱신을 놓쳐도 그 서버가 구멍이 된다.
+
+### 3.3 거절에도 사유가 있어야 한다
+
+`SERVER_REJECT` 는 반대 방향의 문제를 푼다. 상한에 걸린 연결을 그냥 `close` 하면 사용자에게는 **원인 모를 끊김**이다. 서버 만원인지, 회선이 끊긴 건지, 클라이언트 버그인지 구별할 근거가 화면에 하나도 없다. 문의가 와도 서버 로그와 시각을 맞춰 보기 전에는 아무 말도 못 한다.
+
+**현재 소스 발췌 — `net/framing.h`**
+
+```cpp
+enum class RejectReason : uint8_t {
+    ServerFull       = 1,  // 프로세스 전체 동시 연결 상한
+    IpSessionLimit   = 2,  // per-IP 동시 세션 상한
+    IpHandshakeLimit = 3,  // per-IP 동시 핸드셰이크 상한
+    TxBudget         = 4,  // 프로세스 전체 보류 송신 예산
+    AuthBacklog      = 5,  // 대기 중인 meta 인증 왕복 상한
+};
+```
+
+세 가지 설계 규칙이 여기 들어 있다.
+
+**첫째, 사유 코드 값은 wire 규약이다.** 재사용하거나 다시 번호를 매기지 않고 새 사유는 뒤에 덧붙인다. 모르는 코드를 받은 클라이언트는 함께 실린 텍스트를 쓰거나 일반 문구로 물러선다. 코드와 텍스트를 함께 싣는 이유가 이것이다 — 코드는 클라이언트가 분기하기 위한 것이고, 텍스트는 클라이언트가 그 코드를 모를 때를 위한 것이다.
+
+**둘째, 이 타입을 모르는 구버전 클라이언트도 안전하다.** 그 근거는 이 장이 이미 만들어 둔 성질이다. `parse_frames` 는 타입을 해석하지 않고 그대로 올려 주고, `Session::handleFrame` 의 `switch` 는 `default: break;` 로 흘려 보낸다. 큐·룸 대기 루프도 자기가 찾는 타입이 아니면 건너뛴다. Python 미러도 모르는 타입을 그 프레임만 소비하고 계속 읽는다. 어느 쪽이든 **프레임을 무시한 뒤 소켓 종료를 관측**하므로, 구버전에서의 동작은 예전과 정확히 같다 — 조용한 끊김이다. 새 클라이언트만 사유를 읽는다.
+
+이것이 "알 수 없는 TYPE 을 그대로 통과시킨다" 는 파서 규칙이 값을 하는 자리다. 그 규칙이 없었다면 서버에 새 프레임 하나를 추가하는 일이 **클라이언트 강제 업데이트**를 요구했을 것이다. 포워드 호환성은 추상적인 미덕이 아니라, 나중에 무엇을 클라이언트 릴리스와 묶지 않아도 되는지를 정하는 실무적 자산이다.
+
+**셋째, 전달은 보장이 아니라 최선의 노력이다.** 거절은 소켓을 닫기 직전에 일어난다. 닫는 시점에 아직 읽지 않은 수신 데이터가 남아 있으면 커널은 FIN 대신 RST 를 보내고, 그러면 방금 큐에 넣은 바이트도 함께 버려진다. 서버는 닫기 전에 수신 큐를 한 번 비워 그 창을 좁히지만 **없애지는 못한다.** 그래서 클라이언트는 이 프레임이 오지 않는 경우에도 기존의 일반 문구로 물러설 수 있어야 한다. **최선 노력 통지 위에 필수 UI 를 올리지 않는 것** — 이 구분을 흐리면 "가끔 아무 메시지도 안 뜨는" 버그가 된다.
 
 ---
 
@@ -2278,7 +2348,7 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 
 다섯 번째가 이 목록에서 가장 늦게 추가됐고, 가장 놓치기 쉬운 규칙이다. 처음 네 규칙은 "프레임 하나를 안전하게 읽는" 문제고, 다섯 번째는 "프레임이 계속 오는" 문제다. fuzz 테스트(랜덤 프레임을 던져 크래시 유도)는 앞의 넷을 잡지만, 플러딩 테스트가 아니면 다섯 번째는 드러나지 않는다.
 
-릴레이의 검증 범위는 모드에 따라 다르다. **unranked 매치는 게임 바이트를 그대로 양방향 전달**하고, 끝점 `Session`이 프레임과 payload를 검증한다. **ranked 매치는 전송 경계를 찾기 위해 프레임 길이를 읽고, `MATCH_SUMMARY`일 때만 checksum과 결과 payload를 검증**한다. 그 외 게임 프레임은 wire byte를 바꾸지 않고 상대에게 보낸다. relay가 전체 게임 프로토콜을 재구현하지 않는 것은 결정론 시뮬레이션과 중계 서버의 소유권을 분리하기 위해서다.
+릴레이의 검증 범위는 모드에 따라 다르다. 두 모드 모두 프레임 **경계**는 훑는다 — 서버만 만들 수 있는 타입(§3.2)을 걸러 내려면 타입 바이트가 어디 있는지 알아야 하기 때문이다. 그 위에서 **unranked 매치는 통과한 프레임의 내용을 보지 않고** 원본 바이트를 그대로 흘리고, 끝점 `Session`이 프레임과 payload를 검증한다. **ranked 매치는 거기에 더해 `MATCH_SUMMARY`일 때만 checksum과 결과 payload를 검증**한다. 그 외 게임 프레임은 wire byte를 바꾸지 않고 상대에게 보낸다. relay가 전체 게임 프로토콜을 재구현하지 않는 것은 결정론 시뮬레이션과 중계 서버의 소유권을 분리하기 위해서다.
 
 ---
 
@@ -2296,7 +2366,11 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 | CHAT 송신 텍스트 | `Session` | 1024 B | 잘라서 송신 | `net/session.cpp` |
 | `tcp_send_all` 커널 버퍼 대기 | `net/socket.cpp` | 5초 | `false` 반환 → 연결 실패 처리 | `net/socket.cpp` |
 | 릴레이 로비 수신 버퍼 | 릴레이 서버 | 64 KiB | 연결 종료 | `server/relay.cpp` (Part 7) |
+| 릴레이 보류 송신 (연결당) | 릴레이 서버 | 고수위에서 상대 읽기 정지, 하드 상한에서 종료 | 정지 → 종료 | `server/reactor_relay.cpp` ([Part 14](./part14-event-loop-scaling.md)) |
+| 릴레이 보류 송신 (프로세스 전체) | 릴레이 서버 | `--max-tx-mib` | 사유(`SERVER_REJECT`)를 밝히고 종료 | `server/reactor_relay.cpp` (Part 14) |
 | 릴레이 연결 워커 | 릴레이 서버 | 256 | 신규 연결 거부 | `server/main.cpp` (Part 7) |
+| 릴레이 동시 연결 | 릴레이 서버 | `--max-conns` | 사유(`SERVER_REJECT`)를 밝히고 거부 | `server/reactor_relay.cpp` (Part 14) |
+| 릴레이 인증 대기 큐 | 릴레이 서버 | `--max-pending-auth` | 사유(`SERVER_REJECT`)를 밝히고 거부 | `server/reactor_relay.cpp` (Part 14) |
 | 릴레이 중계 워커 | 릴레이 서버 | 512 | 신규 매치 거부 | `server/relay.cpp` (Part 7) |
 | **`sendQ` (게임 송신 큐)** | `Session` | 4096 프레임 | 연결 실패 처리 | `Session::pushSend` |
 
@@ -3284,11 +3358,11 @@ endif()
 
 완성형 relay 구조는 이 장의 lockstep 계약에 아래 경계를 연결한다. 서버 내부 구현은 [relay 서버](./part7-relay-server.md)에 모아 두었다.
 
-- **서버 측** — `server/*.cpp`가 `net/socket.cpp`와 `net/framing.cpp`를 재사용하고 `net/session.cpp`는 쓰지 않는다. 입장·룸 제어 프레임과 ranked 결과 요약은 해석하지만, 성립된 게임의 일반 프레임은 게임 상태를 만들지 않고 전달한다.
+- **서버 측** — `server/*.cpp`가 `net/socket.cpp`와 `net/framing.cpp`를 재사용하고 `net/session.cpp`는 쓰지 않는다. 입장·룸 제어 프레임과 ranked 결과 요약은 해석하고, 서버 전용 타입은 걸러 내며(§3.2), 성립된 게임의 나머지 일반 프레임은 게임 상태를 만들지 않고 전달한다.
 - **클라이언트 측** — `queueThread` / `roomThread`가 큐와 룸 페이즈를 소유한다. 두 스레드는 `ioThread`와 같은 소켓을 다른 페이즈에서 쓰므로, §6.2의 뮤텍스 분할과 §6.3의 `recvBuf` preload 계약이 핸드오프를 보호한다.
 - **배포 설정** — CMake 기본 endpoint, `TETRIS_RELAY_ENDPOINT`, `--relay` 순으로 값을 덮어쓴다. 주소는 UI에 하드코딩하지 않고 배포자와 실행 환경이 정한다.
 
-릴레이가 붙어도 lockstep의 `INPUT`·`ACK`·`PING/PONG`·`HASH` 처리 규칙은 달라지지 않는다. relay는 일반 게임 프레임을 전달하고 ranked `MATCH_SUMMARY`만 서버 결과 검증을 위해 가로챈다. 클라이언트 `Session::handleFrame`에는 서버가 돌려주는 `MATCH_RESULT` 경로가 추가되지만, `SimGame`의 틱 진행과 입력 순서는 직결 P2P와 같다.
+릴레이가 붙어도 lockstep의 `INPUT`·`ACK`·`PING/PONG`·`HASH` 처리 규칙은 달라지지 않는다. relay는 일반 게임 프레임을 전달하고, ranked `MATCH_SUMMARY`만 서버 결과 검증을 위해 가로채며, 클라이언트가 위조한 서버 전용 타입은 버린다. 클라이언트 `Session::handleFrame`에는 서버가 돌려주는 `MATCH_RESULT` 경로가 추가되지만, `SimGame`의 틱 진행과 입력 순서는 직결 P2P와 같다.
 
 ---
 
@@ -3402,7 +3476,8 @@ Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon, match_uuid}
 ## 이 장에서 완성된 것
 
 - `socket` → `framing` → `session` 3계층으로 lockstep 네트워킹 스택을 분리했다. `net/` 의 어느 파일도 `SimGame` 을 include 하지 않는다.
-- 길이-접두사 프레이밍과 FNV-1a 32 체크섬으로 TCP 바이트 스트림 위에 메시지 경계를 세웠다. 부분 수신, 오버사이즈 선언, 체크섬 불일치, 미지 타입이 모두 정의된 동작을 갖는다.
+- 길이-접두사 프레이밍과 FNV-1a 32 체크섬으로 TCP 바이트 스트림 위에 메시지 경계를 세웠다. 부분 수신, 오버사이즈 선언, 체크섬 불일치, 미지 타입이 모두 정의된 동작을 갖는다. 미지 타입을 흘려보내는 규칙 덕분에, 나중에 서버가 `SERVER_REJECT` 같은 새 프레임을 추가해도 구버전 클라이언트의 동작이 달라지지 않는다.
+- 타입 표의 **방향 칸을 신뢰 경계로** 승격했다. 서버만 만들 수 있는 타입을 술어(`net::is_server_only_type`)로 적어 두 릴레이 바이너리가 함께 호출하고, 클라이언트가 위조한 그런 프레임은 중계되지 않는다.
 - `HELLO` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT` 까지 직결 P2P 프로토콜의 메시지 흐름을 고정했다.
 - `safeTick = min(lastLocalSent, lastRemoteRecv) - inputDelay` 로 두 `SimGame` 을 동기 진행시키고, 600틱마다 XOR 결합 해시로 교차 검증한다.
 - 창 드래그 · 일시 정지 · 진짜 단절을 PING/PONG + ioThread 자동 heartbeat 으로 구분해, 한쪽이 얼어도 상대 화면이 멈추지 않는다.

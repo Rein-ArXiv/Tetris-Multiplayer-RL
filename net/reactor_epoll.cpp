@@ -100,9 +100,13 @@ public:
 private:
     bool ctl(int op, int fd, unsigned interest, void* token) {
         epoll_event ev{};
-        ev.events = EPOLLRDHUP;
-        if (interest & kRead)  ev.events |= EPOLLIN;
+        ev.events = 0;
+        if (interest & kRead)  ev.events |= EPOLLIN | EPOLLRDHUP;
         if (interest & kWrite) ev.events |= EPOLLOUT;
+        // EPOLLRDHUP 는 읽기 관심과 함께일 때만 건다. 무조건 걸면 interest 가 0 인
+        // 소켓 — 즉 호출자가 백프레셔로 읽기를 멈춰 둔 소켓 — 도 상대가 half-close
+        // 하는 순간부터 레벨 트리거로 계속 보고된다. 멈춰 세운 의미가 사라지고
+        // 루프가 그 fd 로 스핀한다. 진짜 종료는 읽기를 재개할 때 EOF 로 알게 된다.
         ev.data.ptr = token;
         return ::epoll_ctl(epfd_, op, fd, &ev) == 0;
     }

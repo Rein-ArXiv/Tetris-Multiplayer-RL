@@ -568,6 +568,216 @@ def test_reactor_loops_two_falls_back_to_single_loop():
         "비용만 늘어난 구성이다:\n" + out)
 
 
+def test_queued_client_cannot_grow_the_relay_buffer(meta_and_relay):
+    """큐 대기 중 흘려보낸 바이트가 무한히 쌓이면 안 된다.
+
+    큐 단계는 잔여 바이트를 뒤 단계로 넘겨야 해서 rx 를 소비하지 않고 쌓아 둔다.
+    그런데 바이트 레이트 상한이 Forward 단계에만 걸려 있었고 버퍼 상한도 없어,
+    큐에 들어간 클라이언트 하나가 메모리를 무한히 먹을 수 있었다. 재파싱이 매
+    읽기마다 돌기 때문에 비용이 O(n^2) 로 자라 단일 루프 스레드를 통째로 잡는다 —
+    진행 중인 모든 매치가 함께 멈춘다.
+
+    QUEUE_CANCEL 이 아닌 유효 프레임(CHAT)을 상한 위로 부어 릴레이가 끊는지 본다.
+    """
+    base = meta_and_relay["meta_url"]
+    rh   = meta_and_relay["relay_host"]
+    rp   = meta_and_relay["relay_port"]
+
+    tok = _post(f"{base}/v1/guest")["token"]
+    s = socket.create_connection((rh, rp), timeout=2.0)
+    try:
+        s.sendall(_build_queue_join(tok))
+        # 상대가 없으니 큐에 남는다. 여기에 CHAT 을 들이붓는다.
+        chat = build_frame(MsgType.CHAT, b"x" * 512)
+        s.settimeout(5.0)
+        closed = False
+        sent = 0
+        # 버퍼 상한(64 KiB)과 레이트 상한(64 KiB/s) 중 어느 쪽에 먼저 걸리든
+        # 결과는 같아야 한다 — 릴레이가 이 연결을 끊는다.
+        for _ in range(2000):          # 최대 1 MiB
+            try:
+                s.sendall(chat)
+                sent += len(chat)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                closed = True
+                break
+        if not closed:
+            try:
+                closed = s.recv(4096) == b""
+            except (socket.timeout, ConnectionResetError):
+                closed = True
+        assert closed, (
+            f"큐 대기 중 {sent} 바이트를 부었는데도 릴레이가 연결을 유지한다 "
+            "— 상한이 없다")
+    finally:
+        s.close()
+
+
+def test_ranked_room_join_ready_coalesced_with_host_already_ready(meta_and_relay):
+    """게스트의 ROOM_JOIN 과 READY 가 한 세그먼트에 실려 오고 호스트가 이미 READY 인 경우.
+
+    room_join 은 on_room(c) 를 부른 뒤 호스트의 잔여 바이트도 처리하려고 Room 을
+    다시 만졌는데, 그 사이 on_room 이 양쪽 READY 를 관측하면 start_room_match 가
+    Room 을 파괴한다 — use-after-free 다.
+
+    주의: 이 테스트는 회귀 테스트가 아니라 **가드**다. 해제된 메모리가 아직 멀쩡해
+    보이면 수정 전에도 통과한다. 값은 경로를 밟아 둔다는 데 있고, 진짜 검출은
+    새니타이저를 켠 빌드에서 이 경로를 돌릴 때 나온다.
+    """
+    base = meta_and_relay["meta_url"]
+    rh   = meta_and_relay["relay_host"]
+    rp   = meta_and_relay["relay_port"]
+
+    p1 = _post(f"{base}/v1/guest")
+    p2 = _post(f"{base}/v1/guest")
+
+    a = socket.create_connection((rh, rp), timeout=2.0)
+    b = socket.create_connection((rh, rp), timeout=2.0)
+    a_buf, b_buf = bytearray(), bytearray()
+    try:
+        a.sendall(_build_room_create(p1["token"]))
+        code, _, _ = _parse_room_info(_recv_frame(a, MsgType.ROOM_INFO, a_buf))
+        # 호스트가 먼저 READY 를 확정해 둔다.
+        a.sendall(build_frame(MsgType.READY, b"\x01"))
+        time.sleep(0.2)
+        # 게스트는 JOIN 과 READY 를 한 번에 — 릴레이가 같은 recv 로 받게 된다.
+        b.sendall(_build_room_join(code, p2["token"]) + build_frame(MsgType.READY, b"\x01"))
+
+        mf_a = _recv_frame(a, MsgType.MATCH_FOUND, a_buf)
+        mf_b = _recv_frame(b, MsgType.MATCH_FOUND, b_buf)
+        assert struct.unpack_from("<Q", mf_a, 1)[0] == struct.unpack_from("<Q", mf_b, 1)[0]
+        assert {mf_a[0], mf_b[0]} == {1, 2}
+    finally:
+        a.close(); b.close()
+
+
+def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
+    """느리게 읽는 상대 때문에 정상 송신자가 끊기면 안 된다.
+
+    상대의 tx 가 high-water 를 넘으면 릴레이는 흘려보내는 쪽의 읽기를 멈춘다. 멈춘
+    연결은 읽기 이벤트가 나지 않으므로 유휴 데드라인이 갱신되지 않는데, 유휴 판정이
+    그걸 그대로 보면 "안 읽는 쪽" 이 아니라 "보내는 쪽" 이 idle 타임아웃으로 끊긴다.
+    피해자와 가해자가 뒤바뀐다.
+
+    A 가 꾸준히 보내고 B 는 전혀 읽지 않는 상태를 유휴 타임아웃(15초)보다 오래 유지한
+    뒤, A 가 살아 있는지 본다. 느린 테스트지만 이 경로를 재는 방법이 이것뿐이다.
+
+    reactor 전용이다. 스레드 모델에는 "읽기를 멈춘다" 는 기제가 없다 — 방향별 스레드가
+    tcp_send_all 안에서 최대 5초 잠들며 버티다 실패하면 매치를 접는다. 안 읽는 상대를
+    다루는 방식 자체가 달라서 같은 계약을 겨눌 수 없다.
+    """
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if relay_bin is None or "reactor" not in relay_bin.name:
+        pytest.skip("스레드 모델은 백프레셔 대신 블로킹 send 재시도 — 계약이 다름")
+
+    base = meta_and_relay["meta_url"]
+    rh   = meta_and_relay["relay_host"]
+    rp   = meta_and_relay["relay_port"]
+
+    p1 = _post(f"{base}/v1/guest")
+    p2 = _post(f"{base}/v1/guest")
+
+    a = socket.create_connection((rh, rp), timeout=2.0)
+    b = socket.create_connection((rh, rp), timeout=2.0)
+    # B 의 수신 버퍼를 좁혀 릴레이의 tx 가 빨리 차게 한다.
+    b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    try:
+        a.sendall(_build_queue_join(p1["token"]))
+        b.sendall(_build_queue_join(p2["token"]))
+        _recv_match_found(a)
+        _recv_match_found(b)
+        a.sendall(build_frame(MsgType.READY, b"\x01"))
+        b.sendall(build_frame(MsgType.READY, b"\x01"))
+        time.sleep(0.3)
+
+        # B 는 이 아래로 단 한 바이트도 읽지 않는다. 다만 자기 유휴 데드라인은
+        # 살려 둬야 한다 — B 가 스스로 idle 로 끊기면 그 여파로 A 도 닫혀서, 정작
+        # 재려던 조건(백프레셔에 멈춘 A 가 끊기는가)을 못 본다.
+        keepalive = build_frame(MsgType.INPUT, struct.pack("<IH", 0, 1) + b"\x00")
+        # A 는 상대의 tx 를 high-water(256 KiB) 위로 밀어 올릴 만큼 보낸다. 바이트
+        # 레이트 상한(64 KiB/s) 아래를 유지해야 그쪽에 먼저 걸리지 않는다.
+        chunk = build_frame(MsgType.CHAT, b"x" * 400)          # ≈ 411 B
+        # 아래 루프는 50 ms 마다 돈다. 5 × 411 B × 20 회/초 ≈ 41 KiB/s 로,
+        # 바이트 레이트 상한(64 KiB/s) 아래다 — 그쪽에 먼저 걸리면 재려던 조건이
+        # 아니라 레이트 초과로 끊긴다.
+        per_tick = 5
+        a.settimeout(2.0)
+        b.settimeout(2.0)
+
+        def _fail(exc, phase):
+            pytest.fail(f"[{phase}] 릴레이가 연결을 끊었다: {exc!r} — 백프레셔로 "
+                        "멈춰 세운 송신자를 유휴로 오인하고 있다")
+
+        # 1단계 — A 를 밀어 올려 릴레이가 A 의 읽기를 멈추게 한다.
+        # 멈추면 릴레이가 A 소켓에서 더 이상 읽지 않으므로 A 의 커널 송신 버퍼가
+        # 차고 sendall 이 블록된다. 그 timeout 이 "멈춰 세워졌다" 는 신호다 —
+        # 끊긴 것과 구분해야 한다(끊기면 reset/abort 가 온다).
+        paused = False
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 20.0:
+            try:
+                for _ in range(per_tick):
+                    a.sendall(chunk)
+                b.sendall(keepalive)
+            except socket.timeout:
+                paused = True
+                break
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                _fail(exc, "1단계: 밀어 올리는 중")
+            time.sleep(0.05)
+        assert paused, "high-water 를 넘겼는데도 릴레이가 읽기를 멈추지 않았다"
+
+        # 2단계 — 멈춘 채로 유휴 타임아웃(15초)보다 오래 버틴다. B 는 여전히 안 읽고,
+        # 자기 데드라인만 keepalive 로 살려 둔다. 수정 전에는 여기서 A 가 끊겼다.
+        hold_until = time.monotonic() + 18.0
+        while time.monotonic() < hold_until:
+            try:
+                b.sendall(keepalive)
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                _fail(exc, "2단계: 멈춘 채로 대기")
+            time.sleep(0.5)
+
+        # 3단계 — B 가 읽기 시작하면 릴레이의 보류 송신이 빠지고 A 의 읽기가 재개돼야
+        # 한다. 재개 경로에는 유휴 데드라인 재무장이 붙어 있다(멈춘 동안 굳어 있었다).
+        # 빼내는 동안에도 양쪽 데드라인은 살려 둬야 한다 — 여기서 아무도 안 보내면
+        # 재개와 무관하게 그냥 유휴로 끊긴다(재려던 조건이 아니다).
+        drained = 0
+        b.settimeout(0.5)
+        t1 = time.monotonic()
+        last_keepalive = t1
+        while time.monotonic() - t1 < 8.0:
+            try:
+                got = b.recv(65536)
+                if not got:
+                    break
+                drained += len(got)
+            except socket.timeout:
+                pass
+            # 데이터가 몰려 오면 이 루프는 아주 빨리 돈다. 송신을 매 회전마다 하면
+            # 다시 바이트 레이트 상한을 넘어 "레이트 초과" 로 끊긴다 — 시간 기준으로
+            # 묶어 유휴 데드라인만 유지한다.
+            now = time.monotonic()
+            if now - last_keepalive >= 0.4:
+                last_keepalive = now
+                try:
+                    b.sendall(keepalive)
+                    a.sendall(chunk)
+                except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                    _fail(exc, "3단계: 빼내는 중")
+            if drained > 512 * 1024:
+                break
+        assert drained > 0, "B 가 읽기 시작했는데 보류 송신이 하나도 안 빠졌다"
+
+        # A 가 살아 있고, 재개된 뒤 다시 보낼 수 있어야 한다.
+        a.settimeout(5.0)
+        try:
+            a.sendall(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            _fail(exc, "3단계: 재개 후")
+    finally:
+        a.close(); b.close()
+
+
 def test_relay_refuses_meta_without_secret(tmp_path):
     relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not relay_bin:

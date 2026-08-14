@@ -95,6 +95,13 @@ constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 // 스레드 모델은 tcp_send_all 이 최대 5초 잠들며 버텼지만, 루프는 잠들 수 없으므로
 // 상대가 안 읽으면 읽기를 멈춰 메모리를 지킨다.
 constexpr size_t kSendHighWater     = 256 * 1024;
+// 그리고 하드 상한. 일시정지는 최선의 노력일 뿐 보장이 아니다 — 흘려보내는 쪽이
+// 아예 없거나(룸에 혼자 남아 서버가 직접 쓰는 경우) 상대가 영영 안 읽으면 tx 는
+// 계속 자란다. 상한 없는 버퍼는 상한이 아니므로 여기서 연결을 끊는다.
+constexpr size_t kSendHardCap       = 1024 * 1024;
+// 백프레셔에서 풀린 뒤 적체를 빼내는 데 주는 면제 시간. 짧게 잡는다 — 커널 버퍼는
+// 유한해서 이 안에 다 들어오고, 그 뒤에는 다시 정상 요금이 매겨진다.
+constexpr auto   kRateGraceAfterResume = std::chrono::seconds(3);
 
 std::atomic<bool> g_running{true};
 
@@ -195,6 +202,10 @@ struct Conn {
     TimePoint last_activity{};
     TimePoint byte_window_start{};
     size_t    byte_window = 0;
+    // 백프레셔에서 풀려난 직후, 적체를 빼내는 동안 레이트 상한을 면제하는 시각.
+    // 멈춰 있는 동안 상대의 커널 버퍼에 쌓인 것은 우리가 안 읽어서 생긴 적체이지
+    // 상대가 규정을 넘겨 보낸 게 아니다. 커널 버퍼는 유한하므로 면제도 유한하다.
+    TimePoint rate_grace_until{};
 };
 
 struct Channel {
@@ -378,6 +389,11 @@ private:
     // 들고 있을 수 있다. 표시만 하고 배치 끝(sweep)에서 해제한다.
     void close_conn(Conn* c, const char* why) {
         if (!c || c->stage == Stage::Dead) return;
+        // 이 연결로 흘려보내느라 우리가 멈춰 세운 쪽이 있으면 먼저 풀어 준다.
+        // room/ch 를 끊기 전에 해야 상대를 찾을 수 있다. 안 풀면 그쪽은 interest 0
+        // 으로 등록된 채 아무 이벤트도 못 받아, 유휴 타이머가 걷어갈 때까지 fd 와
+        // per-IP 세션 슬롯을 붙들고 남는다.
+        pause_peer_read(c, false);
         std::cerr << "[conn " << c->id << "] close: " << why << "\n";
         c->stage = Stage::Dead;
         reactor_->remove(c->fd);
@@ -487,9 +503,22 @@ private:
         if (sent < len) {
             dst->tx.insert(dst->tx.end(), data + sent, data + len);
             arm_write(dst, true);
+            if (dst->tx.size() > kSendHardCap) {
+                close_conn(dst, "송신 버퍼 하드 상한 초과");
+                return false;
+            }
             if (dst->tx.size() > kSendHighWater) pause_peer_read(dst, true);
         }
         return true;
+    }
+
+    // dst 로 흘려보내는 쪽. 포워딩 중이면 채널 상대, 룸 단계면 룸 상대다.
+    // 예전에는 채널만 봤는데, 룸 단계 Conn 은 채널이 없어 백프레셔가 통째로
+    // 무효였다 — 상대가 안 읽는 동안 CHAT 이 룸 대기 시간 내내 tx 에 쌓였다.
+    Conn* feeder_of(Conn* dst) {
+        if (Channel* ch = dst->ch) return (dst == ch->a) ? ch->b : ch->a;
+        if (Room* r = dst->room)   return dst->is_host ? r->guest : r->host;
+        return nullptr;
     }
 
     void arm_write(Conn* c, bool want) {
@@ -501,15 +530,29 @@ private:
     }
 
     void pause_peer_read(Conn* dst, bool pause) {
-        Channel* ch = dst->ch;
-        if (!ch) return;
-        Conn* src = (dst == ch->a) ? ch->b : ch->a;
+        Conn* src = feeder_of(dst);
         if (!src || src->stage == Stage::Dead) return;
         if (src->read_paused == pause) return;
         src->read_paused = pause;
         unsigned interest = (pause ? 0u : net::kRead) |
                             (src->want_write ? net::kWrite : 0u);
         reactor_->modify(src->fd, interest, src);
+        // 재개하는 순간 유휴 데드라인을 새로 건다. 멈춰 있는 동안에는 읽기 이벤트가
+        // 없어 last_activity 가 굳어 있었으므로, 그대로 두면 풀자마자 만기로 끊긴다.
+        if (!pause) {
+            src->last_activity = Clock::now();
+            // 바이트 창도 같이 연다. 멈춰 있는 동안 상대의 커널 송신 버퍼에는
+            // 백로그가 쌓이고, 재개하는 순간 그게 한꺼번에 들어온다 — 창을 안 열면
+            // 우리가 막아 놓고 그 대가를 상대에게 "레이트 초과" 로 청구하게 된다.
+            src->byte_window_start = src->last_activity;
+            src->byte_window = 0;
+            // 창을 여는 것만으론 부족하다. 적체는 한 번의 버스트로 들어오므로 새 창을
+            // 그 자리에서 다시 넘긴다. 빼내는 동안은 아예 면제한다.
+            src->rate_grace_until = src->last_activity + kRateGraceAfterResume;
+            if (src->stage == Stage::Forward) {
+                timers_.arm(src, src->last_activity + kIdleTimeout);
+            }
+        }
     }
 
     void on_writable(Conn* c) {
@@ -545,8 +588,20 @@ private:
             c->byte_window = 0;
         }
         c->byte_window += got;
-        if (c->stage == Stage::Forward && c->byte_window > kMaxBytesPerSecond) {
+        // 레이트 상한은 단계를 가리지 않는다. 예전에는 Forward 에만 걸려 있었는데,
+        // 정작 위험한 쪽은 반대였다 — 큐 대기와 인증 왕복 단계는 rx 를 소비하지 않고
+        // 쌓아 두기만 하므로(뒤 단계로 넘겨야 하는 잔여 바이트를 잃지 않으려고),
+        // 상한이 없으면 한 연결이 메모리를 무한히 먹는다.
+        if (now >= c->rate_grace_until && c->byte_window > kMaxBytesPerSecond) {
             close_conn(c, "byte rate 초과");
+            return;
+        }
+        // 레이트 상한만으로는 "느리게, 오래" 붓는 것을 못 막는다. 누적 버퍼에도
+        // 상한을 건다. 재파싱이 매 읽기마다 도는 단계가 있어(on_queued 는 잔여를
+        // 보존하려고 사본을 파싱한다) 상한이 없으면 비용이 O(n^2) 로 자라 단일 루프
+        // 스레드를 통째로 잡아먹는다 — 진행 중인 모든 매치가 함께 멈춘다.
+        if (c->rx.size() > kMaxLobbyBufBytes) {
+            close_conn(c, "수신 버퍼 상한 초과");
             return;
         }
 
@@ -768,9 +823,15 @@ private:
         timers_.arm(r->host, dl);
         timers_.arm(c, dl);
 
+        // host 를 미리 붙들어 둔다. 아래 on_room(c) 가 양쪽 READY 를 관측하면
+        // start_room_match 로 들어가 rooms_.erase 로 Room 을 파괴하므로, 그 뒤에
+        // r 을 다시 만지면 use-after-free 다. alive() 가드는 Conn 의 생존만 보지
+        // Room 의 생존은 보지 않는다 — r->host 를 꺼내는 순간 이미 늦는다.
+        Conn* host = r->host;
         if (!c->rx.empty()) on_room(c);
         // 호스트가 CREATE 와 같은 recv 로 보냈던 READY 가 남아 있을 수 있다.
-        if (alive(r->host) && !r->host->rx.empty()) on_room(r->host);
+        // 매치가 이미 시작됐다면 host->room 이 nullptr 이라 on_room 이 곧바로 반환한다.
+        if (alive(host) && !host->rx.empty()) on_room(host);
     }
 
     void on_room(Conn* c) {
@@ -808,7 +869,10 @@ private:
     void start_room_match(Room* r) {
         Conn* host = r->host;
         Conn* guest = r->guest;
-        rooms_.erase(r->code);          // 방은 역할을 다했다
+        // 키를 값으로 복사한 뒤 지운다. r->code 를 그대로 넘기면 지워질 원소 안의
+        // 문자열을 키로 쓰는 셈이라, 노드가 파괴되는 순간 참조가 죽는다.
+        const std::string code = r->code;
+        rooms_.erase(code);             // 방은 역할을 다했다
         host->room = nullptr;
         guest->room = nullptr;
 
@@ -1099,7 +1163,14 @@ private:
             case Stage::FirstFrame: close_conn(c, "첫 프레임 타임아웃"); break;
             case Stage::Room:       close_conn(c, "룸 대기 타임아웃");   break;
             case Stage::Lobby:      close_conn(c, "로비 타임아웃");      break;
-            case Stage::Forward:    close_conn(c, "idle 타임아웃");      break;
+            case Stage::Forward:
+                // 우리가 백프레셔로 입을 막아 둔 연결은 유휴가 아니다 — 읽기 이벤트가
+                // 안 나는 게 당연하다. 여기서 끊으면 "느리게 읽는 상대" 때문에 "정상
+                // 플레이어" 가 끊긴다. 멈춰 있을 수 있는 시간은 tx 하드 상한이 따로
+                // 묶으므로, 여기서는 데드라인만 다시 건다.
+                if (c->read_paused) { timers_.arm(c, Clock::now() + kIdleTimeout); break; }
+                close_conn(c, "idle 타임아웃");
+                break;
             default: break;
         }
     }

@@ -657,7 +657,13 @@ private:
             net::TcpSocket s = net::tcp_accept(listen_);
             if (!s.valid()) return;
 
-            if (conns_.size() >= g_max_conns) {
+            // 앞단 표(conns_)가 아니라 전역 카운터를 본다. 포워딩이 시작되면
+            // 연결이 샤드 루프로 인계돼 앞단 표에서 빠지므로, 표 크기로 재면
+            // --loops 가 3 이상일 때 경기 중인 사람들이 통째로 안 세어진다 —
+            // 상한이 4096 인데 실제로는 그보다 훨씬 많이 받아들이게 된다.
+            // 이 카운터는 등록에 성공한 뒤 늘고 close_conn 에서만 주는데, 샤드로
+            // 넘어간 연결도 결국 그 경로를 지나므로 어느 루프가 닫든 정확히 한 번이다.
+            if (g_conn_count.load(std::memory_order_relaxed) >= g_max_conns) {
                 g_reject_conn_cap.fetch_add(1, std::memory_order_relaxed);
                 RLOG_INFO("[relay] 거절: 연결 상한 도달 (" << g_max_conns << ")");
                 reject_socket(s, net::RejectReason::ServerFull,

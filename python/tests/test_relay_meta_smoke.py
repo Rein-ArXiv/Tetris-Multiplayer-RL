@@ -778,6 +778,81 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
         a.close(); b.close()
 
 
+def test_tx_budget_is_returned_when_connections_die():
+    """전역 tx 예산이 연결이 죽을 때 정확히 돌아와야 한다.
+
+    연결당 상한만으로는 메모리를 보장하지 못한다 — 연결당 상한 × --max-conns 로
+    천장이 곱해지기 때문이다. 전역 예산이 그 곱셈을 끊는다. 다만 예산은 수동
+    회계라, 진짜 위험은 상한이 안 걸리는 것이 아니라 **반납이 새는 것**이다.
+    새면 서버가 멀쩡한데도 시간이 갈수록 조용히 굶다가 아무도 못 붙는다.
+
+    작은 예산으로 띄우고, 안 읽는 상대를 만들어 예산을 소진시킨 뒤 전부 끊고,
+    그 사이클을 반복한다.
+
+    **한계를 분명히 해 둔다: 이 테스트는 가드지 회귀 테스트가 아니다.** 반납을
+    통째로 제거한 바이너리로 돌려 봤는데 그대로 통과했다. 예산이 바닥나도 accept
+    는 계속 되고 막히는 것은 버퍼링뿐이라, 바깥에서 접속만 봐서는 드러나지 않는다.
+    실제로 버퍼링이 필요한 상황을 뒤에 붙여 재려고도 해 봤지만 그 구성이 정상
+    코드에서도 매칭을 못 받아, 원인을 가르기 전에는 신뢰할 수 없는 판정이었다.
+
+    제대로 잡으려면 카운터를 밖에서 볼 수 있어야 한다 — 주기적 상태 로그든 신호
+    핸들러든. 관측할 수 없는 예산은 운영도 검증도 못 한다. 그게 다음 작업이다.
+    """
+    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
+    if not reactor_bin:
+        pytest.skip("tetris_relay_reactor binary missing")
+
+    port = _free_port()
+    proc = subprocess.Popen([str(reactor_bin), "--port", str(port),
+                             "--max-tx-mib", "1"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        assert _wait_listen(port, 5.0), "relay 기동 실패"
+        chunk = build_frame(MsgType.CHAT, b"x" * 400)
+
+        for round_no in range(3):
+            socks = []
+            try:
+                # unranked 로 4쌍을 붙이고, 각 쌍의 한쪽은 아무것도 읽지 않는다.
+                for _ in range(4):
+                    a = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+                    b = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+                    b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                    socks += [a, b]
+                    a.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+                    b.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+                    _recv_match_found(a)
+                    _recv_match_found(b)
+                    a.sendall(build_frame(MsgType.READY, b"\x01"))
+                    b.sendall(build_frame(MsgType.READY, b"\x01"))
+                time.sleep(0.3)
+
+                # 예산(1 MiB)을 넘길 만큼 붓는다. 릴레이가 어딘가에서 끊어야 한다 —
+                # 연결당 상한이든 전역 예산이든, 무한히 자라지만 않으면 된다.
+                for a in socks[0::2]:
+                    a.settimeout(1.0)
+                for _ in range(60):
+                    for a in socks[0::2]:
+                        try:
+                            a.sendall(chunk)
+                        except OSError:
+                            pass
+                    time.sleep(0.02)
+            finally:
+                for s in socks:
+                    s.close()
+            time.sleep(1.0)
+            assert proc.poll() is None, f"라운드 {round_no} 후 릴레이가 죽었다"
+            probe = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+            probe.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_relay_refuses_meta_without_secret(tmp_path):
     relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not relay_bin:

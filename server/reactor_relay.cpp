@@ -77,6 +77,27 @@ namespace relay {
 constexpr size_t kDefaultMaxConns = 4096;
 size_t           g_max_conns      = kDefaultMaxConns;
 
+// 보류 송신(tx)의 프로세스 전체 예산.
+//
+// 연결당 상한만으로는 메모리를 보장하지 못한다. 두 값이 곱해지기 때문이다 —
+// 연결당 1 MiB 에 연결 4096 개면 최악이 4 GiB 다. 상한을 올릴 때마다 메모리
+// 천장이 조용히 따라 오르고, --max-conns 를 만지는 운영자에게는 그 곱셈이 보이지
+// 않는다. 커널이 소켓당 wmem 과 별개로 전역 tcp_mem 을 두는 이유와 같다: 연결당
+// 상한은 "언제 이 상대를 밀어낼지" 를 정하고, 전역 예산은 "언제 프로세스가
+// 위험한지" 를 정한다. 역할이 달라서 하나가 다른 하나를 대신하지 못한다.
+//
+// 예산을 넘기면 그 순간 넘긴 연결을 끊는다. 가장 많이 쌓인 연결을 골라 끊는 편이
+// 더 공정하지만, 그러려면 샤드 스레드들의 표를 가로질러 훑어야 한다. 연결당
+// 상한이 이미 한 연결의 몫을 좁게 묶어 두므로, 예산을 넘길 만큼 쌓는 쪽이 곧
+// 원인일 가능성이 높다 — 단순한 정책으로 충분하다.
+//
+// 수신 버퍼(rx)는 예산에 넣지 않는다. 매 읽기마다 상한을 검사해 초과 시 연결을
+// 끊으므로 최악이 이미 확정적이다(연결당 64 KiB × --max-conns). 무한정 자랄 수
+// 있었던 쪽은 tx 뿐이고, 예산이 필요한 것도 그쪽이다.
+constexpr size_t      kDefaultTxBudget = 64 * 1024 * 1024;
+size_t                g_tx_budget      = kDefaultTxBudget;
+std::atomic<size_t>   g_tx_total{0};
+
 namespace {
 
 using Clock     = std::chrono::steady_clock;
@@ -94,11 +115,14 @@ constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 // 보류 송신이 이만큼 쌓이면 그 소켓으로 흘려보내는 쪽의 읽기를 멈춘다(backpressure).
 // 스레드 모델은 tcp_send_all 이 최대 5초 잠들며 버텼지만, 루프는 잠들 수 없으므로
 // 상대가 안 읽으면 읽기를 멈춰 메모리를 지킨다.
-constexpr size_t kSendHighWater     = 256 * 1024;
+// 락스텝 프레임은 틱당 수십 바이트다 — 60Hz 로 방향당 1 KB/s 도 안 된다. 64 KiB 가
+// 밀렸다는 것은 이미 1분 넘게 못 흘려보냈다는 뜻이고, 그쯤이면 경기가 성립하지
+// 않는다. 예전 값(256 KiB / 1 MiB)은 게임 트래픽 기준으로 지나치게 컸다.
+constexpr size_t kSendHighWater     = 64 * 1024;
 // 그리고 하드 상한. 일시정지는 최선의 노력일 뿐 보장이 아니다 — 흘려보내는 쪽이
 // 아예 없거나(룸에 혼자 남아 서버가 직접 쓰는 경우) 상대가 영영 안 읽으면 tx 는
 // 계속 자란다. 상한 없는 버퍼는 상한이 아니므로 여기서 연결을 끊는다.
-constexpr size_t kSendHardCap       = 1024 * 1024;
+constexpr size_t kSendHardCap       = 256 * 1024;
 // 백프레셔에서 풀린 뒤 적체를 빼내는 데 주는 면제 시간. 짧게 잡는다 — 커널 버퍼는
 // 유한해서 이 안에 다 들어오고, 그 뒤에는 다시 정상 요금이 매겨진다.
 constexpr auto   kRateGraceAfterResume = std::chrono::seconds(3);
@@ -396,6 +420,9 @@ private:
         pause_peer_read(c, false);
         std::cerr << "[conn " << c->id << "] close: " << why << "\n";
         c->stage = Stage::Dead;
+        // 보류 송신은 여기서 포기한다 — 소켓을 닫는 마당에 흘려보낼 곳이 없다.
+        // 전역 예산도 같이 돌려준다.
+        release_tx(c);
         reactor_->remove(c->fd);
         timers_.cancel(c);
         net::tcp_close(c->sock);
@@ -501,15 +528,35 @@ private:
             if (!net::tcp_send_some(dst->sock, data, len, sent)) return false;
         }
         if (sent < len) {
+            const size_t added = len - sent;
             dst->tx.insert(dst->tx.end(), data + sent, data + len);
+            const size_t total = g_tx_total.fetch_add(added,
+                                     std::memory_order_relaxed) + added;
             arm_write(dst, true);
             if (dst->tx.size() > kSendHardCap) {
                 close_conn(dst, "송신 버퍼 하드 상한 초과");
                 return false;
             }
+            if (total > g_tx_budget) {
+                // 프로세스 전체 예산 초과. 연결당 상한 안에 있어도 여기서 끊는다 —
+                // 지킬 대상이 이 연결이 아니라 프로세스이기 때문이다.
+                std::cerr << "[relay] tx 예산 초과 (" << total << " > "
+                          << g_tx_budget << ")\n";
+                close_conn(dst, "tx 전역 예산 초과");
+                return false;
+            }
             if (dst->tx.size() > kSendHighWater) pause_peer_read(dst, true);
         }
         return true;
+    }
+
+    // tx 를 비우고 그만큼 전역 예산을 돌려준다. 연결이 죽는 모든 경로가 여길 지나야
+    // 카운터가 새지 않는다.
+    static void release_tx(Conn* c) {
+        if (c->tx.empty()) return;
+        g_tx_total.fetch_sub(c->tx.size(), std::memory_order_relaxed);
+        c->tx.clear();
+        c->tx.shrink_to_fit();
     }
 
     // dst 로 흘려보내는 쪽. 포워딩 중이면 채널 상대, 룸 단계면 룸 상대다.
@@ -562,7 +609,10 @@ private:
             close_conn(c, "send 실패");
             return;
         }
-        if (sent) c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
+        if (sent) {
+            c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
+            g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
+        }
         if (c->tx.empty()) {
             arm_write(c, false);
             pause_peer_read(c, false);   // 밀림이 풀렸으니 상대 읽기 재개
@@ -1394,6 +1444,12 @@ int main(int argc, char** argv) {
                                "--max-conns", 2, 1000000, n)) return 2;
             relay::g_max_conns = (size_t)n;
         }
+        else if (a == "--max-tx-mib") {
+            int n = 0;
+            if (!parse_int_arg(next("--max-tx-mib"),
+                               "--max-tx-mib", 1, 65536, n)) return 2;
+            relay::g_tx_budget = (size_t)n * 1024u * 1024u;
+        }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
@@ -1417,7 +1473,13 @@ int main(int argc, char** argv) {
                 "              프로세스 전체 동시 연결 상한 (기본 "
                                     << relay::kDefaultMaxConns << "). 먼저 오는 것은\n"
                 "              보통 이 상한이 아니라 루프 포화이며, 그때 늘릴 것은\n"
-                "              --loops 다. 이 값은 fd·메모리를 지키는 마지막 방어선이다.\n";
+                "              --loops 다. 이 값은 fd 를 지키는 마지막 방어선이다.\n"
+                "  --max-tx-mib N\n"
+                "              보류 송신의 프로세스 전체 예산, MiB (기본 "
+                                    << relay::kDefaultTxBudget / (1024 * 1024) << ").\n"
+                "              연결당 상한만으로는 메모리가 --max-conns 와 곱해져\n"
+                "              천장이 조용히 따라 오른다. 이 예산이 그 곱셈을 끊는다 —\n"
+                "              넘기면 그 순간 넘긴 연결을 끊는다.\n";
             return 0;
         }
     }

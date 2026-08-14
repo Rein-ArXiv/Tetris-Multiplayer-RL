@@ -330,9 +330,29 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                              (ch->playerA_id != 0) &&
                              (ch->playerB_id != 0);
 
-    // Ranked mode intercepts summaries; unranked mode forwards raw bytes.
+    // Both modes parse frame boundaries; only ranked mode inspects payloads.
     std::vector<uint8_t> raw; raw.reserve(4096);
     std::vector<uint8_t> streamBuf; streamBuf.reserve(4096);
+
+    // 목적지 소켓으로 밀어내기. sendMuA/B 로 보호돼 반대 방향 forwarder 와
+    // 같은 소켓에 쓰는 순서가 직렬화된다.
+    auto push = [&](const uint8_t* d, size_t n) {
+        return a_to_b ? sendToB(*ch, d, n) : sendToA(*ch, d, n);
+    };
+
+    // 클라이언트가 서버 전용 프레임을 올려보냈다. 방향당 한 줄만 남긴다 —
+    // 프레임마다 찍으면 위조 프레임을 쏟아붓는 것만으로 로그를 밀어낼 수 있고,
+    // 그건 이 결함을 고치면서 새로 만드는 또 하나의 값싼 공격이다.
+    bool warnedServerOnly = false;
+    auto noteServerOnly = [&](uint8_t type) {
+        if (warnedServerOnly) return;
+        warnedServerOnly = true;
+        RLOG_WARN("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
+                  << " " << dir
+                  << " dropping server-only frame sent by a client, type="
+                  << (int)type << " (further violations on this direction are"
+                  << " dropped silently)");
+    };
 
     // Consume lobby-prefetched bytes before reading the socket.
     bool havePrefix = false;
@@ -388,15 +408,74 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         }
 
         if (!rankedMatch) {
-            // Unranked raw 전달 — MATCH_SUMMARY도 평범한 wire byte일 뿐이며
-            // MATCH_RESULT는 만들지 않는다. sendMuA/B로 보호해 반대 방향
-            // forwarder와 같은 destination socket에 쓰는 순서를 직렬화한다.
-            const bool ok = a_to_b ? sendToB(*ch, raw.data(), raw.size())
-                                   : sendToA(*ch, raw.data(), raw.size());
-            if (!ok) {
+            // Unranked — MATCH_SUMMARY 는 여기서 평범한 wire byte 일 뿐이고
+            // MATCH_RESULT 도 만들지 않는다. 다만 프레임 경계는 훑는다: 서버만
+            // 만들 수 있는 프레임(net::is_server_only_type)이 클라이언트에서
+            // 오면 상대에게 전달하지 않기 위해서다. 통과한 프레임은 복사하지
+            // 않고 "붙어 있는 구간" 의 끝만 늘렸다가 배치 끝에 한 번 민다.
+            //
+            // 비용에 대해: 예전 이 경로는 바이트를 그대로 밀어 프레임당
+            // 0.035µs 였고, 아래 랭크드 경로는 2.67µs 다(70배). 그 차이의
+            // 내역은 경계 판정이 아니라 랭크드가 프레임마다 더 하는 일이다 —
+            // 체크섬 계산(페이로드 전체를 훑는다), 페이로드 파싱, 버퍼 머리
+            // 에서의 erase(O(n) 이동), 프레임당 send 한 번. 여기서는 그 넷을
+            // 전부 피하고 헤더 3바이트(LEN 2 + TYPE 1)만 읽는다. 위조가 없는
+            // 정상 트래픽에서 send 는 예전처럼 배치당 한 번이다.
+            //
+            // 늘어난 비용은 정확히 둘이다. (1) 프레임당 헤더 3바이트 읽기,
+            // (2) 이 배치를 streamBuf 로 한 번 복사하는 것(≤4 KiB 선형 복사 —
+            // 잘린 프레임의 꼬리를 다음 읽기까지 이어 붙이려면 누적 버퍼가
+            // 있어야 한다). 프레임마다 도는 일이 아니라 배치마다 한 번이다.
+            // 위의 숫자는 이 저장소의 기존 측정치이고, 이 구현을 다시 잰
+            // 값이 아니다 — 벤치(python/tools/relay_shard_bench.py)는 Linux
+            // 전용이라 배포 대상에서 돌려 확인해야 한다.
+            //
+            // 대가가 하나 더 있다: 세그먼트 경계에 걸린 프레임의 꼬리를 다음
+            // 읽기까지 들고 있어야 한다(경계를 모르면 거를 수 없다). 랭크드
+            // 경로가 이미 그렇게 동작하고 락스텝 프레임은 수십 바이트라 보통
+            // 한 번에 들어온다.
+            streamBuf.insert(streamBuf.end(), raw.begin(), raw.end());
+            size_t pos = 0, sent = 0;
+            bool dropRest = false, sendFailed = false;
+            while (streamBuf.size() - pos >= 2) {
+                const uint8_t* p   = streamBuf.data() + pos;
+                const uint16_t len = static_cast<uint16_t>(p[0]) |
+                                     (static_cast<uint16_t>(p[1]) << 8);
+                if (static_cast<size_t>(len) > net::kMaxPayloadBytes + 1u) {
+                    // 랭크드 경로와 같은 정책 — 경계를 믿을 수 없으니 남은
+                    // 바이트를 버린다. 앞의 정상 구간은 이미 보냈다.
+                    RLOG_WARN("[relay] match=" << ch->match_id
+                              << " uuid=" << ch->match_uuid
+                              << " dropping over-sized frame (len=" << len
+                              << ") from " << (a_to_b ? "A" : "B"));
+                    dropRest = true;
+                    break;
+                }
+                const size_t total = 2u + static_cast<size_t>(len) + 4u;
+                if (streamBuf.size() - pos < total) break;   // 미완성
+                // len < 1 은 타입 바이트조차 없는 프레임이라 판정 대상이 아니다.
+                // 예전처럼 구간에 남겨 그대로 흘려보낸다.
+                if (len >= 1u && net::is_server_only_type(p[2])) {
+                    if (pos > sent && !push(streamBuf.data() + sent, pos - sent)) {
+                        sendFailed = true;
+                        break;
+                    }
+                    noteServerOnly(p[2]);
+                    sent = pos + total;                      // 이 프레임만 건너뛴다
+                }
+                pos += total;
+            }
+            if (!sendFailed && pos > sent &&
+                !push(streamBuf.data() + sent, pos - sent)) {
+                sendFailed = true;
+            }
+            if (sendFailed) {
                 disconnectSide = a_to_b ? 2 : 1;
                 break;
             }
+            if (dropRest)  streamBuf.clear();
+            else if (pos)  streamBuf.erase(streamBuf.begin(),
+                                           streamBuf.begin() + pos);
             continue;
         }
 
@@ -473,6 +552,10 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                               << " size=" << payload.size());
                 }
                 // 가로챔 — 상대 포워딩 안 함.
+            } else if (net::is_server_only_type(typeByte)) {
+                // 서버만 만들 수 있는 프레임을 클라이언트가 보냈다 — 버린다.
+                // 근거는 net/framing.h 의 is_server_only_type 주석.
+                noteServerOnly(typeByte);
             } else {
                 // 다른 프레임은 원본 바이트 그대로 to 로 송신 (sendMuA/B 로 직렬화).
                 const bool ok = a_to_b ? sendToB(*ch, streamBuf.data(), totalNeeded)

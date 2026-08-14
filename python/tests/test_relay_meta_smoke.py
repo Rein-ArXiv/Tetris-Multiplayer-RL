@@ -603,6 +603,124 @@ def test_reactor_loops_two_falls_back_to_single_loop():
         "비용만 늘어난 구성이다:\n" + out)
 
 
+def test_reactor_bounds_the_pending_auth_queue():
+    """인증 대기 줄에 상한이 있고, 그 예산이 돌아와야 한다.
+
+    루프 릴레이는 meta 검증을 오프로드 워커 풀로 뺀다. 죽은 연결의 작업은 이제
+    취소되지만(그게 굶김의 주된 원인이었다) 취소만으로는 절반이다 — 살아 있는
+    연결이 몰려오면 줄은 여전히 길어지고, 뒤에 선 사람은 자기 클라이언트가
+    포기할 때까지 기다린다. 그래서 대기 줄에 상한을 두고, 넘기면 세우는 대신
+    사유를 밝히고 거절한다 (스레드 모델이 워커가 다 찼을 때 하는 것과 같다).
+
+    여기서 정말 무서운 실패는 상한이 없는 것이 아니라 **예산이 안 돌아오는
+    것**이다. 새면 서버가 멀쩡한데도 상한만큼 로그인이 지나간 뒤로는 아무도
+    인증하지 못하고, 밖에서 보이는 증상은 "어느 순간부터 로그인이 안 된다" 뿐
+    이다. 그래서 두 방향을 함께 잰다: 상한이 실제로 걸리는가, 그리고 걸린 뒤
+    풀리는가.
+
+    meta 는 붙기만 하고 대답하지 않는 소켓으로 세운다 — 인증을 확실히 "대기
+    중" 상태로 붙들어 두는 가장 단순한 방법이고, 지연 주입 장치가 필요 없다.
+
+    ``--max-pending-auth`` 는 reactor 바이너리 전용이므로 TETRIS_RELAY_BIN 이
+    무엇을 가리키든 reactor 를 이름으로 직접 찾는다.
+    """
+    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
+    if not reactor_bin:
+        pytest.skip("tetris_relay_reactor binary missing")
+
+    # 대답하지 않는 meta. accept 만 하고 붙들고 있으면 릴레이의 verify_token 은
+    # 자기 read timeout(3초)까지 그 워커에 매달린다.
+    silent = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(16)
+    meta_port = silent.getsockname()[1]
+    held: list[socket.socket] = []
+
+    def _accept_and_hold():
+        while True:
+            try:
+                conn, _ = silent.accept()
+            except OSError:
+                return
+            held.append(conn)      # 응답하지 않는다
+
+    threading.Thread(target=_accept_and_hold, daemon=True).start()
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [str(reactor_bin), "--port", str(port),
+         "--meta", f"http://127.0.0.1:{meta_port}",
+         "--meta-secret", TEST_RELAY_SECRET,
+         "--max-pending-auth", "1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    socks: list[socket.socket] = []
+
+    def _join(tok: str) -> socket.socket:
+        s = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        socks.append(s)
+        s.sendall(_build_room_create(tok))
+        return s
+
+    try:
+        if not _wait_listen(port, 5.0):
+            pytest.fail("tetris_relay_reactor failed to listen")
+
+        # 1) 한 명이 줄을 차지한다 (meta 가 대답하지 않으므로 대기 상태로 남는다).
+        first = _join("a" * 32)
+        time.sleep(0.3)
+
+        # 2) 상한을 넘긴 다음 사람은 기다리는 대신 사유를 받고 끊겨야 한다.
+        payload = _recv_frame(second := _join("b" * 32),
+                              MsgType.SERVER_REJECT, bytearray(), timeout=5.0)
+        assert payload and payload[0] == RejectReason.AUTH_BACKLOG, (
+            "인증 대기 상한을 넘긴 연결이 다른 사유로 거절됐다 — 사유 코드 "
+            f"{payload[0] if payload else '(없음)'}")
+        second.settimeout(5.0)
+        assert second.recv(4096) == b"", "거절한 연결을 닫지 않았다"
+
+        # 3) 앞사람의 인증이 실패로 끝나면 예산이 돌아와야 한다. 새면 이 뒤로는
+        #    아무도 인증 줄에 들어가지 못한다.
+        first.settimeout(15.0)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if first.recv(4096) == b"":
+                break
+        else:
+            pytest.fail("meta 무응답인데 앞사람의 연결이 정리되지 않았다")
+
+        third = _join("c" * 32)
+        third.settimeout(6.0)
+        buf = bytearray()
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            try:
+                chunk = third.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+        # 이 연결도 결국 거절된다(meta 가 대답하지 않으므로). 하지만 그 사유가
+        # "인증 대기 상한" 이면 앞사람이 비운 자리가 돌아오지 않았다는 뜻이다.
+        for msg_type, payload in parse_frames(buf):
+            assert not (msg_type == MsgType.SERVER_REJECT
+                        and payload and payload[0] == RejectReason.AUTH_BACKLOG), (
+                "앞사람이 떠났는데도 인증 대기 상한으로 거절했다 — 예산이 "
+                "돌아오지 않는다")
+    finally:
+        for s in socks:
+            s.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        silent.close()
+        for c in held:
+            c.close()
+
+
 def test_queued_client_cannot_grow_the_relay_buffer(meta_and_relay):
     """큐 대기 중 흘려보낸 바이트가 무한히 쌓이면 안 된다.
 

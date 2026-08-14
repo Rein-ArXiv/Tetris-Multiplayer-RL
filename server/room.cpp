@@ -1,13 +1,13 @@
 #include "room.h"
 
 #include "relay.h"
+#include "log.h"
 #include "match_uuid.h"
 #include "../net/framing.h"
 #include "../net/socket.h"
 
 #include <chrono>
 #include <functional>
-#include <iostream>
 #include <random>
 #include <thread>
 #include <utility>
@@ -145,7 +145,8 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
         r.hostIpSession    = std::move(ip_session);
         roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
     }
-    std::cerr << "[room] conn=" << conn_id << " created code=" << code << "\n";
+    RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+              << " created code=" << code);
     sendRoomInfoIfCurrent_(sock, code, kStatusWaiting, 1, roomInfoVersion);
     roomLoop_(code, /*isHost=*/true, std::move(streamPrefix));
 }
@@ -172,7 +173,8 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
             lk.unlock();
             sendRoomInfo_(sock, code, kStatusNotFound, 0);
             net::tcp_close(sock);
-            std::cerr << "[room] conn=" << conn_id << " join " << code << " notfound\n";
+            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                      << " close: join " << code << " notfound match_uuid=-");
             return;
         }
         auto& r = it->second;
@@ -182,7 +184,8 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
             lk.unlock();
             sendRoomInfo_(sock, code, kStatusFull, peerCount);
             net::tcp_close(sock);
-            std::cerr << "[room] conn=" << conn_id << " join " << code << " full\n";
+            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                      << " close: join " << code << " full match_uuid=-");
             return;
         }
         r.guestSock     = sock;
@@ -212,7 +215,8 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
         }
     }
     if (entered) {
-        std::cerr << "[room] conn=" << conn_id << " joined " << code << "\n";
+        RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                  << " joined " << code);
         roomLoop_(code, /*isHost=*/false, std::move(streamPrefix));
     }
 }
@@ -256,10 +260,10 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         // 데드라인은 활동(채팅/READY 토글)으로 연장하지 않는다 — 활동 기준이면
         // 채팅만 계속 보내며 워커 슬롯을 무한정 점유할 수 있다.
         if (std::chrono::steady_clock::now() >= deadline) {
-            std::cerr << "[room] code=" << code << " "
+            RLOG_INFO("[room] code=" << code << " "
                       << (isHost ? "host" : "guest")
                       << (bothPresentPrev ? " ready-wait" : " guest-wait")
-                      << " timeout -> closing\n";
+                      << " close: timeout match_uuid=-");
             timedOut = true;
             break;
         }
@@ -410,8 +414,10 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             m.match_uuid  = new_match_uuid();
             rooms.erase(it);
         }
-        std::cerr << "[room] code=" << code << " -> match id=" << m.match_id
-                  << " seed=0x" << std::hex << m.seed << std::dec << "\n";
+        RLOG_INFO("[room] code=" << code << " -> match id=" << m.match_id
+                  << " uuid=" << m.match_uuid
+                  << " player_id=" << m.a.player_id << " x " << m.b.player_id
+                  << " seed=" << log_hex(m.seed));
         relay::startPump(std::move(m), meta_);
         return;
     }

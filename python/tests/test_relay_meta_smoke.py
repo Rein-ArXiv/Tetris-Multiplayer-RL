@@ -20,13 +20,20 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
 
 import pytest
 
-from netbot.framing import FramingError, MsgType, build_frame, parse_frames
+from netbot.framing import (
+    FramingError,
+    MsgType,
+    RejectReason,
+    build_frame,
+    parse_frames,
+)
 
 TEST_RELAY_SECRET = "test-relay-secret"
 
@@ -486,19 +493,47 @@ def test_per_ip_session_cap_rejects_excess_connections(tmp_path):
                 f"({RELAY_MAX_SESSIONS_PER_IP}) — 상한이 너무 빡빡하다")
 
         # 상한을 한 칸 넘긴 연결: relay 가 accept 직후 닫아야 한다.
+        #
+        # "아무것도 안 오면 통과" 로는 더 이상 판정하지 않는다. 루프 릴레이는 닫기
+        # 전에 사유(SERVER_REJECT)를 한 프레임 내려보내므로, 조용한 끊김만 정답으로
+        # 두면 사유를 밝히는 쪽이 실패한다. 정작 지켜야 할 성질은 그게 아니라
+        # "입장하지 못하고(ROOM_INFO 없음) 곧 닫힌다(EOF)" 이다. 스레드 모델은
+        # 여전히 아무 말 없이 닫으므로 두 동작을 모두 받아들인다.
         extra = socket.create_connection(("127.0.0.1", port), timeout=2.0)
         socks.append(extra)
         extra.sendall(build_frame(MsgType.ROOM_CREATE, b"\x00"))
         extra.settimeout(3.0)
+        received = bytearray()
+        closed = False
         try:
-            data = extra.recv(4096)
-        except ConnectionResetError:
-            data = b""
+            while True:
+                data = extra.recv(4096)
+                if not data:
+                    closed = True
+                    break
+                received += data
         except socket.timeout:
             pytest.fail("상한 초과 연결이 ROOM_INFO 도 못 받고 닫히지도 않았다")
-        assert data == b"", (
-            "per-IP 세션 상한을 넘긴 연결이 살아남았다 — 한 주소가 전역 상한까지 "
-            "연결을 쌓을 수 있다는 뜻")
+        except ConnectionError:
+            # 끊김이 깔끔한 EOF 로 오는지 RST/abort 로 오는지는 OS 와 타이밍이
+            # 정한다 (Windows 는 10053/10054 를 모두 낸다). 어느 쪽이든 "닫혔다"
+            # 는 같은 사실이므로 ConnectionError 계열을 통째로 받는다 — 하나만
+            # 잡으면 같은 동작이 플랫폼에 따라 실패로 뒤집힌다.
+            closed = True
+
+        frames = parse_frames(bytearray(received))
+        types = [t for t, _ in frames]
+        assert MsgType.ROOM_INFO not in types, (
+            "per-IP 세션 상한을 넘긴 연결이 방을 받았다 — 한 주소가 전역 상한까지 "
+            f"연결을 쌓을 수 있다는 뜻 (frames={types})")
+        assert closed, (
+            "per-IP 세션 상한을 넘긴 연결이 살아남았다 — 상한이 실효가 없다")
+        for msg_type, payload in frames:
+            assert msg_type == MsgType.SERVER_REJECT, (
+                f"거절 직전에 예상 밖의 프레임을 보냈다: {msg_type}")
+            assert payload and payload[0] == RejectReason.IP_SESSION_LIMIT, (
+                "거절 사유가 per-IP 세션 상한이 아니다: "
+                f"{payload[0] if payload else None}")
     finally:
         for s in socks:
             s.close()
@@ -778,6 +813,81 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
         a.close(); b.close()
 
 
+class _StatsReader:
+    """릴레이가 주기적으로 내는 [stats] 줄을 실시간으로 읽어 둔다.
+
+    파이프를 읽는 쪽이 없으면 버퍼가 차서 릴레이가 write 에서 멈추므로, 테스트가
+    상태를 안 볼 때에도 계속 비워 줘야 한다 — 그래서 전용 스레드다.
+    """
+
+    _FIELDS = ("conns", "matches", "tx", "tx_peak")
+
+    def __init__(self, proc):
+        self._proc = proc
+        self._lock = threading.Lock()
+        self._samples = []          # (수신 시각, {필드: 값})
+        self.lines = []
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        for raw in self._proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            with self._lock:
+                self.lines.append(line)
+            if "[stats]" not in line:
+                continue
+            fields = {}
+            for tok in line.split():
+                if "=" not in tok:
+                    continue
+                key, _, val = tok.partition("=")
+                if key not in self._FIELDS:
+                    continue
+                # conns/tx 는 used/limit 형태다 — 앞쪽(사용량)만 쓴다.
+                head = val.split("/")[0]
+                try:
+                    fields[key] = int(head)
+                except ValueError:
+                    pass
+            if fields:
+                with self._lock:
+                    self._samples.append((time.monotonic(), fields))
+
+    def wait_for_sample_after(self, when: float, timeout: float = 15.0):
+        """``when`` 이후에 새로 도착한 상태 줄을 기다렸다 돌려준다.
+
+        경계에 걸친 줄을 그대로 읽으면 아직 정리 전 상태를 보게 되므로, 반드시
+        그 시각 이후에 **도착한** 표본만 인정한다.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                for ts, fields in reversed(self._samples):
+                    if ts > when:
+                        return fields
+            time.sleep(0.05)
+        with self._lock:
+            tail = "\n".join(self.lines[-30:])
+        raise AssertionError(
+            "상태 줄이 오지 않았다 — 릴레이가 상태를 못 내고 있다:\n" + tail)
+
+    def latest(self) -> dict:
+        with self._lock:
+            return dict(self._samples[-1][1]) if self._samples else {}
+
+    def latest_after(self, when: float) -> dict:
+        """``when`` 이후에 도착한 표본 중 가장 최근 것. 없으면 빈 dict."""
+        with self._lock:
+            if self._samples and self._samples[-1][0] > when:
+                return dict(self._samples[-1][1])
+        return {}
+
+    def dump(self) -> str:
+        with self._lock:
+            return "\n".join(self.lines[-40:])
+
+
 def test_tx_budget_is_returned_when_connections_die():
     """전역 tx 예산이 연결이 죽을 때 정확히 돌아와야 한다.
 
@@ -786,31 +896,64 @@ def test_tx_budget_is_returned_when_connections_die():
     회계라, 진짜 위험은 상한이 안 걸리는 것이 아니라 **반납이 새는 것**이다.
     새면 서버가 멀쩡한데도 시간이 갈수록 조용히 굶다가 아무도 못 붙는다.
 
-    작은 예산으로 띄우고, 안 읽는 상대를 만들어 예산을 소진시킨 뒤 전부 끊고,
-    그 사이클을 반복한다.
+    예전 버전은 바깥에서 "접속이 되는가" 만 봤고, 그래서 반납 회계를 통째로
+    제거한 바이너리가 그대로 통과했다 — 예산이 바닥나도 accept 는 계속 되고
+    막히는 것은 버퍼링뿐이라 증상이 밖으로 안 나왔기 때문이다. 이제 릴레이가
+    주기적으로 tx 사용량을 찍으므로 카운터 자체를 본다.
 
-    **한계를 분명히 해 둔다: 이 테스트는 가드지 회귀 테스트가 아니다.** 반납을
-    통째로 제거한 바이너리로 돌려 봤는데 그대로 통과했다. 예산이 바닥나도 accept
-    는 계속 되고 막히는 것은 버퍼링뿐이라, 바깥에서 접속만 봐서는 드러나지 않는다.
-    실제로 버퍼링이 필요한 상황을 뒤에 붙여 재려고도 해 봤지만 그 구성이 정상
-    코드에서도 매칭을 못 받아, 원인을 가르기 전에는 신뢰할 수 없는 판정이었다.
+    한 라운드는 이렇게 돈다.
+      1) 안 읽는 상대를 만들어 릴레이의 보류 송신을 실제로 쌓는다.
+      2) 전부 끊는다.
+      3) 끊은 뒤에 도착한 상태 줄에서 tx 사용량이 정확히 0 이어야 한다.
 
-    제대로 잡으려면 카운터를 밖에서 볼 수 있어야 한다 — 주기적 상태 로그든 신호
-    핸들러든. 관측할 수 없는 예산은 운영도 검증도 못 한다. 그게 다음 작업이다.
+    3) 이 이 테스트의 전부다. 반납이 한 경로라도 빠지면 tx 는 0 으로 돌아오지
+    않고, 라운드를 거듭할수록 커진다. 1) 은 그 판정이 공허하지 않다는 증거다 —
+    tx_peak 이 0 이면 애초에 아무것도 안 쌓인 것이므로 테스트가 실패한다.
     """
     reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
     if not reactor_bin:
         pytest.skip("tetris_relay_reactor binary missing")
 
     port = _free_port()
+    # 상태 주기를 1초로 줄인다 (운영 기본값 10초는 테스트 한 라운드보다 길다).
     proc = subprocess.Popen([str(reactor_bin), "--port", str(port),
-                             "--max-tx-mib", "1"],
+                             "--max-tx-mib", "1",
+                             "--stats-interval-sec", "1"],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stats = _StatsReader(proc)
     try:
         assert _wait_listen(port, 5.0), "relay 기동 실패"
-        chunk = build_frame(MsgType.CHAT, b"x" * 400)
+        # 커널 송신 버퍼를 넘겨 릴레이의 보류 송신까지 밀어내야 하므로 큰 프레임을
+        # 쓴다. 작은 프레임으로는 커널이 다 삼켜 tx 가 0 인 채로 끝난다.
+        chunk = build_frame(MsgType.CHAT, b"x" * 4000)
+
+        # 판정 기준을 최고 수위(tx_peak)가 아니라 그 순간의 사용량(tx)으로 잡는다.
+        # 최고 수위는 프로세스 수명 동안 단조 증가하는 값이라, 라운드마다 새 최고를
+        # 요구하면 "앞 라운드보다 덜 쌓인" 정상적인 라운드가 실패로 뒤집힌다
+        # (4쌍으로 세운 기록을 뒤의 1쌍이 넘을 수는 없다). 사용량은 라운드마다
+        # 0 에서 다시 시작하므로 그런 이력에 얽히지 않는다.
+        def flood_until_pending(senders, since: float, budget_s: float = 20.0) -> bool:
+            """보류 송신이 실제로 쌓인 것을 상태 줄로 확인할 때까지 붓는다.
+
+            속도가 관건이다 — 릴레이의 초당 상한(64 KiB/s)을 넘기면 보류 송신이
+            쌓이기 전에 릴레이가 붓는 쪽을 먼저 끊어 버려, 정작 재려던 것을 하나도
+            못 잰다. 그래서 그 아래(약 40 KiB/s)로 페이스를 맞춘다.
+            """
+            deadline = time.monotonic() + budget_s
+            while time.monotonic() < deadline:
+                if stats.latest_after(since).get("tx", 0) > 0:
+                    return True
+                for sock in senders:
+                    for _ in range(2):
+                        try:
+                            sock.sendall(chunk)
+                        except OSError:
+                            pass
+                time.sleep(0.2)
+            return stats.latest_after(since).get("tx", 0) > 0
 
         for round_no in range(3):
+            round_start = time.monotonic()
             socks = []
             try:
                 # unranked 로 4쌍을 붙이고, 각 쌍의 한쪽은 아무것도 읽지 않는다.
@@ -827,24 +970,80 @@ def test_tx_budget_is_returned_when_connections_die():
                     b.sendall(build_frame(MsgType.READY, b"\x01"))
                 time.sleep(0.3)
 
-                # 예산(1 MiB)을 넘길 만큼 붓는다. 릴레이가 어딘가에서 끊어야 한다 —
-                # 연결당 상한이든 전역 예산이든, 무한히 자라지만 않으면 된다.
-                for a in socks[0::2]:
-                    a.settimeout(1.0)
-                for _ in range(60):
-                    for a in socks[0::2]:
-                        try:
-                            a.sendall(chunk)
-                        except OSError:
-                            pass
-                    time.sleep(0.02)
+                senders = socks[0::2]
+                for a in senders:
+                    a.settimeout(0.2)
+                # 쌓인 적이 없으면 아래 판정은 아무것도 증명하지 않는다.
+                assert flood_until_pending(senders, round_start), (
+                    f"라운드 {round_no}: 보류 송신이 안 쌓였다 — 이 테스트는 지금 "
+                    "아무것도 재고 있지 않다:\n" + stats.dump())
             finally:
                 for s in socks:
                     s.close()
-            time.sleep(1.0)
+
+            closed_at = time.monotonic()
             assert proc.poll() is None, f"라운드 {round_no} 후 릴레이가 죽었다"
+
+            sample = stats.wait_for_sample_after(closed_at)
+            assert sample.get("tx") == 0, (
+                f"라운드 {round_no}: 연결이 전부 끊겼는데 tx 예산이 돌아오지 않았다 "
+                f"(tx={sample.get('tx')}). 반납 회계가 새고 있다:\n" + stats.dump())
+
             probe = socket.create_connection(("127.0.0.1", port), timeout=3.0)
             probe.close()
+
+        # 위 라운드들은 "쌓인 채로 죽는" 경로만 잰다. 반납 경로는 둘인데, 다른
+        # 하나는 살아 있는 연결이 적체를 빼내는 쪽이다 — 그쪽 반납만 빠져도
+        # 위 판정은 전부 통과한다(죽을 때 남은 것이 0 이므로). 그래서 밀렸다가
+        # 다시 빠져나가는 경로를 따로 재고, 연결을 끊지 않은 채로 확인한다.
+        phase2_start = time.monotonic()
+        a = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        b = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        try:
+            b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            a.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+            b.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+            _recv_match_found(a)
+            _recv_match_found(b)
+            a.sendall(build_frame(MsgType.READY, b"\x01"))
+            b.sendall(build_frame(MsgType.READY, b"\x01"))
+            time.sleep(0.3)
+
+            a.settimeout(0.2)
+            assert flood_until_pending([a], phase2_start), (
+                "2단계에서 보류 송신이 안 쌓였다 — 배수 경로를 재지 못한다:\n"
+                + stats.dump())
+
+            # 이제 b 가 읽어 릴레이의 보류 송신을 비운다. "조용해지면 끝" 으로는
+            # 판정할 수 없다 — 우리가 멈춰 세웠던 a 의 커널 백로그가 재개와 함께
+            # 뒤늦게 흘러 들어오므로, 잠깐의 정적은 배수 완료가 아니다. 릴레이가
+            # 스스로 tx=0 을 말할 때까지 읽는다.
+            drain_start = time.monotonic()
+            b.settimeout(0.2)
+            reached_zero = False
+            drain_until = drain_start + 25.0
+            while time.monotonic() < drain_until:
+                try:
+                    b.recv(65536)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    break
+                if stats.latest_after(drain_start).get("tx") == 0:
+                    reached_zero = True
+                    break
+            assert reached_zero, (
+                "상대가 계속 읽는데도 tx 예산이 0 으로 돌아오지 않았다 — 배수 "
+                "경로의 반납 회계가 새고 있다:\n" + stats.dump())
+        finally:
+            a.close()
+            b.close()
+
+        # 연결 수 카운터도 같은 성질을 갖는다 — 전부 끊긴 뒤에는 0 이어야 한다.
+        final = stats.wait_for_sample_after(time.monotonic())
+        assert final.get("conns") == 0, (
+            "모든 연결이 끊겼는데 동시 연결 수가 안 돌아왔다 "
+            f"(conns={final.get('conns')}):\n" + stats.dump())
     finally:
         proc.terminate()
         try:

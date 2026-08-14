@@ -8,6 +8,7 @@
 #include "worker_group.h"
 #include "../net/socket.h"
 #include "../meta/http_client.h"
+#include "log.h"
 
 #include <atomic>
 #include <charconv>
@@ -101,7 +102,8 @@ int main(int argc, char** argv) {
         if (a == "--port" && i + 1 < argc) {
             const std::string portArg = argv[++i];
             if (!parsePort(portArg, port)) {
-                std::cerr << "Invalid --port value: " << portArg << " (expected 1..65535)\n";
+                RLOG_ERROR("Invalid --port value: " << portArg
+                           << " (expected 1..65535)");
                 return 2;
             }
         } else if (a == "--meta" && i + 1 < argc) {
@@ -112,8 +114,8 @@ int main(int argc, char** argv) {
             const std::string arg = argv[++i];
             size_t n = 0;
             if (!parseCount(arg, n)) {
-                std::cerr << "Invalid --max-sessions-per-ip value: " << arg
-                          << " (expected 1..100000)\n";
+                RLOG_ERROR("Invalid --max-sessions-per-ip value: " << arg
+                           << " (expected 1..100000)");
                 return 2;
             }
             relay::IpAdmission::set_session_limit(n);
@@ -121,7 +123,7 @@ int main(int argc, char** argv) {
             printUsage();
             return 0;
         } else {
-            std::cerr << "Unknown arg: " << a << "\n";
+            RLOG_ERROR("Unknown arg: " << a);
             printUsage();
             return 1;
         }
@@ -131,20 +133,20 @@ int main(int argc, char** argv) {
     std::unique_ptr<meta::client::MetaClient> metaClient;
     if (!metaUrl.empty()) {
         if (metaSecret.empty()) {
-            std::cerr << "[relay] refusing to start: --meta set but no relay secret. "
-                      << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
-                      << "POST /v1/matches without it).\n";
+            RLOG_ERROR("[relay] refusing to start: --meta set but no relay secret. "
+                       << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
+                       << "POST /v1/matches without it).");
             return 2;
         }
         metaClient = std::make_unique<meta::client::MetaClient>(metaUrl, metaSecret);
         if (!metaClient->valid()) {
-            std::cerr << "[relay] invalid --meta URL: " << metaUrl << "\n";
+            RLOG_ERROR("[relay] invalid --meta URL: " << metaUrl);
             return 2;
         } else {
-            std::cout << "[relay] meta enabled: " << metaUrl << "\n";
+            RLOG_INFO("[relay] meta enabled: " << metaUrl);
         }
     } else {
-        std::cout << "[relay] meta=none (unranked mode)\n";
+        RLOG_INFO("[relay] meta=none (unranked mode)");
     }
 
     std::signal(SIGINT,  signalHandler);
@@ -157,29 +159,29 @@ int main(int argc, char** argv) {
 #endif
 
     if (!net::net_init()) {
-        std::cerr << "net_init() failed\n";
+        RLOG_ERROR("net_init() failed");
         return 1;
     }
 
     g_listen_sock = net::tcp_listen(port, /*backlog=*/256);
     if (!g_listen_sock.valid()) {
-        std::cerr << "tcp_listen(" << port << ") failed — port in use?\n";
+        RLOG_ERROR("tcp_listen(" << port << ") failed — port in use?");
         net::net_shutdown();
         return 1;
     }
     // Nonblocking accept lets the loop observe the shutdown flag.
     net::tcp_set_nonblocking(g_listen_sock);
-    std::cout << "[relay] listening on 0.0.0.0:" << port << "\n";
-    std::cout << "[relay] local IP: " << net::get_local_ip() << "\n";
-    std::cout << "[relay] Ctrl+C to stop\n";
+    RLOG_INFO("[relay] listening on 0.0.0.0:" << port);
+    RLOG_INFO("[relay] local IP: " << net::get_local_ip());
+    RLOG_INFO("[relay] Ctrl+C to stop");
 
     relay::Matchmaker   mm;
     relay::RoomRegistry rr;
 
     // Drain workers before destroying the state they reference.
     relay::WorkerGroup connWorkers{"relay-connection", kMaxConnWorkers};
-    std::cout << "[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
-              << " sessions=" << relay::IpAdmission::session_limit() << "\n";
+    RLOG_INFO("[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
+              << " sessions=" << relay::IpAdmission::session_limit());
 
     // 매칭 전담 스레드: 2명 모일 때마다 페어링 + relay 시작.
     // meta 가 있으면 post_match 를 호출할 수 있도록 포인터를 startPump 에 넘긴다.
@@ -197,17 +199,17 @@ int main(int argc, char** argv) {
                     relay::startQueuePump(std::move(*match), mcPtr);
                 }
             } catch (const std::exception& e) {
-                std::cerr << "[relay] matcher failed: " << e.what() << "\n";
+                RLOG_ERROR("[relay] matcher failed: " << e.what());
                 g_running.store(false);
                 mm.shutdown();
             } catch (...) {
-                std::cerr << "[relay] matcher failed: unknown exception\n";
+                RLOG_ERROR("[relay] matcher failed: unknown exception");
                 g_running.store(false);
                 mm.shutdown();
             }
         });
     } catch (const std::exception& e) {
-        std::cerr << "[relay] matcher launch failed: " << e.what() << "\n";
+        RLOG_ERROR("[relay] matcher launch failed: " << e.what());
         net::tcp_close(g_listen_sock);
         g_listen_sock = net::TcpSocket{};
         net::net_shutdown();
@@ -240,20 +242,20 @@ int main(int argc, char** argv) {
         auto sessionSlot = relay::IpAdmission::acquire(
             peerIp, relay::IpAdmission::Kind::Session);
         if (!sessionSlot) {
-            std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
-                      << ": per-IP session limit\n";
+            RLOG_INFO("[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP session limit player_id=0 match_uuid=-");
             net::tcp_close(client);
             continue;
         }
         auto handshakeSlot = relay::IpAdmission::acquire(
             peerIp, relay::IpAdmission::Kind::Handshake);
         if (!handshakeSlot) {
-            std::cerr << "[relay] rejecting conn=" << id << " ip=" << peerIp
-                      << ": per-IP handshake limit\n";
+            RLOG_INFO("[relay] rejecting conn=" << id << " ip=" << peerIp
+                      << ": per-IP handshake limit player_id=0 match_uuid=-");
             net::tcp_close(client);
             continue;
         }
-        std::cout << "[relay] accept conn=" << id << "\n";
+        RLOG_DEBUG("[relay] accept conn=" << id << " ip=" << peerIp);
         // launch 가 실패하면 람다(그리고 두 슬롯 사본)가 그대로 소멸하므로
         // 별도의 반납 경로가 필요 없다.
         if (!connWorkers.launch([client = std::move(client), id, &mm, &rr, mcPtr,
@@ -263,12 +265,12 @@ int main(int argc, char** argv) {
                                     std::move(handshakeSlot),
                                     std::move(sessionSlot));
         })) {
-            std::cerr << "[relay] rejecting conn=" << id
-                      << ": connection worker unavailable\n";
+            RLOG_WARN("[relay] rejecting conn=" << id
+                      << ": connection worker unavailable player_id=0 match_uuid=-");
         }
     }
 
-    std::cout << "[relay] shutting down...\n";
+    RLOG_INFO("[relay] shutting down...");
     relay::beginShutdown();
     connWorkers.stopAccepting();
     net::tcp_close(g_listen_sock);
@@ -279,6 +281,6 @@ int main(int argc, char** argv) {
     connWorkers.wait();
     relay::waitForShutdown();
     net::net_shutdown();
-    std::cout << "[relay] done\n";
+    RLOG_INFO("[relay] done");
     return 0;
 }

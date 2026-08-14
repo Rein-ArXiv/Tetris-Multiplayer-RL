@@ -34,6 +34,7 @@
 #include "../net/socket.h"
 #include "../meta/http_client.h"
 #include "ip_admission.h"
+#include "log.h"
 #include "match_uuid.h"
 #include "offload.h"
 #include "player_session.h"
@@ -97,6 +98,41 @@ size_t           g_max_conns      = kDefaultMaxConns;
 constexpr size_t      kDefaultTxBudget = 64 * 1024 * 1024;
 size_t                g_tx_budget      = kDefaultTxBudget;
 std::atomic<size_t>   g_tx_total{0};
+
+// ── 관측 ─────────────────────────────────────────────────────────────────────
+// 관측할 수 없는 예산은 운영도 검증도 못 한다. 실제로 그랬다: tx 예산을 도입한
+// 직후 회귀 테스트를 쓰려 했는데, 바깥에서 보이는 것이 "접속이 되는가" 뿐이라
+// 반납 회계를 통째로 없앤 바이너리가 테스트를 그대로 통과했다. 예산이 바닥나도
+// accept 는 계속 되고 막히는 것은 버퍼링뿐이라 증상이 밖으로 안 나오기 때문이다.
+//
+// 그래서 카운터를 프로세스 전역으로 두고 주기적으로 한 줄에 찍는다. 전역인
+// 이유는 샤드 때문이다 — 루프마다 자기 표만 세면 포워딩으로 넘어간 연결이
+// 앞단의 수에서 사라져, 어느 줄도 프로세스의 실제 상태를 말하지 못한다.
+std::atomic<size_t>   g_conn_count{0};   // 현재 동시 연결 (프로세스 전체)
+std::atomic<size_t>   g_match_count{0};  // 현재 활성 매치 (프로세스 전체)
+std::atomic<size_t>   g_tx_peak{0};      // tx 사용량의 최고 수위 (예산 여유 판단용)
+
+// 거절 카운터 — 사유별로 나눠야 "무엇이 먼저 걸리는가" 를 말할 수 있다.
+// 합계만 있으면 상한을 어느 쪽으로 올려야 하는지 알 수 없다.
+std::atomic<uint64_t> g_reject_conn_cap{0};
+std::atomic<uint64_t> g_reject_ip_session{0};
+std::atomic<uint64_t> g_reject_ip_handshake{0};
+std::atomic<uint64_t> g_reject_tx_budget{0};
+
+// 상태 한 줄의 주기.
+//
+// 10초를 고른 근거는 양쪽 실패 모드다.
+//   · 너무 길면(60초+) 정작 필요한 순간에 해상도가 없다. tx 예산 누수나 상한
+//     충돌은 몇 초 만에 상태가 바뀌고, 문의 대응은 "그 시각" 에서 출발한다.
+//     한 라운드가 10초 남짓인 회귀 테스트도 60초 주기로는 표본을 못 얻는다.
+//   · 너무 짧으면(1초) 로그가 다른 모든 줄을 덮는다. 이 릴레이의 나머지 로그는
+//     연결 수명당 몇 줄뿐이라, 초당 한 줄이면 한산한 서버의 로그가 사실상
+//     상태 줄만 남는다.
+// 10초는 하루 8,640줄 — 접속·매치 로그와 같은 자릿수라 어느 쪽도 덮지 않고,
+// 저전력 쿼드코어에서 10초에 한 번의 문자열 조립은 측정 대상이 아니다.
+// 조사·테스트용으로 --stats-interval-sec 로 조절할 수 있고 0 이면 끈다.
+constexpr int         kDefaultStatsIntervalSec = 10;
+int                   g_stats_interval_sec     = kDefaultStatsIntervalSec;
 
 namespace {
 
@@ -162,6 +198,38 @@ std::string extract_token(const std::vector<uint8_t>& pl, size_t off) {
     const uint8_t n = pl[off];
     if (n == 0 || pl.size() < off + 1u + n) return {};
     return std::string(pl.begin() + off + 1, pl.begin() + off + 1 + n);
+}
+
+// ── 거절 사유 통지 ───────────────────────────────────────────────────────────
+// 상한에 걸린 연결을 그냥 close 하면 사용자에게는 원인 모를 끊김이다. 닫기
+// 직전에 SERVER_REJECT 를 밀어 넣어 클라이언트가 "서버 만원" 같은 문구를 띄울
+// 수 있게 한다. 구버전 호환성은 net/framing.h 의 SERVER_REJECT 주석 참고.
+std::vector<uint8_t> build_reject(net::RejectReason reason, const char* text) {
+    const size_t n = text ? std::min<size_t>(std::strlen(text), 255) : 0;
+    std::vector<uint8_t> pl;
+    pl.reserve(2 + n);
+    pl.push_back(static_cast<uint8_t>(reason));
+    pl.push_back(static_cast<uint8_t>(n));
+    pl.insert(pl.end(), text, text + n);
+    return net::build_frame(net::MsgType::SERVER_REJECT, pl);
+}
+
+// 아직 Conn 이 되지 못한 소켓(accept 직후 거절)용.
+//
+// 전달은 보장이 아니라 최선의 노력이다. close 시점에 아직 안 읽은 수신
+// 데이터가 남아 있으면 커널은 FIN 대신 RST 를 보내고, 그러면 방금 큐에 넣은
+// 바이트도 함께 버려진다. 갓 accept 한 소켓에는 클라이언트가 connect 와 함께
+// 보낸 첫 프레임이 이미 도착해 있을 수 있으므로, 닫기 전에 수신 큐를 한 번
+// 비워 그 창을 좁힌다 — 없애지는 못한다(비운 직후에도 데이터는 도착할 수
+// 있다). 그래서 클라이언트는 이 프레임이 없는 경우에도 기존의 일반 문구로
+// 물러설 수 있어야 한다.
+void reject_socket(net::TcpSocket& s, net::RejectReason reason, const char* text) {
+    const auto fr = build_reject(reason, text);
+    size_t sent = 0;
+    net::tcp_send_some(s, fr.data(), fr.size(), sent);
+    std::vector<uint8_t> drain;
+    net::tcp_recv_some(s, drain);
+    net::tcp_close(s);
 }
 
 // ── 룸 코드 ──────────────────────────────────────────────────────────────────
@@ -270,23 +338,24 @@ public:
     bool init(uint16_t port) {
         reactor_ = net::Reactor::create();
         if (!reactor_) {
-            std::cerr << "[relay] reactor 생성 실패\n";
+            RLOG_ERROR("[relay] reactor 생성 실패");
             return false;
         }
         offload_ = std::make_unique<Offload>(4, [this] { reactor_->wake(); });
 
         listen_ = net::tcp_listen(port, 64);
         if (!listen_.valid()) {
-            std::cerr << "[relay] port " << port << " listen 실패\n";
+            RLOG_ERROR("[relay] port " << port << " listen 실패");
             return false;
         }
         net::tcp_set_nonblocking(listen_);
         if (!reactor_->add(listen_.fd(), net::kRead, &listen_token_)) {
-            std::cerr << "[relay] listen fd 등록 실패\n";
+            RLOG_ERROR("[relay] listen fd 등록 실패");
             return false;
         }
-        std::cout << "[relay] reactor listening on 0.0.0.0:" << port << "\n";
-        std::cout << "[relay] " << meta_note_ << "\n";
+        is_front_ = true;   // 상태 줄은 앞단 하나만 찍는다 (카운터가 전역이라 그걸로 충분하다)
+        RLOG_INFO("[relay] reactor listening on 0.0.0.0:" << port);
+        RLOG_INFO("[relay] " << meta_note_);
         return true;
     }
 
@@ -295,7 +364,7 @@ public:
         shard_index_ = index;
         reactor_ = net::Reactor::create();
         if (!reactor_) {
-            std::cerr << "[relay] shard " << index << " reactor 생성 실패\n";
+            RLOG_ERROR("[relay] shard " << index << " reactor 생성 실패");
             return false;
         }
         offload_ = std::make_unique<Offload>(2, [this] { reactor_->wake(); });
@@ -332,7 +401,7 @@ public:
 
             const int n = reactor_->poll(events, timeout);
             if (n < 0) {
-                std::cerr << "[relay] poll 오류 — 종료\n";
+                RLOG_ERROR("[relay] poll 오류 — 종료");
                 break;
             }
 
@@ -364,6 +433,7 @@ public:
             }
 
             sweep();
+            if (is_front_) maybe_emit_stats(Clock::now());
         }
 
         shutdown();
@@ -397,16 +467,57 @@ private:
                 close_conn(b, "샤드 등록 실패");
                 continue;
             }
-            std::cerr << "[shard " << shard_index_ << "] match=" << ch->match_id
-                      << " 인계 받음\n";
+            RLOG_DEBUG("[shard " << shard_index_ << "] match=" << ch->match_id
+                       << " uuid=" << ch->match_uuid << " 인계 받음");
             begin_forwarding(ch);
         }
+    }
+
+    // ── 주기 상태 ────────────────────────────────────────────────────────────
+    // 동시 연결·tx 예산·거절 사유별 카운터·활성 매치를 한 줄로 낸다. 이 줄이
+    // 없으면 예산 누수를 바깥에서 잴 방법이 없고, 없는 동안 실제로 반납 회계를
+    // 제거한 바이너리가 테스트를 통과했다.
+    void maybe_emit_stats(TimePoint now) {
+        if (g_stats_interval_sec <= 0) return;
+        // 기본값(epoch)은 "아직 한 번도 안 찍었다" 는 뜻 — 기동 직후 기준선을
+        // 한 줄 남기고 시작한다. 그래야 첫 주기가 지나기 전에 죽은 프로세스도
+        // 최소한 출발점은 말한다.
+        if (next_stats_.time_since_epoch().count() != 0 && now < next_stats_) return;
+        next_stats_ = now + std::chrono::seconds(g_stats_interval_sec);
+        RLOG_INFO("[stats] conns=" << g_conn_count.load(std::memory_order_relaxed)
+                  << "/" << g_max_conns
+                  << " matches=" << g_match_count.load(std::memory_order_relaxed)
+                  << " tx=" << g_tx_total.load(std::memory_order_relaxed)
+                  << "/" << g_tx_budget
+                  << " tx_peak=" << g_tx_peak.load(std::memory_order_relaxed)
+                  << " reject_conn_cap="
+                  << g_reject_conn_cap.load(std::memory_order_relaxed)
+                  << " reject_ip_session="
+                  << g_reject_ip_session.load(std::memory_order_relaxed)
+                  << " reject_ip_handshake="
+                  << g_reject_ip_handshake.load(std::memory_order_relaxed)
+                  << " reject_tx_budget="
+                  << g_reject_tx_budget.load(std::memory_order_relaxed));
     }
 
     // ── 수명 관리 ────────────────────────────────────────────────────────────
     bool alive(Conn* c) const {
         auto it = conns_.find(c);
         return it != conns_.end() && it->second->stage != Stage::Dead;
+    }
+
+    // 종료 로그의 공통 식별자. 메타 서버의 경기 기록과 같은 키(match_uuid)와
+    // 계정 키(player_id)를 붙여야 "그 시각 그 사람이 왜 끊겼는지" 를 맞출 수
+    // 있다. 아직 인증 전이거나 매치 전이면 자리를 '-' 로 채운다 — 필드가 있다
+    // 없다 하면 grep 이 깨지고, 없는 것과 0 인 것도 구분이 안 된다.
+    static std::string ident_of(const Conn* c) {
+        std::string s = " player_id=";
+        s += std::to_string(c->player_id);
+        s += " match=";
+        s += c->ch ? std::to_string(c->ch->match_id) : std::string("-");
+        s += " match_uuid=";
+        s += c->ch ? c->ch->match_uuid : std::string("-");
+        return s;
     }
 
     // 죽은 연결은 즉시 해제하지 않는다 — 같은 배치의 뒤쪽 이벤트가 이 포인터를
@@ -418,7 +529,8 @@ private:
         // 으로 등록된 채 아무 이벤트도 못 받아, 유휴 타이머가 걷어갈 때까지 fd 와
         // per-IP 세션 슬롯을 붙들고 남는다.
         pause_peer_read(c, false);
-        std::cerr << "[conn " << c->id << "] close: " << why << "\n";
+        // ident_of 는 c->ch 를 읽는다 — 아래에서 채널을 끊기 전에 찍어야 한다.
+        RLOG_INFO("[conn " << c->id << "] close: " << why << ident_of(c));
         c->stage = Stage::Dead;
         // 보류 송신은 여기서 포기한다 — 소켓을 닫는 마당에 흘려보낼 곳이 없다.
         // 전역 예산도 같이 돌려준다.
@@ -455,6 +567,9 @@ private:
             if (*it == c) { queue_.erase(it); break; }
         }
         dying_.push_back(c);
+        // 전역 동시 연결 수는 여기서 줄인다. 샤드로 인계된 연결도 결국 이 경로를
+        // 지나므로, 어느 루프가 닫든 정확히 한 번 줄어든다.
+        g_conn_count.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void sweep() {
@@ -463,7 +578,12 @@ private:
         // 양쪽이 사라지고 finalize 도 끝난 채널을 정리한다.
         for (auto it = channels_.begin(); it != channels_.end();) {
             Channel* ch = it->second.get();
-            if (!ch->a && !ch->b && !ch->finalize_inflight) it = channels_.erase(it);
+            if (!ch->a && !ch->b && !ch->finalize_inflight) {
+                // 활성 매치 수는 여기서만 줄인다 — 샤드 인계(extract)는 소유만
+                // 옮길 뿐 매치가 끝난 것이 아니다.
+                g_match_count.fetch_sub(1, std::memory_order_relaxed);
+                it = channels_.erase(it);
+            }
             else ++it;
         }
     }
@@ -476,8 +596,10 @@ private:
             if (!s.valid()) return;
 
             if (conns_.size() >= g_max_conns) {
-                std::cerr << "[relay] 연결 상한 도달 (" << g_max_conns << ") — 거절\n";
-                net::tcp_close(s);
+                g_reject_conn_cap.fetch_add(1, std::memory_order_relaxed);
+                RLOG_INFO("[relay] 거절: 연결 상한 도달 (" << g_max_conns << ")");
+                reject_socket(s, net::RejectReason::ServerFull,
+                              "server is full, try again shortly");
                 continue;
             }
             std::string key = net::tcp_peer_ip(s);
@@ -487,15 +609,19 @@ private:
             auto session_slot =
                 IpAdmission::acquire(key, IpAdmission::Kind::Session);
             if (!session_slot) {
-                std::cerr << "[relay] per-IP session 상한 (" << key << ") — 거절\n";
-                net::tcp_close(s);
+                g_reject_ip_session.fetch_add(1, std::memory_order_relaxed);
+                RLOG_INFO("[relay] 거절: per-IP session 상한 (" << key << ")");
+                reject_socket(s, net::RejectReason::IpSessionLimit,
+                              "too many connections from your address");
                 continue;
             }
             auto handshake_slot =
                 IpAdmission::acquire(key, IpAdmission::Kind::Handshake);
             if (!handshake_slot) {
-                std::cerr << "[relay] per-IP handshake 상한 (" << key << ") — 거절\n";
-                net::tcp_close(s);
+                g_reject_ip_handshake.fetch_add(1, std::memory_order_relaxed);
+                RLOG_INFO("[relay] 거절: per-IP handshake 상한 (" << key << ")");
+                reject_socket(s, net::RejectReason::IpHandshakeLimit,
+                              "too many connection attempts from your address");
                 continue;
             }
 
@@ -508,13 +634,16 @@ private:
             c->last_activity = Clock::now();
             Conn* raw = c.get();
             if (!reactor_->add(raw->fd, net::kRead, raw)) {
-                std::cerr << "[relay] fd 등록 실패 — 거절\n";
+                RLOG_WARN("[relay] fd 등록 실패 — 거절");
                 net::tcp_close(raw->sock);
                 continue;   // c 소멸 → 두 슬롯 자동 반납
             }
             timers_.arm(raw, Clock::now() + kFirstFrameTimeout);
             conns_[raw] = std::move(c);
-            std::cerr << "[conn " << raw->id << "] accepted from " << key << "\n";
+            // 등록에 성공한 뒤에 센다 — close_conn 을 지나지 않고 사라지는
+            // 연결(위 등록 실패 경로)까지 세면 카운터가 영영 안 돌아온다.
+            g_conn_count.fetch_add(1, std::memory_order_relaxed);
+            RLOG_DEBUG("[conn " << raw->id << "] accepted from " << key);
         }
     }
 
@@ -532,6 +661,15 @@ private:
             dst->tx.insert(dst->tx.end(), data + sent, data + len);
             const size_t total = g_tx_total.fetch_add(added,
                                      std::memory_order_relaxed) + added;
+            // 최고 수위. 예산에 얼마나 근접했는지는 순간값만 봐서는 알 수 없다 —
+            // 상태 줄 사이에서 치솟았다 빠지면 어느 줄에도 안 남는다.
+            // 이 갱신은 "커널이 다 받아 주지 않은" 경로에만 있으므로 정상
+            // 포워딩(전량 송신)에서는 실행되지 않는다.
+            for (size_t peak = g_tx_peak.load(std::memory_order_relaxed);
+                 total > peak;) {
+                if (g_tx_peak.compare_exchange_weak(peak, total,
+                                                    std::memory_order_relaxed)) break;
+            }
             arm_write(dst, true);
             if (dst->tx.size() > kSendHardCap) {
                 close_conn(dst, "송신 버퍼 하드 상한 초과");
@@ -540,9 +678,12 @@ private:
             if (total > g_tx_budget) {
                 // 프로세스 전체 예산 초과. 연결당 상한 안에 있어도 여기서 끊는다 —
                 // 지킬 대상이 이 연결이 아니라 프로세스이기 때문이다.
-                std::cerr << "[relay] tx 예산 초과 (" << total << " > "
-                          << g_tx_budget << ")\n";
-                close_conn(dst, "tx 전역 예산 초과");
+                g_reject_tx_budget.fetch_add(1, std::memory_order_relaxed);
+                RLOG_WARN("[relay] 거절: tx 전역 예산 초과 (" << total << " > "
+                          << g_tx_budget << ")" << ident_of(dst));
+                reject_conn(dst, net::RejectReason::TxBudget,
+                            "server memory budget exhausted",
+                            "tx 전역 예산 초과");
                 return false;
             }
             if (dst->tx.size() > kSendHighWater) pause_peer_read(dst, true);
@@ -557,6 +698,27 @@ private:
         g_tx_total.fetch_sub(c->tx.size(), std::memory_order_relaxed);
         c->tx.clear();
         c->tx.shrink_to_fit();
+    }
+
+    // 이미 등록된 연결을 사유와 함께 끊는다.
+    //
+    // 보류 송신이 남아 있을 수 있으므로 프레임을 그 뒤에 붙인다 — 앞질러 보내면
+    // 클라이언트가 받는 바이트 순서가 어긋나 프레임 경계가 깨진다. 붙인 만큼
+    // 전역 예산도 함께 올려 둔다. 곧바로 close_conn 이 release_tx 로 남은 전부를
+    // 돌려주므로 회계는 맞는다. 한 번 밀어 보고 안 나가면 그대로 포기한다 —
+    // 안 읽는 상대를 기다리는 것이 애초에 여기 온 이유다.
+    void reject_conn(Conn* c, net::RejectReason reason, const char* text,
+                     const char* why) {
+        if (!c || c->stage == Stage::Dead) return;
+        const auto fr = build_reject(reason, text);
+        c->tx.insert(c->tx.end(), fr.begin(), fr.end());
+        g_tx_total.fetch_add(fr.size(), std::memory_order_relaxed);
+        size_t sent = 0;
+        if (net::tcp_send_some(c->sock, c->tx.data(), c->tx.size(), sent) && sent) {
+            c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
+            g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
+        }
+        close_conn(c, why);
     }
 
     // dst 로 흘려보내는 쪽. 포워딩 중이면 채널 상대, 룸 단계면 룸 상대다.
@@ -783,8 +945,8 @@ private:
             close_conn(c, "동일 player_id 중복 세션 -> 거절");
             return;
         }
-        std::cerr << "[conn " << c->id << "] authed player_id=" << c->player_id
-                  << " elo=" << c->elo << "\n";
+        RLOG_DEBUG("[conn " << c->id << "] authed player_id=" << c->player_id
+                   << " elo=" << c->elo);
         // unranked 경로(begin_auth 의 !meta_ 분기)와 반드시 같은 문을 통과해야 한다.
         // 여기서 enter_queue 를 직접 부르면 두 가지가 조용히 깨진다:
         //   - 핸드셰이크 슬롯이 안 풀려 per-IP "동시 핸드셰이크" 예산이 "동시 세션"
@@ -843,7 +1005,8 @@ private:
         send_room_info(c, code, kStatusWaiting, 1);
         // 게스트가 안 들어오면 슬롯을 무한정 점유하지 않도록 데드라인을 건다.
         timers_.arm(c, Clock::now() + kRoomGuestWait);
-        std::cerr << "[conn " << c->id << "] ROOM_CREATE " << code << "\n";
+        RLOG_DEBUG("[conn " << c->id << "] ROOM_CREATE " << code
+                   << " player_id=" << c->player_id);
         if (!c->rx.empty()) on_room(c);
     }
 
@@ -864,7 +1027,8 @@ private:
         c->room = r;
         c->is_host = false;
         c->stage = Stage::Room;
-        std::cerr << "[conn " << c->id << "] ROOM_JOIN " << r->code << "\n";
+        RLOG_DEBUG("[conn " << c->id << "] ROOM_JOIN " << r->code
+                   << " player_id=" << c->player_id);
 
         // 양쪽에 "둘 다 있음" 을 알리고, 대기 데드라인을 READY 기준으로 다시 건다.
         send_room_info(r->host, r->code, kStatusWaiting, 2);
@@ -948,7 +1112,8 @@ private:
             if (!alive(c)) return;
         }
         queue_.push_back(c);
-        std::cerr << "[conn " << c->id << "] queued (" << queue_.size() << " 대기)\n";
+        RLOG_DEBUG("[conn " << c->id << "] queued (" << queue_.size() << " 대기)"
+                   << " player_id=" << c->player_id);
         try_pair();
     }
 
@@ -1000,13 +1165,16 @@ private:
         ch->a_lease = a->lease;  ch->b_lease = b->lease;
         ch->ranked = (meta_ != nullptr) && a->player_id != 0 && b->player_id != 0;
         channels_[ch->match_id] = std::move(up);
+        // 활성 매치 수 — 줄이는 곳은 sweep 하나뿐이다(샤드 인계는 소유 이전일 뿐).
+        g_match_count.fetch_add(1, std::memory_order_relaxed);
 
         a->ch = ch; a->is_a = true;
         b->ch = ch; b->is_a = false;
 
-        std::cerr << "[relay] match=" << ch->match_id << " paired conn "
-                  << a->id << " x " << b->id
-                  << (ch->ranked ? " (ranked)" : " (unranked)") << "\n";
+        RLOG_INFO("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
+                  << " paired conn " << a->id << " x " << b->id
+                  << " player_id=" << a->player_id << " x " << b->player_id
+                  << (ch->ranked ? " (ranked)" : " (unranked)"));
         return ch;
     }
 
@@ -1141,7 +1309,8 @@ private:
             c->byte_window = 0;
             timers_.arm(c, now + kIdleTimeout);
         }
-        std::cerr << "[relay] match=" << ch->match_id << " forwarding 시작\n";
+        RLOG_INFO("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
+                  << " forwarding 시작");
         // 로비에서 남은 바이트(READY 이후 도착한 게임 프레임)를 지금 흘려보낸다.
         if (!a->rx.empty()) on_forward(a);
         if (alive(b) && !b->rx.empty()) on_forward(b);
@@ -1173,8 +1342,9 @@ private:
             const size_t avail = c->rx.size() - consumed;
             const uint16_t len = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
             if ((size_t)len > net::kMaxPayloadBytes + 1u) {
-                std::cerr << "[relay] match=" << ch->match_id
-                          << " 과대 프레임 — 스트림 폐기\n";
+                RLOG_WARN("[relay] match=" << ch->match_id
+                          << " uuid=" << ch->match_uuid
+                          << " 과대 프레임 — 스트림 폐기");
                 consumed = c->rx.size();
                 break;
             }
@@ -1190,8 +1360,11 @@ private:
                 if (chk == calc && parse_summary(p + 3, payload_len, s)) {
                     auto& slot = c->is_a ? ch->sumA : ch->sumB;
                     if (!slot) slot = s;
-                    std::cerr << "[relay] match=" << ch->match_id << " MATCH_SUMMARY from "
-                              << (c->is_a ? "A" : "B") << " won=" << (int)s.won << "\n";
+                    RLOG_DEBUG("[relay] match=" << ch->match_id
+                               << " uuid=" << ch->match_uuid << " MATCH_SUMMARY from "
+                               << (c->is_a ? "A" : "B")
+                               << " player_id=" << c->player_id
+                               << " won=" << (int)s.won);
                 }
                 consumed += total;   // 가로챔 — 상대에게 보내지 않는다
                 continue;
@@ -1234,8 +1407,9 @@ private:
             // 무경기 — meta 에 보내지 않는다(담합 RP 파밍·동시 단절 오염 차단).
             ch->summary_handled = true;
             send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
-            std::cerr << "[relay] match=" << ch->match_id
-                      << " 요약 없음 -> meta 미전송 (delta=0)\n";
+            RLOG_INFO("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
+                      << " player_id=" << ch->a_id << " x " << ch->b_id
+                      << " 요약 없음 -> meta 미전송 (delta=0)");
             return;
         }
         finalize_forfeit(ch);
@@ -1252,8 +1426,9 @@ private:
         if (exclusive && scores_ok && lines_ok) {
             winner = (a.won == 1) ? ch->a_id : ch->b_id;
         } else {
-            std::cerr << "[relay] match=" << ch->match_id
-                      << " 교차검증 실패 -> winner=null\n";
+            RLOG_WARN("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
+                      << " player_id=" << ch->a_id << " x " << ch->b_id
+                      << " 교차검증 실패 -> winner=null");
         }
         post_result(ch, winner, (int)a.my_score, (int)b.my_score,
                     (int)a.my_lines, (int)b.my_lines,
@@ -1292,8 +1467,8 @@ private:
             });
         if (!queued) {
             // 종료 중이라 저장할 수 없다 — 결과를 삼키지 말고 남긴다.
-            std::cerr << "[relay] match=" << mid
-                      << " 종료 중 — meta 저장 생략\n";
+            RLOG_WARN("[relay] match=" << mid << " uuid=" << uuid
+                      << " 종료 중 — meta 저장 생략");
             ch->finalize_inflight = false;
         }
     }
@@ -1307,10 +1482,12 @@ private:
         if (res) {
             send_result_frames(ch, res->a.elo_before, res->a.elo_after, res->a.delta,
                                    res->b.elo_before, res->b.elo_after, res->b.delta);
-            std::cerr << "[relay] match=" << match_id << " meta 저장 완료\n";
+            RLOG_INFO("[relay] match=" << match_id << " uuid=" << ch->match_uuid
+                      << " meta 저장 완료");
         } else {
             send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
-            std::cerr << "[relay] match=" << match_id << " meta POST 실패 — delta=0\n";
+            RLOG_WARN("[relay] match=" << match_id << " uuid=" << ch->match_uuid
+                      << " meta POST 실패 — delta=0");
         }
     }
 
@@ -1327,7 +1504,7 @@ private:
 
     // ── 종료 ─────────────────────────────────────────────────────────────────
     void shutdown() {
-        std::cout << "[relay] shutting down...\n";
+        RLOG_INFO("[relay] shutting down...");
         // 새 job 을 막고 이미 큐에 있는 것(진짜 끝난 경기의 결과 저장)은 마친다.
         // 큐 깊이는 그 순간 종료된 매치 수로 한정되고, 새 연결을 받지 않으므로
         // 드레인 중에 자라지 않는다.
@@ -1342,7 +1519,7 @@ private:
         conns_.clear();
         channels_.clear();
         net::tcp_close(listen_);
-        std::cout << "[relay] done\n";
+        RLOG_INFO("[relay] done");
     }
 
     meta::client::MetaClient* meta_ = nullptr;
@@ -1354,6 +1531,8 @@ private:
 
     net::TcpSocket listen_;
     char           listen_token_ = 0;
+    bool           is_front_ = false;   // 리스너를 가진 루프 — 상태 줄 담당
+    TimePoint      next_stats_{};       // epoch = 아직 한 번도 안 찍음
 
     std::unordered_map<Conn*, std::unique_ptr<Conn>>     conns_;
     std::unordered_map<uint32_t, std::unique_ptr<Channel>> channels_;
@@ -1392,12 +1571,12 @@ bool parse_int_arg(const std::string& s, const char* what, int lo, int hi, int& 
     const auto* last  = s.data() + s.size();
     const auto  res   = std::from_chars(first, last, value);
     if (res.ec != std::errc{} || res.ptr != last) {
-        std::cerr << "[relay] " << what << " 는 정수여야 합니다: " << s << "\n";
+        RLOG_ERROR("[relay] " << what << " 는 정수여야 합니다: " << s);
         return false;
     }
     if (value < lo || value > hi) {
-        std::cerr << "[relay] " << what << " 는 " << lo << ".." << hi
-                  << " 범위여야 합니다: " << value << "\n";
+        RLOG_ERROR("[relay] " << what << " 는 " << lo << ".." << hi
+                   << " 범위여야 합니다: " << value);
         return false;
     }
     out = value;
@@ -1411,11 +1590,22 @@ int main(int argc, char** argv) {
     int loops = 1;                      // 1 = 단일 루프(앞단이 포워딩까지)
     std::string meta_url, meta_secret;
 
+    // 환경변수 먼저, 인자 나중 — systemd 유닛에 기본값을 박아 두고 조사할 때만
+    // 명령줄로 덮어쓰는 흐름이 자연스럽다. 잘못된 값은 조용히 무시하지 않고
+    // 알린 뒤 기본값을 쓴다(기동은 막지 않는다 — 로그 설정 하나로 서버가 안
+    // 뜨는 것이 더 나쁜 실패다).
+    if (const char* env = std::getenv("TETRIS_RELAY_LOG_LEVEL")) {
+        relay::LogLevel lv{};
+        if (relay::parse_log_level(env, lv)) relay::set_log_level(lv);
+        else RLOG_WARN("[relay] TETRIS_RELAY_LOG_LEVEL 값을 알 수 없어 무시합니다: "
+                       << env);
+    }
+
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* what) -> std::string {
             if (i + 1 >= argc) {
-                std::cerr << "[relay] " << what << " 인자 누락\n";
+                RLOG_ERROR("[relay] " << what << " 인자 누락");
                 std::exit(2);
             }
             return argv[++i];
@@ -1450,11 +1640,28 @@ int main(int argc, char** argv) {
                                "--max-tx-mib", 1, 65536, n)) return 2;
             relay::g_tx_budget = (size_t)n * 1024u * 1024u;
         }
+        else if (a == "--log-level") {
+            const std::string v = next("--log-level");
+            relay::LogLevel lv{};
+            if (!relay::parse_log_level(v, lv)) {
+                RLOG_ERROR("[relay] --log-level 은 error|warn|info|debug 여야 합니다: "
+                           << v);
+                return 2;
+            }
+            relay::set_log_level(lv);
+        }
+        else if (a == "--stats-interval-sec") {
+            int n = 0;
+            if (!parse_int_arg(next("--stats-interval-sec"),
+                               "--stats-interval-sec", 0, 86400, n)) return 2;
+            relay::g_stats_interval_sec = n;
+        }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
                 "                            [--meta-secret S] [--max-sessions-per-ip N]\n"
-                "                            [--max-conns N]\n"
+                "                            [--max-conns N] [--max-tx-mib N]\n"
+                "                            [--log-level L] [--stats-interval-sec N]\n"
                 "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
                 "\n"
                 "  --loops N   루프 스레드 수 (기본 1). 앞단 루프 하나가 accept·인증·큐·\n"
@@ -1479,7 +1686,18 @@ int main(int argc, char** argv) {
                                     << relay::kDefaultTxBudget / (1024 * 1024) << ").\n"
                 "              연결당 상한만으로는 메모리가 --max-conns 와 곱해져\n"
                 "              천장이 조용히 따라 오른다. 이 예산이 그 곱셈을 끊는다 —\n"
-                "              넘기면 그 순간 넘긴 연결을 끊는다.\n";
+                "              넘기면 그 순간 넘긴 연결을 끊는다.\n"
+                "  --log-level L\n"
+                "              error|warn|info|debug (기본 info). 환경변수\n"
+                "              TETRIS_RELAY_LOG_LEVEL 로도 정할 수 있고 이 인자가 이긴다.\n"
+                "              info 는 거절·종료·매치 수명·주기 상태까지, debug 는\n"
+                "              접속 하나하나와 인증·큐·룸 진행까지 남긴다. 포워딩\n"
+                "              경로에는 어느 레벨에서도 로그가 없다.\n"
+                "  --stats-interval-sec N\n"
+                "              상태 한 줄의 주기, 초 (기본 "
+                                    << relay::kDefaultStatsIntervalSec << ", 0=끔).\n"
+                "              동시 연결·활성 매치·tx 예산 사용량과 최고 수위·사유별\n"
+                "              거절 카운터를 한 줄에 낸다.\n";
             return 0;
         }
     }
@@ -1495,9 +1713,9 @@ int main(int argc, char** argv) {
     // 처리량에 스레드는 하나 적고 인계도 없으므로 엄격히 낫다. 다만 조용히
     // 넘어가면 사용자는 손해를 본 줄도 모르므로 이유를 찍는다.
     if (loops == 2) {
-        std::cout << "[relay] --loops 2 는 포워딩 일꾼이 1개로 --loops 1 과 같고"
-                     " (실효 병렬도 = loops-1) 스레드와 매치 인계 비용만 늘어"
-                     " 단일 루프로 실행합니다 — 실제로 나누려면 --loops 3 이상\n";
+        RLOG_INFO("[relay] --loops 2 는 포워딩 일꾼이 1개로 --loops 1 과 같고"
+                  " (실효 병렬도 = loops-1) 스레드와 매치 인계 비용만 늘어"
+                  " 단일 루프로 실행합니다 — 실제로 나누려면 --loops 3 이상");
         loops = 1;
     }
     if (meta_secret.empty()) {
@@ -1511,7 +1729,7 @@ int main(int argc, char** argv) {
 #endif
 
     if (!net::net_init()) {
-        std::cerr << "[relay] net_init 실패\n";
+        RLOG_ERROR("[relay] net_init 실패");
         return 1;
     }
 
@@ -1521,15 +1739,15 @@ int main(int argc, char** argv) {
         // secret 없이 ranked 로 뜨면 meta 가 POST /v1/matches 를 거절하므로 경기
         // 결과를 하나도 저장하지 못한다. 그 상태로 조용히 도는 대신 기동을 거부한다.
         if (meta_secret.empty()) {
-            std::cerr << "[relay] refusing to start: --meta set but no relay secret. "
-                      << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
-                      << "POST /v1/matches without it).\n";
+            RLOG_ERROR("[relay] refusing to start: --meta set but no relay secret. "
+                       << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
+                       << "POST /v1/matches without it).");
             net::net_shutdown();
             return 2;
         }
         meta = std::make_unique<meta::client::MetaClient>(meta_url, meta_secret);
         if (!meta->valid()) {
-            std::cerr << "[relay] invalid --meta URL: " << meta_url << "\n";
+            RLOG_ERROR("[relay] invalid --meta URL: " << meta_url);
             net::net_shutdown();
             return 2;
         }
@@ -1544,14 +1762,14 @@ int main(int argc, char** argv) {
         net::net_shutdown();
         return 1;
     }
-    std::cout << "[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
-              << " sessions=" << relay::IpAdmission::session_limit() << "\n";
+    RLOG_INFO("[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
+              << " sessions=" << relay::IpAdmission::session_limit());
 
     if (loops > 1 && !front.can_shard()) {
         // 소켓을 다른 완료 포트로 옮길 수 없는 백엔드(IOCP)에서는 인계가 성립하지
         // 않는다. 조용히 반쯤 도는 대신 이유를 밝히고 단일 루프로 물러선다.
-        std::cout << "[relay] 이 플랫폼의 reactor 백엔드는 루프 간 소켓 이동을 "
-                     "지원하지 않아 단일 루프로 실행합니다\n";
+        RLOG_INFO("[relay] 이 플랫폼의 reactor 백엔드는 루프 간 소켓 이동을 "
+                  "지원하지 않아 단일 루프로 실행합니다");
         loops = 1;
     }
 
@@ -1568,7 +1786,7 @@ int main(int argc, char** argv) {
     }
     front.set_shards(shard_ptrs);
     if (!shard_ptrs.empty()) {
-        std::cout << "[relay] forwarding shards: " << shard_ptrs.size() << "\n";
+        RLOG_INFO("[relay] forwarding shards: " << shard_ptrs.size());
     }
 
     std::vector<std::thread> threads;

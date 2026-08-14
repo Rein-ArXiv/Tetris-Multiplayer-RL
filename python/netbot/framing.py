@@ -96,6 +96,27 @@ class MsgType(enum.IntEnum):
 
     CHAT = 20           # bidirectional: [text_len:2 LE][utf8:N] (relay passes through)
 
+    # 서버가 상한에 걸린 연결을 거절하며 사유를 밝힌다.
+    #   S→C: [reason:1][text_len:1][utf8:N]
+    # 소켓을 그냥 닫으면 사용자에게는 원인 모를 끊김이라, 닫기 직전에 이 프레임을
+    # 먼저 내려보낸다. 이 타입을 모르는 구버전 소비자도 안전하다 — 아래
+    # parse_frames 는 모르는 타입을 그 프레임만 소비하고 계속 읽고, C++ 쪽도
+    # 디스패치 default 로 흘려보낸다 (net/framing.h 의 SERVER_REJECT 주석 참고).
+    SERVER_REJECT = 21
+
+
+class RejectReason(enum.IntEnum):
+    """SERVER_REJECT 의 reason 코드 — ``net::RejectReason`` 미러.
+
+    값은 wire 규약이므로 재사용하거나 다시 번호를 매기지 않는다. 새 사유는
+    뒤에 덧붙인다.
+    """
+
+    SERVER_FULL        = 1  # 프로세스 전체 동시 연결 상한
+    IP_SESSION_LIMIT   = 2  # per-IP 동시 세션 상한
+    IP_HANDSHAKE_LIMIT = 3  # per-IP 동시 핸드셰이크 상한
+    TX_BUDGET          = 4  # 프로세스 전체 보류 송신 예산
+
 
 def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:
     """FNV-1a 32-bit hash. Identical bit pattern to ``net::fnv1a32`` in C++."""

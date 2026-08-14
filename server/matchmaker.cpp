@@ -2,9 +2,9 @@
 #include "match_uuid.h"
 
 #include "../net/framing.h"
+#include "log.h"
 
 #include <chrono>
-#include <iostream>
 #include <utility>
 #include <vector>
 
@@ -17,8 +17,9 @@ bool waitingPlayerStillActive(PlayerInfo& p) {
     // 바이트가 유실되어 스트림이 어긋난다. parse_frames 가 완성 프레임만큼만
     // 소비하고 잔여 tail 은 다음 폴링/로비 단계로 넘어간다.
     if (!net::tcp_recv_some(p.sock, p.streamBuf)) {
-        std::cerr << "[matchmaker] conn=" << p.conn_id
-                  << " left queue before match\n";
+        RLOG_INFO("[matchmaker] conn=" << p.conn_id
+                  << " player_id=" << p.player_id
+                  << " left queue before match");
         net::tcp_close(p.sock);
         return false;
     }
@@ -26,15 +27,17 @@ bool waitingPlayerStillActive(PlayerInfo& p) {
     if (!p.streamBuf.empty()) {
         std::vector<net::Frame> frames;
         if (!net::parse_frames(p.streamBuf, frames)) {
-            std::cerr << "[matchmaker] conn=" << p.conn_id
-                      << " sent malformed queue frame\n";
+            RLOG_INFO("[matchmaker] conn=" << p.conn_id
+                      << " player_id=" << p.player_id
+                      << " sent malformed queue frame");
             net::tcp_close(p.sock);
             return false;
         }
         for (const auto& f : frames) {
             if (f.type == net::MsgType::QUEUE_CANCEL) {
-                std::cerr << "[matchmaker] conn=" << p.conn_id
-                          << " cancelled queue\n";
+                RLOG_INFO("[matchmaker] conn=" << p.conn_id
+                          << " player_id=" << p.player_id
+                          << " cancelled queue");
                 net::tcp_close(p.sock);
                 return false;
             }

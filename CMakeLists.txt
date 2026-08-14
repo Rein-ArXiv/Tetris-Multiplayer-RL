@@ -373,6 +373,7 @@ if (TETRIS_BUILD_RELAY)
     endif()
     add_executable(tetris_relay
         server/main.cpp
+        server/log.cpp
         server/matchmaker.cpp
         server/player_conn.cpp
         server/relay.cpp
@@ -381,6 +382,7 @@ if (TETRIS_BUILD_RELAY)
         net/framing.cpp
         meta/http_client.cpp
         server/ip_admission.h
+        server/log.h
         server/matchmaker.h
         server/match_uuid.h
         server/player_conn.h
@@ -427,6 +429,7 @@ endif()
 if (TETRIS_BUILD_RELAY)
     add_executable(tetris_relay_reactor
         server/reactor_relay.cpp
+        server/log.cpp
         net/socket.cpp
         net/framing.cpp
         net/reactor_epoll.cpp
@@ -436,6 +439,7 @@ if (TETRIS_BUILD_RELAY)
         net/socket.h
         net/framing.h
         server/ip_admission.h
+        server/log.h
         server/offload.h
         server/timer_queue.h
         server/player_session.h

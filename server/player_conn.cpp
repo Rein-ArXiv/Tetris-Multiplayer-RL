@@ -4,10 +4,10 @@
 #include "room.h"
 #include "relay.h"
 #include "../net/framing.h"
+#include "log.h"
 #include "../meta/http_client.h"
 
 #include <chrono>
-#include <iostream>
 #include <optional>
 #include <mutex>
 #include <string>
@@ -98,13 +98,13 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
     AuthOutcome o;
     if (!meta) {
         // unranked: meta 미연동 — 토큰이 있더라도 무시.
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " unranked (no meta)\n";
+        RLOG_DEBUG("[conn " << conn_id << "] " << what
+                   << " unranked (no meta)");
         return o;
     }
     if (token.empty()) {
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " missing token -> reject\n";
+        RLOG_INFO("[conn " << conn_id << "] " << what
+                  << " missing token -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
     meta::client::MetaClient::VerifyOutcome verify_outcome{};
@@ -113,14 +113,14 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
         if (verify_outcome == meta::client::MetaClient::VerifyOutcome::NetworkError) {
             auth = cached_auth(token);
             if (auth) {
-                std::cerr << "[conn " << conn_id << "] " << what
-                          << " meta offline; accepted cached auth\n";
+                RLOG_WARN("[conn " << conn_id << "] " << what
+                          << " meta offline; accepted cached auth");
             }
         }
     }
     if (!auth) {
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " meta verify failed -> reject\n";
+        RLOG_INFO("[conn " << conn_id << "] " << what
+                  << " meta verify failed -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
     if (verify_outcome == meta::client::MetaClient::VerifyOutcome::Ok) {
@@ -133,14 +133,15 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
     o.selected_icon_id = auth->selected_icon_id.empty() ? "default" : auth->selected_icon_id;
     o.session_lease = PlayerSessionLease::acquire(o.player_id);
     if (!o.session_lease) {
-        std::cerr << "[conn " << conn_id << "] " << what
-                  << " duplicate active player_id=" << o.player_id << " -> reject\n";
+        RLOG_INFO("[conn " << conn_id << "] " << what
+                  << " duplicate active session -> reject player_id="
+                  << o.player_id << " match_uuid=-");
         return std::nullopt;
     }
-    std::cerr << "[conn " << conn_id << "] " << what
-              << " authed player_id=" << auth->player_id
-              << " elo=" << auth->elo
-              << " icon=" << o.selected_icon_id << "\n";
+    RLOG_DEBUG("[conn " << conn_id << "] " << what
+               << " authed player_id=" << auth->player_id
+               << " elo=" << auth->elo
+               << " icon=" << o.selected_icon_id);
     return o;
 }
 
@@ -165,7 +166,9 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
     while (std::chrono::steady_clock::now() < deadline && !isShuttingDown()) {
         if (!net::tcp_recv_some(sock, stream)) {
-            std::cerr << "[conn " << conn_id << "] disconnected before first frame\n";
+            RLOG_INFO("[conn " << conn_id
+                      << "] close: disconnected before first frame"
+                      << " player_id=0 match_uuid=-");
             net::tcp_close(sock);
             return;
         }
@@ -197,12 +200,15 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
                     // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
                     pi.streamBuf = residual_stream(frames, i + 1, stream);
-                    std::cerr << "[conn " << conn_id << "] QUEUE_JOIN -> queued\n";
+                    RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
+                               << " player_id=" << pi.player_id);
                     mm.enqueue(std::move(pi));
                     return;
                 }
                 if (f.type == net::MsgType::QUEUE_CANCEL) {
-                    std::cerr << "[conn " << conn_id << "] QUEUE_CANCEL before queued\n";
+                    RLOG_INFO("[conn " << conn_id
+                              << "] close: QUEUE_CANCEL before queued"
+                              << " player_id=0 match_uuid=-");
                     net::tcp_close(sock);
                     return;
                 }
@@ -212,7 +218,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     auto auth = authenticate(meta, tok, conn_id, "ROOM_CREATE");
                     if (!auth) { net::tcp_close(sock); return; }
                     handshake_slot.reset();   // 핸드셰이크 끝 (위 QUEUE_JOIN 주석 참고)
-                    std::cerr << "[conn " << conn_id << "] ROOM_CREATE\n";
+                    RLOG_DEBUG("[conn " << conn_id << "] ROOM_CREATE"
+                               << " player_id=" << auth->player_id);
                     rr.handleCreate(std::move(sock), conn_id,
                                     auth->player_id, auth->elo,
                                     auth->username, auth->token,
@@ -235,7 +242,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     auto auth = authenticate(meta, tok, conn_id, "ROOM_JOIN");
                     if (!auth) { net::tcp_close(sock); return; }
                     handshake_slot.reset();   // 핸드셰이크 끝 (위 QUEUE_JOIN 주석 참고)
-                    std::cerr << "[conn " << conn_id << "] ROOM_JOIN " << code << "\n";
+                    RLOG_DEBUG("[conn " << conn_id << "] ROOM_JOIN " << code
+                               << " player_id=" << auth->player_id);
                     rr.handleJoin(code, std::move(sock), conn_id,
                                   auth->player_id, auth->elo,
                                   auth->username, auth->token,
@@ -253,7 +261,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
     }
 
     if (!isShuttingDown()) {
-        std::cerr << "[conn " << conn_id << "] first-frame timeout -> close\n";
+        RLOG_INFO("[conn " << conn_id << "] close: first-frame timeout"
+                  << " player_id=0 match_uuid=-");
     }
     net::tcp_close(sock);
 }

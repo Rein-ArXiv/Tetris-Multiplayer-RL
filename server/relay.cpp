@@ -3,6 +3,7 @@
 
 #include "../net/framing.h"
 #include "../net/socket.h"
+#include "log.h"
 #include "../meta/http_client.h"
 
 #include <algorithm>
@@ -10,7 +11,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -147,11 +147,12 @@ void finalizeRanked(Channel& ch)
         winner = (a.won == 1) ? ch.playerA_id : ch.playerB_id;
     }
     if (!cross_ok) {
-        std::cerr << "[relay] match=" << ch.match_id
+        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
                   << " cross-check FAIL (exclusive_win=" << exclusive_win
                   << " scores=" << scores_match
                   << " lines=" << lines_match
-                  << ") -> winner=null\n";
+                  << ") -> winner=null");
     }
 
     // A mismatch is stored as a draw and does not change RP.
@@ -172,17 +173,17 @@ void finalizeRanked(Channel& ch)
         if (res) {
             eloABefore = res->a.elo_before; eloAAfter = res->a.elo_after; deltaA = res->a.delta;
             eloBBefore = res->b.elo_before; eloBAfter = res->b.elo_after; deltaB = res->b.delta;
-            std::cerr << "[relay] match=" << ch.match_id
+            RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
                       << " saved meta match=" << res->match_id
                       << " a=" << (deltaA >= 0 ? "+" : "") << deltaA
-                      << " b=" << (deltaB >= 0 ? "+" : "") << deltaB << "\n";
+                      << " b=" << (deltaB >= 0 ? "+" : "") << deltaB);
         } else {
-            std::cerr << "[relay] match=" << ch.match_id
-                      << " meta POST failed — MATCH_RESULT delta=0\n";
+            RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                      << " meta POST failed — MATCH_RESULT delta=0");
         }
     } else {
-        std::cerr << "[relay] match=" << ch.match_id
-                  << " no meta — MATCH_RESULT delta=0\n";
+        RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " no meta — MATCH_RESULT delta=0");
     }
 
     // MATCH_RESULT 송신 — 성공 실패 관계없이 양 클라에 한 번씩.
@@ -238,8 +239,9 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
         // send 는 무해하게 실패한다.
         if (disconnectSide != 1) sendToA(ch, frA);
         if (disconnectSide != 2) sendToB(ch, frB);
-        std::cerr << "[relay] match=" << ch.match_id
-                  << " no summaries -> no meta post (delta=0)\n";
+        RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
+                  << " no summaries -> no meta post (delta=0)");
         return;
     }
 
@@ -261,8 +263,8 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
                                    winner, scoreA, scoreB, linesA, linesB,
                                    duration, 3);
     if (!res) {
-        std::cerr << "[relay] match=" << ch.match_id
-                  << " forfeit meta POST failed\n";
+        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " forfeit meta POST failed");
         return;
     }
 
@@ -271,11 +273,12 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
     // 끊긴 쪽 소켓은 이미 죽어 있으므로 생존 가능성이 있는 쪽에만 보낸다.
     if (disconnectSide != 1) sendToA(ch, frA);
     if (disconnectSide != 2) sendToB(ch, frB);
-    std::cerr << "[relay] match=" << ch.match_id << " forfeit winner="
-              << (winner == ch.playerA_id ? "A" : "B")
+    RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+              << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
+              << " forfeit winner=" << (winner == ch.playerA_id ? "A" : "B")
               << " (summary from " << (haveA ? "A" : "B")
               << ", disconnect=" << disconnectSide << ") saved meta match="
-              << res->match_id << "\n";
+              << res->match_id);
 }
 
 // 한 방향 포워딩 루프.
@@ -299,8 +302,11 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 
         ~ForwarderCompletion()
         {
-            std::cerr << "[relay] match=" << channel->match_id
-                      << " " << direction << " end\n";
+            RLOG_INFO("[relay] match=" << channel->match_id
+                      << " uuid=" << channel->match_uuid
+                      << " player_id=" << channel->playerA_id
+                      << " x " << channel->playerB_id
+                      << " " << direction << " end");
             if (*failureSide != 0 && !s_stopping.load()) {
                 int expected = 0;
                 channel->disconnect_side.compare_exchange_strong(expected, *failureSide);
@@ -312,7 +318,10 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                 }
                 net::tcp_close(channel->A);
                 net::tcp_close(channel->B);
-                std::cerr << "[relay] match=" << channel->match_id << " closed\n";
+                RLOG_INFO("[relay] match=" << channel->match_id
+                          << " uuid=" << channel->match_uuid
+                          << " player_id=" << channel->playerA_id
+                          << " x " << channel->playerB_id << " closed");
             }
         }
     } completion{ch, dir, &disconnectSide};
@@ -353,8 +362,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             if (raw.empty()) {
                 if (std::chrono::steady_clock::now() - lastActivity >= kIdleTimeout) {
                     disconnectSide = a_to_b ? 1 : 2;
-                    std::cerr << "[relay] match=" << ch->match_id << " " << dir
-                              << " idle timeout\n";
+                    RLOG_INFO("[relay] match=" << ch->match_id
+                              << " uuid=" << ch->match_uuid << " " << dir
+                              << " close: idle timeout");
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -371,8 +381,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
         byteWindow += raw.size();
         if (byteWindow > kMaxBytesPerSecond) {
             disconnectSide = a_to_b ? 1 : 2;
-            std::cerr << "[relay] match=" << ch->match_id << " " << dir
-                      << " byte rate exceeded\n";
+            RLOG_INFO("[relay] match=" << ch->match_id
+                      << " uuid=" << ch->match_uuid << " " << dir
+                      << " close: byte rate exceeded");
             break;
         }
 
@@ -402,9 +413,10 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             // 상한은 net/framing.h 가 공개하는 값을 직접 참조 — 로컬 사본이
             // framing 구현과 어긋나는 drift 를 막는다.
             if (static_cast<size_t>(payloadAndType) > net::kMaxPayloadBytes + 1u) {
-                std::cerr << "[relay] match=" << ch->match_id
+                RLOG_WARN("[relay] match=" << ch->match_id
+                          << " uuid=" << ch->match_uuid
                           << " dropping over-sized frame (len=" << payloadAndType
-                          << ") from " << (a_to_b ? "A" : "B") << "\n";
+                          << ") from " << (a_to_b ? "A" : "B"));
                 streamBuf.clear();
                 break;
             }
@@ -413,8 +425,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             if (streamBuf.size() < totalNeeded) break;
 
             if (payloadAndType < 1u) {
-                std::cerr << "[relay] match=" << ch->match_id
-                          << " dropping malformed frame (len=0)\n";
+                RLOG_WARN("[relay] match=" << ch->match_id
+                          << " uuid=" << ch->match_uuid
+                          << " dropping malformed frame (len=0)");
                 streamBuf.erase(streamBuf.begin(), streamBuf.begin() + totalNeeded);
                 continue;
             }
@@ -430,9 +443,10 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                     : net::fnv1a32(payloadPtr, payloadLen);
 
                 if (chk != calc) {
-                    std::cerr << "[relay] match=" << ch->match_id
+                    RLOG_WARN("[relay] match=" << ch->match_id
+                              << " uuid=" << ch->match_uuid
                               << " dropping MATCH_SUMMARY with bad checksum from "
-                              << (a_to_b ? "A" : "B") << "\n";
+                              << (a_to_b ? "A" : "B"));
                     streamBuf.erase(streamBuf.begin(), streamBuf.begin() + totalNeeded);
                     continue;
                 }
@@ -446,16 +460,17 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                         if (a_to_b) { if (!ch->summaryA) ch->summaryA = s; }
                         else        { if (!ch->summaryB) ch->summaryB = s; }
                     }
-                    std::cerr << "[relay] match=" << ch->match_id
-                              << " got MATCH_SUMMARY from " << (a_to_b ? "A" : "B")
-                              << " won=" << (int)s.won
-                              << " score=" << s.my_score
-                              << "\n";
+                    RLOG_DEBUG("[relay] match=" << ch->match_id
+                               << " uuid=" << ch->match_uuid
+                               << " got MATCH_SUMMARY from " << (a_to_b ? "A" : "B")
+                               << " won=" << (int)s.won
+                               << " score=" << s.my_score);
                 } else {
-                    std::cerr << "[relay] match=" << ch->match_id
+                    RLOG_WARN("[relay] match=" << ch->match_id
+                              << " uuid=" << ch->match_uuid
                               << " dropping malformed MATCH_SUMMARY payload from "
                               << (a_to_b ? "A" : "B")
-                              << " size=" << payload.size() << "\n";
+                              << " size=" << payload.size());
                 }
                 // 가로챔 — 상대 포워딩 안 함.
             } else {
@@ -529,12 +544,13 @@ bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
 void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
                                 std::vector<uint8_t> prefixFromA,
                                 std::vector<uint8_t> prefixFromB) {
-    std::cerr << "[relay] match forwarding id=" << match.match_id
+    RLOG_INFO("[relay] match forwarding id=" << match.match_id
+              << " uuid=" << match.match_uuid
               << " HOST=conn" << match.a.conn_id
               << " (pid=" << match.a.player_id << " elo=" << match.a.elo << ")"
               << " GUEST=conn" << match.b.conn_id
               << " (pid=" << match.b.player_id << " elo=" << match.b.elo << ")"
-              << " seed=0x" << std::hex << match.seed << std::dec << "\n";
+              << " seed=" << log_hex(match.seed));
 
     auto ch = std::make_shared<Channel>();
     ch->A           = match.a.sock;
@@ -653,9 +669,12 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
 
     while (!abort && !(aReady && bReady) && !s_stopping.load()) {
         if (std::chrono::steady_clock::now() >= deadline) {
-            std::cerr << "[relay] match=" << match.match_id
-                      << " queue lobby timeout (aReady=" << aReady
-                      << " bReady=" << bReady << ")\n";
+            RLOG_INFO("[relay] match=" << match.match_id
+                      << " uuid=" << match.match_uuid
+                      << " player_id=" << match.a.player_id
+                      << " x " << match.b.player_id
+                      << " close: queue lobby timeout (aReady=" << aReady
+                      << " bReady=" << bReady << ")");
             abort = true;
             break;
         }
@@ -668,18 +687,22 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         const bool okA = net::tcp_recv_some(match.a.sock, bufA);
         const bool okB = net::tcp_recv_some(match.b.sock, bufB);
         if (!okA) {
-            std::cerr << "[relay] match=" << match.match_id
-                      << " queue lobby A disconnected (aReady=" << aReady
-                      << " bReady=" << bReady << ")\n";
+            RLOG_INFO("[relay] match=" << match.match_id
+                      << " uuid=" << match.match_uuid
+                      << " player_id=" << match.a.player_id
+                      << " close: queue lobby A disconnected (aReady=" << aReady
+                      << " bReady=" << bReady << ")");
             // 상대에게 READY(0) 전송해 "상대 취소" 시그널 — 소켓이 이미 닫혔을
             // 수 있지만 send 실패해도 어차피 다음 라인에서 close.
             if (bReady || !aReady) forward_ready(match.b.sock, 0);
             abort = true; break;
         }
         if (!okB) {
-            std::cerr << "[relay] match=" << match.match_id
-                      << " queue lobby B disconnected (aReady=" << aReady
-                      << " bReady=" << bReady << ")\n";
+            RLOG_INFO("[relay] match=" << match.match_id
+                      << " uuid=" << match.match_uuid
+                      << " player_id=" << match.b.player_id
+                      << " close: queue lobby B disconnected (aReady=" << aReady
+                      << " bReady=" << bReady << ")");
             if (aReady || !bReady) forward_ready(match.a.sock, 0);
             abort = true; break;
         }
@@ -688,9 +711,10 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         // 무한정 쌓이는 것을 차단. 초과하는 쪽은 프로토콜을 벗어난 것으로 보고
         // 매치를 중단한다.
         if (bufA.size() > kMaxLobbyBufBytes || bufB.size() > kMaxLobbyBufBytes) {
-            std::cerr << "[relay] match=" << match.match_id
-                      << " queue lobby buffer overflow (A=" << bufA.size()
-                      << " B=" << bufB.size() << ") -> abort\n";
+            RLOG_WARN("[relay] match=" << match.match_id
+                      << " uuid=" << match.match_uuid
+                      << " close: queue lobby buffer overflow (A=" << bufA.size()
+                      << " B=" << bufB.size() << ")");
             abort = true; break;
         }
 
@@ -699,8 +723,10 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
             if (r == 1) {
                 aReady = true;
             } else if (r == 2) {
-                std::cerr << "[relay] match=" << match.match_id
-                          << " A declined/cancelled in lobby\n";
+                RLOG_INFO("[relay] match=" << match.match_id
+                          << " uuid=" << match.match_uuid
+                          << " player_id=" << match.a.player_id
+                          << " close: A declined/cancelled in lobby");
                 abort = true; break;
             } else if (r == -1) {
                 abort = true; break;
@@ -713,8 +739,10 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
             if (r == 1) {
                 bReady = true;
             } else if (r == 2) {
-                std::cerr << "[relay] match=" << match.match_id
-                          << " B declined/cancelled in lobby\n";
+                RLOG_INFO("[relay] match=" << match.match_id
+                          << " uuid=" << match.match_uuid
+                          << " player_id=" << match.b.player_id
+                          << " close: B declined/cancelled in lobby");
                 abort = true; break;
             } else if (r == -1) {
                 abort = true; break;
@@ -733,8 +761,9 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         return;
     }
 
-    std::cerr << "[relay] match=" << match.match_id
-              << " queue lobby accepted, starting forwarders\n";
+    RLOG_INFO("[relay] match=" << match.match_id
+              << " uuid=" << match.match_uuid
+              << " queue lobby accepted, starting forwarders");
 
     // lobby 에서 남긴 raw 바이트(READY 이후 도착한 게임 프레임) 를 forwarder 로 이관.
     startForwardingWithPrefix(std::move(match), meta, std::move(bufA), std::move(bufB));
@@ -760,7 +789,10 @@ void startPump(Match match, meta::client::MetaClient* meta) {
                                      match.match_uuid);
 
     if (!ok_a || !ok_b) {
-        std::cerr << "[relay] MATCH_FOUND send failed, match=" << match.match_id << "\n";
+        RLOG_WARN("[relay] MATCH_FOUND send failed, match=" << match.match_id
+                  << " uuid=" << match.match_uuid
+                  << " player_id=" << match.a.player_id
+                  << " x " << match.b.player_id);
         net::tcp_close(match.a.sock);
         net::tcp_close(match.b.sock);
         return;
@@ -787,7 +819,10 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
                                      match.match_uuid);
 
     if (!ok_a || !ok_b) {
-        std::cerr << "[relay] MATCH_FOUND send failed, match=" << match.match_id << "\n";
+        RLOG_WARN("[relay] MATCH_FOUND send failed, match=" << match.match_id
+                  << " uuid=" << match.match_uuid
+                  << " player_id=" << match.a.player_id
+                  << " x " << match.b.player_id);
         net::tcp_close(match.a.sock);
         net::tcp_close(match.b.sock);
         return;

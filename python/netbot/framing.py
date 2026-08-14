@@ -116,6 +116,18 @@ class RejectReason(enum.IntEnum):
     IP_SESSION_LIMIT   = 2  # per-IP 동시 세션 상한
     IP_HANDSHAKE_LIMIT = 3  # per-IP 동시 핸드셰이크 상한
     TX_BUDGET          = 4  # 프로세스 전체 보류 송신 예산
+    AUTH_BACKLOG       = 5  # 대기 중인 meta 인증 왕복 상한
+
+
+# 서버만 만들 수 있는 프레임 — ``net::is_server_only_type`` 미러.
+# 릴레이는 포워딩 중 클라이언트가 올려보낸 이 타입들을 상대에게 전달하지 않는다
+# (근거는 net/framing.h 의 is_server_only_type 주석).
+SERVER_ONLY_TYPES = frozenset({
+    MsgType.MATCH_FOUND,
+    MsgType.ROOM_INFO,
+    MsgType.MATCH_RESULT,
+    MsgType.SERVER_REJECT,
+})
 
 
 def fnv1a32(data: bytes, seed: int = FNV1A32_OFFSET) -> int:

@@ -943,7 +943,7 @@ def test_out_of_stage_control_frames_do_not_break_the_session(unranked, socks):
 
 
 def test_server_only_frames_are_not_relayed_to_the_peer(unranked, socks):
-    """클라이언트가 위조한 S→C 전용 프레임이 상대에게 전달되면 안 된다. **결함 노출**.
+    """클라이언트가 위조한 S→C 전용 프레임이 상대에게 전달되면 안 된다. **회귀 테스트**.
 
     MATCH_FOUND / MATCH_RESULT / ROOM_INFO 는 서버만 만들 수 있는 프레임이다.
     클라이언트는 이 타입을 보낼 이유가 없고, 상대 클라이언트는 이 타입이 오면
@@ -976,13 +976,10 @@ def test_server_only_frames_are_not_relayed_to_the_peer(unranked, socks):
     leaked = sorted({t.name for t, _ in frames
                      if t in (MsgType.MATCH_RESULT, MsgType.ROOM_INFO,
                               MsgType.MATCH_FOUND)})
-    if leaked:
-        pytest.xfail(
-            "결함: 클라이언트가 만든 서버 전용 프레임이 상대에게 그대로 "
-            f"전달됐다 ({', '.join(leaked)}). 상대 클라이언트는 이것을 서버가 "
-            "보낸 것과 구별할 수 없다 — 위조 RP 결과·위조 매치 상태를 주입할 수 "
-            "있다")
-    assert not leaked
+    assert not leaked, (
+        "클라이언트가 만든 서버 전용 프레임이 상대에게 그대로 전달됐다 "
+        f"({', '.join(leaked)}). 상대 클라이언트는 이것을 서버가 보낸 것과 "
+        "구별할 수 없다 — 위조 RP 결과·위조 매치 상태를 주입할 수 있다")
     _relay_still_serves(port, socks)
 
 
@@ -1570,7 +1567,7 @@ def test_relay_rejects_garbage_from_meta(relays, fake_meta, socks):
 
 
 def test_slow_meta_backlog_does_not_starve_new_players(relays, fake_meta, socks):
-    """버려진 인증 요청이 쌓여 정상 사용자를 굶기면 안 된다. **결함 노출**.
+    """버려진 인증 요청이 쌓여 정상 사용자를 굶기면 안 된다. **회귀 테스트**.
 
     배포 대상에서 meta 는 성능이 매우 제한된 보조 기기에서 돈다 — 인증 왕복이
     수백 밀리초 걸리는 것은 이상 상황이 아니라 평상시다. 그 전제에서 이 경로를 본다.
@@ -1627,16 +1624,14 @@ def test_slow_meta_backlog_does_not_starve_new_players(relays, fake_meta, socks)
     # 기준선의 10배 남짓이면서, 결함이 있을 때 관측되는 대기(수 초)와는 확실히
     # 갈리는 값. 절대 지연이 아니라 "정상 사용자가 굶는가" 를 재는 문턱이다.
     threshold = 4.0
-    if info is None or waited > threshold:
-        pytest.xfail(
-            "결함: 이미 끊긴 연결들이 남긴 인증 작업이 큐에 쌓여 무관한 사용자가 "
-            f"{'끝내 못 들어왔다' if info is None else f'{waited:.1f}초를 기다렸다'} "
-            f"(한산할 때 {baseline:.2f}초, 공격 비용은 연결 {churn}개와 "
-            "QUEUE_JOIN 한 프레임씩). 연결이 죽어도 인증 작업이 취소되지 않고, "
-            "per-IP 상한은 연결이 죽는 순간 반납돼 재접속을 막지 못한다 — "
-            "상한이 있는 곳과 일이 쌓이는 곳이 어긋나 있다")
-    assert info is not None
-    assert waited <= threshold
+    fail_note = (
+        "이미 끊긴 연결들이 남긴 인증 작업이 큐에 쌓여 무관한 사용자가 "
+        f"{'끝내 못 들어왔다' if info is None else f'{waited:.1f}초를 기다렸다'} "
+        f"(한산할 때 {baseline:.2f}초, 공격 비용은 연결 {churn}개와 "
+        "QUEUE_JOIN 한 프레임씩). 연결이 죽으면 그 연결의 인증 작업도 함께 "
+        "취소돼야 한다 — 상한이 있는 곳과 일이 쌓이는 곳이 어긋나면 안 된다")
+    assert info is not None, fail_note
+    assert waited <= threshold, fail_note
 
 
 def test_connect_and_close_churn_does_not_kill_the_relay(unranked, socks):

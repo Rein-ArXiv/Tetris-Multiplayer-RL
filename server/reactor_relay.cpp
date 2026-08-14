@@ -99,6 +99,30 @@ constexpr size_t      kDefaultTxBudget = 64 * 1024 * 1024;
 size_t                g_tx_budget      = kDefaultTxBudget;
 std::atomic<size_t>   g_tx_total{0};
 
+// 대기 중인 meta 인증 왕복의 상한.
+//
+// 인증은 루프 밖 워커 4개가 도는 유일한 블로킹 구간이라, 여기 줄이 서면 그
+// 줄은 곧 로그인 대기 시간이다. 죽은 연결의 작업은 취소되므로(close_conn) 이
+// 상한이 세는 것은 "아직 살아서 응답을 기다리는 사람" 뿐이고, 그래서 값은
+// 그 사람들이 얼마나 기다려도 되는지로 정한다.
+//
+// 배포 대상의 meta 는 성능이 매우 제한된 보조 기기라 왕복이 수십~수백 ms 다.
+// 왕복 250 ms, 동시 4개 기준으로 64번째 사람은 16번의 왕복, 약 4초를 기다린다 —
+// 클라이언트의 접속 타임아웃과 같은 자릿수라, 여기까지 받아 준 사람은 실제로
+// 응답을 볼 가망이 있다. 그 뒤에 오는 사람을 줄에 세우면 기다린 끝에 자기
+// 클라이언트가 먼저 포기하므로, 세우는 대신 SERVER_REJECT 로 지금 사유를
+// 밝히고 보낸다. 거절된 쪽은 다시 시도하면 되고, 줄은 초당 4/왕복(≈16명)씩
+// 빠진다.
+//
+// 반대편 논거도 분명하다: 재시작 직후처럼 정상 사용자가 한꺼번에 몰리면 64를
+// 넘긴 사람들이 거절을 받는다. 그래도 조용히 몇십 초를 기다리게 하는 것보다는
+// 낫고(클라이언트가 "잠시 후 다시" 를 띄울 수 있다), meta 가 더 빠른 환경에
+// 있는 운영자는 --max-pending-auth 로 올릴 수 있다. 워커 수를 대신 늘리지
+// 않은 이유는 그쪽이 보조 기기에 동시 요청을 더 밀어 넣어 왕복 자체를 느리게
+// 만들기 때문이다.
+constexpr size_t      kDefaultMaxPendingAuth = 64;
+size_t                g_max_pending_auth     = kDefaultMaxPendingAuth;
+
 // ── 관측 ─────────────────────────────────────────────────────────────────────
 // 관측할 수 없는 예산은 운영도 검증도 못 한다. 실제로 그랬다: tx 예산을 도입한
 // 직후 회귀 테스트를 쓰려 했는데, 바깥에서 보이는 것이 "접속이 되는가" 뿐이라
@@ -118,6 +142,7 @@ std::atomic<uint64_t> g_reject_conn_cap{0};
 std::atomic<uint64_t> g_reject_ip_session{0};
 std::atomic<uint64_t> g_reject_ip_handshake{0};
 std::atomic<uint64_t> g_reject_tx_budget{0};
+std::atomic<uint64_t> g_reject_auth_backlog{0};
 
 // 상태 한 줄의 주기.
 //
@@ -271,6 +296,14 @@ struct Conn {
     std::shared_ptr<IpAdmission> handshake_slot;
     std::shared_ptr<IpAdmission> session_slot;
 
+    // 오프로드에 던져 둔 인증 작업의 취소 깃발. Conn 이 사라진 뒤에도 워커가
+    // 읽어야 하므로 Conn 이 아니라 shared_ptr 안에 산다. 세우는 쪽은 루프
+    // 스레드(close_conn), 읽는 쪽은 워커 스레드라서 atomic 이다.
+    std::shared_ptr<std::atomic<bool>> auth_cancel;
+
+    // 서버 전용 프레임 위조를 이미 한 번 로그로 남겼는가 (연결당 한 줄).
+    bool warned_server_only = false;
+
     // 인증 결과
     int64_t     player_id = 0;
     int         elo = 0;
@@ -320,6 +353,9 @@ struct Channel {
     std::optional<Summary> sumA, sumB;
     bool summary_handled = false;
     bool finalize_inflight = false;
+    // 상대가 사라졌는데 결과 저장이 아직 도는 중이라 살아남은 쪽을 못 닫은 상태.
+    // 결과 프레임을 보낸 뒤에 닫아야 하므로 continuation 이 이 표시를 보고 마무리한다.
+    bool close_survivor_pending = false;
     int  disconnect_side = 0;  // 1=A, 2=B, 0=미상 — 승패가 아니라 통지 대상 선정용
 };
 
@@ -497,7 +533,13 @@ private:
                   << " reject_ip_handshake="
                   << g_reject_ip_handshake.load(std::memory_order_relaxed)
                   << " reject_tx_budget="
-                  << g_reject_tx_budget.load(std::memory_order_relaxed));
+                  << g_reject_tx_budget.load(std::memory_order_relaxed)
+                  // 인증 대기 줄은 밖에서 볼 방법이 이것뿐이다. 이 수가 늘고
+                  // 있으면 늦은 것은 릴레이가 아니라 meta 다.
+                  << " pending_auth=" << pending_auth_.size()
+                  << "/" << g_max_pending_auth
+                  << " reject_auth_backlog="
+                  << g_reject_auth_backlog.load(std::memory_order_relaxed));
     }
 
     // ── 수명 관리 ────────────────────────────────────────────────────────────
@@ -538,6 +580,20 @@ private:
         reactor_->remove(c->fd);
         timers_.cancel(c);
         net::tcp_close(c->sock);
+        // 인증 슬롯과 인증 작업은 반드시 함께 죽어야 한다. 예전에는 슬롯만
+        // 여기서 반납되고 오프로드 큐에 던져 둔 meta 왕복은 그대로 남았다 —
+        // 상한이 걸린 곳(연결)과 일이 쌓이는 곳(큐)이 어긋나 있었고, 그 틈이
+        // 곧 공격면이었다: 붙어서 QUEUE_JOIN 만 던지고 끊기를 반복하면 어떤
+        // 상한에도 닿지 않으면서 큐만 길어지고, 뒤에 줄 선 정상 사용자가 그
+        // 길이만큼 굶었다. 깃발을 세워 두면 워커가 이 작업을 집는 순간 왕복을
+        // 시작하지 않고 버린다. 스레드 모델이 구조적으로 갖고 있던 성질
+        // (인증이 그 연결의 워커에서 돌아 작업과 슬롯의 수명이 같다)을
+        // 루프 모델에서 손으로 맞춰 주는 것이다.
+        if (c->auth_cancel) {
+            c->auth_cancel->store(true, std::memory_order_release);
+            c->auth_cancel.reset();
+        }
+        pending_auth_.erase(c->id);
         c->handshake_slot.reset();
         c->session_slot.reset();
         c->lease.reset();
@@ -561,6 +617,12 @@ private:
             (c->is_a ? ch->a : ch->b) = nullptr;
             if (ch->disconnect_side == 0) ch->disconnect_side = c->is_a ? 1 : 2;
             on_channel_peer_lost(ch);
+            // 살아남은 쪽도 정리한다. 스레드 모델은 방향별 스레드가 함께 접히면서
+            // 두 소켓이 같이 닫혔는데, 루프 모델에는 그 동반 종료가 없어 남은 쪽이
+            // 아무 통지도 못 받은 채 타임아웃까지 기다렸다 — 수락 로비에서 30초,
+            // 포워딩 중이면 유휴 15초. 한 번의 접속으로 상대의 시간을 사는 셈이었다.
+            if (ch->finalize_inflight) ch->close_survivor_pending = true;
+            else close_channel_survivor(ch, "상대 이탈");
         }
         // 큐 대기 중이었다면 큐에서도 뺀다.
         for (auto it = queue_.begin(); it != queue_.end(); ++it) {
@@ -831,7 +893,12 @@ private:
     // 첫 프레임: QUEUE_JOIN 만 이관됐다. 인증은 오프로드한다.
     void on_first_frame(Conn* c) {
         std::vector<net::Frame> frames;
-        net::parse_frames(c->rx, frames);
+        if (!net::parse_frames(c->rx, frames)) {
+            // framing.h 의 계약: false 는 "스트림이 어긋났으니 호출자가 닫는다" 다.
+            // 무시하면 어긋난 채로 연결이 유지되고, 이후 읽는 바이트는 전부 의미가 없다.
+            close_conn(c, "프레이밍 위반");
+            return;
+        }
         for (size_t i = 0; i < frames.size(); ++i) {
             const net::Frame& f = frames[i];
 
@@ -911,13 +978,44 @@ private:
             return;
         }
 
+        // 대기 중인 왕복이 이미 상한만큼 있으면 줄을 더 늘리지 않고 거절한다.
+        // 취소만으로는 절반이다 — 취소는 "죽은 연결" 의 일을 지울 뿐이고, 살아
+        // 있는 연결이 상한까지 몰려오면 줄은 여전히 길어진다. 그때 조용히
+        // 세워 두면 그 사람은 어차피 자기 클라이언트의 타임아웃까지 기다렸다
+        // 실패하므로, 기다리게 하는 대신 지금 사유를 밝히고 보낸다. 스레드
+        // 모델이 워커가 다 찼을 때 하는 것과 같은 선택이다 — 굶기는 대신 거절.
+        if (pending_auth_.size() >= g_max_pending_auth) {
+            g_reject_auth_backlog.fetch_add(1, std::memory_order_relaxed);
+            RLOG_WARN("[relay] 거절: 인증 대기 상한 (" << pending_auth_.size()
+                      << "/" << g_max_pending_auth << ")");
+            reject_conn(c, net::RejectReason::AuthBacklog,
+                        "server is busy authenticating, try again shortly",
+                        "인증 대기 상한");
+            return;
+        }
+
         // continuation 은 Conn* 이 아니라 conn id 를 포착한다 — 인증 왕복 사이에
         // 그 연결이 끊겨 객체가 사라졌을 수 있기 때문이다. 재개 시점에 id 로 다시
         // 찾고, 없으면 조용히 버린다.
         const uint32_t cid = c->id;
         meta::client::MetaClient* meta = meta_;
+        // 취소 깃발은 Conn 보다 오래 산다 — 워커가 작업을 집는 시점에 Conn 은
+        // 이미 없을 수 있고, 그때 읽어야 하는 것이 바로 이 값이다.
+        c->auth_cancel = std::make_shared<std::atomic<bool>>(false);
+        auto cancel = c->auth_cancel;
+        pending_auth_.insert(cid);
         const bool queued = offload_->submit(
-            [this, meta, token, cid]() -> Offload::Cont {
+            [this, meta, token, cid, cancel]() -> Offload::Cont {
+                // 큐에서 기다리는 동안 그 연결이 죽었으면 왕복 자체를 하지
+                // 않는다. 이 검사가 없으면 이미 아무도 기다리지 않는 응답을
+                // 위해 워커 하나가 왕복 한 번(배포 대상에서 수십~수백 ms)을
+                // 통째로 쓰고, 그 시간은 뒤에 선 진짜 사용자가 낸다.
+                // g_running 도 같이 본다 — 종료 중에는 이 큐를 다 비우느라
+                // graceful 종료가 큐 길이만큼 늦어졌다.
+                if (cancel->load(std::memory_order_acquire) ||
+                    !g_running.load(std::memory_order_relaxed)) {
+                    return {};   // continuation 없음 — 루프는 이 작업을 보지도 않는다
+                }
                 meta::client::MetaClient::VerifyOutcome outcome{};
                 auto auth = meta->verify_token(token, 3, &outcome);
                 return [this, cid, auth, token]() { resume_auth(cid, auth, token); };
@@ -931,6 +1029,10 @@ private:
         pending_auth_.erase(conn_id);
         Conn* c = find_by_id(conn_id);
         if (!c) return;   // 인증 도중 끊겼다
+        // 왕복이 끝났으니 취소 깃발도 역할을 다했다. 남겨 두면 이후 close_conn 이
+        // 아무도 안 보는 값을 세우게 되고, "깃발이 있다 = 큐에 일이 있다" 라는
+        // 읽기가 깨진다.
+        c->auth_cancel.reset();
         if (!auth) {
             close_conn(c, "meta verify 실패 -> 거절");
             return;
@@ -1052,7 +1154,10 @@ private:
         Room* r = c->room;
         if (!r) return;
         std::vector<net::Frame> frames;
-        net::parse_frames(c->rx, frames);
+        if (!net::parse_frames(c->rx, frames)) {
+            close_conn(c, "룸 단계 프레이밍 위반");   // 위 on_first_frame 주석 참고
+            return;
+        }
         for (const auto& f : frames) {
             Conn* peer = c->is_host ? r->guest : r->host;
             if (f.type == net::MsgType::READY) {
@@ -1122,7 +1227,16 @@ private:
     void on_queued(Conn* c) {
         std::vector<uint8_t> copy = c->rx;
         std::vector<net::Frame> frames;
-        net::parse_frames(copy, frames);
+        if (!net::parse_frames(copy, frames)) {
+            // 프레이밍 계약 위반(과대 길이 선언 등)은 스트림이 이미 어긋났다는 뜻이고,
+            // framing.h 의 계약도 "false 면 호출자가 닫는다" 다. 여기서 무시하면
+            // 피해가 이 연결에서 끝나지 않는다: 사본을 파싱하는 구조라 그 바이트가
+            // 진짜 버퍼 머리에 영원히 남아 이후 QUEUE_CANCEL 을 다시는 볼 수 없고,
+            // 그 상태로 정직한 상대와 매칭된 뒤 로비에서 같은 헤더에 걸려 죽는다 —
+            // 7바이트로 두 사람을 함께 가두는 셈이다.
+            close_conn(c, "큐 대기 중 프레이밍 위반");
+            return;
+        }
         for (const auto& f : frames) {
             if (f.type == net::MsgType::QUEUE_CANCEL) {
                 close_conn(c, "QUEUE_CANCEL");
@@ -1317,6 +1431,75 @@ private:
     }
 
     // ── 포워딩 ───────────────────────────────────────────────────────────────
+    // 클라이언트가 서버 전용 프레임을 올려보냈다. 연결당 한 줄만 남긴다 —
+    // 프레임마다 찍으면 위조 프레임을 쏟아붓는 것만으로 로그를 밀어낼 수 있고,
+    // 그건 이 결함을 고치면서 새로 만드는 또 하나의 값싼 공격이다.
+    void note_server_only(Conn* c, uint8_t type) {
+        if (c->warned_server_only) return;
+        c->warned_server_only = true;
+        RLOG_WARN("[relay] 서버 전용 프레임을 클라이언트가 보내 폐기 type="
+                  << (int)type << " (이 연결의 이후 위반은 조용히 버린다)"
+                  << ident_of(c));
+    }
+
+    // unranked 포워딩. 프레임 경계만 훑어 서버 전용 프레임을 버리고, 통과한
+    // 프레임들은 "붙어 있는 구간째로" 한 번에 민다. false = 송신이 실패했다.
+    //
+    // 왜 이 모양인가. 예전 이 경로는 받은 바이트를 그대로 흘려보냈고(프레임당
+    // 0.035µs), 그래서 클라이언트가 위조한 S→C 프레임도 그대로 나갔다. 거르려면
+    // 경계를 알아야 하는데, 랭크드 경로를 그대로 가져다 쓰면 프레임당 2.67µs —
+    // 70배다. 다만 그 70배의 내역은 경계 판정이 아니다. 랭크드가 프레임마다
+    // 하는 일은 넷이다: 체크섬 계산(페이로드 전체를 훑는다), 페이로드 파싱,
+    // 버퍼 머리에서의 erase(O(n) 이동), 그리고 프레임당 send 한 번.
+    //
+    // 여기서는 그 넷을 전부 피한다. 읽는 것은 헤더 3바이트뿐이고(LEN 2 + TYPE 1),
+    // 체크섬은 계산하지 않으며(서버 전용인지 판단하는 데 필요 없다), 통과한
+    // 프레임은 복사하지 않고 구간의 끝만 늘렸다가 배치 끝에 한 번 send 하고,
+    // erase 도 배치당 한 번이다. 위조가 없는 정상 트래픽에서는 send 횟수와 복사
+    // 횟수가 예전과 똑같고, 늘어난 것은 프레임당 헤더 세 바이트를 읽는 비용뿐이다.
+    //
+    // 대가가 없지는 않다. 잘린 프레임의 꼬리를 다음 읽기까지 들고 있어야 하므로
+    // (경계를 모르면 거를 수 없다) 세그먼트 경계에 걸린 프레임은 예전보다 한 번
+    // 늦게 나간다. 랭크드 경로가 이미 그렇게 동작하고 있고, 락스텝 프레임은 수십
+    // 바이트라 한 세그먼트에 통째로 들어오는 것이 보통이다. 안전을 위해 이 정도는
+    // 낸다 — 거르지 않는 빠른 경로는 "빠르다" 가 아니라 "신뢰 경계가 없다" 다.
+    bool forward_screened(Conn* c, Conn* peer, Channel* ch) {
+        size_t pos  = 0;   // 경계 판정이 끝난 위치
+        size_t sent = 0;   // 여기까지는 보냈거나(통과) 버렸다(위반)
+        bool   drop_rest = false;
+
+        while (c->rx.size() - pos >= 2) {
+            const uint8_t* p   = c->rx.data() + pos;
+            const uint16_t len = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+            if ((size_t)len > net::kMaxPayloadBytes + 1u) {
+                // 랭크드 경로와 같은 정책이다: 여기서부터는 경계를 믿을 수 없으니
+                // 남은 바이트를 버린다. 앞의 정상 구간은 이미 보냈다.
+                RLOG_WARN("[relay] match=" << ch->match_id
+                          << " uuid=" << ch->match_uuid
+                          << " 과대 프레임 — 스트림 폐기");
+                drop_rest = true;
+                break;
+            }
+            const size_t total = 2u + (size_t)len + 4u;
+            if (c->rx.size() - pos < total) break;   // 미완성 — 뒤를 기다린다
+            // len < 1 은 타입 바이트조차 없는 프레임이라 판정 대상이 아니다.
+            // 예전처럼 그대로 흘려보낸다(구간에 남겨 둔다) — 무해하고, 여기서
+            // 정책을 새로 만들면 거르기와 무관한 동작 변화가 섞인다.
+            if (len >= 1 && net::is_server_only_type(p[2])) {
+                if (pos > sent &&
+                    !queue_send(peer, c->rx.data() + sent, pos - sent)) return false;
+                note_server_only(c, p[2]);
+                sent = pos + total;                  // 이 프레임만 건너뛴다
+            }
+            pos += total;
+        }
+        if (pos > sent && !queue_send(peer, c->rx.data() + sent, pos - sent))
+            return false;
+        if (drop_rest)  c->rx.clear();
+        else if (pos)   c->rx.erase(c->rx.begin(), c->rx.begin() + pos);
+        return true;
+    }
+
     void on_forward(Conn* c) {
         Channel* ch = c->ch;
         if (!ch) return;
@@ -1324,13 +1507,11 @@ private:
         timers_.arm(c, Clock::now() + kIdleTimeout);
 
         if (!ch->ranked) {
-            // unranked: 프레임 경계도 만들지 않고 받은 바이트를 그대로 전달한다.
-            if (!c->rx.empty()) {
-                if (!queue_send(peer, c->rx.data(), c->rx.size())) {
-                    close_conn(peer ? peer : c, "전달 실패");
-                    return;
-                }
-                c->rx.clear();
+            // unranked: 경계는 훑되 내용은 보지 않는다 — 서버 전용 프레임만
+            // 걸러내고 나머지는 원본 바이트 그대로 흘려보낸다.
+            if (!c->rx.empty() && !forward_screened(c, peer, ch)) {
+                close_conn(peer ? peer : c, "전달 실패");
+                return;
             }
             return;
         }
@@ -1369,6 +1550,11 @@ private:
                 consumed += total;   // 가로챔 — 상대에게 보내지 않는다
                 continue;
             }
+            if (net::is_server_only_type(p[2])) {
+                note_server_only(c, p[2]);
+                consumed += total;   // 버림 — 상대에게 보내지 않는다
+                continue;
+            }
             if (!queue_send(peer, p, total)) {
                 close_conn(peer ? peer : c, "전달 실패");
                 return;
@@ -1400,6 +1586,22 @@ private:
 
     // ── finalize ─────────────────────────────────────────────────────────────
     // 상대가 사라졌다. 요약 수집 상태에 따라 세 갈래 — 스레드 모델과 같은 정책이다.
+    // 상대가 사라진 매치에서 살아남은 쪽을 통지하고 닫는다.
+    // 결과 프레임(랭크드)이 있다면 그것을 보낸 뒤에 불러야 한다 — tcp_close 는
+    // shutdown(RDWR) 이라 먼저 닫으면 결과가 나가지 못한다.
+    void close_channel_survivor(Channel* ch, const char* why) {
+        Conn* s = ch->a ? ch->a : ch->b;
+        if (!s || s->stage == Stage::Dead) return;
+        if (s->stage == Stage::Lobby) {
+            // 수락 로비에서는 "상대가 수락하지 않았다" 를 READY(0) 으로 알린다.
+            // 스레드 모델이 보내던 것과 같은 프레임이라 클라이언트가 이미 안다.
+            std::vector<uint8_t> pl{0};
+            auto fr = net::build_frame(net::MsgType::READY, pl);
+            queue_send(s, fr.data(), fr.size());
+        }
+        close_conn(s, why);
+    }
+
     void on_channel_peer_lost(Channel* ch) {
         if (!ch->ranked || ch->summary_handled || ch->finalize_inflight) return;
         if (ch->sumA && ch->sumB) { finalize_ranked(ch); return; }
@@ -1488,6 +1690,12 @@ private:
             send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
             RLOG_WARN("[relay] match=" << match_id << " uuid=" << ch->match_uuid
                       << " meta POST 실패 — delta=0");
+        }
+        // 결과를 보낸 지금이 남은 쪽을 닫을 자리다. 상대가 이미 사라졌을 때
+        // close_conn 이 여기로 미뤄 둔 일이다.
+        if (ch->close_survivor_pending) {
+            ch->close_survivor_pending = false;
+            close_channel_survivor(ch, "상대 이탈");
         }
     }
 
@@ -1640,6 +1848,12 @@ int main(int argc, char** argv) {
                                "--max-tx-mib", 1, 65536, n)) return 2;
             relay::g_tx_budget = (size_t)n * 1024u * 1024u;
         }
+        else if (a == "--max-pending-auth") {
+            int n = 0;
+            if (!parse_int_arg(next("--max-pending-auth"),
+                               "--max-pending-auth", 1, 100000, n)) return 2;
+            relay::g_max_pending_auth = (size_t)n;
+        }
         else if (a == "--log-level") {
             const std::string v = next("--log-level");
             relay::LogLevel lv{};
@@ -1661,6 +1875,7 @@ int main(int argc, char** argv) {
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
                 "                            [--meta-secret S] [--max-sessions-per-ip N]\n"
                 "                            [--max-conns N] [--max-tx-mib N]\n"
+                "                            [--max-pending-auth N]\n"
                 "                            [--log-level L] [--stats-interval-sec N]\n"
                 "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
                 "\n"
@@ -1687,6 +1902,12 @@ int main(int argc, char** argv) {
                 "              연결당 상한만으로는 메모리가 --max-conns 와 곱해져\n"
                 "              천장이 조용히 따라 오른다. 이 예산이 그 곱셈을 끊는다 —\n"
                 "              넘기면 그 순간 넘긴 연결을 끊는다.\n"
+                "  --max-pending-auth N\n"
+                "              meta 인증 왕복을 동시에 몇 명까지 기다리게 할지 (기본 "
+                                    << relay::kDefaultMaxPendingAuth << ").\n"
+                "              끊긴 연결의 인증 작업은 취소되므로 이 수는 아직 살아서\n"
+                "              기다리는 사람만 센다. 넘기면 세우는 대신 사유를 밝히고\n"
+                "              거절한다 — meta 가 느릴수록 낮게 잡아야 줄이 짧아진다.\n"
                 "  --log-level L\n"
                 "              error|warn|info|debug (기본 info). 환경변수\n"
                 "              TETRIS_RELAY_LOG_LEVEL 로도 정할 수 있고 이 인자가 이긴다.\n"

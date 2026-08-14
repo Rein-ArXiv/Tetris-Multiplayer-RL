@@ -90,6 +90,42 @@ enum class MsgType : uint8_t {
     SERVER_REJECT = 21,
 };
 
+// 서버만 만들 수 있는 프레임인가 — 릴레이가 포워딩 경로에서 버릴 대상.
+//
+// 판단 근거는 위 MsgType 표의 방향 주석이다. "S→C" 로 적힌 타입은 서버가
+// 만들어 내려보내는 것이고, 클라이언트가 같은 타입을 올려보낼 자리는 프로토콜
+// 어디에도 없다. 상대 클라이언트는 이 타입이 오면 서버가 보냈다고 믿는데,
+// 릴레이가 포워딩 중에 그대로 흘려보내면 그 믿음을 상대 플레이어가 위조할 수
+// 있게 된다 — 없던 RP 변동을, 없던 매치·룸 상태를 주입하는 길이다.
+//
+//   MATCH_FOUND   — 짝을 지은 것은 큐를 든 서버뿐이다.
+//   ROOM_INFO     — 룸 코드·정원·상태를 아는 것은 룸 표를 든 서버뿐이다.
+//   MATCH_RESULT  — RP 변동은 meta 가 계산해 서버가 내려 준다.
+//   SERVER_REJECT — "서버가 너를 거절했다" 를 클라이언트가 말할 수는 없다.
+//
+// 여기 없는 것들의 근거도 같은 표다.
+//   · HELLO / HELLO_ACK / SEED / INPUT / ACK / PING / PONG / HASH /
+//     GAME_OVER_CHOICE 는 릴레이가 두 클라이언트 사이로 흘려보내는 락스텝
+//     프레임이다. 이름과 달리 HELLO_ACK 은 서버가 아니라 상대 피어가 보내는
+//     응답이고(net/session.cpp 의 HELLO 처리), 막으면 매치가 시작되지 않는다.
+//   · READY 는 표가 "C→S, S→C(forward)" 라고 못 박는다 — 릴레이가 중계하는
+//     것이 정상 동작이다.
+//   · CHAT 은 양방향이다.
+//   · MATCH_SUMMARY 는 C→S 라 클라이언트가 보내는 것이 맞다. 랭크드 릴레이가
+//     이것을 가로채는 이유는 "서버 전용이라서" 가 아니라 결과 교차검증에 쓰려고
+//     소비하기 때문이므로, 이 목록과는 성격이 다르다.
+//
+// 위반한 프레임 하나만 버리고 연결은 살린다. 포워딩은 양방향이라 여기서 연결을
+// 끊으면 위조한 쪽만이 아니라 상대의 경기까지 함께 끝난다 — 한 사람의 반칙으로
+// 무관한 사람의 판을 깨는 것은 이 프레임들을 막아서 지키려던 것과 같은 손해다.
+// 버리기만 해도 공격자가 얻는 것은 없다.
+constexpr bool is_server_only_type(uint8_t type) {
+    return type == static_cast<uint8_t>(MsgType::MATCH_FOUND)  ||
+           type == static_cast<uint8_t>(MsgType::ROOM_INFO)    ||
+           type == static_cast<uint8_t>(MsgType::MATCH_RESULT) ||
+           type == static_cast<uint8_t>(MsgType::SERVER_REJECT);
+}
+
 // SERVER_REJECT 의 reason 코드. 값은 wire 규약이므로 재사용/재번호 금지 —
 // 새 사유는 뒤에 덧붙인다. 모르는 코드를 받은 클라이언트는 함께 실린 텍스트를
 // 쓰거나 일반 문구로 물러선다.
@@ -98,6 +134,7 @@ enum class RejectReason : uint8_t {
     IpSessionLimit   = 2,  // per-IP 동시 세션 상한
     IpHandshakeLimit = 3,  // per-IP 동시 핸드셰이크 상한
     TxBudget         = 4,  // 프로세스 전체 보류 송신 예산
+    AuthBacklog      = 5,  // 대기 중인 meta 인증 왕복 상한
 };
 
 // 파싱된 메시지 프레임

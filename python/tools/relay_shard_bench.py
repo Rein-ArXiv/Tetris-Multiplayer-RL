@@ -566,7 +566,12 @@ def run_once(args) -> dict:
             with open(relay_log, "wb") as log:
                 relay_proc = subprocess.Popen(
                     [str(args.relay_bin), "--port", str(relay_port),
-                     "--loops", str(args.loops)] + relay_extra,
+                     "--loops", str(args.loops),
+                     # 연결 상한을 명시해 릴레이 기본값이 바뀌어도 두 구성이 같은
+                     # 조건에서 비교되게 한다. 예전에는 벤치가 512 를 가정해 하드코딩
+                     # 했는데, 기본값이 4096 이 된 뒤로는 루프가 실제로 포화되는
+                     # 구간(≈700 접속)을 재려 해도 벤치가 먼저 거절했다.
+                     "--max-conns", str(args.max_conns)] + relay_extra,
                     stdout=log, stderr=log)
             if wait_listen(relay_port, timeout=10.0, proc=relay_proc):
                 break
@@ -849,6 +854,10 @@ def main() -> None:
                         help="주면 ranked 모드 (meta 기동 + 게스트 토큰 발급)")
     parser.add_argument("--meta-secret", default="bench-relay-secret")
     parser.add_argument("--loops", type=int, default=1)
+    parser.add_argument("--max-conns", type=int, default=4096,
+                        help="릴레이를 이 연결 상한으로 띄운다 (릴레이 기본값과 동일). "
+                             "부하가 이 값을 넘으면 loops=1 이 초과분을 거절해 "
+                             "구성 간 비교가 성립하지 않으므로 미리 막는다.")
     parser.add_argument("--matches", type=int, default=128,
                         help="동시 매치 수 (연결은 그 두 배)")
     parser.add_argument("--workers", type=int, default=2,
@@ -885,12 +894,13 @@ def main() -> None:
     if args.kib_per_conn >= 64:
         parser.error("--kib-per-conn must stay below the relay's 64 KiB/s per-"
                      "connection cap, otherwise it kills the connection")
-    # kMaxConns=512. 샤딩에서는 인계된 연결이 앞단 표에서 빠지지만 loops=1 은
-    # 전부 한 표에 남는다. 두 구성을 같은 부하로 비교하려면 낮은 쪽에 맞춘다.
-    if args.matches * 2 > 512:
-        parser.error(f"matches*2={args.matches * 2} exceeds the relay's "
-                     "kMaxConns=512 — loops=1 would refuse the surplus and the "
-                     "two configurations would no longer be comparable")
+    # 샤딩에서는 인계된 연결이 앞단 표에서 빠지지만 loops=1 은 전부 한 표에 남는다.
+    # 두 구성을 같은 부하로 비교하려면 loops=1 기준으로 상한을 넘지 않아야 한다.
+    # 릴레이를 이 값으로 띄우므로(--max-conns) 비교 기준이 명시적이다.
+    if args.matches * 2 > args.max_conns:
+        parser.error(f"matches*2={args.matches * 2} exceeds --max-conns="
+                     f"{args.max_conns} — loops=1 would refuse the surplus and "
+                     "the two configurations would no longer be comparable")
 
     result = run_once(args)
     for key, value in result.items():

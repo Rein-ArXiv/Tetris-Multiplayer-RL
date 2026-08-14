@@ -2664,11 +2664,11 @@ stateDiagram-v2
 ```cpp
     // 인증이 끝난 뒤 첫 프레임이 정한 진로로 보낸다.
     void after_auth(Conn* c) {
-        // per-IP 상한은 "동시 핸드셰이크" 예산이지 세션 예산이 아니다. 인증까지
-        // 끝났으면 그 자리를 놓아줘야 같은 IP 뒤에 오는 접속이 굶지 않는다 —
-        // 붙들고 있으면 NAT 뒤 다수 사용자나 loopback 테스트가 상한에 걸린다.
-        release_admission(c->admission_key);
-        c->admission_key.clear();
+        // 핸드셰이크 예산은 여기서 끝난다. 붙들고 있으면 상한 16 이 "동시 세션"
+        // 예산으로 변해 NAT 뒤 다수 사용자나 loopback 테스트가 걸린다.
+        // 세션 예산(session_slot)은 그대로 유지된다 — 인증을 통과했다고 해서
+        // 한 주소가 전역 상한까지 연결을 쌓을 수 있어서는 안 된다.
+        c->handshake_slot.reset();
 
         switch (c->intent) {
             case Intent::Queue:      enter_queue(c); break;
@@ -2678,18 +2678,9 @@ stateDiagram-v2
     }
 ```
 
-연결 종료 경로도 여전히 반납을 시도한다. 이중 반납이 나지 않는 이유는 반납 후 키를 비우고, 반납 함수가 빈 키를 무해하게 무시하기 때문이다.
+반납이 `reset()` 한 줄인 이유는 슬롯이 카운터가 아니라 **핸들**이기 때문이다. `IpAdmission::acquire` 가 `shared_ptr` 을 돌려주고, 그 마지막 사본이 사라질 때 소멸자가 카운터를 줄인다. 그래서 이중 반납이 성립하지 않고, 종료 경로가 따로 반납을 시도할 필요도 없다 — `Conn` 이 소멸하면 남은 슬롯이 알아서 풀린다.
 
-**현재 소스 발췌 — `server/reactor_relay.cpp`**
-
-```cpp
-    void release_admission(const std::string& key) {
-        if (key.empty()) return;
-        auto it = admission_.find(key);
-        if (it == admission_.end()) return;
-        if (--it->second <= 0) admission_.erase(it);
-    }
-```
+이 설계가 특히 값을 하는 곳이 샤딩이다. 포워딩이 시작되면 소켓과 상태가 다른 루프 스레드로 넘어가는데, 세션 슬롯은 `Conn` 을 따라 함께 옮겨 가고 어느 스레드에서 마지막 사본이 죽든 정확히 한 번 반납된다. 표를 프로세스 전역으로 둔 이유도 같다 — 루프마다 표를 두면 인계된 뒤의 반납이 엉뚱한 표로 간다.
 
 핸드셰이크가 인증 왕복(오프로드) 때문에 길어질 수 있다는 점이 이 설계를 오히려 정당화한다. 슬롯이 실제로 막아야 하는 것은 "인증도 안 끝난 반쯤 열린 연결이 무한정 쌓이는 상황"이고, 그 구간은 정확히 accept 부터 인증 완료까지다.
 

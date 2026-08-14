@@ -511,27 +511,10 @@ net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링
 // 첫 프레임 대기(≤5s)와 룸 대기 동안 스레드를 점유하므로, 정상 부하(수백 명)
 // 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다.
 constexpr size_t kMaxConnWorkers = 256;
-constexpr size_t kMaxHandshakesPerIp = 16;
 
-class IpAdmission {
-public:
-    bool acquire(const std::string& ip) {
-        std::lock_guard<std::mutex> lk(mu_);
-        size_t& n = active_[ip.empty() ? "unknown" : ip];
-        if (n >= kMaxHandshakesPerIp) return false;
-        ++n;
-        return true;
-    }
-    void release(const std::string& ip) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = active_.find(ip.empty() ? "unknown" : ip);
-        if (it == active_.end()) return;
-        if (--it->second == 0) active_.erase(it);
-    }
-private:
-    std::mutex mu_;
-    std::unordered_map<std::string, size_t> active_;
-};
+// per-IP 상한은 server/ip_admission.h 가 두 릴레이 바이너리에 공통으로 정의한다.
+// 수명이 다른 슬롯이 둘이다 — 핸드셰이크 슬롯은 인증이 끝나면 놓아주고, 세션
+// 슬롯은 연결이 죽을 때까지 붙든다. 왜 하나로는 안 되는지는 하드닝 장에서 다룬다.
 
 void signalHandler(int /*sig*/) {
     // async-signal-safe 하게 플래그만 세운다. listen 소켓은 논블로킹이라
@@ -3870,7 +3853,8 @@ sequenceDiagram
 | 상수 | 값 | 위치 | 막는 것 |
 |---|---|---|---|
 | `kMaxConnWorkers` | 256 | `server/main.cpp` | connect 플러딩으로 인한 스레드/핸들 고갈 |
-| `kMaxHandshakesPerIp` | 16 | `server/main.cpp` | 한 IP가 입장 worker를 독점하는 공격 |
+| `kMaxHandshakesPerIp` | 16 | `server/ip_admission.h` | 한 IP가 *인증 중인* 연결로 입장 경로를 독점하는 공격 |
+| `kMaxSessionsPerIp` | 64 | `server/ip_admission.h` | 한 IP가 *인증을 마친* 연결로 서버를 독식하는 것 |
 | `kMaxRelayWorkers` | 512 | `server/relay.cpp` | 로비/포워더 스레드 무한 생성 |
 | `kJoinTimeout` | 5초 | `server/player_conn.cpp` | 첫 프레임을 안 보내는 연결 점유 |
 | `kMaxCodeLen` | 5 | `server/player_conn.cpp` | 과대 룸 코드로 인한 로그 오염·조회 비용 |

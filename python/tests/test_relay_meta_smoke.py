@@ -441,7 +441,7 @@ def test_ranked_auth_releases_handshake_slot(meta_and_relay):
 def test_per_ip_session_cap_rejects_excess_connections(tmp_path):
     """세션 슬롯은 연결이 죽을 때까지 유지된다 — 한 IP 가 서버를 독식하지 못하게.
 
-    핸드셰이크 슬롯만 두면 인증만 통과시키며 전역 상한(reactor kMaxConns=512,
+    핸드셰이크 슬롯만 두면 인증만 통과시키며 전역 상한(reactor --max-conns,
     스레드 모델 포워딩 워커 512)까지 한 주소가 전부 차지할 수 있다. 상한이
     아니라 속도 제한일 뿐이다.
 

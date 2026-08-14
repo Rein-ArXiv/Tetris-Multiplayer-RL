@@ -406,7 +406,9 @@ net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링
 
 // Bound thread and handle use during connection setup.
 constexpr size_t kMaxConnWorkers = 256;
-constexpr size_t kMaxHandshakesPerIp = 16;
+
+// per-IP 상한은 server/ip_admission.h 가 두 릴레이 바이너리에 공통으로 정의한다
+// (핸드셰이크 슬롯 = 인증까지, 세션 슬롯 = 연결이 죽을 때까지).
 
 void signalHandler(int /*sig*/) {
     // The signal handler only touches an atomic flag.
@@ -414,7 +416,14 @@ void signalHandler(int /*sig*/) {
 }
 ```
 
-상수가 둘이다. `kMaxConnWorkers`(256)는 프로세스 전체의 연결 setup 스레드 상한이다 — 연결당 detached 스레드를 만들므로 상한이 없으면 connect 플러딩만으로 메모리와 핸들이 고갈된다. `playerConnThread` 는 첫 프레임 대기(≤5초)와 룸 대기 동안 스레드를 점유하므로 정상 부하(수백 명) 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다. `kMaxHandshakesPerIp`(16)는 그 예산을 **출처별로 한 번 더 나눈** 값인데, accept 루프에서 함께 본다(아래).
+`kMaxConnWorkers`(256)는 프로세스 전체의 연결 setup 스레드 상한이다 — 연결당 detached 스레드를 만들므로 상한이 없으면 connect 플러딩만으로 메모리와 핸들이 고갈된다. 초과분은 즉시 close 한다.
+
+그 아래에 per-IP 예산이 **둘** 있다. 처음에는 하나였는데, 하나로는 두 가지를 동시에 지킬 수 없다는 것이 나중에 드러났다.
+
+- **핸드셰이크 슬롯** — accept 부터 *인증이 끝나는 순간*까지만 잡는다. 아직 자기가 누구인지 밝히지 않은 연결이 한 주소에서 몇 개까지 열려 있을 수 있는지를 정한다. 첫 프레임을 안 보내고 버티거나 토큰 검증 왕복만 반복해 접속 경로를 점유하는 부하를 막는 것이 목적이므로, 진로가 정해지는 즉시 놓아준다.
+- **세션 슬롯** — accept 부터 *연결이 죽을 때까지* 잡는다. 인증을 통과한 뒤에도 유지되므로 한 주소가 서버 전체를 차지하는 경로를 막는다.
+
+두 상한은 독립적으로 검사한다. 어느 하나라도 못 얻으면 그 연결은 거절이다.
 
 시그널 핸들러 안에서는 *async-signal-safe* 한 연산만 허용된다. 핸들러는 임의 시점에 다른 코드를 끊고 들어오므로 `malloc`, `mutex`, 그리고 내부에서 참조 카운트를 조작하는 `shared_ptr` 연산 등은 데드락이나 메모리 손상을 일으킬 수 있다. 가장 보수적인 POSIX 형태는 `volatile sig_atomic_t` 플래그다. 현재 코드는 일반 플랫폼에서 lock-free 로 동작하는 `std::atomic<bool>` store 만 사용하는데, 이 선택은 "핸들러에서 복잡한 정리를 하지 않는다" 는 운영 패턴의 일부로 이해해야 한다.
 
@@ -495,33 +504,70 @@ accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓�
     }
 ```
 
-`IpAdmission` 은 IP → 진행 중 setup 수의 맵 하나다.
+`IpAdmission` 은 종류별로 IP → 진행 중 수의 맵을 하나씩 갖는다. 슬롯을 잡으면 핸들을 돌려주고, 그 핸들의 마지막 사본이 사라질 때 카운터가 줄어든다 — 반납 시점을 호출자가 **수명으로** 정하게 하는 것이 이 설계의 요점이다.
 
-**현재 소스 발췌 — `server/main.cpp`**
+**현재 소스 발췌 — `server/ip_admission.h`**
 
 ```cpp
 class IpAdmission {
 public:
-    bool acquire(const std::string& ip) {
+    enum class Kind { Handshake, Session };
+
+    // 슬롯 하나를 잡는다. 상한에 걸리면 nullptr — 호출자는 연결을 거절한다.
+    static std::shared_ptr<IpAdmission> acquire(std::string key, Kind kind)
+    {
+        if (key.empty()) key = "unknown";
         std::lock_guard<std::mutex> lk(mu_);
-        size_t& n = active_[ip.empty() ? "unknown" : ip];
-        if (n >= kMaxHandshakesPerIp) return false;
-        ++n;
-        return true;
+        auto&        table = (kind == Kind::Handshake) ? handshakes_ : sessions_;
+        const size_t limit = (kind == Kind::Handshake) ? kMaxHandshakesPerIp
+                                                       : session_limit_;
+        auto         it    = table.find(key);
+        const size_t n     = (it == table.end()) ? 0u : it->second;
+        if (n >= limit) return {};
+        table[key] = n + 1;
+        return std::shared_ptr<IpAdmission>(new IpAdmission(std::move(key), kind));
     }
-    void release(const std::string& ip) {
+
+    ~IpAdmission()
+    {
         std::lock_guard<std::mutex> lk(mu_);
-        auto it = active_.find(ip.empty() ? "unknown" : ip);
-        if (it == active_.end()) return;
-        if (--it->second == 0) active_.erase(it);
+        auto& table = (kind_ == Kind::Handshake) ? handshakes_ : sessions_;
+        auto  it    = table.find(key_);
+        if (it == table.end()) return;
+        if (--it->second == 0) table.erase(it);
     }
+
 private:
-    std::mutex mu_;
-    std::unordered_map<std::string, size_t> active_;
+    IpAdmission(std::string key, Kind kind)
+        : key_(std::move(key)), kind_(kind) {}
+
+    std::string key_;
+    Kind        kind_;
+
+    static std::mutex mu_;
+    static std::unordered_map<std::string, size_t> handshakes_;
+    static std::unordered_map<std::string, size_t> sessions_;
+    static size_t session_limit_;
 };
 ```
 
-전역 상한(`kMaxConnWorkers`=256)과 IP별 상한(`kMaxHandshakesPerIp`=16)은 지키는 대상이 다르다. 전역 상한은 **프로세스**를 지킨다 — 스레드·핸들이 무한정 늘어나 서버 자체가 죽는 것을 막는다. 그러나 전역 상한만 있으면 한 IP 가 연결 256개를 먼저 채워 다른 모든 사용자를 굶길 수 있다. IP별 상한은 **출처 간 공정성**을 지킨다 — 한 출처가 점유할 수 있는 setup 슬롯을 16개로 잘라, 플러딩하는 쪽만 거부되고 나머지는 계속 들어온다. 예산을 겹으로 두되 각 겹이 다른 실패 모드를 막게 하는 이 구조는 rate limit 일반론이기도 하다(meta 의 per-IP 버킷도 같은 계열, §9.2). 해제는 워커 람다 안의 RAII 소멸자가 보장하므로 `playerConnThread` 가 어떤 경로로 끝나든(정상·타임아웃·예외) 카운트가 샌다는 걱정이 없고, `launch` 자체가 실패한 경로만 명시적 `release` 로 되돌린다.
+표가 프로세스 전역이라는 점이 중요하다. 이벤트 루프 릴레이는 포워딩을 다른 스레드로 넘기는데, 그쪽에서 연결을 닫아도 앞단이 센 수가 함께 줄어야 한다 — 루프마다 표를 두면 인계된 뒤의 반납이 엉뚱한 표로 간다.
+
+전역 상한과 IP별 상한은 지키는 대상이 다르다. 전역 상한은 **프로세스**를 지킨다 — 스레드·핸들이 무한정 늘어나 서버 자체가 죽는 것을 막는다. 그러나 전역 상한만 있으면 한 IP 가 그 예산을 먼저 다 채워 다른 모든 사용자를 굶길 수 있다. IP별 상한은 **출처 간 공정성**을 지킨다. 예산을 겹으로 두되 각 겹이 다른 실패 모드를 막게 하는 이 구조는 rate limit 일반론이기도 하다(meta 의 per-IP 버킷도 같은 계열, §9.2).
+
+해제는 RAII 가 보장한다 — 어떤 경로로 끝나든(정상·타임아웃·예외) 카운트가 샐 걱정이 없다.
+
+### 슬롯의 수명이 상한의 의미를 바꾼다
+
+여기서 처음에 한 번 틀렸다. 슬롯 하나를 두고 그 소멸자를 **연결 스레드 종료 시점**에 걸었는데, RAII 가 새는 걸 막아 준다는 사실에 만족해 *언제* 반납되는지를 따져 보지 않았다.
+
+문제는 룸 경로였다. `playerConnThread` 는 `handleCreate` 안에서 방이 끝날 때까지 반환하지 않는다. 그래서 방을 만들어 두고 친구를 기다리는 동안 — 게스트 대기 한도가 15분이다 — 그 연결이 슬롯을 계속 붙들었다. 이름은 "핸드셰이크 상한" 인데 동작은 **"동시 세션 상한"** 이었던 것이다.
+
+공인 IP 를 공유하는 환경에서 이 차이가 그대로 드러난다. 학교·회사·카페·통신사 CGNAT 뒤에서 열여섯 명이 각자 방을 열어 두면, 열일곱 번째 사람은 방을 못 만드는 정도가 아니라 **랜덤 매칭조차 접속이 끊긴다.** 부하와 무관하게, 접속자가 몇 명이든 걸린다.
+
+고치는 방법은 상한을 키우는 것이 아니라 **수명이 다른 두 슬롯으로 나누는 것**이었다. 이름이 말하는 일과 실제로 하는 일을 일치시키면, 각 상한이 무엇을 지키는지가 다시 분명해진다.
+
+> **교훈이 하나 있다.** RAII 는 자원이 *반드시* 반납되게 해 주지만 *언제* 반납되는지는 정해 주지 않는다. 그리고 상한의 의미는 값이 아니라 수명이 정한다. 소멸자가 어디서 도는지 확인하지 않으면, 새지 않는 코드가 조용히 다른 정책을 집행한다.
 
 `tcp_peer_ip` 가 빈 문자열을 돌려주는 실패 경로의 처리도 눈여겨볼 만하다. 실패한 연결을 전부 `"unknown"` 버킷 하나에 몰면 서로 무관한 연결끼리 상한 16을 나눠 갖는 공멸이 된다. 대신 fd 값을 연결별 고유 키로 쓴다 — fd 는 그 연결이 살아 있는 동안 프로세스 안에서 유일하므로 충돌이 없다. per-IP 상한이라는 원래 목적은 이 경로에서 포기하지만, "제한 장치의 실패가 무고한 사용자를 막는" 역전보다는 낫다는 판단이다.
 

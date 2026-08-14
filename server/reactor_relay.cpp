@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -58,6 +59,24 @@
 #include <vector>
 
 namespace relay {
+
+// 동시 연결 상한. 스레드 모델의 512 는 자원 판단이 아니라 구조의 산물이었다 —
+// 포워딩 워커 512개를 매치당 2개씩 쓰니 연결도 512에서 멎었다. 루프 모델에는
+// 그 제약이 없으므로 값을 물려받을 이유도 없다.
+//
+// 기본값 4096 의 근거는 실측이다. 이 저장소의 벤치(2.0GHz Sandy Bridge, 8스레드)
+// 에서 60 tick/s 부하 기준 접속자당 앞단 루프 비용이 약 0.14% 코어였다 — 500명이
+// 코어 하나의 68% 다. 단일 루프는 스레드 하나이므로 코어 하나가 곧 천장이고,
+// 그 천장은 700명 언저리에 있다. 4096 은 거기서 더 여유를 둔 값이라 이 상한이
+// 먼저 걸리는 일은 없다: 실제로 먼저 오는 것은 루프 포화이고, 그때 늘릴 것은
+// 이 값이 아니라 --loops 다.
+//
+// 그래도 상한 자체는 남긴다. 무한대는 상한이 아니라 상한의 부재이고, fd 고갈이나
+// 메모리 압박이 거절보다 나은 실패 모드인 적은 없다. 운영자가 자기 하드웨어에
+// 맞춰 정할 수 있도록 --max-conns 로 노출한다.
+constexpr size_t kDefaultMaxConns = 4096;
+size_t           g_max_conns      = kDefaultMaxConns;
+
 namespace {
 
 using Clock     = std::chrono::steady_clock;
@@ -69,7 +88,6 @@ constexpr auto   kLobbyTimeout      = std::chrono::seconds(30);
 constexpr auto   kIdleTimeout       = std::chrono::seconds(15);
 constexpr size_t kMaxBytesPerSecond = 64 * 1024;
 constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
-constexpr size_t kMaxConns          = 512;
 // per-IP 상한(핸드셰이크/세션)은 server/ip_admission.h 가 스레드 모델과 공통으로
 // 정의한다. 표가 프로세스 전역이라 샤드 스레드가 인계받은 연결을 닫아도 앞단이
 // 센 수가 함께 줄어든다 — 루프마다 표를 두면 인계 후 반납이 엉뚱한 표로 간다.
@@ -414,8 +432,8 @@ private:
             net::TcpSocket s = net::tcp_accept(listen_);
             if (!s.valid()) return;
 
-            if (conns_.size() >= kMaxConns) {
-                std::cerr << "[relay] 연결 상한 도달 — 거절\n";
+            if (conns_.size() >= g_max_conns) {
+                std::cerr << "[relay] 연결 상한 도달 (" << g_max_conns << ") — 거절\n";
                 net::tcp_close(s);
                 continue;
             }
@@ -1238,6 +1256,35 @@ private:
 } // namespace
 } // namespace relay
 
+namespace {
+
+// 숫자 인자 파싱. std::stoi 는 숫자가 아닌 입력에 예외를 던지는데, 여기서 잡지
+// 않으면 terminate 로 죽어 "std::invalid_argument" 스택 덤프만 남는다. 오타 하나
+// 든 systemd 유닛이 그런 식으로 죽으면 운영자는 무엇이 틀렸는지 알 수 없다.
+// 스레드 모델(server/main.cpp)이 from_chars 로 이미 이렇게 하고 있어, 두 바이너리
+// 의 잘못된 입력 처리도 같은 모양이 된다. 부분 파싱("12abc")도 거절한다 —
+// from_chars 가 멈춘 위치가 끝이 아니면 입력 전체가 숫자가 아니었다는 뜻이다.
+bool parse_int_arg(const std::string& s, const char* what, int lo, int hi, int& out)
+{
+    int value = 0;
+    const auto* first = s.data();
+    const auto* last  = s.data() + s.size();
+    const auto  res   = std::from_chars(first, last, value);
+    if (res.ec != std::errc{} || res.ptr != last) {
+        std::cerr << "[relay] " << what << " 는 정수여야 합니다: " << s << "\n";
+        return false;
+    }
+    if (value < lo || value > hi) {
+        std::cerr << "[relay] " << what << " 는 " << lo << ".." << hi
+                  << " 범위여야 합니다: " << value << "\n";
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
     uint16_t port = 7777;
     int loops = 1;                      // 1 = 단일 루프(앞단이 포워딩까지)
@@ -1252,22 +1299,35 @@ int main(int argc, char** argv) {
             }
             return argv[++i];
         };
-        if (a == "--port")             port = (uint16_t)std::stoi(next("--port"));
-        else if (a == "--loops")       loops = std::max(1, std::stoi(next("--loops")));
+        if (a == "--port") {
+            int n = 0;
+            if (!parse_int_arg(next("--port"), "--port", 1, 65535, n)) return 2;
+            port = (uint16_t)n;
+        }
+        else if (a == "--loops") {
+            int n = 0;
+            if (!parse_int_arg(next("--loops"), "--loops", 1, 256, n)) return 2;
+            loops = n;
+        }
         else if (a == "--meta")        meta_url = next("--meta");
         else if (a == "--meta-secret") meta_secret = next("--meta-secret");
         else if (a == "--max-sessions-per-ip") {
-            const int n = std::stoi(next("--max-sessions-per-ip"));
-            if (n < 1 || n > 100000) {
-                std::cerr << "[relay] --max-sessions-per-ip 은 1..100000\n";
-                return 2;
-            }
+            int n = 0;
+            if (!parse_int_arg(next("--max-sessions-per-ip"),
+                               "--max-sessions-per-ip", 1, 100000, n)) return 2;
             relay::IpAdmission::set_session_limit((size_t)n);
+        }
+        else if (a == "--max-conns") {
+            int n = 0;
+            if (!parse_int_arg(next("--max-conns"),
+                               "--max-conns", 2, 1000000, n)) return 2;
+            relay::g_max_conns = (size_t)n;
         }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
                 "                            [--meta-secret S] [--max-sessions-per-ip N]\n"
+                "                            [--max-conns N]\n"
                 "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
                 "\n"
                 "  --loops N   루프 스레드 수 (기본 1). 앞단 루프 하나가 accept·인증·큐·\n"
@@ -1281,7 +1341,12 @@ int main(int argc, char** argv) {
                 "  --max-sessions-per-ip N\n"
                 "              한 주소가 연결 수명 동안 붙들 수 있는 동시 연결 수\n"
                 "              (기본 " << relay::kMaxSessionsPerIp << "). 인증이 끝나면 반납하는 per-IP 핸드셰이크\n"
-                "              예산(" << relay::kMaxHandshakesPerIp << ")과는 별개로 검사한다.\n";
+                "              예산(" << relay::kMaxHandshakesPerIp << ")과는 별개로 검사한다.\n"
+                "  --max-conns N\n"
+                "              프로세스 전체 동시 연결 상한 (기본 "
+                                    << relay::kDefaultMaxConns << "). 먼저 오는 것은\n"
+                "              보통 이 상한이 아니라 루프 포화이며, 그때 늘릴 것은\n"
+                "              --loops 다. 이 값은 fd·메모리를 지키는 마지막 방어선이다.\n";
             return 0;
         }
     }

@@ -1,5 +1,6 @@
 #include "log.h"
 
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -152,7 +153,14 @@ void log_emit(const LogLine& line)
 #else
         const auto n = ::write(fd, p, left);
 #endif
-        if (n <= 0) break;   // 더 쓸 수 없다 — 로그 때문에 서버를 세우지는 않는다
+        if (n < 0) {
+            // EINTR 은 "아무것도 못 썼다" 가 아니라 "시그널이 끼어들었다" 다.
+            // 여기서 포기하면 줄의 나머지가 잘려 나가는데, 원자적 한 줄을 만들려고
+            // 조립해 놓고 시그널 하나에 반토막을 내보내는 셈이 된다. 다시 시도한다.
+            if (errno == EINTR) continue;
+            break;               // 그 외 오류는 포기 — 로그 때문에 서버를 세우지 않는다
+        }
+        if (n == 0) break;       // 진행이 없다. 무한 루프를 만들지 않는다
         p    += n;
         left -= static_cast<size_t>(n);
     }

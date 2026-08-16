@@ -286,7 +286,12 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
 //   a_to_b == false → B → A.
 //
 // MATCH_SUMMARY는 ranked + meta 연동 + 양쪽 player_id != 0일 때만 가로챈다.
-// unranked/no-meta 경로는 프레임 경계도 만들지 않고 받은 byte를 그대로 전달한다.
+//
+// 두 경로 모두 프레임 경계는 훑는다 — 서버만 만들 수 있는 프레임(net/framing.h 의
+// is_server_only_type)이 클라이언트에서 오면 버려야 하기 때문이다. 다만 하는 일이
+// 다르다: ranked 는 페이로드까지 파싱하고 프레임마다 send 하지만, unranked 는 헤더
+// 3바이트만 읽고 통과한 프레임을 붙어 있는 구간째 한 번에 민다. 정상 트래픽에서
+// unranked 의 send 횟수는 경계를 훑기 전과 같다.
 void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 {
     const net::TcpSocket& from = a_to_b ? ch->A : ch->B;

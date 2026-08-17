@@ -52,6 +52,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -369,7 +370,20 @@ struct Room {
 class RelayLoop {
 public:
     RelayLoop(meta::client::MetaClient* meta, std::string meta_note)
-        : meta_(meta), meta_note_(std::move(meta_note)) {}
+        : meta_(meta), meta_note_(std::move(meta_note))
+    {
+        // 룸 코드 RNG 는 match seed 스트림(next_seed)과 반드시 분리해서 씨를 뿌린다.
+        // 노출되지 않는 독립 엔트로피(random_device)로만 채운다 — 이유는 code_rng_
+        // 선언부 주석 참조. 시드 소스를 여러 개 섞어 random_device 가 빈약한
+        // 플랫폼에서도 예측 가능한 시드로 떨어지지 않게 한다.
+        std::random_device rd;
+        std::seed_seq seq{
+            static_cast<unsigned>(rd()), static_cast<unsigned>(rd()),
+            static_cast<unsigned>(rd()), static_cast<unsigned>(rd()),
+            static_cast<unsigned>(Clock::now().time_since_epoch().count()),
+            static_cast<unsigned>(reinterpret_cast<uintptr_t>(this))};
+        code_rng_.seed(seq);
+    }
 
     bool init(uint16_t port) {
         reactor_ = net::Reactor::create();
@@ -1084,14 +1098,18 @@ private:
         queue_send(c, fr.data(), fr.size());
     }
 
+    // 룸 코드는 code_rng_ 로만 뽑는다 — next_seed()(match seed 스트림)로 뽑으면 안 된다.
+    // match seed 는 MATCH_FOUND 로 두 플레이어에게 그대로 나가는데 그 값이 곧 xorshift64
+    // 의 내부 상태라, 같은 스트림에서 코드를 뽑으면 매치를 한 번 한 사람이 이후 룸 코드를
+    // 예측해 남의 비공개 방에 들어올 수 있다(코드는 그 방의 유일한 자격 증명이다).
     std::string generate_code() {
         for (int attempt = 0; attempt < 32; ++attempt) {
             std::string code(kCodeLen, 'A');
-            uint64_t x = next_seed();
+            uint64_t x = code_rng_();
             for (size_t i = 0; i < kCodeLen; ++i) {
                 code[i] = kCodeAlphabet[x % kCodeAlphabetN];
                 x /= kCodeAlphabetN;
-                if (x == 0) x = next_seed();
+                if (x == 0) x = code_rng_();
             }
             if (!rooms_.count(code)) return code;
         }
@@ -1767,7 +1785,10 @@ private:
 
     uint32_t next_conn_id_  = 1;
     uint32_t next_match_id_ = 1;
-    uint64_t seed_state_    = 0;
+    uint64_t seed_state_    = 0;   // match seed 전용 xorshift64 (MATCH_FOUND 로 노출된다)
+    // 룸 코드 전용 RNG. 노출되는 match seed 스트림과 분리해 씨를 뿌린다(생성자 참조).
+    // 코드는 사람이 받아 적는 5글자 자격 증명이라 예측 불가능해야 한다.
+    std::mt19937_64 code_rng_;
 };
 
 } // namespace

@@ -9,7 +9,21 @@ User=tetris
 Group=tetris
 WorkingDirectory=/opt/tetris
 EnvironmentFile=/etc/tetris/relay.env
-ExecStart=/opt/tetris/tetris_relay --port 7777 --meta https://api.example.com
+# 배포 대상은 이벤트 루프 바이너리(tetris_relay_reactor)다. 연결당 스레드
+# 모델(tetris_relay)은 교재용 참조 구현이라 번들에 넣지 않는다.
+#
+# --loops 는 기본 1(단일 루프)로 둔다. 포워딩의 실효 병렬도는 loops-1 이고,
+# 단일 루프가 코어 하나를 포화시키는 접속 규모(≈700명)에 닿기 전에는 값을 올려도
+# 이득이 없다. 그 지점에 실제로 닿으면 3 이상으로 올린다(2 는 릴레이가 스스로 1 로
+# 낮춘다).
+#
+# --log-level 은 info 다. warn 으로 띄우면 정상 운영 구간이 통째로 침묵한다 —
+# 기동 확인도, per-IP 거절(info)도, 10초 [stats] 하트비트(동시 연결·tx 예산
+# 사용량·사유별 거절 카운터)도 나오지 않아, 운영자가 "정상 유휴"와 "멈춤"을 로그로
+# 구분할 수 없고 tx 예산 누수를 볼 유일한 창을 잃는다. info 는 하루 약 8,640줄로
+# 접속·매치 로그와 같은 자릿수라 어느 쪽도 덮지 않는다. TETRIS_RELAY_SECRET 은
+# relay.env 가 준다(--meta 를 쓰면 secret 없이는 기동을 거부한다).
+ExecStart=/opt/tetris/tetris_relay_reactor --port 7777 --meta https://api.example.com --log-level info
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

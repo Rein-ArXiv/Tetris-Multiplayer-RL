@@ -7,11 +7,15 @@
 # 의존성: cmake, g++, pthread, OpenSSL 개발 패키지(https meta client 사용 시).
 # 산출물: dist/tetris-server-linux-x64.tar.gz
 #   tetris-server-linux-x64/
-#     tetris_relay
+#     tetris_relay_reactor   (배포 대상 — 이벤트 루프)
 #     tetris_meta
 #     web/ranking/index.html
 #     deploy/
 #     scripts/backup_meta_db.sh
+#
+# 연결당 스레드 모델(tetris_relay)은 번들에 넣지 않는다. 교재용 참조 구현이고
+# 빈 방 256개로 서버가 멎는 알려진 결함이 있어 배포 대상이 아니다 — systemd 유닛도
+# tetris_relay_reactor 를 기동한다.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,13 +43,13 @@ CMAKE_ARGS=(
 echo "[release_server_linux] CMake configure ..."
 cmake "${CMAKE_ARGS[@]}"
 echo "[release_server_linux] CMake build ..."
-cmake --build "$BUILD" --config Release -j"$JOBS" --target tetris_relay tetris_meta
+cmake --build "$BUILD" --config Release -j"$JOBS" --target tetris_relay_reactor tetris_meta
 
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/scripts"
 
-cp "$BUILD/tetris_relay" "$BUNDLE/"
-cp "$BUILD/tetris_meta"  "$BUNDLE/"
+cp "$BUILD/tetris_relay_reactor" "$BUNDLE/"
+cp "$BUILD/tetris_meta"          "$BUNDLE/"
 
 if [ -d "$ROOT/web" ]; then
     cp -R "$ROOT/web" "$BUNDLE/web"

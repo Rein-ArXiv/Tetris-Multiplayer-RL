@@ -74,6 +74,35 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _spawn_listening(argv_for_port, tries: int = 4):
+    """포트를 잡아 프로세스를 띄우고, 실제로 듣기 시작하면 (proc, port) 를 준다.
+
+    _free_port 는 커널이 준 번호를 돌려주고 곧바로 소켓을 닫는다. 그 사이에 다른
+    연결이 같은 번호를 가져가면 자식은 bind 에 실패하고, 테스트는 "기동 실패" 로
+    끝난다 — 코드가 틀려서가 아니라 번호를 뺏겨서다. 스위트가 프로세스를 수십 번
+    띄우는 동안 이 경합은 드물지 않게 터지고, 그때마다 무관한 테스트가 빨갛게
+    된다. 번호를 뺏긴 것뿐이면 새 번호로 다시 시도하는 것이 맞다.
+
+    마지막 시도까지 실패하면 자식이 남긴 출력을 함께 올려 준다. 진짜 기동 실패
+    (인자 오류 등)와 번호 경합을 로그 없이 구분할 수 없기 때문이다.
+    """
+    last_output = ""
+    for attempt in range(tries):
+        port = _free_port()
+        proc = subprocess.Popen(argv_for_port(port),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if _wait_listen(port, 5.0):
+            return proc, port
+        proc.kill()
+        try:
+            last_output = proc.communicate(timeout=2)[0].decode("utf-8", "replace")
+        except Exception:
+            last_output = "(자식 출력을 읽지 못함)"
+        # bind 실패가 아니라 진짜 기동 실패라면 재시도해도 같은 출력이 반복된다.
+    raise AssertionError(
+        f"프로세스가 {tries}회 시도에도 듣지 않았다. 마지막 자식 출력:\n{last_output}")
+
+
 def _wait_listen(port: int, timeout_s: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -224,29 +253,19 @@ def meta_and_relay(tmp_path):
     if not meta_bin:  pytest.skip("tetris_meta binary missing")
     if not relay_bin: pytest.skip("tetris_relay binary missing")
 
-    meta_port  = _free_port()
-    relay_port = _free_port()
-
     db = tmp_path / "test.db"
-    meta_proc = subprocess.Popen(
-        [str(meta_bin), "--db", str(db), "--http", f"127.0.0.1:{meta_port}",
-         "--relay-secret", TEST_RELAY_SECRET],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    if not _wait_listen(meta_port, 5.0):
-        meta_proc.kill()
-        pytest.fail("tetris_meta failed to listen")
+    meta_proc, meta_port = _spawn_listening(lambda port: [
+        str(meta_bin), "--db", str(db), "--http", f"127.0.0.1:{port}",
+        "--relay-secret", TEST_RELAY_SECRET])
 
-    relay_proc = subprocess.Popen(
-        [str(relay_bin), "--port", str(relay_port),
-         "--meta", f"http://127.0.0.1:{meta_port}",
-         "--meta-secret", TEST_RELAY_SECRET],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    if not _wait_listen(relay_port, 5.0):
-        relay_proc.kill()
+    try:
+        relay_proc, relay_port = _spawn_listening(lambda port: [
+            str(relay_bin), "--port", str(port),
+            "--meta", f"http://127.0.0.1:{meta_port}",
+            "--meta-secret", TEST_RELAY_SECRET])
+    except AssertionError:
         meta_proc.kill()
-        pytest.fail("tetris_relay failed to listen")
+        raise
 
     try:
         yield {
@@ -834,6 +853,13 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
     b = socket.create_connection((rh, rp), timeout=2.0)
     # B 의 수신 버퍼를 좁혀 릴레이의 tx 가 빨리 차게 한다.
     b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    # A 의 송신 버퍼도 좁힌다. 이 테스트가 "멈춰 세워졌다" 를 알아내는 방법은
+    # A 의 sendall 이 블록하는 것뿐인데, 커널이 송신 버퍼를 자동 확장하는 플랫폼
+    # (Linux 는 tcp_wmem 상한까지, 수 MiB)에서는 릴레이가 A 의 읽기를 멈춘 뒤에도
+    # A 가 수십 초 동안 자기 커널 버퍼에 계속 써 넣을 수 있어 블록이 오지 않는다.
+    # 그러면 관측하지 못한 채 제한 시간이 지나고, 정작 재려던 계약은 손도 못 댄다.
+    # 상한을 걸어 두면 릴레이가 멈춘 직후 몇 초 안에 A 가 실제로 막힌다.
+    a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
     try:
         a.sendall(_build_queue_join(p1["token"]))
         b.sendall(_build_queue_join(p2["token"]))
@@ -843,9 +869,15 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
         b.sendall(build_frame(MsgType.READY, b"\x01"))
         time.sleep(0.3)
 
-        # B 는 이 아래로 단 한 바이트도 읽지 않는다. 다만 자기 유휴 데드라인은
-        # 살려 둬야 한다 — B 가 스스로 idle 로 끊기면 그 여파로 A 도 닫혀서, 정작
-        # 재려던 조건(백프레셔에 멈춘 A 가 끊기는가)을 못 본다.
+        # B 는 아래에서 "느리게 읽는 상대" 가 된다 — 이 테스트의 docstring 이
+        # 말하는 대상이 그것이다. 예전에는 단 한 바이트도 읽지 않게 두고 유휴
+        # 데드라인만 keepalive 로 유지했는데, 그 방식은 릴레이의 송신 큐가 가득
+        # 찬 뒤 B 의 송신 자체가 전송 계층에서 막혀 성립하지 않는다 (Linux 실측:
+        # B 쪽 Send-Q 는 쌓이는데 릴레이 쪽 Recv-Q 는 0 이고, B 가 자기 수신
+        # 버퍼를 다 비워도 풀리지 않는다). 그러면 릴레이는 B 를 조용한 연결로
+        # 보고 15초 뒤 유휴로 걷어가고, 그 여파로 A 까지 닫혀 정작 재려던 조건을
+        # 못 본다. 조금씩이라도 읽는 상대는 자기 소켓이 건강하므로 그 함정이 없고,
+        # A 가 보내는 속도보다 느리기만 하면 릴레이의 tx 는 그대로 쌓인다.
         keepalive = build_frame(MsgType.INPUT, struct.pack("<IH", 0, 1) + b"\x00")
         # A 는 상대의 tx 를 high-water(256 KiB) 위로 밀어 올릴 만큼 보낸다. 바이트
         # 레이트 상한(64 KiB/s) 아래를 유지해야 그쪽에 먼저 걸리지 않는다.
@@ -861,27 +893,50 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
             pytest.fail(f"[{phase}] 릴레이가 연결을 끊었다: {exc!r} — 백프레셔로 "
                         "멈춰 세운 송신자를 유휴로 오인하고 있다")
 
+        # B 를 느린 독자로 돌린다. A 가 보내는 속도의 몇 분의 일만 읽으므로
+        # 릴레이의 tx 는 계속 쌓이고, 그러면서도 B 의 소켓은 살아 있다.
+        slow_reader_stop = threading.Event()
+        slow_read_total = [0]
+
+        def _slow_reader():
+            b.setblocking(False)
+            while not slow_reader_stop.is_set():
+                try:
+                    got = b.recv(2048)
+                    if got:
+                        slow_read_total[0] += len(got)
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    return
+                slow_reader_stop.wait(0.3)
+
+        reader = threading.Thread(target=_slow_reader, daemon=True)
+        reader.start()
+
         # 1단계 — A 를 밀어 올려 릴레이가 A 의 읽기를 멈추게 한다.
         # 멈추면 릴레이가 A 소켓에서 더 이상 읽지 않으므로 A 의 커널 송신 버퍼가
         # 차고 sendall 이 블록된다. 그 timeout 이 "멈춰 세워졌다" 는 신호다 —
         # 끊긴 것과 구분해야 한다(끊기면 reset/abort 가 온다).
         paused = False
         t0 = time.monotonic()
-        while time.monotonic() - t0 < 20.0:
+        while time.monotonic() - t0 < 25.0:
             try:
                 for _ in range(per_tick):
                     a.sendall(chunk)
-                b.sendall(keepalive)
             except socket.timeout:
                 paused = True
                 break
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                 _fail(exc, "1단계: 밀어 올리는 중")
             time.sleep(0.05)
-        assert paused, "high-water 를 넘겼는데도 릴레이가 읽기를 멈추지 않았다"
+        assert paused, (
+            "high-water 를 넘겼는데도 릴레이가 읽기를 멈추지 않았다 "
+            f"(B 가 읽은 바이트={slow_read_total[0]})")
 
-        # 2단계 — 멈춘 채로 유휴 타임아웃(15초)보다 오래 버틴다. B 는 여전히 안 읽고,
-        # 자기 데드라인만 keepalive 로 살려 둔다. 수정 전에는 여기서 A 가 끊겼다.
+        # 2단계 — 멈춘 채로 유휴 타임아웃(15초)보다 오래 버틴다. B 는 계속 느리게
+        # 읽으며 keepalive 로 자기 데드라인도 살려 둔다. 수정 전에는 여기서 A 가
+        # 끊겼다 — 백프레셔로 멈춰 세운 쪽을 유휴로 오인했기 때문이다.
         hold_until = time.monotonic() + 18.0
         while time.monotonic() < hold_until:
             try:
@@ -894,6 +949,10 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
         # 한다. 재개 경로에는 유휴 데드라인 재무장이 붙어 있다(멈춘 동안 굳어 있었다).
         # 빼내는 동안에도 양쪽 데드라인은 살려 둬야 한다 — 여기서 아무도 안 보내면
         # 재개와 무관하게 그냥 유휴로 끊긴다(재려던 조건이 아니다).
+        # 느린 독자를 멈추고 B 를 정상 속도로 돌린다. 여기서부터가 재개 경로다.
+        slow_reader_stop.set()
+        reader.join(timeout=2.0)
+        b.setblocking(True)
         drained = 0
         b.settimeout(0.5)
         t1 = time.monotonic()
@@ -928,6 +987,10 @@ def test_backpressure_does_not_disconnect_the_sender(meta_and_relay):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             _fail(exc, "3단계: 재개 후")
     finally:
+        try:
+            slow_reader_stop.set()
+        except NameError:
+            pass
         a.close(); b.close()
 
 

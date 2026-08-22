@@ -12,7 +12,8 @@ C++17과 CMake를 사용하며, 엔진 없이 직접 구현한 OpenGL 3.3 Core 2
 
 - Windows 기본 빌드는 Handmade Win32/WGL 창·입력 + OpenGL 렌더러 + XAudio2 경로입니다.
 - macOS/Linux 기본 빌드는 SDL2 창·입력·GL 컨텍스트 + 같은 OpenGL 렌더러 + SDL audio 경로입니다.
-- `tetris`, `sim_hash_dump`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
+- `tetris`, `sim_hash_dump`, `tetris_relay_reactor`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
+- 릴레이는 바이너리가 둘입니다. 배포 대상은 이벤트 루프 하나로 도는 `tetris_relay_reactor`이고, 연결당 스레드 모델인 `tetris_relay`는 같은 계약을 스레드로 설명하는 교재용 참조 구현이라 서버 번들에 넣지 않습니다.
 - `Single vs Bot`에는 내장 휴리스틱 봇이 항상 표시됩니다. 학습 모델 봇은 `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/*.onnx` 또는 `model/bots/*.onnx`가 있을 때 선택할 수 있습니다.
 - Python 쪽은 Colab 부트스트랩, Gymnasium 환경,
   PPO/DQN/DDQN/CBMPI/REINFORCE/A2C/n-step AC/CEM/MuZero-style 학습 루프,
@@ -27,7 +28,7 @@ flowchart TB
     Client["tetris client<br/>src + platform + renderer + audio"]
     Sim["deterministic SimGame<br/>src/sim_game + core"]
     Session["lockstep session<br/>net/socket + framing + session"]
-    Relay["tetris_relay<br/>admission + auth + queue/room + selective forwarding"]
+    Relay["tetris_relay_reactor — 배포 대상<br/>admission + auth + queue/room + selective forwarding"]
     Meta["tetris_meta<br/>HTTP API + SQLite"]
     PyBind["tetris_py<br/>pybind11"]
     Train["Python RL<br/>env + model zoo + checkpoint"]
@@ -115,8 +116,8 @@ make release-linux
 | 옵션 | 기본값 | 결과 | 설명 |
 |---|---:|---|---|
 | `TETRIS_BUILD_GAME` | ON | `tetris` | 게임 클라이언트 |
-| `TETRIS_BUILD_TEST` | ON | `sim_hash_dump`, `worker_group_test` | 결정론 해시와 relay worker 수명 회귀 테스트 |
-| `TETRIS_BUILD_RELAY` | OFF | `tetris_relay` | TCP 릴레이/룸/매치메이킹 서버 |
+| `TETRIS_BUILD_TEST` | ON | `sim_hash_dump`, `worker_group_test`, `reactor_test`, `loop_primitives_test` | 결정론 해시, relay worker 수명, 이벤트 루프(epoll/IOCP) 준비성·wake 계약, 루프 지원 도구(TimerQueue/Offload) 회귀 테스트 |
+| `TETRIS_BUILD_RELAY` | OFF | `tetris_relay_reactor`, `tetris_relay` | TCP 릴레이/룸/매치메이킹 서버. 배포 대상은 이벤트 루프 바이너리 `tetris_relay_reactor`이고, `tetris_relay`는 연결당 스레드 모델의 교재용 참조 구현 |
 | `TETRIS_BUILD_META` | OFF | `tetris_meta` | HTTP+SQLite guest/랭킹/리더보드 서버 |
 | `TETRIS_BUILD_PY` | OFF | `tetris_py` | pybind11 기반 Python 시뮬레이션 모듈 |
 | `TETRIS_BUILD_BOT` | OFF | `tetris` 내부 | ONNX Runtime 기반 로컬 봇 추론 |
@@ -196,9 +197,16 @@ META_URL=https://api.example.com \
 
 ## 서버 구성
 
-랭킹 멀티플레이를 쓰려면 `tetris_meta`와 `tetris_relay`를 함께 실행합니다.
-`tetris_meta`는 guest 토큰, RP/XP/BP, 리더보드를 담당하고, `tetris_relay`는 TCP
-매치메이킹과 프레임 포워딩을 담당합니다.
+랭킹 멀티플레이를 쓰려면 `tetris_meta`와 `tetris_relay_reactor`를 함께 실행합니다.
+`tetris_meta`는 guest 토큰, RP/XP/BP, 리더보드를 담당하고,
+`tetris_relay_reactor`는 TCP 매치메이킹과 프레임 포워딩을 담당합니다.
+
+릴레이 바이너리는 둘이지만 배포 대상은 하나입니다. `tetris_relay_reactor`는
+접속·인증·큐·룸·포워딩을 이벤트 루프(epoll/IOCP) 위에서 도는 바이너리이고,
+이쪽만 release 번들과 systemd 유닛에 들어갑니다. 연결당 스레드 모델인
+`tetris_relay`는 같은 계약을 스레드로 설명하는 교재용 참조 구현이며, 대기 중인
+커스텀 룸이 256개 쌓이면 포워딩 워커 예산이 말라 서버가 멎는 알려진 결함을
+고치지 않고 남겨 두었습니다. 폴백이 아니라 읽기용이므로 운영에 올리지 않습니다.
 
 메타 서버는 DB를 가진 프로세스이므로 public `8080`으로 직접 열지 않습니다. meta와
 HTTPS 프록시가 같은 호스트면 `127.0.0.1:8080`에만 바인딩합니다. 현재 시험 구성처럼
@@ -218,17 +226,53 @@ export TETRIS_RELAY_SECRET='change-this-long-random-secret'
 
 ```bash
 cmake -S . -B build-relay -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON
-cmake --build build-relay --config Release
+cmake --build build-relay --config Release --target tetris_relay_reactor
 export TETRIS_RELAY_SECRET='change-this-long-random-secret'
-./build-relay/tetris_relay --port 7777 --meta https://api.example.com
+./build-relay/tetris_relay_reactor --port 7777 --meta https://api.example.com --log-level info
 ```
 
-Linux 서버 번들은 다음 스크립트로 만듭니다. `tetris_relay`, `tetris_meta`,
-systemd/Caddy/cloudflared 예시, DB 백업 스크립트가 함께 들어갑니다.
+Linux 서버 번들은 다음 스크립트로 만듭니다. `tetris_relay_reactor`, `tetris_meta`,
+systemd/Caddy/cloudflared 예시, DB 백업 스크립트가 함께 들어갑니다. 교재용
+`tetris_relay`는 일부러 넣지 않습니다 — 배포 대상이 아닌 바이너리를 서버
+압축 파일에 같이 두면 언젠가 누군가 그것을 띄우기 때문입니다.
 
 ```bash
 ./scripts/release_server_linux.sh
 ```
+
+릴레이 플래그와 기본값의 정본은 `./tetris_relay_reactor --help` 이고, 운영용
+기본값 표는 `DEPLOY.md` 의 릴레이 운영 절에 한 벌만 두었습니다 — 같은 숫자를 두
+문서에 적어 두면 한쪽이 반드시 먼저 낡기 때문입니다. 여기에는 값이 아니라 운영
+판단에 필요한 이유만 적습니다.
+
+`--log-level`은 운영에서 `info`로 둡니다. `warn`으로 띄우면 정상 운영 구간이
+통째로 침묵합니다 — 기동 줄도, per-IP 거절 줄도, 주기 상태 줄도 나오지 않아
+"정상 유휴"와 "멈춤"을 로그로 구분할 수 없고 tx 예산이 새는 것을 볼 창이
+사라집니다. 포워딩 경로에는 어느 레벨에서도 로그가 없으므로 info가 트래픽에
+비례해 늘어나지도 않습니다.
+
+`--loops`는 올린다고 그대로 나뉘지 않습니다. 앞단 루프 하나가 accept·인증·큐·룸을
+전부 쥐고 포워딩만 샤드가 나눠 가지므로 실효 병렬도는 `loops-1`입니다. 2는
+릴레이가 스스로 1로 낮추고, 실제로 나누려면 3 이상이 필요합니다.
+
+per-IP 상한은 두 개가 독립적으로 걸립니다. 핸드셰이크 예산은 accept부터
+인증이 끝나는 순간까지만 잡았다가 바로 놓아주고, 세션 예산(`--max-sessions-per-ip`)은
+연결이 죽을 때까지 잡습니다. 앞의 것은 자기가 누구인지 밝히지 않는 연결이 접속
+처리 경로를 점유하는 것을 막고, 뒤의 것은 인증만 통과시킨 연결이 서버를 독식하는
+것을 막습니다. 주소를 공유하는 정상 집단(CGNAT, LAN) 때문에 상한을 올려야 한다면
+올릴 것은 세션 예산 쪽입니다 — 핸드셰이크 예산은 인증 즉시 반납되므로 동시 접속
+인원과 무관합니다.
+
+거절은 조용히 끊지 않습니다. 릴레이는 소켓을 닫기 직전에 `SERVER_REJECT`
+프레임으로 사유를 알려 주고, 같은 사유가 상태 줄의 카운터로도 쌓입니다.
+사유는 `ServerFull`(전체 연결 상한), `IpSessionLimit`(per-IP 세션 상한),
+`IpHandshakeLimit`(per-IP 핸드셰이크 상한), `TxBudget`(보류 송신 예산 초과),
+`AuthBacklog`(meta 인증 대기 상한)입니다. 유저가 "못 들어간다"고 할 때 어느
+상한에 걸렸는지 로그만으로 답할 수 있게 하려는 것입니다.
+
+`--meta`를 준 상태에서 relay secret이 없으면 릴레이는 기동 자체를 거부합니다.
+secret 없이 ranked로 뜨면 meta가 `POST /v1/matches`를 거절해 경기 결과가 조용히
+버려지기 때문입니다. `--meta-secret` 또는 `TETRIS_RELAY_SECRET`을 함께 넘깁니다.
 
 클라이언트:
 

@@ -912,7 +912,7 @@ if (TETRIS_BUILD_RELAY)
 endif()
 ```
 
-주목: 소스 목록에 `src/`가 없다. relay는 `SimGame`을 실행하지 않으며 `net/session.cpp`도 링크하지 않는다. unranked 매치에서는 raw byte를 전달하고, ranked 매치에서만 프레임 경계를 읽어 `MATCH_SUMMARY`를 검증·가로챈다. meta API를 호출할 수 있어야 하므로 `third_party/httplib.h`는 relay 단독 빌드에도 필요하고, HTTPS를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
+주목: 소스 목록에 `src/`가 없다. relay는 `SimGame`을 실행하지 않으며 `net/session.cpp`도 링크하지 않는다. 두 모드 모두 프레임 경계를 훑어 서버 전용 타입(`net::is_server_only_type`)은 걸러 내고, unranked 매치는 통과한 프레임의 내용을 보지 않고 원본 byte를 그대로 전달하며, ranked 매치에서만 `MATCH_SUMMARY`를 검증·가로챈다. meta API를 호출할 수 있어야 하므로 `third_party/httplib.h`는 relay 단독 빌드에도 필요하고, HTTPS를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
 
 실행 인자는 `--port PORT` 와 meta 연동용 `--meta URL` / `--meta-secret SECRET` 이다(secret 은 환경변수 `TETRIS_RELAY_SECRET` 로도 줄 수 있고, `--meta` 를 줬는데 secret 이 없으면 기동을 거부한다). 기본 포트는 `7777` 이지만, 저장소의 relay/room smoke 테스트는 `7788` 을 하드코딩하고 있다 — [Part 7](./part7-relay-server.md) 의 테스트 절차를 따를 때 포트를 맞춰야 한다.
 

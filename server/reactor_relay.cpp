@@ -66,8 +66,8 @@ namespace relay {
 // 포워딩 워커 512개를 매치당 2개씩 쓰니 연결도 512에서 멎었다. 루프 모델에는
 // 그 제약이 없으므로 값을 물려받을 이유도 없다.
 //
-// 기본값 4096 의 근거는 실측이다. 이 저장소의 벤치(2.0GHz Sandy Bridge, 8스레드)
-// 에서 60 tick/s 부하 기준 접속자당 앞단 루프 비용이 약 0.14% 코어였다 — 500명이
+// 기본값 4096 의 근거는 실측이다. 저전력 쿼드코어(8스레드) 배포 대상에서
+// 60 tick/s 부하 기준 접속자당 앞단 루프 비용이 약 0.14% 코어였다 — 500명이
 // 코어 하나의 68% 다. 단일 루프는 스레드 하나이므로 코어 하나가 곧 천장이고,
 // 그 천장은 700명 언저리에 있다. 4096 은 거기서 더 여유를 둔 값이라 이 상한이
 // 먼저 걸리는 일은 없다: 실제로 먼저 오는 것은 루프 포화이고, 그때 늘릴 것은
@@ -185,6 +185,17 @@ constexpr size_t kSendHighWater     = 64 * 1024;
 // 아예 없거나(룸에 혼자 남아 서버가 직접 쓰는 경우) 상대가 영영 안 읽으면 tx 는
 // 계속 자란다. 상한 없는 버퍼는 상한이 아니므로 여기서 연결을 끊는다.
 constexpr size_t kSendHardCap       = 256 * 1024;
+
+// 수락한 소켓의 커널 송신 버퍼 상한. 기본값(Linux tcp_wmem 자동 조정, 최대 ≈4MiB)
+// 을 그대로 두면 안 읽는 상대에게 보내는 바이트를 커널이 소켓당 수 MiB 씩 대신
+// 물어 준다 — 유저스페이스 tx 가 안 쌓이니 high-water 백프레셔도 전역 tx 예산도
+// 그 몫만큼 늦게(2026-08-17 실측 ≈87초 뒤에나) 걸렸고, 예산이 "프로세스가 물고
+// 있는 바이트" 를 대표하지 못했다. 64KiB 로 묶으면(Linux 실효 128KiB — 커널이
+// 요청값의 2배를 잡는다) 밀림이 수 초 안에 유저스페이스로 드러나고, Windows
+// 기본(≈64KiB)과 같은 자릿수가 돼 두 플랫폼의 backpressure 타이밍도 맞는다.
+// 정상 트래픽에는 여유가 크다 — 게임 프레임은 ≈1KiB/s, 수신 레이트 상한도
+// 64KiB/s 라 128KiB 는 최대 레이트로도 2초치다.
+constexpr int    kKernelSndBufBytes = 64 * 1024;
 // 백프레셔에서 풀린 뒤 적체를 빼내는 데 주는 면제 시간. 짧게 잡는다 — 커널 버퍼는
 // 유한해서 이 안에 다 들어오고, 그 뒤에는 다시 정상 요금이 매겨진다.
 constexpr auto   kRateGraceAfterResume = std::chrono::seconds(3);
@@ -670,6 +681,7 @@ private:
         for (;;) {
             net::TcpSocket s = net::tcp_accept(listen_);
             if (!s.valid()) return;
+            net::tcp_set_sndbuf(s, kKernelSndBufBytes);
 
             // 앞단 표(conns_)가 아니라 전역 카운터를 본다. 포워딩이 시작되면
             // 연결이 샤드 루프로 인계돼 앞단 표에서 빠지므로, 표 크기로 재면
@@ -1599,14 +1611,44 @@ private:
             case Stage::FirstFrame: close_conn(c, "첫 프레임 타임아웃"); break;
             case Stage::Room:       close_conn(c, "룸 대기 타임아웃");   break;
             case Stage::Lobby:      close_conn(c, "로비 타임아웃");      break;
-            case Stage::Forward:
+            case Stage::Forward: {
                 // 우리가 백프레셔로 입을 막아 둔 연결은 유휴가 아니다 — 읽기 이벤트가
                 // 안 나는 게 당연하다. 여기서 끊으면 "느리게 읽는 상대" 때문에 "정상
-                // 플레이어" 가 끊긴다. 멈춰 있을 수 있는 시간은 tx 하드 상한이 따로
-                // 묶으므로, 여기서는 데드라인만 다시 건다.
-                if (c->read_paused) { timers_.arm(c, Clock::now() + kIdleTimeout); break; }
+                // 플레이어" 가 끊긴다. 그래서 멈춘 연결은 데드라인만 다시 건다.
+                //
+                // 단, 재무장에는 전제가 있다: 나를 풀어 줄 쪽이 아직 움직일 수 있어야
+                // 한다. 내 pause 는 상대의 tx 가 빠져야 풀리는데, 그 상대도 pause 면
+                // 양쪽 다 읽기 이벤트가 영영 없고 쓰기 진행도 없다 — 서로가 서로를
+                // 풀 수 없는 교착이다. 이전 주석은 "멈출 수 있는 시간은 tx 하드
+                // 상한이 묶는다" 고 했지만, 교착에서는 tx 가 high-water 와 하드 상한
+                // 사이에 멈춘 채 더 자라지 않으므로 그 상한은 영영 오지 않는다.
+                // 무조건 재무장하면 페어가 불멸이 되어 fd 2개 + per-IP 세션 슬롯
+                // 2개 + 매치 1개를 프로세스 재시작까지 물고 있는다 (2026-08-17
+                // Linux 실측: 상호 pause 후 35초+ 소켓 활동 0, 유휴 만기 미발화).
+                //
+                // 그래서 만기 시점에 상대도 pause 면(또는 이미 사라졌으면) 페어를
+                // 닫는다. 정상 플레이는 15초 안에 반드시 무언가를 주고받으므로,
+                // 양쪽 모두 가득 찬 채 15초를 멈춘 페어는 스레드 모델이 5초 send
+                // 블록에서 접었을 매치보다 이미 3배 관대하게 기다린 뒤다. 한쪽만
+                // 멈춘 정상 백프레셔(가드 테스트가 못 박은 계약)는 그대로 재무장한다.
+                if (c->read_paused) {
+                    Conn* peer = feeder_of(c);
+                    const bool peer_can_free_me =
+                        peer && peer->stage == Stage::Forward && !peer->read_paused;
+                    if (peer_can_free_me) {
+                        timers_.arm(c, Clock::now() + kIdleTimeout);
+                        break;
+                    }
+                    // 사유를 갈라 적는다. 둘 다 멈춘 교착과 "풀어 줄 상대가 아예
+                    // 없다" 는 원인도 후속 조치도 다른데, 한 문구로 뭉뚱그리면
+                    // 로그만 보고는 구분할 수 없다.
+                    close_conn(c, peer ? "상호 백프레셔 교착 (양쪽 read_paused)"
+                                       : "백프레셔 중 상대 소멸");
+                    break;
+                }
                 close_conn(c, "idle 타임아웃");
                 break;
+            }
             default: break;
         }
     }

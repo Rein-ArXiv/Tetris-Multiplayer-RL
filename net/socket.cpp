@@ -373,6 +373,22 @@ void tcp_set_nonblocking(const TcpSocket& s) {
     if (s.valid()) set_nonblocking(s.fd());
 }
 
+// [NET] 커널 송신 버퍼 상한을 지정한다.
+//   기본값을 두면 Linux 는 안 읽는 상대에게 보내는 바이트를 소켓당 tcp_wmem
+//   최대(≈4MiB)까지 커널이 조용히 흡수한다 — 유저스페이스 송신 큐가 안 쌓이므로
+//   그 위에 지은 backpressure/예산은 커널 몫만큼 늦게 걸린다. 상한을 걸면
+//   밀림이 수 초 안에 유저스페이스로 드러난다.
+//   주의: Linux 는 관리 오버헤드 몫으로 요청값의 2배를 잡는다 (64KiB 요청 ⇒ 실효 128KiB).
+//   실패는 best-effort 로 무시한다 — 상한을 못 걸어도 연결 자체는 정상 동작한다.
+void tcp_set_sndbuf(const TcpSocket& s, int bytes) {
+    if (!s.valid() || bytes <= 0) return;
+#ifdef _WIN32
+    setsockopt(s.fd(), SOL_SOCKET, SO_SNDBUF, (const char*)&bytes, sizeof(bytes));
+#else
+    setsockopt(s.fd(), SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+#endif
+}
+
 std::string get_local_ip() {
     std::string result = "127.0.0.1";  // 기본값
 

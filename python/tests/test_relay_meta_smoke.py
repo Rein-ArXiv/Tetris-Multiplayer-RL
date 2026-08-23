@@ -1233,3 +1233,117 @@ def test_relay_refuses_meta_without_secret(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_reactor_rate_cap_survives_a_backpressure_pause():
+    """백프레셔로 멈췄다 풀린 연결이 레이트 상한을 무한히 우회하면 안 된다.
+
+    멈춰 있는 동안 상대의 버퍼에 쌓인 적체는 우리가 안 읽어서 생긴 것이지 상대가
+    규정을 넘긴 게 아니다 — 그래서 재개 직후의 버스트를 그대로 "레이트 초과" 로
+    청구하면 우리가 막아 놓고 대가를 상대에게 물리는 셈이 된다. 처음 그 문제를
+    "재개 후 일정 시간 면제" 로 풀었는데, **면제를 재개 시각에 묶은 것이 틀렸다.**
+    재개는 tx 가 high-water 아래로 떨어질 때마다 일어나므로, pause 와 resume 을
+    반복시키면 이전 면제가 만료되기 전에 새 면제가 걸려 상한이 영영 적용되지 않는다.
+
+    수정 전 실측(Windows): pause 를 한 번 성립시킨 뒤 상대가 빠르게 빼내게 하자
+    3.7초 동안 42.2 MB — 초당 11 MiB 로 상한(64 KiB/s)의 약 172배가 차단 없이
+    통과했다. 지금은 토큰 버킷이라 멈춘 동안 쌓인 토큰만큼만 봐주고 그 뒤로는
+    평소 속도로만 찬다.
+
+    회귀 테스트다. 위 크기 차이가 워낙 커서 문턱을 넉넉히 잡아도 수정 전은 반드시
+    걸린다 — 통과 조건을 8 MiB 로 두면 42 MB 는 다섯 배 넘게 초과한다.
+
+    reactor 전용이다. 스레드 모델에는 "읽기를 멈춘다" 는 기제가 없어 이 경로 자체가
+    존재하지 않는다.
+    """
+    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
+    if not reactor_bin:
+        pytest.skip("tetris_relay_reactor binary missing")
+
+    ALLOWED = 8 * 1024 * 1024          # 버스트 허용치(≈1 MiB)보다 넉넉히 위
+    proc, port = _spawn_listening(
+        lambda p: [str(reactor_bin), "--port", str(p), "--log-level", "error"])
+    a = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+    b = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+    b.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    try:
+        a.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+        b.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+        _recv_match_found(a)
+        _recv_match_found(b)
+        a.sendall(build_frame(MsgType.READY, b"\x01"))
+        b.sendall(build_frame(MsgType.READY, b"\x01"))
+        time.sleep(0.3)
+
+        # 1단계 — 상한 아래로 밀어(≈41 KiB/s) B 의 tx 를 high-water 위로 올린다.
+        # A 의 sendall 이 막히는 것이 "릴레이가 A 를 멈춰 세웠다" 는 신호다.
+        small = build_frame(MsgType.CHAT, b"x" * 400)
+        a.settimeout(2.0)
+        paused = False
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 25.0:
+            try:
+                for _ in range(5):
+                    a.sendall(small)
+            except socket.timeout:
+                paused = True
+                break
+            except OSError as exc:
+                pytest.fail(f"1단계에서 끊겼다: {exc!r}")
+            time.sleep(0.05)
+        assert paused, "high-water 를 넘겼는데 릴레이가 읽기를 멈추지 않았다"
+
+        # 2단계 — B 가 빠르게 빼내면 resume 이 반복된다. 예전에는 그때마다 면제가
+        # 갱신돼 상한이 사라졌다. 지금은 쌓인 토큰을 다 쓰면 차단돼야 한다.
+        drained = [0]
+        alive = [True]
+
+        def drain():
+            b.settimeout(0.5)
+            while alive[0]:
+                try:
+                    got = b.recv(1 << 18)
+                    if not got:
+                        break
+                    drained[0] += len(got)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    break
+
+        th = threading.Thread(target=drain, daemon=True)
+        th.start()
+        try:
+            chunk = build_frame(MsgType.CHAT, b"x" * 3900)
+            accepted = 0
+            cut = False
+            t1 = time.monotonic()
+            while time.monotonic() - t1 < 10.0:
+                try:
+                    a.sendall(chunk)
+                    accepted += len(chunk)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    cut = True
+                    break
+                if accepted > ALLOWED:
+                    break
+        finally:
+            alive[0] = False
+            th.join(timeout=2)
+
+        assert cut, (
+            f"레이트 상한이 걸리지 않았다 — {accepted} 바이트를 차단 없이 통과시켰다. "
+            "면제가 재개마다 갱신되고 있다")
+        assert accepted <= ALLOWED, (
+            f"차단되기까지 {accepted} 바이트가 통과했다 (허용 {ALLOWED}). "
+            "멈춘 동안 쌓인 토큰보다 훨씬 많다면 면제가 갱신되고 있다는 뜻이다")
+    finally:
+        a.close()
+        b.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()

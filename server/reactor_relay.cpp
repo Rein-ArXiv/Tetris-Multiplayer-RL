@@ -198,7 +198,24 @@ constexpr size_t kSendHardCap       = 256 * 1024;
 constexpr int    kKernelSndBufBytes = 64 * 1024;
 // 백프레셔에서 풀린 뒤 적체를 빼내는 데 주는 면제 시간. 짧게 잡는다 — 커널 버퍼는
 // 유한해서 이 안에 다 들어오고, 그 뒤에는 다시 정상 요금이 매겨진다.
-constexpr auto   kRateGraceAfterResume = std::chrono::seconds(3);
+// 레이트 상한을 토큰 버킷으로 센다. 초당 kMaxBytesPerSecond 만큼 토큰이 차고,
+// 최대 kRateBurstBytes 까지 쌓인다.
+//
+// 처음에는 "재개 후 3초간 면제" 라는 시간 창이었다. 멈춰 있는 동안 상대의 버퍼에
+// 쌓인 적체는 우리가 안 읽어서 생긴 것이지 상대가 규정을 넘긴 게 아니라는 논리는
+// 맞았지만, 면제를 재개 시각에 묶은 것이 틀렸다 — 면제가 재개할 때마다 갱신되는데
+// 재개는 tx 가 high-water 아래로 떨어질 때마다 일어난다. pause 와 resume 을
+// 반복시키면 이전 창이 만료되기 전에 새 창이 걸려 상한이 영영 적용되지 않는다.
+// 실측(Windows): pause 를 한 번 성립시킨 뒤 상대가 빠르게 빼내게 하자 3.7초 동안
+// 42 MB, 초당 11 MiB — 상한의 172배가 무제한으로 통과했다.
+//
+// 버킷은 그 구멍이 없다. 멈춰 있는 동안 토큰이 (상한까지) 쌓이므로 적체는 그
+// 쌓인 토큰으로 지불되고, 다 쓰면 그때부터는 평소 속도로만 찬다. 면제라는 개념
+// 자체가 사라져서 갱신시킬 것도 없다.
+//
+// 버스트 한도는 "얼마나 오래 멈춰 있었든 그만큼은 한 번에 봐준다" 의 크기다.
+// 유휴 만기가 15초이므로 그보다 짧은 구간의 정상 트래픽은 전부 덮인다.
+constexpr size_t kRateBurstBytes = 16 * kMaxBytesPerSecond;   // ≈16초분
 
 std::atomic<bool> g_running{true};
 
@@ -337,12 +354,9 @@ struct Conn {
 
     // 전달 한도
     TimePoint last_activity{};
-    TimePoint byte_window_start{};
-    size_t    byte_window = 0;
-    // 백프레셔에서 풀려난 직후, 적체를 빼내는 동안 레이트 상한을 면제하는 시각.
-    // 멈춰 있는 동안 상대의 커널 버퍼에 쌓인 것은 우리가 안 읽어서 생긴 적체이지
-    // 상대가 규정을 넘겨 보낸 게 아니다. 커널 버퍼는 유한하므로 면제도 유한하다.
-    TimePoint rate_grace_until{};
+    // 토큰 버킷: 남은 토큰과 마지막 충전 시각.
+    TimePoint rate_refilled_at{};
+    size_t    rate_tokens = kRateBurstBytes;
 };
 
 struct Channel {
@@ -844,14 +858,9 @@ private:
         // 없어 last_activity 가 굳어 있었으므로, 그대로 두면 풀자마자 만기로 끊긴다.
         if (!pause) {
             src->last_activity = Clock::now();
-            // 바이트 창도 같이 연다. 멈춰 있는 동안 상대의 커널 송신 버퍼에는
-            // 백로그가 쌓이고, 재개하는 순간 그게 한꺼번에 들어온다 — 창을 안 열면
-            // 우리가 막아 놓고 그 대가를 상대에게 "레이트 초과" 로 청구하게 된다.
-            src->byte_window_start = src->last_activity;
-            src->byte_window = 0;
-            // 창을 여는 것만으론 부족하다. 적체는 한 번의 버스트로 들어오므로 새 창을
-            // 그 자리에서 다시 넘긴다. 빼내는 동안은 아예 면제한다.
-            src->rate_grace_until = src->last_activity + kRateGraceAfterResume;
+            // 레이트 쪽은 손대지 않는다. 멈춰 있는 동안에도 토큰이 계속 찼으므로
+            // 재개 시점의 적체는 그 토큰으로 지불된다. 예전에는 여기서 창을 열고
+            // 면제를 걸었는데, 그 면제가 재개할 때마다 갱신돼 상한이 무력해졌다.
             if (src->stage == Stage::Forward) {
                 timers_.arm(src, src->last_activity + kIdleTimeout);
             }
@@ -889,19 +898,28 @@ private:
 
         const TimePoint now = Clock::now();
         c->last_activity = now;
-        if (now - c->byte_window_start >= std::chrono::seconds(1)) {
-            c->byte_window_start = now;
-            c->byte_window = 0;
+        // 지난 시간만큼 토큰을 채운다(상한까지). 멈춰 세워 둔 동안에도 찬다 —
+        // 그래서 재개 시점의 적체가 그 토큰으로 지불되고, 따로 면제할 것이 없다.
+        {
+            const auto elapsed = now - c->rate_refilled_at;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            if (ms > 0) {
+                c->rate_refilled_at = now;
+                const size_t refill = (size_t)((ms * (long long)kMaxBytesPerSecond) / 1000);
+                c->rate_tokens = (refill >= kRateBurstBytes - c->rate_tokens)
+                                     ? kRateBurstBytes
+                                     : c->rate_tokens + refill;
+            }
         }
-        c->byte_window += got;
         // 레이트 상한은 단계를 가리지 않는다. 예전에는 Forward 에만 걸려 있었는데,
         // 정작 위험한 쪽은 반대였다 — 큐 대기와 인증 왕복 단계는 rx 를 소비하지 않고
         // 쌓아 두기만 하므로(뒤 단계로 넘겨야 하는 잔여 바이트를 잃지 않으려고),
         // 상한이 없으면 한 연결이 메모리를 무한히 먹는다.
-        if (now >= c->rate_grace_until && c->byte_window > kMaxBytesPerSecond) {
+        if (got > c->rate_tokens) {
             close_conn(c, "byte rate 초과");
             return;
         }
+        c->rate_tokens -= got;
         // 레이트 상한만으로는 "느리게, 오래" 붓는 것을 못 막는다. 누적 버퍼에도
         // 상한을 건다. 재파싱이 매 읽기마다 도는 단계가 있어(on_queued 는 잔여를
         // 보존하려고 사본을 파싱한다) 상한이 없으면 비용이 O(n^2) 로 자라 단일 루프
@@ -1455,8 +1473,8 @@ private:
         for (Conn* c : {a, b}) {
             c->stage = Stage::Forward;
             c->last_activity = now;
-            c->byte_window_start = now;
-            c->byte_window = 0;
+            c->rate_refilled_at = now;
+            c->rate_tokens = kRateBurstBytes;
             timers_.arm(c, now + kIdleTimeout);
         }
         RLOG_INFO("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid

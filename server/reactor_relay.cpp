@@ -160,6 +160,22 @@ std::atomic<uint64_t> g_reject_auth_backlog{0};
 constexpr int         kDefaultStatsIntervalSec = 10;
 int                   g_stats_interval_sec     = kDefaultStatsIntervalSec;
 
+// 포워딩 중 유휴 만기. 운영값은 15초이고 스레드 모델과 같은 값이다.
+//
+// 상수가 아니라 변수인 이유는 하나뿐이다: 이 만기에 걸려 있는 두 동작 — 백프레셔로
+// 멈춰 세운 연결의 재무장, 그리고 양쪽이 서로를 멈춰 세운 페어의 회수(34b5b11) —
+// 은 밖에서 재려면 만기가 실제로 지나가는 것을 봐야 하는데, 15초에 묶인 테스트는
+// 한 계약당 30초 넘게 벽시계를 먹는다. 그 값이면 회귀 테스트가 CI 에 들어가지
+// 못하고, 못 들어가면 결함은 다음에 또 돌아온다 — MEMORY 에 HIGH DoS 로 적힌
+// 그 결함의 방어선이 실제로 무커버리지였다. --stats-interval-sec 이 같은 이유로
+// 이미 조절 가능하다.
+//
+// 프로세스 기동 때 한 번 정하고 그 뒤로는 읽기만 하므로 루프 스레드들이 공유해도
+// 경합이 없다. 옆 만기 두 개(첫 프레임 5초, 로비 30초)는 이런 사정이 없어
+// constexpr 그대로 둔다 — 움직이는 것은 포워딩 만기 하나뿐이다.
+constexpr int         kDefaultIdleTimeoutSec   = 15;
+int                   g_idle_timeout_sec       = kDefaultIdleTimeoutSec;
+
 namespace {
 
 using Clock     = std::chrono::steady_clock;
@@ -168,7 +184,11 @@ using TimePoint = Clock::time_point;
 // 스레드 모델과 같은 값을 쓴다 — 두 바이너리의 동작이 갈리지 않게.
 constexpr auto   kFirstFrameTimeout = std::chrono::seconds(5);
 constexpr auto   kLobbyTimeout      = std::chrono::seconds(30);
-constexpr auto   kIdleTimeout       = std::chrono::seconds(15);
+// 포워딩 유휴 만기만 기동 인자로 움직인다(--idle-timeout-sec). 근거는 위
+// g_idle_timeout_sec 선언에 적었다.
+inline std::chrono::seconds idle_timeout() {
+    return std::chrono::seconds(g_idle_timeout_sec);
+}
 constexpr size_t kMaxBytesPerSecond = 64 * 1024;
 constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 // per-IP 상한(핸드셰이크/세션)은 server/ip_admission.h 가 스레드 모델과 공통으로
@@ -196,8 +216,6 @@ constexpr size_t kSendHardCap       = 256 * 1024;
 // 정상 트래픽에는 여유가 크다 — 게임 프레임은 ≈1KiB/s, 수신 레이트 상한도
 // 64KiB/s 라 128KiB 는 최대 레이트로도 2초치다.
 constexpr int    kKernelSndBufBytes = 64 * 1024;
-// 백프레셔에서 풀린 뒤 적체를 빼내는 데 주는 면제 시간. 짧게 잡는다 — 커널 버퍼는
-// 유한해서 이 안에 다 들어오고, 그 뒤에는 다시 정상 요금이 매겨진다.
 // 레이트 상한을 토큰 버킷으로 센다. 초당 kMaxBytesPerSecond 만큼 토큰이 차고,
 // 최대 kRateBurstBytes 까지 쌓인다.
 //
@@ -209,13 +227,64 @@ constexpr int    kKernelSndBufBytes = 64 * 1024;
 // 실측(Windows): pause 를 한 번 성립시킨 뒤 상대가 빠르게 빼내게 하자 3.7초 동안
 // 42 MB, 초당 11 MiB — 상한의 172배가 무제한으로 통과했다.
 //
-// 버킷은 그 구멍이 없다. 멈춰 있는 동안 토큰이 (상한까지) 쌓이므로 적체는 그
-// 쌓인 토큰으로 지불되고, 다 쓰면 그때부터는 평소 속도로만 찬다. 면제라는 개념
-// 자체가 사라져서 갱신시킬 것도 없다.
+// 버킷에는 그 갱신 구멍이 없다. 다만 도입 당시의 설명 — "멈춰 있는 동안에도 토큰이
+// 차니까 재개 시점의 적체는 그 토큰으로 지불된다" — 은 틀렸다. 아래 천장이 그 몫을
+// 잘라내기 때문이다(pause 가 천장 시간보다 길면 적체가 천장을 넘는다). 그래서 지금은
+// 멈춰 있는 동안 버킷 시계를 아예 세우고(pause_peer_read), 그 구간의 몫은 재개할 때
+// pause_credit 으로 천장과 무관하게 따로 지급한다. 두 몫이 같은 시간을 두 번 세지
+// 않도록 시계를 세우는 것이 짝이다.
 //
-// 버스트 한도는 "얼마나 오래 멈춰 있었든 그만큼은 한 번에 봐준다" 의 크기다.
-// 유휴 만기가 15초이므로 그보다 짧은 구간의 정상 트래픽은 전부 덮인다.
+// 버스트 한도는 그래서 "정상 운영 중 쉬고 있던 연결이 한 번에 몰아 보낼 수 있는 양"
+// 하나만 뜻한다. 게임 프레임이 ≈1KiB/s 이므로 16초분(1 MiB)이면 정상 트래픽의 어떤
+// 요동도 덮는다.
+//
+// 예전 주석은 이 값을 "유휴 만기가 15초라 그보다 긴 pause 는 있을 수 없다" 로
+// 정당화했는데, 그 명제는 거짓이었다 — 34b5b11 이 넣은 on_timeout 의 재무장 갈래가
+// 한쪽만 pause 인 연결을, 그를 풀어 줄 상대가 살아 있는 한 무기한 살려 둔다(그것이
+// 그 커밋이 지키려던 계약이다). 실측(2026-08-23 Linux, 수정 전 바이너리): 상한의
+// 98% 로 보내는 송신자를 30초·45초 멈춰 세우는 동안 close 는 0건이었고, 재개하는
+// 순간 적체(A 의 Send-Q 만 세어 1.2 MiB·2.2 MiB)가 이 천장을 넘겨 **규정을 지킨
+// 송신자** 가 50 ms 만에 "byte rate 초과" 로 끊겼다.
+//
+// 그래서 이 천장은 이제 pause 논거를 지지 않는다. 멈춰 있던 구간의 몫은 전적으로
+// pause_credit 이 지불하고(그쪽은 천장이 없다), 이 값은 "쉬고 있던 연결이 한 번에
+// 몰아 보낼 수 있는 양" 만 정한다. 그 크기를 바꿔도 [B] 는 되살아나지 않는다 —
+// 다만 아래 kMaxPauseDuration 이 이 값에서 유도되므로 함께 움직인다.
 constexpr size_t kRateBurstBytes = 16 * kMaxBytesPerSecond;   // ≈16초분
+
+// 백프레셔로 한 연결을 멈춰 세워 둘 수 있는 최대 시간.
+//
+// 이 상한이 [B] 를 고치는 것은 아니다 — 그건 pause_credit 이 한다. 이 상한이 막는
+// 것은 회수되지 않는 매치다: 한쪽만 pause 인 연결은 위 재무장 갈래 덕에 무기한
+// 살아남아, 아무도 걷어가지 않는 매치가 fd 2개 + per-IP 세션 슬롯 2개 + 매치 1개를
+// 붙들고 있는다(실측: 45초 동안 close 0건이었고, 끝낸 것은 만기가 아니라 테스트였다).
+// 유휴 만기가 "15초간 아무것도 안 보내면 끊는다" 라면 이것은 그 반대 방향 짝 —
+// "16초간 자기 큐에서 아무것도 안 빼내면 끊는다" — 이다.
+//
+// 값은 임의로 고르지 않고 버스트 한도에서 유도한다. 상한 안에서 보내는 송신자를 N초
+// 멈춰 세우면 그 구간의 빚은 최대 N × kMaxBytesPerSecond 이므로, N 을
+// kRateBurstBytes / kMaxBytesPerSecond 로 잡으면 "한 번의 관측 불가능한 pause 가
+// 만드는 빚" 이 버스트 한도 한 개와 같은 크기로 묶인다. 두 상수를 나눗셈으로 묶어
+// 두면 한도를 만지는 사람이 이 값을 함께 옮기지 않아 그 관계가 깨지는 일이 없다.
+//
+// 닫는 것은 **멈춰 세워진 송신자가 아니라 자기 큐를 안 빼내는 상대** 다. 피해자를
+// 닫으면 34b5b11 이 지킨 계약("느리게 읽는 상대 때문에 정상 송신자가 끊기면 안
+// 된다")이 그대로 깨진다. 판정에 쓰는 시계는 상대의 tx_drained_at 이라, 상대가 자기
+// tx 에서 한 바이트라도 빼내면 그 순간 0 으로 돌아간다 — 걸리는 것은 정확히 "그
+// 시간 동안 우리 쪽에서 관측 가능한 배수가 0 이었던" 상대뿐이다.
+//
+// 한계도 분명히 적어 둔다: 우리가 볼 수 있는 배수는 "상대가 자기 수신 창을 열어 줘
+// 우리 커널 송신 버퍼가 비는 것" 뿐이다. 상대가 읽어도 TCP 가 창 갱신을 보내지
+// 않으면(실리 윈도 회피 문턱: min(rcvbuf/2, 2×MSS)) 우리에게는 0 바이트와 구분되지
+// 않는다. loopback 은 MSS 가 65 KB 라 이 문턱이 100 KB 대로 뛰어, 32 KiB 씩 3초마다
+// 빼내는 클라이언트도 상한에 걸렸다(실측). 실제 링크에서는 MSS 1460 이라 문턱이
+// 약 2.9 KB 이므로, 16초 동안 3 KB 도 못 빼내는 = 200 B/s 도 안 되는 상대만 걸린다.
+// 이미 high-water(64 KiB, 게임 트래픽으로 1분치)를 넘겨 밀린 뒤라는 점과 합치면
+// 그건 경기가 성립하지 않는 상태다. 참고로 그 loopback 시나리오에서 수정 전
+// 바이너리는 같은 매치를 어차피 끊었다 — 다만 안 읽는 쪽이 아니라 규정을 지킨
+// 송신자를 "byte rate 초과" 로 끊었다.
+constexpr auto   kMaxPauseDuration =
+    std::chrono::seconds(kRateBurstBytes / kMaxBytesPerSecond);   // 16초
 
 std::atomic<bool> g_running{true};
 
@@ -319,6 +388,15 @@ struct Conn {
     std::vector<uint8_t> tx;   // 보류 송신(쓰기 준비성 대기)
     bool     want_write = false;
     bool     read_paused = false;   // 상대의 tx 가 차서 읽기를 멈춘 상태
+    // 지금의 pause 가 시작된 시각. read_paused 인 동안에만 뜻이 있고, 멈춰 세우는
+    // 순간에만 찍는다 — 재개할 때 "우리가 얼마나 오래 귀를 닫고 있었나" 를 여기서만
+    // 알 수 있고, 그 길이가 그대로 pause 예산이 된다.
+    TimePoint paused_since{};
+    // 이 연결이 자기 tx 에서 마지막으로 한 바이트라도 빼낸 시각(on_writable).
+    // pause 상한이 재는 것은 "멈춰 있는 쪽이 얼마나 참았나" 가 아니라 "멈춰 세운
+    // 쪽이 얼마나 오래 아무것도 안 빼냈나" 이므로, 예산의 시계와 별개로 둔다.
+    // 하나로 합치면 배수가 곧 재개인 정상 경로에서 예산이 언제나 0 이 된다.
+    TimePoint tx_drained_at{};
 
     // per-IP 입장 슬롯. handshake 는 인증이 끝나는 순간(after_auth) 놓아주고,
     // session 은 이 Conn 이 죽을 때까지 붙들고 있는다.
@@ -354,9 +432,15 @@ struct Conn {
 
     // 전달 한도
     TimePoint last_activity{};
-    // 토큰 버킷: 남은 토큰과 마지막 충전 시각.
+    // 토큰 버킷: 남은 토큰과 마지막 충전 시각. rate_carry 는 밀리초 단위로 계산한
+    // 충전에서 남는 바이트 미만 잔여(1000분의 몇 바이트)를 다음 회차로 넘기는
+    // 자리다 — 없으면 읽기가 촘촘할수록 실효 충전률이 상한보다 조금씩 낮아진다.
     TimePoint rate_refilled_at{};
     size_t    rate_tokens = kRateBurstBytes;
+    int       rate_carry  = 0;      // 0..999, (경과 ms × 상한) 의 1000 나머지
+    // 백프레셔가 만든 적체를 갚는 일회성 예산. 재개할 때 그 pause 의 길이로
+    // 확정된다(자세한 근거는 grant_pause_credit).
+    size_t    pause_credit = 0;
 };
 
 struct Channel {
@@ -535,9 +619,18 @@ private:
             channels_[ch->match_id] = std::move(h.ch);
             conns_[a] = std::move(h.a);
             conns_[b] = std::move(h.b);
-            // fd 자체는 프로세스 전역이지만 관심 등록은 루프마다 따로다.
-            if (!reactor_->add(a->fd, net::kRead, a) ||
-                !reactor_->add(b->fd, net::kRead, b)) {
+            // fd 자체는 프로세스 전역이지만 관심 등록은 루프마다 따로다. 관심은
+            // 반드시 지금 상태에서 다시 계산해야 한다 — kRead 로 못 박으면 룸
+            // 단계에서 백프레셔로 멈춰 세워진 채 넘어온 연결이 "기록상 멈춰 있는데
+            // 실제로는 읽는" 상태가 돼, pause 시계가 인계 전 시각에 굳은 채 상한
+            // 판정이 엉뚱한 쪽을 지목한다. 보류 송신이 있는데 kWrite 를 빠뜨리면
+            // arm_write 의 조기 반환 때문에 다시는 쓰기 준비성을 못 받는다.
+            const unsigned ia = (a->read_paused ? 0u : net::kRead) |
+                                (a->want_write  ? net::kWrite : 0u);
+            const unsigned ib = (b->read_paused ? 0u : net::kRead) |
+                                (b->want_write  ? net::kWrite : 0u);
+            if (!reactor_->add(a->fd, ia, a) ||
+                !reactor_->add(b->fd, ib, b)) {
                 close_conn(a, "샤드 등록 실패");
                 close_conn(b, "샤드 등록 실패");
                 continue;
@@ -740,6 +833,10 @@ private:
             c->handshake_slot = std::move(handshake_slot);
             c->session_slot   = std::move(session_slot);
             c->last_activity = Clock::now();
+            // 버킷 시계도 여기서 출발시킨다. 기본값(epoch)으로 두면 첫 읽기의 경과가
+            // "부팅 이후 전체" 로 계산된다 — 천장에서 잘려 결과는 같지만, 그건 우연히
+            // 맞는 것이지 의도가 아니다.
+            c->rate_refilled_at = c->last_activity;
             Conn* raw = c.get();
             if (!reactor_->add(raw->fd, net::kRead, raw)) {
                 RLOG_WARN("[relay] fd 등록 실패 — 거절");
@@ -846,24 +943,117 @@ private:
         reactor_->modify(c->fd, interest, c);
     }
 
+    // 흐른 시간만큼 토큰을 채운다(천장까지).
+    //
+    // 충전 시각을 now 로 "덮어쓰지" 않고 실제로 지급한 만큼만 민다. ms 는 내림이라
+    // 밀리초 미만 잔여가 남는데, 시계를 now 로 옮기면 그 잔여가 매 읽기마다 소각돼
+    // 실효 충전률이 읽기 케이던스에 좌우된다 — 읽기가 촘촘할수록 더 많이 탄다.
+    // 실측(2026-08-23 Linux): 106B 프레임을 1.8ms 간격, 즉 상한의 94%(61,603 B/s)로
+    // 보내는 송신자가 백프레셔 한 번 없이 49.8초 만에 "byte rate 초과" 로 끊겼다
+    // (역산한 실효 충전 ≈36.5 KiB/s = 상한의 57%). 같은 바이트레이트를 20ms 케이던스
+    // 로 내면 살아남았다 — 상한이 케이던스에 좌우된다는 뜻이다. 바이트 미만 잔여도
+    // rate_carry 로 넘겨야 두 케이던스가 같은 판정을 받는다.
+    //
+    // 멈춰 세워 둔 동안에는 채우지 않는다. 그 구간의 몫은 재개할 때
+    // grant_pause_credit 이 천장 없이 따로 지급하므로, 여기서도 채우면 같은 시간을
+    // 두 번 세어 실효 상한이 2배가 된다.
+    static void refill_tokens(Conn* c, TimePoint now) {
+        if (c->read_paused || now <= c->rate_refilled_at) return;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - c->rate_refilled_at).count();
+        if (ms <= 0) return;
+        c->rate_refilled_at += std::chrono::milliseconds(ms);
+        const long long num = ms * (long long)kMaxBytesPerSecond + c->rate_carry;
+        const size_t refill = (size_t)(num / 1000);
+        c->rate_carry = (int)(num % 1000);
+        c->rate_tokens = (refill >= kRateBurstBytes - c->rate_tokens)
+                             ? kRateBurstBytes
+                             : c->rate_tokens + refill;
+    }
+
+    // 재개하는 순간, "이 pause 가 만든 빚" 을 갚을 일회성 예산을 확정한다.
+    //
+    // 멈춰 있던 동안 상대가 밀어 넣은 바이트는 상대의 커널 송신 버퍼와 우리 수신
+    // 버퍼에 그대로 남아 있다가 재개하는 순간 한꺼번에 들어온다. 그건 상대가 규정을
+    // 넘겨 몰아친 게 아니라 **우리가 귀를 닫고 있어서** 생긴 적체다. 규정을 지킨
+    // 송신자가 그 구간에 제시할 수 있었던 최대치가 정확히 (상한 × 멈춰 있던 시간)
+    // 이므로, 그만큼을 천장과 무관하게 얹어 준다. 그 이상은 우리가 만든 적체가
+    // 아니므로 평소 요금 그대로다.
+    //
+    // ab2a9a2 가 없앤 옛 면제(재개 후 3초 무제한)와 결정적으로 다른 점:
+    //   · 크기가 시간 창이 아니라 **그 pause 자신의 길이에서 나온 바이트** 다.
+    //   · 그래서 갱신되지 않는다. pause 구간들은 서로 겹치지 않고, 그동안 버킷
+    //     시계는 멈춰 있으므로(refill_tokens 의 read_paused 갈래) 두 몫이 같은
+    //     시간을 두 번 세지 않는다. 결과적으로 어떤 구간 [t0,t1] 에서든 통과량은
+    //     kRateBurstBytes + kMaxBytesPerSecond × (t1-t0) 을 넘지 못한다 — 옛 면제는
+    //     이 성질이 없어서 pause/resume 을 반복시키면 상한이 영영 적용되지 않았다.
+    //
+    // 예산에는 천장을 두지 않는다(포화 덧셈만 한다). 천장을 두면 [B] 가 되살아나기
+    // 때문이다: 상대가 상한 직전마다 조금씩 빼내면 pause 상한은 발화하지 않은 채
+    // 총 멈춤 시간이 얼마든지 길어질 수 있고, 그동안 규정을 지킨 송신자의 적체는
+    // 자기 커널 송신 버퍼가 허용하는 만큼(이 호스트 tcp_wmem 최대 4 MiB) 자란다.
+    // 천장은 그 적체가 얼마나 커질 수 있는지를 우리가 모른 채 고르는 값이라, 어떤
+    // 값을 골라도 송신 버퍼가 더 큰 클라이언트에서는 부족하다. 실측: 천장을 2 MiB
+    // (버스트 한도 2개분)로 두자 3.9 MB 를 60초에 걸쳐 제시한 규정 준수 송신자
+    // (54 KiB/s < 상한)가 전속력 배수 시점에 "byte rate 초과" 로 끊겼다.
+    //
+    // 천장이 없어도 레이트 상한은 깨지지 않는다. pause 구간과 비-pause 구간은
+    // 시간축을 빈틈없이 나누고, pause 동안에는 버킷 시계가 멈춰 있으므로
+    // (지급 총합) + (충전 총합) = kMaxBytesPerSecond × 전체 경과 시간 이다. 어떤
+    // 구간 [t0,t1] 에서든 통과량은 kRateBurstBytes + kMaxBytesPerSecond × (t1-t0)
+    // 을 넘지 못한다. 남는 성질은 순간 버스트뿐이다 — 상한보다 느리게 보내면서 오래
+    // 멈춰 있던 연결은 안 쓴 예산을 쌓아 두었다가 한 번에 쓸 수 있다. 그 양은 그
+    // 연결이 "쉬면서 벌어 둔" 몫이고, 쏟아지는 곳은 상대의 tx 라 high-water 에서
+    // 곧바로 다시 멈춰 세워지므로(그리고 하드 상한 256 KiB 가 있으므로) 메모리에는
+    // 영향이 없다.
+    static void grant_pause_credit(Conn* c, TimePoint now) {
+        if (c->paused_since == TimePoint{} || now <= c->paused_since) return;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - c->paused_since).count();
+        if (ms <= 0) return;
+        const size_t owed = (size_t)((ms * (long long)kMaxBytesPerSecond) / 1000);
+        c->pause_credit = (owed > SIZE_MAX - c->pause_credit)
+                              ? SIZE_MAX : c->pause_credit + owed;
+    }
+
     void pause_peer_read(Conn* dst, bool pause) {
         Conn* src = feeder_of(dst);
         if (!src || src->stage == Stage::Dead) return;
         if (src->read_paused == pause) return;
+        const TimePoint now = Clock::now();
+        // 멈추기 직전까지의 몫을 확정하고 나서 시계를 세운다(read_paused 를 켜면
+        // refill_tokens 가 더 이상 채우지 않는다). 순서가 뒤집히면 pause 직전 구간의
+        // 토큰을 잃는다.
+        if (pause) refill_tokens(src, now);
         src->read_paused = pause;
         unsigned interest = (pause ? 0u : net::kRead) |
                             (src->want_write ? net::kWrite : 0u);
         reactor_->modify(src->fd, interest, src);
+        if (pause) {
+            src->paused_since = now;
+            // 밖에서 pause 시계를 볼 방법이 이 줄뿐이다. "누가 얼마나 오래 멈춰
+            // 있었나" 는 이 결함군의 첫 질문인데, 소켓 밖에서는 "언젠가 끊겼다" 만
+            // 보인다. 임계값 아래면 인자 평가도 없다.
+            RLOG_DEBUG("[conn " << src->id << "] read_paused=1 peer_tx="
+                       << dst->tx.size() << " tokens=" << src->rate_tokens);
+            return;
+        }
         // 재개하는 순간 유휴 데드라인을 새로 건다. 멈춰 있는 동안에는 읽기 이벤트가
         // 없어 last_activity 가 굳어 있었으므로, 그대로 두면 풀자마자 만기로 끊긴다.
-        if (!pause) {
-            src->last_activity = Clock::now();
-            // 레이트 쪽은 손대지 않는다. 멈춰 있는 동안에도 토큰이 계속 찼으므로
-            // 재개 시점의 적체는 그 토큰으로 지불된다. 예전에는 여기서 창을 열고
-            // 면제를 걸었는데, 그 면제가 재개할 때마다 갱신돼 상한이 무력해졌다.
-            if (src->stage == Stage::Forward) {
-                timers_.arm(src, src->last_activity + kIdleTimeout);
-            }
+        src->last_activity = now;
+        // 그리고 우리가 강요한 침묵을 상대에게 청구하지 않도록 빚을 갚는다.
+        const auto held = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              now - src->paused_since).count();
+        grant_pause_credit(src, now);
+        src->paused_since = TimePoint{};
+        RLOG_DEBUG("[conn " << src->id << "] read_paused=0 held=" << held
+                   << "ms credit=" << src->pause_credit
+                   << " tokens=" << src->rate_tokens);
+        // 버킷 시계도 여기서 다시 켠다 — 멈춰 있던 구간은 위에서 예산으로 지급했다.
+        src->rate_refilled_at = now;
+        src->rate_carry = 0;
+        if (src->stage == Stage::Forward) {
+            timers_.arm(src, src->last_activity + idle_timeout());
         }
     }
 
@@ -877,6 +1067,11 @@ private:
         if (sent) {
             c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
             g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
+            // 자기 큐에서 실제로 바이트를 빼냈다고 기록한다. pause 상한은 이
+            // 시각으로 판정한다 — high-water 아래로 내려갈 때(= 재개할 때)만 쳐
+            // 주면, tx 가 high-water 위에 걸친 채 조금씩 빼내는 진짜 느린 독자가
+            // "한 바이트도 안 빼낸" 쪽과 구분되지 않아 끊긴다.
+            c->tx_drained_at = Clock::now();
         }
         if (c->tx.empty()) {
             arm_write(c, false);
@@ -898,28 +1093,26 @@ private:
 
         const TimePoint now = Clock::now();
         c->last_activity = now;
-        // 지난 시간만큼 토큰을 채운다(상한까지). 멈춰 세워 둔 동안에도 찬다 —
-        // 그래서 재개 시점의 적체가 그 토큰으로 지불되고, 따로 면제할 것이 없다.
-        {
-            const auto elapsed = now - c->rate_refilled_at;
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-            if (ms > 0) {
-                c->rate_refilled_at = now;
-                const size_t refill = (size_t)((ms * (long long)kMaxBytesPerSecond) / 1000);
-                c->rate_tokens = (refill >= kRateBurstBytes - c->rate_tokens)
-                                     ? kRateBurstBytes
-                                     : c->rate_tokens + refill;
-            }
+        // 흐른 시간만큼 토큰을 채운다(천장까지).
+        refill_tokens(c, now);
+        // 멈춰 세워 둔 동안 쌓인 적체는 먼저 pause 예산에서 갚는다 — 우리가 읽기를
+        // 멈춰서 생긴 몫을 상대의 레이트로 청구하지 않기 위해서다. 예산은 재개
+        // 시점에 그 pause 의 길이로 확정된 일회성이며 여기서 쓴 만큼 줄기만 한다.
+        size_t charge = got;
+        if (c->pause_credit) {
+            const size_t paid = (charge < c->pause_credit) ? charge : c->pause_credit;
+            c->pause_credit -= paid;
+            charge           -= paid;
         }
         // 레이트 상한은 단계를 가리지 않는다. 예전에는 Forward 에만 걸려 있었는데,
         // 정작 위험한 쪽은 반대였다 — 큐 대기와 인증 왕복 단계는 rx 를 소비하지 않고
         // 쌓아 두기만 하므로(뒤 단계로 넘겨야 하는 잔여 바이트를 잃지 않으려고),
         // 상한이 없으면 한 연결이 메모리를 무한히 먹는다.
-        if (got > c->rate_tokens) {
+        if (charge > c->rate_tokens) {
             close_conn(c, "byte rate 초과");
             return;
         }
-        c->rate_tokens -= got;
+        c->rate_tokens -= charge;
         // 레이트 상한만으로는 "느리게, 오래" 붓는 것을 못 막는다. 누적 버퍼에도
         // 상한을 건다. 재파싱이 매 읽기마다 도는 단계가 있어(on_queued 는 잔여를
         // 보존하려고 사본을 파싱한다) 상한이 없으면 비용이 O(n^2) 로 자라 단일 루프
@@ -1473,9 +1666,21 @@ private:
         for (Conn* c : {a, b}) {
             c->stage = Stage::Forward;
             c->last_activity = now;
-            c->rate_refilled_at = now;
-            c->rate_tokens = kRateBurstBytes;
-            timers_.arm(c, now + kIdleTimeout);
+            // 버킷은 이어 간다. 예전에는 여기서 토큰을 무조건 만충으로 되돌렸는데,
+            // 그러면 룸/로비에서 이미 버스트를 다 태운 연결이 포워딩 시작과 동시에
+            // 가득 찬 버킷을 한 번 더 받아 연결당 실효 버스트가 두 배가 된다(실측:
+            // 로비에서 924 KB 를 2ms 만에 태운 뒤 READY 를 보내면 포워딩에서 1,047 KB
+            // 가 더 통과 — 합계 1.88 MiB, 천장 1 MiB 의 1.88배). 단계가 바뀐다고 그
+            // 연결이 다른 연결이 되는 것은 아니므로 흐른 시간만큼만 채운다. 버킷이
+            // 시간으로만 차야 상한이 하나의 값으로 남는다.
+            refill_tokens(c, now);
+            // pause 상한의 시계는 여기서 출발시킨다. 상한은 "포워딩 중에 상대가
+            // 몇 초 동안 아무것도 안 빼냈나" 를 재는 것이므로, 매치가 시작되는
+            // 이 자리가 기산점이다. 특히 샤드 인계에서는 이 자리가 새 루프의
+            // 출발점이라, 룸 단계에서 멈춰 세워진 채 넘어온 연결도 인계 직후에
+            // 곧바로 상한에 걸리지 않고 온전한 유예를 받는다.
+            c->tx_drained_at = now;
+            timers_.arm(c, now + idle_timeout());
         }
         RLOG_INFO("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
                   << " forwarding 시작");
@@ -1561,7 +1766,7 @@ private:
         Channel* ch = c->ch;
         if (!ch) return;
         Conn* peer = c->is_a ? ch->b : ch->a;
-        timers_.arm(c, Clock::now() + kIdleTimeout);
+        timers_.arm(c, Clock::now() + idle_timeout());
 
         if (!ch->ranked) {
             // unranked: 경계는 훑되 내용은 보지 않는다 — 서버 전용 프레임만
@@ -1654,7 +1859,38 @@ private:
                     const bool peer_can_free_me =
                         peer && peer->stage == Stage::Forward && !peer->read_paused;
                     if (peer_can_free_me) {
-                        timers_.arm(c, Clock::now() + kIdleTimeout);
+                        // 재무장에는 전제가 하나 더 있다: 무기한이면 안 된다.
+                        // 여기서 무한정 기다려 주면 (a) 나는 살지만 그동안 커널이
+                        // 대신 물고 있는 내 적체가 자라고 — 재개하는 순간 그것이
+                        // 한꺼번에 읽힌다 — (b) 아무도 회수하지 않는 매치가 fd 2개와
+                        // per-IP 세션 슬롯 2개를 프로세스 재시작까지 붙든다(실측:
+                        // 45초 유지, close 0건). (a) 는 pause_credit 이 회계로
+                        // 막지만 (b) 는 시간으로만 막을 수 있다.
+                        //
+                        // 그래서 상한을 넘기면 **고장 난 쪽** 을 닫는다. 고장 난
+                        // 쪽은 나를 멈춰 세운 채 자기 tx 에서 kMaxPauseDuration 동안
+                        // 한 바이트도 빼내지 않은 peer 다 — 조금이라도 빼냈다면 그
+                        // 순간 on_writable 이 peer->tx_drained_at 을 다시 찍었을
+                        // 것이므로, 여기 닿았다는 것은 그 시간 동안 관측 가능한
+                        // 배수가 0 이었다는 뜻이다. 멈춰 세워진 나를 닫으면 이
+                        // 갈래가 지키려던 계약이 그대로 깨진다.
+                        const TimePoint now = Clock::now();
+                        // 기산점은 pause 시작과 "상대가 마지막으로 빼낸 시각" 중
+                        // 나중 것이다. pause 이전의 배수는 이 판정과 무관하고,
+                        // pause 이후에 조금이라도 빼냈다면 그 시각부터 다시 센다.
+                        const TimePoint from = (peer->tx_drained_at > c->paused_since)
+                                                   ? peer->tx_drained_at
+                                                   : c->paused_since;
+                        const TimePoint due = from + kMaxPauseDuration;
+                        if (now < due) {
+                            // 다음 확인은 상한이 실제로 지나는 시점에 건다.
+                            // now + idle_timeout() 으로 걸면 만기 주기가 pause 시작과
+                            // 어긋나 상한을 최대 한 주기(15초)까지 넘겨 버린다.
+                            timers_.arm(c, due);
+                            break;
+                        }
+                        close_conn(peer, "백프레셔 상한 초과 (자기 tx 를 "
+                                         "kMaxPauseDuration 동안 한 바이트도 안 뺌)");
                         break;
                     }
                     // 사유를 갈라 적는다. 둘 다 멈춘 교착과 "풀어 줄 상대가 아예
@@ -1960,6 +2196,16 @@ int main(int argc, char** argv) {
                                "--stats-interval-sec", 0, 86400, n)) return 2;
             relay::g_stats_interval_sec = n;
         }
+        else if (a == "--idle-timeout-sec") {
+            int n = 0;
+            // 하한이 1인 이유: 0 은 "끄기" 가 아니라 "즉시 만기" 이고, 그러면
+            // 포워딩에 들어서자마자 전부 끊긴다. 끄는 값을 따로 두지도 않았다 —
+            // 유휴 회수는 이 서버가 fd 와 per-IP 세션 슬롯과 매치 슬롯을 되찾는
+            // 유일한 경로라, 끄는 선택지 자체가 있으면 안 된다.
+            if (!parse_int_arg(next("--idle-timeout-sec"),
+                               "--idle-timeout-sec", 1, 3600, n)) return 2;
+            relay::g_idle_timeout_sec = n;
+        }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
@@ -1967,6 +2213,7 @@ int main(int argc, char** argv) {
                 "                            [--max-conns N] [--max-tx-mib N]\n"
                 "                            [--max-pending-auth N]\n"
                 "                            [--log-level L] [--stats-interval-sec N]\n"
+                "                            [--idle-timeout-sec N]\n"
                 "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
                 "\n"
                 "  --loops N   루프 스레드 수 (기본 1). 앞단 루프 하나가 accept·인증·큐·\n"
@@ -2008,8 +2255,30 @@ int main(int argc, char** argv) {
                 "              상태 한 줄의 주기, 초 (기본 "
                                     << relay::kDefaultStatsIntervalSec << ", 0=끔).\n"
                 "              동시 연결·활성 매치·tx 예산 사용량과 최고 수위·사유별\n"
-                "              거절 카운터를 한 줄에 낸다.\n";
+                "              거절 카운터를 한 줄에 낸다.\n"
+                "  --idle-timeout-sec N\n"
+                "              포워딩 중 유휴 만기, 초 (기본 "
+                                    << relay::kDefaultIdleTimeoutSec << ", 1..3600).\n"
+                "              이 시간 동안 아무것도 주고받지 않은 매치를 걷어 fd 와\n"
+                "              매치 슬롯을 되찾는다. 백프레셔로 멈춰 세운 연결은\n"
+                "              유휴가 아니므로 예외지만, 양쪽이 서로를 멈춰 세운\n"
+                "              페어는 이 만기에 회수한다. 끄는 값은 없다 — 회수 경로가\n"
+                "              이것뿐이라 0 은 상한 없는 fd 점유와 같은 뜻이다.\n";
             return 0;
+        }
+        else {
+            // 모르는 인자는 조용히 넘기지 않는다. 예전에는 그랬는데, 그 침묵이
+            // 실제로 대가를 치렀다: CI 의 샤딩 스텝이 adversarial 스위트에
+            // --loops 를 넘기고 있다고 믿었지만 환경변수가 비어 있어 아무것도
+            // 전달되지 않았고, 릴레이는 기본 단일 루프로 조용히 떠서 그 스텝이
+            // 단일 루프 스텝과 문자 그대로 같은 실행이 됐다. 오타 하나가 튜닝을
+            // 통째로 무효로 만들면서 로그에는 아무 흔적도 남기지 않는다.
+            //
+            // 그래도 기동을 거부하지는 않는다 — 바로 아래 --loops 2 처리와 같은
+            // 판단이다. 인자 하나 때문에 배포·벤치 스크립트를 통째로 멈추는 것은
+            // 대가가 너무 크다. 대신 반드시 눈에 띄게 남긴다.
+            RLOG_WARN("[relay] 알 수 없는 인자를 무시합니다: " << a
+                      << " (--help 로 목록 확인)");
         }
     }
 

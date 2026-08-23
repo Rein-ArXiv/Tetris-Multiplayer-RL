@@ -54,7 +54,12 @@ def _find_meta_bin() -> Path | None:
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        # 0.0.0.0 으로 잡는다 — 릴레이·메타가 INADDR_ANY 로 bind 하기 때문이다
+        # (net/socket.cpp 의 tcp_listen). 127.0.0.1 로만 예약하면 그 주소에서만
+        # 비어 있는 번호를 받을 수 있고, 서버는 모든 주소에서 그 번호를 잡아야 하니
+        # bind 가 실패한다. 코드가 틀려서가 아니라 예약한 범위가 달라서 나는 실패라
+        # 무관한 테스트가 빨갛게 된다.
+        s.bind(("0.0.0.0", 0))
         return s.getsockname()[1]
 
 

@@ -70,7 +70,12 @@ def _find_bin(name: str, env_var: str) -> Path | None:
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        # 0.0.0.0 으로 잡는다 — 릴레이·메타가 INADDR_ANY 로 bind 하기 때문이다
+        # (net/socket.cpp 의 tcp_listen). 127.0.0.1 로만 예약하면 그 주소에서만
+        # 비어 있는 번호를 받을 수 있고, 서버는 모든 주소에서 그 번호를 잡아야 하니
+        # bind 가 실패한다. 코드가 틀려서가 아니라 예약한 범위가 달라서 나는 실패라
+        # 무관한 테스트가 빨갛게 된다.
+        s.bind(("0.0.0.0", 0))
         return s.getsockname()[1]
 
 
@@ -194,6 +199,23 @@ def _parse_room_info(payload: bytes) -> tuple[str, int, int]:
     code_len = payload[0]
     code = payload[1:1 + code_len].decode("ascii")
     return code, payload[1 + code_len], payload[2 + code_len]
+
+
+def _require_reactor_step() -> Path:
+    """reactor 고정 테스트의 공통 관문.
+
+    이 테스트들은 TETRIS_RELAY_BIN 이 무엇을 가리키든 자기 reactor 바이너리를 직접
+    띄운다 — 즉 "지금 어떤 릴레이를 겨누고 있는가" 와 무관하게 매번 돈다. 그래서
+    스레드 모델 스텝에서도 전부 한 번씩 더 돌아 CI 시간이 그대로 두 배가 됐다.
+    reactor 를 겨누는 실행에서만 돌게 묶는다 — 커버리지는 그대로고 중복만 사라진다.
+    """
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if relay_bin is None or "reactor" not in relay_bin.name:
+        pytest.skip("reactor 고정 테스트 — reactor 를 겨누는 실행에서만 돈다")
+    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
+    if not reactor_bin:
+        pytest.skip("tetris_relay_reactor binary missing")
+    return reactor_bin
 
 
 def test_relay_sigterm_drains_active_match() -> None:
@@ -578,9 +600,7 @@ def test_reactor_loops_two_falls_back_to_single_loop():
     이 인자는 reactor 바이너리 전용이므로 TETRIS_RELAY_BIN 이 무엇을 가리키든
     reactor 를 이름으로 직접 찾는다 (그래야 스레드 모델 스모크에서도 돈다).
     """
-    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
-    if not reactor_bin:
-        pytest.skip("tetris_relay_reactor binary missing")
+    reactor_bin = _require_reactor_step()
 
     # --help 는 실효 병렬도가 loops-1 이라는 사실을 밝혀야 한다. 이 문장이
     # 사라지면 사용자는 --loops 2 가 왜 손해인지 알 길이 없다.
@@ -642,9 +662,7 @@ def test_reactor_bounds_the_pending_auth_queue():
     ``--max-pending-auth`` 는 reactor 바이너리 전용이므로 TETRIS_RELAY_BIN 이
     무엇을 가리키든 reactor 를 이름으로 직접 찾는다.
     """
-    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
-    if not reactor_bin:
-        pytest.skip("tetris_relay_reactor binary missing")
+    reactor_bin = _require_reactor_step()
 
     # 대답하지 않는 meta. accept 만 하고 붙들고 있으면 릴레이의 verify_token 은
     # 자기 read timeout(3초)까지 그 워커에 매달린다.
@@ -1070,9 +1088,7 @@ def test_tx_budget_is_returned_when_connections_die():
     않고, 라운드를 거듭할수록 커진다. 1) 은 그 판정이 공허하지 않다는 증거다 —
     tx_peak 이 0 이면 애초에 아무것도 안 쌓인 것이므로 테스트가 실패한다.
     """
-    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
-    if not reactor_bin:
-        pytest.skip("tetris_relay_reactor binary missing")
+    reactor_bin = _require_reactor_step()
 
     port = _free_port()
     # 상태 주기를 1초로 줄인다 (운영 기본값 10초는 테스트 한 라운드보다 길다).
@@ -1256,9 +1272,7 @@ def test_reactor_rate_cap_survives_a_backpressure_pause():
     reactor 전용이다. 스레드 모델에는 "읽기를 멈춘다" 는 기제가 없어 이 경로 자체가
     존재하지 않는다.
     """
-    reactor_bin = _find_bin("tetris_relay_reactor", "TETRIS_RELAY_REACTOR_BIN")
-    if not reactor_bin:
-        pytest.skip("tetris_relay_reactor binary missing")
+    reactor_bin = _require_reactor_step()
 
     ALLOWED = 8 * 1024 * 1024          # 버스트 허용치(≈1 MiB)보다 넉넉히 위
     proc, port = _spawn_listening(

@@ -97,11 +97,12 @@ pytestmark = pytest.mark.skipif(
 # ── 소켓 유틸 ────────────────────────────────────────────────────────────────
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # 0.0.0.0 으로 잡는다 — 릴레이·메타가 INADDR_ANY 로 bind 하기 때문이다
+        # 0.0.0.0 으로 잡는다 — 릴레이가 INADDR_ANY 로 bind 하기 때문이다
         # (net/socket.cpp 의 tcp_listen). 127.0.0.1 로만 예약하면 그 주소에서만
-        # 비어 있는 번호를 받을 수 있고, 서버는 모든 주소에서 그 번호를 잡아야 하니
+        # 비어 있는 번호를 받을 수 있고, 릴레이는 모든 주소에서 그 번호를 잡아야 하니
         # bind 가 실패한다. 코드가 틀려서가 아니라 예약한 범위가 달라서 나는 실패라
-        # 무관한 테스트가 빨갛게 된다.
+        # 무관한 테스트가 빨갛게 된다. (meta 는 --http HOST:PORT 로 127.0.0.1 에만
+        # 붙으므로 이 사정이 없지만, 더 강한 예약이 해가 되지 않아 같은 함수를 쓴다.)
         s.bind(("0.0.0.0", 0))
         return s.getsockname()[1]
 
@@ -476,6 +477,15 @@ class _FakeMeta:
             # 메시지가 그 아래 묻힌다. 이 서버의 오류는 관측 대상이 아니다.
             def handle_error(self, request, client_address):
                 pass
+
+            # socketserver 기본 백로그는 5다. 이 스위트는 인증 왕복을 일부러 수백
+            # 개씩 동시에 던지는데(스레드 모델은 워커가 256개라 그대로 다 나간다),
+            # 그러면 accept 큐가 넘쳐 커널이 SYN 을 떨군다. 릴레이는 그것을
+            # "meta 네트워크 오류" 로 보고 그 사용자를 거절하므로, 테스트가 재려던
+            # "뒤에 줄 선 정상 사용자가 굶는가" 대신 "가짜 meta 가 접속을 못 받는가"
+            # 를 재게 된다 — 실측 실패율 약 6~9%의 정체가 이것이다. 백로그를
+            # 넉넉히 잡아 병목을 이 서버 밖으로 치운다.
+            request_queue_size = 512
 
         self._server = QuietServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True

@@ -51,15 +51,18 @@ jobs:
           echo "EXT=$EXT"   >> "$GITHUB_ENV"
           ls "$BIN"
 
-      # 서버가 실제로 들을 때까지 기다린다. 고정 sleep 은 느린 러너에서 모자라
-      # 스위트 전체가 "기동 실패" 로 죽고, 빠른 러너에서는 남는 시간을 그냥 버린다.
+      # 서버가 실제로 들을 때까지 기다린다. 고정 sleep 이 모자랄 때 일어나는 일은
+      # "스위트가 죽는다" 가 아니라 그 반대다 — 스모크 테스트들은 붙지 못하면
+      # pytest.skip 으로 물러서므로 7 skipped / exit 0, 즉 **조용한 거짓 초록**이
+      # 된다(7788 을 비워 두고 돌려 실측). 폴링은 그 거짓 초록을 붉은 실패로 바꾸고,
+      # 빠른 러너에서 버리던 시간도 함께 돌려준다.
       - name: Wait-for-port helper
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/wait_port.sh" <<'SH'
           #!/usr/bin/env bash
           for _ in $(seq 1 100); do
-            if (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null; then exec 3<&-; exit 0; fi
+            if (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null; then exit 0; fi
             sleep 0.1
           done
           echo "port $1 never opened" >&2
@@ -124,6 +127,7 @@ jobs:
           TETRIS_META_BIN="$PWD/$BIN/tetris_meta$EXT" \
           TETRIS_RELAY_BIN="$PWD/$BIN/tetris_relay_reactor$EXT" \
           TETRIS_RELAY_REACTOR_BIN="$PWD/$BIN/tetris_relay_reactor$EXT" \
+          TETRIS_RELAY_EXTRA_ARGS="--loops 4" \
           uv run python -m pytest \
             python/tests/test_relay_smoke.py \
             python/tests/test_room_smoke.py \

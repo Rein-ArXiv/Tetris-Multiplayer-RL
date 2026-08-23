@@ -72,6 +72,67 @@ def test_relay_pairs_two_clients() -> None:
         b.close()
 
 
+def _recv_frame_of(sock: socket.socket, want: MsgType, buf: bytearray) -> bytes:
+    """``want`` 타입 프레임이 올 때까지 읽는다. 다른 타입은 건너뛴다."""
+    sock.settimeout(RECV_TIMEOUT)
+    deadline = time.monotonic() + RECV_TIMEOUT
+    while time.monotonic() < deadline:
+        for t, payload in parse_frames(buf):
+            if t == want:
+                return payload
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise RuntimeError(f"relay closed before {want!r}")
+        buf.extend(chunk)
+    raise TimeoutError(f"no {want!r} within deadline")
+
+
+def test_relay_forwards_a_game_frame_after_handover() -> None:
+    """인계가 끝난 뒤 실제로 바이트가 양방향으로 건너가는지 본다.
+
+    이 파일의 다른 스모크는 수락 로비를 통과시키는 데서 멈춘다 — READY(1) 을
+    보내고 끝이라, 포워딩이 시작됐다는 것만 간접 확인하고 그 뒤로는 한 바이트도
+    보내지 않는다. ``--loops N`` 구성에서 그 공백이 특히 아프다: 연결이 루프
+    사이를 건너가는 유일한 지점이 포워딩 인계인데, 인계 **후** 트래픽이 없으면
+    샤드가 받은 연결로 무엇을 하든 아무도 모른다. 실제로 그랬다 — 샤딩 스텝을
+    돌려도 릴레이의 ``tx_peak`` 이 0 이었고, 샤드 스레드가 포워딩을 통째로 버리는
+    바이너리를 심어도 스모크는 초록이었다.
+
+    그래서 왕복 한 번을 더 한다. 이 한 번이 인계 뒤의 경로를 처음으로 밟는다.
+    """
+    try:
+        a = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    except OSError:
+        pytest.skip(f"relay not running on {RELAY_HOST}:{RELAY_PORT}")
+
+    b = socket.create_connection((RELAY_HOST, RELAY_PORT), timeout=1.0)
+    try:
+        a.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+        b.sendall(build_frame(MsgType.QUEUE_JOIN, b"\x00"))
+        _recv_match_found(a)
+        _recv_match_found(b)
+
+        a.sendall(build_frame(MsgType.READY, bytes([1])))
+        b.sendall(build_frame(MsgType.READY, bytes([1])))
+
+        # 양방향을 다 본다. 인계는 채널 하나를 옮기지만 방향마다 따로 등록되므로,
+        # 한쪽만 재면 반대 방향이 죽어 있어도 통과한다.
+        a_buf, b_buf = bytearray(), bytearray()
+        a_to_b = b"a->b handover probe"
+        b_to_a = b"b->a handover probe"
+
+        a.sendall(build_frame(MsgType.CHAT, a_to_b))
+        assert _recv_frame_of(b, MsgType.CHAT, b_buf) == a_to_b, \
+            "인계 뒤 A→B 로 보낸 프레임이 그대로 도착하지 않았다"
+
+        b.sendall(build_frame(MsgType.CHAT, b_to_a))
+        assert _recv_frame_of(a, MsgType.CHAT, a_buf) == b_to_a, \
+            "인계 뒤 B→A 로 보낸 프레임이 그대로 도착하지 않았다"
+    finally:
+        a.close()
+        b.close()
+
+
 def test_relay_returns_session_slots_when_matches_end() -> None:
     """끝난 매치의 per-IP 세션 슬롯은 돌아와야 한다.
 

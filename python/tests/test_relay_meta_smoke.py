@@ -1044,10 +1044,6 @@ class _StatsReader:
         with self._lock:
             return "\n".join(self.lines[-40:])
 
-    def grep(self, needle: str) -> list:
-        with self._lock:
-            return [l for l in self.lines if needle in l]
-
 
 def test_tx_budget_is_returned_when_connections_die():
     """전역 tx 예산이 연결이 죽을 때 정확히 돌아와야 한다.

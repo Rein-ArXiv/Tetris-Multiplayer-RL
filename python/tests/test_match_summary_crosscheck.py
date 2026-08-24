@@ -84,12 +84,6 @@ def _post(url: str, body: dict | None = None) -> dict:
         return json.loads(r.read().decode())
 
 
-def _get(url: str) -> object:
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=5.0) as r:
-        return json.loads(r.read().decode())
-
-
 def _qjoin(token: str) -> bytes:
     return build_frame(MsgType.QUEUE_JOIN,
                        bytes([len(token)]) + token.encode("ascii"))
@@ -205,18 +199,6 @@ def meta_relay(tmp_path):
             proc.terminate()
             try: proc.wait(timeout=3)
             except subprocess.TimeoutExpired: proc.kill()
-
-
-@pytest.fixture
-def relay_only(tmp_path):
-    """relay 만 (meta 없음). MATCH_SUMMARY 는 투명 포워딩됨."""
-    rp, rport = _spawn_relay(None)
-    try:
-        yield {"relay_port": rport}
-    finally:
-        rp.terminate()
-        try: rp.wait(timeout=3)
-        except subprocess.TimeoutExpired: rp.kill()
 
 
 def _consistent_summaries(my1_score=5000, my1_lines=20,

@@ -19,7 +19,6 @@
 
 #include <cerrno>
 #include <cstdint>
-#include <cstring>
 
 namespace net {
 

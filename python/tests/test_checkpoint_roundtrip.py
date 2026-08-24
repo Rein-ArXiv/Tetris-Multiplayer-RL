@@ -15,7 +15,6 @@ until you regenerate any cached checkpoints — that's the *intent*.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest

@@ -21,17 +21,6 @@ void set_log_level(LogLevel lv)
     g_log_threshold.store(static_cast<int>(lv), std::memory_order_relaxed);
 }
 
-const char* log_level_name(LogLevel lv)
-{
-    switch (lv) {
-        case LogLevel::Error: return "error";
-        case LogLevel::Warn:  return "warn";
-        case LogLevel::Info:  return "info";
-        case LogLevel::Debug: return "debug";
-    }
-    return "info";
-}
-
 bool parse_log_level(const std::string& s, LogLevel& out)
 {
     if (s == "error" || s == "err")   { out = LogLevel::Error; return true; }

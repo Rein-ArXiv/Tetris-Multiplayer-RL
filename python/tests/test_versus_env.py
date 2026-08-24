@@ -12,7 +12,6 @@ import pytest
 sim_mod = pytest.importorskip("sim")
 pytest.importorskip("gymnasium")
 
-from common.action_mask import decode_action  # noqa: E402
 from common.env_versus import (  # noqa: E402
     GreedyBCTSOpponent,
     RandomLegalOpponent,

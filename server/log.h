@@ -44,7 +44,6 @@ extern std::atomic<int> g_log_threshold;
 
 void        set_log_level(LogLevel lv);
 bool        parse_log_level(const std::string& s, LogLevel& out);
-const char* log_level_name(LogLevel lv);
 
 inline bool log_enabled(LogLevel lv)
 {

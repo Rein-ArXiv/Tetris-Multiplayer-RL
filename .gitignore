@@ -43,7 +43,6 @@ CMakeFiles/
 cmake_install.cmake
 Makefile.bak
 *.cmake
-!CMakeLists.txt
 
 # 디버그 파일
 *.pdb

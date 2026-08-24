@@ -124,9 +124,11 @@ jobs:
         run: |
           "./$BIN/tetris_relay_reactor$EXT" --port 7788 --loops 4 &
           "$RUNNER_TEMP/wait_port.sh" 7788
-          TETRIS_META_BIN="$PWD/$BIN/tetris_meta$EXT" \
+          # 이 스텝의 세 파일은 meta 도 reactor 고정 바이너리도 조회하지 않는다
+          # (adversarial 은 in-process 가짜 meta 를 쓴다). 안 읽히는 변수를 세워 두면
+          # 이 스텝이 그것들에 의존한다고 오해하게 되므로 빼 둔다 — meta 를 쓰는
+          # 테스트를 여기 추가한다면 TETRIS_META_BIN 을 함께 되살려야 한다.
           TETRIS_RELAY_BIN="$PWD/$BIN/tetris_relay_reactor$EXT" \
-          TETRIS_RELAY_REACTOR_BIN="$PWD/$BIN/tetris_relay_reactor$EXT" \
           TETRIS_RELAY_EXTRA_ARGS="--loops 4" \
           uv run python -m pytest \
             python/tests/test_relay_smoke.py \

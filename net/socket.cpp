@@ -2,7 +2,6 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
-#include <cstring>
 #include <memory>
 #include <thread>
 #include <chrono>

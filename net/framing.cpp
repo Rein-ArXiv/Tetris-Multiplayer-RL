@@ -1,5 +1,4 @@
 #include "framing.h"
-#include <cstring>
 
 // 한계/필드 크기 상수는 framing.h 의 공개 상수(kMaxPayloadBytes 등)를 쓴다.
 // 과거엔 여기 익명 네임스페이스에 중복 정의돼 있었는데, relay/Python 미러와 값이

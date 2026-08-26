@@ -53,6 +53,8 @@
 #include <mutex>
 #include <optional>
 #include <random>
+
+#include "match_seed.h"
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -1570,12 +1572,10 @@ private:
     }
 
     uint64_t next_seed() {
-        // xorshift64 — 서버 내부 RNG (스레드 모델과 같은 방식)
-        if (seed_state_ == 0) seed_state_ = 0x9E3779B97F4A7C15ULL ^ (uint64_t)Clock::now().time_since_epoch().count();
-        seed_state_ ^= seed_state_ << 13;
-        seed_state_ ^= seed_state_ >> 7;
-        seed_state_ ^= seed_state_ << 17;
-        return seed_state_;
+        // 매치 seed 는 MATCH_FOUND 로 두 클라이언트에게 그대로 나간다. 스트림에서
+        // 뽑으면 받은 값이 곧 생성기 상태라 이후 모든 매치의 seed 가 계산된다 —
+        // 근거와 대안은 match_seed.h 참조.
+        return seed_src_.next();
     }
 
     // 큐·룸 두 경로가 공유하는 채널 생성. 스테이지는 호출자가 정한다 — 큐는
@@ -2151,7 +2151,8 @@ private:
 
     uint32_t next_conn_id_  = 1;
     uint32_t next_match_id_ = 1;
-    uint64_t seed_state_    = 0;   // match seed 전용 xorshift64 (MATCH_FOUND 로 노출된다)
+    // match seed 는 노출되는 값이라 스트림을 두지 않는다 (match_seed.h).
+    relay::MatchSeedSource seed_src_;
     // 룸 코드 전용 RNG. 노출되는 match seed 스트림과 분리해 씨를 뿌린다(생성자 참조).
     // 코드는 사람이 받아 적는 5글자 자격 증명이라 예측 불가능해야 한다.
     std::mt19937_64 code_rng_;

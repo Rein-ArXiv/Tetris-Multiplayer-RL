@@ -49,26 +49,17 @@ bool waitingPlayerStillActive(PlayerInfo& p) {
 
 }  // namespace
 
-Matchmaker::Matchmaker() {
-    // 서버 부팅 시각 기반 초기 seed. 재시작마다 다른 게임이 나오도록.
-    using clock = std::chrono::high_resolution_clock;
-    seed_state = static_cast<uint64_t>(clock::now().time_since_epoch().count());
-    if (seed_state == 0) seed_state = 0xDEADBEEFCAFEBABEULL;
-}
+Matchmaker::Matchmaker() = default;
 
 Matchmaker::~Matchmaker() {
     shutdown();
 }
 
-// xorshift64: 단순하고 빠른 PRNG. 매치마다 새 seed 만 필요하므로 충분.
+// 매치 seed 는 MATCH_FOUND 로 두 클라이언트에게 그대로 나간다. 스트림에서 뽑으면
+// 받은 값이 곧 생성기 상태가 되어 이후 매치가 전부 예측된다 — match_seed.h 참조.
 // 분배 품질이 중요한 RL 시뮬레이션 쪽은 SimGame 이 자체 RNG 를 가지고 있음.
 uint64_t Matchmaker::nextSeed() {
-    uint64_t x = seed_state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    seed_state = x;
-    return x;
+    return seed_src.next();
 }
 
 void Matchmaker::enqueue(PlayerInfo p) {

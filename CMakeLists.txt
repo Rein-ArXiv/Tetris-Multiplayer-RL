@@ -385,6 +385,7 @@ if (TETRIS_BUILD_RELAY)
         server/log.h
         server/matchmaker.h
         server/match_uuid.h
+        server/match_seed.h
         server/player_conn.h
         server/player_session.h
         server/relay.h
@@ -444,6 +445,7 @@ if (TETRIS_BUILD_RELAY)
         server/timer_queue.h
         server/player_session.h
         server/match_uuid.h
+        server/match_seed.h
         meta/http_client.h
         meta/protocol.h
     )

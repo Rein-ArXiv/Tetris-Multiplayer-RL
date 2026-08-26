@@ -13,6 +13,7 @@
 //     복사본이 사라질 때까지 OS 가 그 fd 번호를 새 연결에 재사용하지 않는다.
 
 #pragma once
+#include "match_seed.h"
 #include "../net/socket.h"
 
 #include <atomic>
@@ -78,14 +79,15 @@ public:
     void shutdown();
 
 private:
-    uint64_t nextSeed();  // xorshift64 — 서버 내부 RNG
+    uint64_t nextSeed();  // 매치마다 독립 추출 (match_seed.h)
 
     std::mutex              mu;
     std::condition_variable cv;
     std::deque<PlayerInfo>  waiting;
     std::atomic<bool>       stopping{false};
     uint32_t                next_match_id{1};
-    uint64_t                seed_state{0};
+    // MATCH_FOUND 로 나가는 값이라 스트림을 두지 않는다 (match_seed.h).
+    relay::MatchSeedSource  seed_src;
 };
 
 }  // namespace relay

@@ -13,6 +13,7 @@
 //   뒤 startPump 를 호출한다.
 
 #pragma once
+#include "match_seed.h"
 #include "../net/socket.h"
 #include "matchmaker.h"
 
@@ -124,7 +125,8 @@ private:
     std::array<std::mutex, kRoomSendShardCount> roomSendMu_;
     std::atomic<bool>       stopping{false};
     uint64_t                code_rng_state_ = 0;
-    uint64_t                seed_state_     = 0;
+    // match seed 는 MATCH_FOUND 로 나가는 값이라 스트림을 두지 않는다.
+    relay::MatchSeedSource  seed_src_;
     uint64_t                next_room_info_version_ = 1;
     uint32_t                next_match_id_  = 100000;  // 매치메이킹과 match_id 충돌 피해
     meta::client::MetaClient* meta_ = nullptr;

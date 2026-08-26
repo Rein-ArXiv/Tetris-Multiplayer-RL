@@ -1725,3 +1725,56 @@ def test_sigterm_with_connections_in_every_stage_exits_cleanly(relays, socks):
         pytest.fail("모든 단계에 연결이 걸린 상태에서 종료가 10초 안에 끝나지 않았다")
     assert rc == 0, (
         f"종료 코드 {rc} — 시그널 핸들러를 거치지 못했거나 정리에 실패했다")
+
+
+def test_match_seeds_are_not_drawn_from_a_stream_the_client_can_continue(
+        unranked, socks):
+    """한 매치의 seed 로 다음 매치의 seed 를 계산할 수 없어야 한다.
+
+    seed 는 MATCH_FOUND 로 두 클라이언트에게 그대로 나가는 값이다. 이 값을
+    xorshift64 같은 스트림에서 뽑으면 받은 값이 곧 생성기의 내부 상태가 되어,
+    한 판을 마친 사람이 같은 변환을 이어 돌리는 것만으로 그 뒤 서버 전체에서
+    생성되는 모든 매치의 seed 를 순서대로 얻는다. 브루트포스가 아니라 산술
+    한 번이라 상한으로는 막을 수 없다.
+
+    그래서 여기서는 "두 seed 가 다르다" 로 만족하지 않고, **관측한 seed 에서
+    스트림을 이어 돌려 다음 seed 가 나오는지** 를 직접 확인한다. 그것이 실제
+    공격이 하는 계산이고, 이 성질이 깨지면 여기서 걸린다.
+    """
+    def xorshift64(x: int) -> int:
+        m = (1 << 64) - 1
+        x ^= (x << 13) & m
+        x ^= x >> 7
+        x ^= (x << 17) & m
+        return x & m
+
+    _, port = unranked
+
+    seeds = []
+    for _ in range(4):
+        a = socks(_connect(port, "127.0.0.1"))
+        b = socks(_connect(port, "127.0.0.1"))
+        a_buf, b_buf = bytearray(), bytearray()
+        a.sendall(_queue_join())
+        b.sendall(_queue_join())
+        _, seed_a = _parse_match_found(
+            _recv_frame(a, MsgType.MATCH_FOUND, a_buf, 5.0))
+        _, seed_b = _parse_match_found(
+            _recv_frame(b, MsgType.MATCH_FOUND, b_buf, 5.0))
+        assert seed_a == seed_b, "같은 매치의 두 사람은 같은 seed 를 받아야 한다"
+        seeds.append(seed_a)
+        a.close()
+        b.close()
+
+    assert len(set(seeds)) == len(seeds), f"seed 가 반복된다: {seeds}"
+    assert all(s != 0 for s in seeds), "0 seed 는 클라이언트 RNG 를 죽인다"
+
+    # 관측한 seed 에서 스트림을 이어 돌려 본다. 몇 걸음 안에 다음 seed 가 나오면
+    # 그 값은 생성기 상태 그대로라는 뜻이다.
+    for i in range(len(seeds) - 1):
+        x = seeds[i]
+        for _ in range(64):
+            x = xorshift64(x)
+            assert x != seeds[i + 1], (
+                f"매치 {i} 의 seed 에서 매치 {i+1} 의 seed 가 계산된다 — "
+                "seed 가 노출된 스트림에서 뽑히고 있다")

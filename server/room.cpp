@@ -52,8 +52,6 @@ RoomRegistry::RoomRegistry() {
     std::random_device rd;
     const uint64_t r = (static_cast<uint64_t>(rd()) << 32) | rd();
     code_rng_state_ = (t ^ r) ? (t ^ r) : 0xC0FFEE0DDB0B0BAAULL;
-    // seed stream 은 다른 상태 — 한 프로세스 안에서 matchmaker 와 충돌 최소화.
-    seed_state_     = (t ? t : 0xDEADBEEFCAFEBABEULL) ^ 0x9E3779B97F4A7C15ULL;
 }
 
 std::string RoomRegistry::generateCode_() {
@@ -71,7 +69,7 @@ std::string RoomRegistry::generateCode_() {
     return {};  // 상상 속 병리적 충돌
 }
 
-uint64_t RoomRegistry::nextSeed_()    { return xorshift64_(seed_state_); }
+uint64_t RoomRegistry::nextSeed_()    { return seed_src_.next(); }
 uint32_t RoomRegistry::nextMatchId_() { return next_match_id_++; }
 
 void RoomRegistry::sendRoomInfo_(const net::TcpSocket& sock, const std::string& code,

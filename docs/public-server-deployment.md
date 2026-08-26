@@ -93,7 +93,7 @@ export TETRIS_RELAY_SECRET='64-hex-secret-here'
 ## 1.5 운영 번들 만들기
 
 Linux 서버에 올릴 파일은 서버 전용 번들로 만든다. 이 번들에는 클라이언트가 들어가지
-않고, `tetris_relay`, `tetris_meta`, ranking 정적 페이지, systemd/Caddy/cloudflared
+않고, `tetris_relay_reactor`, `tetris_meta`, ranking 정적 페이지, systemd/Caddy/cloudflared
 예시, DB 백업 스크립트만 들어간다.
 
 ```bash
@@ -107,7 +107,7 @@ dist/tetris-server-linux-x64.tar.gz
 ```
 
 클라이언트 배포물은 별도 스크립트로 만든다. 일반 유저용 클라이언트 번들에는
-`tetris_relay`, `tetris_meta`, secret, DB 경로가 포함되지 않는다.
+`tetris_relay_reactor`, `tetris_meta`, secret, DB 경로가 포함되지 않는다.
 
 ## 2. Meta 호스트: 빌드와 DB 위치
 
@@ -281,14 +281,14 @@ cmake -S . -B build-relay \
   -DTETRIS_BUILD_RELAY=ON \
   -DTETRIS_ENABLE_HTTPS=ON
 
-cmake --build build-relay --config Release --target tetris_relay
+cmake --build build-relay --config Release --target tetris_relay_reactor
 ```
 
 실행:
 
 ```bash
 export TETRIS_RELAY_SECRET='64-hex-secret-here'
-./build-relay/tetris_relay \
+./build-relay/tetris_relay_reactor \
   --port 7777 \
   --meta https://api.example.com
 ```
@@ -296,36 +296,26 @@ export TETRIS_RELAY_SECRET='64-hex-secret-here'
 방화벽은 TCP `7777` 만 public 으로 연다. SSH 는 키 인증과 IP 제한을 권장한다.
 meta 서버의 `8080` 은 VPS 에서 열지 않는다.
 
-systemd unit (`deploy/systemd/tetris-relay.service` 템플릿과 동일):
+systemd unit 은 **`deploy/systemd/tetris-relay.service` 를 그대로 쓴다.**
 
-```ini
-[Unit]
-Description=Tetris Multiplayer Relay
-After=network-online.target
-Wants=network-online.target
+여기에 사본을 두지 않는 이유가 있다. 예전에는 유닛 전문을 이 문서에 옮겨 적고
+"템플릿과 동일" 이라고 적어 두었는데, 템플릿이 배포 대상 바이너리를
+`tetris_relay_reactor` 로 옮기고 파일 서술자 상한(`LimitNOFILE`)과 샌드박스
+지시자들을 얻는 동안 이 사본만 옛 내용으로 남았다. 그 상태의 문서를 따라간
+운영자는 배포 대상이 아닌 스레드 모델을, 그것도 약한 샌드박스로 띄우게 된다.
+두 벌을 손으로 맞추는 방식이 원인이었으므로 한 벌만 남긴다.
 
-[Service]
-Type=simple
-User=tetris
-Group=tetris
-WorkingDirectory=/opt/tetris
-EnvironmentFile=/etc/tetris/relay.env
-ExecStart=/opt/tetris/tetris_relay --port 7777 --meta https://api.example.com
-Restart=always
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-# relay 는 디스크에 아무것도 쓰지 않는다 — 전체 읽기 전용.
-ProtectSystem=strict
-ProtectHome=true
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo install -m 0644 deploy/systemd/tetris-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tetris-relay
 ```
 
-`NoNewPrivileges`/`PrivateTmp`/`ProtectSystem=strict`/`ProtectHome` 격리 지시자를
-빼고 배포하면 템플릿보다 약한 샌드박스가 된다. env 파일 예시는
-`deploy/systemd/tetris-relay.env.example` 에 있다.
+유닛에서 환경에 맞게 고칠 곳은 `ExecStart` 의 `--meta` URL 뿐이다.
+`LimitNOFILE` 은 `--max-conns` 보다 넉넉히 커야 한다 — 낮으면 릴레이의 연결
+상한에 닿기 전에 OS 파일 서술자 천장에 먼저 부딪힌다.
+
+env 파일 예시는 `deploy/systemd/tetris-relay.env.example` 에 있다.
 
 `/etc/tetris/relay.env`:
 

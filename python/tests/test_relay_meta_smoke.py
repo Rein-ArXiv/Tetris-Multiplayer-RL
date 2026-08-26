@@ -2811,3 +2811,150 @@ def test_reactor_keeps_a_pair_whose_reader_only_keeps_up_slowly():
             "재무장 갈래도 지나지 않는다:\n" + stats.dump())
     finally:
         _shutdown(proc, (a, b))
+
+
+# ── per-IP 예산 (reactor 전용) ────────────────────────────────────────────────
+#
+# 아래 두 계약은 reactor 바이너리에만 있다. 스레드 모델에는 룸 오답 예산도
+# 매칭 후 무응답 예산도 없고 --lobby-timeout-sec 도 없다. 그래서 두 바이너리
+# 공통 계약만 겨누는 test_relay_adversarial.py 가 아니라 여기에 두고,
+# _require_reactor_step() 으로 겨냥을 못 박는다.
+
+def _connect_from(port: int, source_ip: str, timeout: float = 3.0) -> socket.socket:
+    """지정한 출발지 주소에서 릴레이로 붙는다.
+
+    127.0.0.0/8 은 전부 loopback 이라 출발지를 흩어 per-IP 버킷을 나눌 수 있다.
+    상한을 우회하려는 것이 아니라 **상한이 주소 단위로 갈리는지** 를 재기 위해서다.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((source_ip, 0))
+    s.settimeout(timeout)
+    s.connect(("127.0.0.1", port))
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return s
+
+
+def _reject_reason_or_none(sock: socket.socket, timeout: float = 1.5):
+    buf = bytearray()
+    try:
+        payload = _recv_frame(sock, MsgType.SERVER_REJECT, buf, timeout)
+    except (AssertionError, TimeoutError, OSError, RuntimeError):
+        return None
+    return payload[0] if payload else None
+
+
+def test_wrong_room_codes_run_out_of_budget_before_the_code_space_does():
+    """한 주소가 던질 수 있는 룸 코드 오답에는 총량 상한이 있어야 한다.
+
+    코드가 틀리면 릴레이가 연결을 닫는다 — 그래서 시도 한 번에 TCP 연결 하나가
+    들고, per-IP 핸드셰이크 상한이 동시 시도를 묶는다. 하지만 그건 속도 제한이지
+    총량 제한이 아니다. 붙었다 끊기를 반복하면 시도 횟수는 시간에 비례해 계속
+    늘고, 방이 살아 있는 동안 훑을 수 있는 코드 수도 함께 는다. 코드 공간(32^5)이
+    실제 방어력이 되려면 그 수가 잘려 있어야 한다.
+
+    판정은 사유로 한다 — 닫혔다는 사실만으로는 "오답이라 닫힘" 과 "예산이 소진돼
+    거절됨" 을 구분할 수 없고, 구분하지 못하면 예산을 통째로 들어내도 통과한다.
+    """
+    reactor_bin = _require_reactor_step()
+    proc, port = _spawn_listening(
+        lambda p: [str(reactor_bin), "--port", str(p), "--log-level", "info"])
+    opened = []
+    try:
+        src = "127.0.7.7"
+        rejected_at = None
+        for attempt in range(1, 40):
+            s = _connect_from(port, src)
+            opened.append(s)
+            s.sendall(_build_room_join("ZZZZZ", ""))
+            if _reject_reason_or_none(s) == int(RejectReason.ROOM_GUESS_LIMIT):
+                rejected_at = attempt
+                break
+            s.close()
+
+        assert rejected_at is not None, (
+            "40번을 연속으로 틀렸는데도 예산이 소진되지 않았다 — 오답에 값이 "
+            "매겨지지 않고 있으므로 코드 공간을 시간만 들이면 훑을 수 있다")
+        assert rejected_at > 1, (
+            "첫 시도부터 거절됐다 — 코드를 잘못 받아 적은 정상 사용자가 즉시 막힌다")
+
+        # 다른 주소는 영향을 받지 않아야 한다. 상한이 전역이면 한 명이 모두를 막는다.
+        host = _connect_from(port, "127.0.7.8"); opened.append(host)
+        host.sendall(_build_room_create(""))
+        hbuf = bytearray()
+        code, _, _ = _parse_room_info(
+            _recv_frame(host, MsgType.ROOM_INFO, hbuf, 5.0))
+
+        joiner = _connect_from(port, "127.0.7.9"); opened.append(joiner)
+        joiner.sendall(_build_room_join(code, ""))
+        jbuf = bytearray()
+        _, status, _ = _parse_room_info(
+            _recv_frame(joiner, MsgType.ROOM_INFO, jbuf, 5.0))
+        assert status != 2, "정상 코드로 들어가는 길까지 막혔다"
+    finally:
+        _shutdown(proc, opened)
+
+
+def test_matching_then_going_silent_costs_the_silent_side_not_the_victim():
+    """짝이 잡힌 뒤 침묵한 쪽의 주소에 값이 매겨져야 한다 — 피해자가 아니라.
+
+    큐 대기 자체에는 값을 매길 수 없다. 한가한 서버에서 오래 기다리는 것은 정상
+    이고, 대기 시간에 상한을 두면 표적이 되는 것은 공격자가 아니라 조용히 기다리는
+    사람이다. 값을 매길 수 있는 것은 "짝이 잡혔는데 끝내 아무것도 하지 않은" 이력
+    뿐이다.
+
+    이 테스트가 있는 이유가 있다. 처음 구현은 만기가 온 연결이 자기 것만 청구했고,
+    그래서 사실상 아무 일도 하지 않았다 — start_match 가 양쪽에 같은 데드라인을
+    걸어 두 만기가 한 배치에 나오는데, 먼저 처리된 쪽의 close_conn 이 상대를 그
+    자리에서 닫아 버려 상대의 on_timeout 은 alive() 가드에 걸려 돌지 않는다.
+    게다가 큐에 먼저 선 사람이 먼저 나오는 경향이라, 보통 READY 를 보낸 피해자가
+    걸리고 정작 침묵한 쪽은 청구되지 않았다. 커버리지가 없어 그 결함이 살아남았다.
+
+    그래서 판정을 두 갈래로 못 박는다: 침묵한 주소는 결국 막히고, 피해자 주소는
+    끝까지 멀쩡해야 한다. 한쪽만 보면 반대로 구현해도 통과한다.
+    """
+    reactor_bin = _require_reactor_step()
+    LOBBY_SEC = 2
+    proc, port = _spawn_listening(
+        lambda p: [str(reactor_bin), "--port", str(p), "--log-level", "info",
+                   "--lobby-timeout-sec", str(LOBBY_SEC)])
+    opened = []
+    silent_ip, victim_ip = "127.0.8.1", "127.0.8.2"
+    try:
+        def one_abandoned_match():
+            v = _connect_from(port, victim_ip); opened.append(v)
+            s = _connect_from(port, silent_ip); opened.append(s)
+            v.sendall(_build_queue_join(""))
+            s.sendall(_build_queue_join(""))
+            _recv_match_found(v)
+            _recv_match_found(s)
+            v.sendall(build_frame(MsgType.READY, bytes([1])))
+            # 침묵한 쪽은 아무것도 보내지 않는다. 만기까지 둘 다 기다린다.
+            time.sleep(LOBBY_SEC + 1.0)
+            v.close()
+            s.close()
+
+        rejected_round = None
+        for attempt in range(1, 9):
+            one_abandoned_match()
+            probe = _connect_from(port, silent_ip); opened.append(probe)
+            probe.sendall(_build_queue_join(""))
+            if _reject_reason_or_none(probe) == int(RejectReason.QUEUE_NO_SHOW):
+                rejected_round = attempt
+                break
+            probe.close()
+
+        assert rejected_round is not None, (
+            "매칭 뒤 8번을 연속으로 침묵했는데도 그 주소가 큐에 계속 들어간다 — "
+            "침묵에 값이 매겨지지 않고 있으므로, 한 주소가 남의 로비 대기 시간을 "
+            "무한정 태울 수 있다")
+
+        # 피해자 주소는 멀쩡해야 한다. 같은 수만큼 매치에 끌려들어 갔지만 매번
+        # READY 를 보냈으므로 이 주소에는 값이 매겨질 이유가 없다.
+        ok = _connect_from(port, victim_ip); opened.append(ok)
+        ok.sendall(_build_queue_join(""))
+        reason = _reject_reason_or_none(ok)
+        assert reason is None, (
+            f"READY 를 매번 보낸 피해자 주소가 거절됐다 (reason={reason}). "
+            "청구가 침묵한 쪽이 아니라 만기를 먼저 맞은 쪽에 붙고 있다는 뜻이다")
+    finally:
+        _shutdown(proc, opened)

@@ -135,6 +135,8 @@ enum class RejectReason : uint8_t {
     IpHandshakeLimit = 3,  // per-IP 동시 핸드셰이크 상한
     TxBudget         = 4,  // 프로세스 전체 보류 송신 예산
     AuthBacklog      = 5,  // 대기 중인 meta 인증 왕복 상한
+    RoomGuessLimit   = 6,  // per-IP 룸 코드 오답 예산 소진
+    QueueNoShow      = 7,  // per-IP 매칭 후 무응답 예산 소진
 };
 
 // 파싱된 메시지 프레임

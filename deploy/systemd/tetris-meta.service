@@ -3,6 +3,13 @@ Description=Tetris Meta API and SQLite Database
 After=network-online.target
 Wants=network-online.target
 
+# 크래시 루프 제동. 기본값(10초에 5회)은 RestartSec=3 과 맞물려 사실상 절대
+# 걸리지 않아, 계속 죽는 프로세스가 영원히 재기동을 반복한다. 아래는 일시적
+# 장애는 그대로 회복시키되(60초에 5회까지 허용) 진짜로 못 뜨는 상태는 멈춰
+# 세워 systemctl status 에 드러나게 한다.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=tetris
@@ -22,6 +29,33 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/srv/tetris
+
+# ── 샌드박스 보강 ────────────────────────────────────────────────────────────
+# 아래는 전부 이 바이너리가 실제로 쓰지 않는 것을 막는 항목이다. 인터넷에 열린
+# 프로세스가 언젠가 임의 코드 실행을 허용했을 때, 거기서 더 나아갈 수 있는 길을
+# 미리 끊어 둔다.
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_UNIX 는 남긴다 — 이름 해석(NSS)과 journald 로그 소켓이 그
+# 위로 오간다. 빼면 둘 다 조용히 실패한다.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 1024 위 포트만 쓰므로 CAP_NET_BIND_SERVICE 도 필요 없다.
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

@@ -117,6 +117,8 @@ class RejectReason(enum.IntEnum):
     IP_HANDSHAKE_LIMIT = 3  # per-IP 동시 핸드셰이크 상한
     TX_BUDGET          = 4  # 프로세스 전체 보류 송신 예산
     AUTH_BACKLOG       = 5  # 대기 중인 meta 인증 왕복 상한
+    ROOM_GUESS_LIMIT   = 6  # per-IP 룸 코드 오답 예산 소진
+    QUEUE_NO_SHOW      = 7  # per-IP 매칭 후 무응답 예산 소진
 
 
 # 서버만 만들 수 있는 프레임 — ``net::is_server_only_type`` 미러.

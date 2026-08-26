@@ -55,6 +55,7 @@
 #include <random>
 
 #include "match_seed.h"
+#include "room_guess_budget.h"
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -170,6 +171,11 @@ std::atomic<uint64_t> g_reject_ip_session{0};
 std::atomic<uint64_t> g_reject_ip_handshake{0};
 std::atomic<uint64_t> g_reject_tx_budget{0};
 std::atomic<uint64_t> g_reject_auth_backlog{0};
+// fd 고갈로 accept 를 멈춘 횟수. 다른 거절과 성격이 다르다 — 상한 정책이
+// 아니라 OS 한계에 부딪힌 것이라, 0 이 아니면 LimitNOFILE 을 올려야 한다.
+std::atomic<uint64_t> g_reject_out_of_fds{0};
+std::atomic<uint64_t> g_reject_room_guess{0};
+std::atomic<uint64_t> g_reject_queue_noshow{0};
 
 // 상태 한 줄의 주기.
 //
@@ -197,10 +203,18 @@ int                   g_stats_interval_sec     = kDefaultStatsIntervalSec;
 // 이미 조절 가능하다.
 //
 // 프로세스 기동 때 한 번 정하고 그 뒤로는 읽기만 하므로 루프 스레드들이 공유해도
-// 경합이 없다. 옆 만기 두 개(첫 프레임 5초, 로비 30초)는 이런 사정이 없어
-// constexpr 그대로 둔다 — 움직이는 것은 포워딩 만기 하나뿐이다.
+// 경합이 없다. 첫 프레임 만기(5초)는 이런 사정이 없어 constexpr 그대로 둔다.
+//
+// 로비 만기도 같은 이유로 움직인다. 예전에는 그럴 사정이 없어 30초 상수였는데,
+// 매칭 뒤 READY 를 끝내 안 보낸 쪽에 값을 매기는 예산(LobbyNoShowBudget)이 이 만기에
+// 걸리면서 사정이 생겼다. 30초에 묶여 있으면 예산 하나를 소진시키는 데만 벙시계
+// 3분이 들어 회귀 테스트가 CI 에 못 들어가고, 못 들어간 방어선은 조용히 무력해진다 —
+// 이 예산이 실제로 그랬다. 추가 검수에서 "한 쪽만, 그것도 보통 피해자를 청구한다"
+// 는 결함이 발견됐고, 그것을 잡을 테스트가 없었던 이유가 바로 이 30초였다.
 constexpr int         kDefaultIdleTimeoutSec   = 15;
 int                   g_idle_timeout_sec       = kDefaultIdleTimeoutSec;
+constexpr int         kDefaultLobbyTimeoutSec  = 30;
+int                   g_lobby_timeout_sec      = kDefaultLobbyTimeoutSec;
 
 namespace {
 
@@ -209,11 +223,13 @@ using TimePoint = Clock::time_point;
 
 // 스레드 모델과 같은 값을 쓴다 — 두 바이너리의 동작이 갈리지 않게.
 constexpr auto   kFirstFrameTimeout = std::chrono::seconds(5);
-constexpr auto   kLobbyTimeout      = std::chrono::seconds(30);
-// 포워딩 유휴 만기만 기동 인자로 움직인다(--idle-timeout-sec). 근거는 위
+// 포워딩 유휴 만기와 로비 만기가 기동 인자로 움직인다. 근거는 위
 // g_idle_timeout_sec 선언에 적었다.
 inline std::chrono::seconds idle_timeout() {
     return std::chrono::seconds(g_idle_timeout_sec);
+}
+inline std::chrono::seconds lobby_timeout() {
+    return std::chrono::seconds(g_lobby_timeout_sec);
 }
 constexpr size_t kMaxBytesPerSecond = 64 * 1024;
 constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
@@ -428,6 +444,11 @@ struct Conn {
     // session 은 이 Conn 이 죽을 때까지 붙들고 있는다.
     std::shared_ptr<IpAdmission> handshake_slot;
     std::shared_ptr<IpAdmission> session_slot;
+
+    // accept 때 확정한 출발지 주소. 룸 코드 오답 예산이 IP 단위라 필요하다.
+    // 소켓에서 매번 다시 묻지 않는 이유는, 닫히는 중인 소켓에서는 못 얻기
+    // 때문이다 — 정작 값을 매겨야 할 순간에 키가 비어 버린다.
+    std::string ip;
 
     // 오프로드에 던져 둔 인증 작업의 취소 깃발. Conn 이 사라진 뒤에도 워커가
     // 읽어야 하므로 Conn 이 아니라 shared_ptr 안에 산다. 세우는 쪽은 루프
@@ -706,7 +727,13 @@ private:
                   << " pending_auth=" << pending_auth_.size()
                   << "/" << g_max_pending_auth
                   << " reject_auth_backlog="
-                  << g_reject_auth_backlog.load(std::memory_order_relaxed));
+                  << g_reject_auth_backlog.load(std::memory_order_relaxed)
+                  << " out_of_fds="
+                  << g_reject_out_of_fds.load(std::memory_order_relaxed)
+                  << " reject_room_guess="
+                  << g_reject_room_guess.load(std::memory_order_relaxed)
+                  << " reject_queue_noshow="
+                  << g_reject_queue_noshow.load(std::memory_order_relaxed));
     }
 
     // ── 수명 관리 ────────────────────────────────────────────────────────────
@@ -761,6 +788,7 @@ private:
             c->auth_cancel.reset();
         }
         pending_auth_.erase(c->id);
+        release_pending_auth_ip(c->id);
         c->handshake_slot.reset();
         c->session_slot.reset();
         c->lease.reset();
@@ -820,6 +848,9 @@ private:
     // fd 가 말라 accept 가 실패했다. 리스너를 관심에서 내려 스핀을 끊는다.
     // 관심을 안 내리고 그냥 return 하면 레벨 트리거가 즉시 다시 깨운다.
     void pause_accept() {
+        // 주기 상태 줄에도 남긴다. WARN 한 줄은 지나가면 끝이지만, 이 값은
+        // 사후에 "언제부터 몇 번 마르고 있었나" 를 말해 준다.
+        g_reject_out_of_fds.fetch_add(1, std::memory_order_relaxed);
         if (accept_paused_) return;
         accept_paused_  = true;
         accept_rearm_at_ = Clock::now() + kAcceptBackoff;
@@ -840,6 +871,7 @@ private:
     }
 
     // ── accept ───────────────────────────────────────────────────────────────
+
     void on_accept() {
         // 준비된 연결을 다 비운다 — 레벨 트리거라도 한 번에 처리하는 편이 낫다.
         for (;;) {
@@ -901,6 +933,7 @@ private:
             c->id   = next_conn_id_++;
             c->handshake_slot = std::move(handshake_slot);
             c->session_slot   = std::move(session_slot);
+            c->ip             = key;
             c->last_activity = Clock::now();
             // 버킷 시계도 여기서 출발시킨다. 기본값(epoch)으로 두면 첫 읽기의 경과가
             // "부팅 이후 전체" 로 계산된다 — 천장에서 잘려 결과는 같지만, 그건 우연히
@@ -972,6 +1005,28 @@ private:
         g_tx_total.fetch_sub(c->tx.size(), std::memory_order_relaxed);
         c->tx.clear();
         c->tx.shrink_to_fit();
+    }
+
+    // 대기 왕복 하나의 주소 몫을 반납한다. 등록된 적 없는 id 에는 아무 일도
+    // 하지 않으므로 여러 경로(완료·취소·연결 소멸)에서 불려도 안전하다.
+    void release_pending_auth_ip(uint32_t conn_id) {
+        auto it = pending_auth_ip_of_.find(conn_id);
+        if (it == pending_auth_ip_of_.end()) return;
+        auto cit = pending_auth_by_ip_.find(it->second);
+        if (cit != pending_auth_by_ip_.end() && --cit->second == 0)
+            pending_auth_by_ip_.erase(cit);
+        pending_auth_ip_of_.erase(it);
+    }
+
+    // 로비 만기로 걷히는 페어에서 "짝이 잡혔는데 끝내 침묵한" 쪽 전부에 값을
+    // 매긴다. 연쇄 종료가 상대를 데려가기 전에 불러야 한다.
+    void charge_lobby_no_shows(Conn* c) {
+        const TimePoint now = Clock::now();
+        if (c && c->stage == Stage::Lobby && !c->ready)
+            LobbyNoShowBudget::charge(c->ip, now);
+        Conn* peer = c ? feeder_of(c) : nullptr;
+        if (peer && peer->stage == Stage::Lobby && !peer->ready)
+            LobbyNoShowBudget::charge(peer->ip, now);
     }
 
     // 이미 등록된 연결을 사유와 함께 끊는다.
@@ -1306,6 +1361,28 @@ private:
             return;
         }
 
+        // 전역 상한만으로는 줄의 길이만 정해질 뿐 **누가 그 줄을 차지하는지** 는
+        // 정해지지 않는다. meta 가 느려지면 왕복이 오래 머무는데, 그때 한두
+        // 주소가 상한까지 몰아넣으면 나머지 전원이 굶는다 — 거절 사유가 남으니
+        // 조용히 죽지는 않지만, 막힌 사람 입장에서는 서버가 통째로 닫힌 것과
+        // 같다. per-IP 입장 슬롯(ip_admission.h)이 동시 연결에 하는 일을 여기서
+        // 대기 왕복에 한다. 몫은 전역의 1/8 이되 최소 2 는 준다 — 1 이면 한 사람이
+        // 두 번째 탭을 여는 평범한 일이 막히고, 그건 방어가 아니라 고장이다.
+        const size_t per_ip_cap = std::max<size_t>(2, g_max_pending_auth / 8);
+        // find 로 본다 — operator[] 로 조회하면 지나가는 주소마다 0 짜리 항목이
+        // 생겨 이 방어 자체가 메모리 증가 경로가 된다.
+        const auto   pit = pending_auth_by_ip_.find(c->ip);
+        const size_t cur = (pit == pending_auth_by_ip_.end()) ? 0u : pit->second;
+        if (cur >= per_ip_cap) {
+            g_reject_auth_backlog.fetch_add(1, std::memory_order_relaxed);
+            RLOG_INFO("[relay] 거절: per-IP 인증 대기 상한 (" << c->ip << " "
+                      << cur << "/" << per_ip_cap << ")");
+            reject_conn(c, net::RejectReason::AuthBacklog,
+                        "too many pending sign-ins from your address",
+                        "per-IP 인증 대기 상한");
+            return;
+        }
+
         // continuation 은 Conn* 이 아니라 conn id 를 포착한다 — 인증 왕복 사이에
         // 그 연결이 끊겨 객체가 사라졌을 수 있기 때문이다. 재개 시점에 id 로 다시
         // 찾고, 없으면 조용히 버린다.
@@ -1316,6 +1393,8 @@ private:
         c->auth_cancel = std::make_shared<std::atomic<bool>>(false);
         auto cancel = c->auth_cancel;
         pending_auth_.insert(cid);
+        ++pending_auth_by_ip_[c->ip];
+        pending_auth_ip_of_[cid] = c->ip;
         const bool queued = offload_->submit(
             [this, meta, token, cid, cancel]() -> Offload::Cont {
                 // 큐에서 기다리는 동안 그 연결이 죽었으면 왕복 자체를 하지
@@ -1339,6 +1418,7 @@ private:
                      std::optional<meta::client::AuthInfo> auth,
                      const std::string& token) {
         pending_auth_.erase(conn_id);
+        release_pending_auth_ip(conn_id);
         Conn* c = find_by_id(conn_id);
         if (!c) return;   // 인증 도중 끊겼다
         // 왕복이 끝났으니 취소 깃발도 역할을 다했다. 남겨 두면 이후 close_conn 이
@@ -1431,6 +1511,19 @@ private:
     void room_join(Conn* c) {
         auto it = rooms_.find(c->join_code);
         if (it == rooms_.end()) {
+            // 오답에만 값을 매긴다 — 정답으로 들어가는 사람은 이 예산을 모른다.
+            // 코드가 틀리면 어차피 연결이 닫히지만, 그건 속도 제한일 뿐 총량
+            // 제한이 아니다. 붙었다 끊기를 반복하면 추측 횟수는 시간에 비례해
+            // 계속 는다. 방이 살아 있는 동안 한 주소가 던질 수 있는 수를 실제로
+            // 잘라야 코드 공간(32^5)이 방어력이 된다 — room_guess_budget.h 참조.
+            if (!RoomGuessBudget::charge(c->ip, Clock::now())) {
+                g_reject_room_guess.fetch_add(1, std::memory_order_relaxed);
+                RLOG_INFO("[relay] 거절: 룸 코드 오답 예산 소진 (" << c->ip << ")");
+                reject_conn(c, net::RejectReason::RoomGuessLimit,
+                            "too many wrong room codes from your address",
+                            "룸 코드 오답 예산 소진");
+                return;
+            }
             send_room_info(c, c->join_code, kStatusNotFound, 0);
             close_conn(c, "존재하지 않는 룸 코드");
             return;
@@ -1523,6 +1616,18 @@ private:
 
     // ── 큐 ───────────────────────────────────────────────────────────────────
     void enter_queue(Conn* c) {
+        // 대기 자체에는 값을 매길 수 없다 — 한가한 서버에서 오래 기다리는 것은
+        // 정상이고, 대기 시간에 상한을 두면 표적이 되는 것은 공격자가 아니라
+        // 조용히 기다리는 사람이다. 값을 매길 수 있는 것은 "짝이 잡혔는데 끝내
+        // 아무것도 하지 않은" 이력뿐이라, 그 이력이 쌓인 주소만 여기서 막는다.
+        if (!LobbyNoShowBudget::allowed(c->ip, Clock::now())) {
+            g_reject_queue_noshow.fetch_add(1, std::memory_order_relaxed);
+            RLOG_INFO("[relay] 거절: 매칭 후 무응답 이력 (" << c->ip << ")");
+            reject_conn(c, net::RejectReason::QueueNoShow,
+                        "too many abandoned matches from your address",
+                        "매칭 후 무응답 예산 소진");
+            return;
+        }
         c->stage = Stage::Queued;
         // 큐에 세우기 전에 이미 도착해 있는 QUEUE_CANCEL 을 먼저 본다. 순서를
         // 뒤집으면(넣고 → 짝짓고 → 취소 확인) 상대가 이미 대기 중일 때 취소한
@@ -1617,7 +1722,7 @@ private:
             close_conn(b, "MATCH_FOUND 송신 실패");
             return;
         }
-        const TimePoint deadline = Clock::now() + kLobbyTimeout;
+        const TimePoint deadline = Clock::now() + lobby_timeout();
         timers_.arm(a, deadline);
         timers_.arm(b, deadline);
 
@@ -1900,7 +2005,22 @@ private:
         switch (c->stage) {
             case Stage::FirstFrame: close_conn(c, "첫 프레임 타임아웃"); break;
             case Stage::Room:       close_conn(c, "룸 대기 타임아웃");   break;
-            case Stage::Lobby:      close_conn(c, "로비 타임아웃");      break;
+            case Stage::Lobby:
+                // 짝이 잡힌 뒤 끝내 READY 를 보내지 않은 쪽에만 값을 매긴다.
+                // READY 를 이미 보내고 상대를 기다리다 함께 걷히는 사람은 피해자
+                // 이므로 세지 않는다 — 세면 정확히 반대로 동작한다.
+                //
+                // 두 사람을 여기서 함께 판정해야 한다. start_match 가 양쪽에 같은
+                // 데드라인을 걸어 두 만기가 한 배치에 나오는데, 먼저 처리된 쪽의
+                // close_conn 이 close_channel_survivor 로 상대를 그 자리에서
+                // 닫아 버려서 상대의 on_timeout 은 alive() 가드에 걸려 아예 돌지
+                // 않는다. 그래서 자기 것만 청구하면 매치당 최대 한 번만 청구되고,
+                // 그 한 번은 힙이 어느 쪽을 먼저 꺼냈는지가 정한다 — 큐에 먼저 선
+                // 사람이 먼저 나오는 경향이라 보통 READY 를 보낸 피해자가 걸리고,
+                // 정작 침묵한 쪽은 청구되지 않는다. 그러면 이 예산은 있으나 마나다.
+                charge_lobby_no_shows(c);
+                close_conn(c, "로비 타임아웃");
+                break;
             case Stage::Forward: {
                 // 우리가 백프레셔로 입을 막아 둔 연결은 유휴가 아니다 — 읽기 이벤트가
                 // 안 나는 게 당연하다. 여기서 끊으면 "느리게 읽는 상대" 때문에 "정상
@@ -2141,6 +2261,11 @@ private:
     std::deque<Conn*>          queue_;
     std::vector<Conn*>         dying_;
     std::unordered_set<uint32_t> pending_auth_;
+    // 대기 왕복의 주소별 몫. Conn 이 먼저 사라져도 정확히 한 번 반납해야 하므로
+    // "어느 연결이 어느 주소로 셌는지" 를 따로 들고 있는다 — 반납할 때 Conn 을
+    // 다시 찾아 c->ip 를 읽는 방식은 이미 사라진 뒤라 쓸 수 없다.
+    std::unordered_map<std::string, size_t> pending_auth_by_ip_;
+    std::unordered_map<uint32_t, std::string> pending_auth_ip_of_;
 
     // 샤딩. shards_ 는 앞단만 채운다(샤드에서는 비어 있어 재인계가 일어나지 않는다).
     std::vector<RelayLoop*> shards_;
@@ -2287,6 +2412,13 @@ int main(int argc, char** argv) {
                                "--idle-timeout-sec", 1, 3600, n)) return 2;
             relay::g_idle_timeout_sec = n;
         }
+        else if (a == "--lobby-timeout-sec") {
+            int n = 0;
+            // 하한 1 의 이유는 위와 같다 — 0 은 끄기가 아니라 즉시 만기다.
+            if (!parse_int_arg(next("--lobby-timeout-sec"),
+                               "--lobby-timeout-sec", 1, 3600, n)) return 2;
+            relay::g_lobby_timeout_sec = n;
+        }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Usage: tetris_relay_reactor [--port N] [--loops N] [--meta URL]\n"
@@ -2295,6 +2427,7 @@ int main(int argc, char** argv) {
                 "                            [--max-pending-auth N]\n"
                 "                            [--log-level L] [--stats-interval-sec N]\n"
                 "                            [--idle-timeout-sec N] [--ipv6-prefix N]\n"
+                "                            [--lobby-timeout-sec N]\n"
                 "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
                 "\n"
                 "  --loops N   루프 스레드 수 (기본 1). 앞단 루프 하나가 accept·인증·큐·\n"
@@ -2358,7 +2491,14 @@ int main(int argc, char** argv) {
                 "              매치 슬롯을 되찾는다. 백프레셔로 멈춰 세운 연결은\n"
                 "              유휴가 아니므로 예외지만, 양쪽이 서로를 멈춰 세운\n"
                 "              페어는 이 만기에 회수한다. 끄는 값은 없다 — 회수 경로가\n"
-                "              이것뿐이라 0 은 상한 없는 fd 점유와 같은 뜻이다.\n";
+                "              이것뿐이라 0 은 상한 없는 fd 점유와 같은 뜻이다.\n"
+                "  --lobby-timeout-sec N\n"
+                "              매칭 뒤 READY 를 기다리는 시간, 초 (기본 "
+                                    << relay::kDefaultLobbyTimeoutSec << ", 1..3600).\n"
+                "              이 시간 안에 양쪽 READY 가 오지 않으면 페어를 걷고,\n"
+                "              그때 끝내 침묵한 쪽의 주소에 값을 매긴다. 낮추면 매칭\n"
+                "              후 무응답에 대한 회귀 테스트를 벽시계 몇 초 안에 돌릴\n"
+                "              수 있다 — 그것이 이 값을 상수에서 꺼낸 이유다.\n";
             return 0;
         }
         else {

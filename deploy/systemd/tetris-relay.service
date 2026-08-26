@@ -52,5 +52,32 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 
+# ── 샌드박스 보강 ────────────────────────────────────────────────────────────
+# 아래는 전부 이 바이너리가 실제로 쓰지 않는 것을 막는 항목이다. 인터넷에 열린
+# 프로세스가 언젠가 임의 코드 실행을 허용했을 때, 거기서 더 나아갈 수 있는 길을
+# 미리 끊어 둔다.
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_UNIX 는 남긴다 — getaddrinfo 가 NSS 를 거칠 때 필요하다. 빼면 --meta 의
+# 호스트 이름 해석이 조용히 실패한다.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 1024 위 포트만 쓰므로 CAP_NET_BIND_SERVICE 도 필요 없다.
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0077
+
 [Install]
 WantedBy=multi-user.target

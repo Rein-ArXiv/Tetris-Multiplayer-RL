@@ -1271,6 +1271,20 @@ _DEADLOCK_REASON = "상호 백프레셔 교착 (양쪽 read_paused)"
 # 한 자릿수 초에 끝난다. 위로는 pause 상한(kMaxPauseDuration, 16초)이 천장이다 —
 # 일방 백프레셔 테스트가 그 상한에 닿으면 재려던 것과 다른 갈래를 재게 된다.
 _BP_IDLE_SEC = 3
+# server/reactor_relay.cpp 의 kMaxPauseDuration 과 같아야 한다
+# (kRateBurstBytes / kMaxBytesPerSecond 에서 유도되는 값).
+#
+# 교착 회수가 "만기 몇 번" 이 아니라 이 상한에 매여 있기 때문에 필요하다. 릴레이는
+# 상대가 아직 배출 중일 수 있다고 보이면 만기에서 곧장 끊지 않고 pause 시작점
+# +kMaxPauseDuration 으로 재무장한다. 커널이 송신 버퍼를 조금 비워 read_paused 가
+# 한순간 풀리면 정확히 그 갈래를 타므로, 만기의 배수로 잡은 대기 예산(3*3+3=12초)은
+# 16초 천장보다 짧아 릴레이가 규정대로 동작해도 테스트가 진다. 실제로 이 불일치가
+# CI 를 리눅스·윈도우 양쪽에서 간헐적으로 빨갛게 만들고 있었다.
+_BP_MAX_PAUSE_SEC = 16
+# 위 pause 예산 테스트가 2단계에서 쌓아야 하는 최소 적체. 이보다 적게 쌓이면
+# "예산 없이도 덮이는" 구간에 들어가 판정이 성립하지 않는다. 값은 그 테스트의
+# tokens_left(≈394 KiB) + 멈추지 않은 구간의 충전을 넘겨야 한다는 데서 온다.
+_BP_MIN_STAGED_BYTES = 900 * 1024
 # 커널이 한 번에 다 삼키지 않을 크기의 프레임.
 _BP_CHUNK = build_frame(MsgType.CHAT, b"x" * 4000)
 # 로비에서 토큰만 태우는 길이 0 프레임(길이 2바이트 + 체크섬 4바이트).
@@ -1512,6 +1526,18 @@ def test_reactor_does_not_bill_the_sender_for_backpressure_it_imposed():
     # 한다 — 넘겨 밀면 지급이 있어도 정당하게 끊기고, 그건 이 계약이 아니다.
     HOLD_SEC = 10.0
     HOLD_RATE = 60 * 1024
+    # A 의 커널 송신 버퍼. 이 값을 안 건드리면 플랫폼 기본값(대개 이 시험의 목표보다
+    # 작다)에 막혀 2단계가 목표한 만큼(HOLD_RATE*HOLD_SEC ≈586 KiB)을 커널에 못
+    # 넘긴다 — 실측: Windows 기본값에서 목표의 절반가량만 send() 가 받아 주고
+    # 나머지는 파이썬 쪽 버퍼에 갇혔다(3단계는 sender.pump 를 다시 안 부르므로
+    # 그 갇힌 몫은 영영 안 나간다). 그러면 got_b 가 재려던 "pause 예산이 덮은 양"이
+    # 아니라 "A 의 송신 버퍼가 우연히 얼마나 컸나" 를 재게 되어 플랫폼마다 결과가
+    # 갈린다. 수신 창과는 무관한 지렛대다 — 로컬 송신 버퍼는 상대가 안 읽어 ACK가
+    # 안 와도 그 자체 용량만큼은 쌓인다(재전송을 위해 커널이 들고 있어야 하는 몫이라
+    # 원격 수신 여부와 별개). 1·2단계 목표 합(≈900 KiB)보다 넉넉히 큰 값으로 고정해
+    # 그 편차를 없앤다. 수신 버퍼(SO_RCVBUF)는 여전히 건드리지 않는다 — 그건 다른
+    # 계약(위 주석 참고)이다.
+    SEND_BUF_BYTES = 4 * 1024 * 1024
 
     proc, port, stats = _spawn_relay_with_stats(
         lambda p: [str(reactor_bin), "--port", str(p),
@@ -1524,6 +1550,22 @@ def test_reactor_does_not_bill_the_sender_for_backpressure_it_imposed():
         # 세므로, 앞으로 잡을수록 그 최대치가 커지고 판정은 그만큼 보수적이 된다.
         t0 = time.monotonic()
         a, b, conn_a, conn_b = _forwarding_pair(stats, port, lobby_burn=BURN)
+        a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SEND_BUF_BYTES)
+        # 요청한 값이 그대로 잡혔는지 반드시 되읽는다. 리눅스는 SO_SNDBUF 를
+        # net.core.wmem_max(기본 212992)로 잘라 버리고 그 두 배를 저장하므로,
+        # 4 MiB 를 요청해도 실제로는 400 KiB 대만 잡힐 수 있다. 그 상태로 그냥
+        # 진행하면 아래 마지막 단언이 "예산이 지급되지 않았다" 처럼 실패하는데,
+        # 진짜 원인은 릴레이가 아니라 이 호스트가 적체를 충분히 못 쌓은 것이다.
+        # 원인이 다른 두 실패를 같은 모양으로 만들면 CI 에서 구분할 수 없으므로,
+        # 전제 조건은 전제 조건으로서 실패시킨다.
+        eff_sndbuf = a.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        if eff_sndbuf < _BP_MIN_STAGED_BYTES:
+            pytest.fail(
+                f"A 의 송신 버퍼가 {eff_sndbuf} 바이트뿐이라(요청 {SEND_BUF_BYTES}) "
+                f"2단계에서 {_BP_MIN_STAGED_BYTES} 바이트 이상을 쌓을 수 없다. "
+                "이 호스트에서는 이 테스트가 재려는 것을 잴 수 없다 — 리눅스라면 "
+                "net.core.wmem_max 가 상한이다 "
+                "(sysctl -w net.core.wmem_max=4194304). 릴레이의 결함이 아니다.")
         tokens_left = _RELAY_RATE_BURST_BYTES - BURN
 
         # 수신 버퍼는 어느 쪽도 건드리지 않는다. B 쪽을 좁히면 3단계에서 B 의
@@ -2502,8 +2544,10 @@ def test_reactor_reclaims_a_mutually_backpressured_pair():
         # 2단계 — 여기서부터 아무도 아무것도 안 보낸다. 릴레이만 스스로 움직인다.
         # 만기 두 번 반의 여유를 준다: 양쪽이 정확히 같은 순간에 멈추지는 않으므로
         # 먼저 멈춘 쪽은 첫 만기에서 (상대가 아직 멀쩡해) 한 번 재무장할 수 있다.
-        closes = stats.wait_for_closes_after(started, 2, _BP_IDLE_SEC * 3 + 3,
-                                             (conn_a, conn_b))
+        # 천장(kMaxPauseDuration)을 넘겨 기다린다 — 만기의 배수로 잡으면 릴레이가
+        # 재무장할 권리를 가진 구간 안에서 테스트가 먼저 포기한다.
+        closes = stats.wait_for_closes_after(
+            started, 2, _BP_MAX_PAUSE_SEC + _BP_IDLE_SEC + 6, (conn_a, conn_b))
         reasons = [why for _, why in closes]
         assert _DEADLOCK_REASON in reasons, (
             f"교착된 페어가 회수되지 않았다 (만기 {_BP_IDLE_SEC}초, "

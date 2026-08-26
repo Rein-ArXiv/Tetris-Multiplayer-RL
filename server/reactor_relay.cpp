@@ -2153,8 +2153,37 @@ private:
         const Summary s = haveA ? *ch->sumA : *ch->sumB;
         // 한쪽 요약만 있으면 그 요약의 won 을 존중한다 — 끊긴 순서로 승자를 정하면
         // 승리 요약을 낸 직후 회선이 끊긴 쪽이 패자로 뒤집힌다.
-        const int64_t winner = haveA ? (s.won ? ch->a_id : ch->b_id)
-                                     : (s.won ? ch->b_id : ch->a_id);
+        //
+        // 단, 그 존중에는 전제가 있다: 요약을 낸 사람과 끊은 사람이 **다른 사람**이어야
+        // 한다. 같은 사람이면 자기 승리를 자기가 신고하고 자리를 뜬 것이고, 그 주장을
+        // 반증할 상대는 아직 경기 중이라 아무것도 제출하지 못했다. 교차검증
+        // (finalize_ranked)은 이 경로에 개입하지 않으므로 이 한 장이 곧 판결이 된다.
+        //
+        // 실측(2026-08-27, 배포 바이너리): READY 직후 MATCH_SUMMARY{won=1} 28바이트
+        // 한 장을 보내고 소켓을 닫자, 게임 프레임을 한 장도 주고받지 않은 채 신고자의
+        // elo 가 0 에서 16 으로 올랐다. 상대는 그동안 정상적으로 경기 중이었다.
+        // 공모자도 플레이도 필요 없고, 큐에서 만난 아무나에게 성립한다.
+        //
+        // 그래서 "이탈자 본인의 승리 주장" 만 무효화한다. 승자를 뒤집지는 않는다 —
+        // 뒤집으면 이번에는 자폭이 도구가 되어, 지고 있는 사람이 패배 요약을 낸 뒤
+        // 끊어 상대의 승리를 지울 수 있다. 승자를 비우면 meta 의 saveMatch 가
+        // elo/wins/losses/bp/xp 를 통째로 건너뛰므로(무승부 경로와 같은 처리) 어느
+        // 쪽도 이득도 손해도 보지 않는다.
+        //
+        // 대가는 정직하게 적어 둔다: 승리 요약을 낸 **직후 실제로 회선이 끊긴** 사람도
+        // 무보상이 된다. 와이어에서 고의 이탈과 회선 사고는 구분할 수 없고, 그 모호함의
+        // 비용은 누군가 낸다. 지금은 그 비용을 아무 잘못 없는 상대가 내고 있고, 이
+        // 변경은 그것을 주장한 본인에게 옮긴다.
+        const int reporter = haveA ? 1 : 2;
+        std::optional<int64_t> winner;
+        if (ch->disconnect_side == reporter && s.won) {
+            RLOG_WARN("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
+                      << " player_id=" << ch->a_id << " x " << ch->b_id
+                      << " 승리 자기신고 후 신고자 이탈 -> winner=null");
+        } else {
+            winner = haveA ? (s.won ? ch->a_id : ch->b_id)
+                           : (s.won ? ch->b_id : ch->a_id);
+        }
         const int scoreA = (int)(haveA ? s.my_score : s.opp_score);
         const int scoreB = (int)(haveA ? s.opp_score : s.my_score);
         const int linesA = (int)(haveA ? s.my_lines : s.opp_lines);

@@ -249,9 +249,35 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
     //     종전에는 disconnectSide 를 무조건 패자로 기록했는데, 그러면 이긴 쪽이
     //     승리 요약을 제출한 직후 회선이 끊겼을 때 제출된 승리 요약이 무시되고
     //     승자가 패자로 뒤집히는 버그가 있었다.
-    int64_t winner = 0;
-    if (haveA) winner = a.won ? ch.playerA_id : ch.playerB_id;
-    else       winner = b.won ? ch.playerB_id : ch.playerA_id;
+    //
+    //     단, 그 존중에는 전제가 있다: 요약을 낸 사람과 끊은 사람이 다른 사람이어야
+    //     한다. 같으면 자기 승리를 자기가 신고하고 자리를 뜬 것이고, 그 주장을
+    //     반증할 상대는 아직 경기 중이라 아무것도 제출하지 못했다. 교차검증
+    //     (finalizeRanked)은 이 경로에 개입하지 않으므로 그 한 장이 곧 판결이 된다.
+    //     실측(배포 대상 reactor 에서, 같은 결함): READY 직후 MATCH_SUMMARY{won=1}
+    //     28바이트 하나를 보내고 소켓을 닫자 게임 프레임 없이 신고자 elo 가 올랐다.
+    //     큐에서 만난 아무에게나 성립해 공모자도 플레이도 필요 없다.
+    //
+    //     승자를 뒤집지 않고 비운다. 뒤집으면 이번에는 자폭이 도구가 되어, 지고
+    //     있는 사람이 패배 요약을 낸 뒤 끊어 상대의 승리를 지울 수 있다. 승자를 0
+    //     으로 두면 meta 의 saveMatch 가 elo/wins/losses/bp/xp 를 통째로 건너뛴다.
+    //     대가: 승리 요약 직후 실제로 회선이 끊긴 사람도 무보상이 된다. 와이어에서
+    //     고의 이탈과 사고는 구분할 수 없고, 그 비용을 아무 잘못 없는 상대가 내던
+    //     것을 주장한 본인에게 옮기는 것이다.
+    //     winner 는 optional 이다. 0 을 넣으면 "승자 없음" 이 아니라 "player_id 0 이
+    //     이겼다" 가 되고, meta 가 winner 는 두 참가자 중 하나여야 한다며 400 으로
+    //     거절한다(meta/api_server.cpp 의 /v1/matches). 비우려면 nullopt 여야 한다.
+    const int reporterSide = haveA ? 1 : 2;
+    const bool selfReportedWin = haveA ? (a.won != 0) : (b.won != 0);
+    std::optional<int64_t> winner;
+    if (disconnectSide == reporterSide && selfReportedWin) {
+        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
+                  << " 승리 자기신고 후 신고자 이탈 -> winner=none");
+    } else if (haveA) {
+        winner = a.won ? ch.playerA_id : ch.playerB_id;
+    } else {
+        winner = b.won ? ch.playerB_id : ch.playerA_id;
+    }
 
     const int scoreA = static_cast<int>(haveA ? a.my_score : b.opp_score);
     const int scoreB = static_cast<int>(haveB ? b.my_score : a.opp_score);
@@ -275,7 +301,8 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
     if (disconnectSide != 2) sendToB(ch, frB);
     RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
               << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
-              << " forfeit winner=" << (winner == ch.playerA_id ? "A" : "B")
+              << " forfeit winner="
+              << (!winner ? "none" : (*winner == ch.playerA_id ? "A" : "B"))
               << " (summary from " << (haveA ? "A" : "B")
               << ", disconnect=" << disconnectSide << ") saved meta match="
               << res->match_id);

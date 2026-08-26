@@ -353,6 +353,63 @@ def test_disconnect_before_summary_is_forfeit(meta_relay):
         a.close(); b.close()
 
 
+def test_self_reported_win_by_the_leaver_earns_nothing(meta_relay):
+    """이탈자가 자기 승리를 신고하고 끊으면 아무것도 적립되면 안 된다.
+
+    바로 위 테스트가 못 박은 "생존자 요약 1개 -> 몰수승" 과 짝이다. 요약이 하나뿐인
+    상황은 둘로 갈리는데, 그 둘을 구분하지 않으면 한쪽이 공격이 된다:
+
+      · 생존자가 냈다  -> 상대가 자리를 떴고 남은 사람이 결과를 보고했다. 존중한다.
+      · 이탈자가 냈다  -> 자기 승리를 자기가 신고하고 자리를 떴다. 그 주장을 반증할
+                         상대는 아직 경기 중이라 아무것도 제출하지 못했다. 교차검증은
+                         이 경로에 개입하지 않으므로 그 한 장이 곧 판결이 된다.
+
+    수정 전 실측(배포 바이너리): READY 직후 MATCH_SUMMARY{won=1} 한 장을 보내고 소켓을
+    닫자, 게임 프레임을 한 장도 주고받지 않은 채 신고자의 elo 가 0 에서 16 으로 올랐다.
+    큐에서 만난 아무에게나 성립하므로 공모자도 플레이도 필요 없었다.
+
+    승자를 뒤집지 않고 비우는 것이 계약이다. 뒤집으면 이번에는 자폭이 도구가 된다 —
+    지고 있는 사람이 패배 요약을 낸 뒤 끊어 상대의 승리를 지울 수 있다.
+    """
+    base = meta_relay["meta_url"]
+    rport = meta_relay["relay_port"]
+    victim = _post(f"{base}/v1/guest")
+    leaver = _post(f"{base}/v1/guest")
+
+    v = socket.create_connection(("127.0.0.1", rport), timeout=2.0)
+    a = socket.create_connection(("127.0.0.1", rport), timeout=2.0)
+    try:
+        v.sendall(_qjoin(victim["token"]))
+        a.sendall(_qjoin(leaver["token"]))
+        assert _await_match_found(v)
+        assert _await_match_found(a)
+        _queue_accept(v, a)
+
+        # 이탈자가 승리를 신고한다. 위 테스트와 같은 이유로 뒤이어 PING 을 보내
+        # 요약이 소비된 것을 관측한 뒤에 닫는다 — 그래야 "요약 없음" 분기로 새지
+        # 않고 이 테스트가 겨눈 분기에 확실히 들어간다.
+        a.sendall(_summary(won=1, my_score=999999, my_lines=999,
+                           opp_score=0, opp_lines=0))
+        a.sendall(build_frame(MsgType.PING, b"\x00" * 8))
+        assert _recv_until(v, MsgType.PING) is not None
+        a.close()
+
+        # 피해자는 이탈 통지를 받는다. 그러나 장부는 움직이지 않아야 한다.
+        result = _recv_until(v, MsgType.MATCH_RESULT)
+        if result is not None:
+            assert struct.unpack_from("<i", result, 8)[0] == 0, \
+                "이탈자의 자기신고로 피해자 RP 가 움직였다"
+
+        cheat = _post(f"{base}/v1/auth/verify", {"token": leaver["token"]})
+        prey  = _post(f"{base}/v1/auth/verify", {"token": victim["token"]})
+        assert cheat["bp"] == 0 and cheat["xp"] == 0, \
+            f"이탈자가 자기신고로 적립했다: bp={cheat['bp']} xp={cheat['xp']}"
+        assert prey["bp"] == 0 and prey["xp"] == 0, \
+            f"경기 중이던 피해자의 장부가 움직였다: bp={prey['bp']} xp={prey['xp']}"
+    finally:
+        v.close(); a.close()
+
+
 def test_relay_without_meta_rejects_token(tmp_path):
     """meta 미기동인 채 --meta URL 만 주면 verify 가 실패해야 한다."""
     # 임의의 free port 를 --meta 로 쓰지만 그 포트에 아무것도 안 띄움 → connect 실패.

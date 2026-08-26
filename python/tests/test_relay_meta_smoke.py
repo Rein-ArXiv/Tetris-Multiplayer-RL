@@ -1281,10 +1281,6 @@ _BP_IDLE_SEC = 3
 # 16초 천장보다 짧아 릴레이가 규정대로 동작해도 테스트가 진다. 실제로 이 불일치가
 # CI 를 리눅스·윈도우 양쪽에서 간헐적으로 빨갛게 만들고 있었다.
 _BP_MAX_PAUSE_SEC = 16
-# 위 pause 예산 테스트가 2단계에서 쌓아야 하는 최소 적체. 이보다 적게 쌓이면
-# "예산 없이도 덮이는" 구간에 들어가 판정이 성립하지 않는다. 값은 그 테스트의
-# tokens_left(≈394 KiB) + 멈추지 않은 구간의 충전을 넘겨야 한다는 데서 온다.
-_BP_MIN_STAGED_BYTES = 900 * 1024
 # 커널이 한 번에 다 삼키지 않을 크기의 프레임.
 _BP_CHUNK = build_frame(MsgType.CHAT, b"x" * 4000)
 # 로비에서 토큰만 태우는 길이 0 프레임(길이 2바이트 + 체크섬 4바이트).
@@ -1551,21 +1547,11 @@ def test_reactor_does_not_bill_the_sender_for_backpressure_it_imposed():
         t0 = time.monotonic()
         a, b, conn_a, conn_b = _forwarding_pair(stats, port, lobby_burn=BURN)
         a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SEND_BUF_BYTES)
-        # 요청한 값이 그대로 잡혔는지 반드시 되읽는다. 리눅스는 SO_SNDBUF 를
-        # net.core.wmem_max(기본 212992)로 잘라 버리고 그 두 배를 저장하므로,
-        # 4 MiB 를 요청해도 실제로는 400 KiB 대만 잡힐 수 있다. 그 상태로 그냥
-        # 진행하면 아래 마지막 단언이 "예산이 지급되지 않았다" 처럼 실패하는데,
-        # 진짜 원인은 릴레이가 아니라 이 호스트가 적체를 충분히 못 쌓은 것이다.
-        # 원인이 다른 두 실패를 같은 모양으로 만들면 CI 에서 구분할 수 없으므로,
-        # 전제 조건은 전제 조건으로서 실패시킨다.
+        # 요청이 그대로 잡히지 않을 수 있다. 리눅스는 SO_SNDBUF 를
+        # net.core.wmem_max(기본 212992)로 자르고 그 두 배를 저장하므로, 4 MiB 를
+        # 요청해도 실제로는 400 KiB 대만 잡힌다(GitHub Actions ubuntu 러너 실측
+        # 425984). 되읽어 두었다가 아래에서 판정 근거로 쓴다.
         eff_sndbuf = a.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
-        if eff_sndbuf < _BP_MIN_STAGED_BYTES:
-            pytest.fail(
-                f"A 의 송신 버퍼가 {eff_sndbuf} 바이트뿐이라(요청 {SEND_BUF_BYTES}) "
-                f"2단계에서 {_BP_MIN_STAGED_BYTES} 바이트 이상을 쌓을 수 없다. "
-                "이 호스트에서는 이 테스트가 재려는 것을 잴 수 없다 — 리눅스라면 "
-                "net.core.wmem_max 가 상한이다 "
-                "(sysctl -w net.core.wmem_max=4194304). 릴레이의 결함이 아니다.")
         tokens_left = _RELAY_RATE_BURST_BYTES - BURN
 
         # 수신 버퍼는 어느 쪽도 건드리지 않는다. B 쪽을 좁히면 3단계에서 B 의
@@ -1652,6 +1638,30 @@ def test_reactor_does_not_bill_the_sender_for_backpressure_it_imposed():
         # 재개 이후의 충전까지 넉넉히 얹어 보수적으로 잡는다.
         without_credit = tokens_left + int(
             _RELAY_MAX_BYTES_PER_SECOND * (ramp_s + drain_s + 1.0))
+
+        # 판정이 성립하려면 2단계가 적체를 충분히 쌓았어야 한다. 그런데 그 적체는
+        # A 의 로컬 송신 버퍼가 담는 것이고, 그 크기는 이 호스트가 정한다 — 리눅스는
+        # net.core.wmem_max 로 잘라 버린다. 못 쌓은 채로 마지막 단언에 걸리면 화면에
+        # 뜨는 말은 "예산이 지급되지 않았다" 인데 실제 원인은 릴레이가 아니라 커널
+        # 설정이라, 원인이 전혀 다른 두 실패가 같은 모양이 된다.
+        #
+        # 그래서 못 쌓았다는 물증이 있을 때만 건너뛴다: sender 에 아직 밀어내지
+        # 못한 바이트가 남아 있다는 것은 로컬 버퍼가 한계였다는 뜻이다(릴레이가
+        # 읽어 주지 않아서가 아니라 — 그건 이 테스트가 일부러 만든 상태이고, 그
+        # 경우에도 커널이 받아 주는 만큼은 나간다).
+        #
+        # 계약 자체를 놓치지는 않는다. 지급이 사라진 릴레이는 여기까지 오지 못하고
+        # 위의 "끊기지 않았다" 에서 'byte rate 초과' 로 걸린다(실측 확인). 여기서
+        # 건너뛰는 것은 계약이 아니라 "이 실행이 그것을 재고 있었나" 뿐이다.
+        if got_b[0] <= without_credit and sender.backlog() > 0:
+            pytest.skip(
+                f"이 호스트는 2단계 적체를 다 쌓지 못했다 — A 의 송신 버퍼가 "
+                f"{eff_sndbuf} 바이트뿐이고(요청 {SEND_BUF_BYTES}) 밀어내지 못한 "
+                f"{sender.backlog()} 바이트가 남았다. 통과량 {got_b[0]} 은 지급 "
+                f"없이도 덮이는 {without_credit} 아래라 이 실행은 예산을 재지 "
+                "못한다. 리눅스라면 net.core.wmem_max 가 상한이다 "
+                "(sysctl -w net.core.wmem_max=4194304). 릴레이의 결함이 아니다.")
+
         assert got_b[0] > without_credit, (
             f"릴레이를 통과한 양이 {got_b[0]} 바이트뿐이라 지급 없이도 덮인다 "
             f"(태우고 남은 토큰 {tokens_left} + 멈추지 않은 "

@@ -79,6 +79,30 @@ namespace relay {
 constexpr size_t kDefaultMaxConns = 4096;
 size_t           g_max_conns      = kDefaultMaxConns;
 
+// per-IP 상한이 IPv6 주소를 묶는 접두사 길이. 근거는 net/socket.cpp 의
+// tcp_peer_admission_key 주석에 있다 — 요약하면, 가입자 하나가 /64 를 통째로
+// 받는 것이 표준이라 주소 단위로 세면 두 per-IP 상한이 "주소를 바꾸는 수고" 로
+// 격하되고 IPv6 에서 그 수고는 사실상 0 이다. 조일 필요가 실제로 생기는 경우가
+// 있어(/48·/56 을 받는 가입자) --ipv6-prefix 로 노출한다.
+// fd 가 말라 accept 가 실패했을 때 리스너를 내려 두는 시간.
+//
+// 이 백오프가 없으면 루프가 코어를 태운다. 리스너는 레벨 트리거라(EPOLLET 없음)
+// 커널 accept 큐에 대기 중인 연결이 남아 있는 한 매 poll 마다 재통지되는데,
+// EMFILE 상태에서는 accept 가 그 큐를 비울 수 없으므로 "깨어난다 → 실패한다 →
+// 즉시 다시 깨어난다" 가 무한 반복된다(실측: 앞단 루프가 코어 하나를 100%
+// 지속 소모). 기본 --loops 1 에서는 그 루프가 포워딩도 겸하므로 진행 중인
+// 매치의 지터로 바로 이어진다.
+//
+// 250ms 를 고른 근거는 양쪽 실패 모드다. 너무 길면 fd 가 풀린 뒤에도 정상
+// 접속을 그만큼 못 받고, 너무 짧으면 스핀에 가까워져 백오프의 의미가 없다.
+// 이 시간 동안 대기 중인 연결은 커널 accept 큐에 남아 있다가 재무장 후
+// 처리되므로 버려지는 것이 아니다(큐가 넘치면 커널이 거절하는데, 그건 이미
+// fd 가 마른 상태에서 올바른 실패 모드다).
+constexpr auto   kAcceptBackoff = std::chrono::milliseconds(250);
+
+constexpr int    kDefaultIpv6PrefixBits = 64;
+int              g_ipv6_prefix_bits     = kDefaultIpv6PrefixBits;
+
 // 보류 송신(tx)의 프로세스 전체 예산.
 //
 // 연결당 상한만으로는 메모리를 보장하지 못한다. 두 값이 곱해지기 때문이다 —
@@ -555,8 +579,17 @@ public:
 
         while (g_running.load()) {
             const TimePoint now = Clock::now();
+            resume_accept_if_due(now);
             int timeout = timers_.timeout_ms(now);
             if (timeout < 0 || timeout > 500) timeout = 500;  // 종료 플래그 확인 주기
+            // 리스너를 내려 둔 동안에는 재무장 시점을 넘겨 자지 않는다. 넘겨 자면
+            // 백오프가 실제로는 최대 500ms 로 늘어나고, 그만큼 정상 접속도 늦어진다.
+            if (accept_paused_) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      accept_rearm_at_ - now).count();
+                const int left_ms = left < 0 ? 0 : (int)left;
+                if (left_ms < timeout) timeout = left_ms;
+            }
 
             const int n = reactor_->poll(events, timeout);
             if (n < 0) {
@@ -782,12 +815,38 @@ private:
         }
     }
 
+    // fd 가 말라 accept 가 실패했다. 리스너를 관심에서 내려 스핀을 끊는다.
+    // 관심을 안 내리고 그냥 return 하면 레벨 트리거가 즉시 다시 깨운다.
+    void pause_accept() {
+        if (accept_paused_) return;
+        accept_paused_  = true;
+        accept_rearm_at_ = Clock::now() + kAcceptBackoff;
+        reactor_->modify(listen_.fd(), 0u, &listen_token_);
+        // 이건 운영자가 반드시 봐야 하는 사건이다 — LimitNOFILE 이 --max-conns 를
+        // 못 받치고 있다는 뜻이고, 그대로 두면 접속 거부가 계속된다.
+        RLOG_WARN("[relay] fd 고갈로 accept 중단 "
+                  << kAcceptBackoff.count() << "ms (conns="
+                  << g_conn_count.load(std::memory_order_relaxed) << "/" << g_max_conns
+                  << ") — LimitNOFILE 이 --max-conns 를 받치는지 확인하라");
+    }
+
+    void resume_accept_if_due(TimePoint now) {
+        if (!accept_paused_ || now < accept_rearm_at_) return;
+        accept_paused_ = false;
+        reactor_->modify(listen_.fd(), net::kRead, &listen_token_);
+        RLOG_INFO("[relay] accept 재개");
+    }
+
     // ── accept ───────────────────────────────────────────────────────────────
     void on_accept() {
         // 준비된 연결을 다 비운다 — 레벨 트리거라도 한 번에 처리하는 편이 낫다.
         for (;;) {
-            net::TcpSocket s = net::tcp_accept(listen_);
-            if (!s.valid()) return;
+            net::AcceptResult ar = net::AcceptResult::Ok;
+            net::TcpSocket s = net::tcp_accept(listen_, &ar);
+            if (!s.valid()) {
+                if (ar == net::AcceptResult::FdExhausted) pause_accept();
+                return;
+            }
             net::tcp_set_sndbuf(s, kKernelSndBufBytes);
 
             // 앞단 표(conns_)가 아니라 전역 카운터를 본다. 포워딩이 시작되면
@@ -803,15 +862,22 @@ private:
                               "server is full, try again shortly");
                 continue;
             }
-            std::string key = net::tcp_peer_ip(s);
+            // 상한이 세는 단위(key)와 사람이 읽고 밴할 주소(peer)를 나눈다.
+            // IPv6 는 key 가 /64 버킷이라 그것만 찍으면 어느 주소를 막아야 할지
+            // 알 수 없고, peer 만 찍으면 왜 걸렸는지(같은 버킷의 다른 주소들)를
+            // 알 수 없다. 둘 다 남겨야 로그만 보고 조치할 수 있다.
+            std::string key  = net::tcp_peer_admission_key(s, g_ipv6_prefix_bits);
+            std::string peer = net::tcp_peer_ip(s);
             if (key.empty()) key = "fd:" + std::to_string(s.fd());  // 공멸 방지
+            if (peer.empty()) peer = key;
             // 두 상한을 독립적으로 건다 — 세션 슬롯을 못 얻어도, 핸드셰이크
             // 슬롯을 못 얻어도 거절이다.
             auto session_slot =
                 IpAdmission::acquire(key, IpAdmission::Kind::Session);
             if (!session_slot) {
                 g_reject_ip_session.fetch_add(1, std::memory_order_relaxed);
-                RLOG_INFO("[relay] 거절: per-IP session 상한 (" << key << ")");
+                RLOG_INFO("[relay] 거절: per-IP session 상한 peer=" << peer
+                          << " bucket=" << key);
                 reject_socket(s, net::RejectReason::IpSessionLimit,
                               "too many connections from your address");
                 continue;
@@ -820,7 +886,8 @@ private:
                 IpAdmission::acquire(key, IpAdmission::Kind::Handshake);
             if (!handshake_slot) {
                 g_reject_ip_handshake.fetch_add(1, std::memory_order_relaxed);
-                RLOG_INFO("[relay] 거절: per-IP handshake 상한 (" << key << ")");
+                RLOG_INFO("[relay] 거절: per-IP handshake 상한 peer=" << peer
+                          << " bucket=" << key);
                 reject_socket(s, net::RejectReason::IpHandshakeLimit,
                               "too many connection attempts from your address");
                 continue;
@@ -2062,6 +2129,9 @@ private:
 
     net::TcpSocket listen_;
     char           listen_token_ = 0;
+    // 리스너를 fd 고갈로 내려 둔 상태인가, 그리고 언제 다시 올릴 것인가.
+    bool           accept_paused_ = false;
+    TimePoint      accept_rearm_at_{};
     bool           is_front_ = false;   // 리스너를 가진 루프 — 상태 줄 담당
     TimePoint      next_stats_{};       // epoch = 아직 한 번도 안 찍음
 
@@ -2196,6 +2266,16 @@ int main(int argc, char** argv) {
                                "--stats-interval-sec", 0, 86400, n)) return 2;
             relay::g_stats_interval_sec = n;
         }
+        else if (a == "--ipv6-prefix") {
+            int n = 0;
+            // 하한 32: 그보다 넓히면 서로 무관한 조직·ISP 가 한 버킷에 묶여
+            // 한쪽이 다른 쪽을 굶긴다. 상한 128: 주소 단위(= 묶지 않음)이며,
+            // IPv6 에서 상한을 사실상 끄는 값이므로 고를 수는 있게 두되
+            // 기본값으로 두지는 않는다.
+            if (!parse_int_arg(next("--ipv6-prefix"),
+                               "--ipv6-prefix", 32, 128, n)) return 2;
+            relay::g_ipv6_prefix_bits = n;
+        }
         else if (a == "--idle-timeout-sec") {
             int n = 0;
             // 하한이 1인 이유: 0 은 "끄기" 가 아니라 "즉시 만기" 이고, 그러면
@@ -2213,7 +2293,7 @@ int main(int argc, char** argv) {
                 "                            [--max-conns N] [--max-tx-mib N]\n"
                 "                            [--max-pending-auth N]\n"
                 "                            [--log-level L] [--stats-interval-sec N]\n"
-                "                            [--idle-timeout-sec N]\n"
+                "                            [--idle-timeout-sec N] [--ipv6-prefix N]\n"
                 "  이벤트 루프(epoll/IOCP) 릴레이. 큐 경로와 커스텀 룸 경로를 모두 지원.\n"
                 "\n"
                 "  --loops N   루프 스레드 수 (기본 1). 앞단 루프 하나가 accept·인증·큐·\n"
@@ -2245,6 +2325,12 @@ int main(int argc, char** argv) {
                 "              끊긴 연결의 인증 작업은 취소되므로 이 수는 아직 살아서\n"
                 "              기다리는 사람만 센다. 넘기면 세우는 대신 사유를 밝히고\n"
                 "              거절한다 — meta 가 느릴수록 낮게 잡아야 줄이 짧아진다.\n"
+                "  --meta-secret S\n"
+                "              meta 와 공유하는 secret. **인자로 주면 ps 와\n"
+                "              /proc/<pid>/cmdline 에 그대로 드러난다** — 같은 호스트의\n"
+                "              다른 사용자가 읽을 수 있다. 환경변수 TETRIS_RELAY_SECRET\n"
+                "              을 쓰면 그 노출이 없고, 이 인자가 없을 때 그 값을 쓴다.\n"
+                "              systemd 배포는 EnvironmentFile 로 주므로 이미 안전하다.\n"
                 "  --log-level L\n"
                 "              error|warn|info|debug (기본 info). 환경변수\n"
                 "              TETRIS_RELAY_LOG_LEVEL 로도 정할 수 있고 이 인자가 이긴다.\n"
@@ -2256,6 +2342,14 @@ int main(int argc, char** argv) {
                                     << relay::kDefaultStatsIntervalSec << ", 0=끔).\n"
                 "              동시 연결·활성 매치·tx 예산 사용량과 최고 수위·사유별\n"
                 "              거절 카운터를 한 줄에 낸다.\n"
+                "  --ipv6-prefix N\n"
+                "              per-IP 상한이 IPv6 주소를 묶는 접두사 길이 (기본 "
+                                    << relay::kDefaultIpv6PrefixBits << ").\n"
+                "              가입자 하나가 /64 를 통째로 받는 것이 표준이라, 주소\n"
+                "              단위로 세면 per-IP 상한이 '주소를 바꾸는 수고' 로\n"
+                "              격하되고 IPv6 에서 그 수고는 사실상 0 이다. /48·/56 을\n"
+                "              받는 가입자에게서 남용이 실제로 오면 더 조일 수 있다.\n"
+                "              IPv4 와 IPv4-mapped 주소는 이 값과 무관하게 주소 단위다.\n"
                 "  --idle-timeout-sec N\n"
                 "              포워딩 중 유휴 만기, 초 (기본 "
                                     << relay::kDefaultIdleTimeoutSec << ", 1..3600).\n"

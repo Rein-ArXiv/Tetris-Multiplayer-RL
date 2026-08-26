@@ -1,5 +1,6 @@
 #include "socket.h"
 #include <cerrno>
+#include <cstring>
 #include <csignal>
 #include <cstdio>
 #include <memory>
@@ -172,11 +173,28 @@ TcpSocket tcp_listen(uint16_t port, int backlog) {
 }
 
 // [NET] 대기 소켓에서 1개 연결을 수락합니다.
-TcpSocket tcp_accept(const TcpSocket& server) {
-    if (!server.valid()) return TcpSocket{};
+TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result) {
+    auto report = [&](AcceptResult r) { if (out_result) *out_result = r; };
+    if (!server.valid()) { report(AcceptResult::Error); return TcpSocket{}; }
     sockaddr_in addr{}; socklen_t alen = sizeof(addr);
     int fd = (int)::accept(server.fd(), (sockaddr*)&addr, &alen);
-    if (fd < 0) return TcpSocket{};
+    if (fd < 0) {
+#ifdef _WIN32
+        const int e = WSAGetLastError();
+        report(e == WSAEWOULDBLOCK ? AcceptResult::WouldBlock
+             : e == WSAEMFILE      ? AcceptResult::FdExhausted
+                                   : AcceptResult::Error);
+#else
+        // EMFILE(프로세스 fd 상한) 과 ENFILE(시스템 전체) 을 함께 본다. 둘 다
+        // "기다린다고 낫지 않는" 부류이고, 호출자가 할 일이 같다.
+        const int e = errno;
+        report((e == EAGAIN || e == EWOULDBLOCK) ? AcceptResult::WouldBlock
+             : (e == EMFILE || e == ENFILE)      ? AcceptResult::FdExhausted
+                                                 : AcceptResult::Error);
+#endif
+        return TcpSocket{};
+    }
+    report(AcceptResult::Ok);
     // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
     set_nonblocking(fd);
     set_nodelay(fd);
@@ -209,6 +227,82 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     set_nodelay(fd);
     set_keepalive(fd);
     return make_owned(fd);
+}
+
+// [NET] per-IP 상한이 셀 버킷의 키. 로그용 주소(tcp_peer_ip)와 일부러 나눠 둔다.
+//
+// IPv4 는 주소 하나가 곧 호스트 하나라 그대로 쓴다. IPv6 는 다르다 — 가입자
+// 하나에게 /64 를 통째로 주는 것이 표준이라(RFC 6177 계열 권고), 주소 단위로
+// 세면 한 가입자가 2^64 개의 버킷을 갖는다. 그러면 per-IP 상한이 상한이 아니라
+// "주소를 바꾸는 수고" 가 되고, 그 수고는 IPv6 에서 사실상 0 이다. 접두사로
+// 묶어야 비로소 "한 가입자" 단위로 세어진다.
+//
+// 기본 64 의 근거는 그 표준 할당 크기다. 더 넓히면(예: /48) 서로 무관한 가입자가
+// 같은 버킷에 묶여 한쪽이 다른 쪽을 굶길 수 있고, 더 좁히면(예: /128) 지금의
+// 무력한 상태로 돌아간다. 다만 /48·/56 을 받는 가입자도 있어 공격자가 여러 /64
+// 를 쥘 수는 있으므로, 실제로 그런 공격을 만나면 --ipv6-prefix 로 조일 수 있게
+// 열어 둔다. 이 값은 상한을 "무의미" 에서 "유한" 으로 옮기는 것이지 공격 비용을
+// 무한대로 만드는 것이 아니다.
+//
+// 반환 문자열에 "/N" 을 붙인다. 접두사로 묶인 버킷과 단일 주소를 로그에서
+// 구분할 수 없으면, 운영자가 무엇을 밴해야 하는지 판단할 수 없기 때문이다.
+//
+// 주의 — **이 v6 갈래는 현재 도달하지 않는다.** tcp_listen 이 AF_INET 소켓을
+// 만들어(같은 파일) 릴레이가 IPv6 접속을 아예 받지 않기 때문이다(실측: ::1 로
+// 접속하면 ConnectionRefused). 그래서 지금 이 코드에는 회귀 테스트를 붙일 수
+// 없고, 뮤테이션으로도 잡히지 않는다.
+//
+// 그럼에도 미리 두는 이유는 순서 때문이다. 듀얼스택으로 바꾸는 변경은 그 자체로
+// 옳아 보이고 한 줄이면 되는데, 이 집계가 없는 상태에서 그걸 하면 per-IP 상한
+// 두 개가 **조용히** 무의미해진다 — 아무 테스트도 빨개지지 않고, 로그도 평소와
+// 같고, 상한 카운터도 정상으로 보인다. 나중에 그 사실을 발견하는 것보다
+// 미리 깔아 두는 편이 싸다. IPv6 를 켤 때 이 주석을 지우고 테스트를 붙여라.
+std::string tcp_peer_admission_key(const TcpSocket& s, int ipv6_prefix_bits) {
+    if (!s.valid()) return {};
+    sockaddr_storage addr{};
+    socklen_t len = sizeof(addr);
+    if (::getpeername(s.fd(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) return {};
+
+    if (addr.ss_family == AF_INET) {
+        char ipbuf[INET_ADDRSTRLEN]{};
+        auto* v4 = reinterpret_cast<sockaddr_in*>(&addr);
+        if (!inet_ntop(AF_INET, &v4->sin_addr, ipbuf, sizeof(ipbuf))) return {};
+        return ipbuf;
+    }
+    if (addr.ss_family != AF_INET6) return {};
+
+    auto* v6 = reinterpret_cast<sockaddr_in6*>(&addr);
+    unsigned char raw[16]{};
+    std::memcpy(raw, &v6->sin6_addr, sizeof(raw));
+
+    // IPv4-mapped (::ffff:a.b.c.d) 는 실제로는 IPv4 연결이다. 접두사로 묶으면
+    // 서로 다른 IPv4 호스트가 한 버킷에 들어가므로 매핑을 풀어 v4 로 센다.
+    static const unsigned char kV4Mapped[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+    if (std::memcmp(raw, kV4Mapped, sizeof(kV4Mapped)) == 0) {
+        in_addr v4addr{};
+        std::memcpy(&v4addr, raw + 12, 4);
+        char ipbuf[INET_ADDRSTRLEN]{};
+        if (!inet_ntop(AF_INET, &v4addr, ipbuf, sizeof(ipbuf))) return {};
+        return ipbuf;
+    }
+
+    int bits = ipv6_prefix_bits;
+    if (bits < 0)   bits = 0;
+    if (bits > 128) bits = 128;
+    // 접두사 밖 비트를 0 으로 민다. 온전한 바이트는 통째로, 경계에 걸친 바이트는
+    // 상위 비트만 남긴다.
+    for (int i = 0; i < 16; ++i) {
+        const int lo = i * 8;                 // 이 바이트가 담는 첫 비트
+        if (lo >= bits) { raw[i] = 0; continue; }
+        const int keep = bits - lo;           // 이 바이트에서 남길 비트 수
+        if (keep < 8) raw[i] &= (unsigned char)(0xFFu << (8 - keep));
+    }
+
+    in6_addr masked{};
+    std::memcpy(&masked, raw, sizeof(raw));
+    char ipbuf[INET6_ADDRSTRLEN]{};
+    if (!inet_ntop(AF_INET6, &masked, ipbuf, sizeof(ipbuf))) return {};
+    return std::string(ipbuf) + "/" + std::to_string(bits);
 }
 
 std::string tcp_peer_ip(const TcpSocket& s) {

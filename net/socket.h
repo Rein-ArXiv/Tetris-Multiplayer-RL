@@ -43,7 +43,15 @@ void net_shutdown();
 
 // TCP 연결 설정
 TcpSocket tcp_listen(uint16_t port, int backlog=1);  // 서버: 포트에서 대기 (bind + listen + SO_REUSEADDR)
-TcpSocket tcp_accept(const TcpSocket& server);       // 서버: 클라이언트 연결 수락 (블로킹, 논블로킹 모드로 설정)
+// accept 가 실패한 *이유*. 호출자가 EAGAIN 과 fd 고갈을 구분해야 하기 때문이다 —
+// 둘 다 "소켓을 못 얻었다" 지만 대응이 정반대다. EAGAIN 은 그냥 다음 이벤트를
+// 기다리면 되고, fd 고갈은 기다려도 저절로 낫지 않는다. 레벨 트리거 리스너에서
+// 그 둘을 뭉뚱그리면 커널 accept 큐가 안 비어 매 poll 마다 재통지되고, 루프는
+// 아무것도 못 하면서 코어를 태운다.
+enum class AcceptResult { Ok, WouldBlock, FdExhausted, Error };
+// 서버: 클라이언트 연결 수락 (논블로킹 모드로 설정해 반환).
+// out_result 를 주면 실패 사유를 받는다. 안 줘도 동작은 같다.
+TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result = nullptr);
 TcpSocket tcp_connect(const std::string& host, uint16_t port);  // 클라이언트: 서버 연결 (getaddrinfo + connect)
 
 // TCP 데이터 송수신
@@ -62,7 +70,11 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf);  // 논블
 void tcp_close(TcpSocket& s);  // shutdown(SHUT_RDWR) 으로 피어/폴러(recv)를 EOF 로 깨운다. 실제 ::close 는 마지막 TcpSocket 복사본 소멸 시 RAII 로 일어난다(멱등).
 void tcp_set_nonblocking(const TcpSocket& s);  // 소켓을 논블로킹으로 전환. listen 소켓 accept 폴링용(shutdown 은 블로킹 accept 를 깨우지 못하므로).
 void tcp_set_sndbuf(const TcpSocket& s, int bytes);  // 커널 송신 버퍼 상한. 안 읽는 상대를 커널이 대신 흡수하지 못하게 묶는다(backpressure 가시성).
-std::string tcp_peer_ip(const TcpSocket& s);   // admission/rate-limit용 숫자형 peer IP
+std::string tcp_peer_ip(const TcpSocket& s);   // 로그·밴용 숫자형 peer IP (전체 주소)
+// per-IP 상한이 셀 버킷 키. IPv4 는 주소 그대로, IPv6 는 접두사로 묶는다
+// (기본 /64 — 가입자 하나가 /64 를 통째로 받는 것이 표준이라 주소 단위로
+//  세면 상한이 무력해진다). IPv4-mapped 는 v4 로 되돌려 센다.
+std::string tcp_peer_admission_key(const TcpSocket& s, int ipv6_prefix_bits);
 
 // IP 주소 조회
 std::string get_local_ip();    // 로컬 네트워크 IP

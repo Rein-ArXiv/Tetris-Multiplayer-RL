@@ -2,6 +2,12 @@
 Description=Tetris Multiplayer Relay
 After=network-online.target
 Wants=network-online.target
+# 크래시 루프에서 재시작이 부하가 되지 않게 묶는다. Restart=always + RestartSec=3
+# 만 두면 기동 실패의 원인(포트 점유, meta 불통 등)이 해소되지 않은 채 20회/분으로
+# 영원히 재시작하며 로그만 쌓인다. 이 둘은 [Service] 가 아니라 [Unit] 소속이다 —
+# [Service] 에 두면 systemd 가 "Unknown key" 로 무시하고 조용히 안 걸린다.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -23,10 +29,24 @@ EnvironmentFile=/etc/tetris/relay.env
 # 구분할 수 없고 tx 예산 누수를 볼 유일한 창을 잃는다. info 는 하루 약 8,640줄로
 # 접속·매치 로그와 같은 자릿수라 어느 쪽도 덮지 않는다. TETRIS_RELAY_SECRET 은
 # relay.env 가 준다(--meta 를 쓰면 secret 없이는 기동을 거부한다).
+#
+# !!! --meta 의 호스트를 반드시 실제 meta 주소로 바꿀 것 !!!
+# 이 줄을 고치지 않고 기동하면 TETRIS_RELAY_SECRET 이 X-Relay-Secret 헤더에 실려
+# 남의 도메인(api.example.com)으로 POST 된다. 플레이스홀더가 "안 되는 주소" 가
+# 아니라 "되는 주소" 라서, 실수하면 조용히 성공하고 시크릿만 새어 나간다.
+# meta 를 안 쓸 거라면 --meta 이하를 통째로 지워라 (unranked 모드로 뜬다).
 ExecStart=/opt/tetris/tetris_relay_reactor --port 7777 --meta https://api.example.com --log-level info
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
+# fd 상한. 이 줄이 없으면 systemd 기본(이 배포판 실측 소프트 1024)이 적용되는데,
+# --max-conns 기본값은 4096 이라 상한이 실제 천장의 4배 위에 놓인다. 그러면
+# "fd 를 지키는 마지막 방어선" 이라던 --max-conns 가 영영 발화하지 못하고, 대신
+# 연결 ~1014 개에서 accept 가 EMFILE 로 떨어진다. 리스너는 레벨 트리거라 커널
+# accept 큐가 비지 않는 한 매 poll 마다 재통지되므로 앞단 루프가 코어 하나를
+# 100% 태운다(실측). 8192 는 연결 4096 에 listen/epoll/eventfd/meta 왕복 몫을
+# 더한 값이다 — --max-conns 를 올린다면 이 값도 같이 올려야 한다.
+LimitNOFILE=8192
 PrivateTmp=true
 # relay 는 디스크에 아무것도 쓰지 않는다 — 전체 읽기 전용.
 ProtectSystem=strict

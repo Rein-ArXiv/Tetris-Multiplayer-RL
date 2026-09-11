@@ -48,6 +48,7 @@ void printUsage() {
         "  --log-level L    error|warn|info|debug (default info). 운영에서는 warn 이\n"
         "                   접속·매치 줄까지 지운다. TETRIS_RELAY_LOG_LEVEL 로도\n"
         "                   정할 수 있고 이 인자가 이긴다.\n"
+        "  --loopback-only  Listen on 127.0.0.1 behind the WSS gateway.\n"
         "  --port N         TCP listen port (default 7777)\n"
         "  --meta URL       tetris_meta base URL (e.g. https://api.example.com)\n"
         "                   If omitted, relay runs unranked (no token verify,\n"
@@ -95,6 +96,7 @@ bool parsePort(const std::string& s, uint16_t& out) {
 int main(int argc, char** argv) {
     uint16_t    port = 7777;
     std::string metaUrl;  // empty = unranked
+    bool loopbackOnly = false;
     std::string metaSecret;
     if (const char* env = std::getenv("TETRIS_RELAY_SECRET")) {
         metaSecret = env;
@@ -128,6 +130,8 @@ int main(int argc, char** argv) {
                            << " (expected 1..65535)");
                 return 2;
             }
+        } else if (a == "--loopback-only") {
+            loopbackOnly = true;
         } else if (a == "--meta" && i + 1 < argc) {
             metaUrl = argv[++i];
         } else if (a == "--meta-secret" && i + 1 < argc) {
@@ -185,7 +189,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    g_listen_sock = net::tcp_listen(port, /*backlog=*/256);
+    g_listen_sock = net::tcp_listen(port, /*backlog=*/256, loopbackOnly);
     if (!g_listen_sock.valid()) {
         RLOG_ERROR("tcp_listen(" << port << ") failed — port in use?");
         net::net_shutdown();

@@ -105,7 +105,7 @@ def _match_uuid() -> str:
 
 
 @pytest.fixture
-def meta_server(tmp_path):
+def meta_server(tmp_path, request):
     bin_path = _find_meta_bin()
     if not bin_path:
         pytest.skip("tetris_meta binary not built (set TETRIS_META_BIN to override)")
@@ -113,7 +113,8 @@ def meta_server(tmp_path):
     db = tmp_path / "test.db"
     proc = subprocess.Popen(
         [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}",
-         "--allow-public-matches"],
+         "--allow-public-matches"] +
+        (["--trust-loopback-proxy"] if getattr(request, "param", False) else []),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
@@ -533,3 +534,47 @@ def test_elo_rp_migration_on_legacy_db(tmp_path):
 
     hi3, lo3 = _run_once(restored)
     assert hi3["elo"] == 300 and lo3["elo"] == 0
+
+
+def test_guest_creation_budget_ignores_forged_forwarding_headers(meta_server):
+    """Changing untrusted proxy headers must not mint unlimited durable players."""
+    for i in range(10):
+        status, body = _post(f"{meta_server}/v1/guest", headers={
+            "X-Forwarded-For": f"198.51.100.{i + 1}",
+            "CF-Connecting-IP": f"203.0.113.{i + 1}",
+        })
+        assert status == 200, body
+    status, body = _post(f"{meta_server}/v1/guest", headers={
+        "X-Forwarded-For": "192.0.2.99", "CF-Connecting-IP": "192.0.2.99",
+    })
+    assert status == 429, body
+    # Registration abuse must not block an existing player's authentication.
+    status, _ = _post(f"{meta_server}/v1/auth/verify", {"token": "0" * 32})
+    assert status == 404
+
+
+def test_guest_token_response_is_not_cacheable(meta_server):
+    req = urllib.request.Request(f"{meta_server}/v1/guest", data=b"{}",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("meta_server", [True], indirect=True)
+def test_trusted_proxy_uses_rightmost_xff_and_ignores_cf_header(meta_server):
+    # A local proxy has appended the same real peer; attacker-controlled values
+    # to its left and CF-Connecting-IP must not create a fresh bucket.
+    for i in range(10):
+        status, _ = _post(f"{meta_server}/v1/guest", headers={
+            "X-Forwarded-For": f"198.51.100.{i}, 192.0.2.1",
+            "CF-Connecting-IP": f"203.0.113.{i}",
+        })
+        assert status == 200
+    status, _ = _post(f"{meta_server}/v1/guest", headers={
+        "X-Forwarded-For": "198.51.100.99, 192.0.2.1",
+        "CF-Connecting-IP": "203.0.113.99",
+    })
+    assert status == 429
+    # Another actual peer, as asserted by the explicitly trusted local proxy.
+    status, _ = _post(f"{meta_server}/v1/guest", headers={"X-Forwarded-For": "192.0.2.2"})
+    assert status == 200

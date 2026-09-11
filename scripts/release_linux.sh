@@ -4,11 +4,11 @@
 # 사용법:
 #   ./scripts/release_linux.sh
 #   BOT=1 ./scripts/release_linux.sh
-#   RELAY_ENDPOINT=relay.example.com:7777 META_URL=https://api.example.com ./scripts/release_linux.sh
+#   RELAY_ENDPOINT=wss://relay.example.com:8443/play META_URL=https://api.example.com ./scripts/release_linux.sh
 #   DEBUG_UI=1 NET_TRACE=1 ./scripts/release_linux.sh
 #
-# 의존성: cmake, g++, libsdl2-dev.
-#   렌더링은 CPU 소프트웨어 래스터라이저라 OpenGL 개발 패키지는 필요 없다.
+# 의존성: cmake, g++, libsdl2-dev, libssl-dev, libboost-dev (기본 WSS=1).
+#   OpenGL 3.3 렌더러: libgl1-mesa-dev도 필요하다.
 # 산출물: dist/tetris-linux-x64.tar.gz
 #   tetris-linux-x64/
 #     tetris
@@ -24,7 +24,8 @@ BUILD="$ROOT/build-release"
 DIST="$ROOT/dist"
 BUNDLE="$DIST/tetris-linux-x64"
 BOT="${BOT:-0}"
-RELAY_ENDPOINT="${RELAY_ENDPOINT:-}"
+WSS="${WSS:-1}"
+RELAY_ENDPOINT="${RELAY_ENDPOINT:-127.0.0.1:7777}"
 META_URL="${META_URL:-}"
 DEBUG_UI="${DEBUG_UI:-0}"
 NET_TRACE="${NET_TRACE:-0}"
@@ -40,21 +41,16 @@ CMAKE_ARGS=(
     -DTETRIS_BUILD_TEST=OFF
     -DTETRIS_USE_SDL2=ON
 )
-if [ "$BOT" = "1" ]; then
-    CMAKE_ARGS+=(-DTETRIS_BUILD_BOT=ON)
-fi
-if [ -n "$RELAY_ENDPOINT" ]; then
-    CMAKE_ARGS+=("-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RELAY_ENDPOINT")
-fi
-if [ -n "$META_URL" ]; then
-    CMAKE_ARGS+=("-DTETRIS_DEFAULT_META_URL=$META_URL")
-fi
-if [ "$DEBUG_UI" = "1" ]; then
-    CMAKE_ARGS+=(-DTETRIS_ENABLE_DEBUG_UI=ON)
-fi
-if [ "$NET_TRACE" = "1" ]; then
-    CMAKE_ARGS+=(-DTETRIS_ENABLE_NET_TRACE=ON)
-fi
+CMAKE_ARGS+=(
+    "-DTETRIS_BUILD_BOT=$BOT"
+    "-DTETRIS_BUILD_WSS=$WSS"
+    "-DTETRIS_ENABLE_DEBUG_UI=$DEBUG_UI"
+    "-DTETRIS_ENABLE_NET_TRACE=$NET_TRACE"
+    "-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RELAY_ENDPOINT"
+    "-DTETRIS_DEFAULT_META_URL=$META_URL"
+    -DTETRIS_BUILD_PY=OFF
+    -DTETRIS_ENABLE_HTTPS=ON
+)
 
 echo "[release_linux] CMake configure ..."
 cmake "${CMAKE_ARGS[@]}"
@@ -99,6 +95,16 @@ fi
 if command -v patchelf &>/dev/null; then
     patchelf --set-rpath '$ORIGIN/lib' "$BUNDLE/tetris" 2>/dev/null || true
 fi
+
+# TLS shared libraries are runtime dependencies, including the crypto dependency
+# of libssl. Keep the SONAME filenames from ldd, never bundle the system libc.
+mkdir -p "$BUNDLE/lib"
+for executable in "$BUNDLE"/tetris*; do
+    [ -f "$executable" ] || continue
+    while IFS= read -r library; do
+        [ -f "$library" ] && cp -L "$library" "$BUNDLE/lib/"
+    done < <(ldd "$executable" | awk '/lib(ssl|crypto)\.so/ && $2 == "=>" { print $3 }')
+done
 
 # ── tar.gz 생성 ──────────────────────────────────────────────────────────────
 mkdir -p "$DIST"

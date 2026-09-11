@@ -214,19 +214,19 @@ static Glyph glyph_for(uint32_t cp, int px)
     return s_cache.emplace(key, glyph).first->second;
 }
 
-void renderer_load_font(const char* path)
+bool renderer_load_font(const char* path)
 {
     s_font_ok = false;
     s_cache.clear();
     s_ttf.clear();
     // 폰트가 바뀌면 아틀라스 내용이 의미를 잃으므로 커서를 되감는다.
     s_pen_x = s_pen_y = s_row_h = 0;
-    if (!path || !*path) return;
+    if (!path || !*path) return false;
 
     FILE* file = std::fopen(path, "rb");
     if (!file) {
         std::fprintf(stderr, "[text] font open failed: %s\n", path);
-        return;
+        return false;
     }
     std::fseek(file, 0, SEEK_END);
     const long size = std::ftell(file);
@@ -234,7 +234,7 @@ void renderer_load_font(const char* path)
     if (size <= 0) {
         std::fclose(file);
         std::fprintf(stderr, "[text] font empty: %s\n", path);
-        return;
+        return false;
     }
     s_ttf.resize((size_t)size);
     const size_t read = std::fread(s_ttf.data(), 1, s_ttf.size(), file);
@@ -242,16 +242,17 @@ void renderer_load_font(const char* path)
     if (read != s_ttf.size()) {
         s_ttf.clear();
         std::fprintf(stderr, "[text] font read failed: %s\n", path);
-        return;
+        return false;
     }
 
     const int offset = stbtt_GetFontOffsetForIndex(s_ttf.data(), 0);
     if (offset < 0 || !stbtt_InitFont(&s_font, s_ttf.data(), offset)) {
         s_ttf.clear();
         std::fprintf(stderr, "[text] invalid TTF: %s\n", path);
-        return;
+        return false;
     }
     s_font_ok = true;
+    return true;
 }
 
 int measure_text(const char* text, int size)

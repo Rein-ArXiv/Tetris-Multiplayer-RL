@@ -30,12 +30,10 @@ EnvironmentFile=/etc/tetris/relay.env
 # 접속·매치 로그와 같은 자릿수라 어느 쪽도 덮지 않는다. TETRIS_RELAY_SECRET 은
 # relay.env 가 준다(--meta 를 쓰면 secret 없이는 기동을 거부한다).
 #
-# !!! --meta 의 호스트를 반드시 실제 meta 주소로 바꿀 것 !!!
-# 이 줄을 고치지 않고 기동하면 TETRIS_RELAY_SECRET 이 X-Relay-Secret 헤더에 실려
-# 남의 도메인(api.example.com)으로 POST 된다. 플레이스홀더가 "안 되는 주소" 가
-# 아니라 "되는 주소" 라서, 실수하면 조용히 성공하고 시크릿만 새어 나간다.
-# meta 를 안 쓸 거라면 --meta 이하를 통째로 지워라 (unranked 모드로 뜬다).
-ExecStart=/opt/tetris/tetris_relay_reactor --port 7777 --meta https://api.example.com --log-level info
+# Same-host meta: secret never leaves loopback. For a separate meta host,
+# explicitly configure its protected HTTPS/private-network endpoint.
+# Gateway owns public IP admission; relay sees only loopback connections.
+ExecStart=/opt/tetris/tetris_relay_reactor --port 7777 --loopback-only --max-sessions-per-ip 128 --meta http://127.0.0.1:8080 --log-level info
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

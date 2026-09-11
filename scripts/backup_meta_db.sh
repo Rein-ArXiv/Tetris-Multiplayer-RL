@@ -7,6 +7,7 @@
 # 실행 중인 WAL DB도 일관되게 복사하도록 sqlite3 온라인 백업 API(.backup)를
 # 사용하고, 완성된 스냅샷의 무결성을 확인한다.
 set -euo pipefail
+umask 077
 
 DB="${1:-/srv/tetris/db/tetris.db}"
 OUT_DIR="${2:-/srv/tetris/backups}"

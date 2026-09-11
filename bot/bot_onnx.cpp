@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 
 #if defined(TETRIS_HAS_ONNXRUNTIME)
     #include <onnxruntime_cxx_api.h>
@@ -50,6 +51,24 @@ struct BotOnnx::Impl {
         #else
             session = std::make_unique<Ort::Session>(env, path.c_str(), sessOpts);
         #endif
+            if (session->GetInputCount()!=3 || session->GetOutputCount()!=2)
+                throw std::runtime_error("expected 3 inputs and 2 outputs");
+            Ort::AllocatorWithDefaultOptions allocator;
+            auto validate=[&](bool input,size_t index,const char* name,const std::vector<int64_t>& shape) {
+                auto actualName=input ? session->GetInputNameAllocated(index,allocator)
+                                      : session->GetOutputNameAllocated(index,allocator);
+                auto type=input ? session->GetInputTypeInfo(index) : session->GetOutputTypeInfo(index);
+                if(std::strcmp(actualName.get(),name)!=0 || type.GetONNXType()!=ONNX_TYPE_TENSOR)
+                    throw std::runtime_error(std::string("incompatible tensor: ")+name);
+                auto info=type.GetTensorTypeAndShapeInfo();
+                if(info.GetElementType()!=ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || info.GetShape()!=shape)
+                    throw std::runtime_error(std::string("incompatible float32 shape: ")+name);
+            };
+            validate(true,0,"board",{1,1,kBoardRows,kBoardCols});
+            validate(true,1,"current",{1,kNumPieceTypes});
+            validate(true,2,"next",{1,kNumPieceTypes});
+            validate(false,0,"policy_logits",{1,kNumPlacements});
+            validate(false,1,"value",{1});
         } catch (const Ort::Exception& e) {
             if (err_out) *err_out = std::string("Ort::Exception: ") + e.what();
             session.reset();
@@ -104,7 +123,7 @@ struct BotOnnx::Impl {
             if (!outs[0].IsTensor()) return false;
             const auto info = outs[0].GetTensorTypeAndShapeInfo();
             if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-                info.GetElementCount() < static_cast<size_t>(kNumPlacements)) {
+                info.GetElementCount() != static_cast<size_t>(kNumPlacements)) {
                 return false;
             }
             logits = outs[0].GetTensorData<float>();
@@ -175,7 +194,7 @@ BotOnnx::~BotOnnx() = default;
 bool BotOnnx::Load(const std::string& onnx_path, std::string* err_out)
 {
     (void)onnx_path;
-    if (err_out) *err_out = "onnxruntime not vendored — rebuild with TETRIS_HAS_ONNXRUNTIME";
+    if (err_out) *err_out = "ONNX Runtime unavailable — fetch the CPU runtime and rebuild with TETRIS_BUILD_BOT=ON";
     return false;
 }
 

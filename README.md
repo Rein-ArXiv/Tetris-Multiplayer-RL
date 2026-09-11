@@ -8,13 +8,24 @@ C++17과 CMake를 사용하며, 엔진 없이 직접 구현한 OpenGL 3.3 Core 2
 결정론 회귀 테스트, Python 시뮬레이션 바인딩, RL 학습용 환경/모델/export
 코드, 선택형 ONNX Runtime 봇 추론 코드가 포함되어 있습니다.
 
+## 오랜만에 다시 실행한다면
+
+[빌드·시작 순서](docs/start-here.md) → [외형·규칙 수정 지도](docs/customization.md) →
+[출시 보안·Linux에서 Windows로 이전](docs/release-readiness.md)을 먼저 읽으세요.
+주 서버는 Linux(Mac 하드웨어), 예비 서버는 Windows입니다. **현재 웹은 랭킹 페이지만
+있고 브라우저 게임은 미구현입니다.** 공개 연결에는 [WSS·일회용 입장권](docs/blog/part16-secure-admission.md)을 사용합니다.
+인증서·포트 배치와 PvP 규칙 검증 등 남은 출시 조건은 별도 확인해야 합니다. [실제 검증 기록](docs/polish-validation.md).
+
 ## 현재 상태
+
+- `TETRIS_BUILD_WSS=ON`은 Boost.Beast·OpenSSL을 이용한 네이티브 WSS 연결과 `tetris_wss_gateway`를 추가합니다. 공개 relay는 loopback 뒤에 두며, release 스크립트는 WSS를 기본 포함합니다.
 
 - Windows 기본 빌드는 Handmade Win32/WGL 창·입력 + OpenGL 렌더러 + XAudio2 경로입니다.
 - macOS/Linux 기본 빌드는 SDL2 창·입력·GL 컨텍스트 + 같은 OpenGL 렌더러 + SDL audio 경로입니다.
 - `tetris`, `sim_hash_dump`, `tetris_relay_reactor`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
 - 릴레이는 바이너리가 둘입니다. 배포 대상은 이벤트 루프 하나로 도는 `tetris_relay_reactor`이고, 연결당 스레드 모델인 `tetris_relay`는 같은 계약을 스레드로 설명하는 교재용 참조 구현이라 서버 번들에 넣지 않습니다.
-- `Single vs Bot`에는 내장 휴리스틱 봇이 항상 표시됩니다. 학습 모델 봇은 `TETRIS_BUILD_BOT=ON`, ONNX Runtime, `model/*.onnx` 또는 `model/bots/*.onnx`가 있을 때 선택할 수 있습니다.
+- `Single vs Bot`은 `assets/opponents.cfg`의 캐릭터별 모델·아이콘·일러스트·속도를 사용합니다. 기본 세 상대는 휴리스틱과 임시 이미지입니다. ONNX 상대는 `TETRIS_BUILD_BOT=ON`이 필요합니다.
+- 봇전 공용 BP는 meta의 `--bot-rewards`를 켰을 때 서버 리플레이 검증 후 지급합니다. [캐릭터·Colab·BP 실행 안내](docs/bots-and-colab.md)를 참고하세요.
 - Python 쪽은 Colab 부트스트랩, Gymnasium 환경,
   PPO/DQN/DDQN/CBMPI/REINFORCE/A2C/n-step AC/CEM/MuZero-style 학습 루프,
   정책 모델, 체크포인트, ONNX export까지 있습니다.
@@ -37,8 +48,10 @@ flowchart TB
 
     Client --> Sim
     Client --> Session
-    Session <--> Relay
-    Client --> Meta
+    Gateway["tetris_wss_gateway<br/>TLS + WebSocket"]
+    Session <-->|WSS| Gateway
+    Gateway <-->|loopback TCP| Relay
+    Client -->|HTTPS API| Meta
     Relay --> Meta
     PyBind --> Sim
     Train --> PyBind
@@ -58,7 +71,7 @@ Meta는 guest token, RP/XP/BP, 아이콘과 경기 기록을 SQLite에 저장합
 | 결정론 코어 | `src/sim_game.*`, `src/sim_grid.h`, `core/` | 규칙, 입력, RNG, 상태 해시 |
 | 클라이언트 | `src/main.cpp`, `src/game.*` | 화면 상태, fixed-step 루프, 게임 조립 |
 | 플랫폼·표현 | `platform/`, `renderer/`, `audio/` | Win32/WGL 또는 SDL2 컨텍스트, OpenGL 배치 렌더러, 오디오 |
-| 네트워크 | `net/` | TCP 소켓, framing, lockstep session |
+| 네트워크 | `net/` | TCP/WSS 전송, framing, lockstep session, 입장권 콜백 |
 | 온라인 서버 | `server/`, `meta/` | relay/room, 인증, 랭킹과 영속화 |
 | RL·봇 | `bindings/`, `python/`, `bot/` | Python 환경, 학습, ONNX 추론 |
 
@@ -120,8 +133,9 @@ make release-linux
 | `TETRIS_BUILD_RELAY` | OFF | `tetris_relay_reactor`, `tetris_relay` | TCP 릴레이/룸/매치메이킹 서버. 배포 대상은 이벤트 루프 바이너리 `tetris_relay_reactor`이고, `tetris_relay`는 연결당 스레드 모델의 교재용 참조 구현 |
 | `TETRIS_BUILD_META` | OFF | `tetris_meta` | HTTP+SQLite guest/랭킹/리더보드 서버 |
 | `TETRIS_BUILD_PY` | OFF | `tetris_py` | pybind11 기반 Python 시뮬레이션 모듈 |
-| `TETRIS_BUILD_BOT` | OFF | `tetris` 내부 | ONNX Runtime 기반 로컬 봇 추론 |
+| `TETRIS_BUILD_BOT` | OFF | `tetris`, `tetris_meta` | ONNX Runtime 기반 봇 추론·선택적 PvE 검증 |
 | `TETRIS_USE_SDL2` | Windows OFF, 그 외 ON | 백엔드 선택 | SDL2 창·입력·OpenGL 컨텍스트·오디오 사용 |
+| `TETRIS_BUILD_WSS` | OFF (release ON) | `tetris`, `tetris_wss_gateway` | Boost.Beast·OpenSSL 기반 보안 게임 연결 |
 | `TETRIS_ENABLE_HTTPS` | ON | `tetris`, `tetris_relay` | OpenSSL이 있으면 `https://` meta URL 지원 |
 | `TETRIS_ENABLE_DEBUG_UI` | OFF | `tetris` | 개발용 NET HUD / 해시 덤프 핫키 활성화 |
 | `TETRIS_ENABLE_NET_TRACE` | OFF | `tetris` | 클라이언트 net/session 상세 trace 로그 활성화 |
@@ -150,13 +164,13 @@ Linux/macOS Makefile 또는 Ninja에서는 `-DCMAKE_BUILD_TYPE=Release`를 사�
 릴레이 랜덤 매칭:
 
 ```bash
-./tetris --queue relay.example.com:7777
+./tetris --queue wss://relay.example.com:8443/play
 ```
 
 커스텀 룸:
 
 ```bash
-./tetris --relay relay.example.com:7777
+./tetris --relay wss://relay.example.com:8443/play
 ```
 
 클라이언트 CLI 옵션:
@@ -166,7 +180,7 @@ Linux/macOS Makefile 또는 Ninja에서는 `-DCMAKE_BUILD_TYPE=Release`를 사�
 | `--host <port>` | 직접 접속용 호스트로 대기 |
 | `--connect <host[:port]>` | 직접 호스트에 접속 |
 | `--queue <host[:port]>` | 릴레이 랜덤 큐에 즉시 참가 |
-| `--relay <host[:port]>` | 메뉴의 Matchmaking/Custom Room에서 사용할 릴레이 주소 지정 |
+| `--relay <host[:port] 또는 wss://host[:port]/play>` | 메뉴의 Matchmaking/Custom Room에서 사용할 릴레이 주소 지정 |
 | `--meta <http(s)://host[:port]>` | 랭킹(RP/레벨/BP)·리더보드용 `tetris_meta` URL |
 
 `--relay`는 환경변수 `TETRIS_RELAY_ENDPOINT`, `--meta`는 환경변수
@@ -176,7 +190,8 @@ Linux/macOS Makefile 또는 Ninja에서는 `-DCMAKE_BUILD_TYPE=Release`를 사�
 ```bash
 cmake -S . -B build-release \
   -DCMAKE_BUILD_TYPE=Release \
-  -DTETRIS_DEFAULT_RELAY_ENDPOINT=relay.example.com:7777 \
+  -DTETRIS_BUILD_WSS=ON \
+  -DTETRIS_DEFAULT_RELAY_ENDPOINT=wss://relay.example.com:8443/play \
   -DTETRIS_DEFAULT_META_URL=https://api.example.com
 ```
 
@@ -184,20 +199,21 @@ cmake -S . -B build-release \
 바이너리를 포함하지 않습니다.
 
 ```bash
-RELAY_ENDPOINT=relay.example.com:7777 \
+RELAY_ENDPOINT=wss://relay.example.com:8443/play \
 META_URL=https://api.example.com \
 ./scripts/release_linux.sh
 ```
 
 ```powershell
 .\scripts\release_win.ps1 `
-  -RelayEndpoint "relay.example.com:7777" `
+  -RelayEndpoint "wss://relay.example.com:8443/play" `
   -MetaUrl "https://api.example.com"
 ```
 
 ## 서버 구성
 
-랭킹 멀티플레이를 쓰려면 `tetris_meta`와 `tetris_relay_reactor`를 함께 실행합니다.
+랭킹 멀티플레이의 공개 실행 순서는 meta → 내부 relay → WSS gateway → 게임입니다.
+[공개 배포 절차](docs/public-server-deployment.md)와 [Part 16](docs/blog/part16-secure-admission.md)의 인증서·포트 설정을 함께 적용합니다.
 `tetris_meta`는 guest 토큰, RP/XP/BP, 리더보드를 담당하고,
 `tetris_relay_reactor`는 TCP 매치메이킹과 프레임 포워딩을 담당합니다.
 
@@ -228,10 +244,10 @@ export TETRIS_RELAY_SECRET='change-this-long-random-secret'
 cmake -S . -B build-relay -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON
 cmake --build build-relay --config Release --target tetris_relay_reactor
 export TETRIS_RELAY_SECRET='change-this-long-random-secret'
-./build-relay/tetris_relay_reactor --port 7777 --meta https://api.example.com --log-level info
+./build-relay/tetris_relay_reactor --port 7777 --loopback-only --max-sessions-per-ip 128 --meta http://127.0.0.1:8080 --log-level info
 ```
 
-Linux 서버 번들은 다음 스크립트로 만듭니다. `tetris_relay_reactor`, `tetris_meta`,
+Linux 서버 번들은 다음 스크립트로 만듭니다. `tetris_relay_reactor`, `tetris_meta`, `tetris_wss_gateway`,
 systemd/Caddy/cloudflared 예시, DB 백업 스크립트가 함께 들어갑니다. 교재용
 `tetris_relay`는 일부러 넣지 않습니다 — 배포 대상이 아닌 바이너리를 서버
 압축 파일에 같이 두면 언젠가 누군가 그것을 띄우기 때문입니다.
@@ -277,7 +293,7 @@ secret 없이 ranked로 뜨면 meta가 `POST /v1/matches`를 거절해 경기 �
 클라이언트:
 
 ```bash
-./tetris --meta https://api.example.com --queue relay.example.com:7777
+./tetris --meta https://api.example.com --queue wss://relay.example.com:8443/play
 ```
 
 `--meta` 없는 relay는 명시적인 unranked 모드로 동작합니다. 반대로 ranked relay의

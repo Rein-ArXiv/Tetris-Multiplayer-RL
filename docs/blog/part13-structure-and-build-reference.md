@@ -1,5 +1,9 @@
 # Part 13: 완성 구조와 확장 레퍼런스
 
+> **공개 접속의 현재 경로:** [Part 16](part16-secure-admission.md)은 WSS 게이트웨이와 일회용 게임 입장권을 추가한다. 이 장의 raw TCP 명령은 로컬/내부 연결을 설명한다. 공개 포트는 WSS, relay는 `--loopback-only`이며, 기존 token 필드에는 장기 계정 토큰 대신 입장권을 넣는다.
+
+> **2026-09-11 현재 코드 반영:** 현재 빌드에는 `TETRIS_BUILD_REACTOR`가 추가됐다(Linux/Windows 기본 ON, macOS OFF). `src/presentation.cpp`도 게임 타깃에 포함된다. CTest에서 워커·루프·reactor 검사를 실행할 수 있다. 아래 상세 발췌보다 실제 `CMakeLists.txt`와 [실행 안내](../start-here.md)의 최신 명령을 우선한다.
+
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 13**
 >
 
@@ -20,6 +24,24 @@
 2. **고칠 때의 지도.** "보드를 20×10 이 아니라 다르게 하고 싶다", "홀드 기능을 넣고 싶다", "새 학습 알고리즘을 붙이고 싶다" 같은 상황에서 **어느 파일을 건드려야 하고 무엇이 함께 깨지는지**를 §7 이 안내한다.
 
 특히 두 번째가 중요하다. 이 저장소에는 컴파일러가 잡아주지 않는 계약이 몇 개 있다 — 결정론 해시, C++/Python 패리티, wire 포맷, ONNX 입출력 이름, 그리고 셰이더 정점 속성과 C++ 정점 버퍼의 대응. 이것들은 어긋나도 빌드가 성공하고, 한참 뒤에 이상한 증상으로 나타난다. §8 이 그 목록이다.
+
+### 후속 Part의 확장 위치
+
+아래 상세 해부는 공통 기반을 설명한다. 후속 추가의 실제 소스와 빌드 연결은 해당
+Part의 구현 계약을 함께 읽는다. 최종 `CMakeLists.txt`는 그 경로를 모두 포함한다.
+
+| 변경 목적 | 현재 소유 코드 | 설명 |
+|---|---|---|
+| 폰트·블록 색·아바타·대기 애니메이션 | `src/presentation.*`, `assets/theme.cfg` | [Part 15 §2](part15-release-polishing.md) |
+| 캐릭터·정책·속도 분리 | `bot/opponents.*`, `bot/controller.h`, `assets/opponents.cfg` | Part 15 §3~4 |
+| 봇 승리 재현·공용 BP | `bot/reward_replay.h`, `meta/bot_challenges.*`, `meta/database.*` | Part 15 §6 |
+| 안전한 게임 입장 | `meta/game_tickets.h`, `meta/http_client.*`, `net/session.*` | [Part 16 §2~3](part16-secure-admission.md) |
+| 인증서·WSS·전송 수명 | `net/wss_client.*`, `net/stream_transport.h`, `net/system_trust.*` | Part 16 §3~4 |
+| 공개 포트와 내부 relay 분리 | `server/wss_gateway.cpp`, `--loopback-only`, WSS systemd | Part 16 §5~6 |
+
+WSS는 `TETRIS_BUILD_WSS=ON`일 때 Boost.Beast·OpenSSL을 요구한다. `tetris_wss_gateway`는
+별도 실행 파일이며 `tetris`가 안에 서버를 띄우는 구조가 아니다. 봇 ONNX는 별도의
+`TETRIS_BUILD_BOT` 옵션이므로 WSS와 독립적으로 켜고 끌 수 있다.
 
 ## 1. 레포 구조 한눈에
 
@@ -496,6 +518,7 @@ if (TETRIS_BUILD_GAME)
         src/game.cpp
         src/gui.cpp
         src/colors.cpp
+        src/presentation.cpp
         core/replay.cpp
         net/socket.cpp
         net/framing.cpp
@@ -524,6 +547,7 @@ if (TETRIS_BUILD_GAME)
         ${TETRIS_SIM_HEADERS}
         src/game.h
         src/colors.h
+        src/presentation.h
         core/replay.h
         net/socket.h
         net/framing.h

@@ -83,3 +83,16 @@ docs/
 DEBUG_REMAINING_CHECKLIST.md
 docs_backup_*/
 .claude/
+
+# Release guides and Velog sources are maintained with code.
+!docs/
+!docs/**/
+!docs/**/*.md
+!docs/*.md
+dist/
+*.db
+*.db-wal
+*.db-shm
+
+# Downloaded, OS-specific inference runtime (recreate with fetch_onnxruntime.sh).
+third_party/onnxruntime/

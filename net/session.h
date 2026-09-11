@@ -7,6 +7,8 @@
 #include <atomic>
 #include <unordered_map>
 #include <string>
+#include <functional>
+#include <optional>
 #include "socket.h"
 #include "framing.h"
 
@@ -58,6 +60,7 @@ struct SeedParams {
 class Session {
 public:
     Session();
+    void SetTicketIssuer(std::function<std::optional<std::string>(const std::string&)> issuer) { ticketIssuer_ = std::move(issuer); }
     ~Session();
 
     // 네트워크 연결
@@ -172,6 +175,8 @@ public:
     void Close();  // 세션 종료 (스레드 정리, 소켓 닫기)
 
 private:
+    std::function<std::optional<std::string>(const std::string&)> ticketIssuer_;
+    bool prepareGameCredential(const std::string& host, std::string& credential);
     void ioThread();  // I/O 루프 (송수신, 메시지 파싱)
     void handleFrame(const Frame& f);  // 메시지 처리
     void acceptThread(uint16_t port);  // 호스트 전용: 연결 대기

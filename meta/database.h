@@ -13,7 +13,7 @@
 //   · 런타임 실패 (schema/쿼리) → fprintf(stderr) 로 로그 + nullopt 반환.
 //     호출자가 HTTP 500 으로 바꿔서 클라이언트에게 전달.
 //
-// 스키마: players, player_icons, matches, elo_history, schema_migrations.
+// 스키마: players, player_icons, matches, elo_history, bot_rewards, schema_migrations.
 // WAL + foreign keys + NORMAL.
 
 #include <cstdint>
@@ -128,6 +128,11 @@ public:
     // 단일 트랜잭션 안에서 matches INSERT → players UPDATE × 2 → elo_history × 2.
     // 실패 시 nullopt (모두 롤백).
     std::optional<MatchInsertResult> saveMatch(const MatchRecord& m);
+
+    // Verified PvE only: 10 BP/win, up to 100 BP per UTC day. No RP/XP/win-loss.
+    // Ticket id is globally unique; the transaction makes retries idempotent.
+    std::optional<int> botReward(int64_t player, const std::string& ticket);
+    std::optional<int> saveBotWin(int64_t player, const std::string& ticket, const std::string& opponent);
 
     // RP 내림차순 상위 N명. limit 은 1..100 으로 clamp.
     std::vector<LeaderRow> leaderboard(int limit);

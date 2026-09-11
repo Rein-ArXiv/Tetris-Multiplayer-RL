@@ -4,8 +4,9 @@
 #   .\scripts\release_win.ps1                        # 기본: BOT=OFF
 #   .\scripts\release_win.ps1 -Bot                   # BOT=ON (ORT 필요)
 #   .\scripts\release_win.ps1 -Sdl2                  # SDL2 백엔드
-#   .\scripts\release_win.ps1 -RelayEndpoint "relay.example.com:7777" -MetaUrl "https://api.example.com"
+#   .\scripts\release_win.ps1 -RelayEndpoint "wss://relay.example.com:8443/play" -MetaUrl "https://api.example.com"
 #
+# 기본 WSS 빌드 의존성: Boost.Beast 헤더와 OpenSSL (vcpkg toolchain 사용 가능).
 # 산출물: dist\tetris-win-x64.zip
 #   tetris-win-x64\
 #     tetris.exe
@@ -16,11 +17,13 @@
 #     onnxruntime.dll  (BOT 모드일 때)
 param(
     [switch]$Bot,
+    [switch]$NoWss,
     [switch]$Sdl2,
-    [string]$RelayEndpoint = "",
+    [string]$RelayEndpoint = "127.0.0.1:7777",
     [string]$MetaUrl = "",
     [switch]$DebugUi,
-    [switch]$NetTrace
+    [switch]$NetTrace,
+    [string]$TlsRuntimeDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +50,8 @@ $cmakeArgs = @(
     "-DTETRIS_BUILD_TEST=OFF"
 )
 
+if ($NoWss) { $cmakeArgs += "-DTETRIS_BUILD_WSS=OFF" } else { $cmakeArgs += "-DTETRIS_BUILD_WSS=ON" }
+
 if ($Sdl2) {
     $cmakeArgs += "-DTETRIS_USE_SDL2=ON"
 } else {
@@ -58,18 +63,12 @@ if ($Bot) {
 } else {
     $cmakeArgs += "-DTETRIS_BUILD_BOT=OFF"
 }
-if ($RelayEndpoint -ne "") {
-    $cmakeArgs += "-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RelayEndpoint"
-}
-if ($MetaUrl -ne "") {
-    $cmakeArgs += "-DTETRIS_DEFAULT_META_URL=$MetaUrl"
-}
-if ($DebugUi) {
-    $cmakeArgs += "-DTETRIS_ENABLE_DEBUG_UI=ON"
-}
-if ($NetTrace) {
-    $cmakeArgs += "-DTETRIS_ENABLE_NET_TRACE=ON"
-}
+$cmakeArgs += "-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RelayEndpoint"
+$cmakeArgs += "-DTETRIS_DEFAULT_META_URL=$MetaUrl"
+$cmakeArgs += "-DTETRIS_ENABLE_DEBUG_UI=$([int][bool]$DebugUi)"
+$cmakeArgs += "-DTETRIS_ENABLE_NET_TRACE=$([int][bool]$NetTrace)"
+$cmakeArgs += "-DTETRIS_BUILD_PY=OFF"
+$cmakeArgs += "-DTETRIS_ENABLE_HTTPS=ON"
 
 # Visual Studio 가 있으면 자동 감지. 명시적으로 지정하고 싶으면 -G 인자 추가.
 Write-Host "[release_win] CMake configure ..."
@@ -114,6 +113,17 @@ if ($Bot) {
         Copy-Item $ortDll "$DistDir\"
     } else {
         Write-Warning "onnxruntime.dll not found at $ortDll — bundling without it."
+    }
+}
+
+# vcpkg app-local deployment puts runtime DLLs beside the executable.
+Get-ChildItem -Path $Rel -Filter "*.dll" | ForEach-Object { Copy-Item $_.FullName "$DistDir\" }
+# For a separate OpenSSL distribution, provide its trusted runtime bin folder.
+if ($TlsRuntimeDir) {
+    foreach ($pattern in @("libssl*.dll", "libcrypto*.dll")) {
+        $libraries = @(Get-ChildItem -Path $TlsRuntimeDir -Filter $pattern)
+        if ($libraries.Count -eq 0) { throw "Missing $pattern in $TlsRuntimeDir" }
+        $libraries | ForEach-Object { Copy-Item $_.FullName "$DistDir\" }
     }
 }
 

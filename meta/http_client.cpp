@@ -114,7 +114,15 @@ std::optional<AuthInfo> parse_auth_info_body(const std::string& body)
 MetaClient::MetaClient(const std::string& base_url, std::string relay_secret)
     : base_url_(base_url), relay_secret_(std::move(relay_secret))
 {
+    const char* legacy = std::getenv("TETRIS_RELAY_LEGACY_AUTH");
+    if (!relay_secret_.empty() && legacy && std::string(legacy) == "1") {
+        std::fprintf(stderr, "[meta-client] WARNING: legacy account-token admission enabled; use only for migration tests\n");
+    }
     valid_ = parse_meta_url(base_url, host_, port_, https_);
+    if (valid_ && relay_secret_.empty() && !https_ &&
+        host_ != "127.0.0.1" && host_ != "::1" && host_ != "localhost") {
+        valid_ = false; // ordinary clients never send account credentials over remote HTTP
+    }
     if (!valid_) {
         std::fprintf(stderr, "[meta-client] invalid URL: %s\n", base_url.c_str());
         return;
@@ -139,6 +147,8 @@ httplib::Result post_json(const MetaClient& mc, const std::string& host, int por
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     if (https) {
         httplib::SSLClient cli(host, port);
+        cli.enable_server_certificate_verification(true);
+        if (const char* ca = std::getenv("TETRIS_CA_FILE")) cli.set_ca_cert_path(ca);
         configure_client(cli, timeout_s);
         return cli.Post(path, headers, body, "application/json");
     }
@@ -156,6 +166,8 @@ httplib::Result get_path(const std::string& host, int port, bool https,
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     if (https) {
         httplib::SSLClient cli(host, port);
+        cli.enable_server_certificate_verification(true);
+        if (const char* ca = std::getenv("TETRIS_CA_FILE")) cli.set_ca_cert_path(ca);
         configure_client(cli, timeout_s);
         return cli.Get(path);
     }
@@ -239,6 +251,37 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
     }
     set_outcome(VerifyOutcome::Ok);
     return parsed;
+}
+
+std::optional<std::string> MetaClient::request_game_ticket(const std::string& token)
+{
+    // Plain HTTP is permitted only for explicit local development. A remote meta
+    // URL must not leak the long-lived account credential while issuing a ticket.
+    if (!valid_ || (!https_ && host_ != "127.0.0.1" && host_ != "::1" && host_ != "localhost")) return std::nullopt;
+    auto r = post_json(*this, host_, port_, https_, "/v1/game-tickets", {},
+                       "{\"token\":\"" + proto::json_escape(token) + "\"}", 5);
+    if (!r || r->status != 200) return std::nullopt;
+    auto ticket = proto::find_string(r->body, "ticket");
+    if (ticket.size() != 36 || ticket.substr(0,4) != "gt1." ||
+        ticket.find_first_not_of("0123456789abcdef",4) != std::string::npos) return std::nullopt;
+    return ticket;
+}
+
+std::optional<AuthInfo> MetaClient::consume_game_ticket(const std::string& ticket)
+{
+    if (!valid_ || relay_secret_.empty()) return std::nullopt;
+    // Explicit local compatibility switch for pre-ticket clients/tests. Never
+    // enabled in release services. Ticket redemption NEVER takes this path.
+    if (ticket.rfind("gt1.",0) != 0) {
+        const char* legacy = std::getenv("TETRIS_RELAY_LEGACY_AUTH");
+        if (legacy && std::string(legacy) == "1") return verify_token(ticket);
+        return std::nullopt;
+    }
+    auto r = post_json(*this, host_, port_, https_, "/v1/game-tickets/consume",
+                       {{"X-Relay-Secret", relay_secret_}},
+                       "{\"ticket\":\"" + proto::json_escape(ticket) + "\"}", 3);
+    if (!r || r->status != 200) return std::nullopt;
+    return parse_auth_info_body(r->body);
 }
 
 std::optional<std::vector<IconEntry>>
@@ -549,6 +592,33 @@ bool save_token(const std::string& token)
                     ec);
     return ok;
 #endif
+}
+
+
+std::optional<BotChallenge> MetaClient::start_bot_challenge(const std::string& token,const std::string& opponent,int* status) {
+    if(status)*status=0;
+    if(!valid_)return std::nullopt;
+    const auto body="{\"token\":\""+proto::json_escape(token)+"\",\"opponent_id\":\""+proto::json_escape(opponent)+"\"}";
+    auto r=post_json(*this,host_,port_,https_,"/v1/bots/challenge",{},body,5);
+    if(!r)return std::nullopt;
+    if(status)*status=r->status;
+    if(r->status!=200)return std::nullopt;
+    auto id=proto::find_string(r->body,"ticket");
+    auto seed=proto::find_int(r->body,"seed"), interval=proto::find_int(r->body,"input_ticks"), think=proto::find_int(r->body,"think_ticks"), minimum=proto::find_int(r->body,"min_piece_ticks");
+    if(id.size()!=32 || !seed || *seed<0 || !interval || *interval<1 || *interval>30 || !think || *think<0 || *think>180 || !minimum || *minimum<1 || *minimum>600)return std::nullopt;
+    return BotChallenge{id,static_cast<uint64_t>(*seed),static_cast<int>(*interval),static_cast<int>(*think),static_cast<int>(*minimum)};
+}
+std::optional<BotReward> MetaClient::claim_bot_reward(const std::string& token,const std::string& ticket,const std::string& inputs,int* status) {
+    if(status)*status=0;
+    if(!valid_)return std::nullopt;
+    const auto body="{\"token\":\""+proto::json_escape(token)+"\",\"ticket\":\""+proto::json_escape(ticket)+"\",\"inputs_hex\":\""+proto::json_escape(inputs)+"\"}";
+    auto r=post_json(*this,host_,port_,https_,"/v1/bots/claim",{},body,10);
+    if(!r)return std::nullopt;
+    if(status)*status=r->status;
+    if(r->status!=200)return std::nullopt;
+    auto earned=proto::find_int(r->body,"awarded_bp"),bp=proto::find_int(r->body,"bp");
+    if(!earned || *earned<0 || *earned>10 || !bp || *bp<0 || *bp>2147483647)return std::nullopt;
+    return BotReward{static_cast<int>(*earned),static_cast<int>(*bp)};
 }
 
 } // namespace meta::client

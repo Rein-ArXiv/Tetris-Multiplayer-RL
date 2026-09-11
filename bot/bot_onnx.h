@@ -17,7 +17,7 @@
 //   출력  "policy_logits" (1, 40)  float32 — 40가지 placement의 점수
 //         "value"         (1,)     float32 — 학습에만 쓰고 여기선 무시
 //
-// 이름과 shape이 어긋나면 로드는 되고 추론에서 터진다. 바꿀 일이 있으면
+// 이름, float32 타입, 고정 shape이 어긋나면 Load에서 거절한다. 바꿀 일이 있으면
 // python/netbot/export_onnx.py의 INPUT_NAMES/OUTPUT_NAMES도 같이 고친다.
 
 class SimGame;
@@ -33,9 +33,9 @@ public:
     BotOnnx& operator=(const BotOnnx&) = delete;
 
     // .onnx 파일을 읽는다. 파일이 없거나, 깨졌거나, 입출력 이름이 위 계약과
-    // 다르면 false. 이 경우 err_out에 화면에 그대로 띄울 수 있는 사유가 담긴다.
+    // 다르면 false. 이 경우 err_out에 개발 로그용 상세 사유가 담긴다.
     // 실패해도 예외를 던지지 않는다 — 모델이 없는 것은 정상 상황이고
-    // 호출자는 heuristic bot으로 넘어가면 된다.
+    // 호출자는 해당 상대를 시작하지 않고 다른 상대 선택을 안내한다.
     bool Load(const std::string& onnx_path, std::string* err_out = nullptr);
 
     // 현재 판을 보고 둘 곳을 정한다.

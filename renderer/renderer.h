@@ -32,8 +32,8 @@ void renderer_shutdown();
 
 // 폰트 로드. stb_truetype 가 TTF 를 파싱한다. 필요한 글리프는 처음 그릴 때
 // CPU 에서 래스터화되어 GPU 글리프 아틀라스(R8 텍스처)에 올라간다.
-// path: "Font/NanumGothic.ttf" 등 TTF 파일 경로
-void renderer_load_font(const char* path);
+// path: "Font/NanumGothic.ttf" 등 TTF 파일 경로. 성공하면 true.
+bool renderer_load_font(const char* path);
 
 // ─── 그리기 함수 ──────────────────────────────────────────────────────────────
 //

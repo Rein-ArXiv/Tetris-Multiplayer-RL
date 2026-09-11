@@ -308,6 +308,7 @@ def meta_and_relay(tmp_path):
 
     try:
         yield {
+            "db_path": db,
             "meta_url":   f"http://127.0.0.1:{meta_port}",
             "relay_host": "127.0.0.1",
             "relay_port": relay_port,
@@ -487,10 +488,18 @@ def test_ranked_auth_releases_handshake_slot(meta_and_relay):
 
     total = RELAY_MAX_HANDSHAKES_PER_IP + 8   # 핸드셰이크 상한보다 확실히 크게
     assert total < RELAY_MAX_SESSIONS_PER_IP, "세션 상한에 닿으면 다른 것을 재게 된다"
+    # This tests existing users' relay admission, not guest creation throughput.
+    # Seed only this private fixture DB; keep the production guest limit enabled.
+    import secrets
+    import sqlite3
+    tokens = [secrets.token_hex(16) for _ in range(total)]
+    with sqlite3.connect(meta_and_relay["db_path"]) as db:
+        db.executemany("INSERT INTO players(token,created_at) VALUES (?,?)",
+                       [(token, int(time.time())) for token in tokens])
     socks: list[socket.socket] = []
     try:
         for i in range(total):
-            tok = _post(f"{base}/v1/guest")["token"]
+            tok = tokens[i]
             s = socket.create_connection((rh, rp), timeout=2.0)
             socks.append(s)
             s.sendall(_build_room_create(tok))

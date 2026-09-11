@@ -9,7 +9,7 @@
 // 코드가 eventfd 에 8바이트를 쓰면, epoll 이 그것을 준비 이벤트로 보고 poll 이
 // 즉시 반환한다.
 
-#if !defined(_WIN32)
+#if defined(__linux__)
 
 #include "reactor.h"
 

@@ -22,7 +22,7 @@ public:
 
     // ── 렌더링 ──────────────────────────────────────────────────────────────
     void Draw();
-    void DrawBoardAt(int offsetX, int offsetY);
+    void DrawBoardAt(int offsetX, int offsetY, int cellSize = 30);
     void DrawNextAt(int offsetX, int offsetY);
     // 축소 프리뷰 — 멀티/봇 모드용 (cellSize 작게). 보드 사이 좁은 갭에 들어감.
     void DrawNextMini(int offsetX, int offsetY, int cellSize);
@@ -31,7 +31,7 @@ public:
                            int ySpacing = 48);
     // 가비지 큐 미리보기 바 — 보드 왼쪽(offsetX-8 위치)에 빨간 바 세로 그리기.
     // pending: 주입 대기 중인 행 수. 최대 표시 12행.
-    static void DrawGarbageBar(int boardX, int boardY, int pending);
+    static void DrawGarbageBar(int boardX, int boardY, int pending, int cellSize = 30);
 
     // ── 시뮬레이션 위임 ─────────────────────────────────────────────────────
     void SubmitInput(uint8_t inputMask);
@@ -49,8 +49,8 @@ public:
     int&  score;
 
 private:
-    void DrawGrid(int offsetX, int offsetY) const;
-    void DrawBlock(const SimBlock& block, int offsetX, int offsetY) const;
+    void DrawGrid(int offsetX, int offsetY, int cellSize = 30) const;
+    void DrawBlock(const SimBlock& block, int offsetX, int offsetY, int cellSize = 30) const;
     void DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const;
 
     std::vector<Color> cellColors;

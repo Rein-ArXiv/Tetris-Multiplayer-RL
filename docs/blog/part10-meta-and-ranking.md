@@ -1626,101 +1626,86 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
 
 ## 11. HTTP 방어선
 
-`ApiServer::listen` 은 라우팅을 등록하기 전에 두 겹의 방어선을 건다.
+2026-09-11 폴리싱에서 발급량과 프록시 신뢰 경계를 보강했다. 본문 64KiB,
+작업자 8개/대기열 128개, 읽기·쓰기 각 5초를 시작점으로 한다.
+일반 요청 60회/초, secret이 맞는 relay 요청 512회/초와 별개로, 영속 DB 행을
+만드는 guest는 10회/60초/IP로 제한한다. `Retry-After`를 보고 재시도한다.
 
 **현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-bool ApiServer::listen(const std::string& host, int port)
-{
-    httplib::Server svr;
+    svr.new_task_queue = [] { return new httplib::ThreadPool(8, 128); };
+    svr.set_read_timeout(5, 0);
+    svr.set_write_timeout(5, 0);
 
-    // [보안] 요청 본문 상한 — 거대한 body 로 메모리를 소모시키는 플러딩 방지.
-    //   우리 엔드포인트의 정상 body 는 수백 바이트 수준이라 64KiB 면 충분.
+    // Normal requests are only a few hundred bytes.
     svr.set_payload_max_length(64 * 1024);
 
-    // 1초 고정 윈도우. 신뢰한 relay와 public 요청은 별도 버킷이다.
+    std::mutex budget_mu;
+    RequestBudget requests, guests;
+    // Guests create durable rows: give them a separate, much smaller budget.
     svr.set_pre_routing_handler(
-        [this](const httplib::Request& req, httplib::Response& res) {
-            static std::mutex mu;
-            static std::unordered_map<std::string, int> hits;
-            static int64_t window = 0;
+        [&, this](const httplib::Request& req, httplib::Response& res) {
             const bool trustedRelay = !relay_secret_.empty() &&
                 ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_);
-            const int maxPerWindow = trustedRelay ? 512 : 60;
-            const int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+            const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            std::lock_guard<std::mutex> lk(mu);
-            if (nowSec != window) { window = nowSec; hits.clear(); }
-            const std::string key = (trustedRelay ? "relay:" : "public:") +
-                                    rate_limit_key(req);
-            if (++hits[key] > maxPerWindow) {
-                res.status = 429;
-                res.set_header("Access-Control-Allow-Origin", "*");
-                res.set_content("{\"error\":\"rate_limited\"}", "application/json");
+            const std::string ip = rate_limit_key(req, trust_loopback_proxy_);
+            std::lock_guard<std::mutex> lk(budget_mu);
+            int retry = 1;
+            bool allowed = requests.allow((trustedRelay ? "relay:" : "public:") + ip,
+                                          now, trustedRelay ? 512 : 60, 1);
+            if (allowed && req.method == "POST" && req.path == "/v1/guest") {
+                allowed = guests.allow(ip, now, 10, 60);
+                retry = 60;
+            }
+            if (!allowed) {
+                set_json(res, 429, "{\"error\":\"rate_limited\"}");
+                res.set_header("Retry-After", std::to_string(retry));
                 return httplib::Server::HandlerResponse::Handled;
             }
             return httplib::Server::HandlerResponse::Unhandled;
         });
 
-    // ------- CORS preflight (브라우저 정적 페이지용) ------------------------
-    svr.Options(R"(/v1/.*)",
-        [](const httplib::Request&, httplib::Response& res) {
-            res.status = 204;
-            res.set_header("Access-Control-Allow-Origin",  "*");
-            res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            res.set_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Secret");
-        });
 ```
 
-public 요청은 **선택된 client key**마다 초당 60회, 올바른 `X-Relay-Secret`을 가진 relay 요청은 별도 namespace에서 초당 512회다. 그 client key 를 무엇으로 잡는가 — 특히 프록시 뒤에서 전달 헤더를 어디까지 믿는가 — 가 이 방어선에서 가장 미묘한 결정이라, §11.1 이 그 규칙 하나만 따로 다룬다.
+`RequestBudget`은 주소마다 첫 요청부터 창 길이를 세고 만료하면 카운터를 초기화한다.
+각 표는 4096개를 넘지 않으며, 가득 차면 만료 항목을 회수하고 그래도 가득 찼으면
+새 주소를 거절한다. 카운터는 제한값에서 멈춘다. 이 제한은 DDoS 방어 전체가 아니라
+프로세스 내부 자원 보호다. NAT 사용자는 같은 버킷을 공유하고 여러 IP의 계정 생성을
+완전히 막지 못하므로 공개 배치에서는 edge 제한과 DB 크기 모니터도 필요하다.
 
-relay 한 대가 여러 플레이어의 인증을 meta에 전달할 때도 직접 peer는 relay IP 하나다. secret 비교를 먼저 통과한 내부 호출만 더 큰 별도 버킷을 쓰므로 정상적인 인증 burst가 public 요청과 경쟁하지 않는다. 임의 헤더를 붙인 외부 요청은 secret 비교를 통과하지 못해 public namespace에 남는다.
-
-고정 윈도우는 창 경계에서 순간적으로 상한의 두 배까지 통과할 수 있다. 대신 상태가 `(문자열 → 정수)` 맵 하나뿐이고 창이 바뀔 때 통째로 비워 메모리가 누적되지 않는다. 이 규모에서는 정확한 과금보다 플러딩 완화와 예측 가능한 비용이 우선이다.
-
-### 11.1 레이트 리밋 키 — 프록시 뒤에서 무너지는 함정
-
-가장 미묘한 부분이 리밋의 **키**다.
+### 11.1 레이트 리밋 키 — 전달 헤더는 기본적으로 신뢰하지 않는다
 
 **현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-// 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
-// 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
-// 버킷을 우회할 수 있다. 소형 리눅스 프록시 → 저전력 Android(Termux) meta 같은
-// 분리 배치에서는 모든 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은
-// edge가 맡아야 한다.
-std::string rate_limit_key(const httplib::Request& req)
+std::string rate_limit_key(const httplib::Request& req, bool trust_proxy)
 {
-    const bool from_loopback =
-        req.remote_addr == "127.0.0.1" || req.remote_addr == "::1";
-    if (from_loopback) {
-        std::string ip = req.get_header_value("CF-Connecting-IP");
-        if (ip.empty()) {
-            // [보안] XFF 는 "client, proxy1, proxy2, ..." 순서로, 경유하는
-            // 프록시가 자기 앞단의 주소를 **뒤에 append** 한다. 즉 첫 토큰은
-            // 클라이언트가 요청에 미리 심어 위조할 수 있는 값이고(매 요청
-            // 다른 값을 넣으면 60/s 공개 버킷을 무한 우회), 신뢰할 수 있는
-            // 것은 우리가 믿는 프록시가 마지막에 붙인 rightmost 토큰뿐이다.
-            // 따라서 첫 토큰이 아니라 마지막 토큰을 rate limit 키로 쓴다.
-            ip = req.get_header_value("X-Forwarded-For");
-            const auto comma = ip.rfind(',');
-            if (comma != std::string::npos) ip.erase(0, comma + 1);
-        }
+    const bool local = req.remote_addr == "127.0.0.1" || req.remote_addr == "::1";
+    if (trust_proxy && local) {
+        std::string ip = req.get_header_value("X-Forwarded-For");
+        const auto comma = ip.rfind(',');
+        if (comma != std::string::npos) ip.erase(0, comma + 1);
         const auto b = ip.find_first_not_of(" \t");
         const auto e = ip.find_last_not_of(" \t");
-        if (b != std::string::npos) return ip.substr(b, e - b + 1);
+        if (b != std::string::npos && e - b < 64) return ip.substr(b, e - b + 1);
     }
     return req.remote_addr;
 }
+
 ```
 
-프록시와 meta가 같은 호스트라면 `tetris_meta`는 `127.0.0.1:8080`에 bind하고 모든 요청의 `remote_addr`은 프록시의 loopback 주소가 된다. 순진하게 그 값만 키로 쓰면 **모든 사용자가 하나의 버킷을 공유**하므로 전달 헤더에서 원 client 주소를 복원해야 한다. 그렇다고 `CF-Connecting-IP`나 `X-Forwarded-For`를 언제나 믿을 수는 없다 — 이 헤더들은 **클라이언트가 직접 넣을 수도 있다.** 그래서 신뢰 조건을 건다. **직접 peer 가 루프백일 때만** forwarded 헤더를 믿는다. 루프백에서 오는 요청은 정의상 같은 기계의 프록시가 보낸 것이다. 이 신뢰 모델은 "meta 를 외부에 직접 공개하지 않는다"는 배포 설정과 한 묶음이며, 둘 중 하나만 지키면 성립하지 않는다.
+예전에는 loopback 요청이면 `CF-Connecting-IP`부터 읽었다. 그러나 일반 프록시가
+그 헤더를 통과시키면 외부 클라이언트가 임의 값을 보내 매번 새 버킷을 만들 수 있다.
+loopback이라는 사실만으로 실제로 검증된 프록시라는 증거가 되지도 않는다.
 
-헤더를 믿기로 한 뒤에도 **어느 토큰을 믿는가**가 남는다. `X-Forwarded-For`는 요청이 프록시를 지날 때마다 각 프록시가 자기가 관측한 peer 주소를 **뒤에 덧붙이는(append)** 목록이다. 값의 왼쪽 끝은 클라이언트가 요청을 만들 때 미리 심어둘 수 있는 자유 입력이고, 오른쪽 끝만이 신뢰하는 프록시가 직접 관측해 붙인 값이다. 첫 토큰을 키로 쓰면 공격자가 매 요청 다른 가짜 주소를 헤더에 심어 매번 새 버킷을 배정받는다 — 초당 60회 제한이 사실상 사라진다. 그래서 코드는 마지막(rightmost) 토큰을 쓴다. 일반화하면, append 형 체인 헤더에서 신뢰할 수 있는 항목 수는 검증된 인접 홉의 수와 같다. 루프백 프록시 한 홉만 신뢰하는 이 배치에서는 마지막 항목 하나만 믿을 수 있고, 신뢰 홉이 늘어나는 배치(edge → 내부 프록시 → meta)라면 신뢰 프록시 목록을 명시하고 오른쪽에서부터 그 수만큼 걷어내야 한다. `CF-Connecting-IP`를 먼저 보는 이유도 같은 결이다 — 목록이 아니라 edge가 매 요청 덮어쓰는 단일 값이라 해석의 모호함이 없다.
-
-프록시와 meta가 다른 호스트인 분리 배치에서는 루프백 조건이 거짓이다. meta의 키는 프록시 사설 IP가 되고 public 버킷은 공유된다. 이것은 버그를 숨긴 per-client 제한이 아니라 보수적인 전체 한도다. client별 제한은 Caddy/Tunnel edge에서 걸고, meta 로그의 429를 감시한다. 이때 edge가 클라이언트가 보낸 XFF를 정규화(덮어쓰기)하도록 설정하는 것까지가 한 묶음이다 — meta가 rightmost를 읽어도 edge가 위조 토큰을 그대로 통과시키면 edge 측 per-IP 제한이 먼저 뚫린다. 별도 프록시를 신뢰하는 기능을 추가하려면 임의 사설망 전체가 아니라 명시적인 proxy 주소 allowlist와 방화벽을 함께 구현해야 한다.
+현재는 `--trust-loopback-proxy`를 명시해야 loopback의 **마지막 XFF 주소**를 읽는다.
+CF 헤더는 무시한다. 이 옵션을 켜는 운영자는 로컬 프록시가 실제 peer 주소를
+append/overwrite하도록 설정하고 meta의 직접 접근을 제한해야 한다.
+별도 호스트 프록시는 신뢰하지 않아 해당 proxy IP의 공용 버킷을 사용한다.
+다단 프록시/Cloudflare 체인의 실제 주소 복원은 검증된 edge 설정에서 담당해야 한다.
+옵션을 켜지 않은 배포에서도 요청은 동작하지만 사용자별 제한이 아닌 공유 제한이다.
 
 ### 11.2 토큰 생성과 상수 시간 비교
 
@@ -2864,7 +2849,7 @@ sequenceDiagram
 
 이 설계가 주는 것은 **서버가 단일 진실 원천**이라는 성질이다. 클라이언트의 `shopOwned` 집합은 캐시일 뿐이고, 틀려도 서버가 바로잡는다. 소유 목록 API 를 만들었다면 그것과 실제 소유의 동기화를 걱정해야 했을 것이다.
 
-## 16. relay 쪽 연동 (1) — 토큰 verify
+## 16. relay 쪽 연동 (1) — 인증된 입장 정보
 
 relay 는 `--meta` 가 주어진 경우에만 ranked 로 동작한다. 그리고 secret 이 없으면 아예 시작을 거부한다.
 
@@ -2894,14 +2879,12 @@ relay 는 `--meta` 가 주어진 경우에만 ranked 로 동작한다. 그리고
 
 `--meta` 를 주고 secret 을 빠뜨리면 **exit 2** 로 죽는다. 그냥 뜨게 두면 매치가 끝날 때마다 403 을 받아 delta 0 을 돌려주는데, 그 증상만 보고 원인을 찾기가 어렵다. 시작 시점에 확실한 메시지로 죽는 편이 낫다. secret 은 `--meta-secret` 플래그 또는 `TETRIS_RELAY_SECRET` 환경변수로 준다(§12.3 참조).
 
-토큰 verify 는 첫 프레임 처리 경로에 붙는다.
+현재 소스에서는 [Part 16](part16-secure-admission.md)의 일회용 입장권 소비가 첫 프레임 처리 경로에 붙는다. 계정 토큰은 클라이언트↔meta API에만 쓰고, relay의 같은 필드에는 `gt1.` 입장권이 들어온다. 이 절은 소비 이후 player 정보와 session lease의 연결을 설명한다.
 
 **현재 소스 발췌 — `server/player_conn.cpp`**
 
 ```cpp
-// meta 가 nullptr 면 unranked 로 통과한다 (player_id=0, elo=0).
-// meta 가 있는 relay 에서는 빈 토큰·verify 실패·중복 세션 모두
-// std::nullopt → 호출자가 소켓 close (reject).
+// A null meta client selects unranked mode.
 struct AuthOutcome {
     int64_t     player_id = 0;
     int         elo = 0;
@@ -2910,6 +2893,7 @@ struct AuthOutcome {
     std::string selected_icon_id{"default"};
     std::shared_ptr<PlayerSessionLease> session_lease;
 };
+
 std::optional<AuthOutcome>
 authenticate(meta::client::MetaClient* meta, const std::string& token,
              uint32_t conn_id, const char* what)
@@ -2926,25 +2910,10 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
                   << " missing token -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
-    meta::client::MetaClient::VerifyOutcome verify_outcome{};
-    auto auth = meta->verify_token(token, 3, &verify_outcome);
+    auto auth = meta->consume_game_ticket(token);
     if (!auth) {
-        // 성공 결과만 5분 캐시하며, meta의 명시적 거부에는 쓰지 않는다.
-        if (verify_outcome == meta::client::MetaClient::VerifyOutcome::NetworkError) {
-            auth = cached_auth(token);
-            if (auth) {
-                RLOG_WARN("[conn " << conn_id << "] " << what
-                          << " meta offline; accepted cached auth");
-            }
-        }
-    }
-    if (!auth) {
-        RLOG_INFO("[conn " << conn_id << "] " << what
-                  << " meta verify failed -> reject player_id=0 match_uuid=-");
+        RLOG_INFO("[conn " << conn_id << "] game admission rejected");
         return std::nullopt;
-    }
-    if (verify_outcome == meta::client::MetaClient::VerifyOutcome::Ok) {
-        cache_auth(token, *auth);
     }
     o.player_id = auth->player_id;
     o.elo       = auth->elo;
@@ -2966,25 +2935,22 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
 }
 ```
 
-발췌는 결과 구조체와 `authenticate` 만 싣는다. 캐시 헬퍼 `cached_auth` / `cache_auth` 는 같은 파일의 익명 네임스페이스에 있고, 그 계약(5분 TTL, 4096 항목 상한)은 아래에서 설명한다. 모든 거부 경로가 원인을 담은 stderr 로그를 남긴다는 점도 계약의 일부다 — 클라이언트에는 소켓 close 하나로만 보이는 실패를 서버 로그에서 구분할 수 있어야 운영이 된다.
+meta가 없는 연습 서버는 자격 증명을 무시하고 unranked로 통과한다. meta가 있는
+서버는 빈 값·소비 실패·중복 활성 세션을 모두 거절한다. 세 진입점 `QUEUE_JOIN`,
+`ROOM_CREATE`, `ROOM_JOIN`이 같은 함수를 사용한다.
 
-진리표가 이렇다.
-
-| meta 연결 | 토큰 | 결과 |
+| meta 연결 | 입장 자격 | 결과 |
 |---|---|---|
-| 없음(`nullptr`) | 무엇이든 | **무시**하고 unranked 통과 (`player_id = 0`) |
-| 있음 | 비어 있음 | **소켓 close** (reject) |
-| 있음 | 유효 | ranked — player_id/RP/username/icon 보관 |
-| 있음 | 무효·404 | **소켓 close** (reject) |
-| 있음 | meta 네트워크 장애 + 5분 내 성공 캐시 | cached identity로 ranked 진행 |
-| 있음 | meta 네트워크 장애 + 캐시 없음 | **소켓 close** (fail closed) |
-| 있음 | 같은 player_id의 활성 lease 존재 | **소켓 close** (중복 세션 거부) |
+| 없음 | 무엇이든 | unranked, player_id=0 |
+| 있음 | 유효한 미사용 입장권 | 소비 후 player 정보와 session lease 확보 |
+| 있음 | 빈 값·만료·재사용·장기 계정 토큰 | 소켓 close |
+| 있음 | meta 네트워크 장애 | 소켓 close. 인증 캐시 우회 없음 |
+| 있음 | 같은 player_id의 활성 lease 존재 | 중복 접속 거부. 소비한 입장권은 복구하지 않음 |
 
-첫 줄과 둘째 줄의 비대칭이 중요하다. meta 가 없는 relay 는 토큰을 보내든 말든 받아주지만, meta 가 있는 relay 는 **토큰 없는 접속을 거부한다.** 후자를 허용하면 ranked 서버에 익명으로 들어와 상대의 시간을 쓰고 결과를 무의미하게 만들 수 있다.
-
-세 진입점(`QUEUE_JOIN`, `ROOM_CREATE`, `ROOM_JOIN`)이 모두 이 함수를 통과한다. 페이로드 끝의 `[tok_len:1][token:N]` 을 `extract_token` 으로 꺼내 넘긴다.
-
-relay도 `UnknownToken`과 `NetworkError`를 구분한다. 404·잘못된 토큰은 언제나 거부하지만, 네트워크 오류는 이전에 meta가 성공시킨 동일 토큰의 5분 캐시가 있을 때만 허용한다. meta 를 저전력 Android(Termux) 단말 같은 절전이 있는 호스트에서 돌리는 배치도 있으므로, 캐시는 4096개에서 오래된 항목을 제거해 meta의 짧은 절전·재연결을 흡수하면서도 무기한 인증 우회와 메모리 증가를 막는다. 인증 뒤 얻은 session lease는 큐·룸·포워더 수명 전체를 따라가 같은 `player_id`의 동시 ranked 접속도 차단한다.
+예전에 있던 `cached_auth`·`cache_auth`와 5분 성공 캐시의 오프라인 입장 허용은
+Part 16에서 제거했다. 한 번 소비한 티켓을 캐시로 다시 허용하면 일회용 계약이
+깨진다. 실패한 접속은 다음 시도에서 새 입장권을 받아야 한다. session lease는
+큐·룸·포워더 전체 수명을 따라가며 접속이 끝날 때 계정의 활성 슬롯을 반환한다.
 
 ## 17. relay 쪽 연동 (2) — `finalizeRanked`
 
@@ -3339,7 +3305,7 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py \
 | 테스트 | 고정하는 계약 |
 |---|---|
 | `test_meta_db_smoke.py` | guest 발급 · stale token 404 · strict secret 시작 조건 · RP 0 시작/0 바닥 · BP/XP 적립 · level 표시 · 아이콘 구매/선택/소유권/BP 부족 오류 · leaderboard 정렬 · 구 1200 스케일 DB 의 1 회 마이그레이션 |
-| `test_relay_meta_smoke.py` | relay 가 토큰을 verify 하고 ranked 로 매칭하는 경로 · 토큰 없는 접속 거부 |
+| `test_relay_meta_smoke.py` | 명시적 legacy fixture의 기존 wire 회귀. 현재 입장권·WSS는 `test_secure_admission.py`에서 검사 |
 | `test_match_summary_crosscheck.py` | 일치하는 `MATCH_SUMMARY` 쌍 → winner 확정 + 보상 · 불일치 쌍 → `winner=null` + 보상 0 |
 
 이 테스트들이 `tetris_meta` 를 실제로 실행하고 HTTP 를 두드리므로, 파이썬 쪽 어서션이 곧 이 장의 API 계약 문서 역할을 한다.
@@ -3351,7 +3317,7 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py \
 - `Database::saveMatch` — matches INSERT + players UPDATE ×2 + elo_history INSERT ×2 를 한 트랜잭션에. `winner=null` 이면 감사 기록만 남고 보상은 없다.
 - 아이콘 카탈로그 · 구매 · 선택 — 조건부 UPDATE 로 BP 차감을 보호하고, 400/402/403/404/409/500 상태 코드로 클라이언트의 2 단계 구매 흐름을 만든다.
 - `meta/protocol.h` — 라이브러리 없는 JSON 직렬화/파싱. `json_escape`, `find_key_colon`/`find_string`/`find_int`(INT64 오버플로 가드)/`find_bool`.
-- HTTP 방어선 — 64 KiB body 상한, per-IP 고정 윈도우 레이트 리밋(루프백 peer 일 때만 forwarded 헤더 신뢰, XFF 는 rightmost 토큰만 채택), 상수 시간 secret 비교, 통계값 1e8 상한.
+- HTTP 방어선 — 64 KiB body 상한, per-IP 고정 윈도우 레이트 리밋(명시적 신뢰 옵션과 loopback peer를 모두 만족할 때만 XFF rightmost 채택), 상수 시간 secret 비교, 통계값 1e8 상한.
 - `meta::client::MetaClient` — 게임 클라이언트와 relay 가 공유하는 HTTP 래퍼. HTTPS 는 OpenSSL 빌드에서만 유효하고, `VerifyOutcome` 3 분기로 "토큰이 죽었다"와 "서버가 잠깐 안 된다"를 구분한다.
 - 플랫폼별 user-data 경로 — `token_file_path()` / `settings_file_path()`, POSIX 0600 토큰 저장, 32-hex 형식 검증.
 - 클라이언트 — 토큰 부트스트랩의 성공·stale token·offline 분기, `AppMode::Customize` 아이콘 상점, 랭크 매치 후 비동기 `verify_token` 갱신. 메뉴 배열의 숫자 index가 아니라 `AppMode` 전이를 계약으로 본다.

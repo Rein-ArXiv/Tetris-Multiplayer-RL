@@ -149,6 +149,7 @@ std::atomic<size_t>   g_tx_total{0};
 // 않은 이유는 그쪽이 보조 기기에 동시 요청을 더 밀어 넣어 왕복 자체를 느리게
 // 만들기 때문이다.
 constexpr size_t      kDefaultMaxPendingAuth = 64;
+bool                  g_loopback_only = false;
 size_t                g_max_pending_auth     = kDefaultMaxPendingAuth;
 
 // ── 관측 ─────────────────────────────────────────────────────────────────────
@@ -549,7 +550,7 @@ public:
         }
         offload_ = std::make_unique<Offload>(4, [this] { reactor_->wake(); });
 
-        listen_ = net::tcp_listen(port, 64);
+        listen_ = net::tcp_listen(port, 64, g_loopback_only);
         if (!listen_.valid()) {
             RLOG_ERROR("[relay] port " << port << " listen 실패");
             return false;
@@ -1407,8 +1408,7 @@ private:
                     !g_running.load(std::memory_order_relaxed)) {
                     return {};   // continuation 없음 — 루프는 이 작업을 보지도 않는다
                 }
-                meta::client::MetaClient::VerifyOutcome outcome{};
-                auto auth = meta->verify_token(token, 3, &outcome);
+                auto auth = meta->consume_game_ticket(token);
                 return [this, cid, auth, token]() { resume_auth(cid, auth, token); };
             });
         if (!queued) close_conn(c, "종료 중 — 인증 불가");
@@ -2379,6 +2379,7 @@ int main(int argc, char** argv) {
             if (!parse_int_arg(next("--loops"), "--loops", 1, 256, n)) return 2;
             loops = n;
         }
+        else if (a == "--loopback-only") relay::g_loopback_only = true;
         else if (a == "--meta")        meta_url = next("--meta");
         else if (a == "--meta-secret") meta_secret = next("--meta-secret");
         else if (a == "--max-sessions-per-ip") {
@@ -2488,6 +2489,7 @@ int main(int argc, char** argv) {
                 "              끊긴 연결의 인증 작업은 취소되므로 이 수는 아직 살아서\n"
                 "              기다리는 사람만 센다. 넘기면 세우는 대신 사유를 밝히고\n"
                 "              거절한다 — meta 가 느릴수록 낮게 잡아야 줄이 짧아진다.\n"
+                "  --loopback-only  Bind only 127.0.0.1 behind WSS.\n"
                 "  --meta-secret S\n"
                 "              meta 와 공유하는 secret. **인자로 주면 ps 와\n"
                 "              /proc/<pid>/cmdline 에 그대로 드러난다** — 같은 호스트의\n"

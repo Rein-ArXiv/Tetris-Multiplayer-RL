@@ -55,42 +55,6 @@ struct AuthOutcome {
     std::shared_ptr<PlayerSessionLease> session_lease;
 };
 
-struct CachedAuth {
-    meta::client::AuthInfo info;
-    std::chrono::steady_clock::time_point expires;
-};
-
-std::mutex s_auth_cache_mu;
-std::unordered_map<std::string, CachedAuth> s_auth_cache;
-constexpr auto kAuthCacheTtl = std::chrono::minutes(5);
-constexpr size_t kMaxAuthCacheEntries = 4096;
-
-std::optional<meta::client::AuthInfo> cached_auth(const std::string& token)
-{
-    std::lock_guard<std::mutex> lk(s_auth_cache_mu);
-    const auto now = std::chrono::steady_clock::now();
-    auto it = s_auth_cache.find(token);
-    if (it == s_auth_cache.end()) return std::nullopt;
-    if (it->second.expires <= now) {
-        s_auth_cache.erase(it);
-        return std::nullopt;
-    }
-    return it->second.info;
-}
-
-void cache_auth(const std::string& token, const meta::client::AuthInfo& info)
-{
-    std::lock_guard<std::mutex> lk(s_auth_cache_mu);
-    const auto now = std::chrono::steady_clock::now();
-    if (s_auth_cache.size() >= kMaxAuthCacheEntries) {
-        for (auto it = s_auth_cache.begin(); it != s_auth_cache.end();) {
-            if (it->second.expires <= now) it = s_auth_cache.erase(it);
-            else ++it;
-        }
-        if (s_auth_cache.size() >= kMaxAuthCacheEntries) s_auth_cache.erase(s_auth_cache.begin());
-    }
-    s_auth_cache[token] = CachedAuth{info, now + kAuthCacheTtl};
-}
 std::optional<AuthOutcome>
 authenticate(meta::client::MetaClient* meta, const std::string& token,
              uint32_t conn_id, const char* what)
@@ -107,24 +71,10 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
                   << " missing token -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
-    meta::client::MetaClient::VerifyOutcome verify_outcome{};
-    auto auth = meta->verify_token(token, 3, &verify_outcome);
+    auto auth = meta->consume_game_ticket(token);
     if (!auth) {
-        if (verify_outcome == meta::client::MetaClient::VerifyOutcome::NetworkError) {
-            auth = cached_auth(token);
-            if (auth) {
-                RLOG_WARN("[conn " << conn_id << "] " << what
-                          << " meta offline; accepted cached auth");
-            }
-        }
-    }
-    if (!auth) {
-        RLOG_INFO("[conn " << conn_id << "] " << what
-                  << " meta verify failed -> reject player_id=0 match_uuid=-");
+        RLOG_INFO("[conn " << conn_id << "] game admission rejected");
         return std::nullopt;
-    }
-    if (verify_outcome == meta::client::MetaClient::VerifyOutcome::Ok) {
-        cache_auth(token, *auth);
     }
     o.player_id = auth->player_id;
     o.elo       = auth->elo;

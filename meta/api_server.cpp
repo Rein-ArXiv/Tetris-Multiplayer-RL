@@ -1,5 +1,7 @@
 #include "api_server.h"
 #include "protocol.h"
+#include "bot_challenges.h"
+#include "game_tickets.h"
 
 // cpp-httplib 는 windows.h 와 상호작용이 있어서 WIN32_LEAN_AND_MEAN 정의 후 include.
 #ifdef _WIN32
@@ -115,39 +117,54 @@ bool valid_match_uuid(const std::string& s)
     return true;
 }
 
-// 전달 헤더는 같은 호스트의 loopback 프록시에서만 신뢰한다. 별도 호스트의
-// 프록시를 자동으로 신뢰하면 같은 LAN에서 직접 붙은 클라이언트가 XFF를 위조해
-// 버킷을 우회할 수 있다. 소형 리눅스 프록시 → 저전력 Android(Termux) meta 같은
-// 분리 배치에서는 모든 요청이 proxy IP 버킷을 공유하며, 실제 client별 제한은
-// edge가 맡아야 한다.
-std::string rate_limit_key(const httplib::Request& req)
+// Off by default: arbitrary forwarding headers cannot buy a fresh rate bucket.
+// With an explicitly trusted local proxy, use only its rightmost appended XFF.
+// CF-Connecting-IP is intentionally ignored: ordinary proxies may pass it through.
+std::string rate_limit_key(const httplib::Request& req, bool trust_proxy)
 {
-    const bool from_loopback =
-        req.remote_addr == "127.0.0.1" || req.remote_addr == "::1";
-    if (from_loopback) {
-        std::string ip = req.get_header_value("CF-Connecting-IP");
-        if (ip.empty()) {
-            // [보안] XFF 는 "client, proxy1, proxy2, ..." 순서로, 경유하는
-            // 프록시가 자기 앞단의 주소를 **뒤에 append** 한다. 즉 첫 토큰은
-            // 클라이언트가 요청에 미리 심어 위조할 수 있는 값이고(매 요청
-            // 다른 값을 넣으면 60/s 공개 버킷을 무한 우회), 신뢰할 수 있는
-            // 것은 우리가 믿는 프록시가 마지막에 붙인 rightmost 토큰뿐이다.
-            // 따라서 첫 토큰이 아니라 마지막 토큰을 rate limit 키로 쓴다.
-            ip = req.get_header_value("X-Forwarded-For");
-            const auto comma = ip.rfind(',');
-            if (comma != std::string::npos) ip.erase(0, comma + 1);
-        }
+    const bool local = req.remote_addr == "127.0.0.1" || req.remote_addr == "::1";
+    if (trust_proxy && local) {
+        std::string ip = req.get_header_value("X-Forwarded-For");
+        const auto comma = ip.rfind(',');
+        if (comma != std::string::npos) ip.erase(0, comma + 1);
         const auto b = ip.find_first_not_of(" \t");
         const auto e = ip.find_last_not_of(" \t");
-        if (b != std::string::npos) return ip.substr(b, e - b + 1);
+        if (b != std::string::npos && e - b < 64) return ip.substr(b, e - b + 1);
     }
     return req.remote_addr;
 }
+
+// A bounded table, counters that saturate, and a monotonic rolling window per
+// address. Rejected traffic cannot extend a window or grow the table indefinitely.
+class RequestBudget {
+    struct Bucket { int64_t start; unsigned hits; };
+    std::unordered_map<std::string, Bucket> buckets_;
+public:
+    bool allow(const std::string& key, int64_t now, unsigned limit, int64_t seconds) {
+        if (buckets_.size() >= 4096) {
+            for (auto it = buckets_.begin(); it != buckets_.end();) {
+                if (now - it->second.start >= seconds) it = buckets_.erase(it);
+                else ++it;
+            }
+        }
+        auto it = buckets_.find(key);
+        if (it == buckets_.end()) {
+            if (buckets_.size() >= 4096) return false;
+            it = buckets_.emplace(key, Bucket{now, 0}).first;
+        }
+        auto& bucket = it->second;
+        if (now - bucket.start >= seconds) bucket = {now, 0};
+        if (bucket.hits >= limit) return false;
+        ++bucket.hits;
+        return true;
+    }
+};
 
 // CORS + content-type 을 한 번에 세팅.
 void set_json(httplib::Response& res, int status, const std::string& body)
 {
     res.status = status;
+    res.set_header("Cache-Control", "no-store");
     res.set_header("Access-Control-Allow-Origin",  "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Secret");
@@ -156,39 +173,82 @@ void set_json(httplib::Response& res, int status, const std::string& body)
 
 } // namespace
 
-ApiServer::ApiServer(Database& db, std::string relay_secret)
-    : db_(db), relay_secret_(std::move(relay_secret)) {}
+ApiServer::ApiServer(Database& db, std::string relay_secret, bool trust_loopback_proxy, bool bot_rewards)
+    : db_(db), relay_secret_(std::move(relay_secret)),
+      trust_loopback_proxy_(trust_loopback_proxy), bot_rewards_(bot_rewards) {}
 
 bool ApiServer::listen(const std::string& host, int port)
 {
     httplib::Server svr;
 
+    svr.new_task_queue = [] { return new httplib::ThreadPool(8, 128); };
+    svr.set_read_timeout(5, 0);
+    svr.set_write_timeout(5, 0);
+
     // Normal requests are only a few hundred bytes.
     svr.set_payload_max_length(64 * 1024);
 
-    // Bounded one-second request window per client IP.
+    std::mutex budget_mu;
+    RequestBudget requests, guests, botStarts, gameStarts;
+    GameTickets gameTickets;
+    // Guests create durable rows: give them a separate, much smaller budget.
     svr.set_pre_routing_handler(
-        [this](const httplib::Request& req, httplib::Response& res) {
-            static std::mutex mu;
-            static std::unordered_map<std::string, int> hits;
-            static int64_t window = 0;
+        [&, this](const httplib::Request& req, httplib::Response& res) {
             const bool trustedRelay = !relay_secret_.empty() &&
                 ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_);
-            const int maxPerWindow = trustedRelay ? 512 : 60;
-            const int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+            const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            std::lock_guard<std::mutex> lk(mu);
-            if (nowSec != window) { window = nowSec; hits.clear(); }
-            const std::string key = (trustedRelay ? "relay:" : "public:") +
-                                    rate_limit_key(req);
-            if (++hits[key] > maxPerWindow) {
-                res.status = 429;
-                res.set_header("Access-Control-Allow-Origin", "*");
-                res.set_content("{\"error\":\"rate_limited\"}", "application/json");
+            const std::string ip = rate_limit_key(req, trust_loopback_proxy_);
+            std::lock_guard<std::mutex> lk(budget_mu);
+            int retry = 1;
+            bool allowed = requests.allow((trustedRelay ? "relay:" : "public:") + ip,
+                                          now, trustedRelay ? 512 : 60, 1);
+            if (allowed && req.method == "POST" && req.path == "/v1/guest") {
+                allowed = guests.allow(ip, now, 10, 60);
+                retry = 60;
+            }
+            if (allowed && req.method == "POST" && req.path == "/v1/bots/challenge") {
+                allowed = botStarts.allow(ip, now, 5, 60);
+                retry = 60;
+            }
+            if (allowed && req.method == "POST" && req.path == "/v1/game-tickets") {
+                allowed = gameStarts.allow(ip, now, 10, 60);
+                retry = 60;
+            }
+            if (!allowed) {
+                set_json(res, 429, "{\"error\":\"rate_limited\"}");
+                res.set_header("Retry-After", std::to_string(retry));
                 return httplib::Server::HandlerResponse::Handled;
             }
             return httplib::Server::HandlerResponse::Unhandled;
         });
+
+    if (bot_rewards_) register_bot_challenges(svr, db_, gen_token);
+
+    // The account credential is accepted only by HTTPS-facing meta. Relay sees
+    // only gt1.* and redeems it over the authenticated internal API once.
+    svr.Post("/v1/game-tickets", [&](const httplib::Request& req, httplib::Response& res) {
+        if (relay_secret_.empty()) { set_json(res, 503, proto::error_json("relay_not_configured")); return; }
+        auto player = db_.getByToken(proto::find_string(req.body, "token"));
+        if (!player) { set_json(res, 401, proto::error_json("unknown_token")); return; }
+        auto random = gen_token();
+        if (!random) { set_json(res, 503, proto::error_json("entropy_unavailable")); return; }
+        const auto ticket = "gt1." + *random;
+        auto auth = proto::auth_response(player->id, player->username, player->elo,
+                                        player->bp, player->xp, player->selected_icon_id);
+        if (!gameTickets.issue(ticket, player->id, std::move(auth))) {
+            set_json(res, 503, proto::error_json("ticket_capacity")); return;
+        }
+        set_json(res, 200, "{\"ticket\":\"" + ticket + "\",\"expires_in\":60}");
+    });
+    svr.Post("/v1/game-tickets/consume", [&](const httplib::Request& req, httplib::Response& res) {
+        if (relay_secret_.empty() || !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
+            set_json(res, 403, proto::error_json("relay_auth_required")); return;
+        }
+        auto auth = gameTickets.consume(proto::find_string(req.body, "ticket"));
+        if (!auth) { set_json(res, 401, proto::error_json("invalid_game_ticket")); return; }
+        set_json(res, 200, *auth);
+    });
 
     // ------- CORS preflight (브라우저 정적 페이지용) ------------------------
     svr.Options(R"(/v1/.*)",

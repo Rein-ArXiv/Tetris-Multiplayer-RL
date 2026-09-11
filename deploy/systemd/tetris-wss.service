@@ -1,0 +1,29 @@
+[Unit]
+Description=Tetris secure WebSocket gateway
+After=network-online.target tetris-relay.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tetris
+Group=tetris
+WorkingDirectory=/opt/tetris
+# Replace certificate paths and the exact browser origin before enabling.
+# Native clients omit Origin and still require a game ticket at the relay.
+ExecStart=/opt/tetris/tetris_wss_gateway --port 8443 --backend-port 7777 --cert /etc/tetris/tls/fullchain.pem --key /etc/tetris/tls/privkey.pem --origin https://game.example.com
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

@@ -73,6 +73,8 @@ class MsgType(enum.IntEnum):
     HASH = 8
     GAME_OVER_CHOICE = 9
 
+    # Current authenticated admission carries a gt1. single-use game ticket in
+    # the historical [tok_len][token] slot; account tokens are API-only.
     # 큐·룸 제어는 relay와 Session이 소비하고, 일반 게임 프레임은 전달한다.
     # ranked MATCH_SUMMARY만 relay가 결과 검증을 위해 가로챈다.
     QUEUE_JOIN = 10     # C→S: [tok_len:1][token:N]  (tok_len=0 → unranked)

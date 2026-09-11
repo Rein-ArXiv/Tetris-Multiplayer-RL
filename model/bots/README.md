@@ -1,50 +1,25 @@
 # Bot model roster
 
-Put exported ONNX policies here to make them appear separately in
-`Single vs Bot`. The game must be built with `TETRIS_BUILD_BOT=ON` and a
-compatible ONNX Runtime bundle to load them. The built-in heuristic entry is
-available without either dependency.
+Current character, pacing, Colab and BP guide: [docs/bots-and-colab.md](../../docs/bots-and-colab.md).
 
-Example layout:
+Put trained policies in `model/bots/*.onnx` and register characters in `assets/opponents.cfg`:
 
 ```text
-model/bots/aria_ppo.onnx
-model/bots/aria_ppo_sparse.onnx
-model/bots/aria_dqn.onnx
-model/bots/aria_ddqn.onnx
-model/bots/aria_cbmpi.onnx
-model/bots/aria_a2c.onnx
-model/bots/aria_reinforce.onnx
-model/bots/aria_nstep_ac.onnx
-model/bots/aria_cem.onnx
-model/bots/aria_muzero.onnx
+aria|Aria|model/bots/aria_ppo.onnx|assets/icons/bot.png|assets/icons/bot.png|Normal|6|18|60
 ```
 
-The game also scans legacy `model/*.onnx`, so `model/policy.onnx` still works.
-For many bots, prefer `model/bots/*.onnx` to keep the root `model/` directory
-readable.
+The three timing values are input interval, thinking delay and minimum hard-drop age,
+in 60Hz ticks. `6|18|60` gives 0.1s inputs, 0.3s thinking and at least 1s per piece.
+Gravity is unchanged. Models can be shared by several characters with distinct IDs.
 
-Optional display names and default speeds live in `model/bots.cfg`:
+The default Lumen/Rook/Vega entries are the same built-in heuristic with different
+speeds and placeholder images. They are available without ONNX Runtime. Learned
+policies require `TETRIS_BUILD_BOT=ON` on clients and the optional BP verifier.
 
-```text
-# path-or-filename|display name|input_interval_ticks
-model/bots/aria_ppo.onnx|Aria PPO|1
-model/bots/aria_ppo_sparse.onnx|Aria PPO Sparse|2
-model/bots/aria_dqn.onnx|Aria DQN|2
-model/bots/aria_ddqn.onnx|Aria DDQN|2
-aria_cbmpi.onnx|Aria CBMPI|3
-model/bots/aria_a2c.onnx|Aria A2C|2
-model/bots/aria_reinforce.onnx|Aria REINFORCE|3
-model/bots/aria_nstep_ac.onnx|Aria n-step AC|2
-model/bots/aria_cem.onnx|Aria CEM|2
-model/bots/aria_muzero.onnx|Aria MuZero|3
-@heuristic|Heuristic (slow)|2
-```
+Legacy auto-discovery of `model/*.onnx` and `model/bots/*.onnx` remains supported.
+For unregistered models only, `model/bots.cfg` can set
+`path|name|input_ticks[|think_ticks|min_piece_ticks]`. Explicit character profiles take precedence.
 
-`input_interval_ticks` controls how often the in-game bot consumes one queued
-frame input. `1` is the old behavior: one bot input every simulation tick.
-Higher values slow the bot down without changing the model.
-
-Debug builds with `TETRIS_ENABLE_DEBUG_UI` can temporarily adjust speed on the
-bot selection screen and during `Single vs Bot`. Release builds use the
-configured/default interval only.
+Deploy the same catalog and model files to clients and the meta server. Only
+server-verified online wins can earn common shop BP (`tetris_meta --bot-rewards`).
+Offline practice awards none. Training and export stay in Colab; runtime uses CPU inference.

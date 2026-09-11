@@ -10,7 +10,8 @@
 //   1. CLI 파싱
 //   2. Database(path) 생성 (스키마 자동 적용)
 //   3. ApiServer 에 Database 주입 후 blocking listen 호출
-//   4. Ctrl+C → httplib 이 내부 시그널 핸들러로 stop 해서 listen() 반환
+//   4. Ctrl+C → OS 기본 종료. 현재 meta에는 별도의 graceful-stop 핸들러가 없다.
+//      최종 이전 스냅샷 전에는 프록시/relay 쓰기를 먼저 중지한다.
 
 #include "api_server.h"
 #include "database.h"
@@ -33,6 +34,8 @@ struct Args {
     int         http_port = 8080;
     std::string relay_secret;
     bool        allow_public_matches = false;
+    bool        trust_loopback_proxy = false;
+    bool        bot_rewards = false;
 };
 
 // host[:port] 형태 파싱. port 생략 시 기존 값 유지.
@@ -73,6 +76,9 @@ void print_usage()
         "  --http  127.0.0.1:8080\n"
         "\n"
         "Security:\n"
+        "  --bot-rewards          Enable server-verified PvE BP (assets/opponents.cfg).\n"
+        "  --trust-loopback-proxy Trust rightmost X-Forwarded-For from loopback only.\n"
+        "                         Enable only behind a proxy that appends/overwrites it.\n"
         "  --relay-secret SECRET  Shared secret required on POST /v1/matches.\n"
         "                         Defaults to TETRIS_RELAY_SECRET if set.\n"
         "  --allow-public-matches Allow unauthenticated POST /v1/matches.\n"
@@ -106,6 +112,10 @@ Args parse_args(int argc, char** argv)
             }
         } else if (k == "--relay-secret" && i + 1 < argc) {
             a.relay_secret = argv[++i];
+        } else if (k == "--bot-rewards") {
+            a.bot_rewards = true;
+        } else if (k == "--trust-loopback-proxy") {
+            a.trust_loopback_proxy = true;
         } else if (k == "--allow-public-matches") {
             a.allow_public_matches = true;
         } else if (k == "-h" || k == "--help") {
@@ -153,7 +163,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "[meta] /v1/matches requires X-Relay-Secret\n");
     }
 
-    meta::ApiServer api(*db, args.relay_secret);
+    meta::ApiServer api(*db, args.relay_secret, args.trust_loopback_proxy, args.bot_rewards);
     if (!api.listen(args.http_host, args.http_port)) {
         return 1;
     }

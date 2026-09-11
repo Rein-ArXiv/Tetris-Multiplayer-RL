@@ -1,5 +1,7 @@
 # Part 14: 이벤트 루프로 확장하기 — reactor, 오프로드, 샤딩
 
+> **2026-09-11 현재 코드 반영:** 운영 대상은 Linux 주 서버/Windows 예비 서버다. Linux는 epoll, Windows는 IOCP 단일 루프 폴백이며 macOS reactor 백엔드는 없다. macOS는 `TETRIS_BUILD_REACTOR=OFF`로 클라이언트/기본 테스트를 빌드한다.
+
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 14**
 
 ---
@@ -13,7 +15,7 @@
 
 ---
 
-이 장은 순서대로 읽는 본편의 마지막 확장이다. Part 7 의 릴레이는 수백 명 규모에서 단순하고 지연도 낮다. 그 구조를 버려야 하는 시점이 오는지, 온다면 무엇을 얻고 무엇을 잃는지, 그리고 그 전환에서 실제로 어떤 버그를 만나는지가 여기 담긴다. 결과물은 기존 릴레이를 대체하지 않는다 — 같은 프로토콜을 말하는 두 번째 바이너리이고, 둘 중 무엇을 띄울지는 측정이 정한다.
+이 장은 서버의 처리량을 확장한다. 후속 Part 15는 표현·봇 보상, Part 16은 공개 접속의 암호화와 입장권을 다룬다. Part 7 의 릴레이는 수백 명 규모에서 단순하고 지연도 낮다. 그 구조를 버려야 하는 시점이 오는지, 온다면 무엇을 얻고 무엇을 잃는지, 그리고 그 전환에서 실제로 어떤 버그를 만나는지가 여기 담긴다. 결과물은 기존 릴레이를 대체하지 않는다 — 같은 프로토콜을 말하는 두 번째 바이너리이고, 둘 중 무엇을 띄울지는 측정이 정한다.
 
 ## 1. 언제 바꾸는가 — 그리고 언제 바꾸지 않는가
 
@@ -1272,7 +1274,7 @@ void test_timer_generation_reuse() {
 
 릴레이에는 그런 지뢰가 둘 있다. 둘 다 메타 서버로 나가는 HTTP 왕복이다.
 
-- **`verify_token`** — 첫 프레임의 토큰을 메타에 검증한다. 타임아웃 3초.
+- **`consume_game_ticket`** — 첫 프레임의 일회용 입장권을 meta에서 소비한다. 타임아웃 3초. 발급·WSS·재사용 방지는 [Part 16](part16-secure-admission.md)이 설명한다.
 - **`post_match`** — ranked 매치가 끝나면 결과를 멱등 키와 함께 저장한다. 타임아웃 10초.
 
 이것들이 HTTP 인 이유는 메타가 별도 프로세스이기 때문이고, 그 분리는 릴레이가 DB 를 직접 만지지 않게 하려는 의도적인 경계다. 경계는 유지하되 그 왕복이 루프를 잡아먹지 않게 해야 한다.
@@ -1343,7 +1345,7 @@ sequenceDiagram
     L->>Q: submit(job) — conn id 를 포착
     Q->>W: job 배정
     L->>L: poll() 로 복귀 — 다른 연결은 계속 처리된다
-    W->>M: verify_token (블로킹)
+    W->>M: consume_game_ticket (블로킹)
     M-->>W: 응답 또는 타임아웃
     W->>Q: done_ 에 continuation 적재
     W-->>L: reactor.wake()
@@ -1388,8 +1390,7 @@ sequenceDiagram
                     !g_running.load(std::memory_order_relaxed)) {
                     return {};   // continuation 없음 — 루프는 이 작업을 보지도 않는다
                 }
-                meta::client::MetaClient::VerifyOutcome outcome{};
-                auto auth = meta->verify_token(token, 3, &outcome);
+                auto auth = meta->consume_game_ticket(token);
                 return [this, cid, auth, token]() { resume_auth(cid, auth, token); };
             });
         if (!queued) close_conn(c, "종료 중 — 인증 불가");

@@ -58,6 +58,13 @@ struct MatchResult {
     MatchDelta  b;
 };
 
+struct BotChallenge {
+    std::string ticket;
+    uint64_t seed = 0;
+    int input_ticks = 6, think_ticks = 18, min_piece_ticks = 60;
+};
+struct BotReward { int awarded_bp = 0; int bp = 0; };
+
 // ---- 메타 서버 클라이언트 --------------------------------------------------
 class MetaClient {
 public:
@@ -85,8 +92,16 @@ public:
     std::optional<AuthInfo>   verify_token   (const std::string& token,
                                               int timeout_s = 3,
                                               VerifyOutcome* out_outcome = nullptr);
+    // Game admission only: issue with an account credential, redeem once with
+    // relay secret. Never use verify_token's offline/cache behavior for tickets.
+    std::optional<std::string> request_game_ticket(const std::string& token);
+    std::optional<AuthInfo> consume_game_ticket(const std::string& ticket);
+
     // 아이콘 카탈로그 전체. 실패(네트워크/파싱) 시 nullopt.
     std::optional<std::vector<IconEntry>> fetch_icon_catalog(int timeout_s = 5);
+
+    std::optional<BotChallenge> start_bot_challenge(const std::string& token, const std::string& opponent, int* status = nullptr);
+    std::optional<BotReward> claim_bot_reward(const std::string& token, const std::string& ticket, const std::string& inputs, int* status = nullptr);
 
     // out_http_status: 0 = 네트워크 실패, 그 외 HTTP 상태 코드. UI 가
     // 402(insufficient_bp) / 403(not_owned) / 409(already_owned) 를 구분해

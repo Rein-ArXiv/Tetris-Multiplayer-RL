@@ -1,5 +1,7 @@
 # Colab training and export environment
 
+> 캐릭터별 모델·속도·일러스트와 서버 검증 BP는 [봇과 Colab 안내](../../docs/bots-and-colab.md)를 먼저 보세요.
+
 The training side of Tetris-Multiplayer-RL lives in this directory. The
 training and `.pt -> .onnx` export path runs on **Google Colab Linux x86_64
 (GPU)**. Local deployment is inference-only: the C++ game loads exported
@@ -16,7 +18,7 @@ the VSCode Colab extension) and run from the top:
    `python/requirements-colab.txt`, build `tetris_py.so` from the same C++
    sources used by the game, and run an import smoke test
    (`from sim import SimGame`, `from common.models import TetrisPolicyNet`).
-3. The remaining cells train, export `.onnx`, generate `model/bots.cfg`, and
+3. The remaining cells train, export `.onnx`, update `assets/opponents.cfg`, and
    download the artifacts.
 4. Put the downloaded `.onnx` under local `model/bots/` for the in-game bot
    roster. The game still scans legacy `model/*.onnx`, but `model/bots/*.onnx`

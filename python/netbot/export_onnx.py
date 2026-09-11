@@ -35,7 +35,7 @@ from common.models import TetrisPolicyNet
 
 
 # bot/bot_onnx.cpp의 inputNames / outputNames와 한 글자도 달라선 안 된다.
-# 여기가 어긋나면 모델은 로드되고 추론에서 터진다.
+# 여기가 어긋나면 C++ Load 단계의 계약 검사에서 거절한다.
 INPUT_NAMES = ["board", "current", "next"]
 OUTPUT_NAMES = ["policy_logits", "value"]
 
@@ -98,6 +98,8 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
                 "installs onnx/onnxscript, then rerun this export cell."
             ) from exc
         raise
+    import onnx
+    onnx.checker.check_model(str(out_path))
     print(f"[export_onnx] wrote {out_path} from {ckpt_path}")
 
 

@@ -1,5 +1,10 @@
 # Part 9: 강화학습과 ONNX 인-프로세스 봇
 
+> **2026-09-11 변경:** 아래의 과거 틱별 입력 큐 예시는 구현 과정을 설명합니다.
+> 현재 실행 경로는 `bot::Controller`의 생각/입력/최소 배치 시간과
+> `assets/opponents.cfg`를 사용합니다. 캐릭터 UI와 공용 BP 서버 검증까지의
+> 실제 실행법은 [봇과 Colab 안내](../bots-and-colab.md)를 기준으로 합니다.
+
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 9**
 
 ---
@@ -1076,7 +1081,7 @@ struct BotOnnx::Impl {
 
 **2. `Ort::Value` 로 래핑.** `CreateTensor<float>` 는 **소유권을 가져가지 않는다** — 포인터와 shape 만 참조한다. `board` 가 스택에 있으므로 `Run` 이 반환할 때까지 이 함수 스코프가 살아있어야 한다. 여기서는 같은 함수 안에서 `Run` 을 동기적으로 부르니 문제없다. shape 배열을 `std::array<int64_t, N>` 으로 만드는 이유는 ORT 가 `int64_t*` 을 요구하기 때문. `{1, 1, 20, 10}` 이 `board` 의 (batch, channels, rows, cols), `{1, 7}` 이 piece one-hot 의 (batch, classes).
 
-**3. `session->Run` 과 출력 계약 검증.** 인자 6개를 순서대로 넘기면 ORT가 `std::vector<Ort::Value>`로 출력을 돌려준다. `outs[0]`이 `policy_logits`, `outs[1]`이 `value`다(후자는 읽지 않는다 — §7.3). 실행 성공만으로 모델 계약이 맞다는 뜻은 아니다. 첫 출력이 tensor인지, 원소형이 `float`인지, 원소 수가 최소 `kNumPlacements(40)`인지 확인한 뒤에만 `GetTensorData<float>()`를 호출한다. 코드 주석이 그 이유를 명시한다 — **잘못 export 된 출력은 shape/type 조회 자체가 예외를 던질 수 있으므로** 검증과 데이터 접근을 모두 같은 예외 경계 안에 둔다. 검증 실패는 모두 `false`가 되어 호출자의 fallback으로 이어지고, 40개 argmax가 출력 범위 밖을 읽지 않는다.
+**3. `session->Run` 과 출력 계약 검증.** 인자 6개를 순서대로 넘기면 ORT가 `std::vector<Ort::Value>`로 출력을 돌려준다. `outs[0]`이 `policy_logits`, `outs[1]`이 `value`다(후자는 읽지 않는다 — §7.3). 실행 성공만으로 모델 계약이 맞다는 뜻은 아니다. 첫 출력이 tensor인지, 원소형이 `float`인지, 원소 수가 정확히 `kNumPlacements(40)`인지 확인한 뒤에만 `GetTensorData<float>()`를 호출한다. 코드 주석이 그 이유를 명시한다 — **잘못 export 된 출력은 shape/type 조회 자체가 예외를 던질 수 있으므로** 검증과 데이터 접근을 모두 같은 예외 경계 안에 둔다. 검증 실패는 모두 `false`가 되어 호출자의 fallback으로 이어지고, 40개 argmax가 출력 범위 밖을 읽지 않는다.
 
 **4. 합법 마스크 재계산.** Python 학습 쪽이 `legal_mask` 로 불법 logit 을 -∞ 로 바꿨던 것처럼, 여기서도 `sim.LegalPlacements()` 를 돌려 bitset 을 만든다. placement 의 `(col, rot)` 을 `encode_action` 으로 40-공간 인덱스로 변환한다. 이 함수가 `bot/placement.h` 에 선언되어 있고 Python 의 `encode_action` 과 수식이 같다: `col * 4 + rot`. 이 대칭성이 없으면 같은 placement 가 두 공간에서 다른 인덱스를 받고, 정책이 완전히 엉뚱한 수를 둔다.
 
@@ -1749,7 +1754,7 @@ out = s.run(
 print(out[0].shape, out[1].shape)   # (1, 40) (1,)
 ```
 
-입력 이름 세 개와 출력 이름 두 개가 §6.1 의 상수와 정확히 같아야 하고, `policy_logits` 가 `(1, 40)` 이어야 한다. 여기서 이름이 다르면 C++ 쪽 `Session::Run` 이 "input not found" 로 던진다. 여기서 shape 이 다르면 `InferOnce` 의 `GetElementCount() < 40` 검사에 걸려 조용히 fallback 으로 빠진다 — 게임은 돌아가는데 봇이 왼쪽에만 쌓는다면 이걸 의심한다.
+입력 이름 세 개와 출력 이름 두 개가 §6.1 의 상수와 정확히 같아야 하고, `policy_logits` 가 `(1, 40)` 이어야 한다. 현재 C++ 구현은 이름·float32 타입·고정 shape를 `LoadModel`에서 검사한다. 계약이 다르면 로드를 거절하고 선택 화면에서 다른 상대를 고르도록 안내한다. 추론 결과도 정확히 40개인지 재확인한다.
 
 ### 기대 결과 요약
 

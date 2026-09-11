@@ -69,6 +69,15 @@ CREATE TABLE IF NOT EXISTS matches (
   elo_b_after  INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS bot_rewards (
+  ticket TEXT PRIMARY KEY,
+  player_id INTEGER NOT NULL REFERENCES players(id),
+  opponent_id TEXT NOT NULL,
+  awarded_bp INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bot_rewards_player_time ON bot_rewards(player_id,created_at);
+
 CREATE TABLE IF NOT EXISTS elo_history (
   id          INTEGER PRIMARY KEY,
   player_id   INTEGER NOT NULL REFERENCES players(id),
@@ -661,6 +670,59 @@ Database::leaderboard(int limit)
         rows.push_back(std::move(r));
     }
     return rows;
+}
+
+
+std::optional<int> Database::botReward(int64_t player, const std::string& ticket) {
+    std::lock_guard<std::mutex> lock(mu_);
+    StmtGuard q;
+    if(sqlite3_prepare_v2(db_,"SELECT awarded_bp FROM bot_rewards WHERE ticket=?1 AND player_id=?2",-1,&q.s,nullptr)!=SQLITE_OK)return std::nullopt;
+    sqlite3_bind_text(q.s,1,ticket.c_str(),-1,SQLITE_TRANSIENT);
+    sqlite3_bind_int64(q.s,2,player);
+    if(sqlite3_step(q.s)!=SQLITE_ROW)return std::nullopt;
+    return sqlite3_column_int(q.s,0);
+}
+
+std::optional<int> Database::saveBotWin(int64_t player,const std::string& ticket,const std::string& opponent) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if(sqlite3_exec(db_,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr)!=SQLITE_OK)return std::nullopt;
+    struct Transaction {
+        sqlite3* db; bool committed=false;
+        ~Transaction(){if(!committed)sqlite3_exec(db,"ROLLBACK",nullptr,nullptr,nullptr);}
+    } tx{db_};
+    {
+        StmtGuard q;
+        if(sqlite3_prepare_v2(db_,"SELECT player_id,awarded_bp FROM bot_rewards WHERE ticket=?1",-1,&q.s,nullptr)!=SQLITE_OK)return std::nullopt;
+        sqlite3_bind_text(q.s,1,ticket.c_str(),-1,SQLITE_TRANSIENT);
+        if(sqlite3_step(q.s)==SQLITE_ROW) {
+            if(sqlite3_column_int64(q.s,0)!=player)return std::nullopt;
+            return sqlite3_column_int(q.s,1); // RAII rolls back this read-only transaction.
+        }
+    }
+    const int64_t now=now_unix(), day=now/86400*86400;
+    int earned=0;
+    {
+        StmtGuard q;
+        if(sqlite3_prepare_v2(db_,"SELECT COALESCE(SUM(awarded_bp),0) FROM bot_rewards WHERE player_id=?1 AND created_at>=?2",-1,&q.s,nullptr)!=SQLITE_OK)return std::nullopt;
+        sqlite3_bind_int64(q.s,1,player);sqlite3_bind_int64(q.s,2,day);
+        if(sqlite3_step(q.s)!=SQLITE_ROW)return std::nullopt;
+        earned=static_cast<int>(std::clamp<int64_t>(100-sqlite3_column_int64(q.s,0),0,10));
+    }
+    {
+        StmtGuard q;
+        if(sqlite3_prepare_v2(db_,"INSERT INTO bot_rewards VALUES (?1,?2,?3,?4,?5)",-1,&q.s,nullptr)!=SQLITE_OK)return std::nullopt;
+        sqlite3_bind_text(q.s,1,ticket.c_str(),-1,SQLITE_TRANSIENT);sqlite3_bind_int64(q.s,2,player);
+        sqlite3_bind_text(q.s,3,opponent.c_str(),-1,SQLITE_TRANSIENT);sqlite3_bind_int(q.s,4,earned);sqlite3_bind_int64(q.s,5,now);
+        if(sqlite3_step(q.s)!=SQLITE_DONE)return std::nullopt;
+    }
+    {
+        StmtGuard q;
+        if(sqlite3_prepare_v2(db_,"UPDATE players SET bp=bp+?1 WHERE id=?2 AND bp<=2147483647-?1",-1,&q.s,nullptr)!=SQLITE_OK)return std::nullopt;
+        sqlite3_bind_int(q.s,1,earned);sqlite3_bind_int64(q.s,2,player);
+        if(sqlite3_step(q.s)!=SQLITE_DONE || sqlite3_changes(db_)!=1)return std::nullopt;
+    }
+    if(sqlite3_exec(db_,"COMMIT",nullptr,nullptr,nullptr)!=SQLITE_OK)return std::nullopt;
+    tx.committed=true;return earned;
 }
 
 } // namespace meta

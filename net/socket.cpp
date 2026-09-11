@@ -152,14 +152,14 @@ static void set_keepalive(int fd) {
 }
 
 // [NET] 포트에서 연결 대기 소켓을 생성합니다.
-TcpSocket tcp_listen(uint16_t port, int backlog) {
+TcpSocket tcp_listen(uint16_t port, int backlog, bool loopback_only) {
     if (!net_init()) return TcpSocket{};
     int fd = (int)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) return TcpSocket{};
     set_reuse(fd);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = htonl(loopback_only ? INADDR_LOOPBACK : INADDR_ANY);
     addr.sin_port = htons(port);
     if (::bind(fd, (sockaddr*)&addr, sizeof(addr)) != 0) {
         close_fd(fd);
@@ -356,6 +356,7 @@ bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out
 }
 
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
+    if (s.transport) return s.transport->send(data,len);
     const int fd = s.fd();
     if (fd < 0) return false;
     const uint8_t* p = static_cast<const uint8_t*>(data);
@@ -408,6 +409,7 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
 
 // [NET] 수신 가능한 만큼 한 번 읽어 누적 버퍼에 추가합니다.
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
+    if (s.transport) return s.transport->receive(outBuf);
     const int fd = s.fd();
     if (fd < 0) return false;
     uint8_t tmp[4096];
@@ -450,6 +452,7 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
 // 불변식: 여기서 fdh.reset() 금지 — 같은 인스턴스를 읽는 다른 스레드와 shared_ptr
 //         인스턴스 경합이 된다. 참조 해제는 소유 스레드의 RAII(재대입/소멸)에 맡긴다.
 void tcp_close(TcpSocket& s) {
+    if (s.transport) { s.transport->close(); return; }
     if (!s.fdh) return;
     int fd = *s.fdh;
     if (fd >= 0) {

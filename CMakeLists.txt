@@ -24,10 +24,21 @@ endif()
 option(TETRIS_BUILD_GAME  "Build the handmade game executable"              ON)
 option(TETRIS_BUILD_PY    "Build the pybind11 module (tetris_py)"           OFF)
 option(TETRIS_BUILD_TEST  "Build the SimGame determinism test"              ON)
+include(CTest)
 option(TETRIS_BUILD_RELAY "Build the tetris_relay matchmaking server"       OFF)
 # TETRIS_BUILD_META — HTTP + SQLite metadata server (guest/auth/matches/leaderboard).
 # Typically deployed separately so the relay owns no durable database state.
 option(TETRIS_BUILD_META  "Build the tetris_meta HTTP+SQLite metadata server" OFF)
+# Only Linux has epoll and Windows has IOCP. macOS uses the portable thread relay.
+set(TETRIS_REACTOR_SUPPORTED OFF)
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(TETRIS_REACTOR_SUPPORTED ON)
+endif()
+option(TETRIS_BUILD_REACTOR "Build experimental reactor relay/tests (Linux/Windows)" ${TETRIS_REACTOR_SUPPORTED})
+if (TETRIS_BUILD_REACTOR AND NOT TETRIS_REACTOR_SUPPORTED)
+    message(FATAL_ERROR "Reactor requires Linux/Windows. On macOS use -DTETRIS_BUILD_REACTOR=OFF and tetris_relay.")
+endif()
+
 # TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
 # 실패한다. Single vs Bot과 내장 휴리스틱 봇은 그대로 사용할 수 있다.
@@ -46,6 +57,13 @@ if (TETRIS_ENABLE_HTTPS)
         message(STATUS "OpenSSL found: HTTPS meta client enabled")
     else()
         message(WARNING "OpenSSL not found: https:// meta URLs will be rejected at runtime")
+    endif()
+endif()
+
+# Do not ship a client whose embedded public API cannot be contacted.
+if (TETRIS_BUILD_GAME AND TETRIS_DEFAULT_META_URL MATCHES "^https://")
+    if (NOT TETRIS_ENABLE_HTTPS OR NOT OpenSSL_FOUND)
+        message(FATAL_ERROR "The embedded HTTPS meta URL requires OpenSSL. Install it or set OPENSSL_ROOT_DIR.")
     endif()
 endif()
 
@@ -101,16 +119,19 @@ if (TETRIS_BUILD_GAME)
         src/game.cpp
         src/gui.cpp
         src/colors.cpp
+        src/presentation.cpp
         core/replay.cpp
         net/socket.cpp
         net/framing.cpp
         net/session.cpp
+        net/wss_client.cpp
         renderer/renderer.cpp
         renderer/gl_api.cpp
         renderer/text_gl.cpp
         renderer/shake.cpp
         renderer/image_gl.cpp
         bot/placement.cpp
+        bot/opponents.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
     )
@@ -119,6 +140,7 @@ if (TETRIS_BUILD_GAME)
         ${TETRIS_SIM_HEADERS}
         src/game.h
         src/colors.h
+        src/presentation.h
         core/replay.h
         net/socket.h
         net/framing.h
@@ -326,22 +348,24 @@ if (TETRIS_BUILD_TEST)
     endif()
 
     # reactor_test — 이벤트 루프(net::Reactor) 준비성·wake 계약 회귀.
-    # 플랫폼별 백엔드(Windows=IOCP, Linux/기타=epoll)를 각자 검증한다. 두 백엔드
+    # 플랫폼별 백엔드(Windows=IOCP, Linux=epoll; macOS는 타깃 제외)를 각자 검증한다. 두 백엔드
     # 소스를 모두 나열하되 파일 내부 #ifdef 가 해당 플랫폼만 컴파일한다.
-    add_executable(reactor_test
-        tests/reactor_test.cpp
-        net/reactor_epoll.cpp
-        net/reactor_iocp.cpp
-        net/socket.cpp
-        net/reactor.h
-        net/socket.h
-    )
-    target_include_directories(reactor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    if (WIN32)
-        target_link_libraries(reactor_test PRIVATE ws2_32)
-    else()
-        find_package(Threads REQUIRED)
-        target_link_libraries(reactor_test PRIVATE Threads::Threads)
+    if (TETRIS_BUILD_REACTOR)
+        add_executable(reactor_test
+            tests/reactor_test.cpp
+            net/reactor_epoll.cpp
+            net/reactor_iocp.cpp
+            net/socket.cpp
+            net/reactor.h
+            net/socket.h
+        )
+        target_include_directories(reactor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        if (WIN32)
+            target_link_libraries(reactor_test PRIVATE ws2_32)
+        else()
+            find_package(Threads REQUIRED)
+            target_link_libraries(reactor_test PRIVATE Threads::Threads)
+        endif()
     endif()
 
     # loop_primitives_test — 이벤트 루프 지원 도구(TimerQueue, Offload) 회귀.
@@ -428,7 +452,7 @@ endif()
 # 검증하기 위해서다 — 스모크 테스트를 TETRIS_RELAY_BIN 으로 이쪽에 겨눠 같은
 # 계약을 통과하는지 확인한 뒤에야 기본 릴레이를 교체한다.
 # -----------------------------------------------------------------------------
-if (TETRIS_BUILD_RELAY)
+if (TETRIS_BUILD_RELAY AND TETRIS_BUILD_REACTOR)
     add_executable(tetris_relay_reactor
         server/reactor_relay.cpp
         server/log.cpp
@@ -510,6 +534,11 @@ if (TETRIS_BUILD_META)
         meta/main.cpp
         meta/database.cpp
         meta/api_server.cpp
+        meta/bot_challenges.cpp
+        bot/opponents.cpp
+        bot/placement.cpp
+        bot/bot_onnx.cpp
+        ${TETRIS_SIM_SOURCES}
         ${TETRIS_SQLITE3_SOURCE}
         meta/database.h
         meta/api_server.h
@@ -540,4 +569,129 @@ if (TETRIS_BUILD_META)
             BUILD_RPATH "$ORIGIN/lib"
             INSTALL_RPATH "$ORIGIN/lib")
     endif()
+endif()
+
+if (TETRIS_BUILD_TEST)
+    add_test(NAME worker_group COMMAND worker_group_test)
+    add_test(NAME loop_primitives COMMAND loop_primitives_test)
+    if (TARGET reactor_test)
+        add_test(NAME reactor COMMAND reactor_test)
+    endif()
+endif()
+
+if (TETRIS_BUILD_TEST)
+    add_executable(bot_controller_test tests/bot_controller_test.cpp bot/placement.cpp bot/opponents.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(bot_controller_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME bot_controller COMMAND bot_controller_test)
+endif()
+
+# PvE verification uses the same optional CPU inference backend as the client.
+if (TETRIS_BUILD_META AND TETRIS_BUILD_BOT)
+    set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
+    if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
+        message(FATAL_ERROR "TETRIS_BUILD_BOT=ON requires the ONNX Runtime CPU bundle for meta verification too.")
+    endif()
+    target_compile_definitions(tetris_meta PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
+    target_include_directories(tetris_meta PRIVATE "${ORT_ROOT}/include")
+    if (WIN32)
+        target_link_libraries(tetris_meta PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
+    elseif (APPLE)
+        target_link_libraries(tetris_meta PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
+    else()
+        target_link_libraries(tetris_meta PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
+    endif()
+endif()
+
+if (TETRIS_BUILD_TEST)
+    add_executable(bot_replay_test tests/bot_replay_test.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(bot_replay_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME bot_replay COMMAND bot_replay_test)
+    if (TETRIS_BUILD_META)
+        add_executable(bot_reward_db_test tests/bot_reward_db_test.cpp meta/database.cpp ${TETRIS_SQLITE3_SOURCE})
+        target_include_directories(bot_reward_db_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+        target_compile_definitions(bot_reward_db_test PRIVATE SQLITE_THREADSAFE=1 SQLITE_DEFAULT_FOREIGN_KEYS=1)
+        if (NOT WIN32)
+            target_link_libraries(bot_reward_db_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+        endif()
+        add_test(NAME bot_reward_db COMMAND bot_reward_db_test)
+    endif()
+endif()
+
+if (TETRIS_BUILD_TEST AND TETRIS_BUILD_BOT)
+    set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
+    add_executable(bot_onnx_contract_test tests/bot_onnx_contract_test.cpp bot/bot_onnx.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(bot_onnx_contract_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} "${ORT_ROOT}/include")
+    target_compile_definitions(bot_onnx_contract_test PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
+    if (WIN32)
+        target_link_libraries(bot_onnx_contract_test PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
+    elseif (APPLE)
+        target_link_libraries(bot_onnx_contract_test PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
+    else()
+        target_link_libraries(bot_onnx_contract_test PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
+    endif()
+endif()
+
+# Beast is header-only; TLS remains OpenSSL. No WebSocket or crypto parser is vendored.
+option(TETRIS_BUILD_WSS "Build secure WebSocket client and gateway" OFF)
+if (TETRIS_BUILD_WSS)
+    find_package(OpenSSL REQUIRED)
+    find_package(Threads REQUIRED)
+    find_path(TETRIS_BOOST_INCLUDE boost/beast.hpp HINTS "${BOOST_ROOT}/include")
+    if (NOT TETRIS_BOOST_INCLUDE)
+        message(FATAL_ERROR "WSS requires Boost.Beast headers (libboost-dev / brew boost / vcpkg boost-beast). Set BOOST_ROOT or TETRIS_BOOST_INCLUDE.")
+    endif()
+    add_library(tetris_system_trust STATIC net/system_trust.cpp)
+    target_link_libraries(tetris_system_trust PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    if (WIN32)
+        target_link_libraries(tetris_system_trust PRIVATE crypt32 ws2_32)
+    elseif (APPLE)
+        target_link_libraries(tetris_system_trust PRIVATE "-framework Security" "-framework CoreFoundation")
+    endif()
+    add_library(tetris_wss_deps INTERFACE)
+    target_include_directories(tetris_wss_deps INTERFACE "${TETRIS_BOOST_INCLUDE}")
+    target_compile_definitions(tetris_wss_deps INTERFACE TETRIS_HAS_WSS=1 BOOST_ERROR_CODE_HEADER_ONLY)
+    target_link_libraries(tetris_wss_deps INTERFACE OpenSSL::SSL OpenSSL::Crypto Threads::Threads tetris_system_trust)
+    if (WIN32)
+        target_link_libraries(tetris_wss_deps INTERFACE ws2_32 mswsock)
+    endif()
+    if (TARGET tetris)
+        target_link_libraries(tetris PRIVATE tetris_wss_deps)
+    endif()
+    add_executable(tetris_wss_gateway server/wss_gateway.cpp)
+    target_link_libraries(tetris_wss_gateway PRIVATE tetris_wss_deps)
+    if (UNIX AND NOT APPLE)
+        set_target_properties(tetris_wss_gateway PROPERTIES BUILD_RPATH "$ORIGIN/lib" INSTALL_RPATH "$ORIGIN/lib")
+    endif()
+endif()
+if (TETRIS_DEFAULT_RELAY_ENDPOINT MATCHES "^wss://" AND NOT TETRIS_BUILD_WSS)
+    message(FATAL_ERROR "A WSS relay endpoint requires TETRIS_BUILD_WSS=ON")
+endif()
+
+if (TETRIS_BUILD_TEST)
+    find_package(Threads REQUIRED)
+    add_executable(game_tickets_test tests/game_tickets_test.cpp)
+    target_link_libraries(game_tickets_test PRIVATE Threads::Threads)
+    add_test(NAME game_tickets COMMAND game_tickets_test)
+    if (TETRIS_BUILD_WSS)
+        add_executable(wss_probe tests/wss_probe.cpp net/wss_client.cpp net/socket.cpp net/session.cpp net/framing.cpp meta/http_client.cpp)
+        target_include_directories(wss_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+        target_compile_definitions(wss_probe PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+        if (WIN32)
+            target_link_libraries(wss_probe PRIVATE shell32)
+        endif()
+        if (APPLE)
+            target_compile_definitions(wss_probe PRIVATE CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN)
+        endif()
+        target_link_libraries(wss_probe PRIVATE tetris_wss_deps)
+    endif()
+endif()
+
+# HTTPS API clients use the same macOS trust source as the WSS client.
+if (APPLE AND TETRIS_ENABLE_HTTPS AND OpenSSL_FOUND)
+    foreach(client_target tetris tetris_relay tetris_relay_reactor)
+        if (TARGET ${client_target})
+            target_compile_definitions(${client_target} PRIVATE CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN)
+            target_link_libraries(${client_target} PRIVATE "-framework Security" "-framework CoreFoundation")
+        endif()
+    endforeach()
 endif()

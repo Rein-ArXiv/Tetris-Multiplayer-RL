@@ -1,5 +1,7 @@
 # Part 3: 렌더링과 UI — OpenGL 3.3 Core 2D 렌더러
 
+> **2026-09-11 현재 코드 반영:** 아바타 프레임·idle 애니메이션·폰트/색상 설정은 `src/presentation.cpp`와 `assets/theme.cfg`로 분리했다. [현재 수정 방법](../customization.md)을 함께 읽는다. `renderer_load_font`는 이제 성공 여부를 bool로 반환한다.
+
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 3**
 >
 

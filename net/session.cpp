@@ -1,4 +1,5 @@
 #include "session.h"
+#include "wss_client.h"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -463,7 +464,12 @@ void Session::roomThread(std::string host, uint16_t port,
     const bool doCreate = joinCode.empty();
     NET_TRACE("[ROOM] Connecting to relay " << host << ":" << port
               << " for " << (doCreate ? "CREATE" : ("JOIN " + joinCode)));
-    TcpSocket s = tcp_connect(host, port);
+    if (!prepareGameCredential(host, auth_token)) {
+        connectionFailed = true;
+        roomState_.store(RoomState::Failed);
+        return;
+    }
+    TcpSocket s = game_connect(host, port);
     if (!s.valid()) {
         NET_WARN("[ROOM] Failed to connect");
         roomState_.store(RoomState::Failed);
@@ -637,11 +643,28 @@ void Session::roomThread(std::string host, uint16_t port,
     }
 }
 
+bool Session::prepareGameCredential(const std::string& host, std::string& credential) {
+    if (credential.empty()) return true; // local unranked play
+    if (!secure_game_endpoint(host)) return false;
+    if (credential.rfind("gt1.",0)==0) return true;
+    if (!ticketIssuer_) return false;
+    auto ticket = ticketIssuer_(credential);
+    credential.clear(); // never write the account credential to the relay
+    if (!ticket) return false;
+    credential = std::move(*ticket);
+    return true;
+}
+
 void Session::queueThread(std::string host, uint16_t port,
                           uint32_t start_tick, uint8_t input_delay,
                           std::string auth_token) {
     NET_TRACE("[QUEUE] Connecting to relay " << host << ":" << port);
-    TcpSocket s = tcp_connect(host, port);
+    if (!prepareGameCredential(host, auth_token)) {
+        connectionFailed = true;
+        roomState_.store(RoomState::Failed);
+        return;
+    }
+    TcpSocket s = game_connect(host, port);
     if (!s.valid()) {
         NET_WARN("[QUEUE] Failed to connect to relay");
         connectionFailed = true;

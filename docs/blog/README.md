@@ -1,5 +1,11 @@
 # 제로부터 멀티플레이어 테트리스 + RL까지
 
+완성된 코드를 다시 실행하려면 먼저 [실행 안내](../start-here.md)를 읽는다.
+작은 출시를 위한 최신 변경은 [Part 15: 폴리싱](part15-release-polishing.md),
+수정 위치는 [외형·규칙 지도](../customization.md), 실제 검증 결과는
+[검증 기록](../polish-validation.md)에 있다. Part 0~16은 아래 의존 관계를 따르는 누적 구현 교재다. 접속 보호는 [Part 16: WSS·입장권](part16-secure-admission.md)이 설명한다.
+
+
 이 시리즈의 목표는 두 가지다.
 
 1. 빈 작업 디렉터리에서 공통 게임·네트워크 뼈대를 만든 뒤, 서비스 운영과 AI 경로를 각자의 의존 순서로 구현해 현재 저장소와 같은 기능 경계를 재현한다.
@@ -41,6 +47,10 @@ graph TB
     P10 --> P11
     P11 --> P12[Part 12<br/>검수와 배포]
     P12 --> P14[Part 14<br/>이벤트 루프로 확장]
+    P9 --> P15[Part 15<br/>표현·캐릭터 봇·검증 BP]
+    P10 --> P15
+    P14 --> P16[Part 16<br/>WSS·일회용 입장권]
+    P15 --> P16
     P12 -.-> P13[Part 13<br/>구조·확장 레퍼런스<br/>필요할 때 펼침]
 ```
 
@@ -49,7 +59,7 @@ graph TB
 모든 독자가 Part 0~7을 먼저 읽어야 하는 것은 아니다. 모든 트랙의 공통 기반은 Part 0~1(빌드 뼈대와 결정론 코어)이고, 화면이 필요한 트랙이 Part 2~4(클라이언트 기반)를 더한다. 위 의존 그래프에서 Part 8이 Part 1에만 매달려 있는 이유가 이것이다 — 학습 코어는 `SimGame`만 의존한다. 여기서 목적에 따라 의존 경로가 갈린다.
 
 - **게임 클라이언트 기반:** Part 0 → 1 → 2 → 3 → 4. 규칙 엔진, 플랫폼, 렌더러, 실제 게임 루프를 만든다.
-- **온라인 서비스·출시:** 클라이언트 기반 → Part 5 → 6 → 7 → 10 → 11 → 12. 오디오, lockstep, relay, 계정·결과 영속화, 사용자 설정, 운영 검증 순서다. Part 12 의 용량 측정이 한 대의 상한을 보여 준 뒤, 그 상한을 올려야 할 때 [Part 14](./part14-event-loop-scaling.md) 로 간다.
+- **온라인 서비스·출시:** 클라이언트 기반 → Part 5 → 6 → 7 → 10 → 11 → 12. 오디오, lockstep, relay, 계정·결과 영속화, 사용자 설정, 운영 검증 순서다. Part 12 의 용량 측정이 한 대의 상한을 보여 준 뒤, 그 상한을 올려야 할 때 [Part 14](./part14-event-loop-scaling.md) 로 간다. 공개 접속 보호는 Part 16까지 이어 읽는다.
 - **학습만 하는 AI 경로:** Part 0 → 1 → 8. 화면이나 relay 없이 `SimGame`을 Python 학습 환경으로 노출한다. Part 8의 wire 패리티 절만 Part 6의 프레이밍 계약을 선택적으로 사용한다.
 - **인게임 AI 경로:** 클라이언트 기반 + Part 8 → 9. 학습된 정책을 ONNX로 변환해 게임 프로세스 안에서 실행한다. 온라인 relay는 필요하지 않다.
 
@@ -71,6 +81,8 @@ Part 번호는 게시 순서를 유지하지만, 실제 구현은 이 의존 그
 | 11 | [Part 11: 설정과 옵션](./part11-settings-and-options.md) | 설정 영속화, `gui_slider`/`gui_value_selector`, 해상도·오디오·VSync와 결정성 경계 |
 | 12 | [Part 12: 검수와 배포](./part12-hardening-and-release.md) | 보안 기본값, 리버스 프록시 배치, 패키징, 전체 회귀·통합 검증 |
 | 14 | [Part 14: 이벤트 루프로 확장하기](./part14-event-loop-scaling.md) | `net::Reactor`(자작 epoll·IOCP), 타이머 힙과 블로킹 오프로드, 스레드 릴레이를 단일 루프로 다시 쓰기, 매치 단위 샤딩과 그 플랫폼 한계 |
+| 15 | [Part 15: 출시 전 폴리싱](part15-release-polishing.md) | 표현 계층·캐릭터 모델/속도·Colab·서버 재현 검증 BP의 코드 소유권과 변경 이유 |
+| 16 | [Part 16: 공개 접속 보호](part16-secure-admission.md) | WSS·인증서·일회용 입장권·비동기 수명·운영 포트·보안 회귀 |
 | 13 | [Part 13: 구조와 확장 레퍼런스](./part13-structure-and-build-reference.md) | **순서대로 읽는 장이 아니다.** 완성 구조·`CMakeLists.txt` 전체 해부·플랫폼별 빌드, 그리고 "고치려면 어디를 건드리나" |
 
 Part 0~4는 실행 가능한 싱글플레이 클라이언트를 만들고, Part 5는 표현 계층, Part 6~7은 같은 결정론 코어의 네트워크 경로를 완성한다. Part 8의 학습 코어는 `SimGame`만 의존하지만, Part 9의 인게임 통합은 렌더링 가능한 클라이언트도 필요하다. 서비스 경로는 relay와 UI 경계를 의존한다. 이 분기를 문서 번호 하나로 억지로 직렬화하지 않는 것이 핵심이다.
@@ -168,7 +180,10 @@ uv run python -m pytest python/tests/test_framing_parity.py \
 
 전체 회귀 절차(빌드 → 결정론 → 워커 → pytest → smoke → 스크립트 검사)는 [Part 12](./part12-hardening-and-release.md) 가 한곳에 모아 둔다.
 
-## 현재 운영 모델
+## 이전의 분리 배치 예시
+
+현재 주 서버/예비 서버 기준은 [출시 안내](../release-readiness.md)의 Linux/Windows다.
+아래 Android/Termux 분리는 선택 가능한 다른 배치로 읽는다.
 
 현재 구조는 세 실행 환경을 분리한다.
 
@@ -180,7 +195,8 @@ graph TB
     end
 
     subgraph RelayHost["소형 리눅스 머신"]
-        R[tetris_relay<br/>public TCP 7777]
+        W[tetris_wss_gateway<br/>public WSS 8443]
+        R[tetris_relay_reactor<br/>loopback TCP 7777]
         E[HTTPS proxy / Tunnel]
     end
 
@@ -195,7 +211,7 @@ graph TB
         ONNX[exported .onnx]
     end
 
-    G --> R
+    G -- WSS --> W --> R
     G -- HTTPS 443 --> E
     R -- X-Relay-Secret --> M
     E -- private network --> M

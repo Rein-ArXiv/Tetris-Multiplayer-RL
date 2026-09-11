@@ -7,6 +7,7 @@
 
 #include "game.h"
 #include "colors.h"
+#include "presentation.h"
 #include "../renderer/renderer.h"
 #include <climits>   // INT_MAX
 
@@ -23,7 +24,7 @@ Game::Game(uint64_t seed)
       gameOver(sim.gameOver),
       score(sim.score)
 {
-    cellColors = GetCellColors();
+    cellColors = presentation_palette(GetCellColors());
 
     // 오디오 초기화 (참조 카운팅 -- 멀티플레이에서 두 번 호출해도 안전)
     audioInitCalled = true;
@@ -95,9 +96,8 @@ unsigned long long Game::ComputeStateHash() const
 
 // ─── 내부 렌더링 ──────────────────────────────────────────────────────────────
 
-void Game::DrawGrid(int offsetX, int offsetY) const
+void Game::DrawGrid(int offsetX, int offsetY, int cellSize) const
 {
-    constexpr int cellSize = 30;
     const auto& g = sim.Grid();
     for (int row = 0; row < SimGrid::kRows; row++)
     {
@@ -113,9 +113,8 @@ void Game::DrawGrid(int offsetX, int offsetY) const
     }
 }
 
-void Game::DrawBlock(const SimBlock& block, int offsetX, int offsetY) const
+void Game::DrawBlock(const SimBlock& block, int offsetX, int offsetY, int cellSize) const
 {
-    constexpr int cellSize = 30;
     std::vector<Position> tiles = block.GetCellPositions();
     for (const Position& p : tiles)
     {
@@ -142,25 +141,23 @@ void Game::Draw()
     }
 }
 
-void Game::DrawBoardAt(int offsetX, int offsetY)
+void Game::DrawBoardAt(int offsetX, int offsetY, int cellSize)
 {
-    constexpr int cellSize = 30;
-    constexpr int bw = SimGrid::kCols * cellSize;
-    constexpr int bh = SimGrid::kRows * cellSize;
+    const int bw = SimGrid::kCols * cellSize;
+    const int bh = SimGrid::kRows * cellSize;
     // 보드 테두리 → 배경 순으로 그려서 1px 테두리 효과
     draw_rect(offsetX - 2, offsetY - 2, bw + 4, bh + 4, {55, 62, 100, 255});
     draw_rect(offsetX,     offsetY,     bw,     bh,     {14, 16, 30, 255});
-    DrawGrid(offsetX, offsetY);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY);
-    DrawBlock(sim.CurrentBlock(), offsetX, offsetY);
+    DrawGrid(offsetX, offsetY, cellSize);
+    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
+    DrawBlock(sim.CurrentBlock(), offsetX, offsetY, cellSize);
 }
 
-void Game::DrawGarbageBar(int boardX, int boardY, int pending)
+void Game::DrawGarbageBar(int boardX, int boardY, int pending, int cellSize)
 {
     if (pending <= 0) return;
-    constexpr int cellSize = 30;
     constexpr int barW = 5;
-    constexpr int boardH = SimGrid::kRows * cellSize;  // 600px
+    const int boardH = SimGrid::kRows * cellSize;  // 600px
     constexpr int maxRows = 12;
 
     int rows = (pending > maxRows) ? maxRows : pending;

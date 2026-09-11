@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "stream_transport.h"
 
 // TCP 소켓 추상화: 플랫폼 독립적 네트워킹 (Windows WinSock / Linux BSD)
 // 상세: ARCHITECTURE.md §7.1
@@ -31,10 +32,11 @@ namespace net {
 //   재대입/소멸시키면 안 된다(shared_ptr 인스턴스 자체는 thread-safe 가 아님).
 //   서로 다른 복사본을 각 스레드가 들고 read/close 하는 것은 안전하다.
 struct TcpSocket {
+    std::shared_ptr<StreamTransport> transport; // client WSS; never a reactor fd
     std::shared_ptr<int> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
 
     int  fd()    const { return fdh ? *fdh : -1; }
-    bool valid() const { return fdh && *fdh >= 0; }
+    bool valid() const { return transport ? transport->alive() : fdh && *fdh >= 0; }
 };
 
 // 네트워킹 초기화/종료 (Windows: WSAStartup/Cleanup, Linux: no-op)
@@ -42,7 +44,7 @@ bool net_init();
 void net_shutdown();
 
 // TCP 연결 설정
-TcpSocket tcp_listen(uint16_t port, int backlog=1);  // 서버: 포트에서 대기 (bind + listen + SO_REUSEADDR)
+TcpSocket tcp_listen(uint16_t port, int backlog=1, bool loopback_only=false);  // 서버: 포트에서 대기 (bind + listen + SO_REUSEADDR)
 // accept 가 실패한 *이유*. 호출자가 EAGAIN 과 fd 고갈을 구분해야 하기 때문이다 —
 // 둘 다 "소켓을 못 얻었다" 지만 대응이 정반대다. EAGAIN 은 그냥 다음 이벤트를
 // 기다리면 되고, fd 고갈은 기다려도 저절로 낫지 않는다. 레벨 트리거 리스너에서

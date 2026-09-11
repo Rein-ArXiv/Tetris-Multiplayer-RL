@@ -4,7 +4,7 @@
 # 사용법:
 #   ./scripts/release_server_linux.sh
 #
-# 의존성: cmake, g++, pthread, OpenSSL 개발 패키지(https meta client 사용 시).
+# 의존성: cmake, g++, pthread, OpenSSL 개발 패키지, Boost 헤더(기본 WSS=1).
 # 산출물: dist/tetris-server-linux-x64.tar.gz
 #   tetris-server-linux-x64/
 #     tetris_relay_reactor   (배포 대상 — 이벤트 루프)
@@ -20,6 +20,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build-server-release"
+BOT="${BOT:-0}"
+WSS="${WSS:-1}"
 DIST="$ROOT/dist"
 BUNDLE="$DIST/tetris-server-linux-x64"
 
@@ -34,7 +36,11 @@ CMAKE_ARGS=(
     -S "$ROOT"
     -DCMAKE_BUILD_TYPE=Release
     -DTETRIS_BUILD_GAME=OFF
+    "-DTETRIS_BUILD_BOT=$BOT"
+    "-DTETRIS_BUILD_WSS=$WSS"
     -DTETRIS_BUILD_RELAY=ON
+    -DTETRIS_BUILD_REACTOR=ON
+    -DTETRIS_BUILD_PY=OFF
     -DTETRIS_BUILD_META=ON
     -DTETRIS_BUILD_TEST=OFF
     -DTETRIS_ENABLE_HTTPS=ON
@@ -43,13 +49,16 @@ CMAKE_ARGS=(
 echo "[release_server_linux] CMake configure ..."
 cmake "${CMAKE_ARGS[@]}"
 echo "[release_server_linux] CMake build ..."
-cmake --build "$BUILD" --config Release -j"$JOBS" --target tetris_relay_reactor tetris_meta
+TARGETS=(tetris_relay_reactor tetris_meta)
+if [ "$WSS" = "1" ]; then TARGETS+=(tetris_wss_gateway); fi
+cmake --build "$BUILD" --config Release -j"$JOBS" --target "${TARGETS[@]}"
 
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/scripts"
 
 cp "$BUILD/tetris_relay_reactor" "$BUNDLE/"
 cp "$BUILD/tetris_meta"          "$BUNDLE/"
+if [ "$WSS" = "1" ]; then cp "$BUILD/tetris_wss_gateway" "$BUNDLE/"; fi
 
 if [ -d "$ROOT/web" ]; then
     cp -R "$ROOT/web" "$BUNDLE/web"
@@ -58,6 +67,25 @@ if [ -d "$ROOT/deploy" ]; then
     cp -R "$ROOT/deploy" "$BUNDLE/deploy"
 fi
 cp "$ROOT/scripts/backup_meta_db.sh" "$BUNDLE/scripts/"
+cp "$ROOT/scripts/backup_meta_db.py" "$BUNDLE/scripts/"
+
+# PvE verifier must receive the same character catalog and policies as clients.
+cp -R "$ROOT/assets" "$BUNDLE/assets"
+if [ -d "$ROOT/model" ]; then cp -R "$ROOT/model" "$BUNDLE/model"; fi
+if [ "$BOT" = "1" ]; then
+    mkdir -p "$BUNDLE/lib"
+    cp "$ROOT/third_party/onnxruntime/lib/linux-x64/"libonnxruntime.so* "$BUNDLE/lib/"
+fi
+
+# TLS shared libraries are runtime dependencies, including the crypto dependency
+# of libssl. Keep the SONAME filenames from ldd, never bundle the system libc.
+mkdir -p "$BUNDLE/lib"
+for executable in "$BUNDLE"/tetris*; do
+    [ -f "$executable" ] || continue
+    while IFS= read -r library; do
+        [ -f "$library" ] && cp -L "$library" "$BUNDLE/lib/"
+    done < <(ldd "$executable" | awk '/lib(ssl|crypto)\.so/ && $2 == "=>" { print $3 }')
+done
 
 mkdir -p "$DIST"
 TAR="$DIST/tetris-server-linux-x64.tar.gz"

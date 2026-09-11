@@ -24,7 +24,8 @@ namespace meta {
 
 class ApiServer {
 public:
-    explicit ApiServer(Database& db, std::string relay_secret = {});
+    explicit ApiServer(Database& db, std::string relay_secret = {},
+                       bool trust_loopback_proxy = false, bool bot_rewards = false);
 
     // 포트 리스닝을 시작 (블로킹). 호출자가 main 에서 직접 부름.
     // host 는 loopback 또는 고정된 사설/VPN 인터페이스처럼 이 프로세스가
@@ -35,6 +36,8 @@ public:
 private:
     Database& db_;
     std::string relay_secret_;
+    bool trust_loopback_proxy_;
+    bool bot_rewards_;
 };
 
 } // namespace meta

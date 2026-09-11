@@ -4,10 +4,11 @@
 # 사용법:
 #   ./scripts/release_macos.sh
 #   BOT=1 ./scripts/release_macos.sh
-#   RELAY_ENDPOINT=relay.example.com:7777 META_URL=https://api.example.com ./scripts/release_macos.sh
+#   RELAY_ENDPOINT=wss://relay.example.com:8443/play META_URL=https://api.example.com ./scripts/release_macos.sh
 #   DEBUG_UI=1 NET_TRACE=1 ./scripts/release_macos.sh
 #
-# 의존성: cmake, SDL2 (brew install sdl2), Xcode command-line tools.
+# 의존성: cmake, SDL2, OpenSSL, Boost(기본 WSS=1), Xcode command-line tools.
+# 기본은 호스트 아키텍처. ARCHS="arm64;x86_64"는 의존 dylib도 universal일 때만.
 # 산출물: dist/tetris-macos.tar.gz (내부에 Tetris.app)
 set -euo pipefail
 
@@ -16,7 +17,8 @@ BUILD="$ROOT/build-release"
 DIST="$ROOT/dist"
 APP="$DIST/Tetris.app"
 BOT="${BOT:-0}"
-RELAY_ENDPOINT="${RELAY_ENDPOINT:-}"
+WSS="${WSS:-1}"
+RELAY_ENDPOINT="${RELAY_ENDPOINT:-127.0.0.1:7777}"
 META_URL="${META_URL:-}"
 DEBUG_UI="${DEBUG_UI:-0}"
 NET_TRACE="${NET_TRACE:-0}"
@@ -31,23 +33,18 @@ CMAKE_ARGS=(
     -DTETRIS_BUILD_META=OFF
     -DTETRIS_BUILD_TEST=OFF
     -DTETRIS_USE_SDL2=ON
-    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+    "-DCMAKE_OSX_ARCHITECTURES=${ARCHS:-$(uname -m)}"
 )
-if [ "$BOT" = "1" ]; then
-    CMAKE_ARGS+=(-DTETRIS_BUILD_BOT=ON)
-fi
-if [ -n "$RELAY_ENDPOINT" ]; then
-    CMAKE_ARGS+=("-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RELAY_ENDPOINT")
-fi
-if [ -n "$META_URL" ]; then
-    CMAKE_ARGS+=("-DTETRIS_DEFAULT_META_URL=$META_URL")
-fi
-if [ "$DEBUG_UI" = "1" ]; then
-    CMAKE_ARGS+=(-DTETRIS_ENABLE_DEBUG_UI=ON)
-fi
-if [ "$NET_TRACE" = "1" ]; then
-    CMAKE_ARGS+=(-DTETRIS_ENABLE_NET_TRACE=ON)
-fi
+CMAKE_ARGS+=(
+    "-DTETRIS_BUILD_BOT=$BOT"
+    "-DTETRIS_BUILD_WSS=$WSS"
+    "-DTETRIS_ENABLE_DEBUG_UI=$DEBUG_UI"
+    "-DTETRIS_ENABLE_NET_TRACE=$NET_TRACE"
+    "-DTETRIS_DEFAULT_RELAY_ENDPOINT=$RELAY_ENDPOINT"
+    "-DTETRIS_DEFAULT_META_URL=$META_URL"
+    -DTETRIS_BUILD_PY=OFF
+    -DTETRIS_ENABLE_HTTPS=ON
+)
 
 echo "[release_macos] CMake configure ..."
 cmake "${CMAKE_ARGS[@]}"
@@ -104,6 +101,28 @@ if [ "$BOT" = "1" ]; then
         echo "[release_macos] WARNING: $ORT_DYLIB not found — bundling without ORT."
     fi
 fi
+
+# OpenSSL dylibs found by CMake. Rewrite both the executable and libssl's
+# reference to libcrypto so a target machine does not need Homebrew installed.
+for component in SSL CRYPTO; do
+    library="$(sed -n "s|^OPENSSL_${component}_LIBRARY:FILEPATH=||p" "$BUILD/CMakeCache.txt")"
+    case "$library" in
+        *.dylib)
+            # Use the actual install name (libssl.3.dylib), even when CMake
+            # discovered an unversioned libssl.dylib symlink.
+            install_id="$(otool -D "$library" | tail -1)"
+            name="$(basename "$install_id")"
+            cp -L "$library" "$APP/Contents/Frameworks/$name"
+            chmod u+w "$APP/Contents/Frameworks/$name"
+            install_name_tool -id "@rpath/$name" "$APP/Contents/Frameworks/$name"
+            for binary in "$APP/Contents/MacOS/tetris" "$APP/Contents/Frameworks/"*.dylib; do
+                while IFS= read -r reference; do
+                    install_name_tool -change "$reference" "@rpath/$name" "$binary"
+                done < <(otool -L "$binary" | awk -v name="$name" '$1 ~ ("/" name "$") {print $1}')
+            done
+            ;;
+    esac
+done
 
 # rpath 추가 (중복 방지)
 install_name_tool -add_rpath "@executable_path/../Frameworks" \

@@ -4,7 +4,9 @@
 # 개발기에서 영영 실행할 수 없는 코드 경로가 생긴다 — net/reactor_epoll.cpp 와, 소켓을
 # 루프 사이로 옮기는 샤딩(--loops N)이 그것이다. Windows 의 IOCP 는 핸들을 완료 포트
 # 하나에 고정하므로 그 경로는 단일 루프로 물러선다. 이 워크플로의 존재 이유가 정확히
-# 그 공백을 메우는 것이다: 두 OS 에서 같은 계약을 돌려 확인한다.
+# 그 공백을 메우는 것이다: Linux/Windows에서 같은 계약을 확인한다.
+# macOS는 portable 서버/코어를 검사하며 reactor와 별도 loopback alias 검사는 제외한다.
+# client-build job은 세 OS에서 그래픽 클라이언트의 컴파일도 확인한다.
 #
 # 게임 클라이언트(TETRIS_BUILD_GAME)는 끈다. GL/SDL/오디오는 서버 회귀와 무관하고
 # 러너에 그래픽 스택을 요구하면 CI 가 불안정해진다.
@@ -24,10 +26,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Linux TLS dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libboost-dev libssl-dev
+      - name: macOS TLS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install boost openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Windows TLS dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install boost-beast:x64-windows openssl:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
 
       - name: Configure
         run: >
@@ -37,6 +55,8 @@ jobs:
           -DTETRIS_BUILD_RELAY=ON
           -DTETRIS_BUILD_META=ON
           -DTETRIS_BUILD_TEST=ON
+          -DTETRIS_BUILD_WSS=ON
+          -DTETRIS_ENABLE_HTTPS=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -79,9 +99,7 @@ jobs:
       - name: Unit tests
         shell: bash
         run: |
-          "./$BIN/worker_group_test$EXT"
-          "./$BIN/reactor_test$EXT"          # Linux 에서는 epoll, Windows 에서는 IOCP 백엔드
-          "./$BIN/loop_primitives_test$EXT"
+          ctest --test-dir build -C Release --output-on-failure
 
       - uses: astral-sh/setup-uv@v5
       - name: Python deps
@@ -94,12 +112,17 @@ jobs:
         run: |
           "./$BIN/tetris_relay$EXT" --port 7788 &
           "$RUNNER_TEMP/wait_port.sh" 7788
+          # macOS does not expose arbitrary 127/8 source aliases by default.
+          EXTRA=()
+          if [ "$RUNNER_OS" = macOS ]; then EXTRA+=(--ignore=python/tests/test_relay_adversarial.py); fi
+          TETRIS_SECURE_BUILD="$PWD/$BIN" \
           TETRIS_META_BIN="$PWD/$BIN/tetris_meta$EXT" \
           TETRIS_RELAY_BIN="$PWD/$BIN/tetris_relay$EXT" \
-          uv run python -m pytest python/tests -q --no-header
+          uv run python -m pytest python/tests "${EXTRA[@]}" -q --no-header
           kill %1 || true
 
       - name: Smoke — reactor relay (single loop)
+        if: runner.os != 'macOS'
         shell: bash
         run: |
           "./$BIN/tetris_relay_reactor$EXT" --port 7788 --loops 1 &
@@ -120,6 +143,7 @@ jobs:
       # 나뉘고, Windows 에서는 릴레이가 이유를 로그로 남기고 단일 루프로 물러선다.
       # 양쪽 모두 같은 스모크를 통과해야 한다 — 폴백도 정상 동작이어야 하기 때문이다.
       - name: Smoke — reactor relay (sharded)
+        if: runner.os != 'macOS'
         shell: bash
         run: |
           "./$BIN/tetris_relay_reactor$EXT" --port 7788 --loops 4 &
@@ -136,3 +160,39 @@ jobs:
             python/tests/test_relay_adversarial.py \
             -q --no-header
           kill %1 || true
+
+  client-build:
+    name: Client / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux TLS dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libboost-dev libssl-dev
+      - name: macOS TLS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install boost openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Windows TLS dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install boost-beast:x64-windows openssl:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
+
+      - name: Linux graphics dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libgl1-mesa-dev libssl-dev
+      - name: macOS graphics dependencies
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+      - name: Configure client
+        run: cmake -S . -B build-client -DCMAKE_BUILD_TYPE=Release -DTETRIS_BUILD_GAME=ON -DTETRIS_BUILD_TEST=OFF -DTETRIS_BUILD_PY=OFF -DTETRIS_BUILD_WSS=ON -DTETRIS_ENABLE_HTTPS=ON
+      - name: Compile client
+        run: cmake --build build-client --config Release --parallel 4

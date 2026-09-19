@@ -39,15 +39,16 @@ enum class MsgType : uint8_t {
     // 매치 중 일반 게임 프레임은 전달한다. ranked MATCH_SUMMARY만 relay가
     // 결과 검증을 위해 가로챈다. SimGame은 이 제어 타입을 직접 소비하지 않는다.
     //
-    // QUEUE_JOIN / ROOM_CREATE / ROOM_JOIN 은 모두 tetris_meta 인증 토큰을
-    // 같이 실어 보낸다. 토큰은 32 hex chars (플랫폼 user-data 경로에 저장).
+    // QUEUE_JOIN / ROOM_CREATE / ROOM_JOIN 은 모두 tetris_meta 입장권을
+    // 같이 실어 보낸다. 현재 입장 키는 gt1. + 32 hex 일회용 입장권이다.
     // ranked relay(--meta)는 토큰이 없거나 검증에 실패하면 소켓을 close한다.
     // unranked relay(meta 없음)는 tok_len==0을 허용한다.
     QUEUE_JOIN    = 10,  // C→S : [tok_len:1][token:N]   (tok_len==0 이면 미인증)
     QUEUE_CANCEL  = 11,  // C→S : 빈 페이로드 (매치메이킹 큐 취소)
     MATCH_FOUND   = 12,  // S→C : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
                          //        [peer_icon_len:1][peer_icon:N][uuid_len:1][uuid:N]
-                         //        role: 1=HOST, 2=GUEST. 구 클라이언트는 UUID를 무시한다.
+                         //        [ranked:1] appended after UUID, 0=practice 1=ranked.
+                         //        role: 1=HOST, 2=GUEST. Older clients ignore appended fields.
 
     // 커스텀 룸
     //   플레이어가 5자리 코드로 방을 만들어 친구와 페어링.
@@ -59,13 +60,13 @@ enum class MsgType : uint8_t {
     ROOM_LEAVE  = 16,  // C→S : 빈 페이로드
     READY       = 17,  // C→S, S→C(forward) : [ready:1]  (1=ready, 0=not)
 
-    // 메타데이터/RP 연동. relay가 MATCH_SUMMARY를 가로채 결과를 검증하고,
-    // meta의 POST /v1/matches 응답을 MATCH_RESULT로 돌려준다.
+    // MATCH_SUMMARY는 결과 확정의 계기다. 승패·통계는 서버 INPUT 시뮬레이션에서
+    // 가져오며 MATCH_RESULT에는 meta 저장 여부 또는 검증 거절 사유를 포함한다.
     MATCH_SUMMARY = 18,  // C→S : [won:1][my_score:4 LE][my_lines:4 LE]
                          //        [opp_score_observed:4 LE][opp_lines_observed:4 LE]
                          //        [duration_s:4 LE]  (총 21 바이트)
     MATCH_RESULT  = 19,  // S→C : [elo_before:4 LE][elo_after:4 LE][delta:4 LE signed]
-                         //   필드명 elo_* 는 하위 호환용. 값은 RP이며 delta=0은 무변동.
+                         //   [status:1] appended; see match_result.h. RP zero is no longer an error code.
 
     CHAT        = 20,  // 양방향 : [text_len:2 LE][utf8:N] (릴레이가 통과 포워딩)
 

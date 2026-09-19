@@ -12,6 +12,8 @@ Run::
 """
 from __future__ import annotations
 
+import hashlib
+
 import json
 import os
 import re
@@ -494,8 +496,8 @@ def test_ranked_auth_releases_handshake_slot(meta_and_relay):
     import sqlite3
     tokens = [secrets.token_hex(16) for _ in range(total)]
     with sqlite3.connect(meta_and_relay["db_path"]) as db:
-        db.executemany("INSERT INTO players(token,created_at) VALUES (?,?)",
-                       [(token, int(time.time())) for token in tokens])
+        db.executemany("INSERT INTO players(token_hash,created_at) VALUES (?,?)",
+                       [(hashlib.sha256(("tetris-account-v1:"+token).encode()).hexdigest(), int(time.time())) for token in tokens])
     socks: list[socket.socket] = []
     try:
         for i in range(total):

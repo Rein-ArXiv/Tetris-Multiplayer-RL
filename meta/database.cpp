@@ -1,5 +1,6 @@
 #include "database.h"
 #include "elo.h"
+#include "credentials.h"
 
 #include "../third_party/sqlite3.h"
 
@@ -29,12 +30,16 @@ int64_t now_unix()
 const char* kSchema = R"sql(
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous  = NORMAL;
+PRAGMA synchronous  = FULL;
+PRAGMA secure_delete = ON;
 
 CREATE TABLE IF NOT EXISTS players (
   id          INTEGER PRIMARY KEY,
   username    TEXT,
-  token       TEXT UNIQUE NOT NULL,
+  token_hash  TEXT UNIQUE NOT NULL,
+  recovery_hash TEXT,
+  auth_epoch INTEGER NOT NULL DEFAULT 0,
+  last_credential_op TEXT,
   elo         INTEGER NOT NULL DEFAULT 0,
   wins        INTEGER NOT NULL DEFAULT 0,
   losses      INTEGER NOT NULL DEFAULT 0,
@@ -136,43 +141,39 @@ const IconCatalogEntry* find_icon_def(const std::string& icon_id)
     return nullptr;
 }
 
-std::optional<Player> read_player_by_token(sqlite3* db, const std::string& token)
-{
-    StmtGuard g;
-    const char* sql =
-        "SELECT id,username,token,elo,wins,losses,bp,xp,selected_icon_id "
-        "FROM players WHERE token=?1";
-    if (sqlite3_prepare_v2(db, sql, -1, &g.s, nullptr) != SQLITE_OK) {
-        std::fprintf(stderr, "[db] getByToken prepare: %s\n", sqlite3_errmsg(db));
+std::optional<Player> read_player(sqlite3_stmt *statement) {
+    if (sqlite3_step(statement) != SQLITE_ROW)
         return std::nullopt;
-    }
-    sqlite3_bind_text(g.s, 1, token.c_str(), -1, SQLITE_TRANSIENT);
-
-    int rc = sqlite3_step(g.s);
-    if (rc == SQLITE_DONE) return std::nullopt;
-    if (rc != SQLITE_ROW) {
-        std::fprintf(stderr, "[db] getByToken step: rc=%d %s\n",
-                     rc, sqlite3_errmsg(db));
-        return std::nullopt;
-    }
-
     Player p;
-    p.id       = sqlite3_column_int64(g.s, 0);
-    p.username = read_nullable_text(g.s, 1);
-    p.token    = reinterpret_cast<const char*>(sqlite3_column_text(g.s, 2));
-    p.elo      = sqlite3_column_int  (g.s, 3);
-    p.wins     = sqlite3_column_int  (g.s, 4);
-    p.losses   = sqlite3_column_int  (g.s, 5);
-    p.bp       = sqlite3_column_int  (g.s, 6);
-    p.xp       = sqlite3_column_int  (g.s, 7);
-    const unsigned char* icon = sqlite3_column_text(g.s, 8);
-    p.selected_icon_id = icon ? reinterpret_cast<const char*>(icon) : kDefaultIconId;
-    if (!find_icon_def(p.selected_icon_id)) p.selected_icon_id = kDefaultIconId;
+    p.id = sqlite3_column_int64(statement, 0);
+    p.username = read_nullable_text(statement, 1);
+    p.elo = sqlite3_column_int(statement, 2);
+    p.wins = sqlite3_column_int(statement, 3);
+    p.losses = sqlite3_column_int(statement, 4);
+    p.bp = sqlite3_column_int(statement, 5);
+    p.xp = sqlite3_column_int(statement, 6);
+    auto icon = sqlite3_column_text(statement, 7);
+    p.selected_icon_id = icon ? reinterpret_cast<const char *>(icon) : kDefaultIconId;
+    if (!find_icon_def(p.selected_icon_id))
+        p.selected_icon_id = kDefaultIconId;
+    p.auth_epoch = sqlite3_column_int64(statement, 8);
     return p;
 }
+const char *kPlayerColumns =
+    "SELECT id,username,elo,wins,losses,bp,xp,selected_icon_id,auth_epoch FROM players ";
+std::optional<Player> read_player_by_token(sqlite3 *db, const std::string &token) {
+    if (!credentials::account(token))
+        return std::nullopt;
+    const auto hash = credentials::digest("account", token);
+    StmtGuard g;
+    const auto sql = std::string(kPlayerColumns) + "WHERE token_hash=?1";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &g.s, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(g.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
+    return read_player(g.s);
+}
 
-bool player_owns_icon(sqlite3* db, int64_t player_id, const std::string& icon_id)
-{
+bool player_owns_icon(sqlite3 *db, int64_t player_id, const std::string &icon_id) {
     const IconCatalogEntry* def = find_icon_def(icon_id);
     if (!def) return false;
     if (def->default_owned) return true;
@@ -214,7 +215,8 @@ Database::Database(const std::string& path)
     }
     // 트랜잭션 밖에서 5초까지 락 대기 (동시 요청 스레드 있을 수 있음).
     sqlite3_busy_timeout(db_, 5000);
-    execSchema();
+    try { execSchema(); }
+    catch (...) { sqlite3_close(db_); db_=nullptr; throw; }
 }
 
 Database::~Database()
@@ -246,6 +248,9 @@ void Database::execSchema()
     alter_if_needed("ALTER TABLE players ADD COLUMN bp INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE players ADD COLUMN selected_icon_id TEXT NOT NULL DEFAULT 'default'");
     alter_if_needed("ALTER TABLE players ADD COLUMN xp INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE players ADD COLUMN recovery_hash TEXT");
+    alter_if_needed("ALTER TABLE players ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE players ADD COLUMN last_credential_op TEXT");
     alter_if_needed("ALTER TABLE matches ADD COLUMN match_uuid TEXT");
     alter_if_needed("ALTER TABLE matches ADD COLUMN elo_a_before INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE matches ADD COLUMN elo_a_after INTEGER NOT NULL DEFAULT 0");
@@ -315,6 +320,7 @@ void Database::execSchema()
             throw std::runtime_error("elo->rp rebase migration failed: " + msg);
         }
     }
+    migrateCredentials();
 }
 
 // -----------------------------------------------------------------------------
@@ -323,15 +329,17 @@ Database::registerGuest(const std::string& token)
 {
     std::lock_guard<std::mutex> lk(mu_);
 
+    if(!credentials::account(token))return std::nullopt;
+    const auto hash=credentials::digest("account",token);
     StmtGuard g;
     const char* sql =
-        "INSERT INTO players(username,token,elo,wins,losses,created_at) "
+        "INSERT INTO players(username,token_hash,elo,wins,losses,created_at) "
         "VALUES(NULL,?1,0,0,0,?2)";
     if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) {
         std::fprintf(stderr, "[db] registerGuest prepare: %s\n", sqlite3_errmsg(db_));
         return std::nullopt;
     }
-    sqlite3_bind_text (g.s, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (g.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(g.s, 2, now_unix());
 
     int rc = sqlite3_step(g.s);
@@ -344,7 +352,6 @@ Database::registerGuest(const std::string& token)
 
     Player p;
     p.id      = sqlite3_last_insert_rowid(db_);
-    p.token   = token;
     p.elo     = 0;
     p.wins    = 0;
     p.losses  = 0;
@@ -725,4 +732,180 @@ std::optional<int> Database::saveBotWin(int64_t player,const std::string& ticket
     tx.committed=true;return earned;
 }
 
+} // namespace meta
+
+namespace meta {
+void Database::migrateCredentials() {
+    auto exec = [&](const char *sql) {
+        if (sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw std::runtime_error("credential migration failed (close other DB readers and retry)");
+    };
+    bool legacy = false;
+    {
+        StmtGuard columns;
+        if (sqlite3_prepare_v2(db_, "PRAGMA table_info(players)", -1, &columns.s, nullptr) != SQLITE_OK)
+            throw std::runtime_error("credential schema inspection failed");
+        while (sqlite3_step(columns.s) == SQLITE_ROW) {
+            const auto name = reinterpret_cast<const char *>(sqlite3_column_text(columns.s, 1));
+            if (name && std::string(name) == "token")
+                legacy = true;
+        }
+    }
+    exec("BEGIN IMMEDIATE");
+    try {
+        if (legacy) {
+            exec("ALTER TABLE players RENAME COLUMN token TO token_hash");
+            StmtGuard rows, update;
+            // Row-id order stays stable while the unique credential index changes.
+            if (sqlite3_prepare_v2(db_, "SELECT id,token_hash FROM players ORDER BY id", -1, &rows.s,
+                                   nullptr) != SQLITE_OK ||
+                sqlite3_prepare_v2(db_, "UPDATE players SET token_hash=?1 WHERE id=?2", -1, &update.s,
+                                   nullptr) != SQLITE_OK)
+                throw std::runtime_error("credential migration prepare failed");
+            int rc;
+            while ((rc = sqlite3_step(rows.s)) == SQLITE_ROW) {
+                const auto raw = sqlite3_column_text(rows.s, 1);
+                const std::string token = raw ? reinterpret_cast<const char *>(raw) : "";
+                if (!credentials::account(token))
+                    throw std::runtime_error("invalid legacy credential; migration rolled back");
+                const auto hash = credentials::digest("account", token);
+                sqlite3_reset(update.s);
+                sqlite3_clear_bindings(update.s);
+                sqlite3_bind_text(update.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(update.s, 2, sqlite3_column_int64(rows.s, 0));
+                if (sqlite3_step(update.s) != SQLITE_DONE)
+                    throw std::runtime_error("credential migration update failed");
+            }
+            if (rc != SQLITE_DONE)
+                throw std::runtime_error("credential migration read failed");
+        }
+        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recovery_hash) WHERE "
+             "recovery_hash IS NOT NULL");
+        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_players_credential_op ON players(last_credential_op) "
+             "WHERE last_credential_op IS NOT NULL");
+        exec("INSERT OR IGNORE INTO schema_migrations(name,applied_at) "
+             "VALUES('credential_hash_v1',strftime('%s','now'))");
+        exec("COMMIT");
+    } catch (...) {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        throw;
+    }
+
+    bool scrubbed = false;
+    {
+        StmtGuard marker;
+        if (sqlite3_prepare_v2(db_, "SELECT 1 FROM schema_migrations WHERE name='credential_scrub_v1'", -1,
+                               &marker.s, nullptr) != SQLITE_OK)
+            throw std::runtime_error("credential scrub marker unavailable");
+        scrubbed = sqlite3_step(marker.s) == SQLITE_ROW;
+    }
+    if (!scrubbed) {
+        auto checkpoint = [&] {
+            StmtGuard g;
+            if (sqlite3_prepare_v2(db_, "PRAGMA wal_checkpoint(TRUNCATE)", -1, &g.s, nullptr) != SQLITE_OK ||
+                sqlite3_step(g.s) != SQLITE_ROW || sqlite3_column_int(g.s, 0) != 0)
+                throw std::runtime_error("credential WAL scrub busy; close other DB readers and restart");
+        };
+        // Logical migration is durable first. A second marker makes an interrupted
+        // physical scrub retry on restart. This does not erase external backups/SSD history.
+        checkpoint();
+        exec("VACUUM");
+        checkpoint();
+        exec("INSERT INTO schema_migrations(name,applied_at) "
+             "VALUES('credential_scrub_v1',strftime('%s','now'))");
+    }
+}
+
+std::optional<Player> Database::getByEpoch(int64_t player_id, int64_t epoch) {
+    std::lock_guard<std::mutex> lock(mu_);
+    StmtGuard g;
+    const auto sql = std::string(kPlayerColumns) + "WHERE id=?1 AND auth_epoch=?2";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &g.s, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_int64(g.s, 1, player_id);
+    sqlite3_bind_int64(g.s, 2, epoch);
+    return read_player(g.s);
+}
+
+AccountChangeResult Database::changeAccount(const std::string &operation, const std::string &current,
+                                            const std::string &next_token, const std::string &next_recovery,
+                                            std::optional<Player> &out_player) {
+    out_player.reset();
+    const bool recovering = operation == "recover", backup = operation == "backup";
+    if ((!recovering && !backup && operation != "rotate") ||
+        !(recovering ? credentials::recovery(current) : credentials::account(current)) ||
+        !credentials::account(next_token) || !credentials::recovery(next_recovery) ||
+        (backup && current != next_token) || (operation == "rotate" && current == next_token) ||
+        (recovering && current == next_recovery))
+        return AccountChangeResult::InvalidRequest;
+    const auto oldHash = credentials::digest(recovering ? "recovery" : "account", current);
+    const auto nextHash = credentials::digest("account", next_token);
+    const auto recoveryHash = credentials::digest("recovery", next_recovery);
+    const auto receipt =
+        credentials::digest("operation", operation + ":" + current + ":" + next_token + ":" + next_recovery);
+    std::lock_guard<std::mutex> lock(mu_);
+    if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return AccountChangeResult::DbError;
+    auto rollback = [&](AccountChangeResult result) {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        return result;
+    };
+    {
+        // Retry requires every original secret and both replacements; old credentials
+        // alone never authenticate. Only the latest receipt per player is retained.
+        StmtGuard prior;
+        if (sqlite3_prepare_v2(
+                db_,
+                "SELECT 1 FROM players WHERE last_credential_op=?1 AND token_hash=?2 AND recovery_hash=?3",
+                -1, &prior.s, nullptr) != SQLITE_OK)
+            return rollback(AccountChangeResult::DbError);
+        sqlite3_bind_text(prior.s, 1, receipt.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(prior.s, 2, nextHash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(prior.s, 3, recoveryHash.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(prior.s) == SQLITE_ROW) {
+            out_player = read_player_by_token(db_, next_token);
+            if (!out_player || sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
+                return rollback(AccountChangeResult::DbError);
+            return AccountChangeResult::Ok;
+        }
+    }
+    int64_t player_id = 0;
+    {
+        StmtGuard owner;
+        const char *sql = recovering ? "SELECT id FROM players WHERE recovery_hash=?1"
+                                     : "SELECT id FROM players WHERE token_hash=?1";
+        if (sqlite3_prepare_v2(db_, sql, -1, &owner.s, nullptr) != SQLITE_OK)
+            return rollback(AccountChangeResult::DbError);
+        sqlite3_bind_text(owner.s, 1, oldHash.c_str(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(owner.s);
+        if (rc == SQLITE_DONE)
+            return rollback(AccountChangeResult::InvalidCredential);
+        if (rc != SQLITE_ROW)
+            return rollback(AccountChangeResult::DbError);
+        player_id = sqlite3_column_int64(owner.s, 0);
+    }
+    {
+        StmtGuard update;
+        if (sqlite3_prepare_v2(db_,
+                               "UPDATE players SET "
+                               "token_hash=?1,recovery_hash=?2,auth_epoch=auth_epoch+1,last_credential_op=?3 "
+                               "WHERE id=?4 AND auth_epoch<9223372036854775807",
+                               -1, &update.s, nullptr) != SQLITE_OK)
+            return rollback(AccountChangeResult::DbError);
+        sqlite3_bind_text(update.s, 1, nextHash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update.s, 2, recoveryHash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update.s, 3, receipt.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(update.s, 4, player_id);
+        const auto rc = sqlite3_step(update.s);
+        if (rc != SQLITE_DONE)
+            return rollback(rc == SQLITE_CONSTRAINT ? AccountChangeResult::Conflict
+                                                    : AccountChangeResult::DbError);
+        if (sqlite3_changes(db_) != 1)
+            return rollback(AccountChangeResult::DbError);
+    }
+    out_player = read_player_by_token(db_, next_token);
+    if (!out_player || sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return rollback(AccountChangeResult::DbError);
+    return AccountChangeResult::Ok;
+}
 } // namespace meta

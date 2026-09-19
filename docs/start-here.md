@@ -2,7 +2,7 @@
 
 > 캐릭터별 모델·속도·일러스트와 서버 검증 BP는 [봇과 Colab 안내](bots-and-colab.md)를 먼저 보세요.
 
-2026-09-11 코드 기준. **주 서버는 Mac 하드웨어에 설치한 Linux, 예비 서버는 Windows**다.
+2026-09-19 코드 기준. **주 서버는 Mac 하드웨어에 설치한 Linux, 예비 서버는 Windows**다.
 macOS는 별도 클라이언트 배포 대상이다. 기기 브랜드가 아니라 설치된 OS로 명령을 고른다.
 
 처음부터 구현 과정을 복습하지 않아도 된다. 아래대로 게임을 켜 본 뒤,
@@ -21,7 +21,7 @@ Velog용 [Part 15](blog/part15-release-polishing.md)는 표현·봇·보상,
 | 웹주소로 게임 플레이 | **아직 미구현** | 기존 실행 파일을 웹에 올리는 것만으로 되지 않음 |
 
 `meta`는 기록 담당, `relay`는 연결·매칭 담당, `tetris`는 화면과 게임 규칙 담당이다.
-PvP relay는 게임 보드를 직접 계산하지 않는다. 봇 BP는 별도로 meta가 보드를 재현한다.
+랭크 PvP relay는 입력으로 보드 종료를 검증하고 meta가 기록한다. 봇 BP는 별도로 meta가 보드를 재현한다.
 
 ## 1. 게임부터 켜기
 
@@ -48,7 +48,7 @@ cmake --build build-client --config Release --parallel 4
 ```
 
 Windows 기본 창/음향은 Win32/XAudio2라 SDL2 설치가 필요 없다. 공개 HTTPS API에
-접속할 클라이언트는 OpenSSL 개발 라이브러리와 실행 DLL도 준비해야 한다.
+접속할 클라이언트는 OpenSSL 개발 라이브러리와 실행 DLL도 준비해야 한다. meta 서버를 빌드할 때에는 HTTPS 사용 여부와 관계없이 계정 해시를 위한 OpenSSL Crypto가 필수다.
 구성 로그에 `OpenSSL found: HTTPS meta client enabled`가 있는지 확인한다.
 
 macOS는 Xcode command-line tools, CMake, SDL2, OpenSSL을 준비한다:
@@ -72,7 +72,7 @@ macOS에서는 reactor 타깃을 기본 제외한다. 클라이언트와 기본 
 
 ## 2. 서버 빌드 — Linux 주 서버 / Windows 예비 서버 공통
 
-서버에는 SDL2, OpenGL, 폰트, 사운드, ONNX 모델이 필요 없다.
+기본 서버에는 C++ 툴체인·CMake·OpenSSL 개발 라이브러리가 필요하며 SDL2·OpenGL·폰트·사운드는 필요 없다. WSS를 켜면 Boost 헤더도 필요하다. ONNX 봇의 BP 검증을 켤 때에는 같은 모델과 OS별 ONNX Runtime을 추가한다.
 
 ```bash
 cmake -S . -B build-server -DCMAKE_BUILD_TYPE=Release \
@@ -133,10 +133,10 @@ export TETRIS_RELAY_SECRET="$(cat "$HOME/.config/entris/relay-secret")"
 
 다른 사용자 데이터 폴더를 쓰는 두 클라이언트로 검증한다. 같은 OS 사용자로
 두 번 실행하면 같은 토큰을 읽어서 중복 ranked 입장이 거절될 수 있다.
-Linux에서는 두 번째 실행에 별도 데이터 폴더를 지정할 수 있다:
+세 OS 모두 `TETRIS_USER_DATA_ROOT`에 절대 경로를 지정하면 계정과 설정을 분리한다. Linux/macOS 예시:
 
 ```bash
-XDG_DATA_HOME="$PWD/out/test-player-b" ./build-client/tetris --relay 127.0.0.1:7777 --meta http://127.0.0.1:8080
+TETRIS_USER_DATA_ROOT="$PWD/out/test-player-b" ./build-client/tetris --relay 127.0.0.1:7777 --meta http://127.0.0.1:8080
 ```
 
 끄는 순서는 클라이언트 → relay → meta다. 로컬에서도 계정 토큰 대신 일회용 입장권을
@@ -161,3 +161,26 @@ Boost·OpenSSL 준비, `TETRIS_BUILD_WSS=ON` 빌드, 인증서, gateway 시작, 
 
 상세 패키징은 [Part 12](blog/part12-hardening-and-release.md), 출시 조건과 서버 이전은
 [release-readiness.md](release-readiness.md)를 기준으로 한다.
+
+## 가입 없이 기록 보관·복구하기
+
+온라인 계정이 생성된 뒤 메뉴의 **Account & Recovery → Save recovery file**을 실행한다.
+화면에 표시되는 폴더의 `account-recovery.json`을 별도 위치에 복사해 둔다. 다른 기기에서는
+같은 서버로 실행하고 해당 폴더에 복구 파일을 놓은 뒤 **Restore recovery file**을
+선택한다. BP·RP·아이콘은 유지하고 접근 키와 복구 파일을 새로 만든다.
+
+키가 유출됐거나 다른 기기의 접근을 끊으려면 **Replace access keys**를 사용한다.
+교체·복구 후에는 항상 새 복구 파일을 보관한다. 통신이나 저장 실패가 표시되면
+**Retry / reconnect**로 마무리하며, 대기 파일을 지우고 새 교체를 시작하지 않는다.
+이미 진행 중인 경기를 즉시 강제 종료하는 기능은 아직 없다.
+
+서버별 폴더에 계정을 나누어 저장한다. 이전 버전의 계정은 **Import older account**에서
+현재 서버를 확인한 뒤 가져온다. 최초 저장 실패 경고가 나오면 게임을 닫기 전에 **Retry / reconnect**로
+저장을 완료한다. 같은 키를 다시 저장하며 온라인 보상은 저장 성공 후에 가능하다.
+
+잘못된 키·손상된 파일을 발견하면 새 계정을 자동 생성하지 않고 복구를 안내한다.
+키와 복구 파일을 모두 잃었을 때는 익명 계정을 확인할 별도 수단이 없다.
+파일 경로·OS별 보호·서버 이관·실패 처리의 이유는 [Part 17](blog/part17-guest-account-recovery.md)에 있다.
+
+랭크 결과가 미확인이면 재접속해 프로필을 확인한다. 연습전은 RP/BP를 주지 않는다.
+재경기는 큐로 돌아가 새 연결로 시작한다. [Part 18](blog/part18-authoritative-results.md)에 판정 기준이 있다.

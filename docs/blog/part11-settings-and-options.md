@@ -1,10 +1,10 @@
 # Part 11: 설정 화면 — 해상도 · 오디오 · VSync, 그리고 결정성 불변식
 
-> **2026-09-11 현재 코드 반영:** Settings에 `UI animation`(저장 키 `idle_animation`)을 추가했다. 테두리 맥동과 상점 회전을 함께 끄며 게임 규칙에는 영향이 없다. 현재 설정 화면은 9행/45px 간격이다.
-
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 11**
 
 ---
+
+> **2026-09-11 현재 코드 반영:** Settings에 `UI animation`(저장 키 `idle_animation`)을 추가했다. 테두리 맥동과 상점 회전을 함께 끄며 게임 규칙에는 영향이 없다. 현재 설정 화면은 9행/45px 간격이다.
 
 ## 이번 Part의 구현 계약
 
@@ -12,7 +12,7 @@
   - [Part 3](./part3-rendering-and-ui.md) 의 `gui_hover_rect` / `gui_button` / `gui_checkbox` 와 OpenGL 3.3 Core 렌더러(`renderer_init` · `renderer_begin` · `renderer_end`)
   - [Part 4](./part4-game-wrapper-and-loop.md) 의 `AppMode` 메뉴 루프와 `Game`
   - [Part 5](./part5-audio.md) 의 `audio_set_music_enabled` / `audio_set_sfx_enabled` / `audio_set_music_volume` / `audio_set_sfx_volume`
-  - [Part 10](./part10-meta-and-ranking.md)의 `meta::client::settings_file_path()`와 `Customize` 화면이 연결된 메인 메뉴
+  - [Part 10](./part10-meta-and-ranking.md)의 `platform::settings_file_path()`와 `Customize` 화면이 연결된 메인 메뉴
 - **이번 Part의 파일:**
   - `src/main.cpp` — `struct GameSettings`, 창 크기 프리셋과 `max_window_scale()`, `load_settings` / `save_settings`, `settingsPath` 결정 + 레거시 마이그레이션, 시작 시 적용, `AppMode::Settings` 전이, `apply_fx` 의 흔들림 게이팅
   - `src/gui.h` / `src/gui.cpp` — `gui_slider`, `gui_value_selector`
@@ -22,12 +22,12 @@
   - `src/sim_game.h` / `src/sim_game.cpp` — 렌더 전용 1 회 플래그 `hardDropEvent`
   - `src/game.h` / `src/game.cpp` — `game_set_ghost_enabled()` 와 게이트된 고스트 draw 사이트
 - **연결점:** 설정은 표현과 입력 정책만 바꾸고 `SimGame` 상태·틱·wire protocol 은 바꾸지 않는다. 적용 경로는 전부 `platform_*` / `audio_*` / `game_*` 이다.
-- **CMakeLists:** 이 장은 **새 소스 파일을 추가하지 않는다.** 전부 기존 파일의 확장이므로 빌드 파일에 변경이 없다.
+- **CMakeLists:** 설정과 위젯은 기존 파일을 확장한다. 현재 빌드는 Part 17에서 분리한 `platform/user_data.cpp`를 게임 타깃에 포함한다.
 - **완료 게이트:** 저장/재시작 복원, 즉시 적용, 논리 좌표 역매핑을 눈으로 확인하고, **설정을 바꿔도 동일 seed/input 의 결정론 해시가 그대로**인지를 `sim_hash_dump` diff 로 확인한다(§10 수동 테스트).
 
 ## 1. 들어가며
 
-> **현재 저장 위치:** 초기 구현은 실행 디렉터리의 `settings.cfg`를 사용했지만, 현재 코드는 token과 같은 플랫폼별 user-data 디렉터리에 저장한다. 경로를 구할 수 없을 때만 실행 디렉터리로 폴백하고, 기존 cwd 파일은 1회 마이그레이션한다. 아래에서 `"settings.cfg"` 리터럴을 쓰는 코드는 도입 과정을 보여주는 중간 스냅샷이며 최종 코드는 `settingsPath`를 사용한다.
+> **현재 저장 위치:** 초기 구현은 실행 디렉터리의 `settings.cfg`를 사용했지만, 현재 코드는 계정 폴더의 상위인 플랫폼별 user-data 디렉터리에 저장한다. 경로를 구할 수 없을 때만 실행 디렉터리로 폴백하고, 기존 cwd 파일은 1회 마이그레이션한다. 아래에서 `"settings.cfg"` 리터럴을 쓰는 코드는 도입 과정을 보여주는 중간 스냅샷이며 최종 코드는 `settingsPath`를 사용한다.
 
 여기까지 게임은 "기능은 다 있는데 손볼 데가 없는" 상태다. 창은 720×640 고정, 볼륨은 켜짐/꺼짐, 화면 흔들림과 고스트 피스는 항상 ON. 이 장은 창 크기·전체화면, BGM/SFX 볼륨, VSync, 화면 흔들림, 고스트 피스를 **인게임 설정 화면(`AppMode::Settings`)**과 한 설정 모델로 묶는다. 변경은 즉시 반영되고 `settings.cfg`에 저장돼 재시작에도 살아남는다.
 
@@ -41,7 +41,10 @@
 - `src/game.h` / `src/game.cpp` — `game_set_ghost_enabled()` 와 게이트된 고스트 draw 사이트.
 - `renderer/renderer.cpp` — 논리 좌표계가 720×640 으로 고정이고 창 크기는 `glViewport` 사각형만 바꾼다는 사실(창 크기 프리셋이 게임 좌표를 흔들지 않는 근거).
 
-설정 기능 자체는 Part 4의 앱 루프와 Part 5의 오디오 API 뒤에 붙일 수 있지만, **현재 코드의 저장 경로 헬퍼가 `meta/http_client.*` 안에 있다.** 그래서 현재 저장소를 그대로 누적 구현하는 순서에서는 Part 10 뒤에 놓인다. 이는 설정이 랭킹을 필요로 한다는 뜻이 아니라 user-data 경로 책임이 meta 모듈에 섞인 구현 결합이다. 이 헬퍼를 `platform/user_data.*` 같은 공용 모듈로 옮기면 설정 장은 Part 5 직후로 이동할 수 있다. 문서 순서는 현재 빌드 가능한 코드를 우선하고, 이 결합을 숨기지 않는다.
+설정 경로는 `platform/user_data.*`가 맡는다. 이전에는 `meta/http_client.*`에 섞여
+있었으나 Part 17에서 분리했다. 따라서 설정 파일 위치를 정하려고 HTTP나 랭킹 서비스를
+의존할 필요가 없다. 이 장의 순서는 기존 시리즈를 유지하며, 새 구현에서는 Part 5 이후에
+공용 경로 모듈을 연결해 설정을 만들 수도 있다.
 
 **결정성 불변식을 맨 앞에 못박는다.** 이 장이 추가하는 모든 것은 *렌더 · 오디오 · 창 · 입력 UI* 전용이다. `SimGame` 의 상태도, 결정성 해시도, lockstep 입력 경로도, 리플레이도 단 한 비트도 건드리지 않는다. 유일하게 sim 에 새로 들어가는 필드(`hardDropEvent`) 조차 *해시에서 제외된* `mutable` 렌더 플래그다. 그래서 설정을 어떻게 바꾸든 같은 입력 시퀀스는 양쪽 클라이언트에서 같은 게임을 만든다.
 
@@ -50,10 +53,6 @@
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-// ── 게임 설정 (렌더/오디오 전용) ──────────────────────────────────────────────
-//   settings.cfg (key=value 텍스트) 에 저장. 시작 시 로드, 변경 시마다 저장.
-//   결정성 주의: 아래 플래그는 모두 렌더/오디오에만 영향 — SimGame 상태나
-//   결정성 해시, lockstep 입력 경로를 절대 건드리지 않는다.
 struct GameSettings {
     int  bgmVol  = 100;   // BGM 볼륨 0~100 (0 == 음소거)
     int  sfxVol  = 100;   // SFX 볼륨 0~100 (0 == 음소거)
@@ -62,6 +61,7 @@ struct GameSettings {
     int  windowScale = 0; // 창 크기 프리셋 인덱스 0~4 (아래 kWindowScale* 참고)
     bool fullscreen  = false;
     bool vsyncOn     = true;
+    bool idleAnimation = true;
     bool ghostOn     = true;  // 고스트 피스 표시
 };
 ```
@@ -108,7 +108,6 @@ static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-// settings.cfg 로드. 파일이 없으면 기본값 반환 (load_bot_config 와 동일한 스타일).
 static GameSettings load_settings(const char* path)
 {
     GameSettings s;
@@ -134,6 +133,7 @@ static GameSettings load_settings(const char* path)
         else if (key == "window_scale")   s.windowScale = parse_int_clamped(val, s.windowScale, 0, kWindowScaleCount - 1);
         else if (key == "fullscreen")     s.fullscreen = parse_bool01(val, s.fullscreen);
         else if (key == "vsync")          s.vsyncOn = parse_bool01(val, s.vsyncOn);
+        else if (key == "idle_animation") s.idleAnimation = parse_bool01(val, s.idleAnimation);
         else if (key == "ghost")          s.ghostOn = parse_bool01(val, s.ghostOn);
     }
     std::fclose(f);
@@ -148,8 +148,6 @@ static GameSettings load_settings(const char* path)
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-// 저장 성공 시 true. 정식 user-data 경로의 부모 디렉터리가 없는 첫 실행도
-// 처리하며, 실패는 stderr에 남겨 설정 변경이 조용히 사라지지 않게 한다.
 static bool save_settings(const char* path, const GameSettings& s)
 {
     namespace fs = std::filesystem;
@@ -180,6 +178,7 @@ static bool save_settings(const char* path, const GameSettings& s)
     ok = ok && std::fprintf(f, "fullscreen=%d\n",     s.fullscreen ? 1 : 0) >= 0;
     ok = ok && std::fprintf(f, "vsync=%d\n",          s.vsyncOn ? 1 : 0) >= 0;
     ok = ok && std::fprintf(f, "ghost=%d\n",          s.ghostOn ? 1 : 0) >= 0;
+    ok = ok && std::fprintf(f, "idle_animation=%d\n", s.idleAnimation ? 1 : 0) >= 0;
     if (std::fclose(f) != 0) ok = false;
     if (!ok) {
         std::fprintf(stderr, "[settings] failed while writing '%s'\n", path);
@@ -274,7 +273,7 @@ static GameSettings g_settings;
 
 초기 구현은 실행 디렉터리의 `"settings.cfg"` 를 그대로 썼다. 그런데 [Part 10](./part10-meta-and-ranking.md) 에서 토큰 저장 경로를 만들면서 같은 문제가 드러났다 — macOS `.app` 번들의 cwd 는 번들 안 `Resources` 이고 **읽기 전용**이다. 거기에 쓰면 조용히 실패해 설정이 매번 초기화된다.
 
-그래서 저장 위치를 토큰과 같은 user-data 디렉터리로 옮긴다. 경로를 구하는 함수는 Part 10 이 만든 `meta::client::settings_file_path()` 다.
+그래서 저장 위치를 토큰과 같은 user-data 디렉터리로 옮긴다. 경로를 구하는 공용 함수는 `platform::settings_file_path()` 다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -284,7 +283,7 @@ static GameSettings g_settings;
     //   macOS .app 번들의 cwd(Resources)는 읽기전용이라 거기 저장하면 조용히
     //   실패한다. HOME/APPDATA 가 없으면 실행 디렉터리 "settings.cfg" 로 폴백.
     //   기존 cwd 파일이 있고 user-data 에 아직 없으면 1회 마이그레이션한다.
-    std::string settingsPath = meta::client::settings_file_path();
+    std::string settingsPath = platform::settings_file_path();
     if (settingsPath.empty()) {
         settingsPath = "settings.cfg";
     } else {
@@ -482,7 +481,7 @@ int  gui_value_selector(int x, int y, int w, int h, const char* label,
 ```cpp
             enum class MenuAction {
                 Single, BotSelect, Matchmaking, CustomRoom,
-                Customize, Settings, Quit,
+                Customize, Settings, Account, Quit,
             };
             struct MenuItem {
                 const char* label;
@@ -495,13 +494,14 @@ int  gui_value_selector(int x, int y, int w, int h, const char* label,
                 {"Custom Room Multi", MenuAction::CustomRoom},
                 {"Customize",         MenuAction::Customize},
                 {"Settings",          MenuAction::Settings},
+                {"Account & Recovery", MenuAction::Account},
                 {"Quit",              MenuAction::Quit},
             };
             constexpr int kMenuCount =
                 static_cast<int>(sizeof(items) / sizeof(items[0]));
 ```
 
-`Settings`는 현재 `Customize` 뒤에 보이지만 진입 동작은 배열 위치에 의존하지 않는다. 렌더 루프가 선택된 `MenuItem::action`을 switch에 넘기므로 항목을 삽입하거나 순서를 바꿔도 라벨과 동작이 함께 이동한다.
+`Settings`는 현재 `Customize`와 `Account & Recovery` 사이에 보이지만 진입 동작은 배열 위치에 의존하지 않는다. 렌더 루프가 선택된 `MenuItem::action`을 switch에 넘기므로 항목을 삽입하거나 순서를 바꿔도 라벨과 동작이 함께 이동한다.
 
 버튼 높이와 간격은 랭킹 표시줄을 침범하지 않도록 고정 영역 안에 맞춘다. 항목을 추가할 때는 문서의 개수에 맞추지 말고 작은 창에서 마지막 버튼의 hit box와 상태 표시줄이 겹치지 않는지 확인한다.
 
@@ -530,7 +530,7 @@ stateDiagram-v2
 
 ### 4.2 행 구성과 내비게이션
 
-설정 화면은 선택기·체크박스·슬라이더 행을 조합한다. `enum RowKind`가 위젯 종류를 구분하고, 현재 항목은 스케일 → 전체화면 → 흔들림 → BGM/SFX 볼륨 → VSync → 고스트 순으로 배치된다. 행 개수나 배열 index보다 항목 ID와 표시 순서를 함께 관리하는 것이 중요하다.
+설정 화면은 선택기·체크박스·슬라이더 행을 조합한다. `enum RowKind`가 위젯 종류를 구분하고, 현재 항목은 스케일 → 전체화면 → 흔들림 → BGM/SFX 볼륨 → VSync → 고스트 → UI 애니메이션 순으로 배치된다. 행 개수나 배열 index보다 항목 ID와 표시 순서를 함께 관리하는 것이 중요하다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -545,8 +545,8 @@ stateDiagram-v2
 
             // 행 종류: 체크박스 / 볼륨 슬라이더 / 스케일 선택기.
             enum RowKind { ROW_SCALE, ROW_FULLSCREEN, ROW_SHAKE, ROW_HARDDROP,
-                           ROW_BGM, ROW_SFX, ROW_VSYNC, ROW_GHOST };
-            constexpr int kSettingsRows = 8;
+                           ROW_BGM, ROW_SFX, ROW_VSYNC, ROW_GHOST, ROW_ANIMATION };
+            constexpr int kSettingsRows = 9;
 
             // 키보드 상하 커서 이동.
             if (platform_key_pressed(PKEY_DOWN))
@@ -573,7 +573,7 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
             const int labelX  = 150;   // 행 라벨 x
             const int ctrlX   = 360;   // 컨트롤(체크박스/슬라이더/선택기) x
             const int rowY0   = 130;
-            const int rowGap  = 52;
+            const int rowGap  = 45;
             const int boxSize = 26;
             const int ctrlW   = 220;   // 슬라이더/선택기 폭
 
@@ -786,6 +786,9 @@ Win32 백엔드는 전체화면을 구현하지 않았다. 창 스타일 전환�
                 game_set_ghost_enabled(g_settings.ghostOn);
                 changed = true;
             }
+
+            if (checkbox_row(ROW_ANIMATION, "UI animation", g_settings.idleAnimation))
+                changed = true;
 
             // 슬라이더 드래그 중 매 프레임 파일을 쓰지 않도록, 변경은 dirty 로
             // 모아 두고 마우스 버튼을 뗀 프레임(키보드 변경은 즉시)에 저장한다.
@@ -1242,9 +1245,9 @@ void Game::Draw()
 **현재 소스 발췌 — `src/game.cpp`**
 
 ```cpp
-    DrawGrid(offsetX, offsetY);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY);
-    DrawBlock(sim.CurrentBlock(), offsetX, offsetY);
+    DrawGrid(offsetX, offsetY, cellSize);
+    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
+    DrawBlock(sim.CurrentBlock(), offsetX, offsetY, cellSize);
 ```
 
 `sim.GhostBlock()`은 `SimGame`이 유지하는 착지 예측 블록을 읽는다. 고스트를 끄면 그 상태를 계산하거나 갱신하는 규칙은 바꾸지 않고, 그리기만 생략한다. 즉 고스트 토글은 순수 렌더 게이트다.
@@ -1254,7 +1257,7 @@ void Game::Draw()
 이 장의 모든 변경이 lockstep/리플레이에 영향이 없는 이유를 한자리에 모은다.
 
 - **입력 비트마스크 불변.** lockstep 이 주고받는 것은 틱별 입력 비트마스크(Part 6) 다. 설정 화면은 이 비트마스크를 만들지도, 보내지도, 바꾸지도 않는다. 설정 행을 조작하는 Up/Down/Left/Right 는 *UI 내비게이션* 일 뿐 게임 입력이 아니다 — 애초에 게임 중이 아니라 메뉴 컨텍스트(`AppMode::Settings`) 에서만 동작한다.
-- **`SimGame` 상태 불변.** 볼륨·창 크기·VSync·흔들림·고스트 중 무엇도
+- **`SimGame` 상태 불변.** 볼륨·창 크기·VSync·흔들림·고스트·UI 애니메이션 중 무엇도
   `SimGame`의 grid/블록/RNG/score를 건드리지 않는다. `hardDropEvent`는
   `mutable` 렌더 이벤트이며 `StateHashBreakdown()`의 해시 대상에서 빠져
   있다(§8.1).

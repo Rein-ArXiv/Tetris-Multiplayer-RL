@@ -1,4 +1,6 @@
 #include "http_client.h"
+#include <algorithm>
+#include <cctype>
 #include "protocol.h"
 
 #ifdef _WIN32
@@ -6,8 +8,6 @@
   #ifndef NOMINMAX
     #define NOMINMAX
   #endif
-  #include <windows.h>
-  #include <shlobj.h>
 #endif
 
 // httplib 는 헤더 온리라 여기서 한 번만 포함해 impl 을 생성한다. game client /
@@ -15,25 +15,15 @@
 // 이 파일을 한 타겟당 한 번만 추가해야 한다.
 #include "httplib.h"
 
-#include <algorithm>
 #include <cstdlib>
-#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <utility>
 #include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
-
-#ifndef _WIN32
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace meta::client {
 
@@ -52,38 +42,31 @@ bool parse_port(const std::string& s, int& out)
     return true;
 }
 
-// URL 파서 — "http://host[:port]" / "https://host[:port]" 허용.
+// API URLs identify an origin, not an arbitrary path. Reject userinfo, queries,
+// fragments and hidden suffixes so storage identity matches the actual destination.
 bool parse_meta_url(const std::string& url, std::string& host, int& port, bool& https)
 {
-    const std::string httpScheme = "http://";
-    const std::string httpsScheme = "https://";
-    std::string rest;
-    if (url.compare(0, httpScheme.size(), httpScheme) == 0) {
-        https = false;
-        port = 80;
-        rest = url.substr(httpScheme.size());
-    } else if (url.compare(0, httpsScheme.size(), httpsScheme) == 0) {
-        https = true;
-        port = 443;
-        rest = url.substr(httpsScheme.size());
-    } else {
-        return false;
+    std::string text = url;
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    size_t prefix = 0;
+    if (text.rfind("https://", 0) == 0) { https = true; port = 443; prefix = 8; }
+    else if (text.rfind("http://", 0) == 0) { https = false; port = 80; prefix = 7; }
+    else return false;
+    std::string authority = text.substr(prefix);
+    if (!authority.empty() && authority.back() == '/') authority.pop_back();
+    if (authority.empty() || authority.find_first_of("/@?#%\\ \t\r\n") != std::string::npos) return false;
+    if (authority.front() == '[') {
+        const auto end = authority.find(']');
+        if (end == std::string::npos) return false;
+        host = authority.substr(1, end - 1);
+        if (host.empty() || host.find_first_not_of("0123456789abcdef:.") != std::string::npos) return false;
+        const auto suffix = authority.substr(end + 1);
+        return suffix.empty() || (suffix.front() == ':' && parse_port(suffix.substr(1), port));
     }
-
-    if (rest.empty()) return false;
-
-    // 옵션 경로(/...)가 따라오면 잘라낸다 — 우리 클라이언트는 호스트만 필요.
-    auto slash = rest.find('/');
-    std::string hostport = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-
-    auto colon = hostport.rfind(':');
-    if (colon == std::string::npos) {
-        host = hostport;
-    } else {
-        host = hostport.substr(0, colon);
-        if (!parse_port(hostport.substr(colon + 1), port)) return false;
-    }
-    return !host.empty();
+    const auto colon = authority.find(':');
+    host = authority.substr(0, colon);
+    if (host.empty() || host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-") != std::string::npos) return false;
+    return colon == std::string::npos || parse_port(authority.substr(colon + 1), port);
 }
 
 template <typename ClientT>
@@ -122,6 +105,11 @@ MetaClient::MetaClient(const std::string& base_url, std::string relay_secret)
     if (valid_ && relay_secret_.empty() && !https_ &&
         host_ != "127.0.0.1" && host_ != "::1" && host_ != "localhost") {
         valid_ = false; // ordinary clients never send account credentials over remote HTTP
+    }
+    if (valid_) {
+        const auto authority = host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]";
+        base_url_ = std::string(https_ ? "https://" : "http://") + authority;
+        if (port_ != (https_ ? 443 : 80)) base_url_ += ":" + std::to_string(port_);
     }
     if (!valid_) {
         std::fprintf(stderr, "[meta-client] invalid URL: %s\n", base_url.c_str());
@@ -232,7 +220,7 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
         return std::nullopt;
     }
     if (r->status == 404) {
-        // 토큰 미등록 — 호출자가 새 guest 재발급 또는 매치 입장 거부.
+        // 토큰 미등록 — 호출자가 복구를 안내하고 새 입장을 거절한다.
         set_outcome(VerifyOutcome::UnknownToken);
         return std::nullopt;
     }
@@ -484,114 +472,19 @@ MetaClient::post_match(const std::string& match_uuid,
 // Token 파일 헬퍼
 // -----------------------------------------------------------------------------
 
-namespace {
-
-// 표준 user-data 디렉토리 기반 경로. 실패 시 빈 문자열.
-std::filesystem::path user_data_dir()
+std::optional<AuthInfo> MetaClient::change_account(const std::string& operation,
+    const std::string& credential,const std::string& next_token,const std::string& next_recovery,int* status)
 {
-    namespace fs = std::filesystem;
-#ifdef _WIN32
-    // %APPDATA% (예: C:\Users\Name\AppData\Roaming)
-    char buf[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, 0, buf))) {
-        return fs::path(buf);
-    }
-    const char* appdata = std::getenv("APPDATA");
-    if (appdata && *appdata) return fs::path(appdata);
-    return {};
-#elif defined(__APPLE__)
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) return {};
-    return fs::path(home) / "Library" / "Application Support";
-#else
-    // Linux / other unix
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return fs::path(xdg);
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) return {};
-    return fs::path(home) / ".local" / "share";
-#endif
-}
-
-} // namespace
-
-std::string token_file_path()
-{
-    auto base = user_data_dir();
-    if (base.empty()) return {};
-    return (base / "Tetris" / "token").string();
-}
-
-std::string settings_file_path()
-{
-    auto base = user_data_dir();
-    if (base.empty()) return {};
-    return (base / "Tetris" / "settings.cfg").string();
-}
-
-std::string load_token()
-{
-    auto path = token_file_path();
-    if (path.empty()) return {};
-
-    std::ifstream f(path);
-    if (!f) return {};
-    std::string tok;
-    f >> tok;
-    // 32 hex chars 만 허용 — 외부 오염된 파일은 무시.
-    if (tok.size() != 32) return {};
-    for (char c : tok) {
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return {};
-    }
-    return tok;
-}
-
-bool save_token(const std::string& token)
-{
-    namespace fs = std::filesystem;
-    auto path = token_file_path();
-    if (path.empty()) return false;
-
-    std::error_code ec;
-    fs::create_directories(fs::path(path).parent_path(), ec);
-
-#ifndef _WIN32
-    const std::string line = token + "\n";
-    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-    if (fd < 0) return false;
-    if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
-        ::close(fd);
-        return false;
-    }
-    size_t written = 0;
-    while (written < line.size()) {
-        ssize_t n = ::write(fd, line.data() + written, line.size() - written);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            ::close(fd);
-            return false;
-        }
-        if (n == 0) {
-            ::close(fd);
-            return false;
-        }
-        written += static_cast<size_t>(n);
-    }
-    bool ok = (::close(fd) == 0);
-    ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
-    return ok;
-#else
-    std::ofstream f(path, std::ios::trunc);
-    if (!f) return false;
-    f << token << "\n";
-    bool ok = static_cast<bool>(f);
-    f.close();
-    fs::permissions(path,
-                    fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace,
-                    ec);
-    return ok;
-#endif
+    if(status)*status=0;
+    if(!valid_ || (operation!="backup" && operation!="rotate" && operation!="recover"))return std::nullopt;
+    const auto body="{\"credential\":\""+proto::json_escape(credential)+"\",\"next_token\":\""+
+        proto::json_escape(next_token)+"\",\"next_recovery\":\""+proto::json_escape(next_recovery)+"\"}";
+    const auto path="/v1/account/"+operation;
+    auto response=post_json(*this,host_,port_,https_,path.c_str(),{},body,5);
+    if(!response)return std::nullopt;
+    if(status)*status=response->status;
+    if(response->status!=200)return std::nullopt;
+    return parse_auth_info_body(response->body);
 }
 
 

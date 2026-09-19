@@ -1,11 +1,10 @@
 # Part 3: 렌더링과 UI — OpenGL 3.3 Core 2D 렌더러
 
-> **2026-09-11 현재 코드 반영:** 아바타 프레임·idle 애니메이션·폰트/색상 설정은 `src/presentation.cpp`와 `assets/theme.cfg`로 분리했다. [현재 수정 방법](../customization.md)을 함께 읽는다. `renderer_load_font`는 이제 성공 여부를 bool로 반환한다.
-
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 3**
->
 
 ---
+
+> **2026-09-11 현재 코드 반영:** 아바타 프레임·idle 애니메이션·폰트/색상 설정은 `src/presentation.cpp`와 `assets/theme.cfg`로 분리했다. [현재 수정 방법](../customization.md)을 함께 읽는다. `renderer_load_font`는 이제 성공 여부를 bool로 반환한다.
 
 ## 이번 Part의 구현 계약
 
@@ -656,8 +655,8 @@ void main() {
     // 불필요하게 흐려지는 것을 막는다.
     if (v_radius > 0.0) {
         float d = rounded_box_sdf(v_local, v_half, v_radius);
-        // 1픽셀 폭으로 부드럽게 자른다 — CPU 구현의 hard edge 와 달리
-        // 모서리 안티앨리어싱이 공짜로 따라온다.
+        // 1픽셀 폭으로 부드럽게 자른다 — 모서리 안티앨리어싱이
+        // 별도 코드 없이 따라온다.
         c.a *= 1.0 - smoothstep(-0.5, 0.5, d);
     }
 
@@ -1440,19 +1439,19 @@ key = (code point << 32) | (논리 크기 << 16) | 굽는 크기
 **현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
-void renderer_load_font(const char* path)
+bool renderer_load_font(const char* path)
 {
     s_font_ok = false;
     s_cache.clear();
     s_ttf.clear();
     // 폰트가 바뀌면 아틀라스 내용이 의미를 잃으므로 커서를 되감는다.
     s_pen_x = s_pen_y = s_row_h = 0;
-    if (!path || !*path) return;
+    if (!path || !*path) return false;
 
     FILE* file = std::fopen(path, "rb");
     if (!file) {
         std::fprintf(stderr, "[text] font open failed: %s\n", path);
-        return;
+        return false;
     }
     std::fseek(file, 0, SEEK_END);
     const long size = std::ftell(file);
@@ -1460,7 +1459,7 @@ void renderer_load_font(const char* path)
     if (size <= 0) {
         std::fclose(file);
         std::fprintf(stderr, "[text] font empty: %s\n", path);
-        return;
+        return false;
     }
     s_ttf.resize((size_t)size);
     const size_t read = std::fread(s_ttf.data(), 1, s_ttf.size(), file);
@@ -1468,16 +1467,17 @@ void renderer_load_font(const char* path)
     if (read != s_ttf.size()) {
         s_ttf.clear();
         std::fprintf(stderr, "[text] font read failed: %s\n", path);
-        return;
+        return false;
     }
 
     const int offset = stbtt_GetFontOffsetForIndex(s_ttf.data(), 0);
     if (offset < 0 || !stbtt_InitFont(&s_font, s_ttf.data(), offset)) {
         s_ttf.clear();
         std::fprintf(stderr, "[text] invalid TTF: %s\n", path);
-        return;
+        return false;
     }
     s_font_ok = true;
+    return true;
 }
 ```
 
@@ -1487,11 +1487,11 @@ void renderer_load_font(const char* path)
 
 `s_pen_x = s_pen_y = s_row_h = 0` 이 GL 버전에서 추가된 줄이다. 폰트를 바꾸면 아틀라스에 남아 있는 옛 폰트의 글리프가 의미를 잃으므로 커서를 처음으로 되감아 그 위에 덮어쓴다. 텍스처를 지우지 않는 이유는 어차피 새 글자가 덮어쓸 것이고, 아직 아무도 참조하지 않기 때문이다 — `s_cache.clear()` 로 옛 UV 를 전부 버렸으니 그 자리를 가리키는 코드가 남아 있지 않다.
 
-실패 경로가 넷이다. 파일 없음, 크기 0, 부분 읽기, 잘못된 TTF. 넷 모두 stderr 에 한 줄을 찍고 `s_font_ok` 를 `false` 로 남긴다. **예외를 던지지 않고 프로그램을 죽이지도 않는다.**
+실패 경로가 넷이다. 파일 없음, 크기 0, 부분 읽기, 잘못된 TTF. 넷 모두 stderr에 한 줄을 찍고 `s_font_ok`를 `false`로 남기며, 호출자에게도 `false`를 반환한다. 성공하면 `true`를 반환한다. **예외를 던지지 않고 프로그램을 죽이지도 않는다.**
 
 그래서 실패 모드가 특이하다. `measure_text` 는 `!s_font_ok` 면 0 을 반환하고, `draw_text` 는 조용히 반환한다. 즉 **폰트를 못 찾으면 화면이 검게 비는 게 아니라, 글자만 전부 사라진다.** 버튼 사각형과 아이콘은 정상적으로 보이는데 라벨이 하나도 없는 화면이 나온다. `measure_text` 가 0 을 반환하므로 중앙 정렬 계산도 전부 어긋난다. 처음 보면 원인을 짐작하기 어려우니, **글자만 안 보이면 stderr 의 `[text] font open failed:` 를 먼저 확인**하는 것이 정석이다.
 
-실제 로드는 [Part 4](./part4-game-wrapper-and-loop.md) 의 `main()` 에서 `renderer_load_font("Font/NanumGothic.ttf")` 한 줄이다. **NanumGothic 을 쓰는 이유는 한글 글리프가 들어 있기 때문이다.** UTF-8 디코더가 한글 code point 를 뽑아내도 폰트에 글리프가 없으면 빈 사각형조차 안 나온다. 저장소에는 `Font/monogram.ttf` 도 있지만 그쪽은 ASCII 픽셀 폰트다.
+현재 `main()`은 `presentation_load("assets/theme.cfg")`를 호출한다. 표현 계층이 설정된 폰트를 먼저 시도하고 실패하면 `renderer_load_font()`의 반환값을 보고 `Font/NanumGothic.ttf`로 복구한다. 둘 다 실패한 경우에는 위의 글자 누락 증상이 남는다. **NanumGothic 을 쓰는 이유는 한글 글리프가 들어 있기 때문이다.** UTF-8 디코더가 한글 code point 를 뽑아내도 폰트에 글리프가 없으면 빈 사각형조차 안 나온다. 저장소에는 `Font/monogram.ttf` 도 있지만 그쪽은 ASCII 픽셀 폰트다.
 
 경로가 상대 경로라는 점이 중요하다. 빌드 디렉터리에서 실행하면 `Font/` 가 없어서 폰트 로드가 실패한다. 저장소 루트에서 실행하거나, `cmake --build build` 를 타깃 지정 없이 돌려 `copy_assets` 가 함께 실행되게 해야 한다. macOS `.app` 번들에서는 Part 2 의 `set_macos_resource_cwd()` 가 작업 디렉터리를 옮겨 이 문제를 해결한다.
 
@@ -2760,7 +2760,9 @@ endif()
 
 렌더러의 모든 기능을 한 화면에 배치하는 데모다. 이미지 파일 없이 동작하도록 **아이콘을 코드로 생성**한다. 저장소에 없는 파일이니 직접 만들어야 한다.
 
-**Part 3 체크포인트 — `demo/part3_render_demo.cpp`(독자가 만들 파일)**
+(독자가 만들 파일)
+
+**Part 3 체크포인트 — `demo/part3_render_demo.cpp`**
 
 ```cpp
 // demo/part3_render_demo.cpp — Part 3 OpenGL 렌더러 검증용 데모

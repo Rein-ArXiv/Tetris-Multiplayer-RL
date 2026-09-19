@@ -1,4 +1,5 @@
 #include "relay.h"
+#include "ranked_game.h"
 #include "worker_group.h"
 
 #include "../net/framing.h"
@@ -49,13 +50,14 @@ bool parse_summary(const std::vector<uint8_t>& p, Summary& out)
     return true;
 }
 
-std::vector<uint8_t> build_match_result(int32_t elo_before, int32_t elo_after, int32_t delta)
+std::vector<uint8_t> build_match_result(int32_t elo_before, int32_t elo_after, int32_t delta, net::ResultStatus status = net::ResultStatus::Unknown)
 {
     std::vector<uint8_t> pl;
     pl.reserve(12);
     net::le_write_u32(pl, static_cast<uint32_t>(elo_before));
     net::le_write_u32(pl, static_cast<uint32_t>(elo_after));
     net::le_write_u32(pl, static_cast<uint32_t>(delta));
+    pl.push_back(static_cast<uint8_t>(status));
     return net::build_frame(net::MsgType::MATCH_RESULT, pl);
 }
 
@@ -86,6 +88,7 @@ struct Channel {
     std::mutex              sumMu;
     std::optional<Summary>  summaryA;
     std::optional<Summary>  summaryB;
+    std::unique_ptr<RankedGame> verified;
     bool                    summaryHandled{false};   // 한 번만 처리
 
     // Bytes read by the lobby after READY are handed to the forwarders.
@@ -123,7 +126,7 @@ bool sendToB(Channel& ch, const uint8_t* data, size_t len)
     return net::tcp_send_all(ch.B, data, len);
 }
 
-// Cross-check both summaries and publish one ranked result.
+// Summaries trigger finalization; only the server simulation determines results.
 void finalizeRanked(Channel& ch)
 {
     // 선점 — 한 번만 실행.
@@ -133,40 +136,23 @@ void finalizeRanked(Channel& ch)
         if (!ch.summaryA || !ch.summaryB) return;
         ch.summaryHandled = true;
     }
-    const Summary a = *ch.summaryA;
-    const Summary b = *ch.summaryB;
-
-    // Both sides must agree on winner, score, and lines.
-    const bool exclusive_win = (a.won ^ b.won) != 0;
-    const bool scores_match  = (a.my_score == b.opp_score) && (b.my_score == a.opp_score);
-    const bool lines_match   = (a.my_lines == b.opp_lines) && (b.my_lines == a.opp_lines);
-    const bool cross_ok      = exclusive_win && scores_match && lines_match;
-
-    std::optional<int64_t> winner;
-    if (cross_ok) {
-        winner = (a.won == 1) ? ch.playerA_id : ch.playerB_id;
+    VerifiedResult verified;
+    {
+        std::lock_guard<std::mutex> lock(ch.sumMu);
+        verified = ch.verified->result();
     }
-    if (!cross_ok) {
-        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
-                  << " cross-check FAIL (exclusive_win=" << exclusive_win
-                  << " scores=" << scores_match
-                  << " lines=" << lines_match
-                  << ") -> winner=null");
-    }
-
-    // A mismatch is stored as a draw and does not change RP.
-    const int      duration_s = static_cast<int>(std::max(a.duration_s, b.duration_s));
-    const int      score_a    = static_cast<int>(a.my_score);
-    const int      score_b    = static_cast<int>(b.my_score);
-    const int      lines_a    = static_cast<int>(a.my_lines);
-    const int      lines_b    = static_cast<int>(b.my_lines);
+    const std::optional<int64_t> winner = verified.winner == 1 ? std::optional<int64_t>(ch.playerA_id)
+        : verified.winner == 2 ? std::optional<int64_t>(ch.playerB_id) : std::nullopt;
+    const int score_a = verified.score_a, score_b = verified.score_b;
+    const int lines_a = verified.lines_a, lines_b = verified.lines_b;
+    const int duration_s = verified.duration_s;
+    auto status = verified.status;
 
     int deltaA = 0, deltaB = 0;
     int eloABefore = ch.playerA_elo, eloAAfter = ch.playerA_elo;
     int eloBBefore = ch.playerB_elo, eloBAfter = ch.playerB_elo;
 
-    if (ch.meta) {
+    if (ch.meta && (status == net::ResultStatus::Applied || status == net::ResultStatus::Draw)) {
         auto res = ch.meta->post_match(ch.match_uuid, ch.playerA_id, ch.playerB_id, winner,
                                        score_a, score_b, lines_a, lines_b,
                                        duration_s);
@@ -178,6 +164,7 @@ void finalizeRanked(Channel& ch)
                       << " a=" << (deltaA >= 0 ? "+" : "") << deltaA
                       << " b=" << (deltaB >= 0 ? "+" : "") << deltaB);
         } else {
+            status = net::ResultStatus::SaveFailed;
             RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
                       << " meta POST failed — MATCH_RESULT delta=0");
         }
@@ -189,123 +176,26 @@ void finalizeRanked(Channel& ch)
     // MATCH_RESULT 송신 — 성공 실패 관계없이 양 클라에 한 번씩.
     // 반대 방향 forwarderLoop 가 동시에 같은 소켓에 쓰고 있을 수 있으므로 sendMuA/B
     // 로 직렬화.
-    auto frA = build_match_result(eloABefore, eloAAfter, deltaA);
-    auto frB = build_match_result(eloBBefore, eloBAfter, deltaB);
+    auto frA = build_match_result(eloABefore, eloAAfter, deltaA, status);
+    auto frB = build_match_result(eloBBefore, eloBAfter, deltaB, status);
     sendToA(ch, frA);
     sendToB(ch, frB);
 }
 
-// A peer lost before finalizeRanked ran. 몰수패 처리 진입점 — 요약이 몇 개
-// 수집됐는지에 따라 세 갈래로 나뉜다 (각 분기 주석 참고).
-// disconnectSide 는 "먼저 끊긴 쪽"(1=A, 2=B, 0=미상)일 뿐 패자가 아니다 —
-// 승자 판정에는 쓰지 않고 MATCH_RESULT 송신 대상(생존자) 선정에만 쓴다.
+// Disconnect is a finalization trigger, not evidence of who won. A terminal
+// server simulation can still be saved; incomplete games award nothing.
 void finalizeForfeit(Channel& ch, int disconnectSide)
 {
-    if (!ch.meta || ch.playerA_id == 0 || ch.playerB_id == 0) return;
-
-    Summary a{}, b{};
-    bool haveA = false;
-    bool haveB = false;
+    (void)disconnectSide;
+    if (!ch.meta || !ch.verified) return;
     {
-        std::lock_guard<std::mutex> lk(ch.sumMu);
+        std::lock_guard<std::mutex> lock(ch.sumMu);
         if (ch.summaryHandled) return;
-        haveA = ch.summaryA.has_value();
-        haveB = ch.summaryB.has_value();
-        // 양쪽 요약이 다 모였으면 몰수패가 아니다 — summaryHandled 를 여기서
-        // 선점하지 않고 finalizeRanked 의 교차검증 경로에 맡긴다 (락 밖에서 위임).
-        if (!(haveA && haveB)) {
-            ch.summaryHandled = true;
-        }
-        if (haveA) a = *ch.summaryA;
-        if (haveB) b = *ch.summaryB;
+        // Finalization no longer uses any fields from a client's summary.
+        if (!ch.summaryA) ch.summaryA = Summary{};
+        if (!ch.summaryB) ch.summaryB = Summary{};
     }
-
-    // (1) 양쪽 요약 존재: 회선이 끊겼어도 경기 자체는 완주된 것이다 (예: 승패
-    //     확정 직후 요약만 보내고 즉시 종료). 교차검증으로 승자를 확정한다.
-    if (haveA && haveB) {
-        finalizeRanked(ch);
-        return;
-    }
-
-    // (2) 요약이 하나도 없음(즉시 이탈, 무경기): meta 에 post_match 를 보내지
-    //     않는다 — RP 미반영. 커스텀 룸에서 READY 직후 끊기를 반복하는 담합
-    //     RP 파밍과, 동시 단절 시 disconnect_side 관측 순서 하나로 임의 승자를
-    //     만들어 RP 를 오염시키는 것을 함께 막는다. 생존자에게는 델타 0 의
-    //     MATCH_RESULT 를 보내 결과 대기 화면에서 빠져나오게 한다.
-    if (!haveA && !haveB) {
-        auto frA = build_match_result(ch.playerA_elo, ch.playerA_elo, 0);
-        auto frB = build_match_result(ch.playerB_elo, ch.playerB_elo, 0);
-        // disconnectSide==0(순서 미상)이면 양쪽 다 시도 — 죽은 소켓으로의
-        // send 는 무해하게 실패한다.
-        if (disconnectSide != 1) sendToA(ch, frA);
-        if (disconnectSide != 2) sendToB(ch, frB);
-        RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
-                  << " no summaries -> no meta post (delta=0)");
-        return;
-    }
-
-    // (3) 한쪽 요약만 존재: 그 요약의 won 플래그를 존중해 승자를 정한다.
-    //     종전에는 disconnectSide 를 무조건 패자로 기록했는데, 그러면 이긴 쪽이
-    //     승리 요약을 제출한 직후 회선이 끊겼을 때 제출된 승리 요약이 무시되고
-    //     승자가 패자로 뒤집히는 버그가 있었다.
-    //
-    //     단, 그 존중에는 전제가 있다: 요약을 낸 사람과 끊은 사람이 다른 사람이어야
-    //     한다. 같으면 자기 승리를 자기가 신고하고 자리를 뜬 것이고, 그 주장을
-    //     반증할 상대는 아직 경기 중이라 아무것도 제출하지 못했다. 교차검증
-    //     (finalizeRanked)은 이 경로에 개입하지 않으므로 그 한 장이 곧 판결이 된다.
-    //     실측(배포 대상 reactor 에서, 같은 결함): READY 직후 MATCH_SUMMARY{won=1}
-    //     28바이트 하나를 보내고 소켓을 닫자 게임 프레임 없이 신고자 elo 가 올랐다.
-    //     큐에서 만난 아무에게나 성립해 공모자도 플레이도 필요 없다.
-    //
-    //     승자를 뒤집지 않고 비운다. 뒤집으면 이번에는 자폭이 도구가 되어, 지고
-    //     있는 사람이 패배 요약을 낸 뒤 끊어 상대의 승리를 지울 수 있다. 승자를 0
-    //     으로 두면 meta 의 saveMatch 가 elo/wins/losses/bp/xp 를 통째로 건너뛴다.
-    //     대가: 승리 요약 직후 실제로 회선이 끊긴 사람도 무보상이 된다. 와이어에서
-    //     고의 이탈과 사고는 구분할 수 없고, 그 비용을 아무 잘못 없는 상대가 내던
-    //     것을 주장한 본인에게 옮기는 것이다.
-    //     winner 는 optional 이다. 0 을 넣으면 "승자 없음" 이 아니라 "player_id 0 이
-    //     이겼다" 가 되고, meta 가 winner 는 두 참가자 중 하나여야 한다며 400 으로
-    //     거절한다(meta/api_server.cpp 의 /v1/matches). 비우려면 nullopt 여야 한다.
-    const int reporterSide = haveA ? 1 : 2;
-    const bool selfReportedWin = haveA ? (a.won != 0) : (b.won != 0);
-    std::optional<int64_t> winner;
-    if (disconnectSide == reporterSide && selfReportedWin) {
-        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-                  << " 승리 자기신고 후 신고자 이탈 -> winner=none");
-    } else if (haveA) {
-        winner = a.won ? ch.playerA_id : ch.playerB_id;
-    } else {
-        winner = b.won ? ch.playerB_id : ch.playerA_id;
-    }
-
-    const int scoreA = static_cast<int>(haveA ? a.my_score : b.opp_score);
-    const int scoreB = static_cast<int>(haveB ? b.my_score : a.opp_score);
-    const int linesA = static_cast<int>(haveA ? a.my_lines : b.opp_lines);
-    const int linesB = static_cast<int>(haveB ? b.my_lines : a.opp_lines);
-    const int duration = static_cast<int>(std::max(a.duration_s, b.duration_s));
-
-    auto res = ch.meta->post_match(ch.match_uuid, ch.playerA_id, ch.playerB_id,
-                                   winner, scoreA, scoreB, linesA, linesB,
-                                   duration, 3);
-    if (!res) {
-        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-                  << " forfeit meta POST failed");
-        return;
-    }
-
-    auto frA = build_match_result(res->a.elo_before, res->a.elo_after, res->a.delta);
-    auto frB = build_match_result(res->b.elo_before, res->b.elo_after, res->b.delta);
-    // 끊긴 쪽 소켓은 이미 죽어 있으므로 생존 가능성이 있는 쪽에만 보낸다.
-    if (disconnectSide != 1) sendToA(ch, frA);
-    if (disconnectSide != 2) sendToB(ch, frB);
-    RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-              << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
-              << " forfeit winner="
-              << (!winner ? "none" : (*winner == ch.playerA_id ? "A" : "B"))
-              << " (summary from " << (haveA ? "A" : "B")
-              << ", disconnect=" << disconnectSide << ") saved meta match="
-              << res->match_id);
+    finalizeRanked(ch);
 }
 
 // 한 방향 포워딩 루프.
@@ -544,6 +434,14 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             }
 
             const uint8_t typeByte = streamBuf[2];
+            if (typeByte == static_cast<uint8_t>(net::MsgType::INPUT) || typeByte == static_cast<uint8_t>(net::MsgType::SEED)) {
+                const size_t length = payloadAndType - 1u;
+                const auto checksum = net::le_read_u32(streamBuf.data() + 2u + payloadAndType);
+                std::lock_guard<std::mutex> lock(ch->sumMu);
+                if (checksum != (length ? net::fnv1a32(streamBuf.data() + 3, length) : 0u)) ch->verified->invalidate();
+                else ch->verified->observe(a_to_b ? 1 : 2, static_cast<net::MsgType>(typeByte), streamBuf.data() + 3, length);
+            }
+
             if (typeByte == static_cast<uint8_t>(net::MsgType::MATCH_SUMMARY)) {
                 // 페이로드는 [2..2+len-1], len-1 은 payload 길이 (TYPE 제외).
                 const size_t payloadLen = payloadAndType >= 1u ? payloadAndType - 1u : 0u;
@@ -628,7 +526,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
                     const std::string& my_icon,
                     const std::string& peer_icon,
-                    const std::string& match_uuid) {
+                    const std::string& match_uuid, bool ranked) {
     const std::string my = my_icon.empty() ? "default" : my_icon;
     const std::string peer = peer_icon.empty() ? "default" : peer_icon;
     const size_t my_len = std::min<size_t>(my.size(), 255);
@@ -651,6 +549,7 @@ bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
     append_icon(peer, peer_len);
     payload.push_back(static_cast<uint8_t>(uuid_len));
     payload.insert(payload.end(), match_uuid.begin(), match_uuid.begin() + uuid_len);
+    payload.push_back(ranked ? 1 : 0);
     auto frame = net::build_frame(net::MsgType::MATCH_FOUND, payload);
     return net::tcp_send_all(sock, frame.data(), frame.size());
 }
@@ -681,6 +580,7 @@ void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
     ch->playerA_ip      = std::move(match.a.ip_session);
     ch->playerB_ip      = std::move(match.b.ip_session);
     ch->meta        = meta;
+    if (meta) ch->verified = std::make_unique<RankedGame>(match.seed);
     ch->prefixFromA = std::move(prefixFromA);
     ch->prefixFromB = std::move(prefixFromB);
 
@@ -898,10 +798,10 @@ void startPump(Match match, meta::client::MetaClient* meta) {
 
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
                                      match.a.selected_icon_id, match.b.selected_icon_id,
-                                     match.match_uuid);
+                                     match.match_uuid, meta && match.a.player_id && match.b.player_id);
     const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
                                      match.b.selected_icon_id, match.a.selected_icon_id,
-                                     match.match_uuid);
+                                     match.match_uuid, meta && match.a.player_id && match.b.player_id);
 
     if (!ok_a || !ok_b) {
         RLOG_WARN("[relay] MATCH_FOUND send failed, match=" << match.match_id
@@ -928,10 +828,10 @@ void startQueuePump(Match match, meta::client::MetaClient* meta) {
 
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
                                      match.a.selected_icon_id, match.b.selected_icon_id,
-                                     match.match_uuid);
+                                     match.match_uuid, meta && match.a.player_id && match.b.player_id);
     const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
                                      match.b.selected_icon_id, match.a.selected_icon_id,
-                                     match.match_uuid);
+                                     match.match_uuid, meta && match.a.player_id && match.b.player_id);
 
     if (!ok_a || !ok_b) {
         RLOG_WARN("[relay] MATCH_FOUND send failed, match=" << match.match_id

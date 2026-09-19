@@ -1,15 +1,16 @@
 # Part 13: 완성 구조와 확장 레퍼런스
 
-> **공개 접속의 현재 경로:** [Part 16](part16-secure-admission.md)은 WSS 게이트웨이와 일회용 게임 입장권을 추가한다. 이 장의 raw TCP 명령은 로컬/내부 연결을 설명한다. 공개 포트는 WSS, relay는 `--loopback-only`이며, 기존 token 필드에는 장기 계정 토큰 대신 입장권을 넣는다.
-
-> **2026-09-11 현재 코드 반영:** 현재 빌드에는 `TETRIS_BUILD_REACTOR`가 추가됐다(Linux/Windows 기본 ON, macOS OFF). `src/presentation.cpp`도 게임 타깃에 포함된다. CTest에서 워커·루프·reactor 검사를 실행할 수 있다. 아래 상세 발췌보다 실제 `CMakeLists.txt`와 [실행 안내](../start-here.md)의 최신 명령을 우선한다.
-
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 13**
->
 
 ---
 
-## 이번 Part의 성격
+> **공개 접속의 현재 경로:** [Part 16](part16-secure-admission.md)은 WSS 게이트웨이와 일회용 게임 입장권을 추가한다. 이 장의 raw TCP 명령은 로컬/내부 연결을 설명한다. 공개 포트는 WSS, relay는 `--loopback-only`이며, 기존 token 필드에는 장기 계정 토큰 대신 입장권을 넣는다.
+
+> **2026-09-11 현재 코드 반영:** 현재 빌드에는 `TETRIS_BUILD_REACTOR`가 추가됐다(Linux/Windows 기본 ON, macOS OFF). `src/presentation.cpp`도 게임 타깃에 포함된다. CTest에서 워커·루프·reactor 검사를 실행할 수 있다. 아래 발췌는 현재 CMake의 해당 타깃을 설명한다. 실행 순서는 [실행 안내](../start-here.md)에 정리한다.
+
+## 이번 Part의 구현 계약
+
+이 장은 레퍼런스이므로 새 구현 파일을 만드는 대신 완성 구조와 확장 경로를 확인한다.
 
 앞선 열세 장과 달리 이 장은 **만드는 장이 아니라 찾아보는 장**이다. 순서대로 읽을 필요가 없고, 필요할 때 해당 절만 펼치면 된다.
 
@@ -38,6 +39,8 @@ Part의 구현 계약을 함께 읽는다. 최종 `CMakeLists.txt`는 그 경로
 | 안전한 게임 입장 | `meta/game_tickets.h`, `meta/http_client.*`, `net/session.*` | [Part 16 §2~3](part16-secure-admission.md) |
 | 인증서·WSS·전송 수명 | `net/wss_client.*`, `net/stream_transport.h`, `net/system_trust.*` | Part 16 §3~4 |
 | 공개 포트와 내부 relay 분리 | `server/wss_gateway.cpp`, `--loopback-only`, WSS systemd | Part 16 §5~6 |
+| 계정 보관·폐기·복구와 화면 | `meta/account_client.*`, `meta/account_store.*`, `meta/private_file.*`, `platform/user_data.*`, `src/account_screen.*` | Part 17 |
+| PvP 결과와 JSON 검증 | `server/ranked_game.h`, `net/match_result.h`, `meta/json_input.h`, `meta/json_routes.h` | Part 18 |
 
 WSS는 `TETRIS_BUILD_WSS=ON`일 때 Boost.Beast·OpenSSL을 요구한다. `tetris_wss_gateway`는
 별도 실행 파일이며 `tetris`가 안에 서버를 띄우는 구조가 아니다. 봇 ONNX는 별도의
@@ -180,7 +183,7 @@ Tetris-Multiplayer-RL/
 | `renderer/` | OpenGL 3.3 Core 2D (사각형·텍스트·이미지·셰이크) | OpenGL 3.3 Core 드라이버, `stb_truetype`, `platform/` |
 | `audio/` | MP3 로드 + 재생 (공용 헤더와 플랫폼별 백엔드) | XAudio2 또는 SDL2_audio, `third_party/dr_mp3.h` |
 | `net/` | TCP 소켓 → 메시지 프레이밍 → lockstep 세션 | WinSock2 또는 BSD 소켓 + pthread |
-| `server/` | `tetris_relay` 바이너리: 매치메이킹 + 바이트 릴레이 | `net/` + `meta/http_client.cpp` + `third_party/httplib.h` |
+| `server/` | thread/reactor relay: 매치메이킹·전달·입력 검증 | `net/` + `SimGame` + meta HTTP |
 | `meta/` | `tetris_meta` 바이너리: HTTP+SQLite 메타/랭킹 + 게임·릴레이용 HTTP 클라이언트 | `third_party/sqlite3.c`, `third_party/httplib.h` |
 | `bot/` | `Ort::Session` 로 학습된 정책 추론 | ONNX Runtime (옵션) |
 | `bindings/` | `SimGame` 을 pybind11 모듈 `tetris_py` 로 노출 | pybind11 |
@@ -190,7 +193,7 @@ Tetris-Multiplayer-RL/
 | `web/` | 정적 랭킹 웹 페이지 — `tetris_meta` 의 leaderboard API(`/v1/leaderboard`)를 same-origin 으로 조회 | 브라우저 + 리버스 프록시 라우팅 (`deploy/`) |
 | `docs/` | 블로그 및 설계 문서 | — |
 
-의존성은 하위 계층에서 UI로 역류하지 않게 유지한다. `core/`는 플랫폼을 모르고, `server/`는 `net/`과 meta HTTP 클라이언트를 쓰되 `src/`의 게임·화면 코드를 링크하지 않는다. relay는 입장·룸·ranked summary 같은 제어 프레임은 해석하지만 게임 시뮬레이션 상태를 만들지 않는다. `python/`의 학습 경로는 `bindings/`를 거쳐 `SimGame`에 닿고, wire 테스트 도구만 framing 규약을 별도로 미러링한다. `web/`은 어떤 빌드 타깃에도 들어가지 않는다 — 정적 HTML 하나가 리버스 프록시를 통해 meta 서버와 같은 origin 에서 서빙되며, 그래서 CORS 설정 없이 leaderboard API 를 그대로 호출할 수 있다.
+의존성은 하위 계층에서 UI로 역류하지 않게 유지한다. `core/`는 플랫폼을 모르고, `server/`는 `net/`·meta HTTP 클라이언트·순수 `SimGame`을 쓰며 화면 래퍼·렌더러·오디오는 링크하지 않는다. relay는 입장·룸 제어와 ranked 입력 검증을 맡고 영속 상태는 meta에 둔다. `python/`의 학습 경로는 `bindings/`를 거쳐 `SimGame`에 닿고, wire 테스트 도구만 framing 규약을 별도로 미러링한다. `web/`은 어떤 빌드 타깃에도 들어가지 않는다 — 정적 HTML 하나가 리버스 프록시를 통해 meta 서버와 같은 origin 에서 서빙되며, 그래서 CORS 설정 없이 leaderboard API 를 그대로 호출할 수 있다.
 
 ---
 
@@ -231,7 +234,7 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 - CMake 에서 `find_package(pybind11 CONFIG QUIET)` 로 탐색. 없으면 `FATAL_ERROR` 로 "`-Dpybind11_DIR=$(python -m pybind11 --cmakedir)` 를 넘겨라" 는 힌트를 준다.
 - CMake 4.0+ 는 `FindPythonInterp` / `FindPythonLibs` 가 삭제됐으므로, `set(PYBIND11_FINDPYTHON ON)` 으로 모던 `FindPython` 을 사용하도록 힌트.
 
-**OpenSSL** — `TETRIS_ENABLE_HTTPS=ON`(기본값) 이고 시스템에 있으면 자동으로 붙는다. 없으면 경고만 내고 빌드는 계속되며, 런타임에 `https://` 메타 URL 이 거부된다.
+**OpenSSL** — meta의 자격 증명 해시에 Crypto가 필수다. WSS 빌드는 TLS도 필수다. WSS를 끈 개발용 클라이언트의 HTTPS는 `TETRIS_ENABLE_HTTPS`로 제어하지만, HTTPS 기본 주소를 넣은 배포 빌드는 지원이 없으면 구성 단계에서 거절한다.
 
 **ONNX Runtime** — 봇(`Single vs Bot`)의 CPU 추론 전용. 용량 때문에 git 서브모듈 대신 `third_party/fetch_onnxruntime.sh`로 다운로드하며, CMake는 벤더링된 헤더와 라이브러리를 명시적으로 검사한다.
 
@@ -243,6 +246,8 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 **stb 계열** — `third_party/stb_truetype.h` 와 `third_party/stb_image.h` 가 **저장소에 벤더링**돼 있다 (둘 다 public domain 단일 헤더). `renderer/text_gl.cpp` 가 모든 플랫폼에서 `stb_truetype` 로 TTF 를 CPU coverage bitmap 으로 래스터화한 뒤, 그 비트맵을 R8 글리프 아틀라스 텍스처에 올린다 — **글자 모양을 만드는 일은 여전히 CPU 가 한다.** GPU 에는 TTF 아웃라인을 래스터화하는 기능이 없기 때문이고, GL 로 옮기면서 바뀐 것은 그 비트맵을 두는 곳이다. `renderer/image_gl.cpp` 의 비-Win32 분기는 `stb_image` 로 PNG/JPG 를 디코딩하고 결과를 GL 텍스처로 업로드한다 (Windows 는 GDI+ 사용 — 이미지 디코딩 전용이며 텍스트에는 쓰지 않는다). 각 헤더는 정확히 한 번역 단위에서 `STB_TRUETYPE_IMPLEMENTATION` / `STB_IMAGE_IMPLEMENTATION` 매크로와 함께 include 된다.
 
 **cpp-httplib / SQLite amalgamation** — `third_party/httplib.h`, `third_party/sqlite3.{c,h}`. 전자는 게임 클라이언트까지 포함한 세 바이너리가 모두 쓰고, 후자는 `tetris_meta` 전용이다. 둘 다 존재 검사를 통과하지 못하면 CMake 가 즉시 `FATAL_ERROR` 로 멈춘다.
+
+**nlohmann/json** — `third_party/json.hpp`를 사용한다. 문서 전체·중복 키·깊이·타입 검사 정책은 `meta/json_input.h`, POST 수신 시점은 `meta/json_routes.h`가 맡는다. 버전·MIT 라이선스·원본 해시는 `third_party/README.md`에 기록한다.
 
 ### 2.3 Python 환경
 
@@ -294,7 +299,7 @@ uv sync --dev --extra train --extra export
 | `tetris` (Win32 경로) | `opengl32` | — | ✓ | 옵션 | — | Windows only, `httplib.h` 필수, 런타임에 GL 3.3 Core |
 | `tetris` (SDL2 경로) | `OpenGL::GL` | ✓ | — | 옵션 | — | 전 플랫폼, `httplib.h` 필수, 런타임에 GL 3.3 Core |
 | `tetris_relay` | — | — | ws2_32만 | — | — | 헤드리스, Termux OK, `httplib.h` 필수 |
-| `tetris_meta` | — | — | ws2_32만 | — | — | `sqlite3.{c,h}` + `httplib.h` 필수 |
+| `tetris_meta` | — | — | ws2_32만 | — | — | SQLite·httplib·json 헤더, OpenSSL Crypto 필수 |
 | `sim_hash_dump` | — | — | — | — | — | 결정론 테스트, 전 플랫폼, 의존성 0 |
 | `worker_group_test` | — | — | — | — | — | Threads 만 (비-Windows) |
 | `tetris_py` (pybind11) | — | — | — | — | ✓ | Colab/로컬 Python |
@@ -353,23 +358,24 @@ MSVC 의 `/utf-8` 는 소스/실행 인코딩 모두 UTF-8 로 설정하는 플�
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Build options
-#
-#   TETRIS_BUILD_GAME  — Game executable. OpenGL 3.3 Core renderer with a thin
-#                         Win32 or SDL2 window/context backend.
-#   TETRIS_BUILD_PY    — pybind11 module (tetris_py) wrapping SimGame. Portable.
-#   TETRIS_BUILD_TEST  — SimGame determinism regression (sim_hash_dump). Portable.
-#   TETRIS_BUILD_RELAY — Headless matchmaking/relay server (server/*.cpp).
-#                         No GUI/audio. Linux(Termux), macOS, Windows 모두 OK.
-# -----------------------------------------------------------------------------
 option(TETRIS_BUILD_GAME  "Build the handmade game executable"              ON)
 option(TETRIS_BUILD_PY    "Build the pybind11 module (tetris_py)"           OFF)
 option(TETRIS_BUILD_TEST  "Build the SimGame determinism test"              ON)
+include(CTest)
 option(TETRIS_BUILD_RELAY "Build the tetris_relay matchmaking server"       OFF)
 # TETRIS_BUILD_META — HTTP + SQLite metadata server (guest/auth/matches/leaderboard).
 # Typically deployed separately so the relay owns no durable database state.
 option(TETRIS_BUILD_META  "Build the tetris_meta HTTP+SQLite metadata server" OFF)
+# Only Linux has epoll and Windows has IOCP. macOS uses the portable thread relay.
+set(TETRIS_REACTOR_SUPPORTED OFF)
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(TETRIS_REACTOR_SUPPORTED ON)
+endif()
+option(TETRIS_BUILD_REACTOR "Build experimental reactor relay/tests (Linux/Windows)" ${TETRIS_REACTOR_SUPPORTED})
+if (TETRIS_BUILD_REACTOR AND NOT TETRIS_REACTOR_SUPPORTED)
+    message(FATAL_ERROR "Reactor requires Linux/Windows. On macOS use -DTETRIS_BUILD_REACTOR=OFF and tetris_relay.")
+endif()
+
 # TETRIS_BUILD_BOT — Section C: link onnxruntime and compile bot/*.cpp.
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
 # 실패한다. Single vs Bot과 내장 휴리스틱 봇은 그대로 사용할 수 있다.
@@ -440,10 +446,6 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# TETRIS_USE_SDL2 — Use SDL2 for the cross-platform window/input/GL context and audio backend.
-# Text and images still go through the shared OpenGL renderer.
-# Default ON on non-Windows so macOS/Linux users get it automatically.
-# On Windows, default OFF to preserve the handmade Win32 window/audio path.
 if (WIN32)
     option(TETRIS_USE_SDL2 "Use SDL2 backend (cross-platform)" OFF)
 else()
@@ -460,10 +462,6 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Sources shared between all targets
-# -----------------------------------------------------------------------------
-# Pure simulation logic (no renderer/platform deps) — used by game, pybind11 module, and tests.
 set(TETRIS_SIM_SOURCES
     src/sim_game.cpp
     src/position.cpp
@@ -497,9 +495,6 @@ set(TETRIS_SIM_HEADERS
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Target: tetris (handmade OpenGL 3.3 Core game client)
-# -----------------------------------------------------------------------------
 if (TETRIS_BUILD_GAME)
     # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇
     #   bot/*.cpp 는 TETRIS_BUILD_BOT 과 관계없이 항상 컴파일한다 — OFF 일 때
@@ -515,6 +510,7 @@ if (TETRIS_BUILD_GAME)
     set(TETRIS_GAME_COMMON
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
+        src/account_screen.cpp
         src/game.cpp
         src/gui.cpp
         src/colors.cpp
@@ -523,14 +519,18 @@ if (TETRIS_BUILD_GAME)
         net/socket.cpp
         net/framing.cpp
         net/session.cpp
+        net/wss_client.cpp
         renderer/renderer.cpp
         renderer/gl_api.cpp
         renderer/text_gl.cpp
         renderer/shake.cpp
         renderer/image_gl.cpp
         bot/placement.cpp
+        bot/opponents.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
+        meta/private_file.cpp
+        meta/account_client.cpp meta/account_store.cpp platform/user_data.cpp
     )
 ```
 
@@ -686,11 +686,6 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-    # ------------------------------------------------------------------------
-    # Optional: ONNX Runtime for Section C (Single vs Bot inference)
-    # third_party/onnxruntime/ 에 공식 CPU 번들을 풀어두면 링크된다.
-    # 없거나 OFF 면 bot/bot_onnx.cpp 가 스텁으로 빌드됨 → Load 항상 실패.
-    # ------------------------------------------------------------------------
     if (TETRIS_BUILD_BOT)
         set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
         if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
@@ -717,9 +712,6 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-    # ------------------------------------------------------------------------
-    # Section G — 플랫폼별 배포 설정 (rpath, macOS .app 번들 메타)
-    # ------------------------------------------------------------------------
     if (APPLE)
         # macOS .app 번들 — scripts/release_macos.sh 가 이 구조를 전제.
         # Info.plist 를 configure_file 로 @변수@ 치환 후 빌드 디렉터리에 생성.
@@ -768,8 +760,6 @@ Windows 는 rpath 개념이 없다 — DLL 은 "실행 파일과 같은 폴더" 
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-    # Copy assets (fonts + sounds + icons + model)
-    #   assets/ 와 model/ 은 없을 수도 있으므로 directory 존재 검사 후 복사.
     set(_copy_cmds
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Font   ${CMAKE_CURRENT_BINARY_DIR}/Font
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Sounds ${CMAKE_CURRENT_BINARY_DIR}/Sounds
@@ -802,9 +792,6 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Target: tetris_py (pybind11 module — Colab training + parity tests)
-# -----------------------------------------------------------------------------
 if (TETRIS_BUILD_PY)
     # cmake 4.0+ removed FindPythonInterp/FindPythonLibs; tell pybind11 to use
     # the modern FindPython instead.
@@ -842,9 +829,6 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Target: sim_hash_dump (determinism regression test — renderer-free)
-# -----------------------------------------------------------------------------
 if (TETRIS_BUILD_TEST)
     add_executable(sim_hash_dump
         tests/sim_hash_dump.cpp
@@ -862,6 +846,39 @@ if (TETRIS_BUILD_TEST)
         find_package(Threads REQUIRED)
         target_link_libraries(worker_group_test PRIVATE Threads::Threads)
     endif()
+
+    # reactor_test — 이벤트 루프(net::Reactor) 준비성·wake 계약 회귀.
+    # 플랫폼별 백엔드(Windows=IOCP, Linux=epoll; macOS는 타깃 제외)를 각자 검증한다. 두 백엔드
+    # 소스를 모두 나열하되 파일 내부 #ifdef 가 해당 플랫폼만 컴파일한다.
+    if (TETRIS_BUILD_REACTOR)
+        add_executable(reactor_test
+            tests/reactor_test.cpp
+            net/reactor_epoll.cpp
+            net/reactor_iocp.cpp
+            net/socket.cpp
+            net/reactor.h
+            net/socket.h
+        )
+        target_include_directories(reactor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        if (WIN32)
+            target_link_libraries(reactor_test PRIVATE ws2_32)
+        else()
+            find_package(Threads REQUIRED)
+            target_link_libraries(reactor_test PRIVATE Threads::Threads)
+        endif()
+    endif()
+
+    # loop_primitives_test — 이벤트 루프 지원 도구(TimerQueue, Offload) 회귀.
+    add_executable(loop_primitives_test
+        tests/loop_primitives_test.cpp
+        server/timer_queue.h
+        server/offload.h
+    )
+    target_include_directories(loop_primitives_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (NOT WIN32)
+        find_package(Threads REQUIRED)
+        target_link_libraries(loop_primitives_test PRIVATE Threads::Threads)
+    endif()
 endif()
 ```
 
@@ -877,12 +894,6 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Target: tetris_relay (matchmaking / relay server)
-#
-# 역할: TCP 접속 제한·인증·매칭·룸·결과 검증을 맡고, 게임 프레임은 전달한다.
-#       GUI/오디오/시뮬 없음 — net/ 만 재사용. Linux/macOS/Windows 서버용.
-# -----------------------------------------------------------------------------
 if (TETRIS_BUILD_RELAY)
     # relay 가 meta HTTP API 를 호출하려면 httplib 헤더와 http_client.cpp 필요.
     # third_party/httplib.h 는 TETRIS_BUILD_META 와 공유 — 릴레이만 빌드해도 필요.
@@ -892,7 +903,9 @@ if (TETRIS_BUILD_RELAY)
             "meta API 호출용. cpp-httplib 를 다운로드해 third_party/ 에 넣으세요.")
     endif()
     add_executable(tetris_relay
+        ${TETRIS_SIM_SOURCES}
         server/main.cpp
+        server/log.cpp
         server/matchmaker.cpp
         server/player_conn.cpp
         server/relay.cpp
@@ -900,8 +913,12 @@ if (TETRIS_BUILD_RELAY)
         net/socket.cpp
         net/framing.cpp
         meta/http_client.cpp
+        server/ip_admission.h
+        server/log.h
         server/matchmaker.h
         server/match_uuid.h
+        server/match_seed.h
+        server/room_guess_budget.h
         server/player_conn.h
         server/player_session.h
         server/relay.h
@@ -945,18 +962,6 @@ endif()
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
-#
-# 역할: 별도 영속 호스트(저전력 Android/Termux 단말 등)에서 돌아가는 독립 서비스.
-#       · SQLite 로 player/match/rating history/icon ownership 영속화
-#       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
-#       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.
-#
-# 서드파티: third_party/sqlite3.{c,h} + third_party/httplib.h (헤더 온리).
-#           두 파일 모두 벤더링(check-in)되어 있어야 한다 — repo 루트의
-#           third_party/ 에 없으면 CMake 가 즉시 실패한다.
-# -----------------------------------------------------------------------------
 if (TETRIS_BUILD_META)
     if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite3.c" OR
         NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite3.h")
@@ -982,7 +987,13 @@ if (TETRIS_BUILD_META)
     add_executable(tetris_meta
         meta/main.cpp
         meta/database.cpp
+        meta/credentials.cpp
         meta/api_server.cpp
+        meta/bot_challenges.cpp
+        bot/opponents.cpp
+        bot/placement.cpp
+        bot/bot_onnx.cpp
+        ${TETRIS_SIM_SOURCES}
         ${TETRIS_SQLITE3_SOURCE}
         meta/database.h
         meta/api_server.h
@@ -994,6 +1005,8 @@ if (TETRIS_BUILD_META)
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
+    find_package(OpenSSL REQUIRED) # credential hashes are mandatory, even without HTTPS
+    target_link_libraries(tetris_meta PRIVATE OpenSSL::Crypto)
     # SQLite amalgamation — 기본 threadsafe(serialized) 모드로 컴파일.
     # WAL + mutex 는 C++ 래퍼에서 보강한다.
     target_compile_definitions(tetris_meta PRIVATE

@@ -14,7 +14,7 @@
 //     호출자가 HTTP 500 으로 바꿔서 클라이언트에게 전달.
 //
 // 스키마: players, player_icons, matches, elo_history, bot_rewards, schema_migrations.
-// WAL + foreign keys + NORMAL.
+// WAL + foreign keys + FULL (credential rotation must survive a committed response).
 
 #include <cstdint>
 #include <mutex>
@@ -29,7 +29,7 @@ namespace meta {
 struct Player {
     int64_t     id;
     std::optional<std::string> username;
-    std::string token;
+    int64_t     auth_epoch = 0; // Changes invalidate outstanding admission tickets.
     int         elo;    // RP (0 시작 / 0 바닥 스케일 — meta/elo.h 참조)
     int         wins;
     int         losses;
@@ -96,6 +96,8 @@ enum class IconPurchaseResult {
     DbError,
 };
 
+enum class AccountChangeResult { Ok, InvalidCredential, InvalidRequest, Conflict, DbError };
+
 class Database {
 public:
     // path 가 존재하지 않으면 새로 만들고 스키마 적용. 실패 시 throw.
@@ -111,6 +113,15 @@ public:
 
     // 토큰으로 플레이어 조회. 못 찾으면 nullopt.
     std::optional<Player> getByToken(const std::string& token);
+
+    // Admission snapshot is valid only while this credential generation is current.
+    std::optional<Player> getByEpoch(int64_t player_id, int64_t epoch);
+
+    // Atomic replacement + bounded (one receipt/player) retry acknowledgement.
+    // backup: same token, new recovery code; rotate/recover: replace both secrets.
+    AccountChangeResult changeAccount(const std::string& operation,
+        const std::string& current, const std::string& next_token,
+        const std::string& next_recovery, std::optional<Player>& out_player);
 
     // 아이콘 카탈로그. 가격/기본 지급 여부는 서버 DB가 검증 기준으로 사용한다.
     std::vector<IconCatalogEntry> iconCatalog() const;
@@ -138,6 +149,7 @@ public:
     std::vector<LeaderRow> leaderboard(int limit);
 
 private:
+    void migrateCredentials();
     void execSchema();          // 스키마 CREATE + PRAGMA. 실패 시 throw.
 
     sqlite3*    db_ = nullptr;

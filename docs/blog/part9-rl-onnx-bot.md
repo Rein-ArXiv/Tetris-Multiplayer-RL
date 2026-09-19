@@ -1,21 +1,16 @@
 # Part 9: 강화학습과 ONNX 인-프로세스 봇
 
-> **2026-09-11 변경:** 아래의 과거 틱별 입력 큐 예시는 구현 과정을 설명합니다.
-> 현재 실행 경로는 `bot::Controller`의 생각/입력/최소 배치 시간과
-> `assets/opponents.cfg`를 사용합니다. 캐릭터 UI와 공용 BP 서버 검증까지의
-> 실제 실행법은 [봇과 Colab 안내](../bots-and-colab.md)를 기준으로 합니다.
-
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 9**
 
 ---
 
-## 이 장의 구현 계약
+## 이번 Part의 구현 계약
 
 - **선행 상태:** Part 4까지 완성된 실행 가능한 클라이언트(메뉴 루프·렌더러·60Hz 틱 루프 — 이 장의 봇 선택 화면과 `AppMode::BotSingle` 이 그 위에 얹힌다), 그리고 Part 8의 관측 schema(`build_observation`), 40-action 인코딩 (`encode_action`), `TetrisPolicyNet` 과 `load_checkpoint` 계약, `python/netbot/input_expander.py` 의 전개 규칙.
 - **이번 장의 파일:** `python/netbot/export_onnx.py`, `bot/placement.h`, `bot/placement.cpp`, `bot/bot_onnx.h`, `bot/bot_onnx.cpp`, `model/bots/`, `model/bots.cfg`, `src/main.cpp` 의 봇 선택 화면과 `AppMode::BotSingle` 루프, `CMakeLists.txt` 의 `TETRIS_BUILD_BOT` 블록.
 - **연결점:** 학습 정책을 ONNX로 내보내고 C++에서 같은 관측을 만들어 placement를 추론한 뒤, 인간 입력과 같은 `SubmitInput` 경로로 실행한다. 두 보드는 [Part 6](./part6-lockstep-networking.md) 의 네트워크 경로와 동일한 구조로 가비지를 교환한다.
 - **완료 게이트:**
-  1. ORT 없이 빌드한 클라이언트에서 `Single vs Bot` 메뉴가 열리고 `Heuristic (test)` 로 한 판이 진행된다.
+  1. ORT 없이 빌드한 클라이언트에서 `Single vs Bot` 메뉴가 열리고 `Practice Partner` 로 한 판이 진행된다.
   2. ORT 빌드에서 `.onnx` 를 선택했을 때 **봇 선택 화면에 로드 오류가 뜨지 않고** 게임이 시작된다. (오류가 있으면 그 자리에 문자열이 그려진다 — `수동 테스트` 의 시나리오 1)
   3. `.pt → .onnx` export 가 `[export_onnx] wrote ...` 를 출력한다.
 
@@ -266,7 +261,9 @@ env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
 
 학습 전체가 `bindings/tetris_py.cpp` 한 파일에 의존한다. 모듈 등록 전체(`Placement`·`SimBlock`·`SimGame` 클래스와 개별 메서드의 해설)는 [Part 8](./part8-python-rl.md) 이 절별로 해부했으므로, 여기서는 **런타임 계약에 직접 걸리는 표면**만 다시 본다 — 시드 기본값, placement API 와 `clone()`, 전투/가비지 API, 관측 복사, 결정론 해시다.
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp`** (`SimGame` 등록부 앞부분. `Placement`·`SimBlock` 등록, frame 단위 API, 조회 접근자는 생략)
+(`SimGame` 등록부 앞부분. `Placement`·`SimBlock` 등록, frame 단위 API, 조회 접근자는 생략)
+
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
     // 시뮬레이션 본체.
@@ -305,7 +302,9 @@ env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
              "Negative/zero is ignored. Used to route an opponent's attack.")
 ```
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp`** (`grid()` — 관측 복사)
+(`grid()` — 관측 복사)
+
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         // --- 관측 ---
@@ -324,7 +323,9 @@ env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
         }, "Return the 20x10 grid as a numpy int32 array (copied).")
 ```
 
-**현재 소스 발췌 — `bindings/tetris_py.cpp`** (결정론 검증 표면)
+(결정론 검증 표면)
+
+**현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
 ```cpp
         // --- 결정성 검증용 ---
@@ -352,7 +353,7 @@ env 보상은 최소한으로 뽑았다: **라인 클리어 수**.
 
 이 바인딩이 완성되면, Python 에서 이렇게 쓸 수 있다.
 
-**예시**
+**예시(실제 저장소에는 없음)**
 
 ```python
 from sim import SimGame
@@ -487,7 +488,7 @@ from common.models import TetrisPolicyNet
 
 
 # bot/bot_onnx.cpp의 inputNames / outputNames와 한 글자도 달라선 안 된다.
-# 여기가 어긋나면 모델은 로드되고 추론에서 터진다.
+# 여기가 어긋나면 C++ Load 단계의 계약 검사에서 거절한다.
 INPUT_NAMES = ["board", "current", "next"]
 OUTPUT_NAMES = ["policy_logits", "value"]
 
@@ -550,6 +551,8 @@ def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None
                 "installs onnx/onnxscript, then rerun this export cell."
             ) from exc
         raise
+    import onnx
+    onnx.checker.check_model(str(out_path))
     print(f"[export_onnx] wrote {out_path} from {ckpt_path}")
 
 
@@ -568,7 +571,7 @@ if __name__ == "__main__":
 
 ### 6.1 load-bearing 상수 두 개
 
-**예시**
+**예시(실제 저장소에는 없음)**
 
 ```python
 INPUT_NAMES = ["board", "current", "next"]
@@ -584,7 +587,7 @@ ONNX 그래프는 텐서 이름으로 식별된다. `torch.onnx.export` 가 이 
     std::array<const char*, 2> outputNames = {"policy_logits", "value"};
 ```
 
-Python 에서 `"next"` 를 `"next_piece"` 로 바꿨는데 C++ 을 안 고치면 `Run` 이 "input not found" 로 던진다. 모델은 로드되지만 추론은 불가능한 상태가 된다. 그래서 두 배열은 **커밋 단위로 동기화** 되어야 하며, 변경 시 기존 `model/*.onnx` / `model/bots/*.onnx` 번들은 모두 재-export 가 필요하다. 파일 상단 docstring 이 `Input/output names are load-bearing` 이라고 이 계약을 명시한다.
+Python에서 `"next"`를 `"next_piece"`로 바꿨는데 C++을 안 고치면 현재 `LoadModel`의 이름·타입·shape 계약 검사에서 거절한다. 예전에는 로드는 성공하고 추론할 때 실패했지만 이제 선택 화면에서 원인을 알 수 있다. 그래서 두 배열은 **커밋 단위로 동기화** 되어야 하며, 변경 시 기존 `model/*.onnx` / `model/bots/*.onnx` 번들은 모두 재-export 가 필요하다. 파일 상단 docstring 이 `Input/output names are load-bearing` 이라고 이 계약을 명시한다.
 
 ### 6.2 옵션 선택
 
@@ -734,7 +737,7 @@ uses the classic target-network max. Checkpoints saved here load directly in
 
 | 파일 | 용도 |
 |------|------|
-| `train_model_zoo_colab.ipynb` | setup, smoke, 학습 명령 생성, ONNX export, `model/bots.cfg` 생성까지 한 파일에서 수행한다. |
+| `train_model_zoo_colab.ipynb` | setup, Drive 체크포인트, smoke/학습, ONNX export, `assets/opponents.cfg` 등록과 ZIP 생성까지 수행한다. |
 | `setup_colab.ipynb` | 저장소 clone 과 네이티브 모듈 빌드만 하는 독립 bootstrap 노트북. |
 | `python/train/README_colab.md` | 알고리즘별 smoke/long 명령과 export troubleshooting 문서. |
 
@@ -742,14 +745,19 @@ uses the classic target-network max. Checkpoints saved here load directly in
 
 노트북 상단 설정 셀은 이렇게 되어 있다.
 
-**현재 소스 발췌 — `python/train/train_model_zoo_colab.ipynb` (설정 셀 전체)**
+(설정 셀 전체)
+
+**현재 소스 발췌 — `python/train/train_model_zoo_colab.ipynb`**
 
 ```python
 REPO_URL = 'https://github.com/Rein-ArXiv/Tetris-Multiplayer-RL.git'
 REPO_DIR = '/content/Tetris-Multiplayer-RL'
 
-ALGO = 'ddqn'
-RUN_NAME = f'aria_{ALGO}'
+ALGO = 'ppo'
+CHARACTER_ID = 'aria'  # 다른 상대를 만들 때 변경 (소문자/숫자/_/-)
+CHARACTER_NAME = 'Aria'
+RUN_NAME = f'{CHARACTER_ID}_{ALGO}'
+USE_DRIVE = True  # 체크포인트를 Drive에 직접 저장 (런타임 종료 대비)
 
 # Smoke 값으로 먼저 검증하고, 잘 돌면 아래 TRAIN_PRESET을 'long'으로 바꾸세요.
 TRAIN_PRESET = 'smoke'  # 'smoke' or 'long'
@@ -769,7 +777,9 @@ print('preset  :', TRAIN_PRESET)
 4. `.pt` 체크포인트 생성.
 5. `netbot.export_onnx` 로 `model/bots/<RUN_NAME>.onnx` 생성.
 
-smoke가 통과한 뒤에만 `TRAIN_PRESET = 'long'`으로 바꾸고, `RUN_NAME`도 장기 학습용으로 구분한다. 같은 이름을 쓰면 smoke 체크포인트를 덮어쓴다.
+smoke가 통과한 뒤에만 `TRAIN_PRESET = 'long'`으로 바꾸고, `RUN_NAME`도 장기 학습용으로 구분한다. 같은 이름의 체크포인트가 있으면 현재 실행 셀은 덮어쓰지 않고 중단한다. 이어서 학습하려면 해당 학습기의 `--resume` 지원을 확인해 명시적으로 실행한다.
+
+**예시(실제 저장소에는 없음)**
 
 ```python
 ALGO = 'ddqn'
@@ -779,7 +789,7 @@ TRAIN_PRESET = 'long'
 
 ### 8.2 preset 이 실제로 바꾸는 것
 
-노트북의 `command_for(algo, run_name, preset)` 함수가 `smoke` 불리언 하나로 알고리즘별 인자를 갈아 끼운다. `ddqn` 을 예로 들면 `--steps 4096 → 500000`, `--warmup 512 → 10000`, `--batch 64 → 256`, `--eval-every 2048 → 25000` 이다. MuZero 는 `--episodes 4 → 500`, `--mcts-simulations 4 → 32`, `--distill-steps 20 → 2000` 으로 바뀐다. 즉 smoke 는 **같은 코드 경로를 최소 크기로** 밟는다 — 다른 코드를 도는 것이 아니다. 그래서 smoke 가 통과하면 파이프라인 구조는 검증된 것이고, 남은 위험은 학습량뿐이다.
+노트북의 `command_for(algo, run_name, preset)` 함수가 `smoke` 불리언 하나로 알고리즘별 인자를 갈아 끼운다. `ddqn` 을 예로 들면 `--steps 4096 → 500000`, `--warmup 512 → 10000`, `--batch 64 → 256`, `--eval-every 2048 → 25000` 이다. MuZero 는 `--episodes 4 → 500`, `--mcts-simulations 4 → 32`, `--distill-steps 20 → 2000` 으로 바뀐다. 즉 smoke 는 **같은 코드 경로를 최소 크기로** 밟는다 — 다른 코드를 도는 것이 아니다. 그래서 smoke 가 통과하면 파이프라인 구조는 검증된 것이고, 장기 학습 안정성·중단 후 재개·정책 성능과 실제 게임에서의 난이도는 따로 검증한다.
 
 ### 8.3 export 실패 진단
 
@@ -961,6 +971,24 @@ struct BotOnnx::Impl {
         #else
             session = std::make_unique<Ort::Session>(env, path.c_str(), sessOpts);
         #endif
+            if (session->GetInputCount()!=3 || session->GetOutputCount()!=2)
+                throw std::runtime_error("expected 3 inputs and 2 outputs");
+            Ort::AllocatorWithDefaultOptions allocator;
+            auto validate=[&](bool input,size_t index,const char* name,const std::vector<int64_t>& shape) {
+                auto actualName=input ? session->GetInputNameAllocated(index,allocator)
+                                      : session->GetOutputNameAllocated(index,allocator);
+                auto type=input ? session->GetInputTypeInfo(index) : session->GetOutputTypeInfo(index);
+                if(std::strcmp(actualName.get(),name)!=0 || type.GetONNXType()!=ONNX_TYPE_TENSOR)
+                    throw std::runtime_error(std::string("incompatible tensor: ")+name);
+                auto info=type.GetTensorTypeAndShapeInfo();
+                if(info.GetElementType()!=ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || info.GetShape()!=shape)
+                    throw std::runtime_error(std::string("incompatible float32 shape: ")+name);
+            };
+            validate(true,0,"board",{1,1,kBoardRows,kBoardCols});
+            validate(true,1,"current",{1,kNumPieceTypes});
+            validate(true,2,"next",{1,kNumPieceTypes});
+            validate(false,0,"policy_logits",{1,kNumPlacements});
+            validate(false,1,"value",{1});
         } catch (const Ort::Exception& e) {
             if (err_out) *err_out = std::string("Ort::Exception: ") + e.what();
             session.reset();
@@ -1036,7 +1064,7 @@ struct BotOnnx::Impl {
             if (!outs[0].IsTensor()) return false;
             const auto info = outs[0].GetTensorTypeAndShapeInfo();
             if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-                info.GetElementCount() < static_cast<size_t>(kNumPlacements)) {
+                info.GetElementCount() != static_cast<size_t>(kNumPlacements)) {
                 return false;
             }
             logits = outs[0].GetTensorData<float>();
@@ -1134,16 +1162,12 @@ BotOnnx::~BotOnnx() = default;
 bool BotOnnx::Load(const std::string& onnx_path, std::string* err_out)
 {
     (void)onnx_path;
-    if (err_out) *err_out = "onnxruntime not vendored — rebuild with TETRIS_HAS_ONNXRUNTIME";
+    if (err_out) *err_out = "ONNX Runtime unavailable — fetch the CPU runtime and rebuild with TETRIS_BUILD_BOT=ON";
     return false;
 }
 
 bool BotOnnx::Infer(const SimGame&, int&, int&) { return false; }
 bool BotOnnx::IsLoaded() const { return false; }
-
-#endif  // TETRIS_HAS_ONNXRUNTIME
-
-}  // namespace bot
 ```
 
 `Load` 는 설명 메시지와 함께 false, `Infer` 는 항상 false, `IsLoaded` 도 false. 저 메시지 문자열이 `수동 테스트` 의 시나리오 1 에서 화면에 뜨는 것을 다시 보게 된다.
@@ -1337,7 +1361,7 @@ std::vector<uint8_t> expand_placement(int cur_col,
 
 회전 스텝의 양수 모듈로 수식:
 
-**예시**
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 int rot_steps = ((tgt_rot - cur_rot) % kNumRotations + kNumRotations) % kNumRotations;
@@ -1359,288 +1383,182 @@ binding이나 dump 도구로 노출하고 동일한 보드·목표 placement를 
 
 ## 13. 봇 실행 경로 — `Single vs Bot`
 
-### 13.1 실제 틱 루프
+### 13.1 추론과 입력 속도를 분리한다
 
-봇은 `Single vs Bot` 안에서 같은 프로세스로 실행된다. 플레이어와 봇은 각각 `SimGame` 을 가지고, `main.cpp` 가 두 보드를 같은 60Hz 루프에서 진행시킨다. 아래가 그 루프의 봇 부분 전문이다.
+모델은 목표 열·회전을 고르고 `Controller`는 그것을 사람과 같은 입력 마스크로
+시간에 걸쳐 실행한다. 추론이 빠르다고 매 틱 블록을 내려놓으면 대전 상대처럼 느껴지지
+않는다. 따라서 세 시간을 따로 둔다. 모두 60Hz 시뮬레이션 틱 단위다.
+
+| 값 | 역할 | 범위 |
+|---|---|---|
+| inputIntervalTicks | 회전·이동 입력 사이 간격 | 1~30 |
+| thinkTicks | 새 피스에서 입력 전 대기 | 0~180 |
+| minPieceTicks | 하드드롭을 허용할 최소 피스 나이 | 1~600 |
+
+현재 main의 picker는 다음과 같다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-                // 1) 봇 입력 큐가 비었으면 새 placement 계산.
-                //    Infer 실패 또는 합법 수 없음 → INPUT_NONE 로 대기 (게임오버면 자연스럽게
-                //    gameBot 가 멈춰 있음).
-                if (botInputQueue.empty() && botInputCooldownTicks <= 0 &&
-                    !gameBot->sim.IsGameOver()) {
-                    int tgtCol = -1, tgtRot = -1;
-                    bool ok;
-                    if (botUsesHeuristic)
-                        ok = bot::heuristic_placement(gameBot->sim, tgtCol, tgtRot);
-                    else
-                        ok = botOnnx.IsLoaded() && botOnnx.Infer(gameBot->sim, tgtCol, tgtRot);
-                    if (!ok) ok = bot::fallback_placement(gameBot->sim, tgtCol, tgtRot);
-                    if (ok) {
-                        int curCol = gameBot->sim.CurrentCol();
-                        int curRot = gameBot->sim.CurrentRotation();
-                        auto seq = bot::expand_placement(curCol, curRot, tgtCol, tgtRot);
-                        for (uint8_t m : seq) botInputQueue.push_back(m);
-                    }
-                }
-                uint8_t botMask = INPUT_NONE;
-                if (botInputCooldownTicks > 0) {
-                    --botInputCooldownTicks;
-                } else if (!botInputQueue.empty()) {
-                    botMask = botInputQueue.front();
-                    botInputQueue.pop_front();
-                    botInputCooldownTicks = selectedBotInputIntervalTicks - 1;
-                }
+const uint8_t botMask = botController.next(gameBot->sim,
+                    [&](const SimGame& sim, int& col, int& rot) {
+                        bool ok = botUsesHeuristic ? bot::heuristic_placement(sim, col, rot)
+                            : (botOnnx.IsLoaded() && botOnnx.Infer(sim, col, rot));
+                        return ok || bot::fallback_placement(sim, col, rot);
+                    });
 ```
 
-세 가지를 짚는다.
+휴리스틱과 ONNX, 추론 실패의 fallback은 목표 선택에서만 다르다. 그 아래 입력 속도는
+공통 controller가 정한다. 모델마다 다른 입력 큐를 main에 복제하지 않는다.
 
-**새 placement 는 큐가 비었고 cooldown 이 0 이하일 때만 계산한다.** 따라서 매 틱 새 action 을 queue 에 추가하지 않는다. 모델이 한 번 placement 를 고르면 `expand_placement` 가 만든 `ROTATE/LEFT/RIGHT/DROP` 시퀀스를 끝까지 소비하고, 그 다음 피스에서 다시 추론한다. §10.1 에서 말한 "추론 빈도가 낮다" 의 근거가 이 조건문이다.
+**현재 소스 발췌 — `bot/controller.h`**
 
-**세 경로가 한 줄로 수렴한다.** `botUsesHeuristic` 이면 휴리스틱, 아니면 `IsLoaded() && Infer(...)`, 그리고 둘 중 무엇이 실패하든 `if (!ok) ok = bot::fallback_placement(...)`. §10.5 의 상태 다이어그램이 이 세 줄로 구현되어 있다.
+```cpp
+#pragma once
+#include "../src/sim_game.h"
+#include "placement.h"
+#include <algorithm>
+#include <deque>
 
-**cooldown 이 봇 속도를 만든다.** `selectedBotInputIntervalTicks` 가 1 이면 `botInputCooldownTicks = 0` 이라 매 틱 하나씩 소비한다. 2 면 한 틱 쉬고 하나 — 즉 시퀀스가 두 배 느리게 실행된다. 이건 **추론 주기가 아니라 이미 만들어진 입력 큐의 소비 간격**이다.
+namespace bot {
+// Frame input scheduling, independent of rendering and model inference speed.
+// A changed piece RNG state detects every spawn, including gravity locking while
+// a slow bot is still executing an old plan (even if the new piece has the same ID).
+class Controller {
+public:
+    void reset(int interval = 6, int think = 18, int minimum = 60) {
+        interval_ = std::clamp(interval, 1, 30);
+        think_ = std::clamp(think, 0, 180);
+        minimum_ = std::clamp(minimum, 1, 600);
+        spawned_ = false; queue_.clear(); cooldown_ = age_ = 0;
+    }
+    template<class Picker>
+    uint8_t next(const SimGame& sim, Picker pick) {
+        if (sim.IsGameOver()) return INPUT_NONE;
+        if (!spawned_ || pieceRng_ != sim.RngState()) {
+            spawned_ = true; pieceRng_ = sim.RngState();
+            queue_.clear(); cooldown_ = age_ = 0;
+        }
+        const int age = age_++;
+        if (age < think_) return INPUT_NONE;
+        if (cooldown_ > 0) { --cooldown_; return INPUT_NONE; }
+        if (queue_.empty()) {
+            int col, rot;
+            if (!pick(sim, col, rot)) { cooldown_ = interval_ - 1; return INPUT_NONE; }
+            const auto plan=expand_placement(sim.CurrentCol(),sim.CurrentRotation(),col,rot);
+            queue_.assign(plan.begin(),plan.end());
+        }
+        if (queue_.empty()) return INPUT_NONE;
+        if ((queue_.front() & INPUT_DROP) && age + 1 < minimum_) return INPUT_NONE;
+        const auto input=queue_.front(); queue_.pop_front();
+        cooldown_=interval_ - 1;
+        return input;
+    }
+private:
+    int interval_=6, think_=18, minimum_=60, cooldown_=0, age_=0;
+    bool spawned_=false;
+    uint64_t pieceRng_=0;
+    std::deque<uint8_t> queue_;
+};
+}
+```
+
+스폰은 피스 ID가 아니라 RNG 상태 변화로 감지한다. 같은 모양이 연속으로 나오거나,
+느린 봇이 이동하는 도중 중력으로 잠겨 새 피스가 나와도 이전 계획을 버려야 하기 때문이다.
+`age`가 think보다 작으면 기다리고, 입력 사이에는 cooldown을 줄인다. DROP은 피스 나이가
+최솟값을 넘었을 때만 꺼낸다. 새 피스에서는 큐·cooldown·나이를 함께 초기화한다.
+
+이 방식은 자연스러운 의사결정 시간을 모델에 학습시키는 기능은 아니다. 모델의 목표 선택과
+실행 속도를 독립적으로 조절해 캐릭터 난이도를 콘텐츠로 다루는 장치다. 결정론적이므로
+서버 보상 검증도 동일한 모델과 controller 설정으로 같은 봇 입력을 재현할 수 있다.
 
 ### 13.2 두 보드의 가비지 교환
 
-이것이 `Single vs Bot` 을 "봇 시연" 이 아니라 **대전**으로 만드는 배선이다.
+main은 사람과 봇에 SubmitInput → Tick을 실행한 뒤 공통 helper를 호출한다.
 
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-                gameSingle->SubmitInput(inputMask);
-                gameBot->SubmitInput(botMask);
-                gameSingle->Tick();
-                gameBot->Tick();
-
-                // Section I — 두 보드 간 가비지 교환 (Net 모드와 동일 구조).
-                {
-                    int attH = gameSingle->sim.AttackLinesSent() - lastAttackHuman;
-                    int attB = gameBot->sim.AttackLinesSent()    - lastAttackBot;
-                    if (attH > 0) gameBot->sim.AddPendingGarbage(attH);
-                    if (attB > 0) gameSingle->sim.AddPendingGarbage(attB);
-                    lastAttackHuman = gameSingle->sim.AttackLinesSent();
-                    lastAttackBot   = gameBot->sim.AttackLinesSent();
-                }
-```
-
-주석의 `Net 모드와 동일 구조` 가 핵심이다. 사람 vs 사람 네트워크 대전 ([Part 6](./part6-lockstep-networking.md))도, 사람 vs 봇 로컬 대전도, 그리고 Python 의 `TetrisVersusEnv`(Part 8)도 **모두 같은 세 단계**를 밟는다.
-
-1. 매 틱(또는 매 배치) `AttackLinesSent()` 의 델타를 구한다.
-2. 델타가 양수면 상대 보드의 `AddPendingGarbage()` 에 넣는다.
-3. 마지막 총계를 저장해 다음 델타의 기준으로 삼는다.
-
-```mermaid
-sequenceDiagram
-    participant H as gameSingle (사람)
-    participant M as main.cpp 60Hz 루프
-    participant B as gameBot (봇)
-
-    loop 매 틱
-        M->>H: SubmitInput(inputMask) / Tick()
-        M->>B: SubmitInput(botMask) / Tick()
-        M->>H: AttackLinesSent() - lastAttackHuman
-        M->>B: AddPendingGarbage(attH)
-        M->>B: AttackLinesSent() - lastAttackBot
-        M->>H: AddPendingGarbage(attB)
-        Note over H,B: 가비지는 받는 보드의 다음 잠금에서 주입
-    end
-```
-
-이 배선 때문에 §1.1 에서 말한 "휴리스틱의 천장" 이 실제로 관측 가능해진다. `eval_board` 는 `lines_cleared` 에 `0.760666` 가중치를 줄 뿐, "4줄을 한 번에 지워 4줄짜리 공격을 보낸다" 와 "1줄씩 네 번 지운다" 를 구분하지 않는다. 공격량은 줄 수에 선형이 아니므로(테트리스가 훨씬 강한 공격), 휴리스틱은 구조적으로 공격 최적화를 못 한다.
-
-그리고 이것이 `python/common/env_versus.py` 를 만든 이유다 — 학습 환경이 이 배선을 그대로 미러링해야 학습된 정책이 실제 대전에서 의미가 있다. 그 환경의 보상은 `lines_cleared + attack_weight * attack_sent` 로 공격에 명시적 가중치를 준다. PPO trainer 는 `--env versus` 로 이 환경을 바로 선택할 수 있다(기본값은 `single`). 나머지 trainer 들은 아직 단일 보드 환경 전용이다 — 그 경계는 [Part 8](./part8-python-rl.md) 의 versus 선택 절에 정리돼 있다.
-
-### 13.3 봇 로스터
-
-고정된 모델 하나만 배포할 때는 `model/policy.onnx`만 읽어도 충분하다. 여러 알고리즘과 체크포인트를 비교하려면 파일마다 표시명·속도·선택 상태가 필요하므로 C++ 클라이언트는 로스터를 만든다.
-
-**현재 소스 발췌 — `src/main.cpp`**
+**현재 소스 발췌 — `bot/reward_replay.h`**
 
 ```cpp
-static std::vector<BotEntry> discover_bot_roster()
-{
-    std::vector<BotEntry> roster;
-    roster.push_back({"Heuristic (test)", "@heuristic", 2});
-
-    const auto cfg = load_bot_config("model/bots.cfg");
-    apply_bot_config(roster[0], cfg);
-
-    namespace fs = std::filesystem;
-    std::vector<BotEntry> models;
-    std::unordered_set<std::string> seen;
-
-    auto scan_dir = [&](const char* dir) {
-        std::error_code ec;
-        if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return;
-        for (fs::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
-            if (!it->is_regular_file(ec)) continue;
-            const fs::path path = it->path();
-            if (path.extension() != ".onnx") continue;
-            const std::string key = normalize_model_key(path);
-            if (!seen.insert(key).second) continue;
-            BotEntry entry{bot_name_from_path(path), key, 1};
-            apply_bot_config(entry, cfg);
-            models.push_back(std::move(entry));
-        }
-    };
-
-    scan_dir("model");
-    scan_dir("model/bots");
-
-    std::sort(models.begin(), models.end(), [](const BotEntry& a, const BotEntry& b) {
-        if (a.name == b.name) return a.path < b.path;
-        return a.name < b.name;
-    });
-    for (size_t i = 0; i < models.size(); ++i) {
-        if (std::filesystem::path(models[i].path).stem().string() == "policy") {
-            std::swap(models[0], models[i]);
-            break;
-        }
-    }
-
-    roster.insert(roster.end(), models.begin(), models.end());
-    return roster;
+inline void exchange_garbage(SimGame& human, SimGame& enemy, int& humanAttack, int& enemyAttack) {
+    const int a=human.AttackLinesSent(), b=enemy.AttackLinesSent();
+    if(a>humanAttack) enemy.AddPendingGarbage(a-humanAttack);
+    if(b>enemyAttack) human.AddPendingGarbage(b-enemyAttack);
+    humanAttack=a; enemyAttack=b;
 }
 ```
 
-항상 `Heuristic (test)` 가 먼저 들어간다. ONNX Runtime 이 없거나 모델 파일이 하나도 없어도 vs Bot 모드는 baseline 으로 실행된다. 모델 파일은 legacy `model/*.onnx` 와 권장 경로 `model/bots/*.onnx` 를 모두 스캔하며, `seen` 집합이 정규화된 키로 중복을 걸러낸다 — 같은 파일이 두 경로로 보이는 경우를 막는다. 디렉터리 순회는 `std::error_code` 오버로드를 써서 권한 문제나 깨진 심볼릭 링크에 예외를 던지지 않는다.
+누적 공격 총계의 차이만 상대 pending에 넣는다. 총계를 매번 그대로 넣으면 같은 공격을
+반복 지급한다. 공격은 받는 보드의 다음 잠금에서 주입된다. Python versus 학습 환경도
+이 공격 교환 의미를 따라야 한다. 점수만 최적화한 단일 보드 정책과 대전 정책이 다른 이유다.
 
-정렬은 이름 기준이지만 `stem == "policy"` 인 항목 하나를 맨 앞으로 끌어올린다. 단일 모델 시절의 `model/policy.onnx` 관습을 유지하는 배려다.
+### 13.3 캐릭터와 모델을 분리한 로스터
 
-### 13.4 `model/bots.cfg` — 표시명과 속도
+**현재 소스 발췌 — `bot/opponents.h`**
 
-표시명과 기본 속도는 선택 파일 `model/bots.cfg` 로 덮어쓴다. 저장소에 `model/bots.cfg.example` 이 그대로 복사해 쓸 수 있는 형태로 들어 있다.
+```cpp
+#pragma once
+#include <string>
+#include <vector>
 
-**현재 소스 발췌 — `model/bots.cfg.example`**
+namespace bot {
+struct Opponent {
+    std::string name;
+    std::string path;
+    int inputIntervalTicks = 6;
+    std::string id;
+    std::string iconPath;
+    std::string portraitPath;
+    std::string difficulty = "Normal";
+    int thinkTicks = 18;
+    int minPieceTicks = 60;
+};
+
+// Character entries can share a model. Legacy model scanning remains available.
+// Asset/model paths are relative to the game resource working directory.
+std::vector<Opponent> discover_opponents(const char* characters = "assets/opponents.cfg",
+                                        const char* legacy = "model/bots.cfg");
+int clamp_input_interval(int ticks);
+}
+```
+
+`discover_opponents()`는 먼저 `assets/opponents.cfg`의 명시적 캐릭터를 읽는다.
+서로 다른 캐릭터가 같은 모델을 쓸 수도 있다. 중복 ID·잘못된 숫자·필드 수는 거절한다.
+캐릭터가 없으면 `Practice Partner` 휴리스틱을 만든다. 이후 `model/`과 `model/bots/`의
+미등록 ONNX 파일을 추가하고 경로 순으로 정렬한다. 설정·아이콘·일러스트는 모델 파일과
+독립적이며 서버 보상은 캐릭터 ID와 서버 쪽 모델·설정을 기준으로 검증한다.
+
+현재 캐릭터 설정 형식은 다음 파일과 같다.
+
+**현재 소스 발췌 — `assets/opponents.cfg`**
 
 ```text
-# Optional in-game bot roster metadata.
-#
-# Format:
-#   path-or-filename|display name|input_interval_ticks
-#
-# The game auto-discovers model/*.onnx and model/bots/*.onnx even without this
-# file. Copy this file to model/bots.cfg only if you want stable display names
-# or per-bot default speeds.
-
-model/bots/aria_ppo.onnx|Aria PPO|1
-model/bots/aria_ppo_sparse.onnx|Aria PPO Sparse|2
-model/bots/aria_dqn.onnx|Aria DQN|2
-model/bots/aria_ddqn.onnx|Aria DDQN|2
-model/bots/aria_cbmpi.onnx|Aria CBMPI|2
-model/bots/aria_cbmpi_value.onnx|Aria CBMPI Value|2
-model/bots/aria_a2c.onnx|Aria A2C|2
-model/bots/aria_reinforce.onnx|Aria REINFORCE|3
-model/bots/aria_nstep_ac.onnx|Aria n-step AC|2
-model/bots/aria_cem.onnx|Aria CEM|2
-model/bots/aria_muzero.onnx|Aria MuZero|3
-@heuristic|Heuristic (test)|2
+# id|name|model|icon|portrait|difficulty|input ticks|think ticks|min piece ticks
+# 60 ticks = 1 second. These starter characters use the built-in heuristic.
+# Replace portrait paths with your own illustrations; current images are placeholders.
+lumen|Lumen|@heuristic|assets/icons/player.png|assets/icons/player.png|Easy|8|24|90
+rook|Rook|@heuristic|assets/icons/bot.png|assets/icons/bot.png|Normal|6|18|60
+vega|Vega|@heuristic|assets/icons/opponent.png|assets/icons/opponent.png|Hard|4|12|45
+# Example trained character (uncomment after copying its ONNX and images):
+# aria|Aria|model/bots/aria_ppo.onnx|assets/icons/aria.png|assets/portraits/aria.png|Normal|6|18|60
 ```
 
-마지막 `@heuristic`은 파일이 아니라 내장 휴리스틱을 가리키는 예약 키다. `discover_bot_roster`가 내장 항목에 그 경로를 넣기 때문에(§13.3) 같은 문법으로 이름과 속도를 덮어쓸 수 있다.
+### 13.4 이전 모델 설정과 속도 조정
 
-파서 동작에서 문서화되지 않으면 헷갈리는 것이 네 가지 있다.
+`model/bots.cfg`의 `path|name|interval[|think|min_piece]`는 자동 발견된 모델과 기본
+연습 상대의 호환 설정이다. 명시적 캐릭터의 값을 덮지 않는다. 전체 경로가 파일명보다
+우선하고 `#`부터 줄 끝까지는 주석이다. 빈 값·범위를 벗어난 값은 기본값을 유지한다.
+입력 간격의 기본값은 6, 생각 시간은 18, 최소 배치 시간은 60틱이다.
 
-**1. `#` 이후는 주석으로 잘린다.** 줄 어디에 있든 `#` 부터 끝까지 버린다. 따라서 표시명에 `#` 을 쓸 수 없다.
+속도를 조정하려면 캐릭터의 세 숫자를 바꾼다. Colab에서 다시 학습할 필요는 없다.
+목표 선택 자체를 바꾸려면 모델을 학습·export하고 관측/행동 shape를 검증한다.
+공용 BP를 주는 상대는 서버와 클라이언트의 모델·설정이 같아야 한다.
 
-**2. 키 매칭은 전체 경로 우선, 실패 시 파일명 fallback.**
+### 13.5 보상 실패를 연습전 성공처럼 보이지 않는다
 
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-static void apply_bot_config(
-    BotEntry& entry,
-    const std::unordered_map<std::string, BotConfigOverride>& cfg)
-{
-    auto apply = [&](const BotConfigOverride& c) {
-        if (!c.name.empty()) entry.name = c.name;
-        if (c.inputIntervalTicks > 0) entry.inputIntervalTicks = c.inputIntervalTicks;
-    };
-
-    auto it = cfg.find(entry.path);
-    if (it != cfg.end()) {
-        apply(it->second);
-        return;
-    }
-
-    std::filesystem::path p(entry.path);
-    it = cfg.find(p.filename().string());
-    if (it != cfg.end()) apply(it->second);
-}
-```
-
-즉 `model/bots/aria_ppo.onnx|...` 로도, 그냥 `aria_ppo.onnx|...` 로도 쓸 수 있다. 전자가 우선이며 매칭되면 후자는 보지 않는다. 파일을 `model/` 과 `model/bots/` 사이에서 옮겨도 파일명 키는 계속 먹는다.
-
-**3. `input_interval_ticks` 는 1~30 으로 클램프된다.**
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-static int clamp_bot_input_interval(int ticks)
-{
-    if (ticks < 1) return 1;
-    if (ticks > 30) return 30;
-    return ticks;
-}
-```
-
-`0` 이나 음수를 써도 1 이 되고, `999` 를 써도 30 이 된다. 클램프는 설정 파싱 시점(`load_bot_config`)과 봇 선택 확정 시점(`selectedBotInputIntervalTicks = clamp_bot_input_interval(...)`) 양쪽에서 걸린다.
-
-**4. 값이 비었거나 파싱 실패면 "기본값 유지" 다.** `BotConfigOverride` 의 `inputIntervalTicks` 초기값이 `0` 이고 `apply_bot_config` 가 `> 0` 일 때만 덮어쓰므로, 세 번째 필드를 생략하면 로스터가 정한 기본값(모델 1, 휴리스틱 2)이 그대로 남는다. 이름도 비어 있으면 덮어쓰지 않는다.
-
-속도 단축키는 debug UI 빌드 전용이다. `TETRIS_ENABLE_DEBUG_UI` 가 정의된 빌드에서만 봇 선택 화면의 Left/Right, 게임 중 `[`/`]` 로 임시 조절 UI 가 보인다 (`CMakeLists.txt`, 기본 OFF). 배포 빌드는 `model/bots.cfg` 와 기본값만 사용한다.
-
-### 13.5 정리 — 봇도 사람과 같은 입구를 쓴다
-
-```mermaid
-graph LR
-    Player[Player SimGame] --> Loop[main.cpp 60 Hz loop]
-    Bot[Bot SimGame] --> Loop
-    Model[model/bots/*.onnx] --> Infer[BotOnnx::Infer]
-    Infer -->|col, rot| Expand[expand_placement]
-    Heuristic[heuristic_placement] -->|col, rot| Expand
-    Fallback[fallback_placement] -->|!ok 일 때| Expand
-    Expand -->|틱당 1 마스크| Queue[botInputQueue]
-    Queue --> Bot
-    Player -->|AttackLinesSent 델타| Bot
-    Bot -->|AttackLinesSent 델타| Player
-```
-
-이 설계의 장점은 **봇이 인간 플레이어와 같은 `SubmitInput` 인터페이스를 쓴다는 것**이다. 게임 루프와 결정론 코어는 별도 봇 전용 상태 변경 API 를 갖지 않는다. 현재 봇은 `Single vs Bot` 의 인프로세스 상대이므로 relay 에 접속하지 않고, 멀티플레이 큐나 커스텀 룸에도 직접 참가하지 않는다.
-
-앞의 의사 코드로 정리하면 이렇게 단순해진다.
-
-**예시(실제 저장소에는 없음): 최소 형태의 봇 어댑터**
-
-```cpp
-static std::vector<uint8_t> pending_seq;
-
-void OnTick(SimGame& sim, BotOnnx& bot)
-{
-    if (pending_seq.empty()) {
-        int col, rot;
-        bool ok = bot.IsLoaded()
-                      ? bot.Infer(sim, col, rot)
-                      : fallback_placement(sim, col, rot);
-        if (!ok) return;   // 합법 수 없음 → 게임오버
-
-        pending_seq = expand_placement(
-            sim.CurrentCol(), sim.CurrentRotation(), col, rot);
-    }
-
-    uint8_t mask = pending_seq.front();
-    pending_seq.erase(pending_seq.begin());
-    sim.SubmitInput(mask);
-    sim.Tick();
-}
-```
-
-실제 코드(§13.1)와의 차이는 두 가지다. 위 의사 코드에는 **속도 cooldown 이 없고**, **휴리스틱 분기가 없다.** 실제 저장소는 `botInputCooldownTicks` 로 소비 속도를 조절하고 `botUsesHeuristic` 으로 세 번째 경로를 갖는다. 구조를 처음 잡을 때는 위 형태로 시작해서, 속도 설정과 휴리스틱 봇을 얹어가면 §13.1 이 된다.
-
----
+온라인 보상 시작 요청이 실패하면 선택 화면에 머물며 재시도 또는 **Play practice - no BP**를
+고르게 한다. 경기 중과 결과 화면에도 보상 검증 여부를 유지한다. 로그인 없는 오프라인
+연습은 가능하지만 보상 경기는 서버 발급 challenge가 필요하다. 봇 BP의 한도·입력
+재현은 Part 15, 실패 상태 표시와 계층 분리는 Part 18에서 설명한다.
 
 ## 이 장에서 완성된 것
 
@@ -1673,7 +1591,7 @@ cmake --build build --config Release
 
 `--target tetris` 를 지정하지 않는 이유는 `copy_assets` 가 ALL 타깃이라 `Font/`·`Sounds/`·`model/` 이 빌드 디렉터리로 복사되어야 하기 때문이다. 저장소 루트에서 실행해도 된다.
 
-메뉴에서 "Single vs Bot" 을 열면 `Heuristic (test)` 가 보여야 한다. 이 상태에서도 "Single Play", "Matchmaking Multi", "Custom Room Multi" 는 그대로 사용할 수 있어야 한다. `.onnx` 파일이 하나도 없으면 ONNX 로드 시도 자체가 없으므로 오류 표시도 없어야 정상이다.
+메뉴에서 "Single vs Bot" 을 열면 `Practice Partner` 가 보여야 한다. 이 상태에서도 "Single Play", "Matchmaking Multi", "Custom Room Multi" 는 그대로 사용할 수 있어야 한다. `.onnx` 파일이 하나도 없으면 ONNX 로드 시도 자체가 없으므로 오류 표시도 없어야 정상이다.
 
 반대로 ORT 없는 빌드에서 `.onnx` 모델을 선택하면 봇이 실행되지 않고 **봇 선택 화면에 오류 문자열이 그려진다.** 이건 stdout 로그가 아니다 — `src/main.cpp` 가 `botSelectError = "Load failed: " + err;` 로 문자열을 만들고, 봇 선택 화면이 그것을 `draw_text` 로 화면에 그린다.
 
@@ -1681,16 +1599,16 @@ cmake --build build --config Release
 
 ```cpp
             if (!botSelectError.empty())
-                draw_text(truncate_middle(botSelectError, 78).c_str(), bx, 578, 13, RED);
+                draw_text(truncate_middle(botSelectError, 78).c_str(), 40, 564, 13, RED);
 ```
 
-따라서 화면에 나타나는 문자열은 정확히 이것이다.
+로드 실패 시 생성하는 오류 문자열은 다음과 같다.
 
 ```text
-Load failed: onnxruntime not vendored — rebuild with TETRIS_HAS_ONNXRUNTIME
+Load failed: ONNX Runtime unavailable — fetch the CPU runtime and rebuild with TETRIS_BUILD_BOT=ON
 ```
 
-`truncate_middle(..., 78)` 을 거치므로 78 을 넘으면 가운데가 `...` 로 잘린다. 이 한도는 `std::string::size()` 기준, 즉 **문자 수가 아니라 바이트 수**다. 위 메시지는 UTF-8 로 77 바이트(75 문자 — em dash 하나가 3 바이트)라 아슬아슬하게 그대로 표시된다. `Ort::Exception` 메시지처럼 긴 사유가 들어오면 가운데가 잘리고, 비ASCII 경로가 섞이면 바이트가 빨리 차므로 잘림이 더 일찍 일어난다.
+`truncate_middle(..., 78)`은 화면 폭을 제한하기 위해 긴 메시지의 가운데를 줄인다. 실제 오류의 전체 내용은 로그와 모델 파일·빌드 옵션을 함께 확인한다. 문자 수와 UTF-8 바이트 수는 다르므로 비ASCII 경로를 포함한 오류 표시도 배포 UI에서 확인해야 한다.
 
 ONNX 모델 선택은 실패하지만 내장 휴리스틱 봇은 계속 사용할 수 있다.
 
@@ -1734,7 +1652,9 @@ export 한 `.onnx` 를 로컬 `model/bots/` 에 두고 클라이언트를 다시
 
 export 직후 학습 머신에서 미리 확인하고 싶다면 아래 스니펫을 쓴다. 저장소에 없는 코드이므로 필요할 때만 붙여 쓴다.
 
-**예시(실제 저장소에는 없음): export 결과 shape 스모크**
+export 결과 shape 스모크
+
+**예시(실제 저장소에는 없음)**
 
 ```python
 import numpy as np, onnxruntime as ort
@@ -1760,7 +1680,7 @@ print(out[0].shape, out[1].shape)   # (1, 40) (1,)
 
 | 상태 | `.onnx` | 봇 메뉴/동작 | 봇 선택 화면 메시지 |
 |------|------|--------|------|
-| ORT 없음 (`TETRIS_BUILD_BOT=OFF` 또는 미벤더링) | - | 휴리스틱 봇 가능, ONNX 선택 실패 | `Load failed: onnxruntime not vendored — rebuild with TETRIS_HAS_ONNXRUNTIME` |
+| ORT 없음 (`TETRIS_BUILD_BOT=OFF` 또는 미벤더링) | - | 휴리스틱 봇 가능, ONNX 선택 실패 | `Load failed: ONNX Runtime unavailable — fetch the CPU runtime and rebuild with TETRIS_BUILD_BOT=ON` |
 | ORT 있음, 모델 없음 | 없음 | 휴리스틱 봇 가능 | 없음 (로드 시도 자체가 없음) |
 | ORT 있음, 모델 정상 | 있음 | 휴리스틱 + RL 정책 선택 가능 | 없음 |
 | ORT 있음, 모델 손상/이름 불일치 | 있음 | 선택 실패, 휴리스틱은 가능 | `Load failed: Ort::Exception: ...` |

@@ -1,3 +1,4 @@
+#include "ranked_game.h"
 // server/reactor_relay.cpp — 단일 reactor 루프로 도는 릴레이 (실험용 바이너리)
 //
 // 스레드 모델(tetris_relay)과 같은 wire 프로토콜을 구현하되, 연결마다 스레드를 두는
@@ -350,12 +351,13 @@ bool parse_summary(const uint8_t* p, size_t n, Summary& out) {
     return true;
 }
 
-std::vector<uint8_t> build_match_result(int32_t before, int32_t after, int32_t delta) {
+std::vector<uint8_t> build_match_result(int32_t before, int32_t after, int32_t delta, net::ResultStatus status = net::ResultStatus::Unknown) {
     std::vector<uint8_t> pl;
     pl.reserve(12);
     net::le_write_u32(pl, (uint32_t)before);
     net::le_write_u32(pl, (uint32_t)after);
     net::le_write_u32(pl, (uint32_t)delta);
+    pl.push_back(static_cast<uint8_t>(status));
     return net::build_frame(net::MsgType::MATCH_RESULT, pl);
 }
 
@@ -496,6 +498,8 @@ struct Channel {
     std::string match_uuid;
     uint64_t    seed = 0;
     bool        ranked = false;
+    std::unique_ptr<relay::RankedGame> verified;
+    net::ResultStatus result_status = net::ResultStatus::Unknown;
 
     Conn* a = nullptr;   // HOST — 죽으면 nullptr
     Conn* b = nullptr;   // GUEST
@@ -1691,6 +1695,7 @@ private:
         ch->match_id   = next_match_id_++;
         ch->match_uuid = new_match_uuid();
         ch->seed       = next_seed();
+        ch->verified = std::make_unique<relay::RankedGame>(ch->seed);
         ch->a = a; ch->b = b;
         ch->sockA = a->sock; ch->sockB = b->sock;
         ch->a_id = a->player_id; ch->b_id = b->player_id;
@@ -1745,6 +1750,7 @@ private:
         pl.insert(pl.end(), peer.begin(), peer.begin() + std::min<size_t>(peer.size(), 255));
         pl.push_back((uint8_t)std::min<size_t>(uuid.size(), 255));
         pl.insert(pl.end(), uuid.begin(), uuid.begin() + std::min<size_t>(uuid.size(), 255));
+        pl.push_back(c->ch && c->ch->ranked ? 1 : 0);
         auto fr = net::build_frame(net::MsgType::MATCH_FOUND, pl);
         return queue_send(c, fr.data(), fr.size());
     }
@@ -1967,6 +1973,12 @@ private:
             if (avail < total) break;
             if (len < 1) { consumed += total; continue; }
 
+            if (p[2] == uint8_t(net::MsgType::INPUT) || p[2] == uint8_t(net::MsgType::SEED)) {
+                const size_t length = len - 1u;
+                const auto checksum = net::le_read_u32(p + 2u + len);
+                if (checksum != (length ? net::fnv1a32(p + 3, length) : 0u)) ch->verified->invalidate();
+                else ch->verified->observe(c->is_a ? 1 : 2, static_cast<net::MsgType>(p[2]), p + 3, length);
+            }
             if (p[2] == (uint8_t)net::MsgType::MATCH_SUMMARY) {
                 const size_t payload_len = (size_t)len - 1u;
                 const uint32_t chk  = net::le_read_u32(p + 2u + len);
@@ -2095,7 +2107,6 @@ private:
     }
 
     // ── finalize ─────────────────────────────────────────────────────────────
-    // 상대가 사라졌다. 요약 수집 상태에 따라 세 갈래 — 스레드 모델과 같은 정책이다.
     // 상대가 사라진 매치에서 살아남은 쪽을 통지하고 닫는다.
     // 결과 프레임(랭크드)이 있다면 그것을 보낸 뒤에 불러야 한다 — tcp_close 는
     // shutdown(RDWR) 이라 먼저 닫으면 결과가 나가지 못한다.
@@ -2113,82 +2124,21 @@ private:
     }
 
     void on_channel_peer_lost(Channel* ch) {
-        if (!ch->ranked || ch->summary_handled || ch->finalize_inflight) return;
-        if (ch->sumA && ch->sumB) { finalize_ranked(ch); return; }
-        if (!ch->sumA && !ch->sumB) {
-            // 무경기 — meta 에 보내지 않는다(담합 RP 파밍·동시 단절 오염 차단).
-            ch->summary_handled = true;
-            send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
-            RLOG_INFO("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
-                      << " player_id=" << ch->a_id << " x " << ch->b_id
-                      << " 요약 없음 -> meta 미전송 (delta=0)");
-            return;
-        }
-        finalize_forfeit(ch);
+        if (ch->ranked) finalize_ranked(ch);
     }
 
     void finalize_ranked(Channel* ch) {
         if (ch->summary_handled || ch->finalize_inflight) return;
         ch->summary_handled = true;
-        const Summary a = *ch->sumA, b = *ch->sumB;
-        const bool exclusive = (a.won ^ b.won) != 0;
-        const bool scores_ok = (a.my_score == b.opp_score) && (b.my_score == a.opp_score);
-        const bool lines_ok  = (a.my_lines == b.opp_lines) && (b.my_lines == a.opp_lines);
-        std::optional<int64_t> winner;
-        if (exclusive && scores_ok && lines_ok) {
-            winner = (a.won == 1) ? ch->a_id : ch->b_id;
-        } else {
-            RLOG_WARN("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
-                      << " player_id=" << ch->a_id << " x " << ch->b_id
-                      << " 교차검증 실패 -> winner=null");
+        const auto result = ch->verified->result();
+        ch->result_status = result.status;
+        if (result.status != net::ResultStatus::Applied && result.status != net::ResultStatus::Draw) {
+            send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
+            return;
         }
-        post_result(ch, winner, (int)a.my_score, (int)b.my_score,
-                    (int)a.my_lines, (int)b.my_lines,
-                    (int)std::max(a.duration_s, b.duration_s));
-    }
-
-    void finalize_forfeit(Channel* ch) {
-        ch->summary_handled = true;
-        const bool haveA = ch->sumA.has_value();
-        const Summary s = haveA ? *ch->sumA : *ch->sumB;
-        // 한쪽 요약만 있으면 그 요약의 won 을 존중한다 — 끊긴 순서로 승자를 정하면
-        // 승리 요약을 낸 직후 회선이 끊긴 쪽이 패자로 뒤집힌다.
-        //
-        // 단, 그 존중에는 전제가 있다: 요약을 낸 사람과 끊은 사람이 **다른 사람**이어야
-        // 한다. 같은 사람이면 자기 승리를 자기가 신고하고 자리를 뜬 것이고, 그 주장을
-        // 반증할 상대는 아직 경기 중이라 아무것도 제출하지 못했다. 교차검증
-        // (finalize_ranked)은 이 경로에 개입하지 않으므로 이 한 장이 곧 판결이 된다.
-        //
-        // 실측(2026-08-27, 배포 바이너리): READY 직후 MATCH_SUMMARY{won=1} 28바이트
-        // 한 장을 보내고 소켓을 닫자, 게임 프레임을 한 장도 주고받지 않은 채 신고자의
-        // elo 가 0 에서 16 으로 올랐다. 상대는 그동안 정상적으로 경기 중이었다.
-        // 공모자도 플레이도 필요 없고, 큐에서 만난 아무나에게 성립한다.
-        //
-        // 그래서 "이탈자 본인의 승리 주장" 만 무효화한다. 승자를 뒤집지는 않는다 —
-        // 뒤집으면 이번에는 자폭이 도구가 되어, 지고 있는 사람이 패배 요약을 낸 뒤
-        // 끊어 상대의 승리를 지울 수 있다. 승자를 비우면 meta 의 saveMatch 가
-        // elo/wins/losses/bp/xp 를 통째로 건너뛰므로(무승부 경로와 같은 처리) 어느
-        // 쪽도 이득도 손해도 보지 않는다.
-        //
-        // 대가는 정직하게 적어 둔다: 승리 요약을 낸 **직후 실제로 회선이 끊긴** 사람도
-        // 무보상이 된다. 와이어에서 고의 이탈과 회선 사고는 구분할 수 없고, 그 모호함의
-        // 비용은 누군가 낸다. 지금은 그 비용을 아무 잘못 없는 상대가 내고 있고, 이
-        // 변경은 그것을 주장한 본인에게 옮긴다.
-        const int reporter = haveA ? 1 : 2;
-        std::optional<int64_t> winner;
-        if (ch->disconnect_side == reporter && s.won) {
-            RLOG_WARN("[relay] match=" << ch->match_id << " uuid=" << ch->match_uuid
-                      << " player_id=" << ch->a_id << " x " << ch->b_id
-                      << " 승리 자기신고 후 신고자 이탈 -> winner=null");
-        } else {
-            winner = haveA ? (s.won ? ch->a_id : ch->b_id)
-                           : (s.won ? ch->b_id : ch->a_id);
-        }
-        const int scoreA = (int)(haveA ? s.my_score : s.opp_score);
-        const int scoreB = (int)(haveA ? s.opp_score : s.my_score);
-        const int linesA = (int)(haveA ? s.my_lines : s.opp_lines);
-        const int linesB = (int)(haveA ? s.opp_lines : s.my_lines);
-        post_result(ch, winner, scoreA, scoreB, linesA, linesB, (int)s.duration_s);
+        const std::optional<int64_t> winner = result.winner == 1 ? std::optional<int64_t>(ch->a_id)
+            : result.winner == 2 ? std::optional<int64_t>(ch->b_id) : std::nullopt;
+        post_result(ch, winner, result.score_a, result.score_b, result.lines_a, result.lines_b, result.duration_s);
     }
 
     // meta POST 는 블로킹이라 워커로 뺀다. 결과 프레임 송신은 루프가 한다.
@@ -2211,6 +2161,8 @@ private:
             RLOG_WARN("[relay] match=" << mid << " uuid=" << uuid
                       << " 종료 중 — meta 저장 생략");
             ch->finalize_inflight = false;
+            ch->result_status = net::ResultStatus::SaveFailed;
+            send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
         }
     }
 
@@ -2226,6 +2178,7 @@ private:
             RLOG_INFO("[relay] match=" << match_id << " uuid=" << ch->match_uuid
                       << " meta 저장 완료");
         } else {
+            ch->result_status = net::ResultStatus::SaveFailed;
             send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
             RLOG_WARN("[relay] match=" << match_id << " uuid=" << ch->match_uuid
                       << " meta POST 실패 — delta=0");
@@ -2240,8 +2193,8 @@ private:
 
     // 채널이 붙들고 있는 소켓 복사본으로 보낸다 — Conn 이 이미 사라졌어도 된다.
     void send_result_frames(Channel* ch, int ab, int aa, int ad, int bb, int ba, int bd) {
-        auto frA = build_match_result(ab, aa, ad);
-        auto frB = build_match_result(bb, ba, bd);
+        auto frA = build_match_result(ab, aa, ad, ch->result_status);
+        auto frB = build_match_result(bb, ba, bd, ch->result_status);
         size_t sent = 0;
         if (ch->disconnect_side != 1 && ch->sockA.valid())
             net::tcp_send_some(ch->sockA, frA.data(), frA.size(), sent);

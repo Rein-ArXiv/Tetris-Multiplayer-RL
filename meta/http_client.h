@@ -4,7 +4,7 @@
 //
 // relay 와 game client 양쪽에서 재사용한다.
 //   · game client   : request_guest()  (첫 실행 시 익명 토큰 발급)
-//   · tetris_relay  : verify_token()   (QUEUE_JOIN 수신 후 인증)
+//   · tetris_relay  : consume_game_ticket() (QUEUE_JOIN 입장권 소비)
 //   · tetris_relay  : post_match()     (경기 결과 저장 + RP 갱신)
 //
 // 네트워크 실패/서버 에러는 std::nullopt 로 통합 처리 — 호출자가 장애 정책
@@ -78,10 +78,10 @@ public:
     const std::string& baseUrl() const { return base_url_; }
 
     // verify_token 결과 — 호출자가 "토큰이 잘못된 것" vs "서버 다운/네트워크 실패"
-    // 를 구분해야 자동 재발급(stale 토큰)을 할 수 있다.
+    // 를 구분해 복구 안내 또는 기존 키 재시도를 선택한다. 자동 계정 교체는 금지한다.
     enum class VerifyOutcome {
         Ok,             // info 유효
-        UnknownToken,   // 200 OK 가 아니라 404 응답 — 새 guest 발급 필요
+        UnknownToken,   // 404 응답 — 기존 파일 유지, 복구 안내
         NetworkError,   // 연결 실패 / 타임아웃 / 그 외 — 토큰은 유지하고 다음에 재시도
     };
 
@@ -96,6 +96,10 @@ public:
     // relay secret. Never use verify_token's offline/cache behavior for tickets.
     std::optional<std::string> request_game_ticket(const std::string& token);
     std::optional<AuthInfo> consume_game_ticket(const std::string& ticket);
+
+    std::optional<AuthInfo> change_account(const std::string& operation,
+        const std::string& credential, const std::string& next_token,
+        const std::string& next_recovery, int* status=nullptr);
 
     // 아이콘 카탈로그 전체. 실패(네트워크/파싱) 시 nullopt.
     std::optional<std::vector<IconEntry>> fetch_icon_catalog(int timeout_s = 5);
@@ -130,26 +134,5 @@ private:
     bool        valid_ = false;
     std::string relay_secret_;
 };
-
-// ---- 클라이언트 토큰 저장 (플랫폼별 user-data 디렉토리) --------------------
-//
-// Windows: %APPDATA%\Tetris\token
-// macOS:   $HOME/Library/Application Support/Tetris/token
-// Linux:   $XDG_DATA_HOME/Tetris/token  (fallback: $HOME/.local/share/Tetris/token)
-
-// 전체 경로 반환. 디렉토리 생성까지는 하지 않는다 (save 시점에 생성).
-std::string token_file_path();
-
-// 파일에서 토큰 읽기. 없거나 손상이면 빈 문자열.
-std::string load_token();
-
-// 토큰 저장 (부모 디렉토리 자동 생성). 실패 시 false.
-bool save_token(const std::string& token);
-
-// settings.cfg 의 권장 저장 경로 — 토큰과 같은 user-data 디렉토리
-// (<user-data>/Tetris/settings.cfg). HOME/APPDATA 를 못 찾으면 빈 문자열.
-// macOS .app 번들은 cwd(Resources)가 읽기전용이라, 실행 디렉터리 대신
-// 이 쓰기 가능한 경로를 써야 설정이 영속된다. 디렉토리 생성은 하지 않는다.
-std::string settings_file_path();
 
 } // namespace meta::client

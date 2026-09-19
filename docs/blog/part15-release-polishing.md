@@ -77,7 +77,9 @@ avatar.period_ms = 2400
 계산한다. 세로 일러스트를 억지로 정사각형으로 늘리지 않는다. 큰 일러스트는 지정된
 직사각형 안에 들어가는 더 작은 축척을 선택한다. 두 경우 모두 가운데에 배치한다.
 
-**현재 소스 발췌 — `src/presentation.cpp` (`presentation_draw_avatar`)**
+(`presentation_draw_avatar`)
+
+**현재 소스 발췌 — `src/presentation.cpp`**
 
 ```cpp
 const double scale = double(size - 8) / std::max(width, height);
@@ -173,7 +175,9 @@ flowchart TD
 현재 `SimGame`은 다음 피스를 뽑을 때 피스 RNG 상태가 바뀌므로 `RngState()`를
 새 피스 경계로 사용한다. Controller가 RNG를 직접 진행시키지는 않는다.
 
-**현재 소스 발췌 — `bot/controller.h` (`Controller::next`)**
+(`Controller::next`)
+
+**현재 소스 발췌 — `bot/controller.h`**
 
 ```cpp
 if (!spawned_ || pieceRng_ != sim.RngState()) {

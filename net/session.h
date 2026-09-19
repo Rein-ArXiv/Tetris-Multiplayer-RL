@@ -1,4 +1,5 @@
 #pragma once
+#include "match_result.h"
 #include <cstdint>
 #include <vector>
 #include <deque>
@@ -53,6 +54,7 @@ struct SeedParams {
     uint32_t start_tick{120};
     uint8_t input_delay{2};
     Role role{Role::Host};
+    bool ranked = false; // Explicit server policy; direct P2P and old servers default to practice.
     std::string local_icon_id{"default"};
     std::string remote_icon_id{"default"};
 };
@@ -158,7 +160,7 @@ public:
                           uint32_t my_score, uint32_t my_lines,
                           uint32_t opp_score, uint32_t opp_lines,
                           uint32_t duration_s);
-    struct MatchResult { int32_t elo_before; int32_t elo_after; int32_t delta; };
+    struct MatchResult { int32_t elo_before; int32_t elo_after; int32_t delta; ResultStatus status = ResultStatus::Unknown; };
     bool GetMatchResult(MatchResult& out) const;
 
     // 안전 틱 계산용: safeTick = min(local, remote) - inputDelay

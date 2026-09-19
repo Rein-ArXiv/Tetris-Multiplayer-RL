@@ -14,6 +14,7 @@ C++17과 CMake를 사용하며, 엔진 없이 직접 구현한 OpenGL 3.3 Core 2
 [출시 보안·Linux에서 Windows로 이전](docs/release-readiness.md)을 먼저 읽으세요.
 주 서버는 Linux(Mac 하드웨어), 예비 서버는 Windows입니다. **현재 웹은 랭킹 페이지만
 있고 브라우저 게임은 미구현입니다.** 공개 연결에는 [WSS·일회용 입장권](docs/blog/part16-secure-admission.md)을 사용합니다.
+가입 없는 계정은 [Account & Recovery](docs/blog/part17-guest-account-recovery.md)에서 복구 파일을 만들고 접근 키를 교체할 수 있습니다.
 인증서·포트 배치와 PvP 규칙 검증 등 남은 출시 조건은 별도 확인해야 합니다. [실제 검증 기록](docs/polish-validation.md).
 
 ## 현재 상태
@@ -25,6 +26,7 @@ C++17과 CMake를 사용하며, 엔진 없이 직접 구현한 OpenGL 3.3 Core 2
 - `tetris`, `sim_hash_dump`, `tetris_relay_reactor`, `tetris_relay`, `tetris_meta`는 CMake 타깃으로 분리되어 있습니다.
 - 릴레이는 바이너리가 둘입니다. 배포 대상은 이벤트 루프 하나로 도는 `tetris_relay_reactor`이고, 연결당 스레드 모델인 `tetris_relay`는 같은 계약을 스레드로 설명하는 교재용 참조 구현이라 서버 번들에 넣지 않습니다.
 - `Single vs Bot`은 `assets/opponents.cfg`의 캐릭터별 모델·아이콘·일러스트·속도를 사용합니다. 기본 세 상대는 휴리스틱과 임시 이미지입니다. ONNX 상대는 `TETRIS_BUILD_BOT=ON`이 필요합니다.
+- 랭크 PvP는 서버가 seed·입력으로 종료를 재현한 뒤 보상합니다. [Part 18](docs/blog/part18-authoritative-results.md)에 검증 한도와 실패 상태를 설명했습니다.
 - 봇전 공용 BP는 meta의 `--bot-rewards`를 켰을 때 서버 리플레이 검증 후 지급합니다. [캐릭터·Colab·BP 실행 안내](docs/bots-and-colab.md)를 참고하세요.
 - Python 쪽은 Colab 부트스트랩, Gymnasium 환경,
   PPO/DQN/DDQN/CBMPI/REINFORCE/A2C/n-step AC/CEM/MuZero-style 학습 루프,
@@ -39,7 +41,7 @@ flowchart TB
     Client["tetris client<br/>src + platform + renderer + audio"]
     Sim["deterministic SimGame<br/>src/sim_game + core"]
     Session["lockstep session<br/>net/socket + framing + session"]
-    Relay["tetris_relay_reactor — 배포 대상<br/>admission + auth + queue/room + selective forwarding"]
+    Relay["tetris_relay_reactor — 배포 대상<br/>admission + auth + queue/room + ranked input validation"]
     Meta["tetris_meta<br/>HTTP API + SQLite"]
     PyBind["tetris_py<br/>pybind11"]
     Train["Python RL<br/>env + model zoo + checkpoint"]

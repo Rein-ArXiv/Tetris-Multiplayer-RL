@@ -4,7 +4,7 @@
 
 ---
 
-## 이 장의 구현 계약
+## 이번 Part의 구현 계약
 
 - **선행 상태:** [Part 0](./part0-project-setup.md) 의 빌드 뼈대 (`CMakeLists.txt` 와 "tetris project skeleton" 을 찍는 `src/main.cpp`) 뿐이다. 이 장은 그 위에 새 파일만 얹는다.
 - **이번 장의 파일:** `core/constants.h`, `core/input.h`, `core/rng.h`, `core/hash.h`, `src/position.{h,cpp}`, `src/sim_block.h`, `src/sim_grid.h`, `src/sim_blocks.h`, `src/sim_game.{h,cpp}`, `tests/sim_hash_dump.cpp`, 그리고 `CMakeLists.txt` 확장.
@@ -148,7 +148,9 @@ Position::Position(int row, int column)
 
 테트리스 그리드는 20행 x 10열의 정수 배열이다:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+설명용 축약 — 실제 코드는 부록 B
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // src/sim_grid.h
@@ -500,7 +502,9 @@ row 18: ■■■■■■■■■■ ← 이제 이 자리에 옛 row 17의 �
 
 역순(row 19 -> 0)이면 이 문제가 없다. 아래에서 위로 올라가며, 가득 찬 행을 삭제할 때 `completed` 카운터를 증가시키고, 가득 차지 않은 행은 `completed`만큼 아래로 이동시킨다:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+설명용 축약 — 실제 코드는 부록 B
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // src/sim_grid.h
@@ -542,7 +546,9 @@ row 19: .■■■■■■..  row 19: .■■■■■■..   row 19: .■■�
 
 `ClearFullRows`에서 루프 변수 `row`를 `size_t`(unsigned)로 선언하면 위험하다:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+설명용 축약 — 실제 코드는 부록 B
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // 위험: size_t는 unsigned이므로 row = 0일 때 row-- = 4294967295
@@ -557,7 +563,9 @@ unsigned 정수에서 `0 - 1`은 언더플로되어 매우 큰 양수가 된다.
 
 아래는 **중간 단계(staged)** 형태다 — 레벨·T-spin 이 아직 없던 시점의 모습이며, 최종 코드가 아니다:
 
-**Part 1 체크포인트 — `src/sim_game.cpp` (중간 단계)**
+(중간 단계)
+
+**Part 1 체크포인트 — `src/sim_game.cpp`**
 
 ```cpp
 // src/sim_game.cpp — 점수표만 먼저 붙인 중간 단계.
@@ -1259,7 +1267,9 @@ sim 내부는 금지.
 
 중력 타이머도 정수다:
 
-**예시(설명용 축약 — 실제 코드는 §12.6 의 생성자)**
+설명용 축약 — 실제 코드는 §12.6 의 생성자
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // src/sim_game.cpp
@@ -1299,7 +1309,9 @@ dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 
 `tests/sim_hash_dump.cpp`는 결정론 회귀 테스트의 지상 진리원(ground truth)이다. 고정된 입력 스크립트를 여러 시드로 실행하고, 매 스텝의 `StateHash()`를 stdout에 찍는다.
 
-**예시(설명용 축약 — 전체 스크립트는 `tests/sim_hash_dump.cpp`)**
+설명용 축약 — 전체 스크립트는 `tests/sim_hash_dump.cpp`
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // tests/sim_hash_dump.cpp — 스크립트 일부
@@ -1643,7 +1655,9 @@ graph TB
 
 실제 `StateHash()` 구현에서 해당 라인을 보면:
 
-**예시(설명용 축약 — 전문은 §9.3)**
+설명용 축약 — 전문은 §9.3
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // src/sim_game.cpp — StateHash() 내부 발췌
@@ -1745,7 +1759,9 @@ F.2 자동 HASH 검증(Part 6) 은 10초마다 양쪽 피어의 `StateHash()` �
 
 `SimGame::HashBreakdown`은 전체 해시를 원인별로 나눈 값을 담는 POD다:
 
-**예시(설명용 축약 — 실제 코드는 부록 B)**
+설명용 축약 — 실제 코드는 부록 B
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 // src/sim_game.h
@@ -2323,7 +2339,9 @@ std::vector<SimBlock> SimGame::GetAllBlocks() const
 
 **해결:** 부동소수를 완전히 제거. `gravityCounterTicks` 는 단순 `int`로 카운트. 0.5초 = 30틱을 직접 상수로 박는다:
 
-**예시(설명용 축약 — 실제 코드는 §12.6 의 생성자)**
+설명용 축약 — 실제 코드는 §12.6 의 생성자
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 gravityCounterTicks(0),

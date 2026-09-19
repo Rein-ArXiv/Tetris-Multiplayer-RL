@@ -11,6 +11,7 @@
   #endif
 #endif
 #include "httplib.h"
+#include "json_routes.h"
 #ifdef _WIN32
   #include <bcrypt.h>
 #else
@@ -189,7 +190,7 @@ bool ApiServer::listen(const std::string& host, int port)
     svr.set_payload_max_length(64 * 1024);
 
     std::mutex budget_mu;
-    RequestBudget requests, guests, botStarts, gameStarts;
+    RequestBudget requests, guests, botStarts, gameStarts, accountChanges;
     GameTickets gameTickets;
     // Guests create durable rows: give them a separate, much smaller budget.
     svr.set_pre_routing_handler(
@@ -215,6 +216,10 @@ bool ApiServer::listen(const std::string& host, int port)
                 allowed = gameStarts.allow(ip, now, 10, 60);
                 retry = 60;
             }
+            if (allowed && req.method == "POST" && req.path.rfind("/v1/account/",0)==0) {
+                allowed = accountChanges.allow(ip, now, 10, 60);
+                retry = 60;
+            }
             if (!allowed) {
                 set_json(res, 429, "{\"error\":\"rate_limited\"}");
                 res.set_header("Retry-After", std::to_string(retry));
@@ -227,27 +232,28 @@ bool ApiServer::listen(const std::string& host, int port)
 
     // The account credential is accepted only by HTTPS-facing meta. Relay sees
     // only gt1.* and redeems it over the authenticated internal API once.
-    svr.Post("/v1/game-tickets", [&](const httplib::Request& req, httplib::Response& res) {
+    json_post(svr, "/v1/game-tickets", [&](const httplib::Request& req, httplib::Response& res) {
         if (relay_secret_.empty()) { set_json(res, 503, proto::error_json("relay_not_configured")); return; }
         auto player = db_.getByToken(proto::find_string(req.body, "token"));
         if (!player) { set_json(res, 401, proto::error_json("unknown_token")); return; }
         auto random = gen_token();
         if (!random) { set_json(res, 503, proto::error_json("entropy_unavailable")); return; }
         const auto ticket = "gt1." + *random;
-        auto auth = proto::auth_response(player->id, player->username, player->elo,
-                                        player->bp, player->xp, player->selected_icon_id);
-        if (!gameTickets.issue(ticket, player->id, std::move(auth))) {
+        if (!gameTickets.issue(ticket, player->id, player->auth_epoch)) {
             set_json(res, 503, proto::error_json("ticket_capacity")); return;
         }
         set_json(res, 200, "{\"ticket\":\"" + ticket + "\",\"expires_in\":60}");
     });
-    svr.Post("/v1/game-tickets/consume", [&](const httplib::Request& req, httplib::Response& res) {
+    json_post(svr, "/v1/game-tickets/consume", [&](const httplib::Request& req, httplib::Response& res) {
         if (relay_secret_.empty() || !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
             set_json(res, 403, proto::error_json("relay_auth_required")); return;
         }
         auto auth = gameTickets.consume(proto::find_string(req.body, "ticket"));
         if (!auth) { set_json(res, 401, proto::error_json("invalid_game_ticket")); return; }
-        set_json(res, 200, *auth);
+        // Rotation/recovery after issue invalidates the old credential generation.
+        auto current=db_.getByEpoch(auth->player,auth->epoch);
+        if(!current) { set_json(res,401,proto::error_json("invalid_game_ticket")); return; }
+        set_json(res,200,proto::auth_response(current->id,current->username,current->elo,current->bp,current->xp,current->selected_icon_id));
     });
 
     // ------- CORS preflight (브라우저 정적 페이지용) ------------------------
@@ -266,7 +272,7 @@ bool ApiServer::listen(const std::string& host, int port)
         });
 
     // ------- POST /v1/guest -------------------------------------------------
-    svr.Post("/v1/guest",
+    json_post(svr, "/v1/guest",
         [this](const httplib::Request&, httplib::Response& res) {
             // 토큰 충돌은 16 바이트 엔트로피에서 사실상 불가능하지만,
             // registerGuest 가 nullopt 반환 시 한 번만 재시도.
@@ -282,7 +288,7 @@ bool ApiServer::listen(const std::string& host, int port)
                 auto p = db_.registerGuest(*token);
                 if (p) {
                     set_json(res, 200, proto::guest_response(
-                        p->id, p->token, p->elo, p->bp, p->xp,
+                        p->id, *token, p->elo, p->bp, p->xp,
                         p->selected_icon_id));
                     std::fprintf(stderr, "[meta] guest player_id=%lld\n",
                                  static_cast<long long>(p->id));
@@ -293,7 +299,7 @@ bool ApiServer::listen(const std::string& host, int port)
         });
 
     // ------- POST /v1/auth/verify ------------------------------------------
-    svr.Post("/v1/auth/verify",
+    json_post(svr, "/v1/auth/verify",
         [this](const httplib::Request& req, httplib::Response& res) {
             std::string token = proto::find_string(req.body, "token");
             if (token.empty()) {
@@ -310,6 +316,24 @@ bool ApiServer::listen(const std::string& host, int port)
                                      p->bp, p->xp, p->selected_icon_id));
         });
 
+    // Candidates are generated and durably journaled by the official client before
+    // applying them. A lost HTTP response can be retried with the exact same body.
+    for(const std::string operation : {"backup", "rotate", "recover"}) {
+        json_post(svr, "/v1/account/"+operation,[this,operation](const httplib::Request& req,httplib::Response& res) {
+            std::optional<Player> player;
+            const auto result=db_.changeAccount(operation,proto::find_string(req.body,"credential"),
+                proto::find_string(req.body,"next_token"),proto::find_string(req.body,"next_recovery"),player);
+            switch(result) {
+            case AccountChangeResult::Ok:
+                set_json(res,200,proto::auth_response(player->id,player->username,player->elo,player->bp,player->xp,player->selected_icon_id));return;
+            case AccountChangeResult::InvalidRequest: set_json(res,400,proto::error_json("invalid_credential_request"));return;
+            case AccountChangeResult::InvalidCredential: set_json(res,401,proto::error_json("invalid_credential"));return;
+            case AccountChangeResult::Conflict: set_json(res,409,proto::error_json("credential_conflict"));return;
+            case AccountChangeResult::DbError: set_json(res,503,proto::error_json("credential_store_unavailable"));return;
+            }
+        });
+    }
+
     // ------- GET /v1/icons/catalog -----------------------------------------
     svr.Get("/v1/icons/catalog",
         [this](const httplib::Request&, httplib::Response& res) {
@@ -323,7 +347,7 @@ bool ApiServer::listen(const std::string& host, int port)
         });
 
     // ------- POST /v1/icons/buy --------------------------------------------
-    svr.Post("/v1/icons/buy",
+    json_post(svr, "/v1/icons/buy",
         [this](const httplib::Request& req, httplib::Response& res) {
             std::string token = proto::find_string(req.body, "token");
             std::string icon  = proto::find_string(req.body, "icon_id");
@@ -353,7 +377,7 @@ bool ApiServer::listen(const std::string& host, int port)
         });
 
     // ------- POST /v1/icons/select -----------------------------------------
-    svr.Post("/v1/icons/select",
+    json_post(svr, "/v1/icons/select",
         [this](const httplib::Request& req, httplib::Response& res) {
             std::string token = proto::find_string(req.body, "token");
             std::string icon  = proto::find_string(req.body, "icon_id");
@@ -381,7 +405,7 @@ bool ApiServer::listen(const std::string& host, int port)
         });
 
     // ------- POST /v1/matches ----------------------------------------------
-    svr.Post("/v1/matches",
+    json_post(svr, "/v1/matches",
         [this](const httplib::Request& req, httplib::Response& res) {
             if (!relay_secret_.empty() &&
                 !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {

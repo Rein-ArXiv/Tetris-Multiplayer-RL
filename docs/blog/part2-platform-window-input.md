@@ -1,7 +1,6 @@
 # Part 2: 플랫폼 계층 — 창, 입력, GL 컨텍스트
 
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 2**
->
 
 ---
 
@@ -1708,7 +1707,9 @@ endif()
 
 저장소에는 없는 파일이니 직접 만들어야 한다.
 
-**Part 2 체크포인트 — `demo/part2_present_demo.cpp`(독자가 만들 파일)**
+(독자가 만들 파일)
+
+**Part 2 체크포인트 — `demo/part2_present_demo.cpp`**
 
 ```cpp
 // demo/part2_present_demo.cpp — Part 2 플랫폼 계층 검증용 데모

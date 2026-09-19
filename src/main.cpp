@@ -52,6 +52,9 @@
 #include "../bot/controller.h"
 #include "../bot/reward_replay.h"
 #include "../meta/http_client.h"
+#include "../meta/account_client.h"
+#include "account_screen.h"
+#include "../platform/user_data.h"
 #include "../meta/levels.h"
 #include <deque>
 
@@ -505,7 +508,7 @@ static bool parse_port(const std::string& s, uint16_t& port_out)
 }
 
 enum class AppMode {
-    Menu, ConnectInput, Single, BotSingle, BotSelect, Net, Settings, Customize,
+    Menu, ConnectInput, Single, BotSingle, BotSelect, Net, Settings, Customize, Account,
     // Section D — 커스텀 룸 경로. 릴레이 주소는 CLI 기본값 사용이라
     // 별도 IP 입력 화면(이전의 MatchmakingAddr / RoomRelay)은 제거됨.
     RoomLobby,    // Create / Join 선택 (+ Join 시 코드 입력)
@@ -663,7 +666,7 @@ int main(int argc, char** argv)
     //   macOS .app 번들의 cwd(Resources)는 읽기전용이라 거기 저장하면 조용히
     //   실패한다. HOME/APPDATA 가 없으면 실행 디렉터리 "settings.cfg" 로 폴백.
     //   기존 cwd 파일이 있고 user-data 에 아직 없으면 1회 마이그레이션한다.
-    std::string settingsPath = meta::client::settings_file_path();
+    std::string settingsPath = platform::settings_file_path();
     if (settingsPath.empty()) {
         settingsPath = "settings.cfg";
     } else {
@@ -746,11 +749,12 @@ int main(int argc, char** argv)
     // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
     //   metaUrl 이 설정된 경우에만 활성화. 부트스트랩 실패는 현재 랭킹 정보를
     //   읽지 못한 상태이지, 반드시 unranked relay 로 전환됐다는 뜻은 아니다.
-    //   네트워크 장애 때는 저장 토큰을 유지하고 계속 relay 입장에 보낸다.
-    //   ranked relay 는 자신의 meta 연결 또는 성공 인증 캐시로 별도 판정하며,
-    //   둘 다 없으면 입장을 거부한다.
+    //   미완료 키 교체를 먼저 복구한다. 기존 키가 거절되면 자동으로 새 계정을
+    //   덮어쓰지 않는다. 게임 입장은 HTTPS API의 새 일회용 입장권이 필요하다.
     std::unique_ptr<meta::client::MetaClient> metaClient;
     std::string authToken;
+    AccountScreen accountScreen;
+    std::string unsavedAccountToken;
     int    myElo       = 0;   // RP (0 시작 스케일 — meta/elo.h)
     int    myBp        = 0;
     int    myXp        = 0;   // 누적 경험치 (레벨은 meta/levels.h 로 유도)
@@ -760,61 +764,32 @@ int main(int argc, char** argv)
     // elo_after 만 싣고 bp/xp 는 없으므로(net/session.h), 메뉴의 Lv/BP/RP 표기를
     // 권위 있는 값으로 맞추려면 verify_token 으로 다시 읽어야 한다.
     bool   metaRefreshPending = false;
+    auto applyAccount = [&](const meta::client::AccountOperation& result) {
+        accountScreen.status = result.message;
+        if (result.unsaved) {
+            unsavedAccountToken = result.token;
+            authToken.clear();
+            metaOnline = false;
+            return;
+        }
+        if (result.ok) {
+            unsavedAccountToken.clear();
+            authToken = result.token;
+            metaOnline = bool(result.player);
+            if (result.player) {
+                myElo = result.player->elo;
+                myBp = result.player->bp;
+                myXp = result.player->xp;
+                mySelectedIconId = result.player->selected_icon_id;
+            }
+        } else {
+            authToken.clear();
+            metaOnline = false;
+        }
+    };
     if (!metaUrl.empty()) {
         metaClient = std::make_unique<meta::client::MetaClient>(metaUrl);
-        if (metaClient->valid()) {
-            // 작은 람다 — 새 guest 발급 + 파일 저장 + 상태 갱신.
-            auto bootstrap_new_guest = [&](const char* why) {
-                auto g = metaClient->request_guest();
-                if (g) {
-                    authToken = g->token;
-                    myElo     = g->elo;
-                    myBp      = g->bp;
-                    myXp      = g->xp;
-                    mySelectedIconId = g->selected_icon_id.empty() ? "default" : g->selected_icon_id;
-                    if (!meta::client::save_token(authToken))
-                        std::fprintf(stderr, "[meta] token could not be saved; this guest identity may be lost on restart\n");
-                    std::cout << "[meta] " << why << " — new guest player_id="
-                              << g->player_id << " elo=" << g->elo
-                              << " bp=" << g->bp
-                              << " icon=" << mySelectedIconId << "\n";
-                    metaOnline = true;
-                } else {
-                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — ranking offline\n", why);
-                }
-            };
-
-            authToken = meta::client::load_token();
-            if (authToken.empty()) {
-                bootstrap_new_guest("first run");
-            } else {
-                // 기존 토큰 — verify. unknown_token 이면 stale → 새로 발급.
-                // 네트워크 실패는 토큰 유지 + 다음 실행에 재시도.
-                meta::client::MetaClient::VerifyOutcome outcome{};
-                auto a = metaClient->verify_token(authToken, 3, &outcome);
-                if (a) {
-                    myElo = a->elo;
-                    myBp  = a->bp;
-                    myXp  = a->xp;
-                    mySelectedIconId = a->selected_icon_id.empty() ? "default" : a->selected_icon_id;
-                    std::cout << "[meta] token ok player_id=" << a->player_id
-                              << " elo=" << a->elo
-                              << " bp=" << a->bp
-                              << " icon=" << mySelectedIconId << "\n";
-                    metaOnline = true;
-                } else if (outcome == meta::client::MetaClient::VerifyOutcome::UnknownToken) {
-                    fprintf(stderr, "[meta] token unknown (DB reset?) — re-issuing\n");
-                    authToken.clear();
-                    bootstrap_new_guest("token unknown");
-                } else {
-                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, ranking offline\n");
-                    // 파일과 authToken 은 유지한다. 다음 실행에 verify 를 재시도하고,
-                    // 현재 실행에서도 relay 에는 이 토큰을 보낸다. relay 쪽 meta와
-                    // 인증 캐시도 쓸 수 없다면 ranked 입장은 실패한다. unranked
-                    // 플레이에는 meta 없이 기동한 relay 가 따로 필요하다.
-                }
-            }
-        }
+        applyAccount(meta::client::bootstrap_account(*metaClient));
     }
     iconYou = resolvePlayerIcon(mySelectedIconId);
 
@@ -982,6 +957,8 @@ int main(int argc, char** argv)
 
     // 메뉴 post-match 메타 갱신도 비동기 (랭크 매치 직후 2s 프리즈 방지).
     std::future<std::optional<meta::client::AuthInfo>> metaRefreshOp;
+    std::future<meta::client::AccountOperation> accountOp;
+
     std::string botSelectError;
     std::string selectedBotName = "Bot";
     bool        botUsesHeuristic = false;
@@ -994,6 +971,7 @@ int main(int argc, char** argv)
     std::string botTicket, botRewardStatus;
     std::vector<uint8_t> botReplay;
     bool botClaimSent=false, botClaimRetryable=false;
+    bool botStartFailed = false;
 
     auto beginBotRound = [&](uint64_t seed) {
         app=AppMode::BotSingle;
@@ -1005,7 +983,7 @@ int main(int argc, char** argv)
         lastAttackHuman=lastAttackBot=0;
     };
     auto requestBotRound = [&]() {
-        botTicket.clear(); botRewardStatus.clear();
+        botTicket.clear(); botRewardStatus.clear(); botStartFailed = false;
         if(metaClient && metaClient->valid() && !authToken.empty()) {
             botSelectError="Preparing your match...";
             auto* mc=metaClient.get();auto token=authToken;auto id=selectedOpponent.id;
@@ -1545,7 +1523,7 @@ int main(int argc, char** argv)
             constexpr Color DISABLED = {70, 70, 70, 255};
             enum class MenuAction {
                 Single, BotSelect, Matchmaking, CustomRoom,
-                Customize, Settings, Quit,
+                Customize, Settings, Account, Quit,
             };
             struct MenuItem {
                 const char* label;
@@ -1558,6 +1536,7 @@ int main(int argc, char** argv)
                 {"Custom Room Multi", MenuAction::CustomRoom},
                 {"Customize",         MenuAction::Customize},
                 {"Settings",          MenuAction::Settings},
+                {"Account & Recovery", MenuAction::Account},
                 {"Quit",              MenuAction::Quit},
             };
             constexpr int kMenuCount =
@@ -1567,8 +1546,8 @@ int main(int argc, char** argv)
             // 묶어 두면 항목을 삽입해도 아래 dispatch 가 숫자 index 와 어긋나지 않는다.
             // 버튼은 ranking 표시줄 위의 고정 영역에 들어가도록 압축 배치한다.
             const int bw = 300;
-            const int bh = 42;
-            const int bgap = 8;
+            const int bh = 36;
+            const int bgap = 7;
             const int bx = (720 - bw) / 2;
             const int byStart = 190;
             // 항목을 추가하면 버튼 열이 아래 랭킹 표시줄(y=540)과 겹칠 수 있다.
@@ -1623,7 +1602,7 @@ int main(int argc, char** argv)
                 draw_text("ranking: disabled (--meta https://host to enable)",
                           140, 540, 12, DISABLED);
             } else if (!metaOnline) {
-                draw_text("ranking: offline (ranked queue may be unavailable)",
+                draw_text(unsavedAccountToken.empty() ? "Account unavailable - open Account & Recovery" : "KEY NOT SAVED - open Account & Recovery before closing",
                           175, 540, 12, RED);
             } else {
                 char eloBuf[64];
@@ -1683,6 +1662,10 @@ int main(int argc, char** argv)
                     app = AppMode::Settings;
                     settingsIndex = 0;
                     break;
+                case MenuAction::Account:
+                    app = AppMode::Account;
+                    accountScreen.confirmation.clear();
+                    break;
                 case MenuAction::Quit:
                     // 메뉴의 Quit. 예전에는 여기서 renderer/platform 만 내리고
                     // 바로 return 0 해서, 하단 정리 경로의 image_unload 와
@@ -1713,8 +1696,8 @@ int main(int argc, char** argv)
                     botRewardStatus="Win for 10 BP (daily max 100)";
                     beginBotRound(r.challenge->seed);
                 } else {
-                    botRewardStatus=r.status==429 ? "Practice - match start limit reached" : "Practice - BP service unavailable";
-                    beginBotRound(sessionSeed);
+                    botStartFailed = true;
+                    botSelectError = r.status == 429 ? "Reward start limit reached. Retry later or choose practice." : "BP service unavailable. Retry or choose practice.";
                 }
             }
             const bool canChoose=!botStartOp.valid() && !botClaimOp.valid() && app==AppMode::BotSelect;
@@ -1774,6 +1757,14 @@ int main(int argc, char** argv)
                 draw_text(cur.difficulty.c_str(), 453, 476, 18, GRAY);
                 if (n > maxVisible)
                     draw_text(fmt_buf("%d-%d / %d",first+1,first+visible,n),bx,524,15,GRAY);
+            }
+            if (botStartFailed && canChoose) {
+                if (gui_button(50, 531, 280, 28, "Retry reward match", 16)) requestBotRound();
+                if (gui_button(370, 531, 290, 28, "Play practice - no BP", 16)) {
+                    botStartFailed = false;
+                    botRewardStatus = "Practice - no BP";
+                    beginBotRound(sessionSeed);
+                }
             }
             if (!botSelectError.empty())
                 draw_text(truncate_middle(botSelectError, 78).c_str(), 40, 564, 13, RED);
@@ -1989,12 +1980,48 @@ int main(int argc, char** argv)
             }
         }
 
+        // HTTP/profile ownership stays here; account_screen only emits user actions.
+        if (app == AppMode::Account) {
+            if (metaRefreshOp.valid() && metaRefreshOp.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                metaRefreshOp.get(); // Discard a pre-rotation response.
+            if (shopOp.valid() && shopOp.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                shopOp.get();
+            if (accountOp.valid() && accountOp.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                const auto result = accountOp.get();
+                applyAccount(result);
+                if (result.ok) {
+                    session.Close();
+                    iconYou = resolvePlayerIcon(mySelectedIconId);
+                    metaRefreshPending = false;
+                }
+            }
+            const bool busy = accountOp.valid() || metaRefreshOp.valid() || shopOp.valid();
+            const auto server = metaClient ? metaClient->baseUrl() : "No account server configured";
+            const auto folder = metaClient ? std::filesystem::u8path(meta::client::AccountStore(server).token_path()).parent_path().u8string() : "";
+            const auto action = accountScreen.draw(busy, !unsavedAccountToken.empty(), server, folder);
+            if (action == "back") app = AppMode::Menu;
+            else if (!action.empty()) {
+                if (!metaClient || !metaClient->valid()) accountScreen.status = "Configure an HTTPS account server first.";
+                else {
+                    auto* api = metaClient.get();
+                    const auto unsaved = unsavedAccountToken;
+                    accountOp = std::async(std::launch::async, [api, action, unsaved] {
+                        if (action == "save") return meta::client::save_created_account(*api, unsaved);
+                        if (action == "import") return meta::client::import_legacy_account(*api);
+                        if (action == "create") return meta::client::bootstrap_account(*api, true);
+                        if (action == "resume") return meta::client::bootstrap_account(*api);
+                        return meta::client::change_saved_account(*api, action);
+                    });
+                }
+            }
+        }
+
         // ── Customize(아이콘 상점) 화면 ──────────────────────────────────────
         //   메타 서버의 /v1/icons/* 를 사용: 카탈로그 표시 → 클릭/Enter 로 선택.
         //   미보유 아이콘은 1차 선택 시도에서 403(not_owned)을 받으면 구매 확인
         //   상태로 전환, 같은 아이콘을 한 번 더 활성화하면 구매+선택한다.
         //   BP 차감/보유 검증은 전부 서버가 권위 — 클라이언트는 결과만 반영.
-        //   HTTP 호출(≤3s)은 블로킹이지만 메뉴 전용 화면이라 게임플레이와 무관.
+        //   HTTP는 비동기 작업에서 수행한다. 완료 결과만 UI 스레드에서 반영한다.
         if (app == AppMode::Customize)
         {
             {
@@ -2716,7 +2743,7 @@ int main(int argc, char** argv)
                 //   · won: "내가 이김" = 상대만 gameOver 이고 나는 살아있음
                 //   · my_score/lines: 내 SimGame
                 //   · opp_score/lines: 내가 관측한 상대 SimGame (lockstep 결정론으로
-                //     양쪽 클라가 동일 값). relay 에서 교차검증에 사용.
+                //     양쪽 클라가 동일 값). 호환 필드이며 최종 판정은 서버 SimGame 사용.
                 if (!summarySent_) {
                     summarySent_ = true;
                     const bool   iWon       = !gameLocal->gameOver && gameRemote->gameOver;
@@ -2748,35 +2775,22 @@ int main(int argc, char** argv)
             {
                 draw_popup_panel(95, 235, 530, 225);
                 gui_text_center(360, 262, "GAME OVER", 60, WHITE);
-                // Section K — RP 델타 (도착했으면). delta=0 && elo_before==elo_after 이면
-                // RP 변화 없음이라는 사실만 보장한다. 가능한 이유의 예:
-                //   (1) meta POST 실패 → "ranking offline".
-                //   (2) 교차검증 실패 (양측 summary 불일치) → winner=null 로 DB 에는
-                //       기록되지만 RP 미반영 → "validation failed".
-                //   (3) 바닥 RP 사용자의 패배처럼 정상 계산 결과가 0인 경우.
-                // unranked relay 는 MATCH_RESULT 자체를 보내지 않으므로 이 분기에
-                // 도달하지 않는다. 프레임에는 원인 코드가 없으므로 UI 는 "RP 변동 없음"
-                // 이라는 중립 문구만 보여준다. 원인은 relay/meta stderr 로그에서 확인.
-                if (haveMatchResult) {
-                    if (lastMatchResult.delta == 0 &&
-                        lastMatchResult.elo_before == lastMatchResult.elo_after) {
-                        gui_text_center(360, 343,
-                                        "no RP change (offline / invalid / RP floor)",
-                                        14, GRAY);
-                    } else {
-                        char buf[64];
-                        std::snprintf(buf, sizeof(buf), "RP %d  %+d",
-                                      lastMatchResult.elo_after, lastMatchResult.delta);
-                        Color col = lastMatchResult.delta >= 0 ? GREEN : RED;
-                        gui_text_center(360, 340, buf, 26, col);
+                const bool ranked = session.params().ranked;
+                if (!ranked) {
+                    gui_text_center(360, 330, "Practice match - no RP or BP", 18, GRAY);
+                } else if (haveMatchResult) {
+                    gui_text_center(360, 326, net::result_status_text(lastMatchResult.status), 15, GRAY);
+                    if (lastMatchResult.status == net::ResultStatus::Applied) {
+                        char resultText[64];
+                        std::snprintf(resultText, sizeof(resultText), "RP %d  %+d", lastMatchResult.elo_after, lastMatchResult.delta);
+                        gui_text_center(360, 355, resultText, 24, lastMatchResult.delta >= 0 ? GREEN : RED);
                     }
                 } else {
-                    gui_text_center(360, 343, "...waiting for ranking server",
-                                    14, {120, 130, 170, 255});
+                    gui_text_center(360, 343, "Result not confirmed yet - rewards are not guaranteed", 14, GRAY);
                 }
-                gui_text_center(360, 380, "[R] Restart", 28, GREEN);
-                gui_text_center(360, 415, "[Q] Go to Title (immediate)", 28, YELLOW);
-                if (platform_key_pressed(PKEY_R)) {
+                gui_text_center(360, 385, ranked ? "New ranked game: return to title and queue again" : "[R] Restart practice", ranked ? 16 : 24, GREEN);
+                gui_text_center(360, 415, "[Q] Go to Title", 28, YELLOW);
+                if (!ranked && platform_key_pressed(PKEY_R)) {
                     myGameOverChoice = net::GameOverChoice::Restart;
                     session.SendGameOverChoice(myGameOverChoice);
                     gameOverState = GameOverState::WaitingForRemote;
@@ -3199,7 +3213,7 @@ int main(int argc, char** argv)
                 quitDialogOpen = false;
             } else if (clickYes) {
                 quitDialogOpen = false;
-                // Net: 세션 종료 → 상대에게 단절 전달(= 패배 기록) → 메뉴로.
+                // Net: 세션 종료 → 상대에게 단절 전달 → 메뉴로. 단절만으로 패배를 기록하지 않는다.
                 if (app == AppMode::Net) {
                     session.Close();
                     netMode = false; isHost = false; queueMode = false;
@@ -3222,6 +3236,10 @@ int main(int argc, char** argv)
             }
         }
 
+        if (app == AppMode::Net && session.isReady())
+            gui_text_center(360, 626, session.params().ranked ? "Ranked - result verified by server" : "Practice - no RP or BP", 12, GRAY);
+        if (app == AppMode::BotSingle)
+            gui_text_center(360, 626, botTicket.empty() ? "Practice - no BP" : "Reward match - BP requires server verification", 12, GRAY);
         renderer_end();
         platform_end_frame();
     }

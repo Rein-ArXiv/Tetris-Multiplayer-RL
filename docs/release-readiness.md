@@ -1,6 +1,6 @@
 # 소규모 출시 점검과 서버 이전
 
-2026-09-11 코드 검토. **Linux 주 서버(Mac 하드웨어), Windows 예비 서버,
+2026-09-19 코드 검토. **Linux 주 서버(Mac 하드웨어), Windows 예비 서버,
 Windows/macOS/Linux 클라이언트**가 목표다. 아래는 코드·로컬 검증 결과이며,
 외부 인터넷 접속이나 Windows/macOS 실기기 검증을 완료했다는 뜻은 아니다.
 
@@ -14,14 +14,16 @@ Windows/macOS/Linux 클라이언트**가 목표다. 아래는 코드·로컬 검
 |---|---|---|
 | 배포 확인 | 계정 토큰은 HTTPS API로 교환, 게임은 WSS + 60초 일회용 입장권. 기본 relay는 장기 토큰 거절 | [Part 16](blog/part16-secure-admission.md)대로 인증서·gateway·loopback relay 구성, 외부 7777·8080 차단과 실접속 확인 |
 | 차단 | `web/ranking`은 랭킹만 제공. WASM/WebGL/브라우저 네트워크 빌드 없음 | 웹 게임을 별도 포팅 작업으로 취급. 아래 범위 참고 |
-| 높음 | relay는 시뮬레이션을 실행하지 않고 양쪽 결과를 대조 | 치트·공모·봇·부계정 파밍을 완전히 막을 수 없음. 경쟁 보상 출시는 서버 규칙 검증 또는 리플레이 검증 후 |
-| 높음 | SQLite `players.token`은 원문, 토큰 만료·회전·폐기 API 없음 | 저장 토큰 해시화와 마이그레이션, 폐기/재발급, 복구 절차 설계 |
+| 높음 | 두 relay에 서버 seed·입력 기반 종료 검증 구현 | 허위 신고는 차단하지만 일부러 지는 담합·자동 플레이·부계정 파밍은 별도 제한 필요. 시뮬레이션을 포함한 부하 재측정 |
+| 배포 확인 | SQLite 목적별 해시 저장·기존 DB 이관·키 교체·복구 파일 구현 | [Part 17](blog/part17-guest-account-recovery.md)대로 점검 시간의 DB 이관과 실제 OS 복구 절차 검수. 시간 기반 만료·활성 경기 즉시 종료는 미구현 |
 | 높음 | Windows는 IOCP 단일 루프로 전환 | 예비 장비에서 실제 대전·종료·부하 측정. Linux 용량 수치 재사용 금지 |
 | 높음 | macOS 배포에 OpenSSL dylib 복사·참조 수정 추가 | 전이 dylib, CA 저장소, 서명/공증, Apple/Intel 아키텍처를 깨끗한 Mac에서 검증 |
 | 보통 | 사용자/경기 데이터 자동 삭제·토큰별 삭제 요청 API 없음 | 보존 기간과 삭제·복구 안내, 운영자 처리 절차 마련 |
 | 보통 | vendored SQLite/cpp-httplib/이미지·폰트 파서 사용 | 버전·라이선스 목록 및 보안 업데이트 절차 유지. 이번 작업은 종속성 CVE 전수 감사가 아님 |
 
 ## 이번에 보강한 것
+
+- [Part 18](blog/part18-authoritative-results.md): PvP 서버 입력 검증, 결과 사유·연습 표시, 서버별 계정·미저장 경고, 엄격한 JSON 검증을 추가했다.
 
 - WSS 클라이언트·TLS 게이트웨이·일회용 게임 입장권을 추가했다. 잘못된 인증서·Origin·프레임과 티켓 재사용을 거절한다. thread relay의 오프라인 인증 캐시는 제거했다. [Part 16](blog/part16-secure-admission.md)에 소유권·제한·실패 처리와 검증을 설명한다.
 
@@ -54,22 +56,26 @@ PC방·학교·가족 네트워크도 하나의 NAT 주소를 공유할 수 있�
 
 **이미 가능하다.** 첫 실행 → `POST /v1/guest` → OS 난수 128비트 토큰 발급 →
 사용자 폴더에 보관 → 다음 실행에서 같은 토큰 검증 → DB의 RP/XP/BP/아이콘 조회다.
-가입 폼이 없을 뿐, 토큰을 열쇠로 쓰는 익명 계정이다.
+가입 폼이 없을 뿐, 토큰을 열쇠로 쓰는 익명 계정이다. 최초 키 저장 실패는 화면에 표시하고 재시도 전 온라인 보상을 차단한다.
 
 | OS | 현재 토큰 파일 |
 |---|---|
-| Windows | `%APPDATA%\Tetris\token` |
-| macOS | `~/Library/Application Support/Tetris/token` |
-| Linux | `$XDG_DATA_HOME/Tetris/token` 또는 `~/.local/share/Tetris/token` |
+| Windows | `%APPDATA%\Tetris\accounts\<origin locator>\account.json` |
+| macOS | `~/Library/Application Support/Tetris/accounts/<origin locator>/account.json` |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/Tetris/accounts/<origin locator>/account.json` |
 
-토큰을 잃으면 같은 사람임을 입증할 수 없다. 다른 PC와 자동 동기화되지 않는다.
+접근 키와 최신 복구 파일을 모두 잃으면 같은 사람임을 입증할 수 없다. 다른 PC와 자동 동기화되지 않는다.
 지금 수동으로 토큰 파일을 옮기면 같은 기록을 쓸 수 있지만, 복사본을 가진 누구든
 접근할 수 있고 동시 접속은 제한된다. 토큰은 비밀번호처럼 취급해야 한다.
-현재 파일이 서비스 URL별로 나뉘지 않으므로 개발용 meta와 운영용 meta를 바꿀 때는
-**별도 OS 사용자 또는 데이터 폴더**를 사용한다. 운영 토큰을 테스트 서버로 보내지 않는다.
+계정은 정규화한 서버 origin별 폴더에 저장한다. 파일 안의 `api_url`도 확인해 다른 서버로
+키를 자동 전송하지 않는다. 옛 `Tetris/token`은 Account 화면의 **Import older account**로
+서버를 확인한 뒤 가져온다. 다른 서버의 새 계정은 **Create separate account**로 시작한다.
+같은 서버에서 테스트 계정을 따로 쓰려면 절대 경로의 `TETRIS_USER_DATA_ROOT`를 지정한다.
 
-작은 서비스라면 가입 없는 게스트를 기본으로 두고, 나중에 별도 복구 코드의
-일회성 발급·사용 시 회전 기능을 더하는 방향이 적합하다. 현재 복구 UI/API는 없다.
+
+가입 없는 게스트를 유지하면서 Account & Recovery에서 복구 파일을 만들 수 있다.
+최신 복구 파일로 Restore하면 같은 기록에 새 접근 키·복구 코드를 발급한다. 사용한
+복구 파일과 이전 접근 키는 다음 인증부터 거절된다. [Part 17](blog/part17-guest-account-recovery.md)의 절차를 따른다.
 이메일·실명을 받지 않아도 IP 로그, 식별 토큰, 플레이 이력이 남는다.
 “로그인이 없으니 개인정보가 전혀 없다”라고 안내하지 않는다. 수집 항목·목적·보존·삭제
 안내는 실제 운영 국가와 배치에 맞게 별도로 확정해야 한다.

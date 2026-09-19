@@ -1,4 +1,87 @@
-# 2026-09-11 폴리싱 변경과 검증 기록
+# 폴리싱 변경과 검증 기록
+
+## 2026-09-19 — 서버 판정·계정 경계·사용자 안내·문서 동기화
+
+현재 검증은 Linux의 로컬 작업 트리 기준이다. [Part 17](blog/part17-guest-account-recovery.md)은
+계정 변경·실패 복구를, [Part 18](blog/part18-authoritative-results.md)은 서버 승패 판정·JSON
+검증·결과 상태를 설명한다. [품질 검토](architecture-quality-review.md)에 발견한 문제와
+해결 범위, 남아 있는 출시 조건을 구분했다.
+
+| 확인 | 실제 결과 |
+|---|---|
+| WSS=ON Release 빌드 | 게임·meta·thread/reactor relay·게이트웨이·probe·단위 검사 빌드 성공 |
+| WSS=OFF Release 빌드 | 게임·meta·두 relay·단위 검사 빌드 성공. `out/polish/quality-wss-off-build.log` |
+| 전체 Python 회귀 | **1,784 passed, 2 skipped**, 200.82초. `out/polish/quality-full-tests.log` |
+| 계정·보안 입장·두 relay 결과 검증 표적 검사 | **65 passed**, 12.83초. `out/polish/quality-focused-final.log` |
+| CTest WSS=ON / OFF | **각각 9/9 통과**. `out/polish/quality-ctest.log`, `quality-wss-off-ctest.log` |
+| Part 형식·현재 소스 발췌·로컬 파일 링크 | `scripts/check_part_docs.py` 통과. CI에도 같은 검사 추가 |
+| 변경 공백 오류 | `git diff --check` 통과 |
+
+전체 실행에서는 loopback reactor를 실제로 띄웠으며 두 relay의 경기 검증 fixture는 각각
+별도 서버를 띄운다. 제외한 두 검사는 설치되지 않은 `torch`·`gymnasium`에 의존한다.
+서버 미기동으로 생긴 skip은 없다. 표적 검사 65개는 전체 결과와 중복되며 더해서 세지 않는다.
+
+주요 회귀는 일치하는 거짓 승리 신고의 무보상, 실제 입력으로 끝난 경기의 서버 승패/통계,
+입력 변조·재작성·seed 변경 거절, 미완료 연결 종료의 무보상, JSON 전체 형식·중복 키 검사,
+다른 서버로의 키 전송 차단, 최초 키 저장 실패 후 같은 계정 저장 재시도, 한글 경로,
+credential 변경의 원자성·응답 유실·복구·입장권 폐기를 확인한다.
+
+문서에서는 Part 0~18의 현재 소스 발췌를 전부 대조하고 필요한 예시를 갱신했다.
+Colab 설정·폰트 반환값·소켓과 wire 필드·systemd 설정도 실제 코드에 맞췄다. 또한
+옛 인증 캐시·평문 공개 포트·자기 신고 승패·기존 메뉴/설정 설명을 수정했다. 발췌 검사는 소스와의 일치를 확인하지만,
+코드 예시의 모든 의미나 본문 문장의 정확성을 자동으로 증명하는 검사는 아니다.
+
+아래 검증 이력의 “미구현/남음”은 **그 단계 당시 상태**다. PvP 입력 재현은 이번에 구현·검증했지만,
+자동 플레이·담합·반복 보상 억제, 이탈 제재, 검증 비용을 포함한 ranked 부하 시험은 남는다.
+Windows/macOS 실기기·설치 번들·최종 화면 육안 검수·실제 Colab 학습·브라우저 게임 포팅·
+운영 서버 배포는 이번 실행에서 완료하지 않았다. 검증한 코드와 문서는 함께 버전 관리하며 실제 서비스 배포 여부와 구분한다.
+
+재현 명령은 저장소 루트에서 실행한다. 전체 회귀용 reactor는 별도 터미널에서 먼저 띄운다.
+
+```bash
+./build-secure/tetris_relay_reactor --port 7788 --loops 1 --loopback-only
+```
+
+```bash
+TETRIS_SECURE_BUILD="$PWD/build-secure" \
+TETRIS_META_BIN="$PWD/build-secure/tetris_meta" \
+TETRIS_RELAY_BIN="$PWD/build-secure/tetris_relay_reactor" \
+TETRIS_RELAY_REACTOR_BIN="$PWD/build-secure/tetris_relay_reactor" \
+uv run python -m pytest python/tests -q -ra
+ctest --test-dir build-secure --output-on-failure
+ctest --test-dir build-polish --output-on-failure
+uv run python scripts/check_part_docs.py
+```
+
+빌드 폴더 이름은 로컬 검증용이다. 새 환경은 [실행 안내](start-here.md)의 구성·빌드부터
+진행한다. WSS 검사에는 `TETRIS_BUILD_WSS=ON`, 단위 검사에는 `TETRIS_BUILD_TEST=ON`이 필요하다.
+
+---
+
+## 이전 검증 이력 — 계정 해시·폐기·복구
+
+계정 구현의 의도와 실패 처리는 [Part 17](blog/part17-guest-account-recovery.md),
+구조·SOLID·문서·보안·사용자 오인에 대한 재평가는 [품질 검토](architecture-quality-review.md)에 있다.
+이 절은 이전 단계의 완료 로그를 2026-09-19에 확인한 기록이다. 그 뒤 같은 날 재실행한 최신 전체 검사 결과는 맨 위 절에 있다.
+
+| 확인 | 결과 |
+|---|---|
+| 계정 변경 포함 Linux 전체 회귀 | **1,758 passed, 2 skipped**, 195.67초. `out/polish/account-full-tests.log` |
+| 계정 보안 표적 검사 재실행 | **12 passed**, 10.68초. `out/polish/account-security-final.log` |
+| WSS=ON Release 빌드와 CTest | 게임·meta·두 relay·gateway·probe 빌드 성공, **7/7 통과** |
+| WSS=OFF Release 빌드와 CTest | 기존 개발 빌드 성공, **7/7 통과** |
+| 파일 링크 | README와 docs의 코드 블록을 제외한 로컬 파일 링크 확인 |
+
+새 표적 검사에는 손상된 옛 토큰을 발견했을 때 기존 행의 부분 해시화를 되돌리고
+서버 시작을 거절하는 회귀를 추가했다. 이 검사는 위 전체 실행 후 추가되었으며 표적 검사에서
+실행했다. 계정 검사에는 원문 미저장·이관 멱등성·이전 키와 입장권 폐기·경쟁 복구·키 충돌·
+파일 잠금·저장 실패·응답 유실 후 재시도가 포함된다.
+
+전체 실행의 skip은 torch·gymnasium 부재다. 실제 운영 DB를 이관하거나 서버를 배포하지
+않았다. Windows/macOS 실행·새 계정 UI의 시각/사용성 검수·활성 경기 즉시 회수·PvP
+결과 재현 검증은 완료한 것으로 표시하지 않는다. 현재 계정 변경은 로컬 작업 트리에 있다.
+
+이하 WSS·봇 단계 수치는 이전 검증 이력이다.
 
 ## 후속 작업: WSS·일회용 입장권·Part 문서 정리
 
@@ -45,8 +128,8 @@ Colab·BP 검증의 소유권, 바꿔야 하는 파일과 이유를 연결했다
 Windows/macOS는 시스템 CA·빌드·CI 경로를 추가했지만 **실기기 또는 원격 CI 실행을
 여기서 완료하지 않았다.** TLS 라이브러리 복사 로직의 추가와 배포 스크립트 문법 검사는
 깨끗한 OS에서의 설치·실행·서명·공증 검증을 대신하지 않는다. 공개 인증서·DNS·
-방화벽·서비스 배포도 수행하지 않았다. 계정 토큰 해시화/회전/복구, PvP 규칙 검증,
-브라우저 게임 포팅은 남은 작업이다.
+방화벽·서비스 배포도 수행하지 않았다. 이 단계 이후 계정 토큰 해시화/교체/복구를
+아래와 별도로 검증했다. PvP 규칙 검증과 브라우저 게임 포팅은 남은 작업이다.
 
 이하 수치는 앞선 단계의 검증 이력이며 위 최종 회귀와 중복된다.
 
@@ -156,7 +239,7 @@ uv run python -m pytest python/tests -q -ra
   최종 화면 디자인 검수는 별도로 필요하다.
 - Linux 다중 루프의 용량 재측정. 이번 로컬 전체 회귀는 기본 단일 루프 기준이다.
 - 동시 수백/수천 명에 대한 무중단 운영, 침투 테스트 전체, 모든 의존성 CVE 감사.
-- 원문 DB 계정 토큰, 회전/폐기/복구 부재와 PvP 서버 규칙 검증의 해결.
+- PvP 서버 규칙 검증과 활성 세션 회수. DB 해시 저장·키 교체·복구 부재는 Part 17에서 해결했다.
   게임 전송 보호는 후속 WSS·입장권 작업으로 추가했지만 이 항목들과는 별개다.
 
 다음 우선순위는 [출시 점검](release-readiness.md)의 차단 항목이다.

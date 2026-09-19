@@ -96,3 +96,14 @@ dist/
 
 # Downloaded, OS-specific inference runtime (recreate with fetch_onnxruntime.sh).
 third_party/onnxruntime/
+
+# Local account credentials and crash-recovery journals must never be published.
+**/Tetris/token
+**/account.json
+account.json.tmp-*
+**/account-recovery.json
+**/account-change.pending.json
+**/account-change.lock
+token.tmp-*
+account-recovery.json.tmp-*
+account-change.pending.json.tmp-*

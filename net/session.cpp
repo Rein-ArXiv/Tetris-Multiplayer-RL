@@ -31,13 +31,15 @@ static std::string read_short_string(const std::vector<uint8_t>& payload, size_t
 
 static void parse_match_icons(const std::vector<uint8_t>& payload,
                               std::string& local_icon,
-                              std::string& remote_icon)
+                              std::string& remote_icon, bool& ranked)
 {
     size_t pos = 9;  // [role:1][seed:8]
     std::string mine = read_short_string(payload, pos);
     std::string peer = read_short_string(payload, pos);
     local_icon  = mine.empty() ? "default" : mine;
     remote_icon = peer.empty() ? "default" : peer;
+    read_short_string(payload, pos); // Existing match UUID.
+    ranked = pos < payload.size() && payload[pos] == 1;
 }
 
 Session::Session() {}
@@ -588,13 +590,15 @@ void Session::roomThread(std::string host, uint16_t port,
                 Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
                 std::string localIcon = "default";
                 std::string remoteIcon = "default";
-                parse_match_icons(f.payload, localIcon, remoteIcon);
+                bool ranked = false;
+                parse_match_icons(f.payload, localIcon, remoteIcon, ranked);
                 {
                     std::lock_guard<std::mutex> lk(seedMu);
                     seedParams.seed = seed;
                     seedParams.start_tick = start_tick;
                     seedParams.input_delay = input_delay;
                     seedParams.role = role;
+                    seedParams.ranked = ranked;
                     seedParams.local_icon_id = localIcon;
                     seedParams.remote_icon_id = remoteIcon;
                 }
@@ -723,13 +727,15 @@ void Session::queueThread(std::string host, uint16_t port,
                 Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
                 std::string localIcon = "default";
                 std::string remoteIcon = "default";
-                parse_match_icons(f.payload, localIcon, remoteIcon);
+                bool ranked = false;
+                parse_match_icons(f.payload, localIcon, remoteIcon, ranked);
                 {
                     std::lock_guard<std::mutex> lk(seedMu);
                     seedParams.seed = seed;
                     seedParams.start_tick = start_tick;
                     seedParams.input_delay = input_delay;
                     seedParams.role = role;
+                    seedParams.ranked = ranked;
                     seedParams.local_icon_id = localIcon;
                     seedParams.remote_icon_id = remoteIcon;
                 }
@@ -1148,6 +1154,7 @@ void Session::handleFrame(const Frame& f) {
         r.elo_before = static_cast<int32_t>(le_read_u32(p));
         r.elo_after  = static_cast<int32_t>(le_read_u32(p + 4));
         r.delta      = static_cast<int32_t>(le_read_u32(p + 8));
+        if (f.payload.size() >= 13 && p[12] <= uint8_t(ResultStatus::Draw)) r.status = static_cast<ResultStatus>(p[12]);
         std::lock_guard<std::mutex> lk(matchResultMu_);
         matchResult_ = r;
         matchResultValid_ = true;

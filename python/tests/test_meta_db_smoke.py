@@ -458,9 +458,9 @@ def test_elo_rp_migration_on_legacy_db(tmp_path):
           elo INTEGER NOT NULL DEFAULT 1200, wins INTEGER NOT NULL DEFAULT 0,
           losses INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
         INSERT INTO players(id,username,token,elo,wins,losses,created_at)
-          VALUES (1, NULL, 'tokenhi', 1500, 3, 1, 0);
+          VALUES (1, NULL, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1500, 3, 1, 0);
         INSERT INTO players(id,username,token,elo,wins,losses,created_at)
-          VALUES (2, NULL, 'tokenlo', 1100, 0, 2, 0);
+          VALUES (2, NULL, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1100, 0, 2, 0);
         CREATE TABLE matches (
           id INTEGER PRIMARY KEY, player_a INTEGER NOT NULL, player_b INTEGER NOT NULL,
           winner INTEGER, score_a INTEGER NOT NULL, score_b INTEGER NOT NULL,
@@ -491,8 +491,8 @@ def test_elo_rp_migration_on_legacy_db(tmp_path):
             pytest.fail(f"tetris_meta did not listen on :{port}\n{stderr}")
         try:
             base = f"http://127.0.0.1:{port}"
-            _, hi = _post(f"{base}/v1/auth/verify", {"token": "tokenhi"})
-            _, lo = _post(f"{base}/v1/auth/verify", {"token": "tokenlo"})
+            _, hi = _post(f"{base}/v1/auth/verify", {"token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+            _, lo = _post(f"{base}/v1/auth/verify", {"token": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
             return hi, lo
         finally:
             proc.terminate()

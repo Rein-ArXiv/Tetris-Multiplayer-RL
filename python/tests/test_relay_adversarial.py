@@ -1293,16 +1293,10 @@ def test_queue_join_then_cancel_in_one_segment_leaves_the_queue_empty(
 
 
 def test_forged_match_summary_cannot_decide_the_result_alone(ranked, socks):
-    """한쪽이 요약을 위조해도 그 값으로 결과가 확정되면 안 된다. **가드**.
+    """Invented or repeatedly changed claims cannot create a ranked result.
 
-    MATCH_SUMMARY 는 클라이언트가 만드는 값이므로 릴레이는 이것을 믿을 수 없다.
-    유일한 방어는 교차검증이다 — 양쪽이 서로의 점수·라인·승패를 거울처럼 보고해야
-    승자를 인정한다. 위조하면 교차검증이 깨지고 결과는 무효(RP 변동 0)여야 한다.
-
-    이 테스트는 세 가지를 함께 못 박는다:
-      · A 가 보낸 요약은 A 자리에만 들어간다 (상대 요약 사칭 불가)
-      · 같은 쪽이 여러 번 보내면 첫 번째만 쓰인다 (유리한 값으로 덮어쓰기 불가)
-      · 교차검증이 깨지면 양쪽 다 delta=0 (위조로 이득을 못 본다)
+    No INPUT stream reaches a terminal game here. The relay must report Incomplete
+    without even posting a draw to meta; agreement between clients is not proof.
     """
     meta, port = ranked
     a = socks(_connect(port))
@@ -1329,9 +1323,8 @@ def test_forged_match_summary_cannot_decide_the_result_alone(ranked, socks):
     assert res_a is not None and res_b is not None, (
         "교차검증이 깨진 경기에서 결과 프레임이 아예 오지 않았다 — 클라이언트는 "
         "결과 대기 화면에서 빠져나올 수 없다")
-    assert meta.last_winner_null is True, (
-        "교차검증이 깨졌는데 릴레이가 meta 에 승자를 지정해 보냈다 — 위조한 쪽이 "
-        "이겼다고 기록된다")
+    assert meta.last_winner_null is None, "Unverified game must not be posted to meta"
+    assert res_a[12] == res_b[12] == 3  # Incomplete
     for name, payload in (("A", res_a), ("B", res_b)):
         before, after, delta = struct.unpack("<iii", payload[:12])
         assert delta == 0, (

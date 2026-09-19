@@ -116,6 +116,7 @@ if (TETRIS_BUILD_GAME)
     set(TETRIS_GAME_COMMON
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
+        src/account_screen.cpp
         src/game.cpp
         src/gui.cpp
         src/colors.cpp
@@ -134,6 +135,8 @@ if (TETRIS_BUILD_GAME)
         bot/opponents.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
+        meta/private_file.cpp
+        meta/account_client.cpp meta/account_store.cpp platform/user_data.cpp
     )
 
     set(TETRIS_GAME_HEADERS
@@ -385,7 +388,7 @@ endif()
 # Target: tetris_relay (matchmaking / relay server)
 #
 # 역할: TCP 접속 제한·인증·매칭·룸·결과 검증을 맡고, 게임 프레임은 전달한다.
-#       GUI/오디오/시뮬 없음 — net/ 만 재사용. Linux/macOS/Windows 서버용.
+#       GUI/오디오 없음 — net/과 결정론적 SimGame 재사용. Linux/macOS/Windows 서버용.
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_RELAY)
     # relay 가 meta HTTP API 를 호출하려면 httplib 헤더와 http_client.cpp 필요.
@@ -396,6 +399,7 @@ if (TETRIS_BUILD_RELAY)
             "meta API 호출용. cpp-httplib 를 다운로드해 third_party/ 에 넣으세요.")
     endif()
     add_executable(tetris_relay
+        ${TETRIS_SIM_SOURCES}
         server/main.cpp
         server/log.cpp
         server/matchmaker.cpp
@@ -454,6 +458,7 @@ endif()
 # -----------------------------------------------------------------------------
 if (TETRIS_BUILD_RELAY AND TETRIS_BUILD_REACTOR)
     add_executable(tetris_relay_reactor
+        ${TETRIS_SIM_SOURCES}
         server/reactor_relay.cpp
         server/log.cpp
         net/socket.cpp
@@ -533,6 +538,7 @@ if (TETRIS_BUILD_META)
     add_executable(tetris_meta
         meta/main.cpp
         meta/database.cpp
+        meta/credentials.cpp
         meta/api_server.cpp
         meta/bot_challenges.cpp
         bot/opponents.cpp
@@ -550,6 +556,8 @@ if (TETRIS_BUILD_META)
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
+    find_package(OpenSSL REQUIRED) # credential hashes are mandatory, even without HTTPS
+    target_link_libraries(tetris_meta PRIVATE OpenSSL::Crypto)
     # SQLite amalgamation — 기본 threadsafe(serialized) 모드로 컴파일.
     # WAL + mutex 는 C++ 래퍼에서 보강한다.
     target_compile_definitions(tetris_meta PRIVATE
@@ -607,12 +615,13 @@ if (TETRIS_BUILD_TEST)
     target_include_directories(bot_replay_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME bot_replay COMMAND bot_replay_test)
     if (TETRIS_BUILD_META)
-        add_executable(bot_reward_db_test tests/bot_reward_db_test.cpp meta/database.cpp ${TETRIS_SQLITE3_SOURCE})
+        add_executable(bot_reward_db_test tests/bot_reward_db_test.cpp meta/database.cpp meta/credentials.cpp ${TETRIS_SQLITE3_SOURCE})
         target_include_directories(bot_reward_db_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
         target_compile_definitions(bot_reward_db_test PRIVATE SQLITE_THREADSAFE=1 SQLITE_DEFAULT_FOREIGN_KEYS=1)
         if (NOT WIN32)
             target_link_libraries(bot_reward_db_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         endif()
+        target_link_libraries(bot_reward_db_test PRIVATE OpenSSL::Crypto)
         add_test(NAME bot_reward_db COMMAND bot_reward_db_test)
     endif()
 endif()
@@ -673,11 +682,11 @@ if (TETRIS_BUILD_TEST)
     target_link_libraries(game_tickets_test PRIVATE Threads::Threads)
     add_test(NAME game_tickets COMMAND game_tickets_test)
     if (TETRIS_BUILD_WSS)
-        add_executable(wss_probe tests/wss_probe.cpp net/wss_client.cpp net/socket.cpp net/session.cpp net/framing.cpp meta/http_client.cpp)
+        add_executable(wss_probe tests/wss_probe.cpp net/wss_client.cpp net/socket.cpp net/session.cpp net/framing.cpp meta/http_client.cpp meta/private_file.cpp meta/account_client.cpp meta/account_store.cpp platform/user_data.cpp)
         target_include_directories(wss_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
         target_compile_definitions(wss_probe PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
         if (WIN32)
-            target_link_libraries(wss_probe PRIVATE shell32)
+            target_link_libraries(wss_probe PRIVATE shell32 advapi32)
         endif()
         if (APPLE)
             target_compile_definitions(wss_probe PRIVATE CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN)
@@ -694,4 +703,12 @@ if (APPLE AND TETRIS_ENABLE_HTTPS AND OpenSSL_FOUND)
             target_link_libraries(${client_target} PRIVATE "-framework Security" "-framework CoreFoundation")
         endif()
     endforeach()
+endif()
+
+# Shared authority and API grammar are independently testable without a game window.
+if (TETRIS_BUILD_TEST)
+    add_executable(ranked_game_test tests/ranked_game_test.cpp ${TETRIS_SIM_SOURCES} net/framing.cpp)
+    add_test(NAME ranked_game COMMAND ranked_game_test)
+    add_executable(json_input_test tests/json_input_test.cpp)
+    add_test(NAME json_input COMMAND json_input_test)
 endif()

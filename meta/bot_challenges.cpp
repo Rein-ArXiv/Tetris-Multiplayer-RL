@@ -4,6 +4,7 @@
 #include "../bot/bot_onnx.h"
 #include "../bot/reward_replay.h"
 #include "httplib.h"
+#include "json_routes.h"
 #include <charconv>
 #include <memory>
 #include <mutex>
@@ -30,7 +31,7 @@ bool valid_ticket(const std::string& s) {
 void register_bot_challenges(httplib::Server& svr,Database& db,
                             std::function<std::optional<std::string>()> secure_id) {
     auto state=std::make_shared<State>();
-    svr.Post("/v1/bots/challenge",[state,&db,secure_id](const httplib::Request& req,httplib::Response& res){
+    json_post(svr, "/v1/bots/challenge",[state,&db,secure_id](const httplib::Request& req,httplib::Response& res){
         auto player=db.getByToken(proto::find_string(req.body,"token"));
         if(!player){error(res,401,"unknown_token");return;}
         const auto id=proto::find_string(req.body,"opponent_id");
@@ -56,7 +57,7 @@ void register_bot_challenges(httplib::Server& svr,Database& db,
             ",\"think_ticks\":"+std::to_string(entry->thinkTicks)+
             ",\"min_piece_ticks\":"+std::to_string(entry->minPieceTicks)+"}");
     });
-    svr.Post("/v1/bots/claim",[state,&db](const httplib::Request& req,httplib::Response& res){
+    json_post(svr, "/v1/bots/claim",[state,&db](const httplib::Request& req,httplib::Response& res){
         const auto token=proto::find_string(req.body,"token");
         auto player=db.getByToken(token);
         if(!player){error(res,401,"unknown_token");return;}

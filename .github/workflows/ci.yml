@@ -105,6 +105,9 @@ jobs:
       - name: Python deps
         run: uv sync --dev
 
+      - name: Part documentation structure, source excerpts and links
+        run: uv run python scripts/check_part_docs.py
+
       # 스모크 테스트는 wire 레벨이라 서버 구현을 모른다. 그래서 같은 스위트를 두
       # 바이너리에 겨눠 "두 구현이 같은 계약을 말하는가" 를 직접 확인할 수 있다.
       - name: Smoke — thread-model relay

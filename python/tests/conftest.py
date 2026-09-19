@@ -19,7 +19,7 @@ def legacy_relay_fixture(request, monkeypatch):
     """Older wire fixtures intentionally send reusable credentials. Production
     defaults and secure transport tests must never inherit that compatibility mode.
     """
-    if request.node.path.name != "test_secure_admission.py":
+    if request.node.path.name not in {"test_secure_admission.py", "test_account_security.py"}:
         monkeypatch.setenv("TETRIS_RELAY_LEGACY_AUTH", "1")
     else:
         monkeypatch.delenv("TETRIS_RELAY_LEGACY_AUTH", raising=False)

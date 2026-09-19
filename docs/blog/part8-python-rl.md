@@ -4,7 +4,7 @@
 
 ---
 
-## 이 장의 구현 계약
+## 이번 Part의 구현 계약
 
 - **선행 상태:** 학습 코어에는 Part 1의 headless `SimGame` API(`LegalPlacements`, `ApplyPlacement`, `Grid`, `StateHash`)와 `sim_hash_dump` 결정론 기준 파일만 필요하다. `python/netbot/framing.py` 패리티 절을 함께 구현할 때만 Part 6의 `net/framing.*` wire 규약이 추가로 필요하다.
 - **이번 장의 파일:** `bindings/tetris_py.cpp`, `python/sim/`, `python/common/`, `python/train/`, `python/netbot/framing.py`, `python/netbot/input_expander.py`, `python/tests/`.
@@ -100,7 +100,9 @@ with an ONNX smoke test. Keeping the conversion in one spot per language
 prevents the classic "trained on one format, deployed on another" failure.
 ```
 
-**현재 소스 발췌 — `python/common/__init__.py`** (패키지 docstring 첫 문단)
+(패키지 docstring 첫 문단)
+
+**현재 소스 발췌 — `python/common/__init__.py`**
 
 ```python
 """Shared training/inference layer for the Tetris RL bot.
@@ -347,7 +349,7 @@ game.apply_placement(4, 0)   # SimGame 내부 상태 변경
 
 `reference_internal` 은 pybind11 에서 `reference + keep_alive<0, 1>` 와 같다. "반환된 자식 객체가 살아 있는 동안 부모(`self`, 여기서는 `SimGame`)도 살려 둔다" 는 뜻이다. 즉 **수명 문제는 이 정책이 이미 해결했다.**
 
-**예시**
+**예시(실제 저장소에는 없음)**
 
 ```python
 block = game.current_block()   # SimGame 내부의 SimBlock 에 대한 참조
@@ -358,7 +360,7 @@ print(block.id)                # 여전히 유효
 
 실제 위험은 소멸이 아니라 **상태 변경**이다.
 
-**예시**
+**예시(실제 저장소에는 없음)**
 
 ```python
 block = game.current_block()
@@ -1136,7 +1138,7 @@ graph TB
 
 ### 7.3 ARCH_VERSION 가드
 
-**예시**
+**예시(실제 저장소에는 없음)**
 
 ```python
 ARCH_VERSION = 1
@@ -1767,7 +1769,9 @@ class FramingError(Exception):
 
 파서 본체는 이렇다.
 
-**현재 소스 발췌 — `python/netbot/framing.py`** (`parse_frames` 본문. docstring 은 생략)
+(`parse_frames` 본문. docstring 은 생략)
+
+**현재 소스 발췌 — `python/netbot/framing.py`**
 
 ```python
     out: list[tuple[MsgType, bytes]] = []

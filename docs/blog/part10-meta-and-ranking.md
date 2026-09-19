@@ -4,6 +4,8 @@
 
 ---
 
+> **현재 구현의 연결:** 접속 입장권은 [Part 16](part16-secure-admission.md), 해시 저장·키 교체·복구·파일 저장은 [Part 17](part17-guest-account-recovery.md)에서 확장한다. 아래 현재 소스 발췌도 이 최종 계약에 맞췄다.
+
 ## 이번 Part의 구현 계약
 
 - **선행 상태:** [Part 7](./part7-relay-server.md)의 `tetris_relay`(`Matchmaker`, `RoomRegistry`, `forwarderLoop`)와 [Part 6](./part6-lockstep-networking.md)의 framing·`Session` 수신 기반이 동작한다. 이 장이 `MATCH_SUMMARY` / `MATCH_RESULT`에 랭킹 의미를 부여하고 relay의 선택적 해석 경계를 완성한다. 클라이언트는 [Part 4](./part4-game-wrapper-and-loop.md)의 `AppMode` 메뉴 루프와 [Part 3](./part3-rendering-and-ui.md)의 기본 GUI 위젯을 가지고 있다.
@@ -12,7 +14,7 @@
   - 벤더링하는 것: `third_party/sqlite3.c`, `third_party/sqlite3.h`, `third_party/httplib.h`
   - 고치는 것: `CMakeLists.txt`(`tetris_meta` 타깃 + 게임 클라이언트에 `meta/http_client.cpp` 추가), `server/main.cpp`(`--meta` / `--meta-secret`), `server/player_conn.cpp`(`authenticate`), `server/relay.cpp`(`finalizeRanked`), `src/main.cpp`(토큰 부트스트랩 + `AppMode::Customize` 화면 + 메뉴 항목)
 - **연결점:** meta 는 guest/auth/icons/leaderboard 를 클라이언트에 제공하고, relay 만 `X-Relay-Secret` 으로 보호된 `POST /v1/matches` 를 호출해 RP/XP/BP 를 갱신한다. 클라이언트는 `meta::client::MetaClient` 하나로 meta 를 부르고, relay 도 같은 클래스를 링크해서 쓴다.
-- **완료 게이트:** `tetris_meta`와 `tetris_relay`가 함께 빌드되고, DB·relay/meta·summary 교차검증 테스트가 skip 없이 모두 통과한다.
+- **완료 게이트:** `tetris_meta`와 `tetris_relay`가 함께 빌드되고, DB·relay/meta·서버 결과 검증 테스트가 skip 없이 모두 통과한다.
 
 ---
 
@@ -24,7 +26,7 @@
 
 | 프로세스 | 상태 | 책임 |
 |---|---|---|
-| `tetris_relay` | 매치 수명 동안만 (메모리) | 토큰 verify, 매칭, wire 전달, 결과 교차검증 |
+| `tetris_relay` | 매치 수명 동안만 (메모리) | 입장권 소비, 매칭, wire 전달, 서버 입력 검증 |
 | `tetris_meta` | SQLite 에 영속 | guest 발급, RP/XP/BP, 아이콘 소유권, 매치 기록, leaderboard |
 
 ```mermaid
@@ -91,13 +93,13 @@ graph TB
 //   · 런타임 실패 (schema/쿼리) → fprintf(stderr) 로 로그 + nullopt 반환.
 //     호출자가 HTTP 500 으로 바꿔서 클라이언트에게 전달.
 //
-// 스키마: players, player_icons, matches, elo_history, schema_migrations.
-// WAL + foreign keys + NORMAL.
+// 스키마: players, player_icons, matches, elo_history, bot_rewards, schema_migrations.
+// WAL + foreign keys + FULL (credential rotation must survive a committed response).
 ```
 
 WAL(Write-Ahead Logging)은 writer와 별도 connection의 reader가 서로 덜 막히게 하는 저장 방식이다. 그러나 현재 `Database`는 connection 하나와 mutex 하나를 공유하므로, 같은 프로세스의 `POST /v1/matches`가 DB 작업을 하는 동안 `GET /v1/leaderboard`도 그 mutex에서 기다린다. 현재 선택의 직접적인 이점은 안전한 크래시 복구와 짧은 트랜잭션이고, 나중에 읽기 전용 connection을 분리할 때 WAL의 동시 읽기 장점을 온전히 사용할 수 있다.
 
-`synchronous = NORMAL` 은 매 커밋마다 fsync 를 부르지 않는 절충이다. OS 가 죽으면 마지막 몇 트랜잭션을 잃을 수 있지만 프로세스가 죽는 것만으로는 잃지 않는다. "마지막 한 판의 RP 가 유실될 수 있음"은 이 게임에서 감당 가능한 위험이고, 그 대가로 커밋 지연이 크게 줄어든다.
+`synchronous = FULL`은 WAL의 커밋도 저장 장치에 동기화한다. [Part 17](part17-guest-account-recovery.md)에서 계정 키 교체를 추가하면서 NORMAL에서 바꿨다. 성공 응답을 받은 클라이언트가 이전 키를 지웠는데 서버가 전원 장애로 교체 전 상태로 돌아가는 일을 줄이기 위해서다. 커밋 지연이 늘어나는 대가가 있으며 실제 내구성은 파일 시스템과 저장 장치가 동기화 요청을 지킨다는 전제에 의존한다.
 
 ## 2. CMakeLists 확장
 
@@ -109,18 +111,6 @@ WAL(Write-Ahead Logging)은 writer와 별도 connection의 reader가 서로 덜 
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-# -----------------------------------------------------------------------------
-# Target: tetris_meta (HTTP + SQLite metadata/leaderboard server)
-#
-# 역할: 별도 영속 호스트(저전력 Android/Termux 단말 등)에서 돌아가는 독립 서비스.
-#       · SQLite 로 player/match/rating history/icon ownership 영속화
-#       · cpp-httplib 로 guest/auth/icons/matches/leaderboard/health API 제공
-#       · relay 에 영속 상태를 두지 않고 matchmaking 경로에서 HTTP 호출만 붙인다.
-#
-# 서드파티: third_party/sqlite3.{c,h} + third_party/httplib.h (헤더 온리).
-#           두 파일 모두 벤더링(check-in)되어 있어야 한다 — repo 루트의
-#           third_party/ 에 없으면 CMake 가 즉시 실패한다.
-# -----------------------------------------------------------------------------
 if (TETRIS_BUILD_META)
     if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite3.c" OR
         NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite3.h")
@@ -146,7 +136,13 @@ if (TETRIS_BUILD_META)
     add_executable(tetris_meta
         meta/main.cpp
         meta/database.cpp
+        meta/credentials.cpp
         meta/api_server.cpp
+        meta/bot_challenges.cpp
+        bot/opponents.cpp
+        bot/placement.cpp
+        bot/bot_onnx.cpp
+        ${TETRIS_SIM_SOURCES}
         ${TETRIS_SQLITE3_SOURCE}
         meta/database.h
         meta/api_server.h
@@ -158,6 +154,8 @@ if (TETRIS_BUILD_META)
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
+    find_package(OpenSSL REQUIRED) # credential hashes are mandatory, even without HTTPS
+    target_link_libraries(tetris_meta PRIVATE OpenSSL::Crypto)
     # SQLite amalgamation — 기본 threadsafe(serialized) 모드로 컴파일.
     # WAL + mutex 는 C++ 래퍼에서 보강한다.
     target_compile_definitions(tetris_meta PRIVATE
@@ -205,36 +203,30 @@ project(tetris CXX C)
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-if (TETRIS_BUILD_GAME)
-    # 공통: 시뮬레이션 + 게임 로직 + 렌더러 공통 부분 + 네트워킹 + 봇
-    #   bot/*.cpp 는 TETRIS_BUILD_BOT 과 관계없이 항상 컴파일한다 — OFF 일 때
-    #   bot_onnx.cpp 는 자동으로 스텁 모드(TETRIS_HAS_ONNXRUNTIME 미정의)로
-    #   빌드되어 main.cpp 의 호출부만 정상 링크된다.
-    # meta/http_client.cpp 는 tetris_meta 서버와의 HTTP 통신 (guest 토큰 발급용).
-    # third_party/httplib.h 가 있어야 한다 — 없으면 빌드 실패로 빠르게 감지.
-    if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib.h")
-        message(FATAL_ERROR
-            "TETRIS_BUILD_GAME=ON 이지만 third_party/httplib.h 가 없습니다. "
-            "tetris_meta 서버 호출 (guest 토큰) 용. 다운로드 후 재시도.")
-    endif()
     set(TETRIS_GAME_COMMON
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
+        src/account_screen.cpp
         src/game.cpp
         src/gui.cpp
         src/colors.cpp
+        src/presentation.cpp
         core/replay.cpp
         net/socket.cpp
         net/framing.cpp
         net/session.cpp
+        net/wss_client.cpp
         renderer/renderer.cpp
         renderer/gl_api.cpp
         renderer/text_gl.cpp
         renderer/shake.cpp
         renderer/image_gl.cpp
         bot/placement.cpp
+        bot/opponents.cpp
         bot/bot_onnx.cpp
         meta/http_client.cpp
+        meta/private_file.cpp
+        meta/account_client.cpp meta/account_store.cpp platform/user_data.cpp
     )
 ```
 
@@ -247,8 +239,8 @@ HTTPS는 선택 기능이다. `TETRIS_ENABLE_HTTPS`가 켜져 있고 OpenSSL이 
 빌드 명령은 다음과 같다.
 
 ```bash
-cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON
-cmake --build build --target tetris_relay tetris_meta
+cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON -DTETRIS_BUILD_TEST=ON
+cmake --build build --parallel 4
 ```
 
 `tetris_meta` 와 `tetris_relay` 두 실행 파일이 생긴다. 게임 클라이언트를 함께 빌드하려면 `-DTETRIS_BUILD_GAME=ON`(기본값)으로 두면 된다.
@@ -263,12 +255,16 @@ cmake --build build --target tetris_relay tetris_meta
 const char* kSchema = R"sql(
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous  = NORMAL;
+PRAGMA synchronous  = FULL;
+PRAGMA secure_delete = ON;
 
 CREATE TABLE IF NOT EXISTS players (
   id          INTEGER PRIMARY KEY,
   username    TEXT,
-  token       TEXT UNIQUE NOT NULL,
+  token_hash  TEXT UNIQUE NOT NULL,
+  recovery_hash TEXT,
+  auth_epoch INTEGER NOT NULL DEFAULT 0,
+  last_credential_op TEXT,
   elo         INTEGER NOT NULL DEFAULT 0,
   wins        INTEGER NOT NULL DEFAULT 0,
   losses      INTEGER NOT NULL DEFAULT 0,
@@ -303,6 +299,15 @@ CREATE TABLE IF NOT EXISTS matches (
   elo_b_after  INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS bot_rewards (
+  ticket TEXT PRIMARY KEY,
+  player_id INTEGER NOT NULL REFERENCES players(id),
+  opponent_id TEXT NOT NULL,
+  awarded_bp INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bot_rewards_player_time ON bot_rewards(player_id,created_at);
+
 CREATE TABLE IF NOT EXISTS elo_history (
   id          INTEGER PRIMARY KEY,
   player_id   INTEGER NOT NULL REFERENCES players(id),
@@ -331,7 +336,7 @@ CREATE INDEX IF NOT EXISTS idx_player_icons_pid ON player_icons(player_id);
 
 | 테이블 | 역할 | 특징 |
 |---|---|---|
-| `players` | 계정 하나 = 행 하나 | `token` 이 UNIQUE — 사실상 로그인 키 |
+| `players` | 계정 하나 = 행 하나 | `token_hash`가 UNIQUE — 접근 키의 목적별 해시. 복구·교체 컬럼은 Part 17 |
 | `player_icons` | 아이콘 소유권 | `(player_id, icon_id)` 복합 PK 로 중복 소유 불가 |
 | `matches` | 매치 감사 기록 | `match_uuid`로 중복 반영 방지, 확정 RP snapshot 보존 |
 | `elo_history` | RP 변동 로그 | 매치당 두 행(양쪽) |
@@ -351,7 +356,6 @@ CREATE INDEX IF NOT EXISTS idx_player_icons_pid ON player_icons(player_id);
 **현재 소스 발췌 — `meta/database.cpp`**
 
 ```cpp
-// -----------------------------------------------------------------------------
 Database::Database(const std::string& path)
 {
     int rc = sqlite3_open(path.c_str(), &db_);
@@ -364,7 +368,8 @@ Database::Database(const std::string& path)
     }
     // 트랜잭션 밖에서 5초까지 락 대기 (동시 요청 스레드 있을 수 있음).
     sqlite3_busy_timeout(db_, 5000);
-    execSchema();
+    try { execSchema(); }
+    catch (...) { sqlite3_close(db_); db_=nullptr; throw; }
 }
 
 Database::~Database()
@@ -406,12 +411,15 @@ void Database::execSchema()
     alter_if_needed("ALTER TABLE players ADD COLUMN bp INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE players ADD COLUMN selected_icon_id TEXT NOT NULL DEFAULT 'default'");
     alter_if_needed("ALTER TABLE players ADD COLUMN xp INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE players ADD COLUMN recovery_hash TEXT");
+    alter_if_needed("ALTER TABLE players ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0");
+    alter_if_needed("ALTER TABLE players ADD COLUMN last_credential_op TEXT");
     alter_if_needed("ALTER TABLE matches ADD COLUMN match_uuid TEXT");
     alter_if_needed("ALTER TABLE matches ADD COLUMN elo_a_before INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE matches ADD COLUMN elo_a_after INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE matches ADD COLUMN elo_b_before INTEGER NOT NULL DEFAULT 0");
     alter_if_needed("ALTER TABLE matches ADD COLUMN elo_b_after INTEGER NOT NULL DEFAULT 0");
-    // 구 DB 는 위 ALTER 로 match_uuid 컬럼을 먼저 받은 뒤에야 인덱스를 만들 수 있다.
+    // Old tables receive this column through ALTER before the index is created.
     {
         char* indexErr = nullptr;
         const int indexRc = sqlite3_exec(
@@ -475,6 +483,7 @@ void Database::execSchema()
             throw std::runtime_error("elo->rp rebase migration failed: " + msg);
         }
     }
+    migrateCredentials();
 }
 ```
 
@@ -751,7 +760,7 @@ constexpr int kXpLoss = 50;
 |---|---|---:|---:|
 | 승리 | Elo 상승 | +30 | +100 |
 | 패배 | Elo 하락 (0 바닥) | +10 | +50 |
-| 무승부 · 교차검증 실패 | 변동 없음 | 0 | 0 |
+| 검증된 무승부 | 변동 없음 | 0 | 0 |
 
 패배에도 BP/XP 를 주는 것이 핵심이다. RP 만 있으면 지는 판은 순손실이라 플레이를 중단할 유인이 생긴다. BP/XP 는 **패배도 진전**으로 만든다. 다만 승리의 세 배(BP) · 두 배(XP) 를 줘서 이기려는 동기는 유지한다.
 
@@ -978,7 +987,7 @@ flowchart TD
 
 **`BEGIN IMMEDIATE` 를 쓰는 이유.** SQLite 의 기본 `BEGIN`(deferred)은 첫 쓰기가 일어날 때 비로소 쓰기 락을 잡는다. 그 사이에 다른 쓰기가 끼어들면 `SQLITE_BUSY` 로 트랜잭션 전체가 실패하고 처음부터 다시 해야 한다. `IMMEDIATE` 는 시작 시점에 쓰기 락을 확보해 이 재시도 경로를 아예 없앤다.
 
-**`winner=null` 이면 players 를 건드리지 않는다.** 교차검증에 실패한 매치도 `matches` 에는 남지만 RP/BP/XP 는 변하지 않고 `elo_history` 행도 생기지 않는다. "누가 뭐라고 주장했는가"는 감사 기록으로 보존하되 보상은 주지 않는다는 정책이다. 덕분에 relay 는 **검증 실패를 저장 실패와 구분해 다룰 필요가 없다** — 어느 쪽이든 POST 는 성공하고, 다만 delta 가 0 으로 돌아온다.
+**`winner=null`이면 players를 건드리지 않는다.** 현재 relay는 검증된 동시 종료만 무승부로 저장한다. 조작 입력이나 미완료 경기는 meta에 POST하지 않고 상태 코드와 변동 0을 반환한다. 따라서 무승부·검증 거절·저장 실패를 화면에서 서로 구분한다.
 
 **`ts` 를 한 번만 읽는다.** `now_unix()` 를 트랜잭션당 한 번 호출해 matches 와 elo_history 두 행이 같은 `created_at` 을 공유한다. 각자 시간을 읽으면 초 경계에서 1 초 차이가 나 "같은 매치인데 타임스탬프가 다른" 행이 생긴다.
 
@@ -998,26 +1007,27 @@ struct StmtGuard {
 
 ### 8.1 guest 등록
 
-계정 생성은 토큰 하나를 받아 행 하나를 만드는 일이다.
+계정 생성은 토큰의 형식을 검사하고 해시만 저장한 뒤 player 행을 만드는 일이다. 원문은 guest 응답에서 최초 클라이언트에 전달하며 `Player`의 필드로 보관하지 않는다.
 
 **현재 소스 발췌 — `meta/database.cpp`**
 
 ```cpp
-// -----------------------------------------------------------------------------
 std::optional<Player>
 Database::registerGuest(const std::string& token)
 {
     std::lock_guard<std::mutex> lk(mu_);
 
+    if(!credentials::account(token))return std::nullopt;
+    const auto hash=credentials::digest("account",token);
     StmtGuard g;
     const char* sql =
-        "INSERT INTO players(username,token,elo,wins,losses,created_at) "
+        "INSERT INTO players(username,token_hash,elo,wins,losses,created_at) "
         "VALUES(NULL,?1,0,0,0,?2)";
     if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) {
         std::fprintf(stderr, "[db] registerGuest prepare: %s\n", sqlite3_errmsg(db_));
         return std::nullopt;
     }
-    sqlite3_bind_text (g.s, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (g.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(g.s, 2, now_unix());
 
     int rc = sqlite3_step(g.s);
@@ -1030,7 +1040,6 @@ Database::registerGuest(const std::string& token)
 
     Player p;
     p.id      = sqlite3_last_insert_rowid(db_);
-    p.token   = token;
     p.elo     = 0;
     p.wins    = 0;
     p.losses  = 0;
@@ -1055,43 +1064,35 @@ Database::registerGuest(const std::string& token)
 **현재 소스 발췌 — `meta/database.cpp`**
 
 ```cpp
-std::optional<Player> read_player_by_token(sqlite3* db, const std::string& token)
+std::optional<Player> read_player(sqlite3_stmt* statement)
 {
-    StmtGuard g;
-    const char* sql =
-        "SELECT id,username,token,elo,wins,losses,bp,xp,selected_icon_id "
-        "FROM players WHERE token=?1";
-    if (sqlite3_prepare_v2(db, sql, -1, &g.s, nullptr) != SQLITE_OK) {
-        std::fprintf(stderr, "[db] getByToken prepare: %s\n", sqlite3_errmsg(db));
-        return std::nullopt;
-    }
-    sqlite3_bind_text(g.s, 1, token.c_str(), -1, SQLITE_TRANSIENT);
-
-    int rc = sqlite3_step(g.s);
-    if (rc == SQLITE_DONE) return std::nullopt;
-    if (rc != SQLITE_ROW) {
-        std::fprintf(stderr, "[db] getByToken step: rc=%d %s\n",
-                     rc, sqlite3_errmsg(db));
-        return std::nullopt;
-    }
-
+    if(sqlite3_step(statement)!=SQLITE_ROW)return std::nullopt;
     Player p;
-    p.id       = sqlite3_column_int64(g.s, 0);
-    p.username = read_nullable_text(g.s, 1);
-    p.token    = reinterpret_cast<const char*>(sqlite3_column_text(g.s, 2));
-    p.elo      = sqlite3_column_int  (g.s, 3);
-    p.wins     = sqlite3_column_int  (g.s, 4);
-    p.losses   = sqlite3_column_int  (g.s, 5);
-    p.bp       = sqlite3_column_int  (g.s, 6);
-    p.xp       = sqlite3_column_int  (g.s, 7);
-    const unsigned char* icon = sqlite3_column_text(g.s, 8);
-    p.selected_icon_id = icon ? reinterpret_cast<const char*>(icon) : kDefaultIconId;
-    if (!find_icon_def(p.selected_icon_id)) p.selected_icon_id = kDefaultIconId;
+    p.id=sqlite3_column_int64(statement,0);
+    p.username=read_nullable_text(statement,1);
+    p.elo=sqlite3_column_int(statement,2);p.wins=sqlite3_column_int(statement,3);
+    p.losses=sqlite3_column_int(statement,4);p.bp=sqlite3_column_int(statement,5);
+    p.xp=sqlite3_column_int(statement,6);
+    auto icon=sqlite3_column_text(statement,7);
+    p.selected_icon_id=icon?reinterpret_cast<const char*>(icon):kDefaultIconId;
+    if(!find_icon_def(p.selected_icon_id))p.selected_icon_id=kDefaultIconId;
+    p.auth_epoch=sqlite3_column_int64(statement,8);
     return p;
+}
+const char* kPlayerColumns="SELECT id,username,elo,wins,losses,bp,xp,selected_icon_id,auth_epoch FROM players ";
+std::optional<Player> read_player_by_token(sqlite3* db,const std::string& token)
+{
+    if(!credentials::account(token))return std::nullopt;
+    const auto hash=credentials::digest("account",token);
+    StmtGuard g;
+    const auto sql=std::string(kPlayerColumns)+"WHERE token_hash=?1";
+    if(sqlite3_prepare_v2(db,sql.c_str(),-1,&g.s,nullptr)!=SQLITE_OK)return std::nullopt;
+    sqlite3_bind_text(g.s,1,hash.c_str(),-1,SQLITE_TRANSIENT);
+    return read_player(g.s);
 }
 ```
 
-끝에서 두 번째 줄이 안전장치다. `players.selected_icon_id` 가 카탈로그에 없는 값이면 강제로 `default` 로 내린다. 이런 상태는 **카탈로그를 줄일 때** 생긴다 — `ruby` 를 카탈로그에서 뺐는데 그것을 선택 중인 플레이어가 남아 있는 경우. fallback 이 없으면 클라이언트가 존재하지 않는 아이콘 id 를 받아 이미지 로드에 실패하고, relay 는 그 id 를 `MATCH_FOUND` 에 실어 상대에게 보낸다.
+`read_player()`의 아이콘 검사문이 안전장치다. 토큰 조회는 먼저 형식을 검사하고 SHA-256 해시를 만들어 `token_hash`와 비교한다. `Player`에는 비밀을 넣지 않는다. 해시 이관·인증 세대는 [Part 17](part17-guest-account-recovery.md)이 확장한다. `players.selected_icon_id` 가 카탈로그에 없는 값이면 강제로 `default` 로 내린다. 이런 상태는 **카탈로그를 줄일 때** 생긴다 — `ruby` 를 카탈로그에서 뺐는데 그것을 선택 중인 플레이어가 남아 있는 경우. fallback 이 없으면 클라이언트가 존재하지 않는 아이콘 id 를 받아 이미지 로드에 실패하고, relay 는 그 id 를 `MATCH_FOUND` 에 실어 상대에게 보낸다.
 
 한 줄로 "카탈로그는 언제든 줄여도 된다"는 성질을 얻는다. `players` 테이블을 일괄 UPDATE 할 필요가 없다.
 
@@ -1209,41 +1210,13 @@ Database::leaderboard(int limit)
 
 `limit` 은 `std::clamp(limit, 1, 100)` 으로 잘린다. `?limit=100000` 을 보내 전체 테이블을 끌어가는 것을 막는 상한이다. `ORDER BY elo DESC, id ASC` 의 두 번째 키가 중요하다 — 동점자의 순서를 `id` 로 고정하지 않으면 같은 요청이 매번 다른 순위를 돌려줄 수 있고, 페이지네이션이 깨진다.
 
-## 9. JSON 을 라이브러리 없이
+## 9. JSON 문서 검증과 응답 직렬화를 분리한다
 
-HTTP API 를 만들면 JSON 이 필요하다. 범용 JSON 라이브러리를 넣는 것이 보통의 답이지만, 이 프로젝트는 헤더 하나로 직접 만든다. 그 판단의 근거가 `meta/protocol.h` 상단에 적혀 있다.
-
-**현재 소스 발췌 — `meta/protocol.h`**
-
-```cpp
-#pragma once
-
-// meta/protocol.h — JSON 수동 직렬화/파싱 헬퍼.
-//
-// 우리 엔드포인트들은 대부분 "평면적인 primitive 필드"로만 구성되므로
-// 범용 풀스펙 JSON 라이브러리는 과하다. 이 헤더의 함수들은
-// 특정 응답 shape 마다 전용으로 만들어져 있어 읽기 쉽고 빠르다.
-//
-// 응답 규약:
-//   · 200: 엔드포인트별 페이로드
-//   · 4xx/5xx: {"error":"...","reason":"..."}
-//
-// 파싱 규약: Content-Type 무시하고 body 에서 원하는 키를 substr+find 로 뽑는다.
-// malformed JSON 은 find_int/find_string 이 -1 또는 빈 문자열 반환 → 호출자가 400.
-
-#include <cstdint>
-#include <cstdio>
-#include <optional>
-#include <sstream>
-#include <string>
-#include <vector>
-
-#include "levels.h"   // xp -> level 유도 (응답에 level 을 함께 실어준다)
-
-namespace meta::proto {
-```
-
-핵심 근거는 **shape 가 고정돼 있다**는 것이다. 요청 본문은 최대 8 개의 top-level primitive 필드고, 중첩 객체도 배열도 없다. 응답도 마찬가지다. 이 조건에서 범용 파서는 "우리가 쓰지 않는 기능"의 코드와 컴파일 시간을 전부 지불하게 한다.
+초기 구현은 평면 필드만 필요하다는 이유로 문자열 검색 파서를 썼다. 하지만 중첩 키,
+닫히지 않은 문자열, 숫자 뒤 쓰레기 문자를 받아들이는 문제가 있었다. 요청 shape가
+단순해도 입력 언어의 유효성 검사는 생략할 수 없다. 현재 `json_input.h`는 vendored
+nlohmann/json으로 문서 전체를 검증하고 `protocol.h`는 API별 응답과 필드 조회를 제공한다.
+응답 shape와 JSON 문법은 변경 이유가 다르므로 서로 다른 헤더가 맡는다.
 
 ### 9.1 직렬화 — 이스케이프와 응답 빌더
 
@@ -1319,119 +1292,94 @@ inline std::string guest_response(int64_t player_id,
 
 `"level"` 필드가 여기서 만들어진다. DB 에는 없는 값이지만 `levels::level_for_xp` 로 유도해 응답에 함께 싣는다. 클라이언트도 같은 헤더를 include 하므로 직접 계산할 수 있지만, 웹 페이지처럼 C++ 를 링크할 수 없는 소비자를 위해 서버가 계산해 준다. `auth_response`, `leaderboard_response` 도 같은 방식이다.
 
-### 9.2 파싱 — 키를 찾아 값만 읽는다
+### 9.2 파싱 — 최상위 필드만, 정확한 타입으로 읽는다
 
-파싱은 "문서를 트리로 만든 뒤 탐색"하는 대신 "필요한 키를 문자열에서 직접 찾는다". 공통 진입점이 `find_key_colon` 이다.
+**현재 소스 발췌 — `meta/json_input.h`**
+
+```cpp
+inline std::optional<Json> object(const std::string &body) {
+    if (body.size() > 64 * 1024)
+        return std::nullopt;
+    try {
+        std::vector<std::set<std::string>> keys;
+        auto callback = [&](int depth, Json::parse_event_t event, Json &value) {
+            if (depth > 16)
+                throw std::runtime_error("JSON nesting limit");
+            if (event == Json::parse_event_t::object_start)
+                keys.emplace_back();
+            if (event == Json::parse_event_t::key && !keys.back().insert(value.get<std::string>()).second)
+                throw std::runtime_error("duplicate JSON key");
+            if (event == Json::parse_event_t::object_end)
+                keys.pop_back();
+            return true;
+        };
+        auto parsed = Json::parse(body, callback);
+        if (parsed.is_object())
+            return parsed;
+    } catch (const std::exception &) {
+        // Do not log parser diagnostics: they can contain bearer credentials.
+    }
+    return std::nullopt;
+}
+```
+
+64KiB와 깊이 16을 제한한다. 중복 키는 Unicode escape를 해석한 이름으로 비교한다.
+`token`과 `toke\u006e`처럼 표기가 달라도 같은 이름이면 거절한다. callback에서 false를
+반환하는 필터링만으로는 깊은 내용을 계속 읽을 수 있으므로 한도에서 예외로 중단한다.
+오류 진단에는 비밀 본문이 들어갈 수 있어 내용을 로그로 내보내지 않는다.
+
+문자열은 최상위의 string만, 정수는 int64 범위의 integer만, boolean은 실제 true/false만
+받는다. 중첩 객체의 token을 찾아 올라가지 않으며 소수·지수형 실수를 정수로 자르지 않는다.
 
 **현재 소스 발췌 — `meta/protocol.h`**
 
 ```cpp
-namespace detail {
-
-inline size_t skip_ws(const std::string& s, size_t i)
-{
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' ||
-                            s[i] == '\n' || s[i] == '\r'))
-        ++i;
-    return i;
+// Fields are read only from a fully validated top-level JSON object.
+inline std::string find_string(const std::string& body, const char* key) {
+    return json_input::string(body, key);
 }
+inline std::optional<int64_t> find_int(const std::string& body, const char* key) {
+    return json_input::integer(body, key);
+}
+inline std::optional<bool> find_bool(const std::string& body, const char* key) {
+    return json_input::boolean(body, key);
+}
+```
 
-// key 의 시작 인덱스를 찾아 콜론 뒤까지 이동. 없으면 npos.
-inline size_t find_key_colon(const std::string& body, const char* key)
-{
-    const std::string needle = std::string("\"") + key + "\"";
-    size_t pos = 0;
-    while ((pos = body.find(needle, pos)) != std::string::npos) {
-        // 콜론까지 이동
-        size_t after = skip_ws(body, pos + needle.size());
-        if (after < body.size() && body[after] == ':') {
-            return skip_ws(body, after + 1);
+### 9.3 검증 시점도 계약이다
+
+HTTP pre-routing은 본문을 읽기 전에 호출된다. 따라서 그곳에는 IP 예산만 적용하고,
+본문 검증은 모든 POST 등록에 사용하는 `json_post`가 맡는다. 본문은 라이브러리의
+길이 제한을 거쳐 읽히고, 문서 검증이 끝난 후에만 원래 핸들러를 호출한다.
+
+**현재 소스 발췌 — `meta/json_routes.h`**
+
+```cpp
+#pragma once
+#include "json_input.h"
+#include "httplib.h"
+#include <utility>
+
+namespace meta {
+// cpp-httplib's pre-routing hook runs before reading the request body. Validate
+// here, after its bounded body reader and before any route can mutate state.
+inline void json_post(httplib::Server &server, const std::string &path, httplib::Server::Handler handler) {
+    server.Post(path, [handler = std::move(handler)](const httplib::Request &req, httplib::Response &res) {
+        if (!json_input::object(req.body)) {
+            res.status = 400;
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content("{\"error\":\"invalid_json\"}", "application/json");
+            return;
         }
-        pos += needle.size();
-    }
-    return std::string::npos;
+        handler(req, res);
+    });
 }
+} // namespace meta
 ```
 
-`"key"` 를 찾은 뒤 **공백을 건너뛰고 콜론이 오는지** 확인한다. 이 검사가 없으면 `{"note":"player_id is required"}` 같은 본문에서 값 문자열 안의 `"player_id"` 를 키로 오인한다. 콜론 검사가 실패하면 다음 출현으로 넘어가 계속 찾는다.
-
-문자열 값 추출은 최소 unescape 를 한다.
-
-**현재 소스 발췌 — `meta/protocol.h`**
-
-```cpp
-// key → 문자열 값 (unescape 최소한: \" \\ \n \r \t 만).
-inline std::string find_string(const std::string& body, const char* key)
-{
-    size_t i = detail::find_key_colon(body, key);
-    if (i == std::string::npos) return {};
-    if (i >= body.size() || body[i] != '"') return {};
-    ++i;
-    std::string out;
-    while (i < body.size() && body[i] != '"') {
-        if (body[i] == '\\' && i + 1 < body.size()) {
-            switch (body[i + 1]) {
-                case '"':  out += '"';  break;
-                case '\\': out += '\\'; break;
-                case '/':  out += '/';  break;
-                case 'n':  out += '\n'; break;
-                case 'r':  out += '\r'; break;
-                case 't':  out += '\t'; break;
-                default:   out += body[i + 1];
-            }
-            i += 2;
-        } else {
-            out += body[i++];
-        }
-    }
-    return out;
-}
-```
-
-`\uXXXX` 를 처리하지 않는다는 점이 이 파서의 명시적 한계다. 클라이언트가 `{"token":"0..."}` 를 보내면 토큰이 깨진다. 우리 클라이언트는 항상 `json_escape` 로 만들고 토큰은 hex 문자만 담으므로 실제로는 나타나지 않지만, **API 를 공개하는 순간 이 가정이 무너진다**는 점은 기억해야 한다.
-
-정수 파싱에는 오버플로 가드가 있다.
-
-**현재 소스 발췌 — `meta/protocol.h`**
-
-```cpp
-// key → 정수 값. null 이면 nullopt. 부호 허용.
-inline std::optional<int64_t> find_int(const std::string& body, const char* key)
-{
-    size_t i = detail::find_key_colon(body, key);
-    if (i == std::string::npos) return std::nullopt;
-    // null?
-    if (body.compare(i, 4, "null") == 0) return std::nullopt;
-    // 숫자 파싱
-    size_t j = i;
-    if (j < body.size() && (body[j] == '-' || body[j] == '+')) ++j;
-    if (j >= body.size() || !(body[j] >= '0' && body[j] <= '9')) return std::nullopt;
-    int64_t val = 0;
-    bool neg = (body[i] == '-');
-    if (body[i] == '+' || body[i] == '-') ++i;
-    while (i < body.size() && body[i] >= '0' && body[i] <= '9') {
-        int d = body[i] - '0';
-        // 오버플로 방지: int64 범위를 벗어나는 입력은 파싱 실패(nullopt)로 처리.
-        // 필수 숫자 필드라면 상위(api_server)에서 400 으로 거부된다.
-        if (val > (INT64_MAX - d) / 10) return std::nullopt;
-        val = val * 10 + d;
-        ++i;
-    }
-    return neg ? -val : val;
-}
-```
-
-서명된 정수의 오버플로는 C++ 에서 **정의되지 않은 동작**이다. `val = val * 10 + d` 를 가드 없이 돌리면 컴파일러가 "오버플로는 일어나지 않는다"고 가정해 어떤 코드를 만들지 알 수 없다. 곱하기 전에 `val > (INT64_MAX - d) / 10` 로 미리 검사해 넘칠 값이면 파싱 자체를 실패시킨다. 실패는 `nullopt` 이고, 필수 필드라면 `api_server` 가 400 으로 거부한다.
-
-여기에 `null` 처리가 자연스럽게 얹힌다. `"winner":null` 은 `nullopt` 을 돌려주고, "필드가 없음"도 `nullopt` 이다. 두 경우를 구분하지 않는 것이 이 API 에서는 맞다 — winner 가 없다는 뜻으로 동일하게 해석하면 된다.
-
-### 9.3 이 선택의 비용
-
-이 프로젝트의 코드 리뷰 문서는 이 결정을 P2 항목으로 지적한다: 필드가 늘고 중첩이 생기면 각 엔드포인트가 파서의 암묵적 제약(중첩 없음, 배열 없음, `\uXXXX` 없음)에 의존하게 되고, 그 제약이 어디에 걸려 있는지 알기 어려워진다.
-
-실제로 이미 한 곳이 제약에 걸렸다. `POST /v1/matches` 의 **응답**은 `a`/`b` 두 개의 중첩 객체를 갖는데, `find_int` 는 중첩을 모른다. 그래서 클라이언트 쪽에서 서브오브젝트 범위를 손으로 잘라낸 뒤 그 부분 문자열에 `find_int` 를 부른다(§13.4). 이런 코드가 한 번 나오면 다음에도 나온다.
-
-전환 기준을 정해두면 좋다 — **응답에 중첩 객체가 둘 이상 생기거나, 외부에 공개하는 필드가 생기면** 라이브러리를 넣는다. 그전까지는 헤더 하나가 이긴다.
+범용 파서는 컴파일 비용이 늘어난다. 그 대신 임의 입력을 처리하는 문법 구현을 직접
+유지하지 않는다. 엔드포인트별 필수 필드·정수 범위·권한 검사는 그대로 필요하다.
 
 ## 10. HTTP API 계약
 
@@ -1488,7 +1436,7 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
 
 ```cpp
     // ------- POST /v1/icons/buy --------------------------------------------
-    svr.Post("/v1/icons/buy",
+    json_post(svr, "/v1/icons/buy",
         [this](const httplib::Request& req, httplib::Response& res) {
             std::string token = proto::find_string(req.body, "token");
             std::string icon  = proto::find_string(req.body, "icon_id");
@@ -1533,7 +1481,7 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
 
 ```cpp
     // ------- POST /v1/matches ----------------------------------------------
-    svr.Post("/v1/matches",
+    json_post(svr, "/v1/matches",
         [this](const httplib::Request& req, httplib::Response& res) {
             if (!relay_secret_.empty() &&
                 !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
@@ -1642,7 +1590,8 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
     svr.set_payload_max_length(64 * 1024);
 
     std::mutex budget_mu;
-    RequestBudget requests, guests;
+    RequestBudget requests, guests, botStarts, gameStarts, accountChanges;
+    GameTickets gameTickets;
     // Guests create durable rows: give them a separate, much smaller budget.
     svr.set_pre_routing_handler(
         [&, this](const httplib::Request& req, httplib::Response& res) {
@@ -1659,6 +1608,18 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
                 allowed = guests.allow(ip, now, 10, 60);
                 retry = 60;
             }
+            if (allowed && req.method == "POST" && req.path == "/v1/bots/challenge") {
+                allowed = botStarts.allow(ip, now, 5, 60);
+                retry = 60;
+            }
+            if (allowed && req.method == "POST" && req.path == "/v1/game-tickets") {
+                allowed = gameStarts.allow(ip, now, 10, 60);
+                retry = 60;
+            }
+            if (allowed && req.method == "POST" && req.path.rfind("/v1/account/",0)==0) {
+                allowed = accountChanges.allow(ip, now, 10, 60);
+                retry = 60;
+            }
             if (!allowed) {
                 set_json(res, 429, "{\"error\":\"rate_limited\"}");
                 res.set_header("Retry-After", std::to_string(retry));
@@ -1666,7 +1627,6 @@ inline std::optional<int64_t> find_int(const std::string& body, const char* key)
             }
             return httplib::Server::HandlerResponse::Unhandled;
         });
-
 ```
 
 `RequestBudget`은 주소마다 첫 요청부터 창 길이를 세고 만료하면 카운터를 초기화한다.
@@ -1792,19 +1752,19 @@ bool ct_equal(const std::string& a, const std::string& b)
 | OAuth (외부 계정 제공자) | 클라이언트 시크릿 관리, 리다이렉트 처리, 제공자 정책 준수 | 브라우저 왕복 |
 | 익명 토큰 | 난수 생성, 파일 저장 | 없음 — 게임을 켜면 이미 계정이 있다 |
 
-이 게임에서 계정이 담는 것은 RP·BP·XP·아이콘뿐이다. 개인정보도, 결제 수단도, 복구할 가치가 큰 자산도 없다. 그 수준의 자산에 비밀번호 인프라를 붙이는 것은 서버 쪽 위험(유출 시 비밀번호 재사용 피해)만 늘리고 얻는 것이 없다. **저장하지 않은 개인정보는 유출될 수 없다.**
+이 게임에서 계정이 담는 것은 RP·BP·XP·아이콘뿐이다. 이메일·실명·결제 수단은 요구하지 않지만 플레이 기록과 식별 키는 보호해야 한다. 그 수준의 자산에 비밀번호 인프라를 붙이는 것은 서버 쪽 위험(유출 시 비밀번호 재사용 피해)만 늘리고 얻는 것이 없다. IP 로그·식별 키·플레이 이력의 실제 수집과 보존 안내는 별도로 마련해야 한다.
 
 ### 12.2 이 설계가 감수하는 것
 
 토큰이 곧 계정이라는 사실은 분실·이전·유출·부계정 정책에 직접 영향을 준다.
 
-**(a) 토큰 파일을 잃으면 계정을 잃는다.** 복구 수단이 없다. 디스크를 갈아엎거나 설정 폴더를 지우면 다음 실행에 새 guest 가 발급되고 RP 는 0 이다. 이것을 완화하려면 "토큰 문자열을 보여주고 옮겨 적게 하는" UI 가 필요한데, 현재 구현에는 없다. 파일 경로를 문서화해 사용자가 직접 백업할 수 있게 하는 것이 현재의 답이다.
+**(a) 접근 키와 복구 파일을 모두 잃으면 신원을 입증할 수 없다.** [Part 17](part17-guest-account-recovery.md)의 Account & Recovery에서 복구 파일을 만들고 별도로 보관한다. 접근 키만 잃었다면 그 파일로 같은 player ID를 되찾을 수 있다.
 
-**(b) 기기 이전은 파일 복사다.** `<user-data>/Tetris/token` 을 새 기기의 같은 경로에 두면 계정이 따라온다. 로그인 화면이 없으니 그것이 유일한 방법이다.
+**(b) 기기 이전은 복구 파일과 키 교체로 진행한다.** 새 기기의 사용자 데이터 폴더에 최신 복구 파일을 놓고 Restore를 실행한다. 이전 접근 키와 복구 코드는 무효가 되며 새 파일을 다시 백업해야 한다. 토큰 파일만 복사하는 방식은 모든 복사본에 같은 접근 권한을 주므로 유출 대응이 되지 않는다.
 
-**(c) 토큰이 유출되면 계정이 넘어간다.** 비밀번호와 달리 2 차 확인이 없다. 유출된 토큰을 가진 사람은 그 계정으로 큐에 들어가고 BP 를 쓸 수 있다. 그래서 저장 시 파일 권한을 `0600`(소유자만 읽기/쓰기)으로 강제한다(§13.5). 공용 기기의 다른 사용자가 읽지 못하게 하는 최소한의 조치다.
+**(c) 접근 키가 유출되면 교체해야 한다.** Replace access keys 또는 최신 복구 파일의 Restore는 이전 키와 미사용 입장권을 무효화한다. 이미 승인된 경기의 즉시 강제 종료는 아직 없다. 클라이언트 파일은 POSIX 0600·Windows 보호 DACL로 저장하지만 현재 사용자 권한의 악성 프로그램까지 막지는 못한다.
 
-**(d) 서버는 사람을 셀 수 없다.** 토큰 파일을 지우고 다시 켜면 새 계정이므로, 한 사람이 계정을 무한히 만들 수 있다. 이것은 leaderboard 조작 통로가 될 수 있다 — 부계정을 여러 개 만들어 본계정에게 져 주는 식이다. 현재 방어는 **relay 만 매치 결과를 제출할 수 있고, 두 클라이언트의 자가보고가 교차 일치해야 한다**는 것뿐이다. 이것은 "혼자서 결과를 조작하는 것"은 막지만 "두 계정을 모두 통제하는 것"은 막지 못한다. 근본 대책(기기 지문, 전화번호 인증)은 익명성을 포기해야 얻어지므로 채택하지 않았다. 랭킹이 진지해지면 다시 판단해야 하는 지점이다.
+**(d) 서버는 사람을 셀 수 없다.** 현재 relay는 서버 seed와 실제 INPUT으로 종료를 재현한다. 허위 요약만으로 지급받는 길은 막지만 정상 규칙으로 일부러 져 주는 경기와 자동 플레이를 판별하지 않는다. 익명 다중 계정의 반복 보상 제한은 별도 정책이다. 봇전 일일 한도가 PvP 한도로 작동하지는 않는다.
 
 ### 12.3 X-Relay-Secret 의 신뢰 경계
 
@@ -1829,7 +1789,7 @@ sequenceDiagram
 
     Note over R,M: secret 축 — "이 요청이 relay 에서 왔는가"
     C->>R: MATCH_SUMMARY (21B)
-    R->>R: 두 summary 교차검증
+    R->>R: 입력 시뮬레이션의 종료 결과 확인
     R->>M: POST /v1/matches + X-Relay-Secret
     M-->>R: 200 match_id + 양쪽 delta
     R-->>C: MATCH_RESULT (before/after/delta)
@@ -1889,7 +1849,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "[meta] /v1/matches requires X-Relay-Secret\n");
     }
 
-    meta::ApiServer api(*db, args.relay_secret);
+    meta::ApiServer api(*db, args.relay_secret, args.trust_loopback_proxy, args.bot_rewards);
     if (!api.listen(args.http_host, args.http_port)) {
         return 1;
     }
@@ -1914,7 +1874,7 @@ int main(int argc, char** argv)
 //
 // relay 와 game client 양쪽에서 재사용한다.
 //   · game client   : request_guest()  (첫 실행 시 익명 토큰 발급)
-//   · tetris_relay  : verify_token()   (QUEUE_JOIN 수신 후 인증)
+//   · tetris_relay  : consume_game_ticket() (QUEUE_JOIN 입장권 소비)
 //   · tetris_relay  : post_match()     (경기 결과 저장 + RP 갱신)
 //
 // 네트워크 실패/서버 에러는 std::nullopt 로 통합 처리 — 호출자가 장애 정책
@@ -1968,6 +1928,13 @@ struct MatchResult {
     MatchDelta  b;
 };
 
+struct BotChallenge {
+    std::string ticket;
+    uint64_t seed = 0;
+    int input_ticks = 6, think_ticks = 18, min_piece_ticks = 60;
+};
+struct BotReward { int awarded_bp = 0; int bp = 0; };
+
 // ---- 메타 서버 클라이언트 --------------------------------------------------
 class MetaClient {
 public:
@@ -1981,10 +1948,10 @@ public:
     const std::string& baseUrl() const { return base_url_; }
 
     // verify_token 결과 — 호출자가 "토큰이 잘못된 것" vs "서버 다운/네트워크 실패"
-    // 를 구분해야 자동 재발급(stale 토큰)을 할 수 있다.
+    // 를 구분해 복구 안내 또는 기존 키 재시도를 선택한다. 자동 계정 교체는 금지한다.
     enum class VerifyOutcome {
         Ok,             // info 유효
-        UnknownToken,   // 200 OK 가 아니라 404 응답 — 새 guest 발급 필요
+        UnknownToken,   // 404 응답 — 기존 파일 유지, 복구 안내
         NetworkError,   // 연결 실패 / 타임아웃 / 그 외 — 토큰은 유지하고 다음에 재시도
     };
 
@@ -1995,8 +1962,20 @@ public:
     std::optional<AuthInfo>   verify_token   (const std::string& token,
                                               int timeout_s = 3,
                                               VerifyOutcome* out_outcome = nullptr);
+    // Game admission only: issue with an account credential, redeem once with
+    // relay secret. Never use verify_token's offline/cache behavior for tickets.
+    std::optional<std::string> request_game_ticket(const std::string& token);
+    std::optional<AuthInfo> consume_game_ticket(const std::string& ticket);
+
+    std::optional<AuthInfo> change_account(const std::string& operation,
+        const std::string& credential, const std::string& next_token,
+        const std::string& next_recovery, int* status=nullptr);
+
     // 아이콘 카탈로그 전체. 실패(네트워크/파싱) 시 nullopt.
     std::optional<std::vector<IconEntry>> fetch_icon_catalog(int timeout_s = 5);
+
+    std::optional<BotChallenge> start_bot_challenge(const std::string& token, const std::string& opponent, int* status = nullptr);
+    std::optional<BotReward> claim_bot_reward(const std::string& token, const std::string& ticket, const std::string& inputs, int* status = nullptr);
 
     // out_http_status: 0 = 네트워크 실패, 그 외 HTTP 상태 코드. UI 가
     // 402(insufficient_bp) / 403(not_owned) / 409(already_owned) 를 구분해
@@ -2026,27 +2005,6 @@ private:
     std::string relay_secret_;
 };
 
-// ---- 클라이언트 토큰 저장 (플랫폼별 user-data 디렉토리) --------------------
-//
-// Windows: %APPDATA%\Tetris\token
-// macOS:   $HOME/Library/Application Support/Tetris/token
-// Linux:   $XDG_DATA_HOME/Tetris/token  (fallback: $HOME/.local/share/Tetris/token)
-
-// 전체 경로 반환. 디렉토리 생성까지는 하지 않는다 (save 시점에 생성).
-std::string token_file_path();
-
-// 파일에서 토큰 읽기. 없거나 손상이면 빈 문자열.
-std::string load_token();
-
-// 토큰 저장 (부모 디렉토리 자동 생성). 실패 시 false.
-bool save_token(const std::string& token);
-
-// settings.cfg 의 권장 저장 경로 — 토큰과 같은 user-data 디렉토리
-// (<user-data>/Tetris/settings.cfg). HOME/APPDATA 를 못 찾으면 빈 문자열.
-// macOS .app 번들은 cwd(Resources)가 읽기전용이라, 실행 디렉터리 대신
-// 이 쓰기 가능한 경로를 써야 설정이 영속된다. 디렉토리 생성은 하지 않는다.
-std::string settings_file_path();
-
 } // namespace meta::client
 ```
 
@@ -2054,78 +2012,43 @@ std::string settings_file_path();
 
 ### 13.1 URL 파싱과 HTTPS 게이팅
 
-`MetaClient` 는 base URL 하나를 받아 host / port / https 로 쪼갠다.
+API 주소는 origin만 허용한다. 경로·query·fragment·사용자 정보를 허용하면 파일에
+기록한 주소와 실제 호출 목적지가 달라지거나 사용자 키가 엉뚱한 서비스로 갈 수 있다.
+호스트 대소문자·기본 포트·끝의 슬래시는 정규화한다. 외부 클라이언트의 원격 HTTP는
+거절하며 loopback HTTP는 개발용으로 허용한다. relay의 내부 API 연결은 별도 secret을 쓴다.
 
 **현재 소스 발췌 — `meta/http_client.cpp`**
 
 ```cpp
-// URL 파서 — "http://host[:port]" / "https://host[:port]" 허용.
 bool parse_meta_url(const std::string& url, std::string& host, int& port, bool& https)
 {
-    const std::string httpScheme = "http://";
-    const std::string httpsScheme = "https://";
-    std::string rest;
-    if (url.compare(0, httpScheme.size(), httpScheme) == 0) {
-        https = false;
-        port = 80;
-        rest = url.substr(httpScheme.size());
-    } else if (url.compare(0, httpsScheme.size(), httpsScheme) == 0) {
-        https = true;
-        port = 443;
-        rest = url.substr(httpsScheme.size());
-    } else {
-        return false;
+    std::string text = url;
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    size_t prefix = 0;
+    if (text.rfind("https://", 0) == 0) { https = true; port = 443; prefix = 8; }
+    else if (text.rfind("http://", 0) == 0) { https = false; port = 80; prefix = 7; }
+    else return false;
+    std::string authority = text.substr(prefix);
+    if (!authority.empty() && authority.back() == '/') authority.pop_back();
+    if (authority.empty() || authority.find_first_of("/@?#%\\ \t\r\n") != std::string::npos) return false;
+    if (authority.front() == '[') {
+        const auto end = authority.find(']');
+        if (end == std::string::npos) return false;
+        host = authority.substr(1, end - 1);
+        if (host.empty() || host.find_first_not_of("0123456789abcdef:.") != std::string::npos) return false;
+        const auto suffix = authority.substr(end + 1);
+        return suffix.empty() || (suffix.front() == ':' && parse_port(suffix.substr(1), port));
     }
-
-    if (rest.empty()) return false;
-
-    // 옵션 경로(/...)가 따라오면 잘라낸다 — 우리 클라이언트는 호스트만 필요.
-    auto slash = rest.find('/');
-    std::string hostport = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-
-    auto colon = hostport.rfind(':');
-    if (colon == std::string::npos) {
-        host = hostport;
-    } else {
-        host = hostport.substr(0, colon);
-        if (!parse_port(hostport.substr(colon + 1), port)) return false;
-    }
-    return !host.empty();
+    const auto colon = authority.find(':');
+    host = authority.substr(0, colon);
+    if (host.empty() || host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-") != std::string::npos) return false;
+    return colon == std::string::npos || parse_port(authority.substr(colon + 1), port);
 }
 ```
 
-스킴이 포트 기본값을 정한다 — `http://` 면 80, `https://` 면 443. 경로가 붙어 있으면 버린다. 엔드포인트 경로는 `MetaClient` 가 알고 있으므로 base URL 에는 호스트만 필요하다. 포트 구분자를 `rfind(':')` 로 찾는 것은 IPv6 리터럴을 부분적으로 고려한 것이지만, 대괄호 표기(`http://[::1]:8080`)는 지원하지 않는다 — 그런 URL 은 host 가 `[::1]` 로 잡혀 연결에 실패한다. 알려진 제약이다.
-
-생성자는 파싱과 HTTPS 지원 여부를 함께 검사한다.
-
-**현재 소스 발췌 — `meta/http_client.cpp`**
-
-```cpp
-// -----------------------------------------------------------------------------
-MetaClient::MetaClient(const std::string& base_url, std::string relay_secret)
-    : base_url_(base_url), relay_secret_(std::move(relay_secret))
-{
-    valid_ = parse_meta_url(base_url, host_, port_, https_);
-    if (!valid_) {
-        std::fprintf(stderr, "[meta-client] invalid URL: %s\n", base_url.c_str());
-        return;
-    }
-#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
-    if (https_) {
-        valid_ = false;
-        std::fprintf(stderr,
-                     "[meta-client] HTTPS URL requires OpenSSL build support: %s\n",
-                     base_url.c_str());
-    }
-#endif
-}
-```
-
-OpenSSL 없이 빌드된 바이너리에 `https://` URL 을 주면 `valid_ = false` 가 되고, 이후 모든 호출이 `nullopt` 을 돌려준다. **조용히 평문 HTTP 로 떨어지지 않는다.** 이것이 중요한 이유는 이 클라이언트가 토큰을 보내기 때문이다. TLS 를 기대했는데 평문으로 나가면 토큰이 그대로 노출된다. "동작하지 않음"이 "안전하지 않게 동작함" 보다 낫다.
-
-이 게이팅은 컴파일 타임 매크로에 걸려 있으므로 릴리스 빌드에서 `TETRIS_ENABLE_HTTPS=ON` + OpenSSL 발견을 확인해야 한다. `[meta-client] HTTPS URL requires OpenSSL build support` 로그가 뜨면 그 원인이다.
-
-`valid_` 가 false 인 객체가 예외를 던지지 않고 조용히 살아 있다는 점도 설계다. 호출부는 `metaClient->valid()` 한 번만 확인하면 되고 랭킹 UI 를 offline 으로 둘 수 있다. 이것이 자동으로 unranked 매치를 연다는 뜻은 아니다. 게임 클라이언트의 meta 상태와 relay 의 운영 모드는 서로 독립적이며, ranked relay 는 유효한 토큰과 자신의 meta 연결 또는 아직 살아 있는 성공 인증 캐시가 필요하다.
+유효한 URL이면 생성자에서 `base_url_`도 같은 정규화 결과로 바꾼다. 저장소는 이 origin을
+사용한다. 서로 다른 도메인 별칭이나 IPv6 표기를 자동으로 하나의 계정으로 합치지 않는다.
+HTTPS URL인데 OpenSSL 지원이 없으면 유효한 클라이언트로 취급하지 않는다.
 
 ### 13.2 타임아웃 정책 — 엔드포인트마다 다른 이유
 
@@ -2190,7 +2113,7 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
         return std::nullopt;
     }
     if (r->status == 404) {
-        // 토큰 미등록 — 호출자가 새 guest 재발급 또는 매치 입장 거부.
+        // 토큰 미등록 — 호출자가 복구를 안내하고 새 입장을 거절한다.
         set_outcome(VerifyOutcome::UnknownToken);
         return std::nullopt;
     }
@@ -2217,14 +2140,14 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
 | 결과 | 무슨 일이 있었나 | 클라이언트의 처방 |
 |---|---|---|
 | `Ok` | 200 + 파싱 성공 | RP/BP/XP/아이콘 복원, ranked 진행 |
-| `UnknownToken` | **404 만** | 토큰이 죽었다 → 버리고 새 guest 발급 |
-| `NetworkError` | 연결 실패, 타임아웃, 5xx, 파싱 실패 | **토큰을 유지**하고 unranked 로 진행 |
+| `UnknownToken` | 404 또는 빈 입력 | 저장 파일 유지, Account & Recovery에서 복구 안내 |
+| `NetworkError` | 연결 실패, 타임아웃, 5xx, 파싱 실패 | **토큰을 유지**하고 재시도. 랭크 입장은 새 입장권 필요 |
 
 `UnknownToken` 을 **404 에만** 부여한 것이 이 함수의 핵심이다. 만약 5xx 나 타임아웃도 "토큰이 잘못됐다"로 처리하면, meta 가 잠깐 재시작하는 동안 게임을 켠 모든 사용자가 **기존 계정을 잃고 새 guest 를 받는다.** 한 번의 서버 점검이 전체 유저 데이터 초기화가 되는 것이다.
 
 파싱 실패도 `NetworkError` 로 분류하는 것이 같은 이유다. 200 이 왔는데 본문이 이상하다면 서버가 잘못된 상태이거나 중간에 무언가(프록시 오류 페이지)가 끼어든 것이지, 토큰이 죽은 것이 아니다. 확신이 없으면 **파괴적이지 않은 쪽**으로 분류한다.
 
-빈 토큰을 `UnknownToken` 으로 두는 것은 편의다. 호출부가 "토큰이 없다"와 "토큰이 죽었다"를 같은 분기(새 guest 발급)로 처리할 수 있다.
+빈 입력도 `UnknownToken`이지만 부트스트랩은 이를 무조건 새 계정 생성으로 바꾸지 않는다. 파일·복구 파일의 존재와 읽기 오류를 먼저 구분한다. 새 guest 자동 발급은 저장 계정의 흔적이 없는 첫 실행에만 허용한다.
 
 헤더 블록도 눈여겨볼 부분이다. relay 로 링크된 `MetaClient` 는 `relay_secret_` 이 차 있으므로 verify 요청에도 `X-Relay-Secret` 이 실리고, §11 의 pre-routing 이 이 호출을 relay 버킷(초당 512회)으로 분류한다. 매치가 몰릴 때 relay 의 인증 burst 가 public 60회 버킷에 갇혀 429 를 받는 일을 막는 장치다. 게임 클라이언트의 `MetaClient` 는 secret 없이 생성되므로 헤더를 붙이지 않고 public 버킷에 남는다.
 
@@ -2389,308 +2312,102 @@ MetaClient::post_match(const std::string& match_uuid,
 
 `relay_secret_` 이 비어 있으면 헤더를 아예 붙이지 않는다. `--allow-public-matches` 로 띄운 로컬 meta 에 대고 테스트할 때의 경로다.
 
-### 13.5 토큰과 설정 파일의 저장 위치
+### 13.5 HTTP, 저장 경로, 계정 파일의 책임을 나눈다
 
-`MetaClient` 밖의 자유 함수들은 토큰과 설정의 플랫폼별 저장 위치를 정한다.
+`MetaClient`는 HTTP 요청·응답만 담당한다. OS별 위치는 `platform/user_data`, 서버별
+계정 파일과 소유 확인은 `AccountStore`, 원자적 쓰기·프로세스 잠금은 `private_file`로
+분리한다. HTTP를 호출하는 relay에는 클라이언트 계정 폴더 구현을 링크하지 않는다.
 
-**현재 소스 발췌 — `meta/http_client.cpp`**
+**현재 소스 발췌 — `platform/user_data.h`**
 
 ```cpp
-namespace {
+#pragma once
+#include <filesystem>
+#include <string>
 
-// 표준 user-data 디렉토리 기반 경로. 실패 시 빈 문자열.
-std::filesystem::path user_data_dir()
-{
-    namespace fs = std::filesystem;
-#ifdef _WIN32
-    // %APPDATA% (예: C:\Users\Name\AppData\Roaming)
-    char buf[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, 0, buf))) {
-        return fs::path(buf);
+namespace platform {
+// Writable application data, independent of HTTP, rendering, or the working directory.
+std::filesystem::path user_data_directory();
+std::string settings_file_path();
+} // namespace platform
+```
+
+설정은 `<사용자 데이터>/Tetris/settings.cfg`, 계정은 그 아래
+`accounts/<origin locator>/account.json`이다. locator는 FNV64의 16자리 hex이며
+파일 안의 전체 정규화 `api_url` 확인이 보안 경계다. 경로 해시만으로 소유를 결정하지 않는다.
+기존 서버 없는 `token` 파일은 자동 전송하지 않고 Account 화면에서 명시적으로 가져온다.
+
+## 14. 클라이언트 부트스트랩 — 저장과 인증을 구분한다
+
+계정 서비스는 시작 시와 화면의 재시도에서 같은 흐름을 사용한다.
+
+**현재 소스 발췌 — `meta/account_client.cpp`**
+
+```cpp
+AccountOperation bootstrap_account(MetaClient &api, bool create_separate) {
+    if (!api.valid())
+        return failed("Configure an HTTPS account server first.");
+    AccountStore store(api.baseUrl());
+    AccountFileLock lock(store.lock_path());
+    if (!lock.locked())
+        return failed("Account folder unavailable or in use. Retry before playing online.");
+    const auto resumed = resume_locked(api, store);
+    if (!resumed.ok || resumed.player)
+        return resumed;
+    const auto token = store.load_token();
+    if (!token.empty()) {
+        MetaClient::VerifyOutcome outcome;
+        const auto player = api.verify_token(token, 3, &outcome);
+        if (player)
+            return {true, false, "Account connected.", token, player};
+        if (outcome == MetaClient::VerifyOutcome::UnknownToken)
+            return failed("Saved access key rejected. Restore your recovery file.");
+        return {true, false, "Server unavailable. Your saved key is safe; retry later.", token, {}};
     }
-    const char* appdata = std::getenv("APPDATA");
-    if (appdata && *appdata) return fs::path(appdata);
-    return {};
-#elif defined(__APPLE__)
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) return {};
-    return fs::path(home) / "Library" / "Application Support";
-#else
-    // Linux / other unix
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return fs::path(xdg);
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) return {};
-    return fs::path(home) / ".local" / "share";
-#endif
-}
+    if (store.has_saved_account())
+        return failed("Saved account needs recovery. Check the account folder.");
+    if (!create_separate && store.has_legacy_account())
+        return failed("Older account found. Confirm its server in Account & Recovery.");
 
-} // namespace
-
-std::string token_file_path()
-{
-    auto base = user_data_dir();
-    if (base.empty()) return {};
-    return (base / "Tetris" / "token").string();
-}
-
-std::string settings_file_path()
-{
-    auto base = user_data_dir();
-    if (base.empty()) return {};
-    return (base / "Tetris" / "settings.cfg").string();
+    const auto guest = api.request_guest();
+    if (!guest)
+        return failed("Account server unavailable. Retry connecting later.");
+    const AuthInfo player{guest->player_id, "", guest->elo, guest->bp, guest->xp, guest->selected_icon_id};
+    if (!store.save_token(guest->token))
+        return {false,        false,  "Account NOT saved. Retry saving before closing the game.",
+                guest->token, player, true};
+    return {true, false, "Account saved. Create a recovery file to keep your progress.", guest->token,
+            player};
 }
 ```
 
-플랫폼마다 "사용자별 애플리케이션 데이터" 의 관례가 다르다.
+잠금을 얻은 뒤 미완료 교체를 복구한다. 저장 키가 있으면 verify하며, 네트워크 장애는
+키를 보존한 오프라인 상태로 둔다. 키 거절·파일 손상·남은 복구 파일을 새 guest로 덮지 않는다.
+이전 버전의 무소속 키가 있으면 서버를 선택해 가져오도록 안내한다.
 
-| 플랫폼 | 기준 디렉터리 | 토큰 경로 |
-|---|---|---|
-| Windows | `SHGetFolderPathA(CSIDL_APPDATA)`, 실패 시 `%APPDATA%` | `%APPDATA%\Tetris\token` |
-| macOS | `$HOME/Library/Application Support` | `~/Library/Application Support/Tetris/token` |
-| Linux / 기타 유닉스 | `$XDG_DATA_HOME`, 없으면 `$HOME/.local/share` | `~/.local/share/Tetris/token` |
-
-Windows 에서 환경변수보다 `SHGetFolderPathA` 를 먼저 쓰는 이유는 이 API 가 로밍 프로필·리다이렉트된 폴더 같은 경우까지 올바른 경로를 돌려주기 때문이다. `%APPDATA%` 는 폴백이다.
-
-실행 디렉터리(`./token`)를 쓰지 않는 이유는 macOS 다. `.app` 번들로 배포하면 프로세스의 cwd 가 번들 안 `Resources` 이고 **읽기 전용**이다. 거기에 쓰면 조용히 실패한다. 같은 이유로 화면·조작 설정을 영속하는 `settings.cfg` 도 이 경로를 쓴다 — `settings_file_path()` 가 여기 있는 것은 그 때문이다. 설정 화면 쪽 코드는 이 함수를 호출만 하고, 쓰기 가능한 user-data 경로의 **정의는 이 장의 파일이 소유한다.**
-
-읽기와 쓰기는 대칭이 아니다.
-
-**현재 소스 발췌 — `meta/http_client.cpp`**
-
-```cpp
-std::string load_token()
-{
-    auto path = token_file_path();
-    if (path.empty()) return {};
-
-    std::ifstream f(path);
-    if (!f) return {};
-    std::string tok;
-    f >> tok;
-    // 32 hex chars 만 허용 — 외부 오염된 파일은 무시.
-    if (tok.size() != 32) return {};
-    for (char c : tok) {
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return {};
-    }
-    return tok;
-}
-```
-
-읽을 때 형식을 검증한다. 길이 32, 소문자 hex 만. 사용자가 실수로 파일을 편집했거나 다른 프로그램이 덮어썼을 때 쓰레기 문자열을 서버로 보내지 않는다. 검증 실패는 "토큰 없음"과 같으므로 새 guest 가 발급된다 — 조용히 복구된다.
-
-쓰기는 POSIX 에서 파일 권한까지 챙긴다.
-
-**현재 소스 발췌 — `meta/http_client.cpp`**
-
-```cpp
-bool save_token(const std::string& token)
-{
-    namespace fs = std::filesystem;
-    auto path = token_file_path();
-    if (path.empty()) return false;
-
-    std::error_code ec;
-    fs::create_directories(fs::path(path).parent_path(), ec);
-
-#ifndef _WIN32
-    const std::string line = token + "\n";
-    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-    if (fd < 0) return false;
-    if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
-        ::close(fd);
-        return false;
-    }
-    size_t written = 0;
-    while (written < line.size()) {
-        ssize_t n = ::write(fd, line.data() + written, line.size() - written);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            ::close(fd);
-            return false;
-        }
-        if (n == 0) {
-            ::close(fd);
-            return false;
-        }
-        written += static_cast<size_t>(n);
-    }
-    bool ok = (::close(fd) == 0);
-    ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
-    return ok;
-#else
-    std::ofstream f(path, std::ios::trunc);
-    if (!f) return false;
-    f << token << "\n";
-    bool ok = static_cast<bool>(f);
-    f.close();
-    fs::permissions(path,
-                    fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace,
-                    ec);
-    return ok;
-#endif
-}
-```
-
-POSIX 경로가 `std::ofstream` 대신 `::open` 을 쓰는 이유는 **권한을 파일 생성 시점에 정하기 위해서**다. `ofstream` 으로 만들면 기본 권한(umask 에 따라 0644 가 흔하다)으로 잠깐 존재하고, 그 뒤에 `chmod` 를 걸어도 그 틈에 다른 사용자가 읽을 수 있다. `open(..., S_IRUSR | S_IWUSR)` 은 처음부터 0600 으로 만든다. umask 가 그 값을 더 깎을 수는 있어도 늘리지는 못하므로, `fchmod` 로 한 번 더 확정한다.
-
-`write` 루프의 세 갈래도 교과서적이다. 부분 쓰기는 정상이므로 반복하고, `EINTR`(시그널로 중단)은 재시도하며, `n == 0` 은 이상 상황이므로 실패로 본다. `close` 의 반환값까지 확인하는 이유는 일부 파일 시스템이 그 시점에 비로소 오류를 보고하기 때문이다.
-
-Windows 경로는 `std::filesystem::permissions` 로 사후에 권한을 좁힌다. NTFS 의 ACL 모델이 POSIX 모드와 다르므로 완전한 등가는 아니지만, 최소한 "다른 사용자 읽기"를 제거한다.
-
-## 14. 클라이언트 부트스트랩 — 세 갈래
-
-이제 `src/main.cpp` 쪽이다. 게임이 뜰 때 meta 를 어떻게 붙이는가.
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-    // ── 메타 서버 + 토큰 부트스트랩 ───────────────────────────────────────────
-    //   metaUrl 이 설정된 경우에만 활성화. 부트스트랩 실패는 현재 랭킹 정보를
-    //   읽지 못한 상태이지, 반드시 unranked relay 로 전환됐다는 뜻은 아니다.
-    //   네트워크 장애 때는 저장 토큰을 유지하고 계속 relay 입장에 보낸다.
-    //   ranked relay 는 자신의 meta 연결 또는 성공 인증 캐시로 별도 판정하며,
-    //   둘 다 없으면 입장을 거부한다.
-    std::unique_ptr<meta::client::MetaClient> metaClient;
-    std::string authToken;
-    int    myElo       = 0;   // RP (0 시작 스케일 — meta/elo.h)
-    int    myBp        = 0;
-    int    myXp        = 0;   // 누적 경험치 (레벨은 meta/levels.h 로 유도)
-    std::string mySelectedIconId = "default";
-    bool   metaOnline  = false;  // 이 실행에서 guest/verify 응답을 받았는지
-    // 랭크 매치 후 메뉴 복귀 시 1회 메타 갱신 필요 표시. MATCH_RESULT 프레임은
-    // elo_after 만 싣고 bp/xp 는 없으므로(net/session.h), 메뉴의 Lv/BP/RP 표기를
-    // 권위 있는 값으로 맞추려면 verify_token 으로 다시 읽어야 한다.
-    bool   metaRefreshPending = false;
-    if (!metaUrl.empty()) {
-        metaClient = std::make_unique<meta::client::MetaClient>(metaUrl);
-        if (metaClient->valid()) {
-            // 작은 람다 — 새 guest 발급 + 파일 저장 + 상태 갱신.
-            auto bootstrap_new_guest = [&](const char* why) {
-                auto g = metaClient->request_guest();
-                if (g) {
-                    authToken = g->token;
-                    myElo     = g->elo;
-                    myBp      = g->bp;
-                    myXp      = g->xp;
-                    mySelectedIconId = g->selected_icon_id.empty() ? "default" : g->selected_icon_id;
-                    meta::client::save_token(authToken);
-                    std::cout << "[meta] " << why << " — new guest player_id="
-                              << g->player_id << " elo=" << g->elo
-                              << " bp=" << g->bp
-                              << " icon=" << mySelectedIconId << "\n";
-                    metaOnline = true;
-                } else {
-                    fprintf(stderr, "[meta] guest bootstrap failed (%s) — ranking offline\n", why);
-                }
-            };
-
-            authToken = meta::client::load_token();
-            if (authToken.empty()) {
-                bootstrap_new_guest("first run");
-            } else {
-                // 기존 토큰 — verify. unknown_token 이면 stale → 새로 발급.
-                // 네트워크 실패는 토큰 유지 + 다음 실행에 재시도.
-                meta::client::MetaClient::VerifyOutcome outcome{};
-                auto a = metaClient->verify_token(authToken, 3, &outcome);
-                if (a) {
-                    myElo = a->elo;
-                    myBp  = a->bp;
-                    myXp  = a->xp;
-                    mySelectedIconId = a->selected_icon_id.empty() ? "default" : a->selected_icon_id;
-                    std::cout << "[meta] token ok player_id=" << a->player_id
-                              << " elo=" << a->elo
-                              << " bp=" << a->bp
-                              << " icon=" << mySelectedIconId << "\n";
-                    metaOnline = true;
-                } else if (outcome == meta::client::MetaClient::VerifyOutcome::UnknownToken) {
-                    fprintf(stderr, "[meta] token unknown (DB reset?) — re-issuing\n");
-                    authToken.clear();
-                    bootstrap_new_guest("token unknown");
-                } else {
-                    fprintf(stderr, "[meta] token verify failed (network) — keeping file, ranking offline\n");
-                    // 파일과 authToken 은 유지한다. 다음 실행에 verify 를 재시도하고,
-                    // 현재 실행에서도 relay 에는 이 토큰을 보낸다. relay 쪽 meta와
-                    // 인증 캐시도 쓸 수 없다면 ranked 입장은 실패한다. unranked
-                    // 플레이에는 meta 없이 기동한 relay 가 따로 필요하다.
-                }
-            }
-        }
-    }
-    iconYou = resolvePlayerIcon(mySelectedIconId);
-```
+새 guest 응답과 로컬 저장 성공은 별도 사건이다. 저장 실패의 `unsaved` 결과는 일반
+온라인 인증에 쓰지 않는다. main은 키를 재시도용 메모리에 두고 경고를 표시한다.
+재시도는 `save_created_account()`가 같은 키를 저장하며 guest를 추가 발급하지 않는다.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CheckUrl
-    CheckUrl --> Disabled: metaUrl 비어 있음
-    CheckUrl --> CheckValid: metaUrl 있음
-    CheckValid --> Disabled: valid() == false<br/>(URL 오류 / HTTPS 미지원 빌드)
-    CheckValid --> LoadToken: valid
-    LoadToken --> NewGuest: 파일 없음/형식 불일치
-    LoadToken --> Verify: 32 hex 토큰 있음
-    Verify --> Online: Ok — RP/BP/XP/아이콘 복원
-    Verify --> NewGuest: UnknownToken (404)
-    Verify --> Offline: NetworkError — 토큰 파일 유지
-    NewGuest --> Online: request_guest 성공 + save_token
-    NewGuest --> Offline: 실패
-    Disabled --> [*]
-    Offline --> [*]
-    Online --> [*]
+    [*] --> ResumePending
+    ResumePending --> VerifySaved: 완료 또는 pending 없음
+    ResumePending --> RecoveryRequired: 손상·서버 불일치
+    VerifySaved --> Online: 인증 성공
+    VerifySaved --> OfflineSaved: 통신 실패
+    VerifySaved --> RecoveryRequired: 키 거절
+    VerifySaved --> ConfirmLegacy: 옛 파일 존재
+    VerifySaved --> CreateGuest: 저장된 계정 없음
+    CreateGuest --> Unsaved: 파일 저장 실패
+    Unsaved --> Online: 같은 키 저장·인증 성공
+    CreateGuest --> Online: 저장 성공
 ```
 
-세 종착지가 UI 에 그대로 드러난다.
-
-- **Disabled**: `ranking: disabled (--meta https://host to enable)`
-- **Offline**: `ranking: offline (ranked queue may be unavailable)` (빨간색). 저장 토큰이 있으면 relay 입장에는 계속 전달하지만, ranked relay 가 인증하지 못하면 연결이 거부된다
-- **Online**: `ranking: online   Lv 3   RP 128   BP 90` (초록색)
-
-meta URL 은 세 경로로 들어온다. 우선순위가 낮은 것부터 CMake 캐시 변수 `TETRIS_DEFAULT_META_URL`(컴파일 시 `#define` 으로 박힌다), 환경변수 `TETRIS_META_URL`, 커맨드라인 `--meta URL` 순이다.
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-    // tetris_meta 베이스 URL (guest 토큰 + RP/XP/BP). `--meta http(s)://host[:port]`.
-    // 환경변수 TETRIS_META_URL 이 있으면 그것을 기본값으로 사용.
-    std::string metaUrl = TETRIS_DEFAULT_META_URL;
-    if (const char* env = std::getenv("TETRIS_META_URL")) metaUrl = env;
-```
-
-| 설정 경로 | 형식 | 용도 |
-|---|---|---|
-| `-DTETRIS_DEFAULT_META_URL=https://api.example.com` | CMake 캐시 | 릴리스 빌드에 기본 서버를 박는다 |
-| `TETRIS_META_URL=http://127.0.0.1:8080` | 환경변수 | 개발 중 서버 전환 |
-| `--meta http://127.0.0.1:8080` | CLI 인자 | 1 회성 테스트 |
-
-relay 주소도 같은 3단 사다리(컴파일 기본값 → 환경변수 → CLI 인자)로 정해진다. 낮은 층이 배포 기본값을, 높은 층이 일시적 실험을 맡는 이 구조는 "지금 어느 설정이 이기고 있는가"를 추적하기 쉽게 만든다. 두 설정은 독립적이다. relay와 meta를 한 기계에 놓을 수도 있고, 부하와 신뢰 경계에 따라 다른 기계로 나눌 수도 있다.
-
-랭크 매치가 끝나고 메뉴로 돌아오면 한 번 더 갱신한다. `MATCH_RESULT` wire 프레임에는 `elo_before/after/delta` 세 값만 있고 BP/XP 가 없기 때문이다.
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-            // 랭크 매치 직후 1회 메타 갱신 — bp/xp/level 을 권위 있는 값으로.
-            // 비동기로 띄워 메뉴가 멈추지 않게 한다 (MATCH_RESULT 는 elo_after 만
-            // 싣고 bp/xp 는 없으므로 verify 로 다시 읽어야 한다).
-            if (metaRefreshPending && metaOnline && metaClient
-                && !authToken.empty() && !metaRefreshOp.valid()) {
-                metaRefreshPending = false;
-                auto* mc = metaClient.get();
-                std::string tok = authToken;
-                metaRefreshOp = std::async(std::launch::async,
-                    [mc, tok]() { return mc->verify_token(tok, 3); });
-            }
-            if (metaRefreshOp.valid() &&
-                metaRefreshOp.wait_for(std::chrono::seconds(0)) ==
-                    std::future_status::ready) {
-                if (auto a = metaRefreshOp.get()) {
-                    myElo = a->elo; myBp = a->bp; myXp = a->xp;
-                }
-            }
-```
-
-`std::async` + 매 프레임 `wait_for(0)` 폴링이 이 코드베이스에서 블로킹 HTTP를 다루는 표준 패턴이다. 렌더 스레드는 멈추지 않고 결과가 준비된 프레임에 값이 반영된다. Customize의 카탈로그 조회·구매·선택도 같은 패턴을 써서 UI 상태 전이만 달라진다.
+`src/account_screen.*`는 버튼과 확인 문구를 그린 뒤 동작 이름만 반환한다. main은
+비동기 계정 작업을 실행하고 완료 시 프로필을 갱신한다. 교체 전의 상점·프로필 응답은
+버려 새 계정 정보를 덮지 않게 한다. 파일 복구·키 폐기 순서와 운영 절차는 Part 17에
+구현되어 있지만, 위 상태 전이는 화면 추가 시에도 반드시 유지할 계약이다.
 
 ## 15. Customize 화면 — 프로필과 아이콘 상점 연결
 
@@ -2702,7 +2419,7 @@ relay 주소도 같은 3단 사다리(컴파일 기본값 → 환경변수 → C
             constexpr Color DISABLED = {70, 70, 70, 255};
             enum class MenuAction {
                 Single, BotSelect, Matchmaking, CustomRoom,
-                Customize, Settings, Quit,
+                Customize, Settings, Account, Quit,
             };
             struct MenuItem {
                 const char* label;
@@ -2715,6 +2432,7 @@ relay 주소도 같은 3단 사다리(컴파일 기본값 → 환경변수 → C
                 {"Custom Room Multi", MenuAction::CustomRoom},
                 {"Customize",         MenuAction::Customize},
                 {"Settings",          MenuAction::Settings},
+                {"Account & Recovery", MenuAction::Account},
                 {"Quit",              MenuAction::Quit},
             };
             constexpr int kMenuCount =
@@ -2733,21 +2451,6 @@ relay 주소도 같은 3단 사다리(컴파일 기본값 → 환경변수 → C
                     shopStatus.clear();
                     shopConfirmId.clear();
                     break;
-                case MenuAction::Settings:
-                    app = AppMode::Settings;
-                    settingsIndex = 0;
-                    break;
-                case MenuAction::Quit:
-                    // 메뉴의 Quit. 예전에는 여기서 renderer/platform 만 내리고
-                    // 바로 return 0 해서, 하단 정리 경로의 image_unload 와
-                    // net_shutdown(WSACleanup) 이 통째로 생략됐다 — "같은 순서를
-                    // 지킨다" 는 약속과 실제 동작이 달랐다. 이제 종료 플래그로
-                    // 메인 루프만 빠져나가 파일 하단의 공통 정리 경로
-                    // (image_unload → renderer_shutdown → platform_shutdown →
-                    // net_shutdown)를 그대로 타게 한다.
-                    quitRequested = true;
-                    break;
-                }
 ```
 
 항목 순서를 바꿔도 라벨과 action이 함께 이동하므로 다른 화면으로 잘못 진입하지 않는다. 새 동작을 추가할 때만 `MenuAction`과 switch를 함께 확장한다. 버튼은 랭킹 표시줄 위의 고정 영역에 배치되므로 항목을 늘렸다면 특정 개수를 문서에 맞추는 대신 가장 작은 지원 해상도에서 겹침과 키보드·마우스 포커스를 다시 확인한다.
@@ -2952,53 +2655,19 @@ Part 16에서 제거했다. 한 번 소비한 티켓을 캐시로 다시 허용�
 깨진다. 실패한 접속은 다음 시도에서 새 입장권을 받아야 한다. session lease는
 큐·룸·포워더 전체 수명을 따라가며 접속이 끝날 때 계정의 활성 슬롯을 반환한다.
 
-## 17. relay 쪽 연동 (2) — `finalizeRanked`
+## 17. relay 쪽 연동 (2) — 서버가 계산한 결과만 저장한다
 
-게임이 끝나면 양쪽 클라이언트가 21 바이트 `MATCH_SUMMARY` 를 보낸다.
+클라이언트는 종전 wire 호환을 위해 21바이트 `MATCH_SUMMARY`를 보낸다.
+`won`, 내 점수·줄 수, 상대 점수·줄 수, 경기 초가 들어간다. 그러나 이 필드는 더 이상
+승자를 결정하지 않는다. 양쪽이 일치하는 거짓말도 가능하기 때문이다.
 
-```text
-[won:1]
-[my_score:4 LE][my_lines:4 LE]
-[opp_score_observed:4 LE][opp_lines_observed:4 LE]
-[duration_s:4 LE]
-```
-
-클라이언트가 이 프레임을 만드는 곳은 게임오버 판정 직후다.
-
-**현재 소스 발췌 — `src/main.cpp`**
-
-```cpp
-                // Section K — MATCH_SUMMARY 송신 (ranked + meta 연동 시에만 의미 있음).
-                //   · won: "내가 이김" = 상대만 gameOver 이고 나는 살아있음
-                //   · my_score/lines: 내 SimGame
-                //   · opp_score/lines: 내가 관측한 상대 SimGame (lockstep 결정론으로
-                //     양쪽 클라가 동일 값). relay 에서 교차검증에 사용.
-                if (!summarySent_) {
-                    summarySent_ = true;
-                    const bool   iWon       = !gameLocal->gameOver && gameRemote->gameOver;
-                    const uint32_t my_score = (uint32_t)gameLocal->score;
-                    const uint32_t my_lines = (uint32_t)gameLocal->sim.totalLinesCleared;
-                    const uint32_t op_score = (uint32_t)gameRemote->score;
-                    const uint32_t op_lines = (uint32_t)gameRemote->sim.totalLinesCleared;
-                    const uint32_t dur_s    = (uint32_t)std::max(0.0,
-                                                    platform_get_time() - gameStartTime_);
-                    session.SendMatchSummary(iWon ? 1 : 0,
-                                             my_score, my_lines,
-                                             op_score, op_lines, dur_s);
-                }
-```
-
-`opp_score` / `opp_lines` 가 **내가 관측한 상대의 값**이라는 점이 교차검증의 전제다. [Part 6](./part6-lockstep-networking.md) 의 lockstep 결정론 덕분에 양쪽 클라이언트는 상대 보드까지 동일하게 시뮬레이션하므로, 정직한 두 클라이언트의 보고는 반드시 교차 일치한다.
-
-relay 의 `forwarderLoop` 는 ranked 매치에서만 이 타입을 가로채고 나머지 프레임은 원본 바이트 그대로 전달한다. 여기서 필요한 전제는 두 가지다 — 방향(A→B, B→A)마다 포워딩 스레드가 하나씩 돌고, 각 스레드는 자기 방향에서 도착한 summary 를 채널에 한 번만 기록하며 이미 값이 있으면 덮어쓰지 않는다. 이 장은 그 두 스레드 중 양쪽 summary 수집 완료를 처음 확인한 쪽이 부르는 함수에 집중한다.
+채널은 서버 seed로 만든 `RankedGame`을 소유한다. INPUT을 순서대로 받아 두 `SimGame`을
+진행하고, 같은 틱의 공격량을 교환한다. 처음 한 보드가 끝난 시점의 승패·점수·줄 수·틱 수를
+결과로 고정한다. 요약과 disconnect는 그 결과를 저장할 시점을 알리는 신호다.
 
 **현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// 두 MATCH_SUMMARY 가 모두 도착했을 때 교차검증 + meta POST + MATCH_RESULT 송신.
-// 양방향 forwarderLoop 중 먼저 양쪽 수집 완료를 본 스레드 하나가 실행한다.
-// 실패/meta-down 상황에서도
-// 양 클라에 MATCH_RESULT(delta=0) 는 반드시 송신해 "ranking offline" 표시 가능.
 void finalizeRanked(Channel& ch)
 {
     // 선점 — 한 번만 실행.
@@ -3008,44 +2677,23 @@ void finalizeRanked(Channel& ch)
         if (!ch.summaryA || !ch.summaryB) return;
         ch.summaryHandled = true;
     }
-    const Summary a = *ch.summaryA;
-    const Summary b = *ch.summaryB;
-
-    // 교차검증 (계획문서 규칙):
-    //   1) 한 명만 승리 주장해야 한다 (won_a XOR won_b).
-    //   2) a.my_score == b.opp_score_observed 이고 반대도 성립.
-    //   3) 라인수도 동일.
-    const bool exclusive_win = (a.won ^ b.won) != 0;
-    const bool scores_match  = (a.my_score == b.opp_score) && (b.my_score == a.opp_score);
-    const bool lines_match   = (a.my_lines == b.opp_lines) && (b.my_lines == a.opp_lines);
-    const bool cross_ok      = exclusive_win && scores_match && lines_match;
-
-    std::optional<int64_t> winner;
-    if (cross_ok) {
-        winner = (a.won == 1) ? ch.playerA_id : ch.playerB_id;
+    VerifiedResult verified;
+    {
+        std::lock_guard<std::mutex> lock(ch.sumMu);
+        verified = ch.verified->result();
     }
-    if (!cross_ok) {
-        RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
-                  << " cross-check FAIL (exclusive_win=" << exclusive_win
-                  << " scores=" << scores_match
-                  << " lines=" << lines_match
-                  << ") -> winner=null");
-    }
-
-    // cross_ok=false 여도 감사 목적으로 자가보고 값을 그대로 기록한다.
-    // winner=null 이므로 RP 에는 영향 없음 — DB 에는 "누가 뭐라고 주장했나" 만 남는다.
-    const int      duration_s = static_cast<int>(std::max(a.duration_s, b.duration_s));
-    const int      score_a    = static_cast<int>(a.my_score);
-    const int      score_b    = static_cast<int>(b.my_score);
-    const int      lines_a    = static_cast<int>(a.my_lines);
-    const int      lines_b    = static_cast<int>(b.my_lines);
+    const std::optional<int64_t> winner = verified.winner == 1 ? std::optional<int64_t>(ch.playerA_id)
+        : verified.winner == 2 ? std::optional<int64_t>(ch.playerB_id) : std::nullopt;
+    const int score_a = verified.score_a, score_b = verified.score_b;
+    const int lines_a = verified.lines_a, lines_b = verified.lines_b;
+    const int duration_s = verified.duration_s;
+    auto status = verified.status;
 
     int deltaA = 0, deltaB = 0;
     int eloABefore = ch.playerA_elo, eloAAfter = ch.playerA_elo;
     int eloBBefore = ch.playerB_elo, eloBAfter = ch.playerB_elo;
 
-    if (ch.meta) {
+    if (ch.meta && (status == net::ResultStatus::Applied || status == net::ResultStatus::Draw)) {
         auto res = ch.meta->post_match(ch.match_uuid, ch.playerA_id, ch.playerB_id, winner,
                                        score_a, score_b, lines_a, lines_b,
                                        duration_s);
@@ -3057,6 +2705,7 @@ void finalizeRanked(Channel& ch)
                       << " a=" << (deltaA >= 0 ? "+" : "") << deltaA
                       << " b=" << (deltaB >= 0 ? "+" : "") << deltaB);
         } else {
+            status = net::ResultStatus::SaveFailed;
             RLOG_WARN("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
                       << " meta POST failed — MATCH_RESULT delta=0");
         }
@@ -3068,58 +2717,69 @@ void finalizeRanked(Channel& ch)
     // MATCH_RESULT 송신 — 성공 실패 관계없이 양 클라에 한 번씩.
     // 반대 방향 forwarderLoop 가 동시에 같은 소켓에 쓰고 있을 수 있으므로 sendMuA/B
     // 로 직렬화.
-    auto frA = build_match_result(eloABefore, eloAAfter, deltaA);
-    auto frB = build_match_result(eloBBefore, eloBAfter, deltaB);
+    auto frA = build_match_result(eloABefore, eloAAfter, deltaA, status);
+    auto frB = build_match_result(eloBBefore, eloBAfter, deltaB, status);
     sendToA(ch, frA);
     sendToB(ch, frB);
 }
 ```
 
-### 17.1 한 번만 실행되는 것을 어떻게 보장하는가
+### 17.1 소유권과 한 번만 저장하기
 
-이 함수는 **두 스레드가 동시에 호출할 수 있다.** A→B 방향 forwarder 와 B→A 방향 forwarder 가 각각 매 루프마다 "양쪽 summary 가 다 왔는가"를 확인하기 때문이다. 마지막 summary 가 도착한 직후 두 스레드가 거의 동시에 조건을 참으로 볼 수 있다.
+thread relay는 `sumMu`로 검증기와 결과 선점을 보호하고 HTTP 호출은 잠금 밖에서 한다.
+reactor는 채널 소유 loop에서 검증하고 HTTP는 기존 offload 작업자에 맡긴다.
+두 구현은 같은 검증 정책을 재사용한다. meta는 match UUID의 UNIQUE 제약과 DB
+트랜잭션으로 중복 지급을 막는다. 연결 단위 선점과 DB 멱등성은 서로 다른 실패를 다룬다.
 
-메모리 선점이 없으면 같은 결과를 불필요하게 두 번 POST하고 두 응답을 경쟁적으로 전송한다. DB의 `match_uuid` 멱등성이 RP 중복 반영은 막지만, 네트워크 작업과 UI 프레임 중복까지 해결하지는 않으므로 채널 안에서도 한 번만 실행되게 한다.
+### 17.2 미완료 입력과 조작 입력
 
-방어는 첫 블록의 선점이다. `sumMu` 를 잡은 채 `summaryHandled` 를 검사하고 즉시 true 로 세운다. 검사와 갱신이 같은 임계 구역 안에 있으므로 정확히 한 스레드만 통과한다. 나머지는 조용히 return 한다.
+누락·뒤집은 입력·잘못된 마스크·서버와 다른 seed·과도한 미래 틱은 유효한 경기로
+인정하지 않는다. 완결된 서버 시뮬레이션이 없으면 요약이 일치해도 RP/BP/XP를 지급하지
+않는다. 상대가 종료 후 요약을 보내지 않고 나가도 서버가 종료를 재현했다면 저장한다.
+종료 전에 이탈하면 보상이 없다. 자동 몰수패 정책은 별도로 구현하지 않았다.
 
-`ch.summaryA` / `ch.summaryB` 를 **락 안에서 검사하고 락 밖에서 복사**하는 것도 안전하다. `summaryHandled` 를 세운 시점 이후로는 이 스레드만 이 값을 읽고, forwarder 쪽은 `if (!ch->summaryA) ch->summaryA = s;` 로 이미 값이 있으면 덮어쓰지 않기 때문이다.
+### 17.3 화면에 결과의 의미를 전달한다
 
-### 17.2 교차검증의 세 조건
+`MATCH_FOUND`의 끝에는 랭크 여부를, `MATCH_RESULT`의 기존 12바이트 뒤에는 상태를
+붙인다. RP 변화량 0만으로 실패를 추측하지 않는다.
 
-| 조건 | 코드 | 막는 것 |
-|---|---|---|
-| 배타적 승리 | `(a.won ^ b.won) != 0` | 둘 다 이겼다고 주장 / 둘 다 졌다고 주장 |
-| 점수 교차 일치 | `a.my_score == b.opp_score && b.my_score == a.opp_score` | 한쪽이 자기 점수를 부풀림 |
-| 라인 교차 일치 | `a.my_lines == b.opp_lines && b.my_lines == a.opp_lines` | 같은 위조를 라인 수로 시도 |
+**현재 소스 발췌 — `net/match_result.h`**
 
-이 검증이 막는 것과 막지 못하는 것을 분명히 해두자.
+```cpp
+#pragma once
+#include <cstdint>
+namespace net {
+// Appended to the original 12-byte MATCH_RESULT. Old clients ignore the suffix.
+enum class ResultStatus : uint8_t {
+    Unknown = 0,
+    Applied = 1,
+    InvalidReplay = 2,
+    Incomplete = 3,
+    SaveFailed = 4,
+    Draw = 5
+};
+inline const char *result_status_text(ResultStatus status) {
+    switch (status) {
+    case ResultStatus::Applied:
+        return "Result verified and saved";
+    case ResultStatus::InvalidReplay:
+        return "No rewards: game inputs failed validation";
+    case ResultStatus::Incomplete:
+        return "No rewards: the game did not finish on the server";
+    case ResultStatus::SaveFailed:
+        return "Server save not confirmed - reconnect to check your profile";
+    case ResultStatus::Draw:
+        return "Verified draw - no rating or rewards";
+    default:
+        return "Server did not provide a result status";
+    }
+}
+} // namespace net
+```
 
-**막는 것:** 한쪽 클라이언트만 조작한 경우. 조작된 값은 상대의 관측과 어긋나므로 `cross_ok = false` 가 되고 `winner = null` 로 기록된다. RP 는 변하지 않는다.
-
-**막지 못하는 것:** 양쪽이 담합해 같은 거짓말을 하는 경우. 두 계정을 모두 통제하는 공격자는 일관된 위조 summary 쌍을 만들 수 있다. §12.2 (d)에서 짚은 부계정 문제와 같은 뿌리다. 근본 대책은 relay가 게임을 직접 시뮬레이션해 결과를 스스로 계산하는 것이다. 그러면 현재의 비영속성은 유지할 수 있어도 relay가 게임 규칙과 CPU 비용을 소유하게 되어 배포·버전 호환·수평 확장의 성격이 크게 달라진다.
-
-`duration_s = std::max(a.duration_s, b.duration_s)` 는 교차검증 대상이 아니다. 두 클라이언트의 실제 벽시계 시간은 시작 시점 차이 때문에 몇 초 어긋날 수 있고, 그 차이로 매치를 무효화하는 것은 과하다. 통계값이므로 큰 쪽을 택한다.
-
-### 17.3 실패해도 UI 는 멈추지 않는다
-
-`deltaA` / `deltaB` 가 0 으로 초기화되고, `eloABefore`/`eloAAfter` 가 verify 시점의 값으로 초기화된다는 점이 중요하다. meta 가 없거나 POST 가 실패해도 **`MATCH_RESULT` 는 반드시 양쪽에 간다.**
-
-이유는 클라이언트 UI 다. 게임오버 화면은 `MATCH_RESULT` 를 기다렸다가 RP 변동을 표시한다. 프레임이 오지 않으면 그 화면이 영원히 "결과 대기 중" 상태로 남는다. delta 0 이 오면 "변동 없음"으로 그리고 다음으로 진행할 수 있다.
-
-**장애 상황에서 무엇을 보여줄지를 미리 정하는 것**이 이런 통합 지점의 기본이다. "응답이 없으면 어떻게 되는가"에 답이 없는 UI 는 반드시 멈춘다.
-
-### 17.4 summary 전에 연결이 끊긴 경우
-
-모바일 절전, 앱 강제 종료, Wi-Fi 전환처럼 한쪽이 `MATCH_SUMMARY`를 보내기 전에 사라질 수 있다. relay는 EOF·송신 실패·15초 무활동·전송량 초과를 관측한 방향을 "먼저 끊긴 쪽"(`disconnect_side`)으로 기록하고 `finalizeForfeit`를 부른다. 이 값은 **승패의 근거가 아니다** — 이미 죽은 소켓에 결과를 쓰지 않도록 `MATCH_RESULT` 송신 대상(생존자)을 고르는 데만 쓴다. 승패는 그 시점까지 수집된 summary 에 따라 세 갈래로 정해진다.
-
-- **양쪽 summary 존재** — 회선이 끊겼어도 경기 자체는 완주된 것이다(승패 확정 직후 요약만 보내고 즉시 종료한 경우). `finalizeRanked` 의 교차검증 경로에 그대로 위임한다.
-- **한쪽 summary 만 존재** — 그 summary 의 `won` 플래그를 존중해 승자를 정하고, 미제출 측의 점수·라인은 제출된 summary 의 상대 관측값으로 채워 저장한다. 이전 설계는 끊긴 쪽을 무조건 패자로 기록했는데, 그러면 이긴 쪽이 승리 요약을 제출한 직후 회선이 끊겼을 때 제출된 요약이 무시되고 승자가 패자로 뒤집히는 버그가 있었다.
-- **summary 전무(무경기)** — meta 에 `post_match` 를 보내지 않는다. RP 는 반영되지 않고, 생존 가능성이 있는 쪽에만 delta 0 `MATCH_RESULT` 를 보내 결과 대기 화면에서 빠져나오게 한다.
-
-세 번째 갈래가 닫는 구멍이 둘이다. 커스텀 룸에서 READY 직후 끊기를 반복하며 상대에게 몰수승을 몰아주는 담합 RP 파밍이 하나, 동시 단절에서 어느 소켓의 실패를 먼저 관측했느냐는 스레드 스케줄링 우연으로 임의 승자가 기록되는 오염이 다른 하나다. 일반화하면 — **서버가 직접 검증하지 않은 사실(누가 이겼는가)을 신뢰할 수 없는 신호(단절 관측 순서)로 추정해 영속 상태에 쓰면 안 된다.** 제출된 주장(summary)이 있으면 그것을 근거로 쓰고, 근거가 전혀 없으면 기록하지 않는 편이 낫다.
-
-기권 저장도 정상 종료와 같은 `match_uuid` 를 사용하므로 재시도에 안전하고, relay 프로세스가 종료 중일 때는 몰수 처리를 생략해 운영 재시작을 패배로 기록하지 않는다. 남는 트레이드오프도 분명하다 — 게임오버 전에 양쪽 모두 summary 없이 끊기면 완주 직전의 경기도 무경기로 남고, 지고 있던 쪽이 summary 제출 전에 강제 종료하면 패배가 기록되지 않는다. 후자는 상대의 승리 summary 가 이미 도착해 있는 한 두 번째 갈래로 흡수되므로, 실제로 빠져나가는 창은 양쪽 summary 가 모두 없는 구간뿐이다.
+랭크 경기의 재경기는 새 입장권·연결·seed·UUID를 얻도록 큐로 돌아간다. 같은 채널에서
+시드만 바꾸는 옛 R 재시작은 연습전에서만 허용한다. 입력 검증의 제한과 자동 검사는
+[Part 18](part18-authoritative-results.md)에 구체적으로 설명한다.
 
 ## 18. 랭킹 웹 페이지
 
@@ -3209,8 +2869,8 @@ same-origin 을 택한 덕에 CORS 문제가 사라지고, meta 포트를 외부
 `tetris_meta` 는 blocking `listen()` 이므로 백그라운드로 띄워야 한다. 두 서버를 한 셸에서 연달아 실행하려면 첫 명령에 `&` 가 필요하다.
 
 ```bash
-cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON
-cmake --build build --target tetris_relay tetris_meta
+cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON -DTETRIS_BUILD_TEST=ON
+cmake --build build --parallel 4
 
 export TETRIS_RELAY_SECRET='replace-with-a-long-random-secret'
 
@@ -3291,8 +2951,8 @@ kill %2 %1
 계약을 고정하는 것은 아래 pytest 모듈들이다. 테스트는 `build/`, `build-relay/`, `build-meta/` 를 자동 탐색하고 `TETRIS_RELAY_BIN` / `TETRIS_META_BIN` 환경변수로 덮어쓸 수 있다.
 
 ```bash
-cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON
-cmake --build build --target tetris_relay tetris_meta
+cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON -DTETRIS_BUILD_TEST=ON
+cmake --build build --parallel 4
 uv run python -m pytest python/tests/test_meta_db_smoke.py \
                        python/tests/test_relay_meta_smoke.py \
                        python/tests/test_match_summary_crosscheck.py -q
@@ -3316,26 +2976,28 @@ uv run python -m pytest python/tests/test_meta_db_smoke.py \
 - RP(`meta/elo.h`) — 0 시작 · 0 바닥으로 리베이스한 Elo, K-factor 3 단계. XP/레벨(`meta/levels.h`) — 저장하지 않고 누적 XP 에서 유도하는 60 레벨 이차 곡선.
 - `Database::saveMatch` — matches INSERT + players UPDATE ×2 + elo_history INSERT ×2 를 한 트랜잭션에. `winner=null` 이면 감사 기록만 남고 보상은 없다.
 - 아이콘 카탈로그 · 구매 · 선택 — 조건부 UPDATE 로 BP 차감을 보호하고, 400/402/403/404/409/500 상태 코드로 클라이언트의 2 단계 구매 흐름을 만든다.
-- `meta/protocol.h` — 라이브러리 없는 JSON 직렬화/파싱. `json_escape`, `find_key_colon`/`find_string`/`find_int`(INT64 오버플로 가드)/`find_bool`.
+- `meta/protocol.h` — 응답 직렬화·타입 있는 최상위 필드 조회. `json_input.h`는 전체 문법·중복 키·깊이·정수 범위를, `json_routes.h`는 POST 검증 시점을 담당한다.
 - HTTP 방어선 — 64 KiB body 상한, per-IP 고정 윈도우 레이트 리밋(명시적 신뢰 옵션과 loopback peer를 모두 만족할 때만 XFF rightmost 채택), 상수 시간 secret 비교, 통계값 1e8 상한.
 - `meta::client::MetaClient` — 게임 클라이언트와 relay 가 공유하는 HTTP 래퍼. HTTPS 는 OpenSSL 빌드에서만 유효하고, `VerifyOutcome` 3 분기로 "토큰이 죽었다"와 "서버가 잠깐 안 된다"를 구분한다.
-- 플랫폼별 user-data 경로 — `token_file_path()` / `settings_file_path()`, POSIX 0600 토큰 저장, 32-hex 형식 검증.
+- 플랫폼별 user-data 경로 — `platform/user_data` / `AccountStore`, 서버별 origin 확인, 원자적 비공개 파일 저장.
 - 클라이언트 — 토큰 부트스트랩의 성공·stale token·offline 분기, `AppMode::Customize` 아이콘 상점, 랭크 매치 후 비동기 `verify_token` 갱신. 메뉴 배열의 숫자 index가 아니라 `AppMode` 전이를 계약으로 본다.
-- relay — `--meta` / `--meta-secret`(secret 없으면 exit 2), `authenticate` 의 unranked/reject 진리표, `finalizeRanked` 의 선점 · 교차검증 3 조건 · 실패해도 delta 0 `MATCH_RESULT` 보장.
+- relay — `--meta` / `--meta-secret`(secret 없으면 exit 2), `authenticate` 의 unranked/reject 진리표, `finalizeRanked`의 선점·공통 서버 판정·저장 및 거절 사유를 포함한 `MATCH_RESULT`.
 - `web/ranking/index.html` — same-origin `/v1/leaderboard?limit=50` 를 30 초마다 fetch 하는 정적 페이지.
 - `deploy/systemd/*.env.example` · `deploy/Caddyfile.example` — `TETRIS_RELAY_SECRET` 을 서비스 매니저의 비밀 파일로 주입하는 예시와, 랭킹 페이지·meta API 를 같은 오리진으로 묶는 리버스 프록시 예시.
 
 ## 수동 테스트
 
 ```bash
-cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON
-cmake --build build --target tetris_relay tetris_meta
+cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON -DTETRIS_BUILD_TEST=ON
+cmake --build build --parallel 4
 uv run python -m pytest python/tests/test_meta_db_smoke.py \
                        python/tests/test_relay_meta_smoke.py \
                        python/tests/test_match_summary_crosscheck.py -q
 ```
 
-기대 결과: DB 마이그레이션, 멱등 재시도, 인증, summary·기권 저장 시나리오가 모두 통과한다.
+전체 빌드는 실제 종료 입력의 기준 통계를 만드는 `ranked_game_test`도 준비한다. Windows는 `--config Release`를 사용하고 필요하면 `TETRIS_SECURE_BUILD`를 `build/Release`로 지정한다.
+
+기대 결과: DB 마이그레이션, 멱등 재시도, 인증, 실제 입력 종료 저장·허위 summary·미완료 이탈 무보상 시나리오가 모두 통과한다.
 
 ```bash
 export TETRIS_RELAY_SECRET='replace-with-a-long-random-secret'
@@ -3349,4 +3011,6 @@ kill %1
 
 기대 결과: `{"ok":true}`, `elo=0`/`bp=0`/`xp=0`/`level=1`/`selected_icon_id=default` 를 담은 guest 응답, 그리고 `elo_history matches player_icons players schema_migrations` 테이블 목록.
 
-이 장이 만든 `meta::client::settings_file_path()`는 현재 설정 영속화도 재사용한다. 네트워크와 무관한 경로 헬퍼가 meta 모듈에 있다는 결합 때문에 설정 구현 순서가 이 장 뒤로 밀리며, 이를 해소하려면 공용 user-data 모듈로 옮겨야 한다. 어느 위치에 있든 설정·아이콘 UI는 표현 계층만 바꾸고 결정론과 wire 계약은 건드리지 않는다는 경계를 지킨다.
+설정 영속화는 현재 `platform::settings_file_path()`를 사용한다. OS 경로 책임을
+`platform/user_data`로 옮겨 HTTP와의 결합을 제거했다. 설정·아이콘 UI는 표현 계층만
+바꾸고 결정론과 wire 계약은 건드리지 않는다는 경계를 유지한다.

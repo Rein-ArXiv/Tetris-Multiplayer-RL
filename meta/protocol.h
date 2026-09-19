@@ -1,17 +1,15 @@
 #pragma once
+#include "json_input.h"
 
-// meta/protocol.h — JSON 수동 직렬화/파싱 헬퍼.
-//
-// 우리 엔드포인트들은 대부분 "평면적인 primitive 필드"로만 구성되므로
-// 범용 풀스펙 JSON 라이브러리는 과하다. 이 헤더의 함수들은
-// 특정 응답 shape 마다 전용으로 만들어져 있어 읽기 쉽고 빠르다.
+// API별 응답 직렬화와 타입 있는 최상위 필드 조회.
+// 요청 전체의 문법·중복 키·깊이는 json_input에서 검증한다.
 //
 // 응답 규약:
 //   · 200: 엔드포인트별 페이로드
 //   · 4xx/5xx: {"error":"...","reason":"..."}
 //
-// 파싱 규약: Content-Type 무시하고 body 에서 원하는 키를 substr+find 로 뽑는다.
-// malformed JSON 은 find_int/find_string 이 -1 또는 빈 문자열 반환 → 호출자가 400.
+// 유효하지 않은 문서나 잘못된 필드 타입은 빈 문자열/nullopt를 반환한다.
+// POST 핸들러는 json_routes에서 문서 검증을 먼저 거친다.
 
 #include <cstdint>
 #include <cstdio>
@@ -177,101 +175,14 @@ inline std::string leaderboard_response(const std::vector<LeaderRow>& rows)
     return ss.str();
 }
 
-// --- 파싱 헬퍼 (요청 바디) ----------------------------------------------------
-//
-// nested object 없음, 배열 없음, 주석 없음 가정. 모든 필드는 top-level primitive.
-//
-// find_string("token")  → `"token"\s*:\s*"VALUE"`  에서 VALUE 반환 (없으면 빈 문자열)
-// find_int("player_a")  → 숫자(null 허용) 반환. 없으면 std::nullopt.
-// find_bool("won")      → true/false. 없으면 std::nullopt.
-
-namespace detail {
-
-inline size_t skip_ws(const std::string& s, size_t i)
-{
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' ||
-                            s[i] == '\n' || s[i] == '\r'))
-        ++i;
-    return i;
+// Fields are read only from a fully validated top-level JSON object.
+inline std::string find_string(const std::string& body, const char* key) {
+    return json_input::string(body, key);
 }
-
-// key 의 시작 인덱스를 찾아 콜론 뒤까지 이동. 없으면 npos.
-inline size_t find_key_colon(const std::string& body, const char* key)
-{
-    const std::string needle = std::string("\"") + key + "\"";
-    size_t pos = 0;
-    while ((pos = body.find(needle, pos)) != std::string::npos) {
-        // 콜론까지 이동
-        size_t after = skip_ws(body, pos + needle.size());
-        if (after < body.size() && body[after] == ':') {
-            return skip_ws(body, after + 1);
-        }
-        pos += needle.size();
-    }
-    return std::string::npos;
+inline std::optional<int64_t> find_int(const std::string& body, const char* key) {
+    return json_input::integer(body, key);
 }
-
-} // namespace detail
-
-// key → 문자열 값 (unescape 최소한: \" \\ \n \r \t 만).
-inline std::string find_string(const std::string& body, const char* key)
-{
-    size_t i = detail::find_key_colon(body, key);
-    if (i == std::string::npos) return {};
-    if (i >= body.size() || body[i] != '"') return {};
-    ++i;
-    std::string out;
-    while (i < body.size() && body[i] != '"') {
-        if (body[i] == '\\' && i + 1 < body.size()) {
-            switch (body[i + 1]) {
-                case '"':  out += '"';  break;
-                case '\\': out += '\\'; break;
-                case '/':  out += '/';  break;
-                case 'n':  out += '\n'; break;
-                case 'r':  out += '\r'; break;
-                case 't':  out += '\t'; break;
-                default:   out += body[i + 1];
-            }
-            i += 2;
-        } else {
-            out += body[i++];
-        }
-    }
-    return out;
+inline std::optional<bool> find_bool(const std::string& body, const char* key) {
+    return json_input::boolean(body, key);
 }
-
-// key → 정수 값. null 이면 nullopt. 부호 허용.
-inline std::optional<int64_t> find_int(const std::string& body, const char* key)
-{
-    size_t i = detail::find_key_colon(body, key);
-    if (i == std::string::npos) return std::nullopt;
-    // null?
-    if (body.compare(i, 4, "null") == 0) return std::nullopt;
-    // 숫자 파싱
-    size_t j = i;
-    if (j < body.size() && (body[j] == '-' || body[j] == '+')) ++j;
-    if (j >= body.size() || !(body[j] >= '0' && body[j] <= '9')) return std::nullopt;
-    int64_t val = 0;
-    bool neg = (body[i] == '-');
-    if (body[i] == '+' || body[i] == '-') ++i;
-    while (i < body.size() && body[i] >= '0' && body[i] <= '9') {
-        int d = body[i] - '0';
-        // 오버플로 방지: int64 범위를 벗어나는 입력은 파싱 실패(nullopt)로 처리.
-        // 필수 숫자 필드라면 상위(api_server)에서 400 으로 거부된다.
-        if (val > (INT64_MAX - d) / 10) return std::nullopt;
-        val = val * 10 + d;
-        ++i;
-    }
-    return neg ? -val : val;
-}
-
-inline std::optional<bool> find_bool(const std::string& body, const char* key)
-{
-    size_t i = detail::find_key_colon(body, key);
-    if (i == std::string::npos) return std::nullopt;
-    if (body.compare(i, 4, "true")  == 0) return true;
-    if (body.compare(i, 5, "false") == 0) return false;
-    return std::nullopt;
-}
-
 } // namespace meta::proto

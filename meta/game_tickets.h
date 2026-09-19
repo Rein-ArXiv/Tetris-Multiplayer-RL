@@ -14,7 +14,8 @@ class GameTickets {
 public:
     using Clock = std::chrono::steady_clock;
     static constexpr auto lifetime = std::chrono::seconds(60);
-    bool issue(const std::string& ticket, int64_t player, std::string auth,
+    struct Admission { int64_t player; int64_t epoch; };
+    bool issue(const std::string& ticket, int64_t player, int64_t epoch = 0,
                Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto it = entries_.begin(); it != entries_.end();) {
@@ -22,9 +23,9 @@ public:
             else ++it;
         }
         if (entries_.size() >= 4096) return false;
-        return entries_.emplace(ticket, Entry{player, std::move(auth), now + lifetime}).second;
+        return entries_.emplace(ticket, Entry{player, epoch, now + lifetime}).second;
     }
-    std::optional<std::string> consume(const std::string& ticket,
+    std::optional<Admission> consume(const std::string& ticket,
                                       Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = entries_.find(ticket);
@@ -32,10 +33,10 @@ public:
         auto entry = std::move(it->second);
         entries_.erase(it); // Burn even an expired ticket; never cache successful redemptions.
         if (entry.expires <= now) return std::nullopt;
-        return entry.auth;
+        return Admission{entry.player,entry.epoch};
     }
 private:
-    struct Entry { int64_t player; std::string auth; Clock::time_point expires; };
+    struct Entry { int64_t player; int64_t epoch; Clock::time_point expires; };
     std::mutex mutex_;
     std::unordered_map<std::string, Entry> entries_;
 };

@@ -47,7 +47,7 @@ epoll에 직접 의존하지 않으므로 Windows에도 같은 진입 구조를 
 
 | 자격 증명 | 보관 위치와 용도 | 수명 |
 |---|---|---|
-| 계정 토큰: 32자리 hex | 사용자 데이터 폴더, meta의 계정·상점 API | 기존 장기 토큰. 만료·회전·복구는 아직 없음 |
+| 계정 토큰: 32자리 hex | 사용자 데이터 폴더, meta의 계정·상점 API | 장기 접근 키. 교체·폐기·복구는 Part 17, 자동 만료는 없음 |
 | 게임 입장권: `gt1.` + 32자리 hex | meta 메모리 → Session 작업 스레드 → relay 인증 | 발급 후 60초, 소비 1회 |
 | relay secret | 서버 설정, meta의 내부 API 인증 | 운영자가 관리. 클라이언트 번들에 넣지 않음 |
 | 봇 도전 티켓 | Part 15의 상대·seed·입력 재현 식별 | 별도 PvE 계약. 게임 입장권과 교환 불가 |
@@ -73,13 +73,16 @@ JSON 응답에는 `Cache-Control: no-store`를 붙인다. 입장권을 URL 쿼�
 **현재 소스 발췌 — `meta/api_server.cpp`**
 
 ```cpp
-    svr.Post("/v1/game-tickets/consume", [&](const httplib::Request& req, httplib::Response& res) {
+    json_post(svr, "/v1/game-tickets/consume", [&](const httplib::Request& req, httplib::Response& res) {
         if (relay_secret_.empty() || !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
             set_json(res, 403, proto::error_json("relay_auth_required")); return;
         }
         auto auth = gameTickets.consume(proto::find_string(req.body, "ticket"));
         if (!auth) { set_json(res, 401, proto::error_json("invalid_game_ticket")); return; }
-        set_json(res, 200, *auth);
+        // Rotation/recovery after issue invalidates the old credential generation.
+        auto current=db_.getByEpoch(auth->player,auth->epoch);
+        if(!current) { set_json(res,401,proto::error_json("invalid_game_ticket")); return; }
+        set_json(res,200,proto::auth_response(current->id,current->username,current->elo,current->bp,current->xp,current->selected_icon_id));
     });
 ```
 
@@ -97,7 +100,7 @@ HTTPS로 배치해야 한다. 임의의 인터넷 HTTP 주소를 내부망으로
 **현재 소스 발췌 — `meta/game_tickets.h`**
 
 ```cpp
-    std::optional<std::string> consume(const std::string& ticket,
+    std::optional<Admission> consume(const std::string& ticket,
                                       Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = entries_.find(ticket);
@@ -105,7 +108,7 @@ HTTPS로 배치해야 한다. 임의의 인터넷 HTTP 주소를 내부망으로
         auto entry = std::move(it->second);
         entries_.erase(it); // Burn even an expired ticket; never cache successful redemptions.
         if (entry.expires <= now) return std::nullopt;
-        return entry.auth;
+        return Admission{entry.player,entry.epoch};
     }
 ```
 
@@ -117,9 +120,10 @@ HTTPS로 배치해야 한다. 임의의 인터넷 HTTP 주소를 내부망으로
 이전 티켓은 무효가 된다. meta 재시작도 미사용 티켓을 모두 무효화한다.
 입장권은 DB에 저장하지 않으므로 서버 이전 시 복사할 필요가 없다.
 
-항목에는 장기 토큰 대신 player ID와 발급 당시 인증 응답을 저장한다.
-RP·선택 아이콘은 최대 60초 전 값일 수 있다. 이것은 입장 표시용 스냅샷이며,
-상점 잔액을 이 값으로 덮어쓰지 않는다. 실제 구매·결과 반영은 계속 DB가 결정한다.
+항목에는 장기 토큰 대신 player ID와 발급 당시 `auth_epoch`를 저장한다.
+[Part 17](part17-guest-account-recovery.md)의 키 변경은 이 세대를 증가시킨다. 소비 시
+`getByEpoch()`가 현재 DB와 비교하므로 변경 전 미사용 티켓은 거절된다. RP·BP·아이콘은
+소비 시 DB에서 읽은 값이다. 이미 승인한 경기까지 소급 취소하는 구조는 아니다.
 
 ### 2.3 응답을 잃었을 때는 새 입장권을 받는다
 
@@ -440,7 +444,7 @@ CI도 Boost·OpenSSL을 준비하고 세 OS에서 WSS 클라이언트 컴파일�
 
 최신 수치와 전체 회귀 결과는 [검증 기록](../polish-validation.md)에 모은다.
 이 작업에서 해결한 것은 공개 연결의 암호화와 게임 입장 자격의 범위다.
-DB 원문 계정 토큰의 해시화·회전·폐기·복구, PvP 결과의 서버 규칙 검증은 후속 작업이다.
-봇 BP는 Part 15의 서버 재현 검증을 사용하지만 PvP에도 같은 검증이 생긴 것은 아니다.
+DB 계정 토큰의 해시화·교체·폐기·복구는 [Part 17](part17-guest-account-recovery.md)에서 이어진다. PvP 결과의 서버 규칙 검증은 [Part 18](part18-authoritative-results.md)에서 구현한다. 활성 세션의 즉시 강제 종료는 남은 작업이다.
+봇 BP와 PvP는 같은 결정론적 코어를 재사용하지만 각자의 입력·보상 경로를 검증한다.
 브라우저가 접근할 WSS 진입점은 마련했으나 WASM/WebGL 게임·비동기 API·브라우저 저장소는
 아직 구현되지 않았다. 따라서 URL을 올리는 것만으로 웹 게임 출시가 끝나지 않는다.

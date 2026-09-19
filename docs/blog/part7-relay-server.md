@@ -1,16 +1,16 @@
 # Part 7: 릴레이 서버 — 매치메이킹, 룸 코드, 선택적 프레임 전달
 
-> **공개 접속의 현재 경로:** [Part 16](part16-secure-admission.md)은 WSS 게이트웨이와 일회용 게임 입장권을 추가한다. 이 장의 raw TCP 명령은 로컬/내부 연결을 설명한다. 공개 포트는 WSS, relay는 `--loopback-only`이며, 기존 token 필드에는 장기 계정 토큰 대신 입장권을 넣는다.
-
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 7**
 
 ---
+
+> **공개 접속의 현재 경로:** [Part 16](part16-secure-admission.md)은 WSS 게이트웨이와 일회용 게임 입장권을 추가한다. 이 장의 raw TCP 명령은 로컬/내부 연결을 설명한다. 공개 포트는 WSS, relay는 `--loopback-only`이며, 기존 token 필드에는 장기 계정 토큰 대신 입장권을 넣는다.
 
 ## 이번 Part의 구현 계약
 
 - **선행 상태:** [Part 6](./part6-lockstep-networking.md) 이 `net/socket.h`(`TcpSocket`, `tcp_listen`/`tcp_connect`/`tcp_accept`/`tcp_recv_some`/`tcp_send_all`/`tcp_close`), `net/framing.h`(`build_frame`/`parse_frames`/`fnv1a32`/`le_*`), `net::Session` 의 직결 P2P 경로(`Host`/`Connect`/`ioThread`/`handleFrame`)를 완성해 뒀다. `MsgType` 에 `QUEUE_*`/`ROOM_*`/`MATCH_*`/`READY`/`CHAT` 값이 이미 선언돼 있고, `Session` 의 릴레이용 공개 메서드는 선언만 있는 상태다. peer IP 조회 헬퍼 `net::tcp_peer_ip` 는 이 시점에 없다 — §5 의 IP별 입장 예산을 위해 이 장이 `net/socket.h/.cpp` 에 추가한다.
 - **이번 Part의 파일:** `server/main.cpp`, `server/player_conn.h/.cpp`, `server/matchmaker.h/.cpp`, `server/room.h/.cpp`, `server/relay.h/.cpp`, `server/worker_group.h`, `server/player_session.h`, `server/match_uuid.h`, `server/ip_admission.h`, `server/log.h/.cpp`, `tests/worker_group_test.cpp`, `net/socket.h/.cpp`(`tcp_peer_ip` 추가), `CMakeLists.txt`(타깃 `tetris_relay`, `worker_group_test`), 그리고 `net/session.cpp` 의 릴레이 절반 (`QueueJoin`/`QueueCancel`/`QueueConfirm`/`QueueDecline`/`RoomCreate`/`RoomJoin`/ `RoomSendReady`/`RoomLeave`/`queueThread`/`roomThread`).
-- **연결점:** 서버는 `net/socket.*` 과 `net/framing.*` 만 재사용한다. 게임 시뮬레이션· 렌더러·오디오를 링크하지 않는다. 클라이언트 쪽은 `queueThread`/`roomThread` 가 `MATCH_FOUND` 를 받은 뒤 그대로 `Session::ioThread` 로 전환하므로, Part 6 의 lockstep 코드는 한 줄도 바뀌지 않는다.
+- **연결점:** 초기 전달 계층은 `net/socket.*`과 `net/framing.*`을 재사용한다. 현재 랭크 검증은 Part 18의 `RankedGame`과 `SimGame`도 링크하며 렌더러·오디오·사용자 계정 파일은 링크하지 않는다. 클라이언트 쪽은 `queueThread`/`roomThread` 가 `MATCH_FOUND` 를 받은 뒤 그대로 `Session::ioThread` 로 전환하므로, Part 6 의 lockstep 코드는 한 줄도 바뀌지 않는다.
 - **완료 게이트:** `tetris_relay`와 `worker_group_test`가 빌드되고, 단위 테스트가 0을 반환하며, 포트 **7788**에 띄운 relay를 대상으로 queue/room smoke 테스트가 skip 없이 모두 통과해야 한다. `tetris_relay` 링크에는 `meta/` 클라이언트 파일이 필요하다 — §3 의 선행 확보 절이 입수 방법을 안내한다.
 
 ## 1. 왜 릴레이인가 — P2P 와의 트레이드오프
@@ -38,27 +38,26 @@ STUN/TURN 계열의 홀펀칭은 UDP 를 전제로 한다. TCP 홀펀칭도 이�
 
 ### 1.3 릴레이가 소유하는 상태와 소유하지 않는 상태
 
-`tetris_relay`는 public TCP 연결을 받는 경계이므로 단순한 소켓 복사보다 많은
+`tetris_relay`는 외부 입력을 처리하는 경계이므로 단순한 소켓 복사보다 많은
 실행 상태를 소유한다.
 
 1. **입장과 세션 안전성**: 첫 프레임 기한, worker·IP별 상한, meta 토큰 인증,
    같은 플레이어의 프로세스 내 활성 session lease를 관리한다.
 2. **매칭과 로비**: `QUEUE_JOIN` 연결을 페어링하고, `ROOM_CREATE`/`ROOM_JOIN`의
    방 코드와 양쪽 READY 상태를 관리한다.
-3. **매치 전송과 단절 판정**: 두 모드 모두 프레임 경계를 훑어 서버 전용 타입은 걸러 내고, unranked 매치는 통과한 프레임의 내용을 보지 않고 원본 byte를 그대로 전달한다.
-   ranked 매치는 프레임 경계를 복원해 `MATCH_SUMMARY`만 가로채고, INPUT·HASH·CHAT
-   같은 일반 프레임의 원본 wire byte는 바꾸지 않는다. 방향별 idle·byte-rate
-   경계를 넘거나 EOF가 나면 채널을 닫고 서버가 관측한 기권으로 처리한다.
-4. **랭킹 결과 경계**: 양쪽 summary를 교차검증하고 멱등 `match_uuid`로 meta에
-   저장한 뒤 `MATCH_RESULT`를 돌려준다.
+3. **매치 전송과 종료 처리**: 두 모드 모두 서버 전용 프레임 위조를 걸러 낸다.
+   unranked는 나머지 게임 바이트를 전달한다. ranked는 INPUT·SEED를 공통 검증기에
+   관측시키면서 원본 wire byte를 상대에게 전달하고, MATCH_SUMMARY는 종료 요청으로 쓴다.
+4. **랭킹 결과 경계**: 입력으로 서버 경기 종료를 재현하고 멱등 `match_uuid`로 meta에
+   저장한 뒤 `MATCH_RESULT`를 돌려준다. 연결 종료도 확정 처리를 시도하지만 미완료
+   입력만으로는 승패나 보상을 만들지 않는다.
 
-여기에도 분명한 한계가 있다. relay는 `SimGame`을 실행하지 않으므로 피스 위치나
-입력의 정당성을 재검증하지 못한다. 제어 페이즈의 큐·룸 프레임과 ranked 결과 요약은
-해석하지만, 게임 중 INPUT으로 같은 시뮬레이션을 재현하는 authoritative server는
-아니다. 이 경계 덕분에 relay 비용은 낮지만, 입력 매크로나 조작된 클라이언트를
-서버 시뮬레이션으로 잡는 구조도 아니다.
+현재 ranked 채널은 `SimGame`을 실행한다. 입력의 구조와 규칙에 맞는 종료를 확인할 수
+있지만, 정상 입력을 자동 생성하는 매크로나 일부러 져 주는 담합까지 판별하는 것은 아니다.
+이 검증으로 추가되는 CPU 비용은 기존 순수 전달 부하 결과와 별도로 측정해야 한다.
+구현과 실패 상태는 [Part 18](./part18-authoritative-results.md)이 설명한다.
 
-> **범위 안내**: 이 장은 **릴레이 + 매치메이킹 + 룸 + 클라이언트 측 릴레이 경로**를 소유한다. RP·DB·HTTP API는 별도 실행 파일 `tetris_meta`의 책임이고, ranked 분기의 교차검증과 `post_match` 호출은 [메타·랭킹 문서](./part10-meta-and-ranking.md)가 설명한다. meta 없이 실행한 relay는 명시적인 unranked 모드로 동작한다.
+> **범위 안내**: 이 장은 **릴레이 + 매치메이킹 + 룸 + 클라이언트 측 릴레이 경로**를 소유한다. RP·DB·HTTP API는 별도 실행 파일 `tetris_meta`의 책임이고, ranked 분기의 서버 결과 검증과 `post_match` 호출은 [메타·랭킹 문서](./part10-meta-and-ranking.md)가 설명한다. meta 없이 실행한 relay는 명시적인 unranked 모드로 동작한다.
 
 ## 2. 전체 아키텍처
 
@@ -169,6 +168,7 @@ if (TETRIS_BUILD_RELAY)
             "meta API 호출용. cpp-httplib 를 다운로드해 third_party/ 에 넣으세요.")
     endif()
     add_executable(tetris_relay
+        ${TETRIS_SIM_SOURCES}
         server/main.cpp
         server/log.cpp
         server/matchmaker.cpp
@@ -182,6 +182,8 @@ if (TETRIS_BUILD_RELAY)
         server/log.h
         server/matchmaker.h
         server/match_uuid.h
+        server/match_seed.h
+        server/room_guess_budget.h
         server/player_conn.h
         server/player_session.h
         server/relay.h
@@ -466,20 +468,7 @@ cmake --build build --target worker_group_test
 **현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
-// server/main.cpp — Tetris Multiplayer 릴레이 서버
-//
-// 빠른 요약:
-//   1) TCP 포트(기본 7777) listen
-//   2) accept 될 때마다 playerConnThread 스폰 → 해당 스레드가
-//      QUEUE_JOIN 프레임을 기다렸다가 matchmaker 큐에 등록
-//   3) matcher 스레드가 2명이 모이면 꺼내 relay::startQueuePump() 호출 →
-//      양쪽에 MATCH_FOUND 전송 + 수락 로비 → 바이트 포워딩 시작
-//
-// 프로토콜(net/framing.h):
-//   C→S QUEUE_JOIN   (10) : [tok_len:1][token:N]
-//   S→C MATCH_FOUND  (12) : [role:1][seed:8 LE][my_icon_len:1][my_icon:N]
-//                           [peer_icon_len:1][peer_icon:N][uuid_len:1][uuid:N]
-//   (게임 프레임은 통과하고, ranked MATCH_SUMMARY만 relay가 검증한다.)
+// Relay process entry point. Protocol details live in net/framing.h and docs.
 
 #include "ip_admission.h"
 #include "matchmaker.h"
@@ -511,33 +500,53 @@ namespace {
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
-// 동시 연결 worker 상한 — 연결당 detached 스레드를 만들므로 상한이
-// 없으면 connect 플러딩만으로 메모리/핸들이 고갈된다. playerConnThread 는
-// 첫 프레임 대기(≤5s)와 룸 대기 동안 스레드를 점유하므로, 정상 부하(수백 명)
-// 대비 넉넉한 값으로 제한하고 초과분은 즉시 close 한다.
+// Bound thread and handle use during connection setup.
 constexpr size_t kMaxConnWorkers = 256;
 
-// per-IP 상한은 server/ip_admission.h 가 두 릴레이 바이너리에 공통으로 정의한다.
-// 수명이 다른 슬롯이 둘이다 — 핸드셰이크 슬롯은 인증이 끝나면 놓아주고, 세션
-// 슬롯은 연결이 죽을 때까지 붙든다. 왜 하나로는 안 되는지는 하드닝 장에서 다룬다.
+// per-IP 상한은 server/ip_admission.h 가 두 릴레이 바이너리에 공통으로 정의한다
+// (핸드셰이크 슬롯 = 인증까지, 세션 슬롯 = 연결이 죽을 때까지).
 
 void signalHandler(int /*sig*/) {
-    // async-signal-safe 하게 플래그만 세운다. listen 소켓은 논블로킹이라
-    // accept 루프가 최대 ~10ms 안에 g_running 을 보고 빠져나온다. 핸들러에서
-    // 소켓(shared_ptr) 을 건드리지 않는다 — atomic store 만 사용.
+    // The signal handler only touches an atomic flag.
     g_running.store(false);
 }
 
 void printUsage() {
     std::cout <<
         "Usage: tetris_relay [--port N] [--meta URL] [--meta-secret SECRET]\n"
+        "                    [--max-sessions-per-ip N] [--log-level L]\n"
+        "  --log-level L    error|warn|info|debug (default info). 운영에서는 warn 이\n"
+        "                   접속·매치 줄까지 지운다. TETRIS_RELAY_LOG_LEVEL 로도\n"
+        "                   정할 수 있고 이 인자가 이긴다.\n"
+        "  --loopback-only  Listen on 127.0.0.1 behind the WSS gateway.\n"
         "  --port N         TCP listen port (default 7777)\n"
         "  --meta URL       tetris_meta base URL (e.g. https://api.example.com)\n"
         "                   If omitted, relay runs unranked (no token verify,\n"
         "                   no /v1/matches POST).\n"
         "  --meta-secret S  Send X-Relay-Secret on /v1/matches.\n"
         "                   Defaults to TETRIS_RELAY_SECRET if set.\n"
+        "  --max-sessions-per-ip N\n"
+        "                   Concurrent connections one address may hold for the\n"
+        "                   life of the connection (default "
+        << relay::kMaxSessionsPerIp << ").\n"
+        "                   Separate from the per-IP handshake budget ("
+        << relay::kMaxHandshakesPerIp << "), which\n"
+        "                   is released as soon as a connection authenticates.\n"
+        "                   Raise it only for a deployment that legitimately\n"
+        "                   shares one address across many players.\n"
         "  -h, --help       Show this help\n";
+}
+
+bool parseCount(const std::string& s, size_t& out) {
+    if (s.empty()) return false;
+    unsigned long long value = 0;
+    auto* first = s.data();
+    auto* last = s.data() + s.size();
+    auto res = std::from_chars(first, last, value);
+    if (res.ec != std::errc{} || res.ptr != last) return false;
+    if (value < 1 || value > 100000) return false;
+    out = static_cast<size_t>(value);
+    return true;
 }
 
 bool parsePort(const std::string& s, uint16_t& out) {
@@ -557,24 +566,55 @@ bool parsePort(const std::string& s, uint16_t& out) {
 int main(int argc, char** argv) {
     uint16_t    port = 7777;
     std::string metaUrl;  // empty = unranked
+    bool loopbackOnly = false;
     std::string metaSecret;
     if (const char* env = std::getenv("TETRIS_RELAY_SECRET")) {
         metaSecret = env;
     }
 
+    // 환경변수 먼저, 인자 나중 — 루프 릴레이와 같은 규칙이다. 두 바이너리가 로그
+    // 설정을 다르게 받으면 운영자가 바이너리마다 다른 것을 외워야 한다.
+    // 잘못된 값은 알린 뒤 기본값으로 간다. 로그 설정 하나로 서버가 안 뜨는 쪽이
+    // 더 나쁜 실패다.
+    if (const char* env = std::getenv("TETRIS_RELAY_LOG_LEVEL")) {
+        relay::LogLevel lv{};
+        if (relay::parse_log_level(env, lv)) relay::set_log_level(lv);
+        else RLOG_WARN("[relay] TETRIS_RELAY_LOG_LEVEL 값을 알 수 없어 무시합니다: "
+                       << env);
+    }
+
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--port" && i + 1 < argc) {
+        if (a == "--log-level" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            relay::LogLevel lv{};
+            if (!relay::parse_log_level(v, lv)) {
+                RLOG_ERROR("[relay] --log-level 은 error|warn|info|debug 여야 합니다: " << v);
+                return 2;
+            }
+            relay::set_log_level(lv);
+        } else if (a == "--port" && i + 1 < argc) {
             const std::string portArg = argv[++i];
             if (!parsePort(portArg, port)) {
                 RLOG_ERROR("Invalid --port value: " << portArg
                            << " (expected 1..65535)");
                 return 2;
             }
+        } else if (a == "--loopback-only") {
+            loopbackOnly = true;
         } else if (a == "--meta" && i + 1 < argc) {
             metaUrl = argv[++i];
         } else if (a == "--meta-secret" && i + 1 < argc) {
             metaSecret = argv[++i];
+        } else if (a == "--max-sessions-per-ip" && i + 1 < argc) {
+            const std::string arg = argv[++i];
+            size_t n = 0;
+            if (!parseCount(arg, n)) {
+                RLOG_ERROR("Invalid --max-sessions-per-ip value: " << arg
+                           << " (expected 1..100000)");
+                return 2;
+            }
+            relay::IpAdmission::set_session_limit(n);
         } else if (a == "-h" || a == "--help") {
             printUsage();
             return 0;
@@ -619,14 +659,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    g_listen_sock = net::tcp_listen(port, /*backlog=*/256);
+    g_listen_sock = net::tcp_listen(port, /*backlog=*/256, loopbackOnly);
     if (!g_listen_sock.valid()) {
         RLOG_ERROR("tcp_listen(" << port << ") failed — port in use?");
         net::net_shutdown();
         return 1;
     }
-    // listen 소켓을 논블로킹으로 — 시그널 핸들러가 fd 를 닫지 않고 g_running
-    // 플래그만 세워도 accept 루프가 폴링으로 빠져나오게 한다(async-signal-safe).
+    // Nonblocking accept lets the loop observe the shutdown flag.
     net::tcp_set_nonblocking(g_listen_sock);
     RLOG_INFO("[relay] listening on 0.0.0.0:" << port);
     RLOG_INFO("[relay] local IP: " << net::get_local_ip());
@@ -635,8 +674,7 @@ int main(int argc, char** argv) {
     relay::Matchmaker   mm;
     relay::RoomRegistry rr;
 
-    // 연결 worker는 완료 즉시 detach되지만 WorkerGroup이 생성 실패와 실행 중
-    // 예외까지 처리한다. 종료 시 drain한 뒤 mm/rr/meta를 파괴해 참조 수명을 보장한다.
+    // Drain workers before destroying the state they reference.
     relay::WorkerGroup connWorkers{"relay-connection", kMaxConnWorkers};
     RLOG_INFO("[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
               << " sessions=" << relay::IpAdmission::session_limit());
@@ -801,7 +839,7 @@ sequenceDiagram
 2. **방을 만들어 코드를 공유하고 싶다** → `ROOM_CREATE`
 3. **받은 코드로 입장하고 싶다** → `ROOM_JOIN <code>`
 
-이 분기가 `playerConnThread` 의 단일 책임이다. 여기에 토큰 인증과 잔여 바이트 인계가 붙는다. 파일 앞부분의 익명 네임스페이스가 첫 프레임 분기에 필요한 헬퍼들 — 토큰 추출, 잔여 스트림 복원, 인증과 그 결과 캐시 — 을 담고 있다.
+이 분기가 `playerConnThread` 의 단일 책임이다. 여기에 토큰 인증과 잔여 바이트 인계가 붙는다. 파일 앞부분의 익명 네임스페이스가 첫 프레임 분기에 필요한 헬퍼들 — 입장권 추출, 잔여 스트림 복원, meta에서의 일회용 입장권 소비 — 을 담고 있다.
 
 **현재 소스 발췌 — `server/player_conn.cpp`**
 
@@ -828,8 +866,7 @@ namespace relay {
 
 namespace {
 
-// QUEUE_JOIN 또는 ROOM_CREATE 페이로드 끝의 [tok_len:1][token:N] 추출.
-// 토큰 페이로드 앞에 다른 바이트가 있으면 offset 을 지정.  범위 초과 시 빈 문자열.
+// Read [token length][token] at the given payload offset.
 std::string extract_token(const std::vector<uint8_t>& pl, size_t offset)
 {
     if (pl.size() < offset + 1) return {};
@@ -840,11 +877,7 @@ std::string extract_token(const std::vector<uint8_t>& pl, size_t offset)
                        pl.begin() + offset + 1 + n);
 }
 
-// 첫 프레임(QUEUE_JOIN 등)과 같은 recv 에 실려 이미 파싱된 후속 프레임들과
-// 아직 완성되지 않은 partial tail 을 원본 바이트 스트림으로 복원한다.
-// build_frame 은 동일 payload 에 대해 bit-identical 하므로 재직렬화가 안전하다.
-// 이 잔여분을 소켓 소유권을 넘겨받는 matchmaker 큐 / roomLoop_ 버퍼로 이관하지 않으면
-// 그 프레임들(예: QUEUE_JOIN 직후의 QUEUE_CANCEL)이 조용히 유실된다.
+// Preserve frames and a partial tail received after the first command.
 std::vector<uint8_t> residual_stream(const std::vector<net::Frame>& frames,
                                      size_t next_idx,
                                      const std::vector<uint8_t>& tail)
@@ -858,8 +891,7 @@ std::vector<uint8_t> residual_stream(const std::vector<net::Frame>& frames,
     return out;
 }
 
-// meta 가 nullptr 이면 unranked (player_id=0, elo=0) — 토큰이 있어도 무시.
-// meta 연동 시 빈 토큰, verify 실패, 중복 세션은 std::nullopt → 호출자가 소켓 close.
+// A null meta client selects unranked mode.
 struct AuthOutcome {
     int64_t     player_id = 0;
     int         elo = 0;
@@ -869,42 +901,6 @@ struct AuthOutcome {
     std::shared_ptr<PlayerSessionLease> session_lease;
 };
 
-struct CachedAuth {
-    meta::client::AuthInfo info;
-    std::chrono::steady_clock::time_point expires;
-};
-
-std::mutex s_auth_cache_mu;
-std::unordered_map<std::string, CachedAuth> s_auth_cache;
-constexpr auto kAuthCacheTtl = std::chrono::minutes(5);
-constexpr size_t kMaxAuthCacheEntries = 4096;
-
-std::optional<meta::client::AuthInfo> cached_auth(const std::string& token)
-{
-    std::lock_guard<std::mutex> lk(s_auth_cache_mu);
-    const auto now = std::chrono::steady_clock::now();
-    auto it = s_auth_cache.find(token);
-    if (it == s_auth_cache.end()) return std::nullopt;
-    if (it->second.expires <= now) {
-        s_auth_cache.erase(it);
-        return std::nullopt;
-    }
-    return it->second.info;
-}
-
-void cache_auth(const std::string& token, const meta::client::AuthInfo& info)
-{
-    std::lock_guard<std::mutex> lk(s_auth_cache_mu);
-    const auto now = std::chrono::steady_clock::now();
-    if (s_auth_cache.size() >= kMaxAuthCacheEntries) {
-        for (auto it = s_auth_cache.begin(); it != s_auth_cache.end();) {
-            if (it->second.expires <= now) it = s_auth_cache.erase(it);
-            else ++it;
-        }
-        if (s_auth_cache.size() >= kMaxAuthCacheEntries) s_auth_cache.erase(s_auth_cache.begin());
-    }
-    s_auth_cache[token] = CachedAuth{info, now + kAuthCacheTtl};
-}
 std::optional<AuthOutcome>
 authenticate(meta::client::MetaClient* meta, const std::string& token,
              uint32_t conn_id, const char* what)
@@ -921,24 +917,10 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
                   << " missing token -> reject player_id=0 match_uuid=-");
         return std::nullopt;
     }
-    meta::client::MetaClient::VerifyOutcome verify_outcome{};
-    auto auth = meta->verify_token(token, 3, &verify_outcome);
+    auto auth = meta->consume_game_ticket(token);
     if (!auth) {
-        if (verify_outcome == meta::client::MetaClient::VerifyOutcome::NetworkError) {
-            auth = cached_auth(token);
-            if (auth) {
-                RLOG_WARN("[conn " << conn_id << "] " << what
-                          << " meta offline; accepted cached auth");
-            }
-        }
-    }
-    if (!auth) {
-        RLOG_INFO("[conn " << conn_id << "] " << what
-                  << " meta verify failed -> reject player_id=0 match_uuid=-");
+        RLOG_INFO("[conn " << conn_id << "] game admission rejected");
         return std::nullopt;
-    }
-    if (verify_outcome == meta::client::MetaClient::VerifyOutcome::Ok) {
-        cache_auth(token, *auth);
     }
     o.player_id = auth->player_id;
     o.elo       = auth->elo;
@@ -960,13 +942,135 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
 }
 
 } // namespace
+
+// 정상 클라이언트는 connect 직후 첫 프레임을 보낸다.
+// 3s 는 위성/모바일 등 고지연 회선에서 meta 토큰 검증 왕복까지 겹치면 정상
+// 접속도 끊는 사례가 있어 5s 로 완화 — slow-loris 류 슬롯 점유 방어에는
+// 여전히 충분히 짧다.
+static constexpr auto kJoinTimeout  = std::chrono::seconds(5);
+static constexpr auto kPollInterval = std::chrono::milliseconds(10);
+
+void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
+                      Matchmaker& mm, RoomRegistry& rr,
+                      meta::client::MetaClient* meta,
+                      std::shared_ptr<IpAdmission> handshake_slot,
+                      std::shared_ptr<IpAdmission> session_slot) {
+    std::vector<uint8_t> stream;
+    stream.reserve(64);
+
+    const auto deadline = std::chrono::steady_clock::now() + kJoinTimeout;
+
+    while (std::chrono::steady_clock::now() < deadline && !isShuttingDown()) {
+        if (!net::tcp_recv_some(sock, stream)) {
+            RLOG_INFO("[conn " << conn_id
+                      << "] close: disconnected before first frame"
+                      << " player_id=0 match_uuid=-");
+            net::tcp_close(sock);
+            return;
+        }
+
+        if (!stream.empty()) {
+            std::vector<net::Frame> frames;
+            net::parse_frames(stream, frames);
+            for (size_t i = 0; i < frames.size(); ++i) {
+                const net::Frame& f = frames[i];
+                if (f.type == net::MsgType::QUEUE_JOIN) {
+                    // 페이로드: [tok_len:1][token:N]
+                    std::string tok = extract_token(f.payload, 0);
+                    auto auth = authenticate(meta, tok, conn_id, "QUEUE_JOIN");
+                    if (!auth) { net::tcp_close(sock); return; }
+                    // 핸드셰이크 끝 — 같은 IP 뒤에 오는 접속이 굶지 않게 슬롯을
+                    // 놓아준다. 세션 슬롯은 아래에서 PlayerInfo 로 넘어간다.
+                    handshake_slot.reset();
+
+                    PlayerInfo pi;
+                    pi.sock      = std::move(sock);
+                    pi.conn_id   = conn_id;
+                    pi.player_id = auth->player_id;
+                    pi.elo       = auth->elo;
+                    pi.username  = std::move(auth->username);
+                    pi.token     = std::move(auth->token);
+                    pi.selected_icon_id = std::move(auth->selected_icon_id);
+                    pi.session_lease = std::move(auth->session_lease);
+                    pi.ip_session    = std::move(session_slot);
+                    // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
+                    // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
+                    pi.streamBuf = residual_stream(frames, i + 1, stream);
+                    RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
+                               << " player_id=" << pi.player_id);
+                    mm.enqueue(std::move(pi));
+                    return;
+                }
+                if (f.type == net::MsgType::QUEUE_CANCEL) {
+                    RLOG_INFO("[conn " << conn_id
+                              << "] close: QUEUE_CANCEL before queued"
+                              << " player_id=0 match_uuid=-");
+                    net::tcp_close(sock);
+                    return;
+                }
+                if (f.type == net::MsgType::ROOM_CREATE) {
+                    // 페이로드: [tok_len:1][token:N]
+                    std::string tok = extract_token(f.payload, 0);
+                    auto auth = authenticate(meta, tok, conn_id, "ROOM_CREATE");
+                    if (!auth) { net::tcp_close(sock); return; }
+                    handshake_slot.reset();   // 핸드셰이크 끝 (위 QUEUE_JOIN 주석 참고)
+                    RLOG_DEBUG("[conn " << conn_id << "] ROOM_CREATE"
+                               << " player_id=" << auth->player_id);
+                    rr.handleCreate(std::move(sock), conn_id,
+                                    auth->player_id, auth->elo,
+                                    auth->username, auth->token,
+                                    auth->selected_icon_id,
+                                    std::move(auth->session_lease),
+                                    std::move(session_slot),
+                                    residual_stream(frames, i + 1, stream));
+                    return;
+                }
+                if (f.type == net::MsgType::ROOM_JOIN) {
+                    if (f.payload.size() < 1) continue;
+                    const uint8_t n = f.payload[0];
+                    constexpr uint8_t kMaxCodeLen = 5;
+                    if (n == 0 || n > kMaxCodeLen ||
+                        f.payload.size() < 1u + n) continue;
+                    std::string code(f.payload.begin() + 1,
+                                     f.payload.begin() + 1 + n);
+                    // 코드 뒤에 [tok_len:1][token:N]
+                    std::string tok = extract_token(f.payload, 1u + n);
+                    auto auth = authenticate(meta, tok, conn_id, "ROOM_JOIN");
+                    if (!auth) { net::tcp_close(sock); return; }
+                    handshake_slot.reset();   // 핸드셰이크 끝 (위 QUEUE_JOIN 주석 참고)
+                    RLOG_DEBUG("[conn " << conn_id << "] ROOM_JOIN " << code
+                               << " player_id=" << auth->player_id);
+                    rr.handleJoin(code, std::move(sock), conn_id,
+                                  auth->player_id, auth->elo,
+                                  auth->username, auth->token,
+                                  auth->selected_icon_id,
+                                  std::move(auth->session_lease),
+                                  std::move(session_slot),
+                                  residual_stream(frames, i + 1, stream));
+                    return;
+                }
+                // HELLO 등 낯선 프레임은 초기 phase 에서는 무시 + 계속 대기
+            }
+        }
+
+        std::this_thread::sleep_for(kPollInterval);
+    }
+
+    if (!isShuttingDown()) {
+        RLOG_INFO("[conn " << conn_id << "] close: first-frame timeout"
+                  << " player_id=0 match_uuid=-");
+    }
+    net::tcp_close(sock);
+}
+
+}  // namespace relay
 ```
 
 `AuthOutcome` 에 `selected_icon_id` 가 들어 있다는 점을 놓치면 안 된다. 이 값은 `MATCH_FOUND` 페이로드에 실려 상대 클라이언트의 아이콘 표시에 쓰인다. 기본값 `"default"` 는 meta 미연동(unranked)일 때 그대로 나간다.
 
 `authenticate` 의 성공 분기는 두 가지를 더 남긴다.
 
-- **인증 캐시.** `verify_token` 이 명시적으로 성공(`VerifyOutcome::Ok`)했을 때만 결과를 토큰별 5분 TTL 로 저장하고, 이후 meta 가 **네트워크 오류**일 때만 그 캐시를 대신 쓴다. meta 가 "그런 토큰 없음" 이라고 답한 경우는 캐시로 우회하지 않는다 — 캐시는 가용성 보완이지 인증 우회 수단이 아니라는 fail-closed 원칙이다. 왜 이 캐시가 필요한지는 §13.3 에서 배포 전제와 함께 다룬다.
+- **일회용 입장권.** `consume_game_ticket`이 meta에서 성공한 경우에만 입장한다. 오프라인 성공 캐시는 없고, meta 장애 때도 새 랭크 입장은 거절한다. 장기 접근 키는 HTTPS API에서 티켓을 발급받는 데 사용한다(Part 16).
 - **세션 lease.** `PlayerSessionLease::acquire(player_id)` 가 계정당 프로세스 내 활성 세션을 하나로 강제한다. 같은 토큰을 두 창에서 동시에 쓰면 두 번째 연결이 여기서 거절된다. 이 `shared_ptr` lease 는 `AuthOutcome` 에 실려 나가는 순간부터 소켓과 같은 여정을 밟는다 — **인증이 lease 의 탄생 지점**이고, §8 의 룸 `Entry` 와 §10 의 `Channel` 이 차례로 보관자가 된다.
 
 이제 본체다.
@@ -1147,8 +1251,8 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
 ```cpp
 // 큐에 들어간 플레이어 정보.
-// player_id / elo / username / token 은 meta /v1/auth/verify 성공 시 채워진다.
-// meta 비활성화(--meta 없음) 또는 토큰 미제공 시 player_id=0 (unranked).
+// meta의 일회용 게임 입장권 소비가 성공하면 인증 정보가 채워진다.
+// --meta가 없을 때만 player_id=0 (unranked). 랭크 입장권 누락은 거절한다.
 struct PlayerInfo {
     net::TcpSocket sock;
     uint32_t       conn_id{0};  // 로깅용
@@ -1158,6 +1262,9 @@ struct PlayerInfo {
     std::string    token;       // relay 가 /v1/matches 에 참조 없이 전달은 안 함
     std::string    selected_icon_id{"default"};
     std::shared_ptr<PlayerSessionLease> session_lease;
+    // per-IP 세션 슬롯. 이 연결이 살아 있는 내내 유지돼야 하므로 소켓을 따라
+    // 큐 → 로비 → 포워딩 Channel 로 함께 옮겨 간다 (session_lease 와 같은 결).
+    std::shared_ptr<IpAdmission> ip_session;
 
     // 큐 대기 중 이 소켓에서 recv 됐지만 아직 완성 프레임이 못 된 잔여 바이트.
     // 폴링 1회마다 로컬 버퍼를 쓰면 프레임이 TCP 세그먼트 경계에 걸쳐 도착할 때
@@ -1192,14 +1299,15 @@ public:
     void shutdown();
 
 private:
-    uint64_t nextSeed();  // xorshift64 — 서버 내부 RNG
+    uint64_t nextSeed();  // 매치마다 독립 추출 (match_seed.h)
 
     std::mutex              mu;
     std::condition_variable cv;
     std::deque<PlayerInfo>  waiting;
     std::atomic<bool>       stopping{false};
     uint32_t                next_match_id{1};
-    uint64_t                seed_state{0};
+    // MATCH_FOUND 로 나가는 값이라 스트림을 두지 않는다 (match_seed.h).
+    relay::MatchSeedSource  seed_src;
 };
 ```
 
@@ -1265,26 +1373,17 @@ bool waitingPlayerStillActive(PlayerInfo& p) {
 **현재 소스 발췌 — `server/matchmaker.cpp`**
 
 ```cpp
-Matchmaker::Matchmaker() {
-    // 서버 부팅 시각 기반 초기 seed. 재시작마다 다른 게임이 나오도록.
-    using clock = std::chrono::high_resolution_clock;
-    seed_state = static_cast<uint64_t>(clock::now().time_since_epoch().count());
-    if (seed_state == 0) seed_state = 0xDEADBEEFCAFEBABEULL;
-}
+Matchmaker::Matchmaker() = default;
 
 Matchmaker::~Matchmaker() {
     shutdown();
 }
 
-// xorshift64: 단순하고 빠른 PRNG. 매치마다 새 seed 만 필요하므로 충분.
+// 매치 seed 는 MATCH_FOUND 로 두 클라이언트에게 그대로 나간다. 스트림에서 뽑으면
+// 받은 값이 곧 생성기 상태가 되어 이후 매치가 전부 예측된다 — match_seed.h 참조.
 // 분배 품질이 중요한 RL 시뮬레이션 쪽은 SimGame 이 자체 RNG 를 가지고 있음.
 uint64_t Matchmaker::nextSeed() {
-    uint64_t x = seed_state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    seed_state = x;
-    return x;
+    return seed_src.next();
 }
 
 void Matchmaker::enqueue(PlayerInfo p) {
@@ -1395,12 +1494,16 @@ icon 필드는 각 클라이언트 관점에서 `my_icon` → `peer_icon` 순으
         std::string    hostToken;
         std::string    hostSelectedIconId{"default"};
         std::shared_ptr<PlayerSessionLease> hostSessionLease;
+        // per-IP 세션 슬롯 — 소켓이 이 방에 머무는 동안 방이 대신 붙들고 있다가
+        // 매치 성립 시 Match 로, 퇴장 시 즉시 반납한다.
+        std::shared_ptr<IpAdmission> hostIpSession;
         int64_t        guestPlayerId = 0;
         int            guestElo      = 0;
         std::string    guestUsername;
         std::string    guestToken;
         std::string    guestSelectedIconId{"default"};
         std::shared_ptr<PlayerSessionLease> guestSessionLease;
+        std::shared_ptr<IpAdmission> guestIpSession;
     };
 ```
 
@@ -1424,7 +1527,8 @@ icon 필드는 각 클라이언트 관점에서 `my_icon` → `peer_icon` 순으
     std::array<std::mutex, kRoomSendShardCount> roomSendMu_;
     std::atomic<bool>       stopping{false};
     uint64_t                code_rng_state_ = 0;
-    uint64_t                seed_state_     = 0;
+    // match seed 는 MATCH_FOUND 로 나가는 값이라 스트림을 두지 않는다.
+    relay::MatchSeedSource  seed_src_;
     uint64_t                next_room_info_version_ = 1;
     uint32_t                next_match_id_  = 100000;  // 매치메이킹과 match_id 충돌 피해
     meta::client::MetaClient* meta_ = nullptr;
@@ -1488,8 +1592,6 @@ RoomRegistry::RoomRegistry() {
     std::random_device rd;
     const uint64_t r = (static_cast<uint64_t>(rd()) << 32) | rd();
     code_rng_state_ = (t ^ r) ? (t ^ r) : 0xC0FFEE0DDB0B0BAAULL;
-    // seed stream 은 다른 상태 — 한 프로세스 안에서 matchmaker 와 충돌 최소화.
-    seed_state_     = (t ? t : 0xDEADBEEFCAFEBABEULL) ^ 0x9E3779B97F4A7C15ULL;
 }
 
 std::string RoomRegistry::generateCode_() {
@@ -1508,11 +1610,9 @@ std::string RoomRegistry::generateCode_() {
 }
 ```
 
-여기서 중요한 것은 충돌 확률이 아니라 **예측 가능성**이다. 룸 코드는 사실상 인증 수단이다 — 코드를 아는 사람은 누구나 그 방에 들어간다. 시드를 부팅 시각만으로 잡으면, 서버 시작 시각을 대략 아는 공격자가 xorshift64 상태를 좁은 범위로 재현해 현재 떠 있는 방 코드를 열거할 수 있다. `code_rng_state_` 는 그래서 고해상도 시각과 `std::random_device`(주요 플랫폼에서 OS CSPRNG) 64비트를 XOR 한다.
+룸 코드는 방을 찾는 짧은 초대 주소이고, 계정 인증은 별도의 입장권이 맡는다. `code_rng_state_`는 부팅 시각에 `std::random_device` 출력을 섞지만 이후 생성기는 xorshift64다. **이 코드를 비밀방의 강한 인증 수단으로 간주하지 않는다.** 짧은 코드의 추측과 반복 관측에 대한 방어는 입장 제한만으로 완결되지 않으며, 비공개 방이 필요하면 암호학적 초대 토큰이나 호스트 승인이 별도 요구사항이다.
 
-xorshift64 자체는 암호학적 PRNG 가 아니라, 출력 몇 개를 보면 내부 상태를 복원할 수 있다. 하지만 코드를 받은 사람은 자기 방 코드 하나만 알 뿐이고 32비트 미만의 정보다. "상태를 통째로 노출하지 않는 한 예측 불가" 수준이면 이 위협 모델에는 충분하다. 방 하나가 오래 살아 있지도 않다.
-
-`seed_state_` 는 코드 RNG 와 **다른 스트림**이다. 같은 상태를 공유하면 코드 하나를 아는 사람이 그 방의 게임 시드까지 유추할 수 있다. 황금비 상수 `0x9E3779B97F4A7C15` 로 XOR 해 스트림을 갈라놓는다.
+매치 seed는 `seed_src_`의 `MatchSeedSource`가 따로 만든다. 매번 새 난수 입력을 사용하며, 게임 클라이언트에게 공개되는 seed 하나에서 뒤 경기의 스트림을 그대로 이어 계산하는 옛 구조를 피한다. 룸 코드 상태에 상수만 XOR해 게임 seed를 만드는 구현은 현재 사용하지 않는다.
 
 `generateCode_` 의 나눗셈 루프는 64비트 난수 하나를 base32 자릿수로 계속 쪼개다가 `x` 가 0이 되면 새 난수를 뽑는다. 32^5 를 담으려면 25비트면 되므로 보통 난수 한 개로 5글자가 다 나온다.
 
@@ -2182,7 +2282,9 @@ void RoomRegistry::shutdown() {
 
 `roomLoop_` 의 "일반 종료" 경로 초기 버전은 대략 이랬다.
 
-**예시(실제 저장소에는 없음 — 하드닝 이전 구현의 재구성)**
+실제 저장소에는 없음 — 하드닝 이전 구현의 재구성
+
+**예시(실제 저장소에는 없음)**
 
 ```cpp
 net::TcpSocket peerSock{};
@@ -2312,9 +2414,6 @@ WorkerGroup s_workers{"relay", kMaxRelayWorkers};
 **현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// 양 방향 스레드가 공유하는 채널 상태.
-// · forwarder_count 가 0 이 되는 순간 양 소켓 close.
-// · summaryA/B 는 forwarderLoop 가 MATCH_SUMMARY 프레임을 가로챌 때 채워짐.
 struct Channel {
     net::TcpSocket   A;            // HOST 소켓
     net::TcpSocket   B;            // GUEST 소켓
@@ -2327,33 +2426,28 @@ struct Channel {
     int              playerB_elo{0};
     std::shared_ptr<PlayerSessionLease> playerA_session;
     std::shared_ptr<PlayerSessionLease> playerB_session;
+    // per-IP 세션 슬롯 — 채널이 소켓을 소유하는 동안 함께 붙들고 있어야 한다.
+    // 여기서 놓치면 Match 가 소멸하는 순간 슬롯이 풀려, 경기 중인 연결이
+    // per-IP 세션 수에서 빠진다.
+    std::shared_ptr<IpAdmission> playerA_ip;
+    std::shared_ptr<IpAdmission> playerB_ip;
 
     std::atomic<bool> closed{false};
     std::atomic<int>  forwarder_count{2};
-    std::atomic<int>  disconnect_side{0}; // 1=A, 2=B; 먼저 관측된 실패가 이긴다
+    std::atomic<int>  disconnect_side{0}; // 1=A, 2=B; first observed failure wins
 
     // MATCH_SUMMARY 수집
     std::mutex              sumMu;
     std::optional<Summary>  summaryA;
     std::optional<Summary>  summaryB;
+    std::unique_ptr<RankedGame> verified;
     bool                    summaryHandled{false};   // 한 번만 처리
 
-    // Lobby 단계에서 recv 됐지만 아직 포워딩되지 못한 raw 바이트.
-    //   READY 교환 중 상대가 먼저 게임 프레임(PING 등)을 보내면 TCP 버퍼를 lobby
-    //   스레드가 이미 kernel→userspace 로 끌어온 상태다. 그 바이트는 forwarder 가
-    //   다시 recv 할 수 없으므로, 첫 iteration 에서 streamBuf / 상대 소켓으로 재주입.
+    // Bytes read by the lobby after READY are handed to the forwarders.
     std::vector<uint8_t>   prefixFromA;
     std::vector<uint8_t>   prefixFromB;
 
-    // 목적지 소켓별 send mutex — forwarderLoop 두 방향이 같은 목적지에 동시
-    // tcp_send_all 을 호출하는 것을 직렬화.  배경:
-    //   · A→B forwarder 는 B 에 tcp_send_all.
-    //   · B→A forwarder 는 A 에 tcp_send_all.
-    //   · finalizeRanked 는 A 와 B 양쪽에 MATCH_RESULT 를 직접 송신.
-    // tcp_send_all 은 partial send 루프라 두 스레드가 같은 fd 에 interleaved 로
-    // 진입하면 프레임 바이트가 섞일 위험이 있다 — 손상된 프레임 → 체크섬 실패 →
-    // 그 프레임만 드롭되면 그나마 낫지만, MATCH_RESULT 같이 재전송이 없는 건
-    // 유실된다. 목적지별 mutex 로 원자성 보장.
+    // Serialize partial sends to each destination socket.
     std::mutex             sendMuA;
     std::mutex             sendMuB;
 
@@ -2365,7 +2459,9 @@ struct Channel {
 
 `Channel` 은 `shared_ptr` 로 두 포워더가 공유한다. `forwarder_count` 가 0이 되는 순간 양 소켓을 닫는다 — 어느 쪽 스레드가 먼저 끝나든 마지막 하나가 정리를 맡는다.
 
-새 멤버 셋의 역할은 이렇다. `match_uuid` 는 §7.4 의 `MATCH_FOUND` 에 실렸던 그 멱등성 키로, `finalizeRanked`/`finalizeForfeit` 가 meta 에 결과를 저장할 때 그대로 쓴다. `playerA_session`/`playerB_session` 은 §6 에서 태어나 큐·룸을 거쳐 온 세션 lease 의 **종착지**다 — `Channel` 이 `shared_ptr` 라 두 포워더가 모두 내려가 마지막 참조가 사라질 때 채널과 함께 lease 도 풀리고, 그 순간부터 같은 계정이 새 매치에 들어올 수 있다. `disconnect_side` 는 어느 방향이 먼저 실패를 관측했는지의 기록으로(1=A, 2=B), §13.3 에서 보듯 승패 판정이 아니라 "결과를 통지할 생존자 선정" 에만 쓴다.
+`verified`는 이 채널 전용 규칙 상태다. 두 포워더가 `sumMu` 안에서만 접근하고, 확정 후 meta 호출은 잠금 밖에서 한다. `finalizeRanked`의 지역 `status`는 미완료·변조·저장 미확인을 점수 변화 0과 구분한다.
+
+공유 멤버의 역할은 이렇다. `match_uuid` 는 §7.4 의 `MATCH_FOUND` 에 실렸던 그 멱등성 키로, `finalizeRanked`/`finalizeForfeit` 가 meta 에 결과를 저장할 때 그대로 쓴다. `playerA_session`/`playerB_session` 은 §6 에서 태어나 큐·룸을 거쳐 온 세션 lease 의 **종착지**다 — `Channel` 이 `shared_ptr` 라 두 포워더가 모두 내려가 마지막 참조가 사라질 때 채널과 함께 lease 도 풀리고, 그 순간부터 같은 계정이 새 매치에 들어올 수 있다. `disconnect_side` 는 어느 방향이 먼저 실패를 관측했는지의 기록으로(1=A, 2=B), §13.3 에서 보듯 승패 판정이 아니라 "결과를 통지할 생존자 선정" 에만 쓴다.
 
 **목적지별 send 뮤텍스가 왜 필요한가.** 같은 목적지 소켓에 쓸 수 있는 주체가 셋이다.
 
@@ -2410,12 +2506,10 @@ bool sendToB(Channel& ch, const uint8_t* data, size_t len)
 **현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// MATCH_FOUND 프레임 전송.
-// 페이로드 끝에 아이콘 두 개와 match UUID를 붙인다.
 bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
                     const std::string& my_icon,
                     const std::string& peer_icon,
-                    const std::string& match_uuid) {
+                    const std::string& match_uuid, bool ranked) {
     const std::string my = my_icon.empty() ? "default" : my_icon;
     const std::string peer = peer_icon.empty() ? "default" : peer_icon;
     const size_t my_len = std::min<size_t>(my.size(), 255);
@@ -2438,10 +2532,13 @@ bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
     append_icon(peer, peer_len);
     payload.push_back(static_cast<uint8_t>(uuid_len));
     payload.insert(payload.end(), match_uuid.begin(), match_uuid.begin() + uuid_len);
+    payload.push_back(ranked ? 1 : 0);
     auto frame = net::build_frame(net::MsgType::MATCH_FOUND, payload);
     return net::tcp_send_all(sock, frame.data(), frame.size());
 }
 ```
+
+UUID 뒤의 `ranked` 바이트는 클라이언트가 보상·결과 대기 UI를 선택하는 기준이다. 입장권 발급/소비는 Part 16, 서버 판정과 상태 코드는 Part 18에서 이어서 설명한다.
 
 길이 필드가 1바이트이므로 아이콘 식별자를 255로 clamp 한다. 빈 문자열은 `"default"` 로 정규화해 수신 측이 빈 값을 특별 취급하지 않아도 되게 한다. 이 함수는 포워딩이 아직 시작되기 전에만 불리므로 `sendToA`/`sendToB` 게이트를 쓰지 않는다 — 이 시점에 그 소켓에 쓰는 스레드는 하나뿐이다.
 
@@ -2450,11 +2547,6 @@ bool sendMatchFound(const net::TcpSocket& sock, uint8_t role, uint64_t seed,
 **현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// 포워더 채널을 열어 추적되는 worker 2개로 양방향 바이트 포워딩 시작.
-// MATCH_FOUND 는 이미 호출자가 송신했다고 가정.
-// prefixFromA/B: lobby 에서 이미 recv 했지만 forwarder 로 넘겨야 할 raw 바이트.
-//   (READY 교환 직후 상대가 바로 PING/INPUT 을 보내 lobby 가 그 바이트를 kernel 에서
-//    끌어왔을 때, 이 상태를 잃지 않도록 한다.)
 void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
                                 std::vector<uint8_t> prefixFromA,
                                 std::vector<uint8_t> prefixFromB) {
@@ -2480,6 +2572,7 @@ void startForwardingWithPrefix(Match match, meta::client::MetaClient* meta,
     ch->playerA_ip      = std::move(match.a.ip_session);
     ch->playerB_ip      = std::move(match.b.ip_session);
     ch->meta        = meta;
+    if (meta) ch->verified = std::make_unique<RankedGame>(match.seed);
     ch->prefixFromA = std::move(prefixFromA);
     ch->prefixFromB = std::move(prefixFromB);
 
@@ -2516,10 +2609,10 @@ void startPump(Match match, meta::client::MetaClient* meta) {
 
     const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
                                      match.a.selected_icon_id, match.b.selected_icon_id,
-                                     match.match_uuid);
+                                     match.match_uuid, meta && match.a.player_id && match.b.player_id);
     const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
                                      match.b.selected_icon_id, match.a.selected_icon_id,
-                                     match.match_uuid);
+                                     match.match_uuid, meta && match.a.player_id && match.b.player_id);
 
     if (!ok_a || !ok_b) {
         RLOG_WARN("[relay] MATCH_FOUND send failed, match=" << match.match_id
@@ -2532,43 +2625,6 @@ void startPump(Match match, meta::client::MetaClient* meta) {
     }
 
     startForwarding(std::move(match), meta);
-}
-
-void startQueuePump(Match match, meta::client::MetaClient* meta) {
-    constexpr uint8_t ROLE_HOST  = 1;
-    constexpr uint8_t ROLE_GUEST = 2;
-
-    if (s_stopping.load()) {
-        net::tcp_close(match.a.sock);
-        net::tcp_close(match.b.sock);
-        return;
-    }
-
-    const bool ok_a = sendMatchFound(match.a.sock, ROLE_HOST,  match.seed,
-                                     match.a.selected_icon_id, match.b.selected_icon_id,
-                                     match.match_uuid);
-    const bool ok_b = sendMatchFound(match.b.sock, ROLE_GUEST, match.seed,
-                                     match.b.selected_icon_id, match.a.selected_icon_id,
-                                     match.match_uuid);
-
-    if (!ok_a || !ok_b) {
-        RLOG_WARN("[relay] MATCH_FOUND send failed, match=" << match.match_id
-                  << " uuid=" << match.match_uuid
-                  << " player_id=" << match.a.player_id
-                  << " x " << match.b.player_id);
-        net::tcp_close(match.a.sock);
-        net::tcp_close(match.b.sock);
-        return;
-    }
-
-    // matcher 스레드를 블록하지 않되 종료 시 server가 drain할 수 있게 추적한다.
-    auto pending = std::make_shared<Match>(std::move(match));
-    if (!s_workers.launch([pending, meta] {
-            queueLobbyThread(std::move(*pending), meta);
-        })) {
-        net::tcp_close(pending->a.sock);
-        net::tcp_close(pending->b.sock);
-    }
 }
 ```
 
@@ -2817,13 +2873,6 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
 **현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// 한 방향 포워딩 루프.
-//   a_to_b == true  → A 에서 읽어 B 로 쓰기. MATCH_SUMMARY 는 가로챔.
-//   a_to_b == false → B → A.
-//
-// MATCH_SUMMARY 는 반드시 ranked + meta 연동 + 양쪽 player_id != 0 일 때만
-// 가로챈다. unranked/no-meta 경로도 프레임 경계는 훑지만(서버 전용 타입 차단이
-// 목적), 페이로드는 들여다보지 않고 원본 byte 를 그대로 전달한다.
 void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 {
     const net::TcpSocket& from = a_to_b ? ch->A : ch->B;
@@ -2831,9 +2880,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
     const char*           dir  = a_to_b ? "A->B" : "B->A";
     int disconnectSide = 0;
 
-    // 예외를 포함한 모든 반환 경로에서 반대편 루프를 멈추고 채널 카운트를
-    // 정리한다. WorkerGroup이 본문 예외를 격리하더라도 이 도메인 정리는
-    // forwarderLoop 안에서 수행되어야 상대 worker와 shutdown이 남지 않는다.
+    // Every exit stops the peer direction and releases the channel once.
     struct ForwarderCompletion {
         std::shared_ptr<Channel> channel;
         const char* direction;
@@ -2869,9 +2916,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                              (ch->playerA_id != 0) &&
                              (ch->playerB_id != 0);
 
-    // 두 모드 모두 프레임 경계를 훑고, 페이로드를 들여다보는 것은 ranked 뿐이다.
-    // MATCH_SUMMARY 만 따로 빼내고 나머지는 원본 바이트 그대로 to 에 보내야
-    // 하므로 raw(방금 읽은 배치) 와 streamBuf(경계 누적) 두 버퍼를 유지한다.
+    // Both modes parse frame boundaries; only ranked mode inspects payloads.
     std::vector<uint8_t> raw; raw.reserve(4096);
     std::vector<uint8_t> streamBuf; streamBuf.reserve(4096);
 
@@ -2895,8 +2940,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                   << " dropped silently)");
     };
 
-    // Lobby 에서 남긴 prefix 바이트가 있으면 첫 iteration 의 raw 로 사용한다.
-    // 두 모드 모두 streamBuf 로 들어가 프레이밍 파서를 탄다.
+    // Consume lobby-prefetched bytes before reading the socket.
     bool havePrefix = false;
     auto lastActivity = std::chrono::steady_clock::now();
     auto byteWindowStart = lastActivity;
@@ -2934,7 +2978,6 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             }
         }
 
-        // 방향별 활동 시각과 1초 창 전송량 갱신 — 초과 시 그 방향을 끊는다.
         const auto now = std::chrono::steady_clock::now();
         lastActivity = now;
         if (now - byteWindowStart >= std::chrono::seconds(1)) {
@@ -2956,6 +2999,27 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             // 만들 수 있는 프레임(net::is_server_only_type)이 클라이언트에서
             // 오면 상대에게 전달하지 않기 위해서다. 통과한 프레임은 복사하지
             // 않고 "붙어 있는 구간" 의 끝만 늘렸다가 배치 끝에 한 번 민다.
+            //
+            // 비용에 대해: 예전 이 경로는 바이트를 그대로 밀어 프레임당
+            // 0.035µs 였고, 아래 랭크드 경로는 2.67µs 다(70배). 그 차이의
+            // 내역은 경계 판정이 아니라 랭크드가 프레임마다 더 하는 일이다 —
+            // 체크섬 계산(페이로드 전체를 훑는다), 페이로드 파싱, 버퍼 머리
+            // 에서의 erase(O(n) 이동), 프레임당 send 한 번. 여기서는 그 넷을
+            // 전부 피하고 헤더 3바이트(LEN 2 + TYPE 1)만 읽는다. 위조가 없는
+            // 정상 트래픽에서 send 는 예전처럼 배치당 한 번이다.
+            //
+            // 늘어난 비용은 정확히 둘이다. (1) 프레임당 헤더 3바이트 읽기,
+            // (2) 이 배치를 streamBuf 로 한 번 복사하는 것(≤4 KiB 선형 복사 —
+            // 잘린 프레임의 꼬리를 다음 읽기까지 이어 붙이려면 누적 버퍼가
+            // 있어야 한다). 프레임마다 도는 일이 아니라 배치마다 한 번이다.
+            // 위의 숫자는 이 저장소의 기존 측정치이고, 이 구현을 다시 잰
+            // 값이 아니다 — 벤치(python/tools/relay_shard_bench.py)는 Linux
+            // 전용이라 배포 대상에서 돌려 확인해야 한다.
+            //
+            // 대가가 하나 더 있다: 세그먼트 경계에 걸린 프레임의 꼬리를 다음
+            // 읽기까지 들고 있어야 한다(경계를 모르면 거를 수 없다). 랭크드
+            // 경로가 이미 그렇게 동작하고 락스텝 프레임은 수십 바이트라 보통
+            // 한 번에 들어온다.
             streamBuf.insert(streamBuf.end(), raw.begin(), raw.end());
             size_t pos = 0, sent = 0;
             bool dropRest = false, sendFailed = false;
@@ -3001,32 +3065,18 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             continue;
         }
 
-        // ranked: 프레임 단위로 파싱해 MATCH_SUMMARY 를 가로챈다.
-        // parse_frames 는 streamBuf 를 소비형으로 다룸 (완성된 프레임만큼 앞에서 제거).
+        // Ranked mode parses frame boundaries to intercept MATCH_SUMMARY.
         streamBuf.insert(streamBuf.end(), raw.begin(), raw.end());
-        // 프레임 경계를 파악하기 위해 build_frame 의 역함수가 필요. 우리 프레임
-        // 포맷은 [LEN:2][TYPE:1][PAYLOAD:LEN-1][CHK:4] — LEN 앞 2바이트로 총
-        // 바이트 수 (= LEN + 2 + 4) 를 알 수 있다. parse_frames 는 체크섬까지
-        // 확인해 프레임 객체를 주지만, raw 바이트는 소비하고 버린다. 그래서
-        // MATCH_SUMMARY 가 아닌 프레임은 원본을 다시 재조립해 to 로 보내야 한다.
-        //
-        // 간단하게 가기 위해 우리는 streamBuf 를 직접 프레이밍한다:
-        //   · LEN 을 읽어 완성된 프레임이 있으면 (2+len+4 bytes) 잘라낸다.
-        //   · TYPE 이 MATCH_SUMMARY 이면 수집만 하고 포워딩하지 않는다.
-        //   · 그 외 TYPE 이면 잘라낸 바이트 전체를 to 로 송신.
-        //
-        // MATCH_SUMMARY 는 relay 가 실제로 신뢰해 RP 갱신에 쓰므로, 이 타입만큼은
-        // 최소한 framing.cpp 와 동일한 payload checksum 을 재검증한다. 나머지
-        // summary가 아닌 완성 프레임은 원래 wire byte 그대로 전달한다.
+        // Non-summary frames retain their original wire bytes.
 
         bool sendFailed = false;
         while (streamBuf.size() >= 2) {
             const uint16_t payloadAndType = static_cast<uint16_t>(streamBuf[0]) |
                                             (static_cast<uint16_t>(streamBuf[1]) << 8);
 
-            // 페이로드 상한 초과 선언이면 framing.cpp::parse_frames 와 동일하게
-            // 스트림 전체를 버린다. 상한은 net/framing.h 가 공개하는 값을 직접
-            // 참조 — 로컬 사본이 framing 구현과 어긋나는 drift 를 막는다.
+            // Reject oversized declarations before the buffer grows.
+            // 상한은 net/framing.h 가 공개하는 값을 직접 참조 — 로컬 사본이
+            // framing 구현과 어긋나는 drift 를 막는다.
             if (static_cast<size_t>(payloadAndType) > net::kMaxPayloadBytes + 1u) {
                 RLOG_WARN("[relay] match=" << ch->match_id
                           << " uuid=" << ch->match_uuid
@@ -3048,6 +3098,14 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             }
 
             const uint8_t typeByte = streamBuf[2];
+            if (typeByte == static_cast<uint8_t>(net::MsgType::INPUT) || typeByte == static_cast<uint8_t>(net::MsgType::SEED)) {
+                const size_t length = payloadAndType - 1u;
+                const auto checksum = net::le_read_u32(streamBuf.data() + 2u + payloadAndType);
+                std::lock_guard<std::mutex> lock(ch->sumMu);
+                if (checksum != (length ? net::fnv1a32(streamBuf.data() + 3, length) : 0u)) ch->verified->invalidate();
+                else ch->verified->observe(a_to_b ? 1 : 2, static_cast<net::MsgType>(typeByte), streamBuf.data() + 3, length);
+            }
+
             if (typeByte == static_cast<uint8_t>(net::MsgType::MATCH_SUMMARY)) {
                 // 페이로드는 [2..2+len-1], len-1 은 payload 길이 (TYPE 제외).
                 const size_t payloadLen = payloadAndType >= 1u ? payloadAndType - 1u : 0u;
@@ -3163,7 +3221,7 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 
 **그리고 위반 로그는 방향당 한 줄만 남긴다.** 프레임마다 찍으면 위조 프레임을 쏟아붓는 것만으로 다른 모든 로그를 밀어낼 수 있다. 그건 이 결함을 고치면서 새로 만드는 또 하나의 값싼 공격이다. 보안 검사를 추가할 때 그 검사가 만드는 **로그·메트릭·알림의 양이 공격자가 정하는 값이 되지 않는지** 함께 봐야 한다 — 이 함정은 로그에서만 나오는 것이 아니라, 실패마다 이메일을 보내거나 캐시를 무효화하는 모든 방어 코드에서 같은 모양으로 나온다.
 
-**both 체크는 `sendFailed` 로 빠져나가기 전에 온다.** 마지막 요약을 방금 가로챈 그 배치에서 송신이 실패하면, `break` 를 먼저 하는 배치 구조에서는 어느 방향도 루프를 한 바퀴 더 돌지 못해 두 요약이 다 있는데도 교차검증이 생략되고 forfeit 경로로 흘러가는 경합이 있었다. finalize 를 배치 처리 직후·탈출 판정 직전에 두면 "관측한 정보는 소켓이 닫히기 전에 소진한다" 가 코드 순서로 보장된다. `finalizeForfeit` 도 양쪽 요약이 있으면 교차검증에 위임하므로 정확성은 겹으로 지켜지지만, 살아 있는 소켓으로 `MATCH_RESULT` 를 보내려면 여기가 먼저여야 한다.
+**both 체크는 `sendFailed` 로 빠져나가기 전에 온다.** 마지막 요약을 방금 가로챈 그 배치에서 송신이 실패하면, `break` 를 먼저 하는 배치 구조에서는 어느 방향도 루프를 한 바퀴 더 돌지 못해 두 요약이 다 있는데도 정상 확정이 생략되고 disconnect 경로로 흘러가는 경합이 있었다. finalize 를 배치 처리 직후·탈출 판정 직전에 두면 "관측한 정보는 소켓이 닫히기 전에 소진한다" 가 코드 순서로 보장된다. `finalizeForfeit`도 같은 서버 판정 확정 함수에 위임하므로 정확성은 겹으로 지켜지지만, 살아 있는 소켓으로 `MATCH_RESULT` 를 보내려면 여기가 먼저여야 한다.
 
 **방향별 idle 15초.** `tcp_recv_some` 이 빈 결과만 주는 상태가 15초를 넘으면 그 방향을 실패로 보고 끊는다. FIN/RST 없이 사라진 모바일 peer 나 반쪽 열린 연결이 매치 슬롯을 무기한 점유하는 것을 막는 애플리케이션 계층의 확정 장치다. 정상 lockstep 은 매 틱 `INPUT`/`PING` 을 흘리므로 15초 무활동은 게임이 이미 죽었다는 뜻이다. TCP keepalive(§13.2)와의 역할 분담도 그곳에서 정리한다.
 
@@ -3356,7 +3414,12 @@ void Session::queueThread(std::string host, uint16_t port,
                           uint32_t start_tick, uint8_t input_delay,
                           std::string auth_token) {
     NET_TRACE("[QUEUE] Connecting to relay " << host << ":" << port);
-    TcpSocket s = tcp_connect(host, port);
+    if (!prepareGameCredential(host, auth_token)) {
+        connectionFailed = true;
+        roomState_.store(RoomState::Failed);
+        return;
+    }
+    TcpSocket s = game_connect(host, port);
     if (!s.valid()) {
         NET_WARN("[QUEUE] Failed to connect to relay");
         connectionFailed = true;
@@ -3405,7 +3468,7 @@ void Session::queueThread(std::string host, uint16_t port,
         }
         std::vector<Frame> frames;
         parse_frames(buf, frames);
-        // MATCH_FOUND와 같은 recv에 실린 프레임을 수락 로비로 넘기는 보존 버퍼.
+        // MATCH_FOUND 뒤에 같은 recv 에 실린 프레임을 다음 단계(로비)로 넘기기 위한 보존 버퍼.
         // build_frame 은 동일 payload 에 대해 bit-identical 재생산되므로 체크섬 포함 복원 가능.
         std::vector<uint8_t> preserve;
         for (auto& f : frames) {
@@ -3415,13 +3478,15 @@ void Session::queueThread(std::string host, uint16_t port,
                 Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
                 std::string localIcon = "default";
                 std::string remoteIcon = "default";
-                parse_match_icons(f.payload, localIcon, remoteIcon);
+                bool ranked = false;
+                parse_match_icons(f.payload, localIcon, remoteIcon, ranked);
                 {
                     std::lock_guard<std::mutex> lk(seedMu);
                     seedParams.seed = seed;
                     seedParams.start_tick = start_tick;
                     seedParams.input_delay = input_delay;
                     seedParams.role = role;
+                    seedParams.ranked = ranked;
                     seedParams.local_icon_id = localIcon;
                     seedParams.remote_icon_id = remoteIcon;
                 }
@@ -3654,7 +3719,12 @@ void Session::roomThread(std::string host, uint16_t port,
     const bool doCreate = joinCode.empty();
     NET_TRACE("[ROOM] Connecting to relay " << host << ":" << port
               << " for " << (doCreate ? "CREATE" : ("JOIN " + joinCode)));
-    TcpSocket s = tcp_connect(host, port);
+    if (!prepareGameCredential(host, auth_token)) {
+        connectionFailed = true;
+        roomState_.store(RoomState::Failed);
+        return;
+    }
+    TcpSocket s = game_connect(host, port);
     if (!s.valid()) {
         NET_WARN("[ROOM] Failed to connect");
         roomState_.store(RoomState::Failed);
@@ -3773,13 +3843,15 @@ void Session::roomThread(std::string host, uint16_t port,
                 Role role = (roleByte == (uint8_t)Role::Host) ? Role::Host : Role::Peer;
                 std::string localIcon = "default";
                 std::string remoteIcon = "default";
-                parse_match_icons(f.payload, localIcon, remoteIcon);
+                bool ranked = false;
+                parse_match_icons(f.payload, localIcon, remoteIcon, ranked);
                 {
                     std::lock_guard<std::mutex> lk(seedMu);
                     seedParams.seed = seed;
                     seedParams.start_tick = start_tick;
                     seedParams.input_delay = input_delay;
                     seedParams.role = role;
+                    seedParams.ranked = ranked;
                     seedParams.local_icon_id = localIcon;
                     seedParams.remote_icon_id = remoteIcon;
                 }
@@ -4029,7 +4101,7 @@ sequenceDiagram
 | `s_auth_cache_mu` | 성공한 token verify 캐시 | 프로세스 단위 |
 | `PlayerSessionLease::mu_` | 활성 ranked `player_id` 집합 | 프로세스 단위 |
 
-이 구조의 장점은 각 뮤텍스가 지키는 불변조건이 짧다는 점이다. 방 상태에는 §8.1의 gate → state mu 순서가 있고, 매치가 성립한 뒤의 데이터 경로는 주로 해당 `Channel`만 만진다. 단, 인증 캐시와 활성 계정 lease는 프로세스 전역이므로 입장 순간에는 짧은 전역 임계구역을 지난다.
+이 구조의 장점은 각 뮤텍스가 지키는 불변조건이 짧다는 점이다. 방 상태에는 §8.1의 gate → state mu 순서가 있고, 매치가 성립한 뒤의 데이터 경로는 주로 해당 `Channel`만 만진다. 단, 활성 계정 lease는 프로세스 전역이므로 입장 순간에는 짧은 전역 임계구역을 지난다.
 
 단점은 두 가지다. 첫째, `RoomRegistry::mu` 는 여전히 전역이라 방 수가 많아지면 `roomLoop_` 들의 10ms 폴링이 모두 이 락을 두드린다. 둘째, 잠금 순서 규칙을 사람이 지켜야 한다. 새 코드가 `mu` 를 잡은 채 `sendRoomFrame_` 를 부르면 즉시 데드락이다.
 
@@ -4110,79 +4182,41 @@ private:
 
 집합에 `insert` 성공한 쪽만 객체를 얻고, 소멸자가 집합에서 지운다 — lease 의 존재 자체가 곧 등록이므로 "해제를 잊는" 경로가 타입 수준에서 없다. `player_id <= 0`(unranked) 은 빈 `shared_ptr` 를 돌려주는데, §6 의 `authenticate` 는 meta 미연동일 때 lease 검사를 아예 하지 않으므로 unranked 입장은 막히지 않는다.
 
-relay는 성공한 `/v1/auth/verify` 결과를 토큰별 5분, 최대 4096개로 캐시한다. meta가 **네트워크 오류**일 때만 아직 유효한 캐시를 사용한다. meta가 404로 토큰이 없다고 답했거나 명시적으로 인증을 거부한 경우에는 캐시로 우회하지 않는다. 이 캐시가 필요한 전제가 하나 있다 — 이 프로젝트의 배포 중에는 meta 를 저전력 단말에서 상시 구동하는 형태도 있어, meta 호스트가 잠깐 절전·재접속 상태로 사라지는 일이 드물지 않다. 그런 순간에도 최근 접속자는 매치에 들어갈 수 있지만, 장기 장애나 처음 보는 토큰은 fail closed다. **가용성 보완은 "최근에 검증된 사실의 유예" 까지만 허용하고, 검증된 적 없는 주장을 통과시키는 순간 인증이 아니게 된다.**
+현재 relay는 오프라인 인증 캐시를 사용하지 않는다. 60초·1회용 입장권을 meta에서
+원자적으로 소비해야 한다. meta 장애를 최근 인증 기록으로 우회하면 폐기된 키와 사용한
+입장권이 다시 통과할 수 있기 때문이다. 세션 lease는 이미 승인한 계정의 동시 입장을
+제한하며 인증의 대체 수단이 아니다.
 
-**단절 시 몰수패 판정.** 랭크 매치 도중 한 peer가 EOF, 송신 실패, 15초 무활동, 전송량 초과로 사라져 채널이 닫히면, 마지막 포워더가 `finalizeForfeit` 를 호출한다(§10.6). 판정은 그 시점까지 수집된 `MATCH_SUMMARY` 의 개수로 세 갈래다.
+**단절은 판정 근거가 아니라 결과 확정의 계기다.** 마지막 포워더는 소켓을 닫기 전에
+`finalizeForfeit`를 호출한다. 이름은 호환상 남았지만 먼저 끊긴 쪽을 패자로 정하지 않는다.
+요약의 유무와 관계없이 공통 `RankedGame`이 이미 끝까지 계산한 결과만 사용한다.
 
-**현재 소스 발췌 — `server/relay.cpp` (`finalizeForfeit` — 분기 (3) 뒤의 점수 필드 조립·meta POST·통지는 생략)**
+**현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// A peer lost before finalizeRanked ran. 몰수패 처리 진입점 — 요약이 몇 개
-// 수집됐는지에 따라 세 갈래로 나뉜다 (각 분기 주석 참고).
-// disconnectSide 는 "먼저 끊긴 쪽"(1=A, 2=B, 0=미상)일 뿐 패자가 아니다 —
-// 승자 판정에는 쓰지 않고 MATCH_RESULT 송신 대상(생존자) 선정에만 쓴다.
 void finalizeForfeit(Channel& ch, int disconnectSide)
 {
-    if (!ch.meta || ch.playerA_id == 0 || ch.playerB_id == 0) return;
-
-    Summary a{}, b{};
-    bool haveA = false;
-    bool haveB = false;
+    (void)disconnectSide;
+    if (!ch.meta || !ch.verified) return;
     {
-        std::lock_guard<std::mutex> lk(ch.sumMu);
+        std::lock_guard<std::mutex> lock(ch.sumMu);
         if (ch.summaryHandled) return;
-        haveA = ch.summaryA.has_value();
-        haveB = ch.summaryB.has_value();
-        // 양쪽 요약이 다 모였으면 몰수패가 아니다 — summaryHandled 를 여기서
-        // 선점하지 않고 finalizeRanked 의 교차검증 경로에 맡긴다 (락 밖에서 위임).
-        if (!(haveA && haveB)) {
-            ch.summaryHandled = true;
-        }
-        if (haveA) a = *ch.summaryA;
-        if (haveB) b = *ch.summaryB;
+        // Finalization no longer uses any fields from a client's summary.
+        if (!ch.summaryA) ch.summaryA = Summary{};
+        if (!ch.summaryB) ch.summaryB = Summary{};
     }
-
-    // (1) 양쪽 요약 존재: 회선이 끊겼어도 경기 자체는 완주된 것이다 (예: 승패
-    //     확정 직후 요약만 보내고 즉시 종료). 교차검증으로 승자를 확정한다.
-    if (haveA && haveB) {
-        finalizeRanked(ch);
-        return;
-    }
-
-    // (2) 요약이 하나도 없음(즉시 이탈, 무경기): meta 에 post_match 를 보내지
-    //     않는다 — RP 미반영. 커스텀 룸에서 READY 직후 끊기를 반복하는 담합
-    //     RP 파밍과, 동시 단절 시 disconnect_side 관측 순서 하나로 임의 승자를
-    //     만들어 RP 를 오염시키는 것을 함께 막는다. 생존자에게는 델타 0 의
-    //     MATCH_RESULT 를 보내 결과 대기 화면에서 빠져나오게 한다.
-    if (!haveA && !haveB) {
-        auto frA = build_match_result(ch.playerA_elo, ch.playerA_elo, 0);
-        auto frB = build_match_result(ch.playerB_elo, ch.playerB_elo, 0);
-        // disconnectSide==0(순서 미상)이면 양쪽 다 시도 — 죽은 소켓으로의
-        // send 는 무해하게 실패한다.
-        if (disconnectSide != 1) sendToA(ch, frA);
-        if (disconnectSide != 2) sendToB(ch, frB);
-        RLOG_INFO("[relay] match=" << ch.match_id << " uuid=" << ch.match_uuid
-                  << " player_id=" << ch.playerA_id << " x " << ch.playerB_id
-                  << " no summaries -> no meta post (delta=0)");
-        return;
-    }
-
-    // (3) 한쪽 요약만 존재: 그 요약의 won 플래그를 존중해 승자를 정한다.
-    //     종전에는 disconnectSide 를 무조건 패자로 기록했는데, 그러면 이긴 쪽이
-    //     승리 요약을 제출한 직후 회선이 끊겼을 때 제출된 승리 요약이 무시되고
-    //     승자가 패자로 뒤집히는 버그가 있었다.
-    int64_t winner = 0;
-    if (haveA) winner = a.won ? ch.playerA_id : ch.playerB_id;
-    else       winner = b.won ? ch.playerB_id : ch.playerA_id;
+    finalizeRanked(ch);
+}
 ```
 
-세 분기의 근거를 정리하면 이렇다.
+- 종료 입력을 받은 뒤 한쪽이 요약 없이 나가도 서버가 승패를 재현했다면 저장한다.
+- 입력이 없거나 아직 종료되지 않은 경기에는 RP/BP/XP를 주지 않는다.
+- 입력 변조가 발견되면 해당 경기 전체를 보상에서 제외한다.
+- 서버 자체 종료는 운영 작업을 기권으로 보지 않고 기존 종료 drain을 따른다.
 
-- **양쪽 요약 존재 → 교차검증 위임.** 회선이 끊겼어도 경기는 완주된 것이다. `finalizeForfeit` 는 `summaryHandled` 를 선점하지 않고 `finalizeRanked` 의 기존 경로에 넘긴다 — 판정 로직을 두 벌 두면 언젠가 어긋난다.
-- **한쪽 요약만 존재 → 그 요약의 `won` 존중.** 게임오버가 확정된 클라이언트는 요약을 보낸 직후 세션을 닫는 것이 정상 동작이라, "승리 요약 제출 → 즉시 단절" 은 공격이 아니라 흔한 정상 경로다. 관측된 단절 순서(`disconnect_side`)를 패자로 삼으면 이 경로에서 **제출된 승리가 회선 단절로 뒤집힌다**. 일반화하면: 판정에는 강한 신호(서명된 것과 다름없는 제출 데이터)를 쓰고, 약한 신호(타이밍 관측)는 판정이 아니라 부수 결정 — 여기서는 결과를 통지할 생존자 선정 — 에만 쓴다.
-- **요약 전무 → meta POST 생략, RP 미반영.** 경기가 있었다는 증거가 하나도 없는 매치에 몰수승 RP 를 주면 그 자체가 인센티브가 된다 — 두 계정이 방을 만들고 READY 직후 한쪽이 끊기를 반복하면 경기 없이 RP 가 이동하는 담합 파밍 벡터다. 동시 단절에서 관측 순서 하나로 임의 승자가 만들어지는 것도 같은 분기가 막는다. 생존자가 결과 화면에 갇히지 않도록 델타 0 의 `MATCH_RESULT` 만 보낸다.
-
-서버 자체가 종료 중일 때는 운영 작업을 플레이어 패배로 만들지 않도록 기권 처리 전체를 건너뛴다. 저장이 일어나는 (1)·(3) 분기는 같은 `match_uuid` 를 쓰므로 재시도돼도 한 경기만 남는다. 그 uuid 를 만드는 쪽도 이 장의 새 헤더다.
+요약 두 장이 일치하거나 남아 있는 사람이 승리를 주장하는 것은 실제 승리의 증명이
+아니다. Part 18은 이 신뢰 경계를 없앤 공통 검증기와 정확한 제한을 설명한다.
+모든 저장 경로는 같은 UUID를 사용해 meta의 중복 지급 차단에 연결한다.
 
 **현재 소스 발췌 — `server/match_uuid.h`**
 
@@ -4229,12 +4263,12 @@ inline std::string new_match_uuid()
 
 ## 14. 메타 통합 경계
 
-이 장의 릴레이는 게임 시뮬레이션과 영속 DB를 소유하지 않는 **선택적 릴레이**다. 대부분의 게임 프레임은 해석하지 않고 전달하지만, 입장 시에는 인증 결과와 계정 lease를 보고, 포워딩 중에는 타입 바이트만 보아 서버 전용 프레임을 거르며, ranked 종료 시에는 `MATCH_SUMMARY`를 파싱한다. 따라서 “완전한 투명 프록시”가 아니라 “영속 상태가 없는 서버 권위 경계”로 이해해야 한다.
+현재 릴레이는 영속 DB를 소유하지 않는 **선택적 릴레이**이며, 랭크 채널에는 결정론적 게임 시뮬레이션을 둔다. 대부분의 게임 프레임은 해석하지 않고 전달하지만, 입장 시에는 인증 결과와 계정 lease를 보고, 포워딩 중에는 타입 바이트만 보아 서버 전용 프레임을 거르며, ranked INPUT은 원본으로 전달하면서 검증기에 기록하고, 종료 신고 시 서버 결과를 저장한다. 따라서 “완전한 투명 프록시”가 아니라 “영속 상태가 없는 서버 권위 경계”로 이해해야 한다.
 
 별도 `tetris_meta` HTTP+SQLite 서버가 토큰 인증과 RP 갱신을 맡는다. relay는 아래 두 지점에서만 meta와 통신하며 DB 파일이나 RP 수식을 소유하지 않는다.
 
-1. `QUEUE_JOIN`/`ROOM_CREATE`/`ROOM_JOIN` 페이로드의 `[tok_len:1][token:N]` 을 `authenticate()` 가 `/v1/auth/verify` 로 1회 검증해 `player_id`/`elo`/`username`/ `selected_icon_id` 를 채운다. `--meta` 없이 뜨면 이 경로가 통째로 건너뛰어진다.
-2. `forwarderLoop` 이 ranked 매치(meta 연동 + 양쪽 `player_id != 0`)일 때만 `MATCH_SUMMARY` 를 가로챈다. 양쪽이 모두 도착하면 `finalizeRanked` 가 교차검증 후 `/v1/matches` 로 POST 하고 `MATCH_RESULT` 를 두 클라이언트에 보낸다.
+1. `QUEUE_JOIN`/`ROOM_CREATE`/`ROOM_JOIN`의 입장권을 `authenticate()`가 meta에서 한 번 소비해 ID·RP·닉네임·아이콘을 얻는다. `--meta` 없는 연습 relay만 이 경로를 건너뛴다.
+2. `forwarderLoop` 이 ranked 매치(meta 연동 + 양쪽 `player_id != 0`)일 때만 `MATCH_SUMMARY` 를 가로챈다. 양쪽이 모두 도착하면 `finalizeRanked`가 서버의 완결된 시뮬레이션 결과를 `/v1/matches`로 POST 하고 `MATCH_RESULT` 를 두 클라이언트에 보낸다.
 
 `post_match`는 relay가 생성한 32자리 소문자 hex `match_uuid`를 총 세 번의 시도(일시 오류 시 최대 두 번 재시도)에서 그대로 쓰고, 재시도를 포함한 전체 블로킹 시간은 wall-clock 예산으로 상한된다 — 어차피 멱등 재전송이 안전하므로 매치 종료 흐름을 오래 붙잡을 이유가 없다. meta의 unique index와 결과 스냅샷이 같은 UUID의 두 번째 요청을 기존 응답으로 바꾸므로 RP가 두 번 반영되지 않는다. DB와 RP 계산은 meta 쪽에 격리되고, relay에는 `forwarderLoop`의 selective passthrough와 `finalizeRanked`/`finalizeForfeit`만 남는다.
 
@@ -4243,15 +4277,15 @@ inline std::string new_match_uuid()
 - `tetris_relay` 단일 바이너리 — 포트 하나로 매치메이킹 + 룸 코드 + 선택적 게임 프레임 전달.
 - `WorkerGroup` — detached 워커의 상한·예외 격리·drain, 그리고 이를 검증하는 `worker_group_test`.
 - `Matchmaker` FIFO 큐. 페어링 **전에** `waitingPlayerStillActive` 로 EOF/취소/손상 프레임을 걸러낸다.
-- `RoomRegistry` — base32 5자 코드 발급(예측 차단 시딩 포함), 대기실 루프, READY 동기, CHAT 포워딩, `iAmStarter` 를 통한 룸 → 매치 인계.
+- `RoomRegistry` — base32 5자 초대 코드 발급, 대기실 루프, READY 동기, CHAT 포워딩, `iAmStarter` 를 통한 룸 → 매치 인계.
 - 동시 나가기 레이스의 세 겹 방어 — owning handle, `roomInfoVersion`, 방별 송신 게이트.
 - `queueLobbyThread` 의 수락 로비와 한-프레임-씩 파싱, `Channel::prefixFromA/B` 로의 잔여 바이트 이관.
-- `forwarderLoop` 양방향 전달. 두 모드 모두 프레임 경계를 훑어 클라이언트가 위조한 서버 전용 타입(`net::is_server_only_type`)을 버리고, ranked 는 거기에 더해 `MATCH_SUMMARY` 만 체크섬 검증 후 가로챈다. 통과한 프레임은 원본 바이트 그대로 전달.
+- `forwarderLoop` 양방향 전달. 두 모드 모두 프레임 경계를 훑어 클라이언트가 위조한 서버 전용 타입(`net::is_server_only_type`)을 버리고, ranked는 `INPUT`·`SEED`를 검증기에 관측시키고 `MATCH_SUMMARY`를 종료 요청으로 가로챈다. 통과한 프레임은 원본 바이트 그대로 전달.
 - 클라이언트 측 릴레이 경로 전부 — `QueueJoin`/`QueueCancel`/`QueueConfirm`/ `QueueDecline`/`RoomCreate`/`RoomJoin`/`RoomSendReady`/`RoomLeave` 와 `queueThread`/`roomThread`, 그리고 `recvBuf` 인계.
 - 단계 전환 시 잔여 TCP 바이트를 잃지 않는 스트림 소유권 규칙 — 서버와 클라이언트의 모든 인계 지점에 동일 적용.
 - IP별 입장 제한, 5초 첫 프레임 제한, TCP keepalive(양 플랫폼 15초/5초 정합), 방향별 15초 idle·64KiB/s 제한.
 - 룸 수명 데드라인 — 게스트 대기 15분·READY 60초 초과 시 `gonefull` 통지 후 방 정리, 떠나는 쪽 세션 lease 즉시 해제.
-- 계정별 단일 활성 session lease(`server/player_session.h`), meta 네트워크 장애 전용 인증 캐시, 요약 증거 기반 기권 판정, `match_uuid`(`server/match_uuid.h`) 기반 멱등 저장.
+- 계정별 단일 활성 session lease(`server/player_session.h`), meta에서의 일회용 입장권 소비, 서버 입력에 근거한 결과 판정, `match_uuid`(`server/match_uuid.h`) 기반 멱등 저장.
 
 ## 수동 테스트
 

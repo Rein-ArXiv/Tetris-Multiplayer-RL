@@ -1,18 +1,15 @@
-"""Cross-check + meta-failure tests for MATCH_SUMMARY → MATCH_RESULT path.
+"""Ranked results derive from replayed inputs, never agreement between claims.
 
-Covers:
-  · 양쪽이 모순된 won/score 를 보고 → relay 가 winner=NULL → RP 미반영 (delta=0).
-  · 양쪽이 일치하는 won/score 를 보고 → RP 변동 (+ leaderboard 갱신).
-  · meta 미기동 상태에서 relay 에 접속 → 즉시 close (verify 거부).
-
-이 테스트들은 게임 시뮬을 실제로 돌리지 않고 클라 → relay 프레임만 직접 만들어
-보낸다. relay 가 lockstep 의 어느 것도 검증하지 않는다는 사실에 의존.
+Raw wire tests cover invented summaries, disconnects and a real deterministic
+terminal game through both relay implementations. Authentication compatibility in
+these historical fixtures does not disable gameplay validation.
 """
 from __future__ import annotations
 
 import json
 import os
 import socket
+import sqlite3
 import struct
 import subprocess
 import time
@@ -167,8 +164,8 @@ def _spawn_meta(tmp_path, relay_secret: str | None = TEST_RELAY_SECRET):
     return proc, f"http://127.0.0.1:{port}"
 
 
-def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SECRET):
-    bin_ = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SECRET, binary=None):
+    bin_ = binary or _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not bin_:
         pytest.skip("tetris_relay binary missing")
     port = _free_port()
@@ -187,13 +184,19 @@ def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SEC
 # ---- 테스트 ------------------------------------------------------------------
 
 
-@pytest.fixture
-def meta_relay(tmp_path):
+@pytest.fixture(params=["tetris_relay", "tetris_relay_reactor"])
+def meta_relay(tmp_path, request):
     """meta + relay (meta 연동) 페어 띄움."""
     mp, mu = _spawn_meta(tmp_path)
-    rp, rport = _spawn_relay(mu)
+    configured = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    build = Path(os.environ.get("TETRIS_SECURE_BUILD", str(configured.parent if configured else "build-secure")))
+    binary = build / (request.param + (".exe" if os.name == "nt" else ""))
+    if not binary.exists():
+        mp.terminate(); mp.wait(timeout=3)
+        pytest.skip(f"{binary} not built")
+    rp, rport = _spawn_relay(mu, binary=binary.resolve())
     try:
-        yield {"meta_url": mu, "relay_port": rport}
+        yield {"meta_url": mu, "relay_port": rport, "db": tmp_path / "test.db", "build": build}
     finally:
         for proc in (rp, mp):
             proc.terminate()
@@ -213,7 +216,7 @@ def _consistent_summaries(my1_score=5000, my1_lines=20,
     return a_summary, b_summary
 
 
-def test_consistent_summaries_apply_elo(meta_relay):
+def test_matching_fabricated_summaries_earn_nothing(meta_relay):
     base   = meta_relay["meta_url"]
     rport  = meta_relay["relay_port"]
     p1 = _post(f"{base}/v1/guest")
@@ -236,11 +239,12 @@ def test_consistent_summaries_apply_elo(meta_relay):
         ra = _recv_until(a, MsgType.MATCH_RESULT)
         rb = _recv_until(b, MsgType.MATCH_RESULT)
         assert ra is not None and rb is not None
-        # 승자 delta > 0 → RP 적용됨. 패자는 0(RP 바닥)에서 시작하므로
-        # 바닥 clamp 으로 delta 0 (meta/elo.h 의 0-시작/0-바닥 스케일).
-        delta_a = struct.unpack_from("<i", ra, 8)[0]
-        delta_b = struct.unpack_from("<i", rb, 8)[0]
-        assert delta_a > 0 and delta_b == 0
+        assert struct.unpack_from("<i", ra, 8)[0] == 0
+        assert struct.unpack_from("<i", rb, 8)[0] == 0
+        assert ra[12] == rb[12] == 3  # Incomplete, never simulated a game.
+        for player in (p1, p2):
+            profile = _post(f"{base}/v1/auth/verify", {"token": player["token"]})
+            assert profile["bp"] == profile["xp"] == 0
     finally:
         a.close(); b.close()
 
@@ -303,7 +307,7 @@ def test_score_mismatch_no_elo(meta_relay):
         ra = _recv_until(a, MsgType.MATCH_RESULT)
         rb = _recv_until(b, MsgType.MATCH_RESULT)
         assert ra is not None and rb is not None
-        # score 교차 검증 실패 → winner=null → RP 미반영.
+        # No terminal simulation exists, regardless of claimed scores.
         delta_a = struct.unpack_from("<i", ra, 8)[0]
         delta_b = struct.unpack_from("<i", rb, 8)[0]
         assert delta_a == 0 and delta_b == 0
@@ -311,7 +315,7 @@ def test_score_mismatch_no_elo(meta_relay):
         a.close(); b.close()
 
 
-def test_disconnect_before_summary_is_forfeit(meta_relay):
+def test_disconnect_with_unverified_survivor_claim_earns_nothing(meta_relay):
     base = meta_relay["meta_url"]
     rport = meta_relay["relay_port"]
     p1 = _post(f"{base}/v1/guest")
@@ -326,10 +330,7 @@ def test_disconnect_before_summary_is_forfeit(meta_relay):
         assert _await_match_found(b)
         _queue_accept(a, b)
 
-        # relay 의 몰수패 처리(finalizeForfeit)는 요약 0개면 담합 RP 파밍
-        # 방지를 위해 meta 에 아무것도 반영하지 않는다 (delta=0). RP/BP/XP
-        # 반영을 검증하는 이 테스트는 "생존자 요약 1개" 분기여야 하므로,
-        # b(생존자) 가 먼저 승리 요약을 제출한 뒤 a 가 끊긴다.
+        # A surviving client claim is not proof that a game finished.
         b.sendall(_summary(won=1, my_score=5000, my_lines=20,
                            opp_score=1000, opp_lines=3))
         # MATCH_SUMMARY 는 relay 가 가로채 forward 하지 않으므로 처리 완료를
@@ -343,34 +344,19 @@ def test_disconnect_before_summary_is_forfeit(meta_relay):
         a.close()
         result = _recv_until(b, MsgType.MATCH_RESULT)
         assert result is not None
-        assert struct.unpack_from("<i", result, 8)[0] > 0
+        assert struct.unpack_from("<i", result, 8)[0] == 0
+        assert result[12] == 3
 
         winner = _post(f"{base}/v1/auth/verify", {"token": p2["token"]})
         loser = _post(f"{base}/v1/auth/verify", {"token": p1["token"]})
-        assert winner["bp"] == 30 and winner["xp"] == 100
-        assert loser["bp"] == 10 and loser["xp"] == 50
+        assert winner["bp"] == winner["xp"] == 0
+        assert loser["bp"] == loser["xp"] == 0
     finally:
         a.close(); b.close()
 
 
 def test_self_reported_win_by_the_leaver_earns_nothing(meta_relay):
-    """이탈자가 자기 승리를 신고하고 끊으면 아무것도 적립되면 안 된다.
-
-    바로 위 테스트가 못 박은 "생존자 요약 1개 -> 몰수승" 과 짝이다. 요약이 하나뿐인
-    상황은 둘로 갈리는데, 그 둘을 구분하지 않으면 한쪽이 공격이 된다:
-
-      · 생존자가 냈다  -> 상대가 자리를 떴고 남은 사람이 결과를 보고했다. 존중한다.
-      · 이탈자가 냈다  -> 자기 승리를 자기가 신고하고 자리를 떴다. 그 주장을 반증할
-                         상대는 아직 경기 중이라 아무것도 제출하지 못했다. 교차검증은
-                         이 경로에 개입하지 않으므로 그 한 장이 곧 판결이 된다.
-
-    수정 전 실측(배포 바이너리): READY 직후 MATCH_SUMMARY{won=1} 한 장을 보내고 소켓을
-    닫자, 게임 프레임을 한 장도 주고받지 않은 채 신고자의 elo 가 0 에서 16 으로 올랐다.
-    큐에서 만난 아무에게나 성립하므로 공모자도 플레이도 필요 없었다.
-
-    승자를 뒤집지 않고 비우는 것이 계약이다. 뒤집으면 이번에는 자폭이 도구가 된다 —
-    지고 있는 사람이 패배 요약을 낸 뒤 끊어 상대의 승리를 지울 수 있다.
-    """
+    """Disconnecting cannot turn an unverified win claim into a reward."""
     base = meta_relay["meta_url"]
     rport = meta_relay["relay_port"]
     victim = _post(f"{base}/v1/guest")
@@ -432,3 +418,82 @@ def test_relay_without_meta_rejects_token(tmp_path):
         rp.terminate()
         try: rp.wait(timeout=3)
         except subprocess.TimeoutExpired: rp.kill()
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_verified_terminal_game_ignores_false_claims(meta_relay, disconnect):
+    base = meta_relay["meta_url"]
+    players = [_post(f"{base}/v1/guest") for _ in range(2)]
+    sockets = [socket.create_connection(("127.0.0.1", meta_relay["relay_port"]), timeout=2) for _ in range(2)]
+    try:
+        for sock, player in zip(sockets, players):
+            sock.sendall(_qjoin(player["token"]))
+        found = [_recv_until(sock, MsgType.MATCH_FOUND) for sock in sockets]
+        assert all(found) and all(data[-1] == 1 for data in found)
+        host_index = next(i for i, data in enumerate(found) if data[0] == 1)
+        host, guest = sockets[host_index], sockets[1 - host_index]
+        seed = struct.unpack_from("<Q", found[host_index], 1)[0]
+        build = meta_relay["build"]
+        probe = build / ("ranked_game_test.exe" if os.name == "nt" else "ranked_game_test")
+        expected = json.loads(subprocess.check_output([str(probe.resolve()), str(seed)], text=True))
+        _queue_accept(host, guest)
+        count = expected["ticks"]
+        host.sendall(build_frame(MsgType.INPUT, struct.pack("<IH", 0, count) + bytes(count)))
+        guest.sendall(build_frame(MsgType.INPUT, struct.pack("<IH", 0, count) + bytes([16]) * count))
+        # Observe input delivery before disconnecting. The relay must have consumed
+        # both streams; it can award even when a client withholds its summary.
+        assert _recv_until(host, MsgType.INPUT) is not None
+        assert _recv_until(guest, MsgType.INPUT) is not None
+        if disconnect:
+            guest.close()
+        else:
+            host.sendall(_summary(0, 99999, 999, 88888, 888))
+            guest.sendall(_summary(1, 88888, 888, 99999, 999))
+        result = _recv_until(host, MsgType.MATCH_RESULT)
+        assert result is not None and result[12] == 1
+        assert struct.unpack_from("<i", result, 8)[0] > 0
+        with sqlite3.connect(meta_relay["db"]) as con:
+            rows = con.execute("SELECT winner,score_a,score_b,lines_a,lines_b FROM matches").fetchall()
+        assert rows == [(players[host_index]["player_id"], expected["score_a"], expected["score_b"],
+                         expected["lines_a"], expected["lines_b"])]
+        for i, player in enumerate(players):
+            profile = _post(f"{base}/v1/auth/verify", {"token": player["token"]})
+            assert profile["bp"] == (30 if i == host_index else 10)
+            assert profile["xp"] == (100 if i == host_index else 50)
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+@pytest.mark.parametrize("violation", ["mask", "rewrite", "seed"])
+def test_invalid_input_never_posts_a_match(meta_relay, violation):
+    base = meta_relay["meta_url"]
+    players = [_post(f"{base}/v1/guest") for _ in range(2)]
+    sockets = [socket.create_connection(("127.0.0.1", meta_relay["relay_port"]), timeout=2) for _ in range(2)]
+    try:
+        for sock, player in zip(sockets, players):
+            sock.sendall(_qjoin(player["token"]))
+        found = [_recv_until(sock, MsgType.MATCH_FOUND) for sock in sockets]
+        assert all(found)
+        host_index = next(i for i, data in enumerate(found) if data[0] == 1)
+        host, guest = sockets[host_index], sockets[1 - host_index]
+        _queue_accept(host, guest)
+        if violation == "seed":
+            seed = struct.unpack_from("<Q", found[host_index], 1)[0]
+            host.sendall(build_frame(MsgType.SEED, struct.pack("<QIBB", seed ^ 1, 120, 2, 1)))
+        elif violation == "mask":
+            host.sendall(build_frame(MsgType.INPUT, struct.pack("<IHB", 0, 1, 32)))
+        else:
+            for mask in (0, 16):
+                host.sendall(build_frame(MsgType.INPUT, struct.pack("<IHB", 0, 1, mask)))
+        host.sendall(_summary(1, 99999, 999, 0, 0))
+        guest.sendall(_summary(0, 0, 0, 99999, 999))
+        for sock in (host, guest):
+            result = _recv_until(sock, MsgType.MATCH_RESULT)
+            assert result is not None and result[12] == 2  # InvalidReplay
+            assert struct.unpack_from("<i", result, 8)[0] == 0
+        with sqlite3.connect(meta_relay["db"]) as con:
+            assert con.execute("SELECT count(*) FROM matches").fetchone()[0] == 0
+    finally:
+        for sock in sockets:
+            sock.close()

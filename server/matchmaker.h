@@ -31,8 +31,8 @@
 namespace relay {
 
 // 큐에 들어간 플레이어 정보.
-// player_id / elo / username / token 은 meta /v1/auth/verify 성공 시 채워진다.
-// meta 비활성화(--meta 없음) 또는 토큰 미제공 시 player_id=0 (unranked).
+// meta의 일회용 게임 입장권 소비가 성공하면 인증 정보가 채워진다.
+// --meta가 없을 때만 player_id=0 (unranked). 랭크 입장권 누락은 거절한다.
 struct PlayerInfo {
     net::TcpSocket sock;
     uint32_t       conn_id{0};  // 로깅용

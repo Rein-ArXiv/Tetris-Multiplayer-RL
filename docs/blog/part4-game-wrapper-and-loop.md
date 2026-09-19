@@ -1,7 +1,6 @@
 # Part 4: Game 래퍼와 메인 루프 — 고정 틱과 입력 누적
 
 > **시리즈:** 제로부터 멀티플레이어 테트리스 + RL | [시리즈 목차](./README.md) | **Part 4**
->
 
 ---
 
@@ -43,7 +42,7 @@ Part 1에서 게임 로직을, Part 2~3에서 창과 렌더러를 만들었다. 
 | 고정 틱과 리플레이 | `accumulator`, `SECONDS_PER_TICK`, `ReplayData` | **Part 4** |
 | 렌더 전용 효과 | `Callout`, 보드별 `ShakeState`, `apply_fx` | **Part 4** |
 | 직결·relay 게임 세션 | `Session`, `safeTick`, HASH/DESYNC, 채팅과 링크 상태 | [Part 6](./part6-lockstep-networking.md), 큐·룸 전환은 [Part 7](./part7-relay-server.md) |
-| 봇 선택과 실행 | `discover_bot_roster`, `botInputQueue`, `BotSingle` | [Part 9](./part9-rl-onnx-bot.md) |
+| 봇 선택과 실행 | `bot::discover_opponents`, `bot::Controller`, `BotSingle` | [Part 9](./part9-rl-onnx-bot.md) |
 | 계정·랭킹·꾸미기 | meta 부트스트랩, 인증 토큰, `Customize`, 매치 결과 표시 | [Part 10](./part10-meta-and-ranking.md) |
 | 사용자 설정 | `GameSettings`, 설정 로드·저장, `AppMode::Settings` | [Part 11](./part11-settings-and-options.md) |
 | 화면별 렌더 | Menu·Single·Net·Bot·Room·Settings·Customize 분기 | 공통 렌더 수명은 **Part 4**, 화면별 상태 의미는 각 소유 문서 |
@@ -122,9 +121,6 @@ set(TETRIS_SIM_HEADERS
 **현재 소스 발췌 — `src/game.h`**
 
 ```cpp
-// [NET] Handmade 렌더러 래퍼 — SimGame 위에 draw_rect() 기반 렌더링 + XAudio2 오디오.
-// 렌더링은 renderer/renderer.h 의 draw_rect() 를 사용.
-// 오디오는 audio/audio.h 의 XAudio2 래퍼를 사용.
 class Game
 {
 public:
@@ -133,7 +129,7 @@ public:
 
     // ── 렌더링 ──────────────────────────────────────────────────────────────
     void Draw();
-    void DrawBoardAt(int offsetX, int offsetY);
+    void DrawBoardAt(int offsetX, int offsetY, int cellSize = 30);
     void DrawNextAt(int offsetX, int offsetY);
     // 축소 프리뷰 — 멀티/봇 모드용 (cellSize 작게). 보드 사이 좁은 갭에 들어감.
     void DrawNextMini(int offsetX, int offsetY, int cellSize);
@@ -142,7 +138,7 @@ public:
                            int ySpacing = 48);
     // 가비지 큐 미리보기 바 — 보드 왼쪽(offsetX-8 위치)에 빨간 바 세로 그리기.
     // pending: 주입 대기 중인 행 수. 최대 표시 12행.
-    static void DrawGarbageBar(int boardX, int boardY, int pending);
+    static void DrawGarbageBar(int boardX, int boardY, int pending, int cellSize = 30);
 
     // ── 시뮬레이션 위임 ─────────────────────────────────────────────────────
     void SubmitInput(uint8_t inputMask);
@@ -160,8 +156,8 @@ public:
     int&  score;
 
 private:
-    void DrawGrid(int offsetX, int offsetY) const;
-    void DrawBlock(const SimBlock& block, int offsetX, int offsetY) const;
+    void DrawGrid(int offsetX, int offsetY, int cellSize = 30) const;
+    void DrawBlock(const SimBlock& block, int offsetX, int offsetY, int cellSize = 30) const;
     void DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const;
 
     std::vector<Color> cellColors;
@@ -204,7 +200,7 @@ Game::Game(uint64_t seed)
       gameOver(sim.gameOver),
       score(sim.score)
 {
-    cellColors = GetCellColors();
+    cellColors = presentation_palette(GetCellColors());
 
     // 오디오 초기화 (참조 카운팅 -- 멀티플레이에서 두 번 호출해도 안전)
     audioInitCalled = true;
@@ -396,6 +392,17 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
     {
         // 1) 입력 처리 + 델타타임
         float deltaTime = platform_begin_frame();
+        if(botClaimOp.valid() && botClaimOp.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            auto r=botClaimOp.get();
+            if(r.reward) {
+                myBp=r.reward->bp;
+                botRewardStatus=r.reward->awarded_bp ? "+"+std::to_string(r.reward->awarded_bp)+" BP earned" : "Daily bot BP limit reached";
+            } else {
+                botClaimRetryable=r.status==0 || r.status==429 || r.status>=500;
+                botRewardStatus=botClaimRetryable ? "BP not confirmed - retry below" : "Victory could not be verified";
+            }
+        }
+
         AccumulateInput(chatComposing);  // 엣지 트리거 입력을 매 프레임 누적
 ```
 
@@ -774,7 +781,7 @@ Part 4 체크포인트에서는 본문이 `sim.SubmitInput(inputMask);` 한 줄�
 
 ```cpp
 enum class AppMode {
-    Menu, ConnectInput, Single, BotSingle, BotSelect, Net, Settings, Customize,
+    Menu, ConnectInput, Single, BotSingle, BotSelect, Net, Settings, Customize, Account,
     // Section D — 커스텀 룸 경로. 릴레이 주소는 CLI 기본값 사용이라
     // 별도 IP 입력 화면(이전의 MatchmakingAddr / RoomRelay)은 제거됨.
     RoomLobby,    // Create / Join 선택 (+ Join 시 코드 입력)
@@ -859,7 +866,7 @@ stateDiagram-v2
 - **재시작은 대입이 아니라 재생성이다.** `std::make_unique<Game>(sessionSeed)` 로 같은 시드의 새 객체를 만든다. 참조 멤버 때문에 대입이 불가능하다는 §2.3의 제약이 여기서 "잔재 없는 리셋" 이라는 이득으로 돌아온다.
 - **같은 시드를 다시 쓴다.** `sessionSeed` 를 새로 뽑지 않으므로 `[R]` 을 누르면 **같은 피스 순서**로 다시 시작한다. 실력 비교와 리플레이 검증에 유리한 선택이고, 이 때문에 `if (recording) replay.frames.clear();` 로 리플레이 프레임만 비워 "시드는 그대로, 입력 기록만 새로" 를 맞춘다.
 
-봇 대전은 같은 패턴에 승패 판정이 붙는다. Part 9가 채우는 블록이지만, 게임오버 UI 관례가 Single 과 동일하다는 점만 여기서 확인해 둔다.
+봇 대전은 승패 판정과 보상 상태가 붙고, 재경기는 새 challenge 요청으로 시작한다. Part 9가 채우는 블록이지만, 게임오버 UI 관례가 Single 과 동일하다는 점만 여기서 확인해 둔다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -867,6 +874,8 @@ stateDiagram-v2
             // 한 쪽이 끝나면 그 순간의 결과를 고정하고 시뮬을 멈춘다.
             if (botMatchResult != BotMatchResult::None)
             {
+                if(botMatchResult==BotMatchResult::Win && !botClaimSent && !botTicket.empty())claimBotReward();
+                if(botMatchResult!=BotMatchResult::Win && !botTicket.empty())botRewardStatus="No BP - win to earn a reward";
                 const char* label;
                 Color labelC;
                 switch (botMatchResult) {
@@ -875,31 +884,28 @@ stateDiagram-v2
                 case BotMatchResult::Draw: label = "DRAW"; labelC = YELLOW; break;
                 default:                   label = "";     labelC = WHITE;  break;
                 }
-                draw_popup_panel(180, 235, 360, 190);
-                gui_text_center(360, 262, label, 60, labelC);
-                gui_text_center(360, 345, "[R] Restart", 28, GREEN);
-                gui_text_center(360, 382, "[Q] Go to Title", 28, YELLOW);
-                if (platform_key_pressed(PKEY_R)) {
-                    gameSingle = std::make_unique<Game>(sessionSeed);
-                    gameBot    = std::make_unique<Game>(sessionSeed);
-                    botInputQueue.clear();
-                    botInputCooldownTicks = 0;
-                    botMatchResult = BotMatchResult::None;
-                    lastAttackHuman = 0; lastAttackBot = 0;
-                } else if (platform_key_pressed(PKEY_Q)) {
+                draw_popup_panel(140, 165, 440, 350);
+                presentation_draw_portrait(opponentImage(selectedOpponent.portraitPath), 170, 205, 115, 115);
+                gui_text_center(420, 235, label, 54, labelC);
+                gui_text_center(360, 405, "[R] Rematch", 25, GREEN);
+                gui_text_center(360, 450, "[Q] Go to Title", 25, YELLOW);
+                gui_text_center(360, 330, botRewardStatus.c_str(), 15, GRAY);
+                if(botClaimRetryable && gui_button(320, 365, 205, 32, "Retry BP",18))claimBotReward();
+                if (!botClaimOp.valid() && platform_key_pressed(PKEY_R)) {
+                    requestBotRound();
+                } else if (!botClaimOp.valid() && platform_key_pressed(PKEY_Q)) {
                     gameSingle.reset();
                     gameBot.reset();
-                    botInputQueue.clear();
-                    botInputCooldownTicks = 0;
+                    botController.reset(selectedOpponent.inputIntervalTicks, selectedOpponent.thinkTicks, selectedOpponent.minPieceTicks);
                     botMatchResult = BotMatchResult::None;
                     app = AppMode::Menu;
                 }
             }
 ```
 
-`Game` 객체를 새로 만드는 것만으로는 부족하고 **루프 바깥에 사는 부수 상태까지 같이 리셋**해야 한다는 것이 이 블록의 교훈이다: `botInputQueue`, `botInputCooldownTicks`, `lastAttackHuman/lastAttackBot`. 이 값들이 `Game` 안에 있지 않은 이유는 "두 보드 사이의 관계" 이지 한 보드의 상태가 아니기 때문이다.
+`Game` 객체를 새로 만드는 것만으로는 부족하고 **루프 바깥에 사는 부수 상태까지 같이 리셋**해야 한다는 것이 이 블록의 교훈이다: `botController`, `lastAttackHuman/lastAttackBot`. 이 값들이 `Game` 안에 있지 않은 이유는 "두 보드 사이의 관계" 이지 한 보드의 상태가 아니기 때문이다.
 
-Net 모드의 게임오버는 훨씬 복잡하다. `GameOverState` 8-상태 FSM(`src/main.cpp`)이 양쪽 결과 확정, 재시작 의사 교환, 호스트의 새 시드 발급, 게스트 수신, 취소·종료를 명시적으로 구분한다. 둘이 같은 시드와 라운드 경계에 합의하기 전에는 새 `SimGame`을 시작하지 않는다.
+랭크 재경기는 새 연결·UUID를 얻도록 메뉴로 돌아간다. 연습 Net 모드의 게임오버는 재시작 협상을 포함한다. `GameOverState` 8-상태 FSM(`src/main.cpp`)이 양쪽 결과 확정, 재시작 의사 교환, 호스트의 새 시드 발급, 게스트 수신, 취소·종료를 명시적으로 구분한다. 둘이 같은 시드와 라운드 경계에 합의하기 전에는 새 `SimGame`을 시작하지 않는다.
 
 ---
 
@@ -910,43 +916,38 @@ Net 모드의 게임오버는 훨씬 복잡하다. `GameOverState` 8-상태 FSM(
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-                uint8_t botMask = INPUT_NONE;
-                if (botInputCooldownTicks > 0) {
-                    --botInputCooldownTicks;
-                } else if (!botInputQueue.empty()) {
-                    botMask = botInputQueue.front();
-                    botInputQueue.pop_front();
-                    botInputCooldownTicks = selectedBotInputIntervalTicks - 1;
-                }
+                const uint8_t botMask = botController.next(gameBot->sim,
+                    [&](const SimGame& sim, int& col, int& rot) {
+                        bool ok = botUsesHeuristic ? bot::heuristic_placement(sim, col, rot)
+                            : (botOnnx.IsLoaded() && botOnnx.Infer(sim, col, rot));
+                        return ok || bot::fallback_placement(sim, col, rot);
+                    });
 
+                if(!botTicket.empty()) {
+                    if(botReplay.size()<bot::kMaxRewardTicks)botReplay.push_back(inputMask);
+                    else {botTicket.clear();botRewardStatus="Practice - reward time limit reached";}
+                }
                 gameSingle->SubmitInput(inputMask);
                 gameBot->SubmitInput(botMask);
                 gameSingle->Tick();
                 gameBot->Tick();
 
-                // Section I — 두 보드 간 가비지 교환 (Net 모드와 동일 구조).
-                {
-                    int attH = gameSingle->sim.AttackLinesSent() - lastAttackHuman;
-                    int attB = gameBot->sim.AttackLinesSent()    - lastAttackBot;
-                    if (attH > 0) gameBot->sim.AddPendingGarbage(attH);
-                    if (attB > 0) gameSingle->sim.AddPendingGarbage(attB);
-                    lastAttackHuman = gameSingle->sim.AttackLinesSent();
-                    lastAttackBot   = gameBot->sim.AttackLinesSent();
-                }
+                bot::exchange_garbage(gameSingle->sim, gameBot->sim, lastAttackHuman, lastAttackBot);
 
                 apply_fx(gameSingle->sim, coLocal,  shakeLeft);
                 apply_fx(gameBot->sim,    coRemote, shakeRight);
+
 ```
 
 세 덩어리로 읽힌다.
 
-1. **봇 입력 페이싱.** 봇은 `bot::expand_placement` 가 만든 입력 시퀀스를 `botInputQueue`(`std::deque<uint8_t>`, `src/main.cpp`)에 담아 두고, 틱마다 **하나씩만** 꺼낸다. `botInputCooldownTicks` 가 `selectedBotInputIntervalTicks - 1` 로 채워지므로 실제 입력 간격은 `selectedBotInputIntervalTicks` 틱이다. 큐를 한 번에 쏟아 부으면 봇이 사람이 볼 수 없는 속도로 피스를 옮겨 "게임" 이 아니게 된다. 페이싱을 **틱 단위**로 하는 것이 핵심이다 — 프레임 단위로 하면 FPS 높은 기계에서 봇만 빨라진다.
+1. **봇 입력 페이싱.** `bot::Controller`가 생각 시간·입력 간격·최소 배치 시간을 틱 단위로 관리한다. 새 피스에서는 큐를 비워 이전 계획이 넘어오지 않는다. 프레임 단위로 기다리면 FPS가 높은 기기에서 봇만 빨라지므로 시뮬레이션 틱으로 센다.
 2. **가비지 교환.** 두 `SimGame` 은 서로를 모른다. 연결은 `AttackLinesSent()` 누적치의 **델타**를 읽어 반대편 `AddPendingGarbage()` 로 넣는 이 다섯 줄뿐이다. 누적치의 델타를 쓰는 이유는 `LockBlock` 이 한 틱에 여러 줄을 보낼 수도, 캐치업으로 여러 틱이 한 프레임에 돌 수도 있기 때문이다 — "지난번에 읽은 값" 만 기억하면 어느 경우에도 빠뜨리거나 두 번 세지 않는다.
 3. **연출 소비.** 두 보드가 각자의 `Callout` 과 `ShakeState` 를 갖고 같은 `apply_fx` 람다를 탄다(부록 A).
 
-이 세 덩어리가 Net 모드에서도 **글자 그대로 같은 모양**으로 반복된다 (`src/main.cpp`). 차이는 상대 입력이 `botInputQueue` 대신 `session.GetRemoteInput(simTick, ri)` 에서 온다는 것뿐이다. Part 9의 봇을 "네트워크 대신 추론에서 입력이 나오는 피어" 로 취급할 수 있는 이유가 여기 있다.
+이 세 책임은 Net 모드에도 유지된다 (`src/main.cpp`). 차이는 상대 입력이 `botController.next()` 대신 `session.GetRemoteInput(simTick, ri)` 에서 온다는 것뿐이다. Part 9의 봇을 "네트워크 대신 추론에서 입력이 나오는 피어" 로 취급할 수 있는 이유가 여기 있다.
 
-Part 4 체크포인트의 시뮬 단계는 Single 분기 하나뿐이므로 `botInputQueue`, `selectedBotInputIntervalTicks`, `lastAttackHuman/Bot` 은 아직 선언조차 없다. [Part 9](./part9-rl-onnx-bot.md) 가 `bot::heuristic_placement` / `bot::expand_placement` 와 함께 이 블록 전체를 도입한다.
+Part 4 체크포인트의 시뮬 단계는 Single 분기 하나뿐이므로 `botController`, 상대 프로필, `lastAttackHuman/Bot` 은 아직 선언조차 없다. [Part 9](./part9-rl-onnx-bot.md) 가 `bot::heuristic_placement` / `bot::expand_placement` 와 함께 이 블록 전체를 도입한다.
 
 ---
 
@@ -1054,7 +1055,7 @@ $$\text{safeTick} = \min(\text{lastLocalSent},\ \text{lastRemote}) - \text{input
         net::net_shutdown();
         return 1;
     }
-    renderer_load_font("Font/NanumGothic.ttf");
+    presentation_load("assets/theme.cfg");
 ```
 
 가드가 두 개인 것은 두 초기화가 실패를 알리는 방식이 다르기 때문이다.
@@ -1342,17 +1343,16 @@ const Color ghostColor   = {200, 200, 210,  70};
 **현재 소스 발췌 — `src/game.cpp`**
 
 ```cpp
-void Game::DrawBoardAt(int offsetX, int offsetY)
+void Game::DrawBoardAt(int offsetX, int offsetY, int cellSize)
 {
-    constexpr int cellSize = 30;
-    constexpr int bw = SimGrid::kCols * cellSize;
-    constexpr int bh = SimGrid::kRows * cellSize;
+    const int bw = SimGrid::kCols * cellSize;
+    const int bh = SimGrid::kRows * cellSize;
     // 보드 테두리 → 배경 순으로 그려서 1px 테두리 효과
     draw_rect(offsetX - 2, offsetY - 2, bw + 4, bh + 4, {55, 62, 100, 255});
     draw_rect(offsetX,     offsetY,     bw,     bh,     {14, 16, 30, 255});
-    DrawGrid(offsetX, offsetY);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY);
-    DrawBlock(sim.CurrentBlock(), offsetX, offsetY);
+    DrawGrid(offsetX, offsetY, cellSize);
+    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
+    DrawBlock(sim.CurrentBlock(), offsetX, offsetY, cellSize);
 }
 ```
 
@@ -1365,12 +1365,11 @@ void Game::DrawBoardAt(int offsetX, int offsetY)
 **현재 소스 발췌 — `src/game.cpp`**
 
 ```cpp
-void Game::DrawGarbageBar(int boardX, int boardY, int pending)
+void Game::DrawGarbageBar(int boardX, int boardY, int pending, int cellSize)
 {
     if (pending <= 0) return;
-    constexpr int cellSize = 30;
     constexpr int barW = 5;
-    constexpr int boardH = SimGrid::kRows * cellSize;  // 600px
+    const int boardH = SimGrid::kRows * cellSize;  // 600px
     constexpr int maxRows = 12;
 
     int rows = (pending > maxRows) ? maxRows : pending;
@@ -1516,7 +1515,7 @@ cmake --build build
 
 **증상:** 재시작 후 봇이 첫 피스부터 엉뚱한 입력을 하거나, 가비지가 한 번에 몰아서 쏟아진다.
 
-**원인:** `botInputQueue`, `lastAttackHuman`, `lastAttackBot` 은 `Game` 이 아니라 `main()` 지역 변수다. `Game` 객체만 재생성하고 이것들을 리셋하지 않으면 이전 판의 잔재가 새 판으로 넘어온다(§9의 `[R]` 분기가 이 셋을 함께 비우는 이유).
+**원인:** `botController`, `lastAttackHuman`, `lastAttackBot` 은 `Game` 이 아니라 `main()` 지역 변수다. `Game` 객체만 재생성하고 이것들을 리셋하지 않으면 이전 판의 잔재가 새 판으로 넘어온다(§9의 `[R]` 분기가 이 셋을 함께 비우는 이유).
 
 **원칙:** "한 보드의 상태" 는 `SimGame` 에, "두 보드의 관계" 는 틱 루프에.
 
@@ -1812,15 +1811,15 @@ sequenceDiagram
                 float sdx = 0.f, sdy = 0.f;
                 shake_offset(shakeLeft, sdx, sdy);
                 renderer_set_view_offset((int)sdx, (int)sdy);
-                gameLocal->DrawBoardAt(leftX, 11);
-                Game::DrawGarbageBar(leftX, 11, gameLocal->sim.PendingGarbage());
+                gameLocal->DrawBoardAt(leftX, 46, 27);
+                Game::DrawGarbageBar(leftX, 46, gameLocal->sim.PendingGarbage(), 27);
             }
             {
                 float sdx = 0.f, sdy = 0.f;
                 shake_offset(shakeRight, sdx, sdy);
                 renderer_set_view_offset((int)sdx, (int)sdy);
-                gameRemote->DrawBoardAt(rightX, 11);
-                Game::DrawGarbageBar(rightX, 11, gameRemote->sim.PendingGarbage());
+                gameRemote->DrawBoardAt(rightX, 46, 27);
+                Game::DrawGarbageBar(rightX, 46, gameRemote->sim.PendingGarbage(), 27);
             }
             renderer_set_view_offset(0, 0);  // UI/오버레이는 정적
 ```
@@ -2020,7 +2019,7 @@ flowchart TB
                 quitDialogOpen = false;
             } else if (clickYes) {
                 quitDialogOpen = false;
-                // Net: 세션 종료 → 상대에게 단절 전달(= 패배 기록) → 메뉴로.
+                // Net: 세션 종료 → 상대에게 단절 전달 → 메뉴로. 단절만으로 패배를 기록하지 않는다.
                 if (app == AppMode::Net) {
                     session.Close();
                     netMode = false; isHost = false; queueMode = false;
@@ -2036,8 +2035,7 @@ flowchart TB
                 if (app == AppMode::BotSingle) {
                     gameSingle.reset();
                     gameBot.reset();
-                    botInputQueue.clear();
-                    botInputCooldownTicks = 0;
+                    botController.reset(selectedOpponent.inputIntervalTicks, selectedOpponent.thinkTicks, selectedOpponent.minPieceTicks);
                     botMatchResult = BotMatchResult::None;
                 }
                 app = AppMode::Menu;
@@ -2069,7 +2067,7 @@ Part 6의 DESYNC 처리와 구분되는 점: DESYNC 는 양쪽이 연결된 채�
 
 ### C.6 Single/BotSingle 에서 Yes 를 눌렀을 때
 
-`Game` 객체를 파기하고 `AppMode::Menu` 로 전환. BotSingle 은 §9·§15-(5)에서 본 "두 보드의 관계" 상태(`botInputQueue`, `botInputCooldownTicks`, `botMatchResult`)까지 함께 비운다. 시뮬은 파기 전까지 `tickPauseForDialog` 로 동결돼 있었으니 깨끗한 상태에서 reset 된다.
+`Game` 객체를 파기하고 `AppMode::Menu` 로 전환. BotSingle 은 §9·§15-(5)에서 본 "두 보드의 관계" 상태(`botController`, `botMatchResult`)까지 함께 비운다. 시뮬은 파기 전까지 `tickPauseForDialog` 로 동결돼 있었으니 깨끗한 상태에서 reset 된다.
 
 ### C.7 전체 상태 흐름
 
@@ -2158,7 +2156,7 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
             constexpr Color DISABLED = {70, 70, 70, 255};
             enum class MenuAction {
                 Single, BotSelect, Matchmaking, CustomRoom,
-                Customize, Settings, Quit,
+                Customize, Settings, Account, Quit,
             };
             struct MenuItem {
                 const char* label;
@@ -2171,6 +2169,7 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
                 {"Custom Room Multi", MenuAction::CustomRoom},
                 {"Customize",         MenuAction::Customize},
                 {"Settings",          MenuAction::Settings},
+                {"Account & Recovery", MenuAction::Account},
                 {"Quit",              MenuAction::Quit},
             };
             constexpr int kMenuCount =
@@ -2180,8 +2179,8 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
             // 묶어 두면 항목을 삽입해도 아래 dispatch 가 숫자 index 와 어긋나지 않는다.
             // 버튼은 ranking 표시줄 위의 고정 영역에 들어가도록 압축 배치한다.
             const int bw = 300;
-            const int bh = 42;
-            const int bgap = 8;
+            const int bh = 36;
+            const int bgap = 7;
             const int bx = (720 - bw) / 2;
             const int byStart = 190;
             // 항목을 추가하면 버튼 열이 아래 랭킹 표시줄(y=540)과 겹칠 수 있다.
@@ -2280,6 +2279,10 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
                     app = AppMode::Settings;
                     settingsIndex = 0;
                     break;
+                case MenuAction::Account:
+                    app = AppMode::Account;
+                    accountScreen.confirmation.clear();
+                    break;
                 case MenuAction::Quit:
                     // 메뉴의 Quit. 예전에는 여기서 renderer/platform 만 내리고
                     // 바로 return 0 해서, 하단 정리 경로의 image_unload 와
@@ -2312,7 +2315,7 @@ dispatch 의 세부도 실패를 조용히 삼키지 않는 방향으로 정리�
 
 ### D.4 disabled 항목 처리
 
-`botAvailable` 은 로스터가 비었을 때만 false 가 된다. 현재 로스터 생성 함수는 항상 `Heuristic (test)` 를 먼저 넣으므로 정상 빌드에서 이 분기는 거의 타지 않지만, 방어 코드는 남아 있다. 이 경우 해당 버튼은 **gui 함수를 호출하지 않는다.** 대신 `draw_rect_rounded` 로 배경을 직접 그리고 라벨 색을 `DISABLED` 로 찍은 뒤 `continue` 한다.
+`botAvailable` 은 로스터가 비었을 때만 false 가 된다. 현재 로스터는 `assets/opponents.cfg`를 먼저 읽고, 사용 가능한 상대가 없으면 기본 휴리스틱 로스터를 사용한다(Part 9·15). 방어용 비활성 처리는 남아 있다. 이 경우 해당 버튼은 **gui 함수를 호출하지 않는다.** 대신 `draw_rect_rounded` 로 배경을 직접 그리고 라벨 색을 `DISABLED` 로 찍은 뒤 `continue` 한다.
 
 `gui_button_highlighted`를 호출하지 않으므로 hover 색이 뜨지 않고 클릭 반환도 없다 — 마우스를 올려도 반응이 없는 "죽은 버튼"처럼 보인다. `continue`로 루프를 건너뛰므로 `clicked` 변수 자체가 존재하지 않아 실수로 `activated = i`가 될 수 없다. 키보드 쪽에서도 `items[menuIndex].action == MenuAction::BotSelect && !botAvailable`인지 검사한다. 항목 위치가 바뀌어도 Enter가 비활성 동작을 실행하지 않는 이중 가드다.
 

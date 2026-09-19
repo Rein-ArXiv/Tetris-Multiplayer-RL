@@ -1,6 +1,6 @@
 # 코드 검수 상태
 
-> **2026-09-11 업데이트:** 현재 실행·외형·보안 점검의 입구는 [문서 허브](README.md)입니다. Linux 주 서버(Mac 하드웨어)/Windows 예비 서버가 기준이며 WSS·일회용 입장권은 [Part 16](blog/part16-secure-admission.md)에서 추가했습니다. 웹 게임, 계정 토큰의 수명·저장 보호와 PvP 규칙 검증은 남아 있습니다. 아래 내용은 상세 설명과 이전 검토 이력을 포함합니다.
+> **2026-09-19 기준:** 구조·SOLID·보안·사용자 오인에 대한 최신 판단은 [품질 검토](architecture-quality-review.md), 실제 실행 결과는 [검증 기록](polish-validation.md)을 함께 본다. 아래의 과거 검증 결과는 날짜를 유지하며 현재 판정과 구분한다.
 
 이 문서는 현재 작업 트리의 품질 판단을 기록한다. 사용법 문서가 아니라, 변경 전에
 알아야 할 위험과 검증 근거를 먼저 보여 주는 문서다.
@@ -13,7 +13,7 @@
 
 relay worker 수명은 종료 신호와 drain 대기를 추가해 보완했고, active match 중
 SIGTERM 회귀 테스트로 고정했다. 연결 setup과 진행 중 매치에는 IP·시간·전송량
-상한을 두고, 계정 중복 session, 단절 몰수 처리, match 저장 재시도도 자동
+상한을 두고, 계정 중복 session, 서버 입력 판정, match 저장 재시도도 자동
 검증한다. 이번 주기의 하드닝으로 클라이언트 초기화 실패는 침묵하지 않고
 (`renderer_init` bool 반환 + `platform_fatal_error` 통지 후 종료), Win32는
 per-monitor DPI 인식으로 물리 픽셀 기준 창·프리셋을 만들며, meta의 rate limit은
@@ -38,23 +38,24 @@ custom room은 대기 데드라인(게스트 무입장 15분, READY 미확정 60
 - first-frame worker도 전역 종료 상태를 확인해 5초 timeout 전에 빠져나온다.
 - Windows에서는 CTRL_BREAK_EVENT(SIGBREAK) 등록으로 같은 우아한 종료 경로를 검증한다.
 
-### 해결됨 — ranked 결과 중복과 단절 회피
+### 해결됨 — ranked 허위 결과와 중복 지급
 
-relay가 생성한 `match_uuid`를 meta의 unique index와 결과 snapshot에 보존한다. HTTP
-응답 유실로 동일 POST가 재시도되어도 최초 match 결과를 반환하고 RP/BP/XP와 승패를
-다시 갱신하지 않는다. `post_match` 재시도에는 wall-clock 예산이 걸려 매치 종료
-흐름이 재시도 대기로 늘어지지 않는다. 몰수 판정은 수집된 summary 개수로 갈린다 —
-양쪽 summary가 있으면 교차검증 경로에 위임하고, 한쪽만 있으면 그 summary의 승패
-주장을 존중하며(끊긴 순서 `disconnect_side`는 승자 판정이 아니라 생존자 통지
-대상 선정에만 쓴다), summary가 하나도 없는 무경기는 meta에 저장하지 않고 델타 0
-결과만 통지해 즉시 이탈 반복형 RP 파밍과 임의 승자 오염을 막는다. relay 자체 종료
-중에는 몰수를 만들지 않는다.
+두 사람이 일치하는 거짓 summary를 제출해도 실제 종료 입력이 없으면 기록하지 않는다.
+현재 두 relay는 공통 `RankedGame`으로 입력을 재현하고 종료·승패·통계를 계산한다.
+summary와 연결 종료는 확정 시점을 알릴 뿐이다. 미완료 이탈에는 보상을 지급하지
+않으므로, 패배 직전 이탈을 제재하거나 몰수패를 기록하는 정책은 별도로 남아 있다.
+
+relay가 생성한 `match_uuid`를 meta의 unique index와 결과 snapshot에 보존한다.
+HTTP 응답 유실로 같은 POST를 재시도해도 최초 결과를 반환하고 RP/BP/XP를 다시
+갱신하지 않는다. 저장 성공 응답이 없으면 UI에는 저장 미확인으로 표시한다.
 
 검증:
 
-- 같은 UUID를 두 번 저장해도 match 행과 보상이 한 번만 변한다.
-- 같은 player_id의 두 번째 활성 ranked session은 입장 단계에서 거부된다.
-- 진행 중 한 peer를 끊으면 survivor만 결과를 받고 relay는 새 연결을 계속 받는다.
+- 양쪽 허위 summary만으로 match 행·보상을 만들지 않는다.
+- 실제 종료 입력을 보낸 경기의 승패·통계는 거짓 summary에도 서버 결과를 따른다.
+- 입력 변조·seed 교체·서로 다른 재전송은 검증 실패로 처리한다.
+- 같은 UUID 재시도는 한 번만 반영하며, 완료 입력 뒤 단절도 같은 판정으로 저장한다.
+- 같은 player_id의 두 번째 활성 session은 입장 단계에서 거부한다.
 
 ### 해결됨 — 실행 중 SQLite의 불일치 백업 가능성
 
@@ -81,8 +82,8 @@ relay가 생성한 `match_uuid`를 meta의 unique index와 결과 snapshot에 �
 
 meta의 `rate_limit_key`가 XFF의 첫 토큰을 신뢰해, loopback 프록시 뒤 배치에서
 클라이언트가 매 요청 다른 XFF를 심으면 public 60/s 버킷을 무한 우회할 수 있었다.
-현재는 신뢰 프록시가 마지막에 append한 rightmost 토큰만 사용한다. `CF-Connecting-IP`
-우선 로직은 유지된다.
+현재는 신뢰 프록시가 마지막에 append한 rightmost 토큰만 사용한다. 현재는 forwarding header 신뢰가 기본 OFF이며, `--trust-loopback-proxy`를
+켠 loopback 프록시의 마지막 XFF만 사용한다. `CF-Connecting-IP`는 신뢰하지 않는다.
 
 ### P2 — `src/main.cpp`의 책임 집중
 
@@ -98,32 +99,34 @@ bot roster, 게임 루프와 화면별 UI를 함께 소유한다. 기능은 동�
 권장 분리 순서:
 
 1. `GameSettings` load/save와 검증을 별도 모듈로 이동
-2. guest/meta profile 상태를 작은 service로 이동
+2. 분리한 계정 서비스에 이어 상점·봇 보상 상태를 작은 서비스로 이동
 3. 화면별 update/render를 mode handler로 이동
 4. mode 전환과 게임 세션 소유권만 app controller에 남김
 
 한 번에 전면 재작성하지 말고 설정 또는 Customize 화면처럼 경계가 분명한 기능부터
 옮기는 편이 회귀 범위를 제어하기 쉽다.
 
-### P2 — 수동 JSON protocol의 확장 비용
+### 해결됨 — 느슨한 JSON 입력 검증
 
-`meta/protocol.h`의 제한된 수동 parser/serializer는 현재 고정된 내부 payload에는
-작고 빠르지만, JSON escape, 타입 변화, 중첩 구조가 늘어날수록 각 endpoint가 parser의
-암묵적 제약에 의존한다. 공개 API 필드가 확장되면 구조화 JSON 라이브러리 도입 또는
-parser 계약 테스트 확대가 필요하다.
+기존 문자열 검색 방식은 닫히지 않은 문자열·중복 키·중첩 키·정수 뒤의 쓰레기 문자를
+엄격하게 구분하지 못했다. 현재 `meta/json_input.h`가 전체 문서를 파싱하고 크기·깊이·
+중복 키·최상위 필드 타입·정수 범위를 검사한다. `json_post`는 요청 본문을 모두 읽은 뒤,
+DB를 바꾸는 핸들러보다 먼저 검사한다. `protocol.h`의 직렬화 도우미는 유지했다.
 
-### P2 — user-data 경로가 HTTP 클라이언트에 결합됨
+### 해결됨 — user-data 경로와 계정 파일의 HTTP 결합
 
-`settings_file_path()`는 네트워크와 무관한 플랫폼 저장 경로인데
-`meta/http_client.*`에 정의돼 있다. 그 결과 설정 화면만 구현하려 해도 meta 클라이언트
-소스와 `httplib.h` 의존성을 먼저 가져와야 하며, 학습 문서에서도 설정 Part가 meta Part
-뒤에 놓이는 인위적인 순서가 생긴다.
+OS 경로는 `platform/user_data.*`, 서버 origin별 키·복구 파일은 `AccountStore`,
+원자적 비공개 쓰기와 잠금은 `private_file.*`로 옮겼다. `MetaClient`는 HTTP 통신을 맡고,
+계정 변경·복구·재시도는 `account_client.*`가 조정한다. 계정 화면은 액션만 반환한다.
+이로써 설정 UI가 파일 경로 때문에 HTTP 클라이언트를 직접 사용할 필요가 없어졌다.
 
-동작 오류는 아니므로 이번 변경에서 파일을 옮기지는 않았다. 리팩터링할 때
-`platform/user_data.*` 같은 작은 모듈로 기준 디렉터리와 settings/token 경로 생성을
-옮기고, `meta/http_client.*`는 토큰 파일 읽기·쓰기와 HTTP만 소유하게 하면 된다.
-그러면 설정 UI는 플랫폼·렌더러·오디오 뒤에 바로 구현할 수 있고 meta는 온라인
-프로필 기능으로 독립된다.
+### 해결됨 — 키 보관 실패와 다른 서버로의 자동 전송
+
+최초 키 저장이 실패하면 온라인 인증을 차단하고 같은 키 저장을 재시도한다. 무소속 옛
+토큰은 현재 서버로 자동 전송하지 않으며 명시적 가져오기를 요구한다. DB에는 접근 키·
+복구 코드의 목적별 해시를 보관하고 교체·복구 때 미사용 입장권도 폐기한다. 이미 승인된
+경기의 즉시 회수는 별도 과제다. [Part 17](blog/part17-guest-account-recovery.md)에
+응답 유실과 로컬 저장 실패를 포함한 상태 전이를 설명한다.
 
 ## 유지보수 관점 평가
 
@@ -134,7 +137,7 @@ parser 계약 테스트 확대가 필요하다.
 | 플랫폼 교체 | 양호 | `platform.h`, `audio.h` 뒤에 Win32/SDL 구현 분리 |
 | 네트워크 프로토콜 | 보통 이상 | framing/session/relay 분리와 parity 테스트 존재 |
 | 서버 종료 수명 | 양호 | worker 활성 수 추적, 신규 pump 차단, SIGTERM drain 테스트 |
-| 접속·단절 방어 | 양호 | IP별 setup 제한, 양 플랫폼 15s/5s keepalive, idle·대역폭 상한, 방 대기 데드라인, session lease, summary 기반 몰수 처리 |
+| 접속·단절 방어 | 양호 | IP별 setup 제한, 양 플랫폼 15s/5s keepalive, idle·대역폭 상한, 방 대기 데드라인, session lease, 입력 기반 종료 검증 |
 | 클라이언트 초기화 | 양호 | 초기화 실패 신호(bool/`platform_should_close`) + `platform_fatal_error` 통지 후 종료, DPI 인식 |
 | UI 확장성 | 개선 필요 | mode별 책임이 `src/main.cpp`에 집중 |
 | Meta 저장소 | 양호 | DB 직렬화, transaction, migration, UUID 멱등 저장, 일관된 online backup 경로 존재 |
@@ -144,7 +147,7 @@ parser 계약 테스트 확대가 필요하다.
 
 GL 하드닝(초기화 실패 신호, DPI 인식, 240fps 상한, `image_init` 멱등화)과 서버
 하드닝(몰수 재설계, 방 대기 데드라인, XFF rightmost, keepalive 정합, 백업 보존
-정책)이 반영된 현재 작업 트리에서 다음을 확인했다.
+정책)이 반영된 당시 작업 트리에서 다음을 확인했다. 최신 판정 방식과 검증 결과는 위의 2026-09-19 기록을 따른다.
 
 ```bash
 git diff --check
@@ -171,8 +174,8 @@ diff -u python/tests/_sim_hash_dump.txt /tmp/tetris_sim_hash_dump.out
 - `SimGame` 변경: 같은 seed와 tick input은 모든 플랫폼에서 같은 `StateHash`를 만든다.
 - framing 변경: C++과 `python/netbot/framing.py`의 바이트 표현이 같다.
 - placement 변경: C++ bot과 Python input expander의 action 해석이 같다.
-- ranked match 변경: 양쪽 summary가 있으면 교차검증 일치가 반영 조건이고, 한쪽만 있으면 그 summary의 승패를 따르며, summary가 없으면 RP를 반영하지 않는다.
-- ranked 단절 변경: `disconnect_side`는 통지 대상 선정 전용이다 — 승자 판정에 쓰지 않는다. relay 종료는 몰수가 아니다.
+- ranked match 변경: 서버 seed와 연속 입력으로 완결된 경기만 저장한다. summary의 자기 신고로 승패·점수를 정하지 않는다.
+- ranked 단절 변경: 단절은 확정 계기다. 완결된 서버 입력이 없으면 무보상이고, `disconnect_side`는 통지 대상 선정에 사용한다.
 - match 저장 변경: 동일 `match_uuid` 재시도는 최초 결과를 반환하고 보상을 중복 반영하지 않는다.
 - DB 변경: 기존 `PRAGMA user_version` 데이터가 반복 실행에도 한 번만 이관된다.
 - 서버 변경: unranked는 meta 없이 동작하고, ranked match POST는 relay secret을 요구한다.
@@ -184,6 +187,6 @@ diff -u python/tests/_sim_hash_dump.txt /tmp/tetris_sim_hash_dump.out
   정확히 잡히는지, `WM_DPICHANGED`로 모니터 간 이동 시 창 크기가 유지되는지는
   고배율 모니터 실기에서 눈으로 확인해야 한다
 - macOS SDL 앱 번들 실제 실행
-- ONNX Runtime을 포함한 모델별 인게임 추론
+- 실제 학습한 모든 모델의 인게임 추론·OS 사이 결과 호환성(합성 모델의 계약 검사는 별도 완료)
 - 장시간 실제 WAN lockstep과 패킷 지연/단절 복구
 - 실제 공인망에서 200명 장시간 soak 중 지연·패킷 손실·동시 종료·공격이 겹치는 상황

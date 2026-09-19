@@ -765,7 +765,9 @@ void SimGame::MoveBlockDrop()
 
 라인 클리어와 가비지 수신은 `LockBlock()` 꼬리에서 세팅된다. `LockBlock` 전체는 [Part 1](./part1-deterministic-simulation.md) 의 소관이므로 여기서는 오디오 플래그가 서는 부분만 인용한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp`** (`SimGame::LockBlock` 의 후반부)
+(`SimGame::LockBlock` 의 후반부)
+
+**현재 소스 발췌 — `src/sim_game.cpp`**
 
 ```cpp
     int rowsCleared = sim_grid.ClearFullRows();
@@ -1011,7 +1013,7 @@ Game::Game(uint64_t seed)
       gameOver(sim.gameOver),
       score(sim.score)
 {
-    cellColors = GetCellColors();
+    cellColors = presentation_palette(GetCellColors());
 
     // 오디오 초기화 (참조 카운팅 -- 멀티플레이에서 두 번 호출해도 안전)
     audioInitCalled = true;
@@ -1031,27 +1033,6 @@ Game::Game(uint64_t seed)
         }
     }
 }
-
-Game::~Game()
-{
-    if (musicUser) {
-        if (sharedMusicUsers > 0) --sharedMusicUsers;
-        if (sharedMusicUsers == 0 && sharedMusic != 0) {
-            audio_stop_music();
-            audio_unload_sound(sharedMusic);
-            sharedMusic = 0;
-        }
-        musicUser = false;
-    }
-    audio_unload_sound(sndRotate);
-    audio_unload_sound(sndClear);
-    audio_unload_sound(sndDrop);
-    audio_unload_sound(sndGarbage);
-    if (audioInitCalled) {
-        audio_shutdown();  // 참조 카운팅: 마지막 Game 소멸 시만 실제 해제
-        audioInitCalled = false;
-    }
-}
 ```
 
 읽을 때 짚어야 할 다섯 가지.
@@ -1068,7 +1049,9 @@ Game::~Game()
 
 이 2 단 구조의 값어치는 게임 재시작에서 드러난다. Single 모드에서 게임 오버 후 R 을 누르면:
 
-**현재 소스 발췌 — `src/main.cpp`** (Single 모드 게임오버 팝업의 `[R]` 분기. `Game` 이 둘인 봇 대전·Net 재시작도 같은 모양의 대입을 반복한다)
+(Single 모드 게임오버 팝업의 `[R]` 분기. `Game` 이 둘인 봇 대전·Net 재시작도 같은 모양의 대입을 반복한다)
+
+**현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
             if (platform_key_pressed(PKEY_R))
@@ -1197,7 +1180,9 @@ BGM 은 별도 보이스로 분리되어 있으므로 SFX 풀에 포함되지 �
 
 이 프로젝트는 **2 번**을 채택했다. 구현은 §3.1 에서 인용한 `audio_play_sound` 의 이 부분이다.
 
-**현재 소스 발췌 — `audio/audio.cpp`** (§3.1 의 `audio_play_sound` 중 선점 구간)
+(§3.1 의 `audio_play_sound` 중 선점 구간)
+
+**현재 소스 발췌 — `audio/audio.cpp`**
 
 ```cpp
     if (slot == -1)

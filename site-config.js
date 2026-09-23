@@ -1,1 +1,1 @@
-window.LEARNING_SITE = Object.freeze({"mode": "static", "release": "efc2a7a910aa83d6"});
+window.LEARNING_SITE = Object.freeze({"mode": "static", "release": "708d2e519c17c011"});

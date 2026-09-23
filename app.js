@@ -54,11 +54,17 @@
   function completionLabel() {
     const lessonStatus = document.getElementById('lesson-status');
     const lessonDone = state.completedLessons['lesson-1'];
-    lessonStatus.textContent = lessonDone ? '완료 표시됨' : '';
+    lessonStatus.textContent = lessonDone ? '✓' : '';
+    lessonStatus.title = lessonDone ? '학습 완료' : '';
+    lessonStatus.setAttribute('role', 'img');
+    lessonStatus.setAttribute('aria-label', lessonDone ? '학습 완료' : '');
     lessonStatus.hidden = !lessonDone;
     for (const label of document.querySelectorAll('[data-lesson-status]')) {
       const done = state.completedLessons[label.dataset.lessonStatus];
-      label.textContent = done ? '완료 표시됨' : '';
+      label.textContent = done ? '✓' : '';
+      label.title = done ? '학습 완료' : '';
+      label.setAttribute('role', 'img');
+      label.setAttribute('aria-label', done ? '학습 완료' : '');
       label.hidden = !done;
     }
   }

@@ -8,9 +8,11 @@
   const wrap = document.getElementById('reading-wrap');
   const status = document.getElementById('reading-settings-status');
   const resume = document.getElementById('resume-reading');
-  const prefs = { size: 'normal', theme: 'system', wrap: false, location: '' };
+  const prefs = { size: 'normal', theme: 'system', wrap: false, location: '', previousLocation: '' };
   const validLocation = hash => typeof hash === 'string' && /^lesson-\d+(--[a-z0-9-]+)?$/.test(hash)
     && Boolean(window.LEARNING_COURSE?.anchorLabel(hash));
+  let currentHash = '';
+  let currentLesson = '';
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
     if (saved && typeof saved === 'object') {
@@ -18,6 +20,7 @@
       if (['system', 'light', 'dark'].includes(saved.theme)) prefs.theme = saved.theme;
       prefs.wrap = saved.wrap === true;
       if (validLocation(saved.location)) prefs.location = saved.location;
+      if (validLocation(saved.previousLocation)) prefs.previousLocation = saved.previousLocation;
     }
   } catch (_) { status.textContent = '읽기 설정을 불러올 수 없습니다. 현재 화면에서는 변경할 수 있습니다.'; }
   function save() {
@@ -30,26 +33,53 @@
     root.classList.toggle('wrap-code', prefs.wrap);
     size.value = prefs.size; theme.value = prefs.theme; wrap.checked = prefs.wrap;
   }
+  // app.js handles routing first; use its visible view rather than duplicate its fallback rules.
+  function resolveHash(hash) {
+    const page = document.querySelector('article[data-view]:not([hidden])')?.id || 'lesson-1';
+    if (validLocation(hash) && hash.split('--')[0] === page) return hash;
+    if ((hash === 'content' || hash === 'course-sidebar') && currentHash.split('--')[0] === page) return currentHash;
+    return page;
+  }
+  function labelFor(hash) {
+    const [page, anchor] = hash.split('--');
+    const coursePart = window.LEARNING_COURSE;
+    const label = anchor ? coursePart?.anchorLabel(hash) : coursePart?.title(page);
+    return `${page.split('-')[1]}차시 · ${label || '본문'}`;
+  }
   function showResume() {
-    resume.hidden = !prefs.location;
-    document.getElementById('resume-empty').hidden = Boolean(prefs.location);
-    if (!prefs.location) return;
-    const [page, anchor] = prefs.location.split('--');
-    const course = window.LEARNING_COURSE;
-    const label = anchor ? course?.anchorLabel(prefs.location) : course?.title(page);
-    resume.href = `#${prefs.location}`;
-    resume.textContent = `최근 방문: ${page.split('-')[1]}차시 · ${label || '본문'}`;
+    // On a lesson page show the previous lesson; on guide/roadmap/graphics show the last lesson read.
+    let target = currentLesson ? prefs.previousLocation : prefs.location;
+    if (!validLocation(target) || target === currentHash) target = '';
+    resume.hidden = !target;
+    document.getElementById('resume-empty').hidden = Boolean(target);
+    if (!target) return;
+    resume.href = `#${target}`;
+    resume.textContent = `이전 읽던 위치: ${labelFor(target)}`;
+  }
+  // Remember a newly opened lesson; the lesson saved before it becomes the previous one.
+  function visit(lesson) {
+    if (!lesson || lesson === prefs.location) return;
+    prefs.previousLocation = prefs.location;
+    prefs.location = lesson;
+    save();
   }
   for (const control of [size, theme, wrap]) control.addEventListener('change', () => {
     prefs.size = size.value; prefs.theme = theme.value; prefs.wrap = wrap.checked;
     apply(); save();
   });
-  apply(); showResume();
-  // Keep the previous visit available on first load; an explicit link wins over it.
+  // Honour an explicit deep link as-is: resolve the real start page before recording it.
+  currentHash = resolveHash(location.hash.slice(1));
+  currentLesson = validLocation(currentHash) ? currentHash : '';
+  visit(currentLesson);
+  apply();
+  document.getElementById('resume-empty').textContent = '다른 차시나 절을 읽으면 이전 위치로 돌아갈 수 있습니다.';
+  showResume();
   window.addEventListener('hashchange', () => {
     const hash = location.hash.slice(1);
-    if (!validLocation(hash)) return;
-    prefs.location = hash; save(); showResume();
+    currentHash = resolveHash(hash);
+    currentLesson = validLocation(currentHash) ? currentHash : '';
+    visit(currentLesson);
+    showResume();
   });
 
   const menu = document.getElementById('course-menu');

@@ -21,6 +21,7 @@ button:hover,.button:hover { background:var(--accent-soft); }
 nav a[data-page] { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; padding:10px; margin:3px 0; color:var(--ink); border-radius:7px; text-decoration:none; font-size:14px; }
 nav a[aria-current="page"] { background:var(--accent-soft); color:var(--accent); font-weight:650; box-shadow:inset 3px 0 var(--accent); }
 .nav-status { font-size:10px; color:var(--muted); }
+.nav-status[aria-label="학습 완료"] { font-size:14px; font-weight:600; color:var(--ink); }
 .planned { padding:8px 10px; color:var(--muted); font-size:13px; margin:0; }
 .planned span { display:block; font-size:11px; }
 .sidebar-note { border-top:1px solid var(--line); margin-top:40px; padding-top:20px; color:var(--muted); font-size:12px; }

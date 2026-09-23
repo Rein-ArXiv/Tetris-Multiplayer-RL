@@ -1,0 +1,65 @@
+{
+  "format": "tetris-learning-static-site",
+  "version": 1,
+  "release": "8acbdcbe49fc390c",
+  "sourceMode": "bundled-snapshot",
+  "progressMode": "browser-local",
+  "files": {
+    "app.js": {
+      "bytes": 14021,
+      "sha256": "c14c731aedbdfe890a3d5c8364d64e70161ffd26efed37f84ac0b5296269f657"
+    },
+    "course.js": {
+      "bytes": 16053,
+      "sha256": "d231f0609b7f9a5bb578863efcd5ae632c86a95012ebd0fd2b72dac2c39baa45"
+    },
+    "index.html": {
+      "bytes": 24996,
+      "sha256": "15512c3d0d93675661b2b2a82fde138a116e0ef77fa6dc1da376a6fe52433639"
+    },
+    "lessons.js": {
+      "bytes": 3748480,
+      "sha256": "9f10d9a1aef3d468baaade03c531b7ff82acdfa63e63bb7713164ad95ec5b3e7"
+    },
+    "library.js": {
+      "bytes": 5170759,
+      "sha256": "551d96fe68e63272eeff45b03267182bf2f39435ad4a781268ad590956fe1938"
+    },
+    "reader.js": {
+      "bytes": 13230,
+      "sha256": "5a7a5de1b556fc0b15357445d97e6268ad09d4b12c19c8b970d56bc74c6c3cfb"
+    },
+    "site-config.js": {
+      "bytes": 89,
+      "sha256": "96fb118382ea42702885e92c5906bd66b1e6a00e33afa2d11e5b06c644b779ed"
+    },
+    "style.css": {
+      "bytes": 24676,
+      "sha256": "c7085acb71eb521af77ee8611f86fcc94a53bec67ed5619bd24448675ac0772b"
+    },
+    "usability.js": {
+      "bytes": 5542,
+      "sha256": "3bada17efd0b1862e31aa09faef6fe1f7b278ab74ea409489d63d6398a8b620d"
+    },
+    "vendor/README.md": {
+      "bytes": 615,
+      "sha256": "53de5e2829d3184154cab703293ea92904a7125eb39ab045e3ed4b69f52d6c9e"
+    },
+    "vendor/highlight-LICENSE": {
+      "bytes": 1514,
+      "sha256": "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490"
+    },
+    "vendor/highlight.min.js": {
+      "bytes": 127496,
+      "sha256": "c4a399dd6f488bc97a3546e3476747b3e714c99c57b9473154c6fb8d259b9381"
+    },
+    "vendor/mermaid-LICENSE": {
+      "bytes": 1089,
+      "sha256": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80"
+    },
+    "vendor/mermaid.min.js": {
+      "bytes": 3336760,
+      "sha256": "5a8ec91820bd55afef049068489369910e5d6ce70c8103952f27e29d3e76e8bc"
+    }
+  }
+}

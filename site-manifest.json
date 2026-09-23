@@ -1,21 +1,21 @@
 {
   "format": "tetris-learning-static-site",
   "version": 1,
-  "release": "892bdb30bf0a140b",
+  "release": "efc2a7a910aa83d6",
   "sourceMode": "bundled-snapshot",
   "progressMode": "browser-local",
   "files": {
     "app.js": {
-      "bytes": 14021,
-      "sha256": "c14c731aedbdfe890a3d5c8364d64e70161ffd26efed37f84ac0b5296269f657"
+      "bytes": 14161,
+      "sha256": "76499d2f74d9f5d9e2eb7cd5b3bff5295038a431092e9c8d569acc9a41d15206"
     },
     "course.js": {
-      "bytes": 16053,
-      "sha256": "d231f0609b7f9a5bb578863efcd5ae632c86a95012ebd0fd2b72dac2c39baa45"
+      "bytes": 16062,
+      "sha256": "9d7ba9528860789d8c3367620b799f75bdd7f41fb49e3119c1116e609fc9eaaa"
     },
     "index.html": {
-      "bytes": 24996,
-      "sha256": "b9c231d6de0640fcb02b0a11f8788b9899b4010d17d9fb7728d914b4498371ab"
+      "bytes": 24990,
+      "sha256": "abb0556ae69ac599f874734d26f1205bc61bab249a9452a04b29841c891e8eeb"
     },
     "lessons.js": {
       "bytes": 3748817,
@@ -31,7 +31,7 @@
     },
     "site-config.js": {
       "bytes": 89,
-      "sha256": "ef212327973d834d7d6b80f203219626b50eef8a82ecc2aa9df7b9c2be559720"
+      "sha256": "3ede3dccaadbeff437d45d7785a1606b0cacfefa8d0392ed12b9c208f2a0887a"
     },
     "style.css": {
       "bytes": 24676,
@@ -63,5 +63,6 @@
     }
   },
   "renderingFix": "korean-emphasis/1",
-  "baseRelease": "8acbdcbe49fc390c"
+  "baseRelease": "892bdb30bf0a140b",
+  "sidebarFix": "sidebar-status/1"
 }

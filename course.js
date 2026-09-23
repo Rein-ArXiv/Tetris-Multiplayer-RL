@@ -204,7 +204,7 @@ const questionNode = (q) => {
   for (const lesson of bundle.lessons) {
     const number = Number(lesson.id.split('-')[1]);
     const entry = link(`${String(number).padStart(2, '0')} · ${lesson.shortTitle}`, lesson.id); entry.dataset.page = lesson.id;
-    const status = el('span', '학습 가능', 'nav-status'); status.dataset.lessonStatus = lesson.id; entry.append(status); nav.append(entry);
+    const status = el('span', '', 'nav-status'); status.dataset.lessonStatus = lesson.id; status.hidden = true; entry.append(status); nav.append(entry);
   }
   const count = available.size;
   document.querySelectorAll('[data-course-status]').forEach(node => { node.textContent = `현재 ${count}개 차시를 읽을 수 있습니다. 나머지는 집필 중입니다. 원문 전체 통합과 강의 집필 완료는 구분합니다.`; });

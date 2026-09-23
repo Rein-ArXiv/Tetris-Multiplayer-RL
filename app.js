@@ -52,9 +52,14 @@
     noticeTimer = setTimeout(() => { actionStatus.textContent = ''; }, 5500);
   }
   function completionLabel() {
-    document.getElementById('lesson-status').textContent = state.completedLessons['lesson-1'] ? '완료 표시됨' : '학습 가능';
+    const lessonStatus = document.getElementById('lesson-status');
+    const lessonDone = state.completedLessons['lesson-1'];
+    lessonStatus.textContent = lessonDone ? '완료 표시됨' : '';
+    lessonStatus.hidden = !lessonDone;
     for (const label of document.querySelectorAll('[data-lesson-status]')) {
-      label.textContent = state.completedLessons[label.dataset.lessonStatus] ? '완료 표시됨' : '학습 가능';
+      const done = state.completedLessons[label.dataset.lessonStatus];
+      label.textContent = done ? '완료 표시됨' : '';
+      label.hidden = !done;
     }
   }
   function savedAnswerLabels() {

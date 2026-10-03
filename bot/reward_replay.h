@@ -1,5 +1,6 @@
 #pragma once
 #include "controller.h"
+#include "../core/input.h"
 #include "opponents.h"
 #include <chrono>
 #include <string>
@@ -26,7 +27,7 @@ bool verify_victory(uint64_t seed, const Opponent& opponent,
     int humanAttack=0, enemyAttack=0;
     const auto start=std::chrono::steady_clock::now();
     for(size_t i=0;i<inputs.size();++i) {
-        if(inputs[i]&~uint8_t(31))return false;
+        if(!isValidInputMask(inputs[i]))return false;
         if(i%120==0 && std::chrono::steady_clock::now()-start>std::chrono::seconds(5))return false;
         auto botInput=controller.next(enemy,picker);
         human.SubmitInput(inputs[i]); enemy.SubmitInput(botInput);
@@ -43,7 +44,7 @@ inline bool decode_inputs(const std::string& hex, std::vector<uint8_t>& out) {
     out.clear(); out.reserve(hex.size()/2);
     for(size_t i=0;i<hex.size();i+=2) {
         int a=digit(hex[i]),b=digit(hex[i+1]);
-        if(a<0||b<0||((a*16+b)&~31))return false;
+        if(a<0||b<0||!isValidInputMask(static_cast<uint64_t>(a*16+b)))return false;
         out.push_back(uint8_t(a*16+b));
     }
     return true;

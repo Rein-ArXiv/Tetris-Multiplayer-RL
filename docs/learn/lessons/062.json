@@ -1,0 +1,475 @@
+{
+  "id": "lesson-62",
+  "title": "둥근 모서리: 거리 함수와 경계",
+  "shortTitle": "중심 좌표·거리·알파 마스크",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 이미지에 UV·tint·회전을 적용하지만 외곽은 사각형입니다.",
+  "finish": "완료: 도형 내부 좌표로 거리를 계산해 둥근 패널과 아이콘을 그리고 경계 알파를 설명합니다.",
+  "objective": "부호 있는 거리의 각 항을 수치로 계산하고, 정점의 local·반크기·반지름을 셰이더에 연결하며 논리 전이 폭과 픽셀 coverage를 구별합니다.",
+  "prerequisites": [
+    "이미지 정점·UV·tint와 회전",
+    "VAO 속성 형식과 셰이더 보간",
+    "straight-alpha 입력의 배경 합성"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 순수 CPU 거리/마스크 초안 검토와 선분·원호 독립 기준, 실제 GL 픽셀 및 루트 입력 경계 대조",
+    "draftJob": "out/learning-jobs/062-distance-events.jsonl",
+    "corrections": [
+      "수학적으로 정확한 거리식과 부동소수 평가를 구별하도록 초안 주석 교정·반복 설명 통합",
+      "root의 작은 반지름 직각 근사와 학습의 양수 반지름 유지 정책 구분",
+      "NaN roundness의 정점 유입 재현 후 비유한 입력 거절; 논리 폭과 정확한 coverage 혼동 교정"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED61/SDL62CTest·누적 tetris/rounded_demo 빌드·경고0",
+    "CPU SDF236196사례: 별도 선분/원호 최소거리 기준·부호/대칭·smoothstep 수치/단조성·비유한/범위 거절·local/UV 독립; UBSan 및 부호/마스크 mutation 거부",
+    "RoundedQuad GL대역/UBSan:52바이트 정점/local32/half40/radius48, 초기화5·draw17단계 실패·자원/속성 실패·입력검증전GL무호출·업로드실패제출억제·재시도/정리",
+    "SDL offscreen llvmpipeLLVM21.1.8:8요청×3Layout=24사례,7371983픽셀 검사·817기하/텍셀경계 제외·7627 smooth mask 샘플; 내부 RGBA 허용오차2.01바이트·외부정확보존",
+    "실제 root draw_rect_rounded 추출: 수정 전 NaN 반지름 큐 유입 재현, 수정 후NaN/Inf/잘못된크기 거절·유한clamp·1미만근사 유지; UBSan",
+    "root 회전/핸들 실패정리 회귀·클라이언트빌드·16CTest·기존sim_hash_dump골든 유지",
+    "수동GUI·타OS네이티브·실제GPU OOM 미검증. 고정논리폭의경계완화이며정확한pixelcoverage/확장기하검증으로주장하지않음"
+  ],
+  "recap": {
+    "points": [
+      "위치·UV·tint는 같은 이미지의 표현을 서로 다른 단계에서 바꿉니다.",
+      "회전은 논리 좌표에서 수행한 뒤 NDC로 옮깁니다.",
+      "셰이더의 샘플×tint와 프레임버퍼 합성은 별도 단계입니다."
+    ],
+    "bridge": "이미지 내부 좌표를 하나 더 전달해 모양의 경계와 알파를 계산합니다."
+  },
+  "sections": [
+    {
+      "title": "그림의 모서리를 알파 마스크로 만든다",
+      "body": "아이콘을 원이나 둥근 사각형 안에 넣고 그 뒤에 둥근 배경 패널을 놓겠습니다. 원본 이미지 바이트와 소유 핸들은 유지하고, 그릴 사각형에 모서리 반지름을 더합니다.\n\nCPU는 위치·UV·tint와 함께 도형 내부 좌표를 넘깁니다. 조각 셰이더는 그 위치가 경계에서 얼마나 떨어졌는지 계산해 알파를 줄입니다. 이미지 샘플과 모양 마스크가 독립적이므로 같은 모양에 다른 아이콘을 넣거나, 같은 아이콘의 모양만 바꿀 수 있습니다.\n\n단색 패널은 1×1 흰 RGBA 텍스처를 사용합니다. 흰 샘플에 tint를 곱하면 원하는 색이 됩니다. 아이콘과 패널이 같은 RoundedQuad 경로를 사용하게 됩니다.",
+      "codes": [
+        {
+          "label": "이미지 표현 요청에 반지름 추가",
+          "language": "cpp",
+          "text": "struct Draw {\n    study_image_quad::Draw image;\n    float radius=0; // Logical units, independent of UV and tint.\n};"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void draw_rect_rounded(",
+        "invariant": "공개 요청에서 크기·반지름 의미를 결정하고 사각형 렌더 경로로 넘긴다.",
+        "mayDiffer": "루트 roundness는 유한 값을 clamp하고 논리 radius<1을 0으로 근사한다. 학습은 절대 radius를 범위 검사하며 작은 양수도 유지한다.",
+        "omitted": "여러 모서리에 서로 다른 반지름은 지정하지 않는다."
+      }
+    },
+    {
+      "title": "화면 위치·UV와 별도로 도형 내부 좌표를 보낸다",
+      "body": "회전된 화면 좌표만으로 모서리를 판단하면 계산에 화면 이동과 회전이 섞입니다. UV를 사용하면 원본을 잘라 보거나 반전할 때 도형의 기준까지 바뀝니다. 모양 계산용 local은 회전 전 사각형의 중심을 원점으로 두겠습니다.\n\n폭 w·높이 h의 반크기는 b=(w/2,h/2)입니다. 네 꼭짓점 local은 (-b.x,-b.y), (+b.x,-b.y), (+b.x,+b.y), (-b.x,+b.y)입니다. 화면 위치만 회전시키고 local은 대응하는 꼭짓점에 그대로 붙입니다.\n\n셰이더가 삼각형 안에서 local을 보간하면 이미지가 회전해도 도형 내부의 원래 좌표를 얻습니다. 여기서는 모든 위치의 w=1이고 변환이 아핀이므로 이 대응이 유지됩니다. UV를 좌우 반전해도 local은 바뀌지 않아 원본 방향만 바뀝니다.",
+      "codes": [
+        {
+          "label": "48×32 도형의 local",
+          "language": "text",
+          "text": "왼쪽 위 (-24,-16)       오른쪽 위 (+24,-16)\n\n왼쪽 아래 (-24,+16)     오른쪽 아래 (+24,+16)\n중심 (0,0), 반크기 b=(24,16)"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_rect(",
+        "invariant": "화면 위치와 중심 기준 local을 각 꼭짓점에 함께 연결한다.",
+        "mayDiffer": "루트 배처는 56바이트 정점과 channel을, 학습 RoundedQuad는 52바이트 정점과 요청별 제출을 사용한다.",
+        "omitted": "글리프 channel과 다중 이미지 배칭은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "포함 여부를 거리와 부호로 확장한다",
+      "body": "포함 판정은 안/밖 두 값만 줍니다. 거리 함수는 가장 가까운 경계까지의 길이도 줍니다. 부호 있는 거리 함수(signed distance function, SDF)는 안쪽을 음수, 경계를 0, 바깥을 양수로 약속합니다.\n\n원의 경우 중심 기준 점 p와 반지름 r에 대해 d=length(p)-r입니다. length는 두 성분의 제곱합에 제곱근을 취한 유클리드 길이입니다. 중심에서는 -r, 원 둘레에서는 0, 반지름보다 2만큼 밖에서는 +2가 됩니다.\n\n부호로 모양을 고르고, 0에 가까운 구간에서 알파를 연속적으로 바꾸면 경계 완화에 사용할 수 있습니다. 거리의 단위가 도형 좌표와 같으므로 어떤 폭으로 완화할지도 수치로 정할 수 있습니다.",
+      "codes": [
+        {
+          "label": "거리에서 마스크로",
+          "language": "text",
+          "text": "d < 0 : 안쪽\nd = 0 : 경계\nd > 0 : 바깥\n\n마스크를 곱하기 전 알파 × mask(d) → 새 조각의 알파"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "float rounded_box_sdf(",
+        "invariant": "도형 중심 좌표·반크기·반지름으로 부호 있는 거리를 계산한다.",
+        "mayDiffer": "학습은 RGBA 이미지와 단색을, 루트는 R8 글리프도 같은 정점 형식으로 처리한다.",
+        "omitted": "다각형·자유 곡선의 일반 거리 필드는 구현하지 않는다."
+      }
+    },
+    {
+      "title": "안쪽 사각형을 줄이고 반지름만큼 넓힌다",
+      "body": "반크기 b=(4,3), 반지름 r=1인 둥근 사각형을 생각해 보세요. 반크기 (3,2)의 작은 사각형을 만들고 그 경계를 모든 방향으로 1만큼 넓히면 직선 변과 네 원호로 이루어진 모양이 됩니다. 최종 외접 사각형의 반크기는 다시 (4,3)입니다.\n\n이 구성이 성립하려면 b.x,b.y가 양수이고 0≤r≤min(b.x,b.y)여야 합니다. 한 축의 안쪽 반크기가 0이 되면 선분에 원을 둘러 알약 모양이 되고, 두 축이 모두 0이면 원이 됩니다.\n\nCPU의 요청은 반지름을 논리 길이로 받습니다. 폭 48·높이 32이면 최대 반지름은 16입니다. roundness라는 0~1 비율을 쓰는 API라면 그 비율에 min(w,h)/2를 곱해 실제 반지름을 정합니다.",
+      "codes": [
+        {
+          "label": "반크기와 반지름",
+          "language": "text",
+          "text": "w=48, h=32 → b=(24,16)\nr=0  → 직각 사각형\nr=8  → 작은 둥근 모서리\nr=16 → 길이 방향의 직선과 양 끝 반원\nr=20 → 이 요청의 허용 범위 밖"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void draw_rect_rounded(",
+        "invariant": "공개 요청에서 크기·반지름 의미를 결정하고 사각형 렌더 경로로 넘긴다.",
+        "mayDiffer": "루트 roundness는 유한 값을 clamp하고 논리 radius<1을 0으로 근사한다. 학습은 절대 radius를 범위 검사하며 작은 양수도 유지한다.",
+        "omitted": "여러 모서리에 서로 다른 반지름은 지정하지 않는다."
+      }
+    },
+    {
+      "title": "abs·max·length가 서로 맡는 역할을 분해한다",
+      "body": "도형은 x·y 방향으로 대칭입니다. abs(p)로 점을 한 사분면에 접은 뒤 q=abs(p)-b+r을 구합니다. q의 각 성분은 반크기 b-r인 안쪽 사각형의 해당 변보다 얼마나 바깥에 있는지를 나타냅니다.\n\n바깥에서는 양수 성분만 남긴 max(q,0)의 길이를 구합니다. 한 성분만 양수면 직선 변까지의 거리, 둘 다 양수면 모서리 점까지의 대각선 거리입니다. 둘 다 음수면 이 항은 0이 됩니다.\n\n안쪽에서는 max(q.x,q.y)가 0에 더 가까운 음수, 즉 가장 가까운 변까지의 부호 있는 거리입니다. min(...,0)은 이 항이 바깥에서 양수로 더해지지 않도록 합니다. 두 항의 합은 작은 사각형까지의 거리이고, 마지막에 r을 빼면 넓힌 둥근 모양까지의 거리가 됩니다.",
+      "codes": [
+        {
+          "label": "GLSL 거리 함수",
+          "language": "glsl",
+          "text": "float rounded_box_sdf(vec2 p,vec2 b,float r){\n    vec2 q=abs(p)-b+vec2(r);\n    return length(max(q,0.0))+min(max(q.x,q.y),0.0)-r;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "float rounded_box_sdf(",
+        "invariant": "도형 중심 좌표·반크기·반지름으로 부호 있는 거리를 계산한다.",
+        "mayDiffer": "학습은 RGBA 이미지와 단색을, 루트는 R8 글리프도 같은 정점 형식으로 처리한다.",
+        "omitted": "다각형·자유 곡선의 일반 거리 필드는 구현하지 않는다."
+      }
+    },
+    {
+      "title": "세 점을 손으로 계산한 뒤 CPU 함수로 확인한다",
+      "body": "코드를 실행하기 전에 중심, 직선 변, 바깥 모서리에서 부호를 예측해 보세요. b=(4,3), r=1일 때 중심은 가장 가까운 변까지 3만큼 안쪽입니다. 오른쪽 변의 중간 (4,0)은 경계입니다. 외접 사각형의 모서리 (4,3)는 둥근 모서리 바깥입니다.\n\n이 세 점의 결과는 각각 -3, 0, √2−1입니다. 마지막 값이 양수라는 사실은 외접 사각형 안에 있다는 조건만으로 둥근 모양 안이라고 판단할 수 없음을 보여 줍니다.\n\n순수 CPU helper는 double로 계산하고 잘못된 입력에 nullopt를 반환합니다. CPU 실습과 GPU 셰이더는 같은 수학을 표현하지만, 자료형·계산 순서·보간 때문에 모든 비트가 같다고 가정하지 않습니다.",
+      "codes": [
+        {
+          "label": "세 점의 계산",
+          "language": "text",
+          "text": "b=(4,3), r=1\np=(0,0) → q=(-3,-2) → 0 + (-2) - 1 = -3\np=(4,0) → q=(1,-2)  → 1 + 0 - 1 = 0\np=(4,3) → q=(1,1)   → √2 + 0 - 1 ≈ 0.414214"
+        },
+        {
+          "label": "CPU의 거리 계산",
+          "language": "cpp",
+          "text": "inline std::optional<double> signed_distance(double x,\n                                             double y,\n                                             double half_width,\n                                             double half_height,\n                                             double radius) noexcept {\n    using detail::kMaxMagnitude;\n    using detail::finite;\n\n    if (!finite(x) || !finite(y) || !finite(half_width) ||\n        !finite(half_height) || !finite(radius)) {\n        return std::nullopt;\n    }\n    if (!(half_width > 0.0) || !(half_height > 0.0)) {\n        return std::nullopt;\n    }\n    if (radius < 0.0) {\n        return std::nullopt;\n    }\n\n    const double max_radius = (std::min)(half_width, half_height);\n    if (radius > max_radius) {\n        return std::nullopt;\n    }\n\n    const double ax = std::abs(x);\n    const double ay = std::abs(y);\n    if (ax > kMaxMagnitude || ay > kMaxMagnitude ||\n        half_width > kMaxMagnitude || half_height > kMaxMagnitude) {\n        return std::nullopt;\n    }\n\n    const double qx = ax - half_width + radius;\n    const double qy = ay - half_height + radius;\n\n    const double outside = std::hypot((std::max)(qx, 0.0), (std::max)(qy, 0.0));\n    const double inside = (std::min)((std::max)(qx, qy), 0.0);\n    return outside + inside - radius;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "float rounded_box_sdf(",
+        "invariant": "도형 중심 좌표·반크기·반지름으로 부호 있는 거리를 계산한다.",
+        "mayDiffer": "학습은 RGBA 이미지와 단색을, 루트는 R8 글리프도 같은 정점 형식으로 처리한다.",
+        "omitted": "다각형·자유 곡선의 일반 거리 필드는 구현하지 않는다."
+      }
+    },
+    {
+      "title": "smoothstep으로 거리 구간을 알파로 바꾼다",
+      "body": "경계 안쪽 논리 거리 0.5까지는 마스크 1, 바깥 0.5부터는 0, 경계에서는 0.5가 되게 하겠습니다. 먼저 t=clamp(d+0.5,0,1)로 구간을 0~1에 맞추고 1−t²(3−2t)를 계산합니다. 이것이 1−smoothstep(-0.5,0.5,d)입니다.\n\nt²(3−2t)는 양 끝에서 변화율이 0이 되는 삼차식입니다. 직선 보간보다 구간 양 끝이 부드럽게 이어집니다. d=-0.25이면 t=0.25, 마스크는 0.84375이고 d=+0.25이면 0.15625입니다.\n\nCPU helper의 transition_width는 구간 전체 폭입니다. 1이면 지금의 식이고 2이면 -1~+1에서 바뀝니다. 폭은 유한한 양수여야 합니다. GLSL smoothstep도 edge0<edge1이 필요합니다. [Khronos smoothstep 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/smoothstep.xhtml)에서 식과 조건을 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "CPU 알파 마스크",
+          "language": "cpp",
+          "text": "inline std::optional<double> opacity(double distance,\n                                     double transition_width = 1.0) noexcept {\n    using detail::finite;\n\n    if (!finite(distance) || !finite(transition_width)) {\n        return std::nullopt;\n    }\n    if (!(transition_width > 0.0)) {\n        return std::nullopt;\n    }\n\n    const double t = (std::clamp)(distance / transition_width + 0.5, 0.0, 1.0);\n    return 1.0 - t * t * (3.0 - 2.0 * t);\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "float rounded_box_sdf(",
+        "invariant": "도형 중심 좌표·반크기·반지름으로 부호 있는 거리를 계산한다.",
+        "mayDiffer": "학습은 RGBA 이미지와 단색을, 루트는 R8 글리프도 같은 정점 형식으로 처리한다.",
+        "omitted": "다각형·자유 곡선의 일반 거리 필드는 구현하지 않는다."
+      }
+    },
+    {
+      "title": "알파 마스크와 픽셀 면적은 구별한다",
+      "body": "이 마스크는 샘플 위치에서 구한 거리로 알파를 정하는 근사입니다. 픽셀이 도형에 덮인 면적 비율을 직접 적분하지는 않습니다. 논리 화면을 두 배로 확대하면 논리 폭 1의 전이도 물리 화면에서는 대략 폭 2가 됩니다.\n\n또한 셰이더는 래스터화로 생성된 조각에서만 실행됩니다. 지금 정점은 원래 사각형의 꼭짓점이므로 그 밖에는 조각이 없습니다. 둥근 모서리가 깎인 부분에는 마스크를 적용할 수 있지만, 외접 사각형 바깥까지 부드러운 띠를 그리지는 않습니다.\n\n이 구현의 목적은 단순한 UI 경계 완화입니다. 결과를 살펴볼 때 사각형의 기하 경계, SDF의 모양 경계, smoothstep 전이 구간을 구별하면 확대율에 따른 차이를 설명할 수 있습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "화면 미분을 사용하는 대안",
+          "body": "fwidth 같은 화면 공간 미분으로 거리 변화량을 추정하면 물리 샘플 크기에 맞춘 전이 폭을 설계할 수 있습니다. 기하 바깥의 조각 부족은 별개이므로 필요하면 외접 정점도 넓혀야 합니다. MSAA 역시 조각 셰이더의 임의 알파 마스크를 자동으로 면적 적분하는 기능은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "52바이트 정점으로 모양 좌표를 전달한다",
+      "body": "위치·UV·tint의 32바이트 뒤에 local 2개, half 2개, radius 1개의 float를 더합니다. 정점 하나가 52바이트, 여섯 정점이 312바이트입니다. local은 바이트 32, half는 40, radius는 48에서 시작합니다.\n\n위치와 UV는 검증된 이미지 변환 함수를 사용합니다. 새 함수는 radius와 크기 정책을 먼저 확인하고, 결과 정점에 회전 전 중심 좌표와 반크기를 붙입니다. 삼각형 순서는 같은 꼭짓점 순서를 사용해야 합니다. local 부호만 다른 순서로 쓰면 모양과 이미지가 어긋납니다.\n\n이 UI 요청은 각 축의 크기를 1e6 논리 단위까지 허용합니다. GLSL float의 length 계산이 범위를 넘지 않도록 정한 수치 정책입니다. 일반 위치·회전은 이미지 변환의 검사를 그대로 따릅니다. 유효한 큰 값이라도 화면 정밀도가 충분하다는 보장은 별개입니다.",
+      "codes": [
+        {
+          "label": "정점 ABI와 검사",
+          "language": "cpp",
+          "text": "struct Vertex {\n    float x,y,u,v,r,g,b,a;\n    float local_x,local_y,half_width,half_height,radius;\n};\nstatic_assert(std::is_standard_layout_v<Vertex> && sizeof(Vertex)==52);\nstatic_assert(offsetof(Vertex,u)==8 && offsetof(Vertex,r)==16);\nstatic_assert(offsetof(Vertex,local_x)==32 && offsetof(Vertex,half_width)==40 && offsetof(Vertex,radius)==48);"
+        },
+        {
+          "label": "요청을 여섯 정점으로",
+          "language": "cpp",
+          "text": "inline std::optional<std::array<Vertex,6>> make_vertices(const Draw& draw) noexcept {\n    const auto& rect=draw.image.rect;\n    if(!std::isfinite(draw.radius) || draw.radius<0 || rect.width>1e6f || rect.height>1e6f ||\n       draw.radius>(std::min)(rect.width,rect.height)*.5f) return std::nullopt;\n    const auto base=study_image_quad::make_vertices(draw.image);\n    if(!base)return std::nullopt;\n    const float hw=rect.width*.5f,hh=rect.height*.5f;\n    const float sx[6]={-1,-1,1,-1,1,1};\n    const float sy[6]={-1,1,1,-1,1,-1};\n    std::array<Vertex,6> result{};\n    for(std::size_t i=0;i<result.size();++i){\n        const auto& v=(*base)[i];\n        result[i]={v.x,v.y,v.u,v.v,v.r,v.g,v.b,v.a,sx[i]*hw,sy[i]*hh,hw,hh,draw.radius};\n    }\n    return result;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_rect(",
+        "invariant": "화면 위치와 중심 기준 local을 각 꼭짓점에 함께 연결한다.",
+        "mayDiffer": "루트 배처는 56바이트 정점과 channel을, 학습 RoundedQuad는 52바이트 정점과 요청별 제출을 사용한다.",
+        "omitted": "글리프 channel과 다중 이미지 배칭은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "보간할 값과 도형마다 고정할 값을 나눈다",
+      "body": "local은 조각 위치마다 달라야 하므로 기본 smooth 보간을 사용합니다. half와 radius는 사각형 전체의 설정이므로 flat으로 전달합니다. flat은 삼각형의 지정된 꼭짓점 값을 조각들에 그대로 사용하는 보간 방식입니다.\n\n이번 구현은 여섯 정점 모두에 같은 half와 radius를 넣습니다. 어느 삼각형의 지정 꼭짓점이 선택되어도 같으므로 내부 대각선에서 설정이 바뀌지 않습니다. 루트 셰이더는 이 값들에도 기본 보간을 쓰지만 꼭짓점마다 같은 값을 넣는다는 계약을 공유합니다.\n\nVAO의 location 3·4·5와 GLSL 선언의 타입·성분 수를 맞춥니다. VBO에 새 자료를 넣고 이 형식으로 해석해야 CPU의 반지름이 실제 조각 셰이더까지 도달합니다.",
+      "codes": [
+        {
+          "label": "새 정점 입력과 출력",
+          "language": "glsl",
+          "text": "#version 330 core\nlayout(location=0) in vec2 a_position;\nlayout(location=1) in vec2 a_uv;\nlayout(location=2) in vec4 a_tint;\nlayout(location=3) in vec2 a_local;\nlayout(location=4) in vec2 a_half;\nlayout(location=5) in float a_radius;\nout vec2 v_uv;\nout vec4 v_tint;\nout vec2 v_local;\nflat out vec2 v_half;\nflat out float v_radius;\nvoid main(){gl_Position=vec4(a_position,0,1);v_uv=a_uv;v_tint=a_tint;v_local=a_local;v_half=a_half;v_radius=a_radius;}"
+        },
+        {
+          "label": "새 속성의 바이트 위치",
+          "language": "cpp",
+          "text": "gl_.VertexAttribPointer(3,2,Float,False,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,local_x)));\n            gl_.EnableVertexAttribArray(3);\n            gl_.VertexAttribPointer(4,2,Float,False,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,half_width)));\n            gl_.EnableVertexAttribArray(4);\n            gl_.VertexAttribPointer(5,1,Float,False,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,radius)));\n            gl_.EnableVertexAttribArray(5);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_rect(",
+        "invariant": "화면 위치와 중심 기준 local을 각 꼭짓점에 함께 연결한다.",
+        "mayDiffer": "루트 배처는 56바이트 정점과 channel을, 학습 RoundedQuad는 52바이트 정점과 요청별 제출을 사용한다.",
+        "omitted": "글리프 channel과 다중 이미지 배칭은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "샘플 알파·tint 알파·모양 마스크를 곱한다",
+      "body": "조각 셰이더는 먼저 texture와 tint를 곱합니다. 반지름이 양수면 SDF 마스크를 알파에 곱하고, 알파가 0이면 discard합니다. 이후 straight-alpha 블렌딩에서 최종 알파가 RGB의 배경 합성 비율을 정합니다.\n\n예를 들어 원본 알파 0.8, tint 알파 0.5, 경계 마스크 0.5이면 최종 알파는 0.2입니다. 여기서 RGB에 마스크를 추가로 곱하면 블렌딩의 SRC_ALPHA와 겹쳐 모서리를 너무 어둡게 만들 수 있습니다. 이 패스는 RGB를 straight로 유지합니다.\n\n반지름 0이면 마스크 계산을 건너뜁니다. 수학적으로 반지름 0의 SDF도 있지만 직각 경로에 경계 완화를 적용할지는 별도의 표현 정책입니다. 학습 경로는 작은 양수 반지름을 유지하고, 루트는 논리 반지름 1 미만을 0으로 근사합니다.",
+      "codes": [
+        {
+          "label": "조각 셰이더",
+          "language": "glsl",
+          "text": "#version 330 core\nin vec2 v_uv;\nin vec4 v_tint;\nin vec2 v_local;\nflat in vec2 v_half;\nflat in float v_radius;\nuniform sampler2D u_image;\nlayout(location=0) out vec4 out_color;\nfloat rounded_box_sdf(vec2 p,vec2 b,float r){\n    vec2 q=abs(p)-b+vec2(r);\n    return length(max(q,0.0))+min(max(q.x,q.y),0.0)-r;\n}\nvoid main(){\n    vec4 color=texture(u_image,v_uv)*v_tint;\n    if(v_radius>0.0){\n        float d=rounded_box_sdf(v_local,v_half,v_radius);\n        color.a*=1.0-smoothstep(-0.5,0.5,d);\n    }\n    if(color.a<=0.0)discard;\n    out_color=color;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "float rounded_box_sdf(",
+        "invariant": "도형 중심 좌표·반크기·반지름으로 부호 있는 거리를 계산한다.",
+        "mayDiffer": "학습은 RGBA 이미지와 단색을, 루트는 R8 글리프도 같은 정점 형식으로 처리한다.",
+        "omitted": "다각형·자유 곡선의 일반 거리 필드는 구현하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "discard와 합성",
+          "body": "이 패스는 depth/stencil 테스트를 끄고 RGBA를 source-over로 합성합니다. 알파 0이면 색상 합성 결과도 배경을 유지하지만 discard는 해당 조각 출력을 생략합니다. 깊이 기록이나 다른 출력 정책이 있는 셰이더에서는 두 동작을 일반적으로 같다고 취급하면 안 됩니다."
+        }
+      ]
+    },
+    {
+      "title": "저장소와 누적 게임에 둥근 패널을 연결한다",
+      "body": "ImageStore는 RoundedQuad용 draw 오버로드에서도 같은 핸들 검사를 사용합니다. 텍스처 생성·해제 책임을 옮기지 않고 그리는 방식만 추가합니다. 기존 ImageQuad는 일반 이미지 진단 도구에서 계속 사용할 수 있습니다.\n\nmain에서 1×1 흰 텍스처를 한 번 만들고 패널 핸들로 보관합니다. 컬러 Stream을 finish한 뒤 둥근 패널을 먼저 그리고, 기울어진 아이콘·부분UV 캡슐·반투명 원형 아이콘을 순서대로 올립니다. 투명도가 있는 그리기에서는 이 순서가 겹침 결과를 결정합니다.\n\n패널 1회와 이미지 3회 제출이 더해져 메뉴 전체는 5draw, 플레이 화면은 6draw입니다. opaque Stream 통계는 컬러 배치만 셉니다. 규칙 상태·입력 기록·해시는 이미지의 모양과 독립적입니다.",
+      "codes": [
+        {
+          "label": "저장소 오버로드",
+          "language": "cpp",
+          "text": "bool draw(study_rounded::RoundedQuad& quad,Handle handle,\n              const study_rounded::Draw& request) const noexcept {\n        const auto* image=images_.find(handle);\n        return image && quad.draw(*image,request);\n    }"
+        },
+        {
+          "label": "게임의 네 요청",
+          "language": "cpp",
+          "text": "study_rounded::Draw panel;\n            panel.image.rect={14,14,64,190};panel.radius=10;\n            panel.image.tint={.08f,.12f,.18f,1};\n            study_rounded::Draw badge;\n            badge.radius=10;\n            badge.image.angle_degrees=app.screen()==study_app::Screen::menu ? -12.f : 12.f;\n            study_rounded::Draw crop;\n            crop.image.rect={20,88,48,32};crop.image.uv={0,0,1,.5f};\n            crop.image.tint={.5f,1,.75f,1};crop.radius=16;\n            study_rounded::Draw translucent;\n            translucent.image.rect={28,148,40,40};translucent.image.angle_degrees=30;\n            translucent.image.tint={.8f,.6f,1,.5f};translucent.radius=20;\n            if(!sink.set_clip(full) || !images.draw(badge_quad,panel_image,panel) ||\n               !images.draw(badge_quad,icon,badge) || !images.draw(badge_quad,icon,crop) ||\n               !images.draw(badge_quad,icon,translucent)) return 1;"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void draw_rect_rounded(",
+        "invariant": "공개 요청에서 크기·반지름 의미를 결정하고 사각형 렌더 경로로 넘긴다.",
+        "mayDiffer": "루트 roundness는 유한 값을 clamp하고 논리 radius<1을 0으로 근사한다. 학습은 절대 radius를 범위 검사하며 작은 양수도 유지한다.",
+        "omitted": "여러 모서리에 서로 다른 반지름은 지정하지 않는다."
+      }
+    },
+    {
+      "title": "실패 조건과 독립적인 기준으로 검사한다",
+      "body": "입력 검사는 NaN·무한대·음수 반지름·반크기를 넘는 반지름을 제출 전에 거절해야 합니다. 유한성은 단순한 대소 비교와 별개입니다. NaN은 radius<0 같은 비교도 거짓이므로 범위 clamp만으로 처리하면 정점에 들어갈 수 있습니다.\n\n거리 검사는 구현의 q 식을 그대로 복제하는 대신 직선 구간과 원호까지의 최소 거리로 기대값을 구합니다. 중심·변·모서리의 손 계산, 대칭, 마스크 단조성도 확인합니다. 다른 방식의 기준은 같은 오타를 양쪽에 복사할 위험을 줄입니다.\n\nGPU 검사는 화면 샘플을 역회전해 local을 구한 뒤 직선/원호 영역별로 거리와 마스크를 계산합니다. 원본 샘플·tint·배경 합성을 더해 RGBA와 비교합니다. 래스터·텍셀 경계 근처의 작은 제외 구간은 개수를 남깁니다. 알파 경계가 실제로 검사됐는지도 0<mask<1인 샘플 수로 확인합니다.",
+      "codes": [
+        {
+          "label": "경계 예제 실행",
+          "language": "bash",
+          "text": "out/study62/rounded_demo\n# b=(4,3), r=1: (0,0)은 d=-3, (4,0)은 d=0, (4,3)은 d≈0.414214"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void draw_rect_rounded(",
+        "invariant": "공개 요청에서 크기·반지름 의미를 결정하고 사각형 렌더 경로로 넘긴다.",
+        "mayDiffer": "루트 roundness는 유한 값을 clamp하고 논리 radius<1을 0으로 근사한다. 학습은 절대 radius를 범위 검사하며 작은 양수도 유지한다.",
+        "omitted": "여러 모서리에 서로 다른 반지름은 지정하지 않는다."
+      }
+    },
+    {
+      "title": "파일 단위로 만들고 표현을 바꾸어 본다",
+      "body": "rounded_distance.h는 수치 실습, rounded_geometry.h는 요청 검증과 정점 구성, rounded_quad.h는 GPU 형식과 거리 마스크, main은 화면별 표현을 담당합니다. 기존 32바이트 ImageQuad와 새 52바이트 RoundedQuad의 VAO를 혼용하지 않도록 생성·제출 책임을 각 객체에 둡니다.\n\n먼저 rounded_demo의 점 하나를 손으로 계산해 맞춰 보세요. 다음으로 화면의 radius만 바꾸고, UV 반전과 회전은 한 번에 하나씩 바꾸어 모양 좌표가 독립적인지 확인합니다. 반지름을 허용 범위 밖으로 지정하면 false를 처리하는 경로도 따라갑니다.\n\nSDL 실행 파일은 실제 창을, SCRIPTED 구성은 CPU·대역 검사를 사용합니다. --image PATH는 마지막 인자로 두며, 다중 구성 빌드에서는 Release 등 실행 파일 경로를 맞춥니다.",
+      "codes": [
+        {
+          "label": "빌드와 검사",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/62-rounded-corners -B out/study62 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study62 -j3\nctest --test-dir out/study62 --output-on-failure\nout/study62/rounded_demo\nout/study62/tetris --seed 1 --image out/study62/assets/player.png"
+        },
+        {
+          "label": "CPU 거리 함수 전체",
+          "language": "cpp",
+          "file": "checkpoints/62-rounded-corners/renderer/rounded_distance.h",
+          "collapsed": true
+        },
+        {
+          "label": "정점 구성 전체",
+          "language": "cpp",
+          "file": "checkpoints/62-rounded-corners/renderer/rounded_geometry.h",
+          "collapsed": true
+        },
+        {
+          "label": "RoundedQuad 전체",
+          "language": "cpp",
+          "file": "checkpoints/62-rounded-corners/renderer/rounded_quad.h",
+          "collapsed": true
+        },
+        {
+          "label": "누적 main 전체",
+          "language": "cpp",
+          "file": "checkpoints/62-rounded-corners/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "62-1",
+      "question": "b=(5,4), r=2인 둥근 사각형에서 p=(5,4)의 거리와 위치는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0이며 경계다."
+        },
+        {
+          "id": "b",
+          "text": "−2이며 안쪽이다."
+        },
+        {
+          "id": "c",
+          "text": "2√2−2이며 바깥이다."
+        },
+        {
+          "id": "d",
+          "text": "2√2이며 바깥이다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "2√2−2이며 바깥이다.",
+      "explanation": "q=(2,2)이므로 length(q)=2√2, 내부 항은 0, 마지막에 r=2를 빼면 양수입니다. 외접 사각형의 꼭짓점은 둥근 모양 바깥입니다."
+    },
+    {
+      "id": "62-2",
+      "question": "목적지 폭80·높이20인 학습 Draw에서 어떤 반지름을 거절해야 하는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0"
+        },
+        {
+          "id": "b",
+          "text": "5"
+        },
+        {
+          "id": "c",
+          "text": "10"
+        },
+        {
+          "id": "d",
+          "text": "11"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "11",
+      "explanation": "반크기는 (40,10)이고 r≤min(40,10)=10이어야 합니다. 반지름11은 입력 계약을 넘습니다."
+    },
+    {
+      "id": "62-3",
+      "question": "UV를 좌우 반전하되 위치와 local은 유지했습니다. 어떤 결과가 맞는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "원본 방향만 반전되고 둥근 경계는 유지된다."
+        },
+        {
+          "id": "b",
+          "text": "둥근 경계가 UV와 함께 반대쪽으로 이동한다."
+        },
+        {
+          "id": "c",
+          "text": "반지름이 음수가 된다."
+        },
+        {
+          "id": "d",
+          "text": "원본 텍스처의 바이트가 뒤집혀 저장된다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "원본 방향만 반전되고 둥근 경계는 유지된다.",
+      "explanation": "모양은 local/half/radius, 원본 선택은 UV가 담당합니다. 서로 다른 좌표를 사용하므로 샘플 방향을 바꿔도 모양의 기준은 유지됩니다."
+    },
+    {
+      "id": "62-4",
+      "question": "원본 알파0.8·tint 알파0.5이고 d=0입니다. 블렌딩에 전달하는 알파는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0.4"
+        },
+        {
+          "id": "b",
+          "text": "0.2"
+        },
+        {
+          "id": "c",
+          "text": "0.1"
+        },
+        {
+          "id": "d",
+          "text": "0.8"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "0.2",
+      "explanation": "경계 d=0에서 마스크는0.5입니다. 세 값을 곱해 0.8×0.5×0.5=0.2가 됩니다. RGB에는 이 마스크를 다시 곱하지 않습니다."
+    },
+    {
+      "id": "62-5",
+      "question": "논리 화면을 가로·세로 동일하게 2배 확대했습니다. 논리 폭1의 거리 전이 구간은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "항상 물리1픽셀이다."
+        },
+        {
+          "id": "b",
+          "text": "정확한 픽셀 면적 비율이 된다."
+        },
+        {
+          "id": "c",
+          "text": "약 물리2픽셀 폭으로 확대된다."
+        },
+        {
+          "id": "d",
+          "text": "GPU가 자동으로 폭을 절반으로 줄인다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "약 물리2픽셀 폭으로 확대된다.",
+      "explanation": "거리와 전이 폭은 논리 단위입니다. 균등2배 변환에서는 길이도2배가 됩니다. 현재 smoothstep 식에는 물리 픽셀 크기를 보정하는 미분 항이 없습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "b=(4,3), r=1에서 중심·변·모서리의 거리를 손으로 계산한다.",
+      "radius를0·8·16으로 바꾸어 48×32 도형의 모양과 허용 범위를 확인한다.",
+      "UV 반전과 회전을 각각 적용하고 local의 의미를 설명한다.",
+      "경계 알파를 원본·tint·마스크의 곱으로 계산한다."
+    ],
+    "failureChecks": [
+      "잘못된 반지름이 GL 호출 전에 거절되는지 확인한다.",
+      "정점52바이트와 local/half/radius 위치32/40/48을 대조한다.",
+      "회전된 local과 원본 UV를 혼용하지 않았는지 확인한다.",
+      "논리 전이 폭·기하 경계·샘플 면적을 구별해 결과를 해석한다."
+    ],
+    "expected": "하나의 렌더 경로로 단색 패널과 둥근 이미지를 만들고 거리식·정점 입력·알파 합성을 단계별로 설명한다."
+  }
+}

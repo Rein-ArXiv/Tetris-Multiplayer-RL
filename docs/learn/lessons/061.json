@@ -1,0 +1,516 @@
+{
+  "id": "lesson-61",
+  "title": "UV·tint·회전: 같은 사각형으로 표현",
+  "shortTitle": "원본 영역·색상 곱·회전 중심",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 화면 상태가 이미지 핸들을 골라 고정 위치와 크기의 사각형에 표시합니다.",
+  "finish": "완료: 같은 이미지를 다른 목적지·부분UV·색상·회전 중심으로 그리며 배경과 알파 합성합니다.",
+  "objective": "화면 좌표와 UV를 구별하고, pivot 회전·정점 형식·성분별 색 곱·알파 합성·실패 경계를 구현하고 예측합니다.",
+  "prerequisites": [
+    "이미지 핸들 조회와 GPU 자원 소유",
+    "논리 좌표·NDC·VAO/VBO·셰이더 입력",
+    "RGBA와 straight-alpha 블렌딩"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 순수 기하 초안 검토; 실제 root 회전 오류 재현과 GL 계약·독립 역변환 픽셀 대조",
+    "draftJob": "out/learning-jobs/061-geometry-events.jsonl",
+    "corrections": [
+      "std::offsetof 잘못된 매크로 수식과 header static helper의 ODR 경계를 교정",
+      "화면 밖 NDC도 허용한다는 주석·입력 범위와 float 정밀도 한계 분리",
+      "루트의 기존 저장 알파와 학습 Separate 계수, 필터/아틀라스 내부 경계 구별"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED59/SDL60 CTest·누적 tetris 빌드·-Wall -Wextra -Wpedantic 경고0; transform_demo 모서리 (10,40) 확인",
+    "순수 기하 UBSan: 54 회전/pivot 조합·거리보존·주기성·UV 반전/동일끝점·tint·45 비유한 필드·float 표현범위·화면밖 위치; 회전방향/UV 대입 mutation 거부",
+    "ImageQuad UBSan·GL 대역: 32바이트 형식/UV8/tint16, 초기화5단계·draw17단계 오류, 입력 검증 전 GL 무호출·업로드 실패 후 제출 억제·재시도/정리",
+    "SDL offscreen llvmpipe LLVM21.1.8: 8요청×3Layout=24사례, 독립 역변환/NEAREST/tint/블렌딩 RGBA 비교; 7371983픽셀 검사·817경계 제외·내부 허용오차2.01바이트·외부 정확보존",
+    "GPU 비교는 premultiplied 배경 RGBA(.025,.05,.075,.25) 포함; 무효 각도/해제 핸들 draw 뒤 전체 RGBA 불변",
+    "실제 root draw_image_rotated 추출: 수정 전 FLOAT_MAX 각도 중간 오버플로 재현, 수정 후 유한 좌표·NaN/Inf 거절·90도 모서리·810도 주기성 확인",
+    "현재 루트 핸들/등록/업로드 실패 정리 회귀·클라이언트 빌드·16CTest·기존 sim_hash_dump 골든 유지",
+    "수동 GUI·타 OS 네이티브 실행·실제 GPU OOM 미검증. root legacy BlendFunc의 저장 알파는 변경하지 않고 학습 Separate 경로와 구분"
+  ],
+  "recap": {
+    "points": [
+      "저장소가 이미지를 소유하고 화면은 핸들을 빌려 사용합니다.",
+      "조회에서는 슬롯 위치와 발급 번호를 함께 검사합니다.",
+      "자원 해제 전에 미제출 사용을 끝내고 GL 문맥의 수명을 유지합니다."
+    ],
+    "bridge": "그 소유 구조를 유지하면서 이미지 한 장에 전달하는 기하·샘플링·색상 요청을 넓힙니다."
+  },
+  "sections": [
+    {
+      "title": "이미지 저장소는 유지하고 그리기 요청을 넓힌다",
+      "body": "한 이미지를 다른 위치에 놓거나 일부만 확대하고, 색을 바꾸고, 기울여 보겠습니다. 이때 텍스처 픽셀 자체를 매번 고칠 필요는 없습니다. 화면의 도형·그림을 읽을 좌표·곱할 색을 요청에 담으면 같은 GPU 이미지를 여러 방식으로 사용할 수 있습니다.\n\n새 요청 Draw에는 회전 전 목적지 사각형 rect, 원본 영역 uv, 성분별 곱 tint, 회전 중심 pivot, 각도 angle_degrees를 둡니다. 저장소는 핸들의 유효성을 확인하고 ImageQuad에 이미지와 요청을 전달합니다.\n\nCPU가 여섯 정점의 위치·UV·색을 만들고 GPU가 삼각형 안의 값을 보간하여 텍스처를 읽습니다. 픽셀을 이중 루프로 회전시키는 작업을 렌더 루프에 추가하지 않습니다.",
+      "codes": [
+        {
+          "label": "요청의 구성",
+          "language": "cpp",
+          "text": "struct Draw {\n    Rect rect;\n    Uv uv;\n    Tint tint;\n    float pivot_x = 0.5f;\n    float pivot_y = 0.5f;\n    float angle_degrees = 0.0f;\n};"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_rotated(",
+        "invariant": "원본 픽셀을 다시 만들지 않고 사각형 꼭짓점의 위치를 회전한다.",
+        "mayDiffer": "루트 API는 중심 좌표·전체UV·WHITE tint를 사용하고 학습 Draw는 회전 전 좌상단·정규화 pivot·부분UV·tint를 함께 받는다.",
+        "omitted": "애니메이션 시계와 둥근 모서리는 포함하지 않는다."
+      }
+    },
+    {
+      "title": "화면 위치와 원본 위치는 서로 다른 좌표다",
+      "body": "목적지 rect는 논리 화면 안에서 도형을 어디에 얼마나 크게 놓을지 정합니다. UV는 그 도형에 원본 이미지의 어디를 붙일지 정합니다. 예를 들어 원본이 8×8이고 목적지가 48×48이면 원본 텍셀 하나가 여러 화면 픽셀에 영향을 줄 수 있습니다.\n\n정규화 UV에서 전체 원본은 0~1입니다. 폭 W인 이미지의 열 i 중심은 `(i+0.5)/W`입니다. 폭 8의 첫 열 중심은 0.0625, 마지막 열 중심은 0.9375입니다. u=1은 마지막 열의 중심이 아니라 원본 영역의 오른쪽 끝입니다.\n\n이 학습 데이터는 첫 행이 그림 위쪽이므로 도형 위쪽에 v0, 아래쪽에 v1을 붙입니다. 화면 좌표를 NDC로 바꾸며 y를 뒤집는 일과, 원본 행을 UV에 연결하는 일을 따로 따라가야 위아래가 뒤집히는 오류를 찾기 쉽습니다.",
+      "codes": [
+        {
+          "label": "서로 독립적으로 바꾸는 값",
+          "language": "text",
+          "text": "원본: 8×8 텍셀\n목적지: x=20, y=20, width=48, height=48 (논리 단위)\n전체 UV: (0,0) → (1,1)\n위쪽 절반 UV: (0,0) → (1,0.5)\n목적지를 그대로 두고 UV만 바꾸면 선택한 부분이 목적지를 채운다."
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_internal.h",
+        "symbol": "void glb_rect(",
+        "invariant": "목적지 좌표와 원본 UV를 각각 받아 정점을 만든다.",
+        "mayDiffer": "공통 배처는 부분UV를 받을 수 있지만 공개 draw_image API는 전체UV를 사용한다.",
+        "omitted": "별도의 아틀라스 배치·패킹 도구는 포함하지 않는다."
+      }
+    },
+    {
+      "title": "부분 선택과 반전도 꼭짓점의 UV로 표현한다",
+      "body": "왼쪽 위·오른쪽 위·오른쪽 아래·왼쪽 아래 꼭짓점에 `(u0,v0)`, `(u1,v0)`, `(u1,v1)`, `(u0,v1)`을 붙입니다. u0와 u1을 뒤집으면 같은 도형에 원본을 좌우 반전해 붙일 수 있습니다. v0와 v1을 뒤집으면 상하 반전입니다.\n\n목적지 크기는 양수로 유지하고 UV 방향으로 반전을 표현합니다. 끝점을 같게 두면 그 축에서 같은 원본 좌표를 계속 읽습니다. 예를 들어 모든 꼭짓점 UV를 한 텍셀의 중심으로 맞추면 도형 전체가 같은 샘플을 사용합니다.\n\n이번 요청은 UV의 유한한 0~1 값만 허용합니다. 부분 영역을 선택한 뒤에도 GL_CLAMP_TO_EDGE의 경계는 텍스처 전체입니다. 아틀라스 내부의 작은 그림 가장자리를 자동으로 격리해 주지는 않습니다.",
+      "codes": [
+        {
+          "label": "삼각형으로 펼치기 전 네 꼭짓점",
+          "language": "text",
+          "text": "TL: (u0,v0)   TR: (u1,v0)\nBL: (u0,v1)   BR: (u1,v1)\n삼각형 인덱스: TL,BL,BR / TL,BR,TR"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "필터가 읽는 범위",
+          "body": "NEAREST는 한 텍셀을 선택하고 LINEAR는 이웃 값을 섞습니다. 부분UV의 끝 근처에서 LINEAR가 옆 그림의 색을 섞을 수 있어 아틀라스에는 패딩·경계 복제 등의 설계가 필요합니다. [Khronos 텍스처 필터·wrap 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glTexParameter.xhtml)을 참고하세요."
+        }
+      ]
+    },
+    {
+      "title": "회전 중심으로 옮긴 뒤 회전하고 다시 옮긴다",
+      "body": "pivot은 목적지 안의 비율입니다. `(0,0)`은 왼쪽 위, `(0.5,0.5)`는 중심, `(1,1)`은 오른쪽 아래입니다. 회전 전 rect의 좌상단이 `(x,y)`이고 크기가 `(w,h)`이면 중심점 P는 `(x+pivot_x*w, y+pivot_y*h)`입니다.\n\n각 꼭짓점에서 P를 빼면 회전 중심 기준 벡터 `(dx,dy)`가 됩니다. 이 벡터에 회전 행렬을 적용하고 P를 더합니다. 이 순서가 바뀌면 이미지가 자기 중심에서 도는 대신 화면 원점 둘레를 돌 수 있습니다.\n\n논리 좌표의 y는 아래로 증가합니다. 아래 식에서 양의 90도는 오른쪽 벡터를 아래로 돌리므로 화면에서는 시계 방향입니다. 수학 좌표의 y가 위로 증가하는 그림을 그대로 대입해 방향을 판단하지 말고, 단위 벡터 하나로 확인합니다.",
+      "codes": [
+        {
+          "label": "중심 이동 → 회전 → 위치 복원",
+          "language": "text",
+          "text": "P = (x + pivot_x*w, y + pivot_y*h)\ndx = corner_x - P.x\ndy = corner_y - P.y\nrotated_x = cos(theta)*dx - sin(theta)*dy + P.x\nrotated_y = sin(theta)*dx + cos(theta)*dy + P.y"
+        },
+        {
+          "label": "손으로 확인하는 90도",
+          "language": "text",
+          "text": "rect=(10,20,20,10), pivot=(0,0)\n회전 전 오른쪽 위=(30,20)\n중심 기준=(20,0) → 90도 뒤=(0,20)\n최종 오른쪽 위=(10,40)"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_rotated(",
+        "invariant": "원본 픽셀을 다시 만들지 않고 사각형 꼭짓점의 위치를 회전한다.",
+        "mayDiffer": "루트 API는 중심 좌표·전체UV·WHITE tint를 사용하고 학습 Draw는 회전 전 좌상단·정규화 pivot·부분UV·tint를 함께 받는다.",
+        "omitted": "애니메이션 시계와 둥근 모서리는 포함하지 않는다."
+      }
+    },
+    {
+      "title": "회전한 위치에 화면 변환을 적용한다",
+      "body": "회전은 논리 화면의 길이 단위에서 계산합니다. 그 뒤 화면 폭 Sx·높이 Sy에 대해 `ndc_x=2*x/Sx-1`, `ndc_y=1-2*y/Sy`로 바꿉니다. 폭과 높이로 서로 다른 비율을 나눈 뒤 NDC에서 같은 회전식을 적용하면 비정사각 화면에서 도형이 의도와 다르게 변형될 수 있습니다.\n\nUV는 이동·회전시키지 않고 해당 꼭짓점에 그대로 붙여 둡니다. GPU가 삼각형 내부 위치의 UV를 보간합니다. 여기서는 gl_Position의 w를 모두 1로 두므로 UV가 화면 도형 안에서 아핀 방식으로 이어집니다. 두 삼각형의 공통 꼭짓점에는 같은 위치와 UV를 사용해 내부 대각선 양쪽의 대응을 맞춥니다.\n\n회전은 CPU에서 네 꼭짓점에 수행하고 여섯 정점으로 펼칩니다. 원본 이미지의 크기가 커져도 이 기하 계산은 네 꼭짓점에 대한 작업입니다. 실제 화면 픽셀을 처리하는 비용은 GPU의 래스터화·샘플링 단계에 남습니다.",
+      "codes": [
+        {
+          "label": "논리 위치에서 NDC로",
+          "language": "cpp",
+          "text": "const double offset_x = (corner.s - static_cast<double>(draw.pivot_x)) * width;\n        const double offset_y = (corner.t - static_cast<double>(draw.pivot_y)) * height;\n        const double world_x = cosine * offset_x - sine * offset_y + pivot_x;\n        const double world_y = sine * offset_x + cosine * offset_y + pivot_y;\n        const double ndc_x = 2.0 * world_x / static_cast<double>(screen_width) - 1.0;\n        const double ndc_y = 1.0 - 2.0 * world_y / static_cast<double>(screen_height);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_rotated(",
+        "invariant": "원본 픽셀을 다시 만들지 않고 사각형 꼭짓점의 위치를 회전한다.",
+        "mayDiffer": "루트 API는 중심 좌표·전체UV·WHITE tint를 사용하고 학습 Draw는 회전 전 좌상단·정규화 pivot·부분UV·tint를 함께 받는다.",
+        "omitted": "애니메이션 시계와 둥근 모서리는 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "아핀 보간과 원근",
+          "body": "이 패스의 w=1 조건에서 사용하는 선형 대응입니다. 3D 투영처럼 꼭짓점마다 w가 다르면 기본 smooth 보간의 원근 보정도 고려해야 합니다. 화면 비율과 투영의 조건을 빼고 모든 텍스처 좌표를 같은 식으로 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "계산 전에 입력을 검증하고 축소 변환 전에 범위를 확인한다",
+      "body": "위치·크기·UV·색·pivot·각도는 모두 유한해야 합니다. 크기와 화면 크기는 양수, UV·tint·pivot은 0~1 범위로 제한합니다. 유효하지 않은 요청은 정점을 만들지 않고, ImageQuad는 GL 상태를 건드리기 전에 false를 반환합니다.\n\n큰 유한 각도는 먼저 double로 바꾸고 remainder(angle,360)으로 한 바퀴 범위로 줄입니다. 이렇게 하면 float 각도에 π를 먼저 곱해 무한대가 되는 중간 계산을 피할 수 있습니다. NaN과 무한대는 축약할 정상 각도가 아니므로 처음부터 거절합니다.\n\n좌표와 회전은 double 중간값으로 계산하고, 최종 NDC가 float 범위에 드는지 확인한 뒤 정점에 저장합니다. 화면 밖의 유한한 위치는 허용해 GPU 클리핑에 맡깁니다. 범위 검사와 화면 안에 있는지 검사는 서로 다른 조건입니다.",
+      "codes": [
+        {
+          "label": "각도 축약과 삼각 함수",
+          "language": "cpp",
+          "text": "const double degrees = std::remainder(static_cast<double>(draw.angle_degrees), 360.0);\n    const double radians = degrees * (3.14159265358979323846 / 180.0);\n    const double cosine = std::cos(radians);\n    const double sine = std::sin(radians);"
+        },
+        {
+          "label": "float 정점으로 옮기기 전 검사",
+          "language": "cpp",
+          "text": "if (!std::isfinite(ndc_x) || !std::isfinite(ndc_y) ||\n            ndc_x < -max_float || ndc_x > max_float ||\n            ndc_y < -max_float || ndc_y > max_float) {\n            return std::nullopt;\n        }\n\n        corners[i].x = static_cast<float>(ndc_x);\n        corners[i].y = static_cast<float>(ndc_y);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_rotated(",
+        "invariant": "원본 픽셀을 다시 만들지 않고 사각형 꼭짓점의 위치를 회전한다.",
+        "mayDiffer": "루트 API는 중심 좌표·전체UV·WHITE tint를 사용하고 학습 Draw는 회전 전 좌상단·정규화 pivot·부분UV·tint를 함께 받는다.",
+        "omitted": "애니메이션 시계와 둥근 모서리는 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "유한한 값도 표현 해상도는 제한된다",
+          "body": "매우 큰 위치에 아주 작은 폭을 더하면 서로 다른 꼭짓점이 같은 float 값으로 반올림될 수 있습니다. 이 검사는 비정상 값과 표현 범위 초과를 막지만, 모든 양수 크기의 도형이 화면 픽셀로 보인다고 보장하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "정점의 바이트 형식을 셰이더와 맞춘다",
+      "body": "정점 하나에 위치 2개, UV 2개, tint 4개를 float로 담습니다. 총 8개 float, 32바이트입니다. UV는 바이트 8, tint는 바이트 16에서 시작합니다. CPU 구조체의 배치, VertexAttribPointer의 stride/offset, 셰이더의 location이 한 계약을 이룹니다.\n\n색상은 정점마다 전달하지만 이번 사각형의 여섯 정점에는 같은 tint를 넣습니다. 그래서 내부에서도 같은 곱을 사용합니다. 다른 정점 색을 넣으면 보간된 색이 되어 그라데이션 표현으로 확장될 수 있습니다.\n\nVAO는 형식을 기록하고 VBO가 바이트를 보관합니다. 같은 VBO 이름에 새 정점 자료를 넣어도 속성의 버퍼 연결은 유지됩니다. 이 단계에서는 한 요청마다 6×32=192바이트를 BufferData로 갱신합니다. DYNAMIC_DRAW는 사용 패턴에 대한 힌트이며 무조건 빠른 경로나 메모리 재사용을 보장하는 명령은 아닙니다.",
+      "codes": [
+        {
+          "label": "32바이트 정점",
+          "language": "cpp",
+          "text": "struct Vertex {\n    float x;\n    float y;\n    float u;\n    float v;\n    float r;\n    float g;\n    float b;\n    float a;\n};"
+        },
+        {
+          "label": "위치·UV·색의 속성 설정",
+          "language": "cpp",
+          "text": "gl_.VertexAttribPointer(0,2,Float,False,sizeof(Vertex),nullptr);\n            gl_.EnableVertexAttribArray(0);\n            gl_.VertexAttribPointer(1,2,Float,False,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,u)));\n            gl_.EnableVertexAttribArray(1);\n            gl_.VertexAttribPointer(2,4,Float,False,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,r)));\n            gl_.EnableVertexAttribArray(2);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "static void push_vertex(",
+        "invariant": "CPU 정점의 속성 순서와 셰이더 입력 위치를 일치시킨다.",
+        "mayDiffer": "루트는 local/half/radius/channel까지14개float를 담고 학습 이미지 정점은8개float다.",
+        "omitted": "여러 이미지를 한 draw로 합치는 배처는 여기서 추가하지 않는다."
+      }
+    },
+    {
+      "title": "샘플과 tint는 네 성분을 각각 곱한다",
+      "body": "정점 셰이더는 위치를 gl_Position으로, UV와 tint를 다음 단계로 넘깁니다. 조각 셰이더는 texture로 얻은 샘플과 tint를 성분별로 곱합니다. tint가 `(1,1,1,1)`이면 값이 유지되고 빨강만 0.5면 빨강 성분만 절반이 됩니다.\n\n예를 들어 샘플 `(0.8,0.4,0.2,0.5)`와 tint `(0.5,1,0.5,0.5)`를 곱하면 셰이더 출력은 `(0.4,0.4,0.1,0.25)`입니다. 이 시점에는 RGB에 알파 0.25를 추가로 곱하지 않습니다. 원본은 straight-alpha 픽셀이고 블렌딩 계수에서 그 곱을 적용할 것이기 때문입니다.\n\n학습 tint는 float 0~1을 사용합니다. 현재 루트의 Color는 바이트 성분이며 정점을 넣는 push_vertex에서 255로 나눕니다. WHITE의 255와 셰이더의 1은 이 변환으로 연결됩니다.",
+      "codes": [
+        {
+          "label": "정점 셰이더",
+          "language": "glsl",
+          "text": "#version 330 core\nlayout(location=0) in vec2 a_position;\nlayout(location=1) in vec2 a_uv;\nlayout(location=2) in vec4 a_tint;\nout vec2 v_uv;\nout vec4 v_tint;\nvoid main(){gl_Position=vec4(a_position,0,1);v_uv=a_uv;v_tint=a_tint;}"
+        },
+        {
+          "label": "조각 셰이더",
+          "language": "glsl",
+          "text": "#version 330 core\nin vec2 v_uv;\nin vec4 v_tint;\nuniform sampler2D u_image;\nlayout(location=0) out vec4 out_color;\nvoid main(){out_color=texture(u_image,v_uv)*v_tint;}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "vec4 c = sampled * v_color;",
+        "invariant": "텍스처 샘플과 정점 색상을 성분별로 곱한 뒤 블렌딩에 넘긴다.",
+        "mayDiffer": "루트는 글리프와 거리 함수도 같은 셰이더에서 처리하고 학습 셰이더는 RGBA 이미지만 다룬다.",
+        "omitted": "sRGB 색 관리와 조명 계산은 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "수치상의 색 곱과 색 관리",
+          "body": "여기서는 RGBA8 성분을 읽어 곱하고 framebuffer-sRGB 변환을 끈 수치 경로를 사용합니다. sRGB 입력을 선형 광량으로 변환해 합성하는 색 관리까지 수행한 결과로 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "tint 알파와 배경 합성을 두 단계로 따라간다",
+      "body": "tint는 새로 그릴 조각의 RGBA를 만듭니다. 블렌딩은 그 조각과 프레임버퍼의 기존 값을 섞습니다. 이번 straight-alpha 입력에서 합성식은 `RGBout=RGBsrc*As + RGBdst*(1-As)`, `Aout=As + Ad*(1-As)`입니다. RGBdst는 프레임버퍼에 저장된 값입니다. 불투명 배경이나 premultiplied로 누적한 배경에 이 식을 적용하면 source-over 합성이 됩니다. RGB와 알파의 source 계수가 서로 다릅니다.\n\n불투명 배경 Ad=1 위에 알파 As=0.25인 아이콘을 그리면 출력 알파는 여전히 1입니다. 알파 source 계수도 SRC_ALPHA로 두면 0.25²+1×0.75=0.8125가 되어 저장 알파가 달라집니다. 그래서 BlendFuncSeparate로 네 계수를 지정합니다.\n\n현재 루트 렌더러는 RGB·알파에 같은 계수를 쓰는 기존 BlendFunc 경로입니다. 학습 패스는 저장 알파까지 위 식으로 맞춥니다. 같은 RGB를 보더라도 두 설정의 알파 결과를 구별해 레퍼런스를 읽습니다. [Khronos RGB·알파 계수 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glBlendFuncSeparate.xhtml)에서 인자 순서를 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "straight 입력의 RGB와 알파 계수",
+          "language": "cpp",
+          "text": "gl_.BlendEquation(FuncAdd);\ngl_.BlendFuncSeparate(SrcAlpha,OneMinusSrcAlpha,One,OneMinusSrcAlpha);\ngl_.Enable(Blend);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "vec4 c = sampled * v_color;",
+        "invariant": "텍스처 샘플과 정점 색상을 성분별로 곱한 뒤 블렌딩에 넘긴다.",
+        "mayDiffer": "루트는 글리프와 거리 함수도 같은 셰이더에서 처리하고 학습 셰이더는 RGBA 이미지만 다룬다.",
+        "omitted": "sRGB 색 관리와 조명 계산은 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "투명한 중간 결과를 다시 사용할 때",
+          "body": "투명 검정에서 이 식으로 누적한 RGB는 premultiplied 형태입니다. 그 결과를 다시 텍스처로 읽어 합성한다면 표현에 맞는 계수를 선택해야 합니다. 원본 PNG의 straight-alpha와 렌더 타깃의 누적 표현을 같은 것으로 가정하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "검증·업로드·상태 설정이 끝나야 제출한다",
+      "body": "ImageQuad의 draw는 요청을 정점으로 변환한 뒤 이미지와 초기화 상태를 확인합니다. 그 다음 VAO/VBO를 바인딩하고 정점을 갱신합니다. 바인딩이나 갱신에 실패하면 DrawArrays를 호출하지 않습니다. 실패했는데도 그리기를 계속하면 버퍼에 남아 있는 옛 정점으로 잘못된 이미지가 나타날 수 있습니다.\n\n텍스처 유닛 0에 이미지를 연결하고 sampler 유니폼에는 유닛 번호 0을 전달합니다. 프로그램·블렌드 상태까지 성공한 뒤 여섯 정점을 제출합니다. 요청마다 이 경계가 끝나므로 이후 CPU Draw 객체를 바꿔도 이미 전달한 정점 자료는 독립적입니다.\n\n정상 종료에서는 바인딩을 비우고 블렌딩을 끕니다. 이는 이 프로젝트가 정한 패스 사이의 상태이지, 호출 전의 임의 상태 전체를 저장·복구하는 API는 아닙니다. GL 오류를 반환하면 호출자가 실패를 처리해야 하며 실패 상태의 완전 복원까지 약속하지 않습니다.",
+      "codes": [
+        {
+          "label": "자료 갱신에 실패하면 제출하지 않는다",
+          "language": "cpp",
+          "text": "gl_.BindVertexArray(array_);bool ok=gl_.GetError()==0;\n        if(ok){gl_.BindBuffer(ArrayBuffer,buffer_);ok=gl_.GetError()==0;}\n        if(ok){gl_.BufferData(ArrayBuffer,sizeof(*vertices),vertices->data(),DynamicDraw);ok=gl_.GetError()==0;}"
+        },
+        {
+          "label": "제출과 정상 패스 종료",
+          "language": "cpp",
+          "text": "if(ok){gl_.DrawArrays(Triangles,0,6);ok=gl_.GetError()==0;}\n        gl_.BindVertexArray(0);gl_.BindBuffer(ArrayBuffer,0);\n        gl_.UseProgram(0);gl_.ActiveTexture(Texture0);gl_.BindTexture(Texture2D,0);gl_.Disable(Blend);\n        const bool clean=gl_.GetError()==0;\n        return ok && clean;"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "static void ensure_texture(",
+        "invariant": "상태가 결정하는 텍스처와 정점의 사용 순서를 맞춘다.",
+        "mayDiffer": "루트는 텍스처 경계에서 배치를 제출하고 학습 ImageQuad는 요청마다 즉시 제출한다.",
+        "omitted": "임의 외부 렌더러의 GL 상태 복원은 지원하지 않는다."
+      }
+    },
+    {
+      "title": "소유 저장소는 같은 핸들 검사로 새 그리기를 연결한다",
+      "body": "ImageStore에는 ImageQuad와 Draw를 받는 draw 오버로드를 추가합니다. 전체 핸들을 조회한 뒤, 찾은 Texture를 그 호출 동안 빌려줍니다. 잘못된 핸들이면 기하 변환이나 GL 호출에 들어가지 않습니다.\n\n고정 Quad는 기존 텍스처·핸들 진단 도구에서 유지하고, 누적 게임의 표시 경로는 ImageQuad를 사용합니다. 따라서 저장소·이미지 로드·해제 정책을 새로 만들지 않고 표현 기능만 교체할 수 있습니다.\n\n텍스처 데이터는 변하지 않습니다. 같은 핸들을 전체 이미지, 부분 확대, 반투명 회전에 연속해서 사용해도 세 텍스처를 다시 만들 필요가 없습니다. 각 요청은 위치·UV·tint 정점만 새로 만듭니다.",
+      "codes": [
+        {
+          "label": "수명 확인 후 표현을 위임한다",
+          "language": "cpp",
+          "text": "bool draw(study_image_quad::ImageQuad& quad,Handle handle,\n              const study_image_quad::Draw& request) const noexcept {\n        const auto* image=images_.find(handle);\n        return image && quad.draw(*image,request);\n    }"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_tinted(",
+        "invariant": "유효 이미지 조회와 그리기 자료 생성을 분리하여 소유권을 유지한다.",
+        "mayDiffer": "루트는 공용 정점 큐, 학습은 ImageQuad의 즉시 제출을 사용한다.",
+        "omitted": "이미지 캐시·자동 재로딩은 추가하지 않는다."
+      }
+    },
+    {
+      "title": "누적 게임에서 세 가지 표현을 확인한다",
+      "body": "메뉴와 플레이 화면이 고르는 핸들은 유지합니다. 첫 아이콘은 전체 그림을 기울이고, 두 번째는 위쪽 절반을 선택해 색을 곱하며, 세 번째는 알파 0.5의 회전 그림으로 배경과 섞습니다. 같은 그림을 읽는 세 요청의 차이가 화면에서 드러납니다.\n\n색상 Stream을 finish한 뒤 전체 클립으로 이미지 요청을 보냅니다. ImageQuad가 블렌딩을 꺼서 정상 종료하므로 다음 프레임의 불투명 보드 경로와도 상태를 맞춥니다. 이 경계와 GL 컨텍스트의 수명은 계속 유지해야 합니다.\n\n이미지 3회 제출이 더해져 전체 메뉴는 4draw, 게임은 5draw입니다. 콘솔의 opaque stream 통계는 색상 배치만 셉니다. 이미지 변환과 tint는 표현 자료이며 규칙 상태·입력 기록·규칙 해시에는 들어가지 않습니다.",
+      "codes": [
+        {
+          "label": "같은 핸들을 세 요청에서 사용",
+          "language": "cpp",
+          "text": "const auto icon=app.screen()==study_app::Screen::menu ? menu_icon : play_icon;\n            study_image_quad::Draw badge;\n            badge.angle_degrees=app.screen()==study_app::Screen::menu ? -12.f : 12.f;\n            study_image_quad::Draw crop;\n            crop.rect={20,88,48,32};crop.uv={0,0,1,.5f};crop.tint={.5f,1,.75f,1};\n            study_image_quad::Draw translucent;\n            translucent.rect={28,148,40,40};translucent.angle_degrees=30;\n            translucent.tint={.8f,.6f,1,.5f};\n            if(!sink.set_clip(full) || !images.draw(badge_quad,icon,badge) ||\n               !images.draw(badge_quad,icon,crop) || !images.draw(badge_quad,icon,translucent)) return 1;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "방향을 살펴보는 기준점",
+          "body": "원본 왼쪽 위의 빨간 두 텍셀을 찾으면 UV 반전과 회전을 구별하기 쉽습니다. 도형의 모양만 보지 말고 원본의 비대칭 표시가 어느 꼭짓점으로 이동했는지도 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "수식과 실제 픽셀을 다른 방법으로 검사한다",
+      "body": "CPU 검사는 손으로 계산한 90도 모서리, 중심에서의 거리 보존, 한 바퀴를 더한 각도의 동등성을 확인합니다. UV 반전·같은 끝점·tint 값, NaN·무한대·float 표현 범위도 따로 검사합니다. GPU가 필요 없는 순수 함수이므로 실패 원인을 먼저 좁힐 수 있습니다.\n\nGPU 검사에서는 화면 픽셀 중심을 논리 좌표로 바꾸고 역회전으로 사각형 안의 위치를 찾습니다. 그 위치에서 UV와 NEAREST 샘플, tint와 블렌드 결과를 독립적으로 계산해 읽어온 RGBA와 비교합니다. 정점 생성 함수를 그대로 호출해 기대값을 만드는 방식보다 대응 오류를 발견하기 좋습니다.\n\n비스듬한 도형의 래스터 경계와 텍셀 경계 근처는 부동소수·서브픽셀 반올림 규칙 때문에 별도 취급합니다. 비교에서 제외한 좁은 구간은 개수를 남기고, 나머지 내부·외부 픽셀을 검사합니다. 저장소 핸들 무효와 잘못된 각도는 프레임버퍼를 바꾸지 않아야 합니다.",
+      "codes": [
+        {
+          "label": "순수 기하 진단 도구",
+          "language": "bash",
+          "text": "out/study61/transform_demo\n# rotated top-right logical=(10.0,40.0), UV=(1.0,0.0)"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_rotated(",
+        "invariant": "원본 픽셀을 다시 만들지 않고 사각형 꼭짓점의 위치를 회전한다.",
+        "mayDiffer": "루트 API는 중심 좌표·전체UV·WHITE tint를 사용하고 학습 Draw는 회전 전 좌상단·정규화 pivot·부분UV·tint를 함께 받는다.",
+        "omitted": "애니메이션 시계와 둥근 모서리는 포함하지 않는다."
+      }
+    },
+    {
+      "title": "파일의 역할과 빌드 방법",
+      "body": "image_geometry.h는 입력 검증과 CPU 정점 계산, image_quad.h는 GPU 형식·셰이더·상태·제출, image_store.h는 소유한 이미지 조회를 담당합니다. main은 화면별 핸들과 세 표현 요청을 정합니다. 완성 파일을 펼칠 때 이 책임 단위로 따라가면 수식과 GPU 호출을 한꺼번에 외울 필요가 없습니다.\n\nSDL 실행 파일에서 게임을 확인하거나 SCRIPTED 구성으로 CPU·대역 계약을 확인합니다. --image PATH는 마지막 인자로 지정하고, Windows 다중 구성 빌드는 실행 파일의 Release 등 구성 경로를 반영합니다.\n\n필터를 바꾸면 샘플 결과가, tint를 바꾸면 조각 색이, 위치·pivot·각도를 바꾸면 도형이 달라집니다. 각각 무엇을 변경하는지 설명한 뒤 한 값씩 바꾸어 보세요. 같은 사각형 경로를 유지하면서 입력의 의미를 추적하는 것이 실습의 중심입니다.",
+      "codes": [
+        {
+          "label": "누적 게임 실행",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/61-image-transform -B out/study61 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study61 -j3\nctest --test-dir out/study61 --output-on-failure\nout/study61/transform_demo\nout/study61/tetris --seed 1 --image out/study61/assets/player.png\npython3 scripts/check_learning_transform.py"
+        },
+        {
+          "label": "CPU 기하 계산 전체",
+          "language": "cpp",
+          "file": "checkpoints/61-image-transform/renderer/image_geometry.h",
+          "collapsed": true
+        },
+        {
+          "label": "GPU 이미지 그리기 전체",
+          "language": "cpp",
+          "file": "checkpoints/61-image-transform/renderer/image_quad.h",
+          "collapsed": true
+        },
+        {
+          "label": "소유 저장소 연결",
+          "language": "cpp",
+          "file": "checkpoints/61-image-transform/renderer/image_store.h",
+          "collapsed": true
+        },
+        {
+          "label": "누적 게임의 요청 구성",
+          "language": "cpp",
+          "file": "checkpoints/61-image-transform/src/main.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void draw_image_rotated(",
+        "invariant": "원본 픽셀을 다시 만들지 않고 사각형 꼭짓점의 위치를 회전한다.",
+        "mayDiffer": "루트 API는 중심 좌표·전체UV·WHITE tint를 사용하고 학습 Draw는 회전 전 좌상단·정규화 pivot·부분UV·tint를 함께 받는다.",
+        "omitted": "애니메이션 시계와 둥근 모서리는 포함하지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "61-1",
+      "question": "목적지 사각형을 유지하며 UV를 (0,0)~(1,0.5)로 바꿨습니다. 무엇이 달라지는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "도형 높이가 자동으로 절반이 된다."
+        },
+        {
+          "id": "b",
+          "text": "원본 위쪽 절반이 같은 목적지 사각형을 채운다."
+        },
+        {
+          "id": "c",
+          "text": "원본 바이트 배열이 절반으로 잘려 저장된다."
+        },
+        {
+          "id": "d",
+          "text": "GPU 텍스처의 해상도가 절반이 된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "원본 위쪽 절반이 같은 목적지 사각형을 채운다.",
+      "explanation": "목적지와 원본 영역은 독립입니다. UV가 선택한 위쪽 절반을 전체 목적지에 대응시키며 원본 저장소의 크기나 자료는 바뀌지 않습니다."
+    },
+    {
+      "id": "61-2",
+      "question": "논리 y가 아래로 증가합니다. 중심 기준 벡터 (20,0)을 양의 90도로 회전하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0,-20)"
+        },
+        {
+          "id": "b",
+          "text": "(-20,0)"
+        },
+        {
+          "id": "c",
+          "text": "(20,20)"
+        },
+        {
+          "id": "d",
+          "text": "(0,20)"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "(0,20)",
+      "explanation": "x′=cosθ·x−sinθ·y, y′=sinθ·x+cosθ·y에서 θ=90도이면 (0,20)입니다. 오른쪽이 아래로 돌아 화면에서 시계 방향입니다."
+    },
+    {
+      "id": "61-3",
+      "question": "샘플 (0.8,0.4,0.2,0.5)와 tint (0.5,1,0.5,0.5)의 조각 셰이더 출력은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0.4,0.4,0.1,0.25)"
+        },
+        {
+          "id": "b",
+          "text": "(0.1,0.1,0.025,0.25)"
+        },
+        {
+          "id": "c",
+          "text": "(0.4,0.4,0.1,0.5)"
+        },
+        {
+          "id": "d",
+          "text": "(0.8,0.4,0.2,0.25)"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "(0.4,0.4,0.1,0.25)",
+      "explanation": "RGBA를 각각 곱합니다. straight-alpha 샘플이므로 이 셰이더에서 RGB에 알파를 추가로 곱하지 않고, 이후 SRC_ALPHA 블렌딩 단계가 그 곱을 적용합니다."
+    },
+    {
+      "id": "61-4",
+      "question": "학습 패스에서 배경 알파 1 위에 조각 알파 0.25를 합성합니다. 저장 알파는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0.25"
+        },
+        {
+          "id": "b",
+          "text": "0.8125"
+        },
+        {
+          "id": "c",
+          "text": "1"
+        },
+        {
+          "id": "d",
+          "text": "0"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "1",
+      "explanation": "알파 계수는 ONE과 ONE_MINUS_SRC_ALPHA입니다. 0.25 + 1×(1−0.25)=1입니다. 0.8125는 source 알파에도 SRC_ALPHA를 써 제곱한 결과입니다."
+    },
+    {
+      "id": "61-5",
+      "question": "VBO를 바인딩했지만 새 정점 업로드가 실패했습니다. ImageQuad의 올바른 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "이전 정점이 남아 있으므로 계속 그린다."
+        },
+        {
+          "id": "b",
+          "text": "DrawArrays를 호출하지 않고 정리 후 실패를 반환한다."
+        },
+        {
+          "id": "c",
+          "text": "이미지 핸들의 발급 번호만 바꿔 재사용한다."
+        },
+        {
+          "id": "d",
+          "text": "UV를 0으로 초기화하고 성공으로 반환한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "DrawArrays를 호출하지 않고 정리 후 실패를 반환한다.",
+      "explanation": "실패 후 제출하면 옛 위치나 UV로 그려질 수 있습니다. 자료와 상태가 준비된 뒤에만 제출하고, 실패는 호출자에게 전달합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "원본 8×8의 첫·마지막 열 중심 UV를 계산하고 목적지 확대와 구별한다.",
+      "pivot을 중심에서 왼쪽 위로 바꾸고 90도 회전한 꼭짓점을 손으로 계산한다.",
+      "UV 끝점 반전과 색상 곱을 각각 바꾸어 어떤 자료가 변하는지 설명한다.",
+      "텍스처 알파와 tint 알파를 곱한 뒤 RGB·알파의 블렌드 계수를 따라 계산한다."
+    ],
+    "failureChecks": [
+      "입력 검증 실패에서 GL을 호출하지 않는지 확인한다.",
+      "바인딩·업로드 실패 뒤 옛 정점으로 그리지 않는지 확인한다.",
+      "NaN·Inf·큰 유한 각도를 구별하여 처리하는지 확인한다.",
+      "색상 Stream의 제출과 이미지 패스 상태 변경 순서를 확인한다."
+    ],
+    "expected": "하나의 소유 이미지로 여러 표현을 만들고 좌표·샘플·색·배경 합성 단계별로 결과와 실패 원인을 설명한다."
+  }
+}

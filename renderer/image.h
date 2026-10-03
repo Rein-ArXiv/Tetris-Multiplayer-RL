@@ -16,18 +16,24 @@
 //   draw : 텍스처를 가리키는 쿼드를 공용 배처에 넣고 샘플링·블렌딩은 GPU에 맡김.
 // ─────────────────────────────────────────────────────────────────────────────
 
-using ImageHandle = int;  // 0 = invalid/미로드
+// Opaque process-local token: 0 is invalid. Never narrow, persist, increment or
+// interpret it as a GL name. Copying a token borrows the same image; it does not
+// duplicate ownership. All image operations run on the rendering thread.
+using ImageHandle = std::uint64_t;
 
 // 실패 시 0 리턴 (파일 없음, 디코드 실패 등).
-// 성공 시 양수 핸들.
+// 성공 시 0이 아닌 핸들. 슬롯 재사용/저장소 재초기화 후에도 해제된 토큰은 무효.
 ImageHandle image_load(const char* path);
 
 // RGBA8 픽셀 배열에서 이미지 생성. 기본/절차적 fallback 아이콘 등에 사용.
 // pixels는 w*h*4 바이트이며 호출 중 GL_RGBA8 텍스처로 복사된다. 반환 뒤에는
-// 호출자 버퍼를 보관하지 않는다.
+// 호출자 버퍼를 보관하지 않는다. 읽을 수 있는 w*h*4 바이트는 호출자가 보장한다.
+// 현재 GL 컨텍스트에서 호출한다. 크기 제한/GL 업로드/저장소 할당 실패는 0을 반환한다.
 ImageHandle image_create_rgba(const uint8_t* pixels, int w, int h);
 
 // 해제. 핸들이 0 이거나 유효하지 않으면 no-op.
+// Flush any pending use before deleting; must run on the rendering thread
+// with its GL context and renderer alive. The caller then discards this handle.
 void image_unload(ImageHandle h);
 
 // 픽셀 단위. (x, y) 는 좌상단. 좌상단이 텍스처 (0,0) 에 매핑.
@@ -36,6 +42,7 @@ void draw_image(ImageHandle h, int x, int y, int w, int h_px);
 // tint 는 RGBA 각 채널에 곱해짐. {255,255,255,255} = 원본.
 void draw_image_tinted(ImageHandle h, int x, int y, int w, int h_px, Color tint);
 
+// 유한한 각도는 한 바퀴 범위로 축약하며, NaN/Inf 각도는 그리지 않는다.
 // 회전 드로우 — (cx, cy)가 중심, angle_deg는 시계방향(화면 y가 아래로
 // 증가하므로 표준 수학 좌표계의 반시계와 반대). CPU에서 쿼드 꼭짓점만
 // 회전하고 내부 픽셀 보간은 GPU 래스터라이저가 맡는다. 메뉴/상점의 실시간
@@ -44,7 +51,7 @@ void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
                         float angle_deg);
 
 // 이미지 크기 질의 — 원본 너비/높이가 필요할 때 (예: 자연 크기로 드로우).
-//   반환 false = 핸들 무효.
+//   반환 false = 핸들 무효. 실패 시 w_out/h_out은 유지된다.
 bool image_size(ImageHandle h, int& w_out, int& h_out);
 
 // 내부: renderer_init 시점 호출 — GL 텍스처 핸들 저장소 초기화.

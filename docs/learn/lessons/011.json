@@ -1,0 +1,339 @@
+{
+  "id": "lesson-11",
+  "title": "창과 GL 컨텍스트: 서로 다른 자원",
+  "shortTitle": "GL 컨텍스트와 수명",
+  "state": "reviewed",
+  "version": "1.0.2",
+  "start": "시작: 플랫폼이 창·이벤트·시간을 관리하지만 SDL 창에는 GL 사용 환경이 없습니다.",
+  "finish": "완료: SDL 창에 3.3 Core 컨텍스트를 연결하고, SDL이 보고한 구성과 실패 시 정리 순서를 검사합니다. 창·컨텍스트·current 연결을 구분해 설명합니다.",
+  "objective": "그리기 명령을 보내기 전에 명령이 사용할 환경부터 만듭니다. 하나의 창과 하나의 컨텍스트를 생성하고, 요청과 결과·소유권과 스레드 연결·초기화와 표시를 각각 구분합니다.",
+  "prerequisites": [
+    "10차시 체크포인트",
+    "RAII와 멤버 파괴 순서",
+    "플랫폼 초기화의 성공·실패 계약"
+  ],
+  "validation": [
+    "Linux SDL 빌드·21개 학습/실제 소스 실패 주입 경로 확인",
+    "실제 offscreen 생성·SDL 버전 설정 3.3 조회·단일 버퍼 거부 확인 (실제 GL 버전 조회는 별도 단계)",
+    "실제 창 표시·GPU 렌더링·Windows/macOS 실행 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "OpenCode DeepSeek 선택 코드 구현·문제 후보를 SDL2 공식 계약, 현재 소스, Linux 실패 주입/실제 offscreen 결과와 대조",
+    "draftJob": "gl-context / gl-production",
+    "corrections": [
+      "CreateContext의 current 설정을 불확실한 동작으로 설명한 후보를 폐기",
+      "속성 요청 실패 시 macOS 후속 호출로 첫 오류를 덮지 않도록 보정",
+      "모든 정답이 a이던 문제 후보를 적용형 질문과 균형 잡힌 보기로 재작성",
+      "창 없는 GL과 소프트웨어 드라이버의 가능성을 Part 2에도 정정",
+      "SDL2 GetAttribute의 version/profile은 내부 설정값일 수 있음. GL 직접 조회와 구분하도록 12차시 실제 실행 결과에 따라 정정."
+    ],
+    "learnerProseEdit": {
+      "date": "2026-09-21",
+      "note": "집필자 검수 보고는 내부 기록에만 유지. 학습 본문은 구현 원리·실행 방법·예상 결과로 정리. 문항 ID와 코드 유지."
+    },
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "플랫폼 구현은 OS 자원을 소유하고, main은 공통 함수로 반복 순서를 정합니다.",
+      "같은 함수 계약을 구현하더라도 OS별 창·입력 검증은 별도로 필요합니다."
+    ],
+    "bridge": "입력과 시간의 경계가 생겼으므로, 이제 SDL 구현 안에 그래픽 명령을 사용할 환경을 추가합니다. main의 반복문은 그대로 유지합니다."
+  },
+  "sections": [
+    {
+      "title": "창이 생겼는데 왜 그릴 준비는 끝나지 않았을까",
+      "body": "**먼저 예측해 보세요.** 제목과 닫기 버튼이 있는 창을 만들었습니다. 이 사실만으로 C++에서 OpenGL 함수를 호출할 준비가 끝났다고 할 수 있을까요? 창 생성과 GL 컨텍스트 생성을 각각 실패시켜 보면 답이 분명해집니다.\n\n창은 OS가 관리하는 화면 영역과 사건 전달의 대상입니다. 컨텍스트는 **OpenGL 명령이 사용할 상태와 자원 접근 환경**입니다. 같은 프로그램 안에서 창은 살아 있어도 컨텍스트 생성은 실패할 수 있습니다. 창 핸들과 컨텍스트 핸들을 다른 변수에 보관해야 하는 이유입니다.\n\n| 대상 | 이 실습의 표현 | 맡는 일 |\n| --- | --- | --- |\n| SDL 실행 환경 | `SdlRuntime` | SDL 초기화와 전체 종료 |\n| 창 | `SDL_Window*` | 제목·크기·입력 사건과 화면 표시 대상 |\n| GL 컨텍스트 | `SDL_GLContext` | GL 상태와 객체를 사용할 환경 |\n| current 연결 | 호출 스레드의 연결 상태 | GL 호출이 어느 컨텍스트에 적용되는지 결정 |\n\n여기서 GL 상태란 예를 들어 어떤 셰이더 프로그램을 선택했는지, 색을 섞는 기능을 켰는지 같은 설정입니다. 아직 그 설정들을 구현할 필요는 없습니다. **GL 호출에 매번 창이나 컨텍스트를 인자로 쓰지 않는 대신, 호출 전에 연결해 둔 상태를 사용한다**는 점을 이해하면 됩니다.\n\n이번에는 SDL 백엔드에만 GL을 추가합니다. `SCRIPTED`는 창 없는 입력 대역이며, 학습용 `WIN32`는 창과 입력까지만 구현합니다. SDL을 Windows에서 쓰는 것과 `STUDY_PLATFORM=WIN32`를 선택하는 것은 다릅니다. 누적 코드의 공통 main에는 아직 그리기 함수가 없으므로 세 구현 모두 입력·시간 계약으로 연결되지만, GL 준비가 보장되는 경로는 SDL뿐입니다.",
+      "notes": [
+        {
+          "kind": "적용 범위",
+          "title": "창 없이도 그래픽 작업을 할 수 있나요?",
+          "body": "가능합니다. [Mesa EGL 문서](https://docs.mesa3d.org/egl.html)는 surfaceless·pbuffer 구성을 설명합니다. 여기서 창 → 컨텍스트 순서를 정한 것은 화면에 표시하는 SDL 실습의 설계입니다. OpenGL의 모든 사용 방식이 보이는 창을 요구한다는 뜻은 아닙니다."
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "static SDL_GLContext s_glctx",
+        "invariant": "플랫폼이 창과 GL 컨텍스트를 함께 준비한다.",
+        "mayDiffer": "현재 게임은 SDL 외에도 네이티브 WGL 초기화를 제공한다.",
+        "omitted": "WGL의 임시 컨텍스트·함수 로딩과 렌더러 초기화"
+      }
+    },
+    {
+      "title": "소유한 핸들과 current 연결은 다른 상태다",
+      "body": "`SDL_GLContext`는 SDL2에서 `void*` 별칭인 불투명 핸들입니다. 불투명하다는 것은 주소처럼 전달하고 비교할 수 있지만 내부 구조를 애플리케이션이 해석하지 않는다는 뜻입니다. 게임이 만든 `new` 객체가 아니므로 `delete`로 해제하지 않습니다.\n\n그 핸들을 변수에 저장한 것만으로 모든 스레드가 GL을 사용할 수 있는 것도 아닙니다. 스레드는 프로그램의 실행 흐름이고, **current는 그 실행 흐름에 연결된 GL 컨텍스트**입니다. 예를 들어 main 스레드에 C를 current로 설정하고 다른 작업 스레드로 C의 값만 복사해도, 작업 스레드에 C가 연결되지는 않습니다. 핸들의 복사와 실행 환경의 설정은 별개의 작업입니다.\n\nSDL2의 [SDL_GL_CreateContext 계약](https://wiki.libsdl.org/SDL2/SDL_GL_CreateContext)은 생성 성공 시 그 컨텍스트를 current로도 만듭니다. 이번 실습은 생성 후 SDL의 조회 함수로 컨텍스트와 창 연결을 확인합니다. 여러 컨텍스트를 전환할 때는 MakeCurrent 같은 명시적 연결 작업이 필요하지만 지금은 하나만 사용합니다.\n\n공개 플랫폼 함수는 초기화한 main 스레드에서 호출합니다. 이 약속을 헤더에 적어 두며, `unique_ptr`를 쓴다고 스레드 간 호출이나 GL 동시 사용까지 안전해지는 것은 아닙니다. 다른 스레드로 렌더링을 옮기는 설계에는 연결 해제·재연결·동기화가 추가로 필요합니다.",
+      "codes": [
+        {
+          "label": "연결 확인 · 컨텍스트 생성 직후의 부분 발췌",
+          "language": "cpp",
+          "text": "        // SDL2 docs say CreateContext makes the context current; verify that\n        // with SDL's own accessors instead of trusting an implicit side effect.\n        if (SDL_GL_GetCurrentContext() != candidate->context.get()) {\n            std::fputs(\"gl context is not current\\n\", stderr);\n            return false;\n        }\n        if (SDL_GL_GetCurrentWindow() != candidate->window.get()) {\n            std::fputs(\"gl current window mismatch\\n\", stderr);\n            return false;\n        }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "용어 구별",
+          "title": "운영체제의 문맥 교환과 같은 뜻인가요?",
+          "body": "OS의 문맥 교환은 CPU 실행을 이어 갈 레지스터 등의 상태를 바꾸는 일입니다. 여기의 GL 컨텍스트는 그래픽 API의 상태 환경입니다. “컨텍스트”라는 단어가 같아도 저장하는 상태와 관리 주체가 다릅니다. [Microsoft의 렌더링 컨텍스트 설명](https://learn.microsoft.com/en-us/windows/win32/opengl/rendering-contexts)은 스레드의 current 연결과 DC의 차이를 함께 다룹니다."
+        }
+      ]
+    },
+    {
+      "title": "요청하는 기능 수준을 창보다 먼저 적는다",
+      "body": "버전 3.3은 소수 하나가 아니라 **주 버전 3과 부 버전 3의 순서쌍**입니다. Core는 사용할 API 범위를 고르는 프로파일입니다. 현대적인 셰이더 기반 경로를 전제로 삼고, 오래된 호환 기능에 우연히 의존하지 않도록 Core를 요청합니다. 버퍼·셰이더·정점 배열의 실제 사용은 차례로 구현합니다.\n\n더블 버퍼는 화면에 내보내는 쪽과 새 프레임을 준비하는 쪽을 구분하는 표시 방식입니다. `SDL_GL_DOUBLEBUFFER=1`은 그 구성을 요청합니다. 이것만으로 그림이 그려지거나 표시가 자동 교체되지는 않습니다. VSync 설정도 별개의 일이며, 더블 버퍼를 60 FPS 보장으로 읽으면 안 됩니다.\n\n[SDL_GL_SetAttribute](https://wiki.libsdl.org/SDL2/SDL_GL_SetAttribute)는 창을 만들기 전에 호출합니다. 창 생성에 필요한 GL 구성이 그때 선택될 수 있기 때문입니다. 성공은 0, 실패는 음수이므로 아래 함수는 첫 실패에서 요청을 중단합니다. `&&`의 단락 평가로 뒷 호출을 건너뛰어 첫 오류를 그대로 보고할 수 있습니다.",
+      "codes": [
+        {
+          "label": "추가할 보조 함수 · GL 속성 요청",
+          "language": "cpp",
+          "text": "bool request_gl_attributes()\n{\n    const bool base =\n        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3) == 0 &&\n        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3) == 0 &&\n        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE) == 0 &&\n        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1) == 0;\n#ifdef __APPLE__\n    if (!base) return false; // Preserve the first SDL error for the caller.\n    // Request a forward-compatible core context on macOS.\n    const bool forward = SDL_GL_SetAttribute(\n        SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG) == 0;\n#else\n    const bool forward = true;\n#endif\n    return base && forward;\n}"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "SDL_GL_SetAttribute",
+        "invariant": "GL 창을 만들기 전에 필요한 버전·프로파일을 요청하고 실패를 확인한다.",
+        "mayDiffer": "현재 게임은 실패를 bool 반환 대신 should_close 상태로 전달한다.",
+        "omitted": "셰이더 컴파일 성공과 실제 표시 성능의 검증"
+      }
+    },
+    {
+      "title": "새 자원의 삭제 방법을 소유자에 넣는다",
+      "body": "GL 핸들을 raw 변수로만 추가하면 각 조기 반환 위치에서 삭제 여부를 계산해야 합니다. 창 생성 뒤 실패한 경로에는 창만 있고, 컨텍스트 생성 뒤 실패한 경로에는 둘 다 있습니다. 분기가 늘수록 사람이 정리 목록을 놓치기 쉽습니다.\n\n`unique_ptr<void, GlContextDeleter>`는 내부 구조를 몰라도 **SDL의 전용 해제 함수**를 호출하게 해 줍니다. 이 타입의 목적은 메모리 내용을 읽는 것이 아니라 핸들 하나의 소유권을 표현하는 것입니다. `.get()`은 소유권을 넘기지 않는 조회이고, `.reset(handle)`은 새 핸들을 소유하게 합니다. 빈 소유자는 삭제자를 호출하지 않습니다.",
+      "codes": [
+        {
+          "label": "추가 · GL 컨텍스트 소유 타입",
+          "language": "cpp",
+          "text": "// SDL_GLContext is a void*. Owning it with unique_ptr<void, ...> keeps the\n// exact SDL lifetime rule: SDL_GL_DeleteContext, never delete.\nstruct GlContextDeleter {\n    void operator()(void* context) const noexcept { SDL_GL_DeleteContext(context); }\n};\nusing GlContextOwner = std::unique_ptr<void, GlContextDeleter>;"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "void platform_shutdown()",
+        "invariant": "GL 컨텍스트를 창보다 먼저 해제한다.",
+        "mayDiffer": "현재 게임은 전역 핸들과 명시적 종료 함수를 쓰며 학습 예제는 RAII를 쓴다.",
+        "omitted": "렌더러가 생성할 버퍼·셰이더의 수명"
+      }
+    },
+    {
+      "title": "선언 순서로 의존 관계를 표현한다",
+      "body": "`Resources`의 자원 멤버를 `runtime`, `window`, `context` 순서로 선언합니다. 생성자 초기화 목록을 보기 좋게 재배열해서 결정하는 규칙이 아니라, **클래스 안의 멤버 선언 순서**가 기준입니다. 파괴는 그 역순입니다.\n\n| 상황 | 실제로 가진 자원 | 반환 뒤 정리 |\n| --- | --- | --- |\n| 속성 요청 실패 | SDL 실행 환경 | SDL 종료 |\n| 창 생성 실패 | SDL 실행 환경 | SDL 종료 |\n| 컨텍스트 생성 실패 | SDL, 창 | 창 → SDL 종료 |\n| 속성 조회나 시간 초기화 실패 | SDL, 창, 컨텍스트 | 컨텍스트 → 창 → SDL 종료 |\n| 정상 종료 | 위 자원 + 문자 입력 활성화 | 문자 입력 중지 → 컨텍스트 → 창 → SDL 종료 |\n\n소멸자 본문은 멤버 파괴보다 먼저 실행됩니다. 그래서 본문의 `SDL_StopTextInput` 때는 창과 SDL이 여전히 살아 있습니다. 자원이 아닌 정수·배열 멤버도 함께 파괴되지만 여기의 외부 자원 해제 순서를 바꾸지 않습니다.\n\n의존 관계가 있는 자원을 역순으로 놓는 것이 핵심입니다. 이후 렌더러가 GL 객체를 만들면 **렌더러 객체 정리 → 컨텍스트 → 창 → SDL** 순서를 유지합니다. 컨텍스트를 먼저 지운 뒤 렌더러가 GL 삭제 함수를 호출하는 흐름은 피해야 합니다.",
+      "codes": [
+        {
+          "label": "교체 · Resources의 전체 선언",
+          "language": "cpp",
+          "text": "struct Resources {\n    // Destroyed in reverse declaration order: context, then window, then\n    // SDL_Quit. GL dies before the window it targeted, the window before SDL.\n    SdlRuntime runtime;\n    WindowOwner window;\n    GlContextOwner context;\n    int gl_major = 0;\n    int gl_minor = 0;\n    int gl_profile = 0;\n    int gl_doublebuffer = 0;\n    Uint64 frequency = 0;\n    Uint64 previous = 0;\n    Uint64 frame_start = 0;\n    bool should_close = false;\n    std::array<bool, key_count> current{};\n    std::array<bool, key_count> previous_keys{};\n    AsciiQueue<64> text;\n    std::uint64_t dropped = 0;\n    bool text_started = false;\n    ~Resources() noexcept\n    {\n        // Destructor body runs before members: the window and SDL still exist.\n        if (text_started) SDL_StopTextInput();\n    }\n};"
+        }
+      ]
+    },
+    {
+      "title": "완성되지 않은 상태를 main에 넘기지 않는다",
+      "body": "생성 중인 자원은 지역 변수 `candidate`에 보관합니다. 속성 요청, 창 생성, 컨텍스트 생성, current 확인, 속성 조회, 시간 준비가 모두 끝난 뒤에만 `active`로 옮깁니다. main이 사용할 수 있는 상태를 공개하는 한 지점을 만드는 방식입니다.\n\n먼저 SDL 초기화 성공을 확인한 다음 아래 부분을 추가합니다. `SDL_WINDOW_OPENGL` 플래그는 이 창을 GL에 사용할 것임을 SDL에 알립니다. 플래그가 있다고 컨텍스트 생성까지 성공한 것은 아니므로 반환값을 따로 검사합니다.\n\n오류 문자열은 반환 직전에 출력합니다. 후보의 소멸자가 다른 SDL 함수를 호출하기 전에 실패 원인을 기록하려는 순서입니다. 조기 반환에서 `candidate`가 파괴되므로 개별 오류 분기마다 창과 컨텍스트를 수동 삭제하지 않습니다. RAII와 수동 해제를 함께 쓰다 같은 핸들을 두 번 지우지 않도록 주의하세요.",
+      "codes": [
+        {
+          "label": "init 내부 · 요청 → 창 → 컨텍스트",
+          "language": "cpp",
+          "text": "        if (!request_gl_attributes()) {\n            std::fprintf(stderr, \"gl attribute request failed: %s\\n\", SDL_GetError());\n            return false;\n        }\n        candidate->window.reset(SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED,\n                                SDL_WINDOWPOS_CENTERED, width, height,\n                                SDL_WINDOW_OPENGL));\n        if (!candidate->window) {\n            std::fprintf(stderr, \"window failed: %s\\n\", SDL_GetError());\n            return false;\n        }\n        candidate->context.reset(SDL_GL_CreateContext(candidate->window.get()));\n        if (!candidate->context) {\n            std::fprintf(stderr, \"gl context failed: %s\\n\", SDL_GetError());\n            return false;\n        }"
+        }
+      ]
+    },
+    {
+      "title": "요청한 값과 얻은 값을 비교한다",
+      "body": "설정 함수가 성공한 것은 요청을 전달했다는 뜻입니다. 컨텍스트를 생성한 뒤 `SDL_GL_GetAttribute`로 SDL이 보고하는 구성을 읽습니다. 다만 SDL2의 version/profile 조회는 내부 설정값을 반환할 수 있으므로 이것만으로 드라이버가 실제 제공한 버전을 확정하지 않습니다. 이 단계는 SDL 구성과 더블 버퍼 조건을 검사하고, GL 함수 로딩 후 직접 버전·프로파일을 조회하는 단계에서 검증을 보강합니다. [SDL2 구현의 속성 조회](https://raw.githubusercontent.com/libsdl-org/SDL/SDL2/src/video/SDL_video.c)에서 두 종류의 반환 경로를 볼 수 있습니다. 조회 자체의 실패와 조회는 성공했지만 조건이 맞지 않는 경우도 나눠 보고합니다.\n\n버전 조건은 `major > 3 || (major == 3 && minor >= 3)`입니다. 3.2는 거부하고 3.3·4.0·4.6은 받아들입니다. `major >= 3 && minor >= 3`이면 4.0을 잘못 거부합니다. 버전은 순서쌍이므로 주 버전이 더 크면 부 버전 비교로 되돌아가지 않습니다.\n\n이 실습은 Core와 더블 버퍼도 확인합니다. 요청한 컨텍스트를 얻었으면 초기화 전제가 갖춰진 것입니다. 셰이더 오류는 컴파일 로그에서, 표시 문제는 실제 프레임 출력에서 따로 확인합니다.",
+      "codes": [
+        {
+          "label": "init 내부 · SDL 구성 조회와 수용 조건",
+          "language": "cpp",
+          "text": "        // SDL reports its GL configuration; version/profile may be cached requests.\n        // Direct GL queries in the next layer verify the driver context.\n        if (SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &candidate->gl_major) != 0 ||\n            SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &candidate->gl_minor) != 0 ||\n            SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &candidate->gl_profile) != 0 ||\n            SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &candidate->gl_doublebuffer) != 0) {\n            std::fprintf(stderr, \"gl attribute query failed: %s\\n\", SDL_GetError());\n            return false;\n        }\n        const bool version_ok = candidate->gl_major > 3 ||\n            (candidate->gl_major == 3 && candidate->gl_minor >= 3);\n        if (!version_ok ||\n            candidate->gl_profile != SDL_GL_CONTEXT_PROFILE_CORE ||\n            candidate->gl_doublebuffer != 1) {\n            std::fprintf(stderr,\n                \"unsupported SDL GL config: %d.%d profile=%d doublebuffer=%d\\n\",\n                candidate->gl_major, candidate->gl_minor,\n                candidate->gl_profile, candidate->gl_doublebuffer);\n            return false;\n        }"
+        }
+      ]
+    },
+    {
+      "title": "빌드는 그대로 두고 SDL 파일을 교체한다",
+      "body": "출발점은 `10-win32` 체크포인트입니다. 새 `11-gl-context` 사본에는 모든 파일을 포함해 두었습니다. 직접 만들어 왔다면 `platform/sdl.cpp`를 아래 완성 파일로 교체하고 `platform/platform.h`의 스레드·백엔드 설명만 보강합니다. `main.cpp`, `text_queue.h`, `scripted.cpp`, `win32.cpp`, CMake 구조는 유지합니다.\n\n이번 파일은 SDL 함수만 직접 호출하므로 CMake에 OpenGL 심볼 링크를 추가하지 않습니다. SDL이 내부에서 GL 실행 환경을 연결하는 것과 애플리케이션이 GL 함수 주소를 얻어 호출하는 것은 다른 단계입니다. 다음에는 이 경계를 `platform_gl_get_proc` 같은 계약으로 열어 갑니다.\n\n저장소 루트에서 아래 명령으로 빌드하고, 데스크톱이 있는 환경에서 실행합니다. 직접 작성한 디렉터리라면 `-S` 뒤를 그 경로로 바꿉니다. SDL2 개발 패키지와 pkg-config 탐색이 가능한 도구 체인이 전제입니다. 네이티브 Windows 전용 예제의 user32 설정과 SDL 패키지 설정을 혼동하지 마세요.\n\n```sh\ncmake -S docs/learn/checkpoints/11-gl-context -B out/study-11 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-11\n./out/study-11/tetris\n```\n\nLinux 단일 구성 빌드 기준 실행 경로입니다. 다른 생성기는 실행 파일 위치가 달라질 수 있습니다. 성공하면 `SDL GL config 3.3 profile=1 doublebuffer=1` 형태의 한 줄을 보고합니다. 이 숫자는 SDL이 보고한 버전 설정입니다. 드라이버 버전은 더 높을 수 있으며 GL 직접 조회로 확인합니다. 입력·시간 로그와 종료 처리는 계속 동작합니다. **아직 화면 색상·도형·버퍼 표시를 구현하지 않았으므로 창의 배경색으로 성공을 판단하지 않습니다.**\n\n`SDL_VIDEODRIVER=dummy`는 입력 검사에는 쓸 수 있지만 GL 창을 제공하지 않습니다. 이 설정에서 창 생성 실패는 정상적인 환경 제약입니다. `SCRIPTED` 빌드 성공도 GL 성공을 대신 증명하지 않습니다.",
+      "codes": [
+        {
+          "label": "설명 보강 · 공개 헤더 전체",
+          "language": "cpp",
+          "file": "checkpoints/11-gl-context/platform/platform.h"
+        }
+      ]
+    },
+    {
+      "title": "현재 게임의 실패 계약도 함께 점검한다",
+      "body": "현재 소스 뷰어의 `platform_init`은 학습 예제와 반환형이 다릅니다. 학습 코드의 bool은 실패하면서 후보 자원을 정리합니다. 현재 게임의 void 함수는 `platform_should_close()`로 실패를 알려 주며, **호출자가 실패 후에도 `platform_shutdown()`을 실행**합니다. `src/main.cpp`는 실제로 그 분기에서 플랫폼과 네트워크를 정리하고 종료합니다.\n\n현재 SDL 초기화는 GL 속성 설정과 MakeCurrent의 반환값을 확인합니다. 실패하면 이유를 출력하고 초기화 실패 상태를 전달합니다. 타이머 주파수가 0이면 문자 입력 시작 전에 중단하며, 남은 핸들은 종료 함수에서 정리합니다.\n\nswap interval 설정은 구분합니다. 실패하면 경고하지만 컨텍스트 사용 자체를 불가능하게 만들지는 않으므로 계속 진행합니다. 현재 게임의 `platform_end_frame`에는 시간 기반 대기 제한도 있지만, 대기는 화면 주사와의 동기화를 보장하지 않습니다. 화면 잘림 현상과 프레임 간격은 표시 단계에서 다시 검증해야 합니다.\n\n학습용 코드를 그대로 복사해 void를 bool로 바꾸면 호출자 계약까지 함께 바뀝니다. 서로 다른 소유 구조를 비교할 때는 타입 이름이 같은지보다 **누가 실패를 감지하고, 어디서 자원을 정리하는지**를 따라가세요.",
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "void platform_init(",
+        "invariant": "실패를 무시하고 렌더러 초기화로 진행하지 않는다.",
+        "mayDiffer": "학습 코드: 지역 후보 RAII와 SDL 구성 조회. 현재 게임: 전역 핸들·실패 플래그·호출자 종료 계약.",
+        "omitted": "실제 게임의 재초기화 지원, macOS 리소스 경로, 프레임 페이싱 상세"
+      }
+    },
+    {
+      "title": "실패를 만들어 자원 정리 순서를 확인한다",
+      "body": "초기화 실패가 드물면 정리 코드의 누락을 발견하기 어렵습니다. **실패 주입**은 특정 SDL 함수가 실패를 반환하도록 바꿔, 원하는 경로를 실행하는 방법입니다. 창 생성 실패와 컨텍스트 생성 실패를 각각 넣고 어느 자원까지 만들어졌는지 따라가 보세요.\n\n컨텍스트 생성까지 성공한 뒤 다음 단계에서 실패했다면 컨텍스트 → 창 → SDL 순서로 정리해야 합니다. 이미 활성화된 상태에서 init을 다시 호출했을 때는 새 자원을 만들지 않고 기존 상태를 유지해야 합니다. 호출을 반복해도 자원이 중복 정리되지 않는지 함께 확인합니다.\n\n버전·프로파일·더블 버퍼 조건도 하나씩 바꿔 봅니다. 예를 들어 `doublebuffer=0`이면 컨텍스트 생성 여부와 별개로 이 실습의 더블 버퍼 조건을 만족하지 못해 초기화를 중단합니다.\n\nLinux에서는 `python3 scripts/check_learning_gl.py`로 실패 경로와 정리 순서를 실행해 볼 수 있습니다. SDL2 개발 패키지와 offscreen GL을 지원하는 환경이 필요합니다."
+    },
+    {
+      "title": "완성 파일과 다음 구현의 경계",
+      "body": "아래는 교체할 SDL 파일 전체입니다. 본문의 부분 발췌를 중복으로 붙이지 말고 전체 파일과 비교해 함수 위치를 확인하세요. init은 환경을 준비하고, begin_frame은 입력과 시간을 갱신하며, end_frame은 아직 시간 대기만 수행합니다. 컨텍스트가 있어도 그리기 명령은 자동으로 생기지 않습니다.\n\n이제 준비된 컨텍스트에서 GL 함수 주소를 얻을 수 있습니다. 다음 구현에서는 선언이 존재하는 것과 실제 호출 주소가 유효한 것이 왜 다른지, 함수 포인터를 어떤 순서로 준비하는지 다룹니다.",
+      "codes": [
+        {
+          "label": "교체할 완성 파일 · SDL과 GL 컨텍스트",
+          "language": "cpp",
+          "file": "checkpoints/11-gl-context/platform/sdl.cpp"
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "10차시 체크포인트를 복사하거나 11-gl-context 사본에서 SDL 파일과 공개 헤더의 변경을 비교한다.",
+      "SDL 경로를 빌드하고 실제 실행 환경·GL 버전·프로파일·더블 버퍼 결과를 기록한다.",
+      "속성 요청 실패, 컨텍스트 생성 실패, 속성 조회 실패 각각에서 살아 있는 자원과 정리 순서를 표로 적는다.",
+      "버전 조건에 3.2·3.3·4.0을 대입해 본 뒤 실패 주입 검사에서 higher 경로와 비교한다.",
+      "main이 GL을 아직 호출하지 않는 이유와, 그리기 계층을 추가할 때 필요한 다음 계약을 설명한다."
+    ],
+    "expected": "현재 호출 스레드에 연결된 GL 환경을 얻거나, 실패 지점과 정리 책임을 설명할 수 있습니다. 화면 출력은 아직 평가 대상이 아닙니다.",
+    "failureChecks": [
+      "dummy 드라이버에서는 GL 창을 만들 수 없다. 데스크톱/GL 가능한 드라이버와 구분한다.",
+      "설정 성공만 보고 넘기지 말고 생성·current·실제 속성 조회 결과를 각각 확인한다.",
+      "창만 생겼는데 종료되면 컨텍스트 생성 또는 조건 검증 로그를 먼저 읽는다.",
+      "정리 중 문제가 나면 멤버 선언 순서와 수동 삭제 중복, 호출 스레드를 점검한다."
+    ]
+  },
+  "questions": [
+    {
+      "id": "11-1",
+      "kind": "환경 구별",
+      "question": "main 스레드에서 컨텍스트 C를 만든 뒤, 작업 스레드에 C의 핸들 값만 넘겼습니다. 이 실습 계약에서 올바른 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 프로세스이므로 작업 스레드에도 C가 자동으로 current가 됩니다."
+        },
+        {
+          "id": "b",
+          "text": "핸들 복사는 current 연결이 아닙니다. GL 호출은 초기화한 main 스레드에 유지합니다."
+        },
+        {
+          "id": "c",
+          "text": "unique_ptr로 소유했으므로 두 스레드에서 동시에 GL을 호출할 수 있습니다."
+        },
+        {
+          "id": "d",
+          "text": "창 핸들을 함께 넘기면 current 연결 없이도 GL 호출을 사용할 수 있습니다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "핸들 복사는 current 연결이 아닙니다. GL 호출은 초기화한 main 스레드에 유지합니다.",
+      "explanation": "소유권·핸들 전달·스레드의 current 연결은 서로 다른 상태입니다. 이 실습은 한 스레드만 사용합니다. 작업 스레드 렌더링으로 바꾸려면 연결 전환과 동기화 계약을 별도로 설계해야 합니다."
+    },
+    {
+      "id": "11-2",
+      "kind": "수명 예측",
+      "question": "창과 컨텍스트 생성은 성공했지만 실제 속성 조회가 실패했습니다. candidate가 아직 active로 옮겨지지 않았다면 올바른 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "active는 비어 있고 컨텍스트 → 창 → SDL 순서로 정리됩니다."
+        },
+        {
+          "id": "b",
+          "text": "active가 후보를 자동으로 받으므로 main에서 종료할 때까지 기다립니다."
+        },
+        {
+          "id": "c",
+          "text": "창 → 컨텍스트 → SDL 순서이며 멤버 선언 순서는 상관없습니다."
+        },
+        {
+          "id": "d",
+          "text": "컨텍스트 생성이 성공했으므로 속성 조회 실패는 무시하고 true를 반환합니다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "active는 비어 있고 컨텍스트 → 창 → SDL 순서로 정리됩니다.",
+      "explanation": "지역 후보는 return 때 파괴됩니다. runtime, window, context 순서로 선언한 멤버는 역순으로 파괴됩니다. 아직 공개하지 않았으므로 외부는 부분 초기화 상태를 사용할 수 없습니다."
+    },
+    {
+      "id": "11-3",
+      "kind": "조건 적용",
+      "question": "비교할 버전 값이 4.0 Core이고 doublebuffer=1입니다. 이 실습의 3.3 이상 검사 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "부 버전 0이 3보다 작으므로 거부합니다."
+        },
+        {
+          "id": "b",
+          "text": "요청값과 정확히 같지 않으므로 다시 3.3을 요청합니다."
+        },
+        {
+          "id": "c",
+          "text": "4.0이므로 셰이더 컴파일 검사도 통과한 것으로 봅니다."
+        },
+        {
+          "id": "d",
+          "text": "주 버전이 더 크므로 수용하되 셰이더 컴파일은 별도로 검사합니다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "주 버전이 더 크므로 수용하되 셰이더 컴파일은 별도로 검사합니다.",
+      "explanation": "주 버전이 3보다 크면 부 버전과 관계없이 버전 하한을 만족합니다. 프로파일과 더블 버퍼도 조건에 맞습니다. API 환경의 조건 검사와 셰이더 소스의 컴파일·링크는 별개의 검증입니다."
+    },
+    {
+      "id": "11-4",
+      "kind": "오류 위치",
+      "question": "더블 버퍼 속성을 SDL_CreateWindow 이후에 설정하고 창이 뜬 것만 확인했습니다. 가장 먼저 고칠 순서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "컨텍스트를 먼저 삭제한 뒤 GL 상태를 조회합니다."
+        },
+        {
+          "id": "b",
+          "text": "main에 같은 SDL_CreateWindow 호출을 하나 더 추가합니다."
+        },
+        {
+          "id": "c",
+          "text": "속성 요청을 창 생성 앞으로 옮기고, 컨텍스트 생성 후 실제 값을 확인합니다."
+        },
+        {
+          "id": "d",
+          "text": "doublebuffer 요청 성공을 확인했으므로 표시까지 성공으로 기록합니다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "속성 요청을 창 생성 앞으로 옮기고, 컨텍스트 생성 후 실제 값을 확인합니다.",
+      "explanation": "창에 필요한 구성이 생성 시 선택될 수 있으므로 속성은 먼저 요청합니다. 창 핸들은 컨텍스트 성공을 증명하지 않고, 요청 성공도 실제 결과를 대신하지 않습니다. 생성 이후 조회로 기대 조건을 확인합니다."
+    },
+    {
+      "id": "11-5",
+      "kind": "검증 해석",
+      "question": "대역 검사 21개가 통과했고, 실제 offscreen 생성 후 SDL이 보고한 구성은 3.3 Core·단일 버퍼라 거부됐습니다. 정확한 보고는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "실패 처리를 검사했고 실제 컨텍스트는 표시 조건에서 거부됐습니다. 더블 버퍼 창 표시는 미검증입니다."
+        },
+        {
+          "id": "b",
+          "text": "21개 검사가 통과했으므로 실제 GPU의 더블 버퍼 표시도 검증됐습니다."
+        },
+        {
+          "id": "c",
+          "text": "단일 버퍼로 조회됐으므로 이 환경에는 GL 컨텍스트가 전혀 없습니다."
+        },
+        {
+          "id": "d",
+          "text": "버전이 3.3이므로 doublebuffer 조회 결과를 무시하고 표시 성공으로 기록합니다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "실패 처리를 검사했고 실제 컨텍스트는 표시 조건에서 거부됐습니다. 더블 버퍼 창 표시는 미검증입니다.",
+      "explanation": "대역은 오류 반환과 자원 정리 순서를 확인합니다. 실제 offscreen 결과는 컨텍스트 획득의 증거지만 더블 버퍼 창 표시에 대한 증거는 아닙니다. 환경 제약을 명시하고 실제 GUI/렌더링 검증을 남겨 두어야 합니다."
+    }
+  ]
+}

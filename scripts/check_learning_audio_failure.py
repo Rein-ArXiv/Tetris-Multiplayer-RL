@@ -1,0 +1,38 @@
+"""Lesson 82: optional audio failure policy and cumulative regressions."""
+from pathlib import Path
+import os,subprocess
+from check_learning_text_layout import run
+ROOT=Path(__file__).resolve().parents[1]
+SOURCE=ROOT/'docs/learn/checkpoints/82-audio-failure'
+OUT=ROOT/'out/learning-checkpoints/82-audio-failure-check'
+def main():
+ OUT.mkdir(parents=True,exist_ok=True)
+ assert (ROOT/'core/once_flags.h').read_bytes()==(SOURCE/'core/once_flags.h').read_bytes()
+ prev=SOURCE.parent/'81-xaudio2'
+ changed={'CMakeLists.txt','README.md','DESIGN.md','presentation/sound_session.h','src/main.cpp'}
+ for p in prev.rglob('*'):
+  if p.is_file() and p.relative_to(prev).as_posix() not in changed:
+   assert p.read_bytes()==(SOURCE/p.relative_to(prev)).read_bytes(),p
+ env={**os.environ,'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy','DISPLAY':'','WAYLAND_DISPLAY':''}
+ for backend in ['SCRIPTED','SDL']:
+  build=OUT/backend.lower();run(['cmake','-S',str(SOURCE),'-B',str(build),'-DSTUDY_PLATFORM='+backend,'-DCMAKE_BUILD_TYPE=Release','-DCMAKE_CXX_FLAGS=-Wall -Wextra -Wpedantic'])
+  r=run(['cmake','--build',str(build),'-j3']);(OUT/f'build-{backend}.log').write_text(r.stdout+r.stderr);assert 'warning:' not in r.stdout+r.stderr
+  r=run(['ctest','--test-dir',str(build),'--output-on-failure'],env=env);(OUT/f'ctest-{backend}.log').write_text(r.stdout);print(r.stdout[-350:],flush=True)
+ for platform,audio in [('SDL','NONE'),('SCRIPTED','SDL')]:
+  build=OUT/(platform.lower()+'-'+audio.lower());run(['cmake','-S',str(SOURCE),'-B',str(build),'-DSTUDY_PLATFORM='+platform,'-DSTUDY_AUDIO='+audio,'-DCMAKE_BUILD_TYPE=Release'])
+  run(['cmake','--build',str(build),'--target','sound_session_contract','-j3'])
+  r=run(['ctest','--test-dir',str(build),'-R','^sound_session_','--output-on-failure'],env=env);print(r.stdout[-220:],flush=True)
+ for audio in ['invalid','XAUDIO2']:
+  r=subprocess.run(['cmake','-S',str(SOURCE),'-B',str(OUT/('reject-'+audio)),'-DSTUDY_PLATFORM=SCRIPTED','-DSTUDY_AUDIO='+audio],text=True,capture_output=True)
+  assert r.returncode!=0 and ('Unknown STUDY_AUDIO' if audio=='invalid' else 'requires a Windows target') in r.stderr
+ for name in ['xaudio_contract','xaudio_session_contract','audio_failure_contract']:
+  binary=OUT/(name+'-sanitized');run(['c++','-std=c++17','-Wall','-Wextra','-Wpedantic','-O1','-fsanitize=address,undefined','-fno-sanitize-recover=all','-DSTUDY_AUDIO_XAUDIO2','-I'+str(SOURCE/'tests/xaudio_fake'),'-I'+str(SOURCE),str(SOURCE/('tests/'+name+'.cpp')),*([str(SOURCE/'audio/xaudio_player.cpp')] if name.startswith('xaudio') else []),'-o',str(binary)])
+  r=run([str(binary)],env=env);(OUT/(name+'-sanitized.log')).write_text(r.stdout+r.stderr);print(r.stdout.strip(),flush=True)
+ # Compile the actual game caller with the Windows-selected Session against the double.
+ run(['c++','-std=c++17','-Wall','-Wextra','-Wpedantic','-DSTUDY_AUDIO_XAUDIO2','-I'+str(SOURCE/'tests/xaudio_fake'),'-I'+str(SOURCE),'-c',str(SOURCE/'src/main.cpp'),'-o',str(OUT/'main-xaudio-double.o')])
+ build=ROOT/'out/learning-checkpoints/54-game-adapter-check/root'
+ run(['cmake','--build',str(build),'-j3'])
+ r=run(['ctest','--test-dir',str(build),'--output-on-failure'],env=env);(OUT/'root-ctest.log').write_text(r.stdout);print(r.stdout[-300:],flush=True)
+ assert run([str(build/'sim_hash_dump')]).stdout==(ROOT/'python/tests/_sim_hash_dump.txt').read_text()
+ print('Cumulative audio failure policy, XAudio/SDL and build-selection checks passed.',flush=True)
+if __name__=='__main__':main()

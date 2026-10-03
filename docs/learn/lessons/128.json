@@ -1,0 +1,436 @@
+{
+  "id": "lesson-128",
+  "title": "IOCP: 비동기 요청과 완료 패킷",
+  "shortTitle": "실제 WSARecv·패킷 회수·취소 수명",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 여러 연결의 준비성을 관찰하지만 Windows의 실제 overlapped 수신 결과를 직접 회수하는 작은 구현은 없습니다.",
+  "finish": "완료: IOCP 수신기를 만들어 제출·부분 완료·wake·취소·회수·저장소 파괴의 순서를 구분합니다.",
+  "objective": "완료 키와 요청 주소를 대응시키고, 반환 BOOL·요청 포인터·오류를 함께 해석하여 미회수 저장소를 유지하는 Windows 수신기를 구현합니다.",
+  "prerequisites": [
+    "준비성·완료·프레임 완성의 구분",
+    "Socket 이동 소유권·RAII·고정 주소·부분 수신",
+    "등록 제거와 실행 수명·깨우기와 자료 공개"
+  ],
+  "recap": {
+    "points": [
+      "커널 관심 목록과 사용자 등록표는 변경 성공 뒤 일치시켜야 한다.",
+      "종료 준비성 뒤에도 남은 바이트가 있어 실제 수신과 EOF를 확인한다.",
+      "깨우기 처리가 새 통지를 끝없이 따라가지 않고 연결 처리로 돌아올 기회를 유지한다."
+    ],
+    "bridge": "이제 관심 조건 대신 수신 연산 자체를 맡기고, 그 완료를 회수할 때까지 저장소를 보존합니다."
+  },
+  "sections": [
+    {
+      "title": "읽기를 직접 맡기고 결과 패킷을 받는다",
+      "body": "준비성 루프는 조건을 받은 뒤 애플리케이션이 실제 recv를 호출합니다. 이번에는 Windows의 WSARecv에 저장소와 요청 상태를 넘기고, IOCP에서 그 **수신 연산의 결과**를 꺼냅니다. 내부에서 작업자 스레드로 recv를 실행하는 어댑터와 달리, 이 코드는 실제 Windows overlapped I/O를 제출합니다.\n\nIOCP는 I/O completion port의 약자로 완료 패킷을 회수하는 포트입니다. 포트에는 바이트를 받은 연산의 완료뿐 아니라 실패한 연산, 취소된 연산, 애플리케이션이 넣은 깨우기 패킷도 올 수 있습니다. “패킷이 왔다”와 “프레임을 성공적으로 받았다”는 별도로 판단합니다.\n\n만들 대상은 한 TCP 소켓과 한 미회수 요청을 소유하는 IocpReceiver입니다. 최대 16바이트를 받아 실제 수량과 결과 바이트를 돌려줍니다. reactor_probe의 준비성 계약에 억지로 끼우는 대신 완료 API 자체를 작게 만들고, 게임의 현재 zero-byte 준비성 어댑터와 비교합니다.\n\n학습 코드는 Windows에서 iocp_probe로 실행합니다. 공통 프레임·소켓 코드는 누적 프로젝트를 재사용하고, IOCP 타입과 호출은 Windows 구현 파일에 둡니다.",
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "void arm_read(",
+        "invariant": "제출한 연산과 완료 회수의 수명을 연결한다.",
+        "mayDiffer": "현재 백엔드는 zero-byte 수신 뒤 실제 recv를 시도한다. 이번 수신기는 양수 길이 버퍼에 받은 payload 자체를 완료 결과로 돌려준다."
+      }
+    },
+    {
+      "title": "완료 키와 OVERLAPPED 주소를 구분한다",
+      "body": "완료 키(completion key)는 소켓 핸들을 포트에 연결할 때 지정합니다. OVERLAPPED 주소는 개별 연산을 제출할 때 지정합니다. 같은 소켓에 읽기와 쓰기를 동시에 제출하면 키는 같을 수 있지만 각 요청의 OVERLAPPED는 구별되어야 합니다.\n\n이번 수신기는 수신 키 1, 깨우기 키 2를 사용합니다. 실제 수신 완료는 자신의 OVERLAPPED 주소와 키를 함께 검사합니다. 깨우기는 null 요청 포인터와 전용 키로 보냅니다. 키 하나만 보고 사용자 바이트를 읽지 않습니다.\n\nState는 힙에서 한 번 만들고 unique_ptr가 소유합니다. 그 안에 소켓, 포트, OVERLAPPED, 16바이트 배열, 요청 번호, 수량 제한, 처리 단계를 둡니다. 연산을 제출한 뒤 객체의 위치가 바뀌면 커널이 원래 주소에 접근할 수 있으므로 수신기의 복사·이동을 금지합니다.\n\nrequest는 호출자가 붙이는 결과 대응 번호입니다. 이 API는 한 미회수 요청만 허용하므로 모든 과거 요청에 걸친 영구 고유성을 검사하지 않습니다. 동시에 여러 요청을 허용하려면 각각의 저장소와 요청 식별을 확장해야 합니다.",
+      "codes": [
+        {
+          "label": "제출·패킷·취소 반환형을 구분",
+          "language": "cpp",
+          "text": "enum class PacketState { timeout, woken, result, error };\nstruct PacketReport { PacketState state; std::uint32_t error = 0; };\nstruct SubmissionReport {\n    Submission state = Submission::rejected;\n    std::uint32_t error = 0;\n    bool accepted() const noexcept { return state != Submission::rejected; }\n};\nenum class CancelState { requested, not_found, no_pending, error };\nstruct CancelReport { CancelState state; std::uint32_t error = 0; };"
+        },
+        {
+          "label": "소유 상태와 주소가 안정적인 요청 저장소",
+          "text": "struct IocpReceiver::State {\n    explicit State(Socket owned) : socket(std::move(owned)) {}\n    ~State() { if (port) ::CloseHandle(port); }\n    Socket socket;\n    HANDLE port = nullptr;\n    OVERLAPPED overlapped{};\n    std::array<std::uint8_t,16> buffer{};\n    std::uint64_t request = 0;\n    std::size_t capacity = 0;\n    Phase phase = Phase::idle;\n    CompletionResult result{};\n};",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "struct SockState {",
+        "invariant": "OVERLAPPED와 이를 포함한 상태를 회수 전까지 이동·파괴하지 않는다.",
+        "mayDiffer": "현재 서버는 SockState.ov에서 CONTAINING_RECORD로 상태를 찾는다. 학습 수신기는 하나의 예상 주소를 직접 비교한다."
+      }
+    },
+    {
+      "title": "소켓을 완료 포트에 결합한다",
+      "body": "생성자는 연결된 Socket을 이동받아 소유합니다. CreateIoCompletionPort에 소켓 핸들과 수신 키를 넘겨 새 포트에 결합합니다. SOCKET은 Windows에서 포인터 크기의 값이므로 int로 줄이지 않고 HANDLE로 변환합니다.\n\n이 수신기는 새로 만든 overlapped 지원 TCP 소켓과 기본 완료 통지 설정을 전제로 합니다. 다른 포트에 이미 연결된 핸들이나 즉시 성공의 통지를 생략하도록 설정한 핸들을 가져오면 같은 회계를 적용할 수 없습니다. Runtime은 수신기보다 오래 살아야 합니다.\n\n포트 생성·결합이 실패하면 오류를 바로 저장하고 예외로 전달합니다. 지역 소유 상태가 소켓을 정리합니다. 정상 파괴에서는 포트와 소켓을 정리하되, 수락한 요청이 남아 있으면 먼저 완료 회수를 끝내야 합니다. 그 종료 순서는 아래에서 구현합니다.\n\n포트 결합은 해당 핸들의 수명 동안 유지됩니다. 다른 포트로 옮길 수 있는 단순 해제·재결합 연산으로 취급하지 않습니다. 여러 작업자가 같은 포트에서 꺼내는 구조는 가능하지만, 이 실습은 한 스레드가 상태를 소유하도록 제한합니다.",
+      "codes": [
+        {
+          "label": "소켓 소유권 이동과 포트 결합",
+          "text": "IocpReceiver::IocpReceiver(Socket socket) : state_(std::make_unique<State>(std::move(socket))) {\n    if (!state_->socket.valid()) throw std::invalid_argument(\"valid connected socket required\");\n    state_->port = ::CreateIoCompletionPort(\n        reinterpret_cast<HANDLE>(static_cast<SOCKET>(state_->socket.native())),\n        nullptr, receive_key, 1);\n    if (!state_->port) {\n        const auto error = ::GetLastError();\n        throw std::system_error(static_cast<int>(error),std::system_category(),\"associate IOCP\");\n    }\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "현재 서버의 이관 능력",
+          "body": "현재 Reactor는 인스턴스마다 별도 포트를 가지므로 IOCP에서 can_migrate_sockets가 false입니다. 이것이 Windows의 모든 샤딩을 금지한다는 뜻은 아닙니다. 수락 시 포트를 고르거나 하나의 포트에 작업자를 배치하려면 다른 소유권 설계가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "제출 반환값을 세 가지로 해석한다",
+      "body": "WSARecv가 0을 반환하면 연산이 즉시 완료됐습니다. SOCKET_ERROR와 WSA_IO_PENDING이면 연산을 수락했고 결과를 기다립니다. 그 외 제출 실패에서는 연산이 시작되지 않았으므로 그 요청의 완료 패킷을 기다리지 않습니다.\n\n| 제출 결과 | 연산 수락 | 이 구현의 단계 |\n| --- | --- | --- |\n| 즉시 성공 | 수락 | pending: 패킷 회수 전 |\n| IO_PENDING | 수락 | pending: 패킷 회수 전 |\n| 다른 오류 | 거절 | idle 유지 |\n\n기본 IOCP 통지 설정에서는 즉시 성공에도 완료 패킷이 옵니다. 따라서 즉시 반환한 성공을 한 번 처리하고, 나중에 패킷도 다시 처리하면 같은 연산을 두 번 셀 수 있습니다. 여기서는 두 성공 경로를 모두 패킷 회수로 통일합니다.\n\npending이라는 내부 이름은 커널이 아직 실행 중이라는 뜻으로만 쓰지 않습니다. 커널에서 끝났지만 패킷이 아직 큐에 있는 상태까지 포함한 **회수 전 단계**입니다. 저장소의 재사용 가능성을 기준으로 읽습니다.",
+      "codes": [
+        {
+          "label": "제출 시점의 세 가지 분기",
+          "text": "enum class Submission {\n    immediate,  // call reported immediate success; the operation is complete\n    pending,    // call failed with the pending code; a completion will post\n    rejected    // call failed otherwise; no completion packet will arrive\n};\n\n// Classify a receive call from its return value, the accompanying last-error,\n// and the platform pending error code.\n//\n// A zero result reports immediate completion. Any nonzero result is failure-valued:\n// it is pending only when last_error equals pending_code, else rejected.\nconstexpr Submission classify_submission(int call_result, int last_error,\n                                         int pending_code) noexcept {\n    return call_result == 0\n               ? Submission::immediate\n               : (last_error == pending_code ? Submission::pending\n                                             : Submission::rejected);\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "지역 설명자와 실제 버퍼의 수명은 다르다",
+      "body": "post는 idle 상태, 0이 아닌 요청 번호, 1~16바이트 용량을 확인합니다. 허용되면 OVERLAPPED와 버퍼를 초기화하고 WSARecv에 전달합니다. 요청 용량은 최대치이며 그만큼 채워질 때까지 기다리라는 목표가 아닙니다.\n\nWSABUF는 길이와 포인터를 가진 설명자입니다. 지역 변수로 만들어도 Winsock이 호출 중 설명자를 캡처합니다. 하지만 bytes.buf가 가리키는 State.buffer와 OVERLAPPED는 완료를 회수할 때까지 살아 있어야 합니다. 포인터를 복사했다고 대상 배열까지 복사된 것은 아닙니다.\n\nlpNumberOfBytesRecvd는 overlapped 요청에서 nullptr로 두고 최종 수량은 완료에서 받습니다. flags는 0으로 시작하고, 완료 루틴 대신 IOCP를 사용합니다. OVERLAPPED.hEvent도 초기값 null로 유지하여 포트 통지를 억제하지 않습니다.\n\n실패 코드는 WSARecv 직후 WSAGetLastError로 읽습니다. 수락된 요청에서만 phase를 pending으로 바꾸고, 거절이면 소켓·버퍼를 소유한 idle 상태를 유지합니다.",
+      "codes": [
+        {
+          "label": "수명과 범위를 확인한 뒤 실제 Windows 읽기 제출",
+          "text": "SubmissionReport IocpReceiver::post(std::uint64_t request, std::size_t capacity) {\n    auto& state = *state_;\n    if (state.phase != Phase::idle || request == 0 || capacity == 0 || capacity > state.buffer.size())\n        return {Submission::rejected, ERROR_INVALID_PARAMETER};\n    state.overlapped = {};\n    state.buffer.fill(0);\n    state.request = request;\n    state.capacity = capacity;\n    WSABUF bytes{static_cast<ULONG>(capacity), reinterpret_cast<char*>(state.buffer.data())};\n    DWORD flags = 0;\n    // WSABUF describes persistent buffer storage; Winsock captures the descriptor.\n    const int rc = ::WSARecv(static_cast<SOCKET>(state.socket.native()), &bytes, 1,\n                             nullptr, &flags, &state.overlapped, nullptr);\n    const int error = rc == 0 ? 0 : ::WSAGetLastError();\n    const auto submitted = classify_submission(rc, error, WSA_IO_PENDING);\n    if (submitted != Submission::rejected) state.phase = Phase::pending;\n    return {submitted, submitted == Submission::rejected ? static_cast<std::uint32_t>(error) : 0u};\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "설명자 캡처의 범위",
+          "body": "[WSARecv의 버퍼 계약](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsarecv)은 WSABUF 설명자와 실제 저장소를 구별합니다. 이 규칙을 임의의 비동기 API의 모든 포인터 인자에 일반화하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "완료 회수 함수의 FALSE는 두 뜻을 가진다",
+      "body": "GetQueuedCompletionStatus는 성공 여부와 함께 수량·키·OVERLAPPED 포인터를 돌려줍니다. 반환 BOOL만 보면 실패한 I/O 완료와 패킷을 못 꺼낸 경우가 섞입니다.\n\n| 반환과 요청 포인터 | 해석 |\n| --- | --- |\n| TRUE, 내 OVERLAPPED | 성공한 수신 완료 |\n| FALSE, 내 OVERLAPPED | 실패한 수신 완료: 오류 확인 |\n| FALSE, null | 시간 초과 또는 포트 오류 |\n| TRUE, null, wake 키 | 애플리케이션의 깨우기 |\n\nFALSE와 내 OVERLAPPED가 왔다면 실패 결과도 최종 완료이므로 저장소 회계를 끝낼 수 있습니다. 반대로 시간 초과는 연산이 끝났다는 증거가 아니므로 pending을 유지합니다. wake도 수신 연산의 저장소를 반환하는 패킷이 아닙니다.\n\n호출이 끝난 즉시 오류를 저장하고, 키와 주소가 예상과 맞는지 검사합니다. 다른 주소를 내 버퍼의 완료로 오인하면 수량·수명 모두 어긋납니다. 이 수신기는 내부 포트를 외부에 노출하지 않고, 예상하지 못한 패킷은 오류로 반환합니다.",
+      "codes": [
+        {
+          "label": "BOOL과 OVERLAPPED를 함께 해석",
+          "text": "PacketReport IocpReceiver::collect(std::uint32_t timeout_ms) {\n    auto& state = *state_;\n    if (state.phase == Phase::ready) return {PacketState::result};\n    DWORD count = 0;\n    ULONG_PTR key = 0;\n    OVERLAPPED* operation = nullptr;\n    const BOOL success = ::GetQueuedCompletionStatus(state.port,&count,&key,&operation,timeout_ms);\n    const DWORD error = success ? ERROR_SUCCESS : ::GetLastError();\n    // FALSE + non-null OVERLAPPED is a failed I/O completion, not an empty queue.\n    if (!operation) {\n        if (!success) return {error == WAIT_TIMEOUT ? PacketState::timeout : PacketState::error,error};\n        if (key == wake_key) return {PacketState::woken};\n        return {PacketState::error,ERROR_INVALID_DATA};\n    }\n    if (key != receive_key || operation != &state.overlapped || state.phase != Phase::pending)\n        return {PacketState::error,ERROR_INVALID_DATA};",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "배치 회수 API와의 차이",
+          "body": "현재 서버의 GetQueuedCompletionStatusEx는 여러 항목을 꺼냅니다. 함수가 성공했다고 각 I/O가 성공한 것은 아닙니다. 예약 필드 Internal에 기대지 않고 해당 소켓의 WSAGetOverlappedResult(..., FALSE, ...)로 결과를 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "수신 결과를 소유한 값으로 만든다",
+      "body": "내 요청의 패킷을 회수하면 CompletionResult를 만듭니다. 성공 수량이 양수면 data, 양수 길이 TCP 요청이 성공 수량 0이면 eof입니다. 실패가 ERROR_OPERATION_ABORTED이면 cancelled, 그 외는 error로 구분합니다.\n\n이 수신기는 실패 결과의 바이트를 파서에 넘기지 않습니다. count를 0으로 두고 오류를 보고합니다. 성공 수량도 요청한 capacity를 넘지 않는지 확인합니다. OS 계약을 사용하는 코드여도 잘못 연결한 요청이나 대역 구현의 불일치를 발견할 경계가 필요합니다.\n\n결과는 요청 번호와 상태, 실제 수량, 오류, 16바이트 배열 값을 소유합니다. 유효한 데이터는 count 범위뿐입니다. take 뒤 다음 요청이 내부 배열을 덮어도 이미 받은 결과는 바뀌지 않습니다.\n\nzero-byte 준비성 프로브는 여기의 EOF 분류를 사용하면 안 됩니다. 처음부터 0바이트를 요청한 완료와, 데이터를 읽도록 요청했는데 끝을 만난 경우가 다르기 때문입니다.",
+      "codes": [
+        {
+          "label": "요청 번호·상태·수량·소유 바이트",
+          "language": "cpp",
+          "text": "struct CompletionResult {\n    std::uint64_t request = 0;\n    CompletionKind kind = CompletionKind::error;\n    std::size_t count = 0;\n    std::uint32_t error = 0;\n    std::array<std::uint8_t, 16> bytes{};\n};"
+        },
+        {
+          "label": "회수한 패킷을 값 소유 결과로 변환",
+          "text": "    state.result = {};\n    state.result.request = state.request;\n    state.result.kind = classify_completion(success != FALSE,count,error,ERROR_OPERATION_ABORTED);\n    state.result.error = error;\n    if (success && count > state.capacity) {\n        state.result.kind = CompletionKind::error;\n        state.result.error = ERROR_INVALID_DATA;\n    } else if (state.result.kind == CompletionKind::data) {\n        state.result.count = count;\n        state.result.bytes = state.buffer; // Value ownership survives the next submission.\n    }\n    state.phase = Phase::ready;\n    return {PacketState::result};\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "준비된 결과를 가져가야 다시 제출할 수 있다",
+      "body": "패킷을 꺼내 결과를 만들면 phase는 ready입니다. 이 단계에서 OS가 저장소를 더 쓰지 않더라도 호출자가 아직 결과를 가져가지 않았습니다. post를 허용하면 새 요청이 미회수 결과를 덮을 수 있으므로 계속 거절합니다.\n\ntake는 ready일 때 결과를 값으로 복사하고 idle로 바꿉니다. 두 번째 take는 nullopt입니다. poll을 ready 상태에서 다시 부르면 결과가 있음을 반환하며 새 패킷을 꺼내지 않습니다.\n\n| 단계 | post | take | 저장소 |\n| --- | --- | --- | --- |\n| idle | 허용 | 없음 | 새 요청에 사용 가능 |\n| pending | 거절 | 없음 | 연산·완료 대응에 보존 |\n| ready | 거절 | 한 번 허용 | 호출자가 결과를 가져갈 때까지 보존 |\n\n이 작은 상태 기계는 큐에서 무엇을 꺼낼 수 있는지와 호출자가 무엇을 가져갔는지를 나눕니다. 여러 동시 요청으로 확장할 때도 요청별로 이 경계를 유지해야 합니다.",
+      "codes": [
+        {
+          "label": "결과 전달 뒤에만 idle로 복귀",
+          "text": "std::optional<CompletionResult> IocpReceiver::take() {\n    if (state_->phase != Phase::ready) return std::nullopt;\n    const auto result = state_->result;\n    state_->phase = Phase::idle;\n    return result;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "취소와 성공이 경합할 때",
+      "body": "request_cancel은 내 소켓과 OVERLAPPED를 CancelIoEx에 넘깁니다. 호출이 성공해도 phase를 ready나 idle로 바꾸지 않습니다. 최종 패킷을 아직 회수하지 않았기 때문입니다.\n\n취소할 요청을 찾지 못했다는 ERROR_NOT_FOUND도 저장소를 바로 해제하라는 뜻이 아닙니다. 예를 들어 수신이 이미 성공했고 패킷만 큐에 남았다면 취소할 실행은 없지만 회수는 남습니다. 이후 성공 결과를 받으면 그 성공을 유지합니다.\n\n취소 요청 뒤에는 성공·cancelled·다른 error 중 실제 결과를 확인합니다. 시간 제한이 끝났다고 요청 번호를 지우거나 OVERLAPPED를 다음 요청에 재사용하지 않습니다. 취소가 결과를 강제로 취소 상태로 바꾸는 동기 함수라면 이런 순서가 필요 없겠지만, 실제 계약은 요청과 완료를 나눕니다.\n\n[CancelIoEx의 동작](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)을 실행 순서로 읽으면 “이미 끝난 성공”, “진행 중 취소”, “요청 자체의 실패”를 별도 사례로 검사할 수 있습니다.",
+      "codes": [
+        {
+          "label": "취소 요청은 상태를 회수 완료로 바꾸지 않는다",
+          "text": "CancelReport IocpReceiver::request_cancel() {\n    if (state_->phase != Phase::pending) return {CancelState::no_pending};\n    if (::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<SOCKET>(state_->socket.native())),\n                     &state_->overlapped)) return {CancelState::requested};\n    const DWORD error = ::GetLastError();\n    return {error == ERROR_NOT_FOUND ? CancelState::not_found : CancelState::error,error};\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "bool remove(",
+        "invariant": "등록 제거 뒤에도 수락된 연산의 저장소를 회수 시점까지 보존한다.",
+        "mayDiffer": "현재 서버는 제거한 SockState를 zombies_에 보관한다. 학습 수신기는 한 소켓의 소유 상태를 유지하며 취소 후 패킷을 회수한다."
+      }
+    },
+    {
+      "title": "종료도 완료 회계에 참여한다",
+      "body": "소멸자가 불렸는데 pending이면 취소를 요청하고 완료 포트에서 회수합니다. 중간에 wake 패킷이 있어도 수신 완료까지 계속 진행합니다. 기본 완료 통지 설정에서 이미 성공한 요청도 같은 회수 경로를 통과합니다.\n\n정상 종료는 해당 연산을 회수한 뒤 State를 파괴하여 포트와 소켓을 닫습니다. 대기에는 INFINITE를 사용하므로 이 소멸자는 기다릴 수 있습니다. 호출자의 시간 제한이 지났다는 이유만으로 커널이 참조할 수 있는 저장소를 해제하는 것보다, 종료 정책을 명시하는 것이 필요합니다.\n\n완료 포트가 복구 불가능하게 실패하면 연산 종료를 증명할 수 없습니다. 이 구현은 진단을 남기고 소켓·버퍼·OVERLAPPED·포트가 있는 State를 프로세스 종료까지 보존합니다. 정상 회수가 아니라 예외적인 자원 보존 정책입니다. 운영 구조에서는 이런 실패를 감시하고 프로세스 종료·복구 정책에 연결해야 합니다.\n\n다른 스레드가 wake할 수 있다면 먼저 중단하고 join한 뒤 수신기를 파괴합니다. State의 소유권은 커널 연산의 수명을 보호하지만, 파괴된 수신기 메서드를 다른 스레드가 호출하는 것을 허용하지 않습니다.",
+      "codes": [
+        {
+          "label": "취소 요청·회수·파괴의 순서",
+          "text": "IocpReceiver::~IocpReceiver() {\n    if (state_->phase != Phase::pending) return;\n    (void)request_cancel();\n    while (state_->phase == Phase::pending) {\n        const auto packet = collect(INFINITE);\n        if (packet.state == PacketState::error) {\n            // Completion cannot be proved after a broken completion channel. Keep\n            // socket, OVERLAPPED, buffer and port alive until process exit.\n            std::fputs(\"IOCP shutdown failed; pending receive storage retained\\n\",stderr);\n            (void)state_.release();\n            return;\n        }\n    }\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "~IocpReactor() override",
+        "invariant": "등록 중인 요청과 제거 대기 요청 모두 종료 전에 회수한다.",
+        "mayDiffer": "현재 서버는 여러 SockState를 세어 기다린다. 이 실습은 한 미회수 요청만 소유한다."
+      }
+    },
+    {
+      "title": "깨우기 패킷과 업무 데이터를 분리한다",
+      "body": "wake는 PostQueuedCompletionStatus로 키 2와 null 요청 포인터를 가진 항목을 넣습니다. 실제 WSARecv 완료와 구별되므로 수신 결과를 만들거나 phase를 바꾸지 않습니다. 호출 성공 여부는 bool로 돌려줍니다.\n\n업무는 mutex가 있는 큐나 적절한 atomic으로 먼저 공개하고 wake합니다. IOCP에 깨우기 패킷이 들어갔다는 사실만으로 일반 메모리의 데이터 경쟁이 해결되지는 않습니다. 일반 스레드에서의 호출과 비동기 시그널 핸들러의 허용 범위도 구분합니다.\n\n이 포트의 wake는 개별 큐 항목입니다. eventfd에서 한 번 읽어 누적 카운터를 비우는 구현을 그대로 복사하지 않습니다. 다른 깨우기 패킷이 남아 있으면 다음 회수에서도 woken이 올 수 있습니다. 어떤 구현이든 실제 업무의 근거는 큐이고, 통지 횟수는 업무 수와 다를 수 있습니다.",
+      "codes": [
+        {
+          "label": "실제 I/O와 다른 키로 애플리케이션 통지",
+          "text": "bool IocpReceiver::wake() noexcept {\n    return ::PostQueuedCompletionStatus(state_->port,0,wake_key,nullptr) != FALSE;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "부분 완료를 프레임에 이어 붙인다",
+      "body": "iocp_probe는 수신 소켓을 수신기에 넘기고, 먼저 최대 2바이트 읽기를 제출합니다. 송신자는 아직 보내지 않았습니다. 이때 wake를 넣어 woken은 받되 take할 수신 결과는 없음을 확인합니다.\n\n길이 헤더 두 바이트를 보낸 뒤 수신 완료를 회수합니다. 실제 count는 1 또는 2일 수 있습니다. 받은 부분을 FrameParser에 붙여도 아직 전체 프레임이 아니므로 need_more입니다. 남은 바이트를 보낸 뒤 새 읽기를 반복 제출하여 11바이트 프레임을 복원합니다.\n\n각 결과는 type·payload의 두 값을 확인하는 누적 프로토콜로 연결합니다. 마지막에는 데이터가 없는 수신을 하나 제출하고 취소한 뒤 cancelled 패킷을 회수합니다. 프로브의 정상 시나리오는 이 마지막 요청에 보낼 데이터가 없도록 구성한 것입니다. 일반적인 취소 경합에서 반드시 cancelled만 온다고 가정하지 않습니다.\n\ncollect 보조 함수의 관찰 제한은 3초입니다. 이 시간이 끝나 예외가 나더라도 소멸자의 취소·회수 책임은 사라지지 않습니다. 관찰을 기다리는 시간과 저장소를 해제할 수 있는 시점이 다른 경계임을 코드로 볼 수 있습니다.",
+      "codes": [
+        {
+          "label": "헤더 읽기 제출과 wake 구별",
+          "text": "        auto sockets=pair();IocpReceiver receiver(std::move(sockets.receiver));\n        EncodedFrame encoded;require(encode_frame(probe_frame(12,8),encoded),\"encode\");\n        require(receiver.post(1,2).accepted(),\"submit receive before data\");\n        require(!receiver.post(2,16).accepted(),\"one pending request\");\n        require(receiver.wake(),\"post wake\");\n        require(receiver.poll(1000).state==PacketState::woken&&!receiver.take(),\"wake is not receive completion\");\n        auto sent=send_bounded(sockets.sender,encoded.bytes.data(),2,std::chrono::steady_clock::now()+std::chrono::seconds(2));\n        require(sent.outcome==SendOutcome::complete,\"send prefix\");\n        const auto first=collect(receiver);\n        require(first.kind==CompletionKind::data&&first.count<=2&&first.request==1,\"partial completion\");",
+          "language": "cpp"
+        },
+        {
+          "label": "결과 일부를 파서에 붙이고 다음 연산 제출",
+          "text": "        FrameParser parser;require(parser.append(first.bytes.data(),first.count),\"append prefix\");\n        Frame frame;require(parser.next(frame)==ParseStatus::need_more,\"completion not complete frame\");\n        sent=send_bounded(sockets.sender,encoded.bytes.data()+2,encoded.size-2,std::chrono::steady_clock::now()+std::chrono::seconds(2));\n        require(sent.outcome==SendOutcome::complete,\"send body\");\n        std::uint64_t request=2;bool parsed=false;\n        while(!parsed) {",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "현재 준비성 어댑터와 연결한다",
+      "body": "현재 게임 Reactor는 IOCP 완료를 바이트 결과로 돌려주지 않고 readable·writable·error와 token으로 바꿉니다. zero-byte 수신은 payload를 복사하지 않으며 실제 recv의 결과로 데이터·EOF·오류를 판단합니다. 완료 통지가 바이트를 예약하지 않으므로 WouldBlock도 처리합니다.\n\nSockState는 OVERLAPPED를 내부 멤버로 두고 CONTAINING_RECORD로 찾아갑니다. 이 계산은 알려진 멤버 주소와 살아 있는 객체를 전제로 합니다. 잘못된 포인터를 안전하게 바꾸는 검사는 아닙니다. 완료 회수 뒤에는 다음 관찰에 재무장을 예약하고, 현재 Read 관심이 꺼져 있으면 상위에 읽기 사건을 알리지 않습니다.\n\n현재 구현은 listener에 AcceptEx를 제출하는 경로 대신 수락 시도 힌트를 합성합니다. 쓰기 관심에도 실제 공간 확인 없이 재시도 힌트를 합성합니다. 폴백 대상이 있으면 요청 대기를 최대 25ms로 줄이지만, 실행 시각의 상한이거나 폴링 비용 0이라는 뜻은 아닙니다.\n\n읽기 완료와 합성 쓰기는 token 기준으로 병합합니다. 같은 대상의 중복을 줄이는 정책이지 객체 수명 검사의 대체물은 아닙니다. 다른 연결을 제거하는 콜백이 있을 수 있어 상위의 Dead 검사와 배치 끝 회수가 계속 필요합니다.\n\n이 차이를 알면 다음 확장을 선택할 수 있습니다. 준비성 계약을 유지할지, 송신도 WSASend 완료로 바꿔 버퍼를 회수할지에 따라 필요한 상태와 비용이 달라집니다. 단순히 IOCP가 더 빠르다는 이름 비교 대신 부하와 소유권 경계를 봅니다.",
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "void synth_writable(",
+        "invariant": "실제 I/O 완료와 재시도 힌트의 의미를 구별한다.",
+        "mayDiffer": "학습 수신기는 양수 길이 결과를 반환한다. 현재 어댑터는 zero-byte 완료·리스너 폴백·합성 쓰기를 준비성 사건으로 맞춘다."
+      }
+    },
+    {
+      "title": "빌드와 실패 순서를 함께 확인한다",
+      "body": "completion_rules.h는 OS 헤더 없이 제출·완료의 분류만 표현합니다. 실제 IOCP 수신은 iocp_receive.h/.cpp, 실행 시나리오는 tools/iocp_probe.cpp입니다. CMake는 Windows에서만 구현과 프로브를 연결하며 공통 프레임·소켓 파일은 재사용합니다.\n\nWindows 빌드에서 SCRIPTED 구성은 창 없이 통신 실습을 실행합니다. 다중 구성 생성기라면 --config Release, CTest의 -C Release, 실행 파일의 Release 하위 폴더를 맞춥니다. 단일 구성에서는 -DCMAKE_BUILD_TYPE=Release를 지정하고 출력 폴더에서 직접 실행합니다.\n\n검사할 실패 순서는 즉시 성공 뒤 미회수, 대기 중 재제출, 시간 초과, wake, 이미 성공한 뒤 취소, 실패한 I/O 패킷, 파괴 중 70개 wake 뒤 취소 완료입니다. Linux용 API 대역은 바로 이 Windows 구현 파일을 컴파일하고 순서를 통제합니다. Windows ABI나 네트워크 드라이버를 재현하는 도구는 아니므로 실제 Windows 실행과 역할을 구분합니다.\n\n완료 분류 테스트만 통과했다고 소켓 수명이 검증되는 것은 아닙니다. 실제 클래스의 제출·회수·소멸 코드를 거치는 검사와 Windows 헤더를 이용한 빌드를 함께 살펴야 합니다.",
+      "codes": [
+        {
+          "label": "Windows 타깃 연결",
+          "text": "add_executable(completion_rules tests/completion_rules.cpp)\ntarget_include_directories(completion_rules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME completion_rules COMMAND completion_rules)\nif(WIN32)\n    target_sources(StudySocket PRIVATE net/iocp_receive.cpp)\n    target_compile_definitions(StudySocket PRIVATE _WIN32_WINNT=0x0601)\n    add_executable(iocp_probe tools/iocp_probe.cpp)\n    target_link_libraries(iocp_probe PRIVATE StudySocket)\n    add_test(NAME iocp_probe COMMAND iocp_probe)\n    set_tests_properties(iocp_probe PROPERTIES TIMEOUT 20)\nendif()",
+          "language": "cmake"
+        },
+        {
+          "label": "Windows 다중 구성 빌드와 실행",
+          "text": "cmake -S docs/learn/checkpoints/128-iocp -B out/study-128 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE\ncmake --build out/study-128 --config Release --target iocp_probe completion_rules\nout/study-128/Release/iocp_probe.exe\nctest --test-dir out/study-128 -C Release -R \"^(iocp_probe|completion_rules)$\" --output-on-failure",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "전체 코드에서 회수 전 상태를 찾는다",
+      "body": "파일을 펼쳐 pending이 설정되고 해제되는 모든 경로를 찾습니다. 제출 실패는 idle, 수락은 pending, 내 완료 패킷 회수는 ready, take는 idle입니다. 시간 초과·wake·취소 요청은 pending을 해제하지 않습니다.\n\n이 상태표와 OVERLAPPED·buffer의 주소를 함께 추적하면 “함수가 반환했다”는 사실과 “메모리를 재사용해도 된다”는 조건을 구분할 수 있습니다. 현재 코드 뷰어에서는 여러 연결의 재무장·보존 맵·폴백이라는 추가 책임을 같은 기준으로 읽습니다.",
+      "codes": [
+        {
+          "label": "수신기 공개 계약 전체",
+          "language": "cpp",
+          "file": "checkpoints/128-iocp/net/iocp_receive.h",
+          "collapsed": true
+        },
+        {
+          "label": "제출·완료 상태 분류 전체",
+          "language": "cpp",
+          "file": "checkpoints/128-iocp/net/completion_rules.h",
+          "collapsed": true
+        },
+        {
+          "label": "Windows 요청·완료·수명 구현 전체",
+          "file": "checkpoints/128-iocp/net/iocp_receive.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "실제 Windows 프레임 프로브",
+          "file": "checkpoints/128-iocp/tools/iocp_probe.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "전체 구현의 API 대역 수명 검사",
+          "file": "checkpoints/128-iocp/tests/iocp_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "128-1",
+      "question": "기본 IOCP 통지 설정에서 WSARecv가 즉시 성공했습니다. 이 수신기가 pending으로 두는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "즉시 성공이 실제로 오류이기 때문이다"
+        },
+        {
+          "id": "b",
+          "text": "완료 패킷을 아직 회수하지 않았으므로 OVERLAPPED와 결과 회계를 보존하기 위해서다"
+        },
+        {
+          "id": "c",
+          "text": "반드시 버퍼 16바이트가 채워질 때까지 다시 WSARecv해야 하기 때문이다"
+        },
+        {
+          "id": "d",
+          "text": "다음 호출에서 같은 결과를 두 번 처리하기 위해서다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "완료 패킷을 아직 회수하지 않았으므로 OVERLAPPED와 결과 회계를 보존하기 위해서다",
+      "explanation": "커널의 즉시 완료와 애플리케이션의 패킷 회수는 다릅니다. 기본 통지 설정에서는 즉시 성공도 큐에서 회수하며, 그 전 재사용이나 이중 처리를 막습니다."
+    },
+    {
+      "id": "128-2",
+      "question": "GetQueuedCompletionStatus가 FALSE를 반환했지만 내 OVERLAPPED 포인터가 왔습니다. 올바른 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "패킷을 못 받았으므로 항상 timeout이다"
+        },
+        {
+          "id": "b",
+          "text": "깨우기 패킷이다"
+        },
+        {
+          "id": "c",
+          "text": "실패한 I/O 완료이므로 오류 결과를 만들고 회수 단계로 진행한다"
+        },
+        {
+          "id": "d",
+          "text": "그 포인터를 무시하고 버퍼를 재사용한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "실패한 I/O 완료이므로 오류 결과를 만들고 회수 단계로 진행한다",
+      "explanation": "BOOL과 요청 포인터를 함께 읽어야 합니다. 실패한 연산도 최종 완료입니다. FALSE와 null인 시간 초과·포트 오류와 구분합니다."
+    },
+    {
+      "id": "128-3",
+      "question": "수신은 성공해 패킷이 큐에 있지만 아직 회수하지 않았습니다. CancelIoEx가 ERROR_NOT_FOUND를 주면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "저장소를 즉시 파괴한다"
+        },
+        {
+          "id": "b",
+          "text": "성공 결과를 강제로 cancelled로 바꾼다"
+        },
+        {
+          "id": "c",
+          "text": "같은 OVERLAPPED로 즉시 새 요청을 제출한다"
+        },
+        {
+          "id": "d",
+          "text": "기존 패킷을 회수하고 실제 결과에 따라 처리한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "기존 패킷을 회수하고 실제 결과에 따라 처리한다",
+      "explanation": "취소할 실행을 찾지 못했다는 사실은 완료 패킷 회수나 저장소 반환을 뜻하지 않습니다. 이미 큐에 있는 성공은 성공으로 회수합니다."
+    },
+    {
+      "id": "128-4",
+      "question": "WSABUF는 지역 변수인데 post 반환 뒤에도 수신이 진행됩니다. 지켜야 할 수명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Winsock이 설명자를 캡처해도 실제 버퍼와 OVERLAPPED는 회수까지 유지한다"
+        },
+        {
+          "id": "b",
+          "text": "설명자 포인터를 넘기면 실제 배열도 모두 복사된다"
+        },
+        {
+          "id": "c",
+          "text": "버퍼는 지역 배열이어도 함수 반환 즉시 해제해도 된다"
+        },
+        {
+          "id": "d",
+          "text": "OVERLAPPED는 다음 post 때마다 위치를 바꾸어야 한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "Winsock이 설명자를 캡처해도 실제 버퍼와 OVERLAPPED는 회수까지 유지한다",
+      "explanation": "WSABUF 설명자와 가리키는 실제 저장소는 다릅니다. 실제 바이트 배열과 요청 상태의 주소·수명을 유지해야 합니다."
+    },
+    {
+      "id": "128-5",
+      "question": "양수 길이 TCP 읽기의 완료 수량이 0인 경우와 zero-byte 준비성 프로브의 완료는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "둘 다 항상 같은 EOF다"
+        },
+        {
+          "id": "b",
+          "text": "전자는 성공 시 EOF이며 후자는 실제 recv로 데이터·EOF·오류를 확인할 힌트다"
+        },
+        {
+          "id": "c",
+          "text": "둘 다 프레임 완성을 뜻한다"
+        },
+        {
+          "id": "d",
+          "text": "둘 다 취소다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "전자는 성공 시 EOF이며 후자는 실제 recv로 데이터·EOF·오류를 확인할 힌트다",
+      "explanation": "요청한 연산의 의미를 먼저 확인해야 합니다. 양수 길이 수신의 성공 0과 처음부터 payload를 복사하지 않는 길이0 요청을 같은 규칙으로 분류하면 EOF를 오판합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "idle·pending·ready 표에 제출·시간초과·wake·취소·take를 각각 배치합니다.",
+      "즉시 성공과 IO_PENDING이 같은 회수 경로에 들어가는지 확인합니다.",
+      "FALSE와 non-null OVERLAPPED를 실패 완료로 처리하는지 검사합니다.",
+      "헤더 일부만 받은 완료를 FrameParser에 붙이고 남은 바이트로 프레임을 완성합니다.",
+      "늦은 취소와 파괴 중 여러 wake 뒤 완료 회수를 비교합니다."
+    ],
+    "failureChecks": [
+      "WSABUF 설명자의 수명과 실제 버퍼의 수명을 혼동하지 않습니다.",
+      "대기 시간 초과나 취소 요청만으로 OVERLAPPED를 재사용하지 않습니다.",
+      "즉시 성공을 반환값과 큐 패킷으로 이중 처리하지 않습니다.",
+      "양수 길이 EOF 규칙을 zero-byte 프로브에 적용하지 않습니다.",
+      "대역 실행·Windows 교차 빌드·실제 Windows 실행 증거를 구분합니다."
+    ],
+    "expected": "수신의 최종 결과와 저장소 반환 시점을 연결하고, 취소·실패·깨우기가 섞여도 요청을 한 번만 회수할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 순수 분류 초안 검토·Microsoft 공식 API 대조·실제Windows코드 교차빌드·동일구현 API대역 수명 검사",
+    "draftJob": "out/learning-jobs/128-completion-rules-events.jsonl",
+    "corrections": [
+      "정수 타입을 std로 명시·실패 바이트 해석을 API 일반 사실 대신 이 수신기의 정책으로 교정",
+      "프로브의 ParseStatus를 실제 error 선언에 맞춤",
+      "실제 IOCP reserved Internal 판정을 WSAGetOverlappedResult로 교체",
+      "현재 WSARecv overlapped 수량 인자를 nullptr로 교정",
+      "Part14§5의 완료/버퍼/취소/기존소멸자/폴백/샤딩 단정 전체 교정"
+    ]
+  },
+  "validation": [
+    "Linux SCRIPTED/SDL 각6CTest·누적 SDL 게임 빌드",
+    "실제 iocp_receive.cpp를 API 행동 대역과 컴파일하여20회 ASan/UBSan 수명 검사",
+    "포트 오류 보존 시나리오만 의도적 누수 검사를 끄고 주소 유지 확인·정상 시나리오 누수 검사 유지",
+    "MinGW-w64 GCC13 Windows x64 실제 iocp_probe.exe와 현재 reactor_test.exe 링크·PE 확인",
+    "현재 완료 상태 판정 수정 전후 대역·기존 IOCP 전체종료 수명 회귀 통과",
+    "실제 Windows/Wine 실행·수동GUI·공개배포 검증 없음"
+  ]
+}

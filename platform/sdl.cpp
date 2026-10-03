@@ -10,6 +10,8 @@
 #include <string>
 
 #include "platform.h"
+#include "../core/key_edges.h"
+#include "mouse_coordinates.h"
 
 #ifdef __APPLE__
 #include <unistd.h>
@@ -30,16 +32,14 @@ static int s_vp_y = 0;
 static int s_vp_w = 0;
 static int s_vp_h = 0;
 
-static bool s_key_state[256]{};
-static bool s_key_prev[256]{};
+static input_detail::KeyEdges<256> s_keys;
 static char s_char_queue[64]{};
 static int s_char_head = 0;
 static int s_char_tail = 0;
 
 static int s_mouse_x = 0;
 static int s_mouse_y = 0;
-static bool s_mouse_state[3]{};
-static bool s_mouse_prev[3]{};
+static input_detail::KeyEdges<3> s_mouse;
 static float s_mouse_wheel = 0.0f;
 
 static uint64_t s_frequency = 1;
@@ -116,6 +116,8 @@ static void recompute_viewport()
 
 void platform_init(int width, int height, const char* title)
 {
+    s_keys.reset();
+    s_mouse.reset();
     s_win_w = s_logical_w = width;
     s_win_h = s_logical_h = height;
     recompute_viewport();
@@ -128,12 +130,17 @@ void platform_init(int width, int height, const char* title)
     set_macos_resource_cwd();
 #endif
     // OpenGL 3.3 Core 를 명시적으로 요청한다. 세 플랫폼 모두 같은 프로파일을
-    // 받아야 셰이더(#version 330 core)가 그대로 통한다. macOS 는 Core 프로파일이
-    // 아니면 3.x 자체를 주지 않으므로 이 설정이 필수다.
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    // 받도록 맞춰야 셰이더(#version 330 core)가 전제하는 컨텍스트와 어긋나지
+    // 않는다. macOS 는 Core 프로파일이 아니면 3.x 자체를 주지 않으므로 이
+    // 설정이 필수다.
+    if (SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE) != 0 ||
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3) != 0 ||
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3) != 0 ||
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1) != 0) {
+        std::fprintf(stderr, "[SDL] GL attribute setup failed: %s\n", SDL_GetError());
+        s_should_close = true;
+        return;
+    }
 
     s_window = SDL_CreateWindow(
         title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -152,10 +159,25 @@ void platform_init(int width, int height, const char* title)
         s_should_close = true;
         return;
     }
-    SDL_GL_MakeCurrent(s_window, s_glctx);
-    SDL_GL_SetSwapInterval(s_frame_pacing ? 1 : 0);
-    SDL_StartTextInput();
+    if (SDL_GL_MakeCurrent(s_window, s_glctx) != 0) {
+        std::fprintf(stderr, "[SDL] GL make current failed: %s\n", SDL_GetError());
+        // 창/컨텍스트는 여기서 파괴하지 않고 남긴다. 호출자는 실패해도 항상
+        // platform_shutdown 을 호출하므로 정리는 거기서 이뤄진다.
+        s_should_close = true;
+        return;
+    }
+    if (SDL_GL_SetSwapInterval(s_frame_pacing ? 1 : 0) != 0) {
+        // 비치명적 경고. 페이싱은 sleep 폴백이 있으므로 s_frame_pacing 정책은
+        // 그대로 두고 실패를 알리기만 한다.
+        std::fprintf(stderr, "[SDL] swap interval unavailable (nonfatal): %s\n", SDL_GetError());
+    }
     s_frequency = SDL_GetPerformanceFrequency();
+    if (s_frequency == 0) {
+        std::fprintf(stderr, "[SDL] performance frequency unavailable\n");
+        s_should_close = true;
+        return;
+    }
+    SDL_StartTextInput();
     s_init_time = SDL_GetPerformanceCounter();
     s_frame_start = s_init_time;
 }
@@ -173,14 +195,16 @@ void platform_shutdown()
         s_window = nullptr;
     }
     SDL_Quit();
+    s_keys.reset();
+    s_mouse.reset();
 }
 
 bool platform_should_close() { return s_should_close; }
 
 float platform_begin_frame()
 {
-    std::memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
-    std::memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_keys.begin_frame();
+    s_mouse.begin_frame();
     s_mouse_wheel = 0.0f;
 
     SDL_Event event;
@@ -193,7 +217,7 @@ float platform_begin_frame()
         case SDL_KEYUP: {
             const int key = sdl_to_platform_key(event.key.keysym.sym);
             if (key >= 0 && key < 256)
-                s_key_state[key] = event.type == SDL_KEYDOWN;
+                s_keys.set(static_cast<std::size_t>(key), event.type == SDL_KEYDOWN, event.key.repeat != 0);
         } break;
         case SDL_TEXTINPUT:
             for (const char* p = event.text.text; *p; ++p) {
@@ -217,7 +241,7 @@ float platform_begin_frame()
             else if (event.button.button == SDL_BUTTON_RIGHT) button = 1;
             else if (event.button.button == SDL_BUTTON_MIDDLE) button = 2;
             if (button >= 0) {
-                s_mouse_state[button] = event.type == SDL_MOUSEBUTTONDOWN;
+                s_mouse.set(static_cast<std::size_t>(button), event.type == SDL_MOUSEBUTTONDOWN);
                 s_mouse_x = event.button.x;
                 s_mouse_y = event.button.y;
             }
@@ -231,6 +255,10 @@ float platform_begin_frame()
                 s_win_w = event.window.data1;
                 s_win_h = event.window.data2;
                 recompute_viewport();
+            } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                // 키·마우스 held와 미전달 press를 취소한다. 문자 큐는 유지.
+                s_keys.cancel();
+                s_mouse.cancel();
             }
             break;
         }
@@ -256,8 +284,8 @@ void* platform_gl_get_proc(const char* name)
 void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
 {
     // s_vp_* 는 창 좌상단 원점이다. GL 은 좌하단 원점이라 y 를 뒤집어 준다.
-    // 지금은 뷰포트가 항상 세로 중앙이라 두 값이 같지만, 나중에 상단 고정
-    // 같은 배치로 바꾸면 이 변환이 없을 때만 조용히 어긋난다.
+    // 중앙 정렬이어도 남는 높이가 홀수면 위아래 여백이 1픽셀 다르다.
+    // 배치 정책과 관계없이 아래쪽 여백으로 변환한다.
     x_out = s_vp_x;
     y_out = s_win_h - s_vp_y - s_vp_h;
     w_out = s_vp_w;
@@ -288,13 +316,15 @@ void platform_end_frame()
 
 bool platform_key_pressed(int key)
 {
-    return key >= 0 && key < 256 && s_key_state[key] && !s_key_prev[key];
+    return key >= 0 && s_keys.pressed(static_cast<std::size_t>(key));
 }
 
 bool platform_key_down(int key)
 {
-    return key >= 0 && key < 256 && s_key_state[key];
+    return key >= 0 && s_keys.down(static_cast<std::size_t>(key));
 }
+
+bool platform_input_cancelled() { return s_keys.cancelled(); }
 
 char platform_get_char_pressed()
 {
@@ -306,31 +336,27 @@ char platform_get_char_pressed()
 
 int platform_mouse_x()
 {
-    if (s_vp_w <= 0) return s_mouse_x;
-    return (int)((double)(s_mouse_x - s_vp_x) * s_logical_w / s_vp_w);
+    return platform_detail::logical_mouse_axis(s_mouse_x, s_vp_x, s_vp_w, s_logical_w);
 }
 
 int platform_mouse_y()
 {
-    if (s_vp_h <= 0) return s_mouse_y;
-    return (int)((double)(s_mouse_y - s_vp_y) * s_logical_h / s_vp_h);
+    return platform_detail::logical_mouse_axis(s_mouse_y, s_vp_y, s_vp_h, s_logical_h);
 }
 
 bool platform_mouse_pressed(int button)
 {
-    return button >= 0 && button < 3 &&
-           s_mouse_state[button] && !s_mouse_prev[button];
+    return s_mouse.pressed(static_cast<std::size_t>(button));
 }
 
 bool platform_mouse_down(int button)
 {
-    return button >= 0 && button < 3 && s_mouse_state[button];
+    return s_mouse.down(static_cast<std::size_t>(button));
 }
 
 bool platform_mouse_released(int button)
 {
-    return button >= 0 && button < 3 &&
-           !s_mouse_state[button] && s_mouse_prev[button];
+    return s_mouse.released(static_cast<std::size_t>(button));
 }
 
 float platform_mouse_wheel() { return s_mouse_wheel; }
@@ -390,9 +416,9 @@ void platform_set_fullscreen(bool on)
 bool platform_fullscreen_supported() { return true; }
 void platform_set_vsync(bool on)
 {
-    // 이제는 진짜 VSync 다. GL swap interval 1 이면 SDL_GL_SwapWindow 가
-    // vblank 까지 기다리므로 tearing 이 사라진다. 소프트웨어 페이싱과 달리
-    // 디스플레이 주사율에 실제로 동기화된다.
+    // GL swap interval을 요청한다. 소프트웨어 대기와 달리 버퍼 교체 동기화를
+    // 제어하지만 드라이버가 요청을 지원/적용해야 한다. 호출 성공이나 실제 표시
+    // 주기를 여기서는 검증하지 않으므로 tearing 제거를 무조건 보장하지 않는다.
     s_frame_pacing = on;
     if (s_glctx) SDL_GL_SetSwapInterval(on ? 1 : 0);
 }

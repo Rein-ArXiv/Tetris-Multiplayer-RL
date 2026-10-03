@@ -1,0 +1,3650 @@
+{
+  "version": 2,
+  "status": "구현 주제를 의존성 순서로 편성하고 마지막에 전체 구현을 복습한다. 집필·내용 검토·실행 검증은 별도 상태로 관리한다.",
+  "principle": "차시 수는 상한이 아니다. CS 깊이와 구현 단계를 위해 더 나눌 수 있다.",
+  "modules": [
+    {
+      "id": "module-01",
+      "title": "프로그램과 창",
+      "units": [
+        {
+          "id": "unit-001",
+          "title": "첫 실행 파일: 소스·오브젝트·프로세스",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-1",
+          "previous": null,
+          "next": "unit-002",
+          "deliverable": "C++17 실행 파일을 빌드하여 문장 한 줄 출력",
+          "validation": [
+            "Linux CMake configure/build/run 확인"
+          ]
+        },
+        {
+          "id": "unit-002",
+          "title": "종료할 수 있는 SDL 창: 핸들과 수명",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-2",
+          "previous": "unit-001",
+          "next": "unit-003",
+          "deliverable": "실패 경로를 정리하며 창을 만들고 종료",
+          "validation": [
+            "Linux CMake 빌드 확인",
+            "SDL dummy 종료·실패 경로 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ]
+        },
+        {
+          "id": "unit-003",
+          "title": "이벤트 큐: 기다리기와 계속 확인하기",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-3",
+          "previous": "unit-002",
+          "next": "unit-004",
+          "deliverable": "이벤트를 모두 처리한 뒤 시간 진행 작업을 반복",
+          "validation": [
+            "Linux CMake 빌드 확인",
+            "SDL dummy 종료·실패 경로 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ]
+        },
+        {
+          "id": "unit-004",
+          "title": "함수를 파일로 나누기: 번역 단위·선언·정의",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-4",
+          "previous": "unit-003",
+          "next": "unit-005",
+          "validation": [
+            "Linux 빌드·SDL dummy 종료/실패 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ],
+          "deliverable": "main.cpp는 반복 순서를, platform.h는 호출 계약을, sdl.cpp는 OS 연결과 상태를 담당합니다. 관찰할 동작은 유지합니다."
+        },
+        {
+          "id": "unit-005",
+          "title": "라이브러리 연결: 헤더 탐색과 링크 경로",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-5",
+          "previous": "unit-004",
+          "next": "unit-006",
+          "validation": [
+            "Linux 빌드·SDL dummy 종료/실패 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ],
+          "deliverable": "study_platform 정적 라이브러리와 tetris 실행 타깃이 의존 관계로 연결됩니다. C++ 파일은 그대로입니다."
+        },
+        {
+          "id": "unit-006",
+          "title": "자원 정리: 성공 경로와 실패 경로",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-6",
+          "previous": "unit-005",
+          "next": "unit-007",
+          "validation": [
+            "Linux 빌드·SDL dummy 종료/실패 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ],
+          "deliverable": "같은 API 안에서 SDL과 창의 정리 책임을 소유 객체로 옮깁니다. 성공하기 전의 자원은 지역 후보에 보관하고 완료 뒤 활성 상태로 넘깁니다."
+        },
+        {
+          "id": "unit-007",
+          "title": "키 상태: 누르고 있음과 처음 누름",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-7",
+          "previous": "unit-006",
+          "next": "unit-008",
+          "validation": [
+            "Linux 빌드·SDL dummy 수명/실패 검사",
+            "SDL 이벤트 주입으로 입력 계약 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ],
+          "deliverable": "왼쪽·오른쪽 키의 유지 상태와 누름·뗌 전이를 조회하고 Escape로 종료합니다."
+        },
+        {
+          "id": "unit-008",
+          "title": "문자 입력: 키코드·문자·링버퍼",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-8",
+          "previous": "unit-007",
+          "next": "unit-009",
+          "validation": [
+            "Linux 빌드·SDL dummy 수명/실패 검사",
+            "SDL 이벤트 주입으로 입력 계약 확인",
+            "실제 GUI·Windows·macOS 미검증"
+          ],
+          "deliverable": "ASCII 문자를 고정 크기 원형 큐에 넣고 main에서 순서대로 소비합니다. 가득 찼을 때의 손실도 수치로 확인합니다."
+        },
+        {
+          "id": "unit-009",
+          "title": "플랫폼 인터페이스: 구현이 갈리는 경계",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-9",
+          "previous": "unit-008",
+          "next": "unit-010",
+          "validation": [
+            "Linux SDL/창 없는 구현 빌드·실행",
+            "수명·입력·대역 계약·잘못된 빌드 옵션 검사",
+            "실제 GUI·Windows·macOS 미검증"
+          ],
+          "deliverable": "같은 main을 SDL 또는 정해진 입력을 재생하는 구현과 연결합니다. 창 없이도 호출 순서와 입력 소비 결과를 확인합니다."
+        },
+        {
+          "id": "unit-010",
+          "title": "Win32와 SDL: 같은 계약의 두 구현",
+          "state": "reviewed",
+          "referenceParts": [
+            0,
+            2
+          ],
+          "lessonId": "lesson-10",
+          "previous": "unit-009",
+          "next": "unit-011",
+          "validation": [
+            "Linux SDL/SCRIPTED 빌드·13개 실행 경로 확인",
+            "실제 SDL 입력 취소 회귀 검사",
+            "Win32 네이티브 빌드·CTest·실제 GUI 미검증"
+          ],
+          "deliverable": "WIN32 선택 경로와 창·콜백·입력·정리를 구현하고, main을 유지하며 운영체제별 구현을 연결합니다."
+        }
+      ]
+    },
+    {
+      "id": "module-02",
+      "title": "GPU로 첫 도형 그리기",
+      "units": [
+        {
+          "id": "unit-011",
+          "title": "창과 GL 컨텍스트: 서로 다른 자원",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-11",
+          "previous": "unit-010",
+          "next": "unit-012",
+          "validation": [
+            "Linux SDL 빌드·21개 학습/실제 소스 실패 주입 경로 확인",
+            "실제 offscreen 생성·SDL 버전 설정 3.3 조회·단일 버퍼 거부 확인 (실제 GL 버전 조회는 별도 단계)",
+            "실제 창 표시·GPU 렌더링·Windows/macOS 실행 미검증"
+          ],
+          "deliverable": "SDL 창에 3.3 Core 컨텍스트를 연결하고, SDL이 보고한 구성과 실패 시 정리 순서를 검사합니다. 창·컨텍스트·current 연결을 구분해 설명합니다."
+        },
+        {
+          "id": "unit-012",
+          "title": "GL 함수 주소: 함수 포인터와 런타임 로딩",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-12",
+          "previous": "unit-011",
+          "next": "unit-013",
+          "validation": [
+            "Linux SDL/SCRIPTED 빌드·로더 누락 조합·실제 소스 44함수 검사",
+            "실제 offscreen GL 조회: Mesa llvmpipe 4.5 Core·정점 속성 상한 16",
+            "WGL 반환값 모델 검사. 네이티브 Windows/macOS·실제 화면 표시는 미검증"
+          ],
+          "deliverable": "함수 주소 세 개를 정확한 타입으로 조회해 버전·프로파일·장치 정보를 읽습니다. 누락된 주소를 모두 보고하고 실패한 테이블은 공개하지 않습니다."
+        },
+        {
+          "id": "unit-013",
+          "title": "정점 데이터: 연속 배열과 바이트 크기",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-13",
+          "previous": "unit-012",
+          "next": "unit-014",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 빌드·CPU 관찰 출력·CTest 통과",
+            "잘못된 필드 배치와 좌표를 주입해 검사 실패 확인",
+            "GPU 업로드·실제 GUI·Windows/macOS 실행 미검증"
+          ],
+          "deliverable": "정점 세 개를 만들고 CPU에서 개수·stride·offset·바이트 범위를 검증합니다. 같은 데이터를 누적 SDL 세션에 연결합니다."
+        },
+        {
+          "id": "unit-014",
+          "title": "VBO: CPU 배열과 GL 데이터 저장소",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-14",
+          "previous": "unit-013",
+          "next": "unit-015",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 빌드와 로더512조합·소유권 검사 통과",
+            "실제 offscreen GL readback·바인딩·저장소 교체·정리 확인: Mesa llvmpipe4.5 Core",
+            "물리 GPU·화면 그리기·네이티브 Windows/macOS 미검증"
+          ],
+          "deliverable": "GL 버퍼에 정점을 복사하고 크기·내용을 읽습니다. 버퍼 소유자를 만들어 실패와 종료 때 이름을 정리합니다."
+        },
+        {
+          "id": "unit-015",
+          "title": "VAO: 속성·stride·offset으로 해석 지정",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-15",
+          "previous": "unit-014",
+          "next": "unit-016",
+          "validation": [
+            "Linux SDL/SCRIPTED Release와 loader/mesh/buffer/VAO CTest 통과",
+            "Mesa llvmpipe4.5 Core 실제 상태 조회·버퍼 연결·VAO 전환·offset·잘못된 stride 관찰",
+            "호스트 Khronos 8함수 타입 일치, NDEBUG 삭제 누락·잘못된 stride 검출",
+            "실제 그리기·물리 GPU·네이티브 Windows/macOS 미검증"
+          ],
+          "deliverable": "VAO에 위치 속성의 버퍼·타입·성분 수·stride·offset을 연결하고 두 VAO의 상태를 비교합니다."
+        },
+        {
+          "id": "unit-016",
+          "title": "GLSL: 소스·셰이더 객체·컴파일 오류",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-16",
+          "previous": "unit-015",
+          "next": "unit-017",
+          "validation": [
+            "Linux SDL/SCRIPTED Release·5개 CTest·실제 GLSL330 컴파일/오류/재시도 통과",
+            "CPU 원본 수정·소멸 후 컴파일, status false/GetError0 관찰: Mesa llvmpipe4.5 Core",
+            "현재 렌더러 생성 실패 대역 검사·번역 검사, NDEBUG 삭제 누락 검출",
+            "프로그램 링크·그리기·물리 GPU·네이티브 Windows/macOS 미검증"
+          ],
+          "deliverable": "정점·프래그먼트 GLSL 소스를 각각 컴파일하고 상태·로그·소유권을 관리합니다. 실패 후 소스를 고쳐 다시 시도합니다."
+        },
+        {
+          "id": "unit-017",
+          "title": "프로그램 링크: 단계 사이의 입출력",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-17",
+          "previous": "unit-016",
+          "next": "unit-018",
+          "validation": [
+            "Linux SDL/SCRIPTED Release: 6 CTest, llvmpipe4.5Core 링크/불일치/선택/삭제 관찰",
+            "8함수 Khronos ABI·삭제 누락 대조군·실제 production link_program 추출 검사",
+            "Windows/macOS 네이티브·물리 GPU·draw/표시는 미검증"
+          ],
+          "deliverable": "Program 소유자로 두 stage를 링크하고 타입 불일치·선택·셰이더 수명을 구별"
+        },
+        {
+          "id": "unit-018",
+          "title": "첫 삼각형: draw 호출의 상태 전제",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-18",
+          "previous": "unit-017",
+          "next": "unit-019",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각7 CTest·실제 offscreen GL 픽셀 읽기",
+            "창 픽셀 크기/표시 수명 경계는 SDL 호출 대역 검사",
+            "X11 사용 불가. 실제 모니터 표시·물리GPU·Windows/macOS 네이티브는 미검증"
+          ],
+          "deliverable": "준비된 정점·VAO·프로그램으로 프레임을 그리고 픽셀 결과와 표시 경계를 구별"
+        },
+        {
+          "id": "unit-019",
+          "title": "좌표계: clip 좌표·원근 나눗셈·NDC",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-19",
+          "previous": "unit-018",
+          "next": "unit-020",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각8 CTest와 CPU 수치/실패 입력 검사",
+            "llvmpipe4.5 Core 네 가지 픽셀 결과·CPU 경계 대조",
+            "물리 GPU·실제 표시·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "공간별 타입·CPU 좌표 예측과 네 셰이더 실험으로 clip·w·NDC·viewport·UI 단위를 설명한다."
+        },
+        {
+          "id": "unit-020",
+          "title": "래스터화: 정점 사이와 프래그먼트",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-20",
+          "previous": "unit-019",
+          "next": "unit-021",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각9 CTest",
+            "llvmpipe4.5 Core: 세 실험 각각16,384픽셀의 내부/배경/색 비교",
+            "물리 GPU·실제 표시·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "CPU 삼각형 샘플러와 smooth/flat/discard 실험으로 샘플·속성 보간·최종 픽셀을 구별한다."
+        },
+        {
+          "id": "unit-021",
+          "title": "사각형: 두 삼각형과 공유 경계",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-21",
+          "previous": "unit-020",
+          "next": "unit-022",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각10 CTest·정점 범위와 개수 상태 검사",
+            "llvmpipe4.5 Core 네 실험·두 개별 마스크 합과 culling 관찰",
+            "물리 GPU·실제 표시·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "여섯 정점의 사각형과 CPU 경계 소유권을 구현하고 개별 GL 마스크·정점 방향·면 제거를 구별한다."
+        },
+        {
+          "id": "unit-022",
+          "title": "색과 블렌딩: 알파를 합성하는 순서",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-22",
+          "previous": "unit-021",
+          "next": "unit-023",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각11 CTest·수식/프레임 계약",
+            "llvmpipe4.5 Core 여섯 모드×두 배경 alpha의 전체 RGBA 비교",
+            "물리 GPU·실제 모니터 표시·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "프레임 초기화와 제출을 분리하고 straight/선곱 RGB·alpha 계수·그리는 순서를 CPU와 실제 RGBA로 비교한다."
+        },
+        {
+          "id": "unit-023",
+          "title": "버퍼 교체: 제출·완료·표시를 구분",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-23",
+          "previous": "unit-022",
+          "next": "unit-024",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각12 CTest·CPU 시점/모드 검사",
+            "SDL 호출 대역으로 세션·current·drawable·설정 실패/보고 검사",
+            "llvmpipe4.5 Core의 세 모드 실제 RGB readback. offscreen doublebuffer0은 창 정책에서 거부",
+            "물리 GPU·모니터 표시·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "Flush/Finish와 swap 요청 진단·CPU 시간 구간을 구현하고 GL 완료와 화면 표시의 증거를 구분한다."
+        },
+        {
+          "id": "unit-024",
+          "title": "창 크기: 뷰포트·레터박스·DPI",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            3
+          ],
+          "lessonId": "lesson-24",
+          "previous": "unit-023",
+          "next": "unit-025",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각13 CTest",
+            "크기별 실제 GL RGB readback·SDL 좌표 조회 대역·production 마우스 경계 회귀",
+            "물리 DPI·native resize·Windows/macOS 창 동작은 별도 검증 필요"
+          ],
+          "deliverable": "세 좌표 공간을 구분하고, 제한 축·정수 여백·GL 원점·입력 경계를 계산하여 창 크기와 독립적인 화면을 구현합니다."
+        }
+      ]
+    },
+    {
+      "id": "module-03",
+      "title": "보드와 규칙 만들기",
+      "units": [
+        {
+          "id": "unit-025",
+          "title": "그리드: 행·열·연속 메모리",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-25",
+          "previous": "unit-024",
+          "next": "unit-026",
+          "validation": [
+            "Linux SDL/SCRIPTED Release 각14CTest·CPU 데모 출력 비교",
+            "200개 좌표 대응·UBSan·flat-only 경계 오류 대조군",
+            "현재 SimGrid 조회/ID/복사 계약 검사. 새 보드 그래픽 표현은 후속 범위",
+            "창 프로그램은 빌드 연결 확인. 새 main의 native GUI와 Windows/macOS 실행은 미검증"
+          ],
+          "deliverable": "행·열을 연속 원소에 대응시키고, 빈칸과 범위 밖을 구분하며 렌더링 없이 보드 상태를 다루는 API를 구현합니다."
+        },
+        {
+          "id": "unit-026",
+          "title": "보드를 그리기: 상태에서 화면 좌표로",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-26",
+          "previous": "unit-025",
+          "next": "unit-027",
+          "validation": [
+            "Linux SCRIPTED/SDL Release 각15CTest·경고0·CPU 타깃 SDL/GL 의존 없음",
+            "전 정점·경계·스냅샷·UBSan·행열 교환 대조군",
+            "SDL offscreen GL4.5 Core llvmpipe: 3보드×4크기 전체 RGB readback 비교",
+            "새 main은 SDL 빌드 확인. 물리 GPU·native 표시/입력·Windows/macOS는 미검증"
+          ],
+          "deliverable": "보드 상태와 표현의 책임을 나누고, 칸 간격·사각형·정점 범위·GPU 복사본을 구별하여 정지된 보드를 렌더링합니다."
+        },
+        {
+          "id": "unit-027",
+          "title": "블록 데이터: 로컬 좌표와 기준점",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-27",
+          "previous": "unit-026",
+          "next": "unit-028",
+          "validation": [
+            "Linux SCRIPTED/SDL Release 각16CTest·CPU 데모·UBSan",
+            "현재 SimBlock 좌표·map/vector 복사·스냅샷 검사",
+            "5배치×3크기 SDL offscreen llvmpipe 실제 GL RGB readback",
+            "새 main SDL 빌드 확인. 물리GPU·native 표시/키/마우스·Windows/macOS는 미검증"
+          ],
+          "deliverable": "로컬 좌표·배치 기준점·보드 좌표·화면 좌표를 구분하고, 평행이동과 범위 검사를 거쳐 블록의 정점 스냅샷을 만듭니다."
+        },
+        {
+          "id": "unit-028",
+          "title": "블록 종류: 데이터와 규칙을 분리",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-28",
+          "previous": "unit-027",
+          "next": "unit-029",
+          "validation": [
+            "Linux SCRIPTED/SDL Release 각17CTest·경고0·CPU 링크 독립",
+            "1820개 네 칸 집합·43680순열의 연결성·UBSan·현재 일곱 종류 데이터 대조",
+            "일곱 종류×3크기 실제 SDL offscreen GL4.5 Core llvmpipe 전체 RGB 비교",
+            "새 main의 CLI 도움말·오류 처리 검사. native 창 표시/입력·물리 GPU·Windows/macOS는 미검증"
+          ],
+          "deliverable": "종류 ID·배열 위치·정의·인스턴스를 구분하고, 데이터의 범위·중복·연결성·의미 대응을 서로 다른 계약으로 검사합니다."
+        },
+        {
+          "id": "unit-029",
+          "title": "좌우 이동: 변경·검사·되돌리기",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-29",
+          "previous": "unit-028",
+          "next": "unit-030",
+          "validation": [
+            "Linux SCRIPTED 20/SDL19 CTest·경고0·CPU 링크 독립",
+            "13440개 상태/방향 조합·극단 기준점·UBSan·조기 확정 오류 대조군",
+            "현재 게임32시드 단일 방향 대조 및 양쪽 입력 정책 차이 확인",
+            "7종류×4위치×3크기 SDL offscreen GL3.3 Core Mesa Intel HD Graphics 3000 저장소/전체 RGB 비교",
+            "native main 창 표시·실제 키 입력·모니터 표시·Windows/macOS는 미검증",
+            "연결된 브라우저 없음: 사이트 실화면·모바일·새 문제 클릭 검수는 다음 연결 시 수행. Node 객관식 검사·생성물 검사는 통과"
+          ],
+          "deliverable": "입력 의도·상태 전이·실패 보존을 구분하고, 후보 검증과 CPU→GPU 갱신 순서로 벽을 넘지 않는 좌우 이동을 구현합니다."
+        },
+        {
+          "id": "unit-030",
+          "title": "충돌: 배열 범위와 점유 상태",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-30",
+          "previous": "unit-029",
+          "next": "unit-031",
+          "validation": [
+            "Linux SCRIPTED22/SDL20 CTest·CPU 링크 독립·UBSan",
+            "63315배치·189945이동·단일 장애물 전200위치·24순열 우선순위·점유 무시 mutation",
+            "현재 SimGrid/SimBlock 좌표와 33768배치 허용 여부 비교; 실제 BlockFits 직접 호출은 아님",
+            "7종류×4위치×3크기 SDL offscreen GL3.3 Core Mesa Intel HD Graphics3000 저장소/전체RGB 비교",
+            "native main 창/키/모니터 표시·타OS·사이트 실화면은 미검증. CUA 브라우저 없음"
+          ],
+          "deliverable": "단일 배치·이동 경로·거부 이유를 구분하고, 읽기 전용 보드 검사로 자기 충돌 없이 점유 충돌을 구현합니다."
+        },
+        {
+          "id": "unit-031",
+          "title": "자연 낙하: 시간 대신 틱으로 진행",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-31",
+          "previous": "unit-030",
+          "next": "unit-032",
+          "validation": [
+            "Linux SCRIPTED23/SDL21 CTest·경고0·CPU 링크 독립·UBSan",
+            "371448 독립 전이·카운터 경계·정수 한계·시계 분할·입력 보관·실행 순서",
+            "현재 SimGame::Tick과 고정 전 51000틱 비교·조기 낙하 mutation 거부",
+            "7종류×4위치×3크기=84 SDL offscreen GL 화면·저장소/RGB 비교",
+            "native main 키/실제 모니터·타OS·사이트 실화면 미검증, CUA 연결 없음"
+          ]
+        },
+        {
+          "id": "unit-032",
+          "title": "고정: 움직이는 블록이 보드가 되는 순간",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-32",
+          "previous": "unit-031",
+          "next": "unit-033",
+          "validation": [
+            "Linux SCRIPTED24/SDL22 CTest·경고0·CPU 링크 독립·UBSan",
+            "371448 고정 배치·24셀 순열·39회 고정의 일곱 전체 경기·중복 무시 mutation",
+            "실제 SimGame 100시드의 첫 고정 보드/preview 승격 비교",
+            "7종류×4상태×3크기=84 SDL offscreen GL 보드/활성 VBO 및 전체 RGB 비교",
+            "native main 물리 키/모니터·타OS·29~32차시 사이트 실화면은 미검증"
+          ]
+        },
+        {
+          "id": "unit-033",
+          "title": "줄 삭제: 아래부터 읽고 남은 행을 압축",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-33",
+          "previous": "unit-032",
+          "next": "unit-034",
+          "validation": [
+            "Linux SCRIPTED25/SDL23 CTest·경고0·CPU 링크 독립·UBSan",
+            "2^20 완성 행 조합·1024 단일 행 마스크·일곱 통합 제거·셀 수/순서/멱등성·상단 누락 mutation",
+            "현재 SimGrid의20000 종류ID 보드 비교, 실제 SimGame 스폰선행 종료/강의 clear-first 차이 재현",
+            "7종류×4상태×3크기=84 SDL offscreen GL 저장소/전체RGB 비교",
+            "native main 물리 키/모니터·타OS·29~33차시 사이트 실화면 미검증"
+          ]
+        },
+        {
+          "id": "unit-034",
+          "title": "회전 상태: 중심과 좌표 변환",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-34",
+          "previous": "unit-033",
+          "next": "unit-035",
+          "validation": [
+            "Linux SCRIPTED26/SDL24 CTest·경고0·CPU 링크 독립·UBSan",
+            "1485792 배치·28 독립 형상·네 회전 복귀·정수 격자/오버플로·입력 순서·생성 초기화·부호 mutation",
+            "현재 28개 표와400 SimGame 회전 일치, 거부 회전 후 성공 이력의 StateHash 보존",
+            "7종×5상태×3크기=105 SDL offscreen GL 저장소/전체RGB 비교",
+            "실제 SDL 큐/pump의 Up 이벤트 검사: 테스트 전용 Resources, platform_init/창/물리 키 검증은 아님",
+            "Windows/macOS·실제 모니터·29~34차시 사이트 실화면 미검증"
+          ]
+        },
+        {
+          "id": "unit-035",
+          "title": "킥: 실패한 회전의 대안 위치",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-35",
+          "previous": "unit-034",
+          "next": "unit-036",
+          "validation": [
+            "Linux SCRIPTED27/SDL25 CTest·경고0·CPU 링크 독립·UBSan",
+            "1485792배치·독립28형상/명시적후보표·후보0~6모두선택·우선순위/실패보존/정수범위/틱통합",
+            "현재SimGame왼벽T거부와교육용킥허용의의도한규칙차이를실제호출로재현",
+            "7사례×전후2상태×3크기=42 SDLoffscreen GL저장소/전체RGB비교",
+            "실제SDL큐/pump입력fixture; platform_init·물리키·모니터·타OS·29~35사이트실화면미검증"
+          ]
+        },
+        {
+          "id": "unit-036",
+          "title": "다음 블록: 큐와 소유권",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-36",
+          "previous": "unit-035",
+          "next": "unit-037",
+          "validation": [
+            "Linux SCRIPTED28/SDL26 CTest·경고0·CPU 링크 독립·UBSan",
+            "250000 deque모델 비교·감김/용량/범위/복사·7시작종류승격·큐/공급자실패보존·미리보기0~72정점",
+            "100 production시드에서조회무소비/해시보존·실제하드드롭승격/보충·값스냅샷독립",
+            "7시작종류×4상태×3크기=84 SDLoffscreen GL활성/보드/미리보기저장소·전체RGB비교",
+            "SDL입력은실제큐/pump fixture. native main·물리키·모니터·타OS·29~36사이트실화면미검증",
+            "잘못된원고코드블록6종을HTML생성전에거부"
+          ]
+        },
+        {
+          "id": "unit-037",
+          "title": "게임 오버: 종료를 판정하는 순서",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-37",
+          "previous": "unit-036",
+          "next": "unit-038",
+          "validation": [
+            "Linux SCRIPTED29/SDL27 CTest·경고0·CPU 링크 독립·UBSan",
+            "1400 단일 장애물 스폰·7종 초기/고정종료/행제거·독립 보드 필터·반복 정지·복사 보존",
+            "200 현재 SimGame 보드 fixture: 제거 전 종료와 clear-first 차이·종료 뒤 입력/틱 보존",
+            "7종×3시나리오×2상태×3크기=126 SDL offscreen GL 화면. X 사선 경계 픽셀만 표식/배경 두 색 허용, 나머지 RGB 오차≤2/255",
+            "SDL 실제 입력 큐/pump fixture. native main·물리키·모니터·타 OS 실행은 미검증",
+            "종료 원인 기록 누락 mutation을 Release에서 검출",
+            "CUA 실제 사이트: 데스크톱/390px 본문·표·접힘·즉시 해설·선택 변경·해제·소스 스냅샷/함수 이동 확인. native 게임 GUI와 별개."
+          ]
+        },
+        {
+          "id": "unit-038",
+          "title": "점수: 규칙 이벤트와 상태 갱신",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-38",
+          "previous": "unit-037",
+          "next": "unit-039",
+          "validation": [
+            "Linux SCRIPTED30/SDL28 CTests·경고0·CPU 독립 링크·UBSan",
+            "일반 점수/레벨 경계·20002 포화 경계·네 번의 실제 회전/낙하/고정·최종 종료 득점·조회/invalid/stopped 보존",
+            "현재 SimGame:100 일반 레벨/제거 조합·16 포화 배치·16 T-spin 조합·포화 후 실제 제거 수 반환·종료 고정 득점",
+            "production sim_score/bot_controller/bot_replay/ranked_game 4 CTests 통과; 기존 sim_hash_dump 출력 동일",
+            "5 규칙 상태+9 숫자 경계×3크기=42 SDL offscreen GL:840정점 전체 저장소·모든 RGB 오차≤2/255",
+            "점수 확정 누락 mutation Release 검출; native main·물리키·모니터·타 OS 게임 실행은 미검증",
+            "CUA 데스크톱/390px 본문·비교표·접힘·38-1 선택/확인 즉시 해설·선택 해제·현재 UpdateScore 스냅샷/함수 이동 확인"
+          ]
+        },
+        {
+          "id": "unit-039",
+          "title": "고스트: 원본 상태를 바꾸지 않는 예측",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-39",
+          "previous": "unit-038",
+          "next": "unit-040",
+          "validation": [
+            "Linux SCRIPTED31/SDL29 CTests·경고0·CPU 독립 링크·UBSan",
+            "337680 배치의 독립 경로 판정: 유효209608/무효128072, 장벽·거리0·좌표 범위·Round 조회 보존",
+            "66 SDL offscreen GL 프레임: 일곱 종류×세 배치+표시없음, 세 크기의 전체 RGB 오차≤2/255·24정점 저장소 대조",
+            "현재 SimGame 64시드 생성·입력·자연 고정·직접 낙하·드롭/가비지·배치 갱신, UBSan 통과",
+            "실제 게임 tetris 빌드·회귀 CTest5개 통과, 기존 sim_hash_dump 출력 동일",
+            "거리 누적 삭제 mutation Release 검출; native 게임 창·물리키·모니터·타 OS 미검증",
+            "CUA 데스크톱 목표/본문·즉시 해설·선택 해제/접힘·390px 본문과 표 확인, 뷰포트 원복"
+          ]
+        },
+        {
+          "id": "unit-040",
+          "title": "소프트 드롭: 누름 지속과 간격",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-40",
+          "previous": "unit-039",
+          "next": "unit-041",
+          "validation": [
+            "Linux SCRIPTED32/SDL31 CTests·경고0·CPU 독립 링크·UBSan",
+            "442368 반복 전이·12틱 held 기록·범위·해제·한 틱 복합 하강·고정 경계·프레임 묶음 동등성·조회 보존",
+            "SDL 실제 이벤트 큐에 Down press/hold/repeat/release/짧은 탭/focus-loss 주입; 테스트 소유 fixture",
+            "105 SDL offscreen GL:7종×5규칙시점×3크기, active/ghost VBO 전체와 모든 RGB 오차≤2/255",
+            "현재 SimGame 28672 유지 입력 기록·숨은 시계 해시·6 CTests·실제 tetris 빌드·기존 sim_hash_dump 출력 동일",
+            "잘못된 period 재장전 mutation Release 검출; native 게임 창·물리키·모니터·타 OS 실행 미검증",
+            "CUA: 40차시 목표·본문·객관식 즉시 해설/해제/재접힘·SubmitInput 보관 스냅샷 연결·390px 표의 가로 스크롤/본문 확인. 물리키/게임 창 검증과 구별."
+          ]
+        },
+        {
+          "id": "unit-041",
+          "title": "하드 드롭: 충돌 직전 위치 찾기",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-41",
+          "previous": "unit-040",
+          "next": "unit-042",
+          "validation": [
+            "Linux SCRIPTED33/SDL33 CTests·경고0·CPU 독립 링크·UBSan",
+            "5516 시작보드/중력/Down 조합·7종 방향/열·독립 착지/행 필터/다음 생성·거리0·복합 입력·invalid/stopped 보존",
+            "SDL 실제 이벤트 큐 fixture: Space press/hold/repeat/release/repress/0틱 래치/동일 펌프 탭/focus loss",
+            "168 SDL offscreen GL:7종×4보드×고정전후×3크기, board/active/ghost VBO 전체 및 모든 RGB 오차≤2/255",
+            "현재 SimGame873고정(거리0 32회)·독립 보드·해시 밖 플래그·복합 입력, 루트7 CTests·tetris 빌드·기존 sim_hash_dump 동일",
+            "착지 대입 누락/Space 재소비 mutation Release 검출; 실제 게임 main 창·물리키·모니터·타 OS 실행 미검증",
+            "CUA 41차시 본문/이미지, 41-1 오답→재선택 시 해설 숨김→정답 즉시 해설→검수 선택 해제/접힘, MoveBlockDrop 스냅샷과 옆 본문,390px 표/코드·페이지 넘침 없음 확인"
+          ]
+        },
+        {
+          "id": "unit-042",
+          "title": "공격과 가비지: 변화량을 교환",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-42",
+          "previous": "unit-041",
+          "next": "unit-043",
+          "validation": [
+            "Linux SCRIPTED34/SDL34 CTests·경고0·CPU 독립 링크·UBSan",
+            "42210 독립 좌표 변환·대기 상한·비대칭/동시 공격·좌우 대칭·실패 보존·묶음/구멍 순환·종료 경계",
+            "210 SDL offscreen GL:7종×5가비지 사례×전후×3크기, board/active/ghost VBO 전체 및 모든 RGB 오차≤2/255",
+            "현재 API 누적 signed overflow·21요청/20주입 보고·상단 셀 소실 미종료를 수정 전후 재현",
+            "현재 SimGame2560가비지 보드·상한 덧셈·공격표·피스 RNG 소비 분리, 루트8 CTests·tetris 빌드·기존 sim_hash_dump 동일",
+            "자기 공격 전달/행 이동 누락/상단 손실 무시 mutation Release 검출; 실제 게임 main 창·물리키·모니터·타 OS 실행 미검증",
+            "CUA42: 본문·그림·즉시 해설·검수 답안 해제·두 소스의 보관 스냅샷·390px 표 스크롤·목표 복귀 확인"
+          ]
+        },
+        {
+          "id": "unit-043",
+          "title": "T-spin·콤보: 이전 상태를 기억하는 이유",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            3,
+            4
+          ],
+          "lessonId": "lesson-43",
+          "previous": "unit-042",
+          "next": "unit-044",
+          "validation": [
+            "Linux SCRIPTED35/SDL35 CTests·경고0·CPU 독립 링크·UBSan",
+            "10048 모서리 배치·90 보상 전이·318 회전 거부·102 킥 성공·피스/틱/연속 상태 수명·레벨/포화 경계",
+            "실제 SimGame T-spin0/1/2·하드 드롭 이력 유지·성공/거부 이동·배치 API 제외·이력 해시; 루트9 CTests·tetris·기존 hash dump 일치",
+            "18 SDL offscreen GL: 0/1/2줄 T-spin 전후×3크기, 독립 보드 필터·VBO·모든 RGB 오차≤2/255; 점수/미리보기 제외",
+            "대기 초기화/2모서리/연속 초기화 누락 mutation Release 거부; native 게임 창·물리키·모니터·Win32 미검증",
+            "CUA43: 오답/재선택 숨김/정답 해설·검수 선택 해제·IsTSpinLock 스냅샷 문맥·390px 콤보 표 스크롤 확인",
+            "ApplyPlacement(INT_MIN) UBSan 재현 후 로컬 열+외부 열을 int64로 선검증; 양 극단256입력·유효 음수 원점·실패 시 해시 보존"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "module-04",
+      "title": "시간과 재현성",
+      "units": [
+        {
+          "id": "unit-044",
+          "title": "게임 루프: 업데이트와 그리기를 구분",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-44",
+          "previous": "unit-043",
+          "next": "unit-045",
+          "validation": [
+            "Linux SCRIPTED36/SDL36 CTests·경고0·CPU 독립 링크·UBSan",
+            "0/1/6틱·한 배치3고정·종료후중복억제·invalid시간후시계/입력/규칙보존·보고값수명·동일60틱분할·읽기전용메시",
+            "18 SDL offscreen GL: FrameRunner 0틱입력보관→1틱T-spin0/1/2전후×3크기,독립보드·VBO·모든RGB오차≤2/255",
+            "0틱입력손실/보고덮어쓰기/보드변경플래그누락 mutation Release 거부; 실제 게임규칙변경없음",
+            "native 게임창·물리키·모니터·Win32실행 미검증; GL관찰그림은점수/미리보기/종료마커제외",
+            "CUA44: 제목/목차/즉시 정답 해설·검수 답안 해제/접힘·Game::Tick79행 스냅샷/비교 문맥·390px 단계표·뷰포트원복/목표복귀 확인"
+          ]
+        },
+        {
+          "id": "unit-045",
+          "title": "고정 스텝: 누산기와 남은 시간",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-45",
+          "previous": "unit-044",
+          "next": "unit-046",
+          "validation": [
+            "Linux SCRIPTED 전체37 CTests, SDL clock_accounting/frame_contract 2 CTests 통과; 경고0",
+            "CPU 도구·검사의 플랫폼/GL 독립 링크와 DISPLAY 없는 실행 확인",
+            "10,000개 입력의 매 프레임 보존식·여러 분할·1ns 경계·양자화·잘못된 실수 입력 뒤 위상 보존",
+            "UBSan, 나머지 삭제/틱 기준 조기 반올림 mutation을 Release 검사에서 거부",
+            "44의 기존 구현 파일과 바이트 동일 확인. 신규 그래픽 검사는 하지 않음; 사용자 요청에 따라 화면 조작 검수 생략"
+          ]
+        },
+        {
+          "id": "unit-046",
+          "title": "긴 프레임: 클램프와 따라잡기",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-46",
+          "previous": "unit-045",
+          "next": "unit-047",
+          "validation": [
+            "Linux SCRIPTED 전체38 CTests·SDL의 frame_contract/clock_accounting/budget_contract 3 CTests·경고0",
+            "세 정책 30,000개 접두 보존식·기존 FixedClock 2,000표본 대조·1ns 경계·보류분 소진·잘못된 정책/큰 입력/덧셈 용량 실패 보존",
+            "CPU 도구·검사의 SDL/GL 독립 링크 및 DISPLAY 없는 실행, UBSan 통과",
+            "보류분 손실·폐기량 보고 누락·용량 검사 제거의 세 변형을 Release 검사에서 거부",
+            "45차시 기존 구현 파일과 바이트 동일 확인. 사용자 요청에 따라 화면 조작/스크린샷 검사 생략"
+          ]
+        },
+        {
+          "id": "unit-047",
+          "title": "입력 손실: 렌더 프레임과 규칙 틱",
+          "state": "reviewed",
+          "referenceParts": [
+            2,
+            4
+          ],
+          "lessonId": "lesson-47",
+          "previous": "unit-046",
+          "next": "unit-048",
+          "validation": [
+            "SCRIPTED 전체39·SDL 전체40 CTests 및 경고0 빌드 통과",
+            "97,656 사건열과 각 접두 상태, 키 독립성·잘못된 번호·반복·취소·초기화 검사",
+            "실제 SDL 회귀 fixture·실제 main 입력 함수 추출 검사·SDL→FrameRunner 전달 검사 통과",
+            "UBSan 및 탭 손실·반복 복원·취소 누락의 세 Release 변형 거부",
+            "실제 게임 SDL 빌드·루트13 CTests 통과. 취소의 invalid-time rollback·0틱 취소·취소 뒤 새 입력 CPU 회귀 검사 통과",
+            "Win32는 소스·공식 메시지 계약 검토. 네이티브 컴파일·실행 미수행. 사용자 요청에 따라 화면 조작 생략"
+          ]
+        },
+        {
+          "id": "unit-048",
+          "title": "비트마스크: 입력 조합의 표현",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6,
+            18
+          ],
+          "lessonId": "lesson-48",
+          "previous": "unit-047",
+          "next": "unit-049",
+          "validation": [
+            "SCRIPTED 전체40 CTests·SDL의 mask_contract/frame_contract/input_pipeline/key_edges_contract 4 CTests·두 구성 경고0 및 실제 SDL tetris 타깃 빌드",
+            "65,536 원시 값·65,536 비트 조회 조합·24개 의미 Intent·32,768 프레임 이력과 기존 소비 정책 대조",
+            "CPU mask_demo의 정확한 출력과 SDL/플랫폼 독립 링크, 마스크·실제 리플레이 UBSan 검사",
+            "축소 선행·XOR 누적·held OR 보관의 세 Release 변형 거부",
+            "실제 루트 tetris 빌드·14 CTests 통과: 로컬 파서/랭킹/봇 수신의 전체 바이트 범위, 완전한 파일·크기 상한·실패 보존·쓰기 오류 검사",
+            "Win32/macOS 네이티브 실행 미수행. 사용자 요청에 따라 화면 조작·스크린샷 생략"
+          ]
+        },
+        {
+          "id": "unit-049",
+          "title": "7-bag: 섞기와 균등성의 차이",
+          "state": "reviewed",
+          "referenceParts": [
+            1
+          ],
+          "lessonId": "lesson-49",
+          "previous": "unit-048",
+          "next": "unit-050",
+          "validation": [
+            "Release SCRIPTED 전체41 CTests·SDL의 bag_contract/queue_contract/frame_contract 3 CTests 및 tetris 빌드; 두 구성 경고0",
+            "5,040개 순열과 모든 접두 상태·실패 보존·복사·재충전; 각 순열의 Round 생성과 세 번 승계",
+            "두 가방49쌍의 공백·세 가방2,401개 창의 빈도·최대 연속2 및 작은 modulo3/3/2",
+            "실제 SimGame 생성자1,000시드의 네 번 공급·시드0 처리·미리보기 관찰 상태 보존",
+            "실제 GetRandomBlock/GetAllBlocks 함수 추출로100,000회 선택의 종류·활성 순서·RNG 상태 대조",
+            "CPU 독립 링크·정확한 출력·학습 및 실제 함수 UBSan; 마지막 원소 교환·실패 전 refill·삭제 누락 세 Release 변형 거부",
+            "Win32/macOS 네이티브 실행 미수행. 사용자 요청으로 화면 조작·스크린샷 생략"
+          ],
+          "deliverable": "종류와 순서를 소유한7-bag를 구현하고, 손으로 고른 순열을 Round 공급 경로에 연결한다."
+        },
+        {
+          "id": "unit-050",
+          "title": "시드 RNG: 같은 시작에서 같은 순서",
+          "state": "reviewed",
+          "referenceParts": [
+            1
+          ],
+          "lessonId": "lesson-50",
+          "previous": "unit-049",
+          "next": "unit-051",
+          "validation": [
+            "Release SCRIPTED 전체42 CTests·SDL 전체43 CTests와 tetris 빌드; 두 구성 경고0",
+            "65,536개 비트 배열·반복 덧셈 엔진 대조와 시드1 고정 벡터; max0/1·상위비트 시드 경계",
+            "100,000회 가방 공급·복사 보존; 100시드 Round의 생성/세부 승계/종료/무효 입력과 FrameRunner의0틱·무효 시간 보존",
+            "실제 SimGame 생성1,000시드와 실제 두 공급함수 추출100,000회 종류·남은 순서·RNG 상태 대조",
+            "CPU 데모 출력/독립 링크, SDL dummy에서 실제 tetris 시드 파싱·초기 공급 후 GL 창 생성 실패 경계; 실제 화면 검증은 아님",
+            "UBSan; 출력값을 state에 저장·마지막 하나에서 소비 생략·잘못된0 기본값 세 Release 결함 변형 거부",
+            "Win32/macOS 네이티브 실행 미수행. 사용자 요청으로 화면 조작과 스크린샷 생략"
+          ],
+          "deliverable": "엔진과 가방을 값으로 소유한 공급기를 Round와 --seed 실행 경로에 연결한다."
+        },
+        {
+          "id": "unit-051",
+          "title": "난수 스트림: 표현 효과와 규칙 분리",
+          "state": "reviewed",
+          "referenceParts": [
+            1
+          ],
+          "lessonId": "lesson-51",
+          "previous": "unit-050",
+          "next": "unit-052",
+          "validation": [
+            "Release SCRIPTED 전체43 CTests·SDL 전체44 CTests와 tetris 빌드; 두 구성 경고0",
+            "100,000개 분리 스트림 교차 호출과100시드 Round의0/1/37회 표현 개입·복사·대기 병합/무효/0/20줄/종료 경계",
+            "seed==garbage_tag의 XOR0→엔진 기본값; 고정4/8/1 패턴 호환",
+            "GL 함수 호출 대역으로 다섯 배경색 전달과 잘못된 색의 지우기 전 거부 확인; 실제 픽셀 검사 아님",
+            "실제 SimGame1000시드의 첫 잠금/가비지 보드와 조각 상태 대조, 실제 InsertGarbage 함수 추출36개 경계 사례 대조",
+            "CPU 데모/독립 링크와 SDL dummy에서 시드/가비지 CLI 설정 뒤 GL 창 생성 실패 경계 확인",
+            "학습·실제 함수 UBSan 및 XOR 뒤0정규화/행마다 소비/0대기 소비 세 Release 오류 변형 거부",
+            "Win32/macOS 네이티브 실행 미수행. 사용자 요청으로 화면 조작과 스크린샷 생략"
+          ],
+          "deliverable": "조각·가비지·표현의 별도 상태를 실제 학습 게임의 가비지 주입과 배경색 선택에 연결한다."
+        },
+        {
+          "id": "unit-052",
+          "title": "상태 해시: 무엇을 동일하다고 할 것인가",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-52",
+          "previous": "unit-051",
+          "next": "unit-053",
+          "validation": [
+            "Release SCRIPTED 44/SDL 45 CTests·학습 tetris 빌드·경고0; 루트 tetris 빌드·15 CTests 통과",
+            "독립 Python 바이트 재구성, 기준 벡터·오버플로·1000시드×60틱·숨은 상태/논리 큐 계약",
+            "실제 해시 함수 추출로 legacy 가방 누락과 V2 보완 재현; 기존 골든 덤프 동일성",
+            "루트 게임 및 CTest, 세 Release 결함 변형 거부",
+            "사용자 요청으로 GUI 검사 생략. Windows/macOS·big-endian 네이티브 실행 미수행",
+            "기존 python/tests/_sim_hash_dump.txt와 전 출력 동일; 학습·실제 추출 함수 UBSan 통과"
+          ],
+          "deliverable": "지속 규칙 상태의 정규 바이트·실패 가능한 해시·게임 루프 진단과 호환성을 보존하는 실제 해시 개선"
+        },
+        {
+          "id": "unit-053",
+          "title": "골든 회귀: 결과가 달라졌을 때의 해석",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-53",
+          "previous": "unit-052",
+          "next": "unit-054",
+          "validation": [
+            "Release SCRIPTED 47/SDL 48 CTests·누적 tetris와 golden_trace 빌드·경고0",
+            "시드0/1/42/UINT64_MAX 반복 기록, 별도 후보의 독점 생성·기존 기준 보존·깨진 입력/실패 프로세스·/dev/full 출력 실패 검사",
+            "중력 초기값/첫 입력/LRND 버전 변형을 각각 상태 차이/입력 차이/형식 오류로 거부; 학습 기록기 UBSan 통과",
+            "새로 빌드한 tetris_py 로딩 경로 확인 후 루트 parser/네이티브 회귀 21 pytest 통과; C++ legacy stdout 전체 기존 골든과 동일",
+            "루트 시드 decimal/octal/hex 동등성·부호/공백/후행/범위초과 거부·출력 실패 종료 검사",
+            "사용자 요청으로 GUI 검사 생략. Windows/macOS 네이티브 실행 미수행"
+          ],
+          "deliverable": "실제 Round 관측 기록·검토된 두 골든·첫 차이 비교·별도 후보 생성과 실제 회귀 기준 검증 보강"
+        },
+        {
+          "id": "unit-054",
+          "title": "Game 래퍼: 규칙과 표현 사이의 어댑터",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-54",
+          "previous": "unit-053",
+          "next": "unit-055",
+          "validation": [
+            "Release SCRIPTED 48/SDL 49 CTests와 누적 tetris·adapter_demo 빌드·경고0",
+            "100시드×150프레임의 직접 위임·규칙 바이트·시간 위상·보고·표현 상태·값 뷰 대조",
+            "뷰 수정/과거 뷰 유지·조회100회·복사 독립성·무효 시간·깨진 배치 뷰 실패·한 배치 두 잠금·stopped 검사",
+            "실제 Game 장치 대역의 별칭·unique_ptr 전달·공유 음악·사건 소비·실패 초기화·대체 재생·1회 해제 검사",
+            "복사/이동 컴파일 거부·학습/실제 UBSan·이중 진행/첫 보고 누락/조회 중 소비 3개 Release 변형 거부",
+            "루트 클라이언트 빌드·16 CTests·기존 sim_hash_dump 전체 골든 유지; 정상 종료 순서는 소스 검토",
+            "사용자 요청으로 GUI 검사 생략. 실제 음향·픽셀 및 Win32/macOS 네이티브 실행 미수행"
+          ],
+          "deliverable": "Game 어댑터의 값 뷰·보고 소비를 실제 학습 게임에 연결하고, 장치 소유 Game의 복사 및 정상 종료 수명을 보강한다."
+        },
+        {
+          "id": "unit-055",
+          "title": "화면 전환: 상태 머신과 재시작",
+          "state": "reviewed",
+          "referenceParts": [
+            1,
+            4,
+            6
+          ],
+          "lessonId": "lesson-55",
+          "previous": "unit-054",
+          "next": "unit-056",
+          "validation": [
+            "Release SCRIPTED49/SDL50 CTests·누적 tetris와 screen_demo 빌드·경고0",
+            "12개 전이표·시작/복귀/동시명령·0틱 보류 입력·held 해제 게이트·포커스 취소·종료 동결·종료 기준 재시작 검사",
+            "50시드 최대120프레임의 직접 Game 위임·해시·위상·표현 상태 대조",
+            "학습 UBSan·기존 Game 유지/시작 프레임 진행/취소 전달 누락 세 Release 변형 거부",
+            "실제 beginSingleRound 본문 추출 대역으로 외부 상태 초기화·생성 실패 시 보존 확인; 실제 클라이언트 빌드·루트16 CTests·legacy 골든 유지",
+            "사용자 요청으로 GUI 조작 생략. 실제 음향/픽셀·Windows/macOS 네이티브 실행 미수행"
+          ],
+          "deliverable": "메뉴·플레이·게임오버·종료를 실제 게임에 연결하고 전환 프레임·키 해제·재시작·GPU 캐시의 경계를 구현한다."
+        }
+      ]
+    },
+    {
+      "id": "module-05",
+      "title": "이미지·글자·UI",
+      "units": [
+        {
+          "id": "unit-056",
+          "title": "배칭: draw 호출을 모으는 이유",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-56",
+          "previous": "unit-055",
+          "next": "unit-057",
+          "validation": [
+            "Release SCRIPTED51/SDL52 CTests·SDL 누적 tetris/CPU 데모 빌드·경고0",
+            "CPU 용량·빈 입력·NaN/불투명 색상·부분 실패 보존·복사·순서·5000프레임 장면 구성·규칙 해시 보존",
+            "GL 대역의 stride24/offset8·사용 prefix 업로드·한 draw·빈 큐 무호출·실패 단계/바인딩·핸들 정리; 버퍼 바인딩 실패 시 업로드 금지 추가 검사",
+            "실제 SDL offscreen llvmpipe 프레임버퍼에서 진행6장면·종료1장면·메뉴를 기존 개별 제출과 비교: 모든 채널 차이0",
+            "학습 CPU/Device UBSan·clear 누락/투명색 허용/정점 역순 세 Release 변형 거부",
+            "실제 렌더러 함수 추출 대역으로 구워진 사각형/회전 사각형 오프셋·정점 순서·텍스처 경계 검사; 루트 클라이언트 빌드·16 CTests·기존 해시 골든 유지",
+            "수동 GUI·물리 GPU/모니터 표시 시간·Windows/macOS 네이티브 실행 미수행; 성능 향상률 미측정"
+          ],
+          "deliverable": "색상 정점 배처·장면 조립·공통 GPU 제출을 실제 게임에 연결하고 기존 경로의 픽셀·순서를 유지한다."
+        },
+        {
+          "id": "unit-057",
+          "title": "flush 경계: 텍스처와 상태 변경",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-57",
+          "previous": "unit-056",
+          "next": "unit-058",
+          "validation": [
+            "Release SCRIPTED52/SDL53 CTests・누적 SDL tetris와 데모 빌드・경고0",
+            "Clip 투영・INT_MAX 산술・유효하지 않은 최소 Layout・동일/빈/순환 상태 경계・용량과 입력 보존・명시적 finish・실패 후 재시도 거부・2000 장면의 정점/해시 보존",
+            "SDL offscreen llvmpipe에서 진행6/종료1/메뉴의 기존 경로 픽셀 차이0; 세 Layout의 겹치는 A→B→A 시저 결과를 독립 RGB 마스크와 전체 픽셀 비교",
+            "CPU UBSan 및 새 상태 선대입/clear 누락/실패 고정 누락 세 Release 변형 거부",
+            "실제 함수 추출 재현: 수정 전 CPU 사용 중 이미지 삭제・죽은 텍스처 이름 제출 각각1회; 수정 후 이미지 삭제/종료・무효/반복해제・다른 텍스처・이름 재사용 순서 검사와 UBSan 통과",
+            "실제 글리프 종료/부모 렌더러 종료의 소스 순서 검사; 루트 클라이언트 빌드・16 CTests・기존 sim_hash_dump 골든 유지",
+            "수동 GUI/모니터 표시・Windows/macOS 네이티브 실행 미수행; 픽셀 검사는 offscreen GL, 루트 수명 검사는 함수 추출 대역 범위"
+          ],
+          "deliverable": "시저 영역・용량・프레임 종료의 제출 경계를 누적 게임에 연결하고 이미지 해제 전 미제출 사용을 처리한다."
+        },
+        {
+          "id": "unit-058",
+          "title": "텍스처: 픽셀 형식과 GPU 저장소",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-58",
+          "previous": "unit-057",
+          "next": "unit-059",
+          "validation": [
+            "Release SCRIPTED54/SDL55 CTests, 누적 tetris/CPU demo 빌드, -Wall -Wextra -Wpedantic 경고0",
+            "57개 로더 진입점 각각 누락/전체 누락/재로드 초기화; RGBA view 길이・정수 범위・방향・불투명 자료 검사",
+            "학습 Texture의 25개 GL 연산 각각 실패/이름0/진입 오류/장치 크기 제한/업로드 실패 뒤 재시도; 복사・정상 복원・소유권/해제 검사",
+            "Quad의 position/UV stride16/offset8・바인딩 실패 시 업로드 금지・초기화 단계 실패/핸들0/속성/유니폼 실패 정리; Texture와 Quad UBSan",
+            "SDL offscreen llvmpipe LLVM21.1.8: 다른 유닛/PBO/정렬8/행길이19/건너뛰기 상태에서 3×2 RGBA 24바이트 업로드/읽기 동일, CPU 자료 수정 뒤 저장소 보존, 모든 저장 상태 복원",
+            "640×480 프레임버퍼에 세 Layout(640×480,639×477,479×479) 적용: 아이콘 9216/9025/5184픽셀 정확, 아이콘 밖 전체 픽셀 보존",
+            "행 건너뛰기 초기화 누락/실패 객체 공개/실패 객체 누수 세 Release 변형 거부",
+            "실제 image_create_rgba 함수 추출+실제 upload_rgba8: 수정 전 업로드 오류에도 used 핸들 반환 재현, 수정 후 모든 GL 연산 실패 시 0/미등록/해제와 빈 슬롯 재사용 검사; 루트 클라이언트 빌드・16CTest・기존 해시 골든 유지",
+            "Windows max 함수형 매크로를 정의한 실제 업로드/등록 함수 추출 컴파일・UBSan 검사 통과; Windows SDK 네이티브 빌드 증거와 구별",
+            "수동 GUI/모니터/타OS 미검증; root 업로드 실패 재현은 GL 대역이며 실제 장치 메모리 부족 유발 검사가 아님; C++ 할당 실패는 선행 슬롯 확보 구조로 검토하고 강제 주입하지 않음"
+          ],
+          "deliverable": "RGBA8 입력을 검증해 GPU 텍스처를 소유하고 고정 아이콘을 누적 게임에 표시하며 업로드 실패와 상태 복원을 처리한다."
+        },
+        {
+          "id": "unit-059",
+          "title": "이미지 디코딩: 파일 형식에서 RGBA로",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-59",
+          "previous": "unit-058",
+          "next": "unit-060",
+          "validation": [
+            "Release SCRIPTED55/SDL56CTest, -Wall -Wextra -Wpedantic 빌드 경고0, player PNG 데모 8×8/source4/RGBA256",
+            "PNG RGB/RGBA/gray 정확 바이트, JPEG ±2, 알파 보존, 입력 덮어쓰기 후 소유 결과 유지, 확장자/한글 경로/빈 파일/파일 및 출력 제한/손상 입력 검사",
+            "실제 stb 할당 추적과 vector 24바이트 할당 bad_alloc 주입: 임시 할당0, allocation 반환 및 다음 성공; UBSan",
+            "실제 루트 decode_image 함수 추출: 수정 전 copy bad_alloc에서 임시 픽셀 누수 재현, 수정 후 해제/출력 보존/실패 및 정상 커밋 확인 (stb 대역)",
+            "실제 image_rows helper UBSan: 3952 signed/padded BGRA 행 배치, alpha 및 계산 실패 시 출력 보존; R/B 교환 누락 mutation 거부",
+            "BitmapReadLock 실제 구조체 추출과 GDI+ 대역: 미획득/명시해제/예외/해제실패에서 해제 시도 정확히 한 번; Windows SDK 실행 증거와 구별",
+            "SDL offscreen llvmpipe LLVM21.1.8: PNG decoded badge의 세 Layout 9216/9025/5184픽셀과 바깥 보존, hostile unpack 3×2 픽셀 복사 검사",
+            "root 클라이언트 빌드/16CTest 및 sim_hash_dump 기존 골든 동일",
+            "수동 GUI/모니터/타OS 네이티브 실행 미검증; 준비한 파일 코퍼스와 할당 실패 검사이며 전체 포맷 퍼징/실제 GPU OOM 검사가 아님"
+          ],
+          "deliverable": "제한된 PNG/JPEG 읽기・RGBA 소유/디코더 예외 정리・파일 아이콘의 누적 게임 연결"
+        },
+        {
+          "id": "unit-060",
+          "title": "이미지 핸들: 로드·조회·해제의 책임",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-60",
+          "previous": "unit-059",
+          "next": "unit-061",
+          "validation": [
+            "Release SCRIPTED57/SDL58CTest, 누적 tetris 빌드, -Wall -Wextra -Wpedantic 경고0; handles_demo same slot1/same token0/old found0/new value20",
+            "학습/현재 HandlePool 각각 UBSan: 512회 확장과 포인터 유지, 복사/삭제/재사용/clear/외부풀/다른T·번역단위/잘못된토큰/할당실패/발급소진",
+            "ImageStore UBSan+GL 대역: 복수이미지/파일로드/무효자료/업로드실패/출력보존/등록공간소진/clear/소멸 후 live GL 이름0",
+            "실제 루트 함수 추출: 수정 전 stale handle의 새이미지 조회/오삭제 재현; 수정 후 조회/기본·회전draw/해제/재초기화에서 stale 거절",
+            "루트 Entry 할당과 업로드 후 슬롯 등록 bad_alloc 주입, 모든 GL upload 단계 실패/크기제한/번호소진에서 공개 핸들0・미등록・GPU정리; 미제출사용 flush→delete 순서 검사",
+            "발급 번호 비교 누락 mutation을 Release 계약 검사가 거부; Windows max 매크로를 정의한 현재 helper/API 추출 컴파일",
+            "SDL offscreen llvmpipe: 파일청록/절차적주황 두 아이콘×3Layout(640×480,639×477,479×479) 전체 RGBA 일치와 바깥보존; stale draw 거절/재로드/clear",
+            "root 클라이언트 빌드/16CTest・기존 sim_hash_dump 골든 동일; 59차시 루트 decode 예외 정리/BitmapReadLock 대역 회귀 유지",
+            "수동 GUI/타OS 네이티브 실행 및 실제 GPU OOM 미검증. 핸들 발급 상태는 단일 렌더링 스레드용이며 보안·직렬화 식별자가 아님"
+          ],
+          "deliverable": "발급 번호를 검사하는 이미지 저장소・등록/해제 실패 계약・두 아이콘을 핸들로 선택하는 누적 게임"
+        },
+        {
+          "id": "unit-061",
+          "title": "UV·tint·회전: 같은 사각형으로 표현",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-61",
+          "previous": "unit-060",
+          "next": "unit-062",
+          "validation": [
+            "Release SCRIPTED59/SDL60 CTest·누적 tetris 빌드·-Wall -Wextra -Wpedantic 경고0; transform_demo 모서리 (10,40) 확인",
+            "순수 기하 UBSan: 54 회전/pivot 조합·거리보존·주기성·UV 반전/동일끝점·tint·45 비유한 필드·float 표현범위·화면밖 위치; 회전방향/UV 대입 mutation 거부",
+            "ImageQuad UBSan·GL 대역: 32바이트 형식/UV8/tint16, 초기화5단계·draw17단계 오류, 입력 검증 전 GL 무호출·업로드 실패 후 제출 억제·재시도/정리",
+            "SDL offscreen llvmpipe LLVM21.1.8: 8요청×3Layout=24사례, 독립 역변환/NEAREST/tint/블렌딩 RGBA 비교; 7371983픽셀 검사·817경계 제외·내부 허용오차2.01바이트·외부 정확보존",
+            "GPU 비교는 premultiplied 배경 RGBA(.025,.05,.075,.25) 포함; 무효 각도/해제 핸들 draw 뒤 전체 RGBA 불변",
+            "실제 root draw_image_rotated 추출: 수정 전 FLOAT_MAX 각도 중간 오버플로 재현, 수정 후 유한 좌표·NaN/Inf 거절·90도 모서리·810도 주기성 확인",
+            "현재 루트 핸들/등록/업로드 실패 정리 회귀·클라이언트 빌드·16CTest·기존 sim_hash_dump 골든 유지",
+            "수동 GUI·타 OS 네이티브 실행·실제 GPU OOM 미검증. root legacy BlendFunc의 저장 알파는 변경하지 않고 학습 Separate 경로와 구분"
+          ],
+          "deliverable": "완료: 같은 이미지를 다른 목적지·부분UV·색상·회전 중심으로 그리며 배경과 알파 합성합니다."
+        },
+        {
+          "id": "unit-062",
+          "title": "둥근 모서리: 거리 함수와 경계",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-62",
+          "previous": "unit-061",
+          "next": "unit-063",
+          "validation": [
+            "Release SCRIPTED61/SDL62CTest·누적 tetris/rounded_demo 빌드·경고0",
+            "CPU SDF236196사례: 별도 선분/원호 최소거리 기준·부호/대칭·smoothstep 수치/단조성·비유한/범위 거절·local/UV 독립; UBSan 및 부호/마스크 mutation 거부",
+            "RoundedQuad GL대역/UBSan:52바이트 정점/local32/half40/radius48, 초기화5·draw17단계 실패·자원/속성 실패·입력검증전GL무호출·업로드실패제출억제·재시도/정리",
+            "SDL offscreen llvmpipeLLVM21.1.8:8요청×3Layout=24사례,7371983픽셀 검사·817기하/텍셀경계 제외·7627 smooth mask 샘플; 내부 RGBA 허용오차2.01바이트·외부정확보존",
+            "실제 root draw_rect_rounded 추출: 수정 전 NaN 반지름 큐 유입 재현, 수정 후NaN/Inf/잘못된크기 거절·유한clamp·1미만근사 유지; UBSan",
+            "root 회전/핸들 실패정리 회귀·클라이언트빌드·16CTest·기존sim_hash_dump골든 유지",
+            "수동GUI·타OS네이티브·실제GPU OOM 미검증. 고정논리폭의경계완화이며정확한pixelcoverage/확장기하검증으로주장하지않음"
+          ],
+          "deliverable": "완료: 도형 내부 좌표로 거리를 계산해 둥근 패널과 아이콘을 그리고 경계 알파를 설명합니다."
+        },
+        {
+          "id": "unit-063",
+          "title": "UTF-8: 바이트와 코드포인트",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-63",
+          "previous": "unit-062",
+          "next": "unit-064",
+          "validation": [
+            "Release SCRIPTED63/SDL64CTest·누적 tetris/utf8_demo 빌드·경고0",
+            "학습/루트 디코더 각각 스칼라1112064개 왕복·모든 잘린 접두·256단일바이트·65536바이트쌍·200000결정적스트림; 독립 RFC 바이트범위 기준",
+            "과장 인코딩·surrogate·범위초과·단일바이트 복구·NUL/정상U+FFFD 구별; UBSan·최소값/대리영역 검사 제거 mutation 거부",
+            "Linux 보호페이지: bounded view와 실제 C문자열 어댑터의 경계 읽기; root 수정 전 잘못된 스칼라 수용 재현·수정 후 거절",
+            "Label16개 용량/17개 거절·잘못된 바이트·NUL·분해한글·실제 Application 메뉴/플레이 전환",
+            "root 클라이언트 빌드·17CTest·기존 sim_hash_dump 골든 유지",
+            "CPU 문자값 준비 범위. 글리프 출력·shaping·수동GUI·타OS네이티브 검증은 포함하지 않음"
+          ],
+          "deliverable": "완료: UTF-8을 검증하며 스칼라로 순회하고, 화면 이름을 코드포인트 목록으로 준비합니다."
+        },
+        {
+          "id": "unit-064",
+          "title": "글리프: 폰트에서 비트맵으로",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-64",
+          "previous": "unit-063",
+          "next": "unit-065",
+          "validation": [
+            "Release SCRIPTED65/SDL66CTest·누적 tetris/glyph_demo 빌드·경고0",
+            "독립 SFNT cmap4/hmtx/loca/glyf 기준 14문자×4크기=56사례,52비어 있지 않은 마스크·12133중간coverage 샘플; 메트릭/상자/공백/누락문자/수명·실패한 재로드",
+            "Glyph·TextLine UBSan; 사용하지 않는 배열 항목 초기화 누락 수정 후 통과; 부분 업로드 실패 정리·재시도·reset/파괴·공백 통과",
+            "SDL offscreen llvmpipeLLVM21.1.8:6라벨/크기 사례,1838980픽셀 대조·8680잉크픽셀·4220텍셀경계 제외,RGBA허용오차2.01바이트",
+            "실제 root glyph_for 추출: 수정 전 null 비트맵의 양수 크기/빈UV 캐시 재현, 수정 후 advance 유지·그리기/캐시 생략·재시도 성공",
+            "root 클라이언트빌드·17CTest·기존 sim_hash_dump골든 유지",
+            "실제 root renderer_load_font 추출: 수정 전 큐 제출 누락 재현, 수정 후 캐시/바이트/아틀라스 커서 초기화 전에 glb_flush 호출 확인",
+            "신뢰하는 패키지 폰트 전제. 악성폰트/OOM전체·shaping·타OS네이티브·수동GUI 검증으로 주장하지 않음"
+          ],
+          "deliverable": "완료: 폰트의 메트릭과 coverage를 읽고, 기준선에 맞춘 한글 화면 이름을 그립니다."
+        },
+        {
+          "id": "unit-065",
+          "title": "아틀라스: 작은 이미지들을 한 텍스처에",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-65",
+          "previous": "unit-064",
+          "next": "unit-066",
+          "validation": [
+            "Release SCRIPTED67/SDL68CTest·누적 tetris/atlas_demo 빌드·경고0",
+            "Shelf 독립 점유 격자: 2374성공/82746거절, padded 영역 경계·겹침·거절 후 커서·정수 범위; UBSan 통과",
+            "아틀라스/루트R8 helper 각각 생성25·업로드19단계 오류 주입; 초기0·네 방향 여백·unpack 복원·재시도·자원 해제",
+            "GL offscreen llvmpipeLLVM21.1.8:6사례·1838980픽셀·11254잉크,4220경계 제외·독립 쌍선형 coverage/기준선/straight 합성 기준·RGBA허용오차2.01바이트",
+            "세대 변경/외부 Region/번호 소진·실패한 clear와 복구·옛 라벨 draw 거절",
+            "루트 pack_glyph 재사용 전후 추출: 옛 여백 픽셀 재현, padded0쓰기·옛UV먼저제출·업로드실패시새커서미확정",
+            "root클라이언트빌드17CTest·sim_hash_dump골든 유지·64차시 비트맵실패/폰트교체 회귀 유지",
+            "수동GUI·Windows/macOS 네이티브 검증 아님. 단일렌더스레드·level0 선형필터·살아 있는 GL컨텍스트 전제",
+            "root glyph_for 실제 함수 추출: 아틀라스 생성/부분 업로드 실패 모두 advance 유지·bitmap 해제·캐시 생략, 재시도 성공/캐시 재사용 확인"
+          ],
+          "deliverable": "완료: 글자의 coverage를 한 R8 페이지에 배치하고, 여백·UV·갱신과 참조 수명을 관리합니다."
+        },
+        {
+          "id": "unit-066",
+          "title": "글자 배치: advance·베이스라인·커닝",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-66",
+          "previous": "unit-065",
+          "next": "unit-067",
+          "validation": [
+            "Release SCRIPTED68/SDL69CTest·누적 tetris/text_layout_demo 빌드·경고0",
+            "Layout 독립 산술2634성공/120거절 조합·최종행폭/비트맵합집합·빈줄/후행LF·수량/비유한/거절복원",
+            "번들 NanumGothic kern 표를 별도 big-endian 해석:113쌍×3높이=339보정값 비교·Font 인덱스/크기 검사",
+            "Paragraph: AV/A V/개행/후행빈줄·공백·기준선·공통측정; UBSan/float-cast-overflow 통과",
+            "SDL offscreen llvmpipeLLVM21.1.8:10문자열/크기사례·3064480픽셀·14220잉크·7520경계 제외·독립쌍선형샘플/합성·오차2.01바이트",
+            "실제 root measure_text/draw_text 함수 추출: 수정전 폭조회5글자의 glyph/GPU준비 도달; 수정후 CPU-only·커닝/개행원점일치·null/font/작은크기/INT_MAX 제한",
+            "root 클라이언트빌드·17CTest·기존 sim_hash_dump골든 유지",
+            "수동GUI·타OS네이티브 미검증. 신뢰한 번들 폰트·스칼라별수평커닝·LF지원, shaping/fallback/CR/TAB/자동줄바꿈 범위 아님"
+          ],
+          "deliverable": "완료: 커닝과 줄바꿈을 적용한 배치 결과로 폭·높이·비트맵 경계를 구하고 패널에 정렬합니다."
+        },
+        {
+          "id": "unit-067",
+          "title": "폰트 캐시: 해상도와 키 설계",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-67",
+          "previous": "unit-066",
+          "next": "unit-068",
+          "validation": [
+            "Release SCRIPTED71/SDL72CTest, 누적 tetris와 cache_real 빌드, 경고0",
+            "CPU 캐시: 독립 font_reference 392메트릭/상자 조합·같은 정수높이 적중·논리크기 분리·같은 파일 재로드/실패 보존·외부 스냅샷 수명·64항목 수용량·실패 재시도",
+            "GPU 캐시: warm 요청의 래스터·GL호출 증가0·논리 pen/baseline/advance 폭 배율 독립·revision 무효화·폰트교체 할당 정체성·업로드 실패/clear 실패 후 회복·lookup과 shelf 용량 구별",
+            "UBSan/float-cast-overflow: cache_contract·gpu_cache_contract·기존 glyph_contract 통과",
+            "SDL offscreen llvmpipeLLVM21.1.8:30문자열/크기/뷰포트배율 사례·8406136픽셀·27442잉크·6056경계제외·독립 논리 배치/coverage 쌍선형 합성 기준·오차2.01바이트",
+            "root CPU-only 측정 추출 회귀·클라이언트빌드17CTest·sim_hash_dump골든 유지",
+            "1단계 policy 정수oracle304135성공/1006585거절 및 root키충돌·할당전범위검사 결과 유지; 이번 변경은 학습 API·캐시·통합에 한정",
+            "수동GUI·타OS네이티브·실제 모니터간 DPI 전환 미검증; 여러 viewport배율은 offscreen GL로 검증"
+          ]
+        },
+        {
+          "id": "unit-068",
+          "title": "즉시모드 UI: 그리기와 입력 판정",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-68",
+          "previous": "unit-067",
+          "next": "unit-069",
+          "validation": [
+            "Release SCRIPTED72/SDL73CTest·누적 tetris 빌드·경고0",
+            "순수 UI 6456681 반정수 좌표와 정수 부등식 oracle, 빠른클릭/최초press/취소/중복down/HiDPI/letterbox/반열린경계/비유한값·UBSan/float-cast-overflow",
+            "SDL 실제 사건 큐와 학습 platform 펌프·통제한 최종커서/포커스·입력전용 세션: 다른창/오른쪽버튼/빠른클릭/취소/종료·앱전이시 규칙틱없음",
+            "루트 hit-test 수정전 int overflow UBSan 재현, 수정후 독립 차이식 oracle531441경계 조합",
+            "루트 SDL 수정전 같은펌프 down/up 누락 재현, 수정후 실제 SDL 사건 큐·포커스·잘못된버튼인덱스 회귀",
+            "Win32 실제 소스 마우스분기 추출+capture API모형: 정상해제/복수버튼/강제상실·UBSan. Windows네이티브 검증 아님",
+            "root 빌드17CTest·sim_hash_dump골든 유지",
+            "offscreen환경의 doublebuffer=0 때문에 GL플랫폼 초기화 기반 입력 검사는 불가; 실제 플랫폼 요구를 유지하고 입력전용 테스트 세션으로 분리. 수동GUI/타OS네이티브 미검증"
+          ]
+        },
+        {
+          "id": "unit-069",
+          "title": "버튼·선택기: 상태 소유 위치",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-69",
+          "previous": "unit-068",
+          "next": "unit-070",
+          "validation": [
+            "Release SCRIPTED73/SDL74CTest·누적 tetris 빌드·경고0",
+            "독립 상태표 768 키/포커스/입력채널 조합·단일 적용·경계 소비·설정 수명·규칙 해시 분리; UBSan/float-cast-overflow",
+            "SDL 실제 사건 큐와 통제한 포인터 fixture의 기존 빠른 클릭·취소·메뉴 전이 회귀",
+            "루트 checkbox 수정전 signed overflow·selector 중첩 영역 재현; 수정후 16764 독립 좌표/방향 활성 조합·무효 배치·UBSan",
+            "실제 SDL offscreen/llvmpipe 단일 버퍼 시험 컨텍스트: 일곱 라벨·36 설정/포커스/DPI 조합·참조 revision/reset·GL오류 없음; 수동 GUI 검증 아님",
+            "root17CTest·sim_hash_dump골든 유지. 수동 GUI·Windows/macOS네이티브 미검증"
+          ],
+          "deliverable": "장식 표시·기존 두 아이콘 선택을 단일 소유 설정과 순수 요청·한 번 적용·최신 값 그리기로 구현"
+        },
+        {
+          "id": "unit-070",
+          "title": "마우스 역매핑: 그림과 클릭을 일치",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-70",
+          "previous": "unit-069",
+          "next": "unit-071",
+          "validation": [
+            "Release SCRIPTED74/SDL75CTest·누적 tetris 빌드·경고0",
+            "독립 viewport표·정수 유리식204834내부hit조합·정확경계·내부점왕복·여섯치수단독변화·최소화복구·키보드독립·UBSan/float-cast-overflow",
+            "같은 raw좌표가 old체크박스→new시작으로 재해석되는 반례와 FrameMapping취소 확인",
+            "실제SDL사건큐+통제한포인터/포커스 fixture: 같은pump크기왕복·뒤쪽press도취소·다음프레임새press허용",
+            "실제SDL offscreen/llvmpipe 픽셀 중심2755407개와hit일치, 내부43568개·경계제외0; 통제한5크기쌍, 실제모니터배율검증아님",
+            "기존widget_render36설정/포커스/DPI조합·7라벨·atlas참조검증",
+            "rootWin32수정전button좌표누락재현; 수정후6버튼분기부호좌표/captureAPI모형검증·rootSDL입력회귀",
+            "root17CTest·sim_hash_dump골든유지. 수동GUI·Windows/macOS네이티브 미검증"
+          ],
+          "deliverable": "프레임 배치 공유·크기 변경 포인터 취소·독립 좌표/픽셀 일치 검사"
+        },
+        {
+          "id": "unit-071",
+          "title": "아이콘·일러스트: 콘텐츠와 규칙 경계",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-71",
+          "previous": "unit-070",
+          "next": "unit-072",
+          "validation": [
+            "Release SCRIPTED75/SDL76CTest·누적 tetris 빌드·경고0",
+            "실패8조합·경로 중복 제거·임시 문자열 선택·캐시/폴백/게시 실패·589824정수 배치(75696생략)·UBSan/float-cast-overflow",
+            "표 재정렬 두 빌드에서 rook ID 유지·인덱스1→0·역할 핸들 유지; 중복ID 컴파일 거절",
+            "실제 SDL offscreen/llvmpipe 이미지 로드·역할별 폴백·921600픽셀의 가로/세로/얇은 그림 배치·오래된 핸들 거절",
+            "누적SDL포인터·widget_render36설정/포커스/DPI조합·pointer_pixels2755407표본 회귀",
+            "루트 표현 함수 수정전 정수overflow·NaN 변환UB재현; 수정후 범위/fit/생략·유한/최대/비유한시각 sanitizer검사",
+            "root17CTest·sim_hash_dump골든 유지; 수동GUI·Windows/macOS네이티브 미검증"
+          ],
+          "deliverable": "캐릭터 ID·역할별 이미지 준비/폴백·정수 contain 배치와 이름·아이콘·일러스트 통합"
+        },
+        {
+          "id": "unit-072",
+          "title": "대기 애니메이션: 표현용 시계와 난수",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-72",
+          "previous": "unit-071",
+          "next": "unit-073",
+          "validation": [
+            "Release SCRIPTED76/SDL77CTest·누적 tetris 빌드·경고0",
+            "시간 입력 거절·정지/재개·0.1초제한/폐기·주기64000반복·정확한 이진분할·독립 사분주기alpha/각도",
+            "4096프레임·반복조회불변·별도RNG오프셋; 실제진행600프레임의규칙hash/phase/lock효과RNG불변·실제hash변화/lock발생 확인",
+            "UBSan/float-cast-overflow; 53비트이진표현전제static_assert",
+            "실제SDL offscreen/llvmpipe 4915200알파/고정범위픽셀 (내부RGB허용오차1), 정적기본값·회전그리기제출·비정상opacity거절",
+            "누적캐릭터이미지921600픽셀·포인터2755407표본·위젯36설정/포커스/DPI회귀",
+            "루트기존presentation UB/범위회귀·17CTest·sim_hash_dump골든유지; 새루트코드변경없음",
+            "수동GUI·네이티브Windows/macOS·타GPU비트동일성미검증"
+          ],
+          "deliverable": "독립된 메뉴 효과 시계·초기 위상·순수 조회와 테두리/일러스트/장식 회전"
+        },
+        {
+          "id": "unit-073",
+          "title": "설정 저장: 기본값·검증·복구",
+          "state": "reviewed",
+          "referenceParts": [
+            3,
+            4,
+            11,
+            15
+          ],
+          "lessonId": "lesson-73",
+          "previous": "unit-072",
+          "next": "unit-074",
+          "validation": [
+            "Release SCRIPTED77/SDL78CTest·누적tetris·경고0",
+            "파일4096/줄256바이트경계·CRLF/EOF/NUL·후보전체거절·소유ID·4설정왕복·실제생성/교체/재시작/보호/백업복구/저장실패후메모리유지",
+            "UBSan/float-cast-overflow; 실제root수정전접미사/오버플로/NUL정수/legacy/물리긴줄/NUL줄 각각재현",
+            "RLIMIT_FSIZE쓰기실패: 이전writer는대상비움, 새writer는이전바이트유지",
+            "Linux실제writer의filefsync/rename실패시old보존·dirfsync실패시new완성파일가시성과false·임시파일정리",
+            "누적SDL입력·위젯36/DPI·포인터2755407픽셀·캐릭터921600픽셀·효과4915200픽셀회귀",
+            "root tetris 빌드·17CTest·sim_hash_dump골든; 최종strtoll변경후root관련검사재실행",
+            "수동GUI·Windows/macOS네이티브파일교체·전원차단/다중프로세스충돌전체미검증"
+          ],
+          "deliverable": "표현 설정 파일의 후보 검증·로드 상태·변경 시 저장·임시 파일 교체·원본 보존 복구"
+        }
+      ]
+    },
+    {
+      "id": "module-06",
+      "title": "소리를 붙이기",
+      "units": [
+        {
+          "id": "unit-074",
+          "title": "PCM과 샘플: 소리의 데이터 표현",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-74",
+          "previous": "unit-073",
+          "next": "unit-075",
+          "validation": [
+            "Release SCRIPTED79/SDL80CTest·누적tetris·경고0",
+            "실습16MiB/반프레임/좌우서로다른값/정수상한·44100삼각파프레임·ASan/UBSan",
+            "실제SDL로더함수와실제변환기: Get오류/짧은읽기거절·프레임정렬·거대한프레임수·직접복사; 반환검사제거반례",
+            "XAudio로더함수·MakeWaveFormat을Linux대역타입/작은API상한으로검사; Windows네이티브검증아님",
+            "완전한SDL백엔드·실제rotate.mp3·dummy오디오장치초기화/재생/언로드/종료",
+            "root tetris빌드·17CTest·sim_hash_dump골든유지",
+            "수동GUI/실제스피커출력/Windows·macOS네이티브실행미검증"
+          ],
+          "deliverable": "PCM 소유 자료형·단위별 크기 검사·1초 삼각파 생성과 콘솔 관찰"
+        },
+        {
+          "id": "unit-075",
+          "title": "MP3 디코드: 압축 파일에서 샘플로",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-75",
+          "previous": "unit-074",
+          "next": "unit-076",
+          "validation": [
+            "Release SCRIPTED81/SDL82CTest·누적tetris·경고0",
+            "rotate.mp3 16128프레임/32256샘플/64512바이트/0.336초; 기존편의API와실제샘플전체일치",
+            "입력/출력정확경계·반환후보정리·파일오류·200잡음입력·56디코딩가능잘린접두; ASan/UBSan",
+            "실제SDL·공통로더7할당실패/9성공주입·Get오류/짧은읽기/프레임정렬·파일descriptor/stream정리",
+            "실제루트파일wrapper의seek실패/부분읽기/읽기후크기증가대역주입;FILE정리",
+            "루트rotate/clear/music실제3에셋·SDLdummy장치;root tetris빌드·17CTest·sim_hash_dump골든",
+            "Windows백엔드소스검토;네이티브Windows/macOS·실제스피커/GUI미검증"
+          ],
+          "deliverable": "제한 있는 MP3 파일 읽기·디코더 RAII·증분 PCM 생성·Pcm16 소유 연결·실제 에셋 관찰"
+        },
+        {
+          "id": "unit-076",
+          "title": "재생 수명: 장치·버퍼·보이스",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-76",
+          "previous": "unit-075",
+          "next": "unit-077",
+          "validation": [
+            "Release SCRIPTED82/SDL85 CTest, 누적 tetris, 경고0",
+            "Voice 독립 커서·프레임/바이트·정렬되지 않은 출력·무음 꼬리·ASan/UBSan",
+            "SDL dummy 실제 콜백·16128프레임·형식 거절·언로드·12회 재시작·외부 서브시스템 참조 유지",
+            "루트 SDL 실패 열기·할당 실패·공유 init·동일 설정·stale 핸들 수정 전후 재현",
+            "Windows 실제 unload 함수 본문과 API 계약 대역 검사; 네이티브 Windows/XAudio2 및 스피커 미검증",
+            "루트 실제 게임 빌드·17CTest·sim_hash_dump 골든 유지"
+          ],
+          "deliverable": "단일 Voice·SDL Player·소유/대여 수명·상태 전이·실패 정리·재생 도구"
+        },
+        {
+          "id": "unit-077",
+          "title": "SDL 콜백: 실시간 경로에서 피할 작업",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-77",
+          "previous": "unit-076",
+          "next": "unit-078",
+          "validation": [
+            "Release SCRIPTED82/SDL86 CTest·누적tetris·경고0",
+            "실제Player callback 직접90회:2049바이트요청·전체PCM·꼬리0·가드·C++할당/해제0",
+            "replace/unload 실제해제양수·잠금안해제0,76구현대조에서는잠금안해제양수",
+            "실제SDLdummy playback 수명·ASanUBSan·root콜백데이터/언로드잠금해제전후계측",
+            "root76수명회귀·실제게임빌드17CTest·sim_hash_dump골든",
+            "네이티브Windows/macOS·실제스피커·물리적지연/WCET 미검증"
+          ],
+          "deliverable": "PCM 소유권 교체·잠금 밖 해제·실제 콜백 데이터와 C++ 할당 경계 진단"
+        },
+        {
+          "id": "unit-078",
+          "title": "믹싱: 더하기·게인·클리핑",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-78",
+          "previous": "unit-077",
+          "next": "unit-079",
+          "validation": [
+            "Release SCRIPTED84/SDL88 CTest·누적게임·경고0",
+            "전S16값×게인0/.5/1·6순열·9보이스극단·모노/스테레오×5요청크기×4회 독립int64oracle",
+            "비정상게인·형식거절·무음커서·미정렬출력·부분프레임꼬리·ASan/UBSan/float-cast-overflow",
+            "root실제SDL믹서 수정전순서의존/NaN UB 재현,수정후순열·513프레임·finite정책 통과",
+            "실제Windows볼륨setter본문대역정책검사,네이티브XAudio2미실행",
+            "root77콜백/76수명회귀·실제게임17CTest·sim_hash_dump골든",
+            "실제스피커·Windows/macOS네이티브·청감/물리적지연미검증"
+          ],
+          "deliverable": "공통게인/S16연산·고정블록9보이스Mixer·Player연결·누산/양자화/클리핑검사"
+        },
+        {
+          "id": "unit-079",
+          "title": "규칙 이벤트: 한 번만 소리를 내기",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-79",
+          "previous": "unit-078",
+          "next": "unit-080",
+          "validation": [
+            "Release SCRIPTED 87 / SDL 최종 92 CTest 통과·누적 SDL 게임 빌드·경고 없음",
+            "24개 상한·0 센티넬 경계·부분 소비 후 이동·반복 소비·실제 0틱 입력과 3600프레임 해시 일치",
+            "두 슬롯의 실제 콜백 합산·부분 교체/해제·잠금 밖 PCM 해제·잘못된 형식 거절",
+            "Voice/Player/콜백/Mixer/Batch/효과음/Session ASan·UBSan·float-cast-overflow 통과",
+            "장치 초기화 실패·SCRIPTED 무음 경로·반복 준비/정지 통과",
+            "실제 Game 수정 전 하드 드롭 가비지 소비 지연 재현·수정 후 ASan/UBSan 통과",
+            "root 17 CTest·sim_hash_dump 골든 유지",
+            "Part 발췌·Markdown 27사례·389문제·DOM 렌더링/탐색/기록/소스 참조 통과",
+            "실제 스피커 출력·물리적 지연·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "최대 24개 소리 요청의 이동 전용 묶음·종류별 PCM 슬롯·누적 게임 연결·실제 래퍼 소비 시점 수정"
+        },
+        {
+          "id": "unit-080",
+          "title": "풀과 참조 수명: 재생 중인 자원",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-80",
+          "previous": "unit-079",
+          "next": "unit-081",
+          "validation": [
+            "Release SCRIPTED88/SDL93 CTest·누적 SDL 게임·경고 없음",
+            "5000회 독립 풀 모델: 선택 순서·바이트 출력·활성/연결·형식/owner 거절 검증",
+            "Voice/Player/callback/Mixer/VoicePool/사건/효과음/Session ASan·UBSan·float-cast-overflow 통과",
+            "같은 음원의 다중 보이스 출력·모든 참조 분리 후 해제·잠금 밖 PCM 해제 유지",
+            "실제 SDL 수정 전 고정0 선점·정확한 끝 경계 지연 재현, 수정 후 해제/순서/종료 검사 통과",
+            "Windows 실제 함수 본문에 지연된 Stop/Flush 대역 연결: 수정 전 추적 소실 가능성·수정 후 DestroyVoice 경계·생성/제출/시작 실패 검사",
+            "root17 CTest·sim_hash_dump 골든 유지",
+            "Part 발췌·Markdown27사례·394객관식·DOM 전체 차시 렌더링/탐색/기록/참조 검사 통과",
+            "실제 스피커·물리적 지연·Windows/macOS 네이티브 미검증"
+          ],
+          "deliverable": "공유 PCM·독립 보이스·시작 순서 기반 포화 교체·모든 대여 분리·실제 SDL/Windows 수명 경계 교정"
+        },
+        {
+          "id": "unit-081",
+          "title": "XAudio2: 같은 계약의 Windows 경로",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-81",
+          "previous": "unit-080",
+          "next": "unit-082",
+          "validation": [
+            "Release SCRIPTED90/SDL95 CTest·누적 SDL 게임·경고 없음",
+            "SDL/NONE·SCRIPTED/SDL 독립 선택, unknown/XAUDIO2 비Windows 구성 거절",
+            "전체 XAudioPlayer와 실제 Session의 API 대역 ASan/UBSan: COM 횟수·부분 초기화·형식·다중 대여·선점·실패 정리",
+            "실제 Windows audio.cpp 전체 + 실제 MP3 로더 대역 검사: BGM 제출/시작 실패 수정 전후, 재시도·SFX·unload·공유 init·COM",
+            "NOMINMAX 누락 시 max 매크로 컴파일 충돌 재현; 가드 적용 전체 소스 컴파일",
+            "실제 누적 main의 XAudio 선택을 API 대역 헤더로 컴파일; SDL console 진입 준비 통일",
+            "root17 CTest·sim_hash_dump 골든 유지",
+            "Part 발췌·짧은 XAudio 스니펫9개·Markdown27사례·399문제·DOM 전체 차시/탐색/저장/참조·정적15파일 ZIP 재현성 통과",
+            "Windows SDK/컴파일러/Wine 없음; 네이티브 ABI·장치·청감 미검증, 사용자 요청으로 수동 GUI 없음"
+          ],
+          "deliverable": "XAudioPlayer·공통 Session 연결·창/오디오 독립 선택·API 대역·BGM 실패 정리"
+        },
+        {
+          "id": "unit-082",
+          "title": "오디오 실패: 게임 전체 실패와 구분",
+          "state": "reviewed",
+          "referenceParts": [
+            5,
+            11
+          ],
+          "lessonId": "lesson-82",
+          "previous": "unit-081",
+          "next": "unit-083",
+          "validation": [
+            "Release SCRIPTED91/SDL96 CTest·누적게임·경고 없음; SDL/NONE·SCRIPTED/SDL 선택 유지",
+            "BasicSession 실패 주입 ASan/UBSan: open·4자리 factory/설치·bad_alloc/기타예외·무음 구성·반복준비 제한·통지 상한",
+            "실제 학습 Game와 Session 정책:24시드×3실패모드×180프레임=12960, 해시/시간 잔여량/Batch 소비 비교",
+            "실제 Game:24시드×3실패모드×240틱=17280, init/load/play 실패에서 SimGame 해시와 사건 소비·수명 비교",
+            "실제 Windows backend+API대역:두 수명1200실패 요청의 로그 수정 전1200줄→수정 후8줄,공유init/성공후속요청/정리 유지",
+            "XAudio/Session 대역 ASan/UBSan·실제main XAudio선택 컴파일·root17CTest·sim_hash_dump골든 유지",
+            "실제 Windows audio.cpp를 API 대역 헤더로 -Wall/-Wextra/-Wpedantic 컴파일,경고 없음",
+            "Part 발췌·짧은 정책 스니펫9개·Markdown27사례·404문제·DOM 전체 차시/탐색/저장/참조·정적15파일 ZIP 재현성 통과",
+            "네이티브 Windows·스피커·장치 제거/복구 미검증; 사용자 요청으로 수동 GUI 없음"
+          ],
+          "deliverable": "BasicSession 상태 기계·준비 실패 고정·한 번의 사건 소비·7종 통지 상한·규칙 독립성 검사"
+        }
+      ]
+    },
+    {
+      "id": "module-07",
+      "title": "입력을 네트워크로 보내기",
+      "units": [
+        {
+          "id": "unit-083",
+          "title": "소켓: 프로세스 사이의 바이트 통로",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-83",
+          "previous": "unit-082",
+          "next": "unit-084",
+          "validation": [
+            "누적 SCRIPTED93/SDL98 CTest 통과·빌드 경고 없음·게임/렌더러/오디오 파일 바이트 유지",
+            "실제 두 프로세스 loopback 왕복·0/128/255·EOF·접속 거절·잘못된 CLI9종 검사",
+            "소켓 move/목적지 교체/descriptor0/EOF/닫힌 상대 송신 ASan·UBSan 통과",
+            "실제 net/socket.cpp: 두 할당 실패·공유 소유자·바인드 옵션 실패·connect/accept 논블로킹 실패 주입 통과",
+            "실제 릴레이·Reactor 릴레이 빌드·root18 CTest·sim_hash_dump 골든 유지",
+            "Windows 공개 헤더 타입 검사:64비트 핸들·0·무효 sentinel·Reactor 인자; Windows/macOS 네이티브 빌드/실행은 미검증",
+            "실제 게임 타깃 빌드·기존 root17 CTest 통과",
+            "Part 발췌·13개 구현 스니펫·Markdown27사례·409문제와 전체 차시 DOM 탐색/저장/참조 통과; 수동 GUI 없음",
+            "84집필에서Winsock취소정책교정;동일소켓코드를포함한84누적검사로재확인(원본83/84소켓파일동일)"
+          ],
+          "deliverable": "move-only 소켓 소유자·플랫폼 준비 수명·loopback 1바이트 요청/응답·실패/EOF 검사"
+        },
+        {
+          "id": "unit-084",
+          "title": "TCP 스트림: 메시지 경계가 없는 이유",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-84",
+          "previous": "unit-083",
+          "next": "unit-085",
+          "validation": [
+            "누적 SCRIPTED95/SDL100 CTest·빌드 경고 없음·이전 게임/오디오/소켓 파일 바이트 동일",
+            "송신3방식×수신4용량 실제 프로세스12조합·내용/순서/상한 검사; 수신 분할 모양 고정 없음",
+            "빈/바이너리/64바이트 응답·65바이트 초과·짧은/잘못된/초과 응답·CLI 오류9종·기존 한 바이트 프로세스 회귀",
+            "전체32분할·사용량/내용 보존·null/0/size_t최댓값·반쪽 종료 뒤 응답 ASan/UBSan",
+            "실제 net/socket.cpp syscall 대역 ASan/UBSan: 부분 진행 뒤 오류/0·EINTR·WouldBlock·수신 바이너리/EOF/오류, io_chunk_size 경계 정적 검사",
+            "실제 릴레이/Reactor/게임 빌드·root18/17 CTest·sim_hash_dump 골든 유지",
+            "Part 발췌·실제 구현 스니펫8개·Markdown27사례 검수; Windows/macOS 네이티브 미검증·수동GUI 없음",
+            "Winsock API대역: 실제 root 송수신 함수 발췌와 기준 stream.cpp의64비트핸들·INT_MAX요청·취소1회보고·WSAEINPROGRESS/WouldBlock구분 통과(네이티브 증거 아님)",
+            "414문제·전체차시 DOM 탐색/복사/답안저장/참조 검사 통과"
+          ],
+          "deliverable": "StreamResult·진행량 기반 송수신·고정 누적 버퍼·half-close 요청/응답·32분할/12통신조합 검사"
+        },
+        {
+          "id": "unit-085",
+          "title": "프레이밍: 길이 접두사와 부분 수신",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-85",
+          "previous": "unit-084",
+          "next": "unit-086",
+          "validation": [
+            "누적 SCRIPTED97/SDL102 CTest·빌드 경고0·기존 게임/소켓/스트림 파일 동일(ByteBuffer 소비 연산만 확장)",
+            "기준 파서128분할·출력/미완성보존·최대프레임·길이/null/용량오류·소비 경계 ASan/UBSan",
+            "실제 루트 파서32768분할·현재 LEN0/체크섬/알수없는TYPE/최대payload 정책 ASan/UBSan",
+            "실제 두 프로세스16조합·EOF 전 응답·빈/바이너리/최대payload·잘못된 요청/응답·CLI9종",
+            "실제 Session io/room/queue/lobby 네 수신 단계에서 열린 상대의2바이트 과대헤더→실패/연결종료 확인",
+            "C++/Python 실제 구현32880회 직접비교·알려지지않은TYPE정책차이 별도확인·Python 고정벡터검사",
+            "실제 게임·양릴레이 빌드·root19/18 CTest 통과; Windows/macOS 네이티브 미검증·수동GUI 없음",
+            "Part 발췌·기준 실제스니펫7·Markdown27·419문제·전체차시 DOM 탐색/저장/복사/참조·정적배포 재현성 통과"
+          ],
+          "deliverable": "길이접두사·고정프레임파서·접두사소비·EOF전반복응답·분할/실제세션/언어간비교"
+        },
+        {
+          "id": "unit-086",
+          "title": "직렬화: 크기·엔디언·범위 검증",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-86",
+          "previous": "unit-085",
+          "next": "unit-087",
+          "validation": [
+            "누적 SCRIPTED99/SDL104 CTest·경고0·기존85게임/네트워크파일바이트동일(새코덱/진단/검사만추가)",
+            "기준코덱고정LE벡터·u16전체65536값·u64양끝/최상위비트·필드/메시지실패보존·null/0·정확한길이·틱래핑/마스크 ASan/UBSan",
+            "실제INPUT디코더길이/전체마스크256값/최대payload/틱경계/출력보존·signed32양끝 ASan/UBSan",
+            "실제프레이밍서버+직렬화클라이언트4수신상한·잘못된응답7종·CLI6종",
+            "실제Session정상입력·틱래핑·후반불명비트·여분/0개수·signed결과6경로;수정전3오류경로회귀실패확인",
+            "실제게임/양릴레이빌드·root20/19CTest통과;Windows/macOS네이티브미검증·수동GUI없음",
+            "Part 발췌·실제스니펫7·Markdown27·424문제·전체차시 DOM 탐색/저장/복사/참조·정적배포 재현성 통과"
+          ],
+          "deliverable": "필드커서·명시적LE코덱·입력배치전체검증·타입echo·실제INPUT래핑/범위방어"
+        },
+        {
+          "id": "unit-087",
+          "title": "부분 송신: 끝까지 보내기의 실패 조건",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-87",
+          "previous": "unit-086",
+          "next": "unit-088",
+          "validation": [
+            "누적 SCRIPTED 100 / SDL 105 CTest 통과·경고 없음·86 누적 파일 변경 범위 검사",
+            "결정적 시간·부분 진행·오류·취소·인터럽트·잘못된 결과 ASan/UBSan 검사",
+            "실제 loopback 역압 후 수락 접두사의 길이와 내용 일치·모드 복원·취소 검사",
+            "실제 native tcp_send_all이 1.5초 간격의 진행에도 전체 5초 후 실패 반환",
+            "Windows API 대역으로 핸들 폭·길이 제한·모드 실패·WouldBlock·취소·0 반환 검사; Windows/macOS 네이티브 빌드 미검증",
+            "typed echo 4수신 상한·잘못된 응답 7종·CLI 검사; 실제 게임/양 릴레이 빌드 및 root 20/19 CTest 통과",
+            "Part 발췌·실제 구현 스니펫 7개·Markdown 27경우·429문제·전체 차시 DOM 참조/저장/복사/탐색 통과·정적 배포 재현성 통과; 수동 GUI 없음"
+          ],
+          "deliverable": "부분 진행 보존·논블로킹 시도·고정 마감시간·취소 정책·실제 송신 전체 시간 제한"
+        },
+        {
+          "id": "unit-088",
+          "title": "연결 수명: 시작·종료·재연결",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-88",
+          "previous": "unit-087",
+          "next": "unit-089",
+          "validation": [
+            "누적 SCRIPTED 101 / SDL 106 CTest·경고 없음·87 기존 파일 변경 범위 확인",
+            "실제 loopback Connection: half-close 양방향·EOF 캐시·잘린 헤더/잘못된 길이·출력 보존·반복 종료·파서 초기화·송신 마감 후 재시작 ASan/UBSan",
+            "실제 connection_probe: 수신 상한 4종·응답 전 요청 half-close·누락/잘못된/중복/잘린 응답 6종 거절",
+            "실제 Session: 진행/실패한 워커 8경로에서 5시작 모두 거절·반복 Close·재연결 ASan/UBSan; 수정 전 8경로 회귀 실패 확인",
+            "현재 게임/양 릴레이 빌드 및 root 20/19 CTest 통과; Windows/macOS 네이티브 미검증·수동 GUI 없음",
+            "실제 구현 스니펫 7개·Part 발췌·Markdown 27경우·434문제·전체 차시 DOM 참조/저장/복사/탐색·정적 배포 재현성 통과"
+          ],
+          "deliverable": "연결 소유 객체·방향별 종료·EOF/잘린 프레임·재시작 초기화·실제 Session 시작 가드"
+        },
+        {
+          "id": "unit-089",
+          "title": "시드 협상: 두 게임의 시작을 맞추기",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-89",
+          "previous": "unit-088",
+          "next": "unit-090",
+          "validation": [
+            "누적 SCRIPTED 104 / SDL 109 CTest·경고 없음·88 누적 파일 변경 범위 확인",
+            "고정 HELLO/설정 LE 벡터·길이 0~33·역할 0~255·정책 경계·0/MAX 시드·실패 출력 보존 ASan/UBSan",
+            "adopt 실패/성공 소유권·busy 보존·invalid_local alias 및 닫힌 연결 실패 ASan/UBSan",
+            "실제 두 프로세스 시드 0/1/77/UINT64_MAX의 설정·초기 상태 해시 일치, host 7/peer 7 잘못된 메시지·EOF에서 출력 보존과 종료",
+            "실제 Session 초기/재대전 수신자 역할·잘못된 SEED 이후 설정/ready 보존·정상 재대전 허용 ASan/UBSan; 수정 전 두 경로 회귀 실패 확인",
+            "현재 게임/양 릴레이 빌드 및 root 20/19 CTest 통과; Windows/macOS 네이티브 미검증·수동 GUI 없음",
+            "실제 구현 스니펫 9개·Part 발췌·Markdown 27경우·439문제·전체 차시 DOM 참조/저장/복사/탐색·정적 배포 재현성 통과"
+          ],
+          "deliverable": "버전/규칙/시드 제안·전체 ACK 확인·수락 소켓 인계·기존 Round 초기화·실제 SEED 역할/문법 교정"
+        },
+        {
+          "id": "unit-090",
+          "title": "입력 교환: 미래 틱을 기다리는 이유",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-90",
+          "previous": "unit-089",
+          "next": "unit-091",
+          "validation": [
+            "누적 SCRIPTED 106 / SDL 111 CTest·경고 없음·89 누적 파일 변경 범위 확인",
+            "입력0/누락·마스크0~511·32칸 경계·중복/충돌·묶음 실패 전체 보존·UINT32_MAX 소진·Duel 상태 바이트·종료 ASan/UBSan",
+            "실제 두 프로세스 네 시드의 12틱 역할별 해시 일치·미래 묶음 대기·잘못된 입력/EOF/중복/충돌 등 9경로 확인",
+            "현재 입력 쌍 조회의 존재 조합·출력 보존 및 main 루프 발췌의 누락·양쪽 종료 검사; 수정 전 missing=3 finished=3, 수정 후 missing=0 finished=1",
+            "현재 게임/양 릴레이 빌드·root20/19 CTest; Windows/macOS 네이티브 미검증·수동 GUI 없음",
+            "실제 구현 스니펫8개·Part 발췌·Markdown27경우·444문제·전체 차시 DOM·재현 가능한 정적 배포물 검사"
+          ],
+          "deliverable": "입력 존재/중립 구분·32틱 창·원자적 묶음 적용·Duel 순차 소비·두 프로세스 12틱 교환"
+        },
+        {
+          "id": "unit-091",
+          "title": "inputDelay와 safeTick: 지연을 흡수",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-91",
+          "previous": "unit-090",
+          "next": "unit-092",
+          "validation": [
+            "누적 SCRIPTED109/SDL114 CTest·경고 없음·90 누적 파일 변경 범위 확인",
+            "D0~30 시작 시점·31~255 거절·마스크 축소 전 검사·창 포화/회복·묶음 실패 원자성·긴 공백·UINT32_MAX·종료 우선 ASan/UBSan",
+            "동일 입력 이력의 host/peer 상태 바이트를 직접 실행과 비교; 논리 도착 시간선에서 D0/D2 진행 수 확인",
+            "실제 main 정책과 루프 발췌 ASan/UBSan: 수정 전 D2=0,0,1,1,1,4,5,6 회귀 실패; 수정 후 0,0,1,2,3,4,5,6 통과",
+            "실제 두 프로세스 네 seed/delay 조합의 역할별 해시·32-D 소비 수·D 꼬리 일치; 다섯 잘못된/누락/중복 입력 경로 확인",
+            "현재 게임/양 릴레이 빌드·root20/19CTest; Windows/macOS 네이티브·실제 GUI·실환경 지터 측정은 수행하지 않음",
+            "실제 구현 스니펫7·Part발췌·Markdown27·449문제·전체 차시 DOM·정적 배포 재현성 검사"
+          ],
+          "deliverable": "로컬 생성 일정 기반 입력 지연·도착 공백 시간선·유한 입력 꼬리·실제 main 정책 교정"
+        },
+        {
+          "id": "unit-092",
+          "title": "해시 대조: 갈라진 상태 찾기",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-92",
+          "previous": "unit-091",
+          "next": "unit-093",
+          "validation": [
+            "누적 SCRIPTED111/SDL116 CTest·경고 없음·91 누적 파일 변경 범위 확인",
+            "HASH 코덱 고정 LE벡터·길이0~40·타입0~255·잘못된 주기/상한·0/MAX해시·출력 보존 ASan/UBSan",
+            "비교 창 선도착·출력 보존·동일/충돌·stale/too_far·역할별 불일치·8샘플 순서 변경/창 이동·라운드 초기화 ASan/UBSan",
+            "실제 두 프로세스 네 seed/delay 조합에서 기대한 모든 주기 샘플 일치; 일치/host변경/peer변경/선도착불일치/누락/잘못된타입/길이 7경로 검증",
+            "실제 main 발췌 선도착 비교·중복 억제·reset ASan/UBSan; 수정 전 선도착 표식 회귀 실패·진단 captured601/compared600 확인",
+            "실제 hash_player_pair 역할 순서·XOR상쇄 반례·명시적 LE바이트 벡터954051100819889112 확인; 게임/양릴레이 빌드·root20/19CTest",
+            "Part 발췌·7스니펫·Markdown27·454문제·전체차시DOM·정적 배포물 재현성; Windows/macOS 네이티브·수동GUI 미검증"
+          ],
+          "deliverable": "초기/주기 해시 wire·같은 검사점 비교 창·선도착/누락·역할 해시 및 실제 main 교정"
+        },
+        {
+          "id": "unit-093",
+          "title": "스레드와 큐: 데이터 소유권",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-93",
+          "previous": "unit-092",
+          "next": "unit-094",
+          "validation": [
+            "누적 SCRIPTED114 / SDL119 CTest·경고 없음·92 누적 파일 변경 범위 확인",
+            "실제 thread_contract: FIFO·닫힌 큐 소진·출력 보존·값 복사·10000개 동시 인계·무응답 취소·20회 즉시 파괴·길이 오류·잘린 EOF·수신 overflow·half-close ASan/UBSan 및 ThreadSanitizer 통과",
+            "실제 ThreadLink 루프+송수신 대역: 한 바이트씩 송신·EINTR/would_block·프레임 FIFO·부분 송신 오류·5초 마감 ASan/UBSan. 커널의 동일 동작을 입증하는 검사가 아님",
+            "독립된 두 프로세스의 네 StateStamp FIFO 교환 4회·9개 인라인 구현 스니펫·Part 발췌·Markdown27 검사",
+            "Windows/macOS 네이티브·지속 GUI 경기·thread 생성/뮤텍스 시스템 실패 복구는 미검증; 수동 화면 검사 없음"
+          ],
+          "deliverable": "고정 값 큐·워커 독점 소켓·부분 송수신·별도 종료 보고·정상 소진/취소/과부하 구분"
+        },
+        {
+          "id": "unit-094",
+          "title": "하트비트: 무응답과 연결 종료",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-94",
+          "previous": "unit-093",
+          "next": "unit-095",
+          "validation": [
+            "누적 SCRIPTED116/SDL121 CTest·경고 없음·93 누적 코드 변경 범위 확인",
+            "Heartbeat TYPE0~255/길이0~39/고정 LE벡터/0/MAX토큰·출력 보존·가짜 시각의 임계값 직전/정확한 경계/역행/MAX 부근·상관관계/중복/미요청 검수",
+            "실제 main650ms 미소비 중 워커 PING/PONG 지속·게임 큐에 제어 프레임 없음·잘못된 timing 거절: ASan/UBSan 및 ThreadSanitizer 통과",
+            "실제 두 프로세스3쌍: 확인>=3·실험 완료 마커·half-close/EOF. 상대 대역5경로:침묵/다른토큰/재사용/잘린PONG/PING-only가 기대한 실패로 종료",
+            "실제 Session PING/PONG 분기 발췌 회귀: 수정 전 빈 PONG 갱신 검사 실패, 수정 후 길이/ready/요청대응/미래/나이/단회소비/16칸/토큰 재발급 금지 ASan/UBSan",
+            "현재 게임·양 릴레이 빌드 및 root20/19 CTest 통과. Windows/macOS 네이티브·수동 GUI 미검증",
+            "Part 발췌·Markdown27·9인라인 구현 스니펫·464문제·전체 차시 DOM 연결/참조/저장 검사 통과",
+            "u64 토큰 전체 소진까지의 실제 장기 실행과 부하 하 임계값 튜닝은 수행하지 않음. 요청 상관관계는 인증·규칙 진행 증명이 아님"
+          ],
+          "deliverable": "PING/PONG 코덱·순수 시간 상태·워커 제어 처리·미응답 만료·현재 PONG 상관관계 검사"
+        },
+        {
+          "id": "unit-095",
+          "title": "백프레셔: 느린 상대와 제한된 메모리",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-95",
+          "previous": "unit-094",
+          "next": "unit-096",
+          "validation": [
+            "누적 SCRIPTED119/SDL124 CTest 통과·경고 없음·94 누적 파일 변경 범위 확인",
+            "FlowQueue 고저수위·활성 비용·개수/바이트 경계·close·출력 보존·100000연산 독립 모델·10000스레드 인계: ASan/UBSan 및 ThreadSanitizer 통과",
+            "실제 ThreadLink 부분 송신/전송 대기 대역으로 charge 유지와 최종 반환: ASan/UBSan 및 ThreadSanitizer 통과",
+            "현재 Session 송신/입력 분기 추출 회귀: 수정 전 실패, 수정 후 바이트/개수/활성/초기화 필터/64프레임/실패 및 INPUT 용량 사전 검사/no ACK/정확한 용량/중복 통과",
+            "즉시 읽기·50ms 지연 상대 각500레코드: 순번/크기/내용/EOF/종료 및 bytes0 확인. 커널 포화 실험은 아님",
+            "현재 게임·양 릴레이 빌드 및 root20/19 CTest·Part 현재 발췌·Markdown27·7개 인라인 구현·469문제·전체 차시 DOM 계약 검사",
+            "Windows/macOS 네이티브·수동 GUI·전체 연결/프로세스 자원 한도는 미검증; 입력 충돌 중복/거리/라운드 식별 정책은 별도"
+          ],
+          "deliverable": "대기+활성 송신 예산·고저수위 접수 제어·생산 재시도·현재 Session 상한과 입력 배치 용량 사전 검사"
+        },
+        {
+          "id": "unit-096",
+          "title": "오래된 입력: 대기 중 backlog를 처리",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-96",
+          "previous": "unit-095",
+          "next": "unit-097",
+          "validation": [
+            "누적 SCRIPTED121/SDL126 CTest 통과·경고 없음·95 누적 코드 변경 범위 확인",
+            "Round 코덱 LE고정벡터·TYPE0..255/size0..39·마스크0..255·count0..255·0/MAXround·틱범위·실패 출력 보존 ASan/UBSan 통과",
+            "상태 전이·prepare실패 보존·countdown 수신 보관·두 DelayedLockstep 규칙 상태 비교·old/future/current 입력·충돌/중복·32칸포화·u32소진 ASan/UBSan 통과",
+            "이전 round를 허용하는 mutation은 새 라운드 틱0 접수 검사에서 거절됨. round_timeline의 결정적 전달 시나리오 통과",
+            "실제 Session::SendInput 발췌 회귀: 수정 전 실패, 수정 후 connected/ready/quit 8조합과 거절 시 큐/시계/틱 무변경 통과; main 준비 조건 소스 대조",
+            "실제 게임·양 릴레이 빌드, root20/19 CTest, Part 발췌·Markdown27·10인라인 구현·474문제·전체 차시 DOM 계약 통과",
+            "수동 GUI·Windows/macOS 네이티브·전체 재시작 wire합의는 미검증. 기준은 단일 main 소유자, 이번 차시는 새 스레드 경합 경로를 추가하지 않음",
+            "root wire round-id/HASH·SEED 확장/워커 중립 입력 소유권 인계는 별도 미완료 경계; 준비 가드를 그 해결로 확대하지 않음"
+          ],
+          "deliverable": "생산 상태 전이·라운드 입력 코덱·누적 시뮬레이션 소속 검사·카운트다운 수신 보관·실제 준비 전 생산 가드"
+        },
+        {
+          "id": "unit-097",
+          "title": "원자적 관측: HASH pair 레이스",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-97",
+          "previous": "unit-096",
+          "next": "unit-098",
+          "validation": [
+            "누적 SCRIPTED123/SDL128 CTest·경고 없음·96 누적 파일 변경 범위 확인; 기준/실제 mailbox 템플릿 본문 일치",
+            "합법적인 seq_cst 혼합 관측을 단계 제어로 재현; ASan/UBSan 및 ThreadSanitizer 통과가 논리적 일관성의 증명은 아님을 구분",
+            "HashMailbox 주기/창/중복충돌/최신도착/출력보존/0해시/단회소비/clear/u32소진·두생산자/소비자/진단reader의20000쌍: ASan/UBSan 및 ThreadSanitizer 통과",
+            "실제 Session/main 분기 발췌: 수정 전 최신1200이 앞600불일치를 숨기는 검사 실패, 수정 후600불일치·1200일치 모두소비/미도착대기/한번만처리/초기화/실패정책 통과",
+            "현재 게임·양릴레이 빌드와 root21/20 CTest 통과; hash_mailbox 기본 회귀 추가, 변경된 SEED/직렬화 실제 세션 회귀 통과",
+            "Part발췌·Markdown27·8인라인구현·479객관식·전체DOM계약검사 통과; 92차시 현재코드 참조/설명만 갱신",
+            "Windows/macOS 네이티브·수동GUI·모든 동시스케줄/실운영 임계값 튜닝은 미검증. HASH 라운드ID·알고리즘협상·독립적인 비교정체 마감은 별도 경계"
+          ],
+          "deliverable": "합법적인 atomic 혼합 반례·mutex 스냅샷·유한 주기 비교 창·실제 최신 슬롯 유실 교정"
+        },
+        {
+          "id": "unit-098",
+          "title": "종료 협상: 통신 종료와 경기 판정",
+          "state": "reviewed",
+          "referenceParts": [
+            6
+          ],
+          "lessonId": "lesson-98",
+          "previous": "unit-097",
+          "next": "unit-099",
+          "validation": [
+            "누적97 파일 보존 검사·SCRIPTED125/SDL130 CTest 통과, -Wall/-Wextra/-Wpedantic 빌드 경고 없음",
+            "기준 코덱 type/size/enum 전수 조합과 round0/u64최대·실패 출력 보존, early 선택·첫 의사 불변·중복/충돌·회차·마감/역행 시각·EOF 경계 ASan/UBSan 통과",
+            "실제 두 RoundPlay의 seed77/drop 입력으로 11틱 terminal, peer 마지막 advance 전 선택 수신, 양쪽 협상 뒤 명시적 다음 설정 공급; ASan/UBSan 통과",
+            "현재 Session 분기·메서드 발췌 회귀: 수정 전 prefix-only 검사 실패 재현, 수정 후 정확1바이트/1·2 도메인/원격 선택 불변/중복·충돌/초기화·출력보존 통과",
+            "현재 게임 및 양 릴레이 빌드·root21/20 CTest 통과. no-meta 최종화 우려는 ranked 진입 조건을 대조해 현재 호출 경로에서 제외됨을 확인",
+            "인라인 구현10(C++9/CMake1) 누적 소스 일치, Part 현재 발췌·구조·링크·Markdown27·484문제 형식·전체 강의 DOM 계약 통과",
+            "Windows/macOS 네이티브·수동 GUI·실망 지연/재접속·root wire round ID와 새 설정 시작 확인 전체 구현은 검증 범위 밖. 기준 FSM은 단일 main 소유이며 전송·서버 저장을 직접 수행하지 않음"
+          ],
+          "deliverable": "회차별 의사·마감·연결 종료 상태 머신과 실제 RoundPlay 조합, 현재 선택 검증 보강"
+        }
+      ]
+    },
+    {
+      "id": "module-08",
+      "title": "서버에서 만나기",
+      "units": [
+        {
+          "id": "unit-099",
+          "title": "릴레이 선택: 직접 연결과 중계의 비용",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-99",
+          "previous": "unit-098",
+          "next": "unit-100",
+          "validation": [
+            "98 누적 파일 보존, SCRIPTED127/SDL132 CTest 통과 및 -Wall/-Wextra/-Wpedantic 빌드 경고 없음",
+            "실제 loopback TCP 직접1/중계2연결, read cap1/2/7/16, RoundPlay3틱의 양쪽 정규 상태 바이트 및 두 경로 최종 상태 일치, 미래 round endpoint거절/상태보존 통과",
+            "고정18바이트 프레임6개와 미래 회차1개로 relay ingress/egress108→126, direct relay카운터0 확인; RTT 또는 WAN/NAT 성능 측정 아님",
+            "비대칭 방향28ms/29ms 및 모델 왕복57ms,100경기216000B/s각방향/200socket/819200B큐예산; 작은160000조합·u64경계·0인자·실패출력보존 ASan/UBSan 통과",
+            "최종 출력 순서를 명시한 실험 재검증 및 인라인11(C++10/CMake1) 누적 소스 일치; Part 구조/현재 발췌/로컬 링크·Markdown27·489문제 및 전체DOM 계약 통과",
+            "Part7 §1·§2와 Part10 §1 책임/현재 인증 경로 대조, STUN/TURN/RTO/빠른재전송 공식 규약 확인. 현재 게임·서버의 실행 코드는 변경하지 않음",
+            "Windows/macOS 네이티브·수동GUI·WAN/NAT·동시 사용자 부하·운영 서버 수용량은 미검증. 동기 실험은 제어된 작은 교환이며 일반 포워딩 서버의 수명/상한 구현은 별도"
+          ],
+          "deliverable": "실제 TCP 직접/중계 경로의 RoundPlay 비교와 실패 보존을 갖춘 지연·트래픽 비용 모델"
+        },
+        {
+          "id": "unit-100",
+          "title": "accept와 첫 프레임: 연결의 역할 결정",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-100",
+          "previous": "unit-099",
+          "next": "unit-101",
+          "validation": [
+            "99 누적 파일 보존, SCRIPTED129/SDL134 CTest 및 -Wall/-Wextra/-Wpedantic 경고 없는 빌드 통과",
+            "디코더 type0..255/size0..39/route0..255 및 각 join 문자/길이,13바이트의 모든4096분할, 한번 인계·출력보존 ASan/UBSan 통과",
+            "정확 마감·u64경계·역행 poll/feed/eof·낯선4/5개·읽기 상한·128바이트 소진/정확 경계 성공·EOF/부분꼬리·후속 잘못된 헤더의 다음 단계 검사 통과",
+            "실제 loopback TCP에서 nonblocking 입장 처리, socket/parser 인계, 후속 TYPE60/61 및 실제 RoundPlay TYPE41 틱0 진행 ASan/UBSan 통과",
+            "실제 first/room 파싱 분기 발췌에서 수정 전 정상prefix+과대길이 dispatch 실패 재현, 수정 후 실패차단/정상·부분입력/잔여순서 통과. 검사 도구는 임시 백업 없이 이전의 무시 분기를 재구성",
+            "현재 게임/양relay 빌드와 root21/20 CTest 통과. 최종 추가 경계의 SCRIPTED admission_contract 재빌드/CTest 통과",
+            "인라인14(C++13/CMake1) 누적 소스 일치, Part구조/현재발췌/로컬링크·Markdown27·494문제·전체DOM 탐색/저장/복원/단일차시렌더링 계약 통과",
+            "Windows/macOS 네이티브·수동GUI·운영 서버 인증/매칭 통합·WAN/부하 검사는 미수행. root 회귀는 실제 분기 발췌 검사이며 서버 전체 통합 검증으로 보지 않음"
+          ],
+          "deliverable": "100-first-admission: 첫 요청 검사·고정 마감·바이트/메시지 예산·parser와 실제 socket 인계, RoundPlay 첫 틱 연결"
+        },
+        {
+          "id": "unit-101",
+          "title": "워커 수명: detach·예외·종료 대기",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-101",
+          "previous": "unit-100",
+          "next": "unit-102",
+          "validation": [
+            "100 누적 코드 보존, SCRIPTED131/SDL136 CTest 및 -Wall/-Wextra/-Wpedantic 경고 없는 빌드 통과",
+            "실제 root에서 캡처 소멸자 gate 중 새 작업 접수가 허용되는 수정 전 실패 재현; 수정 후 같은 회귀 및 ASan/UBSan 통과",
+            "학습/root 그룹의 callable 이동 생성 실패 예약 복원, std::exception/정수 본문 예외, move-only 작업, wait 후 재사용/닫힌접수/limit0,12생산자와2blocked slots 통과",
+            "실제 loopback TCP3연결의 queue/create/join과 parser 인계, 작업별 실제 RoundPlay tick0, 완료 후 결과 읽기 ASan/UBSan 통과",
+            "root 기존 두 구성 빌드와22/21 CTest 통과; worker_lifetime를 정식 CTest에 추가",
+            "프로젝트 .venv에서 실제 tetris_relay 두 참가자 MATCH_FOUND/READY 후 SIGTERM 종료회귀1 passed(0skip); 기본 python3에는pytest가없어 프로젝트환경사용",
+            "인라인13(C++12/CMake1) 누적 구현 일치, Part 구조/발췌/로컬링크·Markdown27·499문제·전체DOM 탐색/저장/복원/단일차시렌더링 계약 통과",
+            "C++ 작업초안 thread.thread.member/destr 및 condition_variable 계약 대조. 기존ThreadLink join과 작업/capture drain 범위 구별",
+            "OS thread생성·detach·join 실패 자체의 강제주입, TLS후처리, Windows/macOS 네이티브·수동GUI·WAN/부하·인증/DB전체종료통합은 미검증"
+          ],
+          "deliverable": "101-worker-lifetime: 작업 예약·캡처 정리 완료·예외·접수중단/drain·실제3연결 RoundPlay"
+        },
+        {
+          "id": "unit-102",
+          "title": "매칭 큐: 등록과 취소를 함께 설계",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-102",
+          "previous": "unit-101",
+          "next": "unit-103",
+          "validation": [
+            "101 누적 구현 바이트 일치. 새 contract/probe만 SCRIPTED2·SDL2 CTest와 경고 없는 빌드로 검사; 변경 없는 과거 전체 타깃은 재빌드하지 않음",
+            "기준32768 모델 연산·128 취소/선택 경합·단독 폴링·close 및 실제 root FIFO/종료후등록/단독취소/상한 회귀 ASan/UBSan 통과",
+            "실제 root 수정 전 late lease·lone cancel 실패 재현, 수정 후 해소. root 두 기존 구성26/25 CTest 통과",
+            "실제 TCP3연결의 buffered cancel2 제거·Pair1,3 소유권 인계와 queue close 후 RoundPlay 전체 상태 바이트 일치 ASan/UBSan 통과",
+            "실제 tetris_relay 단독취소 EOF 및 두 참가자 매칭, 활성 경기 SIGTERM 회귀 pytest2passed/0skip",
+            "C++ deque.modifiers 원문 계약 대조. loopback fixture는 round/seed/roles를 공급하며 인증·MATCH_FOUND·READY 전체 경로 구현이 아님",
+            "Windows/macOS 네이티브·수동GUI·WAN/부하·모든 스케줄 열거·인증/DB 전체 종료 통합은 미검증",
+            "인라인17(C++16/CMake1) 구현 일치; Part 발췌/링크·Markdown27·504문제와 전체 DOM 차시 탐색·단일 마운트·완료/답안 저장·이전 읽던 위치·file URL/저장 실패 계약 통과. 수동 GUI는 수행하지 않음"
+          ],
+          "deliverable": "102-match-queue: 상한 있는 FIFO·취소/선택 소유권·단독 폴링·종료·실제 TCP Pair/RoundPlay"
+        },
+        {
+          "id": "unit-103",
+          "title": "방 코드: 생성·충돌·소유권",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-103",
+          "previous": "unit-102",
+          "next": "unit-104",
+          "validation": [
+            "102 누적 코드 바이트 보존, 새2타깃 SCRIPTED2/SDL2 CTest와 경고 없는 빌드; 이전 전체 체크포인트 재빌드 없음",
+            "학습160자리 조합·16384 기준 모델 연산·64 동시 동일코드 경합·stale 세대/owner·실패 소유권·UINT64_MAX소진 ASan/UBSan 통과",
+            "실제 TCP host create/TYPE52 안내/guest join/버전 take와 Directory close 후 실제 RoundPlay 전체 상태 바이트 일치 ASan/UBSan 통과",
+            "실제 root 종료 전 생성 gate에서 수정 전 ROOM_INFO가 종료 후 송신됨 재현, 수정 후 무송신·연결닫힘·lease해제. 게이트는 잠금 직전 일정 제어만 삽입",
+            "실제 handleCreate 할당 실패로 수정 전 미완성 방과 등록 후 안내 실패 잔류를 재현. 최종 준비/예외정리에서 표에 잔류 없음. 검사 전용 헤더에는 크기 조회만 추가",
+            "공통 room_code의160자리/0/상위7비트/32충돌/소스실패 및 실제 Linux getrandom·짧은읽기/EAGAIN/EINTR 주입 ASan/UBSan 통과",
+            "추출한 옛 xorshift 생성기에서 충돌/숨은호출/짧은몫재추출 없는 연속7코드로64비트 상태 복원,8번째 예측 일치. 모든 관측 상황으로 일반화하지 않음",
+            "Linux getrandom·Windows BCryptGenRandom 공식 계약 대조. Windows/macOS 네이티브·수동GUI·WAN/부하·암호학적 강도 통계증명·인증/DB 전체 통합은 미검증",
+            "실제 handleJoin의 등록 후 안내 버전 변경을 gate로 주입: 수정 전 rooms1·열린guest·lease잔류, 수정 후 방0·연결닫힘·lease반납·무안내. 검사 전용 상태 준비/조회만 추가",
+            "최종 root 두 구성 빌드·27/26 CTest 통과. 실제 tetris_relay 및 tetris_relay_reactor의 create/join/READY/MATCH_FOUND 각각 pytest1passed/0skip",
+            "인라인16(C++15/CMake1) 기준 구현 일치·Part 발췌/링크·Markdown27·509문제 및 전체 DOM 탐색/단일마운트/현재소스/저장복원/file URL 실패 계약 통과. 수동GUI는 수행하지 않음"
+          ],
+          "deliverable": "103-room-code: 코드 공간·충돌/소스 실패·원자적 등록·세대 핸들·실제 TCP 코드 공유와 게임 입력"
+        },
+        {
+          "id": "unit-104",
+          "title": "수락 로비: 두 사람이 준비되는 순간",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-104",
+          "previous": "unit-103",
+          "next": "unit-105",
+          "validation": [
+            "103 누적 불변 파일 보존, 새2타깃 SCRIPTED2/SDL2 CTest 및 ASan/UBSan 계약·실제 TCP probe",
+            "256개 READY 값, 모든 지정 스트림 분할 위치·양쪽 순서, 마감/역행/큰시각·EOF·버퍼·인계 검사",
+            "수정 전 threaded 서버 READY2/255/추가본문을 수락하는 실패3개 재현. 수정 후 두 서버 제어형식/방READY/정상방/종료 각11 passed·0skip",
+            "두 실제 relay 각각 READY+CHAT 보존 통합1passed·0skip",
+            "Windows/macOS 네이티브·수동GUI·WAN/부하·모든 종료 스케줄·인증/DB 통합은 미검증"
+          ],
+          "deliverable": "104-acceptance-lobby: 두 참가자 수락 상태·정확한 READY 검증·절대 마감·parser/socket 인계·실제 TCP 게임 입력"
+        },
+        {
+          "id": "unit-105",
+          "title": "포워더: 방향별 상태와 종료",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-105",
+          "previous": "unit-104",
+          "next": "unit-106",
+          "validation": [
+            "104 누적 불변 파일 보존, 새2타깃 SCRIPTED2/SDL2 CTest",
+            "6006 수신분할/본문크기/송신cap 조합과 정체·EINTR·오류·EOF·prefix·상한 계약 ASan/UBSan",
+            "실제 방 코드/수락/2바이트 송신/상대 입력 수신/EOF 쌍종료/실제 RoundPlay 정규 바이트 일치 ASan/UBSan",
+            "수정 전 두 relay의 과대 헤더 후 연결 유지 및 Python 보조 함수의 후속 프레임 손실 재현",
+            "수정 후 두 relay 각각 정상방/수락꼬리/종료/과대헤더 및 helper 계약5passed·0skip",
+            "Windows/macOS 네이티브·수동GUI·WAN/부하·ranked 인증/DB 통합은 미검증; ranked 위반 무효화는 소스 검토·빌드 범위"
+          ],
+          "deliverable": "105-forwarder: 방향별 parser/pending/offset·짧은 송신·입력 억제·실제 상대 입력 수신·연결 쌍 종료"
+        },
+        {
+          "id": "unit-106",
+          "title": "동시 나가기: 상태를 지우는 순서",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-106",
+          "previous": "unit-105",
+          "next": "unit-107",
+          "validation": [
+            "누적 불변 파일 보존, 새2타깃 SCRIPTED/SDL CTest 및 ASan/UBSan",
+            "128 중복+128 양쪽 퇴장, 같은 Peer 재입장, stale 알림·송신 실패·gate·소멸·번호 소진 계약",
+            "실제 TCP 퇴장/EOF/같은코드 재입장/현재인원/수락/반대입력/게임 상태 바이트 일치",
+            "현재 서버 stale reader 진입/수신 중 교체, starter 깨움, 빈 슬롯 자원 참조 회수4회귀",
+            "두 실제 relay 각각7passed·0skip; 기존 생성/종료/예외/미완료입장 검사",
+            "Windows/macOS 네이티브·수동GUI·WAN/부하·모든 스케줄·ranked 인증/DB 통합 미검증"
+          ],
+          "deliverable": "106-room-exit: 참가 ticket·버전 알림·잠금 밖 정리·실제 퇴장/재입장·조건 변수 회귀"
+        },
+        {
+          "id": "unit-107",
+          "title": "연결 제한: 메모리·큐·시간의 상한",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10,
+            12,
+            14
+          ],
+          "lessonId": "lesson-107",
+          "previous": "unit-106",
+          "next": "unit-108",
+          "validation": [
+            "누적106 파일 보존, 새2타깃 SCRIPTED/SDL 및 ASan/UBSan",
+            "12000 독립 행 모델,24스레드,0/정확한상한/정수경계/이동/소멸/마감 계약",
+            "실제TCP 정원초과EOF·퇴장재입장·반대입력·게임상태·모든예약반납",
+            "실제두lease 할당21조건: 수정전6실패(3누수/3교착시간초과), 수정후전부통과",
+            "현재서버24스레드IP/계정상한과 단계독립;두relay각3통합;root27/26CTest",
+            "Windows/macOS네이티브·수동GUI·WAN/부하·전체프로세스OOM복구·인증/DB통합 미검증"
+          ],
+          "deliverable": "107-connection-budget: 전체·출처별·단계별·바이트 예약과 실제 TCP 거절/반납"
+        },
+        {
+          "id": "unit-108",
+          "title": "메타와 연동: 전달과 영속성의 경계",
+          "state": "reviewed",
+          "referenceParts": [
+            7,
+            10
+          ],
+          "lessonId": "lesson-108",
+          "previous": "unit-107",
+          "next": "unit-109",
+          "validation": [
+            "누적107 파일 바이트 보존; 새2타깃 SCRIPTED/SDL CTest 및 ASan/UBSan 계약·TCP 통합",
+            "실제 입력으로11틱 종료, 서버·두 클라이언트 정규 상태 일치, 응답 미확인 재시도·대역1회 반영",
+            "실제 응답 파서62조건: 수정전19실패, 수정후0; 실제 HTTP 클라이언트503/동일본문/공백/부모위치 검사",
+            "실제 HTTP·SQLite24검사 통과; 동일키·변경내용7조건 수정전200에서 수정후409",
+            "Windows/macOS 네이티브·수동GUI·WAN·크래시/전원장애·재시작 outbox 미검증"
+          ],
+          "deliverable": "108-meta-boundary: 완료된 서버 실행 값·불변 제출·미확인과 중복 반영 방지"
+        }
+      ]
+    },
+    {
+      "id": "module-09",
+      "title": "계정과 보상 저장",
+      "units": [
+        {
+          "id": "unit-109",
+          "title": "메타 서비스: relay와 DB를 나누는 이유",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-109",
+          "previous": "unit-108",
+          "next": "unit-110",
+          "validation": [
+            "누적108 불변 파일 보존; 저장 계약 ASan/UBSan·24스레드·본문 경계 검사",
+            "SCRIPTED/SDL 새3타깃, 독립 호출자/HTTP서비스 프로세스·동일 요청·충돌·동시 요청·413·재시작·미접속 검사",
+            "실제 개발용 공개결과 시작검사4조건: 수정전DB열기로 진행, 수정후DB접근 전 정책거절",
+            "실제 메타 HTTP·SQLite29검사: 커밋 뒤 메타 재시작에서도 동일 응답과 잔액 보존",
+            "Windows/macOS 네이티브·수동GUI·WAN·부하·전원장애·공개 인증 없는 학습 서비스 운영 미검증"
+          ],
+          "deliverable": "109-meta-service: 별도 HTTP 서비스·종료 규칙 호출자·메모리 저장 소유와 재시작 경계"
+        },
+        {
+          "id": "unit-110",
+          "title": "테이블과 키: 사용자·아이콘·경기",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-110",
+          "previous": "unit-109",
+          "next": "unit-111",
+          "validation": [
+            "누적109 파일 보존; SCRIPTED/SDL 신규 SQLite 타깃·관계 제약·재열기·16스레드 검사",
+            "실제 HTTP 두 프로세스·서비스 재시작·12동시요청·uint64·NULL·외부 파일 쓰기 잠금503/해제후200·잘못된 DB경로 검사",
+            "C++ 래퍼/저장 어댑터 ASan/UBSan; SQLite 엔진은 동일 C11 Release 아카이브",
+            "실제 메타 잘못된 winner7종 수정전실패 재현; 수정후 HTTP·SQLite37검사",
+            "타OS 네이티브·수동GUI·전원장애·공개 인증 없는 학습 API 운영 미검증"
+          ],
+          "deliverable": "110-tables-keys: 네 관계 테이블·키/NULL/타입 제약·SQLite 저장 서비스·재시작 확인"
+        },
+        {
+          "id": "unit-111",
+          "title": "인덱스: 조회 비용과 유일성",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-111",
+          "previous": "unit-110",
+          "next": "unit-112",
+          "validation": [
+            "누적110에서 저장 클래스의 인덱스 준비/recent만 추가, 나머지 기존 구현 파일 보존",
+            "12,000경기·64선수×3상한의 독립 예상 결과·OR/UNION ALL·인덱스 전후·ANALYZE·NULL/UNIQUE 검사",
+            "SCRIPTED/SDL 변경/신규 타깃·2CTest·HTTP 저장/양쪽최근목록·재시작·기존DB 인덱스추가 검사",
+            "새 C++ 진단/조회 ASan/UBSan; SQLite 엔진은 Release C11 아카이브",
+            "실제 중복 소유 인덱스 정리·기존행/인증/복합PK 보존·메타 HTTP/SQLite38검사",
+            "타OS네이티브·수동GUI·실서비스 부하/디스크지연/전원장애는 미검증"
+          ],
+          "deliverable": "111-indexes: 양쪽최근목록·복합커버링인덱스·실행계획/작업량·기존DB 보존"
+        },
+        {
+          "id": "unit-112",
+          "title": "스키마 이관: 기존 데이터를 보존",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-112",
+          "previous": "unit-111",
+          "next": "unit-113",
+          "validation": [
+            "111 누적 파일 중 README/DESIGN/CMake/sqlite_results.h 외 보존",
+            "SCRIPTED/SDL 변경·신규5타깃, 각2CTest 및 독립migration_contract",
+            "새/구/v1/v2/미래/외부/불일치/손상관계/실패3지점/commit-busy/선택보존",
+            "실제 프로세스중단·저널복구·동시이관·SQL덤프/Backup API 복원·동일HTTP영수증",
+            "새 C++ ASan/UBSan, SQLite Release C11 아카이브",
+            "실제4종메타데이터읽기오류회귀 ASan/UBSan 및 NUL토큰이관회귀 포함39pytest",
+            "타OS네이티브·수동GUI·물리전원장애·실서비스부하 미검증"
+          ],
+          "deliverable": "112-migrations: 기존행보존·선택아이콘·단계이력·원자적이관·실패복구"
+        },
+        {
+          "id": "unit-113",
+          "title": "트랜잭션: 결과와 보상을 함께 확정",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-113",
+          "previous": "unit-112",
+          "next": "unit-114",
+          "validation": [
+            "112 누적 구현에 v3 지갑/지급내역 이관·원자 put·현재잔액/당시지급 조회 추가",
+            "SCRIPTED/SDL 변경/신규6타깃·각2CTest·이관/보상 계약 검사",
+            "예외4지점·실제SQL실패·B상한에서A포함rollback·COMMITbusy·draw·재시도·8독립연결·재열기",
+            "커밋전/후프로세스kill·부분상태비노출·구경기0정책·HTTP동시재전송/409/재시작",
+            "새 C++ ASan/UBSan; SQLite Release C11 아카이브",
+            "실제BP/XP/승패상한4회귀 수정전200오류재현·수정후전체43pytest",
+            "타OS네이티브·실서비스부하·물리전원장애·수동GUI 미검증"
+          ],
+          "deliverable": "113-transactions: v3지갑·경기별지급·양쪽원자보상·실패/응답유실복구"
+        },
+        {
+          "id": "unit-114",
+          "title": "멱등성: 같은 요청이 다시 도착하면",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-114",
+          "previous": "unit-113",
+          "next": "unit-115",
+          "validation": [
+            "113 누적 스키마/보상정책 보존, SqlResult에 최초지급 포함 및 v2응답/진단클라이언트 추가",
+            "SCRIPTED/SDL8타깃·각2CTest·이관/보상/멱등계약·커밋전후프로세스복구 회귀",
+            "전체9비키필드충돌·JSON순서/공백동등·후속경기/재시작뒤최초응답·v1호환/v2·정책0",
+            "큰uint64정체성·응답타입/중복/범위·부분지급내역거절·8HTTP동시재전송",
+            "새 C++ ASan/UBSan 및 실제중복조회I/O/독립2연결경합 수정전후검사",
+            "실제메타재빌드·기존43pytest통과",
+            "타OS네이티브·실서비스부하·물리전원장애·수동GUI 미검증"
+          ],
+          "deliverable": "114-idempotency: 최초정산응답·의미입력충돌·v1/v2호환·조회오류/경합"
+        },
+        {
+          "id": "unit-115",
+          "title": "RP·XP·BP: 서로 다른 목적의 수치",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-115",
+          "previous": "unit-114",
+          "next": "unit-116",
+          "validation": [
+            "SCRIPTED/SDL의 관련 SQLite·HTTP·이관·보상·멱등·진행 타깃 및 계약 검사",
+            "모든 레벨 임계값·RP 양끝/K 경계·음수 표시·중간 예외·XP 상한 롤백·재전송·v3 이관 검사",
+            "새 진행 C++와 실제 수치/DB 경계 ASan/UBSan 검사",
+            "실제 메타 서버 재빌드 및 43개 pytest 회귀",
+            "다른 OS 네이티브·수동 GUI·실서비스 부하 미검증"
+          ],
+          "deliverable": "115-progression: RP·XP 순수 계산/유도 레벨·v4 이관·BP와 원자적 정산"
+        },
+        {
+          "id": "unit-116",
+          "title": "익명 계정: ID와 자격 증명을 구분",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-116",
+          "previous": "unit-115",
+          "next": "unit-117",
+          "validation": [
+            "SCRIPTED/SDL 계정 및 기존 저장·정산 타깃, 이관/보상/멱등/진행 회귀",
+            "난수 실패·등록 각 단계 SQL 실패·ID/해시 충돌·hash-only DB·구 fixture 보호",
+            "HTTP 본인 조회·공개ID/해시 인증 거절·중복헤더/쿼리 거절·no-store·재시작",
+            "계정 C++와 실제 등록 실패 회귀 ASan/UBSan",
+            "실제 메타·계정 API 56pytest 통과, 네이티브 클라이언트9개 선택 제외",
+            "타OS네이티브·수동 GUI·공개서비스부하 미검증"
+          ],
+          "deliverable": "116-guest-account: v5 해시계정·원자등록·본인조회·비밀없는프로필"
+        },
+        {
+          "id": "unit-117",
+          "title": "아이콘 소유권: 서버에서 검사할 것",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-117",
+          "previous": "unit-116",
+          "next": "unit-118",
+          "validation": [
+            "SCRIPTED/SDL 관련 계정·상점·기존 정산 타깃 및 회귀",
+            "가격 경계·추가필드/타입/NUL 거절·소유권격리·ABORT/IGNORE 롤백·독립연결 동시차감1회",
+            "HTTP 카탈로그·본인목록·구매/선택·재전송·재시작",
+            "실제 동시중복차감/조회오류 수정전재현, 수정후 ASan/UBSan·무시된삽입/선택오류 회귀",
+            "실제 메타·계정 API56pytest 통과, native/initial_guest관련9개 선택제외",
+            "다른 OS 네이티브·수동 GUI·운영부하 미검증"
+          ],
+          "deliverable": "117-icon-ownership: 서버카탈로그·소유목록·원자구매·본인선택·독립연결경합"
+        },
+        {
+          "id": "unit-118",
+          "title": "JSON 경계: 문법·타입·중복 키",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-118",
+          "previous": "unit-117",
+          "next": "unit-119",
+          "validation": [
+            "SCRIPTED/SDL JSON 계약 타깃과 HTTP 거절 시 계정/잔액/소유권 보존",
+            "UTF-8·원시/이스케이프 NUL·중복/이스케이프 키·숫자폭·평면구조·바이트 경계",
+            "현재 파서16/17깊이·객체별 중복범위·응답NUL·ASan/UBSan",
+            "계정·구매·정산·진행 회귀와 실제 API58pytest 통과(native/initial_guest9선택제외)",
+            "타OS 네이티브·수동GUI·운영부하 미검증"
+          ],
+          "deliverable": "118-json-boundary: 문서·타입·도메인 분리, 전체바이트/NUL·중복키·UTF-8·정수범위·HTTP무변경"
+        },
+        {
+          "id": "unit-119",
+          "title": "HTTP 실패: 상태 코드·시간 제한·재시도",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-119",
+          "previous": "unit-118",
+          "next": "unit-120",
+          "validation": [
+            "SCRIPTED/SDL 관련 제출·HTTP 타깃/CTest",
+            "가짜시계의정확대기·예산경계·늦은대기·늦은성공·횟수상한·동일요청",
+            "loopback503/429/4xx/잘못된200·Retry-After·읽기timeout·DB동일영수증",
+            "HTTP계약ASan/UBSan 및 실제TLS지원컴파일·상태별호출횟수/로그비노출",
+            "수동GUI·실제TLS통신·다른OS네이티브·인터넷장애/부하미검증"
+          ],
+          "deliverable": "119-http-failure: 미확인/자동중단·동일요청·횟수/단계별시간/공유예산·대기힌트·진단비노출"
+        },
+        {
+          "id": "unit-120",
+          "title": "부트스트랩: 저장과 인증을 구분",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-120",
+          "previous": "unit-119",
+          "next": "unit-121",
+          "validation": [
+            "SCRIPTED/SDL 계정 부트스트랩·JSON·HTTP계약 빌드와 CTest",
+            "독립 프로세스 재시작·SQLite 1계정·Unicode폴더·손상·origin·협력잠금·오프라인 보존",
+            "실패주입 저장전/게시후·메모리키origin고정·동일키 재시도·신규발급횟수",
+            "ASan/UBSan·실제MetaClient TLS지원컴파일·정수범위/타입/로그/기존정산HTTP 회귀",
+            "실제 계정 native 및 initial_guest 회귀",
+            "수동GUI·다른OS 네이티브·실제 전원차단·TLS 통신 미검증",
+            "루트 WSS 전체 빌드는 Boost 헤더 부재로 실패; WSS 비활성 계정 probe+현재 meta 서버로 native/initial_guest 9회귀 통과"
+          ],
+          "deliverable": "120-account-bootstrap: origin에 묶인 저장 키·파일 상태·협력잠금·동일키 재저장·현재 인증 구분"
+        },
+        {
+          "id": "unit-121",
+          "title": "저장 불확실: 응답 유실을 성공/실패로 단정하지 않기",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-121",
+          "previous": "unit-120",
+          "next": "unit-122",
+          "validation": [
+            "SCRIPTED/SDL outbox·계정 회귀 타깃/CTest·기존 경기 제출 출력 보존",
+            "실제 SQLite 커밋 후 모든 응답 유실·새 프로세스 동일 요청 재개·1행/1회 보상·확인 뒤 HTTP무호출",
+            "선저장 장벽·게시후false·영수증 파일 실패·상태/원문/origin 불변·잠금·손상·중단 보존",
+            "ASan/UBSan 및 실제 src/main.cpp RP 반영문 추출 256상태 대조·수정 전 실패 재현",
+            "현재 Linux 게임 타깃 빌드 통과; 수동GUI·실제 전원차단·타OS·공개 TLS/운영큐 검증 없음"
+          ],
+          "deliverable": "121-save-uncertainty: 요청 선저장·재시작 멱등 전송·영수증 보관·원격 확인/로컬 확정 분리"
+        },
+        {
+          "id": "unit-122",
+          "title": "계정 화면: 서비스 호출과 UI 책임",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-122",
+          "previous": "unit-121",
+          "next": "unit-123",
+          "validation": [
+            "SCRIPTED/SDL 계정 UI·부트스트랩·보관함 CTest와 SDL 누적 게임 빌드",
+            "지연 API에서 프레임 진행·1회 발급·파일 권한·실제 SQLite 계정 재시작 인증",
+            "Gate 기반 중복 요청·ready-only 수집·동일 세션 키 재시도·미확인 발급 중단·작업 회수 수명",
+            "기존 메뉴 네 항목 회귀·상태/입력 정책·ASan/UBSan; 루트 게임 계정 화면 재빌드",
+            "수동 화면·실제 전원차단·Windows/macOS 네이티브 실행 검증 없음; 공개1~55 배포 변경 없음"
+          ],
+          "deliverable": "122-account-screen: 실제 메뉴 계정 패널·한 작업 비동기 서비스·같은 키/잠금 수명·읽기 전용 표시"
+        },
+        {
+          "id": "unit-123",
+          "title": "랭킹: 저장 결과를 조회 화면에 연결",
+          "state": "reviewed",
+          "referenceParts": [
+            10,
+            17,
+            18
+          ],
+          "lessonId": "lesson-123",
+          "previous": "unit-122",
+          "next": "unit-124",
+          "validation": [
+            "SCRIPTED/SDL 랭킹·계정 공통Job·부트스트랩·5항목 메뉴 계약과 누적SDL게임 빌드",
+            "실제SQLite 저장 전후/멱등 재전송·두서비스 동일파일 조회·정상빈목록·손상행503",
+            "중복키/수치타입/범위/순서/수신1024제한·UINT64표시조각·ASan/UBSan",
+            "실제Database 함수 수정전 중간오류 부분행 재현·수정후 실패 및 실제메타서버200/503 검사",
+            "수동GUI·타OS네이티브·운영규모부하·공개배포 검증 없음"
+          ],
+          "deliverable": "123-ranking: 저장된 RP 정렬 조회·오류/빈 결과 구분·공통 작업 소유자·실제 게임 랭킹 패널"
+        }
+      ]
+    },
+    {
+      "id": "module-10",
+      "title": "서버의 동시성 확장",
+      "units": [
+        {
+          "id": "unit-124",
+          "title": "먼저 측정: 스레드 모델의 실제 한계",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-124",
+          "previous": "unit-123",
+          "next": "unit-125",
+          "validation": [
+            "Linux SCRIPTED/SDL 측정·ThreadLink·흐름제어 계약과 누적 SDL 게임 빌드",
+            "1·4·16연결/1·5ms 각3회 실제 소켓 실행·원시 표본/분모 대조",
+            "drop 시간초과·변조 응답·입력 범위 오류·표본 및 실제 소켓 경로 전체 ASan/UBSan",
+            "수동GUI·Windows/macOS네이티브·운영규모 용량·원격 네트워크 검증 없음"
+          ],
+          "deliverable": "124-thread-measurement: 누적 소켓의 실제 에코·유휴/활동 CPU·지연 분포·미완료·닫힌 부하 관찰"
+        },
+        {
+          "id": "unit-125",
+          "title": "준비성과 완료: 두 I/O 모델",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-125",
+          "previous": "unit-124",
+          "next": "unit-126",
+          "validation": [
+            "Linux SCRIPTED/SDL 4개 계약·누적 SDL 게임 빌드",
+            "실제 loopback 준비성/부분 완료/재제출/취소/EOF 시나리오20회 반복",
+            "전체 새 I/O 소스 ASan/UBSan·실제 소켓 수행",
+            "현재 IOCP 소멸자 추출+행동 대역: 수정 전 조기 해제, 수정 후 timeout/70회wake/미제거연산/포트오류/빈종료",
+            "Windows/macOS 네이티브·실제 IOCP/io_uring 실행·수동GUI·공개배포 검증 없음"
+          ],
+          "deliverable": "125-io-models: 실제 준비성 대기·작업자 기반 제출 수신·부분 프레임·취소/완료·저장소 회수"
+        },
+        {
+          "id": "unit-126",
+          "title": "Reactor 계약: 수명과 콜백",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-126",
+          "previous": "unit-125",
+          "next": "unit-127",
+          "validation": [
+            "Linux SCRIPTED/SDL 각3CTest·누적 SDL 게임 빌드",
+            "실제 등록·배치 제거·콜백 수명·wake 계약20회 반복",
+            "새 소켓/Reactor/콜백 ASan·UBSan",
+            "실제 epoll wake 본문 대역의 수정 전후 EINTR/EAGAIN/errno 회귀 및 Linux reactor_test",
+            "Windows/macOS 네이티브·수동GUI·공개배포 검증 없음"
+          ],
+          "deliverable": "126-reactor-contract: 실제 다중 준비성·등록 ID·콜백 수명·제거/재진입·깨우기"
+        },
+        {
+          "id": "unit-127",
+          "title": "epoll: 등록·관측·제거",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-127",
+          "previous": "unit-126",
+          "next": "unit-128",
+          "validation": [
+            "Linux SCRIPTED/SDL 각5CTest·누적 SDL 게임 빌드",
+            "epoll 공통 콜백/등록 계약과 실제 kernel LT/ET/ONESHOT/HUP 검사20회 반복",
+            "ADD/MOD/DEL 실패 주입 후 실제 관찰·수신 후 EOF·역방향 전송·100wake 병합",
+            "전체 새 epoll/소켓/콜백 코드 ASan/UBSan",
+            "현재 root poll 추출: 수정 전100재충전 추적·중단미재시도, 수정 후한성공읽기·EINTR재시도 및 실제Linux reactor_test",
+            "Windows/macOS 네이티브·수동GUI·공개배포 검증 없음"
+          ],
+          "deliverable": "127-epoll: Linux 실제 epoll/eventfd·LT·등록/정지/재개·실패 후 상태·공통 콜백 계약"
+        },
+        {
+          "id": "unit-128",
+          "title": "IOCP: 비동기 요청과 완료 패킷",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-128",
+          "previous": "unit-127",
+          "next": "unit-129",
+          "validation": [
+            "Linux SCRIPTED/SDL 각6CTest·누적 SDL 게임 빌드",
+            "실제 iocp_receive.cpp를 API 행동 대역과 컴파일하여20회 ASan/UBSan 수명 검사",
+            "포트 오류 보존 시나리오만 의도적 누수 검사를 끄고 주소 유지 확인·정상 시나리오 누수 검사 유지",
+            "MinGW-w64 GCC13 Windows x64 실제 iocp_probe.exe와 현재 reactor_test.exe 링크·PE 확인",
+            "현재 완료 상태 판정 수정 전후 대역·기존 IOCP 전체종료 수명 회귀 통과",
+            "실제 Windows/Wine 실행·수동GUI·공개배포 검증 없음"
+          ],
+          "deliverable": "128-iocp: 실제 Windows WSARecv·완료 포트·패킷 회수·취소/저장소 수명·프레임 프로브"
+        },
+        {
+          "id": "unit-129",
+          "title": "타이머 힙: 다음 일을 정렬",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-129",
+          "previous": "unit-128",
+          "next": "unit-130",
+          "validation": [
+            "Linux SCRIPTED/SDL 각9CTest·누적 SDL 게임 빌드",
+            "30000 상태 전이 기준 모델 ASan/UBSan",
+            "실제/학습 헤더 할당 실패와 각각20000개 넓은 정수 시간 기준값 UBSan",
+            "현재 loop_primitives 회귀·실제 tetris_relay_reactor 빌드",
+            "MinGW Windows 타이머 프로브/계약 검사 교차 링크; Windows 실행 없음",
+            "수동GUI·스크린샷·공개배포 없음",
+            "실제 loop_primitives_test도 MinGW Windows PE 링크; 네이티브 실행은 하지 않음"
+          ],
+          "deliverable": "129-timers: 만기 힙·지연 무효화·시간 사전 포화·실제 poll/epoll 대기 루프"
+        },
+        {
+          "id": "unit-130",
+          "title": "블로킹 오프로드: 루프를 멈추지 않기",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-130",
+          "previous": "unit-129",
+          "next": "unit-131",
+          "validation": [
+            "SCRIPTED/SDL 각12CTest·누적 SDL 게임 빌드",
+            "실제 poll/epoll 프레임·만기·늦은 결과 폐기",
+            "계약20회 ASan/UBSan 및 ThreadSanitizer 통과",
+            "실제/학습 헤더 할당 실패·무할당 완료 공개·pthread 생성 실패 주입",
+            "현재 loop_primitives 회귀와 tetris_relay_reactor 빌드",
+            "MinGW 프로브/계약/현재 loop_primitives Windows 교차 링크; 실제 Windows 실행 없음",
+            "수동GUI·스크린샷·공개배포 없음",
+            "실제 post_result/on_result_saved 메서드와 서비스/송신 대역: 용량 거절·작업 예외·늦은 결과 ASan/UBSan"
+          ],
+          "deliverable": "130-offload: 수락 전체 상한·작업/결과 큐·실제 소켓/타이머 루프·실패·회수/종료 수명"
+        },
+        {
+          "id": "unit-131",
+          "title": "상태 머신: 스레드의 지역 상태를 옮기기",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-131",
+          "previous": "unit-130",
+          "next": "unit-132",
+          "validation": [
+            "SCRIPTED/SDL 각15CTest·누적 SDL tetris 빌드",
+            "상태 계약 및 실제 poll/epoll 프로브 ASan/UBSan",
+            "모든 두 조각 분할·잔여 보존·잘못된/중복/종료 후 인증·형식 오류·ID 소진",
+            "실제 Room/close/매칭 메서드: 7개 수정 전 실패 재현·수정 후 ASan/UBSan",
+            "실제 resume_auth 메서드: 수정 전 중복 실패 응답의 종료·수정 후 중복/대상 삭제/실패 검사",
+            "현재 loop_primitives CTest·최종 tetris_relay_reactor 빌드",
+            "MinGW Windows 계약/프로브 교차 링크; 실제 Windows 실행 없음",
+            "현재 소스 심볼·인라인18스니펫·Part 원문 발췌 대조",
+            "수동GUI·스크린샷·공개배포 없음"
+          ],
+          "deliverable": "131-state-machine: 연결별 상태·인증 후 잔여 재개·두 READY 전환·중첩 종료 수명·ID 소진"
+        },
+        {
+          "id": "unit-132",
+          "title": "새 백프레셔: 단일 루프에서도 큐는 찬다",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-132",
+          "previous": "unit-131",
+          "next": "unit-133",
+          "validation": [
+            "SCRIPTED/SDL 각20CTest·누적 SDL tetris 빌드",
+            "큐 계약·실제 poll/epoll 정상/정체 프로브 ASan/UBSan",
+            "8스레드 공유 예약 ThreadSanitizer·SIZE_MAX/실패 out 보존·부분 송신/링 wrap/폐기",
+            "실제 메서드12경로:수정 전11경계 실패·정상FIFO,수정 후 전부통과",
+            "기존 Room/close 실제 메서드8경로·중첩 종료 수정 전 재현/수정 후 통과",
+            "실제 tetris_relay_reactor 운영회귀5pytest:tx반환/양방향정체/일방정체/느린정상수신/반복pause속도제한",
+            "최종 loop_primitives CTest·tetris_relay_reactor 빌드",
+            "MinGW Windows 계약/프로브 교차 링크; 실제 Windows 실행 없음",
+            "현재 소스 심볼·인라인14스니펫·Part 원문 발췌 대조",
+            "수동GUI·스크린샷·공개배포 없음"
+          ],
+          "deliverable": "132-backpressure: 제한 FIFO·high/low·CAS 선예약·실제 양방향 릴레이·역방향 유지·배수/정체/폐기"
+        },
+        {
+          "id": "unit-133",
+          "title": "샤딩: 연결이 아니라 경기의 소유권",
+          "state": "reviewed",
+          "referenceParts": [
+            14
+          ],
+          "lessonId": "lesson-133",
+          "previous": "unit-132",
+          "next": "unit-134",
+          "validation": [
+            "SCRIPTED/SDL 각23CTest·누적 SDL tetris 빌드",
+            "우편함4생산자2000항목·종료경합·고장 등록/해제·만기 보존 계약 검사",
+            "실제4경기/2작업스레드 poll·epoll 전달 프로브 ASan/UBSan와 TSan",
+            "실제 RelayLoop 계측/Reactor 대역10경로:수정 전9경계 실패·정상 인계 대조,수정 후10통과; 의존 라이브러리 객체는 기존 빌드 사용",
+            "실제 서버 pytest3:두 샤드4경기 READY+INPUT 잔여/양방향 순서/카운터 반환·loops2정책·룸 생성/참가/READY",
+            "기존 송신/백프레셔12경로·Room 중첩종료8경로·loop_primitives 회귀",
+            "현재 tetris_relay_reactor 빌드·MinGW Windows 실습 계약/프로브 교차 링크; Windows 실행 없음",
+            "현재 소스 심볼·인라인16스니펫·Part 발췌·Markdown27 대조",
+            "누적 state_machine_probe의 기존 enum/정수 조건식 경고1개 유지; 새 샤딩/교차 빌드 경고 없음",
+            "수동GUI·스크린샷·공개배포 없음"
+          ],
+          "deliverable": "133-sharding: 제한 우편함·경기 소유권 인계·루프별 등록/실패 철회·절대 만기·두 샤드 실제 전달/종료"
+        }
+      ]
+    },
+    {
+      "id": "module-11",
+      "title": "공개 서비스의 신뢰 경계",
+      "units": [
+        {
+          "id": "unit-134",
+          "title": "위협 모델: 클라이언트가 거짓말할 때",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-134",
+          "previous": "unit-133",
+          "next": "unit-135",
+          "validation": [
+            "SCRIPTED/SDL 각26CTest·누적 SDL tetris 빌드",
+            "고정 주체·허용 타입255거절·형식/경기/창·배치 무변경·재시도·모든 분할 검사",
+            "실제 TCP poll/epoll 게이트 프로브 및 ASan/UBSan 계약/프로브 통과",
+            "실제 thread/reactor relay 각3pytest:서버 전용4타입 차단+후속 정상 INPUT,상충/공모 신고 Incomplete·RP무변경·meta미호출",
+            "현재 두 relay·ranked_game_test 빌드와 ranked_game CTest 통과",
+            "MinGW Windows 계약/프로브 교차 링크; Windows 네이티브 실행 없음",
+            "기존 state_machine_probe enum/정수 조건식 경고 각Linux빌드1개 유지; 신규/교차 코드 경고 없음",
+            "인라인12스니펫·현재소스 심볼·Part 코드 발췌·로컬 링크 대조",
+            "수동GUI·스크린샷·공개배포 없음"
+          ],
+          "deliverable": "134-threat-model: 신뢰 경계·고정 연결 주체·입력 권한/형식/경기 검사·배치 원자성·실제 소켓 거절/정상 대조"
+        },
+        {
+          "id": "unit-135",
+          "title": "HTTPS와 게임 전송: 서로 다른 연결",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-135",
+          "previous": "unit-134",
+          "next": "unit-136",
+          "validation": [
+            "SCRIPTED/SDL 각6CTest와 누적 SDL tetris 빌드; 신규 빌드 경고 없음",
+            "실제 HTTPS 프로브 각9구성:정상 DNS/IP·SAN충돌·CN만·이름 불일치·미신뢰 CA·만료·평문 서버·리다이렉트",
+            "현재 MetaClient 수정 전 SAN불일치/CN일치·CN-only 허용 HTTP1회 재현",
+            "수정 후 현재 MetaClient POST/GET 독립 검사:잘못된 인증서 HTTP0·정상 DNS/IP 응답·리다이렉트 미추적",
+            "현재 HTTPS 미지원 빌드의 HTTPS origin 거절·평문 자동 대체 없음",
+            "연결 정책·DNS/IP SAN/와일드카드/NULL/NUL 계약 ASan/UBSan",
+            "현재 tls_identity·ranked_game·json_input CTest3과 두 relay·실제 tetris 클라이언트 빌드",
+            "MinGW 정책 계약 교차 링크; Windows HTTPS/네이티브 실행 없음",
+            "인라인7스니펫·현재 소스 심볼·Part 발췌·Markdown/사이트 자동 검수",
+            "수동GUI·스크린샷·공개배포 없음"
+          ],
+          "deliverable": "135-secure-connections: 두 연결 계획·실제 HTTPS·체인/peer/SAN 이름 검증·인증서/리다이렉트/평문 대체 반례"
+        },
+        {
+          "id": "unit-136",
+          "title": "WSS: TLS 종단과 터널 범위",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-136",
+          "previous": "unit-135",
+          "next": "unit-137",
+          "validation": [
+            "SCRIPTED 누적 CMake 구성·message_stream/connection_policy CTest 통과; SDL tetris/message_stream/wss_roundtrip 빌드",
+            "실제 WSS split/bundle/fragment × native/Origin 왕복 프레임·payload 일치",
+            "경로·쿼리·빈/null/미허용/중복 Origin은 내부 TCP 연결 전 거절",
+            "분할 메시지 사이 Ping/Pong 분리, text·unmasked·초과 메시지는 payload 전달 전 거절",
+            "현재 WSS 수정 전 CN-only 허용 재현, 수정 후 SAN 필수로 내부 TCP 연결 전 거절",
+            "현재 네이티브 정상 DNS/IP·SAN충돌·CN-only·이름불일치·미신뢰 CA·만료·와일드카드 반례 대조",
+            "NUL URL 거절과 출력 인수 보존, 어댑터 모든 두 절단 위치·최대 프레임·메시지 상한·prefix오류·잘린 EOF·sink예외 ASan/UBSan",
+            "공용 테스트 CA의 keyUsage 보강 후 HTTPS GET/POST·리다이렉트·평문대체 회귀 통과",
+            "Linux GNU15/Boost1.83/OpenSSL3.5; Windows/macOS 네이티브·전체 실제 경기·외부 서비스 미검증",
+            "수동 화면·스크린샷·공개 배포 없음"
+          ],
+          "deliverable": "136-wss-tunnel: 메시지/게임 프레임 연결·실제 WSS 분할 왕복·TLS 종단/경로/출처/타입 경계·현재 SAN 정책 보강"
+        },
+        {
+          "id": "unit-137",
+          "title": "일회용 입장권: 발급·소비·만료",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-137",
+          "previous": "unit-136",
+          "next": "unit-138",
+          "validation": [
+            "SCRIPTED 및 SDL 구성의 admission_ticket_contract/demo CTest 통과, SDL 누적 tetris 빌드",
+            "학습 저장소와 현재 GameTickets의 ASan/UBSan: 동시 소비·만료 경계·교체/충돌/용량·실패 시 보존 통과",
+            "현재 메타 서비스와 game_tickets_test Release 빌드 및 CTest 통과",
+            "실제 HTTP/SQLite 검사: 내부 secret·목적 분리·원자 소비·재발급·발급 예산·응답 본문 폐기 후 재시도·같은 DB 재시작·키 교체 후 epoch 폐기, 선택 pytest 5건 통과",
+            "수정 전 재발급 충돌 시 기존 유효 입장권 손실 재현; 수정 후 두 계정의 자격 보존",
+            "현재 심볼·인라인 C++/CMake 발췌 10건 및 누적 파일 보존 검사 통과",
+            "Linux GNU15/OpenSSL3.5; Windows/macOS 네이티브·실제 전체 경기·다중 메타 분산 소비·할당 실패 주입 미검증",
+            "수동 화면·스크린샷·공개 배포 없음"
+          ],
+          "deliverable": "137-admission-tickets: 실패 시 자격 보존·원자적 단일 소비·시간/용량/epoch 경계·실제 API 재시도와 재시작"
+        },
+        {
+          "id": "unit-138",
+          "title": "비동기 TLS: 취소와 객체 수명",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-138",
+          "previous": "unit-137",
+          "next": "unit-139",
+          "validation": [
+            "SCRIPTED async_context_contract CTest 통과; 실제 async WSS와 문맥 계약 ASan/UBSan 통과",
+            "SDL 누적 tetris·async_wss_probe·async_context_contract 빌드 및 CTest 통과",
+            "현재 gateway를 통한 바이트 왕복·resolve/connect/TLS/Upgrade/write/read 단계별 취소·반복 취소 통과",
+            "TLS ClientHello·Upgrade 요청·backend 수신을 확인한 뒤 stall→전체 마감; wrong echo·SAN 불일치·연결 거절의 오류와 해제 검증",
+            "모든 실제 async 사례에서 최종 기록1·늦은 완료·weak_ptr 만료·소멸 관찰·관계없는 공유 문맥 타이머 진행 확인",
+            "현재 WssClient pending read/write에서 반복 close, TcpSocket 복사본과 마지막 소유자 분리, worker join 뒤 해제 검사 통과",
+            "인라인11·현재 심볼·누적 파일 보존·Part 발췌 검사 통과",
+            "GNU15 Release에서 Boost1.83 resolver 결과 생성 헤더의 stringop-overflow 경고가 발생. 경고를 억제하지 않았으며 실제 loopback 경로의 ASan/UBSan 이상 없음; 외부 헤더 전 경로 무결성을 판정하지 않음",
+            "Linux/OpenSSL3.5; Windows/macOS 네이티브·멀티 run 스레드·모든 DNS 취소 구현·전체 실제 경기 미검증",
+            "수동 GUI·공개 배포·런타임 소스 변경 없음"
+          ],
+          "deliverable": "138-async-tls: 실제 비동기 WSS·단계 취소/마감·버퍼 보존·늦은 완료·공유 루프 진행·객체 해제"
+        },
+        {
+          "id": "unit-139",
+          "title": "CSPRNG와 해시: 예측·노출·검색의 차이",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-139",
+          "previous": "unit-138",
+          "next": "unit-140",
+          "validation": [
+            "실습/현재 자격 helper ASan/UBSan, SCRIPTED/SDL, 계정 DB와 HTTP 경계 회귀",
+            "형식·목적·조회·직접 비교·실패 주입·확률 설명·소스 발췌 검토"
+          ],
+          "deliverable": "139-credential-crypto: CSPRNG 실패·hex·목적 해시·중복 보존 인덱스·비밀 비교"
+        },
+        {
+          "id": "unit-140",
+          "title": "토큰 이관: 평문을 지우는 전체 과정",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-140",
+          "previous": "unit-139",
+          "next": "unit-141",
+          "validation": [
+            "논리 롤백·강제 종료·WAL reader·재시작·외부 사본 실험",
+            "실제 서버 다중/최대ID·NUL/BLOB·scrub 재시도 회귀, ASan/UBSan·발췌 검토"
+          ],
+          "deliverable": "140-credential-migration: ID 보존 keyset 변환·두 완료 기록·WAL 정리·프로세스 중단 복구"
+        },
+        {
+          "id": "unit-141",
+          "title": "회전·폐기·복구: 하나의 원자적 교체",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-141",
+          "previous": "unit-140",
+          "next": "unit-142",
+          "validation": [
+            "누적 SCRIPTED/SDL·독립 연결·예외 롤백·현재 서버 HTTP 회귀 통과",
+            "최신 영수증·재사용 거절·계정 보존·세대 검사 통과"
+          ],
+          "deliverable": "같은 계정에서 접근·복구 자격과 인증 세대를 원자적으로 교체하고 최신 동일 요청을 재확인"
+        },
+        {
+          "id": "unit-142",
+          "title": "복구 저널: 응답을 잃어도 다시 시도",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-142",
+          "previous": "unit-141",
+          "next": "unit-143",
+          "validation": [
+            "SCRIPTED/SDL·실제 HTTP/파일/중단 후 새 프로세스·ASan/UBSan 통합 행렬 통과",
+            "현재 native 클라이언트 손상 저널 보존 수정·기존 복구 회귀 통과"
+          ],
+          "deliverable": "전송 전 비밀 저널·실제 HTTP 동일 재전송·복구/접근 파일 마무리·프로세스 재시작·부트스트랩 차단"
+        },
+        {
+          "id": "unit-143",
+          "title": "서버 시뮬레이션: 신고 대신 재현 판정",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-143",
+          "previous": "unit-142",
+          "next": "unit-144",
+          "validation": [
+            "SCRIPTED/SDL·규칙 직접 비교·poll/epoll 실제 TCP·ASan/UBSan 통과",
+            "현재 두 relay/meta 실제 판정·보상 경계14회귀 통과"
+          ],
+          "deliverable": "서버 초기 상태·고정 주체·공통 입력으로 누적 Duel을 진행하고 완결된 경기만 저장 레코드로 연결"
+        },
+        {
+          "id": "unit-144",
+          "title": "입력 검증: 비트·순서·양·진행 시간",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-144",
+          "previous": "unit-143",
+          "next": "unit-145",
+          "validation": [
+            "SCRIPTED/SDL·정수 기준 계산·시간 주입·실제 TCP·ASan/UBSan",
+            "현재 RankedGame 경계와 두 relay/meta 잘못된 입력 검사"
+          ],
+          "deliverable": "서버 시간 주입·정수 허용량·권한과 입력 창을 결합하여 수용 뒤 규칙 진행"
+        },
+        {
+          "id": "unit-145",
+          "title": "두 릴레이: 같은 판정과 다른 실행 소유권",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-145",
+          "previous": "unit-144",
+          "next": "unit-146",
+          "validation": [
+            "두 구성·실제 스레드/SQLite·TSan/ASan/UBSan 통과",
+            "현재 두 relay/meta 동시 결과 제출과 판정/보상20통합 통과"
+          ],
+          "deliverable": "공통 판정/선점을 잠금과 단일 루프 어댑터로 실행하고 늦은 완료·종료·실제 저장을 검사"
+        },
+        {
+          "id": "unit-146",
+          "title": "판정 사유: 무효·미완료·저장 불확실",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-146",
+          "previous": "unit-145",
+          "next": "unit-147",
+          "validation": [
+            "SCRIPTED/SDL 각6CTest 및 학습 contract/TCP poll·epoll ASan/UBSan 통과",
+            "현재 reactor partial/EAGAIN 수정 전3실패→수정 후3통과, 실제meta/SQLite23통합 통과",
+            "현재 reactor ASan/UBSan12통합·종료stderr 검사, peer-close3·명시적 현재 바이너리 tx-budget1 통과"
+          ],
+          "deliverable": "판정·저장 사유와 프로필 적용을 구분하고 FIFO 결과 통지·유한 배수 종료를 구현"
+        },
+        {
+          "id": "unit-147",
+          "title": "봇 BP: 결과와 보상의 서버 검증",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-147",
+          "previous": "unit-146",
+          "next": "unit-148",
+          "validation": [
+            "SCRIPTED/SDL에서 실제 Duel→SQLite bot contract/probe 및 기존 migration/reward contract·notice CTest 통과",
+            "학습 bot contract와 새 프로세스 동일DB 재청구 ASan/UBSan 통과(SQLite archive 비계측)",
+            "현재 meta+SQLite+실제 봇 기록 HTTP6사례 통과: 소유자·조기 제출·소모·재시도·일일 부분/0 지급·지갑 오류 롤백 후 재시도"
+          ],
+          "deliverable": "서버 챌린지와 공식 봇 재현으로 승리를 확인하고 공용 지갑·일일 영수증을 원자적으로 저장"
+        },
+        {
+          "id": "unit-148",
+          "title": "남은 어뷰징: 계정 농사·담합·고의 패배",
+          "state": "reviewed",
+          "referenceParts": [
+            12,
+            16,
+            17,
+            18
+          ],
+          "lessonId": "lesson-148",
+          "previous": "unit-147",
+          "next": "unit-149",
+          "validation": [
+            "SCRIPTED/SDL 실제 규칙 결과→SQLite→READONLY 관찰·기존 봇 보상 계약 통과",
+            "관찰 contract/reader ASan/UBSan 및 전 테이블 행 불변·같은키 재실행 통과(SQLite archive 비계측)",
+            "현재 meta의 같은 상대 새UUID 지급·위조 전달 헤더 거절·신뢰 proxy 오른쪽주소3HTTP 통과"
+          ],
+          "deliverable": "규칙상 유효한 경기의 제한 표본을 읽기 전용으로 집계하고 관찰·제재·경제 정책과 오탐 범위를 구분"
+        }
+      ]
+    },
+    {
+      "id": "module-12",
+      "title": "학습하는 봇",
+      "units": [
+        {
+          "id": "unit-149",
+          "title": "바인딩: 규칙을 Python에서 다시 쓰지 않는 이유",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-149",
+          "previous": "unit-148",
+          "next": "unit-150",
+          "validation": []
+        },
+        {
+          "id": "unit-150",
+          "title": "관측: 보드 상태를 텐서로",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-150",
+          "previous": "unit-149",
+          "next": "unit-151",
+          "validation": []
+        },
+        {
+          "id": "unit-151",
+          "title": "행동: 매 틱 입력과 최종 배치",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-151",
+          "previous": "unit-150",
+          "next": "unit-152",
+          "validation": []
+        },
+        {
+          "id": "unit-152",
+          "title": "보상: 점수와 정책의 목표",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-152",
+          "previous": "unit-151",
+          "next": "unit-153",
+          "validation": []
+        },
+        {
+          "id": "unit-153",
+          "title": "Gym 환경: reset·step·종료",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-153",
+          "previous": "unit-152",
+          "next": "unit-154",
+          "validation": []
+        },
+        {
+          "id": "unit-154",
+          "title": "두 보드 환경: 상대와 함께 진행",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-154",
+          "previous": "unit-153",
+          "next": "unit-155",
+          "validation": []
+        },
+        {
+          "id": "unit-155",
+          "title": "휴리스틱: 비교할 기준 정책",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-155",
+          "previous": "unit-154",
+          "next": "unit-156",
+          "validation": []
+        },
+        {
+          "id": "unit-156",
+          "title": "정책 네트워크: 입력 형상과 출력 의미",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-156",
+          "previous": "unit-155",
+          "next": "unit-157",
+          "validation": []
+        },
+        {
+          "id": "unit-157",
+          "title": "PPO: 수집·업데이트·평가를 구분",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-157",
+          "previous": "unit-156",
+          "next": "unit-158",
+          "validation": []
+        },
+        {
+          "id": "unit-158",
+          "title": "학습 체크포인트: 다시 시작할 정보",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-158",
+          "previous": "unit-157",
+          "next": "unit-159",
+          "validation": []
+        },
+        {
+          "id": "unit-159",
+          "title": "Colab 실행: smoke에서 긴 학습으로",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-159",
+          "previous": "unit-158",
+          "next": "unit-160",
+          "validation": []
+        },
+        {
+          "id": "unit-160",
+          "title": "모델 zoo: 난이도와 실험 기록",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-160",
+          "previous": "unit-159",
+          "next": "unit-161",
+          "validation": []
+        },
+        {
+          "id": "unit-161",
+          "title": "ONNX export: 학습 상태와 배포 계약",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-161",
+          "previous": "unit-160",
+          "next": "unit-162",
+          "validation": []
+        },
+        {
+          "id": "unit-162",
+          "title": "C++ 추론: Env·Session·텐서 수명",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-162",
+          "previous": "unit-161",
+          "next": "unit-163",
+          "validation": []
+        },
+        {
+          "id": "unit-163",
+          "title": "입력 전개: 배치를 사람처럼 조작",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-163",
+          "previous": "unit-162",
+          "next": "unit-164",
+          "validation": []
+        },
+        {
+          "id": "unit-164",
+          "title": "속도 조절: 빠른 추론과 빠른 손",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-164",
+          "previous": "unit-163",
+          "next": "unit-165",
+          "validation": []
+        },
+        {
+          "id": "unit-165",
+          "title": "캐릭터: 정책·일러스트·아이콘을 분리",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-165",
+          "previous": "unit-164",
+          "next": "unit-166",
+          "validation": []
+        },
+        {
+          "id": "unit-166",
+          "title": "fallback: 실패를 숨기지 않는 연습 모드",
+          "state": "outline",
+          "referenceParts": [
+            8,
+            9,
+            15
+          ],
+          "lessonId": "lesson-166",
+          "previous": "unit-165",
+          "next": "unit-167",
+          "validation": []
+        }
+      ]
+    },
+    {
+      "id": "module-13",
+      "title": "배포와 유지보수",
+      "units": [
+        {
+          "id": "unit-167",
+          "title": "빌드 타깃: 클라이언트·relay·meta·학습",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-167",
+          "previous": "unit-166",
+          "next": "unit-168",
+          "validation": []
+        },
+        {
+          "id": "unit-168",
+          "title": "외부 의존성: 선택 기능과 패키징",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-168",
+          "previous": "unit-167",
+          "next": "unit-169",
+          "validation": []
+        },
+        {
+          "id": "unit-169",
+          "title": "Linux 서버: 실행 순서와 포트 경계",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-169",
+          "previous": "unit-168",
+          "next": "unit-170",
+          "validation": []
+        },
+        {
+          "id": "unit-170",
+          "title": "Windows 이전: 경로·소켓·파일 권한",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-170",
+          "previous": "unit-169",
+          "next": "unit-171",
+          "validation": []
+        },
+        {
+          "id": "unit-171",
+          "title": "비공개 파일: 권한과 원자적 교체",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-171",
+          "previous": "unit-170",
+          "next": "unit-172",
+          "validation": []
+        },
+        {
+          "id": "unit-172",
+          "title": "종료: SIGPIPE·소켓 소유권·워커 정리",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-172",
+          "previous": "unit-171",
+          "next": "unit-173",
+          "validation": []
+        },
+        {
+          "id": "unit-173",
+          "title": "백업과 복구: DB·키·설정의 일관성",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-173",
+          "previous": "unit-172",
+          "next": "unit-174",
+          "validation": []
+        },
+        {
+          "id": "unit-174",
+          "title": "릴리스 검사: 단위·통합·GUI·부하를 구분",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-174",
+          "previous": "unit-173",
+          "next": "unit-175",
+          "validation": []
+        },
+        {
+          "id": "unit-175",
+          "title": "아키텍처 읽기: 변경 위치와 SOLID의 한계",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-175",
+          "previous": "unit-174",
+          "next": "unit-176",
+          "validation": []
+        },
+        {
+          "id": "unit-176",
+          "title": "최종 실습: 새 콘텐츠를 안전하게 추가",
+          "state": "outline",
+          "referenceParts": [
+            12,
+            13,
+            15
+          ],
+          "lessonId": "lesson-176",
+          "previous": "unit-175",
+          "next": "unit-177",
+          "validation": []
+        },
+        {
+          "id": "unit-177",
+          "title": "전체 구현 복습과 다음 프로젝트 설계",
+          "state": "outline",
+          "referenceParts": [
+            13,
+            15,
+            18
+          ],
+          "kind": "review",
+          "lessonId": "lesson-177",
+          "previous": "unit-176",
+          "next": null,
+          "validation": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,423 @@
+{
+  "id": "lesson-87",
+  "title": "부분 송신: 끝까지 보내기의 실패 조건",
+  "shortTitle": "진행량·WouldBlock·마감시간·취소",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 실제 진행량으로 남은 바이트를 보내지만 송신 종료 정책은 단순합니다.",
+  "finish": "완료: 부분 실패의 진행량을 보존하고 전체 마감시간·취소·오류를 구별해 송신을 종료합니다.",
+  "objective": "수락과 상대 처리 완료를 구별하고, 논블로킹 전제·진행 불변식·고정 마감시간을 갖춘 송신 정책을 구현하고 검증합니다.",
+  "prerequisites": [
+    "실제 진행량과 남은 바이트 범위",
+    "프레임·payload·소켓 계층의 구분",
+    "시간을 재는 단조 시계와 소켓 소유권"
+  ],
+  "recap": {
+    "points": [
+      "직렬화는 필드 폭과 바이트 순서를 명시합니다.",
+      "메시지 후보는 전체 검증 뒤 출력에 반영합니다.",
+      "프레임을 보낸 뒤 응답의 종류·내용·종료도 확인합니다."
+    ],
+    "bridge": "소켓의 부분 성공은 메모리 후보처럼 취소할 수 없으므로 진행량과 실패 정책을 함께 설계합니다."
+  },
+  "sections": [
+    {
+      "title": "실패는 아무것도 보내지 않았다는 뜻일까",
+      "body": "여섯 바이트 ABCDEF를 보내는 중 첫 send가 2를 반환하고 다음 시도에서 연결 오류가 났다고 합시다. AB는 이미 로컬 전송 계층에 수락되었습니다. 함수가 실패했다고 해서 그 두 바이트를 취소할 수는 없습니다. 원래 위치에서 다시 시작하면 같은 연결에 ABABCDEF가 들어갈 수 있습니다.\n\n이번에는 부분 진행량과 종료 사유를 함께 남기는 송신 함수를 만듭니다. WouldBlock·인터럽트·전송 오류를 구별하고, 전체 마감시간과 취소 요청을 재시도마다 확인합니다. 직렬화 클라이언트의 송신 부분에 연결하되 프레임·payload·게임 규칙은 유지합니다.\n\n메모리 안의 직렬화 후보는 실패 시 공개하지 않을 수 있었습니다. 소켓으로 이미 넘긴 바이트는 외부에서 관찰될 수 있는 효과입니다. 이 차이가 결과 타입과 실패 정책을 결정합니다.",
+      "codes": [
+        {
+          "label": "실패 시 남아 있는 사실",
+          "language": "text",
+          "text": "전체 요청: ABCDEF\n첫 시도:  AB 수락 → accepted=2\n다음 시도: 전송 오류\n\n결과: error, accepted=2\n이 결과로 알 수 없는 것: 상대가 AB를 언제 읽었는지, 요청을 처리했는지"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_send_some",
+        "invariant": "중간 실패 전의 수락된 접두사 길이를 보존한다.",
+        "mayDiffer": "실제 함수는 bool과 out_sent를 사용한다. 기준 함수는 종료 사유와 진행량을 하나의 결과로 묶는다."
+      }
+    },
+    {
+      "title": "수락·전달·처리 완료를 구분한다",
+      "body": "send가 반환한 양수 길이는 호출자가 다음 바이트 위치로 이동할 근거입니다. 상대 프로그램의 recv나 게임 로직이 실행되었다는 응답은 아닙니다. 운영체제의 전송 공간, TCP의 전달, 상대 애플리케이션의 처리는 서로 다른 단계입니다.\n\n따라서 기준 결과의 이름을 sent 대신 accepted로 둡니다. 전체 바이트가 수락되면 complete를 반환하지만, 직렬화 클라이언트는 여전히 TYPE2 응답의 내용과 종료 조건을 확인해야 합니다. 애플리케이션 의미에 맞는 확인을 별도로 둡니다.\n\n[Linux send의 반환 계약](https://man7.org/linux/man-pages/man2/send. 2.html)과 [Winsock send의 주의사항](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-send)에서도 로컬 호출의 성공을 상대 수신 성공으로 해석하지 않도록 구분합니다.",
+      "codes": [
+        {
+          "label": "어떤 관찰이 어떤 사실을 지지하는가",
+          "language": "text",
+          "text": "send의 양수 반환       → 로컬에서 그만큼 수락됨\n전체 send 루프 complete → 요청 전체가 로컬에서 수락됨\n일치하는 echo 응답     → 상대 프로그램이 그 내용을 읽고 응답함\n게임 상태/보상 확정    → 해당 프로토콜의 별도 판정과 확인 필요"
+        }
+      ]
+    },
+    {
+      "title": "한 번의 시도와 전체 작업의 결과를 나눈다",
+      "body": "try_send는 한 번의 논블로킹 OS 호출을 SendAttempt로 바꿉니다. progress는 양수 count, would_block은 지금 더 수락할 수 없음, interrupted는 POSIX 인터럽트, error는 전송 실패입니다. 무진행 결과에는 count=0을 둡니다.\n\n그 위의 send_until은 전체 작업 결과인 SendReport를 만듭니다. complete·timed_out·cancelled·error와 누적 accepted를 함께 반환합니다. invalid_request는 양수 길이에 null을 준 호출 오류이고, invalid_result는 어댑터가 0바이트 progress처럼 계약에 맞지 않는 결과를 준 경우입니다.\n\n이 둘을 분리하면 현재 시도의 일시적인 무진행과 전체 작업의 종료를 같은 false 하나로 뭉개지 않습니다. 오류 코드는 OS 전송 실패에서 보존하며, 시간 초과와 취소는 자체 정책의 종료 사유입니다.",
+      "codes": [
+        {
+          "label": "한 번의 결과와 누적 결과",
+          "language": "cpp",
+          "text": "enum class SendState {\n    progress,\n    would_block,\n    interrupted,\n    error,\n};\n\nstruct SendAttempt {\n    SendState state;\n    std::size_t count;\n    int error;\n};\n\nenum class SendOutcome {\n    complete,\n    timed_out,\n    cancelled,\n    error,\n    invalid_result,\n    invalid_request,\n};\n\nstruct SendReport {\n    SendOutcome outcome;\n    std::size_t accepted;\n    int error;\n};"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "0바이트 progress를 왜 거절할까",
+          "body": "accepted가 늘지 않는데 성공 분기만 반복하면 대기 없이 같은 시도를 계속할 수 있습니다. 실제 어댑터는 비어 있지 않은 send의 0을 별도 오류로 바꾸고, 공통 드라이버도 잘못된 progress를 거절합니다. 이는 OS 오류뿐 아니라 연결한 코드의 계약을 확인하는 검사입니다."
+        }
+      ]
+    },
+    {
+      "title": "남은 범위만 보내는 불변식을 세운다",
+      "body": "전체 크기를 size, 수락된 크기를 accepted라 하면 항상 0≤accepted≤size를 유지합니다. 다음 호출은 data+accepted부터 size-accepted바이트입니다. 첫 결과가 2였다면 ABCDEF의 다음 범위는 CDEF 네 바이트입니다.\n\n진행량을 더하기 전에는 1≤count≤remaining인지 확인합니다. 어댑터가 요청보다 큰 값을 보고하면 올바른 다음 포인터를 만들 수 없으므로 종료합니다. 범위 검증이 먼저이기 때문에 accepted+count는 size를 넘지 않습니다.\n\n버퍼는 함수가 돌아올 때까지 읽을 수 있는 상태로 유지해야 합니다. 이 동기 함수는 배열을 차용합니다. 다른 스레드가 내용을 바꾸거나 해제하면 같은 바이트 열을 보낸다는 전제가 깨집니다. 나중에 반환 후에도 이어 보내는 큐를 만들 때는 데이터·진행 위치의 수명도 함께 소유해야 합니다.",
+      "codes": [
+        {
+          "label": "매 호출 직전의 상태",
+          "language": "text",
+          "text": "accepted=0 → data+0, remaining6\ncount=2    → accepted2\nWouldBlock → accepted2 그대로\n재시도     → data+2, remaining4\ncount=4    → accepted6, complete"
+        }
+      ]
+    },
+    {
+      "title": "WouldBlock에서 무엇을 기다릴까",
+      "body": "논블로킹 소켓은 송신 공간이 없을 때 호출자에게 돌아옵니다. would_block은 이번 시도에서 0바이트가 진행되었다는 상태입니다. 연결을 새로 만들거나 앞부분을 다시 보내지 않고 같은 남은 범위를 보류합니다.\n\n기준 드라이버는 최대 1ms의 대기를 요청한 뒤 재시도합니다. 반복 폴링은 코드가 작지만 많은 연결을 처리하는 이벤트 루프에는 맞지 않습니다. 준비성 알림을 쓰는 경우에도 쓰기 가능 알림은 전체 남은 메시지가 한 번에 들어간다는 약속이 아니므로 다시 반환량을 처리해야 합니다.\n\n잠깐 양보한다고 전체 함수가 비동기가 되는 것은 아닙니다. send_until은 완료하거나 종료 사유가 생길 때까지 호출자에게 돌아오지 않는 동기 함수입니다. 현재 실습은 통신 진단을 수행하는 단일 스레드이므로 이 비용을 드러내 놓고 사용합니다.",
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_send_all",
+        "invariant": "부분 진행과 WouldBlock을 구별하며 남은 범위로 다시 시도한다.",
+        "mayDiffer": "현재 Reactor 경로는 tcp_send_some과 보류 큐를 사용한다. 기준은 최대 1ms 양보하는 동기 진단이다."
+      }
+    },
+    {
+      "title": "무진행 제한과 전체 마감시간을 비교한다",
+      "body": "무진행 제한은 마지막 진행 이후 얼마나 시간이 지났는지 봅니다. 바이트가 조금이라도 수락되면 기준 시각이 갱신됩니다. 5초마다 한 바이트보다 빠르게 읽는 상대는 이 타이머를 계속 연장할 수 있습니다.\n\n전체 마감시간은 작업 시작 때 deadline을 한 번 정합니다. 진행이 있어도 바꾸지 않습니다. 기준 드라이버는 매 시도 전에 steady_clock을 확인합니다. 이 시계는 경과 시간을 재는 용도이므로 시스템의 달력 시각 조정과 분리해 사용합니다.\n\n시간 제한이 정상이던 연결을 실패시킬 수도 있습니다. 이것은 상대가 죽었다는 판정이 아니라 이 작업에 허용한 지연 예산을 다 썼다는 뜻입니다. 학습 진단과 실제 네이티브 tcp_send_all은 각각의 송신 시간 예산을 사용합니다.",
+      "codes": [
+        {
+          "label": "같은 진행 패턴에서 다른 종료 시점",
+          "language": "text",
+          "text": "t=0.0s  1바이트 수락\nt=1.5s  1바이트 수락\nt=3.0s  1바이트 수락\nt=4.5s  1바이트 수락\n\n무진행5초 제한: 계속 연장됨\n전체5초 마감: t≈5s의 검사에서 남은 송신 종료"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "정확히 그 시각에 멈추는가",
+          "body": "검사는 협력적으로 수행합니다. OS 호출과 스케줄링이 늦어질 수 있고, 마지막 시도가 시작될 때 시간이 남았고 그 시도에서 모두 수락되면 complete입니다. 이 함수는 실시간 스케줄러의 엄격한 반환 시각 보장을 제공하지 않습니다. send 자체가 오래 블로킹하면 바깥 검사만으로 이를 중단할 수 없습니다."
+        }
+      ]
+    },
+    {
+      "title": "취소와 인터럽트에서도 같은 예산을 지킨다",
+      "body": "취소 요청은 재시도 시작 시 읽습니다. accepted=2에서 취소되면 cancelled와 2를 반환합니다. 취소는 다음 시도를 하지 않게 할 뿐 이미 수락된 접두사를 회수하지 않습니다. 현재 호출이 돌아오면 호출자가 연결 정리 여부를 결정합니다.\n\nPOSIX send가 EINTR로 실패한 경우 어댑터는 interrupted를 돌려줍니다. 드라이버는 다시 위로 올라가 시간과 취소를 확인한 뒤 재시도합니다. OS 어댑터 안에서 인터럽트를 무한히 재시도하면 상위 정책이 점검할 기회를 잃을 수 있습니다. Winsock WSAEINTR는 호출 취소이므로 오류로 전달합니다.\n\n실제 드라이버의 선택적 취소 인자는 atomic_bool입니다. 이 값은 중단 요청 하나를 전달하며 추가 데이터의 공개 신호로 사용하지 않습니다. 한 번 읽어본 false는 앞으로 취소가 오지 않는다는 보장이 아니므로 각 시도에서 다시 확인합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "빈 요청의 우선순위",
+          "body": "size=0이면 이미 완료된 작업으로 처리하고 시계·송신·취소 콜백을 호출하지 않습니다. null도 허용하며 포인터 산술을 하지 않습니다. 반면 양수 길이의 null은 invalid_request입니다. 이런 경계 계약을 정해 두어야 검사와 호출자가 같은 결과를 기대할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "정책을 코드로 묶는다",
+      "body": "send_until은 send·now·pause·cancelled를 인자로 받습니다. 운영에서는 실제 소켓과 시계를 연결하고, 검사에서는 정해 둔 결과와 가상 시계를 연결합니다. 재시도 정책을 OS 패킷 분할이나 실제로 기다린 시간에 종속시키지 않기 위해서입니다.\n\n루프의 순서는 취소 확인 → 마감 확인 → 남은 범위의 한 번 송신 → 결과 검증 → 진행 또는 대기입니다. WouldBlock에서는 시계를 한 번 더 읽어 남은 예산을 확인하고, 1ms와 남은 시간 중 작은 값으로 대기를 요청합니다. 대기 후에는 같은 루프의 검사부터 시작합니다.\n\n결과 타입과 분기 순서를 보며 각 반환에서 accepted가 어떤 값을 가지는지 따라가 보세요. 특히 오류 분기에서 0으로 초기화하지 않고, 완료 분기에서만 전체 길이에 도달했다는 조건을 확인합니다.",
+      "codes": [
+        {
+          "label": "수락된 접두사와 고정된 마감시간을 유지한다",
+          "language": "cpp",
+          "text": "template <typename Sender, typename Now, typename Pause, typename Cancelled>\nSendReport send_until(const std::uint8_t* data,\n                      std::size_t size,\n                      std::chrono::steady_clock::time_point deadline,\n                      Sender send,\n                      Now now,\n                      Pause pause,\n                      Cancelled cancelled) {\n    // Empty transfer: no callbacks, no pointer arithmetic, null data is fine.\n    if (size == 0) {\n        return SendReport{SendOutcome::complete, 0, 0};\n    }\n    if (data == nullptr) {\n        return SendReport{SendOutcome::invalid_request, 0, 0};\n    }\n\n    std::size_t accepted = 0;\n    while (accepted < size) {\n        if (cancelled()) {\n            return SendReport{SendOutcome::cancelled, accepted, 0};\n        }\n\n        const std::chrono::steady_clock::time_point current = now();\n        if (current >= deadline) {\n            return SendReport{SendOutcome::timed_out, accepted, 0};\n        }\n\n        const std::size_t remaining = size - accepted;\n        const SendAttempt attempt = send(data + accepted, remaining);\n\n        // Validate before trusting count: progress must move 1..remaining with no\n        // error; every other state must report count 0.\n        if (attempt.state == SendState::progress) {\n            if (attempt.count < 1 || attempt.count > remaining || attempt.error != 0) {\n                return SendReport{SendOutcome::invalid_result, accepted, 0};\n            }\n        } else {\n            if (attempt.count != 0) {\n                return SendReport{SendOutcome::invalid_result, accepted, 0};\n            }\n            if (attempt.state != SendState::error && attempt.error != 0) {\n                return SendReport{SendOutcome::invalid_result, accepted, 0};\n            }\n        }\n\n        switch (attempt.state) {\n            case SendState::progress:\n                accepted += attempt.count;\n                break;\n            case SendState::would_block: {\n                // Same clock type as the deadline keeps (std::min) well-typed;\n                // the parentheses dodge any min macro.\n                const auto cap = std::chrono::duration_cast<std::chrono::steady_clock::duration>(\n                    std::chrono::milliseconds(1));\n                const auto after = now();\n                if (after >= deadline) return {SendOutcome::timed_out, accepted, 0};\n                const auto wait = (std::min)(deadline - after, cap);\n                pause(wait);\n                break;\n            }\n            case SendState::interrupted:\n                // No sleep: the next iteration rechecks deadline and cancellation.\n                break;\n            case SendState::error:\n                return SendReport{SendOutcome::error, accepted, attempt.error};\n            default:\n                return SendReport{SendOutcome::invalid_result, accepted, 0};\n        }\n    }\n\n    // All bytes accepted; crossing the deadline after the final attempt is fine.\n    return SendReport{SendOutcome::complete, accepted, 0};\n}"
+        }
+      ]
+    },
+    {
+      "title": "논블로킹 한 번의 시도를 OS에 연결한다",
+      "body": "try_send는 OS send를 한 번 호출합니다. POSIX의 EINTR·EAGAIN/EWOULDBLOCK과 Windows의 WSAEWOULDBLOCK을 공통 상태로 바꾸고, 나머지 오류 코드는 즉시 보존합니다. 양수 요청에서 0이 반환되면 과거의 errno를 읽지 않고 합성 오류를 돌려줍니다.\n\n요청 길이는 io_chunk_size로 제한합니다. 전체 버퍼가 size_t 범위에 있어도 Windows send의 길이 인자는 int이므로 변환 전에 상한을 적용해야 합니다. 이 어댑터는 POSIX에서도 한 번의 요청을 같은 상한으로 제한해 한 시도와 전체 작업을 구분합니다.\n\nsend_bounded는 실제 try_send와 steady_clock, sleep_for, 취소 플래그 읽기를 공통 드라이버에 연결합니다. 이 함수가 시간 제한을 제공하려면 소켓이 미리 논블로킹으로 설정되어 있어야 합니다. 주석상의 전제만 읽고 넘어가지 않고 호출부에서 설정 성공을 확인합니다.",
+      "codes": [
+        {
+          "label": "OS 결과를 한 번의 시도 결과로 변환한다",
+          "language": "cpp",
+          "text": "SendAttempt try_send(Socket& socket, const std::uint8_t* data, std::size_t size) noexcept {\n    if (!socket.valid()) {\n        return SendAttempt{SendState::error, 0, kInvalidArgument};\n    }\n    if (data == nullptr || size == 0) {\n        return SendAttempt{SendState::error, 0, kInvalidArgument};\n    }\n\n#if defined(_WIN32)\n    const SOCKET handle = static_cast<SOCKET>(socket.native());\n    const int chunk = io_chunk_size(size);\n    const int n = ::send(handle, reinterpret_cast<const char*>(data), chunk, 0);\n    if (n == SOCKET_ERROR) {\n        const int err = ::WSAGetLastError();\n        if (err == WSAEWOULDBLOCK) {\n            return SendAttempt{SendState::would_block, 0, 0};\n        }\n        // WSAEINTR is cancellation here, not a retryable interruption.\n        return SendAttempt{SendState::error, 0, err};\n    }\n    if (n > 0) {\n        return SendAttempt{SendState::progress, static_cast<std::size_t>(n), 0};\n    }\n    // A zero-byte send is a synthetic failure; do not read stale error state.\n    return SendAttempt{SendState::error, 0, WSAECONNABORTED};\n#else\n#if defined(__linux__)\n    constexpr int kSendFlags = MSG_NOSIGNAL;\n#else\n    constexpr int kSendFlags = 0;  // macOS: SIGPIPE already suppressed via SO_NOSIGPIPE.\n#endif\n    const int fd = static_cast<int>(socket.native());\n    const int chunk = io_chunk_size(size);\n    const ssize_t n = ::send(fd, data, static_cast<std::size_t>(chunk), kSendFlags);\n    if (n < 0) {\n        const int err = errno;\n        if (err == EINTR) {\n            return SendAttempt{SendState::interrupted, 0, 0};\n        }\n        if (err == EAGAIN || err == EWOULDBLOCK) {\n            return SendAttempt{SendState::would_block, 0, 0};\n        }\n        return SendAttempt{SendState::error, 0, err};\n    }\n    if (n > 0) {\n        return SendAttempt{SendState::progress, static_cast<std::size_t>(n), 0};\n    }\n    return SendAttempt{SendState::error, 0, EIO};\n#endif\n}"
+        },
+        {
+          "label": "실제 소켓·시계·취소를 공통 정책에 연결한다",
+          "language": "cpp",
+          "text": "SendReport send_bounded(Socket& socket,\n                        const std::uint8_t* data,\n                        std::size_t size,\n                        std::chrono::steady_clock::time_point deadline,\n                        const std::atomic_bool* cancel) {\n    // Requires a nonblocking socket; the mode is not changed here.\n    const auto sender = [&socket](const std::uint8_t* bytes, std::size_t count) {\n        return try_send(socket, bytes, count);\n    };\n    const auto now = []() { return std::chrono::steady_clock::now(); };\n    const auto pause = [](std::chrono::steady_clock::duration wait) {\n        std::this_thread::sleep_for(wait);\n    };\n    const auto cancelled = [cancel]() {\n        return cancel != nullptr && cancel->load(std::memory_order_relaxed);\n    };\n    return send_until(data, size, deadline, sender, now, pause, cancelled);\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "SIGPIPE와 오류 반환",
+          "body": "Linux에서는 MSG_NOSIGNAL로 해당 송신의 SIGPIPE 발생을 억제합니다. macOS 소켓은 생성 때 SO_NOSIGPIPE를 설정한 경로를 사용합니다. 신호로 프로세스가 종료되는 일을 막더라도 끊긴 연결의 송신은 오류로 처리해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "직렬화 클라이언트의 송신 부분을 교체한다",
+      "body": "serialization_probe는 소켓을 혼자 소유합니다. 송신 전에 set_nonblocking(true)의 성공을 확인하고, 2초 뒤의 deadline으로 send_bounded를 호출합니다. 실패하면 사유·accepted·오류 코드를 출력하고 반환합니다. 소켓은 RAII로 정리되고 전체 프레임을 다시 보내지 않습니다.\n\n송신이 완료되면 set_nonblocking(false)의 성공을 확인한 뒤 기존의 블로킹 응답 수신을 사용합니다. 모드 변경은 송신과 수신 모두에 영향을 주므로, 다른 스레드가 동시에 같은 연결을 쓰는 구조에서는 이 방식으로 임의 전환하면 안 됩니다.\n\n이 실습의 2초 예산은 송신에만 적용됩니다. connect와 응답 수신을 포함한 전체 요청의 시간 제한은 아닙니다. 종료를 설계할 때는 어느 작업에 어느 시간 제한이 적용되는지 구분해야 합니다.",
+      "codes": [
+        {
+          "label": "기존 플래그를 보존하며 모드 변경 결과를 확인한다",
+          "language": "cpp",
+          "text": "bool set_nonblocking(Socket& socket, bool enabled, int& error) noexcept {\n    if (!socket.valid()) {\n        error = kInvalidArgument;\n        return false;\n    }\n\n#if defined(_WIN32)\n    u_long mode = enabled ? 1UL : 0UL;\n    if (::ioctlsocket(static_cast<SOCKET>(socket.native()), FIONBIO, &mode) == SOCKET_ERROR) {\n        error = ::WSAGetLastError();\n        return false;\n    }\n#else\n    const int fd = static_cast<int>(socket.native());\n    const int flags = ::fcntl(fd, F_GETFL, 0);\n    if (flags < 0) {\n        error = errno;\n        return false;\n    }\n    // Preserve unrelated flags; only toggle O_NONBLOCK.\n    const int updated = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);\n    if (::fcntl(fd, F_SETFL, updated) < 0) {\n        // Capture immediately; a failed fcntl is not retried on EINTR.\n        error = errno;\n        return false;\n    }\n#endif\n\n    error = 0;\n    return true;\n}"
+        },
+        {
+          "label": "송신 실패 후 연결을 닫고 중복 재송신을 막는다",
+          "language": "cpp",
+          "text": "// This probe exclusively owns the socket. Mode affects both directions.\n    if(!study_net::set_nonblocking(socket,true,error)) return fail(\"nonblocking mode\");\n    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);\n    const auto report=study_net::send_bounded(socket,bytes.bytes.data(),bytes.size,deadline);\n    if(report.outcome!=study_net::SendOutcome::complete) {\n        std::fprintf(stderr,\"SEND outcome=%d accepted=%zu error=%d\\n\",int(report.outcome),report.accepted,report.error);\n        return 1; // RAII closes; never resend the whole frame on this connection.\n    }\n    // Receive still uses the blocking diagnostic contract; its wait is not\n    // covered by the send deadline. Restore only after checking the send result.\n    if(!study_net::set_nonblocking(socket,false,error)) return fail(\"blocking mode\");"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "수신도 논블로킹으로 유지하는 대안",
+          "body": "수신 상태까지 WouldBlock으로 분리하고 하나의 이벤트 루프에서 두 방향을 처리할 수 있습니다. 그 경우 부분 수신 버퍼·보류 송신·준비성·시간 제한의 상태를 연결 객체가 소유해야 합니다. 현재 실습에서는 송신 실패 정책을 분리해 관찰하기 위해 수신 경로를 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "시간 초과 뒤 무엇을 다시 보낼 수 있을까",
+      "body": "WouldBlock은 아직 전체 작업을 종료하지 않은 상태이므로 같은 연결에서 남은 범위를 이어 보낼 수 있습니다. 하지만 기준 함수가 오류·취소·마감으로 반환하면 이 진단은 연결을 정리합니다. 부분 프레임을 남긴 채 다음 메시지를 이어 보내면 수신 파서가 원래 프레임의 나머지로 읽을 수 있습니다.\n\n새 연결에서 원래 요청을 다시 보낼 때도 상대의 처리 여부를 별도로 고려해야 합니다. 응답을 받지 못했다는 사실만으로 요청이 실행되지 않았다고 결론 낼 수는 없습니다. 저장·보상처럼 반복 실행의 효과가 있는 요청은 식별자와 중복 처리 정책이 필요합니다.\n\n현재 게임의 INPUT도 임의로 버리면 lockstep이 필요한 입력을 잃습니다. 라운드가 바뀌어 의미가 없어진 입력을 정리하는 것과, 진행 중 밀린 입력을 버리는 정책은 다릅니다. 송신 오류 처리와 게임 상태 전이를 같은 ‘실패니까 다시’라는 규칙으로 합치지 않습니다.",
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_send_all",
+        "invariant": "부분 실패가 이미 수락된 바이트를 취소하지 않는다는 전제로 호출자가 처리한다.",
+        "mayDiffer": "현재 native 함수는 bool만 반환하며 오류 뒤 연결 실패로 처리한다. 기준 결과는 accepted와 사유를 함께 남긴다."
+      }
+    },
+    {
+      "title": "현재 엔진의 성공 신호를 계층별로 읽는다",
+      "body": "현재 native tcp_send_all은 논블로킹 소켓에서 정책으로 정한 전체 송신 마감시간을 검사합니다. 일부 진행이 있어도 deadline을 갱신하지 않습니다. tcp_send_some은 바로 진행할 수 있는 양을 보고하고, Reactor 쪽 호출자는 남은 바이트를 보류합니다. 같은 이름의 성공도 호출자가 기다리는 범위가 다릅니다.\n\nWSS를 사용하는 클라이언트는 StreamTransport로 분기합니다. 현재 WssClient::send는 데이터를 복사해 비동기 큐에 수락하면 true를 반환합니다. 그 반환은 native send 루프가 OS에 모든 바이트를 넘겼다는 뜻과 다릅니다. 어느 쪽도 상대 애플리케이션의 완료 응답은 아닙니다.\n\n유지되는 핵심은 진행 위치·데이터 수명·대기 정책·성공이 뜻하는 범위를 분명하게 하는 것입니다. 1ms 재시도나 2초/5초 예산, 고정 진단 메시지는 바꿀 수 있는 정책입니다. 전송 실패를 완전한 취소로 오인하지 않는 계약은 그대로 필요합니다.",
+      "reference": {
+        "path": "net/wss_client.cpp",
+        "symbol": "bool send(const void* data",
+        "invariant": "반환 성공이 어느 계층의 수락인지 구별한다.",
+        "mayDiffer": "WSS는 복사된 비동기 큐 수락이며 기준은 native TCP의 수락량을 누적한다."
+      }
+    },
+    {
+      "title": "진행 패턴을 통제해 실패를 검사한다",
+      "body": "운영체제가 언제 몇 바이트를 받아들일지는 매 실행마다 달라집니다. 핵심 정책 검사는 SendAttempt를 정해진 순서로 돌려주는 대역을 사용합니다. 2바이트 진행 → WouldBlock → 인터럽트 →4바이트 진행에서는 포인터가 중복 없이 전진하고 complete, accepted=6이 나와야 합니다.\n\n가상 시계를 쓰면 실제 5초를 기다리지 않고도 부분 진행이 deadline을 갱신하지 않는지 확인할 수 있습니다. 시도마다 3ms가 걸리고 예산이 5ms이면 첫 두 시도는 시작할 수 있지만 세 번째 시도는 시작할 수 없습니다. 마지막 시도에서 모두 완료되는 경우의 우선순위도 별도로 검사합니다.\n\n실제 소켓 검사는 상대가 읽지 않는 loopback 연결의 송신 공간을 채웁니다. 마감 후 상대가 읽기 시작했을 때 받아들이는 내용이 accepted 길이의 접두사와 정확히 같은지 비교합니다. 이 검사는 커널과 어댑터의 연결을 확인하며 특정 send 반환량 자체를 고정하지 않습니다.",
+      "codes": [
+        {
+          "label": "같은 API에서 비교할 결과",
+          "language": "text",
+          "text": "2 진행 → error        : error, accepted2\n2 진행 → 취소 확인    : cancelled, accepted2\n계속 WouldBlock       : timed_out, accepted0\n2 진행(3ms) × 반복,5ms: 두 시도 뒤 timed_out, accepted4\n0바이트 progress      : invalid_result, accepted0"
+        }
+      ]
+    },
+    {
+      "title": "실행하고 완성 파일을 따라간다",
+      "body": "누적 프로젝트를 빌드한 뒤 framing_probe 서버와 serialization_probe 클라이언트를 실행합니다. 정상 응답의 출력은 유지됩니다. 송신 실패 시에는 SEND 줄에 종료 사유의 열거값·accepted·OS 오류가 남고 성공 응답 검증으로 진행하지 않습니다.\n\nsend_budget.h에서 정책을, send_socket.cpp에서 OS 변환을, serialization_probe.cpp에서 설정 성공·송신 결과·소켓 수명 연결을 확인합니다. 예산 검사를 분리해 놓아도 어댑터가 블로킹되면 전제가 깨진다는 점까지 설명할 수 있어야 합니다.\n\nCMake의 StudySocket에 net/send_socket.cpp를 추가하고 send_contract를 같은 타깃에 연결합니다. send_budget.h의 템플릿은 호출하는 쪽에서 인스턴스화되므로 별도 .cpp가 필요하지 않습니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/87-partial-send -B out/study87 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study87 -j3\nctest --test-dir out/study87 --output-on-failure\n./out/study87/framing_probe listen 0 2\n# 다른 터미널: LISTEN 포트 사용\n./out/study87/serialization_probe 실제포트"
+        },
+        {
+          "label": "CMakeLists.txt에 추가한 빌드·검사 항목",
+          "language": "cmake",
+          "text": "target_sources(StudySocket PRIVATE net/send_socket.cpp)\nadd_executable(send_contract tests/send_contract.cpp)\ntarget_link_libraries(send_contract PRIVATE StudySocket)\nadd_test(NAME send_contract COMMAND send_contract)\nset_tests_properties(send_contract PROPERTIES TIMEOUT 10)"
+        },
+        {
+          "label": "net/send_budget.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/87-partial-send/net/send_budget.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/send_socket.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/87-partial-send/net/send_socket.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/send_socket.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/87-partial-send/net/send_socket.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/serialization_probe.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/87-partial-send/tools/serialization_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/send_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/87-partial-send/tests/send_contract.cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성 빌드",
+          "body": "빌드의 --config Release와 CTest의 -C Release를 사용하고 Release/ 아래 exe를 실행합니다. 서버와 클라이언트는 같은 기기의 loopback으로 연결합니다."
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "87-1",
+      "question": "ABCDEF 중 2바이트가 수락된 뒤 WouldBlock입니다. 같은 연결의 다음 시도는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "data,6"
+        },
+        {
+          "id": "b",
+          "text": "data+2,4"
+        },
+        {
+          "id": "c",
+          "text": "data+4,2"
+        },
+        {
+          "id": "d",
+          "text": "data,4"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "data+2,4",
+      "explanation": "이미 수락된 접두사 AB를 다시 보내지 않고 CDEF부터 이어 갑니다. WouldBlock 자체는 누적 위치를 바꾸지 않습니다."
+    },
+    {
+      "id": "87-2",
+      "question": "매 1.5초마다 조금씩 진행되는 송신을 전체 5초 안에서 제한하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "진행마다 마감시간을 5초 뒤로 옮긴다"
+        },
+        {
+          "id": "b",
+          "text": "WouldBlock 횟수만 센다"
+        },
+        {
+          "id": "c",
+          "text": "처음 정한 deadline을 유지한다"
+        },
+        {
+          "id": "d",
+          "text": "마지막 send가 보낸 양을 0으로 돌린다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "처음 정한 deadline을 유지한다",
+      "explanation": "무진행 타이머는 작은 진행에도 계속 연장될 수 있습니다. 전체 마감시간은 시작 때 한 번 정하고 재시도마다 검사합니다."
+    },
+    {
+      "id": "87-3",
+      "question": "accepted=2인 상태에서 전송 오류가 났습니다. 이 정보의 의미는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "앞의 2바이트는 이미 수락됐으며 상대 처리 여부는 별도다"
+        },
+        {
+          "id": "b",
+          "text": "실패했으므로 아무 바이트도 나가지 않았다"
+        },
+        {
+          "id": "c",
+          "text": "상대가 요청 전체를 처리했다"
+        },
+        {
+          "id": "d",
+          "text": "같은 연결에서 전체 버퍼를 다시 보내면 된다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "앞의 2바이트는 이미 수락됐으며 상대 처리 여부는 별도다",
+      "explanation": "실패는 앞선 외부 효과를 취소하지 않습니다. 수락된 접두사를 보존하고 처리 완료는 별도의 응답으로 판단합니다."
+    },
+    {
+      "id": "87-4",
+      "question": "논블로킹 설정에 실패했는데도 바깥의 시간 검사만 믿고 send를 호출하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "항상 지정 시간 안에 반환한다"
+        },
+        {
+          "id": "b",
+          "text": "OS가 자동으로 논블로킹으로 바꾼다"
+        },
+        {
+          "id": "c",
+          "text": "요청이 자동으로 취소된다"
+        },
+        {
+          "id": "d",
+          "text": "send 안에서 멈춰 바깥 검사 기회를 잃을 수 있다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "send 안에서 멈춰 바깥 검사 기회를 잃을 수 있다",
+      "explanation": "협력적 마감 검사는 개별 시도가 신속히 반환한다는 전제가 필요합니다. 설정 실패를 무시하면 이 전제가 성립하지 않습니다."
+    },
+    {
+      "id": "87-5",
+      "question": "현재 WssClient::send가 true를 반환했습니다. 보장되는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "상대 게임이 요청을 실행했다"
+        },
+        {
+          "id": "b",
+          "text": "복사된 데이터가 로컬 비동기 큐에 수락됐다"
+        },
+        {
+          "id": "c",
+          "text": "모든 데이터가 상대 커널에 도착했다"
+        },
+        {
+          "id": "d",
+          "text": "상대 응답까지 검증됐다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "복사된 데이터가 로컬 비동기 큐에 수락됐다",
+      "explanation": "현재 WSS 어댑터의 성공은 큐 수락입니다. native send의 로컬 OS 수락과도 층위가 다르며 상대 처리 완료를 뜻하지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "2바이트 진행 뒤 오류일 때 누적 진행량과 다음 행동을 적습니다.",
+      "무진행 5초와 전체 5초를 같은 진행 패턴에서 비교합니다.",
+      "논블로킹 설정의 실패가 드라이버의 어느 전제를 깨는지 찾습니다.",
+      "OS 결과·정책 결과·애플리케이션 응답의 성공 의미를 구분합니다."
+    ],
+    "failureChecks": [
+      "0바이트 progress와 요청보다 큰 진행량을 거절하는지 확인합니다.",
+      "인터럽트 반복 중에도 시간과 취소를 확인하는지 검사합니다.",
+      "시간 초과 후 상대가 읽는 내용이 accepted 길이의 접두사와 같은지 비교합니다."
+    ],
+    "expected": "부분 송신의 외부 효과를 보존하고, 재시도·중단·응답 확인을 서로 다른 계약으로 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 한정 송신 구현 초안·Linux/Winsock 공식 API·현재 엔진/Part 대조·결정적 시나리오와 실제 backpressure 검사",
+    "draftJob": "out/learning-jobs/087-send-events.jsonl",
+    "corrections": [
+      "알 수 없는 상태 거절·WouldBlock 뒤 시계 재확인·기존 길이 제한 helper 재사용",
+      "실제 native tcp_send_all을 무진행 제한에서 전체 5초 deadline으로 변경",
+      "WSS 큐 수락·송신 큐 추정량·현재 라운드 INPUT 임의 폐기 오해 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED 100 / SDL 105 CTest 통과·경고 없음·86 누적 파일 변경 범위 검사",
+    "결정적 시간·부분 진행·오류·취소·인터럽트·잘못된 결과 ASan/UBSan 검사",
+    "실제 loopback 역압 후 수락 접두사의 길이와 내용 일치·모드 복원·취소 검사",
+    "실제 native tcp_send_all이 1.5초 간격의 진행에도 전체 5초 후 실패 반환",
+    "Windows API 대역으로 핸들 폭·길이 제한·모드 실패·WouldBlock·취소·0 반환 검사; Windows/macOS 네이티브 빌드 미검증",
+    "typed echo 4수신 상한·잘못된 응답 7종·CLI 검사; 실제 게임/양 릴레이 빌드 및 root 20/19 CTest 통과",
+    "Part 발췌·실제 구현 스니펫 7개·Markdown 27경우·429문제·전체 차시 DOM 참조/저장/복사/탐색 통과·정적 배포 재현성 통과; 수동 GUI 없음"
+  ]
+}

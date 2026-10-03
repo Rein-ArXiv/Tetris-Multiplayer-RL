@@ -1,0 +1,452 @@
+{
+  "id": "lesson-109",
+  "title": "메타 서비스: relay와 DB를 나누는 이유",
+  "shortTitle": "프로세스·HTTP·저장 소유",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 제출 객체가 같은 프로세스 안의 콜백으로 경기 결과를 전달합니다.",
+  "finish": "완료: 별도 HTTP 서비스와 호출 실행 파일을 만들고, 호출자·서비스·저장 자료의 수명을 구별합니다.",
+  "objective": "모듈·스레드·프로세스 경계를 구별하고, 메타가 DB를 소유하는 구조와 프로세스 분리의 비용을 설명합니다.",
+  "prerequisites": [
+    "완료된 경기 값과 고정 요청",
+    "미확인·재시도·중복 방지",
+    "mutex와 값의 소유권"
+  ],
+  "recap": {
+    "points": [
+      "응답을 받지 못했어도 서버에 이미 반영됐을 수 있습니다.",
+      "재시도는 같은 경기 키와 내용을 유지합니다.",
+      "호출 횟수 제한과 저장 효과의 중복 방지는 서로 다른 책임입니다."
+    ],
+    "bridge": "그 제출 계약을 유지하면서 콜백을 별도 프로세스의 HTTP 요청으로 바꿉니다."
+  },
+  "sections": [
+    {
+      "title": "함수 호출 하나를 프로세스 경계 밖으로",
+      "body": "제출 객체는 완료된 경기 값을 소유하고 외부 콜백의 확인 응답을 해석합니다. 지금 그 콜백을 같은 프로그램 안의 서비스 대역에 연결할 수도 있습니다. 이를 **별도 실행 파일**의 HTTP 서비스에 연결하면 무엇이 달라질까요?\n\n만들 실행 파일은 둘입니다. study_meta는 요청을 받아 경기 값을 보관하고, meta_submit은 누적 Duel 규칙을 끝까지 실행한 결과를 제출합니다. 제출 프로그램이 끝나도 서비스는 계속 실행됩니다. 같은 키로 제출 프로그램을 다시 실행하면 서비스가 가진 최초 행 번호를 받습니다.\n\n실습의 저장소는 고정 크기 메모리입니다. 이 선택으로 “호출 프로그램보다 오래 사는 서비스 상태”와 “서비스 재시작까지 살아남는 영속 상태”를 따로 관찰합니다. 현재 프로젝트의 tetris_meta는 같은 자리에서 SQLite 파일을 소유합니다. 서비스 프로세스가 따로 있다는 사실만으로 저장 자료가 영속적이 되는 것은 아닙니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "meta::ApiServer api",
+        "invariant": "메타 프로세스의 진입점이 저장 객체를 만들고 API에 연결한다.",
+        "mayDiffer": "학습 study_meta는 메모리 저장소, 실제 tetris_meta는 스키마를 적용한 SQLite Database를 소유한다."
+      }
+    },
+    {
+      "title": "파일·모듈·스레드·프로세스를 구별한다",
+      "body": "C++ 파일을 둘로 나누는 일과 실행 중 프로세스를 둘로 나누는 일은 다릅니다. 여러 번역 단위를 한 실행 파일로 링크하면 그 코드들은 같은 프로세스의 객체를 참조할 수 있습니다. 헤더에 클래스를 분리했다고 장애와 종료 수명이 자동으로 분리되지는 않습니다.\n\n**프로세스**는 실행 중인 프로그램의 주소 공간과 OS 자원을 관리하는 단위입니다. 독립 프로세스는 각자의 객체를 가지므로 한쪽의 주소 숫자를 다른 쪽으로 보내도 같은 C++ 객체를 가리킨다는 의미가 생기지 않습니다. 값을 바이트로 표현해 보내고 받는 쪽이 자기 객체를 구성해야 합니다.\n\n**스레드**는 한 프로세스 안에서 실행 흐름을 나누는 단위입니다. 메타의 여러 HTTP 요청 스레드는 같은 저장 객체를 사용할 수 있으므로 그 객체 내부에는 동기화가 필요합니다. 이 실습에는 “프로세스 사이 HTTP”와 “서비스 내부 mutex”라는 서로 다른 경계가 함께 있습니다.\n\n| 경계 | 공유하는 것 | 추가로 정할 계약 |\n| --- | --- | --- |\n| 같은 스레드의 함수 호출 | 객체와 호출 스택 | 인자·반환·예외·수명 |\n| 같은 프로세스의 요청 스레드 | 저장 객체의 메모리 | 잠금 범위·동시 접근 |\n| 서로 다른 프로세스 | 전송한 값의 표현 | 직렬화·주소·응답·실패 |\n\n별도 프로세스는 종료와 메모리 오류의 영향을 나눌 수 있지만, 같은 호스트의 CPU·디스크·전원 문제까지 분리하는 것은 아닙니다."
+    },
+    {
+      "title": "무엇을 오래 보관할지 먼저 정한다",
+      "body": "relay가 유지하는 방·대기열·참가자 소켓·검증 중 게임은 진행 중 세션의 상태입니다. relay를 종료하면 그 메모리도 사라집니다. 계정의 아이콘 소유권과 보상은 경기 연결이 끝나도 유지해야 하므로 다른 수명을 가집니다.\n\n| 상태 | 현재 소유자 | 소유 프로세스 재시작 뒤 |\n| --- | --- | --- |\n| 방·대기열·진행 중 규칙 상태 | relay 메모리 | 다시 구성해야 함 |\n| 계정·경기 기록·RP/BP/XP | meta의 SQLite 파일 | 커밋된 기록을 다시 읽음 |\n| 일회용 게임 입장권 | meta 메모리 | 새 입장권이 필요함 |\n| 요청 빈도 제한 카운터 | meta 메모리 | 새 계수 상태로 시작 |\n\nmeta라는 이름의 모든 상태가 DB에 저장되는 것은 아닙니다. 상태별 소유 위치와 재시작 의미를 적어야 이전·장애 복구 때 무엇을 유지해야 할지 알 수 있습니다. relay를 다른 OS 기기로 옮기더라도 메타가 같은 위치에서 계속 실행된다면 계정 DB까지 함께 옮길 이유는 없습니다. 대신 relay의 메타 접속 주소와 공유 비밀, 네트워크 도달 경로를 준비해야 합니다.",
+      "reference": {
+        "path": "meta/api_server.cpp",
+        "symbol": "GameTickets gameTickets",
+        "invariant": "영속 DB 참조와 요청 처리에 필요한 메모리 상태를 구별한다.",
+        "mayDiffer": "입장권·요청 제한의 종류와 수명은 서비스 정책에 따라 바뀔 수 있다."
+      }
+    },
+    {
+      "title": "SQLite 엔진은 어느 프로세스에서 실행될까",
+      "body": "tetris_meta와 SQLite를 나눈다는 표현은 두 서버 프로그램을 띄운다는 뜻으로 오해하기 쉽습니다. 이 프로젝트는 SQLite의 C 코드를 메타 실행 파일에 링크합니다. meta::Database가 SQLite API를 호출하면 메타 프로세스 안에서 코드가 실행되고 DB 파일에 접근합니다. relay는 그 파일을 직접 열지 않고 HTTP API를 호출합니다.\n\n```mermaid\nflowchart LR\n  R[\"relay 프로세스<br/>게임·연결 상태\"] -->|\"HTTP 요청과 응답\"| A\n  subgraph M[\"meta 프로세스\"]\n    A[\"API 핸들러\"] --> D[\"Database 객체\"]\n    D --> E[\"링크된 SQLite 엔진\"]\n  end\n  E --> F[(\"DB 파일·WAL\")]\n```\n\nSQLite 공식 문서의 [serverless 설명](https://www.sqlite.org/serverless.html)은 별도의 DB 서버 프로세스 없이 애플리케이션이 파일을 읽고 쓰는 이 구조를 가리킵니다. 게임 전체에 서버가 없다는 뜻은 아닙니다.\n\n파일을 JSON으로 보관하면서 스냅샷 교체·저널·잠금·복구를 직접 구현하는 대안도 있습니다. 프로젝트는 여러 계정 집계를 함께 바꾸는 일과 저장 복구를 SQLite에 맡깁니다. 이 선택은 DB 파일의 운영 책임을 제거하지 않고 메타 쪽에 모읍니다.",
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "add_executable(tetris_meta",
+        "invariant": "DB 엔진을 사용하는 실행 파일에 그 구현을 링크한다.",
+        "mayDiffer": "학습 HTTP 타깃은 아직 SQLite를 링크하지 않는다. 실제 서비스의 스키마·마이그레이션은 Database가 담당한다."
+      }
+    },
+    {
+      "title": "프로세스를 나누어 얻는 것과 지불하는 것",
+      "body": "relay에 계정 SQL과 디스크 접근이 들어가면 계정 스키마 변경과 연결 서버 배포가 강하게 묶입니다. 별도 meta API를 두면 relay는 “경기 결과를 제출한다”는 계약을 사용하고, 저장 세부를 메타 안에서 바꿀 수 있습니다. 백업과 계정 데이터 이전의 운영 책임도 한쪽에 모입니다.\n\n대신 함수 호출이 HTTP 통신으로 바뀝니다. 직렬화 비용, 주소 설정, 연결 실패, 시간 제한, 응답 검증이 필요합니다. 프로세스가 분리돼 있어도 relay의 결과 처리 스레드가 동기 HTTP 호출을 기다리면 그 실행 흐름은 멈춰 있습니다. 프로세스 분리와 비동기 처리는 별개의 선택입니다.\n\n단일 실행 파일 안에서도 저장 인터페이스와 작업 스레드를 분리하는 설계가 가능합니다. 이 프로젝트의 선택을 모든 소규모 게임에 필요한 규칙으로 일반화하지 않습니다. 여기서는 경기 연결의 수명과 계정 저장의 수명, 배포와 백업 책임을 실제로 나누는 데 초점을 둡니다.",
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "MetaClient::post_match",
+        "invariant": "호출자는 저장 API 계약을 사용하고 SQL을 직접 실행하지 않는다.",
+        "mayDiffer": "현재 호출은 동기식이며 HTTP 실패와 대기 비용이 남는다. 프로세스 분리만으로 호출 지연이 사라지지 않는다."
+      }
+    },
+    {
+      "title": "서비스가 소유할 저장 경계를 만든다",
+      "body": "MemoryResults는 최대 Capacity개의 경기 값을 소유합니다. put은 신규 반영 또는 동일 요청의 재확인 결과를 반환하고, lookup은 값의 복사본을 반환합니다. 내부 배열이나 mutex 주소를 API 호출자에게 넘기지 않습니다.\n\nHTTP 요청 스레드는 동시에 들어올 수 있습니다. 같은 키를 두 스레드가 각각 “없음”으로 읽고 새 행을 만들면 중복이 생깁니다. 따라서 키 탐색·내용 비교·새 행 삽입·개수 증가를 하나의 잠금 구간에 둡니다. 같은 키의 같은 내용은 같은 행 번호, 다른 내용은 conflict입니다.\n\n가득 찬 저장소에 이미 있는 요청을 재전송했을 때도 확인할 수 있어야 합니다. 키 탐색을 먼저 하고, 새 키일 때만 용량을 검사합니다. 조회와 쓰기의 공통 단위는 저장소의 논리 작업 하나입니다.",
+      "codes": [
+        {
+          "label": "같은 키를 먼저 찾는다",
+          "text": "        std::lock_guard<std::mutex> lock(mutex_);\n\n        // Existing-key check FIRST. This is what lets an identical retry still\n        // succeed when the store is already full: we find the key and confirm\n        // the payload matches before ever consulting Capacity.\n        for (std::size_t i = 0; i < count_; ++i) {\n            const std::optional<study_net::MatchRecord>& slot = rows_[i];\n            if (slot.has_value() && slot->key == record.key) {\n                if (*slot == record) {\n                    // Idempotent accept: same key, same payload. Row is reported\n                    // as a positive, one-based index.\n                    return PutResult{\n                        PutStatus::accepted,\n                        study_net::Receipt{record.key, i + 1, record.player_a, record.player_b}};\n                }\n                // Same key, different payload. Never overwrite: reject.\n                return PutResult{PutStatus::conflict, study_net::Receipt{}};\n            }\n        }",
+          "language": "cpp"
+        },
+        {
+          "label": "새 행만 용량을 사용한다",
+          "text": "        // New key. Only now does capacity matter.\n        if (count_ == Capacity) {\n            return PutResult{PutStatus::full, study_net::Receipt{}};\n        }\n\n        // Copy the record into the next free row without any allocation.\n        rows_[count_] = record;\n        ++count_;\n        // count_ is now the one-based row of the record we just stored.\n        return PutResult{\n            PutStatus::accepted,\n            study_net::Receipt{record.key, count_, record.player_a, record.player_b}};\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::saveMatch",
+        "invariant": "키 탐색과 내용 비교·반영이 하나의 저장 계약을 이룬다.",
+        "mayDiffer": "서비스는 DB unique 제약과 트랜잭션까지 사용한다. 학습 mutex와 배열은 한 프로세스의 메모리만 보호한다."
+      }
+    },
+    {
+      "title": "잠금을 놓은 뒤에도 읽을 수 있는 값",
+      "body": "lookup이 배열 원소의 참조를 반환하면 호출자가 잠금 밖에서 그 메모리를 읽게 됩니다. 현재 행을 삭제하지 않는다는 구현만 믿고 참조를 내보내면 나중에 저장소 정책을 바꿀 때 호출자까지 영향을 받습니다. 고정 크기 경기 값의 복사본을 반환하면 호출자는 저장소 잠금과 독립적으로 JSON 응답을 만들 수 있습니다.\n\nconst 메서드도 mutex를 잠그려면 잠금 객체는 변경됩니다. 그래서 mutex_만 mutable로 두고, 논리 데이터인 rows_와 count_를 읽는 계약은 유지합니다. mutable이 다른 스레드의 접근을 자동으로 동기화하는 키워드는 아닙니다. 실제 lock_guard가 동기화합니다.\n\n메타 DB도 다수 요청이 connection 하나에 접근하므로 DB 접근 메서드를 직렬화합니다. WAL을 사용해도 같은 connection과 같은 mutex를 공유하는 호출이 자동으로 병렬 실행되지는 않습니다.",
+      "codes": [
+        {
+          "label": "잠금 안에서 복사하기",
+          "text": "    std::optional<study_net::MatchRecord> lookup(std::uint64_t key) const {\n        std::lock_guard<std::mutex> lock(mutex_);\n        for (std::size_t i = 0; i < count_; ++i) {\n            const std::optional<study_net::MatchRecord>& slot = rows_[i];\n            if (slot.has_value() && slot->key == key) {\n                return *slot;  // copy taken under the lock\n            }\n        }\n        return std::nullopt;\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.h",
+        "symbol": "std::mutex  mu_",
+        "invariant": "공유 DB 접근을 보호하고 외부에는 조회 값을 반환한다.",
+        "mayDiffer": "정적 카탈로그처럼 DB connection을 쓰지 않는 조회는 이 잠금 대상과 다르다."
+      }
+    },
+    {
+      "title": "값을 HTTP 본문으로 표현한다",
+      "body": "C++ 구조체의 메모리를 그대로 보내면 padding·크기·바이트 순서·프로세스 내부 주소 같은 문제를 전송 계약으로 끌어들이게 됩니다. 여기서는 필드 이름과 정수로 이루어진 작은 JSON 객체를 사용합니다. HTTP 라이브러리는 요청의 경계를 처리하고, wire.h는 경기 값과 JSON 사이의 변환을 담당합니다.\n\n학습 경로는 POST /study/v1/matches입니다. key·round·참가자·ticks·점수·라인·승자를10개 필드로 표현합니다. 읽는 쪽은 본문1024바이트, 평평한 객체, 중복 없는 키, 필요한 정수 필드를 검사합니다. 라인 수와 승자 구분은 좁히기 전에 범위를 검사합니다. 기본 선수·키 조건은 저장 경계에서도 확인합니다.\n\n이 학습 v1 형식은 정확히10개 필드를 요구합니다. 확장 필드를 허용하는 서비스의 기존 파서와 호환 정책이 다릅니다. 경로와 형식 버전을 정해 두면 같은 이름의 “경기 결과”라도 어느 계약을 사용하는지 분명해집니다.",
+      "codes": [
+        {
+          "label": "필드 이름으로 값 표현하기",
+          "text": "inline Json record_json(const study_net::MatchRecord& r) {\n    return {{\"key\",r.key},{\"round\",r.round},{\"player_a\",r.player_a},{\"player_b\",r.player_b},\n            {\"ticks\",r.ticks},{\"score_a\",r.score_a},{\"score_b\",r.score_b},\n            {\"lines_a\",r.lines_a},{\"lines_b\",r.lines_b},{\"winner\",static_cast<unsigned>(r.winner)}};\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "정수 타입과 부호 확인",
+          "text": "inline std::optional<std::uint64_t> number(const Json& object,const char* name) {\n    const auto it=object.find(name);\n    if(it==object.end() || !it->is_number_integer())return std::nullopt;\n    if(it->is_number_unsigned())return it->get<std::uint64_t>();\n    const auto value=it->get<std::int64_t>();\n    return value<0 ? std::nullopt : std::optional<std::uint64_t>(value);\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/json_input.h",
+        "symbol": "inline std::optional<Json> object",
+        "invariant": "본문 전체 파싱과 필드 해석을 구별하고 입력의 크기·구조를 제한한다.",
+        "mayDiffer": "실제 JSON 경계는64KiB·깊이16과 API별 필드 계약을 사용한다. 학습의 평평한10필드·1024바이트 조건을 서비스 전체에 적용하지 않는다."
+      }
+    },
+    {
+      "title": "주소·메서드·경로로 요청을 전달한다",
+      "body": "서버 주소127.0.0.1은 이 프로그램이 실행되는 기기의 loopback입니다. 다른 컴퓨터에서 같은 주소를 쓰면 원래 서버가 아니라 그 다른 컴퓨터 자신에게 접속합니다. 포트는 그 주소에서 어떤 리스너에 연결할지 선택합니다. 같은 주소라도 포트가 다르면 다른 서비스일 수 있습니다.\n\n연결 뒤 HTTP는 메서드와 경로로 작업을 구분합니다. GET /healthz는 응답 경로를 관찰하고, POST /study/v1/matches는 본문을 읽어 저장 경계에 전달합니다. 정상 영수증은200, 잘못된 입력은400, 같은 키의 다른 내용은409, 새로운 행을 받을 공간이 없으면503으로 대응합니다.\n\n핸들러의 역할은 HTTP 요청·응답과 저장 계약을 연결하는 것입니다. JSON 파싱과 상태 코드 선택은 핸들러 주변에, 중복 판정과 배열 변경은 저장소에 둡니다. 그래야 다른 전송 어댑터를 붙여도 저장 규칙을 다시 복사하지 않습니다.",
+      "codes": [
+        {
+          "label": "요청을 저장 계약으로 연결",
+          "text": "    http.Post(\"/study/v1/matches\",[&store](const httplib::Request& req,httplib::Response& res){\n        const auto record=study_meta::parse_record(req.body);\n        if(!record){res.status=400;res.set_content(\"{\\\"error\\\":\\\"invalid\\\"}\",\"application/json\");return;}\n        const auto result=store.put(*record);\n        using Status=study_meta::PutStatus;\n        if(result.status==Status::accepted) {\n            res.set_content(study_meta::receipt_json(result.receipt).dump(),\"application/json\");\n        }else {\n            res.status=result.status==Status::conflict ? 409 : result.status==Status::full ? 503 : 400;\n            res.set_content(\"{\\\"error\\\":\\\"not_accepted\\\"}\",\"application/json\");\n        }\n    });",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/api_server.cpp",
+        "symbol": "MatchSaveError error",
+        "invariant": "API 계층이 저장 결과를 HTTP 상태와 응답 값으로 바꾼다.",
+        "mayDiffer": "실제 API에는 인증·사용자/경기 유효성·DB 오류 구별이 더 있다. 학습 서비스는 loopback 전용이며 공용 보상 서비스로 사용할 수 없다."
+      }
+    },
+    {
+      "title": "조립하는 곳에서 수명을 정한다",
+      "body": "main에서 저장소를 먼저 만들고 HTTP 서버를 나중에 만듭니다. 핸들러는 store를 참조로 빌립니다. 참조는 저장소를 소유하거나 수명을 늘리지 않으므로, 요청 처리가 끝날 때까지 저장소가 살아 있어야 합니다.\n\n정상적인 블록 종료에서는 지역 변수가 선언 역순으로 파괴됩니다. 또한 사용하는 HTTP 라이브러리의 listen 종료 경로가 요청 작업을 정리하는지 확인해야 합니다. 변수 순서만 맞추고 실행 중인 작업을 남겨 둬도 괜찮다고 생각하면 안 됩니다. 현재 서비스는 listen_after_bind가 반환할 때까지 main에 머뭅니다.\n\n의존성 주입은 이처럼 객체가 필요한 저장소를 외부에서 받아 쓰게 하는 일입니다. 반드시 복잡한 프레임워크나 가상 함수 계층을 만들어야 하는 것은 아닙니다. 현재 프로젝트의 ApiServer는 Database&를 생성자에서 받고, 메타 main이 Database의 수명을 소유합니다.",
+      "codes": [
+        {
+          "label": "요청 처리보다 먼저 준비할 것",
+          "text": "    study_meta::MemoryResults<64> store;\n    httplib::Server http;\n    http.new_task_queue=[] {return new httplib::ThreadPool(2,8);};\n    http.set_payload_max_length(1024);\n    http.set_read_timeout(2,0);http.set_write_timeout(2,0);",
+          "language": "cpp"
+        },
+        {
+          "label": "바인드와 실행을 구별",
+          "text": "    const int port=requested==0 ? http.bind_to_any_port(\"127.0.0.1\")\n        : http.bind_to_port(\"127.0.0.1\",requested) ? requested : -1;\n    if(port<=0){std::fprintf(stderr,\"bind failed\\n\");return 1;}\n    std::printf(\"PORT %d\\n\",port);std::fflush(stdout);\n    // Store is constructed before http; handlers borrow it only while serving.\n    return http.listen_after_bind() ? 0 : 1;",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/api_server.h",
+        "symbol": "Database& db_",
+        "invariant": "API가 빌린 DB는 요청 처리보다 오래 살아 있어야 한다.",
+        "mayDiffer": "현재 main은 unique_ptr로 DB를 소유하고 API를 만든다. 정상 반환과 OS의 즉시 프로세스 종료는 서로 다른 정리 경로다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "종료 신호와 C++ 소멸자",
+          "body": "실습 서버와 현재 메타의 기본 종료 신호 경로를 graceful drain으로 해석하지 않습니다. OS가 프로세스를 종료하면 모든 C++ 지역 소멸자가 정상 순서로 실행된다고 보장할 수 없습니다. 파일 저장의 복구 계약과 진행 중 요청의 종료 정책은 각각 설계해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "콜백을 HTTP 호출자로 바꾼다",
+      "body": "HttpSender는 포트 하나를 가지고, 주어진 경기 값을 JSON으로 직렬화해 한 번 요청합니다. 응답이 있고 상태가200이며 영수증을 해석할 수 있으면 Reply를 만듭니다. MatchSubmission은 그 영수증의 키와 참가자가 소유한 요청에 대응하는지 확인합니다.\n\n이 어댑터는 내부 재시도를 하지 않습니다. 호출 횟수는 제출 객체가 관리합니다. 네트워크 오류·잘못된 응답·예외는 미확인으로 돌려주므로 콜백의 noexcept 계약을 지킵니다. 연결·읽기·쓰기 제한은 각각2초이며 함수 전체2초라는 약속은 아닙니다.\n\n[cpp-httplib의 서버·클라이언트 예제](https://github.com/yhirose/cpp-httplib#server)는 같은 라이브러리가 HTTP 요청 수신과 호출을 제공하는 사용 형태를 보여 줍니다. 여기서는 저장소가 HTTP에 의존하게 하지 않고, 호출자와 수신 어댑터가 라이브러리를 사용하도록 둡니다.",
+      "codes": [
+        {
+          "label": "제출 포트의 HTTP 어댑터",
+          "text": "    study_net::Reply operator()(const study_net::MatchRecord& record) const noexcept {\n        try {\n            if(port_<1 || port_>65535)return {};\n            httplib::Client client(\"127.0.0.1\",port_);\n            client.set_connection_timeout(2,0);\n            client.set_read_timeout(2,0);\n            client.set_write_timeout(2,0);\n            const auto response=client.Post(\"/study/v1/matches\",record_json(record).dump(),\"application/json\");\n            if(!response || response->status!=200)return {};\n            const auto receipt=parse_receipt(response->body);\n            if(!receipt)return {};\n            return {study_net::Reply::confirmed,*receipt};\n        }catch(const std::exception&) { return {}; }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/http_client.h",
+        "symbol": "class MetaClient",
+        "invariant": "HTTP 클라이언트가 전송 세부를 감추고 도메인 값을 반환한다.",
+        "mayDiffer": "현재 post_match는 자체 최대3회 HTTP 시도 정책이 있다. 학습 HttpSender는 한 번만 호출한다."
+      }
+    },
+    {
+      "title": "실제 종료 값을 제출하는 실행 파일",
+      "body": "meta_submit은 포트와 경기 키를 인자로 받습니다. 누적 Duel을 만들고 한쪽 hard drop·다른 쪽 중립 입력으로 실제 보드가 종료될 때까지 실행합니다. 점수·라인·승자는 종료한 규칙 상태에서 읽어 MatchRecord에 담습니다. 각 Intent를 {}로 값 초기화한 뒤 필요한 입력만 바꿔 미설정 필드를 남기지 않습니다.\n\n여기서 프로그램은 신뢰된 시뮬레이션을 수행하는 로컬 실습 호출자입니다. 네트워크 사용자에게 승패 값을 받아 지급하는 서버 검증을 대신하지 않습니다. 실제 서비스에서는 relay의 검증 상태와 인증된 선수 번호가 이 입력의 근거가 됩니다.\n\n제출 객체에 준비한 뒤 HttpSender를 한 번 호출합니다. 확인되면 key·row·ticks를 출력하고 종료합니다. 서비스가 내려가 있으면 unconfirmed와 종료 코드3을 돌려줍니다. 호출 프로그램의 수명은 한 번의 실험이며 서비스 저장소의 수명과 분리돼 있습니다.",
+      "codes": [
+        {
+          "label": "종료된 경기와 제출 연결",
+          "text": "    const auto& a=game.left();const auto& b=game.right();\n    if(a.total_lines()>std::numeric_limits<std::uint32_t>::max() ||\n       b.total_lines()>std::numeric_limits<std::uint32_t>::max())return 1;\n    const auto winner=a.finished()==b.finished() ? study_net::MatchRecord::draw\n        : a.finished() ? study_net::MatchRecord::b : study_net::MatchRecord::a;\n    study_net::MatchRecord record{key,1,101,202,ticks,a.score(),b.score(),\n        static_cast<std::uint32_t>(a.total_lines()),static_cast<std::uint32_t>(b.total_lines()),winner};\n    study_net::MatchSubmission submission(1);\n    if(!submission.prepare(record))return 1;\n    const auto step=submission.submit(study_meta::HttpSender(port));\n    if(step!=study_net::MatchSubmission::SubmitStep::confirmed){std::puts(\"unconfirmed\");return 3;}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "finalizeRanked",
+        "invariant": "규칙 판정에서 얻은 결과를 API 제출 값으로 변환한다.",
+        "mayDiffer": "학습 실행 파일은 고정된 시드와 선수로 결과를 만든다. 서비스는 랭크 경기의 입력 검증·인증·경기 식별자를 사용한다."
+      }
+    },
+    {
+      "title": "호출자와 서비스를 따로 재시작해 본다",
+      "body": "두 터미널을 엽니다. 하나에서 study_meta 18081을 실행하면 해당 포트를 바인드하고 요청을 기다립니다. 다른 터미널에서 meta_submit 18081 17을 실행합니다. 같은 명령을 다시 실행하면 호출 프로세스는 새로 만들어지지만 서비스가 기억한 행 번호는 같습니다. key18로 호출하면 새 행 번호를 받습니다.\n\n이제 서비스를 종료하고 다시 실행해 key18부터 제출합니다. 메모리 저장소가 새로 생기므로 행 번호1부터 시작합니다. 이를 “프로세스 분리가 실패했다”라고 해석하지 않습니다. 서비스는 호출자와 독립적으로 살았고, 단지 그 서비스의 저장 구현이 휘발성이었기 때문입니다.\n\n실제 tetris_meta의 같은 실험에서는 동일 DB 경로를 유지해야 합니다. 계정과 경기 기록은 파일에서 읽습니다. 작업 폴더가 달라 상대 경로가 다른 파일을 가리키면 새 계정처럼 보일 수 있으므로 운영에서는 DB 경로도 상태의 정체성으로 관리합니다. HTTP가 응답한다는 관찰과 원하는 DB를 열었다는 관찰을 함께 확인해야 합니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "재시작과 저장 장치 장애",
+          "body": "프로세스를 끝내고 다시 읽는 실험은 프로세스 수명 경계를 확인합니다. 전원 손실·파일시스템 오류·동기화 요청 실패까지 같은 실험으로 검증한 것으로 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "열어 둔 주소와 준비 상태를 확인한다",
+      "body": "학습 서버는 바인드 주소를127.0.0.1로 고정합니다. 인자0은 OS가 빈 포트를 골라 바인드하게 하며, 출력한 PORT는 주소를 확보했다는 사실입니다. 자동 실험은 그 뒤 /healthz가 응답하는 것까지 기다린 다음 요청을 보냅니다. 단순히 일정 시간 잠든 뒤 준비됐다고 가정하지 않습니다.\n\n실제 메타도 비밀키 없는 개발용 결과 제출을 숫자 loopback에만 허용합니다. 전체 인터페이스 주소0.0.0.0이나 ::는 로컬 전용 주소가 아닙니다. 이름 해석 결과에 기대지 않도록 이 예외 모드에서는 localhost라는 이름도 받지 않습니다. 운영은 인증된 relay만 결과를 제출하도록 구성합니다.\n\n/healthz가200이어도 저장소가 가득 찼거나 DB 쓰기가 실패할 수 있습니다. **liveness**는 살아서 응답하는지를, **readiness**는 필요한 일을 맡을 준비가 됐는지를 관찰하는 목적의 구분입니다. 무엇을 검사하는 핸들러인지에 따라 그 의미가 정해집니다. 현재 healthz는 DB 쓰기까지 실행하지 않습니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "numeric loopback bind",
+        "invariant": "개발용 무인증 경로의 노출 조건을 시작 전에 검사한다.",
+        "mayDiffer": "loopback은 주소 범위의 제한이다. 다른 로컬 프로세스를 인증하거나 프록시를 통한 외부 공개를 방지하는 기능은 아니다."
+      }
+    },
+    {
+      "title": "타깃과 파일에서 의존 방향 읽기",
+      "body": "study_meta에는 수신 핸들러와 저장소가 들어갑니다. meta_submit에는 게임 규칙·제출 상태·HTTP 호출 어댑터가 들어갑니다. 둘은 wire.h에 적은 값의 형식을 공유하며 하나의 저장 객체를 링크해서 공유하지 않습니다. study_meta_http는 공통 include 경로·컴파일 요구·플랫폼 링크 요구를 전파하는 CMake INTERFACE 타깃입니다. 실행 중 네트워크 서비스나 공유 메모리 객체가 아닙니다.\n\nHTTP/JSON 헤더는 저장소에 포함된 third_party에서 가져옵니다. 체크포인트 폴더를 따로 옮기면 STUDY_VENDOR_DIR에 그 헤더가 있는 폴더를 지정합니다. 두 실행 파일은 SDL 창을 사용하지 않습니다. Windows의 여러 구성 생성기를 쓰면 실행 파일은 선택한 구성 하위 폴더에 생성될 수 있습니다.\n\n핵심은 값으로 넘기는 프로세스 경계, 수명이 명시된 저장 소유자, 저장 작업의 동기화, HTTP와 저장 규칙의 분리입니다. 메모리 저장소의64행 상한·포트·실습 선수 번호는 바뀔 수 있습니다. 실제 서비스가 요구하는 계정 인증·영속 트랜잭션·보상 정책은 학습의 메모리 API가 제공하는 기능과 구별해서 소스 뷰어에서 읽습니다.",
+      "codes": [
+        {
+          "label": "별도 실행 타깃 연결",
+          "text": "# Separate HTTP process; only protocol headers are shared with its caller.\nset(STUDY_VENDOR_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party\" CACHE PATH \"Vendored HTTP/JSON headers\")\nif(NOT EXISTS \"${STUDY_VENDOR_DIR}/httplib.h\" OR NOT EXISTS \"${STUDY_VENDOR_DIR}/json.hpp\")\n    message(FATAL_ERROR \"Set STUDY_VENDOR_DIR to the repository third_party directory\")\nendif()\nadd_library(study_meta_http INTERFACE)\ntarget_compile_features(study_meta_http INTERFACE cxx_std_17)\ntarget_include_directories(study_meta_http INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_include_directories(study_meta_http SYSTEM INTERFACE ${STUDY_VENDOR_DIR})\ntarget_link_libraries(study_meta_http INTERFACE Threads::Threads)\nif(WIN32)\n    target_link_libraries(study_meta_http INTERFACE ws2_32 crypt32)\nendif()\nadd_executable(study_meta meta/service.cpp)\ntarget_link_libraries(study_meta PRIVATE study_meta_http)\nadd_executable(meta_submit tools/meta_submit.cpp)\ntarget_link_libraries(meta_submit PRIVATE study_meta_http)\nadd_executable(meta_service_contract tests/meta_service_contract.cpp)\ntarget_link_libraries(meta_service_contract PRIVATE study_meta_http)\nadd_test(NAME meta_service_contract COMMAND meta_service_contract)\nset_tests_properties(meta_service_contract PROPERTIES TIMEOUT 20)\n",
+          "language": "cmake"
+        },
+        {
+          "label": "빌드와 계약 검사",
+          "text": "cmake -S docs/learn/checkpoints/109-meta-service -B out/study-109 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-109 --target study_meta meta_submit meta_service_contract -j2\nctest --test-dir out/study-109 -R \"^meta_service_contract$\" --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "서버 터미널",
+          "text": "out/study-109/study_meta 18081",
+          "language": "sh"
+        },
+        {
+          "label": "호출자 터미널",
+          "text": "out/study-109/meta_submit 18081 17\nout/study-109/meta_submit 18081 17\nout/study-109/meta_submit 18081 18",
+          "language": "sh"
+        },
+        {
+          "label": "meta/memory_results.h",
+          "language": "cpp",
+          "file": "checkpoints/109-meta-service/meta/memory_results.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/wire.h",
+          "language": "cpp",
+          "file": "checkpoints/109-meta-service/meta/wire.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/http_sender.h",
+          "language": "cpp",
+          "file": "checkpoints/109-meta-service/meta/http_sender.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/service.cpp",
+          "language": "cpp",
+          "file": "checkpoints/109-meta-service/meta/service.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/meta_submit.cpp",
+          "language": "cpp",
+          "file": "checkpoints/109-meta-service/tools/meta_submit.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/meta_service_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/109-meta-service/tests/meta_service_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "109-1",
+      "question": "relay와 meta를 같은 기기에서 서로 다른 실행 파일로 시작했습니다. relay의 Database* 주소를 HTTP로 보내면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "메타가 같은 객체를 바로 읽는다"
+        },
+        {
+          "id": "b",
+          "text": "같은 CPU라서 공유된다"
+        },
+        {
+          "id": "c",
+          "text": "객체 공유를 뜻하지 않는다"
+        },
+        {
+          "id": "d",
+          "text": "포트가 같으면 공유된다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "객체 공유를 뜻하지 않는다",
+      "explanation": "독립 프로세스는 각자의 주소 공간과 객체를 가집니다. 필요한 값을 직렬화해 보내고 수신 프로세스가 자기 객체를 구성해야 합니다."
+    },
+    {
+      "id": "109-2",
+      "question": "학습 서비스에 키17을 제출한 프로그램만 종료하고 다시 키17을 보냈습니다. 서비스는 계속 실행 중입니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 내용이면 원래 행 번호"
+        },
+        {
+          "id": "b",
+          "text": "항상 새로운 행 번호"
+        },
+        {
+          "id": "c",
+          "text": "서비스도 함께 종료됨"
+        },
+        {
+          "id": "d",
+          "text": "메모리는 모두 초기화됨"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "같은 내용이면 원래 행 번호",
+      "explanation": "저장소는 서비스 프로세스가 소유합니다. 호출자의 재시작은 서비스 객체를 다시 만들지 않으므로 동일 키·동일 내용은 원래 행으로 확인됩니다."
+    },
+    {
+      "id": "109-3",
+      "question": "MemoryResults가 가득 찬 상태에서 이미 저장된 동일 요청을 받았습니다. 올바른 구현 순서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "용량 초과를 먼저 반환"
+        },
+        {
+          "id": "b",
+          "text": "옛 행을 임의로 삭제"
+        },
+        {
+          "id": "c",
+          "text": "기존 키를 찾아 동일 내용을 먼저 확인"
+        },
+        {
+          "id": "d",
+          "text": "배열을 빈 상태로 재설정"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "기존 키를 찾아 동일 내용을 먼저 확인",
+      "explanation": "재전송 확인에는 새 행이 필요하지 않습니다. 기존 키 비교를 먼저 하고 새 키일 때만 용량을 검사해야 저장소가 가득 차도 최초 결과를 확인할 수 있습니다."
+    },
+    {
+      "id": "109-4",
+      "question": "GET /healthz는200인데 새 경기 저장은 공간 부족으로 실패합니다. 이 관찰은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HTTP 응답이 있으므로 불가능하다"
+        },
+        {
+          "id": "b",
+          "text": "liveness 응답과 저장 준비는 별개다"
+        },
+        {
+          "id": "c",
+          "text": "DB가 자동 복구됐다는 뜻이다"
+        },
+        {
+          "id": "d",
+          "text": "결과가 반드시 저장됐다는 뜻이다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "liveness 응답과 저장 준비는 별개다",
+      "explanation": "현재 healthz는 HTTP 응답 경로만 확인합니다. 저장 공간·DB 쓰기·새 요청 수용 여부까지 검사한 것으로 해석할 수 없습니다."
+    },
+    {
+      "id": "109-5",
+      "question": "현재 tetris_meta에서 SQLite 코드는 어디에서 실행됩니까?",
+      "options": [
+        {
+          "id": "a",
+          "text": "relay 프로세스 안"
+        },
+        {
+          "id": "b",
+          "text": "별도 SQLite 네트워크 데몬 안"
+        },
+        {
+          "id": "c",
+          "text": "정적 랭킹 웹페이지 안"
+        },
+        {
+          "id": "d",
+          "text": "메타 프로세스에 링크된 코드로 실행"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "메타 프로세스에 링크된 코드로 실행",
+      "explanation": "이 프로젝트는 SQLite 엔진을 메타 실행 파일에 포함합니다. 메타는 파일에 접근하고 relay는 메타 HTTP API를 호출합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "두 실행 파일에서 각각 어떤 객체를 소유하는지 표시합니다.",
+      "같은 키로 호출자만 다시 실행해 행 번호를 비교합니다.",
+      "서비스를 다시 시작한 뒤 다른 키부터 보내 메모리 상태의 수명을 관찰합니다.",
+      "본문·HTTP 상태·저장 결과가 서로 어떤 타입으로 변환되는지 추적합니다."
+    ],
+    "failureChecks": [
+      "가득 찬 저장소도 기존 요청을 다시 확인하는지 검사합니다.",
+      "같은 키를 동시에 보내도 행을 하나만 만드는지 검사합니다.",
+      "HTTP 응답과 실제 저장 준비 상태를 같은 의미로 취급하지 않는지 확인합니다."
+    ],
+    "expected": "호출자와 서비스가 독립적으로 실행되고, 저장소의 중복 판정·수명·HTTP 실패를 구별해 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 저장 경계 초안 직접 검수·실제 두 프로세스·SQLite 재시작 대조",
+    "draftJob": "out/learning-jobs/109-store-events.jsonl",
+    "corrections": [
+      "초안의 반복적 제한/검수 안내 주석 정리",
+      "실습 Intent 값 초기화 누락을 Release 경고로 발견해 교정",
+      "실제 무인증 개발 모드의 숫자 loopback 제한",
+      "모든 메타 상태=영속·healthz=DB준비·파일로원자성불가·모든DB메서드잠금 주석 교정"
+    ]
+  },
+  "validation": [
+    "누적108 불변 파일 보존; 저장 계약 ASan/UBSan·24스레드·본문 경계 검사",
+    "SCRIPTED/SDL 새3타깃, 독립 호출자/HTTP서비스 프로세스·동일 요청·충돌·동시 요청·413·재시작·미접속 검사",
+    "실제 개발용 공개결과 시작검사4조건: 수정전DB열기로 진행, 수정후DB접근 전 정책거절",
+    "실제 메타 HTTP·SQLite29검사: 커밋 뒤 메타 재시작에서도 동일 응답과 잔액 보존",
+    "Windows/macOS 네이티브·수동GUI·WAN·부하·전원장애·공개 인증 없는 학습 서비스 운영 미검증"
+  ]
+}

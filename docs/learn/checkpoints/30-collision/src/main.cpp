@@ -1,0 +1,190 @@
+#include "platform/platform.h"
+#include "board_example.h"
+#include "simulation/catalog.h"
+#include "simulation/movement.h"
+#include "simulation/collision.h"
+#include "renderer/piece_scene.h"
+#include "renderer/gl_api.h"
+#include "renderer/mesh.h"
+#include "renderer/vertex_buffer.h"
+#include "renderer/vertex_array.h"
+#include "renderer/shader.h"
+#include "renderer/program.h"
+#include "renderer/triangle.h"
+#include "renderer/shader_sources.h"
+#include "renderer/coordinates.h"
+#include "renderer/quad.h"
+#include "renderer/blend_scene.h"
+#include "renderer/board_scene.h"
+#include <cstdio>
+#include <exception>
+#include <string_view>
+
+// The table and borrowed GL strings are used only while the context exists.
+static int run_session(const study_grid::Grid& board, study_piece::Piece piece)
+{
+    std::size_t occupied=0;
+    for(const auto cell:board.cells()) if(cell==study_grid::Cell::filled) ++occupied;
+    std::printf("board state: %d rows x %d columns, %zu occupied cells\n",
+                study_grid::Grid::kRows,study_grid::Grid::kColumns,occupied);
+    if (study_collision::classify(board, piece) != study_collision::Placement::clear) return 1;
+    const auto mesh = study_board::make_mesh(board);
+    const auto cells = study_piece::to_board(piece);
+    if (!cells) { std::fputs("piece coordinate sum is outside int range\n",stderr); return 1; }
+    const auto piece_mesh = study_piece_view::make_visible_mesh(*cells);
+    const auto swap = platform_set_swap_interval(1);
+    std::printf("swap request=%d attempted=%d accepted=%d reported=%d (not measured refresh)\n",
+                1, swap.attempted, swap.accepted, swap.reported_interval);
+    study_gl::GlApi gl;
+    if (!study_gl::load(gl, platform_gl_get_proc)) return 1;
+    const auto* version = gl.GetString(study_gl::Version);
+    const auto* renderer = gl.GetString(study_gl::Renderer);
+    study_gl::GLint attributes = 0, major = 0, minor = 0, profile = 0;
+    gl.GetIntegerv(study_gl::MajorVersion, &major);
+    gl.GetIntegerv(study_gl::MinorVersion, &minor);
+    gl.GetIntegerv(study_gl::ContextProfileMask, &profile);
+    gl.GetIntegerv(study_gl::MaxVertexAttribs, &attributes);
+    const bool version_ok = major > 3 || (major == 3 && minor >= 3);
+    if (!version || !renderer || gl.GetError() != 0 || !version_ok ||
+        !(profile & study_gl::CoreProfileBit)) {
+        std::fputs("GL diagnostic query/version/profile failed\n", stderr);
+        return 1;
+    }
+    std::printf("GL %s | %s | actual=%d.%d core, max attributes=%d\n",
+                reinterpret_cast<const char*>(version), reinterpret_cast<const char*>(renderer),
+                major, minor, attributes);
+
+    // Declared after `gl`, destroyed before it and before platform_shutdown().
+    study_gl::VertexBuffer vertex_buffer(gl);
+    {
+        if (!vertex_buffer.upload(mesh.vertices)) return 1;
+    } // The GL data store owns a separate copy of the vertex positions.
+    study_gl::GLint stored_bytes = 0;
+    gl.GetBufferParameteriv(study_gl::ArrayBuffer, study_gl::BufferSize, &stored_bytes);
+    if (gl.GetError() != 0 || stored_bytes != static_cast<study_gl::GLint>(sizeof(mesh.vertices))) return 1;
+    std::printf("GL vertex buffer stores %d bytes (ready for draw)\n", stored_bytes);
+
+    // A VAO borrows the buffer: destroy the VAO first, then the buffer.
+    study_gl::VertexArray vertex_array(gl);
+    if (!vertex_array.configure(vertex_buffer.name())) return 1;
+    study_gl::GLint stride = 0, enabled = 0;
+    gl.GetVertexAttribiv(0, study_gl::AttribStride, &stride);
+    gl.GetVertexAttribiv(0, study_gl::AttribEnabled, &enabled);
+    if (gl.GetError() != 0 || stride != sizeof(study_mesh::Vertex2) || enabled != 1) return 1;
+    std::puts("VAO location 0: two floats, stride 8, offset 0, enabled (ready for draw)");
+
+    study_gl::Program empty_program(gl), filled_program(gl);
+    if (!study_board_scene::link_program(gl, empty_program, study_board_scene::empty_fragment) ||
+        !study_board_scene::link_program(gl, filled_program, study_board_scene::filled_fragment)) return 1;
+    std::printf("board mesh: %zu empty vertices + %zu filled vertices\n",
+                mesh.empty_vertices, study_board::vertex_count - mesh.empty_vertices);
+    if (!study_board_scene::configure(gl)) return 1;
+
+    study_gl::VertexBuffer piece_buffer(gl);
+    study_gl::VertexArray piece_array(gl);
+    study_gl::Program piece_program(gl);
+    if (piece_mesh.count > 0 &&
+        (!piece_buffer.upload(piece_mesh.vertices.data(),piece_mesh.count) ||
+         !piece_array.configure(piece_buffer.name()) ||
+         !study_board_scene::link_program(gl,piece_program,study_piece_view::fragment))) return 1;
+    std::printf("piece origin=(%d,%d), visible cells=%zu (Grid unchanged)\n",
+                piece.origin.row,piece.origin.column,piece_mesh.count/6);
+
+    WindowSize previous_window{};
+    DrawableSize previous_drawable{};
+    double report_elapsed=0;
+    while (!platform_should_close()) {
+        const FrameInfo frame=platform_begin_frame();
+        if (platform_should_close() || platform_key_pressed(Key::Escape)) break;
+        const int direction = study_movement::horizontal_intent(
+            platform_key_pressed(Key::Left), platform_key_pressed(Key::Right));
+        const auto move = study_collision::try_shift(board, piece, direction);
+        if (move == study_movement::Result::invalid) return 1;
+        if (move == study_movement::Result::moved) {
+            const auto updated_cells = study_piece::to_board(piece);
+            if (!updated_cells) return 1;
+            const auto updated_mesh = study_piece_view::make_visible_mesh(*updated_cells);
+            if (!piece_buffer.replace_same_size(updated_mesh.vertices.data(),
+                                                updated_mesh.count)) return 1;
+            std::printf("moved: column=%d (bounds and occupancy)\n", piece.origin.column);
+        } else if (move == study_movement::Result::blocked) {
+            std::puts("blocked by boundary or occupied cell; state unchanged");
+        }
+        const auto window=platform_window_size();
+        const auto drawable=platform_drawable_size();
+        const auto layout=study_letterbox::make_layout(
+            {window.width,window.height},{drawable.width,drawable.height},
+            study_board_scene::logical);
+        if (layout) {
+            if (window.width!=previous_window.width || window.height!=previous_window.height ||
+                drawable.width!=previous_drawable.width || drawable.height!=previous_drawable.height) {
+                const auto& v=layout->viewport;
+                std::printf("window=%dx%d drawable=%dx%d viewport(top-left)=%d,%d %dx%d GL-y=%d\n",
+                    window.width,window.height,drawable.width,drawable.height,
+                    v.x,v.y,v.width,v.height,study_letterbox::gl_y(*layout));
+                previous_window=window; previous_drawable=drawable;
+            }
+            const auto mouse=platform_window_mouse();
+            const auto point=mouse.available ? study_letterbox::window_to_logical(
+                *layout,{static_cast<double>(mouse.x),static_cast<double>(mouse.y)}) : std::nullopt;
+            report_elapsed+=frame.dt;
+            if (report_elapsed>=0.5) {
+                const auto cell = point ? study_board::cell_at(point->x,point->y) : std::nullopt;
+                if (cell) std::printf("board mouse: row=%d column=%d (pitch includes gap)\n",
+                                      cell->row,cell->column);
+                else std::puts("mouse: outside board or unavailable");
+                report_elapsed=0;
+            }
+            if (!study_board_scene::render(gl,empty_program.name(),filled_program.name(),
+                    vertex_array.name(),vertex_buffer.vertex_count(),mesh.empty_vertices,*layout)) return 1;
+            if (!study_piece_view::render(gl,piece_program.name(),piece_array.name(),
+                                          piece_buffer.vertex_count())) return 1;
+            (void)platform_present();
+        }
+        // Invalid/minimized dimensions skip rendering, not frame pacing.
+        platform_end_frame();
+    }
+    return 0;
+}
+
+static void usage(const char* executable) {
+    std::printf("Usage: %s [I|J|L|O|S|T|Z] (default T)\n", executable);
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+        usage(argv[0]);
+        return 0;
+    }
+    if (argc > 2) {
+        usage(argv[0]);
+        return 2;
+    }
+
+    const auto* selected = study_catalog::find_name(argc == 2 ? argv[1] : "T");
+    if (!selected) {
+        usage(argv[0]);
+        return 2;
+    }
+    const auto piece = study_catalog::make_piece(selected->kind);
+    if (!piece) {
+        return 1; // A known catalog entry must produce a Piece.
+    }
+    std::printf("selected=%.*s id=%d spawn=(%d,%d)\n",
+        static_cast<int>(selected->name.size()), selected->name.data(),
+        static_cast<int>(selected->kind), piece->origin.row, piece->origin.column);
+
+    std::puts("Tap Left/Right: one cell. Both press edges cancel. Filled cells block movement.");
+    const auto board = make_example_board();
+    if (!platform_init(640, 480, "Tetris study: horizontal movement (bounds and occupancy)")) {
+        return 1;
+    }
+    int result = 1;
+    try {
+        result = run_session(board, *piece);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Session exception: %s\n", e.what());
+    }
+    platform_shutdown();
+    return result;
+}

@@ -1,0 +1,400 @@
+{
+  "id": "lesson-89",
+  "title": "시드 협상: 두 게임의 시작을 맞추기",
+  "shortTitle": "버전·규칙·시작 조건·확인 응답",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 프레임을 주고받고 연결 수명을 관리하지만 게임의 공통 시작 조건은 아직 합의하지 않습니다.",
+  "finish": "완료: 호스트가 제안한 시작 조건을 상대가 검증·확인하고, 두 프로세스가 같은 시드로 초기 게임 상태를 만듭니다.",
+  "objective": "연결과 준비 완료를 구분하고, 메시지 순서·호환성·필드 검증·확인 응답을 갖춘 시작 조건 협상을 구현합니다.",
+  "prerequisites": [
+    "동일 시드와 난수 소비 순서에 따른 결정론적 초기화",
+    "고정 길이 payload와 후보 객체 검증",
+    "연결 객체의 소유·프레임 수신·송신 마감시간"
+  ],
+  "recap": {
+    "points": [
+      "연결 객체는 소켓과 수신 파서의 수명을 함께 관리합니다.",
+      "방향별 종료와 핸들 해제는 서로 다른 경계입니다.",
+      "정상 프레임이나 EOF만으로 애플리케이션 요청의 성공을 판단할 수는 없습니다."
+    ],
+    "bridge": "이제 양쪽이 어떤 규칙과 시작 값으로 게임을 만들지 프레임의 의미와 순서로 약속합니다."
+  },
+  "sections": [
+    {
+      "title": "연결된 두 프로그램은 아직 같은 게임을 만들지 않았다",
+      "body": "호스트가 시드 77로 블록을 만들고 상대가 자신의 시계에서 얻은 시드 91로 시작하면, 이후 입력을 똑같이 주고받아도 초기 블록부터 달라집니다. 같은 시드라도 블록 목록이나 난수 소비 규칙이 다른 실행 파일이면 결과가 달라질 수 있습니다. 네트워크 연결 위에 게임 시작 조건의 계약이 필요합니다.\n\n이번에는 한 호스트가 공통 설정을 제안하고, 상대가 그 내용을 확인해 되돌려 보내는 절차를 만듭니다. 협상한 시드로 누적 Round를 생성하고 두 프로세스의 초기 상태 해시를 비교합니다. 카운트다운과 입력 지연은 합의할 값으로 전달하며 이 진단에서 실행하지는 않습니다.\n\n이 방식의 협상은 여러 후보의 최적값을 찾는 알고리즘이 아닙니다. 호스트가 정한 유효한 설정을 상대가 수락하거나 연결을 끝내는 제안·확인 절차입니다.",
+      "reference": {
+        "path": "net/session.h",
+        "symbol": "struct SeedParams",
+        "invariant": "게임 생성 전에 시드와 시작 조건을 명시적인 값으로 확정한다.",
+        "mayDiffer": "기준 Config는 공통 값만 가진다. 현재 SeedParams에는 로컬 역할·랭크 여부·아이콘도 포함된다."
+      }
+    },
+    {
+      "title": "같아야 하는 값과 달라야 하는 역할을 나눈다",
+      "body": "Config에는 seed, countdown_ticks, input_delay가 들어갑니다. 이 세 값은 양쪽에서 같아야 합니다. 역할은 반대로 host와 peer가 서로 달라야 합니다. 공통 설정 안에 로컬 역할을 무심코 복사하면 두 플레이어가 같은 결정권을 가질 수 있습니다.\n\n시드는 난수열의 시작 값입니다. 카운트다운은 준비 후 기다릴 로컬 틱 수이며 공통 벽시계 시각이 아닙니다. 입력 지연은 입력을 곧바로 소비하지 않고 얼마만큼 앞서 확보할지 정하는 틱 단위 값입니다. 지금은 정확히 같은 값을 전달하는 데 집중합니다.\n\n기준에서는 카운트다운 0~600, 입력 지연 0~30을 허용합니다. 각각 u32와 u8의 표현 범위보다 작으며 학습 진단의 정책입니다. 정책 상한과 자료형의 최댓값을 구분해야 검증을 나중에 수정할 수 있습니다.",
+      "codes": [
+        {
+          "label": "공통 설정만 소유한다",
+          "language": "cpp",
+          "text": "struct Config {\n  std::uint64_t seed = 0;\n  std::uint32_t countdown_ticks = 120;\n  std::uint8_t input_delay = 2;\n};"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "시드 0도 합의할 수 있다",
+          "body": "코덱은 0을 다른 값으로 바꾸지 않습니다. 기존 시뮬레이션은 0을 기본 시드로 정규화합니다. 양쪽이 같은 초기화 규칙을 사용한다는 전제에서 0도 일관된 시작 조건이 됩니다. 통신 필드의 값과 난수 엔진에 최종 전달되는 값을 구분해 읽으세요."
+        }
+      ]
+    },
+    {
+      "title": "버전과 규칙 ID는 서로 다른 호환성 약속이다",
+      "body": "프로토콜 버전은 프레임 payload의 필드 순서·폭·해석 방식에 관한 약속입니다. 규칙 ID는 블록 생성이나 게임 판정처럼 같은 입력에서 같은 상태를 만들기 위한 시뮬레이션 약속입니다. wire 형식이 같아도 게임 규칙이 바뀌면 규칙 ID의 의미를 갱신해야 합니다.\n\nHELLO는 version:u16과 rules:u32, 총 6바이트입니다. 기준값은 둘 다 1입니다. 호스트는 두 값을 검사한 뒤에만 설정을 제안합니다. 상대도 OFFER의 같은 필드를 검사하므로 서로 다른 기준으로 payload를 적용하는 일을 막습니다.\n\nID가 같다는 사실은 상대가 정직하게 구현했다는 증거는 아닙니다. 이 값은 호환성을 선언하는 규약이며 실행 파일 인증이나 부정행위 검증을 대신하지 않습니다.",
+      "codes": [
+        {
+          "label": "예상한 형식과 규칙인지 확인한다",
+          "language": "cpp",
+          "text": "inline bool valid_hello(const Frame& frame) noexcept {\n  if (frame.type != kTypeHello || frame.size != kHelloPayloadBytes) {\n    return false;\n  }\n  ByteReader reader(frame.payload.data(), frame.size);\n  std::uint16_t version = 0;\n  std::uint32_t rules = 0;\n  if (!reader.u16(version)) {\n    return false;\n  }\n  if (!reader.u32(rules)) {\n    return false;\n  }\n  if (!reader.at_end()) {\n    return false;\n  }\n  return version == kProtocolVersion && rules == kRulesetId;\n}"
+        }
+      ]
+    },
+    {
+      "title": "메시지 순서를 상태 전이로 그린다",
+      "body": "순서는 peer의 HELLO → host의 OFFER → peer의 ACK입니다. 호스트는 HELLO를 기다리고, 상대는 HELLO를 보낸 뒤 OFFER를 기다립니다. 두 쪽이 모두 먼저 읽기만 하면 서로 보내기를 기다리며 멈출 수 있으므로 시작 역할이 순서를 결정합니다.\n\n같은 TYPE이라도 어느 단계에서 왔는지가 중요합니다. HELLO를 기다릴 때 ACK를 받거나 OFFER 대신 ACK를 받으면 protocol_error입니다. 프레임의 바이트 문법이 올바른 것과 현재 단계에 맞는 메시지인 것은 별도의 검사입니다.\n\n기준 함수는 이 상태를 순차 코드의 위치로 표현합니다. 새로 연결된 Connection에서 한 번만 호출하는 계약입니다. 지속적인 세션의 모든 상태를 자동으로 관리하는 객체는 아니므로 성공 후 도착한 메시지나 재대전 단계는 호출자가 맡습니다.",
+      "codes": [
+        {
+          "label": "각 쪽이 현재 기다리는 것",
+          "language": "text",
+          "text": "peer                         host\nHELLO 송신 ───────────────→ HELLO 검사\nOFFER 대기                  OFFER 송신\nOFFER 검사 ←───────────────┘\nACK 송신 ─────────────────→ ACK 내용 비교\n공통 설정 공개               공통 설정 공개\n\n잘못된 단계/형식/값: 연결 정리, agreed는 변경하지 않음"
+        }
+      ]
+    },
+    {
+      "title": "제안과 확인 응답에 같은 설정을 싣는다",
+      "body": "OFFER와 ACK의 payload는 모두 20바이트입니다. version 2 + rules 4 + seed 8 + countdown 4 + delay 1 + receiver_role 1입니다. 수신자 역할은 초기 직결 협상에서 항상 Peer를 뜻하는 2로 둡니다. 호스트 자신의 역할 1은 로컬에 유지합니다.\n\nACK에 단순히 ‘OK’ 하나만 보내면 무엇을 확인했는지 호스트가 비교할 수 없습니다. 설정 전체를 되돌려 보내면 시드·카운트다운·입력 지연 중 하나라도 달라졌는지 검사할 수 있습니다. 작은 고정 크기 설정이므로 이 방법을 사용합니다.\n\nencode_config는 후보 Frame에 모든 필드를 쓴 뒤 출력에 반영합니다. 만들 수 없는 타입이나 범위 밖 설정이면 기존 출력을 보존합니다. 고정 payload 상한 32바이트 안에 20바이트가 들어가는 것도 static_assert로 연결합니다.",
+      "codes": [
+        {
+          "label": "제안과 확인을 같은 wire 규약으로 만든다",
+          "language": "cpp",
+          "text": "inline bool encode_config(std::uint8_t type, const Config& config,\n                          Frame& out) noexcept {\n  if (type != kTypeOffer && type != kTypeAck) {\n    return false;\n  }\n  if (!valid_config(config)) {\n    return false;\n  }\n  Frame candidate{};\n  candidate.type = type;\n  ByteWriter writer(candidate.payload.data(), candidate.payload.size());\n  const bool ok = writer.u16(kProtocolVersion) &&\n                  writer.u32(kRulesetId) &&\n                  writer.u64(config.seed) &&\n                  writer.u32(config.countdown_ticks) &&\n                  writer.u8(config.input_delay) &&\n                  writer.u8(kReceiverRolePeer);\n  if (!ok || writer.position() != kConfigPayloadBytes) {\n    return false;\n  }\n  candidate.size = kConfigPayloadBytes;\n  out = candidate;\n  return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::SendNewSeed(",
+        "invariant": "전송할 역할은 받는 쪽에 배정되는 값이며 로컬 역할과 구분한다.",
+        "mayDiffer": "현재 엔진 SEED는 14바이트이고 정상 재대전에서도 다시 사용한다. 기준 OFFER/ACK는 버전·규칙 ID가 포함된 별도 학습 wire다."
+      }
+    },
+    {
+      "title": "후보 설정을 검증한 뒤 한 번에 적용한다",
+      "body": "decode_config는 기대한 TYPE와 정확한 20바이트 길이를 먼저 확인합니다. 그 뒤 ByteReader로 필드를 읽고 버전·규칙·수신자 역할·정책 상한을 검사합니다. 모든 조건이 맞아야 out에 후보를 대입합니다.\n\n예를 들어 시드는 정상인데 마지막 역할 바이트가 3이라면 메시지 전체가 실패합니다. 역할만 기본값으로 바꾸면서 시드를 적용하면, 검증되지 않은 제안 일부가 현재 게임 설정에 들어갈 수 있습니다. 필드 읽기와 메시지 적용을 나누는 이유입니다.\n\n모든 필드를 읽었다는 조건만으로 충분하지도 않습니다. 정확한 길이를 확인하지 않으면 뒤에 붙은 알 수 없는 바이트를 조용히 버려 서로 다른 버전이 같은 메시지로 오인할 수 있습니다. 확장이 필요하면 버전과 확장 규약을 함께 정해야 합니다.",
+      "codes": [
+        {
+          "label": "형식·값·역할을 모두 검증한 후보만 공개한다",
+          "language": "cpp",
+          "text": "inline bool decode_config(const Frame& frame, std::uint8_t expected,\n                          Config& out) noexcept {\n  if (expected != kTypeOffer && expected != kTypeAck) {\n    return false;\n  }\n  if (frame.type != expected || frame.size != kConfigPayloadBytes) {\n    return false;\n  }\n  ByteReader reader(frame.payload.data(), frame.size);\n  std::uint16_t version = 0;\n  std::uint32_t rules = 0;\n  Config candidate{};\n  std::uint8_t receiver_role = 0;\n  if (!reader.u16(version)) {\n    return false;\n  }\n  if (!reader.u32(rules)) {\n    return false;\n  }\n  if (!reader.u64(candidate.seed)) {\n    return false;\n  }\n  if (!reader.u32(candidate.countdown_ticks)) {\n    return false;\n  }\n  if (!reader.u8(candidate.input_delay)) {\n    return false;\n  }\n  if (!reader.u8(receiver_role)) {\n    return false;\n  }\n  if (!reader.at_end()) {\n    return false;\n  }\n  if (version != kProtocolVersion || rules != kRulesetId) {\n    return false;\n  }\n  if (receiver_role != kReceiverRolePeer) {\n    return false;\n  }\n  if (!valid_config(candidate)) {\n    return false;\n  }\n  out = candidate;\n  return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::handleFrame(",
+        "invariant": "길이와 역할을 모두 검사한 뒤 시드 설정을 적용한다.",
+        "mayDiffer": "기준은 버전·규칙 ID·정책 상한도 검증한다. 현재 SEED에는 이 두 ID가 포함되지 않는다."
+      }
+    },
+    {
+      "title": "호스트는 ACK의 세 값까지 비교한다",
+      "body": "negotiate_host는 먼저 로컬 제안이 정책 안에 있는지 검사합니다. 로컬 설정이 틀렸다면 아직 통신을 하지 않고 invalid_local을 반환합니다. 연결과 agreed는 그대로이므로 호출자가 설정을 고칠 수 있습니다.\n\n정상 HELLO를 받으면 OFFER를 보냅니다. 다음 프레임은 유효한 ACK여야 하며, decode가 성공한 뒤에도 equal_config로 제안의 모든 공통 값과 비교합니다. 상대가 다른 시드를 넣어 형식만 맞춘 ACK를 보내도 준비 완료로 전환하지 않습니다.\n\n함수 시작에서 proposed를 local로 복사합니다. proposed와 agreed가 같은 객체를 가리키더라도 마지막 성공 전에는 출력이 바뀌지 않게 하려는 것입니다. 네트워크·프로토콜 실패는 연결을 정리하고 원래 agreed를 보존합니다.",
+      "codes": [
+        {
+          "label": "정확히 같은 제안의 확인을 기다린다",
+          "language": "cpp",
+          "text": "inline HandshakeResult negotiate_host(Connection& connection,\n                                      const Config& proposed,\n                                      Config& agreed) {\n  const Config local = proposed;  // snapshot before touching `agreed`\n  if (!valid_config(local)) {\n    return HandshakeResult::invalid_local;  // output and connection untouched\n  }\n\n  Frame hello{};\n  const Connection::ReadReport hello_read = connection.next_frame(hello);\n  if (hello_read.state != Connection::ReadState::frame) {\n    connection.close();\n    return HandshakeResult::receive_failed;\n  }\n  if (!valid_hello(hello)) {\n    connection.close();\n    return HandshakeResult::protocol_error;\n  }\n\n  Frame offer{};\n  if (!encode_config(kTypeOffer, local, offer)) {\n    connection.close();  // local was validated, so this path is unexpected\n    return HandshakeResult::invalid_local;\n  }\n  if (!seed_handshake_detail::send_with_budget(connection, offer)) {\n    connection.close();\n    return HandshakeResult::send_failed;\n  }\n\n  Frame ack{};\n  const Connection::ReadReport ack_read = connection.next_frame(ack);\n  if (ack_read.state != Connection::ReadState::frame) {\n    connection.close();\n    return HandshakeResult::receive_failed;\n  }\n  Config echoed{};\n  if (!decode_config(ack, kTypeAck, echoed)) {\n    connection.close();\n    return HandshakeResult::protocol_error;\n  }\n  if (!equal_config(echoed, local)) {\n    connection.close();\n    return HandshakeResult::protocol_error;\n  }\n\n  agreed = local;\n  return HandshakeResult::ready;\n}"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::acceptThread(",
+        "invariant": "역할별로 시작 조건을 제안하고 게임 준비 상태로 전환한다.",
+        "mayDiffer": "현재 호스트는 송신 큐 적재 뒤 ready가 되며 기준의 설정 ACK를 기다리지 않는다."
+      }
+    },
+    {
+      "title": "상대는 제안을 확인하고 ACK 송신 뒤 설정을 공개한다",
+      "body": "negotiate_peer는 HELLO를 보내고 OFFER를 읽습니다. 제안의 모든 조건을 검사한 후보로 ACK를 만들고, ACK 송신이 완료된 뒤 agreed에 반영합니다. 송신이 실패하면 제안을 읽었다고 해도 이 함수는 ready를 반환하지 않습니다.\n\n각 송신은 2초 예산을 사용합니다. 이 시간은 세 번의 메시지 교환 전체에 대한 예산이 아니며 수신 대기에는 적용되지 않습니다. 상위 기능이 ‘5초 안에 게임 입장 완료’ 같은 계약을 필요로 하면 별도의 전체 절차 마감시간과 취소 가능한 수신이 필요합니다.\n\n협상 중 EOF는 기다리던 프레임이 오지 않은 실패입니다. 정상 경로는 연결을 열어 둔 채 반환하여 이어지는 게임 메시지를 받을 수 있게 합니다.",
+      "codes": [
+        {
+          "label": "검증한 후보를 확인 응답으로 되돌려 보낸다",
+          "language": "cpp",
+          "text": "inline HandshakeResult negotiate_peer(Connection& connection, Config& agreed) {\n  const Frame hello = make_hello();\n  if (!seed_handshake_detail::send_with_budget(connection, hello)) {\n    connection.close();\n    return HandshakeResult::send_failed;\n  }\n\n  Frame offer{};\n  const Connection::ReadReport offer_read = connection.next_frame(offer);\n  if (offer_read.state != Connection::ReadState::frame) {\n    connection.close();\n    return HandshakeResult::receive_failed;\n  }\n  Config candidate{};\n  if (!decode_config(offer, kTypeOffer, candidate)) {\n    connection.close();\n    return HandshakeResult::protocol_error;\n  }\n\n  Frame ack{};\n  if (!encode_config(kTypeAck, candidate, ack)) {\n    connection.close();  // candidate passed decode_config, so unexpected\n    return HandshakeResult::protocol_error;\n  }\n  if (!seed_handshake_detail::send_with_budget(connection, ack)) {\n    connection.close();\n    return HandshakeResult::send_failed;\n  }\n\n  agreed = candidate;\n  return HandshakeResult::ready;\n}"
+        }
+      ]
+    },
+    {
+      "title": "두 ready는 같은 순간의 전역 사건이 아니다",
+      "body": "peer의 ready는 ACK를 로컬 전송 계층이 수락한 뒤입니다. host의 ready는 그 ACK를 수신하고 내용을 확인한 뒤입니다. 네트워크 지연 때문에 두 시점은 별개입니다. peer가 먼저 반환한 뒤 연결이 끊기면 host는 ready에 도달하지 못할 수도 있습니다.\n\n확인 응답을 추가하면 확인 범위를 늘릴 수 있지만, 메시지의 수신과 다음 응답 사이에도 다시 지연·단절이 있을 수 있습니다. 여기서는 각 반환이 보장하는 사실을 제한하고, 게임 진행은 이후 입력을 실제로 확보한 조건에 연결합니다.\n\n카운트다운 120도 두 기기의 벽시계를 일치시키지 않습니다. 60Hz 기준으로 각자 약 2초를 기다리는 값일 뿐입니다. 중요한 것은 같은 규칙·초기 상태와 같은 틱의 입력을 사용한다는 조건이며 실제 프레임 표시 시각의 일치와 구별합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "ACK가 증명하는 범위",
+          "body": "호스트는 같은 설정의 ACK를 읽었다고 말할 수 있습니다. 상대의 게임 화면이 표시됐는지, 이후 프레임을 처리할 수 있는지, 변조된 프로그램인지까지 이 ACK가 증명하지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "수락한 소켓의 소유권을 Connection에 넘긴다",
+      "body": "클라이언트는 Connection::start로 연결하지만 서버는 listen_loopback과 accept_one으로 상대를 받습니다. 같은 협상 함수를 사용하려면 수락한 Socket을 Connection에 넣는 입구가 필요합니다. adopt는 연결 객체가 비어 있고 후보 핸들이 유효할 때만 이동합니다.\n\nbusy나 invalid로 실패하면 호출자의 Socket은 그대로입니다. 성공하면 후보가 비워지고 Connection이 닫을 책임을 갖습니다. 실패했는데도 소유권이 넘어갔다고 생각하거나 성공한 뒤 원시 핸들을 다시 닫으면 수명 계약이 깨집니다.\n\n이 입구는 새로 수락한 연결된 블로킹 소켓을 받는 계약입니다. 유효한 정수라는 검사만으로 연결 상태와 모드까지 증명하지는 않으므로 후보를 만드는 경로의 책임을 함께 명시합니다.",
+      "codes": [
+        {
+          "label": "성공한 인계에서만 후보를 비운다",
+          "language": "cpp",
+          "text": "bool Connection::adopt(Socket& candidate) noexcept {\n    if (active() || !candidate.valid()) return false;\n    parser_ = FrameParser{};\n    send_closed_ = false;\n    peer_eof_ = false;\n    socket_ = std::move(candidate);\n    return true;\n}"
+        }
+      ]
+    },
+    {
+      "title": "협상한 시드를 기존 게임 초기화에 연결한다",
+      "body": "seed_probe는 협상이 ready를 반환하면 Round::create_seeded에 agreed.seed를 넘깁니다. 그 뒤 state_hash의 성공 여부를 확인하고 초기 상태 해시를 출력합니다. 두 프로세스가 같은 값을 전달하는지 숫자만 보는 대신 기존 규칙 코드가 실제로 만든 결과까지 관찰합니다.\n\n같은 해시는 유용한 진단 신호지만 충돌이 가능한 요약값입니다. 검증할 때는 공통 설정도 필드별로 비교하며, 결정론의 근거는 동일한 초기화 규칙과 상태입니다. 화면이나 네트워크 포트처럼 시뮬레이션 밖의 값은 이 초기 상태에 넣지 않습니다.\n\n진단은 아직 네트워크 입력으로 Round를 tick하지 않습니다. 시드 합의와 게임 생성의 연결을 완성하며, 누적 게임 실행과 렌더러·오디오 경로는 유지합니다.",
+      "codes": [
+        {
+          "label": "협상한 값으로 누적 시뮬레이션을 만든다",
+          "language": "cpp",
+          "text": "auto round=study_round::Round::create_seeded(study_grid::Grid{},agreed.seed);\n if(!round)return 1;\n const auto hash=study_hash::state_hash(*round);\n if(!hash)return 1;"
+        }
+      ]
+    },
+    {
+      "title": "현재 엔진의 SEED와 비교해 읽는다",
+      "body": "현재 엔진의 SEED payload는 seed:u64, start_tick:u32, input_delay:u8, role:u8의 14바이트입니다. start_tick은 실제 사용처에서 시작 카운트다운으로 쓰입니다. 로컬 SeedParams.role은 자신의 역할이고, 송신 payload의 role은 상대에게 배정할 역할입니다. 초기 호스트와 재대전 송신은 이 차이를 지켜야 합니다.\n\n현재 수신 분기는 정확한 14바이트와 유효한 역할을 확인한 뒤 설정을 적용합니다. 짧거나 여분이 붙은 payload, 알 수 없는 역할이면 설정과 ready를 보존합니다. 정상 SEED는 연습전 재시작에서도 다시 받으므로 기준의 연결당 한 번 협상과 정책이 다릅니다.\n\n현재 호스트는 SEED를 송신 큐에 넣고 ready를 세우며, 엄격한 버전·규칙·ACK 확인 절차를 기다리지 않습니다. 이 강의의 학습 wire를 현재 게임에 그대로 꽂을 수는 없습니다. 유지되는 핵심은 같은 시작 조건을 만들고 로컬 역할과 상대 배정을 구분하는 것이며, 실제 프로토콜의 호환성과 경기 단계별 권한 검증은 별도의 변경 범위입니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::handleFrame(",
+        "invariant": "전체 메시지가 유효한지 확인한 뒤 시작 설정을 적용한다.",
+        "mayDiffer": "현재 엔진은 재대전용 SEED 반복을 허용하며 학습용 버전·규칙·ACK 절차와 운영 상한을 그대로 적용하지 않는다."
+      }
+    },
+    {
+      "title": "두 터미널에서 같은 초기 상태를 확인한다",
+      "body": "첫 터미널에서 호스트 진단을 실행하면 LISTEN 뒤에 포트가 표시됩니다. 둘째 터미널에서 그 포트로 접속합니다. 양쪽 READY 줄은 role만 다르고 seed·countdown·delay·hash는 같아야 합니다. 시드 0, 1, 77, 큰 64비트 값을 바꿔 확인할 수 있습니다.\n\nCMake에는 코덱 검사와 seed_probe 타깃을 추가합니다. 협상 함수는 헤더에 정의된 inline 함수여서 별도 구현 .cpp 없이 StudySocket에 연결한 실행 파일에서 사용합니다. accept한 소켓을 채택하는 Connection의 메서드는 기존 connection.cpp에 추가합니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/89-seed-handshake -B out/study89 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study89 -j3\nctest --test-dir out/study89 --output-on-failure\n./out/study89/seed_probe listen 0 77\n# 다른 터미널에서 LISTEN 포트 사용\n./out/study89/seed_probe connect 실제포트"
+        },
+        {
+          "label": "추가한 빌드·검사 타깃",
+          "language": "cmake",
+          "text": "add_executable(seed_protocol_contract tests/seed_protocol_contract.cpp)\ntarget_link_libraries(seed_protocol_contract PRIVATE StudySocket)\nadd_test(NAME seed_protocol_contract COMMAND seed_protocol_contract)\nadd_executable(seed_probe tools/seed_probe.cpp)\ntarget_link_libraries(seed_probe PRIVATE StudySocket)\nadd_test(NAME seed_probe_help COMMAND seed_probe --help)\nadd_executable(seed_lifetime_contract tests/seed_lifetime_contract.cpp)\ntarget_link_libraries(seed_lifetime_contract PRIVATE StudySocket)\nadd_test(NAME seed_lifetime_contract COMMAND seed_lifetime_contract)\nset_tests_properties(seed_lifetime_contract PROPERTIES TIMEOUT 10)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성",
+          "body": "빌드의 --config Release와 CTest의 -C Release를 사용하고 Release/ 아래 exe를 실행합니다. 두 진단은 같은 기기의 loopback으로 연결합니다."
+        }
+      ]
+    },
+    {
+      "title": "틀린 순서와 다른 제안의 확인을 검사한다",
+      "body": "코덱 검사는 고정된 little-endian 바이트 배열과 결과를 대조합니다. 길이 0~33, 역할 바이트 0~255, 정책 경계와 시드의 양끝을 검사하고 실패한 출력이 그대로인지 확인합니다. 정상 값을 넣었다가 다시 읽는 round-trip만으로는 필드 순서가 양쪽에서 함께 잘못된 경우를 놓칠 수 있습니다.\n\n통신 검사는 HELLO 자리의 ACK, 잘못된 버전·규칙, 다른 시드의 ACK, 잘못된 수신자 역할, EOF를 보냅니다. ready가 되지 않고 연결이 정리되며 agreed가 보존되는지 확인합니다. 포트 연결에 성공했다는 검사만으로 협상 성공을 주장하지 않습니다.\n\n완성 파일에서는 순차 제어 흐름이 어떤 메시지를 기대하는지, 출력 대입이 어느 줄에서 일어나는지 따라가 보세요. 성공과 실패에서 Connection의 소유 상태가 어떻게 달라지는지도 함께 확인합니다.",
+      "codes": [
+        {
+          "label": "net/seed_protocol.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/89-seed-handshake/net/seed_protocol.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/seed_handshake.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/89-seed-handshake/net/seed_handshake.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/seed_probe.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/89-seed-handshake/tools/seed_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/seed_protocol_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/89-seed-handshake/tests/seed_protocol_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/seed_lifetime_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/89-seed-handshake/tests/seed_lifetime_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "89-1",
+      "question": "호스트의 로컬 역할은 Host입니다. 초기 제안의 receiver_role에는 무엇을 넣을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Host: 보내는 쪽의 역할이므로"
+        },
+        {
+          "id": "b",
+          "text": "Peer: 받는 쪽에 배정할 역할이므로"
+        },
+        {
+          "id": "c",
+          "text": "어떤 값이든 유효한 시드면 상관없다"
+        },
+        {
+          "id": "d",
+          "text": "양쪽 모두 Host여야 같은 게임을 만든다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Peer: 받는 쪽에 배정할 역할이므로",
+      "explanation": "공통 설정은 같지만 역할은 다릅니다. 로컬 Host를 상대에 그대로 적용하면 두 쪽이 같은 결정권을 갖게 됩니다."
+    },
+    {
+      "id": "89-2",
+      "question": "유효한 ACK가 왔지만 seed가 제안한 값과 다릅니다. 호스트의 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "형식이 맞으므로 ready"
+        },
+        {
+          "id": "b",
+          "text": "ACK의 시드로 호스트를 자동 변경"
+        },
+        {
+          "id": "c",
+          "text": "protocol_error로 연결 정리, agreed 보존"
+        },
+        {
+          "id": "d",
+          "text": "시드를 무시하고 나머지만 적용"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "protocol_error로 연결 정리, agreed 보존",
+      "explanation": "ACK는 형식 검사뿐 아니라 제안 내용과의 동일성 검사도 통과해야 합니다. 검증한 후보만 마지막에 출력합니다."
+    },
+    {
+      "id": "89-3",
+      "question": "peer가 ready를 반환한 순간 보장되는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "host도 같은 순간 ready다"
+        },
+        {
+          "id": "b",
+          "text": "두 화면이 이미 표시됐다"
+        },
+        {
+          "id": "c",
+          "text": "ACK가 호스트의 게임 로직에서 실행됐다"
+        },
+        {
+          "id": "d",
+          "text": "유효한 제안을 읽었고 ACK 송신이 로컬에서 수락됐다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "유효한 제안을 읽었고 ACK 송신이 로컬에서 수락됐다",
+      "explanation": "peer는 로컬 ACK 송신 완료 뒤 반환합니다. host의 ACK 수신·검증은 더 늦거나 단절로 실패할 수 있습니다."
+    },
+    {
+      "id": "89-4",
+      "question": "OFFER의 마지막 역할 바이트가 잘못됐습니다. 안전한 적용 방식은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "전체 제안을 거절하고 기존 출력을 보존"
+        },
+        {
+          "id": "b",
+          "text": "시드는 적용하고 역할만 기본값으로 바꾼다"
+        },
+        {
+          "id": "c",
+          "text": "길이가 맞으므로 통과시킨다"
+        },
+        {
+          "id": "d",
+          "text": "다음 메시지의 바이트를 이어 붙인다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "전체 제안을 거절하고 기존 출력을 보존",
+      "explanation": "부분적으로 맞는 필드를 먼저 공개하면 메시지 검증 실패에도 상태가 바뀝니다. 전체 후보를 검사한 뒤 적용해야 합니다."
+    },
+    {
+      "id": "89-5",
+      "question": "두 쪽에 countdown_ticks=120을 보냈습니다. 어떤 해석이 맞을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 기기의 벽시계가 동기화된다"
+        },
+        {
+          "id": "b",
+          "text": "각자의 준비 후 로컬 틱 지연을 같은 값으로 정한다"
+        },
+        {
+          "id": "c",
+          "text": "네트워크 지연이 정확히 120틱이다"
+        },
+        {
+          "id": "d",
+          "text": "시드가 같으므로 규칙 버전은 확인할 필요가 없다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "각자의 준비 후 로컬 틱 지연을 같은 값으로 정한다",
+      "explanation": "카운트다운은 로컬 진행 지연입니다. 공통 시작 시각이나 동일한 바이너리를 증명하는 값이 아닙니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "공통 설정과 서로 달라야 하는 역할을 분리해 적습니다.",
+      "HELLO·OFFER·ACK를 어느 단계에서 기대하는지 따라갑니다.",
+      "같은 시드와 다른 시드로 두 프로세스의 초기 상태를 비교합니다.",
+      "현재 SEED와 기준 협상의 성공 조건·재대전 정책 차이를 설명합니다."
+    ],
+    "failureChecks": [
+      "ACK의 시드만 바꿔도 호스트가 거절하는지 확인합니다.",
+      "마지막 필드 오류가 기존 설정을 바꾸지 않는지 검사합니다.",
+      "정상 EOF를 협상 성공으로 처리하지 않는지 확인합니다."
+    ],
+    "expected": "시작 조건을 명시적으로 합의하고, 반환 성공이 각 통신 단계에서 무엇을 보장하는지 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 한정 코덱/절차 초안·현재 Session/Part 대조·고정 wire 벡터·두 프로세스 협상·수정 전후 회귀",
+    "draftJob": "out/learning-jobs/089-seed-events.jsonl",
+    "corrections": [
+      "송신 실패 시 close를 호출하는 책임의 주석 교정",
+      "실제 초기/재대전 SEED의 수신자 역할 배정 수정",
+      "실제 SEED 정확 길이·역할 검증 후 전체 적용 및 원문 범위 계산 교정",
+      "진단에서 optional 초기 상태 해시의 실패를 명시적으로 처리"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED 104 / SDL 109 CTest·경고 없음·88 누적 파일 변경 범위 확인",
+    "고정 HELLO/설정 LE 벡터·길이 0~33·역할 0~255·정책 경계·0/MAX 시드·실패 출력 보존 ASan/UBSan",
+    "adopt 실패/성공 소유권·busy 보존·invalid_local alias 및 닫힌 연결 실패 ASan/UBSan",
+    "실제 두 프로세스 시드 0/1/77/UINT64_MAX의 설정·초기 상태 해시 일치, host 7/peer 7 잘못된 메시지·EOF에서 출력 보존과 종료",
+    "실제 Session 초기/재대전 수신자 역할·잘못된 SEED 이후 설정/ready 보존·정상 재대전 허용 ASan/UBSan; 수정 전 두 경로 회귀 실패 확인",
+    "현재 게임/양 릴레이 빌드 및 root 20/19 CTest 통과; Windows/macOS 네이티브 미검증·수동 GUI 없음",
+    "실제 구현 스니펫 9개·Part 발췌·Markdown 27경우·439문제·전체 차시 DOM 참조/저장/복사/탐색·정적 배포 재현성 통과"
+  ]
+}

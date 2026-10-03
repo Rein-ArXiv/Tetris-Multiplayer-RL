@@ -1,0 +1,432 @@
+{
+  "id": "lesson-22",
+  "title": "색과 블렌딩: 알파를 합성하는 순서",
+  "shortTitle": "알파·합성·그리기 순서",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 사각형을 그릴 때마다 화면을 지우고 불투명 색을 출력합니다.",
+  "finish": "완료: 한 번 초기화한 화면에 반투명 사각형 두 개를 합성하고, 순서·색 표현·저장 알파의 차이를 설명합니다.",
+  "objective": "프레임 초기화와 제출을 분리하고, source-over 수식으로 RGB와 alpha를 예측하며 shader 출력에 맞는 블렌드 계수를 선택합니다.",
+  "prerequisites": [
+    "21차시 체크포인트",
+    "정점 개수·공유 경계",
+    "프로그램·VAO와 GL 상태"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 각11 CTest·수식/프레임 계약",
+    "llvmpipe4.5 Core 여섯 모드×두 배경 alpha의 전체 RGBA 비교",
+    "물리 GPU·실제 모니터 표시·Windows/macOS 네이티브 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek CPU helper 검토·독립 GL 수치 oracle·공식 계약 대조",
+    "draftJob": "out/learning-jobs/blend-events.jsonl",
+    "corrections": [
+      "알파0에서 straight RGB 복원 불가 명시",
+      "LDR premultiplied 범위 정책과 HDR 구별",
+      "RGB와 저장 alpha 식 분리",
+      "색 공간 조건과 수치 readback의 범위 명시",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "사각형 하나는 인덱스 없는 두 삼각형의 정점 여섯 개로 제출합니다.",
+      "같은 공유 변은 일관된 한쪽 소유로 틈과 중복을 피합니다.",
+      "정점 방향 분류와 면 제거 활성화는 별도 상태입니다."
+    ],
+    "bridge": "이제 두 도형을 같은 화면에 남기고 겹칩니다. 경계의 중복은 반투명 색에서도 드러나므로 합성 수식과 제출 순서를 함께 확인합니다."
+  },
+  "sections": [
+    {
+      "title": "색을 겹치려면 화면을 남겨 둬야 한다",
+      "body": "빨간 사각형 A와 파란 사각형 B를 각각 알파 0.5로 그립니다. A 다음 B를 그린 결과와 B 다음 A를 그린 결과는 같을까요? 알파가 같더라도 **뒤에 그린 색이 더 많이 남습니다.** 그 이유를 먼저 계산하고, 두 번의 draw로 확인합니다.\n\n현재 `draw_triangles`는 호출할 때마다 화면을 지웁니다. 이를 두 번 부르면 첫 도형이 사라지므로 합성을 관찰할 수 없습니다. 이번에는 프레임 시작의 초기화와 도형 제출을 나누고, 정점 12개로 두 사각형을 준비합니다.\n\n새 `22-blending`에서는 색의 표현, 합성식, GL 상태를 한 줄씩 연결합니다. 투명도 0.5라는 숫자를 넣는 것만으로 합성이 켜지는 것은 아닙니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void renderer_begin(Color bg)",
+        "invariant": "프레임 초기화는 한 번 하고 도형 제출은 그 안에서 여러 번 한다.",
+        "mayDiffer": "현재 렌더러는 제출을 배치에 모아 flush하며 배경·viewport도 관리한다.",
+        "omitted": "이번에는 즉시 draw 두 번만 사용하며 텍스처나 배치 최적화는 없다."
+      }
+    },
+    {
+      "title": "알파는 RGB와 다른 성분이다",
+      "body": "RGB는 색의 세 성분이고 알파는 이 합성 모델에서 그 색이 기여하는 비중입니다. 알파가 0.5인 빨강을 straight 표현으로 쓰면 `(1,0,0,0.5)`입니다. RGB가 0.5로 바뀌어 있는 것은 아닙니다.\n\n**straight**(비선곱)는 RGB를 알파와 독립적으로 저장합니다. **premultiplied**(선곱)는 RGB에 알파를 미리 곱해 저장합니다. 같은 빨강의 선곱 표현은 `(0.5,0,0,0.5)`입니다. 두 배열은 같은 숫자가 아니지만, 각 표현에 맞는 합성을 하면 같은 결과를 만들 수 있습니다.\n\n| 의미 | straight RGBA | premultiplied RGBA |\n| --- | --- | --- |\n| 불투명 빨강 | (1,0,0,1) | (1,0,0,1) |\n| 절반 기여 빨강 | (1,0,0,0.5) | (0.5,0,0,0.5) |\n| 기여 없는 빨강 | (1,0,0,0) | (0,0,0,0) |\n\n마지막 행에서 알파가 0이면 원래 straight RGB를 복원할 수 없습니다. 알파로 나누는 변환은 알파가 양수일 때만 가능합니다. 알파는 빛의 밝기 그 자체나 모든 재료의 물리적 투과율을 완전히 표현하는 값이 아닙니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "같은 숫자 범위만으로 표현을 판별할 수 있을까?",
+          "body": "자료형이 RGBA라고 해서 선곱 여부가 정해지지 않습니다. 이미지 로딩·셰이더 출력·블렌드 설정 사이에 계약이 필요합니다. 이 수업의 Rgba도 하나의 구조체이므로 함수 이름과 인자 계약을 구분해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "source-over를 한 채널씩 계산한다",
+      "body": "source는 지금 들어오는 조각, destination은 같은 위치에 이미 저장된 값입니다. 아래에서 `Cs`는 straight 소스 RGB, `Ps`와 `Pd`는 선곱 RGB, `As`와 `Ad`는 알파입니다. RGB 식은 빨강·초록·파랑에 각각 적용합니다.\n\n```text\n선곱 RGB: Pout = Ps + Pd * (1 - As)\n알파:     Aout = As + Ad * (1 - As)\nstraight 소스이면 Ps = Cs * As\n```\n\n출력의 RGB는 선곱 형태입니다. 불투명 배경에서는 알파가 1이므로 선곱 RGB와 straight RGB 수치가 같아 이 구분을 놓치기 쉽습니다.\n\n투명 검정에 빨강 A=(1,0,0,0.5)를 먼저 올리면 저장값은 `(0.5,0,0,0.5)`입니다. 그 위에 파랑 B=(0,0,1,0.5)를 올리면 빨강은 `0.5×0.5=0.25`, 파랑은 `1×0.5=0.5`, 알파는 `0.5+0.5×0.5=0.75`가 됩니다. 결과는 `(0.25,0,0.5,0.75)`입니다.\n\n순서를 뒤집으면 `(0.5,0,0.25,0.75)`입니다. 알파는 같지만 색은 다릅니다. 이는 합성이 일반적으로 교환법칙을 만족하지 않는다는 작은 반례입니다. 텍스처가 같다는 이유로 반투명 도형 순서를 마음대로 바꿀 수 없는 이유이기도 합니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "제출 순서는 합성 결과의 일부다.",
+        "mayDiffer": "현재 배처는 텍스처가 바뀔 때 앞 배치를 먼저 제출해 호출 순서를 보존한다.",
+        "omitted": "깊이 정렬·3D 투명 도형 문제는 아직 다루지 않는다."
+      }
+    },
+    {
+      "title": "CPU에서 수식과 입력 계약을 먼저 만든다",
+      "body": "`blend.h`는 GL을 모릅니다. `Rgba`는 double 네 개이며, 유한한 0~1 입력만 받습니다. 선곱 입력은 각 RGB가 알파 이하인지도 확인합니다. 이 조건은 음수가 없는 제한된 LDR(low dynamic range) 색 모델의 정책입니다. HDR(high dynamic range)에서는 RGB가 1을 넘는 밝기를 표현할 수도 있어 이 범위 검사를 그대로 적용하지 않습니다.\n\n`premultiply`는 RGB에 알파를 한 번 곱합니다. `over_premultiplied`는 두 선곱 값을 합성합니다. `over_straight`는 소스만 변환한 뒤 같은 구현을 사용합니다. destination은 이미 선곱 값이어야 합니다. 잘못된 입력은 조용히 자르지 않고 `nullopt`로 돌려줍니다.\n\n계산 결과를 반복 사용할 때는 optional의 값이 있는지 먼저 확인합니다. 정상 결과가 전부 0인 것과 계산을 거부한 것은 다릅니다. CPU 도구는 원리와 작은 수치 예를 위한 것이며 GL 저장 형식의 반올림까지 복제하지 않습니다.",
+      "codes": [
+        {
+          "label": "선곱 값의 source-over",
+          "text": "inline std::optional<Rgba> over_premultiplied(const Rgba& src, const Rgba& dst) noexcept {\n    if (!valid_premultiplied(src) || !valid_premultiplied(dst)) {\n        return std::nullopt;\n    }\n    const double keep = 1.0 - src.a;\n    Rgba out;\n    out.r = src.r + dst.r * keep;\n    out.g = src.g + dst.g * keep;\n    out.b = src.b + dst.b * keep;\n    out.a = src.a + dst.a * keep;\n    return out;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "straight 소스는 한 번만 변환한다",
+          "text": "inline std::optional<Rgba> over_straight(const Rgba& src, const Rgba& dst) noexcept {\n    const std::optional<Rgba> premul_src = premultiply(src);\n    if (!premul_src.has_value()) {\n        return std::nullopt;\n    }\n    return over_premultiplied(*premul_src, dst);\n}",
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/renderer/blend.h",
+          "label": "renderer/blend.h · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/src/blend_demo.cpp",
+          "label": "src/blend_demo.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "clear와 submit을 다른 함수로 분리한다",
+      "body": "`begin_color_frame`은 drawable 크기와 배경값을 검사한 뒤 viewport·clear color·clear를 수행합니다. `submit_triangles`는 범위를 검사하고 프로그램·VAO를 선택한 뒤 draw합니다. 제출 함수에는 clear나 viewport 변경이 없습니다.\n\n```text\n프레임 시작 → begin_color_frame\n          → submit A\n          → submit B\n          → platform_present\n```\n\n기존 한 번 그리기 API는 두 함수를 차례로 부르는 래퍼로 유지합니다. 잘못된 정점 범위로 호출한 래퍼가 먼저 화면을 지우지 않도록, 범위와 이름은 begin보다 앞에서 검사합니다.\n\n이 함수들은 모든 GL 상태를 복구하는 범용 렌더러가 아닙니다. 제출 후 프로그램과 VAO를 0으로 해제하며, viewport·clear color·블렌드 상태는 설정된 대로 남습니다. scissor·깊이·스텐실 비활성, 전체 색 쓰기 등 실습의 전제는 헤더에 명시합니다. clear는 viewport로 잘리지 않습니다.",
+      "codes": [
+        {
+          "label": "프레임 초기화",
+          "text": "bool begin_color_frame(const GlApi& gl, int width, int height,\n                       const study_blend::Rgba& background) noexcept {\n    if (width <= 0 || height <= 0 || !study_blend::valid_rgba(background)) return false;\n    if (!check(gl, \"frame entry\")) return false;\n    gl.Viewport(0, 0, width, height);\n    if (!check(gl, \"Viewport\")) return false;\n    gl.ClearColor(static_cast<GLfloat>(background.r), static_cast<GLfloat>(background.g),\n                  static_cast<GLfloat>(background.b), static_cast<GLfloat>(background.a));\n    if (!check(gl, \"ClearColor\")) return false;\n    gl.Clear(ColorBufferBit);\n    return check(gl, \"Clear\");\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "기존 호출을 잇는 래퍼",
+          "text": "bool draw_triangles(const GlApi& gl, GLuint program, GLuint vao, GLsizei available,\n                    GLint first, GLsizei count, int width, int height) noexcept {\n    // Preserve the convenience wrapper's rejection-before-clear contract.\n    if (!valid_range(available, first, count) || !program || !vao) return false;\n    return begin_color_frame(gl, width, height, {0.05, 0.08, 0.12, 1.0}) &&\n           submit_triangles(gl, program, vao, available, first, count);\n}",
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/renderer/triangle.h",
+          "label": "renderer/triangle.h · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/renderer/triangle.cpp",
+          "label": "renderer/triangle.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "함수를 나누면 무엇을 검사할 수 있나?",
+          "body": "한 프레임에서 clear는 한 번, draw는 두 번이라는 순서를 대역으로 검사할 수 있습니다. 제출 실패 때 다음 도형을 계속 그리는지도 별도로 판단할 수 있습니다. 함수 분리는 이름을 늘리는 작업이 아니라 책임과 관찰 지점을 나누는 작업입니다."
+        }
+      ]
+    },
+    {
+      "title": "GL의 RGB 계수와 알파 계수를 따로 정한다",
+      "body": "덧셈 방정식에서는 source 성분×source 계수와 destination 성분×destination 계수를 더합니다. `BlendEquation(FUNC_ADD)`로 덧셈을 고르고 `BlendFuncSeparate`로 RGB와 알파의 계수를 구분합니다. 마지막으로 `Enable(BLEND)`를 호출해야 합성이 활성화됩니다.\n\n| 적용 위치 | straight 출력 | 선곱 출력 |\n| --- | --- | --- |\n| source RGB | As | 1 |\n| destination RGB | 1-As | 1-As |\n| source alpha | 1 | 1 |\n| destination alpha | 1-As | 1-As |\n\n표의 `As`는 `SRC_ALPHA`, `1-As`는 `ONE_MINUS_SRC_ALPHA`, `1`은 `ONE` 상수에 대응합니다. source/destination은 새로 들어오는 값/이미 저장된 값이고, RGB/alpha는 계수가 적용될 성분입니다.\n\n알파에는 source 계수 ONE을 사용합니다. source alpha를 다시 SRC_ALPHA로 곱하면 `As² + Ad*(1-As)`가 되어 다른 식입니다. 예를 들어 As=0.5, Ad=1이면 source-over 알파는 1이지만 잘못된 식은 0.75가 됩니다.\n\nGlApi에 BlendEquation과 BlendFuncSeparate 두 함수와 필요한 토큰을 추가합니다. 서명·호출 규약을 맞추고 둘 중 하나라도 조회에 실패하면 전체 로딩을 거부합니다. 이제 필수 함수는 43개입니다. 상태 설정은 GL 호출이므로 현재 컨텍스트가 있어야 합니다.",
+      "codes": [
+        {
+          "label": "실험에 맞춘 합성 상태",
+          "text": "inline bool configure(const study_gl::GlApi& gl, const Case& c) noexcept {\n    using namespace study_gl;\n    if (gl.GetError()) return false;\n    gl.Disable(CullFaceCap);\n    gl.Disable(FramebufferSrgb); // Numeric channel experiment, not sRGB encoding.\n    gl.Disable(Dither);         // Make 8-bit readback comparison easier.\n    gl.BlendEquation(FuncAdd);\n    const GLenum rgb_source = c.premultiplied && !c.wrong_factor ? One : SrcAlpha;\n    gl.BlendFuncSeparate(rgb_source, OneMinusSrcAlpha,\n                         c.legacy_alpha ? SrcAlpha : One, OneMinusSrcAlpha);\n    if (c.disabled) gl.Disable(Blend); else gl.Enable(Blend);\n    return gl.GetError() == 0;\n}",
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/renderer/gl_api.h",
+          "label": "renderer/gl_api.h · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/renderer/gl_api.cpp",
+          "label": "renderer/gl_api.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/tests/loader_contract.cpp",
+          "label": "tests/loader_contract.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "bool renderer_init(",
+        "invariant": "소스 RGB 표현에 맞춰 합성 계수를 정한다.",
+        "mayDiffer": "현재 게임은 BlendFunc의 같은 계수를 RGB와 알파에 적용한다. 화면 RGB와 저장 alpha의 계약을 구분해 읽는다.",
+        "omitted": "이번 학습 코드의 별도 alpha 계수를 현재 게임이 이미 사용한다고 가정하지 않는다."
+      }
+    },
+    {
+      "title": "두 사각형과 두 번의 제출을 연결한다",
+      "body": "A는 중앙에서 왼쪽으로 0.25, B는 오른쪽으로 0.25 이동한 사각형입니다. 두 사각형의 높이는 같고 가운데에서 겹칩니다. `make_layers`는 A의 여섯 정점 다음에 B의 여섯 정점을 기록합니다. 전체 12개, 96바이트이며 정점 간격은 여전히 8바이트입니다.\n\n정점 셰이더는 `gl_VertexID<6`이면 빨강, 나머지이면 파랑을 줍니다. DrawArrays의 ID에는 first가 반영되므로 `(first,count)=(6,6)`으로 B만 그려도 B의 색을 선택합니다. 배열 색 속성이나 uniform을 만들기 전의 진단용 표현입니다.\n\n`render`는 전체 개수 12와 객체 이름을 먼저 확인한 뒤 화면을 한 번 지웁니다. A→B이면 0/6, B→A이면 6/0의 시작 위치로 두 번 제출합니다. `available`은 VAO가 참조하는 실제 버퍼의 개수와 일치해야 한다는 계약을 유지합니다.",
+      "codes": [
+        {
+          "label": "같은 정점 형식으로 두 도형 준비",
+          "text": "inline std::array<study_mesh::Vertex2,12> make_layers() noexcept {\n    std::array<study_mesh::Vertex2,12> vertices{};\n    const auto quad = study_quad::make_quad();\n    for (std::size_t i=0; i<6; ++i) {\n        vertices[i] = {quad[i].x - 0.25f, quad[i].y};\n        vertices[i+6] = {quad[i].x + 0.25f, quad[i].y};\n    }\n    return vertices;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "한 clear와 두 submit",
+          "text": "inline bool render(const study_gl::GlApi& gl, study_gl::GLuint program,\n                   study_gl::GLuint vao, study_gl::GLsizei available,\n                   const Case& c, int width, int height, double background_alpha=1.0) noexcept {\n    // Validate the entire scene before clearing or submitting the first half.\n    if (available != 12 || !program || !vao) return false;\n    if (!study_gl::begin_color_frame(gl,width,height,{0,0,0,background_alpha})) return false;\n    const int first = c.reverse ? 6 : 0;\n    return study_gl::submit_triangles(gl,program,vao,available,first,6) &&\n           study_gl::submit_triangles(gl,program,vao,available,6-first,6);\n}",
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/renderer/blend_scene.h",
+          "label": "renderer/blend_scene.h · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/src/main.cpp",
+          "label": "src/main.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "여섯 가지 모드로 오해를 분리한다",
+      "body": "아래 모드는 모두 알파 0.5의 같은 두 사각형을 사용합니다. 실행 이름만 바꾸어 원인을 하나씩 비교합니다.\n\n| 모드 | 바꾸는 것 | 불투명 검정 배경의 겹친 부분 RGBA |\n| --- | --- | --- |\n| ab | A 다음 B, straight | (0.25,0,0.5,1) |\n| ba | B 다음 A | (0.5,0,0.25,1) |\n| premul | RGB를 shader에서 선곱하고 계수 ONE | ab와 같음 |\n| double-alpha | 선곱했는데 RGB 계수 SRC_ALPHA | (0.125,0,0.25,1) |\n| replace | BLEND 비활성 | (0,0,1,0.5) |\n| legacy-alpha | alpha에도 SRC_ALPHA 계수 | (0.25,0,0.5,0.625) |\n\n`double-alpha`에서는 알파를 두 번 곱해 RGB가 더 어둡습니다. `replace`는 source의 알파가 0.5여도 배경과 섞지 않고 값을 덮습니다. `legacy-alpha`는 RGB 그림만 보면 ab와 같지만 저장 알파가 다릅니다. 따라서 결과 검사는 RGB뿐 아니라 A도 읽어야 합니다.\n\n투명 검정에서 시작하면 ab의 저장값은 `(0.25,0,0.5,0.75)`이며 legacy-alpha는 알파가 0.375입니다. 이런 중간 RGBA를 다른 배경에 다시 합성할 때 차이가 드러납니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "알파가 있어도 창이 투명해지는 것은 아니다",
+          "body": "프레임버퍼의 alpha 성분과 OS 창의 투명도 설정은 별개입니다. 이 실험은 RGBA readback을 관찰합니다. 기본 창에서 alpha를 저장했다고 바탕화면이 비친다고 기대하지 마세요."
+        }
+      ]
+    },
+    {
+      "title": "그림과 숫자를 함께 관찰한다",
+      "body": "128×128 viewport에서 A는 x=16~80, B는 x=48~112, 두 도형의 y는 32~96 영역입니다. 겹치는 폭은 32입니다. 그림은 RGB 결과이며 저장 alpha 자체를 표현하지 않습니다.\n\n| 모드 | RGB 결과 |\n| --- | --- |\n| ab | ![빨강 다음 파랑 합성](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABNklEQVR4nO3RMQ3AQBAEsYcWaA89ELaaIoqtA7CnOQcAAAAAAAAAAAAAAPidG99zbnr9B7F6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIAAAAAAAAAAAAAAABf8wK5gwDT7Vg6BAAAAABJRU5ErkJggg==) |\n| ba | ![파랑 다음 빨강 합성](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABNElEQVR4nO3RMQ3AQBAEsYcWaIEeCFtNEb2tA7CnOQcAAAAAAAAAAAAAALjOm9+TXv9BrJ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AAAAAAAAAAAAAAAAwN98ub8A02rRdo0AAAAASUVORK5CYII=) |\n| double-alpha | ![알파를 두 번 곱한 어두운 합성](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABN0lEQVR4nO3RMQ3AQBAEsYcSKM8fVSBsNUUUWwdgT3MOAAAAAAAAAAAAAADwOze+59z0+g9i9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFGOr5Agz1fAGGer4AQz1fgKGeL8BQzxdgqOcLMNTzBRjq+QIM9XwBhnq+AEM9X4Chni/AUM8XYKjnCzDU8wUY6vkCDPV8AYZ6vgBDPV+AoZ4vwFDPF2Co5wsw1PMFAAAAAAAAAAAAAAAAvuYFPQkAap7avfUAAAAASUVORK5CYII=) |\n| replace | ![블렌드를 꺼서 파랑이 덮은 결과](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAAAs0lEQVR4nO3RwQ0AAAQEQf03TRUXETPxF7YKAAAAAAAAAAAAAAB4p8OT35C/QAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQRY/6AAt0cAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAAAAAAAAAAAAAAA4KIBopfpWgL4GwAAAAAASUVORK5CYII=) |\n\n`blend_probe`는 여섯 모드를 배경 alpha 0과 1로 각각 그립니다. 도형 안·겹침·바깥을 포함한 모든 픽셀의 RGBA를 수치 예측과 비교합니다. 기본 프레임버퍼에 알파 성분이 있는지도 확인하며, 저장/반올림 차이를 위해 8비트 채널에서 최대 2단계 오차를 허용합니다.\n\n같은 사각형을 이루는 공유 대각선에서 중복 합성되면 색이 달라집니다. 전체 픽셀 비교에는 대각선도 포함되므로 중복이나 틈을 숨기기 어렵습니다.",
+      "codes": [
+        {
+          "file": "checkpoints/22-blending/tests/blend_real.cpp",
+          "label": "tests/blend_real.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "색 공간과 현재 구현의 경계를 확인한다",
+      "body": "CPU의 수식은 선형 채널 값의 합성을 모델링합니다. 빛의 세기를 섞는 의미를 가지려면 RGB가 선형값이어야 합니다. sRGB로 저장된 바이트를 그대로 같은 식에 넣는 것과 sRGB를 선형값으로 풀고 합성한 뒤 다시 인코딩하는 것은 결과가 다릅니다.\n\n이번 GL 실험은 수치 계산을 비교하기 위해 FRAMEBUFFER_SRGB와 dithering을 끕니다. Dithering은 적은 색 단계에서 띠가 보이는 현상을 줄이기 위해 인접 픽셀의 양자화 값을 조절하는 처리입니다. shader가 출력한 숫자를 같은 채널 수치로 섞는 조건입니다. 이 설정만으로 실제 모니터까지 색이 정확해지는 것은 아닙니다. 여기의 PNG도 수치 비교 그림이며 완전한 색 관리 예제가 아닙니다.\n\n현재 게임의 글리프 shader에서 `sampled * v_color`는 글자 RGB를 유지하고 alpha에 coverage를 곱합니다. RGB에 coverage를 미리 곱한 선곱 출력으로 오해하면 SRC_ALPHA와 겹쳐 두 번 곱하게 됩니다. 현재 BlendFunc의 저장 alpha 식도 투명한 렌더 타깃을 도입할 때 다시 검토해야 합니다.",
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "vec4 c = sampled * v_color;",
+        "invariant": "셰이더 출력 표현과 뒤의 블렌드 계수는 함께 읽는다.",
+        "mayDiffer": "현재 shader는 텍스처·글리프·SDF의 alpha를 결합하고 게임 렌더러가 합성한다.",
+        "omitted": "sRGB 이미지 로딩·중간 타깃 재합성·HDR은 후속 설계 범위다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "알파도 sRGB 변환해야 할까?",
+          "body": "sRGB 전달 함수는 RGB의 인코딩입니다. 이 수업의 alpha는 합성 비중이므로 RGB와 같은 감마 변환 대상으로 취급하지 않습니다. 색의 표현과 alpha의 의미를 따로 유지하세요."
+        }
+      ]
+    },
+    {
+      "title": "실패를 드러내는 검사와 실행 순서",
+      "body": "CPU 계약 검사는 순서 반전·straight/선곱의 동등한 결과·alpha 0/1·유효하지 않은 입력을 확인합니다. 알파를 실수로 제곱하도록 바꾸면 색이 맞더라도 알파 검사가 실패해야 합니다.\n\n그리기 대역은 clear 한 번 뒤에 A와 B가 제출되는지 확인합니다. 프레임 초기화의 세 호출과 제출의 다섯 호출에 각각 실패를 넣어 뒤 작업 중단과 해제를 검사합니다. 경계 밖 정점 수를 실제 GL에 보내는 대신 GL 호출 전의 거부를 확인합니다.\n\n`22-blending`은 독립 빌드 가능한 누적 체크포인트입니다. `blend.h`, `blend_scene.h`, CPU 도구와 검사를 추가하고 triangle·GlApi·main·로더 검사·CMake를 갱신합니다. 완성 파일은 접힌 패널에서 비교하세요.\n\n```sh\ncmake -S docs/learn/checkpoints/22-blending -B out/study-22 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-22\nctest --test-dir out/study-22 --output-on-failure\n./out/study-22/blend_demo\n./out/study-22/tetris ab\n./out/study-22/tetris ba\n./out/study-22/tetris premul\n./out/study-22/tetris double-alpha\n./out/study-22/tetris replace\n./out/study-22/tetris legacy-alpha\n./out/study-22/blend_probe\n```\n\n저장소 루트·SDL2 개발 패키지·pkg-config·GL 3.3 Core 환경, 단일 구성 생성기 기준입니다. 창은 하나씩 실행하고 Escape로 닫습니다. Windows 다중 구성은 구성과 실행 경로를 맞춥니다. Linux가 offscreen GL을 지원하면 probe 앞에 `SDL_VIDEODRIVER=offscreen`을 붙일 수 있습니다. 별도 빌드 폴더의 SCRIPTED는 CPU 도구와 계약 검사에 사용합니다.\n\n이제 한 프레임에 여러 도형의 결과를 남길 수 있습니다. 다음에는 `platform_present`가 뜻하는 버퍼 교체를 살펴보고, **명령 제출·GPU 완료·화면 표시가 서로 다른 시점**임을 구분합니다.",
+      "codes": [
+        {
+          "file": "checkpoints/22-blending/tests/blend_contract.cpp",
+          "label": "tests/blend_contract.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "file": "checkpoints/22-blending/tests/triangle_contract.cpp",
+          "label": "tests/triangle_contract.cpp · 완성 파일",
+          "collapsed": true,
+          "language": "cpp"
+        },
+        {
+          "label": "CMake에 새 도구와 검사 연결",
+          "text": "add_executable(blend_demo src/blend_demo.cpp)\ntarget_link_libraries(blend_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(blend_contract tests/blend_contract.cpp)\n    target_link_libraries(blend_contract PRIVATE study_mesh)\n    add_test(NAME blend_contract COMMAND blend_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(blend_probe tests/blend_real.cpp)\n        target_link_libraries(blend_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()\n",
+          "language": "cmake"
+        },
+        {
+          "file": "checkpoints/22-blending/CMakeLists.txt",
+          "label": "CMakeLists.txt · 완성 파일",
+          "collapsed": true,
+          "language": "cmake"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 자료",
+          "title": "계수와 색 공간의 공식 계약",
+          "body": "[OpenGL 3.3 Core 명세](https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf) §4.1.7의 Blend Equation/Blend Functions와 sRGB 처리 설명을 함께 읽어 보세요. 함수 이름이 비슷해도 RGB와 alpha에 적용되는 계수가 같은지는 따로 확인합니다."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "straight와 선곱 색의 수치 표현을 구분한다.",
+      "CPU에서 source-over의 RGB/alpha를 계산한다.",
+      "begin과 submit을 분리해 clear 한 번 뒤 두 번 그린다.",
+      "여섯 모드와 두 배경 alpha의 RGBA를 비교한다."
+    ],
+    "expected": "ab와 premul은 같고 ba는 색 비중이 뒤바뀝니다. double-alpha는 어두워지고 replace는 덮어씁니다. legacy-alpha의 저장 alpha는 source-over와 다릅니다.",
+    "failureChecks": [
+      "두 번째 draw 전에 화면을 지우지 않았는가?",
+      "소스 RGB에 alpha를 몇 번 곱했는가?",
+      "alpha의 source 계수도 ONE인가?",
+      "BLEND가 실제로 활성화됐는가?",
+      "sRGB 변환과 수치 합성 조건을 구별했는가?",
+      "RGB 그림만 보고 alpha를 같다고 판단하지 않았는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "22-1",
+      "kind": "합성 계산",
+      "question": "투명 검정에 빨강 (1,0,0,0.5), 다음 파랑 (0,0,1,0.5)을 source-over로 올렸습니다. 저장되는 선곱 RGBA는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0.5,0,0.5,1)"
+        },
+        {
+          "id": "b",
+          "text": "(0.25,0,0.5,0.75)"
+        },
+        {
+          "id": "c",
+          "text": "(0.5,0,0.25,0.75)"
+        },
+        {
+          "id": "d",
+          "text": "(0.25,0,0.5,0.375)"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "(0.25,0,0.5,0.75)",
+      "explanation": "빨강은 먼저 0.5가 되고 파랑의 남는 비중 0.5를 다시 받아 0.25입니다. 파랑은 0.5, 알파는 0.5+0.5×0.5=0.75입니다. 역순이면 RGB의 빨강과 파랑 비중이 바뀝니다."
+    },
+    {
+      "id": "22-2",
+      "kind": "표현 계약",
+      "question": "shader가 RGB에 alpha를 이미 곱했습니다. source-over의 source RGB 계수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SRC_ALPHA"
+        },
+        {
+          "id": "b",
+          "text": "ONE_MINUS_SRC_ALPHA"
+        },
+        {
+          "id": "c",
+          "text": "ZERO"
+        },
+        {
+          "id": "d",
+          "text": "ONE"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "ONE",
+      "explanation": "선곱 source RGB에는 이미 alpha가 반영되어 있습니다. ONE으로 그대로 더하고 destination에는 1-As를 곱합니다. 다시 SRC_ALPHA를 쓰면 RGB에 alpha가 두 번 곱해집니다."
+    },
+    {
+      "id": "22-3",
+      "kind": "저장 알파",
+      "question": "source alpha=0.5, destination alpha=1입니다. alpha에도 SRC_ALPHA / ONE_MINUS_SRC_ALPHA를 쓰면 무엇이 저장되나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0.75: source-over의 1과 다르다."
+        },
+        {
+          "id": "b",
+          "text": "1: 항상 불투명 배경을 유지한다."
+        },
+        {
+          "id": "c",
+          "text": "0.5: source alpha만 저장한다."
+        },
+        {
+          "id": "d",
+          "text": "0: 투명 배경을 새로 만든다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "0.75: source-over의 1과 다르다.",
+      "explanation": "같은 두 계수를 alpha에도 적용하면 0.5×0.5+1×0.5=0.75입니다. 일반 source-over alpha는 source 계수 ONE을 써서 0.5+1×0.5=1이 됩니다."
+    },
+    {
+      "id": "22-4",
+      "kind": "책임 분리",
+      "question": "A와 B를 합성하려고 begin_color_frame→submit A→begin_color_frame→submit B를 실행했습니다. 무엇을 고쳐야 하나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "정점 stride를 두 배로 늘린다."
+        },
+        {
+          "id": "b",
+          "text": "두 번째 begin에서 alpha만 0.5로 바꾼다."
+        },
+        {
+          "id": "c",
+          "text": "두 번째 begin을 없애 A를 남긴 채 B를 제출한다."
+        },
+        {
+          "id": "d",
+          "text": "두 번째 submit 전에 VAO를 삭제한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "두 번째 begin을 없애 A를 남긴 채 B를 제출한다.",
+      "explanation": "두 번째 begin의 clear가 A의 결과를 지웁니다. 프레임 초기화는 한 번, 제출은 여러 번 수행해야 destination에 앞 도형이 남아 있습니다."
+    },
+    {
+      "id": "22-5",
+      "kind": "검사 범위",
+      "question": "ab와 legacy-alpha의 RGB 그림이 같습니다. 합성이 동등하다고 결론 내릴 수 있나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RGB가 같으면 저장 alpha도 같다."
+        },
+        {
+          "id": "b",
+          "text": "RGBA를 읽어 alpha까지 비교해야 한다."
+        },
+        {
+          "id": "c",
+          "text": "순서만 뒤집으면 alpha를 읽을 필요가 없다."
+        },
+        {
+          "id": "d",
+          "text": "PNG를 확대하면 alpha 수치가 자동으로 보인다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "RGBA를 읽어 alpha까지 비교해야 한다.",
+      "explanation": "legacy-alpha는 RGB 계수는 같지만 alpha 계수가 다릅니다. RGB 그림만으로 저장 alpha를 알 수 없으므로 RGBA readback과 수식을 함께 확인합니다."
+    }
+  ]
+}

@@ -1,0 +1,440 @@
+{
+  "id": "lesson-85",
+  "title": "프레이밍: 길이 접두사와 부분 수신",
+  "shortTitle": "길이·파서 상태·꼬리 보존·실패 전달",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 바이트를 누적하고 EOF 뒤 한 묶음으로 응답합니다.",
+  "finish": "완료: 길이 접두사로 메시지를 꺼내고 연결을 유지한 채 프레임마다 응답합니다.",
+  "objective": "부분 헤더·부분 본문·연속 프레임을 해석하고, 버퍼 상한과 오류·EOF 조건을 증명하는 프레임 파서를 구현합니다.",
+  "prerequisites": [
+    "호출 경계와 바이트 스트림의 차이",
+    "실제 진행량으로 갱신하는 포인터와 길이",
+    "고정 버퍼와 송신 방향 종료"
+  ],
+  "recap": {
+    "points": [
+      "수신 호출은 송신 호출의 묶음을 보존하지 않습니다.",
+      "누적에는 실제 받은 바이트만 사용합니다.",
+      "송신 방향을 닫은 뒤에도 반대 방향 응답을 읽을 수 있습니다."
+    ],
+    "bridge": "연결을 유지하며 메시지마다 응답하려면 EOF와 별도의 경계 규약이 필요합니다."
+  },
+  "sections": [
+    {
+      "title": "한 연결에서 여러 요청에 답하려면",
+      "body": "스트림 진단은 상대가 송신 방향을 닫으면 모아 둔 내용을 응답합니다. 그런데 연결을 유지한 채 요청 하나에 답하고 또 다른 요청을 받으려면, 서버는 어느 바이트까지가 한 요청인지 알아야 합니다. ABC를 받았을 때 요청이 끝난 것인지, ABCDEF의 앞부분인지 바이트 내용만으로 판단할 수 없습니다.\n\n이번에는 요청 앞에 길이를 넣고, 그 길이만큼 모이면 즉시 응답하는 framing_probe를 만듭니다. **프레이밍(framing)**은 스트림 안에서 메시지의 시작과 끝을 결정하는 규약입니다. 완성된 메시지를 다루는 애플리케이션과 조각난 바이트를 받는 소켓 사이에 이 계층을 둡니다.\n\n누적 게임과 소켓·스트림 진단은 유지합니다. 추가되는 실행 파일은 통신 계층을 게임에 붙이기 위한 독립 진단입니다. 핵심은 매번 같은 크기를 받는 요령이 아니라, 어느 경계로 읽혀도 같은 메시지를 같은 순서로 꺼내는 파서입니다.",
+      "codes": [
+        {
+          "label": "책임의 이동",
+          "language": "text",
+          "text": "소켓: 실제 받은 바이트와 개수\n버퍼: 아직 해석하지 않은 바이트 소유\n프레임 파서: 길이를 읽고 완성된 메시지만 꺼냄\n애플리케이션: 요청 종류·내용 검증 → 응답"
+        }
+      ],
+      "reference": {
+        "path": "net/framing.cpp",
+        "symbol": "bool parse_frames",
+        "invariant": "완성된 프레임을 추출하고 미완성 꼬리를 보존한다.",
+        "mayDiffer": "현재 엔진은 체크섬이 있는 wire 규약과 vector를 사용한다."
+      }
+    },
+    {
+      "title": "먼저 바이트 배치를 고정한다",
+      "body": "기준 형식은 [LEN 2바이트][TYPE 1바이트][PAYLOAD]입니다. LEN은 TYPE과 PAYLOAD를 합친 길이이며 자신의 2바이트를 포함하지 않습니다. payload를32바이트까지 허용하므로 LEN은1~33, 전체 프레임은3~35바이트입니다. payload가 비어도 TYPE은 존재합니다.\n\nLEN은 작은 자리 바이트를 먼저 놓는 리틀 엔디언으로 저장합니다. 예를 들어 수258은 02 01로 쓰며, 수신 측은 첫 바이트에 두 번째 바이트의256배를 더해 복원합니다. 이번의 정상 LEN은33 이하라 상위 바이트가0이지만, 파서는 두 바이트를 모두 읽어 상한 위반도 판별합니다.\n\nTYPE=1은 요청, TYPE=2는 응답으로 약속합니다. 이 의미는 애플리케이션 규칙입니다. 파서는 TYPE을 1바이트 값 그대로 출력하고 요청인지 응답인지는 호출자가 확인합니다. payload 안의00이나FF도 길이로 세므로 문자열 종료 문자나 구분자로 해석하지 않습니다.",
+      "codes": [
+        {
+          "label": "ABC 요청의 바이트 위치 — 모두16진수",
+          "language": "text",
+          "text": "위치:  0  1  2  3  4  5\n바이트:04 00 01 41 42 43\n       LEN  TYPE  A  B  C\nLEN = 1 + 3 = 4, 전체 = 2 + 4 = 6\n\n빈 요청: 01 00 01 → LEN=1, 전체3바이트\n바이너리 요청: 04 00 01 00 FF 2A → payload3바이트"
+        }
+      ],
+      "reference": {
+        "path": "net/framing.h",
+        "symbol": "constexpr std::size_t kMaxPayloadBytes",
+        "invariant": "길이 필드의 의미와 허용 범위를 송수신 측이 공유한다.",
+        "mayDiffer": "기준 최대payload32·체크섬 없음. 현재 엔진은 최대4096·뒤에체크섬4바이트를 붙여 서로 직접 통신할 수 없다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "구분자 대신 길이를 선택한 이유",
+          "body": "줄바꿈으로 메시지를 나누려면 데이터 내부의 줄바꿈을 이스케이프하는 규약이 필요합니다. 고정 크기 메시지는 단순하지만 가변 payload마다 공간을 낭비할 수 있습니다. 길이 접두사는 임의 바이트와 가변 길이를 표현하는 대신 길이의 범위·부분 수신을 검사해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "버퍼 앞부분을 소비하는 연산을 만든다",
+      "body": "ByteBuffer는 받은 바이트를 뒤에 붙일 수 있습니다. 여기에 consume_front(count)를 추가합니다. 앞에서 완성된 프레임을 꺼낸 다음 나머지 바이트를 다음 프레임의 시작으로 남기는 연산입니다. 현재 사용량이8이고 앞5바이트를 소비하면 원래[5,8)이 새[0,3)이 됩니다.\n\ncount가 사용량보다 크면 아무것도 바꾸지 않고 false를 반환합니다. 검사 뒤의 used_-count는 음수가 될 수 없습니다. 앞에서부터 복사하면 목적 위치 index가 원본 count+index보다 앞이거나 같으므로 아직 읽지 않은 뒤쪽 원본을 덮지 않습니다. count=0도 같은 위치로 복사하는 유효한 연산입니다.\n\n새 사용량 뒤의 배열 칸은 유효 데이터 범위에 포함하지 않습니다. 남아 있는 옛 값은 이후 append로 덮을 수 있습니다. 버퍼를 비우는 것은 논리적인 사용량 변경이며 비밀 데이터의 메모리 소거와는 다른 작업입니다.",
+      "codes": [
+        {
+          "label": "완성된 접두사를 제거하고 꼬리를 앞으로 옮긴다",
+          "language": "cpp",
+          "text": "bool consume_front(std::size_t count) noexcept {\n        if (count > used_) return false;\n        const std::size_t left = used_ - count;\n        for (std::size_t index = 0; index < left; ++index) {\n            bytes_[index] = bytes_[count + index];\n        }\n        used_ = left;\n        return true;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "이 복사 비용을 언제 바꿀까",
+          "body": "한 번 소비할 때 남은 바이트 수에 비례하는 복사 비용이 듭니다. 여기서는 용량64로 작게 제한합니다. 큰 버퍼와 많은 프레임에서는 읽기 위치를 따로 두고 가끔 압축하거나 링 버퍼를 쓸 수 있습니다. 그러면 배열 끝을 가로지르는 헤더와 payload를 읽는 책임도 함께 생깁니다."
+        }
+      ]
+    },
+    {
+      "title": "표현할 수 있는 프레임만 인코딩한다",
+      "body": "Frame은 type, payload 배열, 실제 payload 길이 size를 소유합니다. EncodedFrame은 전송 바이트 배열과 실제 전체 길이를 소유합니다. 서로 다른 두 size가 세는 대상을 구분하세요. 전자는 본문 데이터 길이, 후자는 헤더와 TYPE까지 포함한 길이입니다.\n\nencode_frame은 먼저 size≤32를 검사합니다. 이 조건 아래 size+1은33 이하이므로 uint16_t 변환이 값을 잃지 않습니다. 길이를 두 바이트로 분리하고 TYPE과 payload를 차례로 씁니다. 객체의 메모리 배치에는 패딩이 있을 수 있으므로 구조체 전체를 복사해 wire 형식으로 삼지 않습니다.\n\n결과는 지역 candidate에 완성한 뒤 out에 대입합니다. 따라서 너무 큰 길이로 실패해도 호출자의 이전 out은 보존됩니다. candidate의 남는 배열 칸은0으로 초기화되지만 송신은 candidate.size만큼만 합니다. 고정 배열 전체를 보내면 남는 칸도 다음 메시지의 바이트로 전달됩니다.",
+      "codes": [
+        {
+          "label": "고정 공간과 두 길이의 의미",
+          "language": "cpp",
+          "text": "inline constexpr std::size_t kMaxPayloadBytes = 32;\ninline constexpr std::size_t kHeaderBytes = 2;\ninline constexpr std::size_t kMaxFrameBytes = 35;\ninline constexpr std::size_t kReceiveCapacity = 64;\ninline constexpr std::uint16_t kMaxLength = 33;\n\nstatic_assert(kMaxFrameBytes == kHeaderBytes + 1 + kMaxPayloadBytes,\n              \"frame size must equal header + type + max payload\");\nstatic_assert(kReceiveCapacity > kMaxFrameBytes,\n              \"receive buffer must hold a whole maximum frame\");\n\n// One application frame. `size` is the payload length (0..kMaxPayloadBytes).\n// A freshly decoded frame has a zeroed unused payload tail.\nstruct Frame {\n  std::uint8_t type{};\n  std::array<std::uint8_t, kMaxPayloadBytes> payload{};\n  std::size_t size{};\n};\n\n// One encoded frame. `size` is the total encoded length (3 + payload length).\nstruct EncodedFrame {\n  std::array<std::uint8_t, kMaxFrameBytes> bytes{};\n  std::size_t size{};\n};"
+        },
+        {
+          "label": "범위 확인 → 바이트 조립 → 완성 결과 전달",
+          "language": "cpp",
+          "text": "inline bool encode_frame(const Frame& frame, EncodedFrame& out) noexcept {\n  if (frame.size > kMaxPayloadBytes) {\n    return false;\n  }\n  EncodedFrame candidate{};\n  const std::uint16_t len =\n      static_cast<std::uint16_t>(frame.size + std::size_t{1});\n  candidate.bytes[0] = static_cast<std::uint8_t>(len & 0xFFu);\n  candidate.bytes[1] = static_cast<std::uint8_t>((len >> 8) & 0xFFu);\n  candidate.bytes[2] = frame.type;\n  for (std::size_t i = 0; i < frame.size; ++i) {\n    candidate.bytes[kHeaderBytes + 1 + i] = frame.payload[i];\n  }\n  candidate.size = kHeaderBytes + 1 + frame.size;\n  out = candidate;\n  return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "net/framing.cpp",
+        "symbol": "std::vector<uint8_t> build_frame",
+        "invariant": "송신 쪽도 payload 상한을 확인하고 명시적인 wire 바이트를 만든다.",
+        "mayDiffer": "현재 함수는 실패를 빈vector로 알리고 payload 체크섬도 추가한다."
+      }
+    },
+    {
+      "title": "파서를 세 가지 결과로 표현한다",
+      "body": "바이트가 부족한 상태와 잘못된 메시지를 받은 상태는 호출자의 다음 행동이 다릅니다. need_more는 버퍼와 출력 인자를 유지한 채 수신을 이어 가라는 뜻입니다. frame은 하나를 완성해 출력하고 정확히 그 길이만 소비했다는 뜻입니다. error는 더 이상 이 연결의 데이터를 해석하지 않는 실패 상태입니다.\n\nFrameParser는 ByteBuffer<64>와 failed_를 소유합니다. 임의의 호출 사이에 남아야 하는 정보는 이 객체에 있습니다. 스택에서 매 recv마다 새 파서를 만들면 부분 헤더와 본문이 사라집니다. 한 연결에서 살아 있는 파서 하나를 유지합니다.\n\n헤더를 읽는 별도 카운터는 두지 않습니다. 버퍼 크기가2 미만이면 헤더 부족, 헤더를 읽었는데 전체 크기보다 작으면 본문 부족으로 상태를 도출할 수 있습니다. 실패만 bool로 기억합니다. 두 상태 저장소가 서로 어긋나지 않도록 필요한 정보만 보관하는 설계입니다.",
+      "codes": [
+        {
+          "label": "파서 결과 타입",
+          "language": "cpp",
+          "text": "enum class ParseStatus { need_more, frame, error };"
+        },
+        {
+          "label": "호출자가 사용하는 상태표",
+          "language": "text",
+          "text": "결과       out           버퍼                  다음 행동\nneed_more  변경 없음     변경 없음             더 수신\nframe      완성 메시지   해당 접두사만 제거     다시 next\nerror      변경 없음     비우고 실패 고정       연결 종료\n\nEOF는 소켓 결과다. 파서 결과와 함께 해석한다."
+        }
+      ]
+    },
+    {
+      "title": "헤더 두 바이트로 기다릴 양부터 검증한다",
+      "body": "next는 버퍼 크기가2 이상인 것을 확인한 뒤 p[0], p[1]을 읽습니다. len이0이면 TYPE조차 없고,33보다 크면 허용된 최대 본문을 넘습니다. 이 두 경우는 나머지 데이터가 없어도 오류로 판정할 수 있습니다. 공격자가65535를 선언했는데 그만큼 모일 때까지 기다릴 이유가 없습니다.\n\n길이가 유효하면 total=2+len을 계산합니다. 최대35이므로 이 덧셈은 size_t 범위를 넘지 않습니다. 버퍼 크기가 total보다 작으면 소비하지 않고 need_more를 반환합니다. 헤더를 미리 버리지 않기 때문에 다음 호출도 같은 위치에서 길이를 읽을 수 있습니다.\n\n완성된 경우 payload를 지역 candidate로 복사합니다. 복사한 뒤 consume_front(total)로 버퍼를 이동하고 out을 갱신합니다. 이동 후의 p는 동일한 배열 주소라도 가리키는 내용이 바뀌므로, 메시지를 참조 포인터로 넘기는 대신 소유한 복사본을 넘깁니다. out의 수명은 파서가 다음 바이트를 받는 일과 분리됩니다.",
+      "codes": [
+        {
+          "label": "배열 접근의 전제를 위에서 아래로 쌓는다",
+          "language": "cpp",
+          "text": "ParseStatus next(Frame& out) noexcept {\n    if (failed_) {\n      return ParseStatus::error;\n    }\n    if (buffer_.size() < kHeaderBytes) {\n      return ParseStatus::need_more;\n    }\n    const std::uint8_t* p = buffer_.data();\n    const std::uint16_t len = static_cast<std::uint16_t>(\n        static_cast<std::uint16_t>(p[0]) |\n        (static_cast<std::uint16_t>(p[1]) << 8));\n    if (len < 1u || len > kMaxLength) {\n      failed_ = true;\n      (void)buffer_.consume_front(buffer_.size());\n      return ParseStatus::error;\n    }\n    const std::size_t total = kHeaderBytes + static_cast<std::size_t>(len);\n    if (buffer_.size() < total) {\n      return ParseStatus::need_more;\n    }\n    Frame candidate{};\n    candidate.type = p[kHeaderBytes];\n    for (std::size_t i = 1; i < len; ++i) {\n      candidate.payload[i - 1] = p[kHeaderBytes + i];\n    }\n    candidate.size = static_cast<std::size_t>(len) - 1;\n    (void)buffer_.consume_front(total);\n    out = candidate;\n    return ParseStatus::frame;\n  }"
+        }
+      ],
+      "reference": {
+        "path": "net/framing.cpp",
+        "symbol": "bool parse_frames",
+        "invariant": "헤더 준비·길이상한·전체 준비를 차례로 확인한 뒤 payload를 읽는다.",
+        "mayDiffer": "현재 파서는 여러 프레임을 한 호출에 추출하고 마지막에vector접두사를 한 번 제거한다."
+      }
+    },
+    {
+      "title": "분할된 헤더와 붙어 온 다음 프레임을 따라간다",
+      "body": "ABC 요청 뒤 빈 요청이 이어진다고 합시다. 수신 묶음이 [04], [00 01 41], [42 43 01], [00 01]이면 첫 호출은 헤더조차 부족합니다. 두 번째에는 LEN=4를 알지만 전체6바이트 중4개뿐이므로 기다립니다.\n\n세 번째에는7바이트가 모입니다. 첫6바이트를 꺼내고01 하나를 남깁니다. 그01은 다음 길이 필드의 첫 바이트입니다. 여기서 다시 next를 부르면 need_more이며 out과 남은01은 그대로입니다. 마지막00 01을 붙이면 두 번째 프레임이 완성됩니다.\n\n한 번의 recv에 여러 프레임이 붙어 올 수도 있습니다. 따라서 frame을 얻었으면 다음 recv부터 호출하는 것이 아니라, 같은 파서에서 next를 반복해 need_more까지 비웁니다. 소켓에 새 데이터가 없어도 버퍼에는 이미 완성된 메시지가 있을 수 있습니다.",
+      "codes": [
+        {
+          "label": "관찰 표: 바이트는16진수",
+          "language": "text",
+          "text": "추가            꺼낸 메시지      남은 바이트\n04              없음             04\n00 01 41        없음             04 00 01 41\n42 43 01        요청 ABC         01\n00 01           빈 요청          없음\n\n다르게 한 번에 추가: 04 00 01 41 42 43 01 00 01\nnext → ABC, next → 빈 요청, next → need_more"
+        }
+      ]
+    },
+    {
+      "title": "오류 뒤에는 파서를 계속 사용하지 않는다",
+      "body": "append의 입력은 이번 recv가 실제로 채운 범위입니다. 바이트 버퍼가 추가를 거절하면 파서는 failed_를 설정하고 보류 중인 바이트를 비웁니다. 양수 길이에 null을 넘긴 경우도 실패입니다. ByteBuffer 자체는 거절 시 기존 내용을 유지하지만, FrameParser는 더 높은 계층에서 이 실패를 연결 해석의 종료로 취급합니다.\n\n실패가 고정되면 이후 append는 false, next는 error를 반환합니다. 우연히 다음 바이트가 정상 헤더처럼 보인다고 다시 시작하지 않습니다. 현재 규약에는 어느 위치가 진짜 프레임 시작인지 찾는 재동기화 표식이 없기 때문입니다. 새 연결에는 새 파서를 만듭니다.\n\n이 정책은 잘못된 데이터를 자동 수리하려는 추측을 없애고 호출자의 종료 경로를 분명하게 만듭니다. 길이만 정상인 미완성 프레임은 여전히 need_more입니다. 대기 시간이 지나도 오지 않는 문제는 시간 제한을 담당하는 계층이 판단해야 합니다.",
+      "codes": [
+        {
+          "label": "하위 버퍼의 실패를 연결 단위 파서 실패로 승격한다",
+          "language": "cpp",
+          "text": "bool append(const std::uint8_t* data, std::size_t count) noexcept {\n    if (failed_) {\n      return false;\n    }\n    if (!buffer_.append(data, count)) {\n      failed_ = true;\n      (void)buffer_.consume_front(buffer_.size());\n      return false;\n    }\n    return true;\n  }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "오류 전에 나온 메시지는 되돌아갈까",
+          "body": "next가 이미 반환한 메시지를 애플리케이션이 처리했다면 이후 오류가 이를 취소하지 않습니다. 이 파서는 프레임 단위 추출기입니다. 여러 메시지를 모두 성공하거나 모두 취소하려면 별도의 애플리케이션 트랜잭션 규약이 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "64바이트 버퍼가 충분한 이유를 계산한다",
+      "body": "고정 배열을 선택했다면 정상 메시지가 용량 때문에 실패하지 않는다는 근거도 필요합니다. 파서를 need_more까지 비운 뒤에는 보류 중인 꼬리가35바이트 미만입니다.35바이트가 있다면 허용 범위의 프레임 하나는 반드시 완성되어 꺼낼 수 있기 때문입니다.\n\n한 번의 수신 상한을16으로 두면 새 바이트를 붙일 때 최대34+16=50바이트입니다. 따라서 용량64 안에 들어갑니다. 이 증명에는 **다음 수신 전에 완성된 프레임을 모두 소비한다**는 조건이 들어갑니다. 상수64만 보고 충분하다고 말할 수는 없습니다.\n\n총 통신량은64바이트보다 커도 됩니다. 소비한 공간을 재사용하므로 같은 연결에서 많은 프레임을 순서대로 처리할 수 있습니다. 다만 이 동기 진단은 한 연결만 처리하고 응답 송신 중에는 수신을 하지 않습니다. 상대가 응답을 읽지 않거나 본문을 끝내지 않으면 블로킹될 수 있습니다. 메모리 용량·연결 수·대기 시간은 서로 다른 자원 한도입니다.",
+      "codes": [
+        {
+          "label": "공간의 상한",
+          "language": "text",
+          "text": "최대 프레임     = 2 + 1 + 32 = 35\n완성분 소비 후  = 최대34\n다음 recv       = 최대16\nappend 직후     = 최대50 ≤ 64\n\nrecv → append → next 반복(need_more까지) → recv"
+        }
+      ]
+    },
+    {
+      "title": "응답을 EOF보다 먼저 보낸다",
+      "body": "서버는 프레임 하나가 완성되면 TYPE=1인지 확인하고 payload가 같은 TYPE=2 응답을 바로 보냅니다. 요청을 읽는 scratch 배열, 미완성 바이트를 보관하는 parser, 완성 메시지 frame은 각각 다른 수명을 가집니다. scratch는 다음 recv에서 덮어도 parser와 frame의 데이터는 유지됩니다.\n\n클라이언트는 ABC·빈 payload·00 FF 2A의 세 요청을 이어 보냅니다. CHUNK는 한 send 요청에 제출할 최대 길이이며 실제 반환량만큼만 전진합니다. 세 응답의 종류·길이·내용·순서를 검사한 뒤 송신 방향을 닫습니다. 서버가 EOF를 받아 종료하면 클라이언트도 남은 응답 방향의 EOF까지 읽습니다.\n\n요청 송신 직후에는 shutdown_send를 하지 않습니다. 응답 세 개가 먼저 와야 하므로, 서버가 EOF를 기다리지 않고 프레임 경계만으로 응답했는지 확인할 수 있습니다. 이 예제에서 세 요청의 전체 길이는15바이트로 작게 제한되어 양쪽의 대용량 송수신 동시 진행 문제를 격리합니다.",
+      "codes": [
+        {
+          "label": "서버: 수신 → 모두 추출 → 프레임마다 응답",
+          "language": "cpp",
+          "text": "int run_server(unsigned port_arg, std::size_t read_cap) {\n  int error = 0;\n  std::uint16_t actual_port = 0;\n  study_net::Socket listener = study_net::listen_loopback(\n      static_cast<std::uint16_t>(port_arg), actual_port, error);\n  if (!listener.valid()) {\n    return fail_error(\"listen\", \"listen_loopback\", error);\n  }\n  std::printf(\"LISTEN %u\\n\", static_cast<unsigned>(actual_port));\n  std::fflush(stdout);\n\n  study_net::Socket connection = study_net::accept_one(listener, error);\n  listener.reset();\n  if (!connection.valid()) {\n    return fail_error(\"accept\", \"accept_one\", error);\n  }\n\n  study_net::FrameParser parser;\n  std::uint8_t buffer[kReadWindow];\n  std::size_t frames = 0;\n\n  for (;;) {\n    const study_net::StreamResult result =\n        study_net::receive_some(connection, buffer, read_cap);\n    if (result.status == study_net::StreamStatus::error) {\n      return fail_error(\"receive\", \"receive_some\", result.error);\n    }\n    if (result.status == study_net::StreamStatus::eof) {\n      break;\n    }\n    if (result.count == 0) {\n      return fail(\"receive\", \"no_progress\");\n    }\n    if (!parser.append(buffer, result.count)) {\n      return fail(\"append\", \"overflow\");\n    }\n    for (;;) {\n      study_net::Frame frame{};\n      const study_net::ParseStatus status = parser.next(frame);\n      if (status == study_net::ParseStatus::need_more) {\n        break;\n      }\n      if (status == study_net::ParseStatus::error) {\n        return fail(\"parse\", \"malformed_length\");\n      }\n      if (frame.type != kRequestType) {\n        return fail(\"parse\", \"unknown_type\");\n      }\n      study_net::Frame reply{};\n      reply.type = kReplyType;\n      reply.size = frame.size;\n      reply.payload = frame.payload;\n      study_net::EncodedFrame encoded{};\n      if (!study_net::encode_frame(reply, encoded)) {\n        return fail(\"encode\", \"payload_too_large\");\n      }\n      if (!send_all(connection, encoded.bytes.data(), encoded.size, encoded.size,\n                    \"send_reply\")) {\n        return 1;\n      }\n      print_frame_hex(frame);\n      ++frames;\n    }\n  }\n\n  if (parser.pending_bytes() != 0) {\n    return fail(\"eof\", \"truncated_frame\");\n  }\n  int shut_error = 0;\n  if (!study_net::shutdown_send(connection, shut_error)) {\n    return fail_error(\"shutdown\", \"shutdown_send\", shut_error);\n  }\n  std::printf(\"FRAMES %zu\\n\", frames);\n  std::fflush(stdout);\n  return 0;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "파서 성공과 애플리케이션 성공",
+          "body": "TYPE=99여도 기준 파서는 프레임으로 꺼냅니다. 서버는 허용된 요청 종류가 아니므로 거절합니다. 길이가 맞다는 것과 지금 상태에서 허용되는 행동이라는 것은 별도 검사입니다."
+        }
+      ]
+    },
+    {
+      "title": "EOF에서 남은 꼬리를 검사한다",
+      "body": "need_more는 빈 버퍼에서도 정상적으로 나옵니다. 호출자는 EOF를 받으면, 완성된 프레임을 모두 꺼낸 상태에서 pending_bytes를 확인합니다.0이면 프레임 경계에서 종료했고, 양수이면 헤더나 본문이 중간에서 잘린 것입니다. EOF 자체에 어느 메시지를 기대했는지는 들어 있지 않습니다.\n\n클라이언트는 이 구조 검사에 더해 응답 개수가 정확히3인지 확인합니다. 경계가 맞는 빈 스트림도 필요한 응답을 못 받았다면 실패입니다. 반대로 세 응답을 받았더라도 추가 네 번째 프레임이나 잘린 꼬리가 이어지면 거절합니다.\n\n버퍼를 정리할 때 남은 바이트를 무조건 버리면 이런 절단을 정상 종료로 오인할 수 있습니다. 종료 판정 전에 어떤 데이터와 의미 조건이 남아 있는지 확인하는 순서가 중요합니다.",
+      "codes": [
+        {
+          "label": "종료 판정의 두 축",
+          "language": "text",
+          "text": "EOF + 꼬리0 + 응답3개/내용일치 → 성공\nEOF + 꼬리1바이트             → 헤더 절단\nEOF + 헤더/일부 본문          → 프레임 절단\nEOF + 꼬리0 + 응답2개         → 애플리케이션 응답 부족\n정상 응답3개 + 완성 프레임1개 → 추가 응답 오류"
+        }
+      ]
+    },
+    {
+      "title": "실제 엔진의 규약과 비교한다",
+      "body": "현재 net/framing.cpp는 [LEN][TYPE][PAYLOAD][CHECKSUM]을 사용합니다. LEN의 의미는 같고 payload 상한은4096입니다. 전체 크기는2+LEN+4이며 payload 체크섬은 FNV-1a32, 빈 payload의 체크섬은0입니다. 파서가 한 번에 여러 Frame을 out에 추가하고, 끝에 미완성 꼬리를 남깁니다.\n\n길이 상한 초과는 버퍼를 비우고 false를 반환합니다. Session의 공통 parseReceived는 게임 I/O·룸·매칭 대기·수락 로비 모두에서 이 실패를 연결 종료로 처리합니다. 원시 파서는 같은 호출에서 먼저 꺼낸 정상 프레임을 out에 남길 수 있지만, Session은 실패한 배치의 프레임을 처리하지 않습니다. 이미 이전 호출에서 처리한 결과까지 취소하는 것은 아닙니다.\n\n오류 정책에는 차이도 있습니다. 현재 엔진은 LEN=0인6바이트 묶음과 체크섬 불일치를 소비하고 출력하지 않습니다. 기준 파서는 LEN=0을 헤더만 보고 치명적 오류로 처리합니다. 이 차이를 숨긴 채 파일을 서로 교체하면 호환되는 구현이 되지 않습니다. 체크섬이 맞아도 TYPE·payload 내부 범위·상태 전이는 별도로 검사해야 합니다.\n\n또한 현재 엔진의 vector 수신·payload 복사·출력 확장은 동적 할당을 할 수 있습니다. 기준 파서의 고정 배열과 최대payload는 학습용 선택입니다. 유지할 핵심은 바이트 경계·상한·완성분 소비·오류 전달의 계약이며, 저장 방식과 구체적인 메시지 종류는 바뀔 수 있습니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "bool Session::parseReceived",
+        "invariant": "파서의 치명적 실패가 호출자의 종료 상태와 전송 종료로 이어진다.",
+        "mayDiffer": "기준 진단은 동기 단일 연결이며 스레드join과게임상태전이는 다루지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "체크섬이 지켜 주는 범위",
+          "body": "현재 체크섬은 payload만 덮고 LEN·TYPE은 덮지 않습니다. 키가 없는 비암호학적 해시여서 악의적 송신자도 계산할 수 있습니다. 체크섬 일치를 인증이나 부정행위 방지의 증거로 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "실행 결과와 실패 입력을 비교한다",
+      "body": "아래 명령으로 누적 프로젝트를 빌드하고 서버를 시작합니다. 서버가 출력한 LISTEN 뒤 숫자를 다른 터미널의 connect 포트에 넣습니다. 서버 READ_CAP과 클라이언트 CHUNK를 1·2·4·16 등으로 바꿔도 최종 FRAMES 3과 VERIFIED 3 FRAMES는 같아야 합니다. 수신 호출의 분할 모양은 OS가 결정하므로 특정 로그 횟수를 성공 조건으로 삼지 않습니다.\n\n알고리즘 검사는 OS와 분리할 수 있습니다. tests/framing_contract.cpp는8바이트 두 프레임 사이의7개 틈을 자르거나 잇는128가지 분할을 모두 넣습니다. 매 추출의 메시지와 마지막 꼬리를 비교하고, need_more일 때 출력 인자가 유지되는지도 확인합니다. 최대 프레임, 잘못된 길이, 소비 범위 초과는 별도 입력으로 검사합니다.\n\n실제 프로세스 검사는 소켓과 파서의 연결을 확인합니다. 서버 준비 신호를 받은 뒤 연결하고, 응답을 읽은 뒤 송신을 닫는 순서로 EOF 이전 응답을 확인합니다. 검사 하네스의 시간 제한은 멈춘 검사를 끝내는 장치이며 진단 프로그램에 운영용 타임아웃이 구현되었다는 뜻은 아닙니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/85-framing -B out/study85 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study85 -j3\nctest --test-dir out/study85 --output-on-failure\n./out/study85/framing_probe listen 0 2\n# 다른 터미널: 실제 LISTEN 포트로 교체\n./out/study85/framing_probe connect 실제포트 1"
+        },
+        {
+          "label": "서버와 클라이언트의 마지막 출력",
+          "language": "text",
+          "text": "서버: FRAME 3 414243\n      FRAME 0\n      FRAME 3 00ff2a\n      FRAMES 3\n클라이언트: VERIFIED 3 FRAMES"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 빌드 위치",
+          "body": "다중 구성 생성기를 쓰면 빌드에 --config Release, 검사에 -C Release를 추가하고 out/study85/Release/framing_probe.exe를 실행합니다. 서버와 클라이언트는 같은 기기의127.0.0.1로 연결합니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일에서 소유와 소비를 연결한다",
+      "body": "byte_buffer.h는 저장 공간과 접두사 소비, framing.h는 wire 규칙과 파서 상태, framing_probe.cpp는 요청·응답의 의미와 종료 순서를 맡습니다. Socket과 Runtime의 수명 관리는 그대로 사용합니다. net/framing.h는 인라인 구현이므로 별도 cpp를 링크하지 않고, 새 진단 타깃은 StudySocket을 링크합니다.\n\n전체 파일을 읽을 때 바이트가 어느 객체로 복사되고 언제 소비되는지 표시해 보세요. header 확인 전의 배열 접근, 미완성 프레임의 소비, 파서 오류 뒤의 계속 수신 중 하나라도 들어가면 계약이 깨집니다. 테스트에서는 올바른 입력의 성공뿐 아니라 실패가 다음 행동을 정확히 바꾸는지 관찰합니다.",
+      "codes": [
+        {
+          "label": "net/byte_buffer.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/85-framing/net/byte_buffer.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/framing.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/85-framing/net/framing.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/framing_probe.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/85-framing/tools/framing_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/framing_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/85-framing/tests/framing_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "85-1",
+      "question": "기준 형식으로 payload가5바이트인 요청을 보냅니다. LEN과 전체 프레임 길이는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "LEN=5, 전체7"
+        },
+        {
+          "id": "b",
+          "text": "LEN=6, 전체8"
+        },
+        {
+          "id": "c",
+          "text": "LEN=8, 전체8"
+        },
+        {
+          "id": "d",
+          "text": "LEN=6, 전체12"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "LEN=6, 전체8",
+      "explanation": "LEN은 TYPE1+payload5=6입니다. 전체는 길이 필드2를 더한8입니다. 이 기준 형식에는 체크섬이 없습니다."
+    },
+    {
+      "id": "85-2",
+      "question": "04 00 01 41 42 43 01을 한 번에 추가하고 next를 need_more까지 호출했습니다. 남는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "없음"
+        },
+        {
+          "id": "b",
+          "text": "41 42 43"
+        },
+        {
+          "id": "c",
+          "text": "01"
+        },
+        {
+          "id": "d",
+          "text": "04 00"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "01",
+      "explanation": "첫6바이트가 ABC 요청입니다. 마지막01은 다음 LEN의 첫 바이트라 소비하지 않습니다. 다음 수신과 이어서 해석합니다."
+    },
+    {
+      "id": "85-3",
+      "question": "기준 파서에22 00 두 바이트만 들어왔습니다. 올바른 다음 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "error; 본문을 기다리지 않음"
+        },
+        {
+          "id": "b",
+          "text": "need_more;34바이트 본문 대기"
+        },
+        {
+          "id": "c",
+          "text": "빈 프레임 하나 반환"
+        },
+        {
+          "id": "d",
+          "text": "다음 바이트부터 헤더를 다시 탐색"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "error; 본문을 기다리지 않음",
+      "explanation": "22는16진수34로 최대LEN33을 넘습니다. 헤더만으로 거절하고 실패를 고정합니다."
+    },
+    {
+      "id": "85-4",
+      "question": "최대 프레임35, 수신 상한16, 버퍼64가 정상 입력에 충분하다는 증명에 필요한 조건은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든 recv가16바이트를 반환한다"
+        },
+        {
+          "id": "b",
+          "text": "송신을 항상 한 번만 한다"
+        },
+        {
+          "id": "c",
+          "text": "payload에0이 들어오지 않는다"
+        },
+        {
+          "id": "d",
+          "text": "다음 수신 전에 next를 need_more까지 반복한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "다음 수신 전에 next를 need_more까지 반복한다",
+      "explanation": "완성분을 소비해야 보류 꼬리가 최대34가 됩니다. 그러면 다음16바이트를 더해도50입니다. 소비 없이 계속 누적하면 정상 입력도 용량을 넘습니다."
+    },
+    {
+      "id": "85-5",
+      "question": "클라이언트가 정확히 두 응답을 꺼냈고 버퍼가 빈 상태에서 EOF를 받았습니다. 세 응답을 기대하는 이 진단의 판정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "빈 꼬리이므로 성공"
+        },
+        {
+          "id": "b",
+          "text": "프레임 경계는 맞지만 응답 부족으로 실패"
+        },
+        {
+          "id": "c",
+          "text": "헤더 절단으로 실패"
+        },
+        {
+          "id": "d",
+          "text": "EOF를 무시하고 네 번째 응답 대기"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "프레임 경계는 맞지만 응답 부족으로 실패",
+      "explanation": "구조적으로는 경계에서 끝났지만 필요한 응답 개수가 모자랍니다. wire 구조 검사와 애플리케이션 완료 조건을 함께 확인합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "ABC 요청과 빈 요청을 바이트로 적고 임의의 수신 경계 네 개로 나눕니다.",
+      "각 수신 뒤 next의 반환과 남은 꼬리를 손으로 추적합니다.",
+      "consume_front에서 복사 방향이 안전한 이유를 배열 인덱스로 설명합니다.",
+      "read cap과send chunk를 바꾸어 응답의 내용과 순서가 유지되는지 비교합니다."
+    ],
+    "failureChecks": [
+      "LEN0·LEN34를 헤더만 넣어도 즉시 오류가 되는지 확인합니다.",
+      "헤더 또는 본문 중간의 EOF를 완성 경계의 EOF와 구별합니다.",
+      "프레임 구조가 맞아도 응답 종류·개수·내용이 틀리면 실패하는지 확인합니다."
+    ],
+    "expected": "메시지 경계와 수신 경계를 분리하고, 완성분 소비·상한·종료의 전제를 코드로 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 한정 구현 초안·실제 C++/Python/Session·Part 대조와 직접 실행 검사",
+    "draftJob": "out/learning-jobs/085-framing-events.jsonl",
+    "corrections": [
+      "append가 하위 실패를 무시하던 초안 교정·존재하지 않는 runtime헤더 제거",
+      "출력 꼬리·보류바이트 주석의 적용 범위 교정",
+      "Session의4수신경로 프레이밍 실패 종료 보장",
+      "unsigned비교·할당·순수Python검사의 검증범위 설명 교정"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED97/SDL102 CTest·빌드 경고0·기존 게임/소켓/스트림 파일 동일(ByteBuffer 소비 연산만 확장)",
+    "기준 파서128분할·출력/미완성보존·최대프레임·길이/null/용량오류·소비 경계 ASan/UBSan",
+    "실제 루트 파서32768분할·현재 LEN0/체크섬/알수없는TYPE/최대payload 정책 ASan/UBSan",
+    "실제 두 프로세스16조합·EOF 전 응답·빈/바이너리/최대payload·잘못된 요청/응답·CLI9종",
+    "실제 Session io/room/queue/lobby 네 수신 단계에서 열린 상대의2바이트 과대헤더→실패/연결종료 확인",
+    "C++/Python 실제 구현32880회 직접비교·알려지지않은TYPE정책차이 별도확인·Python 고정벡터검사",
+    "실제 게임·양릴레이 빌드·root19/18 CTest 통과; Windows/macOS 네이티브 미검증·수동GUI 없음",
+    "Part 발췌·기준 실제스니펫7·Markdown27·419문제·전체차시 DOM 탐색/저장/복사/참조·정적배포 재현성 통과"
+  ]
+}

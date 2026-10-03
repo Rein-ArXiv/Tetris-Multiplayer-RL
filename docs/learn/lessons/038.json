@@ -1,0 +1,410 @@
+{
+  "id": "lesson-38",
+  "title": "점수: 규칙 이벤트와 상태 갱신",
+  "shortTitle": "득점과 누적 상태",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 고정과 행 제거·게임 오버를 판정하지만 점수와 레벨을 누적하지 않습니다.",
+  "finish": "완료: 고정마다 점수·줄 수·레벨·중력 간격을 한 번 갱신하고, 조회만 하는 숫자 표시를 화면에 연결합니다.",
+  "objective": "사건과 누적 합계를 구별하고, 레벨 경계의 계산 순서·정수 포화·점수표 입력 범위·GPU 저장 용량과 사용 길이를 설명하고 검사합니다.",
+  "prerequisites": [
+    "37차시 체크포인트",
+    "정수·optional·값 복사",
+    "행 제거·종료 상태·정점 버퍼"
+  ],
+  "validation": [
+    "Linux SCRIPTED30/SDL28 CTests·경고0·CPU 독립 링크·UBSan",
+    "일반 점수/레벨 경계·20002 포화 경계·네 번의 실제 회전/낙하/고정·최종 종료 득점·조회/invalid/stopped 보존",
+    "현재 SimGame:100 일반 레벨/제거 조합·16 포화 배치·16 T-spin 조합·포화 후 실제 제거 수 반환·종료 고정 득점",
+    "production sim_score/bot_controller/bot_replay/ranked_game 4 CTests 통과; 기존 sim_hash_dump 출력 동일",
+    "5 규칙 상태+9 숫자 경계×3크기=42 SDL offscreen GL:840정점 전체 저장소·모든 RGB 오차≤2/255",
+    "점수 확정 누락 mutation Release 검출; native main·물리키·모니터·타 OS 게임 실행은 미검증",
+    "CUA 데스크톱/390px 본문·비교표·접힘·38-1 선택/확인 즉시 해설·선택 해제·현재 UpdateScore 스냅샷/함수 이동 확인"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 점수/숫자 메시 초안 검토; 실제 SimGame 정수 상한 재현·수정; 독립 상태·픽셀 비교",
+    "draftJob": "out/learning-jobs/038-score-events.jsonl",
+    "corrections": [
+      "규칙 틱을 프레임으로 부르던 초안 주석 수정",
+      "그래픽 API 타입의 네임스페이스·빌린 const 참조·출력 위치 수정",
+      "정리된 초기 보드 불변식으로 네 줄 점수표의 입력 범위 보장",
+      "실제 점수/누적 행 signed overflow와 포화 이후 배치 반환값 보완"
+    ]
+  },
+  "recap": {
+    "points": [
+      "종료 사유는 지속 상태이고 game_over는 한 호출의 전이 결과입니다.",
+      "고정 뒤 정상 종료도 보드와 큐의 진행을 확정합니다.",
+      "끝난 판의 규칙 상태는 멈추어도 화면과 창의 이벤트 처리는 계속됩니다."
+    ],
+    "bridge": "고정에서 얻은 결과를 한 번만 점수에 반영하고, 화면은 그 누적 상태를 읽도록 연결하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "그림을 두 번 그리면 점수도 두 번 오를까?",
+      "body": "O가 두 줄을 지우면 300점을 주기로 했다고 합시다. 마지막 제거 수를 읽고 `score += 300`을 draw 안에서 실행하면 어떻게 될까요? 다음 규칙 갱신 없이 화면만 다시 그려도 600점이 됩니다. 같은 판을 빠른 모니터에서 볼수록 더 많은 점수를 얻는 셈입니다.\n\n득점은 고정·행 제거에서 발생하는 규칙 전이입니다. 화면은 이미 계산된 총점을 읽어서 숫자로 바꿉니다. 프로그램의 어느 곳에서나 같은 변수에 더할 수 있게 두는 것과, 실제로 더해야 할 단 하나의 경계를 정하는 것은 다릅니다.\n\n이번에는 점수표를 순수 함수로 만들고, Round가 누적 점수와 제거 줄 수를 소유하게 하겠습니다. 레벨은 누적 줄 수에서 계산하며, 한 번의 고정 안에서 득점·레벨·낙하 간격을 정해진 순서로 갱신합니다. 화면 상단에는 그 값을 읽어 만든 숫자를 그립니다.",
+      "notes": [
+        {
+          "kind": "용어 구별",
+          "title": "게임 점수와 BP는 별개의 상태",
+          "body": "여기서 다루는 점수는 한 판 안의 규칙 상태입니다. 계정에 저장하는 BP나 상점 잔액이 아니며, 점수 표시만으로 서버가 보상을 승인하지도 않습니다. 경기 검증·보상 지급은 뒤의 서버 단원에서 별도 경계로 다룹니다."
+        }
+      ]
+    },
+    {
+      "title": "입력은 제거 수, 출력은 이번 득점이다",
+      "body": "일반 줄 제거의 기본 점수를 표로 정의합니다. 이 표는 프로젝트가 선택한 규칙입니다. 모든 테트리스 게임에 공통인 공식이라고 가정하지 않습니다.\n\n| 한 번에 제거한 행 | 기본 점수 |\n| --- | --- |\n| 0 | 0 |\n| 1 | 100 |\n| 2 | 300 |\n| 3 | 600 |\n| 4 | 1000 |\n\n두 줄을 한꺼번에 지우면 300점이고 한 줄을 두 번 지우면 200점입니다. 누적 제거 수가 같아도 점수가 다릅니다. 따라서 점수를 ‘총 제거 수 × 100’으로 나중에 재계산할 수 없습니다. **누적 점수는 각 사건에서 얻은 점수의 합**입니다.\n\n레벨이 같다면 네 줄 한 번의 1000점은 한 줄 네 번의 400점보다 2.5배입니다. 여러 사건 사이에 레벨이 달라지는 비교에서는 각각의 당시 배율까지 계산해야 합니다.\n\n실제 득점은 기본 점수에 제거 직전 레벨을 곱합니다. 기본값이 300이면 레벨 1에서 300, 레벨 2에서 600입니다. T-spin·드롭 거리·콤보처럼 다른 정보가 필요한 보너스는 아직 이 함수에 넣지 않습니다. 이를 추가할 때는 필요한 입력과 기억해야 할 상태부터 확장해야 합니다."
+    },
+    {
+      "title": "왜 점수표는 네 줄까: 호출 경계의 불변식",
+      "body": "범용 clear_full_rows는 20행 전체에서 완성 행을 찾아 0~20을 반환합니다. 그런데 일반 점수표는 0~4만 정의했습니다. 배열 크기가 다섯이라는 이유만으로 모든 호출의 제거 수가 네 개 이하가 되지는 않습니다.\n\n한 판이 고정 사이에 머무는 시점에는 아직 지우지 않은 완성 행이 없어야 합니다. 그러면 새로 완성되는 각 행에는 이번에 고정한 셀이 적어도 하나 필요합니다. 새 셀은 서로 다른 네 개이므로 새로 완성되는 행도 최대 네 개입니다. 이것이 점수표의 입력 범위를 뒷받침하는 조건입니다.\n\nRound::create에 이 조건을 추가합니다. 초기 보드에 완성 행이 있으면 설정 오류로 nullopt를 반환합니다. 보드를 자동으로 지우거나 미리 점수를 주지 않습니다. initial_spawn_blocked는 유효한 초기 보드에서 스폰 공간이 막힌 정상 종료이므로 이 경우와 다릅니다.\n\n완성 행이 없는 초기 보드에서 시작하고, 고정할 때마다 모든 완성 행을 제거하면 같은 조건이 다음 고정 전에도 유지됩니다. 처음 성립함을 확인하고 한 전이가 조건을 보존함을 확인하는 방식은 반복 과정의 불변식을 설명하는 데 유용합니다.",
+      "codes": [
+        {
+          "label": "득점 가능한 판의 초기 조건",
+          "language": "cpp",
+          "text": "        // A scoring round starts between locks: no unresolved complete row.\n        // Four newly locked cells can then complete at most four rows.\n        for (int row=0; row<study_grid::Grid::kRows; ++row)\n            if (study_lines::row_full(board,row)) return std::nullopt;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "API 계약",
+          "title": "Grid와 Round가 허용하는 상태는 다르다",
+          "body": "Grid는 20행 모두를 채울 수 있습니다. 행 정리 함수도 이를 처리합니다. 점수를 계산하는 Round는 고정 사이의 정리된 보드만 초기값으로 받습니다. 새 체크포인트의 생성 계약을 강화한 것이며, 예전 기준 파일을 몰래 바꾸지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "표를 읽는 함수와 상태를 바꾸는 함수를 나눈다",
+      "body": "normal_points는 제거 수와 레벨을 받아 이번 점수를 계산합니다. 입력을 검사한 뒤 표를 읽고 곱합니다. 창·시간·전역 변수·누적 점수에는 접근하지 않습니다. 같은 입력이면 같은 출력이므로 표의 모든 조합을 작은 검사로 다룰 수 있습니다.\n\n반환형은 optional<uint64_t>입니다. 0줄의 결과는 값 0을 가진 optional이고, -1줄·5줄 또는 레벨 범위 밖은 nullopt입니다. ‘점수가 0’과 ‘입력에 대한 계산이 정의되지 않음’을 같은 0으로 합치지 않습니다.\n\n`if (!points)`는 optional에 값이 있는지 검사합니다. 담긴 점수가 0인지 검사하는 `if (*points == 0)`과 다릅니다. 정상적인 0줄 고정도 이후 큐 소비와 새 스폰을 계속 처리해야 합니다.\n\n검사를 인덱싱 전에 두어 음수나 5가 table의 범위를 벗어나지 않게 합니다. 레벨도 1~20으로 제한하므로 최대 기본 점수 1000과의 곱은 20000입니다. 누적 총점이 커지는 문제는 이 작은 곱과 별도로 처리합니다.",
+      "codes": [
+        {
+          "label": "범위 검사와 일반 제거 점수표",
+          "language": "cpp",
+          "text": "// Points for 0..4 rows at a 1..20 level, or nullopt when out of range.\ninline std::optional<std::uint64_t> normal_points(int rows, unsigned level) noexcept {\n    if (rows < 0 || rows > 4 || level < 1 || level > 20) {\n        return std::nullopt;\n    }\n    constexpr std::uint64_t table[5] = {0u, 100u, 300u, 600u, 1000u};\n    return table[rows] * static_cast<std::uint64_t>(level);\n}"
+        }
+      ]
+    },
+    {
+      "title": "누적 상태와 레벨의 관계를 한 곳에 둔다",
+      "body": "Totals는 누적 points와 lines를 값으로 보관합니다. 두 값은 서로 대체할 수 없으므로 둘 다 필요합니다. Round가 Totals를 소유하고 외부에는 읽기용 조회만 제공합니다.\n\n레벨은 누적 10줄마다 하나 오르고 최대 20입니다. 별도의 level 필드를 함께 저장하는 대신 totals.lines에서 계산합니다. 그러면 줄 수는 12인데 저장된 레벨은 1인 모순을 만들 저장 공간 자체가 줄어듭니다.\n\n| 누적 줄 수 | 레벨 |\n| --- | --- |\n| 0~9 | 1 |\n| 10~19 | 2 |\n| 180~189 | 19 |\n| 190 이상 | 20 |\n\nlevel 함수는 큰 줄 수를 unsigned로 바꾸기 전에 `lines >= 190`을 확인합니다. 그 아래에서만 나누고 변환하므로 변환할 몫은 0~18입니다. 작은 자료형으로 먼저 잘라 낸 뒤 상한을 확인하는 순서는 피합니다.\n\n레벨이 20에 도달해도 누적 줄 수와 점수는 각자 상한까지 계속 증가합니다. 레벨 제한과 총량 제한은 서로 다른 정책입니다.",
+      "codes": [
+        {
+          "label": "누적 상태와 파생 레벨",
+          "language": "cpp",
+          "text": "struct Totals {\n    std::uint64_t points = 0;\n    std::uint64_t lines = 0;\n};\n\n// Level grows every 10 cleared lines and is capped at 20.\nconstexpr unsigned level(const Totals& totals) noexcept {\n    return totals.lines >= 190u ? 20u : 1u + static_cast<unsigned>(totals.lines / 10u);\n}"
+        }
+      ]
+    },
+    {
+      "title": "경계를 넘는 제거는 어느 레벨로 계산할까?",
+      "body": "누적 9줄·1000점·레벨 1에서 두 줄을 제거한다고 생각해 보세요. 총 줄 수를 먼저 11로 바꾼 뒤 레벨을 계산하면 이번 제거에 레벨 2를 곱해 600점을 주게 됩니다. 여기서 선택한 규칙은 제거 직전 레벨을 쓰므로 300점입니다.\n\naward는 before에서 레벨을 읽고 normal_points를 계산합니다. 그 뒤 복사본의 점수와 줄 수를 증가시켜 반환합니다. 결과는 1300점·11줄이며, 그 결과의 level을 조회하면 2입니다.\n\n| 계산 단계 | 값 |\n| --- | --- |\n| 사건 전 | 1000점, 9줄, 레벨 1 |\n| 이번 일반 득점 | 300 × 1 = 300 |\n| 누적 결과 | 1300점, 11줄 |\n| 다음 동작의 레벨 | 2 |\n\n합계를 갱신하는 순서는 규칙의 일부입니다. 코드를 짧게 만들려고 줄 수 증가를 위로 옮겨도 같은 결과라고 가정할 수 없습니다. before를 const 참조로 받고 after를 따로 만드는 형식은 어떤 시점의 값을 읽는지 드러냅니다.",
+      "codes": [
+        {
+          "label": "옛 레벨로 계산한 뒤 새 합계를 반환",
+          "language": "cpp",
+          "text": "// Award a clear using the level before the clear; input is left untouched.\ninline std::optional<Totals> award(const Totals& before, int rows) noexcept {\n    const auto points = normal_points(rows, level(before));\n    if (!points) return std::nullopt;\n    Totals after = before;\n    after.points = saturating_add(before.points, *points);\n    after.lines = saturating_add(before.lines, static_cast<std::uint64_t>(rows));\n    return after;\n}"
+        }
+      ]
+    },
+    {
+      "title": "큰 정수는 무한대가 아니다",
+      "body": "uint64_t도 유한한 정수입니다. 최댓값 M에서 1을 더하면 unsigned 연산은 0으로 감깁니다. 언어 규칙상 정의된 동작이지만 점수가 갑자기 0이 되는 것은 이번 게임 규칙에 맞지 않습니다.\n\n상한에서 취할 정책은 여러 가지입니다. 연산을 거부하거나, 더 큰 표현을 쓰거나, 상한을 유지할 수 있습니다. 여기서는 **포화 덧셈**을 선택합니다. a+b가 M을 넘으면 M을 반환하고, 그 아래에서는 정확한 합을 반환합니다.\n\n검사는 `b > M - a`입니다. a가 이 자료형의 값이므로 M-a는 음수가 되지 않습니다. a+b를 먼저 계산해 놓고 최댓값보다 큰지 비교하면 이미 감긴 뒤라 넘침을 찾을 수 없습니다.\n\n포화 직전 총점이 M-50이고 규칙상 득점이 100이라면 새 총점은 M입니다. 저장된 실제 증가량은 50입니다. 따라서 ‘점수표가 계산한 보상’과 ‘상한을 적용한 누적 값의 증가’는 같지 않을 수 있습니다. last_awarded는 후자를 기록합니다.\n\n현재 게임은 API·해시가 int 점수를 사용합니다. signed 정수의 표현 범위를 넘는 덧셈은 단순히 감긴다고 의존할 수 없으며 정의되지 않은 동작입니다. 현재 구현에서는 피연산자를 int64_t로 먼저 넓혀 계산한 다음 int의 상한으로 제한합니다. 더한 뒤의 캐스팅은 늦습니다.",
+      "codes": [
+        {
+          "label": "덧셈 전에 상한 검사",
+          "language": "cpp",
+          "text": "// Add without wrapping: clamp to UINT64_MAX on overflow.\nconstexpr std::uint64_t saturating_add(std::uint64_t a, std::uint64_t b) noexcept {\n    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();\n    return b > maximum - a ? maximum : a + b;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "적용 범위",
+          "title": "점수의 상한과 랭킹 정책",
+          "body": "포화 이후 서로 다른 실제 누적 보상이 같은 저장 점수가 될 수 있습니다. 포화는 수치 표현 정책이며 순위의 동점 처리나 서버의 보상 승인 정책을 대신하지 않습니다. 자료형을 넓힐 때도 직렬화·저장·해시의 계약을 함께 바꿔야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "한 번의 고정 안에서 득점을 확정한다",
+      "body": "Round::tick은 candidate에 고정과 행 제거를 적용한 직후 award를 호출합니다. 성공하면 후보의 Totals를 새 값으로 교체하고, 이전 점수와 새 점수의 차이를 last_awarded에 기록합니다. 점수가 감소하지 않는 포화 정책이므로 이 뺄셈은 음수가 되지 않습니다.\n\n득점 계산이 실패하면 후보 전체를 버립니다. 보드만 새 값인데 점수는 옛 값인 중간 상태를 외부에 남기지 않습니다. 이후 큐·스폰 검사에서 invalid가 나와도 같은 방식으로 전체 후보를 확정하지 않습니다.\n\n일반 고정과 정상 게임 오버는 완료된 규칙 전이입니다. 둘 모두 이번 고정의 보드·득점·큐 진행을 확정합니다. 조회 함수나 renderer는 이 계산을 다시 실행하지 않습니다.\n\n같은 award 함수를 두 번 호출하면 결과를 두 번 더할 수 있습니다. 함수가 자동으로 중복을 알아내는 것은 아닙니다. 여기서는 새 고정을 처리하는 단 하나의 경로에서 한 번 호출하도록 소유권과 제어 흐름을 정합니다. 네트워크 재전송을 구별하는 사건 ID나 중복 제거 저장소는 별도 문제입니다.",
+      "codes": [
+        {
+          "label": "득점·레벨·중력을 후보 상태에 적용",
+          "language": "cpp",
+          "text": "            const auto scored = study_score::award(candidate.totals_,candidate.last_cleared_);\n            if (!scored) return Step::invalid;\n            const auto old_level = candidate.level();\n            candidate.last_awarded_ = scored->points - candidate.totals_.points;\n            candidate.totals_ = *scored;\n            if (candidate.level() != old_level) {\n                const auto interval = study_score::gravity_interval(candidate.level());\n                if (!interval) return Step::invalid;\n                candidate.gravity_.interval = *interval;\n            }"
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "file": "checkpoints/38-score/simulation/round.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "레벨이 바뀌면 다음 낙하 간격도 바꾼다",
+      "body": "득점과 줄 수를 확정한 후보의 레벨이 옛 레벨과 다르면 중력 간격을 바꿉니다. 사용한 식은 `30 - (level - 1) * 27 / 19`이며 레벨 1은 30틱, 레벨 20은 3틱입니다.\n\n정수 나눗셈은 여기서 양수 몫의 소수 부분을 버립니다. 곱셈을 먼저 하므로 레벨 5에서는 `30 - 108 / 19 = 25`입니다. `27 / 19`를 먼저 계산해 1로 만든 뒤 곱하면 26이 되어 다른 곡선입니다.\n\n| 레벨 | 낙하 한 칸의 간격 |\n| --- | --- |\n| 1 | 30틱 |\n| 2 | 29틱 |\n| 5 | 25틱 |\n| 10 | 18틱 |\n| 20 | 3틱 |\n\n틱 수는 화면 프레임 수가 아닙니다. 규칙이 초당 60틱 진행된다는 조건에서 30틱은 0.5초입니다. 렌더링 횟수에 점수나 중력을 연결하지 않습니다.\n\n고정 뒤 생성되는 새 블록의 중력 경과는 0으로 초기화합니다. 레벨 상승은 새 간격을 정하고, 스폰 과정은 새 블록의 경과를 정합니다. CPU 실험은 기다림을 줄이기 위해 초기 interval을 1로 넘길 수 있지만, 첫 레벨 상승부터는 위의 레벨 간격을 적용합니다. 이 인자는 영구 속도 고정 옵션이 아닙니다.",
+      "codes": [
+        {
+          "label": "유효한 레벨의 낙하 간격",
+          "language": "cpp",
+          "text": "// Simulation ticks per automatic drop, from 30 at level 1 to 3 at level 20.\ninline std::optional<int> gravity_interval(unsigned level) noexcept {\n    if (level < 1 || level > 20) {\n        return std::nullopt;\n    }\n    return 30 - static_cast<int>(level - 1) * 27 / 19;\n}"
+        },
+        {
+          "label": "simulation/score.h · 완성 파일",
+          "file": "checkpoints/38-score/simulation/score.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "이번 증가량과 총점은 수명이 다르다",
+      "body": "score()는 판의 누적 점수를 읽습니다. last_awarded()는 가장 최근에 받아들인 tick에서 실제로 늘어난 양을 읽습니다. 후보 tick의 시작에서 last_awarded를 0으로 두고, 고정에서만 새 증가량을 기록합니다.\n\n다음 정상 대기 tick이 오면 last_awarded는 0이지만 총점은 유지됩니다. invalid와 stopped는 후보를 확정하지 않거나 시작 전에 반환하므로 마지막 값까지 보존합니다. 따라서 last_awarded가 양수라는 이유만으로 매 프레임 다시 합산하거나 소리를 내면 안 됩니다.\n\n고정과 동시에 종료되는 사례도 보겠습니다. O가 row 0과 row 1을 차지하고 row 1의 다른 칸을 채운 보드에서 고정하면 한 행이 제거됩니다. 위에 남았던 O의 두 셀이 row 1로 내려와 다음 O 스폰을 막을 수 있습니다. 이 고정은 100점을 얻고 종료됩니다. 그 뒤 stopped는 최종 100점을 유지합니다.\n\nmain의 로그는 locked 또는 game_over 결과를 받은 순간에 출력합니다. 화면은 round.score()를 읽습니다. 규칙 합계는 이미 Round 안에서 갱신됐으므로 main에서 다시 점수를 더하는 코드는 없습니다."
+    },
+    {
+      "title": "숫자를 그리기 전에 정수에서 자릿수를 꺼낸다",
+      "body": "아직 글꼴 렌더러가 없으므로 숫자 0~9만 일곱 선분으로 표현하겠습니다. 이것은 고정된 숫자 도형이며 일반 텍스트·한글·폰트를 그리는 구현이 아닙니다.\n\n십진수의 마지막 자릿수는 value % 10이고, 그 자릿수를 뺀 몫은 value / 10입니다. 120은 차례로 0,2,1을 꺼냅니다. 저장 순서는 뒤집혀 있으므로 그림을 만들 때 끝에서부터 읽어 1,2,0 순서로 배치합니다.\n\n처음 값이 0이어도 숫자 하나를 만들어야 하므로 do-while을 사용합니다. 일반 while(value != 0)만 쓰면 0점에서 아무 숫자도 나오지 않습니다. uint64_t의 최댓값은 20자리이므로 임시 배열을 20칸으로 둡니다.\n\n각 자릿수는 위·오른쪽 위·오른쪽 아래·아래·왼쪽 아래·왼쪽 위·가운데 일곱 선분 중 필요한 것만 켭니다. 예를 들어 1은 오른쪽 두 선분, 8은 일곱 선분입니다. 비트 마스크의 각 비트는 선분 하나의 켜짐 상태를 나타내며, 숫자 자체의 이진 표기와는 다른 표시용 부호입니다.",
+      "notes": [
+        {
+          "kind": "작은 예측",
+          "title": "점수 0은 몇 정점일까?",
+          "body": "0은 가운데 선분을 제외한 여섯 선분을 씁니다. 선분 하나를 사각형 두 삼각형으로 만들면 6정점이므로 총 36정점입니다. 숫자 값 0과 메시의 사용 정점 수 0을 혼동하지 않습니다."
+        }
+      ],
+      "codes": [
+        {
+          "label": "정수를 자릿수·선분·사각형으로 변환",
+          "language": "cpp",
+          "text": "// Emit the geometry of a value; 0 still renders as a single digit.\ninline Mesh make_mesh(std::uint64_t value) noexcept {\n    std::array<unsigned, 20> digits{};\n    std::size_t used = 0;\n    do {\n        digits[used++] = static_cast<unsigned>(value % 10u);\n        value /= 10u;\n    } while (value != 0);\n\n    Mesh mesh;\n    for (std::size_t i = 0; i < used; ++i) {\n        const unsigned digit = digits[used - 1 - i];\n        const unsigned mask = kDigitMask[digit];\n        const float x = 8.0f + 8.0f * static_cast<float>(i);\n        const float y = 4.0f;\n        for (unsigned seg = 0; seg < 7; ++seg) {\n            if ((mask & (1u << seg)) == 0) {\n                continue;\n            }\n            const int* r = kSegments[seg];\n            const auto quad = study_board::quad_vertices({\n                x + static_cast<float>(r[0]), y + static_cast<float>(r[1]),\n                x + static_cast<float>(r[2]), y + static_cast<float>(r[3]),\n            });\n            for (const Vertex2& v : quad) {\n                mesh.vertices[mesh.count++] = v;\n            }\n        }\n    }\n    return mesh;\n}"
+        }
+      ]
+    },
+    {
+      "title": "GPU 저장 용량과 이번 draw 길이를 구별한다",
+      "body": "한 자릿수에 최대 7선분, 한 선분에 6정점, 최대 20자리이므로 메시 저장 용량은 840정점입니다. 하지만 1점은 12정점, 0점은 36정점처럼 실제로 쓸 길이는 값에 따라 달라집니다.\n\nVBO는 840정점 용량으로 한 번 준비하고, 점수가 달라질 때 같은 크기의 데이터를 교체합니다. Mesh::count에 기록된 앞부분만 draw합니다. 저장 용량을 draw 길이로 그대로 쓰는 API를 재사용하지 않도록 둘을 다른 인자로 전달합니다.\n\nmain은 displayed_score와 현재 점수를 비교합니다. 값이 바뀌었을 때만 메시와 VBO를 갱신하므로 글자를 다시 그릴 때마다 GPU 메모리 내용을 바꿀 필요는 없습니다. 포화로 총점이 유지되면 새 메시를 만들지 않아도 화면 값은 맞습니다.\n\n첫 자릿수는 논리 좌표 (8,4), 다음 자리는 x를 8씩 늘립니다. 높이 11인 숫자를 보드 시작 y=20보다 위에 두어 보드나 종료 X를 가리지 않습니다. 연두색 불투명 프로그램은 board pass 뒤에서 숫자를 덧그리며 화면을 다시 지우지 않습니다.",
+      "codes": [
+        {
+          "label": "renderer/score_view.h · 완성 파일",
+          "file": "checkpoints/38-score/renderer/score_view.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "값이 바뀔 때만 고정 용량 VBO 갱신",
+          "language": "cpp",
+          "text": "        if (round.score()!=displayed_score) {\n            score_mesh=study_score_view::make_mesh(round.score());\n            if (!score_buffer.replace_same_size(score_mesh.vertices.data(),score_mesh.vertices.size())) return 1;\n            displayed_score=round.score();\n        }"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/38-score/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "현재 코드에서 같은 계약과 다른 표현을 찾는다",
+      "body": "현재 SimGame::UpdateScore도 제거 직전 level로 기본 점수를 계산하고, 총 제거 수를 늘린 뒤 레벨과 중력을 갱신합니다. 다만 T-spin 점수표가 함께 있고, points/lines는 uint64_t가 아닌 int입니다. 두 구현의 자료형과 지원 보너스를 같은 것으로 읽지 않습니다.\n\nlevelUp이라는 인자 이름만 보고 레벨 상승 때마다 보너스가 자동 지급된다고 추측하지 마세요. 현재 LockBlock의 호출은 `UpdateScore(rowsCleared, 0, tSpin)`입니다. 별도 보너스는 levelUp × 1000이지만 이 호출의 인자는 0이며 실제 레벨 상승은 totalLinesCleared에서 계산합니다.\n\n현재 구현은 누적 덧셈을 int64_t로 먼저 넓혀 계산하고 int 범위에 제한합니다. 점수 API와 해시의 int 표현은 유지합니다. ApplyPlacement는 이번 LockBlock의 lastLinesCleared를 반환합니다. 상한에 걸린 누적 값의 차이나 레벨 배율이 들어간 점수의 역산은 실제 제거 수를 보장하지 않습니다.\n\n화면은 Game 래퍼를 통해 상태를 읽습니다. 뒤에서 서버 보상과 연결할 때도 화면에 표시된 점수를 신뢰 입력으로 삼지 않고 규칙 진행을 검증하는 경계가 필요합니다. 이 차시의 로컬 점수 계산이 계정 보상 보안을 완성하는 것은 아닙니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::UpdateScore(int linesCleared, int levelUp, bool tSpin)",
+        "invariant": "고정 사건에서 옛 레벨로 득점하고 합계를 보존하며, 표현 계층은 조회한다.",
+        "mayDiffer": "현재는 int 포화·T-spin 표·별도 level 필드, 강의는 uint64_t 포화·일반 제거 표·파생 레벨이다.",
+        "omitted": "T-spin 인식·콤보·서버 보상은 후속 단원에서 다룬다."
+      }
+    },
+    {
+      "title": "연속 네 줄 제거로 경계 순서를 관찰한다",
+      "body": "체크포인트 `38-score`는 score.h와 score_view.h를 추가하고 Round와 main에 연결합니다. score_example.h는 column 5만 비운 하단 16행을 준비합니다. I를 세로로 고정하면 한 번에 네 줄씩 지울 수 있습니다.\n\nC++17·CMake 환경의 저장소 루트에서 CPU 데모를 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/38-score -B out/study-38 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-38\n./out/study-38/score_demo\nctest --test-dir out/study-38 --output-on-failure\n```\n\n```text\nscore=1000 gain=1000 lines=4 level=1 interval=1\nscore=2000 gain=1000 lines=8 level=1 interval=1\nscore=3000 gain=1000 lines=12 level=2 interval=29\nscore=5000 gain=2000 lines=16 level=2 interval=29\n```\n\n세 번째 고정은 누적 8줄에서 시작합니다. 아직 레벨 1이므로 1000점을 받고, 누적 12줄이 된 뒤 레벨 2로 바뀝니다. 네 번째 고정부터 2000점입니다. gain은 이번 실제 증가, score는 누적 합계입니다.\n\n데모는 새 I마다 시계 회전을 한 번 요청하고 고정까지 규칙 tick을 실행합니다. 실제 시간을 기다리지 않지만 중력 카운터는 그대로 사용합니다. 초기 간격 1은 CPU 실험 설정이고, 레벨이 오른 뒤에는 29틱 간격을 적용합니다.",
+      "codes": [
+        {
+          "label": "src/score_example.h · 완성 파일",
+          "file": "checkpoints/38-score/src/score_example.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/score_demo.cpp · 완성 파일",
+          "file": "checkpoints/38-score/src/score_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/38-score/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "화면의 숫자는 규칙을 읽기만 한다",
+      "body": "SDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core 환경에서 같은 보드를 창으로 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/38-score -B out/study-38-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-38-sdl\n./out/study-38-sdl/tetris I four-clears\n```\n\n새 I마다 Up을 한 번 눌러 세로로 만든 뒤 기다립니다. 기본 스폰 원점의 시계 회전은 column 5의 세로 I가 되므로 좌우로 옮기지 않아도 홈에 들어갑니다. 이 실험 모드는 I를 반복 공급합니다. 네 번 고정하면 숫자는 0→1000→2000→3000→5000 순서로 바뀝니다. 창의 초기 중력 간격은 30틱입니다.\n\n화면 상단 연두색 숫자가 총점입니다. 콘솔에는 각 고정의 gain·누적 줄 수·레벨·낙하 간격을 함께 출력합니다. 창 크기를 바꾸거나 같은 상태를 여러 번 그려도 점수는 늘지 않습니다. 이미 고정된 주황색 셀과 현재 청록색 I, 오른쪽 미리보기는 각자의 역할을 유지합니다.\n\n`O normal`은 바닥의 두 줄을 완성해 300점을 얻는 짧은 실험입니다. initial-blocked·next-blocked·clear-rescue 종료 실험도 사용할 수 있습니다. four-clears는 I 전용이며 다른 종류와 조합하면 사용법을 표시합니다. Escape/닫기로 종료하고, 다중 구성 빌드는 구성과 실행 경로를 맞춥니다.\n\n![0점과 세로 I가 들어갈 열을 비워 둔 하단 16행](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAADwCAIAAAD+Tyo8AAAFxUlEQVR4nO3aMY4c1hVE0QkdOlTopWgpXop2xqVRmSHIoGwSl8X3qQOcqH/SKODiAT3z8Y9//gI86uOHfwPgmwkYHiZgeNhfBfzb51//44d/UeC/fTHgP0WrYThIwPAwAcPDBAwP8ys0PMwFhocJGB4mYHiYgOFh/hMLHuZXaHiYgOFhAoaHCRgeJmB4mIAz//r131/i9U+vVAScuZnKzVcqAs7cTOXmKxUBZ26mcvOVioAzN1O5+UpFwJmbqdx8pSLgzM1Ubr5SEXDmZio3X6kIOHMzlZuvVAQMDxNw5vvdq49Pn7/ku766wPcJOCNgAe8JOCNgAe8JOCNgAe8JOCNgAe8JOCNgAe8JOCNgAe8JOCNgAe8JOCNgAe8JGB4m4Mz3u1c/3ysVAWdupnLzlYqAMzdTuflKRcCZm6ncfKUi4MzNVG6+UhFw5mYqN1+pCDhzM5Wbrxv/8+/e/+cnlwk4czOVm68bAuYr3Ezl5uuGgOFhAuYr3Lx1N183BMxXuJnKzVcqAs7cTOXmKxUBZ26mcvOVioAzN1O5+UpFwJmbqdx8pSLgzM1Ubr5SEXDmZio3X6kIOHMzlZuvVAQMDxNw5vNvH1/yA1//+hL+qG9FxZoZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5rwMAFnXGAXeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+a8DABZ1xgF3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmvAwAWdcYBd4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5rwMAFnXGAXeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQFfC/jj0+c/+uZPLhNwRsAC3hNwRsAC3hMwPy0B8xVcYBd4T8AZAV8L+O/AmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmvAwAWdcYBd4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5rwMAFnXGAXeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+a8DABZ1xgF3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmvAwAWdcYBd4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5rwMAFnXGAXeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQFfC/jj0+c/+uZPLhNwRsAC3hNwRsAC3hMwPy0B8xVcYBd4T8AZAV8L+O/AmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmvAwAWdcYBd4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5rwMAFnXGAXeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+aGQELeM+a8DABZ1xgF3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmhkBC3jPmvAwAWdcYBd4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5oZAQt4z5rwMAHDwwQMDxMwPEzA8DABw8MEDA8TMDxMwPAwAcPDBAwPEzA8TMDwMAHDwwQMDxMwPEzA8DABw8MEDA8TMDxMwPCw3wGdixfIxpNRCgAAAABJRU5ErkJggg==)\n\n![네 번의 네 줄 제거 뒤 5000점과 새 I](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAADwCAIAAAD+Tyo8AAAGbklEQVR4nO3aMY5cVRRF0Q4JCQkZiofCUJiZh2YyZIEMrvbpz75oSSt6J6lk60pV9fbTz78AR739558AeDcBw2EChsP+KeDfv3z600e8Az/omwF/K7a/x/m+d+DHCRgOEzAcJmA47D1fYgER3/sz0rsvrQsMH0fAcJiA4TABw2H+iQWH+S80HCZgOEzAcJiA4TABw2ECnvn102/fYv3LyoqAZ5qpNFdWBDzTTKW5siLgmWYqzZUVAc80U2murAh4pplKc2VFwDPNVJorKwKeaabSXFkR8EwzlebKioDhMAHPfNy9evv85Vs+dHWB+wQ8I2ABP0/AMwIW8PMEPCNgAT9PwDMCFvDzBDwjYAE/T8AzAhbw8wQ8I2ABP0/AMwIW8PMEDIcJeObj7tX/b2VFwDPNVJorKwKeaabSXFkR8EwzlebKioBnmqk0V1YEPNNMpbmyIuCZZirN9Rn/+rv3d76UCXimmUpzfYaAeUEzleb6DAHDYQLmBc1b11yfIWBe0EylubIi4JlmKs2VFQHPNFNprqwIeKaZSnNlRcAzzVSaKysCnmmm0lxZEfBMM5XmyoqAZ5qpNFdWBAyHCXimeeuaKysCnmmm0lxZEfBMM5XmyoqAZ5qpNFdWBDzTTKW5siLgmWYqzZUVAc80U2murAh4pplKc2VFwDPNVJorKwKGwwQ807x1zZUVAc80U2murAh4pplKc2VFwDPNVJorKwKeaabSXFkR8EwzlebKioBnmqk0V1YEPNNMpbmyIuCZZirNlRUBw2ECnmneuubKioBnmqk0V1YEPNNMpbmyIuCZZirNlRUBzzRTaa6sCHimmUpzZUXAM81UmisrAp5pptJcWRHwTDOV5sqKgOEwAc80b11zZUXAM81UmisrAp5pptJcWRHwTDOV5sqKgGeaqTRXVgQ800ylubIi4JlmKs2VFQHPNFNprqwIeKaZSnNlRcBwmIBnmreuubIi4JlmKs2VFQHPNFNprqwIeKaZSnNlRcAzzVSaKysCnmmm0lxZEfBMM5Xm+oy3z1++9u6XMgHPNFNprs8QMC9optJcnyFgOEzAvKB565rrMwTMC5qpNFdWBDzTTKW5siLgmWYqzZUVAc80U2murAh4pplKc2VFwDPNVJorKwKeaabSXFkR8EwzlebKioDhMAHPNG9dc2VFwDPNVJorKwKeaabSXFkR8EwzlebKioBnmqk0V1YEPNNMpbmyIuCZZirNlRUBzzRTaa6sCHimmUpzZUXAcJiAZ5q3rrmyIuCZZirNlRUBzzRTaa6sCHimmUpzZUXAM81UmisrAp5pptJcWRHwTDOV5sqKgGeaqTRXVgQ800ylubIiYDhMwDPNW9dcWRHwTDOV5sqKgGeaqTRXVgQ800ylubIi4JlmKs2VFQHPNFNprqwIeKaZSnNlRcAzzVSaKysCnmmm0lxZETAcJuCZ5q1rrqwIeKaZSnNlRcAzzVSaKysCnmmm0lxZEfBMM5XmyoqAZ5qpNFdWBDzTTKW5siLgmWYqzZUVAc80U2murAgYDhPwTPPWNVdWBDzTTKW5siLgmWYqzZUVAc80U2murAh4pplKc2VFwDPNVJorKwKeaabSXJ/x9vnL1979UibgmWYqzfUZAuYFzVSa6zMEDIcJmBc0b11zfYaAeUEzlebKioBnmqk0V1YEPNNMpbmyIuCZZirNlRUBzzRTaa6sCHimmUpzZUXAM81UmisrAp5pptJcWREwHCbgmeata66sCHimmUpzZUXAM81UmisrAp5pptJcWRHwTDOV5sqKgGeaqTRXVgQ800ylubIi4JlmKs2VFQHPNFNprqwIGA4T8Ezz1jVXVgQ800ylubIi4JlmKs2VFQHPNFNprqwIeKaZSnNlRcAzzVSaKysCnmmm0lxZEfBMM5XmyoqAZ5qpNFdWBAyHCXimeeuaKysCnmmm0lxZEfBMM5XmyoqAZ5qpNFdWBDzTTKW5siLgmWYqzZUVAc80U2murAh4pplKc2VFwDPNVJorKwKGwwQ807x1zZUVAc80U2murAh4pplKc2VFwDPNVJorKwKeaabSXFkR8EwzlebKioBnmqk0V1YEPNNMpbmyIuCZZirNlRUBw2EChsMEDIcJGA4TMBwmYDhMwHCYgOEwAcNhAobDBAyHCRgOEzAcJmA4TMBwmIDhMAHDYQKGwwQMhwkYDhMwHPYH0LKBVhr2qN8AAAAASUVORK5CYII=)"
+    },
+    {
+      "title": "표·상태 전이·표현을 서로 다른 기대값으로 검사한다",
+      "body": "먼저 점수표 0~4줄과 레벨 1~20의 조합을 계산합니다. -1·5줄, 레벨 0·21은 nullopt인지 확인합니다. 0점도 정상 값이므로 존재 여부와 값 자체를 따로 검사합니다.\n\n누적 줄 수 9·10·19·189·190처럼 경계 주변에서 한 번의 award를 적용하세요. 사전 레벨로 점수가 계산됐는지, 새 줄 수의 레벨은 무엇인지 따로 확인합니다. 정수 최댓값에 가까운 값에서는 감김 없이 포화하고 원본 Totals는 바뀌지 않아야 합니다.\n\n통합 검사는 실제 I 네 번의 회전·낙하·고정으로 4·8·12·16줄을 만듭니다. 예상 점수 1000·2000·3000·5000을 비교하고, 중력 간격과 초기화된 경과를 함께 확인합니다. 마지막 고정과 종료가 동시에 발생해도 얻은 점수가 남는 사례를 포함합니다.\n\n렌더링은 std::to_string으로 얻은 십진 자릿수와 별도의 선분 정의로 예상 화면을 계산할 수 있습니다. 표시 코드가 만든 메시를 그대로 기대 이미지로 쓰면 같은 실수를 반복할 수 있습니다. 0, 자릿수가 바뀌는 9→10, 모든 숫자가 들어간 값, 20자리 최댓값을 포함하세요.\n\n점수 조회·메시 생성은 상태를 바꾸지 않아야 합니다. 한 프레임에 tick이 없거나 여러 번 실행되어도 각 고정은 한 번만 득점합니다. 이 경계가 정해졌으므로 다음에는 원본 상태를 바꾸지 않고 착지 위치를 예측하는 고스트를 만들 수 있습니다.",
+      "codes": [
+        {
+          "label": "tests/score_contract.cpp · 완성 파일",
+          "file": "checkpoints/38-score/tests/score_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "두 줄 한 번과 한 줄 두 번의 점수 차이를 계산한다.",
+      "누적 9줄에서 두 줄을 지울 때 계산 순서를 표로 적는다.",
+      "최댓값 직전에서 명목 득점과 실제 증가량을 비교한다.",
+      "I 네 번의 고정으로 레벨 상승 전후의 득점과 간격을 확인한다.",
+      "점수 조회·다시 그리기만으로 상태가 바뀌지 않는지 확인한다.",
+      "0점과 20자리 값에서 VBO 용량·사용 정점 수·자릿수를 구별한다."
+    ],
+    "expected": "득점을 고정 전이 안에 두고, 수치 경계와 표현 경계를 분리하여 일관된 누적 상태를 만든다.",
+    "failureChecks": [
+      "새 레벨을 이번 득점에 미리 적용하지 않는가?",
+      "정리되지 않은 초기 보드를 0~4줄 점수표에 넘기지 않는가?",
+      "범위를 넘는 덧셈을 한 뒤 검사하거나 캐스팅하지 않는가?",
+      "stopped가 보존한 last_awarded를 매 프레임 다시 더하지 않는가?",
+      "0점을 빈 optional이나 빈 메시로 취급하지 않는가?",
+      "사용 길이 대신 VBO 용량 전체를 draw하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "38-1",
+      "kind": "경계 순서",
+      "question": "누적 8줄·2000점·레벨 1에서 네 줄을 제거했습니다. 기준 코드의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "4000점·12줄·레벨 2다."
+        },
+        {
+          "id": "b",
+          "text": "3000점·12줄·레벨 2다."
+        },
+        {
+          "id": "c",
+          "text": "3000점·12줄·레벨 1이다."
+        },
+        {
+          "id": "d",
+          "text": "4000점·8줄·레벨 1이다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "3000점·12줄·레벨 2다.",
+      "explanation": "이번 사건은 시작 당시 레벨 1로 1000점을 얻습니다. 그 뒤 누적 줄 수가 12가 되어 레벨 2가 됩니다. 새 레벨 배율은 다음 득점부터 사용합니다."
+    },
+    {
+      "id": "38-2",
+      "kind": "갱신 위치",
+      "question": "한 렌더 프레임에 두 번 고정이 발생하고, 다음 프레임에는 규칙 tick이 없습니다. 득점 위치는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "draw에서 마지막 제거 수만 한 번 더한다."
+        },
+        {
+          "id": "b",
+          "text": "화면 프레임이 시작할 때 총점을 초기화한다."
+        },
+        {
+          "id": "c",
+          "text": "Round의 각 고정 전이에서 한 번씩 계산한다."
+        },
+        {
+          "id": "d",
+          "text": "마지막 Step이 locked일 때만 두 고정을 합친다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "Round의 각 고정 전이에서 한 번씩 계산한다.",
+      "explanation": "각 고정은 서로 다른 사건이므로 각각 계산합니다. 렌더 프레임은 사건 수와 같지 않고 마지막 Step은 앞 사건을 잃을 수 있습니다. 화면은 Round가 소유한 누적 점수를 읽습니다."
+    },
+    {
+      "id": "38-3",
+      "kind": "포화와 변화량",
+      "question": "총점이 최댓값 M-50이고 이번 규칙상 득점이 100입니다. 포화 후 score와 last_awarded는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "M과 50이다."
+        },
+        {
+          "id": "b",
+          "text": "M과 100이다."
+        },
+        {
+          "id": "c",
+          "text": "49와 100이다."
+        },
+        {
+          "id": "d",
+          "text": "M-50과 0이다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "M과 50이다.",
+      "explanation": "상한을 넘는 50은 저장하지 못하므로 새 총점은 M, 실제 저장 증가량은 50입니다. last_awarded는 규칙표의 명목 점수가 아니라 포화 후 합계의 차이입니다."
+    },
+    {
+      "id": "38-4",
+      "kind": "서로 다른 계약",
+      "question": "완성 행 다섯 개를 미리 넣은 초기 보드를 준비했습니다. 38차시의 Round::create는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "다섯 줄 점수를 0으로 보고 그대로 시작한다."
+        },
+        {
+          "id": "b",
+          "text": "Grid가 담을 수 있으므로 점수표도 다섯 줄을 지원한다."
+        },
+        {
+          "id": "c",
+          "text": "행을 지운 뒤 자동으로 보너스를 주고 시작한다."
+        },
+        {
+          "id": "d",
+          "text": "정리된 보드라는 초기 조건 위반으로 거부한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "정리된 보드라는 초기 조건 위반으로 거부한다.",
+      "explanation": "범용 행 정리는 0~20줄을 처리하지만 이 Round는 고정 전 완성 행이 없다는 조건을 검사합니다. 이 조건과 서로 다른 네 셀 고정이 함께 0~4줄 점수표 범위를 보장합니다."
+    },
+    {
+      "id": "38-5",
+      "kind": "저장 용량과 사용 길이",
+      "question": "0점 메시의 VBO는 840정점을 저장합니다. 실제로 그릴 정점 수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "저장 용량과 같은 840이다."
+        },
+        {
+          "id": "b",
+          "text": "여섯 선분 × 6정점인 36이다."
+        },
+        {
+          "id": "c",
+          "text": "숫자 값이 0이므로 0이다."
+        },
+        {
+          "id": "d",
+          "text": "일곱 선분 × 20자리인 140이다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "여섯 선분 × 6정점인 36이다.",
+      "explanation": "0도 한 자릿수이며 가운데를 제외한 여섯 선분을 켭니다. 각 선분은 사각형 두 삼각형으로 6정점입니다. 고정 저장 용량과 현재 메시의 사용 길이를 구별합니다."
+    }
+  ]
+}

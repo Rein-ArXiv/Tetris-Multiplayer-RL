@@ -14,7 +14,9 @@ using Json = nlohmann::json;
 // Depth and byte limits apply before any endpoint extracts a field. Throwing in
 // the callback aborts parsing; merely filtering a deep subtree would still parse it.
 inline std::optional<Json> object(const std::string &body) {
-    if (body.size() > 64 * 1024)
+    // The vendored lexer treats raw NUL as EOF. Reject it before parsing so
+    // a valid prefix cannot hide trailing bytes. Escaped \u0000 remains valid.
+    if (body.size() > 64 * 1024 || body.find('\0') != std::string::npos)
         return std::nullopt;
     try {
         std::vector<std::set<std::string>> keys;

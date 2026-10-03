@@ -1,0 +1,461 @@
+{
+  "id": "lesson-111",
+  "title": "인덱스: 조회 비용과 유일성",
+  "shortTitle": "조회 계획·복합 키·커버링·비용",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 경기 행을 파일에 저장하지만 사용자별 최근 목록의 조회 경로는 정하지 않았습니다.",
+  "finish": "완료: 양쪽 참가자 위치의 최근 경기를 조회하고, 같은 결과를 유지하며 실행 계획과 인덱스 비용을 비교합니다.",
+  "objective": "조회 조건·정렬·반환 열에 맞는 인덱스를 설계하고, 성능용 경로와 유일성 제약을 구별합니다.",
+  "prerequisites": [
+    "행·기본 키·외래 키·NULL",
+    "SQLite 바인딩과 타입 변환",
+    "정렬·상한·mutex의 역할"
+  ],
+  "recap": {
+    "points": [
+      "같은 사용자는 표시 이름이 바뀌어도 ID로 참조합니다.",
+      "소유 관계의 복합 키와 경기 요청의 유일 키는 중복을 막습니다.",
+      "DB 값의 타입·범위와 명시적 부재를 구별해 읽고 씁니다."
+    ],
+    "bridge": "이제 같은 자료를 어떤 경로로 찾고 어떤 순서로 제한해 읽을지 정합니다."
+  },
+  "sections": [
+    {
+      "title": "자신의 최근 경기 다섯 개를 찾는다",
+      "body": "경기 행을 오래 보관할 수 있게 되면 읽을 때의 질문이 생깁니다. “선수101이 참가한 최근 경기 다섯 개는 무엇인가?”입니다. 그 선수는 어떤 경기에서는 A, 다른 경기에서는 B 자리일 수 있습니다. 한쪽 열만 찾으면 기록의 절반이 빠질 수 있습니다.\n\n이번에는 SqliteResults에 recent(player,limit)를 추가하고, 로컬 history_list 실행 파일에서 경기 행 번호와 요청 키를 출력합니다. 같은 결과를 반환하는 두 SQL 형태와 인덱스 전후의 실행 계획도 index_probe에서 비교합니다.\n\n목표는 인덱스를 많이 만드는 것이 아니라 **정확한 결과를 유지하면서 읽어야 하는 범위를 줄이는 것**입니다. 조회 조건, 정렬 순서, 반환할 열을 정한 뒤 그 쿼리를 돕는 자료구조를 만듭니다."
+    },
+    {
+      "title": "최근이라는 말의 기준부터 고정한다",
+      "body": "이 실습의 경기 기록은 행 삭제 없이 추가되며 id는 저장소가 배정합니다. 따라서 id 내림차순을 **이 저장소에서 접수한 행의 역순**으로 사용합니다. 경기 종료 시각이나 실제 시계 시간이 아니라는 점을 분명히 해야 합니다. 늦게 도착한 옛 경기 결과도 늦게 저장되면 큰 id를 받을 수 있습니다.\n\n요청 키 match_key는 같은 요청을 다시 확인하기 위한 값입니다. 키17 다음에 키3을 저장할 수도 있으므로 키가 큰 순서와 최근 저장 순서는 다릅니다. 게다가 학습의 요청 키는 십진 TEXT여서 기본 문자열 정렬은 수의 정렬과 다릅니다.\n\n반환 계약은 양쪽 참가자 자리 중 하나에 player가 들어간 경기, id 내림차순, 최대limit개입니다. id는 유일하므로 동점 정렬은 없습니다. 실제 서비스의 created_at처럼 시간값을 쓴다면 같은 시각의 행이 생길 수 있으므로 id 같은 보조 정렬 키도 정해야 결과 순서가 안정적입니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "ORDER BY elo DESC, id ASC LIMIT ?1",
+        "invariant": "정렬의 동점까지 결정해야 제한된 결과의 순서가 안정적이다.",
+        "mayDiffer": "현재 랭킹은 RP 내림차순·ID 오름차순이다. 학습 최근 경기는 저장 행 ID 내림차순이며 경기 종료 시간순이 아니다."
+      }
+    },
+    {
+      "title": "먼저 맞는 조회를 적는다",
+      "body": "WHERE는 어떤 행을 고를지 정합니다. player_a=?1 OR player_b=?1은 두 조건 중 하나를 만족하는 경기입니다. ORDER BY id DESC는 큰 행 번호부터, LIMIT ?2는 전체 결과에서 최대 몇 행을 돌려줄지 정합니다. ?1에는 정규 십진 사용자 ID, ?2에는 정수 상한을 바인딩합니다.\n\nSELECT id,match_key는 화면에 필요한 두 열만 요청합니다. 경기 점수·라인·승자까지 모두 읽은 뒤 버리는 방식과 필요한 자료량이 다릅니다. 반환할 열은 커버링 인덱스를 설계할 때도 영향을 줍니다.\n\n이 SQL만으로 결과의 의미는 완성됩니다. 성능을 바꿀 때는 이 조건과 순서를 기준으로 결과를 대조합니다. “더 빨라 보이는 결과”가 선수B의 경기를 빠뜨리거나 다른 다섯 행을 반환한다면 올바른 개선이 아닙니다.",
+      "codes": [
+        {
+          "label": "양쪽 자리에서 찾는 기본 조회",
+          "text": "inline constexpr const char* kRecentMatchesOr =\n    \"SELECT id,match_key FROM matches WHERE player_a=?1 OR player_b=?1 \"\n    \"ORDER BY id DESC LIMIT ?2\";",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "테이블과 별개인 검색 경로를 만든다",
+      "body": "**인덱스**는 일부 열의 값과 해당 행을 찾을 정보를 정렬된 구조로 유지하는 보조 자료입니다. 이름순 색인이 있는 책에서 이름을 찾고 해당 페이지로 이동하는 것과 비슷합니다. 본문을 바꾸면 색인도 맞춰야 한다는 비용까지 함께 생각해야 합니다.\n\nSQLite의 보통 테이블과 인덱스는 여러 항목을 페이지에 묶는 B-tree 계열 구조를 사용합니다. 한 노드가 여러 갈래로 범위를 나누므로 비교할 때마다 한 행씩 처음부터 훑는 대신 목표 범위로 내려갈 수 있습니다. N개 중 단일 키를 찾는 탐색은 대략 로그 규모의 경로를, 같은 키의 K개 결과를 읽을 때는 그 범위의 추가 순회를 생각합니다. 실제 비용에는 페이지 크기·캐시·값 길이·테이블 재조회가 더해집니다.\n\n```mermaid\nflowchart TD\n  A[\"인덱스의 범위 안내\"] --> B[\"player 1~16\"]\n  A --> C[\"player 17~32\"]\n  A --> D[\"player 33~64\"]\n  C --> E[\"player17의 최근 행들<br/>id 내림차순\"]\n  E --> F[\"요청한 수만큼 결과 읽기\"]\n```\n\n그림은 범위를 좁히는 생각을 보여 주는 도식입니다. 실제 DB 페이지 배치를 그린 것은 아닙니다. SQL 작성자는 원하는 결과를 선언하고, 엔진의 **쿼리 플래너**가 가능한 경로 중 하나를 고릅니다. 인덱스가 존재해도 모든 쿼리에 그 인덱스를 사용해야 하는 것은 아닙니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "자료구조의 비용을 볼 때",
+          "body": "같은 결과라도 필터에 맞는 행의 비율이 높거나 테이블이 매우 작으면 순회가 유리할 수 있습니다. “인덱스가 있으니 언제나 빠름”이라는 규칙 대신 자료 분포와 실제 쿼리를 함께 봅니다. SQLite의 [검색·정렬 계획](https://www.sqlite.org/queryplanner.html)은 경로별 비용을 비교하는 출발점입니다."
+        }
+      ]
+    },
+    {
+      "title": "복합 인덱스는 왼쪽부터 읽는다",
+      "body": "한 인덱스에 여러 열을 넣으면 **첫 열로 묶고, 같은 첫 열 안에서 둘째 열로 정렬하고, 다시 같으면 셋째 열로 정렬**합니다. 이를 사전식 순서로 이해할 수 있습니다.\n\n(player_a,id DESC,match_key)를 만들면 player_a가 같은 경기들이 모이고, 그 안에서 큰 id가 먼저 옵니다. WHERE player_a=?1로 한 선수의 범위를 찾은 뒤 그 범위를 순서대로 읽으면 최근 행을 얻습니다. 선수B용으로는 player_b를 선두에 둔 인덱스가 필요합니다.\n\n| 인덱스 열 | 역할 |\n| --- | --- |\n| player_a 또는 player_b | 동등 조건으로 범위를 좁힘 |\n| id DESC | 그 범위 안의 결과 순서 |\n| match_key | 반환할 값을 인덱스에 포함 |\n\n첫 열 조건 없이 id만 찾는 문제와 이 조회는 다릅니다. (player_a,id) 인덱스가 있다는 사실만으로 id 전체가 원하는 한 순서로 모여 있다고 가정하면 안 됩니다. 선수별 구간 사이에 id 값이 반복해 섞여 있습니다.",
+      "codes": [
+        {
+          "label": "두 참가자 위치의 조회 인덱스",
+          "text": "CREATE INDEX IF NOT EXISTS idx_study_matches_a_recent\n  ON matches(player_a,id DESC,match_key);\nCREATE INDEX IF NOT EXISTS idx_study_matches_b_recent\n  ON matches(player_b,id DESC,match_key);",
+          "language": "sql"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "선두 열 규칙의 적용 범위",
+          "body": "플래너는 자료 분포와 통계에 따라 skip-scan 같은 다른 전략을 선택할 수도 있습니다. 여기서 배우는 것은 특정 최적화가 절대 불가능하다는 규칙이 아니라, 해당 쿼리가 바로 사용할 수 있는 정렬된 범위가 무엇인지입니다."
+        }
+      ]
+    },
+    {
+      "title": "커버링은 인덱스가 아닌 쿼리와의 관계다",
+      "body": "검색 인덱스에서 찾은 값만으로 SELECT의 결과를 만들 수 있으면 **커버링 인덱스**라고 부릅니다. 지금 쿼리는 id와 match_key를 반환하고 두 값이 인덱스에 들어 있으므로 테이블 본문을 다시 찾아갈 필요를 줄입니다.\n\n같은 인덱스를 두고 SELECT에 score_a를 추가하면 그 값은 인덱스에 없으므로 테이블 행에서 가져와야 합니다. “이 인덱스는 커버링이다”라는 말은 대상 쿼리를 함께 적어야 정확합니다. [커버링 인덱스](https://www.sqlite.org/queryplanner.html#covering_indexes)\n\n필요한 모든 열을 인덱스에 복제하는 것도 비용이 듭니다. 항목이 커져 더 많은 페이지를 쓰고, 그 열을 바꿀 때 인덱스도 갱신해야 합니다. 이번 목록은 행 번호와 요청 키만 필요하므로 두 열을 반환하는 작은 계약을 유지합니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "SELECT id,username,elo,wins,losses,xp FROM players",
+        "invariant": "반환 열까지 알아야 테이블 재조회 여부를 판단할 수 있다.",
+        "mayDiffer": "실제 랭킹의 elo 인덱스는 정렬을 돕지만 이름·승패·XP까지 포함하지 않으므로 전체 랭킹 SELECT를 커버하지 않는다."
+      }
+    },
+    {
+      "title": "두 정렬된 결과를 합친다",
+      "body": "기본 OR 조회는 의미가 명확하지만 엔진이 두 인덱스에서 찾은 행들을 모은 뒤 전체 결과를 다시 정렬할 수 있습니다. 같은 결과를 다른 형태로 적어 봅시다. 선수A로 참가한 행과 선수B로 참가한 행을 각각 SELECT하고 UNION ALL로 이어서 전체 ORDER BY와 LIMIT를 적용합니다.\n\n**UNION ALL**은 두 SELECT의 결과를 합치며 중복 제거를 별도로 하지 않습니다. 이 경우 matches의 CHECK(player_a<>player_b)가 있으므로 같은 선수가 한 경기의 양쪽에 동시에 있을 수 없습니다. 따라서 두 집합은 겹치지 않고 기본 OR 조회와 같은 행을 반환합니다. 이 전제가 없다면 한 경기가 두 번 나오므로 변환이 잘못됩니다.\n\n마지막 ORDER BY와 LIMIT는 두 결과를 합친 전체에 적용됩니다. 각 SELECT에 limit개씩 반환하도록 바꾸어 최대 두 배 결과를 노출하는 계약이 아닙니다. 두 인덱스가 각각 id 내림차순으로 결과를 제공하면 플래너는 큰 id부터 두 흐름을 병합하고 전체limit에 도달해 멈추는 경로를 선택할 수 있습니다.",
+      "codes": [
+        {
+          "label": "결과 전체에 정렬과 상한 적용",
+          "text": "inline constexpr const char* kRecentMatches =\n    \"SELECT id,match_key FROM matches WHERE player_a=?1 \"\n    \"UNION ALL \"\n    \"SELECT id,match_key FROM matches WHERE player_b=?1 \"\n    \"ORDER BY id DESC LIMIT ?2\";",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "UNION과 UNION ALL",
+          "body": "UNION은 중복 행 제거까지 요구하므로 다른 연산과 비용이 추가됩니다. 이 실습에서는 스키마의 참가자 불일치 제약으로 중복이 생기지 않음을 먼저 보장해 UNION ALL을 쓸 수 있습니다. SQL 모양을 바꾸기 전에 결과 동등성의 전제를 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "조회 메서드도 결과량을 제한한다",
+      "body": "recent는 사용자 ID가 양수이고 limit가1~50인지 먼저 검사합니다. SQLite에서 음수 LIMIT는 상한을 없애는 의미가 될 수 있으므로 API에서 원하는 범위를 정해 둡니다. 사용자 입력으로 무제한 목록을 읽는 경로를 만들지 않습니다.\n\n한 mutex 구간에서 문장을 준비하고, 값 두 개를 바인딩하고, 결과를 복사합니다. 행 번호는 실제 INTEGER를 읽어 양수인지 확인하고, match_key는 정규 십진 TEXT를 uint64로 복원합니다. 값으로 소유한 벡터가 반환되므로 연결의 수명이나 내부 메모리를 호출자에게 넘기지 않습니다.\n\n없는 사용자의 조회는 빈 결과이며 잘못된 인자나 SQL 오류는 예외입니다. 최대 반환 행 수가50이라는 계약은 최대 실행 시간을 뜻하지 않습니다. 제한된 결과를 찾기 위해 얼마나 많은 행을 살펴야 하는지는 인덱스와 자료 분포에 달려 있습니다.",
+      "codes": [
+        {
+          "label": "양쪽 참가자의 제한된 최근 경기 목록",
+          "text": "    // Both participant positions contribute to one bounded, ordered result.\n    std::vector<RecentMatch> recent(std::uint64_t player, unsigned limit) {\n        if (player == 0 || limit == 0 || limit > 50)\n            throw std::invalid_argument(\"recent requires player > 0 and limit 1..50\");\n        std::lock_guard<std::mutex> lock(mutex_);\n        Statement q(db_.get(), kRecentMatches);\n        q.text(1, std::to_string(player));\n        q.integer(2, limit);\n        std::vector<RecentMatch> result;\n        while (q.next()) {\n            const auto row = q.integer_column(0);\n            if (row <= 0)\n                throw std::runtime_error(\"invalid recent row id\");\n            result.push_back({static_cast<std::uint64_t>(row), decimal(q.text_column(1))});\n        }\n        return result;\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "EXPLAIN QUERY PLAN으로 경로를 읽는다",
+      "body": "EXPLAIN QUERY PLAN 앞에 실제 SELECT를 붙이고 같은 인자를 바인딩하면 어떤 경로로 찾으려 하는지 볼 수 있습니다. 이 결과는 경기 목록 자체가 아니라 엔진의 계획에 관한 자료입니다.\n\n| 표시 | 읽을 의미 |\n| --- | --- |\n| SEARCH ... (player_a=?) | 조건으로 해당 인덱스의 범위를 좁힘 |\n| SCAN ... | 테이블 또는 인덱스를 순회하는 경로 |\n| USING COVERING INDEX | 이 SELECT의 필요한 값을 인덱스에서 얻음 |\n| USE TEMP B-TREE FOR ORDER BY | 추가 정렬용 구조가 필요함 |\n| MERGE (UNION ALL) | 두 결과 흐름을 순서에 맞게 합침 |\n\nSCAN이 항상 모든 행을 끝까지 읽는다는 뜻은 아닙니다. LIMIT를 만나 멈출 수도 있고, 이미 정렬된 랭킹 인덱스의 앞부분을 읽는 경우도 SCAN으로 나타납니다. 반대로 SEARCH가 보이더라도 많은 행이 조건에 맞으면 큰 작업이 될 수 있습니다.\n\n계획 출력의 정확한 문구와 구조는 SQLite 버전에 따라 달라질 수 있습니다. 사용자 기능을 이 문자열 파싱에 의존시키지 않습니다. [공식 실행 계획 안내](https://www.sqlite.org/eqp.html)",
+      "codes": [
+        {
+          "label": "동일 SQL의 계획을 먼저 관찰",
+          "text": "    // Explain phase is scoped so its statement is finalized before the SELECT.\n    {\n        StatementPtr explain = observer_prepare(db, \"EXPLAIN QUERY PLAN \" + sql);\n        if (bind) {\n            bind(explain.get());\n        }\n        for (;;) {\n            const int rc = sqlite3_step(explain.get());\n            if (rc == SQLITE_ROW) {\n                // Column 3 is the plan detail. Plan strings are recorded as-is;\n                // they are never compared against exact expected text.\n                observation.plan.push_back(observer_text(explain.get(), 3));\n            } else if (rc == SQLITE_DONE) {\n                break;\n            } else {\n                throw std::runtime_error(std::string(\"query_observer: EXPLAIN step failed: \") + sqlite3_errmsg(db));\n            }\n        }\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "결과를 읽으면서 엔진 작업량을 관찰한다",
+      "body": "QueryObservation은 결과 행, 계획 문자열, 세 종류의 작업 계수를 모읍니다. 진단 도구는 숫자를 화면에 표시하기 위한 문자열로 바꾸고, SQL NULL은 빈 문자열과 구별할 수 있게 optional의 빈 값으로 보관합니다. 실제 경기 객체 복원은 SqliteResults의 타입 검사를 그대로 사용합니다.\n\nsqlite3_step을 ROW가 나오는 동안 반복하고 DONE을 받은 뒤 계수를 읽습니다. FULLSCAN_STEP은 전체 순회 과정의 전진 횟수, SORT는 정렬 작업 수, VM_STEP은 해당 준비된 문장을 실행한 가상 머신 명령 단계 수입니다. [문장 계수 API](https://www.sqlite.org/c3ref/stmt_status.html), [각 계수의 의미](https://www.sqlite.org/c3ref/c_stmtstatus_counter.html)\n\n이 값은 디스크 읽기 횟수나 밀리초가 아닙니다. 캐시·스토리지·OS 스케줄링이 다른 환경의 실제 속도를 직접 예측할 수는 없습니다. 동일 자료와 쿼리에서 **결과가 같은지 먼저 확인하고 불필요한 작업이 줄었는지** 살피는 근거로 사용합니다.\n\nobserve_query는 진단 실행 파일에서만 호출합니다. 서비스의 모든 HTTP 요청마다 EXPLAIN을 실행하거나 전체 결과를 복사해 측정하면 관찰 자체의 비용이 요청 경로에 추가됩니다.",
+      "codes": [
+        {
+          "label": "문장 실행을 끝낸 뒤 계수 읽기",
+          "text": "    // Statement-local work counters, not disk reads and not elapsed time.\n    observation.fullscan_steps = sqlite3_stmt_status(query.get(), SQLITE_STMTSTATUS_FULLSCAN_STEP, 0);\n    observation.sorts = sqlite3_stmt_status(query.get(), SQLITE_STMTSTATUS_SORT, 0);\n    observation.vm_steps = sqlite3_stmt_status(query.get(), SQLITE_STMTSTATUS_VM_STEP, 0);",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "12,000경기에서 같은 다섯 행을 비교한다",
+      "body": "index_probe는 메모리 DB에 동일한 스키마를 만들고64명의 선수와12,000경기 자료를 채웁니다. 참가자 위치는 서로 다르게 생성하고, 요청 키는 행 번호 증가와 반대 방향으로 감소시켜 키 정렬과 최근 행 정렬을 혼동하면 드러나게 합니다.\n\n예상 결과는 SQL과 별개로 경기 생성 루프에서 참가자를 보고 모은 뒤 행 번호 역순으로 구합니다. 인덱스 없는 UNION ALL, 인덱스 있는 UNION ALL, OR 조회의 반환 행·순서가 모두 같은지 대조합니다. 모든 선수에 대해1·5·50개 상한도 확인합니다.\n\n이 자료와 저장소에 포함된 SQLite에서 선수17의 최근5개를 관찰하면 다음과 같은 형태를 볼 수 있습니다. 수치는 이 입력과 엔진에 대한 관찰 예입니다.\n\n| 경로 | 반환 행 | 순차 전진 | 정렬 작업 | VM 단계 |\n| --- | --- | --- | --- | --- |\n| 인덱스 없는 UNION ALL | 5 | 305 | 0 | 1003 |\n| 복합 인덱스의 UNION ALL | 5 | 0 | 0 | 97 |\n| 복합 인덱스의 OR | 5 | 0 | 1 | 4556 |\n\n첫 행에서도 정렬 작업이0인 이유는 id가 테이블 rowid여서 역순 순회가 가능하기 때문입니다. 대신 조건에 맞는 선수를 찾으려고 더 많은 행을 지나갑니다. OR 경로는 범위 검색에는 인덱스를 쓰지만 결과 정렬 작업이 추가됩니다. 같은 인덱스라도 SQL 형태에 따라 선택하는 경로가 달라집니다.",
+      "codes": [
+        {
+          "label": "먼저 결과를 대조하고 작업량을 비교",
+          "text": "    const auto before=observe_query(db.get(),kRecentMatches,bind);\n    const auto or_before=observe_query(db.get(),kRecentMatchesOr,bind);\n    CHECK(before.rows==expected && or_before.rows==expected);\n    const auto pages_before=pages(db);\n    db.exec(kHistoryIndexes);\n    const auto pages_after=pages(db);\n    const auto after=observe_query(db.get(),kRecentMatches,bind);\n    const auto or_after=observe_query(db.get(),kRecentMatchesOr,bind);\n    CHECK(after.rows==expected && or_after.rows==expected);\n    CHECK(after.fullscan_steps==0 && after.sorts==0);\n    CHECK(before.fullscan_steps>after.fullscan_steps && before.vm_steps>after.vm_steps);\n    CHECK(pages_after>pages_before);",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "수치를 성능 약속으로 읽지 않기",
+          "body": "1003에서97로 줄었다고 모든 기기에서 실행 시간이 그 비율로 줄었다는 뜻은 아닙니다. 실습은 같은 결과를 더 적은 엔진 작업으로 얻는 경로를 보여 줍니다. 실제 서비스의 지연·처리량은 대표 자료와 동시 요청·저장 장치를 포함해 따로 측정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "통계와 선택도를 함께 본다",
+      "body": "조건에 맞는 행이 전체에서 얼마나 드문지가 경로 선택에 영향을 줍니다. 이를 **선택도**와 연결해 생각할 수 있습니다. 한 선수의 경기가 전체의 작은 일부라면 그 선수의 인덱스 구간을 찾는 이점이 큽니다. 거의 모든 행이 같은 선수라면 좁힐 범위가 작지 않습니다.\n\nANALYZE는 DB 자료 분포에 관한 통계를 수집해 플래너가 경로의 비용을 추정하는 데 도움을 줍니다. 이 실습은 인덱스 적용 전후를 비교하고, ANALYZE 이후에도 같은 결과를 반환하는지 확인합니다. 통계가 바뀌면 계획은 바뀔 수 있으므로 결과 계약을 특정 계획 문자열에 묶지 않습니다.\n\n실서비스에서는 대표 자료로 계획을 확인해야 합니다. 빈 개발 DB의 계획과 오래 운영한 DB의 계획이 같을 이유는 없습니다. 강제로 특정 인덱스를 지시하는 것은 처음 선택이 아니라, 자료·통계·쿼리 자체를 살핀 뒤 판단할 일입니다.",
+      "codes": [
+        {
+          "label": "통계 갱신 후에도 결과 계약 유지",
+          "text": "    // Statistics can change the chosen algorithm; the result contract is unchanged.\n    db.exec(\"ANALYZE;\");\n    CHECK(observe_query(db.get(),kRecentMatches,bind).rows==expected);\n    CHECK(observe_query(db.get(),kRecentMatches,history_bind(999,5)).rows.empty());",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "인덱스 추가는 공짜가 아니다",
+      "body": "테이블에 새 경기를 쓰면 각 보조 인덱스에도 새 항목을 넣어야 합니다. 인덱스 대상 열을 수정하거나 행을 삭제할 때도 대응 항목을 고칩니다. 그래서 읽기 경로가 좋아지는 대신 저장 공간과 쓰기 갱신 작업이 늘어납니다.\n\n실습은 두 인덱스를 만들기 전후 PRAGMA page_count로 DB의 논리 페이지 수를 봅니다. 이 자료에서는306페이지에서506페이지로 증가합니다. 이는 메모리 DB가 관리하는 페이지 수의 비교이며 실제 파일 크기나 운영 환경의 메모리 사용량 전체를 뜻하지 않습니다.\n\n어느 열에나 인덱스를 추가하기 전에 실제 조회가 그 경로를 쓸지 확인합니다. 반환 열을 너무 많이 포함한 커버링 인덱스, 거의 쓰지 않는 검색용 인덱스, 이미 있는 복합 인덱스와 겹치는 경로는 쓰기 비용만 늘릴 수 있습니다. 반대로 여러 인덱스가 서로 다른 조회를 돕는다면 둘 다 필요한 경우도 있습니다.",
+      "codes": [
+        {
+          "label": "같은 자료에 인덱스를 추가한 페이지 수 비교",
+          "text": "    const auto pages_before=pages(db);\n    db.exec(kHistoryIndexes);\n    const auto pages_after=pages(db);",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "속도를 위한 인덱스와 유일성을 구별한다",
+      "body": "일반 인덱스는 값이 같은 행도 정렬해 보관할 수 있습니다. CREATE INDEX를 썼다는 이유로 같은 경기 키나 같은 소유 관계가 자동 거절되지는 않습니다. **UNIQUE**는 중복을 허용하지 않는 데이터 제약까지 요구합니다.\n\n이미 중복 값이 있는 테이블에 UNIQUE 인덱스를 만들면 생성 자체가 실패합니다. 인덱스 추가가 단순한 성능 변경인지, 허용 데이터의 변경인지 먼저 구별해야 합니다. nullable UNIQUE에는 여러 NULL이 들어갈 수 있으므로 필수 키라면 NOT NULL도 함께 필요합니다.\n\n학습의 최근 경기용 두 인덱스는 성능용입니다. 이들을 없애도 match_key의 UNIQUE나 소유 복합 PK는 남아 중복을 계속 막습니다. 반대로 PK·UNIQUE가 만든 자동 인덱스를 성능상 비슷해 보인다는 이유로 보조 인덱스와 같은 취급을 하면 데이터 계약을 놓칩니다.",
+      "codes": [
+        {
+          "label": "일반 인덱스와 UNIQUE가 허용하는 입력 비교",
+          "text": "    // An ordinary index and a UNIQUE index have different admissible inputs.\n    db.exec(\"CREATE TABLE uniqueness_demo(code TEXT); CREATE INDEX normal_code ON uniqueness_demo(code);\"\n            \"INSERT INTO uniqueness_demo VALUES('x'),('x');\");\n    rejects([&]{db.exec(\"CREATE UNIQUE INDEX unique_code ON uniqueness_demo(code)\");});\n    db.exec(\"DELETE FROM uniqueness_demo; DROP INDEX normal_code;\"\n            \"CREATE UNIQUE INDEX unique_code ON uniqueness_demo(code);\"\n            \"INSERT INTO uniqueness_demo VALUES('x'),(NULL),(NULL);\");\n    rejects([&]{db.exec(\"INSERT INTO uniqueness_demo VALUES('x')\");});",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_uuid",
+        "invariant": "경기 키의 유일성은 중복 반영을 막는 저장 계약이다.",
+        "mayDiffer": "실제 기존 DB는 nullable UUID 열과 partial unique index를 사용한다. 학습 match_key는 NOT NULL UNIQUE다."
+      }
+    },
+    {
+      "title": "소유 조회에서 중복된 경로를 정리한다",
+      "body": "player_icons의 기본 키는 (player_id,icon_id)입니다. 자동 인덱스 안에서 같은 플레이어의 아이콘이 모이고 아이콘 ID 순서로 정렬됩니다. 따라서 WHERE player_id=?1 ORDER BY icon_id 조회와 두 키를 모두 지정하는 소유 확인에 쓸 수 있습니다.\n\n실제 코드의 소유 확인은 SELECT 1 FROM player_icons WHERE player_id=?1 AND icon_id=?2입니다. 필요한 열이 모두 기본 키 인덱스에 있으므로 별도 player_id 전용 인덱스 없이 이 조회를 처리할 수 있습니다. 현재 초기화는 옛 idx_player_icons_pid 보조 인덱스를 정리하며 소유 행과 복합 PK는 유지합니다.\n\n정리할 대상은 이 이름의 성능용 보조 인덱스입니다. 데이터 행을 삭제하거나 UNIQUE를 해제하는 작업과 다릅니다. 변경 후에는 동일한 소유 조회 결과, 중복 삽입 거절, 기존 파일을 다시 열었을 때의 상태를 확인합니다.",
+      "codes": [
+        {
+          "label": "보조 인덱스 전후에 같은 소유 조회",
+          "text": "    db.exec(\"CREATE INDEX redundant_pid ON player_icons(player_id);\");\n    const auto with_extra=observe_query(db.get(),\n        \"SELECT 1 FROM player_icons WHERE player_id=?1 AND icon_id=?2\",\n        [](sqlite3_stmt* s){bind_observer_text(s,1,\"17\");bind_observer_text(s,2,\"ruby\");});\n    db.exec(\"DROP INDEX redundant_pid;\");\n    const auto without_extra=observe_query(db.get(),\n        \"SELECT 1 FROM player_icons WHERE player_id=?1 AND icon_id=?2\",\n        [](sqlite3_stmt* s){bind_observer_text(s,1,\"17\");bind_observer_text(s,2,\"ruby\");});\n    CHECK(with_extra.rows==without_extra.rows && without_extra.fullscan_steps==0);\n    rejects([&]{db.exec(\"INSERT INTO player_icons VALUES('17','ruby')\");});",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "DROP INDEX IF EXISTS idx_player_icons_pid",
+        "invariant": "중복 경로를 제거해도 결과와 유일성 계약을 유지한다.",
+        "mayDiffer": "실제 소유 키는 INTEGER/TEXT이고 학습은 TEXT/TEXT다. 실제 초기화는 이름이 지정된 옛 보조 인덱스만 정리한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "복합 인덱스의 접두라고 언제나 삭제할까",
+          "body": "폭이 좁은 인덱스가 일부 빈번한 조회에 더 유리하거나 서로 다른 정렬·부분 조건을 제공할 수 있습니다. 이 사례의 결론은 현재 실제 소유 확인 쿼리와 복합 PK에 근거합니다. 열 이름이 겹친다는 이유만으로 모든 서비스에 같은 삭제 규칙을 적용하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "실제 저장 파일에서 목록을 읽는다",
+      "body": "study_meta_db의 저장소 생성자는 테이블 준비 뒤 두 조회 인덱스를 준비합니다. 테이블 정의와 HTTP 요청 형식은 유지합니다. 유효한 학습 DB를 다시 열면 없는 인덱스가 만들어지고 이미 있는 행을 읽을 수 있습니다.\n\n서버 터미널을 실행한 뒤 호출자에서 키17과18을 제출합니다. history_list에는 같은 DB 경로, 선수 ID, 반환 상한을 넣습니다. 새 DB라면 선수101과202 모두 `row=2 key=18`, `row=1 key=17` 순서로 볼 수 있습니다. 상한1이면 첫 행만 나옵니다.\n\nhistory_list는 실제 로컬 파일을 열어 조회하는 학습 도구입니다. 파일 접근 권한을 가진 사람이 쓰며 계정 인증을 대신하는 공개 조회 API가 아닙니다. 없는 파일 경로나 잘못된 인자는 거절하고, 경로가 맞는 기존 학습 DB를 사용합니다. 소스 레퍼런스의 실제 계정 DB는 스키마가 다르므로 이 도구로 열지 않습니다.",
+      "codes": [
+        {
+          "label": "빌드와 계획 관찰",
+          "text": "cmake -S docs/learn/checkpoints/111-indexes -B out/study-111 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-111 --target study_meta_db meta_submit history_list index_probe -j2\nout/study-111/index_probe\nctest --test-dir out/study-111 -R \"^index_query_contract$\" --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "서버 터미널",
+          "text": "out/study-111/study_meta_db 18081 out/study-111/history.db",
+          "language": "sh"
+        },
+        {
+          "label": "호출·목록 조회 터미널",
+          "text": "out/study-111/meta_submit 18081 17\nout/study-111/meta_submit 18081 18\nout/study-111/history_list out/study-111/history.db 101 5\nout/study-111/history_list out/study-111/history.db 202 1",
+          "language": "sh"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "기존 DB와 IF NOT EXISTS",
+          "body": "동일한 학습 스키마의 기존 DB에 조회 인덱스를 추가하는 단계입니다. IF NOT EXISTS는 같은 이름이 존재할 때 정의까지 비교해 고쳐 주지 않습니다. 열이나 인덱스 정의 자체를 바꾸는 버전 이관은 변경 전 스키마와 데이터를 확인하는 별도 절차가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "검사의 순서도 계약에서 시작한다",
+      "body": "인덱스 검사는 빠른 실행 시간 한 번을 보고 끝내지 않습니다. 먼저 독립적으로 계산한 예상 행·순서와 SQL 결과를 비교합니다. 선수A/B 양쪽, 없는 선수,1·5·50개의 상한, 키 크기와 행 번호 순서가 다른 자료를 넣습니다.\n\n다음으로 실행 계획과 엔진 작업 계수를 읽습니다. 고정된 실습 자료에서 추가 정렬과 불필요한 순회를 줄였는지 봅니다. 완전히 같은 계획 문자열을 모든 버전의 정답으로 고정하지 않습니다.\n\n마지막으로 데이터 계약을 확인합니다. 성능용 인덱스가 없어도 결과·UNIQUE·외래 키가 유지되는지, 기존 DB에 인덱스를 추가한 뒤 같은 경기 응답과 목록을 읽는지, 삭제한 옛 보조 인덱스가 소유 행을 건드리지 않았는지를 검사합니다. 읽기 경로 개선과 허용 데이터 변경을 분리해 검토하는 순서입니다."
+    },
+    {
+      "title": "추가한 파일과 유지할 경계",
+      "body": "history_queries.h는 목록 SQL과 그 SQL을 돕는 인덱스를 모읍니다. SqliteResults는 연결·mutex·타입 변환·상한을 소유하고 recent 결과를 값으로 반환합니다. history_list는 인자를 해석하고 결과를 출력합니다. query_observer와 index_probe는 쿼리 계획을 공부하는 진단 경로에 있습니다.\n\n유지되는 핵심은 조회의 결과 계약, 그 계약에 맞춘 키 순서, 실행 계획과 자료 분포를 근거로 한 선택, 인덱스 변경 뒤 데이터 보존입니다. 반환 열·상한·추가 검색 조건·콘텐츠 수가 달라지면 적절한 인덱스도 달라질 수 있습니다. 현재 실제 코드에서는 소유 확인, 랭킹 정렬, 경기 UUID 유일성의 세 책임을 각각 찾아보세요.",
+      "codes": [
+        {
+          "label": "진단과 목록 실행 파일의 타깃",
+          "text": "# Inspect plans in a local fixture; production request handling does not run EXPLAIN.\nadd_executable(index_probe tools/index_probe.cpp)\ntarget_link_libraries(index_probe PRIVATE study_meta_http study_sqlite)\nadd_test(NAME index_query_contract COMMAND index_probe)\nset_tests_properties(index_query_contract PROPERTIES TIMEOUT 30)",
+          "language": "cmake"
+        },
+        {
+          "label": "meta/history_queries.h",
+          "language": "cpp",
+          "file": "checkpoints/111-indexes/meta/history_queries.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/sqlite_results.h",
+          "language": "cpp",
+          "file": "checkpoints/111-indexes/meta/sqlite_results.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/query_observer.h",
+          "language": "cpp",
+          "file": "checkpoints/111-indexes/meta/query_observer.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/index_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/111-indexes/tools/index_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/history_list.cpp",
+          "language": "cpp",
+          "file": "checkpoints/111-indexes/tools/history_list.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::leaderboard",
+        "invariant": "조회 조건·정렬·반환 열·상한을 함께 읽어 적절한 인덱스를 판단한다.",
+        "mayDiffer": "실제 랭킹 반환 구조와 사용자 수는 학습 최근 경기 목록과 다르다. 계획 문자열을 사용자 기능의 계약으로 삼지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "111-1",
+      "question": "(player_a,id DESC,match_key) 인덱스가 직접 돕는 조회는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "match_key 전체를 숫자 오름차순으로 읽기"
+        },
+        {
+          "id": "b",
+          "text": "특정 player_a의 경기 ID를 내림차순으로 읽기"
+        },
+        {
+          "id": "c",
+          "text": "player_b만 지정한 모든 조회"
+        },
+        {
+          "id": "d",
+          "text": "아무 조건 없는 모든 SELECT를 같은 비용으로 처리"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "특정 player_a의 경기 ID를 내림차순으로 읽기",
+      "explanation": "선두 player_a가 같은 범위 안에서 id 내림차순으로 정렬됩니다. 다른 열의 조건과 전체 숫자 정렬을 자동으로 제공하지는 않습니다."
+    },
+    {
+      "id": "111-2",
+      "question": "OR 조회를 두 SELECT의 UNION ALL로 바꿀 때 같은 경기가 중복되지 않는 근거는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "UNION ALL이 자동으로 중복을 지운다"
+        },
+        {
+          "id": "b",
+          "text": "LIMIT가 중복 행을 삭제한다"
+        },
+        {
+          "id": "c",
+          "text": "player_a와 player_b가 다르다는 스키마 제약"
+        },
+        {
+          "id": "d",
+          "text": "인덱스 이름이 서로 다르다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "player_a와 player_b가 다르다는 스키마 제약",
+      "explanation": "같은 사용자가 한 경기의 양쪽에 동시에 없으므로 두 결과 집합이 겹치지 않습니다. 이 전제가 깨지면 UNION ALL은 같은 행을 두 번 반환할 수 있습니다."
+    },
+    {
+      "id": "111-3",
+      "question": "계획에 SCAN이 표시되면 어떤 결론이 타당합니까?",
+      "options": [
+        {
+          "id": "a",
+          "text": "항상 인덱스가 없다"
+        },
+        {
+          "id": "b",
+          "text": "항상 전체 테이블을 끝까지 읽는다"
+        },
+        {
+          "id": "c",
+          "text": "즉시 강제로 SEARCH로 바꿔야 한다"
+        },
+        {
+          "id": "d",
+          "text": "순회 대상·조건·정렬·LIMIT와 실제 작업량을 함께 봐야 한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "순회 대상·조건·정렬·LIMIT와 실제 작업량을 함께 봐야 한다",
+      "explanation": "정렬된 인덱스의 상위 몇 행만 읽는 경우도 SCAN입니다. 계획 단어 하나만으로 작업량이나 효율을 판정하지 않습니다."
+    },
+    {
+      "id": "111-4",
+      "question": "일반 인덱스를 UNIQUE 인덱스로 바꾸려는데 이미 같은 값의 행이 두 개 있습니다. 예상 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "UNIQUE 인덱스 생성이 실패한다"
+        },
+        {
+          "id": "b",
+          "text": "중복 행을 자동 삭제한다"
+        },
+        {
+          "id": "c",
+          "text": "항상 생성되고 나중에만 검사한다"
+        },
+        {
+          "id": "d",
+          "text": "조회 순서만 바뀐다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "UNIQUE 인덱스 생성이 실패한다",
+      "explanation": "UNIQUE는 허용 데이터에도 제약을 겁니다. 기존 중복을 만족시키지 못하면 생성이 실패하므로 단순한 성능 변경으로 취급할 수 없습니다."
+    },
+    {
+      "id": "111-5",
+      "question": "한 실습에서 VM_STEP이1003에서97로 줄었습니다. 이 관찰이 직접 보여 주는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든 기기에서 정확히 같은 비율로 빨라짐"
+        },
+        {
+          "id": "b",
+          "text": "해당 문장의 엔진 실행 단계 수가 줄어듦"
+        },
+        {
+          "id": "c",
+          "text": "디스크를 정확히97번 읽음"
+        },
+        {
+          "id": "d",
+          "text": "공개 서비스 동시 사용자 한도가10배 증가함"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "해당 문장의 엔진 실행 단계 수가 줄어듦",
+      "explanation": "VM 단계는 문장 실행 작업 계수입니다. 실제 시간·디스크 I/O·동시 처리량은 캐시와 환경·자료 분포 등 다른 요인도 포함해 측정해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "최근 목록의 필터·정렬·반환 열·상한을 먼저 적습니다.",
+      "인덱스 전후 결과의 행과 순서를 대조합니다.",
+      "OR와 UNION ALL 계획에서 추가 정렬과 범위 검색을 찾습니다.",
+      "기존 학습 파일에서101과202의 목록을 읽고 상한을 바꿔 봅니다."
+    ],
+    "failureChecks": [
+      "같은 경기가 두 번 반환되거나 한쪽 참가자의 기록이 빠지지 않는지 확인합니다.",
+      "TEXT 요청 키를 숫자 또는 최근 시간처럼 정렬하지 않는지 확인합니다.",
+      "인덱스를 정리해도 소유 중복과 경기 키 유일성이 유지되는지 검사합니다."
+    ],
+    "expected": "정확한 최근 목록을 유지하고 인덱스가 줄인 읽기 작업과 추가한 저장·쓰기 비용을 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 진단 도구 초안 검수·독립 결과 oracle·실행계획/계수·기존DB 재열기 대조",
+    "draftJob": "out/learning-jobs/111-observer-events.jsonl",
+    "corrections": [
+      "std::move의 명시적utility include와 불필요한SQL길이narrowing 제거",
+      "SCAN을 전 행 읽기로 단정하지 않고 실제 전진 횟수와 구분",
+      "UNION ALL 동등성의 참가자불일치 제약 명시",
+      "실제 중복 소유 인덱스 제거와 데이터/인증/유일성 보존",
+      "Part10 실제랭킹동점순서·커버링범위·계획/비용 설명 보강"
+    ]
+  },
+  "validation": [
+    "누적110에서 저장 클래스의 인덱스 준비/recent만 추가, 나머지 기존 구현 파일 보존",
+    "12,000경기·64선수×3상한의 독립 예상 결과·OR/UNION ALL·인덱스 전후·ANALYZE·NULL/UNIQUE 검사",
+    "SCRIPTED/SDL 변경/신규 타깃·2CTest·HTTP 저장/양쪽최근목록·재시작·기존DB 인덱스추가 검사",
+    "새 C++ 진단/조회 ASan/UBSan; SQLite 엔진은 Release C11 아카이브",
+    "실제 중복 소유 인덱스 정리·기존행/인증/복합PK 보존·메타 HTTP/SQLite38검사",
+    "타OS네이티브·수동GUI·실서비스 부하/디스크지연/전원장애는 미검증"
+  ]
+}

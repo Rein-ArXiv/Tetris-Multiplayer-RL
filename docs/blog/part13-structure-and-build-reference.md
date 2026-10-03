@@ -177,7 +177,7 @@ Tetris-Multiplayer-RL/
 
 | 디렉토리 | 책임 | 외부 의존 |
 |---|---|---|
-| `core/` | 순수 C++ 헬퍼(RNG·해시·상수·입력 비트마스크·리플레이) | 없음 |
+| `core/` | 순수 C++ 헬퍼(RNG·해시·상수·입력 비트마스크·리플레이·UTF-8) | 없음 |
 | `src/` | 테트리스 로직 + 렌더링 래퍼 + UI + 진입점 | `core/`, `renderer/`, `net/` |
 | `platform/` | OS 창/입력/GL 컨텍스트 추상화 (`platform.h` 공용 계약과 플랫폼별 구현) | Win32 API + WGL 또는 SDL2 |
 | `renderer/` | OpenGL 3.3 Core 2D (사각형·텍스트·이미지·셰이크) | OpenGL 3.3 Core 드라이버, `stb_truetype`, `platform/` |
@@ -243,7 +243,7 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 
 **dr_mp3** — 단일 헤더 MP3 디코더 (public domain). `third_party/dr_mp3.h` 로 **이미 저장소에 벤더링**돼 있다. `audio/audio.cpp` 와 `audio/sdl_audio.cpp` 양쪽에서 사용한다.
 
-**stb 계열** — `third_party/stb_truetype.h` 와 `third_party/stb_image.h` 가 **저장소에 벤더링**돼 있다 (둘 다 public domain 단일 헤더). `renderer/text_gl.cpp` 가 모든 플랫폼에서 `stb_truetype` 로 TTF 를 CPU coverage bitmap 으로 래스터화한 뒤, 그 비트맵을 R8 글리프 아틀라스 텍스처에 올린다 — **글자 모양을 만드는 일은 여전히 CPU 가 한다.** GPU 에는 TTF 아웃라인을 래스터화하는 기능이 없기 때문이고, GL 로 옮기면서 바뀐 것은 그 비트맵을 두는 곳이다. `renderer/image_gl.cpp` 의 비-Win32 분기는 `stb_image` 로 PNG/JPG 를 디코딩하고 결과를 GL 텍스처로 업로드한다 (Windows 는 GDI+ 사용 — 이미지 디코딩 전용이며 텍스트에는 쓰지 않는다). 각 헤더는 정확히 한 번역 단위에서 `STB_TRUETYPE_IMPLEMENTATION` / `STB_IMAGE_IMPLEMENTATION` 매크로와 함께 include 된다.
+**stb 계열** — `third_party/stb_truetype.h` 와 `third_party/stb_image.h` 가 **저장소에 벤더링**돼 있다 (둘 다 public domain 단일 헤더). `renderer/text_gl.cpp` 가 모든 플랫폼에서 `stb_truetype` 로 TTF 를 CPU coverage bitmap 으로 래스터화한 뒤, 그 비트맵을 R8 글리프 아틀라스 텍스처에 올린다 — **글자 모양을 만드는 일은 여전히 CPU 가 한다.** 이 렌더러는 TTF 해석과 coverage 생성에 CPU 라이브러리를 사용한다. OpenGL 3.3에는 TTF 파일을 직접 받아 처리하는 API가 없으며, 별도의 GPU 글꼴 렌더링 알고리즘을 구현하는 선택과는 구별한다. GL로 옮기면서 이 경로에서 바뀐 것은 비트맵 저장소와 화면 합성이다. `renderer/image_gl.cpp` 의 비-Win32 분기는 `stb_image` 로 PNG/JPG 를 디코딩하고 결과를 GL 텍스처로 업로드한다 (Windows 는 GDI+ 사용 — 이미지 디코딩 전용이며 텍스트에는 쓰지 않는다). 각 헤더는 정확히 한 번역 단위에서 `STB_TRUETYPE_IMPLEMENTATION` / `STB_IMAGE_IMPLEMENTATION` 매크로와 함께 include 된다.
 
 **cpp-httplib / SQLite amalgamation** — `third_party/httplib.h`, `third_party/sqlite3.{c,h}`. 전자는 게임 클라이언트까지 포함한 세 바이너리가 모두 쓰고, 후자는 `tetris_meta` 전용이다. 둘 다 존재 검사를 통과하지 못하면 CMake 가 즉시 `FATAL_ERROR` 로 멈춘다.
 
@@ -335,7 +335,7 @@ uv sync --dev --extra train --extra export
 ```cmake
 cmake_minimum_required(VERSION 3.15)
 # C 언어도 활성화 — third_party/sqlite3.c (amalgamation) 를 빌드하려면 필요.
-# tetris_meta 타겟만 C 를 쓰지만 enable_language 는 프로젝트 루트에서 선언해야 한다.
+# 현재 구성은 루트에서 두 언어를 선언해 필요한 하위 타깃에 제공한다.
 project(tetris CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -349,7 +349,7 @@ endif()
 
 CMake 3.15 는 `find_package` 의 `CONFIG` 모드, `target_link_libraries` 의 타깃 기반 의존성 같은 현대적 기능을 안정적으로 지원하는 최저선이다. C++17 은 `std::optional`, structured binding, `if constexpr` 를 쓰기 위해 필수.
 
-`project(tetris CXX C)` 의 `C` 는 주석이 설명하듯 `tetris_meta` 타깃만을 위한 것이다. 그런데 `enable_language` 계열 선언은 프로젝트 루트에서 해야 하므로, `TETRIS_BUILD_META=OFF` 인 대부분의 빌드에서도 C 컴파일러를 찾는다. C 컴파일러가 없는 희귀한 환경에서는 이 줄이 첫 실패 지점이 된다.
+`project(tetris CXX C)` 의 `C` 는 주석이 설명하듯 `tetris_meta` 타깃만을 위한 것이다. 현재 구성은 루트에서 두 언어를 무조건 선언하므로 `TETRIS_BUILD_META=OFF`인 빌드에서도 C 컴파일러를 찾는다. 이것은 이 프로젝트의 구성 선택이다. `enable_language`가 언제나 루트에서만 허용되는 것은 아니며, 해당 언어를 직간접으로 사용하는 타깃들의 가장 높은 공통 디렉터리에서 활성화해야 한다. [CMake 언어 활성화 규칙](https://cmake.org/cmake/help/latest/command/enable_language.html)을 참고한다. C 컴파일러가 없는 희귀한 환경에서는 이 줄이 첫 실패 지점이 된다.
 
 MSVC 의 `/utf-8` 는 소스/실행 인코딩 모두 UTF-8 로 설정하는 플래그다. 이 저장소는 C++ 주석이 한국어로 많이 적혀 있고, MSVC 가 기본으로 가정하는 시스템 로케일(CP949 등)에서 컴파일하면 `warning C4819` 가 쏟아진다. `/utf-8` 하나로 전부 해결.
 
@@ -508,6 +508,7 @@ if (TETRIS_BUILD_GAME)
             "tetris_meta 서버 호출 (guest 토큰) 용. 다운로드 후 재시도.")
     endif()
     set(TETRIS_GAME_COMMON
+        audio/mp3_decode.cpp
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
         src/account_screen.cpp
@@ -549,6 +550,7 @@ if (TETRIS_BUILD_GAME)
         src/colors.h
         src/presentation.h
         core/replay.h
+        core/utf8.h
         net/socket.h
         net/framing.h
         net/session.h
@@ -559,6 +561,11 @@ if (TETRIS_BUILD_GAME)
         renderer/gl_shaders.h
         renderer/shake.h
         renderer/image.h
+        renderer/texture_upload.h
+        renderer/mask_upload.h
+    renderer/font_raster_policy.h
+        renderer/image_rows.h
+        renderer/handle_pool.h
         audio/audio.h
         bot/placement.h
         bot/bot_onnx.h
@@ -567,7 +574,9 @@ if (TETRIS_BUILD_GAME)
 
 `${TETRIS_SIM_HEADERS}`를 앞에 펼쳐 넣으므로 시뮬 공개 헤더도 함께 나열된다. `src/gui.h`와 `meta/http_client.h`는 이 목록에 없다. 헤더 누락은 컴파일 자체에는 영향을 주지 않지만 일부 IDE의 타깃 트리 표시에는 영향을 줄 수 있다.
 
-GL 헤더 셋(`gl_api.h` / `gl_internal.h` / `gl_shaders.h`)이 여기 나열돼 있다는 것은 이 셋이 **렌더러 내부 전용**이라는 뜻이기도 하다. `src/` 나 `game.cpp` 는 `renderer/renderer.h` 만 include 하고 GL 타입을 한 번도 보지 않는다. 셰이더 문자열조차 `gl_shaders.h` 안의 raw string literal 이라, 별도 애셋 파일이나 로딩 경로가 없다.
+`core/utf8.h`는 길이를 받는 순수 UTF-8 디코더다. 글꼴·GL·로케일을 사용하지 않고 결과 스칼라·소비 바이트·유효 상태를 반환한다. `text_gl.cpp`는 NUL 종료 API를 이 계약에 연결한다.
+
+`gl_api.h`·`gl_internal.h`·`gl_shaders.h`와 업로드 보조 `texture_upload.h`·디코딩 행 변환 `image_rows.h`·이미지 토큰 저장소 `handle_pool.h`는 렌더러 내부에서 사용한다. 이 책임 경계는 include 관계로 유지하며, CMake의 헤더 목록 자체가 접근을 제한하는 것은 아니다. `src/` 나 `game.cpp` 는 `renderer/renderer.h` 만 include 하고 GL 타입을 한 번도 보지 않는다. 셰이더 문자열조차 `gl_shaders.h` 안의 raw string literal 이라, 별도 애셋 파일이나 로딩 경로가 없다.
 
 (c) **백엔드 분기** — GL 렌더러와 텍스트는 공통이고, `TETRIS_USE_SDL2`에 따라 창/컨텍스트와 오디오 구현을 교체한다.
 
@@ -837,6 +846,33 @@ if (TETRIS_BUILD_TEST)
     )
     target_include_directories(sim_hash_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+    add_executable(replay_io_test tests/replay_io_test.cpp core/replay.cpp)
+    target_include_directories(replay_io_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME replay_io COMMAND replay_io_test)
+
+    add_executable(sim_t_spin_test tests/sim_t_spin_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_t_spin_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_combat_test tests/sim_combat_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_combat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_hard_drop_test tests/sim_hard_drop_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_hard_drop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_soft_drop_test tests/sim_soft_drop_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_soft_drop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_ghost_test tests/sim_ghost_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_ghost_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # Real Game linked with audio/draw probes; no device/backend dependency.
+    add_executable(game_wrapper_test tests/game_wrapper_test.cpp src/game.cpp
+        src/colors.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(game_wrapper_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(utf8_test tests/utf8_test.cpp)
+    target_include_directories(utf8_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME utf8 COMMAND utf8_test)
+
+    add_executable(sim_hash_test tests/sim_hash_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_hash_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_score_test tests/sim_score_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_score_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
     add_executable(worker_group_test
         tests/worker_group_test.cpp
         server/worker_group.h
@@ -846,6 +882,32 @@ if (TETRIS_BUILD_TEST)
         find_package(Threads REQUIRED)
         target_link_libraries(worker_group_test PRIVATE Threads::Threads)
     endif()
+
+    add_executable(worker_lifetime_test tests/learning/worker_lifetime.cpp)
+    target_include_directories(worker_lifetime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (NOT WIN32)
+        target_link_libraries(worker_lifetime_test PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(matchmaker_queue_test tests/learning/matchmaker_queue.cpp
+        server/matchmaker.cpp server/log.cpp net/socket.cpp net/framing.cpp)
+    target_include_directories(matchmaker_queue_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (WIN32)
+        target_link_libraries(matchmaker_queue_test PRIVATE ws2_32)
+    else()
+        target_link_libraries(matchmaker_queue_test PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(room_code_test tests/learning/room_code.cpp server/room_code.cpp)
+    target_include_directories(room_code_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (WIN32)
+        target_link_libraries(room_code_test PRIVATE bcrypt)
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_definitions(room_code_test PRIVATE ROOM_RANDOM_WRAP)
+        target_link_options(room_code_test PRIVATE "-Wl,--wrap=getrandom")
+    endif()
+    add_test(NAME room_code COMMAND room_code_test)
+    set_tests_properties(room_code PROPERTIES TIMEOUT 15)
 
     # reactor_test — 이벤트 루프(net::Reactor) 준비성·wake 계약 회귀.
     # 플랫폼별 백엔드(Windows=IOCP, Linux=epoll; macOS는 타깃 제외)를 각자 검증한다. 두 백엔드
@@ -910,6 +972,8 @@ if (TETRIS_BUILD_RELAY)
         server/player_conn.cpp
         server/relay.cpp
         server/room.cpp
+        server/room_code.cpp
+        server/room_code.h
         net/socket.cpp
         net/framing.cpp
         meta/http_client.cpp
@@ -934,7 +998,7 @@ if (TETRIS_BUILD_RELAY)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
     if (WIN32)
-        target_link_libraries(tetris_relay PRIVATE ws2_32)
+        target_link_libraries(tetris_relay PRIVATE ws2_32 bcrypt)
     else()
         # Linux/macOS: std::thread 는 pthread 를 필요로 함 (libstdc++)
         find_package(Threads REQUIRED)
@@ -1036,7 +1100,7 @@ endif()
 3. **`meta/levels.h`.** XP → 레벨 곡선 테이블이며 헤더 목록에 포함돼 있다.
 4. **플랫폼별 시스템 라이브러리.** Linux/macOS는 `Threads::Threads ${CMAKE_DL_LIBS}`로 SQLite의 스레드·동적 로딩 심볼을 제공한다. Windows는 HTTP socket용 `ws2_32`와 guest token CSPRNG인 `BCryptGenRandom`용 `bcrypt`를 링크한다.
 
-`tetris_meta` 는 게임 클라이언트와 독립된 HTTP+SQLite 프로세스다. 실행 인자는 `--db PATH`, `--http HOST:PORT`, `--relay-secret SECRET`, `--allow-public-matches` 이며, 기본값은 `tetris.db` 와 `127.0.0.1:8080` 이다. 운영에서는 Caddy/Tunnel 뒤에 두고 `/v1/matches` 에 `X-Relay-Secret` 을 요구한다. secret 이 없으면 기본적으로 시작하지 않고, `--allow-public-matches` 는 로컬 테스트 전용이다.
+`tetris_meta` 는 게임 클라이언트와 독립된 HTTP+SQLite 프로세스다. 실행 인자는 `--db PATH`, `--http HOST:PORT`, `--relay-secret SECRET`, `--allow-public-matches` 이며, 기본값은 `tetris.db` 와 `127.0.0.1:8080` 이다. 운영에서는 Caddy/Tunnel 뒤에 두고 `/v1/matches` 에 `X-Relay-Secret` 을 요구한다. secret 이 없으면 기본적으로 시작하지 않고, `--allow-public-matches`는 로컬 테스트 전용이며 비밀키가 없으면 `127.0.0.1`·`::1`만 바인드할 수 있다. 호스트 이름이나 전체 인터페이스 주소는 DB 초기화 전에 거절한다.
 
 ### 3.10 라이브러리 링크 순서는 왜 중요한가
 

@@ -2,6 +2,7 @@
 #include "protocol.h"
 #include "bot_challenges.h"
 #include "game_tickets.h"
+#include "credentials.h"
 
 // cpp-httplib 는 windows.h 와 상호작용이 있어서 WIN32_LEAN_AND_MEAN 정의 후 include.
 #ifdef _WIN32
@@ -85,18 +86,6 @@ std::optional<std::string> gen_token()
     return std::string(buf, 32);
 }
 
-// [보안] 상수 시간 문자열 비교(타이밍 사이드채널 방지).
-//   내용에 따라 조기 종료/분기하지 않는다. 길이가 다르면 false.
-bool ct_equal(const std::string& a, const std::string& b)
-{
-    if (a.size() != b.size()) return false;
-    volatile unsigned char diff = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
-    }
-    return diff == 0;
-}
-
 bool parse_int_param(const std::string& s, int& out)
 {
     if (s.empty()) return false;
@@ -135,8 +124,9 @@ std::string rate_limit_key(const httplib::Request& req, bool trust_proxy)
     return req.remote_addr;
 }
 
-// A bounded table, counters that saturate, and a monotonic rolling window per
-// address. Rejected traffic cannot extend a window or grow the table indefinitely.
+// A bounded table and capped counters in a fixed-duration window anchored at
+// each address's first accepted request. This is not a sliding-window log.
+// Rejected traffic cannot extend that window or grow the table indefinitely.
 class RequestBudget {
     struct Bucket { int64_t start; unsigned hits; };
     std::unordered_map<std::string, Bucket> buckets_;
@@ -196,7 +186,7 @@ bool ApiServer::listen(const std::string& host, int port)
     svr.set_pre_routing_handler(
         [&, this](const httplib::Request& req, httplib::Response& res) {
             const bool trustedRelay = !relay_secret_.empty() &&
-                ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_);
+                credentials::equal_secret(req.get_header_value("X-Relay-Secret"), relay_secret_);
             const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             const std::string ip = rate_limit_key(req, trust_loopback_proxy_);
@@ -240,12 +230,13 @@ bool ApiServer::listen(const std::string& host, int port)
         if (!random) { set_json(res, 503, proto::error_json("entropy_unavailable")); return; }
         const auto ticket = "gt1." + *random;
         if (!gameTickets.issue(ticket, player->id, player->auth_epoch)) {
-            set_json(res, 503, proto::error_json("ticket_capacity")); return;
+            set_json(res, 503, proto::error_json("ticket_unavailable")); return;
         }
-        set_json(res, 200, "{\"ticket\":\"" + ticket + "\",\"expires_in\":60}");
+        const auto expiresIn = std::chrono::duration_cast<std::chrono::seconds>(GameTickets::lifetime).count();
+        set_json(res, 200, "{\"ticket\":\"" + ticket + "\",\"expires_in\":" + std::to_string(expiresIn) + "}");
     });
     json_post(svr, "/v1/game-tickets/consume", [&](const httplib::Request& req, httplib::Response& res) {
-        if (relay_secret_.empty() || !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
+        if (relay_secret_.empty() || !credentials::equal_secret(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
             set_json(res, 403, proto::error_json("relay_auth_required")); return;
         }
         auto auth = gameTickets.consume(proto::find_string(req.body, "ticket"));
@@ -408,7 +399,7 @@ bool ApiServer::listen(const std::string& host, int port)
     json_post(svr, "/v1/matches",
         [this](const httplib::Request& req, httplib::Response& res) {
             if (!relay_secret_.empty() &&
-                !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
+                !credentials::equal_secret(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
                 set_json(res, 403, proto::error_json("forbidden", "relay secret required"));
                 return;
             }
@@ -416,7 +407,15 @@ bool ApiServer::listen(const std::string& host, int port)
             const std::string matchUuid = proto::find_string(req.body, "match_uuid");
             auto pa = proto::find_int(req.body, "player_a");
             auto pb = proto::find_int(req.body, "player_b");
-            auto wn = proto::find_int(req.body, "winner");   // null 허용
+            auto wn = proto::find_int(req.body, "winner");
+            // Explicit JSON null is a draw; missing/invalid/out-of-range values
+            // must not silently acquire that meaning and consume a match UUID.
+            const auto match_input = json_input::object(req.body);
+            if (!match_input || !match_input->contains("winner") ||
+                (!(*match_input)["winner"].is_null() && !wn)) {
+                set_json(res, 400, proto::error_json("bad_request", "winner must be an integer or null"));
+                return;
+            }
             auto sa = proto::find_int(req.body, "score_a");
             auto sb = proto::find_int(req.body, "score_b");
             auto la = proto::find_int(req.body, "lines_a");
@@ -465,7 +464,13 @@ bool ApiServer::listen(const std::string& host, int port)
             m.lines_b    = static_cast<int>(*lb);
             m.duration_s = static_cast<int>(*du);
 
-            auto ins = db_.saveMatch(m);
+            MatchSaveError error;
+            auto ins = db_.saveMatch(m, &error);
+            if (!ins && error == MatchSaveError::IdentityConflict) {
+                set_json(res, 409,
+                    proto::error_json("match_conflict", "match_uuid already identifies a different record"));
+                return;
+            }
             if (!ins) {
                 set_json(res, 500,
                     proto::error_json("save_failed", "db transaction failed"));
@@ -490,11 +495,16 @@ bool ApiServer::listen(const std::string& host, int port)
                     limit = parsed;
                 }
             }
+            res.set_header("Cache-Control", "no-store");
             auto rows = db_.leaderboard(limit);
+            if (!rows) {
+                set_json(res, 503, proto::error_json("leaderboard_unavailable"));
+                return;
+            }
 
             std::vector<proto::LeaderRow> out;
-            out.reserve(rows.size());
-            for (const auto& r : rows) {
+            out.reserve(rows->size());
+            for (const auto& r : *rows) {
                 out.push_back({ r.player_id, r.username, r.elo, r.wins,
                                 r.losses, r.xp });
             }

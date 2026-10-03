@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.15)
+project(tetris_study LANGUAGES CXX)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_library(StudySDL2 INTERFACE)
+# Keep the console entry point; SDL readiness is explicit before SDL_Init.
+target_compile_definitions(StudySDL2 INTERFACE SDL_MAIN_HANDLED)
+find_package(SDL2 CONFIG QUIET)
+if(TARGET SDL2::SDL2)
+    target_link_libraries(StudySDL2 INTERFACE SDL2::SDL2)
+elseif(TARGET SDL2::SDL2-static)
+    target_link_libraries(StudySDL2 INTERFACE SDL2::SDL2-static)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+    target_link_libraries(StudySDL2 INTERFACE PkgConfig::SDL2)
+endif()
+
+add_library(study_platform STATIC platform/sdl.cpp)
+target_compile_features(study_platform PUBLIC cxx_std_17)
+target_include_directories(study_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(study_platform PRIVATE StudySDL2)
+
+add_executable(tetris src/main.cpp)
+target_link_libraries(tetris PRIVATE study_platform)

@@ -1,0 +1,445 @@
+{
+  "id": "lesson-122",
+  "title": "계정 화면: 서비스 호출과 UI 책임",
+  "shortTitle": "계정 패널·작업 수명·결과 수집",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 계정의 발급·저장·인증은 콘솔 도구에서 실행하고, 게임 메뉴에는 계정 상태를 확인할 경로가 없습니다.",
+  "finish": "완료: 메뉴에서 계정을 연결하고 재시도하며, 화면은 진행 상태를 읽고 서비스는 키·파일·통신을 소유합니다.",
+  "objective": "입력에서 서비스 결과 표시까지의 흐름을 구현하고, 프레임 대기·중복 실행·미저장 키 손실·객체 수명 오류를 설명하고 진단합니다.",
+  "prerequisites": [
+    "계정 발급·저장·인증 상태와 동일 키 재시도",
+    "메뉴 입력 의도·프레임 갱신·글리프 캐시",
+    "객체 소유권·RAII·참조 수명"
+  ],
+  "recap": {
+    "points": [
+      "요청의 정체성과 서버 확인 여부를 보관하면 같은 작업을 재개할 수 있다.",
+      "원격 성공과 로컬 저장 완료는 별도로 관찰한다.",
+      "이미 확인한 결과를 저장 실패 때문에 미확인 상태로 되돌리지 않는다."
+    ],
+    "bridge": "이제 서비스가 아는 사실을 UI에 전달하고, 작업을 기다리는 동안에도 화면이 입력과 그리기를 계속하게 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "메뉴에서 계정을 연결한다",
+      "body": "계정 서비스는 발급·파일 저장·인증 결과를 구분하고, 저장하지 못한 새 키를 메모리에 보관합니다. 게임에는 메뉴·입력·글자·렌더러가 있습니다. 이제 두 부분을 연결해 메뉴의 **계정** 버튼으로 연결 상태를 확인하고 재시도하는 패널을 만듭니다.\n\n첫 연결의 흐름은 버튼 입력 → 요청 시작 → 처리 중 표시 → 결과 수집 → 상태 표시입니다. 키가 저장되지 않았다면 같은 키의 저장을 다시 시도합니다. 계정 버튼을 여는 것만으로 신규 발급하지 않고, 연결 버튼을 눌렀을 때 작업을 요청합니다.\n\n연결 중에도 뒤로 갈 수 있습니다. 메뉴에서 게임을 시작해도 계정 작업의 결과는 수집합니다. 패널이 닫힌 것과 서비스 객체가 사라지는 것을 분리해, 늦게 도착한 결과와 미저장 키가 길을 잃지 않도록 합니다.\n\n산출물은 별도 콘솔 화면이 아니라 누적 `tetris` 프로그램의 메뉴 패널입니다. 자동 검사용 `account_ui_probe`도 같은 Controller와 AccountTask를 사용합니다. 서버와 폴더는 프로그램 시작 인자로 고정합니다.",
+      "reference": {
+        "path": "src/account_screen.h",
+        "symbol": "struct AccountScreen",
+        "invariant": "화면은 상태를 보여 주고 서비스에 전달할 요청을 만든다.",
+        "mayDiffer": "현재 화면은 복구·교체·가져오기까지 지원한다. 학습 패널은 연결과 같은 키 재시도에 집중한다."
+      }
+    },
+    {
+      "title": "동기 호출을 프레임 안에 두면 어떤 일이 생길까",
+      "body": "**동기 호출**은 함수가 결과를 돌려줄 때까지 호출자가 다음 문장으로 진행하지 않는 방식입니다. AccountBootstrap::connect는 파일과 HTTP의 결과를 받아 순서대로 처리하므로 동기 함수입니다.\n\n프레임 안에서 이 함수를 직접 호출하고 HTTP 응답이 800ms 걸린다고 가정해 봅시다. 60Hz 화면의 한 주기 약 16.7ms와 비교하면 약 48주기에 해당하는 시간 동안 그 스레드는 새 입력과 그리기를 진행하지 못합니다. 서버가 응답한 뒤 상태 문구를 바꾸어도 기다리는 동안의 멈춤을 없애지는 못합니다.\n\n**비동기 요청**은 일을 시작한 뒤 호출자가 다른 일을 진행하고, 나중에 결과를 받는 경계입니다. 여기서는 동기 서비스 함수를 작업 스레드에서 실행합니다. UI 스레드는 입력·표시·결과 수집을 맡습니다. 비동기가 HTTP 자체를 빠르게 만드는 것은 아니며, 대기 중에도 UI가 일을 계속할 수 있게 하는 것입니다.\n\n초기화 시에는 Controller만 만들고 네트워크 작업을 시작하지 않습니다. 계정 연결 전에도 메뉴와 로컬 플레이가 준비되는 구조입니다. 연결은 사용자의 명시적 입력으로 시작합니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "동시성과 병렬성",
+          "body": "동시성은 여러 작업의 진행을 함께 관리하는 구조이고 병렬성은 실제로 같은 순간에 실행되는 성질입니다. 한 코어에서도 OS가 스레드를 번갈아 실행하며, 네트워크 대기 동안 UI가 진행할 수 있습니다. 이 패널은 처리량보다 응답성 때문에 작업을 분리합니다."
+        }
+      ]
+    },
+    {
+      "title": "화면이 받아야 할 정보만 값으로 만든다",
+      "body": "서비스가 가진 계정 키는 파일 저장과 인증에 필요하지만, 상태 글자를 그리는 데에는 필요하지 않습니다. View에는 표시 상태·미저장 키 존재 여부·인증된 공개 프로필만 둡니다. 렌더러가 비밀 키를 받아 로그나 텍스트로 출력할 경로를 줄이는 설계입니다.\n\nView는 **그 시점에 표시할 정보의 복사본**입니다. Controller는 이를 const 참조로 공개하고 다음 결과를 수집할 때 갱신합니다. 렌더러가 참조를 영구히 보관하거나 다른 스레드에서 읽는 계약은 아닙니다. 한 프레임에서 읽고 그리면 됩니다.\n\nBootstrapState와 BootstrapResult는 `meta/bootstrap_types.h`로 추출합니다. 표시 쪽은 값 계약을 읽고, 작업 쪽은 AccountBootstrap을 사용합니다. 서비스 흐름 자체를 UI용으로 다시 구현하지 않습니다.\n\n| 서비스 관찰 | 표시 상태 | 공개 프로필 사용 |\n| --- | --- | --- |\n| 아직 요청하지 않음 | 연결 전 | 없음 |\n| 수집하지 않은 작업 있음 | 처리 중 | 숨김 |\n| 저장 확인 후 인증 성공 | 연결됨 | 허용 |\n| 키는 저장됨, 인증 응답 없음 | 서버 확인 필요 | 없음 |\n| 키 저장 실패 | 키 저장 필요 | 없음 |\n| 발급 응답 미확인 | 발급 결과 미확인 | 없음 |\n\n저장 실패와 인증 성공이 섞인 입력이 들어오더라도 미저장 여부를 우선합니다. 오류 상태에 우연히 profile이 들어 있으면 버리고, online인데 profile이 없으면 failed로 표시합니다.",
+      "codes": [
+        {
+          "label": "표시 상태와 비밀 없는 값",
+          "text": "enum class Status {\n  idle,\n  busy,\n  online,\n  offline_saved,\n  unsaved,\n  storage_blocked,\n  key_rejected,\n  creation_unconfirmed,\n  failed,\n};\n\n// Value snapshot exposed as const by the controller; never carries credentials.\nstruct View {\n  Status status = Status::idle;\n  bool has_unsaved_key = false;\n  std::optional<study_meta::PublicProfile> profile;\n};",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.h",
+        "symbol": "struct AccountOperation",
+        "invariant": "발급·저장·인증을 구분하고 미저장 상태를 온라인 성공으로 표시하지 않는다.",
+        "mayDiffer": "현재 조정 계층의 AccountOperation에는 키도 포함된다. 학습 View는 렌더러에 넘길 정보만 별도로 뽑는다."
+      }
+    },
+    {
+      "title": "표시 상태를 만드는 규칙을 한곳에 둔다",
+      "body": "`present`는 서비스 결과를 화면 값으로 바꾸는 순수 함수입니다. 파일·HTTP·GL을 호출하지 않으므로, 같은 입력 조합에 어떤 표시가 나오는지 독립적으로 검사할 수 있습니다.\n\n먼저 unsaved를 처리하고 나머지 BootstrapState를 매핑합니다. 성공 문구를 서비스의 bool 하나만 보고 선택하지 않습니다. 인증된 프로필이 있어야 online이고, 키 저장까지 확인되어야 한다는 의미가 이 경계에 담깁니다.\n\n연결 버튼은 busy와 creation_unconfirmed에서 막습니다. busy는 중복 작업 방지이고 creation_unconfirmed는 발급 결과를 모르는 상태에서 새 계정을 자동으로 추가하지 않기 위한 정책입니다. 저장 실패·일시적 통신 실패는 같은 서비스에 명시적으로 재시도를 요청할 수 있습니다.\n\n버튼 비활성 표시와 Controller의 실제 거절을 함께 둡니다. 입력 장치가 바뀌거나 화면을 거치지 않는 호출이 생겨도 중복 시작을 허용하지 않기 위해서입니다.",
+      "codes": [
+        {
+          "label": "결과에서 표시값으로 변환",
+          "text": "inline View present(const study_meta::BootstrapResult& result, bool unsaved) {\n  View view;\n  if (unsaved) {\n    view.status = Status::unsaved;\n    view.has_unsaved_key = true;\n    view.profile.reset();\n    return view;\n  }\n\n  switch (result.state) {\n    case study_meta::BootstrapState::online:\n      // Online requires a confirmed public profile.\n      if (!result.profile.has_value()) {\n        view.status = Status::failed;\n        return view;\n      }\n      view.status = Status::online;\n      view.profile = result.profile;\n      return view;\n    case study_meta::BootstrapState::offline_saved:\n      view.status = Status::offline_saved;\n      return view;\n    case study_meta::BootstrapState::unsaved:\n      view.status = Status::unsaved;\n      view.has_unsaved_key = true;\n      return view;\n    case study_meta::BootstrapState::storage_blocked:\n      view.status = Status::storage_blocked;\n      return view;\n    case study_meta::BootstrapState::key_rejected:\n      view.status = Status::key_rejected;\n      return view;\n    case study_meta::BootstrapState::creation_unconfirmed:\n      view.status = Status::creation_unconfirmed;\n      return view;\n    default:\n      view.status = Status::failed;\n      return view;\n  }\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "표시와 요청 경계가 공유하는 허용 정책",
+          "text": "inline bool may_connect(const View& view) {\n  return view.status != Status::busy &&\n         view.status != Status::creation_unconfirmed;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "서비스 세션은 버튼을 누를 때마다 새로 만들지 않는다",
+      "body": "새 계정을 발급받은 뒤 파일 저장이 실패했다고 해 봅시다. 버튼을 누를 때마다 새 AccountBootstrap을 만들면 메모리에 남겨 둔 키와 발급 시도 여부를 잃습니다. 파일도 아직 없으면 다른 계정을 다시 발급할 수 있습니다.\n\nAccountTask는 API·폴더·AccountBootstrap·파일 저장소를 소유합니다. Controller가 존재하는 동안 같은 Task를 사용하고, 한 번에 하나의 작업만 이 Task를 호출합니다. 따라서 두 번째 작업도 첫 번째 작업이 보관한 키를 찾습니다.\n\n저장소는 첫 작업에서 생성합니다. 폴더 확인과 잠금 획득도 파일 I/O이므로 UI 생성자에서 하지 않습니다. 잠금을 얻었으면 Task 수명 동안 유지합니다. 작업 사이에 저장이 실패한 키가 메모리에만 남아 있을 때 다른 프로세스가 같은 빈 폴더를 보고 신규 발급하는 경쟁을 줄입니다. 잠금을 얻지 못한 저장소만 다음 요청에서 다시 만듭니다.\n\n작업 결과 AccountOutcome에는 선택적 BootstrapResult와 미저장 키 존재 여부를 넣습니다. 서비스 예외가 발생해도 Task가 남아 있는 키 여부를 확인해 전달합니다. 오류를 설명하겠다고 키 문자열을 결과 메시지에 포함하지 않습니다.",
+      "codes": [
+        {
+          "label": "세션과 잠금을 유지하는 실제 작업자",
+          "text": "struct AccountOutcome {\n    std::optional<BootstrapResult> result;\n    bool has_unsaved_key = false;\n};\n// Confined to one job at a time. Session identity and any unsaved key survive jobs.\nclass AccountTask final {\npublic:\n    AccountTask(int port, std::filesystem::path folder)\n        : api_(port), folder_(std::move(folder)) {}\n    AccountOutcome operator()() {\n        try {\n            // Acquire on the worker, then retain the lock between calls as well.\n            if (!store_ || !store_->available())\n                store_ = std::make_unique<LocalAccountStore>(folder_, api_.origin());\n            const auto result = session_.connect(*store_, api_);\n            return {result, session_.has_unsaved_key()};\n        } catch (const std::exception&) {\n            return {{}, session_.has_unsaved_key()};\n        }\n    }\nprivate:\n    AccountHttp api_;\n    std::filesystem::path folder_;\n    AccountBootstrap session_;\n    std::unique_ptr<LocalAccountStore> store_;\n};",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation save_created_account",
+        "invariant": "재시도에 같은 발급 키를 사용하며 미저장 계정을 추가로 만들지 않는다.",
+        "mayDiffer": "현재 main은 미저장 토큰을 조정 계층에 보관한다. 학습 Task는 Bootstrap 객체 내부에 보관하고 렌더러에는 존재 여부만 전달한다."
+      }
+    },
+    {
+      "title": "한 작업만 소유하는 Controller를 만든다",
+      "body": "Controller는 UI 스레드에서만 호출합니다. Worker는 unique_ptr로 소유하고, 진행 중인 작업은 future 하나로 소유합니다. `busy()`는 future가 아직 수집할 작업을 가지고 있는지를 검사합니다. 서버가 응답했더라도 poll이 결과를 가져오기 전까지는 busy입니다.\n\nrequest는 진행 중이거나 정책상 막힌 상태이면 false를 반환합니다. 허용되면 같은 Worker 주소를 캡처해 async를 시작하고, 표시를 busy로 바꾸며 이전 프로필을 숨깁니다. 작업을 시작하지 못한 예외는 failed 또는 unsaved로 바꾸고 호출자에게 false를 반환합니다.\n\n`std::launch::async`를 명시합니다. 기본 정책은 나중에 기다릴 때 실행하는 deferred도 허용합니다. 이 코드의 목표는 프레임 밖에서 서비스를 진행하는 것이므로 실행 정책을 구현 선택에 맡기지 않습니다. 값이나 예외는 future의 공유 상태에 전달됩니다. [C++ 초안의 async 계약](https://eel.is/c++draft/futures.async)을 함께 확인할 수 있습니다.\n\n여기서 raw 포인터는 소유권을 넘기지 않습니다. Worker의 소유자는 Controller입니다. 작업이 끝날 때까지 그 소유자가 살아 있다는 보장은 곧 살펴볼 멤버 파괴 순서에서 나옵니다.",
+      "codes": [
+        {
+          "label": "단일 작업 요청과 실행 정책",
+          "text": "    explicit Controller(std::unique_ptr<Worker> worker) : worker_(std::move(worker)) {\n        if (!worker_) throw std::invalid_argument(\"account worker required\");\n    }\n    Controller(const Controller&) = delete;\n    Controller& operator=(const Controller&) = delete;\n    const View& view() const { return view_; }\n    bool busy() const { return job_.valid(); }\n    bool request() {\n        if (busy() || !may_connect(view_)) return false;\n        try {\n            auto* worker = worker_.get();\n            job_ = std::async(std::launch::async, [worker] { return (*worker)(); });\n            view_.status = Status::busy;\n            view_.profile.reset();\n            return true;\n        } catch (const std::exception&) {\n            view_.status = view_.has_unsaved_key ? Status::unsaved : Status::failed;\n            view_.profile.reset();\n            return false;\n        }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "accountOp;",
+        "invariant": "진행 중인 작업의 핸들을 보관하고 중복 시작을 막는다.",
+        "mayDiffer": "현재 main은 상점·프로필 갱신 작업도 조정한다. 학습 Controller는 고정된 하나의 계정 서비스만 소유한다."
+      }
+    },
+    {
+      "title": "결과 수집은 프레임의 짧은 관찰로 끝낸다",
+      "body": "매 프레임 poll은 future가 있는지 확인하고, 대기 시간 0으로 준비 여부를 관찰합니다. 아직 결과가 없으면 false를 반환해 입력과 그리기를 이어 갑니다. ready일 때만 get을 호출해 결과를 한 번 소비합니다.\n\nvalid와 ready는 서로 다릅니다. valid는 공유 상태에 연결되어 있다는 뜻이고, ready는 결과를 얻을 수 있다는 뜻입니다. get을 호출한 뒤 future는 유효하지 않은 상태가 됩니다. 같은 결과에 다시 get을 호출하지 않도록 먼저 busy를 확인합니다. 예외 결과도 get에서 전달될 수 있으므로 이 경계를 처리합니다. [C++ 초안의 future 계약](https://eel.is/c++draft/futures.unique.future)에서 각 연산의 사전 조건을 확인할 수 있습니다.\n\n작업 중에는 UI가 Worker의 필드를 읽지 않고, Worker도 View를 쓰지 않습니다. 결과를 수집한 UI 스레드만 View를 바꿉니다. 두 스레드가 같은 상태를 동시에 읽고 쓰는 경로를 애초에 줄인 것입니다.\n\n대기 시간 0은 결과를 기다리는 시간을 요청하지 않는다는 뜻입니다. 함수 호출 비용이나 OS 스케줄링 지연이 0이라는 실시간 보장은 아닙니다. 프레임 안에서 파일과 HTTP의 완료를 기다리지 않는 경계로 이해하면 됩니다.",
+      "codes": [
+        {
+          "label": "준비된 결과만 한 번 수집",
+          "text": "    bool poll() {\n        if (!busy() || job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)\n            return false;\n        try {\n            const auto outcome = job_.get(); // consumes exactly once; publishes worker writes\n            view_ = outcome.result ? present(*outcome.result, outcome.has_unsaved_key)\n                                   : View{outcome.has_unsaved_key ? Status::unsaved : Status::failed,\n                                          outcome.has_unsaved_key, {}};\n        } catch (const std::exception&) {\n            view_.status = view_.has_unsaved_key ? Status::unsaved : Status::failed;\n            view_.profile.reset();\n        }\n        return true;\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "왜 mutex가 없는가",
+          "body": "하나의 Worker에 대한 작업은 겹치지 않고, UI는 Worker의 내부 상태를 관찰하지 않습니다. async의 완료 동기화를 거친 결과 값만 받습니다. 별도의 진행률 필드를 Worker가 쓰고 UI가 읽도록 추가한다면 그 필드에는 새로운 동기화 설계가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "객체 수명은 선언 순서까지 읽어야 한다",
+      "body": "Controller의 멤버는 worker_·view_·job_ 순서로 선언합니다. C++ 객체의 멤버는 역순으로 파괴되므로 job_이 먼저 정리됩니다. 이 async 작업의 마지막 future가 끝나지 않은 작업을 놓을 때는 작업 종료를 기다릴 수 있습니다. 따라서 Worker가 파괴되기 전에 그 Worker를 빌린 작업이 끝납니다.\n\n이 순서를 바꾸어 Worker부터 해제하면 작업의 포인터가 이미 사라진 객체를 가리킬 수 있습니다. 포인터를 shared_ptr로 바꾸는 대안도 있지만, 여기서는 한 Controller가 한 Worker를 소유하는 관계를 유지하고 파괴 순서로 수명을 보장합니다.\n\n프레임의 poll이 짧다는 사실과 프로그램 종료가 즉시 끝난다는 주장은 다릅니다. 종료 시에는 진행 중인 작업을 회수하므로 기다릴 수 있습니다. AccountHttp의 연결·읽기·쓰기 시간 제한은 각 통신 단계의 정책이며, 모든 파일 I/O와 종료 시간을 합친 절대 상한은 아닙니다.\n\n패널의 뒤로 버튼은 Controller를 파괴하지 않습니다. 패널을 닫을 때마다 future를 버리면 뒤로 가는 입력이 작업 종료를 기다리게 될 수 있으므로, 표시 여부만 바꿉니다.",
+      "codes": [
+        {
+          "label": "작업을 먼저 회수하는 멤버 순서",
+          "text": "private:\n    std::unique_ptr<Worker> worker_;\n    View view_;\n    // Destroyed FIRST: async future joins before worker_ and its secret session die.\n    // Destruction can block; the frame's poll uses only a zero-duration wait.\n    std::future<study_meta::AccountOutcome> job_;",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "취소 기능을 추가하려면",
+          "body": "표시를 닫는 것만으로 서버 요청이 취소되지는 않습니다. 취소 요청을 전달하고 서비스가 어느 단계에서 멈출 수 있는지 정의해야 합니다. 이미 서버에서 발급하거나 저장한 사실도 유지해야 합니다. 이 패널은 취소 API를 제공하지 않고 완료까지 수집합니다."
+        }
+      ]
+    },
+    {
+      "title": "늦게 온 결과를 어디에 적용할지 정한다",
+      "body": "계정 패널을 열고 연결을 누른 뒤 바로 뒤로 가 보세요. 응답은 뒤늦게 도착할 수 있습니다. 이 Controller는 서버·폴더가 고정되어 있으므로 결과는 여전히 같은 서비스에 속합니다. 패널이 닫혀 있어도 poll이 결과를 받아 View를 갱신하고, 다시 열면 그 상태를 보여 줍니다.\n\n이 정책에서는 단순히 패널을 닫았다는 이유로 결과를 버리지 않습니다. 발급 후 저장 실패 결과를 버리면 미저장 키가 있다는 안내도 놓칠 수 있기 때문입니다. 반대로 패널을 닫았다가 다시 열 때 Controller를 새로 만들지도 않습니다.\n\n계정이나 서버를 바꿀 수 있는 화면에서는 더 강한 구분이 필요합니다. 예를 들어 서버 A의 조회를 시작한 뒤 화면을 서버 B로 바꾸었다면, A의 결과를 B의 표시값으로 적용해서는 안 됩니다. 요청에 문맥 식별자나 세대 번호를 붙여 결과의 목적지를 확인하는 방식이 가능합니다. 이 산출물은 실행 중 목적지를 바꾸지 않는 제약으로 그 혼선을 막습니다.\n\n표시 여부는 바뀌어도 서비스의 정체성은 유지한다는 것이 핵심입니다. 계정 상태를 즉시 게임 규칙이나 보상 판정으로 연결하지 않고 공개 프로필을 표시용 값으로 보관합니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "if (app == AppMode::Account)",
+        "invariant": "현재 인증 문맥에 속한 결과만 적용하고 오래된 조회 결과로 덮지 않는다.",
+        "mayDiffer": "현재 코드는 계정 작업 전에 진행 중인 상점·조회 결과를 수집한다. 학습 코드는 계정 변경 기능 없이 서버와 폴더를 고정한다."
+      }
+    },
+    {
+      "title": "입력·서비스 요청·그리기의 경계를 연결한다",
+      "body": "메뉴에는 네 번째 Focus와 account Action을 추가합니다. Account action은 설정값을 바꾸지 않습니다. 설정 저장 함수는 변경이 없음을 반환하고, main이 패널 표시 여부를 켭니다. 계정 버튼을 추가하려고 규칙의 Application에 파일이나 HTTP를 넣지 않습니다.\n\n패널의 evaluate는 connect·back·none 중 하나를 반환합니다. 취소된 입력은 무시하고, Escape는 back으로 해석합니다. 포인터가 버튼을 눌렀으면 그 프레임의 Space가 다른 동작으로 흘러가지 않게 소비합니다. connect는 허용 상태에서만 발생하지만 back은 처리 중에도 가능합니다.\n\nmain은 패널의 입력을 처리한 뒤 confirm과 back을 false로 만듭니다. 같은 Escape가 패널을 닫고 앱도 종료하거나, 같은 Space가 계정을 연결하고 게임도 시작하는 입력 누수를 막습니다. 그래픽스·시뮬레이션·계정 작업의 시간이 서로 다른데도 입력 한 번이 여러 경계를 통과하는 오류는 이런 조정 지점에서 생깁니다.",
+      "codes": [
+        {
+          "label": "패널 입력을 의도로 변환",
+          "text": "enum class Action { none, connect, back };\ninline constexpr study_ui::Rect connect_bounds{110,132,180,28};\ninline constexpr study_ui::Rect back_bounds{110,176,180,28};\ninline Action evaluate(const View& view, const study_ui::Input& input,\n                       bool confirm, bool back, bool cancelled) {\n    if (cancelled) return Action::none;\n    if (back) return Action::back;\n    if (!input.cancelled && input.press) {\n        if (study_ui::contains(back_bounds,*input.press)) return Action::back;\n        if (study_ui::contains(connect_bounds,*input.press))\n            return may_connect(view) ? Action::connect : Action::none;\n        return Action::none; // A pointer press consumes this frame's confirm edge.\n    }\n    return confirm && may_connect(view) ? Action::connect : Action::none;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "프레임마다 결과 수집, 패널 입력은 한 번 소비",
+          "text": "        (void)account.poll(); // Collect even while the panel is hidden or a round is playing.\n        bool confirm=platform_key_pressed(Key::Space);\n        bool back=platform_key_pressed(Key::Escape);\n        if (app.screen()==study_app::Screen::menu && account_open) {\n            const auto action=study_account_ui::evaluate(account.view(),pointer,confirm,back,\n                                                          platform_input_cancelled());\n            if (action==study_account_ui::Action::connect) (void)account.request();\n            if (action==study_account_ui::Action::back) account_open=false;\n            confirm=false;back=false; // Panel edges never start play or quit the application.\n        } else if (app.screen()==study_app::Screen::menu) {",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "그리기는 이미 결정된 표시값을 읽는다",
+      "body": "Account 패널은 문자열을 고르는 status_label과 실제 draw를 분리합니다. 연결 중에는 처리 중 문구, 키 저장 실패에는 저장 필요 문구와 종료 위험 안내를 함께 보여 줍니다. 신규 발급 결과가 미확인인 상태는 버튼 색뿐 아니라 문구로도 구분합니다.\n\ndraw에는 const View를 전달합니다. 포인터의 현재 위치는 hover 표현에 사용하지만 press는 비워 둡니다. 입력 평가에서 시작한 작업을 그리기 도중 다시 시작하지 않기 위해서입니다. 같은 View를 두 번 그려도 계정 발급이나 파일 저장 횟수는 늘지 않습니다.\n\n정적 문구는 menu_labels에 추가해 공용 글리프 캐시와 아틀라스를 재사용합니다. 창의 픽셀 밀도가 바뀌면 다른 메뉴 글자와 함께 준비 상태를 다시 만듭니다. 매 프레임 HTTP 결과를 문자열로 만들고 새 텍스처를 올리는 방식으로 연결하지 않습니다.\n\n이 패널은 상태를 표시하며 프로필 숫자를 나열하지 않습니다. View가 가진 공개 프로필과 키가 보관된 서비스의 책임을 나누어 두면, 표시 항목을 늘릴 때도 인증 절차를 그리기 함수로 옮길 필요가 없습니다.",
+      "codes": [
+        {
+          "label": "상태에서 문구로 대응",
+          "text": "inline study_menu_render::Label status_label(study_account_ui::Status status) {\n    using S=study_account_ui::Status;using L=study_menu_render::Label;\n    switch(status) {\n    case S::idle:return L::idle;\n    case S::busy:return L::busy;\n    case S::online:return L::online;\n    case S::offline_saved:return L::offline;\n    case S::unsaved:return L::unsaved;\n    case S::storage_blocked:return L::blocked;\n    case S::key_rejected:return L::rejected;\n    case S::creation_unconfirmed:return L::uncertain;\n    default:return L::failed;\n    }\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "읽기 전용 draw의 인터페이스와 입력 정리",
+          "text": "inline bool draw(const study_account_ui::View& view, study_ui::Input pointer,\n                 const study_menu_render::Labels& labels, study_image::ImageStore& images,\n                 study_image::Handle white, study_rounded::RoundedQuad& rounded,\n                 study_image_quad::ImageQuad& text) {\n    using namespace study_account_ui;using L=study_menu_render::Label;\n    pointer.press.reset();",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "src/account_screen.cpp",
+        "symbol": "std::string AccountScreen::draw",
+        "invariant": "표시 문구·버튼 동작을 관리하되 HTTP와 파일 저장은 서비스에 맡긴다.",
+        "mayDiffer": "현재 화면은 gui_button을 사용해 draw에서 action을 반환한다. 학습 화면은 순수 evaluate와 read-only draw로 경계를 더 작게 나눈다."
+      }
+    },
+    {
+      "title": "빠르다는 느낌 대신 실패 순서를 검사한다",
+      "body": "작업자에 Gate를 넣어 결과를 일부러 멈춥니다. 작업이 들어왔음을 확인한 뒤 UI 역할의 코드가 poll과 request를 만 번 호출합니다. poll은 기다리지 않고 false를 반환해야 하고, request는 중복 작업을 시작하지 않아야 합니다. 작업자 호출 수는 1이어야 합니다.\n\nGate를 열면 결과를 한 번 수집하고 online으로 바뀝니다. 다시 poll해도 같은 결과를 중복 소비하지 않습니다. 정상 결과뿐 아니라 작업 예외, 발급 결과 미확인, 미저장 키의 재시도도 각각 검사합니다.\n\n저장 실패 실험에서는 첫 작업이 한 번 발급하고 저장에 실패하도록 합니다. 두 번째 작업은 쓰기를 허용합니다. 발급 횟수 1, 저장 시도 2, 인증 1이라는 관찰이 나와야 같은 세션을 유지했다는 설명과 맞습니다.\n\n실제 API를 사용하는 probe도 둡니다. 응답을 늦추는 테스트 서버에서는 대기 중 frames가 증가하고 발급은 한 번이어야 합니다. 실제 SQLite 계정 서버에서는 프로그램을 다시 실행해도 저장한 계정으로 인증해야 합니다. 이 검사는 제어 흐름·저장·통신을 다루며 화면이 그려졌다는 증거로 대신 사용하지 않습니다.",
+      "codes": [
+        {
+          "label": "대기 중에도 진행되는 프레임 역할 검사",
+          "text": "        CHECK(controller.request());state.gate.wait_entered();\n        int frames=0;\n        for(;frames<10000;++frames){CHECK(!controller.poll());CHECK(!controller.request());CHECK(controller.busy());}\n        CHECK(frames==10000&&state.calls==1);\n        CHECK(controller.view().status==Status::busy&&!controller.view().profile);",
+          "language": "cpp"
+        },
+        {
+          "label": "같은 세션의 키 재저장 검사",
+          "text": "    Store store;Api api;\n    {Controller<SessionWorker> c(std::make_unique<SessionWorker>(store,api));\n     CHECK(c.request());finish(c);CHECK(c.view().status==Status::unsaved&&c.view().has_unsaved_key);\n     CHECK(api.issues==1&&api.verifies==0&&store.saves==1);\n     store.writable=true;CHECK(c.request());finish(c);\n     CHECK(c.view().status==Status::online&&!c.view().has_unsaved_key);\n     CHECK(api.issues==1&&api.verifies==1&&store.saves==2);}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "Gate와 조건 변수",
+          "body": "Gate는 테스트의 대기 문입니다. mutex로 entered·release 플래그를 보호하고, 조건 변수로 release가 참이 될 때까지 작업자를 기다리게 합니다. 조건 변수의 대기는 mutex를 놓고 잠들며 깨어나면 다시 잠금을 얻어 조건을 검사합니다. UI 역할의 스레드는 그 잠금을 보유한 채 poll하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "같은 게임 메뉴에서 연결과 재시도를 실행한다",
+      "body": "저장소 루트에서 아래 명령을 실행합니다. C++17·CMake·SDL2·OpenSSL 개발 패키지가 필요합니다. 서버는 첫 터미널에서 실행하고, 두 번째 터미널에서 tetris를 실행합니다. 실행 파일이 assets 폴더의 글꼴을 읽으므로 저장소 루트를 작업 디렉터리로 둡니다.\n\n메뉴의 계정 버튼을 누르거나 Down으로 계정을 선택한 뒤 Space를 누릅니다. 연결 버튼은 클릭 또는 Space, 뒤로는 클릭 또는 Escape입니다. 연결 중 뒤로 갔다가 다시 열어도 현재 상태를 확인할 수 있습니다. 계정 연결 없이 시작 버튼으로 로컬 게임을 실행할 수도 있습니다.\n\n`--account PORT FOLDER`는 모든 기존 옵션 뒤에 붙입니다. 생략하면 loopback 18080과 study-account 폴더를 사용합니다. 서버 포트가 바뀌면 저장 키의 origin도 달라지므로 별도의 계정 폴더를 사용합니다. 의도적으로 다른 서버의 파일을 덮어쓰지 않습니다.\n\n헤드리스 환경은 SCRIPTED로 구성하고 tetris 대신 account_ui_probe·account_ui_contract를 빌드합니다. probe는 같은 Controller를 통과한 결과를 출력하며, UI에서 표시할 수 있는 값만 기록합니다. Controller가 폴더 잠금을 유지하므로 같은 폴더의 probe와 게임은 동시에 계정 작업을 할 수 없습니다.",
+      "codes": [
+        {
+          "label": "첫 터미널 — 빌드와 계정 서버",
+          "text": "cmake -S docs/learn/checkpoints/122-account-screen -B out/study-122 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-122 --target tetris study_account_db account_ui_probe account_ui_contract -j2\nctest --test-dir out/study-122 -R '^account_ui_contract$' --output-on-failure\nout/study-122/study_account_db 18080 out/study-122/accounts.db",
+          "language": "sh"
+        },
+        {
+          "label": "두 번째 터미널 — 메뉴에서 연결",
+          "text": "out/study-122/tetris --account 18080 out/study-122/my-account\n# 게임 종료 후 같은 폴더의 계정으로 확인\nout/study-122/account_ui_probe 18080 out/study-122/my-account\npython3 scripts/check_learning_account_screen.py",
+          "language": "sh"
+        },
+        {
+          "label": "게임과 검사용 도구에 같은 서비스 의존성 연결",
+          "text": "# Frame loop and service task share values, not GL handles or account secrets.\nif(TARGET tetris)\n    target_link_libraries(tetris PRIVATE study_bootstrap)\nendif()\nadd_executable(account_ui_contract tests/account_ui_contract.cpp)\ntarget_link_libraries(account_ui_contract PRIVATE study_bootstrap)\nadd_test(NAME account_ui_contract COMMAND account_ui_contract)\nset_tests_properties(account_ui_contract PROPERTIES TIMEOUT 25)\nadd_executable(account_ui_probe tools/account_ui_probe.cpp)\ntarget_link_libraries(account_ui_probe PRIVATE study_bootstrap)",
+          "language": "cmake"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "미저장 키와 종료",
+          "body": "미저장 키는 이 프로세스의 AccountBootstrap에 남아 있습니다. 저장 실패 경고가 있으면 프로세스를 유지하고 원인을 해결한 뒤 재시도해야 합니다. 창 닫기나 프로세스 종료로 메모리 키를 잃을 수 있으며, 이 패널은 미저장 키를 별도 복구 저널에 기록하지 않습니다."
+        },
+        {
+          "kind": "scope",
+          "title": "빌드 경로와 통신 범위",
+          "body": "다중 구성 생성기는 --config Release와 CTest -C Release, 실행 경로를 맞춥니다. 체크포인트를 저장소 밖에 복사하면 STUDY_VENDOR_DIR를 지정합니다. 학습 API는 127.0.0.1 전용이며 공개 운영 서버용 TLS·배포 설정을 이 메뉴 옵션으로 대신하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "소유권과 부작용을 따라 코드를 읽는다",
+      "body": "파일을 읽는 순서는 View → AccountTask → Controller → 패널 입력 → main 연결 → draw입니다. View는 표시값, Task는 비밀과 서비스 상태, Controller는 작업 수명, main은 한 프레임의 순서, renderer는 표현을 담당합니다.\n\n계정 연결의 알고리즘은 AccountBootstrap에 남아 있으므로 UI를 바꿔도 파일 부재·손상·발급 불확실성·같은 키 재시도 정책을 다시 쓰지 않습니다. Worker를 템플릿 매개변수로 받은 이유도 이 알고리즘을 여러 개 만들기 위해서가 아니라, 대기와 실패를 제어하는 테스트 작업자를 넣을 경계를 만들기 위해서입니다.\n\n기준 코드가 유지할 계약은 한 서비스의 정체성, 중복 실행 금지, 작업보다 긴 소유자 수명, 미저장 키 보존, 공개 표시값과 비밀의 분리입니다. 문구·버튼 위치·표시할 프로필 필드는 바뀔 수 있습니다. 서버 전환·계정 교체·취소를 도입하면 결과의 문맥과 미완료 작업을 처리하는 계약도 함께 확장해야 합니다.",
+      "codes": [
+        {
+          "label": "완성 파일 — 표시 값",
+          "language": "cpp",
+          "file": "checkpoints/122-account-screen/client/account_view.h",
+          "collapsed": true
+        },
+        {
+          "label": "완성 파일 — 작업 소유자",
+          "language": "cpp",
+          "file": "checkpoints/122-account-screen/client/account_controller.h",
+          "collapsed": true
+        },
+        {
+          "label": "완성 파일 — 서비스 세션",
+          "language": "cpp",
+          "file": "checkpoints/122-account-screen/meta/account_task.h",
+          "collapsed": true
+        },
+        {
+          "label": "완성 파일 — 실제 메뉴와 프레임 연결",
+          "language": "cpp",
+          "file": "checkpoints/122-account-screen/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "122-1",
+      "question": "연결 요청을 시작한 직후 future가 valid입니다. 다음 프레임에서 어떤 처리가 맞을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "즉시 get으로 결과를 기다린다."
+        },
+        {
+          "id": "b",
+          "text": "준비 여부를 확인한 뒤 ready일 때 get한다."
+        },
+        {
+          "id": "c",
+          "text": "valid이면 연결 성공을 표시한다."
+        },
+        {
+          "id": "d",
+          "text": "결과가 늦으면 새 future로 덮는다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "준비 여부를 확인한 뒤 ready일 때 get한다.",
+      "explanation": "valid는 수집할 공유 상태가 있다는 뜻입니다. ready인 경우에만 get해야 프레임이 서비스 완료를 기다리지 않습니다. 수집 전 future를 덮으면 작업을 중복 시작하거나 이전 작업 정리에서 기다릴 수 있습니다."
+    },
+    {
+      "id": "122-2",
+      "question": "발급한 키의 파일 저장이 실패한 뒤 같은 프로세스에서 다시 시도합니다. 유지해야 할 객체는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "버튼을 그린 프레임의 포인터 좌표"
+        },
+        {
+          "id": "b",
+          "text": "실패 문구를 담은 임시 텍스처"
+        },
+        {
+          "id": "c",
+          "text": "매번 새로 만든 AccountBootstrap"
+        },
+        {
+          "id": "d",
+          "text": "발급 키를 보관한 동일한 AccountTask"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "발급 키를 보관한 동일한 AccountTask",
+      "explanation": "동일 Task의 Bootstrap은 pending 키와 발급 시도 여부를 보존합니다. 새 Bootstrap을 만들면 파일이 없는 상태를 보고 다른 계정을 발급할 수 있습니다. 화면의 경고 문구만 유지하는 것으로는 키가 보존되지 않습니다."
+    },
+    {
+      "id": "122-3",
+      "question": "서버·폴더가 고정된 Controller에서 연결 중 패널만 닫았습니다. 늦은 결과는 어떻게 처리할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Controller가 계속 수집해 같은 계정의 View에 반영한다."
+        },
+        {
+          "id": "b",
+          "text": "패널이 닫혔으므로 서비스와 키를 즉시 삭제한다."
+        },
+        {
+          "id": "c",
+          "text": "서버 요청이 취소된 것으로 간주한다."
+        },
+        {
+          "id": "d",
+          "text": "다시 열 때 신규 계정을 발급해서 대체한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "Controller가 계속 수집해 같은 계정의 View에 반영한다.",
+      "explanation": "표시 여부와 서비스 정체성을 분리합니다. 패널이 닫혀도 Controller는 살아 있고 매 프레임 결과를 수집합니다. 미저장 키 안내도 유지됩니다. 서버나 계정까지 바꾸는 기능이라면 추가 문맥 검사가 필요합니다."
+    },
+    {
+      "id": "122-4",
+      "question": "멤버가 worker_, view_, job_ 순서로 선언되어 있습니다. 이 순서를 선택한 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "worker_가 먼저 파괴되어 스레드를 강제 중단한다."
+        },
+        {
+          "id": "b",
+          "text": "future는 순서와 무관하게 항상 즉시 파괴된다."
+        },
+        {
+          "id": "c",
+          "text": "job_을 먼저 정리해 작업 종료 후 worker_를 해제한다."
+        },
+        {
+          "id": "d",
+          "text": "view_를 worker_와 동시에 쓰기 위해서다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "job_을 먼저 정리해 작업 종료 후 worker_를 해제한다.",
+      "explanation": "멤버는 선언의 역순으로 파괴됩니다. async future의 정리가 진행 중 작업을 회수한 다음 Worker가 파괴되므로 빌린 포인터의 수명이 유지됩니다. 종료 시 기다릴 수 있다는 성질도 함께 받아들인 설계입니다."
+    },
+    {
+      "id": "122-5",
+      "question": "패널의 뒤로 버튼에 대응하는 Escape를 처리했습니다. main이 이어서 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 Escape로 게임 앱도 종료한다."
+        },
+        {
+          "id": "b",
+          "text": "이번 프레임의 back을 소비해 다른 화면으로 넘기지 않는다."
+        },
+        {
+          "id": "c",
+          "text": "서비스 결과를 성공으로 바꾼다."
+        },
+        {
+          "id": "d",
+          "text": "future를 지워 요청을 취소한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "이번 프레임의 back을 소비해 다른 화면으로 넘기지 않는다.",
+      "explanation": "입력 한 번의 의미를 현재 패널에서 소비합니다. back을 그대로 Application에 넘기면 패널 닫기와 앱 종료가 동시에 일어날 수 있습니다. 서비스는 패널 표시와 독립적으로 계속 수집합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "Controller·Worker·View의 소유자와 읽고 쓰는 스레드를 그림으로 표시합니다.",
+      "메뉴에서 계정 연결을 요청하고 처리 중 뒤로 갔다가 다시 열어 봅니다.",
+      "Gate 검사에서 중복 request와 poll의 반환, 작업자 호출 수를 예측합니다.",
+      "첫 저장 실패 후 같은 Task로 재시도해 발급 1회·저장 2회·인증 1회를 확인합니다.",
+      "게임 종료 뒤 같은 계정 폴더로 다시 실행해 저장된 계정으로 인증합니다."
+    ],
+    "failureChecks": [
+      "valid를 온라인 성공이나 ready와 동일하게 해석하지 않습니다.",
+      "렌더러에서 파일·HTTP·계정 생성 함수를 호출하지 않습니다.",
+      "패널 닫기를 작업 취소 또는 계정 변경으로 취급하지 않습니다.",
+      "미저장 키가 있을 때 Task나 Bootstrap을 재생성하지 않습니다.",
+      "작업보다 먼저 그 작업이 빌린 객체를 해제하지 않습니다."
+    ],
+    "expected": "메뉴에 계정 상태를 표시하면서 프레임 진행과 서비스 수명을 분리하고, 실패 후에도 같은 계정으로 재시도할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 상태/버튼 표 초안 직접 검수·C++ future 계약 대조·실제 API와 실패 순서 검사",
+    "draftJob": "out/learning-jobs/122-view-events.jsonl",
+    "corrections": [
+      "mutable 값형식을 불변객체로 부르던주석을const노출snapshot으로교정",
+      "현재화면busy문구와버튼병렬배열/위치의존제거",
+      "계정저장소의협력잠금을Task수명동안유지",
+      "메뉴항목추가에맞춰기존키보드기대표확장"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 계정 UI·부트스트랩·보관함 CTest와 SDL 누적 게임 빌드",
+    "지연 API에서 프레임 진행·1회 발급·파일 권한·실제 SQLite 계정 재시작 인증",
+    "Gate 기반 중복 요청·ready-only 수집·동일 세션 키 재시도·미확인 발급 중단·작업 회수 수명",
+    "기존 메뉴 네 항목 회귀·상태/입력 정책·ASan/UBSan; 루트 게임 계정 화면 재빌드",
+    "수동 화면·실제 전원차단·Windows/macOS 네이티브 실행 검증 없음; 공개1~55 배포 변경 없음"
+  ]
+}

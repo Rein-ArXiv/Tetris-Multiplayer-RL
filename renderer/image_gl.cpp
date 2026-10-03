@@ -1,8 +1,7 @@
 // renderer/image_gl.cpp — 이미지 디코딩 + GPU 텍스처
 //
-// 디코딩은 여전히 CPU 가 한다. PNG/JPG 를 푸는 일은 GPU 가 할 수 있는 종류의
-// 작업이 아니고, 어차피 로드 시점에 한 번뿐이다. 바뀐 것은 결과를 어디에
-// 두느냐다 — 시스템 RAM 의 픽셀 배열 대신 GL 텍스처로 올린다.
+// 이 구현은 PNG/JPG 를 CPU 에서 RGBA 픽셀로 디코딩한 뒤 GL 텍스처로 올린다.
+// 파일 형식 해석과 GPU 저장소 업로드를 분리하며, 렌더링에는 업로드한 자원을 쓴다.
 //
 // 그리기는 셋 다 사각형 하나로 끝난다.
 //   draw_image        — 텍스처를 목적지 크기로 늘려 그린다 (샘플러가 확대)
@@ -14,6 +13,13 @@
 
 #include "image.h"
 #include "gl_internal.h"
+#include "texture_upload.h"
+#include "image_rows.h"
+#include "handle_pool.h"
+#include <memory>
+#include <limits>
+#include <new>
+#include <stdexcept>
 
 #include <algorithm>
 #include <cmath>
@@ -37,97 +43,107 @@
 #endif
 
 struct ImageEntry {
-    bool   used = false;
     int    w = 0;
     int    h = 0;
     GLuint tex = 0;
 };
 
-static std::vector<ImageEntry> s_images;
+static image_detail::HandlePool<ImageEntry> s_images;
 
 #if defined(_WIN32)
 static ULONG_PTR s_gdiplus_token = 0;
 static bool s_gdiplus_initialized = false;
 #endif
 
+#if defined(_WIN32)
+// LockBits lends a temporary pixel buffer. Release it on every exit path.
+struct BitmapReadLock {
+    Gdiplus::Bitmap& bitmap;
+    Gdiplus::BitmapData data{};
+    bool active=false;
+    explicit BitmapReadLock(Gdiplus::Bitmap& value) noexcept : bitmap(value) {}
+    ~BitmapReadLock() { if(active) bitmap.UnlockBits(&data); }
+    BitmapReadLock(const BitmapReadLock&)=delete;
+    BitmapReadLock& operator=(const BitmapReadLock&)=delete;
+    bool close() noexcept {
+        if(!active) return true;
+        active=false;
+        return bitmap.UnlockBits(&data)==Gdiplus::Ok;
+    }
+};
+#endif
+
 static bool decode_image(const char* path, std::vector<uint8_t>& rgba,
                          int& width, int& height)
 {
+    if(!path || !*path) return false;
+    try {
+        int w=0,h=0;
+        std::vector<uint8_t> result;
 #if defined(_WIN32)
-    if (!s_gdiplus_initialized) {
-        Gdiplus::GdiplusStartupInput input;
-        if (Gdiplus::GdiplusStartup(&s_gdiplus_token, &input, nullptr) !=
-            Gdiplus::Ok) {
-            std::fprintf(stderr, "[image] GDI+ startup failed\n");
+        if (!s_gdiplus_initialized) {
+            Gdiplus::GdiplusStartupInput input;
+            if (Gdiplus::GdiplusStartup(&s_gdiplus_token, &input, nullptr)!=Gdiplus::Ok)
+                return false;
+            s_gdiplus_initialized=true;
+        }
+        const int wide_count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,nullptr,0);
+        if(wide_count<=0) return false;
+        std::wstring wide(static_cast<size_t>(wide_count),L'\0');
+        if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,wide.data(),wide_count)!=wide_count)
+            return false;
+        Gdiplus::Bitmap bitmap(wide.c_str());
+        if(bitmap.GetLastStatus()!=Gdiplus::Ok) return false;
+        const auto bw=bitmap.GetWidth(),bh=bitmap.GetHeight();
+        const auto max_int=static_cast<UINT>((std::numeric_limits<int>::max)());
+        if(bw>max_int || bh>max_int) return false;
+        w=static_cast<int>(bw);h=static_cast<int>(bh);
+        const auto bytes=image_detail::rgba_storage_bytes(w,h);
+        if(!bytes) return false;
+        result.resize(*bytes); // Allocate before acquiring the temporary lock.
+        BitmapReadLock lock(bitmap);
+        Gdiplus::Rect rect(0,0,w,h);
+        if(bitmap.LockBits(&rect,Gdiplus::ImageLockModeRead,PixelFormat32bppARGB,&lock.data)!=Gdiplus::Ok)
+            return false;
+        lock.active=true;
+        if(!image_detail::copy_bgra_rows(static_cast<const uint8_t*>(lock.data.Scan0),
+                lock.data.Stride,w,h,result.data(),result.size())) return false;
+        if(!lock.close()) return false;
+#else
+        int channels=0;
+        using Pixels=std::unique_ptr<unsigned char,decltype(&stbi_image_free)>;
+        Pixels decoded(stbi_load(path,&w,&h,&channels,4),stbi_image_free);
+        if(!decoded) {
+            const char* reason=stbi_failure_reason();
+            std::fprintf(stderr,"[image] load failed: %s (%s)\n",path,reason?reason:"unknown");
             return false;
         }
-        s_gdiplus_initialized = true;
-    }
-    const int wide_count = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (wide_count <= 0) return false;
-    std::wstring wide((size_t)wide_count, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide.data(), wide_count);
-
-    Gdiplus::Bitmap bitmap(wide.c_str());
-    if (bitmap.GetLastStatus() != Gdiplus::Ok) {
-        std::fprintf(stderr, "[image] load failed: %s\n", path);
-        return false;
-    }
-    width = (int)bitmap.GetWidth();
-    height = (int)bitmap.GetHeight();
-    if (width <= 0 || height <= 0) return false;
-
-    Gdiplus::BitmapData data{};
-    Gdiplus::Rect rect(0, 0, width, height);
-    if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead,
-                        PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
-        std::fprintf(stderr, "[image] pixel lock failed: %s\n", path);
-        return false;
-    }
-    rgba.resize((size_t)width * (size_t)height * 4);
-    const uint8_t* base = static_cast<const uint8_t*>(data.Scan0);
-    for (int y = 0; y < height; ++y) {
-        const uint8_t* src = base + (ptrdiff_t)y * data.Stride;
-        uint8_t* dst = rgba.data() + (size_t)y * (size_t)width * 4;
-        for (int x = 0; x < width; ++x) {
-            dst[x * 4 + 0] = src[x * 4 + 2];
-            dst[x * 4 + 1] = src[x * 4 + 1];
-            dst[x * 4 + 2] = src[x * 4 + 0];
-            dst[x * 4 + 3] = src[x * 4 + 3];
-        }
-    }
-    bitmap.UnlockBits(&data);
-    return true;
-#else
-    int channels = 0;
-    unsigned char* decoded = stbi_load(path, &width, &height, &channels, 4);
-    if (!decoded) {
-        std::fprintf(stderr, "[image] load failed: %s (%s)\n",
-                     path, stbi_failure_reason());
-        return false;
-    }
-    if (width <= 0 || height <= 0) {
-        stbi_image_free(decoded);
-        return false;
-    }
-    rgba.assign(decoded, decoded + (size_t)width * (size_t)height * 4);
-    stbi_image_free(decoded);
-    return true;
+        const auto bytes=image_detail::rgba_storage_bytes(w,h);
+        if(!bytes) return false;
+        result.assign(decoded.get(),decoded.get()+*bytes);
 #endif
+        rgba.swap(result);
+        width=w;height=h;
+        return true;
+    } catch(const std::bad_alloc&) { return false; }
+      catch(const std::length_error&) { return false; }
 }
 
 void image_init()
 {
-    if (s_images.empty()) s_images.resize(1); // 핸들 0 은 무효값으로 예약
+    // Slots are allocated lazily. Issued stamps survive shutdown/reinitialization.
 }
 
 void image_shutdown()
 {
     // 텍스처를 먼저 지운다. 컨텍스트가 살아 있을 때만 유효한 호출이라
     // renderer_shutdown 이 platform_shutdown 보다 앞서야 한다.
-    for (auto& e : s_images) {
-        if (e.tex) gl_DeleteTextures(1, &e.tex);
-    }
+    s_images.for_each([](ImageEntry& e) {
+        if (e.tex) {
+            glb_before_texture_delete(e.tex);
+            gl_DeleteTextures(1, &e.tex);
+        }
+    });
     s_images.clear();
 #if defined(_WIN32)
     if (s_gdiplus_initialized) {
@@ -141,38 +157,18 @@ void image_shutdown()
 ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
 {
     if (!rgba || width <= 0 || height <= 0) return 0;
-
-    // 슬롯 0 은 "무효 핸들" 로 예약돼 있다. image_shutdown 이 벡터를 비운 뒤
-    // 여기로 들어오면 push_back 결과가 인덱스 0 이 되어, 호출자에게는 실패로
-    // 보이는데 텍스처는 이미 만들어진 상태로 새어 나간다. image_init 은
-    // 멱등이므로 여기서 한 번 더 불러 그 경로를 막는다.
-    image_init();
-
-    ImageEntry entry;
-    entry.used = true;
-    entry.w = width;
-    entry.h = height;
-
-    gl_GenTextures(1, &entry.tex);
-    gl_BindTexture(GL_TEXTURE_2D, entry.tex);
-    gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
-                  GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    // 아이콘이 픽셀아트라 확대할 때 NEAREST 로 경계를 살린다. 부드러운
-    // 확대가 필요하면 이 두 줄을 GL_LINEAR 로 바꾸면 된다.
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    for (size_t i = 1; i < s_images.size(); ++i) {
-        if (!s_images[i].used) {
-            s_images[i] = entry;
-            return (ImageHandle)i;
-        }
-    }
-    s_images.push_back(entry);
-    return (ImageHandle)(s_images.size() - 1);
+    std::unique_ptr<ImageEntry> entry;
+    try {
+        entry=std::make_unique<ImageEntry>();
+    } catch(const std::bad_alloc&) { return 0; }
+    const GLuint tex=image_detail::upload_rgba8(rgba,width,height);
+    if(!tex) return 0;
+    entry->w=width;entry->h=height;entry->tex=tex;
+    const ImageHandle handle=s_images.insert(std::move(entry));
+    // Pool insertion consumes entry on every path. A failed registration still
+    // leaves us responsible for the GL object, which has never been queued.
+    if(!handle) gl_DeleteTextures(1,&tex);
+    return handle;
 }
 
 ImageHandle image_load(const char* path)
@@ -187,27 +183,29 @@ ImageHandle image_load(const char* path)
 
 void image_unload(ImageHandle handle)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
-    ImageEntry& e = s_images[(size_t)handle];
-    if (e.tex) gl_DeleteTextures(1, &e.tex);
-    e = {};
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry) return;
+    if(entry->tex) {
+        glb_before_texture_delete(entry->tex);
+        gl_DeleteTextures(1,&entry->tex);
+    }
+    s_images.erase(handle);
 }
 
 bool image_size(ImageHandle handle, int& width, int& height)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size() ||
-        !s_images[(size_t)handle].used) return false;
-    width = s_images[(size_t)handle].w;
-    height = s_images[(size_t)handle].h;
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry) return false;
+    width=entry->w;height=entry->h;
     return true;
 }
 
 void draw_image_tinted(ImageHandle handle, int x, int y, int width, int height,
                        Color tint)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
-    const ImageEntry& e = s_images[(size_t)handle];
-    if (!e.used || width <= 0 || height <= 0) return;
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry || width <= 0 || height <= 0) return;
+    const ImageEntry& e=*entry;
 
     glb_rect(e.tex, (float)x, (float)y, (float)width, (float)height,
              0.0f, 0.0f, 1.0f, 1.0f, tint, 0.0f, 0.0f);
@@ -221,16 +219,19 @@ void draw_image(ImageHandle handle, int x, int y, int width, int height)
 void draw_image_rotated(ImageHandle handle, int cx, int cy, int width, int height,
                         float clockwise_degrees)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
-    const ImageEntry& e = s_images[(size_t)handle];
-    if (!e.used || width <= 0 || height <= 0) return;
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry || width <= 0 || height <= 0 || !std::isfinite(clockwise_degrees)) return;
+    const ImageEntry& e=*entry;
 
     // 화면 좌표는 y 가 아래로 증가하므로 양의 각도가 시계 방향이 되도록
     // 부호를 맞춘다. CPU 구현이 목적지에서 원본으로 역변환했던 것과 달리,
     // 여기서는 네 꼭짓점만 정변환하면 그 사이는 래스터라이저가 채운다.
-    const float rad = clockwise_degrees * 3.14159265358979323846f / 180.0f;
-    const float cs = std::cos(rad);
-    const float sn = std::sin(rad);
+    // Reduce before multiplying: even a finite float angle can overflow the
+    // old float degree-to-radian product. NaN/Inf are rejected before queuing.
+    const double degrees=std::remainder(static_cast<double>(clockwise_degrees),360.0);
+    const double rad=degrees*(3.14159265358979323846/180.0);
+    const float cs=static_cast<float>(std::cos(rad));
+    const float sn=static_cast<float>(std::sin(rad));
     const float hw = (float)width  * 0.5f;
     const float hh = (float)height * 0.5f;
 

@@ -6,12 +6,19 @@
 //
 // 왜 직접 선언하는가: Windows 의 opengl32.dll 은 GL 1.1 까지만 export 한다.
 // 3.3 의 셰이더·VAO·VBO 함수는 링커가 찾을 수 없고, 런타임에 드라이버에서
-// 주소를 받아야 한다. Linux/macOS 는 libGL 에 심볼이 있지만 플랫폼마다
-// 다른 코드를 쓰지 않으려고 세 곳 모두 같은 조회 경로를 탄다.
+// 주소를 받아야 한다. 다른 플랫폼의 직접 링크 가능 심볼도 런타임에 따라
+// 다르므로 세 곳 모두 플랫폼 조회 경로를 사용한다.
 //
 // glad/GLEW 를 쓰지 않는 이유는 의존성 하나를 아끼려는 것이 아니라,
 // "GL 함수가 어디서 오는가" 가 이 프로젝트에서 감출 이유가 없는 지식이기
 // 때문이다. 필요한 함수가 40개 남짓이라 직접 들고 있어도 부담이 없다.
+
+// 호출 규약을 보존한다. 32비트 Windows 에서 규약이 틀리면 스택이 깨진다.
+#if defined(_WIN32)
+#define TETRIS_GL_APIENTRY __stdcall
+#else
+#define TETRIS_GL_APIENTRY
+#endif
 
 using GLenum     = unsigned int;
 using GLbitfield = unsigned int;
@@ -60,6 +67,13 @@ using GLsizeiptr = std::ptrdiff_t;
 #define GL_VERSION                        0x1F02
 #define GL_RENDERER                       0x1F01
 #define GL_NO_ERROR                       0
+#define GL_TEXTURE_BINDING_2D              0x8069
+#define GL_UNPACK_ROW_LENGTH               0x0CF2
+#define GL_UNPACK_SKIP_ROWS                0x0CF3
+#define GL_UNPACK_SKIP_PIXELS              0x0CF4
+#define GL_PIXEL_UNPACK_BUFFER             0x88EC
+#define GL_PIXEL_UNPACK_BUFFER_BINDING     0x88EF
+
 
 // ─── 함수 포인터 ──────────────────────────────────────────────────────────────
 // 이름 앞에 gl_ 을 붙여 시스템 헤더의 gl* 심볼과 충돌하지 않게 한다.
@@ -110,7 +124,7 @@ using GLsizeiptr = std::ptrdiff_t;
     X(void,   TexParameteri,          (GLenum, GLenum, GLint))                 \
     X(void,   DeleteTextures,         (GLsizei, const GLuint*))
 
-#define GL_DECLARE(ret, name, args) extern ret (*gl_##name) args;
+#define GL_DECLARE(ret, name, args) extern ret (TETRIS_GL_APIENTRY *gl_##name) args;
 GL_FUNCS(GL_DECLARE)
 #undef GL_DECLARE
 

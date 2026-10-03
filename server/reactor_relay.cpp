@@ -1,3 +1,4 @@
+#include "room_code.h"
 #include "ranked_game.h"
 // server/reactor_relay.cpp — 단일 reactor 루프로 도는 릴레이 (실험용 바이너리)
 //
@@ -11,20 +12,19 @@
 //   queueLobbyThread       → Stage::Lobby 핸들러
 //   forwarderLoop × 2      → 양쪽 Conn 의 readable 핸들러 하나씩
 //
-// 단일 스레드가 모든 소켓을 소유하므로 스레드 모델의 동기화가 대부분 사라진다 —
+// 각 루프가 자기 소켓과 경기 상태를 단독 소유하여 해당 상태의 동기화를 줄인다 —
 // 방향별 send mutex, 요약 수집 mutex, forwarder_count/disconnect_side atomic,
 // 그리고 "양방향이 동시에 죽을 때 교차검증이 생략되는" 경합까지. 남은 락은 오프로드
-// 워커와 공유하는 지점(인증 캐시, 세션 lease)뿐이다.
+// 워커·세션 lease·샤드 우편함·로그 등에 있다. 공유 예산/통계는 원자적으로 갱신한다.
 //
-// 샤딩(--loops N): 매치메이킹 큐와 룸 코드 표는 본질적으로 전역이라 루프마다 복제할
-// 수 없다 — 서로 다른 루프의 큐에 선 두 사람은 영영 만나지 못하고, 한 루프에서 발급한
-// 룸 코드는 다른 루프에서 "없는 방"이 된다. 그래서 나누는 축을 연결이 아니라 매치로
-// 잡는다: 앞단 루프 하나가 accept·인증·큐·룸·로비를 전부 소유하고(연결 수명당 몇 번뿐인
-// 값싼 일), 포워딩이 시작되는 순간 두 소켓과 채널을 포워딩 샤드로 넘긴다(패킷마다 도는
-// 비싼 일). 샤드는 서로 아무것도 공유하지 않으므로 락이 필요 없다 — 유일한 락은 넘겨줄
-// 때 쓰는 우편함이다.
+// 샤딩(--loops N): 현재 매칭/룸 정책은 하나의 큐와 코드 표를 전제로 한다.
+// 루프마다 독립 사본을 만들면 라우팅과 이름의 유일성 정책도 설계해야 한다.
+// 이 구현은 앞단이 accept·인증·큐·룸·로비를 소유하고, 준비된 경기의 두 연결과
+// 채널을 한 포워딩 샤드에 넘긴다. 샤드는 서로의 Conn/Channel을 수정하지 않는다.
+// 전역 예산/통계 및 서비스·세션 관리의 공유 상태는 별도 동기화 계약을 유지한다.
+// 입장과 포워딩 중 어디가 비싼지는 부하에서 측정한다. 루프 수만으로 성능을 보장하지 않는다.
 //
-// 루프 클래스는 하나뿐이다. 앞단이냐 샤드냐는 리스너를 가졌는지의 차이일 뿐이다.
+// 앞단과 샤드는 같은 클래스다. 리스너, 목적지 샤드 목록과 오프로드 구성이 다르다.
 //
 // 룸 경로는 스레드 모델의 starter/exit 조건변수 배리어가 통째로 사라진다. 그 배리어는
 // 두 스레드가 같은 fd 를 동시에 읽지 않게 하려고 있었는데, 소켓 소유자가 하나뿐이면
@@ -38,6 +38,8 @@
 #include "log.h"
 #include "match_uuid.h"
 #include "offload.h"
+#include "monotonic_id.h"
+#include "byte_budget.h"
 #include "player_session.h"
 #include "timer_queue.h"
 
@@ -53,7 +55,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <random>
+#include <new>
+#include <stdexcept>
 
 #include "match_seed.h"
 #include "room_guess_budget.h"
@@ -241,24 +244,19 @@ constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 // 보류 송신이 이만큼 쌓이면 그 소켓으로 흘려보내는 쪽의 읽기를 멈춘다(backpressure).
 // 스레드 모델은 tcp_send_all 이 최대 5초 잠들며 버텼지만, 루프는 잠들 수 없으므로
 // 상대가 안 읽으면 읽기를 멈춰 메모리를 지킨다.
-// 락스텝 프레임은 틱당 수십 바이트다 — 60Hz 로 방향당 1 KB/s 도 안 된다. 64 KiB 가
-// 밀렸다는 것은 이미 1분 넘게 못 흘려보냈다는 뜻이고, 그쯤이면 경기가 성립하지
-// 않는다. 예전 값(256 KiB / 1 MiB)은 게임 트래픽 기준으로 지나치게 컸다.
+// 읽기 중지/재개 문턱은 운영 정책이다. 채팅·버스트·커널 버퍼도 영향을 주므로
+// 특정 대기 바이트 수를 모든 연결의 동일한 정체 시간으로 환산하지 않는다.
 constexpr size_t kSendHighWater     = 64 * 1024;
+constexpr size_t kSendLowWater      = 32 * 1024;  // 재개는 더 낮은 수위에서 한다
 // 그리고 하드 상한. 일시정지는 최선의 노력일 뿐 보장이 아니다 — 흘려보내는 쪽이
 // 아예 없거나(룸에 혼자 남아 서버가 직접 쓰는 경우) 상대가 영영 안 읽으면 tx 는
 // 계속 자란다. 상한 없는 버퍼는 상한이 아니므로 여기서 연결을 끊는다.
 constexpr size_t kSendHardCap       = 256 * 1024;
 
-// 수락한 소켓의 커널 송신 버퍼 상한. 기본값(Linux tcp_wmem 자동 조정, 최대 ≈4MiB)
-// 을 그대로 두면 안 읽는 상대에게 보내는 바이트를 커널이 소켓당 수 MiB 씩 대신
-// 물어 준다 — 유저스페이스 tx 가 안 쌓이니 high-water 백프레셔도 전역 tx 예산도
-// 그 몫만큼 늦게(2026-08-17 실측 ≈87초 뒤에나) 걸렸고, 예산이 "프로세스가 물고
-// 있는 바이트" 를 대표하지 못했다. 64KiB 로 묶으면(Linux 실효 128KiB — 커널이
-// 요청값의 2배를 잡는다) 밀림이 수 초 안에 유저스페이스로 드러나고, Windows
-// 기본(≈64KiB)과 같은 자릿수가 돼 두 플랫폼의 backpressure 타이밍도 맞는다.
-// 정상 트래픽에는 여유가 크다 — 게임 프레임은 ≈1KiB/s, 수신 레이트 상한도
-// 64KiB/s 라 128KiB 는 최대 레이트로도 2초치다.
+// 수락 소켓에 요청할 SO_SNDBUF 크기. 실제 값과 TCP 버퍼 동작은 OS/설정에
+// 따라 달라진다. Linux의 getsockopt 값은 bookkeeping을 포함해 요청값보다
+// 커질 수 있다. 같은 요청값이 플랫폼별 정체 시점을 같게 만들지는 않는다.
+// 이 공간과 유저스페이스 tx의 논리적 바이트 예산은 별도로 관측한다.
 constexpr int    kKernelSndBufBytes = 64 * 1024;
 // 레이트 상한을 토큰 버킷으로 센다. 초당 kMaxBytesPerSecond 만큼 토큰이 차고,
 // 최대 kRateBurstBytes 까지 쌓인다.
@@ -266,7 +264,7 @@ constexpr int    kKernelSndBufBytes = 64 * 1024;
 // 처음에는 "재개 후 3초간 면제" 라는 시간 창이었다. 멈춰 있는 동안 상대의 버퍼에
 // 쌓인 적체는 우리가 안 읽어서 생긴 것이지 상대가 규정을 넘긴 게 아니라는 논리는
 // 맞았지만, 면제를 재개 시각에 묶은 것이 틀렸다 — 면제가 재개할 때마다 갱신되는데
-// 재개는 tx 가 high-water 아래로 떨어질 때마다 일어난다. pause 와 resume 을
+// 재개는 tx 가 low-water 이하로 떨어질 때 일어난다. pause 와 resume 을
 // 반복시키면 이전 창이 만료되기 전에 새 창이 걸려 상한이 영영 적용되지 않는다.
 // 실측(Windows): pause 를 한 번 성립시킨 뒤 상대가 빠르게 빼내게 하자 3.7초 동안
 // 42 MB, 초당 11 MiB — 상한의 172배가 무제한으로 통과했다.
@@ -402,9 +400,7 @@ void reject_socket(net::TcpSocket& s, net::RejectReason reason, const char* text
 
 // ── 룸 코드 ──────────────────────────────────────────────────────────────────
 // 헷갈리는 글자(I, O, 0, 1)를 뺀 알파벳 — 사람이 불러 주고 받아 적는 코드다.
-constexpr char   kCodeAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-constexpr size_t kCodeAlphabetN  = sizeof(kCodeAlphabet) - 1;
-constexpr size_t kCodeLen        = 5;
+constexpr size_t kCodeLen = relay::kRoomCodeLength;
 constexpr auto   kRoomGuestWait  = std::chrono::minutes(15);  // 개설 후 게스트 무입장
 constexpr auto   kRoomReadyWait  = std::chrono::seconds(60);  // 입장 후 READY 미확정
 
@@ -419,19 +415,22 @@ struct Channel;
 struct Room;
 
 enum class Stage { FirstFrame, Auth, Queued, Room, Lobby, Forward, Dead };
+// Graceful peer-loss notification has a finite local drain budget.
+constexpr auto kFinalNoticeDrain = std::chrono::seconds(2);
 
 // 첫 프레임이 정한 진로. 인증이 끝난 뒤 어디로 보낼지 기억해 둔다.
 enum class Intent { Queue, RoomCreate, RoomJoin };
 
 struct Conn {
     net::TcpSocket sock;
-    int      fd = -1;
+    net::NativeSocket fd = net::kInvalidSocket;
     uint32_t id = 0;
     Stage    stage = Stage::FirstFrame;
 
     std::vector<uint8_t> rx;   // 수신 누적(프레임 경계 파싱 전)
     std::vector<uint8_t> tx;   // 보류 송신(쓰기 준비성 대기)
     bool     want_write = false;
+    bool     drain_then_close = false; // no more reads/appends; finish queued bytes or deadline
     bool     read_paused = false;   // 상대의 tx 가 차서 읽기를 멈춘 상태
     // 지금의 pause 가 시작된 시각. read_paused 인 동안에만 뜻이 있고, 멈춰 세우는
     // 순간에만 찍는다 — 재개할 때 "우리가 얼마나 오래 귀를 닫고 있었나" 를 여기서만
@@ -504,10 +503,6 @@ struct Channel {
     Conn* a = nullptr;   // HOST — 죽으면 nullptr
     Conn* b = nullptr;   // GUEST
 
-    // 소켓 복사본: Conn 이 사라진 뒤에도 MATCH_RESULT 를 보낼 수 있게 채널이
-    // 참조 카운트를 하나 붙들고 있는다(TcpSocket 은 shared_ptr<int> 소유 핸들).
-    net::TcpSocket sockA, sockB;
-
     int64_t a_id = 0, b_id = 0;
     int     a_elo = 0, b_elo = 0;
     std::shared_ptr<PlayerSessionLease> a_lease, b_lease;
@@ -515,6 +510,7 @@ struct Channel {
     std::optional<Summary> sumA, sumB;
     bool summary_handled = false;
     bool finalize_inflight = false;
+    bool delivering_result = false; // queue_send failure can re-enter close_conn
     // 상대가 사라졌는데 결과 저장이 아직 도는 중이라 살아남은 쪽을 못 닫은 상태.
     // 결과 프레임을 보낸 뒤에 닫아야 하므로 continuation 이 이 표시를 보고 마무리한다.
     bool close_survivor_pending = false;
@@ -533,17 +529,7 @@ public:
     RelayLoop(meta::client::MetaClient* meta, std::string meta_note)
         : meta_(meta), meta_note_(std::move(meta_note))
     {
-        // 룸 코드 RNG 는 match seed 스트림(next_seed)과 반드시 분리해서 씨를 뿌린다.
-        // 노출되지 않는 독립 엔트로피(random_device)로만 채운다 — 이유는 code_rng_
-        // 선언부 주석 참조. 시드 소스를 여러 개 섞어 random_device 가 빈약한
-        // 플랫폼에서도 예측 가능한 시드로 떨어지지 않게 한다.
-        std::random_device rd;
-        std::seed_seq seq{
-            static_cast<unsigned>(rd()), static_cast<unsigned>(rd()),
-            static_cast<unsigned>(rd()), static_cast<unsigned>(rd()),
-            static_cast<unsigned>(Clock::now().time_since_epoch().count()),
-            static_cast<unsigned>(reinterpret_cast<uintptr_t>(this))};
-        code_rng_.seed(seq);
+
     }
 
     bool init(uint16_t port) {
@@ -588,16 +574,25 @@ public:
     // 이 백엔드에서 매치를 다른 루프로 넘길 수 있는가(IOCP 는 불가 — reactor.h 참조).
     bool can_shard() const { return reactor_ && reactor_->can_migrate_sockets(); }
 
-    // 앞단 스레드가 호출한다 — 이 클래스에서 유일하게 교차 스레드로 불리는 지점이다.
-    // 우편함에 넣고 깨우면 나머지는 샤드 스레드가 자기 문맥에서 처리한다. 소켓 등록도
-    // 그때 한다 — Reactor 인스턴스는 소유 스레드 전용이기 때문이다.
-    void hand_off(std::unique_ptr<Conn> a, std::unique_ptr<Conn> b,
-                  std::unique_ptr<Channel> ch) {
+    // 성공 때만 소유권을 소비한다. 거절/할당 실패면 호출자의 세 객체를 보존한다.
+    // mutex가 상태를 공개하며 wake는 대기 단축용이다. 실제 등록은 샤드가 수행한다.
+    bool hand_off(std::unique_ptr<Conn>& a, std::unique_ptr<Conn>& b,
+                  std::unique_ptr<Channel>& ch) {
+        if (!a || !b || !ch) return false;
         {
             std::lock_guard<std::mutex> lk(inbox_mu_);
-            inbox_.push_back(Handoff{std::move(a), std::move(b), std::move(ch)});
+            if (!inbox_accepting_ || inbox_.size() >= kMaxPendingHandoffs) return false;
+            // 새 칸 확보가 실패해도 아직 호출자의 소유권은 건드리지 않았다.
+            try { inbox_.emplace_back(); }
+            catch (const std::bad_alloc&) { return false; }
+            catch (const std::length_error&) { return false; }
+            auto& slot = inbox_.back();
+            slot.a = std::move(a);
+            slot.b = std::move(b);
+            slot.ch = std::move(ch);
         }
         reactor_->wake();
+        return true;
     }
 
     void run() {
@@ -613,15 +608,14 @@ public:
             // 리스너를 내려 둔 동안에는 재무장 시점을 넘겨 자지 않는다. 넘겨 자면
             // 백오프가 실제로는 최대 500ms 로 늘어나고, 그만큼 정상 접속도 늦어진다.
             if (accept_paused_) {
-                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      accept_rearm_at_ - now).count();
-                const int left_ms = left < 0 ? 0 : (int)left;
+                const int left_ms = TimerQueue::wait_ms_until(now, accept_rearm_at_);
                 if (left_ms < timeout) timeout = left_ms;
             }
 
             const int n = reactor_->poll(events, timeout);
             if (n < 0) {
                 RLOG_ERROR("[relay] poll 오류 — 종료");
+                g_running.store(false); // 한 루프 실패도 나머지 루프의 join을 끝내야 한다.
                 break;
             }
 
@@ -631,6 +625,8 @@ public:
             // 1) 오프로드 완료분을 루프 스레드에서 실행 (소켓 I/O 단일 스레드 유지)
             conts.clear();
             offload_->drain(conts);
+            if (const auto failures = offload_->take_wake_errors())
+                RLOG_WARN("[relay] wake 예외 " << failures << "건 — 주기적 회수로 처리");
             for (auto& c : conts) c();
 
             // 2) I/O 이벤트
@@ -640,7 +636,7 @@ public:
                 if (!alive(c)) continue;          // 이번 배치에서 이미 죽은 연결
                 if (ev.writable) on_writable(c);
                 if (!alive(c)) continue;
-                if (ev.readable || ev.error) on_readable(c);
+                if (ev.readable || ev.error) on_readable(c, ev.error);
             }
 
             // 3) 만기
@@ -692,14 +688,21 @@ private:
                                 (b->want_write  ? net::kWrite : 0u);
             if (!reactor_->add(a->fd, ia, a) ||
                 !reactor_->add(b->fd, ib, b)) {
-                close_conn(a, "샤드 등록 실패");
-                close_conn(b, "샤드 등록 실패");
+                abort_unstarted_match(ch, "샤드 등록 실패");
                 continue;
             }
             RLOG_DEBUG("[shard " << shard_index_ << "] match=" << ch->match_id
                        << " uuid=" << ch->match_uuid << " 인계 받음");
             begin_forwarding(ch);
         }
+    }
+
+    // 인프라 실패를 플레이어의 경기 결과로 저장하지 않는다.
+    void abort_unstarted_match(Channel* ch, const char* why) {
+        Conn* a = ch->a; Conn* b = ch->b;
+        ch->summary_handled = true;
+        close_conn(a, why);
+        close_conn(b, why);
     }
 
     // ── 주기 상태 ────────────────────────────────────────────────────────────
@@ -765,29 +768,20 @@ private:
     // 들고 있을 수 있다. 표시만 하고 배치 끝(sweep)에서 해제한다.
     void close_conn(Conn* c, const char* why) {
         if (!c || c->stage == Stage::Dead) return;
-        // 이 연결로 흘려보내느라 우리가 멈춰 세운 쪽이 있으면 먼저 풀어 준다.
-        // room/ch 를 끊기 전에 해야 상대를 찾을 수 있다. 안 풀면 그쪽은 interest 0
-        // 으로 등록된 채 아무 이벤트도 못 받아, 유휴 타이머가 걷어갈 때까지 fd 와
-        // per-IP 세션 슬롯을 붙들고 남는다.
-        pause_peer_read(c, false);
-        // ident_of 는 c->ch 를 읽는다 — 아래에서 채널을 끊기 전에 찍어야 한다.
         RLOG_INFO("[conn " << c->id << "] close: " << why << ident_of(c));
+        // 상대의 관심 변경 실패가 이 연결의 종료로 재진입할 수 있다.
+        // 종료 표시는 효과보다 먼저, room/ch 관계 해제는 상대 재개 뒤에 한다.
         c->stage = Stage::Dead;
+        pause_peer_read(c, false);
         // 보류 송신은 여기서 포기한다 — 소켓을 닫는 마당에 흘려보낼 곳이 없다.
         // 전역 예산도 같이 돌려준다.
         release_tx(c);
         reactor_->remove(c->fd);
         timers_.cancel(c);
         net::tcp_close(c->sock);
-        // 인증 슬롯과 인증 작업은 반드시 함께 죽어야 한다. 예전에는 슬롯만
-        // 여기서 반납되고 오프로드 큐에 던져 둔 meta 왕복은 그대로 남았다 —
-        // 상한이 걸린 곳(연결)과 일이 쌓이는 곳(큐)이 어긋나 있었고, 그 틈이
-        // 곧 공격면이었다: 붙어서 QUEUE_JOIN 만 던지고 끊기를 반복하면 어떤
-        // 상한에도 닿지 않으면서 큐만 길어지고, 뒤에 줄 선 정상 사용자가 그
-        // 길이만큼 굶었다. 깃발을 세워 두면 워커가 이 작업을 집는 순간 왕복을
-        // 시작하지 않고 버린다. 스레드 모델이 구조적으로 갖고 있던 성질
-        // (인증이 그 연결의 워커에서 돌아 작업과 슬롯의 수명이 같다)을
-        // 루프 모델에서 손으로 맞춰 주는 것이다.
+        // 정책상 인증 대기 몫은 여기서 반환한다. 큐에 남은 작업은 취소 깃발로
+        // HTTP 시작을 건너뛰지만, 이미 실행 중인 HTTP를 강제로 중단하지는 않는다.
+        // 실제 작업 저장소는 Offload가 완료/회수까지 별도 슬롯으로 제한한다.
         if (c->auth_cancel) {
             c->auth_cancel->store(true, std::memory_order_release);
             c->auth_cancel.reset();
@@ -800,17 +794,18 @@ private:
 
         if (c->room) {
             Room* r = c->room;
+            const std::string code = r->code;
             c->room = nullptr;
             (c->is_host ? r->host : r->guest) = nullptr;
             Conn* peer = c->is_host ? r->guest : r->host;
-            if (peer && peer->stage != Stage::Dead) {
-                // 상대는 방에 남는다 — 다시 혼자가 됐음을 알리고 대기 데드라인을
-                // 게스트 대기 기준으로 되돌린다(스레드 모델의 재무장과 같다).
+            if (!r->host && !r->guest) rooms_.erase(code);
+            if (alive(peer)) {
                 peer->ready = false;
-                send_room_info(peer, r->code, kStatusGoneFull, 1);
+                // 송신 실패가 peer도 닫고 Room을 지울 수 있다. 만기를 먼저 설정해
+                // 중첩 close_conn이 취소하게 하고, 송신 뒤에는 r을 사용하지 않는다.
                 timers_.arm(peer, Clock::now() + kRoomGuestWait);
+                send_room_info(peer, code, kStatusGoneFull, 1);
             }
-            if (!r->host && !r->guest) rooms_.erase(r->code);
         }
         if (c->ch) {
             Channel* ch = c->ch;
@@ -821,7 +816,7 @@ private:
             // 두 소켓이 같이 닫혔는데, 루프 모델에는 그 동반 종료가 없어 남은 쪽이
             // 아무 통지도 못 받은 채 타임아웃까지 기다렸다 — 수락 로비에서 30초,
             // 포워딩 중이면 유휴 15초. 한 번의 접속으로 상대의 시간을 사는 셈이었다.
-            if (ch->finalize_inflight) ch->close_survivor_pending = true;
+            if (ch->finalize_inflight || ch->delivering_result) ch->close_survivor_pending = true;
             else close_channel_survivor(ch, "상대 이탈");
         }
         // 큐 대기 중이었다면 큐에서도 뺀다.
@@ -932,10 +927,16 @@ private:
                 continue;
             }
 
+            const uint32_t id = conn_ids_.take();
+            if (id == 0) {
+                RLOG_WARN("[relay] 연결 ID 공간 소진 — 새 연결 거절");
+                net::tcp_close(s);
+                continue; // 지역 admission 슬롯도 반납한다.
+            }
             auto c = std::make_unique<Conn>();
             c->sock = std::move(s);
             c->fd   = c->sock.fd();
-            c->id   = next_conn_id_++;
+            c->id   = id;
             c->handshake_slot = std::move(handshake_slot);
             c->session_slot   = std::move(session_slot);
             c->ip             = key;
@@ -962,54 +963,62 @@ private:
     // ── 송신(backpressure) ───────────────────────────────────────────────────
     // 논블로킹으로 최대한 보내고 남는 것은 tx 에 쌓는다. 상대가 안 읽어 tx 가
     // 한계를 넘으면 그 소켓으로 흘려보내는 쪽의 읽기를 멈춘다.
-    bool queue_send(Conn* dst, const uint8_t* data, size_t len) {
-        if (!dst || dst->stage == Stage::Dead) return false;
-        size_t sent = 0;
-        if (dst->tx.empty()) {
-            if (!net::tcp_send_some(dst->sock, data, len, sent)) return false;
+    enum class TxAppend { stored, local_limit, global_limit, allocation_failed };
+
+    // 단일 Conn 소유자가 호출한다. 전역 몫만 CAS로 예약하고 저장 실패 시 반납한다.
+    static TxAppend append_tx(Conn* c, const uint8_t* data, size_t len) {
+        if (c->tx.size() > kSendHardCap || len > kSendHardCap - c->tx.size())
+            return TxAppend::local_limit;
+        size_t total = 0;
+        if (!try_reserve_bytes(g_tx_total, g_tx_budget, len, total))
+            return TxAppend::global_limit;
+        try {
+            if (len) c->tx.insert(c->tx.end(), data, data + len);
+        } catch (const std::bad_alloc&) {
+            g_tx_total.fetch_sub(len, std::memory_order_relaxed);
+            return TxAppend::allocation_failed;
+        } catch (const std::length_error&) {
+            g_tx_total.fetch_sub(len, std::memory_order_relaxed);
+            return TxAppend::allocation_failed;
         }
-        if (sent < len) {
-            const size_t added = len - sent;
-            dst->tx.insert(dst->tx.end(), data + sent, data + len);
-            const size_t total = g_tx_total.fetch_add(added,
-                                     std::memory_order_relaxed) + added;
-            // 최고 수위. 예산에 얼마나 근접했는지는 순간값만 봐서는 알 수 없다 —
-            // 상태 줄 사이에서 치솟았다 빠지면 어느 줄에도 안 남는다.
-            // 이 갱신은 "커널이 다 받아 주지 않은" 경로에만 있으므로 정상
-            // 포워딩(전량 송신)에서는 실행되지 않는다.
-            for (size_t peak = g_tx_peak.load(std::memory_order_relaxed);
-                 total > peak;) {
-                if (g_tx_peak.compare_exchange_weak(peak, total,
-                                                    std::memory_order_relaxed)) break;
-            }
-            arm_write(dst, true);
-            if (dst->tx.size() > kSendHardCap) {
-                close_conn(dst, "송신 버퍼 하드 상한 초과");
-                return false;
-            }
-            if (total > g_tx_budget) {
-                // 프로세스 전체 예산 초과. 연결당 상한 안에 있어도 여기서 끊는다 —
-                // 지킬 대상이 이 연결이 아니라 프로세스이기 때문이다.
-                g_reject_tx_budget.fetch_add(1, std::memory_order_relaxed);
-                RLOG_WARN("[relay] 거절: tx 전역 예산 초과 (" << total << " > "
-                          << g_tx_budget << ")" << ident_of(dst));
-                reject_conn(dst, net::RejectReason::TxBudget,
-                            "server memory budget exhausted",
-                            "tx 전역 예산 초과");
-                return false;
-            }
-            if (dst->tx.size() > kSendHighWater) pause_peer_read(dst, true);
+        for (size_t peak = g_tx_peak.load(std::memory_order_relaxed); total > peak;) {
+            if (g_tx_peak.compare_exchange_weak(peak, total, std::memory_order_relaxed)) break;
         }
-        return true;
+        return TxAppend::stored;
     }
 
-    // tx 를 비우고 그만큼 전역 예산을 돌려준다. 연결이 죽는 모든 경로가 여길 지나야
-    // 카운터가 새지 않는다.
+    bool queue_send(Conn* dst, const uint8_t* data, size_t len) {
+        if (!dst || dst->stage == Stage::Dead || dst->drain_then_close) return false;
+        size_t sent = 0;
+        if (dst->tx.empty() && !net::tcp_send_some(dst->sock, data, len, sent)) {
+            close_conn(dst, "send 실패");
+            return false;
+        }
+        if (sent < len) {
+            switch (append_tx(dst, data + sent, len - sent)) {
+                case TxAppend::local_limit:
+                    close_conn(dst, "송신 버퍼 하드 상한 초과");
+                    return false;
+                case TxAppend::global_limit:
+                    g_reject_tx_budget.fetch_add(1, std::memory_order_relaxed);
+                    reject_conn(dst, net::RejectReason::TxBudget,
+                                "server memory budget exhausted", "tx 전역 예산 초과");
+                    return false;
+                case TxAppend::allocation_failed:
+                    close_conn(dst, "송신 버퍼 할당 실패");
+                    return false;
+                case TxAppend::stored: break;
+            }
+            if (!arm_write(dst, true)) return false;
+            if (dst->tx.size() >= kSendHighWater) pause_peer_read(dst, true);
+        }
+        return dst->stage != Stage::Dead;
+    }
+
+    // 논리 대기량을 반환한다. capacity/RSS는 이 카운터의 단위가 아니다.
     static void release_tx(Conn* c) {
-        if (c->tx.empty()) return;
         g_tx_total.fetch_sub(c->tx.size(), std::memory_order_relaxed);
-        c->tx.clear();
-        c->tx.shrink_to_fit();
+        std::vector<uint8_t>().swap(c->tx);
     }
 
     // 대기 왕복 하나의 주소 몫을 반납한다. 등록된 적 없는 id 에는 아무 일도
@@ -1034,23 +1043,24 @@ private:
             LobbyNoShowBudget::charge(peer->ip, now);
     }
 
-    // 이미 등록된 연결을 사유와 함께 끊는다.
-    //
-    // 보류 송신이 남아 있을 수 있으므로 프레임을 그 뒤에 붙인다 — 앞질러 보내면
-    // 클라이언트가 받는 바이트 순서가 어긋나 프레임 경계가 깨진다. 붙인 만큼
-    // 전역 예산도 함께 올려 둔다. 곧바로 close_conn 이 release_tx 로 남은 전부를
-    // 돌려주므로 회계는 맞는다. 한 번 밀어 보고 안 나가면 그대로 포기한다 —
-    // 안 읽는 상대를 기다리는 것이 애초에 여기 온 이유다.
+    // 사유는 기존 바이트 뒤에만 붙인다. 예산/할당이 허용하지 않으면 통지를
+    // 포기하고 닫는다. 성공해도 한 번의 송신 시도는 상대의 수신 보장이 아니다.
     void reject_conn(Conn* c, net::RejectReason reason, const char* text,
                      const char* why) {
         if (!c || c->stage == Stage::Dead) return;
-        const auto fr = build_reject(reason, text);
-        c->tx.insert(c->tx.end(), fr.begin(), fr.end());
-        g_tx_total.fetch_add(fr.size(), std::memory_order_relaxed);
-        size_t sent = 0;
-        if (net::tcp_send_some(c->sock, c->tx.data(), c->tx.size(), sent) && sent) {
-            c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
-            g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
+        try {
+            const auto fr = build_reject(reason, text);
+            if (append_tx(c, fr.data(), fr.size()) == TxAppend::stored) {
+                size_t sent = 0;
+                (void)net::tcp_send_some(c->sock, c->tx.data(), c->tx.size(), sent);
+                // 실패 전 일부가 수락된 경우에도 그 접두사는 다시 보내지 않는다.
+                if (sent) {
+                    c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
+                    g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
+                }
+            }
+        } catch (const std::bad_alloc&) {
+            // 거절 프레임 생성도 최선의 노력이다.
         }
         close_conn(c, why);
     }
@@ -1064,12 +1074,17 @@ private:
         return nullptr;
     }
 
-    void arm_write(Conn* c, bool want) {
-        if (c->want_write == want) return;
+    bool arm_write(Conn* c, bool want) {
+        if (c->stage == Stage::Dead) return false;
+        if (c->want_write == want) return true;
+        const unsigned interest = (c->read_paused ? 0u : net::kRead) |
+                                  (want ? net::kWrite : 0u);
+        if (!reactor_->modify(c->fd, interest, c)) {
+            close_conn(c, "Reactor 쓰기 관심 변경 실패");
+            return false;
+        }
         c->want_write = want;
-        unsigned interest = (c->read_paused ? 0u : net::kRead) |
-                            (want ? net::kWrite : 0u);
-        reactor_->modify(c->fd, interest, c);
+        return true;
     }
 
     // 흐른 시간만큼 토큰을 채운다(천장까지).
@@ -1113,9 +1128,8 @@ private:
     //   · 크기가 시간 창이 아니라 **그 pause 자신의 길이에서 나온 바이트** 다.
     //   · 그래서 갱신되지 않는다. pause 구간들은 서로 겹치지 않고, 그동안 버킷
     //     시계는 멈춰 있으므로(refill_tokens 의 read_paused 갈래) 두 몫이 같은
-    //     시간을 두 번 세지 않는다. 결과적으로 어떤 구간 [t0,t1] 에서든 통과량은
-    //     kRateBurstBytes + kMaxBytesPerSecond × (t1-t0) 을 넘지 못한다 — 옛 면제는
-    //     이 성질이 없어서 pause/resume 을 반복시키면 상한이 영영 적용되지 않았다.
+    //     시간을 두 번 세지 않는다. 단, 구간 시작에 남은 credit은 이월되므로
+    //     임의 구간의 허용량을 일반 토큰 버킷 식 하나로 한정할 수는 없다.
     //
     // 예산에는 천장을 두지 않는다(포화 덧셈만 한다). 천장을 두면 [B] 가 되살아나기
     // 때문이다: 상대가 상한 직전마다 조금씩 빼내면 pause 상한은 발화하지 않은 채
@@ -1126,15 +1140,10 @@ private:
     // (버스트 한도 2개분)로 두자 3.9 MB 를 60초에 걸쳐 제시한 규정 준수 송신자
     // (54 KiB/s < 상한)가 전속력 배수 시점에 "byte rate 초과" 로 끊겼다.
     //
-    // 천장이 없어도 레이트 상한은 깨지지 않는다. pause 구간과 비-pause 구간은
-    // 시간축을 빈틈없이 나누고, pause 동안에는 버킷 시계가 멈춰 있으므로
-    // (지급 총합) + (충전 총합) = kMaxBytesPerSecond × 전체 경과 시간 이다. 어떤
-    // 구간 [t0,t1] 에서든 통과량은 kRateBurstBytes + kMaxBytesPerSecond × (t1-t0)
-    // 을 넘지 못한다. 남는 성질은 순간 버스트뿐이다 — 상한보다 느리게 보내면서 오래
-    // 멈춰 있던 연결은 안 쓴 예산을 쌓아 두었다가 한 번에 쓸 수 있다. 그 양은 그
-    // 연결이 "쉬면서 벌어 둔" 몫이고, 쏟아지는 곳은 상대의 tx 라 high-water 에서
-    // 곧바로 다시 멈춰 세워지므로(그리고 하드 상한 256 KiB 가 있으므로) 메모리에는
-    // 영향이 없다.
+    // pause 동안의 몫은 별도 credit으로 이월한다. 따라서 임의 구간의
+    // 버스트 상한에는 그 구간 시작의 기존 credit도 포함해야 한다. 일반 토큰
+    // 버킷의 burst + rate * 기간만으로 설명할 수 없다. 저장소 상한은 tx와
+    // 수신 정책이 따로 담당하며, credit은 실제 메모리 사용량이 아니다.
     static void grant_pause_credit(Conn* c, TimePoint now) {
         if (c->paused_since == TimePoint{} || now <= c->paused_since) return;
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1147,7 +1156,7 @@ private:
 
     void pause_peer_read(Conn* dst, bool pause) {
         Conn* src = feeder_of(dst);
-        if (!src || src->stage == Stage::Dead) return;
+        if (!src || src->stage == Stage::Dead || src->drain_then_close) return;
         if (src->read_paused == pause) return;
         const TimePoint now = Clock::now();
         // 멈추기 직전까지의 몫을 확정하고 나서 시계를 세운다(read_paused 를 켜면
@@ -1157,7 +1166,10 @@ private:
         src->read_paused = pause;
         unsigned interest = (pause ? 0u : net::kRead) |
                             (src->want_write ? net::kWrite : 0u);
-        reactor_->modify(src->fd, interest, src);
+        if (!reactor_->modify(src->fd, interest, src)) {
+            close_conn(src, "Reactor 읽기 관심 변경 실패");
+            return;
+        }
         if (pause) {
             src->paused_since = now;
             // 밖에서 pause 시계를 볼 방법이 이 줄뿐이다. "누가 얼마나 오래 멈춰
@@ -1187,7 +1199,11 @@ private:
     }
 
     void on_writable(Conn* c) {
-        if (c->tx.empty()) { arm_write(c, false); return; }
+        if (c->tx.empty()) {
+            if (c->drain_then_close) close_conn(c, "최종 통지 배수 완료");
+            else arm_write(c, false);
+            return;
+        }
         size_t sent = 0;
         if (!net::tcp_send_some(c->sock, c->tx.data(), c->tx.size(), sent)) {
             close_conn(c, "send 실패");
@@ -1197,21 +1213,32 @@ private:
             c->tx.erase(c->tx.begin(), c->tx.begin() + sent);
             g_tx_total.fetch_sub(sent, std::memory_order_relaxed);
             // 자기 큐에서 실제로 바이트를 빼냈다고 기록한다. pause 상한은 이
-            // 시각으로 판정한다 — high-water 아래로 내려갈 때(= 재개할 때)만 쳐
+            // 시각으로 판정한다 — low-water 이하로 내려갈 때(= 재개할 때)만 쳐
             // 주면, tx 가 high-water 위에 걸친 채 조금씩 빼내는 진짜 느린 독자가
             // "한 바이트도 안 빼낸" 쪽과 구분되지 않아 끊긴다.
             c->tx_drained_at = Clock::now();
         }
         if (c->tx.empty()) {
-            arm_write(c, false);
+            if (c->drain_then_close) {
+                close_conn(c, "최종 통지 배수 완료");
+                return;
+            }
+            if (!arm_write(c, false)) return;
             pause_peer_read(c, false);   // 밀림이 풀렸으니 상대 읽기 재개
-        } else if (c->tx.size() <= kSendHighWater) {
+        } else if (!c->drain_then_close && c->tx.size() <= kSendLowWater) {
             pause_peer_read(c, false);
         }
     }
 
     // ── 수신 ─────────────────────────────────────────────────────────────────
-    void on_readable(Conn* c) {
+    void on_readable(Conn* c, bool transport_error = false) {
+        if (c->stage == Stage::Dead) return;
+        // 같은 배치의 앞선 콜백이 Read를 내렸어도 HUP/ERR는 별도로 온다.
+        // 중지 중에는 데이터를 소비하지 않되 terminal 이벤트로 스핀하지 않는다.
+        if (c->read_paused) {
+            if (transport_error) close_conn(c, "읽기 중지 중 수송 종료/오류");
+            return;
+        }
         const size_t before = c->rx.size();
         if (!net::tcp_recv_some(c->sock, c->rx)) {
             close_conn(c, "peer 종료");
@@ -1262,7 +1289,7 @@ private:
         }
     }
 
-    // 첫 프레임: QUEUE_JOIN 만 이관됐다. 인증은 오프로드한다.
+    // 첫 프레임에서 큐/룸 진로를 기록하고 인증을 오프로드한다.
     void on_first_frame(Conn* c) {
         std::vector<net::Frame> frames;
         if (!net::parse_frames(c->rx, frames)) {
@@ -1414,17 +1441,22 @@ private:
                 }
                 auto auth = meta->consume_game_ticket(token);
                 return [this, cid, auth, token]() { resume_auth(cid, auth, token); };
+            }, [this, cid] {
+                RLOG_WARN("[relay] 인증 작업 예외 — 입장 거절");
+                resume_auth(cid, std::nullopt, {});
             });
-        if (!queued) close_conn(c, "종료 중 — 인증 불가");
+        if (!queued) reject_conn(c, net::RejectReason::AuthBacklog,
+                                 "authentication service is busy, try again shortly",
+                                 "오프로드 종료/용량 상한 — 인증 불가");
     }
 
     void resume_auth(uint32_t conn_id,
                      std::optional<meta::client::AuthInfo> auth,
                      const std::string& token) {
+        Conn* c = find_by_id(conn_id);
+        if (!c || c->stage != Stage::Auth) return; // 종료되었거나 이미 적용한 응답
         pending_auth_.erase(conn_id);
         release_pending_auth_ip(conn_id);
-        Conn* c = find_by_id(conn_id);
-        if (!c) return;   // 인증 도중 끊겼다
         // 왕복이 끝났으니 취소 깃발도 역할을 다했다. 남겨 두면 이후 close_conn 이
         // 아무도 안 보는 값을 세우게 되고, "깃발이 있다 = 큐에 일이 있다" 라는
         // 읽기가 깨진다.
@@ -1474,22 +1506,12 @@ private:
         queue_send(c, fr.data(), fr.size());
     }
 
-    // 룸 코드는 code_rng_ 로만 뽑는다 — next_seed()(match seed 스트림)로 뽑으면 안 된다.
-    // match seed 는 MATCH_FOUND 로 두 플레이어에게 그대로 나가는데 그 값이 곧 xorshift64
-    // 의 내부 상태라, 같은 스트림에서 코드를 뽑으면 매치를 한 번 한 사람이 이후 룸 코드를
-    // 예측해 남의 비공개 방에 들어올 수 있다(코드는 그 방의 유일한 자격 증명이다).
+    // Registry changes are confined to this loop. Search and insertion do not yield.
     std::string generate_code() {
-        for (int attempt = 0; attempt < 32; ++attempt) {
-            std::string code(kCodeLen, 'A');
-            uint64_t x = code_rng_();
-            for (size_t i = 0; i < kCodeLen; ++i) {
-                code[i] = kCodeAlphabet[x % kCodeAlphabetN];
-                x /= kCodeAlphabetN;
-                if (x == 0) x = code_rng_();
-            }
-            if (!rooms_.count(code)) return code;
-        }
-        return {};
+        auto code = selectRoomCode(roomCodeRandomWord, [this](const std::string& c) {
+            return rooms_.count(c) != 0;
+        });
+        return code ? std::move(*code) : std::string{};
     }
 
     void room_create(Conn* c) {
@@ -1504,9 +1526,10 @@ private:
         c->room = r;
         c->is_host = true;
         c->stage = Stage::Room;
-        send_room_info(c, code, kStatusWaiting, 1);
-        // 게스트가 안 들어오면 슬롯을 무한정 점유하지 않도록 데드라인을 건다.
+        // 송신 실패로 닫히면 close_conn이 이 만기를 취소한다.
         timers_.arm(c, Clock::now() + kRoomGuestWait);
+        send_room_info(c, code, kStatusWaiting, 1);
+        if (!alive(c) || c->stage != Stage::Room) return;
         RLOG_DEBUG("[conn " << c->id << "] ROOM_CREATE " << code
                    << " player_id=" << c->player_id);
         if (!c->rx.empty()) on_room(c);
@@ -1545,27 +1568,28 @@ private:
         RLOG_DEBUG("[conn " << c->id << "] ROOM_JOIN " << r->code
                    << " player_id=" << c->player_id);
 
-        // 양쪽에 "둘 다 있음" 을 알리고, 대기 데드라인을 READY 기준으로 다시 건다.
-        send_room_info(r->host, r->code, kStatusWaiting, 2);
-        send_room_info(c,       r->code, kStatusWaiting, 2);
-        const TimePoint dl = Clock::now() + kRoomReadyWait;
-        timers_.arm(r->host, dl);
-        timers_.arm(c, dl);
-
-        // host 를 미리 붙들어 둔다. 아래 on_room(c) 가 양쪽 READY 를 관측하면
-        // start_room_match 로 들어가 rooms_.erase 로 Room 을 파괴하므로, 그 뒤에
-        // r 을 다시 만지면 use-after-free 다. alive() 가드는 Conn 의 생존만 보지
-        // Room 의 생존은 보지 않는다 — r->host 를 꺼내는 순간 이미 늦는다.
+        // Conn은 배치 끝까지 보존되지만 Room은 송신 실패의 중첩 종료로
+        // 즉시 삭제될 수 있다. 필요한 값과 Conn만 먼저 보관한다.
         Conn* host = r->host;
+        const std::string code = r->code;
+        const TimePoint dl = Clock::now() + kRoomReadyWait;
+        timers_.arm(host, dl);
+        timers_.arm(c, dl);
+        auto together = [&] {
+            return alive(c) && alive(host) && c->stage == Stage::Room &&
+                   host->stage == Stage::Room && c->room && c->room == host->room;
+        };
+        send_room_info(host, code, kStatusWaiting, 2);
+        if (!together()) return;
+        send_room_info(c, code, kStatusWaiting, 2);
+        if (!together()) return;
         if (!c->rx.empty()) on_room(c);
-        // 호스트가 CREATE 와 같은 recv 로 보냈던 READY 가 남아 있을 수 있다.
-        // 매치가 이미 시작됐다면 host->room 이 nullptr 이라 on_room 이 곧바로 반환한다.
-        if (alive(host) && !host->rx.empty()) on_room(host);
+        if (alive(host) && host->stage == Stage::Room && !host->rx.empty()) on_room(host);
     }
 
     void on_room(Conn* c) {
+        if (!alive(c) || c->stage != Stage::Room || !c->room) return;
         Room* r = c->room;
-        if (!r) return;
         std::vector<net::Frame> frames;
         if (!net::parse_frames(c->rx, frames)) {
             close_conn(c, "룸 단계 프레이밍 위반");   // 위 on_first_frame 주석 참고
@@ -1574,7 +1598,11 @@ private:
         for (const auto& f : frames) {
             Conn* peer = c->is_host ? r->guest : r->host;
             if (f.type == net::MsgType::READY) {
-                const bool ready = !f.payload.empty() && f.payload[0] != 0;
+                if (f.payload.size() != 1 || f.payload[0] > 1) {
+                    close_conn(c, "룸 READY 형식 위반");
+                    return;
+                }
+                const bool ready = f.payload[0] == 1;
                 c->ready = ready;
                 if (peer && peer->stage != Stage::Dead) {
                     std::vector<uint8_t> pl{(uint8_t)(ready ? 1 : 0)};
@@ -1591,6 +1619,9 @@ private:
                 }
             }
             // 그 밖의 프레임은 룸 단계에서 무시한다.
+            // queue_send가 상대와 자신을 연쇄 종료할 수 있으므로 r을 재조회한다.
+            if (!alive(c) || c->stage != Stage::Room || !c->room) return;
+            r = c->room;
         }
         if (r->host && r->guest && r->host->ready && r->guest->ready) {
             start_room_match(r);
@@ -1609,6 +1640,7 @@ private:
         guest->room = nullptr;
 
         Channel* ch = make_channel(host, guest);
+        if (!ch) return;
         if (!send_match_found(host,  1, ch->seed, host->icon,  guest->icon, ch->match_uuid) ||
             !send_match_found(guest, 2, ch->seed, guest->icon, host->icon,  ch->match_uuid)) {
             close_conn(host,  "MATCH_FOUND 송신 실패");
@@ -1690,14 +1722,19 @@ private:
     // 큐·룸 두 경로가 공유하는 채널 생성. 스테이지는 호출자가 정한다 — 큐는
     // READY 핸드셰이크(로비)를 거치고, 룸은 이미 READY 라 곧장 포워딩으로 간다.
     Channel* make_channel(Conn* a, Conn* b) {
+        const uint32_t id = match_ids_.take();
+        if (id == 0) {
+            close_conn(a, "매치 ID 공간 소진");
+            close_conn(b, "매치 ID 공간 소진");
+            return nullptr;
+        }
         auto up = std::make_unique<Channel>();
         Channel* ch = up.get();
-        ch->match_id   = next_match_id_++;
+        ch->match_id   = id;
         ch->match_uuid = new_match_uuid();
         ch->seed       = next_seed();
         ch->verified = std::make_unique<relay::RankedGame>(ch->seed);
         ch->a = a; ch->b = b;
-        ch->sockA = a->sock; ch->sockB = b->sock;
         ch->a_id = a->player_id; ch->b_id = b->player_id;
         ch->a_elo = a->elo;      ch->b_elo = b->elo;
         ch->a_lease = a->lease;  ch->b_lease = b->lease;
@@ -1718,6 +1755,7 @@ private:
 
     void start_match(Conn* a, Conn* b) {
         Channel* ch = make_channel(a, b);
+        if (!ch) return;
         a->stage = Stage::Lobby;
         b->stage = Stage::Lobby;
 
@@ -1790,7 +1828,12 @@ private:
             if (chk != calc) { c->rx.erase(c->rx.begin(), c->rx.begin() + total); continue; }
 
             const bool is_ready = (type == (uint8_t)net::MsgType::READY);
-            const uint8_t v = (is_ready && payload_len >= 1) ? c->rx[3] : 0;
+            if ((is_ready && (payload_len != 1 || c->rx[3] > 1)) ||
+                (!is_ready && payload_len != 0)) {
+                close_conn(c, "로비 제어 메시지 형식 위반");
+                return;
+            }
+            const uint8_t v = is_ready ? c->rx[3] : 0;
             c->rx.erase(c->rx.begin(), c->rx.begin() + total);
 
             if (!is_ready || v == 0) {           // 취소/거절 — 상대에게 알리고 종료
@@ -1817,27 +1860,39 @@ private:
         if (ch->a && ch->b && ch->a->ready && ch->b->ready) begin_forwarding(ch);
     }
 
-    // 포워딩 시작 지점이자 샤딩의 경계다. 앞단이라면 여기서 매치를 통째로 샤드에
-    // 넘긴다 — 이 뒤로는 패킷마다 도는 비싼 일만 남고, 그 일에는 공유 상태가 없다.
+    // 두 연결과 경기 상태를 함께 넘긴다. 경기 내부는 한 루프가 소유하고,
+    // 전역 예산/통계/서비스의 동기화는 별도로 유지한다.
     void begin_forwarding(Channel* ch) {
         Conn* a = ch->a; Conn* b = ch->b;
         if (!a || !b) return;
 
         if (!shards_.empty()) {
+            // 인계 실패를 부분 추출 뒤에 발견하지 않도록 소유 관계부터 확인한다.
+            auto ia = conns_.find(a), ib = conns_.find(b);
+            auto ic = channels_.find(ch->match_id);
+            if (a == b || ia == conns_.end() || ib == conns_.end() ||
+                ic == channels_.end() || ic->second.get() != ch)
+                throw std::logic_error("invalid match ownership before handoff");
             RelayLoop* target = shards_[next_shard_ % shards_.size()];
             ++next_shard_;
-            // 이 루프의 관심에서 떼고 타이머를 접은 뒤 소유권을 통째로 옮긴다.
-            reactor_->remove(a->fd);
-            reactor_->remove(b->fd);
+            if (!reactor_->remove(a->fd) || !reactor_->remove(b->fd)) {
+                abort_unstarted_match(ch, "샤드 인계 전 등록 해제 실패");
+                return;
+            }
             timers_.cancel(a);
             timers_.cancel(b);
-            auto na = conns_.extract(a);
-            auto nb = conns_.extract(b);
-            auto nc = channels_.extract(ch->match_id);
-            if (!na || !nb || !nc) return;   // 있을 수 없는 상태 — 방어
-            target->hand_off(std::move(na.mapped()), std::move(nb.mapped()),
-                             std::move(nc.mapped()));
-            return;
+            auto na = conns_.extract(ia);
+            auto nb = conns_.extract(ib);
+            auto nc = channels_.extract(ic);
+            if (!target->hand_off(na.mapped(), nb.mapped(), nc.mapped())) {
+                // 노드와 pointee를 보존한 채 원래 소유자에게 복구한다. 재시도 큐는
+                // 만들지 않는다. 용량/종료 거절은 이 경기만 무효화하고 정리한다.
+                conns_.insert(std::move(na));
+                conns_.insert(std::move(nb));
+                channels_.insert(std::move(nc));
+                abort_unstarted_match(ch, "샤드 인계 거절");
+            }
+            return; // 성공 후 a/b/ch를 읽지 않는다. 샤드가 이미 해제할 수 있다.
         }
 
         const TimePoint now = Clock::now();
@@ -1880,7 +1935,7 @@ private:
     }
 
     // unranked 포워딩. 프레임 경계만 훑어 서버 전용 프레임을 버리고, 통과한
-    // 프레임들은 "붙어 있는 구간째로" 한 번에 민다. false = 송신이 실패했다.
+    // 프레임들은 "붙어 있는 구간째로" 한 번에 민다. 소스 경계 오류와 대상 송신 실패를 구별한다.
     //
     // 왜 이 모양인가. 예전 이 경로는 받은 바이트를 그대로 흘려보냈고(프레임당
     // 0.035µs), 그래서 클라이언트가 위조한 S→C 프레임도 그대로 나갔다. 거르려면
@@ -1903,22 +1958,22 @@ private:
     // 늦게 나간다. 랭크드 경로가 이미 그렇게 동작하고 있고, 락스텝 프레임은 수십
     // 바이트라 한 세그먼트에 통째로 들어오는 것이 보통이다. 안전을 위해 이 정도는
     // 낸다 — 거르지 않는 빠른 경로는 "빠르다" 가 아니라 "신뢰 경계가 없다" 다.
-    bool forward_screened(Conn* c, Conn* peer, Channel* ch) {
+    enum class ForwardScreenResult { ok, protocol_error, send_failed };
+
+    ForwardScreenResult forward_screened(Conn* c, Conn* peer, Channel* ch) {
         size_t pos  = 0;   // 경계 판정이 끝난 위치
         size_t sent = 0;   // 여기까지는 보냈거나(통과) 버렸다(위반)
-        bool   drop_rest = false;
 
         while (c->rx.size() - pos >= 2) {
             const uint8_t* p   = c->rx.data() + pos;
             const uint16_t len = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
             if ((size_t)len > net::kMaxPayloadBytes + 1u) {
-                // 랭크드 경로와 같은 정책이다: 여기서부터는 경계를 믿을 수 없으니
-                // 남은 바이트를 버린다. 앞의 정상 구간은 이미 보냈다.
+                // Do not treat a future recv as a resynchronization boundary.
+                // The caller closes the source, not the destination.
                 RLOG_WARN("[relay] match=" << ch->match_id
                           << " uuid=" << ch->match_uuid
-                          << " 과대 프레임 — 스트림 폐기");
-                drop_rest = true;
-                break;
+                          << " 과대 프레임 — 연결 종료");
+                return ForwardScreenResult::protocol_error;
             }
             const size_t total = 2u + (size_t)len + 4u;
             if (c->rx.size() - pos < total) break;   // 미완성 — 뒤를 기다린다
@@ -1927,17 +1982,16 @@ private:
             // 정책을 새로 만들면 거르기와 무관한 동작 변화가 섞인다.
             if (len >= 1 && net::is_server_only_type(p[2])) {
                 if (pos > sent &&
-                    !queue_send(peer, c->rx.data() + sent, pos - sent)) return false;
+                    !queue_send(peer, c->rx.data() + sent, pos - sent)) return ForwardScreenResult::send_failed;
                 note_server_only(c, p[2]);
                 sent = pos + total;                  // 이 프레임만 건너뛴다
             }
             pos += total;
         }
         if (pos > sent && !queue_send(peer, c->rx.data() + sent, pos - sent))
-            return false;
-        if (drop_rest)  c->rx.clear();
-        else if (pos)   c->rx.erase(c->rx.begin(), c->rx.begin() + pos);
-        return true;
+            return ForwardScreenResult::send_failed;
+        if (pos)   c->rx.erase(c->rx.begin(), c->rx.begin() + pos);
+        return ForwardScreenResult::ok;
     }
 
     void on_forward(Conn* c) {
@@ -1949,9 +2003,16 @@ private:
         if (!ch->ranked) {
             // unranked: 경계는 훑되 내용은 보지 않는다 — 서버 전용 프레임만
             // 걸러내고 나머지는 원본 바이트 그대로 흘려보낸다.
-            if (!c->rx.empty() && !forward_screened(c, peer, ch)) {
-                close_conn(peer ? peer : c, "전달 실패");
-                return;
+            if (!c->rx.empty()) {
+                const auto result = forward_screened(c, peer, ch);
+                if (result == ForwardScreenResult::protocol_error) {
+                    close_conn(c, "포워딩 프레임 경계 위반");
+                    return;
+                }
+                if (result == ForwardScreenResult::send_failed) {
+                    close_conn(peer ? peer : c, "전달 실패");
+                    return;
+                }
             }
             return;
         }
@@ -1965,9 +2026,10 @@ private:
             if ((size_t)len > net::kMaxPayloadBytes + 1u) {
                 RLOG_WARN("[relay] match=" << ch->match_id
                           << " uuid=" << ch->match_uuid
-                          << " 과대 프레임 — 스트림 폐기");
-                consumed = c->rx.size();
-                break;
+                          << " 과대 프레임 — 연결 종료");
+                if (ch->verified) ch->verified->invalidate();
+                close_conn(c, "포워딩 프레임 경계 위반");
+                return;
             }
             const size_t total = 2u + (size_t)len + 4u;
             if (avail < total) break;
@@ -2014,6 +2076,10 @@ private:
 
     // ── 만기 ─────────────────────────────────────────────────────────────────
     void on_timeout(Conn* c) {
+        if (c->drain_then_close) {
+            close_conn(c, "최종 통지 배수 기한");
+            return;
+        }
         switch (c->stage) {
             case Stage::FirstFrame: close_conn(c, "첫 프레임 타임아웃"); break;
             case Stage::Room:       close_conn(c, "룸 대기 타임아웃");   break;
@@ -2034,69 +2100,24 @@ private:
                 close_conn(c, "로비 타임아웃");
                 break;
             case Stage::Forward: {
-                // 우리가 백프레셔로 입을 막아 둔 연결은 유휴가 아니다 — 읽기 이벤트가
-                // 안 나는 게 당연하다. 여기서 끊으면 "느리게 읽는 상대" 때문에 "정상
-                // 플레이어" 가 끊긴다. 그래서 멈춘 연결은 데드라인만 다시 건다.
-                //
-                // 단, 재무장에는 전제가 있다: 나를 풀어 줄 쪽이 아직 움직일 수 있어야
-                // 한다. 내 pause 는 상대의 tx 가 빠져야 풀리는데, 그 상대도 pause 면
-                // 양쪽 다 읽기 이벤트가 영영 없고 쓰기 진행도 없다 — 서로가 서로를
-                // 풀 수 없는 교착이다. 이전 주석은 "멈출 수 있는 시간은 tx 하드
-                // 상한이 묶는다" 고 했지만, 교착에서는 tx 가 high-water 와 하드 상한
-                // 사이에 멈춘 채 더 자라지 않으므로 그 상한은 영영 오지 않는다.
-                // 무조건 재무장하면 페어가 불멸이 되어 fd 2개 + per-IP 세션 슬롯
-                // 2개 + 매치 1개를 프로세스 재시작까지 물고 있는다 (2026-08-17
-                // Linux 실측: 상호 pause 후 35초+ 소켓 활동 0, 유휴 만기 미발화).
-                //
-                // 그래서 만기 시점에 상대도 pause 면(또는 이미 사라졌으면) 페어를
-                // 닫는다. 정상 플레이는 15초 안에 반드시 무언가를 주고받으므로,
-                // 양쪽 모두 가득 찬 채 15초를 멈춘 페어는 스레드 모델이 5초 send
-                // 블록에서 접었을 매치보다 이미 3배 관대하게 기다린 뒤다. 한쪽만
-                // 멈춘 정상 백프레셔(가드 테스트가 못 박은 계약)는 그대로 재무장한다.
                 if (c->read_paused) {
                     Conn* peer = feeder_of(c);
-                    const bool peer_can_free_me =
-                        peer && peer->stage == Stage::Forward && !peer->read_paused;
-                    if (peer_can_free_me) {
-                        // 재무장에는 전제가 하나 더 있다: 무기한이면 안 된다.
-                        // 여기서 무한정 기다려 주면 (a) 나는 살지만 그동안 커널이
-                        // 대신 물고 있는 내 적체가 자라고 — 재개하는 순간 그것이
-                        // 한꺼번에 읽힌다 — (b) 아무도 회수하지 않는 매치가 fd 2개와
-                        // per-IP 세션 슬롯 2개를 프로세스 재시작까지 붙든다(실측:
-                        // 45초 유지, close 0건). (a) 는 pause_credit 이 회계로
-                        // 막지만 (b) 는 시간으로만 막을 수 있다.
-                        //
-                        // 그래서 상한을 넘기면 **고장 난 쪽** 을 닫는다. 고장 난
-                        // 쪽은 나를 멈춰 세운 채 자기 tx 에서 kMaxPauseDuration 동안
-                        // 한 바이트도 빼내지 않은 peer 다 — 조금이라도 빼냈다면 그
-                        // 순간 on_writable 이 peer->tx_drained_at 을 다시 찍었을
-                        // 것이므로, 여기 닿았다는 것은 그 시간 동안 관측 가능한
-                        // 배수가 0 이었다는 뜻이다. 멈춰 세워진 나를 닫으면 이
-                        // 갈래가 지키려던 계약이 그대로 깨진다.
+                    // Read 중지는 Write 중지가 아니다. 양쪽이 read_paused여도
+                    // 쓰기 준비성으로 배수가 진행되면 정체 시계를 연장할 수 있다.
+                    if (peer && peer->stage == Stage::Forward) {
                         const TimePoint now = Clock::now();
-                        // 기산점은 pause 시작과 "상대가 마지막으로 빼낸 시각" 중
-                        // 나중 것이다. pause 이전의 배수는 이 판정과 무관하고,
-                        // pause 이후에 조금이라도 빼냈다면 그 시각부터 다시 센다.
                         const TimePoint from = (peer->tx_drained_at > c->paused_since)
                                                    ? peer->tx_drained_at
                                                    : c->paused_since;
                         const TimePoint due = from + kMaxPauseDuration;
                         if (now < due) {
-                            // 다음 확인은 상한이 실제로 지나는 시점에 건다.
-                            // now + idle_timeout() 으로 걸면 만기 주기가 pause 시작과
-                            // 어긋나 상한을 최대 한 주기(15초)까지 넘겨 버린다.
                             timers_.arm(c, due);
                             break;
                         }
-                        close_conn(peer, "백프레셔 상한 초과 (자기 tx 를 "
-                                         "kMaxPauseDuration 동안 한 바이트도 안 뺌)");
+                        close_conn(peer, "백프레셔 상한 초과 (송신 진행 없음)");
                         break;
                     }
-                    // 사유를 갈라 적는다. 둘 다 멈춘 교착과 "풀어 줄 상대가 아예
-                    // 없다" 는 원인도 후속 조치도 다른데, 한 문구로 뭉뚱그리면
-                    // 로그만 보고는 구분할 수 없다.
-                    close_conn(c, peer ? "상호 백프레셔 교착 (양쪽 read_paused)"
-                                       : "백프레셔 중 상대 소멸");
+                    close_conn(c, "백프레셔 중 상대 소멸");
                     break;
                 }
                 close_conn(c, "idle 타임아웃");
@@ -2107,20 +2128,32 @@ private:
     }
 
     // ── finalize ─────────────────────────────────────────────────────────────
-    // 상대가 사라진 매치에서 살아남은 쪽을 통지하고 닫는다.
-    // 결과 프레임(랭크드)이 있다면 그것을 보낸 뒤에 불러야 한다 — tcp_close 는
-    // shutdown(RDWR) 이라 먼저 닫으면 결과가 나가지 못한다.
+    // Stop receiving new work, retain FIFO output, and bound graceful teardown.
+    // Kernel acceptance of all bytes is not proof that the peer displayed them.
+    void drain_and_close(Conn* c) {
+        if (!alive(c) || c->drain_then_close) return;
+        c->drain_then_close = true;
+        if (c->tx.empty()) { close_conn(c, "최종 통지 배수 완료"); return; }
+        c->read_paused = true;
+        if (!reactor_->modify(c->fd, net::kWrite, c)) {
+            close_conn(c, "최종 통지 쓰기 관심 실패");
+            return;
+        }
+        c->want_write = true;
+        timers_.arm(c, Clock::now() + kFinalNoticeDrain);
+    }
+
+    // Queue notification before beginning bounded graceful peer-loss teardown.
     void close_channel_survivor(Channel* ch, const char* why) {
+        (void)why;
         Conn* s = ch->a ? ch->a : ch->b;
-        if (!s || s->stage == Stage::Dead) return;
+        if (!alive(s) || s->drain_then_close) return;
         if (s->stage == Stage::Lobby) {
-            // 수락 로비에서는 "상대가 수락하지 않았다" 를 READY(0) 으로 알린다.
-            // 스레드 모델이 보내던 것과 같은 프레임이라 클라이언트가 이미 안다.
             std::vector<uint8_t> pl{0};
             auto fr = net::build_frame(net::MsgType::READY, pl);
             queue_send(s, fr.data(), fr.size());
         }
-        close_conn(s, why);
+        drain_and_close(s);
     }
 
     void on_channel_peer_lost(Channel* ch) {
@@ -2155,14 +2188,15 @@ private:
             [this, meta, uuid, aid, bid, winner, sa, sb, la, lb, dur, mid]() -> Offload::Cont {
                 auto res = meta->post_match(uuid, aid, bid, winner, sa, sb, la, lb, dur);
                 return [this, mid, res]() { on_result_saved(mid, res); };
+            }, [this, mid] {
+                RLOG_WARN("[relay] match=" << mid << " 결과 저장 작업 예외");
+                on_result_saved(mid, std::nullopt);
             });
         if (!queued) {
-            // 종료 중이라 저장할 수 없다 — 결과를 삼키지 말고 남긴다.
+            // 제출 거절도 같은 실패 상태 전이로 처리해 대기 중인 상대 종료를 마친다.
             RLOG_WARN("[relay] match=" << mid << " uuid=" << uuid
-                      << " 종료 중 — meta 저장 생략");
-            ch->finalize_inflight = false;
-            ch->result_status = net::ResultStatus::SaveFailed;
-            send_result_frames(ch, ch->a_elo, ch->a_elo, 0, ch->b_elo, ch->b_elo, 0);
+                      << " 오프로드 종료/용량 상한 — meta 저장 제출 거절");
+            on_result_saved(mid, std::nullopt);
         }
     }
 
@@ -2191,33 +2225,72 @@ private:
         }
     }
 
-    // 채널이 붙들고 있는 소켓 복사본으로 보낸다 — Conn 이 이미 사라졌어도 된다.
+    // Results share the connection FIFO with forwarded bytes. A partial send
+    // leaves its suffix in tx; sending through a copied socket would skip tx.
     void send_result_frames(Channel* ch, int ab, int aa, int ad, int bb, int ba, int bd) {
         auto frA = build_match_result(ab, aa, ad, ch->result_status);
         auto frB = build_match_result(bb, ba, bd, ch->result_status);
-        size_t sent = 0;
-        if (ch->disconnect_side != 1 && ch->sockA.valid())
-            net::tcp_send_some(ch->sockA, frA.data(), frA.size(), sent);
-        if (ch->disconnect_side != 2 && ch->sockB.valid())
-            net::tcp_send_some(ch->sockB, frB.data(), frB.size(), sent);
+        ch->delivering_result = true;
+        if (ch->disconnect_side != 1 && alive(ch->a))
+            queue_send(ch->a, frA.data(), frA.size());
+        if (ch->disconnect_side != 2 && alive(ch->b))
+            queue_send(ch->b, frB.data(), frB.size());
+        ch->delivering_result = false;
+        // A send error can close one side recursively while both notifications
+        // are being queued. Defer survivor teardown until the other is queued.
+        if (ch->close_survivor_pending && !ch->finalize_inflight) {
+            ch->close_survivor_pending = false;
+            close_channel_survivor(ch, "결과 송신 중 상대 이탈");
+        }
     }
 
     // ── 종료 ─────────────────────────────────────────────────────────────────
+    // 서버 정지는 플레이어 이탈과 다르다. 신규 승패를 만들지 않고 자원만 반환한다.
+    void discard_on_shutdown(Conn* c) {
+        if (c->stage != Stage::Dead) {
+            c->stage = Stage::Dead;
+            g_conn_count.fetch_sub(1, std::memory_order_relaxed);
+        }
+        release_tx(c);
+        reactor_->remove(c->fd);
+        timers_.cancel(c);
+        if (c->auth_cancel) c->auth_cancel->store(true, std::memory_order_release);
+        c->handshake_slot.reset();
+        c->session_slot.reset();
+        c->lease.reset();
+        net::tcp_close(c->sock);
+    }
+
     void shutdown() {
         RLOG_INFO("[relay] shutting down...");
-        // 새 job 을 막고 이미 큐에 있는 것(진짜 끝난 경기의 결과 저장)은 마친다.
-        // 큐 깊이는 그 순간 종료된 매치 수로 한정되고, 새 연결을 받지 않으므로
-        // 드레인 중에 자라지 않는다.
+        std::vector<Handoff> pending;
+        {
+            std::lock_guard<std::mutex> lk(inbox_mu_);
+            inbox_accepting_ = false;
+            pending.swap(inbox_);
+        }
+        // close와 같은 mutex로 공개 경계를 닫았다. 이후 인계는 앞단이 돌려받는다.
+        for (auto& h : pending) {
+            discard_on_shutdown(h.a.get());
+            discard_on_shutdown(h.b.get());
+            g_match_count.fetch_sub(1, std::memory_order_relaxed);
+        }
+        pending.clear();
+        // 이미 제출된 결과 저장은 마치고 continuation까지 적용한다.
         offload_->shutdown();
         std::vector<Offload::Cont> conts;
         offload_->drain(conts);
         for (auto& c : conts) c();
-
-        for (auto& [ptr, up] : conns_) {
-            if (up->stage != Stage::Dead) net::tcp_close(up->sock);
-        }
+        for (auto& [ptr, up] : conns_) discard_on_shutdown(up.get());
+        g_match_count.fetch_sub(channels_.size(), std::memory_order_relaxed);
         conns_.clear();
         channels_.clear();
+        rooms_.clear();
+        queue_.clear();
+        dying_.clear();
+        pending_auth_.clear();
+        pending_auth_by_ip_.clear();
+        pending_auth_ip_of_.clear();
         net::tcp_close(listen_);
         RLOG_INFO("[relay] done");
     }
@@ -2255,14 +2328,14 @@ private:
     size_t                  next_shard_  = 0;
     std::mutex              inbox_mu_;
     std::vector<Handoff>    inbox_;
+    static constexpr size_t kMaxPendingHandoffs = 256;
+    bool inbox_accepting_ = true; // inbox_mu_로만 접근한다.
 
-    uint32_t next_conn_id_  = 1;
-    uint32_t next_match_id_ = 1;
+    MonotonicId conn_ids_;
+    MonotonicId match_ids_;
     // match seed 는 노출되는 값이라 스트림을 두지 않는다 (match_seed.h).
     relay::MatchSeedSource seed_src_;
-    // 룸 코드 전용 RNG. 노출되는 match seed 스트림과 분리해 씨를 뿌린다(생성자 참조).
-    // 코드는 사람이 받아 적는 5글자 자격 증명이라 예측 불가능해야 한다.
-    std::mt19937_64 code_rng_;
+
 };
 
 } // namespace

@@ -3,13 +3,13 @@
 // meta/api_server.h — cpp-httplib 기반 public/meta API 라우팅.
 //
 //   POST /v1/guest           익명 guest 플레이어 생성
-//   POST /v1/auth/verify     토큰 검증 (relay 가 QUEUE_JOIN 수신 후 호출)
-//   POST /v1/matches         경기 결과 저장 + RP 업데이트 (relay secret 보호 가능)
+//   POST /v1/auth/verify     계정 자격 증명으로 프로필 조회 (입장은 별도 1회용 ticket 소비)
+//   POST /v1/matches         경기 결과 저장 + RP 업데이트 (운영에서는 relay secret 필수)
 //   GET  /v1/leaderboard     상위 N명 조회
 //   GET  /v1/icons/catalog   아이콘 카탈로그
 //   POST /v1/icons/buy       BP 차감 + 아이콘 소유권 부여
 //   POST /v1/icons/select    소유한 아이콘을 selected_icon_id 로 저장
-//   GET  /healthz            운영 상태 확인
+//   GET  /healthz            HTTP 경로 응답 확인 (DB 읽기/쓰기 준비 여부까지 검사하지 않음)
 //
 // CORS: GET /v1/leaderboard 는 브라우저 정적 페이지에서 직접 fetch 가능하도록
 //   `Access-Control-Allow-Origin: *` 를 전 응답에 달아둔다 (OPTIONS 도 처리).

@@ -28,6 +28,11 @@ int main(int argc,char** argv) {
         for(auto i:inputs)std::cout<<hex[i>>4]<<hex[i&15];
         std::cout<<'\n';return 0;
     }
+    auto extra = inputs;
+    extra.push_back(0);
+    if(bot::verify_victory(seed,enemyProfile,extra,pick))return 9;
+    extra=inputs;extra.front()=0x20;
+    if(bot::verify_victory(seed,enemyProfile,extra,pick))return 10;
     inputs.pop_back();
     if(bot::verify_victory(seed,enemyProfile,inputs,pick))return 2;
     inputs.assign(60,0);
@@ -37,5 +42,12 @@ int main(int argc,char** argv) {
     std::vector<uint8_t> decoded;
     if(!bot::decode_inputs("001f10",decoded) || decoded.size()!=3 || decoded[1]!=31)return 5;
     for(auto bad:{"","0","20","ff","GG","00 0"})if(bot::decode_inputs(bad,decoded))return 6;
+    const char* digits="0123456789abcdef";
+    for(unsigned value=0;value<256;++value) {
+        std::string encoded{digits[value/16],digits[value%16]};
+        const bool accepted=bot::decode_inputs(encoded,decoded);
+        if(accepted!=(value<32))return 7;
+        if(accepted&&(decoded.size()!=1||decoded[0]!=value))return 8;
+    }
     return 0;
 }

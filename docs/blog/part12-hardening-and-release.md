@@ -6,7 +6,7 @@
 
 > **공개 접속의 현재 경로:** [Part 16](part16-secure-admission.md)은 WSS 게이트웨이와 일회용 게임 입장권을 추가한다. 이 장의 raw TCP 명령은 로컬/내부 연결을 설명한다. 공개 포트는 WSS, relay는 `--loopback-only`이며, 기존 token 필드에는 장기 계정 토큰 대신 입장권을 넣는다.
 
-> **2026-09-11 현재 코드 반영:** 주 서버는 Mac 하드웨어의 Linux, 예비 서버는 Windows다. 공개 ranked 접속은 Part 16의 WSS·일회용 입장권을 사용한다. PvP 결과의 서버 규칙 검증은 아직 남는다. [출시 차단 항목과 이전 절차](../release-readiness.md)를 먼저 확인한다. 이 글의 배포 절차가 보안 출시 승인을 의미하지 않는다.
+> **현재 코드 반영:** 주 서버는 Mac 하드웨어의 Linux, 예비 서버는 Windows다. 공개 ranked 접속은 Part 16의 WSS·일회용 입장권을 사용한다. PvP 결과는 [Part 18](part18-authoritative-results.md)의 서버 입력 재실행으로 검증한다. [출시 차단 항목과 이전 절차](../release-readiness.md)를 먼저 확인한다. 이 글의 배포 절차가 보안 출시 승인을 의미하지 않는다.
 
 ## 이번 Part의 구현 계약
 
@@ -46,6 +46,41 @@ Part 11 까지 기능은 다 들어왔다. guest 발급, 토큰 인증, RP/XP/BP
 9. **릴리스 빌드와 패키징** — 컴파일 타임 기본값 주입, 플랫폼별 번들.
 10. **운영** — systemd 격리, 백업과 **복구**, secret 회전.
 11. **전체 회귀 검증** — 이 장의 존재 이유.
+
+### 1.3 공격자가 바꿀 수 있는 값에서 검증 계약을 만든다
+
+위협 모델은 보호할 자산, 공격자의 능력, 데이터 이동 경로와 신뢰 경계를 정리한 뒤
+검증할 불변식을 정하는 작업이다. 이 서비스에서 자산은 계정 접근 권한, RP/XP/BP와
+소유 아이콘, 경기의 입력·결과, 다른 사용자의 접속 가능성이다.
+
+공격자는 자기 클라이언트를 수정하고 유효한 체크섬을 붙인 프레임을 직접 만들 수 있다.
+요청을 반복하거나 늦출 수 있고 두 계정을 함께 통제할 수도 있다. 서버 비밀키와 DB를
+이미 장악했다고 가정하는 모델은 별도다. 토큰 파일 유출은 계정 권한을 넘기는 경계라
+파일 권한·폐기·복구도 함께 다룬다.
+
+입력 경로는 `클라이언트 → TLS 진입점 → relay 연결/경기 → RankedGame → meta → DB`다.
+같은 프로세스 안에서도 외부 프레임을 경기 상태로 바꾸는 지점은 신뢰 경계다.
+
+| 공격자가 정하는 것 | 서버가 지켜야 할 계약 | 구현에서 확인할 곳 |
+|---|---|---|
+| 프레임 타입과 본문 | 서버 전용 상태 프레임은 상대에게 전달하지 않는다 | `net/framing.h`의 `is_server_only_type`, 두 relay의 전달 경로 |
+| 입력의 시각·개수·마스크 | 형식, 연속성, 재전송 일치, 허용된 진행량을 검사한다 | `server/ranked_game.h`의 `observe` |
+| 승패·점수 신고 | 두 신고가 같아도 서버가 재실행한 종료 결과만 저장한다 | `RankedGame::result`, relay의 결과 저장 경로 |
+| player ID처럼 보이는 값 | 입력 주체는 서버의 연결/채널 관계에서 정한다 | relay의 Conn/Channel, meta의 인증된 요청 처리 |
+| 반복·지연·느린 수신 | 연결·작업·대기 바이트·시간 예산을 각 경계에서 제한한다 | §8, [Part 14](part14-event-loop-scaling.md) |
+
+형식에 맞는 입력도 권한이 없을 수 있다. 인증된 계정도 다른 경기의 참가자는 아닐 수 있다.
+TLS는 전송 경로를 보호하지만 접속한 클라이언트의 주장이 사실인지 판정하지 않는다.
+공개 FNV 체크섬도 공격자가 다시 계산할 수 있으므로 메시지 인증으로 사용하지 않는다.
+
+검사는 거절뿐 아니라 뒤에 보낸 정상 입력의 전달과 보상 무변경을 함께 확인한다.
+`python/tests/test_relay_adversarial.py`의 서버 전용 4타입 검사와 상충/공모 결과 신고
+검사가 이 경계를 관찰한다. 전체 가용성·사람이 직접 조작했는지·담합 방지는 별도 정책과
+측정 대상이다. [134차시](../learn/index.html#lesson-134)는 연결에 고정한 주체와 배치
+원자성을 작은 입력 게이트로 구현한다.
+
+구조화 방법은 [OWASP 위협 모델링 가이드](https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html),
+요청마다 권한을 확인하는 원칙은 [OWASP 권한 검사 가이드](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)를 참고한다.
 
 ## 2. 토큰 생성 — `random_device` 의 함정
 
@@ -262,13 +297,27 @@ relay 가 "secret 없이 meta 를 부르는 것" 을 막았다면, meta 는 대�
     }
 ```
 
-양쪽 다 시작 시점에 거부하므로 "실수로 RP 조작이 가능한 상태로 배포되는" 경로가 양끝에서 닫힌다. 로컬 테스트만 `--allow-public-matches` 라는 *명시적* 플래그로 빠져나갈 수 있다. 기본값이 안전하고, 위험한 쪽을 택하려면 타이핑을 더 해야 한다 — 이것이 보안 기본값 설계의 일반 규칙이다.
+기본 모드에서는 양쪽이 시작 시점에 비밀키 누락을 거절한다. 개발용 `--allow-public-matches`를 비밀키 없이 지정하면 meta는 숫자 loopback 주소 `127.0.0.1`·`::1`만 허용하고, 전체 인터페이스·공인/사설 주소·호스트 이름은 DB를 열기 전에 거절한다. 로컬 바인드는 다른 로컬 프로세스를 인증하지 않으며, 프록시로 이 경로를 외부에 공개하면 그 제한을 우회해 노출할 수 있다. 운영에는 공유 비밀과 공개 경로 제한이 여전히 필요하다.
+
+**현재 소스 발췌 — `meta/main.cpp`**
+
+```cpp
+// The unauthenticated result route is a local test escape hatch only.
+    // Numeric addresses avoid depending on hostname resolution for this boundary.
+    if (args.relay_secret.empty() && args.allow_public_matches &&
+        args.http_host != "127.0.0.1" && args.http_host != "::1") {
+        std::fprintf(stderr,
+                     "[meta] --allow-public-matches without a secret requires a "
+                     "numeric loopback bind (127.0.0.1 or ::1).\n");
+        return 2;
+    }
+```
 
 meta 프로세스 *내부* 의 나머지 하드닝은 Part 10 에서 이미 구현·해설했으므로 여기서 코드를 다시 싣지 않고 목록으로만 회수한다.
 
 - **OS CSPRNG 토큰** — `fill_random` + `gen_token` (§2).
 - **상수 시간 secret 비교** — `X-Relay-Secret` 검증의 타이밍 사이드채널 방지
-  (`meta/api_server.cpp`의 `ct_equal`).
+  (`meta/credentials.cpp`의 `equal_secret`, 동일 길이 내용 비교).
 - **요청 본문 상한** — `set_payload_max_length(64 * 1024)` 로 거대 body 플러딩 차단.
 - **per-IP 레이트 리밋** — 고정 윈도우 카운터. 직접 연결은 소켓 peer IP를 키로 쓰고, 직접 peer가 loopback인 로컬 프록시 구성에서만 전달된 client IP 헤더를 신뢰한다.
 - **`find_int` 오버플로 가드** — `INT64_MAX` 초과 입력에 `std::nullopt` (§8.5).
@@ -598,22 +647,30 @@ public:
     static std::shared_ptr<IpAdmission> acquire(std::string key, Kind kind)
     {
         if (key.empty()) key = "unknown";
+        // Finish ownership allocations before publishing a reservation. If the
+        // shared_ptr control block fails, its unregistered object does no cleanup.
+        auto candidate = std::shared_ptr<IpAdmission>(
+            new IpAdmission(std::move(key), kind));
         std::lock_guard<std::mutex> lk(mu_);
-        auto&        table = (kind == Kind::Handshake) ? handshakes_ : sessions_;
+        auto& table = (kind == Kind::Handshake) ? handshakes_ : sessions_;
         const size_t limit = (kind == Kind::Handshake) ? kMaxHandshakesPerIp
                                                        : session_limit_;
-        auto         it    = table.find(key);
-        const size_t n     = (it == table.end()) ? 0u : it->second;
+        auto it = table.find(candidate->key_);
+        const size_t n = (it == table.end()) ? 0u : it->second;
         if (n >= limit) return {};
-        table[key] = n + 1;
-        return std::shared_ptr<IpAdmission>(new IpAdmission(std::move(key), kind));
+        // try_emplace may allocate. Failure leaves no reservation to roll back.
+        if (it == table.end()) it = table.try_emplace(candidate->key_, 0).first;
+        ++it->second;
+        candidate->registered_ = true; // No throwing work after this commit.
+        return candidate;
     }
 
     ~IpAdmission()
     {
+        if (!registered_) return;
         std::lock_guard<std::mutex> lk(mu_);
         auto& table = (kind_ == Kind::Handshake) ? handshakes_ : sessions_;
-        auto  it    = table.find(key_);
+        auto it = table.find(key_);
         if (it == table.end()) return;
         if (--it->second == 0) table.erase(it);
     }
@@ -627,6 +684,7 @@ private:
 
     std::string key_;
     Kind        kind_;
+    bool        registered_ = false;
 
     inline static std::mutex                             mu_;
     inline static std::unordered_map<std::string, size_t> handshakes_;
@@ -638,9 +696,18 @@ private:
 
 표가 프로세스 전역이라는 점이 중요하다. 이벤트 루프 릴레이는 포워딩을 다른 스레드로 넘기는데, 그쪽에서 연결을 닫아도 앞단이 센 수가 함께 줄어야 한다 — 루프마다 표를 두면 인계된 뒤의 반납이 엉뚱한 표로 간다.
 
-전역 상한과 IP별 상한은 지키는 대상이 다르다. 전역 상한은 **프로세스**를 지킨다 — 스레드·핸들이 무한정 늘어나 서버 자체가 죽는 것을 막는다. 그러나 전역 상한만 있으면 한 IP 가 그 예산을 먼저 다 채워 다른 모든 사용자를 굶길 수 있다. IP별 상한은 **출처 간 공정성**을 지킨다. 예산을 겹으로 두되 각 겹이 다른 실패 모드를 막게 하는 이 구조는 rate limit 일반론이기도 하다(meta 의 per-IP 버킷도 같은 계열, §9.2).
+전역 상한과 IP별 상한은 지키는 대상이 다르다. 전역 상한은 **프로세스**를 지킨다 — 스레드·핸들이 무한정 늘어나 서버 자체가 죽는 것을 막는다. 그러나 전역 상한만 있으면 한 IP 가 그 예산을 먼저 다 채워 다른 모든 사용자를 굶길 수 있다. IP별 상한은 **한 출처의 동시 점유**를 제한한다. 공유 IP의 사용자별 공정성이나 여러 IP를 쓰는 행위자의 제한까지 보장하지 않는다. 예산을 겹으로 두되 각 겹이 다른 실패 모드를 막게 하는 이 구조는 rate limit 일반론이기도 하다(meta 의 per-IP 버킷도 같은 계열, §9.2).
 
-해제는 RAII 가 보장한다 — 어떤 경로로 끝나든(정상·타임아웃·예외) 카운트가 샐 걱정이 없다.
+**등록 전에 실패할 수 있는 작업을 끝낸다.** RAII는 소유 객체를 확보한 뒤의
+반납을 돕는다. 카운터를 먼저 올리고 new 또는 shared_ptr 제어 블록을 할당하면,
+실패 때 반납 주체가 없거나 잠금 안에서 소멸자가 같은 mutex를 다시 잡을 수 있다.
+현재 acquire는 미등록 candidate를 먼저 만들고 mutex 안에서 상한과 map 삽입을
+검사한 뒤 카운터 증가·registered_=true를 확정한다. 삽입까지 실패해도 예약은 남지 않는다.
+소멸자의 registered_ 검사는 미등록 후보가 다른 연결의 예약을 지우는 것도 막는다.
+
+성공한 핸들의 마지막 참조가 없어지면 반납된다. 소유 참조를 계속 붙들거나 순환 참조를
+만드는 코드는 반납을 늦출 수 있으므로, 단계 전환과 실패 경로의 소유권을 함께 확인한다.
+메모리 부족 예외가 호출자 전체에서 어떻게 처리되는지는 이 작은 등록 계약과 별도다.
 
 ### 슬롯의 수명이 상한의 의미를 바꾼다
 
@@ -724,7 +791,7 @@ SIGPIPE 가 "죽은 소켓에 쓰는" 문제라면, fd 소유권은 "살아있�
 
 공개 서버에서 이것은 단순 크래시가 아니라 **A 의 데이터가 엉뚱한 클라이언트 Y 로 새거나, Y 의 데이터를 X 의 코드가 읽는** 교차 연결 유출이다. 공격자가 접속/절단을 빠르게 반복해 이 경합을 노릴 수 있다.
 
-### 7.2 `shared_ptr<int>` 로 소유권을 모은다
+### 7.2 `shared_ptr<NativeSocket>` 로 소유권을 모은다
 
 수정은 fd 를 참조 카운트 소유 핸들로 감싸는 것이다. 실제 `::close` 는 "마지막 복사본이 사라지는 순간" 딱 한 번만 일어나게 한다.
 
@@ -733,11 +800,12 @@ SIGPIPE 가 "죽은 소켓에 쓰는" 문제라면, fd 소유권은 "살아있�
 ```cpp
 struct TcpSocket {
     std::shared_ptr<StreamTransport> transport; // client WSS; never a reactor fd
-    std::shared_ptr<int> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
+    std::shared_ptr<NativeSocket> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
 
-    int  fd()    const { return fdh ? *fdh : -1; }
-    bool valid() const { return transport ? transport->alive() : fdh && *fdh >= 0; }
-};
+    NativeSocket fd() const { return fdh ? *fdh : kInvalidSocket; }
+    bool valid() const { return transport ? transport->alive() : fdh && socket_valid(*fdh); }
+}
+;
 ```
 
 새 fd 를 만드는 모든 경로(`tcp_listen`/`tcp_accept`/`tcp_connect`)는 `make_owned` 로 감싼다. deleter 가 정확히 한 번 `close_fd` 를 부른다.
@@ -745,13 +813,18 @@ struct TcpSocket {
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 새로 생성된 fd 를 참조 카운트 소유 핸들로 감싼다.
-//   마지막 복사본이 사라질 때 deleter 가 close_fd 로 정확히 한 번 닫는다.
-static TcpSocket make_owned(int fd) {
+static TcpSocket make_owned(NativeSocket fd) {
     TcpSocket s;
-    s.fdh = std::shared_ptr<int>(new int(fd), [](int* p) {
-        if (p) { close_fd(*p); delete p; }
-    });
+    try {
+        // Keep the real handle unowned until both allocations succeed. If the
+        // control-block allocation fails, shared_ptr deletes only the sentinel.
+        auto owner = std::shared_ptr<NativeSocket>(new NativeSocket(kInvalidSocket),
+            [](NativeSocket* p) { if (p) { close_fd(*p); delete p; } });
+        *owner = fd;
+        s.fdh = std::move(owner);
+    } catch (const std::bad_alloc&) {
+        close_fd(fd);
+    }
     return s;
 }
 ```
@@ -780,8 +853,8 @@ graph TB
 void tcp_close(TcpSocket& s) {
     if (s.transport) { s.transport->close(); return; }
     if (!s.fdh) return;
-    int fd = *s.fdh;
-    if (fd >= 0) {
+    NativeSocket fd = *s.fdh;
+    if (socket_valid(fd)) {
 #ifdef _WIN32
         ::shutdown(fd, SD_BOTH);
 #else
@@ -802,7 +875,7 @@ void tcp_close(TcpSocket& s) {
 ```cpp
 void Session::Close() {
     quit = true;
-    // 소켓을 먼저 닫아(shutdown) accept()/recv() 블로킹 스레드를 깨운다.
+    // 공개된 연결에 shutdown을 요청한다. accept 워커는 논블로킹 폴링에서 quit를 본다.
     //   sockMu_ 로 워커 스레드의 publish 와 직렬화 — Close 가 quit 를 먼저 세팅하므로
     //   워커는 이 잠금 이후 publish 하지 않거나(잠금 안에서 quit 재확인), 이미 publish
     //   한 값을 우리가 본다. (shared_ptr 멤버 data race 방지)
@@ -811,7 +884,8 @@ void Session::Close() {
         if (listening && listenSock.valid()) tcp_close(listenSock);
         if (sock.valid()) tcp_close(sock);
     }
-    // shutdown 후 스레드 join (블로킹 해제됨). join 은 반드시 잠금 밖에서.
+    // 공개 소켓에는 shutdown을 요청했지만, DNS/connect 등 미공개 작업의
+    // 완료 시간까지 보장하지는 않는다. join은 워커가 쓸 잠금 밖에서 수행한다.
     if (ath.joinable()) ath.join();
     if (qth.joinable()) qth.join();
     if (rth.joinable()) rth.join();
@@ -854,8 +928,8 @@ void Session::Close() {
     }
     // 게임 sendQ / HASH pair 도 함께 비움 — 같은 Session 객체 재사용 시 이전
     // 연결의 stale 프레임이 새 연결의 ioThread 에서 선두로 나가는 것 방지.
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     // MATCH_RESULT 도 초기화. ClearGameOverChoices 만 의존하면 타이틀→새 매치
     // 경로에서 이전 라운드 결과가 새 매치 게임오버 시점에 즉시 읽히는 경계가
     // 있었다. Close 는 세션 경계마다 반드시 실행되므로 여기서 보장.
@@ -867,15 +941,17 @@ void Session::Close() {
 }
 ```
 
-앞의 세 단계가 소켓 소유권의 전부다.
+종료 절차에서 구분할 세 단계는 다음과 같다.
 
-1. **shutdown** (잠금 안) — 워커들의 `recv`/`accept` 를 EOF 로 깨운다. 아직 fd 는 살아있다.
+1. **shutdown** (잠금 안) — 공개된 연결의 전송 방향을 종료한다. accept 워커는 논블로킹 폴링에서 quit를 확인한다. 아직 핸들은 소유하고 있다.
 2. **join** (잠금 밖) — 워커 스레드가 모두 끝나길 기다린다. join 을 잠금 안에서 하면 워커가 `sockMu_` 를 잡으려다 데드락이므로, 반드시 잠금을 풀고 join 한다.
-3. **reset** (잠금 안) — `sock = TcpSocket{}` 로 소유자 복사본을 버린다. 워커가 모두 끝났으니 이제 남은 마지막 참조이고, 여기서 deleter 가 실제 `::close` 를 부른다.
+3. **reset** (잠금 안) — `sock = TcpSocket{}` 로 소유자 복사본을 버린다. 이것이 마지막 소유 참조라면 deleter가 실제 `::close`를 부른다. 다른 소유 복사본이 남아 있다면 그 복사본의 해제까지 핸들이 유지된다.
 
 `sockMu_` 의 역할은 *shared_ptr 멤버 변수 자체* 에 대한 동시 재대입을 직렬화하는 것이다. 워커는 멤버를 직접 쓰지 않고 잠금 아래에서 *값으로 복사* 해 쓴다 — `net/session.cpp` 전반의 `{ std::lock_guard<std::mutex> lk(sockMu_); s = sock; }` 패턴이 그것이다. 서로 다른 복사본을 각자 들고 read/close 하는 것은 §7.2 의 계약상 안전하다.
 
-함수 뒷부분이 큐를 전부 비우는 이유도 같은 계열이다. `Session` 객체는 타이틀 → 새 매치 경로에서 **재사용** 되므로, 이전 연결의 stale 프레임이나 이전 라운드의 `MATCH_RESULT` 가 남아 있으면 새 연결의 첫 프레임으로 나가거나 새 게임오버 시점에 즉시 읽힌다. `Close` 는 세션 경계마다 반드시 실행되는 유일한 지점이라 여기서 전부 초기화한다.
+함수 뒷부분이 송신·룸·매칭·채팅 큐와 경기 결과를 정리하는 이유도 같은 계열이다. `Session` 객체는 타이틀 → 새 매치 경로에서 **재사용** 되므로, 이전 연결의 stale 프레임이나 이전 라운드의 `MATCH_RESULT` 가 남아 있으면 새 연결의 첫 프레임으로 나가거나 새 게임오버 시점에 즉시 읽힌다. `Close`로 워커 수명을 끝낸 뒤 새 시작 경로가 수신 버퍼·remoteInputs·틱 상태를 초기화한다. 각 시작 메서드는 hasUnjoinedWorkers를 먼저 검사하므로 아직 join하지 않은 워커가 있으면 상태를 바꾸지 않고 거절한다.
+
+공개 전 로컬 후보에서 진행 중인 DNS/connect에는 shutdown할 공유 소켓이 없을 수 있다. 현재 native 연결 수립은 블로킹이며 애플리케이션 마감시간이 없어 Close의 join도 그 반환을 기다릴 수 있다. 종료 요청을 전달하는 것과 제한 시간 안에 모든 워커가 끝남을 보장하는 것은 별도 계약이다.
 
 ## 8. 신뢰할 수 없는 입력 · DoS 하드닝
 
@@ -885,17 +961,17 @@ relay 와 host 는 공개 IP 에서 임의의 피어로부터 바이트를 받�
 
 lockstep 의 INPUT 프레임은 `[from:4][cnt:2][inputs:cnt]` 다 ([Part 6](./part6-lockstep-networking.md)). 신뢰할 수 없는 피어는 `cnt` 를 거대하게, `from` 을 아무 tick 으로나 보낼 수 있다.
 
+`net/input_message.h`에서 payload 전체를 먼저 검사한다. 헤더6바이트·정확한 count·알려진 마스크·래핑 없는 틱 구간을 확인한 뒤 Session이 틱 거리와 큐 상한을 적용한다. 예를 들어 from=0xFFFFFFFE, count=4는 단순히 from+i를 계산하면 뒤의 두 항목이0과1로 돌아온다. 이 작은 값은 수신 초기의 거리 검사만으로 걸러지지 않으므로 덧셈 전에 구간 자체를 거절해야 한다. 마지막 항목의 비트가 잘못되었을 때도 배치 전체를 적용하지 않는다. 구조가 유효한 배치도 현재 거리 정책을 통과하는 신규 키가 전부 들어갈 수 있는지 먼저 센다. 용량이 모자라면 map과 watermark를 바꾸지 않고 ACK 없이 실패를 표시한다. 거리 밖 틱 폐기와 기존 키의 값 유지 정책은 별도다.
+
 **현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
     case MsgType::INPUT: {
-        if (f.payload.size() >= 6) {
-            const uint8_t* p = f.payload.data();
-            uint32_t from = le_read_u32(p);
-            uint16_t cnt = le_read_u16(p+4);
-            // 페이로드 크기 검증: 헤더(6) + cnt 바이트가 실제 크기 이내인지 확인
-            if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
-            const uint8_t* arr = p+6;
+        InputBatchView batch;
+        if (decode_input_payload(f.payload, batch)) {
+            const uint32_t from = batch.first_tick;
+            const uint16_t cnt = batch.count;
+            const uint8_t* arr = batch.masks;
             // [보안] 신뢰할 수 없는 피어의 INPUT 처리:
             //  - remoteInputs 무한 증가로 인한 메모리 고갈을 막기 위해 누적 크기를 제한.
             //  - tick 래핑/원거리 tick 주입으로 인한 desync 를 막기 위해 현재 수신
@@ -905,12 +981,25 @@ lockstep 의 INPUT 프레임은 `[from:4][cnt:2][inputs:cnt]` 다 ([Part 6](./pa
             {
                 std::lock_guard<std::mutex> lk(inMu);
                 const uint32_t cur = lastRemoteTick.load();
+                // Check all eligible new keys before applying this batch. Partial
+                // admission could ACK beyond an input we silently dropped.
+                size_t newEntries = 0;
+                for (uint16_t i = 0; i < cnt; ++i) {
+                    const uint32_t tick = from + i;
+                    const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
+                    if (dist <= kMaxTickWindow && remoteInputs.find(tick) == remoteInputs.end())
+                        ++newEntries;
+                }
+                if (newEntries > kMaxRemoteInputs - remoteInputs.size()) {
+                    NET_WARN("[NET] INPUT storage limit reached; rejecting entire batch");
+                    connectionFailed = true;
+                    quit = true;
+                    break;
+                }
                 for (uint16_t i=0;i<cnt;++i) {
                     const uint32_t tick = from + i;
                     const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
                     if (dist > kMaxTickWindow) continue;  // 윈도우 밖(가비지/래핑) 폐기
-                    if (remoteInputs.size() >= kMaxRemoteInputs &&
-                        remoteInputs.find(tick) == remoteInputs.end()) continue;  // 버퍼 포화
                     remoteInputs.emplace(tick, arr[i]);
                     if (tick > lastRemoteTick) lastRemoteTick = tick;
                 }
@@ -924,43 +1013,39 @@ lockstep 의 INPUT 프레임은 `[from:4][cnt:2][inputs:cnt]` 다 ([Part 6](./pa
 
 세 겹이다.
 
-- **페이로드 경계** — `6 + cnt > payload.size()` 면 즉시 버린다. 선언된 `cnt` 만큼의 입력 바이트가 실제로 들어있지 않으면 `arr[i]` 는 버퍼 오버리드다.
-- **`kMaxTickWindow` (4096)** — 현재 수신 지점 `cur` 에서 과거/미래로 4096 tick 을 벗어난 tick 은 폐기한다. `dist` 를 부호 없는 절댓값으로 계산하므로 tick 래핑(`uint32_t` 오버플로)으로 인한 거대 거리도 윈도우 밖으로 잡힌다. 악의적 피어가 `from = 0xFFFFFFF0` 같은 값으로 desync 를 유발하려 해도 무시된다.
-- **`kMaxRemoteInputs` (8192)** — `remoteInputs` 맵의 크기를 8192 로 제한한다. 이미 포화 상태에서 *새* tick 을 추가하려는 시도는 버린다(기존 tick 의 덮어쓰기는 허용).
+- **메시지 전체** — 헤더6바이트·양수 count·정확한 남은 길이·모든 알려진 입력 비트·래핑 없는 틱 구간을 확인한다. 이 검사가 끝나기 전에 큐에 일부를 적용하지 않는다.
+- **`kMaxTickWindow` (4096)** — 현재 수신 지점 `cur` 에서 과거/미래로 4096 tick 을 벗어난 tick 은 폐기한다. 배치의 래핑은 앞선 구간 검사가 막고, 거리 검사는 이미 유효한 틱의 현재 지점 대비 거리를 제한한다. 덧셈이 먼저 래핑해 작은 값이 되면 거리만으로는 막을 수 없다.
+- **`kMaxRemoteInputs` (8192)** — `remoteInputs` 맵의 크기를 8192 로 제한한다. 이미 포화 상태에서 *새* tick 을 추가하려는 시도는 버린다(기존 tick은 emplace가 유지).
 
-### 8.2 느린 송신(slow-loris) 타임아웃
+### 8.2 느린 수신자에 대한 송신 시간 제한
 
-논블로킹 소켓에 `send` 가 `EWOULDBLOCK` 을 반환하면 커널 송신 버퍼가 가득 찼다는 뜻이다 — 보통 상대가 느리거나, *고의로 천천히 읽는* 피어다. 무한정 재시도하면 한 느린 피어가 송신 스레드를 영원히 붙잡는다.
+논블로킹 send의 WouldBlock은 지금 더 받아들일 송신 공간이 없다는 신호다. 상대가 읽지 않거나 전송 경로가 느려지는 등 여러 원인이 가능하다. 현재 네이티브 함수는 시작 시각+5초를 전체 마감시간으로 두고 매 시도 전에 검사한다. 조금씩 진행돼도 갱신하지 않으므로 무진행 타이머만 둘 때 생기는 무기한 연장을 막는다. Windows·POSIX의 네이티브 경로에 같은 정책을 적용하며 WSS 큐의 계약은 별도다.
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
     if (s.transport) return s.transport->send(data,len);
-    const int fd = s.fd();
-    if (fd < 0) return false;
+    const NativeSocket fd = s.fd();
+    if (!socket_valid(fd)) return false;
     const uint8_t* p = static_cast<const uint8_t*>(data);
     size_t sent = 0;
-    constexpr auto kBlockedTimeout = std::chrono::seconds(5);
-    std::chrono::steady_clock::time_point blockedSince{};
+    // Total call budget: intermittent progress must not restart the clock.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sent < len) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
 #ifdef _WIN32
-        int n = ::send(fd, (const char*)(p + sent), (int)(len - sent), 0);
+        int n = ::send(fd, (const char*)(p + sent), io_chunk_size(len - sent), 0);
         if (n < 0) {
             int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
-                if (err == WSAEWOULDBLOCK) {
-                    auto now = std::chrono::steady_clock::now();
-                    if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
-                    if (now - blockedSince >= kBlockedTimeout) return false;
-                }
+            if (err == WSAEWOULDBLOCK) {
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
-        if (n == 0) return false; // 연결 종료
+        if (n == 0) return false; // nonempty request made no progress
 #else
         int flags = 0;
 #ifdef MSG_NOSIGNAL
@@ -970,25 +1055,21 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                auto now = std::chrono::steady_clock::now();
-                if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
-                if (now - blockedSince >= kBlockedTimeout) return false;
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
-        if (n == 0) return false; // 연결 종료
+        if (n == 0) return false; // nonempty request made no progress
 #endif
-        blockedSince = {};
         sent += (size_t)n;
     }
     return true;
 }
 ```
 
-`kBlockedTimeout` 은 5초다. 한 번이라도 진척이 있으면 루프 끝의 `blockedSince = {};` 가 타이머를 리셋하므로, 정상적으로 느린 연결은 살아남고 *전혀 진척이 없는* 연결만 5초 뒤 끊긴다. POSIX 분기의 `MSG_NOSIGNAL` 이 §6.1 에서 말한 이중 방어의 두 번째 겹이다.
+전체 마감시간은 시작 뒤5초로 고정된다. WouldBlock·EINTR·부분 진행 뒤의 재시도 모두 이 한 시각을 검사한다. 정상 연결도 예산 안에 완료하지 못하면 실패할 수 있으므로 시간 제한은 운영 지연 정책이다. 연결이 끊겼을 때 이미 수락된 접두사는 되돌릴 수 없다. POSIX의 MSG_NOSIGNAL은 해당 호출의 SIGPIPE 발생을 억제하며 오류 반환까지 없애지는 않는다.
 
 ### 8.3 단계 전환 버퍼와 채팅 큐 상한
 
@@ -1044,25 +1125,37 @@ relay 는 연결, 30초 수락 lobby, 양방향 forwarder 에 스레드를 쓴�
             ++active_;
         }
 
+        std::thread worker;
         try {
-            std::thread([this, work = std::forward<Fn>(fn)]() mutable {
+            worker = std::thread(
+                [this, work = std::make_unique<std::decay_t<Fn>>(std::forward<Fn>(fn))]() mutable {
                 Completion completion{this};
+                // Locals die in reverse order. Destroy the task (including its
+                // captures) before Completion releases the active slot.
+                auto ownedWork = std::move(work);
                 try {
-                    work();
+                    (*ownedWork)();
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "[%s] worker failed: %s\n", name_, e.what());
                 } catch (...) {
                     std::fprintf(stderr, "[%s] worker failed: unknown exception\n", name_);
                 }
-            }).detach();
+            });
         } catch (const std::exception& e) {
-            finish();
             std::fprintf(stderr, "[%s] worker launch failed: %s\n", name_, e.what());
+            finish();
             return false;
         } catch (...) {
-            finish();
             std::fprintf(stderr, "[%s] worker launch failed: unknown exception\n", name_);
+            finish();
             return false;
+        }
+        // A failed detach must not destroy a joinable temporary. The task
+        // already started, so only its Completion releases the slot.
+        try {
+            worker.detach();
+        } catch (...) {
+            worker.join(); // Fallback may block. A join failure is fail-fast.
         }
         return true;
     }
@@ -1070,7 +1163,12 @@ relay 는 연결, 30초 수락 lobby, 양방향 forwarder 에 스레드를 쓴�
 
 거부 사유가 둘로 나뉘어 있는 것이 중요하다. `!accepting_` 은 **종료 중**(조용히 false), `active_ >= maxActive_` 는 **포화**(stderr 로 알림)다. 운영자는 로그로 둘을 구별할 수 있어야 한다 — 전자는 정상 종료이고 후자는 용량 문제이거나 공격이다.
 
-`++active_` 는 스레드를 만들기 *전* 에 올린다. 스레드가 시작된 뒤에 올리면 `launch` 가 반환한 직후 `wait()` 가 `active_ == 0` 을 보고 통과하는 창이 생긴다. 대신 `std::thread` 생성이 예외를 던지면 반드시 되돌려야 하고, 그게 `catch` 절의 `finish()` 다. 스레드 안에서는 `Completion` RAII 가 정상 반환·예외·`work()` 의 어떤 경로에서도 `finish()` 를 보장한다.
+`++active_` 는 스레드를 만들기 *전* 에 올린다. 스레드가 시작된 뒤에 올리면 `launch` 가 반환한 직후 `wait()` 가 `active_ == 0` 을 보고 통과하는 창이 생긴다. 대신 `std::thread` 생성이 예외를 던지면 반드시 되돌려야 하고, 그게 `catch` 절의 `finish()` 다. 스레드 안에서는 Completion을 먼저 선언하고 지역 ownedWork를 나중에 선언한다.
+ownedWork가 callable과 캡처를 정리한 뒤 Completion이 active를 줄인다. 정상 반환과
+C++ 예외 처리의 순서를 묶는 장치이며 강제 종료까지 정리를 보장하지는 않는다.
+detach 실패는 작업이 이미 시작된 경우이므로 생성 실패 catch와 분리해 join으로
+회수한다. 이 폴백은 launch를 막을 수 있으며 join 자체 실패는 fail-fast한다.
+wait는 작업과 캡처 완료를 기다리고, OS 스레드 종료·TLS 소멸까지 join하지는 않는다.
 
 `finish()` 자체에도 함정이 하나 있다.
 
@@ -1105,7 +1203,7 @@ WorkerGroup s_workers{"relay", kMaxRelayWorkers};
 
 연결 worker 는 최대 256개(§6.2 의 `kMaxConnWorkers`), queue lobby 와 forwarder 를 합친 relay worker 는 최대 512개다. 두 번째 상한이 따로 필요한 이유는 공격자가 첫 frame 을 빨리 보내 연결 worker 를 즉시 통과한 뒤 30초짜리 lobby 스레드를 무제한 만들 수 있기 때문이다. 상한 도달이나 생성 실패는 해당 연결/매치만 닫고 서버는 계속 동작한다.
 
-**종료 drain 이 이 장의 관심사다.** §6.3 의 종료 순서에서 `connWorkers.wait()` 와 `relay::waitForShutdown()` 이 하는 일이 정확히 `active_ == 0` 대기다. 워커들이 `mm`/`rr`/`MetaClient` 를 raw reference 로 붙잡고 있으므로, 이 대기를 건너뛰면 `main` 의 스택 객체가 워커보다 먼저 파괴된다 — SIGTERM 을 받은 순간 진행 중이던 매치가 하나라도 있으면 바로 재현되는 use-after-free 다.
+**종료 drain 이 이 장의 관심사다.** §6.3 의 종료 순서에서 `connWorkers.wait()` 와 `relay::waitForShutdown()` 이 하는 일이 정확히 `active_ == 0` 대기다. 워커들이 `mm`/`rr`/`MetaClient` 를 raw reference 로 붙잡고 있으므로, 이 대기를 건너뛰면 `main` 의 스택 객체가 워커보다 먼저 파괴된다 — 진행 중인 작업의 실제 접근과 파괴 순서가 겹치면 use-after-free가 발생할 수 있다.
 
 이 경로에는 자동 회귀가 붙어 있다. `python/tests/test_relay_meta_smoke.py` 의 `test_relay_sigterm_drains_active_match` 가 매치를 붙여 놓은 상태에서 relay 에 SIGTERM 을 보내고, 프로세스가 종료 코드 0 으로 깨끗이 내려오는지 확인한다.
 
@@ -1212,7 +1310,7 @@ graph TB
 
 1. **same-origin fetch.** 랭킹 페이지 `web/ranking/index.html` 은 API 주소를 하드코딩하지 않고 상대 경로로 부른다 — `fetch('/v1/leaderboard?limit=50', ...)`. 정적 파일과 `/v1/*` 가 **같은 origin** 에서 나오기 때문에 가능한 코드다. CORS 프리플라이트도, 배포마다 바꿔야 하는 API 베이스 URL 도 없다. Caddy 를 빼고 페이지를 다른 호스트에 올리는 순간 이 한 줄이 깨진다.
 2. **meta 의 loopback bind 정당화.** `handle /v1/*` 의 `reverse_proxy 127.0.0.1:8080` 이 유일한 진입로다. meta 를 `0.0.0.0` 에 열 이유가 없다.
-3. **이 API 예제의 외부 TLS는 Tunnel이 담당한다.** 게임 WSS 게이트웨이는 별도로 직접 TLS를 처리한다. Caddy 는 `127.0.0.1:8088` 만 듣는다. 인증서 관리와 public TLS 는 전부 tunnel 쪽이다.
+3. **이 API 예제의 외부 TLS는 Tunnel이 담당한다.** 게임 WSS 게이트웨이는 별도로 직접 TLS를 처리한다. Caddy 는 `127.0.0.1:8088` 만 듣는다. 이 API 경로의 인증서와 외부 TLS는 tunnel 쪽이 담당한다. 게임 게이트웨이의 인증서 관리는 별도다.
 
 **현재 소스 발췌 — `deploy/cloudflared/config.yml.example`**
 
@@ -1673,7 +1771,7 @@ meta+relay 통합 테스트는 `build/`, `build-relay/`, `build-meta/` 를 자�
 - `server/main.cpp` 의 graceful shutdown — `signalHandler` 가 종료 플래그만 내리고, 논블로킹 accept 폴링(10ms)이 스스로 루프를 빠져나온 뒤 정상 스레드에서 `tcp_close` + 역순 drain. 핸들러 안에서 소켓/shared_ptr/mutex 를 건드리지 않는다.
 - `server/main.cpp` 의 `parsePort` — `std::from_chars` 기반 완전 소비·범위 검사.
 - `net/socket.cpp` `net_init()` 의 `SIGPIPE` `SIG_IGN` + POSIX `send` 의 `MSG_NOSIGNAL` — 끊긴 피어에 써도 프로세스가 죽지 않음.
-- `net/socket.h` 의 `shared_ptr<int>` 기반 `TcpSocket` — fd 재사용 경합(교차 연결 데이터 유출) 제거. `tcp_close` = shutdown-only, 실제 close 는 RAII 단일 호출.
+- `net/socket.h` 의 `shared_ptr<NativeSocket>` 기반 `TcpSocket` — fd 재사용 경합(교차 연결 데이터 유출) 제거. `tcp_close` = shutdown-only, 실제 close 는 RAII 단일 호출.
 - `net/session.cpp` `Close()` 의 shutdown → join → reset 순서 + `sockMu_` 로 shared_ptr 멤버 직렬화 + 세션 재사용 대비 큐 전체 초기화.
 - `net/session.cpp` INPUT 프레임 바운드 검증(`kMaxTickWindow`/`kMaxRemoteInputs` + 페이로드 경계) + `tcp_send_all` 5초 slow-loris 타임아웃.
 - 단계 전환의 잔여 TCP stream 인계, queue lobby 64 KiB 와 CHAT 256개 상한.
@@ -1734,7 +1832,7 @@ stat -c '%a' "${XDG_DATA_HOME:-$HOME/.local/share}/Tetris/accounts/<origin locat
 
 이 시리즈가 의도적으로 단순화하거나 아예 다루지 않은 한계가 있다. 이 코드를 기반으로 기능을 확장할 때는 아래 목록이 현재 기능 재고보다 더 중요한 경계가 된다.
 
-**1. lockstep 은 지연을 숨기지 않는다.** [Part 6](./part6-lockstep-networking.md) 의 모델은 두 클라이언트가 같은 tick 을 같은 입력으로 진행한다. 이 방식의 정확성은 완벽하지만 — desync 가 나면 해시로 즉시 잡힌다 — 대가로 **모든 입력이 왕복 지연만큼 늦게 반영된다.** 입력 지연(input delay) 프레임을 늘리면 끊김은 줄지만 조작감이 나빠지고, 줄이면 반대가 된다. 이 트레이드오프를 피하려면 롤백 넷코드(입력을 예측해 즉시 반영하고, 실제 입력이 도착하면 과거 상태에서 재시뮬레이션)가 필요하다. `SimGame` 이 결정론적이고 상태가 값 타입이라 롤백의 전제 조건 자체는 이미 갖춰져 있지만, 이 시리즈는 거기까지 가지 않는다.
+**1. lockstep 은 지연을 숨기지 않는다.** [Part 6](./part6-lockstep-networking.md) 의 모델은 두 클라이언트가 같은 tick 을 같은 입력으로 진행한다. 정확한 동기화에는 규칙·seed·입력 순서의 결정성이 필요하고, 상태 해시는 관측 시점의 불일치를 탐지하는 수단이다. 상대 입력이 없으면 해당 틱을 기다리므로 네트워크 지연과 입력 버퍼 정책이 조작 반영 시점에 영향을 준다. 입력 지연(input delay) 프레임을 늘리면 끊김은 줄지만 조작감이 나빠지고, 줄이면 반대가 된다. 이 트레이드오프를 피하려면 롤백 넷코드(입력을 예측해 즉시 반영하고, 실제 입력이 도착하면 과거 상태에서 재시뮬레이션)가 필요하다. `SimGame` 이 결정론적이고 상태가 값 타입이라 롤백의 전제 조건 자체는 이미 갖춰져 있지만, 이 시리즈는 거기까지 가지 않는다.
 
 **2. 가비지에 상쇄가 없다.** 실제 대전 테트리스는 들어오는 가비지를 내가 지운 줄로 상쇄(counter)한다. `src/sim_game.cpp` 에는 그 로직이 없다 — `AddPendingGarbage` 로 쌓이고 다음 LockBlock 시점에 그대로 삽입된다. 규칙이 단순해져 결정론 검증과 RL 환경이 쉬워졌지만, 게임성은 실제 대전작과 다르다. 상쇄를 넣으려면 `pendingGarbage` 차감 규칙이 `StateHash` 에 영향을 주므로 골든 해시(`python/tests/_sim_hash_dump.txt`)를 다시 떠야 한다.
 
@@ -1744,12 +1842,12 @@ stat -c '%a' "${XDG_DATA_HOME:-$HOME/.local/share}/Tetris/accounts/<origin locat
 
 **5. trainer CLI 는 2-보드 환경을 선택할 수 없다.** `python/common/env_versus.py` 는 가비지 교환형 2-보드 RL 환경을 제공하고 `python/tests/test_versus_env.py` 가 그것을 검증한다. 그런데 `python/train/` 의 기본 trainer CLI 는 아직 단일 보드 환경을 직접 생성한다 — 대전 환경으로 학습하려면 코드를 고쳐야 한다. [Part 8](./part8-python-rl.md) 의 관측/행동 공간은 이미 양쪽을 지원하므로 남은 것은 CLI 배선이다.
 
-**6. 인증은 guest 토큰 하나뿐이다.** 정식 계정, 토큰 폐기(revocation), 계정 복구가 없다. relay는 같은 player_id의 동시 ranked session을 막지만 토큰 자체가 유출된 뒤 소유자를 구분할 방법은 없다. 토큰 파일을 잃으면 그 player를 복구할 수 없고, §5의 `0600`은 유출 가능성을 낮출 뿐 수명주기를 해결하지 않는다.
+**6. guest 계정은 자격 증명으로 소유를 판단한다.** [Part 17](part17-guest-account-recovery.md)에 토큰 해시 저장·교체/폐기·복구키 경로가 있다. 복구 수단까지 잃으면 서버는 원래 사용자를 자동으로 알아낼 수 없다. 같은 사람이 여러 계정을 만드는 문제도 계정 인증만으로 해결되지 않는다.
 
-**7. relay 는 평문이다.** §9.1 에서 정당화했듯 relay 는 영속 상태가 없고 인증도 meta 에 위임하지만, 게임 트래픽 자체는 감청·변조 가능하다. 같은 매치에 있는 두 클라이언트는 해시 검증으로 desync 를 잡으므로 중간자가 게임 상태를 조작하면 매치가 깨지긴 한다 — 그래도 이것은 탐지이지 방어가 아니다.
+**7. 공개 구간과 내부 구간의 보호가 다르다.** [Part 16](part16-secure-admission.md)의 공개 진입점은 HTTPS/WSS이며 내부 relay는 loopback에 둔다. 평문 내부 연결을 다른 호스트로 옮길 때는 그 구간의 보호를 다시 설계해야 한다. TLS를 통과한 악성 클라이언트의 입력과 결과 신고는 [Part 18](part18-authoritative-results.md)의 서버 검증 경계에서 판단한다.
 
 ## 마치며
 
-이 장의 하드닝은 코드베이스를 "내 노트북에서 도는 데모"에서 제한된 공개 시험 운영이 가능한 서비스로 옮겼다. 평문 relay, 단일 프로세스 room 상태, guest 토큰 복구 부재, 저전력 단말 단일 DB 같은 남은 경계 때문에 무조건 안전하다는 뜻은 아니다. 차이를 만든 것은 *기본값*과 *검증 절차*였다. secret 없이는 시작하지 않고, SIGPIPE·fd 수명·worker 예외가 프로세스를 무너뜨리지 않으며, 입력·송신·토큰·프록시를 기본적으로 신뢰하지 않고, 회귀와 부하 측정으로 그 계약을 반복 확인한다.
+이 장의 하드닝은 코드베이스를 "내 노트북에서 도는 데모"에서 제한된 공개 시험 운영이 가능한 서비스로 옮겼다. 현재 공개 TLS 경계와 계정 복구 경로를 포함해도, 단일 프로세스 room 상태·DB 가용성·키 관리·담합과 반복 보상 정책은 계속 관리할 대상이다. 차이를 만든 것은 *기본값*과 *검증 절차*였다. secret 없이는 시작하지 않고, SIGPIPE·fd 수명·worker 예외가 프로세스를 무너뜨리지 않으며, 입력·송신·토큰·프록시를 기본적으로 신뢰하지 않고, 회귀와 부하 측정으로 그 계약을 반복 확인한다.
 
 [Part 1](./part1-deterministic-simulation.md)의 결정론적 `SimGame` 하나에서 시작해 플랫폼 계층, OpenGL 렌더러, 게임 루프, 오디오, lockstep, 릴레이, Python 바인딩, RL, ONNX 봇, 메타 서비스, 설정을 쌓았다. 각 계층이 아래 계층의 좁은 API만 부르고 위 계층을 모른다는 규칙을 지킨 덕분에, 같은 `SimGame` 코드가 게임 클라이언트에서도 학습 환경에서도 그대로 돌아간다. 회고에서 확인한 롤백 넷코드, 가비지 상쇄, 정식 계정, 리플레이, self-play도 이 경계를 유지해야 기존 검증 자산을 재사용할 수 있다.

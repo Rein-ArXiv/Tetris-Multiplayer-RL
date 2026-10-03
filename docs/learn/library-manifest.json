@@ -1,0 +1,1011 @@
+{
+  "documents": {
+    "README": {
+      "path": "docs/blog/README.md",
+      "sha256": "8f0e819d33f832650f19eed725ee0b2c2cbb343b75fee3b7d18fb66daf840e51",
+      "lines": 238,
+      "codeBlocks": 6
+    },
+    "part0": {
+      "path": "docs/blog/part0-project-setup.md",
+      "sha256": "73b81b401c52589d630cc5e3a24cf60974d80631b188c9b984ed4c4d52151245",
+      "lines": 278,
+      "codeBlocks": 15
+    },
+    "part1": {
+      "path": "docs/blog/part1-deterministic-simulation.md",
+      "sha256": "996021b7f9aa48be179474b0301aaae97f3115e491b6c91ea77a93940aab2b18",
+      "lines": 3395,
+      "codeBlocks": 87
+    },
+    "part2": {
+      "path": "docs/blog/part2-platform-window-input.md",
+      "sha256": "5fefe120bc24fe66b76cd6fbbe31fa6b95f8ee1d979b816e75930315faff1262",
+      "lines": 2072,
+      "codeBlocks": 52
+    },
+    "part3": {
+      "path": "docs/blog/part3-rendering-and-ui.md",
+      "sha256": "b5be5a1933620365e9da1109e9d1d1b85491494076ebcca8a0e1d04901e00fa8",
+      "lines": 3421,
+      "codeBlocks": 85
+    },
+    "part4": {
+      "path": "docs/blog/part4-game-wrapper-and-loop.md",
+      "sha256": "972b875ad1f68f831db0fdb19d6ce8bbdec8c479a42f4f9d7be69b3923376898",
+      "lines": 2552,
+      "codeBlocks": 63
+    },
+    "part5": {
+      "path": "docs/blog/part5-audio.md",
+      "sha256": "b5030376a72bf1784a19e210f3d8966a13cb0794dbc3840ba2d44d37c19333f5",
+      "lines": 2626,
+      "codeBlocks": 60
+    },
+    "part6": {
+      "path": "docs/blog/part6-lockstep-networking.md",
+      "sha256": "e835cd3d65efa7948423615d1df7be86fd6a1ff88e825c3eb859cb39cd9900e9",
+      "lines": 3738,
+      "codeBlocks": 93
+    },
+    "part7": {
+      "path": "docs/blog/part7-relay-server.md",
+      "sha256": "c529c8c8359ad3e858e67f1d9bc79db25008e4363c731a3f6aa34f9a1b4ce5dc",
+      "lines": 4810,
+      "codeBlocks": 67
+    },
+    "part8": {
+      "path": "docs/blog/part8-python-rl.md",
+      "sha256": "c1cf95ea6896146562fec7c1ea9f611a871955f01ef73db4d8317fb352e8409f",
+      "lines": 2139,
+      "codeBlocks": 74
+    },
+    "part9": {
+      "path": "docs/blog/part9-rl-onnx-bot.md",
+      "sha256": "b01234247230ce05270d87c8af9175017f9ee5180fd09990e4f077b4abfcd9ab",
+      "lines": 1715,
+      "codeBlocks": 52
+    },
+    "part10": {
+      "path": "docs/blog/part10-meta-and-ranking.md",
+      "sha256": "feb5d14214df920db9c68cab66c4ea90798cf37791d02b520aa7da46bccf4569",
+      "lines": 3262,
+      "codeBlocks": 71
+    },
+    "part11": {
+      "path": "docs/blog/part11-settings-and-options.md",
+      "sha256": "888605ff2488962efa2d4c274e98ee995e9405057e1e0d1ca42ed1cd65e7f2d2",
+      "lines": 1389,
+      "codeBlocks": 48
+    },
+    "part12": {
+      "path": "docs/blog/part12-hardening-and-release.md",
+      "sha256": "a39d386c2deea6ff0630b6533d32cca80a08aca6bfbc74a0f0e2b493e5405816",
+      "lines": 1853,
+      "codeBlocks": 51
+    },
+    "part13": {
+      "path": "docs/blog/part13-structure-and-build-reference.md",
+      "sha256": "4b7c2cba83d0f5afb3aabab5b640659176d64dca38628a453906e99baae3c16f",
+      "lines": 1633,
+      "codeBlocks": 35
+    },
+    "part14": {
+      "path": "docs/blog/part14-event-loop-scaling.md",
+      "sha256": "2ffcf939f761d07a97b7cec9590ed1695bbf00542a65fb35b03e254ebe9aead7",
+      "lines": 3827,
+      "codeBlocks": 101
+    },
+    "part15": {
+      "path": "docs/blog/part15-release-polishing.md",
+      "sha256": "ecd4ff087e6f3484eaca21700a9228089b903545de5d9920364f3c83841df619",
+      "lines": 386,
+      "codeBlocks": 10
+    },
+    "part16": {
+      "path": "docs/blog/part16-secure-admission.md",
+      "sha256": "c81ddfa5a8b5d85f533de1702d54737b7a565e436f79dd52e5d6a7db302611d9",
+      "lines": 627,
+      "codeBlocks": 15
+    },
+    "part17": {
+      "path": "docs/blog/part17-guest-account-recovery.md",
+      "sha256": "8cf032e0325ee58650317a9e8112aad4c4cf59152cd4ed81a83b93aa413415d2",
+      "lines": 462,
+      "codeBlocks": 8
+    },
+    "part18": {
+      "path": "docs/blog/part18-authoritative-results.md",
+      "sha256": "bfe82aa0552bd7154d24ffb5beb9027d03f62a6ad4b124f637952340961212ea",
+      "lines": 595,
+      "codeBlocks": 8
+    },
+    "architecture-quality-review": {
+      "path": "docs/architecture-quality-review.md",
+      "sha256": "1b8af6e9f69632575d65e60ddd8e6dbeb48fc6df0e35e33e0d8cef1f4f24a55e",
+      "lines": 125,
+      "codeBlocks": 0
+    },
+    "bots-and-colab": {
+      "path": "docs/bots-and-colab.md",
+      "sha256": "b1fa220ca2665a5a4b75f520311798a00970f041834ced6912f26e5ceb77c2bd",
+      "lines": 208,
+      "codeBlocks": 6
+    },
+    "code-review": {
+      "path": "docs/code-review.md",
+      "sha256": "d1d2836f2e5f687b8b89975efc17a5678967b1b1dcc68aeb7b48418a1b715a7f",
+      "lines": 192,
+      "codeBlocks": 1
+    },
+    "customization": {
+      "path": "docs/customization.md",
+      "sha256": "bcf700f3f155c17519b2ab29918ec709e6b1c2982ae9f9678b1f9299a25dd4ce",
+      "lines": 110,
+      "codeBlocks": 3
+    },
+    "polish-validation": {
+      "path": "docs/polish-validation.md",
+      "sha256": "f2c85c2eb10040c2e155d36ddfc2a821dc24f7d2c9d1c0b679bfcca71f113d32",
+      "lines": 245,
+      "codeBlocks": 5
+    },
+    "public-server-deployment": {
+      "path": "docs/public-server-deployment.md",
+      "sha256": "1d2b97c43cf22c0c39adfaf2c950b8e8251aa64fb2ba6c7f36701e0c2b5ae0e2",
+      "lines": 203,
+      "codeBlocks": 7
+    },
+    "release-readiness": {
+      "path": "docs/release-readiness.md",
+      "sha256": "b4648c552c0427887f15c97a92052b7738005f0ec8ef94bad2942c8fd4d69d07",
+      "lines": 164,
+      "codeBlocks": 4
+    },
+    "start-here": {
+      "path": "docs/start-here.md",
+      "sha256": "f649dd87800c99e34c055096e84d3972826189920db44ba9fa518abb03d40a49",
+      "lines": 186,
+      "codeBlocks": 10
+    }
+  },
+  "sources": {
+    "CMakeLists.txt": {
+      "sha256": "1972f65b4d9d49f9f6d141e8611b4182610ba272dfbecedf65135981fa3c0881",
+      "lines": 828
+    },
+    "audio/audio.cpp": {
+      "sha256": "afe333792ae9134d7046a8684a5223c0a501709391352a9df2b566c9be4659c9",
+      "lines": 507
+    },
+    "audio/audio.h": {
+      "sha256": "a79647782652f6b18b758ac2e541e1364357275899a0c355de730a61d5335f18",
+      "lines": 54
+    },
+    "audio/mix_s16.h": {
+      "sha256": "0f33048de277e3f00295acb5cfc30629860a2db84522966512bcff750dfc4145",
+      "lines": 54
+    },
+    "audio/mp3_decode.cpp": {
+      "sha256": "9ad40a0a7d505901e4fe0711b69c7be97d8eeda85f8b19e1194c62b31a2718bb",
+      "lines": 222
+    },
+    "audio/mp3_decode.h": {
+      "sha256": "bd879209798bca0c331437ff9d95edc8c39861ec456ba7228b103892d46dcf2a",
+      "lines": 56
+    },
+    "audio/pcm_layout.h": {
+      "sha256": "82416afa02461aebed00daee249784049ae9bde0965c8c0ca155b1e1058d5456",
+      "lines": 62
+    },
+    "audio/sdl_audio.cpp": {
+      "sha256": "8d29beae859e8ad9feba1eaa17d1a98c96db149525ba56059cc862a9c4ebd72c",
+      "lines": 389
+    },
+    "audio/voice_order.h": {
+      "sha256": "c3270aaea59f329c4dda685168b61cbc74f5cb50aede8d499f6d8e30a7cfc5c0",
+      "lines": 45
+    },
+    "bot/bot_onnx.cpp": {
+      "sha256": "bcce544b2b7e8718ae7ff70d3ed5e0b9b22b00a897c103548cae02bcc0992ac3",
+      "lines": 206
+    },
+    "bot/bot_onnx.h": {
+      "sha256": "c9e683c10bdfb60adcfe05998ffde5ceec16a978af359cd101717849541cfb5d",
+      "lines": 56
+    },
+    "bot/controller.h": {
+      "sha256": "7d5d4e0eeea21017a0a53f4a331cfcdcc6b0e826c2bb448800344da0d98773d8",
+      "lines": 47
+    },
+    "bot/opponents.cpp": {
+      "sha256": "b805285f7eaaf98127d309820c7985a9a6c4a48da5a11df26a4f66e5089fdbfc",
+      "lines": 110
+    },
+    "bot/opponents.h": {
+      "sha256": "96a25847ca1873c9041fa9f16a023625758d8f885a706b71b78fb46f46d2022a",
+      "lines": 23
+    },
+    "bot/placement.cpp": {
+      "sha256": "bc117e9d89905511035017b6497789bc0513925d0d2ca85d7c1fff1dda90f5b1",
+      "lines": 134
+    },
+    "bot/placement.h": {
+      "sha256": "165848251bbce53422aa158cc580ffee3d9f7803eacb8def9273243a1468a0e0",
+      "lines": 74
+    },
+    "bot/reward_replay.h": {
+      "sha256": "ff0b84663ec5ff5f5111e592a31215121b188ba13679ad1a2877167adacc1b62",
+      "lines": 52
+    },
+    "core/constants.h": {
+      "sha256": "ca9bf261b781948b73191167577784098787ea9f107fee9e7618d7e84531c32a",
+      "lines": 8
+    },
+    "core/hash.h": {
+      "sha256": "7d01329d420dac28ac2b7eb99d3aceb0a1f73690f9e5f48edb2590bd076dbcef",
+      "lines": 40
+    },
+    "core/input.h": {
+      "sha256": "093aa539e87014d392e1b1a04eebf2fa33149df1a4daae70ecb81aae2c0f3fd9",
+      "lines": 28
+    },
+    "core/key_edges.h": {
+      "sha256": "2f3b4139381f407e873c6694982afd3460b03316ef1ed23a96b4108f891891c0",
+      "lines": 82
+    },
+    "core/once_flags.h": {
+      "sha256": "7140563b574af4e230c67023a11cacfa132f299640539deb56b0eec5baf7d32f",
+      "lines": 35
+    },
+    "core/replay.cpp": {
+      "sha256": "756df7d52635156992705e85a44e80a0e363ffb6f4986eef6225d7f7d61e0427",
+      "lines": 73
+    },
+    "core/replay.h": {
+      "sha256": "195a35a62ead642b000b93f07992f73e3ab69d79084813f8408f788823ab8ca0",
+      "lines": 28
+    },
+    "core/rng.h": {
+      "sha256": "941e394a310e87d00d12b4a3dc40263f876031528b16983e160e249c4876aeb3",
+      "lines": 32
+    },
+    "core/saturating_count.h": {
+      "sha256": "d5e56106c828df1f31ffb2bc1fa3d30501294d2bea18cd9d5bd38470bec3d1cf",
+      "lines": 11
+    },
+    "core/utf8.h": {
+      "sha256": "d771860faf8fe2135198d9528319d0f7f8e97ffaa4d6418d0e37b74031d0719c",
+      "lines": 105
+    },
+    "meta/account_client.cpp": {
+      "sha256": "6eea10b6761e26c2442153b0d2da8cddc38956c2ca6a3570d7e7903266deea0b",
+      "lines": 232
+    },
+    "meta/account_client.h": {
+      "sha256": "9a6a2a95640b6266086ccdd2c57cffdcdef9506fac1367f2487c90c7dcbfd3f3",
+      "lines": 21
+    },
+    "meta/account_store.cpp": {
+      "sha256": "ad766980500613072b88da713568f7ff1fc24feb358eaa06c5a2118d222aee24",
+      "lines": 89
+    },
+    "meta/api_server.cpp": {
+      "sha256": "615e6870ec0b464c324bf22132ea2c80e337ea97fa895c93e82ccdb0bf4f55d2",
+      "lines": 520
+    },
+    "meta/api_server.h": {
+      "sha256": "0960c5821f42a0e1410e9d00931f412976f4152619bab5462adc690b0e939e86",
+      "lines": 43
+    },
+    "meta/bot_challenges.cpp": {
+      "sha256": "98a8986e6476bca44378f7e69e11e347fd91ed96cb96c946dfefa362e422d2fe",
+      "lines": 109
+    },
+    "meta/credentials.cpp": {
+      "sha256": "884fb179b8b29e1c48f7020c936bd719487b0d112dc2adfc2911a1e22cb71583",
+      "lines": 27
+    },
+    "meta/credentials.h": {
+      "sha256": "83f2199f38f80cf09ee8b8252e1574f1371277ffa82965ab842b3a37fc4bd0a6",
+      "lines": 18
+    },
+    "meta/database.cpp": {
+      "sha256": "612854e5cbb9da2e5863236b521fd587456725ec13e4a704268b128035437276",
+      "lines": 1030
+    },
+    "meta/database.h": {
+      "sha256": "387ba9fcb16180aeaf4064546ace46a44c95f68fe01ce1e465523659778fedb1",
+      "lines": 166
+    },
+    "meta/elo.h": {
+      "sha256": "58aa90fe1193c00bc381f58ab27a26bd8753fa210f7cf7666a31f313d13f518f",
+      "lines": 71
+    },
+    "meta/game_tickets.h": {
+      "sha256": "1c2d330449a3a07439fafb00f5bd2517a2fac222c3c30f97cf7a968e19f0ad14",
+      "lines": 61
+    },
+    "meta/http_client.cpp": {
+      "sha256": "3bbc7968e71281a1ec75b54f833bb37a44e60609eca37423740facbbc6742cb1",
+      "lines": 476
+    },
+    "meta/http_client.h": {
+      "sha256": "6fb8aa039d6cf878a94f17c7e34cf3d7798d3ffe5bea21443279765dc143d0d1",
+      "lines": 140
+    },
+    "meta/json_input.h": {
+      "sha256": "7498c1107178ab5a517f5f4eb68095758576ac72f9ceb3fc15123b6dd3f0de99",
+      "lines": 69
+    },
+    "meta/json_routes.h": {
+      "sha256": "a7ce99583e425714d3fbca08768c09c93caf2255ce3beacbf0b1341e0d64a50f",
+      "lines": 21
+    },
+    "meta/levels.h": {
+      "sha256": "f6b9fb6932563aa1bf4c24effece090d902f6dddc68fa91e48391824c3b3ddb1",
+      "lines": 60
+    },
+    "meta/main.cpp": {
+      "sha256": "0335ac570d92ae79c5ae05f8e0325246b67a06c6cbfd129b57c0c175b15bb7b4",
+      "lines": 181
+    },
+    "meta/match_response.h": {
+      "sha256": "5b643a0555c0bcbce6d90cfad02dd8ee2005bd3b751ce04c4f2f613830270e59",
+      "lines": 48
+    },
+    "meta/private_file.cpp": {
+      "sha256": "6bd7a9b25739714db283a06bbc18865a129c701ae6fb28c56a6280d6b87825cd",
+      "lines": 150
+    },
+    "meta/profile_response.h": {
+      "sha256": "cd7bf2421f83999c6f85e0eca9fe372862eb5f5735c4c4f6560c50e48b55e0eb",
+      "lines": 57
+    },
+    "meta/protocol.h": {
+      "sha256": "180fbadeeefcb9fcaa4efcc87c4f6601687dc60c5bd0bda0b14e6f859d81049e",
+      "lines": 188
+    },
+    "meta/tls_identity.h": {
+      "sha256": "ba2975d7134a3a7dcb425468afb023337079cf32fff182218418a829ca2cb79c",
+      "lines": 35
+    },
+    "net/framing.cpp": {
+      "sha256": "f978d1d30ca55f921c71b364fbb41e81cc788591d869ba51e57026ef45c758e5",
+      "lines": 97
+    },
+    "net/framing.h": {
+      "sha256": "e2da660f6d09d08155eb489757033031be0b9452f6f3e6f1de1539a9c6f98f60",
+      "lines": 175
+    },
+    "net/hash_mailbox.h": {
+      "sha256": "90914684737d12317ea4974c7f95ab1bbdc095883039f572f2d9962b68ac1283",
+      "lines": 164
+    },
+    "net/input_message.h": {
+      "sha256": "6ba61b2985a25425c66f04bde2a3c176e05fbb5b5d83dd49461d055aaf32b060",
+      "lines": 33
+    },
+    "net/input_pair.h": {
+      "sha256": "69e62e1926d3f4342cb5e5e6fea0688d7aa143f15f3ac2507ddd013c783fc932",
+      "lines": 21
+    },
+    "net/io_size.h": {
+      "sha256": "b43117f50173c5365706b02ded6ba0c1eb909db70cab9e8bb59da3e21f6fdd22",
+      "lines": 12
+    },
+    "net/match_result.h": {
+      "sha256": "eb19fee8d86f722d5aaa1c9f2e0bff71b4e34fee9821164dfa1e65e0c2b0cade",
+      "lines": 33
+    },
+    "net/native_socket.h": {
+      "sha256": "5799f7ad10e482320fce68bd5e2ca132ffb2521a69785b85efe0c4f46d947cb6",
+      "lines": 16
+    },
+    "net/pong_window.h": {
+      "sha256": "324ed9265726ad7c943382e8c29664d5aa676e7d73ed434b0ee864603d42599d",
+      "lines": 33
+    },
+    "net/reactor.h": {
+      "sha256": "3b259e209f8b836f7367dac3adfc28451b0cbe8641c33bffe06d4f6cc74f113e",
+      "lines": 92
+    },
+    "net/reactor_epoll.cpp": {
+      "sha256": "fe7912cb70c0798f6b6d451b0c10fbd7d9de05ff1b0b47eaf80be046fe7a45cd",
+      "lines": 140
+    },
+    "net/reactor_iocp.cpp": {
+      "sha256": "97f6338f0cae32a6f0fc7423f0947ff9eadfd44ace3d63df3ca2befc279d1b44",
+      "lines": 352
+    },
+    "net/session.cpp": {
+      "sha256": "e6c743cb0961ff569d63bdcf0dc58e94d6e2fbe403ae9da5f29d02899d52664e",
+      "lines": 1313
+    },
+    "net/session.h": {
+      "sha256": "6673f507faa783a9817922fc9eedd6822ae33d1ea7ad44a0e5b7f36bee0d5688",
+      "lines": 302
+    },
+    "net/socket.cpp": {
+      "sha256": "7996efee6ce3785fde31ef25693c882bad4b1c708068702a0e1c2ad952127659",
+      "lines": 609
+    },
+    "net/socket.h": {
+      "sha256": "3f8713e3ed8dd97d39f902092e1eb41ab74470c1b2c3e76fbd3706af229115c8",
+      "lines": 92
+    },
+    "net/stream_transport.h": {
+      "sha256": "57367ceb4aefe3206f6b771b054344b984bcffddfcd54809e661067a4ba16b21",
+      "lines": 17
+    },
+    "net/system_trust.cpp": {
+      "sha256": "3f628d195cda6df5162e9df776e8b27324bd3111fc42f9f5b3da6a0bae91a7c2",
+      "lines": 25
+    },
+    "net/wss_client.cpp": {
+      "sha256": "d30bd115ad32656e7a8243c32e45c11d63b646ffadb07d709167fecddbb59acb",
+      "lines": 215
+    },
+    "platform/mouse_coordinates.h": {
+      "sha256": "138e8deb33023357c7f5695f32afd357272af2b4419550998afb5a56e88a8306",
+      "lines": 22
+    },
+    "platform/platform.h": {
+      "sha256": "d1ee3ced808cbe0647dea30b3644d20887cff27ab2995eb4f7a90b4ee8ccb98d",
+      "lines": 159
+    },
+    "platform/sdl.cpp": {
+      "sha256": "da35afee745f346fdee3ccc40f08303241a367af3e6207ca1736a59981cff006",
+      "lines": 424
+    },
+    "platform/user_data.cpp": {
+      "sha256": "8840af36972dd0a9f1dd861582f534645a21ff0d6258b18d81367e0669a0af48",
+      "lines": 43
+    },
+    "platform/user_data.h": {
+      "sha256": "341f7bbb63ffa1f0182f9510bdcc203ad23100d060a2a517a7cad5b4c8e77ea7",
+      "lines": 9
+    },
+    "platform/win32.cpp": {
+      "sha256": "5e3b20aaa816326b7534c5f02a17bb8846d0003e771a2c0c41402d8c267b8127",
+      "lines": 587
+    },
+    "python/common/__init__.py": {
+      "sha256": "e9189b1baf9441e72327ae5b80cbbeb2b2e4f33051d0a939c31c1b0ced7d2dd7",
+      "lines": 46
+    },
+    "python/common/action_mask.py": {
+      "sha256": "4960f9f001e2118d8d2e22d19d02963935eb4c546cbe994f8ea9879d5a6e4654",
+      "lines": 47
+    },
+    "python/common/checkpoint.py": {
+      "sha256": "fa41d9a5e90a398abc3d2bee6a2e17aa1aa084e9ac9e546e4ad7e33472eebadd",
+      "lines": 84
+    },
+    "python/common/env.py": {
+      "sha256": "d2b8c36a29ce353900d2cce17cb23ccd82e56f5e7f8e09d8356dce306923f9f6",
+      "lines": 131
+    },
+    "python/common/env_versus.py": {
+      "sha256": "f5231016006457907fbec43a8cfbbabf32d4b5faf79274ab99b108df8b65f701",
+      "lines": 287
+    },
+    "python/common/features.py": {
+      "sha256": "bdbc9d2db89d3cf3d6dbba2a5e625127318dcdbff51171384f5e6335833c8955",
+      "lines": 119
+    },
+    "python/common/models.py": {
+      "sha256": "c7287555c9be9059bfe483fc62c71c62fef41f77eed4c7234b816911f156e55b",
+      "lines": 107
+    },
+    "python/common/obs.py": {
+      "sha256": "bf95562f3dc6c862c9307aa505b9f6fc41f05088a93d6685e9ac268bd4b22fa9",
+      "lines": 64
+    },
+    "python/netbot/__init__.py": {
+      "sha256": "c2e4f470d01d4e112742f566c473ac29020299128c897ff80923b999791d71d0",
+      "lines": 12
+    },
+    "python/netbot/export_onnx.py": {
+      "sha256": "93322036b43051645a7e2c7dff00626a308a6e4a1007d8523ddbc5a1d34a474b",
+      "lines": 116
+    },
+    "python/netbot/framing.py": {
+      "sha256": "68ca4d8d3b795b4917b62ccd63eed1c22b3da87178d9914f901d39853b84dc88",
+      "lines": 269
+    },
+    "python/netbot/input_expander.py": {
+      "sha256": "afbd708bb64be78d76445cd185d3e89a3acb371fa4759200f5e0136bf124acf6",
+      "lines": 91
+    },
+    "python/tests/determinism_reference.py": {
+      "sha256": "47492c70e5fc39e071e07dc4525626c71866bc2ca9f58c6030a3f370e55c4e69",
+      "lines": 95
+    },
+    "python/tests/make_onnx_fixtures.py": {
+      "sha256": "cef41de19f716ffe81228698d98776e526770a0464a54c5e01135f21b5f469cd",
+      "lines": 21
+    },
+    "python/tests/test_account_security.py": {
+      "sha256": "77caebf6774f33c444d72b6ed6449cf5e03b49657c384179e135da66fe51123a",
+      "lines": 564
+    },
+    "python/tests/test_checkpoint_roundtrip.py": {
+      "sha256": "2045dada002f26ca6d685ef4ea9e21d4e50e4e7e8f9d2d57d9ab4004da2baa80",
+      "lines": 95
+    },
+    "python/tests/test_determinism_crossplatform.py": {
+      "sha256": "8afa7bc3cbfad8c387126ee526cd7b8dd5a1ad2900fe5c138e8f39ebcd100f41",
+      "lines": 140
+    },
+    "python/tests/test_framing_parity.py": {
+      "sha256": "06ebf565a951f89d8497ec5b6a01d4f2632647a44c851adad019a61b360f3b95",
+      "lines": 205
+    },
+    "python/tests/test_match_summary_crosscheck.py": {
+      "sha256": "9623d8950cb0b9a4d12803ab7bfaf7e060169aaeb571b1a46ea0ea80423edd97",
+      "lines": 591
+    },
+    "python/tests/test_meta_db_smoke.py": {
+      "sha256": "a1ccd9ada0db89547f47278a346a637e5059287b3d13b89510aa3e7840193661",
+      "lines": 828
+    },
+    "python/tests/test_placement_parity.py": {
+      "sha256": "152c0f28d8edc4b38e363edda3f2a183ca0d300cb68cb9c3b319602d6b53a8f0",
+      "lines": 101
+    },
+    "python/tests/test_relay_adversarial.py": {
+      "sha256": "5b937800a3556007262b6212b99505950b38e5fe273ac75d96acdee4a40fe8fe",
+      "lines": 1761
+    },
+    "python/tests/test_relay_meta_smoke.py": {
+      "sha256": "a330e999a3255921dccdba80d3732ba9e4ad97133d9d275b899c6fb83cd827c6",
+      "lines": 3318
+    },
+    "python/tests/test_relay_smoke.py": {
+      "sha256": "a4f59e277a654df8ce88af7bfc0351ad14b66ec966630cb6365c208921623c23",
+      "lines": 243
+    },
+    "python/tests/test_room_smoke.py": {
+      "sha256": "0ae77ce9364f1214e1e0afa8e4d25215fa9d66c676e0215046f667541b54a73e",
+      "lines": 190
+    },
+    "python/tests/test_secure_admission.py": {
+      "sha256": "9a3186b9ce904906f2c7a15c55d8a5a5f41314ca1c217ffece7f9bce58526f91",
+      "lines": 389
+    },
+    "python/tests/test_training_scripts_static.py": {
+      "sha256": "dd9d3d562fbb302ec3850cc67adc7240f4e77a22da6e2d13bdcab7adbbb0f70a",
+      "lines": 25
+    },
+    "python/tests/test_versus_env.py": {
+      "sha256": "dcf6f3ed161b89de2d63261a8e37911e60c7eb1d386b4a398df737de481e7324",
+      "lines": 137
+    },
+    "python/tools/package_opponents.py": {
+      "sha256": "4acdf64c043828e192ff78aee7bbf337719ea0f513f6fc557ffb8f1cfb49869e",
+      "lines": 65
+    },
+    "python/tools/relay_capacity.py": {
+      "sha256": "51b2c9417691fe239e41b6d78c3b51a3f5f84bdc2aa10f01990c717987b081da",
+      "lines": 231
+    },
+    "python/tools/relay_shard_bench.py": {
+      "sha256": "37e858bc91671410b863e13e63216d4d4b3f64d77028cc26f3493338e627e149",
+      "lines": 923
+    },
+    "python/train/cbmpi_tetris.py": {
+      "sha256": "4eda7fabe6ec4969f1661eb7a411cba4e0595bf571a4a87dc3dc4b904a193dee",
+      "lines": 386
+    },
+    "python/train/dqn_tetris.py": {
+      "sha256": "c0ed2121e88502fca3553daf6bfd82f53401b898b91e7b761c25b9da2333cb10",
+      "lines": 292
+    },
+    "python/train/muzero_tetris.py": {
+      "sha256": "a797578668a9f1484281c33a826b302be03d56915f405c70f530df8e3e663dac",
+      "lines": 538
+    },
+    "python/train/ppo_tetris.py": {
+      "sha256": "eda9124d86600c0b5aa774dc4f7c28fad340262e600ea93b26a8c9eddfc9ba60",
+      "lines": 461
+    },
+    "python/train/rl_common.py": {
+      "sha256": "f9ae4749dd8b38ecf64df350bb9062e77a37037c17a18e73096d87666f305914",
+      "lines": 278
+    },
+    "renderer/font_raster_policy.h": {
+      "sha256": "e23b3ace4282517c8c43e92642cade0b71eb82f0abc5b345f11ed0ffe9db3ce8",
+      "lines": 83
+    },
+    "renderer/gl_api.cpp": {
+      "sha256": "a6a6f7d2f8b45bbec54ef59e4601952674877d160376d9d3a873859e404c69e4",
+      "lines": 39
+    },
+    "renderer/gl_api.h": {
+      "sha256": "4f173364d9b27aa47bb1790a3677bebf77ffa1489e339a713da5cdd0f9e5b051",
+      "lines": 133
+    },
+    "renderer/gl_internal.h": {
+      "sha256": "6850d12b736de8b6c1d1dee57ac0d7ebcff674b3025571fc103f05e74268ed1c",
+      "lines": 51
+    },
+    "renderer/gl_shaders.h": {
+      "sha256": "31e135432d41bbf18f1eab856e1315ecf4b125d5309c316aa40317bff02912c4",
+      "lines": 93
+    },
+    "renderer/handle_pool.h": {
+      "sha256": "38baaeadcce538fc67add20f9a0c722ef16f8dd11d5891b55d1d2a4b0317be10",
+      "lines": 214
+    },
+    "renderer/image.h": {
+      "sha256": "1c7528131198062749256af0ae8d07836697afc64baf2f135b56c5f48333764b",
+      "lines": 59
+    },
+    "renderer/image_gl.cpp": {
+      "sha256": "c99b3da65cf21d386f0f284bee83b594b69cd210ad1db4ea398420c8971edae2",
+      "lines": 249
+    },
+    "renderer/image_rows.h": {
+      "sha256": "7a25aa43378783c0a7282f72ebf31f17f006b7e3feec9c708125a95f18a3a00d",
+      "lines": 98
+    },
+    "renderer/mask_upload.h": {
+      "sha256": "e84080fbca732f8e7399072a8e3d7313ab0bc5a906b7f9b21cf81b5ee1e31a54",
+      "lines": 73
+    },
+    "renderer/renderer.cpp": {
+      "sha256": "253ceadce99c46889a705f7cf6dec2e2914f98105ab62b6f8e8026d9e20c9089",
+      "lines": 383
+    },
+    "renderer/renderer.h": {
+      "sha256": "7c12547bf07c340c202da4e34b5dd3d48dccb2b65444e7157135e3aa23143bad",
+      "lines": 64
+    },
+    "renderer/shake.cpp": {
+      "sha256": "96a584be47f37e5191e8dd5e1c1f67ac14ad8a440646efeff9a7d4c7eaaef7d2",
+      "lines": 58
+    },
+    "renderer/shake.h": {
+      "sha256": "9acf6ff55ba7a79141c4b4c20b1fbd42136516f5c8eee29c476520cd6c3ecee8",
+      "lines": 26
+    },
+    "renderer/text_gl.cpp": {
+      "sha256": "00674adada3f9bc77f4ac1fb1c7a5b2fccac31fe7ab3053ae9c16d5001552ef7",
+      "lines": 318
+    },
+    "renderer/texture_upload.h": {
+      "sha256": "7ef654dab78dd57ddc98297d0f21094ea656a6e8201ce47b5de271c4b859cfca",
+      "lines": 66
+    },
+    "scripts/backup_meta_db.py": {
+      "sha256": "910c11ac95135e42795d011910aa1b1c3de52a161d2f4ff04757eccbcd2515b4",
+      "lines": 46
+    },
+    "scripts/backup_meta_db.sh": {
+      "sha256": "0c3f4d33e68a4169c87643dac3344728067a7664c97b7a43e363945ebf52d580",
+      "lines": 81
+    },
+    "scripts/check_learning_framing.py": {
+      "sha256": "70bc4670f813875902aeab4a5cd759ddb48e6f69399219f208003d5dec9b90f5",
+      "lines": 151
+    },
+    "scripts/check_learning_serialization.py": {
+      "sha256": "26bedd091a658ca5b263fc5ef5bededce099b88f19ed8f891f6644141776880a",
+      "lines": 82
+    },
+    "scripts/check_part_docs.py": {
+      "sha256": "51cf34e85c74cb642055c9eb8e351b0eb1608b30eddfb82225ff07749d058ed2",
+      "lines": 90
+    },
+    "scripts/learning_tls_fixture.py": {
+      "sha256": "8fe4bc5023ed2db1be87588aea398b6e9e0573f1e2603b2f9aebb20af2122fb3",
+      "lines": 83
+    },
+    "scripts/learning_wss_fixture.py": {
+      "sha256": "7332b1ce64d9a63359dc6fa2b7705ecb2717b2746dc2d6dd6ba3ec0a4ca024d6",
+      "lines": 147
+    },
+    "scripts/release_linux.sh": {
+      "sha256": "678f404f84f69b5d5a2302a2a7b187dbb8a0b7719534dbc8b88b121c45a5d2c1",
+      "lines": 115
+    },
+    "scripts/release_macos.sh": {
+      "sha256": "534b54ae5f86ee53561d44db05c22a52c3fae48f6a47532c24d77e12e492b04c",
+      "lines": 137
+    },
+    "scripts/release_server_linux.sh": {
+      "sha256": "a5ea3cb1465db983ca72c81ab4c4b8ac192b149fafbf255d7dd978b8d3e76e10",
+      "lines": 96
+    },
+    "scripts/release_win.ps1": {
+      "sha256": "ed6a931ee8cedf72cb83880b2b77ab78471b21d0040925a4e599b830c04f4910",
+      "lines": 138
+    },
+    "server/byte_budget.h": {
+      "sha256": "a2f6c49c9b6c6fdc322e643ca48bf53c2969eafec0c993e2a800721afebf6ac1",
+      "lines": 34
+    },
+    "server/ip_admission.h": {
+      "sha256": "b0368300f68cbb5b79c6f62fffd3e582b43426eb6bec62459eb58b6c9389b10d",
+      "lines": 100
+    },
+    "server/log.cpp": {
+      "sha256": "3686885bf3dda363924f3b8bdb17dd94bcbcb63294c3c72052a439f47d99936f",
+      "lines": 158
+    },
+    "server/log.h": {
+      "sha256": "f6a3bc05e1e37bbbecf0ded8e677c7720d1580acab221b15a3bf6a2bb54032b8",
+      "lines": 102
+    },
+    "server/main.cpp": {
+      "sha256": "1eee6999e0bcba64a6755ec74a5d74ce2c64b65041b4feebbd812804b2969942",
+      "lines": 312
+    },
+    "server/match_seed.h": {
+      "sha256": "3951283a7ae621809e39479bcb4a254fe2427d09727c3af52c1649cd99f438c7",
+      "lines": 78
+    },
+    "server/match_uuid.h": {
+      "sha256": "f528ac8dca929bb8bb3df48a4586225be4c4e94747ba2dabebfbe18d6cafe416",
+      "lines": 41
+    },
+    "server/matchmaker.cpp": {
+      "sha256": "9024b56bad9ca5e931c7c21cd41e2329eabc0b9232c1742f4439fb5c7c2e7e57",
+      "lines": 122
+    },
+    "server/matchmaker.h": {
+      "sha256": "6e53139b4fb9142c163d147f7eadb7b18daa8a1f3ebdd4be86e3028f4d31869b",
+      "lines": 96
+    },
+    "server/monotonic_id.h": {
+      "sha256": "17bf1b9251ef59c54ae2dca095a2509ee3e5a57c86b08fb71fcb3aa3b97a0d6d",
+      "lines": 44
+    },
+    "server/offload.h": {
+      "sha256": "555ed4072c658b5c0862607459c76f52f9152745887fa6cb3b91820f6a71a2ec",
+      "lines": 184
+    },
+    "server/player_conn.cpp": {
+      "sha256": "9101c14e1081320e371bf3562a3163e38eec5b1c5c80caa77cba0e1865a094a5",
+      "lines": 226
+    },
+    "server/player_conn.h": {
+      "sha256": "a441ee165f3d0bc824407e37a9f66fa3ab7cb115fd2f014881a330c50733d13e",
+      "lines": 46
+    },
+    "server/player_session.h": {
+      "sha256": "840c7cf15f0c60e0c28c3b1c26b33674425e9698603d966958747a5ebf4497e0",
+      "lines": 45
+    },
+    "server/ranked_game.h": {
+      "sha256": "61f8bc8b2c8ff6652570e9a0028410ddd9a5853a4c8679cfcfa1de7a46774a10",
+      "lines": 128
+    },
+    "server/reactor_relay.cpp": {
+      "sha256": "3f8c273a0a32ab37b55e49efed3ba4150e3e3c5a71441c8809ced744ca527ea6",
+      "lines": 2672
+    },
+    "server/relay.cpp": {
+      "sha256": "e31f0995ad613606c3acb3d9d3aee03632876ab490ca54a403f592f1c90f33cc",
+      "lines": 883
+    },
+    "server/relay.h": {
+      "sha256": "d3bde08aa354af4b46fe521c77bf660c6dc34fc2532dc38163c831a86bc78a9c",
+      "lines": 52
+    },
+    "server/room.cpp": {
+      "sha256": "7112df8f8268d9ed1f3a6cfbdb11fd9d5e4210cb569cf9a89ea63fd7e7cad8e2",
+      "lines": 549
+    },
+    "server/room.h": {
+      "sha256": "ad67230355356f7c1a77048e0e48b42dfa69fb19909935ff71655db2e94ae61a",
+      "lines": 140
+    },
+    "server/room_code.cpp": {
+      "sha256": "ec19d40f3a58358f7928911cb85b0db710cd45dc4be91e551ba7117c4cfa2b0a",
+      "lines": 43
+    },
+    "server/room_code.h": {
+      "sha256": "b8c2b468be35ba441995a583a1dbae37bbde04796e41342127d2ce0be16a72d8",
+      "lines": 42
+    },
+    "server/room_guess_budget.h": {
+      "sha256": "40f0f0d0d8b8d8b630efeb9577e220e28fb54589beb951e91ed3d24bbf036177",
+      "lines": 143
+    },
+    "server/timer_queue.h": {
+      "sha256": "c90fc6d24a21d584390fa99910a8cfa810e3fbad1a61fd733b9e801ee09057e3",
+      "lines": 130
+    },
+    "server/worker_group.h": {
+      "sha256": "20feefd74ec83b47aa27cfbdab236b4a11ed3257bbb180339cf85add2ed8efd4",
+      "lines": 125
+    },
+    "server/wss_gateway.cpp": {
+      "sha256": "de5ffdda089793565b56c62cad858ebdf6934314ffa7baa900dfad403f2aeca6",
+      "lines": 207
+    },
+    "src/account_screen.cpp": {
+      "sha256": "41591e075b3d6953c18fb27700a7843d9291e0d499bba80dc100f964a5a61050",
+      "lines": 64
+    },
+    "src/account_screen.h": {
+      "sha256": "2e8ca0b8e8bfc45ce8fb6f26b8658865d222873138c3bb4de4985d2d01e99831",
+      "lines": 9
+    },
+    "src/colors.cpp": {
+      "sha256": "9e8dcc5ed38ab45b314dc558ceb20cd2be89a6b77a5fbd58afac0cc8eb80001f",
+      "lines": 22
+    },
+    "src/colors.h": {
+      "sha256": "a23ed1c03723871a9a1183571535a84acfc2214996112e476399fb5ecc492948",
+      "lines": 19
+    },
+    "src/game.cpp": {
+      "sha256": "6d7d82ceea14d805c6dfb078c4953e9137ab7602f2daa0340cd9f36b16661d6e",
+      "lines": 232
+    },
+    "src/game.h": {
+      "sha256": "d2561e031c1f3a3de19598f99fe78a7881405bc4a56f619e2e6cc1698a996753",
+      "lines": 74
+    },
+    "src/gui.cpp": {
+      "sha256": "43ceaada103ef3b344b9dda7077f7cadc53c0bdd431a3591dcd82056305b9beb",
+      "lines": 214
+    },
+    "src/gui.h": {
+      "sha256": "1d6d415a5c4a0cfa445206c39582992a38ea485b1841306ebb24b0dcb355fcf2",
+      "lines": 62
+    },
+    "src/image_fit.h": {
+      "sha256": "41aa1cca328780d0f342289e8b0175b44546e8773df97be8c4fffde54ad6124c",
+      "lines": 30
+    },
+    "src/main.cpp": {
+      "sha256": "9d84e33277cd9f4ae077fdb642697f9f628fe8ca635820483191693ab324912c",
+      "lines": 3281
+    },
+    "src/position.cpp": {
+      "sha256": "6639db4a4217587ab65eeee0ea575fbc04c9f222ad3ecfd090e6ae319e2a8730",
+      "lines": 7
+    },
+    "src/position.h": {
+      "sha256": "9fb02fbb6151cf5bd228e831c9488e8f52b13775cb370f2bd30b09fff5cec3d4",
+      "lines": 8
+    },
+    "src/presentation.cpp": {
+      "sha256": "776e1392285a562efb58b972c89e5017714157007e5feb61cbf7a4bac0305409",
+      "lines": 105
+    },
+    "src/presentation.h": {
+      "sha256": "f5f259b62af21fec68c0fd851c2a8a18e68bab2baa34e5bd08e03fd5ede44d35",
+      "lines": 13
+    },
+    "src/sim_block.h": {
+      "sha256": "c5018fadaa4992c59999771dc85d079c266c14a133a9f3ff5810b568cfef1c78",
+      "lines": 64
+    },
+    "src/sim_blocks.h": {
+      "sha256": "161d2fd820b54f5c5e7201609c82746b295c2f923c49492c191ebc0cf17bc9d2",
+      "lines": 105
+    },
+    "src/sim_game.cpp": {
+      "sha256": "99fd64bbd8ecbdc830297f018b5f2c44bedc2e7de97af13fe23d40a08a6004b6",
+      "lines": 584
+    },
+    "src/sim_game.h": {
+      "sha256": "a9846b01a6442474c8da7c198d0545e5946528a3a6e205892e5056c94c01de64",
+      "lines": 176
+    },
+    "src/sim_grid.h": {
+      "sha256": "d39199b27ae24a93016e2f59b94d143f20009667dab2be02410dc48ede67550c",
+      "lines": 103
+    },
+    "tests/game_tickets_test.cpp": {
+      "sha256": "858678c5b2ec3598be1b396ae0471003cb02577319cc2d57e0950d8bee212f3a",
+      "lines": 45
+    },
+    "tests/game_wrapper_test.cpp": {
+      "sha256": "fab2a17f482ebb607b6605f74a3e4c28ffa956f08943f479ef7097436836bbe5",
+      "lines": 125
+    },
+    "tests/input_message_test.cpp": {
+      "sha256": "50374f38266e5c5ee4a098d8149aaf40c52546c42318fe76a142716c19a25617",
+      "lines": 33
+    },
+    "tests/json_input_test.cpp": {
+      "sha256": "48e2caf6f631634949eef52aac2a48a3f5aa4532e16481bdf154f92e7ec13721",
+      "lines": 21
+    },
+    "tests/learning/current_https.cpp": {
+      "sha256": "e2a8758c12524318022aced88483e079b2b1681bdef08e8c599066726e56a39b",
+      "lines": 17
+    },
+    "tests/learning/current_wss.cpp": {
+      "sha256": "1424485dad3aeebaecff57358c4caa147d2195010cb56cca6d819c298cca1e51",
+      "lines": 28
+    },
+    "tests/learning/framing_parity_probe.cpp": {
+      "sha256": "a3669ee061749736c65d16a5514fe668413128af5afa8d5a12d860a64fad152a",
+      "lines": 38
+    },
+    "tests/learning/matchmaker_queue.cpp": {
+      "sha256": "56380e9ec7d6e704913fcd633930c362c5118d11f3757b2ae381d44b4843360e",
+      "lines": 55
+    },
+    "tests/learning/room_code.cpp": {
+      "sha256": "60b10811ec6da46bec7e77a7cf2786cb3c42fad5f8ace00291dd4b58d4994539",
+      "lines": 49
+    },
+    "tests/learning/worker_lifetime.cpp": {
+      "sha256": "5c57bf476063cdc1e65fdb8c435d0b8bff84c2ecacb4a560a0c16464c0b14332",
+      "lines": 64
+    },
+    "tests/loop_primitives_test.cpp": {
+      "sha256": "923bcbac2cfaa5dcb36f02cfe0347a6e924f9fa0bc168f705bb6ded3347c51a5",
+      "lines": 250
+    },
+    "tests/ranked_game_test.cpp": {
+      "sha256": "773c22b818547207c2ff5839540659febf21377d38cf342bb301bfe43078263b",
+      "lines": 178
+    },
+    "tests/reactor_test.cpp": {
+      "sha256": "fd27f7430bef6ffd3ba4c4d7145aca61ea6cf04cefa78733f6731ce562c91b39",
+      "lines": 172
+    },
+    "tests/replay_io_test.cpp": {
+      "sha256": "6fc12c567ba339e1998bb86a81f1d48f8319b5d6f3557f15991e0775a8378f67",
+      "lines": 67
+    },
+    "tests/sim_combat_test.cpp": {
+      "sha256": "8a9838fa55f33f311ae1aa74382a8851ec3fd9c18f62aec68c2ce203377ce4a9",
+      "lines": 61
+    },
+    "tests/sim_ghost_test.cpp": {
+      "sha256": "66cdd4e4dfc385542ce3c428c542f00989e16e043deaf3f65dbb2c3ba2d490cf",
+      "lines": 47
+    },
+    "tests/sim_hard_drop_test.cpp": {
+      "sha256": "dfdd98d8bb69c17a3f4171c12819c6219165766342e500b9b9e0af3f33b90bf5",
+      "lines": 69
+    },
+    "tests/sim_hash_dump.cpp": {
+      "sha256": "ada078403e7f5d89efc2229353aa7dc06b46d4a7a39be2387f1ab642bde77b7d",
+      "lines": 172
+    },
+    "tests/sim_hash_test.cpp": {
+      "sha256": "092c487052fe1d50707a1d04364fe35ec6a043ddd3b024684ab821f35e9639cd",
+      "lines": 29
+    },
+    "tests/sim_score_test.cpp": {
+      "sha256": "ac13be468675efd8aeb54d2336c0464910e6ef4725a41f659d4d18865b8406e6",
+      "lines": 55
+    },
+    "tests/sim_soft_drop_test.cpp": {
+      "sha256": "e831b921f064d05627ac668f08d5a1e3b99e877ee38ec6fdebdc783776e1a168",
+      "lines": 38
+    },
+    "tests/sim_t_spin_test.cpp": {
+      "sha256": "81072d467d03412212af0ff4d62778781fb1c0f2898ef49c3c86813e4f389fec",
+      "lines": 51
+    },
+    "tests/tls_identity_test.cpp": {
+      "sha256": "190d9faf6fc3f2a5a9bfa715a6463d3ef9bf1b51eabe015e01392669fba340cc",
+      "lines": 44
+    },
+    "tests/utf8_test.cpp": {
+      "sha256": "0c7e4dea8dbc856470e0396294ddbc97fc9fa40ed653ca87c188c934f23483b9",
+      "lines": 65
+    },
+    "tests/worker_group_test.cpp": {
+      "sha256": "93b7aa2c830b619c1ee8f3e4c1eaa1d920b65f9d22d0485b90a6c34de6beb29c",
+      "lines": 43
+    },
+    "web/ranking/index.html": {
+      "sha256": "d0b8ea351d7c37f1d0ee340a779be7097d81532d8697c34ae80ddbd5df58d628",
+      "lines": 157
+    }
+  },
+  "note": "All Part 0–18 text is preserved as reference. Authored lessons are tracked separately."
+}

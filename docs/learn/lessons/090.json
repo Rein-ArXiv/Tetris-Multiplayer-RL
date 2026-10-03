@@ -1,0 +1,392 @@
+{
+  "id": "lesson-90",
+  "title": "입력 교환: 미래 틱을 기다리는 이유",
+  "shortTitle": "틱별 입력 쌍·누락·중립·순차 소비",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 두 프로세스가 같은 시작 조건으로 게임을 만들고 프레임을 주고받습니다.",
+  "finish": "완료: 미래 입력을 보관하고 같은 틱의 두 입력이 모이면 두 보드를 한 번씩 진행합니다.",
+  "objective": "누락과 중립 입력을 구분하고, 입력 도착 순서와 게임 적용 순서를 분리하는 lockstep 실행기를 구현합니다.",
+  "prerequisites": [
+    "시드와 규칙에 따른 결정론적 상태 전이",
+    "입력 마스크와 두 보드의 공격 교환",
+    "프레임·입력 묶음 코덱·연결 소유권"
+  ],
+  "recap": {
+    "points": [
+      "시드와 게임 규칙이 같아야 같은 초기 상태를 만들 수 있습니다.",
+      "공통 설정은 전체를 검증한 뒤 적용하며 로컬 역할은 양쪽에서 다릅니다.",
+      "협상 성공 뒤에도 연결은 후속 게임 메시지를 전달할 수 있습니다."
+    ],
+    "bridge": "공통 시작 상태에 적용할 입력의 순서를 틱 번호로 고정합니다."
+  },
+  "sections": [
+    {
+      "title": "같은 시드 다음에는 같은 입력 이력이 필요하다",
+      "body": "시드 77로 시작한 두 프로그램이 첫 틱에 서로 다른 키를 적용하면, 그 순간부터 다른 상태가 됩니다. 화면에 보이는 상대 보드도 상대가 실제 적용한 입력을 같은 순서로 실행해야 합니다. 틱 번호는 한 번의 규칙 갱신을 식별하는 논리적 순번입니다. 컴퓨터의 현재 시각이나 패킷을 받은 횟수와 독립적입니다.\n\n결정론적 게임의 한 단계를 S(t+1) = F(S(t), H(t), P(t))로 적어 봅시다. S는 두 보드와 공격 전달 상태를 포함한 Duel, H와 P는 호스트와 상대의 입력입니다. 같은 초기 S, 같은 F, 같은 순서의 입력 쌍을 적용하면 같은 후속 상태를 얻습니다.\n\n이번 산출물은 누적 게임의 순수 Duel을 실제 소켓 입력으로 움직이는 작은 실행 파일입니다. GUI 입력 경로를 교체하기 전에 통신과 규칙 사이의 계약을 분리해서 만듭니다. 진단에서는 카운트다운과 추가 입력 지연을 모두 0으로 합의하고, 필요한 입력 쌍이 준비되는 즉시 진행합니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "int64_t safeTick",
+        "invariant": "규칙 갱신 전에 해당 틱의 입력을 확보한다.",
+        "mayDiffer": "현재 게임은 로컬/상대 보드·입력 지연·화면 갱신을 조정한다. 기준은 역할 고정 Duel과 소켓 진단으로 계약을 격리한다."
+      }
+    },
+    {
+      "title": "0이라는 값과 값이 없다는 상태",
+      "body": "호스트의 틱 4 입력이 0이고 상대 입력이 아직 도착하지 않았다고 합시다. 두 변수를 모두 0으로 초기화해 Tick을 호출하면 어떤 정보가 사라질까요? 호스트는 아무 키도 누르지 않았다는 사실이 확정됐지만, 상대의 행동은 아직 모릅니다.\n\n값과 존재 여부를 따로 표현해야 합니다. optional<uint8_t>의 nullopt는 미확정 슬롯, 값 0은 확정된 중립 입력입니다. optional을 조건식으로 검사하면 저장된 정수의 참·거짓이 아니라 값의 존재 여부를 검사합니다. 코드에서는 has_value()로 의도를 드러냅니다.\n\n중립 입력도 한 틱을 소비합니다. 수평 이동 요청이 없어도 중력·타이머·공격 처리는 진행할 수 있습니다. 입력 누락 때문에 기다리는 동안에는 시뮬레이션 틱 자체를 소비하지 않습니다.",
+      "codes": [
+        {
+          "label": "동일한 0으로 합칠 수 없는 두 상태",
+          "language": "text",
+          "text": "host[4] = 0       peer[4] = 없음  → 대기, next_tick=4 유지\nhost[4] = 0       peer[4] = 0     → 틱 4 실행, next_tick=5\nhost[4] = LEFT    peer[4] = RIGHT → 틱 4 실행, next_tick=5"
+        }
+      ]
+    },
+    {
+      "title": "미래 입력을 보관하되 빈 틱을 건너뛰지 않는다",
+      "body": "next_tick=4일 때 상대의 틱 7까지 입력이 도착해도 틱 4가 비어 있으면 기다립니다. 받은 최대 번호는 도착 이력의 요약일 뿐, 그 이하의 모든 항목이 있다는 증명이 아닙니다. 실행기는 항상 next_tick 하나를 검사하고 성공할 때만 1 증가시킵니다.\n\n도착 순서와 적용 순서를 분리하기 위해 32개의 슬롯을 둡니다. 슬롯 i는 next_tick+i에 대응합니다. 예를 들어 next_tick=4이면 틱 4~35를 저장할 수 있고 36은 too_far입니다. 틱 4를 소비하면 창이 한 칸 이동합니다. 이 창은 메모리와 받아들일 미래 범위를 함께 제한합니다.\n\n호스트와 상대 배열은 같은 번호 체계를 사용합니다. 두 배열의 0번 슬롯이 모두 채워지면 다음 틱을 실행할 수 있습니다. 원소 수 32는 학습 구현의 정책값이며 입력 지연 32틱을 뜻하지 않습니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "TCP가 순서를 보장하는데 왜 구멍을 다루나",
+          "body": "TCP는 송신한 바이트 순서를 보존합니다. 애플리케이션이 틱 6~11 묶음을 먼저 보내고 0~5를 나중에 보내면 수신도 그 순서입니다. 번호 누락·중복·게임 단계 오류는 애플리케이션 계약으로 검사해야 합니다. 이 실습의 역순 묶음 전송은 TCP 패킷 재정렬 실험이 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "저장 결과를 구분하는 작은 인터페이스",
+      "body": "TickInputs는 역할·틱 번호·마스크를 받아 Put을 반환합니다. stored는 새로운 기록, duplicate는 아직 보관 중인 동일 기록, conflict는 같은 슬롯에 다른 마스크가 들어온 경우입니다. conflict는 최초 기록을 보존합니다. 이미 소비한 번호는 stale, 창 밖의 미래 번호는 too_far입니다.\n\n마스크 검사는 unsigned 상태에서 먼저 합니다. 256을 uint8_t로 줄인 뒤 검사하면 0으로 보일 수 있기 때문입니다. 유효한 역할과 마스크인지 확인한 다음 틱 범위를 계산하고 슬롯에 기록합니다. wire가 u32이므로 내부 next_는 u64로 넓혀 마지막 틱을 소비한 뒤의 상태도 표현합니다.\n\n틱 최댓값을 소비한 뒤 next_=4294967296이 되면 exhausted를 반환합니다. 0으로 돌아가 오래된 틱과 섞지 않습니다. 실행 중인 경기를 그보다 오래 유지하려면 번호 규약 자체를 별도로 설계해야 합니다.",
+      "codes": [
+        {
+          "label": "번호와 마스크를 검사한 뒤 슬롯을 채운다",
+          "language": "cpp",
+          "text": "Put put(Side side, std::uint32_t tick, unsigned mask) noexcept {\n        if (side != Side::host && side != Side::peer) {\n            return Put::invalid;\n        }\n        if (!study_input::valid(mask)) {\n            return Put::invalid;\n        }\n        if (exhausted()) {\n            return Put::exhausted;\n        }\n\n        const std::uint64_t wire = static_cast<std::uint64_t>(tick);\n        if (wire < next_) {\n            return Put::stale;\n        }\n        const std::uint64_t offset = wire - next_;\n        if (offset >= static_cast<std::uint64_t>(capacity)) {\n            return Put::too_far;\n        }\n\n        std::array<std::optional<std::uint8_t>, capacity>& slots = slots_for(side);\n        const std::size_t index = static_cast<std::size_t>(offset);\n        if (slots[index].has_value()) {\n            // Preserve what was recorded: only an identical input is harmless.\n            return *slots[index] == static_cast<std::uint8_t>(mask) ? Put::duplicate\n                                                                   : Put::conflict;\n        }\n        slots[index] = static_cast<std::uint8_t>(mask);\n        return Put::stored;\n    }\n"
+        }
+      ]
+    },
+    {
+      "title": "묶음은 전부 유효할 때 한 번에 넣는다",
+      "body": "입력 메시지에는 first_tick과 count개의 마스크가 들어갑니다. 메시지 자체의 길이·비트·번호 넘침 검사는 코덱에서 끝났더라도, 현재 창에서 수용할 수 있는지는 별도 판단입니다.\n\n예를 들어 [0:LEFT, 1:RIGHT, 2:DOWN]을 넣는데 틱 2에 ROTATE가 이미 저장되어 있으면 마지막 항목이 충돌합니다. 틱 0과 1을 먼저 원본에 쓰면 실패 반환 뒤에도 상태가 달라집니다. 작은 TickInputs를 후보로 복사해서 모두 넣어 보고, stored 또는 duplicate만 나왔을 때 원본에 적용합니다.\n\n이것이 여기서의 원자적 적용입니다. 한 번의 함수 호출에서 전부 반영하거나 전부 보존한다는 뜻입니다. 스레드 동기화용 atomic 연산을 사용하는 것은 아니며 모든 호출은 한 소유자가 직렬로 수행합니다. 배열 32칸 두 개를 복사하므로 비용도 고정된 크기에 제한됩니다.",
+      "codes": [
+        {
+          "label": "후보 창으로 묶음 전체를 검증한다",
+          "language": "cpp",
+          "text": "Put put_batch(Side side, std::uint32_t first, const std::uint8_t* masks,\n                  std::size_t count) noexcept {\n        if (side != Side::host && side != Side::peer) {\n            return Put::invalid;\n        }\n        if (masks == nullptr) {\n            return Put::invalid;\n        }\n        if (count == 0 || count > capacity) {\n            return Put::invalid;\n        }\n        // The run must not wrap past the end of the uint32 tick space.\n        if (static_cast<std::uint64_t>(first) + (count - 1) >\n            static_cast<std::uint64_t>(UINT32_MAX)) {\n            return Put::invalid;\n        }\n        for (std::size_t i = 0; i < count; ++i) {\n            if (!study_input::valid(masks[i])) {\n                return Put::invalid;\n            }\n        }\n\n        // Commit-or-rollback: build the result on a copy, assign only on success.\n        TickInputs candidate = *this;\n        bool any_stored = false;\n        for (std::size_t i = 0; i < count; ++i) {\n            const std::uint32_t tick =\n                static_cast<std::uint32_t>(static_cast<std::uint64_t>(first) + i);\n            const Put result = candidate.put(side, tick, masks[i]);\n            if (result == Put::stored) {\n                any_stored = true;\n            } else if (result != Put::duplicate) {\n                return result; // Whole batch rejected; *this is unchanged.\n            }\n        }\n        *this = candidate;\n        return any_stored ? Put::stored : Put::duplicate;\n    }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "동일 재송이 허용되는 범위",
+          "body": "현재 창에 남아 있는 동일 입력만 duplicate입니다. 소비한 틱의 값은 보관하지 않으므로 stale로 분류합니다. 이 실행 파일은 stale 입력도 오류로 종료합니다. 재접속·재전송을 허용하는 서비스라면 보존 이력과 재시도 범위를 별도로 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "조회와 소비를 분리한다",
+      "body": "peek는 두 입력을 읽지만 창을 이동하지 않습니다. 둘 중 하나가 없으면 호출자가 넘긴 두 출력도 그대로 보존합니다. 서로 다른 출력 변수 두 개를 사용해야 호스트와 상대 값을 동시에 받을 수 있습니다.\n\nconsume은 두 슬롯이 존재할 때만 배열을 한 칸씩 앞으로 옮기고 마지막 칸을 비웁니다. 마지막 값을 지우지 않으면 미래에 오래된 입력을 다시 사용할 수 있습니다. next_ 증가도 성공한 소비에만 포함합니다.\n\n한 틱마다 두 배열을 옮기는 O(32) 구현은 창의 의미를 직접 보여 줍니다. 더 큰 창에서는 원형 배열과 시작 인덱스로 복사를 줄일 수 있습니다. 어떤 자료구조든 슬롯이 어떤 틱인지, 비어 있는지, 재사용할 때 언제 비우는지의 계약은 유지되어야 합니다.",
+      "codes": [
+        {
+          "label": "상태를 바꾸지 않고 한 쌍을 읽는다",
+          "language": "cpp",
+          "text": "bool peek(std::uint8_t& host, std::uint8_t& peer) const noexcept {\n        if (!host_[0].has_value() || !peer_[0].has_value()) {\n            return false;\n        }\n        host = *host_[0];\n        peer = *peer_[0];\n        return true;\n    }\n"
+        },
+        {
+          "label": "정확히 한 틱만 소비한다",
+          "language": "cpp",
+          "text": "bool consume() noexcept {\n        if (!host_[0].has_value() || !peer_[0].has_value()) {\n            return false;\n        }\n        for (std::size_t i = 0; i + 1 < capacity; ++i) {\n            host_[i] = host_[i + 1];\n            peer_[i] = peer_[i + 1];\n        }\n        host_[capacity - 1].reset();\n        peer_[capacity - 1].reset();\n        ++next_;\n        return true;\n    }\n"
+        }
+      ]
+    },
+    {
+      "title": "화면의 좌우와 플레이어 정체성을 구분한다",
+      "body": "호스트 컴퓨터에서는 자신이 왼쪽, 상대 컴퓨터에서도 자신이 왼쪽이라고 생각하기 쉽습니다. 그 배치를 시뮬레이션에 그대로 사용하면 두 프로세스의 left가 서로 다른 플레이어를 가리킵니다. 비교할 상태의 기준을 고정해야 합니다.\n\n기준 Duel은 host→left, peer→right로 고정합니다. 연결 쪽에서 자신이 host인지 peer인지 알면 로컬 입력을 해당 Side에 넣고 수신 입력은 반대 Side에 넣습니다. Lockstep은 어느 컴퓨터에서 실행 중인지 알 필요가 없습니다.\n\n화면에서 자기 보드를 왼쪽으로 보여 주고 싶다면 표시 단계에서 두 보드의 위치를 선택하면 됩니다. 규칙 상태의 정체성과 표현 순서를 분리하면 두 상태를 비교하거나 기록할 때 기준이 분명해집니다.",
+      "codes": [
+        {
+          "label": "역할별로 서로 다른 입력 이력을 만든다",
+          "language": "cpp",
+          "text": "std::uint8_t scripted(study_net::Side side, std::uint32_t tick) {\n    if (tick % 3 == 2) return 0;\n    if (side == study_net::Side::host)\n        return tick % 3 == 0 ? study_input::left : study_input::rotate;\n    return tick % 3 == 0 ? study_input::right : study_input::down;\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "gameLocal->SubmitInput",
+        "invariant": "각 입력이 가리키는 플레이어를 일관되게 유지한다.",
+        "mayDiffer": "현재 엔진은 gameLocal/gameRemote 관점을 쓴다. 기준의 host/peer 정렬과 같지 않으므로 상태를 비교할 때 역할을 맞춘다."
+      }
+    },
+    {
+      "title": "게임 상태와 입력 창을 함께 전진시킨다",
+      "body": "advance는 한 틱을 시도하고 결과를 반환합니다. 번호 공간이 소진되면 exhausted, 어느 보드가 이미 끝났으면 finished, 입력 쌍이 없으면 waiting입니다. 이런 결과에서는 창을 소비하지 않습니다.\n\n쌍이 있으면 마스크를 Intent로 해석하고 Duel 후보에 틱을 적용합니다. 기존 Duel은 두 Round를 갱신한 뒤 공격량을 반대 보드에 전달합니다. 그 결과가 유효할 때만 Duel 후보를 공개하고 입력 한 쌍을 소비합니다. 이 사이에 다른 호출이 끼어들지 않는 단일 소유 계약 덕분에 peek 성공 후 consume은 성공합니다.\n\n이번 틱의 하드 드롭으로 한 보드가 끝나도 그 틱 자체는 수행됐습니다. advanced와 함께 next_tick을 증가시키고, 다시 호출하면 finished를 반환합니다. 완료된 전이를 기록한 뒤 종료 상태를 처리하는 순서입니다.",
+      "codes": [
+        {
+          "label": "입력 쌍 하나로 Duel 한 단계를 확정한다",
+          "language": "cpp",
+          "text": "Advance advance() noexcept {\n        // A consumed tick space can never advance further.\n        if (inputs_.exhausted()) {\n            return Advance::exhausted;\n        }\n\n        // A finished board ends the match; do not consume the pending pair.\n        if (duel_.left().finished() || duel_.right().finished()) {\n            return Advance::finished;\n        }\n\n        // Both input records for this tick must exist; peek leaves them in place.\n        std::uint8_t host_mask = 0;\n        std::uint8_t peer_mask = 0;\n        if (!inputs_.peek(host_mask, peer_mask)) {\n            return Advance::waiting;\n        }\n\n        // Canonical mapping, independent of which process is running locally.\n        const std::optional<study_input::Intent> left = study_input::decode(host_mask);\n        const std::optional<study_input::Intent> right = study_input::decode(peer_mask);\n        if (!left.has_value() || !right.has_value()) {\n            return Advance::invalid;\n        }\n\n        // Apply to a copy first: a rejected step leaves duel_ and inputs_ intact.\n        study_combat::Duel candidate = duel_;\n        if (!candidate.tick(*left, *right).has_value()) {\n            return Advance::invalid;\n        }\n\n        // Commit the duel, then retire the pair. peek and consume share this\n        // single owner, so no interleaving can occur between the two calls.\n        duel_ = candidate;\n        // peek guaranteed both slot-0 inputs, so consume cannot fail here.\n        (void)inputs_.consume();\n        // An accepted pair advances next_tick() exactly once, even when the\n        // step itself makes a board finished.\n        return Advance::advanced;\n    }\n"
+        }
+      ]
+    },
+    {
+      "title": "프레임을 틱 기록으로 바꿔 실행기에 넘긴다",
+      "body": "학습 입력 교환에는 TYPE=20을 사용합니다. HELLO 10·OFFER 11·ACK 12 협상이 끝난 연결에서 TYPE을 검사한 뒤 InputBatch 코덱을 호출합니다. 코덱은 payload만 해석하므로 호출자가 메시지 종류를 확인해야 합니다.\n\nwire의 입력 묶음 최대 개수는 16, 보관 창은 32칸입니다. 하나는 메시지 크기 제한이고 다른 하나는 동시에 보관할 틱 범위입니다. 이번 진단은 총 12틱만 실행하므로 수신 묶음이 0~11 범위 안에 드는지도 검사합니다.\n\n각 쪽은 자신의 0~11 입력을 저장하고, 6~11 묶음을 먼저 보낸 뒤 0~5를 보냅니다. 첫 묶음으로는 틱 0이 준비되지 않아 WAIT next=0입니다. 두 번째 묶음이 채워지면 advance를 반복해서 12쌍을 순서대로 소비합니다. 게임 상태의 해시는 마지막에 진단용으로 출력합니다.",
+      "codes": [
+        {
+          "label": "두 입력 묶음을 주고받으며 준비된 틱을 적용한다",
+          "language": "cpp",
+          "text": "bool exchange(study_net::Connection& connection, study_net::Lockstep& game,\n              study_net::Side local) {\n    using namespace study_net;\n    for (std::uint32_t tick = 0; tick < kTicks; ++tick)\n        if (game.submit(local, tick, scripted(local, tick)) != Put::stored) return false;\n    for (const std::uint32_t first : {6u, 0u}) {\n        InputBatch batch;\n        batch.first_tick = first;\n        batch.count = 6;\n        for (std::size_t i = 0; i < batch.count; ++i)\n            batch.masks[i] = scripted(local, first + static_cast<std::uint32_t>(i));\n        Frame frame;\n        if (!encode_input_payload(batch, frame)) return false;\n        frame.type = kInputType;\n        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);\n        if (connection.send_frame(frame, deadline).outcome != SendOutcome::complete) return false;\n    }\n    int error = 0;\n    if (!connection.finish_sending(error)) return false;\n    const Side remote = local == Side::host ? Side::peer : Side::host;\n    for (;;) {\n        Frame frame;\n        const auto received = connection.next_frame(frame);\n        if (received.state == Connection::ReadState::eof) return game.next_tick() == kTicks;\n        if (received.state != Connection::ReadState::frame || frame.type != kInputType) return false;\n        InputBatch batch;\n        if (!decode_input_payload(frame, batch)) return false;\n        // This experiment has exactly twelve ticks. The generic window can hold 32.\n        if (batch.first_tick >= kTicks || batch.count > kTicks - batch.first_tick) return false;\n        if (!accepted(game.submit_batch(remote, batch.first_tick, batch.masks.data(), batch.count))) return false;\n        for (;;) {\n            const auto result = game.advance();\n            if (result == Advance::advanced) continue;\n            if (result != Advance::waiting) return false;\n            std::printf(\"WAIT next=%llu\\n\",static_cast<unsigned long long>(game.next_tick()));\n            break;\n        }\n    }\n}\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "작은 진단의 송수신 순서",
+          "body": "두 쪽이 먼저 보내는 데이터는 각각 6입력짜리 두 프레임뿐입니다. 지속적인 게임에서 전체 입력 이력을 보내고 나서 읽는 방식으로 확장하면 송신 버퍼가 차 서로 기다릴 수 있습니다. 지속 통신은 송수신을 번갈아 처리하거나 준비 상태에 따라 진행해야 합니다. 현재 Connection의 수신은 상대가 침묵하면 계속 기다립니다."
+        }
+      ]
+    },
+    {
+      "title": "EOF는 입력 개수와 함께 해석한다",
+      "body": "자신의 두 프레임을 보낸 뒤 finish_sending으로 송신 방향을 닫고 수신은 계속합니다. 상대의 EOF는 더 보낼 바이트가 없다는 뜻입니다. 틱 0이 비어 있는데 EOF가 왔다면 필요한 입력이 끝내 오지 않은 실패입니다.\n\n이 진단의 성공 조건은 정확한 프레임 경계에서 EOF를 받고 next_tick이 12인 것입니다. 충돌·잘못된 마스크·범위 밖 묶음·잘린 프레임은 실패로 끝냅니다. 이미 성공적으로 적용한 앞 틱 전체를 되돌리지는 않습니다. 원자성은 한 묶음의 저장과 한 틱의 전이에 각각 적용됩니다.\n\n실제 게임의 경기 종료는 연결 EOF와 별도 사건입니다. 종료 메시지와 승패 판정은 경기 규약에서 정해야 합니다. 여기서는 길이가 고정된 실험을 닫는 조건으로 EOF를 사용합니다."
+    },
+    {
+      "title": "현재 게임에서도 두 기록이 있는지 확인한다",
+      "body": "현재 게임의 localInputs는 로컬 틱별 마스크를 보관하고, Session::GetRemoteInput은 상대 맵에서 해당 틱을 조회합니다. 진행 상한 safeTick 안에 들어가더라도 두 조회가 모두 성공해야 Tick을 호출하도록 read_input_pair를 사용합니다.\n\n보조 함수는 로컬 값을 임시 변수에 보관한 뒤 상대 조회를 호출합니다. 어느 한쪽이 없으면 false와 함께 두 출력을 보존합니다. 성공한 경우에만 호출자에게 두 값을 전달합니다. 상대 조회는 항목을 소비하지 않는 함수여야 하며 호출자는 이후 규칙 진행을 소유합니다.\n\nheartbeat catch-up이 중립 입력을 실제로 전송하고 같은 0을 로컬 맵에 저장하는 경우는 유효한 기록입니다. 소비 위치에서 맵 누락을 발견했을 때 임의로 0을 만들어 사용하는 것과 구분하세요.\n\n현재 main의 따라잡기 루프도 매 반복에서 두 보드의 gameOver를 확인합니다. 한 틱에서 보드가 끝나면 이어지는 틱의 입력을 추가 제출하지 않습니다.",
+      "reference": {
+        "path": "net/input_pair.h",
+        "symbol": "bool read_input_pair",
+        "invariant": "존재가 확인된 두 입력만 규칙에 전달한다.",
+        "mayDiffer": "기준은 고정 창·중복 충돌 결과·묶음 전체 원자성을 제공한다. 현재 Session의 수신 저장 정책과 같은 구현이라고 가정하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "진행 상한과 입력 증거",
+          "body": "safeTick은 지연 정책에 따른 진행 상한입니다. maxRemoteTick처럼 관찰한 최대 번호를 이용한 상한만으로 중간 입력의 존재가 증명되지는 않습니다. 현재 게임은 입력 지연도 적용하지만 이 진단의 합의값은 0입니다."
+        }
+      ]
+    },
+    {
+      "title": "실행 파일을 빌드하고 두 프로세스로 비교한다",
+      "body": "89-seed-handshake를 복사한 90-input-exchange에 net/tick_inputs.h·net/lockstep.h·tools/input_probe.cpp와 검사를 추가합니다. 누적 렌더러·오디오·게임 실행 파일은 유지됩니다. 이 추가 타깃은 StudySocket과 순수 시뮬레이션을 연결합니다.\n\n첫 터미널의 listen 0은 OS가 정한 빈 루프백 포트를 LISTEN 줄로 알려 줍니다. 두 번째 터미널에서 그 번호로 connect를 실행하세요. 양쪽 DONE의 ticks는 12, left끼리와 right끼리의 해시는 일치해야 합니다. 호스트·상대 입력이 다르므로 한 프로세스의 left와 right가 같아야 하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "추가 타깃",
+          "language": "cmake",
+          "text": "add_executable(lockstep_contract tests/lockstep_contract.cpp)\ntarget_include_directories(lockstep_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME lockstep_contract COMMAND lockstep_contract)\nadd_executable(input_probe tools/input_probe.cpp)\ntarget_link_libraries(input_probe PRIVATE StudySocket)\nadd_test(NAME input_probe_help COMMAND input_probe --help)"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/90-input-exchange -B out/study90 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study90 -j3\nctest --test-dir out/study90 --output-on-failure\n./out/study90/input_probe listen 0 77\n# 다른 터미널: LISTEN에 표시된 포트로 바꿔 실행\n./out/study90/input_probe connect 포트번호"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "상태 해시의 역할",
+          "body": "해시 일치는 실행 결과를 빠르게 비교하는 신호입니다. 모든 상태가 같다는 수학적 증명이나 상대의 정직함을 보증하지는 않습니다. 단위 검사에서는 직렬화한 상태 바이트도 직접 비교합니다."
+        },
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성 빌드",
+          "body": "빌드에 --config Release, CTest에 -C Release를 붙이고 실행 파일은 Release/input_probe.exe에서 찾습니다. 루프백 주소는 같은 기기의 두 프로세스를 연결합니다."
+        }
+      ]
+    },
+    {
+      "title": "빈 틱과 충돌을 의도적으로 만들어 본다",
+      "body": "입력 창의 테스트는 도착 상황을 바꾸면서 next_tick과 실제 게임 상태를 함께 관찰합니다. 호스트 틱 0과 상대 틱 1만 저장한 뒤 advance를 호출하면 waiting이며 두 보드의 상태 바이트도 그대로여야 합니다. 상대 틱 0을 추가한 다음에는 정확히 한 번 진행해야 합니다.\n\n묶음 마지막 항목에서 충돌을 일으키고 앞 항목도 새로 기록되지 않았는지 확인하세요. 틱 UINT32_MAX를 양쪽에 넣고 한 번 소비한 뒤 0번 입력을 넣는 경우에는 exhausted가 나와야 합니다.\n\n두 프로세스에서는 미래 묶음만 전송한 뒤 송신을 닫아 보세요. EOF를 받아도 FAILED next=0이어야 합니다. 동일 미래 묶음 두 번 뒤에 빈 구간을 채우면 정상 완료됩니다. 이 대비가 누락·재송·충돌을 서로 다른 결과로 분류할 이유를 보여 줍니다."
+    },
+    {
+      "title": "완성 파일과 책임 경계",
+      "body": "TickInputs는 입력의 존재와 순서를, Lockstep은 한 입력 쌍의 규칙 적용을, input_probe는 연결과 메시지 종류·실험 종료 조건을 소유합니다. 소켓이 게임 규칙 내부로 들어가지 않으므로 파일 입력이나 재현 테스트도 같은 실행기에 연결할 수 있습니다.\n\n유지할 핵심은 같은 플레이어·같은 틱의 확정 입력을 한 번 적용하는 계약입니다. 창 크기·배열과 맵 선택·묶음 수·화면 배치는 바뀔 수 있습니다. 기준의 엄격한 오류 종료 정책도 실제 운영에서는 재연결·재전송·시간 제한 규약과 함께 정해야 합니다.",
+      "codes": [
+        {
+          "label": "net/tick_inputs.h",
+          "language": "cpp",
+          "file": "checkpoints/90-input-exchange/net/tick_inputs.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/lockstep.h",
+          "language": "cpp",
+          "file": "checkpoints/90-input-exchange/net/lockstep.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/input_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/90-input-exchange/tools/input_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/lockstep_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/90-input-exchange/tests/lockstep_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "90-1",
+      "question": "next_tick=4입니다. 호스트 입력 4는 0이고 상대 입력은 5만 있습니다. 올바른 동작은 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "상대 입력을 0으로 채워 진행한다"
+        },
+        {
+          "id": "b",
+          "text": "틱 5로 건너뛴다"
+        },
+        {
+          "id": "c",
+          "text": "틱 4에서 상태를 유지하며 기다린다"
+        },
+        {
+          "id": "d",
+          "text": "호스트 입력 0을 누락으로 지운다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "틱 4에서 상태를 유지하며 기다린다",
+      "explanation": "저장된 0은 확정된 중립 입력입니다. 상대의 틱 4는 아직 없으므로 다른 틱의 기록으로 대신할 수 없습니다."
+    },
+    {
+      "id": "90-2",
+      "question": "창에 호스트 틱 2=ROTATE가 있습니다. 새 묶음 0=LEFT, 1=RIGHT, 2=DOWN을 넣으면 어떻게 될까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0과 1만 기록된다"
+        },
+        {
+          "id": "b",
+          "text": "전체 묶음이 거절되고 원래 창이 유지된다"
+        },
+        {
+          "id": "c",
+          "text": "2가 DOWN으로 덮인다"
+        },
+        {
+          "id": "d",
+          "text": "세 항목을 다음 틱으로 미룬다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "전체 묶음이 거절되고 원래 창이 유지된다",
+      "explanation": "후보 창에서 마지막 충돌을 발견하면 후보 전체를 버립니다. 앞 항목을 원본에 부분 반영하지 않습니다."
+    },
+    {
+      "id": "90-3",
+      "question": "peer 프로세스가 자기 입력을 Duel의 left에 적용하도록 바꾸었습니다. 기준 계약과 맞추려면 어떻게 해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "입력 마스크의 LEFT와 RIGHT 비트를 뒤집는다"
+        },
+        {
+          "id": "b",
+          "text": "두 보드를 모두 자기 입력으로 진행한다"
+        },
+        {
+          "id": "c",
+          "text": "호스트 입력도 peer로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "자기 입력을 Side::peer에 넣고 right에 적용한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "자기 입력을 Side::peer에 넣고 right에 적용한다",
+      "explanation": "host→left, peer→right는 모든 프로세스가 공유하는 식별 기준입니다. 화면 배치 변경은 표현 계층에서 처리할 수 있습니다."
+    },
+    {
+      "id": "90-4",
+      "question": "한 틱이 정상 적용되며 호스트 보드가 끝났습니다. 그 직후의 올바른 처리는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "그 틱을 advanced로 소비하고 다음 호출은 finished를 반환한다"
+        },
+        {
+          "id": "b",
+          "text": "그 틱의 입력을 삭제하지 않고 다시 적용한다"
+        },
+        {
+          "id": "c",
+          "text": "완료된 틱을 롤백한다"
+        },
+        {
+          "id": "d",
+          "text": "상대가 끝날 때까지 입력 없이 전진한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "그 틱을 advanced로 소비하고 다음 호출은 finished를 반환한다",
+      "explanation": "게임 종료를 일으킨 틱도 유효한 상태 전이입니다. 한 번 소비한 뒤 추가 진행을 멈춥니다."
+    },
+    {
+      "id": "90-5",
+      "question": "총 12틱 진단에서 상대가 6~11만 보내고 정상 EOF를 보냈습니다. 어떤 결과가 맞을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "정상 EOF이므로 성공이다"
+        },
+        {
+          "id": "b",
+          "text": "부족한 여섯 틱을 0으로 채운다"
+        },
+        {
+          "id": "c",
+          "text": "미래 입력을 저장했지만 틱 0이 없어 실패한다"
+        },
+        {
+          "id": "d",
+          "text": "틱 번호를 6부터 다시 시작한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "미래 입력을 저장했지만 틱 0이 없어 실패한다",
+      "explanation": "EOF는 상대 송신의 끝입니다. 필요한 입력을 모두 받았다는 뜻이 아니므로 next_tick=12라는 완료 조건을 함께 확인합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "누락·중립·동작 입력을 표로 구분합니다.",
+      "미래 입력을 먼저 넣고 next_tick이 왜 멈추는지 설명합니다.",
+      "두 프로세스에서 host/peer 입력을 같은 보드에 적용합니다.",
+      "묶음 충돌과 EOF 누락을 주입해 상태 보존·실패 조건을 확인합니다."
+    ],
+    "failureChecks": [
+      "출력 0을 값의 부재로 판단하지 않는지 확인합니다.",
+      "최대 수신 틱 아래의 구멍을 건너뛰지 않는지 검사합니다.",
+      "실패한 묶음의 앞 항목이 저장되지 않았는지 확인합니다."
+    ],
+    "expected": "확정된 입력 쌍만 순서대로 적용하고, 대기·재송·충돌·소진을 다른 상태로 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 선택 헤더 초안·직접 구조/용어 검수·실제 입력 소비 경로와 Part 대조",
+    "draftJob": "out/learning-jobs/090-lockstep-events.jsonl",
+    "corrections": [
+      "소진 뒤 창에 프레임이 남을 수 있다는 부정확한 주석 수정",
+      "실제 main의 누락 로컬 입력 0 대체를 쌍 조회로 교체",
+      "틀린 API명과 상태 바이트 접근자를 통합 검사 전에 수정",
+      "현재 main에서 따라잡기 루프 매 반복 gameOver 검사 추가",
+      "네트워크 프레임과 틱별 입력 레코드를 혼동한 초안 주석을 구분"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED 106 / SDL 111 CTest·경고 없음·89 누적 파일 변경 범위 확인",
+    "입력0/누락·마스크0~511·32칸 경계·중복/충돌·묶음 실패 전체 보존·UINT32_MAX 소진·Duel 상태 바이트·종료 ASan/UBSan",
+    "실제 두 프로세스 네 시드의 12틱 역할별 해시 일치·미래 묶음 대기·잘못된 입력/EOF/중복/충돌 등 9경로 확인",
+    "현재 입력 쌍 조회의 존재 조합·출력 보존 및 main 루프 발췌의 누락·양쪽 종료 검사; 수정 전 missing=3 finished=3, 수정 후 missing=0 finished=1",
+    "현재 게임/양 릴레이 빌드·root20/19 CTest; Windows/macOS 네이티브 미검증·수동 GUI 없음",
+    "실제 구현 스니펫8개·Part 발췌·Markdown27경우·444문제·전체 차시 DOM·재현 가능한 정적 배포물 검사"
+  ]
+}

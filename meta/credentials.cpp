@@ -1,8 +1,14 @@
 #include "credentials.h"
 #include <openssl/evp.h>
+#include <openssl/crypto.h>
 #include <stdexcept>
 
 namespace meta::credentials {
+bool equal_secret(const std::string &a, const std::string &b) {
+    if (a.size() != b.size()) return false;
+    return a.empty() || CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
+}
+
 std::string digest(const std::string &purpose, const std::string &value) {
     const auto input = "tetris-" + purpose + "-v1:" + value;
     unsigned char bytes[EVP_MAX_MD_SIZE];

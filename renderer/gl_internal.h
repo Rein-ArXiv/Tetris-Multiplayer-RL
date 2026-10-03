@@ -4,10 +4,9 @@
 
 // 렌더러 내부 전용. text_gl.cpp / image_gl.cpp 가 배처에 사각형을 넣을 때 쓴다.
 //
-// 모든 그리기가 이 배처를 통과한다. 텍스처가 바뀔 때만 draw call 이 나가므로
-// 실측으로 인게임 9 회, 메뉴 16 회다 (교체 횟수가 곧 draw call 수다).
-// draw_rect 마다 draw call 을 내면 프레임당 수백 회가 되어 드라이버 오버헤드가
-// 실제 픽셀 작업보다 커진다.
+// 도형의 정점을 호출 순서대로 모아 호환되는 렌더링 상태끼리 제출한다.
+// 호출 횟수는 비어 있지 않은 flush 경계의 수에 따라 달라진다.
+// 실제 성능은 드라이버 제출·전송·정점/픽셀 처리 비용을 함께 측정한다.
 
 // 축 정렬 사각형 하나를 큐에 넣는다. 좌표는 논리 픽셀, 좌상단 원점.
 //   radius  — 0 이면 각진 사각형. 양수면 fragment 셰이더가 모서리를 깎는다.
@@ -25,8 +24,13 @@ void glb_quad(GLuint tex,
               const float uu[4], const float vv[4],
               Color c, float channel);
 
-// 큐에 쌓인 것을 실제로 그린다. 텍스처가 바뀌기 직전과 프레임 끝에 호출된다.
+// 큐를 GPU 명령으로 제출한다. 텍스처 변경·프레임 끝·아틀라스 재활용 전에 호출한다.
+// GPU 완료나 모니터 표시 완료를 기다리는 함수는 아니다.
 void glb_flush();
+
+// Before deleting a texture, submit its pending vertices and forget its batch name.
+// Main render thread/current context; this submits commands, not a GPU wait.
+void glb_before_texture_delete(GLuint tex);
 
 // 단색 도형용 1x1 흰색 텍스처. 셰이더를 하나로 유지하기 위한 장치다.
 GLuint glb_white_texture();

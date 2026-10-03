@@ -1,4 +1,5 @@
 #include "framing.h"
+#include <limits>
 
 // 한계/필드 크기 상수는 framing.h 의 공개 상수(kMaxPayloadBytes 등)를 쓴다.
 // 과거엔 여기 익명 네임스페이스에 중복 정의돼 있었는데, relay/Python 미러와 값이
@@ -23,6 +24,13 @@ void le_write_u64(std::vector<uint8_t>& v, uint64_t x) {
 }
 uint16_t le_read_u16(const uint8_t* p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 uint32_t le_read_u32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
+int32_t le_read_i32(const uint8_t* p) {
+    const uint32_t raw = le_read_u32(p);
+    const auto max = static_cast<uint32_t>((std::numeric_limits<int32_t>::max)());
+    if (raw <= max) return static_cast<int32_t>(raw);
+    // UINT32_MAX - raw fits int32_t here. No out-of-range unsigned→signed cast.
+    return -1 - static_cast<int32_t>((std::numeric_limits<uint32_t>::max)() - raw);
+}
 uint64_t le_read_u64(const uint8_t* p) {
     // 리틀엔디안: p[0]이 최하위 바이트
     uint64_t x=0; for (int i=7;i>=0;--i){ x = (x<<8) | p[i]; } return x;
@@ -46,8 +54,9 @@ std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload)
 bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
     size_t offset = 0;
     while (true) {
-        // Addition avoids unsigned underflow in a subtraction check.
-        if (offset + kFrameLenBytes > streamBuf.size()) break;
+        // Invariant: offset <= size; advance only by a complete frame.
+        const size_t remaining = streamBuf.size() - offset;
+        if (remaining < kFrameLenBytes) break;
 
         // LEN = TYPE + PAYLOAD 길이
         const uint16_t len = le_read_u16(&streamBuf[offset]);
@@ -59,7 +68,7 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
         }
 
         const size_t need = kFrameLenBytes + static_cast<size_t>(len) + kFrameChecksumBytes;
-        if (offset + need > streamBuf.size()) break;
+        if (remaining < need) break;
 
         // A zero length frame has no type byte.
         if (len < kFrameTypeBytes) { offset += need; continue; }

@@ -1,0 +1,414 @@
+{
+  "id": "lesson-27",
+  "title": "블록 데이터: 로컬 좌표와 기준점",
+  "shortTitle": "로컬 모양과 배치",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 보드 칸을 그릴 수 있지만, 보드와 독립적인 블록 모양·배치 상태는 없습니다.",
+  "finish": "완료: T 모양과 기준점을 분리해 보드 좌표를 계산하고, 기존 Grid를 바꾸지 않은 채 블록을 덧그립니다.",
+  "objective": "로컬 좌표·배치 기준점·보드 좌표·화면 좌표를 구분하고, 평행이동과 범위 검사를 거쳐 블록의 정점 스냅샷을 만듭니다.",
+  "prerequisites": [
+    "26차시 체크포인트",
+    "값 소유·optional·정수 표현 범위",
+    "칸 사각형·정점 배열·VBO와 제출"
+  ],
+  "validation": [
+    "Linux SCRIPTED/SDL Release 각16CTest·CPU 데모·UBSan",
+    "현재 SimBlock 좌표·map/vector 복사·스냅샷 검사",
+    "5배치×3크기 SDL offscreen llvmpipe 실제 GL RGB readback",
+    "새 main SDL 빌드 확인. 물리GPU·native 표시/키/마우스·Windows/macOS는 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek 선택 명세 기반 순수 좌표 변환 검토·원문/현재 소스와 값 소유/기준점 대조",
+    "draftJob": "out/learning-jobs/piece-events.jsonl",
+    "corrections": [
+      "고스트의 값 복사와 메모리 공유 구분",
+      "T 점유 사각형과 회전 좌표 틀 구분",
+      "덧셈 전 확장·전체 결과 반환 계약 검토",
+      "보드 밖 표시 생략을 충돌 허용으로 오해하지 않도록 설명"
+    ]
+  },
+  "recap": {
+    "points": [
+      "보드의 행·열은 표현 계층에서 논리 사각형과 정점으로 바뀝니다.",
+      "칸 입력 영역과 칠하는 영역은 별도 정책으로 정할 수 있습니다.",
+      "Grid·Mesh·GPU 저장소는 별개여서 상태 변경이 자동으로 전파되지 않습니다."
+    ],
+    "bridge": "보드에 저장된 칸 외에, 독립적인 모양과 기준점을 가진 블록을 같은 표현 경로에 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "보드와 떨어져 있는 모양 하나",
+      "body": "보드의 채운 칸을 화면에 그릴 수 있게 되었습니다. 이제 T 모양을 추가합니다. 하지만 네 칸을 곧바로 `Grid::set`으로 써 넣지는 않습니다. 현재 움직일 대상과 이미 쌓인 칸이 같은 저장소에 섞이면, 위치를 바꿀 때 어떤 칸을 지워야 하는지부터 어려워집니다.\n\n**블록의 모양과 보드 위 배치 위치를 별도로 저장**하겠습니다. 보드는 고정된 세 칸을 그대로 갖고, T 모양은 별도의 청록색 그림으로 그 위에 표시합니다. 이번 산출물은 키로 움직이는 게임이 아니라, 기준점을 바꾸어 좌표와 그림을 비교할 수 있는 정지된 배치입니다.\n\n```text\n로컬 모양 + 배치 기준점\n       ↓ 정수 좌표 덧셈\n블록의 보드 좌표 네 개\n       ↓ 보이는 칸만 사각형으로 변환\n블록 정점 → 보드 다음에 그리기\n```\n\n이 흐름은 Grid를 변경하지 않습니다. 화면에서 블록이 보인다는 사실과 규칙상 보드에 고정됐다는 사실을 구분하는 출발점입니다.",
+      "reference": {
+        "path": "src/sim_block.h",
+        "symbol": "std::vector<Position> GetCellPositions() const",
+        "invariant": "셀의 로컬 좌표에 배치 오프셋을 더해 보드 기준 좌표를 얻는다.",
+        "mayDiffer": "현재 SimBlock은 회전별 map/vector와 ID를 갖는다. 강의는 한 모양·네 칸·회전 없는 값 객체로 시작한다.",
+        "omitted": "회전·충돌·낙하·고정·여러 종류의 모양은 후속 구현이다."
+      }
+    },
+    {
+      "title": "로컬 좌표에 모양만 기록한다",
+      "body": "로컬(local)은 이 모양을 기술하기 위해 정한 좌표계라는 뜻입니다. 어느 보드·창에 놓일지와 관계없이 네 칸의 상대적인 배치만 기록합니다. 행은 아래로, 열은 오른쪽으로 증가합니다.\n\n```text\n      column\n      0 1 2\nrow 0 . # .\nrow 1 # # #\n```\n\n위 모양을 `(0,1), (1,0), (1,1), (1,2)`로 저장합니다. 각 쌍은 `(row,column)`입니다. 저장 순서는 화면의 색이나 셀 ID가 아니라, 변환 결과를 어느 순서로 내보낼지를 결정합니다. 이 함수는 입력 순서를 유지합니다.\n\n`LocalCell`과 `Origin`을 다른 struct로 만들면 같은 두 정수라도 역할을 구분할 수 있습니다. `Shape`는 네 LocalCell을 소유하는 `std::array`의 별칭입니다. 네 칸이라는 제약은 이번 예제의 데이터 형식이며 모든 변형 게임의 블록이 네 칸이어야 한다는 뜻은 아닙니다.\n\n`Piece`는 모양과 기준점을 값으로 소유합니다. 같은 모양의 Piece 두 개를 만들더라도 각 인스턴스의 기준점은 독립적입니다. 모양을 공통 카탈로그에서 참조하는 구조는 종류를 늘릴 때 비교할 수 있습니다. 지금은 참조 수명이나 등록 ID 없이 좌표 변환부터 완성합니다.",
+      "codes": [
+        {
+          "label": "의미가 다른 좌표와 모양을 타입으로 나눈다",
+          "language": "cpp",
+          "text": "struct LocalCell {\n    int row = 0;\n    int column = 0;\n};\n\nstruct Origin {\n    int row = 0;\n    int column = 0;\n};\n\nusing Shape = std::array<LocalCell, 4>;\nusing BoardCells = std::array<study_grid::Position, 4>;\n\n// Default T-tetromino in local coordinates.\n// Occupied bounds: rows 0..1, columns 0..2. Origin local (0,0) is empty;\n// the T rotation pivot at local (1,1) is a separate concept, not stored here.\ninline constexpr Shape t_shape{{\n    LocalCell{0, 1},\n    LocalCell{1, 0},\n    LocalCell{1, 1},\n    LocalCell{1, 2},\n}};\n\n// Piece owns its local cells by value and its origin by value.\nstruct Piece {\n    Shape local = t_shape;\n    Origin origin{};\n};"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_blocks.h",
+        "symbol": "class SimTBlock",
+        "invariant": "T 모양은 상대적인 row/column 목록으로 기술된다.",
+        "mayDiffer": "현재 코드는 네 회전 상태와 ID6, 초기 오프셋(0,3)을 설정한다.",
+        "omitted": "이번에는 기본 방향 하나만 사용하며 회전 표는 다음 규칙 구현에서 다룬다."
+      },
+      "notes": [
+        {
+          "kind": "현재 코드 읽기",
+          "title": "SimBlock의 형상은 언제 준비되는가",
+          "body": "기본 SimBlock은 회전별 cells가 비어 있습니다. SimTBlock 등의 생성자가 테이블을 채운 뒤 GetCellPositions를 호출해야 합니다. cells.at(rotationState)는 선택한 키가 없으면 예외를 던집니다. 강의의 Piece는 기본 T 모양을 멤버 초기값으로 갖는다는 차이가 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "기준점은 첫 칸이나 회전 중심이 아니다",
+      "body": "기본 T 모양의 첫 원소는 (0,1)입니다. 로컬 원점 (0,0)에는 칸이 없습니다. 따라서 기준점을 (4,3)에 놓았다고 해서 반드시 (4,3)이 채워지는 것은 아닙니다. 기준점은 **로컬 (0,0)이 보드 어디에 대응하는가**를 정합니다.\n\n| 구분 | 이 T 모양에서의 의미 |\n| --- | --- |\n| 로컬 원점 | (0,0), 채워지지 않아도 됨 |\n| 첫 배열 원소 | (0,1), 저장 순서상 첫 칸 |\n| 점유 범위 | 행 0~1, 열 0~2 |\n| 현재 게임의 T 회전 기준점 | 로컬 (1,1), 회전 표와 연결된 별도 약속 |\n\n점유 범위의 최소 사각형을 bounding box라고 합니다. 여기서는 2행×3열입니다. T 회전 상태를 모두 표현하는 공통 좌표 틀은 3×3이지만, 한 상태의 점유 사각형도 항상 3×3인 것은 아닙니다. 매번 점유 사각형의 중심을 구해 회전 기준점으로 쓰면 기준이 달라질 수 있습니다.\n\n`local_bounds`는 네 칸의 최소·최대 행과 열만 찾습니다. min/max는 포함되는 마지막 칸 번호입니다. 예제의 행 수는 `1-0+1=2`입니다. 임의 int 극단값까지 크기를 계산하려면 빼기 전 타입을 넓혀야 하므로, 이 함수는 크기를 계산하지 않고 경계만 반환합니다. 경계를 찾았다고 모양을 자동으로 원점에 맞추지는 않습니다.",
+      "codes": [
+        {
+          "label": "모양을 바꾸지 않고 점유 범위만 읽는다",
+          "language": "cpp",
+          "text": "struct Bounds {\n    int min_row = 0;\n    int min_column = 0;\n    int max_row = 0;\n    int max_column = 0;\n};\n\n// Inclusive extrema computed with direct comparisons only. No\n// (max - min + 1) sizing math; the extrema are reported as data and never\n// recenter the stored cells.\ninline Bounds local_bounds(const Shape& shape) noexcept {\n    Bounds bounds{shape[0].row, shape[0].column, shape[0].row, shape[0].column};\n    for (std::size_t i = 1; i < shape.size(); ++i) {\n        const LocalCell& cell = shape[i];\n        if (cell.row < bounds.min_row) {\n            bounds.min_row = cell.row;\n        }\n        if (cell.column < bounds.min_column) {\n            bounds.min_column = cell.column;\n        }\n        if (cell.row > bounds.max_row) {\n            bounds.max_row = cell.row;\n        }\n        if (cell.column > bounds.max_column) {\n            bounds.max_column = cell.column;\n        }\n    }\n    return bounds;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "그림의 중심을 맞추는 일은 별도 계산",
+          "body": "아이콘이나 다음 블록 미리보기를 중앙 정렬할 때는 점유 범위를 이용할 수 있습니다. 그때 얻은 화면 배치 오프셋을 게임의 회전 기준점에 덮어쓰면 안 됩니다. 표현 정렬과 규칙 좌표의 책임이 다르기 때문입니다."
+        }
+      ]
+    },
+    {
+      "title": "배치 기준점을 네 칸 모두에 더한다",
+      "body": "기준점이 (4,3)일 때 첫 칸 (0,1)의 보드 위치를 먼저 예상해 봅시다. 행끼리, 열끼리 더하면 `(4+0, 3+1) = (4,4)`입니다.\n\n| 로컬 칸 | 기준점 | 보드 칸 |\n| --- | --- | --- |\n| (0,1) | (4,3) | (4,4) |\n| (1,0) | (4,3) | (5,3) |\n| (1,1) | (4,3) | (5,4) |\n| (1,2) | (4,3) | (5,5) |\n\n모든 칸에 같은 변위를 더하는 변환을 평행이동(translation)이라고 합니다. 두 칸 A와 B의 차이는 `(A+offset)-(B+offset)=A-B`로 보존됩니다. 따라서 위치만 바뀌고 상대적 배치는 그대로입니다. 회전이나 크기 변경은 이 함수가 수행하지 않습니다.\n\n보드 좌표를 얻은 뒤에는 `x = 110 + column×10`, `y = 20 + row×10`으로 화면 배치를 계산합니다. 첫 칸 (4,4)의 논리 좌상단은 (150,60)입니다. 기준점 (4,3)은 셀 단위이고 화면 원점 (110,20)은 논리 화면 단위입니다. 둘을 같은 오프셋으로 혼용하거나 보드 좌표에 기준점을 한 번 더 더하지 않습니다.",
+      "reference": {
+        "path": "src/sim_block.h",
+        "symbol": "std::vector<Position> GetCellPositions() const",
+        "invariant": "셀의 로컬 좌표에 배치 오프셋을 더해 보드 기준 좌표를 얻는다.",
+        "mayDiffer": "현재 SimBlock은 회전별 map/vector와 ID를 갖는다. 강의는 한 모양·네 칸·회전 없는 값 객체로 시작한다.",
+        "omitted": "회전·충돌·낙하·고정·여러 종류의 모양은 후속 구현이다."
+      }
+    },
+    {
+      "title": "보드 밖과 계산 실패를 구분한다",
+      "body": "기준점을 (-1,3)으로 바꾸면 첫 칸은 (-1,4), 나머지는 (0,3), (0,4), (0,5)입니다. 첫 칸이 보드 위쪽에 있지만 정수 계산 자체에는 문제가 없습니다. 변환은 네 좌표 모두를 반환합니다.\n\n반대로 기준점 행이 `INT_MAX`인데 로컬 행에 1이 있다면 그 합은 int로 표현할 수 없습니다. 이 경우는 **계산 결과를 저장할 수 없는 실패**입니다. 범위를 넘어선 부호 있는 정수 덧셈을 먼저 수행하고 나중에 검사하는 방식으로 해결할 수 없습니다.\n\n```cpp\n// 잘못된 순서: int 덧셈이 먼저 일어난다.\nconst std::int64_t row = local_row + origin_row;\n\n```\n\n```cpp\n// 필요한 순서: 피연산자를 넓힌 뒤 더한다.\nconst std::int64_t row =\n    static_cast<std::int64_t>(local_row) +\n    static_cast<std::int64_t>(origin_row);\n```\n\n체크포인트는 int가 32비트 이하라는 전제를 정적 검사로 확인합니다. 그 전제에서 두 int 값을 int64로 넓혀 더하면 합이 int64 범위 안입니다. 합을 원래 int의 min/max와 비교한 뒤에만 int로 되돌립니다.\n\n변환 성공, 보드 안 배치, 다른 칸과 겹치지 않음은 서로 다른 질문입니다. 계산이 성공해도 음수 좌표가 있을 수 있고, 모두 보드 안이어도 이미 쌓인 칸과 겹칠 수 있습니다. `to_board`에는 Grid 점유 상태를 전달하지 않으므로 충돌을 판정할 수도 없습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "부호 있는 오버플로는 자동 순환 규칙이 아니다",
+          "body": "[C++ 공개 초안의 식 평가 규칙](https://eel.is/c++draft/expr.pre)은 표현할 수 없는 산술 결과의 동작을 규정합니다. 이 예제의 signed int 범위 초과를 정상적인 음수 순환으로 가정하면 안 됩니다. 더 큰 변수에 대입하는 것과 더 큰 타입에서 계산하는 것은 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "네 좌표가 모두 준비된 뒤 결과를 반환한다",
+      "body": "`to_board`는 Piece를 const 참조로 읽고 `optional<BoardCells>`를 반환합니다. 내부의 candidate는 아직 외부에 공개하지 않은 계산 결과입니다. 각 좌표 합을 검사하고, 하나라도 int 범위를 넘으면 `nullopt`로 끝냅니다. 네 칸이 모두 성공해야 배열을 돌려줍니다.\n\n따라서 앞 세 칸만 계산됐다고 호출자가 불완전한 블록을 받는 일은 없습니다. 원본 Piece를 수정하지 않으므로 실패 뒤 복구할 상태도 없습니다. 이것은 여러 스레드의 원자적 연산이나 트랜잭션을 제공한다는 뜻이 아니라, 이 함수가 반환하는 값의 완전성을 정한 계약입니다.\n\n이 함수는 모양의 중복 칸·연결성까지 검사하지 않습니다. 같은 로컬 칸 네 개를 주면 같은 보드 칸 네 개가 나옵니다. 좌표 변환 함수가 할 일과 블록 데이터 등록 시 확인할 일은 나누어야 합니다. 기준 코드의 T 모양은 네 칸이 서로 다르지만 그 성질을 임의 입력 전체로 확대하지 않습니다.",
+      "codes": [
+        {
+          "label": "각 합을 검사하고 완성된 값만 반환한다",
+          "language": "cpp",
+          "text": "inline std::optional<BoardCells> to_board(const Piece& piece) noexcept {\n    BoardCells candidate{};\n    for (std::size_t i = 0; i < piece.local.size(); ++i) {\n        const std::int64_t row =\n            static_cast<std::int64_t>(piece.local[i].row) +\n            static_cast<std::int64_t>(piece.origin.row);\n        const std::int64_t column =\n            static_cast<std::int64_t>(piece.local[i].column) +\n            static_cast<std::int64_t>(piece.origin.column);\n        if (row < std::numeric_limits<int>::min() ||\n            row > std::numeric_limits<int>::max() ||\n            column < std::numeric_limits<int>::min() ||\n            column > std::numeric_limits<int>::max()) {\n            return std::nullopt;\n        }\n        candidate[i] = study_grid::Position{\n            static_cast<int>(row), static_cast<int>(column)};\n    }\n    return candidate;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_block.h",
+        "symbol": "std::vector<Position> GetCellPositions() const",
+        "invariant": "셀의 로컬 좌표에 배치 오프셋을 더해 보드 기준 좌표를 얻는다.",
+        "mayDiffer": "현재 SimBlock은 회전별 map/vector와 ID를 갖는다. 강의는 한 모양·네 칸·회전 없는 값 객체로 시작한다.",
+        "omitted": "회전·충돌·낙하·고정·여러 종류의 모양은 후속 구현이다."
+      }
+    },
+    {
+      "title": "복사본과 계산 결과는 자동으로 따라오지 않는다",
+      "body": "`Piece copy = original`은 모양 배열과 기준점을 값으로 복사합니다. copy의 기준점을 바꾸거나 로컬 칸을 수정해도 original은 바뀌지 않습니다. 마찬가지로 `to_board`에서 받은 배열도 호출 당시 위치의 스냅샷입니다. 이후 original을 이동시키려면 새 기준점으로 다시 계산해야 합니다.\n\n현재 게임의 `SimBlock`도 기본 값 복사를 사용합니다. map 안에 vector가 들어 있다고 해서 복사 후 두 블록이 하나의 형상 메모리를 공유하는 것은 아닙니다. 각 컨테이너는 별도 원소를 소유합니다. 고스트 생성은 현재 블록을 복사한 뒤 표시 ID를 8로 바꾸고, 낙하 과정에서 고스트의 행 오프셋을 바꿉니다.\n\n“같은 모양”은 값이 같다는 의미로 쓸 수 있지만 “같은 메모리를 공유한다”는 다른 주장입니다. 추후 형상 카탈로그를 한 번만 저장하고 참조로 공유하려면 불변 데이터의 소유자와 수명 계약을 새로 정해야 합니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimBlock SimGame::MakeGhostBlock",
+        "invariant": "고스트는 현재 블록에서 출발하되 별도의 배치 상태로 다룬다.",
+        "mayDiffer": "현재 구현은 map/vector를 포함한 SimBlock 값 복사와 ID8을 사용한다. 강의는 고스트 없이 Piece 값 소유를 먼저 확인한다.",
+        "omitted": "고스트 낙하·블록 고정·표현 투명도는 후속 범위다."
+      }
+    },
+    {
+      "title": "같은 모양을 다른 원점으로 기술할 수도 있다",
+      "body": "로컬 원점은 모양을 기술하는 약속입니다. 기준을 바꿔도 반대쪽 오프셋을 보상하면 같은 보드 칸을 얻을 수 있습니다. 작은 수로 확인해 봅시다.\n\n기본 T의 로컬 행에서 모두 2를 빼고 로컬 열에는 모두 3을 더합니다. 새 좌표는 `(-2,4), (-1,3), (-1,4), (-1,5)`입니다. 기준점 (4,3)은 행에 2를 더하고 열에서 3을 빼서 (6,0)으로 바꿉니다. 첫 칸은 `(6-2, 0+4) = (4,4)`로 같습니다.\n\n이런 원점 재설정(rebasing)은 좌표 표현을 바꾸는 것이며, 실제 물체를 움직이는 것과는 다릅니다. 로컬 좌표만 수정하고 기준점을 보상하지 않으면 보드 위치가 바뀝니다. 모든 산술은 표현 범위 안에서 수행해야 합니다.\n\n미리보기용으로 점유 사각형을 (0,0)에 맞출 때도 같은 원리를 사용할 수 있습니다. 다만 게임의 회전 표에 보관된 로컬 데이터 자체를 화면 정렬 때문에 바꾸는 대신, 표현 쪽의 임시 오프셋으로 처리하면 규칙 좌표를 유지할 수 있습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "좌표 타입이 의도를 전부 증명하지는 않는다",
+          "body": "LocalCell과 Origin을 다른 타입으로 나누면 전달 실수를 줄일 수 있습니다. 하지만 두 필드 모두 int이므로 row와 column에 잘못된 값을 넣는 것까지 컴파일러가 알아내지는 못합니다. 서로 다른 축 값과 여러 기준점으로 결과를 확인해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "보이는 칸의 정점만 별도로 만든다",
+      "body": "`make_visible_mesh`는 이미 계산된 BoardCells를 읽고 보드 안의 칸만 사각형으로 바꿉니다. 이 단계에서 밖인 칸은 생략하지만 좌표를 0으로 보정하거나 Piece를 수정하지 않습니다. 이 정책은 **화면 표시를 위한 칸 필터링**이며, GPU의 삼각형 클리핑이나 게임의 이동 허용 판정과 다릅니다.\n\n네 칸이면 최대 24정점이 필요합니다. 배열은 최대 용량을 갖고 `count`가 실제 사용한 앞부분 길이를 기록합니다. 위쪽에 걸친 예제는 세 칸이 보여 18정점만 사용합니다. 남은 여섯 원소가 0으로 초기화돼 있어도 그 원소를 제출하지 않습니다. 배열 용량과 유효한 데이터 길이를 구분하는 이유입니다.\n\n보드와 블록은 같은 사각형 변환을 사용합니다. `board_geometry.h`에서 네 모서리를 여섯 정점으로 바꾸는 부분을 `quad_vertices`로 분리했습니다. 보드는 자기 큰 배열에, 블록은 자기 작은 배열에 그 여섯 정점을 붙입니다. 그리는 대상이 늘어났을 때 좌표 공식을 복사해 두 군데서 따로 고치지 않도록 한 작은 추출입니다.\n\n블록을 보드 밖으로 완전히 옮기면 count=0인 정상 결과입니다. VBO의 최초 upload는 빈 입력을 받지 않으므로 그때에는 블록용 자원을 만들거나 드로우를 제출하지 않습니다. “계산 실패”와 “보이는 정점 없음”을 하나의 false로 합치지 않습니다.",
+      "codes": [
+        {
+          "label": "보이는 칸만 배열의 앞부분에 채운다",
+          "language": "cpp",
+          "text": "struct Mesh {\n    std::array<study_mesh::Vertex2,24> vertices{};\n    std::size_t count=0; // Used prefix only; invisible cells do not submit zeros.\n};\n// Visual filtering only: out-of-board cells are omitted, not clamped or moved.\n// This function knows no Grid occupancy and is NOT collision validation.\ninline Mesh make_visible_mesh(const study_piece::BoardCells& cells) noexcept {\n    Mesh mesh{};\n    for(const auto cell:cells){\n        const auto rect=study_board::cell_rect(cell.row,cell.column);\n        if(!rect)continue;\n        for(const auto vertex:study_board::quad_vertices(*rect))\n            mesh.vertices[mesh.count++]=vertex;\n    }\n    return mesh;\n}"
+        },
+        {
+          "label": "보드와 블록이 공유하는 사각형 변환",
+          "language": "cpp",
+          "text": "inline std::array<study_mesh::Vertex2,6> quad_vertices(const Rect& r) noexcept {\n    const double corners[6][2] = {\n        {r.left,r.bottom},{r.right,r.bottom},{r.right,r.top},\n        {r.left,r.bottom},{r.right,r.top},{r.left,r.top}\n    };\n    std::array<study_mesh::Vertex2,6> vertices{};\n    for(std::size_t i=0;i<vertices.size();++i){\n        const auto clip=study_coordinates::ui_to_clip(\n            corners[i][0],corners[i][1],logical_width,logical_height);\n        vertices[i]={static_cast<float>(clip->x),static_cast<float>(clip->y)};\n    }\n    return vertices;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::DrawBlock(",
+        "invariant": "블록의 보드 좌표를 표현 사각형으로 바꾸되 시뮬레이션 상태는 그리기에서 변경하지 않는다.",
+        "mayDiffer": "현재 Game은 draw_rect를 호출하고 다른 렌더링 계층에서 화면 밖 도형을 걸러낸다. 강의는 보드 밖 셀을 CPU에서 생략한다.",
+        "omitted": "고스트·텍스처·부분 사각형 클리핑은 생략한다."
+      },
+      "notes": [
+        {
+          "kind": "그림으로 비교",
+          "title": "위쪽에 걸친 T: 기준점 (-1,3)",
+          "body": "첫 셀 (-1,4)는 표시되지 않고, 나머지 세 셀만 보드의 0행에 나타납니다. 원래 네 좌표를 지우거나 이동한 것은 아닙니다.\n\n![기준점이 마이너스1행3열인 T의 아래쪽 세 칸만 보드 맨 위 행에 청록색으로 보인다.](data:image/png;base64,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)"
+        }
+      ]
+    },
+    {
+      "title": "보드를 그린 뒤 블록을 덧그린다",
+      "body": "그리기 순서는 프레임 시작 → 보드 → 블록 → present입니다. 보드와 블록 사이에 화면을 지우지 않습니다. 이번 블록은 알파1의 청록색이고, 보드 패스가 설정한 viewport·scissor·불투명 그리기 조건을 그대로 사용합니다.\n\n블록이 기존 주황색 칸과 겹치면 나중에 제출한 청록색이 그 픽셀을 덮습니다. 그래도 Grid의 주황색 칸 데이터는 그대로입니다. 화면에서 가려졌다는 사실은 셀이 삭제됐거나 충돌이 허용됐다는 뜻이 아닙니다. 정지된 좌표 실험에서는 겹침도 관찰 대상으로 허용하고, 실제 이동 규칙은 별도로 추가합니다.\n\n블록 VBO·VAO·프로그램은 보드 자원과 따로 소유합니다. 유효한 정점 수만 업로드하고 그 수만 render에 전달합니다. 보이는 칸이 없으면 GL 이름이 0이어도 제출할 것이 없으므로 반환합니다. count가 음수·24 초과·6의 배수가 아닌 경우는 잘못된 메타데이터로 거부합니다.\n\n이번 세션은 시작할 때 기준점을 정하므로 업로드가 한 번입니다. 키 입력으로 기준점을 바꾸는 기능을 붙일 때에는 Piece → BoardCells → Mesh → GPU 복사본을 갱신해야 합니다. 최초 업로드만 허용하는 지금의 버퍼에 매 프레임 upload를 반복하는 방식으로는 갱신되지 않습니다.",
+      "codes": [
+        {
+          "label": "프레임을 지우지 않고 블록만 제출한다",
+          "language": "cpp",
+          "text": "inline constexpr char fragment[] = R\"glsl(#version 330 core\nlayout(location = 0) out vec4 out_color;\nvoid main() { out_color = vec4(0,0.75,1,1); }\n)glsl\";\n// Borrow the board pass's viewport/scissor/opaque state. Never clear here.\n// available matches the uploaded used prefix. Zero means no GL objects needed.\ninline bool render(const study_gl::GlApi& gl,study_gl::GLuint program,\n                   study_gl::GLuint vao,study_gl::GLsizei available) noexcept {\n    if(available<0 || available>24 || available%6!=0)return false;\n    if(available==0)return true;\n    return study_gl::submit_triangles(gl,program,vao,available,0,available);\n}"
+        }
+      ]
+    },
+    {
+      "title": "파일을 연결하고 배치 결과를 비교한다",
+      "body": "`27-local-piece`는 보드 렌더링 체크포인트를 복사해 확장한 누적 코드입니다. 새 규칙 데이터와 표현 경계를 다음처럼 나눕니다.\n\n| 파일 | 역할 |\n| --- | --- |\n| `simulation/piece.h` | 로컬 모양·기준점·정수 좌표 변환 |\n| `src/piece_example.h` | 기본 T와 배치 기준점 (4,3) 선택 |\n| `renderer/piece_geometry.h` | 보이는 칸의 정점 스냅샷 |\n| `renderer/piece_scene.h` | 청록색과 블록 제출 |\n| `renderer/board_geometry.h` | 공통 사각형 변환 추출 |\n| `src/main.cpp` | 보드·블록 자원 소유와 그리기 순서 |\n| `src/piece_demo.cpp` | 다섯 배치의 좌표·가시 칸 수 출력 |\n\nCPU 경로는 SDL 개발 패키지 없이 C++17·CMake로 빌드합니다. 저장소 루트에서 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/27-local-piece -B out/study-27 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-27\n./out/study-27/piece_demo\nctest --test-dir out/study-27 --output-on-failure\n```\n\n| 기준점 | 결과 |\n| --- | --- |\n| (4,3) | (4,4),(5,3),(5,4),(5,5) · 4칸 표시 |\n| (-1,3) | 첫 칸은 (-1,4) · 나머지 3칸 표시 |\n| (-4,3) | 변환 성공 · 표시할 칸 없음 |\n| (19,8) | (19,9)만 보드 안 · 1칸 표시 |\n| (INT_MAX,3) | 행 덧셈을 int로 저장할 수 없어 실패 |\n\n창 실행에는 SDL2 개발 패키지·pkg-config·desktop GL3.3 Core 컨텍스트가 필요합니다. SDL 전용 폴더를 별도로 구성합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/27-local-piece -B out/study-27-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-27-sdl\n./out/study-27-sdl/tetris\n```\n\n다중 구성 생성기는 선택한 구성에 맞춰 실행 파일 경로를 바꿉니다. Escape 또는 창 닫기로 종료합니다. `piece_example.h`의 기준점을 바꾸고 다시 빌드하면 창에서도 다른 배치를 비교할 수 있습니다. 아래쪽 한 칸만 보이는 (19,8)에서, 사라진 세 칸의 좌표도 터미널 데모에는 남아 있는지 확인하세요.",
+      "codes": [
+        {
+          "label": "simulation/piece.h · 완성 파일",
+          "file": "checkpoints/27-local-piece/simulation/piece.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/piece_example.h · 완성 파일",
+          "file": "checkpoints/27-local-piece/src/piece_example.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/piece_geometry.h · 완성 파일",
+          "file": "checkpoints/27-local-piece/renderer/piece_geometry.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/piece_scene.h · 완성 파일",
+          "file": "checkpoints/27-local-piece/renderer/piece_scene.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/board_geometry.h · 완성 파일",
+          "file": "checkpoints/27-local-piece/renderer/board_geometry.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/27-local-piece/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/27-local-piece/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "틀린 변환을 찾아내는 관찰",
+      "body": "기본 배치에서 청록색 T의 첫 칸은 보드 (4,4)이며, 아래 세 칸은 5행의 3~5열입니다. 보드의 세 주황색 칸은 그대로 유지됩니다. 이미지를 읽을 때 행·열을 0부터 세어 보세요.\n\n![주황색 세 칸을 유지한 보드 위에 청록색 T가 행4의 열4, 행5의 열3부터5까지 표시된다.](data:image/png;base64,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)\n\n기준 검사는 위·아래·좌·우 경계 주변의 여러 기준점에서 모든 좌표와 정점을 비교합니다. 각 칸의 절대 위치뿐 아니라 칸 사이의 상대 차이가 유지되는지, 원점을 바꾸고 보상해도 같은 결과인지 확인합니다.\n\n| 다른 결과 | 점검할 원인 |\n| --- | --- |\n| 모양이 예상보다 두 배 멀리 이동 | 보드 좌표에 기준점을 다시 더함 |\n| 원점이 바뀔 때 T 형태도 바뀜 | 일부 칸만 이동하거나 축을 바꿈 |\n| 위쪽 칸이 좌상단에 나타남 | 음수 좌표를 0으로 보정 |\n| 블록을 그리자 기존 셀이 사라짐 | 표현에서 Grid를 수정하거나 중간 clear |\n| 전부 밖일 때 오류 | 빈 Mesh를 최초 upload에 전달 |\n| 큰 좌표에서 동작이 달라짐 | int에서 더한 뒤 타입을 넓힘 |\n\n이제 같은 변환에 다른 로컬 모양을 넣을 준비가 됐습니다. 다음 구현에서는 여러 종류의 블록 데이터를 정의하고, 형상 데이터와 배치·규칙의 책임을 분리합니다.",
+      "codes": [
+        {
+          "label": "src/piece_demo.cpp · 완성 파일",
+          "file": "checkpoints/27-local-piece/src/piece_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/piece_contract.cpp · 완성 파일",
+          "file": "checkpoints/27-local-piece/tests/piece_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "기준점 (4,3)에서 T의 네 보드 좌표를 손으로 계산한다.",
+      "원점·첫 칸·점유 사각형·회전 기준점의 차이를 설명한다.",
+      "기준점 (-1,3)과 (19,8)의 반환 좌표와 보이는 칸 수를 비교한다.",
+      "Piece 복사와 BoardCells 스냅샷이 원본 변경을 따라오는지 확인한다.",
+      "로컬 원점을 바꾸고 기준점을 보상해 같은 보드 좌표를 만든다."
+    ],
+    "expected": "Grid를 수정하지 않고 별도의 T 블록을 표시하며, 계산 실패·보드 밖 좌표·보이는 칸 없음·충돌 가능성을 구분한다.",
+    "failureChecks": [
+      "한 칸씩 오프셋을 두 번 더하지 않았는가?",
+      "기준점이 반드시 채워진 칸이나 중심이라고 가정하지 않았는가?",
+      "int 덧셈 전에 피연산자를 넓히는가?",
+      "표시 단계의 생략을 게임 규칙의 허용 판정으로 쓰지 않았는가?",
+      "정점 배열 용량 대신 실제 count만 업로드하는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "27-1",
+      "kind": "평행이동",
+      "question": "로컬 칸 (1,2), 기준점 (4,3)을 보드 좌표로 바꾸면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(5,5)"
+        },
+        {
+          "id": "b",
+          "text": "(4,6)"
+        },
+        {
+          "id": "c",
+          "text": "(150,70)"
+        },
+        {
+          "id": "d",
+          "text": "(1,2)"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "(5,5)",
+      "explanation": "행끼리 1+4, 열끼리 2+3을 더해 (5,5)입니다. 아직 셀 단위의 보드 좌표이며 화면 원점이나 칸 간격을 적용한 픽셀 좌표가 아닙니다."
+    },
+    {
+      "id": "27-2",
+      "kind": "기준점",
+      "question": "기본 T의 첫 셀이 (0,1)일 때 배치 기준점에 대한 설명으로 맞는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "항상 네 칸 중 하나가 기준점에 놓인다."
+        },
+        {
+          "id": "b",
+          "text": "배열 첫 셀과 기준점은 같은 위치다."
+        },
+        {
+          "id": "c",
+          "text": "로컬 (0,0)의 보드 위치이며 비어 있어도 된다."
+        },
+        {
+          "id": "d",
+          "text": "점유 사각형의 중심과 반드시 같다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "로컬 (0,0)의 보드 위치이며 비어 있어도 된다.",
+      "explanation": "배치 기준점은 로컬 원점이 보드 어디에 대응하는지를 정합니다. 첫 원소, 점유 사각형의 중심, 회전 기준점은 각기 다른 개념입니다."
+    },
+    {
+      "id": "27-3",
+      "kind": "범위 구분",
+      "question": "기본 T의 기준점이 (-1,3)일 때 to_board와 make_visible_mesh의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "변환 실패이므로 아무 좌표도 반환하지 않는다."
+        },
+        {
+          "id": "b",
+          "text": "네 좌표를 반환하고 보드 안의 세 칸만 그린다."
+        },
+        {
+          "id": "c",
+          "text": "첫 행을 0으로 고쳐 네 칸 모두 그린다."
+        },
+        {
+          "id": "d",
+          "text": "네 좌표를 반환했으므로 충돌 없이 이동 가능하다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "네 좌표를 반환하고 보드 안의 세 칸만 그린다.",
+      "explanation": "정수 합은 모두 표현 가능하므로 to_board는 (-1,4),(0,3),(0,4),(0,5)를 반환합니다. 표시 단계만 음수 행 칸을 생략합니다. 이동 합법성은 별도의 규칙 검사입니다."
+    },
+    {
+      "id": "27-4",
+      "kind": "연산 순서",
+      "question": "int a와 b의 합을 int64에서 계산하려면 무엇이 필요한가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "합을 int로 계산한 뒤 int64에 대입한다."
+        },
+        {
+          "id": "b",
+          "text": "합이 음수인지 확인한 뒤 다시 더한다."
+        },
+        {
+          "id": "c",
+          "text": "overflow가 나면 항상 0으로 돌아온다고 가정한다."
+        },
+        {
+          "id": "d",
+          "text": "피연산자를 int64로 바꾼 뒤 덧셈한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "피연산자를 int64로 바꾼 뒤 덧셈한다.",
+      "explanation": "계산 타입은 덧셈 시점의 피연산자 타입으로 결정됩니다. 더 큰 변수에 저장하더라도 이미 수행한 int 오버플로를 취소하지 못합니다. 이 체크포인트는 넓힌 뒤 더하고 int 범위를 검사합니다."
+    },
+    {
+      "id": "27-5",
+      "kind": "원점 재설정",
+      "question": "모든 로컬 칸에서 (2,1)을 뺐습니다. 기존 기준점 (4,3)에서 같은 보드 위치를 유지할 새 기준점은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(2,2)"
+        },
+        {
+          "id": "b",
+          "text": "(4,3)"
+        },
+        {
+          "id": "c",
+          "text": "(6,3)"
+        },
+        {
+          "id": "d",
+          "text": "(6,4)"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "(6,4)",
+      "explanation": "local이 (2,1)만큼 줄었으므로 origin에 (2,1)을 더해 (6,4)로 보상합니다. (local-delta)+(origin+delta)는 원래 보드 위치와 같습니다."
+    }
+  ]
+}

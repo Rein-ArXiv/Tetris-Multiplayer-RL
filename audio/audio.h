@@ -1,25 +1,23 @@
 #pragma once
 
-// audio/audio.h -- XAudio2 오디오 인터페이스
-//
-// 기성 즉시 그리기 라이브러리의 오디오 장치 초기화 / 사운드 로드·재생 /
-// 음악 스트림 API 를 대체한다.
-// 구현: audio/audio.cpp (XAudio2 + dr_mp3)
-//
-// 학습 포인트:
-//   기성 프레임워크의 "오디오 초기화 한 줄"은 내부 믹서 라이브러리를 감싼 것이다.
-//   우리는 XAudio2 COM 인터페이스를 직접 사용한다.
-//   XAudio2 오디오 그래프: Source Voice -> Mastering Voice -> 스피커
+// audio/audio.h -- platform-independent client audio API.
+// Implemented by audio/audio.cpp (Windows XAudio2 + dr_mp3) or
+// audio/sdl_audio.cpp (SDL callback mixer + dr_mp3), selected by the build.
+// Game owns loaded handles; SimGame does not call this API.
+// Control calls (including init/shutdown) are serialized on the main thread.
+// Each backend synchronizes PCM reads with its worker; API calls stay serialized.
 
-// 오디오 핸들 (내부 인덱스). 0 = 무효.
+// 오디오 핸들 (초기화 세션 안의 내부 인덱스). 0 = 무효.
+// 언로드한 인덱스는 같은 세션에서 재사용하지 않는다. 마지막 shutdown 뒤에는
+// 모든 핸들이 만료되므로 다음 init 세션에 보관한 정수를 전달하면 안 된다.
 using AudioHandle = int;
 
-// XAudio2 엔진 초기화 (CoInitializeEx + XAudio2Create + CreateMasteringVoice).
+// 선택된 오디오 백엔드 초기화.
 // 참조 카운팅: 여러 번 호출해도 안전 (첫 호출만 실제 초기화).
-// 실패 시 false 반환 -- 이후 모든 audio_* 호출은 no-op으로 동작.
+// 실패 시 false. 성공 여부와 관계없이 각 호출을 audio_shutdown과 짝짓는다.
 bool audio_init();
 
-// XAudio2 엔진 종료. 참조 카운팅: 마지막 호출만 실제 해제.
+// 선택된 오디오 백엔드 종료. 참조 카운팅: 마지막 호출만 실제 해제.
 void audio_shutdown();
 
 // MP3 파일을 PCM으로 디코딩하여 메모리에 로드.
@@ -30,6 +28,8 @@ AudioHandle audio_load_sound(const char* filepath);
 void audio_unload_sound(AudioHandle handle);
 
 // SFX 재생 (fire-and-forget). 같은 사운드를 동시에 여러 번 재생 가능.
+// 최대 8개. 빈 보이스를 먼저 사용하고 가득 차면 가장 먼저 시작한 재생을 교체한다.
+// 주어진 음원이 해제될 때 해당 PCM을 참조하는 모든 보이스를 분리한다.
 void audio_play_sound(AudioHandle handle);
 
 // BGM 재생 (루프). 이전 BGM은 자동 정지.
@@ -39,7 +39,7 @@ void audio_play_music(AudioHandle handle);
 void audio_stop_music();
 
 // ─── 설정 토글 (렌더/오디오 전용 — SimGame/결정성 해시와 무관) ──────────────────
-// BGM on/off. off: 음악 보이스 정지. on: 마지막으로 재생한 음악을 다시 재생.
+// BGM on/off. off: 음악 보이스 정지. on: 마지막으로 요청한 음악을 다시 재생 시도.
 // 내부에 s_musicEnabled + 마지막 음악 핸들을 기억해 on 시 자동 복원한다.
 void audio_set_music_enabled(bool on);
 

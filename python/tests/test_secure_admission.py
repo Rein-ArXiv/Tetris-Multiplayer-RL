@@ -70,6 +70,9 @@ def test_ticket_scope_secret_and_atomic_consumption(meta):
     account = guest(meta)
     value = ticket(meta, account)
     assert consume(meta, value, "wrong")[0] == 403
+    # Same length must also fail at either edge without consuming the ticket.
+    assert consume(meta, value, "X" + SECRET[1:])[0] == 403
+    assert consume(meta, value, SECRET[:-1] + "X")[0] == 403
     assert _post(meta + "/v1/auth/verify", {"token": value})[0] == 404
     assert _post(meta + "/v1/game-tickets", {"token": value})[0] == 401
     assert consume(meta, account)[0] == 401
@@ -345,3 +348,42 @@ def test_native_session_issues_ticket_and_leaves_room(stack, tmp_path):
     result = subprocess.run([str(probe), "--session", f"wss://localhost:{port}/play", meta, str(account_file)],
                             env=env, capture_output=True, timeout=12)
     assert result.returncode == 0, (result.returncode, result.stderr)
+
+
+def test_consumed_ticket_is_not_restored_when_reply_is_discarded(meta):
+    """Observe headers but discard admission body, then retry the same bearer."""
+    import json
+    from urllib.parse import urlsplit
+    account = guest(meta)
+    value = ticket(meta, account)
+    target = urlsplit(meta)
+    body = json.dumps({"ticket": value}).encode()
+    with socket.create_connection((target.hostname, target.port), timeout=3) as conn:
+        request = (f"POST /v1/game-tickets/consume HTTP/1.1\r\nHost: {target.hostname}\r\n"
+                   f"X-Relay-Secret: {SECRET}\r\nContent-Type: application/json\r\n"
+                   f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode() + body
+        conn.sendall(request)
+        headers = b""
+        while not headers.endswith(b"\r\n\r\n"):
+            part = conn.recv(1)
+            assert part
+            headers += part
+            assert len(headers) < 8192
+        assert b" 200 " in headers
+        assert b"cache-control: no-store" in headers.lower()
+        # The caller does not obtain a usable admission body.
+    assert consume(meta, value)[0] == 401
+    assert _post(meta + "/v1/auth/verify", {"token": account})[0] == 200
+    assert consume(meta, ticket(meta, account))[0] == 200
+
+
+def test_pending_ticket_does_not_survive_meta_restart(tmp_path):
+    from .test_account_security import running_meta
+    db = tmp_path / "ticket-restart.db"
+    with running_meta(db) as base:
+        account = guest(base)
+        pending = ticket(base, account)
+    with running_meta(db) as base:
+        assert consume(base, pending)[0] == 401
+        assert _post(base + "/v1/auth/verify", {"token": account})[0] == 200
+        assert consume(base, ticket(base, account))[0] == 200

@@ -1,0 +1,374 @@
+{
+  "id": "lesson-35",
+  "title": "킥: 실패한 회전의 대안 위치",
+  "shortTitle": "킥 후보와 선택 순서",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 제자리에서 회전한 후보가 벽이나 고정 셀에 걸리면 회전을 거부합니다.",
+  "finish": "완료: 정해진 순서의 대안 위치를 검사해 첫 성공을 확정하고, 모두 실패하면 셀·원점·방향을 보존합니다.",
+  "objective": "후보 정책과 검색을 분리하고, 오프셋 기준·우선순위·실패 보존·중력과의 순서를 설명하고 예측합니다.",
+  "prerequisites": [
+    "34차시 체크포인트",
+    "값 복사·optional·고정 크기 배열",
+    "회전 중심·방향·보드 점유 검사"
+  ],
+  "validation": [
+    "Linux SCRIPTED27/SDL25 CTest·경고0·CPU 링크 독립·UBSan",
+    "1485792배치·독립28형상/명시적후보표·후보0~6모두선택·우선순위/실패보존/정수범위/틱통합",
+    "현재SimGame왼벽T거부와교육용킥허용의의도한규칙차이를실제호출로재현",
+    "7사례×전후2상태×3크기=42 SDLoffscreen GL저장소/전체RGB비교",
+    "실제SDL큐/pump입력fixture; platform_init·물리키·모니터·타OS·29~35사이트실화면미검증"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 후보 검색 초안 직접 검토, 독립 형상/정책 표·실제 게임 차이·GPU 결과 대조",
+    "draftJob": "out/learning-jobs/035-kicks-events.jsonl",
+    "corrections": [
+      "absolute offset이라는 오해 가능한 주석을 시도 전 원점 상대값으로 교정",
+      "교육용 정책과 현재 게임/표준 호환 구분",
+      "데모 입력과 테스트 기대값 분리"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "회전은 로컬 셀을 바꾸고 원점과 방향을 함께 관리합니다.",
+      "회전 후보가 막히면 원래 배치와 방향을 보존합니다.",
+      "한 눌림은 한 틱에서 소비하고 그 뒤 중력이 진행됩니다."
+    ],
+    "bridge": "제자리 후보가 막혔을 때 제한된 대안 원점을 검사하되, 같은 실패 보존 계약을 유지하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "회전한 모양은 맞지만 제자리에는 들어가지 않을 때",
+      "body": "왼쪽 벽에 세로 T가 놓여 있다고 합시다. 로컬 방향1의 점유 열은1·2이므로 origin.column이−1이어도 보드 점유 열은0·1입니다. 현재 배치는 유효합니다.\n\n다음 방향2는 로컬 열0을 사용합니다. 같은 원점에서는 보드 열−1이 생겨 회전이 거부됩니다. 원점을 오른쪽으로 한 칸 옮긴 회전 후보라면 들어갈 수 있습니다. 이처럼 기본 회전이 막혔을 때 정해진 대안 위치를 검사하는 규칙을 **킥(kick)**이라고 부르겠습니다.\n\n여기서 원점이 음수라는 이유로 현재 상태를 오류로 처리하면 안 됩니다. 보드에 들어가야 하는 것은 원점 표시가 아니라 실제 네 셀입니다. 회전 중심을 잘못 정한 것을 킥으로 감추어서도 안 됩니다. 형상 계산과 후보 배치 검사는 서로 다른 책임입니다.",
+      "notes": [
+        {
+          "kind": "예측",
+          "title": "오른쪽으로 옮기면 항상 해결될까?",
+          "body": "벽을 벗어나는 문제가 해결되어도 고정된 셀과 겹칠 수 있습니다. 원점만 안쪽으로 옮겼다는 사실로 성공을 선언하지 말고, 바뀐 방향의 네 칸을 모두 검사해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "기하학은 후보를 만들고, 정책은 순서를 정한다",
+      "body": "회전 중심과 좌표 변환식만으로 어느 방향으로 몇 칸 옮겨 볼지는 결정되지 않습니다. 이것은 게임 규칙의 선택입니다. 검색 코드는 ‘순서대로 검사해 첫 성공 반환’을 담당하고, 정책 데이터는 ‘어떤 위치를 어떤 순서로 시도할지’를 담당하게 나누겠습니다.\n\n이번 교육용 정책에서 O는 제자리 후보만 검사합니다. 나머지 여섯 종류는 다음 일곱 후보를 사용합니다. 이동량은 `(행 변화, 열 변화)`이며 행의 음수 방향은 위입니다.\n\n| 후보 번호 | 이동량 | 의미 |\n| --- | --- | --- |\n| 0 | (0,0) | 제자리 회전 |\n| 1 | (0,side) | 선호 방향 한 칸 |\n| 2 | (0,−side) | 반대 방향 한 칸 |\n| 3 | (0,2×side) | 선호 방향 두 칸 |\n| 4 | (0,−2×side) | 반대 방향 두 칸 |\n| 5 | (−1,0) | 위로 한 칸 |\n| 6 | (−2,0) | 위로 두 칸 |\n\n출발 방향0·3이면 side=−1로 왼쪽을 먼저,1·2이면 side=+1로 오른쪽을 먼저 시도하도록 정합니다. 이 선호는 회전 공식의 필연적인 결과가 아니라 여기서 선택한 규칙입니다. 바꾸면 다른 게임 행동이 됩니다.\n\n이번에는 직접 정한 후보 목록을 순서대로 검사하는 킥 정책을 구현합니다. 현재 완성 게임의 SimGame은 제자리 회전을 사용하므로, 킥 후보 탐색이 추가되는 지점을 함께 비교합니다.",
+      "codes": [
+        {
+          "label": "출발 방향으로 선택하는 후보 정책",
+          "language": "cpp",
+          "text": "inline std::optional<study_kick_search::Policy> policy(study_catalog::Kind kind,\n                                                      int quarter) noexcept {\n    if (!study_catalog::find(kind) || quarter < 0 || quarter > 3) return std::nullopt;\n    study_kick_search::Policy list;\n    list.count = kind == study_catalog::Kind::O ? 1 : 7;\n    const int side = (quarter == 0 || quarter == 3) ? -1 : 1;\n    list.offsets = {{{0,0},{0,side},{0,-side},{0,2*side},{0,-2*side},{-1,0},{-2,0}}};\n    return list;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "SRS와 비교할 때",
+          "body": "SRS는 피스 종류와 회전 전후 상태에 따른 킥 표를 사용합니다. 여기의 단순 후보 목록과 SRS의 표·회전 규칙은 다르므로 SRS 호환 구현으로 취급할 수 없습니다."
+        }
+      ]
+    },
+    {
+      "title": "첫 성공은 가장 가까운 위치와 다를 수 있다",
+      "body": "후보 목록은 순서가 있는 열거입니다. 가능한 위치를 모두 모아 최적의 위치를 찾는 알고리즘이 아닙니다. 제자리부터 검사하고 첫 clear에서 종료합니다.\n\n예를 들어 T가 방향0,원점(5,3)에 있고 보드(7,4)에 고정 셀이 있다고 합시다. 회전한 기본 후보의 아래쪽 셀이 이 장애물에 걸립니다. 왼쪽 한 칸과 오른쪽 한 칸은 둘 다 가능하지만, 정책은 왼쪽을 먼저 검사하므로 원점(5,2)를 선택합니다. 두 후보의 순서를 바꾸면(5,4)가 됩니다.\n\n거리만 따지면 위로 한 칸이 옆으로 두 칸보다 짧을 수 있습니다. 그래도 목록에서 옆으로 두 칸을 먼저 두었으므로 그것이 허용되면 위 후보를 보지 않습니다. ‘처음 찾았다’와 ‘가장 가깝다’는 다른 조건입니다.\n\n순서가 고정되고 현재 상태와 입력이 같으면 같은 후보가 선택됩니다. unordered 컨테이너의 순회나 임의의 정렬 기준에 후보 순서를 맡기면 규칙이 불분명해집니다. 리플레이와 네트워크를 연결할 때에도 후보 순서는 결과에 영향을 주는 규칙 데이터입니다."
+    },
+    {
+      "title": "모든 후보는 같은 원점에서 출발한다",
+      "body": "오프셋은 바로 앞 후보에서 얼마나 더 움직이는지가 아닙니다. **회전 시도 전 원점으로부터의 이동량**입니다. 검색 반복마다 rotated를 복사하고 그 원점에 해당 오프셋 하나만 더합니다.\n\n원점 열이3이고 제자리와 왼쪽 후보가 실패했다고 합시다. 다음 오른쪽 한 칸 후보는 열4입니다. 실패한 왼쪽 후보의 열2에+1을 더하면 열3을 다시 검사하게 됩니다. 이렇게 누적하면 표에 없는 위치를 검사하거나 유효한 위치를 놓칩니다.\n\n| 후보 | 원래 열 | 더할 값 | 후보 열 |\n| --- | --- | --- | --- |\n| 제자리 | 3 | 0 | 3 |\n| 왼쪽 한 칸 | 3 | −1 | 2 |\n| 오른쪽 한 칸 | 3 | +1 | 4 |\n| 왼쪽 두 칸 | 3 | −2 | 1 |\n\n변경 가능한 candidate를 반복문 밖에 두고 계속 이동시키는 것보다, 반복문 안에서 새 값 복사본을 만드는 편이 이 계약을 코드 구조로 드러냅니다. 네 셀과 원점만 가진 작은 값이므로 이 단계에서는 복잡한 복구 로직을 둘 이유가 없습니다.",
+      "codes": [
+        {
+          "label": "같은 기준에서 독립 후보 생성",
+          "language": "cpp",
+          "text": "    for (std::size_t index = 0; index < policy.count; ++index) {\n        const Offset& offset = policy.offsets[index];\n\n        // Start from a fresh copy every iteration; offsets do not accumulate.\n        study_piece::Piece candidate = rotated;\n\n        // Widen the origin before adding so the addition cannot overflow.\n        const std::int64_t row =\n            static_cast<std::int64_t>(rotated.origin.row) +\n            static_cast<std::int64_t>(offset.row);\n        const std::int64_t column =\n            static_cast<std::int64_t>(rotated.origin.column) +\n            static_cast<std::int64_t>(offset.column);\n\n        // Skip offsets whose result does not fit in int.\n        if (row < std::numeric_limits<int>::min() ||\n            row > std::numeric_limits<int>::max() ||\n            column < std::numeric_limits<int>::min() ||\n            column > std::numeric_limits<int>::max()) {\n            continue;\n        }\n\n        candidate.origin.row = static_cast<int>(row);\n        candidate.origin.column = static_cast<int>(column);\n\n        // Accept only a fully clear placement; reject outside, occupied and\n        // unrepresentable alike.\n        if (study_collision::classify(board, candidate) ==\n            study_collision::Placement::clear) {\n            return Candidate{candidate, index};\n        }\n    }"
+        },
+        {
+          "label": "simulation/kick_search.h · 완성 파일",
+          "file": "checkpoints/35-kicks/simulation/kick_search.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "표현 가능한 좌표와 허용된 배치를 구분한다",
+      "body": "후보 원점의 덧셈은 int64_t로 넓힌 뒤 수행하고 int에 들어가는지 검사합니다. 결과가 int 범위를 벗어난 후보는 건너뜁니다. 다음 후보가 가능할 수도 있기 때문입니다. 이 체크포인트의 int≤32비트 전제가 넓은 중간 계산을 뒷받침합니다.\n\n정수로 표현 가능한 후보라고 보드 안에 있다는 뜻은 아닙니다. classify가 네 셀의 좌표 변환·경계·점유를 검사하고 clear일 때만 선택합니다. outside,occupied,unrepresentable은 모두 이 후보를 허용하지 않는 이유입니다.\n\nfirst_clear는 회전 방향이나 현재 상태의 정당성까지 판단하지 않습니다. 이미 다음 방향의 셀을 준비한 rotated와 후보 목록을 받는 작은 검색 함수입니다. 호출자가 현재 상태를 검증하고, 검색 함수는 후보의 최종 점유만 판단합니다.\n\nPolicy에는 최대 일곱 오프셋과 실제 사용 개수 count가 있습니다. O는 count=1이라 나머지 저장 공간을 읽지 않습니다. count가0이거나 배열 크기보다 크면 검색은 nullopt입니다. 이번 회전 함수는 내부에서 검증된 정책만 만들므로, 정상 입력에서 nullopt는 허용되는 후보가 없음을 뜻합니다. 외부에서 임의의 표를 받는 API로 넓힌다면 정책 오류와 검색 실패를 별도로 보고하도록 확장해야 합니다."
+    },
+    {
+      "title": "모든 후보가 실패해도 원본 상태는 그대로 둔다",
+      "body": "try_clockwise는 현재 셀과 kind·quarter의 일치를 검사하고, 현재 배치도 clear인지 확인합니다. 잘못된 현재 상태를 킥으로 정상 위치에 밀어 넣는 ‘복구’를 하지 않습니다. 이 경우 결과는 invalid입니다.\n\n정상 상태이면 다음 방향을 한 번 계산해 rotated.local에 넣습니다. 검색은 그 모양을 여러 원점에 놓아 봅니다. 성공한 Candidate가 있을 때만 Piece와quarter를 함께 대입합니다. 성공 결과에는 선택한 후보 번호도 담습니다.\n\n모든 후보가 막히면 blocked와−1을 반환하고 원본 셀·원점·방향·보드를 보존합니다. 다음 방향 번호부터 원본에 써 놓고 실패 뒤 되돌리는 방식도 구현할 수 있지만, 복구해야 할 필드가 늘수록 빠뜨리기 쉽습니다. 후보가 완성된 뒤 한 번 확정하면 중간 실패에 원본이 노출되지 않습니다.\n\n후보 번호0은 성공입니다. −1만 ‘확정된 후보 없음’입니다. C++에서 정수를 그대로 bool로 검사하면0이 false가 되므로, `if (candidate_index)`로 성공을 판단하면 제자리 회전과 실패를 잘못 구별합니다. Result를 먼저 읽거나 번호의 범위를 명시하세요.",
+      "codes": [
+        {
+          "label": "검증된 현재 상태에서 검색하고 함께 확정",
+          "language": "cpp",
+          "text": "inline Outcome try_clockwise(const study_grid::Grid& board, study_piece::Piece& piece,\n                              study_catalog::Kind kind, int& quarter) noexcept {\n    const auto expected = study_rotation::shape_at(kind,quarter);\n    const auto list = policy(kind,quarter);\n    if (!expected || !list || !study_rotation::same_cells(piece.local,*expected) ||\n        study_collision::classify(board,piece)!=study_collision::Placement::clear)\n        return {};\n    const int next_quarter = (quarter+1)%4;\n    const auto shape = study_rotation::shape_at(kind,next_quarter);\n    if (!shape) return {};\n    auto rotated = piece;\n    rotated.local = *shape;\n    const auto choice = study_kick_search::first_clear(board,rotated,*list);\n    if (!choice) return {study_rotation::Result::blocked,-1};\n    piece = choice->piece;\n    quarter = next_quarter;\n    return {study_rotation::Result::rotated,static_cast<int>(choice->index)};\n}"
+        },
+        {
+          "label": "simulation/kicks.h · 완성 파일",
+          "file": "checkpoints/35-kicks/simulation/kicks.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::RotateBlockImpl()",
+        "invariant": "거부된 회전은 직전 배치와 기존 성공 이력을 보존한다.",
+        "mayDiffer": "현재 게임은 제자리 후보만 검사하고 실패하면 UndoRotation한다. 강의는 대안 위치를 검색하므로 허용되는 행동이 달라진다.",
+        "omitted": "고스트·회전음·T-spin 이력은 현재 게임에 있고 이 기준 코드에는 아직 없다."
+      }
+    },
+    {
+      "title": "킥은 이동 경로 검사나 무한한 구조 요청이 아니다",
+      "body": "검색 함수는 후보 위치의 네 셀만 검사합니다. 회전 애니메이션의 중간 각도나, 원점을 두 칸 옮기는 동안의 연속 경로를 검사하지 않습니다. 후보에 도착했을 때 비어 있으면 허용하는 이산적인 게임 규칙입니다.\n\n따라서 한 칸씩 움직이는 try_shift를 반복 호출해 킥을 대신하면 다른 규칙이 될 수 있습니다. 최종 위치는 비어 있지만 중간 한 칸 위치가 막힌 경우, 단계별 이동은 거부하고 이 후보 검사는 허용할 수 있습니다. 같은 이동량을 썼다고 같은 연산은 아닙니다.\n\n목록의 모든 위치가 막혔다고 보드 전체를 돌며 빈칸을 찾지 않습니다. 후보를 제한하는 것은 계산량뿐 아니라 게임에서 가능한 행동의 범위를 제한하는 선택입니다. 사각형으로 막힌 영역을 빠져나가게 하고 싶은지, 바닥에서 얼마나 올라갈 수 있는지 정책에 따라 달라집니다.\n\n후보 수 K,블록 셀 수 N이라면 후보 검사 작업량은 O(KN)입니다. 지금은 최대7×4로 작고, 회전 형상은 반복 밖에서 한 번 만듭니다. 추가 후보 때문에 무제한 탐색이 생기지 않습니다. 이것은 이 알고리즘의 범위 설명이며 어떤 장치에서든 특정 시간 안에 끝난다는 측정 보장은 아닙니다.",
+      "notes": [
+        {
+          "kind": "규칙과 표현",
+          "title": "그림을 부드럽게 움직여도 판정 규칙은 유지한다",
+          "body": "화면에서는 원점을 보간해 부드럽게 이동시킬 수 있습니다. 그 보간값을 보드에 반올림해 다시 입력하면 학습한 이산 후보 선택과 다른 규칙이 됩니다. 확정된 게임 상태와 표현용 중간 상태를 나눕니다."
+        }
+      ]
+    },
+    {
+      "title": "방향 네 번 복귀와 위치 복귀를 따로 검사한다",
+      "body": "킥이 없는 순수 회전은 같은 중심에서 네 번 돌면 원래 셀 집합으로 돌아옵니다. 킥이 끼면 원점에 평행이동이 더해집니다. 방향 번호가0으로 돌아왔다는 사실만으로 보드 점유까지 원래 위치라고 말할 수 없습니다.\n\n빈 보드의 바닥에 방향0 T를 원점(18,3)에 둡니다. 방향1 후보는 행20에 걸려 제자리와 수평 후보들이 실패합니다. 위 한 칸 후보가 허용되어 원점(17,3),방향1이 됩니다.\n\n그 상태에서 나머지 세 번을 돌리면 제자리에서 모두 가능합니다. 최종 방향은0이지만 원점은(17,3)입니다. 처음보다 한 행 위입니다. 첫 킥의 이동량을 후속 회전이 자동으로 상쇄하지 않습니다.\n\n회전의 역연산도 주의해야 합니다. 반시계 한 번과 시계 세 번은 중간 후보와 킥을 다르게 거칠 수 있습니다. 방향 숫자의 산술만으로 실제 게임 전이가 서로 역이라고 증명할 수 없습니다."
+    },
+    {
+      "title": "한 틱에서는 좌우, 회전과 킥, 중력을 이어 간다",
+      "body": "Round의 순서는 `좌우 이동 → 회전/킥 → 중력 → 필요하면 고정·줄 정리·새 생성`입니다. 회전 후보는 같은 틱의 좌우 이동이 반영된 위치에서 시작합니다.\n\n예를 들어 시작 T의 보드(2,4)에 장애물을 두면 제자리 회전이 막혀 왼쪽 후보가 선택됩니다. 같은 틱에 오른쪽 이동도 요청하면 먼저 원점 열4로 간 뒤 제자리 회전이 가능해 후보0이 선택됩니다. 입력을 처리하는 순서도 게임 규칙입니다.\n\n킥 성공은 중력 카운터를 초기화하지 않습니다. 바닥의 T가 위로 한 칸 킥해 회전에 성공해도, 같은 틱에 낙하 시간이 되었다면 아래 후보를 검사합니다. 새 방향의 맨 아래 셀 때문에 낙하가 막히면 곧바로 고정될 수 있습니다. 킥이 고정 지연 시간을 자동으로 만들어 주지는 않습니다.\n\nRound는 last_rotation_candidate_에 이번 정상 틱에서 성공한 후보 번호를 보관합니다. 정상 틱의 시작에는−1이고, 성공하면0~6입니다. invalid나stopped는 전체 상태를 보존하므로 직전 값도 남습니다. main은 이번 틱의 결과와 함께 읽고,0보다 큰 성공 번호만 킥 로그로 출력합니다.",
+      "codes": [
+        {
+          "label": "킥 결과를 틱에 연결",
+          "language": "cpp",
+          "text": "        auto turn = study_rotation::Result::blocked; // No requested shape change.\n        if (clockwise) {\n            const auto rotation = study_kicks::try_clockwise(candidate.board_,*candidate.active_,\n                                                             candidate.kind_,candidate.quarter_);\n            turn = rotation.result;\n            candidate.last_rotation_candidate_ = rotation.candidate_index;\n            if (turn == study_rotation::Result::invalid) return Step::invalid;\n        }"
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "file": "checkpoints/35-kicks/simulation/round.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "사건과 현재 상태",
+          "title": "새 블록의 방향0과 이전 블록의 킥 번호",
+          "body": "한 틱에서 회전한 뒤 고정·새 생성까지 이어질 수 있습니다. 이때 Round의 현재 방향은 새 블록의0이고, last_rotation_candidate는 그 틱에 이전 블록이 성공한 회전 사건입니다. 둘이 같은 블록을 설명한다고 가정하지 마세요. 다음 정상 틱은 번호를−1로 초기화합니다."
+        }
+      ]
+    },
+    {
+      "title": "선택된 최종 상태를 같은 렌더링 경로로 보낸다",
+      "body": "성공한 킥은 셀 모양과 원점이 함께 바뀔 수 있습니다. main은 Step::changed를 받으면 최종 Piece를 보드 좌표로 변환하고 활성 메시의24정점을 같은 VBO에 다시 올립니다. 렌더러가 후보 목록이나 회전 정책을 알 필요는 없습니다.\n\n실패한 후보들은 화면에 차례로 그리지 않습니다. 한 번의 규칙 계산 안에서 읽어 본 값일 뿐 확정 상태가 아닙니다. 모든 후보가 막히면 기존 활성 메시를 유지합니다. 이어 중력이나 고정으로 상태가 바뀐다면 그 결과를 갱신합니다.\n\n보드 VBO는 킥 자체로 바뀌지 않습니다. 회전한 블록이 실제로 고정될 때 보드 기록과 줄 정리를 마친 결과로 갱신합니다. 여러 틱을 한 프레임에 처리하면 화면은 그 프레임 마지막 상태를 보여 줍니다.\n\n후보 번호를 보여 주는 로그는 상태를 진단하는 작은 도구입니다. 추후 게임 UI에서 성공 효과를 붙이려면 사건을 별도로 전달하면 됩니다. 화면 효과를 실행하기 위해 시뮬레이션에서 GL이나 오디오 함수를 호출하지 않습니다.",
+      "codes": [
+        {
+          "label": "정상 틱에서 킥 사건 읽기",
+          "language": "cpp",
+          "text": "            if (result != study_round::Step::invalid && result != study_round::Step::stopped &&\n                round.last_rotation_candidate() > 0)\n                std::printf(\"rotation accepted: kick candidate=%d\\n\",round.last_rotation_candidate());"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/35-kicks/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "일곱 입력으로 후보 순서를 직접 확인한다",
+      "body": "누적 체크포인트는 `35-kicks`입니다. 검색 함수와 정책을 추가하고 Round의 회전 호출을 교체했습니다. 플랫폼의 Up 입력과 렌더링 계층 계약은 그대로 사용합니다.\n\n저장소 루트에서 C++17·CMake로 CPU 데모를 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/35-kicks -B out/study-35 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-35\n./out/study-35/kicks_demo\nctest --test-dir out/study-35 --output-on-failure\n```\n\n| case | 입력 | 선택 후보 | 최종 원점 |\n| --- | --- | --- | --- |\n| 0 | 왼벽의 방향1 T | 1: 오른쪽1 | (5,0) |\n| 1 | 바닥의 방향0 T | 5: 위1 | (17,3) |\n| 2 | 바닥의 방향0 I | 6: 위2 | (16,3) |\n| 3 | 기본 후보만 막힌 T | 1: 왼쪽1 | (5,2) |\n| 4 | 기본·왼쪽1이 막힌 T | 2: 오른쪽1 | (5,4) |\n| 5 | 현재 T 네 칸 외에 모두 채운 보드 | −1: 거부 | (5,3), 방향0 유지 |\n| 6 | 중앙의 O | 0: 제자리 | (5,3), 방향1 |\n\nsrc/kicks_example.h는 실습 입력만 만듭니다. tests/kicks_cases.h는 그 입력의 기대 결과를 별도로 보관합니다. 기대값을 회전 함수에서 다시 계산해서 적으면 같은 오류를 반복할 수 있습니다.\n\nSDL2 개발 패키지·pkg-config·desktop OpenGL3.3 Core 환경에서는 다음처럼 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/35-kicks -B out/study-35-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-35-sdl\n./out/study-35-sdl/tetris T\n```\n\nUp은 시계 회전, 좌우는 한 칸 이동, Escape/닫기는 종료입니다. T를 한 번 돌리고 왼쪽 벽까지 옮긴 뒤 다시 회전해 보세요. 킥으로 성공하면 후보 번호가 출력됩니다. 창은 줄 완성용 준비 보드를 쓰므로 CPU 데모와 장애물 배치가 다릅니다. 같은 종류를 반복 생성하고 I/J/L/O/S/T/Z도 선택할 수 있습니다. 다중 구성 생성기는 구성과 실행 경로를 맞춥니다.\n\n아래는 CPU 사례0과 같은 빈 보드의 벽 옆 T입니다. 첫 장면의 원점 열은−1이지만 청록색 셀은 모두 보드 안에 있습니다. 두 번째 장면은 오른쪽 한 칸 보정한 방향2이며, 원점 열은0입니다.\n\n![왼벽에서 오른쪽을 향하는 T의 현재 배치](data:image/png;base64,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)\n\n![오른쪽 한 칸 보정 후 아래를 향하는 T](data:image/png;base64,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)",
+      "codes": [
+        {
+          "label": "src/kicks_example.h · 완성 파일",
+          "file": "checkpoints/35-kicks/src/kicks_example.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/kicks_demo.cpp · 완성 파일",
+          "file": "checkpoints/35-kicks/src/kicks_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/35-kicks/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "허용 여부뿐 아니라 선택 위치까지 검증한다",
+      "body": "어느 후보로든 성공하면 테스트를 통과시키는 검사는 우선순위 오류를 놓칩니다. 독립된 방향별 비트 형상과 명시적 오프셋 표를 사용해 첫 성공 번호·최종 원점·방향·실패 전후 상태를 함께 비교합니다.\n\n제자리만 막혔는데 왼쪽과 오른쪽이 모두 가능할 때, 한쪽 후보만 가능한 때, 모든 후보가 막힌 때를 따로 두세요. 원래 상태가 잘못된 입력은 blocked가 아니라 invalid이고, 양쪽 모두 원본을 변경하지 않아야 합니다.\n\nO의 방향 변화, I의 바닥 두 칸 보정, 입력 순서, 같은 틱의 중력과 고정도 연결해서 봅니다. 단일 함수의 성공만 확인하면 Round에서 카운터를 잘못 초기화하거나 다음 블록에 방향을 남기는 오류를 놓칠 수 있습니다.\n\n현재 SimGame과 비교할 때는 항상 같은 결과를 요구하지 않습니다. 왼벽의 세로 T는 현재 게임에서는 회전이 거부되고, 이 교육용 정책에서는 오른쪽 보정으로 성공합니다. 의도한 규칙 차이를 구체적인 입력과 결과로 남기고, 문서에는 어느 구현의 동작인지 밝힙니다.\n\n이제 회전 계산·후보 정책·순서 있는 검색·확정이 분리되었습니다. 다음에는 같은 종류만 반복 생성하는 자리에 다음 블록 큐를 연결하고, 누가 다음 블록을 소유하고 소비하는지 다루겠습니다.",
+      "codes": [
+        {
+          "label": "tests/kicks_contract.cpp · 완성 파일",
+          "file": "checkpoints/35-kicks/tests/kicks_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_block.h",
+        "symbol": "void Rotate()",
+        "invariant": "방향 전이는 로컬 형상을 선택하고 최종 보드 허용 여부는 별도 계층에서 검사한다.",
+        "mayDiffer": "현재는 방향별 표 조회이며 회전 자체는 원점을 바꾸지 않는다. 강의의 킥은 후보 원점까지 함께 선택한다.",
+        "omitted": "반시계 입력·표준 호환 표·고정 지연 규칙은 이번 교육용 정책에 포함하지 않는다."
+      }
+    }
+  ],
+  "practice": {
+    "steps": [
+      "왼벽 세로 T의 원점−1과 점유 열0·1을 계산한다.",
+      "같은 원점에서 좌우 후보를 각각 만든다.",
+      "좌우 모두 가능할 때 표 순서를 바꿔 결과 차이를 확인한다.",
+      "T와I가 바닥에서 필요한 위쪽 이동량을 예측한다.",
+      "완전 거부 후 셀·원점·방향·보드가 같은지 확인한다.",
+      "네 번 회전 뒤 방향과 원점을 각각 비교한다."
+    ],
+    "expected": "첫 허용 후보와 최종 상태를 예측하고, 정책 변경과 구현 오류를 구별하며 중력까지 이어지는 전이를 설명한다.",
+    "failureChecks": [
+      "후보 이동량을 직전 실패 위치에 누적하지 않는가?",
+      "후보0을false로,−1을true로 해석하지 않는가?",
+      "원점만 검사해 유효한 음수 원점을 거부하지 않는가?",
+      "첫 성공 뒤에도 계속 검사해 마지막 후보를 선택하지 않는가?",
+      "킥이 중력 카운터나 고정 지연을 임의로 초기화하지 않는가?",
+      "교육용 후보표를 현재 게임이나 SRS와 동일하다고 설명하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "35-1",
+      "kind": "오프셋 기준",
+      "question": "원점 열3에서 제자리와 왼쪽1 후보가 실패했습니다. 오른쪽1 후보의 열은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "2다."
+        },
+        {
+          "id": "b",
+          "text": "3이다."
+        },
+        {
+          "id": "c",
+          "text": "4다."
+        },
+        {
+          "id": "d",
+          "text": "5다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "4다.",
+      "explanation": "모든 오프셋은 시도 전 원점에 각각 더합니다. 실패한 열2에+1을 누적하면 원래 자리3을 다시 검사하는 오류가 됩니다."
+    },
+    {
+      "id": "35-2",
+      "kind": "순서의 의미",
+      "question": "방향0 T의 제자리 회전은 막히지만 좌우1칸 후보는 모두 가능합니다. 이번 정책은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "왼쪽1칸을 선택한다."
+        },
+        {
+          "id": "b",
+          "text": "오른쪽1칸을 선택한다."
+        },
+        {
+          "id": "c",
+          "text": "양쪽이 가능하므로 거부한다."
+        },
+        {
+          "id": "d",
+          "text": "무작위로 한쪽을 선택한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "왼쪽1칸을 선택한다.",
+      "explanation": "방향0의 side는−1이고 후보1이 왼쪽입니다. 첫 성공을 반환하므로 가능한 다른 후보를 평가해 더 좋은 위치를 고르지 않습니다."
+    },
+    {
+      "id": "35-3",
+      "kind": "실패 보존",
+      "question": "현재 상태는 유효하지만 모든 회전 후보가 막혔습니다. try_clockwise 직후 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "다음 방향만 확정하고 원점은 유지한다."
+        },
+        {
+          "id": "b",
+          "text": "마지막 검사 위치를 원점으로 남긴다."
+        },
+        {
+          "id": "c",
+          "text": "게임을 종료하고 보드를 비운다."
+        },
+        {
+          "id": "d",
+          "text": "blocked와−1을 반환하고 기존 배치를 유지한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "blocked와−1을 반환하고 기존 배치를 유지한다.",
+      "explanation": "검색은 복사본만 검사하고 성공했을 때만 원본을 확정합니다. 이 함수가 거부했다고 뒤따르는 중력까지 멈추는 것은 아닙니다."
+    },
+    {
+      "id": "35-4",
+      "kind": "방향과 위치",
+      "question": "빈 보드 바닥의 T가 첫 회전에 위1칸 킥을 하고, 남은 세 회전은 제자리 성공했습니다. 최종 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "방향과 원점 모두 처음과 같다."
+        },
+        {
+          "id": "b",
+          "text": "방향은 같고 원점은 한 행 위다."
+        },
+        {
+          "id": "c",
+          "text": "원점은 같고 방향은1이다."
+        },
+        {
+          "id": "d",
+          "text": "네 번 회전이므로 반드시 거부된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "방향은 같고 원점은 한 행 위다.",
+      "explanation": "방향0으로 돌아와도 첫 킥의 평행이동이 자동으로 취소되지 않습니다. 순수 회전의 복귀 성질을 킥이 포함된 전체 전이에 그대로 적용할 수 없습니다."
+    },
+    {
+      "id": "35-5",
+      "kind": "중력과 킥",
+      "question": "이번 틱에 바닥의 T가 위1칸 킥으로 회전했습니다. 중력도 진행할 시간이 되었고 아래 후보가 막혔습니다. 기준 Round는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "카운터를 초기화하고 무조건 기다린다."
+        },
+        {
+          "id": "b",
+          "text": "회전 성공을 취소하고 이전 모양을 고정한다."
+        },
+        {
+          "id": "c",
+          "text": "회전한 현재 배치로 고정 절차를 진행한다."
+        },
+        {
+          "id": "d",
+          "text": "보드가 비어질 때까지 위로 탐색한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "회전한 현재 배치로 고정 절차를 진행한다.",
+      "explanation": "킥은 중력 주기를 초기화하지 않습니다. 회전/킥 뒤 중력을 처리하고, 아래로 못 가면 유효한 현재 배치를 고정합니다. 고정 지연은 별도의 정책입니다."
+    }
+  ]
+}

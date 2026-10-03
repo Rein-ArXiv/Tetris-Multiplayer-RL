@@ -1,0 +1,445 @@
+{
+  "id": "lesson-41",
+  "title": "하드 드롭: 착지에서 고정까지",
+  "shortTitle": "하드 드롭과 명령 소비",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 소프트 낙하와 고스트는 있지만 Space로 즉시 착지·고정할 수 없습니다.",
+  "finish": "완료: Space 요청을 한 번 소비하고 현재 후보 위치에서 착지·행 정리·점수·다음 생성을 확정합니다.",
+  "objective": "조회와 명령, 사건 보관과 소비, 복합 입력 순서, 실패 시 상태 보존을 구현하고 고정 전후 화면을 연결합니다.",
+  "prerequisites": [
+    "40차시 체크포인트",
+    "고스트 조회·고정·행 정리·다음 큐",
+    "pressed/held·후보 값 복사"
+  ],
+  "validation": [
+    "Linux SCRIPTED33/SDL33 CTests·경고0·CPU 독립 링크·UBSan",
+    "5516 시작보드/중력/Down 조합·7종 방향/열·독립 착지/행 필터/다음 생성·거리0·복합 입력·invalid/stopped 보존",
+    "SDL 실제 이벤트 큐 fixture: Space press/hold/repeat/release/repress/0틱 래치/동일 펌프 탭/focus loss",
+    "168 SDL offscreen GL:7종×4보드×고정전후×3크기, board/active/ghost VBO 전체 및 모든 RGB 오차≤2/255",
+    "현재 SimGame873고정(거리0 32회)·독립 보드·해시 밖 플래그·복합 입력, 루트7 CTests·tetris 빌드·기존 sim_hash_dump 동일",
+    "착지 대입 누락/Space 재소비 mutation Release 검출; 실제 게임 main 창·물리키·모니터·타 OS 실행 미검증",
+    "CUA 41차시 본문/이미지, 41-1 오답→재선택 시 해설 숨김→정답 즉시 해설→검수 선택 해제/접힘, MoveBlockDrop 스냅샷과 옆 본문,390px 표/코드·페이지 넘침 없음 확인"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 두 헤더 초안 검토; 독립 보드 필터·현재 복합 명령·GPU 비교",
+    "draftJob": "out/learning-jobs/041-hard-drop-events.jsonl",
+    "corrections": [
+      "물리 입력의 정확히 한 번 보장과 bool 래치의 합침을 구별",
+      "거리 보고를 파생 조회가 아니라 저장된 틱 결과로 명시",
+      "오디오 플래그 소비 순서와 mutable 설명 교정",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "Down은 최신 held 표본을 여러 틱에 전달하고 반복 시계가 이동 시점을 결정합니다.",
+      "소프트 낙하와 자연 중력은 별도 시계이며 같은 틱에 이동이 합쳐질 수 있습니다.",
+      "고정 경계에서 남은 입력을 어느 피스에 적용할지는 명시적인 정책입니다."
+    ],
+    "bridge": "이번에는 Space 눌림을 한 번 소비하고, 고스트가 계산하던 착지 위치를 실제 고정 전이로 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "착지 조회를 고정 명령으로 바꾼다",
+      "body": "고스트는 “지금 수직으로 내려가면 어디에 멈출까?”를 계산합니다. 보드에 셀을 쓰거나 점수·큐를 바꾸지 않습니다. 하드 드롭은 그 위치로 **실제 피스를 옮기고 즉시 고정하는 명령**입니다. 목표 위치가 같아도 책임이 다릅니다.\n\n먼저 빈 보드의 I를 생각해 봅시다. 원점은 행 0이고 셀은 그보다 한 행 아래에 있습니다. 착지 원점은 행 18입니다. 조회만 하면 네 셀은 아직 보드에 없습니다. 하드 드롭을 실행하면 마지막 행에 네 셀이 저장되고 다음 피스가 생성됩니다. 행이 완성되지 않았으므로 점수는 0입니다.\n\n이처럼 값을 돌려주는 관찰과 상태를 바꾸는 요청을 구분하면 읽기용 기능을 호출하다 게임이 진행되는 실수를 막기 쉽습니다. 다만 이름에 get이나 query를 붙였다는 사실만으로 읽기 전용이 보장되지는 않습니다. 함수의 인자·const 계약·실제 변경을 함께 확인해야 합니다.",
+      "notes": [
+        {
+          "kind": "생각해 보기",
+          "title": "착지 거리가 0이면?",
+          "body": "이미 바닥에 닿아 있어도 아직 보드에 고정되지 않은 피스일 수 있습니다. 이동이 없다는 이유로 명령을 무시하면 Space로 확정할 수 없습니다. 거리 0도 정상적인 하드 드롭입니다."
+        }
+      ]
+    },
+    {
+      "title": "Space는 유지 상태가 아니라 보관할 요청이다",
+      "body": "Down은 눌려 있는 동안 여러 번 시도하지만 Space는 눌림 하나를 다음 규칙 틱에 한 번 전달합니다. main은 `platform_key_pressed(Key::Space)`를 수집하고 PendingControls는 요청을 bool에 보관합니다.\n\n렌더 프레임에 규칙 틱이 없으면 즉시 소비할 곳이 없습니다. 그래서 capture는 새 pressed를 OR로 합칩니다. 다음 프레임에서 pressed=false가 들어와도 이미 보관한 true가 남습니다. consume은 true를 반환한 뒤 지웁니다. 한 프레임에서 규칙 틱을 세 번 처리해도 요청은 첫 틱만 봅니다.\n\n| 호출 | 입력 Space | 보관 값 또는 반환 값 |\n| --- | --- | --- |\n| capture | true | 보관 true |\n| capture | false | 보관 true 유지 |\n| consume | 해당 없음 | true 반환 후 false |\n| consume | 해당 없음 | false 반환 |\n\nDown 표본은 최신 값으로 교체하고 계속 내보냅니다. Space 요청은 누적해 한 번 내보냅니다. 같은 bool 타입을 쓰더라도 보관 정책은 다릅니다.",
+      "codes": [
+        {
+          "label": "Intent에 하드 드롭 요청 추가",
+          "language": "cpp",
+          "text": "struct Intent {\n    int horizontal;\n    bool clockwise;\n    bool soft_drop = false;\n    bool hard_drop = false;\n};"
+        },
+        {
+          "label": "한 프레임의 입력 수집",
+          "language": "cpp",
+          "text": "    void capture(bool left, bool right, bool up, bool downHeld = false,\n                 bool spacePressed = false) noexcept {\n        horizontal_.capture(left, right);\n        clockwise_ = clockwise_ || up;\n        soft_drop_ = downHeld;\n        // A bool latch is enough here: it coalesces any number of captured\n        // hard-drop edges into a single pending request. It is NOT a queue and\n        // gives no physical exact-once guarantee; two presses captured before\n        // one consume() still yield one hard_drop.\n        hard_drop_ = hard_drop_ || spacePressed;\n    }"
+        },
+        {
+          "label": "한 규칙 틱의 입력 소비",
+          "language": "cpp",
+          "text": "    Intent consume() noexcept {\n        Intent result{horizontal_.consume(), clockwise_, soft_drop_, hard_drop_};\n        clockwise_ = false;\n        hard_drop_ = false;\n        return result;\n    }"
+        },
+        {
+          "label": "simulation/pending_controls.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/simulation/pending_controls.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "bool 래치는 횟수를 세는 큐가 아니다",
+      "body": "consume 전에 Space 눌림을 두 번 수집하면 `true || true`는 여전히 true입니다. bool 래치는 “적어도 한 번 요청됨”을 보존하고 두 사건을 한 요청으로 합칩니다. 모든 눌림의 횟수·순서를 보존해야 한다면 사건 큐와 용량 초과 정책이 필요합니다. 이번 조작에서는 한 소비 시점에 한 요청으로 합치는 규칙을 선택합니다.\n\n또한 이 래치가 보관하는 것은 플랫폼이 이미 관찰한 pressed입니다. 현재 체크포인트의 플랫폼은 프레임 전후 키 상태를 비교합니다. 같은 이벤트 처리 안에서 Space를 눌렀다 떼어 최종 상태가 false이면 pressed 표본에 잡히지 않을 수 있습니다. 래치가 아직 수집하지 않은 사건까지 복구하지는 않습니다.\n\nconsume이 요청을 내보낸 뒤 Round가 invalid를 반환해도 PendingControls는 되돌아가지 않습니다. 판 상태의 실패 시 보존과 입력의 재시도 정책은 다른 계약입니다. 이번 main은 invalid를 프로그램 오류로 보고 종료합니다. 입력을 다시 시도하는 시스템을 만들려면 소비·성공 확인 경계부터 다시 정해야 합니다.",
+      "notes": [
+        {
+          "kind": "CS · 멱등성",
+          "title": "두 번 호출해도 같은 결과일까?",
+          "body": "멱등적인 연산은 같은 요청을 다시 적용해도 한 번 적용한 뒤의 결과와 같습니다. 하드 드롭은 다시 호출하면 다음 피스도 고정할 수 있으므로 멱등적이지 않습니다. 키 래치를 한 번 지우는 것은 로컬 입력 소비 정책이며, 네트워크 중복 명령까지 막아 주는 보장은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "키 목록과 두 플랫폼 변환을 함께 확장한다",
+      "body": "공통 Key에 Space를 추가하고 SDL의 SDLK_SPACE, Win32의 VK_SPACE를 같은 공통 값으로 매핑합니다. Key::Count로 크기를 정한 배열은 새 슬롯을 포함합니다. SCRIPTED의 고정 이벤트 목록에 Space는 없으므로 원래 시나리오는 그대로입니다.\n\nOS가 키 유지 중 생성하는 자동 반복 이벤트 횟수로 하드 드롭을 실행하지 않습니다. 수집하는 것은 첫 눌림 표본이며, held가 계속 true인 동안에는 새 pressed가 아닙니다. 키를 놓았다 다시 누르면 다음 요청을 만들 수 있습니다.\n\n포커스를 잃었을 때 플랫폼은 held 상태를 지웁니다. 이미 PendingControls로 수집한 요청까지 자동으로 취소하는 구현은 아닙니다. 포커스 상실 때 보류 중인 조작도 버리고 싶다면, 입력 경계에 취소 신호와 정책을 따로 추가해야 합니다.",
+      "codes": [
+        {
+          "label": "공통 키 식별자",
+          "language": "cpp",
+          "text": "enum class Key { Left, Right, Escape, Up, Down, Space, Count };"
+        },
+        {
+          "label": "SDL 매핑",
+          "language": "cpp",
+          "text": "    case SDLK_SPACE: return Key::Space;"
+        },
+        {
+          "label": "Win32 매핑",
+          "language": "cpp",
+          "text": "    case VK_SPACE:  key = Key::Space;  break;"
+        }
+      ]
+    },
+    {
+      "title": "한 틱에서 어느 명령을 먼저 실행할까?",
+      "body": "Space와 Down, 회전을 같은 틱에 받는 경우를 먼저 정의합니다. 이 예제의 순서는 좌우 이동 → 회전 → 소프트 반복 시계 갱신 → 하드 드롭 분기입니다. Space가 true이면 소프트 이동과 자연 중력은 생략하고, 바뀐 위치·방향에서 하드 드롭을 한 번 실행합니다.\n\nSpace가 false이면 소프트 이동 → 자연 중력이라는 경로를 유지합니다. 어떤 경로든 한 번 고정하면 그 틱을 끝냅니다. 새 피스에 남은 회전이나 하강을 적용하지 않습니다.\n\n소프트 시계 자체는 하드 드롭 틱에도 갱신합니다. remaining=0, Down=true, Space=true이면 remaining은 3이 되지만 소프트 한 칸 이동은 하지 않습니다. 이 틱의 아래 이동은 하드 드롭이 담당합니다. 새 피스의 소프트 시계는 그 3을 이어받고 자연 중력 elapsed는 고정 경로에서 0으로 리셋됩니다. 입력 시계와 실제 이동 허가는 구분해서 추적해야 합니다.",
+      "notes": [
+        {
+          "kind": "결과 예측",
+          "title": "오른쪽 + 회전 + Space",
+          "body": "빈 보드의 I가 원점 열 3에서 시작합니다. 오른쪽 이동 후 원점 열은 4, 시계 회전 후 세로 I의 로컬 열은 2입니다. 하드 드롭하면 절대 열 6의 행 16~19에 고정됩니다. 다음 피스는 이 틱의 중력으로 내려오지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "저장된 그림 대신 지금의 배치에서 착지를 계산한다",
+      "body": "Space 분기는 `study_ghost::project`를 재사용합니다. 같은 틱에서 좌우 이동이나 회전을 먼저 실행했으므로, 그 **후보 피스**로 다시 조회합니다. 이전 프레임에 그린 고스트는 다른 열·방향·보드를 기준으로 했을 수 있습니다.\n\nproject는 유효한 시작 배치에서 사본을 한 행씩 옮겨 마지막 유효 위치를 반환합니다. 중간에 장애물이 있으면 그 위에서 멈춥니다. 더 아래에 빈 공간이 있다고 그곳으로 건너뛰지 않습니다. 실패하면 nullopt이고, 내려갈 수 없는 유효 배치는 distance=0을 담은 정상 값입니다.\n\n`active_ = landing->piece`는 실제 고정 직전 피스 위치를 후보 상태에 대입합니다. 보드에 쓰는 작업은 finish_lock이 담당합니다. 조회 결과를 받았다는 사실과 게임 상태를 확정했다는 사실 사이에 이 단계를 둡니다.",
+      "codes": [
+        {
+          "label": "하드 드롭 분기",
+          "language": "cpp",
+          "text": "        if (hard_drop) {\n            // Project to the landing position and lock immediately. Distance\n            // zero still locks: an already-resting piece is resolved here too.\n            const auto landing = study_ghost::project(candidate.board_, *candidate.active_);\n            if (!landing) return Step::invalid;\n            candidate.active_ = landing->piece;\n            candidate.last_hard_drop_distance_ = landing->distance;\n            const auto resolved = finish_lock(candidate);\n            if (resolved == Step::invalid) return Step::invalid;\n            result = resolved;\n        }"
+        },
+        {
+          "label": "simulation/ghost.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/simulation/ghost.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "반복 이동과 게임 틱 반복은 같은 연산이 아니다",
+      "body": "착지 탐색을 `Round::tick` 반복으로 구현하면 중력 시간·점수·큐·입력 시계까지 계속 진행합니다. 원하던 피스가 고정된 뒤 다음 피스를 또 움직일 수도 있습니다. “한 번에 끝까지 내려라”를 “시간을 여러 틱 흘려라”로 바꾸면 다른 명령이 됩니다.\n\nproject 내부 반복은 복사된 피스의 수직 후보만 검사합니다. 유효한 피스의 가장 높은 셀도 보드 안에 있으므로 높이 H인 판에서 최대 H번의 아래 시도 안에 막힙니다. 한 배치의 K개 셀을 검사한다면 탐색 비용은 O(HK)입니다. H=20, K=4인 이 예제에서는 작고 유한한 작업입니다.\n\n하드 드롭 전체 비용이 탐색 비용만 있는 것은 아닙니다. 후보 Round 복사와 고정 뒤 행 정리는 보드 전체를 다루므로 H×W 크기에 의존합니다. 여기서는 작은 값 객체와 고정 크기 보드를 이해하기 쉽게 사용합니다. 큰 월드에 그대로 복사를 적용할 때는 비용과 소유권을 다시 검토해야 합니다.",
+      "notes": [
+        {
+          "kind": "표현과 규칙",
+          "title": "떨어지는 중간 프레임이 없는 이유",
+          "body": "수직 탐색은 CPU 함수 호출 안에서 끝납니다. 렌더러는 확정된 새 보드와 다음 피스를 봅니다. 낙하 잔상이나 충격 애니메이션을 추가하려면 표현 상태를 별도로 만들며, 중간 그림을 위해 규칙 틱을 추가 실행하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "고정 이후의 전이를 한 함수로 모은다",
+      "body": "하드 드롭과 자연·소프트 낙하는 서로 다른 이유로 착지를 확정하지만, 그 뒤 해야 할 일은 같습니다. 피스의 네 셀을 보드에 쓰기 → 활성 피스 제거 → 완성 행 제거 → 점수·레벨 계산 → 다음 큐 소비와 보충 → 스폰 검사입니다.\n\n이 코드를 하드 드롭 분기에 복사하면 한쪽만 점수나 종료 처리를 수정하기 쉽습니다. 기존 고정 경로를 `finish_lock(Round& candidate)`로 옮겨 두 경로가 같은 함수를 호출하게 합니다. 외부에는 노출하지 않는 private static 함수입니다. static은 별도 전역 상태라는 뜻이 아니라 암묵적인 this 없이 전달받은 후보를 다룬다는 뜻입니다.\n\nfinish_lock은 단계 도중 실패하면 candidate를 일부 바꾼 채 invalid를 반환할 수 있습니다. 그래도 호출자는 그 후보를 원본에 대입하지 않습니다. 성공한 locked 또는 game_over일 때만 tick의 마지막에서 원본을 교체합니다. 이 실패 계약은 아래에서 함께 확인합니다.",
+      "codes": [
+        {
+          "label": "공유하는 고정 전이",
+          "language": "cpp",
+          "text": "    static Step finish_lock(Round& candidate) noexcept {\n        if (study_locking::try_lock(candidate.board_, *candidate.active_) !=\n            study_locking::Result::locked) return Step::invalid;\n        candidate.active_.reset(); // The locked piece now belongs to the board.\n        // Resolve the board before testing the next spawn.\n        candidate.last_cleared_ = study_lines::clear_full_rows(candidate.board_);\n        const auto scored = study_score::award(candidate.totals_,candidate.last_cleared_);\n        if (!scored) return Step::invalid;\n        const auto old_level = candidate.level();\n        candidate.last_awarded_ = scored->points - candidate.totals_.points;\n        candidate.totals_ = *scored;\n        if (candidate.level() != old_level) {\n            const auto interval = study_score::gravity_interval(candidate.level());\n            if (!interval) return Step::invalid;\n            candidate.gravity_.interval = *interval;\n        }\n        const auto next_kind=candidate.next_.peek();\n        if(!next_kind)return Step::invalid;\n        const auto spawn=study_catalog::make_piece(*next_kind);\n        if(!spawn)return Step::invalid;\n        // A spawn attempt consumes the selected kind, even if its placement\n        // is blocked. Refill before publishing the finished state as well.\n        if(!candidate.next_.pop() || !candidate.next_.push(candidate.source_.next()))\n            return Step::invalid;\n        candidate.kind_=*next_kind;\n        candidate.gravity_.elapsed = 0;\n        candidate.quarter_ = 0;\n        const auto placement=study_spawn::assess(candidate.board_,*spawn);\n        if(placement==study_spawn::Status::invalid)return Step::invalid;\n        if (placement==study_spawn::Status::ready) {\n            candidate.active_ = spawn;\n            return Step::locked;\n        }\n        candidate.end_reason_=EndReason::spawn_blocked;\n        return Step::game_over; // Keep the resolved board, no active overlay.\n    }"
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/simulation/round.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "실패 시 상태 보존과 스레드 원자성을 구별한다",
+      "body": "tick은 처음에 `Round candidate = *this`로 후보를 만들고 마지막의 `*this = candidate`로 확정합니다. 함수가 invalid를 반환하면 그 마지막 대입까지 도달하지 않으므로 원본의 보드·활성 피스·큐·점수·시계·표시값을 보존합니다. 후보만 바꾸다가 실패했다면 후보를 버리면 됩니다.\n\ngame_over는 invalid와 다릅니다. 이번 피스를 정상적으로 고정·정산했지만 다음 피스가 들어갈 수 없어 끝난 결과입니다. 따라서 끝난 판과 점수·큐를 확정합니다. 이미 끝난 판에 대한 tick은 stopped로 반환하며 새 명령을 실행하지 않습니다.",
+      "codes": [
+        {
+          "label": "후보에서 시작",
+          "language": "cpp",
+          "text": "        Round candidate = *this;\n        candidate.last_cleared_ = 0;\n        candidate.last_awarded_ = 0;\n        candidate.last_rotation_candidate_ = -1;\n        candidate.last_hard_drop_distance_ = -1;"
+        },
+        {
+          "label": "검토한 후보 게시",
+          "language": "cpp",
+          "text": "        *this = candidate; // All related state becomes the next value together.\n        return result;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "한 번에 반영한다는 계약의 범위",
+          "body": "여기서는 한 스레드에서 함수를 호출하고 반환된 상태를 관찰합니다. 다른 스레드의 동시 읽기까지 보호하려면 별도의 동기화가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "거리 0과 이번 틱에 드롭 없음은 다르다",
+      "body": "`last_hard_drop_distance()`는 가장 최근에 수락된 틱의 결과를 읽습니다. -1은 그 틱에 하드 드롭이 없었다는 뜻이고, 0 이상은 하드 드롭이 이동한 행 수입니다. 별도 거리 점수를 주는 필드는 아닙니다.\n\n각 수락된 틱의 시작에 -1로 지우고 하드 드롭 분기에서만 거리로 덮습니다. 그 다음 waiting 틱을 실행하면 값은 다시 -1이 됩니다. 반면 invalid나 stopped는 원본을 보존하므로 직전 값이 남습니다. 이 조회를 “읽으면 없어지는 사건 큐”로 오해하면 같은 사건을 반복 처리할 수 있습니다.\n\nmain은 tick 직후 locked/game_over 결과를 확인한 자리에서 거리를 읽습니다. 같은 렌더 프레임의 후속 틱이 값을 지우기 전에 보고할 수 있습니다. 여러 사건을 프레임 끝에 한꺼번에 재생하려면 개별 결과를 따로 모아야 합니다.",
+      "codes": [
+        {
+          "label": "읽기용 결과 접근자",
+          "language": "cpp",
+          "text": "    int last_hard_drop_distance() const noexcept { return last_hard_drop_distance_; }"
+        }
+      ]
+    },
+    {
+      "title": "보드가 바뀌었으면 정점과 표시 범위도 바뀐다",
+      "body": "하드 드롭 직후에는 보드 셀뿐 아니라 다음 큐, 점수, 활성 피스, 고스트가 함께 바뀔 수 있습니다. main은 locked/game_over를 board_changed와 piece_changed에 포함하고, 틱 묶음이 끝난 뒤 최종 상태의 메시를 GPU에 보냅니다.\n\n반복 I 소스를 쓰면 고정 뒤 새 I도 원점 행 0·열 3에서 시작합니다. 시작과 끝의 활성 피스 좌표가 같아도 보드는 네 셀 늘었습니다. 좌표 비교만으로 “아무 변화 없음”이라고 판단하면 고정된 셀이 화면에 나타나지 않습니다. 고정 결과 자체를 갱신 신호로 사용해야 합니다.\n\n행 삭제 뒤에는 빈 셀과 채운 셀의 정점 배열 구간도 달라집니다. 보드 VBO만 교체하고 empty_vertices 같은 그리기 범위를 예전 값으로 두면 잘못된 색 구간을 그립니다. 현재 main은 메시와 표시 범위를 함께 교체합니다. 종료 상태에서는 활성 피스·고스트를 그리지 않고 확정된 보드와 종료 표시를 남깁니다.",
+      "codes": [
+        {
+          "label": "입력 수집과 틱 전달",
+          "language": "cpp",
+          "text": "        pending.capture(platform_key_pressed(Key::Left), platform_key_pressed(Key::Right),\n                        platform_key_pressed(Key::Up),platform_key_down(Key::Down),\n                        platform_key_pressed(Key::Space));\n        const auto batch = clock.advance_seconds(frame.dt);\n        if (!batch) return 1;\n        bool piece_changed = false, board_changed = false;\n        int cleared_this_frame = 0;\n        for (unsigned i = 0; i < batch->ticks; ++i) {\n            const auto input = pending.consume();\n            const auto result = round.tick(input.horizontal,input.clockwise,input.soft_drop,input.hard_drop);"
+        },
+        {
+          "label": "고정 신호와 즉시 거리 보고",
+          "language": "cpp",
+          "text": "            const bool locked = result == study_round::Step::locked ||\n                                result == study_round::Step::game_over;\n            if (locked) {\n                if (round.last_hard_drop_distance() >= 0)\n                    std::printf(\"hard drop: %d row(s) before lock\\n\",round.last_hard_drop_distance());\n                cleared_this_frame += round.last_cleared();\n                std::printf(\"score=%\" PRIu64 \" (+%\" PRIu64 \") lines=%\" PRIu64 \" level=%u interval=%d ticks\\n\",\n                    round.score(),round.last_awarded(),round.total_lines(),round.level(),round.gravity().interval);\n            }\n            board_changed = board_changed || locked;\n            piece_changed = piece_changed || locked || result == study_round::Step::changed;"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "현재 구현의 한 칸 되돌리기와 명령 순서를 읽는다",
+      "body": "현재 SimGame::MoveBlockDrop은 유효한 동안 원본 피스를 한 행씩 내리고, 처음 범위 밖이거나 겹친 위치에서 한 행 되돌린 뒤 LockBlock을 호출합니다. 그래서 유효한 시작 배치가 전제입니다. 시작부터 잘못된 피스를 이 함수로 복구하려 하면 반복문을 건너뛰고 위로 한 행 이동하는 잘못된 결과가 나옵니다.\n\n강의의 project는 사본과 마지막 유효 위치를 반환하므로 원본을 임시 충돌 상태로 만들지 않습니다. 두 방식은 유효한 시작·같은 보드·같은 수직 경로에서 착지 위치를 구할 수 있지만 실패 처리와 상태 노출 계약은 다릅니다.\n\n실제 SubmitInput은 좌→우→소프트→회전→하드 드롭 순서입니다. 바닥에 닿은 피스에 Down과 Space를 함께 주고 소프트 시도가 허용되면, Down이 첫 피스를 고정하고 Space가 새 피스를 다시 고정할 수 있습니다. 강의는 하드 드롭 분기에서 소프트 이동을 생략하고 한 틱 한 고정으로 끝납니다. 기존 규칙을 바꿀 때는 이런 복합 입력 결과를 의도적으로 정해야 합니다.\n\nLockBlock의 순서도 비교해야 합니다. 실제 코드는 다음 피스를 골라 스폰 충돌을 검사한 뒤 행을 지우고 가비지를 처리합니다. 강의의 finish_lock은 행 정리 뒤 스폰 충돌을 검사합니다. 따라서 상단 행 정리로 스폰 공간을 확보하는 경계 사례의 종료 결과가 다를 수 있습니다. 함수 이름이 같거나 착지 좌표가 같다는 이유로 경기 전체 결과까지 같다고 가정하지 마세요.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::MoveBlockDrop()",
+        "invariant": "현재 유효한 피스의 수직 경로에서 마지막 유효 위치를 찾고 보드에 고정한다. 렌더 프레임이나 중력 틱을 반복하지 않는다.",
+        "mayDiffer": "원본 이동 후 한 칸 복원 대 사본 투영, 복합 입력의 고정 횟수, 행 정리·스폰 검사 순서, 가비지와 T-spin 정책이 다르다.",
+        "omitted": "공격·가비지·연출 이벤트 큐·네트워크 중복 명령 검증은 후속 단원에서 다룬다."
+      }
+    },
+    {
+      "title": "같은 사건을 두 소비자가 읽으면 생기는 문제",
+      "body": "실제 MoveBlockDrop은 dropSoundEvent와 hardDropEvent를 각각 true로 만듭니다. 첫 값은 Game::SubmitInput이 소리 재생 요청 후 지우고, 두 번째는 화면 연출 쪽이 소비합니다. 둘을 하나로 합치면 먼저 읽고 지운 소비자 뒤에서 사건을 놓칩니다.\n\n현재 Game::SubmitInput은 소리가 실제로 들렸는지와 관계없이 사운드 플래그를 지웁니다. 따라서 “오디오가 켜졌을 때만 흔들린다”처럼 설정만으로 결과를 단정할 수 없습니다. 중요한 것은 읽기·초기화의 순서와 소유자입니다.\n\nbool 플래그가 해시에 없다는 것은 표현 소비 여부를 규칙 동기화에 넣지 않는다는 뜻입니다. 하드 드롭 입력을 재생하면 사건은 다시 발생할 수 있습니다. 또한 소비 전에 두 번 발생해도 true 하나만 남으므로 발생 횟수는 보존하지 않습니다. 이 단계의 거리 보고와 마찬가지로, 큐를 제공하는 계약은 아닙니다.",
+      "notes": [
+        {
+          "kind": "C++ · mutable",
+          "title": "const여도 수정 가능한 필드",
+          "body": "mutable 필드는 const 객체나 const 참조를 통해서도 바꿀 수 있습니다. 표현 플래그를 읽고 지우는 데 쓰이지만 스레드 안전성이나 규칙·표현 분리를 자동 보장하지는 않습니다. 어떤 코드가 그 값을 바꾸는지 여전히 추적해야 합니다."
+        }
+      ],
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::SubmitInput(uint8_t inputMask)",
+        "invariant": "규칙 입력 처리 뒤 표현 사건을 각 소비자가 읽고 자신의 플래그를 지운다.",
+        "mayDiffer": "소리 에셋·대체 재생·흔들림 세기와 이벤트 전달 방식은 바뀔 수 있다.",
+        "omitted": "현재 예제는 오디오 장치와 흔들림을 추가하지 않고 틱 결과와 거리 보고까지만 구현한다."
+      }
+    },
+    {
+      "title": "누적 프로젝트를 빌드하고 한 요청을 세 틱에 전달한다",
+      "body": "체크포인트 41-hard-drop은 40-soft-drop에서 시작합니다. PendingControls와 Round를 확장하고 키 목록·SDL/Win32 매핑·main의 두 호출을 바꿉니다. CMake에 CPU 데모와 계약 검사, SDL 입력 및 GPU 검사를 추가합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/41-hard-drop -B out/study-41 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-41\n./out/study-41/hard_drop_demo\nctest --test-dir out/study-41 --output-on-failure\n```\n\n데모는 빈 판·반복 I·중력 간격 30에서 Space 요청 하나를 넣고 consume을 세 번 호출합니다. 첫 틱만 거리 18로 고정되고, 나머지 두 틱에는 요청이 없습니다. 이미 고정된 네 셀은 유지됩니다.\n\n```text\ntick=1 drop=1 distance=18 filled=4 row=0 score=0\ntick=2 drop=0 distance=-1 filled=4 row=0 score=0\ntick=3 drop=0 distance=-1 filled=4 row=0 score=0\n```\n\nrow=0은 방금 고정한 I의 착지 행이 아니라 새 활성 I의 원점입니다. 어느 피스의 좌표인지 구분해야 출력이 모순으로 보이지 않습니다.",
+      "codes": [
+        {
+          "label": "src/hard_drop_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/src/hard_drop_demo.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "추가할 데모와 검사 타깃",
+          "language": "cmake",
+          "text": "add_executable(hard_drop_demo src/hard_drop_demo.cpp)\ntarget_link_libraries(hard_drop_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(hard_drop_contract tests/hard_drop_contract.cpp)\n    target_link_libraries(hard_drop_contract PRIVATE study_mesh)\n    add_test(NAME hard_drop_contract COMMAND hard_drop_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(hard_drop_input tests/hard_drop_input.cpp)\n        target_link_libraries(hard_drop_input PRIVATE study_mesh StudySDL2)\n        add_test(NAME hard_drop_input COMMAND hard_drop_input)\n        set_tests_properties(hard_drop_input PROPERTIES ENVIRONMENT \"SDL_VIDEODRIVER=dummy\")\n        add_executable(hard_drop_probe tests/hard_drop_real.cpp)\n        target_link_libraries(hard_drop_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()\n"
+        }
+      ]
+    },
+    {
+      "title": "한 번 눌러 고정하고 다시 눌러 다음 피스를 다룬다",
+      "body": "SDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core 환경에서 창을 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/41-hard-drop -B out/study-41-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-41-sdl\n./out/study-41-sdl/tetris T normal\n```\n\nSpace를 누르면 현재 피스가 착지·고정됩니다. 키를 계속 누른 상태에서 다음 피스가 연속 하드 드롭하지 않는지 확인하고, 놓았다 다시 눌러 두 번째 명령을 줍니다. Down은 유지 소프트 드롭, Up은 시계 회전, Left/Right는 눌림당 한 칸입니다. Escape 또는 창 닫기로 종료합니다. 다중 구성 빌드는 선택한 구성별 실행 경로를 사용합니다.\n\nnormal은 빈 판이 아니라 하단에 지울 행을 준비한 실험 모드입니다. 아래 그림은 그 T 실험의 고정 직전·직후입니다. 하단 고스트 위치에 T가 고정되고 완성된 한 행이 사라집니다. 위쪽 표식이 한 행 내려오고 다음 Z가 스폰됩니다. 그림은 보드·활성 피스·고스트만 비교하도록 점수와 미리보기를 생략했습니다. 창에서는 점수·큐 표시도 함께 갱신됩니다.\n\n`T next-blocked`와 `T clear-rescue` 모드도 비교해 보세요. 시작부터 한 행 아래가 막힌 피스는 Space를 눌러도 이동 거리가 0입니다. 그래도 고정 후 행 정리 여부에 따라 종료하거나 다음 피스를 생성합니다.\n\n![하드 드롭 직전: 준비된 하단 행과 T의 착지 고스트](data:image/png;base64,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)\n\n![T 고정과 한 행 삭제 뒤: 내려온 표식과 새 Z, 갱신된 고스트](data:image/png;base64,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)"
+    },
+    {
+      "title": "착지 알고리즘과 입력 소비를 독립적으로 검사한다",
+      "body": "검사의 기대값까지 project를 호출해 만들면 같은 버그를 복사할 수 있습니다. 규칙 검사에서는 단순 셀 배열로 수직 충돌 위치를 찾고, 네 셀을 채운 뒤 완성되지 않은 행만 새 배열에 바닥부터 복사합니다. 이 결과와 실제 보드·삭제 수·점수·큐·스폰 상태를 비교합니다.\n\n빈 판과 각 위치의 장애물, 여러 방향·열, 거리 0, 행 정리로 살아나는 스폰, 종료 뒤 입력을 포함합니다. 같은 틱의 오른쪽·회전·Down·Space도 따로 주어 순서를 확인합니다. 하드 드롭 분기에서 착지 대입을 빼거나 consume의 요청 초기화를 빼면 검사에서 실패해야 합니다.\n\n입력 검사는 SDL 이벤트 큐에 press·release·repeat를 넣어 플랫폼 표본과 래치를 연결합니다. 이는 CPU 규칙 검사와 다른 경계입니다. GPU 검사는 고정 전후 보드·피스·고스트 메시를 갱신한 뒤 정점 저장소와 화면 픽셀을 읽어 비교합니다. 규칙은 맞는데 그림이 이전 상태라면 board_changed와 VBO 교체부터 확인합니다.",
+      "codes": [
+        {
+          "label": "tests/hard_drop_contract.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/tests/hard_drop_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/hard_drop_input.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/41-hard-drop/tests/hard_drop_input.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "조회만 한 경우와 거리 0 하드 드롭의 보드 변화를 예측한다.",
+      "Space 하나를 0틱 프레임 너머 세 규칙 틱에 전달해 본다.",
+      "Down·Space·회전이 겹칠 때의 순서를 말로 설명한다.",
+      "hard_drop_demo의 착지 거리와 새 활성 피스 행을 구별한다.",
+      "창에서 유지·해제·재누름, 고정 후 보드·큐·고스트를 확인한다.",
+      "현재 MoveBlockDrop·Game::SubmitInput과 예제의 정책 차이를 찾아본다."
+    ],
+    "expected": "한 요청을 명시한 순서로 고정까지 연결하고, 상태 전이와 표시 갱신 및 실패 계약을 설명한다.",
+    "failureChecks": [
+      "Space에 pressed 대신 held를 전달하지 않았는가?",
+      "consume에서 하드 드롭 요청을 지우는가?",
+      "같은 틱의 이동·회전 뒤 착지를 다시 계산하는가?",
+      "거리 0을 실패나 요청 없음과 혼동하지 않는가?",
+      "고정 뒤 새 활성 피스 좌표가 같아도 보드 메시를 갱신하는가?",
+      "invalid 후보를 원본에 대입하거나 입력도 자동 복원된다고 가정하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "41-1",
+      "question": "유효한 활성 피스가 이미 내려갈 수 없는 위치에 있습니다. Space를 한 번 소비했을 때 강의 예제의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "거리 0이므로 아무 변화가 없다"
+        },
+        {
+          "id": "b",
+          "text": "한 행 위로 이동하고 기다린다"
+        },
+        {
+          "id": "c",
+          "text": "그 피스를 고정하고 행 정리·다음 생성으로 진행한다"
+        },
+        {
+          "id": "d",
+          "text": "자연 중력 간격이 끝날 때까지 요청을 보관한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "그 피스를 고정하고 행 정리·다음 생성으로 진행한다",
+      "explanation": "거리 0인 Landing도 정상 값입니다. 하드 드롭은 위치 이동뿐 아니라 즉시 고정하는 명령이므로 finish_lock을 실행합니다."
+    },
+    {
+      "id": "41-2",
+      "question": "consume 전에 Space=true를 수집하고 다음 프레임에 false를 수집했습니다. 이어서 consume을 세 번 하면 hard_drop은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "true·false·false"
+        },
+        {
+          "id": "b",
+          "text": "false·false·false"
+        },
+        {
+          "id": "c",
+          "text": "true·true·true"
+        },
+        {
+          "id": "d",
+          "text": "false·true·false"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "true·false·false",
+      "explanation": "OR 래치는 수집한 요청을 false 표본으로 지우지 않습니다. 첫 consume이 요청을 반환하고 초기화하므로 뒤의 두 소비에는 남지 않습니다."
+    },
+    {
+      "id": "41-3",
+      "question": "빈 보드의 I, 자연 중력 간격 1, 소프트 remaining=0입니다. 이동·회전 없이 Down=true와 Space=true를 같은 틱에 주면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소프트가 한 행 이동하고 새 피스도 중력으로 이동한다"
+        },
+        {
+          "id": "b",
+          "text": "소프트 시계는 3이 되고 I 한 개를 고정한 뒤 새 피스는 원점 행 0에 남는다"
+        },
+        {
+          "id": "c",
+          "text": "자연 중력이 먼저 실행되어 Space는 다음 틱으로 미뤄진다"
+        },
+        {
+          "id": "d",
+          "text": "소프트 시계는 0에 멈추고 새 피스 두 개가 고정된다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "소프트 시계는 3이 되고 I 한 개를 고정한 뒤 새 피스는 원점 행 0에 남는다",
+      "explanation": "소프트 시계는 갱신하지만 Space 분기에서는 소프트 이동과 자연 중력을 생략합니다. 고정은 한 번이고 자연 elapsed는 0으로 초기화됩니다. 이는 강의 예제의 순서입니다."
+    },
+    {
+      "id": "41-4",
+      "question": "Space를 두 번 수집한 뒤 한 번 consume하면 bool 래치가 주는 보장은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 피스를 차례로 고정할 두 요청을 반환한다"
+        },
+        {
+          "id": "b",
+          "text": "첫 물리 입력의 정확한 시간을 보존한다"
+        },
+        {
+          "id": "c",
+          "text": "네트워크 중복 명령도 자동 제거한다"
+        },
+        {
+          "id": "d",
+          "text": "적어도 한 번 요청되었다는 true 하나를 반환한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "적어도 한 번 요청되었다는 true 하나를 반환한다",
+      "explanation": "bool은 사건 개수를 저장하지 않습니다. OR 누적은 여러 요청을 하나로 합치며, 순서·시각·중복 식별은 별도 자료구조와 계약이 필요합니다."
+    },
+    {
+      "id": "41-5",
+      "question": "finish_lock이 후보 보드를 일부 수정한 뒤 invalid를 반환했습니다. 현재 tick의 계약으로 옳은 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "원본 보드 일부도 이미 바뀌었다"
+        },
+        {
+          "id": "b",
+          "text": "후보를 게시하지 않아 원본 상태는 보존되지만, 다른 스레드와의 동기화까지 보장하지는 않는다"
+        },
+        {
+          "id": "c",
+          "text": "PendingControls의 consume도 자동으로 되돌아간다"
+        },
+        {
+          "id": "d",
+          "text": "invalid를 game_over로 바꾸어 후보를 확정한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "후보를 게시하지 않아 원본 상태는 보존되지만, 다른 스레드와의 동기화까지 보장하지는 않는다",
+      "explanation": "후보 복사본의 부분 변경은 원본에 전파되지 않습니다. 마지막 대입을 생략해 실패 시 원본을 보존합니다. 입력 소비의 되돌리기나 동시 접근의 원자성은 이 코드가 제공하지 않습니다."
+    }
+  ]
+}

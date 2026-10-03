@@ -1,0 +1,381 @@
+{
+  "id": "lesson-34",
+  "title": "회전 상태: 중심과 좌표 변환",
+  "shortTitle": "회전 중심과 후보 확정",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 블록은 이동·낙하·고정·줄 제거가 가능하지만 기본 방향으로만 놓입니다.",
+  "finish": "완료: Up 눌림으로 시계 회전 후보를 만들고, 허용될 때 방향과 셀을 함께 확정해 화면을 갱신합니다.",
+  "objective": "행·열 좌표의 회전 공식을 유도하고, 중심·원점·방향 상태를 구분하며 실패 보존과 입력 소비 순서를 예측합니다.",
+  "prerequisites": [
+    "33차시 체크포인트",
+    "정수 연산·optional·값 복사",
+    "로컬 좌표·보드 충돌·고정 틱"
+  ],
+  "validation": [
+    "Linux SCRIPTED26/SDL24 CTest·경고0·CPU 링크 독립·UBSan",
+    "1485792 배치·28 독립 형상·네 회전 복귀·정수 격자/오버플로·입력 순서·생성 초기화·부호 mutation",
+    "현재 28개 표와400 SimGame 회전 일치, 거부 회전 후 성공 이력의 StateHash 보존",
+    "7종×5상태×3크기=105 SDL offscreen GL 저장소/전체RGB 비교",
+    "실제 SDL 큐/pump의 Up 이벤트 검사: 테스트 전용 Resources, platform_init/창/물리 키 검증은 아님",
+    "Windows/macOS·실제 모니터·29~34차시 사이트 실화면 미검증"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 순수 회전 초안을 직접 검토; 독립 형상·실제 코드·후보 보존 대조",
+    "draftJob": "out/learning-jobs/034-rotation-events.jsonl",
+    "corrections": [
+      "O의 방향과 점유 구분",
+      "중심 인덱스와 그리기 중심 구분",
+      "Part1 실패 회전의 과거 이력 설명 교정"
+    ]
+  },
+  "recap": {
+    "points": [
+      "줄 정리는 남는 행의 순서를 보존하고 상단을 비웁니다.",
+      "Round는 고정·줄 정리·생성을 한 후보 상태에서 처리합니다.",
+      "활성 Piece와 고정된 보드는 별도로 그립니다."
+    ],
+    "bridge": "활성 블록의 로컬 셀에 회전을 추가하고, 바뀐 후보를 같은 보드 충돌 계약으로 검사하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "회전은 그림을 돌리는 효과보다 먼저 게임 상태의 변화다",
+      "body": "T 블록이 벽에 닿아 있을 때 화면만 90도 돌리면 어떤 일이 생길까요? 보드가 검사하는 네 칸과 화면의 네 칸이 달라집니다. 회전은 먼저 시뮬레이션의 점유 좌표를 바꾸고, 그 결과를 그리기로 전달해야 합니다.\n\n지금 Piece에는 로컬 셀 네 개와 보드 배치 기준점 origin이 있습니다. 이동은 origin을 바꿨습니다. 회전은 origin을 그대로 두고 로컬 셀을 바꿉니다. 화면의 픽셀이나 GL 좌표를 회전 계산의 입력으로 쓰지 않습니다.\n\n회전 처리를 세 단계로 나누겠습니다. 중심을 기준으로 새 좌표를 계산하고, 그 후보가 보드에 들어갈 수 있는지 검사한 뒤, 허용될 때 방향과 좌표를 함께 확정합니다. 벽에 걸릴 때 원점을 옮겨 다시 시도하는 **킥(kick)**은 별도 규칙입니다. 우선 원점을 고정한 회전부터 만듭니다.",
+      "notes": [
+        {
+          "kind": "예측",
+          "title": "바닥의 T는 제자리에서 돌아갈까?",
+          "body": "T의 기본 방향은 로컬 행0~1을 쓰지만, 오른쪽으로 돌린 방향은 행0~2를 씁니다. origin.row가18이면 회전 후보의 맨 아래 셀은 보드 행20입니다. 현재 배치가 들어간다는 사실만으로 회전 후보도 들어간다고 결론 낼 수 없습니다."
+        }
+      ]
+    },
+    {
+      "title": "방향 번호와 점유 모양은 같은 개념이 아니다",
+      "body": "quarter는 시계 방향으로 몇 번 90도 돌렸는지를 나타내는 상태 번호입니다. 0→1→2→3→0으로 순환합니다. 전체 회전 횟수를 계속 누적하는 카운터가 아니라 네 상태의 순환입니다.\n\n| quarter | 기본 방향으로부터의 각도 | 다음 상태 |\n| --- | --- | --- |\n| 0 | 0도 | 1 |\n| 1 | 90도 | 2 |\n| 2 | 180도 | 3 |\n| 3 | 270도 | 0 |\n\n유효한 quarter가0~3일 때 `(quarter + 1) % 4`로 다음 상태를 구합니다. 이 식이 임의의 정수를 올바른 입력으로 만들어 주지는 않습니다. 먼저 범위를 검사해야 합니다.\n\nO는 네 방향 모두 같은 네 칸을 차지합니다. 그래도 방향 번호는 순환하도록 정하겠습니다. **논리 상태가 바뀌었다는 사실과 화면의 잉크가 바뀌었다는 사실은 다릅니다.** I 역시 방향1과3은 둘 다 세로 막대지만, 같은 원점에서 차지하는 열은 다릅니다. 모양이 비슷하다고 상태를 합치면 위치와 이후 회전 결과가 바뀝니다."
+    },
+    {
+      "title": "회전 중심을 셀 인덱스 좌표계에서 정한다",
+      "body": "행은 아래로, 열은 오른쪽으로 증가합니다. 여기서는 셀 중심에 그 셀의 정수 인덱스 `(row,column)`를 붙입니다. 로컬 셀(0,0)의 중심이 좌표(0,0)이고 이웃 셀 중심과의 거리는1입니다.\n\n| 블록 | 중심 `(pr,pc)` | 두 배 중심 `(pr2,pc2)` |\n| --- | --- | --- |\n| J·L·S·T·Z | (1,1) | (2,2) |\n| I | (1.5,1.5) | (3,3) |\n| O | (0.5,0.5) | (1,1) |\n\nT의 중심은 로컬 셀(1,1)의 중심입니다. O의 중심은 네 셀 중심 사이에 있습니다. I는 4×4 틀의 가운데를 사용합니다. 중심을 모두(1,1)로 통일하면 I의 방향별 좌표가 달라집니다.\n\norigin은 이 로컬 좌표계를 보드 어디에 놓는지 나타냅니다. 회전 중심과 같지 않습니다. 보드에서의 회전 중심은 origin에 로컬 중심을 더한 위치지만, 좌표 변환은 로컬 좌표만으로 계산할 수 있습니다.\n\n렌더러가 셀 왼쪽 위 모서리를 인덱스에 대응시킨다면 셀 중심의 화면 좌표에는 반 칸을 더합니다. 이것은 그리기의 좌표 변환입니다. 그 반 칸을 게임의 셀 인덱스에 다시 더하면 같은 보정을 두 번 적용하게 됩니다.",
+      "codes": [
+        {
+          "label": "종류별 두 배 중심",
+          "language": "cpp",
+          "text": "inline std::optional<study_rotation_math::PivotTwice> pivot(study_catalog::Kind kind) noexcept {\n    if (!study_catalog::find(kind)) return std::nullopt;\n    if (kind == study_catalog::Kind::I) return study_rotation_math::PivotTwice{3,3};\n    if (kind == study_catalog::Kind::O) return study_rotation_math::PivotTwice{1,1};\n    return study_rotation_math::PivotTwice{2,2};\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "좌표 구별",
+          "title": "점유 영역을 잘라 다시 정렬하지 않는다",
+          "body": "회전한 셀 중 가장 작은 행·열을 빼서 좌상단에 붙이면 원점에 대한 오프셋이 변합니다. I의 기본 점유 행은1이고 방향2의 점유 행은2입니다. 이를 모두 행0으로 맞추는 것은 이 회전 규칙과 다른 변환입니다."
+        }
+      ]
+    },
+    {
+      "title": "중심을 빼고, 방향을 돌리고, 중심을 더한다",
+      "body": "먼저 점을 중심 기준의 상대 벡터로 바꿉니다. `dr = row − pr`, `dc = column − pc`입니다. 화면에서 중심보다 위에 있는 점은 dr가 음수입니다.\n\n시계 90도에서는 위쪽이 오른쪽으로 갑니다. 따라서 `(dr,dc)`는 `(dc,−dr)`가 됩니다. 마지막으로 중심을 다시 더합니다.\n\n```text\nrow'    = pr + (column - pc)\ncolumn' = pc - (row - pr)\n```\n\nT의 셀(0,1)을 중심(1,1)로 돌려 봅시다. 상대 벡터는(−1,0), 돌린 벡터는(0,1), 결과는(1,2)입니다. 위쪽 돌출 칸이 오른쪽 돌출 칸이 됩니다.\n\nI의 셀(1,0)은 중심(1.5,1.5)을 쓰면 결과가(0,2)입니다. 네 셀(1,0)~(1,3)이 열2의 행0~3으로 바뀝니다. 눈으로 ‘세로가 됐다’만 확인하지 말고 어느 열을 차지하는지도 예측해야 합니다.\n\n수학 교재의 x오른쪽·y위쪽 좌표 식을 그대로 가져와 row와column에 대입하면 회전 방향을 거꾸로 만들기 쉽습니다. 축의 순서와 증가 방향을 먼저 정하고, 위쪽 한 점이 오른쪽으로 가는지 확인하세요."
+    },
+    {
+      "title": "반 정수 중심을 정수 연산으로 보존한다",
+      "body": "중심에는0.5가 들어가지만 결과 셀은 정수 격자 위에 있어야 합니다. 중심과 결과를 두 배로 표현하면 부동소수점 없이 계산할 수 있습니다.\n\n```text\nrow2    = pr2 + 2*column - pc2\ncolumn2 = pc2 - 2*row + pr2\n```\n\nrow2와column2가 짝수일 때만2로 나눕니다. 예를 들어 중심(0.5,0), 즉 두 배 중심(1,0)을 사용하면 정수 셀이 반 칸 위치로 갑니다. 이런 결과를 정수 나눗셈으로 잘라 버리면 회전이 아니라 반올림조차 하지 않는 다른 변환입니다. 함수는 nullopt를 반환합니다.\n\n곱하고 더하기 **전에** int64_t로 넓힙니다. int로 계산한 뒤 결과를 넓히면 이미 발생한 오버플로를 되돌릴 수 없습니다. 이 체크포인트의 Piece는 int가 최대32비트라는 조건을 선언하므로, 여러 int 입력을 두 배로 더하고 빼는 중간 값은 int64_t 안에 들어갑니다. 나눈 결과가 다시 int 범위에 있는지도 검사합니다.\n\n이 함수는 순수 좌표 변환입니다. 음수 로컬 좌표 자체를 오류로 보지 않고, 보드 점유나 셀의 연결성도 검사하지 않습니다. 계산 가능성과 게임에서 허용되는 배치는 다음 단계에서 구분합니다.",
+      "codes": [
+        {
+          "label": "연산 전에 넓히고 정수 격자와 결과 범위를 검사",
+          "language": "cpp",
+          "text": "        const std::int64_t r = static_cast<std::int64_t>(shape[i].row);\n        const std::int64_t c = static_cast<std::int64_t>(shape[i].column);\n        const std::int64_t pr2 = static_cast<std::int64_t>(pivot.row);\n        const std::int64_t pc2 = static_cast<std::int64_t>(pivot.column);\n\n        const std::int64_t row2 = pr2 + 2 * c - pc2;\n        const std::int64_t column2 = pc2 - 2 * r + pr2;\n\n        if (row2 % 2 != 0 || column2 % 2 != 0) {\n            return std::nullopt;  // non-integral cell center\n        }\n\n        const std::int64_t row = row2 / 2;\n        const std::int64_t column = column2 / 2;\n        if (row < std::numeric_limits<int>::min() ||\n            row > std::numeric_limits<int>::max() ||\n            column < std::numeric_limits<int>::min() ||\n            column > std::numeric_limits<int>::max()) {\n            return std::nullopt;\n        }"
+        },
+        {
+          "label": "simulation/rotation_math.h · 완성 파일",
+          "file": "checkpoints/34-rotation/simulation/rotation_math.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "형상을 매번 기본 데이터에서 유도한다",
+      "body": "shape_at(kind,quarter)는 카탈로그의 기본 셀을 복사하고 quarter번 변환합니다. 최대 세 번, 매번 네 셀만 처리합니다. 성능을 위해 모든 방향을 저장할 수도 있지만, 여기서는 중심과 상태에서 좌표가 어떻게 나오는지를 드러내겠습니다.\n\n변환 뒤에는 행이 작은 셀부터, 같은 행이면 열이 작은 셀부터 정렬합니다. 같은 셀 집합을 같은 배열 순서로 만드는 **정규 표현(canonical representation)**입니다. 셀의 실제 이동 경로나 회전 애니메이션 순서는 아닙니다.\n\n입력 셀 순서가 달라도 점유가 같을 수 있습니다. 그래서 현재 Piece와 기대 형상을 비교하는 same_cells는 두 복사본을 정렬해서 비교합니다. 네 번 회전한 뒤 같은 칸으로 돌아오는 성질과, 배열의 각 슬롯이 원래 순서로 돌아오는 성질을 혼동하지 않습니다. 카탈로그의 기본 셀은 이미 행 우선 순서이므로 이 예제에서는 네 번 뒤 배열까지 일치합니다.\n\n현재 게임의 SimBlock은 방향별 좌표를 미리 저장한 표를 읽습니다. 표를 읽든 기본 데이터에서 계산하든, 같은 종류·방향의 로컬 점유와 원점 계약이 같아야 같은 게임 배치가 됩니다.",
+      "codes": [
+        {
+          "label": "기본 형상으로부터 방향별 좌표 생성",
+          "language": "cpp",
+          "text": "inline std::optional<study_piece::Shape> shape_at(study_catalog::Kind kind,\n                                                int quarter) noexcept {\n    if (quarter < 0 || quarter > 3) return std::nullopt;\n    const auto* definition = study_catalog::find(kind);\n    const auto center = pivot(kind);\n    if (!definition || !center) return std::nullopt;\n    auto shape = definition->cells;\n    for (int i=0;i<quarter;++i) {\n        const auto next = study_rotation_math::clockwise(shape,*center);\n        if (!next) return std::nullopt;\n        shape = *next;\n    }\n    return shape;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_blocks.h",
+        "symbol": "class SimTBlock",
+        "invariant": "종류와 방향이 로컬 셀 배치를 결정한다.",
+        "mayDiffer": "현재는 네 방향을 표로 저장한다. 기준 코드는 중심과 기본 형상으로 계산한다.",
+        "omitted": "킥과 반시계 회전은 좌표 표만 추가한다고 완성되지 않는다."
+      }
+    },
+    {
+      "title": "현재 상태를 검사한 뒤 회전 후보를 확정한다",
+      "body": "Round는 kind와quarter를 소유하고 Piece.local에는 그 방향의 셀을 보관합니다. 같은 정보를 두 표현에 두므로 **일치 조건**이 필요합니다. Piece.local은 kind와quarter로 유도한 형상과 같은 셀 집합이어야 합니다. 잘못된 캐시를 정상 회전으로 덮어 숨기지 않습니다.\n\ntry_clockwise는 현재 형상과 현재 배치부터 검사합니다. 알 수 없는 종류, 범위 밖 방향, 서로 다른 형상, 이미 막힌 현재 배치는 invalid입니다. 정상 상태에서 만든 회전 후보가 벽이나 고정 셀에 걸리면 blocked입니다.\n\ncandidate는 Piece의 복사본입니다. origin을 유지한 채 local만 다음 방향으로 교체합니다. clear일 때만 piece와quarter를 함께 대입합니다. 실패 경로는 원본 Piece·방향·보드 모두를 바꾸지 않습니다.\n\n보드를 const 참조로 받는 이유도 여기에 있습니다. 활성 블록의 회전은 고정된 셀을 보드에 새로 쓰는 작업이 아닙니다. 후보 네 셀을 조회할 뿐입니다. 고정은 별도 전이입니다.",
+      "codes": [
+        {
+          "label": "검사와 후보 확정",
+          "language": "cpp",
+          "text": "inline Result try_clockwise(const study_grid::Grid& board,study_piece::Piece& piece,\n                            study_catalog::Kind kind,int& quarter) noexcept {\n    const auto expected = shape_at(kind,quarter);\n    if (!expected || !same_cells(piece.local,*expected) ||\n        study_collision::classify(board,piece)!=study_collision::Placement::clear)\n        return Result::invalid;\n    const int next_quarter = (quarter+1)%4;\n    const auto next = shape_at(kind,next_quarter);\n    if (!next) return Result::invalid;\n    auto candidate = piece;\n    candidate.local = *next;\n    const auto placement = study_collision::classify(board,candidate);\n    if (placement == study_collision::Placement::outside ||\n        placement == study_collision::Placement::occupied) return Result::blocked;\n    if (placement != study_collision::Placement::clear) return Result::invalid;\n    piece = candidate;\n    quarter = next_quarter;\n    return Result::rotated;\n}"
+        },
+        {
+          "label": "simulation/rotation.h · 완성 파일",
+          "file": "checkpoints/34-rotation/simulation/rotation.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::RotateBlockImpl()",
+        "invariant": "거부된 회전은 직전 배치와 기존 성공 행동 이력을 유지한다.",
+        "mayDiffer": "현재는 먼저 Rotate하고 실패하면 UndoRotation한다. 기준 코드는 후보가 통과한 뒤 확정한다.",
+        "omitted": "현재의 회전음·고스트·T-spin용 이력은 기준 코드에 아직 없다."
+      },
+      "notes": [
+        {
+          "kind": "설계 선택",
+          "title": "방향과 셀을 둘 다 보관하는 이유",
+          "body": "지금의 Piece를 이동·충돌·메시가 그대로 읽도록 유지하면서 방향을 추가했습니다. 다른 설계로는 종류·방향·원점만 저장하고 셀을 읽을 때마다 유도할 수 있습니다. 무엇을 택하든 독립적으로 수정 가능한 두 진실을 두지 말아야 합니다. Round는 외부에 읽기 뷰만 주고 내부에서 함께 갱신합니다."
+        }
+      ]
+    },
+    {
+      "title": "회전 거부와 한 틱 전체 중단을 구분한다",
+      "body": "Round::tick의 처리 순서는 **좌우 이동 → 회전 → 중력**입니다. 같은 틱에 오른쪽과 회전이 들어오면 먼저 이동한 위치에서 회전 후보를 검사합니다. 그 뒤 중력을 처리합니다. 순서가 바뀌면 벽·장애물 주변 결과도 달라질 수 있습니다.\n\n정상적인 회전 거부는 틱을 중단하지 않습니다. 바닥의 T가 회전하려다 막혀도 낙하 시간이 되었다면 아래 이동도 막히고, 이어 고정·줄 정리·새 생성으로 진행합니다. ‘회전 함수가 보존했다’는 말은 그 호출의 계약이지, 뒤따르는 중력까지 시간이 멈춘다는 말이 아닙니다.\n\nStep::moved는 Step::changed로 이름을 바꿉니다. 원점이 이동하지 않아도 회전으로 활성 상태가 바뀔 수 있기 때문입니다. O의 회전도 changed로 보고합니다. 이것은 모든 상태 변화의 통합 이벤트가 아니라 활성 블록의 이동·회전을 알리는 결과이며, 고정과 종료는 별도 결과입니다. waiting인 틱도 중력 카운터는 진행할 수 있습니다.\n\n고정 뒤 새 블록을 생성하면 quarter를0으로 초기화합니다. 카탈로그가 기본 방향의 Piece를 만들기 때문에 방향도 같이 맞춰야 합니다. 방향1을 남겨 두고 기본 셀을 넣으면 다음 회전의 일치 검사에서 invalid가 됩니다.",
+      "codes": [
+        {
+          "label": "한 틱 안에서 이동·회전·중력을 순서대로 계산",
+          "language": "cpp",
+          "text": "        const auto move = study_collision::try_shift(candidate.board_,\n                                                     *candidate.active_, direction);\n        if (move == study_movement::Result::invalid) return Step::invalid;\n        auto turn = study_rotation::Result::blocked; // No requested shape change.\n        if (clockwise) {\n            turn = study_rotation::try_clockwise(candidate.board_,*candidate.active_,\n                                                 candidate.kind_,candidate.quarter_);\n            if (turn == study_rotation::Result::invalid) return Step::invalid;\n        }\n        const auto fall = study_gravity::tick(candidate.board_, *candidate.active_,\n                                              candidate.gravity_);"
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "file": "checkpoints/34-rotation/simulation/round.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "Up 눌림을 시뮬레이션 틱까지 보관한다",
+      "body": "렌더 프레임마다 시뮬레이션 틱이 꼭 한 번 실행되는 것은 아닙니다. Up을 누른 프레임에 실행할 틱이 없으면, 눌림 신호를 즉시 버리는 코드에서는 회전이 사라집니다. 반대로 같은 눌림을 여러 틱에 전달하면 한 번 눌러 여러 번 돕니다.\n\nPendingControls는 좌우와 clockwise 요청을 보관합니다. capture는 Up 눌림이 있으면 bool을 세우고, consume은 값을 반환한 뒤 지웁니다. 틱이 없으면 보존하고 첫 틱에서 한 번만 사용합니다. 한 프레임에 틱이 여러 번 있어도 두 번째 consume의 clockwise는 false입니다.\n\n이 구조는 모든 입력을 저장하는 큐가 아닙니다. consume 전 여러 번 들어온 눌림은 하나로 합쳐집니다. 또한 플랫폼의 눌림은 프레임 전후 키 상태로 얻으므로 같은 프레임 안에서 눌렀다 놓은 매우 짧은 동작은 놓칠 수 있습니다. 모든 전이를 보존하려면 이벤트 큐를 별도로 설계해야 합니다.\n\nKey에 Up을 추가하고 SDL의 SDLK_UP, Win32의 VK_UP을 같은 계약에 연결합니다. main은 플랫폼 상수 대신 Key::Up을 읽습니다. 누른 채 유지하는 down이 아니라 pressed를 capture하므로 키 반복으로 연속 회전하지 않습니다.",
+      "codes": [
+        {
+          "label": "simulation/pending_controls.h · 완성 파일",
+          "file": "checkpoints/34-rotation/simulation/pending_controls.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "core/input.h",
+        "symbol": "INPUT_ROTATE",
+        "invariant": "플랫폼 키를 게임의 회전 의도로 바꾸어 시뮬레이션에 전달한다.",
+        "mayDiffer": "현재 게임은 입력 비트를 사용한다. 기준 코드는 bool과 소비 시점이 명시된 작은 요청 객체를 쓴다.",
+        "omitted": "리플레이·네트워크 입력 직렬화와 자동 반복은 아직 추가하지 않는다."
+      }
+    },
+    {
+      "title": "회전한 셀을 다시 정점으로 바꾸어 그린다",
+      "body": "main은 changed를 받으면 활성 Piece의 보드 좌표로 메시를 다시 만들고, 같은 VBO의24개 정점을 교체합니다. 회전은 네 셀이라는 개수를 바꾸지 않으므로 저장소 크기가 같습니다. VAO와 프로그램을 매번 만들 필요가 없습니다.\n\n보드 메시를 회전 때문에 다시 만들지는 않습니다. 고정되었을 때 최종 보드와 그리기 구간을 갱신합니다. 여러 틱이 한 프레임에 처리되면 마지막 상태를 그립니다. 중간 방향을 모두 화면에 표시한다는 보장은 없습니다.\n\nO는 방향만 바뀌어 같은 정점을 다시 올릴 수 있습니다. 지금은 상태 변경과 화면 갱신의 연결을 단순하게 유지합니다. 필요하면 나중에 셀 좌표 변화까지 비교해 업로드를 줄일 수 있습니다. 단, 그 최적화 때문에 방향 상태 갱신을 생략하면 안 됩니다.\n\n회전 애니메이션을 붙일 때에도 충돌 판정은 확정한 격자 상태를 사용해야 합니다. 화면 보간 중간의 비스듬한 사각형을 보드 셀로 반올림해 규칙에 섞지 않습니다.\n\n아래 두 장면은 회전만 비교하도록 T의 origin을(6,3)에 고정한 배치입니다. 주황색 세 셀은 보드에 고정된 표식이고, 청록색 네 셀만 방향0에서1로 바뀝니다. 이 비교 장면은 줄 완성용 실습 보드와 다릅니다.\n\n![중앙의 T가 위를 향하고 고정 표식 세 개는 그대로 있다](data:image/png;base64,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)\n\n![같은 원점에서 T의 돌출 칸이 오른쪽을 향한다](data:image/png;base64,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)",
+      "codes": [
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/34-rotation/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "T와 I를 직접 돌리고 바닥의 거부를 비교한다",
+      "body": "누적 체크포인트는 `34-rotation`입니다. 순수 계산을 rotation_math.h, 게임 배치 처리를 rotation.h에 추가하고 Round·입력·main에 연결했습니다. 저장소 루트에서 C++17·CMake로 CPU 실험을 시작합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/34-rotation -B out/study-34 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-34\n./out/study-34/rotation_demo\nctest --test-dir out/study-34 --output-on-failure\n```\n\n방향 번호는0,1,2,3,0으로 출력됩니다. 방향1의 T 셀은(0,1),(1,1),(1,2),(2,1)입니다. 마지막 바닥 실험은 `floor: blocked quarter=0 row=18`입니다. 후보가 행20을 사용하므로 회전만 거부하고 배치를 유지합니다. 이 데모는 Round의 중력을 실행하지 않습니다.\n\nSDL2 개발 패키지·pkg-config·desktop OpenGL3.3 Core 환경에서는 창을 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/34-rotation -B out/study-34-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-34-sdl\n./out/study-34-sdl/tetris T\n```\n\nUp을 짧게 누를 때마다 시계 방향으로 돕니다. 좌우는 한 칸 이동, Escape/닫기는 종료입니다. T 대신 I나O도 실행해 보세요. 같은 종류를 반복 생성합니다. O의 상태 변화는 화면만으로 구분할 수 없으므로 Round::quarter() 또는 CPU 실험으로 관찰합니다.\n\n보드는 기본 방향으로 떨어뜨렸을 때 줄을 완성하도록 준비되어 있습니다. 회전하거나 이동하면 빈칸에 맞지 않을 수 있습니다. 바닥에서는 회전이 막힌 뒤 중력 시점에 고정될 수 있으므로, 회전 자체의 결과를 따로 보고 싶을 때는 CPU 데모를 사용합니다. 다중 구성 생성기는 빌드 구성과 실행 파일 경로를 맞춥니다.",
+      "codes": [
+        {
+          "label": "src/rotation_demo.cpp · 완성 파일",
+          "file": "checkpoints/34-rotation/src/rotation_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/34-rotation/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "독립된 형상과 실패 전후 상태로 검사한다",
+      "body": "검사 대상과 똑같은 회전 식으로 기대값을 만들면 부호 오류를 공유할 수 있습니다. 테스트에는 일곱 종류의 네 방향을 별도 4×4 비트 그림으로 적습니다. 각 비트가 셀 하나이므로 예상 점유를 직접 읽을 수 있습니다.\n\n| 검사 | 확인할 성질 |\n| --- | --- |\n| 빈 보드의 중앙에서 네 번 회전 | 원점 유지, 방향0, 원래 점유 복귀 |\n| I의 방향1과3 | 세로 모양뿐 아니라 점유 열도 일치 |\n| O의 한 번 회전 | 같은 점유, 다른 방향 |\n| 바닥 또는 고정 셀에 걸린 후보 | blocked, Piece와quarter 보존 |\n| 현재 상태와 방향별 셀 불일치 | invalid, 수정하지 않음 |\n| 한 번 눌림 뒤 여러 틱 | 첫 consume만 회전 요청 |\n| 고정 뒤 새 블록 | 방향0과 기본 셀의 일치 |\n\n빈 보드와 장애물 하나를 각 셀에 놓은 보드에서, 경계 안팎의 여러 원점을 비교할 수 있습니다. 이 범위는 경계·단일 장애물 위치를 체계적으로 다루며 가능한 모든 보드 조합의 증명은 아닙니다.\n\n현재 게임과 대조할 때는 실패한 회전이 과거 성공 이력을 지우지 않는지도 봅니다. S가 한 번 성공한 뒤 다음 회전에 막히면 방향과 lastMoveWasRotate 이력은 첫 성공 후 상태를 유지합니다. 강의는 아직 이 이력을 저장하지 않지만, 기준 코드에 없는 것을 현재 게임에도 없다고 가정하면 안 됩니다.\n\n이제 회전 계산과 후보 점유 검사가 분리되었습니다. 이어서 제자리 후보가 막혔을 때 정해진 순서의 대안 위치를 검사하는 킥을 만들 수 있습니다.",
+      "codes": [
+        {
+          "label": "tests/rotation_contract.cpp · 완성 파일",
+          "file": "checkpoints/34-rotation/tests/rotation_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "설계 연결",
+          "title": "실패를 다루는 책임",
+          "body": "회전 계산은 새 모양을 만들고, 충돌 검사는 그 모양의 배치를 판단합니다. 킥은 실패한 기본 후보 다음에 어떤 원점을 시도할지 정하는 정책입니다. 이 셋을 분리하면 중심 오류를 킥으로 우연히 감추는 일을 줄일 수 있습니다."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "T의 위쪽 셀과 I의 왼쪽 셀을 손으로 회전한다.",
+      "I의 방향1·3이 차지하는 열을 비교한다.",
+      "바닥의 T 회전 거부와 원점 보존을 확인한다.",
+      "한 눌림과 두 번 consume의 결과를 예측한다.",
+      "회전 실패 뒤 중력이 진행되는 순서를 설명한다."
+    ],
+    "expected": "회전 좌표·후보 점유·상태 확정·GPU 갱신을 각각 설명하고, 경계에서 실패한 회전의 영향 범위를 구분한다.",
+    "failureChecks": [
+      "중심을 모든 블록에(1,1)로 적용하지 않았는가?",
+      "행 아래 방향에서 회전 부호를 반대로 쓰지 않았는가?",
+      "int 연산 후에 넓은 타입으로 바꾸고 있지 않은가?",
+      "회전 실패 전에 quarter를 확정하지 않았는가?",
+      "키 유지나 다중 틱으로 한 눌림을 반복 소비하지 않는가?",
+      "새 생성 때 방향을0으로 맞추는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "34-1",
+      "kind": "좌표 계산",
+      "question": "행이 아래로 증가합니다. T의 셀(0,1)을 중심(1,1)로 시계90도 돌리면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(1,0)이다."
+        },
+        {
+          "id": "b",
+          "text": "(1,2)이다."
+        },
+        {
+          "id": "c",
+          "text": "(2,1)이다."
+        },
+        {
+          "id": "d",
+          "text": "(0,1)이다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "(1,2)이다.",
+      "explanation": "중심 상대 벡터(−1,0)을(0,1)로 바꾸고 중심을 더하면(1,2)입니다. 축 방향을 반대로 해석하면 왼쪽 칸을 고르게 됩니다."
+    },
+    {
+      "id": "34-2",
+      "kind": "상태와 모양",
+      "question": "빈 보드에서 O가 한 번 회전에 성공했습니다. 기준 코드의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "셀과 방향 모두 바뀌지 않는다."
+        },
+        {
+          "id": "b",
+          "text": "셀은 바뀌고 방향은 그대로다."
+        },
+        {
+          "id": "c",
+          "text": "셀 집합은 같고 방향은 다음 상태다."
+        },
+        {
+          "id": "d",
+          "text": "origin이 오른쪽으로 한 칸 이동한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "셀 집합은 같고 방향은 다음 상태다.",
+      "explanation": "O의 네 방향은 같은 점유지만 quarter는 순환합니다. Step::changed를 좌표 이동에만 한정하지 않는 이유입니다."
+    },
+    {
+      "id": "34-3",
+      "kind": "거부의 범위",
+      "question": "바닥의 T 회전 후보가 막혔고, 같은 틱에 중력 시간이 되었습니다. Round는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "회전을 보존한 채 중력을 처리하고, 아래도 막히면 고정한다."
+        },
+        {
+          "id": "b",
+          "text": "회전 거부만으로 틱의 카운터도 무조건 정지한다."
+        },
+        {
+          "id": "c",
+          "text": "회전 후보를 보드 밖에 확정한 뒤 고정한다."
+        },
+        {
+          "id": "d",
+          "text": "킥 없이도 자동으로 한 행 위로 이동한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "회전을 보존한 채 중력을 처리하고, 아래도 막히면 고정한다.",
+      "explanation": "try_clockwise의 blocked는 회전만 거부합니다. Round는 중력을 계속 처리합니다. invalid가 틱 전체 후보를 버리는 경우와 다릅니다."
+    },
+    {
+      "id": "34-4",
+      "kind": "입력 소비",
+      "question": "Up 눌림을 capture했지만 그 프레임에는 틱이 없었습니다. 이후 두 틱에서 consume하면 clockwise 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "false, false다."
+        },
+        {
+          "id": "b",
+          "text": "true, true다."
+        },
+        {
+          "id": "c",
+          "text": "false, true다."
+        },
+        {
+          "id": "d",
+          "text": "true, false다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "true, false다.",
+      "explanation": "PendingControls는 첫 틱까지 보관하고 consume 뒤 지웁니다. 프레임마다 버리거나 같은 요청을 여러 틱에 반복하면 입력 의미가 바뀝니다."
+    },
+    {
+      "id": "34-5",
+      "kind": "원점과 중심",
+      "question": "I를 회전한 뒤 최소 행·열을 빼서 매번 로컬 좌상단을(0,0)에 붙이면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "현재 회전과 항상 같은 배치다."
+        },
+        {
+          "id": "b",
+          "text": "원점 상대 위치가 바뀌어 방향별 배치 계약이 달라진다."
+        },
+        {
+          "id": "c",
+          "text": "보드의 고정 셀도 자동으로 함께 이동한다."
+        },
+        {
+          "id": "d",
+          "text": "좌표가 모두 양수이므로 킥이 완성된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "원점 상대 위치가 바뀌어 방향별 배치 계약이 달라진다.",
+      "explanation": "회전 중심은 고정된 로컬 좌표계에 있습니다. 점유 영역을 매번 자르면 별도의 평행이동을 더하는 셈입니다. origin을 그대로 둬도 보드 점유는 바뀝니다."
+    }
+  ]
+}

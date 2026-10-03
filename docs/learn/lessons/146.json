@@ -1,0 +1,402 @@
+{
+  "id": "lesson-146",
+  "title": "판정 사유: 무효·미완료·저장 불확실",
+  "shortTitle": "사유·프로필·FIFO 통지·배수 종료",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 결과 저장을 선점하지만 사용자에게 어떤 사실을 알릴지, 통지 바이트를 언제까지 보존할지 구분이 필요합니다.",
+  "finish": "완료: 판정과 저장의 사유를 분류하고, 미확인 응답으로 프로필을 덮지 않으며 결과를 같은 FIFO로 배수한 뒤 종료합니다.",
+  "objective": "판정·저장·송신·수신 완료의 의미를 구분하고 부분 송신·불확실 응답·종료 재진입에서 일관된 통지와 회계를 구현합니다.",
+  "prerequisites": [
+    "한 번의 결과 선점과 저장 확인",
+    "바이트 프레이밍·논블로킹 송신·대기 큐",
+    "이벤트 루프의 소유권·재진입·타이머"
+  ],
+  "recap": {
+    "points": [
+      "선점과 결과 스냅샷은 같은 소유 경계에서 확정한다.",
+      "느린 저장은 분리하고 완료는 살아 있는 소유 상태에 적용한다."
+    ],
+    "bridge": "그 완료를 사용자에게 설명하고 실제 바이트로 전달할 때도 각 단계가 확인한 사실을 보존합니다."
+  },
+  "sections": [
+    {
+      "title": "서버가 아는 사실을 상태로 전달한다",
+      "body": "결과 레코드를 한 번만 저장하도록 만들었어도 사용자는 왜 결과가 나오지 않았는지 모를 수 있습니다. 규칙상 경기가 끝나지 않은 경우, 입력이 검증을 통과하지 못한 경우, 저장 서버의 응답을 잃은 경우는 대응 방법이 다릅니다.\n\n이번에는 ChannelView의 판정 상태와 저장 상태를 사용자에게 보여 줄 사유로 바꾸고, 그 통지를 실제 연결로 보냅니다. 사유를 만들었다는 것, 송신 큐에 넣었다는 것, 커널이 바이트를 받았다는 것, 클라이언트가 읽었다는 것을 각각 구분합니다.\n\n**상태 모델**은 단순히 문구를 모아 둔 목록이 아닙니다. 프로그램이 어느 사실까지 확인했는지 표현하는 계약입니다. 분류 함수와 송신 큐를 분리하면 저장 여부의 의미가 네트워크 송신 성공 여부에 섞이지 않습니다.",
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "변화량 0만으로 성공 여부를 판단할 수 없다",
+      "body": "이 실습의 생각 실험에서 현재 RP가 0인 사용자가 정상 패배했다고 합시다. 하한 정책 때문에 변화량이 0일 수 있습니다. 무승부, 미완료, 서버 저장 미확인도 화면 숫자만 보면 같은 0으로 보일 수 있습니다.\n\n숫자는 값의 변화를 나타내고 상태는 그 값을 어떤 근거로 적용할지 나타냅니다. 현재 게임의 rating_after_result는 Applied와 Draw에서만 보고된 RP를 사용합니다. Unknown·InvalidReplay·Incomplete·SaveFailed에서는 기존 RP를 유지합니다. 실패 프레임의 자리값을 실제 프로필 값으로 해석하지 않는 것입니다.\n\nBP와 XP가 프레임에 없다면 RP 변화량으로 추측해서 채우지 않습니다. 현재 클라이언트는 메뉴 복귀 뒤 프로필을 다시 조회합니다. 화면에 즉시 표시한 값과 서버에 확정 저장된 프로필의 동기화 경로도 명시해야 합니다.",
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "판정 상태와 저장 상태의 곱을 분류한다",
+      "body": "ChannelView에는 match와 saving이 따로 있습니다. 각각을 하나의 축으로 보면 조합을 분류할 수 있습니다. 규칙이 끝났어도 저장은 진행 중일 수 있고, 입력을 무효 처리해 저장 요청 자체가 없는 경우도 있습니다.\n\n| 조합 | 표시할 의미 |\n|---|---|\n| open | 경기 결과 판정 중 |\n| finished + inflight | 저장 확인 대기 |\n| invalid + not_eligible | 입력 검증 거절, 보상 적용 없음 |\n| incomplete + not_eligible | 서버에서 완결된 결과 없음 |\n| budget_exhausted + not_eligible | 진행 한도에 따른 판정 종료 |\n| finished + confirmed | 저장된 승패 또는 무승부 |\n| finished + unconfirmed | 원격 저장 여부 미확인 |\n\nfinished가 아닌데 confirmed인 조합처럼 계약과 맞지 않는 값은 unknown으로 처리합니다. 우연히 기본값이 승리나 저장 성공으로 해석되면 가장 위험한 쪽으로 잘못된 화면을 만들 수 있습니다. 모르는 상태를 성공으로 승격하지 않습니다.",
+      "codes": [
+        {
+          "label": "상태 조합을 의미로 분류한다",
+          "language": "cpp",
+          "text": "inline NoticeReason notice_reason(const ChannelView& view) noexcept {\n  switch (view.saving) {\n    case ResultHandoff::Stage::open:\n      return NoticeReason::waiting;\n    case ResultHandoff::Stage::inflight:\n      // In-flight is only \"pending\" once a finished result exists.\n      return view.match.state == MatchState::finished ? NoticeReason::pending\n                                                     : NoticeReason::unknown;\n    case ResultHandoff::Stage::not_eligible:\n      // Sealed without a storable result, including an incomplete match.\n      return detail::reason_from_match_state(view.match.state);\n    case ResultHandoff::Stage::confirmed:\n      if (view.match.state != MatchState::finished) {\n        return NoticeReason::unknown;\n      }\n      switch (view.match.winner) {\n        case Winner::host:\n        case Winner::peer:\n          return NoticeReason::saved;\n        case Winner::draw:\n          return NoticeReason::draw;\n        default:\n          return NoticeReason::unknown;\n      }\n    case ResultHandoff::Stage::unconfirmed:\n      return view.match.state == MatchState::finished\n                 ? NoticeReason::unconfirmed\n                 : NoticeReason::unknown;\n    default:\n      return NoticeReason::unknown;\n  }\n}"
+        }
+      ],
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "불확실하다는 말은 정보가 부족하다는 뜻이다",
+      "body": "저장 서버가 COMMIT을 마쳤지만 응답이 도착하지 않았을 수 있습니다. 이때 호출자가 아는 사실은 “저장 확인을 받지 못했다”입니다. “저장하지 않았다”나 “보상이 없다”로 단정하면 사용자가 잘못 재시도하거나 이미 지급된 재화를 의심하게 됩니다.\n\n반대로 서버가 입력을 거절해 저장 요청을 만들지 않은 경우에는 이번 경기의 보상이 적용되지 않았다고 설명할 수 있습니다. 그래도 그 상태만으로 사람이 고의로 부정행위를 했다고 표현하지 않습니다. 프로토콜 오류나 클라이언트 버그도 같은 검증 경계를 넘을 수 있습니다.\n\n문구는 확인한 사실과 사용자가 할 일을 담습니다. unconfirmed는 프로필 재확인을 안내하고, saved는 확인된 저장을 알립니다. 송신 내부의 증명 한계 같은 구현 설명은 사용자 문구에 섞지 않고 개발 설명에 둡니다.",
+      "codes": [
+        {
+          "label": "확인되지 않은 저장에는 재확인 행동을 안내",
+          "language": "cpp",
+          "text": "    case NoticeReason::unconfirmed:\n      // Storage is NOT CONFIRMED. Not a rollback and not a lack of reward.\n      return \"저장 여부를 확인하지 못했습니다. 프로필을 다시 확인해 주세요.\";"
+        }
+      ],
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "통지는 경기 식별자와 사유를 값으로 보낸다",
+      "body": "학습 ResultNotice는 경기 저장 키와 사유를 갖습니다. 인코딩은 구조체 메모리를 그대로 보내지 않고 각 필드를 바이트 코덱으로 씁니다. 메모리 패딩과 enum의 기본 저장 형식을 wire 규약으로 삼지 않기 위해서입니다.\n\n이 학습 wire는 u64 키 뒤에 u8 사유를 둡니다. 사유의 번호를 enum에 명시해 항목을 정리하다 값이 조용히 바뀌지 않게 합니다. 인코더는 임시 Frame에 완성한 뒤 출력에 대입하므로 실패한 경우 호출자의 프레임을 부분 변경하지 않습니다.\n\n현재 게임의 MATCH_RESULT는 이 형식과 다릅니다. RP before·after·delta 뒤에 상태 바이트를 추가한 호환 규약을 사용합니다. 학습 키와 현재 프로토콜의 연결/경기 범위를 서로 대체해서 읽지 말고, 공통 책임인 사유 전달과 프로필 적용 경계를 비교합니다.",
+      "codes": [
+        {
+          "label": "학습 통지의 명시적 wire 인코딩",
+          "language": "cpp",
+          "text": "inline constexpr std::uint8_t kResultNoticeType=43;\nstruct ResultNotice { std::uint64_t key=0;NoticeReason reason=NoticeReason::unknown; };\ninline bool encode_notice(const ResultNotice& notice,Frame& out) noexcept {\n    if(!notice.key)return false;\n    Frame next;next.type=kResultNoticeType;\n    ByteWriter writer(next.payload.data(),next.payload.size());\n    if(!writer.u64(notice.key) || !writer.u8(static_cast<std::uint8_t>(notice.reason)))return false;\n    next.size=writer.position();out=next;return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "새 버전의 사유를 만나도 성공으로 추정하지 않는다",
+      "body": "클라이언트보다 서버의 버전이 앞서면 아직 모르는 상태 번호가 올 수 있습니다. 메시지의 길이와 키가 맞는다면 사유를 unknown으로 읽는 정책을 택합니다. 알 수 없는 번호를 saved로 바꾸거나 기존 마지막 성공을 새 결과처럼 유지하지 않습니다.\n\n형식이 깨진 통지는 별도입니다. 이 wire는 정확한 길이와 0이 아닌 키를 요구합니다. 디코딩 실패에서는 출력 값을 바꾸지 않습니다. NoticeView는 자신에게 기대된 키의 통지만 받아 현재 설명을 변경합니다.\n\n키가 일치한다는 사실은 송신자를 인증하지 않습니다. NoticeView는 인증된 서버 연결에 묶인 수신 경계 뒤에 놓습니다. 현재 서버가 클라이언트의 서버 전용 프레임 위조를 차단하는 이유도 이 방향의 권한을 유지하기 위해서입니다.",
+      "codes": [
+        {
+          "label": "미래 번호는 Unknown, 다른 경기 키는 거절",
+          "language": "cpp",
+          "text": "inline bool decode_notice(const Frame& frame,ResultNotice& out) noexcept {\n    if(frame.type!=kResultNoticeType || frame.size!=9)return false;\n    ByteReader reader(frame.payload.data(),frame.size);\n    std::uint64_t key;std::uint8_t raw;\n    if(!reader.u64(key) || !key || !reader.u8(raw) || !reader.at_end())return false;\n    // Future reasons remain readable as unknown; no optimistic success fallback.\n    out={key,raw<=static_cast<std::uint8_t>(NoticeReason::unknown)\n                 ?static_cast<NoticeReason>(raw):NoticeReason::unknown};\n    return true;\n}\n// This consumer is bound to an admitted server connection and one expected key.\n// Matching an ID does not authenticate an arbitrary remote sender.\nclass NoticeView {\npublic:\n    explicit NoticeView(std::uint64_t expected):expected_(expected) {\n        if(!expected)throw std::invalid_argument(\"expected result key\");\n    }\n    bool accept(const Frame& frame) noexcept {\n        ResultNotice next;\n        if(!decode_notice(frame,next) || next.key!=expected_)return false;\n        reason_=next.reason;return true;\n    }\n    NoticeReason reason()const noexcept{return reason_;}\n    const char* text()const noexcept{return notice_text(reason_);}\nprivate:\n    const std::uint64_t expected_;\n    NoticeReason reason_=NoticeReason::waiting;\n};"
+        }
+      ],
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "송신은 바이트 스트림에 순서를 더하는 작업이다",
+      "body": "TCP는 애플리케이션 메시지 경계를 보존하지 않습니다. 하나의 프레임이 여러 send나 recv로 나뉘거나 여러 프레임이 한 번에 읽힐 수 있습니다. 그래서 연결 하나에서 내보낼 바이트의 전체 순서를 프로그램이 유지해야 합니다.\n\n이미 프레임 A의 앞부분을 보냈고 나머지를 큐에 보관했다고 합시다. 결과 B를 소켓에 직접 보내면 스트림은 A 앞부분 → B → A 나머지가 될 수 있습니다. B가 중요하다는 이유로 큐를 건너뛰면 두 프레임 모두 해석하지 못할 수 있습니다.\n\n모든 송신은 같은 FIFO를 통과시킵니다. 결과 통지도 기존 바이트 뒤에 추가합니다. 커널이 지금 일부만 받아도 그 접미사가 같은 위치에 남아 다음 쓰기 준비 이벤트에서 이어집니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "부분 성공과 아직 보낼 수 없음을 구별한다",
+      "body": "논블로킹 send의 양수 반환은 그만큼의 바이트가 수락됐다는 뜻입니다. 요청한 전체 길이가 수락됐다는 뜻은 아닙니다. EAGAIN 또는 would_block은 지금 수락할 여유가 없다는 뜻이며, 아직 남은 바이트를 지우거나 처음부터 재전송할 근거가 되지 않습니다.\n\n누적 PendingSend는 성공한 접두사만 제거하고 전역 대기 바이트 예산에서도 그 양만 뺍니다. would_block에서는 큐를 유지합니다. 오류나 비정상 반환에서는 연결 소유자가 실패로 정리할 수 있도록 결과를 구분합니다.\n\nFinalOutput은 이 큐 앞에 연결 종료 상태를 추가합니다. 일반 상태에서는 프레임을 넣을 수 있고, 배수 중에는 이미 받아들인 바이트만 처리합니다. 한 번의 writable 호출은 한 번의 비차단 시도를 하므로 다른 연결과 타이머를 계속 처리할 기회를 남깁니다.",
+      "codes": [
+        {
+          "label": "접두사만 진행하고 나머지는 큐에 보존",
+          "language": "cpp",
+          "text": "    template<class Sender> DeliveryState writable(Clock::time_point now,Sender&& sender) noexcept {\n        if(state_!=DeliveryState::open && state_!=DeliveryState::draining)return state_;\n        if(state_==DeliveryState::draining && now>=deadline_) {\n            finish(DeliveryState::timed_out);return state_;\n        }\n        const auto result=queue_.flush(std::forward<Sender>(sender));\n        if(result==FlushResult::error || result==FlushResult::invalid)finish(DeliveryState::failed);\n        else if(state_==DeliveryState::draining && queue_.size()==0)finish(DeliveryState::drained);\n        return state_;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "종료 요청은 즉시 버리기와 다르다",
+      "body": "상대가 떠나 생존자에게 결과를 알리고 연결을 종료한다고 합시다. 결과를 큐에 넣은 직후 소켓을 닫으면 커널이 아직 받아들이지 않은 바이트는 사라집니다. 따라서 종료를 open → draining → drained 또는 timed_out/failed 상태로 나눕니다.\n\nbegin_close는 첫 요청에서 기한을 고정하고 새로운 프레임 입력을 막습니다. 큐가 이미 비어 있으면 바로 drained입니다. 큐가 남아 있으면 쓰기 이벤트에서 배수하고, 타이머에서도 기한을 확인합니다. 쓰기 이벤트가 전혀 오지 않는 연결에서도 종료가 가능해야 합니다.\n\n반복 종료 요청이나 조금씩 들어오는 바이트가 기한을 새로 연장하면 자원을 무한히 붙들 수 있습니다. 기한은 첫 요청 기준으로 유지합니다. 상한에 도달하면 남은 큐를 포기하고 회계를 반환합니다. 통지 보존 노력과 유한한 자원 사용을 함께 설계하는 선택입니다.",
+      "codes": [
+        {
+          "label": "처음 정한 종료 기한을 유지",
+          "language": "cpp",
+          "text": "    void begin_close(Clock::time_point deadline) noexcept {\n        if(state_!=DeliveryState::open)return; // Never extend an existing deadline.\n        deadline_=deadline;\n        state_=DeliveryState::draining;\n        if(queue_.size()==0)finish(DeliveryState::drained);\n    }"
+        },
+        {
+          "label": "쓰기 이벤트 없이도 만기를 처리",
+          "language": "cpp",
+          "text": "    // A timer calls this even when no writable event arrives.\n    void expire(Clock::time_point now) noexcept {\n        if(state_==DeliveryState::draining && now>=deadline_)finish(DeliveryState::timed_out);\n    }\n    void abort() noexcept {if(state_==DeliveryState::open || state_==DeliveryState::draining)finish(DeliveryState::failed);}\n    DeliveryState state()const noexcept{return state_;}\n    bool wants_write()const noexcept{return queue_.size()!=0;}\n    bool accepts_input()const noexcept{return state_==DeliveryState::open;}\n    std::size_t pending()const noexcept{return queue_.size();}"
+        }
+      ],
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "배수 완료와 수신 완료와 저장 성공은 다르다",
+      "body": "drained는 이 큐의 바이트를 커널이 받아들였다는 뜻입니다. 상대 프로세스가 프레임을 해석했는지, 화면을 그렸는지까지 확인한 것은 아닙니다. 애플리케이션 수준의 수신 확인이 필요하다면 별도 응답 규약과 중복 처리 정책을 설계해야 합니다.\n\n저장 성공은 이보다 앞서 확정됐을 수 있습니다. 저장 후 통지 전 서버가 종료되거나 연결이 끊겨도 DB가 되돌아가지 않습니다. 결과 통지 유실을 재화 미지급으로 단정하지 않고 인증된 프로필 조회로 확인하는 이유입니다.\n\nFinalOutput은 소켓을 직접 닫지 않습니다. 연결 소유자가 terminal 상태를 보고 등록과 소켓을 정리합니다. 큐의 역할과 OS 자원 수명 역할을 나누어 두면 실제 리액터와 타이머를 서로 다른 환경에서도 연결할 수 있습니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "송신 실패가 종료 처리로 재진입할 수 있다",
+      "body": "현재 리액터의 queue_send는 실패하면 close_conn을 호출할 수 있습니다. 양쪽에게 결과를 보내던 함수 안에서 A가 닫히면, close_conn이 생존자 B의 종료까지 요청할 수 있습니다. 아직 B의 결과를 큐에 넣기도 전인데 닫히는 순서가 생길 수 있는 것입니다.\n\n현재 서버는 delivering_result 표시로 양쪽 결과의 큐 입력을 시도하는 구간을 나타냅니다. 중첩된 close_conn은 생존자 종료를 예약하고, 두 대상 처리를 마친 뒤 종료 배수를 시작합니다. finalize_inflight가 저장 작업 수명을 보호한다면 delivering_result는 결과 큐 입력 중의 재진입을 보호합니다.\n\n한 루프만 상태를 만진다고 중첩 호출이 사라지지는 않습니다. **재진입**은 다른 스레드가 동시에 실행하는 것과 별개로, 현재 호출이 끝나기 전에 다른 경로로 관련 동작에 다시 들어오는 상황입니다. 상태 표시를 효과보다 먼저 바꾸는 이유를 이 경로에서 확인할 수 있습니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "관심 이벤트와 타이머도 종료 상태를 따른다",
+      "body": "현재 drain_and_close는 새 읽기를 중지하고 쓰기 관심만 남깁니다. 송신 큐가 비면 on_writable이 닫고, 기한을 넘으면 on_timeout이 닫습니다. 백프레셔 해제는 draining 연결의 읽기를 다시 켜지 않습니다.\n\n관심 등록 실패나 송신 오류에서도 같은 연결 종료 경로로 들어가 대기 바이트 예산을 반환합니다. Conn의 메모리는 현재 준비성 배치가 끝날 때 정리하므로 같은 배치에 남은 토큰이 곧바로 해제된 주소를 참조하지 않게 합니다.\n\n프로브는 FinalOutput의 상태를 CallbackLoop에 연결합니다. 실제 TCP 송신을 작은 조각으로 제한하고, 수신 파서가 앞선 프레임과 결과를 순서대로 읽은 뒤 EOF를 관찰하는지 확인합니다. 오류 상태의 사용자 문구를 출력하지만 저장 서버 응답은 이 프로브의 fixture이며 실제 저장 검증과 구별합니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "실패를 주입하여 정상 송신의 우연을 제거한다",
+      "body": "작은 결과 프레임은 loopback에서 보통 한 번에 수락됩니다. 이 성공만 반복하면 부분 송신 접미사를 버리는 코드를 발견하기 어렵습니다. 테스트에서는 실제 TCP 바이트를 유지하면서 send가 짧게 성공한 뒤 EAGAIN을 반환하도록 만듭니다.\n\n현재 서버의 회귀는 결과 헤더 뒤에서 멈춤, 기존 프레임 뒤에 결과 추가, 영구 송신 정체, 첫 대상의 송신 오류를 각각 만든 뒤 확인합니다. 기존 프레임과 결과의 순서, EOF 전에 완전한 프레임인지, 기한 안에 연결이 닫히는지, 다른 대상에게 통지가 남는지가 관찰 대상입니다.\n\n학습 계약 검사에서는 공유 대기 바이트가 배수·오류·만기·객체 파괴 뒤 정확히 반환되는지도 확인합니다. “나중에 접속이 된다”는 간접 증거보다 지켜야 할 회계 자체를 읽는 검사가 더 정확합니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void send_result_frames",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "빌드하고 상태와 전송을 따로 실험한다",
+      "body": "다음 명령은 상태 분류와 송신 계약, 실제 TCP 통지를 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/146-result-notices -B out/study-146 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-146 --target result_notice_contract notice_probe -j2\nout/study-146/result_notice_contract\nout/study-146/notice_probe\n# Linux에서는 같은 프로브를 epoll로 실행한다.\nout/study-146/notice_probe --epoll\n```\n\nBoost 헤더가 기본 경로 밖에 있으면 STUDY_BOOST_INCLUDE를 지정합니다. notice_probe는 저장 여부 미확인 문구와, 순서가 유지된 통지 뒤 EOF 결과를 출력합니다.\n\n```sh\npython3 scripts/check_learning_result_notices.py --boost /path/to/boost/include\n```\n\n만기 때 큐를 비우지 않으면 어떤 회계 검사가 실패할지, 모든 프레임을 같은 큐에 넣지 않으면 수신 파서가 어떤 바이트 순서를 보게 될지 먼저 예측합니다. Linux의 현재 서버 오류 주입 코드는 테스트 릴레이에만 연결하며 일반 실행에는 사용하지 않습니다."
+    },
+    {
+      "title": "현재 클라이언트와 규약의 호환 범위를 읽는다",
+      "body": "현재 Session은 기존 RP 필드만 있는 결과도 읽을 수 있지만 상태가 없으면 Unknown을 유지합니다. 새 상태 바이트가 알려진 범위에 있을 때만 해당 사유로 해석합니다. 오래된 서버와 연결됐다는 이유로 확인하지 못한 저장을 성공으로 표시하지 않습니다.\n\n게임 화면은 랭크 여부와 서버가 보낸 상태를 나누어 표시하고, 확인된 상태에만 RP 값을 적용합니다. 미완료는 정상 무승부가 아니며, 저장 미확인은 입력 무효가 아닙니다. 상태 이름이 SaveFailed여도 사용자 문구가 “저장 확인을 받지 못했다”는 의미인 이유를 코드와 함께 읽어 보세요.\n\n학습 NoticeView는 결과 키를 명시적으로 검사하는 작은 수신 모델입니다. 실제 연결에 통합할 때에는 기존 세션의 경기 수명·서버 전용 메시지 방향·프로필 갱신 계약과 함께 유지해야 합니다.",
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "enum class ResultStatus",
+        "invariant": "판정과 저장 확인의 사유를 구분하고, 결과 바이트도 같은 연결 FIFO를 통해 전달한다. 미확인 응답으로 프로필을 덮어쓰지 않는다.",
+        "mayDiffer": "학습 코드는 ChannelView와 경기 키가 있는 별도 ResultNotice를 사용한다. 현재 MATCH_RESULT는 RP 값과 상태 suffix를 보내며 Conn의 동적 tx와 Reactor 관심 변경으로 배수한다."
+      }
+    },
+    {
+      "title": "전체 파일에서 두 상태 흐름을 연결한다",
+      "body": "판정/저장 사유와 송신/종료 상태를 각각 표시하고, 둘 사이에는 어떤 값이 전달되는지 따라가 보세요. 사용자 문구에는 확인한 사실과 다음 행동을 남기고, 큐·소켓·DB의 내부 완료 단계를 서로 대신 쓰지 않는 것이 핵심입니다.",
+      "codes": [
+        {
+          "label": "사유 분류와 사용자 문구",
+          "language": "cpp",
+          "file": "checkpoints/146-result-notices/net/notice_reason.h"
+        },
+        {
+          "label": "학습 wire와 수신 뷰",
+          "language": "cpp",
+          "file": "checkpoints/146-result-notices/net/result_notice.h"
+        },
+        {
+          "label": "FIFO와 유한 배수 종료",
+          "language": "cpp",
+          "file": "checkpoints/146-result-notices/net/final_output.h"
+        },
+        {
+          "label": "상태·범위·회계 계약 검사",
+          "language": "cpp",
+          "file": "checkpoints/146-result-notices/tests/result_notice_contract.cpp"
+        },
+        {
+          "label": "실제 TCP 통지 프로브",
+          "language": "cpp",
+          "file": "checkpoints/146-result-notices/tools/notice_probe.cpp"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "146-1",
+      "question": "저장 서버가 COMMIT한 뒤 응답을 잃었습니다. 호출자가 표시할 수 있는 정확한 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "보상 지급 없음"
+        },
+        {
+          "id": "b",
+          "text": "정상 무승부"
+        },
+        {
+          "id": "c",
+          "text": "저장 여부 미확인, 프로필 재확인 필요"
+        },
+        {
+          "id": "d",
+          "text": "입력 위조 확정"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "저장 여부 미확인, 프로필 재확인 필요",
+      "explanation": "확인 응답 부재는 롤백 증거가 아닙니다. 저장은 완료됐을 수 있으므로 프로필 등 서버 상태로 확인합니다."
+    },
+    {
+      "id": "146-2",
+      "question": "프레임 A의 접미사가 tx에 남아 있을 때 결과 B가 생겼습니다. 순서를 보존하는 방법은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "B를 소켓에 직접 먼저 송신"
+        },
+        {
+          "id": "b",
+          "text": "A를 버리고 B만 송신"
+        },
+        {
+          "id": "c",
+          "text": "B를 A의 남은 바이트 뒤에 추가"
+        },
+        {
+          "id": "d",
+          "text": "A 전체를 처음부터 다시 송신"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "B를 A의 남은 바이트 뒤에 추가",
+      "explanation": "같은 연결의 모든 바이트가 하나의 FIFO를 지나야 합니다. 이미 수락된 접두사를 재전송하거나 중간에 B를 끼우면 스트림이 달라집니다."
+    },
+    {
+      "id": "146-3",
+      "question": "종료 배수 중 쓰기 이벤트가 더 이상 오지 않습니다. 자원 수명을 제한하는 경로는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "첫 종료 요청에 고정한 기한을 타이머로 확인"
+        },
+        {
+          "id": "b",
+          "text": "쓰기 이벤트가 올 때까지 무기한 대기"
+        },
+        {
+          "id": "c",
+          "text": "읽기 이벤트마다 기한 갱신"
+        },
+        {
+          "id": "d",
+          "text": "기한을 패킷마다 다시 생성"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "첫 종료 요청에 고정한 기한을 타이머로 확인",
+      "explanation": "타이머가 쓰기 준비성과 독립적으로 만기를 확인하고, 남은 큐와 예산을 정리해야 합니다."
+    },
+    {
+      "id": "146-4",
+      "question": "현재 프로필 RP는 300입니다. SaveFailed 응답의 reported RP가 자리값 0일 때의 처리로 맞는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RP를 0으로 덮어씀"
+        },
+        {
+          "id": "b",
+          "text": "실제 패배로 간주"
+        },
+        {
+          "id": "c",
+          "text": "저장 성공으로 알림"
+        },
+        {
+          "id": "d",
+          "text": "기존 RP를 유지하고 서버 프로필을 재확인"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "기존 RP를 유지하고 서버 프로필을 재확인",
+      "explanation": "확인되지 않은 결과의 숫자를 확정 프로필로 적용하지 않습니다. 현재 rating_after_result도 이 상태에서 기존 값을 유지합니다."
+    },
+    {
+      "id": "146-5",
+      "question": "A에게 결과를 큐에 넣다가 송신 오류로 close_conn에 재진입했습니다. B의 결과를 보존하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "B를 먼저 즉시 닫는다"
+        },
+        {
+          "id": "b",
+          "text": "양쪽 결과 큐 입력 시도까지 생존자 종료를 미룬다"
+        },
+        {
+          "id": "c",
+          "text": "같은 함수를 다른 워커에서 실행한다"
+        },
+        {
+          "id": "d",
+          "text": "A의 포인터를 지운 뒤 다시 사용한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "양쪽 결과 큐 입력 시도까지 생존자 종료를 미룬다",
+      "explanation": "delivering_result는 중첩 종료가 B를 너무 일찍 닫는 것을 막습니다. B의 큐 입력 뒤 유한 기한의 배수 종료를 진행합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "ChannelView의 정상·잘못된 조합을 사용자 사유로 분류한다.",
+      "앞선 프레임의 일부를 보낸 뒤 결과를 추가하여 바이트 순서를 확인한다.",
+      "부분 송신·송신 정체·한쪽 오류에서 통지와 종료 기한·예산 반환을 검사한다."
+    ],
+    "failureChecks": [
+      "RP 변화량 0이나 응답 부재만으로 성공/실패를 판정하지 않는지 확인한다.",
+      "알 수 없는 사유가 성공으로 해석되거나 다른 경기 통지로 화면이 바뀌지 않는지 확인한다.",
+      "종료 재진입과 반복 요청이 통지를 건너뛰거나 기한을 연장하지 않는지 확인한다."
+    ],
+    "expected": "확인된 사실에 맞는 상태를 표시하고, 부분 송신에서도 FIFO를 유지하며 유한한 시간 안에 연결과 대기 바이트를 정리한다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 분류 초안 교정·상태 행렬·실제 TCP·현재 리액터 syscall 오류 주입 전후 검사",
+    "corrections": [
+      "사용자 문구에서 구현상의 전달 증명 설명 제거, 실제 행동 안내 추가",
+      "미완료를 terminal 규칙 결과라고 부르던 초안 주석 교정",
+      "현재 리액터 직접 결과 송신을 FIFO·유한 배수·재진입 보호로 수정"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 각6CTest 및 학습 contract/TCP poll·epoll ASan/UBSan 통과",
+    "현재 reactor partial/EAGAIN 수정 전3실패→수정 후3통과, 실제meta/SQLite23통합 통과",
+    "현재 reactor ASan/UBSan12통합·종료stderr 검사, peer-close3·명시적 현재 바이너리 tx-budget1 통과",
+    "상태256값에서 미확인 RP 보존, 누적 파일·인라인·현재심볼 대조 통과",
+    "Windows/macOS native 및 수동GUI 미검증"
+  ]
+}

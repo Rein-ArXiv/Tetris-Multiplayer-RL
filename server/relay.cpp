@@ -129,16 +129,13 @@ bool sendToB(Channel& ch, const uint8_t* data, size_t len)
 // Summaries trigger finalization; only the server simulation determines results.
 void finalizeRanked(Channel& ch)
 {
-    // 선점 — 한 번만 실행.
+    // Claim and snapshot under one lock: no input observation can interleave.
+    VerifiedResult verified;
     {
         std::lock_guard<std::mutex> lk(ch.sumMu);
         if (ch.summaryHandled) return;
         if (!ch.summaryA || !ch.summaryB) return;
         ch.summaryHandled = true;
-    }
-    VerifiedResult verified;
-    {
-        std::lock_guard<std::mutex> lock(ch.sumMu);
         verified = ch.verified->result();
     }
     const std::optional<int64_t> winner = verified.winner == 1 ? std::optional<int64_t>(ch.playerA_id)
@@ -345,9 +342,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             // 정상 트래픽에서 send 는 예전처럼 배치당 한 번이다.
             //
             // 늘어난 비용은 정확히 둘이다. (1) 프레임당 헤더 3바이트 읽기,
-            // (2) 이 배치를 streamBuf 로 한 번 복사하는 것(≤4 KiB 선형 복사 —
-            // 잘린 프레임의 꼬리를 다음 읽기까지 이어 붙이려면 누적 버퍼가
-            // 있어야 한다). 프레임마다 도는 일이 아니라 배치마다 한 번이다.
+            // (2) 이 배치를 streamBuf 로 한 번 복사하는 것(일반 TCP recv는 최대4KiB,
+            // 로비 prefix는 더 클 수 있다). 잘린 프레임의 꼬리를 이어 붙이려면 버퍼가
+            // 있어야 한다. 이 복사는 프레임마다가 아니라 배치마다 한 번이다.
             // 위의 숫자는 이 저장소의 기존 측정치이고, 이 구현을 다시 잰
             // 값이 아니다 — 벤치(python/tools/relay_shard_bench.py)는 Linux
             // 전용이라 배포 대상에서 돌려 확인해야 한다.
@@ -358,19 +355,19 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             // 한 번에 들어온다.
             streamBuf.insert(streamBuf.end(), raw.begin(), raw.end());
             size_t pos = 0, sent = 0;
-            bool dropRest = false, sendFailed = false;
+            bool invalidBoundary = false, sendFailed = false;
             while (streamBuf.size() - pos >= 2) {
                 const uint8_t* p   = streamBuf.data() + pos;
                 const uint16_t len = static_cast<uint16_t>(p[0]) |
                                      (static_cast<uint16_t>(p[1]) << 8);
                 if (static_cast<size_t>(len) > net::kMaxPayloadBytes + 1u) {
-                    // 랭크드 경로와 같은 정책 — 경계를 믿을 수 없으니 남은
-                    // 바이트를 버린다. 앞의 정상 구간은 이미 보냈다.
+                    // The next recv is not a new frame boundary. End this
+                    // source stream; already accepted output cannot be recalled.
                     RLOG_WARN("[relay] match=" << ch->match_id
                               << " uuid=" << ch->match_uuid
-                              << " dropping over-sized frame (len=" << len
+                              << " closing on over-sized frame (len=" << len
                               << ") from " << (a_to_b ? "A" : "B"));
-                    dropRest = true;
+                    invalidBoundary = true;
                     break;
                 }
                 const size_t total = 2u + static_cast<size_t>(len) + 4u;
@@ -395,9 +392,11 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                 disconnectSide = a_to_b ? 2 : 1;
                 break;
             }
-            if (dropRest)  streamBuf.clear();
-            else if (pos)  streamBuf.erase(streamBuf.begin(),
-                                           streamBuf.begin() + pos);
+            if (invalidBoundary) {
+                disconnectSide = a_to_b ? 1 : 2;
+                break;
+            }
+            if (pos) streamBuf.erase(streamBuf.begin(), streamBuf.begin() + pos);
             continue;
         }
 
@@ -416,9 +415,13 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             if (static_cast<size_t>(payloadAndType) > net::kMaxPayloadBytes + 1u) {
                 RLOG_WARN("[relay] match=" << ch->match_id
                           << " uuid=" << ch->match_uuid
-                          << " dropping over-sized frame (len=" << payloadAndType
+                          << " closing on over-sized frame (len=" << payloadAndType
                           << ") from " << (a_to_b ? "A" : "B"));
-                streamBuf.clear();
+                {
+                    std::lock_guard<std::mutex> lock(ch->sumMu);
+                    ch->verified->invalidate();
+                }
+                disconnectSide = a_to_b ? 1 : 2;
                 break;
             }
 
@@ -498,6 +501,8 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             }
             streamBuf.erase(streamBuf.begin(), streamBuf.begin() + totalNeeded);
         }
+
+        if (disconnectSide != 0 && !sendFailed) break;
 
         // 양쪽 MATCH_SUMMARY 모두 모였다면 finalize. (매 루프 체크 — 가벼움)
         // sendFailed 로 빠져나가기 "직전"에도 반드시 수행한다 — 양 방향이 거의
@@ -664,8 +669,14 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
                 continue;
             }
 
-            if (type == (uint8_t)net::MsgType::READY) {
-                const uint8_t v = payloadLen == 0 ? 0 : buf[LEN_FIELD + TYPE_FIELD];
+            // Validate the complete control message before changing consent.
+            const bool isReady = type == (uint8_t)net::MsgType::READY;
+            if ((isReady && (payloadLen != 1 || buf[LEN_FIELD + TYPE_FIELD] > 1)) ||
+                (!isReady && payloadLen != 0)) {
+                return -1;
+            }
+            if (isReady) {
+                const uint8_t v = buf[LEN_FIELD + TYPE_FIELD];
                 buf.erase(buf.begin(), buf.begin() + totalNeeded);
                 if (v == 0) {
                     forward_ready(peer, 0);

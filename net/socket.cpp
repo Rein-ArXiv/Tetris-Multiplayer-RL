@@ -1,4 +1,5 @@
 #include "socket.h"
+#include "io_size.h"
 #include <cerrno>
 #include <cstring>
 #include <csignal>
@@ -31,12 +32,16 @@ using socklen_t = int;
 #endif
 
 namespace net {
+#ifdef _WIN32
+static_assert(sizeof(NativeSocket) == sizeof(SOCKET));
+static_assert(kInvalidSocket == INVALID_SOCKET);
+#endif
 
 static bool g_inited = false;
 
-// [NET] 실제 fd 를 닫는다(플랫폼별). 오직 owning 핸들의 deleter 에서만 호출.
-static void close_fd(int fd) {
-    if (fd < 0) return;
+// [NET] 실제 fd를 닫는다. 생성 실패 정리와 마지막 소유자의 deleter에서 호출.
+static void close_fd(NativeSocket fd) {
+    if (!socket_valid(fd)) return;
 #ifdef _WIN32
     closesocket(fd);
 #else
@@ -46,11 +51,18 @@ static void close_fd(int fd) {
 
 // [NET] 새로 생성된 fd 를 참조 카운트 소유 핸들로 감싼다.
 //   마지막 복사본이 사라질 때 deleter 가 close_fd 로 정확히 한 번 닫는다.
-static TcpSocket make_owned(int fd) {
+static TcpSocket make_owned(NativeSocket fd) {
     TcpSocket s;
-    s.fdh = std::shared_ptr<int>(new int(fd), [](int* p) {
-        if (p) { close_fd(*p); delete p; }
-    });
+    try {
+        // Keep the real handle unowned until both allocations succeed. If the
+        // control-block allocation fails, shared_ptr deletes only the sentinel.
+        auto owner = std::shared_ptr<NativeSocket>(new NativeSocket(kInvalidSocket),
+            [](NativeSocket* p) { if (p) { close_fd(*p); delete p; } });
+        *owner = fd;
+        s.fdh = std::move(owner);
+    } catch (const std::bad_alloc&) {
+        close_fd(fd);
+    }
     return s;
 }
 
@@ -81,18 +93,18 @@ void net_shutdown() {
     g_inited = false;
 }
 
-// [NET] 빠른 재바인드를 위한 SO_REUSEADDR 설정
-static int set_reuse(int fd) {
+// [NET] 플랫폼별 바인드 정책. Windows의 SO_REUSEADDR는 강제 공유를 허용한다.
+static int set_bind_policy(NativeSocket fd) {
     int yes = 1;
 #ifdef _WIN32
-    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+    return setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&yes, sizeof(yes));
 #else
     return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 #endif
 }
 
 // [NET] 논블로킹 모드 설정
-static bool set_nonblocking(int fd) {
+static bool set_nonblocking(NativeSocket fd) {
 #ifdef _WIN32
     u_long mode = 1;
     return ioctlsocket(fd, FIONBIO, &mode) == 0;
@@ -104,7 +116,7 @@ static bool set_nonblocking(int fd) {
 }
 
 // Lockstep favors latency over batching small INPUT frames.
-static int set_nodelay(int fd) {
+static int set_nodelay(NativeSocket fd) {
     int yes = 1;
 #ifdef _WIN32
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
@@ -114,14 +126,13 @@ static int set_nodelay(int fd) {
 }
 
 // Kernel fallback for peers that disappear without FIN/RST.
-static void set_keepalive(int fd) {
+static void set_keepalive(NativeSocket fd) {
     int yes = 1;
 #ifdef _WIN32
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&yes, sizeof(yes));
-    // Windows 기본 KeepAliveTime 은 2시간이라 SO_KEEPALIVE 만으로는 'FIN/RST 없이
-    // 사라진 피어 감지'가 사실상 동작하지 않는다(POSIX 분기의 idle 15s / interval 5s
-    // 와 비대칭). SIO_KEEPALIVE_VALS 로 같은 값을 명시해 양 플랫폼 감지 시간을 맞춘다.
-    // (Vista+ 는 probe 재전송 횟수가 10회 고정 — 대략 15s + 10*5s 내 감지.)
+    // SIO_KEEPALIVE_VALS requests per-connection idle/interval settings.
+    // Probe count and actual failure-detection latency remain platform-specific;
+    // this path does not set TCP_KEEPCNT. Option failures are best-effort below.
     tcp_keepalive ka{};
     ka.onoff = 1;
     ka.keepalivetime = 15000;     // idle 15초 후 첫 probe (ms)
@@ -154,9 +165,9 @@ static void set_keepalive(int fd) {
 // [NET] 포트에서 연결 대기 소켓을 생성합니다.
 TcpSocket tcp_listen(uint16_t port, int backlog, bool loopback_only) {
     if (!net_init()) return TcpSocket{};
-    int fd = (int)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd < 0) return TcpSocket{};
-    set_reuse(fd);
+    NativeSocket fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!socket_valid(fd)) return TcpSocket{};
+    if (set_bind_policy(fd) != 0) { close_fd(fd); return TcpSocket{}; }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(loopback_only ? INADDR_LOOPBACK : INADDR_ANY);
@@ -177,8 +188,8 @@ TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result) {
     auto report = [&](AcceptResult r) { if (out_result) *out_result = r; };
     if (!server.valid()) { report(AcceptResult::Error); return TcpSocket{}; }
     sockaddr_in addr{}; socklen_t alen = sizeof(addr);
-    int fd = (int)::accept(server.fd(), (sockaddr*)&addr, &alen);
-    if (fd < 0) {
+    NativeSocket fd = ::accept(server.fd(), (sockaddr*)&addr, &alen);
+    if (!socket_valid(fd)) {
 #ifdef _WIN32
         const int e = WSAGetLastError();
         report(e == WSAEWOULDBLOCK ? AcceptResult::WouldBlock
@@ -194,12 +205,14 @@ TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result) {
 #endif
         return TcpSocket{};
     }
-    report(AcceptResult::Ok);
+    report(AcceptResult::Error);
     // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
-    set_nonblocking(fd);
+    if (!set_nonblocking(fd)) { close_fd(fd); return TcpSocket{}; }
     set_nodelay(fd);
     set_keepalive(fd);
-    return make_owned(fd);
+    auto owned = make_owned(fd);
+    if (owned.valid()) report(AcceptResult::Ok);
+    return owned;
 }
 
 // [NET] 원격 호스트로 TCP 연결을 시도합니다.
@@ -210,20 +223,20 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     addrinfo* res = nullptr; char portStr[16];
     std::snprintf(portStr, sizeof(portStr), "%u", (unsigned)port);
     if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0) return TcpSocket{};
-    int fd = -1;
+    NativeSocket fd = kInvalidSocket;
     for (addrinfo* p = res; p; p = p->ai_next) {
-        fd = (int)::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
+        fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (!socket_valid(fd)) continue;
         if (::connect(fd, p->ai_addr, (int)p->ai_addrlen) == 0) {
             break;
         }
         close_fd(fd);
-        fd = -1;
+        fd = kInvalidSocket;
     }
     freeaddrinfo(res);
-    if (fd < 0) return TcpSocket{};
+    if (!socket_valid(fd)) return TcpSocket{};
     // 연결된 소켓을 논블로킹 + NODELAY 로 설정.
-    set_nonblocking(fd);
+    if (!set_nonblocking(fd)) { close_fd(fd); return TcpSocket{}; }
     set_nodelay(fd);
     set_keepalive(fd);
     return make_owned(fd);
@@ -316,26 +329,24 @@ std::string tcp_peer_ip(const TcpSocket& s) {
     return host;
 }
 
-// [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
 // 논블로킹 부분 송신 — 이벤트 루프용. 계약은 net/socket.h 참조.
 bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out_sent) {
     out_sent = 0;
-    const int fd = s.fd();
-    if (fd < 0) return false;
+    const NativeSocket fd = s.fd();
+    if (!socket_valid(fd)) return false;
     if (len == 0) return true;
     const uint8_t* p = static_cast<const uint8_t*>(data);
-    size_t sent = 0;
+    size_t& sent = out_sent; // preserve accepted bytes even if a later call fails
     while (sent < len) {
 #ifdef _WIN32
-        int n = ::send(fd, (const char*)(p + sent), (int)(len - sent), 0);
+        int n = ::send(fd, (const char*)(p + sent), io_chunk_size(len - sent), 0);
         if (n < 0) {
             int err = WSAGetLastError();
-            if (err == WSAEINTR) continue;
             // 버퍼 가득참 — 오류가 아니다. 보낸 만큼만 보고하고 돌아간다.
             if (err == WSAEWOULDBLOCK) break;
             return false;
         }
-        if (n == 0) return false;  // 연결 종료
+        if (n == 0) return false;  // nonempty request made no progress
 #else
         int flags = 0;
 #ifdef MSG_NOSIGNAL
@@ -347,40 +358,35 @@ bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             return false;
         }
-        if (n == 0) return false;  // 연결 종료
+        if (n == 0) return false;  // nonempty request made no progress
 #endif
         sent += (size_t)n;
     }
-    out_sent = sent;
     return true;
 }
 
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
     if (s.transport) return s.transport->send(data,len);
-    const int fd = s.fd();
-    if (fd < 0) return false;
+    const NativeSocket fd = s.fd();
+    if (!socket_valid(fd)) return false;
     const uint8_t* p = static_cast<const uint8_t*>(data);
     size_t sent = 0;
-    constexpr auto kBlockedTimeout = std::chrono::seconds(5);
-    std::chrono::steady_clock::time_point blockedSince{};
+    // Total call budget: intermittent progress must not restart the clock.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sent < len) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
 #ifdef _WIN32
-        int n = ::send(fd, (const char*)(p + sent), (int)(len - sent), 0);
+        int n = ::send(fd, (const char*)(p + sent), io_chunk_size(len - sent), 0);
         if (n < 0) {
             int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
-                if (err == WSAEWOULDBLOCK) {
-                    auto now = std::chrono::steady_clock::now();
-                    if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
-                    if (now - blockedSince >= kBlockedTimeout) return false;
-                }
+            if (err == WSAEWOULDBLOCK) {
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
-        if (n == 0) return false; // 연결 종료
+        if (n == 0) return false; // nonempty request made no progress
 #else
         int flags = 0;
 #ifdef MSG_NOSIGNAL
@@ -390,18 +396,14 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                auto now = std::chrono::steady_clock::now();
-                if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
-                if (now - blockedSince >= kBlockedTimeout) return false;
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
-        if (n == 0) return false; // 연결 종료
+        if (n == 0) return false; // nonempty request made no progress
 #endif
-        blockedSince = {};
         sent += (size_t)n;
     }
     return true;
@@ -410,41 +412,30 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
 // [NET] 수신 가능한 만큼 한 번 읽어 누적 버퍼에 추가합니다.
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
     if (s.transport) return s.transport->receive(outBuf);
-    const int fd = s.fd();
-    if (fd < 0) return false;
+    const NativeSocket fd = s.fd();
+    if (!socket_valid(fd)) return false;
     uint8_t tmp[4096];
+    for (;;) {
 #ifdef _WIN32
-    int n = ::recv(fd, (char*)tmp, (int)sizeof(tmp), 0);
-    if (n < 0) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
-            // 논블로킹에서 데이터 없음 - 정상
-            return true;
+        const int n = ::recv(fd, reinterpret_cast<char*>(tmp), sizeof(tmp), 0);
+        if (n < 0) {
+            const int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK) return true;
+            return false;
         }
-        // 실제 에러
-        return false;
-    }
-    if (n == 0) {
-        // 연결 종료
-        return false;
-    }
 #else
-    ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // 논블로킹에서 데이터 없음 - 정상
-            return true;
+        const ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+        if (n < 0) {
+            const int error = errno;
+            if (error == EINTR) continue;
+            if (error == EAGAIN || error == EWOULDBLOCK) return true;
+            return false;
         }
-        // 실제 에러
-        return false;
-    }
-    if (n == 0) {
-        // 연결 종료
-        return false;
-    }
 #endif
-    outBuf.insert(outBuf.end(), tmp, tmp + n);
-    return true;
+        if (n == 0) return false; // peer send direction ended after queued bytes
+        outBuf.insert(outBuf.end(), tmp, tmp + n);
+        return true;
+    }
 }
 
 // shutdown wakes peer threads; the final handle owner closes the fd.
@@ -454,8 +445,8 @@ bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
 void tcp_close(TcpSocket& s) {
     if (s.transport) { s.transport->close(); return; }
     if (!s.fdh) return;
-    int fd = *s.fdh;
-    if (fd >= 0) {
+    NativeSocket fd = *s.fdh;
+    if (socket_valid(fd)) {
 #ifdef _WIN32
         ::shutdown(fd, SD_BOTH);
 #else

@@ -1,0 +1,23 @@
+# 100 First admission
+
+- accept establishes a transport endpoint; route, identity, matching and readiness remain distinct.
+- Pure single-owner phase receives timestamps and bytes; the caller owns transport and EOF observations.
+- TYPE50 payload is route/length/room: queue/create exact2+zero length, join exact7+length5 with ASCII A-Z0-9.
+- Decoder validates size before indexing and commits a local candidate only on success.
+- Positive factory timeout; elapsed subtraction after monotonic check avoids deadline addition overflow.
+- poll is cooperative, never extends the deadline, and treats backward time as transient/no mutation.
+- feed polls first: the deadline wins a tie. It accepts at most16 bytes and remaining phase budget128.
+- Four complete unknown frames allowed; fifth fails. Malformed known request is fatal immediately.
+- Drain one frame at a time and stop after route; complete/partial later bytes remain in parser.
+- Routing at the exact byte budget can succeed if it happens before the deadline; still waiting at128 fails.
+- Fixed64-byte parser storage plus incomplete frame tail<35 and incoming<=16 prevents append overflow under this protocol.
+- take transfers the logical phase once per object; parser copy is followed by source reset and handed_off state.
+- Caller must maintain one owner, carry Socket separately, and never copy a live phase to fork ownership.
+- EOF waiting with pending bytes is truncated; otherwise peer_closed. Routed remains routed; caller carries transport EOF separately.
+- admission_probe uses real loopback nonblocking server reads, steady-clock elapsed ms, controlled tiny blocking client writes, and CTest15s outer guard.
+- Its next owner drains existing parser before reading socket, preserves TYPE60/61 and consumes real TYPE41 input with RoundPlay.
+- Probe explicitly supplies round1/seed77/roles; admission route does not perform auth, matchmaking or READY.
+- Root parser batches frames and reconstructs remaining canonical frames plus tail; fatal parse false must stop dispatch for that batch.
+- Root first/room branches now honor false; room uses common cleanup. Checksum skip policy remains unchanged.
+- Root5s starts at worker entry, checks cooperatively, and does not cancel authenticate HTTP calls.
+- Tests cover every4096 partition of13 bytes, decoder domains, phase budgets, deadline, EOF and backward clock.

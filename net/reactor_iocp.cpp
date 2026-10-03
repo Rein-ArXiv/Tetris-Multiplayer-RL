@@ -3,16 +3,15 @@
 // IOCP 는 완료(completion) 모델이다: 버퍼를 미리 걸어 두면 OS 가 "다 했다"고
 // 통지한다. 반면 이 인터페이스는 준비성(readiness) 모델이다. 둘을 잇는 표준 기법이
 // zero-byte WSARecv 다 — 길이 0짜리 수신을 걸어 두면 커널은 실제로 바이트를
-// 복사하지 않고, "지금 recv 하면 WOULDBLOCK 없이 진행된다(데이터 있음 또는 EOF)"가
-// 되는 순간 완료를 통지한다. 그 통지가 곧 read 준비성이고, 이후 실제 recv 는
-// net/socket.cpp 의 논블로킹 경로로 즉시 성공한다.
+// 복사하지 않는 수신의 완료를 통지한다. 데이터·EOF·오류를 알리는 읽기 힌트로
+// 변환하며, 이후 net/socket.cpp 의 논블로킹 recv 결과에서 실제 상태를 판단한다.
+// 통지 자체가 바이트를 예약하지 않으므로 WouldBlock도 정상적으로 처리한다.
 //
 // 쓰기 준비성의 한계 (정직하게 밝힌다)
-//   IOCP 에는 write 준비성 통지가 없다. 릴레이 송신은 작고 커널 송신 버퍼가 차는
-//   일이 드물어, 여기서는 kWrite 관심이 걸린 fd 에 대해 매 poll 마다 낙관적으로
-//   writable 을 합성해 돌려준다(루프가 실제 send 를 시도해 확인). 보류 송신이 있을
-//   때만 짧은 타임아웃으로 재시도하므로 유휴 시 스핀은 없다. 대량 backpressure 가
-//   상시적인 워크로드라면 완료(proactor) 모델로 send 자체를 IOCP 에 거는 편이 맞다.
+//   여기서는 kWrite 관심 fd의 writable을 실제 OS 준비성 확인 없이 재시도 힌트로
+//   합성한다. 리스너/폴백/쓰기 관심이 있으면 요청 대기를 최대25ms로 줄인다.
+//   실제 실행 시각의 상한은 아니며 다른 완료가 잦으면 재시도도 잦아질 수 있다.
+//   부하와 송신 큐 압박을 측정하고 필요하면 overlapped WSASend 경로를 설계한다.
 
 #if defined(_WIN32)
 
@@ -25,6 +24,7 @@
 #include <windows.h>
 
 #include <cstring>
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -33,14 +33,14 @@ namespace net {
 
 namespace {
 
-// IOCP 완료 키. 소켓은 자기 token 을 키로 연결하고, wake 는 전용 키를 쓴다.
+// IOCP 완료 키는 소켓 연산과 wake의 종류를 구분한다. 개별 요청은 OVERLAPPED로 찾는다.
 constexpr ULONG_PTR kWakeKey = 1;
 constexpr ULONG_PTR kSockKey = 2;
 
 struct SockState {
     WSAOVERLAPPED ov{};        // zero-byte WSARecv 용. CONTAINING_RECORD 로 역참조.
     void*    token       = nullptr;
-    int      fd          = -1;     // 완료에서 되짚어 재무장할 때 필요하다
+    NativeSocket fd = kInvalidSocket;     // 완료에서 되짚어 재무장할 때 필요하다
     unsigned interest    = 0;
     bool     read_armed  = false;  // zero-byte recv 가 걸려 있는가
     bool     arm_queued  = false;  // 재무장 대기열에 이미 들어 있는가(중복 방지)
@@ -56,23 +56,48 @@ public:
     }
 
     ~IocpReactor() override {
-        // 취소를 기다리는 좀비가 남아 있으면 그 완료를 먼저 회수한다. 커널은 완료
-        // 시점에 OVERLAPPED 에 쓰므로, in-flight 인 채로 해제하면 그 쓰기가 해제된
-        // 메모리를 향한다. 완료는 취소·소켓 close 로 반드시 오지만 무한정 기다리지는
-        // 않는다(정상 종료 경로에서는 즉시 회수된다).
-        for (int spins = 0; !zombies_.empty() && spins < 64; ++spins) {
+        // A cancellation request does not release the kernel's OVERLAPPED loan.
+        // Include still-registered sockets, not only states retired by remove().
+        size_t pending = zombies_.size();
+        for (auto& entry : socks_) {
+            SockState& st = *entry.second;
+            if (!st.read_armed) continue;
+            ++pending;
+            ::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<SOCKET>(st.fd)), &st.ov);
+        }
+        // Removed states have already had cancellation requested. A completed
+        // operation may still have its packet queued even if CancelIoEx found none.
+        while (pending != 0) {
             ULONG got = 0;
             OVERLAPPED_ENTRY batch[32];
-            if (!::GetQueuedCompletionStatusEx(iocp_, batch, 32, &got, 50, FALSE)) break;
+            if (!::GetQueuedCompletionStatusEx(iocp_, batch, 32, &got, INFINITE, FALSE)) {
+                if (::GetLastError() == WAIT_TIMEOUT) continue;
+                // If the completion channel is irrecoverably broken, completion
+                // cannot be proven. Retain only in-flight storage until process
+                // exit instead of freeing memory that the OS may still access.
+                std::fputs("[reactor] IOCP shutdown failed; pending I/O storage retained\n", stderr);
+                for (auto& entry : socks_)
+                    if (entry.second->read_armed) (void)entry.second.release();
+                for (auto& entry : zombies_) (void)entry.second.release();
+                break;
+            }
             for (ULONG i = 0; i < got; ++i) {
-                if (batch[i].lpCompletionKey == kWakeKey) continue;
-                zombies_.erase(CONTAINING_RECORD(batch[i].lpOverlapped, SockState, ov));
+                if (batch[i].lpCompletionKey != kSockKey || !batch[i].lpOverlapped) continue;
+                SockState* st = CONTAINING_RECORD(batch[i].lpOverlapped, SockState, ov);
+                auto retired = zombies_.find(st);
+                if (retired != zombies_.end()) {
+                    zombies_.erase(retired);
+                    --pending;
+                } else if (st->read_armed) {
+                    st->read_armed = false;
+                    --pending;
+                }
             }
         }
         if (iocp_) ::CloseHandle(iocp_);
     }
 
-    bool add(int fd, unsigned interest, void* token) override {
+    bool add(NativeSocket fd, unsigned interest, void* token) override {
         if (socks_.count(fd)) return false;
         SOCKET s = static_cast<SOCKET>(fd);
         // 소켓을 완료 포트에 연결. 키로 소켓 완료임을 구분한다(개별 상태는 OVERLAPPED
@@ -87,8 +112,8 @@ public:
         st->interest = interest;
         // listen 소켓은 zero-byte WSARecv 를 받지 못한다(수신 큐가 아니라 백로그를
         // 가진 소켓이다). IOCP 로 accept 준비성을 제대로 얻으려면 AcceptEx 로 수락
-        // 소켓을 미리 걸어 둬야 하는데, 그건 Reactor 인터페이스가 accept 를 알아야
-        // 한다는 뜻이라 준비성 추상화가 깨진다. 대신 이런 소켓은 매 poll 마다 readable
+        // 소켓을 미리 걸어 둬야 한다. 이 어댑터는 수락된 소켓을 보관/인계하는
+        // AcceptEx 경로 대신 이런 소켓을 매 poll 마다 readable
         // 로 보고하고 호출자가 accept 를 시도하게 둔다 — 대상이 리스너 몇 개뿐이라
         // 비용이 연결 수에 비례하지 않는다.
         int listening = 0;
@@ -104,7 +129,7 @@ public:
         return true;
     }
 
-    bool modify(int fd, unsigned interest, void* token) override {
+    bool modify(NativeSocket fd, unsigned interest, void* token) override {
         auto it = socks_.find(fd);
         if (it == socks_.end()) return false;
         it->second->token    = token;
@@ -113,7 +138,7 @@ public:
         return true;
     }
 
-    bool remove(int fd) override {
+    bool remove(NativeSocket fd) override {
         auto it = socks_.find(fd);
         if (it == socks_.end()) return false;
 
@@ -122,8 +147,8 @@ public:
             // 커널이 아직 &raw->ov 를 들고 있다. 여기서 상태 객체를 해제하면 뒤늦게
             // 도착하는 완료 통지의 CONTAINING_RECORD 가 해제된 메모리를 가리킨다
             // (use-after-free). 취소를 요청하고, 그 완료를 회수할 때까지 객체를
-            // 살려 둔다 — 소켓이 닫히거나 취소되면 커널은 반드시 완료를 큐잉하므로
-            // poll() 이 이 좀비를 정확히 한 번 걷어 간다.
+            // 살려 둔다. 취소는 요청일 뿐이며 완료가 이미 큐에 있을 수도 있다.
+            // 기본 완료 통지 설정에서 수락한 연산의 패킷을 회수한 뒤 해제한다.
             ::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<SOCKET>(fd)), &raw->ov);
             zombies_.emplace(raw, std::move(it->second));
         }
@@ -138,10 +163,10 @@ public:
         out.clear();
 
         // 1) 재무장이 필요한 소켓에만 zero-byte recv 를 건다. 전체를 훑지 않는 것이
-        //    핵심이다 — 준비된 것만 만지는 것이 이 모델의 존재 이유인데, 매 poll 마다
-        //    등록된 소켓을 전부 순회하면 연결 수에 비례하는 비용이 그대로 되돌아온다.
+        //    등록된 전체 연결 대신 재무장 후보를 처리한다. 지연 무효화된 fd는
+        //    아래 조회로 거르고, 실제 비용에는 폴백과 쓰기 관심 처리도 포함된다.
         for (size_t i = 0; i < need_arm_.size(); ++i) {
-            const int fd = need_arm_[i];
+            const NativeSocket fd = need_arm_[i];
             auto it = socks_.find(fd);
             if (it == socks_.end()) continue;           // remove() 된 낡은 항목
             SockState& st = *it->second;
@@ -188,16 +213,19 @@ public:
             queue_arm(st);               // 다음 poll 에서 다시 걸도록 예약
 
             // 무장을 건 뒤 관심에서 kRead 가 빠졌다면(루프가 backpressure 로 읽기를
-            // 멈춘 경우) 이 완료는 알리지 않는다. epoll 은 modify 가 즉시 반영되지만
-            // IOCP 는 이미 커널에 건 연산을 되돌릴 수 없어, 그대로 내보내면 읽지 말라고
+            // 멈춘 경우) 이 완료는 알리지 않는다. 이미 제출한 연산의 회수와
+            // 현재 읽기 정책은 별개다. 그대로 내보내면 읽지 말라고
             // 한 소켓에서 한 번 더 읽게 되어 backpressure 가 새어 나간다.
             if (!(st->interest & kRead)) continue;
 
             Event ev;
             ev.token    = st->token;
             ev.readable = true;  // zero-byte recv 완료 = 읽을 수 있음(또는 EOF/에러)
-            // 완료가 오류로 끝났으면 error 도 표시(다음 recv 가 확정 처리).
-            if (e.Internal != 0) ev.error = true;
+            // OVERLAPPED_ENTRY::Internal은 예약 필드다. 완료 패킷을 꺼낸 뒤
+            // 문서화된 Winsock API로 해당 연산 결과를 확인한다(추가 대기 없음).
+            DWORD transferred = 0, flags = 0;
+            ev.error = !::WSAGetOverlappedResult(static_cast<SOCKET>(st->fd), &st->ov,
+                                                &transferred, FALSE, &flags);
             out.push_back(ev);
         }
 
@@ -217,13 +245,13 @@ public:
 private:
     static constexpr DWORD kWritePollMs = 25;
 
-    void arm_read(int fd, SockState& st, std::vector<Event>& out) {
+    void arm_read(NativeSocket fd, SockState& st, std::vector<Event>& out) {
         WSABUF buf;
         buf.buf = &st.dummy;
         buf.len = 0;  // zero-byte: 데이터를 소비하지 않고 준비성만 감지
-        DWORD flags = 0, recvd = 0;
+        DWORD flags = 0;
         std::memset(&st.ov, 0, sizeof(st.ov));
-        int r = ::WSARecv(static_cast<SOCKET>(fd), &buf, 1, &recvd, &flags,
+        int r = ::WSARecv(static_cast<SOCKET>(fd), &buf, 1, nullptr, &flags,
                           &st.ov, nullptr);
         if (r == 0) {
             // 즉시 완료 — 그래도 완료 통지가 IOCP 로 큐잉되므로 무장 상태로 둔다.
@@ -271,13 +299,13 @@ private:
         };
 
         // 쓰기 관심이 걸린 소켓만 본다 — 보류 송신은 드문 상태라 이 집합은 대개 비어 있다.
-        for (int fd : write_interest_) {
+        for (NativeSocket fd : write_interest_) {
             auto sit = socks_.find(fd);
             if (sit == socks_.end()) continue;
             mark(*sit->second, false, true);
         }
         // 무장할 수 없는 소켓(리스너)은 준비성을 알 방법이 없으므로 매번 알린다.
-        for (int fd : poll_always_) {
+        for (NativeSocket fd : poll_always_) {
             auto sit = socks_.find(fd);
             if (sit == socks_.end()) continue;
             SockState& st = *sit->second;
@@ -300,14 +328,14 @@ private:
     }
 
     HANDLE iocp_ = nullptr;
-    std::unordered_map<int, std::unique_ptr<SockState>> socks_;
+    std::unordered_map<NativeSocket, std::unique_ptr<SockState>> socks_;
     // remove() 됐지만 커널이 아직 OVERLAPPED 를 들고 있는 상태 객체. 취소 완료가
     // 회수될 때까지만 살아 있다.
     std::unordered_map<SockState*, std::unique_ptr<SockState>> zombies_;
     // poll 을 O(등록 수)가 아니라 O(할 일)로 유지하는 두 색인.
-    std::vector<int>           need_arm_;        // 재무장 대기 (지연 무효화)
-    std::unordered_set<int>    write_interest_;  // kWrite 가 걸린 소켓
-    std::unordered_set<int>    poll_always_;     // 리스너 등 무장 불가 소켓
+    std::vector<NativeSocket> need_arm_;        // 재무장 대기 (지연 무효화)
+    std::unordered_set<NativeSocket> write_interest_;  // kWrite 가 걸린 소켓
+    std::unordered_set<NativeSocket> poll_always_;     // 리스너 등 무장 불가 소켓
     std::vector<OVERLAPPED_ENTRY> entries_;
 };
 

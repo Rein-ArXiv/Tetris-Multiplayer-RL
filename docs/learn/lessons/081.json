@@ -1,0 +1,467 @@
+{
+  "id": "lesson-81",
+  "title": "XAudio2: 같은 계약의 Windows 경로",
+  "shortTitle": "보이스 그래프·COM·PCM 대여·빌드 선택",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 게임의 사건을 SDL Player가 준비된 PCM의 중첩 재생으로 바꿉니다.",
+  "finish": "완료: Session의 제어 계약을 유지하며 Windows XAudio2 구현과 독립적인 오디오 빌드 선택을 연결합니다.",
+  "objective": "COM 초기화 의무·WAVEFORMATEX의 단위·비동기 PCM 수명·실패 후 정리 순서를 설명하고 두 장치 구현의 공통 계약과 차이를 구별합니다.",
+  "prerequisites": [
+    "PCM 소유자와 보이스의 다중 대여",
+    "고정 보이스 풀과 성공한 시작 순서",
+    "컴파일·링크와 RAII의 역순 정리"
+  ],
+  "recap": {
+    "points": [
+      "같은 PCM을 여러 보이스가 독립적으로 재생할 수 있습니다.",
+      "빈 보이스를 먼저 쓰고, 모두 바쁘면 가장 오래된 성공한 시작을 교체합니다.",
+      "음원 저장소를 해제하기 전에 모든 대여를 끝냅니다."
+    ],
+    "bridge": "이 제어와 수명 계약을 유지하면서 OS가 보이스 그래프를 관리하는 XAudio2에 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "바꾸는 것은 장치 구현, 유지하는 것은 호출 계약",
+      "body": "게임은 확정된 사건을 `Session::play(kind)`로 넘기고, Session은 종류를 준비된 PCM 자리로 바꿉니다. 이 흐름을 유지하면서 Windows의 XAudio2로 소리를 내보내겠습니다. 호출자는 open·replace·play·stop·unload·close의 의미를 계속 사용합니다.\n\n**계약**은 함수 이름뿐 아니라 입력 조건과 성공·실패 후 상태까지 포함합니다. play는 준비된 음원을 새 보이스로 시작하고, stop은 음원을 남긴 채 모든 재생을 끝냅니다. unload는 해당 음원을 빌리는 재생을 먼저 종료하고 PCM을 해제합니다. close는 부분 초기화 상태에서도 남은 자원을 정리합니다.\n\n이번에는 빌드할 때 구체적인 Player 타입을 고릅니다. 실행 중 장치를 교체할 요구가 없으므로 가상 함수 계층은 추가하지 않습니다. 규칙과 사건 투영을 유지한 채, Session이 의존하는 작은 제어 계약으로 구현의 차이를 가둡니다.",
+      "codes": [
+        {
+          "label": "Session이 의존하는 제어 면",
+          "language": "text",
+          "text": "open(rate, channels)       // 장치와 고정 PCM 형식을 준비\nreplace(std::move(pcm), i) // 음원 i를 소유; 기존 대여 먼저 종료\nplay(i)                   // 음원 i의 새 재생 시도\nstop()                    // 모든 재생 종료, PCM 보존\nunload(i)                 // i의 모든 대여 종료 후 PCM 해제\nclose()                   // 모든 소유 자원 정리"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "bool audio_init",
+        "invariant": "호출자는 재생 제어 계약을 사용하고 OS 자원은 구현 안에 둔다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "같은 계약이면 출력도 바이트 단위로 같을까?",
+          "body": "SDL 구현은 정수 믹서를 직접 실행하고 XAudio2는 내부 그래프에서 합성·형식 변환·장치 출력을 처리합니다. 공통인 것은 제어와 수명 의미입니다. 최종 샘플·지연·장치 설정까지 동일하다는 약속은 없습니다. SDL의 state/cursor_frames 진단 API도 이번 Session 공통 계약에는 포함하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "보이스 그래프를 소유 관계와 함께 그린다",
+      "body": "**그래프**는 노드와 연결로 작업 흐름을 나타내는 자료구조입니다. XAudio2의 Source Voice는 제출된 PCM을 읽는 노드이고, Mastering Voice는 합쳐진 결과를 출력 장치로 보내는 마지막 노드입니다. 여기서는 중간 효과 노드를 만들지 않고 모든 Source를 기본 Mastering Voice로 연결합니다.\n\n엔진을 만든 뒤 Mastering Voice를 먼저 만들고, 재생 요청이 들어오면 Source Voice를 만듭니다. Source는 정지 상태로 생성되므로 버퍼 제출과 Start를 따로 호출합니다. PCM 소유자는 XAudioPlayer의 clips_ 배열이며 Source Voice는 그 주소를 빌립니다.\n\n정리는 의존 방향의 반대입니다. Source들을 DestroyVoice로 없앤 뒤 PCM을 비우고, Mastering Voice를 DestroyVoice, 엔진을 Release합니다. Source/Mastering에는 Release 대신 DestroyVoice라는 별도 종료 함수가 있다는 점을 코드에 드러냅니다.",
+      "codes": [
+        {
+          "label": "출력 경로와 PCM 대여",
+          "language": "text",
+          "text": "clips_[0] PCM ──대여──▶ Source A ─┐\n             └─대여──▶ Source B ─┼─▶ Mastering Voice ─▶ 장치\nclips_[1] PCM ──대여──▶ Source C ─┘\n\n생성: COM 준비 → 엔진 → Mastering → Source\n종료: Source 전부 → PCM → Mastering → 엔진 → 이번 COM 참조"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "void audio_shutdown",
+        "invariant": "의존하는 보이스를 먼저 종료한 뒤 장치와 엔진을 정리한다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      }
+    },
+    {
+      "title": "COM 초기화는 호출 스레드의 횟수를 빌리는 일",
+      "body": "COM은 Windows 구성 요소 사이의 호출과 객체 수명을 위한 기반입니다. **apartment**는 COM 객체 호출이 속하는 스레딩 모델의 단위입니다. CoInitializeEx는 이 함수를 호출한 스레드가 어떤 모델로 COM을 사용할지 요청합니다. 여기서는 MTA(COINIT_MULTITHREADED)를 요청합니다.\n\n반환값 S_OK는 초기화 성공, S_FALSE는 이 스레드가 이미 같은 모델로 초기화되었다는 성공입니다. 둘 다 성공 횟수 하나가 추가되어 같은 스레드의 CoUninitialize 한 번과 짝을 이룹니다. 따라서 com_owned_는 ‘프로세스에 COM이 켜졌나’가 아니라 ‘이 객체가 되돌릴 성공 한 번이 있나’를 기록합니다.\n\n호스트가 먼저 한 번 초기화하고 Player가 S_FALSE를 받았다고 합시다. Player를 닫으면 자신의 한 번만 해제하고 호스트의 초기화는 남깁니다. RPC_E_CHANGED_MODE는 요청 모델을 적용할 수 없다는 실패이므로 이번 해제 의무가 없습니다. 이 구현은 호스트 모델을 바꾸지 않고 엔진 생성을 시도하며 그 성공 여부를 따로 확인합니다.\n\n자원 생성·제어·소멸을 같은 메인 스레드에 모읍니다. 여러 객체가 같은 스레드에서 각자 성공 횟수를 얻을 수 있지만, 한 객체를 임의의 다른 스레드에서 닫는 것은 이 계약 밖입니다. [CoInitializeEx의 반환값과 해제 규칙](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-coinitializeex)을 함께 읽어 보세요.",
+      "codes": [
+        {
+          "label": "결과를 소유 의무로 바꾸는 분기",
+          "language": "cpp",
+          "text": "    const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);\n    if (initialized == S_OK || initialized == S_FALSE) {\n        com_owned_ = true;\n    } else if (initialized == RPC_E_CHANGED_MODE) {\n        com_owned_ = false;\n    } else {\n        return false;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "bool audio_init",
+        "invariant": "S_OK/S_FALSE로 얻은 이번 스레드의 성공 횟수만 종료에서 되돌린다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "MTA 요청과 오디오 워커",
+          "body": "이 호출은 XAudio2 내부 워커의 모델을 외부에서 지정하는 명령이 아닙니다. RPC_E_CHANGED_MODE도 항상 STA만 뜻하지 않으며 NTA 전환 이력과 관련될 수 있습니다. 이미 구성된 호스트와의 호환성은 엔진 생성 결과까지 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "부분 초기화를 정상적인 상태로 다룬다",
+      "body": "open은 한 번의 원자적 OS 작업이 아닙니다. COM 준비는 성공했는데 엔진 생성이 실패할 수 있고, 엔진은 생겼는데 기본 출력 장치가 없어 Mastering Voice 생성이 실패할 수 있습니다. 각 포인터를 nullptr로 시작하면 어느 단계까지 소유했는지를 상태 자체로 표현할 수 있습니다.\n\n실패 분기마다 같은 close를 호출합니다. close는 존재하는 자원만 정리하므로 COM만 가진 경우, 엔진까지 가진 경우, 모든 자원이 있는 경우를 같은 종료 순서로 처리합니다. 정리한 포인터와 소유 플래그를 비우면 두 번 close해도 두 번 해제하지 않습니다. 이런 성질을 **멱등성**이라고 합니다. 같은 종료 요청을 반복해도 추가 변화가 없습니다.\n\n입력 형식은 OS 자원을 얻기 전에 검사합니다. 이미 열린 객체의 open도 거절합니다. 이 둘은 기존 자원을 흔들지 않는 실패입니다. 반면 풀 선점 뒤 생성 실패는 이미 끊은 소리를 복원하지 않습니다. 모든 실패에 같은 강도의 보존을 약속하지 않고 함수의 단계에 맞춰 설명해야 합니다.",
+      "codes": [
+        {
+          "label": "획득 단계와 되감기",
+          "language": "cpp",
+          "text": "    if (FAILED(::XAudio2Create(&engine_, 0, XAUDIO2_DEFAULT_PROCESSOR))) {\n        close();\n        return false;\n    }\n    if (FAILED(engine_->CreateMasteringVoice(&master_, channels, rate))) {\n        close();\n        return false;\n    }"
+        },
+        {
+          "label": "void XAudioPlayer::close(",
+          "language": "cpp",
+          "text": "void XAudioPlayer::close() noexcept {\n    // Idempotent and safe from any partial open(): stop voices, drop PCM, then\n    // tear the device down in reverse creation order before balancing COM.\n    stop();\n\n    for (auto& clip : clips_) clip.reset();\n\n    if (master_ != nullptr) {\n        master_->DestroyVoice();\n        master_ = nullptr;\n    }\n    if (engine_ != nullptr) {\n        engine_->Release();\n        engine_ = nullptr;\n    }\n    if (com_owned_) {\n        ::CoUninitialize();\n        com_owned_ = false;\n    }\n\n    format_ = WAVEFORMATEX{};\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "void audio_shutdown",
+        "invariant": "부분 획득과 정상 종료를 같은 의존 순서로 정리한다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      }
+    },
+    {
+      "title": "WAVEFORMATEX를 단위식으로 채운다",
+      "body": "XAudio2에 넘기는 바이트를 해석하려면 채널 수·샘플레이트·표본 형식을 알려야 합니다. 여기서는 부호 있는 16비트 정수 PCM, 모노 또는 스테레오를 사용합니다. WAVE_FORMAT_PCM과 wBitsPerSample=16이 자료 표현을 설명합니다.\n\n44,100Hz 스테레오에서 한 프레임은 L과 R의 표본 두 개입니다. nBlockAlign은 한 프레임의 바이트 수이므로 `2채널 × 2바이트 = 4바이트`입니다. nAvgBytesPerSec는 `44,100프레임/초 × 4바이트/프레임 = 176,400바이트/초`입니다. 4,410프레임짜리 효과음의 AudioBytes는 17,640바이트이고 길이는 0.1초입니다.\n\nopen의 입력은 공통 layout_s16으로 먼저 제한합니다. replace도 rate와 channels가 열린 형식과 같은지, 데이터가 비어 있지 않은지, 버퍼 크기가 API 한도와 32비트 AudioBytes에 들어가는지 확인합니다. 이 형식 고정 정책 덕분에 끝난 Source Voice를 다른 음원에 재사용해도 형식이 맞습니다.",
+      "codes": [
+        {
+          "label": "서로 다른 단위를 가진 필드",
+          "language": "cpp",
+          "text": "    format_.wFormatTag = WAVE_FORMAT_PCM;\n    format_.nChannels = static_cast<WORD>(channels);\n    format_.nSamplesPerSec = rate;\n    format_.wBitsPerSample = 16;\n    format_.nBlockAlign = static_cast<WORD>(channels * sizeof(std::int16_t));\n    format_.nAvgBytesPerSec =\n        static_cast<DWORD>(rate * channels * sizeof(std::int16_t));\n    format_.cbSize = 0;"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "static WAVEFORMATEX MakeWaveFormat",
+        "invariant": "프레임·표본·바이트 단위를 검증한 뒤 OS 형식 필드로 옮긴다.",
+        "mayDiffer": "현재 엔진은 음원별 형식을 보관하고 보이스 재사용 때 형식을 비교한다. 기준 Player는 open 시 한 형식을 고정한다."
+      }
+    },
+    {
+      "title": "버퍼 설명서는 짧게, PCM은 오래 살아야 한다",
+      "body": "지역 변수 XAUDIO2_BUFFER에는 데이터 주소·크기·재생 구간 같은 **설명서**가 들어 있습니다. SubmitSourceBuffer는 이 설명서를 받아 재생 큐를 구성합니다. 호출이 끝난 뒤 설명서 변수는 사라져도 되지만, pAudioData가 가리키는 PCM 배열은 실제 읽기가 끝날 때까지 유지해야 합니다.\n\n따라서 스택에 buffer를 만드는 것은 이 API 계약에 맞습니다. 스택의 임시 PCM 배열을 가리키게 한 뒤 함수에서 돌아가는 것은 다른 문제입니다. 크기 필드와 주소를 복사했다는 사실은 그 주소 뒤의 모든 데이터를 복사했다는 뜻이 아닙니다.\n\nclips_[slot]이 PCM을 소유하고 voices_[i].owner가 대여 관계를 추적합니다. 여러 보이스가 같은 주소를 빌릴 수 있습니다. 교체·해제는 owner가 같은 모든 Source를 먼저 종료한 뒤 저장소를 변경합니다. [SubmitSourceBuffer의 설명서와 오디오 데이터 수명](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2sourcevoice-submitsourcebuffer)이 이 설계의 근거입니다.",
+      "codes": [
+        {
+          "label": "지역 설명서가 가리키는 장기 소유 데이터",
+          "language": "cpp",
+          "text": "    XAUDIO2_BUFFER buffer{};\n    buffer.AudioBytes =\n        static_cast<UINT32>(clip.samples().size() * sizeof(std::int16_t));\n    buffer.pAudioData = reinterpret_cast<const BYTE*>(clip.samples().data());\n    buffer.Flags = XAUDIO2_END_OF_STREAM;"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "static void start_music_voice",
+        "invariant": "지역 버퍼 설명서와 비동기로 읽힐 PCM 소유 수명을 분리한다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      }
+    },
+    {
+      "title": "제출 성공과 시작 성공을 따로 확인한다",
+      "body": "HRESULT는 API 처리 결과를 담는 값입니다. 성공이 꼭 숫자 0 하나인 것은 아니므로 일반적인 성공·실패 판정에는 SUCCEEDED와 FAILED를 씁니다. COM의 초기화 의무처럼 결과 종류가 의미를 바꾸는 곳에서는 S_OK·S_FALSE 등을 따로 분기합니다.\n\n재생은 Source 생성 → 버퍼 제출 → Start의 세 단계입니다. 제출이 실패하면 Start를 호출하지 않습니다. 제출 성공 뒤 Start가 실패하면 PCM 주소를 이미 OS에 전달했을 수 있습니다. 이때 보이스를 파괴해서 대여를 끝내고 빈 슬롯으로 돌아갑니다. 새 owner와 시작 순서는 세 단계가 모두 성공한 뒤에만 기록합니다.\n\n실제 게임의 BGM도 같은 원칙을 적용합니다. 마지막 요청 s_lastMusic은 재시도를 위해 남기지만, 시작에 실패한 곡을 s_currentMusic에 기록하지 않습니다. 사용자의 의도와 OS에서 성공한 재생 상태는 다른 변수로 표현합니다.",
+      "codes": [
+        {
+          "label": "성공 뒤에만 재생 연결을 확정",
+          "language": "cpp",
+          "text": "    if (FAILED(voices_[target].ptr->SubmitSourceBuffer(&buffer))) {\n        destroy_slot(target);\n        return false;\n    }\n    if (FAILED(voices_[target].ptr->Start(0))) {\n        destroy_slot(target);\n        return false;\n    }\n\n    voices_[target].owner = slot;\n    order_.mark_started(target);\n    return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "static void start_music_voice",
+        "invariant": "제출·시작 실패 시 보이스를 정리하고 성공 상태를 기록하지 않는다.",
+        "mayDiffer": "실제 BGM은 마지막 요청을 별도 저장해 off→on 때 재시도한다. 효과음 Session은 실패한 사건을 자동 재전송하지 않는다."
+      }
+    },
+    {
+      "title": "비활성 보이스를 찾고, 포화일 때만 선점한다",
+      "body": "보이스 포인터가 nullptr이면 아직 자원이 없는 자리입니다. 포인터가 있어도 GetState의 BuffersQueued가 0이면 제출한 데이터가 모두 끝난 자리로 볼 수 있습니다. 이 Player는 매 재생에 버퍼 하나만 제출하며, 제어 호출은 같은 스레드에서 직렬 실행하므로 조회 뒤 다른 호출자가 버퍼를 몰래 추가하지 않습니다.\n\n먼저 그런 자리를 인덱스 순으로 찾습니다. 같은 형식의 끝난 Source는 재사용할 수 있습니다. 모두 바쁘면 VoiceOrder가 가리키는 가장 오래된 시작을 고르고 DestroyVoice한 뒤 새 Source를 만듭니다. 모든 자리가 바쁘다는 조건이 있어야 순열의 oldest가 선점 후보라는 의미를 갖습니다.\n\n포화 교체는 기존 소리를 끊습니다. 새 Source 생성이 실패하면 자리는 비며, 과거 커서로 자동 복원하지 않습니다. 순서표는 성공한 시작만 갱신하고 PCM 원본은 계속 소유합니다. 자원 안정성·청감 품질·재생 성공률은 서로 다른 평가 항목입니다.",
+      "codes": [
+        {
+          "label": "빈자리 우선, 전부 바쁠 때 가장 오래된 시작",
+          "language": "cpp",
+          "text": "    std::size_t target = kVoiceCount;\n    for (std::size_t i = 0; i < kVoiceCount; ++i) {\n        if (voices_[i].ptr == nullptr) {\n            target = i;\n            break;\n        }\n        XAUDIO2_VOICE_STATE state{};\n        voices_[i].ptr->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);\n        if (state.BuffersQueued == 0) {\n            target = i;\n            break;\n        }\n    }\n\n    // Pool is full: steal the least recently started voice.\n    if (target == kVoiceCount) {\n        target = order_.oldest();\n        destroy_slot(target);\n    }"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "void audio_play_sound",
+        "invariant": "idle 우선으로 재사용하고 포화일 때 성공한 시작 순서로 선점한다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      }
+    },
+    {
+      "title": "OS에 맡긴 동기화와 우리 소유권의 경계",
+      "body": "XAudio2는 작업 스레드에서 PCM을 읽습니다. 우리 프로그램의 제어 코드가 메인 스레드 하나에 있어도, PCM을 읽는 실행 흐름은 동시에 존재합니다. ‘내 코드에 콜백이 없다’는 사실만으로 PCM을 언제든 해제할 수는 없습니다.\n\nDestroyVoice가 돌아온 뒤에는 해당 보이스의 데이터 읽기가 끝났다는 API 경계를 사용합니다. stop_owner는 일치하는 보이스를 전부 파괴하고, unload는 그 뒤 clips_를 비웁니다. 순서를 반대로 쓰면 worker가 이미 해제된 배열을 읽는 use-after-free 가능성이 생깁니다.\n\nSDL Player는 사용자 믹서 상태를 장치 잠금으로 보호합니다. XAudioPlayer는 제어 메타데이터를 메인 스레드에만 두고 PCM을 불변으로 유지하며, OS 읽기의 끝을 DestroyVoice로 기다립니다. 동기화 책임이 사라지는 것이 아니라 책임과 경계가 달라집니다. [DestroyVoice의 완료·호출 위치 계약](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2voice-destroyvoice)을 확인하세요.",
+      "codes": [
+        {
+          "label": "void XAudioPlayer::unload(",
+          "language": "cpp",
+          "text": "void XAudioPlayer::unload(std::size_t slot) noexcept {\n    if (slot >= kVoiceCount) return;\n    stop_owner(slot);\n    clips_[slot].reset();\n}\n"
+        },
+        {
+          "label": "void XAudioPlayer::stop_owner(",
+          "language": "cpp",
+          "text": "void XAudioPlayer::stop_owner(std::size_t owner) noexcept {\n    for (std::size_t i = 0; i < kVoiceCount; ++i) {\n        if (voices_[i].ptr != nullptr && voices_[i].owner == owner) {\n            destroy_slot(i);\n        }\n    }\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "void audio_unload_sound",
+        "invariant": "PCM 해제 전에 그 주소를 읽는 모든 OS 보이스를 끝낸다.",
+        "mayDiffer": "실제 엔진은 전역 상태에서 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 한 객체 안에서 효과음 보이스 풀을 관리한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "정지 요청과 해제 가능한 시점",
+          "body": "Stop/FlushSourceBuffers만 연속 호출했다고 현재 버퍼의 읽기 종료가 즉시 확정되는 것은 아닙니다. 이 구현은 추적할 보이스를 DestroyVoice로 파괴해 경계를 단순화합니다. 이 호출은 대기할 수 있고 XAudio2 콜백 안에서는 호출하면 안 됩니다. 더 정교한 비동기 반환 풀은 완료 통지를 별도로 추적해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "창 선택과 오디오 선택은 서로 다른 축이다",
+      "body": "SDL 창을 사용한다고 소리도 반드시 SDL이어야 하는 것은 아닙니다. CMake의 STUDY_PLATFORM은 창·입력 구현, STUDY_AUDIO는 소리 구현을 선택합니다. Windows에서 SDL 창 + XAudio2 소리를 선택하면 렌더러·입력 경로는 유지하면서 오디오만 바뀝니다.\n\nAUTO는 SCRIPTED에서 NONE, Windows의 실제 창 구성에서 XAUDIO2, 그 밖의 SDL 구성에서 SDL을 고릅니다. 명시적으로 NONE을 선택하면 게임은 소리 없이 빌드되고, SCRIPTED+SDL이면 창 대역과 실제 SDL 오디오 계약 검사를 함께 사용할 수 있습니다. XAUDIO2를 비 Windows 타깃으로 지정하면 구성 단계에서 거절합니다.\n\nSession 헤더는 선택된 Player 타입만 멤버로 둡니다. 두 오디오 매크로가 동시에 들어오면 컴파일 오류로 막습니다. STUDY_PLATFORM=WIN32는 초기 창·키보드 학습용 input_demo 경로이고 누적 GL 게임은 SDL 플랫폼에서 만듭니다. XAudio2 사용을 위해 누적 게임의 창 구현까지 바꿀 필요는 없습니다.",
+      "codes": [
+        {
+          "label": "의존성과 선택을 분리한 빌드 조합",
+          "language": "text",
+          "text": "창/입력          오디오          산출물/용도\nSDL (Windows)    XAUDIO2         누적 GL 게임 + Windows 소리\nSDL              SDL            누적 GL 게임 + SDL 소리\nSDL              NONE           누적 GL 게임, 소리 없음\nSCRIPTED         NONE           CPU 규칙·계약 검사\nSCRIPTED         SDL            CPU 규칙 + SDL 오디오 검사\nWIN32            XAUDIO2         초기 입력 데모 + 별도 오디오 probe"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "bool audio_init",
+        "invariant": "플랫폼별 구현을 빌드 때 골라도 게임의 오디오 호출 책임은 유지한다.",
+        "mayDiffer": "현재 루트 CMake는 Windows에서 자체 Win32/WGL과 XAudio2를 선택한다. 학습 누적 GL 게임은 SDL 창과 XAudio2의 조합도 지원하도록 분리했다."
+      }
+    },
+    {
+      "title": "헤더·링크·런타임을 차례대로 준비한다",
+      "body": "C++ 컴파일러는 헤더에서 함수 선언과 타입을 읽습니다. 링커는 외부 호출이 어디에 있는지 연결하고, 실행 시 로더는 필요한 DLL을 찾습니다. Windows SDK의 windows.h·xaudio2.h와 xaudio2·ole32 가져오기 라이브러리는 앞의 두 단계에 필요합니다. 장치 사용 가능 여부는 프로그램이 실행된 뒤 open에서 확인합니다.\n\nWindows 10의 XAudio2 2.9를 대상으로 실습합니다. 해당 런타임은 OS가 제공하며, 다른 Windows 버전은 별도의 지원·재배포 구성을 확인해야 합니다. CMake에서 WIN32가 참이라는 사실은 타깃 OS가 Windows라는 뜻입니다. Linux에서 실행하는 CMake라도 Windows용 도구 체인을 선택하면 타깃은 Windows일 수 있지만, 변수 하나를 임의로 켠다고 SDK와 컴파일러가 생기지는 않습니다.\n\nSDL은 설치된 CMake 패키지를 먼저 찾고 pkg-config를 대안으로 사용합니다. 이 체크포인트는 SDL_MAIN_HANDLED를 빌드 정의로 전달해 모든 실행 파일이 일반 console main을 유지하게 합니다. 각 SDL 초기화 경로는 SDL_SetMainReady를 먼저 호출합니다. 따라서 main의 인자 형태가 서로 다른 진단 프로그램에도 SDL_main 재정의가 적용되지 않습니다. [SDL의 CMake 패키지 연결](https://wiki.libsdl.org/SDL2/README-cmake)와 [진입점 준비 함수](https://wiki.libsdl.org/SDL2/SDL_SetMainReady)를 참고하세요.",
+      "codes": [
+        {
+          "label": "Windows 개발 셸: 저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/81-xaudio2 -B out/study81-win -DSTUDY_PLATFORM=SDL -DSTUDY_AUDIO=XAUDIO2 -DCMAKE_PREFIX_PATH=C:/deps/SDL2\ncmake --build out/study81-win --config Release\nctest --test-dir out/study81-win -C Release --output-on-failure\nout/study81-win/Release/xaudio_probe.exe\ncd docs/learn/checkpoints/81-xaudio2\n../../../../out/study81-win/Release/tetris.exe"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "경로와 빌드 구성",
+          "body": "C:/deps/SDL2는 자신의 SDL2 설치 경로로 바꿉니다. Visual Studio 같은 다중 구성 생성기는 Release 하위에 실행 파일을 놓습니다. Ninja 같은 단일 구성 생성기는 -DCMAKE_BUILD_TYPE=Release를 구성에 넣고 실행 경로의 Release/를 뺍니다. 게임의 상대 에셋 경로 때문에 실행 위치는 체크포인트 디렉터리로 맞춥니다."
+        },
+        {
+          "kind": "concept",
+          "title": "NOMINMAX를 헤더 전에 두는 이유",
+          "body": "Windows 헤더의 함수형 max 매크로는 std::numeric_limits<int>::max()에도 토큰 치환을 적용할 수 있습니다. C++ 이름 공간은 전처리기의 매크로를 막지 않습니다. windows.h를 처음 포함하기 전에 NOMINMAX를 정의해 이 매크로를 비활성화합니다."
+        }
+      ]
+    },
+    {
+      "title": "실패를 주입해 소유권의 끝을 검사한다",
+      "body": "장치가 정상인 날에만 실행하면 실패 분기의 정리 순서를 관찰하기 어렵습니다. API 대역은 COM·엔진·Mastering·Source 생성, 제출, Start 중 지정한 단계에서 실패하게 합니다. 실제 XAudioPlayer 구현을 그대로 컴파일하고 OS 호출 경계만 대체합니다.\n\n대역 Source는 전달된 설명서를 복사하고 PCM 주소는 보관합니다. 파괴 직전에도 PCM의 첫·마지막 바이트를 읽도록 하면, PCM부터 해제하는 잘못된 순서를 주소 검사기가 잡을 수 있습니다. Mastering을 먼저 파괴하면 아직 살아 있는 Source가 있다는 오류를 내도록 그래프의 종료 의존성도 검사합니다.\n\n두 Player를 동시에 열어 한쪽을 닫은 뒤 다른 쪽의 그래프와 COM 횟수가 남는지 확인합니다. Session 검사에서는 네 종류의 효과음을 반복 요청해 최대 아홉 보이스라는 경계와 실패 뒤 재시도를 확인합니다. 마지막으로 실제 Windows의 xaudio_probe를 실행하면 각 150ms 간격으로 네 소리를 요청하고 종료합니다. 제출 성공 출력과 실제 장치에서 들리는 결과를 각각 관찰하세요.",
+      "codes": [
+        {
+          "label": "Linux에서 계약 검사와 SDL 누적 게임 빌드",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/81-xaudio2 -B out/study81 -DSTUDY_PLATFORM=SDL -DSTUDY_AUDIO=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study81 -j3\nctest --test-dir out/study81 --output-on-failure\ncd docs/learn/checkpoints/81-xaudio2\n../../../../out/study81/tetris"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "대역으로 답할 수 있는 질문",
+          "body": "API 대역은 우리가 가정한 호출 계약 아래에서 소유권·실패 처리·순서를 검사합니다. Windows SDK의 ABI, 실제 스케줄링, 장치 변환, 소리 품질은 실제 플랫폼 검사의 대상입니다. 그래서 하드웨어를 요구하는 xaudio_probe는 기본 CTest에 자동 등록하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "전체 구현에서 다시 찾을 세 가지 경계",
+      "body": "첫째, Session은 사건 종류와 음원 자리를 연결하고 장치의 세부 API를 숨깁니다. 둘째, XAudioPlayer는 PCM·보이스·엔진의 유일한 소유자이며 어느 실패에서도 이미 얻은 자원을 회수합니다. 셋째, PCM을 읽는 worker와 소유자를 잇는 대여는 OS가 보장한 완료 지점에서 끝냅니다.\n\n음원 종류·보이스 수·장치 선택·재사용 전략은 바뀔 수 있습니다. 실패 후 상태와 대여 종료 지점을 명확히 하는 핵심은 유지합니다. 이번 구현은 네 가지 합성 효과음을 재생하며, 장치 전환 알림·스트리밍·XAudio 효과 그래프·런타임 백엔드 교체는 추가하지 않습니다. 현재 레퍼런스의 MP3/BGM 경로와 비교할 때는 같은 소유권 원리가 어디에 구현되어 있는지 먼저 찾으세요.",
+      "codes": [
+        {
+          "label": "audio/xaudio_player.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/81-xaudio2/audio/xaudio_player.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/xaudio_player.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/81-xaudio2/audio/xaudio_player.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "presentation/sound_session.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/81-xaudio2/presentation/sound_session.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/xaudio_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/81-xaudio2/tests/xaudio_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt 전체",
+          "language": "cmake",
+          "file": "checkpoints/81-xaudio2/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "81-1",
+      "question": "호스트가 이 스레드에서 COM을 한 번 초기화했습니다. Player의 CoInitializeEx가 S_FALSE를 반환했다면 Player 종료에서 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "CoUninitialize를 호출하지 않는다"
+        },
+        {
+          "id": "b",
+          "text": "호스트 몫까지 두 번 해제한다"
+        },
+        {
+          "id": "c",
+          "text": "같은 스레드에서 자기 몫 한 번을 해제한다"
+        },
+        {
+          "id": "d",
+          "text": "오디오 워커에서 한 번 해제한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "같은 스레드에서 자기 몫 한 번을 해제한다",
+      "explanation": "S_FALSE도 성공 한 번을 추가합니다. com_owned_는 이번 호출의 의무를 기록하고, 호스트가 소유한 횟수는 그대로 둡니다."
+    },
+    {
+      "id": "81-2",
+      "question": "44,100Hz·스테레오·16비트 PCM 4,410프레임의 nBlockAlign과 AudioBytes는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "2와 8,820"
+        },
+        {
+          "id": "b",
+          "text": "4와 17,640"
+        },
+        {
+          "id": "c",
+          "text": "16과 70,560"
+        },
+        {
+          "id": "d",
+          "text": "44,100과 176,400"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "4와 17,640",
+      "explanation": "한 프레임은 두 채널 표본이므로 2×2=4바이트입니다. 전체 버퍼는 4,410×4=17,640바이트입니다. 176,400은 초당 바이트 수입니다."
+    },
+    {
+      "id": "81-3",
+      "question": "SubmitSourceBuffer가 성공하고 Start가 실패했습니다. 이 구현이 보이스를 파괴하는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "PCM 주소의 대여가 남아 있을 수 있기 때문"
+        },
+        {
+          "id": "b",
+          "text": "지역 설명서의 메모리를 free하기 위해"
+        },
+        {
+          "id": "c",
+          "text": "실패한 Start가 PCM을 소유했기 때문"
+        },
+        {
+          "id": "d",
+          "text": "과거 재생 위치를 자동 복원하기 위해"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "PCM 주소의 대여가 남아 있을 수 있기 때문",
+      "explanation": "제출 성공으로 OS에 PCM 주소를 전달했습니다. DestroyVoice로 읽기 가능성을 끝내고 슬롯을 비웁니다. PCM 소유는 Player에 남고 성공한 시작 순서는 기록하지 않습니다."
+    },
+    {
+      "id": "81-4",
+      "question": "SDL 창을 유지하고 Windows에서 XAudio2 소리를 쓰려면 어떤 조합을 고르는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "STUDY_PLATFORM=WIN32, STUDY_AUDIO=SDL"
+        },
+        {
+          "id": "b",
+          "text": "STUDY_PLATFORM=SCRIPTED, STUDY_AUDIO=AUTO"
+        },
+        {
+          "id": "c",
+          "text": "STUDY_PLATFORM=SDL, STUDY_AUDIO=NONE"
+        },
+        {
+          "id": "d",
+          "text": "STUDY_PLATFORM=SDL, STUDY_AUDIO=XAUDIO2"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "STUDY_PLATFORM=SDL, STUDY_AUDIO=XAUDIO2",
+      "explanation": "창·입력과 오디오는 별도 선택입니다. 누적 GL 게임은 SDL 플랫폼에서 빌드하고 Session의 Player만 XAudio2로 선택할 수 있습니다."
+    },
+    {
+      "id": "81-5",
+      "question": "PCM 하나를 읽는 Source 세 개가 있습니다. unload의 안전한 순서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "PCM 해제 → Source 정지 요청"
+        },
+        {
+          "id": "b",
+          "text": "Source 하나 파괴 → PCM 해제"
+        },
+        {
+          "id": "c",
+          "text": "세 Source 모두 DestroyVoice 반환 확인 → PCM 해제"
+        },
+        {
+          "id": "d",
+          "text": "Mastering 파괴 → PCM 해제 → Source 파괴"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "세 Source 모두 DestroyVoice 반환 확인 → PCM 해제",
+      "explanation": "같은 owner에 연결된 모든 읽기를 종료한 뒤 소유 저장소를 비웁니다. Mastering도 자신에게 연결된 Source들을 먼저 정리해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "COM 성공 → 엔진 성공 → Mastering 실패를 그려 남은 소유 자원과 정리 순서를 표시합니다.",
+      "같은 PCM을 빌리는 세 보이스를 연결하고 unload가 지켜야 할 순서를 적습니다.",
+      "STUDY_PLATFORM과 STUDY_AUDIO의 조합을 골라 Session이 어떤 Player를 갖는지 설명합니다.",
+      "Submit 성공·Start 실패 뒤 요청한 곡과 재생 중인 곡의 상태를 각각 예측합니다."
+    ],
+    "failureChecks": [
+      "S_FALSE와 RPC_E_CHANGED_MODE에서 COM 해제 횟수를 비교합니다.",
+      "다른 형식의 PCM 교체를 거절한 뒤 기존 음원과 재생이 유지되는지 확인합니다.",
+      "API 대역에서 PCM 읽기를 파괴 직전까지 유지하고 잘못된 해제 순서를 찾아봅니다."
+    ],
+    "expected": "동일한 재생 제어 계약을 다른 장치 API로 구현하고, 단위·소유권·동기화·빌드 단계의 실패를 구별할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 선택 명세 구현 초안 직접 검토·공식 Microsoft/SDL 계약 대조·전체 구현 API 대역 및 누적 빌드 검사",
+    "draftJob": "out/learning-jobs/081-xaudio-events.jsonl",
+    "corrections": [
+      "COM 호출 스레드·성공 횟수와 워커 스레드 구별",
+      "콜백이 없으므로 동기화가 필요 없다는 초안 설명 교정",
+      "실제 BGM 제출·시작 실패 정리와 NOMINMAX 추가",
+      "Part5의 현대 XAudio2 생성 경로·COM·배포·로더 실패 전제 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED90/SDL95 CTest·누적 SDL 게임·경고 없음",
+    "SDL/NONE·SCRIPTED/SDL 독립 선택, unknown/XAUDIO2 비Windows 구성 거절",
+    "전체 XAudioPlayer와 실제 Session의 API 대역 ASan/UBSan: COM 횟수·부분 초기화·형식·다중 대여·선점·실패 정리",
+    "실제 Windows audio.cpp 전체 + 실제 MP3 로더 대역 검사: BGM 제출/시작 실패 수정 전후, 재시도·SFX·unload·공유 init·COM",
+    "NOMINMAX 누락 시 max 매크로 컴파일 충돌 재현; 가드 적용 전체 소스 컴파일",
+    "실제 누적 main의 XAudio 선택을 API 대역 헤더로 컴파일; SDL console 진입 준비 통일",
+    "root17 CTest·sim_hash_dump 골든 유지",
+    "Part 발췌·짧은 XAudio 스니펫9개·Markdown27사례·399문제·DOM 전체 차시/탐색/저장/참조·정적15파일 ZIP 재현성 통과",
+    "Windows SDK/컴파일러/Wine 없음; 네이티브 ABI·장치·청감 미검증, 사용자 요청으로 수동 GUI 없음"
+  ]
+}

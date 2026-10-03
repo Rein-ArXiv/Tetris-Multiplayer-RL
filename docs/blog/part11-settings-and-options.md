@@ -74,17 +74,29 @@ struct GameSettings {
 
 ### 2.1 파서 헬퍼와 load/save
 
-먼저 두 개의 관대한 파서 헬퍼를 둔다. bool 은 `1/true/on` 과 `0/false/off` 를 모두 받고, 정수는 범위로 클램프한다.
+bool은 `1/true/on`과 `0/false/off`를 받고, 정수는 전체 문자열과 변환 범위를 확인한 뒤 유효한 숫자만 설정 범위로 클램프한다. `12junk`나 long long 표현 범위를 넘는 값은 거절한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-static bool parse_bool01(const std::string& v, bool fallback)
+static std::optional<bool> parse_bool_value(const std::string& v)
 {
     const std::string s = trim_copy(v);
-    if (s == "1" || s == "true"  || s == "on")  return true;
+    if (s == "1" || s == "true" || s == "on") return true;
     if (s == "0" || s == "false" || s == "off") return false;
-    return fallback;
+    return std::nullopt;
+}
+
+static bool parse_bool01(const std::string& v, bool fallback)
+{
+    return parse_bool_value(v).value_or(fallback);
+}
+
+// Invalid legacy bool leaves a partial volume unchanged rather than rounding to 100.
+static int parse_legacy_volume(const std::string& v, int fallback)
+{
+    const auto value = parse_bool_value(v);
+    return value ? (*value ? 100 : 0) : fallback;
 }
 
 // 정수(예: 볼륨 0~100, 스케일 인덱스) 파싱. lo..hi 로 클램프. 비정상 시 fallback.
@@ -93,17 +105,19 @@ static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
     const std::string s = trim_copy(v);
     if (s.empty()) return fallback;
     char* end = nullptr;
-    long n = std::strtol(s.c_str(), &end, 10);
-    if (end == s.c_str()) return fallback;
+    errno = 0;
+    long long n = std::strtoll(s.c_str(), &end, 10);
+    if (end == s.c_str() || end != s.c_str() + s.size() || errno == ERANGE)
+        return fallback;
     if (n < lo) n = lo;
     if (n > hi) n = hi;
     return (int)n;
 }
 ```
 
-`fallback` 인자가 핵심이다. 파싱이 실패해도 *기본값* 으로 떨어지지, 0 이나 빈 값으로 망가지지 않는다. 손으로 편집된 `settings.cfg` 에 오타가 있어도 그 줄만 무시되고 나머지는 살아남는다.
+`fallback`은 호출자가 넘긴 **현재 값**이다. 처음에는 기본값이지만, 같은 키가 이미 유효하게 등장했다면 그 값을 유지한다. 숫자 접미사·오버플로·잘못된 bool 때문에 앞의 유효 설정을 덮어쓰지 않는다. 예를 들어 `bgm_vol=37` 뒤에 `bgm=oops`가 있어도 37을 보존한다.
 
-로더는 파일이 없으면 그냥 기본값 구조체를 돌려준다 — 첫 실행에 설정 파일이 없는 건 에러가 아니다.
+로더는 파일이 없으면 기본값으로 시작한다. 일반 파일을 최대 16 KiB까지 읽고, 물리적 한 줄이 255바이트를 넘거나 NUL을 포함하면 그 줄 전체를 건너뛴다. 긴 줄의 뒤쪽을 새 설정처럼 읽지 않는다. 파일 읽기 오류나 전체 크기 초과에서는 부분 결과를 적용하지 않고 기본값을 반환한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -111,12 +125,24 @@ static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
 static GameSettings load_settings(const char* path)
 {
     GameSettings s;
-    FILE* f = std::fopen(path, "rb");
-    if (!f) return s;
-
-    char line[256];
-    while (std::fgets(line, sizeof(line), f)) {
-        std::string ln(line);
+    if (!path || !*path) return s;
+    const auto file = std::filesystem::u8path(path);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec)) return s;
+    std::ifstream input(file, std::ios::binary);
+    if (!input) return s;
+    std::array<char, 16385> bytes{};
+    input.read(bytes.data(), bytes.size());
+    const auto count = input.gcount();
+    if (input.bad() || (input.fail() && !input.eof()) || count > 16384) {
+        std::fprintf(stderr, "[settings] unreadable or oversized file: %s\n", path);
+        return s;
+    }
+    std::istringstream lines(std::string(bytes.data(), static_cast<size_t>(count)));
+    std::string ln;
+    while (std::getline(lines, ln)) {
+        // One physical line is one record; never interpret an overlong suffix as a new key.
+        if (ln.size() > 255 || ln.find('\0') != std::string::npos) continue;
         const size_t hash = ln.find('#');
         if (hash != std::string::npos) ln.resize(hash);
         const size_t eq = ln.find('=');
@@ -126,8 +152,8 @@ static GameSettings load_settings(const char* path)
         // 볼륨 키 — 신형. 구형 호환: 과거 bgm=1/sfx=0 (bool) 도 받아 0/100 으로.
         if (key == "bgm_vol")        s.bgmVol = parse_int_clamped(val, s.bgmVol, 0, 100);
         else if (key == "sfx_vol")   s.sfxVol = parse_int_clamped(val, s.sfxVol, 0, 100);
-        else if (key == "bgm")       s.bgmVol = parse_bool01(val, s.bgmVol > 0) ? 100 : 0;
-        else if (key == "sfx")       s.sfxVol = parse_bool01(val, s.sfxVol > 0) ? 100 : 0;
+        else if (key == "bgm")       s.bgmVol = parse_legacy_volume(val, s.bgmVol);
+        else if (key == "sfx")       s.sfxVol = parse_legacy_volume(val, s.sfxVol);
         else if (key == "shake")     s.shakeOn = parse_bool01(val, s.shakeOn);
         else if (key == "harddrop_shake") s.hardDropShakeOn = parse_bool01(val, s.hardDropShakeOn);
         else if (key == "window_scale")   s.windowScale = parse_int_clamped(val, s.windowScale, 0, kWindowScaleCount - 1);
@@ -136,9 +162,9 @@ static GameSettings load_settings(const char* path)
         else if (key == "idle_animation") s.idleAnimation = parse_bool01(val, s.idleAnimation);
         else if (key == "ghost")          s.ghostOn = parse_bool01(val, s.ghostOn);
     }
-    std::fclose(f);
     return s;
 }
+
 ```
 
 **하위 호환 분기에 주목한다.** 볼륨은 원래 켜짐/꺼짐 bool 이었다(`bgm=1`). 슬라이더로 넘어가면서 `bgm_vol=75` 같은 정수 키가 신형이 됐지만, 과거 `bgm=1`/`bgm=0` 으로 저장된 파일도 그대로 읽힌다 — bool 을 0/100 으로 승격한다. 키만 추가하고 옛 키를 살려두면, 이전 버전이 쓴 설정 파일이 새 버전에서 깨지지 않는다. 이게 "backward-tolerant 파싱" 의 실제 모습이다.
@@ -150,50 +176,62 @@ static GameSettings load_settings(const char* path)
 ```cpp
 static bool save_settings(const char* path, const GameSettings& s)
 {
-    namespace fs = std::filesystem;
-    const fs::path target(path);
-    const fs::path parent = target.parent_path();
-    if (!parent.empty()) {
-        std::error_code ec;
-        fs::create_directories(parent, ec);
-        if (ec) {
-            std::fprintf(stderr, "[settings] cannot create '%s': %s\n",
-                         parent.string().c_str(), ec.message().c_str());
-            return false;
-        }
+    if (!path || !*path) return false;
+    try {
+        // Serialize before touching the existing file. This writer publishes a
+        // complete temporary file in the same directory, then confirms syncing.
+        std::ostringstream text;
+        text << "bgm_vol=" << s.bgmVol << '\n'
+             << "sfx_vol=" << s.sfxVol << '\n'
+             << "shake=" << int(s.shakeOn) << '\n'
+             << "harddrop_shake=" << int(s.hardDropShakeOn) << '\n'
+             << "window_scale=" << s.windowScale << '\n'
+             << "fullscreen=" << int(s.fullscreen) << '\n'
+             << "vsync=" << int(s.vsyncOn) << '\n'
+             << "ghost=" << int(s.ghostOn) << '\n'
+             << "idle_animation=" << int(s.idleAnimation) << '\n';
+        auto target = std::filesystem::u8path(path);
+        if (target.parent_path().empty()) target = std::filesystem::path(".") / target;
+        if (text && meta::client::write_private_file(target.u8string(), text.str())) return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[settings] save exception: %s\n", e.what());
     }
-
-    FILE* f = std::fopen(path, "wb");
-    if (!f) {
-        std::fprintf(stderr, "[settings] cannot open '%s' for writing\n", path);
-        return false;
-    }
-
-    bool ok = true;
-    ok = ok && std::fprintf(f, "bgm_vol=%d\n",        s.bgmVol) >= 0;
-    ok = ok && std::fprintf(f, "sfx_vol=%d\n",        s.sfxVol) >= 0;
-    ok = ok && std::fprintf(f, "shake=%d\n",          s.shakeOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "harddrop_shake=%d\n", s.hardDropShakeOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "window_scale=%d\n",   s.windowScale) >= 0;
-    ok = ok && std::fprintf(f, "fullscreen=%d\n",     s.fullscreen ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "vsync=%d\n",          s.vsyncOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "ghost=%d\n",          s.ghostOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "idle_animation=%d\n", s.idleAnimation ? 1 : 0) >= 0;
-    if (std::fclose(f) != 0) ok = false;
-    if (!ok) {
-        std::fprintf(stderr, "[settings] failed while writing '%s'\n", path);
-    }
-    return ok;
+    // A sync error after rename can report failure even if new contents are visible.
+    std::fprintf(stderr, "[settings] save could not be confirmed: %s\n", path);
+    return false;
 }
+
 ```
 
-세 가지가 로더와 다르다.
+저장 순서는 **문자열 준비 → 같은 디렉터리의 임시 파일 완성 → 기존 경로 교체**다.
+`meta/private_file.cpp`의 `meta::client::write_private_file`은 계정 파일에도 쓰는 로컬 파일 도구다. 이 호출 자체가
+네트워크 요청을 보내지는 않는다. 필요한 부모 디렉터리를 만들고, POSIX에서는 임시 파일을
+배타적으로 만들며 소유자 읽기·쓰기 권한으로 기록한다. Windows는 해당 사용자/SYSTEM
+ACL과 배타적 생성을 사용한다.
 
-**(1) 부모 디렉터리를 만든다.** 저장 위치는 `<user-data>/Tetris/settings.cfg` 인데 (§2.3), 첫 실행에는 `Tetris/` 디렉터리 자체가 없다. `fopen` 은 디렉터리를 만들어 주지 않으므로 그냥 실패한다. `fs::create_directories` 를 앞에 두고, 그것이 실패하면 파일을 열어보지도 않고 돌아간다.
+기존 파일을 `wb`로 먼저 비우면 이후 쓰기가 실패해 예전 설정도 잃는다. 임시 파일에 먼저
+쓰기 때문에 교체 전 실패에서는 원래 파일을 유지할 수 있다. POSIX의 rename과 Windows의
+MoveFileEx 교체 경로를 사용하며, 쓰기·동기화·닫기·교체의 성공 여부를 확인한다.
+**원자적 교체는 보이는 내용의 경계**, **동기화는 영속성 확인**이라는 서로 다른 계약이다.
+POSIX에서는 rename 뒤 디렉터리 fsync가 실패할 수 있어 false여도 새 내용이 보일 수 있다.
+반환 실패를 곧바로 ‘예전 파일이 반드시 그대로다’로 해석하지 않는다.
 
-**(2) `bool` 을 반환한다.** 로드 실패는 "기본값으로 시작"이라는 합리적 폴백이 있지만, 저장 실패는 폴백이 없다 — 사용자가 바꾼 값이 그냥 사라진다. 호출부가 그 사실을 알 수 있어야 한다.
+여러 프로세스의 동시 편집을 합치는 기능은 없다. 마지막 교체가 이전 값을 덮을 수 있다.
+설정 변경은 실행 중 먼저 적용되며 저장 실패는 stderr에 보고한다. 현재 UI 호출부는
+bool 결과를 화면 알림으로 연결하지 않으므로, 디스크 저장 성공과 현재 실행의 설정 적용을
+구별해야 한다. 이 함수를 쓴다고 손상된 기존 파일의 해석이나 모든 충돌이 해결되는 것은 아니다.
 
-**(3) 실패를 stderr 에 남긴다.** `fprintf` 의 반환값을 `ok` 에 누적하고 `fclose` 결과까지 확인한다. 디스크가 꽉 찼거나 권한이 없을 때 조용히 성공한 척하지 않는다. `fclose` 를 확인하는 이유는 stdio 가 버퍼링을 하기 때문이다 — 앞의 `fprintf` 들이 전부 성공을 보고해도 실제 쓰기는 `fclose` 시점에 일어나 거기서 실패할 수 있다.
+### 2.1.1 기본값 복구와 원본 보존을 구별한다
+
+현재 게임의 로더는 잘못된 줄을 건너뛰고 유효한 줄을 적용하는 정책이며, 미지원 버전
+필드는 없다. 학습 체크포인트 `73-settings`는 작은 형식에 `version=1`을 두고, 중복 키·
+알 수 없는 키·잘못된 값이 하나라도 있으면 후보 전체를 거절한다. 서로 다른 정책이다.
+
+학습 세션은 `loaded`와 `missing`일 때만 저장한다. `invalid`와 `io_error`에서는 기본값으로
+조작을 계속할 수 있지만 기존 파일을 보호한다. 복구하려면 프로그램을 종료하고 잘못된 파일을
+다른 이름으로 보관한 뒤 다시 실행하거나, 파일을 올바르게 고치고 다시 실행한다. 단순히 화면이
+기본값으로 돌아온 것이 디스크의 복구나 삭제를 뜻하지 않는다. 이 보호 게이트는 현재 루트의
+load_settings/save_settings에 그대로 구현되어 있다고 가정하지 않는다.
 
 ### 2.2 창 크기 프리셋과 `max_window_scale()`
 
@@ -363,7 +401,7 @@ static GameSettings g_settings;
 
 ## 3. 즉시모드 위젯 확장 — 슬라이더와 선택기
 
-설정 화면은 즉시모드 GUI(immediate-mode)로 만든다. 위젯 트리도 retained 상태도 없다. 매 프레임 렌더 루프 안에서 위젯 함수를 부르면 그 함수가 그 자리에서 그리고 입력 결과를 반환한다. 기존 `gui_hover_rect` / `gui_button` / `gui_checkbox` 계약에 값 선택용 `gui_slider`와 `gui_value_selector`를 더한다.
+설정 화면은 즉시모드 GUI(immediate-mode)로 만든다. 이 구현은 지속적인 위젯 트리를 두지 않으며 설정 값과 포커스는 호출자가 보관한다. 매 프레임 렌더 루프 안에서 위젯 함수를 부르면 그 함수가 그 자리에서 그리고 입력 결과를 반환한다. 기존 `gui_hover_rect` / `gui_button` / `gui_checkbox` 계약에 값 선택용 `gui_slider`와 `gui_value_selector`를 더한다.
 
 ### 3.1 `gui_slider` — 0~100 트랙
 
@@ -415,32 +453,42 @@ int gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted)
 
 ### 3.2 `gui_value_selector` — `< 라벨 >`
 
+호출자가 양 끝에서 가능한 방향을 전달한다. 불가능한 화살표는 숨기고 클릭도 받지 않으며, 반환된 방향을 실제 값에 적용하는 책임은 호출자에게 남는다. 두 화살표가 겹치지 않도록 `h > 6`, `w > 2*h`인 배치만 받는다. 파생 좌표는 넓은 정수로 계산하고 `fits_ui_coordinate`로 확인한 뒤 그린다. 이 보조 함수와 체크박스의 배치 검사는 Part 3의 GUI 절에서 다룬다.
+
 선택기는 양끝 화살표 `<` `>` 와 가운데 라벨로 된 위젯이다. 클릭한 쪽에 따라 `-1`/`0`/`+1` 을 반환한다 — 값 자체는 호출부가 관리하고, 위젯은 "어느 방향으로 한 칸" 만 알려준다.
 
 **현재 소스 발췌 — `src/gui.cpp`**
 
 ```cpp
 int gui_value_selector(int x, int y, int w, int h, const char* label,
-                       bool highlighted)
+                       bool highlighted, bool allowPrevious, bool allowNext)
 {
-    // 양끝 화살표 버튼 영역 (정사각형). 중앙은 라벨.
+    // Keep two square arrows disjoint with a positive center label interval.
+    if (h <= 6 || std::int64_t(w) <= 2 * std::int64_t(h) ||
+        !fits_ui_coordinate(std::int64_t(x) + w) ||
+        !fits_ui_coordinate(std::int64_t(y) + h)) return 0;
     const int arrowW = h;
+    const int fs = h - 6;
+    const int left_width = measure_text("<", fs);
+    const int right_width = measure_text(">", fs);
+    const int text_width = measure_text(label, fs);
+    if (left_width < 0 || right_width < 0 || text_width < 0) return 0;
+    const auto right_x = std::int64_t(x) + w - arrowW;
+    const auto left_text_x = std::int64_t(x) + (std::int64_t(arrowW) - left_width) / 2;
+    const auto right_text_x = right_x + (std::int64_t(arrowW) - right_width) / 2;
+    const auto center_text_x = std::int64_t(x) + (std::int64_t(w) - text_width) / 2;
+    if (!fits_ui_coordinate(left_text_x) || !fits_ui_coordinate(right_text_x) ||
+        !fits_ui_coordinate(center_text_x)) return 0;
+
     const Color arrowIdle = highlighted ? kBtnHighlight : Color{180, 190, 220, 255};
-
-    const bool hoverL = gui_hover_rect(x, y, arrowW, h);
-    const bool hoverR = gui_hover_rect(x + w - arrowW, y, arrowW, h);
-
-    // 좌/우 화살표 — "<" / ">" 텍스트를 각 버튼 영역 중앙에 그린다.
+    const bool hoverL = allowPrevious && gui_hover_rect(x, y, arrowW, h);
+    const bool hoverR = allowNext && gui_hover_rect(static_cast<int>(right_x), y, arrowW, h);
     const Color cL = hoverL ? WHITE : arrowIdle;
     const Color cR = hoverR ? WHITE : arrowIdle;
-    const int fs = h - 6;
-    draw_text("<", x + (arrowW - measure_text("<", fs)) / 2, y + 3, fs, cL);
-    draw_text(">", x + w - arrowW + (arrowW - measure_text(">", fs)) / 2, y + 3, fs, cR);
-
-    // 중앙 라벨.
+    if (allowPrevious) draw_text("<", static_cast<int>(left_text_x), y + 3, fs, cL);
+    if (allowNext) draw_text(">", static_cast<int>(right_text_x), y + 3, fs, cR);
     const Color labelColor = highlighted ? kBtnHighlight : WHITE;
-    const int tw = measure_text(label, fs);
-    draw_text(label, x + (w - tw) / 2, y + 3, fs, labelColor);
+    draw_text(label, static_cast<int>(center_text_x), y + 3, fs, labelColor);
 
     if (hoverL && platform_mouse_pressed(0)) return -1;
     if (hoverR && platform_mouse_pressed(0)) return +1;
@@ -468,7 +516,7 @@ int  gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted);
 int  gui_value_selector(int x, int y, int w, int h, const char* label,
 ```
 
-즉시모드의 이점은 설정 화면 같은 *간헐적이고 단순한* UI 에 딱 맞는다는 것이다. 위젯의 "상태"(현재 값·하이라이트 여부)는 전부 호출부(`g_settings` + `settingsIndex`)가 들고 있고, 위젯 함수는 그릴 때마다 그 상태를 받아 그리고 결과만 돌려준다. 매 프레임 호출이라 값이 항상 최신이고, 동기화 버그가 끼어들 틈이 없다.
+즉시모드의 이점은 설정 화면 같은 *간헐적이고 단순한* UI 에 딱 맞는다는 것이다. 위젯의 "상태"(현재 값·하이라이트 여부)는 전부 호출부(`g_settings` + `settingsIndex`)가 들고 있고, 위젯 함수는 그릴 때마다 그 상태를 받아 그리고 결과만 돌려준다. 값의 소유자가 하나이므로 위젯 내부에 별도 복사본을 동기화할 필요가 줄어든다. 다만 입력을 두 번 적용하거나 갱신 전에 그리면 중복 변경이나 한 프레임 늦은 표시가 생길 수 있다. 이 설정 화면은 그리기와 입력 판정을 함께 하므로 반환된 결과는 다음 프레임의 위젯 표시에 반영된다.
 
 ## 4. 설정 화면 — `AppMode::Settings`
 
@@ -598,9 +646,11 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
             // ── ROW_SCALE: 창 스케일 선택기 ──────────────────────────────────
             draw_label(ROW_SCALE, "Window");
             {
+                const int hi = max_window_scale();
                 int dir = gui_value_selector(ctrlX, rowY(ROW_SCALE), ctrlW, boxSize,
                                              kWindowScaleLabel[g_settings.windowScale],
-                                             settingsIndex == ROW_SCALE);
+                                             settingsIndex == ROW_SCALE,
+                                             g_settings.windowScale > 0, g_settings.windowScale < hi);
                 if (settingsIndex == ROW_SCALE) {
                     if (kLeft)  dir = -1;
                     if (kRight) dir = +1;
@@ -609,7 +659,6 @@ Up/Down 은 커서(`settingsIndex`) 를 행 사이로 순환시킨다. Left/Righ
                     // 양 끝에서 wrap 하지 않고 clamp 한다 (가장 큰 값에서
                     // Right → 720 으로 점프하는, picker 답지 않은 동작 방지).
                     // 상한은 프리셋 개수가 아니라 이 모니터에 들어가는 최대치다.
-                    const int hi = max_window_scale();
                     int ns = g_settings.windowScale + dir;
                     if (ns < 0) ns = 0;
                     if (ns > hi) ns = hi;
@@ -829,7 +878,7 @@ Back 버튼이 필요한 이유도 분명하다. 이 화면은 슬라이더 때�
 
 `renderer_init(720, 640)` 이 정하는 것은 버퍼 크기가 아니라 **좌표계**다. 게임의 모든 좌표(보드, UI, 텍스트) 는 창이 얼마나 크든 항상 720×640 논리 공간에 그려진다. `draw_rect(360, 320, ...)` 는 720×640 창에서도 2430×2160 창에서도 화면 정중앙이다.
 
-창 크기를 바꿀 때 실제로 바뀌는 것은 `glViewport` 의 사각형 하나다. 그 계산이 `renderer_begin` 에 있다.
+창 크기가 달라지면 현재 플랫폼은 창 크기 기준으로 표시 사각형을 다시 계산한다. SDL 구현은 window와 drawable이 같은 단위라는 전제를 사용하며, 실제 drawable을 별도로 조회하는 고밀도 경로와 구별해야 한다. `renderer_begin`은 `platform_viewport`로 그 결과를 받아 GL에 적용한다. 논리 해상도 자체를 창 크기에 맞춰 바꾸지는 않는다.
 
 **현재 소스 발췌 — `renderer/renderer.cpp`**
 
@@ -844,13 +893,14 @@ void renderer_begin(Color bg)
     int vx = 0, vy = 0, vw = 0, vh = 0;
     platform_viewport(vx, vy, vw, vh);
 
-    // 창이 최소화되면 뷰포트가 0x0 이 된다. 지울 곳도 그릴 곳도 없으니
-    // 건너뛴다. 게임 코드는 최소화 여부를 모르고 계속 draw_* 를 부르지만,
+    // 플랫폼이 빈 표시 영역을 반환하면 배경 지우기를 건너뛰고 GL 뷰포트를
+    // 0x0으로 설정한다. 게임 코드는 최소화 여부를 모르고 draw_* 를 부르지만,
     // 그 정점들은 프레임 끝의 glb_flush 가 0x0 뷰포트로 흘려보내고 큐를
     // 비우므로 쌓이지는 않는다. 다만 배처 상태는 여기서 맞춰 둔다 —
     // 그러지 않으면 첫 프레임부터 최소화로 시작했을 때 glUseProgram 을
     // 한 번도 부르지 않은 채 glDrawArrays 에 도달한다.
     if (vw <= 0 || vh <= 0) {
+        gl_Viewport(0, 0, 0, 0); // 이전 프레임의 GL 뷰포트를 남기지 않는다.
         gl_UseProgram(s_prog);
         s_verts.clear();
         s_batch_tex = s_white;
@@ -933,17 +983,17 @@ static void recompute_viewport()
 
 크기 프리셋(720×640, 1080×960, 1440×1280, 1800×1600, 2430×2160) 은 모두 9:8 이므로 창 비율과 논리 비율이 정확히 같고, `window_aspect > logical_aspect` 가 거짓이 되어 else 분기로 간다. 거기서 `s_vp_w = s_win_w` 이고 `s_vp_h = lround(s_win_w / logical_aspect)` 인데, 1080×960 을 넣으면 `lround(1080 / 1.125) = 960 = s_win_h` 다. 즉 **else 분기가 스스로 레터박스 0을 계산해낸다.** 부동소수 비교로 특례를 만들 이유가 없다.
 
-전체화면에서 모니터가 9:8 이 아닐 때만 실제로 바가 생긴다. 16:9 모니터라면 `window_aspect ≈ 1.778 > 1.125` 이라 첫 분기로 가서 좌우 필러박스가 붙는다. 어느 경우든 그려지는 *내용* 은 9:8 비율을 유지하므로 늘어나거나 찌그러지지 않는다.
+사용자가 드래그한 창이나 전체화면의 종횡비가 9:8이 아닐 때 바가 생긴다. 16:9 모니터라면 `window_aspect ≈ 1.778 > 1.125` 이라 첫 분기로 가서 좌우 필러박스가 붙는다. 표시 사각형은 9:8에 맞추되 정수 픽셀 반올림 때문에 실제 비율에는 작은 오차가 생길 수 있다.
 
-`std::lround` 를 쓰는 것도 의도가 있다. `(int)(x + 0.5)` 는 음수에서 잘못 반올림하고 `x` 가 이미 정수에 가까울 때 부동소수 오차로 1픽셀이 흔들릴 수 있다. 창을 드래그로 늘리는 동안에는 `SDL_WINDOWEVENT_SIZE_CHANGED` 가 들어올 때마다 이 함수가 다시 돌므로, 여기서 1픽셀이 떨리면 화면이 미세하게 진동한다.
+`std::lround`는 맞춘 변의 실수 크기를 가까운 정수로 반올림하는 정책이다. 이 양수 입력 범위에서는 `(int)(x + 0.5)`도 보통 같은 목적을 수행하지만, `lround`가 의도를 명확하게 드러낸다. 반올림 함수를 썼다고 부동소수점 오차나 임계점에서의 1픽셀 변화가 없어지는 것은 아니다. 입력과 그리기가 최종 확정된 같은 정수 사각형을 사용해야 한다.
 
-계산된 `s_vp_*` 는 창 좌상단 원점이지만, 렌더러는 이것을 `glViewport` 에 그대로 넘긴다. GL 은 좌하단 원점이므로 `platform_viewport()` 가 넘겨줄 때 `y = s_win_h - s_vp_y - s_vp_h` 로 뒤집는다. 지금은 뷰포트가 항상 세로 중앙이라 두 값이 우연히 같지만, 나중에 "상단 고정" 같은 배치로 바꾸면 이 변환이 없을 때만 조용히 어긋난다.
+계산된 `s_vp_*` 는 창 좌상단 원점이지만, 렌더러는 이것을 `glViewport` 에 그대로 넘긴다. GL 은 좌하단 원점이므로 `platform_viewport()` 가 넘겨줄 때 `y = s_win_h - s_vp_y - s_vp_h` 로 뒤집는다. 중앙 배치에서도 남는 높이가 홀수이면 위아래 여백이 1픽셀 다르다. 예를 들어 위 1·아래 2이면 GL y는 2이므로 원점 변환이 필요하다.
 
 **같은 사각형을 렌더러와 마우스가 함께 쓴다는 점이 중요하다.** 렌더러가 창 전체에 늘려 그리는데 마우스만 레터박스 기준으로 역매핑하면, 창 종횡비가 논리 9:8 과 다른 순간 클릭 지점과 그려진 버튼이 서로 다른 곳을 가리킨다. 두 계산이 같은 `s_vp_*` 를 읽게 해서 그 어긋남을 구조적으로 없앴다.
 
 ### 5.3 마우스 좌표 역매핑 — 핵심 함정
 
-뷰포트를 키웠으면 **마우스 좌표를 논리 720×640 공간으로 되돌려야 한다.** 이걸 빼먹으면 1440×1280 창에서 버튼을 클릭할 때 실제 히트 위치가 두 배로 어긋난다 — 화면 좌상단을 눌렀는데 게임은 논리 중앙을 클릭한 것으로 인식한다. 위젯은 논리 좌표로 히트 테스트하므로, 마우스도 같은 좌표계로 들어와야 한다.
+뷰포트를 키웠으면 **마우스 좌표를 논리 720×640 공간으로 되돌려야 한다.** 이걸 빼먹으면 1440×1280 창에서 버튼을 클릭할 때 실제 히트 위치가 두 배로 어긋난다 — 예를 들어 창 좌표 (360,320)은 논리 (180,160)이어야 하는데 (360,320)으로 판정된다. 위젯은 논리 좌표로 히트 테스트하므로, 마우스도 같은 좌표계로 들어와야 한다.
 
 `platform_mouse_x/y` 가 원시 창 픽셀을 뷰포트 사각형 기준으로 역매핑한다.
 
@@ -952,20 +1002,16 @@ static void recompute_viewport()
 ```cpp
 int platform_mouse_x()
 {
-    if (s_vp_w <= 0) return s_mouse_x;
-    return (int)((double)(s_mouse_x - s_vp_x) * s_logical_w / s_vp_w);
+    return platform_detail::logical_mouse_axis(s_mouse_x, s_vp_x, s_vp_w, s_logical_w);
 }
 
 int platform_mouse_y()
 {
-    if (s_vp_h <= 0) return s_mouse_y;
-    return (int)((double)(s_mouse_y - s_vp_y) * s_logical_h / s_vp_h);
+    return platform_detail::logical_mouse_axis(s_mouse_y, s_vp_y, s_vp_h, s_logical_h);
 }
 ```
 
-공식은 `logical = (raw - vpOffset) * logicalSize / vpSize` 다. 뷰포트 오프셋(`s_vp_x`) 을 먼저 빼서 레터박스 바를 보정하고, 논리/물리 크기 비로 스케일을 되돌린다. 가드는 `s_vp_w <= 0` 하나뿐이다 — 0으로 나누는 것만 막고, `s_logical_w` 는 `platform_init` 이후 항상 양수라 검사하지 않는다.
-
-레터박스 바를 클릭하면 대체로 음수나 범위 밖 좌표가 나와 어떤 위젯에도 맞지 않는다. 다만 **완전히 안전하지는 않다.** `(int)` 캐스트는 0 쪽으로 절단하므로, 확대 배율이 1보다 크면 뷰포트 바로 왼쪽 1픽셀이 `-0.5 → 0` 으로 접혀 논리 좌표 0(화면 안)이 된다. 1080×960 전체화면에서 좌측 바 경계를 정확히 누르면 재현된다. 엄밀히 막으려면 `s_mouse_x < s_vp_x` 를 따로 검사하거나 `std::floor` 를 써야 한다. 현재 UI 는 좌측 끝 1픽셀에 클릭 가능한 위젯을 두지 않아 증상이 드러나지 않을 뿐이다.
+공식은 `logical = (raw - vpOffset) * logicalSize / vpSize`다. 오프셋을 빼고 확정된 뷰포트 크기로 역변환한다. 공통 `logical_mouse_axis`는 크기가 양수인지 검사하고 음수 결과는 아래 정수로 내린다. 왼쪽 여백의 -0.59가 0으로 절단되어 위젯 안으로 들어오던 문제를 막기 위한 것이다. 곱셈은 64비트로 하고 반환 int의 범위를 넘을 때만 포화한다. UI는 결과를 반열린 히트 영역으로 검사한다. 계산 구현과 경계 사례는 [Part 2의 마우스 역매핑](./part2-platform-window-input.md#82-마우스-역매핑과-절단-함정)을 참고한다.
 
 **현재 소스 발췌 — `platform/sdl.cpp`**
 
@@ -986,7 +1032,7 @@ void platform_set_window_size(int width, int height)
 
 세 가지가 순서대로 일어난다. 전체화면이면 먼저 창모드로 빠져나오고(그래야 `SDL_SetWindowSize` 가 먹는다), 크기를 바꾼 뒤 화면 중앙으로 옮기고, **요청한 크기가 아니라 실제로 잡힌 크기를 `SDL_GetWindowSize` 로 다시 읽어** 뷰포트를 계산한다. 창 관리자가 요청을 거부하거나 조정할 수 있으므로 요청값을 믿으면 안 된다.
 
-여기서 읽는 것은 `SDL_GetWindowSize` 가 돌려주는 **논리 창 크기**이지 드로어블 픽셀 크기가 아니다. 이 백엔드는 `SDL_WINDOW_ALLOW_HIGHDPI` 를 주지 않으므로 두 값이 같고, 마우스 좌표도 같은 단위로 들어온다. HiDPI 를 켜려면 `SDL_GetWindowSize` 를 `SDL_GetWindowSizeInPixels` 로 바꾸는 것만으로는 부족하고 마우스 좌표까지 함께 환산해야 한다 — 지금은 그 복잡도를 사지 않았다.
+여기서 읽는 것은 `SDL_GetWindowSize` 가 돌려주는 **논리 창 크기**이지 드로어블 픽셀 크기가 아니다. 이 백엔드는 `SDL_WINDOW_ALLOW_HIGHDPI`를 명시적으로 요청하지 않고 window와 drawable의 1:1 관계를 전제로 계산한다. 요청 플래그가 없다는 사실만으로 모든 환경의 픽셀 비율을 보장할 수는 없다. 고밀도 지원에서는 `SDL_GL_GetDrawableSize`로 실제 픽셀 크기를 따로 읽고 window→drawable→논리 변환을 함께 적용해야 한다. SDL도 [drawable 크기가 창 크기와 다를 수 있음](https://wiki.libsdl.org/SDL2/SDL_GL_GetDrawableSize)을 명시한다. 학습 체크포인트의 두 크기 조회 경로와 현재 게임의 전제를 구별한다.
 
 ```mermaid
 graph TB
@@ -1005,23 +1051,21 @@ graph TB
 
 ## 6. 오디오 볼륨 — 카테고리별 게인
 
-볼륨은 BGM/SFX 두 카테고리로 나뉜다. SDL 백엔드는 소프트웨어 믹서라, 각 보이스를 합산하기 전에 카테고리 게인을 곱한다. `audio_set_music_volume`/`audio_set_sfx_volume` 은 0~1 로 클램프해 전역 게인 변수에 저장한다.
+볼륨은 BGM/SFX 두 카테고리로 나뉜다. SDL 백엔드는 소프트웨어 믹서라, 각 보이스를 합산하기 전에 카테고리 게인을 곱한다. `audio_set_music_volume`/`audio_set_sfx_volume` 은 공통 `audio/mix_s16.h` 정책으로 유한한 값을0~1로 제한하고 NaN·무한대는0으로 처리해 저장한다.
 
 **현재 소스 발췌 — `audio/sdl_audio.cpp`**
 
 ```cpp
 void audio_set_music_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     std::lock_guard<std::mutex> lk(s_mu);
     s_musicVol = v01;
 }
 
 void audio_set_sfx_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     std::lock_guard<std::mutex> lk(s_mu);
     s_sfxVol = v01;
 }
@@ -1034,29 +1078,38 @@ void audio_set_sfx_volume(float v01)
 ```cpp
 static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
 {
-    int16_t* out = (int16_t*)stream;
-    int frames   = len / (s_have.channels * (int)sizeof(int16_t));
-    memset(stream, 0, (size_t)len);
+    if (len <= 0) return;
+    memset(stream, 0, static_cast<size_t>(len));
+    const int channels = s_have.channels;
+    if (channels < 1 || channels > 2) return;
+    const int frames = len / (channels * static_cast<int>(sizeof(int16_t)));
+    std::array<int32_t, audio_mix::kBlockFrames * 2> sum{};
 
     std::lock_guard<std::mutex> lk(s_mu);
-    mix_voice(s_bgm, out, frames, s_have.channels, s_musicVol);
-    for (int i = 0; i < MAX_SFX_VOICES; ++i)
-        mix_voice(s_sfx[i], out, frames, s_have.channels, s_sfxVol);
+    for (int offset = 0; offset < frames; ) {
+        const int count = std::min(frames - offset, static_cast<int>(audio_mix::kBlockFrames));
+        std::fill(sum.begin(), sum.end(), 0);
+        mix_voice(s_bgm, sum.data(), count, channels, s_musicVol);
+        for (int i = 0; i < MAX_SFX_VOICES; ++i)
+            mix_voice(s_sfx[i], sum.data(), count, channels, s_sfxVol);
+        for (int i = 0; i < count * channels; ++i) {
+            const int16_t value = audio_mix::finish_sample(sum[i]);
+            const size_t byteOffset = (static_cast<size_t>(offset) * channels + i) * sizeof(value);
+            memcpy(stream + byteOffset, &value, sizeof(value));
+        }
+        offset += count;
+    }
 }
 ```
 
-`mix_voice` 는 각 샘플에 게인을 곱한 뒤 포화 합산(saturating add) 한다. 게인이 0 이면 그 카테고리는 무음이 된다 — 그래서 슬라이더 0% 가 곧 음소거다.
+`mix_voice`는 각 샘플에 게인을 곱해 정수 기여량을 만들고 int32에 누산한다. 모든 보이스를 더한 뒤 콜백 출력 루프에서 한 번만 int16 범위로 제한한다. 매번 중간 합을 자르면 보이스 순서에 따라 값이 달라질 수 있다. 게인이 0 이면 그 카테고리는 무음이 된다 — 그래서 슬라이더 0% 가 곧 음소거다.
 
 **현재 소스 발췌 — `audio/sdl_audio.cpp`**
 
 ```cpp
         for (int c = 0; c < outChannels; ++c) {
-            int s = (int)((c == 0) ? l : r);
-            s = (int)(s * gain);
-            int acc = (int)out[f * outChannels + c] + s;
-            if (acc >  32767) acc =  32767;
-            if (acc < -32768) acc = -32768;
-            out[f * outChannels + c] = (int16_t)acc;
+            const int16_t sample = (c == 0) ? l : r;
+            out[f * outChannels + c] += audio_mix::scaled_sample(sample, gain);
         }
 ```
 
@@ -1067,16 +1120,14 @@ Windows 의 XAudio2 백엔드(`audio/audio.cpp`) 는 같은 시그니처를 보�
 ```cpp
 void audio_set_music_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     s_musicVol = v01;
     if (s_musicVoice) s_musicVoice->SetVolume(s_musicVol);  // 재생 중이면 즉시 반영
 }
 
 void audio_set_sfx_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     s_sfxVol = v01;  // 다음 audio_play_sound 부터 적용
 }
 ```
@@ -1125,7 +1176,7 @@ static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
 
 ```cpp
     // 컨텍스트가 current 인 지금이 확장을 조회할 수 있는 시점이다.
-    s_wglSwapInterval = (BOOL (WINAPI*)(int))wglGetProcAddress("wglSwapIntervalEXT");
+    s_wglSwapInterval = (BOOL (WINAPI*)(int))platform_gl_get_proc("wglSwapIntervalEXT");
     if (s_wglSwapInterval) s_wglSwapInterval(s_frame_pacing ? 1 : 0);
 ```
 
@@ -1165,7 +1216,7 @@ static BOOL (WINAPI* s_wglSwapInterval)(int) = nullptr;
     LockBlock();
 ```
 
-**이 플래그가 결정성 해시에 들어가지 않는 이유** 는 기존 `*SoundEvent` 들과 같다 — `mutable` 이고, sim *상태* 가 아니라 "이번 틱에 이런 일이 있었다" 는 *렌더 측 알림* 이다. `StateHashBreakdown()` 은 grid·블록·RNG·score/플래그/중력/레벨만 해시한다.
+**이 플래그를 해시에서 제외하는 기준**은 규칙 전이에 영향을 주는가이다. `hardDropEvent`와 오디오 알림은 표현 측에서 소비한다. `mutable` 여부만으로 해시 포함 여부를 정하지 않는다. `StateHashBreakdown()`은 grid·블록·RNG·점수/타이머/레벨·전투 상태를 묶어 비교한다.
 
 **현재 소스 발췌 — `src/sim_game.cpp`**
 
@@ -1176,10 +1227,12 @@ SimGame::HashBreakdown SimGame::StateHashBreakdown() const
     constexpr uint64_t BASE = 14695981039346656037ull;
 
     // Grid
-    b.grid = fnv1a64(&sim_grid.grid[0][0], sizeof(sim_grid.grid), BASE);
+    b.grid = BASE;
+    for (const auto& row : sim_grid.grid)
+        for (int cell : row) b.grid = fnv1a64_value(int32_t{cell}, b.grid);
 ```
 
-`hardDropEvent`(그리고 `*SoundEvent`) 는 이 목록에 없다. `mutable` 이라 `const` 인 해시 함수가 봐도 그만이지만, 애초에 해시 대상이 아니다 — 양쪽 클라이언트에서 흔들림이 한쪽만 떠도 게임 상태 해시는 똑같다.
+같은 규칙 상태에서 표현 플래그만 다르게 소비하면 이 해시들은 유지된다. `const` 조회는 일반 필드도 읽을 수 있다. `mutable`은 const 객체에서도 해당 필드를 수정할 수 있게 하는 C++ 선언이며, 상태의 교육적 분류와는 구별한다.
 
 ### 8.2 트리거 시점 게이팅과 흔들림 공존
 
@@ -1238,7 +1291,7 @@ void game_set_ghost_enabled(bool on) { g_ghostEnabled = on; }
 void Game::Draw()
 {
     DrawGrid(11, 11);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), 11, 11);
+    if (g_ghostEnabled && !sim.IsGameOver()) DrawBlock(sim.GhostBlock(), 11, 11);
     DrawBlock(sim.CurrentBlock(), 11, 11);
 ```
 
@@ -1246,11 +1299,11 @@ void Game::Draw()
 
 ```cpp
     DrawGrid(offsetX, offsetY, cellSize);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
+    if (g_ghostEnabled && !sim.IsGameOver()) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
     DrawBlock(sim.CurrentBlock(), offsetX, offsetY, cellSize);
 ```
 
-`sim.GhostBlock()`은 `SimGame`이 유지하는 착지 예측 블록을 읽는다. 고스트를 끄면 그 상태를 계산하거나 갱신하는 규칙은 바꾸지 않고, 그리기만 생략한다. 즉 고스트 토글은 순수 렌더 게이트다.
+`sim.GhostBlock()`은 `SimGame`이 유지하는 착지 예측 블록을 읽는다. 고스트를 끄면 그 상태를 계산하거나 갱신하는 규칙은 바꾸지 않고, 그리기만 생략한다. 게임 오버에서도 이 힌트는 그리지 않는다. 즉 고스트 토글은 순수 렌더 게이트다.
 
 ## 9. 결정성 · 네트워크 안전성 정리
 

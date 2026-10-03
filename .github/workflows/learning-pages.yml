@@ -1,0 +1,70 @@
+name: Learning site
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: learning-pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install documentation renderer
+        run: python -m pip install markdown-it-py==3.0.0
+      - name: Check documentation and refresh reference snapshots
+        run: |
+          python scripts/check_part_docs.py
+          python scripts/check_learning_markdown.py
+          python scripts/build_learning_library.py
+          python scripts/build_learning_coverage.py
+          python scripts/build_learning_lessons.py
+      - name: Check multiple-choice learning flow
+        run: node tests/learning/quiz.cjs
+      - name: Build static release
+        id: site
+        run: |
+          python scripts/build_learning_site.py > site-result.txt
+          cat site-result.txt
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads(Path('site-result.txt').read_text().splitlines()[-1])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('directory=' + result['directory'] + '\n')
+          PY
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ steps.site.outputs.directory }}
+
+  # Public publishing is deliberately an explicit Run workflow on main.
+  # Push/PR runs validate and package the site without publishing drafts.
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy reviewed site
+        id: deployment
+        uses: actions/deploy-pages@v4

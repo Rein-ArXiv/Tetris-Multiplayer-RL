@@ -9,7 +9,7 @@
 ## 이번 Part의 구현 계약
 
 - **선행 상태:** [Part 2](./part2-platform-window-input.md) 의 `platform/platform.h`(`struct Color`, `enum PlatformKey`, `platform_gl_get_proc`, `platform_viewport`, `platform_present`, `platform_mouse_*`)와 두 백엔드 중 하나. 창과 **OpenGL 3.3 Core 컨텍스트**가 만들어져 있고, 논리 좌표 마우스를 읽을 수 있다.
-- **이번 Part의 파일:** `renderer/gl_api.h`, `renderer/gl_api.cpp`, `renderer/gl_shaders.h`, `renderer/gl_internal.h`, `renderer/renderer.h`, `renderer/renderer.cpp`, `renderer/text_gl.cpp`, `renderer/image.h`, `renderer/image_gl.cpp`, `renderer/shake.h`, `renderer/shake.cpp`, `src/gui.h`, `src/gui.cpp`, `src/colors.h`, `src/colors.cpp`, `CMakeLists.txt`.
+- **이번 Part의 파일:** `core/utf8.h`, `renderer/gl_api.h`, `renderer/gl_api.cpp`, `renderer/gl_shaders.h`, `renderer/gl_internal.h`, `renderer/renderer.h`, `renderer/renderer.cpp`, `renderer/text_gl.cpp`, `renderer/image.h`, `renderer/image_gl.cpp`, `renderer/shake.h`, `renderer/shake.cpp`, `src/gui.h`, `src/gui.cpp`, `src/colors.h`, `src/colors.cpp`, `CMakeLists.txt`.
 - **연결점:** `gl_load_functions()` 가 Part 2 의 `platform_gl_get_proc()` 로 GL 함수 주소를 받는다. `renderer_begin()` 이 `platform_viewport()` 로 그릴 사각형을 얻고, `renderer_end()` 가 `platform_present()` 로 버퍼를 교체한다. `gui_hover_rect()` 가 `platform_mouse_x/y()` 를 읽는다. 반대 방향 의존은 없다 — 플랫폼 계층은 렌더러를 모른다.
 - **완료 게이트:** 이 장 말미의 `part3_render_demo` 를 빌드해 실행. 한 화면에서 사각형·둥근 사각형 안티앨리어싱·알파 0/128/255·텍스트 측정·글리프 아틀라스·이미지·tint·회전·view offset·레터박스·GUI 위젯이 전부 눈으로 확인된다.
 
@@ -62,13 +62,15 @@ flowchart LR
 
 ## 2. 래스터화는 누가 하는가
 
-“GPU에 맡긴다”는 말은 CPU가 아무 일도 하지 않는다는 뜻이 아니다. CPU는 정점·인덱스·상태 변경을 모아 명령을 만들고, GPU는 셰이더 실행·래스터화·블렌딩을 맡는다. 이 책임 경계를 먼저 고정해야 배칭과 셰이더 코드의 이유가 보인다.
+CPU는 정점·상태·명령을 준비하고 GL 구현이 정점 처리·래스터화·조각 처리·프레임버퍼 갱신을 수행한다. 보통 하드웨어 가속 구현에서는 이 경로의 많은 부분을 GPU가 맡지만, CPU에서 실행하는 소프트웨어 GL 구현도 있다. API의 책임 경계와 실행 장치의 종류를 구분해야 한다.
 
 ### 2.1 래스터화란 무엇인가
 
-**도형을 픽셀로 바꾸는 일**이다. "이 삼각형이 화면의 어느 픽셀들을 덮는가, 그리고 그 픽셀 각각은 무슨 색인가" 를 정하는 단계를 가리킨다.
+**도형이 덮는 샘플을 정하고 조각 처리에 필요한 값을 만드는 과정**이다. 정점 세 개로 삼각형을 지정해도 셰이더가 픽셀마다 정점을 새로 만드는 것은 아니다. 창 좌표의 삼각형을 샘플 격자와 비교하고, 정점 속성을 그 위치에 맞게 보간한다.
 
-화면은 결국 픽셀 격자뿐이라, 무엇을 그리든 마지막에는 누군가 "이 좌표에 이 값을 넣어라" 를 픽셀 수만큼 반복해야 한다. **그 반복을 누가 하느냐** 가 소프트웨어 렌더러와 GPU 렌더러를 가르는 유일한 차이다. 나머지는 전부 그 결정에서 파생된다.
+기본 단일 샘플 설정에서 픽셀 `(x,y)`의 중심은 연속 창 좌표 `(x+0.5,y+0.5)`다. 삼각형의 세 변을 기준으로 이 점이 안쪽인지 판정하는 CPU 모형을 만들 수 있다. 다만 경계 위 샘플의 소유권·유한 정밀도·멀티샘플링까지 재현하지 않은 모형을 GL 전체 규칙과 같다고 하면 안 된다.
+
+**프래그먼트(fragment, 조각)는 최종 픽셀 값이 아니다.** 한 픽셀에 여러 도형의 조각이 도달할 수 있고, 조각이 discard되거나 테스트에서 탈락할 수 있다. 살아남은 색상도 블렌딩·쓰기 마스크 등을 거쳐 저장된다. 조각 셰이더 호출 횟수 역시 보이는 픽셀 수를 세는 방법으로 단정하지 않는다.
 
 ### 2.2 보통 게임의 한 프레임
 
@@ -76,18 +78,21 @@ flowchart LR
 graph TB
     subgraph CPUSIDE["CPU"]
         A["게임 로직"] --> B["정점 6개 준비<br/>(사각형 = 삼각형 2개)"]
-        B --> C["draw call 제출<br/>여기서 CPU 일은 끝"]
+        B --> C["draw call 제출<br/>드라이버에 작업 요청"]
     end
     subgraph GPUSIDE["GPU"]
-        D["vertex shader<br/>정점 → 화면 좌표"] --> E["래스터화<br/>고정 하드웨어"]
-        E --> F["fragment shader<br/>덮인 픽셀마다 색 계산"]
-        F --> G["GPU 메모리의 프레임버퍼"]
+        D["vertex shader<br/>정점 → clip 좌표"] --> E["클리핑·좌표 변환<br/>래스터화·보간"]
+        E --> F["fragment shader<br/>조각의 색 계산"]
+        F --> T["테스트·블렌딩·쓰기"]
+        T --> G["프레임버퍼"]
     end
     C --> D
     G --> H["디스플레이 컨트롤러<br/>스캔아웃"]
 ```
 
-CPU 는 **"무엇을 그릴지" 만 말하고 끝난다.** 픽셀은 한 개도 만지지 않는다. 그리고 셰이더는 우리가 쓰지만 **래스터화 자체는 쓸 수 없다** — 그건 GPU 안의 고정 하드웨어이고, 우리가 짜는 것은 그 앞(vertex)과 뒤(fragment)뿐이다.
+이 프로젝트의 draw 경로는 CPU에서 완성 이미지를 채우는 대신 정점과 그리기 요청을 전달한다. 그렇다고 CPU가 픽셀 데이터를 전혀 다루지 않는 것은 아니다. 이미지 업로드·글리프 생성·필요한 readback은 별도 CPU 작업이다. 또한 draw의 반환이 실제 그리기 완료를 보장하지 않는다.
+
+OpenGL 3.3의 이 경로에서는 래스터화 단계를 사용자 셰이더로 교체하지 않는다. CPU 래스터라이저를 직접 만들 수 없다는 뜻은 아니며, GL 구현 내부가 반드시 같은 하드웨어 알고리즘이라는 뜻도 아니다. 그림은 책임 관계를 보여 주며 드라이버의 물리적 실행 순서나 디스플레이까지의 모든 단계를 나타내지는 않는다.
 
 ### 2.3 이 프로젝트의 한 프레임
 
@@ -96,12 +101,13 @@ graph TB
     subgraph CPUONLY["CPU"]
         A["게임 로직"] --> B["draw_rect / draw_text / draw_image"]
         B --> C["glb_rect<br/>정점 6개를 std::vector&lt;float&gt; 에 추가"]
-        C --> D["glb_flush<br/>텍스처가 바뀌거나 프레임이 끝날 때만"]
+        C --> D["glb_flush<br/>텍스처 변경·프레임 끝·아틀라스 재활용 경계"]
     end
     subgraph GPUSIDE["GPU"]
-        E["vertex shader<br/>픽셀 좌표 → NDC"] --> F["래스터화<br/>고정 하드웨어"]
+        E["vertex shader<br/>논리 UI 좌표 → clip 좌표"] --> F["클리핑·좌표 변환<br/>래스터화·보간"]
         F --> G["fragment shader<br/>텍스처 샘플 · SDF 모서리"]
-        G --> H["기본 프레임버퍼"]
+        G --> T["테스트·블렌딩·쓰기"]
+        T --> H["기본 프레임버퍼"]
     end
     D -->|"glBufferData + glDrawArrays"| E
     H --> I["platform_present<br/>버퍼 교체"]
@@ -113,9 +119,9 @@ graph TB
 | | 이전 소프트웨어 구현 | 현재 |
 |---|---|---|
 | GPU 가 받는 것 | 완성된 이미지 한 장 | 정점 · 셰이더 · 그리기 명령 |
-| 래스터화 주체 | CPU 의 `for` 루프 | GPU (고정 하드웨어 + fragment shader) |
-| 프레임버퍼 위치 | 시스템 RAM (`std::vector<uint32_t>`) | GPU 메모리 (기본 프레임버퍼) |
-| 언제 그려지나 | 함수가 반환되면 끝 | 비동기. 버퍼 교체까지 미확정 |
+| 래스터화 주체 | 애플리케이션의 CPU 루프 | GL 구현의 래스터화 단계, 이어서 별도의 조각 셰이더 |
+| 프레임버퍼 관리 | 애플리케이션의 시스템 RAM 배열 | GL 구현이 관리하는 기본 프레임버퍼 |
+| 완료 경계 | CPU 이미지 쓰기 루프가 끝나면 배열 갱신 완료 | draw 반환만으로 완료 보장 없음. 필요 시 명시적 동기화나 CPU readback으로 관찰 |
 | 상태 모델 | 없음. 함수 인자가 전부 | 전역 상태 머신(바인딩된 프로그램 · 텍스처 · VAO · 블렌드 모드) |
 | 창을 키우면 | 픽셀 수가 면적에 비례해 늘고 확대가 흐릿하다 | 정점 좌표가 실수라 GPU 가 창 해상도로 다시 래스터화한다 |
 
@@ -194,7 +200,7 @@ void draw_rect(int x, int y, int w, int h, Color c)
 | 모서리 | 둥근 사각형 경계가 1픽셀 hard edge 였다. 안티앨리어싱을 넣으려면 경계 픽셀마다 coverage 를 따로 계산해야 한다 |
 | VSync | 완성된 이미지를 창에 복사하는 방식이라 진짜 VSync 가 아니었다. `SDL_Delay` 로 60Hz 에 맞추는 소프트웨어 페이싱은 tearing 을 막지 못한다 |
 
-GPU 로 옮기면 이 넷이 전부 사라진다. 도형은 정점이 실수라 창 해상도 그대로 래스터화되어 저절로 선명하고, 글자는 화면 배율만큼 크게 구우면 되고, 모서리 안티앨리어싱은 조각 셰이더 한 줄이며, 버퍼 교체는 드라이버가 수직 귀선에 맞춰 준다. 그리고 비용은 창을 아무리 키워도 CPU 쪽에서는 변하지 않는다 — 보내는 정점 수가 같기 때문이다.
+GPU 경로는 CPU가 매번 큰 픽셀 배열을 확대 복사하는 부담을 줄인다. 도형의 해상도, 글리프를 굽는 배율, 모서리 경계 완화는 각자 맞춰야 하며 정점이 실수라는 이유만으로 모든 경계가 선명해지는 것은 아니다. 버퍼 교체의 동기화는 swap interval의 지원·적용과 OS 경로에 달려 있다. 같은 정점 수라면 CPU의 도형 제출량은 비슷할 수 있지만, 큰 창에서 GPU 픽셀 작업이 늘고 대기가 CPU 호출로 전파될 수 있으므로 CPU 경과 시간까지 항상 일정하다고 단정하지 않는다.
 
 한 가지 사실을 덧붙여 둔다. 이 저장소에는 그 이전에도 OpenGL 렌더러가 있었고, 그것은 **macOS 에서 돌지 않았다.** 컨텍스트를 만들 때 Core 프로파일을 명시적으로 요구하지 않아 드라이버 기본 호환 컨텍스트를 받았고, `#version 130` 셰이더가 Windows/Linux 에서는 우연히 통과했지만 macOS 의 Core 프로파일은 그것을 거부한다. 지금 버전이 세 플랫폼에서 **같은 3.3 Core 프로파일과 같은 `#version 330 core` 셰이더 한 벌**을 쓰는 것은 그 실패에서 나온 요구사항이다.
 
@@ -231,7 +237,7 @@ GPU 로 가기로 했다면 다음 질문은 "어느 API 로" 다. 2020년대에
 
 컨텍스트가 생겼다고 `glCreateShader` 를 바로 부를 수 있는 것은 아니다. **Windows 의 `opengl32.dll` 은 OpenGL 1.1 까지만 export 한다.** 1995년 Windows 95 OSR2 시절의 ABI 가 그대로 남아 있고, 그 이후 20여 년의 GL 함수는 전부 드라이버 DLL 안에 있다. 링커는 `glCreateShader` 를 찾지 못한다. 런타임에 `wglGetProcAddress` 로 주소를 받아야 한다.
 
-Linux 의 `libGL.so` 와 macOS 의 OpenGL 프레임워크에는 심볼이 있어서 그냥 링크해도 된다. 그런데 그렇게 하면 플랫폼마다 다른 선언과 다른 빌드 설정이 필요해진다. **세 플랫폼이 같은 조회 경로를 타게 하는 편이 훨씬 단순하다.** 그래서 이 렌더러는 어디서든 함수 포인터를 런타임에 받는다.
+Linux와 macOS에서는 지원되는 함수 일부를 라이브러리 심볼로 직접 연결하는 방식도 가능하지만, 실제 제공 범위는 API와 런타임에 따라 확인해야 한다. 그런데 그렇게 하면 플랫폼마다 다른 선언과 다른 빌드 설정이 필요해진다. **세 플랫폼이 같은 조회 경로를 타게 하는 편이 훨씬 단순하다.** 그래서 이 렌더러는 어디서든 함수 포인터를 런타임에 받는다.
 
 기성 GL 로더 라이브러리를 쓰면 이 일을 대신해 준다. 쓰지 않은 이유는 의존성 하나를 아끼려는 것이 아니라, **"GL 함수가 어디서 오는가"가 이 프로젝트에서 감출 이유가 없는 지식이기 때문이다.** 렌더러가 실제로 쓰는 심볼만 X-매크로 한 목록에 두므로 API가 늘어도 선언·정의·로딩 검사를 함께 갱신할 수 있다.
 
@@ -254,7 +260,7 @@ using GLintptr   = std::ptrdiff_t;
 using GLsizeiptr = std::ptrdiff_t;
 ```
 
-상수도 마찬가지로 값만 적어 둔다. GL 의 enum 값은 표준으로 고정돼 있어서 이렇게 적어도 안전하다.
+상수 값은 GL 규격에 정의돼 있다. 직접 적는 경우 오타와 타입·호출 규약 불일치를 검토해야 하며, 상수 이름이 존재한다고 실행 중인 컨텍스트가 그 기능을 지원한다는 뜻은 아니다.
 
 **현재 소스 발췌 — `renderer/gl_api.h`**
 
@@ -298,6 +304,18 @@ using GLsizeiptr = std::ptrdiff_t;
 ```
 
 이 목록의 길이가 곧 이 렌더러가 쓰는 GL 기능의 전부다. 픽셀 포맷 두 개(`GL_RGBA8`, `GL_R8`), 필터 두 개, 블렌드 인자 두 개, 버퍼 하나, 셰이더 스테이지 두 개. 3D 렌더링에 필요한 깊이 버퍼·컬링·스텐실은 한 줄도 없다.
+
+함수 포인터에는 반환형과 매개변수 외에 **호출 규약**도 맞아야 한다. 아래 매크로는 32비트 Windows에서 필요한 `__stdcall`을 명시하고 다른 플랫폼에서는 비워 둔다. 선언·정의·주소 변환이 같은 타입을 사용해야 한다. x64에서 문제없이 실행된 사실만으로 32비트 호출 규약이 맞다고 판단하면 안 된다. [SDL2의 함수 조회 계약](https://wiki.libsdl.org/SDL2/SDL_GL_GetProcAddress)도 APIENTRY 규약을 요구한다.
+
+**현재 소스 발췌 — `renderer/gl_api.h`**
+
+```cpp
+#if defined(_WIN32)
+#define TETRIS_GL_APIENTRY __stdcall
+#else
+#define TETRIS_GL_APIENTRY
+#endif
+```
 
 ### 4.2 X-매크로 테이블
 
@@ -355,7 +373,7 @@ using GLsizeiptr = std::ptrdiff_t;
     X(void,   TexParameteri,          (GLenum, GLenum, GLint))                 \
     X(void,   DeleteTextures,         (GLsizei, const GLuint*))
 
-#define GL_DECLARE(ret, name, args) extern ret (*gl_##name) args;
+#define GL_DECLARE(ret, name, args) extern ret (TETRIS_GL_APIENTRY *gl_##name) args;
 GL_FUNCS(GL_DECLARE)
 #undef GL_DECLARE
 
@@ -375,7 +393,7 @@ bool gl_load_functions();
 **현재 소스 발췌 — `renderer/gl_api.cpp`**
 
 ```cpp
-#define GL_DEFINE(ret, name, args) ret (*gl_##name) args = nullptr;
+#define GL_DEFINE(ret, name, args) ret (TETRIS_GL_APIENTRY *gl_##name) args = nullptr;
 GL_FUNCS(GL_DEFINE)
 #undef GL_DEFINE
 
@@ -386,7 +404,8 @@ bool gl_load_functions()
     // 조회 실패를 한 번에 모아 보여준다. 첫 실패에서 멈추면 드라이버가
     // 무엇을 얼마나 빠뜨렸는지 알 수 없어 원인 파악이 느려진다.
 #define GL_LOAD(ret, name, args)                                               \
-    gl_##name = (ret (*) args)platform_gl_get_proc("gl" #name);                \
+    gl_##name = reinterpret_cast<decltype(gl_##name)>(                         \
+        platform_gl_get_proc("gl" #name));                                    \
     if (!gl_##name) {                                                          \
         std::fprintf(stderr, "[GL] missing entry point: gl%s\n", #name);       \
         ok = false;                                                            \
@@ -413,6 +432,10 @@ bool gl_load_functions()
 `"gl" #name` 이 전처리기 문자열화다. `Enable` 이라는 토큰이 `"gl" "Enable"` 로 이어 붙어 `"glEnable"` 이 된다. 저장소에는 함수 이름이 **한 번만** 적혀 있고, 나머지는 전부 여기서 파생된다.
 
 **첫 실패에서 멈추지 않는 것이 이 함수의 설계 포인트다.** 흔한 구현은 `if (!fn) return false;` 로 즉시 빠져나온다. 그러면 사용자가 보내온 로그에 `glCreateShader 없음` 한 줄만 남는다. 그 한 줄로는 "컨텍스트 생성 자체가 실패한 것"과 "특정 진입점만 빠진 것"을 구별할 수 없다. 요구 목록 전체를 검사하면 전부 조회되지 않는 경우와 일부만 빠진 경우를 로그만으로 나눌 수 있다.
+
+주소가 NULL이면 사용할 수 없지만, NULL이 아니라고 지원이 증명되지는 않는다. 일부 구현은 지원되지 않는 이름에도 비어 있지 않은 주소를 돌려줄 수 있다. 현재 렌더러는 먼저 3.3 Core 컨텍스트를 확보하고 그 버전에 포함된 함수 목록을 조회한다. 확장을 추가하면 확장 지원 여부도 별도로 검사해야 한다. 컨텍스트를 다시 만들 때는 포인터도 다시 조회하며 이전 세션의 주소를 계속 쓰지 않는다.
+
+`decltype(gl_##name)`은 선언에 사용한 호출 규약까지 보존하는 포인터 타입이다. `void*`에서 함수 포인터로의 변환은 SDL/운영체제의 구현 계약을 사용하는 부분이며, 모든 ISO C++ 구현에서 같은 방식으로 이식 가능하다고 일반화하지 않는다.
 
 로딩에 성공하면 버전과 렌더러 이름을 찍는다. 이 한 줄이 실전에서 가장 자주 쓰이는 진단 도구다.
 
@@ -479,8 +502,12 @@ void glb_quad(GLuint tex,
               const float uu[4], const float vv[4],
               Color c, float channel);
 
-// 큐에 쌓인 것을 실제로 그린다. 텍스처가 바뀌기 직전과 프레임 끝에 호출된다.
+// 큐를 GPU 명령으로 제출한다. 텍스처 변경·프레임 끝·아틀라스 재활용 전에 호출한다.
+// GPU 완료나 모니터 표시 완료를 기다리는 함수는 아니다.
 void glb_flush();
+
+// 삭제 전 미제출 사용을 제출하고 배처의 텍스처 이름을 비운다.
+void glb_before_texture_delete(GLuint tex);
 
 // 단색 도형용 1x1 흰색 텍스처. 셰이더를 하나로 유지하기 위한 장치다.
 GLuint glb_white_texture();
@@ -505,7 +532,7 @@ float glb_render_scale();
 void renderer_text_shutdown();
 ```
 
-이 헤더가 소프트웨어 시절의 "픽셀을 건드리는 유일한 통로" 를 대체한다. 역할은 같다 — **텍스트와 이미지가 GL 상태를 직접 만지지 못하게 막는다.** 만약 `text_gl.cpp` 가 자기 텍스처를 바인딩하고 자기 draw call 을 냈다면, 배처가 쌓아 둔 정점이 엉뚱한 텍스처로 그려지는 버그가 생긴다. 통로를 좁혔기 때문에 **바인딩 순서를 아는 코드가 저장소에 딱 한 곳**이다.
+이 헤더는 텍스트와 이미지의 **그리기 정점 제출을 공통 배처로 모으는 통로**다. 텍스트와 이미지 모듈은 텍스처 생성·갱신·삭제 때 GL을 직접 호출하지만, 도형의 draw는 배처에 맡긴다. 배처는 flush할 때 사용할 텍스처를 다시 바인딩한다. 따라서 중간의 바인딩 변경과 텍스처 내용 변경·삭제는 구별해야 한다. 특히 이미 기록한 UV가 가리키는 내용을 덮어쓰거나 자원을 지우기 전에는 미제출 사용을 먼저 처리해야 한다.
 
 주석의 계약도 읽을 것. "view offset 은 이 함수 안에서 더해진다. 호출자는 논리 좌표만 넘긴다." 텍스트와 이미지는 흔들림을 신경 쓰지 않는다.
 
@@ -516,8 +543,8 @@ void renderer_text_shutdown();
 ```cpp
 // ─── 그리기 함수 ──────────────────────────────────────────────────────────────
 //
-// 아래 함수들은 즉시 그리지 않는다. 정점을 배처에 쌓아 두고, 텍스처가 바뀌는
-// 지점과 프레임 끝(renderer_end)에서만 실제 draw call 이 나간다.
+// 그리기 호출은 정점을 배처에 모은다. 텍스처·렌더 상태 변경, 큐 용량,
+// 자원 수명 경계와 프레임 끝(renderer_end)에서 모인 draw를 제출한다.
 
 // 색칠된 사각형.
 // 1x1 흰 텍스처를 입힌 쿼드 두 삼각형으로 배처에 들어가고, 알파 블렌딩은
@@ -526,18 +553,19 @@ void draw_rect(int x, int y, int w, int h, Color c);
 
 // 둥근 모서리 사각형.
 // roundness: 0.0(직각) ~ 1.0(완전 둥근). 반지름 = roundness * min(w,h)/2.
-// 모서리는 fragment 셰이더가 SDF 로 깎으므로 안티앨리어싱이 함께 적용된다.
+// 유한한 roundness를 [0,1]로 제한한다. 비유한 값/양수가 아닌 크기는 무시한다.
+// 논리 반지름 1 미만은 직각으로 근사; SDF 알파 전이 폭은 논리 단위 1이다.
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c);
 
-// 텍스트 그리기.
+// 텍스트 그리기. x는 첫 펜, y는 폰트 메트릭 상단(첫 기준선 - ascent).
 // 글리프는 아틀라스의 R8 텍셀이며, 셰이더가 r 채널을 알파로 읽어 색을 곱한다.
 // 글자 모양은 CPU 가 굽고 합성은 GPU 가 맡는다. 배치는 논리 좌표로 하되
 // 비트맵은 화면 배율로 구워 확대해도 선명하다.
 void draw_text(const char* text, int x, int y, int size, Color c);
 
-// 텍스트 폭 측정.
-// TTF advance metric 으로 측정한다. 창 배율과 무관한 논리 픽셀 값이라
-// 창을 늘려도 레이아웃이 흔들리지 않는다.
+// CPU 폰트 메트릭만으로 각 줄의 advance + 커닝을 합산한 최대 폭.
+// 논리 픽셀로 반올림하고 int 상한을 넘으면 INT_MAX를 반환한다.
+// 비트맵의 잉크 경계와 구별하며, 측정은 GL/아틀라스 상태를 바꾸지 않는다.
 int  measure_text(const char* text, int size);
 ```
 
@@ -560,7 +588,7 @@ int  measure_text(const char* text, int size);
 
 ### 6.1 정점 형식
 
-정점 하나가 **14 float, 56 바이트**다.
+정점 하나는 **float 원소 14개**다. 이 렌더러가 대상으로 하는 8비트 바이트·4바이트 float 환경에서는 56바이트다. 업로드 코드는 숫자 56을 반복하지 않고 `sizeof(float)`로 바이트 수를 계산한다. C++의 모든 구현에서 float가 4바이트라는 뜻은 아니다.
 
 ```text
 pos(2)  uv(2)  color(4)  local(2)  half(2)  radius(1)  channel(1)
@@ -578,15 +606,15 @@ pos(2)  uv(2)  color(4)  local(2)  half(2)  radius(1)  channel(1)
 static const char* kQuadVert = R"glsl(
 #version 330 core
 
-layout(location = 0) in vec2  a_pos;      // 화면 픽셀 좌표 (좌상단 원점)
+layout(location = 0) in vec2  a_pos;      // 논리 UI 좌표 (좌상단 원점, drawable 픽셀과 구별)
 layout(location = 1) in vec2  a_uv;
 layout(location = 2) in vec4  a_color;
-layout(location = 3) in vec2  a_local;    // 사각형 중심 기준 좌표 (픽셀)
-layout(location = 4) in vec2  a_half;     // 사각형 반크기 (픽셀)
+layout(location = 3) in vec2  a_local;    // 사각형 중심 기준 좌표 (논리 단위)
+layout(location = 4) in vec2  a_half;     // 사각형 반크기 (논리 단위)
 layout(location = 5) in float a_radius;   // 모서리 반지름 (0 이면 각진 사각형)
 layout(location = 6) in float a_channel;  // 0 = RGBA 텍스처, 1 = R8 을 알파로
 
-uniform vec2 u_screen;                    // 논리 해상도 (픽셀)
+uniform vec2 u_screen;                    // 논리 UI 영역의 폭·높이 (양수)
 
 out vec2  v_uv;
 out vec4  v_color;
@@ -596,7 +624,8 @@ out float v_radius;
 out float v_channel;
 
 void main() {
-    // 픽셀 좌표 → NDC. y 는 화면이 아래로 증가하므로 뒤집는다.
+    // 논리 UI 좌표 → w=1인 clip 좌표. 나눈 뒤 NDC와 같은 수치다.
+    // UI의 y는 아래로 증가하므로 뒤집는다.
     vec2 ndc = vec2( 2.0 * a_pos.x / u_screen.x - 1.0,
                      1.0 - 2.0 * a_pos.y / u_screen.y );
     gl_Position = vec4(ndc, 0.0, 1.0);
@@ -611,7 +640,11 @@ void main() {
 )glsl";
 ```
 
-**투영 행렬이 없다.** 2D 렌더러 튜토리얼은 대개 직교 투영 `mat4` 를 만들어 유니폼으로 올리고 `gl_Position = u_proj * vec4(a_pos, 0, 1)` 을 쓴다. 그 행렬이 실제로 하는 일은 이 두 줄과 정확히 같다 — 스케일과 이동뿐이고, 나머지 열두 성분은 0 아니면 1 이다. `vec2` 유니폼 하나로 대체하면 유니폼 업로드가 64바이트에서 8바이트로 줄고, 정점마다 4×4 행렬 곱셈이 곱셈 두 번과 덧셈 두 번이 된다. 카메라도 회전도 없는 2D UI 에서 행렬은 순수한 오버헤드다.
+**이 UI 투영에는 행렬 객체가 필요하지 않다.** 필요한 것은 논리 좌표의 배율·이동과 y축 방향 변환이다. 같은 x/y 변환은 직교 투영 행렬로도 표현할 수 있다. 여기서는 양수인 논리 폭·높이를 `vec2`로 전달해 식을 그대로 드러낸다. 32비트 float 성분 기준으로 `mat4`는 64바이트, `vec2`는 8바이트의 값을 담지만, 이것만으로 실제 전송 비용이나 셰이더 성능 차이가 확정되지는 않는다. 현재 식에는 나눗셈도 있고, 컴파일러가 상수·행렬 연산을 최적화할 수도 있다. 행렬이 항상 느리다는 이유가 아니라 필요한 변환과 인터페이스가 작다는 이유로 이 표현을 선택했다.
+
+`gl_Position`의 계약은 **clip 좌표**다. `ndc`라는 지역 변수에 계산한 x/y를 넣더라도 이 계약은 바뀌지 않는다. 뒤의 원근 나눗셈에서 x/y/z를 w로 나누며, 이 셰이더는 w=1이므로 계산한 수치가 그대로 NDC가 된다. 논리 UI (0,0)은 clip (-1,+1,0,1), (폭,높이)는 (+1,-1,0,1)로 간다. 여기서 논리 폭·높이는 창의 실제 drawable 픽셀 크기와 별개다.
+
+기본 OpenGL 3.3 설정에서 클립 영역은 `-w ≤ x,y,z ≤ w`로 표현한다. 삼각형은 이 영역과 겹치는 부분을 남기므로, 세 정점 모두 밖이어도 가운데가 영역을 가로지르면 일부가 남는다. 점 하나의 포함 판정과 도형 전체의 클리핑을 같은 함수로 취급하면 안 된다. 좌표 네 성분을 같은 양수로 배율 조정하면 나눈 위치는 같지만, w만 2배로 바꾸면 x/y/z의 나눈 값은 절반이 된다.
 
 y 를 뒤집는 것은 **좌표계 규약이 다르기 때문**이다. 화면 좌표는 위에서 아래로 증가하고(좌상단이 원점), NDC 는 아래에서 위로 증가한다(중앙이 원점, -1 이 아래). `1.0 - 2.0 * y / h` 가 그 변환이다. 이 한 줄을 빼먹으면 화면이 위아래로 뒤집혀 나온다 — 그래픽스에서 가장 흔한 첫 버그다.
 
@@ -655,8 +688,8 @@ void main() {
     // 불필요하게 흐려지는 것을 막는다.
     if (v_radius > 0.0) {
         float d = rounded_box_sdf(v_local, v_half, v_radius);
-        // 1픽셀 폭으로 부드럽게 자른다 — 모서리 안티앨리어싱이
-        // 별도 코드 없이 따라온다.
+        // 논리 UI 폭 1의 구간에서 알파를 완화한다. 물리 1픽셀이나
+        // 정확한 픽셀 coverage를 보장하는 식은 아니다.
         c.a *= 1.0 - smoothstep(-0.5, 0.5, d);
     }
 
@@ -673,11 +706,13 @@ q = |p| - b + r          (중심 대칭을 이용해 1사분면으로 접는다)
 d = |max(q, 0)| + min(max(q.x, q.y), 0) - r
 ```
 
-첫 항 `length(max(q, 0.0))` 이 모서리 바깥 영역의 거리를, 둘째 항 `min(max(q.x, q.y), 0.0)` 이 도형 내부의 (음수) 거리를 담당한다. 마지막에 `- r` 로 모서리를 깎는다. 이 식은 사각형을 안쪽으로 `r` 만큼 줄인 뒤 경계를 `r` 만큼 부풀리는 연산과 같고, 그래서 결과가 둥근 사각형이 된다.
+중심 기준 점 `p`, 양수 반크기 `b`, `0 ≤ r ≤ min(b.x,b.y)`를 사용한다. 먼저 반크기 `b-r`인 안쪽 사각형까지의 부호 있는 거리를 구한다. `length(max(q,0))`는 그 사각형 바깥에서 x/y 초과량의 유클리드 길이를 계산한다. 안쪽에서는 이 항이 0이므로 `min(max(q.x,q.y),0)`가 가장 가까운 변까지의 음수 거리를 남긴다. 마지막 `-r`은 거리 0인 경계를 바깥으로 r만큼 옮겨 둥근 사각형을 만든다. 반지름이 반크기의 최솟값을 넘으면 이 설명의 안쪽 사각형이 성립하지 않으므로 CPU에서 제한한다.
 
-거리를 알면 안티앨리어싱이 따라온다. `smoothstep(-0.5, 0.5, d)` 는 경계 ±0.5픽셀 구간에서 0 에서 1 로 부드럽게 올라가는 값이다. 이걸 알파에서 빼면 **경계 픽셀이 덮인 비율만큼만 불투명해진다.** 소프트웨어 구현에서는 이 효과를 내려면 경계 픽셀마다 coverage 를 따로 계산해야 했고, 그래서 하지 않았다. 여기서는 한 줄이다.
+`smoothstep(-0.5, 0.5, d)`는 경계 주변의 알파를 부드럽게 바꾸는 근사다. d는 논리 UI 단위이므로 전이 구간의 폭 1도 논리 단위이며, 확대된 drawable에서 항상 물리 1픽셀은 아니다. 또한 픽셀 면적을 적분한 정확한 coverage가 아니다. 화면 배율에 일정한 폭을 원하면 화면 공간 미분 등을 사용하는 별도 설계가 필요하다. 현재 식은 이 비용을 들이지 않고 간단한 경계 완화를 제공한다.
 
-`if (v_radius > 0.0)` 로 건너뛰는 것도 의미가 있다. 각진 사각형에 SDF 를 적용하면 경계 픽셀의 알파가 0.5 근처가 되어 **테두리 한 줄이 미세하게 흐려진다.** 인접한 사각형 두 개를 붙여 놓으면 이음매에 실선이 보인다. 반지름 0 이면 셰이더가 아예 손대지 않도록 해서 그 문제를 없앴다.
+`if (v_radius > 0.0)`는 반지름 0일 때 알파 마스크를 건너뛰게 한다. 반지름 0의 SDF도 계산할 수 있지만, 그 값에 smoothstep을 적용하면 경계에서 논리 거리 0.5 이내인 내부 샘플의 알파가 줄어든다. 어느 픽셀이 영향을 받는지는 배율·정렬에 달려 있다. 각진 사각형을 타일처럼 붙이는 경로에서는 이 추가 완화를 생략한다.
+
+SDF는 이미 래스터화된 사각형 안에서 실행된다. 현재 정점은 원래 외접 사각형이므로 그 밖에는 smoothstep의 바깥쪽 전이 구간을 그릴 조각이 없다. 이 방식은 모서리 알파를 완화하지만, 확장된 기하나 픽셀 면적 적분으로 완전한 윤곽 coverage를 구하는 구현과는 구별한다.
 
 ### 6.4 `a_channel` — 텍스처 두 종류를 한 셰이더로
 
@@ -685,11 +720,11 @@ d = |max(q, 0)| + min(max(q.x, q.y), 0) - r
 
 가장 단순한 해법은 셰이더를 나누는 것이고, 그러면 배칭이 깨진다. 두 번째 해법은 `if (v_channel > 0.5)` 분기인데, 조각 셰이더의 분기는 워프 안에서 두 경로가 갈리면 양쪽을 모두 실행한다. 세 번째가 위 조각 셰이더의 `vec4 sampled = mix(tex, vec4(1.0, 1.0, 1.0, tex.r), v_channel);` 한 줄이다.
 
-`mix(a, b, t)` 는 `a*(1-t) + b*t` 다. `v_channel` 이 0 이면 `tex` 를 그대로, 1 이면 `vec4(1,1,1,tex.r)` 을 고른다. 후자는 "색은 흰색, 알파는 R 채널" 이고, 다음 줄의 `sampled * v_color` 를 거치면 **글자색 × coverage** 가 된다. 분기 없이, 한 줄로, 같은 코드 경로에서.
+`mix(a, b, t)` 는 `a*(1-t) + b*t` 다. `v_channel` 이 0 이면 `tex` 를 그대로, 1 이면 `vec4(1,1,1,tex.r)` 을 고른다. 후자는 "색은 흰색, 알파는 R 채널"이다. `sampled * v_color`를 거치면 RGB는 글자색을 유지하고 **알파만 coverage × 글자색의 알파**가 된다. 이 출력은 아직 premultiplied RGB가 아니다. RGB에 알파가 곱해지는 시점은 뒤의 `SRC_ALPHA` 블렌딩이다. 셰이더에서 RGB에도 coverage를 미리 곱한 채 같은 블렌드를 쓰면 두 번 곱해져 가장자리가 어두워진다.
 
 `v_channel` 은 정점 속성이므로 사각형마다 다를 수 있다. 즉 **한 배치 안에 글리프와 이미지가 섞여도 된다.** 실제로 섞이지는 않는다 — 텍스처가 다르면 어차피 배치가 끊기기 때문이다. 그래도 이 설계 덕분에 셰이더 쪽에는 특별한 규칙이 없다.
 
-마지막의 `if (c.a <= 0.0) discard;` 는 완전히 투명한 조각을 프레임버퍼에 쓰지 않고 버린다. 블렌딩 결과는 어차피 같지만 메모리 쓰기가 줄고, 글리프 사각형의 대부분이 여백이라 실제로 자주 걸린다.
+마지막의 `if (c.a <= 0.0) discard;`는 해당 조각의 출력을 버린다. 배경을 새로 칠하거나 삼각형의 정점을 삭제하는 동작은 아니다. 현재 알파 합성에서 알파 0인 색은 배경색을 바꾸지 않지만, discard와 알파 0 출력은 일반적으로 동일한 파이프라인 동작이 아니다. 다른 깊이·스텐실·블렌드 상태까지 같은 결과라고 일반화하지 않는다. 실행 비용과 메모리 트래픽도 드라이버·하드웨어에 따라 달라지므로 성능 개선을 이 한 줄만으로 보장하지 않는다.
 
 ## 7. 배처
 
@@ -718,7 +753,7 @@ static GLint  s_u_tex       = -1;
 // 정점 하나: pos(2) uv(2) color(4) local(2) half(2) radius(1) channel(1)
 static constexpr int kFloatsPerVertex = 14;
 
-static std::vector<float> s_verts;      // 프레임 내내 재사용 — 재할당 방지
+static std::vector<float> s_verts;      // 용량 재사용 — capacity를 넘으면 재할당 가능
 static GLuint             s_batch_tex = 0;
 static bool               s_ready     = false;
 ```
@@ -742,13 +777,13 @@ static void push_vertex(float x, float y, float u, float v, Color c,
 }
 ```
 
-`Color` 의 0~255 바이트를 여기서 0~1 float 으로 바꾼다. GL 3.3 에서는 `glVertexAttribPointer` 의 `normalized` 인자로 정수 속성을 자동 정규화할 수도 있어서 색을 4바이트로 보낼 수 있지만, 그러면 정점 구조가 float 과 byte 가 섞인 형태가 되어 오프셋 계산이 복잡해진다. 정점 수가 프레임당 수천 개 수준이라 대역폭이 문제되지 않으므로 전부 float 으로 통일했다.
+`Color` 의 0~255 바이트를 여기서 0~1 float 으로 바꾼다. GL 3.3 에서는 `glVertexAttribPointer` 의 `normalized` 인자로 정수 속성을 자동 정규화할 수도 있어서 색을 4바이트로 보낼 수 있지만, 그러면 정점 구조가 float 과 byte 가 섞인 형태가 되어 오프셋 계산이 복잡해진다. 현재 구현은 속성 배치를 단순하게 유지하려고 전부 float을 사용한다. 대역폭 비용이 허용되는지는 실제 화면의 업로드량과 실행 시간으로 판단해야 한다.
 
 **현재 소스 발췌 — `renderer/renderer.cpp`**
 
 ```cpp
-// 텍스처가 바뀌면 지금까지 쌓인 것을 먼저 내보낸다. 한 draw call 은 한
-// 텍스처만 쓸 수 있기 때문이다.
+// 이 배처는 draw마다 한 텍스처를 바인딩한다. 텍스처가 바뀌기 전에
+// 쌓인 정점을 먼저 그려 같은 배치의 텍스처 해석을 유지한다.
 static void ensure_texture(GLuint tex)
 {
     if (s_batch_tex != tex) {
@@ -781,9 +816,19 @@ void glb_flush()
 }
 ```
 
-`glBufferData` 를 매번 부르는 것이 핵심이다. 같은 크기의 버퍼를 `glBufferSubData` 로 덮어쓰면 GPU 가 아직 이전 draw call 을 처리하는 중일 때 **드라이버가 완료를 기다린다**(파이프라인 정지). `glBufferData` 에 새 크기와 새 데이터를 주면 드라이버는 기존 저장소를 버리고 새 메모리를 잡을 수 있다 — 이것을 버퍼 오펀링(orphaning)이라 부르고, `GL_STREAM_DRAW` 힌트가 "매 프레임 한 번 쓰고 몇 번 읽는다" 는 사용 패턴을 알려 준다.
+`glBufferData`는 현재 바인딩된 버퍼의 데이터 저장소를 새 크기로 다시 정의한다. non-null 포인터를 전달하면 그 범위의 내용을 초기 데이터로 복사하므로, 호출이 반환된 뒤 CPU 원본 배열을 비워도 된다. 이것은 뒤의 그리기 명령까지 완료됐다는 뜻은 아니다. `nullptr`를 전달하면 저장 공간만 마련하며 내용이 0으로 초기화된다고 가정하지 않는다.
 
-`s_verts` 는 `clear()` 만 하고 메모리를 놓지 않는다. `std::vector::clear` 는 용량을 유지하므로 다음 프레임의 `insert` 가 재할당 없이 돈다. 초기화에서 4,096 정점 분량을 미리 예약하는데, 그 `renderer_init` 은 VAO/VBO 설정과 함께 "초기화 · 프레임 수명주기 · 종료 순서" 절에서 통째로 본다.
+`glBufferSubData`로 사용 중인 범위를 갱신하면 기존 작업과의 충돌 때문에 대기가 생길 수 있다. 저장소를 재정의하는 방식은 드라이버가 이전 저장소와 새 저장소를 분리하는 오펀링(orphaning) 전략을 선택할 여지를 준다. 하지만 새 물리 메모리를 반드시 할당하거나 동기화 대기를 없앤다는 보장은 없다. 실제 비용은 드라이버·사용 패턴·현재 진행 중인 작업에 달려 있다.
+
+`GL_STREAM_DRAW`는 내용을 한 번 바꾼 뒤 적은 횟수로 그리기에 사용할 것이라는 힌트다. 이 구현에서는 프레임이 아니라 **flush마다** 저장소를 정의한다. `GL_STATIC_DRAW` 역시 변경 금지나 전용 GPU 메모리 배치를 강제하는 플래그가 아니다. 사용 패턴에 맞는 힌트를 선택하고, 성능을 판단할 때는 실행 시간을 관찰한다. [Khronos glBufferData 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glBufferData.xhtml)
+
+`s_verts.clear()`는 원소를 제거해 size를 0으로 만들고 capacity는 유지한다. 다음 삽입으로 size가 capacity를 넘지 않는 동안에는 재할당이 필요 없다. 예약한 용량은 상한이 아니므로 더 많은 원소를 넣으면 저장소가 재할당될 수 있다. 이때 이전 `data()` 주소를 계속 쓰면 안 된다. clear 후에는 원소도 존재하지 않으므로 남은 저장 공간을 살아 있는 정점으로 읽지 않는다.
+
+이 배열의 원소는 정점 구조체가 아니라 **float**다. 예를 들어 정점 6개는 float 84개이며, 4바이트 float 환경에서 업로드 범위는 336바이트다. `s_verts.size()`는 84, 그리기에 쓰는 정점 수는 `84 / kFloatsPerVertex`인 6이다. `sizeof(s_verts)`는 vector 제어 객체의 크기라 업로드 범위가 아니며, `capacity()`도 실제로 채운 원소 수가 아니다.
+
+`glDrawArrays(GL_TRIANGLES, first, count)`의 first는 시작 **정점 인덱스**, count는 읽을 **정점 개수**다. 바이트 길이나 삼각형 개수가 아니다. 위 호출은0부터 연속 정점을3개씩 묶으며 count가2라면 완성된 삼각형이 없어 아무 삼각형도 만들지 않는다. 이것은 API 오류 없이도 발생할 수 있다. CPU/VBO 범위를 넘어서는 수를 진단 실험으로 넘기지 말고, 업로드 범위와 first/count의 관계를 호출자가 지켜야 한다. [Khronos DrawArrays](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glDrawArrays.xhtml).
+
+초기화는 `reserve(4096 * kFloatsPerVertex)`로 4,096 정점 분량의 **float 용량**을 예약한다. reserve는 원소를 생성하지 않는다. 그 `renderer_init`은 VAO/VBO 설정과 함께 "초기화 · 프레임 수명주기 · 종료 순서" 절에서 통째로 본다. 텍스처 변경 시 flush는 이 렌더러의 단일 텍스처 배치 정책이며, OpenGL 전체가 한 draw에서 텍스처 하나만 사용할 수 있다는 제한은 아니다.
 
 ### 7.3 사각형을 정점 여섯 개로
 
@@ -828,13 +873,18 @@ void glb_rect(GLuint tex,
 
 꼭짓점 배열을 네 개만 만들고 `order` 로 여섯 번 꺼낸다. 사각형은 삼각형 두 개이고 두 삼각형이 대각선의 두 꼭짓점(0 과 2)을 공유한다.
 
-**인덱스 버퍼(EBO)를 쓰지 않은 이유**를 적어 둔다. 인덱스를 쓰면 정점 4개(224바이트) + 인덱스 6개(24바이트) = 248바이트로, 지금의 336바이트보다 26 % 적다. 대신 배처가 사각형마다 인덱스 베이스를 더해 가며 별도 배열을 관리해야 하고, flush 때 버퍼 두 개를 업로드해야 한다. 정점 대역폭이 병목이 아닌 상황에서 코드 복잡도만 늘어나는 거래라 하지 않았다.
+이 `order`는 CPU에서 원소를 고르는 배열이며 GPU의 인덱스 버퍼가 아니다. 최종 VBO에는 여섯 정점이 복사되어 `DrawArrays`로 읽힌다. 같은 위치 0과 2가 두 번 들어가지만 두 삼각형이 같은 영역을 두 번 덮는다는 뜻은 아니다. 동일한 끝점을 가진 공유 변 위의 샘플은 GL의 래스터화 규칙에 따라 한쪽에서만 생성된다. 한쪽 끝점을 다른 값으로 계산하거나 좌표 공간을 섞으면 이 연결 조건을 잃을 수 있다.
+
+정점 순서는 변을 따라 도는 방향(winding)도 정한다. 앞면의 기준은 `glFrontFace`로 선택하고, 면 제거 여부는 별도의 `GL_CULL_FACE` 활성화 상태로 정한다. 기본값은 CCW 앞면·면 제거 비활성이다. 방향을 뒤집었다는 이유만으로 언제나 사라지는 것은 아니다. 이 UI의 y는 아래로 증가하며 vertex shader가 뒤집으므로 방향을 판단할 때 입력 UI 좌표와 변환 뒤 창 좌표를 구별한다.
+
+
+**인덱스 버퍼(EBO)를 쓰지 않은 이유**를 적어 둔다. 현재 정점 형식이 56바이트일 때 여섯 정점은 336바이트다. 정점 네 개와 32비트 인덱스 여섯 개를 사용하면 224+24=248바이트, 약 26% 작다. 16비트 인덱스를 사용할 수 있는 배치 범위에서는 인덱스 데이터가 12바이트가 된다. 이 계산은 원시 데이터 크기 비교이며 실제 전송·실행 성능 측정은 아니다. 현재 배처는 정점 한 배열을 순서대로 쌓는 단순한 구현을 선택했다. EBO로 바꾸려면 인덱스 형식·배치의 기준 정점·업로드 수명 등을 추가로 관리해야 한다.
 
 `x += s_view_ox` 가 여기 있는 것도 계약의 일부다. 화면 흔들림 오프셋을 **모든 그리기가 통과하는 이 지점 한 곳에서** 더한다. 텍스트도 이미지도 논리 좌표만 넘기면 된다.
 
 화면 밖 조기 반환은 소프트웨어 시절의 클리핑과 성격이 다르다. GPU 는 화면 밖 삼각형을 어차피 버리므로 **정확성을 위한 코드가 아니다.** 정점 336바이트를 만들어 업로드하는 CPU 비용을 아끼는 최적화다.
 
-회전 이미지는 축 정렬이 아니라서 별도 진입점을 쓴다.
+회전 이미지는 축 정렬이 아니라서 별도 진입점을 쓴다. 네 위치와 UV는 동일한 순서로 짝지어야 한다. 고정 대각선 0-2로 나누는 이 함수는 호출자가 순서대로 둘러싼 볼록 사각형을 준다는 계약이며, 임의의 오목·자기 교차 사각형을 삼각분할하는 알고리즘은 아니다.
 
 **현재 소스 발췌 — `renderer/renderer.cpp`**
 
@@ -867,22 +917,26 @@ int    glb_screen_height()   { return s_screen_h; }
 float  glb_render_scale()    { return s_render_scale; }
 ```
 
-### 7.4 draw call 이 끊기는 네 지점
+### 7.4 배치 제출 경계와 그리기 순서
 
-배칭이 언제 끊기는지를 정확히 아는 것이 이 렌더러를 이해하는 열쇠다. 네 곳뿐이다.
+현재 렌더러에서 정점이 남아 있는 큐를 제출하는 경계는 다음과 같다. 빈 큐의 flush는 draw를 만들지 않는다.
 
 | 지점 | 부르는 곳 | 이유 |
 |---|---|---|
-| 텍스처 교체 | `ensure_texture` | 한 draw call 은 텍스처 하나만 바인딩한다 |
-| view offset 변경 | `renderer_set_view_offset` | 오프셋이 정점 좌표에 이미 구워져 있어 섞이면 안 된다 |
+| 텍스처 교체 | `ensure_texture` | 현재 배처는 한 draw에서 하나의 텍스처를 사용한다 |
 | 프레임 끝 | `renderer_end` | 남은 것을 내보내야 화면에 나온다 |
 | 글리프 아틀라스 재활용 직전 | `pack_glyph` | 큐에 든 글자들의 UV 가 곧 덮어써질 내용을 가리킨다 |
 
-그래서 프레임당 draw call 수는 **텍스처가 몇 개인가가 아니라 몇 번 바뀌는가**로 정해진다. 텍스처 종류는 몇 안 되지만(흰 텍스처·글리프 아틀라스·아이콘 텍스처), 도형과 글자를 번갈아 그리면 그 횟수만큼 끊긴다. 즉 이 값은 코드에 고정된 상수가 아니라 화면 구성에 따라 변하는 관찰값이다 — 수치를 문서에 박아 두는 대신, flush 횟수를 직접 세어 확인하는 측정 방법을 §19 에 둔다.
+프레임당 draw call 수는 **정점이 들어 있는 제출 경계의 수**에 따라 달라진다. 텍스처 변경뿐 아니라 프레임의 마지막 큐와 아틀라스 재활용도 포함한다. 텍스처 종류는 몇 안 되지만(흰 텍스처·글리프 아틀라스·아이콘 텍스처), 도형과 글자를 번갈아 그리면 그 횟수만큼 끊긴다. 즉 이 값은 코드에 고정된 상수가 아니라 화면 구성에 따라 변하는 관찰값이다 — 수치를 문서에 박아 두는 대신, flush 횟수를 직접 세어 확인하는 측정 방법을 §19 에 둔다.
 
-여기서 **이 배처가 하지 않는 것**을 분명히 해 둘 필요가 있다. 상용 2D 배처는 흔히 텍스처별로 정점을 모아 두었다가 마지막에 텍스처 순서로 정렬해 draw call 을 최소화한다. 이 배처는 **정렬하지 않는다.** 순서를 바꾸면 알파 블렌딩 결과가 달라지기 때문이다.
+이 배처는 도형 호출 순서를 보존한다. 같은 텍스처 A를 쓰는 도형 사이에 B가
+끼어 있을 때 A끼리 재정렬하면 겹치는 픽셀 결과가 달라질 수 있다. 불투명 도형도
+깊이 검사를 사용하지 않는 현재 2D 경로에서는 나중 도형이 앞 도형을 덮는다.
+알파 블렌딩은 그 순서가 색 혼합에도 영향을 준다.
 
-깊이 버퍼가 없으므로 무엇이 위에 그려지는지는 **오직 그리는 순서**가 정한다. 모달 오버레이가 게임 화면을 덮고, 버튼 라벨이 버튼 배경 위에 올라오는 것이 전부 순서 덕분이다. 배처가 텍스처 기준으로 재정렬하면 라벨(아틀라스 텍스처)이 배경(흰 텍스처)보다 먼저 나가서 글자가 배경 밑에 깔린다. **순서 보존은 성능보다 우선하는 제약이다.** 대신 텍스처 전환 자체가 프레임당 서너 번뿐이라 잃는 것도 거의 없다.
+모달 위에 라벨을 그리려면 배경→라벨 순서를 보존해야 한다. 정렬 최적화는 겹치지
+않음이나 별도 깊이 규칙처럼 순서를 바꿔도 결과가 같다는 근거가 있을 때 적용한다.
+현재 화면의 텍스처 전환 수와 이득은 실제 호출 흐름에서 측정한다.
 
 ## 8. 좌표계 · 뷰포트 · 레터박스
 
@@ -903,13 +957,14 @@ void renderer_begin(Color bg)
     int vx = 0, vy = 0, vw = 0, vh = 0;
     platform_viewport(vx, vy, vw, vh);
 
-    // 창이 최소화되면 뷰포트가 0x0 이 된다. 지울 곳도 그릴 곳도 없으니
-    // 건너뛴다. 게임 코드는 최소화 여부를 모르고 계속 draw_* 를 부르지만,
+    // 플랫폼이 빈 표시 영역을 반환하면 배경 지우기를 건너뛰고 GL 뷰포트를
+    // 0x0으로 설정한다. 게임 코드는 최소화 여부를 모르고 draw_* 를 부르지만,
     // 그 정점들은 프레임 끝의 glb_flush 가 0x0 뷰포트로 흘려보내고 큐를
     // 비우므로 쌓이지는 않는다. 다만 배처 상태는 여기서 맞춰 둔다 —
     // 그러지 않으면 첫 프레임부터 최소화로 시작했을 때 glUseProgram 을
     // 한 번도 부르지 않은 채 glDrawArrays 에 도달한다.
     if (vw <= 0 || vh <= 0) {
+        gl_Viewport(0, 0, 0, 0); // 이전 프레임의 GL 뷰포트를 남기지 않는다.
         gl_UseProgram(s_prog);
         s_verts.clear();
         s_batch_tex = s_white;
@@ -917,7 +972,8 @@ void renderer_begin(Color bg)
     }
     gl_Viewport(vx, vy, vw, vh);
 
-    // 뷰포트는 논리 종횡비를 유지하므로 가로/세로 배율이 같다. 세로로 잰다.
+    // 정수 뷰포트의 반올림 때문에 두 축 배율은 조금 다를 수 있다.
+    // 글리프 배율은 세로 높이를 기준으로 정한다.
     s_render_scale = (float)vh / (float)s_screen_h;
 
     // glClear 는 뷰포트가 아니라 시저 박스를 따른다. glViewport 만 좁혀 놓고
@@ -946,7 +1002,7 @@ void renderer_begin(Color bg)
 
 ### 8.1 뷰포트가 0×0 인 프레임
 
-첫 분기부터 짚는다. **창을 최소화하면 클라이언트 영역이 사라져 뷰포트가 0×0 이 된다.** 지울 곳도 그릴 곳도 없으니 건너뛰는 것이 맞는데, 그냥 `return` 하면 미묘한 문제가 생긴다.
+첫 분기부터 짚는다. **플랫폼이 그릴 영역을0×0으로 보고한 경우** 배경 지우기와 일반 프레임 설정을 건너뛴다. 최소화 때 반환되는 실제 크기는 OS·백엔드에 따라 다를 수 있다. 이 분기는 창 상태를 추측하는 대신 전달받은 크기를 검사한다. 그냥 `return` 하면 GL에 이전 프레임의 viewport가 남기 때문에, 먼저 `glViewport(0, 0, 0, 0)`으로 빈 영역을 명시한다. CPU에서 크기0을 계산한 것과 GL 상태를0으로 설정한 것은 별개다.
 
 게임 코드는 창이 최소화됐는지 모른다. 프레임 루프가 계속 돌면서 `draw_rect` 와 `draw_text` 를 부르고, 정점이 큐에 쌓인다. 그 정점들은 프레임 끝의 `glb_flush` 가 0×0 뷰포트로 흘려보내므로 쌓이지는 않는다. 문제는 **`glUseProgram` 이 한 번도 불리지 않은 채 `glDrawArrays` 에 도달할 수 있다** 는 것이다 — 프로그램이 최소화된 상태로 시작하면 정확히 그렇게 된다. 바인딩된 프로그램이 없는 상태의 draw call 은 정의되지 않은 동작이다.
 
@@ -954,17 +1010,19 @@ void renderer_begin(Color bg)
 
 ### 8.2 `glClear` 는 뷰포트를 따르지 않는다
 
-이 함수에서 가장 놓치기 쉬운 사실이다. **`glViewport` 는 정점 좌표가 매핑될 사각형을 정할 뿐, `glClear` 의 범위를 정하지 않는다.** clear 의 범위를 제한하는 것은 시저 박스뿐이다.
+이 함수에서 가장 놓치기 쉬운 사실이다. **`glViewport` 는 정점 좌표가 매핑될 사각형을 정할 뿐, `glClear` 의 범위를 정하지 않는다.** 이 패스에서는 시저 박스로 지울 사각형을 제한한다. 색 쓰기 마스크 등 다른 관련 상태도 clear에 영향을 주므로, 전체 상태와 무관한 함수라는 뜻은 아니다.
 
 그래서 `glViewport` 만 좁혀 놓고 배경색으로 지우면 **창 전체가 배경색으로 칠해진다.** 레터박스 여백과 게임 화면이 같은 색이 되어 경계가 사라지고, 9:8 이 아닌 창에서는 화면이 어디까지인지 알 수 없게 된다. 처음 보면 "뷰포트가 적용되지 않았다" 고 오해하기 쉬운 증상이다.
 
 해결은 두 번 지우는 것이다. 시저를 끄고 창 전체를 검게, 시저를 뷰포트로 켜고 그 안만 배경색으로. 그리고 **시저를 켠 채로 남겨 둔다.** 논리 좌표 밖으로 나가는 그리기가 있어도 여백을 침범하지 못한다. `glb_rect` 의 화면 밖 조기 반환이 CPU 쪽 방어라면 이쪽은 GPU 쪽 방어다.
 
+뷰포트 `(vx, vy, vw, vh)`는 NDC를 연속 창 좌표로 옮긴다. 식은 `x = vx + (ndc_x + 1) × vw / 2`, `y = vy + (ndc_y + 1) × vh / 2`다. NDC (+1,+1)은 마지막 픽셀의 인덱스가 아니라 사각형의 위·오른쪽 경계로 간다. 정점이 어느 연속 위치에 놓이는지와 어떤 픽셀 샘플이 도형 내부에 들어오는지는 별개의 문제다. 기본 깊이 범위는 NDC z의 [-1,1]을 [0,1]로 옮긴다.
+
 ### 8.3 좌하단 원점
 
 `platform_viewport` 가 돌려주는 `y` 는 **창 아래쪽 기준**이다. GL 의 윈도우 좌표계 규약이 좌하단 원점이기 때문이고, 플랫폼 계층이 `y = win_h - vp_y - vp_h` 로 변환해서 준다.
 
-지금은 뷰포트가 항상 세로 중앙에 있어서 위아래 여백이 같고, 그래서 뒤집어도 값이 같다. **바로 그 점이 위험하다.** 나중에 "상단 고정" 같은 배치로 바꾸면 변환이 없어도 조용히 잘못된 값이 나온다. 규약을 지키는 쪽에 변환을 넣어 두는 것이 옳고, 플랫폼 계층 주석이 그 이유를 남겨 두었다.
+중앙 정렬에서도 남은 높이가 홀수면 위아래 여백이 1픽셀 다르다. 높이 603에 600을 넣으면 위쪽 여백은 1, 아래쪽 여백은 2다. 따라서 `win_h - vp_y - vp_h`를 항상 계산한다. 이 규약은 상단 고정 같은 다른 배치에도 그대로 적용된다.
 
 ### 8.4 실제로 있었던 버그 — 클릭과 그림이 어긋난다
 
@@ -974,13 +1032,13 @@ void renderer_begin(Color bg)
 
 고친 방법은 단순하다. **그리는 쪽과 입력을 되돌리는 쪽이 같은 사각형을 쓰게 했다.** `platform_viewport` 하나가 두 계산의 유일한 출처가 되었고, 렌더러는 그 값을 `glViewport` 에 그대로 넘긴다. 좌표계 버그의 표준적인 해법이다 — 같은 값을 두 곳에서 계산하지 말고, 한 곳에서 계산해 두 곳이 읽게 한다.
 
-실측으로 확인할 수 있다. 1000×400 창을 만들면 뷰포트가 정확히 450×400 이 되고(400 × 9/8 = 450), 좌우에 275픽셀씩 검은 여백이 생긴다. 그 상태에서 논리 좌표 (360, 320) — 화면 정중앙 — 에 점을 찍으면 뷰포트의 측정 중심에서 1.6픽셀 이내에 들어온다.
+수치로 예측해 보자. 1000×400 창에 논리 720×640을 맞추면 뷰포트는 450×400, 좌우 여백은 275다. 논리 중심 (360,320)은 연속 창 좌표 (500,200)에 대응한다. 실제 픽셀 샘플이 덮이는 범위는 그다음 래스터화 규칙으로 판정한다.
 
-### 8.5 도형은 저절로 선명해진다
+### 8.5 drawable 해상도에서 도형을 다시 그린다
 
 `s_render_scale` 은 뷰포트 높이를 논리 높이로 나눈 값이다. 1440×1280 창이면 2.0, 2430×2160 창이면 3.375 다.
 
-**도형은 이 값을 쓰지 않는다.** 정점 좌표가 실수이고 NDC 변환도 실수라, GPU 는 뷰포트 해상도 그대로 래스터화한다. 논리 좌표 (20.0, 20.0)-(140.0, 70.0) 짜리 사각형은 3.375배 창에서 (67.5, 67.5)-(472.5, 236.25) 픽셀에 그려지고, 경계는 그 해상도의 픽셀 격자에 맞춰 계산된다. 확대한 그림이 아니라 처음부터 그 크기로 그린 그림이다.
+**도형은 이 값을 쓰지 않는다.** 정점 좌표가 실수이고 NDC 변환도 실수라, GPU 는 뷰포트 해상도 그대로 래스터화한다. 논리 좌표 (20.0, 20.0)-(140.0, 70.0) 짜리 사각형은 3.375배 창에서 (67.5, 67.5)-(472.5, 236.25) 픽셀에 그려지고, 경계는 그 해상도의 픽셀 격자에 맞춰 계산된다. 작은 완성 이미지를 확대하지 않고 그 크기로 다시 래스터화한다. 실수 정점만으로 경계의 계단 현상까지 사라지지는 않는다. 픽셀 샘플링·안티앨리어싱·사용한 텍스처의 해상도는 별개다.
 
 이 값이 필요한 곳은 딱 하나, **글자**다. 글리프는 CPU 에서 특정 픽셀 크기로 구워지므로 화면 배율이 바뀌면 같은 아틀라스를 단순 확대하지 않고 배율에 맞는 크기로 다시 래스터화해야 한다.
 
@@ -993,19 +1051,22 @@ void renderer_begin(Color bg)
 ```cpp
 void renderer_set_view_offset(int dx, int dy)
 {
-    // 오프셋이 바뀌기 전에 쌓인 것을 비운다. 그렇지 않으면 이전 오프셋으로
-    // 만들어진 정점과 새 오프셋 정점이 한 배치에 섞인다.
-    if (dx != s_view_ox || dy != s_view_oy) glb_flush();
+    // glb_rect/glb_quad bake the offset into each submitted CPU vertex.
+    // Different baked offsets can share one ordered batch; no GPU state changes.
     s_view_ox = dx;
     s_view_oy = dy;
 }
 ```
 
-소프트웨어 시절에는 이 함수가 정수 두 개를 세우는 것이 전부였다. 지금은 **flush 가 하나 붙는다.** 그런데 이유가 직관과 반대다.
+오프셋은 `glb_rect`와 `glb_quad`가 정점을 큐에 넣을 때 좌표에 더한다. 예를 들어
+x=10인 도형을 오프셋0에서 넣으면 x=10을 저장하고, 오프셋100으로 바꾼 다음 같은
+도형을 넣으면 x=110을 저장한다. 같은 배치 안에 두 값이 들어가도 각각의 위치가
+보존되므로 이 setter에서 flush할 필요가 없다.
 
-오프셋은 정점 좌표에 이미 더해져 큐에 들어가 있다. 즉 이미 쌓인 정점은 옛 오프셋이 구워진 상태이고, 새로 쌓일 정점은 새 오프셋이 구워진다. **한 배치 안에 두 오프셋이 섞여도 각 정점은 자기 오프셋을 그대로 가지고 있으므로 그림 자체는 맞다.** 그러면 flush 가 왜 필요한가?
-
-`if (dx != s_view_ox || dy != s_view_oy)` 조건이 답이다. 이 함수는 오프셋이 **실제로 바뀔 때만** flush 한다. 흔들림이 꺼져 있으면 매 프레임 `(0,0)` 이 들어와 아무 일도 일어나지 않는다. 흔들리는 동안에도 프레임당 두 번(켜고 끄고)이다. 그리고 이 flush 는 미래를 위한 방어다 — 오프셋을 유니폼으로 옮기거나(정점당 8바이트 절약) 정점 셰이더에서 더하도록 바꾸는 순간, flush 없이는 배치 전체가 마지막 오프셋으로 그려진다. 경계를 지금 그어 두면 그때 조용히 깨지지 않는다.
+이는 **정점에 담은 값**과 **draw 시점의 공유 상태**를 구별하는 사례다. 오프셋을
+유니폼으로 구현하는 설계로 바꾸면 서로 다른 오프셋을 한 draw에 적용할 방법을
+다시 정해야 한다. 현재 정점에는 어차피 최종 위치의 두 float이 필요하므로,
+오프셋을 유니폼으로 옮기는 것만으로 정점당8바이트가 사라지는 것도 아니다.
 
 흔들림 상태 머신은 별도 파일에 있고, 렌더러의 GL 전환과 무관하게 그대로다.
 
@@ -1094,12 +1155,9 @@ draw_hud();
 
 ### 10.1 글자 모양은 여전히 CPU 가 만든다
 
-GPU 로 옮겼다고 텍스트가 GPU 로 가는 것은 아니다. **TTF 아웃라인을 래스터화하는 기능은 GPU 에 없다.** 정점과 삼각형을 픽셀로 바꾸는 하드웨어는 있지만, 베지어 곡선으로 정의된 글자 윤곽을 8비트 coverage 로 채워 주는 하드웨어는 없다. 글꼴을 삼각형으로 잘게 쪼개 보내는 방법이나 곡선 자체를 조각 셰이더에서 평가하는 방법이 있지만, 둘 다 이 프로젝트의 범위를 한참 넘는다.
+이 렌더러는 stb_truetype가 CPU에서 TTF 윤곽을 8비트 coverage 비트맵으로 만드는 경로를 선택했다. GPU에서 글꼴 윤곽을 처리하는 방식도 있지만, 여기서는 폰트 해석과 마스크 생성을 CPU에 두고 배치와 합성을 GPU에 맡긴다.
 
-그래서 stb_truetype 가 CPU 에서 비트맵을 만드는 구조는 그대로 남았다. **바뀐 것은 그 비트맵을 어디에 두느냐다.**
-
-- 이전: 비트맵을 CPU 메모리에 캐시하고, 그릴 때 픽셀마다 프레임버퍼에 합성
-- 지금: 비트맵을 한 장의 R8 텍스처(아틀라스)에 올리고, 그릴 때는 그 텍스처의 일부를 가리키는 사각형 하나를 배처에 넣음
+CPU 프레임버퍼에서는 마스크를 읽어 픽셀마다 배경과 합성했다. 현재 경로는 마스크를 R8 텍스처인 아틀라스에 올리고, 해당 영역을 가리키는 사각형을 GPU에 제출한다. 같은 마스크를 사용하는 동안에는 폰트 윤곽을 매 프레임 다시 읽지 않는다.
 
 ### 10.2 왜 벤더링된 단일 헤더인가
 
@@ -1108,20 +1166,22 @@ TTF 파일을 파싱해 베지어 outline 을 추출하고, 그것을 안티에�
 그래서 `third_party/stb_truetype.h` 를 저장소에 벤더링(체크인)했다. 선택 근거는 셋이다.
 
 - **단일 헤더에 의존성이 없다.** 빌드 시스템에 라이브러리 탐색 코드가 한 줄도 늘지 않는다. 크로스 컴파일 환경에서 이 차이가 크다.
-- **버전이 고정된다.** 체크인해 두면 어느 기계에서 빌드해도 같은 글리프 비트맵이 나온다. 시스템 폰트 라이브러리에 의존하면 OS 마다 글자 모양이 달라진다.
+- **버전이 고정된다.** 같은 폰트와 구현을 함께 고정하면 OS별 기본 폰트 차이를 줄일 수 있다. 부동소수 계산·컴파일러·설정 차이까지 포함한 모든 플랫폼의 비트맵 바이트 동일성을 보장하는 것은 아니다.
 - **API 가 픽셀 수준이다.** `stbtt_GetCodepointBitmap` 이 8비트 coverage 배열을 그대로 준다. 우리가 원하는 것이 정확히 그것이고, 그 위의 아틀라스 패킹·배치·업로드는 우리 코드가 한다.
 
 구현부는 `renderer/text_gl.cpp` 하나에만 들어간다. `#define STB_TRUETYPE_IMPLEMENTATION` 이 그 파일에만 있다.
 
 ### 10.3 알아 둘 stb_truetype 개념 넷
 
-**`stbtt_ScaleForPixelHeight(&font, px)`** 는 폰트 단위(font units, 보통 em 당 1000 또는 2048)를 픽셀로 바꾸는 배율을 준다. "px" 는 **ascent 에서 descent 까지의 높이**가 그만큼이 되도록 정규화한 값이다. 그래서 `size = 24` 로 그린 글자의 실제 대문자 높이는 24 보다 작다. 폰트마다 이 비율이 다르므로, UI 를 픽셀 단위로 맞출 때는 `measure_text` 로 실측하는 것이 유일하게 안전한 방법이다.
+**폰트 크기와 실제 모양.** `stbtt_ScaleForPixelHeight(&font, px)`는 `px / (ascent - descent)` 배율을 구한다. ascent/descent는 이 API가 읽는 폰트의 수직 메트릭이며 개별 글리프의 실제 잉크 경계가 아니다. 요청한 24가 대문자나 한글의 비트맵 높이 24를 뜻하지 않는다. `measure_text`는 가로 advance와 커닝으로 줄 폭을 구하므로 세로 크기나 잉크 경계의 측정을 대신하지 않는다.
 
-**세 개의 수직 metric.** `ascent` 는 baseline 위쪽 최대 높이, `descent` 는 baseline 아래쪽(음수), `lineGap` 은 줄 사이 추가 여백이다. 한 줄의 표준 높이는 `(ascent - descent + lineGap) × scale` 이다. `descent` 가 음수라 빼기가 곧 더하기다.
+**기준선과 오프셋.** 글리프는 pen의 x 위치와 baseline에 상대적으로 배치한다. 폰트 좌표의 y는 위로 증가하지만, `GetCodepointBitmap`이 반환하는 `yoff`는 아래로 증가하는 이미지 좌표다. 화면 왼쪽 위는 `(pen_x + xoff, baseline + yoff)`이다. ascent/descent/lineGap으로 만든 `(ascent - descent + lineGap) × scale`은 이 렌더러가 선택한 줄 간격이다. 모든 글리프의 경계를 보장하는 상자로 취급하지 않는다.
 
-**advance 와 커닝.** `stbtt_GetCodepointHMetrics` 가 주는 `advance` 는 이 글자를 그린 뒤 pen 을 얼마나 전진시킬지다. 글자의 실제 폭(bitmap width)과 다르다. `stbtt_GetCodepointKernAdvance(prev, cur)` 는 특정 글자 쌍에 대한 추가 보정이다. "AV" 처럼 붙여야 예쁜 쌍에서 음수가 나온다.
+**advance·잉크 폭·커닝.** `GetCodepointHMetrics`의 advance는 다음 pen까지의 거리다. 공백처럼 비트맵이 없어도 양수 advance가 있을 수 있다. left side bearing은 폰트 단위의 가로 메트릭이고, 픽셀로 정수 경계를 만든 `xoff`와 항상 같은 숫자는 아니다. 커닝은 글자 쌍의 추가 보정이며, 일반적인 스크립트 조형(shaping) 전체를 수행하는 기능과는 구별한다.
 
-**coverage 안티에일리어싱.** `stbtt_GetCodepointBitmap` 이 주는 것은 색이 아니라 **픽셀당 0~255 의 덮임 정도**다. 글자 획이 픽셀의 절반을 덮으면 128 이다. 이 값을 알파로 써서 배경과 섞으면 계단이 사라진다. 그래서 글리프 비트맵은 색과 무관하고, 같은 글리프를 흰색으로도 빨간색으로도 재사용할 수 있다. 아틀라스가 성립하는 이유이자, 조각 셰이더의 `a_channel` 트릭이 성립하는 이유다.
+**coverage.** 반환한 바이트는 색상이 아니라 0~255의 덮임 정도를 나타내는 근삿값이다. 이를 알파로 쓰면 가장자리의 계단을 완화한다. 폰트 래스터라이저의 필터·수치 근사에 따라 값이 달라질 수 있다. 비트맵 크기가 양수인데 포인터가 null이면 생성 실패이므로 그리기와 캐시 등록을 생략하고 advance만 유지한다. 공백의 빈 모양은 정상 결과다.
+
+`stbtt_fontinfo`는 파일 바이트를 빌려 읽는다. 폰트를 사용하는 동안 `s_ttf`의 저장 공간과 내용을 유지해야 한다. `stb_truetype`는 파일 내부 오프셋을 전부 경계 검사하지 않으므로 이 API는 배포자가 신뢰하는 패키지 폰트를 위한 경로다. 파일 크기 확인이나 `InitFont`의 성공을 업로드 폰트의 안전성 검증으로 해석하지 않는다.
 
 ### 10.4 UTF-8 디코딩
 
@@ -1130,39 +1190,133 @@ TTF 파일을 파싱해 베지어 outline 을 추출하고, 그것을 안티에�
 ```cpp
 static uint32_t utf8_next(const char** text)
 {
-    const uint8_t* s = reinterpret_cast<const uint8_t*>(*text);
-    if (!s[0]) return 0;
-    uint32_t cp = 0;
-    int count = 0;
-    if (s[0] < 0x80) {
-        cp = s[0]; count = 1;
-    } else if ((s[0] & 0xE0) == 0xC0) {
-        cp = s[0] & 0x1F; count = 2;
-    } else if ((s[0] & 0xF0) == 0xE0) {
-        cp = s[0] & 0x0F; count = 3;
-    } else if ((s[0] & 0xF8) == 0xF0) {
-        cp = s[0] & 0x07; count = 4;
-    } else {
-        ++*text;
-        return 0xFFFD;
-    }
-    for (int i = 1; i < count; ++i) {
-        if ((s[i] & 0xC0) != 0x80) {
-            ++*text;
-            return 0xFFFD;
-        }
-        cp = (cp << 6) | (s[i] & 0x3F);
-    }
-    *text += count;
-    return cp;
+    std::size_t available = 0;
+    while (available < 4 && (*text)[available] != '\0') ++available;
+    const auto result = utf8::decode_first(std::string_view(*text, available));
+    *text += result.bytes;
+    return static_cast<uint32_t>(result.codepoint);
 }
 ```
 
-선두 바이트의 상위 비트로 길이를 판정하고(`0xxxxxxx`=1, `110xxxxx`=2, `1110xxxx`=3, `11110xxx`=4), 나머지 바이트가 `10xxxxxx` 인지 확인하며 6비트씩 이어 붙인다. 포인터를 참조로 받아 **소비한 만큼 전진시킨다** — 호출부는 `for (const char* p = text; *p;) { cp = utf8_next(&p); ... }` 형태로 쓴다.
+공개 텍스트 API는 읽을 수 있는 NUL 종료 문자열을 받는다. `utf8_next`는 끝의 NUL을 넘기지 않고 최대 4바이트를 빌려 `core/utf8.h`에 전달한다. 이 어댑터는 포인터를 소비한 바이트 수만큼 전진시키므로 호출부의 순회 형태를 유지한다. 버퍼가 NUL로 끝난다는 전제 없이 이 어댑터에 임의 메모리를 넘길 수는 없다.
 
-잘못된 바이트열을 만나면 `0xFFFD`(replacement character)를 반환하고 **한 바이트만** 전진한다. 무한 루프를 막으면서 다음 바이트부터 재동기화를 시도하는 표준적 처리다. 폰트에 U+FFFD 글리프가 없으면 빈 글리프가 캐시되어 아무것도 그려지지 않는다.
+길이를 받는 디코더는 빈 입력·정상 스칼라·잘못된 입력을 `Status`로 구별한다. 본문의 NUL 바이트 U+0000도 길이 기반 API에서는 정상 스칼라지만, 공개 C 문자열 API에서는 문자열 끝이다. 정상적으로 인코딩된 U+FFFD와 오류 대체값 U+FFFD도 상태값으로 구별할 수 있다.
 
-이 함수 덕분에 한글·일본어·기호가 전부 같은 경로로 처리된다. 폰트에 글리프만 있으면 된다. 다만 [Part 2](./part2-platform-window-input.md) 의 문자 입력 링버퍼는 ASCII 만 받으므로, **표시는 유니코드, 입력은 ASCII** 라는 비대칭이 남아 있다.
+**현재 소스 발췌 — `core/utf8.h`**
+
+```cpp
+#ifndef TETRIS_UTF8_HPP
+#define TETRIS_UTF8_HPP
+
+// utf8: minimal UTF-8 decoding for one code point at a time.
+//
+// decode_first(input):
+//   * empty input -> Result{} (codepoint 0, bytes 0, Status::end).
+//   * otherwise consumes 1..4 bytes, never more than input.size().
+//   * malformed, truncated, overlong or non-scalar sequences yield
+//     U+FFFD with exactly one byte consumed and Status::invalid; this is a
+//     per-byte replacement policy, not maximal-subpart, so a later ASCII
+//     byte is never swallowed.
+//   * Status::scalar marks a real scalar value; an embedded U+0000 is a
+//     scalar, which keeps it distinct from Status::end.
+//   * Status::invalid marks failure and carries U+FFFD; a genuine U+FFFD
+//     in the input is reported as Status::scalar.
+#include <climits>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+static_assert(CHAR_BIT == 8, "utf8 requires 8-bit bytes");
+
+namespace utf8 {
+
+enum class Status { end, scalar, invalid };
+
+struct Result {
+    char32_t codepoint = 0;
+    std::size_t bytes = 0;
+    Status status = Status::end;
+};
+
+namespace detail {
+
+constexpr char32_t kMaxCodepoint = 0x10FFFF;
+constexpr char32_t kSurrogateLow = 0xD800;
+constexpr char32_t kSurrogateHigh = 0xDFFF;
+
+// True when byte is 10xxxxxx.
+constexpr bool is_continuation(unsigned char byte) noexcept {
+    return (byte & 0xC0u) == 0x80u;
+}
+
+// Decode the length-byte sequence in input; caller guarantees size() >= length.
+inline Result assemble(std::string_view input, std::size_t length,
+                       std::uint32_t lead_mask, char32_t minimum) noexcept {
+    std::uint32_t value = static_cast<std::uint32_t>(
+        static_cast<unsigned char>(input[0]) & lead_mask);
+    for (std::size_t i = 1; i < length; ++i) {
+        const unsigned char byte = static_cast<unsigned char>(input[i]);
+        if (!is_continuation(byte)) {
+            return {0xFFFD, 1, Status::invalid};
+        }
+        value = (value << 6) | (static_cast<std::uint32_t>(byte) & 0x3Fu);
+    }
+    const char32_t code = static_cast<char32_t>(value);
+    if (code < minimum || code > kMaxCodepoint ||
+        (code >= kSurrogateLow && code <= kSurrogateHigh)) {
+        return {0xFFFD, 1, Status::invalid};
+    }
+    return {code, length, Status::scalar};
+}
+
+}  // namespace detail
+
+inline Result decode_first(std::string_view input) noexcept {
+    if (input.empty()) {
+        return Result{};
+    }
+
+    const unsigned char lead = static_cast<unsigned char>(input[0]);
+
+    if (lead <= 0x7F) {
+        // 00..7F, including an embedded U+0000, is a 1-byte scalar.
+        return {static_cast<char32_t>(lead), 1, Status::scalar};
+    }
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        // 2-byte sequence; C0/C1 would encode below U+0080.
+        if (input.size() < 2) {
+            return {0xFFFD, 1, Status::invalid};
+        }
+        return detail::assemble(input, 2, 0x1Fu, 0x80);
+    }
+    if (lead >= 0xE0 && lead <= 0xEF) {
+        // 3-byte sequence; overlong and surrogate results are rejected below.
+        if (input.size() < 3) {
+            return {0xFFFD, 1, Status::invalid};
+        }
+        return detail::assemble(input, 3, 0x0Fu, 0x800);
+    }
+    if (lead >= 0xF0 && lead <= 0xF4) {
+        // 4-byte sequence; F4 results above U+10FFFF are rejected below.
+        if (input.size() < 4) {
+            return {0xFFFD, 1, Status::invalid};
+        }
+        return detail::assemble(input, 4, 0x07u, 0x10000);
+    }
+    // 80..BF is a stray continuation; C0/C1 and F5..FF are never valid leads.
+    return {0xFFFD, 1, Status::invalid};
+}
+
+}  // namespace utf8
+
+#endif  // TETRIS_UTF8_HPP
+```
+
+첫 바이트는 ASCII 또는 C2~DF·E0~EF·F0~F4 범위여야 한다. 연속 바이트 `10xxxxxx`의 6비트를 이어 붙인 뒤 해당 길이의 최솟값, surrogate D800~DFFF 제외, U+10FFFF 상한을 검사한다. `C0 AF`를 `/`로 해석하는 과장 인코딩이나 `ED A0 80`을 surrogate로 통과시키는 해석은 허용하지 않는다. [RFC 3629의 UTF-8 정의](https://www.rfc-editor.org/rfc/rfc3629#section-3)와 같은 유효 범위를 사용한다.
+
+오류에서는 한 바이트를 소비하고 U+FFFD를 돌려준다. 예를 들어 `E2 82 41`은 대체값 두 개와 A로 진행한다. 이는 이 렌더러의 바이트별 복구 정책이며, 잘못된 접두부를 최대 부분열로 묶어 한 번 대체하는 방식과 대체 문자 수가 다를 수 있다. 비어 있지 않은 입력에서 반드시 전진하고 뒤의 정상 바이트를 삼키지 않는 것이 공통 계약이다. 네트워크 식별자 검증처럼 입력 전체를 거절해야 하는 용도에서는 `invalid` 상태를 처리해야 하며 대체 출력만 신뢰해서는 안 된다.
+
+코드포인트 해석과 글리프 선택은 별개다. 폰트에 코드포인트가 있다고 모든 언어의 조합·양방향 배치가 완성되는 것은 아니다. 현재 경로는 코드포인트별 글리프와 커닝을 사용하며 범용 shaping 엔진은 포함하지 않는다. [Part 2](./part2-platform-window-input.md)의 문자 입력 링버퍼는 ASCII 경로이므로 표시와 입력 지원도 구별한다.
 
 ## 11. 텍스트 (2) — 글리프 아틀라스
 
@@ -1170,7 +1324,7 @@ static uint32_t utf8_next(const char** text)
 
 draw call은 텍스처가 바뀌는 지점에서 끊긴다. 글리프마다 별도 텍스처를 쓰면 문자열 길이에 비례해 draw call이 늘어 배칭의 이점이 사라진다. 여러 글리프를 한 아틀라스에 모으면 같은 텍스처를 유지한 채 정점만 이어 붙일 수 있다.
 
-해법은 글리프 비트맵을 **한 장의 큰 텍스처에 모아 넣고** 각 글자가 그 안의 사각형 영역을 가리키게 하는 것이다. 그러면 화면의 모든 글자가 같은 텍스처를 쓰므로 한 draw call 에 들어간다.
+해법은 글리프 비트맵을 **한 장의 큰 텍스처에 모아 넣고** 각 글자가 그 안의 사각형 영역을 가리키게 하는 것이다. 같은 텍스처와 클립 등 배치 조건을 유지하는 연속 글리프를 함께 제출할 수 있다. 다른 이미지·상태 변경·배처 용량 때문에 제출이 나뉠 수 있으므로 화면의 모든 글자가 반드시 한 draw call에 들어가는 것은 아니다.
 
 **현재 소스 발췌 — `renderer/text_gl.cpp`**
 
@@ -1182,10 +1336,7 @@ draw call은 텍스처가 바뀌는 지점에서 끊긴다. 글리프마다 별�
 static constexpr int kAtlasWanted = 2048;
 static int s_atlas_dim = kAtlasWanted;
 
-// 굽는 크기를 1/8 단위로 반올림한다. 창을 드래그로 늘리는 동안 배율이
-// 연속으로 변하는데, 그때마다 새 크기로 다시 구우면 아틀라스가 순식간에
-// 찬다. 눈에 안 보이는 차이를 같은 크기로 묶어 재굽기를 줄인다.
-static constexpr float kScaleQuantum = 8.0f;
+// 크기와 캐시 키 정책은 renderer/font_raster_policy.h에서 범위를 먼저 검증한다.
 ```
 
 **현재 소스 발췌 — `renderer/text_gl.cpp`**
@@ -1219,42 +1370,28 @@ static int    s_row_h    = 0;
 **현재 소스 발췌 — `renderer/text_gl.cpp`**
 
 ```cpp
-static void ensure_atlas()
+static bool ensure_atlas()
 {
-    if (s_atlas) return;
-
+    if (s_atlas) return true;
+    if (gl_GetError()) return false;
     GLint max_dim = 0;
     gl_GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dim);
-    s_atlas_dim = (max_dim > 0 && max_dim < kAtlasWanted) ? (int)max_dim
-                                                          : kAtlasWanted;
-
-    gl_GenTextures(1, &s_atlas);
-    gl_BindTexture(GL_TEXTURE_2D, s_atlas);
-    // 채널이 하나뿐이라 기본 4바이트 정렬 규칙이 맞지 않는다. 이걸 빠뜨리면
-    // 폭이 4의 배수가 아닌 글자가 비스듬히 밀려 보인다.
-    gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    std::vector<uint8_t> zero((size_t)s_atlas_dim * s_atlas_dim, 0);
-    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_R8, s_atlas_dim, s_atlas_dim, 0,
-                  GL_RED, GL_UNSIGNED_BYTE, zero.data());
-    // 굽는 크기를 1/8 단위로 반올림하므로 화면 픽셀과 텍셀이 정확히 1:1 은
-    // 아니다 (최대 6% 어긋난다). NEAREST 로 두면 그 어긋남이 글자 획 굵기가
-    // 들쭉날쭉해지는 형태로 보인다. LINEAR 가 그 차이를 흡수한다.
-    // 글리프 사이에 1픽셀 빈 줄을 두므로 이웃 글자가 번져 들어오지 않는다.
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (gl_GetError() || max_dim < 3) return false;
+    const int dimension = std::min(kAtlasWanted, int(max_dim));
+    const GLuint candidate = text_detail::create_mask8(dimension);
+    if (!candidate) return false;
+    s_atlas = candidate;
+    s_atlas_dim = dimension;
     s_pen_x = s_pen_y = s_row_h = 0;
+    return true;
 }
 ```
 
-**`GL_R8` 이 이 텍스처의 포맷이다.** 채널 하나, 픽셀당 1바이트. 글리프 비트맵이 coverage 값 하나뿐이므로 RGBA 로 올리면 메모리를 네 배 쓴다. 2048² 이면 4 MB 대 16 MB 다.
+**`GL_R8` 이 이 텍스처의 포맷이다.** 채널 하나, 픽셀당 1바이트. 같은 크기의 R8과 RGBA8을 비교하면 성분 자료량은 1:4다. 2048²이면 4 MiB 대 16 MiB이며 드라이버의 내부 배치·관리 비용은 제외한 수치다. 페이지의 빈 공간도 할당하므로 아틀라스가 개별 작은 텍스처들의 합보다 항상 작다는 뜻은 아니다.
 
 **`GL_UNPACK_ALIGNMENT = 1` 이 이 절에서 가장 중요한 한 줄이다.** GL 은 CPU 메모리에서 픽셀을 읽어 올 때 각 행이 4바이트 경계에서 시작한다고 **기본적으로 가정한다.** RGBA8 은 픽셀이 4바이트라 어떤 폭이든 자동으로 맞지만, R8 은 픽셀이 1바이트다. 폭 13픽셀짜리 글자를 올리면 GL 은 각 행이 16바이트(13을 4의 배수로 올림)라고 믿고 읽어서, 두 번째 행부터 3바이트씩 밀린다. **화면에는 글자가 비스듬히 기울어져 찢어진 모습으로 나온다.** 원인을 모르면 폰트 래스터화 코드를 며칠 들여다보게 되는 종류의 버그다.
 
-`GL_MAX_TEXTURE_SIZE` 를 물어보는 이유는 2048 이 어디서나 되는 값이 아니기 때문이다. GL 3.3 이 보장하는 하한은 2048 보다 작고, 실제 상한은 드라이버와 하드웨어가 정한다. 한도를 넘긴 `glTexImage2D` 는 `GL_INVALID_VALUE` 를 내고 텍스처를 만들지 않는데, 이 렌더러는 그 자리에서 `glGetError` 를 보지 않으므로 **글자가 전부 안 보이는 형태로만 드러난다.** 물어보는 쪽이 싸다.
-
-참고로 이 글을 쓰며 확인한 십수 년 된 저사양 내장 그래픽도 8192 를 보고한다. 2048 이 문제가 되는 기계는 이제 흔치 않지만, 한 줄로 막을 수 있는 실패를 굳이 남겨 둘 이유도 없다.
+`GL_MAX_TEXTURE_SIZE` 를 물어보는 이유는 2048 이 어디서나 되는 값이 아니기 때문이다. [OpenGL 3.3 Core 명세의 표 6.38](https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf)은 GL_MAX_TEXTURE_SIZE의 최소값을 1024로 정한다. 실제 상한은 드라이버와 하드웨어가 정한다. 지원 한도와 실제 할당 성공은 구별한다. `renderer/mask_upload.h`는 GL 오류를 확인하고, 할당·업로드·상태 복원이 성공했을 때만 이름을 확정한다. 글리프 업로드 실패도 캐시에 등록하지 않아 다음 요청에서 다시 시도할 수 있다.
 
 필터를 `GL_LINEAR` 로 둔 이유는 논리 좌표와 실제 창 픽셀이 배율 변환 때문에 항상 1:1은 아니기 때문이다. 최근접 필터는 그 경계에서 이미지와 회전된 쿼드의 계단 현상을 두드러지게 만든다.
 
@@ -1267,65 +1404,60 @@ static void ensure_atlas()
 // 최적 패킹은 아니지만 글리프 높이가 크기별로 비슷해서 낭비가 크지 않다.
 static bool pack_glyph(const uint8_t* bitmap, int w, int h, Glyph& out)
 {
-    if (w <= 0 || h <= 0) return true;   // 공백 문자 — 자리를 차지하지 않는다
-    if (w > s_atlas_dim || h > s_atlas_dim) return false;  // 한 장에 안 들어가는 글자
+    if (w < 0 || h < 0) return false;
+    if (w == 0 || h == 0) return true;
+    if (!bitmap || w > s_atlas_dim - 2 || h > s_atlas_dim - 2) return false;
+    const int outer_w = w + 2, outer_h = h + 2;
+    try {
+        // Own every border texel. Reused atlas space may contain older ink.
+        std::vector<uint8_t> padded(std::size_t(outer_w) * outer_h, 0);
+        for (int row = 0; row < h; ++row)
+            std::copy_n(bitmap + std::size_t(row) * w, w,
+                        padded.data() + std::size_t(row + 1) * outer_w + 1);
 
-    if (s_pen_x + w > s_atlas_dim) {       // 줄 바꿈
-        s_pen_x = 0;
-        s_pen_y += s_row_h + 1;
-        s_row_h = 0;
-    }
-    if (s_pen_y + h > s_atlas_dim) {
-        // 가득 찼다. 예전 크기로 구운 글자들이 대부분이므로 (창 크기가
-        // 바뀌면 이전 배율 비트맵은 다시 안 쓰인다) 통째로 버리고 처음부터
-        // 다시 채운다. 개별 항목을 쫓아내는 LRU 보다 단순하고, 실제로는
-        // 창 크기를 크게 바꿀 때 한 번씩만 일어난다.
-        //
-        // 버리기 전에 배치를 비운다. 이미 큐에 들어간 글자들의 UV 는 지금
-        // 아틀라스 내용을 가리키는데, 비우지 않고 덮어쓰면 그 글자들이
-        // 새로 구운 다른 글자의 그림으로 그려진다.
-        glb_flush();
-        s_cache.clear();
-        s_pen_x = s_pen_y = s_row_h = 0;
-    }
-
-    gl_BindTexture(GL_TEXTURE_2D, s_atlas);
-    gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    gl_TexSubImage2D(GL_TEXTURE_2D, 0, s_pen_x, s_pen_y, w, h,
-                     GL_RED, GL_UNSIGNED_BYTE, bitmap);
-
-    out.u0 = (float)s_pen_x / (float)s_atlas_dim;
-    out.v0 = (float)s_pen_y / (float)s_atlas_dim;
-    out.u1 = (float)(s_pen_x + w) / (float)s_atlas_dim;
-    out.v1 = (float)(s_pen_y + h) / (float)s_atlas_dim;
-
-    s_pen_x += w + 1;                     // 1픽셀 간격 — 샘플링 번짐 방지
-    s_row_h = std::max(s_row_h, h);
-    return true;
+        int x = s_pen_x, y = s_pen_y, row_h = s_row_h;
+        if (outer_w > s_atlas_dim - x) { x = 0; y += row_h; row_h = 0; }
+        if (outer_h > s_atlas_dim - y) {
+            glb_flush(); // Submit old UVs before any reused pixel is overwritten.
+            s_cache.clear();
+            s_pen_x = s_pen_y = s_row_h = 0;
+            x = y = row_h = 0;
+        }
+        if (!text_detail::update_mask8(s_atlas, x, y, outer_w, outer_h, padded.data()))
+            return false;
+        out.u0 = float(x + 1) / s_atlas_dim;
+        out.v0 = float(y + 1) / s_atlas_dim;
+        out.u1 = float(x + 1 + w) / s_atlas_dim;
+        out.v1 = float(y + 1 + h) / s_atlas_dim;
+        s_pen_x = x + outer_w;
+        s_pen_y = y;
+        s_row_h = std::max(row_h, outer_h);
+        return true;
+    } catch (const std::bad_alloc&) { return false; }
 }
 ```
 
-**shelf packing** 은 사각형 채우기 알고리즘 중 가장 단순한 축이다. 커서를 왼쪽에서 오른쪽으로 옮기며 채우고, 폭이 모자라면 현재 줄의 최대 높이만큼 아래로 내려 새 줄(shelf)을 시작한다. 최적 패킹(예: MaxRects)에 비해 공간을 낭비하지만, **글리프는 같은 폰트 크기 안에서 높이가 고만고만해서** 실제 낭비가 작다. 한 줄에 22px 글자들만 들어가면 줄 높이 낭비가 거의 없다.
+**shelf packing** 은 사각형 채우기 알고리즘 중 가장 단순한 축이다. 커서를 왼쪽에서 오른쪽으로 옮기며 채우고, 폭이 모자라면 현재 줄의 최대 높이만큼 아래로 내려 새 줄(shelf)을 시작한다. 입력 순서와 높이 차이에 따라 줄 위쪽이나 오른쪽 공간이 남는다. MaxRects 같은 빈 사각형 기반 휴리스틱은 다른 배치 선택을 제공하지만 전역 최적해를 보장하는 것은 아니다. 여기서는 이미 반환한 UV를 옮기지 않고 적은 상태로 배치할 수 있는 선반 방식을 선택했다.
 
-`s_pen_x += w + 1` 과 `s_pen_y += s_row_h + 1` 의 `+1` 이 글리프 사이 1픽셀 빈 줄이다. 텍스처 필터가 `LINEAR` 라 샘플링할 때 인접 텍셀을 섞는데, 글자들이 딱 붙어 있으면 **옆 글자의 획 끄트머리가 번져 들어온다.** 아틀라스 전체가 0(투명)으로 초기화돼 있으므로 빈 줄은 항상 투명이고, 번져도 아무것도 보이지 않는다.
+각 글리프는 `(w+2)×(h+2)` 영역을 예약한다. 실제 잉크는 그 안의 `(x+1,y+1)`에서 시작하며 네 방향에 0으로 채운 1텍셀 테두리가 있다. 초기화 때만 0을 채워서는 충분하지 않다. 커서를 되감아 아틀라스를 재사용하면 새 여백 자리에 옛 글자의 픽셀이 남을 수 있으므로 테두리를 포함한 타일 전체를 매번 업로드한다.
 
-`gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1)` 이 여기 한 번 더 나온다. 이 설정은 GL 컨텍스트의 전역 상태라 `ensure_atlas` 에서 한 번 걸어도 되지만, **이미지 업로드 쪽에서 값을 바꿀 수 있으므로** 업로드 직전에 다시 건다. 전역 상태 머신을 다룰 때의 기본자세다 — 내가 필요한 상태는 내가 세운다.
+`renderer/mask_upload.h`의 업로드 경로가 매번 정렬을 1로, row length와 skip을 0으로, unpack PBO를 0으로 설정한다. CPU 포인터를 PBO 안의 오프셋으로 해석하지 않도록 하기 위해서다. 사용 중인 텍스처 단위는 바꾸지 않으며 바인딩과 픽셀 저장 상태를 작업 후 복원한다. 실패한 업로드에는 새 UV나 새 글자의 배치 커서를 확정하지 않는다. 공간 부족으로 이미 큐를 제출하고 페이지를 재사용하기로 한 경우 캐시 삭제와 커서 초기화는 되돌리지 않는다.
 
 ### 11.4 가득 차면 통째로 버린다
 
-아틀라스가 다 차면 보통은 LRU 로 오래된 글리프를 쫓아낸다. 이 코드는 **통째로 버리고 처음부터 다시 채운다.**
+공간이 부족해지면 이 구현은 캐시를 비우고 커서를 처음으로 돌린다. GPU 페이지 전체를 즉시 지우지는 않는다. 새 글리프마다 잉크와 네 방향 여백을 덮어써 재사용한 영역의 내용만 확정한다.
 
-근거는 언제 가득 차는가에 있다. 게임을 켜 두는 동안 새 글자가 계속 생기지 않는다 — UI 문자열은 고정이고, 폰트 크기 종류도 열몇 개다. 아틀라스가 차는 상황은 사실상 하나뿐이다. **창 크기를 크게 바꿔서 같은 글자들을 새 배율로 다시 굽는 경우.** 그때 아틀라스에 있는 옛 배율 비트맵은 다시 쓰이지 않는다. LRU 로 하나씩 쫓아내 봐야 결국 전부 쫓겨난다. 통째로 버리는 쪽이 코드도 짧고 결과도 같다.
+크기·문자 종류가 늘거나 창 배율별로 새 비트맵을 구우면 페이지가 찰 수 있다. 기존 비트맵 중 다시 쓸 것도 있을 수 있으므로 전체 초기화는 일부 재생성 비용을 감수하는 정책이다. 개별 영역 반환, 여러 페이지, LRU와 빈 영역 관리는 추가 상태를 요구한다. 고정된 UI를 중심으로 단순한 초기화 정책을 선택했으며, 모든 입력 분포에서 같은 성능을 보장하지 않는다.
 
 **`glb_flush()` 를 먼저 부르는 것이 이 함수에서 가장 미묘한 부분이다.** 배처의 큐에는 이미 이번 프레임의 글자들이 들어가 있고, 각 글자의 정점에는 **현재 아틀라스 기준의 UV 좌표**가 구워져 있다. 아틀라스를 지우고 다시 채우면 그 좌표들이 가리키는 자리에 전혀 다른 글자가 들어간다. flush 없이 아틀라스를 덮어쓰면 화면에 나오는 문장이 **엉뚱한 글자들의 조합**이 된다.
 
-이런 종류의 버그는 재현이 어렵다. 아틀라스가 가득 차는 정확한 순간에만, 그것도 그 프레임에만 나타났다가 다음 프레임에는 정상으로 돌아온다. 창을 드래그로 천천히 늘리면 한 번 깜빡이고 마는 식이라 눈으로 잡기도 힘들다. **"GPU 자원을 덮어쓰기 전에 그 자원을 참조하는 대기 중 작업을 먼저 내보낸다"** 는 규칙을 알고 코드를 쓰는 것이 유일한 예방책이다.
+**같은 컨텍스트에서 옛 UV의 CPU 큐를 GL draw로 제출한 뒤 픽셀을 갱신한다.** 이는 glFinish로 GPU의 모든 실행 완료를 기다리는 것과 다르다. 작은 페이지로 재사용을 유도하고, 업로드 직전 큐 제출과 테두리 0 쓰기를 검사하면 순서와 내용 양쪽을 확인할 수 있다.
 
 ## 12. 텍스트 (3) — 해상도 대응
 
 여기가 이 장에서 GPU 전환의 이득이 가장 잘 드러나는 곳이다.
 
-도형은 창을 키우면 저절로 선명해진다. 글자는 그렇지 않다. 글리프는 CPU 에서 **특정 픽셀 크기로 한 번 구워진 비트맵**이고, 그걸 3배로 늘려 그리면 3배로 뭉갠다. 텍스처 필터를 아무리 좋은 것으로 바꿔도 없는 정보가 생기지는 않는다.
+정점 기반 도형은 새 drawable 해상도에서 다시 래스터화할 수 있다. 이미 구운 글리프 비트맵은 추가 처리가 필요하다. 글리프는 CPU 에서 **특정 픽셀 크기로 한 번 구워진 비트맵**이고, 그걸 3배로 늘려 그리면 3배로 뭉갠다. 텍스처 필터를 아무리 좋은 것으로 바꿔도 없는 정보가 생기지는 않는다.
 
 해결의 원리는 한 문장이다. **배치는 논리 크기로, 굽기는 화면 크기로.**
 
@@ -1336,19 +1468,11 @@ static Glyph glyph_for(uint32_t cp, int px)
 {
     px = px < 1 ? 1 : px;
 
-    // 실제로 구울 크기. 논리 크기 × 화면 배율을 1/8 단위로 반올림한다.
-    const float scale_q = std::max(
-        1.0f, std::round(glb_render_scale() * kScaleQuantum) / kScaleQuantum);
-    const int dev_px = std::max(1, (int)std::lround((float)px * scale_q));
-
-    // 캐시 키에 굽는 크기까지 넣는다. 같은 22px 글자라도 창 배율이 다르면
-    // 다른 비트맵이므로 따로 보관해야 한다.
-    const uint64_t key = (uint64_t(cp) << 32) |
-                         (uint64_t(uint16_t(px)) << 16) | uint16_t(dev_px);
-    auto found = s_cache.find(key);
-    if (found != s_cache.end()) return found->second;
-
-    ensure_atlas();
+    const auto plan = font_raster::plan(cp, px, glb_render_scale());
+    if (plan) {
+        const auto found = s_cache.find(plan->key);
+        if (found != s_cache.end()) return found->second;
+    }
 
     Glyph glyph;
 
@@ -1359,9 +1483,18 @@ static Glyph glyph_for(uint32_t cp, int px)
     int left_bearing = 0;
     stbtt_GetCodepointHMetrics(&s_font, (int)cp, &advance, &left_bearing);
     glyph.advance = (float)advance * layout_scale;
+    if (!plan || !ensure_atlas()) return glyph;
+    const int dev_px = plan->device_height;
+    const uint64_t key = plan->key;
 
     // 비트맵만 확대된 크기로 굽는다.
     const float bake_scale = stbtt_ScaleForPixelHeight(&s_font, (float)dev_px);
+    // Reject unsupported bitmap extents before stb allocates their pixels.
+    int x0=0, y0=0, x1=0, y1=0;
+    stbtt_GetCodepointBitmapBox(&s_font, (int)cp, bake_scale, bake_scale, &x0, &y0, &x1, &y1);
+    const int64_t width = int64_t(x1) - x0, height = int64_t(y1) - y0;
+    if (width < 0 || height < 0 || width > s_atlas_dim - 2 || height > s_atlas_dim - 2)
+        return glyph;
     int bx = 0, by = 0;
     unsigned char* bitmap = stbtt_GetCodepointBitmap(
         &s_font, bake_scale, bake_scale, (int)cp,
@@ -1374,9 +1507,17 @@ static Glyph glyph_for(uint32_t cp, int px)
     glyph.xoff = (float)bx * inv;
     glyph.yoff = (float)by * inv;
 
+    // A non-empty outline can report dimensions even when bitmap allocation
+    // fails. Keep spacing, suppress drawing, and allow the next request to retry.
+    if (!bitmap && glyph.bw > 0 && glyph.bh > 0) {
+        glyph.bw = glyph.bh = 0;
+        return glyph;
+    }
     if (bitmap && glyph.bw > 0 && glyph.bh > 0) {
         if (!pack_glyph(bitmap, glyph.bw, glyph.bh, glyph)) {
-            glyph.bw = glyph.bh = 0;      // 자리 없음 — 그리지 않는다
+            glyph.bw = glyph.bh = 0;
+            stbtt_FreeBitmap(bitmap, nullptr);
+            return glyph; // Do not cache a failed upload; a later request may retry.
         }
     }
     if (bitmap) stbtt_FreeBitmap(bitmap, nullptr);
@@ -1395,29 +1536,31 @@ static Glyph glyph_for(uint32_t cp, int px)
 
 **배치 메트릭이 논리 크기로 나와야 하는 이유**는 레이아웃 안정성이다. 창을 늘렸다고 글자 간격이 달라지면 `measure_text` 의 결과가 창 크기에 따라 변하고, 그러면 버튼 안에서 중앙 정렬한 라벨이 창 크기에 따라 다른 자리에 놓인다. 심하면 라벨이 버튼 밖으로 넘친다. **레이아웃은 창 크기와 무관해야 한다.**
 
-**비트맵만 크게 굽는다.** 22px 글자를 3.375배 창에서 보면 실제로는 74px 로 굽고, `inv = 22/74` 를 곱해 논리 크기 22px 자리에 그린다. 배처에 들어가는 사각형의 크기와 위치는 논리 좌표 그대로이고, 그 사각형이 가리키는 텍스처 영역만 3.375배 촘촘하다. GPU 가 그 사각형을 창 해상도로 래스터화하면 텍셀과 화면 픽셀이 거의 1:1 이 된다.
+**비트맵만 크게 굽는다.** 22px 글자를 3.375배 창에서 보면 실제로는 74px 로 굽고, `inv = 22/74` 를 곱해 논리 크기 22px 자리에 그린다. 펜과 간격은 논리 좌표로 유지하고 래스터화 배율은 74/22배가 된다. 비트맵 외곽 상자는 픽셀 경계 반올림 때문에 논리 좌표로 환산해도 크기·오프셋이 조금 달라질 수 있다. GPU 가 그 사각형을 창 해상도로 래스터화하면 텍셀과 화면 픽셀이 거의 1:1 이 된다.
 
 `glyph.w`/`glyph.h` 를 `inv` 로 되돌리는 계산이 이 함수에서 가장 헷갈리는 부분이다. `stbtt_GetCodepointBitmap` 이 돌려주는 크기와 오프셋은 **굽는 크기 기준**(화면 픽셀)이므로, 논리 좌표계에서 쓰려면 배율을 나눠야 한다. 이 나눗셈을 빠뜨리면 창을 키울 때 글자가 배율만큼 커져 화면을 뒤덮는다.
 
 ### 12.2 1/8 양자화
 
-`kScaleQuantum = 8.0f` 이 하는 일은 **굽는 배율을 1/8 단위로 반올림**하는 것이다. 배율 2.13 은 2.125 로, 2.19 는 2.25 로 스냅된다.
+`renderer/font_raster_policy.h`의 `kScaleStep = 8.0`이 하는 일은 **굽는 배율을 1/8 단위로 반올림**하는 것이다. 배율 2.13 은 2.125 로, 2.19 는 2.25 로 스냅된다.
 
-이유는 창 드래그다. 마우스로 창 모서리를 끌면 배율이 1픽셀 단위로 연속해서 변한다. 양자화가 없으면 **모든 중간 배율마다 모든 글자를 새로 굽는다.** 2048² 아틀라스가 몇 초 만에 차고, 통째로 비우고 다시 채우기를 반복하면서 프레임이 뚝뚝 끊긴다.
+창 크기가 바뀌면 drawable/논리 높이의 비율도 바뀐다. 정수 굽기 크기가 달라질 때마다 새 캐시 항목이 필요하므로, 배율을 일정 구간으로 묶어 재굽기 빈도를 줄인다. 정수 높이가 같거나 이미 캐시에 있는 요청은 양자화와 별개로 재사용할 수 있다. 재생성 비용과 포화 시점은 문자 수·크기·창 변화에 따라 달라진다.
 
-1/8 로 묶으면 드래그 중에 새로 굽는 횟수가 배율 구간 수만큼으로 줄어든다. 대가는 텍셀과 화면 픽셀이 정확히 1:1 이 아니게 되는 것 — 최대 오차가 1/16 배율, 약 6 % 다. 그리고 그 6 % 가 필터를 `GL_NEAREST` 에서 `GL_LINEAR` 로 바꾼 이유다.
+배율이 1 이상이고 상한에 걸리지 않는 범위에서 배율 양자화의 절대 오차는 최대 1/16이다. 이는 일정한 상대 오차 6%를 뜻하지 않는다. 굽기 높이를 정수로 반올림하면서 유효 배율에는 추가로 최대 0.5/논리높이의 오차가 생긴다. 배율 1 미만에서는 최소 1로 굽는 정책을 쓰므로 이 오차 경계를 그대로 적용하지 않는다. 텍셀과 화면 픽셀의 어긋남을 완화하는 데 선형 필터를 사용하지만 필터가 잃어버린 윤곽 정보를 복원하지는 않는다.
 
-**`GL_NEAREST` 였다면** 텍셀이 화면 픽셀에 정확히 대응하지 않을 때 어떤 텍셀은 두 번 샘플링되고 어떤 텍셀은 건너뛰어진다. 글자에서는 이것이 **획 굵기가 글자마다 들쭉날쭉해지는** 형태로 보인다. 같은 글꼴인데 어떤 세로획은 2픽셀, 어떤 것은 3픽셀이 된다. `GL_LINEAR` 는 이웃 텍셀을 섞어 그 차이를 흡수한다. 그리고 1픽셀 여백이 있으므로 이웃 글자가 섞여 들어올 걱정은 없다.
+**`GL_NEAREST` 였다면** 텍셀이 화면 픽셀에 정확히 대응하지 않을 때 어떤 텍셀은 두 번 샘플링되고 어떤 텍셀은 건너뛰어진다. 글자에서는 이것이 **획 굵기가 글자마다 들쭉날쭉해지는** 형태로 보인다. 같은 글꼴인데 어떤 세로획은 2픽셀, 어떤 것은 3픽셀이 된다. `GL_LINEAR` 는 이웃 텍셀을 섞어 그 차이를 흡수한다. level 0에서 선형 필터를 사용하고 UV가 잉크 영역 안에 머무는 이 경로에서는 네 방향에 실제로 0을 쓴 테두리가 이웃 글리프의 영향을 차단한다. 밉맵이나 더 넓은 필터에는 같은 여백 폭을 그대로 일반화할 수 없다.
 
 ### 12.3 캐시 키
+
+크기 정책은 Unicode 스칼라, 논리 높이와 굽기 높이 1~2048, 유한하고 양수인 배율을 변환 전에 검사한다. 16비트 정수로 잘라 넣는 것 자체는 검증이 아니다. 예를 들어 제한 없이 16과 65552를 잘라 넣으면 같은 하위 비트가 된다. 현재 정책의 허용 범위에서는 각 필드가 겹치지 않는다. 범위 밖 요청은 비트맵을 만들거나 캐시에 넣지 않으며 논리 advance는 유지한다. 비트맵의 실제 상자도 아틀라스 여백 안에 들어가는지 할당 전에 검사한다. 이 상한은 리소스 정책이며 모든 글자의 비트맵 높이가 요청 높이와 같다는 뜻이 아니다.
 
 ```text
 key = (code point << 32) | (논리 크기 << 16) | 굽는 크기
 ```
 
-**세 값이 전부 들어간다.** 같은 글자를 같은 논리 크기로 요청해도 창 배율이 다르면 다른 비트맵이므로 별도 항목이어야 한다. 그리고 논리 크기와 굽는 크기 둘 다 키에 넣어야 하는 이유는 `advance` 가 논리 크기에, 비트맵이 굽는 크기에 각각 의존하기 때문이다.
+**세 값이 전부 들어간다.** 같은 글자를 같은 논리 크기로 요청해도 정수 굽기 높이가 달라지면 별도 비트맵 항목이 필요하다. 원래 배율이 달라도 양자화와 높이 반올림의 결과가 같으면 같은 항목을 재사용한다. 그리고 논리 크기와 굽는 크기 둘 다 키에 넣어야 하는 이유는 `advance` 가 논리 크기에, 비트맵이 굽는 크기에 각각 의존하기 때문이다.
 
-캐시에 축출 정책은 없다. 아틀라스가 찰 때 `s_cache.clear()` 로 통째로 비워지는 것이 유일한 정리다. 창 크기를 여러 번 바꾸면 옛 배율 항목이 남아 메모리를 조금 차지하지만, 다음 아틀라스 리셋 때 함께 사라진다.
+캐시에 축출 정책은 없다. 아틀라스가 찰 때 `s_cache.clear()`로 통째로 비우며, 폰트 교체와 렌더러 종료에서도 캐시를 정리한다. 창 크기를 여러 번 바꾸면 옛 배율 항목이 남아 메모리를 조금 차지하지만, 다음 아틀라스 리셋 때 함께 사라진다.
 
 ### 12.4 실측
 
@@ -1428,7 +1571,7 @@ key = (code point << 32) | (논리 크기 << 16) | 굽는 크기
 | 논리 크기로 굽고 확대 | 298 × 58 | 22.7 % |
 | 화면 배율로 굽기 | 298 × 58 | **13.2 %** |
 
-**그려진 크기는 두 경우가 같다.** 레이아웃이 논리 좌표로 고정돼 있으니 당연하다. 다른 것은 경계의 성질이다. 확대한 쪽은 원래 1픽셀이던 반투명 경계가 1.69픽셀로 늘어나 22.7 % 의 픽셀이 어중간한 알파를 갖는다. 화면 배율로 구운 쪽은 경계가 다시 1픽셀 폭이 되어 13.2 % 로 떨어진다. 이 수치가 눈에는 **획이 또렷해지는 것**으로 보인다.
+위 표는 해당 조건에서 기록한 비교 사례다. 논리 advance는 유지하지만 비트맵의 외곽 상자는 굽는 크기의 정수 경계에 따라 달라질 수 있다. 부분 덮임 비율은 폰트·문자열·필터에 따라 달라지는 지표이며 모든 환경의 선명도를 나타내는 점수는 아니다. 이 사례에서 비교한 것은 경계의 성질이다. 확대한 쪽은 원래 1픽셀이던 반투명 경계가 1.69픽셀로 늘어나 22.7 % 의 픽셀이 어중간한 알파를 갖는다. 화면 배율로 구운 쪽은 경계가 다시 1픽셀 폭이 되어 13.2 % 로 떨어진다. 이 수치가 눈에는 **획이 또렷해지는 것**으로 보인다.
 
 창을 키울수록 차이가 벌어진다. 3.375배 창에서는 확대한 글자의 경계가 3픽셀 이상으로 번져서, 멀리서 봐도 흐릿한 것이 티가 난다.
 
@@ -1441,6 +1584,8 @@ key = (code point << 32) | (논리 크기 << 16) | 굽는 크기
 ```cpp
 bool renderer_load_font(const char* path)
 {
+    // Submit queued quads before resetting atlas positions for another font.
+    glb_flush();
     s_font_ok = false;
     s_cache.clear();
     s_ttf.clear();
@@ -1481,17 +1626,17 @@ bool renderer_load_font(const char* path)
 }
 ```
 
-절차는 다섯 단계다. ① 이전 상태 초기화 → ② 파일 전체를 `s_ttf` 로 읽음 → ③ `stbtt_GetFontOffsetForIndex(data, 0)` 으로 첫 폰트의 오프셋을 구함(TTC 컬렉션 파일 대응) → ④ `stbtt_InitFont` → ⑤ `s_font_ok = true`.
+먼저 큐에 남은 글리프 사각형을 제출한다. 이어지는 절차는 다섯 단계다. ① 이전 상태 초기화 → ② 파일 전체를 `s_ttf` 로 읽음 → ③ `stbtt_GetFontOffsetForIndex(data, 0)` 으로 첫 폰트의 오프셋을 구함(TTC 컬렉션 파일 대응) → ④ `stbtt_InitFont` → ⑤ `s_font_ok = true`.
 
 **`s_ttf` 를 끝까지 들고 있어야 한다.** `stbtt_fontinfo` 는 파일 데이터를 복사하지 않고 **포인터로 참조**한다. `s_ttf` 를 해제하거나 재할당하면 이후 모든 글리프 래스터화가 해제된 메모리를 읽는다. 이 파일에서 `s_ttf` 를 비우는 곳이 전부 `s_font_ok = false` 와 짝을 이루는 이유다.
 
-`s_pen_x = s_pen_y = s_row_h = 0` 이 GL 버전에서 추가된 줄이다. 폰트를 바꾸면 아틀라스에 남아 있는 옛 폰트의 글리프가 의미를 잃으므로 커서를 처음으로 되감아 그 위에 덮어쓴다. 텍스처를 지우지 않는 이유는 어차피 새 글자가 덮어쓸 것이고, 아직 아무도 참조하지 않기 때문이다 — `s_cache.clear()` 로 옛 UV 를 전부 버렸으니 그 자리를 가리키는 코드가 남아 있지 않다.
+`s_pen_x = s_pen_y = s_row_h = 0` 이 GL 버전에서 추가된 줄이다. 폰트를 바꾸면 아틀라스에 남아 있는 옛 폰트의 글리프가 의미를 잃으므로 커서를 처음으로 되감아 그 위에 덮어쓴다. 커서를 되감기 전에 `glb_flush()`로 이미 큐에 넣은 옛 글리프 사각형을 제출한다. `s_cache.clear()`만으로는 큐에 복사된 UV가 없어지지 않는다. 텍스처 저장 공간은 재사용하되, 새 내용으로 덮어쓰기 전에 옛 참조의 제출 순서를 보장한다.
 
-실패 경로가 넷이다. 파일 없음, 크기 0, 부분 읽기, 잘못된 TTF. 넷 모두 stderr에 한 줄을 찍고 `s_font_ok`를 `false`로 남기며, 호출자에게도 `false`를 반환한다. 성공하면 `true`를 반환한다. **예외를 던지지 않고 프로그램을 죽이지도 않는다.**
+실패 경로가 넷이다. 파일 없음, 크기 0, 부분 읽기, 잘못된 TTF. 넷 모두 stderr에 한 줄을 찍고 `s_font_ok`를 `false`로 남기며, 호출자에게도 `false`를 반환한다. 성공하면 `true`를 반환한다. 이 명시적인 실패 분기들은 `false`를 반환한다. 벡터 할당의 예외나 신뢰하지 않는 폰트의 잘못된 내부 오프셋까지 이 반환값으로 처리한다는 보장은 없다.
 
 그래서 실패 모드가 특이하다. `measure_text` 는 `!s_font_ok` 면 0 을 반환하고, `draw_text` 는 조용히 반환한다. 즉 **폰트를 못 찾으면 화면이 검게 비는 게 아니라, 글자만 전부 사라진다.** 버튼 사각형과 아이콘은 정상적으로 보이는데 라벨이 하나도 없는 화면이 나온다. `measure_text` 가 0 을 반환하므로 중앙 정렬 계산도 전부 어긋난다. 처음 보면 원인을 짐작하기 어려우니, **글자만 안 보이면 stderr 의 `[text] font open failed:` 를 먼저 확인**하는 것이 정석이다.
 
-현재 `main()`은 `presentation_load("assets/theme.cfg")`를 호출한다. 표현 계층이 설정된 폰트를 먼저 시도하고 실패하면 `renderer_load_font()`의 반환값을 보고 `Font/NanumGothic.ttf`로 복구한다. 둘 다 실패한 경우에는 위의 글자 누락 증상이 남는다. **NanumGothic 을 쓰는 이유는 한글 글리프가 들어 있기 때문이다.** UTF-8 디코더가 한글 code point 를 뽑아내도 폰트에 글리프가 없으면 빈 사각형조차 안 나온다. 저장소에는 `Font/monogram.ttf` 도 있지만 그쪽은 ASCII 픽셀 폰트다.
+현재 `main()`은 `presentation_load("assets/theme.cfg")`를 호출한다. 표현 계층이 설정된 폰트를 먼저 시도하고 실패하면 `renderer_load_font()`의 반환값을 보고 `Font/NanumGothic.ttf`로 복구한다. 둘 다 실패한 경우에는 위의 글자 누락 증상이 남는다. **NanumGothic 을 쓰는 이유는 한글 글리프가 들어 있기 때문이다.** UTF-8 디코더가 한글 code point를 뽑아내더라도 해당 폰트에 매핑이 없으면 glyph 0(`.notdef`)으로 처리된다. 그 모양은 폰트에 따라 사각형이나 빈 모양일 수 있다. 저장소에는 `Font/monogram.ttf` 도 있지만 그쪽은 ASCII 픽셀 폰트다.
 
 경로가 상대 경로라는 점이 중요하다. 빌드 디렉터리에서 실행하면 `Font/` 가 없어서 폰트 로드가 실패한다. 저장소 루트에서 실행하거나, `cmake --build build` 를 타깃 지정 없이 돌려 `copy_assets` 가 함께 실행되게 해야 한다. macOS `.app` 번들에서는 Part 2 의 `set_macos_resource_cwd()` 가 작업 디렉터리를 옮겨 이 문제를 해결한다.
 
@@ -1504,6 +1649,7 @@ int measure_text(const char* text, int size)
 {
     if (!text || !*text || !s_font_ok) return 0;
     const int px = size < 1 ? 1 : size;
+    const float scale = stbtt_ScaleForPixelHeight(&s_font, (float)px);
     float line_width = 0.0f;
     float max_width = 0.0f;
     uint32_t previous = 0;
@@ -1515,15 +1661,20 @@ int measure_text(const char* text, int size)
             previous = 0;
             continue;
         }
-        const float scale = stbtt_ScaleForPixelHeight(&s_font, (float)px);
         if (previous)
             line_width += stbtt_GetCodepointKernAdvance(
                 &s_font, (int)previous, (int)cp) * scale;
-        line_width += glyph_for(cp, px).advance;
+        int advance = 0, bearing = 0;
+        stbtt_GetCodepointHMetrics(&s_font, (int)cp, &advance, &bearing);
+        line_width += advance * scale;
         previous = cp;
     }
     max_width = std::max(max_width, line_width);
-    return (int)std::floor(max_width + 0.5f);
+    // Measurement uses CPU metrics only; it must not allocate or recycle an atlas.
+    const double rounded = std::floor(double(max_width) + 0.5);
+    if (!(rounded < (std::numeric_limits<int>::max)()))
+        return (std::numeric_limits<int>::max)();
+    return int(rounded);
 }
 ```
 
@@ -1531,7 +1682,7 @@ int measure_text(const char* text, int size)
 
 반환값은 `floor(max_width + 0.5)` — 반올림이다. 멀티라인 문자열에서는 **가장 긴 줄의 폭**을 준다.
 
-이 함수가 `glyph_for` 를 부른다는 점에 주의할 것. 측정만 해도 글리프가 구워지고 아틀라스에 올라간다. 부작용처럼 보이지만 의도적이다 — `measure_text` 직후에 거의 항상 `draw_text` 가 따라오므로, 어차피 구울 것을 미리 굽는 셈이다. 그리고 `advance` 는 논리 크기 기준이므로 **창 크기가 바뀌어도 이 함수의 반환값은 변하지 않는다.**
+이 함수는 CPU 폰트 메트릭에서 advance와 커닝만 읽는다. 폭을 재기 위해 비트맵을 굽거나 아틀라스를 할당·비우지 않는다. `draw_text`도 같은 논리 크기의 메트릭으로 펜을 이동한다. 글꼴·문자열·논리 크기가 같으면 창 배율을 바꿔도 측정 폭은 유지한다. 반환형 int를 넘는 큰 폭은 INT_MAX로 제한해 범위를 벗어난 실수→정수 변환을 피한다. 폭은 각 줄의 최종 advance 기준이며 잉크의 실제 경계와는 다를 수 있다.
 
 ### 13.3 배치
 
@@ -1580,7 +1731,7 @@ void draw_text(const char* text, int x, int y, int size, Color color)
 }
 ```
 
-`draw_text(text, x, y, size, color)` 의 `y` 는 **텍스트 상단**이다. 폰트의 baseline 은 그보다 `ascent × scale` 만큼 아래다. 글리프의 위치는 baseline 에 `glyph.yoff`(대부분 음수)를 더해 정한다.
+`draw_text(text, x, y, size, color)`의 `y`는 **폰트 메트릭 상자의 위쪽**이다. 개별 글리프의 실제 잉크 상단과는 다를 수 있다. 폰트의 baseline 은 그보다 `ascent × scale` 만큼 아래다. 글리프의 위치는 baseline 에 `glyph.yoff`(대부분 음수)를 더해 정한다.
 
 ```text
 baseline = y + ascent × scale
@@ -1593,9 +1744,9 @@ pen_x   += kerning + advance
 
 **멀티라인 처리**가 여기 들어 있다. 개행을 만나면 `pen_x` 를 시작 `x` 로 되돌리고 `baseline` 에 `line_advance = (ascent - descent + line_gap) × scale` 을 더한다. `previous = 0` 리셋도 `measure_text` 와 같다. **두 함수가 같은 규칙을 쓰는 것이 계약이다** — 어긋나면 버튼 라벨의 중앙 정렬이 흔들린다. 실제로 `gui_button` 은 `measure_text` 로 폭을 재서 `x + (w - tw) / 2` 에 그리므로, 측정과 배치가 다르면 즉시 시각적으로 드러난다.
 
-`if (glyph.bw > 0 && glyph.bh > 0)` 가 공백 문자와 자리 없는 글자를 걸러 낸다. 공백은 비트맵이 비어 있고 `advance` 만 유효하다. 아틀라스에 자리가 없어 `pack_glyph` 가 실패한 글자도 `bw = bh = 0` 이 되어 같은 경로로 걸러진다 — **한 글자가 안 그려질 뿐 나머지는 정상으로 나온다.**
+`if (glyph.bw > 0 && glyph.bh > 0)` 가 공백 문자와 자리 없는 글자를 걸러 낸다. 공백은 비트맵이 비어 있고 간격은 `advance`로 유지한다. 크기 제한이나 업로드 오류로 `pack_glyph`가 실패한 글자도 `bw = bh = 0`으로 두어 그리기를 생략한다. 실패 결과를 캐시하지 않아 다음 요청에서 다시 시도한다. 이 처리는 그 글자의 그리기와 간격을 구분하는 계약이며, 컨텍스트 오류 등에서 나머지 GL 호출의 성공까지 보장하지는 않는다.
 
-이 루프가 만드는 것은 결국 `glb_rect` 호출 여러 번이다. 전부 같은 텍스처(`s_atlas`)를 쓰므로 **한 문장이든 화면의 모든 글자든 draw call 은 한 번**이다.
+이 루프는 같은 아틀라스 텍스처를 사용하는 `glb_rect` 호출을 만든다. 사이에 다른 텍스처나 아틀라스 재활용 경계가 없으면 한 배치로 모인다. 중간에 이미지·도형이 끼거나 아틀라스를 비우면 제출이 나뉜다.
 
 ### 13.4 정리
 
@@ -1605,6 +1756,7 @@ pen_x   += kerning + advance
 void renderer_text_shutdown()
 {
     if (s_atlas) {
+        glb_before_texture_delete(s_atlas);
         gl_DeleteTextures(1, &s_atlas);
         s_atlas = 0;
     }
@@ -1615,7 +1767,7 @@ void renderer_text_shutdown()
 }
 ```
 
-`gl_DeleteTextures` 가 추가된 것이 소프트웨어 버전과의 유일한 차이다. 그리고 이 한 줄 때문에 **이 함수는 GL 컨텍스트가 살아 있을 때만 부를 수 있다.** 종료 순서 이야기가 여기서 시작된다.
+글리프 아틀라스를 참조하는 미제출 정점을 먼저 제출한 뒤 텍스처를 삭제한다. CPU 캐시도 함께 비운다. **이 함수는 렌더링 스레드에서 GL 컨텍스트가 current인 동안 호출한다.**
 
 ## 14. 이미지 (1) — 저장소와 핸들 수명
 
@@ -1624,18 +1776,24 @@ void renderer_text_shutdown()
 **현재 소스 발췌 — `renderer/image.h`**
 
 ```cpp
-using ImageHandle = int;  // 0 = invalid/미로드
+// Opaque process-local token: 0 is invalid. Never narrow, persist, increment or
+// interpret it as a GL name. Copying a token borrows the same image; it does not
+// duplicate ownership. All image operations run on the rendering thread.
+using ImageHandle = std::uint64_t;
 
 // 실패 시 0 리턴 (파일 없음, 디코드 실패 등).
-// 성공 시 양수 핸들.
+// 성공 시 0이 아닌 핸들. 슬롯 재사용/저장소 재초기화 후에도 해제된 토큰은 무효.
 ImageHandle image_load(const char* path);
 
 // RGBA8 픽셀 배열에서 이미지 생성. 기본/절차적 fallback 아이콘 등에 사용.
 // pixels는 w*h*4 바이트이며 호출 중 GL_RGBA8 텍스처로 복사된다. 반환 뒤에는
-// 호출자 버퍼를 보관하지 않는다.
+// 호출자 버퍼를 보관하지 않는다. 읽을 수 있는 w*h*4 바이트는 호출자가 보장한다.
+// 현재 GL 컨텍스트에서 호출한다. 크기 제한/GL 업로드/저장소 할당 실패는 0을 반환한다.
 ImageHandle image_create_rgba(const uint8_t* pixels, int w, int h);
 
 // 해제. 핸들이 0 이거나 유효하지 않으면 no-op.
+// Flush any pending use before deleting; must run on the rendering thread
+// with its GL context and renderer alive. The caller then discards this handle.
 void image_unload(ImageHandle h);
 
 // 픽셀 단위. (x, y) 는 좌상단. 좌상단이 텍스처 (0,0) 에 매핑.
@@ -1644,6 +1802,7 @@ void draw_image(ImageHandle h, int x, int y, int w, int h_px);
 // tint 는 RGBA 각 채널에 곱해짐. {255,255,255,255} = 원본.
 void draw_image_tinted(ImageHandle h, int x, int y, int w, int h_px, Color tint);
 
+// 유한한 각도는 한 바퀴 범위로 축약하며, NaN/Inf 각도는 그리지 않는다.
 // 회전 드로우 — (cx, cy)가 중심, angle_deg는 시계방향(화면 y가 아래로
 // 증가하므로 표준 수학 좌표계의 반시계와 반대). CPU에서 쿼드 꼭짓점만
 // 회전하고 내부 픽셀 보간은 GPU 래스터라이저가 맡는다. 메뉴/상점의 실시간
@@ -1652,7 +1811,7 @@ void draw_image_rotated(ImageHandle h, int cx, int cy, int w, int h_px,
                         float angle_deg);
 
 // 이미지 크기 질의 — 원본 너비/높이가 필요할 때 (예: 자연 크기로 드로우).
-//   반환 false = 핸들 무효.
+//   반환 false = 핸들 무효. 실패 시 w_out/h_out은 유지된다.
 bool image_size(ImageHandle h, int& w_out, int& h_out);
 
 // 내부: renderer_init 시점 호출 — GL 텍스처 핸들 저장소 초기화.
@@ -1660,61 +1819,45 @@ void image_init();
 void image_shutdown();
 ```
 
-선언부는 GL 전환 전과 같다 — 바뀐 것은 구현이 무엇을 보관하는지 설명하는 주석뿐이다. 게임 코드가 보는 계약(정수 핸들 하나, 실패는 0)이 그대로라는 뜻이고, 그것이 핸들 기반 API 를 쓴 이유이기도 하다.
+핸들은 64비트의 불투명한 토큰이며 0은 무효다. 하위 32비트에 슬롯 위치+1, 상위 32비트에 발급 번호를 담는다. 호출자는 비트 배치를 해석하지 않고 ImageHandle 타입 그대로 보관한다. int로 줄이거나 GL 이름처럼 사용하지 않는다. 함수 이름과 실패 시 0이라는 사용 흐름은 유지되지만, 과거 int 핸들과 바이너리 호환되는 타입은 아니므로 호출부를 함께 빌드한다.
 
-저장소는 벡터 하나다.
+### 14.1 위치와 자원 식별을 분리한다
+
+벡터 인덱스만 핸들로 쓰면 해제한 슬롯을 다른 이미지가 차지했을 때 옛 복사본이 새 이미지를 가리킨다. 크기 조회뿐 아니라 잘못된 삭제도 일어날 수 있다. 현재 저장소는 슬롯의 발급 번호까지 일치해야 조회를 허용한다.
 
 **현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
 struct ImageEntry {
-    bool   used = false;
     int    w = 0;
     int    h = 0;
     GLuint tex = 0;
 };
 
-static std::vector<ImageEntry> s_images;
-
-#if defined(_WIN32)
-static ULONG_PTR s_gdiplus_token = 0;
-static bool s_gdiplus_initialized = false;
-#endif
+static image_detail::HandlePool<ImageEntry> s_images;
 ```
 
-소프트웨어 시절 이 구조체에는 `std::vector<uint32_t> pixels` 가 들어 있었다. 지금은 `GLuint tex` 하나다. **픽셀 데이터가 CPU 메모리에 남지 않는다** — 업로드가 끝나면 디코더가 만든 임시 버퍼는 해제되고, 그림은 GPU 쪽에만 존재한다.
+슬롯에는 CPU의 크기·GL 이름을 담은 ImageEntry를 unique_ptr로 보관한다. 슬롯 벡터의 재할당으로 메타데이터가 움직여도 별도로 할당한 Entry 주소는 유지된다. 조회한 포인터는 빌린 값이며 해당 이미지의 해제·저장소 종료 이후에는 사용할 수 없다.
 
-**현재 소스 발췌 — `renderer/image_gl.cpp`**
+HandlePool의 발급 카운터는 템플릿 타입과 인스턴스가 공유하는 렌더링 스레드 전용 상태다. 발급 번호를 되감지 않아 다른 풀·슬롯 재사용·clear 이후의 토큰 혼동도 거절한다. 마지막 번호를 쓰면 카운터를 0으로 두고 추가 발급을 거절한다. 실행 중 전체 발급 수는 최대 2³²−1이며 이미 살아 있는 핸들은 계속 조회할 수 있다. 파일·네트워크에 저장할 ID나 보안 토큰으로 쓰지 않는다.
+
+**현재 소스 발췌 — `renderer/handle_pool.h`**
 
 ```cpp
-void image_init()
-{
-    if (s_images.empty()) s_images.resize(1); // 핸들 0 은 무효값으로 예약
-}
-
-void image_shutdown()
-{
-    // 텍스처를 먼저 지운다. 컨텍스트가 살아 있을 때만 유효한 호출이라
-    // renderer_shutdown 이 platform_shutdown 보다 앞서야 한다.
-    for (auto& e : s_images) {
-        if (e.tex) gl_DeleteTextures(1, &e.tex);
+inline std::uint32_t take_stamp(std::uint32_t& next) noexcept {
+    std::uint32_t const current = next;
+    if (current == 0u || current == (std::numeric_limits<std::uint32_t>::max)()) {
+        next = 0u;
+    } else {
+        next = current + 1u;
     }
-    s_images.clear();
-#if defined(_WIN32)
-    if (s_gdiplus_initialized) {
-        Gdiplus::GdiplusShutdown(s_gdiplus_token);
-        s_gdiplus_initialized = false;
-        s_gdiplus_token = 0;
-    }
-#endif
+    return current;
 }
 ```
 
-`image_init()` 이 벡터를 크기 1 로 만든다. **인덱스 0 은 영원히 사용되지 않는 자리이고, 그래서 `ImageHandle` 0 이 "무효" 를 뜻할 수 있다.** 별도의 sentinel 값이나 `std::optional` 없이 정수 하나로 유효성을 표현하는 고전적 기법이다.
+### 14.2 생성의 실패 경로와 소유권
 
-핸들 0 이 "무효" 로 남으려면 **슬롯 0 예약이라는 불변식이 언제나 참**이어야 한다. 이 불변식이 깨지는 경로가 실제로 있다 — `image_init` 이 아직 불리지 않았거나, `image_shutdown` 이 벡터를 통째로 비운 뒤 이미지를 다시 만들면, `image_create_rgba` 의 `push_back` 이 인덱스 **0** 을 돌려준다. 호출자에게는 실패로 보이는데 GL 텍스처는 이미 만들어져 새어 나가는, 조용히 어긋나는 실패다. 그래서 `image_create_rgba` 는 진입부에서 멱등 `image_init()` 을 스스로 한 번 더 불러 그 경로를 원천 차단한다. `if (s_images.empty())` 덕분에 몇 번을 불러도 결과가 같으므로, 불변식을 **의존하는 지점에서 스스로 복구**하는 비용이 사실상 0 이다. 이런 자가 방어는 실패를 숨기는 것과 다르다 — 잘못된 입력(널 픽셀 포인터, 0 이하 크기)은 여전히 0 으로 거부되고, 복구되는 것은 호출 순서라는 우연뿐이다.
-
-생성과 해제는 슬롯 재사용 방식이다.
+Entry 할당 → GPU 업로드 → 풀 등록 순서다. 업로드 실패는 그 함수가 임시 GL 이름을 정리한다. 풀 등록은 unique_ptr 인자를 성공·실패 모두 소비한다. 등록 실패 시 Entry의 CPU 메모리는 정리되지만 GL 이름의 해제는 이 생성 함수가 맡는다. 아직 그리기 큐에 공개하지 않은 이름을 바로 삭제하고 0을 반환한다.
 
 **현재 소스 발췌 — `renderer/image_gl.cpp`**
 
@@ -1722,42 +1865,90 @@ void image_shutdown()
 ImageHandle image_create_rgba(const uint8_t* rgba, int width, int height)
 {
     if (!rgba || width <= 0 || height <= 0) return 0;
-
-    // 슬롯 0 은 "무효 핸들" 로 예약돼 있다. image_shutdown 이 벡터를 비운 뒤
-    // 여기로 들어오면 push_back 결과가 인덱스 0 이 되어, 호출자에게는 실패로
-    // 보이는데 텍스처는 이미 만들어진 상태로 새어 나간다. image_init 은
-    // 멱등이므로 여기서 한 번 더 불러 그 경로를 막는다.
-    image_init();
-
-    ImageEntry entry;
-    entry.used = true;
-    entry.w = width;
-    entry.h = height;
-
-    gl_GenTextures(1, &entry.tex);
-    gl_BindTexture(GL_TEXTURE_2D, entry.tex);
-    gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
-                  GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    // 아이콘이 픽셀아트라 확대할 때 NEAREST 로 경계를 살린다. 부드러운
-    // 확대가 필요하면 이 두 줄을 GL_LINEAR 로 바꾸면 된다.
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    for (size_t i = 1; i < s_images.size(); ++i) {
-        if (!s_images[i].used) {
-            s_images[i] = entry;
-            return (ImageHandle)i;
-        }
-    }
-    s_images.push_back(entry);
-    return (ImageHandle)(s_images.size() - 1);
+    std::unique_ptr<ImageEntry> entry;
+    try {
+        entry=std::make_unique<ImageEntry>();
+    } catch(const std::bad_alloc&) { return 0; }
+    const GLuint tex=image_detail::upload_rgba8(rgba,width,height);
+    if(!tex) return 0;
+    entry->w=width;entry->h=height;entry->tex=tex;
+    const ImageHandle handle=s_images.insert(std::move(entry));
+    // Pool insertion consumes entry on every path. A failed registration still
+    // leaves us responsible for the GL object, which has never been queued.
+    if(!handle) gl_DeleteTextures(1,&tex);
+    return handle;
 }
 ```
 
-`gl_TexImage2D` 한 번이 소프트웨어 시절의 "RGBA8 바이트 배열을 `0xAARRGGBB` 워드로 변환하는 루프" 를 대체한다. 포맷 변환은 이제 드라이버가 한다 — `GL_RGBA` + `GL_UNSIGNED_BYTE` 가 CPU 쪽 배치를, `GL_RGBA8` 이 GPU 쪽 저장 포맷을 말한다.
+실제 GL 업로드는 `renderer/texture_upload.h`의 `image_detail::upload_rgba8`가 담당한다. 폭·높이와 바이트 곱의 표현 범위, `GL_MAX_TEXTURE_SIZE`를 검사한 뒤 임시 텍스처를 만든다. 업로드나 매개변수 설정·상태 복원에 실패하면 임시 객체를 삭제하고 0을 반환한다. 이름을 생성했다는 사실만으로 픽셀 저장소가 만들어졌다고 판단하지 않는다.
+
+**현재 소스 발췌 — `renderer/texture_upload.h`**
+
+```cpp
+inline GLuint upload_rgba8(const std::uint8_t* rgba, int width, int height) noexcept {
+    if (!rgba || width<=0 || height<=0) return 0;
+    const auto w=static_cast<std::size_t>(width), h=static_cast<std::size_t>(height);
+    if (w>(std::numeric_limits<std::size_t>::max)()/4 ||
+        h>(std::numeric_limits<std::size_t>::max)()/(w*4)) return 0;
+    if (gl_GetError()) return 0;
+    GLint limit = 0;
+    gl_GetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
+    if (gl_GetError() || limit <= 0 || width > limit || height > limit)
+        return 0;
+    GLint bound=0, alignment=0, row_length=0, skip_rows=0, skip_pixels=0, unpack_buffer=0;
+    gl_GetIntegerv(GL_TEXTURE_BINDING_2D,&bound);
+    gl_GetIntegerv(GL_UNPACK_ALIGNMENT,&alignment);
+    gl_GetIntegerv(GL_UNPACK_ROW_LENGTH,&row_length);
+    gl_GetIntegerv(GL_UNPACK_SKIP_ROWS,&skip_rows);
+    gl_GetIntegerv(GL_UNPACK_SKIP_PIXELS,&skip_pixels);
+    gl_GetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING,&unpack_buffer);
+    if (gl_GetError()) return 0;
+
+    GLuint candidate=0;
+    gl_GenTextures(1,&candidate);
+    bool ok=gl_GetError()==0 && candidate!=0;
+    if (ok) {
+        gl_BindTexture(GL_TEXTURE_2D,candidate);
+        ok=gl_GetError()==0;
+    }
+    if (ok) {
+        // A CPU pointer must not be interpreted as an offset in a PBO.
+        gl_BindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
+        gl_PixelStorei(GL_UNPACK_ALIGNMENT,1);
+        gl_PixelStorei(GL_UNPACK_ROW_LENGTH,0);
+        gl_PixelStorei(GL_UNPACK_SKIP_ROWS,0);
+        gl_PixelStorei(GL_UNPACK_SKIP_PIXELS,0);
+        gl_TexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        gl_TexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        gl_TexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        gl_TexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        ok=gl_GetError()==0;
+    }
+    if (ok) {
+        gl_TexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width,height,0,
+                       GL_RGBA,GL_UNSIGNED_BYTE,rgba);
+        ok=gl_GetError()==0;
+    }
+    gl_BindTexture(GL_TEXTURE_2D,static_cast<GLuint>(bound));
+    gl_BindBuffer(GL_PIXEL_UNPACK_BUFFER,static_cast<GLuint>(unpack_buffer));
+    gl_PixelStorei(GL_UNPACK_ALIGNMENT,alignment);
+    gl_PixelStorei(GL_UNPACK_ROW_LENGTH,row_length);
+    gl_PixelStorei(GL_UNPACK_SKIP_ROWS,skip_rows);
+    gl_PixelStorei(GL_UNPACK_SKIP_PIXELS,skip_pixels);
+    const bool restored=gl_GetError()==0;
+    if (!ok || !restored) {
+        if (candidate) gl_DeleteTextures(1,&candidate);
+        return 0;
+    }
+    return candidate;
+}
+```
+
+`GL_RGBA`와 `GL_UNSIGNED_BYTE`는 CPU 입력이 RGBA 순서의 바이트임을, `GL_RGBA8`은 텍스처가 채널마다 8비트 정규화 성분을 저장함을 지정한다. `sampler2D`로 읽으면 성분은 0~1 범위로 해석된다. 드라이버의 실제 메모리 배치까지 CPU 배열과 같다는 뜻은 아니다.
+
+현재 공개 API는 포인터와 폭·높이만 받는다. 호출자는 최소 `width*height*4`바이트의 읽을 수 있는 연속 RGBA 배열을 제공해야 하며, 포인터만으로 그 길이를 검사할 수는 없다. 디코더 결과와 절차적 아이콘 생성기가 이 계약을 지킨다.
+
+업로드 함수는 현재 활성 텍스처 유닛의 바인딩과 unpack 상태를 저장하고 복원한다. PBO 바인딩을 0으로 만들어 입력을 CPU 주소로 해석하고, 행 길이·행/픽셀 건너뛰기는 0, 정렬은 1로 설정한다. 이 경로는 패딩 없는 RGBA8 배열 전용이다. 3픽셀 RGBA 행은 12바이트라 기본 정렬4에도 맞지만, 정렬8이나 다른 행 상태가 남아 있다면 결과가 달라질 수 있다.
 
 **필터가 `GL_NEAREST` 인 것은 의도다.** 이 게임의 아이콘은 작은 픽셀아트라 확대할 때 경계가 또렷한 편이 낫다. 텍스트 아틀라스가 `GL_LINEAR` 인 것과 대비된다 — 같은 렌더러 안에서도 콘텐츠 성격에 따라 다른 필터를 쓴다. 부드러운 확대가 필요하면 두 줄을 바꾸면 되고, 호출부는 손대지 않는다.
 
@@ -1778,29 +1969,68 @@ ImageHandle image_load(const char* path)
 
 void image_unload(ImageHandle handle)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
-    ImageEntry& e = s_images[(size_t)handle];
-    if (e.tex) gl_DeleteTextures(1, &e.tex);
-    e = {};
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry) return;
+    if(entry->tex) {
+        glb_before_texture_delete(entry->tex);
+        gl_DeleteTextures(1,&entry->tex);
+    }
+    s_images.erase(handle);
 }
 
 bool image_size(ImageHandle handle, int& width, int& height)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size() ||
-        !s_images[(size_t)handle].used) return false;
-    width = s_images[(size_t)handle].w;
-    height = s_images[(size_t)handle].h;
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry) return false;
+    width=entry->w;height=entry->h;
     return true;
 }
 ```
 
-`image_unload` 는 텍스처를 먼저 지우고 슬롯을 기본값으로 되돌린다. **`e = {}` 만 하고 `gl_DeleteTextures` 를 빠뜨리면 GL 객체가 샌다.** 소프트웨어 시절에는 `std::vector` 소멸자가 알아서 정리해 줬지만, GL 핸들은 그냥 정수라 소멸자가 없다. C++ 의 RAII 가 닿지 않는 자원이라는 점이 GPU 자원 관리의 기본 함정이다.
+### 14.3 해제 권한과 렌더링 순서
 
-이 설계의 결과: **게임 코드는 텍스처 ID 도, GDI+ `Bitmap` 객체도, 파일 핸들도 보지 않는다.** 정수 하나만 들고 다닌다. 대가는 handle 재사용에서 오는 고전적 위험이다 — unload 한 핸들을 계속 들고 있다가 나중에 쓰면, 그 사이에 다른 이미지가 그 슬롯을 차지했을 수 있다. 이 프로젝트는 아이콘 몇 개를 시작 시 로드해 끝까지 유지하므로 문제가 되지 않는다. 동적 로드/언로드가 늘어난다면 세대 카운터를 핸들 상위 비트에 넣는 것이 표준적 해법이다.
+image_unload는 전체 토큰을 조회한 뒤, 해당 텍스처를 쓰는 CPU 배치를 제출하고 GL 이름을 삭제한 다음 슬롯을 비운다. 무효·해제된·다른 저장소의 토큰은 해제와 그리기를 수행하지 않는다. image_size도 실패 시 호출자의 출력 크기를 유지한다.
+
+핸들을 복사해도 참조 횟수를 올리거나 소유권을 복제하지 않는다. main의 카탈로그가 한 번 로드한 이미지를 iconYou/iconOpponent 등이 빌려 사용한다. 별도 소유 목록이 한 번씩 해제하며, 기본 이미지로 대체해 반환한 핸들은 기본 이미지 소유자가 정리한다. 유효한 핸들을 잘못된 코드가 해제하는 것까지 발급 번호로 막을 수는 없으므로, 누가 unload를 호출하는지 책임을 정해야 한다.
+
+### 14.4 종료와 재초기화
+
+**현재 소스 발췌 — `renderer/image_gl.cpp`**
+
+```cpp
+void image_init()
+{
+    // Slots are allocated lazily. Issued stamps survive shutdown/reinitialization.
+}
+
+void image_shutdown()
+{
+    // 텍스처를 먼저 지운다. 컨텍스트가 살아 있을 때만 유효한 호출이라
+    // renderer_shutdown 이 platform_shutdown 보다 앞서야 한다.
+    s_images.for_each([](ImageEntry& e) {
+        if (e.tex) {
+            glb_before_texture_delete(e.tex);
+            gl_DeleteTextures(1, &e.tex);
+        }
+    });
+    s_images.clear();
+#if defined(_WIN32)
+    if (s_gdiplus_initialized) {
+        Gdiplus::GdiplusShutdown(s_gdiplus_token);
+        s_gdiplus_initialized = false;
+        s_gdiplus_token = 0;
+    }
+#endif
+}
+```
+
+초기화는 빈 저장소에 슬롯을 강제로 만들지 않는다. renderer_shutdown은 컨텍스트가 살아 있을 때 image_shutdown을 호출하여 남은 텍스처를 정리한다. clear는 슬롯 자료를 비우지만 공유 발급 카운터를 되감지 않는다. 나중에 새 이미지를 같은 슬롯에 넣어도 종료 전에 복사한 토큰과는 다른 값이다. GL 컨텍스트는 이미지 저장소의 정리가 끝날 때까지 유지한다.
 
 ## 15. 이미지 (2) — 디코딩
 
-파일 포맷 디코딩은 플랫폼별로 갈리는 유일한 렌더러 코드다. 그리고 **GL 전환에서 한 글자도 바뀌지 않은 코드**이기도 하다. PNG/JPG 를 푸는 일은 GPU 가 할 수 있는 종류의 작업이 아니고, 어차피 로드 시점에 한 번뿐이다.
+PNG/JPG 파일은 압축된 바이트와 형식 정보를 담고 있다. CPU 디코더가 이를 해석하여 픽셀을 만들고, 공통 GL 경로가 그 픽셀을 GPU 저장소에 복사한다. 디코딩의 성공과 텍스처 생성의 성공을 각각 확인한다.
+
+게임 애셋은 표준 PNG/JPEG를 사용하며, 그 결과의 계약은 양수 폭·높이, 위에서 아래로 이어지는 밀집 RGBA8, straight alpha다. 작업 중에는 지역 결과만 바꾸고, 모든 단계가 성공하면 호출자의 배열과 크기를 갱신한다. 실패하면 기존 출력값을 유지한다.
 
 **현재 소스 발췌 — `renderer/image_gl.cpp`**
 
@@ -1808,96 +2038,158 @@ bool image_size(ImageHandle handle, int& width, int& height)
 static bool decode_image(const char* path, std::vector<uint8_t>& rgba,
                          int& width, int& height)
 {
+    if(!path || !*path) return false;
+    try {
+        int w=0,h=0;
+        std::vector<uint8_t> result;
 #if defined(_WIN32)
-    if (!s_gdiplus_initialized) {
-        Gdiplus::GdiplusStartupInput input;
-        if (Gdiplus::GdiplusStartup(&s_gdiplus_token, &input, nullptr) !=
-            Gdiplus::Ok) {
-            std::fprintf(stderr, "[image] GDI+ startup failed\n");
+        if (!s_gdiplus_initialized) {
+            Gdiplus::GdiplusStartupInput input;
+            if (Gdiplus::GdiplusStartup(&s_gdiplus_token, &input, nullptr)!=Gdiplus::Ok)
+                return false;
+            s_gdiplus_initialized=true;
+        }
+        const int wide_count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,nullptr,0);
+        if(wide_count<=0) return false;
+        std::wstring wide(static_cast<size_t>(wide_count),L'\0');
+        if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,wide.data(),wide_count)!=wide_count)
+            return false;
+        Gdiplus::Bitmap bitmap(wide.c_str());
+        if(bitmap.GetLastStatus()!=Gdiplus::Ok) return false;
+        const auto bw=bitmap.GetWidth(),bh=bitmap.GetHeight();
+        const auto max_int=static_cast<UINT>((std::numeric_limits<int>::max)());
+        if(bw>max_int || bh>max_int) return false;
+        w=static_cast<int>(bw);h=static_cast<int>(bh);
+        const auto bytes=image_detail::rgba_storage_bytes(w,h);
+        if(!bytes) return false;
+        result.resize(*bytes); // Allocate before acquiring the temporary lock.
+        BitmapReadLock lock(bitmap);
+        Gdiplus::Rect rect(0,0,w,h);
+        if(bitmap.LockBits(&rect,Gdiplus::ImageLockModeRead,PixelFormat32bppARGB,&lock.data)!=Gdiplus::Ok)
+            return false;
+        lock.active=true;
+        if(!image_detail::copy_bgra_rows(static_cast<const uint8_t*>(lock.data.Scan0),
+                lock.data.Stride,w,h,result.data(),result.size())) return false;
+        if(!lock.close()) return false;
+#else
+        int channels=0;
+        using Pixels=std::unique_ptr<unsigned char,decltype(&stbi_image_free)>;
+        Pixels decoded(stbi_load(path,&w,&h,&channels,4),stbi_image_free);
+        if(!decoded) {
+            const char* reason=stbi_failure_reason();
+            std::fprintf(stderr,"[image] load failed: %s (%s)\n",path,reason?reason:"unknown");
             return false;
         }
-        s_gdiplus_initialized = true;
-    }
-    const int wide_count = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (wide_count <= 0) return false;
-    std::wstring wide((size_t)wide_count, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide.data(), wide_count);
-
-    Gdiplus::Bitmap bitmap(wide.c_str());
-    if (bitmap.GetLastStatus() != Gdiplus::Ok) {
-        std::fprintf(stderr, "[image] load failed: %s\n", path);
-        return false;
-    }
-    width = (int)bitmap.GetWidth();
-    height = (int)bitmap.GetHeight();
-    if (width <= 0 || height <= 0) return false;
-
-    Gdiplus::BitmapData data{};
-    Gdiplus::Rect rect(0, 0, width, height);
-    if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead,
-                        PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
-        std::fprintf(stderr, "[image] pixel lock failed: %s\n", path);
-        return false;
-    }
-    rgba.resize((size_t)width * (size_t)height * 4);
-    const uint8_t* base = static_cast<const uint8_t*>(data.Scan0);
-    for (int y = 0; y < height; ++y) {
-        const uint8_t* src = base + (ptrdiff_t)y * data.Stride;
-        uint8_t* dst = rgba.data() + (size_t)y * (size_t)width * 4;
-        for (int x = 0; x < width; ++x) {
-            dst[x * 4 + 0] = src[x * 4 + 2];
-            dst[x * 4 + 1] = src[x * 4 + 1];
-            dst[x * 4 + 2] = src[x * 4 + 0];
-            dst[x * 4 + 3] = src[x * 4 + 3];
-        }
-    }
-    bitmap.UnlockBits(&data);
-    return true;
-#else
-    int channels = 0;
-    unsigned char* decoded = stbi_load(path, &width, &height, &channels, 4);
-    if (!decoded) {
-        std::fprintf(stderr, "[image] load failed: %s (%s)\n",
-                     path, stbi_failure_reason());
-        return false;
-    }
-    if (width <= 0 || height <= 0) {
-        stbi_image_free(decoded);
-        return false;
-    }
-    rgba.assign(decoded, decoded + (size_t)width * (size_t)height * 4);
-    stbi_image_free(decoded);
-    return true;
+        const auto bytes=image_detail::rgba_storage_bytes(w,h);
+        if(!bytes) return false;
+        result.assign(decoded.get(),decoded.get()+*bytes);
 #endif
+        rgba.swap(result);
+        width=w;height=h;
+        return true;
+    } catch(const std::bad_alloc&) { return false; }
+      catch(const std::length_error&) { return false; }
 }
 ```
 
-### 15.1 Windows: GDI+ 와 채널 스왑
+### 15.1 Windows: GDI+ 잠금과 행 배치
 
-Windows 에서는 GDI+ 가 PNG/JPG/BMP 를 디코드한다. 시스템에 이미 있는 코덱을 쓰므로 추가 의존성이 없다. 절차는 지연 초기화(`GdiplusStartup`) → UTF-8 경로를 UTF-16 으로 변환 → `Gdiplus::Bitmap` 생성 → `LockBits` 로 픽셀 접근 → 행 단위 복사 → `UnlockBits`.
+GDI+ 초기화 → UTF-8 경로의 UTF-16 변환 → `Bitmap` 생성 → 결과 배열 확보 → `LockBits` → 행 복사 → `UnlockBits` 순서다. 잘못된 UTF-8은 `MB_ERR_INVALID_CHARS`로 거절한다. 이미지의 unsigned 크기를 int로 바꾸기 전에 범위를 검사하고, 바이트 곱도 계산 전에 확인한다.
 
-**여기 이 시리즈에서 가장 놓치기 쉬운 네 줄이 있다.** 위 `decode_image` 안쪽 루프의 본문이다.
+`LockBits`로 빌린 메모리는 잠금이 끝날 때까지만 사용한다. 결과 배열은 잠금 전에 할당하고, 잠금 이후의 조기 반환은 `BitmapReadLock`이 정리한다. 명시적 `close`가 실패하면 결과도 실패다. 정리 시도를 이미 했다면 소멸자에서 중복 호출하지 않는다.
 
 **현재 소스 발췌 — `renderer/image_gl.cpp`**
 
 ```cpp
-            dst[x * 4 + 0] = src[x * 4 + 2];
-            dst[x * 4 + 1] = src[x * 4 + 1];
-            dst[x * 4 + 2] = src[x * 4 + 0];
-            dst[x * 4 + 3] = src[x * 4 + 3];
+struct BitmapReadLock {
+    Gdiplus::Bitmap& bitmap;
+    Gdiplus::BitmapData data{};
+    bool active=false;
+    explicit BitmapReadLock(Gdiplus::Bitmap& value) noexcept : bitmap(value) {}
+    ~BitmapReadLock() { if(active) bitmap.UnlockBits(&data); }
+    BitmapReadLock(const BitmapReadLock&)=delete;
+    BitmapReadLock& operator=(const BitmapReadLock&)=delete;
+    bool close() noexcept {
+        if(!active) return true;
+        active=false;
+        return bitmap.UnlockBits(&data)==Gdiplus::Ok;
+    }
+};
 ```
 
-`PixelFormat32bppARGB` 라는 이름과 달리, GDI+ 가 메모리에 실제로 놓는 바이트 순서는 **BGRA** 다(리틀 엔디언에서 `0xAARRGGBB` 워드를 바이트로 펼친 것이므로). 우리 계약은 RGBA8 바이트 배열이고, 그 배열이 그대로 `glTexImage2D` 에 `GL_RGBA` 로 들어간다. 그래서 R 과 B 를 맞바꾼다. 이 네 줄이 없으면 **모든 아이콘의 빨강과 파랑이 뒤바뀐 채로 표시된다.**
+`PixelFormat32bppARGB`의 32비트 값을 리틀 엔디언 바이트로 읽으면 B,G,R,A 순서다. R과 B를 옮겨 공통 RGBA8 계약에 맞춘다. `Stride`는 다음 논리 행으로 이동할 signed 바이트 거리다. 양수·음수를 그대로 적용하고 행 끝의 패딩은 복사하지 않는다. `Scan0`은 첫 논리 행을 가리켜야 하며 각 행이 실제로 접근 가능한지는 디코더의 계약이다.
 
-`data.Stride` 를 행마다 다시 계산하는 것도 중요하다. GDI+ 의 행은 4바이트 정렬이며 `width * 4` 와 다를 수 있고, 심지어 음수일 수도 있다(bottom-up 비트맵). `ptrdiff_t` 로 캐스팅해 곱하는 이유가 그것이다.
+**현재 소스 발췌 — `renderer/image_rows.h`**
 
-### 15.2 그 외 플랫폼: stb_image
+```cpp
+inline bool copy_bgra_rows(const std::uint8_t* scan0, std::ptrdiff_t stride,
+                           int width, int height, std::uint8_t* out,
+                           std::size_t out_bytes) noexcept {
+    if (scan0 == nullptr || out == nullptr) {
+        return false;
+    }
 
-Linux/macOS 에서는 벤더링된 `third_party/stb_image.h` 를 쓴다. `stbi_load(path, &w, &h, &channels, 4)` 의 마지막 인자 `4` 가 "무슨 포맷이든 RGBA8 로 변환해 달라" 는 요청이다. 그래서 채널 스왑이 필요 없다 — stb_image 의 출력은 정의상 R,G,B,A 바이트 순서다.
+    const std::optional<std::size_t> storage = rgba_storage_bytes(width, height);
+    if (!storage || out_bytes != *storage) {
+        return false;
+    }
 
-실패하면 `stbi_failure_reason()` 이 사람이 읽을 수 있는 이유를 준다. 로그에 함께 찍는다.
+    // Negating the most negative stride would overflow.
+    if (stride == (std::numeric_limits<std::ptrdiff_t>::min)()) {
+        return false;
+    }
+    const std::ptrdiff_t abs_stride = stride < 0 ? -stride : stride;
 
-두 경로 모두 반환 시점의 계약이 같다. `rgba` 는 `width × height × 4` 바이트, 바이트 순서 R,G,B,A, straight alpha. 이 계약이 있기 때문에 `image_create_rgba` 가 플랫폼을 몰라도 되고, GL 에 넘길 포맷 인자가 한 벌로 고정된다.
+    // Bytes per row; this already fits because width * height * 4 does.
+    const std::ptrdiff_t row_bytes = static_cast<std::ptrdiff_t>(width) * 4;
+    if (abs_stride < row_bytes) {
+        return false;
+    }
+
+    const std::ptrdiff_t max_ptrdiff = (std::numeric_limits<std::ptrdiff_t>::max)();
+    const std::ptrdiff_t last_row = static_cast<std::ptrdiff_t>(height) - 1;
+
+    // (height - 1) * abs_stride must not overflow, and the final row must
+    // still fit along with its width.
+    if (last_row > max_ptrdiff / abs_stride) {
+        return false;
+    }
+    const std::ptrdiff_t span = last_row * abs_stride;
+    if (span > max_ptrdiff - row_bytes) {
+        return false;
+    }
+
+    const std::size_t row_bytes_sz = static_cast<std::size_t>(row_bytes);
+    for (int y = 0; y < height; ++y) {
+        const std::ptrdiff_t src_offset = static_cast<std::ptrdiff_t>(y) * stride;
+        const std::uint8_t* src = scan0 + src_offset;
+        std::uint8_t* dst = out + static_cast<std::size_t>(y) * row_bytes_sz;
+        for (std::size_t x = 0; x < row_bytes_sz; x += 4) {
+            dst[x + 0] = src[x + 2];  // R
+            dst[x + 1] = src[x + 1];  // G from G
+            dst[x + 2] = src[x + 0];  // B
+            dst[x + 3] = src[x + 3];  // A preserved
+        }
+    }
+    return true;
+}
+```
+
+`rgba_storage_bytes`는 양수 크기, size_t 곱 범위와 ptrdiff_t 표현 범위를 검사한다. 행 복사도 음수 최솟값의 부호 반전과 행 간 거리의 곱을 검사한 뒤 출력에 쓴다. 이 계산 검사는 포인터가 가리키는 할당의 실제 크기를 알아내는 기능과는 구별한다.
+
+### 15.2 Linux/macOS: 디코더 메모리의 소유권
+
+벤더링한 `stb_image`의 `stbi_load(..., 4)`는 지원하는 입력을 8비트 RGBA로 변환한다. `channels`에는 원본 성분 수가 남으므로 출력 길이는 `width × height × 4`로 계산한다. 픽셀 포인터의 해제 함수는 `stbi_image_free`다.
+
+벡터에 복사하기 전에 그 포인터를 사용자 정의 deleter를 가진 `unique_ptr`에 넣는다. `vector::assign`이 메모리 부족으로 예외를 내도 스택을 빠져나가며 디코더 메모리가 해제된다. 출력 벡터와 크기는 마지막에만 확정하므로 호출자는 실패한 중간 상태를 받지 않는다. 디코더 실패의 설명 문자열은 보조 진단이며 분기는 성공 포인터 여부로 결정한다.
+
+비표준 iOS CgBI PNG는 stb 기본 설정에서 BGRA·premultiplied 자료가 나올 수 있다. 이 애셋 계약에서는 제외하며 일반 PNG로 내보낸 파일을 사용한다. 현재 로더가 PNG의 모든 비표준 변형을 엄격히 거절하는 것은 아니다. CgBI를 지원 범위에 넣을 때는 stb의 해당 변환·unpremultiply 옵션과 기대 픽셀을 함께 정의한다.
+
+### 15.3 적용 범위와 자원 정책
+
+현재 게임의 로더는 로컬 애셋을 대상으로 한다. 위 크기 검사는 정수 표현과 저장소 형식에 관한 것이며, 파일 크기·총 디코더 메모리·작업 시간의 서비스 정책은 별도다. 외부 사용자가 업로드한 파일을 받는 경로로 넓힐 때는 디코딩 전 입력 길이와 크기 상한, 라이브러리 갱신, 격리된 처리 등 신뢰 경계도 함께 설계해야 한다. HTML 강의의 학습 디코더는 PNG/JPEG만 허용하고 파일 8 MiB·출력 64 MiB·한 변 8192라는 별도 정책을 사용한다.
+
+공식 계약: [stb_image 헤더의 출력·해제 규약](https://github.com/nothings/stb/blob/master/stb_image.h), [GDI+ LockBits와 임시 픽셀 버퍼](https://learn.microsoft.com/en-us/windows/win32/api/gdiplusheaders/nf-gdiplusheaders-bitmap-lockbits).
 
 ## 16. 이미지 (3) — 텍스처 · tint · 회전
 
@@ -1909,9 +2201,9 @@ Linux/macOS 에서는 벤더링된 `third_party/stb_image.h` 를 쓴다. `stbi_l
 void draw_image_tinted(ImageHandle handle, int x, int y, int width, int height,
                        Color tint)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
-    const ImageEntry& e = s_images[(size_t)handle];
-    if (!e.used || width <= 0 || height <= 0) return;
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry || width <= 0 || height <= 0) return;
+    const ImageEntry& e=*entry;
 
     glb_rect(e.tex, (float)x, (float)y, (float)width, (float)height,
              0.0f, 0.0f, 1.0f, 1.0f, tint, 0.0f, 0.0f);
@@ -1939,16 +2231,19 @@ void draw_image(ImageHandle handle, int x, int y, int width, int height)
 void draw_image_rotated(ImageHandle handle, int cx, int cy, int width, int height,
                         float clockwise_degrees)
 {
-    if (handle <= 0 || (size_t)handle >= s_images.size()) return;
-    const ImageEntry& e = s_images[(size_t)handle];
-    if (!e.used || width <= 0 || height <= 0) return;
+    const ImageEntry* entry=s_images.find(handle);
+    if(!entry || width <= 0 || height <= 0 || !std::isfinite(clockwise_degrees)) return;
+    const ImageEntry& e=*entry;
 
     // 화면 좌표는 y 가 아래로 증가하므로 양의 각도가 시계 방향이 되도록
     // 부호를 맞춘다. CPU 구현이 목적지에서 원본으로 역변환했던 것과 달리,
     // 여기서는 네 꼭짓점만 정변환하면 그 사이는 래스터라이저가 채운다.
-    const float rad = clockwise_degrees * 3.14159265358979323846f / 180.0f;
-    const float cs = std::cos(rad);
-    const float sn = std::sin(rad);
+    // Reduce before multiplying: even a finite float angle can overflow the
+    // old float degree-to-radian product. NaN/Inf are rejected before queuing.
+    const double degrees=std::remainder(static_cast<double>(clockwise_degrees),360.0);
+    const double rad=degrees*(3.14159265358979323846/180.0);
+    const float cs=static_cast<float>(std::cos(rad));
+    const float sn=static_cast<float>(std::sin(rad));
     const float hw = (float)width  * 0.5f;
     const float hh = (float)height * 0.5f;
 
@@ -1987,11 +2282,26 @@ py = cy + lx·sin θ + ly·cos θ
 
 꼭짓점 순서 `{TL, TR, BR, BL}` 과 UV `{(0,0), (1,0), (1,1), (0,1)}` 가 짝을 이룬다. 이 짝이 어긋나면 이미지가 뒤집히거나 대각선으로 접힌다. `glb_quad` 가 `{0,1,2, 0,2,3}` 순서로 삼각형 두 개를 만드는 것도 이 순서를 전제로 한다.
 
-**소프트웨어 시절의 제약 두 개 중 하나가 사라졌다.** 회전 이미지의 경계에 안티앨리어싱이 없다는 문제는 그대로지만(GL 기본 상태에서는 멀티샘플링이 꺼져 있다), 확대 시 계단이 생기던 문제는 GPU 의 샘플링으로 바뀌면서 성격이 달라졌다. tint 를 지원하지 않는 제약은 여전하다 — `glb_quad` 에 `WHITE` 를 고정으로 넘긴다. 필요하면 인자를 하나 추가해 그대로 전달하면 되지만, 현재 호출부(메뉴·상점의 회전 아이콘)가 필요로 하지 않는다.
+현재 필터는 GL_NEAREST이므로 확대하면 원본 텍셀의 격자가 보이고, 회전 경계는 멀티샘플링을 켜지 않은 상태에서 계단 모양이 될 수 있다. GPU는 샘플링과 래스터화를 수행하며, 결과의 특성은 필터와 안티앨리어싱 설정에 따라 정해진다. 이 회전 API는 glb_quad에 WHITE를 전달하므로 색상 tint를 인자로 받지 않는다. 공통 배처는 UV와 Color를 받을 수 있어 별도 그리기 요청을 설계하면 같은 정점 경로에서 함께 표현할 수 있다.
+
+유한한 각도라도 float 최댓값을 π와 먼저 곱하면 라디안이 무한대가 될 수 있다. 그래서 double로 바꾼 각도를 remainder(..., 360.0)으로 먼저 줄이고 삼각 함수를 계산한다. NaN/Inf 각도는 큐에 넣기 전에 거절한다. 이는 표현 입력의 검증이며 게임 규칙이나 규칙 해시에 삼각 함수를 추가하는 것이 아니다.
+
+### 16.3 목적지 좌표와 UV는 서로 다른 영역이다
+
+목적지 사각형은 화면에서 놓일 위치와 크기를 정하고 UV는 원본 텍스처에서 읽을 영역을 정한다. 전체 그림은 (0,0)~(1,1), 위쪽 절반은 (0,0)~(1,0.5)로 선택할 수 있다. UV 순서를 뒤집으면 같은 목적지 도형에서 그림이 반전된다. 회전할 때는 대응하는 UV를 꼭짓점에 붙인 채 위치만 변환한다.
+
+폭 W 텍스처의 열 i 중심은 u=(i+0.5)/W다. NEAREST는 샘플 위치에 가까운 텍셀 하나를 선택하고 LINEAR는 주변 값을 섞는다. UV 부분 영역의 끝은 텍스처 전체의 끝과 구별한다. CLAMP_TO_EDGE는 전체 텍스처의 가장자리를 처리하므로, 여러 그림을 한 텍스처에 넣은 아틀라스의 내부 경계에는 별도 패딩이나 UV 설계가 필요하다.
+
+### 16.4 색상 곱과 프레임버퍼 합성
+
+샘플 RGBA에 정점의 tint RGBA를 성분별로 곱한 값이 셰이더 출력이다. 그 뒤 블렌딩이 배경과 섞는다. straight-alpha 샘플에서 RGB를 알파와 미리 곱한 뒤 SRC_ALPHA로 한 번 더 곱하면 같은 알파가 두 번 적용된다.
+
+학습 ImageQuad는 RGB 계수 SRC_ALPHA/ONE_MINUS_SRC_ALPHA, 알파 계수 ONE/ONE_MINUS_SRC_ALPHA를 별도로 지정한다. 현재 루트 렌더러의 BlendFunc는 RGB와 알파에 같은 계수를 사용하므로 저장 알파의 식은 아래 렌더러 초기화 절의 구분을 따른다. 두 경로가 RGB를 같은 방식으로 섞는다는 사실만으로 알파 저장 결과까지 동일하다고 판단하지 않는다.
+
 
 ## 17. 즉시모드 GUI
 
-`src/gui.cpp` 는 이 장의 두 계층 위에 얹힌다. 렌더러의 `draw_*` 와 Part 2 의 `platform_mouse_*` 만 쓴다. 상태를 저장하지 않는다.
+`src/gui.cpp`는 렌더러의 `draw_*`와 플랫폼의 `platform_mouse_*`를 사용한다. 체크 값이나 메뉴 선택 같은 지속 상태는 호출자가 보관한다. 플랫폼의 입력 이력·렌더러 배치·자원 캐시는 별도로 상태를 갖는다. 즉시모드라는 말은 UI를 매 프레임 현재 상태로 기술하는 호출 방식에 관한 것이며, 모든 구현이 무상태라는 뜻은 아니다.
 
 ```mermaid
 sequenceDiagram
@@ -2013,11 +2323,11 @@ sequenceDiagram
     G-->>M: true / false
 ```
 
-위젯 객체도, 레이아웃 트리도, 이벤트 콜백도 없다. **그리는 행위와 입력을 판정하는 행위가 같은 함수 호출 하나**다. 즉시모드 GUI 라이브러리들이 대중화한 패턴이고, 이 프로젝트 규모에서는 retained-mode UI 보다 압도적으로 짧다. 대가는 매 프레임 전부 다시 그린다는 것인데, 어차피 `renderer_begin` 이 화면을 통째로 지우므로 추가 비용이 없다.
+이 프로젝트의 위젯에는 별도 객체 트리나 이벤트 콜백 등록이 없다. **그리기를 요청하고 입력을 판정하는 호출을 매 프레임 수행**한다. 호출 지점에서 현재 값과 동작을 함께 읽을 수 있다는 이점이 있다. 반복적인 hit-test·텍스트 측정·정점 생성에는 CPU 비용이 들고 그리기에는 GPU 비용이 든다. 프레임버퍼를 지운다는 사실이 그 비용을 없애지는 않는다. 보관형 UI도 전체 또는 일부를 다시 그릴 수 있으므로, 두 방식의 성능은 실제 작업량과 구현으로 비교해야 한다. 또한 즉시모드 UI 호출과 OpenGL의 옛 glBegin/glEnd 방식은 서로 다른 계층의 용어다.
 
 **GPU 구현으로 바꿔도 호출 계층의 API는 유지됐다.** `renderer.h`가 도형·텍스트·이미지 명령만 노출하고 GL 객체를 숨기기 때문이다. 다만 배칭이 들어오면 기존 호출 순서가 화면의 겹침 순서와 계속 일치하는지는 별도로 확인해야 한다.
 
-**z-order 는 여전히 draw 순서다.** 깊이 버퍼가 없고, 배처가 정점을 순서대로 쌓고, flush 도 순서를 바꾸지 않는다. 그래서 `gui_button` 이 배경 사각형을 먼저 그리고 라벨을 나중에 그리는 코드가 예전과 똑같이 동작한다. 만약 배처가 텍스처별로 재정렬했다면 라벨이 배경 밑으로 들어가서 **GUI 코드를 전부 다시 써야 했을 것이다.** 배칭 설계에서 순서 보존을 포기하지 않은 값이 여기서 회수된다.
+**z-order 는 여전히 draw 순서다.** 깊이 버퍼가 없고, 배처가 정점을 순서대로 쌓고, flush 도 순서를 바꾸지 않는다. 그래서 `gui_button` 이 배경 사각형을 먼저 그리고 라벨을 나중에 그리는 코드가 예전과 똑같이 동작한다. 배처가 겹침 관계를 무시하고 텍스처별로 재정렬하면 라벨과 배경의 순서가 깨질 수 있다. 순서를 지키는 배칭이나 명시적인 계층 규칙이 필요하다. 배칭 설계에서 순서 보존을 포기하지 않은 값이 여기서 회수된다.
 
 팔레트는 파일 상단의 익명 네임스페이스에 있다.
 
@@ -2028,7 +2338,7 @@ namespace {
 // 팔레트 — 메뉴/모달 전용. 기존 Color 상수(WHITE/GRAY 등)와 섞어 씀.
 constexpr Color kBtnIdleBg    = { 38,  50,  78, 255};   // 어두운 남색
 constexpr Color kBtnHoverBg   = { 60,  82, 140, 255};   // 호버 시 파랑
-constexpr Color kBtnPressBg   = { 30,  60, 120, 255};   // 눌린 순간
+constexpr Color kBtnPressBg   = { 30,  60, 120, 255};   // 누른 채 포인터가 올라와 있는 상태
 constexpr Color kBtnHighlight = {210, 180,  30, 255};   // 커서 강조 (키보드 선택)
 constexpr Color kModalBg      = {  0,   0,   0, 180};   // 모달 오버레이 반투명
 constexpr Color kCloseIdle    = {130, 130, 130, 255};
@@ -2045,15 +2355,20 @@ bool gui_hover_rect(int x, int y, int w, int h)
 {
     int mx = platform_mouse_x();
     int my = platform_mouse_y();
-    return mx >= x && mx < x + w && my >= y && my < y + h;
+    if (w <= 0 || h <= 0) return false;
+    // Widen before addition: the far edge can lie outside the int domain.
+    const auto right = std::int64_t(x) + w;
+    const auto bottom = std::int64_t(y) + h;
+    return mx >= x && std::int64_t(mx) < right &&
+           my >= y && std::int64_t(my) < bottom;
 }
 ```
 
-여섯 줄이지만 이 함수가 GUI 와 플랫폼 계층을 잇는 유일한 지점이다. `platform_mouse_x/y()` 가 이미 **논리 좌표로 역매핑된 값**을 주므로, GUI 는 창 크기나 전체화면 여부를 전혀 모른다.
+이 함수는 포인터의 좌표와 UI 사각형을 비교하는 경계다. 버튼 함수는 별도로 마우스 버튼 상태도 읽는다. `platform_mouse_x/y()` 가 이미 **논리 좌표로 역매핑된 값**을 주므로, GUI 는 창 크기나 전체화면 여부를 전혀 모른다.
 
-앞서 다룬 레터박스 버그가 정확히 이 함수의 전제를 무너뜨렸던 것이다. 마우스 역매핑이 뷰포트 사각형을 쓰고 렌더러가 창 전체를 쓰면, 이 여섯 줄은 아무 잘못 없이 틀린 답을 낸다. **`platform_viewport` 를 두 쪽의 공통 출처로 만든 것이 이 함수를 다시 옳게 만든다.**
+앞서 다룬 레터박스 버그가 정확히 이 함수의 전제를 무너뜨렸던 것이다. 마우스 역매핑이 뷰포트 사각형을 쓰고 렌더러가 창 전체를 쓰면 hit-test가 실제 표시 위치와 어긋난다. **`platform_viewport` 를 두 쪽의 공통 출처로 만든 것이 이 함수를 다시 옳게 만든다.**
 
-경계 규칙은 `>= x` 이고 `< x + w` — 왼쪽/위쪽 경계는 포함, 오른쪽/아래쪽은 제외다. 인접한 두 버튼이 좌표를 공유해도 겹쳐 반응하지 않는다.
+경계 규칙은 `>= x` 이고 `< x + w` — 왼쪽/위쪽 경계는 포함, 오른쪽/아래쪽은 제외다. 겹침 없이 맞닿은 두 사각형은 공유한 경계를 둘 다 포함하지 않는다. 면적 자체가 겹친 위젯의 입력 우선순위까지 해결하는 규칙은 아니다. 크기는 양수인지 검사하고 오른쪽·아래쪽 경계는 64비트에서 더해 int 오버플로를 피한다.
 
 ### 17.2 버튼
 
@@ -2082,13 +2397,27 @@ bool gui_button(int x, int y, int w, int h, const char* label, int fontSize)
 
 세 가지 상태(idle / hover / press)를 배경색으로 표현한다. **`press` 는 level(`platform_mouse_down`), 반환값은 edge(`platform_mouse_pressed`)** 다. 이 구분이 중요하다. 버튼을 누르고 있는 동안은 계속 눌린 색으로 보이지만, `true` 는 누른 첫 프레임에 딱 한 번만 반환된다. level 로 반환하면 버튼을 누르고 있는 내내 매 프레임 클릭이 발생한다.
 
-`draw_rect_rounded(x, y, w, h, 0.25f, bg)` 가 이 장의 SDF 경로를 타는 대표적인 호출이다. 높이 44px 버튼이면 반지름은 `0.25 × 0.5 × 44 = 5.5px` 이고, 조각 셰이더가 그 반지름으로 네 모서리를 깎으면서 1픽셀 폭 안티앨리어싱을 함께 만든다. **버튼 모서리가 부드러워진 것이 GPU 전환에서 눈에 가장 먼저 띄는 변화다.**
+`draw_rect_rounded(x, y, w, h, 0.25f, bg)` 가 이 장의 SDF 경로를 타는 대표적인 호출이다. 높이 44px 버튼이면 반지름은 `0.25 × 0.5 × 44 = 5.5 논리 단위`이고, 조각 셰이더가 그 반지름으로 네 모서리를 깎으면서 논리 폭 1의 알파 전이를 적용한다. **버튼 모서리가 부드러워진 것이 GPU 전환에서 눈에 가장 먼저 띄는 변화다.**
 
 라벨 중앙 정렬이 `measure_text` 에 의존한다. 폰트 로드가 실패하면 `measure_text` 가 0 을 반환해 `tx = x + w/2` 가 되고, 어차피 `draw_text` 도 아무것도 안 그린다. 앞서 말한 "글자만 사라지는" 실패 모드가 여기서 구체화된다.
 
 수직 정렬은 `y + (h - fontSize) / 2` 라는 근사다. `fontSize` 는 실제 글자 높이가 아니라 stb_truetype 의 정규화 픽셀 높이이므로 완벽한 중앙은 아니다. 실측 bbox 를 쓰면 정확해지지만 글자마다 높이가 달라 오히려 흔들려 보인다. 근사를 택한 이유다.
 
 ### 17.3 체크박스
+
+크기·텍스트 측정 폭에서 파생된 좌표는 넓은 정수로 계산한 뒤 렌더러의 int 경계로 넘긴다. 체크박스는 2픽셀 테두리를 배치할 수 있도록 size≥4를 요구하고, 전체 hit 폭이나 끝점이 int 범위를 벗어나면 그리기와 클릭을 모두 생략한다.
+
+**현재 소스 발췌 — `src/gui.cpp`**
+
+```cpp
+static bool fits_ui_coordinate(std::int64_t value)
+{
+    return value >= (std::numeric_limits<int>::min)() &&
+           value <= (std::numeric_limits<int>::max)();
+}
+
+```
+
 
 **현재 소스 발췌 — `src/gui.cpp`**
 
@@ -2097,10 +2426,15 @@ bool gui_checkbox(int x, int y, int size, const char* label, bool checked,
                   bool highlighted)
 {
     // 라벨 폰트는 박스 높이에 맞춰 그린다. hover 영역은 박스 + 라벨 전체.
+    if (size < 4) return false; // Two-pixel borders need a nonnegative interior.
     const int fontSize = size;
     const int gap = 10;
-    const int tw  = measure_text(label, fontSize);
-    const int hitW = size + gap + tw;
+    const int tw = measure_text(label, fontSize);
+    const auto hit_width = std::int64_t(size) + gap + tw;
+    if (tw < 0 || !fits_ui_coordinate(hit_width) ||
+        !fits_ui_coordinate(std::int64_t(x) + hit_width) ||
+        !fits_ui_coordinate(std::int64_t(y) + size)) return false;
+    const int hitW = static_cast<int>(hit_width);
     const bool hover = gui_hover_rect(x, y, hitW, size);
 
     // 박스 외곽선 — hover/highlight 시 강조색, 평소 회색.
@@ -2138,7 +2472,7 @@ bool gui_checkbox(int x, int y, int size, const char* label, bool checked,
 
 **세 가지 강조 상태.** hover(마우스) > highlighted(키보드 커서) > 기본. `if/else if/else` 우선순위가 명시적이다. 마우스와 키보드 내비게이션이 공존하는 화면에서 어느 쪽이 이기는지를 코드가 답한다.
 
-반환값 계약은 "**토글하라**" 가 아니라 "**클릭됐다**" 다. 상태는 호출부가 소유한다. 즉시모드의 본질이다.
+반환값 계약은 "**토글하라**" 가 아니라 "**클릭됐다**" 다. 이 위젯에서 체크 값은 호출부가 소유한다. 즉시모드 구현도 포커스·드래그 대상 등 상호작용 상태를 내부에 둘 수 있으며, 어떤 상태를 누가 소유하는지는 API 계약으로 정한다.
 
 **Part 3 체크포인트 — `src/gui.h`**
 
@@ -2245,7 +2579,12 @@ std::vector<Color> GetCellColors()
 }
 ```
 
-고스트 블록의 알파 70 이 이 파일에서 유일하게 렌더링과 얽히는 값이다. 정점 색으로 실려 셰이더의 `sampled * v_color` 에서 곱해지고, `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA` 블렌드가 배경과 섞는다. 소프트웨어 시절의 정수 source-over 와 결과가 같은 식이고, 다만 계산이 부동소수로 바뀌었다.
+고스트 블록의 알파 70 이 이 파일에서 유일하게 렌더링과 얽히는 값이다. 정점 색으로 실려 셰이더의 `sampled * v_color` 에서 곱해지고, `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA` 블렌드가 배경과 섞는다. 이는 불투명 배경 위 RGB를 섞는 source-over 형태와 대응한다. 정수 경로와 GL의 저장 형식·반올림·색 공간 조건이 달라 비트 단위 결과까지 같다는 뜻은 아니다. 저장 알파의 식은 아래에서 별도로 구분한다.
+
+
+### 위젯 배치의 수용 범위
+
+현재 `gui_value_selector`는 높이 h>6, 전체 폭 w>2h를 요구한다. 양끝 정사각형 화살표 사이에 양수 폭의 라벨 공간을 남기는 정책이다. 너무 좁은 상자에서 같은 점이 양쪽 화살표에 모두 속하면 코드의 if 순서만으로 방향이 정해질 수 있으므로, 그런 배치는 그리기와 입력을 함께 거절한다. 파생 글자 원점도 int64에서 계산하고 int로 표현 가능한지 확인한다. 반환값 −1/0/+1은 방향 의도이며, 실제 항목 수·현재 인덱스·끝에서 멈출지 순환할지는 호출자가 정한다.
 
 ## 18. 초기화 · 프레임 수명주기 · 종료 순서
 
@@ -2259,6 +2598,10 @@ std::vector<Color> GetCellColors()
 static GLuint compile_shader(GLenum type, const char* src, const char* label)
 {
     GLuint s = gl_CreateShader(type);
+    if (!s) {
+        std::fprintf(stderr, "[GL] %s shader creation failed.\n", label);
+        return 0;
+    }
     gl_ShaderSource(s, 1, &src, nullptr);
     gl_CompileShader(s);
 
@@ -2280,9 +2623,11 @@ static GLuint compile_shader(GLenum type, const char* src, const char* label)
 }
 ```
 
-**셰이더는 사용자 기계에서 컴파일된다.** 이것이 GPU 프로그래밍의 특이한 점이다. C++ 코드는 개발자 기계에서 한 번 컴파일되어 기계어로 배포되지만, GLSL 소스는 문자열로 실행 파일에 들어가서 사용자의 드라이버가 컴파일한다. GPU 벤더별 드라이버와 오픈소스 구현이 각자 다른 GLSL 프론트엔드를 갖고 있고, 표준에서 애매한 부분의 해석이 갈린다. 내 기계에서 통과한 셰이더가 남의 기계에서 막힐 수 있다.
+**이 렌더러는 실행 중 드라이버에 GLSL 소스를 전달해 컴파일한다.** C++ 컴파일러는 문자열 안의 GLSL 문법을 검사하지 않는다. `glShaderSource`는 문자열을 복사할 뿐 컴파일하지 않으며, `glCompileShader` 뒤 `GL_COMPILE_STATUS`로 결과를 읽어야 한다. GLSL 문법 오류는 API 사용 오류와 다르므로 `glGetError`가0이어도 컴파일은 실패할 수 있다. 컴파일 성공도 프로그램 링크와 그리기 성공을 보장하지 않는다.
 
-그래서 **컴파일 로그를 절대 삼키면 안 된다.** 실패 시 사용자가 보내온 stderr 한 조각이 원인 파악의 유일한 단서다. `GL_INFO_LOG_LENGTH` 로 길이를 물어 버퍼를 잡고 그대로 찍는다.
+`glCreateShader`가0이면 유효한 객체가 없으므로 소스 전달 전에 멈춘다. 정상적으로 만들어진 객체는 실패 로그를 읽은 뒤 삭제하고, 성공한 이름의 소유권은 호출자에게 넘긴다. `glShaderSource(s, 1, &src, nullptr)`의1은 문자열 개수이며, 길이 배열을 생략했으므로 src는 종료 NUL이 있는 문자열이어야 한다. 복사 이후 CPU 원본은 계속 유지할 필요가 없다.
+
+**컴파일 로그를 실패 진단에 남긴다.** 드라이버에 따라 문구와 줄/열 표기가 다르므로 정확한 한 문장에 의존해 원인을 판정하지 않는다. `GL_INFO_LOG_LENGTH`는 종료 NUL을 포함한 공간을 알려 주고, `glGetShaderInfoLog`의 written 결과는 NUL을 제외한 실제 GLchar 원소 수다. 위 구현은 출력용 NUL 문자열로 읽으며, 학습용 Shader 소유자는 written까지 받아 범위를 명시한다. 성공 로그에도 경고나 참고 정보가 있을 수 있지만 로그의 유무가 성공 판정은 아니다. 위 현재 구현은 실패 로그를 출력하며, 학습 코드는 성공 로그도 보관한다. [Khronos 컴파일 상태 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glCompileShader.xhtml)과 [로그 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glGetShaderInfoLog.xhtml)을 구별해서 읽는다.
 
 **현재 소스 발췌 — `renderer/renderer.cpp`**
 
@@ -2298,6 +2643,12 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
     }
 
     GLuint p = gl_CreateProgram();
+    if (!p) {
+        std::fprintf(stderr, "[GL] program creation failed.\n");
+        gl_DeleteShader(vs);
+        gl_DeleteShader(fs);
+        return 0;
+    }
     gl_AttachShader(p, vs);
     gl_AttachShader(p, fs);
     gl_LinkProgram(p);
@@ -2314,16 +2665,19 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
         p = 0;
     }
 
-    // 링크가 끝나면 셰이더 객체는 프로그램이 참조를 들고 있으므로 놓아준다.
+    // 삭제를 요청한다. 성공한 프로그램에 붙어 있는 셰이더의 실제 삭제는
+    // 프로그램 삭제로 연결이 해제될 때까지 지연되며, 링크된 실행 코드는 유지된다.
     gl_DeleteShader(vs);
     gl_DeleteShader(fs);
     return p;
 }
 ```
 
-링크는 컴파일과 별개의 단계이고 별개의 실패 모드가 있다. 정점 셰이더의 `out` 과 조각 셰이더의 `in` 이 이름·타입까지 정확히 맞아야 하고, 하나라도 어긋나면 컴파일은 둘 다 통과했는데 링크에서 막힌다.
+링크는 컴파일된 stage들을 연결하고 인터페이스를 검사하는 별도 단계다. 이 GLSL330 vertex/fragment 조합에서 fragment가 실제 사용하는 입력은 대응하는 vertex 출력과 이름·타입 및 필요한 한정자가 호환되어야 한다. 예를 들어 vertex의 `out vec3 v_color`와 fragment의 `in vec2 v_color`를 연결하고 fragment가 이 값을 색상에 사용하면, 각각의 컴파일은 성공해도 링크는 실패한다. 사용하지 않아 제거되는 변수까지 모든 선언이 항상 오류를 만든다고 일반화하지 않는다. `GL_LINK_STATUS`와 프로그램 로그로 판정하며, API 오류 유무나 셰이더의 컴파일 상태를 대신 읽지 않는다. [Khronos 링크 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glLinkProgram.xhtml).
 
-마지막 두 줄이 GL 의 참조 카운팅 규약이다. `glDeleteShader` 는 즉시 지우지 않고 **"더 이상 참조되지 않으면 지워라" 는 표시**를 남긴다. 프로그램이 셰이더를 attach 한 상태이므로 실제 삭제는 프로그램이 지워질 때 일어난다. 이 두 줄을 빠뜨리면 셰이더 객체가 프로세스 종료까지 남는다 — 이 렌더러는 프로그램을 하나만 만드니 실질적 피해는 없지만, 규약을 지키는 코드가 읽기에도 낫다.
+`glCreateProgram`이0이면 attach/link를 호출하지 않고 컴파일한 두 셰이더를 정리한다. 성공한 프로그램도 `glUseProgram`으로 선택하기 전에는 새 프로그램을 그리기에 사용하도록 지정한 것이 아니다. 링크는 VAO의 바이트 배치나 화면 출력까지 검증하지 않는다.
+
+마지막 두 호출은 **셰이더 삭제 요청**이다. 성공 경로에서는 셰이더가 프로그램에 붙어 있으므로 실제 삭제가 지연된다. 링크 실패로 프로그램을 먼저 삭제한 경로에서는 연결이 해제되어 셰이더를 바로 정리할 수 있다. 현재 구현은 성공한 프로그램을 삭제할 때 남은 연결을 해제한다. 학습용 Program은 성공 직후 명시적으로 detach하고, 호출자의 Shader 소유자가 삭제하게 한다. 두 방식 모두 링크된 실행 코드는 유지된다. 이 독립성은 링크가 만든 것이며 detach가 새로 만들어 주는 것이 아니다. [셰이더 삭제](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glDeleteShader.xhtml)와 [연결 해제](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glDetachShader.xhtml)의 계약을 구별한다.
 
 ### 18.2 초기화
 
@@ -2377,6 +2731,8 @@ bool renderer_init(int screen_w, int screen_h)
     gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    // RGB는 straight-alpha 입력으로 합성한다. 저장 alpha에는 같은 계수가 적용되어
+    // As*As + Ad*(1-As)가 된다. 투명한 중간 이미지의 source-over에는 별도 설정이 필요하다.
     gl_Enable(GL_BLEND);
     gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -2391,13 +2747,41 @@ bool renderer_init(int screen_w, int screen_h)
 
 순서가 곧 의존 관계다. 함수 포인터 → 셰이더 프로그램 → 유니폼 위치 → VAO/VBO/정점 속성 → 흰 텍스처 → 블렌드 상태 → 정점 큐 예약 → 이미지 서브시스템.
 
-**VAO는 "정점을 어떻게 읽을지"를 기억하는 객체다.** `glVertexAttribPointer`를 부르면 그 설정이 현재 바인딩된 VAO에 저장되고, 이후에는 `glBindVertexArray(s_vao)` 한 번으로 정점 속성 설정이 통째로 복원된다. GL 3.3 Core에서는 VAO 없이 그릴 수 없다. 이것이 호환 프로파일과의 눈에 띄는 차이다.
+`glGenBuffers`가 돌려주는 GLuint는 버퍼를 식별하는 **이름**이며 CPU 메모리 주소가 아니다. 이름을 처음 바인딩하면 버퍼 객체가 만들어지고, `glBufferData`에서 바이트 저장소를 정의한다. 이 초기화 함수는 이름과 바인딩을 준비하며 실제 정점 데이터는 `glb_flush`에서 채운다. CPU vector의 reserve와 GL 데이터 저장소 할당은 별개다.
+
+`glBindBuffer(GL_ARRAY_BUFFER, 0)`은 대상의 연결을 비우는 동작이며 버퍼 삭제가 아니다. 소유한 이름은 `glDeleteBuffers`로 정리하고 C++ 변수도 0으로 바꾼다. GL 컨텍스트가 살아 있고 필요한 current 연결이 있는 동안 정리해야 하므로 `renderer_shutdown`이 `platform_shutdown`보다 먼저 실행된다.
+
+**VAO는 "정점을 어떻게 읽을지"를 기억하는 객체다.** `glVertexAttribPointer`는 성분 수·타입·정규화·stride·바이트 offset과, 호출 시점의 `GL_ARRAY_BUFFER` 버퍼 연결을 현재 VAO의 해당 속성에 기록한다. 정점 바이트를 VAO로 복사하는 호출은 아니다. `glEnableVertexAttribArray`의 활성화 여부도 속성별 VAO 상태다. 두 호출은 역할이 다르므로 형식만 설정하고 활성화를 빠뜨리지 않는다.
+
+그 뒤 다른 VBO를 `GL_ARRAY_BUFFER`에 바인딩하거나 0으로 연결을 비워도 이미 기록한 속성의 버퍼 연결은 바뀌지 않는다. `glBindVertexArray(s_vao)`로 VAO를 선택하면 그 객체의 속성 설정을 사용하지만, 일반 `GL_ARRAY_BUFFER` 바인딩이나 셰이더 프로그램·텍스처까지 되돌리지는 않는다. 이 설명은 ARRAY_BUFFER에 관한 것이며, 후속 인덱스 그리기에서 사용하는 ELEMENT_ARRAY_BUFFER 바인딩은 VAO 상태라는 차이가 있다. GL 3.3 Core에서 VAO 0은 설정할 기본 객체가 아니므로 실제 VAO를 바인딩하고 속성을 설정·활성화해야 한다.
+
+여기서 stride는 정점 한 개의 전체 바이트 간격인 `14 * sizeof(float)`다. `a.offset`은 테이블 안에서는 float 단위이고, 포인터 인자에 넣기 직전에 `sizeof(float)`를 곱해 바이트 offset으로 바꾼다. 버퍼가 연결된 이 API의 포인터 모양 인자는 CPU 주소가 아니다. 또한 이 `glVertexAttribPointer`의 stride 0은 해당 속성이 촘촘히 연속된 형식으로 해석하라는 뜻이다. 여러 속성을 섞은 현재 배열에서는 전체 정점 간격을 명시해야 한다. [Khronos 속성 형식 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glVertexAttribPointer.xhtml)을 기준으로 단위를 대조할 수 있다.
 
 속성 테이블이 정점 형식의 정의 그 자체다. `{ 위치, 성분 수, float 단위 오프셋 }` 순으로 `{0,2,0}, {1,2,2}, {2,4,4}, {3,2,8}, {4,2,10}, {5,1,12}, {6,1,13}` — 합이 14 이고, 이 숫자들이 `gl_shaders.h` 의 `layout(location = N)` 과 일대일로 대응한다. 둘이 어긋나면 컴파일도 링크도 통과하고 **화면에만 이상한 그림이 나온다.** GL 에서 가장 진단하기 어려운 종류의 버그이므로, 두 파일을 나란히 놓고 대조하는 습관이 필요하다.
 
 **1×1 흰 텍스처**가 "셰이더 하나" 설계를 완성하는 조각이다. 단색 사각형도 텍스처를 샘플링해야 하는데, 이 텍스처는 어디를 읽어도 `(1,1,1,1)` 이라 `sampled * v_color` 가 그냥 `v_color` 가 된다. 4바이트로 분기 하나를 없앤 셈이다.
 
 `gl_Enable(GL_BLEND)` 와 `gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` 는 프레임마다 다시 세우지 않는다. 이 렌더러는 블렌드 모드를 바꾸지 않으므로 초기화에서 한 번이면 된다. 이것도 상태 머신을 좁게 유지한 결과다.
+
+**RGB와 알파는 별도 수식이다.** 위 `BlendFunc`는 같은 두 계수를 RGB와 알파에 모두 적용한다.
+RGB는 `Cs*As + Cd*(1-As)`지만 저장 알파는 `As*As + Ad*(1-As)`다.
+일반적인 source-over의 `As + Ad*(1-As)`와 다르다. 예를 들어 As=0.5, Ad=1이면
+올바른 누적 알파는 1이지만 현재 설정은 0.75를 저장한다. 현재 표시 경로에서 RGB만
+사용하는 것과, 이 RGBA를 투명한 중간 결과로 저장해 재합성하는 것은 다른 계약이다.
+
+투명한 렌더 타깃으로 확장할 때는 출력 표현부터 정한다. straight RGB 출력을 받는다면
+`BlendFuncSeparate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA)`로
+RGB와 알파 계수를 나눈다. shader가 이미 premultiplied RGB를 출력한다면 첫 계수도
+`ONE`이어야 한다. 투명 검정 `(0,0,0,0)`에서 시작해 이렇게 누적한 저장 RGB는
+premultiplied 형태다. 다시 straight 형태로 읽으려면 알파가 양수일 때만 RGB를 나눈다.
+알파 0의 원래 straight RGB는 복원할 수 없다.
+
+이 식을 빛의 세기 혼합으로 해석하려면 RGB가 선형 공간 값이라는 조건도 필요하다.
+현재 RGBA8 이미지/화면 경로가 완전한 sRGB 디코딩·선형 합성·인코딩을 수행한다고
+단정하지 않는다. 색 공간과 framebuffer 설정은 별도의 설계 항목이다.
+[OpenGL 3.3 §4.1.7](https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf)의
+블렌드 방정식과 RGB/알파 계수 표에서 현재 계약을 대조할 수 있다.
+
 
 **실패 통지는 두 겹이다.** 1차는 반환값이다. 함수 로딩이나 셰이더 링크가 실패하면 `false` 를 돌려주고, `renderer.h` 의 주석이 호출자의 의무를 명시한다 — 반환값을 확인하고 사용자에게 이유를 알린 뒤 종료해야 한다. 완성된 클라이언트의 `main()` 이 실제로 그렇게 한다: `renderer_init` 이 `false` 면 [Part 2](./part2-platform-window-input.md) 플랫폼 계층의 `platform_fatal_error` 로 메시지박스를 띄우고, 자원을 정리한 뒤 종료 코드 1 로 끝난다. GUI 프로세스는 stderr 가 사용자에게 보이지 않으므로, 로그만 남기고 검은 창으로 돌게 두면 사용자에게는 단서가 하나도 없다.
 
@@ -2416,11 +2800,15 @@ void renderer_end()
 }
 ```
 
-두 줄이다. 큐에 남은 것을 마지막으로 내보내고 버퍼를 교체한다. `platform_present` 는 SDL 에서는 `SDL_GL_SwapWindow`, Win32 에서는 `SwapBuffers` 다.
+두 줄이다. 큐에 남은 것을 마지막으로 내보내고 버퍼를 교체한다. `platform_present` 는 SDL 에서는 `SDL_GL_SwapWindow`, Win32 에서는 `SwapBuffers` 다. 여기서 `glb_flush`는 애플리케이션의 CPU 정점 배치를 GL에 제출하는 함수이며 OpenGL의 `glFlush`와 다른 함수다. 이 호출이나 present 반환만으로 GPU 실행과 모니터 표시가 완료됐다고 판단하지 않는다.
 
-**이제 진짜 VSync 다.** 스왑 인터벌이 1 이면 버퍼 교체가 수직 귀선에 맞춰지고, 프레임을 일찍 끝내면 드라이버가 그 안에서 기다린다. 소프트웨어 시절의 `SDL_Delay` 기반 60Hz 페이싱은 화면 갱신과 무관한 타이머였기 때문에 tearing 을 막지 못했다.
+GL의 `Flush`는 앞서 보낸 명령이 유한 시간 안에 완료되도록 진행을 보장하며 완료까지 기다리는 장벽이 아니다. `Finish`는 앞선 GL 명령의 효과가 완료될 때까지 기다리지만 디스플레이 주사 완료를 알려 주지는 않는다. 매 프레임 Finish를 넣으면 CPU와 GPU가 겹쳐 일할 여지를 줄이며 병목 관찰 자체도 달라진다. 단순 함수 호출 시간은 GPU 작업 시간과 구별한다.
 
-한 가지 짚어 둘 것은 **`glDrawArrays` 가 반환해도 그림이 완성된 것이 아니라는 점**이다. 명령이 큐에 들어갔을 뿐이고, GPU 는 나중에 처리한다. 소프트웨어 렌더러에서는 함수가 반환되면 픽셀이 이미 메모리에 있었다. 디버깅할 때 이 차이가 중요하다 — draw call 직후에 무언가를 검사해 봐야 아무것도 볼 수 없다.
+**스왑 인터벌과 타이머 기반 페이싱은 목적이 다르다.** 지원되는 환경에서 스왑 인터벌1은 화면 갱신과 교체를 맞추도록 요청한다. 호출 성공 여부와 실제 설정을 확인해야 하며 드라이버·합성기 정책에 따라 대기 위치와 동작이 달라질 수 있다. `SDL_Delay` 기반60Hz 페이싱은 작업 반복 속도를 조절할 뿐 화면 갱신과 동기화하는 수단은 아니다. 프레임 수 제한만으로 tearing 방지를 보장하지 않는다. [SDL 스왑 인터벌](https://wiki.libsdl.org/SDL2/SDL_GL_SetSwapInterval).
+
+**`glDrawArrays`의 반환은 렌더링 완료나 모니터 표시를 보장하지 않는다.** 구현이 비동기적으로 처리할 수 있다는 뜻이지, 반환 시점에 언제나 미완료라고 단정하는 것은 아니다. 일반 CPU 배열로 결과를 받는 `glReadPixels`(pixel-pack buffer 미바인딩)는 필요한 선행 작업과 읽기 완료를 동기화해 픽셀을 관찰할 수 있다. 따라서 “draw 직후에는 아무것도 검사할 수 없다”는 해석은 잘못이다. 읽어 온 픽셀과 실제 화면에 표시된 시점도 서로 다른 관찰이다. [Khronos 픽셀 읽기 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glReadPixels.xhtml).
+
+표시를 담당하는 `platform_present`는 그리기 호출과 분리된다. 더블 버퍼 창에서는 준비한 back buffer를 교체 대상으로 제출한다. 교체 방식과 표시 시점, 대기 위치는 플랫폼·드라이버·스왑 설정에 영향을 받으며, 교체 후 새 back buffer에 직전 내용이 그대로 남는다고 가정하지 않는다. 이 렌더러는 매 프레임 필요한 배경과 도형을 다시 구성한다.
 
 ### 18.4 도형 API
 
@@ -2429,22 +2817,23 @@ void renderer_end()
 ```cpp
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c)
 {
+    if (w <= 0 || h <= 0 || !std::isfinite(roundness)) return;
     if (roundness < 0.0f) roundness = 0.0f;
     if (roundness > 1.0f) roundness = 1.0f;
     const float shorter = (float)(w < h ? w : h);
     const float radius  = roundness * 0.5f * shorter;
 
-    // 반지름이 1픽셀 미만이면 SDF 를 켜지 않는다. 각진 사각형과 결과가
-    // 같으면서 경계가 불필요하게 흐려지는 것을 막는다.
+    // 논리 반지름이 1 미만이면 각진 사각형으로 근사한다.
+    // 작은 양수 반지름의 SDF 결과와 수학적으로 같은 것은 아니다.
     glb_rect(s_white, (float)x, (float)y, (float)w, (float)h,
              0.0f, 0.0f, 1.0f, 1.0f, c,
              radius < 1.0f ? 0.0f : radius, 0.0f);
 }
 ```
 
-`roundness` 는 0.0~1.0 의 정규화 값이고 실제 반지름은 `roundness × 0.5 × min(w, h)` 다. `min(w, h)` 의 절반이 "완전히 둥근" 한계다 — `roundness = 1.0` 이고 정사각형이면 원, 가로로 긴 사각형이면 양 끝이 반원인 알약 모양이 된다. 크기에 비례시킨 덕분에 같은 값이 큰 버튼과 작은 버튼에서 시각적으로 같은 인상을 준다.
+`roundness` 는 0.0~1.0 의 정규화 값이고 실제 반지름은 `roundness × 0.5 × min(w, h)` 다. `min(w, h)` 의 절반이 "완전히 둥근" 한계다 — `roundness = 1.0` 이고 정사각형이면 원, 가로로 긴 사각형이면 양 끝이 반원인 알약 모양이 된다. 크기에 비례한 비율을 유지하지만, 논리 폭 1의 알파 전이와 작은 반지름 근사 때문에 크기별 결과가 완전히 같은 비율로 보장되지는 않는다.
 
-`radius < 1.0f` 일 때 0 을 넘기는 것이 소프트웨어 시절의 "`draw_rect` 로 폴백" 에 대응한다. 조각 셰이더가 SDF 를 건너뛰므로 결과가 `draw_rect` 와 정확히 같아진다. **`roundness = 0` 이 일반 사각형과 완전히 같다** 는 보장이 여기서 나온다.
+`radius < 1.0f` 일 때 0 을 넘기는 것이 소프트웨어 시절의 "`draw_rect` 로 폴백" 에 대응한다. 조각 셰이더가 SDF 를 건너뛰므로 결과가 `draw_rect` 와 정확히 같아진다. 이것은 작은 양수 반지름을 0으로 바꾸는 정책이며 원래 SDF와 같은 수학적 도형이라는 뜻은 아니다. `roundness=0`의 직각 경로와 구별해 읽어야 한다. NaN·무한대는 비교에 의한 clamp로 처리하지 않고 호출 초기에 거절한다. 반지름이 1 이상일 때 위의 원·알약 모양 설명이 실제 SDF 경로에 적용된다.
 
 이 함수 전체에 루프가 없다는 점을 눈여겨볼 것. 소프트웨어 구현은 `w × h` 픽셀을 순회하며 코너 판정을 했다. 지금은 반지름 하나를 계산해 정점에 실어 보내는 것이 전부이고, 판정은 조각 셰이더가 픽셀마다 병렬로 한다.
 
@@ -2456,6 +2845,7 @@ void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c)
 void renderer_shutdown()
 {
     if (s_ready) {
+        glb_flush(); // Submit while every referenced texture/program/buffer is alive.
         image_shutdown();
         renderer_text_shutdown();
         if (s_white) gl_DeleteTextures(1, &s_white);
@@ -2483,7 +2873,7 @@ platform_init  →  renderer_init  →  (프레임 루프)  →  renderer_shutdo
 창을 닫은 뒤에 `renderer_shutdown`을 부르면 텍스처·버퍼·정점 배열·프로그램을
 정리하는 GL 호출이 모두 유효하지 않다.
 
-내부 순서에도 이유가 있다. `image_shutdown` 과 `renderer_text_shutdown` 이 먼저다. 두 서브시스템이 자기 텍스처(아이콘들, 글리프 아틀라스)를 갖고 있고, 그것들이 정리된 뒤에 렌더러 자신의 자원(흰 텍스처·VBO·VAO·프로그램)을 지운다. 만든 순서의 역순이다.
+내부 순서에도 이유가 있다. 남은 배치를 먼저 제출한 뒤 `image_shutdown`과 `renderer_text_shutdown`을 호출한다. 두 서브시스템이 자기 텍스처(아이콘들, 글리프 아틀라스)를 갖고 있고, 그것들이 정리된 뒤에 렌더러 자신의 자원(흰 텍스처·VBO·VAO·프로그램)을 지운다. 만든 순서의 역순이다.
 
 `if (s_ready)` 검사가 초기화 실패 경로를 막는다. `gl_load_functions()` 가 실패했다면 함수 포인터가 전부 `nullptr` 이므로 `gl_DeleteTextures` 를 부르는 순간 널 포인터 호출이 된다. `renderer_init` 이 `false` 를 돌려준 뒤의 정리 경로가 `renderer_shutdown()` 을 불러도 안전한 이유가 이 검사다.
 
@@ -2529,12 +2919,15 @@ sequenceDiagram
 
 이 렌더러에서 먼저 관찰할 값은 화면에 있는 사각형 수가 아니라
 **배치가 언제 끊기는가**다. `glb_rect`와 `glb_quad`는 정점을 `s_verts`에
-모으고, 다음 조건에서만 `glb_flush()`로 GPU에 보낸다.
+모으고, 다음 경계에서 `glb_flush()`로 GL에 제출한다.
 
 - 흰 텍스처, 글리프 아틀라스, 이미지처럼 사용할 텍스처가 바뀐다.
-- 보드 흔들림을 위해 `renderer_set_view_offset`의 값이 바뀐다.
+- 이미지·글리프 텍스처 삭제 전에 해당 텍스처를 쓰는 정점이 남아 있다.
 - 글리프 아틀라스가 가득 차 내용을 비우기 전에 기존 정점을 보존해야 한다.
-- `renderer_end()`가 프레임의 마지막 배치를 내보낸다.
+- `renderer_end()`가 프레임의 마지막 배치를 내보내거나 종료 전에 남은 배치를 제출한다.
+
+뷰 오프셋은 도형을 큐에 넣을 때 정점 좌표에 더해진다. 오프셋 변수만 바뀌면
+이미 기록한 좌표의 의미는 유지되므로 그 변경 자체는 flush 경계가 아니다.
 
 따라서 draw call 수는 코드에 고정된 성질이 아니다. 메뉴 항목, HUD 텍스트,
 아이콘, 오버레이의 **현재 배치 순서**에 따라 달라진다. 문서에 특정 화면의
@@ -2637,7 +3030,7 @@ graph LR
     NOW -.->|"renderer.cpp 를 새 백엔드로"| P2
 ```
 
-**확장 1 은 이 장의 코드 안에서 끝난다.** 아이콘들을 하나의 아틀라스로 합치면 draw call 이 두세 번으로 줄고, 오프스크린 프레임버퍼(FBO)를 하나 만들면 블룸이나 화면 전환 효과 같은 후처리가 가능해진다. MSAA 를 켜면 회전 이미지의 경계 계단도 사라진다. 전부 `renderer.cpp` 와 `gl_shaders.h` 안의 변경이고, `renderer.h` 는 그대로다.
+**확장 1 은 이 장의 코드 안에서 끝난다.** 아이콘들을 하나의 아틀라스로 합치면 draw call 이 두세 번으로 줄고, 오프스크린 프레임버퍼(FBO)를 하나 만들면 블룸이나 화면 전환 효과 같은 후처리가 가능해진다. MSAA는 회전한 기하 경계의 coverage를 더 세밀하게 추정할 수 있다. SDF 알파 마스크나 텍스처 내부의 경계까지 자동으로 해결하는 것은 아니다. 전부 `renderer.cpp` 와 `gl_shaders.h` 안의 변경이고, `renderer.h` 는 그대로다.
 
 **확장 2 는 백엔드를 통째로 갈아 끼우는 일이다.** 그리고 이 장의 구조가 그 작업을 예상 가능한 크기로 만든다. 바꿔야 할 것은 `renderer.cpp` 와 `gl_*` 파일들이고, 유지되는 것은 `renderer.h`·`image.h`·`gl_internal.h` 가 정의한 개념(배처, 사각형 큐, 텍스처 핸들)과 그 위의 모든 코드다. 실제로 이 프로젝트는 렌더러 백엔드를 두 번 갈아치우는 동안 `src/gui.cpp` 를 손대지 않았다 — 그것이 얇은 API 경계의 값이다.
 

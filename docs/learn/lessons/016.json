@@ -1,0 +1,404 @@
+{
+  "id": "lesson-16",
+  "title": "GLSL: 소스를 컴파일하고 오류를 읽기",
+  "shortTitle": "셰이더 소스와 컴파일",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: GL 버퍼와 VAO가 위치 데이터를 읽을 준비를 마쳤습니다.",
+  "finish": "완료: 정점·프래그먼트 GLSL 소스를 각각 컴파일하고 상태·로그·소유권을 관리합니다. 실패 후 소스를 고쳐 다시 시도합니다.",
+  "objective": "C++ 빌드와 GLSL 컴파일을 구분합니다. 문자열 길이·복사 시점·컴파일 상태·진단 로그를 구현하고 실패와 예외에서 자원을 정리합니다.",
+  "prerequisites": [
+    "15차시 체크포인트",
+    "location·vec2 입력의 연결",
+    "C++ 문자열·포인터·RAII"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release·5개 CTest·실제 GLSL330 컴파일/오류/재시도 통과",
+    "CPU 원본 수정·소멸 후 컴파일, status false/GetError0 관찰: Mesa llvmpipe4.5 Core",
+    "현재 렌더러 생성 실패 대역 검사·번역 검사, NDEBUG 삭제 누락 검출",
+    "프로그램 링크·그리기·물리 GPU·네이티브 Windows/macOS 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek shader 구현 후보 검토, Khronos 소스/컴파일/로그·GLSL330 계약과 실제 관찰 대조",
+    "draftJob": "shader",
+    "corrections": [
+      "GLSL 원본도 소유자보다 오래 살아야 한다는 잘못된 주석 수정",
+      "GL3.3의 programmable stage가 두 개뿐이라는 주석을 예제 범위로 수정",
+      "입력 오류에서 이전 진단을 남기던 코드 수정",
+      "잘못 이스케이프된 NUL 초기값 수정, 성공 로그를 모두 경고로 단정하지 않음",
+      "실제 renderer의 CreateShader0 반환 조기 종료와 Part 발췌 반영"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "VBO는 바이트를 담고 VAO는 속성 형식과 읽을 버퍼 연결을 기억합니다.",
+      "location 0의 위치는 두 float이며 stride 8·offset 0으로 Vertex2의 배치와 맞춥니다."
+    ],
+    "bridge": "읽을 데이터를 준비했으니 이제 그 입력을 처리할 GLSL 소스를 만듭니다. 먼저 stage 하나씩 컴파일하고 결과를 확인합니다."
+  },
+  "sections": [
+    {
+      "title": "C++ 빌드가 성공했는데 셰이더는 왜 실패할까?",
+      "body": "**먼저 예측해 보세요.** C++ 문자열 안에 `void main(){ gl_Position = ; }`를 넣었습니다. C++ 컴파일러는 대입식이 비었다고 거부할까요? C++에게는 문자열의 내용일 뿐입니다. 따옴표와 문자열 문법이 올바르면 그 안의 GLSL 문법 오류는 C++ 빌드에서 검출되지 않습니다.\n\n한 프로그램 안에 **서로 다른 언어의 컴파일 단계**가 있습니다. 셰이더가 담당하는 처리 단계 하나를 stage라고 부릅니다. C++ 소스는 실행 파일을 만들 때 C++ 도구 체인이 처리합니다. 이 렌더러의 GLSL 소스는 실행 파일에 문자열로 들어갔다가, 실행 중 OpenGL을 통해 드라이버의 셰이더 컴파일 경로에 전달됩니다. 에디터가 미리 문법을 알려 줄 수는 있어도 실제 GL 컴파일 결과를 대신하지는 않습니다.\n\n| 단계 | 입력 | 우리가 확인할 결과 |\n| --- | --- | --- |\n| C++ 빌드 | main.cpp와 헤더 등 | 실행 파일을 만들었는가 |\n| GL 소스 전달 | GLSL 문자 범위 | 객체에 소스를 복사했는가 |\n| 셰이더 컴파일 | 한 stage의 소스 | COMPILE_STATUS와 진단 로그 |\n| 프로그램 링크 | 컴파일한 stage들 | 다음 단계에서 입출력 연결 확인 |\n\n이번에는 정점·프래그먼트 셰이더를 각각 컴파일하고, 잘못된 소스의 오류를 읽을 수 있게 만듭니다. 컴파일 성공을 곧바로 화면 출력 성공이라고 부르지 않습니다. VAO 입력, 프로그램 링크, 그리기 호출은 각자 다른 계약입니다."
+    },
+    {
+      "title": "짧은 정점 셰이더에서 입력과 출력을 찾는다",
+      "body": "**GLSL**은 OpenGL 셰이더를 작성하는 언어입니다. C와 비슷한 표기법을 쓰지만 C++ 언어 자체는 아닙니다. vec2·vec4 같은 벡터 타입과 그래픽 단계의 입력·출력을 표현하는 문법이 있습니다.\n\n`#version 330 core`는 이 소스를 GLSL 3.30의 core 문법으로 해석하라는 선언입니다. 우리가 사용하는 Desktop OpenGL 3.3 경로와 맞춥니다. C++ 버전이나 창의 픽셀 크기를 지정하는 문장이 아닙니다. 소스 시작에 두어 앞에 다른 선언이 끼지 않게 합니다.\n\n`layout(location = 0) in vec2 a_position`은 VAO가 설정한 속성 0에서 float 두 성분을 받는 약속입니다. location은 변수 이름과 별개인 입력 자리 번호입니다. C++에서 호출할 함수의 주소도 아닙니다.\n\n`gl_Position`은 정점 단계가 내보내는 **클립 좌표**입니다. vec4(a_position, 0.0, 1.0)는 x·y에 입력을 놓고 z=0, w=1로 구성합니다. 이후 x·y·z를 w로 나누는 단계가 있으므로, 이 예제처럼 w=1이면 수치가 그대로 정규화 장치 좌표로 이어집니다. 클립 좌표와 화면 픽셀을 같은 좌표라고 생각하지 마세요. 화면 영역으로의 변환은 그리기를 연결할 때 다룹니다.\n\n정점 셰이더의 main은 정점 처리 단계의 진입점입니다. CPU의 main처럼 창·입력 루프를 돌리지 않습니다. ‘각 정점을 처리한다’는 논리 모델로 읽고, 물리적인 실행 횟수나 GPU 스케줄 순서를 코드에서 가정하지 않습니다.",
+      "codes": [
+        {
+          "label": "정점 stage · 위치 두 성분을 클립 좌표로",
+          "language": "glsl",
+          "text": "#version 330 core\nlayout(location = 0) in vec2 a_position;\nvoid main() {\n    gl_Position = vec4(a_position, 0.0, 1.0);\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "static const char* kQuadVert",
+        "invariant": "셰이더 입력 location과 VAO 형식을 맞추고 gl_Position을 쓴다.",
+        "mayDiffer": "현재 게임은 픽셀 좌표를 논리 해상도로 변환하며 여러 속성을 전달한다.",
+        "omitted": "픽셀→클립 변환·유니폼·단계 사이 보간"
+      }
+    },
+    {
+      "title": "프래그먼트 셰이더와 C++ 문자열을 준비한다",
+      "body": "프래그먼트는 도형을 화면 영역에 펼치는 과정에서 만들어지는 처리 단위입니다. 프래그먼트 셰이더는 그 단위의 출력값을 계산합니다. 최종 화면의 픽셀과 항상 일대일이라고 단정하지 않습니다. 뒤에 깊이 검사·블렌딩·샘플 처리 등이 영향을 줄 수 있습니다.\n\n지금은 입력에 따라 색을 바꾸지 않고 일정한 RGBA를 출력합니다. vec4의 네 성분은 이 예제에서 빨강·초록·파랑·알파로 사용합니다. 출력값을 만들었다고 아직 창에 저장되는 것은 아닙니다. 어느 출력이 어느 색상 버퍼로 가는지는 프로그램과 그리기 상태를 연결할 때 확인합니다.\n\n두 소스는 shader_sources.h에 C++ raw string literal로 보관합니다. `R\"glsl(`와 `)glsl\"`은 C++ 문자열 구분자이며 GLSL로 전달되는 본문에 포함되지 않습니다. 줄바꿈을 그대로 쓸 수 있어 한 줄마다 `\\n`을 붙이지 않아도 됩니다. 구분자 glsl은 C++에서 임의로 고른 이름이며 문자열 안에 `)glsl\"`가 나타나면 닫히므로 그 충돌을 피해야 합니다.\n\n`inline constexpr char ...[]`는 헤더에 정의를 두어도 C++17의 여러 번역 단위에서 같은 변수를 사용할 수 있게 합니다. 배열 리터럴의 끝에는 종료 NUL이 있지만, 컴파일 도우미에서는 다른 문자열 범위도 받을 수 있도록 길이를 별도로 전달할 것입니다.",
+      "codes": [
+        {
+          "label": "프래그먼트 stage · 고정 색상 출력",
+          "language": "glsl",
+          "text": "#version 330 core\nout vec4 out_color;\nvoid main() {\n    out_color = vec4(0.2, 0.7, 0.9, 1.0);\n}"
+        },
+        {
+          "label": "새 파일 · C++에 담은 두 GLSL 소스",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/renderer/shader_sources.h",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "컴파일 시점",
+          "title": "raw string은 GLSL을 실행하는 문법이 아닙니다",
+          "body": "C++ raw string은 따옴표·줄바꿈을 편하게 담는 문자열 표기입니다. 같은 내용을 일반 문자열로 만들어도 GL에 전달된 문자 범위가 같으면 역할은 같습니다. GLSL을 처리하는 단계는 뒤의 ShaderSource·CompileShader 호출로 시작합니다."
+        }
+      ]
+    },
+    {
+      "title": "이름 생성·소스 복사·컴파일을 분리한다",
+      "body": "버퍼는 GenBuffers로 이름을 받았지만 셰이더는 CreateShader가 stage를 받아 이름을 직접 반환합니다. VertexShader와 FragmentShader는 서로 다른 처리 단계이며, ‘하나의 셰이더 문자열 안에 main 둘을 넣는다’는 방식으로 묶지 않습니다.\n\n생성 결과가 0이면 유효한 객체가 없으므로 바로 멈춥니다. 이름을 얻었으면 ShaderSource로 소스를 전달하고, CompileShader로 컴파일을 요청합니다. 각 문장은 다른 상태를 만듭니다.\n\n| 호출 | 생기는 상태 | 아직 하지 않은 일 |\n| --- | --- | --- |\n| CreateShader | stage 종류를 가진 셰이더 객체 | 소스 전달 |\n| ShaderSource | 객체가 보관한 소스 복사본 | 문법 검사·컴파일 |\n| CompileShader | 컴파일 시도 결과와 로그 | 성공 판정 조회·프로그램 링크 |\n\n소스를 넣는다고 자동 컴파일되지 않습니다. 소스를 바꾸면 그 소스로 다시 컴파일해야 합니다. 또한 컴파일한 결과는 프로그램에 연결할 단계 결과이며, 곧바로 ‘최종 GPU 기계어와 실행 준비가 모두 끝났다’고 단정하지 않습니다. 드라이버는 이후 링크나 실행 준비에서도 처리를 할 수 있습니다.",
+      "codes": [
+        {
+          "label": "호출 순서의 핵심 · 최종 구현에서는 단계별 오류도 확인",
+          "language": "cpp",
+          "text": "study_gl::GLuint shader = gl.CreateShader(study_gl::VertexShader);\nif (shader == 0) return false;\nconst study_gl::GLchar* text = study_shader::vertex;\ngl.ShaderSource(shader, 1, &text, nullptr);\ngl.CompileShader(shader);\n// Query status and log, then delete or transfer ownership. The steps below add this."
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 계약",
+          "title": "객체 생성 실패와 소스 오류는 다른 시점입니다",
+          "body": "[CreateShader의 반환값](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glCreateShader.xhtml)과 [CompileShader의 상태 조회](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glCompileShader.xhtml)를 나누어 보세요. 유효한 객체가 없는 경우에 소스 오류 로그부터 찾으면 원인을 잘못 좁히게 됩니다."
+        }
+      ]
+    },
+    {
+      "title": "문자열 개수·길이·수명을 정확하게 넘긴다",
+      "body": "ShaderSource의 count=1은 문자 수가 아니라 **문자열 조각의 개수**입니다. 세 번째 인자는 문자열 포인터들의 배열입니다. 조각 하나라면 지역 포인터 data의 주소인 &data를 넘길 수 있습니다. 네 번째 인자는 각 조각의 길이 배열입니다.\n\n길이 인자를 nullptr로 넘기면 각 문자열에서 종료 NUL을 찾습니다. 반면 std::string_view는 문자 범위를 가리킬 뿐, 끝에 NUL이 있다는 보장도 원본의 소유권도 없습니다. 따라서 이 도우미는 view의 크기를 GLint로 표현할 수 있는지 확인한 뒤 실제 길이를 넘깁니다. 이 길이에는 종료 NUL을 포함하지 않습니다. 유효한 주소와 그 길이만큼의 읽을 수 있는 범위를 제공하는 책임은 호출자에게 있습니다.\n\nShaderSource는 소스를 객체 안으로 복사합니다. 반환 후 원본을 수정하거나 없애도 컴파일할 내용이 같이 바뀌지 않습니다. 반대로 **함수에 넘기기 전에** string_view가 가리키는 원본이 사라졌다면 잘못된 범위를 읽게 됩니다. view가 값으로 전달됐다는 사실이 문자를 복사했다는 뜻은 아닙니다.\n\nshader_probe에서는 지역 char 배열에 소스를 준비하고 ShaderSource를 호출한 뒤 원본을 '?'로 덮고 스코프를 끝냅니다. 그 다음 컴파일이 원래 소스로 성공하는지 확인합니다. ‘언제 복사되는가’를 코드의 순서로 관찰하는 실습입니다.",
+      "codes": [
+        {
+          "label": "Shader::compile 내부 · 명시적인 길이",
+          "language": "cpp",
+          "text": "if (source.size() > static_cast<std::size_t>(std::numeric_limits<GLint>::max())) {\n    diagnostic_ = \"Input failure: source exceeds GLint length\";\n    return false;\n}\nconst GLchar* data = source.data();\nconst GLint length = static_cast<GLint>(source.size());\ngl_.ShaderSource(name_, 1, &data, &length);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "여러 조각",
+          "title": "분리해서 보낼 때도 소스의 경계를 설계합니다",
+          "body": "여러 문자열 조각을 전달할 수 있지만 조각 사이에 필요한 줄바꿈을 API가 자동 삽입한다고 가정하면 안 됩니다. 특히 #version이나 전처리 지시문을 별도 조각으로 만들면 줄의 끝을 유지하세요. [ShaderSource의 복사·길이 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glShaderSource.xhtml)을 참고합니다."
+        }
+      ]
+    },
+    {
+      "title": "API 오류·컴파일 상태·로그를 따로 판단한다",
+      "body": "GL API 호출이 잘못됐는지와 GLSL 코드가 올바른지는 다른 질문입니다. glGetError는 잘못된 객체나 인자 같은 GL 오류 상태를 확인합니다. 문법이 틀린 소스를 유효한 셰이더에 컴파일하는 호출은 API 사용 자체로는 정상일 수 있습니다.\n\n컴파일 결과는 GetShaderiv의 CompileStatus로 읽습니다. 값이 0이면 실패이며, GetError가 0이거나 정보 로그가 비어 있어도 실패입니다. 반대로 컴파일 상태가 참인데 로그가 있다는 이유만으로 실패시키면 경고나 참고 정보가 있는 정상 셰이더를 거부하게 됩니다.\n\n| 관찰 | 해석 | 다음 행동 |\n| --- | --- | --- |\n| 객체 생성 결과 0 | 객체 생성 실패 | 소스 전달 없이 반환 |\n| API 오류가 있음 | 인자·객체·호출 조건 문제 | 발생 단계를 기록하고 정리 |\n| CompileStatus=0, API 오류 없음 | GLSL 컴파일 실패 | 소스·컴파일 로그 확인 |\n| CompileStatus=참, 로그 있음 | 컴파일 성공, 진단 정보 존재 | 로그를 보관하고 다음 단계 진행 |\n\n이 예제의 api_stage는 경계마다 오류 플래그 하나를 읽고 단계 이름과 함께 기록합니다. 진입부터 오류가 남아 있으면 이번 컴파일의 오류인 것처럼 섞지 않고 먼저 실패를 알립니다.",
+      "codes": [
+        {
+          "label": "상태 조회 · 반환형 void인 컴파일 요청 뒤",
+          "language": "cpp",
+          "text": "gl_.CompileShader(name_);\nif (!api_stage(gl_, diagnostic_, \"glCompileShader\")) {\n    reset();\n    return false;\n}\nGLint status = 0;\ngl_.GetShaderiv(name_, CompileStatus, &status);\n// Also check the query API error; fetch the log before handling status == 0."
+        }
+      ]
+    },
+    {
+      "title": "로그 버퍼에서 NUL과 실제 길이를 구별한다",
+      "body": "길이를 먼저 묻고 그만큼 공간을 준비합니다. InfoLogLength는 종료 NUL을 포함한 공간이고, GetShaderInfoLog가 written으로 돌려주는 수는 NUL을 제외한 실제 문자 수입니다. 예를 들어 ASCII 글자 12개라면 필요한 공간은 보통 13바이트이며, 출력 문자열에는 12바이트를 넣습니다. 여기서 길이는 GLchar 원소 수입니다. 여러 바이트로 표현되는 문자가 있다면 화면에 보이는 글자 수와 다를 수 있습니다.\n\n로그 길이가 0 또는 1이면 읽어 보관할 본문이 없습니다. 그렇다고 컴파일 실패가 성공으로 바뀌지는 않습니다. 실패한 상태인데 로그가 없다면 ‘컴파일 실패, 로그 없음’이라는 대체 설명을 남깁니다. 음수 길이나 출력 범위를 벗어난 written은 진단 조회 자체의 문제로 처리합니다.\n\nstd::vector의 **size**만큼 공간을 만들어야 GL이 거기에 문자를 쓸 수 있습니다. reserve만 하고 data()를 넘기면 살아 있는 원소 범위를 준비한 것이 아닙니다. 초기값 '\\0'은 방어적인 초기화이고, 읽을 길이는 written을 기준으로 제한합니다.\n\n문구와 줄·열 표기는 드라이버마다 다를 수 있습니다. 특정 영어 문장 하나가 포함됐는지를 성공 기준으로 삼지 않습니다. 본문의 오류 줄을 찾아 원본과 비교하되, 첫 문법 오류가 뒤의 여러 오류를 연달아 만들 수 있다는 점도 고려합니다.",
+      "codes": [
+        {
+          "label": "로그 조회의 핵심 · log_length > 1인 분기",
+          "language": "cpp",
+          "text": "std::vector<GLchar> buffer(static_cast<std::size_t>(log_length), '\\0');\nGLsizei written = 0;\ngl_.GetShaderInfoLog(name_, log_length, &written, buffer.data());\n// Check the API error before using outputs.\nif (written < 0 || static_cast<GLint>(written) >= log_length) {\n    diagnostic_ = \"API failure: invalid log length\";\n    reset();\n    return false;\n}\nlog.assign(buffer.data(), static_cast<std::size_t>(written));"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 계약",
+          "title": "공간 크기와 결과 길이를 섞지 않습니다",
+          "body": "[Khronos GetShaderInfoLog](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glGetShaderInfoLog.xhtml)의 maxLength와 length를 대조하세요. 버퍼 용량과 실제 출력량은 일반적인 C API에서도 자주 분리되는 계약입니다."
+        }
+      ]
+    },
+    {
+      "title": "Shader 소유자로 실패와 예외 경로를 닫는다",
+      "body": "Shader는 셰이더 이름 하나를 소유하고, GlApi를 빌립니다. 컨텍스트와 테이블은 소유자보다 오래 살아 있어야 합니다. 소스는 ShaderSource가 복사하므로 그 이후까지 같은 CPU 주소를 보관할 필요는 없습니다.\n\n이 예제는 정점·프래그먼트 두 종류만 받습니다. OpenGL 3.3에 다른 stage가 없어서가 아니라, 지금 만들 파이프라인에 필요한 범위를 정한 것입니다. 빈 소스와 표현 불가능한 길이는 GL 호출 전에 거부하며 diagnostic에 이유를 남깁니다. 이미 이름을 소유했다면 새 컴파일을 거부하고 기존 결과를 유지합니다.\n\nGL 호출 실패나 GLSL 컴파일 실패에서는 가진 이름을 reset으로 지우고 false를 반환합니다. 로그는 멤버 문자열로 남겨 호출자가 읽습니다. reset은 이름만 비우고 진단을 보존합니다. 실패 후 올바른 소스로 다시 시도하면 새 시도의 진단으로 갱신됩니다.\n\n문자열과 vector는 메모리를 할당하므로 C++ 예외가 발생할 수도 있습니다. 이 함수에는 noexcept를 붙이지 않습니다. try 영역 안에서 이름을 얻은 뒤 예외가 발생하면 catch에서 reset 후 다시 throw합니다. ‘보통의 컴파일 실패를 false로 알림’과 ‘C++ 예외를 전달함’은 서로 다른 경로입니다.\n\nmain에서도 run_session을 try/catch로 감싸 플랫폼 종료에 도달하게 합니다. 예외가 세션 밖으로 나가는 동안 지역 소유자들이 정리되고, catch 뒤의 platform_shutdown이 컨텍스트를 정리합니다. 자원 정리 책임을 예외가 발생한 곳의 수동 종료 호출에 흩어 놓지 않습니다.",
+      "codes": [
+        {
+          "label": "실패 처리와 예외 정리의 핵심",
+          "language": "cpp",
+          "text": "if (status == 0) {\n    diagnostic_ = log.empty() ? \"GLSL compile failed: no compiler log\"\n                             : \"GLSL compile failed: \" + log;\n    reset();\n    return false;\n}\n// The surrounding try block ends with:\n// catch (...) { reset(); throw; }"
+        },
+        {
+          "label": "새 파일 · Shader 소유자 공개 계약",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/renderer/shader.h",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 소스·상태·로그·정리 전체",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/renderer/shader.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "함수 테이블과 누적 세션에 연결한다",
+      "body": "GLchar는 char로 선언하고 셰이더 관련 함수 여섯 개를 추가합니다. ShaderSource의 세 번째 인자는 `const GLchar* const*`이며, GL에 넘기는 문자열 포인터 목록입니다. GetShaderInfoLog는 길이 출력용 `GLsizei*`와 문자 출력용 `GLchar*`를 받습니다. 서로 다른 출력 인자를 같은 포인터로 취급하지 않습니다.\n\n로드할 이름은 총 23개입니다. 로더와 누락 검사도 이 목록에 맞춥니다. 함수 주소를 얻었다는 사실만으로 무조건 호출하지 않고, 세션에서 확인한 Desktop GL 버전·프로파일과 current 컨텍스트를 유지합니다.\n\nmain은 VAO를 만든 뒤 두 Shader를 선언하고 각각 컴파일합니다. 하나가 실패하면 해당 진단을 출력하고 반환합니다. 정점 셰이더가 성공한 뒤 프래그먼트 셰이더가 실패해도 세션의 지역 소유자가 성공한 이름까지 정리합니다.\n\n성공했을 때도 비어 있지 않은 진단은 출력합니다. 두 소유자는 아직 프로그램에 attach되지 않았으므로 이번 수명에서는 삭제 요청 시 다른 프로그램 참조를 고려할 필요가 없습니다. 프로그램 연결 뒤 셰이더의 삭제와 소유권 관계는 다음 구현에서 다룹니다.",
+      "codes": [
+        {
+          "label": "GlApi에 추가할 여섯 함수",
+          "language": "cpp",
+          "text": "GLuint (STUDY_GL_CALL* CreateShader)(GLenum) = nullptr;\nvoid (STUDY_GL_CALL* ShaderSource)(GLuint, GLsizei, const GLchar* const*, const GLint*) = nullptr;\nvoid (STUDY_GL_CALL* CompileShader)(GLuint) = nullptr;\nvoid (STUDY_GL_CALL* GetShaderiv)(GLuint, GLenum, GLint*) = nullptr;\nvoid (STUDY_GL_CALL* GetShaderInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*) = nullptr;\nvoid (STUDY_GL_CALL* DeleteShader)(GLuint) = nullptr;"
+        },
+        {
+          "label": "세션의 두 stage · 생성된 VAO 다음",
+          "language": "cpp",
+          "text": "study_gl::Shader vertex(gl), fragment(gl);\nif (!vertex.compile(study_gl::VertexShader, study_shader::vertex)) {\n    std::fprintf(stderr, \"Vertex shader: %s\\n\", vertex.diagnostic().c_str());\n    return 1;\n}\nif (!fragment.compile(study_gl::FragmentShader, study_shader::fragment)) {\n    std::fprintf(stderr, \"Fragment shader: %s\\n\", fragment.diagnostic().c_str());\n    return 1;\n}"
+        },
+        {
+          "label": "교체 · GL 함수 테이블 전체",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/renderer/gl_api.h",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · GL 로더 전체",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/renderer/gl_api.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 컴파일과 예외 처리를 포함한 main",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "현재 렌더러의 컴파일 도우미와 대조한다",
+      "body": "현재 compile_shader도 CreateShader → ShaderSource → CompileShader → 상태 조회 → 실패 로그와 정리 순서를 사용합니다. 생성 결과가 0이면 다음 호출을 하지 않습니다. 성공한 GLuint를 반환하면 그 이름을 받은 쪽이 이후 수명을 관리합니다.\n\n학습 코드는 이름을 Shader 객체에 담아 지역 스코프에 소유권을 표시했습니다. 현재 함수는 실패 로그를 stderr로 출력하며, 학습 도우미는 실패·성공 진단을 문자열로 보관해 호출자가 사용할 수 있게 합니다. 핵심 순서는 같지만 진단의 보관 방식과 소유권 표현이 다릅니다.\n\n현재 소스는 종료 NUL이 있는 const char*를 받아 길이 배열을 생략합니다. 학습 코드는 string_view를 받아 길이를 명시합니다. ‘nullptr를 쓴 현재 코드가 틀렸다’가 아니라 입력 계약에 맞는지 판단해야 합니다.\n\n두 stage가 각각 성공하더라도 stage 사이의 입력·출력 연결이나 최종 프로그램의 상태는 아직 확인하지 않았습니다. 함수가 성공한 이름 둘을 다음에 link_program으로 넘기는 이유가 여기에 있습니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "static GLuint compile_shader(",
+        "invariant": "생성 결과·컴파일 상태를 확인하고 실패한 이름을 정리한다.",
+        "mayDiffer": "현재 함수는 NUL 문자열과 raw GLuint 반환, 학습 코드는 길이 있는 view와 소유자를 쓴다.",
+        "omitted": "프로그램 링크·연결된 셰이더 삭제·실행 중 교체"
+      }
+    },
+    {
+      "title": "성공·문법 오류·재시도를 직접 실행한다",
+      "body": "15-vao를 `16-shader`로 복사합니다. shader.h/cpp와 shader_sources.h, 두 검사 파일을 추가하고 gl_api.h/cpp·main·loader_contract.cpp·CMakeLists.txt를 교체합니다. 버퍼와 VAO의 구현은 그대로 사용합니다.\n\nstudy_shader는 study_gl에 연결합니다. 셰이더 컴파일 자체는 SDL 헤더에 의존하지 않고, current 컨텍스트를 준비하는 실행 파일이 SDL과 연결됩니다. shader_contract는 함수 대역으로 빈 로그 실패·긴 성공 로그·중간 API 실패·정리·예외 전파를 확인합니다. shader_probe는 실제 컴파일러에 정상 소스와 잘못된 소스를 전달합니다.\n\n저장소 루트에서 실행합니다. SDL2 개발 패키지·pkg-config가 필요하며 아래 경로는 Linux 단일 구성 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/16-shader -B out/study-16 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-16\nctest --test-dir out/study-16 --output-on-failure\n./out/study-16/tetris\n```\n\n성공하면 `Vertex and fragment shaders compiled (not linked or drawn)` 로그를 읽을 수 있습니다. Windows 다중 구성 생성기는 빌드·CTest에 구성 이름을 지정하고 Debug/Release 실행 경로를 맞춥니다.\n\n표시 없이 컴파일을 관찰할 때는 SDL offscreen GL을 지원하는 Linux에서 다음을 실행합니다. 그래픽 세션에서는 환경변수 없이 shader_probe를 실행할 수도 있습니다.\n\n```sh\nSDL_VIDEODRIVER=offscreen ./out/study-16/shader_probe\n```\n\n프로그램은 원본 소스 덮어쓰기와 소멸 후 성공, 잘못된 대입식의 CompileStatus 실패, 두 정상 stage의 독립 컴파일, 실패한 소유자의 정상 소스 재시도를 차례로 관찰합니다. 중간의 오류 로그는 의도적으로 틀린 소스를 준 결과입니다. 정확한 문구 대신 어떤 stage인지·상태가 실패인지·진단이 남았는지 확인합니다.\n\n이제 GLSL 텍스트를 처리하고 실패 이유를 읽을 수 있습니다. 다음에는 성공한 두 stage를 프로그램에 연결하고, 컴파일은 성공했지만 링크가 실패하는 경우를 구별합니다.",
+      "codes": [
+        {
+          "label": "교체 · 셰이더 타깃을 포함한 CMake",
+          "language": "cmake",
+          "file": "checkpoints/16-shader/CMakeLists.txt",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 23개 진입점 로딩 검사",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/tests/loader_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 진단과 소유권 계약 검사",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/tests/shader_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 소스 수명·컴파일 상태 관찰",
+          "language": "cpp",
+          "file": "checkpoints/16-shader/tests/shader_real.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "15-vao 사본에 Shader 소유자·GLSL 소스·검사 파일을 추가하고 GL 목록·main·CMake를 갱신한다.",
+      "C++ 문자열 구분자와 실제 GLSL 본문을 구별하고 두 main의 역할을 설명한다.",
+      "명시적 길이를 전달하고 원본 수정·소멸 후에도 복사된 소스로 컴파일되는지 관찰한다.",
+      "문법 오류 소스를 넣고 API 오류·CompileStatus·정보 로그를 각각 기록한다.",
+      "실패 후 정상 소스로 재시도하고 이름 정리와 진단 보존을 확인한다."
+    ],
+    "expected": "두 stage가 각각 컴파일됩니다. 문법 오류는 상태 실패로 판정하고 진단을 남기며, 성공 로그는 성공 여부와 별도로 다룹니다.",
+    "failureChecks": [
+      "CreateShader가 0인데 다음 호출로 진행하지 않았는지 확인한다.",
+      "문자열 개수 1과 소스 바이트 길이를 구별한다.",
+      "string_view의 원본이 ShaderSource 호출 때 살아 있는지 확인한다.",
+      "CompileStatus를 읽지 않고 GetError나 로그 유무만으로 판정하지 않는지 확인한다.",
+      "로그 공간의 size와 written 범위, 예외 후 정리 순서를 확인한다."
+    ]
+  },
+  "questions": [
+    {
+      "id": "16-1",
+      "kind": "컴파일 시점",
+      "question": "C++ raw string 안에 잘못된 GLSL 대입식이 있습니다. C++ 빌드는 성공했습니다. 어떤 판단이 맞을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "C++ 빌드가 성공했으므로 GLSL도 문법 검사를 통과했다."
+        },
+        {
+          "id": "b",
+          "text": "raw string은 런타임에 자동 컴파일되므로 GL 호출은 필요 없다."
+        },
+        {
+          "id": "c",
+          "text": "실행 중 셰이더를 컴파일하고 CompileStatus로 별도 확인해야 한다."
+        },
+        {
+          "id": "d",
+          "text": "셰이더 문자열은 GL이 읽기 전에 반드시 C++ 함수로 변환해야 한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "실행 중 셰이더를 컴파일하고 CompileStatus로 별도 확인해야 한다.",
+      "explanation": "C++은 문자열 안을 GLSL 코드로 검사하지 않습니다. ShaderSource는 그 문자를 복사하고 CompileShader가 셰이더 컴파일을 시도합니다. 결과는 GL_COMPILE_STATUS로 확인합니다."
+    },
+    {
+      "id": "16-2",
+      "kind": "소스 수명",
+      "question": "ShaderSource가 성공적으로 반환된 뒤 CPU 원본 배열을 덮어쓰고 없앴습니다. 아직 CompileShader를 호출하지 않았습니다. 다음 컴파일은 어느 소스를 사용하나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "셰이더 객체에 복사해 둔 소스를 사용한다."
+        },
+        {
+          "id": "b",
+          "text": "원본 주소를 다시 읽으므로 덮어쓴 새 문자를 사용한다."
+        },
+        {
+          "id": "c",
+          "text": "CPU 배열 소멸과 함께 셰이더 객체도 삭제된다."
+        },
+        {
+          "id": "d",
+          "text": "컴파일 전까지는 반드시 같은 CPU 배열을 유지해야 한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "셰이더 객체에 복사해 둔 소스를 사용한다.",
+      "explanation": "소스 복사는 ShaderSource 호출에서 이루어집니다. 그 이후 CPU 원본이 바뀌어도 객체에 저장된 소스는 그대로입니다. 단, ShaderSource가 원본을 읽는 동안에는 유효한 문자 범위가 있어야 합니다."
+    },
+    {
+      "id": "16-3",
+      "kind": "상태와 진단",
+      "question": "GetError는 0인데 CompileStatus는 0이고 컴파일 로그는 비어 있습니다. 도우미는 어떻게 처리해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "API 오류가 없으므로 성공한 이름을 반환한다."
+        },
+        {
+          "id": "b",
+          "text": "로그가 생길 때까지 무한히 같은 조회를 반복한다."
+        },
+        {
+          "id": "c",
+          "text": "로그 없음은 항상 드라이버 충돌이므로 프로그램을 즉시 강제 종료한다."
+        },
+        {
+          "id": "d",
+          "text": "컴파일 실패로 처리하고 이름을 정리하며 로그가 없다는 진단을 남긴다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "컴파일 실패로 처리하고 이름을 정리하며 로그가 없다는 진단을 남긴다.",
+      "explanation": "성공 여부는 CompileStatus로 판정합니다. API 사용이 정상이어도 GLSL 컴파일은 실패할 수 있고, 실패 로그가 반드시 상세하다고 가정할 수 없습니다. 자원을 정리한 뒤 빈 로그 상황을 설명합니다."
+    },
+    {
+      "id": "16-4",
+      "kind": "길이 계산",
+      "question": "ASCII 로그의 InfoLogLength=13이고 GetShaderInfoLog가 written=12를 돌려줬습니다. 올바른 공간·문자열 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "12칸만 만들고 GL에는13칸이라고 알려 준다."
+        },
+        {
+          "id": "b",
+          "text": "13칸을 준비하고 출력 문자열에는 실제12글자를 넣는다."
+        },
+        {
+          "id": "c",
+          "text": "13칸 중 마지막 NUL도 로그 문자로 항상 화면에 출력한다."
+        },
+        {
+          "id": "d",
+          "text": "written을 문자열 조각 개수로 사용해 ShaderSource를 호출한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "13칸을 준비하고 출력 문자열에는 실제12글자를 넣는다.",
+      "explanation": "InfoLogLength는 종료 NUL 공간을 포함합니다. written은 실제 출력 글자 수이고 NUL은 제외합니다. 용량은13, 사용할 본문 범위는12로 구분합니다. reserve만 하는 대신 size가13인 출력 공간을 준비합니다."
+    },
+    {
+      "id": "16-5",
+      "kind": "성공 로그",
+      "question": "컴파일 상태는 참이고 정보 로그에 경고가 있습니다. 다음 행동으로 맞는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "로그가 비어 있지 않으면 무조건 컴파일 실패다."
+        },
+        {
+          "id": "b",
+          "text": "경고가 있으면 프로그램 링크도 이미 완료된 것이다."
+        },
+        {
+          "id": "c",
+          "text": "컴파일 성공을 유지하면서 로그를 보관하고 다음 링크 단계로 진행한다."
+        },
+        {
+          "id": "d",
+          "text": "경고를 없애려고 오류 상태를 성공 값으로 덮어쓴다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "컴파일 성공을 유지하면서 로그를 보관하고 다음 링크 단계로 진행한다.",
+      "explanation": "로그는 성공·실패와 별개의 진단 정보입니다. 컴파일 상태가 성공이면 다음 단계에 사용할 수 있지만, 경고를 읽고 필요한 수정을 판단해야 합니다. 프로그램 링크는 별도로 해야 합니다."
+    }
+  ]
+}

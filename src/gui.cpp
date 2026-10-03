@@ -1,22 +1,39 @@
 #include "gui.h"
 #include "../renderer/renderer.h"
+#include <cstdint>
+#include <limits>
+
+static_assert(std::numeric_limits<int>::digits <= 31, "UI coordinates require at most 32-bit int");
 
 namespace {
 // 팔레트 — 메뉴/모달 전용. 기존 Color 상수(WHITE/GRAY 등)와 섞어 씀.
 constexpr Color kBtnIdleBg    = { 38,  50,  78, 255};   // 어두운 남색
 constexpr Color kBtnHoverBg   = { 60,  82, 140, 255};   // 호버 시 파랑
-constexpr Color kBtnPressBg   = { 30,  60, 120, 255};   // 눌린 순간
+constexpr Color kBtnPressBg   = { 30,  60, 120, 255};   // 누른 채 포인터가 올라와 있는 상태
 constexpr Color kBtnHighlight = {210, 180,  30, 255};   // 커서 강조 (키보드 선택)
 constexpr Color kModalBg      = {  0,   0,   0, 180};   // 모달 오버레이 반투명
 constexpr Color kCloseIdle    = {130, 130, 130, 255};
 constexpr Color kCloseHover   = {230,  60,  60, 255};
 }
 
+// Widget layout uses int coordinates at the renderer boundary. Compute derived
+// positions in a wider type, then narrow only after the whole layout is valid.
+static bool fits_ui_coordinate(std::int64_t value)
+{
+    return value >= (std::numeric_limits<int>::min)() &&
+           value <= (std::numeric_limits<int>::max)();
+}
+
 bool gui_hover_rect(int x, int y, int w, int h)
 {
     int mx = platform_mouse_x();
     int my = platform_mouse_y();
-    return mx >= x && mx < x + w && my >= y && my < y + h;
+    if (w <= 0 || h <= 0) return false;
+    // Widen before addition: the far edge can lie outside the int domain.
+    const auto right = std::int64_t(x) + w;
+    const auto bottom = std::int64_t(y) + h;
+    return mx >= x && std::int64_t(mx) < right &&
+           my >= y && std::int64_t(my) < bottom;
 }
 
 bool gui_button(int x, int y, int w, int h, const char* label, int fontSize)
@@ -79,10 +96,15 @@ bool gui_checkbox(int x, int y, int size, const char* label, bool checked,
                   bool highlighted)
 {
     // 라벨 폰트는 박스 높이에 맞춰 그린다. hover 영역은 박스 + 라벨 전체.
+    if (size < 4) return false; // Two-pixel borders need a nonnegative interior.
     const int fontSize = size;
     const int gap = 10;
-    const int tw  = measure_text(label, fontSize);
-    const int hitW = size + gap + tw;
+    const int tw = measure_text(label, fontSize);
+    const auto hit_width = std::int64_t(size) + gap + tw;
+    if (tw < 0 || !fits_ui_coordinate(hit_width) ||
+        !fits_ui_coordinate(std::int64_t(x) + hit_width) ||
+        !fits_ui_coordinate(std::int64_t(y) + size)) return false;
+    const int hitW = static_cast<int>(hit_width);
     const bool hover = gui_hover_rect(x, y, hitW, size);
 
     // 박스 외곽선 — hover/highlight 시 강조색, 평소 회색.
@@ -146,26 +168,34 @@ int gui_slider(int x, int y, int w, int h, int valuePct, bool highlighted)
 }
 
 int gui_value_selector(int x, int y, int w, int h, const char* label,
-                       bool highlighted)
+                       bool highlighted, bool allowPrevious, bool allowNext)
 {
-    // 양끝 화살표 버튼 영역 (정사각형). 중앙은 라벨.
+    // Keep two square arrows disjoint with a positive center label interval.
+    if (h <= 6 || std::int64_t(w) <= 2 * std::int64_t(h) ||
+        !fits_ui_coordinate(std::int64_t(x) + w) ||
+        !fits_ui_coordinate(std::int64_t(y) + h)) return 0;
     const int arrowW = h;
+    const int fs = h - 6;
+    const int left_width = measure_text("<", fs);
+    const int right_width = measure_text(">", fs);
+    const int text_width = measure_text(label, fs);
+    if (left_width < 0 || right_width < 0 || text_width < 0) return 0;
+    const auto right_x = std::int64_t(x) + w - arrowW;
+    const auto left_text_x = std::int64_t(x) + (std::int64_t(arrowW) - left_width) / 2;
+    const auto right_text_x = right_x + (std::int64_t(arrowW) - right_width) / 2;
+    const auto center_text_x = std::int64_t(x) + (std::int64_t(w) - text_width) / 2;
+    if (!fits_ui_coordinate(left_text_x) || !fits_ui_coordinate(right_text_x) ||
+        !fits_ui_coordinate(center_text_x)) return 0;
+
     const Color arrowIdle = highlighted ? kBtnHighlight : Color{180, 190, 220, 255};
-
-    const bool hoverL = gui_hover_rect(x, y, arrowW, h);
-    const bool hoverR = gui_hover_rect(x + w - arrowW, y, arrowW, h);
-
-    // 좌/우 화살표 — "<" / ">" 텍스트를 각 버튼 영역 중앙에 그린다.
+    const bool hoverL = allowPrevious && gui_hover_rect(x, y, arrowW, h);
+    const bool hoverR = allowNext && gui_hover_rect(static_cast<int>(right_x), y, arrowW, h);
     const Color cL = hoverL ? WHITE : arrowIdle;
     const Color cR = hoverR ? WHITE : arrowIdle;
-    const int fs = h - 6;
-    draw_text("<", x + (arrowW - measure_text("<", fs)) / 2, y + 3, fs, cL);
-    draw_text(">", x + w - arrowW + (arrowW - measure_text(">", fs)) / 2, y + 3, fs, cR);
-
-    // 중앙 라벨.
+    if (allowPrevious) draw_text("<", static_cast<int>(left_text_x), y + 3, fs, cL);
+    if (allowNext) draw_text(">", static_cast<int>(right_text_x), y + 3, fs, cR);
     const Color labelColor = highlighted ? kBtnHighlight : WHITE;
-    const int tw = measure_text(label, fs);
-    draw_text(label, x + (w - tw) / 2, y + 3, fs, labelColor);
+    draw_text(label, static_cast<int>(center_text_x), y + 3, fs, labelColor);
 
     if (hoverL && platform_mouse_pressed(0)) return -1;
     if (hoverR && platform_mouse_pressed(0)) return +1;

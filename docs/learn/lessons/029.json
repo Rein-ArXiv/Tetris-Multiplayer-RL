@@ -1,0 +1,406 @@
+{
+  "id": "lesson-29",
+  "title": "좌우 이동: 변경·검사·되돌리기",
+  "shortTitle": "이동과 상태 확정",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 선택한 종류를 초기 위치에 그리며, CPU 상태와 GPU 정점은 처음 한 번만 준비합니다.",
+  "finish": "완료: 좌우 눌림으로 후보 위치를 검사하고, 성공한 이동만 확정해 같은 GPU 버퍼에 반영합니다.",
+  "objective": "입력 의도·상태 전이·실패 보존을 구분하고, 후보 검증과 CPU→GPU 갱신 순서로 벽을 넘지 않는 좌우 이동을 구현합니다.",
+  "prerequisites": [
+    "28차시 체크포인트",
+    "프레임별 눌림·값 복사·보드 좌표",
+    "VBO·VAO·정점과 바이트 수"
+  ],
+  "validation": [
+    "Linux SCRIPTED 20/SDL19 CTest·경고0·CPU 링크 독립",
+    "13440개 상태/방향 조합·극단 기준점·UBSan·조기 확정 오류 대조군",
+    "현재 게임32시드 단일 방향 대조 및 양쪽 입력 정책 차이 확인",
+    "7종류×4위치×3크기 SDL offscreen GL3.3 Core Mesa Intel HD Graphics 3000 저장소/전체 RGB 비교",
+    "native main 창 표시·실제 키 입력·모니터 표시·Windows/macOS는 미검증",
+    "연결된 브라우저 없음: 사이트 실화면·모바일·새 문제 클릭 검수는 다음 연결 시 수행. Node 객관식 검사·생성물 검사는 통과"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 선택 명세의 순수 이동 초안 검토·타입 누락 보완·후보/확정/그래픽 실패 경계 검수",
+    "draftJob": "out/learning-jobs/movement-events.jsonl",
+    "corrections": [
+      "누락된 Piece 이름공간을 명시",
+      "false 눌림 edge와 실제 키 뗌을 구분",
+      "원점 범위와 점유 칸 범위를 구분",
+      "현재 게임의 순차 양쪽 입력과 강의 취소 정책을 명시"
+    ]
+  },
+  "recap": {
+    "points": [
+      "카탈로그의 정의는 불변이며 새 Piece는 독립적인 모양과 기준점을 소유합니다.",
+      "종류 ID와 배열 위치는 별개입니다.",
+      "CPU 값이 바뀌어도 이미 만든 정점과 GPU 저장소는 자동 갱신되지 않습니다."
+    ],
+    "bridge": "종류가 같은 블록의 배치만 바꾸고, 거부된 후보와 확정된 상태를 나누어 화면에 반영합니다."
+  },
+  "sections": [
+    {
+      "title": "정지한 그림을 한 칸 움직이는 상태로 바꾼다",
+      "body": "이제 왼쪽 화살표를 누르면 선택한 블록이 한 칸 왼쪽으로, 오른쪽 화살표를 누르면 한 칸 오른쪽으로 움직이게 만듭니다. 모양의 로컬 좌표는 그대로 두고 Piece의 기준점 열만 바꿉니다.\n\n겉으로는 작은 변화지만 서로 다른 두 일을 연결해야 합니다. **게임 쪽에서는 새 위치를 허용할지 결정**하고, **표현 쪽에서는 허용된 위치로 정점을 다시 만들어 GPU 저장소에 전달**합니다. 기준점만 바꾸어도 화면이 따라올 것이라고 가정하면 CPU와 GPU가 서로 다른 위치를 보게 됩니다.\n\n이번 규칙은 모든 점유 칸이 20×10 보드 안에 있는 이동만 허용합니다. 주황색으로 채운 Grid 칸과의 겹침은 아직 검사하지 않습니다. 따라서 주황색 칸 위로 지나갈 수 있습니다. 이 동작은 다음 충돌 구현에서 제한할 대상이며, 완성 게임의 이동 규칙으로 해석하지 않습니다.\n\n```text\n키 눌림 → 방향 의도 → 후보 위치 → 경계 검사 → Piece 확정\n                                               ↓\n                           새 보드 좌표 → 정점 → GPU 갱신 → 그리기\n```\n\n누적 체크포인트는 종류 선택 I/J/L/O/S/T/Z를 유지합니다. 한 번 누름에 한 칸, 같은 프레임의 좌우 동시 눌림은 이동 없음으로 정합니다. 길게 누르는 반복 이동은 별도의 입력 정책입니다."
+    },
+    {
+      "title": "상태 전이에는 지켜야 할 조건이 있다",
+      "body": "상태(state)는 현재 모양과 기준점 같은 저장된 값이고, 상태 전이(transition)는 입력을 받아 다음 값을 결정하는 연산입니다. 여기서는 `현재 Piece + 방향 → 결과 + 다음 Piece`로 읽을 수 있습니다.\n\n함수를 통과한 뒤에도 유지해야 할 조건을 불변식(invariant)이라고 합니다. 이 실습의 정상 상태에서는 네 보드 좌표가 모두 범위 안에 있고, 이동은 로컬 모양과 행을 바꾸지 않습니다. 실패하면 열을 포함한 모든 필드가 그대로여야 합니다.\n\nT의 기준점 열이 3일 때 왼쪽 입력을 네 번 주면 어떻게 될까요?\n\n| 시도 | 시작 열 | 후보 열 | 결과 | 남는 열 |\n| --- | --- | --- | --- | --- |\n| 왼쪽 1 | 3 | 2 | 이동 | 2 |\n| 왼쪽 2 | 2 | 1 | 이동 | 1 |\n| 왼쪽 3 | 1 | 0 | 이동 | 0 |\n| 왼쪽 4 | 0 | -1 | 경계에 막힘 | 0 |\n\n마지막에 -1을 0으로 보정해서 저장하는 것과, 후보를 거부해 원본을 그대로 남기는 것은 다른 정책입니다. 이 구현은 거부합니다. 이후 점수·효과·입력 기록을 연결할 때도 ‘이동을 시도했다’와 ‘상태가 바뀌었다’를 구별할 수 있어야 합니다.\n\nResult는 네 경우를 표현합니다. idle은 유효한 상태에서 방향이 0인 경우, moved는 확정된 이동, blocked는 유효한 시도지만 후보 칸이 보드 밖인 경우입니다. invalid는 방향이 -1/0/1이 아니거나 현재 상태·산술 전제가 맞지 않는 경우입니다. main은 invalid를 정상적인 벽 충돌처럼 숨기지 않고 세션을 끝냅니다.",
+      "codes": [
+        {
+          "label": "호출자가 후속 처리를 고를 수 있는 결과",
+          "language": "cpp",
+          "text": "enum class Result { idle, moved, blocked, invalid };"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::MoveBlockLeft()",
+        "invariant": "거부된 이동은 기존 배치를 보존하고, 성공한 이동의 후속 처리만 수행한다.",
+        "mayDiffer": "현재 게임은 먼저 이동하고 실패하면 역이동한다. 강의는 작은 Piece 복사본을 검사한 뒤 대입한다.",
+        "omitted": "이번에는 보드 경계만 검사하며 점유 충돌·고스트·회전 이력은 후속 범위다."
+      }
+    },
+    {
+      "title": "입력 장치의 상태를 방향 의도로 바꾼다",
+      "body": "규칙 함수가 SDL 키 코드를 직접 읽게 하지 않습니다. main에서 플랫폼의 눌림 정보를 읽고, 규칙에는 -1·0·1의 방향 의도만 넘깁니다. 키 바인딩이나 플랫폼이 바뀌어도 좌표 검사 함수는 그대로 사용할 수 있습니다.\n\n두 bool은 ‘키가 지금 눌려 있는가’가 아니라 **이번 프레임에 눌림 edge가 관측됐는가**입니다. false에는 계속 누르는 중·이미 뗀 상태·입력 없음이 모두 들어갈 수 있습니다.\n\n| 왼쪽 눌림 edge | 오른쪽 눌림 edge | 방향 |\n| --- | --- | --- |\n| false | false | 0 |\n| true | false | -1 |\n| false | true | +1 |\n| true | true | 0 |\n\n양쪽 edge가 모두 true일 때 0으로 합친 뒤 규칙을 한 번만 호출합니다. 왼쪽을 실행하고 오른쪽을 실행하는 것과 같을까요? 왼쪽 벽에서는 첫 동작이 막히고 오른쪽만 성공할 수 있습니다. 처리 순서가 결과를 바꾼다는 반례입니다.\n\n현재 게임의 SubmitInput은 LEFT를 먼저, RIGHT를 다음에 처리합니다. 강의는 동시에 관측한 두 눌림을 취소하는 정책을 택합니다. 어느 쪽이든 명시하면 구현할 수 있지만, 서로 바꿀 때 같은 입력의 결과와 리플레이가 달라질 수 있습니다.",
+      "codes": [
+        {
+          "label": "두 눌림 관측을 하나의 방향으로 합친다",
+          "language": "cpp",
+          "text": "inline int horizontal_intent(bool left_pressed, bool right_pressed) noexcept {\n    if (left_pressed == right_pressed) {\n        return 0;\n    }\n    return left_pressed ? -1 : 1;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::SubmitInput(uint8_t inputMask)",
+        "invariant": "입력 해석과 상태 변경 순서를 명시적으로 정한다.",
+        "mayDiffer": "현재 게임은 틱 입력 비트의 LEFT 다음 RIGHT를 각각 실행한다. 강의는 같은 프레임의 양쪽 눌림 edge를 합쳐 0으로 처리한다.",
+        "omitted": "고정 틱·키 반복 지연·네트워크 입력 기록은 아직 도입하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "눌림 edge가 모든 키 사건의 기록은 아니다",
+          "body": "플랫폼의 pressed는 이전 프레임 상태와 현재 상태의 차이입니다. 같은 이벤트 처리 안에서 눌렀다 놓아 최종 상태가 같다면 짧은 입력을 놓칠 수 있습니다. 지금은 이 프레임 단위 관측 계약을 사용합니다. 모든 사건을 순서대로 보존하는 큐나 고정 틱 입력 기록과는 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "역이동으로 복구하는 방법과 후보를 버리는 방법",
+      "body": "실제 게임의 좌우 이동은 `Move(0,-1)`로 상태를 바꾼 뒤 검사하고, 실패하면 `Move(0,1)`로 되돌립니다. 이 방식은 제한된 좌표 범위에서 반대 이동이 원래 값으로 돌아온다는 전제에 기대고 있습니다.\n\n좌표 두 개만 바꾸는 동안에는 작고 직접적인 구현입니다. 그러나 이동 직후 점수·소리·네트워크 전송까지 실행하면 좌표만 되돌려도 나머지는 취소되지 않습니다. 실패할 수 있는 검사를 하기 전에 어느 상태가 외부에 드러나는지 살펴야 합니다.\n\n여기서는 작은 값 객체를 복사해 **후보(candidate)**를 만듭니다. 후보의 열을 바꾸고 네 좌표를 검사한 뒤 성공한 경우에만 `current = candidate`로 확정합니다. 실패 경로는 후보를 버리면 끝납니다. 원본에 역연산을 할 필요가 없습니다.\n\n```text\ncurrent 열 0 ──복사──→ candidate 열 0\n                       ↓ 왼쪽\n                     candidate 열 -1\n                       ↓ 경계 실패\ncurrent 열 0 유지 ←── 후보 버리기\n```\n\n이 예제의 Piece는 네 칸 배열과 두 정수만 소유하므로 복사 중 자원 할당이 없습니다. 현재 SimBlock은 map/vector를 포함하므로 같은 복사 비용이라고 할 수는 없습니다. 언제나 복사가 더 좋다는 규칙이 아니라, 상태 크기·실패 경로·소유권을 함께 보고 고르는 방법입니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::MoveBlockLeft()",
+        "invariant": "거부된 이동은 기존 배치를 보존하고, 성공한 이동의 후속 처리만 수행한다.",
+        "mayDiffer": "현재 게임은 먼저 이동하고 실패하면 역이동한다. 강의는 작은 Piece 복사본을 검사한 뒤 대입한다.",
+        "omitted": "이번에는 보드 경계만 검사하며 점유 충돌·고스트·회전 이력은 후속 범위다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "여기서 확정은 스레드의 원자적 연산이 아니다",
+          "body": "검사 전의 중간 후보를 이 함수의 호출자에게 공개하지 않는다는 뜻입니다. 다른 스레드와 동기화하거나 데이터베이스의 ACID 트랜잭션을 제공하지 않습니다. 현재 Piece 대입은 값 필드 복사이며 게임 규칙 함수는 한 스레드에서 순서대로 실행합니다."
+        }
+      ]
+    },
+    {
+      "title": "기준점 대신 실제 점유 칸을 검사한다",
+      "body": "기준점 열이 음수면 항상 잘못된 배치일까요? 로컬 열에 모두 100을 더하고 기준점 열에서 100을 빼면 보드 좌표는 같습니다. 기준점 자체만 0~9인지 검사하면 좌표 표현이 달라졌다는 이유로 같은 배치를 거부할 수 있습니다.\n\ninside_board는 to_board로 네 좌표를 구하고 각각 Grid::contains를 확인합니다. 원점의 위치, 점유 사각형의 중심, 실제 점유 칸은 서로 다릅니다. 이 규칙이 제한할 대상은 실제 네 칸입니다.\n\n변환 실패와 범위 밖 좌표는 inside_board에서는 모두 false입니다. 이 helper는 ‘현재 칸들이 모두 보드 안인가’라는 질문에만 답합니다. try_shift는 현재 상태가 이 조건을 만족하지 않으면 invalid로 분류합니다. 보드 위 숨겨진 스폰 행이나 바깥 상태에서의 복구 이동은 이 실습의 계약에 포함하지 않습니다.\n\n이 함수에는 Grid 객체가 전달되지 않습니다. Grid의 정적 경계만 사용하므로 이미 채운 셀과의 겹침은 알 수 없습니다. 보드 내부 배치 검사와 점유 충돌 검사를 함수 이름과 입력에서부터 구분합니다.",
+      "codes": [
+        {
+          "label": "네 좌표가 모두 보드 안인지 확인한다",
+          "language": "cpp",
+          "text": "inline bool inside_board(const Piece& piece) noexcept {\n    const auto cells = study_piece::to_board(piece);\n    if (!cells.has_value()) {\n        return false;\n    }\n    for (const auto& position : *cells) {\n        if (!study_grid::Grid::contains(position.row, position.column)) {\n            return false;\n        }\n    }\n    return true;\n}"
+        }
+      ]
+    },
+    {
+      "title": "후보 생성부터 확정까지 순서를 지킨다",
+      "body": "try_shift는 먼저 방향이 -1~1인지 검사하고 현재 칸들이 모두 보드 안인지 확인합니다. 그다음 방향 0을 idle로 반환합니다. 잘못된 현재 상태를 0 입력으로 넘겼을 때도 invalid가 나오는 이유입니다.\n\n후보를 복사한 뒤 기준점 열을 int64로 넓혀 방향을 더합니다. 현재 점유 칸이 작다고 기준점도 반드시 작다는 보장은 없습니다. 큰 로컬 좌표와 반대 부호의 기준점이 합쳐져 작은 보드 좌표를 만들 수 있기 때문입니다. 합이 int로 표현되는지 확인한 뒤에만 후보 열에 넣습니다.\n\n후보의 보드 좌표를 다시 구합니다. 변환 자체가 실패하면 invalid, 좌표 하나라도 보드 밖이면 blocked입니다. 둘 다 원본을 건드리지 않습니다. 모든 검사를 통과한 마지막 대입만 current를 바꿉니다.\n\n이때 모든 실패 경로가 실제로 대입 앞에 있는지 읽어 보세요. ‘실패하면 상태 보존’이라는 주석만으로는 충분하지 않습니다. 반환 위치와 원본에 쓰는 위치가 그 계약을 구현해야 합니다.",
+      "codes": [
+        {
+          "label": "작은 복사본에서 검사하고 마지막에 원본을 바꾼다",
+          "language": "cpp",
+          "text": "inline Result try_shift(Piece& current, int direction) noexcept {\n    // Only unit horizontal steps are meaningful to this layer.\n    if (direction < -1 || direction > 1) {\n        return Result::invalid;\n    }\n\n    // This exercise requires all current cells inside the board.\n    // Hidden spawn rows and recovery from an outside state are separate policies.\n    if (!inside_board(current)) {\n        return Result::invalid;\n    }\n\n    if (direction == 0) {\n        return Result::idle;\n    }\n\n    // Work on a copy so the caller's piece is never partially modified.\n    Piece candidate = current;\n\n    // Widen the origin column to 64 bits before adding so the range check\n    // cannot itself overflow.\n    const std::int64_t widened =\n        static_cast<std::int64_t>(candidate.origin.column) +\n        static_cast<std::int64_t>(direction);\n    if (widened < static_cast<std::int64_t>(std::numeric_limits<int>::min()) ||\n        widened > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {\n        return Result::invalid;\n    }\n    candidate.origin.column = static_cast<int>(widened);\n\n    // Recompute the occupied cells for the shifted origin; a translation\n    // failure here means the coordinate mapping is not usable.\n    const auto cells = study_piece::to_board(candidate);\n    if (!cells.has_value()) {\n        return Result::invalid;\n    }\n    for (const auto& position : *cells) {\n        if (!study_grid::Grid::contains(position.row, position.column)) {\n            return Result::blocked;\n        }\n    }\n\n    // Commit only after the candidate has been fully validated.\n    current = candidate;\n    return Result::moved;\n}"
+        },
+        {
+          "label": "simulation/movement.h · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/simulation/movement.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "입력·상태·정점을 프레임 안에서 연결한다",
+      "body": "run_session은 이제 Piece를 값으로 받습니다. 세션이 자기 배치 상태를 소유하고 움직이며, main에 남아 있는 초기 Piece를 수정하지 않습니다. 시작할 때 inside_board를 확인해 처음부터 네 칸이 모두 보이는 상태임을 보장합니다.\n\n반복문에서는 platform_begin_frame으로 입력 상태를 갱신하고 종료 요청부터 처리합니다. 이후 방향 의도와 이동 결과를 구합니다. moved일 때만 보드 좌표와 정점을 다시 만들고, blocked나 idle이면 GPU 갱신을 생략합니다.\n\n모양은 네 칸, 각 칸은 두 삼각형의 여섯 정점입니다. 성공한 이동은 모든 칸을 보드 안에 유지하므로 블록 정점 수는 항상 `4×6=24`입니다. 이를 이용해 이번 버퍼 갱신 API는 정점 수가 같은 경우로 제한합니다.\n\n창 크기를 읽고 layout이 유효한지 확인하는 것보다 상태 처리와 GPU 갱신을 먼저 합니다. 이 예제에서는 창 크기가 일시적으로 0이라 그리기를 생략하더라도, 받아들인 상태 변경의 GPU 복사본을 그대로 방치하지 않습니다. GL 컨텍스트가 살아 있다는 세션 전제는 유지합니다.",
+      "codes": [
+        {
+          "label": "성공한 상태 변경만 새 정점으로 전파한다",
+          "language": "cpp",
+          "text": "const int direction = study_movement::horizontal_intent(\n    platform_key_pressed(Key::Left), platform_key_pressed(Key::Right));\nconst auto move = study_movement::try_shift(piece, direction);\nif (move == study_movement::Result::invalid) return 1;\nif (move == study_movement::Result::moved) {\n    const auto updated_cells = study_piece::to_board(piece);\n    if (!updated_cells) return 1;\n    const auto updated_mesh = study_piece_view::make_visible_mesh(*updated_cells);\n    if (!piece_buffer.replace_same_size(updated_mesh.vertices.data(),\n                                        updated_mesh.count)) return 1;\n    std::printf(\"moved: column=%d (bounds only)\\n\", piece.origin.column);\n} else if (move == study_movement::Result::blocked) {\n    std::puts(\"blocked by board boundary; state unchanged\");\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "길게 누르는 속도가 프레임 수에 따라 달라진다면",
+          "body": "key_down을 매 프레임 읽고 그때마다 한 칸 움직이면 초당 이동 횟수가 렌더링 빈도에 의존합니다. 이번에는 key_pressed로 한 번만 이동합니다. 이후 반복 지연·반복 간격을 가진 입력 처리와 고정 틱을 도입할 때 시간 계약을 따로 정합니다."
+        }
+      ]
+    },
+    {
+      "title": "같은 버퍼 객체의 저장소를 갱신한다",
+      "body": "CPU의 새 정점 배열과 이미 업로드한 GL 저장소는 별개입니다. upload를 다시 호출하는 방법은 현재 wrapper의 ‘최초 업로드만 허용’ 계약에 막힙니다. 그렇다고 매번 버퍼 이름을 지우고 새로 만들면 그 이름을 참조하는 VAO 연결도 다시 관리해야 합니다.\n\n`replace_same_size`는 **객체 이름은 유지하고 그 객체의 데이터 저장소를 다시 정의**합니다. VAO가 참조하는 버퍼 객체는 그대로이고, 위치 속성의 형식·stride·offset도 바뀌지 않으므로 VAO를 재구성하지 않습니다.\n\n처음 upload가 검증한 count_와 새 count가 같은지 먼저 확인합니다. 버퍼가 없거나 포인터가 없거나 개수가 다르면 GL 호출 없이 false입니다. 이 제한은 OpenGL 자체의 제약이 아니라 이번 helper의 정책입니다. 원시 포인터가 정말 그만큼 읽을 수 있는지는 호출자의 계약으로 남습니다.\n\n`glBufferData`의 size 단위는 바이트입니다. Vertex2 하나가 8바이트이므로 24개는 192바이트입니다. 현재 버퍼를 바인딩하고 새 배열의 값을 복사합니다. 함수가 반환된 뒤 updated_mesh 지역 변수가 사라져도 GL의 복사본은 남습니다. 그리기까지 끝났다는 뜻은 아닙니다.\n\nusage에는 GL_DYNAMIC_DRAW 값을 전달합니다. 사용 패턴을 알려 주는 힌트이며 자동 갱신이나 특정 성능을 보장하는 옵션은 아닙니다. GL_STATIC_DRAW로 만들었던 저장소를 절대로 수정할 수 없다는 뜻도 아닙니다. 같은 컨텍스트의 명령 순서에 따라 갱신 뒤 draw가 새 데이터를 사용하며, 매 이동마다 glFinish로 전체 완료를 기다릴 필요는 없습니다.",
+      "codes": [
+        {
+          "label": "현재 이름과 정점 개수를 유지하는 갱신",
+          "language": "cpp",
+          "text": "bool VertexBuffer::replace_same_size(const study_mesh::Vertex2* vertices,\n                                     std::size_t count) noexcept {\n    if (name_ == 0 || !vertices || count_ <= 0 ||\n        count != static_cast<std::size_t>(count_)) {\n        return false;\n    }\n    // count_ was range-checked by upload; byte multiplication remains safe.\n    const auto bytes = static_cast<GLsizeiptr>(count * sizeof(study_mesh::Vertex2));\n    if (!stage_ok(gl_, \"replace entry (pre-existing error)\")) return false;\n    gl_.BindBuffer(ArrayBuffer, name_);\n    if (!stage_ok(gl_, \"replace glBindBuffer\")) return false;\n    gl_.BufferData(ArrayBuffer, bytes, vertices, DynamicDraw);\n    return stage_ok(gl_, \"replace glBufferData\");\n}"
+        },
+        {
+          "label": "renderer/vertex_buffer.h · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/renderer/vertex_buffer.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/vertex_buffer.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/renderer/vertex_buffer.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "CPU 정점을 GL 저장소에 복사한 뒤 해당 버퍼를 사용하는 그리기를 제출한다.",
+        "mayDiffer": "현재 렌더러는 배치마다 저장소 크기를 다시 정의한다. 강의의 갱신 API는 기존 정점 수가 같은 경우만 허용한다.",
+        "omitted": "변경된 부분만 업로드하기·매핑·링 버퍼·동기화 최적화는 후속 범위다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "저장소 재정의와 부분 수정의 선택",
+          "body": "[Khronos glBufferData 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glBufferData.xhtml)은 기존 객체에 새 저장소를 정의하고 입력 데이터를 복사하는 동작과 usage 힌트를 구분합니다. 일부 범위만 바꾸는 BufferSubData도 별도 선택지지만, 지금은 작은 192바이트 전체 교체로 갱신 경계를 드러냅니다. 이 선택을 모든 규모에서 가장 빠르다고 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "CPU 이동 실패와 그래픽 실패를 같은 원복으로 묶지 않는다",
+      "body": "try_shift가 blocked를 반환하면 Piece는 변하지 않았습니다. 반면 moved 뒤 GPU 갱신이 실패하면 CPU 이동은 이미 확정됐습니다. 두 시점을 같은 ‘이동 실패’라고 부르면 어디까지 복구해야 할지 불명확해집니다.\n\n이 작은 프로그램은 GPU 갱신 실패 시 세션을 종료합니다. 예전 그림으로 새 CPU 상태를 표시하며 계속하지 않습니다. replace_same_size는 잘못된 인수를 GL 호출 전에 거부하지만, GL 단계 오류 뒤 저장소 내용을 이전 상태로 복구한다고 약속하지 않습니다. 소유 객체는 남아 있다가 세션 정리 과정에서 해제됩니다.\n\n```text\n후보가 보드 밖 → Piece 유지 → GPU 호출 없음 → 계속\n정상 이동 → Piece 변경 → GPU 갱신 성공 → 새 위치로 그리기\n정상 이동 → Piece 변경 → GPU 갱신 실패 → 세션 종료와 자원 정리\n```\n\n상태 전이와 표현 갱신을 하나의 원자적 거래로 구현한 것은 아닙니다. 더 큰 게임에서는 CPU 상태를 권위 있는 상태로 두고 렌더링 자원을 재생성하는 복구 정책을 설계할 수 있습니다. 그 경우에도 어디까지 유효하고 무엇을 다시 만들지 명시해야 합니다.\n\n매 프레임 보드를 다시 그리고 블록을 덧그리므로 이전 위치의 청록색 그림이 지워집니다. 새 블록만 추가로 그리는 식이면 CPU 이동과 VBO 갱신이 맞아도 화면에 흔적이 남습니다. ‘상태 갱신’과 ‘프레임 다시 그리기’도 다른 책임입니다.",
+      "codes": [
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/buffer_replace_contract.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/tests/buffer_replace_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "실행하면서 벽·입력·겹침을 구분한다",
+      "body": "저장소 루트에서 CPU 데모를 먼저 실행합니다. 새 파일은 simulation/movement.h와 src/movement_demo.cpp이며, CMake에 데모와 계약 검사 타깃을 추가합니다. 완성 체크포인트에는 SCRIPTED 입력 검사와 SDL 그래픽 비교 경로도 포함되어 있습니다.\n\n```sh\ncmake -S docs/learn/checkpoints/29-horizontal-move -B out/study-29 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-29\n./out/study-29/movement_demo\nctest --test-dir out/study-29 --output-on-failure\n```\n\n기준점 열은 `3→2→1→0→0→0→1`입니다. 네 번째 왼쪽 시도는 blocked이고 방향 0은 idle입니다. 단순히 마지막 값만 비교하지 말고, 거부된 시도 직전·직후의 모든 필드가 같은지 확인하세요.\n\nSDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core 환경에서는 창을 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/29-horizontal-move -B out/study-29-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-29-sdl\n./out/study-29-sdl/tetris T\n```\n\n좌우 키를 눌렀다 놓으며 양쪽 벽까지 이동합니다. 길게 누를 때 한 칸만 움직이는 것은 이번 입력 정책입니다. 주황색 칸을 통과하는 것은 점유 충돌을 아직 구현하지 않았기 때문입니다. Escape 또는 닫기로 끝내고, I/O 등으로 종류를 바꾸어 폭에 따른 마지막 기준점 열을 비교합니다. 다중 구성 생성기에서는 구성과 실행 파일 경로를 맞춥니다.\n\n기존 catalog_demo는 종류 목록, piece_demo는 고정 배치 좌표를 관찰하는 도구로 남습니다. 새 이동은 movement_demo와 tetris로 확인합니다. CMake 전체 파일을 펼치면 기존 타깃 뒤에 추가한 부분을 볼 수 있습니다.",
+      "codes": [
+        {
+          "label": "src/movement_demo.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/src/movement_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "검사는 성공 위치보다 거부된 변경을 더 묻는다",
+      "body": "T가 오른쪽으로 한 칸 움직인다는 사례만으로는 벽 처리와 복사 보존을 확인할 수 없습니다. 다음 입력을 나누어 봅니다.\n\n| 사례 | 확인할 성질 |\n| --- | --- |\n| 정상 위치에서 -1/+1 | 열만 한 칸 변하고 로컬 모양·행은 유지 |\n| 벽을 넘는 후보 | blocked, 원본의 모든 필드 유지 |\n| 방향 0 | 정상 상태이면 idle, 갱신 없음 |\n| 방향 2 또는 잘못된 현재 배치 | invalid, 원본 유지 |\n| 같은 보드 좌표를 다른 로컬 원점으로 표현 | 기준점 자체의 범위로 잘못 거부하지 않음 |\n| 큰 기준점과 반대 부호 로컬 좌표 | 후보 덧셈의 표현 범위 확인 |\n| GPU 버퍼 갱신 | 이름·VAO 연결은 유지되고 저장된 정점은 바뀜 |\n\n이동 함수에 대한 검사는 Piece와 결과를 봅니다. 버퍼 대역 검사는 호출 순서·바이트 수·실패 뒤 중단·소유권을 봅니다. 실제 GL 비교는 CPU 정점 배열이 저장소에 들어갔는지와 그 배열이 만드는 픽셀을 함께 봅니다. 어느 한 검사만으로 나머지 계약까지 증명됐다고 보지 않습니다.\n\n특히 버퍼 내용은 바뀌었는데 예전 위치가 그려지면 다른 VAO나 버퍼를 선택했을 가능성을 살펴야 합니다. 반대로 CPU 상태만 바뀌고 버퍼 내용이 그대로면 업로드 경로가 빠진 것입니다. 경계에서 일부 칸만 사라지면 거부해야 할 상태를 표시 단계의 잘라내기로 숨겼는지 확인하세요.",
+      "codes": [
+        {
+          "label": "tests/movement_contract.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/tests/movement_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/movement_input.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/tests/movement_input.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/movement_real.cpp · 완성 파일",
+          "file": "checkpoints/29-horizontal-move/tests/movement_real.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "다음 규칙은 같은 확정 지점 앞에 더한다",
+      "body": "T를 왼쪽 끝까지 움직이면 기준점 열이 0이 되고, 추가 왼쪽 시도는 배치를 바꾸지 않습니다.\n\n![T 블록이 왼쪽 벽에 닿은 보드 화면](data:image/png;base64,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)\n\n일곱 종류는 폭이 달라 오른쪽 마지막 기준점 열도 다릅니다. I는 폭 4라 열 6, O는 폭 2라 열 8, 기본 방향의 나머지 모양은 폭 3이라 열 7까지 갑니다. 공통 이동 함수가 종류별 if 없이 실제 점유 좌표를 검사한 결과입니다.\n\n이 단계에서 주황색 셀은 시각적으로만 존재하는 장식이 아니라 Grid에 저장된 값입니다. 다만 이동 함수가 그 값을 아직 읽지 않습니다. 다음에는 후보의 모든 칸이 범위 안에 있는지에 더해 **그 자리가 비어 있는지**를 확인하겠습니다.\n\n후보를 만드는 과정과 확정하는 마지막 대입은 그대로 두고, 대입 전의 허용 조건을 확장할 수 있습니다. 이때 범위 밖과 점유 상태를 구분하고, 아직 고정되지 않은 블록을 Grid에 먼저 써 넣어 자기 자신과 충돌시키지 않아야 합니다. 규칙의 상태 저장소와 화면의 덧그리기를 분리해 둔 이유가 다음 구현에서 더 분명해집니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "T 기준점 열3에 왼쪽 네 번을 입력해 각 후보와 남는 열을 예상한다.",
+      "같은 프레임의 두 눌림과 두 방향 순차 실행을 왼쪽 벽에서 비교한다.",
+      "후보 실패 시 열뿐 아니라 모양·행도 유지되는지 확인한다.",
+      "이동 뒤 CPU 정점 재생성과 GPU 저장소 갱신 위치를 찾는다.",
+      "I/O/T의 양쪽 벽과 주황색 셀 겹침을 관찰해 경계와 점유를 구별한다."
+    ],
+    "expected": "한 번의 눌림에 한 칸씩 이동하고 보드 경계에서는 원본을 유지하며, 성공한 위치만 새 정점으로 표시한다.",
+    "failureChecks": [
+      "key_down을 매 프레임 한 칸 이동에 쓰고 있지 않은가?",
+      "후보 검사 전에 원본을 바꾸지 않았는가?",
+      "기준점만 검사하고 실제 네 칸 검사를 생략하지 않았는가?",
+      "이동 후 VBO 갱신 없이 draw만 반복하고 있지 않은가?",
+      "GPU 갱신 실패 뒤 이전 그림으로 계속하지 않는가?",
+      "점유 충돌을 구현하기 전의 겹침을 보드 상태 변경으로 오해하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "29-1",
+      "kind": "실패 보존",
+      "question": "기준점 열 0의 기본 T에 왼쪽 이동을 시도했습니다. 후보의 일부 칸이 보드 밖입니다. 올바른 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "열 -1을 저장하고 보이는 칸만 그린다."
+        },
+        {
+          "id": "b",
+          "text": "모든 로컬 열을 1 늘려 모양을 보정한다."
+        },
+        {
+          "id": "c",
+          "text": "blocked를 반환하고 Piece 전체를 그대로 둔다."
+        },
+        {
+          "id": "d",
+          "text": "이동 성공을 기록한 뒤 GPU에서만 취소한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "blocked를 반환하고 Piece 전체를 그대로 둔다.",
+      "explanation": "후보만 바뀌었고 최종 대입 전에 경계 검사에서 반환합니다. 원본의 열·행·로컬 모양이 모두 보존되며 GPU 갱신도 생략합니다."
+    },
+    {
+      "id": "29-2",
+      "kind": "입력 정책",
+      "question": "왼쪽 벽에서 좌우 입력을 순서대로 실행하는 방식과, 양쪽 눌림 edge를 0으로 합치는 이번 방식의 차이는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "순서 실행은 오른쪽으로 이동할 수 있고, 0으로 합치면 그대로다."
+        },
+        {
+          "id": "b",
+          "text": "두 방식은 어느 위치에서나 같은 결과다."
+        },
+        {
+          "id": "c",
+          "text": "0으로 합치면 왼쪽을 먼저 실행한다."
+        },
+        {
+          "id": "d",
+          "text": "순서 실행에서는 두 이동이 반드시 모두 성공한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "순서 실행은 오른쪽으로 이동할 수 있고, 0으로 합치면 그대로다.",
+      "explanation": "벽에서는 왼쪽이 거부되고 오른쪽만 성공할 수 있습니다. 합친 의도 0은 이동을 시도하지 않습니다. 동시 입력 정책은 상태 전이의 일부입니다."
+    },
+    {
+      "id": "29-3",
+      "kind": "좌표 표현",
+      "question": "로컬 열에 모두 100을 더하고 기준점 열에서 100을 뺐습니다. 보드 좌표가 같다면 inside_board는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "기준점이 음수라는 이유만으로 거부한다."
+        },
+        {
+          "id": "b",
+          "text": "로컬 열이 4 이상이므로 항상 거부한다."
+        },
+        {
+          "id": "c",
+          "text": "저장 순서를 정렬한 뒤 종류별로 판단한다."
+        },
+        {
+          "id": "d",
+          "text": "네 보드 좌표를 검사하므로 같은 결과다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "네 보드 좌표를 검사하므로 같은 결과다.",
+      "explanation": "inside_board는 카탈로그 등록 검사가 아닙니다. to_board 결과를 Grid::contains로 확인하므로 기준점 표현 자체보다 실제 점유 좌표를 봅니다. 산술이 표현 가능하다는 전제는 유지합니다."
+    },
+    {
+      "id": "29-4",
+      "kind": "GPU 상태",
+      "question": "Piece 열과 CPU 정점만 바꾸고 기존 VBO에 새 데이터를 전달하지 않았습니다. 다른 렌더링 상태가 같다면 무엇을 예상해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "CPU 지역 배열의 주소가 같으면 자동 갱신된다."
+        },
+        {
+          "id": "b",
+          "text": "GPU 저장소가 이전 정점이므로 이전 위치가 그려진다."
+        },
+        {
+          "id": "c",
+          "text": "VAO가 Piece의 열을 읽어 새 위치를 계산한다."
+        },
+        {
+          "id": "d",
+          "text": "GL_DYNAMIC_DRAW를 쓰면 복사 호출이 없어도 갱신된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "GPU 저장소가 이전 정점이므로 이전 위치가 그려진다.",
+      "explanation": "GPU 저장소는 업로드 시점의 별도 복사본입니다. usage 힌트나 VAO가 CPU 객체 변경을 감시하지 않습니다. 새 좌표를 전달하는 갱신 호출이 필요합니다."
+    },
+    {
+      "id": "29-5",
+      "kind": "실패 경계",
+      "question": "try_shift가 moved를 반환한 뒤 replace_same_size가 GL 단계 오류로 false를 반환했습니다. 이번 main의 정책은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Piece가 자동 복구되므로 평소처럼 계속 그린다."
+        },
+        {
+          "id": "b",
+          "text": "이전 저장소가 보장되므로 새 CPU 상태로 계속한다."
+        },
+        {
+          "id": "c",
+          "text": "세션을 끝내고 자원을 정리한다."
+        },
+        {
+          "id": "d",
+          "text": "VAO 이름만 바꾸면 CPU와 GPU가 일치한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "세션을 끝내고 자원을 정리한다.",
+      "explanation": "CPU 변경은 이미 확정됐지만 GPU 갱신 성공은 확인되지 않았습니다. 이 예제는 저장소 원복을 보장하지 않으므로 제출을 계속하지 않고 세션을 종료합니다. 규칙의 거부와 그래픽 실패는 다른 시점입니다."
+    }
+  ]
+}

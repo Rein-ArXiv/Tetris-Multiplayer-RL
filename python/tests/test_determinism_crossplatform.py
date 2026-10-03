@@ -1,19 +1,15 @@
-"""Cross-platform determinism gate for ``SimGame``.
+"""Compare native SimGame observations with a reviewed legacy-format capture.
 
-Runs the same scripted input sequence used by ``tests/sim_hash_dump.cpp`` and
-checks the resulting state hashes against a frozen reference table. The
-reference table is the C++ ``sim_hash_dump`` output captured on Windows; if
-the same numbers come out of the Python binding (which links the same C++
-sources), Linux and Windows builds are bitwise-identical.
+A match covers these seeds, inputs and observation boundaries. The capture alone
+has no verified OS/compiler provenance; cross-platform evidence requires recording
+and comparing actual builds on each target. It is not a proof of all rule paths.
 
-How to (re)generate the reference numbers:
-
+Generate a separate candidate, inspect differences and then deliberately adopt it:
     cmake --build build --target sim_hash_dump
-    ./build/sim_hash_dump > python/tests/_sim_hash_dump.txt
+    ./build/sim_hash_dump > candidate-sim-hash.txt
 
-The fixture below parses ``_sim_hash_dump.txt`` if present and compares.
-If the file is missing the test is skipped — that lets the suite stay green
-until the C++ binary has been built at least once.
+The committed reference must be present and structurally complete. Native-only
+checks skip when the binding is unavailable; reference validation still runs.
 """
 
 from __future__ import annotations
@@ -21,6 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+from .determinism_reference import compare_records, parse_reference
 
 # Mirror of the script in tests/sim_hash_dump.cpp. Keep these two in sync —
 # any change here must be reflected in the C++ test driver.
@@ -120,40 +118,23 @@ def test_script_replay_stable() -> None:
         assert a == b, f"unstable script replay for seed 0x{seed:016x}"
 
 
-@pytest.mark.skipif(not REFERENCE_FILE.exists(), reason="No reference dump")
+def test_reference_capture_is_complete() -> None:
+    # This gate must run even when the optional native extension is absent.
+    parse_reference(REFERENCE_FILE.read_text(encoding="utf-8"), SEEDS, SCRIPT)
+
+
 @pytest.mark.skipif(not _have_native(), reason="Native tetris_py not built")
 def test_matches_cpp_reference_dump() -> None:
-    """Cross-platform parity vs the C++ ``sim_hash_dump`` reference output.
+    """Compare initial state, every step field, row count and final summary."""
+    from sim import SimGame
 
-    Parses the captured stdout of the C++ test driver and checks that
-    every ``hash=0x...`` line matches the Python replay.
-    """
-    text = REFERENCE_FILE.read_text(encoding="utf-8")
-
-    # Parse: each "==== seed 0x... ====" block contains lines like
-    #   step=000 mask=0x00 ticks=30 total_ticks=30 score=0 over=0 hash=0x...
-    blocks = text.split("==== seed ")
-    expected_by_seed: dict[int, list[int]] = {}
-    for block in blocks[1:]:
-        head, _, body = block.partition("\n")
-        seed_str = head.strip().split()[0]
-        seed = int(seed_str, 16)
-        hashes: list[int] = []
-        for line in body.splitlines():
-            line = line.strip()
-            if not line.startswith("step="):
-                continue
-            tag = "hash="
-            idx = line.find(tag)
-            if idx == -1:
-                continue
-            hashes.append(int(line[idx + len(tag):].split()[0], 16))
-        expected_by_seed[seed] = hashes
-
-    for seed, expected_hashes in expected_by_seed.items():
-        actual = [row[4] for row in _run_script(seed)]
-        assert actual == expected_hashes, (
-            f"hash divergence for seed 0x{seed:016x}: "
-            f"first mismatch at step "
-            f"{next(i for i, (e, a) in enumerate(zip(expected_hashes, actual)) if e != a)}"
-        )
+    expected = parse_reference(REFERENCE_FILE.read_text(encoding="utf-8"), SEEDS, SCRIPT)
+    for seed in SEEDS:
+        reference = expected[seed]
+        initial = SimGame(seed).state_hash()
+        assert initial == reference.initial_hash, f"seed {seed:x}: initial hash differs"
+        rows = [(r.step, r.total_ticks, r.score, r.over, r.state_hash) for r in reference.records]
+        actual = _run_script(seed)
+        difference = compare_records(rows, actual)
+        assert difference is None, f"seed {seed:x}: {difference}"
+        assert actual[-1][2:] == (reference.final_score, reference.final_over, reference.final_hash)

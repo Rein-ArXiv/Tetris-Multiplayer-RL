@@ -1,0 +1,355 @@
+{
+  "id": "lesson-148",
+  "title": "남은 어뷰징: 계정 농사·담합·고의 패배",
+  "shortTitle": "관찰·정규화·표본 범위·오탐·경제 정책",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 가능한 경기와 중복 지급은 검증하지만 계정 농사·담합·고의 패배의 동기까지 판정하지는 못합니다.",
+  "finish": "완료: 검증된 경기의 제한된 표본을 읽어 검토 신호를 만들고, 제재·경제 정책·오탐의 경계를 설명합니다.",
+  "objective": "신뢰 경계별 방어의 범위를 구분하고 읽기 전용 관찰 도구를 구현하며 표본 밖의 불확실성과 정상 이용자의 영향을 설명한다.",
+  "prerequisites": [
+    "서버 재현 판정과 저장 영수증",
+    "계정·주소·경기 식별자의 차이",
+    "SQLite 조회·자원 수명·정수 범위"
+  ],
+  "recap": {
+    "points": [
+      "공식 시드와 상대 정책으로 사람 입력을 재현해 봇 승리를 확인한다.",
+      "지급 영수증과 공용 지갑은 함께 저장하고 0 지급도 확정 결과로 남긴다."
+    ],
+    "bridge": "그 검증이 확인하지 못하는 이용 패턴을 별도의 읽기 전용 관찰로 다룹니다."
+  },
+  "sections": [
+    {
+      "title": "가능한 승리와 정당한 이용은 다른 질문이다",
+      "body": "서버가 두 보드를 재현해 승리를 확인했다고 합시다. 한 사용자가 일부러 블록을 한곳에 쌓아 패배했어도 그 입력은 규칙에 맞을 수 있습니다. 두 계정이 승리를 번갈아 나눠 갖는 경우도 프레임·입력 비트·시드 검사를 모두 통과할 수 있습니다.\n\n**규칙 검증**은 주어진 입력이 해당 결과를 만드는지 확인합니다. **어뷰징 판단**은 서비스의 이용 정책과 맥락을 함께 봅니다. 규칙 검증을 느슨하게 할 이유는 없지만, 검증 성공을 사람이 공정하게 조작했다는 인증으로 확대해서도 안 됩니다.\n\n이번에는 저장된 경기를 읽는 작은 운영 관찰 도구를 만듭니다. 반복 상대·한쪽으로 치우친 승패·짧은 경기라는 관찰을 모으고, 어떤 범위에서 얻은 신호인지 함께 출력합니다. 판정·경제·제재의 책임을 분리하는 것이 구현의 출발점입니다.",
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "인증·규칙 검증·저장 중복 방지·경제 정책·운영 검토가 확인하는 사실을 구분한다. 관찰 신호를 사람의 의도에 대한 증명으로 취급하지 않는다.",
+        "mayDiffer": "학습 도구는 학습 DB를 읽는 운영자 로컬 관찰기이며 현재 게임 DB의 스키마와 다르다. 실제 게임에 같은 분류기나 반복 상대별 지급 제한이 이미 적용된 것은 아니다."
+      }
+    },
+    {
+      "title": "공격자가 바꾸는 식별 단위를 먼저 본다",
+      "body": "같은 경기 UUID를 재전송하면 저장 영수증이 중복 지급을 막습니다. 그러나 새 UUID로 새로운 경기를 계속 만드는 것은 다른 경우입니다. 현재 `Database::saveMatch`는 같은 상대라도 서로 다른 유효 경기에는 일반 보상을 적용합니다.\n\n게스트 계정을 새로 만들면 계정별 획득 한도도 새로운 대상에 적용됩니다. 주소별 발급 제한은 같은 주소에서 빠르게 등록하는 요청을 줄이지만 주소를 바꾸는 행위까지 동일인으로 묶지는 않습니다. 계정, 연결, 주소, 경기, 티켓이 각각 다른 단위라는 점을 먼저 표시해야 합니다.\n\n방어책을 정할 때에는 “무엇을 센다”와 “무엇을 신뢰한다”를 함께 적습니다. 경기 키의 중복 방지를 여러 계정 농사의 해결책으로 설명하거나, IP 주소를 사람 한 명의 식별자로 설명하면 다른 문제에 맞는 수단을 적용하게 됩니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::saveMatch",
+        "invariant": "인증·규칙 검증·저장 중복 방지·경제 정책·운영 검토가 확인하는 사실을 구분한다. 관찰 신호를 사람의 의도에 대한 증명으로 취급하지 않는다.",
+        "mayDiffer": "학습 도구는 학습 DB를 읽는 운영자 로컬 관찰기이며 현재 게임 DB의 스키마와 다르다. 실제 게임에 같은 분류기나 반복 상대별 지급 제한이 이미 적용된 것은 아니다."
+      }
+    },
+    {
+      "title": "입장·판정·지급·검토에 서로 다른 제어를 둔다",
+      "body": "각 단계가 막는 실패를 표로 나누어 봅시다.\n\n| 단계 | 제어 | 적용 범위 |\n|---|---|---|\n| 접속과 요청 | 본문·연결·작업자·주소 예산 | 처리 자원과 요청 속도 |\n| 인증과 발급 | 계정 키·한 번 쓰는 입장권 | 요청자의 권한과 서버 문맥 |\n| 규칙 판정 | 입력 재현·비트·순서·시간 검사 | 가능한 경기 결과 |\n| 지급 저장 | 영수증·트랜잭션·경제 상한 | 중복과 부분 지급, 지정한 재화 정책 |\n| 운영 검토 | 상대·승패·기간의 관찰 | 추가로 살펴볼 이용 패턴 |\n\n상위 단계의 성공이 아래 단계의 필요를 없애지는 않습니다. 규칙상 완결된 결과에 별도 보상 상한을 적용하더라도 경기 결과와 제한 사유를 구분해 남겨야 합니다. 보상 제한을 도입하는 변경은 사용자 안내와 저장 영수증까지 이어져야 합니다."
+    },
+    {
+      "title": "주소별 제한의 창과 오탐 범위를 읽는다",
+      "body": "현재 meta의 RequestBudget은 주소가 처음 수락된 시각을 기준으로 고정 길이 창을 엽니다. 개별 요청의 시각을 매번 보관해 과거 구간을 정확히 세는 슬라이딩 윈도우와는 다릅니다. 창 끝 직전에 허용량을 쓰고 다음 창 시작에 다시 쓰면 짧은 관찰 구간의 요청 수가 한 창의 한도를 넘을 수 있습니다.\n\n그 자체로 구현 오류라고 단정할 수는 없습니다. 어떤 버스트를 허용할지 정한 정책입니다. 다만 “모든 짧은 구간에서 같은 상한”이라고 설명하면 계약이 달라집니다. 본문 크기·작업자 수·동시 연결 상한을 함께 두어 경계의 버스트도 감당할 수 있어야 합니다.\n\n신뢰하지 않는 전달 헤더를 바꿔 새 주소 버킷을 얻는 것은 막습니다. 반면 공유 NAT에서는 정상 이용자도 같은 버킷에 들어갑니다. 등록 거절을 기존 계정 인증까지 일괄 차단하는 방식으로 연결하면 피해 범위가 커지므로 각 예산의 목적을 구분합니다.",
+      "reference": {
+        "path": "meta/api_server.cpp",
+        "symbol": "class RequestBudget",
+        "invariant": "인증·규칙 검증·저장 중복 방지·경제 정책·운영 검토가 확인하는 사실을 구분한다. 관찰 신호를 사람의 의도에 대한 증명으로 취급하지 않는다.",
+        "mayDiffer": "학습 도구는 학습 DB를 읽는 운영자 로컬 관찰기이며 현재 게임 DB의 스키마와 다르다. 실제 게임에 같은 분류기나 반복 상대별 지급 제한이 이미 적용된 것은 아니다."
+      }
+    },
+    {
+      "title": "규칙상 유효한 경기로 관찰 fixture를 만든다",
+      "body": "관찰기가 임의의 숫자만 분류하는 데 그치지 않도록 실제 AuthoritativeMatch로 경기를 끝내고 SqliteResults에 저장합니다. 실습 fixture의 한쪽은 중립 입력을, 다른 쪽은 하드 드롭을 보냅니다. 입력은 합법적이며 같은 계정이 반복해서 승리하는 결과를 만듭니다.\n\nHOST와 GUEST 자리는 번갈아 바꾸되 계정별 입력 정책은 유지합니다. 자리 바꾸기로 집계가 나뉘지 않는지 확인하기 위해서입니다. 경기 키는 fixture마다 고정되어 같은 생성 명령을 다시 실행해도 저장과 보상이 늘지 않아야 합니다.\n\n이 fixture는 규칙상 가능한 패턴을 만들 뿐 실제 사람의 의도를 재현하는 것이 아닙니다. 바로 그 구분을 관찰기의 출력에도 유지합니다.",
+      "codes": [
+        {
+          "label": "tests/review_fixture.h",
+          "language": "cpp",
+          "text": "#pragma once\n#include \"meta/sqlite_results.h\"\n#include \"net/authoritative_match.h\"\n#include \"tests/authority_fixture.h\"\nnamespace study_review_test {\ninline study_net::MatchRecord match(std::uint64_t key,bool swapped=false) {\n    using namespace study_net;\n    AuthoritativeMatch game(9,swapped?202:101,swapped?101:202,77,1000);\n    for(std::uint32_t tick=0;game.result().state==MatchState::incomplete;++tick) {\n        study_authority_test::require(tick<1000);\n        game.submit(101,study_authority_test::frame(tick,{0}));\n        game.submit(202,study_authority_test::frame(tick,{study_input::drop}));\n    }\n    auto record=game.record(key);study_authority_test::require(record.has_value());return *record;\n}\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::saveMatch",
+        "invariant": "인증·규칙 검증·저장 중복 방지·경제 정책·운영 검토가 확인하는 사실을 구분한다. 관찰 신호를 사람의 의도에 대한 증명으로 취급하지 않는다.",
+        "mayDiffer": "학습 도구는 학습 DB를 읽는 운영자 로컬 관찰기이며 현재 게임 DB의 스키마와 다르다. 실제 게임에 같은 분류기나 반복 상대별 지급 제한이 이미 적용된 것은 아니다."
+      }
+    },
+    {
+      "title": "검토 도구에는 읽기 권한만 준다",
+      "body": "관찰 결과를 출력하는 도구가 계정이나 지갑을 바꿀 필요는 없습니다. ReviewReader는 SQLite를 READONLY 모드로 열고, 실제 연결이 읽기 전용인지 확인합니다. 기존 쓰기 서비스와 도구의 권한을 분리하면 관찰 코드를 수정하다 보상 상태를 바꾸는 실수를 줄일 수 있습니다.\n\n다른 DB를 잘못 열지 않도록 application_id와 지원하는 스키마 버전도 확인합니다. 학습 DB와 현재 게임의 DB는 필드 형식이 다르므로 한쪽의 SQL을 다른 쪽에 그대로 적용하지 않습니다. 토큰·복구 정보·사용자 이름은 이 질의에 필요하지 않습니다.\n\n읽기 전용도 DB 자원을 사용합니다. 읽기 스냅샷과 잠금이 서비스에 주는 영향은 별도이며, 운영에서는 백업·복제본·조회 시간과 부하를 함께 고려합니다.",
+      "codes": [
+        {
+          "label": "meta/review_reader.h",
+          "language": "cpp",
+          "text": "explicit ReviewReader(const std::string& path) {\n        if(path.empty() || path.find('\\0')!=std::string::npos)throw std::invalid_argument(\"review database path\");\n        sqlite3* raw=nullptr;\n        const auto rc=sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr);\n        db_.reset(raw);\n        if(rc!=SQLITE_OK || !raw)throw std::runtime_error(\"review database open failed\");\n        if(sqlite3_busy_timeout(raw,1000)!=SQLITE_OK || !read_only())throw std::runtime_error(\"review read-only setup failed\");\n        Statement app(raw,\"PRAGMA application_id\"),version(raw,\"PRAGMA user_version\");\n        if(!app.next() || app.integer_column(0)!=1413829714 || !version.next() || version.integer_column(0)!=7)\n            throw std::runtime_error(\"unsupported review schema\");\n    }\n    bool read_only()const noexcept{return sqlite3_db_readonly(db_.get(),\"main\")==1;}"
+        }
+      ]
+    },
+    {
+      "title": "최근 저장 행을 제한해서 표본을 만든다",
+      "body": "SELECT는 경기 ID 내림차순으로 필요한 필드만 읽습니다. 행 상한보다 하나 더 요청하면 이전 행이 더 있는지도 알 수 있습니다. extra 행은 집계하지 않고 has_older를 표시하는 데 사용합니다. 무한한 과거 결과를 한 번에 메모리에 올리지 않도록 질의 자체에 LIMIT을 적용합니다.\n\n이 표본은 최근 저장 순서입니다. 경기 시작 시각 순서나 최근 며칠을 뜻하지 않습니다. 저장 지연·재시도 때문에 발생 순서와 다를 수 있습니다. 날짜 기반 정책을 만들려면 신뢰할 시간 필드와 창의 정의를 추가해야 합니다.\n\n단일 SELECT가 보는 SQLite 스냅샷에서 한 묶음을 읽고, 오류 없이 질의가 끝난 경우에만 표본을 반환합니다. 쿼리 실패를 빈 결과로 바꾸면 장애가 “문제 없음”으로 보일 수 있습니다.",
+      "codes": [
+        {
+          "label": "meta/review_reader.h",
+          "language": "cpp",
+          "text": "ReviewSample read(std::size_t limit) {\n        if(!limit || limit>kMaxReviewRows)throw std::invalid_argument(\"review row limit\");\n        Statement q(db_.get(),\"SELECT id,player_a,player_b,winner,ticks FROM matches ORDER BY id DESC LIMIT ?1\");\n        q.integer(1,static_cast<sqlite3_int64>(limit+1));\n        ReviewSample sample{{},limit,false};sample.rows.reserve(limit);\n        while(q.next()) {\n            if(sample.rows.size()==limit){sample.has_older=true;continue;}\n            const auto id=q.integer_column(0);\n            if(id<=0)throw std::runtime_error(\"invalid result identity\");\n            sample.rows.push_back({static_cast<std::uint64_t>(id),decimal(q.text_column(1)),\n                decimal(q.text_column(2)),q.is_null(3)?0:decimal(q.text_column(3)),decimal(q.text_column(4))});\n        }\n        return sample; // One SELECT reads one coherent SQLite snapshot.\n    }"
+        }
+      ]
+    },
+    {
+      "title": "계정 쌍의 표현을 정규화한다",
+      "body": "경기 A에서 계정 101이 HOST이고 202가 GUEST였고, 경기 B에서는 자리가 바뀌었다고 합시다. `(101, 202)`와 `(202, 101)`을 다른 키로 쓰면 같은 상대의 반복 경기를 둘로 나누게 됩니다.\n\n작은 ID를 앞에, 큰 ID를 뒤에 놓은 쌍을 집계 키로 사용합니다. 이것이 **정규화**입니다. 같은 의미를 가진 여러 표현을 같은 표현으로 바꾸어 비교합니다. 승패도 HOST/GUEST 대신 정규화된 낮은/높은 계정 ID에 귀속시킵니다.\n\n문자열 ID를 사전순으로 비교하는 것과 숫자의 크기를 비교하는 것은 다를 수 있습니다. 학습 저장소의 canonical decimal TEXT를 uint64로 정확히 읽고 숫자로 정렬합니다. 범위를 넘거나 형식이 다른 값은 조용히 줄이지 않고 거절합니다.",
+      "codes": [
+        {
+          "label": "meta/review_sample.h",
+          "language": "cpp",
+          "text": "for(const auto& row:sample.rows) {\n        if(!row.row || (previous && row.row>=previous) || !row.player_a || !row.player_b ||\n           row.player_a==row.player_b || !row.ticks ||\n           (row.winner && row.winner!=row.player_a && row.winner!=row.player_b))\n            throw std::invalid_argument(\"invalid authoritative review row\");\n        previous=row.row;\n        const std::array<std::uint64_t,2> pair{std::min(row.player_a,row.player_b),std::max(row.player_a,row.player_b)};\n        auto& count=pairs[pair];++count.games;\n        if(row.winner==pair[0])++count.lower_wins;\n        if(row.winner==pair[1])++count.upper_wins;\n        if(row.ticks<=short_tick_limit)++count.short_games;\n    }"
+        }
+      ]
+    },
+    {
+      "title": "분류 앞에서 불가능한 카운터를 거절한다",
+      "body": "ReviewCounts는 경기 수, 양쪽 승리 수, 짧은 경기 수를 가집니다. 무승부는 전체 경기 수에 포함되고 양쪽 승리에는 들어가지 않습니다. 어느 쪽 승리라도 전체 경기 수를 넘을 수 없고, 두 승리 수의 합도 경기 수 이하여야 합니다.\n\n큰 unsigned 값에서 승리 두 개를 먼저 더하면 오버플로가 날 수 있습니다. 한쪽이 전체보다 큰지 먼저 확인한 뒤 `lower_wins > games - upper_wins`로 비교하면 뺄셈 가능한 범위 안에서 검증할 수 있습니다. 관찰 통계라고 해서 잘못된 입력을 허용하면 분류 결과도 믿을 수 없습니다.\n\n행 집계에서도 ID 중복·내림차순 위반·존재하지 않는 승자·같은 계정끼리의 경기·유효하지 않은 틱 수를 거절합니다. 부분 집계 뒤 오류가 나면 보고서 전체를 실패로 처리합니다.",
+      "codes": [
+        {
+          "label": "meta/review_policy.h",
+          "language": "cpp",
+          "text": "if (p.repeat_matches == 0 || p.one_sided_wins == 0 || p.short_matches == 0) {\n        throw std::invalid_argument(\"review policy thresholds must be non-zero\");\n    }\n    // Consistency: total wins must not exceed games (checked without overflow),\n    // and lower_wins must not exceed games - upper_wins.\n    if (c.upper_wins > c.games || c.lower_wins > c.games - c.upper_wins) {\n        throw std::invalid_argument(\"inconsistent counters: wins exceed games\");\n    }\n    if (c.short_games > c.games) {\n        throw std::invalid_argument(\"inconsistent counters: short_games exceed games\");\n    }"
+        }
+      ]
+    },
+    {
+      "title": "임계값은 관찰 이유를 만들며 제재를 결정하지 않는다",
+      "body": "review_flags는 반복 경기 수, 한쪽만 이긴 승리 수, 짧은 경기 수를 정책 임계값과 비교합니다. 여러 조건이 동시에 맞을 수 있어 하나의 성공/실패 대신 비트 집합으로 반환합니다. 짧은 경기는 `ticks <= short_tick_limit`로 정의하며 경계값을 포함합니다.\n\n실습의 편향 조건은 반대쪽 승리가 아직 관찰되지 않은 경우입니다. 표본 밖에 반대쪽 승리가 있을 수 있고, 초보자와 숙련자의 정상 경기에서도 같은 조건이 맞을 수 있습니다. 따라서 문구는 “한쪽으로 치우친 승패”처럼 확인한 현상을 말합니다.\n\n정책값을 바꾸면 같은 표본에서 신호가 달라집니다. 보고서에는 사용한 임계값과 분류 버전을 함께 남겨 나중에 결과를 재현할 수 있게 합니다. 임계값을 코드 깊숙한 숫자로 숨기면 결과 변화의 원인을 추적하기 어렵습니다.",
+      "codes": [
+        {
+          "label": "meta/review_policy.h",
+          "language": "cpp",
+          "text": "unsigned flags = 0;\n\n    if (c.games >= p.repeat_matches) {\n        flags |= repeated_pair;\n    }\n\n    const std::uint64_t hi = std::max(c.lower_wins, c.upper_wins);\n    const std::uint64_t lo = std::min(c.lower_wins, c.upper_wins);\n    if (hi >= p.one_sided_wins && lo == 0) {\n        flags |= one_sided;\n    }\n\n    if (c.short_games >= p.short_matches) {\n        flags |= short_results;\n    }\n\n    return flags;\n}"
+        }
+      ]
+    },
+    {
+      "title": "낮은 오탐률도 많은 정상 이용자를 가리킬 수 있다",
+      "body": "이해를 위한 가상 조건을 정해 봅시다. 이용자 1,000명 중 실제 악용이 10명이고, 탐지기가 그중 9명을 표시한다고 합시다. 정상 990명 중 약 1%도 표시한다면 잘못 표시된 사람은 약 10명입니다. 표시된 약 19명 중 실제 악용은 9명입니다.\n\n탐지기가 높은 비율로 악용을 찾는다는 말만으로 표시 결과의 신뢰도를 알 수 없습니다. **기저율**은 대상 집단에서 실제 사건이 얼마나 드문지 나타내며, **정밀도**는 표시한 대상 중 실제 사건의 비율입니다. 이 계산은 실측 성능이 아니라 두 비율을 구별하기 위한 예입니다.\n\n운영에서는 정상 친구 대전·신규 플레이어·공유 네트워크처럼 영향을 받을 집단을 나누어 봅니다. 단순 반복 신호 하나로 영구 제재를 결정하기보다 다른 근거와 재검토 경로를 둬야 하는 이유입니다."
+    },
+    {
+      "title": "표본 밖을 모른다는 사실도 결과에 남긴다",
+      "body": "보고서는 요청한 행 수, 읽은 행 수, 가장 오래된/최신 저장 ID, 더 오래된 행의 존재 여부를 가집니다. 정책과 이 범위를 함께 표시해야 “신호 없음”을 해석할 수 있습니다. 빈 DB와 잘못된 DB, 표본 밖의 기록은 서로 다릅니다.\n\n표본 안에서 반복 임계값을 넘지 않았다고 전체 이력이 정상이라는 뜻은 아닙니다. 서비스 전체 최신 행을 제한하면 경기가 적은 계정의 오래된 활동은 빠질 수 있습니다. 특정 계정의 조사라면 다른 질의와 범위가 필요합니다.\n\n출력의 계정 ID도 이용 기록을 연결하는 식별자입니다. 운영자 로컬 보고서와 공개 통계를 구분하고 필요한 정보만 다룹니다. 토큰이나 입력 전문을 로그에 추가한다고 사람의 동기를 더 잘 증명할 수 있는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "meta/review_sample.h",
+          "language": "cpp",
+          "text": "struct ReviewReport {\n    ReviewPolicy policy;\n    std::uint64_t short_tick_limit;\n    std::size_t rows_read,requested;\n    std::uint64_t newest=0,oldest=0;\n    bool has_older;\n    std::vector<PairReview> pairs;\n};"
+        }
+      ]
+    },
+    {
+      "title": "경제 정책을 바꾸려면 저장과 안내까지 연결한다",
+      "body": "관찰을 바탕으로 같은 상대 반복 지급의 상한이나 획득 속도 제한을 도입할 수 있습니다. 그때에는 무엇을 제한할지 먼저 정해야 합니다. 게임 입장, BP 지급, RP 변화, 계정 이용 정지는 서로 다른 조치입니다. 친구 대전을 허용하면서 재화만 제한하는 정책도 가능합니다.\n\n지급 정책을 적용하는 위치는 서버의 저장 경계입니다. 검사 후 별도 단계에서 잔액을 더하면 동시 요청이 같은 남은 한도를 보고 함께 지급할 수 있습니다. 영수증 조회·상한 계산·실제 지급량 저장·지갑 갱신을 같은 트랜잭션에 둬야 합니다. 재요청에는 당시의 정책과 지급량을 돌려줍니다.\n\n이 도구는 운영 관찰만 구현합니다. 현재 실제 게임의 경제 정책을 자동으로 변경하지 않습니다. 적용 전에는 제한 사유를 사용자에게 어떻게 안내할지, 정상 이용자가 이의를 제기하면 어떻게 재검토할지, 언제 제한을 해제할지도 정해야 합니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::saveBotWin",
+        "invariant": "인증·규칙 검증·저장 중복 방지·경제 정책·운영 검토가 확인하는 사실을 구분한다. 관찰 신호를 사람의 의도에 대한 증명으로 취급하지 않는다.",
+        "mayDiffer": "학습 도구는 학습 DB를 읽는 운영자 로컬 관찰기이며 현재 게임 DB의 스키마와 다르다. 실제 게임에 같은 분류기나 반복 상대별 지급 제한이 이미 적용된 것은 아니다."
+      }
+    },
+    {
+      "title": "실패와 범위가 다른 표본으로 검증한다",
+      "body": "계약 검사는 임계값 직전·정확히 경계·경계 초과를 비교하고, 무승부·자리 교환·넓은 ID 범위를 포함합니다. 합계가 불가능한 카운터와 중복 행은 거절해야 합니다. 행 상한을 바꾸면 has_older와 집계 신호가 함께 바뀌는지도 확인합니다.\n\n실제 규칙으로 만든 경기를 DB에 저장한 후 읽기 전용 도구를 실행하고 모든 테이블의 행을 전후 비교합니다. 지갑·RP·XP·영수증이 바뀌지 않아야 합니다. 같은 경기 키를 다시 저장해도 관찰 행이 늘지 않는지 확인하여 중복 요청이 통계도 부풀리지 않게 합니다.\n\n이 검사는 구현 계약을 확인합니다. 실제 사용자의 악용을 얼마나 찾는지, 어떤 집단을 잘못 표시하는지는 운영 데이터와 검토 결과가 필요한 별도 평가입니다."
+    },
+    {
+      "title": "실습 표본과 정책을 바꾸며 결과를 읽는다",
+      "body": "다음 값들은 고정된 실습 조건이며 운영 권장 임계값이 아닙니다. 첫 관찰에서는 일부 행만, 두 번째에서는 fixture의 전체 행을 읽습니다.\n\n```sh\ncmake -S docs/learn/checkpoints/148-abuse-review -B out/study-148 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-148 --target review_contract review_results review_fixture -j2\nout/study-148/review_contract out/study-148/contracts-new.db\nout/study-148/review_fixture out/study-148/fixture.db\nout/study-148/review_results out/study-148/fixture.db 3 3 2 2 1000\nout/study-148/review_results out/study-148/fixture.db 8 3 2 2 1000\n```\n\n인자는 DB, 읽을 행 상한, 반복 경기 수, 한쪽 승리 수, 짧은 경기 수, 짧은 경기 틱 상한입니다. 계약 검사는 새 DB를 사용합니다. Boost가 기본 경로 밖에 있으면 `STUDY_BOOST_INCLUDE`를 지정합니다.\n\n```sh\npython3 scripts/check_learning_abuse_review.py --boost /path/to/boost/include\n```\n\n출력을 읽으며 데이터 수가 충분한지, 어떤 경기 순서의 표본인지, 어느 정책이 신호를 만들었는지 설명해 보세요. 현재 게임의 DB를 이 학습 도구에 그대로 넣으면 스키마 검사에서 거절되어야 합니다."
+    },
+    {
+      "title": "단원의 신뢰 경계를 한 요청으로 연결한다",
+      "body": "한 사용자가 보상을 받는 흐름을 계정 인증 → 서버 문맥 발급 → 입력 검사 → 규칙 재현 → 결과 저장 → 사용자 통지로 따라가 보세요. 각 단계가 소유하는 상태, 신뢰하는 값, 실패했을 때 보존해야 할 값을 설명할 수 있어야 합니다.\n\n입력 검증 실패는 규칙 결과를 지급하지 않는 이유가 될 수 있습니다. 저장 응답 유실은 저장되지 않았다는 증거가 아니므로 영수증이나 프로필로 확인합니다. 반복 상대라는 관찰은 이용 의도를 확정하지 않으므로 검토 대상으로 다룹니다. 다른 실패를 하나의 “보안 오류” 상태로 합치면 사용자도 운영자도 대응 방법을 잃습니다.\n\n아래 파일에서 조회와 분류의 경계를 따라가고, 자동 조치를 추가한다면 어느 책임이 새로 필요한지 적어 보세요. 어떤 위험을 줄였고 어떤 위험이 여전히 남는지 구체적으로 설명하는 것이 이 단원의 마지막 산출물입니다.",
+      "codes": [
+        {
+          "label": "meta/review_policy.h",
+          "language": "cpp",
+          "file": "checkpoints/148-abuse-review/meta/review_policy.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/review_sample.h",
+          "language": "cpp",
+          "file": "checkpoints/148-abuse-review/meta/review_sample.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/review_reader.h",
+          "language": "cpp",
+          "file": "checkpoints/148-abuse-review/meta/review_reader.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/review_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/148-abuse-review/tests/review_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/review_results.cpp",
+          "language": "cpp",
+          "file": "checkpoints/148-abuse-review/tools/review_results.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "148-1",
+      "question": "서버가 재현에 성공한 경기에서 같은 계정이 반복 패배했습니다. 이것만으로 확정할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "의도적 담합"
+        },
+        {
+          "id": "b",
+          "text": "입력이 해당 규칙 결과를 만들었다는 사실"
+        },
+        {
+          "id": "c",
+          "text": "사람이 직접 조작함"
+        },
+        {
+          "id": "d",
+          "text": "패배자의 악성 프로그램 사용"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "입력이 해당 규칙 결과를 만들었다는 사실",
+      "explanation": "규칙 재현은 가능한 결과를 검증합니다. 실력 차이나 고의 등 동기는 다른 근거가 필요합니다."
+    },
+    {
+      "id": "148-2",
+      "question": "HOST/GUEST를 바꾼 같은 두 계정의 경기를 하나로 집계하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HOST ID만 키로 사용"
+        },
+        {
+          "id": "b",
+          "text": "승자 이름만 저장"
+        },
+        {
+          "id": "c",
+          "text": "ID를 숫자로 정렬한 쌍을 키로 사용"
+        },
+        {
+          "id": "d",
+          "text": "매 경기 UUID를 쌍의 키로 사용"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "ID를 숫자로 정렬한 쌍을 키로 사용",
+      "explanation": "역할과 무관하게 같은 계정쌍을 정규화합니다. 경기 UUID는 서로 다른 경기의 식별자입니다."
+    },
+    {
+      "id": "148-3",
+      "question": "최근 일부 저장 행에서 검토 신호가 없고 has_older가 true입니다. 맞는 안내는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "표본 안에서는 신호가 없으며 이전 행은 조사 범위 밖"
+        },
+        {
+          "id": "b",
+          "text": "전체 이력이 정상"
+        },
+        {
+          "id": "c",
+          "text": "오래된 행도 같은 결과"
+        },
+        {
+          "id": "d",
+          "text": "DB가 비어 있음"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "표본 안에서는 신호가 없으며 이전 행은 조사 범위 밖",
+      "explanation": "표본의 부재를 전체 이력의 부재로 확대할 수 없습니다. 조회 범위와 누락 여부를 함께 남깁니다."
+    },
+    {
+      "id": "148-4",
+      "question": "동일 UUID의 재지급은 막았지만 새 UUID로 같은 상대와 계속 경기합니다. 남은 과제는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "UUID 길이를 더 늘리면 해결"
+        },
+        {
+          "id": "b",
+          "text": "승리 신고를 클라이언트에 맡김"
+        },
+        {
+          "id": "c",
+          "text": "중복 방지를 제거"
+        },
+        {
+          "id": "d",
+          "text": "서로 다른 경기의 경제 정책과 운영 검토"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "서로 다른 경기의 경제 정책과 운영 검토",
+      "explanation": "멱등성은 같은 작업의 중복 효과를 막습니다. 서로 다른 경기를 반복하는 동기나 지급 정책은 별도입니다."
+    },
+    {
+      "id": "148-5",
+      "question": "일일 지급 상한을 적용할 때 동시 청구가 남은 한도를 함께 쓰지 못하게 하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "클라이언트가 잔액을 계산"
+        },
+        {
+          "id": "b",
+          "text": "조회 후 잠금 없이 나중에 각각 지급"
+        },
+        {
+          "id": "c",
+          "text": "영수증 조회·한도 계산·지급을 같은 쓰기 트랜잭션에 둠"
+        },
+        {
+          "id": "d",
+          "text": "성공 응답 후 영수증을 저장"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "영수증 조회·한도 계산·지급을 같은 쓰기 트랜잭션에 둠",
+      "explanation": "일관된 쓰기 경계에서 한도를 계산하고 효과를 저장해야 합니다. 응답 재시도에는 확정 영수증을 사용합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "실제 규칙으로 반복 승패 fixture를 만들어 저장한다.",
+      "READONLY 연결과 제한된 단일 SELECT로 경기 표본을 읽는다.",
+      "쌍 정규화·분류 임계값·표본 상한을 바꿔 결과와 오탐 가능성을 설명한다."
+    ],
+    "failureChecks": [
+      "관찰 후 지갑·RP·XP·영수증이 바뀌지 않는지 확인한다.",
+      "자리 교환·무승부·불가능한 카운터·중복 행을 정확히 처리하는지 확인한다.",
+      "조회 오류·빈 결과·표본 밖을 같은 정상 상태로 표시하지 않는지 확인한다."
+    ],
+    "expected": "확인한 사실과 범위를 가진 운영 관찰 결과를 만들고, 규칙 검증과 사람의 의도 판정을 구분한다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 순수 분류 초안 검수, 실제 규칙/SQLite 관찰 및 현재 제한 경계 회귀",
+    "corrections": [
+      "RequestBudget의 rolling window 주석을 주소별 고정 길이 창으로 교정",
+      "현재 반복 상대별 경제 상한 부재와 읽기 전용 실습의 범위를 명시",
+      "정상 친구 대전·표본 누락과 관찰/제재의 차이를 본문에 포함"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 실제 규칙 결과→SQLite→READONLY 관찰·기존 봇 보상 계약 통과",
+    "관찰 contract/reader ASan/UBSan 및 전 테이블 행 불변·같은키 재실행 통과(SQLite archive 비계측)",
+    "현재 meta의 같은 상대 새UUID 지급·위조 전달 헤더 거절·신뢰 proxy 오른쪽주소3HTTP 통과",
+    "인라인 스니펫·현재심볼·147 누적 파일 보존 대조 통과",
+    "Windows/macOS native·실제 이용자 분류 성능·수동GUI 미검증"
+  ]
+}

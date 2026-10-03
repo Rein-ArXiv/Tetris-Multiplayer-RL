@@ -1,28 +1,32 @@
 // renderer/text_gl.cpp — stb_truetype 래스터화 + GPU 글리프 아틀라스
 //
 // 글자 모양을 만드는 일은 여전히 CPU 가 한다. stb_truetype 가 TTF 아웃라인을
-// 8비트 coverage 비트맵으로 그려 주는데, GPU 에는 그런 기능이 없기 때문이다.
+// 8비트 coverage 비트맵으로 굽는다. 이 렌더러가 선택한 CPU 래스터화 경로다.
 // 바뀐 것은 그 비트맵을 어디에 두느냐다.
 //
 //   이전: 비트맵을 CPU 메모리에 캐시하고 픽셀마다 프레임버퍼에 합성
 //   지금: 비트맵을 한 장의 R8 텍스처(아틀라스)에 올리고, 그릴 때는
 //         그 텍스처의 일부를 가리키는 사각형 하나만 배처에 넣는다
 //
-// 아틀라스를 쓰는 이유는 텍스처 교체가 draw call 을 끊기 때문이다. 글자마다
-// 텍스처가 따로면 "Game Over" 한 줄에 draw call 이 9번 나간다. 한 장에 모아
-// 두면 화면의 모든 글자가 한 번에 나간다.
+// 아틀라스는 글리프 사이의 텍스처 교체를 줄인다. 같은 텍스처와 클립 등
+// 배치 조건을 유지하는 연속 글리프는 함께 제출할 수 있다. 다른 이미지,
+// 상태 변경, 배처 용량에 따라 한 문자열도 여러 제출로 나뉠 수 있다.
 //
 // 해상도에 대해: 사각형은 정점 좌표가 실수라 창을 4K 로 키워도 GPU 가 그
 // 해상도로 다시 래스터화한다 — 저절로 선명하다. 글자는 그렇지 않다. 한 번
 // 구운 비트맵을 확대하면 그 배율만큼 뭉갠다. 그래서 여기서는 배치는 논리
 // 좌표로 하되, **굽는 크기만** 화면 배율을 곱해 키운다. 22px 글자를 3.4배
-// 창에서 보면 실제로는 75px 로 구워 22px 자리에 그린다.
+// 창에서 보면 배율을 3.375로 양자화해 높이 74로 구운 뒤 논리 크기로 배치한다.
 
 #include "renderer.h"
 #include "gl_internal.h"
+#include "mask_upload.h"
+#include "font_raster_policy.h"
+#include "../core/utf8.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -39,11 +43,6 @@
 // GL_MAX_TEXTURE_SIZE 와 비교해 정한다.
 static constexpr int kAtlasWanted = 2048;
 static int s_atlas_dim = kAtlasWanted;
-
-// 굽는 크기를 1/8 단위로 반올림한다. 창을 드래그로 늘리는 동안 배율이
-// 연속으로 변하는데, 그때마다 새 크기로 다시 구우면 아틀라스가 순식간에
-// 찬다. 눈에 안 보이는 차이를 같은 크기로 묶어 재굽기를 줄인다.
-static constexpr float kScaleQuantum = 8.0f;
 
 struct Glyph {
     int   bw = 0, bh = 0;        // 구워진 비트맵 크기 (실제 화면 픽셀)
@@ -65,121 +64,79 @@ static int    s_pen_x    = 0;   // shelf packing 커서
 static int    s_pen_y    = 0;
 static int    s_row_h    = 0;
 
+// Adapter for the public NUL-terminated text API. Borrow at most four bytes;
+// stop at the terminator before considering another byte. The caller supplies
+// a readable C string. Malformed input advances one byte, preserving later ASCII.
 static uint32_t utf8_next(const char** text)
 {
-    const uint8_t* s = reinterpret_cast<const uint8_t*>(*text);
-    if (!s[0]) return 0;
-    uint32_t cp = 0;
-    int count = 0;
-    if (s[0] < 0x80) {
-        cp = s[0]; count = 1;
-    } else if ((s[0] & 0xE0) == 0xC0) {
-        cp = s[0] & 0x1F; count = 2;
-    } else if ((s[0] & 0xF0) == 0xE0) {
-        cp = s[0] & 0x0F; count = 3;
-    } else if ((s[0] & 0xF8) == 0xF0) {
-        cp = s[0] & 0x07; count = 4;
-    } else {
-        ++*text;
-        return 0xFFFD;
-    }
-    for (int i = 1; i < count; ++i) {
-        if ((s[i] & 0xC0) != 0x80) {
-            ++*text;
-            return 0xFFFD;
-        }
-        cp = (cp << 6) | (s[i] & 0x3F);
-    }
-    *text += count;
-    return cp;
+    std::size_t available = 0;
+    while (available < 4 && (*text)[available] != '\0') ++available;
+    const auto result = utf8::decode_first(std::string_view(*text, available));
+    *text += result.bytes;
+    return static_cast<uint32_t>(result.codepoint);
 }
 
-static void ensure_atlas()
+static bool ensure_atlas()
 {
-    if (s_atlas) return;
-
+    if (s_atlas) return true;
+    if (gl_GetError()) return false;
     GLint max_dim = 0;
     gl_GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dim);
-    s_atlas_dim = (max_dim > 0 && max_dim < kAtlasWanted) ? (int)max_dim
-                                                          : kAtlasWanted;
-
-    gl_GenTextures(1, &s_atlas);
-    gl_BindTexture(GL_TEXTURE_2D, s_atlas);
-    // 채널이 하나뿐이라 기본 4바이트 정렬 규칙이 맞지 않는다. 이걸 빠뜨리면
-    // 폭이 4의 배수가 아닌 글자가 비스듬히 밀려 보인다.
-    gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    std::vector<uint8_t> zero((size_t)s_atlas_dim * s_atlas_dim, 0);
-    gl_TexImage2D(GL_TEXTURE_2D, 0, GL_R8, s_atlas_dim, s_atlas_dim, 0,
-                  GL_RED, GL_UNSIGNED_BYTE, zero.data());
-    // 굽는 크기를 1/8 단위로 반올림하므로 화면 픽셀과 텍셀이 정확히 1:1 은
-    // 아니다 (최대 6% 어긋난다). NEAREST 로 두면 그 어긋남이 글자 획 굵기가
-    // 들쭉날쭉해지는 형태로 보인다. LINEAR 가 그 차이를 흡수한다.
-    // 글리프 사이에 1픽셀 빈 줄을 두므로 이웃 글자가 번져 들어오지 않는다.
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (gl_GetError() || max_dim < 3) return false;
+    const int dimension = std::min(kAtlasWanted, int(max_dim));
+    const GLuint candidate = text_detail::create_mask8(dimension);
+    if (!candidate) return false;
+    s_atlas = candidate;
+    s_atlas_dim = dimension;
     s_pen_x = s_pen_y = s_row_h = 0;
+    return true;
 }
 
 // shelf packing: 왼쪽에서 오른쪽으로 채우다 폭이 모자라면 다음 줄로 내린다.
-// 최적 패킹은 아니지만 글리프 높이가 크기별로 비슷해서 낭비가 크지 않다.
+// 반환한 UV를 옮기지 않는 단순 배치다. 입력 순서/높이에 따라 빈 공간이 남는다.
 static bool pack_glyph(const uint8_t* bitmap, int w, int h, Glyph& out)
 {
-    if (w <= 0 || h <= 0) return true;   // 공백 문자 — 자리를 차지하지 않는다
-    if (w > s_atlas_dim || h > s_atlas_dim) return false;  // 한 장에 안 들어가는 글자
+    if (w < 0 || h < 0) return false;
+    if (w == 0 || h == 0) return true;
+    if (!bitmap || w > s_atlas_dim - 2 || h > s_atlas_dim - 2) return false;
+    const int outer_w = w + 2, outer_h = h + 2;
+    try {
+        // Own every border texel. Reused atlas space may contain older ink.
+        std::vector<uint8_t> padded(std::size_t(outer_w) * outer_h, 0);
+        for (int row = 0; row < h; ++row)
+            std::copy_n(bitmap + std::size_t(row) * w, w,
+                        padded.data() + std::size_t(row + 1) * outer_w + 1);
 
-    if (s_pen_x + w > s_atlas_dim) {       // 줄 바꿈
-        s_pen_x = 0;
-        s_pen_y += s_row_h + 1;
-        s_row_h = 0;
-    }
-    if (s_pen_y + h > s_atlas_dim) {
-        // 가득 찼다. 예전 크기로 구운 글자들이 대부분이므로 (창 크기가
-        // 바뀌면 이전 배율 비트맵은 다시 안 쓰인다) 통째로 버리고 처음부터
-        // 다시 채운다. 개별 항목을 쫓아내는 LRU 보다 단순하고, 실제로는
-        // 창 크기를 크게 바꿀 때 한 번씩만 일어난다.
-        //
-        // 버리기 전에 배치를 비운다. 이미 큐에 들어간 글자들의 UV 는 지금
-        // 아틀라스 내용을 가리키는데, 비우지 않고 덮어쓰면 그 글자들이
-        // 새로 구운 다른 글자의 그림으로 그려진다.
-        glb_flush();
-        s_cache.clear();
-        s_pen_x = s_pen_y = s_row_h = 0;
-    }
-
-    gl_BindTexture(GL_TEXTURE_2D, s_atlas);
-    gl_PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    gl_TexSubImage2D(GL_TEXTURE_2D, 0, s_pen_x, s_pen_y, w, h,
-                     GL_RED, GL_UNSIGNED_BYTE, bitmap);
-
-    out.u0 = (float)s_pen_x / (float)s_atlas_dim;
-    out.v0 = (float)s_pen_y / (float)s_atlas_dim;
-    out.u1 = (float)(s_pen_x + w) / (float)s_atlas_dim;
-    out.v1 = (float)(s_pen_y + h) / (float)s_atlas_dim;
-
-    s_pen_x += w + 1;                     // 1픽셀 간격 — 샘플링 번짐 방지
-    s_row_h = std::max(s_row_h, h);
-    return true;
+        int x = s_pen_x, y = s_pen_y, row_h = s_row_h;
+        if (outer_w > s_atlas_dim - x) { x = 0; y += row_h; row_h = 0; }
+        if (outer_h > s_atlas_dim - y) {
+            glb_flush(); // Submit old UVs before any reused pixel is overwritten.
+            s_cache.clear();
+            s_pen_x = s_pen_y = s_row_h = 0;
+            x = y = row_h = 0;
+        }
+        if (!text_detail::update_mask8(s_atlas, x, y, outer_w, outer_h, padded.data()))
+            return false;
+        out.u0 = float(x + 1) / s_atlas_dim;
+        out.v0 = float(y + 1) / s_atlas_dim;
+        out.u1 = float(x + 1 + w) / s_atlas_dim;
+        out.v1 = float(y + 1 + h) / s_atlas_dim;
+        s_pen_x = x + outer_w;
+        s_pen_y = y;
+        s_row_h = std::max(row_h, outer_h);
+        return true;
+    } catch (const std::bad_alloc&) { return false; }
 }
 
 static Glyph glyph_for(uint32_t cp, int px)
 {
     px = px < 1 ? 1 : px;
 
-    // 실제로 구울 크기. 논리 크기 × 화면 배율을 1/8 단위로 반올림한다.
-    const float scale_q = std::max(
-        1.0f, std::round(glb_render_scale() * kScaleQuantum) / kScaleQuantum);
-    const int dev_px = std::max(1, (int)std::lround((float)px * scale_q));
-
-    // 캐시 키에 굽는 크기까지 넣는다. 같은 22px 글자라도 창 배율이 다르면
-    // 다른 비트맵이므로 따로 보관해야 한다.
-    const uint64_t key = (uint64_t(cp) << 32) |
-                         (uint64_t(uint16_t(px)) << 16) | uint16_t(dev_px);
-    auto found = s_cache.find(key);
-    if (found != s_cache.end()) return found->second;
-
-    ensure_atlas();
+    const auto plan = font_raster::plan(cp, px, glb_render_scale());
+    if (plan) {
+        const auto found = s_cache.find(plan->key);
+        if (found != s_cache.end()) return found->second;
+    }
 
     Glyph glyph;
 
@@ -190,9 +147,18 @@ static Glyph glyph_for(uint32_t cp, int px)
     int left_bearing = 0;
     stbtt_GetCodepointHMetrics(&s_font, (int)cp, &advance, &left_bearing);
     glyph.advance = (float)advance * layout_scale;
+    if (!plan || !ensure_atlas()) return glyph;
+    const int dev_px = plan->device_height;
+    const uint64_t key = plan->key;
 
     // 비트맵만 확대된 크기로 굽는다.
     const float bake_scale = stbtt_ScaleForPixelHeight(&s_font, (float)dev_px);
+    // Reject unsupported bitmap extents before stb allocates their pixels.
+    int x0=0, y0=0, x1=0, y1=0;
+    stbtt_GetCodepointBitmapBox(&s_font, (int)cp, bake_scale, bake_scale, &x0, &y0, &x1, &y1);
+    const int64_t width = int64_t(x1) - x0, height = int64_t(y1) - y0;
+    if (width < 0 || height < 0 || width > s_atlas_dim - 2 || height > s_atlas_dim - 2)
+        return glyph;
     int bx = 0, by = 0;
     unsigned char* bitmap = stbtt_GetCodepointBitmap(
         &s_font, bake_scale, bake_scale, (int)cp,
@@ -205,9 +171,17 @@ static Glyph glyph_for(uint32_t cp, int px)
     glyph.xoff = (float)bx * inv;
     glyph.yoff = (float)by * inv;
 
+    // A non-empty outline can report dimensions even when bitmap allocation
+    // fails. Keep spacing, suppress drawing, and allow the next request to retry.
+    if (!bitmap && glyph.bw > 0 && glyph.bh > 0) {
+        glyph.bw = glyph.bh = 0;
+        return glyph;
+    }
     if (bitmap && glyph.bw > 0 && glyph.bh > 0) {
         if (!pack_glyph(bitmap, glyph.bw, glyph.bh, glyph)) {
-            glyph.bw = glyph.bh = 0;      // 자리 없음 — 그리지 않는다
+            glyph.bw = glyph.bh = 0;
+            stbtt_FreeBitmap(bitmap, nullptr);
+            return glyph; // Do not cache a failed upload; a later request may retry.
         }
     }
     if (bitmap) stbtt_FreeBitmap(bitmap, nullptr);
@@ -216,6 +190,8 @@ static Glyph glyph_for(uint32_t cp, int px)
 
 bool renderer_load_font(const char* path)
 {
+    // Submit queued quads before resetting atlas positions for another font.
+    glb_flush();
     s_font_ok = false;
     s_cache.clear();
     s_ttf.clear();
@@ -259,6 +235,7 @@ int measure_text(const char* text, int size)
 {
     if (!text || !*text || !s_font_ok) return 0;
     const int px = size < 1 ? 1 : size;
+    const float scale = stbtt_ScaleForPixelHeight(&s_font, (float)px);
     float line_width = 0.0f;
     float max_width = 0.0f;
     uint32_t previous = 0;
@@ -270,15 +247,20 @@ int measure_text(const char* text, int size)
             previous = 0;
             continue;
         }
-        const float scale = stbtt_ScaleForPixelHeight(&s_font, (float)px);
         if (previous)
             line_width += stbtt_GetCodepointKernAdvance(
                 &s_font, (int)previous, (int)cp) * scale;
-        line_width += glyph_for(cp, px).advance;
+        int advance = 0, bearing = 0;
+        stbtt_GetCodepointHMetrics(&s_font, (int)cp, &advance, &bearing);
+        line_width += advance * scale;
         previous = cp;
     }
     max_width = std::max(max_width, line_width);
-    return (int)std::floor(max_width + 0.5f);
+    // Measurement uses CPU metrics only; it must not allocate or recycle an atlas.
+    const double rounded = std::floor(double(max_width) + 0.5);
+    if (!(rounded < (std::numeric_limits<int>::max)()))
+        return (std::numeric_limits<int>::max)();
+    return int(rounded);
 }
 
 void draw_text(const char* text, int x, int y, int size, Color color)
@@ -325,6 +307,7 @@ void draw_text(const char* text, int x, int y, int size, Color color)
 void renderer_text_shutdown()
 {
     if (s_atlas) {
+        glb_before_texture_delete(s_atlas);
         gl_DeleteTextures(1, &s_atlas);
         s_atlas = 0;
     }

@@ -1,0 +1,368 @@
+{
+  "id": "lesson-39",
+  "title": "고스트: 원본 상태를 바꾸지 않는 예측",
+  "shortTitle": "착지 예측과 읽기 전용 조회",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 이동·고정·점수가 연결된 판에서 착지 위치는 직접 내려 보아야 알 수 있습니다.",
+  "finish": "완료: 원본 상태를 보존하는 착지 조회와 회색 고스트를 추가하고, 보드·블록 변경 뒤 표시를 갱신합니다.",
+  "objective": "수직 경로와 최종 배치를 구별하고, 값 복사·반복 불변식·종료 근거·캐시 갱신·GPU 제출 순서를 설명하고 검사합니다.",
+  "prerequisites": [
+    "38차시 체크포인트",
+    "한 행 낙하·배치 충돌·값 복사",
+    "보드 좌표·정점 버퍼·2D 그리기 순서"
+  ],
+  "validation": [
+    "Linux SCRIPTED31/SDL29 CTests·경고0·CPU 독립 링크·UBSan",
+    "337680 배치의 독립 경로 판정: 유효209608/무효128072, 장벽·거리0·좌표 범위·Round 조회 보존",
+    "66 SDL offscreen GL 프레임: 일곱 종류×세 배치+표시없음, 세 크기의 전체 RGB 오차≤2/255·24정점 저장소 대조",
+    "현재 SimGame 64시드 생성·입력·자연 고정·직접 낙하·드롭/가비지·배치 갱신, UBSan 통과",
+    "실제 게임 tetris 빌드·회귀 CTest5개 통과, 기존 sim_hash_dump 출력 동일",
+    "거리 누적 삭제 mutation Release 검출; native 게임 창·물리키·모니터·타 OS 미검증",
+    "CUA 데스크톱 목표/본문·즉시 해설·선택 해제/접힘·390px 본문과 표 확인, 뷰포트 원복"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 한정 초안 검토와 독립 좌표·상태·픽셀 검증",
+    "draftJob": "out/learning-jobs/039-ghost-events.jsonl",
+    "corrections": [
+      "clear 출발점이 항상 거리0 착지라는 초안 주석 수정",
+      "화면 scrollY 복원만으로는 문단이 보존되지 않는 UI 조언 교정",
+      "검사 모델의 인덱스와 실제 Kind ID를 명시적 표로 연결",
+      "경계 검사 준비 코드의 signed overflow를 제거하고 UBSan 재실행",
+      "current ghostColor 팔레트와 사용하지 않는 gray 상수를 구별",
+      "practice 누락으로 본문 렌더링이 중단되는 오류를 원고 생성 단계에서 거부",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "득점은 고정 사건에서 한 번 갱신하고 화면은 합계를 읽습니다.",
+      "점수·줄 수·레벨·중력 간격은 한 전이에서 정해진 순서로 확정합니다.",
+      "렌더링용 정점과 규칙 상태는 서로 다른 소유자가 관리합니다."
+    ],
+    "bridge": "이번에는 규칙을 진행하지 않는 조회로 착지 위치를 계산하고, 화면의 새 레이어에 연결하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "착지 위치를 보여 주려다가 블록을 떨어뜨린다면",
+      "body": "블록을 아래로 움직이는 함수는 이미 있습니다. 고스트를 그리려고 원본 active에 try_down을 반복 호출하면 어떤 일이 생길까요? 화면을 한 번 그리는 것만으로 실제 블록이 바닥에 도착합니다. Round::tick까지 반복하면 중력 시계·고정·행 제거·점수·다음 큐도 진행할 수 있습니다.\n\n고스트가 답할 질문은 더 좁습니다. **보드와 현재 모양·방향·열을 그대로 둔 채, 지금 위치에서 수직으로 내려가면 어디서 멈추는가?** 실제 시간을 진행하거나 블록을 고정하는 명령이 아닙니다. 원본 Piece를 값 복사한 뒤 복사본만 움직이고, 마지막 유효 배치와 이동한 행 수를 반환하겠습니다.\n\n예측이란 이름 때문에 미래의 모든 입력을 알아맞히는 기능으로 생각하지 마세요. 플레이어가 좌우로 움직이거나 회전하면 답도 바뀝니다. 이 함수의 결과는 계산할 때 받은 입력에 대한 조건부 결과입니다.",
+      "notes": [
+        {
+          "kind": "용어 구별",
+          "title": "명령과 조회",
+          "body": "명령은 소유한 상태를 바꾸라고 요청합니다. 조회는 현재 상태에서 정보를 얻습니다. 여기서는 tick이 명령이고 ghost가 조회입니다. 조회가 계산을 많이 한다고 명령이 되는 것은 아닙니다. 이 구분이 모든 프로그램에 특정 아키텍처나 프레임워크를 강제하지도 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "출발점·경로·도착점은 서로 다른 조건이다",
+      "body": "보드는 위에서 아래로 행 번호가 커집니다. T의 스폰 원점은 (0, 3)이고 점유 로컬 셀은 (0,1), (1,0), (1,1), (1,2)입니다. 장애물 하나를 보드 (10,4)에 놓아 봅시다.\n\n| T의 원점 행 | 가장 아래의 점유 행 | 결과 |\n| --- | --- | --- |\n| 0 | 1 | 출발 가능 |\n| 8 | 9 | 장애물 바로 위의 마지막 유효 배치 |\n| 9 | 10 | T의 아래 가운데 셀이 장애물과 겹침 |\n| 18 | 19 | 최종 배치만 검사하면 비어 있음 |\n\n원점 18의 배치가 비어 있다는 사실은 그곳까지 내려갈 수 있다는 뜻이 아닙니다. 원점 9에서 장애물을 통과해야 하기 때문입니다. 아래쪽에서 위로 빈 배치를 찾거나, 바닥 배치만 검사해서 답을 정하면 이 경로 조건을 놓칩니다.\n\n현재 위치에서 한 행씩 내려가며 모든 중간 배치를 검사합니다. 첫 실패 직전의 배치가 이번 수직 경로의 착지 위치입니다. 좌우 이동으로 장애물을 피해 들어가는 경로나 회전을 섞은 탐색은 이 함수가 푸는 문제가 아닙니다."
+    },
+    {
+      "title": "반환값으로 배치와 거리를 함께 묶는다",
+      "body": "Landing은 Piece와 distance를 함께 반환합니다. Piece는 로컬 셀 배열과 원점을 값으로 소유합니다. 복사된 배열은 원본 배열과 별개의 저장 공간을 가지므로 복사본의 원점을 바꾸어도 원본은 바뀌지 않습니다.\n\n결과형은 optional<Landing>입니다. 유효한 출발점인데 바로 아래가 막혔다면 distance가 0인 Landing을 반환합니다. 출발점 자체가 밖에 있거나 점유 셀과 겹치거나 좌표 변환이 불가능하면 nullopt를 반환합니다. ‘움직일 필요가 없다’와 ‘질문에 답할 수 없는 입력이다’를 분리합니다.\n\nboard와 start를 const 참조로 받는 것은 이 경로에서 원본을 변경하지 않겠다는 계약입니다.  여기서는 함수의 실제 의존성이 읽기용 보드와 입력 Piece, 지역 복사본에 한정되는지까지 확인합니다.",
+      "codes": [
+        {
+          "label": "결과는 빌린 참조가 아닌 값",
+          "language": "cpp",
+          "text": "struct Landing {\n    study_piece::Piece piece;\n    int distance = 0;\n};"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "소유권",
+          "title": "복사가 얕은지 깊은지는 멤버를 보고 판단한다",
+          "body": "이 Piece는 std::array와 정수만 소유합니다. 포인터를 가진 다른 타입을 복사하면 가리키는 대상을 공유할 수 있습니다. 현재 SimBlock은 map과 vector를 값으로 소유하므로 그 컨테이너 원소도 복사됩니다. ‘C++ 복사는 언제나 원본과 완전히 독립’이라는 일반화는 피합니다."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "const 참조와 순수 함수",
+          "body": "const 참조는 그 참조를 통한 변경을 제한합니다. 함수가 전역 상태를 읽거나 다른 별칭으로 값을 바꿀 가능성까지 없애 주지는 않습니다. 순수성을 판단하려면 함수의 전체 읽기·쓰기 의존성을 확인해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "한 칸 이동의 계약을 조합해 예측한다",
+      "body": "project는 출발 배치가 clear인지 먼저 검사합니다. 그다음 Landing과 이동용 cursor를 복사하고 try_down을 반복합니다. 이 함수는 시계를 받지 않고 한 행 이동만 판단합니다.\n\nmoved이면 cursor에는 검사를 통과한 새 위치가 들어 있습니다. 이를 landing.piece에 복사하고 거리를 하나 늘립니다. blocked이면 cursor를 변경하지 않았으므로 저장해 둔 마지막 유효 배치를 반환합니다. invalid는 정상 착지로 바꾸어 해석하지 않고 nullopt로 전달합니다.\n\n이 루프에는 rowOffset을 직접 더하는 코드가 없습니다. 한 행 이동과 정수 범위 검사를 이미 맡은 try_down의 계약을 재사용합니다. 반대로 tick은 Counter를 바꾸므로 목적이 맞지 않습니다. 함수를 고를 때 이름의 유사성보다 그 호출이 바꾸는 상태를 살펴보세요.",
+      "codes": [
+        {
+          "label": "예측 루프",
+          "language": "cpp",
+          "text": "inline std::optional<Landing> project(const study_grid::Grid& board,\n                                      const study_piece::Piece& start) noexcept {\n    // Only a cleanly placed piece may be projected. This rejects shapes that\n    // leave the board and shapes overlapping filled cells.\n    if (study_collision::classify(board, start) !=\n        study_collision::Placement::clear) {\n        return std::nullopt;\n    }\n\n    // A clear start already blocked below will return distance zero.\n    Landing landing{start, 0};\n    study_piece::Piece cursor = start;  // private copy; `start` stays const\n\n    for (int step = 0; step < study_grid::Grid::kRows; ++step) {\n        const study_movement::Result result =\n            study_gravity::try_down(board, cursor);\n        if (result == study_movement::Result::moved) {\n            landing.piece = cursor;  // try_down commits only on success\n            ++landing.distance;\n            continue;\n        }\n        if (result == study_movement::Result::blocked) {\n            return landing;  // obstacle reached: report the last valid landing\n        }\n        return std::nullopt;  // invalid: fail closed, change nothing\n    }\n\n    // Budget exhausted without a blocked result: fail closed rather than guess.\n    return std::nullopt;\n}\n"
+        },
+        {
+          "label": "simulation/ghost.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/39-ghost/simulation/ghost.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "루프가 끝난다는 근거를 코드와 함께 둔다",
+      "body": "루프 시작 시 cursor는 유효한 배치이고, landing.piece와 같은 위치입니다. moved 이후에도 한 행 이동의 성공 계약 때문에 이 조건이 유지됩니다. distance는 지금까지 성공한 이동 횟수입니다. blocked로 끝나면 현재 배치는 유효하지만 그 바로 아래 배치는 유효하지 않으므로 원하는 경로의 끝에 도달했습니다.\n\n종료도 설명할 수 있습니다. 모든 점유 셀이 0~19행에 있고 아래로만 움직입니다. 가장 아래 점유 행을 b라고 하면 바닥까지 성공할 수 있는 횟수는 최대 19-b입니다. 장애물이 있으면 더 일찍 멈춥니다. 따라서 최대 19번의 성공 뒤 한 번의 blocked를 확인하는 20회 시도로 충분합니다. 코드에서는 보드의 행 수인 Grid::kRows를 한도로 사용합니다.\n\n이 한도를 다 쓰고도 blocked를 얻지 못했다면 부분 결과를 착지라고 내보내지 않습니다. 한 행 이동의 계약이 깨졌을 가능성을 나타내는 nullopt로 종료합니다. 여기서는 정상 입력에서 필요한 반복 수를 근거로 제한한 것입니다.\n\n일반화한 보드 높이가 H, 점유 셀 수가 K라면 반복 한 번의 배치 검사는 O(K), 시도 수는 O(H)이므로 전체는 O(HK)입니다. K=4를 고정하면 높이에 대해 O(H)입니다. 현재 20×10 보드에서는 매우 작은 계산입니다. 보드 자체를 복사하지 않고 Piece만 복사하므로 추가 저장 공간은 O(K)입니다."
+    },
+    {
+      "title": "Round는 예측값을 저장하지 않고 필요할 때 만든다",
+      "body": "Round에는 이미 board와 active가 있습니다. 여기에 ghost를 또 영구 필드로 저장하면 board나 active가 바뀔 때마다 둘의 관계를 유지해야 합니다. 여기서는 읽기 함수 ghost()가 현재 값에서 계산해 반환하도록 하겠습니다.\n\n끝난 Round에는 active가 없으므로 nullopt를 반환합니다. 진행 중인 판에서는 active의 유효 배치 불변식 덕분에 정상적인 Landing을 얻습니다. 따라서 호출자는 active가 있는데 ghost가 없으면 계약 위반으로 처리하고, active도 없으면 표시할 고스트가 없다고 해석할 수 있습니다.\n\n반환된 Landing은 그 순간의 스냅샷입니다. 그 값을 변수에 보관해 놓고 Round를 움직여도 이미 받은 값이 저절로 최신화되지는 않습니다. 이 성질은 값 복사의 장점이자, 오래 보관한 값을 계속 그릴 때 주의할 점입니다.\n\nRound의 헤더에 `#include \"simulation/ghost.h\"`를 추가하고 아래 조회 함수를 public 영역에 둡니다. private 상태나 tick의 전이 순서는 바꾸지 않습니다.",
+      "codes": [
+        {
+          "label": "소유 상태를 읽는 조회 함수",
+          "language": "cpp",
+          "text": "    // Derived value, not another owner of game state. No clock or queue advances.\n    std::optional<study_ghost::Landing> ghost() const noexcept {\n        return active_ ? study_ghost::project(board_, *active_) : std::nullopt;\n    }\n\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "대안과 선택",
+          "title": "계산 결과를 캐시하려면 무엇을 기억해야 할까?",
+          "body": "캐시는 같은 계산의 결과를 저장해 다시 사용하는 방법입니다. 보드·모양·회전·위치가 결과에 영향을 주면 그중 어떤 값이 바뀌어도 이전 결과의 유효성을 다시 판단해야 합니다. 이 예제의 작은 O(HK) 계산에서는 추가 상태를 줄이는 설계가 이해하기 쉽습니다. 렌더 메시 갱신을 줄이는 캐시는 규칙의 원본 상태와 구별해 아래에서 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "회색 힌트도 같은 보드 좌표로 정점이 된다",
+      "body": "Landing의 Piece를 to_board로 네 개의 보드 셀로 바꾸고, make_visible_mesh로 사각형 정점을 만듭니다. 각 셀에 두 삼각형이 필요하므로 네 셀은 24정점입니다. 활성 블록과 같은 원점·셀 간격·레터박스 변환을 사용해야 크기 변경 후에도 위치가 맞습니다.\n\n표현을 구분할 정보는 조각 셰이더의 색입니다. 이번 힌트는 불투명 회색 RGBA=(0.5,0.5,0.5,1)입니다. 별도의 알파 합성 상태를 요구하지 않습니다. 반투명이라는 말은 회색과 같은 뜻이 아닙니다. 회색이어도 알파가 1이면 뒤의 색을 투과하지 않습니다.\n\nghost_view.h는 색만 정의하고, 정점 생성과 삼각형 제출은 기존 함수를 재사용합니다. 규칙 함수는 색·GL 핸들·창의 크기를 알 필요가 없습니다. 같은 Landing은 콘솔 표시나 봇의 관찰 데이터에도 사용할 수 있습니다.\n\n현재 게임의 기본 id=8은 `gray` 상수가 아니라 `ghostColor={200,200,210,70}`을 사용합니다. 이 경우에는 알파 합성으로 배경이 비칩니다. 강의의 불투명 회색은 이번에 추가할 상태를 줄인 표현 선택이며, 현재 앱의 색과 같다고 가정하지 않습니다. 합성 가중치를 복습하려면 [알파와 그리기 순서](#lesson-22)를 함께 보세요.",
+      "codes": [
+        {
+          "label": "renderer/ghost_view.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/39-ghost/renderer/ghost_view.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "겹칠 때 무엇이 보여야 할까?",
+      "body": "그리는 순서는 보드 → 고스트 → 활성 블록입니다. 보드 패스만 배경을 지우고, 그 위의 두 패스는 clear 없이 덧그립니다. 깊이 검사를 사용하지 않는 이 불투명 2D 경로에서는 같은 픽셀에 나중에 제출한 색이 남습니다.\n\n블록이 이미 착지 위치에 있으면 고스트와 활성 블록의 네 셀이 일치합니다. 먼저 회색으로 그린 뒤 청록색 활성 블록을 그리므로 사용자가 실제 블록을 볼 수 있습니다. 순서를 반대로 하면 활성 블록이 회색으로 덮여 ‘움직일 수 없는 고정 블록’처럼 오인될 수 있습니다.\n\ndistance가 0이라고 고정이나 게임 종료를 판정하지 않습니다. 고스트는 현재 입력 조건의 예측일 뿐입니다. 이 단계의 Round는 중력 시도가 blocked일 때 고정하므로 그 시도 전에는 좌우 입력 등으로 달라질 여지가 있습니다. 종료 상태에서는 active와 ghost를 모두 그리지 않고 기존 종료 표시를 유지합니다.",
+      "codes": [
+        {
+          "label": "같은 viewport 위에 그리는 순서",
+          "language": "cpp",
+          "text": "            if (!study_board_scene::render(gl,empty_program.name(),filled_program.name(),\n                    vertex_array.name(),vertex_buffer.vertex_count(),mesh.empty_vertices,*layout)) return 1;\n            if (ghost && !study_piece_view::render(gl,ghost_program.name(),ghost_array.name(),\n                                                   ghost_buffer.vertex_count())) return 1;\n            if (round.active() && !study_piece_view::render(gl,piece_program.name(),piece_array.name(),\n                                          piece_buffer.vertex_count())) return 1;"
+        }
+      ]
+    },
+    {
+      "title": "계산할 시점과 그릴 시점을 연결한다",
+      "body": "main은 처음에 round.ghost()를 구해 24정점을 고스트 VBO에 올립니다. 활성 블록이 있는 초기 상태에서 예측이 실패하면 진행하지 않습니다. 초기부터 종료된 판은 고스트 버퍼를 사용할 필요가 없습니다.\n\n한 화면을 그리기 전에 여러 규칙 틱을 처리할 수 있습니다. 그 틱 묶음에서 이동·회전·낙하·고정 중 하나라도 일어나면 piece_changed가 true가 됩니다. 묶음을 모두 처리한 뒤 최종 Round에서 예측을 한 번 구하고 동일 크기 버퍼를 교체합니다. 중간 상태를 전부 그리는 것이 목적은 아닙니다.\n\n고정 때는 단순히 현재 블록만 바뀌는 것이 아닙니다. 보드 기록·행 정리·새 스폰까지 마친 상태로 계산해야 합니다. 따라서 고정도 piece_changed에 포함합니다. 종료 시에는 ghost가 비어 다음 draw에서 제출하지 않습니다. waiting 틱은 Counter만 바뀌므로 현재 수직 경로의 착지 위치는 유지됩니다.\n\nVBO 이름과 VAO 연결을 계속 유지하고 저장된 정점만 바꿉니다. 이 표현용 캐시를 나중에 다른 규칙과 연결한다면, 예를 들어 고정 없이 보드를 수정하는 명령을 도입한다면, 그 명령도 갱신 신호를 내도록 확장해야 합니다. ‘piece_changed라는 이름이니까 블록 위치만 보면 된다’고 가정하면 안 됩니다.",
+      "codes": [
+        {
+          "label": "초기 예측·VBO·VAO·색 프로그램 준비",
+          "language": "cpp",
+          "text": "    auto ghost = round.ghost();\n    if (round.active() && !ghost) return 1;\n    study_gl::VertexBuffer ghost_buffer(gl);\n    study_gl::VertexArray ghost_array(gl);\n    study_gl::Program ghost_program(gl);\n    if (!study_board_scene::link_program(gl,ghost_program,study_ghost_view::fragment)) return 1;\n    if (ghost) {\n        const auto cells=study_piece::to_board(ghost->piece);\n        if (!cells) return 1;\n        const auto hint=study_piece_view::make_visible_mesh(*cells);\n        if (!ghost_buffer.upload(hint.vertices.data(),hint.count) ||\n            !ghost_array.configure(ghost_buffer.name())) return 1;\n    }"
+        },
+        {
+          "label": "변경된 규칙 상태에서 표시값 재계산",
+          "language": "cpp",
+          "text": "        // Recompute after the batch: board/pose can both change on a lock.\n        if (piece_changed) {\n            ghost = round.ghost();\n            if (round.active() && !ghost) return 1;\n            if (ghost) {\n                const auto cells=study_piece::to_board(ghost->piece);\n                if (!cells) return 1;\n                const auto hint=study_piece_view::make_visible_mesh(*cells);\n                if (!ghost_buffer.replace_same_size(hint.vertices.data(),hint.count)) return 1;\n            }\n        }\n"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/39-ghost/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "현재 SimGame의 고스트는 캐시다",
+      "body": "현재 SimGame은 ghostBlock을 멤버로 저장하고 GhostBlock()은 const 참조를 반환합니다. MakeGhostBlock은 현재 블록의 값 복사본에 id=8을 붙일 뿐, 착지 위치를 구하지 않습니다. DropExpectation이 현재 블록에서 복사본을 다시 만든 뒤 아래로 내려 착지 위치를 저장합니다.\n\n이 캐시를 유지하는 경계가 중요합니다. 생성자는 보드·현재 블록·다음 큐를 초기화한 뒤 예측을 구합니다. SubmitInput은 좌우·회전·드롭 처리가 끝나면 갱신합니다. LockBlock은 행 제거와 가비지 삽입을 마친 뒤 갱신합니다. 그러면 입력 없이 자연 낙하로 고정하거나 배치 수준 API를 사용해도 새 블록의 힌트가 준비됩니다.\n\n보드·회전·열이 그대로인 상태에서 한 행 아래로 자연 낙하에 성공하면 착지 위치 자체는 같습니다. 그래서 성공한 수직 이동마다 다시 계산할 필요는 없습니다. 반면 새로운 블록이 생성되거나 보드가 바뀌면 이 추론은 적용되지 않습니다.\n\nMakeGhostBlock만 호출하고 실제 낙하 계산을 미루면, 첫 화면 또는 고정 직후에 힌트가 스폰 위치에 남을 수 있습니다. 캐시를 쓰는 설계에서는 올바른 계산식만큼 ‘언제 다시 계산하는가’가 중요합니다. 현재 렌더 경로는 설정이 켜져 있고 게임이 진행 중일 때만 고스트를 그립니다. 고스트 값은 보드 셀에 쓰지 않으며 상태 해시의 규칙 데이터에도 포함하지 않습니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::DropExpectation()",
+        "invariant": "보드와 실제 블록을 바꾸지 않고 복사본의 수직 착지 위치를 계산한다.",
+        "mayDiffer": "현재는 SimBlock·id 8·캐시·기본 알파70/255, 강의는 optional<Landing> 값 조회와 불투명 회색을 사용한다.",
+        "omitted": "회전을 섞은 경로 탐색·봇 행동 선택·드롭 보상은 후속 단원에서 다룬다."
+      }
+    },
+    {
+      "title": "반복 조회가 상태를 바꾸지 않는지 관찰한다",
+      "body": "체크포인트 39-ghost는 38-score 전체에 ghost.h, Round::ghost, 회색 셰이더, 고스트 버퍼와 제출 패스를 추가합니다. 창 없이 착지 예측만 실행할 수 있는 ghost_demo도 함께 만듭니다.\n\n```sh\ncmake -S docs/learn/checkpoints/39-ghost -B out/study-39 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-39\n./out/study-39/ghost_demo\nctest --test-dir out/study-39 --output-on-failure\n```\n\n데모는 (10,4)에 장애물을 놓고 원점 (0,3)의 T를 세 번 조회합니다. 다음 한 줄이 세 번 출력됩니다.\n\n```text\nactive=0 ghost=8 distance=8 score=0 elapsed=0\n```\n\n조회 횟수가 늘어도 active·score·elapsed가 바뀌지 않아야 합니다. 고스트의 행이 계속 늘어나거나 큐가 소비된다면 조회 경로에서 실제 상태를 갱신하고 있는지 확인합니다. 이 출력은 일부 관찰값만 보여 줍니다. 검사 코드는 보드·활성 블록·큐·공급 위치·점수·레벨·중력·종료 사유까지 비교합니다.\n\nCMakeLists.txt 마지막에 다음 타깃을 추가합니다. ghost_demo와 ghost_contract는 헤더 경로와 C++17 요구만 전달하는 study_mesh에 연결합니다. SDL 또는 GL을 링크하지 않으므로 창을 열 수 없는 환경에서도 실행됩니다. ghost_probe만 SDL 분기에서 그래픽 라이브러리에 연결합니다.",
+      "codes": [
+        {
+          "label": "새 데모·검사 타깃 추가",
+          "language": "cmake",
+          "text": "add_executable(ghost_demo src/ghost_demo.cpp)\ntarget_link_libraries(ghost_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(ghost_contract tests/ghost_contract.cpp)\n    target_link_libraries(ghost_contract PRIVATE study_mesh)\n    add_test(NAME ghost_contract COMMAND ghost_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(ghost_probe tests/ghost_real.cpp)\n        target_link_libraries(ghost_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()"
+        },
+        {
+          "label": "src/ghost_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/39-ghost/src/ghost_demo.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/39-ghost/simulation/round.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "창에서 낙하와 겹침을 관찰한다",
+      "body": "SDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core 환경에서는 같은 누적 예제를 창으로 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/39-ghost -B out/study-39-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-39-sdl\n./out/study-39-sdl/tetris T normal\n```\n\n좌우 키는 한 번 누름당 한 칸, Up은 시계 방향 회전입니다. 청록색 블록 아래의 회색 힌트가 새 경로에 맞춰 달라지는지 봅니다. 블록이 내려오며 힌트와 겹치는 순간에도 청록색이 남아야 합니다. 바닥에 고정되면 주황색 보드가 바뀌고 새 블록의 힌트가 나타납니다.\n\ninitial-blocked 모드에서는 시작부터 종료되므로 고스트가 없어야 합니다. I four-clears는 I를 세로로 회전해 네 줄씩 제거하며 점수와 다음 힌트의 갱신을 함께 관찰할 수 있습니다. Escape 또는 창 닫기로 종료합니다. 다중 구성 빌드를 사용하면 실행 파일의 구성별 경로를 맞추세요.\n\n아래 두 그림은 힌트를 보기 쉽도록 보드·활성 블록·고스트만 그린 실험입니다. 첫 그림은 장애물 위의 예측이고, 둘째는 바닥에서 활성 블록과 고스트가 겹친 경우입니다. 본 게임의 점수·미리보기 패스는 그대로 유지됩니다.\n\n![장애물 위에서 멈추는 회색 T 고스트와 위쪽의 청록색 활성 T](data:image/png;base64,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)\n\n![빈 보드 바닥에서 고스트 위에 청록색 활성 T가 덮인 모습](data:image/png;base64,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)"
+    },
+    {
+      "title": "예상값을 다른 방식으로 만들어 검사한다",
+      "body": "project를 검사하는 테스트가 같은 try_down을 반복해 정답을 계산하면, 두 경로가 같은 오류를 공유할 수 있습니다. 비교용 모델은 종류별 비트 마스크와 보드의 bool 배열을 사용하고, 스칼라 좌표로 점유와 경계를 검사합니다. 같은 출력 계약을 다른 표현으로 계산해 대조합니다.\n\n빈 보드와 한 셀 장애물의 모든 위치, 일곱 종류, 여러 출발 행·열을 조합합니다. 유효한 출발점이면 마지막 유효 배치·이동 거리·그 아래의 막힘을 확인합니다. 출발점이 잘못됐으면 nullopt여야 합니다. 별도로 장애물 아래에 비어 있는 배치가 있어도 통과하지 못하는 반례를 둡니다.\n\n조회 보존 검사는 Round의 관찰 가능한 상태를 복사해 여러 차례 ghost()를 호출한 뒤 비교합니다. 메모리 전체를 memcmp하는 대신 의미 있는 필드를 비교해야 padding이나 객체 표현 때문에 잘못된 결론을 내리지 않습니다.\n\nGPU 검사는 CPU가 만든 정점 저장소와 실제 읽은 픽셀을 나누어 확인합니다. 고스트가 맞는 위치에 있어도 활성 블록 뒤에 그리지 않으면 겹침 색이 틀립니다. 그러므로 위치·버퍼 갱신·제출 순서 각각에 다른 기대값을 두는 편이 오류를 좁히는 데 도움이 됩니다.",
+      "codes": [
+        {
+          "label": "tests/ghost_contract.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/39-ghost/tests/ghost_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "39-1",
+      "question": "T의 원점이 (0,3)이고 장애물은 (10,4)입니다. 원점 행 18의 최종 배치는 비어 있습니다. project의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "18행·거리 18"
+        },
+        {
+          "id": "b",
+          "text": "8행·거리 8"
+        },
+        {
+          "id": "c",
+          "text": "9행·거리 9"
+        },
+        {
+          "id": "d",
+          "text": "최종 배치가 비어 있으므로 nullopt"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "8행·거리 8",
+      "explanation": "아래 셀이 원점+1행에 있습니다. 원점 9에서 장애물과 겹치므로 마지막 유효 원점은 8입니다. 18행의 비어 있음만으로 그곳까지 가는 수직 경로가 열려 있다고 판단할 수 없습니다."
+    },
+    {
+      "id": "39-2",
+      "question": "출발 배치는 유효하지만 바로 한 행 아래가 막혀 있습니다. 반환해야 할 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "nullopt"
+        },
+        {
+          "id": "b",
+          "text": "거리 1인 Landing"
+        },
+        {
+          "id": "c",
+          "text": "현재 위치·거리 0인 Landing"
+        },
+        {
+          "id": "d",
+          "text": "고정 후 다음 블록의 Landing"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "현재 위치·거리 0인 Landing",
+      "explanation": "첫 이동 시도가 blocked이면 출발점 자체가 마지막 유효 배치입니다. 이동 거리 0은 정상 결과이며, nullopt는 잘못된 입력 등으로 답을 구할 수 없는 경우입니다. 고정과 새 스폰은 조회가 수행하지 않습니다."
+    },
+    {
+      "id": "39-3",
+      "question": "Landing을 값으로 받아 두고 Round를 오른쪽으로 움직였습니다. 저장해 둔 Landing은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "조회 당시 위치를 유지한다"
+        },
+        {
+          "id": "b",
+          "text": "새 active의 열로 자동 갱신된다"
+        },
+        {
+          "id": "c",
+          "text": "참조가 무효화돼 읽을 수 없다"
+        },
+        {
+          "id": "d",
+          "text": "보드를 원래 상태로 되돌린다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "조회 당시 위치를 유지한다",
+      "explanation": "값으로 받은 결과는 독립적인 스냅샷입니다. Round의 새 상태에 대한 힌트가 필요하면 다시 조회해야 합니다. 값 복사는 갱신 구독이나 빌린 참조가 아닙니다."
+    },
+    {
+      "id": "39-4",
+      "question": "고스트와 active의 네 셀이 일치하며 불투명 2D 패스를 사용합니다. active가 회색으로 덮였습니다. 가장 직접적인 수정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "보드를 회색으로 바꾼다"
+        },
+        {
+          "id": "b",
+          "text": "조회마다 점수를 초기화한다"
+        },
+        {
+          "id": "c",
+          "text": "고스트 계산에 Round::tick을 쓴다"
+        },
+        {
+          "id": "d",
+          "text": "보드→고스트→active 순서로 제출한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "보드→고스트→active 순서로 제출한다",
+      "explanation": "같은 픽셀에서는 나중에 제출한 불투명 색이 남습니다. 보드 뒤에 고스트를 그리고 마지막에 active를 그려야 실제 블록의 청록색이 유지됩니다. 규칙과 점수를 바꿀 이유는 없습니다."
+    },
+    {
+      "id": "39-5",
+      "question": "고스트를 멤버로 캐시하며 SubmitInput 끝에서만 착지를 계산합니다. 자연 중력으로 고정된 직후 힌트가 새 스폰 위치에 남습니다. 필요한 보강은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "프레임마다 다음 큐를 소비한다"
+        },
+        {
+          "id": "b",
+          "text": "행 정리·가비지·새 스폰이 확정되는 경계에서도 계산한다"
+        },
+        {
+          "id": "c",
+          "text": "고스트를 보드에 미리 기록한다"
+        },
+        {
+          "id": "d",
+          "text": "자연 중력 간격을 더 짧게 한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "행 정리·가비지·새 스폰이 확정되는 경계에서도 계산한다",
+      "explanation": "입력 호출이 없어도 LockBlock으로 새 블록과 보드가 만들어집니다. 최종 보드를 기준으로 캐시를 갱신해야 합니다. 큐 소비나 고스트의 보드 기록은 예측 조회를 실제 게임 상태 변경으로 잘못 연결합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "T와 (10,4) 장애물의 경로를 표로 그려 마지막 유효 원점을 예측한다.",
+      "ghost_demo를 실행하고 세 번의 조회에서 active·점수·시계가 그대로인지 확인한다.",
+      "고스트가 이미 active와 겹치는 거리0 결과와 nullopt를 구별한다.",
+      "창에서 좌우·회전 후의 힌트, 바닥 겹침 색, 고정 후 새 힌트를 관찰한다.",
+      "현재 DropExpectation의 호출 지점을 찾아 초기화·입력·행 정리/가비지 뒤 캐시 갱신을 설명한다."
+    ],
+    "expected": "실제 규칙 상태를 바꾸지 않고 현재 수직 경로의 마지막 유효 배치를 표시한다.",
+    "failureChecks": [
+      "최종 위치만 검사해 중간 장애물을 통과시키지 않는가?",
+      "고스트를 구하려고 원본 active나 Round::tick을 호출하지 않는가?",
+      "distance 0을 실패 또는 고정 명령으로 오해하지 않는가?",
+      "보드 변경 후 오래된 캐시를 계속 사용하지 않는가?",
+      "고스트를 active 뒤에 그려 실제 블록을 가리지 않는가?"
+    ]
+  }
+}

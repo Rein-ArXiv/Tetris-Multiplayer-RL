@@ -1,0 +1,394 @@
+{
+  "id": "lesson-94",
+  "title": "하트비트: 무응답과 연결 종료",
+  "shortTitle": "요청 대응·경과 시간·장애 감지의 한계",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 통신 워커는 종료·오류를 관찰하지만 조용한 연결에 대한 무응답 정책은 없습니다.",
+  "finish": "완료: PING/PONG을 워커에서 처리하고 유효한 요청 응답과 로컬 시간으로 대기·확인·만료를 구분합니다.",
+  "objective": "관찰한 응답과 장애 원인을 구별하고, 토큰 코덱·순수 타이머·워커 연결·실패 검사를 구현합니다.",
+  "prerequisites": [
+    "소켓 단일 소유 워커와 값 큐",
+    "고정 길이 wire 코덱과 후보 검증",
+    "steady_clock·반쪽 종료·부분 송신"
+  ],
+  "recap": {
+    "points": [
+      "워커는 소켓과 파서를 소유하고 main은 규칙 상태를 소유합니다.",
+      "큐 접수와 원격 처리 완료는 다릅니다.",
+      "정상 소진·취소·과부하 종료를 구별합니다."
+    ],
+    "bridge": "이 소유권 경계 안에서 통신 제어 경로가 일정 시간 응답하는지 관찰합니다."
+  },
+  "sections": [
+    {
+      "title": "연결 핸들이 남아 있어도 응답은 멈출 수 있다",
+      "body": "상대가 정상 종료하면 recv가 EOF를 반환할 수 있습니다. 그러나 케이블이 빠지거나 경로 중간에서 패킷이 버려지면 당장 EOF나 오류를 관찰하지 못할 수 있습니다. 유효한 소켓을 소유하고 있다는 사실과 상대 애플리케이션에서 응답을 받았다는 사실은 다릅니다.\n\n하트비트는 주기적인 요청과 그 요청에 대한 응답으로 관찰 지점을 만듭니다. 이번에는 PING에 번호를 넣고 PONG이 같은 번호를 돌려주는 규약을 추가합니다. 기다릴 시간을 넘기면 응답이 확인되지 않았다는 이유로 연결을 종료합니다.\n\n이것은 장애 감지 정책입니다. ‘상대가 죽었다’는 사실을 증명하는 기계는 아닙니다. 상대의 처리 지연, 네트워크 지연, 우리의 워커 지연이 모두 응답 관찰을 늦출 수 있습니다. 유한한 대기 시간을 선택하면 늦게 살아 돌아온 상대도 종료 대상이 될 수 있습니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "LinkStatus Session::linkStatus",
+        "invariant": "관찰한 경과 시간에 따라 대기·종료 정책을 적용한다.",
+        "mayDiffer": "현재 게임은 연결 상태별 시간 제한과 추가 복귀 유예를 사용한다. 기준 워커는 실습에 정한 요청 주기와 만료 시간으로 상태 전이를 관찰한다."
+      }
+    },
+    {
+      "title": "어느 실행 경로의 응답인지 먼저 정한다",
+      "body": "PING을 main에서 받고 main이 PONG을 만들면 게임 루프가 오래 멈춘 상황도 응답 지연에 포함됩니다. 반대로 통신 워커가 직접 답하면 main이 멈춰 있어도 PONG은 돌아올 수 있습니다. 어느 방식이 더 옳은지보다 무엇을 관찰하려는지 먼저 정해야 합니다.\n\n이번 구현은 ThreadLink의 워커가 PING/PONG을 처리합니다. 제어 프레임은 main의 8칸 수신 큐에 넣지 않으므로 main이 잠시 큐를 읽지 않아도 응답을 만들 수 있습니다. 게임 입력과 해시는 계속 main으로 전달합니다.\n\n따라서 PONG은 통신 제어 경로가 요청을 처리했다는 최근 관찰입니다. 상대의 보드가 다음 틱으로 진행했는지, 렌더러가 화면을 갱신했는지, 플레이어가 실제로 조작 중인지는 별도 정보입니다.",
+      "codes": [
+        {
+          "label": "같은 프로세스 안에서도 관찰 경로가 다르다",
+          "language": "text",
+          "text": "main 정지:   INPUT 생성·규칙·그리기가 지연될 수 있음\nI/O 진행:    PING 수신 → PONG 응답은 계속 가능\n관찰 결과:   통신 응답 있음 + 게임 진행 없음\n판단:        PONG만으로 규칙 진행을 대신 확인하지 않는다"
+        }
+      ]
+    },
+    {
+      "title": "상대 시계 대신 우리가 보낸 토큰을 돌려받는다",
+      "body": "기준 규약의 TYPE30은 PING, TYPE31은 PONG입니다. payload는 0이 아닌 u64 토큰 하나를 리틀엔디언으로 담은 8바이트입니다. 토큰은 연결 안에서 1,2,3…으로 증가하며, 응답자는 내용을 자기 시각으로 바꾸지 않고 그대로 돌려줍니다.\n\n서로 다른 컴퓨터의 steady_clock 값은 공통 기준점을 약속하지 않습니다. 따라서 상대 시각을 우리 시각에서 빼는 방식으로 지연을 계산하지 않습니다. 지연을 측정하려면 우리가 요청을 기록한 로컬 시각과 같은 요청의 응답을 관찰한 로컬 시각을 사용합니다.\n\n토큰은 요청과 응답을 짝짓는 번호입니다. 상대는 토큰을 보고 에코할 수 있고 이번 번호는 예측도 가능하므로 인증 수단이 아닙니다. 토큰 값만 맞는다고 상대의 신원이나 게임 결과를 신뢰할 수는 없습니다.",
+      "codes": [
+        {
+          "label": "후보를 만든 뒤 완성된 PING/PONG을 공개한다",
+          "language": "cpp",
+          "text": "inline bool encode_beat(bool pong, std::uint64_t token, Frame& out) noexcept {\n  if (token == 0) {\n    return false;\n  }\n  Frame candidate{};\n  candidate.type = pong ? kBeatTypePong : kBeatTypePing;\n  ByteWriter writer(candidate.payload.data(), candidate.payload.size());\n  if (!writer.u64(token)) {\n    return false;\n  }\n  candidate.size = kBeatPayloadBytes;\n  out = candidate;\n  return true;\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "잘못된 응답은 건강 시각을 바꾸지 않는다",
+      "body": "프레임 종류, 정확한 길이, 0이 아닌 토큰을 확인한 뒤에만 출력을 갱신합니다. payload가 7바이트면 토큰이 잘린 것이고, 9바이트면 우리가 정한 제어 메시지 규약과 다릅니다. 두 경우 모두 거절합니다.\n\n문법적으로 유효한 PONG이어도 우리가 기다리는 토큰과 다르면 최근 응답으로 세지 않습니다. 동일 토큰의 첫 응답을 소비한 다음 재전송된 복사본도 건강 시각을 다시 갱신하지 않습니다. 요청과 관계없는 PONG을 계속 보내 무응답 판정을 미루는 경계를 막기 위해서입니다.",
+      "codes": [
+        {
+          "label": "타입·길이·토큰을 모두 검사한다",
+          "language": "cpp",
+          "text": "inline bool decode_beat(const Frame& frame, bool& pong,\n                        std::uint64_t& token) noexcept {\n  if (frame.type != kBeatTypePing && frame.type != kBeatTypePong) {\n    return false;\n  }\n  if (frame.size != kBeatPayloadBytes) {\n    return false;\n  }\n  ByteReader reader(frame.payload.data(), frame.size);\n  std::uint64_t candidate = 0;\n  if (!reader.u64(candidate)) {\n    return false;\n  }\n  if (candidate == 0) {\n    return false;\n  }\n  pong = (frame.type == kBeatTypePong);\n  token = candidate;\n  return true;\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "case MsgType::PONG",
+        "invariant": "응답의 문법과 미소비 요청의 상관관계를 확인한다.",
+        "mayDiffer": "현재 게임은 용량을 제한한 timestamp 토큰 창을 사용하며 잘못된 응답을 무시한다. 기준은 잘못된 제어 프레임 문법에서 연결을 끝낸다."
+      }
+    },
+    {
+      "title": "시간은 입력으로 받아 경계를 직접 실험한다",
+      "body": "Heartbeat는 OS 시계를 직접 읽지 않습니다. 생성 시점과 각 호출의 now를 밀리초 정수로 받습니다. 이렇게 하면 테스트에서 1999,2000,2999,3000을 차례로 넣어 임계값의 포함 관계를 검사할 수 있습니다. 실제로 몇 초씩 기다리는 테스트에만 의존하지 않습니다.\n\n기본 정책은 interval=1000, suspect=2000, timeout=3000입니다. 시작부터 첫 확인 응답까지는 waiting, 확인 응답 후 최근이면 healthy, 마지막 확인 또는 시작 유예부터 2000ms 이상이면 suspect, 3000ms 이상이면 expired입니다. timeout 경계는 포함합니다.\n\nnow가 뒤로 가면 clock_error를 반환하고 객체는 바꾸지 않습니다. 순서가 맞을 때만 now-last_good를 계산하므로 unsigned 뺄셈이 음수 경과를 거대한 양수로 바꾸지 않습니다. 만료는 고정됩니다. 이 객체의 만료 뒤에 도착한 PONG이 연결을 되살리지는 않습니다.\n\n이번 ThreadLink는 이 중 expired를 종료 사유로 사용합니다. suspect를 main의 UI에 전달하는 API는 아직 추가하지 않았으며, 시간 정책 자체의 검사에서 구분해 관찰합니다.",
+      "codes": [
+        {
+          "label": "시간 판정과 상태 변화",
+          "language": "cpp",
+          "text": "BeatHealth status(std::uint64_t now) noexcept {\n    if (now < last_now_) {\n      return BeatHealth::clock_error;\n    }\n    last_now_ = now;\n    if (expired_) {\n      return BeatHealth::expired;\n    }\n    const std::uint64_t since_good = now - last_good_;\n    if (since_good >= timing_.timeout) {\n      expired_ = true;\n      return BeatHealth::expired;\n    }\n    if (since_good >= timing_.suspect) {\n      return BeatHealth::suspect;\n    }\n    return confirmed_ ? BeatHealth::healthy : BeatHealth::waiting;\n  }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "처음 waiting은 확인 성공이 아니다",
+          "body": "처음 2초의 유예는 아직 응답이 없더라도 바로 실패 처리하지 않는 정책입니다. healthy와 구분하면 화면에서 처음 연결을 확인 중인 상태를 표현할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "한 요청이 남아 있을 때 번호를 계속 바꾸지 않는다",
+      "body": "PING(1)을 보낸 뒤 아직 PONG(1)을 기다리는 동안 새 번호로 덮어쓰면, 늦게 돌아온 정상 응답도 현재 번호와 다르다는 이유로 무시할 수 있습니다. 기준 타이머는 미응답 요청을 한 개만 유지합니다.\n\nissue는 만료·역행 시각·미응답 요청·주기 미도달을 확인합니다. 모두 통과하면 토큰을 기록하고 다음 번호를 준비합니다. 거절하면 출력 토큰은 그대로 둡니다. 단, now가 전진했다면 내부 시간 관찰과 만료 판정은 진행될 수 있습니다.\n\n번호가 u64 최댓값에 닿으면 다음 번호를 0으로 표시해 더 발급하지 않습니다. 1로 되돌려 오래된 응답과 다시 충돌시키지 않습니다. 실용적인 실행 시간과 별개로 순환 정책을 코드에서 명시해 둡니다.\n\nwire에서 0을 금지했으므로 pending=0은 미응답 요청 없음으로 사용할 수 있습니다. 일반 해시처럼 0도 유효한 값인 자료에서는 이 표시를 그대로 사용할 수 없습니다.",
+      "codes": [
+        {
+          "label": "접수 시점과 미응답 토큰을 기록한다",
+          "language": "cpp",
+          "text": "bool issue(std::uint64_t now, std::uint64_t& out) noexcept {\n    if (!usable(status(now))) {\n      return false;\n    }\n    if (pending_ != 0) {\n      return false;\n    }\n    if (next_token_ == 0) {\n      return false;\n    }\n    if (sent_ && (now - last_sent_) < timing_.interval) {\n      return false;\n    }\n    const std::uint64_t token = next_token_;\n    pending_ = token;\n    last_sent_ = now;\n    sent_ = true;\n    next_token_ = (token == (std::numeric_limits<std::uint64_t>::max)())\n                      ? std::uint64_t{0}\n                      : token + 1;\n    out = token;\n    return true;\n  }\n"
+        }
+      ]
+    },
+    {
+      "title": "응답 확인과 만료가 같은 시각이면 누가 이기는가",
+      "body": "pong은 먼저 status(now)를 호출합니다. 정확히 만료 시각에 도착한 응답은 이미 만료된 것으로 거절합니다. 이 순서를 바꾸면 같은 시간 값인데도 어떤 API를 먼저 호출했는지에 따라 연결이 살아날 수 있습니다.\n\n유효한 응답은 pending을 비우고 last_good를 응답 관찰 시각으로 갱신합니다. 다음 요청 주기는 마지막 발급 시각을 기준으로 확인합니다. timeout은 각 요청마다 별도로 3초를 새로 주는 방식이 아니라 마지막 확인 또는 시작 유예부터 3초입니다.\n\n예를 들어 시작 0에서 토큰1을 발급하고 100에서 확인하면 last_good=100입니다. 토큰2는 1000부터 발급할 수 있고, 응답을 계속 못 받으면 3100에서 만료합니다. 토큰2를 발급했다고 마감이 4000으로 늘어나지 않습니다.",
+      "codes": [
+        {
+          "label": "같은 토큰을 한 번만 소비한다",
+          "language": "cpp",
+          "text": "bool pong(std::uint64_t token, std::uint64_t now) noexcept {\n    if (!usable(status(now))) {\n      return false;\n    }\n    if (pending_ == 0 || token != pending_) {\n      return false;\n    }\n    pending_ = 0;\n    last_good_ = now;\n    confirmed_ = true;\n    return true;\n  }\n"
+        },
+        {
+          "label": "시간 경계를 손으로 따라간다",
+          "language": "text",
+          "text": "0     issue(1): waiting\n100   pong(1): healthy, last_good=100\n1000  issue(2): last_good는 여전히100\n2100  suspect\n3099  pong(2)가 오면 확인 가능\n3100  아직 미확인이라면 expired; 그 시각의 pong도 거절"
+        }
+      ]
+    },
+    {
+      "title": "워커 시계와 부분 송신 루프에 연결한다",
+      "body": "ThreadLink 생성자의 heartbeat 옵션을 켜면 워커가 시작한 steady_clock 시점을 원점으로 삼아 경과 밀리초를 전달합니다. 잘못된 BeatTiming은 스레드를 시작하기 전에 거절합니다. 옵션 기본값은 false라서 단순 프레임 전송 실험의 규약은 유지됩니다.\n\n루프 상단에서 만료를 검사하고 heartbeat_timeout으로 끝냅니다. 현재 부분 송신이 남아 있으면 그 프레임을 먼저 마칩니다. 다음 프레임을 고르는 경계에서 대기 중인 PONG 응답, 발급할 PING, 일반 송신 큐 순으로 선택합니다. 이미 일부 바이트를 보낸 일반 프레임 중간에 PONG 바이트를 끼우면 프레임 경계를 깨뜨립니다.\n\nissue 시각은 워커가 송신 경로에 접수한 시각입니다. OS가 실제 마지막 바이트를 받은 시각과 다를 수 있습니다. 전체 무응답 판정에는 로컬 처리와 송신 대기도 포함됩니다. 늦은 원인을 상대에게만 돌릴 수 없는 이유입니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "pendingPongs_.remember",
+        "invariant": "요청 기록과 실제 송신 완료의 시점을 구분한다.",
+        "mayDiffer": "현재 게임은 sendQ에 넣을 timestamp를 기록한다. 기준 워커는 다음 부분 송신 버퍼를 정할 때 번호를 발급한다."
+      },
+      "codes": [
+        {
+          "label": "타이밍을 검증한 뒤 워커를 시작한다",
+          "language": "cpp",
+          "text": "ThreadLink::ThreadLink(Socket socket, bool heartbeat, BeatTiming timing) {\n    if (heartbeat && !timing.valid()) throw std::invalid_argument(\"heartbeat timing\");\n    worker_ = std::thread([this, owned = std::move(socket), heartbeat, timing]() mutable {\n          const LinkReport result = run(owned, heartbeat, timing);\n          owned.reset(); // Close in the owning thread, before publishing completion.\n          outbound_.close();\n          inbound_.close(); // Already queued frames can still be drained.\n          std::lock_guard<std::mutex> lock(report_mutex_);\n          report_ = result;\n      });\n}\n"
+        },
+        {
+          "label": "부분 프레임 경계에서 다음 송신을 선택한다",
+          "language": "cpp",
+          "text": "QueueGet got = QueueGet::empty;\n            std::uint64_t token = 0;\n            if (reply) {\n                frame = *reply;\n                reply.reset();\n                got = QueueGet::item;\n            } else if (heartbeat && watch.issue(milliseconds(), token)) {\n                if (!encode_beat(false, token, frame)) return {LinkEnd::protocol_error};\n                got = QueueGet::item;\n            } else got = outbound_.try_pop(frame);"
+        }
+      ]
+    },
+    {
+      "title": "제어 프레임은 워커 안에서 소비한다",
+      "body": "수신 파서가 완성한 프레임이 PING/PONG이면 워커가 직접 처리합니다. PONG은 타이머에 전달하고 확인 성공 횟수만 atomic으로 공개합니다. PING은 동일 토큰의 PONG 프레임으로 바꿔 대기 슬롯에 넣습니다. 일반 입력·해시 프레임은 수신 큐로 보냅니다.\n\n대기 응답 슬롯도 무한히 늘리지 않습니다. 응답 하나가 아직 대기 중인데 상대가 새 PING을 밀어 넣으면 receive_full로 종료합니다. 이것은 작은 기준 구현의 정책이며 임의 트래픽을 모두 받아 처리한다는 약속이 아닙니다. 잦은 제어 메시지에 대한 별도 빈도 제한은 또 다른 정책입니다.\n\n응답이 없는 동안 상대의 PING이나 일반 데이터가 와도 우리 요청의 확인으로 세지 않습니다. 어느 방향이 진행되는지와 요청 왕복이 완료됐는지를 섞지 않습니다. 송신 방향을 닫은 뒤 들어온 PING에는 더 응답할 수 없고, 상대 EOF를 기다리는 동안 만료 정책은 계속 적용됩니다.",
+      "codes": [
+        {
+          "label": "제어 프레임은 워커가, 게임 프레임은 main이 소비한다",
+          "language": "cpp",
+          "text": "if (heartbeat && (frame.type == kBeatTypePing || frame.type == kBeatTypePong)) {\n                    bool pong = false;\n                    std::uint64_t token = 0;\n                    if (!decode_beat(frame, pong, token)) return {LinkEnd::protocol_error};\n                    if (pong) {\n                        if (watch.pong(token, milliseconds())) pongs_.fetch_add(1);\n                    } else if (!send_closed) {\n                        // One bounded pending echo; a peer exceeding it fails explicitly.\n                        if (reply) return {LinkEnd::receive_full};\n                        Frame echo;\n                        if (!encode_beat(true, token, echo)) return {LinkEnd::protocol_error};\n                        reply = echo;\n                    }\n                } else if (inbound_.try_push(frame) != QueuePut::stored)\n                    return {LinkEnd::receive_full};"
+        }
+      ]
+    },
+    {
+      "title": "하트비트 종료와 정상 종료는 사유가 다르다",
+      "body": "heartbeat_timeout은 시간 정책에 따른 실패입니다. 프레임 잘림·잘못된 길이·I/O 오류·수신 과부하와 각각 구분해 보고합니다. 사용자에게는 응답을 확인하지 못했다는 표현을 사용하고, 로그에는 구체적인 종료 사유를 남길 수 있습니다.\n\n정상 종료는 송신 큐를 닫아 남은 프레임을 전송한 뒤 반쪽 종료하고 상대 EOF도 확인하는 흐름입니다. 이번 실행 도구는 약 600ms 동안 짧은 하트비트를 교환한 뒤 TYPE32·빈 payload의 실험 완료 표시를 보내고 이 흐름을 수행합니다. 이는 게임의 승패 판정 메시지가 아닙니다.\n\n취소는 main의 요청에 따라 남은 전송을 포기할 수 있습니다. 정상 완료, 무응답 만료, 사용자의 중단을 같은 성공 상태로 합치면 나중에 재접속·안내·진단 정책을 고르기 어렵습니다."
+    },
+    {
+      "title": "실제 게임의 응답 창과 화면 문구를 읽는다",
+      "body": "현재 Session은 주기적으로 timestamp 요청을 발급하고 용량이 제한된 PongWindow에 보관합니다. 응답이 와도 ready 상태·프로토콜이 정한 payload 크기·미소비 토큰·허용된 응답 나이를 모두 만족해야 lastPongMs를 갱신합니다. 같은 토큰의 재사용과 미요청 응답은 갱신하지 않습니다. 연결 안에서 마지막 발급 시각 이하의 토큰을 다시 발급하지 않으므로, 빠른 상태 재설정으로 같은 밀리초 값이 반복돼도 소비한 요청이 다시 유효해지지 않습니다.\n\n창을 넘는 오래된 요청은 덮어씁니다. 이는 제한된 최근 요청의 확인을 위한 구조이며 모든 요청 결과를 보존하는 이벤트 로그가 아닙니다. ioThread가 창을 소유하고 시작 때 초기화합니다. main은 atomic 건강 시각만 읽습니다.\n\n현재 LinkStatus는 Lost 이후라도 유예 중 유효한 응답이 돌아오면 회복할 수 있습니다. 기준 Heartbeat의 고정 만료와 다른 정책입니다. 화면의 Waiting for peer response와 Peer response lost도 관찰한 응답 상태를 표현합니다. PONG만으로 ‘상대 창이 얼었다’거나 ‘상대가 종료했다’고 판정하지 않습니다.",
+      "reference": {
+        "path": "net/pong_window.h",
+        "symbol": "bool consume",
+        "invariant": "이미 확인한 토큰을 다시 사용해 건강 시각을 연장하지 않는다.",
+        "mayDiffer": "현재 게임은 보관한 timestamp와 응답 나이를 검사한다. 기준은 단일 증가 토큰과 고정 만료다."
+      }
+    },
+    {
+      "title": "TCP keepalive와 애플리케이션 하트비트의 범위",
+      "body": "TCP keepalive는 운영체제의 TCP 연결 계층에서 동작합니다. 응답 경로의 일부 문제를 발견하는 데 도움이 되지만, 게임 규칙이나 우리의 PONG 처리 함수가 실행되는지는 직접 확인하지 않습니다. 활성화 여부와 시간 설정도 운영체제·소켓 옵션에 따라 달라집니다.\n\n애플리케이션 PING/PONG은 우리가 정의한 처리 경로를 왕복합니다. 이번에는 I/O 워커까지이며 main의 게임 진행은 포함하지 않습니다. 두 기법은 같은 기능을 중복해서 넣은 것이 아니라 서로 다른 관찰 범위를 가진 수단으로 사용할 수 있습니다.\n\n유예를 길게 하면 일시 지연을 덜 끊지만 실제로 응답하지 않는 연결도 오래 남습니다. 짧게 하면 빠르게 정리하지만 스케줄링 정지나 일시 혼잡을 실패로 볼 가능성이 커집니다. 적절한 수치는 실제 환경의 지연 분포와 사용자 경험을 관찰해 정합니다."
+    },
+    {
+      "title": "작은 시간 입력과 실제 통신을 함께 검사한다",
+      "body": "시간 정책은 가짜 now 값으로 경계 직전·정확한 경계·역행 시각을 검사합니다. 코덱은 모든 TYPE 값과 길이 0~39를 확인합니다. 요청과 맞지 않는 번호, 같은 응답 반복, 미요청 응답이 건강 시각을 늘리지 않는지도 확인합니다.\n\nheartbeat_contract의 실제 워커 검사는 main이 650ms 동안 공개 수신 큐를 읽지 않은 상태에서도 제어 응답이 계속되는지 확인합니다. 실제 통신 도구는 두 프로세스가 최소 세 번 확인 응답을 받은 뒤 실험 완료 표시와 EOF를 교환합니다. 짧은 40/150/350ms 설정은 관찰용이며 게임 운영 설정으로 그대로 가져오지 않습니다.\n\n상대 대역을 만들어 침묵, 틀린 토큰 반복, 첫 응답 재사용, 잘린 PONG payload, PING만 보내기를 각각 시도하세요. 마지막 경우에도 우리의 요청에 대한 응답이 없으면 만료해야 합니다.",
+      "codes": [
+        {
+          "label": "추가 타깃",
+          "language": "cmake",
+          "text": "add_executable(heartbeat_contract tests/heartbeat_contract.cpp)\ntarget_link_libraries(heartbeat_contract PRIVATE StudySocket)\nadd_test(NAME heartbeat_contract COMMAND heartbeat_contract)\nset_tests_properties(heartbeat_contract PROPERTIES TIMEOUT 10)\nadd_executable(heartbeat_probe tools/heartbeat_probe.cpp)\ntarget_link_libraries(heartbeat_probe PRIVATE StudySocket)\nadd_test(NAME heartbeat_probe_help COMMAND heartbeat_probe --help)"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/94-heartbeat -B out/study94 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study94 -j3\nctest --test-dir out/study94 --output-on-failure\n./out/study94/heartbeat_probe listen 0\n# 다른 터미널에서 출력된 포트 사용\n./out/study94/heartbeat_probe connect 포트번호"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성",
+          "body": "빌드에는 --config Release, CTest에는 -C Release를 붙이고 Release/heartbeat_probe.exe를 실행합니다. 연결 시작의 accept/connect는 동기식이며 하트비트 타이머는 연결 이후에 시작합니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 유지할 핵심",
+      "body": "정확한 요청·응답 대응, 로컬 경과 시간, 한정된 미응답 보관, 명시적인 만료 정책을 유지합니다. 응답 처리 위치와 임계값을 바꾸면 관찰하는 의미도 함께 바뀌므로 문서와 사용자 안내를 같이 고쳐야 합니다.\n\n이번 타이머는 네트워크 인증·부정행위 검증·게임 규칙 진행을 대신하지 않습니다. 상대의 일시 지연에서 자동 재연결하거나 규칙 상태를 복구하는 기능도 별도의 연결·상태 계약을 필요로 합니다.",
+      "codes": [
+        {
+          "label": "net/heartbeat.h",
+          "language": "cpp",
+          "file": "checkpoints/94-heartbeat/net/heartbeat.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/thread_link.h",
+          "language": "cpp",
+          "file": "checkpoints/94-heartbeat/net/thread_link.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/thread_link.cpp",
+          "language": "cpp",
+          "file": "checkpoints/94-heartbeat/net/thread_link.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/heartbeat_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/94-heartbeat/tools/heartbeat_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/heartbeat_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/94-heartbeat/tests/heartbeat_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "94-1",
+      "question": "main은 멈췄지만 I/O 워커가 PONG을 계속 처리합니다. 무엇을 확인했다고 말할 수 있나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "보드가 매 틱 진행된다"
+        },
+        {
+          "id": "b",
+          "text": "최근 통신 제어 요청이 처리됐다"
+        },
+        {
+          "id": "c",
+          "text": "화면이 정상 갱신된다"
+        },
+        {
+          "id": "d",
+          "text": "입력 버퍼가 비어 있다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "최근 통신 제어 요청이 처리됐다",
+      "explanation": "응답을 처리하는 실행 경로까지만 관찰합니다. 이번에는 main의 규칙 진행과 분리된 워커입니다."
+    },
+    {
+      "id": "94-2",
+      "question": "시작0, PONG(1) 확인100, 다음 PING 발급1000입니다. 이후 응답이 없을 때 기본 만료 시각은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "3000"
+        },
+        {
+          "id": "b",
+          "text": "4000"
+        },
+        {
+          "id": "c",
+          "text": "3100"
+        },
+        {
+          "id": "d",
+          "text": "2100"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "3100",
+      "explanation": "timeout은 마지막 확인부터 3000ms입니다. 새 요청 발급이 마지막 확인 시각을 갱신하지 않습니다."
+    },
+    {
+      "id": "94-3",
+      "question": "PONG(1)을 이미 확인한 뒤 같은 PONG을 반복 수신합니다. 어떤 결과가 맞나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "매번 last_good를 갱신한다"
+        },
+        {
+          "id": "b",
+          "text": "응답 횟수만 늘리고 무기한 기다린다"
+        },
+        {
+          "id": "c",
+          "text": "새 토큰2의 확인으로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "확인하지 않고 기존 무응답 타이머를 유지한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "확인하지 않고 기존 무응답 타이머를 유지한다",
+      "explanation": "pending을 소비했으므로 반복된 토큰은 현재 요청의 새 증거가 아닙니다."
+    },
+    {
+      "id": "94-4",
+      "question": "상대가 PING은 보내지만 우리 PING에 맞는 PONG은 보내지 않습니다. 이번 정책은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "우리 요청이 미확인인 채 제한을 넘으면 만료한다"
+        },
+        {
+          "id": "b",
+          "text": "어떤 트래픽이든 오면 건강하다"
+        },
+        {
+          "id": "c",
+          "text": "우리 PING 번호를 상대 번호로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "수신 큐를 무제한 늘린다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "우리 요청이 미확인인 채 제한을 넘으면 만료한다",
+      "explanation": "한 방향의 데이터 수신과 특정 요청의 왕복 확인은 다릅니다."
+    },
+    {
+      "id": "94-5",
+      "question": "기준 타이머의 정확한 만료 시각에 맞는 PONG이 처리됩니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "응답이 언제나 우선한다"
+        },
+        {
+          "id": "b",
+          "text": "시간 판정을 먼저 하므로 만료가 유지된다"
+        },
+        {
+          "id": "c",
+          "text": "토큰0으로 다시 시작한다"
+        },
+        {
+          "id": "d",
+          "text": "상대 시계로 마감을 연장한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "시간 판정을 먼저 하므로 만료가 유지된다",
+      "explanation": "pong은 status를 먼저 호출합니다. timeout을 포함하는 만료와 늦은 응답 처리 순서가 명시돼 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "PING에 적는 정보와 로컬에 보관할 시간을 분리합니다.",
+      "요청 발급·확인·만료의 상태표를 작성합니다.",
+      "시간 경계 직전과 정확한 경계를 검사합니다.",
+      "정상·침묵·중복·잘못된 응답의 종료 이유를 비교합니다."
+    ],
+    "failureChecks": [
+      "PONG이면 무조건 갱신하지 않는지 확인합니다.",
+      "다른 컴퓨터 시계를 직접 빼지 않는지 확인합니다.",
+      "응답이 규칙·렌더 진행까지 증명한다고 설명하지 않습니다."
+    ],
+    "expected": "하트비트의 관찰 범위와 시간 정책을 구현하고 무응답 원인을 단정하지 않고 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 순수 타이머/코덱 초안 검토·실제 Session 응답 상관관계 교정·시간 경계와 통신 대역 검수",
+    "draftJob": "out/learning-jobs/094-beat-events.jsonl",
+    "corrections": [
+      "불필요한 상태 조회 API 제거와 Windows max 매크로 경계 보호",
+      "PONG의 최근 확인 의미와 원인 추론 한계 교정",
+      "실제 empty/unsolicited/replayed PONG 갱신 경계 및 사용자 안내 교정",
+      "미응답 토큰은 wire 예약값0으로 명시하여 optional 인라이닝 초기화 경고 제거",
+      "같은 연결의 timestamp 재발급 금지로 소비·퇴출된 요청 재사용 차단",
+      "공식 Winsock 옵션 표에 따라 probe 횟수·실제 감지 시간 단정 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED116/SDL121 CTest·경고 없음·93 누적 코드 변경 범위 확인",
+    "Heartbeat TYPE0~255/길이0~39/고정 LE벡터/0/MAX토큰·출력 보존·가짜 시각의 임계값 직전/정확한 경계/역행/MAX 부근·상관관계/중복/미요청 검수",
+    "실제 main650ms 미소비 중 워커 PING/PONG 지속·게임 큐에 제어 프레임 없음·잘못된 timing 거절: ASan/UBSan 및 ThreadSanitizer 통과",
+    "실제 두 프로세스3쌍: 확인>=3·실험 완료 마커·half-close/EOF. 상대 대역5경로:침묵/다른토큰/재사용/잘린PONG/PING-only가 기대한 실패로 종료",
+    "실제 Session PING/PONG 분기 발췌 회귀: 수정 전 빈 PONG 갱신 검사 실패, 수정 후 길이/ready/요청대응/미래/나이/단회소비/16칸/토큰 재발급 금지 ASan/UBSan",
+    "현재 게임·양 릴레이 빌드 및 root20/19 CTest 통과. Windows/macOS 네이티브·수동 GUI 미검증",
+    "Part 발췌·Markdown27·9인라인 구현 스니펫·464문제·전체 차시 DOM 연결/참조/저장 검사 통과",
+    "u64 토큰 전체 소진까지의 실제 장기 실행과 부하 하 임계값 튜닝은 수행하지 않음. 요청 상관관계는 인증·규칙 진행 증명이 아님"
+  ]
+}

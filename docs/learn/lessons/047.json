@@ -1,0 +1,389 @@
+{
+  "id": "lesson-47",
+  "title": "짧은 눌림을 틱까지 전달하기",
+  "shortTitle": "입력의 두 보관 경계",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 프레임 실행기는 입력을 틱까지 보관하지만, 플랫폼은 프레임 전후의 키 상태만 비교합니다.",
+  "finish": "완료: 사건마다 눌림을 기록하고, 0틱 프레임과 포커스 취소를 거쳐 의도를 한 번 전달합니다.",
+  "objective": "상태와 사건의 차이로 짧은 탭 손실을 설명하고, 프레임 기록·틱 버퍼의 수명과 취소 순서를 구현합니다.",
+  "prerequisites": [
+    "키의 level·edge와 이벤트 펌프",
+    "PendingControls의 수집과 소비",
+    "FrameRunner의 0틱·여러 틱 실행"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek의 순수 입력 클래스 초안을 검토한 뒤 실제 SDL 사건 주입과 사건 이력 오라클로 대조",
+    "draftJob": "out/learning-jobs/047-key-events.jsonl",
+    "corrections": [
+      "구현과 같은 상태 대입을 반복하던 검사 모델을 마지막 사건·경계로 역산하는 이력 오라클로 교체",
+      "Release 변형 검사의 실패 코드를 일정하게 유지하도록 abort를 exit(1)로 변경",
+      "플랫폼 취소 플래그를 PendingControls와 실제 AccumulateInput까지 연결",
+      "이전 체크포인트의 짧은 탭 손실 기대값은 새 체크포인트에서만 변경"
+    ]
+  },
+  "validation": [
+    "SCRIPTED 전체39·SDL 전체40 CTests 및 경고0 빌드 통과",
+    "97,656 사건열과 각 접두 상태, 키 독립성·잘못된 번호·반복·취소·초기화 검사",
+    "실제 SDL 회귀 fixture·실제 main 입력 함수 추출 검사·SDL→FrameRunner 전달 검사 통과",
+    "UBSan 및 탭 손실·반복 복원·취소 누락의 세 Release 변형 거부",
+    "실제 게임 SDL 빌드·루트13 CTests 통과. 취소의 invalid-time rollback·0틱 취소·취소 뒤 새 입력 CPU 회귀 검사 통과",
+    "Win32는 소스·공식 메시지 계약 검토. 네이티브 컴파일·실행 미수행. 사용자 요청에 따라 화면 조작 생략"
+  ],
+  "recap": {
+    "points": [
+      "경과 시간의 상한과 한 호출의 틱 처리 예산은 서로 다른 정책입니다.",
+      "프레임 하나에 규칙 틱이 없을 수도 있고 여러 개 있을 수도 있습니다.",
+      "시간을 보관하는 시계와 조작을 보관하는 입력 객체는 각자의 상태를 소유합니다."
+    ],
+    "bridge": "이번에는 이 서로 다른 갱신 주기 사이에서 짧은 키 조작이 어떻게 살아남는지 사건부터 따라갑니다."
+  },
+  "sections": [
+    {
+      "title": "화면이 멈춘 사이에 누르고 뗐다면",
+      "body": "> **읽기 전 예측** · Space가 해제되어 있습니다. OS 큐에 down, up 두 사건이 들어오고, 프로그램은 둘을 한 번의 펌프에서 처리합니다. 최종 키 상태만 저장했다면 눌림을 알 수 있을까요?\n\n큐는 두 사건을 모두 전달했습니다. 그런데 `current = event.down`처럼 마지막 값만 덮어쓰면 최종 상태는 false입니다. 프레임 시작 전에도 false였으므로 `current && !previous`는 false가 됩니다. 사건을 읽는 데 성공했어도, 저장 표현을 바꾸는 과정에서 정보가 사라진 것입니다.\n\n이번 산출물은 `KeyEdges`와 이를 틱 입력에 연결하는 취소 경로입니다. 짧은 탭을 보존하면서, 창을 떠난 뒤 오래된 하드드롭이 실행되는 상황도 함께 다룹니다."
+    },
+    {
+      "title": "상태와 사건은 서로 다른 질문에 답한다",
+      "body": "**상태(state)**는 한 시점의 값입니다. held는 “지금 누르고 있는가”에 답합니다. **사건(event)**은 변화가 있었다는 기록입니다. down과 up은 시간 순서가 있는 사건이고, pressed는 일정 구간에 눌림 전이가 있었는지 요약한 값입니다.\n\n끝점만 남기는 것은 정보 압축입니다. `아무 일 없음`과 `down→up`은 서로 다른 이력이지만 모두 해제 상태로 끝납니다. 한 결과에 여러 이력이 대응하므로 최종 상태에서 원래 이력을 복원할 수 없습니다. 필요한 정보를 사건 처리 시점에 따로 남겨야 합니다.\n\n| 새 해제 상태에서 처리한 사건 | held | pressed | released |\n| --- | --- | --- | --- |\n| 없음 | false | false | false |\n| down | true | true | false |\n| down → up | false | true | true |\n| down → up → down | true | true | true |\n\npressed와 released는 각각의 발생 기록이어서 둘 다 true일 수 있습니다. 같은 순간에 두 상태라는 의미가 아닙니다. 지금 상태를 결정하는 값은 held입니다."
+    },
+    {
+      "title": "입력이 건너는 두 경계를 그린다",
+      "body": "```text\nOS 사건 큐\n    ↓ 사건마다 set()\nKeyEdges: 프레임 동안의 held / pressed / released\n    ↓ 프레임마다 capture()\nPendingControls: 다음 틱까지의 조작 의도\n    ↓ 틱마다 consume()\nRound::tick: 규칙 변경\n```\n\n첫 경계는 **사건→프레임**입니다. 한 펌프 안의 down→up을 KeyEdges가 기억합니다. 두 번째는 **프레임→틱**입니다. pressed가 있었던 프레임에 틱이 없으면 PendingControls가 다음 틱까지 보관합니다.\n\n두 객체는 같은 종류의 bool을 사용해도 수명이 다릅니다. KeyEdges의 기록은 다음 프레임 시작에 지우고, PendingControls의 회전·드롭 요청은 틱에서 소비할 때 지웁니다. 한쪽만 고치면 다른 경계의 손실은 남습니다.\n\n| 저장 값 | 갱신하는 시점 | 지우거나 바꾸는 시점 |\n| --- | --- | --- |\n| held | 키 사건 | 해제·취소·세션 초기화 |\n| pressed / released | 전이 사건 | 다음 프레임 시작; 취소는 앞선 pressed도 제거 |\n| pending 회전·드롭 | 프레임 수집 | 틱 소비·취소 |\n| pending soft_drop | 프레임 수집 | 다음 held 샘플로 교체·취소 |\n\n이 구현은 한 스레드의 호출 순서로 경계를 정합니다. 메모리 공유나 스레드 동기화 기법은 필요하지 않습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "래치라는 이름",
+          "body": "래치(latch)는 발생 사실을 저장해 나중에 읽게 하는 장치를 가리킵니다. 여기서는 한 스레드 안의 bool 보관 관용구이며, C++20의 스레드 대기 도구 std::latch와 다른 개념입니다."
+        }
+      ]
+    },
+    {
+      "title": "고정 크기 상태를 소유하는 클래스를 만든다",
+      "body": "플랫폼 코드는 OS 사건을 번역하고, 전이를 기억하는 규칙은 순수한 C++ 클래스가 담당하게 합니다. `KeyEdges<Count>`는 키마다 held·pressed·released 배열을 소유합니다. Count는 컴파일 때 정해지는 용량입니다. 실제 게임은 가상 키 번호 범위 256을, 학습 체크포인트는 `Key::Count`를 사용합니다.\n\n`std::array<bool, Count>`는 객체 내부의 고정 크기 저장소입니다. 동적 할당이 없고, `{}` 초기화로 모든 슬롯이 false에서 시작합니다. 조회는 상태를 바꾸지 않는 const 함수입니다. 여러 호출자가 같은 프레임의 pressed를 읽어도 첫 조회가 입력을 가져가 버리지 않습니다.\n\n유효하지 않은 키 번호는 set에서 무시하고 조회에서 false를 반환합니다. signed 키 값을 받는 루트 API는 음수를 먼저 거부한 뒤 size_t로 넘깁니다. 이렇게 번역 경계와 저장소 경계를 각각 분명히 둡니다.",
+      "codes": [
+        {
+          "label": "core/key_edges.h · 소유 상태와 조회",
+          "language": "cpp",
+          "text": "    bool down(std::size_t key) const noexcept { return key < Count ? held_[key] : false; }\n    bool pressed(std::size_t key) const noexcept { return key < Count ? pressed_[key] : false; }\n    bool released(std::size_t key) const noexcept { return key < Count ? released_[key] : false; }"
+        }
+      ],
+      "reference": {
+        "path": "core/key_edges.h",
+        "symbol": "class KeyEdges",
+        "invariant": "상태와 전이 기록을 고정 크기 객체가 소유하며 조회는 비소비적이다.",
+        "mayDiffer": "플랫폼별 키 매핑과 Count는 달라질 수 있다.",
+        "omitted": "마우스 버튼·문자 입력 큐는 이 클래스의 대상에 포함하지 않는다."
+      }
+    },
+    {
+      "title": "현재 프레임의 기록만 초기화한다",
+      "body": "begin_frame은 새 기록 구간을 여는 함수입니다. held까지 지우면 누르고 있는 키를 매 프레임 새 키로 보거나, 사건 없는 프레임에서 해제로 볼 수 있습니다. 그래서 pressed·released·cancelled만 초기화합니다.\n\n호출 위치는 **이벤트 펌프 앞**입니다. 펌프에서 새 눌림을 모은 뒤 호출하면 그 기록을 바로 지워 버립니다. Win32에서는 PeekMessage 호출 과정에서도 보낸 메시지의 처리가 일어날 수 있으므로, 초기화를 메시지 펌프 전체보다 앞에 둡니다.\n\nreset은 모든 값을 지우는 별도 연산입니다. 객체의 세션을 시작하거나 끝낼 때 사용합니다. “프레임의 시작”과 “입력 세션의 초기 상태”가 다른 상태 전이라는 점을 함수 이름에도 드러냅니다.",
+      "codes": [
+        {
+          "label": "core/key_edges.h · begin_frame",
+          "language": "cpp",
+          "text": "    void begin_frame() noexcept {\n        for (std::size_t i = 0; i < Count; ++i) {\n            pressed_[i] = false;\n            released_[i] = false;\n        }\n        cancelled_ = false;\n    }"
+        }
+      ]
+    },
+    {
+      "title": "사건이 도착할 때 전이를 누적한다",
+      "body": "set은 사건 하나를 반영합니다. 먼저 번호와 반복 여부를 확인하고, 변화 이전의 held를 was에 보관합니다. false→true이면 pressed를 세우고, true→false이면 released를 세운 뒤 held를 새 값으로 바꿉니다.\n\n전이가 없을 때 기록을 false로 덮어쓰지 않는 것이 핵심입니다. down 뒤 up이 오더라도 앞선 pressed=true는 그대로 남습니다. 예를 들어 `pressed = down && !was`로 매번 대입하면 마지막 up이 pressed를 false로 덮어써 탭이 다시 사라집니다.\n\n같은 키의 down이 중복되어 들어와도 was가 true이면 추가 전이는 없습니다. OS 반복 down은 더 앞에서 반환하므로, 취소 이후 held가 false인 상태에서도 새 눌림으로 바뀌지 않습니다.",
+      "codes": [
+        {
+          "label": "core/key_edges.h · 사건 하나 적용",
+          "language": "cpp",
+          "text": "    void set(std::size_t key, bool down, bool repeat = false) noexcept {\n        if (key >= Count) return;\n        if (down && repeat) return;\n        const bool was = held_[key];\n        if (down && !was) pressed_[key] = true;\n        if (!down && was) released_[key] = true;\n        held_[key] = down;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "core/key_edges.h",
+        "symbol": "void set(",
+        "invariant": "사건마다 변화 직전 상태를 보고 발생 사실을 누적한다.",
+        "mayDiffer": "필요한 조작이 바뀌면 횟수나 순서를 저장하는 별도 표현을 선택할 수 있다.",
+        "omitted": "입력 사건의 정확한 시각과 순서는 저장하지 않는다."
+      }
+    },
+    {
+      "title": "SDL과 Win32 사건을 같은 계약으로 바꾼다",
+      "body": "SDL 어댑터는 SDL_Keycode를 게임 Key로 바꾸고, 사건 종류로 down을 구합니다. [SDL_KeyboardEvent의 repeat](https://wiki.libsdl.org/SDL2/SDL_KeyboardEvent)는 0이 아니면 자동 반복입니다. 매핑되지 않은 키는 Key::Count가 되어 공통 클래스의 범위 검사에서 무시됩니다.\n\nWin32 어댑터는 [WM_KEYDOWN의 lParam 비트 30](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-keydown)을 읽습니다. 메시지 직전에 키가 눌려 있었으면 1이므로 반복 down을 구분할 수 있습니다. 키를 떼는 메시지는 repeat=false로 전달합니다. 시스템 키 메시지는 상태 반영 뒤 DefWindowProc에도 넘겨 Alt+F4 같은 기본 처리를 유지합니다.\n\n플랫폼은 키를 오래 누른 사실을 held로 제공하고, 게임이 좌우 이동 반복의 지연·간격을 정합니다. OS 반복 설정을 회전 횟수나 이동 속도로 직접 사용하지 않는 구조입니다.",
+      "codes": [
+        {
+          "label": "platform/sdl.cpp · 사건 번역",
+          "language": "cpp",
+          "text": "const auto index = static_cast<std::size_t>(map_key(event.key.keysym.sym));\nstate.keys.set(index, event.type == SDL_KEYDOWN, event.key.repeat != 0);"
+        },
+        {
+          "label": "platform/win32.cpp · 눌림 번역",
+          "language": "cpp",
+          "text": "if (res != nullptr)\n    SetKeyState(*res, wParam, true, (lParam & (1LL << 30)) != 0);"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "s_keys.set(",
+        "invariant": "OS 사건을 같은 전이 계약으로 번역한다.",
+        "mayDiffer": "현재 루트는 int PlatformKey와 256개 슬롯, 체크포인트는 enum Key를 사용한다.",
+        "omitted": "문자 입력·IME·키 바인딩 편집은 별도의 계약이다."
+      }
+    },
+    {
+      "title": "0틱 프레임을 지나 한 번 소비한다",
+      "body": "회전 키를 눌렀다 뗀 프레임에서 틱이 없다고 가정합니다. 플랫폼은 pressed=true를 제공하고, FrameRunner는 루프에 들어가기 **전에 한 번** PendingControls.capture를 호출합니다. capture가 틱 루프 안에 있으면 0틱일 때 실행되지 않습니다.\n\n| 호출 | raw.up | 배정 틱 | 회전 요청의 행방 |\n| --- | --- | --- | --- |\n| A | true | 0 | pending에 보관 |\n| B | false | 0 | 보관 유지 |\n| C | false | 3 | 첫 consume이 회전=true; 뒤 두 번은 false |\n\npending 회전은 `clockwise_ = clockwise_ || up`으로 누적합니다. 소비하면서 false로 지워 여러 틱에 같은 눌림이 반복 적용되는 것을 막습니다. 반면 Down은 held 샘플을 대입하므로 매 틱 유지 상태를 전달합니다. 짧은 Down 탭이 프레임 안에서 끝나면 pressed가 있어도 downHeld=false이므로 소프트드롭 유지 요청은 생기지 않습니다.",
+      "codes": [
+        {
+          "label": "simulation/pending_controls.h · capture",
+          "language": "cpp",
+          "text": "    void capture(bool left, bool right, bool up, bool downHeld = false,\n                 bool spacePressed = false) noexcept {\n        horizontal_.capture(left, right);\n        clockwise_ = clockwise_ || up;\n        soft_drop_ = downHeld;\n        // A bool latch is enough here: it coalesces any number of captured\n        // hard-drop edges into a single pending request. It is NOT a queue and\n        // gives no physical exact-once guarantee; two presses captured before\n        // one consume() still yield one hard_drop.\n        hard_drop_ = hard_drop_ || spacePressed;\n    }"
+        },
+        {
+          "label": "simulation/pending_controls.h · consume",
+          "language": "cpp",
+          "text": "    Intent consume() noexcept {\n        Intent result{horizontal_.consume(), clockwise_, soft_drop_, hard_drop_};\n        clockwise_ = false;\n        hard_drop_ = false;\n        return result;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "물리 입력 시각과 적용 틱",
+          "body": "보관된 요청은 다음 consume에 적용됩니다. 긴 프레임에서 여러 틱을 따라잡아도 사건 시각으로 과거 틱을 찾아 배정하지 않습니다. 시각 기반 배정을 하려면 사건 타임스탬프와 틱 시간축의 대응을 추가로 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "포커스 상실을 취소 사건으로 표현한다",
+      "body": "Space가 pending에 있지만 아직 틱이 없을 때 창을 떠났다고 생각해 봅시다. 플랫폼 held만 지우면 pending 드롭은 그대로 남아 복귀 후 실행될 수 있습니다. 취소는 입력이 보관된 두 계층 모두에 도달해야 합니다.\n\nKeyEdges.cancel은 held를 false로 바꾸고, 이 프레임의 앞선 pressed를 지웁니다. 누르고 있던 키는 released로 기록합니다. cancelled는 “이 프레임 안에 취소 경계가 있었다”는 플래그입니다. 포커스가 현재 있는지를 나타내는 지속 상태와 다릅니다.\n\n사건 순서가 `down → cancel → 새 down`이면 마지막 눌림은 새 요청입니다. 플랫폼은 취소 이전 press를 지웠으므로, 호출자는 오래된 pending을 지운 뒤 이번 raw 입력을 수집하면 됩니다. `down → cancel → 반복 down`이면 반복을 버려 새 요청이 없습니다.",
+      "codes": [
+        {
+          "label": "core/key_edges.h · cancel",
+          "language": "cpp",
+          "text": "    void cancel() noexcept {\n        for (std::size_t i = 0; i < Count; ++i) {\n            released_[i] = released_[i] || held_[i];\n            held_[i] = false;\n            pressed_[i] = false;\n        }\n        cancelled_ = true;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "취소로 생기는 released",
+          "body": "released는 이 입력 모델에서 눌림이 해제되었다는 기록입니다. cancel로도 만들어지므로 반드시 물리적인 key-up 메시지를 받았다는 증거는 아닙니다. 취소와 실제 key-up을 다르게 취급할 기능이라면 cancelled나 별도 원인을 함께 사용해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "틱 버퍼를 먼저 비우고 새 입력을 받는다",
+      "body": "FrameInput에 cancelled 필드를 추가합니다. 플랫폼에서 프레임별 플래그를 가져오고, FrameRunner는 유효한 시간 입력을 확인한 뒤 candidate.pending_를 정리합니다. 그다음 capture를 실행합니다. 둘의 순서를 바꾸면 취소 뒤 도착한 새 눌림까지 잃습니다.\n\nPendingControls.clear는 기본값 객체를 대입합니다. 좌우 의도·회전·소프트드롭·하드드롭을 함께 초기화하므로 취소 대상 일부를 빠뜨릴 위험을 줄입니다. 취소는 0틱 프레임에도 처리됩니다.\n\n실행기의 실패 시 상태 보존 계약도 유지합니다. 시간이 음수·NaN·무한대라면 이번 호출 전체를 거부하므로 취소만 먼저 원본에 적용하지 않습니다. 호출자가 실패를 무시하고 계속 실행하려는 경우에는 입력 재전달까지 설계해야 합니다. 현재 학습 main은 실패 시 종료합니다.",
+      "codes": [
+        {
+          "label": "simulation/pending_controls.h · clear",
+          "language": "cpp",
+          "text": "void clear() noexcept { *this = PendingControls{}; }"
+        },
+        {
+          "label": "loop/frame_runner.h · 수집 순서",
+          "language": "cpp",
+          "text": "        if (raw.cancelled) candidate.pending_.clear();\n        candidate.pending_.capture(raw.left, raw.right, raw.up, raw.down, raw.drop);"
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "static void AccumulateInput(bool suppress = false)",
+        "invariant": "매 프레임 취소를 먼저 반영하고 새 눌림을 틱 버퍼에 수집한다.",
+        "mayDiffer": "실제 게임은 비트마스크와 DAS 카운터를 초기화하며 채팅 중에는 게임 입력을 억제한다.",
+        "omitted": "실제 앱의 모달·모드 전환 전체를 FrameRunner로 옮기지 않는다."
+      }
+    },
+    {
+      "title": "무엇을 보존할지에 따라 자료구조가 달라진다",
+      "body": "bool 래치는 **한 번 이상 발생했는가**를 보존합니다. 완전한 탭을 한 번 하든 두 번 하든 pressed=true 하나가 남습니다. PendingControls도 회전 두 번을 소비 전에 받으면 한 번으로 합칩니다.\n\n| 표현 | 남는 정보 | 함께 정할 정책 |\n| --- | --- | --- |\n| 최종 held | 지금 상태 | 조회 시점 |\n| bool 래치 | 구간 안의 발생 여부 | 구간·소비·취소 |\n| 카운터 | 발생 횟수 | 범위·포화·한 틱에 소비할 양 |\n| 사건 큐 | 저장한 사건의 순서 | 용량·넘침·틱 배정·취소 범위 |\n\n지금 게임의 조작 계약은 틱별 요청 유무여서 bool을 사용합니다. 반대로 “빠른 회전 두 번을 반드시 두 번 수행”하는 요구라면 수집 단계부터 횟수나 순서를 보존해야 합니다. 나중 단계에 큐를 추가해도 앞서 bool로 합쳐진 사건은 복원되지 않습니다.\n\n이 관점은 입력 외에도 적용됩니다. 네트워크 알림, 센서 샘플, UI 변경을 묶을 때 발생 여부·최신 값·전체 이력 중 무엇이 필요한지 먼저 정하면 자료구조의 선택 이유를 설명할 수 있습니다."
+    },
+    {
+      "title": "실제 코드와 기준 코드를 비교한다",
+      "body": "학습 체크포인트의 platform은 Key 열거형과 KeyEdges를 갖고, main은 FrameInput을 만들어 FrameRunner로 전달합니다. 실제 게임의 SDL·Win32도 같은 KeyEdges 규칙을 사용하지만, public API의 키 번호와 main 입력 형식은 다릅니다.\n\n| 역할 | 기준 코드 | 현재 코드 보기 |\n| --- | --- | --- |\n| 사건 누적 | core/key_edges.h | core/key_edges.h |\n| OS 사건 번역 | platform/sdl.cpp 또는 win32.cpp | 같은 경로의 실제 백엔드 |\n| 프레임 수집 | FrameInput → PendingControls | AccumulateInput → s_pendingInput |\n| 틱 소비 | PendingControls.consume | ConsumeInput |\n| 지속 조작 | Down held | Down held + 좌우 DAS/ARR |\n\n표현이 달라도 **사건에서 기록하고, 프레임에서 보관하며, 틱에서 소비한다**는 책임 분리는 같습니다. 기준 스니펫은 이 학습 계약을 고정합니다. 코드 뷰어의 루트 소스는 이후 기능 추가로 달라질 수 있으므로 변수 개수보다 입력의 생성·보관·소비 지점을 비교하세요.",
+      "codes": [
+        {
+          "label": "core/key_edges.h",
+          "language": "cpp",
+          "file": "checkpoints/47-input-edges/core/key_edges.h",
+          "collapsed": true
+        },
+        {
+          "label": "simulation/pending_controls.h",
+          "language": "cpp",
+          "file": "checkpoints/47-input-edges/simulation/pending_controls.h",
+          "collapsed": true
+        },
+        {
+          "label": "loop/frame_runner.h",
+          "language": "cpp",
+          "file": "checkpoints/47-input-edges/loop/frame_runner.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "platform/platform.h",
+        "symbol": "bool platform_input_cancelled();",
+        "invariant": "플랫폼의 프레임 계약과 게임의 틱 소비 계약을 분리한다.",
+        "mayDiffer": "키 목록·조작 종류·반복 수치가 바뀔 수 있다.",
+        "omitted": "현재 서버와 온라인 입력 검증은 이번 로컬 입력 경계의 검사 대상이 아니다."
+      }
+    },
+    {
+      "title": "사건 이력으로 결과를 검증한다",
+      "body": "최종 화면의 블록 위치만으로 검사하면 틱 시점·중력·회전 조건이 섞여 원인을 찾기 어렵습니다. 먼저 순수 클래스에 사건을 넣고 상태를 직접 확인한 다음, SDL→FrameInput→FrameRunner 연결을 검사합니다.\n\n| 넣는 사건·호출 | 확인하는 성질 |\n| --- | --- |\n| down → up, 프레임 한 번 | pressed와 released 모두 true, held false |\n| begin_frame, 사건 없음 | 전이 기록 초기화, held 유지 |\n| down → cancel → repeat | 눌림과 held가 복원되지 않음 |\n| cancel → 새 down | cancelled와 pressed 함께 true |\n| 눌림 프레임 뒤 0틱 여러 번 | 다음 첫 틱까지 보관 |\n| pending 드롭 뒤 0틱 취소 | 나중 틱에서 드롭 없음 |\n\n`key_edges_contract`는 down·up·repeat·cancel·begin 다섯 사건으로 길이0~7의 모든97,656개 사건열을 만듭니다. 기대값은 기록된 사건을 거슬러 마지막 down/up/cancel을 찾아 held를 구하고, 마지막 구간 경계 뒤에 전이가 있었는지로 계산합니다. 구현과 같은 대입문을 그대로 복사해 기대값을 만드는 실수를 피합니다.\n\n`input_pipeline`은 SDL 큐에 실제 사건 구조체를 넣고, 틱이 없는 프레임과 여러 틱 프레임을 직접 호출합니다. 검사 실패 시 어느 경계부터 잘못됐는지 나누어 볼 수 있습니다."
+    },
+    {
+      "title": "파일을 연결하고 직접 실험한다",
+      "body": "47-input-edges는 누적 프로젝트에 공통 입력 클래스·취소 API·회귀 검사를 추가합니다. SDL·Win32·SCRIPTED가 같은 조회 계약을 사용하도록 세 어댑터를 바꿉니다. SCRIPTED는 정해 둔 입력 시나리오를 공급하고, SDL 검사에서는 직접 사건을 주입합니다.\n\n저장소 루트에서 먼저 CPU 검사를 실행합니다. 명령은 단일 구성 CMake 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/47-input-edges -B out/study-47 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-47 --target key_edges_contract frame_contract\nctest --test-dir out/study-47 -R '^(key_edges_contract|frame_contract)$' --output-on-failure\n```\n\nSDL2 개발 라이브러리가 있는 환경에서는 프레임·틱 연결도 검사합니다. input_pipeline의 CTest 설정은 창과 GL 컨텍스트를 만들 필요가 없는 dummy 비디오 드라이버를 사용합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/47-input-edges -B out/study-47-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-47-sdl --target input_pipeline hard_drop_input\nctest --test-dir out/study-47-sdl -R '^(input_pipeline|hard_drop_input)$' --output-on-failure\n```\n\n완성 게임 실행 파일은 SDL 구성에서 `tetris` 타깃으로 빌드합니다. 실제 창을 실행하려면 OpenGL3.3 Core 환경이 필요합니다. 입력 검사를 실행하는 조건과 게임 화면을 실행하는 조건을 나누어 확인하세요.\n\n직접 고쳐 볼 작은 실험은 `set`의 pressed 기록을 매 사건마다 대입하도록 바꾸는 것입니다. down→up 검사부터 실패하는 이유를 설명한 뒤 누적 방식으로 되돌립니다. 이어서 취소와 capture의 순서를 바꿔, 취소 뒤의 새 조작이 어느 단계에서 사라지는지 추적합니다."
+    }
+  ],
+  "questions": [
+    {
+      "id": "47-1",
+      "kind": "결과 예측",
+      "question": "해제 상태에서 같은 프레임에 down→up→down을 처리했습니다. (held, pressed, released)는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(true, true, false)"
+        },
+        {
+          "id": "b",
+          "text": "(true, false, true)"
+        },
+        {
+          "id": "c",
+          "text": "(true, true, true)"
+        },
+        {
+          "id": "d",
+          "text": "(false, true, true)"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "(true, true, true)",
+      "explanation": "최종 down이 held를 true로 만듭니다. 중간 up으로 released가 기록되고, 첫 down의 pressed도 프레임 내내 남습니다."
+    },
+    {
+      "id": "47-2",
+      "kind": "오류 원인",
+      "question": "플랫폼의 짧은 탭 래치는 정상인데, capture를 틱 루프 안에서만 호출하면 어떤 문제가 생길까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0틱 프레임의 눌림을 pending에 보관하지 못한다."
+        },
+        {
+          "id": "b",
+          "text": "한 프레임의 held가 여러 키로 복제된다."
+        },
+        {
+          "id": "c",
+          "text": "모든 프레임에서 회전이 두 번 실행된다."
+        },
+        {
+          "id": "d",
+          "text": "키를 떼면 cancelled가 자동으로 true가 된다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "0틱 프레임의 눌림을 pending에 보관하지 못한다.",
+      "explanation": "틱 루프를 건너뛰는 프레임에도 입력은 발생합니다. 다음 프레임이 전이 기록을 지우기 전에 capture를 프레임당 한 번 실행해야 합니다."
+    },
+    {
+      "id": "47-3",
+      "kind": "적용",
+      "question": "아직 소비하지 않은 드롭이 있습니다. 이번 펌프에는 cancel→새 Up down이 왔습니다. 올바른 처리 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "드롭과 회전을 모두 다음 틱에 전달한다."
+        },
+        {
+          "id": "b",
+          "text": "드롭을 취소하고 새 회전을 다음 틱에 전달한다."
+        },
+        {
+          "id": "c",
+          "text": "드롭과 새 회전을 모두 취소한다."
+        },
+        {
+          "id": "d",
+          "text": "회전을 취소하고 드롭만 다음 틱에 전달한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "드롭을 취소하고 새 회전을 다음 틱에 전달한다.",
+      "explanation": "취소 이전 pending을 먼저 비우고 취소 이후의 raw 입력을 수집합니다. 순서를 뒤집으면 새 회전까지 사라집니다."
+    },
+    {
+      "id": "47-4",
+      "kind": "설계 선택",
+      "question": "다음 틱 전에 회전 탭을 두 번 완료했습니다. 현재 두 bool 래치 계층이 보장하는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "각 탭의 시각과 순서 보존"
+        },
+        {
+          "id": "b",
+          "text": "두 번의 회전 실행"
+        },
+        {
+          "id": "c",
+          "text": "키를 계속 누르는 상태로 변환"
+        },
+        {
+          "id": "d",
+          "text": "한 번 이상 회전 요청이 있었음"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "한 번 이상 회전 요청이 있었음",
+      "explanation": "각 계층은 발생 여부를 bool로 합칩니다. 두 번을 두 번 실행하는 요구에는 사건 수집부터 횟수·순서를 보존하는 표현과 소비 정책이 필요합니다."
+    },
+    {
+      "id": "47-5",
+      "kind": "결과 예측",
+      "question": "포커스를 잃은 뒤 repeat=true인 down만 들어왔습니다. KeyEdges의 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새 pressed를 만들고 held=true로 바꾼다."
+        },
+        {
+          "id": "b",
+          "text": "released를 지우고 held=true로 바꾼다."
+        },
+        {
+          "id": "c",
+          "text": "상태 변경 없이 반복 down을 무시한다."
+        },
+        {
+          "id": "d",
+          "text": "다음 프레임에 새 pressed를 예약한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "상태 변경 없이 반복 down을 무시한다.",
+      "explanation": "반복 down은 held 검사·대입보다 먼저 거부됩니다. 따라서 취소한 과거 눌림이 반복 메시지만으로 복원되지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "down→up→down의 세 값을 손으로 추적한다.",
+      "begin_frame을 펌프 뒤로 옮기면 어떤 기록이 지워지는지 설명한다.",
+      "0틱 프레임의 회전을 첫 틱까지 전달하는 검사를 실행한다.",
+      "pending 드롭을 취소한 뒤 새 회전만 전달하는 순서를 작성한다.",
+      "두 탭을 모두 실행하는 기능에 필요한 저장 정보와 소비 규칙을 제안한다."
+    ],
+    "expected": "사건·프레임·틱의 세 시점에서 무엇이 보관되고 언제 사라지는지 설명하고 두 입력 손실 경계를 수정한다.",
+    "failureChecks": [
+      "pressed를 현재 held와 같은 값으로 읽고 있지 않은가?",
+      "프레임 초기화가 사건 수집보다 먼저인가?",
+      "0틱 프레임에도 수집과 취소를 수행하는가?",
+      "취소 이후 새 입력을 받기 전에 pending을 비우는가?",
+      "bool의 발생 여부와 사건 횟수·순서를 구분했는가?"
+    ]
+  }
+}

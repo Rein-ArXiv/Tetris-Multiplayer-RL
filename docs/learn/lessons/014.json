@@ -1,0 +1,414 @@
+{
+  "id": "lesson-14",
+  "title": "VBO: CPU 배열을 GL 저장소로 복사하기",
+  "shortTitle": "버퍼 복사와 소유권",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: CPU에 정점 세 개를 만들고 24바이트 범위를 계산할 수 있습니다.",
+  "finish": "완료: GL 버퍼에 정점을 복사하고 크기·내용을 읽습니다. 버퍼 소유자를 만들어 실패와 종료 때 이름을 정리합니다.",
+  "objective": "이름·바인딩·저장소를 구분하며 버퍼를 만듭니다. 원본 배열의 수명과 GL 객체의 수명을 나누고 복사·연결 해제·재정의의 결과를 예측합니다.",
+  "prerequisites": [
+    "13차시 체크포인트",
+    "함수 테이블과 current 컨텍스트",
+    "RAII·배열의 바이트 크기"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 빌드와 로더512조합·소유권 검사 통과",
+    "실제 offscreen GL readback·바인딩·저장소 교체·정리 확인: Mesa llvmpipe4.5 Core",
+    "물리 GPU·화면 그리기·네이티브 Windows/macOS 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek vbo 후보를 Khronos 계약과 실습 코드에 대조, 실제 readback과 대역 실패 경로 검사",
+    "draftJob": "vbo",
+    "corrections": [
+      "잘못 추정한 include와 gl/gl_멤버 이름, 상수 이름을 보정",
+      "이동 금지를 RAII 필수 조건으로 설명하지 않음",
+      "기존 GL 오류는 진입에서 보고하고 작업하지 않는 학습 정책으로 한정",
+      "단순 재진술 문항을 상태 변화 예측으로 재작성",
+      "작업 보고는 내부 metadata에만 보관",
+      "포인터 별표가 Markdown 강조로 사라지던 곁들임 메모를 인라인 코드로 수정"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "정점 수와 바이트 수는 다르며, 원소 크기와 배치가 읽는 쪽의 계약과 맞아야 합니다.",
+      "data()는 컨테이너 원소를 빌려 가리키는 주소입니다. 원소 수명과 재할당을 고려해야 합니다."
+    ],
+    "bridge": "이제 배열의 24바이트를 GL이 관리하는 저장소로 복사합니다. 복사 후 원본과 저장소가 각각 언제까지 살아 있어야 하는지 살펴봅니다."
+  },
+  "sections": [
+    {
+      "title": "배열을 만든 다음에는 누가 데이터를 보관할까?",
+      "body": "**먼저 예측해 보세요.** 함수 안에서 만든 정점 배열을 GL에 전달하고 함수가 끝났습니다. GL은 사라진 지역 변수의 주소를 계속 읽어야 할까요? 이번에 사용할 `glBufferData`는 초기 데이터를 GL이 관리하는 저장소로 복사합니다. 배열의 주소를 영구 등록하는 방식과는 다릅니다.\n\n**버퍼**는 데이터를 담는 저장 공간입니다. OpenGL의 버퍼 객체는 그 저장 공간을 API로 만들고 사용할 수 있도록 식별자와 상태를 함께 관리합니다. 정점 데이터에 사용하는 버퍼를 흔히 **VBO**(Vertex Buffer Object)라고 부릅니다. VBO라는 별도 C++ 기본 타입이 생기는 것은 아닙니다.\n\n우리가 할 일은 정점 세 개의 24바이트를 복사하고, 저장된 크기와 내용을 확인한 뒤 정리하는 것입니다. CPU 배열과 GL 저장소는 소유자와 수명이 다릅니다. 또한 GL 저장소가 반드시 그래픽 카드의 전용 메모리에 놓인다고 가정하지 않습니다. 실제 배치는 드라이버와 하드웨어가 결정합니다.\n\n| 대상 | 관리하는 쪽 | 이번 코드에서 수명이 끝나는 때 |\n| --- | --- | --- |\n| 지역 Triangle 배열 | C++ 스코프 | 배열이 선언된 블록을 나갈 때 |\n| 버퍼 이름·객체 | GL, 사용자는 삭제 책임을 가짐 | 소유자가 DeleteBuffers를 호출할 때 |\n| current 컨텍스트 | 플랫폼 계층 | 버퍼 소유자를 정리한 뒤 플랫폼 종료 때 |\n\n정점의 값이 저장됐다는 것만으로 화면에 그림이 나오지는 않습니다. 읽는 형식과 셰이더, 그리기 명령은 다음 단계에서 연결합니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "렌더러가 준비한 CPU 데이터를 GL 저장소로 전달한다.",
+        "mayDiffer": "현재 게임은 배치마다 내용을 채우며 실습은 삼각형 한 개를 한 번 복사한다.",
+        "omitted": "정점 속성·셰이더·화면 그리기"
+      }
+    },
+    {
+      "title": "이름, 바인딩, 저장소를 세 단계로 나눈다",
+      "body": "`GLuint` 이름은 GL에 전달하는 식별자입니다. 예를 들어 값이 7이어도 메모리의 7번 주소라는 뜻이 아닙니다. 역참조하거나 C++의 delete에 넘기지 않습니다. 이름의 숫자가 연속으로 나온다고 가정할 필요도 없습니다.\n\n`GenBuffers`는 이름을 얻습니다. 그 이름을 처음 `BindBuffer`하면 버퍼 객체가 생기고, `BufferData`가 바이트 저장소를 정의합니다. 각 호출이 준비하는 것이 다릅니다.\n\n| 호출 | 준비되는 것 | 아직 준비되지 않은 것 |\n| --- | --- | --- |\n| `GenBuffers(1, &name)` | 예약된 이름 하나 | 24바이트 데이터 저장소 |\n| `BindBuffer(ArrayBuffer, name)` | 대상에 연결된 버퍼 객체 | 우리가 보낼 정점 데이터 |\n| `BufferData(ArrayBuffer, 24, data, StaticDraw)` | 24바이트 저장소와 복사한 초기 데이터 | 정점을 읽는 속성 형식·그리기 |\n\n**바인딩**은 이후 명령이 어떤 객체에 작용할지 선택하는 상태입니다. GL 3.3의 `BufferData`에는 name 인자가 없습니다. `ArrayBuffer`라는 대상에 현재 연결된 버퍼를 사용합니다. 중간에 다른 코드를 호출해 바인딩을 바꾸면 똑같은 BufferData 문장이 다른 객체에 작용할 수 있습니다.\n\n`BindBuffer(ArrayBuffer, 0)`은 이 대상의 연결을 비웁니다. 이름 0은 정점 저장소를 가진 일반 버퍼처럼 사용할 수 없습니다. 연결 해제와 객체 삭제는 다른 동작입니다.",
+      "codes": [
+        {
+          "label": "호출 순서의 뼈대 · 오류 처리는 뒤에서 추가",
+          "language": "cpp",
+          "text": "study_gl::GLuint name = 0;\ngl.GenBuffers(1, &name);\ngl.BindBuffer(study_gl::ArrayBuffer, name);\ngl.BufferData(study_gl::ArrayBuffer, 24, vertices.data(), study_gl::StaticDraw);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "API 읽기",
+          "title": "GenBuffers의 1과 BufferData의 24는 단위가 다릅니다",
+          "body": "GenBuffers의 첫 인자는 얻을 이름의 **개수**, BufferData의 크기는 **바이트 수**입니다. &name은 결과를 써 넣을 변수의 주소이고, vertices.data()는 복사할 원본 범위의 시작 주소입니다. [Khronos의 이름 생성 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glGenBuffers.xhtml)에서 두 역할을 구분해 보세요."
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "gl_GenBuffers(1, &s_vbo);",
+        "invariant": "버퍼 이름을 얻고 작업할 대상에 바인딩한다.",
+        "mayDiffer": "현재 게임은 초기화 때 이름을 만들고 flush 때 데이터 저장소를 정의한다.",
+        "omitted": "VAO 설정과 여러 버퍼 간 상태 관리"
+      }
+    },
+    {
+      "title": "함수 테이블에 버퍼 작업 여섯 개를 추가한다",
+      "body": "GL 테이블에 생성·바인딩·복사·삭제 함수와 관찰용 조회 함수 두 개를 추가합니다. `GetBufferParameteriv`로 크기를, `GetBufferSubData`로 저장소 일부의 내용을 CPU로 읽습니다. 조회는 이번 관찰 실습에 쓰며 매 프레임 렌더링에 넣을 필요는 없습니다.\n\n`GLuint`는 이름, `GLsizei`는 개수, `GLsizeiptr`는 바이트 크기, `GLintptr`는 바이트 위치에 사용합니다. 이름에 ptr이 있어도 마지막 두 타입은 포인터가 아닌 **부호 있는 정수**입니다. 이 대상의 헤더에서는 `std::ptrdiff_t`로 선언합니다.\n\n로더는 여섯 이름도 `resolve_slot`로 조회합니다. 모두 채워진 뒤에만 테이블을 공개하는 규칙과 호출 규약은 유지합니다. 버퍼 작업에 앞서 현재 컨텍스트의 버전·프로파일을 확인하는 코드도 남겨 둡니다. 아래 두 파일을 교체하면 총 아홉 함수가 테이블에 들어갑니다.",
+      "codes": [
+        {
+          "label": "GlApi에 추가 · 생성에서 읽기까지",
+          "language": "cpp",
+          "text": "void (STUDY_GL_CALL* GenBuffers)(GLsizei, GLuint*) = nullptr;\nvoid (STUDY_GL_CALL* BindBuffer)(GLenum, GLuint) = nullptr;\nvoid (STUDY_GL_CALL* BufferData)(GLenum, GLsizeiptr, const void*, GLenum) = nullptr;\nvoid (STUDY_GL_CALL* DeleteBuffers)(GLsizei, const GLuint*) = nullptr;\nvoid (STUDY_GL_CALL* GetBufferParameteriv)(GLenum, GLenum, GLint*) = nullptr;\nvoid (STUDY_GL_CALL* GetBufferSubData)(GLenum, GLintptr, GLsizeiptr, void*) = nullptr;"
+        },
+        {
+          "label": "교체 · GL 타입과 함수 테이블 전체",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/renderer/gl_api.h",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 함수 주소 로딩 전체",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/renderer/gl_api.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_api.h",
+        "symbol": "#define GL_FUNCS",
+        "invariant": "사용할 진입점과 타입을 명시하고 로딩 실패를 처리한다.",
+        "mayDiffer": "현재 게임은 매크로 목록을 쓰며 학습용 진단의 readback 함수는 포함하지 않는다.",
+        "omitted": "X-매크로로 선언·정의·로딩을 생성하는 과정"
+      }
+    },
+    {
+      "title": "복사가 끝난 뒤 CPU 배열을 바꿔도 되는 이유",
+      "body": "`BufferData`에 non-null 데이터 포인터를 넘기면 지정한 바이트 범위가 초기 데이터로 복사됩니다. 호출이 반환된 뒤 원본 배열을 수정하거나 수명을 끝내도 저장소 내용은 그대로입니다. 다만 나중에 실행할 그리기 명령까지 완료됐다는 뜻은 아닙니다. 드라이버가 명령을 처리하는 시간과 애플리케이션이 원본 배열을 유지해야 하는 시간은 구분합니다.\n\n포인터에 `nullptr`를 넘길 수도 있습니다. 이 경우 크기만큼 저장소는 생기지만 초기 내용은 정의되지 않습니다. 검은색 정점이나 좌표 0으로 채워진다고 생각하면 안 됩니다. 여기서는 곧바로 읽어 볼 것이므로 정점 배열을 전달합니다.\n\n`StaticDraw`는 내용을 한 번 준비하고 여러 번 그리기에 사용할 것이라는 **사용 패턴 힌트**입니다. 내용을 바꾸지 못하게 잠그는 옵션도, 물리 GPU 메모리 위치를 지정하는 옵션도 아닙니다. 아직 한 번도 그리지 않았더라도 나중의 사용 의도를 알려 줄 수 있습니다.\n\n크기에는 배열의 원소 수가 아니라 바이트 수를 넘깁니다. byte_count가 반환한 size_t를 GLsizeiptr로 바꾸기 전에 표현 가능한 범위인지 확인합니다. 지금 삼각형은 작지만, 서로 다른 정수 타입이 만나는 API 경계를 코드에 드러내는 습관을 만듭니다.",
+      "codes": [
+        {
+          "label": "upload 내부 · 부호 있는 GL 크기로 변환",
+          "language": "cpp",
+          "text": "const std::size_t bytes = study_mesh::byte_count(vertices);\nif (bytes > static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max())) {\n    std::fprintf(stderr, \"VertexBuffer::upload: mesh too large for GL\\n\");\n    return false;\n}\ngl_.BufferData(ArrayBuffer, static_cast<GLsizeiptr>(bytes),\n               vertices.data(), StaticDraw);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 계약",
+          "title": "C++ const void*는 불변 저장소라는 뜻이 아닙니다",
+          "body": "const는 이 호출이 원본 포인터를 통해 값을 수정하지 않는다는 인터페이스 표현입니다. GL 쪽 저장소를 이후에 바꿀 수 있는지와는 다른 문제입니다. [BufferData의 초기 데이터·usage 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glBufferData.xhtml)을 함께 읽어 보세요."
+        }
+      ]
+    },
+    {
+      "title": "소유자를 만들어 return 경로마다 정리되게 한다",
+      "body": "함수 중간에서 실패할 때마다 DeleteBuffers를 손으로 반복하면 한 경로를 빠뜨리기 쉽습니다. `VertexBuffer`가 이름 하나를 소유하고, 소멸자가 reset을 부르도록 만듭니다. reset은 이름이 있을 때 삭제한 다음 이름을 0으로 바꿉니다. 두 번 호출해도 같은 이름을 다시 삭제하지 않습니다.\n\n`gl_`은 함수 테이블에 대한 **비소유 참조**입니다. 테이블이나 컨텍스트를 이 클래스가 만들거나 없애지 않습니다. 따라서 테이블을 먼저 선언하고 소유자를 나중에 선언합니다. 블록을 나갈 때 역순으로 소멸하여 소유자가 먼저 정리됩니다. 컨텍스트는 이 전체 블록 밖에서 유지해야 합니다.\n\n이름 숫자만 복사하면 소유자 둘이 같은 객체를 삭제하려고 할 수 있습니다. 이번 클래스는 복사와 이동을 모두 막습니다. RAII가 이동을 금지하는 것은 아닙니다. 이동을 제공하려면 이름을 넘긴 뒤 원래 소유자의 이름을 0으로 만드는 동작까지 설계해야 하므로, 지금은 소유자 하나를 같은 스코프에서 사용합니다.\n\nupload는 빈 소유자에서 한 번 수행합니다. 이미 이름이 있으면 기존 버퍼를 유지하고 false를 돌려줍니다. 새로 시작하려면 reset 후 upload를 호출합니다. 이것은 이 클래스의 단순한 사용 계약이며 OpenGL이 저장소 갱신을 금지해서 생긴 제약은 아닙니다.",
+      "codes": [
+        {
+          "label": "정리의 핵심 · 이름과 C++ 상태를 함께 비운다",
+          "language": "cpp",
+          "text": "VertexBuffer::~VertexBuffer() noexcept { reset(); }\n\nvoid VertexBuffer::reset() noexcept {\n    if (name_ != 0) {\n        gl_.DeleteBuffers(1, &name_);\n        name_ = 0;\n    }\n}"
+        },
+        {
+          "label": "새 파일 · 버퍼 소유자의 공개 계약",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/renderer/vertex_buffer.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void renderer_shutdown()",
+        "invariant": "GL 자원은 current 컨텍스트가 유지되는 동안 정리한다.",
+        "mayDiffer": "현재 게임은 renderer_shutdown에서 여러 자원을 정리하고, 학습 코드는 스코프 소유자를 쓴다.",
+        "omitted": "여러 컨텍스트·공유 객체·이동 소유자"
+      }
+    },
+    {
+      "title": "생성 중 실패한 이름도 남겨 두지 않는다",
+      "body": "세 단계의 성공 조건을 각각 확인합니다. 이름 생성이 실패하면 바인딩하지 않고, 바인딩이 실패하면 데이터를 보내지 않습니다. 저장소 정의가 실패했더라도 이미 얻은 이름은 정리해야 합니다. 한 단계가 실패하면 reset 후 false로 반환합니다.\n\n| 실패 위치 | 이미 가진 것 | 처리 |\n| --- | --- | --- |\n| 함수 진입에 오류가 남아 있음 | 없음 | 오류를 알리고 시작하지 않음 |\n| 이름 생성 | 없거나 반환된 이름 | 이름이 있으면 정리 |\n| 바인딩 | 이름 | 정리 후 반환 |\n| 데이터 저장소 정의 | 이름·버퍼 객체 | 정리 후 반환 |\n\n`GetError`는 현재 컨텍스트의 오류 상태를 읽고 해당 오류를 지웁니다. 특정 C++ 객체만의 오류함이 아니므로, 진입부터 오류가 남아 있으면 새 작업 탓으로 돌리지 않고 알립니다. 오류를 발견하면 진행을 중단하여 다음 작업과 섞이지 않게 합니다.\n\n바인딩은 성공 후에도 그대로 둡니다. 초기화 단계에서 이 함수가 작업할 버퍼를 선택한다는 계약입니다. 임의의 렌더링 중간에 삽입해 호출 전 상태까지 자동 복원하는 범용 도구는 아닙니다. 나중에 여러 객체가 상태를 바꾸기 시작하면 호출 순서나 상태 복원 책임을 추가해야 합니다.",
+      "codes": [
+        {
+          "label": "upload 내부 · 앞 단계가 실패하면 진행하지 않는다",
+          "language": "cpp",
+          "text": "gl_.GenBuffers(1, &name_);\nif (!stage_ok(gl_, \"glGenBuffers\") || name_ == 0) {\n    reset();\n    return false;\n}\ngl_.BindBuffer(ArrayBuffer, name_);\nif (!stage_ok(gl_, \"glBindBuffer\")) {\n    reset();\n    return false;\n}"
+        },
+        {
+          "label": "새 파일 · 업로드와 실패 정리 전체",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/renderer/vertex_buffer.cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "여러 오류 상태를 모두 읽으려면",
+          "body": "이 보조 함수는 경계마다 GetError를 한 번 호출하고 오류를 만나면 진행을 중단합니다. 남은 오류 상태까지 수집하려면 GL_NO_ERROR가 반환될 때까지 반복해서 읽는 별도 진단 경로가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "같은 세션에서 배열 수명과 버퍼 수명을 나눈다",
+      "body": "run_session에서 GL 정보 조회가 끝난 다음 버퍼 소유자를 선언합니다. 그 안쪽의 작은 블록에서 삼각형을 만들고 upload에 전달합니다. 블록이 끝나면 배열은 사라지지만 소유자는 입력 루프가 끝날 때까지 남습니다.\n\n이후 `GetBufferParameteriv(ArrayBuffer, BufferSize, &stored_bytes)`로 저장된 크기를 읽습니다. 여기에는 byte_count의 결과인 24가 나와야 합니다. 크기가 다르면 원소 수를 바이트 수로 착각했는지, 다른 버퍼가 바인딩됐는지부터 확인합니다. 이 실습의 작은 저장소는 GLint 범위에 들어가므로 정수 조회 함수를 사용합니다.\n\nmain은 run_session이 반환된 뒤 platform_shutdown을 호출합니다. run_session 내부의 소유자는 return 경로에서도 먼저 소멸하므로 버퍼 삭제가 컨텍스트 종료보다 앞섭니다. GL 호출을 하는 소멸자는 컨텍스트가 계속 current라는 전제까지 필요합니다. 단순히 객체의 선언 순서만 맞추고 중간에 컨텍스트를 파괴해서는 안 됩니다.",
+      "codes": [
+        {
+          "label": "run_session에 추가 · GL 정보 조회 다음",
+          "language": "cpp",
+          "text": "study_gl::VertexBuffer vertex_buffer(gl);\n{\n    const auto vertices = study_mesh::make_triangle();\n    if (!vertex_buffer.upload(vertices)) return 1;\n}\nstudy_gl::GLint stored_bytes = 0;\ngl.GetBufferParameteriv(study_gl::ArrayBuffer, study_gl::BufferSize, &stored_bytes);\nif (gl.GetError() != 0 || stored_bytes != 24) return 1;\nstd::printf(\"GL vertex buffer stores %d bytes (not drawn)\\n\", stored_bytes);"
+        },
+        {
+          "label": "교체 · 버퍼 수명을 포함한 main 전체",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "크기만 보지 말고 복사된 내용을 다시 읽는다",
+      "body": "**원본의 x를 99로 바꾸면 저장소에서 읽은 값도 99일까요?** 업로드 후 CPU 배열만 바꿨다면 GL 저장소의 첫 x는 원래 값 -0.5여야 합니다. `GetBufferSubData`로 처음부터 24바이트를 읽어 각 정점의 x·y와 비교해 봅니다.\n\n읽을 때도 대상·시작 위치·길이·출력 주소가 필요합니다. 시작 위치 0과 길이 24의 단위는 바이트입니다. 출력 배열에는 그만큼 쓸 공간이 있어야 합니다. 이 예제는 입력과 출력에 같은 Triangle 타입을 사용하므로 배치가 맞습니다.\n\n이런 읽기 되돌림을 **readback**이라고 부릅니다. 내부 처리를 기다리는 비용이 생길 수 있어 매 프레임 결과를 확인하는 방법으로 넣지는 않습니다. 지금은 CPU 원본과 GL 저장소가 별개라는 성질을 관찰하는 용도로 사용합니다.\n\nbuffer_probe에는 배열을 수정하고 스코프를 끝낸 다음 읽는 실험이 들어 있습니다. 비교 코드는 바이트 주소를 숫자처럼 출력하는 대신 정점의 실제 값이 같은지 확인합니다.",
+      "codes": [
+        {
+          "label": "관찰 실험의 핵심 · CPU로 24바이트 읽기",
+          "language": "cpp",
+          "text": "study_mesh::Triangle actual{};\ngl.GetBufferSubData(study_gl::ArrayBuffer, 0,\n    static_cast<study_gl::GLsizeiptr>(study_mesh::byte_count(actual)), actual.data());\nif (gl.GetError() != 0) return false;\nconst auto expected = study_mesh::make_triangle();\nfor (std::size_t i = 0; i < actual.size(); ++i) {\n    if (actual[i].x != expected[i].x || actual[i].y != expected[i].y) return false;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "데이터 방향",
+          "title": "업로드와 readback의 포인터 역할",
+          "body": "BufferData의 `const void*`는 CPU의 입력 범위를 가리키고, GetBufferSubData의 `void*`는 결과를 써 넣을 CPU 출력 범위를 가리킵니다. 두 경우 모두 크기를 별도로 지정합니다. [Khronos readback 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glGetBufferSubData.xhtml)에서 offset과 size의 범위를 확인할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "연결 해제·저장소 교체·삭제를 비교한다",
+      "body": "버퍼를 0으로 바인딩해 연결을 비운 뒤 원래 이름을 다시 바인딩해 읽어 봅니다. 내용은 그대로입니다. 반면 아무 버퍼도 연결되지 않은 상태에서 BufferData를 호출하면 GL_INVALID_OPERATION 오류가 납니다. 버퍼 변수에 유효한 이름이 남아 있다는 사실만으로 호출 대상이 자동 선택되지는 않습니다.\n\n같은 이름을 바인딩한 채 BufferData를 다시 호출하면 저장소를 다른 크기로 정의할 수 있습니다. 관찰 프로그램은 정점 두 개인 16바이트로 바꾸고 그 크기와 값을 읽습니다. 이름은 유지되지만 저장소의 크기·내용은 달라집니다. StaticDraw를 사용해도 이 동작이 금지되지 않습니다. 이는 raw GL 호출 실험이며, 중복 upload를 거부하는 우리 클래스의 정책과 구분합니다.\n\n끝으로 reset을 호출합니다. DeleteBuffers는 C++ 변수에 저장된 숫자를 직접 0으로 바꿔 주지 않으므로 reset이 그 대입을 함께 합니다. 삭제한 이름은 나중에 재사용될 수 있습니다. 옛 숫자가 남았다는 이유로 아직 자신의 버퍼라고 판단하면 안 됩니다.\n\n이 객체의 삭제 요청과 드라이버 내부의 물리 메모리 회수 시점도 같은 개념은 아닙니다. 프로그램은 API가 정한 객체 수명을 지키고, 진행 중인 작업에 필요한 내부 보관은 구현에 맡깁니다.",
+      "codes": [
+        {
+          "label": "관찰 실험 · 같은 이름에 더 작은 저장소 정의",
+          "language": "cpp",
+          "text": "gl.BindBuffer(study_gl::ArrayBuffer, buffer.name());\nconst study_mesh::Vertex2 replacement[2] = {{1, 2}, {3, 4}};\ngl.BufferData(study_gl::ArrayBuffer, sizeof(replacement),\n              replacement, study_gl::StaticDraw);\n// Query size and read back before reset(); expect 16 bytes and these two vertices.\nbuffer.reset();"
+        }
+      ]
+    },
+    {
+      "title": "현재 게임은 배치마다 저장소를 다시 정의한다",
+      "body": "현재 렌더러는 초기화 때 s_vbo의 이름과 바인딩을 만들고, glb_flush에서 모은 정점을 BufferData로 보냅니다. 호출이 반환된 뒤 CPU vector를 clear해 다음 배치를 준비합니다. 원본 배열을 계속 보관하지 않아도 되는 복사 계약을 이용하는 것입니다.\n\n실습의 StaticDraw와 달리 현재 게임은 StreamDraw를 사용합니다. 한 번 채운 배치 데이터를 적은 횟수로 그리기에 사용한다는 힌트입니다. 텍스처가 바뀌면 프레임 중에도 flush하므로 ‘프레임당 반드시 한 번 업로드’라는 뜻은 아닙니다.\n\n저장소를 다시 정의하면 드라이버가 진행 중인 작업의 저장소와 새 저장소를 분리하는 **오펀링** 전략을 선택할 여지가 있습니다. 그러나 API 호출만으로 새 물리 메모리 할당이나 대기 없는 실행을 보장하지는 않습니다. 다른 갱신 방식과의 성능 비교는 실제 배치 크기와 사용 패턴을 두고 해야 합니다.\n\n지금 유지할 핵심은 데이터를 만드는 쪽과 GL 자원을 소유하는 쪽을 구별하는 것입니다. 정점 형식·배치 횟수·갱신 전략은 렌더러가 커지면서 달라질 수 있습니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "gl_BufferData(GL_ARRAY_BUFFER,",
+        "invariant": "CPU 원본 범위를 복사하고 GL 객체는 렌더러 수명 동안 관리한다.",
+        "mayDiffer": "현재 게임은 float 배열과 StreamDraw를 사용하며 배치마다 저장소를 다시 정의한다.",
+        "omitted": "부분 갱신·링 버퍼·동기화 최적화"
+      }
+    },
+    {
+      "title": "파일을 연결하고 버퍼 관찰 프로그램을 실행한다",
+      "body": "13-vertex-data를 `14-vbo`로 복사합니다. gl_api.h/cpp와 main을 교체하고 vertex_buffer.h/cpp, tests/buffer_contract.cpp, tests/buffer_real.cpp를 추가합니다. 로더의 함수 수가 늘었으므로 tests/loader_contract.cpp도 교체합니다. 플랫폼·mesh.h·CPU 관찰 실행은 유지합니다.\n\n새 `study_buffer` 라이브러리는 study_gl과 study_mesh를 사용합니다. SDL 실행 파일과 버퍼 관찰 프로그램이 여기에 연결됩니다. buffer_contract는 GL 호출의 반환을 바꾸는 대역으로 실패 시 정리 순서를 확인합니다. buffer_probe는 실제 SDL 컨텍스트를 만들어 저장소를 읽습니다.\n\n저장소 루트에서 빌드합니다. SDL2 개발 패키지와 pkg-config가 필요하며, 실행 경로는 Linux 단일 구성 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/14-vbo -B out/study-14 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-14\nctest --test-dir out/study-14 --output-on-failure\n./out/study-14/tetris\n```\n\n버퍼가 준비되면 `GL vertex buffer stores 24 bytes (not drawn)` 로그가 나옵니다. 입력 루프 동안 이름이 유지되고 창을 닫거나 Escape를 누르면 정리됩니다. Windows의 다중 구성 생성기에서는 빌드와 CTest에 구성 이름을 지정하고 실행 파일의 Debug/Release 하위 경로를 사용합니다.\n\nLinux에서 창 표시 없이 관찰하려면 offscreen GL을 지원하는 SDL 환경에서 아래 명령을 실행합니다. 이 프로그램은 readback만 하므로 더블 버퍼 표시를 요청하지 않습니다.\n\n```sh\nSDL_VIDEODRIVER=offscreen ./out/study-14/buffer_probe\n```\n\n출력에서 24바이트 일치 → 연결 해제 후 내용 유지 → 16바이트로 교체 → 정리 순서를 확인합니다. 각 동작이 버퍼 상태를 어떻게 바꾸는지 따라가 보세요.\n\n완성 파일에서 검사 코드도 읽어 보세요. 삭제 호출을 빠뜨렸을 때 정리 횟수 검사가 왜 실패하는지, 실패한 upload가 다음 바인딩·복사로 넘어가지 않는지 설명할 수 있어야 합니다. 다음에는 이 저장소를 두 성분의 정점으로 읽도록 VAO에 속성 형식을 연결합니다.",
+      "codes": [
+        {
+          "label": "교체 · CMake 타깃 연결 전체",
+          "language": "cmake",
+          "file": "checkpoints/14-vbo/CMakeLists.txt",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 아홉 진입점의 로딩 검사",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/tests/loader_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 버퍼 수명과 실패 정리 검사",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/tests/buffer_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 실제 저장소 복사·조회 실험",
+          "language": "cpp",
+          "file": "checkpoints/14-vbo/tests/buffer_real.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "13-vertex-data 사본에 버퍼 소유자와 관찰 프로그램을 추가하고 GL 테이블·로더·CMake·main을 갱신한다.",
+      "GenBuffers·BindBuffer·BufferData 직후의 이름·바인딩·저장소 상태를 표로 적는다.",
+      "누적 tetris에서 24바이트 저장 로그와 종료 경로를 확인한다.",
+      "buffer_probe에서 원본 수정과 소멸 후에도 정점 값이 보존되는지 확인한다.",
+      "연결 해제·16바이트 재정의·reset이 각각 바꾸는 상태를 비교한다."
+    ],
+    "expected": "같은 이름의 GL 저장소에 24바이트를 복사하고 읽어 봅니다. 원본 배열을 없애도 내용이 남는 이유와 컨텍스트보다 버퍼를 먼저 정리해야 하는 이유를 설명합니다.",
+    "failureChecks": [
+      "진입점 누락이면 함수 테이블과 로더의 이름 목록을 대조한다.",
+      "GL_INVALID_OPERATION이면 ArrayBuffer에 0을 바인딩한 채 저장소를 정의했는지 확인한다.",
+      "저장 크기가 3이라면 정점 수를 바이트 수로 넘기지 않았는지 확인한다.",
+      "readback의 출력 공간과 바이트 길이가 맞는지 확인한다.",
+      "소멸자 호출 전에 컨텍스트를 파괴하거나 다른 current 연결로 바꾸지 않았는지 확인한다."
+    ]
+  },
+  "questions": [
+    {
+      "id": "14-1",
+      "kind": "복사와 수명",
+      "question": "첫 x가 -0.5인 배열을 BufferData로 복사한 뒤 원본 x만 99로 바꾸고 배열을 없앴습니다. 같은 버퍼를 읽으면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "원본이 없으므로 항상 GL 오류가 난다."
+        },
+        {
+          "id": "b",
+          "text": "복사한 첫 x는 -0.5로 남는다."
+        },
+        {
+          "id": "c",
+          "text": "원본 수정이 공유되어 첫 x는 99다."
+        },
+        {
+          "id": "d",
+          "text": "원본 소멸과 함께 첫 x는 0이 된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "복사한 첫 x는 -0.5로 남는다.",
+      "explanation": "BufferData는 지정한 범위를 초기 데이터로 복사합니다. 호출 후 CPU 원본을 수정하거나 없애도 저장소 내용은 자동 변경되지 않습니다. GL 버퍼의 수명은 별도로 유지해야 합니다."
+    },
+    {
+      "id": "14-2",
+      "kind": "호출 대상",
+      "question": "버퍼 이름은 변수에 남아 있습니다. BindBuffer(ArrayBuffer,0) 뒤 BufferData(ArrayBuffer,24,data,StaticDraw)를 호출하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "남은 이름 변수를 찾아 그 버퍼를 갱신한다."
+        },
+        {
+          "id": "b",
+          "text": "이름 0에 새 버퍼를 만들고 복사한다."
+        },
+        {
+          "id": "c",
+          "text": "대상에 버퍼가 없어 GL_INVALID_OPERATION이 난다."
+        },
+        {
+          "id": "d",
+          "text": "직전에 연결했던 버퍼를 자동으로 다시 연결한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "대상에 버퍼가 없어 GL_INVALID_OPERATION이 난다.",
+      "explanation": "BufferData는 name 변수를 받지 않고 현재 바인딩된 대상을 사용합니다. 바인딩 0은 연결 해제이므로 먼저 사용할 이름을 다시 바인딩해야 합니다. 연결 해제만으로 기존 객체가 삭제되지는 않습니다."
+    },
+    {
+      "id": "14-3",
+      "kind": "소멸 순서",
+      "question": "VertexBuffer 소멸자가 DeleteBuffers를 호출합니다. 플랫폼과 버퍼 수명을 올바르게 배치한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "run_session 안에서 버퍼를 정리하고, 반환 후 platform_shutdown을 호출한다."
+        },
+        {
+          "id": "b",
+          "text": "platform_shutdown을 먼저 호출하고, return으로 버퍼를 정리한다."
+        },
+        {
+          "id": "c",
+          "text": "GL 테이블을 먼저 없앤 뒤 버퍼 소멸자를 호출한다."
+        },
+        {
+          "id": "d",
+          "text": "버퍼 이름이 정수이므로 컨텍스트 종료 순서는 무관하다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "run_session 안에서 버퍼를 정리하고, 반환 후 platform_shutdown을 호출한다.",
+      "explanation": "소멸자도 GL 함수를 호출하므로 함수 테이블과 적절한 current 컨텍스트가 살아 있어야 합니다. 지역 소유자가 있는 함수를 빠져나온 다음 플랫폼을 종료하면 정상·실패 return 모두 같은 순서를 따릅니다."
+    },
+    {
+      "id": "14-4",
+      "kind": "초기 내용",
+      "question": "바인딩된 버퍼에 BufferData(ArrayBuffer,24,nullptr,StaticDraw)를 호출해 성공했습니다. 내용을 읽기 전에 올바른 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "24바이트 전체가 0으로 초기화됐다."
+        },
+        {
+          "id": "b",
+          "text": "직전 저장소의 앞 24바이트가 보존됐다."
+        },
+        {
+          "id": "c",
+          "text": "nullptr이므로 저장소 크기도 0이다."
+        },
+        {
+          "id": "d",
+          "text": "크기는 24바이트지만 초기 내용은 정의되지 않았다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "크기는 24바이트지만 초기 내용은 정의되지 않았다.",
+      "explanation": "nullptr는 복사할 초기 데이터를 제공하지 않는다는 뜻입니다. 요청한 크기의 저장소를 정의하지만 내용이 0이거나 이전 값이라고 가정하면 안 됩니다. 사용할 데이터는 별도로 채워야 합니다."
+    },
+    {
+      "id": "14-5",
+      "kind": "사용 패턴",
+      "question": "StaticDraw로 24바이트를 만든 같은 버퍼에 16바이트 BufferData를 다시 호출하는 것을 해석하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "StaticDraw가 변경을 금지하므로 항상 실패한다."
+        },
+        {
+          "id": "b",
+          "text": "이름도 반드시 다른 숫자로 바뀐다."
+        },
+        {
+          "id": "c",
+          "text": "이름을 유지하며 저장소를 16바이트로 다시 정의할 수 있다."
+        },
+        {
+          "id": "d",
+          "text": "새 데이터는 기존 24바이트 뒤에 자동 추가된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "이름을 유지하며 저장소를 16바이트로 다시 정의할 수 있다.",
+      "explanation": "StaticDraw는 사용 패턴 힌트입니다. BufferData는 바인딩된 객체의 저장소를 새 크기와 내용으로 정의하며 이름을 새로 만드는 호출이 아닙니다. 우리 VertexBuffer의 중복 upload 거부는 별도로 정한 클래스 정책입니다."
+    }
+  ]
+}

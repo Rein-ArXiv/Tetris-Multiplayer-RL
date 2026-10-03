@@ -1,31 +1,17 @@
-// [NET/RL] Determinism regression test — renderer-free.
-//
-// Runs SimGame through a FIXED deterministic sequence of inputs and ticks,
-// then dumps the state hash at well-known checkpoints. This binary is the
-// ground truth for three separate gates:
-//
-//   1. Refactor parity:        old Game::ComputeStateHash()
-//                              == new SimGame::StateHash()
-//      (run the same input sequence with both versions and diff the output)
-//
-//   2. Cross-platform parity:  Linux (Colab) build
-//                              == Windows (local) build
-//      (XorShift64* + FNV-1a are pure integer ops, but int widths and
-//       unsigned modulo behaviour are worth verifying explicitly)
-//
-//   3. CI regression:          any code change that is *supposed* to preserve
-//      behaviour should not change this dump. If the hash moves, the change
-//      touched sim semantics and every lockstep peer will desync.
-//
-// Usage:
-//   sim_hash_dump              -> prints hash checkpoints to stdout
-//   sim_hash_dump > out.txt    -> capture for diff
-//
-// The test does NOT depend on net/, the renderer, or any I/O other than stdout.
+// Renderer-free observation emitter for a fixed legacy-hash regression script.
+// The output is a candidate capture, not an independent oracle of rule correctness.
+// Compare like-for-like rules, seed/input script, hash format and observation boundaries.
+// A mismatch may arise from rules, encoding, inputs, build differences or a regression.
+// Cross-platform claims require observations from each actual target build.
+// Capture a separate file for review; do not overwrite the committed reference on failure.
+// Usage: sim_hash_dump > candidate-sim-hash.txt
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
+#include <charconv>
+#include <optional>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "../src/sim_game.h"
@@ -33,6 +19,25 @@
 #include "../core/constants.h"
 
 namespace {
+
+// Preserve base-0 seed notation: decimal, leading-zero octal, or 0x hexadecimal.
+// Reject signs, whitespace, trailing characters and uint64 overflow before output.
+std::optional<uint64_t> parse_seed(std::string_view text)
+{
+    if (text.empty() || text.front() == '+' || text.front() == '-') return std::nullopt;
+    int base = 10;
+    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        base = 16;
+        text.remove_prefix(2);
+    } else if (text.size() > 1 && text[0] == '0') {
+        base = 8;
+        text.remove_prefix(1);
+    }
+    uint64_t value = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value, base);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) return std::nullopt;
+    return value;
+}
 
 struct Step
 {
@@ -50,7 +55,7 @@ struct Step
 //   - multi-tick gravity without input
 //   - block locks and bag refills
 //
-// Length is modest (~60 placements worth) but every branch is hit.
+// This finite scenario samples those actions; it does not cover every rule branch.
 const Step kScript[] = {
     { INPUT_NONE,                           30 },
     { INPUT_LEFT,                            1 },
@@ -146,7 +151,12 @@ int main(int argc, char** argv)
         seeds.clear();
         for (int i = 1; i < argc; ++i)
         {
-            seeds.push_back(static_cast<uint64_t>(std::strtoull(argv[i], nullptr, 0)));
+            const auto seed = parse_seed(argv[i]);
+            if (!seed) {
+                std::fprintf(stderr, "invalid seed: use unsigned decimal, octal or 0x hexadecimal uint64\n");
+                return 2;
+            }
+            seeds.push_back(*seed);
         }
     }
 
@@ -158,5 +168,5 @@ int main(int argc, char** argv)
         std::printf("\n");
     }
 
-    return 0;
+    return std::fflush(stdout) == 0 && !std::ferror(stdout) ? 0 : 1;
 }

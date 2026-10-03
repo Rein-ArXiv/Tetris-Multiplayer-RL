@@ -1,7 +1,7 @@
 // renderer/renderer.cpp — OpenGL 3.3 Core 2D 렌더러
 //
 // 게임 코드가 부르는 draw_* 는 즉시 그리지 않고 정점을 큐에 쌓는다.
-// 텍스처가 바뀌는 지점과 프레임 끝에서만 실제 draw call 이 나간다.
+// 텍스처 변경·프레임 끝·아틀라스 재활용 경계에서 쌓인 정점을 제출한다.
 //
 // 좌표계는 논리 픽셀(좌상단 원점)이고, NDC 변환은 vertex 셰이더가 한다.
 // 그래서 이 파일에는 투영 행렬이 없다 — u_screen 하나로 충분하다.
@@ -12,6 +12,7 @@
 #include "image.h"
 
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -33,7 +34,7 @@ static GLint  s_u_tex       = -1;
 // 정점 하나: pos(2) uv(2) color(4) local(2) half(2) radius(1) channel(1)
 static constexpr int kFloatsPerVertex = 14;
 
-static std::vector<float> s_verts;      // 프레임 내내 재사용 — 재할당 방지
+static std::vector<float> s_verts;      // 용량 재사용 — capacity를 넘으면 재할당 가능
 static GLuint             s_batch_tex = 0;
 static bool               s_ready     = false;
 
@@ -42,6 +43,10 @@ static bool               s_ready     = false;
 static GLuint compile_shader(GLenum type, const char* src, const char* label)
 {
     GLuint s = gl_CreateShader(type);
+    if (!s) {
+        std::fprintf(stderr, "[GL] %s shader creation failed.\n", label);
+        return 0;
+    }
     gl_ShaderSource(s, 1, &src, nullptr);
     gl_CompileShader(s);
 
@@ -73,6 +78,12 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
     }
 
     GLuint p = gl_CreateProgram();
+    if (!p) {
+        std::fprintf(stderr, "[GL] program creation failed.\n");
+        gl_DeleteShader(vs);
+        gl_DeleteShader(fs);
+        return 0;
+    }
     gl_AttachShader(p, vs);
     gl_AttachShader(p, fs);
     gl_LinkProgram(p);
@@ -89,7 +100,8 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
         p = 0;
     }
 
-    // 링크가 끝나면 셰이더 객체는 프로그램이 참조를 들고 있으므로 놓아준다.
+    // 삭제를 요청한다. 성공한 프로그램에 붙어 있는 셰이더의 실제 삭제는
+    // 프로그램 삭제로 연결이 해제될 때까지 지연되며, 링크된 실행 코드는 유지된다.
     gl_DeleteShader(vs);
     gl_DeleteShader(fs);
     return p;
@@ -108,8 +120,8 @@ static void push_vertex(float x, float y, float u, float v, Color c,
     });
 }
 
-// 텍스처가 바뀌면 지금까지 쌓인 것을 먼저 내보낸다. 한 draw call 은 한
-// 텍스처만 쓸 수 있기 때문이다.
+// 이 배처는 draw마다 한 텍스처를 바인딩한다. 텍스처가 바뀌기 전에
+// 쌓인 정점을 먼저 그려 같은 배치의 텍스처 해석을 유지한다.
 static void ensure_texture(GLuint tex)
 {
     if (s_batch_tex != tex) {
@@ -135,6 +147,16 @@ void glb_flush()
                   (GLsizei)(s_verts.size() / kFloatsPerVertex));
 
     s_verts.clear();
+}
+
+// The texture must stay alive until CPU vertices that name it are submitted.
+// Forget the name as well: GL may reuse it for a different texture later.
+void glb_before_texture_delete(GLuint tex)
+{
+    if (tex && s_batch_tex == tex) {
+        glb_flush();
+        s_batch_tex = 0;
+    }
 }
 
 void glb_rect(GLuint tex,
@@ -172,6 +194,8 @@ void glb_rect(GLuint tex,
     }
 }
 
+// px/py와 uu/vv는 같은 꼭짓점 순서(TL, TR, BR, BL)를 공유한다.
+// 고정 대각선 0-2를 쓰므로 호출자는 뒤틀리거나 교차하지 않는 볼록 사각형을 준다.
 void glb_quad(GLuint tex,
               const float px[4], const float py[4],
               const float uu[4], const float vv[4],
@@ -240,6 +264,8 @@ bool renderer_init(int screen_w, int screen_h)
     gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    // RGB는 straight-alpha 입력으로 합성한다. 저장 alpha에는 같은 계수가 적용되어
+    // As*As + Ad*(1-As)가 된다. 투명한 중간 이미지의 source-over에는 별도 설정이 필요하다.
     gl_Enable(GL_BLEND);
     gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -261,13 +287,14 @@ void renderer_begin(Color bg)
     int vx = 0, vy = 0, vw = 0, vh = 0;
     platform_viewport(vx, vy, vw, vh);
 
-    // 창이 최소화되면 뷰포트가 0x0 이 된다. 지울 곳도 그릴 곳도 없으니
-    // 건너뛴다. 게임 코드는 최소화 여부를 모르고 계속 draw_* 를 부르지만,
+    // 플랫폼이 빈 표시 영역을 반환하면 배경 지우기를 건너뛰고 GL 뷰포트를
+    // 0x0으로 설정한다. 게임 코드는 최소화 여부를 모르고 draw_* 를 부르지만,
     // 그 정점들은 프레임 끝의 glb_flush 가 0x0 뷰포트로 흘려보내고 큐를
     // 비우므로 쌓이지는 않는다. 다만 배처 상태는 여기서 맞춰 둔다 —
     // 그러지 않으면 첫 프레임부터 최소화로 시작했을 때 glUseProgram 을
     // 한 번도 부르지 않은 채 glDrawArrays 에 도달한다.
     if (vw <= 0 || vh <= 0) {
+        gl_Viewport(0, 0, 0, 0); // 이전 프레임의 GL 뷰포트를 남기지 않는다.
         gl_UseProgram(s_prog);
         s_verts.clear();
         s_batch_tex = s_white;
@@ -275,7 +302,8 @@ void renderer_begin(Color bg)
     }
     gl_Viewport(vx, vy, vw, vh);
 
-    // 뷰포트는 논리 종횡비를 유지하므로 가로/세로 배율이 같다. 세로로 잰다.
+    // 정수 뷰포트의 반올림 때문에 두 축 배율은 조금 다를 수 있다.
+    // 글리프 배율은 세로 높이를 기준으로 정한다.
     s_render_scale = (float)vh / (float)s_screen_h;
 
     // glClear 는 뷰포트가 아니라 시저 박스를 따른다. glViewport 만 좁혀 놓고
@@ -303,9 +331,8 @@ void renderer_begin(Color bg)
 
 void renderer_set_view_offset(int dx, int dy)
 {
-    // 오프셋이 바뀌기 전에 쌓인 것을 비운다. 그렇지 않으면 이전 오프셋으로
-    // 만들어진 정점과 새 오프셋 정점이 한 배치에 섞인다.
-    if (dx != s_view_ox || dy != s_view_oy) glb_flush();
+    // glb_rect/glb_quad bake the offset into each submitted CPU vertex.
+    // Different baked offsets can share one ordered batch; no GPU state changes.
     s_view_ox = dx;
     s_view_oy = dy;
 }
@@ -320,6 +347,7 @@ void renderer_end()
 void renderer_shutdown()
 {
     if (s_ready) {
+        glb_flush(); // Submit while every referenced texture/program/buffer is alive.
         image_shutdown();
         renderer_text_shutdown();
         if (s_white) gl_DeleteTextures(1, &s_white);
@@ -341,13 +369,14 @@ void draw_rect(int x, int y, int w, int h, Color c)
 
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c)
 {
+    if (w <= 0 || h <= 0 || !std::isfinite(roundness)) return;
     if (roundness < 0.0f) roundness = 0.0f;
     if (roundness > 1.0f) roundness = 1.0f;
     const float shorter = (float)(w < h ? w : h);
     const float radius  = roundness * 0.5f * shorter;
 
-    // 반지름이 1픽셀 미만이면 SDF 를 켜지 않는다. 각진 사각형과 결과가
-    // 같으면서 경계가 불필요하게 흐려지는 것을 막는다.
+    // 논리 반지름이 1 미만이면 각진 사각형으로 근사한다.
+    // 작은 양수 반지름의 SDF 결과와 수학적으로 같은 것은 아니다.
     glb_rect(s_white, (float)x, (float)y, (float)w, (float)h,
              0.0f, 0.0f, 1.0f, 1.0f, c,
              radius < 1.0f ? 0.0f : radius, 0.0f);

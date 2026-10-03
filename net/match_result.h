@@ -10,6 +10,10 @@ enum class ResultStatus : uint8_t {
     SaveFailed = 4,
     Draw = 5
 };
+// Failed/unknown replies carry placeholders, not a confirmed profile update.
+inline int rating_after_result(int current, int reported, ResultStatus status) {
+    return status == ResultStatus::Applied || status == ResultStatus::Draw ? reported : current;
+}
 inline const char *result_status_text(ResultStatus status) {
     switch (status) {
     case ResultStatus::Applied:

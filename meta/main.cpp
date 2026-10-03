@@ -82,7 +82,7 @@ void print_usage()
         "  --relay-secret SECRET  Shared secret required on POST /v1/matches.\n"
         "                         Defaults to TETRIS_RELAY_SECRET if set.\n"
         "  --allow-public-matches Allow unauthenticated POST /v1/matches.\n"
-        "                         Intended only for local development/tests.\n"
+        "                         Without a secret, bind only to 127.0.0.1 or ::1.\n"
         "\n"
         "Endpoints:\n"
         "  POST /v1/guest        — create anonymous player, returns token + elo(RP)=0\n"
@@ -141,6 +141,16 @@ int main(int argc, char** argv)
                      "[meta] refusing to start: POST /v1/matches requires "
                      "--relay-secret or TETRIS_RELAY_SECRET. For local-only "
                      "tests, pass --allow-public-matches explicitly.\n");
+        return 2;
+    }
+
+    // The unauthenticated result route is a local test escape hatch only.
+    // Numeric addresses avoid depending on hostname resolution for this boundary.
+    if (args.relay_secret.empty() && args.allow_public_matches &&
+        args.http_host != "127.0.0.1" && args.http_host != "::1") {
+        std::fprintf(stderr,
+                     "[meta] --allow-public-matches without a secret requires a "
+                     "numeric loopback bind (127.0.0.1 or ::1).\n");
         return 2;
     }
 

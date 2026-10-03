@@ -80,6 +80,7 @@ def test_new_accounts_store_only_hashes(account_api):
 def test_legacy_tokens_migrate_once_without_losing_progress(tmp_path):
     db = tmp_path / "legacy.db"
     token = secrets.token_hex(16)
+    peers = {29: secrets.token_hex(16), (1 << 63) - 1: secrets.token_hex(16)}
     with sqlite3.connect(db) as con:
         con.executescript("""PRAGMA user_version=1;
             CREATE TABLE players(id INTEGER PRIMARY KEY,username TEXT,token TEXT UNIQUE NOT NULL,
@@ -87,6 +88,8 @@ def test_legacy_tokens_migrate_once_without_losing_progress(tmp_path):
               bp INTEGER NOT NULL DEFAULT 0,xp INTEGER NOT NULL DEFAULT 0,selected_icon_id TEXT NOT NULL DEFAULT 'default',
               created_at INTEGER NOT NULL);""")
         con.execute("INSERT INTO players VALUES(7,'player',?,123,4,2,80,900,'default',1234)", (token,))
+        for player, raw in peers.items():
+            con.execute("INSERT INTO players VALUES(?,'peer',?,123,4,2,80,900,'default',1234)", (player, raw))
     assert token.encode() in db.read_bytes()
     for _ in range(2):
         with running_meta(db) as base:
@@ -94,6 +97,8 @@ def test_legacy_tokens_migrate_once_without_losing_progress(tmp_path):
             assert status == 200 and profile["player_id"] == 7
             assert (profile["elo"], profile["bp"], profile["xp"]) == (123, 80, 900)
             assert stored(db)["token_hash"] == digest("account", token)
+            for player, raw in peers.items():
+                assert verify(base, raw)[1]["player_id"] == player
             for path in [db, Path(str(db) + "-wal")]:
                 if path.exists(): assert token.encode() not in path.read_bytes()
     with sqlite3.connect(db) as con:
@@ -103,7 +108,8 @@ def test_legacy_tokens_migrate_once_without_losing_progress(tmp_path):
         assert verify(base, token)[1]["elo"] == 123
 
 
-def test_invalid_legacy_credential_aborts_without_partial_hashing(tmp_path):
+@pytest.mark.parametrize("invalid", ["damaged-legacy-key", "a" * 32 + "\0tail", b"b" * 32])
+def test_invalid_legacy_credential_aborts_without_partial_hashing(tmp_path, invalid):
     binary = _find_meta_bin()
     if not binary:
         pytest.skip("meta not built")
@@ -115,14 +121,14 @@ def test_invalid_legacy_credential_aborts_without_partial_hashing(tmp_path):
                 elo INTEGER NOT NULL DEFAULT 0,wins INTEGER NOT NULL DEFAULT 0,
                 losses INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);""")
         con.executemany("INSERT INTO players VALUES(?,NULL,?,10,1,0,1)",
-                        [(1, good), (2, "damaged-legacy-key")])
+                        [(1, good), (2, invalid)])
     result = subprocess.run([str(binary.resolve()), "--http", f"127.0.0.1:{_free_port()}",
                              "--db", str(db), "--relay-secret", SECRET],
                             capture_output=True, timeout=10)
     assert result.returncode != 0
     assert good.encode() not in result.stdout + result.stderr
     with sqlite3.connect(db) as con:
-        assert con.execute("SELECT token FROM players ORDER BY id").fetchall() == [(good,), ("damaged-legacy-key",)]
+        assert con.execute("SELECT token FROM players ORDER BY id").fetchall() == [(good,), (invalid,)]
         assert con.execute("SELECT COUNT(*) FROM schema_migrations WHERE name='credential_hash_v1'").fetchone()[0] == 0
 
 
@@ -442,3 +448,117 @@ def test_native_supports_unicode_profile_root(account_api, account_home):
     assert verify(base, token)[0] == 200
     assert native("backup", base, env).returncode == 0
     assert (folder / "account-recovery.json").is_file()
+
+
+@pytest.mark.parametrize("body", [b'{}\x00', b'{}\x00ignored'])
+def test_guest_rejects_raw_nul_without_creating_account(account_api, body):
+    """A valid prefix must not hide bytes after a NUL terminator."""
+    import urllib.request
+    import urllib.error
+    base, db, _ = account_api
+    with sqlite3.connect(db) as con:
+        before = con.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+    req = urllib.request.Request(base + "/v1/guest", data=body,
+                                 headers={"Content-Type": "application/json"})
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(req, timeout=5)
+    assert error.value.code == 400
+    with sqlite3.connect(db) as con:
+        assert con.execute("SELECT COUNT(*) FROM players").fetchone()[0] == before
+
+
+def test_credential_scrub_retries_after_wal_reader_releases(tmp_path):
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("meta not built")
+    db = tmp_path / "reader-blocked.db"
+    token = secrets.token_hex(16)
+    with sqlite3.connect(db) as setup:
+        setup.executescript("""PRAGMA journal_mode=WAL; PRAGMA user_version=1;
+            CREATE TABLE players(id INTEGER PRIMARY KEY,username TEXT,token TEXT UNIQUE NOT NULL,
+              elo INTEGER NOT NULL DEFAULT 0,wins INTEGER NOT NULL DEFAULT 0,losses INTEGER NOT NULL DEFAULT 0,
+              bp INTEGER NOT NULL DEFAULT 0,xp INTEGER NOT NULL DEFAULT 0,selected_icon_id TEXT NOT NULL DEFAULT 'default',
+              created_at INTEGER NOT NULL);""")
+        setup.execute("INSERT INTO players VALUES(7,'player',?,123,4,2,80,900,'default',1234)", (token,))
+    reader = sqlite3.connect(db)
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT token FROM players").fetchone()[0] == token
+        result = subprocess.run([str(binary.resolve()), "--http", f"127.0.0.1:{_free_port()}",
+                                 "--db", str(db), "--relay-secret", SECRET], capture_output=True, timeout=20)
+        assert result.returncode != 0
+        assert token.encode() not in result.stdout + result.stderr
+        with sqlite3.connect(db) as check:
+            assert check.execute("SELECT token_hash FROM players").fetchone()[0] == digest("account", token)
+            markers = {r[0] for r in check.execute("SELECT name FROM schema_migrations")}
+            assert "credential_hash_v1" in markers and "credential_scrub_v1" not in markers
+        # The old reader still has its old snapshot, despite logical commit.
+        assert reader.execute("SELECT token FROM players").fetchone()[0] == token
+    finally:
+        reader.rollback()
+        reader.close()
+    with running_meta(db) as base:
+        assert verify(base, token)[1]["player_id"] == 7
+        row = stored(db)
+        assert row["token_hash"] == digest("account", token) and row["bp"] == 80
+        with sqlite3.connect(db) as check:
+            assert check.execute("SELECT 1 FROM schema_migrations WHERE name='credential_scrub_v1'").fetchone()
+        for path in [db, Path(str(db) + "-wal")]:
+            if path.exists(): assert token.encode() not in path.read_bytes()
+
+
+def test_change_trigger_failure_is_storage_error_and_keeps_credentials(account_api):
+    base, db, guest = account_api
+    old = guest["token"]
+    new, code = replacements()
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TRIGGER reject_account_change BEFORE UPDATE OF token_hash ON players "
+                    "BEGIN SELECT RAISE(ABORT,'injected');END")
+    assert change(base, "rotate", old, new, code)[0] == 503
+    assert verify(base, old)[0] == 200 and verify(base, new)[0] == 404
+    assert stored(db)["auth_epoch"] == 0
+    with sqlite3.connect(db) as con:
+        con.execute("DROP TRIGGER reject_account_change")
+    assert change(base, "rotate", old, new, code)[0] == 200
+    assert stored(db)["auth_epoch"] == 1
+
+
+@pytest.mark.parametrize("kind", ["backup", "rotate", "recover"])
+def test_change_rejects_reuse_of_current_secret_except_exact_retry(account_api, kind):
+    base, db, guest = account_api
+    old, code = replacements()
+    assert change(base, "rotate", guest["token"], old, code)[0] == 200
+    fresh, fresh_code = replacements()
+    if kind == "backup":
+        args = (old, old, code) # A different operation that reuses the current recovery key.
+    elif kind == "rotate":
+        args = (old, fresh, code)
+    else:
+        args = (code, old, fresh_code) # Recovery must replace the current access key too.
+    before = stored(db)
+    assert change(base, kind, *args)[0] == 400
+    assert stored(db) == before
+    # A receipt-confirmed retry remains valid, even though its candidates are now current.
+    assert change(base, "rotate", guest["token"], old, code)[0] == 200
+
+
+@pytest.mark.parametrize("operation", ["backup", "rotate", "recover"])
+def test_native_preserves_semantically_damaged_pending(account_api, account_home, operation):
+    base, db, guest = account_api
+    env, folder = account_home
+    write_token(folder, base, guest["token"])
+    token, recovery = replacements()
+    credential = guest["token"]
+    if operation == "rotate":
+        token = credential
+    elif operation == "recover":
+        credential = recovery
+    # Each field has the right wire format, but their relationship is impossible.
+    path = folder / "account-change.pending.json"
+    path.write_text(json.dumps({"api_url": base, "operation": operation, "credential": credential,
+                               "next_token": token, "next_recovery": recovery}))
+    before = path.read_bytes()
+    result = native("resume", base, env)
+    assert result.returncode == 8
+    assert path.read_bytes() == before
+    assert stored(db)["auth_epoch"] == 0

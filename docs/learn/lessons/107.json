@@ -1,0 +1,458 @@
+{
+  "id": "lesson-107",
+  "title": "연결 제한: 메모리·큐·시간의 상한",
+  "shortTitle": "동시 점유·예약·실패 반납",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 개별 방의 퇴장·재입장과 입력 전달은 관리하지만 여러 연결의 전체 자원 점유를 함께 세지 않습니다.",
+  "finish": "완료: 단계별 연결과 예약 바이트의 상한을 검사하고, 소유권 인계·퇴장·실패 때 해당 예약을 반납합니다.",
+  "objective": "동시 개수·발생 속도·체류 시간·저장량의 단위를 구별하고, 누적 TCP 흐름에 자원 예산을 구현합니다.",
+  "prerequisites": [
+    "참가 ticket과 소유권",
+    "mutex와 shared_ptr 수명",
+    "입장 파서의 절대 마감"
+  ],
+  "recap": {
+    "points": [
+      "참가를 제거한 순간과 소켓 자원이 사라지는 순간은 다를 수 있습니다.",
+      "정리할 소유 참조는 상태 잠금 밖에서 해제할 수 있도록 반환합니다.",
+      "닫기 요청과 실행 중인 작업의 완료 대기는 별도입니다."
+    ],
+    "bridge": "이제 그 소유 참조가 유지되는 동안 무엇을 몇 개 점유하는지 계수하고 새로운 입장을 제한합니다."
+  },
+  "sections": [
+    {
+      "title": "연결 하나의 안전과 서버 전체의 여유",
+      "body": "프레임 파서 하나가 고정 크기여도 연결을 무한히 만들 수 있다면 전체 메모리는 제한되지 않습니다. 반대로 연결 수가 적어도 한 연결의 송신 대기열이 끝없이 늘면 메모리를 잃습니다. 이번에는 연결마다 가진 상태 위에 전체 자원을 계수하는 ConnectionBudget을 붙입니다.\n\n서버가 한 요청을 받아들일지 결정하는 과정을 admission control, 입장 제어라고 합니다. 받아들인 뒤 감당하지 못할 작업을 쌓는 대신, 필요한 예산을 먼저 확보하고 실패하면 그 연결을 정리합니다. 개별 연결의 유효한 문법과 서버가 더 일할 여유가 있다는 조건을 함께 만족해야 합니다.\n\n실습에서는 전체·출처별 세션 수, 전체·출처별 입장 처리 수, 전체·연결별 예약 바이트를 나눠 셉니다. 수락한 연결의 소유권이 방과 게임으로 이동해도 예산 핸들이 따라가게 만들고, 정원 초과 연결의 실제 EOF까지 관찰합니다.",
+      "reference": {
+        "path": "server/main.cpp",
+        "symbol": "auto sessionSlot = relay::IpAdmission::acquire",
+        "invariant": "수락한 연결을 다음 단계에 넣기 전에 필요한 예산을 확보한다.",
+        "mayDiffer": "현재 서버의 IP별 슬롯과 워커 예산은 별도 객체다. 기준 구현은 학습용 전체·출처별·바이트 예산을 한 상태에 모은다."
+      }
+    },
+    {
+      "title": "동시 개수, 발생 속도, 기다린 시간",
+      "body": "단위부터 적어 봅시다. 세션4개는 어떤 순간에 동시에 유지할 수 있는 개수입니다. 초당4요청은 일정 시간에 받아들일 수 있는 일의 양입니다. 대기100ms는 한 작업이 머물 수 있는 시간입니다. 숫자가 같더라도 각각 다른 자원을 제한합니다.\n\n입장 슬롯 하나를 잡고1ms 만에 반납하는 연결은 그 슬롯을 빠르게 반복해서 쓸 수 있습니다. 동시 핸드셰이크 상한이16이라는 이유로 초당16접속만 가능하다고 계산하면 안 됩니다. 오래 연결을 유지하는 점유 공격과 짧은 요청을 반복하는 CPU·로그 소모에는 서로 다른 계수가 필요합니다.\n\n평균을 연결하는 관계도 있습니다. 안정된 관측 구간에서 같은 작업 집단을 세면 평균 시스템 내 작업 수 L은 평균 도착률 λ와 평균 체류 시간 W의 곱 L=λW로 설명할 수 있습니다. 예를 들어 초당2개가 들어와 평균3초 머무르면 평균6개입니다. 이는 순간 상한이나 폭주 때의 응답 시간 보장이 아니며, 큐가 계속 늘어나는 상황에 안정 상태의 수치를 그대로 적용하지 않습니다.",
+      "codes": [
+        {
+          "label": "제한값에 단위 붙이기",
+          "text": "동시 점유: sessions ≤ 4개\n처리량 정책: 시간 구간별 requests 또는 bytes\n체류 시간: now − entered_at < timeout\n저장 공간: reserved_bytes ≤ 18바이트 (계약 검사 수치)",
+          "language": "text"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "같은 전송률 숫자도 정책을 확인",
+          "body": "고정1초 창은 경계 양쪽으로 몰린 요청을 다르게 셀 수 있고, token bucket은 충전률과 함께 burst 용량을 가집니다. 두 구현에64KiB/s가 적혀 있어도 모든 입력 패턴을 동일하게 허용한다는 뜻은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "입장 처리와 세션의 수명을 겹쳐 놓는다",
+      "body": "연결을 수락하면 세션 예산과 핸드셰이크 예산을 함께 잡습니다. 첫 요청을 해석하고 진로가 정해지면 핸드셰이크 예산만 반납합니다. 세션 예산은 큐·방·게임 동안 유지되고 연결 소유자가 최종 정리될 때 반납합니다.\n\n핸드셰이크 슬롯을 게임 내내 유지하면 입장 처리용 작은 상한이 사실상 전체 플레이 인원 제한이 됩니다. 세션 슬롯까지 입장 직후 반납하면 반대로 오래 살아 있는 연결을 더는 세지 못합니다. 어느 카운터를 언제 내리는지가 그 상한의 의미를 결정합니다.\n\n기준 Lease는 하나의 세션과 아직 끝나지 않은 핸드셰이크 여부를 함께 갖습니다. finish_handshake는 내부 플래그를 확인해 한 번만 반납합니다. 여기서 이름은 입장 처리 단계의 종료를 뜻합니다. 학습 실습은 계정을 인증하지 않으므로 이 함수의 성공을 신원 검증으로 읽지 않습니다.",
+      "codes": [
+        {
+          "label": "단계 종료를 한 번만 반영",
+          "text": "bool finish_handshake() {\n    if (!state_ || !handshaking_) return false;\n    std::shared_ptr<State> state = state_;\n    {\n        std::lock_guard<std::mutex> lock(state->mutex);\n        --state->handshakes;\n        --state->buckets[slot_].handshakes;\n        handshaking_ = false;\n    }\n    return true;\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void after_auth(Conn* c)",
+        "invariant": "짧은 단계 예산을 놓아도 세션 예산은 연결과 함께 유지한다.",
+        "mayDiffer": "서비스는 인증 완료 후 별도 shared_ptr 핸드셰이크 슬롯을 reset한다. 기준 구현은 하나의 이동 전용 Lease 안에서 단계 플래그를 내린다."
+      }
+    },
+    {
+      "title": "한 출처의 제한과 전체 제한을 함께 둔다",
+      "body": "전체4세션, 출처당2세션이면 출처 A가2개를 점유한 뒤 A의 다음 입장은 거절되지만 B는 남은 자리를 사용할 수 있습니다. 반대로 A와 B가2개씩 사용하면 C의 첫 입장도 전체 한계에서 거절됩니다. 어느 하나만 두면 다른 실패 경로가 남습니다.\n\n키별 표 자체도 자원입니다. 여기서는 MaxKeys개의 고정 Bucket을 두고 세션 수가0인 칸을 빈칸으로 취급합니다. 새 키를 저장할 칸이 없으면 key_capacity를 반환합니다. 기존 키의 세션이 모두 끝나면 그 칸을 비워 재사용합니다. 탐색 비용은 O(MaxKeys)이고 표 크기는 생성 시 고정됩니다.\n\n키는 호출자가 정한64비트 출처 식별자입니다. TCP 실습의 모든 접속은 같은 loopback 출처이므로1을 사용합니다. 실제 IP 문자열의 정규화와 키 매핑은 별도 경계입니다. 문자열을 임의로 잘라 숫자로 만들면 서로 다른 출처를 잘못 합치거나 같은 출처를 여러 키로 나눌 수 있습니다.",
+      "codes": [
+        {
+          "label": "각기 다른 여섯 예산",
+          "text": "struct Limits {\n    std::size_t total_sessions = 0;\n    std::size_t per_key_sessions = 0;\n    std::size_t total_handshakes = 0;\n    std::size_t per_key_handshakes = 0;\n    std::size_t total_bytes = 0;\n    std::size_t per_connection_bytes = 0;\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "출처별 고정 슬롯",
+          "text": "struct Bucket {\n    std::uint64_t key = 0;\n    std::size_t sessions = 0;\n    std::size_t handshakes = 0;\n};",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "IP와 사용자",
+          "body": "NAT 뒤 여러 사람은 하나의 공인 IP를 공유할 수 있고, 한 행위자는 여러 IP를 사용할 수 있습니다. IP별 제한은 출처의 점유 정책이며 사용자 신원이나 완전한 공정성의 증거가 아닙니다. 실제 수요에 맞춰 조정할 운영값으로 다룹니다."
+        }
+      ]
+    },
+    {
+      "title": "검사와 확보를 같은 잠금 구간에 둔다",
+      "body": "전체 세션이3이고 상한이4일 때 두 스레드가 각각3을 읽었다고 해 봅시다. 검사 후 잠금을 풀었다가 나중에 증가시키면 둘 다 통과해5가 될 수 있습니다. 여유 확인과 카운터 증가는 하나의 상태 mutex 아래에서 처리해야 합니다.\n\nadmit은 입장 중단 여부, 전체 세션·핸드셰이크 한계, 출처별 한계, 키 저장 공간을 검사합니다. 여러 조건이 동시에 막혀 있어도 정해진 검사 순서의 첫 사유를 돌려줍니다. 거절은 카운터를 바꾸지 않습니다. 조건을 모두 통과한 뒤 각 카운터를 함께 올리고 Lease를 반환합니다.\n\n상한0은 해당 자원을 전혀 허용하지 않는 값으로 정합니다. 전체 상한이0일 때만 비교를 건너뛰면 다른 상한은 남아 있어도 “전체 제한 없음”이라는 다른 정책이 됩니다. 설정값의0 의미는 구현마다 다를 수 있으므로 기준 코드의 계약과 실제 서비스 옵션의 계약을 구별합니다.",
+      "codes": [
+        {
+          "label": "전체 여유 확인",
+          "text": "if (!state->accepting) {\n    result.status = AdmissionStatus::stopped;\n    return result;\n}\nif (state->sessions >= state->limits.total_sessions) {\n    result.status = AdmissionStatus::total_sessions;\n    return result;\n}\nif (state->handshakes >= state->limits.total_handshakes) {\n    result.status = AdmissionStatus::total_handshakes;\n    return result;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "할당 없는 확정 구간",
+          "text": "    // Commit: all checks passed. Only now do counters change, and the lease\n    // reuses the State allocated at construction, so this path does not\n    // allocate and the lease constructor is noexcept.\n    state->sessions += 1;\n    state->handshakes += 1;\n    if (is_new_key) {\n        state->buckets[slot].key = key;\n        state->buckets[slot].sessions = 1;\n        state->buckets[slot].handshakes = 1;\n    } else {\n        state->buckets[slot].sessions += 1;\n        state->buckets[slot].handshakes += 1;\n    }\n\n    result.lease = Lease(state, slot, true);\n    result.status = AdmissionStatus::admitted;\n    return result;\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/ip_admission.h",
+        "symbol": "static std::shared_ptr<IpAdmission> acquire",
+        "invariant": "상한 검사와 예약 확정을 같은 mutex로 직렬화한다.",
+        "mayDiffer": "서비스는 문자열 키의 unordered_map을 쓰며 set_session_limit(0)을1로 보정한다. 학습 객체의0은 거절이므로 두 설정 의미를 혼용하지 않는다."
+      }
+    },
+    {
+      "title": "예약 핸들 하나가 반납 의무 하나를 갖는다",
+      "body": "Lease를 자유롭게 복사할 수 있고 각 사본이 카운터를 내리면 한 연결을 여러 번 반납하게 됩니다. 기준 Lease는 복사를 막고 이동만 허용합니다. 이동은 이미 확보한 한 예약의 관리 책임을 다른 변수에 넘기며 카운터를 다시 증가시키지 않습니다.\n\n이동 대입은 대상 변수가 이미 가진 예약을 먼저 reset한 뒤 원본의 State 참조·slot·단계 플래그·예약 바이트를 가져옵니다. 원본은 빈 shared_ptr와0으로 정리합니다. 자기 자신으로의 이동 대입은 별도로 걸러 기존 예약을 유지합니다.\n\n같은 Lease 객체를 여러 스레드가 동시에 바꾸면 안 됩니다. 다른 Lease들이 같은 State를 공유하는 경우는 내부 mutex로 직렬화합니다. 클래스가 mutex를 쓴다는 사실만으로 그 클래스의 모든 객체·모든 필드 접근이 자동으로 안전해지는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "이동 대입은 대상 예약부터 반납",
+          "text": "Lease& operator=(Lease&& other) noexcept {\n    if (this != &other) {\n        reset();\n        state_ = std::move(other.state_);\n        slot_ = other.slot_;\n        handshaking_ = other.handshaking_;\n        held_bytes_ = other.held_bytes_;\n        other.slot_ = 0;\n        other.handshaking_ = false;\n        other.held_bytes_ = 0;\n    }\n    return *this;\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "현재 서비스의 shared_ptr 슬롯과 비교",
+          "body": "서비스는 여러 사본 중 마지막 소유자가 한 번 반납하는 shared_ptr lease를 사용합니다. 기준은 하나의 이동 전용 Lease가 직접 반납하되 카운터 State만 공유합니다. 둘 다 복사본마다 독립적으로 예약을 해제하는 구조는 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "마지막 State 참조를 잠금 밖에서 놓는다",
+      "body": "예산 객체가 사라져도 발급한 Lease가 살아 있을 수 있습니다. raw 포인터로 예산 객체를 가리키면 그 뒤 소멸자에서 카운터에 접근할 때 해제된 메모리를 읽습니다. 기준 Lease는 카운터와 mutex가 들어 있는 State의 shared_ptr를 보관합니다.\n\nreset은 자신의 State 참조를 지역 변수로 먼저 옮깁니다. 그 지역 변수가 State의 마지막 소유자일 수도 있습니다. 중첩된 잠금 범위 안에서 세션·핸드셰이크·바이트를 반납하고, 잠금을 푼 뒤 지역 shared_ptr가 소멸하게 합니다. 잠긴 mutex가 포함된 State를 먼저 파괴하지 않도록 순서를 코드로 드러냅니다.\n\n이 설계가 예산 객체 자체의 모든 동시 파괴를 허용하는 것은 아닙니다. 다른 스레드가 budget.admit이나 snapshot을 실행한다면 예산 객체도 살아 있어야 합니다. 이미 발급한 Lease의 정리 수명만 State 소유로 분리한 것입니다.",
+      "codes": [
+        {
+          "label": "반납과 공유 상태의 최종 파괴 순서",
+          "text": "void reset() noexcept {\n    // Take the owning reference into a local first so State cannot\n    // vanish underneath us while we unwind it.\n    std::shared_ptr<State> state = std::move(state_);\n    if (!state) return;\n\n    const std::size_t slot = slot_;\n    const bool handshaking = handshaking_;\n    const std::size_t held = held_bytes_;\n    slot_ = 0;\n    handshaking_ = false;\n    held_bytes_ = 0;\n\n    {\n        std::lock_guard<std::mutex> lock(state->mutex);\n        --state->sessions;\n        if (handshaking) --state->handshakes;\n        Bucket& bucket = state->buckets[slot];\n        --bucket.sessions;\n        if (handshaking) --bucket.handshakes;\n        if (bucket.sessions == 0) bucket = Bucket{};\n        state->bytes -= held;\n    }\n    // The mutex is released before `state` is destroyed: this may be the\n    // last reference, and destroying a locked mutex is undefined.\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "바이트 상한은 더하기 전에 검사한다",
+      "body": "연결별10바이트, 전체18바이트를 허용한다고 합시다. A가10을 예약하면 A의 추가1은 연결 한계에서 거절됩니다. B가8을 예약하면 B는 아직 자기 한계까지2가 남아 있지만 전체가 찼으므로 추가1이 거절됩니다.\n\nused+n<=limit를 검사하기 전에 used+n이 정수 범위를 넘을 수 있습니다. used<=limit라는 불변조건을 유지하고 n<=limit−used를 비교하면 합을 먼저 만들지 않고 여유를 확인할 수 있습니다. 통과한 뒤에만 두 카운터를 함께 더합니다.\n\nreserve_bytes는 선언한 저장 공간의 예약입니다. 실제 버퍼를 늘릴 때는 먼저 예약하고, 할당 실패 시 예약을 되돌리며, 버퍼를 해제한 뒤 반납하는 순서가 필요합니다. vector.size를 줄였어도 capacity가 그대로면 실제 할당은 남을 수 있습니다. 여기서는 고정 파서 한 개의 용량을 연결 소유 기간에 한 번 예약해 이 관계를 단순하게 만듭니다.",
+      "codes": [
+        {
+          "label": "차이로 검사하고 성공 뒤 증가",
+          "text": "bool reserve_bytes(std::size_t n) {\n    if (!state_) return false;\n    std::shared_ptr<State> state = state_;\n    std::lock_guard<std::mutex> lock(state->mutex);\n    // Subtract first: held_bytes_ <= per_connection_bytes and\n    // state->bytes <= total_bytes are invariants, so neither wraps.\n    if (n > state->limits.per_connection_bytes - held_bytes_) {\n        return false;\n    }\n    if (n > state->limits.total_bytes - state->bytes) {\n        return false;\n    }\n    held_bytes_ += n;\n    state->bytes += n;\n    return true;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "가진 만큼만 반납",
+          "text": "bool release_bytes(std::size_t n) {\n    if (!state_ || n > held_bytes_) return false;\n    std::shared_ptr<State> state = state_;\n    std::lock_guard<std::mutex> lock(state->mutex);\n    held_bytes_ -= n;\n    state->bytes -= n;\n    return true;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "버퍼별 상한을 더해 전체 비용을 읽는다",
+      "body": "연결당 보류 버퍼64KiB와 연결1024개를 허용하면 그 버퍼 종류만 최대64MiB를 계산할 수 있습니다. 소켓 커널 버퍼, 스레드 스택, 파서 임시값, 게임 상태, allocator 부가 비용은 이 수치에 포함되지 않습니다. 어떤 항목을 셌는지 함께 적어야 용량 계획에 사용할 수 있습니다.\n\n실습은 서버 연결의 활성 FrameParser 용량을 sizeof(FrameParser)만큼 예약합니다. 객체 내 정렬과 길이 필드를 포함한 타입 크기를 쓰므로 특정 컴파일러의 숫자를 강의에 고정하지 않습니다. 임시 FirstAdmission과 handoff, 이동 후 남은 인라인 저장 공간까지 모두 포함한 프로세스 메모리 계산은 아닙니다.\n\n고정 크기 표도 공짜는 아닙니다. ConnectionBudget 생성 때 State와 MaxKeys개 Bucket을 한 번 할당합니다. 대신 입장할 때 shared_ptr를 복사하고 고정 표를 갱신하는 경로에는 새 힙 할당이 없습니다. “요청당 할당 없음”과 “프로그램 전체 할당 없음”의 범위를 구별하세요.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "kDefaultTxBudget",
+        "invariant": "연결별 버퍼 한계와 전역 보류 바이트를 별도로 계수한다.",
+        "mayDiffer": "현재 Reactor의 송신 예산은 보류 송신 범위를 센다. 학습 실습은 연결 파서에 선언한 예약만 센다."
+      }
+    },
+    {
+      "title": "RAII 객체를 만들기 전에 등록하면 생기는 일",
+      "body": "현재 서비스의 IP 예산은 키별 map에, 계정의 단일 세션은 player_id 집합에 등록합니다. 등록한 뒤 new로 lease 객체를 만들면 객체 할당 실패 시 예약은 있지만 소멸자를 실행할 소유자가 없습니다. 뒤의 정상 연결이 계속 상한이나 중복 상태로 거절될 수 있습니다.\n\nshared_ptr를 만드는 과정에는 객체 외에 참조 수를 담는 제어 블록의 할당도 있습니다. 이 할당이 실패하면 shared_ptr 생성자는 넘겨받은 raw 포인터를 정리합니다. 등록 mutex를 잡은 상태에서 lease 소멸자가 같은 mutex를 다시 잡는 구조라면 그 예외 처리 경로가 멈출 수 있습니다.\n\n해결은 미등록 candidate를 먼저 만들고 등록을 마지막에 확정하는 것입니다. 소멸자는 registered_가 false이면 표를 건드리지 않습니다. 객체와 제어 블록을 확보한 뒤 mutex 안에서 상한·집합 중복·map 삽입을 확인하고, 성공한 카운터 변경 뒤 registered_를 세웁니다. 이후에는 예외를 던질 작업을 두지 않습니다. 실패 시 등록 상태를 보존하는 강한 예외 보장을 이 작은 연산의 범위에서 구성합니다.",
+      "reference": {
+        "path": "server/ip_admission.h",
+        "symbol": "auto candidate = std::shared_ptr<IpAdmission>",
+        "invariant": "반납 주체를 먼저 준비하고 등록 성공 뒤에만 정리 의무를 활성화한다.",
+        "mayDiffer": "기준 고정 표는 입장 시 할당하지 않는다. 문자열 map을 쓰는 실제 서비스에서는 객체·제어 블록·map 삽입의 실패를 각각 다룬다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "RAII의 출발점",
+          "body": "RAII는 소유권을 얻은 뒤의 정리를 묶는 방식입니다. 소유 객체를 만드는 도중의 실패까지 자동으로 모두 되돌리는 장치는 아닙니다. 프로세스 전체의 메모리 부족 복구 정책도 이 등록 함수의 계약과 별도로 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "큐 길이와 워커 수는 같은 인구가 아니다",
+      "body": "첫 요청을 처리한 worker가 연결을 대기 큐에 넘기고 반환하면 worker 수는 줄지만 소켓은 살아 있습니다. 실행 중인 worker의 상한으로 전체 연결 수의 상한을 설명할 수 없는 이유입니다. 방 reader, 수락 로비, 두 방향 포워더도 서로 다른 작업 수명을 가집니다.\n\n큐에는 독립적인 최대 길이가 필요합니다. 꽉 찼을 때 새 요청을 거절할지 오래된 요청을 내보낼지도 정책으로 정해야 합니다. 현재 Matchmaker는 대기 큐 상한을 검사하고 새 등록을 거절합니다. 큐에서 경기로 인계할 때는 큐 자리는 반환하되 세션 예약을 함께 넘겨 연결 계수가 사라지지 않게 합니다.\n\n연결별 작은 버퍼, 전체 연결 수, 큐 길이, 실행 중인 worker 수는 겹치지만 같은 집합을 세지 않습니다. 변경할 때 “내가 지금 몇 개를 세는가”를 타입과 수명으로 설명해 보세요. 기준 Budget의 세션 핸들은 방과 수락·게임 흐름 동안 유지되어 이 연결의 수명을 셉니다.",
+      "reference": {
+        "path": "server/matchmaker.cpp",
+        "symbol": "waiting.size() >= kMaxWaiting",
+        "invariant": "대기 큐 길이 제한과 연결 소유의 수명을 구별한다.",
+        "mayDiffer": "현재 큐의 용량 제한은 worker·per-IP·Reactor 전역 연결 상한과 별도다. 기준 Budget은 그 큐 자체를 재구현하지 않는다."
+      }
+    },
+    {
+      "title": "시간 초과를 관측한 뒤 소유자를 정리한다",
+      "body": "동시 슬롯이1개여도 첫 요청을 영원히 기다리면 그 출처의 다음 접속은 계속 막힙니다. 개수 상한은 얼마나 많이 붙들 수 있는지를 정하고, 마감은 얼마나 오래 붙들 수 있는지를 정합니다. FirstAdmission의 마감을 같이 사용해야 침묵한 입장도 끝낼 수 있습니다.\n\n시작1000, 제한100이면1099에서는 대기하고1100에서 timed_out입니다. 이 상태를 관측한 것만으로 별도의 Budget lease가 파괴되지는 않습니다. 호출자가 연결 처리 흐름을 끝내 소켓과 lease를 정리해야 자리가 돌아옵니다.\n\n시각은 호출자가 공급하며 poll이 실제로 실행될 때 마감을 관측합니다. 블로킹 인증 호출이나 스케줄링 지연을 이 순수 상태 객체가 강제로 끊지는 않습니다. 외부 요청은 자기 timeout과 취소 정책을 가져야 합니다. 조금씩 바이트를 보내는 활동으로 절대 마감을 계속 연장하지 않는지도 함께 확인합니다.",
+      "codes": [
+        {
+          "label": "마감 상태와 예약 반납은 별도 동작",
+          "text": "    Budget b({1,1,1,1,64,64});auto held=b.admit(1);\n    auto phase=*study_net::FirstAdmission::create(1000,100);\n    require(phase.poll(1099)==study_net::AdmissionState::waiting);\n    require(phase.poll(1100)==study_net::AdmissionState::timed_out);\n    require(b.snapshot().sessions==1); // A deadline observation does not destroy owners.\n    held.lease.reset();require(b.snapshot().sessions==0 && b.snapshot().handshakes==0);\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/player_conn.cpp",
+        "symbol": "static constexpr auto kJoinTimeout",
+        "invariant": "입장 단계의 절대 마감과 외부 호출의 시간 제한을 구별한다.",
+        "mayDiffer": "현재 초기 폴링은 정책으로 정한 마감을 사용하며 블로킹 인증 HTTP 호출은 그 클라이언트의 제한을 별도로 따른다."
+      }
+    },
+    {
+      "title": "실제 소켓 소유권과 예약을 함께 넘긴다",
+      "body": "Peer에 Lease를 첫 멤버로 추가합니다. C++ 멤버는 선언 역순으로 파괴되므로 그 Peer의 parser와 Socket이 먼저 정리되고 lease가 마지막에 반납됩니다. 생성·이동·해제 경로에서 예약과 연결이 같은 소유자를 따라가게 하는 작은 배치입니다.\n\nadmit 함수는 수락한 소켓을 받은 뒤 예산을 얻고 파서 용량을 예약합니다. 첫 요청을 해석하면 finish_handshake를 호출하고 Socket·parser·lease를 새 Peer에 함께 옮깁니다. 이후 방의 shared_ptr<Peer>가 살아 있는 동안 세션 예약도 유지됩니다.\n\nTCP accept 자체가 예산 검사보다 먼저 일어나므로 거절할 소켓도 잠깐은 존재합니다. 이 객체가 커널 listen backlog나 accept 이전 자원까지 제한한다고 해석하지 않습니다. 정원 초과를 확인한 경로는 파서 처리를 시작하지 않고 방금 수락한 소켓을 닫습니다.",
+      "codes": [
+        {
+          "label": "멤버 선언 순서와 이동 묶음",
+          "text": "using Budget = ConnectionBudget<4>;\n// Declaration order makes the lease outlive this Peer's parser and socket.\nstruct Peer { Budget::Lease admission; Socket socket; FrameParser parser; };",
+          "language": "cpp"
+        },
+        {
+          "label": "예산을 확보한 뒤 입장 파싱 시작",
+          "text": "Peer admit(Socket socket, AdmissionRequest& request, Budget& budget) {\n    // Every accepted socket in this loopback fixture belongs to source key 1.\n    auto reservation = budget.admit(1);\n    require(reservation.status == Budget::AdmissionStatus::admitted);\n    require(reservation.lease.reserve_bytes(sizeof(FrameParser)));",
+          "language": "cpp"
+        },
+        {
+          "label": "입장 단계만 반납하고 세션을 인계",
+          "text": "    require(reservation.lease.finish_handshake());\n    return {std::move(reservation.lease),std::move(socket),std::move(handoff.parser)};\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "넘친 접속, 퇴장, 재입장을 한 흐름으로 본다",
+      "body": "실습의 전체·출처별 세션 상한은2입니다. 호스트와 게스트가 입장하면 세션2, 핸드셰이크0, 예약 바이트2×sizeof(FrameParser)가 됩니다. 세 번째 실제 TCP 연결을 수락해도 admit은 total_sessions를 반환합니다. 서버 쪽 소켓을 닫고 그 클라이언트가 EOF를 받는지 확인합니다.\n\n게스트가 나가 소켓을 닫은 뒤 그 Peer를 붙들던 참조까지 놓으면 세션은1로 줄어듭니다. 새 게스트는 반환된 자리를 사용해 같은 방 코드에 입장합니다. 오래된 참가 ticket과 알림은 방 멤버십이 거르고, 새 연결 예약은 Budget이 따로 관리합니다.\n\n현재 인원 통지 뒤 수락 로비와 포워더로 소켓을 넘겨 실제 반대 클라이언트의 입력 수신과 RoundPlay 상태 일치를 확인합니다. 모든 Peer의 소유 범위가 끝나면 세션·핸드셰이크·바이트·키 개수가0이어야 합니다. 소켓만 닫고 Peer를 계속 붙들면 예약도 남는다는 수명 관계를 관찰하세요.",
+      "codes": [
+        {
+          "label": "두 참가자 뒤 추가 접속 거절",
+          "text": "require(budget.snapshot().sessions==2 && budget.snapshot().handshakes==0 &&\n        budget.snapshot().bytes==2*sizeof(FrameParser));\n// Reject one extra accepted connection before starting its admission parser.\nauto excess=connect_loopback(port,error);require(excess.valid());\nauto excess_server=accept_one(listener,error);require(excess_server.valid());\nauto rejected=budget.admit(1);require(rejected.status==Budget::AdmissionStatus::total_sessions);",
+          "language": "cpp"
+        },
+        {
+          "label": "퇴장한 소유자를 놓고 자리 재사용",
+          "text": "departed.departed.reset();old_guest.reset();\nrequire(budget.snapshot().sessions==1 && budget.snapshot().bytes==sizeof(FrameParser));\nclients[1].socket=connect_loopback(port,error);require(clients[1].socket.valid());",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "경계값과 동시성 결과를 독립적으로 확인한다",
+      "body": "contract는 전체 상한만0인 경우와 출처 상한만0인 경우를 나눠 검사합니다. 정확한 상한, 상한+1, 바이트 최댓값과1 추가를 넣어 숫자 경계를 확인합니다. 이동 대입, 자기 이동, 반복 reset, 예산 객체보다 오래 사는 lease도 별도의 수명 사례입니다.\n\n24개 스레드가 같은 출처로 입장을 시도하게 하고 발급된 lease를 배열에 보관합니다. 도중에 반납되면 더 많은 호출이 순차 성공할 수 있으므로 모두 끝날 때까지 소유자를 유지합니다. 상한3에서 성공한 lease가 정확히3개인지 확인한 뒤 여러 스레드가 각자의 lease를 반납하게 합니다.\n\n12000개 결정적 연산은 별도의 연결 행 목록으로 예상값을 계산합니다. 구현 내부의 카운터를 답으로 다시 쓰지 않고, 살아 있는 행들의 합으로 세션·핸드셰이크·바이트·키 수를 구합니다. 실제 서비스의 할당 실패 검사는 객체·제어 블록·표 삽입 중 한 할당을 실패시킨 뒤 정원이 다시 확보되는지 확인합니다.",
+      "codes": [
+        {
+          "label": "State의 마지막 소유자가 된 lease",
+          "text": "Budget::Lease survivor;\n{Budget b({1,1,1,1,8,8});survivor=std::move(b.admit(1).lease);require(survivor.reserve_bytes(8));}\nrequire(survivor.finish_handshake());survivor.reset(); // Last State owner releases mutex before destruction.",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "빌드하고 전체 파일에서 정책의 경계를 찾는다",
+      "body": "connection_budget_contract는 예산 상태를 검사하고 connection_budget_probe는 실제 TCP 실습에 예산 소유를 붙입니다. 두 실행 파일을 빌드한 뒤 계약·정원 초과 EOF·퇴장 재입장·최종 반납 출력을 확인하세요. SCRIPTED와 SDL 구성 모두 이 두 타깃은 창을 열지 않습니다.\n\n유지할 핵심은 검사와 확보의 직렬화, 단계별 반납 시점, 이동하는 예약 소유권, 합산 전 범위 검사, 상태보다 오래 살아 있는 정리 참조입니다. 기본 상한값과 출처 키 표현은 서비스 수요에 따라 바뀔 수 있습니다.\n\n이 예산은 요청 속도 제한, 인증, WAN 공격 방어, 프로세스 전체 메모리 측정까지 구현한 것이 아닙니다. 각 상한 옆에 계수 대상과 반납 시점을 적으면 남은 정책의 위치도 구체적으로 설명할 수 있습니다.",
+      "codes": [
+        {
+          "label": "추가한 계약과 실습 타깃",
+          "text": "# Connection and declared-buffer reservations follow owning leases.\nadd_executable(connection_budget_contract tests/connection_budget_contract.cpp)\ntarget_include_directories(connection_budget_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_link_libraries(connection_budget_contract PRIVATE Threads::Threads)\nadd_test(NAME connection_budget_contract COMMAND connection_budget_contract)\nset_tests_properties(connection_budget_contract PROPERTIES TIMEOUT 20)\nadd_executable(connection_budget_probe tools/connection_budget_probe.cpp)\ntarget_include_directories(connection_budget_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_link_libraries(connection_budget_probe PRIVATE StudySocket Threads::Threads)\nadd_test(NAME connection_budget_probe COMMAND connection_budget_probe)\nset_tests_properties(connection_budget_probe PROPERTIES TIMEOUT 15)\n",
+          "language": "cmake"
+        },
+        {
+          "label": "빌드와 실행",
+          "text": "cmake -S docs/learn/checkpoints/107-connection-budget -B out/study-107 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-107 --target connection_budget_contract connection_budget_probe -j2\nctest --test-dir out/study-107 -R \"^connection_budget_(contract|probe)$\" --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "net/connection_budget.h",
+          "language": "cpp",
+          "file": "checkpoints/107-connection-budget/net/connection_budget.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/connection_budget_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/107-connection-budget/tests/connection_budget_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/connection_budget_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/107-connection-budget/tools/connection_budget_probe.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "107-1",
+      "question": "동시 핸드셰이크 상한이16입니다. 입장을 매우 빨리 끝내는 연결이 반복되면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "초당 접속은 반드시16 이하"
+        },
+        {
+          "id": "b",
+          "text": "시간당16번만 가능"
+        },
+        {
+          "id": "c",
+          "text": "동시16을 지켜도 초당16회를 넘을 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "인증 뒤 세션 수도 항상16 이하"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "동시16을 지켜도 초당16회를 넘을 수 있다",
+      "explanation": "이 카운터는 현재 처리 중인 수입니다. 빨리 반납하면 같은 자리를 여러 번 재사용하며, 빈도 제한에는 별도 시간 계수가 필요합니다."
+    },
+    {
+      "id": "107-2",
+      "question": "연결별10·전체18바이트입니다. A가10, B가8을 예약했고 B가1을 더 요청합니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "B는 자기 여유가2이므로 성공"
+        },
+        {
+          "id": "b",
+          "text": "전체 한계로 거절하고 카운터는 유지"
+        },
+        {
+          "id": "c",
+          "text": "A의1바이트를 자동 회수"
+        },
+        {
+          "id": "d",
+          "text": "B의 기존8바이트까지 취소"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "전체 한계로 거절하고 카운터는 유지",
+      "explanation": "모든 상한을 통과해야 합니다. 전체 남은 양이0이므로 실패하고 이미 가진 예약은 보존합니다."
+    },
+    {
+      "id": "107-3",
+      "question": "카운터를 올린 뒤 mutex 안에서 shared_ptr 제어 블록 할당이 실패하고 lease 소멸자가 같은 mutex를 잡습니다. 필요한 설계는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "예외를 무조건 무시"
+        },
+        {
+          "id": "b",
+          "text": "mutex를 하나 더 추가"
+        },
+        {
+          "id": "c",
+          "text": "카운터를 unsigned로 변경"
+        },
+        {
+          "id": "d",
+          "text": "미등록 소유 객체를 먼저 확보하고 마지막에 예약을 확정"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "미등록 소유 객체를 먼저 확보하고 마지막에 예약을 확정",
+      "explanation": "반납 주체 없는 등록과 잠금 중 재진입을 피해야 합니다. 미등록 후보는 표를 건드리지 않고 소멸하며 등록 성공 뒤에만 반납 의무를 가집니다."
+    },
+    {
+      "id": "107-4",
+      "question": "첫 요청 마감을 timed_out으로 관측했는데 Budget lease를 계속 보관합니다. 예산 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "마감이 자동으로 카운터를 내린다"
+        },
+        {
+          "id": "b",
+          "text": "세션 예약은 소유자가 정리할 때까지 유지된다"
+        },
+        {
+          "id": "c",
+          "text": "키가 자동으로 다른 출처에 재할당된다"
+        },
+        {
+          "id": "d",
+          "text": "모든 다른 연결이 취소된다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "세션 예약은 소유자가 정리할 때까지 유지된다",
+      "explanation": "시간 상태와 자원 소유는 별도입니다. 호출자가 처리 흐름을 끝내 소켓과 예약을 정리해야 자리가 돌아옵니다."
+    },
+    {
+      "id": "107-5",
+      "question": "24개 스레드가 상한3인 입장을 시험합니다. 정확히3개만 성공하는지 보려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "성공 즉시 lease를 반납"
+        },
+        {
+          "id": "b",
+          "text": "각 스레드에 별도 Budget 생성"
+        },
+        {
+          "id": "c",
+          "text": "동일 Budget을 공유하고 발급 lease를 모든 시도 완료까지 보관"
+        },
+        {
+          "id": "d",
+          "text": "총 성공 횟수만 무조건3으로 고정"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "동일 Budget을 공유하고 발급 lease를 모든 시도 완료까지 보관",
+      "explanation": "중간에 반납하면24개가 순차적으로 성공해도 동시 상한 위반은 아닙니다. 같은 상태를 공유하고 예약을 유지해야 해당 순간의 상한을 검사할 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "각 제한의 단위를 개수·바이트·초·초당 횟수로 구별합니다.",
+      "핸드셰이크 종료와 세션 종료의 카운터 변화를 그립니다.",
+      "전체18·연결별10에서 두 연결의 예약과 반납 순서를 계산합니다.",
+      "TCP 실습에서 세 번째 연결 거절과 퇴장 후 재입장의 예산 변화를 관찰합니다."
+    ],
+    "failureChecks": [
+      "상한 검사와 카운터 증가 사이에 다른 입장이 들어갈 수 있는지 확인합니다.",
+      "등록 뒤 할당 실패 시 반납 주체가 존재하는지 확인합니다.",
+      "close·마감 관측 뒤에도 남아 있는 소유 참조를 추적합니다."
+    ],
+    "expected": "정원을 넘는 입장은 상태를 바꾸지 않고 거절하며, 슬롯·선언 버퍼 예약은 소유권 이동과 단계 종료에 따라 정확히 반납한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 예산 초안 직접 검수·독립 상태 모델·할당 실패 주입·실제 TCP/서버 검사",
+    "draftJob": "out/learning-jobs/107-budget-events.jsonl",
+    "corrections": [
+      "전체 상한0을 무제한으로 처리한 초안 오류 교정",
+      "이동 후 빈Lease는 nullState로 구별하고 유효 인덱스 유지",
+      "IpAdmission·PlayerSessionLease의 등록 전 객체/제어블록 준비 및 미등록 소멸자 경로",
+      "동시수/속도제한·worker수/연결수·구현별수신정책 문서 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분",
+      "가변 정책 수치를 계산식·설정으로 설명하고 수치 예제는 체크포인트 조건으로 구분(2026-10-03)."
+    ]
+  },
+  "validation": [
+    "누적106 파일 보존, 새2타깃 SCRIPTED/SDL 및 ASan/UBSan",
+    "12000 독립 행 모델,24스레드,0/정확한상한/정수경계/이동/소멸/마감 계약",
+    "실제TCP 정원초과EOF·퇴장재입장·반대입력·게임상태·모든예약반납",
+    "실제두lease 할당21조건: 수정전6실패(3누수/3교착시간초과), 수정후전부통과",
+    "현재서버24스레드IP/계정상한과 단계독립;두relay각3통합;root27/26CTest",
+    "Windows/macOS네이티브·수동GUI·WAN/부하·전체프로세스OOM복구·인증/DB통합 미검증"
+  ]
+}

@@ -1,4 +1,5 @@
 #include "room.h"
+#include "room_code.h"
 
 #include "relay.h"
 #include "log.h"
@@ -8,8 +9,8 @@
 
 #include <chrono>
 #include <functional>
-#include <random>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -17,10 +18,6 @@ namespace relay {
 
 namespace {
 
-// base32 알파벳 — 혼동 쉬운 0/O/1/I 제외 (plan §D.1)
-constexpr char   kCodeAlphabet[]    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-constexpr size_t kCodeAlphabetN     = sizeof(kCodeAlphabet) - 1;
-constexpr size_t kCodeLen           = 5;
 constexpr auto   kPollInterval      = std::chrono::milliseconds(10);
 
 // roomLoop_ 대기 단계 데드라인 — queueLobbyThread 의 kConfirmTimeout 과 같은 결.
@@ -35,38 +32,16 @@ constexpr uint8_t kStatusFull       = 1;
 constexpr uint8_t kStatusNotFound   = 2;
 constexpr uint8_t kStatusGoneFull   = 3;
 
-uint64_t xorshift64_(uint64_t& s) {
-    uint64_t x = s;
-    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-    s = x;
-    return x;
-}
-
 }  // namespace
 
-RoomRegistry::RoomRegistry() {
-    using clock = std::chrono::high_resolution_clock;
-    const auto t = static_cast<uint64_t>(clock::now().time_since_epoch().count());
-    // 룸코드는 추측되면 남의 방에 난입할 수 있으므로 부팅 시각만으로 시드하지
-    // 않는다 — random_device(주요 플랫폼에서 OS CSPRNG)를 섞어 예측을 차단.
-    std::random_device rd;
-    const uint64_t r = (static_cast<uint64_t>(rd()) << 32) | rd();
-    code_rng_state_ = (t ^ r) ? (t ^ r) : 0xC0FFEE0DDB0B0BAAULL;
-}
+RoomRegistry::RoomRegistry() = default;
 
 std::string RoomRegistry::generateCode_() {
-    // mu 잡힘. 충돌 나면 재시도 — 실질적으로 매우 드물다 (32^5 = 33M 조합).
-    for (int attempt = 0; attempt < 32; ++attempt) {
-        std::string c(kCodeLen, 'A');
-        uint64_t x = xorshift64_(code_rng_state_);
-        for (size_t i = 0; i < kCodeLen; ++i) {
-            c[i] = kCodeAlphabet[x % kCodeAlphabetN];
-            x /= kCodeAlphabetN;
-            if (x == 0) x = xorshift64_(code_rng_state_);
-        }
-        if (rooms.find(c) == rooms.end()) return c;
-    }
-    return {};  // 상상 속 병리적 충돌
+    // mu remains held from candidate search through insertion in handleCreate.
+    auto code = selectRoomCode(roomCodeRandomWord, [this](const std::string& c) {
+        return rooms.find(c) != rooms.end();
+    });
+    return code ? std::move(*code) : std::string{};
 }
 
 uint64_t RoomRegistry::nextSeed_()    { return seed_src_.next(); }
@@ -120,33 +95,49 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
                                 std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
-    uint64_t roomInfoVersion = 0;
-    {
-        std::unique_lock<std::mutex> lk(mu);
-        code = generateCode_();
-        if (code.empty()) {
-            lk.unlock();
-            net::tcp_close(sock);
-            return;
+    try {
+        uint64_t roomInfoVersion = 0;
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            // Serialize admission with shutdown; the early check is only a fast path.
+            if (stopping.load()) {
+                lk.unlock();
+                net::tcp_close(sock);
+                return;
+            }
+            code = generateCode_();
+            if (code.empty()) {
+                lk.unlock();
+                net::tcp_close(sock);
+                return;
+            }
+            // Prepare potentially allocating fields before publishing the entry.
+            // A failed string copy must not leave a room with no owning roomLoop.
+            static_assert(std::is_nothrow_move_constructible_v<Entry>);
+            Entry r;
+            r.code         = code;
+            r.hostSock     = sock;
+            r.hostConn     = conn_id;
+            r.hostPresent  = true;
+            r.hostPlayerId = player_id;
+            r.hostElo      = elo;
+            r.hostUsername = username;
+            r.hostToken    = token;
+            r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+            r.hostSessionLease = std::move(session_lease);
+            r.hostIpSession    = std::move(ip_session);
+            roomInfoVersion = r.roomInfoVersion = next_room_info_version_;
+            rooms.emplace(code, std::move(r));
+            ++next_room_info_version_;
         }
-        Entry& r       = rooms[code];
-        r.code         = code;
-        r.hostSock     = sock;
-        r.hostConn     = conn_id;
-        r.hostPresent  = true;
-        r.hostPlayerId = player_id;
-        r.hostElo      = elo;
-        r.hostUsername = username;
-        r.hostToken    = token;
-        r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
-        r.hostSessionLease = std::move(session_lease);
-        r.hostIpSession    = std::move(ip_session);
-        roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
+        RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                  << " created code=" << code);
+        sendRoomInfoIfCurrent_(sock, code, kStatusWaiting, 1, roomInfoVersion);
+        roomLoop_(code, /*isHost=*/true, sock, std::move(streamPrefix));
+    } catch (...) {
+        abortRoom_(code, sock);
+        throw;
     }
-    RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-              << " created code=" << code);
-    sendRoomInfoIfCurrent_(sock, code, kStatusWaiting, 1, roomInfoVersion);
-    roomLoop_(code, /*isHost=*/true, std::move(streamPrefix));
 }
 
 void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint32_t conn_id,
@@ -157,78 +148,128 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
                               std::shared_ptr<IpAdmission> ip_session,
                               std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
-    bool entered = false;
-    uint64_t roomInfoVersion = 0;
-    {
-        // send gate를 먼저 잡은 뒤 guestPresent를 공개한다. 반대 순서면 host
-        // roomLoop가 그 사이 guest를 발견하고 CHAT/READY를 ROOM_INFO보다 먼저
-        // 보낼 수 있다. 모든 중첩 잠금은 send gate -> state mu 순서를 따른다.
-        const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
-        std::unique_lock<std::mutex> sendLk(roomSendMu_[shard]);
-        std::unique_lock<std::mutex> lk(mu);
-        auto it = rooms.find(code);
-        if (it == rooms.end()) {
-            lk.unlock();
-            sendRoomInfo_(sock, code, kStatusNotFound, 0);
-            net::tcp_close(sock);
-            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-                      << " close: join " << code << " notfound match_uuid=-");
-            return;
-        }
-        auto& r = it->second;
-        if (r.guestPresent || r.matchStarted) {
-            const uint8_t peerCount =
-                static_cast<uint8_t>((r.hostPresent ? 1 : 0) + (r.guestPresent ? 1 : 0));
-            lk.unlock();
-            sendRoomInfo_(sock, code, kStatusFull, peerCount);
-            net::tcp_close(sock);
-            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-                      << " close: join " << code << " full match_uuid=-");
-            return;
-        }
-        r.guestSock     = sock;
-        r.guestConn     = conn_id;
-        r.guestPresent  = true;
-        r.guestPlayerId = player_id;
-        r.guestElo      = elo;
-        r.guestUsername = username;
-        r.guestToken    = token;
-        r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
-        r.guestSessionLease = std::move(session_lease);
-        r.guestIpSession    = std::move(ip_session);
-        net::TcpSocket hs = r.hostSock;
-        net::TcpSocket gs = r.guestSock;
-        roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
-        lk.unlock();
+    try {
+        bool entered = false;
+        uint64_t roomInfoVersion = 0;
         {
-            std::lock_guard<std::mutex> stateLk(mu);
-            auto current = rooms.find(code);
-            entered = current != rooms.end() &&
-                      current->second.roomInfoVersion == roomInfoVersion;
+            // send gate를 먼저 잡은 뒤 guestPresent를 공개한다. 반대 순서면 host
+            // roomLoop가 그 사이 guest를 발견하고 CHAT/READY를 ROOM_INFO보다 먼저
+            // 보낼 수 있다. 모든 중첩 잠금은 send gate -> state mu 순서를 따른다.
+            const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
+            std::unique_lock<std::mutex> sendLk(roomSendMu_[shard]);
+            std::unique_lock<std::mutex> lk(mu);
+            if (stopping.load()) {
+                lk.unlock();
+                net::tcp_close(sock);
+                return;
+            }
+            auto it = rooms.find(code);
+            if (it == rooms.end()) {
+                lk.unlock();
+                sendRoomInfo_(sock, code, kStatusNotFound, 0);
+                net::tcp_close(sock);
+                RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                          << " close: join " << code << " notfound match_uuid=-");
+                return;
+            }
+            const auto& current = it->second;
+            if (current.guestPresent || current.matchStarted) {
+                const uint8_t peerCount =
+                    static_cast<uint8_t>((current.hostPresent ? 1 : 0) + (current.guestPresent ? 1 : 0));
+                lk.unlock();
+                sendRoomInfo_(sock, code, kStatusFull, peerCount);
+                net::tcp_close(sock);
+                RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                          << " close: join " << code << " full match_uuid=-");
+                return;
+            }
+            Entry r = current; // Copy before changing the live room.
+            r.guestSock     = sock;
+            r.guestConn     = conn_id;
+            r.guestPresent  = true;
+            r.guestPlayerId = player_id;
+            r.guestElo      = elo;
+            r.guestUsername = username;
+            r.guestToken    = token;
+            r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+            r.guestSessionLease = std::move(session_lease);
+            r.guestIpSession    = std::move(ip_session);
+            net::TcpSocket hs = r.hostSock;
+            net::TcpSocket gs = r.guestSock;
+            roomInfoVersion = r.roomInfoVersion = next_room_info_version_;
+            static_assert(std::is_nothrow_move_assignable_v<Entry>);
+            it->second = std::move(r);
+            ++next_room_info_version_;
+            lk.unlock();
+            {
+                std::lock_guard<std::mutex> stateLk(mu);
+                auto current = rooms.find(code);
+                entered = current != rooms.end() &&
+                          current->second.roomInfoVersion == roomInfoVersion;
+            }
+            if (entered) {
+                // 두 참가자의 ROOM_INFO 사이에도 READY/CHAT이 끼지 않는다.
+                sendRoomInfo_(hs, code, kStatusWaiting, 2);
+                sendRoomInfo_(gs, code, kStatusWaiting, 2);
+            }
         }
         if (entered) {
-            // 두 참가자의 ROOM_INFO 사이에도 READY/CHAT이 끼지 않는다.
-            sendRoomInfo_(hs, code, kStatusWaiting, 2);
-            sendRoomInfo_(gs, code, kStatusWaiting, 2);
+            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                      << " joined " << code);
+            roomLoop_(code, /*isHost=*/false, sock, std::move(streamPrefix));
+        } else {
+            // The published guest still owns a slot if a concurrent state change
+            // invalidated its initial notice. No reader loop will reclaim it.
+            abortRoom_(code, sock);
+            net::tcp_close(sock);
         }
-    }
-    if (entered) {
-        RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-                  << " joined " << code);
-        roomLoop_(code, /*isHost=*/false, std::move(streamPrefix));
+    } catch (...) {
+        abortRoom_(code, sock);
+        throw;
     }
 }
 
+// An abandoned owner path must not leave an entry without its reader loop.
+// Compare owning handle identities, not reusable fd numbers or only the code.
+void RoomRegistry::abortRoom_(const std::string& code, const net::TcpSocket& owner) {
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        const auto it = rooms.find(code);
+        if (it == rooms.end()) return;
+        const auto same = [&](const net::TcpSocket& socket) {
+            return (owner.fdh || owner.transport) &&
+                   socket.fdh == owner.fdh && socket.transport == owner.transport;
+        };
+        if (!same(it->second.hostSock) && !same(it->second.guestSock)) return;
+        net::tcp_close(it->second.hostSock);
+        net::tcp_close(it->second.guestSock);
+        rooms.erase(it);
+    }
+    cv.notify_all();
+}
+
+bool RoomRegistry::ownsSlot_(const Entry& entry, bool isHost,
+                             const net::TcpSocket& expected) {
+    const auto& socket = isHost ? entry.hostSock : entry.guestSock;
+    const bool present = isHost ? entry.hostPresent : entry.guestPresent;
+    return present && (expected.fdh || expected.transport) &&
+           socket.fdh == expected.fdh && socket.transport == expected.transport;
+}
+
 void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
+                             const net::TcpSocket& expected,
                              std::vector<uint8_t> streamPrefix) {
-    // 내 소켓 사본 확보 (lock 밖에서 recv 하기 위함)
-    net::TcpSocket mySock;
+    // Keep the caller's owning identity: the same code/role may be reused.
+    net::TcpSocket mySock = expected;
+    bool ownsSlot = false;
     {
         std::lock_guard<std::mutex> lk(mu);
-        auto it = rooms.find(code);
-        if (it == rooms.end()) return;
-        auto& r = it->second;
-        mySock = isHost ? r.hostSock : r.guestSock;
+        const auto it = rooms.find(code);
+        ownsSlot = it != rooms.end() && ownsSlot_(it->second, isHost, mySock);
+    }
+    if (!ownsSlot) {
+        net::tcp_close(mySock);
+        return;
     }
 
     // playerConnThread 가 첫 프레임과 함께 끌어온 잔여 바이트를 수신 버퍼의
@@ -273,21 +314,30 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
 
         if (!stream.empty()) {
             std::vector<net::Frame> frames;
-            net::parse_frames(stream, frames);
+            if (!net::parse_frames(stream, frames)) {
+                RLOG_WARN("[room] code=" << code << " close: invalid frame boundary");
+                break; // Use the common room/peer/socket cleanup below.
+            }
             for (const auto& f : frames) {
                 if (f.type == net::MsgType::READY) {
-                    const bool ready = !f.payload.empty() && f.payload[0] != 0;
+                    if (f.payload.size() != 1 || f.payload[0] > 1) {
+                        leaveRequested = true;
+                        break; // Common cleanup releases the room slot and socket.
+                    }
+                    const bool ready = f.payload[0] == 1;
                     net::TcpSocket fwd{};
                     bool hasFwd = false;
                     {
                         std::lock_guard<std::mutex> lk(mu);
                         auto it = rooms.find(code);
-                        if (it != rooms.end()) {
+                        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
                             auto& r = it->second;
                             if (isHost) r.hostReady  = ready;
                             else        r.guestReady = ready;
                             if (isHost && r.guestPresent) { fwd = r.guestSock; hasFwd = true; }
                             if (!isHost && r.hostPresent) { fwd = r.hostSock;  hasFwd = true; }
+                        } else {
+                            leaveRequested = true;
                         }
                     }
                     if (hasFwd) {
@@ -297,6 +347,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                     }
                 } else if (f.type == net::MsgType::ROOM_LEAVE) {
                     leaveRequested = true;
+                    break;
                 } else if (f.type == net::MsgType::CHAT) {
                     // 대기 중 채팅 — 상대에게 그대로 전달
                     net::TcpSocket fwd{};
@@ -304,10 +355,12 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                     {
                         std::lock_guard<std::mutex> lk(mu);
                         auto it = rooms.find(code);
-                        if (it != rooms.end()) {
+                        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
                             auto& r = it->second;
                             if (isHost && r.guestPresent) { fwd = r.guestSock; hasFwd = true; }
                             if (!isHost && r.hostPresent) { fwd = r.hostSock;  hasFwd = true; }
+                        } else {
+                            leaveRequested = true;
                         }
                     }
                     if (hasFwd) {
@@ -315,6 +368,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                         sendRoomFrame_(code, fwd, out);
                     }
                 }
+                if (leaveRequested) break;
                 // 다른 타입(HELLO 등)은 이 단계에서는 무시
             }
         }
@@ -326,7 +380,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         {
             std::lock_guard<std::mutex> lk(mu);
             auto it = rooms.find(code);
-            if (it == rooms.end()) break;
+            if (it == rooms.end() || !ownsSlot_(it->second, isHost, mySock)) break;
             auto& r = it->second;
             bothPresentNow = r.hostPresent && r.guestPresent;
 
@@ -368,16 +422,17 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             cv.wait(lk, [&] {
                 if (stopping.load()) return true;
                 auto it = rooms.find(code);
-                if (it == rooms.end()) return true;
+                if (it == rooms.end() || !ownsSlot_(it->second, isHost, mySock)) return true;
                 auto& r = it->second;
                 if (isHost)  return r.guestExited || !r.guestPresent;
                 else         return r.hostExited  || !r.hostPresent;
             });
 
             auto it = rooms.find(code);
-            if (it == rooms.end() || stopping.load()) {
-                // 상대 사라짐 — 내 소켓만 닫고 종료
-                if (it != rooms.end()) rooms.erase(it);
+            const bool stillOwns = it != rooms.end() && ownsSlot_(it->second, isHost, mySock);
+            if (!stillOwns || stopping.load()) {
+                // Never erase a replacement room reached by an old reader.
+                if (stillOwns) rooms.erase(it);
                 net::tcp_close(mySock);
                 return;
             }
@@ -442,28 +497,37 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
     net::TcpSocket peerSock{};
     bool notifyPeer = false;
     uint64_t roomInfoVersion = 0;
+    std::shared_ptr<PlayerSessionLease> retiredLease;
+    std::shared_ptr<IpAdmission> retiredIp;
     {
         std::lock_guard<std::mutex> lk(mu);
         auto it = rooms.find(code);
-        if (it != rooms.end()) {
+        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
             auto& r = it->second;
-            // 떠나는 쪽의 세션 lease 와 per-IP 세션 슬롯은 즉시 반납한다 —
-            // 상대가 남아 방 Entry 가 유지되는 동안에도 이 플레이어가 새 연결로
-            // 재인증할 수 있어야 하고, 타임아웃 정리 시 자원 회수가 방 소멸
-            // 시점까지 미뤄지지 않게 한다. (이 소켓은 아래에서 닫힌다.)
+            // Move departure leases out; release them after mu, before peer I/O.
+            // A surviving room must not keep the departed admission alive.
+            // Other aliases, if any, may still defer final release.
             if (isHost) {
                 r.hostPresent = false;  r.hostReady  = false;
-                r.hostSessionLease.reset(); r.hostIpSession.reset();
+                r.hostSock = {}; // mySock retains the departing owner until close below.
+                retiredLease = std::move(r.hostSessionLease);
+                retiredIp = std::move(r.hostIpSession);
             } else {
                 r.guestPresent = false; r.guestReady = false;
-                r.guestSessionLease.reset(); r.guestIpSession.reset();
+                r.guestSock = {};
+                retiredLease = std::move(r.guestSessionLease);
+                retiredIp = std::move(r.guestIpSession);
             }
             if (isHost && r.guestPresent) { peerSock = r.guestSock; notifyPeer = true; }
             if (!isHost && r.hostPresent) { peerSock = r.hostSock;  notifyPeer = true; }
             roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
             if (!r.hostPresent && !r.guestPresent) rooms.erase(it);
+            // A starter may be waiting for this presence change, not reader-exit.
+            cv.notify_all();
         }
     }
+    retiredLease.reset();
+    retiredIp.reset();
 
     if (notifyPeer) {
         sendRoomInfoIfCurrent_(peerSock, code, kStatusGoneFull, 1,
@@ -474,7 +538,10 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
 }
 
 void RoomRegistry::shutdown() {
-    if (stopping.exchange(true)) return;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (stopping.exchange(true)) return;
+    }
     cv.notify_all();
     // roomLoop_ 들은 stopping 을 보고 자기 소켓을 닫으며 종료한다.
 }

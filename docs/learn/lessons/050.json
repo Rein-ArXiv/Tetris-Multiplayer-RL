@@ -1,0 +1,467 @@
+{
+  "id": "lesson-50",
+  "title": "시드 RNG: 상태를 소유하며 같은 순서를 다시 만들기",
+  "shortTitle": "시드·상태와 난수 공급기",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: SevenBag에 고를 인덱스를 전달하고, Round는 정해진 패턴을 반복해서 공급받습니다.",
+  "finish": "완료: 난수 엔진과 가방을 함께 소유한 공급기를 만들고, --seed 옵션으로 실제 게임 루프에 연결합니다.",
+  "objective": "시드·상태·출력과 고정 폭 정수 계산을 구분하고, 공급기 복사·호출 순서·게임 시드 정규화를 설명하며 검증합니다.",
+  "prerequisites": [
+    "SevenBag의 활성 구간과 선택 상한",
+    "Round의 값 소유와 후보 상태 게시",
+    "비트 XOR·시프트·uint64_t·optional"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek의 선택 초안 두 공급기를 검수하고 누적 게임 경로·비트 오라클·실제 생산 함수와 대조",
+    "draftJob": "out/learning-jobs/050-rng-events.jsonl",
+    "corrections": [
+      "미정의 SevenBag 이름을 완전 수식형으로 수정",
+      "variant를 타입 소거라고 부른 주석을 태그 있는 합집합으로 교정",
+      "엔진 상태만을 공급기 스냅샷으로 읽을 수 있는 주석 교정",
+      "게임 시드0 정규화와 엔진 기본값을 구별하고 Round·실제 main에 연결",
+      "부동소수점1/60초의 나노초 절삭을 고려해 한 틱 소비 실험을20ms로 명시",
+      "variant의 예외 없는 복사·이동 계약을 static_assert로 고정"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED 전체42 CTests·SDL 전체43 CTests와 tetris 빌드; 두 구성 경고0",
+    "65,536개 비트 배열·반복 덧셈 엔진 대조와 시드1 고정 벡터; max0/1·상위비트 시드 경계",
+    "100,000회 가방 공급·복사 보존; 100시드 Round의 생성/세부 승계/종료/무효 입력과 FrameRunner의0틱·무효 시간 보존",
+    "실제 SimGame 생성1,000시드와 실제 두 공급함수 추출100,000회 종류·남은 순서·RNG 상태 대조",
+    "CPU 데모 출력/독립 링크, SDL dummy에서 실제 tetris 시드 파싱·초기 공급 후 GL 창 생성 실패 경계; 실제 화면 검증은 아님",
+    "UBSan; 출력값을 state에 저장·마지막 하나에서 소비 생략·잘못된0 기본값 세 Release 결함 변형 거부",
+    "Win32/macOS 네이티브 실행 미수행. 사용자 요청으로 화면 조작과 스크린샷 생략"
+  ],
+  "recap": {
+    "points": [
+      "가방은 남은 후보의 순서와 개수를 소유하고, 추출은 선택한 종류를 제거합니다.",
+      "중복 없는 한 가방과 모든 순열의 균등성은 별도의 성질입니다.",
+      "인덱스 선택 방식·삭제 순서·난수 소비 횟수가 같은 시드의 결과에 영향을 줍니다."
+    ],
+    "bridge": "선택 인덱스를 만드는 엔진을 붙이고, 그 내부 상태를 가방과 함께 소유합니다."
+  },
+  "sections": [
+    {
+      "title": "선택 인덱스를 만드는 상태 기계",
+      "body": "SevenBag는 남은 후보에서 지정한 인덱스를 꺼냅니다. 매번 손으로 숫자를 적는 대신, 내부 상태를 갱신하면서 정수를 만드는 함수를 연결해 봅시다. 같은 시작점에서 같은 공급 순서를 다시 얻는 것이 목표입니다.\n\n이 함수는 저장한 상태에 정해진 계산을 적용해 값을 만듭니다. 이를 **의사난수 생성기(PRNG)**라고 부릅니다. 의사난수라는 말은 상태로부터 수열을 계산한다는 뜻입니다.\n\n| 단계 | 역할 |\n| --- | --- |\n| 시드 정규화 | 요청한 시작 값을 내부 상태로 바꿈 |\n| 엔진 next | 상태를 다음 상태로 바꾸고 큰 정수를 반환 |\n| nextUInt(bound) | 큰 정수를 유효 인덱스 범위로 줄임 |\n| SevenBag.take(index) | 해당 후보를 제거하고 종류를 반환 |\n| Round | 종류를 현재 블록·미리보기로 소비 |\n\n작업은 엔진의 계산을 이해하고, 엔진과 가방을 함께 소유하는 공급기를 만든 뒤, 실제 게임 실행기에 `--seed 42`로 연결하는 순서입니다."
+    },
+    {
+      "title": "시드·상태·출력의 세 역할",
+      "body": "**시드(seed)**는 초기 상태를 정할 때 넣는 값입니다. **상태(state)**는 다음 호출을 위해 객체가 보관하는 값이고, **출력(output)**은 이번 호출이 밖으로 돌려주는 값입니다. 셋의 역할을 나누면 시드로 시작하는 것과 진행 중인 수열을 이어 가는 것을 구별할 수 있습니다.\n\n현재 엔진을 상태 기계로 쓰면 `다음 상태 = T(현재 상태)`, `출력 = G(다음 상태)`입니다. T와 G가 정해져 있으므로 같은 상태에서 같은 호출을 하면 같은 결과를 얻습니다. next가 끝난 뒤 객체는 다음 상태를 보관합니다.\n\n시드1인 엔진의 첫 호출에서는 내부 상태가33,554,433이 되고, 출력은5,180,492,295,206,395,165입니다. 서로 다른 숫자입니다. 호출자는 출력을 인덱스로 바꾸고, 엔진은 내부 상태로 다음 호출을 계속합니다.",
+      "codes": [
+        {
+          "label": "상태 관찰과 출력 반환",
+          "language": "cpp",
+          "text": "XorShift64Star engine(1);\nconst auto before = engine.getState(); // 1\nconst auto output = engine.next();     // 5180492295206395165\nconst auto after = engine.getState();  // 33554433"
+        }
+      ],
+      "reference": {
+        "path": "core/rng.h",
+        "symbol": "uint64_t getState() const",
+        "invariant": "관찰 함수가 내부 상태의 값을 반환하며 엔진을 진행시키지 않는다.",
+        "mayDiffer": "반환된 상태를 저장하는 형식과 접근자 이름은 바뀔 수 있다.",
+        "omitted": "이 상태 값만으로 보드와 남은 가방까지 복원하지는 않는다."
+      }
+    },
+    {
+      "title": "XOR와 시프트를 한 줄씩 계산한다",
+      "body": "XOR `^`는 같은 자리의 두 비트가 다를 때1을 만듭니다. 시프트는 비트를 왼쪽 또는 오른쪽으로 옮깁니다. 예를 들어 네 자리로 표시한11은1011이고, 오른쪽으로 한 칸 옮기면0101입니다. 두 값을 XOR하면1110, 즉14입니다.\n\n`x ^= x >> 12`는 x와 x를 오른쪽으로12칸 옮긴 값을 XOR해 x에 다시 저장합니다. 이어지는 왼쪽25칸 시프트는 **이미 갱신된 x**를 사용합니다. 마지막 오른쪽27칸 시프트도 그다음 값에 적용합니다. 세 줄을 처음 x에 따로 적용한 뒤 합치는 계산과는 다릅니다.\n\n실제 상수12,25,27은 이 엔진의 고정된 전이 규칙입니다. 같은 비트 연산 몇 개를 아무 상수로 조합한다고 같은 주기나 통계적 성질을 얻지는 않습니다. 재현할 구현의 상수와 순서를 함께 고정합니다.",
+      "codes": [
+        {
+          "label": "core/rng.h · 상태 전이",
+          "language": "cpp",
+          "text": "uint64_t x = state;\nx ^= x >> 12;\nx ^= x << 25;\nx ^= x >> 27;\nstate = x;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "시드1의 첫 전이를 손으로 확인하기",
+          "body": "처음1을 오른쪽12칸 이동한 값은0입니다. 다음 줄은1 XOR 2²⁵이므로33,554,433입니다. 이 값은2²⁷보다 작아 마지막 오른쪽27칸 값도0입니다. 따라서 첫 내부 상태는33,554,433입니다."
+        }
+      ]
+    },
+    {
+      "title": "64비트 범위에서 계산한다",
+      "body": "uint64_t는 정확히64비트인 부호 없는 정수 타입입니다. 이 타입의 값은0부터2⁶⁴−1까지입니다. 범위를 넘는 부호 없는 정수 계산은2⁶⁴로 나눈 나머지로 돌아옵니다. 예를 들어 최댓값에1을 더하면0이 됩니다.\n\n왼쪽 시프트로 범위를 벗어난 높은 비트는 사라지고, 오른쪽 시프트에는 높은 쪽부터0이 들어옵니다. 이 엔진의 시프트 횟수12,25,27은 모두64보다 작습니다. 시프트 횟수도 연산 계약의 일부입니다.\n\n마지막 곱셈 `x * 2685821657736338717ull`은64비트 결과를 돌려줍니다. 수학적인 곱 전체를 무한한 정수로 보관하는 것이 아니라 하위64비트에 해당하는 값입니다. 그래서 다른 언어에서 검사기를 만들 때에도64비트 범위로 줄이는 규칙을 넣어야 같은 결과를 비교할 수 있습니다.\n\n[C++ 정수 타입의 부호 없는 연산 규정](https://eel.is/c++draft/basic.fundamental)과 [시프트 규정](https://eel.is/c++draft/expr.shift)은 이 계산의 언어 차원 근거입니다. 엔진을 이식할 때에는 타입의 폭·부호·연산 순서를 함께 맞춥니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "메모리에 저장된 바이트 순서와 수치 연산",
+          "body": "같은 uint64_t 수치에 같은 연산을 하는 단계에서는 메모리의 바이트 순서를 직접 읽지 않습니다. 수치를 파일·패킷의 바이트열로 옮기는 단계에서는 별도의 순서 규약이 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "출력 곱셈은 내부 상태 다음에 온다",
+      "body": "xorshift64*의 별표는 이 구현에서 출력에 곱셈을 적용하는 형태를 가리킵니다. 세 시프트로 만든 x를 state에 저장하고, 곱셈 결과를 반환합니다. 아래에서 state 대입과 return의 위치를 구별해 읽어 보세요.\n\n출력값을 state에 저장하면 다음 호출의 출발점이 달라집니다. 코드가 여전히 숫자를 만들고 블록도 나오기 때문에 화면만으로는 오류를 알아채기 어렵습니다. 상태와 출력을 함께 기록하는 짧은 고정 예제가 이런 회귀를 잡습니다.\n\n| 시드1의 호출 | 저장된 상태 | 반환 출력 |\n| --- | --- | --- |\n| 1 | 33554433 | 5180492295206395165 |\n| 2 | 1126174793148417 | 12380297144915551517 |\n| 3 | 3659449627584515 | 13389498078930870103 |\n\n엔진을 복사하면 현재 저장된 상태가 복사됩니다. 같은 입력 없이 next만 호출하는 엔진에서는 복사본 두 개에 같은 횟수로 next를 호출하면 같은 이어지는 수열을 얻습니다.",
+      "codes": [
+        {
+          "label": "core/rng.h · next 전체",
+          "language": "cpp",
+          "text": "uint64_t next() {\n    uint64_t x = state;\n    x ^= x >> 12;\n    x ^= x << 25;\n    x ^= x >> 27;\n    state = x;\n    return x * 2685821657736338717ull;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "재현 가능한 난수와 비밀 값",
+          "body": "이 엔진은 규칙 재현을 위한 수열을 만듭니다. 시드나 내부 상태를 아는 사람도 같은 수열을 계산할 수 있습니다. 계정 토큰처럼 예측하기 어려워야 하는 값과는 역할이 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "시드0의 정규화도 계약이다",
+      "body": "0에 어떤 시프트를 해도0이며,0 XOR 0과0의 곱도0입니다. 내부 상태0은 바뀌지 않는 **고정점**입니다. 엔진 생성자는 요청한 시드가0이면 비영 기본값으로 바꿉니다.\n\n그런데 게임은 엔진을 만들기 전에 자신만의 기본 시드를 적용합니다. 생성 경계에 따라 값이 다릅니다.\n\n| 생성 | 엔진의 처음 상태 |\n| --- | --- |\n| XorShift64Star(1) | 1 |\n| XorShift64Star(0) | 88172645463393265 |\n| SimGame(0)의 조각 엔진 | 869193496018642825 |\n| SeededBagSource(0)의 조각 엔진 | 869193496018642825 |\n\n마지막 두 값은16진수0xC0FFEE123456789와 같습니다. 새 공급기는 실제 SimGame의 순서를 재현하므로 **게임 경계의 대체 값**을 사용합니다.0을 기본값으로 정규화하면, 요청0과 요청869193496018642825는 같은 수열을 만듭니다. 서로 다른 요청 숫자가 언제나 다른 수열을 뜻하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "simulation/seeded_bag_source.h · 게임 시드 정규화",
+          "language": "cpp",
+          "text": "static constexpr std::uint64_t default_seed = 0xC0FFEE123456789ull;\n\nexplicit SeededBagSource(std::uint64_t seed) noexcept\n    : rng_(seed ? seed : default_seed) {}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimGame::SimGame(uint64_t seed)",
+        "invariant": "게임이 선택한 시드 정규화를 엔진 생성 전에 적용한다.",
+        "mayDiffer": "기본 시드를 바꾸면 요청0으로 시작한 기존 경기의 순서가 달라진다.",
+        "omitted": "가비지 시드 유도와 다른 스트림의 정책은 조각 공급기에 합치지 않는다."
+      }
+    },
+    {
+      "title": "한 번의 호출이 수열을 한 칸 진행시킨다",
+      "body": "nextUInt는 엔진 출력을 범위 안의 숫자로 줄입니다. 후보가3개이면 next의 출력에3으로 나눈 나머지를 사용합니다. 인덱스는0,1,2 중 하나가 됩니다.\n\n후보가 하나만 남으면 반환 인덱스는 항상0입니다. 그래도 현재 구현은 next를 한 번 호출합니다. 이 호출을 생략하면 당장의 종류는 같지만, 다음 가방을 시작할 때 엔진 상태가 달라집니다. **반환 값이 정해진 호출도 상태를 바꿀 수 있습니다.**\n\nmax=0도 현재 엔진에서는 분모1로 처리해0을 반환하며 한 번 진행합니다. 새 가방 공급기는 next_bound가 항상1~7이므로 이0 경로를 사용하지 않습니다. 엔진의 기존 계약과 공급기가 실제 쓰는 범위를 나누어 기억합니다.",
+      "codes": [
+        {
+          "label": "core/rng.h · nextUInt",
+          "language": "cpp",
+          "text": "uint32_t nextUInt(uint32_t max) {\n    return static_cast<uint32_t>(next() % (max ? max : 1u));\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimBlock SimGame::GetRandomBlock()",
+        "invariant": "한 조각을 공급할 때 조각 RNG를 한 번 소비한다.",
+        "mayDiffer": "다른 범위 축소 알고리즘은 호출 횟수나 같은 시드 결과를 바꿀 수 있다.",
+        "omitted": "유효 범위에 드는 것과 모든 순열의 정확한 균등성은 별도 계약이다."
+      }
+    },
+    {
+      "title": "엔진과 가방을 같은 객체가 소유한다",
+      "body": "SeededBagSource의 next는 세 단계입니다. 가방에서 다음 선택 상한을 읽고, 엔진으로 인덱스를 만든 뒤, 그 인덱스를 꺼냅니다. 멤버 rng_와 bag_가 같은 공급기 안에 있으므로 객체를 복사할 때 둘을 함께 복사합니다.\n\n가방 상한은1~7이고 nextUInt는 그 상한 미만을 반환합니다. 따라서 여기에서 호출한 take는 성공한다는 불변 조건이 성립합니다. 외부의 임의 인덱스를 받는 SevenBag는 optional로 실패를 표현하지만, 이 연결 함수는 성공한 Kind를 바로 반환할 수 있습니다.\n\nnext가 끝난 뒤에는 엔진이 한 번 진행되고 남은 가방이 하나 줄어듭니다. 마지막 항목을 꺼낸 순간 remaining=0이며, 다음 호출에서 가방을 채웁니다.",
+      "codes": [
+        {
+          "label": "simulation/seeded_bag_source.h · next",
+          "language": "cpp",
+          "text": "Kind next() noexcept {\n    const std::uint32_t bound =\n        static_cast<std::uint32_t>(bag_.next_bound());\n    const std::size_t index = rng_.nextUInt(bound);\n    return *bag_.take(index);\n}"
+        },
+        {
+          "label": "simulation/seeded_bag_source.h · 함께 소유할 상태",
+          "language": "cpp",
+          "text": "XorShift64Star rng_;\nstudy_bag::SevenBag bag_;"
+        }
+      ]
+    },
+    {
+      "title": "가방 위치와 전체 진행량을 구별한다",
+      "body": "cursor는 `(7−remaining) % 7`입니다. 가방 안에서 몇 개를 꺼냈는지0~6으로 표시합니다. 생성 직후와 일곱 개를 모두 꺼낸 직후에는 모두0입니다. 하지만 처음 remaining은7, 다 꺼낸 뒤 remaining은0입니다.\n\n이 값 하나를 전체 생성 횟수나 공급기의 완전한 상태로 쓰면 정보를 잃습니다. 같은 cursor라도 엔진 상태와 남은 종류 순서가 다를 수 있습니다. 관찰에는 목적별 값을 사용합니다.\n\n| 관찰 | 뜻 |\n| --- | --- |\n| cursor() | 가방 단위의 순환 위치 |\n| bag().remaining() | 지금 활성 후보 수 |\n| bag().at(i) | 남은 후보의 순서 |\n| rng_state() | 다음 난수를 만드는 내부 상태 |\n\ngetState를 시드로 새 엔진을 만들면 이 비영 상태에서 엔진 수열은 이어집니다. 그러나 새 SevenBag까지 함께 만들면 남은 후보를 초기 목록으로 되돌립니다. **공급기 전체를 이어 가려면 엔진과 가방을 함께 보관**해야 합니다.",
+      "codes": [
+        {
+          "label": "복사한 공급기로 별도의 미래를 계산한다",
+          "language": "cpp",
+          "text": "study_next::SeededBagSource live(42);\n(void)live.next();\n(void)live.next();\nauto branch = live;       // 엔진과 남은 후보를 함께 복사\nconst auto b = branch.next();\nconst auto a = live.next(); // branch 호출이 live를 진행시키지 않는다\n// a == b"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "매번 같은 시드로 새로 만들면",
+          "body": "next를 호출할 때마다 SeededBagSource(42)를 새로 생성하면 매번 첫 종류만 얻습니다. 초기화는 새 경기를 시작할 때 하고, 진행 중에는 같은 객체의 상태를 이어 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "정해진 패턴과 난수 가방을 한 경계로 받는다",
+      "body": "Round에는 결과가 정해진 실습용 ScriptedSource도 필요합니다. 줄 지우기나 게임 종료 실험에서 원하는 종류를 반복할 수 있기 때문입니다. 두 공급기는 모두 next와 cursor를 제공하지만 저장하는 상태가 다릅니다.\n\nPieceSource는 `std::variant<ScriptedSource, SeededBagSource>`에 둘 중 하나를 값으로 담습니다. variant는 저장된 값과 **현재 어느 타입인지 나타내는 표식**을 함께 관리하는 타입입니다. 이를 태그가 있는 합집합, 또는 tagged union이라고 부릅니다. 이 구조에서는 후보 타입 두 개가 컴파일 때 정해져 있습니다.\n\nget_if는 현재 타입이 맞으면 내부 값의 포인터, 다르면 nullptr를 줍니다. next는 먼저 패턴 공급기인지 확인하고, 아니면 난수 가방을 호출합니다. 공급기를 복사하면 활성 타입과 그 상태를 함께 복사합니다.\n\n생성자는 두 공급기 각각을 받아 PieceSource를 만들며, 저장 타입들은 예외 없이 복사·이동할 수 있습니다. 이 조건을 static_assert로 고정해 두고, 어느 쪽도 없는 상태를 만들 경로를 열지 않습니다. 다른 타입이 추가되면 분기와 계약을 함께 갱신해야 합니다.",
+      "codes": [
+        {
+          "label": "simulation/piece_source.h · next 분기",
+          "language": "cpp",
+          "text": "Kind next() noexcept {\n    if (auto* scripted = std::get_if<ScriptedSource>(&source_)) {\n        return scripted->next();\n    }\n    return std::get<SeededBagSource>(source_).next();\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "읽기 포인터의 수명",
+          "body": "seeded()는 활성 타입이 난수 공급기일 때 읽기 전용 포인터를 줍니다. 이 포인터는 소유자가 살아 있고 해당 내부 값이 유지되는 동안 빌려 씁니다. 별도의 미래를 보관하려면 포인터 대신 공급기의 값을 복사합니다."
+        }
+      ]
+    },
+    {
+      "title": "Round의 후보 상태에도 공급기가 들어간다",
+      "body": "Round의 source_ 타입을 PieceSource로 바꾸고 create의 매개변수도 같은 타입으로 받습니다. Kind 하나로 시작하는 편의 함수는 반복 패턴을 만들어 이 경계를 호출합니다. 기존 실습 호출과 난수 가방 호출이 같은 큐·고정 규칙으로 들어갑니다.\n\nRound는 create에서 현재 하나와 미리보기 세 개를 꺼냅니다. 시드1이면 수열의 앞부분이T,Z,O,J,S,L,I이므로 현재T, 미리보기Z,O,J, 남은 가방S,L,I가 됩니다. 미리보기를 읽는 것만으로는 더 꺼내지 않습니다.\n\n틱 처리의 `Round candidate = *this`에도 공급기가 함께 복사됩니다. 후보 안에서 고정과 미리보기 보충을 계산한 뒤 성공하면 `*this = candidate`로 게시합니다. 엔진이 전역 변수나 공유 포인터에 있었다면 후보 계산이 원본 엔진을 먼저 진행시킬 수 있습니다. 값 소유는 보드와 공급 상태가 함께 다음 상태가 되도록 만듭니다.",
+      "codes": [
+        {
+          "label": "simulation/round.h · 바뀌는 공급 경계",
+          "language": "cpp",
+          "text": "static std::optional<Round> create(const study_grid::Grid& board,\n                                  study_next::PieceSource source,\n                                  int interval = 30) noexcept;\n\n// private\nexplicit Round(study_next::PieceSource source) noexcept : source_(source) {}\nstudy_next::PieceSource source_;"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.h",
+        "symbol": "XorShift64Star rng;",
+        "invariant": "경기 상태가 자체 RNG와 남은 가방을 소유한다.",
+        "mayDiffer": "실제 SimGame은 멤버를 직접 소유하며 기준 Round는 공급기 객체로 묶는다.",
+        "omitted": "실제 게임의 전체 전이와 학습 Round의 후보 게시 방식이 완전히 같다고 가정하지 않는다."
+      }
+    },
+    {
+      "title": "실제 게임 실행에 시드 옵션을 연결한다",
+      "body": "시드 옵션은 `tetris --seed 42`입니다. main은 문자열을 넓은 부호 없는 정수로 읽고, 빈 보드와 SeededBagSource로 Round를 만듭니다. 이후 같은 run_session과 FrameRunner가 입력·시간·렌더를 처리합니다. 게임 규칙 안에서 현재 시간을 읽어 시드를 다시 만들지 않습니다.\n\n시드 문법은 십진수0~18,446,744,073,709,551,615입니다. 부호, 앞뒤 공백,16진수 접두사, 뒤에 붙은 글자, 범위 초과를 거부합니다.0과 앞의0들은 허용합니다. from_chars의 오류 코드와 끝 위치를 모두 확인하므로 “42oops”를42로 일부만 읽어 수락하지 않습니다.\n\n기존 `tetris T spin`, `tetris I four-clears` 같은 명령은 정해진 패턴을 계속 사용합니다. 난수 가방은 명시적으로 시드를 고른 경로에서 사용합니다. 화면에서 주는 조작을 달리하면 보드와 소비 시점도 달라지므로, 같은 시드는 같은 플레이 전체를 뜻하지 않습니다.",
+      "codes": [
+        {
+          "label": "src/seed_option.h · 십진수 시드 읽기",
+          "language": "cpp",
+          "text": "inline std::optional<std::uint64_t> parse(std::string_view text) noexcept {\n    if (text.empty()) return std::nullopt;\n    for (const char ch : text) if (ch < '0' || ch > '9') return std::nullopt;\n    std::uint64_t value = 0;\n    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);\n    if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) return std::nullopt;\n    return value;\n}"
+        },
+        {
+          "label": "src/main.cpp · 시드 경로의 핵심",
+          "language": "cpp",
+          "text": "const auto seed = study_seed::parse(argv[2]);\nif (!seed) { usage(argv[0]); return 2; }\nround = study_round::Round::create(study_grid::Grid{}, study_next::SeededBagSource(*seed));\nif (!round) return 1;\n// 나머지 모드와 같은 run_session(*round)로 진행"
+        }
+      ]
+    },
+    {
+      "title": "재현 조건을 검사 가능한 주장으로 만든다",
+      "body": "“같은 시드면 같다”를 검사하려면 무엇이 같은지 정해야 합니다. 엔진 검사에서는 상태·출력 열을 비교합니다. 공급기 검사에서는 종류 열과 남은 후보를 함께 비교합니다. 경기 검사에서는 같은 초기 보드와 같은 틱 입력을 적용한 후 현재 블록·미리보기·보드·공급 상태를 비교합니다.\n\n검사기는 비트를64개의 bool로 풀어서 옮기고, 곱셈은 반복 덧셈으로 계산해 엔진과 대조합니다. 다른 표현으로 같은 계산을 검증하면 테스트와 구현이 같은 잘못된 한 줄을 공유할 가능성을 줄입니다. 시드1의 알려진 앞부분도 별도 기대값으로 고정합니다.\n\n후보가 하나일 때의 호출을 생략하거나, 출력 곱셈을 state에 넣거나, 게임의 시드0을 엔진 기본값으로 처리하면 종류 또는 상태 비교가 실패해야 합니다. 복사본을 진행시킨 뒤 원본을 확인하는 검사도 소유권 계약의 일부입니다.\n\n프레임 검사에서는0틱에 하드드롭 요청을 보관하고20ms 프레임에서 한 번 소비합니다. 그사이에 잘못된 시간을 전달해도 요청과 RNG 상태가 보존되어야 합니다. 게임이 끝난 뒤에는 stopped 틱이 공급기를 더 진행시키지 않습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "재현성과 통계 품질",
+          "body": "같은 입력으로 같은 결과를 얻는 검사는 결정론을 확인합니다. 출력 분포, 연속 값의 상관관계, 예측 어려움은 다른 질문입니다. [xorshift 계열의 통계적 특성에 대한 저자 설명](https://prng.di.unimi.it/xorshift.php)은 이 구분을 더 살펴볼 수 있는 자료입니다."
+        }
+      ]
+    },
+    {
+      "title": "CPU 실험과 게임 실행",
+      "body": "먼저 창 없이 rng_demo로 엔진의 상태·출력과 블록 열을 읽습니다. 인자를 생략하면 시드1을 사용합니다.0을 넣으면 엔진 자체 초기값과 게임 공급기의 초기값이 다른 것도 출력에서 확인할 수 있습니다.\n\n시드1의 두 가방은 `TZOJSLI | LOITSJZ`입니다. 첫 줄의 엔진 수치와 게임의 미리보기는 서로 다른 관찰입니다. rng_demo는 각 실험에 새 객체를 만들므로 엔진 출력 세 번이 뒤의 가방 실험을 미리 진행시키지 않습니다.\n\n화면으로 조작하려면 SDL 구성으로 tetris를 빌드합니다. 같은 시드42로 다시 시작하면 같은 블록 공급 순서가 나오고, Left/Right·Up·Down·Space는 기존 게임 루프가 처리합니다. 화면 실행에는 SDL과 OpenGL3.3 Core가 필요합니다.",
+      "codes": [
+        {
+          "label": "CMakeLists.txt · 두 CPU 타깃 추가",
+          "language": "cmake",
+          "text": "add_executable(rng_demo src/rng_demo.cpp)\ntarget_link_libraries(rng_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(rng_contract tests/rng_contract.cpp)\n    target_link_libraries(rng_contract PRIVATE study_mesh)\n    add_test(NAME rng_contract COMMAND rng_contract)\nendif()"
+        },
+        {
+          "label": "CPU 실험 · 저장소 루트",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/50-seeded-rng -B out/study-50 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-50 --target rng_demo rng_contract\n./out/study-50/rng_demo 1\nctest --test-dir out/study-50 -R '^rng_contract$' --output-on-failure"
+        },
+        {
+          "label": "SDL 게임 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/50-seeded-rng -B out/study-50-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-50-sdl --target tetris\n./out/study-50-sdl/tetris --seed 42"
+        },
+        {
+          "label": "시드1 · 공급 상태의 변화",
+          "language": "text",
+          "text": "locks=0 current=T preview=ZOJ remaining=3 state=2306758490171379329\nlocks=1 current=Z preview=OJS remaining=2 state=585415316980522496\nlocks=2 current=O preview=JSL remaining=1 state=12683848079143609325\nlocks=3 current=J preview=SLI remaining=0 state=3609032897813531829"
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 읽을 경계",
+      "body": "추가 파일은 core/rng.h, seeded_bag_source.h, piece_source.h, seed_option.h와 CPU 데모·검사입니다. Round는 공급기 타입을 바꾸고 main은 시드 진입 경로를 추가합니다. SevenBag의 삭제 규칙과 기존 입력·렌더 코드는 유지합니다.\n\n소스 뷰어에서는 XorShift64Star 생성자→next→nextUInt와 SimGame 생성자→GetRandomBlock을 따라가 보세요. 엔진만 같아도 게임 생성자의 시드 정규화, 후보 초기 순서, 범위 축소, 호출 횟수가 다르면 종류 열이 달라집니다. 이 경계를 함께 고정하는 것이 재현 가능한 공급기의 계약입니다.",
+      "codes": [
+        {
+          "label": "core/rng.h · 기준 엔진 전체",
+          "language": "cpp",
+          "file": "checkpoints/50-seeded-rng/core/rng.h",
+          "collapsed": true
+        },
+        {
+          "label": "simulation/seeded_bag_source.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/50-seeded-rng/simulation/seeded_bag_source.h",
+          "collapsed": true
+        },
+        {
+          "label": "simulation/piece_source.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/50-seeded-rng/simulation/piece_source.h",
+          "collapsed": true
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/50-seeded-rng/simulation/round.h",
+          "collapsed": true
+        },
+        {
+          "label": "src/rng_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/50-seeded-rng/src/rng_demo.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "core/rng.h",
+        "symbol": "class XorShift64Star",
+        "invariant": "정규화한 초기 상태와 고정 폭 연산·호출 순서로 수열을 재현한다.",
+        "mayDiffer": "엔진이나 기본 시드가 바뀌면 과거 기록과의 호환 정책을 함께 정해야 한다.",
+        "omitted": "계정 토큰·전체 게임 스냅샷·가비지 홀 RNG를 조각 엔진 하나로 대체하지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "50-1",
+      "kind": "결과 예측",
+      "question": "시드1의 첫 호출 뒤 state는33554433이고 output은5180492295206395165입니다. 다음 next의 출발 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "처음 시드1"
+        },
+        {
+          "id": "b",
+          "text": "반환 출력5180492295206395165"
+        },
+        {
+          "id": "c",
+          "text": "저장된 상태33554433"
+        },
+        {
+          "id": "d",
+          "text": "매번 읽은 현재 시각"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "저장된 상태33554433",
+      "explanation": "현재 엔진은 세 시프트 뒤의x를state에 저장하고 곱셈 결과만 반환합니다. 다음 호출은 저장된state를 읽습니다."
+    },
+    {
+      "id": "50-2",
+      "kind": "오류 원인",
+      "question": "마지막 한 종류가 남았을 때 nextUInt(1)을 생략하고0을 선택했습니다. 어떤 결과가 생기나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "당장 같은 종류를 꺼내지만 다음 가방의 엔진 순서가 달라진다."
+        },
+        {
+          "id": "b",
+          "text": "현재 가방에 같은 종류가 두 개 생긴다."
+        },
+        {
+          "id": "c",
+          "text": "생략해도 내부 상태가 자동으로 한 번 진행한다."
+        },
+        {
+          "id": "d",
+          "text": "현재 배열 크기가8로 늘어난다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "당장 같은 종류를 꺼내지만 다음 가방의 엔진 순서가 달라진다.",
+      "explanation": "nextUInt(1)의 출력은0이지만 내부 next는 상태를 진행합니다. 이 소비를 없애면 다음 추출부터 참조 구현과 다른 상태를 사용합니다."
+    },
+    {
+      "id": "50-3",
+      "kind": "계약 적용",
+      "question": "실제 SimGame(0)의 공급 순서를 재현할 SeededBagSource가 엔진에 전달할 초기 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0"
+        },
+        {
+          "id": "b",
+          "text": "1"
+        },
+        {
+          "id": "c",
+          "text": "88172645463393265"
+        },
+        {
+          "id": "d",
+          "text": "869193496018642825"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "869193496018642825",
+      "explanation": "게임 생성자는0을0xC0FFEE123456789로 바꿉니다. 십진수869193496018642825입니다. 엔진을 직접0으로 만들 때 쓰는 기본값과 다릅니다."
+    },
+    {
+      "id": "50-4",
+      "kind": "소유권 해석",
+      "question": "두 종류를 꺼낸 공급기를 auto branch = live로 복사한 뒤 branch.next()를 호출했습니다. 값 소유 설계에서 live는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "엔진만 한 번 진행하고 가방은 유지한다."
+        },
+        {
+          "id": "b",
+          "text": "엔진과 남은 가방 상태를 모두 유지한다."
+        },
+        {
+          "id": "c",
+          "text": "가방만 한 종류 줄어든다."
+        },
+        {
+          "id": "d",
+          "text": "처음 시드로 자동 초기화된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "엔진과 남은 가방 상태를 모두 유지한다.",
+      "explanation": "복사는 엔진과 가방을 함께 독립된 값으로 만듭니다. branch를 진행시켜도 live는 변하지 않습니다. 같은 미래를 각각 계산할 수 있습니다."
+    },
+    {
+      "id": "50-5",
+      "kind": "경계 진단",
+      "question": "엔진 state만 저장해 두었다가 새 엔진과 새 SevenBag를 만들었습니다. 중간 공급을 그대로 이어 가는 데 부족한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모니터의 주사율"
+        },
+        {
+          "id": "b",
+          "text": "현재 시스템 시간"
+        },
+        {
+          "id": "c",
+          "text": "남은 후보의 순서와 개수"
+        },
+        {
+          "id": "d",
+          "text": "렌더러의 셰이더 핸들"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "남은 후보의 순서와 개수",
+      "explanation": "엔진 상태는 다음 난수를 재현하지만 새 가방은 후보를 일곱 종류로 초기화합니다. 중간 공급에는 남은 가방 상태도 필요합니다. 게임 전체를 복원하려면 보드 등 추가 상태가 필요합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "시드1의 첫 상태 전이를 손으로 계산하고 반환 출력과 구분한다.",
+      "엔진과 게임의0 정규화 값을 각각 확인한다.",
+      "후보가 하나일 때에도 엔진 상태가 진행하는지 검사한다.",
+      "공급기 복사본을 진행시킨 뒤 원본의 엔진·가방을 비교한다.",
+      "--seed로 실제 게임을 시작하고 CPU 데모의 현재·미리보기와 대조한다."
+    ],
+    "expected": "같은 초기 상태·호출 순서에서 수열을 재현하고 공급기 경계의 오류를 찾는다.",
+    "failureChecks": [
+      "곱셈 출력을 내부 state에 저장하지 않았는가?",
+      "새 추출 때마다 같은 시드로 초기화하지 않았는가?",
+      "0 정규화가 게임과 엔진 중 어느 경계인지 확인했는가?",
+      "cursor만으로 전체 공급 상태를 대표하지 않았는가?",
+      "미리보기 조회와 새 항목 소비를 구별했는가?"
+    ]
+  }
+}

@@ -1,0 +1,428 @@
+{
+  "id": "lesson-80",
+  "title": "풀과 참조 수명: 재생 중인 자원",
+  "shortTitle": "중첩 재생·포화 정책·모든 대여 해제",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 같은 종류의 소리를 다시 요청하면 한 보이스가 처음부터 재시작합니다.",
+  "finish": "완료: 같은 PCM을 여러 보이스가 독립적으로 재생하고, 풀 포화와 음원 해제의 참조 경계를 관리합니다.",
+  "objective": "음원과 재생 자리를 구별하고, 시작 순서 기반 선점·완료 경계·모든 대여 종료·실패 후 상태를 구현과 출력으로 설명합니다.",
+  "prerequisites": [
+    "PCM 소유자와 Voice의 대여 관계",
+    "한 번의 사건 소비와 재생 요청",
+    "믹싱 상한과 SDL 장치 잠금"
+  ],
+  "recap": {
+    "points": [
+      "규칙이 확정한 틱별 결과를 소리 요청으로 변환합니다.",
+      "묶음의 소비 위치를 진행한 뒤 재생을 한 번 시도합니다.",
+      "종류별 한 보이스 정책에서는 같은 종류의 새 요청이 기존 커서를 되감습니다."
+    ],
+    "bridge": "음원 자리를 그대로 유지하면서 재생 보이스를 별도로 배정해, 여러 요청의 소리를 겹쳐 보겠습니다."
+  },
+  "sections": [
+    {
+      "title": "한 음원에 두 개의 재생 위치가 필요하다",
+      "body": "회전 효과음이 100ms 동안 울리고 있습니다. 시작 후 20ms에 다시 회전하면 같은 종류의 슬롯을 처음부터 되감는 방식은 앞선 소리를 끊습니다. 이번에는 두 소리를 겹쳐 재생하겠습니다. 음원은 하나지만 시작 시각이 다르므로 읽는 위치는 두 개입니다.\n\n**음원 자원**은 준비된 PCM 데이터이고, **보이스**는 그 데이터를 어디까지 읽었는지와 재생 여부를 가진 한 번의 재생 상태입니다. Player의 PCM 자리와 Mixer의 보이스 자리를 분리합니다. 같은 PCM을 보이스 A는 882프레임에서, 보이스 B는 0프레임에서 읽을 수 있습니다. 44,100Hz에서 20ms는 882프레임입니다.\n\n이 분리 덕분에 같은 음원을 재생할 때 PCM 배열을 복사할 필요가 없습니다. 대신 모든 읽기가 끝나기 전까지 원본을 유지해야 합니다. 중첩 재생 기능은 곧 다중 참조의 수명 문제로 이어집니다.",
+      "codes": [
+        {
+          "label": "하나의 소유자와 두 대여자",
+          "language": "text",
+          "text": "Player.clips_[0] : PCM 4410frames 소유\n       ↑                   ↑\nvoice[2] cursor=882   voice[5] cursor=0\n       └──── 같은 출력 시각의 샘플을 Mixer가 합산 ────┘"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "struct Voice",
+        "invariant": "보이스는 음원의 식별 정보와 독립적인 읽기 위치를 갖는다.",
+        "mayDiffer": "현재 SDL 보이스는 핸들과 샘플 인덱스를 저장하고 기준 Voice는 PCM 포인터와 프레임 커서를 저장한다."
+      }
+    },
+    {
+      "title": "풀은 미리 정한 수의 재생 자리를 돌려 쓴다",
+      "body": "풀(pool)은 자리를 정해 두고 필요할 때 빌렸다가 다시 쓰는 저장소입니다. 여기서는 Mixer가 가진 아홉 보이스를 사용합니다. 음원 종류는 네 개여도 같은 음원이 겹치면 네 개보다 많은 보이스가 필요합니다.\n\n자원이 유한하므로 풀이 가득 찼을 때의 정책도 필요합니다. 새 요청을 버릴지, 진행 중인 소리를 끊을지, 요청들을 하나로 합칠지를 선택합니다. 이번 구현은 비활성 자리를 먼저 찾고, 모두 재생 중이면 가장 오래전에 성공적으로 시작한 재생을 교체합니다. 잘리는 소리는 있어도 보이스 수는 아홉을 넘지 않습니다.\n\n아홉은 이 학습 믹서의 상한입니다. 현재 엔진의 SFX는 여덟이고 BGM 하나를 따로 둡니다. 종류 수나 한 틱의 사건 수만으로 동시 재생 최대를 증명할 수는 없습니다. 지속 시간과 순간적인 요청 밀도까지 봐야 합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "평균으로 최대를 증명할 수 있을까?",
+          "body": "0.2초 음원을 일정하게 0.05초마다 시작하면 약 네 재생이 겹칩니다. 순간적으로 여덟 요청이 함께 오면 평균만으로 예상한 값보다 커집니다. 발생률×지속 시간은 예산의 출발점이며, 실제 포화 처리 정책을 대신하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "0번 슬롯이 가장 오래된 소리일까?",
+      "body": "여덟 자리를 0,1,2,3,4,5,6,7 순서로 채웠다고 합시다. 아홉 번째 요청이 0번을 교체하면 그 자리는 가장 새로운 재생입니다. 열 번째도 0번을 고르면 방금 시작한 소리를 자르고 오래된 1번을 남깁니다.\n\n따라서 배열 인덱스와 시작 순서를 별도로 관리합니다. `VoiceOrder`는 슬롯 번호의 순열을 오래된 쪽부터 보관합니다. 어떤 슬롯이 새로 시작하면 그 번호를 제거한 뒤 끝에 붙입니다. 나머지 번호의 상대 순서는 유지됩니다.\n\n이 순서는 성공한 시작 때만 갱신합니다. 단순 조회나 샘플 읽기 때는 갱신하지 않습니다. 최근 접근 시점을 바꾸는 LRU 캐시 정책과 구별하세요.",
+      "codes": [
+        {
+          "label": "인덱스와 시작 순서를 나눈다",
+          "language": "text",
+          "text": "처음 모두 재생 중:  [0,1,2,3,4,5,6,7]\n0번에서 새 시작:    [1,2,3,4,5,6,7,0]\n1번에서 새 시작:    [2,3,4,5,6,7,0,1]\n다음 오래된 후보:   2번"
+        }
+      ],
+      "reference": {
+        "path": "audio/voice_order.h",
+        "symbol": "class VoiceOrder",
+        "invariant": "시작한 슬롯을 가장 새로운 위치로 옮기고 나머지 상대 순서를 보존한다.",
+        "mayDiffer": "정책의 N은 각 풀에 마련한 보이스 슬롯 수다. 슬롯 수와 빈자리 선택 정책을 구분한다."
+      }
+    },
+    {
+      "title": "시간 카운터 대신 작은 순열을 유지한다",
+      "body": "시작할 때마다 증가하는 일련번호를 저장해 최솟값을 고를 수도 있습니다. 그 방법에는 번호가 최대값에 도달했을 때의 정책이 필요합니다. 우리는 최대 아홉 자리의 상대 순서만 필요하므로 순열을 직접 이동시킵니다.\n\n`mark_started(slot)`의 write는 slot 이외의 번호를 앞에서부터 기록할 위치입니다. read가 왼쪽에서 오른쪽으로 움직이고 write는 read보다 앞서지 않으므로, 아직 읽지 않은 원소를 덮지 않습니다. 마지막에 slot을 넣으면 같은 번호가 두 번 생기지 않고 모든 번호를 유지합니다.\n\n검색과 이동은 각각 최대 N원소입니다. 크기가 수천 개인 풀이라면 다른 자료구조를 검토할 수 있지만 여기의 N=9에서는 고정 배열로 비용과 수명을 분명하게 표현할 수 있습니다.",
+      "codes": [
+        {
+          "label": "    bool mark_started(",
+          "language": "cpp",
+          "text": "    bool mark_started(std::size_t slot) noexcept {\n        if (slot >= N) return false;\n        std::size_t write = 0;\n        for (std::size_t read = 0; read < N; ++read) {\n            if (order_[read] != slot) order_[write++] = order_[read];\n        }\n        order_[N - 1] = slot;\n        return true;\n    }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "oldest를 언제 읽을까?",
+          "body": "초기 순열에는 한 번도 재생하지 않은 자리도 들어 있습니다. 그래서 oldest는 모든 보이스가 재생 중인 경우에만 선점 후보로 씁니다. 빈 자리가 있으면 먼저 그것을 고르는 조건이 순서 해석의 전제입니다."
+        }
+      ]
+    },
+    {
+      "title": "음원 자리와 보이스 자리를 연결하는 표",
+      "body": "VoicePool은 Mixer와 함께 `owners_[voice]`를 보관합니다. 값은 그 보이스가 빌리는 Player의 음원 자리 번호입니다. 예를 들어 owners가 `[0,0,2,...]`이면 보이스 두 개가 0번 PCM을, 하나가 2번 PCM을 읽습니다.\n\n여기서 owner라는 이름은 PCM을 소유한 자리의 식별값입니다. VoicePool 자체가 PCM 메모리를 소유한다는 뜻은 아닙니다. 실제 소유자는 Player의 optional<Pcm16> 배열입니다. 같은 owner에 대해 stop_owner를 호출하기 전에는 동일한, 살아 있고 변하지 않는 PCM을 전달한다는 계약을 둡니다.\n\n복사와 이동을 막아 재생을 제어하는 객체 하나를 유지합니다. 순수 규칙의 값 복사와 장치·재생 제어자의 수명 정책을 한 가지 규칙으로 일반화하지 않습니다.",
+      "codes": [
+        {
+          "label": "두 인덱스 공간",
+          "language": "text",
+          "text": "음원 자리 0 → 소유 PCM A\n음원 자리 1 → 소유 PCM B\n\n보이스 0 → owner 0, cursor 100\n보이스 1 → owner 0, cursor  20\n보이스 2 → owner 1, cursor  70"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "s_sfxHandles",
+        "invariant": "각 보이스가 어느 PCM 자원에 연결됐는지 추적한다.",
+        "mayDiffer": "현재 Windows는 OS 보이스 포인터와 음원 핸들을 별도 배열로 저장한다."
+      }
+    },
+    {
+      "title": "검증하고 고른 뒤 성공한 시작만 반영한다",
+      "body": "start는 먼저 사용할 자리를 고릅니다. Mixer가 해당 보이스의 형식·PCM 유효성을 검사한 뒤 시작에 성공하면 owner와 순서를 기록합니다. 잘못된 형식 때문에 요청이 거절되면 기존 보이스와 순서는 유지됩니다.\n\n빈 자리가 있으면 가장 작은 인덱스를 사용합니다. 다 차 있으면 오래된 자리를 선택합니다. 새 PCM이 유효할 때 Mixer::start가 그 자리의 대여 대상과 커서를 바꾸므로, 오래된 보이스의 포인터를 따로 보관해 해제하는 단계는 없습니다. 이전 PCM의 소유자는 그대로 있고, 이 대여자만 바뀝니다.\n\n반환하는 보이스 번호는 선택 결과를 검사하기 위한 일시적인 위치입니다. 같은 번호가 다른 재생에 쓰일 수 있으므로 영구적인 재생 식별자로 취급하지 않습니다.",
+      "codes": [
+        {
+          "label": "    std::optional<std::size_t> start(",
+          "language": "cpp",
+          "text": "    std::optional<std::size_t> start(std::size_t owner,\n                                     const Pcm16& clip) noexcept {\n        if (owner == kNoOwner) return std::nullopt;\n\n        std::size_t slot = kMaxVoices;\n        for (std::size_t i = 0; i < kMaxVoices; ++i) {\n            if (!mixer_.playing(i)) {\n                slot = i;\n                break;\n            }\n        }\n        if (slot == kMaxVoices) slot = order_.oldest();\n\n        if (!mixer_.start(slot, clip)) return std::nullopt;\n\n        owners_[slot] = owner;\n        order_.mark_started(slot);\n        return slot;\n    }\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "void audio_play_sound",
+        "invariant": "유효 음원의 재생에 빈 자리를 우선 배정하고 포화 정책을 적용한다.",
+        "mayDiffer": "현재 엔진은 void API이며 학습 풀은 선택한 보이스 번호를 검사할 수 있게 돌려준다."
+      }
+    },
+    {
+      "title": "정확히 버퍼 끝에서 끝난 소리는 이미 빈자리다",
+      "body": "PCM에 한 프레임이 남아 있고 콜백도 한 프레임을 요청했습니다. 마지막 값을 출력한 순간 보이스는 끝났습니다. 다음 콜백이 와서 읽을 것이 없다는 사실을 발견할 때까지 active를 유지하면, 그 사이 들어온 요청은 사용할 수 있는 자리를 바쁜 자리로 오해합니다.\n\n학습 Voice는 복사 후 cursor가 총 프레임 수에 도달했는지 검사합니다. 현재 SDL 엔진에는 반복문 진입 때의 검사만 있어 정확히 요청 경계에서 끝났을 때 active가 남는 경우가 있었습니다. 반복문 뒤에도 비루프 음원의 종료 여부를 반영합니다.\n\n이 검사는 단순한 상태 정리 이상의 의미가 있습니다. 포화 판단이 잘못되면 아직 울리는 다른 소리를 불필요하게 자를 수 있기 때문입니다.",
+      "codes": [
+        {
+          "label": "현재 SDL 믹서의 출력 후 종료 확인",
+          "language": "cpp",
+          "text": "// A buffer ending exactly at this request boundary is already reusable.\nif (!v.loop && v.pos >= total) v.active = false;"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "static void mix_voice",
+        "invariant": "마지막 샘플을 소비한 시점에 비루프 재생 완료를 반영한다.",
+        "mayDiffer": "현재 pos는 채널을 포함한 샘플 수이고 학습 Voice의 cursor는 프레임 수다."
+      }
+    },
+    {
+      "title": "끝났다는 상태와 참조를 끊었다는 사실",
+      "body": "보이스가 재생을 마쳐 active=false가 되어도 구조체 안에 PCM 포인터가 남을 수 있습니다. 현재 Voice는 마지막 커서를 조회할 수 있도록 그 정보를 남깁니다. 따라서 ‘이제 출력하지 않는다’와 ‘소유자가 음원을 파괴해도 남은 참조가 없다’는 조건을 구별합니다.\n\nstop_owner는 owner가 같은 모든 보이스에 stop을 호출하고 연결 표도 비웁니다. 재생이 끝난 보이스도 포함합니다. 한 음원을 여러 번 시작했으면 여러 자리가 연결되어 있으므로 첫 번째만 멈추고 루프를 종료하면 안 됩니다.\n\nPlayer의 replace/unload는 장치 잠금 안에서 이 연산을 수행합니다. 모든 대여를 끊고 PCM을 retired로 분리한 뒤 잠금을 풀어 메모리를 해제합니다. 다른 음원을 빌리는 보이스의 커서는 계속 진행할 수 있습니다.",
+      "codes": [
+        {
+          "label": "    void stop_owner(",
+          "language": "cpp",
+          "text": "    void stop_owner(std::size_t owner) noexcept {\n        if (owner == kNoOwner) return;\n        for (std::size_t i = 0; i < kMaxVoices; ++i) {\n            if (owners_[i] == owner) {\n                mixer_.stop(i);\n                owners_[i] = kNoOwner;\n            }\n        }\n    }\n"
+        },
+        {
+          "label": "void Player::unload(",
+          "language": "cpp",
+          "text": "void Player::unload(std::size_t slot) noexcept {\n    if (dev_ == 0) return;\n    if (slot >= kSlots) return;\n    // No global pause: the other slots must keep playing while this one is\n    // retired. Every voice borrowing the target clip is detached.\n\n    // Retired outside the lock scope: the old PCM buffer is destroyed only\n    // after DeviceLock runs SDL_UnlockAudioDevice.\n    std::optional<Pcm16> retired;\n    {\n        DeviceLock lock(dev_);\n        pool_.stop_owner(slot);\n        retired.swap(clips_[slot]);\n    }\n    // `retired` destructs here, i.e. the old PCM deallocation happens post-unlock.\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "void audio_unload_sound",
+        "invariant": "PCM 해제 전에 그 PCM을 빌리는 모든 BGM/SFX 연결을 끊는다.",
+        "mayDiffer": "현재 SDL은 한 mutex로 저장소와 믹서를 보호하고 학습 Player는 장치 잠금을 쓴다."
+      }
+    },
+    {
+      "title": "조회 API가 의미하는 범위도 바꾼다",
+      "body": "같은 음원의 재생이 세 개라면 ‘이 음원의 커서’는 하나가 아닙니다. Player::state는 그 음원에 연결된 보이스 중 하나라도 재생 중인지 먼저 확인합니다. cursor_frames는 풀에 아직 연결 정보가 남아 있는 것 중 가장 최근에 시작한 재생의 커서를 반환합니다.\n\n모든 재생이 선점되거나 stop_owner로 분리되면 cursor는 0입니다. 음원이 여전히 로드되어 있다면 state는 ready입니다. 이 값들은 현재 풀의 관찰값이며, 사용자의 전체 재생 이력을 뜻하지 않습니다.\n\n음원 자리 번호 역시 특정 PCM의 영구 신분이 아닙니다. replace(clip,0)를 호출하면 0번 자리의 내용이 바뀝니다. 현재 엔진의 AudioHandle은 초기화 세션 안에서 증가하는 다른 규칙을 사용하며, 마지막 shutdown 뒤에는 만료됩니다. 세션을 넘겨 검증하려면 세대나 세션 ID가 있는 식별자 설계가 필요합니다.",
+      "codes": [
+        {
+          "label": "    std::size_t cursor_frames(",
+          "language": "cpp",
+          "text": "    std::size_t cursor_frames(std::size_t owner) const noexcept {\n        if (owner == kNoOwner) return 0;\n        const std::array<std::size_t, kMaxVoices>& ordered = order_.ordered();\n        for (std::size_t k = kMaxVoices; k > 0; --k) {\n            const std::size_t slot = ordered[k - 1];\n            if (owners_[slot] == owner) return mixer_.cursor_frames(slot);\n        }\n        return 0;\n    }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "같은 숫자라서 같은 자원일까?",
+          "body": "슬롯 번호는 위치이고 자원의 신분은 별도입니다. 해제 후 같은 위치에 새 자원을 넣는 시스템에서는 옛 번호를 가진 호출자가 새 자원을 건드릴 수 있습니다. 현재 API의 수명 경계를 지키거나, 세대 번호까지 비교해 오래된 참조를 거절하는 방법을 사용합니다. 이 풀의 반환 번호에는 세대 검사가 없습니다."
+        }
+      ]
+    },
+    {
+      "title": "비동기 장치에서는 정지 요청과 참조 종료가 다르다",
+      "body": "직접 만든 Mixer는 잠금 안에서 포인터를 바꾸면 그 변경이 반영됩니다. XAudio2에서는 오디오 처리 스레드가 명령과 버퍼를 다룹니다. [FlushSourceBuffers](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2sourcevoice-flushsourcebuffers) 호출만으로 보이스가 즉시 초기 상태가 됐다고 가정할 수 없습니다.\n\n포화 교체에서 Stop/Flush를 호출한 뒤 추적 핸들을 새 음원으로 덮으면, 이전 PCM을 읽을 가능성이 남아 있는데도 언로드 코드가 이전 주인을 찾지 못할 수 있습니다. 현재 Windows 경로는 이 경우 보이스를 파괴해 대여 종료를 확정하고 새 보이스를 생성합니다.\n\n[DestroyVoice](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/nf-xaudio2-ixaudio2voice-destroyvoice)는 반환 뒤 해당 보이스의 오디오 데이터 읽기와 콜백이 끝났다는 경계를 제공합니다. 처리 스레드를 기다릴 수 있으므로 메인 스레드 지연 비용도 있습니다. 여기서는 수명 계약을 우선 명시하고, 이를 호출 시간 보장과 혼동하지 않습니다.",
+      "codes": [
+        {
+          "label": "현재 Windows 포화 교체",
+          "language": "cpp",
+          "text": "    if (slot == -1)\n    {\n        slot = static_cast<int>(s_sfxOrder.oldest());\n        // Stop/Flush may still be pending on the audio thread. End the old\n        // borrow before overwriting the only handle that tracks its PCM.\n        s_sfxVoices[slot]->DestroyVoice();\n        s_sfxVoices[slot] = nullptr;\n        s_sfxFormats[slot] = {};\n        s_sfxHandles[slot] = 0;\n    }\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "void audio_play_sound",
+        "invariant": "오래된 PCM의 대여가 끝나기 전에 추적 정보를 잃지 않는다.",
+        "mayDiffer": "SDL의 잠금 안 포인터 교체와 XAudio2 보이스 파괴는 서로 다른 동기화 경계다."
+      }
+    },
+    {
+      "title": "실패한 시작은 성공한 재생으로 기록하지 않는다",
+      "body": "새 OS 보이스 생성, PCM 제출, 재생 시작은 각각 실패할 수 있는 단계입니다. 제출은 성공했지만 Start가 실패했다면 버퍼 대여가 남아 있을 수 있습니다. 실패 경로에서 보이스를 파괴하고 추적 핸들·형식을 비워야 합니다.\n\n순서는 성공적으로 시작한 뒤에만 갱신합니다. 다만 포화 상태에서 기존 보이스를 이미 끊은 뒤 새 생성이 실패하면, 이전 소리는 돌아오지 않습니다. 이 경로는 강한 롤백 보장을 제공하지 않습니다. 반면 학습 Mixer가 잘못된 PCM 형식을 거절하는 경로는 변경 전에 검사하므로 기존 재생을 유지합니다.\n\n실패 원인이 다른 두 경로에 같은 ‘실패하면 아무 변화 없음’ 계약을 붙이면 호출자가 잘못된 기대를 갖게 됩니다. 어느 단계까지 상태가 바뀌었는지 구체적으로 설명해야 합니다.",
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "HRESULT hr = s_sfxVoices[slot]->SubmitSourceBuffer",
+        "invariant": "제출·시작 실패 후 남은 PCM 참조와 슬롯 메타데이터를 정리한다.",
+        "mayDiffer": "학습 믹서는 검증된 메모리 안의 동기 시작이고, 현재 Windows API에는 별도의 실패 단계가 있다."
+      }
+    },
+    {
+      "title": "게임에서 달라지는 소리와 유지되는 규칙",
+      "body": "Session은 여전히 종류를 네 음원 자리로 변환합니다. Player의 play가 자동으로 보이스를 배정하므로, 같은 회전음이 겹칠 수 있습니다. 규칙·사건 투영·메인 루프는 그대로 두고 재생 정책만 바꿉니다.\n\n효과음 하나의 절댓값 상한은 2000입니다. 같은 종류를 포함해 최대 아홉 개가 겹치면 합의 절댓값 상한은 18,000입니다. ‘네 종류라서 최대 8,000’이라는 계산은 종류별 한 보이스 정책에서만 성립했습니다. 새 동시 재생 수에 맞춰 믹서 범위도 다시 확인합니다.\n\nPCM은 네 개를 준비하므로 데이터는 `4 × 4410 × 2 × 2 = 70,560바이트`입니다. 아홉 보이스를 사용한다고 이 배열을 아홉 벌 복사하지 않습니다. 각 보이스의 작은 재생 상태와 연결 표가 추가됩니다. 이 수치는 PCM 본문 크기이며 컨테이너·장치 내부 메모리는 포함하지 않습니다.",
+      "codes": [
+        {
+          "label": "bool Player::play(",
+          "language": "cpp",
+          "text": "bool Player::play(std::size_t slot) noexcept {\n    // Closed takes priority over an out-of-range slot.\n    if (dev_ == 0) return false;\n    if (slot >= kSlots) return false;\n    if (!clips_[slot].has_value()) return false;\n\n    bool started = false;\n    {\n        DeviceLock lock(dev_);\n        started = pool_.start(slot, *clips_[slot]).has_value();\n    }\n    // Unpause only after the lock is released.\n    SDL_PauseAudioDevice(dev_, 0);\n    return started;\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.h",
+        "symbol": "void audio_play_sound",
+        "invariant": "같은 음원을 여러 보이스가 동시에 재생할 수 있다.",
+        "mayDiffer": "현재 엔진은 SFX와 BGM 재생 공간을 구분하고, 기준 코드는 효과음 보이스 풀의 정책을 다룬다."
+      }
+    },
+    {
+      "title": "예측한 선택 순서와 실제 출력을 함께 검사한다",
+      "body": "풀 검사는 선택한 인덱스만 맞는지로 끝나지 않습니다. 같은 PCM의 두 보이스가 독립 커서로 읽는지, 음원 해제 시 모든 대여가 사라지는지, 끝난 자리를 새 요청이 바로 재사용하는지까지 관찰합니다.\n\n독립 참조 모델에는 보이스별 owner·cursor·active와 시작 순서를 저장합니다. 임의의 시작·출력·해제 요청을 적용하면서 실제 Pool의 선택 결과와 출력 바이트를 비교합니다. 이 모델은 Pool의 순열 이동 코드를 복사하는 대신 순서를 담은 별도 컨테이너로 기대값을 계산합니다.\n\n빌드 후 실제 게임에서는 빠르게 회전할 때 효과음이 겹칠 수 있습니다. 자동 검사에서는 짧은 상수 PCM으로 합산값을 정확히 확인하고, 아홉 보이스가 같은 음원을 빌린 상태에서 전부 분리한 뒤 그 PCM을 파괴하고 다시 출력합니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 누적 빌드",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/80-voice-pool -B out/study80 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study80 -j3\nctest --test-dir out/study80 --output-on-failure\ncd docs/learn/checkpoints/80-voice-pool\n../../../../out/study80/tetris"
+        }
+      ]
+    },
+    {
+      "title": "전체 파일과 설계의 변경 경계",
+      "body": "VoiceOrder는 상대적인 시작 순서만 다룹니다. VoicePool은 보이스 선택과 음원 연결을 관리하고, Player는 PCM과 장치를 소유합니다. 같은 순서 도우미를 실제 SDL·Windows와 기준 코드에 사용하면서, 각 환경의 참조 종료 방식은 분리합니다.\n\n콘텐츠 개수·음원 길이·풀 크기·선점 기준은 바뀔 수 있습니다. 모든 대여를 추적하고, 해제 전에 끊으며, 성공·실패 시 어느 상태까지 바뀌는지 드러내는 핵심은 유지합니다. 풀 크기를 바꾸면 계산량·믹싱 상한·동시 요청 정책을 함께 재검토합니다.",
+      "codes": [
+        {
+          "label": "audio/voice_order.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/80-voice-pool/audio/voice_order.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/voice_pool.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/80-voice-pool/audio/voice_pool.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/player.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/80-voice-pool/audio/player.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/voice_pool_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/80-voice-pool/tests/voice_pool_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "80-1",
+      "question": "같은 PCM을 20ms 간격으로 두 번 겹쳐 재생합니다. 필요한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "PCM 배열 두 벌만"
+        },
+        {
+          "id": "b",
+          "text": "PCM 한 벌과 독립 커서 두 개"
+        },
+        {
+          "id": "c",
+          "text": "커서 하나와 음원 핸들 두 개"
+        },
+        {
+          "id": "d",
+          "text": "볼륨 두 배와 커서 하나"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "PCM 한 벌과 독립 커서 두 개",
+      "explanation": "음원 데이터는 변하지 않아 함께 읽을 수 있습니다. 시작 시각이 다르므로 현재 읽는 위치는 각각 필요합니다. 소유 PCM은 두 대여가 모두 끝날 때까지 유지합니다."
+    },
+    {
+      "id": "80-2",
+      "question": "8개 슬롯을 0~7 순서로 채우고 9번째 요청이 0번을 교체했습니다. 아무 재생도 끝나지 않았다면 10번째의 교체 대상은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0번"
+        },
+        {
+          "id": "b",
+          "text": "7번"
+        },
+        {
+          "id": "c",
+          "text": "1번"
+        },
+        {
+          "id": "d",
+          "text": "가장 큰 음원 핸들의 슬롯"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "1번",
+      "explanation": "0번은 방금 시작한 가장 새로운 재생입니다. 나머지의 상대 순서를 유지하면 1번이 가장 오래된 시작입니다."
+    },
+    {
+      "id": "80-3",
+      "question": "음원 하나를 보이스 세 개가 참조합니다. 하나는 재생이 끝났고 둘은 재생 중입니다. unload에서 해야 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "가장 최근 보이스만 정지"
+        },
+        {
+          "id": "b",
+          "text": "재생 중인 보이스 하나만 정지"
+        },
+        {
+          "id": "c",
+          "text": "PCM부터 해제하고 다음 콜백에서 정지"
+        },
+        {
+          "id": "d",
+          "text": "세 연결을 모두 끊은 뒤 PCM 해제"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "세 연결을 모두 끊은 뒤 PCM 해제",
+      "explanation": "재생 완료와 참조 분리는 다릅니다. 완료된 보이스의 포인터도 남아 있을 수 있으므로 해당 owner의 모든 보이스를 stop하고 연결 표를 비웁니다."
+    },
+    {
+      "id": "80-4",
+      "question": "PCM의 마지막 프레임과 콜백 요청의 마지막 프레임이 일치합니다. active를 다음 콜백까지 유지하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "빈 자리를 바쁘다고 판단해 다른 소리를 선점할 수 있다"
+        },
+        {
+          "id": "b",
+          "text": "PCM 형식이 자동 변경된다"
+        },
+        {
+          "id": "c",
+          "text": "다음 요청은 반드시 한 프레임을 더 출력한다"
+        },
+        {
+          "id": "d",
+          "text": "한 음원의 소유권이 두 개로 늘어난다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "빈 자리를 바쁘다고 판단해 다른 소리를 선점할 수 있다",
+      "explanation": "마지막 데이터를 소비한 시점에 재생 완료를 반영해야 풀의 빈자리 판정이 정확합니다. 상태 지연이 실제로 울리는 다른 소리의 불필요한 교체로 이어질 수 있습니다."
+    },
+    {
+      "id": "80-5",
+      "question": "Windows 포화 선점에서 이전 보이스를 파괴한 뒤 새 보이스 생성이 실패했습니다. 이 구현의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "이전 재생 위치가 자동 복원된다"
+        },
+        {
+          "id": "b",
+          "text": "새 음원이 재생됐다고 순서만 기록한다"
+        },
+        {
+          "id": "c",
+          "text": "해당 자리는 비고 이전 소리는 복원되지 않는다"
+        },
+        {
+          "id": "d",
+          "text": "이전 PCM이 반드시 즉시 해제된다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "해당 자리는 비고 이전 소리는 복원되지 않는다",
+      "explanation": "보이스 파괴는 이전 대여를 끝내지만 음원 소유 자체를 해제하지 않습니다. 새 생성 실패 후 슬롯은 비어 있고 이전 재생은 돌아오지 않습니다. 성공한 시작으로 순서를 갱신하지도 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "여덟 슬롯을 채운 뒤 세 번 선점했을 때의 순서를 손으로 계산합니다.",
+      "하나의 PCM을 빌리는 모든 보이스를 그림으로 연결합니다.",
+      "start 거절과 OS 보이스 생성 실패의 변경 범위를 비교합니다.",
+      "현재 SDL/Windows 해제 경로에서 읽기 종료가 확정되는 지점을 찾습니다."
+    ],
+    "failureChecks": [
+      "정확한 출력 요청 경계에서 음원이 끝나는 경우를 검사합니다.",
+      "같은 PCM에 연결된 모든 보이스를 분리하고 PCM을 파괴한 뒤 출력을 요청합니다.",
+      "잘못된 형식과 owner를 거절한 뒤 선택 순서와 커서가 유지되는지 확인합니다."
+    ],
+    "expected": "보이스 수와 음원 수를 독립적으로 계산하고, 풀의 재사용 정책과 비동기 장치의 자원 수명을 연결해 설명한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 순서/풀 초안 직접 검토·실제 SDL 및 Windows 함수 본문 대조·Microsoft 공식 참조 종료 계약 확인",
+    "draftJob": "out/learning-jobs/080-pool-events.jsonl",
+    "corrections": [
+      "고정0번 선점을 성공한 시작 순서 기반으로 교정",
+      "SDL 정확한 요청 끝 경계에서 활성 상태 갱신",
+      "Windows 포화 선점의 이전 PCM 대여를 DestroyVoice로 종료하고 제출/시작 실패 정리",
+      "Part5의 풀8 최대값·LRU/FIFO·항상 콜백 할당이라는 단정 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED88/SDL93 CTest·누적 SDL 게임·경고 없음",
+    "5000회 독립 풀 모델: 선택 순서·바이트 출력·활성/연결·형식/owner 거절 검증",
+    "Voice/Player/callback/Mixer/VoicePool/사건/효과음/Session ASan·UBSan·float-cast-overflow 통과",
+    "같은 음원의 다중 보이스 출력·모든 참조 분리 후 해제·잠금 밖 PCM 해제 유지",
+    "실제 SDL 수정 전 고정0 선점·정확한 끝 경계 지연 재현, 수정 후 해제/순서/종료 검사 통과",
+    "Windows 실제 함수 본문에 지연된 Stop/Flush 대역 연결: 수정 전 추적 소실 가능성·수정 후 DestroyVoice 경계·생성/제출/시작 실패 검사",
+    "root17 CTest·sim_hash_dump 골든 유지",
+    "Part 발췌·Markdown27사례·394객관식·DOM 전체 차시 렌더링/탐색/기록/참조 검사 통과",
+    "실제 스피커·물리적 지연·Windows/macOS 네이티브 미검증"
+  ]
+}

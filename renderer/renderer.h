@@ -33,12 +33,13 @@ void renderer_shutdown();
 // 폰트 로드. stb_truetype 가 TTF 를 파싱한다. 필요한 글리프는 처음 그릴 때
 // CPU 에서 래스터화되어 GPU 글리프 아틀라스(R8 텍스처)에 올라간다.
 // path: "Font/NanumGothic.ttf" 등 TTF 파일 경로. 성공하면 true.
+// Trusted packaged fonts only: stb_truetype is not a validator for untrusted files.
 bool renderer_load_font(const char* path);
 
 // ─── 그리기 함수 ──────────────────────────────────────────────────────────────
 //
-// 아래 함수들은 즉시 그리지 않는다. 정점을 배처에 쌓아 두고, 텍스처가 바뀌는
-// 지점과 프레임 끝(renderer_end)에서만 실제 draw call 이 나간다.
+// 그리기 호출은 정점을 배처에 모은다. 텍스처·렌더 상태 변경, 큐 용량,
+// 자원 수명 경계와 프레임 끝(renderer_end)에서 모인 draw를 제출한다.
 
 // 색칠된 사각형.
 // 1x1 흰 텍스처를 입힌 쿼드 두 삼각형으로 배처에 들어가고, 알파 블렌딩은
@@ -47,16 +48,17 @@ void draw_rect(int x, int y, int w, int h, Color c);
 
 // 둥근 모서리 사각형.
 // roundness: 0.0(직각) ~ 1.0(완전 둥근). 반지름 = roundness * min(w,h)/2.
-// 모서리는 fragment 셰이더가 SDF 로 깎으므로 안티앨리어싱이 함께 적용된다.
+// 유한한 roundness를 [0,1]로 제한한다. 비유한 값/양수가 아닌 크기는 무시한다.
+// 논리 반지름 1 미만은 직각으로 근사; SDF 알파 전이 폭은 논리 단위 1이다.
 void draw_rect_rounded(int x, int y, int w, int h, float roundness, Color c);
 
-// 텍스트 그리기.
+// 텍스트 그리기. x는 첫 펜, y는 폰트 메트릭 상단(첫 기준선 - ascent).
 // 글리프는 아틀라스의 R8 텍셀이며, 셰이더가 r 채널을 알파로 읽어 색을 곱한다.
 // 글자 모양은 CPU 가 굽고 합성은 GPU 가 맡는다. 배치는 논리 좌표로 하되
 // 비트맵은 화면 배율로 구워 확대해도 선명하다.
 void draw_text(const char* text, int x, int y, int size, Color c);
 
-// 텍스트 폭 측정.
-// TTF advance metric 으로 측정한다. 창 배율과 무관한 논리 픽셀 값이라
-// 창을 늘려도 레이아웃이 흔들리지 않는다.
+// CPU 폰트 메트릭만으로 각 줄의 advance + 커닝을 합산한 최대 폭.
+// 논리 픽셀로 반올림하고 int 상한을 넘으면 INT_MAX를 반환한다.
+// 비트맵의 잉크 경계와 구별하며, 측정은 GL/아틀라스 상태를 바꾸지 않는다.
 int  measure_text(const char* text, int size);

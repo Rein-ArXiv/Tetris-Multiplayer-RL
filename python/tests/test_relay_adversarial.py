@@ -958,27 +958,13 @@ def test_out_of_stage_control_frames_do_not_break_the_session(unranked, socks):
 
 
 def test_server_only_frames_are_not_relayed_to_the_peer(unranked, socks):
-    """클라이언트가 위조한 S→C 전용 프레임이 상대에게 전달되면 안 된다. **회귀 테스트**.
-
-    MATCH_FOUND / MATCH_RESULT / ROOM_INFO 는 서버만 만들 수 있는 프레임이다.
-    클라이언트는 이 타입을 보낼 이유가 없고, 상대 클라이언트는 이 타입이 오면
-    서버가 보냈다고 믿는다 — 그게 프로토콜의 전제다.
-
-    포워딩 단계는 프레임을 그대로 흘려보내므로, 한 플레이어가 이 타입들을 직접
-    만들어 보내면 상대 화면에는 서버가 보낸 것과 구별되지 않는 프레임이 뜬다.
-    위조된 MATCH_RESULT 는 있지도 않은 RP 변동을 보여 주고, 위조된 MATCH_FOUND /
-    ROOM_INFO 는 상대 클라이언트를 있지도 않은 상태로 밀어 넣는다. 릴레이가
-    "상대가 보낸 것" 과 "서버가 보낸 것" 을 구분해 주지 않으면, 신뢰 경계를
-    지킬 수 있는 곳은 아무 데도 남지 않는다.
-
-    릴레이는 이 타입들을 포워딩 경로에서 버려야 한다 (MATCH_SUMMARY 를 이미
-    가로채듯이).
-    """
+    """All four server-only types are dropped; a following valid INPUT survives."""
     _, port = unranked
     a, b, _, b_buf = _pair_unranked(port, socks, ready=True)
 
     forged = (
-        build_frame(MsgType.MATCH_RESULT, struct.pack("<iii", 9999, 99999, 90000))
+        build_frame(MsgType.SERVER_REJECT, b"\x01")
+        + build_frame(MsgType.MATCH_RESULT, struct.pack("<iii", 9999, 99999, 90000))
         + build_frame(MsgType.ROOM_INFO, b"\x05HAXXX\x00\x02")
         + build_frame(MsgType.MATCH_FOUND,
                       b"\x01" + struct.pack("<Q", 0xDEAD) + b"\x00\x00\x00")
@@ -990,7 +976,7 @@ def test_server_only_frames_are_not_relayed_to_the_peer(unranked, socks):
 
     leaked = sorted({t.name for t, _ in frames
                      if t in (MsgType.MATCH_RESULT, MsgType.ROOM_INFO,
-                              MsgType.MATCH_FOUND)})
+                              MsgType.MATCH_FOUND, MsgType.SERVER_REJECT)})
     assert not leaked, (
         "클라이언트가 만든 서버 전용 프레임이 상대에게 그대로 전달됐다 "
         f"({', '.join(leaked)}). 상대 클라이언트는 이것을 서버가 보낸 것과 "
@@ -1292,7 +1278,8 @@ def test_queue_join_then_cancel_in_one_segment_leaves_the_queue_empty(
         "취소한 연결이 큐에 남아 정상 사용자와 짝지어졌다")
 
 
-def test_forged_match_summary_cannot_decide_the_result_alone(ranked, socks):
+@pytest.mark.parametrize("agree", [False, True], ids=["contradictory", "colluding"])
+def test_forged_match_summary_cannot_decide_the_result_alone(ranked, socks, agree):
     """Invented or repeatedly changed claims cannot create a ranked result.
 
     No INPUT stream reaches a terminal game here. The relay must report Incomplete
@@ -1310,25 +1297,26 @@ def test_forged_match_summary_cannot_decide_the_result_alone(ranked, socks):
     b.sendall(_ready(1))
     _handshake_forwarding(a, b, a_buf, b_buf)
 
-    # A: 자기 승리를 주장하고, 이어서 더 유리한 값으로 덮어쓰기를 시도하고,
-    #    마지막으로 "상대(B)의 요약" 인 척하는 프레임까지 보낸다.
     a.sendall(_summary(1, 100, 10, 0, 0))
-    a.sendall(_summary(1, 999999, 999, 0, 0))
-    a.sendall(_summary(0, 0, 0, 999999, 999))
-    # B: 진실을 보고한다 — A 의 주장과 맞지 않는다.
-    b.sendall(_summary(1, 250, 20, 250, 20))
+    if agree:
+        # Both clients tell the same invented story; no INPUT supports it.
+        b.sendall(_summary(0, 0, 0, 100, 10))
+    else:
+        a.sendall(_summary(1, 999999, 999, 0, 0))
+        a.sendall(_summary(0, 0, 0, 999999, 999))
+        b.sendall(_summary(1, 250, 20, 250, 20))
 
     res_a = _try_recv_frame(a, MsgType.MATCH_RESULT, a_buf, 8.0)
     res_b = _try_recv_frame(b, MsgType.MATCH_RESULT, b_buf, 8.0)
     assert res_a is not None and res_b is not None, (
-        "교차검증이 깨진 경기에서 결과 프레임이 아예 오지 않았다 — 클라이언트는 "
+        "입력으로 완결되지 않은 경기에서 결과 프레임이 오지 않았다 — 클라이언트는 "
         "결과 대기 화면에서 빠져나올 수 없다")
     assert meta.last_winner_null is None, "Unverified game must not be posted to meta"
     assert res_a[12] == res_b[12] == 3  # Incomplete
     for name, payload in (("A", res_a), ("B", res_b)):
         before, after, delta = struct.unpack("<iii", payload[:12])
         assert delta == 0, (
-            f"{name} 가 위조된 요약으로 RP 변동({delta})을 얻었다 — 교차검증이 "
+            f"{name} 가 위조된 요약으로 RP 변동({delta})을 얻었다 — 입력 검증이 "
             "실패했는데 결과가 반영됐다")
         assert before == after
 

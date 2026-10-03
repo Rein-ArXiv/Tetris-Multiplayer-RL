@@ -1,0 +1,408 @@
+{
+  "id": "lesson-139",
+  "title": "CSPRNG와 해시: 예측·노출·검색의 차이",
+  "shortTitle": "난수 생성·목적 해시·인증 조회",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 계정 자격과 보호된 통신이 있지만 난수·해시·조회가 해결하는 문제를 독립적으로 실험하지 않았습니다.",
+  "finish": "완료: 자격 생성 실패·형식·목적별 해시·중복 보존·인증 조회·비밀 비교를 분리한 실습을 만들고 보호 범위를 설명합니다.",
+  "objective": "자격의 생성부터 서버 조회까지 데이터 형태와 실패 경계를 추적하고, 표현 길이와 실제 추측 난이도를 구분합니다.",
+  "prerequisites": [
+    "바이트와 문자열 뷰·예외",
+    "결정론적 난수와 seed",
+    "계정 ID·토큰·TLS·DB 조회"
+  ],
+  "recap": {
+    "points": [
+      "비동기 작업은 논리 결과를 정한 뒤에도 버퍼를 참조할 수 있다.",
+      "원문을 소유하는 객체와 작업의 수명은 명시적으로 연결한다."
+    ],
+    "bridge": "이제 자격 원문이 필요한 위치와 요약만 남겨도 되는 위치를 구분하고, 생성부터 조회까지 구현합니다."
+  },
+  "sections": [
+    {
+      "title": "원문을 보관하지 않고 계정을 찾을 수 있을까",
+      "body": "HTTPS는 요청이 이동하는 구간을 보호합니다. 그러나 서버가 요청에서 받은 자격을 DB에 그대로 저장하면 DB 사본을 읽은 사람이 그 값을 제출할 수 있습니다. 여기서는 **DB 읽기 권한만 유출된 상황**을 놓고, 계정을 찾는 데 필요한 정보와 계정으로 행동하는 데 필요한 정보를 나눕니다.\n\n클라이언트는 원문 토큰을 보관하고 서버에 제출합니다. 서버는 토큰을 해시한 값을 조회 키로 보관합니다. 요청이 올 때 같은 계산을 다시 해서 player ID를 찾습니다. 누적 계정 서비스의 account_hash가 이미 이 형태입니다. 이번에는 그 안의 생성·표현·계산·조회 계약을 작은 실습으로 분리해 하나씩 실험합니다.\n\n만들 파일은 meta/credential_lab.h와 tests/credential_crypto_contract.cpp입니다. 누적 게임과 계정 DB는 그대로 두고, 메모리 안의 작은 인덱스로 인증 조회를 관찰합니다. 실제 DB 연결은 현재 코드 보기에서 같은 흐름을 따라갈 수 있습니다."
+    },
+    {
+      "title": "게임 난수와 인증 난수의 요구가 다르다",
+      "body": "게임 규칙의 난수는 같은 seed와 입력으로 같은 순서를 재현해야 합니다. 인증 자격은 다른 출력과 생성 시점을 관찰해도 공격자가 다음 자격을 현실적인 계산량으로 예측하기 어려워야 합니다. 이 요구를 다루는 생성기가 **CSPRNG**, 암호학적으로 안전한 의사난수 생성기입니다.\n\nCSPRNG도 내부 상태를 전이하는 계산 장치입니다. 매 출력마다 물리 잡음을 직접 측정해야 한다는 뜻은 아닙니다. 신뢰할 엔트로피로 초기 상태를 만들고 검토된 알고리즘과 갱신 규칙을 사용합니다. 실습은 운영체제와 연결된 OpenSSL 난수 API에 이 책임을 맡깁니다.\n\n시각이나 player ID로 게임용 생성기를 seed하면 값이 길어 보여도 공격자가 시험할 seed 후보가 좁을 수 있습니다. 결정론적 시뮬레이션의 seed와 계정 자격의 난수 상태를 공유하지 않습니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "엔트로피는 글자 모양으로 측정하지 않는다",
+          "body": "엔트로피는 공격자가 가진 정보를 조건으로 한 불확실성과 관련됩니다. 특정 문자열에 같은 글자가 많다고 약하다고 판정하거나, 여러 문자 종류가 섞였다고 강하다고 판정할 수 없습니다. 외부 클라이언트가 제출한 값의 형식 검사는 그 생성 과정의 예측 불가능성을 증명하지 못합니다."
+        }
+      ]
+    },
+    {
+      "title": "바이트·표현 길이·추측 확률을 연결한다",
+      "body": "균일하고 독립적으로 선택된 b바이트가 있으면 가능한 값은 2^(8b)개입니다. 특정 계정의 값을 서로 다른 q개 후보로 추측할 때, 추가 정보가 없고 q가 후보 공간 안에 있으면 성공 확률은 q / 2^(8b)입니다. 서비스의 요청 제한은 q를 줄이고, 충분한 생성 비트 수는 분모를 키웁니다.\n\nhex는 한 바이트를 두 글자로 표현합니다. 길이가 두 배가 되어도 원래 후보 수는 그대로입니다. 예를 들어 공개 실험 바이트 0xab는 문자 a와 b로 표현됩니다. 암호화나 비밀 추가가 일어난 것이 아닙니다.\n\n실습의 account_bytes는 누적 서비스의 wire 형식에 맞춘 선택입니다. 출력 길이는 account_bytes × hex_per_byte로 계산합니다. 프로토콜을 바꾸려면 생성기뿐 아니라 형식 검사·저장·클라이언트가 같은 계약을 사용하도록 이관해야 합니다.",
+      "codes": [
+        {
+          "label": "프로토콜 상수와 파생 길이",
+          "language": "cpp",
+          "text": "inline constexpr std::size_t account_bytes = 16;\ninline constexpr std::size_t hex_per_byte = 2;\ninline constexpr std::size_t sha256_bytes = 32;\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "충돌 확률과 계정 추측 확률",
+          "body": "독립적으로 m개의 값을 생성할 때 어느 두 값이 같은 사건은 쌍의 수에 영향을 받습니다. 충돌이 드문 범위의 근삿값은 m(m−1) / (2 × 2^(8b))입니다. 특정 계정 하나를 맞히는 확률과 다른 질문입니다. 충돌 확률이 작아도 저장소는 충돌 시 기존 소유자를 덮어쓰지 않아야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "난수 생성 실패에는 자격이 없다",
+      "body": "generate_account는 고정 크기 배열을 준비하고 난수 함수에 전체 길이를 넘깁니다. OpenSSL RAND_bytes는 성공에 1을 반환합니다. 반환값을 단순히 참·거짓으로 해석하면 지원하지 않는 경우의 음수도 성공처럼 처리할 수 있으므로 정확히 비교합니다.\n\n실패한 함수가 배열 앞부분을 이미 썼을 수도 있습니다. 배열을 0으로 초기화했어도 나머지를 그대로 토큰으로 발급하면 안 됩니다. 전체 생성이 성공한 뒤에만 hex 문자열을 반환합니다. 실패는 호출자에게 전달하여 계정 발급을 끝냅니다.\n\nRandomBytes 매개변수는 로컬 검사에서 실패를 재현할 자리입니다. 실제 호출은 기본 RAND_bytes를 사용합니다. nullptr도 명시적으로 거절합니다. [RAND_bytes의 반환값과 오류 상태](https://docs.openssl.org/3.5/man3/RAND_bytes/)를 기준으로 구현합니다.",
+      "codes": [
+        {
+          "label": "성공 확인 뒤에만 자격 반환",
+          "language": "cpp",
+          "text": "inline std::string generate_account(RandomBytes random = RAND_bytes) {\n    if (random == nullptr) {\n        throw std::invalid_argument(\"study_credentials: null RandomBytes\");\n    }\n    std::array<unsigned char, account_bytes> bytes{};\n    static_assert(account_bytes <= static_cast<std::size_t>(std::numeric_limits<int>::max()));\n    const int rc = random(bytes.data(), static_cast<int>(bytes.size()));\n    if (rc != 1) {\n        throw std::runtime_error(\"study_credentials: RNG failure\");\n    }\n    return hex_encode(bytes.data(), bytes.size());\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/api_server.cpp",
+        "symbol": "bool fill_random",
+        "invariant": "엔트로피 소스가 전체 요청을 성공시켜야 자격을 발급한다.",
+        "mayDiffer": "현재 서버는 Windows의 BCryptGenRandom 또는 Unix 난수 장치 읽기를 사용한다. 부분 읽기·EINTR는 OS 어댑터에서 처리하며 실습은 OpenSSL 계약을 사용한다."
+      }
+    },
+    {
+      "title": "바이트를 문자열로 바꾸는 경계도 검사한다",
+      "body": "hex_encode는 각 바이트의 상위 nibble과 하위 nibble을 각각 문자로 바꿉니다. nibble은 반 바이트에 해당하는 비트 묶음이며, 16진 숫자 한 자리와 대응합니다. unsigned char로 읽어 부호 확장 때문에 시프트 결과가 달라지지 않게 합니다.\n\n출력 공간은 입력 바이트 수에 hex_per_byte를 곱해 만듭니다. 곱하기 전에 max_size와 나눗셈으로 비교하여 길이 오버플로를 막습니다. 데이터가 있는데 포인터가 null이면 거절합니다. 빈 입력은 포인터를 읽지 않고 빈 결과를 만듭니다.\n\n이 함수는 형식 변환만 수행합니다. 출력이 터미널에 인쇄 가능한 문자라고 해서 로그로 남겨도 되는 값은 아닙니다. 진단기는 난수 토큰 자체를 출력하지 않습니다.",
+      "codes": [
+        {
+          "label": "길이와 포인터를 검사하는 hex 변환",
+          "language": "cpp",
+          "text": "inline std::string hex_encode(const unsigned char* data, std::size_t size) {\n    std::string out;\n    if (size > out.max_size() / hex_per_byte)\n        throw std::length_error(\"hex output too large\");\n    if (size != 0 && data == nullptr)\n        throw std::invalid_argument(\"null hex input\");\n    out.resize(size * hex_per_byte);\n    for (std::size_t i = 0; i < size; ++i) {\n        out[2 * i] = hex_digit((static_cast<unsigned>(data[i]) >> 4) & 0x0Fu);\n        out[2 * i + 1] = hex_digit(static_cast<unsigned>(data[i]) & 0x0Fu);\n    }\n    return out;\n}"
+        }
+      ]
+    },
+    {
+      "title": "검증은 허용할 표현을 하나로 좁힌다",
+      "body": "토큰을 받는 경계는 정확한 길이와 소문자 hex만 허용합니다. 공백을 제거하거나 대문자를 자동으로 바꾸지 않습니다. 같은 자격의 여러 표현을 받아들이면 저장·서명·로그 필터마다 정규화 규칙이 달라질 수 있기 때문입니다.\n\nstd::string_view는 주소와 길이를 함께 가진 뷰입니다. 길이 검사는 NUL 뒤에 남은 바이트도 포함합니다. 내부 NUL을 C 문자열의 끝으로 간주해 정상 접두사만 검사하지 않습니다. 이 함수가 성공하면 형식을 확인한 것이며, 실제 계정 소유 여부는 저장된 해시 조회가 결정합니다.",
+      "codes": [
+        {
+          "label": "길이와 문자 집합",
+          "language": "cpp",
+          "text": "inline bool valid_account(std::string_view value) {\n    if (value.size() != account_bytes * hex_per_byte) return false;\n    for (char c : value) {\n        if (!is_lower_hex(c)) return false;\n    }\n    return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/credentials.h",
+        "symbol": "inline bool account",
+        "invariant": "형식 검사와 소유 증명을 분리한다.",
+        "mayDiffer": "현재 recovery는 버전 접두사와 별도 길이를 사용한다. 이 실습은 접근 키 조회만 연결한다."
+      }
+    },
+    {
+      "title": "해시가 제공하는 것과 입력이 제공하는 것",
+      "body": "암호학적 해시는 입력 바이트를 고정 길이 요약으로 바꾸는 결정론적 함수입니다. 입력이 같으면 결과가 같아야 조회 키로 쓸 수 있습니다. 여기서 필요한 성질은 주어진 요약과 맞는 입력을 찾기 어렵다는 **역상 저항성**입니다.\n\n충돌 저항성은 서로 다른 어떤 두 입력의 요약을 같게 만들기 어렵다는 성질입니다. DB에서 특정 계정의 요약을 훔친 경우와 임의의 충돌 쌍을 찾는 경우는 목표가 다릅니다. 해시값만 읽을 수 있는 공격자는 후보 원문을 생성하고 같은 계산을 반복해 맞는지 시험할 수 있습니다.\n\n따라서 짧은 후보 목록에서 고른 비밀을 해시해도 추측 공간은 커지지 않습니다. SHA-256 출력 비트 수가 원문 토큰의 엔트로피를 늘려 주지 않습니다. 균일한 난수 자격에는 입력의 충분한 후보 공간이 중요한 전제입니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "사람이 고르는 비밀번호를 저장한다면",
+          "body": "비밀번호는 자주 쓰는 단어나 패턴에 확률이 몰릴 수 있습니다. 별도 salt와 비용을 갖는 비밀번호 해시 설계가 필요합니다. salt는 공개되어도 되는 계정별 입력이며, 같은 비밀번호에 대한 사전 계산의 재사용을 어렵게 합니다. [OWASP의 비밀번호 저장 지침](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)을 참고합니다. 이 실습의 빠른 난수 자격 조회를 비밀번호 저장으로 그대로 옮기지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "목적을 바이트 입력에 포함한다",
+      "body": "계정 접근과 복구는 권한이 다릅니다. 원문 앞에 고정 목적과 버전 접두사를 붙이면 동일한 원문도 목적별로 다른 계산의 입력이 됩니다. 이를 **도메인 분리**라고 합니다. 실습은 Purpose enum으로 허용한 목적을 고르고, 알 수 없는 값은 거절합니다.\n\n접두사는 비밀이 아니며 모든 계정에서 같은 역할 이름을 사용합니다. 서버가 원문을 받았을 때 어떤 역할의 해시를 계산할지 코드로 결정합니다. 외부 요청이 DB 컬럼이나 purpose 문자열을 임의로 고르게 하지 않습니다.\n\n같은 공개 실험 문자열을 account와 recovery에 각각 넣어 결과가 다른지 검사합니다. 이 비교는 해시 함수의 목적 분리를 관찰하는 것이며, 복구 요청의 형식 검사나 일회 소비 동작은 포함하지 않습니다.",
+      "codes": [
+        {
+          "label": "허용된 목적을 명시한다",
+          "language": "cpp",
+          "text": "inline std::string_view prefix(Purpose purpose) {\n    switch (purpose) {\n    case Purpose::account:\n        return \"study-account-v1:\";\n    case Purpose::recovery:\n        return \"study-recovery-v1:\";\n    }\n    throw std::invalid_argument(\"study_credentials: invalid Purpose\");\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/credentials.cpp",
+        "symbol": "std::string digest",
+        "invariant": "역할·버전을 원문과 함께 해시 입력에 넣는다.",
+        "mayDiffer": "실제 코드는 tetris 접두사와 내부 호출자의 purpose 문자열을 사용한다. 학습용 study 접두사의 요약을 실제 서버에 제출하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "도메인 분리는 MAC과 역할이 다르다",
+          "body": "MAC은 공유 비밀 키를 사용하여 메시지의 인증을 확인하는 구조입니다. 여기의 공개 접두사와 일반 해시만으로는 발급자 서명을 검증하지 않습니다. 서버는 그 요약이 자신이 보관한 계정 행과 대응하는지를 조회하여 소유 증명을 처리합니다."
+        }
+      ]
+    },
+    {
+      "title": "라이브러리 계산의 성공과 길이를 확인한다",
+      "body": "digest는 접두사와 원문을 명시적 길이로 이어 붙이고 EVP_Digest를 호출합니다. 문자열에 NUL이 있어도 전체 바이트가 입력이 됩니다. 빈 string_view에는 null data가 올 수 있어, 빈 입력이면 append를 건너뜁니다.\n\n출력 버퍼는 EVP_MAX_MD_SIZE만큼 준비합니다. 함수가 성공하고 SHA-256의 출력 길이가 맞는지 확인한 뒤, 실제 출력 길이만 hex로 변환합니다. 실패를 빈 요약으로 바꾸면 서로 다른 사용자를 같은 키로 다룰 수 있으므로 예외로 실패를 전달합니다.\n\n[EVP digest API](https://docs.openssl.org/3.5/man3/EVP_DigestInit/)는 계산과 성공 여부를 제공하고, 우리 코드는 목적·형식·실패 전파를 책임집니다. account_digest는 이 계산 앞에 계정 형식 검사를 붙인 진입점입니다.",
+      "codes": [
+        {
+          "label": "전체 바이트를 해시한다",
+          "language": "cpp",
+          "text": "inline std::string digest(Purpose purpose, std::string_view value) {\n    std::string input(prefix(purpose));\n    if (!value.empty()) input.append(value.data(), value.size());\n    std::array<unsigned char, EVP_MAX_MD_SIZE> out{};\n    unsigned int out_len = 0;\n    if (EVP_Digest(input.data(), input.size(), out.data(), &out_len,\n                   EVP_sha256(), nullptr) != 1 || out_len != sha256_bytes) {\n        throw std::runtime_error(\"study_credentials: digest failure\");\n    }\n    return hex_encode(out.data(), out_len);\n}"
+        },
+        {
+          "label": "계정 용도의 검증 경계",
+          "language": "cpp",
+          "text": "inline std::string account_digest(std::string_view token) {\n    if (!valid_account(token)) {\n        throw std::invalid_argument(\"study_credentials: invalid account format\");\n    }\n    return digest(Purpose::account, token);\n}"
+        }
+      ]
+    },
+    {
+      "title": "원문 대신 요약을 인덱스 키로 넣는다",
+      "body": "CredentialIndex는 해시 문자열과 player ID만 멤버로 보관합니다. insert는 원문의 형식과 계산을 끝낸 뒤 try_emplace로 새 항목을 만듭니다. 이미 같은 요약이 있으면 false를 반환하며 기존 ID를 유지합니다.\n\n이때 같은 토큰이 다시 제출된 것인지 서로 다른 토큰의 해시 충돌인지, 원문을 보관하지 않는 인덱스는 구분하지 않습니다. 어느 경우든 기존 계정의 소유자를 덮어쓰면 안 됩니다. caller는 충돌 실패를 처리해야 합니다. 생성부터 저장까지를 하나의 마법 같은 함수로 숨기지 않는 이유입니다.\n\n해시 테이블의 평균 조회 비용은 항목 수에 대해 O(1)로 다루지만, 문자열 해시 계산과 비교 비용은 남습니다. 최악의 경우와 메모리 사용량도 별개입니다. 이 작은 단일 스레드 인덱스는 알고리즘을 관찰하는 실습이며 무제한 서버 저장소 정책으로 사용하지 않습니다.",
+      "codes": [
+        {
+          "label": "충돌을 호출자에게 알리는 삽입",
+          "language": "cpp",
+          "text": "    bool insert(std::string_view token, std::uint64_t id) {\n        std::string key = account_digest(token);\n        return map_.try_emplace(std::move(key), id).second;\n    }\n\n    // Invalid format returns nullopt; otherwise computes the digest and looks up.\n    std::optional<std::uint64_t> find(std::string_view token) const {\n        if (!valid_account(token)) return std::nullopt;\n        std::string key = account_digest(token);\n        auto it = map_.find(key);\n        if (it == map_.end()) return std::nullopt;\n        return it->second;\n    }\n\n    std::size_t size() const { return map_.size(); }\n\nprivate:\n    std::unordered_map<std::string, std::uint64_t> map_;\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::registerGuest",
+        "invariant": "유효 자격의 요약을 저장하고 중복 키로 기존 소유자를 바꾸지 않는다.",
+        "mayDiffer": "현재 DB는 UNIQUE 제약과 트랜잭션을 사용한다. 실습의 unordered_map에는 디스크 지속성·동시 접근 제어가 없다."
+      }
+    },
+    {
+      "title": "요청마다 같은 경로로 계산하여 찾는다",
+      "body": "find는 형식이 다르면 결과 없음으로 끝냅니다. 형식이 맞으면 account_digest를 계산해 저장한 키를 찾습니다. 있으면 player ID 값을 반환하며, 원문을 인덱스에 보관하지 않습니다. 계산 오류는 예외로 전파되어 인증 실패와 내부 계산 실패를 호출자가 구분할 수 있습니다.\n\n```mermaid\nflowchart LR\n T[클라이언트 원문] --> V[길이·문자 검사]\n V --> H[account 목적 해시]\n H --> I[해시 키로 조회]\n I --> P[player ID 또는 없음]\n```\n\nDB에서 훔친 해시값을 원문 자리에 넣으면 어떻게 될까요? 실습에서는 길이가 접근 키 형식과 달라 첫 경계에서 거절됩니다. 형식 길이가 우연히 같도록 설계를 바꾸더라도 서버는 제출값을 다시 해시해야 하며, 저장 요약을 그대로 인증하는 지름길을 만들지 않습니다.\n\n클라이언트도 원문 대신 DB 해시만 저장하도록 바꾸면 인증 프로토콜이 바뀝니다. 서버가 그 해시 자체를 비밀로 인정하면 이제 그 값이 복사 가능한 bearer 자격이 됩니다. 서버의 요약 저장과 클라이언트의 원문 파일 보호는 서로 다른 책임입니다.",
+      "codes": [
+        {
+          "label": "형식 검사에서 조회까지",
+          "language": "cpp",
+          "text": "    std::optional<std::uint64_t> find(std::string_view token) const {\n        if (!valid_account(token)) return std::nullopt;\n        std::string key = account_digest(token);\n        auto it = map_.find(key);\n        if (it == map_.end()) return std::nullopt;\n        return it->second;\n    }\n\n    std::size_t size() const { return map_.size(); }\n\nprivate:\n    std::unordered_map<std::string, std::uint64_t> map_;\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "std::optional<Player> read_player_by_token",
+        "invariant": "제출된 원문을 같은 목적으로 해시하고 저장된 키와 조회한다.",
+        "mayDiffer": "현재는 prepared SQL에 요약을 바인딩하고 Player를 반환한다. 실습은 ID 값만 반환한다."
+      }
+    },
+    {
+      "title": "비밀 비교의 시간 계약을 라이브러리에 맡긴다",
+      "body": "릴레이와 메타 서버 사이처럼 이미 알고 있는 비밀 두 개의 동등성을 확인할 때는 내용에 따른 조기 종료를 피하는 비교가 필요합니다. 일반 문자열 비교는 어느 위치가 다른지에 따라 작업량이 달라질 수 있습니다.\n\nequal_secret은 길이가 다르면 거절하고, 같고 비어 있으면 true를 반환하며, 나머지는 CRYPTO_memcmp에 맡깁니다. 이 함수는 같은 길이에 대해 내용과 무관한 실행 시간 계약을 제공합니다. 결과는 0이면 같음, 그 밖이면 다름으로만 해석합니다. 크기 순서 비교에 사용하지 않습니다.\n\n길이 검사와 전체 HTTP 처리는 이 함수 밖에 있습니다. 이 helper 하나로 요청 처리 전체가 일정 시간이 되었다고 결론내리지 않습니다. DB 키 조회도 이 함수를 모든 행에 적용하는 방식으로 바꾸지 않습니다. 직접 비밀 비교와 해시 키를 이용한 데이터 조회의 책임이 다릅니다. [CRYPTO_memcmp 계약](https://docs.openssl.org/3.5/man3/CRYPTO_memcmp/)을 확인합니다.",
+      "codes": [
+        {
+          "label": "동등성만 제공하는 비밀 비교",
+          "language": "cpp",
+          "text": "inline bool equal_secret(std::string_view a, std::string_view b) {\n    if (a.size() != b.size()) return false;\n    if (a.empty()) return true;\n    return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/credentials.cpp",
+        "symbol": "bool equal_secret",
+        "invariant": "동일 길이 비밀의 내용 비교를 암호 라이브러리의 동등성 함수에 맡긴다.",
+        "mayDiffer": "현재 API는 X-Relay-Secret 검사에 사용한다. 이 함수는 길이 노출이나 서버 전체의 시간 차이까지 숨기지는 않는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "volatile과 일정 시간의 관계",
+          "body": "volatile은 C++ 추상 기계에서 특정 메모리 접근을 관찰 가능한 동작으로 취급합니다. 임의 코드의 실행 시간이 비밀과 무관하도록 보증하는 언어 기능은 아닙니다. 비교를 직접 작성하기보다 필요한 계약이 명시된 라이브러리 함수를 선택합니다."
+        }
+      ]
+    },
+    {
+      "title": "가짜 난수로 실패 경로를 확정한다",
+      "body": "실패 실험은 생성기의 품질을 평가하는 실험과 분리합니다. known_bytes는 공개된 순서로 바이트를 채우므로 hex 표현의 기대값을 고정할 수 있습니다. 실제 자격 생성에 연결하는 함수가 아닙니다.\n\nfailed_bytes는 앞부분을 쓰고 실패를 반환합니다. unsupported_bytes는 음수를, unexpected_bytes는 성공 계약에 없는 양수를 반환합니다. 이 모두에서 generate_account가 예외를 던지는지 확인합니다. 호출 횟수도 확인해 실패 후 숨은 재시도나 다른 난수 fallback이 없는지 봅니다.\n\n실제 RAND_bytes 경로는 형식과 연결 상태만 검사합니다. 짧은 표본에 중복이 없거나 분포가 그럴듯하다는 관찰로 예측 불가능성을 증명할 수는 없습니다. 구현 검사는 API 사용과 실패 처리가 계약을 지키는지를 확인합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "서버 외부에서 받은 새 키",
+          "body": "키 교체 API는 현재 소유 증명과 새 키 형식을 검사할 수 있지만 상대가 어떤 난수 생성기를 사용했는지는 토큰만 보고 증명하기 어렵습니다. 공식 클라이언트의 생성 경로를 CSPRNG로 고정하고, 형식 검사를 엔트로피 검사라고 부르지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "조회 실패와 원문 미보관을 실험한다",
+      "body": "공개 fixture를 넣고 ID를 찾은 뒤, 같은 토큰에 다른 ID로 삽입을 시도합니다. false가 반환되고 처음 ID가 유지되어야 합니다. 길이가 같은 미등록 토큰은 결과가 없고, DB 해시·복구 형식·NUL이 든 값도 계정 원문으로 인정되지 않아야 합니다.\n\n고정 fixture의 해시 기대값은 별도의 계산으로 준비합니다. study_meta::account_hash와도 같음을 검사하여 누적 계정 서비스의 형식·목적 계산이 유지되는지 확인합니다. 다른 purpose의 결과와 내부 NUL의 계산도 대조합니다.\n\n원문 미보관은 저장소 멤버가 무엇을 소유하는지 읽어 확인합니다. 호출자의 문자열, digest의 임시 연결 문자열, 라이브러리 버퍼에는 실행 중 원문이 존재할 수 있습니다. 이 실습은 프로세스 메모리의 안전 삭제를 구현하지 않습니다. 실험은 비밀을 출력하지 않고 검사 종류와 성공 여부만 남깁니다."
+    },
+    {
+      "title": "누적 프로젝트에 검사 타깃을 추가한다",
+      "body": "검사 타깃은 C++17과 OpenSSL::Crypto를 연결합니다. 누적 게임은 유지되고, credential_crypto_contract 실행에는 창이나 외부 서버가 필요 없습니다. Boost 헤더는 누적 네트워크 도구의 구성 의존성으로 남아 있으며 별도 설치라면 STUDY_BOOST_INCLUDE로 지정합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/139-credential-crypto -B out/study-139 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-139 --target credential_crypto_contract account_contract -j2\nctest --test-dir out/study-139 -R '^credential_crypto_contract$' --output-on-failure\npython3 scripts/check_learning_credential_crypto.py --boost /path/to/boost/include\n```\n\n생성 실패·형식 변환·도메인·조회·동등성 검사가 통과하면 각 계약의 성공 여부가 출력됩니다. Windows의 다중 구성 생성기는 빌드에 --config Release, CTest에 -C Release를 함께 사용합니다. 테스트는 예외 기반 require를 사용하므로 Release의 NDEBUG가 검사를 제거하지 않습니다."
+    },
+    {
+      "title": "보호 범위를 자격의 생애로 읽는다",
+      "body": "생성 시에는 CSPRNG의 성공 여부를 확인하고, 전달 시에는 TLS를 검증하며, 서버 보관 시에는 원문을 요약으로 바꿉니다. 클라이언트는 인증에 필요한 원문을 보호하고, 요청 제한은 온라인 추측 횟수를 제한합니다. 각 장치가 자격이 놓이는 다른 위치를 다룹니다.\n\nDB 읽기 유출에 대한 요약 저장은 서버 실행 권한 탈취나 DB 쓰기 변조까지 해결하지 않습니다. 실행 중 원문을 훔치거나 공격자의 요약으로 행을 바꿀 수 있는 상황은 권한·파일·운영 경계에서 따로 막아야 합니다. 원문을 한 번 얻은 상대는 그 자격이 유효한 동안 사용할 수 있으므로 보관과 폐기 정책도 중요합니다.\n\n완성 파일은 generate_account → account_digest → insert/find 순서로 읽습니다. 나머지 equal_secret은 직접 비밀 비교가 필요한 경계의 별도 도구입니다. 어떤 값이 비밀인지, 어느 함수가 실패를 결정하는지, 각 객체가 무엇을 보관하는지 설명할 수 있으면 핵심 흐름을 이해한 것입니다.",
+      "codes": [
+        {
+          "label": "전체 파일 — 생성·해시·조회·비교",
+          "language": "cpp",
+          "file": "checkpoints/139-credential-crypto/meta/credential_lab.h"
+        },
+        {
+          "label": "전체 파일 — 실패 주입과 인증 조회 검사",
+          "language": "cpp",
+          "file": "checkpoints/139-credential-crypto/tests/credential_crypto_contract.cpp"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "139-1",
+      "question": "시각을 seed로 만든 짧은 후보 토큰을 SHA-256으로 바꾸면 추측 공간은 어떻게 될까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "출력 길이만큼 자동으로 커진다"
+        },
+        {
+          "id": "b",
+          "text": "공격자는 가능한 seed 후보를 해시해 대조할 수 있다"
+        },
+        {
+          "id": "c",
+          "text": "hex로 바꾸면 추가 엔트로피가 생긴다"
+        },
+        {
+          "id": "d",
+          "text": "서버가 해시를 저장하면 원문 생성 방식은 무관하다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "공격자는 가능한 seed 후보를 해시해 대조할 수 있다",
+      "explanation": "결정론적 표현 변환과 해시는 입력의 불확실성을 추가하지 않습니다. 공격자가 가진 정보로 좁힐 수 있는 seed 후보가 생성 자격의 한계가 됩니다."
+    },
+    {
+      "id": "139-2",
+      "question": "난수 함수가 배열의 일부를 채운 뒤 -1을 반환했습니다. 올바른 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "음수는 true이므로 토큰을 반환한다"
+        },
+        {
+          "id": "b",
+          "text": "남은 바이트를 시간값으로 채운다"
+        },
+        {
+          "id": "c",
+          "text": "현재 배열을 해시해 자격으로 만든다"
+        },
+        {
+          "id": "d",
+          "text": "전체 실패로 처리하고 발급을 끝낸다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "전체 실패로 처리하고 발급을 끝낸다",
+      "explanation": "성공 계약은 정확히 1입니다. 일부 출력이나 0 초기화는 성공한 난수 생성의 대안이 아니며, 실패한 출력은 발급하지 않습니다."
+    },
+    {
+      "id": "139-3",
+      "question": "CredentialIndex에 token→ID 7이 있을 때 같은 token→ID 99를 삽입하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "실패를 반환하고 ID 7을 보존한다"
+        },
+        {
+          "id": "b",
+          "text": "ID 99로 교체하고 성공한다"
+        },
+        {
+          "id": "c",
+          "text": "둘 다 저장한 뒤 아무 ID나 찾는다"
+        },
+        {
+          "id": "d",
+          "text": "전체 인덱스를 비운다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "실패를 반환하고 ID 7을 보존한다",
+      "explanation": "try_emplace의 삽입 여부를 호출자에게 전달합니다. 같은 요약이 생긴 이유와 무관하게 기존 소유자를 덮어쓰지 않는 것이 계약입니다."
+    },
+    {
+      "id": "139-4",
+      "question": "DB 요약을 원문 토큰 대신 받아 직접 조회하도록 API를 바꾸면 어떤 문제가 생길까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "복호화 키가 자동으로 필요해진다"
+        },
+        {
+          "id": "b",
+          "text": "DB 검색이 불가능해진다"
+        },
+        {
+          "id": "c",
+          "text": "유출된 DB 요약 자체가 제출 가능한 자격이 된다"
+        },
+        {
+          "id": "d",
+          "text": "요약의 엔트로피가 자동으로 증가한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "유출된 DB 요약 자체가 제출 가능한 자격이 된다",
+      "explanation": "서버가 그 값을 인증의 충분한 증거로 받아들이면 복사한 사람이 제출할 수 있습니다. 원문 제시→서버 계산→요약 조회 계약을 유지해야 읽기 유출의 직접 재사용을 막을 수 있습니다."
+    },
+    {
+      "id": "139-5",
+      "question": "equal_secret 검사를 통과했습니다. 여기서 주장할 수 있는 범위는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HTTP 요청의 전체 응답 시간이 항상 같다"
+        },
+        {
+          "id": "b",
+          "text": "같은 길이의 내용 비교를 라이브러리 계약에 맡기며 길이와 주변 처리는 별개다"
+        },
+        {
+          "id": "c",
+          "text": "DB의 모든 검색이 일정 시간이다"
+        },
+        {
+          "id": "d",
+          "text": "함수의 음수 반환으로 문자열 정렬도 할 수 있다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "같은 길이의 내용 비교를 라이브러리 계약에 맡기며 길이와 주변 처리는 별개다",
+      "explanation": "CRYPTO_memcmp는 같은 길이의 내용에 따른 시간 차이를 피하는 동등성 함수입니다. 길이 분기·DB 조회·HTTP 처리 전체와 정렬 순서는 이 계약에 포함되지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "generate_account에서 성공 반환 전까지 원문이 놓이는 저장소를 표시한다.",
+      "고정 fixture·부분 쓰기 실패·NUL·목적 변경·중복 ID의 예상 결과를 적고 검사한다.",
+      "현재 fill_random·digest·read_player_by_token·equal_secret을 실습의 책임과 연결한다."
+    ],
+    "failureChecks": [
+      "-1을 성공으로 처리하거나 실패 후 시간값으로 대체하면 어떤 보안 전제가 깨지는지 설명한다.",
+      "DB 요약을 그대로 인증하는 지름길과 클라이언트 원문 저장의 차이를 설명한다.",
+      "try_emplace 대신 대입을 사용하면 중복 입력에서 어느 ID가 남는지 예상한다."
+    ],
+    "expected": "난수 실패는 발급되지 않고, 형식·목적별 계산이 맞아야 저장된 ID를 찾는다. 충돌은 기존 소유자를 유지하고 비밀은 로그에 출력되지 않는다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "선택 명세 DeepSeek 초안·OpenSSL 공식 계약·현재 생성/DB 조회 대조·결정적 실패 주입과 API 회귀",
+    "corrections": [
+      "배열 반환 초안을 wire 문자열 반환으로 정리",
+      "삽입 충돌을 bool로 호출자에게 전달",
+      "hex 길이 오버플로·null 입력·빈 string_view 방어 보완",
+      "해시 구현을 현재 코드와 같은 단회 EVP 계산으로 단순화",
+      "실제 비밀 비교의 수제 volatile 루프를 CRYPTO_memcmp로 교체"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL credential_crypto_contract CTest 통과; SDL 누적 tetris 빌드 통과",
+    "두 구성의 account_contract를 독립 임시 DB로 실행: 해시 저장·원자적 생성·충돌·재시작 통과",
+    "학습 helper와 실제 credentials helper의 ASan/UBSan 통과; 난수 실패/음수/예상 밖 반환·NUL·목적·중복/조회·전체 위치 비교",
+    "현재 meta Release 빌드·credentials CTest·실제 HTTP 해시 원문 거절/같은 길이 릴레이 비밀 거절/원자 소비 회귀 통과",
+    "인라인10·현재 심볼·누적 파일 보존·Part 현재 코드 발췌 통과",
+    "GNU15가 기존 third_party/sqlite3.c에서 const 폐기와 strlen overread 최적화 경고를 냄. 경고를 보존하고 정확히 해당 두 경고만 별도 기록; 새 helper의 경고 없음. SQLite 전체 안전성 입증 아님",
+    "최초 root multi-target 빌드는 CMake 재생성 전 Makefile이 새 타깃을 몰라 meta 이후 실패. 재호출로 credentials 빌드/CTest 통과",
+    "Linux/OpenSSL; Windows/macOS 네이티브·시간 부채널 측정·CSPRNG의 통계/암호 분석·프로세스 메모리 안전 삭제 미검증",
+    "수동 GUI·공개 배포 없음"
+  ]
+}

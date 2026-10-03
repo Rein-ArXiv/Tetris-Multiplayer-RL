@@ -1,0 +1,392 @@
+{
+  "id": "lesson-92",
+  "title": "해시 대조: 갈라진 상태 찾기",
+  "shortTitle": "같은 틱·플레이어 역할·대기 중인 비교",
+  "state": "reviewed",
+  "version": "1.0.2",
+  "start": "시작: 두 프로세스가 입력을 교환하고 같은 순서로 적용하지만 실행 중 상태 일치는 서로 확인하지 않습니다.",
+  "finish": "완료: 초기·주기 상태 해시를 교환하고 같은 틱의 두 기록이 모였을 때 플레이어별 일치 여부를 확인합니다.",
+  "objective": "해시의 대상과 시점을 정의하고, 선도착·누락·불일치를 구분하는 제한된 비교 창을 구현합니다.",
+  "prerequisites": [
+    "결정론적 상태 바이트와 상태 해시",
+    "입력 생성 일정과 순차 소비",
+    "프레임 코덱·후보 검증·고정 크기 보관 창"
+  ],
+  "recap": {
+    "points": [
+      "로컬 입력 생성 일정에 지연을 적용해 소비 상한을 정합니다.",
+      "소비 시점이 열려도 실제 두 입력이 있어야 규칙을 진행합니다.",
+      "같은 입력 이력을 다른 시점에 소비해도 같은 틱에서 비교할 상태는 일치해야 합니다."
+    ],
+    "bridge": "입력이 같다는 가정을 실행 중 관찰 가능한 상태 비교로 확인합니다."
+  },
+  "sections": [
+    {
+      "title": "입력이 같아도 실행 결과를 확인할 장치가 필요하다",
+      "body": "한쪽 실행 파일에서 회전 처리 순서가 달라졌다고 합시다. 양쪽은 같은 입력을 받지만 보드 결과는 달라질 수 있습니다. 소켓 연결이 유지되고 입력 프레임을 정상 해석했다는 사실만으로 규칙 상태의 일치를 알 수는 없습니다.\n\n상태 해시는 규칙 상태를 일정한 바이트 순서로 표현한 뒤 짧은 값으로 요약한 것입니다. 이번에는 두 플레이어의 상태 해시를 주기적으로 보내고, 같은 게임 진행 지점에서 만든 값과 비교합니다. 불일치가 발견되면 어떤 플레이어 보드의 해시가 다른지 기록합니다.\n\n검사 주기는 학습 실험에서 4틱입니다. 초기 상태도 포함해 0, 4, 8…을 검사합니다. 네트워크 수신을 빠르게 하기 위한 주기가 아니라 상태 비교 지점을 정하는 규약입니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::SendHash",
+        "invariant": "틱 번호와 그 시점의 상태 요약을 함께 전달한다.",
+        "mayDiffer": "현재 게임은 설정된 주기로 결합 해시를 전송한다. 기준은 실습 주기로 역할별 해시를 분리해 전송한다."
+      }
+    },
+    {
+      "title": "입력 번호와 상태 번호의 한 칸 차이",
+      "body": "입력은 0번부터 시작합니다. 아무 입력도 적용하지 않은 초기 상태를 S0, 입력 0을 적용한 뒤를 S1이라 적겠습니다. 그러면 입력 0~3을 적용한 뒤의 상태는 S4입니다.\n\nStateStamp의 tick은 이미 적용한 입력 쌍의 수입니다. 게임의 next_tick과 같은 값이며 다음에 적용할 입력 번호이기도 합니다. 해시는 한 틱의 규칙 갱신과 공격 전달이 끝난 뒤 계산해야 합니다. 중간에 계산하면 한 보드만 진행한 상태와 두 보드가 모두 진행한 상태를 섞어 비교할 수 있습니다.\n\nwire 입력 번호는 u32이므로 마지막 UINT32_MAX 입력 뒤의 완료 수는 UINT32_MAX+1입니다. 기준 해시 메시지는 u64 완료 수를 사용해 이 경계도 표현합니다.",
+      "codes": [
+        {
+          "label": "어느 상태를 비교하는가",
+          "language": "text",
+          "text": "초기화                    → S0, HASH tick=0\n입력 쌍 0 적용             → S1\n입력 쌍 1 적용             → S2\n입력 쌍 2 적용             → S3\n입력 쌍 3 적용·공격 전달 완료 → S4, HASH tick=4"
+        }
+      ]
+    },
+    {
+      "title": "해시가 담는 상태와 관찰 범위를 정한다",
+      "body": "기준은 기존 study_hash::state_hash로 각 Round를 요약합니다. 이 함수가 실패하면 값을 임의로 0으로 바꾸지 않고 검사 실행을 실패시킵니다. 성공한 해시 값 0과 해시 생성 실패는 별개의 상태입니다.\n\n규칙에 영향을 주는 보드·활성 블록·난수·점수·타이머 등의 표현 규약은 두 프로세스에서 같아야 합니다. 메모리 주소나 구조체의 padding을 그대로 읽는 방식은 플랫폼이나 실행마다 달라질 수 있습니다. 누적된 명시적 상태 바이트 규약을 그대로 사용합니다.\n\n이번 메시지는 두 Round의 해시를 다룹니다. Duel의 공격 전달 완료 수는 정상 전이에서 각 Round의 누적 공격 수와 맞는 불변식을 유지합니다. 추후 Duel에 별도의 승패·대기 상태를 추가한다면 그 상태가 비교 대상에 포함되어야 하는지도 검토해야 합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "일치가 뜻하는 범위",
+          "body": "해시는 짧은 값이므로 다른 상태가 같은 값으로 요약될 수 있습니다. 해시에 빠진 필드는 비교되지 않으며, 검사하지 않은 틱에서 차이가 났다가 합쳐질 수도 있습니다. 일치는 해당 규약과 샘플 시점의 진단 신호입니다. 상대가 보내는 값 자체를 믿을 수 없는 환경에서는 별도의 서버 검증도 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "플레이어 역할과 기록의 출처를 구분한다",
+      "body": "호스트의 gameLocal과 상대의 gameLocal은 서로 다른 플레이어입니다. 각자의 로컬 보드만 비교하면 정상 경기에서도 값이 다를 수 있습니다. StateStamp는 host_hash와 peer_hash라는 고정 순서를 사용합니다.\n\n비교 창의 local과 remote는 기록을 계산한 출처입니다. local.host_hash와 remote.host_hash가 같은 플레이어의 상태를 가리킵니다. local.peer_hash와 remote.peer_hash도 마찬가지입니다. 메시지를 받은 쪽이 peer라고 해서 두 필드를 바꾸지 않습니다.\n\n기준 Duel은 이미 host→left, peer→right 순서로 상태를 소유하므로 left에서 host_hash를, right에서 peer_hash를 만듭니다. 화면 배치와 해시의 역할 순서를 분리하면 어느 컴퓨터에서 보든 의미가 유지됩니다.",
+      "codes": [
+        {
+          "label": "두 출처에서 같은 역할을 비교한다",
+          "language": "text",
+          "text": "               host_hash          peer_hash\n로컬 계산       호스트 보드 S(t)    상대 보드 S(t)\n원격이 보낸 값   호스트 보드 S(t)    상대 보드 S(t)\n비교                 ↓                   ↓\n                host_equal          peer_equal"
+        }
+      ]
+    },
+    {
+      "title": "두 값의 XOR는 변화가 상쇄될 수 있다",
+      "body": "두 보드를 하나로 요약하려고 hL XOR hR을 사용하면 순서가 뒤집혀도 같은 결과를 얻습니다. 하지만 두 값이 같으면 결과는 항상 0입니다.\n\n한 프로세스에서 두 보드의 해시가 모두 11이고, 다른 프로세스에서 모두 29라면 양쪽 XOR 값은 0입니다. 해시 11과 29가 달라도 결합 결과가 같아집니다. 두 보드가 같은 시드로 시작하거나 비슷한 입력을 받는 상황에서 독립적인 난수 두 개처럼 취급할 수 없는 이유입니다.\n\n기준 메시지는 역할별 값을 따로 보내므로 11과 29의 차이를 각 필드에서 발견할 수 있습니다. 현재 게임의 단일64비트 wire는 유지하면서 개선하려면 역할 순서로 두 값을 다시 해시할 수 있습니다. 이 방식도 일반적인 충돌 가능성은 남지만 XOR의 동일값 상쇄를 그대로 갖지는 않습니다.",
+      "reference": {
+        "path": "core/hash.h",
+        "symbol": "inline uint64_t hash_player_pair",
+        "invariant": "서로 다른 플레이어의 상태를 고정된 역할 순서로 요약한다.",
+        "mayDiffer": "기준은 두 해시를 분리 전송한다. 현재 게임은 DUEL/버전1 바이트와 host·peer 값을 FNV-1a에 누적해 단일 값으로 전송한다."
+      }
+    },
+    {
+      "title": "24바이트 상태 메시지를 후보로 인코딩한다",
+      "body": "TYPE=21의 payload는 완료 수 u64, 호스트 해시 u64, 상대 해시 u64입니다. little-endian으로 각각 8바이트를 쓰므로 정확히 24바이트입니다. C++ 구조체의 메모리 크기와 무관하게 wire 형식을 정합니다.\n\nvalid_stamp는 완료 수의 상한과 4틱 주기를 검사합니다. 해시의 비트 패턴에는 별도의 금지값이 없습니다. encode_stamp는 후보 Frame에 세 필드를 모두 쓴 뒤에만 출력에 반영합니다.\n\ndecode_stamp는 TYPE과 정확한 길이를 먼저 확인합니다. 일부 필드만 맞는 메시지가 기존 출력을 바꾸지 않도록 StateStamp 후보를 읽고 전체 규약을 확인한 뒤 대입합니다. 메시지의 문법적 유효성과 실제 로컬 상태와의 일치는 서로 다른 단계입니다.",
+      "codes": [
+        {
+          "label": "완료 수와 역할별 해시를 명시적으로 쓴다",
+          "language": "cpp",
+          "text": "inline bool encode_stamp(const StateStamp& stamp, Frame& out) noexcept {\n  if (!valid_stamp(stamp)) {\n    return false;\n  }\n\n  Frame candidate{};\n  candidate.type = kStateStampType;\n  candidate.size = kStateStampBytes;\n\n  ByteWriter writer(candidate.payload.data(), candidate.payload.size());\n  if (!writer.u64(stamp.tick) || !writer.u64(stamp.host_hash) ||\n      !writer.u64(stamp.peer_hash)) {\n    return false;\n  }\n  if (writer.position() != kStateStampBytes) {\n    return false;\n  }\n\n  out = candidate;\n  return true;\n}\n"
+        },
+        {
+          "label": "타입·길이·주기를 확인한 뒤 공개한다",
+          "language": "cpp",
+          "text": "inline bool decode_stamp(const Frame& frame, StateStamp& out) noexcept {\n  if (frame.type != kStateStampType) {\n    return false;\n  }\n  if (frame.size != kStateStampBytes) {\n    return false;\n  }\n\n  ByteReader reader(frame.payload.data(), frame.size);\n  StateStamp candidate{};\n  if (!reader.u64(candidate.tick) || !reader.u64(candidate.host_hash) ||\n      !reader.u64(candidate.peer_hash)) {\n    return false;\n  }\n  if (!reader.at_end()) {\n    return false;\n  }\n  if (!valid_stamp(candidate)) {\n    return false;\n  }\n\n  out = candidate;\n  return true;\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "먼저 도착한 기록을 제한된 창에 보관한다",
+      "body": "로컬이 상태 3까지 진행했는데 원격의 HASH(4)가 먼저 도착할 수 있습니다. 이때 현재 S3의 해시와 비교하면 서로 다른 상태 번호를 대조하게 됩니다. 해시 4를 보관하고 로컬 S4가 생길 때까지 기다려야 합니다.\n\nHashAudit은 local과 remote 배열에 각각 8개의 optional<StateStamp>를 둡니다. next_tick이 0이면 검사점 0, 4, …, 28을 저장할 수 있습니다. 32는 아직 창 밖입니다. next_tick은 비교를 마칠 때만 4 증가하며, 먼 미래 메시지를 받았다고 앞으로 이동시키지 않습니다.\n\n이미 저장한 동일 기록은 duplicate, 같은 출처·같은 틱의 다른 값은 conflict입니다. 충돌은 최초 기록을 보존합니다. 이미 비교한 번호는 stale, 앞선 범위 밖은 too_far입니다. 상대의 번호만 따라 창을 밀어 버리면 아직 비교하지 않은 기록을 지울 수 있습니다.",
+      "codes": [
+        {
+          "label": "유효성·창 범위·동일 기록 여부를 검사한다",
+          "language": "cpp",
+          "text": "AuditPut put(Queue& queue, const StateStamp& stamp) noexcept {\n    if (!valid_stamp(stamp)) {\n      return AuditPut::invalid;\n    }\n    if (next_ > kMaxStateTick) {\n      return AuditPut::exhausted;\n    }\n    if (stamp.tick < next_) {\n      return AuditPut::stale;\n    }\n\n    const std::uint64_t offset = stamp.tick - next_;\n    if (offset >= kHashWindow) {\n      return AuditPut::too_far;\n    }\n\n    const std::size_t index = static_cast<std::size_t>(offset / kHashPeriod);\n    Slot& slot = queue[index];\n    if (slot.has_value()) {\n      return same_stamp(*slot, stamp) ? AuditPut::duplicate : AuditPut::conflict;\n    }\n    slot = stamp;\n    return AuditPut::stored;\n  }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "보관 한도의 단위",
+          "body": "8은 게임 틱 개수가 아니라 해시 샘플 수입니다. 주기4와 함께 32틱 폭의 창을 만듭니다. 두 출처가 같은 틱의 기록을 충분히 공급하지 않으면 창이 막힙니다. 여기서는 오류로 종료하며 자동 샘플 건너뛰기를 하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "비교 대기는 아직 일치도 불일치도 아니다",
+      "body": "poll은 두 배열의 첫 슬롯이 모두 있을 때만 Comparison을 만듭니다. 하나라도 없으면 false를 반환하고 출력과 창을 그대로 보존합니다. 값 0을 대기 표시로 사용하는 대신 optional의 존재 여부를 검사합니다.\n\n같은 틱의 두 기록이 있으면 host_equal과 peer_equal을 각각 계산합니다. 두 값이 모두 true일 때 matched입니다. false인 필드로 어느 플레이어 보드의 해시가 다른지 알 수 있지만, 보드 내부의 원인 필드까지 알 수는 없습니다.\n\npoll 성공은 한 번의 비교가 끝났다는 뜻입니다. 불일치여도 그 비교를 소비하고 다음 검사점을 향해 창을 이동합니다. 이 실행 파일은 불일치를 출력한 뒤 종료합니다. 다른 프로그램이라면 결과를 보관하거나 경기 중단 정책에 전달할 수 있습니다.",
+      "codes": [
+        {
+          "label": "같은 검사점의 두 기록이 모였을 때 한 번 비교한다",
+          "language": "cpp",
+          "text": "bool poll(Comparison& out) noexcept {\n    if (!local_[0].has_value() || !remote_[0].has_value()) {\n      return false;\n    }\n\n    Comparison candidate{};\n    candidate.tick = next_;\n    candidate.host_equal = local_[0]->host_hash == remote_[0]->host_hash;\n    candidate.peer_equal = local_[0]->peer_hash == remote_[0]->peer_hash;\n\n    for (std::size_t i = 0; i + 1 < kHashCapacity; ++i) {\n      local_[i] = local_[i + 1];\n      remote_[i] = remote_[i + 1];\n    }\n    local_[kHashCapacity - 1].reset();\n    remote_[kHashCapacity - 1].reset();\n\n    next_ += kHashPeriod;\n    out = candidate;\n    return true;\n  }\n"
+        }
+      ]
+    },
+    {
+      "title": "규칙 진행 직후의 값을 기록하고 보낸다",
+      "body": "publish는 현재 Duel의 두 Round 해시를 구하고 game.next_tick과 함께 StateStamp를 만듭니다. 로컬 비교 창에 같은 값을 기록한 뒤 프레임을 보냅니다. 송신용 값과 로컬 비교용 값을 서로 다른 시점에 계산하지 않도록 하나의 후보를 공유합니다.\n\n프로그램은 초기화 직후 publish를 호출하고, 이후 advance가 성공한 뒤 완료 수가 4의 배수일 때 다시 호출합니다. 입력이 없어 waiting인 동안 같은 틱의 해시를 반복 생성하지 않습니다.\n\n이 스냅샷에는 해시 값만 저장합니다. 나중에 원격 값이 도착해도 과거 게임 상태를 다시 계산할 필요 없이 같은 틱의 저장값과 비교할 수 있습니다. 과거 상태 전체를 복구하려면 별도의 스냅샷이나 입력 재현 기록이 필요합니다.",
+      "codes": [
+        {
+          "label": "한 시점의 해시를 보관과 송신에 함께 사용한다",
+          "language": "cpp",
+          "text": "bool publish(study_net::Connection& connection, const study_net::DelayedLockstep& game,\n             study_net::HashAudit& audit) {\n    using namespace study_net;\n    const auto host = study_hash::state_hash(game.state().left());\n    const auto peer = study_hash::state_hash(game.state().right());\n    if (!host || !peer) return false;\n    const StateStamp stamp{game.next_tick(), *host, *peer};\n    if (audit.record_local(stamp) != AuditPut::stored) return false;\n    Frame frame;\n    if (!encode_stamp(stamp, frame)) return false;\n    return connection.send_frame(frame, std::chrono::steady_clock::now() + std::chrono::seconds(2)).outcome == SendOutcome::complete;\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "입력 프레임과 해시 프레임을 함께 처리한다",
+      "body": "협상이 끝나면 초기 HASH(0)를 보내고 32개의 로컬 입력을 기록·전송합니다. 수신 프레임이 TYPE20이면 입력 코덱으로, TYPE21이면 상태 코덱으로 해석합니다. 입력과 해시는 서로 다른 책임을 가진 메시지입니다.\n\n프레임을 반영한 뒤 비교 가능한 해시를 배출하고, 실행 가능한 입력 쌍을 적용합니다. 한 틱을 진행할 때마다 필요한 주기 해시를 생성하고 다시 비교합니다. 따라서 원격 해시가 로컬 계산보다 먼저 와도 이후 규칙 진행에서 대기 중인 비교가 열릴 수 있습니다.\n\n입력과 자신의 주기 해시를 모두 보낸 뒤 송신 방향만 닫고 상대의 나머지 해시를 계속 받습니다. EOF에서 입력 소비 목표와 해시 비교 목표를 모두 확인합니다. 중간 HASH(4)가 빠지면 뒤의 HASH(8)가 있어도 전체 비교 완료로 처리하지 않습니다.",
+      "codes": [
+        {
+          "label": "일치와 불일치를 구분해 소비한다",
+          "language": "cpp",
+          "text": "bool compare_ready(study_net::HashAudit& audit) {\n    study_net::Comparison comparison;\n    while (audit.poll(comparison)) {\n        std::printf(\"CHECK tick=%llu host=%s peer=%s\\n\",static_cast<unsigned long long>(comparison.tick),\n            comparison.host_equal ? \"match\" : \"mismatch\",comparison.peer_equal ? \"match\" : \"mismatch\");\n        if (!comparison.matched()) return false;\n    }\n    return true;\n}\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "작은 실험의 송수신 한계",
+          "body": "교환하는 데이터는 고정된 소수의 프레임입니다. 지속 경기에서는 송수신과 게임 작업을 함께 진행하는 루프가 필요합니다. 기존 Connection의 수신은 블로킹이며 해시 창이 작다는 사실이 상대의 침묵 시간까지 제한하지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "검사한 마지막 상태를 분명히 말한다",
+      "body": "D=2 실험은 입력 32개를 생성하고 30틱을 소비합니다. 주기 해시는 상태 0, 4, …, 28까지 비교합니다. 상태 29와 30은 이 주기 교환에서 검사하지 않았습니다. 마지막 DONE의 해시는 출력용 진단값이며 주기 메시지의 비교 완료 범위와 구분합니다.\n\nD=30처럼 소비 틱이 2개인 짧은 실행에서는 초기 상태 0만 교환합니다. 이를 게임 진행 결과까지 검증했다고 표현하면 안 됩니다. 검사 주기를 줄이거나 종료 시 최종 상태를 반드시 교환하는 별도 규약으로 관찰 범위를 늘릴 수 있습니다.\n\n이번 EOF 성공 조건은 준비한 주기 샘플을 빠짐없이 비교했다는 뜻입니다. 같은 값의 충돌, 샘플 사이의 변화, 해시에 포함되지 않은 상태를 모두 배제하는 증명은 아닙니다. 로그와 테스트는 확인한 범위를 그대로 표현해야 합니다."
+    },
+    {
+      "title": "현재 게임의 선도착과 라운드 경계를 읽는다",
+      "body": "현재 Session은 로컬·원격 주기 해시를 각각 유한 창에 보관합니다. main은 PollHashComparison으로 같은 틱의 쌍을 순서대로 소비합니다. 상대 값이 먼저 도착하면 로컬 기록이 준비될 때까지 보관하며, 뒤 틱이 도착해도 앞의 미비교 기록을 덮어쓰지 않습니다.\n\n새 경기에서는 창과 마지막 송신 번호·불일치 표시를 초기화합니다. 큐 초기화가 이미 전송 중인 이전 라운드 기록을 취소하지는 않으므로 라운드 식별은 별도 경계입니다.\n\n기준 HashAudit는 초기 틱 0과 두 플레이어의 해시를 각각 비교합니다. 현재 게임은 600부터 시작하는 주기와 결합 해시를 사용합니다. 보관·정확한 틱 대조라는 핵심은 같고 주기·값의 구성·동시성 경계가 다릅니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "while (session.PollHashComparison(rt, localHash, rh))",
+        "invariant": "비교하지 못한 기록을 비교 완료로 표시하지 않는다.",
+        "mayDiffer": "현재 게임은 두 보드의 결합 해시를 설정된 주기와 보관 용량에 따라 Session의 mutex 아래에서 보관한다. 기준은 단일 소유자의 두 역할 해시와 초기 샘플을 사용한다."
+      }
+    },
+    {
+      "title": "오류를 발견한 틱과 로그를 계산한 틱을 구분한다",
+      "body": "로컬 S600 해시를 보관한 뒤 S601까지 진행한 상태에서 원격 HASH(600)를 받아 불일치를 발견할 수 있습니다. 여기서 지금 계산한 StateHashBreakdown은 S601의 필드별 요약입니다.\n\n현재 로그는 compared_tick=600과 captured_tick=601을 함께 남깁니다. 과거 비교값이 다르다는 사실과 현재 필드별 값은 유용한 단서지만, 현재 breakdown만으로 S600에서 처음 달라진 필드를 단정할 수는 없습니다. 같은 틱의 스냅샷이나 입력 이력을 재현하면 원인 범위를 더 좁힐 수 있습니다.\n\n역할별 해시가 다르다는 것만으로 어느 플레이어가 잘못했는지도 결정되지 않습니다. 두 실행의 규칙 버전·시드·입력·직렬화 규약을 함께 조사해야 합니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "[DESYNC-DIAGNOSTIC]",
+        "invariant": "진단 데이터가 어느 시점의 상태인지 기록한다.",
+        "mayDiffer": "기준 메시지는 역할별 해시 두 개를 보낸다. 현재 breakdown은 로컬의 현재 상태만 보여 주며 원격 과거 필드를 복원하지 않는다."
+      }
+    },
+    {
+      "title": "두 터미널에서 주기별 비교 결과를 확인한다",
+      "body": "91-input-delay를 복사한 92-hash-audit에 hash_protocol.h·hash_audit.h와 hash_probe를 추가합니다. 누적 게임과 입력·지연 진단은 그대로 유지합니다. 해시 진단은 같은 순수 Duel을 사용합니다.\n\n두 프로세스를 연결하면 CHECK tick=0부터 주기마다 host=match, peer=match를 출력합니다. D=2에서는 마지막 비교점이 28, DONE의 소비 수는 30입니다. 두 화면의 같은 역할 해시를 비교하는 것과 한 화면의 host·peer 해시가 같아야 한다는 것은 다른 요구입니다.\n\n잘못된 TYPE·길이·주기, 중간 샘플 누락, 호스트 또는 상대 해시 한 비트 변경을 검사하세요. 기다리는 경우의 출력 보존도 함께 확인해야 대기를 정상 일치로 처리하는 오류를 찾을 수 있습니다.",
+      "codes": [
+        {
+          "label": "추가 타깃",
+          "language": "cmake",
+          "text": "add_executable(hash_audit_contract tests/hash_audit_contract.cpp)\ntarget_include_directories(hash_audit_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME hash_audit_contract COMMAND hash_audit_contract)\nadd_executable(hash_probe tools/hash_probe.cpp)\ntarget_link_libraries(hash_probe PRIVATE StudySocket)\nadd_test(NAME hash_probe_help COMMAND hash_probe --help)"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/92-hash-audit -B out/study92 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study92 -j3\nctest --test-dir out/study92 --output-on-failure\n./out/study92/hash_probe listen 0 77 2\n# 다른 터미널: LISTEN의 포트 사용\n./out/study92/hash_probe connect 포트번호"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성",
+          "body": "빌드에 --config Release, CTest에 -C Release를 붙이고 Release/hash_probe.exe를 실행합니다. 이 진단은 같은 기기의 루프백 연결을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 확장할 경계",
+      "body": "메시지 코덱은 wire 형식을, 비교 창은 틱별 보관과 대조를, 실행 파일은 규칙 진행·송수신·오류 종료를 소유합니다. 해시 불일치를 게임 상태 덮어쓰기로 바로 연결하지 않아도 원인을 조사할 정보를 모을 수 있습니다.\n\n유지할 핵심은 같은 상태 번호와 같은 플레이어의 요약을 비교하고, 미비교 상태를 일치로 표시하지 않는 것입니다. 샘플 주기·보관 수·해시 알고리즘은 합의한 규약으로 바뀔 수 있습니다. 전체 상태 복구·최종 결과 인증·재접속 이력 검증에는 각각 추가 계약이 필요합니다.",
+      "codes": [
+        {
+          "label": "net/hash_protocol.h",
+          "language": "cpp",
+          "file": "checkpoints/92-hash-audit/net/hash_protocol.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/hash_audit.h",
+          "language": "cpp",
+          "file": "checkpoints/92-hash-audit/net/hash_audit.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/hash_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/92-hash-audit/tools/hash_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/hash_audit_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/92-hash-audit/tests/hash_audit_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "92-1",
+      "question": "입력 쌍 0~3을 적용하고 공격 전달까지 마쳤습니다. 이번 규약의 상태 번호는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0"
+        },
+        {
+          "id": "b",
+          "text": "3"
+        },
+        {
+          "id": "c",
+          "text": "4"
+        },
+        {
+          "id": "d",
+          "text": "5"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "4",
+      "explanation": "상태 번호는 완료한 입력 쌍의 수입니다. 네 쌍을 적용했으므로 S4이며 다음 입력 번호도 4입니다."
+    },
+    {
+      "id": "92-2",
+      "question": "원격 HASH(4)가 도착했지만 로컬은 상태 3입니다. 올바른 처리는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "현재 S3의 해시와 비교한다"
+        },
+        {
+          "id": "b",
+          "text": "비교 완료로 표시하고 버린다"
+        },
+        {
+          "id": "c",
+          "text": "로컬 해시를 0으로 넣어 비교한다"
+        },
+        {
+          "id": "d",
+          "text": "기록을 보관하고 로컬 S4를 기다린다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "기록을 보관하고 로컬 S4를 기다린다",
+      "explanation": "서로 다른 상태 번호를 비교할 수 없습니다. 대기는 일치도 불일치도 아니며 같은 검사점의 로컬 기록이 필요합니다."
+    },
+    {
+      "id": "92-3",
+      "question": "한쪽 두 보드 해시가 (11,11), 다른 쪽이 (29,29)입니다. XOR 결합의 문제는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 결과가 모두 0이라 차이가 상쇄된다"
+        },
+        {
+          "id": "b",
+          "text": "XOR가 메모리를 초과한다"
+        },
+        {
+          "id": "c",
+          "text": "원격 해시 순번이 증가한다"
+        },
+        {
+          "id": "d",
+          "text": "두 해시의 길이가 달라진다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "두 결과가 모두 0이라 차이가 상쇄된다",
+      "explanation": "a XOR a는 0입니다. 역할별 값을 나누어 비교하거나 역할 순서로 다시 해시하는 이유입니다."
+    },
+    {
+      "id": "92-4",
+      "question": "HashAudit의 next_tick=0일 때 상대가 HASH(32)를 보냈습니다. 현재 8샘플·주기4 창의 결과는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0번 슬롯을 지우고 32로 이동한다"
+        },
+        {
+          "id": "b",
+          "text": "too_far로 거절하고 비교 순번은 유지한다"
+        },
+        {
+          "id": "c",
+          "text": "상대 번호에 맞춰 모두 비교 완료로 표시한다"
+        },
+        {
+          "id": "d",
+          "text": "32를 28로 바꿔 저장한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "too_far로 거절하고 비교 순번은 유지한다",
+      "explanation": "현재 창은 0~28의 여덟 검사점입니다. 수신한 미래 번호가 비교 순번을 강제로 바꿀 수 없습니다."
+    },
+    {
+      "id": "92-5",
+      "question": "compared_tick=600, captured_tick=601인 로그에서 현재 rng breakdown이 다릅니다. 어떤 해석이 적절할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "600에서 RNG 호출 순서가 처음 달라졌음이 증명된다"
+        },
+        {
+          "id": "b",
+          "text": "해시 충돌 가능성이 사라진다"
+        },
+        {
+          "id": "c",
+          "text": "601의 진단 단서이므로 600의 원인은 같은 틱 기록이나 재현으로 확인한다"
+        },
+        {
+          "id": "d",
+          "text": "상대가 부정행위를 했다고 판정한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "601의 진단 단서이므로 600의 원인은 같은 틱 기록이나 재현으로 확인한다",
+      "explanation": "비교한 과거 요약과 지금 계산한 세부 요약은 시점이 다릅니다. 원인을 좁히려면 같은 상태 번호의 자료를 대조해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "입력 번호와 완료 상태 번호를 표로 적습니다.",
+      "로컬·원격 출처와 host·peer 역할을 구분합니다.",
+      "해시를 먼저 보내고 같은 틱 계산 뒤 비교되는지 확인합니다.",
+      "한 필드 변경과 중간 샘플 누락을 서로 다른 결과로 검사합니다."
+    ],
+    "failureChecks": [
+      "0이라는 유효 해시를 미수신 표시로 사용하지 않는지 확인합니다.",
+      "먼 미래 샘플이 비교 순번을 이동시키지 않는지 검사합니다.",
+      "마지막으로 비교한 틱과 현재 게임 틱을 구별합니다."
+    ],
+    "expected": "같은 검사점의 상태 요약을 대조하고, 대기·불일치·관찰 범위의 한계를 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 선택 코덱/창 초안·실제 main/Part 비교·선도착 회귀·wire 오류 주입",
+    "draftJob": "out/learning-jobs/092-audit-events.jsonl",
+    "corrections": [
+      "역할 필드와 관찰자 변경을 혼동한 초안 주석 수정 및 scoped enum 사용",
+      "실제 XOR 상쇄를 역할 순서 해시로 변경",
+      "실제 선도착 비교 완료 표식·두 라운드 생성 초기화·진단 시점 표기 교정",
+      "원문의 고정 벽시각 보존·원자성/lock-free·오류 원인 단정 설명 교정",
+      "97차시 수정에 맞춰 현재 코드 연결을 latest-only 링에서 보관 창의 소비 API로 갱신; 기준 스니펫 유지",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED111/SDL116 CTest·경고 없음·91 누적 파일 변경 범위 확인",
+    "HASH 코덱 고정 LE벡터·길이0~40·타입0~255·잘못된 주기/상한·0/MAX해시·출력 보존 ASan/UBSan",
+    "비교 창 선도착·출력 보존·동일/충돌·stale/too_far·역할별 불일치·8샘플 순서 변경/창 이동·라운드 초기화 ASan/UBSan",
+    "실제 두 프로세스 네 seed/delay 조합에서 기대한 모든 주기 샘플 일치; 일치/host변경/peer변경/선도착불일치/누락/잘못된타입/길이 7경로 검증",
+    "실제 main 발췌 선도착 비교·중복 억제·reset ASan/UBSan; 수정 전 선도착 표식 회귀 실패·진단 captured601/compared600 확인",
+    "실제 hash_player_pair 역할 순서·XOR상쇄 반례·명시적 LE바이트 벡터954051100819889112 확인; 게임/양릴레이 빌드·root20/19CTest",
+    "Part 발췌·7스니펫·Markdown27·454문제·전체차시DOM·정적 배포물 재현성; Windows/macOS 네이티브·수동GUI 미검증"
+  ]
+}

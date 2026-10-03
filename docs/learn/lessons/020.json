@@ -1,0 +1,439 @@
+{
+  "id": "lesson-20",
+  "title": "래스터화: 세 정점 사이를 채우는 과정",
+  "shortTitle": "샘플·보간·프래그먼트",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 세 정점의 창 위치는 계산할 수 있지만, 그 사이의 픽셀과 색이 어떻게 선택되는지는 아직 구현하지 않았습니다.",
+  "finish": "완료: edge 함수와 가중치로 샘플을 판정하고, smooth·flat·discard 실험을 통해 조각 처리와 최종 픽셀을 구별합니다.",
+  "objective": "CPU 삼각형 샘플러와 세 가지 GLSL 실험을 만들고, 픽셀 중심·내부 판정·색 보간·조각 폐기를 직접 계산하고 설명할 수 있습니다.",
+  "prerequisites": [
+    "19차시 체크포인트",
+    "clip·NDC·viewport와 연속 창 좌표",
+    "셰이더 입력/출력과 프로그램 링크"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 각9 CTest",
+    "llvmpipe4.5 Core: 세 실험 각각16,384픽셀의 내부/배경/색 비교",
+    "물리 GPU·실제 표시·Windows/macOS 네이티브 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek CPU 함수 초안 검토, 직접 계산·계약 검사·공식 명세·실제 픽셀 대조",
+    "draftJob": "out/learning-jobs/raster-events.jsonl",
+    "corrections": [
+      "불필요한 template 보조 함수를 double 함수로 단순화",
+      "같은 w=1에서만 단순 가중합과 smooth 대응함 명시",
+      "CPU 경계 분류를 GL shared-edge ownership 구현으로 오인하지 않게 제한",
+      "Part의 래스터화/최종 픽셀 혼동·물리 1픽셀 SDF와 coverage 단정 보완",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "gl_Position은 clip 좌표이며 xyz를 w로 나누면 NDC가 됩니다.",
+      "viewport는 NDC를 연속 창 좌표로 옮깁니다. 경계와 픽셀 인덱스는 다릅니다.",
+      "점 하나의 clip 포함 여부만으로 삼각형 전체의 가시성을 판단할 수 없습니다."
+    ],
+    "bridge": "세 정점의 창 위치를 얻었습니다. 이제 그 사이에서 어떤 샘플을 채우고 어떤 속성을 조각 셰이더에 전달할지 살펴봅니다."
+  },
+  "sections": [
+    {
+      "title": "세 정점으로 넓은 면을 채운다",
+      "body": "VBO에는 정점이 세 개뿐인데, 화면에는 수천 개의 색칠된 픽셀이 생깁니다. 그 사이를 누가 채우는 걸까요? 정점 셰이더가 내부 픽셀 수만큼 정점을 만드는 것은 아닙니다. **래스터화가 도형이 덮는 샘플을 정하고, 정점의 속성을 조각 처리에 연결합니다.**\n\n이번에는 위치가 같은 삼각형에 세 실험을 붙입니다. 정점 A는 빨강, B는 초록, C는 파랑입니다.\n\n| 실행 이름 | 바꾸는 것 | 예측할 결과 |\n| --- | --- | --- |\n| smooth | 색을 위치에 맞게 보간 | 세 색이 이어지는 삼각형 |\n| flat | 대표 정점의 색을 사용 | 파란색 삼각형 |\n| cutout | 일부 조각을 discard | 색 삼각형 안에 배경이 보이는 격자 |\n\n`19-coordinates`의 위치 데이터·VBO·VAO·draw 함수는 유지합니다. 새 `20-raster`에는 CPU의 작은 삼각형 샘플러와 GLSL 실험을 추가합니다. CPU 샘플러는 수학을 직접 실행해 보는 도구이고, 실제 창은 계속 GL로 그립니다. 두 경로를 비교하면서 범위와 차이까지 설명하는 것이 목표입니다.",
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "out vec4 fragColor;",
+        "invariant": "정점 단계의 출력 속성이 조각 단계의 입력으로 이어지고, 조각 출력은 이후 프레임버퍼 처리로 간다.",
+        "mayDiffer": "현재 렌더러는 색뿐 아니라 UV·도형 내부 좌표·반지름 등도 전달한다.",
+        "omitted": "이번 단계는 색 보간과 discard를 분리해 관찰한다. 텍스처·SDF·블렌딩은 이후에 구현한다."
+      }
+    },
+    {
+      "title": "픽셀과 프래그먼트를 구별한다",
+      "body": "픽셀은 프레임버퍼의 격자 위치입니다. 프래그먼트(fragment, 조각)는 그 위치에 영향을 줄 수 있는 도형 쪽의 처리 자료입니다. 위치·깊이·보간된 속성 등을 가지고 조각 처리로 이어집니다.\n\n한 픽셀에 삼각형 두 개가 겹치면 각각의 도형에서 온 조각이 같은 위치에 도달할 수 있습니다. 조각 셰이더가 `discard`하면 그 조각의 출력은 저장되지 않습니다. 깊이·스텐실 검사에서 탈락하거나, 살아남은 색이 블렌딩되는 경우도 있습니다. 따라서 “조각 하나 = 최종 픽셀 하나”로 세면 안 됩니다.\n\n```text\n정점 위치와 속성\n→ 도형 조립·클리핑·좌표 변환\n→ 래스터화: 덮인 샘플과 조각 처리 자료\n→ 조각 셰이더: 색 계산 또는 discard\n→ 관련 테스트·합성·쓰기\n→ 프레임버퍼에 남은 값\n```\n\n이 그림은 책임을 구별하는 개념적 흐름입니다. 구현은 허용된 범위에서 테스트를 일찍 수행하는 등 실행을 최적화할 수 있습니다. 이번 실습은 새 컨텍스트의 기본 단일 샘플·채우기 상태를 사용하고 깊이·스텐실·블렌드·면 제거를 켜지 않습니다. 복잡한 상태를 섞기 전에 샘플과 색을 따로 이해합니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "셰이더 호출 횟수는 보이는 픽셀 수일까?",
+          "body": "보간·미분 계산을 위한 보조 실행이나 여러 도형의 겹침, 샘플링 방식 때문에 둘을 같은 수로 단정할 수 없습니다. 이번 CPU 루프의 반복 횟수는 그 루프의 작업량일 뿐 실제 GPU 호출 횟수의 측정값이 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "픽셀의 어디를 검사할까",
+      "body": "픽셀 `(x,y)`는 한 점만을 뜻하지 않고 격자의 칸을 가리킵니다. 도형이 이 칸을 덮는지 정하려면 먼저 어떤 위치를 검사할지 정해야 합니다. 기본 단일 샘플의 중심은 연속 창 좌표 `(x+0.5,y+0.5)`입니다. 왼쪽 아래 픽셀의 중심은 `(0.5,0.5)`입니다.\n\n픽셀 인덱스 `(1,2)`의 모서리 `(1,2)`를 검사하는 것과 중심 `(1.5,2.5)`를 검사하는 것은 결과가 다를 수 있습니다. 얇은 도형과 가장자리에서 이 차이가 드러납니다.\n\nCPU 도구는 이 중심을 검사합니다. 반환 타입은 정수 인덱스가 아니라 연속 좌표 `Point`입니다. int에 먼저 1을 더하지 않고 double로 바꾼 뒤 0.5를 더하므로 정수 범위의 끝에서도 덧셈을 잘못 수행하지 않습니다.\n\n`raster.h`에는 아래 타입을 선언하고, 이어지는 함수들도 `study_raster` 이름 공간 안에 추가합니다. `Sample`은 계산에 성공했을 때의 결과이고, `std::optional<Sample>`이 비어 있으면 입력이나 면적 조건을 만족하지 못한 것입니다.",
+      "codes": [
+        {
+          "label": "raster.h에 둘 좌표와 결과 타입",
+          "text": "#include <array>\n#include <cmath>\n#include <optional>\n\nnamespace study_raster {\nstruct Point { double x, y; };\nstruct Weights { double a, b, c; };\nenum class Region { outside, boundary, inside };\nstruct Sample { Weights weights; Region region; };\n} // namespace study_raster",
+          "language": "cpp"
+        },
+        {
+          "label": "픽셀 인덱스에서 샘플 위치로",
+          "text": "inline Point pixel_center(int x, int y) noexcept {\n    return Point{ static_cast<double>(x) + 0.5, static_cast<double>(y) + 0.5 };\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "멀티샘플링은 다른 질문을 더한다",
+          "body": "멀티샘플링에서는 한 픽셀 안의 여러 위치를 검사해 각 샘플의 coverage를 구합니다. 샘플 수와 조각 셰이더의 실행 횟수, 샘플들을 최종 픽셀로 합치는 과정은 각각 구별해 이해해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "변의 어느 쪽에 있는가",
+      "body": "삼각형 안쪽인지 판정하는 방법을 만들어 봅시다. A에서 B로 향하는 변과 검사할 점 P가 있을 때, 두 벡터 `B-A`와 `P-A`의 2차원 외적에 해당하는 스칼라를 계산합니다.\n\n```text\nedge(A,B,P) = (B.x-A.x)*(P.y-A.y) - (B.y-A.y)*(P.x-A.x)\n```\n\n이 값은 삼각형 A-B-P의 **부호 있는 면적의 두 배**입니다. 창 좌표처럼 y가 위로 증가할 때 양수면 A→B의 왼쪽, 음수면 오른쪽, 0이면 같은 직선 위입니다. 길이나 거리가 아니라 면적에 비례하는 값이라는 점도 기억하세요.\n\nA=(0,0), B=(4,0)이라면 P=(1,1)에서 `4*1-0*1=4`로 양수입니다. P=(1,-1)은 -4입니다. 점이 변을 넘을 때 부호가 바뀝니다.\n\n삼각형 전체의 방향은 `area=edge(A,B,C)`로 읽습니다. area가 양수라면 세 변의 안쪽은 양수 쪽, 음수라면 음수 쪽입니다. 정점 순서를 바꿨다고 CPU 내부 판정이 뒤집혀 모두 사라지지 않도록 두 방향을 처리합니다. 면 제거(culling) 정책은 이 함수에 넣지 않습니다.",
+      "codes": [
+        {
+          "label": "변을 기준으로 점의 방향을 계산한다",
+          "text": "inline double edge(Point a, Point b, Point p) noexcept {\n    return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "왜 area가 0이면 나누지 않을까?",
+          "body": "세 점이 한 직선에 있거나 점이 겹치면 면적이 없습니다. 이 샘플러는 계산된 area가 0이면 nullopt를 반환합니다. 임의의 작은 값으로 바꿔 삼각형처럼 처리하면 무의미한 가중치를 만들 수 있습니다. 매우 작거나 큰 수에서는 부동소수점 정밀도 문제도 별도로 고려해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "세 부호로 내부를 판정한다",
+      "body": "세 변에 대해 `e0=edge(B,C,P)`, `e1=edge(C,A,P)`, `e2=edge(A,B,P)`를 계산합니다. 하나라도 삼각형의 방향과 반대 부호면 바깥입니다. 바깥이 아니면서 어느 값이 0이면 경계, 나머지는 엄격한 내부입니다.\n\n바깥 판정을 먼저 해야 합니다. A=(0,0), B=(4,0), C=(0,4)일 때 P=(5,0)은 변 AB의 연장선 위입니다. 한 edge가 0이지만 다른 변을 넘어갔으므로 삼각형의 경계가 아니라 바깥입니다.\n\n결과를 bool 하나로 줄이지 않고 `outside/boundary/inside`로 나눕니다. 두 삼각형이 같은 변을 공유할 때 경계 점을 둘 다 색칠하면 중복되고, 둘 다 버리면 틈이 생길 수 있기 때문입니다. 이 도구는 경계 위치를 알려 주되 어느 삼각형이 소유할지 결정하지 않습니다. 사각형을 두 삼각형으로 만들 때 그 규칙을 이어서 다룹니다.\n\n입력은 유한한 값이면서 각 성분의 절댓값이 1,000,000 이하인 실습 범위로 제한합니다. GL의 좌표 제한이 아니라 수치 실험의 계약입니다. 이 범위 안에서도 임의의 거의 일직선인 입력을 정확한 기하학으로 판정한다고 보장하지 않습니다. 아래 실험은 이진수로 정확히 표현되는 정점과 반 픽셀 위치를 사용합니다.",
+      "codes": [
+        {
+          "label": "내부 범위 검사",
+          "text": "inline bool finite_in_range(double v) noexcept {\n    return std::isfinite(v) && std::abs(v) <= 1000000.0;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "면적·부호·가중치를 함께 돌려주는 함수",
+          "text": "inline std::optional<Sample> sample_triangle(const std::array<Point, 3>& triangle,\n                                             Point p) noexcept {\n    for (const Point& v : triangle) {\n        if (!finite_in_range(v.x) || !finite_in_range(v.y)) return std::nullopt;\n    }\n    if (!finite_in_range(p.x) || !finite_in_range(p.y)) return std::nullopt;\n\n    const Point& a = triangle[0];\n    const Point& b = triangle[1];\n    const Point& c = triangle[2];\n\n    const double area = edge(a, b, c);\n    if (area == 0.0) return std::nullopt;\n\n    const double e0 = edge(b, c, p);\n    const double e1 = edge(c, a, p);\n    const double e2 = edge(a, b, p);\n\n    const Weights w{ e0 / area, e1 / area, e2 / area };\n    if (!std::isfinite(w.a) || !std::isfinite(w.b) || !std::isfinite(w.c)) {\n        return std::nullopt;\n    }\n\n    // Interior points keep the same edge sign as the triangle area, so both\n    // windings are accepted by comparing oriented edges against area's sign.\n    const bool outside =\n        (area > 0.0 && (e0 < 0.0 || e1 < 0.0 || e2 < 0.0)) ||\n        (area < 0.0 && (e0 > 0.0 || e1 > 0.0 || e2 > 0.0));\n\n    Region region = Region::inside;\n    if (outside) {\n        region = Region::outside;\n    } else if (e0 == 0.0 || e1 == 0.0 || e2 == 0.0) {\n        region = Region::boundary;\n    }\n\n    return Sample{ w, region };\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "epsilon을 넣으면 더 정확해질까?",
+          "body": "모든 변에 넓은 epsilon을 허용하면 원래 바깥인 영역까지 포함하고 공유 경계를 중복할 수 있습니다. 오차 허용은 목적에 맞게 설계해야 합니다. 이 도구의 exact-zero 경계 분류를 하드웨어의 subpixel 규칙이나 일반 강건 기하 알고리즘으로 설명하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "면적 비율로 색을 섞는다",
+      "body": "도형 내부의 P가 각 정점에 얼마나 대응하는지 세 가중치로 표현할 수 있습니다. 이를 **무게중심 좌표**(barycentric coordinates)라고 합니다. 앞에서 구한 면적 값으로 계산합니다.\n\n```text\nlambda_A = edge(B,C,P) / area\nlambda_B = edge(C,A,P) / area\nlambda_C = edge(A,B,P) / area\n```\n\n수학적으로 합은 1이고 내부에서는 모두 양수입니다. 정점 A에서는 (1,0,0), B에서는 (0,1,0), C에서는 (0,0,1)입니다. 경계에서는 해당 변의 반대편 정점 가중치가 0입니다. 바깥 점은 음수 가중치를 가질 수 있으므로 계산 함수에서 clamp해 숨기지 않습니다.\n\nA=(0,0), B=(4,0), C=(0,4), P=(1,1)이라면 area=16이고 e0=8, e1=4, e2=4입니다. 가중치는 (0.5,0.25,0.25)입니다. A 빨강, B 초록, C 파랑을 섞으면 `0.5*(1,0,0)+0.25*(0,1,0)+0.25*(0,0,1)=(0.5,0.25,0.25)`가 됩니다.\n\n이것은 화면 공간에서 선형으로 섞는 계산입니다. **이번 삼각형은 clip w가 모두 1**이라 GLSL의 기본 smooth 보간도 이 결과와 대응합니다. 서로 다른 w를 갖는 투영에서 같은 식만 적용하면 일반적인 smooth 보간을 재현하지 못합니다.",
+      "codes": [
+        {
+          "label": "세 꼭짓점의 RGB를 가중합한 결과",
+          "text": "inline std::array<double, 3> mix_rgb(Weights w) noexcept {\n    return { w.a, w.b, w.c };\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "w가 다르면 무엇이 달라질까?",
+          "body": "일반적인 smooth 속성 f는 화면 가중치 λ를 사용해 `(λA*fA/wA + λB*fB/wB + λC*fC/wC) / (λA/wA + λB/wB + λC/wC)`처럼 원근을 보정합니다. 세 w가 같으면 공통 인수가 약분되어 이번 가중합으로 돌아옵니다. noperspective는 화면 공간 선형 보간을 지정합니다. 이 식을 깊이 등 모든 파이프라인 값에 그대로 적용한다고 일반화하지 마세요."
+        }
+      ]
+    },
+    {
+      "title": "작은 격자를 직접 채운다",
+      "body": "이제 16×16 픽셀을 순회하며 중심점을 검사합니다. 삼각형은 A=(4,4), B=(12,4), C=(8,12)로 둡니다. 내부는 `#`, 바깥은 `.`, 정확한 경계 위 점은 `B`로 출력합니다.\n\n창 좌표의 y는 위로 증가하지만 터미널은 첫 줄을 위에 표시합니다. 따라서 y=15부터 0까지 내려오며 출력해야 삼각형이 거꾸로 보이지 않습니다. 좌표 규약과 파일·텍스트의 행 순서도 별개입니다.\n\n```text\n.......##.......\n.......##.......\n......####......\n......####......\n.....######.....\n.....######.....\n....########....\n```\n\n위는 비어 있지 않은 행만 발췌한 모습입니다. 전체 256개 중심 중 엄격한 내부는 32개이고 이 삼각형에는 중심과 정확히 겹치는 변이 없습니다.\n\n픽셀을 전부 검사하는 방식의 작업량은 폭 W, 높이 H에 대해 O(W×H)입니다. 지금은 흐름을 읽기 쉬운 기준 구현을 만듭니다. 도형의 바운딩 박스만 돌거나 edge 값을 증분 갱신할 수 있지만, 이러한 최적화는 정확한 결과와 경계 정책을 먼저 정한 다음 적용합니다.",
+      "codes": [
+        {
+          "label": "중심점→분류→한 글자 출력",
+          "text": "for(int y=15;y>=0;--y){\n    for(int x=0;x<16;++x){\n        const auto sample=sample_triangle(triangle,pixel_center(x,y));\n        if(!sample)return 1;\n        const char ch=sample->region==Region::inside?'#':\n                      sample->region==Region::boundary?'B':'.';\n        std::putchar(ch);\n    }\n    std::putchar('\\n');\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "src/raster_demo.cpp · 완성 파일",
+          "file": "checkpoints/20-raster/src/raster_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "경계 샘플이 생기는 도형이라면",
+          "body": "이 예제는 변 위에 놓인 픽셀 중심이 없어 내부와 외부만 비교할 수 있습니다. 변을 이동해 중심과 겹치게 하거나 두 삼각형이 변을 공유하게 하면, 경계 샘플을 어느 도형에 포함할지 정하는 규칙도 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "정점의 색을 조각으로 전달한다",
+      "body": "정점 셰이더에 RGB 세 값을 넣습니다. 이번 draw는 인덱스 없이 `first=0`, `count=3`으로 실행하므로 `gl_VertexID`는 0,1,2에 대응합니다. 이 정점 ID로 색을 고르면 VBO 형식을 바꾸지 않고 보간에만 집중할 수 있습니다.\n\n이 코드는 임의의 정점 수에 쓸 범용 셰이더가 아닙니다. first나 count를 바꾸면 세 원소 색 배열 범위를 벗어날 수 있습니다. 일반 도형의 정점별 색은 이후 VBO 속성으로 옮깁니다.\n\nvertex의 `smooth out vec3 v_color`와 fragment의 `smooth in vec3 v_color`를 맞춥니다. 위치별 보간값이 fragment 입력으로 전달되고, fragment는 그 값을 불투명 색으로 출력합니다. `smooth`는 여기서 기본 동작을 명시한 것입니다. 셰이더가 화면에 직접 점을 찍는 CPU 반복문을 실행하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "RGB를 내보내는 vertex shader",
+          "text": "#version 330 core\nlayout(location = 0) in vec2 a_position;\nsmooth out vec3 v_color;\nvoid main() {\n    const vec3 colors[3] = vec3[3](vec3(1,0,0), vec3(0,1,0), vec3(0,0,1));\n    v_color = colors[gl_VertexID];\n    gl_Position = vec4(a_position, 0.0, 1.0);\n}\n",
+          "language": "glsl"
+        },
+        {
+          "label": "보간된 색을 쓰는 fragment shader",
+          "text": "#version 330 core\nsmooth in vec3 v_color;\nlayout(location = 0) out vec4 out_color;\nvoid main() { out_color = vec4(v_color, 1.0); }\n",
+          "language": "glsl"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "out vec4 fragColor;",
+        "invariant": "정점 단계의 출력 속성이 조각 단계의 입력으로 이어지고, 조각 출력은 이후 프레임버퍼 처리로 간다.",
+        "mayDiffer": "현재 렌더러는 색뿐 아니라 UV·도형 내부 좌표·반지름 등도 전달한다.",
+        "omitted": "이번 단계는 색 보간과 discard를 분리해 관찰한다. 텍스처·SDF·블렌딩은 이후에 구현한다."
+      }
+    },
+    {
+      "title": "보간과 폐기를 따로 바꾼다",
+      "body": "flat 실험에서는 양쪽 인터페이스를 `flat out`/`flat in`으로 바꿉니다. flat은 정점 색의 평균이 아니라 **대표 정점(provoking vertex)의 값**을 사용합니다. 새 컨텍스트의 기본 LAST_VERTEX_CONVENTION에서 이번 독립 삼각형의 대표는 마지막 정점 C이므로 파랑으로 채워집니다. 정점 위치와 샘플 범위는 그대로입니다.\n\ncutout 실험은 smooth 색을 유지하면서 fragment에서 일부 조각을 버립니다. `gl_FragCoord.xy`는 이 실습의 기본 설정에서 창 좌표의 샘플 중심입니다. 이를 8로 나누고 floor하면 8×8 픽셀 격자의 칸 번호를 얻습니다. 두 칸 번호의 합이 짝수인 곳에서 discard합니다.\n\n`discard`는 삼각형의 정점을 바꾸지 않고 현재 조각의 출력을 버립니다. 배경색을 새로 쓰는 명령도 아닙니다. 먼저 clear한 값이 그 자리에 남으므로 구멍처럼 보입니다. 알파 0으로 출력하는 것과도 같지 않습니다. 알파가 어떻게 합성되는지는 블렌드 상태의 영향을 받지만, 여기서는 블렌딩을 켜지 않았습니다.\n\n전체 셰이더 파일의 작은 표가 실험 이름과 vertex/fragment 소스를 묶습니다. main은 선택한 두 소스를 초기화할 때 링크하고 매 프레임 같은 프로그램을 사용합니다.",
+      "codes": [
+        {
+          "label": "화면 격자에 따라 조각의 출력을 버린다",
+          "text": "#version 330 core\nsmooth in vec3 v_color;\nlayout(location = 0) out vec4 out_color;\nvoid main() {\n    ivec2 cell = ivec2(floor(gl_FragCoord.xy / 8.0));\n    if ((cell.x + cell.y) % 2 == 0) discard;\n    out_color = vec4(v_color, 1.0);\n}\n",
+          "language": "glsl"
+        },
+        {
+          "label": "renderer/raster_sources.h · 완성 파일",
+          "file": "checkpoints/20-raster/renderer/raster_sources.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/20-raster/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "if (c.a <= 0.0) discard;",
+        "invariant": "조각 조건에 따라 현재 조각의 출력을 버리고 남은 배경을 보존할 수 있다.",
+        "mayDiffer": "실제 렌더러는 격자 번호 대신 텍스처·글리프·SDF를 반영한 알파로 조건을 정한다.",
+        "omitted": "알파 합성·SDF 경계 폭·텍스처 샘플링 상세는 각각의 구현 차시에서 다룬다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "smooth라는 이름과 안티앨리어싱",
+          "body": "smooth는 속성의 보간 규칙입니다. 삼각형의 외곽선을 자동으로 안티앨리어싱한다는 옵션이 아닙니다. 반대로 smoothstep 함수는 수치를 곡선으로 바꾸는 함수이며 보간 한정자 smooth와 다른 기능입니다."
+        }
+      ]
+    },
+    {
+      "title": "예측한 색을 픽셀로 확인한다",
+      "body": "다음은 128×128 framebuffer에 그린 결과 예시입니다. 세 실험은 VBO·좌표·draw 개수가 같습니다.\n\n| 실험 | 결과 |\n| --- | --- |\n| smooth | ![세 정점 색의 보간: 128×128 프레임 버퍼 결과](data:image/png;base64,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) |\n| flat | ![마지막 정점의 파랑: 128×128 프레임 버퍼 결과](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABwElEQVR4nO3asW1EMQwE0d/AZc7df5U+Ay7hJA3lGWALWO5L+by+vguYB28gTwABuBNAAO4EEIA7AQTgTgABuBNAAO4EEIA7AQTgTgABuBNAAO4EEIA7AQTgTgABuBNAAO4EEIA7AQTwSfvn5zd4jQD4JkaAv/VvNwiAvgJv8Pn6VxsEQB+CN1iy/r0GAdC34A1WrX+pQQD0OXiDhevfaBAAfRHeYO361xkEQB+FN1i+/l0GAdB34Q12rH+RQQD0aXiDTevfYhAAfR3eYN/6VxgEQB+IN9i6/nyDAOgb8Qa71x9uEAB9Jt7gwPqTDQKgL8UbnFl/rEEA9LF4g2PrzzQIgL4Xb3By/YEGAdAn4w0Orz/NIAD6arzB+fVHGQRAH443QNafYxAAfTvfAFp/iEEA9Pnm9ScYBCAGwKefYBCAFQAffYhBAEoAfO45BgH4APChRxkEIAPAJ55mEIAJAB93oEEAGgB81pkGATgA8EHHGgQgAMCnnGwQwH8HwEccbsB/RcgTQADuBBCAOwEE4E4AAbgTQADuBBCAOwEE4E4AAbgTQADuBBCAOwEE4E4AAbgTQADuBBCAOwEE4E4AcN6Ek/k8arJprQAAAABJRU5ErkJggg==) |\n| cutout | ![격자 모양의 조각 폐기: 128×128 프레임 버퍼 결과](data:image/png;base64,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) |\n\n`raster_probe`는 정점을 창 좌표 `(32,32)`, `(96,32)`, `(64,96)`로 예측한 뒤 각 픽셀 중심의 내부 여부와 가중치를 계산합니다. smooth에서는 가중치 RGB, flat에서는 파랑, cutout에서 버릴 칸은 clear 색과 비교합니다. 이 선택된 도형은 2,048개 중심을 덮고, cutout은 그중 1,024개의 출력을 버립니다.\n\n색상 출력은 0~1이고 읽은 RGB는 8비트이므로 채널당 `round(255*값)`으로 비교합니다. 변환·반올림·디더링 등의 미세 차이를 고려해 몇 단계의 여유를 둡니다. 픽셀을 읽을 때는 GL의 아래쪽 행부터 받으며 PPM 파일에는 위쪽 행부터 저장합니다.\n\n선택된 도형에는 샘플 중심과 정확히 겹치는 변이 없어 전체 16,384개 픽셀을 비교할 수 있습니다. 경계 점이 있는 다른 도형에는 이 결과를 그대로 확대하지 않습니다. 소프트웨어 double 계산과 GL의 유한 정밀도·경계 규칙까지 완전히 같은 래스터라이저를 만든 것은 아닙니다.\n\nCPU readback으로 확인하는 것은 framebuffer의 값입니다. 이 관찰로 화면의 실제 표시 시각이나 물리 GPU의 내부 실행 횟수를 알 수 있는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "tests/raster_real.cpp · 완성 파일",
+          "file": "checkpoints/20-raster/tests/raster_real.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "CPU 도구와 셰이더가 함께 틀릴 수도 있다",
+          "body": "두 코드가 같은 수식을 복사했다는 사실만으로 정확성을 증명하지 않습니다. 작은 수치의 직접 계산, 방향 반전, 평행 이동, 퇴화 입력, 실제 픽셀을 함께 비교합니다. 중심을 모서리로 잘못 계산한 구현이 검사를 통과하지 못하는지도 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "연결하고 다음 도형을 준비한다",
+      "body": "`20-raster`는 누적 체크포인트입니다. 직접 이어 만들 때 바뀌는 파일을 확인하세요.\n\n| 파일 | 역할 |\n| --- | --- |\n| renderer/raster.h | 점·edge·영역·가중치·RGB 계산 추가 |\n| renderer/raster_sources.h | smooth/flat/cutout 셰이더 추가 |\n| src/raster_demo.cpp | CPU 16×16 격자 출력 추가 |\n| src/main.cpp | 실험 선택을 새 셰이더 표로 교체 |\n| tests/raster_contract.cpp | 수치·방향·경계·실패 입력 검사 추가 |\n| tests/raster_real.cpp | 실제 픽셀의 coverage·색·폐기 비교 추가 |\n| CMakeLists.txt | CPU 실행 파일과 검사, SDL probe 연결 추가 |\n\n좌표 예측 도구 `coordinates_demo`와 기존 검사 파일도 체크포인트에 남아 있습니다. CPU 샘플러를 main의 정점 업로드에 끼워 넣지는 않습니다. main의 실제 그림은 GL 파이프라인을 사용하고 CPU 도구는 독립적으로 예측합니다.\n\n저장소 루트에서 SDL2 개발 패키지·pkg-config·OpenGL 3.3 Core 환경으로 실행합니다. 아래는 단일 구성 생성기 기준이며, Windows 다중 구성은 구성 이름과 실행 파일 경로를 맞춥니다.\n\n```sh\ncmake -S docs/learn/checkpoints/20-raster -B out/study-20 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-20\nctest --test-dir out/study-20 --output-on-failure\n./out/study-20/raster_demo\n./out/study-20/tetris smooth\n./out/study-20/tetris flat\n./out/study-20/tetris cutout\n./out/study-20/raster_probe\n```\n\n창은 하나씩 실행하고 Escape로 닫습니다. Linux offscreen GL을 지원한다면 probe 앞에 `SDL_VIDEODRIVER=offscreen`을 붙여 표시 없이 픽셀을 읽을 수 있습니다. 선택 인자로 기존 폴더 안의 경로 접두사를 주면 세 PPM을 저장합니다. CPU 도구와 대역 검사만 필요하면 다른 빌드 폴더에서 `-DSTUDY_PLATFORM=SCRIPTED`를 선택합니다.\n\n다음에는 두 삼각형으로 사각형을 만듭니다. 두 도형의 내부를 각각 채우는 것만으로 충분한지, 공유 변과 정점 순서가 결과에 어떤 영향을 주는지 확인합니다.",
+      "codes": [
+        {
+          "label": "renderer/raster.h · 완성 파일",
+          "file": "checkpoints/20-raster/renderer/raster.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/raster_contract.cpp · 완성 파일",
+          "file": "checkpoints/20-raster/tests/raster_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt 끝에 추가",
+          "text": "# A CPU sampling oracle and independent GL interpolation/discard experiments.\nadd_executable(raster_demo src/raster_demo.cpp)\ntarget_link_libraries(raster_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(raster_contract tests/raster_contract.cpp)\n    target_link_libraries(raster_contract PRIVATE study_mesh)\n    add_test(NAME raster_contract COMMAND raster_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(raster_probe tests/raster_real.cpp)\n        target_link_libraries(raster_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()\n",
+          "language": "cmake"
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/20-raster/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 자료",
+          "title": "공식 계약을 찾아 읽기",
+          "body": "[OpenGL 3.3 Core 명세](https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf)의 §3.6.1은 삼각형 래스터화와 속성 보간을 설명합니다. [GLSL 3.30 명세](https://registry.khronos.org/OpenGL/specs/gl/GLSLangSpec.3.30.pdf)의 §4.3.9는 smooth/flat/noperspective, §6.4는 discard, §7.2는 gl_FragCoord를 다룹니다. CPU 학습 도구의 정책과 API 계약을 구분하며 읽어 보세요."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "픽셀 인덱스에서 중심의 연속 좌표를 만든다.",
+      "세 edge 부호와 면적으로 내부·경계·바깥을 구분한다.",
+      "무게중심 가중치로 RGB를 계산하고 작은 격자를 출력한다.",
+      "동일 VBO에서 smooth/flat/cutout을 실행한다.",
+      "CPU 예측과 framebuffer 픽셀을 비교하고 경계 규칙의 생략 범위를 설명한다."
+    ],
+    "expected": "smooth는 색이 이어지고 flat은 파랑으로 채워집니다. cutout은 위치를 바꾸지 않고 격자 모양으로 배경을 드러냅니다.",
+    "failureChecks": [
+      "샘플 중심 대신 정수 모서리를 검사하지 않았는가?",
+      "삼각형 방향이 음수일 때 부호 판정도 함께 바꿨는가?",
+      "변 연장선의 바깥 점을 boundary로 먼저 처리하지 않았는가?",
+      "가중치를 면적으로 나누고 서로 다른 clip w의 한계를 구별했는가?",
+      "flat 한정자를 양쪽 인터페이스에 맞추고 first0/count3 전제를 유지했는가?",
+      "discard와 배경 출력·알파0 출력·최종 픽셀을 구별하는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "20-1",
+      "kind": "샘플 위치",
+      "question": "기본 단일 샘플에서 픽셀 인덱스 (3,7)의 중심 창 좌표는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(3,7)"
+        },
+        {
+          "id": "b",
+          "text": "(4,8)"
+        },
+        {
+          "id": "c",
+          "text": "(3.5,7.5)"
+        },
+        {
+          "id": "d",
+          "text": "(3.5,6.5)"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "(3.5,7.5)",
+      "explanation": "픽셀 인덱스는 격자의 칸을 가리키고 기본 중심은 각 성분에 0.5를 더한 연속 위치입니다. 모서리 (3,7)를 검사하면 다른 판정이 나올 수 있습니다."
+    },
+    {
+      "id": "20-2",
+      "kind": "수치 적용",
+      "question": "A=(0,0), B=(4,0), C=(0,4), P=(1,1)입니다. A 빨강·B 초록·C 파랑이고 w가 모두 1일 때 보간 RGB는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0.5,0.25,0.25)"
+        },
+        {
+          "id": "b",
+          "text": "(1,1,1)"
+        },
+        {
+          "id": "c",
+          "text": "(0.25,0.5,0.25)"
+        },
+        {
+          "id": "d",
+          "text": "(0,0,1)"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "(0.5,0.25,0.25)",
+      "explanation": "전체 두 배 면적은 16, P에 대응하는 세 부분 값은 8,4,4입니다. 가중치 0.5,0.25,0.25로 RGB를 섞습니다. 마지막 정점의 파랑만 쓰는 것은 이번 smooth 계산이 아니라 flat 실험입니다."
+    },
+    {
+      "id": "20-3",
+      "kind": "경계 정책",
+      "question": "두 삼각형이 공유하는 변 위의 샘플을 두 호출이 모두 boundary로 반환했습니다. 무엇을 뜻하나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 도형 모두 채우면 항상 GL과 같은 결과다."
+        },
+        {
+          "id": "b",
+          "text": "둘 다 버리면 틈 없이 중복만 제거된다."
+        },
+        {
+          "id": "c",
+          "text": "함수 오류이므로 임의의 epsilon으로 모두 inside로 바꾼다."
+        },
+        {
+          "id": "d",
+          "text": "점 위치는 분류했지만 어느 도형이 채울지는 별도 규칙이 필요하다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "점 위치는 분류했지만 어느 도형이 채울지는 별도 규칙이 필요하다.",
+      "explanation": "boundary는 진단용 분류입니다. 공유 경계의 소유권을 선택하지 않으므로 둘 다 채우거나 버리는 정책만으로 정확한 연결을 보장할 수 없습니다. 사각형 실습에서 이 문제를 이어 다룹니다."
+    },
+    {
+      "id": "20-4",
+      "kind": "파이프라인",
+      "question": "cutout 셰이더가 삼각형 내부에서 discard를 실행했습니다. 이 실습에서 보이는 구멍의 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "그 위치에 새 정점이 추가되어 삼각형을 잘랐기 때문이다."
+        },
+        {
+          "id": "b",
+          "text": "그 조각의 출력을 버려 먼저 clear한 배경값이 남았기 때문이다."
+        },
+        {
+          "id": "c",
+          "text": "discard가 현재 clear 색을 다시 칠하는 명령이기 때문이다."
+        },
+        {
+          "id": "d",
+          "text": "그 위치의 알파가 자동으로 0이 되어 항상 투명 합성되기 때문이다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "그 조각의 출력을 버려 먼저 clear한 배경값이 남았기 때문이다.",
+      "explanation": "discard는 현재 조각의 출력을 버립니다. 정점과 래스터화 대상 삼각형은 그대로이고, 새 배경색을 출력한 것도 아닙니다. 이 실습에서는 먼저 지운 값이 남아 구멍처럼 보입니다."
+    },
+    {
+      "id": "20-5",
+      "kind": "보간 규칙",
+      "question": "새 컨텍스트에서 DrawArrays(TRIANGLES,0,3)를 사용합니다. A 빨강·B 초록·C 파랑이고 양쪽 색 인터페이스가 flat이면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RGB 평균색으로 채워지고 외곽선은 자동으로 부드러워진다."
+        },
+        {
+          "id": "b",
+          "text": "첫 정점 A의 빨강을 기본 대표색으로 쓴다."
+        },
+        {
+          "id": "c",
+          "text": "마지막 정점 C의 파랑을 쓰며 삼각형 위치는 그대로다."
+        },
+        {
+          "id": "d",
+          "text": "정점마다 색이 다르므로 프로그램 링크가 반드시 실패한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "마지막 정점 C의 파랑을 쓰며 삼각형 위치는 그대로다.",
+      "explanation": "기본 LAST_VERTEX_CONVENTION의 독립 삼각형에서 마지막 정점 C가 대표입니다. flat은 보간을 하지 않고 그 값을 사용합니다. 면을 덮는 위치를 바꾸거나 안티앨리어싱을 켜는 기능은 아닙니다."
+    }
+  ]
+}

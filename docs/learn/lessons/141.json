@@ -1,0 +1,346 @@
+{
+  "id": "lesson-141",
+  "title": "회전·폐기·복구: 하나의 원자적 교체",
+  "shortTitle": "자격 교체·영수증·인증 세대",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 해시로 계정을 조회하지만 접근 키와 복구 코드를 함께 교체하는 요청은 없습니다.",
+  "finish": "완료: 계정과 재화를 유지하며 자격·세대·영수증을 원자적으로 교체하고 재전송·경쟁·실패를 검사합니다.",
+  "objective": "교체 요청의 입력·동시성·예외·응답 유실에서 유지할 계정 상태를 설명하고 구현합니다.",
+  "prerequisites": [
+    "목적별 해시와 CSPRNG",
+    "SQLite 트랜잭션·RAII·스키마 이관",
+    "입장 티켓과 계정 식별자"
+  ],
+  "recap": {
+    "points": [
+      "인증 원문 대신 목적별 해시로 계정을 찾는다.",
+      "커밋 전 실패와 커밋 후 미완료 작업은 복구 방식이 다르다."
+    ],
+    "bridge": "저장 표현을 갖췄으므로 사용자가 보유한 열쇠를 교체해도 같은 계정으로 이어지도록 상태 전이를 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "계정은 유지하고 열쇠를 바꾼다",
+      "body": "사용자가 접근 키를 잃었어도 BP와 아이콘을 새 계정으로 옮길 필요는 없습니다. 계정을 식별하는 player ID를 유지하고 그 계정에 접근하는 자격만 교체하면 됩니다. **회전**은 사용 중인 비밀을 새 비밀로 바꾸는 작업이고, **폐기**는 옛 비밀이 새 인증에 쓰이지 못하게 만드는 효과입니다.\n\n복구 코드는 접근 키와 별도로 보관하는 두 번째 자격입니다. 서버가 소유자를 신원 확인해서 찾아 주는 방식이 아니라, 코드를 가진 사람이 계정 교체 권한을 증명합니다. 따라서 코드 유출도 계정 접근 권한 유출로 취급합니다.\n\n| 요청 | 권한을 증명할 값 | 바꿀 값 |\n| --- | --- | --- |\n| backup | 현재 접근 키 | 복구 코드 |\n| rotate | 현재 접근 키 | 접근 키와 복구 코드 |\n| recover | 현재 복구 코드 | 접근 키와 복구 코드 |\n\n모든 성공한 새 교체는 인증 세대도 올립니다. backup은 접근 키를 유지하지만 복구 자격의 상태는 바뀌므로 세대 변경 대상입니다."
+    },
+    {
+      "title": "함께 움직여야 할 상태를 먼저 적는다",
+      "body": "한 계정의 인증 상태를 S=(A, R, E, O)로 적어 봅니다. A는 접근 키 해시, R은 복구 코드 해시, E는 인증 세대, O는 최신 교체 요청의 영수증 해시입니다. 처음에는 복구 코드와 영수증이 없을 수 있습니다.\n\n교체는 S를 새 상태로 한꺼번에 바꿉니다. 접근 키만 바뀐 뒤 복구 코드 저장에 실패하면 사용자가 알고 있는 복구 수단과 서버 상태가 어긋납니다. 영수증만 빠지면 이미 성공한 요청의 재전송을 알아보지 못합니다.\n\n이 값들을 하나의 SQL UPDATE와 트랜잭션에 묶습니다. 원자성은 관찰 가능한 상태가 교체 전 또는 교체 후로 나뉜다는 성질입니다. 클라이언트가 성공 응답을 받았다는 사실까지 포함하는 성질은 아닙니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "AccountChangeResult Database::changeAccount",
+        "invariant": "같은 계정의 자격·세대·최신 요청 영수증을 한 트랜잭션으로 교체한다.",
+        "mayDiffer": "현재 서버는 players에 인증 열을 함께 두며, 학습 코드는 account_keys를 사용한다. HTTP 경로와 상태 표현도 다를 수 있다."
+      }
+    },
+    {
+      "title": "누적 스키마에 복구·세대·영수증을 추가한다",
+      "body": "account_keys의 player_id와 token_hash는 유지합니다. recovery_hash와 last_change_hash에는 NULL을 허용하여 아직 설정되지 않은 상태를 나타냅니다. 과거 계정에 서버가 임의 복구 코드를 만들어 넣으면 사용자는 그 원문을 알 수 없습니다.\n\nauth_epoch는 정수이며 음수가 될 수 없습니다. 신규 이관에서 기존 계정은 기본 세대로 시작합니다. 복구 해시와 영수증에는 NULL이 아닌 행만 대상으로 하는 UNIQUE 인덱스를 둡니다. 이 **부분 인덱스**는 설정하지 않은 계정들이 함께 존재하면서 실제 설정된 값의 중복은 거절하게 합니다.\n\n해시 길이 제약은 선택한 요약 형식의 계약입니다. 콘텐츠 개수나 계정 수를 제한하는 값과는 용도가 다릅니다. migrations.h에서는 열 추가·이관 이력·구조 검증을 하나의 스키마 업그레이드로 처리합니다.",
+      "codes": [
+        {
+          "label": "인증 상태를 확장하는 스키마",
+          "language": "cpp",
+          "file": "checkpoints/141-account-change/meta/account_change_schema.h"
+        }
+      ]
+    },
+    {
+      "title": "요청의 모양과 권한을 구별한다",
+      "body": "ChangeRequest는 작업 종류, 현재 증명, 새 접근 키, 새 복구 코드를 갖습니다. 먼저 enum 범위와 각 문자열 형식을 검사합니다. backup은 접근 키를 유지하고, rotate는 전달받은 현재 접근 키와 다른 후보를 요구합니다. recover는 제출한 복구 코드와 다른 새 복구 코드를 요구합니다.\n\n형식에 맞는 문자열이라는 이유로 권한이 생기지는 않습니다. 권한은 현재 DB 해시와의 조회로 확인합니다. 후보의 예측 불가능성은 생성한 클라이언트의 CSPRNG 계약이며 서버의 형식 검사로 증명할 수 없습니다.\n\n입력 구조가 잘못되면 invalid_request, 형식은 맞지만 현재 자격이 없으면 invalid_credential입니다. 이 구분을 HTTP 오류와 연결하면 클라이언트가 입력 수정과 자격 교체를 다른 행동으로 안내할 수 있습니다.",
+      "codes": [
+        {
+          "label": "교체 요청과 결과의 계약",
+          "language": "cpp",
+          "text": "enum class ChangeKind { backup, rotate, recover };\n\nstruct ChangeRequest {\n    ChangeKind kind = ChangeKind::backup;\n    std::string current;\n    std::string next_token;\n    std::string next_recovery;\n};\n\nenum class ChangeStatus { ok, invalid_request, invalid_credential, conflict, storage_error };\n\nstruct ChangeResult {\n    ChangeStatus status = ChangeStatus::storage_error;\n    std::uint64_t player_id = 0;\n    std::int64_t epoch = 0;\n};"
+        }
+      ]
+    },
+    {
+      "title": "작업 전체를 식별하는 영수증을 만든다",
+      "body": "이미 교체에 성공했지만 응답이 유실된 상황을 생각합니다. 재전송할 때 옛 키는 폐기되어 있습니다. 현재 자격만 조회하면 성공했던 요청도 실패로 보이게 됩니다.\n\n작업 종류·옛 자격·새 접근 키·새 복구 코드를 순서대로 직렬화하고 operation 목적의 해시를 계산합니다. 각 비밀의 허용 문자에는 구분자인 콜론이 없으므로 이 형식에서는 경계가 모호하지 않습니다. 자유 문자열로 확장한다면 길이 접두사 같은 명시적인 직렬화 규칙이 필요합니다.\n\n이 영수증은 요청을 식별하는 DB 내부 요약입니다. 공개 영수증 번호를 보여 주는 방식이 아닙니다. 계정용·복구용 해시와 목적을 분리하고 원문을 저장하지 않습니다. 계산은 writer 잠금을 얻기 전에 끝내어 잠금 시간을 줄입니다.",
+      "codes": [
+        {
+          "label": "목적별 해시와 요청 영수증",
+          "language": "cpp",
+          "text": "        // Hash before acquiring the writer transaction. Failures publish no result.\n        const std::string current_hash = study_credentials::digest(role, request.current);\n        const std::string next_token_hash =\n            study_credentials::digest(study_credentials::Purpose::account, request.next_token);\n        const std::string next_recovery_hash =\n            study_credentials::digest(study_credentials::Purpose::recovery, request.next_recovery);\n        const std::string receipt = study_credentials::digest(\n            study_credentials::Purpose::operation,\n            std::string(kind_name) + \":\" + request.current + \":\" + request.next_token + \":\" +\n                request.next_recovery);"
+        }
+      ]
+    },
+    {
+      "title": "최신 요청의 재전송을 먼저 판정한다",
+      "body": "먼저 영수증과 새 자격 해시가 현재 행에 모두 일치하는지 찾습니다. 일치하면 이미 커밋된 같은 요청이므로 player ID와 현재 세대를 그대로 반환합니다. UPDATE도 세대 증가도 다시 하지 않습니다. 같은 요청을 반복해도 효과가 추가되지 않는 **멱등성**입니다.\n\n현재 자격 검사를 영수증 검사보다 먼저 하면 성공 후 폐기된 옛 자격 때문에 재전송을 거절합니다. 반대로 영수증만 맞고 현재 자격 상태가 달라졌다면 더 최근의 교체가 있었을 수 있으므로 과거 결과로 되돌리지 않습니다.\n\n조회 결과를 값으로 복사한 뒤 SELECT의 수명을 끝내고 commit합니다. 아직 열려 있는 조회 문장을 성공 반환 경로에 끌고 가지 않습니다. 최신 영수증만 보관하는 설계이므로 무기한 과거 요청 재생을 제공하지는 않습니다.",
+      "codes": [
+        {
+          "label": "최신 상태와 함께 검사하는 영수증 조회",
+          "language": "cpp",
+          "text": "inline constexpr const char* select_retry =\n    \"SELECT player_id, auth_epoch FROM account_keys \"\n    \"WHERE last_change_hash = ?1 AND token_hash = ?2 AND recovery_hash = ?3\";"
+        }
+      ]
+    },
+    {
+      "title": "동시 복구를 DB의 쓰기 순서로 정리한다",
+      "body": "같은 복구 코드로 서로 다른 새 자격을 보낸 요청 A와 B가 동시에 도착했다고 합시다. 둘 다 먼저 소유자를 읽고 나중에 쓰면 각자 유효한 코드라고 판단할 수 있습니다. 따라서 BEGIN IMMEDIATE 이후에 영수증과 소유자를 조회합니다.\n\nA가 쓰기 트랜잭션을 얻으면 B는 대기하거나 busy 오류를 받습니다. A가 커밋하고 B가 새 트랜잭션을 시작하면, A가 소모한 복구 코드는 현재 행에서 찾을 수 없습니다. 서로 다른 요청이 둘 다 성공해서 마지막 쓰기가 앞의 결과를 덮는 상황을 막습니다.\n\nSqliteResults의 mutex는 같은 C++ 객체에 들어오는 호출을 직렬화합니다. 별도 객체나 프로세스에는 그 mutex가 공유되지 않습니다. SQLite의 파일 잠금과 트랜잭션은 그 경계를 담당하므로 동시성 검사는 서로 다른 연결로도 수행해야 합니다. 대기 기한 초과는 저장소 오류이며 코드를 틀리게 입력한 것과 구분합니다."
+    },
+    {
+      "title": "현재 비밀을 새 후보로 재사용하지 못하게 한다",
+      "body": "입력끼리의 비교만으로는 부족한 경우가 있습니다. recover가 제출한 current는 복구 코드이므로, next_token이 현재 접근 키와 같은지 요청 문자열끼리 비교해서 알 수 없습니다. 소유자를 조회할 때 현재 접근·복구 해시도 읽어 후보와 비교합니다.\n\n복구에서는 현재 접근 키의 재사용을 거절합니다. 새 복구 코드는 어떤 새 교체에서도 현재 복구 코드와 달라야 합니다. 그래야 노출된 비밀을 계속 유지하면서 폐기했다고 안내하는 일을 막습니다. backup에서 접근 키를 유지하는 것은 요청 자체의 계약입니다.\n\n검사 순서가 중요합니다. 동일 요청을 재전송하면 후보는 이미 현재 값이 되어 있습니다. 영수증 일치를 먼저 확인한 뒤 새 요청에 대해서만 재사용을 검사해야 성공 재확인이 보존됩니다.",
+      "codes": [
+        {
+          "label": "DB에 저장된 현재 상태와 후보를 비교한다",
+          "language": "cpp",
+          "text": "            const auto stored_token = lookup.text_column(2);\n            const auto stored_recovery = lookup.is_null(3)\n                ? std::optional<std::string>{} : std::optional<std::string>{lookup.text_column(3)};\n            if ((!current_is_account && stored_token == next_token_hash) ||\n                (stored_recovery && *stored_recovery == next_recovery_hash))\n                return ChangeResult{ChangeStatus::invalid_request};"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "AccountChangeResult Database::changeAccount",
+        "invariant": "같은 계정의 자격·세대·최신 요청 영수증을 한 트랜잭션으로 교체한다.",
+        "mayDiffer": "현재 서버는 players에 인증 열을 함께 두며, 학습 코드는 account_keys를 사용한다. HTTP 경로와 상태 표현도 다를 수 있다."
+      }
+    },
+    {
+      "title": "기대 세대와 함께 한 행만 갱신한다",
+      "body": "인증 세대는 자격 상태가 바뀔 때 증가하는 정수입니다. ID가 같아도 세대가 다르면 다른 인증 상태에서 발급한 권한으로 취급할 수 있습니다. UPDATE는 모든 해시와 영수증을 바꾸면서 세대를 증가시킵니다.\n\nWHERE에는 소유자 ID와 읽었던 세대를 함께 넣습니다. 현재 구현에서는 쓰기 트랜잭션이 다른 writer를 막지만, 기대 상태 조건을 SQL에 남기면 변경 의도를 명시하고 잘못된 행 선택도 발견하기 쉽습니다. sqlite3_changes가 한 행인지 확인하여 성공 코드만으로 교체 성공을 판단하지 않습니다.\n\n최대 정수 세대에서 더하면 표현 범위를 벗어납니다. 갱신 전에 상한을 검사하고 저장 오류로 중단합니다. 부호 없는 외부 세대를 부호 있는 DB 정수로 바꿀 때도 범위를 먼저 검사합니다.",
+      "codes": [
+        {
+          "label": "상태를 함께 교체하는 UPDATE",
+          "language": "cpp",
+          "text": "inline constexpr const char* update_owner =\n    \"UPDATE account_keys SET token_hash = ?1, recovery_hash = ?2, \"\n    \"auth_epoch = auth_epoch + 1, last_change_hash = ?3 \"\n    \"WHERE player_id = ?4 AND auth_epoch = ?5\";"
+        }
+      ]
+    },
+    {
+      "title": "충돌과 저장소 오류의 의미를 보존한다",
+      "body": "다른 계정이 가진 후보 해시를 사용하면 UNIQUE 제약이 실패합니다. 이때는 conflict로 반환하여 새 후보를 생성할 수 있게 합니다. CHECK 위반이나 트리거의 RAISE(ABORT)까지 전부 충돌로 바꾸면 저장 구조의 오류를 난수 충돌처럼 숨깁니다.\n\n확장 오류 코드가 UNIQUE 또는 PRIMARYKEY인 경우만 충돌로 분류하고 나머지는 storage_error로 전달합니다. 오류 코드는 다른 SQLite 호출이 덮기 전에 복사합니다. 롤백을 먼저 실행하고 나서 코드를 읽으면 원래 실패 원인을 잃을 수 있습니다.\n\n후보 충돌에서 아무 값도 커밋하지 않으므로 옛 자격은 유지됩니다. 조회 단계에서도 SQLITE_DONE은 결과 없음, 그 밖의 오류는 읽기 실패로 구분해야 합니다. 읽기 실패를 자격 없음으로 바꾸면 사용자가 정상 키를 버리도록 잘못 안내할 수 있습니다.",
+      "codes": [
+        {
+          "label": "확장 코드로 후보 충돌만 분리한다",
+          "language": "cpp",
+          "text": "            try {\n                update.done();\n            } catch (...) {\n                // Read the code before the transaction RAII clears the error.\n                const int code = sqlite3_extended_errcode(db.get());\n                if (code == SQLITE_CONSTRAINT_UNIQUE || code == SQLITE_CONSTRAINT_PRIMARYKEY) return ChangeResult{ChangeStatus::conflict};\n                throw;\n            }"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "AccountChangeResult Database::changeAccount",
+        "invariant": "같은 계정의 자격·세대·최신 요청 영수증을 한 트랜잭션으로 교체한다.",
+        "mayDiffer": "현재 서버는 players에 인증 열을 함께 두며, 학습 코드는 account_keys를 사용한다. HTTP 경로와 상태 표현도 다를 수 있다."
+      }
+    },
+    {
+      "title": "C++ 예외도 트랜잭션의 실패 경로다",
+      "body": "UPDATE가 성공한 뒤 결과 객체를 만들거나 문자열을 복사하는 과정에서도 예외가 발생할 수 있습니다. SQL 반환 코드마다 수동 ROLLBACK을 적어도 이런 C++ 경로가 빠질 수 있습니다. 열린 트랜잭션이 남으면 같은 연결은 커밋되지 않은 새 자격을 계속 읽을 수 있고 다음 요청의 트랜잭션 시작도 실패할 수 있습니다.\n\nImmediateTransaction은 commit이 완료되기 전까지 롤백 책임을 갖습니다. 중간 return과 예외 모두 범위를 벗어날 때 정리됩니다. ChangeResult를 commit 전에 준비하고 성공적으로 commit한 뒤 반환하여, 응답 준비 실패도 교체 전 상태로 되돌릴 수 있게 합니다.\n\n로컬 hook에서 UPDATE 직후 또는 commit 직전에 예외를 던집니다. 검사할 것은 함수의 오류 값뿐 아니라 같은 연결로 본 옛 키의 유효성·새 키의 부재·세대 유지·다음 정상 요청의 성공입니다.",
+      "codes": [
+        {
+          "label": "결과 준비와 커밋의 순서",
+          "language": "cpp",
+          "text": "        if (hook) hook(ChangePoint::after_update);\n        const ChangeResult committed{ChangeStatus::ok, player_id, owner_epoch + 1};\n        if (hook) hook(ChangePoint::before_commit);\n\n        tx.commit();\n        return committed;"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "AccountChangeResult Database::changeAccount",
+        "invariant": "같은 계정의 자격·세대·최신 요청 영수증을 한 트랜잭션으로 교체한다.",
+        "mayDiffer": "현재 서버는 players에 인증 열을 함께 두며, 학습 코드는 account_keys를 사용한다. HTTP 경로와 상태 표현도 다를 수 있다."
+      }
+    },
+    {
+      "title": "커밋과 성공 응답 사이에는 간격이 있다",
+      "body": "DB 커밋 후 서버가 응답을 보내기 전에 연결이 끊길 수 있습니다. 클라이언트는 시간 초과만 보고 교체가 실패했다고 확정할 수 없습니다. DB의 원자성은 중간 상태를 없애지만 서로 다른 기계가 동시에 결과를 알게 하지는 않습니다.\n\n이 경우 필요한 것은 **같은 요청의 재전송**입니다. 타임아웃마다 새 후보를 생성하면 영수증이 달라져 완료된 작업을 확인할 수 없습니다. 따라서 클라이언트는 전송 전에 작업 종류·증명·후보를 보존하고, 성공 확인 후 새 자격을 활성화해야 합니다.\n\n여기서 만든 서버는 그 재전송을 받아 줄 계약을 제공합니다. 요청 원문은 비밀이므로 일반 로그나 분석 이벤트에 넣지 않습니다. 파일에 남길 클라이언트 저널의 저장·권한·교체 규칙은 별도의 클라이언트 책임입니다."
+    },
+    {
+      "title": "발급된 티켓의 세대를 다시 검사한다",
+      "body": "교체 전에 게임 입장 티켓이 발급됐다고 합시다. 티켓에 player ID만 있으면 접근 키를 폐기한 뒤에도 남은 티켓으로 입장할 수 있습니다. 티켓에 발급 당시의 세대를 함께 넣고, 입장 처리에서 현재 DB 세대와 비교합니다.\n\n예를 들어 티켓 세대가 E이고 교체 후 DB가 E+1이면 티켓 자체가 아직 유효기간 안이어도 인증 상태가 바뀌었으므로 입장을 거절합니다. 티켓의 단일 소비와 계정 세대 비교는 서로 다른 조건입니다. 누적 검사에서는 티켓을 소비한 결과에 credential_is_current를 적용해 이 조건을 관찰합니다.\n\n이미 입장을 끝낸 소켓은 별도의 수명을 갖습니다. DB 세대 변경만으로 실행 중 세션을 즉시 종료하지는 않습니다. 즉시 퇴장이 필요하면 세션 추적과 종료 통지가 추가되어야 합니다. 이 실습이 폐기하는 범위는 새 인증과 세대 재검사를 수행하는 입장입니다."
+    },
+    {
+      "title": "HTTP 경계에는 좁은 입력 계약을 둔다",
+      "body": "누적 loopback 계정 서비스에 /study/v1/account/backup, rotate, recover를 추가합니다. JSON 필드는 credential, next_token, next_recovery이며 모두 문자열입니다. 중복 키·추가 필드·잘못된 Content-Type·쿼리 문자열을 거절하여 파서마다 요청 의미가 달라지는 여지를 줄입니다.\n\n| 내부 결과 | HTTP | 호출자의 판단 |\n| --- | --- | --- |\n| ok | 200 | ID와 세대를 확인 |\n| invalid_request | 400 | 요청 계약 수정 |\n| invalid_credential | 401 | 현재 증명 확인 |\n| conflict | 409 | 후보 중복, 새 요청 준비 |\n| storage_error | 503 | 저장소 문제로 처리 |\n\n응답에는 player_id와 auth_epoch만 담고 비밀을 되돌려 주지 않습니다. Cache-Control: no-store로 응답의 캐시 보관을 금지합니다. 전송 계층에서는 TLS가 비밀을 보호하며, no-store가 암호화를 대신하지 않습니다.\n\n학습 서비스는 로컬 연결용입니다. 외부 배포 서버에는 IP별 요청 예산·본문 한도·시간 제한이 함께 필요합니다. 현재 서버의 계정 API와 비교할 때는 DB 원자 교체 계약과 HTTP 방어의 책임을 나누어 읽습니다."
+    },
+    {
+      "title": "빌드하고 계정 보존·실패·재시도를 관찰한다",
+      "body": "다음 계약 실행 파일은 새 임시 DB 경로를 인자로 받습니다. 그 경로에 기존 실사용 DB를 지정하지 않습니다. 서비스는 port 0으로 시작하면 할당된 loopback 포트를 출력합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/141-account-change -B out/study-141 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-141 --target study_account_db account_change_contract -j2\nout/study-141/account_change_contract out/study-141/change-test.db\nout/study-141/study_account_db 0 out/study-141/account-service.db\n```\n\nBoost가 기본 탐색 경로 밖에 있으면 STUDY_BOOST_INCLUDE에 헤더 경로를 지정합니다. 독립적인 DB 파일로 다시 실행하면 초기 fixture부터 같은 실험을 반복할 수 있습니다.\n\n```sh\npython3 scripts/check_learning_account_change.py --boost /path/to/boost/include\n```\n\n검사에서는 같은 계정의 재화·경험·보유 아이콘을 기록한 뒤 교체 후 비교합니다. 서로 다른 DB 연결에서 같은 복구 증명을 경쟁시키고, 실패 지점 주입 뒤 옛 자격과 세대를 다시 조회합니다. 성공 응답 하나만 확인하는 검사보다 상태 전이의 누락을 찾기 쉽습니다."
+    },
+    {
+      "title": "전체 구현을 따라가며 책임을 연결한다",
+      "body": "account_change.h는 입력·영수증·소유자·교체·결과의 순서를, account_change_schema.h는 저장 제약을, SqliteResults는 연결의 직렬화를 담당합니다. HTTP 서비스는 이 결과를 상태 코드로 번역합니다.\n\n계약 검사를 읽을 때는 성공 경로부터 본 뒤, 같은 요청과 다른 요청의 차이, UPDATE 뒤 예외, 독립 연결 경쟁을 순서대로 추적합니다. 실제 서버와 테이블 배치는 달라도 player ID 보존과 자격 상태의 원자 교체가 비교 기준입니다.",
+      "codes": [
+        {
+          "label": "원자적 교체 전체 구현",
+          "language": "cpp",
+          "file": "checkpoints/141-account-change/meta/account_change.h"
+        },
+        {
+          "label": "실패 주입과 경쟁 요청 계약 검사",
+          "language": "cpp",
+          "file": "checkpoints/141-account-change/tests/account_change_contract.cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "AccountChangeResult Database::changeAccount",
+        "invariant": "같은 계정의 자격·세대·최신 요청 영수증을 한 트랜잭션으로 교체한다.",
+        "mayDiffer": "현재 서버는 players에 인증 열을 함께 두며, 학습 코드는 account_keys를 사용한다. HTTP 경로와 상태 표현도 다를 수 있다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "141-1",
+      "question": "교체가 커밋된 뒤 응답만 유실됐습니다. 최신 요청을 그대로 다시 받으면 서버는 어떻게 해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "옛 자격이므로 무조건 거절"
+        },
+        {
+          "id": "b",
+          "text": "영수증과 현재 후보를 확인하고 같은 세대를 반환"
+        },
+        {
+          "id": "c",
+          "text": "세대를 다시 증가"
+        },
+        {
+          "id": "d",
+          "text": "새 계정 생성"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "영수증과 현재 후보를 확인하고 같은 세대를 반환",
+      "explanation": "동일 요청의 효과를 반복하지 않고 커밋된 결과를 확인합니다. 그래서 영수증 검사가 현재 자격 조회보다 앞섭니다."
+    },
+    {
+      "id": "141-2",
+      "question": "서로 다른 연결이 같은 복구 코드와 서로 다른 후보로 복구합니다. 소유자 조회는 어디에 두어야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "BEGIN IMMEDIATE 안"
+        },
+        {
+          "id": "b",
+          "text": "트랜잭션 밖에서 두 번"
+        },
+        {
+          "id": "c",
+          "text": "응답 전송 후"
+        },
+        {
+          "id": "d",
+          "text": "mutex 없이 전역 캐시에만"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "BEGIN IMMEDIATE 안",
+      "explanation": "쓰기 순서를 확보한 뒤 현재 증명을 조회해야 한 요청의 커밋 후 다른 요청이 소모된 증명을 거절할 수 있습니다."
+    },
+    {
+      "id": "141-3",
+      "question": "UPDATE는 성공했지만 결과 문자열 준비에서 예외가 발생했습니다. 필요한 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "연결에서 새 키를 계속 읽어도 된다"
+        },
+        {
+          "id": "b",
+          "text": "예외 메시지만 반환한다"
+        },
+        {
+          "id": "c",
+          "text": "세대를 한 번 더 증가한다"
+        },
+        {
+          "id": "d",
+          "text": "트랜잭션을 롤백하고 성공 출력을 남기지 않는다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "트랜잭션을 롤백하고 성공 출력을 남기지 않는다",
+      "explanation": "SQL 오류 외의 C++ 예외도 실패 경로입니다. RAII는 중간 반환과 예외에서 커밋되지 않은 상태의 정리를 맡습니다."
+    },
+    {
+      "id": "141-4",
+      "question": "recover 요청의 새 접근 키가 DB에 저장된 현재 접근 키와 같습니다. 동일 요청 영수증은 없습니다. 어떻게 처리할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "계정 ID가 같으므로 허용"
+        },
+        {
+          "id": "b",
+          "text": "복구 코드만 갱신"
+        },
+        {
+          "id": "c",
+          "text": "현재 비밀 재사용으로 거절"
+        },
+        {
+          "id": "d",
+          "text": "BP를 초기화"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "현재 비밀 재사용으로 거절",
+      "explanation": "복구에서 접근 키를 폐기하려면 현재 값과 다른 후보가 필요합니다. 최신 동일 요청 재전송은 먼저 영수증으로 처리합니다."
+    },
+    {
+      "id": "141-5",
+      "question": "교체 전 세대로 발급된 티켓이 아직 만료되지 않았습니다. 현재 세대와 비교하는 입장 단계에서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "유효기간만 확인하고 허용"
+        },
+        {
+          "id": "b",
+          "text": "세대가 다르면 거절"
+        },
+        {
+          "id": "c",
+          "text": "모든 접속 중 소켓이 자동 종료됨"
+        },
+        {
+          "id": "d",
+          "text": "player ID를 새로 발급"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "세대가 다르면 거절",
+      "explanation": "티켓의 유효기간·단일 소비·현재 인증 세대는 별도 조건입니다. 세대 검사만으로 이미 승인한 세션의 수명이 자동 종료되지는 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "backup·rotate·recover의 증명과 후보를 표로 적고 구현 경로를 추적한다.",
+      "성공한 요청을 그대로 반복한 뒤 세대가 유지되는지 확인한다.",
+      "독립 연결의 복구 경쟁과 UPDATE 뒤 예외를 주입하여 계정 상태를 비교한다."
+    ],
+    "failureChecks": [
+      "현재 복구 코드를 새 후보로 재사용하면 거절되는지 확인한다.",
+      "트리거 실패를 후보 충돌로 표시하지 않는지 확인한다.",
+      "커밋 뒤 응답 유실과 커밋 전 롤백에서 클라이언트가 보존할 요청을 설명한다."
+    ],
+    "expected": "새 교체는 같은 계정에서 한 번 반영되고 최신 동일 요청은 추가 교체 없이 성공을 확인한다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 선택 구현 초안·현재 서버·독립 연결·실패 주입·HTTP 계약 대조",
+    "corrections": [
+      "예외 경로 트랜잭션 롤백과 출력 초기화 보완",
+      "영수증 검사 뒤 현재 비밀 재사용 검사",
+      "확장 제약 코드 분리와 세대 범위 검사",
+      "복구·회전의 계정 보존과 최신 요청 재전송 범위 명시"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 계정 서비스와 교체 계약 타깃 빌드·실행 통과",
+    "누적 계정·이관·상점·성장 계약과 독립 연결 복구 경쟁·예외·트리거 롤백·재전송·세대 경계 통과",
+    "학습 HTTP 엄격 입력·no-store·동시 복구·재시작 통과",
+    "학습 C++ 교체 경로 ASan/UBSan 통과; SQLite static archive 자체는 비계측",
+    "현재 meta Release 및 실제 HTTP 회귀8사례 통과; 예외 후 같은 연결의 옛 자격 보존·후속 요청 성공 확인",
+    "v5 계정 DB의 v6 업그레이드에서 ID·재화·보유 아이콘·접근 해시 보존 확인",
+    "인라인7·현재 심볼·누적 파일 보존 검사 통과",
+    "Windows/macOS native·운영DB·실제 장치 장애 미검증; 수동GUI·공개배포 없음"
+  ]
+}

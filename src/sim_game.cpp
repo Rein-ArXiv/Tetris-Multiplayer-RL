@@ -1,5 +1,8 @@
 #include "sim_game.h"
 #include "../core/hash.h"
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 
 // [NET/RL] This file is the single source of truth for game logic.
 // Ported line-for-line from src/game.cpp to preserve deterministic state hashes.
@@ -9,12 +12,12 @@ SimGame::SimGame(uint64_t seed)
     : gameOver(false),
       score(0),
       rng(seed ? seed : 0xC0FFEE123456789ull),
-      // splitmix-style fork: 시드와 상호 상관관계가 약한 별도 스트림.
+      // Separate owned stream: this XOR fork does not guarantee statistical independence.
       garbageRng((seed ? seed : 0xC0FFEE123456789ull) ^ 0x9E3779B97F4A7C15ull),
       gravityCounterTicks(0),
       dropIntervalTicks(TICKS_PER_SECOND / 2), // default: drop every 0.5s
-      // in-class initializer 에 의존하지 않고 명시 — StateHash 포함 필드들의
-      // 결정론 보장을 위해 생성자 시점에 확정.
+      // 이 생성자의 초기 상태를 명시한다. 같은 멤버의 기본 초기화 식은
+      // 여기서 다시 실행되지 않는다. 두 방식 중 하나로 값을 정의하면 된다.
       softDropCounterTicks(0),
       lastMoveWasRotate(false),
       attackLinesSent(0),
@@ -29,12 +32,14 @@ SimGame::SimGame(uint64_t seed)
     }
     ghostBlock = MakeGhostBlock(currentBlock);
     // sim_grid is zero-initialized by its default constructor.
+    DropExpectation();
 }
 
 SimBlock SimGame::GetRandomBlock()
 {
-    // [NET] '가방'이 비면 새 가방을 채웁니다. RNG 호출 횟수가 틱/입력 흐름에 따라
-    // 달라지지 않도록 주의 — 이 함수가 RNG의 유일한 호출 지점입니다.
+    // Refill the piece bag on demand; each draw consumes this piece RNG once,
+    // including a one-item bag. Stable erase order is part of seeded replay.
+    // Garbage uses its separately owned garbageRng stream.
     if (blocks.empty())
     {
         blocks = GetAllBlocks();
@@ -67,15 +72,15 @@ void SimGame::SubmitInput(uint8_t inputMask)
     if (hasInput(inputMask, INPUT_LEFT))   MoveBlockLeft();
     if (hasInput(inputMask, INPUT_RIGHT))  MoveBlockRight();
 
-    // 소프트 드롭: 매 틱 호출되면 60셀/초(너무 빠름). N틱마다 1회로 제한.
-    //   최초 눌림(카운터=0) 은 즉시 반응, 그 다음부터 kSoftDropIntervalTicks
-    //   (=3, 60Hz → 약 15셀/초) 간격. 뗐다가 다시 눌러도 즉시.
-    //   결정론: 이 카운터는 상태 해시에 포함되므로 양쪽 클라이언트 동일 전개.
-    constexpr int kSoftDropIntervalTicks = 3;
+    // DOWN이 처음 관찰된 호출은 즉시 시도하고, 이후 3호출을 건너뛴다.
+    // 한 틱당 SubmitInput 1회라면 4틱 주기: 60Hz에서 초당 15회 시도.
+    // 자연 중력은 Tick에서 별도로 더해진다. false가 관찰되면 다음 눌림을 재준비한다.
+    // 이 카운터는 미래 전이에 영향을 주므로 상태 해시에 포함한다.
+    constexpr int kSoftDropCooldownTicks = 3;
     if (hasInput(inputMask, INPUT_DOWN)) {
         if (softDropCounterTicks <= 0) {
             MoveBlockDown();
-            softDropCounterTicks = kSoftDropIntervalTicks;
+            softDropCounterTicks = kSoftDropCooldownTicks;
         } else {
             softDropCounterTicks--;
         }
@@ -161,6 +166,9 @@ void SimGame::MoveBlockDrop()
 void SimGame::DropExpectation()
 {
     if (gameOver) return;
+    // Refresh from the current pose; a cached hint may describe an older board.
+    ghostBlock = MakeGhostBlock(currentBlock);
+    if (IsBlockOutside(ghostBlock) || !BlockFits(ghostBlock)) return;
     while (IsBlockOutside(ghostBlock) == false && BlockFits(ghostBlock) == true)
     {
         ghostBlock.Move(1, 0);
@@ -267,7 +275,7 @@ void SimGame::LockBlock()
     {
         if (rowsCleared > 0) clearSoundEvent = true;
         UpdateScore(rowsCleared, 0, tSpin);
-        attackLinesSent += attack_lines_for(rowsCleared, tSpin);
+        attackLinesSent = saturating_add_count(attackLinesSent, attack_lines_for(rowsCleared, tSpin));
     }
     lastMoveWasRotate = false;
 
@@ -276,8 +284,8 @@ void SimGame::LockBlock()
     int inserted = 0;
     if (pendingGarbage > 0 && !gameOver)
     {
-        inserted = pendingGarbage;
-        InsertGarbage(pendingGarbage);
+        inserted = std::min(pendingGarbage, SimGrid::kRows);
+        InsertGarbage(inserted);
         pendingGarbage = 0;
         // 가비지가 올라와 currentBlock 스폰 위치를 막았으면 topout.
         if (!BlockFits(currentBlock)) gameOver = true;
@@ -286,6 +294,9 @@ void SimGame::LockBlock()
     if (inserted > 0) garbageSoundEvent = true;
 
     if (gameOver && !wasGameOver) gameOverEvent = true;
+    // Also covers natural gravity and placement-level callers, without input.
+    // Recompute after row removal and garbage insertion have settled the board.
+    DropExpectation();
 }
 
 void SimGame::InsertGarbage(int rows)
@@ -293,7 +304,13 @@ void SimGame::InsertGarbage(int rows)
     if (rows <= 0) return;
     if (rows > SimGrid::kRows) rows = SimGrid::kRows;
 
-    // 기존 행을 위로 밀어올린다 — 상단 rows 만큼은 소실 (오버플로우는 게임오버 처리).
+    // Detect occupied cells leaving the top before overwriting them. An empty
+    // discarded row is not a defeat. Still publish the shifted/final board.
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < SimGrid::kCols; ++c)
+            if (!sim_grid.IsCellEmpty(r, c)) gameOver = true;
+
+    // Read higher-index source rows before a later write can replace them.
     for (int r = 0; r + rows < SimGrid::kRows; r++)
     {
         for (int c = 0; c < SimGrid::kCols; c++)
@@ -328,16 +345,16 @@ bool SimGame::BlockFits(const SimBlock& block) const
 
 void SimGame::UpdateScore(int linesCleared, int levelUp, bool tSpin)
 {
-    // 프로젝트 점수표에 현재 레벨을 배율로 적용한다. NES와 마찬가지로
-    // 높은 레벨의 생존을 더 보상하지만 base 점수 자체는 이 게임 고유 값이다.
+    // Award using the level before this clear; the table is project-specific.
+    int basePoints = 0;
     if (tSpin)
     {
         switch (linesCleared)
         {
-        case 0: score += 400  * level; break;
-        case 1: score += 800  * level; break;
-        case 2: score += 1200 * level; break;
-        case 3: score += 1600 * level; break;
+        case 0: basePoints = 400; break;
+        case 1: basePoints = 800; break;
+        case 2: basePoints = 1200; break;
+        case 3: basePoints = 1600; break;
         default: break;
         }
     }
@@ -345,17 +362,24 @@ void SimGame::UpdateScore(int linesCleared, int levelUp, bool tSpin)
     {
         switch (linesCleared)
         {
-        case 1: score += 100  * level; break;
-        case 2: score += 300  * level; break;
-        case 3: score += 600  * level; break;
-        case 4: score += 1000 * level; break;
+        case 1: basePoints = 100; break;
+        case 2: basePoints = 300; break;
+        case 3: basePoints = 600; break;
+        case 4: basePoints = 1000; break;
         default: break;
         }
     }
-    score += levelUp * 1000;
+    // Widen BEFORE arithmetic. Preserve the int API/hash representation and
+    // saturate at its limit rather than invoking signed-overflow UB.
+    const std::int64_t gained = std::int64_t{basePoints} * level +
+                                std::int64_t{levelUp} * 1000;
+    const auto limit = std::int64_t{std::numeric_limits<int>::max()};
+    score = static_cast<int>(std::clamp(std::int64_t{score} + gained,
+                                        std::int64_t{0}, limit));
 
     // 레벨 시스템: 10라인마다 레벨업 + 중력 증가.
-    totalLinesCleared += linesCleared;
+    totalLinesCleared = static_cast<int>(std::clamp(
+        std::int64_t{totalLinesCleared} + linesCleared, std::int64_t{0}, limit));
     int newLevel = totalLinesCleared / 10 + 1;
     if (newLevel > level) {
         level = (newLevel > 20) ? 20 : newLevel;
@@ -373,7 +397,9 @@ SimGame::HashBreakdown SimGame::StateHashBreakdown() const
     constexpr uint64_t BASE = 14695981039346656037ull;
 
     // Grid
-    b.grid = fnv1a64(&sim_grid.grid[0][0], sizeof(sim_grid.grid), BASE);
+    b.grid = BASE;
+    for (const auto& row : sim_grid.grid)
+        for (int cell : row) b.grid = fnv1a64_value(int32_t{cell}, b.grid);
 
     // Current block
     uint64_t cb = BASE;
@@ -420,11 +446,20 @@ SimGame::HashBreakdown SimGame::StateHashBreakdown() const
     return b;
 }
 
-uint64_t SimGame::StateHash() const
+uint64_t SimGame::StateHash() const { return ComputeStateHash(false); }
+
+uint64_t SimGame::DiagnosticStateHashV2() const { return ComputeStateHash(true); }
+
+uint64_t SimGame::ComputeStateHash(bool includeBag) const
 {
     uint64_t h = 14695981039346656037ull;
-    // Grid bytes — layout must match old Grid::grid exactly.
-    h = fnv1a64(&sim_grid.grid[0][0], sizeof(sim_grid.grid), h);
+    if (includeBag) {
+        h = fnv1a64("SIMH", 4, h);
+        h = fnv1a64_value(uint32_t{2}, h);
+    }
+    // Row-major signed 32-bit values encoded LE, independent of host endian.
+    for (const auto& row : sim_grid.grid)
+        for (int cell : row) h = fnv1a64_value(int32_t{cell}, h);
     // Current block state
     h = fnv1a64_value(currentBlock.id, h);
     int curRot = currentBlock.GetRotationState();
@@ -454,12 +489,20 @@ uint64_t SimGame::StateHash() const
     h = fnv1a64_value(totalLinesCleared, h);
     h = fnv1a64_value(level, h);
     h = fnv1a64_value(lastMoveWasRotate ? 1 : 0, h);
-    // Combat state — 양쪽이 동일한 입력에서 동일한 값을 도출하므로 해시에 포함하면
-    // 가비지 로직 버그가 HASH 자동 검증(F.2)에서 즉시 DESYNC 로 잡힌다.
+    // Compare at matching simulation boundaries; mismatches are diagnostic evidence.
     uint64_t gRng = garbageRng.getState();
     h = fnv1a64_value(gRng, h);
     h = fnv1a64_value(attackLinesSent, h);
     h = fnv1a64_value(pendingGarbage, h);
+    if (includeBag) {
+        h = fnv1a64_value(static_cast<uint32_t>(blocks.size()), h);
+        for (const SimBlock& block : blocks) {
+            h = fnv1a64_value(block.id, h);
+            h = fnv1a64_value(block.GetRotationState(), h);
+            h = fnv1a64_value(block.GetRowOffset(), h);
+            h = fnv1a64_value(block.GetColumnOffset(), h);
+        }
+    }
     return h;
 }
 
@@ -514,8 +557,14 @@ int SimGame::ApplyPlacement(int col, int rot)
     {
         target.Rotate();
     }
-    int delta = col - target.columnOffset;
-    target.columnOffset += delta;
+    // Validate the external origin before GetCellPositions adds int offsets.
+    // Avoid both col-oldOrigin subtraction overflow and local+col overflow.
+    for (const Position& cell : target.cells.at(target.rotationState))
+    {
+        const std::int64_t column = std::int64_t{cell.column} + col;
+        if (column < 0 || column >= SimGrid::kCols) return -1;
+    }
+    target.columnOffset = col;
     if (IsBlockOutside(target) || !BlockFits(target)) return -1;
     // Hard drop
     while (IsBlockOutside(target) == false && BlockFits(target) == true)
@@ -525,14 +574,11 @@ int SimGame::ApplyPlacement(int col, int rot)
     target.rowOffset--;
     if (IsBlockOutside(target) || !BlockFits(target)) return -1;
 
-    // Snapshot cleared-line count before lock. Score is level-scaled, so it
-    // cannot be inverted back to a line count after level 1.
-    int linesBefore = totalLinesCleared;
-
     // Commit: overwrite currentBlock with the landed configuration and lock.
     currentBlock = target;
     lastMoveWasRotate = false;
     LockBlock();
 
-    return totalLinesCleared - linesBefore;
+    // Use the actual lock result: a saturated total cannot recover this delta.
+    return lastLinesCleared;
 }

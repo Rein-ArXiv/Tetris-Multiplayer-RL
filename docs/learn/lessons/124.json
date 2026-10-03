@@ -1,0 +1,462 @@
+{
+  "id": "lesson-124",
+  "title": "먼저 측정: 스레드 모델의 실제 한계",
+  "shortTitle": "실측 경계·CPU·p99·부하 모델",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 누적 소켓 작업자는 연결마다 스레드로 송수신하지만, 부하가 달라질 때 비용을 비교할 측정 기록이 없습니다.",
+  "finish": "완료: 실제 TCP·큐·프레이밍을 쓰는 제한된 에코 실험으로 지연·CPU·처리량·미완료를 기록하고, 그 숫자의 범위를 설명합니다.",
+  "objective": "측정 시작과 끝·성공 조건을 코드에 정하고, 평균과 백분위·CPU 시간과 경과 시간·닫힌 부하와 실패 누락을 구별해 해석합니다.",
+  "prerequisites": [
+    "소켓 RAII와 부분 송수신·프레이밍",
+    "ThreadLink의 작업자 소유권·큐·종료 수명",
+    "steady_clock과 duration·정수 범위",
+    "누적 프로젝트의 독립 실행 타깃"
+  ],
+  "recap": {
+    "points": [
+      "랭킹 화면은 저장된 성적을 정렬해 조회하고, 빈 결과와 조회 실패를 구분한다.",
+      "비동기 작업은 화면 표시와 별도로 완료를 수집하며 소유자보다 먼저 정리한다.",
+      "정상 응답을 확인하기 전에는 큐 저장이나 작업 시작을 완료로 취급하지 않는다."
+    ],
+    "bridge": "기능의 성공 경계를 유지하면서, 여러 연결을 함께 실행했을 때 기다림과 자원 비용을 실제 숫자로 관찰합니다."
+  },
+  "sections": [
+    {
+      "title": "바꾸기 전에 비교할 기준을 만든다",
+      "body": "게임의 입력 통신과 서버의 계정·성적 조회가 연결되어 있습니다. 기능이 늘면서 이제 “동시에 연결된 사람이 많아져도 목표한 지연을 유지할까?”라는 질문을 다룰 수 있습니다. 이번 산출물은 **누적 소켓 코드를 그대로 사용하는 제한된 부하 측정 실행 파일**입니다.\n\n코드를 읽으면 연결마다 어떤 작업자가 생기는지 알 수 있습니다. 그러나 그것만으로 특정 기기의 최대 접속자 수나 p99 지연을 계산할 수는 없습니다. 입력 빈도·패킷 크기·다른 프로세스·OS 스케줄러가 함께 작용하기 때문입니다. 관찰할 구간과 성공 조건을 먼저 정합니다.\n\n`thread_measure`는 같은 컴퓨터의 TCP loopback 연결을 1~16개 만들고 작은 요청을 되돌려 받습니다. 각각의 연결 양 끝은 게임에서도 쓰는 `ThreadLink`입니다. 프레이밍·부분 송수신·큐·스레드 수명을 재사용합니다. 별도의 계산식만 돌리는 모형보다 구현의 실제 기다림을 볼 수 있습니다.\n\n게임 메뉴·계정·랭킹 코드는 유지합니다. 측정기는 별도 실행 파일로 연결해 게임 화면의 프레임 시간과 통신 측정 작업을 섞지 않습니다.",
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "void forwarderLoop",
+        "invariant": "구조 변경의 근거는 실제 처리 경로와 관측 범위가 있는 측정이다.",
+        "mayDiffer": "현재 릴레이는 매칭·방·경기 검증까지 포함한다. 학습 도구는 누적 ThreadLink의 에코 경로만 측정한다."
+      }
+    },
+    {
+      "title": "스레드의 존재와 CPU 실행을 구분한다",
+      "body": "OS 스레드는 실행 문맥과 자원을 가진 작업 단위입니다. **실행 중**, **실행 가능하지만 CPU를 기다림**, **입력이나 시간을 기다리며 잠듦**을 구별해야 합니다. 대기 중인 스레드가 매 순간 CPU를 소모하는 것은 아닙니다.\n\n동시에 실행 가능한 작업이 사용 가능한 논리 CPU보다 많으면 일부 작업은 순서를 기다립니다. 이 대기는 작업 길이·우선순위·CPU 배정 제한·다른 부하의 영향을 받습니다. 스레드 수가 두 배가 되었다고 지연도 정확히 두 배가 되는 식은 여기서 나오지 않습니다.\n\n잠든 스레드에도 스택과 OS 관리 자료가 남습니다. 스택에 예약한 가상 주소 공간과 실제 물리 메모리 사용량도 같은 값이 아닙니다. 따라서 **보유 자원 비용**과 **깨어나 실행하는 비용**을 나누어 조사합니다. 이번 도구는 CPU와 지연을 먼저 측정하고 메모리 용량 판정은 추가하지 않습니다.\n\n연결 쌍 N개를 만들면 ThreadLink가 2N개이고 그 작업자도 2N개입니다. 측정을 조정하는 main까지 포함하면 이 도구가 만드는 실행 주체는 2N+1개입니다. 현재 운영 서버의 “매치당 스레드 수”를 이 숫자로 대체하면 안 됩니다. 두 프로그램의 책임과 토폴로지가 다릅니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "스케줄러를 이해하는 깊이",
+          "body": "이 차시에서 필요한 것은 runnable과 waiting의 차이입니다. [Linux EEVDF의 실행 자격·가상 마감 시각](https://kernel.org/doc/html/latest/scheduler/sched-eevdf.html)을 보면 현대 스케줄러가 “매 틱 모든 스레드를 훑는 배열 반복문”이라는 설명과 다르다는 것을 확인할 수 있습니다. 실제 선택 정책을 알아도 애플리케이션의 지연 분포는 별도로 측정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "폴링의 작은 상수에 담긴 선택을 찾는다",
+      "body": "누적 ThreadLink는 논블로킹 송수신을 시도합니다. 그 회차에 진행한 일이 없으면 1ms 수면을 요청합니다. 아직 처리할 일이 남아 있으면 곧바로 다음 회차를 진행합니다. 따라서 모든 프레임 뒤에 무조건 1ms를 더하는 코드도 아닙니다.\n\n비교 실험을 위해 생성자 마지막 인자에 `poll_delay`를 추가합니다. 기본값은 1ms로 유지하고 실험 범위는 1~10ms로 제한합니다. 인자는 작업자 시작 전에 검증하고 람다에 값으로 포착합니다. 실행 중 여러 스레드가 공유 상수를 수정하도록 만들지 않습니다.\n\n간격을 늘리면 유휴 반복은 보통 줄어듭니다. 대신 바이트가 들어온 뒤 다음 검사까지 기다리는 시간이 길어질 수 있습니다. 이상적인 주기 T의 검사에서도 그 대기는 도착 시점에 따라 0~T입니다. T가 모든 요청 지연의 하한이 되는 것은 아닙니다.\n\n실제 실행에는 타이머 해상도·작업 시간·스케줄러 대기가 더해집니다. 요청한 5ms를 전체 지연의 최대값으로 쓰면 안 됩니다. [Linux 수면 API의 재실행 지연 설명](https://man7.org/linux/man-pages/man2/nanosleep.2.html)을 이 구분과 함께 읽습니다.",
+      "codes": [
+        {
+          "label": "생성자에서 실험 인자를 확인한 뒤 작업자에 전달",
+          "text": "ThreadLink::ThreadLink(Socket socket, bool heartbeat, BeatTiming timing,\n                       std::chrono::milliseconds poll_delay) {\n    if (poll_delay < std::chrono::milliseconds(1) ||\n        poll_delay > std::chrono::milliseconds(10))\n        throw std::invalid_argument(\"poll delay must be 1..10ms\");\n    if (heartbeat && !timing.valid()) throw std::invalid_argument(\"heartbeat timing\");\n    worker_ = std::thread([this, owned = std::move(socket), heartbeat, timing, poll_delay]() mutable {\n          const LinkReport result = run(owned, heartbeat, timing, poll_delay);",
+          "language": "cpp"
+        },
+        {
+          "label": "진행하지 못한 회차에서만 쉰다",
+          "text": "        // Cooperative polling: no hard latency guarantee from the OS scheduler.\n        if (!activity) std::this_thread::sleep_for(poll_delay);\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "if (raw.empty())",
+        "invariant": "논블로킹 수신과 주기적 대기는 종료·시간 제한을 관찰하는 정책의 일부다.",
+        "mayDiffer": "현재 forwarder는 수신 방향마다 쉰다. 학습 ThreadLink는 한 작업자가 송수신 둘을 관리하며 비교용 인자를 받는다."
+      }
+    },
+    {
+      "title": "왕복이라는 말의 양 끝을 정한다",
+      "body": "다음 경로에서 시간을 어디서 시작하고 끝낼지 먼저 표시해 봅니다. 시작은 client.send 호출 직전, 끝은 **응답을 큐에서 꺼내 일련번호까지 확인한 시각**입니다.\n\n| 흐름 | 담당 |\n| --- | --- |\n| 시작 시각 기록 → 송신 큐에 저장 | main |\n| 큐 → 프레임 인코딩 → TCP 전송 | client 작업자 |\n| TCP 수신 → 프레임 파싱 → 수신 큐 | echo 작업자 |\n| 요청 확인 → 응답 송신 큐 | main |\n| 응답 TCP 전송 → 수신·파싱 | 두 작업자 |\n| 응답 큐 → 내용 확인 → 끝 시각 | main |\n\n이 구간에는 사용자 큐 대기, 작업자와 main의 폴링, OS와 TCP 처리, 내용 확인이 포함됩니다. 우리는 이것을 **애플리케이션이 관찰한 에코 지연**이라고 부릅니다. 네트워크 장비만의 왕복 시간이나 운영 릴레이 하나의 처리 시간과 구분됩니다.\n\n시간 차이는 같은 프로세스의 `steady_clock`으로 잽니다. 다른 컴퓨터의 벽시계를 빼는 방식과 달리 시계 동기화가 필요하지 않습니다. duration을 double 마이크로초로 바꾸지만, 소수점을 출력한다고 측정 장치의 실제 정밀도가 그만큼 높아지는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "프레임 생성 뒤, 큐 호출 직전에 시작 시각 기록",
+          "text": "        for (std::size_t i = 0; i < pairs.size(); ++i) {\n            const auto frame = probe_frame(first_round + r, static_cast<std::uint32_t>(i));\n            sent[i] = Clock::now(); // Before enqueue: includes local queue waiting.\n            ++result.started;\n            if (pairs[i].client->send(frame) != QueuePut::stored) {\n                result.status = \"enqueue_failed\"; return result;\n            }\n        }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "소켓의 두 역할을 한 프로세스에 둔 이유",
+          "body": "양쪽의 수명과 요청 식별을 작은 코드에서 확인하기 위해서입니다. 실제 용량을 판단할 때는 부하 발생기를 분리하고 서버 프로세스만의 CPU도 따로 관찰해야 합니다. 이 도구의 결과를 서버 단독 비용으로 읽지 않는 것이 실험의 중요한 조건입니다."
+        }
+      ]
+    },
+    {
+      "title": "프레임이 도착했다는 사실만으로 성공을 세지 않는다",
+      "body": "측정용 프레임은 type 60, payload 8바이트입니다. payload에는 round와 slot을 uint32로 담습니다. round는 요청 묶음의 일련번호, slot은 연결 위치입니다. 헤더 2바이트와 type 1바이트까지 합쳐 애플리케이션 프레임은 11바이트입니다.\n\n응답의 type·payload 길이·두 식별자가 모두 맞아야 성공입니다. 일련번호 8을 기다리는데 7이 돌아오면 빠른 응답 표본으로 넣지 않습니다. 같은 묶음의 동일 연결에서 두 응답을 받는 것도 정상 성공 두 건으로 세지 않습니다.\n\n측정용 메시지는 loopback 실험 안에서만 사용합니다. 게임 입력이나 상태 해시와 같은 의미를 부여하지 않습니다. 워밍업은 round 0~7, 실제 표본은 8부터 시작하므로 늦은 워밍업 응답도 구분됩니다.\n\n한 번의 완성 에코에는 요청 11바이트와 응답 11바이트가 있지만, 이는 TCP/IP 헤더·ACK 등을 포함한 네트워크 전송량이 아닙니다. 성공 건수에 22를 곱한 값을 링크 전체 바이트 사용량이라고 부르지 않습니다.",
+      "codes": [
+        {
+          "label": "측정용 메시지와 정확한 응답 식별",
+          "text": "// Loopback measurement protocol, not simulation input or an authenticated reply.\ninline Frame probe_frame(std::uint32_t round, std::uint32_t slot) {\n    Frame frame{};\n    frame.type = 60;\n    frame.size = 8;\n    ByteWriter writer(frame.payload.data(), frame.size);\n    writer.u32(round);\n    writer.u32(slot);\n    return frame;\n}\ninline bool matches_probe(const Frame& frame, std::uint32_t round, std::uint32_t slot) {\n    if (frame.type != 60 || frame.size != 8) return false;\n    ByteReader reader(frame.payload.data(), frame.size);\n    std::uint32_t got_round = 0, got_slot = 0;\n    return reader.u32(got_round) && reader.u32(got_slot) && reader.at_end() &&\n           got_round == round && got_slot == slot;\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_recv_some",
+        "invariant": "바이트 도착·프레임 완성·애플리케이션 처리 완료는 서로 다른 관찰 지점이다.",
+        "mayDiffer": "현재 수신 함수는 바이트를 제공한다. 학습 도구의 성공 판단은 그 위의 메시지 내용 검사까지 포함한다."
+      }
+    },
+    {
+      "title": "동시에 보내되 미완료 수에는 상한을 둔다",
+      "body": "N개 연결에 하나씩 요청을 보낸 뒤, **그 묶음의 모든 응답이 완료되어야** 다음 묶음을 시작합니다. 한 연결에 미완료 요청은 최대 하나이고 전체 상한은 N입니다. 연결별 무제한 대기열을 만들어 측정기 자체가 메모리를 소진하지 않도록 합니다.\n\nmain만 모든 ThreadLink의 공개 함수를 호출합니다. 각 작업자는 자신의 소켓·파서를 소유합니다. echo 수신 큐에서 요청을 꺼내 확인한 뒤 같은 프레임을 송신 큐에 넣는 것도 main의 책임입니다.\n\n`done`과 `echoed`는 현재 묶음의 중복을 구분합니다. `pending`은 아직 완료되지 않은 응답 수입니다. `report`가 있으면 링크가 종료된 것이므로 해당 실험을 중단합니다. 성공 표본을 만들기 위해 끊어진 연결에 자동으로 재접속하지 않습니다.\n\nmain이 큐를 계속 훑느라 코어 하나를 점유하지 않도록 미완료 상태에서 100µs 수면을 요청합니다. 이 대기도 방금 정한 지연에 포함됩니다. 측정하는 대상과 관찰자의 실행이 서로 영향을 준다는 점을 코드에서 볼 수 있습니다.",
+      "codes": [
+        {
+          "label": "응답 측의 확인과 에코 송신",
+          "text": "                if (pair.echo->receive(frame) == QueueGet::item) {\n                    if (echoed[i] || !matches_probe(frame, first_round + r,\n                                                   static_cast<std::uint32_t>(i))) {\n                        result.status = \"bad_request\"; return result;\n                    }\n                    echoed[i] = true;\n                    if (std::strcmp(mode, \"drop\") != 0) {\n                        if (std::strcmp(mode, \"corrupt\") == 0) frame.payload[0] ^= 1;\n                        if (pair.echo->send(frame) != QueuePut::stored) {\n                            result.status = \"echo_enqueue_failed\"; return result;\n                        }\n                    }\n                }",
+          "language": "cpp"
+        },
+        {
+          "label": "완료 표본을 만든 뒤 미완료 수 감소",
+          "text": "                if (pair.client->receive(frame) == QueueGet::item) {\n                    if (done[i] || !matches_probe(frame, first_round + r,\n                                                 static_cast<std::uint32_t>(i))) {\n                        result.status = \"bad_reply\"; return result;\n                    }\n                    const auto received = Clock::now();\n                    if (received >= deadline || received >= total_deadline) {\n                        result.status = \"timeout\"; return result;\n                    }\n                    result.samples_us.push_back(\n                        std::chrono::duration<double, std::micro>(received - sent[i]).count());\n                    done[i] = true;\n                    --pending;\n                }\n            }\n            // This coordinator delay is part of application-observed latency.\n            if (pending) std::this_thread::sleep_for(std::chrono::microseconds(100));\n        }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "묶음 장벽이 만드는 부하",
+          "body": "이 방식은 각 연결이 독립적으로 계속 보내는 패턴보다 더 강한 동기화가 있습니다. 한 연결이 늦으면 다른 연결도 다음 묶음을 기다립니다. 이후 다른 부하 모델과 비교하려면 이 장벽까지 같은 조건으로 유지하거나 변경 사실을 명시해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "시작·성공·미완료·미시도를 따로 센다",
+      "body": "계획한 요청 수는 N×rounds입니다. started는 send를 시도하기 직전에 증가합니다. 따라서 로컬 큐에 거절된 요청도 started에 들어갑니다. completed는 내용 확인을 마친 지연 표본 수입니다.\n\n실패하면 실험을 중단하고 남아 있는 작업을 취소합니다. `incomplete = started − completed`는 이번 실행에서 성공을 확인하지 못한 시도입니다. 모두 같은 이유로 실패했다는 뜻은 아닙니다. 한 연결의 잘못된 응답 때문에 함께 중단된 다른 요청도 포함됩니다. `unattempted = planned − started`는 아직 시도하지 않은 수입니다.\n\n한 묶음의 마감은 송신을 시작하기 직전부터 500ms입니다. 전체 measure 호출에는 60초 마감을 둡니다. 마감 뒤에 꺼낸 응답은 제시간 성공 표본에 넣지 않습니다. 실패 상태와 미완료 수를 출력하고 프로그램도 실패 코드로 종료합니다.\n\n예를 들어 4개 연결로 10묶음을 계획하고 첫 묶음의 응답을 모두 버리면 planned=40, started=4, completed=0, incomplete=4, unattempted=36입니다. 표본이 없으므로 latency는 null입니다. 0µs라는 가짜 성공값으로 바꾸지 않습니다.",
+      "codes": [
+        {
+          "label": "측정 결과가 보유할 최소 상태",
+          "text": "struct Measurement {\n    std::size_t started = 0;\n    std::vector<double> samples_us;\n    const char* status = \"ok\";\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "마감 확인 후 요청 묶음 시작",
+          "text": "    const auto total_deadline = Clock::now() + std::chrono::seconds(60);\n    for (unsigned r = 0; r < rounds; ++r) {\n        if (Clock::now() >= total_deadline) {\n            result.status = \"total_timeout\"; return result;\n        }\n        std::fill(done.begin(), done.end(), false);\n        std::fill(echoed.begin(), echoed.end(), false);\n        const auto deadline = Clock::now() + Millis(500);",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "시간 제한의 범위",
+          "body": "이 도구의 round/전체 마감은 요청 측정 루프를 제한합니다. loopback 소켓 준비와 워밍업 실패는 별도 시작 실패로 보고합니다. 외부 주소를 받는 서비스 연결 도구로 확장하려면 connect·accept 준비 단계에도 별도의 취소·시간 제한을 설계해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "표본에서 평균과 p99를 직접 계산한다",
+      "body": "표본을 작은 순서대로 정렬했을 때 p99를 어느 위치로 정의할지 정합니다. 여기서는 **nearest rank**, 즉 `ceil(99×N/100)`번째를 씁니다. 1부터 세는 순위이므로 vector 인덱스는 그 값에서 1을 뺍니다. 다른 도구는 인접 값 사이를 보간할 수도 있어 같은 원시 자료에도 숫자가 조금 다를 수 있습니다.\n\n1~100µs가 한 번씩 있는 표본의 p50은 50µs, p99는 99µs입니다. 50개 표본의 p99 순위는 ceil(49.5)=50이므로 최댓값과 같습니다. 적은 표본에 p99.9를 붙인다고 갑자기 꼬리를 정밀하게 추정하는 것은 아닙니다.\n\n`summarize_latency`는 복사본을 정렬해 원래 도착 순서를 보존합니다. 빈 표본, 음수, NaN, 무한대는 거절합니다. 평균은 비음수 정렬 값에 대해 누적 평균을 갱신하여 큰 값들을 단순 합산할 때의 넘침을 피합니다.\n\n순위 계산도 정수 곱셈의 범위를 확인합니다. N=100q+r로 나누면 ceil(pN/100)=pq+ceil(pr/100)입니다. r<100이므로 중간 곱을 작게 유지할 수 있습니다. 실제 실험의 최대 표본은 16,000개지만 함수는 그 작은 범위에만 기대지 않습니다.",
+      "codes": [
+        {
+          "label": "유효 표본만 복사본에서 정렬",
+          "text": "inline std::optional<LatencySummary> summarize_latency(std::vector<double> samples) {\n    if (samples.empty()) {\n        return std::nullopt;\n    }\n    for (const double s : samples) {\n        if (!std::isfinite(s) || s < 0.0) {\n            return std::nullopt;\n        }\n    }\n\n    // Private copy: sorting must not disturb the caller's sample order.\n    std::sort(samples.begin(), samples.end());",
+          "language": "cpp"
+        },
+        {
+          "label": "합산 넘침을 피하는 평균과 nearest-rank 순위",
+          "text": "    // Incremental mean of sorted nonnegative values avoids overflowing a sum,\n    // including platforms where long double has the same range as double.\n    long double mean = 0.0L;\n    std::size_t seen = 0;\n    for (const double s : samples) {\n        ++seen;\n        mean += (static_cast<long double>(s) - mean) / static_cast<long double>(seen);\n    }\n\n    const std::size_t n = samples.size();  // n > 0 past this point.\n\n    // Nearest-rank quantiles computed as p*q + ceil(p*r / 100) with\n    // n = 100*q + r. Splitting n this way keeps every intermediate (p <= 99,\n    // r < 100, q <= n/100) small enough that no std::size_t product overflows.\n    const std::size_t q = n / 100;\n    const std::size_t r = n % 100;\n    const std::size_t r50 = 50 * q + (50 * r + 99) / 100;\n    const std::size_t r99 = 99 * q + (99 * r + 99) / 100;",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "p99를 읽을 때 사라지는 표본을 찾는다",
+      "body": "표본 100개 중 99개가 1ms이고 하나가 1000ms라고 가정합니다. 평균은 (99+1000)/100=10.99ms입니다. p99는 정렬한 99번째인 1ms이고 최댓값은 1000ms입니다. 세 숫자는 서로 모순되지 않습니다. 서로 다른 요약이기 때문입니다.\n\n이번 프로그램의 분포에는 **성공을 확인한 요청만** 들어갑니다. 마감으로 중단한 요청에는 정확한 완료 지연이 없으므로 500ms라는 값을 임의로 삽입하지 않습니다. 이 요청은 미완료로 따로 보고합니다. 성공 p99가 작아도 미완료가 많다면 좋은 실험 결과로 판단할 수 없습니다.\n\n표본을 완료를 관찰한 순서대로 보관하면 느린 값이 연속해서 관찰되었는지 다시 볼 수 있습니다. 정확한 발생 시각까지 분석하려면 시각도 별도로 기록해야 합니다. 한 번의 p99만 남겨 두면 그 정보가 사라집니다. 그래서 출력 JSON에는 요약과 함께 `samples_us`도 남깁니다.\n\n같은 묶음의 요청은 같은 CPU·스케줄링 상황을 공유하므로 표본을 모두 독립적인 추첨으로 가정하지 않습니다. 이 함수가 계산한 것은 **이번 실행의 경험적 백분위**입니다. 미래 실행이나 운영 사용자 99%에 대한 신뢰 구간을 계산한 것은 아닙니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "가장 느린 입력과 화면 진행",
+          "body": "lockstep은 필요한 상대 입력이 부족하면 시뮬레이션 진행을 기다립니다. 그래서 꼬리 지연을 살펴야 합니다. 다만 에코 한 번의 지연이 화면 정지 시간과 그대로 같지는 않습니다. 입력 버퍼와 시뮬레이션 진행 조건까지 연결해 해석해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "CPU 시간은 경과 시간과 다르게 센다",
+      "body": "경과 시간은 시작에서 끝까지 실제로 지난 시간입니다. CPU 시간은 그동안 프로세스의 스레드가 CPU에서 실행된 시간의 합입니다. 잠들거나 실행 순서를 기다린 시간은 보통 CPU 사용 시간에 들어가지 않습니다.\n\n예를 들어 경과 2초 동안 사용자 모드 0.3초, 커널 모드 0.1초를 사용했다면 CPU 시간은 0.4초이고 평균 0.2코어분입니다. 병렬로 두 코어를 계속 사용하면 같은 2초 동안 CPU 시간은 약 4초일 수 있습니다. `cpu_core_equivalents = ΔCPU / Δwall`은 전체 컴퓨터의 모든 코어를 합쳐 100%로 정규화한 비율과 구분됩니다.\n\nLinux의 [getrusage RUSAGE_SELF](https://man7.org/linux/man-pages/man2/getrusage.2.html)는 프로세스 전체 스레드의 누적 CPU 시간을 제공합니다. 시작과 끝의 차이를 취합니다. Windows 경로는 [GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)의 사용자·커널 시간을 사용하고 100ns 단위를 초로 바꿉니다.\n\n자발적 컨텍스트 전환과 비자발적 전환은 Linux에서만 추가 출력합니다. 해당 관찰을 제공하지 않는 경로에서는 null입니다. 0으로 출력해 “전환이 없었다”고 오해하게 만들지 않습니다. CPU 관찰 API 자체의 실패도 null로 남깁니다.",
+      "codes": [
+        {
+          "label": "프로세스 전체에 대한 누적 관찰값",
+          "text": "struct ProcessUsage {\n    double cpu_seconds = 0;\n    std::optional<std::uint64_t> voluntary_switches;\n    std::optional<std::uint64_t> involuntary_switches;\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "OS별 CPU 시간을 같은 단위로 읽기",
+          "text": "inline std::optional<ProcessUsage> process_usage() {\n    ProcessUsage result;\n#ifdef _WIN32\n    FILETIME created{}, exited{}, kernel{}, user{};\n    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))\n        return std::nullopt;\n    const auto seconds = [](FILETIME v) {\n        const std::uint64_t ticks = (std::uint64_t(v.dwHighDateTime) << 32) |\n                                    v.dwLowDateTime;\n        return static_cast<double>(ticks) * 1e-7;\n    };\n    result.cpu_seconds = seconds(kernel) + seconds(user);\n#else\n    rusage usage{};\n    if (getrusage(RUSAGE_SELF, &usage) != 0) return std::nullopt;\n    result.cpu_seconds = static_cast<double>(usage.ru_utime.tv_sec) +\n        usage.ru_utime.tv_usec * 1e-6 + static_cast<double>(usage.ru_stime.tv_sec) +\n        usage.ru_stime.tv_usec * 1e-6;\n#ifdef __linux__\n    result.voluntary_switches = static_cast<std::uint64_t>(usage.ru_nvcsw);\n    result.involuntary_switches = static_cast<std::uint64_t>(usage.ru_nivcsw);\n#endif\n#endif\n    return result;\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "컨텍스트 전환은 wakeup 계수기가 아니다",
+          "body": "자발적 전환에는 sleep뿐 아니라 동기화 자원 대기도 포함될 수 있습니다. 비자발적 전환에도 여러 스케줄링 원인이 있습니다. 전환 횟수가 늘었다는 관찰만으로 정확한 폴링 호출 횟수나 캐시 손실량을 계산하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "유휴·워밍업·측정·정리를 분리한다",
+      "body": "연결을 모두 만든 뒤 main은 200ms를 쉽니다. 이 구간에는 애플리케이션 요청이 없지만 ThreadLink 작업자는 계속 폴링합니다. 이것이 idle 창입니다. 연결 생성 비용은 창 밖에 있지만 갓 시작한 작업자의 초기 실행 일부는 겹칠 수 있습니다. 짧은 창을 정밀한 장기 유휴 비용으로 단정하지 않습니다.\n\n다음에는 8개 묶음을 정상 에코로 왕복시키되 표본을 버립니다. 워밍업은 작업자 시작·코드와 자료 접근 등 초기 효과를 측정 창과 어느 정도 분리하기 위한 단계입니다. 8번이면 모든 캐시와 시스템이 안정된다는 보장은 없습니다.\n\nactive 창은 실제 measure 호출 전후입니다. 요청 처리와 표본 기록 등 이 호출의 비용을 포함하고, 통계 정렬·화면 출력·연결 해제는 밖에 둡니다. CPU와 경과 시간은 바로 옆에서 읽지만 원자적인 한 번의 관찰은 아니므로 API 호출 간의 작은 차이도 존재합니다.\n\n성공 처리량은 `completed / active.wall_seconds`입니다. 실패로 중단된 구간도 실제 경과 시간을 분모로 씁니다. 워밍업을 분자에 넣거나 실패 구간을 분모에서 빼서 결과를 좋아 보이게 만들지 않습니다. 정리는 모든 작업자에 중단을 요청한 다음 join을 완료하고 Runtime보다 먼저 연결을 해제합니다.",
+      "codes": [
+        {
+          "label": "측정 창을 만들고 정리를 분리한다",
+          "text": "        // No application traffic; the main thread sleeps while all links poll.\n        const Window idle_begin;\n        std::this_thread::sleep_for(Millis(200));\n        const Window idle_end;\n        const auto warmup = measure(pairs, 8, 0, \"echo\");\n        if (std::strcmp(warmup.status, \"ok\")) throw std::runtime_error(\"warmup\");\n        const Window active_begin;\n        const auto result = measure(pairs, rounds, 8, mode);\n        const Window active_end;\n        const auto summary = summarize_latency(result.samples_us);\n        for (auto& pair : pairs) { pair.client->request_stop(); pair.echo->request_stop(); }\n        pairs.clear(); // Cleanup outside the measured windows; join every worker.",
+          "language": "cpp"
+        },
+        {
+          "label": "성공 처리량의 분모",
+          "text": "        const double wall = std::chrono::duration<double>(active_end.wall - active_begin.wall).count();\n        std::cout << \",\\\"completed_per_second\\\":\" << result.samples_us.size() / wall\n                  << \",\\\"latency\\\":\";",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "부하 모델이 보여 주지 못하는 것을 읽는다",
+      "body": "이 도구는 응답을 기다렸다가 다음 묶음을 보냅니다. 이를 **닫힌 부하 모델**이라고 부릅니다. 서버가 느려지면 요청도 늦게 생기므로 부하가 스스로 낮아집니다. 한 묶음의 응답이 5ms에서 50ms로 늘면 같은 N에서 시도할 수 있는 묶음 빈도도 대략 1/10로 줄어듭니다.\n\n외부 사용자가 일정한 속도로 계속 접속하는 상황은 다릅니다. 처리보다 도착이 빠르면 대기열이 쌓입니다. 닫힌 모델의 성공 지연만으로 이 혼잡을 예측하면, 기다리는 동안 원래 도착했어야 할 요청과 그 지연을 관찰하지 못합니다. 이런 누락을 흔히 coordinated omission 문제와 연결해 설명합니다.\n\n따라서 결과의 질문을 좁힙니다. “이 구현과 이 기기에서 N개 연결에 묶음당 한 요청을 보내면 어떤 비용이 보이는가?”입니다. “초당 고정된 도착률에서 최대 몇 명을 받을 수 있는가?”는 다른 부하 생성·대기열·거절 정책과 측정이 필요합니다.\n\nCPU도 같은 프로세스 안의 **발생기·두 소켓 끝·에코 조정**을 합친 값입니다. 연결 수를 늘렸을 때 비용이 커지면 조사할 근거는 되지만, 증가분 전부를 운영 서버의 한 함수 탓으로 돌릴 수는 없습니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "다른 구현과 비교할 때 고정할 것",
+          "body": "요청 크기·미완료 상한·묶음 장벽·시간 제한·성공 판단·측정 시작과 끝을 같게 해야 합니다. 구현뿐 아니라 측정 조건까지 바뀌면 어느 변화가 숫자를 만들었는지 구분하기 어렵습니다."
+        },
+        {
+          "kind": "scope",
+          "title": "측정 누락을 더 읽기",
+          "body": "[HdrHistogram의 누락 표본과 보정 설명](https://github.com/HdrHistogram/HdrHistogram#corrected-vs-raw-value-recording-calls)은 긴 지연 때문에 관측 자체가 줄어드는 상황을 다룹니다. 여기서는 표본에 보정값을 합성하지 않고, 원시 표본과 부하 생성 조건을 함께 남깁니다."
+        }
+      ]
+    },
+    {
+      "title": "빌드하고 원시 기록을 남긴다",
+      "body": "CMake에 두 타깃을 추가합니다. thread_measure는 StudySocket에 연결하므로 게임의 실제 누적 통신 구현을 사용합니다. measurement_contract는 백분위·응답 식별·실험 인자 범위를 검사합니다. 창을 띄우지 않는 실험은 SCRIPTED 백엔드로 빌드할 수 있습니다.\n\n같은 기기에서 1·4·16개 연결과 1·5ms 폴링을 비교합니다. 한 번에 하나의 조건을 바꾸어 표를 만들고, 실행 순서를 뒤집어 반복합니다. 발열·주파수 조절·백그라운드 부하가 한쪽 조건에만 몰리는 영향을 줄이기 위해서입니다. 반복이 이런 영향을 모두 제거하는 것은 아닙니다.\n\nCPU/OS·컴파일러·Release 여부·다른 부하를 기록하고 각 실행 JSON을 보관합니다. 측정 중 디버거·로그 출력·검사기를 추가하면 그것도 실험 조건입니다. 결과가 매번 달라질 수 있으므로 “p99가 반드시 3ms 이하” 같은 환경 의존 숫자를 코드의 정답 검사로 쓰지 않습니다.\n\n명령은 저장소 루트 기준입니다. SDL 게임도 확인하려면 별도 빌드 폴더에 STUDY_PLATFORM=SDL로 구성하고 tetris 타깃을 빌드합니다. 다중 구성 생성기는 빌드에 --config Release, CTest에 -C Release를 추가하고 실행 파일의 Release 하위 경로를 맞춥니다.",
+      "codes": [
+        {
+          "label": "누적 소켓 라이브러리를 재사용하는 두 타깃",
+          "text": "# Bounded measurement reuses the cumulative socket/framing/thread implementation.\nadd_executable(thread_measure tools/thread_measure.cpp)\ntarget_link_libraries(thread_measure PRIVATE StudySocket)\nadd_executable(measurement_contract tests/measurement_contract.cpp)\ntarget_link_libraries(measurement_contract PRIVATE StudySocket)\nadd_test(NAME measurement_contract COMMAND measurement_contract)",
+          "language": "cmake"
+        },
+        {
+          "label": "측정 도구 빌드",
+          "text": "cmake -S docs/learn/checkpoints/124-thread-measurement -B out/study-124 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-124 --target thread_measure measurement_contract -j2\nctest --test-dir out/study-124 -R '^measurement_contract$' --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "연결 수와 폴링 간격을 한 조건씩 비교",
+          "text": "out/study-124/thread_measure 1 100 1 > out/study-124/one-poll1.json\nout/study-124/thread_measure 4 100 1 > out/study-124/four-poll1.json\nout/study-124/thread_measure 16 100 1 > out/study-124/sixteen-poll1.json\nout/study-124/thread_measure 16 100 5 > out/study-124/sixteen-poll5.json",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "실패가 결과를 왜곡하지 않는지 실험한다",
+      "body": "drop 모드는 워밍업을 정상 완료한 뒤 실제 측정에서 응답을 보내지 않습니다. 요청의 큐 저장과 송신이 성공해도 completed는 0이어야 합니다. corrupt 모드는 응답의 round 바이트를 바꾸므로 bad_reply로 끝나야 합니다. 두 모드 모두 의도적으로 프로그램이 실패 코드 1을 반환합니다.\n\n출력의 planned=started+unattempted, started=completed+incomplete 관계를 확인합니다. samples_us를 별도로 정렬해 nearest-rank p99를 다시 계산하고, 성공 처리량의 분모도 active.wall_seconds와 대조합니다. 이것은 측정기의 정확성 검사입니다. 어떤 구현이 빠른지를 단정하는 검사가 아닙니다.\n\n이제 소켓 소유권과 메시지 의미를 유지한 채 비교 가능한 기준 기록을 만들 수 있습니다. 현재 코드 보기에서는 forwarderLoop의 기다림·종료·idle 마감과 측정 도구의 경계를 대조합니다. 학습 프레임 크기와 연결 개수는 바뀔 수 있지만, 무엇을 언제 세었는지를 밝히는 원칙은 유지합니다.\n\n프로세스 복제도 선택지지만 현재 서버의 매칭 큐·친구방·입장 제한까지 모두 독립인 것은 아닙니다. 같은 경기의 연결을 같은 인스턴스로 보내는 방법과 공용 저장소의 병목을 함께 검토해야 합니다. 이번 작은 에코 결과만으로 구조 교체나 복제의 우열을 결정하지 않습니다.",
+      "codes": [
+        {
+          "label": "내용 없는 성공을 막는 실패 실험",
+          "text": "out/study-124/thread_measure 4 10 1 drop\nout/study-124/thread_measure 4 10 1 corrupt\npython3 scripts/check_learning_measurement.py",
+          "language": "sh"
+        }
+      ],
+      "reference": {
+        "path": "server/main.cpp",
+        "symbol": "relay::playerConnThread",
+        "invariant": "성능 선택은 연결 이후의 공유 상태·입장 정책까지 포함한 경계에서 판단한다.",
+        "mayDiffer": "현재 서버는 접속·매칭·방 관리와 메타 서비스를 연결한다. 이 실험은 그 전체 비용을 재현하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "여기서 구현하지 않은 것",
+          "body": "운영 규모 부하, 고정 도착률 발생기, 원격 호스트 간 지연, 메모리 프로파일링, Reactor 교체는 포함하지 않습니다. 실험이 던지는 질문을 확장할 때 각각의 관찰 경계와 성공 조건을 추가해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 구현 순서를 다시 연결한다",
+      "body": "파일을 열 때는 probe_frame의 요청 식별 → ThreadLink의 poll_delay 전달 → measure의 한 묶음 → 지연 표본 집계 → process_usage의 누적값 차이 순으로 따라갑니다. 완성 파일은 아래에서 펼쳐 읽을 수 있습니다.\n\n측정 코드가 길어지는 이유의 상당 부분은 빠른 경로가 아니라 잘못된 응답·시간 초과·구간 구분을 명시하기 때문입니다. 그 경계를 생략하면 숫자는 더 쉽게 나오지만 무엇을 측정했는지 설명하기 어려워집니다.",
+      "codes": [
+        {
+          "label": "측정 실행 파일 전체",
+          "file": "checkpoints/124-thread-measurement/tools/thread_measure.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "지연 요약 함수 전체",
+          "file": "checkpoints/124-thread-measurement/net/latency_summary.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "측정 계약 검사 전체",
+          "file": "checkpoints/124-thread-measurement/tests/measurement_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "124-1",
+      "question": "100개 성공 표본 중 99개가 1ms, 하나가 1000ms입니다. nearest-rank p99와 최댓값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "둘 다 1000ms"
+        },
+        {
+          "id": "b",
+          "text": "p99 1ms, 최댓값 1000ms"
+        },
+        {
+          "id": "c",
+          "text": "p99 10.99ms, 최댓값 1000ms"
+        },
+        {
+          "id": "d",
+          "text": "둘 다 1ms"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "p99 1ms, 최댓값 1000ms",
+      "explanation": "p99의 순위는 ceil(0.99×100)=99이므로 1ms입니다. 100번째의 1000ms는 최댓값에 남습니다. 10.99ms는 평균이므로 다른 요약값입니다."
+    },
+    {
+      "id": "124-2",
+      "question": "이 도구에서 active 경과 시간이 2초, 프로세스 CPU 시간이 0.6초 늘었습니다. 맞는 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "운영 릴레이만 코어 0.3개분 사용"
+        },
+        {
+          "id": "b",
+          "text": "전체 컴퓨터 CPU가 반드시 30% 사용됨"
+        },
+        {
+          "id": "c",
+          "text": "평균 요청 지연은 0.6초"
+        },
+        {
+          "id": "d",
+          "text": "도구 전체가 평균 0.3코어분 사용"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "도구 전체가 평균 0.3코어분 사용",
+      "explanation": "0.6/2=0.3코어분입니다. 이 프로세스에는 발생기·소켓 양 끝·조정자가 포함됩니다. 머신 전체 코어 수로 정규화한 CPU 퍼센트나 릴레이 단독 비용과 구분해야 합니다."
+    },
+    {
+      "id": "124-3",
+      "question": "4개 연결·10묶음에서 첫 묶음의 응답을 모두 버려 중단했습니다. 출력은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "completed 0, incomplete 4, unattempted 36"
+        },
+        {
+          "id": "b",
+          "text": "completed 4, incomplete 0, unattempted 36"
+        },
+        {
+          "id": "c",
+          "text": "completed 0, incomplete 40, unattempted 0"
+        },
+        {
+          "id": "d",
+          "text": "completed 0, incomplete 0, unattempted 40"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "completed 0, incomplete 4, unattempted 36",
+      "explanation": "처음 네 요청만 시도했습니다. 응답을 확인하지 못했으므로 네 시도는 incomplete, 아직 시작하지 않은 36개는 unattempted입니다. 성공 표본이 없어 latency는 null입니다."
+    },
+    {
+      "id": "124-4",
+      "question": "응답을 모두 받은 다음 묶음을 보내는 실험에서 서버가 느려졌습니다. 가장 직접적인 부하 변화는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새 요청 도착률이 자동으로 증가한다"
+        },
+        {
+          "id": "b",
+          "text": "대기열이 반드시 무한히 커진다"
+        },
+        {
+          "id": "c",
+          "text": "다음 묶음 시작이 늦어져 요청률도 낮아진다"
+        },
+        {
+          "id": "d",
+          "text": "고정 도착률의 혼잡을 그대로 재현한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "다음 묶음 시작이 늦어져 요청률도 낮아진다",
+      "explanation": "닫힌 부하는 응답을 기다리는 동안 새 묶음을 만들지 않습니다. 따라서 일정 속도로 외부 요청이 계속 도착하는 상황과 다릅니다. 그 혼잡을 판단하려면 다른 부하 모델이 필요합니다."
+    },
+    {
+      "id": "124-5",
+      "question": "ThreadLink의 유휴 수면 요청을 1ms에서 5ms로 바꾸었습니다. 코드만 보고 확정할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "p99가 정확히 5배가 된다"
+        },
+        {
+          "id": "b",
+          "text": "진행 없는 회차의 요청 수면 시간이 5ms가 된다"
+        },
+        {
+          "id": "c",
+          "text": "프로세스 CPU가 정확히 1/5이 된다"
+        },
+        {
+          "id": "d",
+          "text": "에코 지연의 최댓값이 5ms가 된다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "진행 없는 회차의 요청 수면 시간이 5ms가 된다",
+      "explanation": "인자가 바꾸는 것은 진행하지 못한 회차의 요청 수면 시간입니다. 실제 반복률·CPU·지연은 스케줄링과 처리 경로에 따라 달라지므로 측정해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "에코 경로에 시작·끝 시각과 성공 조건을 직접 표시합니다.",
+      "1·4·16개 연결의 원시 표본을 저장하고 같은 조건을 순서를 바꾸어 반복합니다.",
+      "정렬한 표본의 p50·p99·최댓값을 출력과 대조합니다.",
+      "idle/active CPU 차이를 각 경과 시간으로 나누고 프로세스 범위를 설명합니다.",
+      "drop/corrupt 모드에서 성공을 세지 않고 미완료와 미시도를 구분하는지 확인합니다."
+    ],
+    "failureChecks": [
+      "큐에 저장한 수를 성공 응답 수로 바꾸지 않습니다.",
+      "표본 없는 결과를 지연 0으로 채우지 않습니다.",
+      "CPU 관찰 불가를 사용량 0으로 표시하지 않습니다.",
+      "실험 전체 CPU를 서버 한쪽의 CPU라고 해석하지 않습니다.",
+      "닫힌 부하 결과로 고정 도착률의 혼잡이나 운영 최대 인원을 단정하지 않습니다."
+    ],
+    "expected": "경계가 명확한 원시 측정 기록을 만들고, 실패와 부하 모델을 포함해 구조 변경의 근거로 사용할 수 있는 범위를 판단할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "선택 통계 명세 DeepSeek 초안 직접 교정·OS 공식 API 계약 대조·실제 루프백 부하/실패 주입",
+    "draftJob": "out/learning-jobs/124-summary-events.jsonl",
+    "corrections": [
+      "long double 범위가 double과 같은 플랫폼의 합산 넘침을 누적 평균으로 교정",
+      "불필요한 percentile 순위 clamp 제거",
+      "Part14의 정확 1000회·p99 비례·TLB 유지·선형 복제 등 단정 교정",
+      "표본 저장 순서는 요청 순서가 아니라 완료 관찰 순서임을 명시"
+    ]
+  },
+  "validation": [
+    "Linux SCRIPTED/SDL 측정·ThreadLink·흐름제어 계약과 누적 SDL 게임 빌드",
+    "1·4·16연결/1·5ms 각3회 실제 소켓 실행·원시 표본/분모 대조",
+    "drop 시간초과·변조 응답·입력 범위 오류·표본 및 실제 소켓 경로 전체 ASan/UBSan",
+    "수동GUI·Windows/macOS네이티브·운영규모 용량·원격 네트워크 검증 없음"
+  ]
+}

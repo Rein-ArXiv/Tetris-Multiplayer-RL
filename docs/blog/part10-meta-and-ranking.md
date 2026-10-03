@@ -20,14 +20,14 @@
 
 ## 1. 왜 relay 와 meta 를 분리하는가
 
-[Part 7](./part7-relay-server.md) 의 relay 는 매치 전에는 큐와 room 제어 프레임을 해석하고, 매치가 시작되면 두 TCP 소켓 사이에서 게임 프레임을 전달한다. 상태를 거의 갖지 않는 것이 그 설계의 핵심이었다 — 재시작해도 잃을 것이 진행 중인 매치뿐이고, 다른 기기로 옮기는 데 데이터 이전이 필요 없다.
+[Part 7](./part7-relay-server.md) 의 relay 는 매치 전에는 큐와 room 제어 프레임을 해석하고, 매치가 시작되면 두 TCP 소켓 사이에서 게임 프레임을 전달한다. relay의 경기·방·큐·입장 상태는 주로 메모리에 있고, ranked에서는 서버 규칙 상태도 유지한다. 재시작하면 진행 중인 경기뿐 아니라 방과 대기 상태도 잃는다. 계정·보상 DB는 meta가 소유하므로 relay만 옮길 때 그 DB를 함께 이전하지는 않는다. 운영 설정·공유 비밀·meta 접속 경로는 별도로 준비한다.
 
-여기에 SQLite 를 밀어 넣으면 그 성질이 사라진다. relay 프로세스가 DB 파일을 소유하는 순간 백업·이전·스키마 마이그레이션이 relay 의 배포 절차에 붙고, 포워딩 스레드가 디스크 fsync 뒤에서 밀린다. 그래서 책임을 둘로 나눈다.
+relay가 DB 파일까지 소유하면 백업·이전·스키마 변경이 relay 배포 책임에 포함된다. 전달 경로에서 동기 DB 작업을 호출하면 디스크 작업이 전송을 지연시킬 수도 있다. 별도 워커로 분리하는 설계도 가능하지만, 이 프로젝트는 영속 상태와 게임 연결의 운영 책임을 두 프로세스로 나눈다. 프로세스를 나누어도 HTTP 왕복·실패·대기 비용은 남으므로 호출 시점과 스레드 소유권을 함께 확인한다.
 
 | 프로세스 | 상태 | 책임 |
 |---|---|---|
 | `tetris_relay` | 매치 수명 동안만 (메모리) | 입장권 소비, 매칭, wire 전달, 서버 입력 검증 |
-| `tetris_meta` | SQLite 에 영속 | guest 발급, RP/XP/BP, 아이콘 소유권, 매치 기록, leaderboard |
+| `tetris_meta` | 계정·경기는 SQLite, 입장권·요청 제한은 메모리 | guest 발급, RP/XP/BP, 아이콘 소유권, 매치 기록, leaderboard |
 
 ```mermaid
 graph TB
@@ -54,26 +54,30 @@ graph TB
     W[web/ranking/index.html]
     DB[(tetris.db<br/>SQLite WAL)]
 
-    C2 -- "POST /v1/guest · /v1/auth/verify<br/>GET /v1/icons/catalog<br/>POST /v1/icons/buy · select" --> M1
+    C2 -- "POST /v1/guest · /v1/auth/verify · /v1/game-tickets<br/>GET /v1/icons/catalog<br/>POST /v1/icons/buy · select" --> M1
     C1 -- "TCP: QUEUE_JOIN / 게임 프레임" --> R1
-    R3 -- "POST /v1/auth/verify<br/>POST /v1/matches + X-Relay-Secret" --> M1
+    R3 -- "POST /v1/game-tickets/consume<br/>POST /v1/matches + X-Relay-Secret" --> M1
     W -- "GET /v1/leaderboard?limit=50" --> M1
     M2 --> DB
 ```
 
-클라이언트는 자기 토큰으로 자기 데이터를 읽고, 아이콘을 사고, 공개 leaderboard 를 볼 수 있다. 그러나 **매치 결과는 직접 제출하지 못한다.** `POST /v1/matches` 는 `X-Relay-Secret` 헤더를 요구하고, 그 secret 은 relay 와 meta 만 공유한다. 이유는 간단하다 — 클라이언트가 자기 승패를 직접 보고할 수 있으면 RP 는 즉시 무의미해진다.
+클라이언트는 자기 자격 증명으로 프로필을 읽고 아이콘을 구입하며 공개 leaderboard를 볼 수 있다. 운영의 `POST /v1/matches`는 relay와 meta만 공유하는 `X-Relay-Secret`을 요구한다. 신뢰된 relay가 서버 입력 검증 결과를 제출한다. 개발용 `--allow-public-matches`를 비밀키 없이 쓰는 경우에는 `127.0.0.1` 또는 `::1`에만 bind할 수 있다. 이 예외는 방화벽·프록시를 통한 공개를 허용하는 설정이 아니다.
+
+프로세스 분리는 주소 공간과 종료 수명, 배포 단위를 나눈다. 한 호스트에서 실행해도 relay와 meta의 C++ 객체를 서로 포인터로 공유하지 않으며 HTTP 바이트로 값을 전달한다. SQLite 엔진은 meta에 링크되어 같은 프로세스 안에서 DB 파일을 읽고 쓴다. DB 파일을 읽는 별도의 SQLite 서버를 띄우는 구조가 아니다. 서비스가 재시작해도 SQLite의 커밋 기록은 보존되지만 메모리의 일회용 입장권과 요청 제한 카운터는 다시 시작한다.
+
+`GET /healthz`는 HTTP 핸들러가 응답한다는 관찰이다. 매 요청마다 DB 쿼리나 쓰기 트랜잭션을 검사하지 않으므로 이후 디스크 부족·쓰기 오류까지 판정하는 readiness 검사로 해석하지 않는다.
 
 ### 1.1 왜 SQLite 인가
 
 대안은 셋이었다.
 
-**(a) 파일 JSON/CSV.** 의존성이 0 이고 손으로 읽을 수 있다. 그러나 "BP 를 차감하고 `player_icons` 에 행을 넣는다" 같은 두 단계 갱신을 원자적으로 만들 방법이 없다. 프로세스가 중간에 죽으면 BP 만 사라진 플레이어가 생긴다. 파일 전체를 쓰고 rename 하는 방식으로 원자성을 흉내낼 수는 있지만, 플레이어가 수천 명이 되면 매 요청마다 전체 파일을 다시 쓰게 된다.
+**(a) 파일 JSON/CSV.** 형식은 단순하고 손으로 읽기 쉽다. 여러 변경의 원자성을 만들 수 없는 것은 아니다. 완전한 새 스냅샷을 준비해 원자적으로 교체하거나 저널을 설계할 수 있다. 다만 동시 접근·부분 쓰기·재시작 복구·조회용 인덱스·스키마 변경의 계약을 애플리케이션이 직접 구현해야 한다. 이 프로젝트에서는 계정·아이콘·보상을 함께 바꾸는 트랜잭션을 SQLite에 맡긴다.
 
 **(b) 클라이언트-서버형 RDBMS.** 동시성과 운영 도구가 훌륭하지만 초기 자가 호스팅 규모에는 과하다. 별도 데몬, 별도 사용자·권한, 별도 백업 파이프라인과 네트워크 경계가 생긴다. 여러 meta 인스턴스와 진정한 active-active 운영이 필요해질 때는 이 비용이 타당해진다.
 
 **(c) SQLite.** 트랜잭션·인덱스·타입·외래키를 갖췄고, DB 엔진은 amalgamation(`sqlite3.c`)으로 바이너리에 포함할 수 있다. 저장 모델도 “매치 종료 시 짧은 트랜잭션” 중심이라 단일 writer 구조로 시작하기에 알맞다. 다만 WAL 모드의 실행 중 DB는 `.db` 파일 하나를 `cp`해서 백업하면 안 된다. 일관된 온라인 백업은 SQLite backup API를 사용하고, 단순 파일 복사는 meta를 멈춘 오프라인 상태에서만 한다.
 
-(c) 를 고른 대가는 **처리량 상한**이다. `Database` 는 SQLite connection 하나를 공유하고 그 위를 `std::mutex` 로 완전히 직렬화한다. 즉 동시 요청이 100 개 들어와도 DB 작업은 한 줄로 선다. 이것은 최적화가 아니라 의도적 단순화다 — `meta/database.h` 상단이 그 이유를 명시한다.
+(c) 를 고른 대가는 **처리량 상한**이다. `Database`는 SQLite connection 하나를 공유하고 해당 연결을 쓰는 메서드를 `std::mutex`로 직렬화한다. 정적 아이콘 카탈로그처럼 연결을 사용하지 않는 조회는 이 잠금 대상이 아니다. 즉 동시 요청이 100 개 들어와도 DB 작업은 한 줄로 선다. 이것은 최적화가 아니라 의도적 단순화다 — `meta/database.h` 상단이 그 이유를 명시한다.
 
 **현재 소스 발췌 — `meta/database.h`**
 
@@ -84,14 +88,16 @@ graph TB
 //
 // 스레드 모델:
 //   cpp-httplib 의 요청 스레드 여러 개에서 동시에 호출될 수 있다. 이 클래스는
-//   내부 std::mutex 로 모든 public 메서드를 직렬화한다. 성능 최적화보다는
+//   내부 std::mutex 로 DB 연결에 접근하는 메서드를 직렬화한다. 정적 카탈로그 조회는
+//   공유 DB를 사용하지 않는다. 성능 최적화보다는
 //   데이터 정합성 + 단순함 우선. SQLite 자체도 SQLITE_THREADSAFE=1 (기본) 로
 //   컴파일되어 serialized 모드.
 //
 // 실패 정책:
 //   · open 실패 → 생성자가 std::runtime_error throw. main 이 exit(1).
-//   · 런타임 실패 (schema/쿼리) → fprintf(stderr) 로 로그 + nullopt 반환.
-//     호출자가 HTTP 500 으로 바꿔서 클라이언트에게 전달.
+//   · 스키마/마이그레이션 실패 → 생성자가 연결을 닫고 throw.
+//   · 쿼리 실패 → 메서드별 optional/상태값/빈 목록 반환. 호출부의 실패 매핑 확인.
+//     모든 실패가 반드시 HTTP 500으로 구분되는 것은 아니다.
 //
 // 스키마: players, player_icons, matches, elo_history, bot_rewards, schema_migrations.
 // WAL + foreign keys + FULL (credential rotation must survive a committed response).
@@ -194,7 +200,7 @@ endif()
 ```cmake
 cmake_minimum_required(VERSION 3.15)
 # C 언어도 활성화 — third_party/sqlite3.c (amalgamation) 를 빌드하려면 필요.
-# tetris_meta 타겟만 C 를 쓰지만 enable_language 는 프로젝트 루트에서 선언해야 한다.
+# 현재 구성은 루트에서 두 언어를 선언해 필요한 하위 타깃에 제공한다.
 project(tetris CXX C)
 ```
 
@@ -204,6 +210,7 @@ project(tetris CXX C)
 
 ```cmake
     set(TETRIS_GAME_COMMON
+        audio/mp3_decode.cpp
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
         src/account_screen.cpp
@@ -318,7 +325,7 @@ CREATE TABLE IF NOT EXISTS elo_history (
   created_at  INTEGER NOT NULL
 );
 
--- PRAGMA user_version 은 sqlite3 .dump/.restore 에 보존되지 않는다. 데이터
+-- SQL .dump를 새 DB에 재실행하면 user_version 헤더는 복원되지 않는다. 데이터
 -- 테이블의 marker도 함께 기록해 데이터 변환 마이그레이션을 멱등하게 만든다.
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name        TEXT PRIMARY KEY,
@@ -328,7 +335,9 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE INDEX IF NOT EXISTS idx_players_elo    ON players(elo DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_played ON matches(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_elo_pid        ON elo_history(player_id);
-CREATE INDEX IF NOT EXISTS idx_player_icons_pid ON player_icons(player_id);
+-- The composite ownership PK already supports the current lookup.
+-- Also remove the redundant legacy index when reopening an existing DB.
+DROP INDEX IF EXISTS idx_player_icons_pid;
 )sql";
 ```
 
@@ -340,14 +349,29 @@ CREATE INDEX IF NOT EXISTS idx_player_icons_pid ON player_icons(player_id);
 | `player_icons` | 아이콘 소유권 | `(player_id, icon_id)` 복합 PK 로 중복 소유 불가 |
 | `matches` | 매치 감사 기록 | `match_uuid`로 중복 반영 방지, 확정 RP snapshot 보존 |
 | `elo_history` | RP 변동 로그 | 매치당 두 행(양쪽) |
+| `bot_rewards` | 검증된 봇전 보상 기록 | 경기 키·플레이어·시간으로 중복 지급과 지급 한도를 관리 |
 | `schema_migrations` | 적용된 마이그레이션 marker | 데이터 변환의 멱등성 보장 |
 
 조회 인덱스는 각각 실제 쿼리를 겨냥한다. 여기에 `match_uuid` UNIQUE 제약이 재시도 멱등성 인덱스로 동작한다. 기존 DB는 nullable 컬럼을 `ALTER TABLE`로 추가한 뒤 `WHERE match_uuid IS NOT NULL`인 partial unique index를 만들어 과거 행을 그대로 보존한다.
 
-- `idx_players_elo ON players(elo DESC)` — leaderboard 의 `ORDER BY elo DESC` 를 정렬 없이 인덱스 순회로 처리한다. `players` 가 수만 행이 돼도 상위 50 명을 뽑는 데 전체 정렬이 필요 없다.
+- `idx_players_elo ON players(elo DESC)` — 실제 leaderboard는 `ORDER BY elo DESC, id ASC LIMIT ?1`을 사용한다. `id`가 INTEGER PRIMARY KEY라 이 인덱스의 동점 항목을 구별하는 rowid와 같으며, RP 동점에서는 ID 오름차순으로 안정적인 순서를 만든다. 현재 실행 계획에서 추가 정렬 없이 상위 항목부터 읽을 수 있지만 이름·승패·XP는 테이블 행에서 가져오므로 전체 SELECT의 커버링 인덱스는 아니다.
 - `idx_matches_played ON matches(created_at DESC)` — "최근 매치" 조회용. 지금 API 로 노출돼 있진 않지만 운영 중 `sqlite3` 셸로 들여다볼 때 쓴다.
 - `idx_elo_pid ON elo_history(player_id)` — 한 플레이어의 RP 곡선 조회용.
-- `idx_player_icons_pid ON player_icons(player_id)` — 복합 PK 의 선두 컬럼이 이미 `player_id` 라 중복처럼 보이지만, SQLite 에서 `WITHOUT ROWID` 가 아닌 테이블의 PK 는 별도 인덱스이므로 이 인덱스가 소유 목록 조회를 커버한다.
+- `player_icons`의 복합 PK `(player_id, icon_id)` — 현재 `SELECT 1 ... WHERE player_id=?1 AND icon_id=?2`를 두 키로 찾으며 결과에 필요한 값이 인덱스에 있어 테이블 본문을 추가로 읽을 필요가 없다. 선두 열인 player_id만으로 소유 목록을 찾는 경우에도 사용할 수 있다. 별도로 두었던 `idx_player_icons_pid`는 이 조회를 위해 필요하지 않아 생성하지 않는다. 기존 DB를 열 때는 `DROP INDEX IF EXISTS`로 그 보조 인덱스만 정리한다. 소유 행과 복합 PK의 유일성 제약은 그대로 남는다.
+
+### 3.1 조회 계획과 제약의 역할
+
+일반 `CREATE INDEX`는 중복 값을 허용하며 검색 순서를 제공한다. `UNIQUE` 인덱스·기본 키는 허용할 데이터에도 제약을 건다. 빠른 소유 조회와 중복 소유 거절은 같은 복합 PK 인덱스가 돕지만 서로 다른 계약이다. 따라서 성능용 보조 인덱스를 정리할 때 자동 생성된 PK/UNIQUE 인덱스와 혼동하지 않는다.
+
+`EXPLAIN QUERY PLAN`의 SEARCH는 조건으로 인덱스 범위를 좁히는 계획이고, SCAN은 테이블이나 인덱스를 순회하는 계획이다. SCAN이라는 단어만으로 비효율을 판정할 수 없다. 랭킹처럼 정렬된 인덱스 앞부분만 LIMIT까지 읽는 경우도 SCAN으로 표시된다. COVERING은 해당 SELECT에 필요한 열이 인덱스에 들어 있다는 뜻이고, USE TEMP B-TREE FOR ORDER BY는 별도 정렬 구조가 필요하다는 단서다. 계획 문자열의 정확한 문구는 SQLite 버전별로 달라질 수 있다. [실행 계획 해석](https://www.sqlite.org/eqp.html)
+
+인덱스는 읽기 경로를 추가하는 대신 저장 공간과 쓰기 갱신 비용을 늘린다. 단일 컬럼 인덱스를 무조건 추가하거나, 복합 인덱스의 모든 접두 인덱스를 이름만 보고 없애지 않는다. 실제 WHERE·ORDER BY·SELECT 열과 자료 분포를 확인한다. 같은 인덱스라도 어떤 쿼리에는 커버링이고 다른 쿼리에는 테이블 조회가 더 필요하다. ANALYZE가 제공하는 분포 통계는 계획 선택을 도울 수 있지만 쿼리 결과의 계약을 바꾸지는 않는다. [복합·커버링 인덱스](https://www.sqlite.org/queryplanner.html)
+
+키는 식별·참조·값 제약을 나눠 읽는다. `players.id`는 이름이 바뀌어도 유지되는 계정 식별자이고, `player_icons`의 복합 키는 한 계정이 같은 아이콘을 두 번 소유하는 일을 막는다. 현재 아이콘 카탈로그는 C++ 자료이며 `icons` SQL 테이블은 없다. 따라서 `icon_id`의 존재·구매 가능 여부는 API/DB 메서드가 카탈로그와 대조한다. `selected_icon_id` 문자열만으로 소유권이 증명되지는 않는다.
+
+`matches.winner`의 외래 키는 해당 계정의 존재를 요구한다. 그 계정이 **이번 경기의 두 참가자 중 하나**인지는 별도 조건이며 현재 API가 검사한다. 무승부는 명시적인 `NULL`로 저장하고, JSON 필드 누락·잘못된 타입은 입력 오류로 거절한다(§10.2). 과거 `match_uuid=NULL` 행은 여러 개 있을 수 있다. nullable UNIQUE만으로 모든 행에 재시도 키가 생기지는 않는다.
+
+SQLite 외래 키 검사는 각 연결에서 `PRAGMA foreign_keys=ON`으로 켜야 한다. 현재 초기화도 이를 설정한다. 일반 테이블의 TEXT 기본 키에는 NULL 허용이라는 역사적 예외가 있으므로 새로운 스키마의 필수 키에는 `NOT NULL`을 명시한다. `INTEGER PRIMARY KEY`는 rowid에 연결되며 생략/NULL 삽입 시 행 번호를 배정하는 다른 경우다. [외래 키](https://www.sqlite.org/foreignkeys.html)와 [테이블 제약](https://www.sqlite.org/lang_createtable.html)의 계약을 구별해 읽는다.
 
 `elo` 라는 컬럼 이름에 대해 한 가지 짚어둔다. 사용자에게 보이는 용어는 **RP** (Rating Point) 지만, DB 컬럼·JSON 필드·wire 필드는 전부 `elo` 다. 이름을 절반만 바꾸면 구 DB 와 구 클라이언트가 동시에 깨지므로, 프로토콜 버전을 올리기 전까지 이름은 유지하고 UI 문자열만 `RP` 를 쓴다. 값을 해석할 때만 `elo == RP` 로 읽는다.
 
@@ -378,7 +402,7 @@ Database::~Database()
 }
 ```
 
-`sqlite3_busy_timeout(db_, 5000)` 은 §1.1 의 mutex 직렬화와 짝을 이룬다. 우리 프로세스 안에서는 mutex 가 이미 모든 접근을 한 줄로 세우므로 SQLITE_BUSY 가 날 일이 없지만, **같은 DB 파일을 다른 프로세스가 열고 있을 때**(운영 중 `sqlite3` 셸로 조회, 백업 스크립트, 잘못 띄운 두 번째 `tetris_meta`)는 얘기가 다르다. 그때 기본 동작은 즉시 `SQLITE_BUSY` 반환이고, 우리 코드는 그것을 "DB 오류"로 보고 HTTP 500 을 돌려준다. 5 초 대기를 걸어두면 대부분의 짧은 외부 락은 그냥 지나간다.
+`sqlite3_busy_timeout(db_, 5000)`은 같은 파일을 쓰는 다른 연결과 경합할 때 쓰기 잠금을 기다리는 설정이다. 객체의 mutex는 같은 `Database` 연결을 쓰는 요청들을 직렬화하지만, 운영 중 별도 SQLite 도구나 다른 메타 프로세스가 파일을 열 때의 경합까지 제거하지 않는다. 대기 시간 안에 잠금이 풀리지 않으면 SQLite 오류가 반환되며 API는 저장 실패로 처리한다. 5초 대기는 성공 보장이 아니고 모든 오류에 적용되는 재시도 정책도 아니다.
 
 ## 4. 스키마 진화 — 컬럼 추가와 데이터 변환
 
@@ -397,8 +421,8 @@ void Database::execSchema()
         throw std::runtime_error(msg);
     }
 
-    // 기존 tetris.db 를 보존하면서 신규 컬럼을 붙인다. duplicate column 은 이미
-    // 마이그레이션된 DB 라는 뜻이므로 무시한다.
+    // 기존 tetris.db 를 보존하면서 신규 컬럼을 붙인다. duplicate column은
+    // 같은 이름의 열이 존재한다는 뜻이며, 열 정의 전체의 일치 검사는 아니다.
     auto alter_if_needed = [&](const char* sql) {
         char* alterErr = nullptr;
         int alterRc = sqlite3_exec(db_, sql, nullptr, nullptr, &alterErr);
@@ -440,11 +464,14 @@ void Database::execSchema()
     //   no-op 이고, 버전만 1 로 올라간다. (meta/elo.h 참조)
     int userVersion = 0;
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &s, nullptr) == SQLITE_OK
-            && sqlite3_step(s) == SQLITE_ROW)
-            userVersion = sqlite3_column_int(s, 0);
-        sqlite3_finalize(s);
+        StmtGuard version;
+        if (sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &version.s, nullptr) != SQLITE_OK)
+            throw std::runtime_error("schema migration version prepare failed");
+        if (sqlite3_step(version.s) != SQLITE_ROW)
+            throw std::runtime_error("schema migration version read failed");
+        userVersion = sqlite3_column_int(version.s, 0);
+        if (userVersion < 0)
+            throw std::runtime_error("schema migration version invalid");
     }
     bool rpRebaseApplied = false;
     {
@@ -453,7 +480,10 @@ void Database::execSchema()
                 "SELECT 1 FROM schema_migrations WHERE name='elo_to_rp_v1'",
                 -1, &g.s, nullptr) != SQLITE_OK)
             throw std::runtime_error("schema migration marker prepare failed");
-        rpRebaseApplied = sqlite3_step(g.s) == SQLITE_ROW;
+        const int markerRc = sqlite3_step(g.s);
+        if (markerRc != SQLITE_ROW && markerRc != SQLITE_DONE)
+            throw std::runtime_error("schema migration marker read failed");
+        rpRebaseApplied = markerRc == SQLITE_ROW;
     }
 
     if (!rpRebaseApplied) {
@@ -487,49 +517,48 @@ void Database::execSchema()
 }
 ```
 
-### 4.1 컬럼 추가 — 실패 메시지로 멱등성을 만든다
+### 4.1 컬럼 추가 — 존재 여부와 정의를 구별한다
 
-`players` 의 `bp`·`selected_icon_id`·`xp` 와 `matches` 의 `match_uuid`·RP snapshot 컬럼들은 초기 스키마에 없었다. `CREATE TABLE IF NOT EXISTS` 는 **이미 존재하는 테이블의 컬럼을 늘려주지 않으므로**, 구 DB 를 열면 새 컬럼 없이 그대로 열린다. 그래서 매 기동마다 `ALTER TABLE ... ADD COLUMN` 을 무조건 실행하고, SQLite 가 돌려주는 `"duplicate column name"` 오류만 무시한다.
+`players`의 `bp`·`selected_icon_id`·`xp`와 `matches`의 `match_uuid`·RP snapshot 컬럼들은 초기 스키마에 없었다. `CREATE TABLE IF NOT EXISTS`는 이미 존재하는 테이블의 정의를 갱신하지 않는다. 구 DB에 열을 추가하려면 별도의 `ALTER TABLE ... ADD COLUMN`이 필요하다.
 
-이 방식이 `PRAGMA table_info(players)` 를 파싱해 컬럼 존재를 검사하는 것보다 짧고, 경쟁 조건도 없다. 대신 **오류 문자열에 의존**한다는 약점이 있다. SQLite 가 그 메시지를 바꾸면 정상 기동이 예외로 바뀐다. amalgamation 을 벤더링해 버전을 고정했으므로 지금은 안전하지만, 업그레이드 시 확인해야 할 항목이다.
+현재 호환 경로는 ADD COLUMN을 실행하고 `duplicate column name` 오류만 무시한다. 이 오류는 같은 이름의 열이 있다는 뜻이다. 타입·기본값·제약까지 원하는 정의라는 증거는 아니다. 오류 메시지에 의존하므로 SQLite 갱신 때도 검토해야 한다. 버전 고정만으로 임의의 DB 구조가 올바르다고 보장할 수는 없다. 지원하는 구 스키마를 명시적으로 판별하고 버전별 변환을 적용하는 학습 구현과 이 오래된 호환 경로를 구별한다.
 
-`ADD COLUMN` 에 `NOT NULL DEFAULT` 를 붙였다는 점도 중요하다. SQLite 는 기존 행이 있는 테이블에 `NOT NULL` 컬럼을 추가할 때 default 를 요구한다. 기본값 덕분에 구 플레이어들은 자동으로 `bp=0, xp=0, selected_icon_id='default'` 가 된다.
+`NOT NULL DEFAULT`를 붙이면 구 행에서도 새 값을 읽을 수 있다. 여기서는 `bp=0`, `xp=0`, `selected_icon_id='default'`라는 제품 정책이다. 단순 열 추가는 모든 기존 행을 새 형식으로 다시 쓰는 것과 같지 않다. SQLite는 스키마와 기본값을 이용해 기존 행의 새 열을 해석할 수 있다. 제약 추가 종류에 따라 기존 행 검사 비용이 발생할 수 있다. [ALTER TABLE의 ADD COLUMN](https://www.sqlite.org/lang_altertable.html)
 
-`match_uuid` 만 예외적으로 제약 없이 추가한다. SQLite 의 `ALTER TABLE ADD COLUMN` 은 UNIQUE 제약을 함께 붙일 수 없으므로, 컬럼을 먼저 붙인 뒤 별도의 `CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_uuid` 로 유니크 제약을 건다. `WHERE match_uuid IS NOT NULL` 부분(partial) 인덱스라 uuid 가 NULL 인 과거 행들은 제약 밖에 남고, 새로 저장되는 행만 §7 의 중복 반영 방지가 적용된다. 인덱스 쪽 멱등성은 오류 문자열 매칭이 아니라 `IF NOT EXISTS` 가 보장하므로, 이쪽 실패는 무시하지 않고 기동 실패로 승격한다 — 이 인덱스 없이 뜬 meta 는 재전송을 이중 반영하는 서비스이기 때문이다.
+`match_uuid`는 nullable 열로 추가하고 별도 partial UNIQUE 인덱스를 만든다. `WHERE match_uuid IS NOT NULL`이므로 UUID가 없는 과거 행은 제약 밖에 남는다. 새 UUID가 붙은 결과의 재시도는 §7의 유일 키로 구별한다. 인덱스 생성 오류는 기동 실패로 처리한다. 다만 `IF NOT EXISTS`는 같은 이름의 객체가 있으면 생성을 생략할 뿐, 그 인덱스의 열·유일성·WHERE 조건을 재검증하거나 고치지 않는다. 현재 경로를 임의로 변형된 DB에 대한 완전한 스키마 검증기로 해석하지 않는다.
 
-### 4.2 데이터 변환 — `user_version` 대신 marker 테이블
+### 4.2 데이터 변환 — 파일 헤더와 이관 기록
 
-RP 스케일 변환은 훨씬 위험하다. `UPDATE players SET elo = MAX(0, elo - 1200)` 을 두 번 실행하면 모든 플레이어의 RP 가 0 이 된다. 정확히 한 번만 실행되게 만들어야 한다.
+RP 변환은 `UPDATE players SET elo=MAX(0,elo-1200)`이다. 이를 반복하면 값이 잘못 줄어든다. 1500은 300을 거쳐 0이 되고, 3000은 1800을 거쳐 600이 된다. 모든 값이 두 번 만에 0이 되는 것은 아니지만, 같은 변환을 재실행하면 이미 옮긴 데이터를 손상한다는 문제는 같다.
 
-SQLite 의 관용적인 답은 `PRAGMA user_version` 이다. 파일 헤더의 정수 슬롯 하나를 "스키마 버전"으로 쓰는 것. 초기 구현도 그렇게 했다. 그런데 여기에 함정이 있다.
+`PRAGMA user_version`은 애플리케이션이 쓰는 파일 헤더의 정수다. SQLite가 이 값을 보고 앱 스키마를 자동으로 변환하지는 않는다. 초기 구현은 이 값이 0이면 RP 변환을 수행했다.
 
-> `PRAGMA user_version` 은 sqlite3 `.dump` / `.restore` 에 보존되지 않는다.
+SQL 덤프와 바이너리 백업을 구별해야 한다. `.dump`가 만든 SQL을 빈 DB에 실행하면 보통 테이블·행은 복원되지만 `user_version` 설정은 포함되지 않아 헤더 값이 0으로 남는다. SQLite CLI의 `.backup`/`.restore`나 Backup API는 데이터베이스 페이지를 복사하는 경로이므로 이 SQL 재실행과 다르다. [CLI의 백업과 덤프](https://www.sqlite.org/cli.html), [Online Backup API](https://www.sqlite.org/backup.html)
 
-백업 절차가 `sqlite3 tetris.db .dump > backup.sql` 이라면, 복원한 DB 의 `user_version` 은 0 이다. 그 상태로 `tetris_meta` 를 띄우면 이미 리베이스된 데이터에 `-1200` 이 한 번 더 적용된다. **백업에서 복원했더니 전 서버의 RP 가 0 이 되는** 사고다.
+그래서 `schema_migrations`의 `elo_to_rp_v1` 행도 함께 기록한다. 일반 테이블의 행은 전체 SQL 덤프에 포함되므로 새 파일에 SQL을 재실행해도 적용 사실을 확인할 수 있다. 구 구현으로 이미 변환한 DB는 `user_version>=1`이면서 marker가 없을 수 있다. 이 경우에는 RP를 다시 바꾸지 않고 marker만 보강한다. 이 값은 현재 코드에서 옛 RP 변환의 호환 신호이며 모든 미래 스키마의 지원 여부를 판정하는 전역 버전은 아니다.
 
-그래서 게이트를 데이터 테이블로 옮긴다. `schema_migrations` 에 `name='elo_to_rp_v1'` 행이 있는지 보고, 없을 때만 변환한다. 이 테이블은 평범한 테이블이므로 `.dump` 에 그대로 들어간다.
-
-기존 배포를 깨뜨리지 않으려면 분기가 하나 더 필요하다. 구 구현으로 이미 리베이스한 DB 는 `user_version >= 1` 이지만 marker 행이 없다. 그 DB 에 변환을 다시 걸면 안 되므로, `userVersion >= 1` 이면 **데이터는 건드리지 않고 marker 만 백필**한다. 그래서 SQL 이 두 갈래다.
+버전이나 marker를 **읽지 못한 상태**는 0이나 행 부재와 다르다. prepare/step 오류는 기동 실패로 처리한다. marker 조회의 ROW는 있음, DONE은 없음이며 나머지는 저장소 오류다. 이를 구분하지 않으면 일시적인 읽기 실패가 데이터 재변환의 조건이 될 수 있다.
 
 ```mermaid
 flowchart TD
-    A[execSchema 시작] --> B["현재 스키마의 테이블·인덱스를<br/>IF NOT EXISTS로 확보"]
-    B --> C["players·matches에 필요한 컬럼 보강<br/>duplicate column name만 무시"]
-    C --> C2["idx_matches_uuid 부분 유니크 인덱스<br/>IF NOT EXISTS로 확보"]
-    C2 --> D{"schema_migrations 에<br/>elo_to_rp_v1 있음?"}
-    D -- 예 --> Z[완료 — 아무것도 안 함]
-    D -- 아니오 --> E{"PRAGMA user_version < 1?"}
-    E -- "예 (구 1200 스케일 원본)" --> F["players.elo -= 1200 (0 바닥)<br/>elo_history 3열도 리베이스<br/>marker INSERT + user_version=1"]
-    E -- "아니오 (구 구현이 이미 변환)" --> G["marker INSERT 만"]
-    F --> Z
-    G --> Z
+    A["테이블·열·인덱스 준비"] --> B["RP 버전·marker 조회"]
+    B --> C{"조회 성공?"}
+    C -- 아니오 --> X["시작 실패"]
+    C -- 예 --> D{"RP marker 있음?"}
+    D -- 예 --> H["계정 키 이관 단계"]
+    D -- 아니오 --> E{"user_version < 1?"}
+    E -- 예 --> F["트랜잭션: RP·히스토리 변환<br/>marker·헤더 기록"]
+    E -- 아니오 --> G["트랜잭션: marker만 기록"]
+    F --> H
+    G --> H
+    H --> I["계정 키 물리 정리 후 요청 수신"]
 ```
 
-변환 SQL 이 `players` 뿐 아니라 `elo_history` 의 `elo_before` / `elo_after` / `delta` 까지 함께 리베이스한다는 점도 놓치기 쉽다. 히스토리를 그대로 두면 "RP 0 인 플레이어의 과거 기록이 1216 에서 1232 로 올랐다"는 모순된 곡선이 남는다. `delta` 는 단순히 -1200 하면 안 되고(차이값이므로), 0 바닥 clamp 후의 두 값을 다시 빼서 계산한다 — 그래서 SQL 이 `MAX(0, elo_after - 1200) - MAX(0, elo_before - 1200)` 형태다.
+`elo_history`의 before/after와 delta도 같은 RP 변환에 포함한다. delta에는 1200을 빼는 대신 `MAX(0,elo_after-1200)-MAX(0,elo_before-1200)`를 쓴다. 0 바닥을 적용한 두 값의 차이여야 하기 때문이다.
 
-전체가 `BEGIN IMMEDIATE` / `COMMIT` 한 트랜잭션 안에 있고, 실패하면 `ROLLBACK` 후 예외를 던져 프로세스가 뜨지 않는다. **반쯤 변환된 DB 로 서비스가 시작되는 일이 없다**는 것이 여기서 지키려는 성질이다.
+**RP 데이터 변경과 RP marker 기록**이 한 `BEGIN IMMEDIATE`/`COMMIT`에 묶인다. 실패하면 이 묶음을 롤백하고 시작을 거절한다. 초기 테이블·컬럼 보강, RP 이관, 계정 키 논리 이관, 커밋 뒤 물리 정리는 각각 다른 단계다. 예를 들어 잘못된 옛 계정 키 때문에 해시 이관이 롤백되어도 먼저 커밋한 RP 이관은 남는다. 전체 서버 초기화가 하나의 트랜잭션이라는 설명은 맞지 않는다. 단계별 marker로 재시작 위치를 판별한다.
 
-이 `1200` 은 신규 플레이어의 시작값이 아니라 **구 DB 변환 상수**다. 새 row 는 언제나 RP 0, BP 0, XP 0 에서 시작한다.
+이 `1200`은 구 DB를 해석하기 위한 변환 상수다. 신규 계정은 RP 0, BP 0, XP 0에서 시작한다.
 
 ## 5. RP — Elo 를 0 시작으로 리베이스하기
 
@@ -546,11 +575,12 @@ RP 계산은 헤더 하나로 끝난다. 상태도 DB 접근도 없는 순수 �
 //   · 시작 0, 바닥 0 — 신규 플레이어가 "0 RP" 에서 출발해 위로만 쌓는 표기.
 //     바닥(0)에서는 패배해도 더 잃지 않는다 (일반적인 래더 관행).
 //   · ELO 의 기대승률은 두 레이팅의 *차이* 만 쓰므로 기준점 이동은 수학적으로
-//     무손실이다. (구 스케일 1200 시작 → 신 스케일 0 시작; 기존 DB 는
+//     기대승률을 보존한다. K 구간과 0 바닥까지 보존한다는 뜻은 아니다.
+//     (구 스케일 1200 시작 → 신 스케일 0 시작; 기존 DB 는
 //     database.cpp 의 1회성 마이그레이션이 elo-1200 으로 이관)
 //
 // K-factor 는 세 단계 (<300 / <600 / >=600) — 하위 구간은 빠르게 수렴,
-// 상위는 천천히 변동. FIDE/USCF 관행의 리베이스판.
+// 상위는 천천히 변동. 구간과 계수는 이 게임의 정책이다.
 //
 // expected(ra, rb) = 1 / (1 + 10^((rb - ra) / 400))
 // new_r = r + K * (score - expected)    (승=1, 패=0)
@@ -559,6 +589,8 @@ RP 계산은 헤더 하나로 끝난다. 상태도 DB 접근도 없는 순수 �
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <utility>
 
 namespace elo {
@@ -572,10 +604,16 @@ inline int k_factor(int rating)
 
 inline double expected(int ra, int rb)
 {
-    return 1.0 / (1.0 + std::pow(10.0, (rb - ra) / 400.0));
+    return 1.0 / (1.0 + std::pow(10.0, (static_cast<double>(rb) - static_cast<double>(ra)) / 400.0));
 }
 
-// 승자/패자 쌍의 새 RP 를 반환. 0 아래로 내려가지 않도록 clamp.
+// 저장 가능한 RP 범위로 포화시킨다. 차감/덧셈은 넓은 타입에서 수행한다.
+inline int bounded_rating(std::int64_t value)
+{
+    return static_cast<int>(std::clamp<std::int64_t>(value, 0, std::numeric_limits<int>::max()));
+}
+
+// 음수 입력은 0으로 정규화하고 결과는 0..INT_MAX로 제한한다.
 struct Update {
     int new_winner;
     int new_loser;
@@ -583,26 +621,28 @@ struct Update {
 
 inline Update update(int winner_elo, int loser_elo)
 {
+    winner_elo = std::max(0, winner_elo);
+    loser_elo = std::max(0, loser_elo);
     const double e_win = expected(winner_elo, loser_elo);
     const double e_los = expected(loser_elo, winner_elo);
 
-    const int new_winner = winner_elo + static_cast<int>(std::round(
+    const std::int64_t new_winner = static_cast<std::int64_t>(winner_elo) + static_cast<int>(std::round(
         k_factor(winner_elo) * (1.0 - e_win)));
-    const int new_loser  = loser_elo  + static_cast<int>(std::round(
+    const std::int64_t new_loser  = static_cast<std::int64_t>(loser_elo) + static_cast<int>(std::round(
         k_factor(loser_elo)  * (0.0 - e_los)));
 
     return {
-        std::max(0, new_winner),
-        std::max(0, new_loser),
+        bounded_rating(new_winner),
+        bounded_rating(new_loser),
     };
 }
 
 } // namespace elo
 ```
 
-### 5.1 기준점 이동이 왜 무손실인가
+### 5.1 기준점 이동과 기대승률의 불변성
 
-표준 Elo 는 1500 이나 1200 에서 시작한다. 우리는 0 에서 시작한다. 이것이 "수학적으로 무손실"인 이유는 `expected()` 가 `rb - ra` 만 쓰기 때문이다.
+시작 RP는 이 게임에서 0으로 정했다. 기대승률 계산은 두 RP의 차이를 사용하므로 같은 양을 평행이동해도 아래 식의 값은 유지된다.
 
 ```
 expected(ra, rb) = 1 / (1 + 10^((rb - ra) / 400))
@@ -611,28 +651,23 @@ expected(ra + c, rb + c) = 1 / (1 + 10^(((rb + c) - (ra + c)) / 400))
                          = expected(ra, rb)
 ```
 
-모든 레이팅에 같은 상수를 더하거나 빼도 기대승률은 그대로다. 따라서 전체를 -1200 평행이동해도 매칭의 의미와 갱신 폭이 전혀 바뀌지 않는다. 바뀌는 것은 표시 숫자뿐이고, 게임 UI 에서 "0 RP 에서 시작해 쌓아 올린다"는 서사가 더 자연스럽다.
-
-무손실이 **깨지는** 지점이 하나 있다. 0 바닥 clamp 다. 이건 평행이동이 아니라 치역을 자르는 연산이라 원본과 다른 시스템이 된다.
+모든 레이팅에 같은 상수를 더하거나 빼도 이 식의 기대승률은 그대로다. 다만 현재 k_factor는 절대 RP의 300·600 경계로 계수를 고른다. 수치만 이동하고 K 구간을 그대로 두면 갱신 폭은 바뀔 수 있다. 또 0 바닥 clamp는 평행이동이 아니라 값을 잘라 내는 연산이다. 기대승률 식의 불변성과 전체 레이팅 시스템의 동등성을 구별한다.
 
 ### 5.2 0 바닥 clamp 와 레이팅 인플레이션
 
-표준 Elo 는 제로섬이다. 승자가 얻는 점수와 패자가 잃는 점수가 정확히 같아 전체 합이 보존된다. `std::max(0, new_loser)` 는 이 성질을 깬다.
+양쪽이 같은 K를 사용하고 같은 기대승률 쌍에 대해 대칭으로 갱신하면 반올림 전 증감의 합은 0이다. 현재 구현은 각자의 RP로 K를 고르므로 K가 다를 수 있다. 따라서 항상 제로섬이라고 할 수 없다.
 
-RP 0 인 두 플레이어가 붙는 경우를 보자. `expected(0, 0) = 0.5`, `k_factor(0) = 32` 이므로 승자는 `0 + round(32 * 0.5) = +16`, 패자는 `0 + round(32 * -0.5) = -16` → clamp 되어 `0` 이다. 시스템 전체 RP 는 16 만큼 늘었다. 매 판 바닥에 걸린 패배가 나올 때마다 총합이 증가하므로, 장기적으로 **RP 는 인플레이션한다.**
+예를 들어 RP 299인 선수가 RP 300인 선수에게 이기면 K는 각각 32와 24다. 현재 식과 반올림으로 승자는 약 16을 얻고 패자는 약 12를 잃어, 바닥 clamp에 닿지 않아도 총합이 4 늘어난다. 같은 사례에서 어느 쪽이 이기는지에 따라 변화 방향도 달라진다.
 
-이걸 받아들이는 이유는 두 가지다.
+RP 0인 두 선수가 붙으면 기대승률은 0.5이고 K는 모두 32다. 승자는 16을 얻고 패자의 -16은 0으로 잘려 전체 RP가 16 늘어난다. 바닥은 추가 증가 압력을 만들지만, 전체 서비스의 장기 분포를 이 한 사례만으로 예측할 수는 없다. 사용자 유입·실력 분포·매칭·서로 다른 K가 함께 작용한다.
 
-- 대안(음수 RP 허용)이 사용자 경험상 나쁘다. "-48 RP" 는 신규 플레이어를 쫓아낸다.
-- 우리 랭킹은 상대 서열만 의미가 있고 절대값의 안정성을 요구하지 않는다. 인플레이션은 하위권 구간에만 집중되고, 상위권은 서로에게서만 점수를 주고받으므로 제로섬에 가깝게 유지된다.
-
-만약 절대값이 중요한 시스템이라면 답은 다르다 — 하한 근처에서 K 를 줄이거나, 바닥에서 잃지 못한 점수만큼 승자의 획득도 깎아 제로섬을 복원해야 한다.
+0 바닥은 신규 사용자가 음수 RP로 시작하지 않게 하는 게임 정책이다. 총량 보존을 원하는 시스템이라면 양쪽에 같은 이동량을 적용하고 패자가 실제 잃을 수 있는 양에 맞추는 등 다른 정책을 설계해야 한다. 현재 구현의 정책을 수학적으로 필연적인 Elo 특성으로 설명하지 않는다.
 
 ### 5.3 K-factor 3 단계의 경계
 
 `k_factor` 는 32 / 24 / 16 세 값을 300, 600 경계로 고른다. K 는 "한 판이 레이팅을 얼마나 움직이는가"를 정하는 계수다. 크면 빨리 수렴하고 크게 흔들리며, 작으면 천천히 수렴하고 안정적이다.
 
-체스(FIDE)는 신인 40, 일반 20, 2400 이상 10 을 쓴다. 우리는 그 관행을 스케일에 맞춰 옮겼다.
+32·24·16과 300·600 경계는 이 게임에서 선택한 정책이다. 다른 종목의 레이팅 규정과 동일한 값이나 직접적인 스케일 변환으로 취급하지 않는다.
 
 | 구간 | K | 의도 | 실제 효과 |
 |---|---:|---|---|
@@ -640,13 +675,19 @@ RP 0 인 두 플레이어가 붙는 경우를 보자. `expected(0, 0) = 0.5`, `k
 | 300 ≤ RP < 600 | 24 | 중간 수렴 | 동급 승리 시 약 +12 |
 | RP ≥ 600 | 16 | 상위권 안정 | 동급 승리 시 약 +8 |
 
-경계값 300 과 600 은 "동급 상대와 몇 판을 이겨야 다음 구간인가"로 잡았다. 0 에서 시작해 동급 상대에게 연승하면 판당 +16 이므로 약 19 승에 300 에 닿고, 거기서 판당 +12 이므로 다시 25 승에 600 에 닿는다. 즉 대략 20 판 · 45 판이 구간 전환점이다. 이 정도면 "몇 판 해보니 내 자리가 잡혔다"는 감각과 맞는다.
+경계값 300과 600의 효과를 동급 상대에게 연승하는 가정으로 살펴보자. 0 에서 시작해 동급 상대에게 연승하면 판당 +16 이므로 약 19 승에 300 에 닿고, 거기서 판당 +12 이므로 다시 25 승에 600 에 닿는다. 즉 대략 20 판 · 45 판이 구간 전환점이다. 이 수치는 동급 상대와의 연승 가정에서만 성립하며 실제 실력 추정의 정확도를 보장하는 판수는 아니다.
 
 주의할 점은 `k_factor` 가 **각자의 레이팅**으로 계산된다는 것이다. RP 800 인 플레이어가 RP 100 인 플레이어에게 지면, 승자는 K=32 로 크게 오르고 패자는 K=16 으로 적게 잃는다. 비대칭이지만 의도된 것이다 — 상위권의 안정성을 지키면서 하위권의 수렴 속도를 살린다.
 
+### 5.4 수학식과 기계 정수의 범위
+
+`(rb-ra)/400.0`은 먼저 int끼리 빼므로 마지막 나눗셈이 실수여도 차감의 넘침을 막지 못한다. 각 피연산자를 double로 바꾼 뒤 차감을 수행한다. RP 갱신도 int64_t로 더한 다음 0..INT_MAX로 제한한다. 위쪽 제한은 저장 형식에 맞춘 포화 정책이며 Elo 공식 자체의 성질은 아니다.
+
+DB의 INTEGER 값은 64비트다. 현재 프로필·리더보드·정산 경로는 저장 타입이 INTEGER인지, 값이 0..2,147,483,647인지 확인한 뒤 int로 줄인다. 손상된 값을 0으로 고쳐 정산하면 오류를 정상 데이터로 덮어쓰므로 저장은 실패시킨다. 표시용 `level_progress`의 음수 정규화와 영속 데이터 검증은 서로 다른 경계다.
+
 ## 6. XP 와 레벨 곡선
 
-RP 는 오르내리지만 레벨은 오르기만 해야 한다. 그래서 별도 축인 XP 를 둔다.
+이 게임은 승패로 변하는 RP와 누적 플레이 경험을 구분한다. 같은 곡선을 유지하고 XP를 차감하지 않는 정산에서는 XP와 표시 레벨이 감소하지 않는다.
 
 **현재 소스 발췌 — `meta/levels.h`**
 
@@ -655,29 +696,38 @@ RP 는 오르내리지만 레벨은 오르기만 해야 한다. 그래서 별도
 
 // meta/levels.h — 누적 XP → 레벨 변환 (순수 함수, 서버/클라이언트 공용).
 //
-// XP 는 매치로만 적립되고 절대 줄지 않는다 (meta/database.cpp 의
-// kXpWin/kXpLoss — RP/BP 와 같은 트랜잭션에서 적립). 레벨은 저장하지 않고
-// 항상 XP 에서 유도한다 — 곡선을 바꿔도 DB 마이그레이션이 필요 없다.
+// 매치 정산에서는 XP를 RP/BP와 같은 트랜잭션에서 적립한다.
+// 레벨은 저장하지 않고 누적 XP에서 유도한다. 곡선을 바꾸면 같은 XP의
+// 표시 레벨도 달라지므로 기존 이용자에 대한 적용 정책을 함께 정해야 한다.
 //
 // 곡선: 레벨 n → n+1 에 필요한 XP 가 선형 증가 (100, 120, 140, ...).
-//   레벨 60(최대) 도달 누적 = 40,120 XP ≈ 승리 100 XP 기준 약 400승.
+//   레벨 60(최대) 도달 누적 = 40,120 XP ≈ 승리 100 XP 기준 402승.
 
 namespace meta::levels {
 
 constexpr int kMaxLevel = 60;
+constexpr int kBaseCost = 100;
+constexpr int kCostStep = 20;
 
-// 레벨 n 에서 n+1 로 가는 데 필요한 XP (n: 1..kMaxLevel-1).
+// 표시용 레벨 입력은 산술 전에 범위로 제한한다.
+constexpr int bounded_level(int level)
+{
+    return level < 1 ? 1 : (level > kMaxLevel ? kMaxLevel : level);
+}
+
+// 레벨을 1..60으로 제한한다. 최대 레벨에는 다음 단계가 없어 0을 반환한다.
 constexpr int xp_to_next(int level)
 {
-    return 100 + 20 * (level - 1);
+    level = bounded_level(level);
+    return level == kMaxLevel ? 0 : kBaseCost + kCostStep * (level - 1);
 }
 
 // 레벨 L 도달에 필요한 누적 XP. 레벨 1 = 0.
 //   sum_{n=1..L-1} (100 + 20(n-1)) = 100(L-1) + 10(L-1)(L-2)
 constexpr int total_xp_for_level(int level)
 {
-    const int k = level - 1;
-    return 100 * k + 10 * k * (k - 1);
+    const int k = bounded_level(level) - 1;
+    return kBaseCost * k + kCostStep * k * (k - 1) / 2;
 }
 
 // 누적 XP → 현재 레벨 (1..kMaxLevel 로 clamp).
@@ -694,6 +744,7 @@ inline int level_for_xp(int xp)
 // 최대 레벨이면 둘 다 0 을 채운다 (진행바 숨김).
 inline void level_progress(int xp, int& into_out, int& need_out)
 {
+    if (xp < 0) xp = 0;
     const int lv = level_for_xp(xp);
     if (lv >= kMaxLevel) { into_out = 0; need_out = 0; return; }
     into_out = xp - total_xp_for_level(lv);
@@ -707,10 +758,10 @@ inline void level_progress(int xp, int& into_out, int& need_out)
 
 `players` 테이블에 `level` 컬럼이 없다는 점을 먼저 보라. 레벨은 언제나 `xp` 에서 계산한다. 이 결정의 대가와 이득은 명확하다.
 
-- **대가:** 응답을 만들 때마다 `level_for_xp` 를 돈다. 최대 60 회 반복하는 루프라 비용은 무시할 수준이다.
-- **이득:** 곡선을 바꿔도 DB 마이그레이션이 없다. `xp_to_next` 의 상수 하나를 고치면 모든 플레이어의 레벨이 그 자리에서 재계산된다. 저장했다면 전 행을 다시 계산하는 배치 마이그레이션이 필요했다.
+- **대가:** 응답을 만들 때마다 `level_for_xp` 를 돈다. 다음 임계값은 최대 59회 비교한다. 최대 레벨이 고정된 작은 범위이므로 탐색 비용도 제한된다.
+- **이득:** 단계 비용과 누적 임계값이 `kBaseCost`·`kCostStep`을 공유하므로 둘을 함께 바꿀 수 있다. 누적 XP를 그대로 유지하는 정책에서는 레벨 컬럼을 일괄 갱신할 필요가 없다. 단, 같은 XP의 표시 레벨이 바뀔 수 있으므로 적용 시점과 기존 이용자 보전 정책을 정해야 한다.
 
-게임 밸런싱 파라미터는 이렇게 **유도 가능한 것은 저장하지 않는 편**이 대체로 낫다. 저장해야 하는 건 되돌릴 수 없는 사실(누적 XP)뿐이다.
+현재 레벨은 누적 XP와 곡선에서 유도한다. 과거 정산 화면을 그대로 재현해야 한다면 당시 정책과 결과를 별도로 저장할 수 있다. 현재 표시값과 과거 사실의 저장 목적은 다르다.
 
 ### 6.2 곡선의 근거
 
@@ -722,13 +773,15 @@ total_xp_for_level(L) = sum_{n=1..L-1} (100 + 20(n-1))
                       = 100(L-1) + 10(L-1)(L-2)
 ```
 
-`kMaxLevel = 60` 을 넣으면 `100 * 59 + 10 * 59 * 58 = 5900 + 34220 = 40120` XP 다. 승리가 100 XP, 패배가 50 XP 이므로 승률 50% 로 플레이하면 판당 평균 75 XP, 즉 약 535 판이다. 전승이면 약 400 판.
+`kMaxLevel = 60` 을 넣으면 `100 * 59 + 10 * 59 * 58 = 5900 + 34220 = 40120` XP 다. 승리가 100 XP, 패배가 50 XP 이므로 승률 50% 로 플레이하면 판당 평균 75 XP, 약 535판 분량의 XP다. 실제 도달 판수는 승패 순서·분포에 따라 달라지며 이 평균 비율만으로 정확한 첫 도달 시점의 기댓값을 구한 것은 아니다. 전승만 가정하면 401승은 40,100 XP라 부족하고 402승에 도달한다.
 
 왜 이차 곡선인가. 선택지는 셋이었다.
 
-- **선형**(레벨당 고정 100 XP): 초반이 지루하고 후반이 너무 쉽다. 레벨 60 이 6000 XP 라 하루면 끝난다.
-- **지수**(레벨당 ×1.15): 후반이 사실상 도달 불가능해진다. 레벨 60 이면 초기값의 3000 배가 넘는다.
-- **이차**(등차 증분): 초반은 빠르게 오르고 후반은 완만하게 느려진다. 레벨 2 는 한 판 반이면 되고, 레벨 60 은 수백 판이 든다. "꾸준히 하면 언젠가 닿는다"는 감각이 유지된다.
+- **고정 비용**(레벨당 100 XP): 레벨 1에서 60까지 59번 올라가므로 5,900 XP다. 단계마다 같은 양을 요구한다.
+- **기하 증가**(단계 비용에 매번 ×1.15): 후반 단계의 비용이 빠르게 커진다. 목표 플레이 시간과 지급량에 맞춰 비율을 조절해야 한다.
+- **등차 비용·이차 누적**(100,120,140,…): 단계 비용이 매번 20씩 늘어 누적 요구량이 이차식이다. 레벨 2에는 승리 한 번 또는 패배 두 번이 필요하고, 최대 레벨까지는 더 많은 경험을 요구한다.
+
+현재 곡선의 선택은 진행 속도에 관한 정책이다. “하루면 끝난다” 같은 시간 판단은 경기 시간·접속 빈도·다른 지급 경로를 함께 측정해야 한다.
 
 `level_progress` 는 UI 진행바용이다. 현재 레벨 안에서 얼마나 왔는지(`into`)와 그 레벨의 총 요구량(`need`)을 채우고, 최대 레벨이면 둘 다 0 으로 두어 호출부가 진행바를 숨길 수 있게 한다.
 
@@ -773,50 +826,13 @@ constexpr int kXpLoss = 50;
 **현재 소스 발췌 — `meta/database.cpp`**
 
 ```cpp
-// -----------------------------------------------------------------------------
 std::optional<MatchInsertResult>
-Database::saveMatch(const MatchRecord& m)
+Database::saveMatch(const MatchRecord& m, MatchSaveError* error)
 {
+    if (error) *error = MatchSaveError::Database;
     std::lock_guard<std::mutex> lk(mu_);
 
-    // 같은 relay 결과의 재시도면 최초 응답을 그대로 돌려준다.
-    {
-        StmtGuard g;
-        const char* sql =
-            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after,"
-            "player_a,player_b "
-            "FROM matches WHERE match_uuid=?1";
-        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
-        sqlite3_bind_text(g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(g.s) == SQLITE_ROW) {
-            MatchInsertResult r;
-            r.match_id = sqlite3_column_int64(g.s, 0);
-            const int ab = sqlite3_column_int(g.s, 1);
-            const int aa = sqlite3_column_int(g.s, 2);
-            const int bb = sqlite3_column_int(g.s, 3);
-            const int ba = sqlite3_column_int(g.s, 4);
-            // 같은 match_uuid 재전송인데 참가자가 다르면 uuid 충돌이거나 relay
-            // 버그(재사용/뒤바뀐 payload)다. 저장된 결과를 그대로 반환하는 기존
-            // 동작은 유지하되(멱등성 보장), stderr 경고로 조기 발견을 돕는다.
-            const int64_t stored_a = sqlite3_column_int64(g.s, 5);
-            const int64_t stored_b = sqlite3_column_int64(g.s, 6);
-            if (stored_a != m.player_a || stored_b != m.player_b) {
-                std::fprintf(stderr,
-                    "[db] saveMatch: match_uuid=%s replay with mismatched players "
-                    "(stored a=%lld b=%lld, request a=%lld b=%lld); returning stored result\n",
-                    m.match_uuid.c_str(),
-                    static_cast<long long>(stored_a),
-                    static_cast<long long>(stored_b),
-                    static_cast<long long>(m.player_a),
-                    static_cast<long long>(m.player_b));
-            }
-            r.a = {ab, aa, aa - ab};
-            r.b = {bb, ba, ba - bb};
-            return r;
-        }
-    }
-
-    // 트랜잭션 시작. IMMEDIATE: 쓰기 락 즉시 확보해 reader 때문에 밀리지 않게.
+    // 쓰기 트랜잭션을 먼저 확보한다. BEGIN/COMMIT의 잠금 대기는 여전히 실패할 수 있다.
     char* err = nullptr;
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, &err) != SQLITE_OK) {
         std::fprintf(stderr, "[db] BEGIN: %s\n", err ? err : "?");
@@ -824,10 +840,58 @@ Database::saveMatch(const MatchRecord& m)
         return std::nullopt;
     }
 
+    struct MatchTransaction {
+        sqlite3* db;
+        bool committed = false;
+        ~MatchTransaction() {
+            if (!committed) sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    } transaction{db_};
+
+    // Inspect the key while holding the write transaction, across connections too.
+    // Returning a saved result rolls back only this read-only transaction.
+    {
+        StmtGuard g;
+        const char* sql =
+            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after,"
+            "player_a,player_b,winner,score_a,score_b,lines_a,lines_b,duration_s "
+            "FROM matches WHERE match_uuid=?1";
+        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
+        const int lookupRc = sqlite3_step(g.s);
+        if (lookupRc != SQLITE_ROW && lookupRc != SQLITE_DONE) return std::nullopt;
+        if (lookupRc == SQLITE_ROW) {
+            MatchInsertResult r;
+            r.match_id = sqlite3_column_int64(g.s, 0);
+            int ab, aa, bb, ba;
+            if (!read_nonnegative_int(g.s, 1, ab) || !read_nonnegative_int(g.s, 2, aa) ||
+                !read_nonnegative_int(g.s, 3, bb) || !read_nonnegative_int(g.s, 4, ba))
+                return std::nullopt;
+            // A retry is the same operation only when every persisted input
+            // agrees. A reused key must not confirm somebody else's result.
+            const bool stored_draw = sqlite3_column_type(g.s, 7) == SQLITE_NULL;
+            const bool same_winner = stored_draw ? !m.winner
+                : m.winner && sqlite3_column_int64(g.s, 7) == *m.winner;
+            if (sqlite3_column_int64(g.s, 5) != m.player_a ||
+                sqlite3_column_int64(g.s, 6) != m.player_b || !same_winner ||
+                sqlite3_column_int(g.s, 8) != m.score_a ||
+                sqlite3_column_int(g.s, 9) != m.score_b ||
+                sqlite3_column_int(g.s, 10) != m.lines_a ||
+                sqlite3_column_int(g.s, 11) != m.lines_b ||
+                sqlite3_column_int(g.s, 12) != m.duration_s) {
+                if (error) *error = MatchSaveError::IdentityConflict;
+                return std::nullopt;
+            }
+            if (error) *error = MatchSaveError::None;
+            r.a = {ab, aa, aa - ab};
+            r.b = {bb, ba, ba - bb};
+            return r;
+        }
+    }
+
     auto rollback = [&](const char* why) -> std::optional<MatchInsertResult> {
         std::fprintf(stderr, "[db] saveMatch rollback: %s (%s)\n",
                      why, sqlite3_errmsg(db_));
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
         return std::nullopt;
     };
 
@@ -866,8 +930,7 @@ Database::saveMatch(const MatchRecord& m)
         sqlite3_bind_int64(g.s, 1, pid);
         int rc = sqlite3_step(g.s);
         if (rc != SQLITE_ROW) return false;
-        out = sqlite3_column_int(g.s, 0);
-        return true;
+        return read_nonnegative_int(g.s, 0, out);
     };
 
     int elo_a_before = 0, elo_b_before = 0;
@@ -891,7 +954,7 @@ Database::saveMatch(const MatchRecord& m)
         }
     }
 
-    // 무승부도 같은 재시도 응답을 돌려주도록 최초 RP 결과를 저장한다.
+    // Draws also need an exact response for idempotent retries.
     {
         StmtGuard g;
         const char* sql =
@@ -912,14 +975,20 @@ Database::saveMatch(const MatchRecord& m)
         auto update_player = [&](int64_t pid, int new_elo, bool won) -> bool {
             StmtGuard g;
             const char* sql = won
-                ? "UPDATE players SET elo=?1, wins=wins+1,     bp=bp+?3, xp=xp+?4 WHERE id=?2"
-                : "UPDATE players SET elo=?1, losses=losses+1, bp=bp+?3, xp=xp+?4 WHERE id=?2";
+                ? "UPDATE players SET elo=?1, wins=wins+1, bp=bp+?3, xp=xp+?4 WHERE id=?2 "
+                  "AND typeof(wins)='integer' AND wins BETWEEN 0 AND 2147483646 "
+                  "AND typeof(bp)='integer' AND bp BETWEEN 0 AND 2147483647-?3 "
+                  "AND typeof(xp)='integer' AND xp BETWEEN 0 AND 2147483647-?4"
+                : "UPDATE players SET elo=?1, losses=losses+1, bp=bp+?3, xp=xp+?4 WHERE id=?2 "
+                  "AND typeof(losses)='integer' AND losses BETWEEN 0 AND 2147483646 "
+                  "AND typeof(bp)='integer' AND bp BETWEEN 0 AND 2147483647-?3 "
+                  "AND typeof(xp)='integer' AND xp BETWEEN 0 AND 2147483647-?4";
             if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return false;
             sqlite3_bind_int  (g.s, 1, new_elo);
             sqlite3_bind_int64(g.s, 2, pid);
             sqlite3_bind_int  (g.s, 3, won ? kBpWin : kBpLoss);
             sqlite3_bind_int  (g.s, 4, won ? kXpWin : kXpLoss);
-            return sqlite3_step(g.s) == SQLITE_DONE;
+            return sqlite3_step(g.s) == SQLITE_DONE && sqlite3_changes(db_) == 1;
         };
         if (!update_player(m.player_a, elo_a_after, a_won)) return rollback("update player_a");
         if (!update_player(m.player_b, elo_b_after, b_won)) return rollback("update player_b");
@@ -948,26 +1017,38 @@ Database::saveMatch(const MatchRecord& m)
     if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK) {
         std::fprintf(stderr, "[db] COMMIT: %s\n", err ? err : "?");
         sqlite3_free(err);
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
         return std::nullopt;
     }
 
+    transaction.committed = true;
     MatchInsertResult r;
     r.match_id = match_id;
     r.a = { elo_a_before, elo_a_after, elo_a_after - elo_a_before };
     r.b = { elo_b_before, elo_b_after, elo_b_after - elo_b_before };
+    if (error) *error = MatchSaveError::None;
     return r;
 }
 ```
 
-`match_uuid`는 relay가 매치 성립 때 한 번 만든 32자리 소문자 hex 값이다. HTTP 응답이 유실되거나 429·5xx·네트워크 오류로 `post_match`가 재시도되어도 같은 값을 보낸다. `saveMatch`는 player 갱신 전에 UUID를 조회하고, 이미 존재하면 match 행에 보존한 최초 RP 전후값으로 같은 응답을 재구성한다. 따라서 재전송은 wins/losses, BP, XP, RP, history 어느 것도 두 번 올리지 않는다. 프로세스 메모리의 “이미 처리함” 플래그가 아니라 DB unique 제약과 snapshot이 기준이므로 meta 재시작 뒤에도 성립한다. 재전송의 참가자 쌍이 저장된 행과 다르면 — uuid 충돌이거나 relay 버그다 — 저장된 결과를 돌려주는 멱등 동작은 그대로 유지하되 stderr 경고를 남겨 조기 발견을 돕는다.
+`match_uuid`는 relay가 매치 성립 때 한 번 만든 32자리 소문자 hex 값이다. 재시도는 같은 키와 같은 경기 내용을 보낸다. `saveMatch`는 UUID가 이미 있으면 참가자 순서·승자 또는 무승부·점수·라인·경기 시간을 모두 비교한다. 같으면 저장된 최초 RP 전후값을 반환하여 wins/losses·BP·XP·RP·history를 다시 올리지 않는다. 다르면 `MatchSaveError::IdentityConflict`를 반환하고 API는 HTTP409 `match_conflict`로 거절한다. 키만 같은 요청을 같은 작업으로 인정하지 않는다. 중복 여부와 최초 결과는 DB 행과 unique 제약에 남으므로 메타 프로세스 재시작 뒤에도 조회할 수 있다. 이 중복 방지는 신뢰된 경기 판정과 별도의 책임이다.
+
+조회는 BEGIN IMMEDIATE 뒤에 한다. 한 Database의 mutex는 그 객체를 공유하는 요청을 직렬화하지만 독립 연결까지 묶지 못한다. 쓰기 트랜잭션을 확보한 뒤 키를 읽어야 두 연결이 모두 “없음”을 읽는 check-then-write 경합을 피할 수 있다. UNIQUE는 최종 제약으로 유지한다. prepare 실패나 step의 ROW/DONE 이외 결과는 저장 오류이며 새 INSERT의 근거로 삼지 않는다.
+
+MatchTransaction은 COMMIT 성공 전의 반환·예외에서 롤백을 시도한다. 기존 경기의 응답을 반환할 때는 이번 연결의 읽기만 한 트랜잭션을 끝내며 이미 커밋된 최초 경기를 취소하지 않는다. 키 충돌·조회 오류·새 저장 실패 경로에서도 연결을 열린 트랜잭션 상태로 남기지 않는다.
+
+멱등성의 기준은 요청 키와 해석된 경기 필드다. JSON의 공백이나 키 순서 자체를 비교하지 않는다. 동일한 점수라도 다른 UUID라면 별개 작업이므로 다시 보상이 반영될 수 있다. 키를 매 재시도마다 새로 만들면 중복 방지 계약을 벗어난다. 보상 어뷰징을 막으려면 신뢰된 경기 판정과 키 발급·권한 경계가 함께 필요하다.
+
+최초 응답은 matches의 RP snapshot으로 재구성한다. 이후 다른 경기로 현재 RP가 변해도 과거 요청에 현재 RP를 덧붙여 최초 응답인 것처럼 반환하지 않는다. 현재 구현은 중복 판별 자료를 계속 보관한다. 경기 키나 기록을 삭제하는 보관 정책을 도입하면 그 이후의 재시도 보장도 별도로 정해야 한다.
 
 ```mermaid
 flowchart TD
-    U["match_uuid 선조회"] --> UX{"기존 행 있음?"}
-    UX -- "예 (재전송)" --> S["보존된 RP snapshot으로<br/>최초 응답 재구성 — 반영 없음"]
-    UX -- 아니오 --> A["BEGIN IMMEDIATE"]
-    A --> B["1) INSERT matches → match_id"]
+    A["BEGIN IMMEDIATE"] --> U["match_uuid 조회"]
+    U --> UR{"ROW / DONE / 오류"}
+    UR -- 오류 --> R["RAII ROLLBACK + nullopt"]
+    UR -- ROW --> EQ{"모든 경기 내용 일치?"}
+    EQ -- 예 --> S["보존된 RP snapshot으로<br/>최초 응답 재구성 — 반영 없음"]
+    EQ -- 아니오 --> CF["IdentityConflict → HTTP409<br/>저장/보상 변경 없음"]
+    UR -- DONE --> B["1) INSERT matches → match_id"]
     B --> C["2) SELECT elo FROM players ×2<br/>winner 있으면 elo::update"]
     C --> C2["matches에 RP snapshot UPDATE<br/>(무승부 포함 모든 매치)"]
     C2 --> D{"winner 있음?"}
@@ -975,7 +1056,7 @@ flowchart TD
     D -- 예 --> F["3) UPDATE players ×2<br/>elo · wins/losses · bp · xp"]
     F --> G["4) INSERT elo_history ×2"]
     G --> H
-    B -- 실패 --> R["ROLLBACK + nullopt"]
+    B -- 실패 --> R
     C -- 실패 --> R
     C2 -- 실패 --> R
     F -- 실패 --> R
@@ -983,9 +1064,13 @@ flowchart TD
     H -- 실패 --> R
 ```
 
-읽어둘 것이 넷 있다.
+트랜잭션을 읽을 때는 다음 경계를 확인한다.
 
-**`BEGIN IMMEDIATE` 를 쓰는 이유.** SQLite 의 기본 `BEGIN`(deferred)은 첫 쓰기가 일어날 때 비로소 쓰기 락을 잡는다. 그 사이에 다른 쓰기가 끼어들면 `SQLITE_BUSY` 로 트랜잭션 전체가 실패하고 처음부터 다시 해야 한다. `IMMEDIATE` 는 시작 시점에 쓰기 락을 확보해 이 재시도 경로를 아예 없앤다.
+**`BEGIN IMMEDIATE`를 쓰는 이유.** 쓰기 트랜잭션을 처음부터 요청해 뒤늦은 읽기→쓰기 전환의 경합을 줄인다. 다른 writer가 있으면 BEGIN 자체가 SQLITE_BUSY로 실패할 수 있다. rollback journal 모드에서는 reader가 COMMIT을 지연시킬 수도 있다. IMMEDIATE나 busy timeout은 모든 잠금 실패를 없애는 기능이 아니다. 현재 실제 서버는 WAL을 사용하며 독자는 쓰는 도중에도 이전 snapshot을 읽을 수 있다. [트랜잭션의 잠금과 실패](https://www.sqlite.org/lang_transaction.html)
+
+**문장 성공과 행 갱신을 구별한다.** UPDATE가 SQLITE_DONE을 반환해도 WHERE에 맞는 행이 0개일 수 있다. 보상 갱신은 BP·XP와 증가할 승패 카운터의 실제 INTEGER 타입 및 32비트 상한을 조건에 넣고 sqlite3_changes가 1인지도 확인한다. 두 번째 참가자가 상한에 걸리면 첫 번째 참가자의 변경, matches와 history도 함께 롤백한다. SQLite INTEGER의 범위가 더 넓더라도 현재 Player/API의 int 범위를 넘는 값을 저장하면 읽을 때 다른 값이 될 수 있다. [직접 변경된 행 수](https://www.sqlite.org/c3ref/changes.html)
+
+**커밋 뒤 응답을 잃을 수 있다.** DB 커밋과 HTTP 응답 도착은 서로 다른 사건이다. 커밋 뒤 연결이 끊어지면 호출자는 결과를 모를 수 있지만 데이터는 이미 남아 있다. 이때 같은 UUID와 내용으로 재시도하면 저장된 최초 결과를 확인한다. 네트워크 전송을 DB 트랜잭션 안에 넣어 모든 실패를 한 번에 취소하려 하지 않는다.
 
 **`winner=null`이면 players를 건드리지 않는다.** 현재 relay는 검증된 동시 종료만 무승부로 저장한다. 조작 입력이나 미완료 경기는 meta에 POST하지 않고 상태 코드와 변동 0을 반환한다. 따라서 무승부·검증 거절·저장 실패를 화면에서 서로 구분한다.
 
@@ -1019,6 +1104,15 @@ Database::registerGuest(const std::string& token)
 
     if(!credentials::account(token))return std::nullopt;
     const auto hash=credentials::digest("account",token);
+    if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    struct RegistrationTransaction {
+        sqlite3* db;
+        bool committed = false;
+        ~RegistrationTransaction() {
+            if (!committed) sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    } transaction{db_};
     StmtGuard g;
     const char* sql =
         "INSERT INTO players(username,token_hash,elo,wins,losses,created_at) "
@@ -1048,53 +1142,72 @@ Database::registerGuest(const std::string& token)
     p.selected_icon_id = kDefaultIconId;
     // username 은 기본 NULL
     if (!insert_icon_ownership(db_, p.id, kDefaultIconId)) {
-        // default 아이콘은 default_owned=true 라 실동작엔 지장 없지만, 소유 행
-        // 누락은 DB 이상 신호이므로 조용히 넘기지 않는다.
+        // 계정과 기본 소유권은 하나의 등록이다. 부분 성공을 반환하지 않는다.
         std::fprintf(stderr, "[db] registerGuest: default icon ownership insert "
                      "failed for player_id=%lld\n", static_cast<long long>(p.id));
+        return std::nullopt;
     }
+    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    transaction.committed = true;
     return p;
 }
 ```
 
-마지막 블록이 흥미롭다. `default` 아이콘은 카탈로그에서 `default_owned = true` 이므로 `player_owns_icon()` 이 `player_icons` 를 조회하기도 전에 true 를 돌려준다. 즉 이 INSERT 가 실패해도 **게임은 정상 동작한다**. 그런데도 경고를 남기는 이유는, 이 실패가 "DB 쓰기가 안 되고 있다"는 신호이기 때문이다. 무해한 실패를 조용히 삼키면 다음번의 유해한 실패(BP 차감 누락 등)를 예고하는 유일한 단서를 잃는다. 실패를 무시하는 것과 로그를 남기는 것은 다르다.
+계정 행과 기본 아이콘 소유권을 하나의 쓰기 트랜잭션으로 만든다. 소유권 INSERT가 실패하면 새 계정도 롤백하고 등록 실패를 반환한다. 등록 응답을 받은 클라이언트는 서버에서 기본 프로필이 모두 확정됐다고 해석할 수 있다. 기본 아이콘의 표시 fallback과 새 계정 저장의 원자성은 별도 계약이다.
+
+토큰은 난수로 발급한 비밀이고 player ID는 공개 식별자다. 같은 토큰의 해시는 UNIQUE 제약으로 중복 등록을 막는다. DB 실패나 커밋 실패도 nullopt이므로 호출자가 모든 실패를 난수 충돌로 해석해서는 안 된다. 현재 HTTP 등록은 최대 두 번만 시도하며 성공 응답에만 원문 토큰을 넣는다.
 
 ### 8.2 토큰으로 플레이어 읽기 — 방어적 fallback
 
 **현재 소스 발췌 — `meta/database.cpp`**
 
 ```cpp
-std::optional<Player> read_player(sqlite3_stmt* statement)
-{
-    if(sqlite3_step(statement)!=SQLITE_ROW)return std::nullopt;
+// SQLite INTEGER is 64-bit. Validate its storage type and range before narrowing.
+bool read_nonnegative_int(sqlite3_stmt* statement, int column, int& out) {
+    if (sqlite3_column_type(statement, column) != SQLITE_INTEGER) return false;
+    const auto value = sqlite3_column_int64(statement, column);
+    if (value < 0 || value > 2147483647) return false;
+    out = static_cast<int>(value);
+    return true;
+}
+
+std::optional<Player> read_player(sqlite3_stmt *statement) {
+    if (sqlite3_step(statement) != SQLITE_ROW)
+        return std::nullopt;
     Player p;
-    p.id=sqlite3_column_int64(statement,0);
-    p.username=read_nullable_text(statement,1);
-    p.elo=sqlite3_column_int(statement,2);p.wins=sqlite3_column_int(statement,3);
-    p.losses=sqlite3_column_int(statement,4);p.bp=sqlite3_column_int(statement,5);
-    p.xp=sqlite3_column_int(statement,6);
-    auto icon=sqlite3_column_text(statement,7);
-    p.selected_icon_id=icon?reinterpret_cast<const char*>(icon):kDefaultIconId;
-    if(!find_icon_def(p.selected_icon_id))p.selected_icon_id=kDefaultIconId;
-    p.auth_epoch=sqlite3_column_int64(statement,8);
+    p.id = sqlite3_column_int64(statement, 0);
+    p.username = read_nullable_text(statement, 1);
+    if (!read_nonnegative_int(statement, 2, p.elo) ||
+        !read_nonnegative_int(statement, 3, p.wins) ||
+        !read_nonnegative_int(statement, 4, p.losses) ||
+        !read_nonnegative_int(statement, 5, p.bp) ||
+        !read_nonnegative_int(statement, 6, p.xp)) return std::nullopt;
+    auto icon = sqlite3_column_text(statement, 7);
+    p.selected_icon_id = icon ? reinterpret_cast<const char *>(icon) : kDefaultIconId;
+    if (!find_icon_def(p.selected_icon_id))
+        p.selected_icon_id = kDefaultIconId;
+    p.auth_epoch = sqlite3_column_int64(statement, 8);
     return p;
 }
-const char* kPlayerColumns="SELECT id,username,elo,wins,losses,bp,xp,selected_icon_id,auth_epoch FROM players ";
-std::optional<Player> read_player_by_token(sqlite3* db,const std::string& token)
-{
-    if(!credentials::account(token))return std::nullopt;
-    const auto hash=credentials::digest("account",token);
+const char *kPlayerColumns =
+    "SELECT id,username,elo,wins,losses,bp,xp,selected_icon_id,auth_epoch FROM players ";
+std::optional<Player> read_player_by_token(sqlite3 *db, const std::string &token) {
+    if (!credentials::account(token))
+        return std::nullopt;
+    const auto hash = credentials::digest("account", token);
     StmtGuard g;
-    const auto sql=std::string(kPlayerColumns)+"WHERE token_hash=?1";
-    if(sqlite3_prepare_v2(db,sql.c_str(),-1,&g.s,nullptr)!=SQLITE_OK)return std::nullopt;
-    sqlite3_bind_text(g.s,1,hash.c_str(),-1,SQLITE_TRANSIENT);
+    const auto sql = std::string(kPlayerColumns) + "WHERE token_hash=?1";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &g.s, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(g.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
     return read_player(g.s);
 }
 ```
 
 `read_player()`의 아이콘 검사문이 안전장치다. 토큰 조회는 먼저 형식을 검사하고 SHA-256 해시를 만들어 `token_hash`와 비교한다. `Player`에는 비밀을 넣지 않는다. 해시 이관·인증 세대는 [Part 17](part17-guest-account-recovery.md)이 확장한다. `players.selected_icon_id` 가 카탈로그에 없는 값이면 강제로 `default` 로 내린다. 이런 상태는 **카탈로그를 줄일 때** 생긴다 — `ruby` 를 카탈로그에서 뺐는데 그것을 선택 중인 플레이어가 남아 있는 경우. fallback 이 없으면 클라이언트가 존재하지 않는 아이콘 id 를 받아 이미지 로드에 실패하고, relay 는 그 id 를 `MATCH_FOUND` 에 실어 상대에게 보낸다.
 
-한 줄로 "카탈로그는 언제든 줄여도 된다"는 성질을 얻는다. `players` 테이블을 일괄 UPDATE 할 필요가 없다.
+이 fallback은 존재하지 않는 선택을 기본 아이콘으로 표시하게 한다. 판매 중단된 아이콘의 기존 소유권·가격·보상 정책까지 결정해 주는 것은 아니다. 카탈로그를 바꿀 때는 새 구매 허용 여부와 기존 소유자의 사용 정책을 따로 정한다.
 
 ### 8.3 구매 — 검증과 조건부 UPDATE
 
@@ -1108,75 +1221,95 @@ Database::purchaseIcon(const std::string& token,
 {
     out_player.reset();
     std::lock_guard<std::mutex> lk(mu_);
-
     const IconCatalogEntry* icon = find_icon_def(icon_id);
     if (!icon) return IconPurchaseResult::InvalidIcon;
-
+    ShopTransaction transaction(db_);
+    if (!transaction.started()) return IconPurchaseResult::DbError;
     auto p = read_player_by_token(db_, token);
     if (!p) return IconPurchaseResult::UnknownToken;
-    if (player_owns_icon(db_, p->id, icon_id))
-        return IconPurchaseResult::AlreadyOwned;
-    if (p->bp < icon->price_bp)
-        return IconPurchaseResult::InsufficientBp;
-
-    char* err = nullptr;
-    if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, &err) != SQLITE_OK) {
-        std::fprintf(stderr, "[db] purchaseIcon BEGIN: %s\n", err ? err : "?");
-        sqlite3_free(err);
-        return IconPurchaseResult::DbError;
-    }
-
-    auto rollback = [&] {
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return IconPurchaseResult::DbError;
-    };
-
+    const auto owned = player_owns_icon(db_, p->id, icon_id);
+    if (!owned) return IconPurchaseResult::DbError;
+    if (*owned) return IconPurchaseResult::AlreadyOwned;
+    if (p->bp < icon->price_bp) return IconPurchaseResult::InsufficientBp;
     {
         StmtGuard g;
-        const char* sql = "UPDATE players SET bp=bp-?1 WHERE id=?2 AND bp>=?1";
+        const char* sql = "UPDATE players SET bp=bp-?1 WHERE id=?2 AND typeof(bp)='integer' AND bp>=?1";
         if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
-            return rollback();
-        sqlite3_bind_int  (g.s, 1, icon->price_bp);
+            return IconPurchaseResult::DbError;
+        sqlite3_bind_int(g.s, 1, icon->price_bp);
         sqlite3_bind_int64(g.s, 2, p->id);
         if (sqlite3_step(g.s) != SQLITE_DONE || sqlite3_changes(db_) != 1)
-            return rollback();
+            return IconPurchaseResult::DbError;
     }
-    if (!insert_icon_ownership(db_, p->id, icon_id)) return rollback();
-
-    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK) {
-        std::fprintf(stderr, "[db] purchaseIcon COMMIT: %s\n", err ? err : "?");
-        sqlite3_free(err);
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return IconPurchaseResult::DbError;
-    }
-    out_player = read_player_by_token(db_, token);
-    return out_player ? IconPurchaseResult::Ok : IconPurchaseResult::DbError;
+    if (!insert_icon_ownership(db_, p->id, icon_id)) return IconPurchaseResult::DbError;
+    // Read the response before COMMIT, while the authenticated identity is stable.
+    auto after = read_player_by_token(db_, token);
+    if (!after || !transaction.commit()) return IconPurchaseResult::DbError;
+    out_player = std::move(after);
+    return IconPurchaseResult::Ok;
 }
 ```
 
-검증 순서가 곧 오류 우선순위다.
+검증과 변경은 하나의 쓰기 트랜잭션 안에서 이어진다.
 
-1. `icon_id` 가 카탈로그에 있는가 → `InvalidIcon` (HTTP 400)
-2. token 이 유효한가 → `UnknownToken` (404)
-3. 이미 소유하지 않았는가 → `AlreadyOwned` (409)
-4. BP 가 충분한가 → `InsufficientBp` (402)
-5. 트랜잭션에서 BP 차감 + 소유 행 INSERT 가 모두 성공하는가 → `DbError` (500)
+1. 서버 카탈로그에서 아이콘과 가격을 고른다. 미등록 아이콘은 `InvalidIcon`이다.
+2. `ShopTransaction`이 `BEGIN IMMEDIATE`에 성공한 뒤 토큰으로 계정을 찾는다.
+3. 소유권 조회는 **소유 / 미소유 / 조회 오류**를 구별한다. 오류를 미소유로 취급하지 않는다.
+4. 이미 가진 아이콘은 `AlreadyOwned`, BP가 부족하면 `InsufficientBp`다.
+5. 조건부 차감과 새 소유권 INSERT가 각각 한 행을 바꾸었는지 확인한다.
+6. 같은 거래 안에서 응답용 프로필을 읽고, COMMIT 성공 후에만 결과를 반환한다.
 
-4 번에서 이미 BP 를 확인했는데 UPDATE 에 `AND bp>=?1` 이 또 붙어 있다. 중복처럼 보이지만 아니다. 이것은 **조건부 UPDATE** 로, "읽은 시점의 BP 와 쓰는 시점의 BP 가 같다"는 것을 DB 레벨에서 보장한다. `sqlite3_changes(db_) != 1` 검사가 그 결과를 확인한다 — 조건이 어긋나 0 행이 갱신되면 롤백한다.
+`AND bp>=?1`은 UPDATE가 적용되는 시점의 잔액이 가격 이상이라는 조건이다. 앞서 읽은 BP와 쓰는 순간의 BP가 같은 값이라는 뜻은 아니다. 이번 구현에서는 쓰기 트랜잭션을 먼저 확보해 다른 연결의 동시 변경도 직렬화하며, UPDATE 조건은 그와 별도로 차감의 전제를 SQL에 명시한다.
 
-지금은 `mu_` 가 모든 접근을 직렬화하므로 이 경합이 실제로 일어나지 않는다. 그러나 나중에 mutex 범위를 좁히거나 커넥션을 늘리면 즉시 필요해진다. "읽고- 판단하고-쓰는" 코드는 **쓰기에도 조건을 거는 것**이 기본이다.
+객체의 mutex는 그 Database 객체의 연결만 보호한다. 같은 DB 파일을 연 별도 객체나 프로세스까지 보호하지 않는다. 예를 들어 두 연결이 BP300·ruby미소유를 각각 읽고, 그 뒤 차감만 차례로 수행하면 잔액은100이 될 수 있다. 소유권 INSERT를 OR IGNORE로 처리하면 두 번째 삽입이 무시돼도 성공처럼 보인다. 현재 코드는 BEGIN 뒤 소유권을 다시 판단하므로 한 요청은100을 차감하고 다른 요청은 AlreadyOwned를 반환한다. 소유권 삽입은 일반 INSERT와 변경 행 수 검사로 실패를 드러낸다.
 
-선택(`selectIcon`)은 더 단순하다. 카탈로그 존재 → 토큰 유효 → 소유 확인 → `players.selected_icon_id` UPDATE. 소유하지 않은 아이콘을 선택하면 `NotOwned` (403) 다. 클라이언트의 구매 흐름이 정확히 이 403 을 신호로 쓴다(§15.1).
+`ShopTransaction`은 커밋하지 않은 모든 이른 반환에서 롤백한다. 기본 아이콘의 저장도 같은 엄격한 삽입 보조 함수를 사용한다. 조회 성공·SQL 실행 성공·실제 행 반영·커밋 성공을 서로 같은 것으로 취급하지 않는다.
 
-클라이언트의 `assets/images.cfg` 는 icon id 를 로컬 PNG 로 매핑할 뿐이고, **소유권의 기준은 언제나 meta DB** 다. 클라이언트가 파일을 고쳐도 서버가 인정하지 않으면 아무 일도 일어나지 않는다.
+선택도 인증과 소유권 확인을 같은 쓰기 트랜잭션 안에서 수행한다. 미소유는 NotOwned(403), 조회 실패는 DbError(500)다. 선택은 selected_icon_id만 바꾸고 BP를 차감하지 않는다. 구매는 소유권만 추가하므로 자동으로 선택되지 않는다. 프로필 응답은 커밋 전에 읽고 커밋 뒤 내보내어, 별도 연결의 키 변경과 엇갈려 성공한 구매를 응답 조회 실패로 오인하는 구간도 줄인다.
+
+**현재 소스 발췌 — `meta/database.cpp`**
+
+```cpp
+IconSelectResult
+Database::selectIcon(const std::string& token,
+                     const std::string& icon_id,
+                     std::optional<Player>& out_player)
+{
+    out_player.reset();
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!find_icon_def(icon_id)) return IconSelectResult::InvalidIcon;
+    ShopTransaction transaction(db_);
+    if (!transaction.started()) return IconSelectResult::DbError;
+    auto p = read_player_by_token(db_, token);
+    if (!p) return IconSelectResult::UnknownToken;
+    const auto owned = player_owns_icon(db_, p->id, icon_id);
+    if (!owned) return IconSelectResult::DbError;
+    if (!*owned) return IconSelectResult::NotOwned;
+    {
+        StmtGuard g;
+        const char* sql = "UPDATE players SET selected_icon_id=?1 WHERE id=?2";
+        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
+            return IconSelectResult::DbError;
+        sqlite3_bind_text(g.s, 1, icon_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(g.s, 2, p->id);
+        if (sqlite3_step(g.s) != SQLITE_DONE || sqlite3_changes(db_) != 1)
+            return IconSelectResult::DbError;
+    }
+    auto after = read_player_by_token(db_, token);
+    if (!after || !transaction.commit()) return IconSelectResult::DbError;
+    out_player = std::move(after);
+    return IconSelectResult::Ok;
+}
+```
+
+클라이언트의 `assets/images.cfg`는 icon ID를 로컬 이미지로 매핑한다. 파일을 바꾸면 자신의 화면 모양은 바뀔 수 있으나, 서버의 소유권이나 다른 참가자에게 전달되는 공식 선택을 얻는 것은 아니다. 서버가 확인할 대상은 이미지 파일의 존재 여부가 아니라 인증된 계정의 소유권이다.
 
 ### 8.4 leaderboard
 
 **현재 소스 발췌 — `meta/database.cpp`**
 
 ```cpp
-// -----------------------------------------------------------------------------
-std::vector<LeaderRow>
+std::optional<std::vector<LeaderRow>>
 Database::leaderboard(int limit)
 {
     std::lock_guard<std::mutex> lk(mu_);
@@ -1191,24 +1324,36 @@ Database::leaderboard(int limit)
         std::fprintf(stderr, "[db] leaderboard prepare: %s\n", sqlite3_errmsg(db_));
         return {};
     }
-    sqlite3_bind_int(g.s, 1, limit);
+    if (sqlite3_bind_int(g.s, 1, limit) != SQLITE_OK) return std::nullopt;
 
     std::vector<LeaderRow> rows;
-    while (sqlite3_step(g.s) == SQLITE_ROW) {
+    int step = SQLITE_OK;
+    while ((step = sqlite3_step(g.s)) == SQLITE_ROW) {
         LeaderRow r;
         r.player_id = sqlite3_column_int64(g.s, 0);
+        if (r.player_id <= 0) return std::nullopt;
         r.username  = read_nullable_text(g.s, 1);
-        r.elo       = sqlite3_column_int(g.s, 2);
-        r.wins      = sqlite3_column_int(g.s, 3);
-        r.losses    = sqlite3_column_int(g.s, 4);
-        r.xp        = sqlite3_column_int(g.s, 5);
+        if (!read_nonnegative_int(g.s, 2, r.elo) ||
+            !read_nonnegative_int(g.s, 3, r.wins) ||
+            !read_nonnegative_int(g.s, 4, r.losses) ||
+            !read_nonnegative_int(g.s, 5, r.xp)) return {};
         rows.push_back(std::move(r));
     }
+    if (step != SQLITE_DONE) return std::nullopt;
     return rows;
 }
 ```
 
 `limit` 은 `std::clamp(limit, 1, 100)` 으로 잘린다. `?limit=100000` 을 보내 전체 테이블을 끌어가는 것을 막는 상한이다. `ORDER BY elo DESC, id ASC` 의 두 번째 키가 중요하다 — 동점자의 순서를 `id` 로 고정하지 않으면 같은 요청이 매번 다른 순위를 돌려줄 수 있고, 페이지네이션이 깨진다.
+
+조회 성공의 빈 vector와 조회 실패의 nullopt를 구분한다. 준비·바인딩·행 검증·step 중
+어느 단계든 실패하면 목록을 공개하지 않는다. SQLITE_ROW 반복 뒤에는 SQLITE_DONE을
+확인해야 한다. 도중에 SQLITE_ERROR나 SQLITE_BUSY가 나온 상태를 정상 종료로 취급하면
+일부 행만 담긴 목록을 완전한 랭킹처럼 표시할 수 있다.
+
+정렬은 RP 내림차순, 같은 RP에서는 id 오름차순이다. 응답의 rank는 그 목록의 표시 순번이며
+동점자에게 같은 등수를 붙이는 경쟁 순위 방식은 아니다. 유일한 id를 보조 키로 사용하므로
+같은 데이터 스냅샷에서 순서가 정해진다. 다른 조회 사이에 성적이 갱신되면 순서는 바뀔 수 있다.
 
 ## 9. JSON 문서 검증과 응답 직렬화를 분리한다
 
@@ -1220,7 +1365,7 @@ nlohmann/json으로 문서 전체를 검증하고 `protocol.h`는 API별 응답�
 
 ### 9.1 직렬화 — 이스케이프와 응답 빌더
 
-직렬화에서 유일하게 조심할 것은 문자열 이스케이프다.
+응답 빌더는 정해진 필드와 숫자 값을 JSON으로 조립한다. 문자열 값에는 이스케이프가 필요하며, UTF-8 바이트를 그대로 전달하는 부분은 입력 문자열이 유효한 UTF-8이라는 전제를 갖는다.
 
 **현재 소스 발췌 — `meta/protocol.h`**
 
@@ -1251,7 +1396,7 @@ inline std::string json_escape(const std::string& s)
 }
 ```
 
-`default` 분기가 UTF-8 바이트를 그대로 통과시킨다는 점이 중요하다. JSON 스펙은 비 ASCII 를 `\uXXXX` 로 이스케이프하는 것도 허용하지만 요구하지는 않으며, UTF-8 응답 본문에 그대로 실어도 유효하다. 한국어 username 이 들어와도 문제없다. `< 0x20` 제어문자만 `\u00xx` 로 바꾼다 — 이스케이프하지 않으면 문법 위반이기 때문이다.
+`default` 분기가 UTF-8 바이트를 그대로 통과시킨다는 점이 중요하다. JSON 스펙은 비 ASCII 를 `\uXXXX` 로 이스케이프하는 것도 허용하지만 요구하지는 않으며, UTF-8 응답 본문에 그대로 실어도 유효하다. 유효한 UTF-8로 저장된 한국어 username은 그대로 전달할 수 있다. 이 함수 자체가 잘못된 UTF-8을 복구하거나 검사하지는 않는다. `< 0x20` 제어문자만 `\u00xx` 로 바꾼다 — 이스케이프하지 않으면 문법 위반이기 때문이다.
 
 응답 빌더는 shape 마다 하나씩 있다.
 
@@ -1298,7 +1443,9 @@ inline std::string guest_response(int64_t player_id,
 
 ```cpp
 inline std::optional<Json> object(const std::string &body) {
-    if (body.size() > 64 * 1024)
+    // The vendored lexer treats raw NUL as EOF. Reject it before parsing so
+    // a valid prefix cannot hide trailing bytes. Escaped \u0000 remains valid.
+    if (body.size() > 64 * 1024 || body.find('\0') != std::string::npos)
         return std::nullopt;
     try {
         std::vector<std::set<std::string>> keys;
@@ -1323,13 +1470,14 @@ inline std::optional<Json> object(const std::string &body) {
 }
 ```
 
-64KiB와 깊이 16을 제한한다. 중복 키는 Unicode escape를 해석한 이름으로 비교한다.
-`token`과 `toke\u006e`처럼 표기가 달라도 같은 이름이면 거절한다. callback에서 false를
-반환하는 필터링만으로는 깊은 내용을 계속 읽을 수 있으므로 한도에서 예외로 중단한다.
-오류 진단에는 비밀 본문이 들어갈 수 있어 내용을 로그로 내보내지 않는다.
+본문 크기는 바이트 기준 64KiB이고 콜백의 depth가 16을 넘으면 거절한다. 현재 포함된 파서는 원시 NUL 바이트를 입력 끝으로 취급할 수 있으므로, 파싱 전에 전체 본문에서 원시 NUL을 거절한다. 예를 들어 `{}` 뒤에 NUL과 다른 바이트가 붙었다면 빈 객체로 처리해서는 안 된다. 반면 문자열 안의 `\u0000` 이스케이프는 유효한 문자 데이터이며, 디코딩 후 그 문자를 허용할지는 ID·표시 이름 등 사용처가 판단한다.
 
-문자열은 최상위의 string만, 정수는 int64 범위의 integer만, boolean은 실제 true/false만
-받는다. 중첩 객체의 token을 찾아 올라가지 않으며 소수·지수형 실수를 정수로 자르지 않는다.
+중복 키는 Unicode escape를 해석한 이름으로 비교한다. `token`과 `toke\u006e`처럼 표기가 달라도 같은 객체의 같은 이름이면 거절한다. 객체 시작 때 새 집합을 넣고 끝날 때 빼므로, 서로 다른 객체의 같은 키까지 중복으로 거절하지 않는다. 이는 JSON 표준의 유일 이름 권고보다 엄격한 서비스 정책이다. 콜백에서 false를 반환하는 것은 필터링일 수 있으므로 한도를 넘거나 키가 중복되면 예외로 파싱 전체를 중단한다. 오류 진단에는 비밀 본문이 들어갈 수 있어 내용을 로그로 내보내지 않는다.
+
+문자열은 최상위의 string만, 정수는 int64 범위의 integer만, boolean은 실제 true/false만 받는다. 중첩 객체의 token을 찾아 올라가지 않으며 소수·지수형 실수를 정수로 자르지 않는다. unsigned 정수는 INT64_MAX 이하임을 먼저 확인한다. 문자열 helper가 반환하는 빈 문자열은 누락·타입 오류와 유효한 빈 문자열을 합친 계약이므로, 빈 문자열이 의미 있는 필드는 객체를 직접 확인하거나 optional<string> 같은 구분 가능한 계약이 필요하다.
+
+문서가 JSON 객체라는 사실과 각 API의 필드 계약은 별개다. 필요한 키·타입·범위·명시적인 null 허용 여부를 핸들러에서 검사하고, 계정·카탈로그·소유권·잔액은 서버 상태로 판단한다. 필드별 find helper는 본문을 매번 파싱한다. 여러 필드를 읽는 경로를 최적화한다면 문서 한 번을 검증한 뒤 그 객체를 전달할 수 있지만, 전체 문서 검증을 생략하는 문자열 검색으로 되돌리지 않는다.
+
 
 **현재 소스 발췌 — `meta/protocol.h`**
 
@@ -1387,14 +1535,14 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
 
 | method / path | 호출자 | 성공(200) 응답 | 실패 응답 |
 |---|---|---|---|
-| `GET /healthz` | 운영 probe | `{"ok":true}` | — |
+| `GET /healthz` | HTTP 응답 probe (DB 준비 상태 별도) | `{"ok":true}` | — |
 | `POST /v1/guest` | client | player_id/token/elo/bp/xp/level/icon | 500 `entropy_unavailable`, 500 `register_failed` |
 | `POST /v1/auth/verify` | client · relay | player_id/username/elo/bp/xp/level/icon | 400 `bad_request`, 404 `unknown_token` |
 | `GET /v1/icons/catalog` | client | id/name/price_bp/default_owned 배열 | — |
 | `POST /v1/icons/buy` | client | 갱신된 auth 응답 | 400 `bad_request`·`invalid_icon`, 402 `insufficient_bp`, 404 `unknown_token`, 409 `already_owned`, 500 `db_error` |
 | `POST /v1/icons/select` | client | 갱신된 auth 응답 | 400 `bad_request`·`invalid_icon`, 403 `not_owned`, 404 `unknown_token`, 500 `db_error` |
 | `POST /v1/matches` | relay 전용 | match_id + 양쪽 `elo_before/after/delta` | 400 `bad_request`, 403 `forbidden`, 500 `save_failed` |
-| `GET /v1/leaderboard?limit=N` | client · web | rank/player_id/username/elo/wins/losses/level 배열 | — |
+| `GET /v1/leaderboard?limit=N` | client · web | rank/player_id/username/elo/wins/losses/level 배열 | 성공 200(빈 배열 포함), 조회 실패 503 |
 | 모든 `/v1/*` | 브라우저 | `OPTIONS` → 204 + CORS 헤더 | — |
 | (전역) | — | — | 429 `rate_limited` |
 
@@ -1484,7 +1632,7 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
     json_post(svr, "/v1/matches",
         [this](const httplib::Request& req, httplib::Response& res) {
             if (!relay_secret_.empty() &&
-                !ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
+                !credentials::equal_secret(req.get_header_value("X-Relay-Secret"), relay_secret_)) {
                 set_json(res, 403, proto::error_json("forbidden", "relay secret required"));
                 return;
             }
@@ -1492,7 +1640,15 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
             const std::string matchUuid = proto::find_string(req.body, "match_uuid");
             auto pa = proto::find_int(req.body, "player_a");
             auto pb = proto::find_int(req.body, "player_b");
-            auto wn = proto::find_int(req.body, "winner");   // null 허용
+            auto wn = proto::find_int(req.body, "winner");
+            // Explicit JSON null is a draw; missing/invalid/out-of-range values
+            // must not silently acquire that meaning and consume a match UUID.
+            const auto match_input = json_input::object(req.body);
+            if (!match_input || !match_input->contains("winner") ||
+                (!(*match_input)["winner"].is_null() && !wn)) {
+                set_json(res, 400, proto::error_json("bad_request", "winner must be an integer or null"));
+                return;
+            }
             auto sa = proto::find_int(req.body, "score_a");
             auto sb = proto::find_int(req.body, "score_b");
             auto la = proto::find_int(req.body, "lines_a");
@@ -1509,10 +1665,7 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
                     proto::error_json("bad_request", "player_a == player_b"));
                 return;
             }
-            // winner 가 있다면 player_a 또는 player_b 중 하나여야 한다.
-            // 그렇지 않으면 RP 갱신이 두 플레이어 모두 losses 만 누적하는 잘못된
-            // 상태를 만든다 (saveMatch 가 winner != a && winner != b 인 분기에서
-            // 둘 다 패배 처리). 외부에 노출되는 API 이므로 여기서 막는다.
+            // A winner must identify one side of this match.
             if (wn && (*wn != *pa && *wn != *pb)) {
                 set_json(res, 400,
                     proto::error_json("bad_request", "winner must be player_a, player_b, or null"));
@@ -1523,9 +1676,7 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
                     proto::error_json("bad_request", "scores/lines/duration must be non-negative"));
                 return;
             }
-            // int64 → int 로 내려가기 전에 상한 검증 — 2^31 이상 값은 캐스팅에서
-            // 음수로 래핑되어 위의 non-negative 검사를 우회한다. 게임 상 도달
-            // 불가능한 1e8 을 하드 상한으로 거부.
+            // Validate before narrowing int64 JSON values to int.
             constexpr int64_t kMaxStatValue = 100000000;
             if (*sa > kMaxStatValue || *sb > kMaxStatValue ||
                 *la > kMaxStatValue || *lb > kMaxStatValue ||
@@ -1546,7 +1697,13 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
             m.lines_b    = static_cast<int>(*lb);
             m.duration_s = static_cast<int>(*du);
 
-            auto ins = db_.saveMatch(m);
+            MatchSaveError error;
+            auto ins = db_.saveMatch(m, &error);
+            if (!ins && error == MatchSaveError::IdentityConflict) {
+                set_json(res, 409,
+                    proto::error_json("match_conflict", "match_uuid already identifies a different record"));
+                return;
+            }
             if (!ins) {
                 set_json(res, 500,
                     proto::error_json("save_failed", "db transaction failed"));
@@ -1564,13 +1721,37 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
 
 검증 코드가 저장 코드보다 길다. 이것이 정상이다.
 
-두 검사를 특히 눈여겨볼 만하다.
+세 검사를 특히 눈여겨볼 만하다.
+
+**무승부와 해석 실패를 구별한다.** `find_int`의 빈 optional은 JSON null뿐 아니라 필드 누락·문자열·소수·불리언·범위 초과에서도 나온다. 빈 optional만 그대로 저장하면 오류 입력이 무승부로 확정되어 경기 UUID를 소비한다. 객체에서 `winner`가 존재하며 명시적인 null인지 따로 확인하고, 그 외에는 유효한 정수만 받는다. 수정한 요청은 거절된 UUID를 그대로 사용해 정상 제출할 수 있다.
 
 **`winner` 가 두 플레이어 중 하나여야 한다.** `saveMatch` 는 `a_won` 도 `b_won` 도 아닌 winner 를 받으면 두 플레이어 **모두**를 패배 처리한다(`update_player` 의 `won` 인자가 둘 다 false). 이건 명백한 버그 상태이므로 API 경계에서 막는다. "호출자가 알아서 올바른 값을 보낼 것"이라는 가정은 relay 가 유일한 호출자일 때조차 두면 안 된다.
 
-**`int64` → `int` narrowing 전에 상한을 건다.** 이건 실제로 우회 가능한 구멍이다. `score_a = 4294967296` (2^32) 을 보내면 `find_int` 는 정상적인 `int64_t` 를 돌려주고 `> 0` 검사를 통과한다. 그런데 `static_cast<int>` 에서 하위 32 비트만 남아 `0` 이 되고, 값에 따라서는 음수가 된다. 음수 검사를 **캐스팅 전에** 했으니 소용이 없다. 그래서 게임에서 도달 불가능한 `100,000,000` 을 하드 상한으로 둔다.
+**`int64` → `int` narrowing 전에 상한을 건다.** 이건 실제로 우회 가능한 구멍이다. `score_a = 4294967296` (2^32) 을 보내면 `find_int` 는 정상적인 `int64_t` 를 돌려주고 `> 0` 검사를 통과한다. 그런데 32비트 `int`에 이 값을 저장할 수 없다. C++17에서 범위 밖의 signed 정수 변환 결과는 구현 정의이며, 흔한 구현에서는 하위 비트에 따라 `0`이나 음수가 된다. 음수 검사를 **캐스팅 전에** 했으니 소용이 없다. 그래서 게임에서 도달 불가능한 `100,000,000` 을 하드 상한으로 둔다.
 
 이런 종류의 버그는 "검사했다"와 "검사한 값이 저장되는 값과 같다"를 혼동할 때 생긴다. 타입이 좁아지는 지점마다 검사가 여전히 유효한지 확인해야 한다.
+
+랭킹 핸들러는 데이터베이스의 nullopt를 503으로 바꾼다. 빈 배열 200은 조회 성공이다.
+클라이언트는 실패 응답을 빈 순위표로 바꾸지 않고 재조회 가능 상태로 표시한다.
+
+**현재 소스 발췌 — `meta/api_server.cpp`**
+
+```cpp
+res.set_header("Cache-Control", "no-store");
+            auto rows = db_.leaderboard(limit);
+            if (!rows) {
+                set_json(res, 503, proto::error_json("leaderboard_unavailable"));
+                return;
+            }
+
+            std::vector<proto::LeaderRow> out;
+            out.reserve(rows->size());
+            for (const auto& r : *rows) {
+                out.push_back({ r.player_id, r.username, r.elo, r.wins,
+                                r.losses, r.xp });
+            }
+            set_json(res, 200, proto::leaderboard_response(out));
+```
 
 ## 11. HTTP 방어선
 
@@ -1596,7 +1777,7 @@ inline void json_post(httplib::Server &server, const std::string &path, httplib:
     svr.set_pre_routing_handler(
         [&, this](const httplib::Request& req, httplib::Response& res) {
             const bool trustedRelay = !relay_secret_.empty() &&
-                ct_equal(req.get_header_value("X-Relay-Secret"), relay_secret_);
+                credentials::equal_secret(req.get_header_value("X-Relay-Secret"), relay_secret_);
             const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             const std::string ip = rate_limit_key(req, trust_loopback_proxy_);
@@ -1721,24 +1902,35 @@ std::optional<std::string> gen_token()
     return std::string(buf, 32);
 }
 
-// [보안] 상수 시간 문자열 비교(타이밍 사이드채널 방지).
-//   내용에 따라 조기 종료/분기하지 않는다. 길이가 다르면 false.
-bool ct_equal(const std::string& a, const std::string& b)
-{
-    if (a.size() != b.size()) return false;
-    volatile unsigned char diff = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
-    }
-    return diff == 0;
-}
+
 ```
 
 `std::random_device` 를 직접 쓰지 않는 이유가 주석에 있다. 표준은 이 클래스가 "비결정적"이길 권장할 뿐 **강제하지 않는다.** 실제로 일부 구형 구현은 결정적일 수 있다. Windows는 운영체제 CSPRNG인 `BCryptGenRandom`을 직접 호출하고, POSIX/Termux는 `/dev/urandom`을 부분 읽기와 `EINTR`까지 처리하며 끝까지 읽는다. 둘 중 어느 경로든 실패하면 500 `entropy_unavailable`로 guest 발급을 거부한다. 약한 폴백으로 보안 경계를 조용히 낮추지 않는다.
 
-128 비트 엔트로피는 충돌을 사실상 배제한다. 생일 문제로 계산하면 50% 충돌 확률에 도달하는 데 약 2^64 개의 토큰이 필요하다. 그래도 `POST /v1/guest` 핸들러는 `registerGuest` 가 실패하면 새 토큰으로 한 번 더 시도한다 — UNIQUE 제약 위반은 충돌이 아니라 다른 이유로도 날 수 있으므로, 재시도가 비용이 거의 없다면 하는 편이 낫다.
+균일한 b바이트 토큰을 독립적으로 m개 만들 때 충돌 확률이 작은 범위의 근사는
+`m(m−1) / (2 × 2^(8b))`이다. 가능성이 작아도 저장소는 UNIQUE 충돌을 거절한다.
+현재 guest 핸들러는 등록 실패 시 새 토큰으로 제한된 재시도를 한다. 등록 실패에는
+충돌 외의 DB 오류도 포함되며, 난수 생성 자체가 실패하면 즉시 발급을 거절한다.
 
-`ct_equal` 은 relay secret 비교 전용이다. 일반적인 `==` 는 첫 불일치 바이트에서 즉시 반환하므로, 응답 시간을 정밀하게 재면 "앞 몇 글자가 맞았는지"를 알아낼 수 있다. 이론적으로 secret 을 한 글자씩 복원할 수 있는 통로다. 네트워크 지연이 이 신호를 대부분 묻어버려 현실적 위협은 낮지만, 상수 시간 비교의 비용이 사실상 0 이므로 안 쓸 이유가 없다. `volatile` 은 컴파일러가 루프를 조기 종료로 최적화하지 못하게 막는다.
+**현재 소스 발췌 — `meta/credentials.cpp`**
+
+```cpp
+bool equal_secret(const std::string &a, const std::string &b) {
+    if (a.size() != b.size()) return false;
+    return a.empty() || CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
+}
+```
+
+`credentials::equal_secret`은 relay secret을 직접 비교할 때 사용한다. 일반 문자열
+비교에는 내용과 무관한 실행 시간 계약이 없다. 여기서는 같은 길이의 바이트 비교를
+[OpenSSL CRYPTO_memcmp](https://docs.openssl.org/3.5/man3/CRYPTO_memcmp/)에 맡긴다.
+반환값은 0이면 같고 나머지는 다름이며 정렬 비교로 사용할 수 없다.
+길이 차이는 먼저 거절하므로 길이는 숨기지 않는다. 이 함수의 계약을 HTTP 응답 전체의
+일정한 처리 시간이나 DB 검색의 일정한 시간으로 확대하지 않는다.
+
+직접 작성한 반복문에 `volatile`을 붙이는 것만으로 내용 독립적 실행 시간이 보장되지는
+않는다. 비교 함수는 OpenSSL Crypto를 링크하며, 기능 검사와 시간 부채널 분석은
+서로 다른 검증이다.
 
 ## 12. guest 토큰 — 위협 모델
 
@@ -1830,6 +2022,16 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    // The unauthenticated result route is a local test escape hatch only.
+    // Numeric addresses avoid depending on hostname resolution for this boundary.
+    if (args.relay_secret.empty() && args.allow_public_matches &&
+        args.http_host != "127.0.0.1" && args.http_host != "::1") {
+        std::fprintf(stderr,
+                     "[meta] --allow-public-matches without a secret requires a "
+                     "numeric loopback bind (127.0.0.1 or ::1).\n");
+        return 2;
+    }
+
     std::fprintf(stderr, "[meta] opening db: %s\n", args.db_path.c_str());
 
     std::unique_ptr<meta::Database> db;
@@ -1878,7 +2080,7 @@ int main(int argc, char** argv)
 //   · tetris_relay  : post_match()     (경기 결과 저장 + RP 갱신)
 //
 // 네트워크 실패/서버 에러는 std::nullopt 로 통합 처리 — 호출자가 장애 정책
-// (매치 거부 / result 미반영) 적용. 에러 원인은 stderr 로 간단 로그만.
+// (입장 거부 / 결과 저장 확인 불가) 적용. 에러 원인은 stderr 로 간단 로그만.
 //
 // 구현: third_party/httplib.h 의 httplib::Client/SSLClient 위에 thin wrapper.
 
@@ -1955,7 +2157,7 @@ public:
         NetworkError,   // 연결 실패 / 타임아웃 / 그 외 — 토큰은 유지하고 다음에 재시도
     };
 
-    // 주요 엔드포인트. timeout_s: 네트워크 전체 deadline. 계획문서의 기본값과 동일.
+    // timeout_s sets connect/read/write limits; it is not one hard total deadline.
     std::optional<GuestInfo>  request_guest  (int timeout_s = 5);
     // 기존 호출 호환: outcome 무시 시 nullopt 가 unknown 또는 network 실패.
     // 호출부가 회복 정책을 적용하려면 outcome 인자를 채워서 호출.
@@ -1988,6 +2190,8 @@ public:
                                               const std::string& icon_id,
                                               int timeout_s = 5,
                                               int* out_http_status = nullptr);
+    // nullopt means no validated receipt, not proof that no DB write occurred.
+    // Retrying a logical match must reuse its match_uuid and identical fields.
     std::optional<MatchResult> post_match    (const std::string& match_uuid,
                                               int64_t player_a, int64_t player_b,
                                               std::optional<int64_t> winner,
@@ -2056,15 +2260,15 @@ HTTPS URL인데 OpenSSL 지원이 없으면 유효한 클라이언트로 취급�
 
 | 메서드 | 기본 timeout | 누가 기다리는가 | 근거 |
 |---|---:|---|---|
-| `request_guest` | 5 s | 게임 시작 시 사용자 | 첫 실행 1 회. 조금 느려도 재시도할 수 없으니 여유를 준다 |
+| `request_guest` | 5 s | 게임 시작 시 사용자 | 신규 발급 요청. 응답 유실 시 발급 여부가 불명확하므로 이 함수는 자동 재시도하지 않는다 |
 | `verify_token` | 3 s | 게임 시작 시 사용자 / relay 의 QUEUE_JOIN | 클라이언트는 토큰을 보존하지만 ranked relay 는 인증할 수 없으면 입장을 거부한다. 시작을 오래 멈추지 않도록 짧게 둔다 |
 | `fetch_icon_catalog` | 5 s | Customize 화면 | 화면 진입 시 1 회. 실패 시 `[R]` 로 재시도 가능 |
 | `purchase_icon` / `select_icon` | 5 s | Customize 화면 | 사용자가 결과를 기다리는 명시적 조작 |
-| `post_match` | 10 s | 게임오버 화면의 양 클라이언트 | DB 트랜잭션 + 커밋이 걸린다. 재시도까지 포함한 전체 wall-clock 예산으로 해석된다(§13.4). 여기서 포기하면 RP 가 유실된다 |
+| `post_match` | 10 s | 게임오버 화면의 양 클라이언트 | DB 처리와 재시도 진입을 기다린다. 공유 마감은 새 재시도를 제한하지만 진행 중 호출의 강제 취소를 보장하지 않는다(§13.4) |
 
 원칙은 두 가지다. **사용자가 대기 화면 없이 기다리는 호출은 짧게**, **실패하면 데이터가 사라지는 호출은 길게.**
 
-`post_match`가 유독 긴 이유가 후자다. 네트워크 실패·429·5xx에는 같은 `match_uuid`로 짧게 재시도한다. 다만 이 10초는 시도당 값이 아니라 **재시도까지 포함한 전체 wall-clock 예산**이다(§13.4) — 예산을 다 쓰고도 실패하면 relay는 delta 0 `MATCH_RESULT`를 보내고 종료한다. 프로세스 밖 durable outbox가 없으므로 그 결과는 나중에 자동 복구되지 않는다. 반면 `verify_token`이 타임아웃돼도 토큰 파일은 그대로 남아 다음 접속에서 다시 검증할 수 있다.
+`post_match`는 네트워크 실패·429·5xx에서 같은 키와 본문으로 재시도한다. 호출 횟수와 재시도 진입 마감은 제한하지만, 응답을 못 받았다는 사실만으로 DB에 저장되지 않았다고 판단할 수는 없다. 현재 relay는 저장 확인 실패 시 delta0인 `MATCH_RESULT`로 마무리하므로, 화면에 보인0과 나중에 조회한 계정 잔액이 다를 수 있다. 지속 저장되는 재전송 대기열(durable outbox)이 없어 relay 재시작 뒤 미확인 요청을 자동 복구하지 않는다. `verify_token` 실패 시에도 토큰 파일을 보존해 다음 접속에 다시 검증한다.
 
 실제 호출부는 기본값을 그대로 쓰지 않는 곳도 있다. 클라이언트의 Customize 화면은 `mc->select_icon(tok, id, 3, &st)` 처럼 3 초를 쓴다 — 비동기로 돌지만 화면에 "contacting server..." 가 떠 있으므로 짧게 끊는 편이 낫다.
 
@@ -2082,7 +2286,7 @@ void configure_client(ClientT& cli, int timeout_s)
 }
 ```
 
-연결·읽기·쓰기에 각각 같은 값이 걸리므로 한 번의 호출은 **최악의 경우 그 3 배**까지 늘어질 수 있다. 대부분의 엔드포인트는 이 정도로 충분하다 — 연결이 되면 읽기/쓰기가 함께 느려지는 경우가 드물기 때문이다. 예외가 `post_match` 다. 매치 종료 흐름을 붙잡는 호출이라 최악 지연을 계약으로 묶어야 하므로, `timeout_s` 를 시도당 값이 아니라 재시도를 포함한 전체 예산으로 재해석하고 `steady_clock` deadline 으로 강제한다(§13.4).
+연결·읽기·쓰기 제한은 각각 적용된다. 이름이 timeout이라고 해서 함수 전체의 경과 시간이 그 값으로 고정되는 것은 아니다. 이름 해석·여러 I/O 단계·스케줄 지연도 있으므로 단순히 세 값을 더해 엄밀한 전체 상한으로 주장하지 않는다. `post_match`의 `steady_clock` 마감은 남은 시간으로 다음 시도의 제한을 줄이고 새 재시도 진입을 멈춘다. 이미 진행 중인 모든 작업을 그 순간 강제 취소하는 구현은 아니다.
 
 ### 13.3 `VerifyOutcome` — 세 갈래를 구분해야 하는 이유
 
@@ -2118,9 +2322,8 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
         return std::nullopt;
     }
     if (r->status != 200) {
-        std::fprintf(stderr, "[meta-client] /v1/auth/verify HTTP %d: %s\n",
-                     r->status, r->body.c_str());
-        // 5xx 등은 일시적 — 네트워크 오류로 분류해 토큰을 그대로 두고 재시도.
+        std::fprintf(stderr, "[meta-client] /v1/auth/verify HTTP %d\n", r->status);
+        // 인증 실패를 확정할 수 없는 응답이다. 토큰을 보존하고 미확인 결과를 전달한다.
         set_outcome(VerifyOutcome::NetworkError);
         return std::nullopt;
     }
@@ -2166,27 +2369,64 @@ MetaClient::request_guest(int timeout_s)
         return std::nullopt;
     }
     if (r->status != 200) {
-        std::fprintf(stderr, "[meta-client] /v1/guest HTTP %d: %s\n",
-                     r->status, r->body.c_str());
+        std::fprintf(stderr, "[meta-client] /v1/guest HTTP %d\n", r->status);
         return std::nullopt;
     }
-    auto pid = proto::find_int   (r->body, "player_id");
-    auto tok = proto::find_string(r->body, "token");
-    auto elo = proto::find_int   (r->body, "elo");
-    auto bp  = proto::find_int   (r->body, "bp");
-    auto xp  = proto::find_int   (r->body, "xp");
-    auto icon = proto::find_string(r->body, "selected_icon_id");
-    if (!pid || tok.empty() || !elo || !bp || icon.empty()) {
+    const auto result = profile_response::guest(r->body);
+    if (!result)
         std::fprintf(stderr, "[meta-client] /v1/guest bad response\n");
-        return std::nullopt;
-    }
-    return GuestInfo{ *pid, std::move(tok), static_cast<int>(*elo),
-                      static_cast<int>(*bp), static_cast<int>(xp.value_or(0)),
-                      std::move(icon) };
+    return result;
 }
 ```
 
-필수 필드 검사 목록에 `xp` 가 없다는 점을 보라. 마지막 줄이 `xp.value_or(0)` 을 쓴다. XP 는 나중에 추가된 필드라 **구 버전 meta 서버의 응답에는 없다.** 없으면 0 으로 두고 나머지는 정상 처리한다. 서버와 클라이언트를 동시에 배포할 수 없는 환경에서 필드를 추가할 때의 표준 패턴이다 — 새 필드는 선택으로 두고 기본값을 정한다.
+응답은 `profile_response::guest()`에서 한 번 파싱하고, 인증 응답과 같은 `fields()` 검사를 사용한다.
+양수 `player_id`는 int64_t 범위, `elo`·`bp`·`xp`는 0부터 int 최댓값까지 확인한 뒤 변환한다.
+JSON 정수와 실수·문자열·bool을 구별한다. 작은 정수형으로 먼저 변환하면 원래 값의 범위를
+검사할 수 없으므로 **검사 후 변환** 순서를 유지한다.
+
+XP의 하위 호환 기본값 0은 **필드가 없을 때만** 적용한다. `xp: null`, `xp: -1`,
+`xp: "100"`은 누락이 아니라 잘못된 응답이다. username은 누락/null을 빈 이름으로 허용하고,
+값이 있으면 문자열이어야 한다. selected_icon_id는 비어 있지 않은 문자열이어야 한다.
+guest의 token은 32자리 소문자 16진수인지 확인한다. 이 형식 검사가 서버 인증을 대신하지는 않는다.
+알 수 없는 추가 필드는 허용하되 사용 중인 필드의 타입·범위는 엄격하게 검사한다.
+
+**현재 소스 발췌 — `meta/profile_response.h`**
+
+```cpp
+inline std::optional<int64_t> nonnegative(const json_input::Json& j,
+                                         const char* key, int64_t maximum) {
+    const auto it = j.find(key);
+    if (it == j.end() || !it->is_number_integer()) return std::nullopt;
+    if (it->is_number_unsigned()) {
+        const auto value = it->get<uint64_t>();
+        if (value > static_cast<uint64_t>(maximum)) return std::nullopt;
+        return static_cast<int64_t>(value);
+    }
+    const auto value = it->get<int64_t>();
+    if (value < 0 || value > maximum) return std::nullopt;
+    return value;
+}
+inline std::optional<AuthInfo> fields(const json_input::Json& j) {
+    if (!j.is_object()) return std::nullopt;
+    const auto id = nonnegative(j, "player_id", std::numeric_limits<int64_t>::max());
+    const auto elo = nonnegative(j, "elo", std::numeric_limits<int>::max());
+    const auto bp = nonnegative(j, "bp", std::numeric_limits<int>::max());
+    // Legacy compatibility applies only to an absent XP field, not malformed XP.
+    const auto xp = j.contains("xp") ? nonnegative(j, "xp", std::numeric_limits<int>::max())
+                                    : std::optional<int64_t>{0};
+    const auto icon = j.find("selected_icon_id");
+    if (!id || *id == 0 || !elo || !bp || !xp || icon == j.end() ||
+        !icon->is_string() || icon->get_ref<const std::string&>().empty()) return std::nullopt;
+    std::string username;
+    const auto name = j.find("username");
+    if (name != j.end() && !name->is_null()) {
+        if (!name->is_string()) return std::nullopt;
+        username = name->get<std::string>();
+    }
+    return AuthInfo{*id, std::move(username), static_cast<int>(*elo), static_cast<int>(*bp),
+                    static_cast<int>(*xp), icon->get<std::string>()};
+}
+```
 
 `post_match` 는 secret 헤더를 붙이고 중첩 응답을 파싱한다.
 
@@ -2224,12 +2464,11 @@ MetaClient::post_match(const std::string& match_uuid,
     if (!relay_secret_.empty()) {
         headers.emplace("X-Relay-Secret", relay_secret_);
     }
-    // [예산] 재시도를 포함한 전체 wall-clock 을 timeout_s 로 상한한다.
-    // 시도별 타임아웃은 connect/read/write 각각에 걸리므로 한 시도가 그 몇 배로
-    // 늘어질 수 있고, 기존처럼 3회를 무조건 돌면 최악 ~9초까지 블로킹돼 매치
-    // 종료 흐름이 눈에 띄게 지연됐다. 남은 예산 기준으로 시도별 타임아웃을
-    // 줄이고, 예산이 소진되면 재시도를 포기한다 (relay 가 멱등 재전송하므로
-    // 여기서 무리하게 기다릴 이유가 없다).
+    // Bound retry admission with a shared deadline and reuse the exact key/body.
+    // Per-call connect/read/write timeouts are separate; an in-flight request,
+    // DNS resolution or scheduling can exceed the remaining wall-clock budget.
+    // This is not a hard end-to-end cancellation deadline. A missing response
+    // does not prove that the service failed to commit the match.
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::seconds(std::max(1, timeout_s));
     auto remaining_s = [&]() -> int {
@@ -2261,54 +2500,29 @@ MetaClient::post_match(const std::string& match_uuid,
         return std::nullopt;
     }
     if (r->status != 200) {
-        std::fprintf(stderr, "[meta-client] /v1/matches HTTP %d: %s\n",
-                     r->status, r->body.c_str());
+        std::fprintf(stderr, "[meta-client] /v1/matches HTTP %d\n", r->status);
         return std::nullopt;
     }
 
-    // 응답 파싱 — 중첩된 "a"/"b" 가 있지만 each 는 평면. 서브오브젝트 범위에서
-    // find_int 를 호출하려면 수동으로 오프셋을 계산해야 한다.
-    auto mid = proto::find_int(r->body, "match_id");
-    if (!mid) return std::nullopt;
-
-    auto find_sub = [&](const char* key, std::size_t& start, std::size_t& end) -> bool {
-        std::string pat = std::string("\"") + key + "\":{";
-        auto i = r->body.find(pat);
-        if (i == std::string::npos) return false;
-        auto j = r->body.find('}', i);
-        if (j == std::string::npos) return false;
-        start = i + pat.size();
-        end   = j;
-        return true;
-    };
-    auto parse_side = [&](const char* key, MatchDelta& out) -> bool {
-        std::size_t s = 0, e = 0;
-        if (!find_sub(key, s, e)) return false;
-        std::string sub = r->body.substr(s - 1, e - s + 2);  // include "{...}"
-        auto bef = proto::find_int(sub, "elo_before");
-        auto aft = proto::find_int(sub, "elo_after");
-        auto del = proto::find_int(sub, "delta");
-        if (!bef || !aft || !del) return false;
-        out.elo_before = static_cast<int>(*bef);
-        out.elo_after  = static_cast<int>(*aft);
-        out.delta      = static_cast<int>(*del);
-        return true;
-    };
-    MatchResult res{};
-    res.match_id = *mid;
-    if (!parse_side("a", res.a) || !parse_side("b", res.b)) {
+    auto result = parse_match_response(r->body);
+    if (!result) {
         std::fprintf(stderr, "[meta-client] /v1/matches bad response\n");
-        return std::nullopt;
     }
-    return res;
+    return result;
 }
 ```
 
-`post_match`는 네트워크 실패, 429, 5xx에만 최대 세 번 재시도하고 100ms, 200ms로 짧게 물러난다. 400이나 403은 같은 요청을 다시 보내도 성공하지 않는 계약·권한 오류라 즉시 반환한다. 모든 시도가 같은 `match_uuid`와 JSON 본문을 사용하므로 첫 응답만 유실된 경우에도 DB의 최초 결과를 안전하게 다시 받는다.
+`post_match`는 네트워크 실패, 429, 5xx에만 최초 호출을 포함해 최대 세 번 시도하고 100ms, 200ms로 짧게 물러난다. 400·403·409는 같은 요청을 다시 보내도 성공하지 않는 계약·권한 오류라 즉시 반환한다. 모든 시도가 같은 `match_uuid`와 JSON 본문을 사용하므로 첫 응답만 유실된 경우에도 DB의 최초 결과를 안전하게 다시 받는다.
 
-재시도 루프를 `steady_clock` deadline이 감싼다는 점이 이 함수의 두 번째 계약이다. 시도당 타임아웃(`timeout_s / 3`)은 연결·읽기·쓰기 각각에 걸리므로 한 시도가 그 몇 배로 늘어질 수 있고, 그 위에 재시도를 무조건 얹으면 매치 종료 흐름이 최악에는 십수 초를 블로킹한다. 이 함수를 부르는 것은 relay의 포워딩 스레드이고, 그동안 두 클라이언트는 게임오버 화면에서 `MATCH_RESULT`를 기다린다. 그래서 남은 예산으로 시도별 타임아웃을 깎고, 예산이 소진되면 `retry budget exhausted` 로그를 남기고 포기한다. 같은 uuid 재전송이 멱등(§7)이라 포기가 데이터를 이중 반영할 위험은 없고, 잃는 것은 이번 매치의 RP 반영뿐이다. 일반화하면 — **외부 호출을 품은 종료 경로는 재시도 횟수만이 아니라 전체 wall-clock 예산을 함께 계약해야** 최악 지연이 상수로 묶인다. 시도당 타임아웃 × 시도 횟수라는 곱셈식 상한은 타임아웃이 겹으로 걸리는 순간 쉽게 무너진다.
+상태 코드만으로 서버의 커밋 여부를 확정하지 않는다. 5xx는 이번 정책에서 재시도할 후보이며 항상 일시적인 장애라는 뜻은 아니다. 200도 `parse_match_response`가 본문의 위치·타입·범위·관계를 확인한 뒤에야 저장 확인 결과로 인정한다. 잘못된 200 응답은 이 호출에서 자동 반복하지 않는다. 현재 실제 함수는 `Retry-After`를 해석하지 않고 고정 백오프를 사용한다. 서버가 최소 대기를 요구하는 운영 계약에는 이 차이를 반영해야 한다.
 
-`find_sub` / `parse_side`는 **수동 JSON 파서의 한계가 드러난 지점**이다. `find_int(body, "elo_before")`를 전체 본문에 부르면 `a`와 `b` 중 먼저 나온 값만 잡는다. 그래서 `"a":{`부터 대응하는 단순 객체 끝까지 잘라 그 안에서만 찾는다. 중첩 객체가 하나 더 생기면 이 방식은 무너지므로, 응답 구조가 확장되는 시점이 정식 JSON 라이브러리 도입 기준선이다.
+재시도 루프는 `steady_clock`의 공유 마감을 확인하고, 각 시도의 연결·읽기·쓰기 제한을 남은 예산으로 줄인다. 그 마감은 다음 시도를 시작할지 정하는 기준이며 엄밀한 함수 전체 wall-clock 상한은 아니다. 진행 중 I/O·이름 해석·스케줄 지연까지 제한하려면 해당 단계가 취소 또는 절대 마감을 지원해야 한다. 포기한 뒤에도 최초 시도가 이미 커밋됐을 수 있다. 따라서 `nullopt`의 의미는 “검증된 저장 응답을 확보하지 못함”이고, 같은 키·동일 내용 재시도로 처음의 저장 결과를 확인하는 구조다.
+
+응답 해석은 `meta/match_response.h`의 `parse_match_response`가 담당한다. `meta/json_input.h`로 본문 전체를 한 번 파싱하고 중복 키·문법 오류·크기·깊이를 검사한다. 루트의 양수 정수 `match_id`와 정확히 루트에 속하는 `a`·`b` 객체를 찾고, 각 RP 전후값·차이의 정수 타입과 범위, `after-before==delta` 관계를 검사한다. 공백·필드 순서·알려지지 않은 확장 필드는 허용한다. 키 문자열을 검색해서 다른 객체 안의 값을 잘못 채택하거나 큰 정수를 `int`로 먼저 좁히지 않는다. 이 구조 검사는 응답 출처를 인증하는 기능과 별개다.
+
+과거 문자열을 잘라 응답을 읽던 `find_sub` / `parse_side` 방식은 현재 `parse_match_response`로 교체됐다. 현재 구현은 한 번 만든 객체에서 정확히 `a`·`b`에 속한 필드를 조회한다. 하위 객체의 같은 필드명이 서로 충돌하지 않는 이유는 문자열 위치 추측이 아니라 부모 객체를 구별하기 때문이다.
+
+오류 진단에는 엔드포인트와 HTTP 상태만 남긴다. guest·verify·matches의 외부 응답 본문은 로그에 복사하지 않는다. 오류 응답이 자격 증명을 반사하거나 줄바꿈으로 별도 로그 줄을 흉내 낼 수 있기 때문이다. 잘못된 URL도 원문을 출력하지 않는다. 거절된 사용자 정보나 비밀 쿼리까지 진단 로그로 옮기는 일을 피한다. 상태 분류와 반환값은 유지하며 출력 자료의 범위만 제한한다.
 
 `relay_secret_` 이 비어 있으면 헤더를 아예 붙이지 않는다. `--allow-public-matches` 로 띄운 로컬 meta 에 대고 테스트할 때의 경로다.
 
@@ -2340,6 +2554,19 @@ std::string settings_file_path();
 ## 14. 클라이언트 부트스트랩 — 저장과 인증을 구분한다
 
 계정 서비스는 시작 시와 화면의 재시도에서 같은 흐름을 사용한다.
+
+**현재 소스 발췌 — `meta/account_client.h`**
+
+```cpp
+struct AccountOperation {
+    bool ok = false;
+    bool pending = false;
+    std::string message;
+    std::string token;
+    std::optional<AuthInfo> player;
+    bool unsaved = false; // Keep this key in memory for a local save retry; do not spend/earn online.
+};
+```
 
 **현재 소스 발췌 — `meta/account_client.cpp`**
 
@@ -2388,6 +2615,24 @@ AccountOperation bootstrap_account(MetaClient &api, bool create_separate) {
 새 guest 응답과 로컬 저장 성공은 별도 사건이다. 저장 실패의 `unsaved` 결과는 일반
 온라인 인증에 쓰지 않는다. main은 키를 재시도용 메모리에 두고 경고를 표시한다.
 재시도는 `save_created_account()`가 같은 키를 저장하며 guest를 추가 발급하지 않는다.
+
+화면에서는 `src/account_screen.cpp`가 요청 이름을 반환하고, `src/main.cpp`의
+Account 분기가 작업용 future를 관리한다. 파일·HTTP를 수행하는 서비스 함수가
+동기 함수여도 호출 위치를 worker로 옮기면 화면 반복을 계속할 수 있다. 이 설명의
+비동기 경계는 Account 화면에 해당한다. 현재 시작 경로의 `bootstrap_account()` 호출은
+여전히 메인 루프 진입 전 동기 실행이다. 함수 이름만 보고 모든 호출이 비동기라고
+가정하지 않고 호출 위치와 소유자를 함께 확인한다.
+
+이를 읽을 때 **발급 응답 수신 / 로컬 키 보관 / 서버에서 현재 유효함을 확인**을 나누면 된다.
+`AccountOperation::ok`만으로 온라인 가능 여부를 판정하지 않는다. 저장 키를 유지하면서
+서버 확인에 실패한 반환은 ok가 true여도 player가 없고, 미저장 반환은 player가 있어도
+unsaved가 true다. 호출자는 각 상태의 의미를 따라야 한다.
+
+파일 없음과 읽기 실패도 다른 상태다. 계정 파일이 손상됐는데 빈 문자열 반환만 보고
+신규 발급하면 원래 계정으로 돌아갈 경로를 잃을 수 있다. 현재 구현은 load_token 뒤에
+has_saved_account를 확인하여 이 경로를 막는다. 잠금은 읽기부터 발급·저장까지 유지한다.
+파일 교체의 원자성만으로 두 프로세스의 ‘없음 확인 → 발급’ 경쟁까지 막을 수는 없다.
+
 
 ```mermaid
 stateDiagram-v2
@@ -2670,16 +2915,13 @@ Part 16에서 제거했다. 한 번 소비한 티켓을 캐시로 다시 허용�
 ```cpp
 void finalizeRanked(Channel& ch)
 {
-    // 선점 — 한 번만 실행.
+    // Claim and snapshot under one lock: no input observation can interleave.
+    VerifiedResult verified;
     {
         std::lock_guard<std::mutex> lk(ch.sumMu);
         if (ch.summaryHandled) return;
         if (!ch.summaryA || !ch.summaryB) return;
         ch.summaryHandled = true;
-    }
-    VerifiedResult verified;
-    {
-        std::lock_guard<std::mutex> lock(ch.sumMu);
         verified = ch.verified->result();
     }
     const std::optional<int64_t> winner = verified.winner == 1 ? std::optional<int64_t>(ch.playerA_id)
@@ -2758,6 +3000,10 @@ enum class ResultStatus : uint8_t {
     SaveFailed = 4,
     Draw = 5
 };
+// Failed/unknown replies carry placeholders, not a confirmed profile update.
+inline int rating_after_result(int current, int reported, ResultStatus status) {
+    return status == ResultStatus::Applied || status == ResultStatus::Draw ? reported : current;
+}
 inline const char *result_status_text(ResultStatus status) {
     switch (status) {
     case ResultStatus::Applied:
@@ -2842,7 +3088,7 @@ same-origin 을 택한 덕에 CORS 문제가 사라지고, meta 포트를 외부
 
 **(2) `?limit=50`.** 서버는 이 값을 1..100 으로 clamp 한다(§8.4). 파싱에 실패하면 조용히 20 으로 떨어진다.
 
-**(3) `row.level ?? 1`.** 응답에 `level` 이 없는 구 서버를 만나면 1 로 표시한다. `request_guest` 의 `xp.value_or(0)` 과 같은 종류의 하위 호환 처리다.
+**(3) `row.level ?? 1`.** 응답에 `level` 이 없는 구 서버를 만나면 1 로 표시한다. `request_guest`가 XP 필드 누락 때만 0을 쓰는 것과 같이, 구 버전의 필드 부재에 기본값을 정한 처리다. 단, 타입·범위가 잘못된 값까지 부재로 간주하지 않는다.
 
 **(4) `textContent` 사용.** `cell()` 이 `innerHTML` 이 아니라 `textContent` 를 쓴다. username 은 사용자 입력이므로 `innerHTML` 에 넣으면 스크립트 주입이 가능하다. `textContent` 는 문자열을 텍스트 노드로 만들어 마크업 해석을 하지 않는다. 데이터를 화면에 넣는 기본값은 언제나 이쪽이어야 한다.
 

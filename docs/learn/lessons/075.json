@@ -1,0 +1,470 @@
+{
+  "id": "lesson-75",
+  "title": "MP3 디코드: 압축 파일에서 샘플로",
+  "shortTitle": "파일 경계·빌린 입력·소유하는 PCM",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 직접 생성한 파형을 Pcm16으로 보관할 수 있지만 효과음 파일을 읽는 경로는 없습니다.",
+  "finish": "완료: MP3를 제한된 크기로 읽어 PCM을 소유하고, 파일·디코딩·출력 예산 실패를 구별해 진단합니다.",
+  "objective": "압축 프레임과 PCM 프레임, 입력 대여와 출력 소유를 구별하고, 실제 읽은 수량·예산 검사·RAII 정리를 코드에서 추적합니다.",
+  "prerequisites": [
+    "PCM 샘플·채널·프레임과 크기 계산",
+    "vector 이동과 소유 수명",
+    "오류 반환·예외·RAII"
+  ],
+  "recap": {
+    "points": [
+      "샘플 하나는 한 채널 값이고 PCM 프레임은 같은 시각의 모든 채널 값입니다.",
+      "인터리브 원소 인덱스는 프레임*채널수+채널이며 기간은 프레임수/레이트입니다.",
+      "큰 수는 곱셈 전에 예산으로 검사하고 배열과 형식 정보를 함께 소유합니다."
+    ],
+    "bridge": "직접 계산한 파형 대신 압축 파일을 입력으로 받아, 같은 PCM 계약까지 연결하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "파일을 소리가 되는 값으로 바꾼다",
+      "body": "정수 삼각파는 배열의 값을 직접 계산했습니다. 이제 실제 효과음 파일을 읽어 같은 PCM 자료형으로 옮깁니다. 입력은 압축된 MP3 바이트, 출력은 채널·레이트와 함께 소유하는 signed16 배열입니다.\n\n이번에 만드는 `mp3_probe`는 `assets/rotate.mp3`를 읽고 프레임 수·바이트 수·기간을 출력합니다. 장치가 없어도 파일 읽기와 디코딩을 독립적으로 검사할 수 있습니다. 누적 게임 main은 유지하며 오디오 데이터 준비 모듈을 확장합니다.\n\n책임을 세 부분으로 나눕니다. 파일 로더는 바이트를 얻고, 디코더는 해석한 PCM을 만들며, 학습 어댑터는 그 결과를 Pcm16의 생성 계약에 맞춥니다. 어느 단계에서 실패했는지 결과 값으로 알 수 있게 구성하겠습니다.",
+      "codes": [
+        {
+          "label": "이번 데이터 경로",
+          "language": "text",
+          "text": "MP3 파일\n  ↓ load: 길이 검사·읽기\n압축 바이트 vector<uint8_t>\n  ↓ decode: 디코더가 빌려 읽기·출력 예산 검사\n소유하는 PCM Result\n  ↓ load_clip: vector 이동·형식 검증\nPcm16 → mp3_probe의 길이/기간 출력"
+        }
+      ]
+    },
+    {
+      "title": "MP3 바이트를 int16 배열로 보면 안 되는 이유",
+      "body": "PCM은 각 시각의 진폭을 담지만 MP3는 압축 규칙에 따라 부호화된 정보를 담습니다. 파일 바이트를 두 개씩 묶어 int16_t로 읽는 것만으로 원래의 표본이 되지 않습니다. 디코더는 헤더와 압축 정보를 해석하고 시간 영역의 샘플을 계산해야 합니다.\n\nMP3는 손실 압축입니다. 디코딩은 압축 전에 버린 정보를 완벽히 되찾는 과정이 아니라, 압축 비트스트림이 나타내는 신호를 복원하는 과정입니다. 이번에 비교할 ‘같은 PCM’은 **같은 MP3를 같은 디코더로 처리한 결과**입니다. 녹음 원본과 비트 단위로 같다는 뜻이 아닙니다.\n\nMPEG-1 Layer III 압축 프레임은 채널당 1152샘플에 대응합니다. 스테레오라면 스칼라 값은 2304개지만 PCM 프레임 수는 1152입니다. 이 수와 디코더 함수에 한 번 요청하는 프레임 수는 독립적입니다. 디코더가 압축 프레임 경계를 내부에서 처리하기 때문입니다. 압축 구조는 [CSIRO의 MPEG 오디오 보고서](https://www.mp3-tech.org/programmer/docs/tr_196_01_CSIRO.pdf)에 정리되어 있습니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "압축 프레임과 지연·패딩",
+          "body": "압축 프레임 크기에 맞춰 끝부분을 채우거나 인코더 지연을 다루는 메타데이터가 있을 수 있습니다. 저장소 디코더도 지연·패딩을 처리하므로 실제 반환된 PCM 프레임 수를 사용합니다. 파일 크기나 압축 프레임 개수만으로 최종 재생 길이를 단정하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "디코더를 한 번역 단위에만 넣는다",
+      "body": "dr_mp3는 선언과 구현을 하나의 헤더에 제공하는 라이브러리입니다. 한 .cpp에서 DR_MP3_IMPLEMENTATION을 정의하고 포함하면 함수 정의가 생성됩니다. 다른 파일은 앱의 공개 헤더를 포함해 함수를 호출합니다.\n\n구현 매크로는 `audio/mp3_decode.cpp`에만 둡니다. 이 파일을 study_mp3 정적 라이브러리로 빌드하고 도구와 검사에 연결합니다. 현재 게임도 같은 파일을 공통 소스 목록에서 한 번 컴파일합니다. SDL이나 XAudio2를 몰라도 디코딩 모듈을 사용할 수 있습니다.\n\n헤더 가드는 한 번역 단위에서 중복 포함을 제어합니다. 서로 다른 .cpp에 구현 매크로를 적으면 각 번역 단위에서 함수 정의가 생길 수 있으므로, 빌드 소스 목록과 구현 매크로 위치를 함께 관리해야 합니다. [dr_libs 공식 저장소](https://github.com/mackron/dr_libs)의 라이브러리와 이 체크포인트에 보관한 헤더 버전을 구분해 읽으세요.",
+      "codes": [
+        {
+          "label": "구현은 이 .cpp에서만 생성한다",
+          "language": "cpp",
+          "text": "#define DR_MP3_IMPLEMENTATION\n#include \"../third_party/dr_mp3.h\"\n\n#include \"mp3_decode.h\"\n#include \"pcm_layout.h\""
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "최신 파일로 바꾸면 같은 실습일까",
+          "body": "단일 헤더도 외부 의존성입니다. 체크포인트에는 저장소와 같은 dr_mp3 헤더 및 라이선스 원문을 보관합니다. 교체할 때는 실제 음원 결과·오류 처리·길이 계약을 다시 대조해야 합니다. 강의의 핵심은 라이브러리의 구체적인 줄 번호보다 앱과 라이브러리의 경계입니다."
+        }
+      ],
+      "reference": {
+        "path": "audio/mp3_decode.cpp",
+        "symbol": "DR_MP3_IMPLEMENTATION",
+        "invariant": "디코더 정의를 한 번역 단위에 두고 두 백엔드에서 공통 사용한다.",
+        "mayDiffer": "내부 디코더 버전과 최적화는 변할 수 있다. 학습 체크포인트는 현재 포함한 헤더를 기준으로 한다."
+      }
+    },
+    {
+      "title": "값과 실패 이유를 함께 반환한다",
+      "body": "단순히 빈 배열을 돌려주면 파일이 없었는지, MP3를 해석하지 못했는지, 크기를 제한했는지 알기 어렵습니다. Result에는 error와 channels·rate·samples를 함께 둡니다. 성공이면 비어 있지 않은 완성 프레임 배열을 소유하고 error는 none입니다.\n\nload와 decode는 실패 시 빈 결과와 오류 종류를 반환합니다. file_too_large는 압축 입력 예산 초과, pcm_too_large는 디코딩한 결과의 예산 초과입니다. allocation_failed는 C++ 저장소 확보 실패를 나타냅니다. init 단계에서 라이브러리가 false를 반환한 이유를 모두 세분할 수는 없어 decode_failed에 포함합니다.\n\n호출자는 `if (!result)`에서 준비 실패를 처리하고 성공 뒤에만 샘플과 형식을 사용합니다. 실패 문자열은 error_name에서 정해 콘솔 진단에도 같은 이름을 씁니다.",
+      "codes": [
+        {
+          "label": "공개 결과 타입",
+          "language": "cpp",
+          "text": "struct Result {\n    Error error = Error::none;\n    uint32_t channels = 0;\n    uint32_t rate = 0;\n    std::vector<int16_t> samples; // interleaved, complete frames only\n\n    explicit operator bool() const noexcept {\n        return error == Error::none && !samples.empty();\n    }\n}\n;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "기본 생성된 Result",
+          "body": "기본 Result의 error는 none이지만 샘플이 없어서 bool 변환은 false입니다. 함수의 정상 성공은 비어 있지 않은 샘플과 유효한 형식을 함께 갖습니다. bool 검사 없이 error==none만 확인하지 않도록 호출 계약을 읽으세요."
+        }
+      ]
+    },
+    {
+      "title": "압축 크기와 PCM 크기는 다른 예산이다",
+      "body": "6 KiB 안팎의 압축 파일이 더 큰 PCM 배열로 풀릴 수 있습니다. 압축 바이트만 제한하면 출력 메모리까지 같은 크기로 제한되는 것은 아닙니다. Limits는 입력과 출력에 각각 바이트 예산을 둡니다.\n\n공통 로더 기본값은 압축 16 MiB, PCM 64 MiB입니다. 학습 Pcm16은 16 MiB를 받아들이므로 load_clip은 PCM 예산도 16 MiB로 내려 전달합니다. 기본값이 다른 두 모듈을 연결할 때 경계에서 더 작은 계약을 맞춘 것입니다.\n\nMiB는 1024*1024바이트입니다. 이 한도는 파일 하나와 그 디코딩 결과에 적용됩니다. 여러 음원의 합계나 vector 여유 용량, 재할당 중 옛 배열과 새 배열이 함께 있는 순간까지 포함한 프로세스 전체 메모리 한도와는 구별합니다.",
+      "codes": [
+        {
+          "label": "두 가지 바이트 예산",
+          "language": "cpp",
+          "text": "struct Limits {\n    std::size_t file_bytes = 16u * 1024u * 1024u;\n    std::size_t pcm_bytes  = 64u * 1024u * 1024u;\n}\n;"
+        },
+        {
+          "label": "학습 어댑터가 더 작은 PCM 예산을 전달한다",
+          "language": "cpp",
+          "text": "auto result = audio_mp3::load(\n    path, {16u * 1024u * 1024u, Pcm16::kTeachingBudgetBytes});"
+        }
+      ]
+    },
+    {
+      "title": "파일 길이를 확인한 뒤 버퍼를 만든다",
+      "body": "로컬 에셋 파일을 rb 모드로 엽니다. 끝으로 이동해 ftell로 길이를 구하고, 음수는 I/O 오류, 0은 빈 파일, 입력 예산 초과는 file_too_large로 분류합니다. 그 뒤에 시작으로 되돌아와 vector 크기를 정합니다.\n\n검사의 순서가 중요합니다. 파일 크기로 vector를 먼저 만들고 한도를 검사하면 큰 할당 자체를 막지 못합니다. ftell의 양수 long 값을 uint64_t로 비교한 뒤 예산 안에 있을 때 size_t로 변환합니다. 작은 타입으로 먼저 줄여 버리면 큰 원래 길이를 잃을 수 있습니다.\n\n이 구현은 seek 가능한 로컬 파일을 읽는 경로입니다. 파일이 열린 동안 다른 작성자가 내용을 바꾸는 전체 상황을 일관된 스냅샷으로 만들지는 않습니다. 배포 에셋은 쓰기가 끝난 파일을 제공하는 운영 조건으로 사용합니다.",
+      "codes": [
+        {
+          "label": "할당 전 크기 확인",
+          "language": "cpp",
+          "text": "const long endPos = std::ftell(file.get());\n    if (endPos < 0) {\n        result.error = Error::io;\n        return result;\n    }\n\n    // Compare as unsigned 64-bit before any size_t narrowing.\n    const uint64_t fileSize = static_cast<uint64_t>(endPos);\n    if (fileSize == 0u) {\n        result.error = Error::empty;\n        return result;\n    }\n    if (fileSize > static_cast<uint64_t>(limits.file_bytes)) {\n        result.error = Error::file_too_large; // reject before allocating\n        return result;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "audio/mp3_decode.cpp",
+        "symbol": "Result load(",
+        "invariant": "파일 읽기 버퍼를 할당하기 전에 길이와 예산을 검사한다.",
+        "mayDiffer": "경로 인코딩·파일 API·에셋 저장 위치는 바뀔 수 있다. 이 구현은 const char* 로컬 경로와 C stdio를 사용한다."
+      }
+    },
+    {
+      "title": "요청한 길이와 실제 읽은 길이를 비교한다",
+      "body": "fread에는 원소 크기 1과 원하는 바이트 수를 넘깁니다. 그러면 반환값도 실제 읽은 바이트 수가 되어 vector.size()와 직접 비교할 수 있습니다. 요청만 했다고 전부 읽혔다고 가정하지 않습니다.\n\n길이를 구한 뒤 파일이 짧아지면 부분 읽기가 발생할 수 있습니다. 반대로 파일이 길어졌다면 원래 크기만 읽고 성공으로 돌려주는 대신, 한 바이트를 더 읽어 EOF인지 확인합니다. EOF와 ferror도 함께 확인해 정상 끝과 읽기 오류를 구별합니다.\n\n이 검사는 일부 크기 변경과 읽기 실패를 발견합니다. 파일이 같은 길이로 덮어써지는 모든 경쟁을 감지하는 방식은 아닙니다. 파일을 읽을 때마다 어떤 변화까지 확인하는지 계약을 구체적으로 둡니다.",
+      "codes": [
+        {
+          "label": "실제 바이트 수와 끝 상태 검사",
+          "language": "cpp",
+          "text": "const std::size_t got = std::fread(input.data(), 1, input.size(), file.get());\nif (got != input.size()) {\n    result.error = Error::io;\n    return result;\n}\nconst int extra = std::fgetc(file.get());\nif (extra != EOF || std::ferror(file.get())) {\n    result.error = Error::io;\n    return result;\n}"
+        }
+      ]
+    },
+    {
+      "title": "빌린 압축 버퍼는 디코더보다 오래 산다",
+      "body": "drmp3_init_memory는 압축 바이트를 복사하지 않고 그 메모리를 참조합니다. 디코더는 읽기 위치와 압축 상태를 보관하며, 호출마다 그 바이트를 더 읽을 수 있습니다. 입력 vector를 디코딩 중에 비우거나 재할당하면 이 참조가 무효해집니다.\n\nload의 input 지역 변수는 decode 호출이 끝날 때까지 살아 있습니다. decode 안에서는 초기화에 성공한 뒤 Guard를 만들고, 함수가 빠져나갈 때 uninit을 호출합니다. 시간 순서는 입력 생성 → 디코더 초기화 → 읽기 → uninit → 입력 파괴입니다.\n\n초기화에 실패한 객체와 성공한 객체를 구별해야 합니다. 이 가드는 성공한 뒤에만 만들어져 성공한 초기화 한 번에 종료 한 번을 대응시킵니다. 파일의 unique_ptr도 같은 원리로 fclose를 호출합니다.",
+      "codes": [
+        {
+          "label": "성공한 초기화에만 종료를 대응한다",
+          "language": "cpp",
+          "text": "drmp3 decoder{};\nif (!drmp3_init_memory(&decoder, input.data(), input.size(), nullptr)) {\n    result.error = Error::decode_failed;\n    return result;\n}\nstruct Guard {\n    drmp3* d;\n    ~Guard() { drmp3_uninit(d); }\n} guard{&decoder};"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "RAII와 오류 반환은 다른 역할",
+          "body": "오류 값은 호출자가 실패 이유를 알게 하고, RAII는 함수에서 나갈 때 소유 자원을 정리합니다. 둘 중 하나로 다른 하나를 대체하지 않습니다. return을 여러 곳에 두더라도 정리는 소유 객체의 소멸에 묶여 있습니다."
+        }
+      ],
+      "reference": {
+        "path": "audio/mp3_decode.cpp",
+        "symbol": "struct Guard",
+        "invariant": "빌린 입력이 유효한 동안 디코더를 사용하고 초기화 성공에 정리를 대응시킨다.",
+        "mayDiffer": "가드 타입과 보조 함수 이름은 달라질 수 있다. 입력을 복사하는 API로 바꾸면 소유 계약도 다시 확인해야 한다."
+      }
+    },
+    {
+      "title": "4096샘플 배열에 몇 프레임을 요청할까",
+      "body": "고정 임시 배열에는 int16 샘플 4096개가 들어갑니다. 모노라면 4096프레임, 스테레오라면 2048프레임을 요청할 수 있습니다. 채널 수를 검사한 뒤 `4096/channels`로 요청량을 정합니다.\n\nread_pcm_frames_s16의 반환값 got은 프레임 수입니다. 실제 원소 수는 `got*channels`입니다. 스테레오에서 100프레임을 읽었다면 임시 배열의 앞 200원소만 새 데이터입니다. 배열 전체나 요청한 길이를 무조건 붙이면 마지막 블록에 오래된 값이나 무의미한 값이 섞일 수 있습니다.\n\ngot이 0이면 반복을 마칩니다. 양수라면 요청량 이하인지 확인한 뒤 반환된 부분만 누적합니다. 함수 이름의 frames가 압축 프레임이 아니라 PCM 프레임이라는 점이 버퍼 크기를 결정합니다.",
+      "codes": [
+        {
+          "label": "원소 수 → 요청 프레임 수 → 반환 원소 수",
+          "language": "cpp",
+          "text": "const std::size_t blockFrames = 4096u / channels;\nconst drmp3_uint64 askFrames = static_cast<drmp3_uint64>(blockFrames);\nstd::array<drmp3_int16, 4096> block{};\nconst auto got = drmp3_read_pcm_frames_s16(&decoder, askFrames, block.data());\n// got == 0이면 종료, got > askFrames이면 실패\nconst std::size_t added = static_cast<std::size_t>(got) * channels;"
+        }
+      ]
+    },
+    {
+      "title": "넘친 뒤 되돌리지 않고 추가 전에 거절한다",
+      "body": "현재 샘플 수가 4000이고 허용량이 4096인데 다음 블록에 200샘플이 있다고 합시다. 96샘플만 들어갈 수 있으므로 이번 결과 전체를 pcm_too_large로 반환합니다. 앞부분 4000샘플을 성공으로 돌려주면 원래 음원이 조용히 잘린 데이터로 바뀝니다.\n\n검사는 `added > maxSamples - currentSamples`입니다. currentSamples가 이미 허용량 이하라는 불변조건을 유지하므로 뺄셈은 음수로 감기지 않습니다. 덧셈 결과가 넘친 뒤 검사하는 대신 남은 용량과 추가량을 비교합니다.\n\n실패할 때는 빈 Result를 새로 반환하여 후보 배열 저장소도 정리합니다. vector의 clear만 사용하면 size는 0이어도 capacity는 남을 수 있습니다. 성공 때는 완성된 vector를 결과가 소유하도록 넘깁니다.",
+      "codes": [
+        {
+          "label": "추가 전 검사와 실패 후보 폐기",
+          "language": "cpp",
+          "text": "if (added > maxSamples - result.samples.size()) {\n    result.error = Error::pcm_too_large;\n    return Result{result.error, 0, 0, {}};\n}\nresult.samples.insert(result.samples.end(),\n                      block.data(), block.data() + added);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "한도에 정확히 맞는 음원",
+          "body": "최종 PCM이 한도와 같으면 허용합니다. 다음 read가 0으로 끝나야 성공입니다. 한도가 찼다는 이유로 즉시 성공하면 아직 남은 샘플을 검사하지 못하고 긴 음원을 잘라 받아들일 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "디코딩 종료와 파일 무결성을 구별한다",
+      "body": "텍스트 파일에 .mp3 확장자를 붙여도 디코딩되지 않습니다. 반대로 유효한 MP3 바이트를 sound.data라는 이름으로 저장하면 이 로더가 읽을 수 있습니다. 해석은 확장자 문자열 대신 실제 바이트를 기준으로 합니다.\n\n저장소의 dr_mp3는 잘린 파일에서 앞부분 PCM을 반환할 수 있습니다. 읽기 함수가 0을 반환했다고 정상적인 음원 끝과 모든 손상 원인이 별도 상태로 제공되는 것은 아닙니다. 따라서 이번 성공의 의미는 **지원 형식의 비어 있지 않은 PCM을 예산 안에서 얻었다**입니다.\n\n배포 에셋이 기대한 파일 전체인지 확인하려면 알려진 해시 같은 별도 증거가 필요합니다. 디코더의 관대한 동작을 엄격한 파일 검증으로 설명하지 않습니다. 테스트도 일부 잘린 입력이 성공할 수 있다는 실제 정책을 확인합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "부분 읽기와 잘린 MP3는 같은 오류일까",
+          "body": "fread가 예상한 파일 길이보다 적게 읽는 것은 I/O 단계의 실패입니다. 이미 잘린 짧은 파일을 길이만큼 정확히 읽었다면 파일 읽기는 성공할 수 있고, 그 바이트를 어떻게 해석할지는 디코더의 계약입니다."
+        }
+      ]
+    },
+    {
+      "title": "이동으로 Pcm16에 소유권을 넘긴다",
+      "body": "load_clip은 공통 로더 결과를 받은 뒤 Pcm16::make에 rate·channels와 `std::move(result.samples)`를 전달합니다. 같은 PCM을 다시 바이트 단위로 복사하지 않고 저장소 소유권을 넘깁니다. 원래 Result는 함수가 끝날 때 사라지고 Pcm16이 배열을 유지합니다.\n\n공통 모듈은 학습 Pcm16 타입을 알지 못합니다. 그래서 실제 게임도 같은 로더를 사용하면서 자체 SoundData에 연결할 수 있습니다. CPU 디코딩과 게임의 재생 자원 표현 사이에 작은 변환 경계를 둔 셈입니다.\n\nC++ 할당 예외는 함수 경계에서 allocation_failed로 바꿉니다. 이때 noexcept를 적는 것만으로 예외가 자동 처리되지는 않습니다. 실제 할당이 발생하는 코드가 try 범위에 들어 있어야 하고, 그 안의 RAII 객체가 실패 경로에서 정리되어야 합니다.",
+      "codes": [
+        {
+          "label": "학습 타입으로 연결하는 어댑터",
+          "language": "cpp",
+          "text": "inline ClipResult load_clip(const char* path) noexcept {\n    auto result = audio_mp3::load(path, {16u*1024u*1024u, Pcm16::kTeachingBudgetBytes});\n    if (!result) return {result.error, std::nullopt};\n    try {\n        auto pcm = Pcm16::make(result.rate, result.channels, std::move(result.samples));\n        if (!pcm) return {audio_mp3::Error::unsupported_format, std::nullopt};\n        return {audio_mp3::Error::none, std::move(pcm)};\n    } catch (const std::bad_alloc&) {\n        return {audio_mp3::Error::allocation_failed, std::nullopt};\n    } catch (const std::length_error&) {\n        return {audio_mp3::Error::allocation_failed, std::nullopt};\n    }\n}\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "catch를 어디에 둘까",
+          "body": "이미 noexcept인 load 호출만 try로 감싸고 그 아래 vector::resize를 밖에 두면 후속 할당 실패는 잡지 못합니다. 현재 백엔드는 로드 이후의 변환·저장·핸들 등록까지 실제 할당 구간을 감쌉니다."
+        }
+      ]
+    },
+    {
+      "title": "작은 블록 읽기와 스트리밍 재생은 다르다",
+      "body": "우리 구현은 디코더를 작은 블록 단위로 여러 번 부릅니다. 하지만 그 블록을 모두 모은 뒤 호출자에게 돌려주므로 재생 전에 전체 PCM을 준비하는 방식입니다. 함수 호출이 여러 번이라는 이유만으로 스트리밍 재생이 되지는 않습니다.\n\n재생 중 스트리밍은 일부 버퍼를 소비하는 동안 뒤의 데이터를 공급합니다. 디코딩 작업을 오디오 콜백에서 직접 수행할 수도 있지만, 작업 스레드와 큐로 나눌 수도 있습니다. 큐의 소유권·버퍼 부족·종료 동기화를 별도로 설계해야 합니다.\n\n현재 선택은 짧은 효과음과 공유하는 음악 에셋을 로드 시 준비하는 것입니다. 전체 디코드가 재생 중 디코딩 비용을 줄여도 믹싱·장치 전달·언로드 수명 문제까지 없애지는 않습니다. ‘언제 계산할지’와 ‘누가 데이터를 언제까지 소유할지’를 각각 확인합니다.",
+      "codes": [
+        {
+          "label": "두 경로의 시간 배치",
+          "language": "text",
+          "text": "현재: 읽기 → 디코딩 반복 → 전체 PCM 반환 → 재생 자원에 연결\n스트리밍 재생: 일부 준비 → 재생 소비 ↔ 남은 데이터 공급"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "AudioHandle audio_load_sound",
+        "invariant": "재생 등록 전에 PCM을 준비하고 소유자를 확정한다.",
+        "mayDiffer": "현재 SDL은 장치용 레이트/채널 변환까지 수행한다. 학습 도구는 원본 디코더 출력 형식만 관찰한다."
+      }
+    },
+    {
+      "title": "누적 빌드와 실제 효과음 관찰",
+      "body": "audio/mp3_decode.cpp를 study_mp3 정적 라이브러리로 만들고, study_pcm의 헤더 경로와 C++17 요구를 전달받습니다. mp3_probe와 mp3_contract는 study_mp3를 링크합니다. dr_mp3 구현을 도구 파일마다 생성하지 않도록 소스 목록을 확인하세요.\n\n저장소 루트에서 아래 명령을 실행합니다. 포함한 rotate.mp3는 48,000 Hz·2채널, 16,128 PCM 프레임으로 디코딩됩니다. 스칼라 샘플은 32,256개, 바이트는 64,512, 기간은 0.336초입니다. 이 파일에 대한 결과이며 다른 음원에는 그 파일의 형식과 길이가 출력됩니다.\n\n존재하지 않는 경로는 io, 빈 파일은 empty, 일반 텍스트는 decode_failed로 표시됩니다. 파일 경로에 공백이 있으면 인자를 따옴표로 묶으세요. 실행 파일 위치와 확장자는 빌드 생성기와 OS에 따라 달라질 수 있습니다.",
+      "codes": [
+        {
+          "label": "빌드와 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/75-mp3 -B out/study75 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study75 -j3\nctest --test-dir out/study75 --output-on-failure\n./out/study75/mp3_probe docs/learn/checkpoints/75-mp3/assets/rotate.mp3"
+        },
+        {
+          "label": "포함한 효과음의 출력",
+          "language": "text",
+          "text": "rate=48000 channels=2 frames=16128 samples=32256 bytes=64512 seconds=0.336"
+        }
+      ]
+    },
+    {
+      "title": "현재 소스와 실패 실험을 연결한다",
+      "body": "현재 SDL과 XAudio2 백엔드는 같은 공통 로더를 호출합니다. SDL은 형식이 이미 맞으면 vector를 이동하고, 다르면 SDL_AudioStream으로 변환합니다. Windows는 PCM을 바이트 저장소에 복사해 WAVEFORMATEX와 함께 보관합니다. 장치별 차이는 이 단계 뒤에 남겨 둡니다.\n\n시험할 때는 성공 경로와 실패 경로의 증거를 나눕니다. 정상 음원은 편의 디코딩 함수의 결과와 샘플 전체를 비교합니다. 출력 예산은 64,512바이트를 허용하고 64,511바이트를 거절하는 경계로 검사합니다. 작은 예산에서도 앞부분만 성공으로 반환하지 않는지 확인합니다.\n\n파일 읽기 실패와 할당 실패는 정상 에셋으로도 주입해 볼 수 있습니다. 예외가 함수 밖으로 새지 않는지, 열린 파일과 변환기가 정리되는지, 실패한 음원이 핸들 목록에 등록되지 않는지가 관찰할 조건입니다. 소리가 실제 스피커로 나오는가와는 다른 단계의 검사입니다.",
+      "codes": [
+        {
+          "label": "실제 결과 길이에 맞춘 경계",
+          "language": "cpp",
+          "text": "auto exact = audio_mp3::decode(bytes, {bytes.size(), 64512});\nauto over = audio_mp3::decode(bytes, {bytes.size(), 64511});\n// 포함한 rotate.mp3 기준: exact 성공\n// over.error == Error::pcm_too_large, over.samples는 빈 배열"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "AudioHandle audio_load_sound",
+        "invariant": "CPU 디코딩 실패를 재생 핸들 등록 실패로 연결하고 소유 저장소를 정리한다.",
+        "mayDiffer": "현재 Windows는 바이트 배열과 WAVEFORMATEX를 사용한다. 학습은 Pcm16으로 원본 PCM을 보관한다."
+      }
+    },
+    {
+      "title": "완성 파일에서 수명과 경계를 따라 읽는다",
+      "body": "공개 결과 타입 → 파일 로드 → 디코딩 반복 → 학습 어댑터 → 도구 순서로 읽으세요. .cpp의 Guard가 어떤 return에서도 실행되는지, 바이트 수를 샘플 수로 바꾸는 곳이 어디인지 표시해 보세요. 디코더 헤더는 체크포인트의 third_party에 보관되어 있으며 앱의 구현 경계는 아래 파일에서 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "audio/mp3_decode.h",
+          "language": "cpp",
+          "file": "checkpoints/75-mp3/audio/mp3_decode.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/mp3_decode.cpp",
+          "language": "cpp",
+          "file": "checkpoints/75-mp3/audio/mp3_decode.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "audio/load_clip.h",
+          "language": "cpp",
+          "file": "checkpoints/75-mp3/audio/load_clip.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/mp3_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/75-mp3/tools/mp3_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/mp3_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/75-mp3/tests/mp3_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/75-mp3/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "75-1",
+      "question": "스테레오 디코딩용 int16 임시 배열이 4096원소입니다. 요청할 수 있는 PCM 프레임 수와 100프레임 반환 시 붙일 원소 수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "4096프레임, 100원소"
+        },
+        {
+          "id": "b",
+          "text": "2048프레임, 200원소"
+        },
+        {
+          "id": "c",
+          "text": "2048프레임, 100원소"
+        },
+        {
+          "id": "d",
+          "text": "8192프레임, 200원소"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "2048프레임, 200원소",
+      "explanation": "한 PCM 프레임에 좌우 두 원소가 들어갑니다. 배열 용량은 4096/2=2048프레임이고 반환된 100프레임은 200원소입니다."
+    },
+    {
+      "id": "75-2",
+      "question": "drmp3_init_memory 성공 직후 입력 vector를 비우고 저장소까지 해제하면 무엇이 문제인가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "PCM 값이 자동으로 모노가 된다."
+        },
+        {
+          "id": "b",
+          "text": "디코더가 입력을 다시 파일에서 읽어 느려진다."
+        },
+        {
+          "id": "c",
+          "text": "디코더가 빌린 압축 바이트의 수명이 끝난다."
+        },
+        {
+          "id": "d",
+          "text": "디코더의 복사본만 남아 메모리가 두 배가 된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "디코더가 빌린 압축 바이트의 수명이 끝난다.",
+      "explanation": "이 API는 압축 입력을 복사하지 않고 참조합니다. 디코딩과 uninit이 끝날 때까지 해당 입력 저장소를 유효하게 유지해야 합니다."
+    },
+    {
+      "id": "75-3",
+      "question": "출력 허용량이 4096샘플이고 이미 4000샘플을 모았습니다. 다음 읽기가 200샘플을 반환하면 현재 로더는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "pcm_too_large로 후보 전체를 버린다."
+        },
+        {
+          "id": "b",
+          "text": "남은 96샘플만 붙이고 성공한다."
+        },
+        {
+          "id": "c",
+          "text": "앞의 4000샘플을 성공으로 돌려준다."
+        },
+        {
+          "id": "d",
+          "text": "예산을 4200으로 늘려 계속 읽는다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "pcm_too_large로 후보 전체를 버린다.",
+      "explanation": "추가량 200이 남은 허용량 4096-4000=96보다 크므로 실패합니다. 자원 한도 때문에 조용히 잘린 음원을 성공으로 반환하지 않는 정책입니다."
+    },
+    {
+      "id": "75-4",
+      "question": "디코더를 여러 번 호출해 작은 PCM 블록을 읽고 전부 모은 뒤 반환합니다. 재생 방식에 대한 정확한 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "작은 블록이므로 이미 실시간 스트리밍 재생이다."
+        },
+        {
+          "id": "b",
+          "text": "MP3 프레임당 별도 장치를 여는 방식이다."
+        },
+        {
+          "id": "c",
+          "text": "콜백 안에서만 실행할 수 있는 방식이다."
+        },
+        {
+          "id": "d",
+          "text": "재생 전에 전체 PCM을 준비하는 전체 디코드 방식이다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "재생 전에 전체 PCM을 준비하는 전체 디코드 방식이다.",
+      "explanation": "읽기 호출 단위와 재생 전략은 다릅니다. 모든 PCM을 준비한 뒤 재생에 넘기므로 전체 적재입니다. 스트리밍 재생은 소비와 공급이 시간상 겹치는 별도 설계입니다."
+    },
+    {
+      "id": "75-5",
+      "question": "짧게 잘린 MP3 파일을 decode가 비어 있지 않은 PCM으로 반환했습니다. 이 결과만으로 말할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "원본 MP3 전체가 손상되지 않았다."
+        },
+        {
+          "id": "b",
+          "text": "파일이 배포 에셋의 해시와 일치한다."
+        },
+        {
+          "id": "c",
+          "text": "디코더가 지원 형식의 표본을 예산 안에서 얻었다."
+        },
+        {
+          "id": "d",
+          "text": "오디오 장치의 재생까지 성공했다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "디코더가 지원 형식의 표본을 예산 안에서 얻었다.",
+      "explanation": "저장소 디코더는 읽을 수 있는 앞부분을 반환할 수 있습니다. 반환된 PCM은 파일 전체 무결성이나 실제 장치 재생 성공의 증거가 아닙니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "pcm_probe와 mp3_probe를 각각 실행해 생성 데이터와 디코딩 데이터가 같은 단위를 사용하는지 비교합니다.",
+      "포함한 rotate.mp3의 16128프레임에서 샘플·바이트·기간을 계산하고 출력과 맞춥니다.",
+      "decode의 입력 vector, 디코더 가드, 출력 vector가 생성되고 파괴되는 순서를 그립니다."
+    ],
+    "failureChecks": [
+      "없는 경로·빈 파일·텍스트 파일을 넣어 서로 다른 오류 결과를 확인합니다.",
+      "PCM 예산64512/64511바이트를 비교하여 경계 성공과 후보 전체 거절을 확인합니다.",
+      "잘린 입력이 디코딩될 수 있는 사례를 관찰하고 이 성공으로 보장할 수 있는 범위를 적습니다."
+    ],
+    "expected": "MP3 읽기와 PCM 생성의 각 단계에서 단위·소유자·실패 반환을 추적하고, 디코딩 성공과 파일 무결성을 구별한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 공통로더/백엔드후보 직접 검토, vendored dr_mp3 구현·공식 dr_libs/CSIRO 자료 대조",
+    "draftJob": "out/learning-jobs/075-decode-events.jsonl",
+    "corrections": [
+      "optional을0과비교한초안/namespace누락/stdexcept누락교정",
+      "noexcept load만catch하고후속resize를감싸지않던백엔드초안의try범위확대",
+      "실패clear가capacity를남기는부분을빈Result반환으로후보저장소정리",
+      "Part전체편의함수는선행총량스캔후한번할당한다는설명을실제증분재할당루프로교정",
+      "헤더가드는다른번역단위중복정의도완화한다는설명교정",
+      "전체디코드면동기화/실시간오류없음·효과음무조건우월·스트리밍콜백필수단정교정",
+      "원고참조객체가notes에들어간세절을reference로옮기고구조검사통과"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED81/SDL82CTest·누적tetris·경고0",
+    "rotate.mp3 16128프레임/32256샘플/64512바이트/0.336초; 기존편의API와실제샘플전체일치",
+    "입력/출력정확경계·반환후보정리·파일오류·200잡음입력·56디코딩가능잘린접두; ASan/UBSan",
+    "실제SDL·공통로더7할당실패/9성공주입·Get오류/짧은읽기/프레임정렬·파일descriptor/stream정리",
+    "실제루트파일wrapper의seek실패/부분읽기/읽기후크기증가대역주입;FILE정리",
+    "루트rotate/clear/music실제3에셋·SDLdummy장치;root tetris빌드·17CTest·sim_hash_dump골든",
+    "Windows백엔드소스검토;네이티브Windows/macOS·실제스피커/GUI미검증"
+  ]
+}

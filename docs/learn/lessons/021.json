@@ -1,0 +1,477 @@
+{
+  "id": "lesson-21",
+  "title": "사각형: 두 삼각형과 공유 경계",
+  "shortTitle": "사각형·경계·정점 순서",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 정점 3개를 읽어 삼각형 하나를 그리고, 경계 점은 분류만 합니다.",
+  "finish": "완료: 정점 6개로 사각형을 그리고 범위를 검사합니다. 공유 경계의 소유권과 정점 방향·면 제거를 따로 설명합니다.",
+  "objective": "버퍼와 draw의 정점 개수 계약을 확장하고, 두 삼각형의 경계 연결과 방향에 따른 결과를 계산·관찰할 수 있습니다.",
+  "prerequisites": [
+    "20차시 체크포인트",
+    "샘플 중심·edge 함수·경계 분류",
+    "VBO·VAO·프로그램 소유권"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 각10 CTest·정점 범위와 개수 상태 검사",
+    "llvmpipe4.5 Core 네 실험·두 개별 마스크 합과 culling 관찰",
+    "물리 GPU·실제 표시·Windows/macOS 네이티브 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek 기하 helper 검토, CPU 경계 대조군·실제 GL mask·공식 계약 대조",
+    "draftJob": "out/learning-jobs/quad-events.jsonl",
+    "corrections": [
+      "뒤집힌 삼각형은 정규화 이후 공유 변 방향이 반대가 됨을 주석 보정",
+      "edge는 부호 있는 면적의 두 배임을 보정",
+      "top-left의 특정 소유 방향을 GL 규정으로 주장하지 않음",
+      "EBO 크기 비교의 인덱스 형식·측정 범위를 Part에 명시",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ]
+  },
+  "recap": {
+    "points": [
+      "픽셀 중심은 기본 단일 샘플에서 정수 인덱스에 0.5를 더한 위치입니다.",
+      "edge 부호로 내부·경계·바깥을 구별하고 면적 비율로 속성을 섞습니다.",
+      "프래그먼트는 최종 픽셀과 다르며 discard나 합성 상태가 남는 결과에 영향을 줍니다."
+    ],
+    "bridge": "이제 삼각형 두 개를 붙여 UI의 기본 도형을 만듭니다. 경계 점을 분류하는 데서 한 걸음 더 나아가 누가 채울지 정합니다."
+  },
+  "sections": [
+    {
+      "title": "삼각형 두 개를 한 도형으로",
+      "body": "블록과 버튼의 기본 모양은 사각형입니다. 네 모서리가 있는데 GL_TRIANGLES에는 몇 정점을 보내야 할까요? 인덱스 없이 삼각형 두 개를 지정하면 **세 정점씩, 총 여섯 정점**을 읽습니다. 같은 모서리 위치를 다시 보내는 것과 같은 픽셀을 중복해서 칠하는 것은 다른 문제입니다.\n\n이번에는 좌하단 A, 우하단 B, 우상단 C, 좌상단 D를 준비해 `A-B-C / A-C-D`로 나눕니다. 첫 삼각형은 청록, 둘째는 주황으로 표시해 연결부를 관찰합니다.\n\n```text\nD ───── C\n│     ╱ │\n│   ╱   │\n│ ╱     │\nA ───── B\n```\n\n`20-raster`의 버퍼·VAO·프로그램 구조를 이어 쓰되, 정점 3개에 고정된 업로드와 그리기를 확장합니다. 새 `21-quad`에서는 공유 경계의 CPU 정책을 만들고 GL의 실제 결과를 별도로 읽습니다. 정점 순서와 면 제거를 조합한 네 실험도 추가합니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_rect(GLuint tex,",
+        "invariant": "사각형을 같은 대각선을 공유하는 삼각형 두 개로 풀어 연속 정점 여섯 개를 만든다.",
+        "mayDiffer": "현재 정점에는 위치 외에 색·UV·SDF 속성도 들어가고 여러 사각형을 한 배치로 모은다.",
+        "omitted": "이번 단계는 위치 두 성분과 진단 색만 사용한다. 인덱스 버퍼·동적 배칭·텍스처는 후속 구현이다."
+      }
+    },
+    {
+      "title": "네 위치를 여섯 번 기록한다",
+      "body": "좌표는 NDC와 같은 수치를 갖는 w=1 clip 위치입니다. A=(-0.5,-0.5), B=(0.5,-0.5), C=(0.5,0.5), D=(-0.5,0.5)로 두면 창의 중앙 절반 크기를 차지합니다. 창이 직사각형이면 최종 도형도 그 비율을 따릅니다.\n\n배열의 앞 3개는 ABC, 뒤 3개는 ACD입니다. A와 C의 값은 그대로 재사용합니다. 공유 끝점을 따로 계산해 조금 다른 위치를 만들면 두 삼각형이 정말 같은 변을 갖는다는 조건을 잃을 수 있습니다.\n\n`reverse_first`는 첫 삼각형의 B와 C 순서만 교환합니다. 위치의 집합은 같고 돌아가는 방향만 바뀝니다. 이를 통해 방향과 화면에 나타나는지 여부를 구분합니다.\n\nVertex2는 float 두 개로 8바이트입니다. 배열 여섯 개는 48바이트지만 DrawArrays의 count는 6입니다. VAO의 정점 하나 간격은 여전히 8바이트이므로 stride를 48로 바꾸면 안 됩니다.",
+      "codes": [
+        {
+          "label": "quad.h의 정점 구성",
+          "text": "using Quad = std::array<study_mesh::Vertex2, 6>;\n\ninline Quad make_quad(bool reverse_first = false) noexcept {\n    const study_mesh::Vertex2 A{-0.5f, -0.5f};\n    const study_mesh::Vertex2 B{ 0.5f, -0.5f};\n    const study_mesh::Vertex2 C{ 0.5f,  0.5f};\n    const study_mesh::Vertex2 D{-0.5f,  0.5f};\n\n    if (reverse_first) {\n        return Quad{A, C, B, A, C, D};\n    }\n    return Quad{A, B, C, A, C, D};\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_rect(GLuint tex,",
+        "invariant": "사각형을 같은 대각선을 공유하는 삼각형 두 개로 풀어 연속 정점 여섯 개를 만든다.",
+        "mayDiffer": "현재 정점에는 위치 외에 색·UV·SDF 속성도 들어가고 여러 사각형을 한 배치로 모은다.",
+        "omitted": "이번 단계는 위치 두 성분과 진단 색만 사용한다. 인덱스 버퍼·동적 배칭·텍스처는 후속 구현이다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "CPU order 배열과 GPU 인덱스 버퍼",
+          "body": "현재 렌더러의 order={0,1,2,0,2,3}은 CPU에서 값을 여섯 번 꺼내는 배열입니다. 그것만으로 GPU가 인덱스 그리기를 하는 것은 아닙니다. EBO를 도입하면 네 정점과 여섯 인덱스를 따로 보낼 수 있지만, 지금은 DrawArrays의 연속 정점 계약부터 확장합니다."
+        }
+      ]
+    },
+    {
+      "title": "버퍼가 정점 개수를 기억한다",
+      "body": "업로드 함수가 `Triangle` 타입만 받으면 사각형을 넣을 수 없습니다. 읽을 수 있는 연속 배열의 시작 포인터와 정점 개수를 받는 핵심 함수를 만들고, `std::array<Vertex2,N>`용 오버로드가 실제 크기를 전달하게 합니다.\n\n포인터만으로 실제 할당 길이를 알아낼 수는 없습니다. raw 포인터 오버로드의 호출자는 count개 원소를 읽을 수 있어야 합니다. 배열 오버로드를 쓰면 호출할 때 데이터와 길이를 따로 적을 필요가 없어 실수를 줄입니다.\n\n검사는 곱셈 전에 합니다. `count*sizeof(Vertex2)`를 먼저 계산하면 size_t에서 값이 넘친 다음 검사할 수 있습니다. GLsizei에 정점 개수가 들어가는지, GLsizeiptr에 바이트 길이가 들어가는지 각각 확인합니다.\n\n성공한 뒤에만 `count_`를 기록하고 reset은 이름과 개수를 함께 0으로 돌립니다. 기존 버퍼가 있는 상태의 재업로드 거부는 그 버퍼의 개수도 보존해야 합니다. 이름과 메타데이터가 서로 다른 상태를 설명하지 않도록 수명을 맞춥니다.",
+      "codes": [
+        {
+          "label": "array 오버로드와 업로드 메타데이터",
+          "text": "bool upload(const study_mesh::Vertex2* vertices, std::size_t count) noexcept;\ntemplate<std::size_t N>\nbool upload(const std::array<study_mesh::Vertex2, N>& vertices) noexcept {\n    return upload(vertices.data(), vertices.size());\n}\nGLsizei vertex_count() const noexcept { return count_; }",
+          "language": "cpp"
+        },
+        {
+          "label": "곱셈·변환 이전에 검사한다",
+          "text": "if (!vertices || count == 0 ||\n    count > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()) ||\n    count > static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()) /\n                sizeof(study_mesh::Vertex2)) {\n    std::fputs(\"VertexBuffer::upload: invalid vertex extent\\n\", stderr);\n    return false;\n}\nconst std::size_t bytes = count * sizeof(study_mesh::Vertex2);",
+          "language": "cpp"
+        },
+        {
+          "label": "renderer/vertex_buffer.h · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/vertex_buffer.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/vertex_buffer.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/vertex_buffer.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "템플릿은 어떤 역할만 맡을까?",
+          "body": "N을 컴파일러가 배열 타입에서 알아내도록 하는 얇은 입구입니다. GL 자원 생성과 복사 구현을 N마다 반복 작성하지 않고, 포인터와 개수를 받는 함수 한 곳에 모읍니다. 버퍼 소유권 정책은 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "그리기 범위를 안전하게 잇는다",
+      "body": "새 함수 `draw_triangles`는 버퍼의 전체 정점 개수 available, 시작 first, 읽을 개수 count를 받습니다. 사각형은 available=6, first=0, count=6입니다. 뒤 삼각형만 그릴 때는 first=3, count=3입니다.\n\n유효 범위 검사를 `first+count <= available`로 쓰면 두 정수의 합이 넘칠 수 있습니다. 음수와 순서를 먼저 거른 뒤 `count <= available-first`로 확인합니다. GL을 호출하기 전에 잘못된 범위를 거부해야 합니다.\n\n여기서는 count가 양수이면서 3의 배수인 완성된 삼각형 묶음만 허용합니다. 이것은 이 도우미의 정책입니다. GL 자체는 count=2 같은 불완전한 마지막 묶음을 무시할 수 있으므로, 도우미의 거부를 GL API 오류 규칙이라고 설명하지 않습니다.\n\navailable은 VAO가 실제로 참조하는 버퍼의 개수여야 합니다. 함수가 VAO 내부를 조사하는 것은 아니므로 잘못된 버퍼의 메타데이터를 넘기면 검사의 전제가 깨집니다. main에서 함께 준비한 버퍼·VAO를 연결하고 `vertex_buffer.vertex_count()`를 전달합니다.\n\n기존 `draw_triangle`은 `(available,first,count)=(3,0,3)`으로 새 함수를 부르는 호환 래퍼로 남깁니다. 내부의 clear→draw→선택 해제 경로를 복사해 둘로 유지하지 않습니다.\n\n이 함수는 호출할 때마다 색 버퍼를 지웁니다. 두 삼각형을 화면에 함께 남기려면 count=6인 호출 한 번을 사용합니다. 두 번 나누어 호출하면 마지막 삼각형만 남습니다. 여러 도형을 누적해서 그리려면 프레임 시작의 clear와 개별 draw를 분리해야 합니다.",
+      "codes": [
+        {
+          "label": "범위를 검사한 다음 draw까지 진행한다",
+          "text": "if (available <= 0 || first < 0 || count <= 0 || count % 3 != 0 ||\n    first > available || count > available - first) {\n    std::fputs(\"draw_triangles: invalid vertex range\\n\", stderr);\n    return false;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "같은 함수의 실제 제출 한 줄",
+          "text": "gl.DrawArrays(Triangles, first, count);",
+          "language": "cpp"
+        },
+        {
+          "label": "renderer/triangle.h · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/triangle.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/triangle.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/triangle.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "업로드한 연속 정점 범위 안에서 정점 단위의 first/count로 제출한다.",
+        "mayDiffer": "현재 배처는 float 배열 길이와 정점 형식을 사용해 개수를 구하며 한 프레임에 여러 배치를 보낸다.",
+        "omitted": "이번 함수는 호출할 때마다 clear하므로 두 호출을 누적하는 범용 제출 API는 아니다. 사각형은 한 draw로 보낸다."
+      }
+    },
+    {
+      "title": "대각선의 점은 누가 갖는가",
+      "body": "16×16 격자에서 A=(4,4), B=(12,4), C=(12,12), D=(4,12)로 사각형을 잡아 봅시다. 대각선 AC는 x=y이며 (4.5,4.5)부터 (11.5,11.5)까지 8개의 샘플 중심을 지납니다.\n\n두 삼각형의 내부 판정을 각각 수행할 때 boundary를 모두 포함하면 이 8개가 중복됩니다. 모두 제외하면 8개가 비어 대각선 틈이 생깁니다. 도형 자체가 틀린 것이 아니라 경계의 소유권을 아직 정하지 않은 것입니다.\n\n| CPU 처리 | 대각선의 8개 샘플 |\n| --- | --- |\n| inside와 boundary를 모두 채움 | 각각 두 번 |\n| strict inside만 채움 | 모두 빠짐 |\n| 일관된 한쪽 경계만 포함 | 각각 한 번 |\n\n최종 불투명 그림만 보면 중복을 발견하기 어렵습니다. 뒤 색이 앞 색을 덮을 수 있기 때문입니다. 따라서 이번 실험은 두 삼각형을 따로 검사해 각 위치가 0번·1번·2번 선택되는지 셉니다. 같은 이유로 GL 결과도 두 개의 개별 마스크를 읽습니다.",
+      "codes": [
+        {
+          "label": "src/quad_demo.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/src/quad_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "CPU의 경계 규칙을 만든다",
+      "body": "이 CPU 도구는 **top-left 규칙**을 선택합니다. y가 위로 증가하고 정점이 반시계 방향일 때, 아래로 향하는 변(dy<0) 또는 왼쪽으로 향하는 수평 변(dy=0, dx<0)에 경계 점의 소유권을 줍니다. 사각형의 바깥 테두리에서는 위·왼쪽 변이 포함되는 규칙입니다.\n\n같은 공유 변을 서로 반대 방향으로 읽으면 한쪽 조건만 참이 됩니다. ABC의 공유 변 C→A는 아래로 향해 포함되고, ACD의 A→C는 위로 향해 제외됩니다. 가장자리가 둘 이상 만나는 점은 해당하는 모든 경계 조건을 만족해야 합니다.\n\n입력이 시계 방향이면 CPU 안에서 정점 1과 2를 교환해 반시계 방향으로 정규화합니다. GL에 업로드할 배열을 바꾸는 것이 아니라 함수가 값으로 받은 복사본만 바꿉니다. 이 소유권 함수는 면 제거를 하지 않습니다.\n\n`sample_triangle`이 유효한 입력인지, 안쪽인지 바깥인지 먼저 판정합니다. 경계로 분류된 경우에만 새 규칙을 적용합니다. double 계산의 한계와 exact-zero 정책은 그대로이며 하드웨어의 subpixel 반올림까지 재현하지 않습니다.",
+      "codes": [
+        {
+          "label": "y가 위로 증가하는 좌표에서 포함할 변",
+          "text": "inline bool included_edge(const study_raster::Point& a,\n                          const study_raster::Point& b) noexcept {\n    const double dx = b.x - a.x;\n    const double dy = b.y - a.y;\n    return (dy < 0.0) || (dy == 0.0 && dx < 0.0);\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "경계만 추가 규칙으로 선택한다",
+          "text": "inline std::optional<bool> covers_top_left(\n    std::array<study_raster::Point, 3> triangle,\n    study_raster::Point p) noexcept {\n\n    const std::optional<study_raster::Sample> sample =\n        study_raster::sample_triangle(triangle, p);\n\n    if (!sample.has_value()) {\n        return std::nullopt;  // invalid input or degenerate computed area\n    }\n    if (sample->region == study_raster::Region::outside) {\n        return false;\n    }\n    if (sample->region == study_raster::Region::inside) {\n        return true;\n    }\n\n    // Boundary: normalize winding to CCW so the directed edges are well defined.\n    // edge(A, B, C) is twice the signed area, negative for clockwise input.\n    if (study_raster::edge(triangle[0], triangle[1], triangle[2]) < 0.0) {\n        std::swap(triangle[1], triangle[2]);\n    }\n\n    const study_raster::Point& a = triangle[0];\n    const study_raster::Point& b = triangle[1];\n    const study_raster::Point& c = triangle[2];\n\n    // Only zero edges impose the extra top-left test; non-boundary edges are\n    // already accepted by sample_triangle. A single rejected zero edge fails.\n    const auto owned = [&p](const study_raster::Point& from,\n                            const study_raster::Point& to) noexcept {\n        return (study_raster::edge(from, to, p) != 0.0) || included_edge(from, to);\n    };\n\n    // Identical shared endpoints in opposite directions (A..C and C..A) are what\n    // let two adjacent triangles agree on exactly one owner per shared edge.\n    return owned(a, b) && owned(b, c) && owned(c, a);\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "renderer/quad.h · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/quad.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "optional<bool>의 두 질문",
+          "body": "`if (!result)`는 값이 있는지를 검사합니다. 값이 있는 false는 “정상적으로 계산했지만 이 삼각형이 소유하지 않음”입니다. 먼저 optional의 유효성을 확인한 뒤 `*result`를 읽어 포함 여부를 판단하세요."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "이 규칙이 곧 GL 전체 규칙일까?",
+          "body": "GL 3.3은 동일한 끝점의 공유 변 양쪽에 도형이 있을 때 변 위 샘플을 정확히 한쪽이 만들도록 요구합니다. 이 CPU 도구의 특정 방향 선택까지 GL에 강제된다고 주장하지 않습니다. 실제 비교는 어느 쪽이 소유했는지를 고정하기보다 두 마스크의 합이 1인지 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "정점 순서와 면 제거를 분리한다",
+      "body": "winding은 도형의 정점을 어느 방향으로 도는지 뜻합니다. 앞면 판단은 변환된 창 좌표를 기준으로 합니다. `glFrontFace(CCW)`는 반시계 방향을 앞면으로 정하고, `glCullFace(BACK)`는 면 제거를 켰을 때 뒷면을 버리도록 지정합니다.\n\n설정과 활성화는 다릅니다. `glCullFace(BACK)`만 부른다고 면 제거가 켜지지 않습니다. `glEnable(GL_CULL_FACE)`가 필요하며, `glDisable`로 끌 수 있습니다. 네 함수의 타입과 이름을 GlApi/로더에 추가합니다. 다른 함수와 같이 하나라도 로딩이 빠지면 테이블 전체를 사용하지 않습니다.\n\n| 실행 이름 | 첫 삼각형 방향 | 면 제거 | 기대 도형 |\n| --- | --- | --- | --- |\n| quad | 반시계 | 끔 | 사각형 |\n| reverse | 시계 | 끔 | 사각형 |\n| cull | 반시계 | 켬 | 사각형 |\n| reverse-cull | 시계 | 켬 | 둘째 삼각형만 |\n\nCPU 소유권 함수가 방향을 정규화한다고 GPU 면 제거에서도 두 방향을 같게 취급하는 것은 아닙니다. 서로 다른 기능이므로 실험 조건을 분리합니다. UI의 아래로 증가하는 y를 셰이더에서 뒤집는 경우에는 변환 전후의 방향도 달라질 수 있습니다.",
+      "codes": [
+        {
+          "label": "main 초기화에서 명시하는 면 제거 정책",
+          "text": "gl.FrontFace(study_gl::CounterClockwise);\ngl.CullFace(study_gl::Back);\nif (experiment.cull) gl.Enable(study_gl::CullFaceCap);\nelse gl.Disable(study_gl::CullFaceCap);\nif (gl.GetError() != 0) return 1;",
+          "language": "cpp"
+        },
+        {
+          "label": "renderer/gl_api.h · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/gl_api.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/gl_api.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/gl_api.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/loader_contract.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/tests/loader_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_quad(GLuint tex,",
+        "invariant": "도형의 정점 순서와 각 위치에 대응하는 속성 순서를 함께 유지한다.",
+        "mayDiffer": "현재 UI는 TL/TR/BR/BL의 논리 좌표와 UV를 함께 전달하고 shader가 y를 뒤집는다.",
+        "omitted": "임의의 오목·자기교차 다각형 삼각분할이나 3D 카메라는 이 고정 대각선 구현의 범위 밖이다."
+      }
+    },
+    {
+      "title": "여섯 정점에 맞는 셰이더를 쓴다",
+      "body": "색 세 개를 `colors[gl_VertexID]`로 고르던 셰이더를 count=6에 그대로 쓰면 배열 범위를 벗어납니다. 정점 수가 늘 때 CPU의 업로드와 draw뿐 아니라 셰이더의 입력 가정도 확인해야 합니다.\n\n이번 진단 셰이더는 배열을 사용하지 않습니다. ID가 3보다 작으면 청록, 나머지는 주황을 출력합니다. 각 삼각형의 세 정점은 같은 색이므로 flat으로 전달하면 두 영역을 쉽게 구별할 수 있습니다. 정점별 색 속성을 갖는 범용 표현은 이후에 도입합니다.\n\nmain에서는 `make_quad`를 업로드하고 BufferSize=48을 관찰합니다. 그리기에는 `vertex_count(), 0, 6`을 넘깁니다. VAO는 정점당 vec2 위치와 stride 8을 그대로 사용합니다. 자원 소유자와 컨텍스트의 종료 순서도 유지합니다.",
+      "codes": [
+        {
+          "label": "배열 범위 가정을 없앤 진단 vertex shader",
+          "text": "#version 330 core\nlayout(location = 0) in vec2 a_position;\nflat out vec3 v_color;\nvoid main() {\n    // No array lookup: the six-vertex experiment uses one color per triangle.\n    v_color = gl_VertexID < 3 ? vec3(0.2,0.7,0.9) : vec3(0.95,0.65,0.2);\n    gl_Position = vec4(a_position, 0.0, 1.0);\n}\n",
+          "language": "glsl"
+        },
+        {
+          "label": "renderer/quad_sources.h · 완성 파일",
+          "file": "checkpoints/21-quad/renderer/quad_sources.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_rect(GLuint tex,",
+        "invariant": "사각형을 같은 대각선을 공유하는 삼각형 두 개로 풀어 연속 정점 여섯 개를 만든다.",
+        "mayDiffer": "현재 정점에는 위치 외에 색·UV·SDF 속성도 들어가고 여러 사각형을 한 배치로 모은다.",
+        "omitted": "이번 단계는 위치 두 성분과 진단 색만 사용한다. 인덱스 버퍼·동적 배칭·텍스처는 후속 구현이다."
+      }
+    },
+    {
+      "title": "완성 그림과 개별 마스크를 본다",
+      "body": "128×128 viewport에서 사각형은 x/y가 32부터 96까지인 연속 영역에 놓입니다. 안쪽 샘플은 64×64=4,096개입니다. 공유 대각선 위에는 샘플 중심 64개가 있습니다.\n\n| 실험 | 결과 |\n| --- | --- |\n| quad | ![정상 두 삼각형: 128×128 결과](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABeUlEQVR4nO3RQQ0CAQADwTPAjz8izjMCEHUCUIAKspBOUgHNznG7PyzckT8YHwAA2wMAYHsAAGwPAIDtAQCwPQAAtgcAwPYAANgeAADbAwBgewAAbA8AgO0BALA9AAC2BwDA9r4O8H6e/7vzdQEo6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI668D5PWnAfL00wB592mAPPo0QF58GiDPPQ2Qt54GyENPA+SVpwHyxNMAed9pgDzuNEBedhogzzoNkDedBsiDTgPkNacB8pTTAHnHaYA84jRAXnAdwAD89AAA2B4AANsDAGB7AABsDwCA7QEAsD0AALYHAMD2AADYHgAA2wMAYHsAAGwPAIDtAQCwPQAAtvcBFiGyWTMzUCkAAAAASUVORK5CYII=) |\n| reverse | ![첫 방향 반전과 면 제거 비활성: 128×128 결과](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABeUlEQVR4nO3RQQ0CAQADwTPAjz8izjMCEHUCUIAKspBOUgHNznG7PyzckT8YHwAA2wMAYHsAAGwPAIDtAQCwPQAAtgcAwPYAANgeAADbAwBgewAAbA8AgO0BALA9AAC2BwDA9r4O8H6e/7vzdQEo6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI6wOI668D5PWnAfL00wB592mAPPo0QF58GiDPPQ2Qt54GyENPA+SVpwHyxNMAed9pgDzuNEBedhogzzoNkDedBsiDTgPkNacB8pTTAHnHaYA84jRAXnAdwAD89AAA2B4AANsDAGB7AABsDwCA7QEAsD0AALYHAMD2AADYHgAA2wMAYHsAAGwPAIDtAQCwPQAAtvcBFiGyWTMzUCkAAAAASUVORK5CYII=) |\n| reverse-cull | ![첫 방향 반전과 면 제거 활성: 128×128 결과](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABn0lEQVR4nO3dQRHDQAzF0BDoLfeCKOcADIKiqOVGmvkA1noA9nid7wbuwF8gXwABuBdAAO4FEIB7AQTgXgABuBdAAO4FEIB7AQTgXgABuBdAAO4FEIB7AQTgXgABuBdAAO4FEIB7Pwe4r8//LoCH1w8Arh8AXD8AuH4AcP0A4PoBwPUDgOsHANcPAK5vB8DrqwHw9GoAvLsaAI+uBsCLqwHw3GoAvLUaAA+tBsArqwHwxGoAvK8aAI+rBsDLqgHwrGoAvKkaAA+qBsBrqgHwlGoAvKMaAI+oBsALqgHwfGoAvJ0aAA+nBsCrqQHwZGoAvJcaAI+lBsBLqQHwTGoAvJEaAA+kBsDrqAHwNGoAvIsaAI+iBsCLqAHwHGoAvIUaAA+hBsArqAHwBGoA/H58JAB+/IZhAPjlS8YA4GfvGQCA37xq0wD4wds2CoBfu3BzAPipOzcEgN+5dhMA+JGb1/8BAbgXQADuBRCAewEE4F4AAbgXQADuBRCAewEE4F4AAbgXQADuBRCAewEE4F4AAbgXQADuBRCAewEE4F4A8L4FuyhFkGzCVQAAAABJRU5ErkJggg==) |\n\n`quad_probe`는 먼저 여섯 정점을 함께 그린 뒤, 면 제거를 끄고 `(first,count)=(0,3)`과 `(3,3)`을 따로 그려 두 마스크를 얻습니다. 각 호출은 새로 clear합니다. 안쪽에서 마스크 합이 1, 바깥에서 0인지 검사하므로 불투명 색에 가려진 중복도 찾을 수 있습니다.\n\nreverse-cull의 전체 결과는 둘째 삼각형의 마스크와 같아야 합니다. 공유 경계의 구체적인 소유 방향을 지정하지 않아 남은 픽셀 수를 무조건 전체의 절반으로 단정하지 않습니다. 대각선 위 샘플이 어느 쪽에 속하는지가 그 개수에 영향을 줍니다.\n\n같은 검사에서 업로드 바이트 수와 버퍼의 정점 수를 함께 확인합니다. 범위 밖 draw로 실패를 유발하는 대신, CPU 계약 검사에서 잘못된 범위를 주어 GL 호출 전에 거부되는지 확인합니다.",
+      "codes": [
+        {
+          "label": "tests/quad_real.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/tests/quad_real.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "서로 다른 두 정책을 같은 것으로 검사하지 않는다",
+          "body": "CPU top-left 마스크와 GL 각 삼각형의 경계 소유 방향을 비트 단위로 같게 요구하지 않습니다. CPU에는 선언한 규칙의 일관성을, GL에는 공유 변에서 한쪽만 덮는 결과와 면 제거의 영향을 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "실패가 드러나는 검사를 남긴다",
+      "body": "CPU 검사에는 뒤집힌 삼각형, 경계의 연장선, 퇴화 삼각형과 잘못된 수치도 포함합니다. “정상 사각형이 보임”만 확인하면 상태와 범위 오류를 놓치기 쉽습니다.\n\n| 바꿔 볼 잘못된 구현 | 드러나야 하는 실패 |\n| --- | --- |\n| 모든 boundary를 포함 | 대각선 중복 |\n| 모든 boundary를 제외 | 대각선 구멍 |\n| count에 48을 전달 | available=6 범위 검사에서 거부 |\n| first=INT_MAX-1, count=3 | 더하기 없이 범위 거부 |\n| count*sizeof를 먼저 계산 | 큰 개수에서 오버플로 위험 |\n| reset 때 count를 유지 | 빈 이름과 남은 개수의 불일치 |\n\n업로드와 draw의 기존 실패 경로 검사도 유지합니다. 자원 생성·복사 실패 후 개수가 0인지, 재업로드 거부가 기존 이름·개수를 보존하는지 확인합니다. GL 함수 로더는 네 개의 새 함수가 각각 빠진 경우도 검사합니다. 이런 계약은 사각형 이후 정점 수가 더 늘어도 계속 필요합니다.",
+      "codes": [
+        {
+          "label": "tests/quad_contract.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/tests/quad_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/buffer_contract.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/tests/buffer_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/triangle_contract.cpp · 완성 파일",
+          "file": "checkpoints/21-quad/tests/triangle_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "실행하고 UI 도형으로 연결한다",
+      "body": "`21-quad`는 독립적으로 빌드 가능한 누적 체크포인트입니다. 직접 이어 만드는 경우 `quad.h`, `quad_sources.h`, `quad_demo.cpp`, `quad_contract.cpp`, `quad_real.cpp`를 추가합니다. 버퍼·draw·GlApi·로더·main과 관련 계약 검사를 교체하고 CMake 타깃을 연결합니다. 본문의 접힌 완성 파일을 그대로 비교할 수 있습니다.\n\n저장소 루트에서 SDL2 개발 패키지·pkg-config·GL 3.3 Core 환경을 사용합니다. 단일 구성 생성기 기준이며 Windows 다중 구성은 구성 이름과 실행 경로를 맞춥니다.\n\n```sh\ncmake -S docs/learn/checkpoints/21-quad -B out/study-21 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-21\nctest --test-dir out/study-21 --output-on-failure\n./out/study-21/quad_demo\n./out/study-21/tetris quad\n./out/study-21/tetris reverse\n./out/study-21/tetris cull\n./out/study-21/tetris reverse-cull\n./out/study-21/quad_probe\n```\n\n창은 하나씩 실행하고 Escape로 닫습니다. CPU 도구는 닫힌 경계의 중복 8개, 열린 경계의 구멍 8개, top-left 정책의 구멍/중복 0개를 출력합니다. Linux offscreen GL을 지원하면 probe 앞에 `SDL_VIDEODRIVER=offscreen`을 붙일 수 있습니다. 기존 폴더 안의 경로 접두사를 인자로 주면 네 PPM을 저장합니다. 다른 빌드 폴더에서 SCRIPTED를 선택하면 CPU 도구와 계약 검사를 실행할 수 있습니다.\n\n현재 렌더러의 `glb_rect`에서도 같은 여섯 정점 구성 원리를 찾을 수 있습니다. 다만 위치 외에 UV·색·둥근 모서리 속성을 붙이고 여러 도형을 모읍니다. 두 삼각형의 연결을 이해했으므로 다음에는 반투명 색을 겹쳐 그리며 **색 합성과 그리는 순서**를 구현합니다.",
+      "codes": [
+        {
+          "label": "CMakeLists.txt 마지막에 연결한다",
+          "text": "add_executable(quad_demo src/quad_demo.cpp)\ntarget_link_libraries(quad_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(quad_contract tests/quad_contract.cpp)\n    target_link_libraries(quad_contract PRIVATE study_mesh)\n    add_test(NAME quad_contract COMMAND quad_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(quad_probe tests/quad_real.cpp)\n        target_link_libraries(quad_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()\n",
+          "language": "cmake"
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/21-quad/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 자료",
+          "title": "공식 계약의 확인 위치",
+          "body": "[OpenGL 3.3 Core 명세](https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf) §3.6.1은 창 좌표 방향·면 제거·공유 변의 샘플 규칙을 설명합니다. CPU의 특정 top-left 선택과 GL이 요구하는 일관성 조건을 구분하며 읽어 보세요."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "ABC/ACD 순서의 여섯 정점을 만든다.",
+      "버퍼의 정점 수를 성공/실패/해제 상태와 함께 관리한다.",
+      "first/count 범위를 GL 호출 전에 검사한다.",
+      "CPU의 열린/닫힌/한쪽 경계 정책을 비교한다.",
+      "두 GL 마스크의 합과 정점 반전·면 제거 네 실험을 확인한다."
+    ],
+    "expected": "기본·반전·정상 면 제거는 사각형이고, 반전+면 제거에서는 첫 삼각형이 사라집니다. 공유 대각선은 한 번씩 덮습니다.",
+    "failureChecks": [
+      "count 6과 bytes 48, stride 8을 구별했는가?",
+      "셰이더가 여전히 색 배열 세 원소만 가정하지 않는가?",
+      "available이 VAO가 참조하는 버퍼의 실제 업로드 개수인가?",
+      "count를 곱하거나 first+count를 더하기 전에 범위를 검사하는가?",
+      "optional의 값 존재와 bool 포함 여부를 구별하는가?",
+      "FrontFace/CullFace 설정과 CULL_FACE 활성화를 구별하는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "21-1",
+      "kind": "개수와 단위",
+      "question": "Vertex2 여섯 개를 48바이트로 업로드했습니다. 전체 사각형의 count와 정점 stride는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "count 48, stride 8"
+        },
+        {
+          "id": "b",
+          "text": "count 2, stride 48"
+        },
+        {
+          "id": "c",
+          "text": "count 6, stride 8"
+        },
+        {
+          "id": "d",
+          "text": "count 4, stride 12"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "count 6, stride 8",
+      "explanation": "DrawArrays는 정점 6개를 읽고, VAO는 정점 하나의 8바이트 간격을 유지합니다. 삼각형 개수 2와 전체 업로드 길이 48은 각각 다른 단위입니다."
+    },
+    {
+      "id": "21-2",
+      "kind": "안전한 범위",
+      "question": "available=6, first=3, count=6입니다. 새 draw 도우미의 올바른 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "뒤 삼각형부터 두 삼각형을 그린다."
+        },
+        {
+          "id": "b",
+          "text": "GL 호출 전에 범위를 거부한다."
+        },
+        {
+          "id": "c",
+          "text": "count를 자동으로 3으로 줄인다."
+        },
+        {
+          "id": "d",
+          "text": "바이트 단위로 바꾸면 범위가 맞는다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "GL 호출 전에 범위를 거부한다.",
+      "explanation": "first 이후 남은 정점은 6-3=3개인데 count는 6입니다. 호출자가 의도한 범위가 잘못됐으므로 조용히 줄이지 않고 거부합니다. 버퍼 밖을 읽도록 GL에 보내지 않습니다."
+    },
+    {
+      "id": "21-3",
+      "kind": "공유 변",
+      "question": "두 삼각형의 boundary 샘플을 모두 포함했는데 완성된 불투명 그림은 사각형처럼 보입니다. 무엇을 더 확인해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "완성 그림이 맞으니 각 샘플은 반드시 한 번만 그려졌다."
+        },
+        {
+          "id": "b",
+          "text": "동일한 좌표를 두 번 저장했으니 모든 픽셀이 두 번 칠해졌다."
+        },
+        {
+          "id": "c",
+          "text": "면 제거를 켜면 경계 중복을 항상 해결한다."
+        },
+        {
+          "id": "d",
+          "text": "개별 마스크를 합쳐 공유 변에서 중복되는지 확인한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "개별 마스크를 합쳐 공유 변에서 중복되는지 확인한다.",
+      "explanation": "불투명 색이 이전 색을 덮으면 중복이 완성 그림에 드러나지 않을 수 있습니다. 각 삼각형의 마스크 합이 안쪽에서 1인지 확인하면 공유 경계의 중복과 구멍을 구별할 수 있습니다."
+    },
+    {
+      "id": "21-4",
+      "kind": "상태와 방향",
+      "question": "앞면은 CCW, 제거 대상은 BACK입니다. 첫 삼각형만 시계 방향으로 바꾸었지만 CULL_FACE를 비활성화했습니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 삼각형이 모두 그려진다."
+        },
+        {
+          "id": "b",
+          "text": "첫 삼각형이 반드시 제거된다."
+        },
+        {
+          "id": "c",
+          "text": "두 삼각형이 모두 제거된다."
+        },
+        {
+          "id": "d",
+          "text": "winding이 달라 프로그램 링크가 실패한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "두 삼각형이 모두 그려진다.",
+      "explanation": "앞면/뒷면 분류와 실제 면 제거의 활성화는 다릅니다. CULL_FACE가 꺼져 있으면 이 실습의 두 방향을 모두 그립니다. 켜면 뒷면인 첫 삼각형을 제거합니다."
+    },
+    {
+      "id": "21-5",
+      "kind": "결과 타입",
+      "question": "covers_top_left의 결과가 값이 있는 false입니다. 올바른 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "잘못된 입력이므로 optional을 역참조하면 안 된다."
+        },
+        {
+          "id": "b",
+          "text": "유효한 결과이며 해당 삼각형이 이 샘플을 소유하지 않는다."
+        },
+        {
+          "id": "c",
+          "text": "삼각형 방향이 잘못되어 메모리를 읽지 못했다."
+        },
+        {
+          "id": "d",
+          "text": "공유 변 양쪽에서 반드시 false를 반환해야 한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "유효한 결과이며 해당 삼각형이 이 샘플을 소유하지 않는다.",
+      "explanation": "optional의 값 존재와 bool의 포함 여부는 별개입니다. nullopt는 잘못된 입력/퇴화 계산, 값이 있는 false는 정상 계산한 비소유입니다. 먼저 유효성을 확인한 뒤 *result를 읽습니다."
+    }
+  ]
+}

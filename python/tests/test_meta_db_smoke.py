@@ -521,7 +521,7 @@ def test_elo_rp_migration_on_legacy_db(tmp_path):
     hi2, lo2 = _run_once(db)
     assert hi2["elo"] == 300 and lo2["elo"] == 0
 
-    # sqlite3 .dump/restore 는 PRAGMA user_version 을 보존하지 않는다. DB 안의
+    # SQL 덤프를 새 DB에 재실행하면 PRAGMA user_version 헤더는 복원되지 않는다. DB 안의
     # migration marker 는 보존되므로 복원본도 다시 리베이스하면 안 된다.
     con = sqlite3.connect(str(db))
     dump_sql = "\n".join(con.iterdump())
@@ -578,3 +578,251 @@ def test_trusted_proxy_uses_rightmost_xff_and_ignores_cf_header(meta_server):
     # Another actual peer, as asserted by the explicitly trusted local proxy.
     status, _ = _post(f"{meta_server}/v1/guest", headers={"X-Forwarded-For": "192.0.2.2"})
     assert status == 200
+
+
+@pytest.mark.parametrize("changed", [
+    {"score_a": 11}, {"score_b": 6}, {"lines_a": 5},
+    {"lines_b": 3}, {"duration_s": 31}, {"winner": None},
+    {"swap_players": True},
+])
+def test_match_uuid_rejects_changed_record(meta_server, changed):
+    base = meta_server
+    _, a = _post(f"{base}/v1/guest")
+    _, b = _post(f"{base}/v1/guest")
+    record = {"match_uuid": _match_uuid(), "player_a": a["player_id"],
+              "player_b": b["player_id"], "winner": a["player_id"],
+              "score_a": 10, "score_b": 5, "lines_a": 4, "lines_b": 2,
+              "duration_s": 30}
+    code, original = _post(f"{base}/v1/matches", record)
+    assert code == 200
+    conflict = dict(record)
+    if changed.get("swap_players"):
+        conflict["player_a"], conflict["player_b"] = record["player_b"], record["player_a"]
+    else:
+        conflict.update(changed)
+    code, response = _post(f"{base}/v1/matches", conflict)
+    assert code == 409
+    assert response["error"] == "match_conflict"
+    code, retry = _post(f"{base}/v1/matches", record)
+    assert code == 200 and retry == original
+    for player, expected in [(a, (16, 30, 100)), (b, (0, 10, 50))]:
+        code, saved = _post(f"{base}/v1/auth/verify", {"token": player["token"]})
+        assert code == 200
+        assert (saved["elo"], saved["bp"], saved["xp"]) == expected
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.1", "localhost"])
+def test_public_match_test_mode_requires_numeric_loopback(tmp_path, host):
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("tetris_meta binary not built")
+    # A deliberately missing parent prevents any bind in the old implementation.
+    # The new policy must reject the address before touching the database.
+    env = dict(os.environ)
+    env.pop("TETRIS_RELAY_SECRET", None)
+    result = subprocess.run(
+        [str(binary), "--db", str(tmp_path / "absent" / "unused.db"),
+         "--http", f"{host}:18080", "--allow-public-matches"],
+        env=env, capture_output=True, text=True, timeout=3,
+    )
+    assert result.returncode == 2
+    assert "numeric loopback" in result.stderr
+    assert "opening db" not in result.stderr
+
+
+def test_meta_restart_keeps_committed_match(tmp_path):
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("tetris_meta binary not built")
+    db = tmp_path / "restart.db"
+    env = dict(os.environ)
+    env.pop("TETRIS_RELAY_SECRET", None)
+    def start():
+        port = _free_port()
+        process = subprocess.Popen([str(binary), "--db", str(db), "--http", f"127.0.0.1:{port}",
+                                    "--allow-public-matches"],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if not _wait_listen(port):
+            process.kill(); process.wait(timeout=3)
+            pytest.fail("meta restart readiness failed")
+        return process, f"http://127.0.0.1:{port}"
+    def stop(process):
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait(timeout=3)
+    first, base = start()
+    try:
+        _, a = _post(f"{base}/v1/guest")
+        _, b = _post(f"{base}/v1/guest")
+        record = {"match_uuid": _match_uuid(), "player_a": a["player_id"], "player_b": b["player_id"],
+                  "winner": a["player_id"], "score_a": 10, "score_b": 5, "lines_a": 4, "lines_b": 2, "duration_s": 30}
+        code, receipt = _post(f"{base}/v1/matches", record)
+        assert code == 200
+    finally:
+        stop(first)
+    second, base = start()
+    try:
+        assert _get(f"{base}/healthz") == (200, {"ok": True})
+        code, retry = _post(f"{base}/v1/matches", record)
+        assert code == 200 and retry == receipt
+        code, saved = _post(f"{base}/v1/auth/verify", {"token": a["token"]})
+        assert code == 200
+        assert (saved["elo"], saved["bp"], saved["xp"]) == (16, 30, 100)
+    finally:
+        stop(second)
+
+
+@pytest.mark.parametrize("bad_winner", ["missing", "101", 1.5, True, [], {}, 18446744073709551615])
+def test_match_winner_null_is_not_parse_failure(meta_server, bad_winner):
+    _, a = _post(f"{meta_server}/v1/guest")
+    _, b = _post(f"{meta_server}/v1/guest")
+    record = {"match_uuid": _match_uuid(), "player_a": a["player_id"], "player_b": b["player_id"],
+              "winner": a["player_id"], "score_a": 10, "score_b": 5, "lines_a": 4, "lines_b": 2, "duration_s": 30}
+    malformed = dict(record)
+    if bad_winner == "missing":
+        malformed.pop("winner")
+    else:
+        malformed["winner"] = bad_winner
+    code, _ = _post(f"{meta_server}/v1/matches", malformed)
+    assert code == 400
+    code, receipt = _post(f"{meta_server}/v1/matches", record)
+    assert code == 200 and receipt["a"]["delta"] == 16
+
+
+def test_explicit_null_winner_is_draw(meta_server):
+    _, a = _post(f"{meta_server}/v1/guest")
+    _, b = _post(f"{meta_server}/v1/guest")
+    record = {"match_uuid": _match_uuid(), "player_a": a["player_id"], "player_b": b["player_id"],
+              "winner": None, "score_a": 10, "score_b": 5, "lines_a": 4, "lines_b": 2, "duration_s": 30}
+    code, receipt = _post(f"{meta_server}/v1/matches", record)
+    assert code == 200 and receipt["a"]["delta"] == 0 and receipt["b"]["delta"] == 0
+
+
+def test_ownership_index_upgrade_keeps_rows(tmp_path):
+    """Removing a redundant lookup index must retain ownership and the composite PK."""
+    import contextlib
+    import sqlite3
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("tetris_meta binary not built")
+    db = tmp_path / "index-upgrade.db"
+
+    @contextlib.contextmanager
+    def running():
+        port = _free_port()
+        with (tmp_path / "index-server.log").open("w") as log:
+            proc = subprocess.Popen([str(binary), "--db", str(db), "--http",
+                                     f"127.0.0.1:{port}", "--allow-public-matches"],
+                                    stdout=log, stderr=log)
+        try:
+            assert _wait_listen(port), "meta did not start"
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+
+    with running() as base:
+        status, guest = _post(f"{base}/v1/guest")
+        assert status == 200
+    with sqlite3.connect(db) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_player_icons_pid ON player_icons(player_id)")
+        conn.execute("INSERT INTO player_icons VALUES(?,?,?)", (guest["player_id"], "ruby", 10))
+        conn.execute("INSERT INTO player_icons VALUES(?,?,?)", (guest["player_id"], "gold", 11))
+        before = conn.execute("SELECT * FROM player_icons ORDER BY player_id,icon_id").fetchall()
+    for _ in range(2):
+        with running() as base:
+            status, verified = _post(f"{base}/v1/auth/verify", {"token": guest["token"]})
+            assert status == 200 and verified["player_id"] == guest["player_id"]
+            with sqlite3.connect(db) as conn:
+                assert conn.execute("SELECT * FROM player_icons ORDER BY player_id,icon_id").fetchall() == before
+                assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='idx_player_icons_pid'").fetchall()
+                plan = conn.execute("EXPLAIN QUERY PLAN SELECT 1 FROM player_icons WHERE player_id=?1 AND icon_id=?2",
+                                    (guest["player_id"], "ruby")).fetchall()
+                assert any("COVERING INDEX" in row[3] and "player_id=? AND icon_id=?" in row[3] for row in plan)
+                with pytest.raises(sqlite3.IntegrityError):
+                    conn.execute("INSERT INTO player_icons VALUES(?,?,?)", (guest["player_id"], "ruby", 99))
+
+
+def test_legacy_credential_with_nul_rolls_back_logical_migration(tmp_path):
+    """Migration validates all stored bytes instead of hashing a truncated prefix."""
+    import sqlite3
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("tetris_meta binary not built")
+    db = tmp_path / "legacy-nul.db"
+    values = ["a" * 32, "b" * 32 + "\0suffix"]
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE players(id INTEGER PRIMARY KEY, username TEXT, token TEXT UNIQUE NOT NULL, "
+                     "elo INTEGER NOT NULL DEFAULT 1200,wins INTEGER NOT NULL DEFAULT 0,losses INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)")
+        conn.executemany("INSERT INTO players VALUES(?,NULL,?,1500,0,0,0)", list(enumerate(values, 1)))
+    proc = subprocess.Popen([str(binary), "--db", str(db), "--http", f"127.0.0.1:{_free_port()}",
+                             "--allow-public-matches"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            stdout, stderr = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=3)
+    assert proc.returncode != 0 and "invalid legacy credential" in stderr
+    with sqlite3.connect(db) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(players)")]
+        assert "token" in columns and "token_hash" not in columns
+        assert [row[0] for row in conn.execute("SELECT token FROM players ORDER BY id")] == values
+        assert not conn.execute("SELECT 1 FROM schema_migrations WHERE name='credential_hash_v1'").fetchall()
+        # The earlier RP phase committed separately; this test does not claim all startup DDL rolled back.
+        assert conn.execute("SELECT elo FROM players ORDER BY id").fetchall() == [(300,), (300,)]
+
+
+@pytest.mark.parametrize("column", ["bp", "xp", "wins", "losses"])
+def test_match_counter_limit_rolls_back_whole_match(meta_server, tmp_path, column):
+    import sqlite3
+    base = meta_server
+    _, a = _post(base + '/v1/guest')
+    _, b = _post(base + '/v1/guest')
+    # Fail the second participant update after the first one would have changed.
+    winner = b['player_id'] if column == 'wins' else a['player_id']
+    path = tmp_path / 'test.db'
+    with sqlite3.connect(path) as db:
+        db.execute(f'UPDATE players SET {column}=? WHERE id=?', (2147483647, b['player_id']))
+        before = db.execute('SELECT id,elo,bp,xp,wins,losses FROM players ORDER BY id').fetchall()
+    record = dict(match_uuid=_match_uuid(), player_a=a['player_id'], player_b=b['player_id'],
+                  winner=winner, score_a=100, score_b=0, lines_a=1, lines_b=0, duration_s=60)
+    code, _ = _post(base + '/v1/matches', record)
+    assert code == 500
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT id,elo,bp,xp,wins,losses FROM players ORDER BY id').fetchall() == before
+        assert db.execute('SELECT count(*) FROM matches').fetchone() == (0,)
+        assert db.execute('SELECT count(*) FROM elo_history').fetchone() == (0,)
+        db.execute(f'UPDATE players SET {column}=0 WHERE id=?', (b['player_id'],))
+    code, first = _post(base + '/v1/matches', record)
+    assert code == 200
+    code, retried = _post(base + '/v1/matches', record)
+    assert code == 200 and first == retried
+
+
+def test_distinct_matches_same_pair_are_not_economy_capped(meta_server):
+    # Persistence-port fixture: these trusted result rows do not prove human intent.
+    base = meta_server
+    _, a = _post(f"{base}/v1/guest")
+    _, b = _post(f"{base}/v1/guest")
+    record = {"match_uuid": _match_uuid(), "player_a": a["player_id"], "player_b": b["player_id"],
+              "winner": a["player_id"], "score_a": 10, "score_b": 0, "lines_a": 0, "lines_b": 0, "duration_s": 5}
+    assert _post(f"{base}/v1/matches", record)[0] == 200
+    status, first = _post(f"{base}/v1/auth/verify", {"token": a["token"]})
+    assert status == 200 and first["bp"] > 0
+    record["match_uuid"] = _match_uuid()
+    assert _post(f"{base}/v1/matches", record)[0] == 200
+    status, second = _post(f"{base}/v1/auth/verify", {"token": a["token"]})
+    assert status == 200 and second["bp"] == first["bp"] * 2
+    assert second["xp"] == first["xp"] * 2

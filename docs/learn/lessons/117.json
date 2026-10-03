@@ -1,0 +1,425 @@
+{
+  "id": "lesson-117",
+  "title": "아이콘 소유권: 서버에서 검사할 것",
+  "shortTitle": "카탈로그·구매·소유·선택",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 익명 계정이 자기 프로필과 BP를 조회할 수 있습니다.",
+  "finish": "완료: 서버 가격으로 한 번만 차감해 아이콘을 획득하고, 본인이 소유한 아이콘만 선택합니다.",
+  "objective": "콘텐츠 정의·소유 관계·선택 상태를 분리하고, 동시 요청과 읽기·쓰기 실패에서도 부분 차감과 권한 없는 변경을 막습니다.",
+  "prerequisites": [
+    "공개ID·비밀토큰·인증결과",
+    "복합 키·조건부 SQL·트랜잭션",
+    "현재 프로필과 최초 정산의 차이"
+  ],
+  "recap": {
+    "points": [
+      "ID를 아는 것은 소유 증명이 아니다.",
+      "토큰의 해시로 서버가 계정을 찾는다.",
+      "계정 생성은 구성 행을 함께 확정한다."
+    ],
+    "bridge": "인증된 계정에 어떤 아이콘을 사용할 권한이 있는지 확인하고, 구매로 그 관계를 추가합니다."
+  },
+  "sections": [
+    {
+      "title": "계정의 소유 목록을 구매와 선택으로 확장한다",
+      "body": "토큰으로 자기 프로필을 조회할 수 있고, RP·XP·BP는 서버에 저장되어 있습니다. 이제 BP를 써서 아이콘을 획득하고, 가진 아이콘 중 하나를 선택하는 상점 API를 추가합니다.\n\n만약 클라이언트가 “ruby를 0 BP에 샀다”는 값을 보내거나 다른 사람의 player_id를 붙인다면 어떻게 처리해야 할까요? 화면에서 구매 버튼을 감추는 것만으로는 변형된 요청을 막을 수 없습니다. 요청에는 사고 싶은 icon_id만 받으며, 가격·계정·잔액·소유 여부는 서버가 결정합니다.\n\n추가하는 경로는 카탈로그 조회, 본인 소유 목록 조회, 구매, 선택입니다. 카탈로그는 default0·ruby100·gold250 BP로 두고, 새 계정은 default를 소유한 상태에서 시작합니다. 구매와 선택이 같은 동작인지도 명확히 정합니다. 이번 구현은 **구매해도 선택은 유지**하고 선택 API가 장착만 바꿉니다."
+    },
+    {
+      "title": "카탈로그·소유권·선택은 세 가지 관계다",
+      "body": "**카탈로그**는 서버가 다루는 콘텐츠의 정의입니다. **소유권**은 어느 계정이 어느 콘텐츠를 획득했는지의 관계입니다. **선택 상태**는 소유한 콘텐츠 중 지금 표시할 하나를 가리킵니다.\n\n| 자료 | 예 | 바뀌는 계기 |\n| --- | --- | --- |\n| 카탈로그 | ruby의 가격은 100 BP | 콘텐츠 정책 변경 |\n| 소유권 | 플레이어 A가 ruby를 가짐 | 구매·관리된 지급 |\n| 선택 | 플레이어 A의 현재 아이콘은 default | 소유한 아이콘 선택 |\n\n같은 아이콘은 여러 플레이어가 가질 수 있고, 한 플레이어도 여러 아이콘을 가질 수 있으므로 소유권은 **다대다 관계**입니다. player_icons의 복합 키 `(player_id,icon_id)`는 같은 관계가 두 번 저장되는 것을 막습니다. 이 키가 지켜져도 BP를 두 번 차감할 수 있다는 점은 뒤의 동시 요청에서 확인합니다.\n\n이번 상태의 불변조건은 `선택한 아이콘 ∈ 소유 목록`입니다. 각 API의 성공 후에도 이 조건을 유지하고, 조회에서 깨진 상태를 발견하면 정상 응답을 만들지 않습니다. 선택할 수 있는 대상은 서버 카탈로그에도 있어야 합니다.",
+      "codes": [
+        {
+          "label": "프로필·선택·소유 목록",
+          "text": "struct ShopView {\n    PublicProfile profile;\n    std::string selected;\n    std::vector<std::string> owned;\n};\nenum class ShopStatus { ok, unknown_account, unknown_icon, already_owned, insufficient_bp, not_owned, storage_error };\nstruct ShopResult { ShopStatus status; std::optional<ShopView> view; };",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "콘텐츠 파일과 권한",
+          "body": "이미지 파일이 클라이언트에 있다는 사실은 소유권이 아닙니다. 다른 참가자의 아이콘도 그려야 하므로 파일은 미리 배포될 수 있습니다. 반대로 이미지 파일을 고쳐 자기 화면을 바꾸는 것까지 서버의 소유권 검사로 막을 수 있는 것은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "가격은 서버 카탈로그에서 찾는다",
+      "body": "클라이언트는 icon_id를 보내고 서버는 정확히 일치하는 정의를 찾습니다. C++ 문자열 비교는 길이까지 비교하므로 `ruby` 뒤에 NUL이나 다른 바이트가 붙은 값이 ruby로 잘려 해석되지 않습니다. 가격은 반환된 ShopIcon의 price에서 가져옵니다.\n\n카탈로그 조회 API도 이 배열을 직렬화합니다. 화면에 보여 주는 가격과 차감하는 가격의 출처를 한 곳에 두는 것입니다. 이 예제의 icons 테이블은 외래 키가 참조할 ID·라벨을 보관하고, 가격 정책은 코드 배열이 소유합니다.\n\n`seed_shop`는 서버 시작 시 카탈로그 ID를 DB에 등록합니다. 이미 있는 정의는 보존합니다. 이것은 신뢰된 시작 작업이며 사용자가 임의로 소유권을 얻는 HTTP 경로가 아닙니다. 판매 아이콘과 기본 지급 아이콘을 같은 개념으로 묶지 않습니다.",
+      "codes": [
+        {
+          "label": "가격의 단일 출처와 정확 조회",
+          "text": "struct ShopIcon {\n    const char* id;\n    const char* label;\n    int price;\n};\n\ninline constexpr std::array<ShopIcon, 3> kShopIcons{{\n    {\"default\", \"Default\", 0},\n    {\"ruby\", \"Ruby\", 100},\n    {\"gold\", \"Gold\", 250},\n}};\n\n// Exact, NUL-safe lookup; nullptr when absent.\ninline const ShopIcon* shop_icon(const std::string& id) {\n    for (const ShopIcon& icon : kShopIcons) {\n        if (id == icon.id) {\n            return &icon;\n        }\n    }\n    return nullptr;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "서버 시작 시 외래 키 대상 준비",
+          "text": "    void seed_shop() {\n        std::lock_guard<std::mutex> lock(mutex_);\n        ImmediateTransaction transaction(db_);\n        for(const auto& icon:kShopIcons) {\n            Statement q(db_.get(),\"INSERT INTO icons(id,label) VALUES(?1,?2) ON CONFLICT(id) DO NOTHING\");\n            q.text(1,icon.id);q.text(2,icon.label);q.done();\n        }\n        transaction.commit();\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "const IconCatalogEntry kIconCatalog",
+        "invariant": "요청의 가격을 믿지 않고 서버 카탈로그에서 가격을 결정한다.",
+        "mayDiffer": "실제 카탈로그는 기본 소유 여부도 정의한다. 학습 코드는 기본 아이콘의 소유 행을 명시적으로 유지한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "카탈로그 변경과 가격 확인",
+          "body": "이 실습은 프로세스 실행 중 고정된 가격을 사용합니다. 운영 중 가격을 바꾼다면 사용자가 본 가격과 확정 가격의 차이를 어떻게 다룰지 정해야 합니다. 가격 버전이나 허용 최대 금액을 요청 계약에 추가할 수 있지만, 그 값으로 서버 가격을 임의로 덮어쓰는 것은 다른 일입니다."
+        }
+      ]
+    },
+    {
+      "title": "요청에는 선택한 아이콘만 담는다",
+      "body": "구매와 선택 요청은 `{\"icon_id\":\"ruby\"}`입니다. player_id·price·owned를 추가하면 거절합니다. 계정은 인증 토큰에서, 가격은 서버 카탈로그에서, 소유 여부는 DB에서 구합니다.\n\n파서는 먼저 JSON 객체가 필드 하나인지 검사하고 icon_id가 문자열인지 확인합니다. 문자열 길이는 1..32바이트이며 소문자 ASCII·숫자·밑줄·하이픈만 허용합니다. 이 형식 검사가 통과해도 `unknown`처럼 판매하지 않는 ID일 수 있습니다. **문법·타입 검사와 콘텐츠 존재 검사는 별개**입니다.\n\nJSON 중복 키와 중첩 입력은 공통 object 함수가 거절합니다. icon_id가 숫자인데 문자열처럼 사용하거나, C 문자열의 첫 NUL까지만 비교하는 식의 묵시적 변환을 만들지 않습니다.",
+      "codes": [
+        {
+          "label": "아이콘 선택의 형식만 확인",
+          "text": "inline std::optional<std::string> parse_icon_choice(const std::string& body) {\n    auto obj = object(body, 1);\n    if (!obj) {\n        return std::nullopt;\n    }\n    auto it = obj->find(\"icon_id\");\n    if (it == obj->end() || !it->is_string()) {\n        return std::nullopt;\n    }\n\n    const std::string value = it->get<std::string>();\n    if (value.empty() || value.size() > 32) {\n        return std::nullopt;\n    }\n    for (unsigned char c : value) {\n        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||\n                        c == '_' || c == '-';\n        if (!ok) {\n            return std::nullopt;\n        }\n    }\n    return value;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "소유 목록을 한 시점의 상태로 읽는다",
+      "body": "상점 화면은 BP·선택·소유 목록을 함께 필요로 합니다. BP를 읽고 다른 거래가 끝난 뒤 소유 목록을 따로 읽으면, 새 소유권과 오래된 잔액이 섞인 화면을 만들 수 있습니다. 이번 inventory 조회는 한 SQL 문장으로 관련 행을 읽습니다.\n\naccount_keys의 해시에서 계정을 찾고 players·careers·wallets·player_icons를 연결합니다. JOIN 결과에는 소유 아이콘 수만큼 프로필 값이 반복되므로 첫 행에서 프로필과 선택을 읽고, 모든 행에서 icon_id를 모읍니다. ORDER BY는 결과의 표시 순서를 안정적으로 만듭니다.\n\nSQLite의 한 읽기 문장 안에서는 같은 스냅샷을 읽습니다. LEFT JOIN 덕분에 키는 있지만 지갑이나 소유 행이 없는 상태가 단순한 미인증으로 사라지지 않습니다. NULL을 정수나 문자열로 읽는 곳에서 오류가 나고, 선택한 아이콘이 소유 목록에 없는 경우도 별도로 거절합니다. [SQLite 읽기 트랜잭션 설명](https://www.sqlite.org/lang_transaction.html#read_transactions_versus_write_transactions)은 스냅샷의 범위를 설명합니다.",
+      "codes": [
+        {
+          "label": "하나의 조회로 일관된 상점 상태 복원",
+          "text": "    std::optional<ShopView> read_shop(const std::string& digest) {\n        if(digest.size()!=64 || digest.find_first_not_of(\"0123456789abcdef\")!=std::string::npos)\n            throw std::invalid_argument(\"invalid credential hash\");\n        Statement q(db_.get(),\"SELECT a.player_id,c.rp,c.xp,w.bp,p.selected_icon_id,i.icon_id FROM account_keys a \"\n            \"LEFT JOIN players p ON p.id=a.player_id LEFT JOIN careers c ON c.player_id=a.player_id \"\n            \"LEFT JOIN wallets w ON w.player_id=a.player_id LEFT JOIN player_icons i ON i.player_id=a.player_id \"\n            \"WHERE a.token_hash=?1 ORDER BY i.icon_id\");\n        q.text(1,digest);\n        if(!q.next())return std::nullopt;\n        const auto id=decimal(q.text_column(0));\n        const auto rp=q.integer_column(1),xp=q.integer_column(2),bp=q.integer_column(3);\n        if(id==0 || rp<0 || rp>kProgressLimit || xp<0 || xp>kProgressLimit || bp<0 || bp>kBalanceLimit)\n            throw std::runtime_error(\"invalid inventory profile\");\n        ShopView result{{id,static_cast<int>(rp),static_cast<int>(xp),static_cast<int>(bp)},q.text_column(4),{}};\n        do {result.owned.push_back(q.text_column(5));}while(q.next());\n        if(!owns(result,result.selected))throw std::runtime_error(\"selected icon is not owned\");\n        return result;\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "응답과 화면의 시차",
+          "body": "스냅샷이 일관되다는 것은 그 응답이 한 시점의 상태라는 뜻입니다. 응답을 받은 뒤 다른 기기에서 구매하면 화면은 다시 오래된 값이 됩니다. 구매 허용 여부는 화면의 BP가 아니라 서버가 거래 시점에 확인한 값으로 판단해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "인증과 소유권 확인도 거래 안에 둔다",
+      "body": "구매 함수는 서버 카탈로그를 고른 뒤 mutex를 잠그고 BEGIN IMMEDIATE를 수행합니다. 그 다음 토큰 해시로 계정을 확인하고 소유 목록과 잔액을 읽습니다. 인증 확인과 변경 사이에 별도 연결이 키를 폐기하거나 소유권을 바꾸는 구간을 같은 쓰기 거래로 묶기 위해서입니다.\n\nmutex는 이 SqliteResults 객체의 연결을 동시에 사용하는 스레드를 조정합니다. 다른 객체나 다른 프로세스가 연 SQLite 연결은 같은 mutex를 공유하지 않습니다. DB 파일에 걸친 쓰기 순서는 SQLite 트랜잭션이 관리합니다.\n\nBEGIN IMMEDIATE는 쓰기 거래를 즉시 확보하려 하며, 다른 쓰기 거래 때문에 기다리거나 실패할 수 있습니다. 실패를 성공으로 처리하지 않고 storage_error를 반환합니다. 잠금을 얻은 뒤에는 다른 쓰기 거래가 끝난 상태를 기준으로 인증·소유권·잔액을 다시 판단합니다.",
+      "codes": [
+        {
+          "label": "쓰기 거래 안에서 구매 전제 확인",
+          "text": "    ShopResult buy_icon(const std::string& digest,const std::string& icon_id) {\n        const auto* icon=shop_icon(icon_id);\n        if(!icon)return {ShopStatus::unknown_icon,{}};\n        std::lock_guard<std::mutex> lock(mutex_);\n        try {\n            ImmediateTransaction transaction(db_);\n            const auto before=read_shop(digest);\n            if(!before)return {ShopStatus::unknown_account,{}};\n            if(owns(*before,icon_id))return {ShopStatus::already_owned,{}};\n            if(before->profile.bp<icon->price)return {ShopStatus::insufficient_bp,{}};",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "class ShopTransaction",
+        "invariant": "동일 DB의 독립 연결도 고려해 인증과 변경을 같은 쓰기 거래로 묶는다.",
+        "mayDiffer": "실제 구현은 상태 코드 반환과 RAII guard를 사용하고 학습 코드는 예외를 상태로 바꾼다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "키 폐기와 이미 진행 중인 요청",
+          "body": "키를 폐기하는 거래와 구매 거래 사이에도 순서가 생깁니다. 구매가 먼저 확정됐다면 뒤의 키 폐기가 그 구매를 소급 취소하지 않습니다. 폐기가 먼저 확정됐다면 다음 구매의 인증은 실패해야 합니다. 서버가 어느 시점의 자격 증명을 기준으로 판단하는지 정하는 것이 핵심입니다."
+        }
+      ]
+    },
+    {
+      "title": "조건부 차감과 소유권 추가를 함께 확정한다",
+      "body": "ruby 가격은 100 BP입니다. 현재 잔액이 99면 InsufficientBp이고, 100이면 구매 후 0입니다. UPDATE에도 `bp>=가격`을 넣어 차감 조건을 SQL에 명시합니다. 이 조건이 의미하는 것은 **쓰기 시점에도 충분한 잔액이 있다**는 것이며, 앞에서 읽은 값과 정확히 같다는 뜻은 아닙니다.\n\nSQL 실행이 SQLITE_DONE으로 끝나도 조건에 맞는 행이 없으면 변경 행 수는 0일 수 있습니다. 차감은 한 계정의 지갑 한 행을 바꾸어야 하므로 changes==1을 확인합니다. 이어서 새 소유권 행을 일반 INSERT로 추가하고 역시 한 행이 반영됐는지 확인합니다.\n\n새 소유권을 넣지 못했다면 이미 수행한 차감도 롤백해야 합니다. 결과 프로필까지 거래 안에서 읽어 응답 값을 준비하고, 마지막 COMMIT이 성공한 뒤에만 성공과 그 값을 반환합니다. 이 순서가 “돈만 빠지고 아이콘은 없는 상태”를 막습니다.",
+      "codes": [
+        {
+          "label": "차감·새 소유권·응답·커밋",
+          "text": "            Statement debit(db_.get(),\"UPDATE wallets SET bp=bp-?1 WHERE player_id=?2 \"\n                \"AND typeof(bp)='integer' AND bp>=?1\");\n            debit.integer(1,icon->price);debit.text(2,std::to_string(before->profile.player_id));debit.done();\n            if(sqlite3_changes(db_.get())!=1)throw std::runtime_error(\"debit missing\");\n            Statement grant(db_.get(),\"INSERT INTO player_icons(player_id,icon_id) VALUES(?1,?2)\");\n            grant.text(1,std::to_string(before->profile.player_id));grant.text(2,icon_id);grant.done();\n            if(sqlite3_changes(db_.get())!=1)throw std::runtime_error(\"grant missing\");\n            const auto after=read_shop(digest);\n            if(!after)throw std::runtime_error(\"purchased profile missing\");\n            transaction.commit();\n            return {ShopStatus::ok,after};\n        }catch(const std::exception&){return {ShopStatus::storage_error,{}};}\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::purchaseIcon",
+        "invariant": "차감과 새 소유권이 모두 반영된 거래만 성공으로 반환한다.",
+        "mayDiffer": "실제 잔액은 players.bp, 학습 잔액은 wallets.bp에 있다. 가격·상태 코드·기본 아이콘 정책은 달라질 수 있다."
+      }
+    },
+    {
+      "title": "복합 키만으로 중복 차감이 막히지는 않는다",
+      "body": "잔액 300, ruby 미소유에서 두 요청 A/B가 동시에 도착했다고 생각해 보세요. 둘 다 거래 밖에서 미소유를 읽었다면 A가 100을 차감하고 소유권을 넣은 다음, B도 100을 차감할 수 있습니다. B의 INSERT OR IGNORE가 중복 소유 행만 무시하면 최종 잔액은 100, 소유권은 한 행입니다.\n\n복합 키는 **소유 행의 중복**을 막았지만 **대금 차감의 중복**은 막지 못했습니다. IGNORE는 특정 충돌을 실패로 보고하지 않고 행을 건너뛸 수 있습니다. SQL 명령이 끝났다는 신호만으로 새 소유권을 만들었다고 결론 내리면 안 됩니다. [SQLite 충돌 처리](https://www.sqlite.org/lang_conflict.html)에서 IGNORE와 기본 ABORT의 의미를 비교할 수 있습니다.\n\n이번 순서는 A가 쓰기 거래를 확보해 구매를 확정한 뒤 B가 소유권을 읽게 합니다. B는 AlreadyOwned로 끝나며 다시 차감하지 않습니다. 한 번의 구매 성공과 한 번의 중복 결과가 기대한 결과입니다. 일반 INSERT와 변경 행 수 확인은 잘못된 삽입이 조용히 지나가지 않게 하는 추가 조건입니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "검사 시점과 사용 시점",
+          "body": "어떤 조건을 확인한 뒤 그 조건에 기대어 작업하는 사이에 상태가 바뀌는 문제를 TOCTOU라고 부릅니다. 이름보다 실제 틈을 찾는 것이 중요합니다. 이 예제에서는 “미소유를 읽은 순간”과 “BP를 차감하는 순간” 사이입니다. 공유 mutex의 범위와 DB 거래의 범위를 나란히 그리면 틈이 보입니다."
+        }
+      ]
+    },
+    {
+      "title": "선택은 소유를 요구하고 잔액을 바꾸지 않는다",
+      "body": "구매는 목록에 아이콘을 추가합니다. 선택은 이미 소유한 항목으로 selected_icon_id를 바꿉니다. 다른 계정이 ruby를 소유해도 현재 계정이 소유하지 않았다면 NotOwned입니다.\n\n선택도 쓰기 거래 안에서 인증과 소유를 확인합니다. UPDATE의 EXISTS 조건에는 같은 player_id와 icon_id를 넣어 관계를 다시 명시합니다. 한 행 반영과 응답 조회·커밋을 확인하는 방식은 구매와 같습니다.\n\n이미 선택한 ruby를 다시 선택하는 것은 허용합니다. 상태는 ruby로 유지되고 BP 변화는 없습니다. 반면 이미 소유한 ruby의 재구매는 409입니다. 상태 효과가 반복되지 않는 것과 HTTP 응답이 매번 같은 것은 서로 다른 계약입니다.",
+      "codes": [
+        {
+          "label": "본인 소유 확인 뒤 선택만 변경",
+          "text": "    ShopResult choose_icon(const std::string& digest,const std::string& icon_id) {\n        if(!shop_icon(icon_id))return {ShopStatus::unknown_icon,{}};\n        std::lock_guard<std::mutex> lock(mutex_);\n        try {\n            ImmediateTransaction transaction(db_);\n            const auto before=read_shop(digest);\n            if(!before)return {ShopStatus::unknown_account,{}};\n            if(!owns(*before,icon_id))return {ShopStatus::not_owned,{}};\n            Statement q(db_.get(),\"UPDATE players SET selected_icon_id=?1 WHERE id=?2 AND EXISTS \"\n                \"(SELECT 1 FROM player_icons WHERE player_id=?2 AND icon_id=?1)\");\n            q.text(1,icon_id);q.text(2,std::to_string(before->profile.player_id));q.done();\n            if(sqlite3_changes(db_.get())!=1)throw std::runtime_error(\"selection missing\");\n            const auto after=read_shop(digest);\n            if(!after)throw std::runtime_error(\"selected profile missing\");\n            transaction.commit();\n            return {ShopStatus::ok,after};\n        }catch(const std::exception&){return {ShopStatus::storage_error,{}};}\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::selectIcon",
+        "invariant": "선택 대상은 인증된 계정이 소유해야 하며 선택은 BP를 소비하지 않는다.",
+        "mayDiffer": "실제 기본 아이콘은 default_owned 정책도 사용한다. 학습 코드는 소유 행을 직접 확인한다."
+      }
+    },
+    {
+      "title": "미소유와 조회 실패를 다른 결과로 전달한다",
+      "body": "정상 조회에서 행이 없으면 미소유입니다. SQLite 읽기 오류는 소유 여부를 알지 못한 상태입니다. 두 경우를 false 하나로 반환하면 구매에서 읽기 오류를 “새로 사도 된다”는 허가로 바꿀 수 있습니다.\n\n실제 소스의 player_owns_icon은 optional<bool>을 반환합니다. 값이 없으면 조회 오류, 값이 false면 미소유, true면 소유입니다. `if (!owned)`는 optional에 값이 있는지 검사하며 `if (!*owned)`는 들어 있는 bool을 검사합니다. 이를 혼동하면 미소유를 오류처럼 처리하거나 오류를 권한 판단에 사용할 수 있습니다.\n\n학습 코드의 Statement는 읽기 오류를 예외로 전달하고, 상점 함수는 storage_error로 바꿉니다. HTTP 응답에서도 부족한 잔액·미소유·이미 소유·저장 오류를 구분해 화면이 다른 행동을 안내할 수 있게 합니다.\n\n| 결과 | 학습 HTTP | 의미 |\n| --- | ---: | --- |\n| 알 수 없는 계정 | 401 | 인증 확인 필요 |\n| 등록되지 않은 아이콘/잘못된 요청 | 400 | 요청 수정 필요 |\n| 잔액 부족 | 402 | 구매 조건 불충족 |\n| 선택 대상 미소유 | 403 | 소유권 없음 |\n| 이미 소유 | 409 | 중복 구매 없음 |\n| 저장·조회 실패 | 503 | 결과를 확인할 수 없음 |\n\n402는 이 학습 API가 잔액 부족에 정한 매핑입니다. 모든 HTTP 서비스가 같은 의미로 사용하는 규칙으로 일반화하지 않습니다.",
+      "codes": [
+        {
+          "label": "업무 상태를 HTTP 응답으로 변환",
+          "text": "            using S=study_meta::ShopStatus;\n            switch(result.status) {\n            case S::ok:reply(res,200,study_meta::shop_json(*result.view));return;\n            case S::unknown_account:reply(res,401,{{\"error\",\"invalid_credential\"}});return;\n            case S::unknown_icon:reply(res,400,{{\"error\",\"unknown_icon\"}});return;\n            case S::already_owned:reply(res,409,{{\"error\",\"already_owned\"}});return;\n            case S::insufficient_bp:reply(res,402,{{\"error\",\"insufficient_bp\"}});return;\n            case S::not_owned:reply(res,403,{{\"error\",\"not_owned\"}});return;\n            case S::storage_error:reply(res,503,{{\"error\",\"shop_unavailable\"}});return;\n            }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "응답이 없으면 소유 목록을 다시 확인한다",
+      "body": "구매가 커밋됐는데 응답이 사라질 수 있습니다. 같은 아이콘으로 재요청하면 AlreadyOwned가 돌아오고 추가 차감은 없습니다. 클라이언트는 이 결과를 “아무 일도 없었다”로 해석하지 말고 inventory를 다시 읽어 소유와 현재 잔액을 갱신해야 합니다.\n\n이 상점 모델은 아이콘을 영구 소유하고 한 번만 획득하는 상품에 맞습니다. “물약 1개를 더 산다”처럼 여러 번 구매할 수 있는 소비형 상품에는 `(player_id,icon_id)`만으로 서로 다른 구매를 구별할 수 없습니다. 그런 상품에는 별도의 구매 업무 키와 거래 내역이 필요합니다.\n\n이번 구매에는 원래 가격·차감량을 담은 영수증 테이블을 추가하지 않았습니다. inventory는 현재 상태입니다. 고객 지원·환불·당시 가격 재현을 제공하려면 현재 잔액과 별도로 거래 원장을 설계해야 합니다. 경기 정산의 최초 내역과 같은 목적이지만 저장할 업무 사실은 구매에 맞게 정해야 합니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "판매 중단과 기존 소유권",
+          "body": "서버 카탈로그에서 항목을 지우는 것, 새 구매를 막는 것, 기존 소유자의 사용을 막는 것은 서로 다른 정책입니다. 현재 예제는 고정된 세 아이콘만 다룹니다. 실제 콘텐츠를 줄일 때는 화면 fallback만 보고 기존 이용자의 권한이 보존됐다고 판단하지 마세요."
+        }
+      ]
+    },
+    {
+      "title": "실패 지점과 두 계정의 격리를 검사한다",
+      "body": "검사는 네 가지 질문으로 구성합니다. 서버 가격대로 차감했는가, 실패하면 양쪽 변화가 사라지는가, 다른 계정의 소유를 사용하지 않는가, 같은 아이콘을 동시에 사도 한 번만 차감하는가입니다.\n\n가격 100에 잔액 99·100을 넣고 경계를 비교합니다. 소유권 INSERT에 ABORT를 주면 차감도 사라져야 합니다. IGNORE로 삽입을 건너뛰게 해도 changes==0이므로 저장 오류가 되어야 합니다. SQL이 끝난 경우까지 별도로 검사하는 이유입니다.\n\n동시성 검사는 객체 하나의 두 스레드뿐 아니라 같은 파일을 연 독립 연결 두 개를 사용합니다. 새 구매 요청이 하나는 성공·하나는 AlreadyOwned가 되고, 잔액과 소유 행이 한 번만 바뀌어야 합니다. 다른 계정으로 같은 아이콘을 선택하는 검사는 403이어야 합니다.\n\n마지막으로 같은 선택을 반복하고 서버를 다시 열어 선택·소유 목록·잔액이 유지되는지 확인합니다. UI 버튼을 누른 사실보다 저장된 상태와 실패 응답을 근거로 계약을 검증합니다.",
+      "codes": [
+        {
+          "label": "삽입 오류와 무시된 삽입 모두 차감 롤백",
+          "text": "    for(const auto* effect:{\"RAISE(ABORT,'injected')\",\"RAISE(IGNORE)\"}) {\n        raw.exec((std::string(\"CREATE TRIGGER reject_grant BEFORE INSERT ON player_icons WHEN NEW.icon_id='ruby' BEGIN SELECT \")+effect+\"; END;\").c_str());\n        CHECK(db.buy_icon(hash,\"ruby\").status==ShopStatus::storage_error);\n        CHECK(db.balance(101)==300 && db.icons(101)==std::vector<std::string>{\"default\"});\n        raw.exec(\"DROP TRIGGER reject_grant;\");\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "새 계정의 거절 경로와 구매 성공을 나누어 실습한다",
+      "body": "서버를 실행한 뒤 별도 터미널에서 shop_probe.py를 실행합니다. 도구는 새 계정을 만들고 원문 토큰을 메모리에만 둡니다. 출력에는 default 소유·default 선택·BP0이 보이며 ruby 구매는 `402 insufficient_bp`가 됩니다. 새 계정에 보상이 없으므로 이것이 올바른 거절입니다.\n\n전체 자동 검사에서는 자신이 만든 임시 fixture에 BP300을 준비해 구매 성공·동시 구매·선택·재시작을 확인합니다. 테스트 준비용 SQL은 검사 코드가 소유한 임시 DB에만 적용합니다. 사용자에게 잔액을 임의로 설정하는 HTTP 경로는 추가하지 않습니다.\n\n학습 API의 카탈로그와 실제 게임 카탈로그는 수치가 같아도 별도 기준 구현입니다. 서버는 loopback에만 열며 운영 계정 DB와 혼용하지 않습니다. OpenSSL 개발 패키지가 필요하고, Windows 다중 구성 생성기는 --config Release와 실행 경로를 맞춥니다.",
+      "codes": [
+        {
+          "label": "상점 계정 서버 빌드·실행",
+          "text": "cmake -S docs/learn/checkpoints/117-icon-ownership -B out/study-117 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-117 --target study_account_db shop_contract -j2\nout/study-117/study_account_db 18082 out/study-117/accounts.db",
+          "language": "sh"
+        },
+        {
+          "label": "별도 터미널에서 거절 경로와 전체 검사",
+          "text": "python3 docs/learn/checkpoints/117-icon-ownership/tools/shop_probe.py 18082\npython3 scripts/check_learning_icon_ownership.py",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "콘텐츠 정의와 권한 검사를 분리해 유지한다",
+      "body": "카탈로그 배열은 아이콘과 가격을 정의하고, SqliteResults는 인증된 계정의 상태를 확인해 구매·선택을 확정합니다. HTTP 서비스는 입력 형식과 상태 매핑을 맡습니다. 이미지 파일이나 버튼 모양이 달라져도 이 의존 관계는 유지할 수 있습니다.\n\n바뀔 수 있는 것은 아이콘 종류·가격·화면 배치·표시 이름입니다. 유지해야 할 핵심은 서버 가격, 본인 계정의 소유 관계, 구매 전제와 변경의 거래 경계, 실패 시 무차감, 구매와 선택의 구분입니다. 콘텐츠가 늘어나면 카탈로그 저장 위치를 파일이나 DB로 옮길 수 있지만 클라이언트 입력을 가격의 근거로 바꾸지는 않습니다.\n\n소스 뷰어에서 purchaseIcon의 BEGIN 위치, player_owns_icon의 세 결과, 소유권 INSERT의 행 수, selectIcon의 무차감을 따라 읽어 보세요. 작은 조건 하나가 사용자 잔액과 화면 의미를 어떻게 연결하는지 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "상점 계약 검사 타깃",
+          "text": "add_executable(shop_contract tests/shop_contract.cpp)\ntarget_link_libraries(shop_contract PRIVATE study_accounts)",
+          "language": "cmake"
+        },
+        {
+          "label": "meta/shop_catalog.h",
+          "language": "cpp",
+          "file": "checkpoints/117-icon-ownership/meta/shop_catalog.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/shop_view.h",
+          "language": "cpp",
+          "file": "checkpoints/117-icon-ownership/meta/shop_view.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/sqlite_results.h",
+          "language": "cpp",
+          "file": "checkpoints/117-icon-ownership/meta/sqlite_results.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/account_service.cpp",
+          "language": "cpp",
+          "file": "checkpoints/117-icon-ownership/meta/account_service.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::purchaseIcon",
+        "invariant": "서버 정책과 계정의 영속 상태로 구매·선택을 결정한다.",
+        "mayDiffer": "학습 코드는 지갑·career가 분리돼 있고 실제 코드는 players에 수치를 모은다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "117-1",
+      "question": "클라이언트가 ruby와 price_bp=0을 함께 보냈습니다. 이번 학습 API의 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0 BP로 구매한다"
+        },
+        {
+          "id": "b",
+          "text": "추가 필드를 거절하고 가격은 서버에서 정한다"
+        },
+        {
+          "id": "c",
+          "text": "구매한 뒤 원래 가격을 조회한다"
+        },
+        {
+          "id": "d",
+          "text": "player_id가 있으면 허용한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "추가 필드를 거절하고 가격은 서버에서 정한다",
+      "explanation": "요청 계약은 icon_id 하나입니다. 계정은 토큰, 가격은 서버 카탈로그에서 얻으며 요청 가격을 신뢰하지 않습니다."
+    },
+    {
+      "id": "117-2",
+      "question": "BP300인 계정의 ruby 구매 두 개가 동시에 도착했습니다. 이번 계약의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "잔액100·소유 행1개·성공2개"
+        },
+        {
+          "id": "b",
+          "text": "잔액200·소유 행2개·성공2개"
+        },
+        {
+          "id": "c",
+          "text": "잔액200·소유 행1개·성공1개와 AlreadyOwned1개"
+        },
+        {
+          "id": "d",
+          "text": "잔액300·두 요청 모두 성공"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "잔액200·소유 행1개·성공1개와 AlreadyOwned1개",
+      "explanation": "쓰기 거래 안에서 소유 여부를 확인하므로 먼저 확정된 구매 뒤 요청은 이미 소유함을 읽습니다. 대금과 소유 관계가 한 번만 바뀝니다."
+    },
+    {
+      "id": "117-3",
+      "question": "소유권 SELECT가 I/O 오류를 반환했습니다. 올바른 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "조회 실패이므로 권한·구매 판단을 중단한다"
+        },
+        {
+          "id": "b",
+          "text": "행이 없으므로 미소유다"
+        },
+        {
+          "id": "c",
+          "text": "기본 아이콘만 제외하고 구매를 허용한다"
+        },
+        {
+          "id": "d",
+          "text": "잔액이 충분하면 오류를 무시한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "조회 실패이므로 권한·구매 판단을 중단한다",
+      "explanation": "조회 오류는 소유 여부를 알지 못했다는 뜻입니다. 정상 조회에서 행이 없는 경우와 분리해 저장 오류로 반환해야 합니다."
+    },
+    {
+      "id": "117-4",
+      "question": "ruby 구매 성공 직후 default가 계속 선택돼 있습니다. 이번 구현에서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소유권이 저장되지 않았다는 뜻이다"
+        },
+        {
+          "id": "b",
+          "text": "BP를 다시 내야 ruby를 선택할 수 있다"
+        },
+        {
+          "id": "c",
+          "text": "다른 계정이 ruby를 소유했다는 뜻이다"
+        },
+        {
+          "id": "d",
+          "text": "정상이며 선택 API로 ruby를 장착한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "정상이며 선택 API로 ruby를 장착한다",
+      "explanation": "구매는 소유권 추가, 선택은 장착 상태 변경입니다. 선택에는 추가 BP가 들지 않으며 본인의 소유 여부를 확인합니다."
+    },
+    {
+      "id": "117-5",
+      "question": "조건부 UPDATE의 bp>=가격과 changes==1을 함께 검사하는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "읽은 BP가 변하지 않았음을 항상 증명하려고"
+        },
+        {
+          "id": "b",
+          "text": "쓰기 시 충분한 잔액을 요구하고 대상 한 행의 반영을 확인하려고"
+        },
+        {
+          "id": "c",
+          "text": "토큰 해시를 암호화하려고"
+        },
+        {
+          "id": "d",
+          "text": "소유권 조회를 완전히 생략하려고"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "쓰기 시 충분한 잔액을 요구하고 대상 한 행의 반영을 확인하려고",
+      "explanation": "조건은 현재 차감의 전제이고 행 수는 실제 대상 반영 여부입니다. 과거 읽기 값과 정확히 같다는 검사는 아니며 인증·소유권·거래 경계와 함께 사용합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "카탈로그·소유권·선택을 서로 다른 상태로 그립니다.",
+      "새 계정에서 ruby 구매402·선택403을 비교합니다.",
+      "임시 fixture로 BP99/100·동시구매·삽입실패를 검사합니다.",
+      "구매 후 선택 유지와 반복 선택의 무차감을 확인합니다."
+    ],
+    "failureChecks": [
+      "요청 가격·player_id·owned를 권한 근거로 쓰지 않습니다.",
+      "소유권 조회 실패를 미소유로 바꾸지 않습니다.",
+      "INSERT가 무시됐는데 차감만 커밋하지 않습니다.",
+      "현재 잔액을 최초 구매 영수증으로 설명하지 않습니다."
+    ],
+    "expected": "서버의 판단 근거와 거래 경계를 설명하고, 동시구매·응답유실·조회오류의 상태를 예측한다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 작은파서 검수·실제경합/조회오류 재현·원문/SQLite 계약 대조",
+    "draftJob": "out/learning-jobs/117-catalog-events.jsonl",
+    "corrections": [
+      "초안의 없는 wire namespace·잘못된 JSON iterator/문자열타입검사 교정",
+      "실제 구매/선택BEGIN전 인증·소유검사를거래안으로이동",
+      "일반INSERT/행수검사·조회3상태·커밋전응답조회",
+      "조건부UPDATE의의미·mutex범위·클라이언트이미지/권한 구별"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 관련 계정·상점·기존 정산 타깃 및 회귀",
+    "가격 경계·추가필드/타입/NUL 거절·소유권격리·ABORT/IGNORE 롤백·독립연결 동시차감1회",
+    "HTTP 카탈로그·본인목록·구매/선택·재전송·재시작",
+    "실제 동시중복차감/조회오류 수정전재현, 수정후 ASan/UBSan·무시된삽입/선택오류 회귀",
+    "실제 메타·계정 API56pytest 통과, native/initial_guest관련9개 선택제외",
+    "다른 OS 네이티브·수동 GUI·운영부하 미검증"
+  ]
+}

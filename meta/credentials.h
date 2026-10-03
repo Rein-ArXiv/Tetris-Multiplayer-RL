@@ -11,7 +11,8 @@ inline bool account(const std::string &value) {
 inline bool recovery(const std::string &value) {
     return value.size() == 68 && value.compare(0, 4, "rc1.") == 0 && hex(value.substr(4), 64);
 }
-// Domain separation prevents a digest in one credential role being used in another.
-// These are uniformly random bearer secrets, not user-chosen passwords.
+// Equality for secrets; length is observable. This is not a sort comparator.
+bool equal_secret(const std::string &a, const std::string &b);
+// Domain separation scopes uniformly random bearer secrets, not passwords.
 std::string digest(const std::string &purpose, const std::string &value);
 } // namespace meta::credentials

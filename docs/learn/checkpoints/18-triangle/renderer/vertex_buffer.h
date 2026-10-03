@@ -1,0 +1,47 @@
+#pragma once
+// Lesson 14: RAII ownership of one OpenGL buffer object.
+//
+// VertexBuffer owns the GL buffer name only. It does not own the CPU vertex
+// data, the GL context, or any other GL object. All GlApi entry points must be
+// loaded before this object is constructed, and both the GlApi table and the
+// current GL context must outlive it. The context is a single, current,
+// desktop OpenGL 3.3 Core context.
+//
+// There is no bind/unbind save-restore: this object is used only at an
+// exclusive initialization boundary, so ArrayBuffer binding changes are
+// intentional.
+
+#include <cstddef>
+
+#include "renderer/gl_api.h"         // study_gl::GlApi, GLuint, GLenum, GLsizeiptr
+#include "renderer/mesh.h"  // study_mesh::Triangle, study_mesh::byte_count
+
+namespace study_gl {
+
+class VertexBuffer {
+public:
+    explicit VertexBuffer(const GlApi& gl) noexcept;
+    ~VertexBuffer() noexcept;
+
+    VertexBuffer(const VertexBuffer&) = delete;
+    VertexBuffer& operator=(const VertexBuffer&) = delete;
+    VertexBuffer(VertexBuffer&&) = delete;
+    VertexBuffer& operator=(VertexBuffer&&) = delete;
+
+    // First upload only. Fails without touching the existing object when
+    // name() != 0. On any GL failure the name is released and the object
+    // returns to the empty state.
+    bool upload(const study_mesh::Triangle& vertices) noexcept;
+
+    // The owned GL name, or 0 when nothing is owned.
+    GLuint name() const noexcept { return name_; }
+
+    // Deletes the owned GL name, if any, and sets it to 0. Idempotent.
+    void reset() noexcept;
+
+private:
+    const GlApi& gl_;
+    GLuint name_ = 0;
+};
+
+} // namespace study_gl

@@ -1,0 +1,441 @@
+{
+  "id": "lesson-19",
+  "title": "좌표계: clip 위치에서 화면 위치까지",
+  "shortTitle": "clip·NDC·viewport",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 삼각형은 보이지만 셰이더의 네 좌표 성분이 화면 위치를 만드는 과정을 계산하지 않습니다.",
+  "finish": "완료: clip→w 나눗셈→viewport를 직접 계산하고, 네 가지 셰이더 실험으로 크기·경계·클리핑을 설명합니다.",
+  "objective": "공간별 타입과 CPU 계산 도구를 만들고, w 변경·viewport·UI 좌표를 수치와 픽셀로 비교해 좌표계 오류를 진단할 수 있습니다.",
+  "prerequisites": [
+    "18차시 체크포인트",
+    "VBO·VAO·프로그램과 draw의 역할",
+    "C++ 구조체·함수·조건문"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 각8 CTest와 CPU 수치/실패 입력 검사",
+    "llvmpipe4.5 Core 네 가지 픽셀 결과·CPU 경계 대조",
+    "물리 GPU·실제 표시·Windows/macOS 네이티브 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek 수학 함수 초안을 공식 계약·수치 사례·GL 픽셀로 대조",
+    "draftJob": "out/learning-jobs/coordinates-events.jsonl",
+    "corrections": [
+      "w=0에서 부등식 무의미/GL이 정점 폐기한다는 초안의 단정 제거",
+      "underflow가 infinity를 만든다는 주석 수정",
+      "NDC 범위·window depth 범위는 임의 입력에서 자동 보장되지 않음 명시",
+      "점 판정과 삼각형 클리핑 구별·Part 행렬 성능 단정 보완",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ]
+  },
+  "recap": {
+    "points": [
+      "VBO·VAO·프로그램을 준비하고 draw에서 함께 사용합니다.",
+      "drawable 픽셀 크기로 viewport를 정하고 clear→draw→present 순서로 프레임을 만듭니다.",
+      "정점 개수와 업로드 바이트 수는 다른 단위입니다."
+    ],
+    "bridge": "정점 세 개를 그리는 경로는 연결되어 있습니다. 이제 정점 셰이더의 출력이 어느 화면 위치를 뜻하는지 계산합니다."
+  },
+  "sections": [
+    {
+      "title": "수치로 화면 위치를 예측한다",
+      "body": "삼각형은 보이지만, `(-0.5, -0.5)`가 왜 화면의 특정 위치로 가는지는 아직 설명하지 않았습니다. 이번에는 정점 데이터와 draw 호출을 고정하고, 정점 셰이더가 쓰는 좌표만 바꿉니다. **그림을 보기 전에 크기와 위치를 계산할 수 있게 만드는 것**이 목표입니다.\n\n다음 세 줄을 비교해 보세요. `a_position`이 `(0.5, -0.5)`라면 어느 경우가 더 작게 보일까요?\n\n| 실험 이름 | gl_Position에 쓰는 값 | 비교할 변화 |\n| --- | --- | --- |\n| base | `vec4(a_position, 0.0, 1.0)` | 기준 |\n| w2 | `vec4(a_position, 0.0, 2.0)` | 마지막 성분만 두 배 |\n| scaled | `2.0 * vec4(a_position, 0.0, 1.0)` | 네 성분을 모두 두 배 |\n\n출발 코드는 `18-triangle`입니다. 새 `19-coordinates`에는 CPU 계산 도구와 네 가지 셰이더 실험을 추가합니다. VBO의 정점 3개, VAO, fragment 색상, clear/draw 함수는 유지합니다. 어떤 입력이 바뀌었는지 한정해야 그림 변화의 원인을 찾기 쉽습니다.\n\nCPU 도구는 GL 실행을 대신하지 않습니다. 우리가 이해한 변환식을 실행 가능한 예측으로 만들고, 화면의 픽셀 결과를 별도로 관찰해 그 예측과 비교합니다.",
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "kQuadVert",
+        "invariant": "정점 셰이더는 gl_Position에 clip 좌표를 쓰고, w로 나눈 뒤 viewport에 매핑한다.",
+        "mayDiffer": "현재 렌더러는 논리 UI 크기 uniform과 색·UV·도형 속성을 함께 사용한다.",
+        "omitted": "이번 실험은 위치만 비교한다. 카메라 행렬·텍스처·원근 보간은 아직 구현하지 않는다."
+      }
+    },
+    {
+      "title": "좌표에 공간 이름을 붙인다",
+      "body": "좌표는 숫자 두세 개만으로 의미가 정해지지 않습니다. `(0,0)`은 UI에서는 왼쪽 위, NDC에서는 중앙, viewport 원점이 0인 창 좌표에서는 왼쪽 아래입니다. 단위와 원점을 함께 알아야 합니다.\n\n| 공간 | 이 실습에서 담는 값 | 다음 단계 |\n| --- | --- | --- |\n| 입력 정점 | `Vertex2`의 x/y, 셰이더가 해석할 수치 | 정점 셰이더 |\n| clip 좌표 | `gl_Position`의 x/y/z/w | 도형 클리핑과 원근 나눗셈 |\n| NDC | x/w, y/w, z/w | viewport 변환 |\n| 연속 창 좌표 | 실제 그리기 영역의 위치와 깊이 | 래스터화와 픽셀 처리 |\n\nNDC는 **Normalized Device Coordinates**, 정규화 장치 좌표입니다. 화면 크기와 분리된 공통 좌표를 사용하므로 같은 도형을 서로 다른 크기의 viewport로 보낼 수 있습니다. 정상적인 클리핑 뒤의 위치는 기본 설정에서 각 축의 [-1,1] 범위로 대응합니다. 임의의 수를 나눴다고 자동으로 이 범위로 제한되지는 않습니다.\n\n`renderer/coordinates.h`를 만들고 공간마다 작은 구조체를 둡니다. 같은 double을 써도 `ClipPosition`을 `to_window`에 바로 넘길 수 없도록 함수의 인자 타입을 구분합니다. 좌표를 섞는 오류 일부를 컴파일 시점에 드러내는 설계입니다. 다만 개발자가 잘못된 수치를 넣는 것까지 타입이 막아 주지는 않습니다.\n\n헤더에는 `<cmath>`와 `<optional>`을 포함하고 선언·정의를 `namespace study_coordinates` 안에 둡니다. 반복되는 유한성 검사는 아래 `detail` 이름 공간의 작은 함수로 묶습니다. `std::isfinite`는 NaN이나 양·음의 무한대가 아닌지 검사합니다. `detail`은 접근을 강제로 막는 문법이 아니라 내부 보조 함수라는 이름 규칙입니다.",
+      "codes": [
+        {
+          "label": "공간과 단위를 타입으로 드러낸다",
+          "language": "cpp",
+          "text": "struct ClipPosition { double x, y, z, w; };\nstruct NdcPosition { double x, y, z; };\nstruct Viewport { int x, y, width, height; };\nstruct WindowPosition { double x, y, depth; };"
+        },
+        {
+          "label": "coordinates.h의 include와 내부 보조 함수",
+          "language": "cpp",
+          "text": "#include <cmath>\n#include <optional>\n\nnamespace study_coordinates {\nnamespace detail {\ninline bool finite(double v) noexcept { return std::isfinite(v); }\ninline bool finite4(double a, double b, double c, double d) noexcept {\n    return std::isfinite(a) && std::isfinite(b) &&\n           std::isfinite(c) && std::isfinite(d);\n}\n} // namespace detail\n} // namespace study_coordinates"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "입력 정점의 공간은 누가 정할까?",
+          "body": "GL은 VBO에 담긴 두 float를 무조건 화면 픽셀로 해석하지 않습니다. 현재 실습 셰이더가 입력 x/y를 clip의 x/y로 바로 사용합니다. 실제 UI 셰이더는 같은 두 성분을 논리 UI 좌표로 해석해 변환합니다. 메모리 형식과 수학적 의미는 서로 다른 계약입니다."
+        }
+      ]
+    },
+    {
+      "title": "w는 언제 나눠지는가",
+      "body": "`gl_Position`은 마지막 화면 좌표가 아니라 **동차 clip 좌표**입니다. 동차 좌표는 위치를 네 성분으로 표현하고, 여기서는 w로 나눈 세 값으로 위치를 해석합니다. `(x,y,z,w)`와 네 성분에 같은 양수 k를 곱한 값은 나눈 결과가 같습니다.\n\n`(0.5,-0.5,0,1)`을 나누면 `(0.5,-0.5,0)`입니다. w만 2로 바꾸면 `(0.25,-0.25,0)`이 되어 중앙으로 가까워집니다. 네 성분을 두 배로 한 `(1,-1,0,2)`는 다시 `(0.5,-0.5,0)`이 됩니다. w는 불투명도나 정점의 개수가 아닙니다.\n\n이 나눗셈을 **perspective divide, 원근 나눗셈**이라고 합니다. 현재 삼각형에는 카메라나 멀고 가까움이 없으므로 w를 바꿔도 그 사실만으로 3D 카메라가 만들어지지는 않습니다. 투영으로 w가 깊이에 의존하게 되면 먼 위치가 더 작게 투영되는 효과를 표현할 수 있습니다. 지금은 그 마지막 나눗셈을 분리해서 배웁니다.\n\n함수는 계산 가능성을 `std::optional`로 돌려줍니다. 값이 없으면 `std::nullopt`이며 호출자는 성공 여부를 확인한 뒤 `->x` 같은 멤버에 접근합니다. 이 optional은 내부에 결과 또는 비어 있음 상태를 보관하며 결과를 위해 동적 할당할 필요가 없습니다.",
+      "codes": [
+        {
+          "label": "유한한 결과를 만드는 원근 나눗셈",
+          "language": "cpp",
+          "text": "inline std::optional<NdcPosition> perspective_divide(const ClipPosition& p) noexcept {\n    if (!detail::finite4(p.x, p.y, p.z, p.w)) return std::nullopt;\n    if (p.w == 0.0) return std::nullopt;\n\n    const NdcPosition n{ p.x / p.w, p.y / p.w, p.z / p.w };\n\n    if (!detail::finite(n.x) || !detail::finite(n.y) || !detail::finite(n.z))\n        return std::nullopt;\n    return n;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "0과 작은 수를 같은 것으로 취급하지 않는다",
+          "body": "w가 정확히 0이면 이 함수의 나눗셈 계약을 만족하지 못합니다. 작은 비영 값은 계산을 시도하되 결과가 무한대인지 검사합니다. 작은 w를 임의의 epsilon으로 바꾸면 위치 자체가 달라집니다. 음수 w의 산술 나눗셈은 허용하지만, 그 결과가 보인다는 뜻은 아닙니다. 이 함수는 클리핑을 수행하지 않습니다."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "헤더에 inline을 붙이는 이유",
+          "body": "여러 번역 단위에서 이 헤더를 포함해도 함수 정의를 함께 사용할 수 있게 합니다. 여기서 inline은 호출 코드를 반드시 펼치라는 명령이 아닙니다. 함수들은 표준 수학 검사와 작은 값 계산만 사용하므로 noexcept로 계약을 드러냅니다."
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "kQuadVert",
+        "invariant": "정점 셰이더는 gl_Position에 clip 좌표를 쓰고, w로 나눈 뒤 viewport에 매핑한다.",
+        "mayDiffer": "현재 렌더러는 논리 UI 크기 uniform과 색·UV·도형 속성을 함께 사용한다.",
+        "omitted": "이번 실험은 위치만 비교한다. 카메라 행렬·텍스처·원근 보간은 아직 구현하지 않는다."
+      }
+    },
+    {
+      "title": "점을 검사하고 도형을 자른다",
+      "body": "기본 OpenGL 3.3 설정에서 clip 영역의 여섯 경계는 `-w ≤ x ≤ w`, `-w ≤ y ≤ w`, `-w ≤ z ≤ w`입니다. x/y만 검사하면 z로 벗어난 경우를 놓칩니다. 이 실습은 depth clamp와 추가 clip plane을 켜지 않습니다.\n\n**클리핑은 도형에서 영역 밖 부분을 잘라 내는 과정**입니다. 삼각형이 경계를 가로지르면 교차 위치가 생겨 영역 안쪽 부분이 남습니다. “정점 하나가 밖에 있다”와 “삼각형 전체가 밖에 있다”는 같은 판단이 아닙니다.\n\n아래 함수는 점 하나가 영역 안에 있는지만 알려 줍니다. 함수가 false라는 이유로 draw를 건너뛰는 코드를 추가하지 마세요. 세 정점이 모두 false여도 삼각형이 영역을 가로지를 수 있습니다. `oversized` 실험이 그 반례입니다.\n\nw=0인 모든 입력은 이 CPU 도구의 정책으로 거부합니다. `(0,0,0,0)`은 적힌 부등식을 만족하지만 나눗셈의 결과는 정의할 수 없습니다. 이 예외 처리를 실제 GL의 모든 특이 도형 처리 규칙으로 일반화하지 않습니다.",
+      "codes": [
+        {
+          "label": "단일 점의 포함 여부만 판정한다",
+          "language": "cpp",
+          "text": "inline bool inside_clip_volume(const ClipPosition& p) noexcept {\n    if (!detail::finite4(p.x, p.y, p.z, p.w)) return false;\n    if (!(p.w > 0.0)) return false;\n    return (p.x >= -p.w && p.x <= p.w &&\n            p.y >= -p.w && p.y <= p.w &&\n            p.z >= -p.w && p.z <= p.w);\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "나눗셈 후 범위 검사만 하면?",
+          "body": "clip `(0,0,0,-1)`을 산술적으로 나누면 `(0,0,0)`이 됩니다. 하지만 음수 w에서는 기본 clip 부등식을 만족하지 않습니다. w의 정보를 버린 뒤 [-1,1]만 검사하면 이 차이를 잃습니다. GPU 파이프라인을 이해할 때 clip 좌표와 NDC를 따로 두는 이유입니다."
+        }
+      ]
+    },
+    {
+      "title": "viewport 변환을 유도한다",
+      "body": "폭 200, 높이 100인 영역을 창의 `(10,20)`에서 시작한다고 합시다. 여기서 y의 양수 방향은 위쪽입니다. NDC x의 -1을 0으로, +1을 1로 옮기는 식은 `(x + 1) / 2`입니다. 폭을 곱하면 영역 내부 거리, 원점을 더하면 창에서의 위치가 됩니다.\n\n```text\nwindow_x = viewport_x + (ndc_x * 0.5 + 0.5) * width\nwindow_y = viewport_y + (ndc_y * 0.5 + 0.5) * height\nwindow_depth = ndc_z * 0.5 + 0.5\n```\n\n마지막 줄은 기본 `glDepthRange(0,1)`인 경우입니다. z=0은 깊이 0.5로 갑니다. 이 수치가 있어도 깊이 테스트를 켜지 않은 실습에서 자동으로 가림 관계를 검사하지는 않습니다.\n\n| NDC | viewport (10,20,200,100)에서 창 위치 |\n| --- | --- |\n| (-1,-1,0) | (10,20), 깊이 0.5 |\n| (0,0,0) | (110,70), 깊이 0.5 |\n| (+1,+1,0) | (210,120), 깊이 0.5 |\n| (+0.5,-0.5,0) | (160,45), 깊이 0.5 |\n\n`to_window`는 양수 폭·높이를 요구합니다. 실제 GL은 폭이나 높이 0인 viewport도 허용하지만, 이 도구는 위치 예측용이므로 빈 영역을 실패로 취급합니다. 외부 NDC 수치도 계산할 수 있게 두며 픽셀 영역으로 강제 제한하지 않습니다. 이 계산 자체는 가시성 검사가 아닙니다.",
+      "codes": [
+        {
+          "label": "정수 원점은 더하기 전에 double로 바꾼다",
+          "language": "cpp",
+          "text": "inline std::optional<WindowPosition> to_window(const NdcPosition& n,\n                                               const Viewport& v) noexcept {\n    if (!detail::finite(n.x) || !detail::finite(n.y) || !detail::finite(n.z))\n        return std::nullopt;\n    if (v.width <= 0 || v.height <= 0) return std::nullopt;\n\n    // Cast first: every later term is double, so ints never participate in the\n    // arithmetic that could overflow.\n    const double origin_x = static_cast<double>(v.x);\n    const double origin_y = static_cast<double>(v.y);\n    const double width    = static_cast<double>(v.width);\n    const double height   = static_cast<double>(v.height);\n\n    const WindowPosition w{\n        origin_x + (n.x * 0.5 + 0.5) * width,\n        origin_y + (n.y * 0.5 + 0.5) * height,\n        n.z * 0.5 + 0.5\n    };\n\n    if (!detail::finite(w.x) || !detail::finite(w.y) || !detail::finite(w.depth))\n        return std::nullopt;\n    return w;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "연속 좌표를 곧바로 픽셀 번호로 바꾸지 않는다",
+          "body": "폭 200인 영역에서 NDC +1은 오른쪽 경계 210입니다. x 픽셀 인덱스의 마지막은 209이고, 기본 단일 샘플의 중심은 209.5입니다. 정점은 연속 좌표에 놓이고 래스터화가 어떤 샘플을 덮는지 결정합니다. 정점 좌표를 먼저 정수 반올림하면 도형을 바꿔 버립니다."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "정수 오버플로와 부동소수점 오버플로",
+          "body": "원점+폭을 int로 먼저 계산한 뒤 double로 바꾸면 이미 일어난 정수 오버플로를 되돌릴 수 없습니다. 각 값을 먼저 double로 변환합니다. 큰 double 계산도 무한대가 될 수 있어 결과를 검사합니다. 이 CPU 식은 GL 구현의 최대 viewport 크기 제한을 재현하지 않습니다."
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "gl_Viewport(vx, vy, vw, vh);",
+        "invariant": "렌더러가 선택한 viewport가 NDC에서 창 좌표로의 변환을 정한다.",
+        "mayDiffer": "현재 구현은 레터박스 사각형을 적용하고 UI 논리 크기를 uniform으로 따로 보낸다.",
+        "omitted": "레터박스 영역 계산·DPI·마우스 역변환은 별도 구현 단계에서 다룬다."
+      }
+    },
+    {
+      "title": "세 정점의 위치를 계산한다",
+      "body": "삼각형의 입력은 `(-0.5,-0.5)`, `(0.5,-0.5)`, `(0,0.5)`입니다. CPU 예측과 셰이더 선택을 `projection_cases.h`의 작은 표에 묶습니다. 이름은 실행 인자로도 씁니다.\n\n`xy_scale`과 `w`는 CPU가 계산할 계수이고, `vertex_source`는 실제로 컴파일할 GLSL입니다. 두 경로가 같은 수식을 뜻하는지 별도 픽셀 실험으로 확인합니다. 문자열만 바꾸고 CPU 계수를 그대로 두면 둘이 다른 실험을 설명하게 됩니다.\n\n| 실험 | 왼쪽 아래 정점 | 오른쪽 아래 정점 | 위 정점 |\n| --- | --- | --- | --- |\n| base | (60,45) | (160,45) | (110,95) |\n| w2 | (85,57.5) | (135,57.5) | (110,82.5) |\n| scaled | (60,45) | (160,45) | (110,95) |\n| oversized | (-40,-5) | (260,-5) | (110,145) |\n\n이 표는 viewport `(10,20,200,100)` 기준이며 깊이는 모두 0.5입니다. oversized의 세 좌표는 클리핑 전 원래 정점의 산술 투영입니다. GL이 이 세 위치를 그대로 화면 밖에 그린다는 뜻은 아닙니다. 실제 도형은 clip 영역과 교차해 잘립니다.\n\n`coordinates_demo`는 창을 만들지 않고 이 표를 출력합니다. 구조체·optional·수학만 사용하는 계산은 플랫폼 없이 실행할 수 있습니다.",
+      "codes": [
+        {
+          "label": "실험 하나를 CPU clip 좌표로 바꾼다",
+          "language": "cpp",
+          "text": "struct Case { const char* name; const char* vertex_source; double xy_scale, w; };\ninline study_coordinates::ClipPosition clip_for(const Case& c, double x, double y) noexcept {\n    return {c.xy_scale*x, c.xy_scale*y, 0.0, c.w};\n}"
+        },
+        {
+          "label": "renderer/projection_cases.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/19-coordinates/renderer/projection_cases.h",
+          "collapsed": true
+        },
+        {
+          "label": "src/coordinates_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/19-coordinates/src/coordinates_demo.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "같은 VBO로 네 그림을 그린다",
+      "body": "GL 쪽에서는 선택한 정점 셰이더를 초기화할 때 한 번 컴파일합니다. uniform API나 새로운 버퍼 형식을 도입하지 않고, w를 쓰는 줄만 비교할 수 있습니다. 실행 중 전환이 필요해지면 uniform으로 바꿀 수 있지만 지금은 실행 인자가 어느 식을 사용할지 결정합니다.\n\n`main`은 `base|w2|scaled|oversized` 중 하나를 받습니다. 알 수 없는 이름과 남는 인자는 창을 만들기 전에 오류 코드 2로 끝냅니다. 사용자 입력이 틀렸는데 그래픽 초기화 오류로 보이게 만들지 않습니다.\n\n각 프레임에서는 실제 drawable 폭·높이로 그립니다. CPU 예상 위치는 첫 프레임과 크기가 바뀔 때만 출력합니다. 같은 크기에서 매 프레임 찍으면 중요한 변화가 로그에 묻히기 때문입니다. CPU 계산은 위치를 설명할 뿐, GL에 다시 정점을 업로드하는 데 쓰지 않습니다.",
+      "codes": [
+        {
+          "label": "기존 vertex.compile의 소스 인자만 실험에 연결한다",
+          "language": "cpp",
+          "text": "if (!vertex.compile(study_gl::VertexShader, experiment.vertex_source)) {\n    std::fprintf(stderr,\"Vertex shader: %s\\n\",vertex.diagnostic().c_str());\n    return 1;\n}"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/19-coordinates/src/main.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "kQuadVert",
+        "invariant": "정점 셰이더는 gl_Position에 clip 좌표를 쓰고, w로 나눈 뒤 viewport에 매핑한다.",
+        "mayDiffer": "현재 렌더러는 논리 UI 크기 uniform과 색·UV·도형 속성을 함께 사용한다.",
+        "omitted": "이번 실험은 위치만 비교한다. 카메라 행렬·텍스처·원근 보간은 아직 구현하지 않는다."
+      }
+    },
+    {
+      "title": "예측과 픽셀을 비교한다",
+      "body": "다음은 같은 128×128 영역으로 그린 결과 예시입니다. 위의 CPU 표는 원점과 크기가 다르므로 숫자 자체를 이 그림의 픽셀 번호로 읽지 마세요. 비교할 것은 w에 따른 상대 크기와 클리핑입니다.\n\n| 실험 | 결과 |\n| --- | --- |\n| base: 기준 | ![기준의 128×128 프레임 버퍼 그림](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABhklEQVR4nO3asU0AUQwFQRogI6cIOqco6gCJErg7+7MjbQHWm9Qvr2/vGuxl/IJ4AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIA/9PH59dP4GQDmLykC/K5/ugEAAH9e/2gDAACuWP9cAwAALlr/UAMAAK5b/0QDAAAuXf84AwAArl7/LAMAAG5Y/yADAADuWf8UAwAAblv/CAMAAO5cf78BAAA3r7/cAACA+9ffbAAAwCPrrzUAAOCp9XcaAADw4PoLDQAAeHb9bQYAADy+/ioDAAAm1t9jACAPMLX+EgMAbYDZ9TcYAAgDjE+/wQBAFWB89CUGAJIA43PvMQDQAxgfepUBgBjA+MTbDACUAMbHXWgAIAMwPutOAwANgPFB1xoACACMT7nZAMB/BxgfcbnB/FdEPAAA2gEA0A4AgHYAALQDAKAdAADtAABoBwBAOwAA2gEA0A4AgHYAALQDAKAdAADtAABoB2C4bxMrWaU9JBLDAAAAAElFTkSuQmCC) |\n| w2: w만 두 배 | ![w만 두 배의 128×128 프레임 버퍼 그림](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABRElEQVR4nO3RwU0DMBREwTTAjTtF0DlFUUeQKCF27K830itgtfP4+PzSwR7HF8QDAKAdAADtAABoBwBAOwAA2gEA0A4AgHYAALQDAKAdAADtAABoBwBAOwAA2gEA0A4AgHYAALQDAKAdAADtAABoBwBAOwAA2gEA0A4AgHYAALzQ98/vX8dnADi/pAjw//50AwAAXn5/tAEAACven2sAAMCi94caAACw7v2JBgAALH1/nAEAAKvfn2UAAMCG9wcZAACw5/0pBgAAbHt/hAEAADvfv98AAIDN719uAADA/vdvNgAA4C3vX2sAAMC73r/T4DqAWgAAtAMAoB0AAO0AAGgHAEA7AADaAQDQDgCAdgAAtAMAoB0AAO0AAGgHAEA7AADaAQDQDgCAdgAAtAMAoB0AAO0AAGgHAEA7AADaAQDQDsDhnt4jFx643blvAAAAAElFTkSuQmCC) |\n| scaled: 네 성분 두 배 | ![네 성분 두 배의 128×128 프레임 버퍼 그림](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABhklEQVR4nO3asU0AUQwFQRogI6cIOqco6gCJErg7+7MjbQHWm9Qvr2/vGuxl/IJ4AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIA/9PH59dP4GQDmLykC/K5/ugEAAH9e/2gDAACuWP9cAwAALlr/UAMAAK5b/0QDAAAuXf84AwAArl7/LAMAAG5Y/yADAADuWf8UAwAAblv/CAMAAO5cf78BAAA3r7/cAACA+9ffbAAAwCPrrzUAAOCp9XcaAADw4PoLDQAAeHb9bQYAADy+/ioDAAAm1t9jACAPMLX+EgMAbYDZ9TcYAAgDjE+/wQBAFWB89CUGAJIA43PvMQDQAxgfepUBgBjA+MTbDACUAMbHXWgAIAMwPutOAwANgPFB1xoACACMT7nZAMB/BxgfcbnB/FdEPAAA2gEA0A4AgHYAALQDAKAdAADtAABoBwBAOwAA2gEA0A4AgHYAALQDAKAdAADtAABoB2C4bxMrWaU9JBLDAAAAAElFTkSuQmCC) |\n| oversized: x/y 세 배 | ![x/y 세 배의 128×128 프레임 버퍼 그림](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABuklEQVR4nO3RsVFEAQwD0WuAjJwi6JyiqONycv7K0s5sAbbe6+PzK6rvn99/DX/wTy/8gifXDzQQQIBn108zEECAx9ePMhBAAGL9HAMB5gGo9UMMBNgGYNdPMBBgGACfPsFAgFUAfPQQAwEmAfC5cwwE2APAh44yEGAMAJ84zUCAJQB83EADAWYA8FkzDQTYAMAHjTUQYAAAnzLZQIB2AHzEcAMBqgHw+fINBOgFwIc7YSBAKQA+2RUDARoB8LEOGQhQB4DPdMtAgC4AfKBzBgIUAeDTXDQQoAUAH+WogQAVAPgcdw0EuA+AD3HaQIDjAPgEeAIMA+DPhyTAJAD+dlQCjAHgDwcmwAwA/mpsAgwA4E+GJ0A1AP7eiQQoBcAfO5QAdQD4S+cSoAgAf+ZoAlQA4G+cToDjAPgDBQlwFgA/vSYBDgLgR5clwCkA/NzKBDgCgB9anADxAPiJ9QkQDIAfN5IAkQD4WVMJEAaAHzSYADEA+CmzCRAAgB8xngACbCeAANsJIMB2AgiwnQACbCeAANsJIMB2AgiwnQACbCeAANsJIMB2AgiwnQACbCeAANsJIMB2Agiw3Rs5VP8LtjxtvAAAAABJRU5ErkJggg==) |\n\nw2는 가로·세로가 절반이므로 기하학적 면적은 1/4입니다. scaled는 base와 같습니다. oversized는 세 정점이 모두 clip 영역 밖인데도 가운데 부분이 남습니다. 원래의 큰 삼각형과 clip 영역의 교차 부분을 보고 있는 것입니다.\n\n`coordinates_probe`는 새 컨텍스트에서 프로그램 네 개를 순서대로 사용하고 내부·배경 픽셀을 읽습니다. base와 scaled의 결과를 비교하고, w2에서는 base 내부였던 `(44,44)`가 배경인지 확인합니다. 각 도형의 색칠된 픽셀 범위를 CPU가 예측한 연속 경계와도 비교합니다.\n\n도형 가장자리의 샘플 규칙 때문에 연속 꼭짓점의 위치와 마지막 색칠 픽셀이 꼭 같지는 않습니다. 이 실험에서는 경계 비교에 1픽셀 여유를 두고 내부 점도 함께 봅니다. 임의의 크기에서 색칠된 픽셀 개수가 항상 정확히 1/4이라는 검사로 일반화하지 않습니다. 더 자세한 샘플 선택은 래스터화를 구현하며 다룹니다.",
+      "codes": [
+        {
+          "label": "tests/coordinates_real.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/19-coordinates/tests/coordinates_real.cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "수학적 동일성과 비트 단위 결과",
+          "body": "이 실험의 0.5와 두 배 값은 이진 부동소수점으로 정확히 표현됩니다. 별도 셰이더의 임의 연산까지 항상 비트 단위로 같다는 일반 보장은 아닙니다. 큰 수·복잡한 식·최적화가 들어오면 수학식뿐 아니라 유한 정밀도와 GL의 invariance 규칙도 고려해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "논리 UI 좌표로 돌아온다",
+      "body": "게임 UI는 왼쪽 위를 `(0,0)`으로 두고 아래로 y가 늘어나는 편이 다루기 쉽습니다. 논리 폭 720, 높이 640인 UI를 NDC 범위로 옮겨 봅시다.\n\nx는 `x/폭`으로 [0,1]에 맞춘 뒤 두 배에서 1을 뺍니다. y는 위쪽이 +1이어야 하므로 `1 - 2*(y/높이)`로 뒤집습니다. clip의 z=0, w=1로 두면 나눗셈 뒤에도 그 수치가 유지됩니다.\n\n| 논리 UI 위치 | clip 위치 | 의미 |\n| --- | --- | --- |\n| (0,0) | (-1,+1,0,1) | 왼쪽 위 경계 |\n| (360,320) | (0,0,0,1) | 중앙 |\n| (720,640) | (+1,-1,0,1) | 오른쪽 아래 경계 |\n\n실제 창이 1440×1280이어도 논리 UI 폭·높이는 그대로 둘 수 있습니다. 이후 viewport가 실제 픽셀 위치를 결정합니다. 논리 수치와 drawable 픽셀 수치를 한 변수에 섞으면 배율을 두 번 적용하거나 클릭 위치와 그림을 어긋나게 만들 수 있습니다.\n\n`ui_to_clip`은 이 연결을 CPU에서 설명하는 함수입니다. 현재 게임의 GLSL은 같은 목적의 수식을 직접 실행합니다. UI 밖 입력도 허용하고 좌표를 강제로 잘라 넣지 않습니다. CPU에서 먼저 정점을 clamp하면 도형 자체가 달라집니다.",
+      "codes": [
+        {
+          "label": "논리 UI 크기가 양수일 때 clip 위치를 만든다",
+          "language": "cpp",
+          "text": "inline std::optional<ClipPosition> ui_to_clip(double x, double y,\n                                              double logical_width,\n                                              double logical_height) noexcept {\n    if (!detail::finite4(x, y, logical_width, logical_height)) return std::nullopt;\n    if (!(logical_width > 0.0) || !(logical_height > 0.0)) return std::nullopt;\n\n    const ClipPosition c{\n        2.0 * (x / logical_width) - 1.0,\n        1.0 - 2.0 * (y / logical_height),\n        0.0,\n        1.0\n    };\n\n    if (!detail::finite4(c.x, c.y, c.z, c.w)) return std::nullopt;\n    return c;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "kQuadVert",
+        "invariant": "정점 셰이더는 gl_Position에 clip 좌표를 쓰고, w로 나눈 뒤 viewport에 매핑한다.",
+        "mayDiffer": "현재 렌더러는 논리 UI 크기 uniform과 색·UV·도형 속성을 함께 사용한다.",
+        "omitted": "이번 실험은 위치만 비교한다. 카메라 행렬·텍스처·원근 보간은 아직 구현하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "나누기를 먼저 쓰는 이유",
+          "body": "`2*(x/width)`는 x와 width가 함께 매우 큰 경우 `2*x/width`의 불필요한 중간 오버플로를 피할 수 있습니다. 모든 입력에서 오차가 사라지는 것은 아닙니다. 이 CPU 함수는 double을 쓰고 현재 GLSL은 float를 쓰므로 경계 수치의 완전한 비트 일치보다 변환 계약을 비교합니다."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "행렬을 아직 만들지 않은 이유",
+          "body": "이 UI 변환은 배율과 이동만 있으면 설명할 수 있습니다. 행렬은 변환을 합성하고 카메라를 다룰 때 유용해집니다. 여기서 쓰지 않는 이유는 학습 목표와 인터페이스가 작기 때문입니다. 행렬 연산이 항상 더 느리다고 단정할 근거는 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "실패 입력을 계약으로 다룬다",
+      "body": "좌표 계산의 버그는 창이 검게 보이는 증상으로 늦게 발견되기 쉽습니다. 창 없이 계산을 검사하면 “수학식이 잘못됐는가”와 “GL 상태가 잘못됐는가”를 나눠 볼 수 있습니다.\n\n| 검사할 입력 | 기대하는 결과 | 막는 혼동 |\n| --- | --- | --- |\n| w=0, NaN, 무한대 | 나눗셈 실패 | 실패를 좌표 (0,0,0)으로 숨기지 않기 |\n| w=-2, x=1 | 나눗셈 x=-0.5, 점 포함은 false | 산술 성공과 clip 통과 구별 |\n| NDC (+1,+1), viewport (10,20,200,100) | (210,120) | 경계와 마지막 픽셀 구별 |\n| UI (0,0), 크기 720×640 | clip (-1,+1,0,1) | y축 반전 누락 검출 |\n| 네 성분에 같은 양수 배율 | 같은 나눈 위치 | w를 빼먹은 계산 검출 |\n\nNaN은 비교가 일반 실수처럼 동작하지 않는 부동소수점 값입니다. 입력이 유한한지 먼저 검사하면 의미 없는 결과가 다음 단계로 흘러가는 것을 막습니다. 유한한 입력끼리 나눠도 결과가 너무 크면 무한대가 될 수 있으므로 출력도 검사합니다.\n\n체크포인트의 검사는 `assert`에만 맡기지 않습니다. Release에서 `NDEBUG`로 assert가 사라져도 실패를 반환하도록 `CHECK`를 사용합니다. 결과 상수와 실제 그림을 대조하며, 나눗셈 자체를 빼먹은 구현이 거부되는지도 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "renderer/coordinates.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/19-coordinates/renderer/coordinates.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/coordinates_contract.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/19-coordinates/tests/coordinates_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "파일을 연결하고 실행한다",
+      "body": "`19-coordinates`는 독립적으로 빌드할 수 있는 누적 체크포인트입니다. 직접 이어 만드는 경우 아래 파일을 `18-triangle` 기반 작업 폴더에 추가·교체합니다.\n\n| 파일 | 작업 |\n| --- | --- |\n| renderer/coordinates.h | 공간별 타입·검사·변환 함수 추가 |\n| renderer/projection_cases.h | 네 실험의 GLSL과 CPU 계수 추가 |\n| src/coordinates_demo.cpp | 창 없는 계산 실행 파일 추가 |\n| src/main.cpp | 실험 선택·예상 위치 출력으로 교체 |\n| tests/coordinates_contract.cpp | 수치와 실패 입력 검사 추가 |\n| tests/coordinates_real.cpp | GL 픽셀 비교 도구 추가 |\n| CMakeLists.txt | 아래 CPU 타깃과 SDL probe 연결 추가 |\n\n저장소 루트에서 SDL2 개발 패키지와 pkg-config, OpenGL 3.3 Core 실행 환경을 사용합니다. 아래 경로는 단일 구성 생성기 기준입니다. Windows 다중 구성 생성기는 빌드 구성과 Debug/Release 실행 파일 경로를 맞춥니다.\n\n```sh\ncmake -S docs/learn/checkpoints/19-coordinates -B out/study-19 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-19\nctest --test-dir out/study-19 --output-on-failure\n./out/study-19/coordinates_demo w2\n./out/study-19/tetris base\n./out/study-19/tetris w2\n./out/study-19/tetris scaled\n./out/study-19/tetris oversized\n```\n\n창은 하나씩 실행하고 Escape로 닫습니다. `coordinates_demo w2`는 `(85,57.5)`, `(135,57.5)`, `(110,82.5)`를 출력합니다. `tetris`는 창 전체 drawable을 사용하므로 출력 좌표는 실제 크기에 따라 다릅니다.\n\n픽셀 비교는 `./out/study-19/coordinates_probe`로 실행합니다. Linux에서 offscreen GL을 지원하면 앞에 `SDL_VIDEODRIVER=offscreen`을 붙여 표시 없이 읽을 수 있습니다. 선택 인자로 기존 폴더 안의 경로 접두사를 주면 `접두사-base.ppm` 등 네 파일을 저장합니다. 창 없이 CPU 계산만 실행하려면 다른 빌드 폴더에서 `-DSTUDY_PLATFORM=SCRIPTED`를 선택합니다. 그 경우 tetris와 GL probe는 만들지 않습니다.\n\n이제 clip 위치에서 창의 연속 위치까지 계산할 수 있습니다. 다음 구현 과제는 그 위치 사이에서 **어떤 픽셀 샘플을 삼각형 내부로 선택하는가**입니다. 정점 세 개가 화면의 넓은 면을 채우는 래스터화로 이어집니다.",
+      "codes": [
+        {
+          "label": "CMakeLists.txt 끝에 추가할 타깃",
+          "language": "cmake",
+          "text": "# Coordinate predictions are CPU-only and available with every backend.\nadd_executable(coordinates_demo src/coordinates_demo.cpp)\ntarget_link_libraries(coordinates_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(coordinates_contract tests/coordinates_contract.cpp)\n    target_link_libraries(coordinates_contract PRIVATE study_mesh)\n    add_test(NAME coordinates_contract COMMAND coordinates_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(coordinates_probe tests/coordinates_real.cpp)\n        target_link_libraries(coordinates_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()\n"
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "language": "cmake",
+          "file": "checkpoints/19-coordinates/CMakeLists.txt",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "공식 자료",
+          "title": "공식 계약을 더 읽고 싶다면",
+          "body": "[OpenGL 3.3 Core 명세](https://registry.khronos.org/OpenGL/specs/gl/glspec33.core.pdf)의 §2.13은 좌표 변환, §2.19는 primitive clipping을 설명합니다. [GLSL 3.30 명세](https://registry.khronos.org/OpenGL/specs/gl/GLSLangSpec.3.30.pdf)의 §7.1에서 gl_Position의 역할을 확인할 수 있습니다. 명세는 CPU 예측 도구의 입력 정책과 GL 자체의 규칙을 구분할 때 참고합니다."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "clip·NDC·창 좌표 타입과 변환 함수를 만든다.",
+      "같은 정점에 base·w2·scaled·oversized를 적용해 좌표를 먼저 계산한다.",
+      "CPU 도구의 출력과 창/픽셀 결과를 비교한다.",
+      "논리 UI 원점·중앙·반대 경계를 clip 좌표로 바꾼다.",
+      "점 판정 실패와 삼각형 전체의 보임 여부가 다른 반례를 설명한다."
+    ],
+    "expected": "w2의 폭·높이는 기준의 절반, scaled는 같은 그림, oversized는 경계에서 잘린 큰 도형입니다. UI와 drawable의 단위를 구별하며 창 위치를 계산할 수 있습니다.",
+    "failureChecks": [
+      "gl_Position을 w와 무관하게 항상 NDC라고 해석하지 않았는가?",
+      "좌표를 나누는 것과 도형 클리핑을 구별했는가?",
+      "viewport 원점을 더하고 창 좌표를 정수 인덱스로 조기 반올림하지 않았는가?",
+      "UI 좌표를 drawable 크기로 정규화하거나 y 반전을 누락하지 않았는가?",
+      "optional을 확인한 뒤 사용하고 NaN·0 크기·0 w를 처리하는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "19-1",
+      "kind": "결과 예측",
+      "question": "clip (0.6, -0.2, 0, 1)의 w만 2로 바꿨습니다. 나눗셈 뒤 NDC는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0.6, -0.2, 0)"
+        },
+        {
+          "id": "b",
+          "text": "(0.3, -0.1, 0)"
+        },
+        {
+          "id": "c",
+          "text": "(1.2, -0.4, 0)"
+        },
+        {
+          "id": "d",
+          "text": "(0.3, -0.1, 2)"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "(0.3, -0.1, 0)",
+      "explanation": "x/y/z를 각각 새 w=2로 나눕니다. 결과는 (0.3,-0.1,0)입니다. 네 성분을 함께 두 배로 했다면 원래의 NDC가 유지되지만, 여기서는 w만 바꿨습니다."
+    },
+    {
+      "id": "19-2",
+      "kind": "단위",
+      "question": "NDC (+1,+1,0)을 viewport (10,20,200,100)에 매핑하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "픽셀 인덱스 (209,119), 깊이 0"
+        },
+        {
+          "id": "b",
+          "text": "연속 창 좌표 (200,100), 깊이 0.5"
+        },
+        {
+          "id": "c",
+          "text": "픽셀 인덱스 (210,120), 깊이 1"
+        },
+        {
+          "id": "d",
+          "text": "연속 창 좌표 (210,120), 깊이 0.5"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "연속 창 좌표 (210,120), 깊이 0.5",
+      "explanation": "원점에 폭·높이를 더한 오른쪽 위 경계가 (210,120)입니다. 정점은 연속 위치에 놓이므로 이것을 마지막 픽셀 인덱스라고 부르지 않습니다. 기본 깊이 범위에서 NDC z=0은 깊이 0.5로 매핑됩니다."
+    },
+    {
+      "id": "19-3",
+      "kind": "오류 진단",
+      "question": "세 정점에 대한 inside_clip_volume 결과가 모두 false였습니다. 이 정보만으로 가능한 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "세 점은 검사 조건을 통과하지 못했지만 삼각형의 일부가 남을 수 있다."
+        },
+        {
+          "id": "b",
+          "text": "삼각형 전체가 바깥이므로 draw를 생략해도 같은 결과다."
+        },
+        {
+          "id": "c",
+          "text": "점을 각각 [-1,1]로 clamp하면 원래의 클리핑 결과가 보존된다."
+        },
+        {
+          "id": "d",
+          "text": "세 점을 나누면 GL이 자동으로 모든 성분을 [-1,1]로 고친다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "세 점은 검사 조건을 통과하지 못했지만 삼각형의 일부가 남을 수 있다.",
+      "explanation": "점의 포함 여부와 도형의 교차 여부는 다릅니다. oversized처럼 세 정점이 모두 밖이어도 큰 삼각형의 가운데가 clip 영역과 겹칩니다. 정점별 clamp는 모양을 바꾸며 GL의 도형 클리핑을 대신하지 않습니다."
+    },
+    {
+      "id": "19-4",
+      "kind": "UI 변환",
+      "question": "논리 UI가 800×600이고 실제 drawable은 1600×1200입니다. 논리 위치 (400,0)의 올바른 clip 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(-0.5,+1,0,1)"
+        },
+        {
+          "id": "b",
+          "text": "(0,-1,0,1)"
+        },
+        {
+          "id": "c",
+          "text": "(0,+1,0,1)"
+        },
+        {
+          "id": "d",
+          "text": "(400,0,0,1)"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "(0,+1,0,1)",
+      "explanation": "논리 폭 800으로 x를 정규화하므로 2*(400/800)-1=0입니다. 위쪽 y=0은 +1입니다. 실제 drawable 크기는 이후 viewport에서 사용합니다. UI 좌표를 drawable 폭으로 나누면 서로 다른 단위를 섞습니다."
+    },
+    {
+      "id": "19-5",
+      "kind": "계약",
+      "question": "perspective_divide({0,0,0,-1})가 NDC (0,0,0)을 반환했습니다. 올바른 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "NDC가 가운데이므로 이 clip 점은 기본 clip 영역 안이다."
+        },
+        {
+          "id": "b",
+          "text": "산술 계산은 성공했지만, clip 영역 통과를 의미하지 않는다."
+        },
+        {
+          "id": "c",
+          "text": "음수로 나누면 반드시 무한대이므로 반환값은 구현 오류다."
+        },
+        {
+          "id": "d",
+          "text": "w를 절댓값으로 고쳐야 GL의 모든 clipping 규칙과 일치한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "산술 계산은 성공했지만, clip 영역 통과를 의미하지 않는다.",
+      "explanation": "이 함수는 유한한 비영 w의 나눗셈을 계산합니다. 음수 w의 나눗셈 자체는 가능하지만 clip 부등식은 별도입니다. w 정보를 버린 NDC 범위 검사만으로 원래 clip 점의 통과 여부를 판단할 수 없습니다."
+    }
+  ]
+}

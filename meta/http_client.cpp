@@ -1,4 +1,6 @@
 #include "http_client.h"
+#include "match_response.h"
+#include "profile_response.h"
 #include <algorithm>
 #include <cctype>
 #include "protocol.h"
@@ -14,6 +16,9 @@
 // relay 양쪽에서 이 .cpp 가 링크되면 httplib 심볼이 중복되므로, 상위 CMake 는
 // 이 파일을 한 타겟당 한 번만 추가해야 한다.
 #include "httplib.h"
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+#include "tls_identity.h"
+#endif
 
 #include <cstdlib>
 #include <charconv>
@@ -79,16 +84,7 @@ void configure_client(ClientT& cli, int timeout_s)
 
 std::optional<AuthInfo> parse_auth_info_body(const std::string& body)
 {
-    auto pid = proto::find_int   (body, "player_id");
-    auto uname = proto::find_string(body, "username");  // null 이면 ""
-    auto elo = proto::find_int   (body, "elo");
-    auto bp  = proto::find_int   (body, "bp");
-    auto xp  = proto::find_int   (body, "xp");          // 구 서버 응답엔 없음 → 0
-    auto icon = proto::find_string(body, "selected_icon_id");
-    if (!pid || !elo || !bp || icon.empty()) return std::nullopt;
-    return AuthInfo{ *pid, std::move(uname), static_cast<int>(*elo),
-                     static_cast<int>(*bp), static_cast<int>(xp.value_or(0)),
-                     std::move(icon) };
+    return profile_response::auth(body);
 }
 
 } // namespace
@@ -112,7 +108,7 @@ MetaClient::MetaClient(const std::string& base_url, std::string relay_secret)
         if (port_ != (https_ ? 443 : 80)) base_url_ += ":" + std::to_string(port_);
     }
     if (!valid_) {
-        std::fprintf(stderr, "[meta-client] invalid URL: %s\n", base_url.c_str());
+        std::fprintf(stderr, "[meta-client] invalid URL\n");
         return;
     }
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
@@ -136,6 +132,9 @@ httplib::Result post_json(const MetaClient& mc, const std::string& host, int por
     if (https) {
         httplib::SSLClient cli(host, port);
         cli.enable_server_certificate_verification(true);
+        cli.set_server_certificate_verifier([host](SSL* ssl) {
+            return tls_identity::verified_peer(ssl, host);
+        });
         if (const char* ca = std::getenv("TETRIS_CA_FILE")) cli.set_ca_cert_path(ca);
         configure_client(cli, timeout_s);
         return cli.Post(path, headers, body, "application/json");
@@ -155,6 +154,9 @@ httplib::Result get_path(const std::string& host, int port, bool https,
     if (https) {
         httplib::SSLClient cli(host, port);
         cli.enable_server_certificate_verification(true);
+        cli.set_server_certificate_verifier([host](SSL* ssl) {
+            return tls_identity::verified_peer(ssl, host);
+        });
         if (const char* ca = std::getenv("TETRIS_CA_FILE")) cli.set_ca_cert_path(ca);
         configure_client(cli, timeout_s);
         return cli.Get(path);
@@ -179,23 +181,13 @@ MetaClient::request_guest(int timeout_s)
         return std::nullopt;
     }
     if (r->status != 200) {
-        std::fprintf(stderr, "[meta-client] /v1/guest HTTP %d: %s\n",
-                     r->status, r->body.c_str());
+        std::fprintf(stderr, "[meta-client] /v1/guest HTTP %d\n", r->status);
         return std::nullopt;
     }
-    auto pid = proto::find_int   (r->body, "player_id");
-    auto tok = proto::find_string(r->body, "token");
-    auto elo = proto::find_int   (r->body, "elo");
-    auto bp  = proto::find_int   (r->body, "bp");
-    auto xp  = proto::find_int   (r->body, "xp");
-    auto icon = proto::find_string(r->body, "selected_icon_id");
-    if (!pid || tok.empty() || !elo || !bp || icon.empty()) {
+    const auto result = profile_response::guest(r->body);
+    if (!result)
         std::fprintf(stderr, "[meta-client] /v1/guest bad response\n");
-        return std::nullopt;
-    }
-    return GuestInfo{ *pid, std::move(tok), static_cast<int>(*elo),
-                      static_cast<int>(*bp), static_cast<int>(xp.value_or(0)),
-                      std::move(icon) };
+    return result;
 }
 
 std::optional<AuthInfo>
@@ -225,9 +217,8 @@ MetaClient::verify_token(const std::string& token, int timeout_s,
         return std::nullopt;
     }
     if (r->status != 200) {
-        std::fprintf(stderr, "[meta-client] /v1/auth/verify HTTP %d: %s\n",
-                     r->status, r->body.c_str());
-        // 5xx 등은 일시적 — 네트워크 오류로 분류해 토큰을 그대로 두고 재시도.
+        std::fprintf(stderr, "[meta-client] /v1/auth/verify HTTP %d\n", r->status);
+        // 인증 실패를 확정할 수 없는 응답이다. 토큰을 보존하고 미확인 결과를 전달한다.
         set_outcome(VerifyOutcome::NetworkError);
         return std::nullopt;
     }
@@ -389,12 +380,11 @@ MetaClient::post_match(const std::string& match_uuid,
     if (!relay_secret_.empty()) {
         headers.emplace("X-Relay-Secret", relay_secret_);
     }
-    // [예산] 재시도를 포함한 전체 wall-clock 을 timeout_s 로 상한한다.
-    // 시도별 타임아웃은 connect/read/write 각각에 걸리므로 한 시도가 그 몇 배로
-    // 늘어질 수 있고, 기존처럼 3회를 무조건 돌면 최악 ~9초까지 블로킹돼 매치
-    // 종료 흐름이 눈에 띄게 지연됐다. 남은 예산 기준으로 시도별 타임아웃을
-    // 줄이고, 예산이 소진되면 재시도를 포기한다 (relay 가 멱등 재전송하므로
-    // 여기서 무리하게 기다릴 이유가 없다).
+    // Bound retry admission with a shared deadline and reuse the exact key/body.
+    // Per-call connect/read/write timeouts are separate; an in-flight request,
+    // DNS resolution or scheduling can exceed the remaining wall-clock budget.
+    // This is not a hard end-to-end cancellation deadline. A missing response
+    // does not prove that the service failed to commit the match.
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::seconds(std::max(1, timeout_s));
     auto remaining_s = [&]() -> int {
@@ -426,46 +416,15 @@ MetaClient::post_match(const std::string& match_uuid,
         return std::nullopt;
     }
     if (r->status != 200) {
-        std::fprintf(stderr, "[meta-client] /v1/matches HTTP %d: %s\n",
-                     r->status, r->body.c_str());
+        std::fprintf(stderr, "[meta-client] /v1/matches HTTP %d\n", r->status);
         return std::nullopt;
     }
 
-    // 응답 파싱 — 중첩된 "a"/"b" 가 있지만 each 는 평면. 서브오브젝트 범위에서
-    // find_int 를 호출하려면 수동으로 오프셋을 계산해야 한다.
-    auto mid = proto::find_int(r->body, "match_id");
-    if (!mid) return std::nullopt;
-
-    auto find_sub = [&](const char* key, std::size_t& start, std::size_t& end) -> bool {
-        std::string pat = std::string("\"") + key + "\":{";
-        auto i = r->body.find(pat);
-        if (i == std::string::npos) return false;
-        auto j = r->body.find('}', i);
-        if (j == std::string::npos) return false;
-        start = i + pat.size();
-        end   = j;
-        return true;
-    };
-    auto parse_side = [&](const char* key, MatchDelta& out) -> bool {
-        std::size_t s = 0, e = 0;
-        if (!find_sub(key, s, e)) return false;
-        std::string sub = r->body.substr(s - 1, e - s + 2);  // include "{...}"
-        auto bef = proto::find_int(sub, "elo_before");
-        auto aft = proto::find_int(sub, "elo_after");
-        auto del = proto::find_int(sub, "delta");
-        if (!bef || !aft || !del) return false;
-        out.elo_before = static_cast<int>(*bef);
-        out.elo_after  = static_cast<int>(*aft);
-        out.delta      = static_cast<int>(*del);
-        return true;
-    };
-    MatchResult res{};
-    res.match_id = *mid;
-    if (!parse_side("a", res.a) || !parse_side("b", res.b)) {
+    auto result = parse_match_response(r->body);
+    if (!result) {
         std::fprintf(stderr, "[meta-client] /v1/matches bad response\n");
-        return std::nullopt;
     }
-    return res;
+    return result;
 }
 
 // -----------------------------------------------------------------------------

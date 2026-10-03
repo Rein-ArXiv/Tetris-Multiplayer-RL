@@ -16,15 +16,15 @@
 static const char* kQuadVert = R"glsl(
 #version 330 core
 
-layout(location = 0) in vec2  a_pos;      // 화면 픽셀 좌표 (좌상단 원점)
+layout(location = 0) in vec2  a_pos;      // 논리 UI 좌표 (좌상단 원점, drawable 픽셀과 구별)
 layout(location = 1) in vec2  a_uv;
 layout(location = 2) in vec4  a_color;
-layout(location = 3) in vec2  a_local;    // 사각형 중심 기준 좌표 (픽셀)
-layout(location = 4) in vec2  a_half;     // 사각형 반크기 (픽셀)
+layout(location = 3) in vec2  a_local;    // 사각형 중심 기준 좌표 (논리 단위)
+layout(location = 4) in vec2  a_half;     // 사각형 반크기 (논리 단위)
 layout(location = 5) in float a_radius;   // 모서리 반지름 (0 이면 각진 사각형)
 layout(location = 6) in float a_channel;  // 0 = RGBA 텍스처, 1 = R8 을 알파로
 
-uniform vec2 u_screen;                    // 논리 해상도 (픽셀)
+uniform vec2 u_screen;                    // 논리 UI 영역의 폭·높이 (양수)
 
 out vec2  v_uv;
 out vec4  v_color;
@@ -34,7 +34,8 @@ out float v_radius;
 out float v_channel;
 
 void main() {
-    // 픽셀 좌표 → NDC. y 는 화면이 아래로 증가하므로 뒤집는다.
+    // 논리 UI 좌표 → w=1인 clip 좌표. 나눈 뒤 NDC와 같은 수치다.
+    // UI의 y는 아래로 증가하므로 뒤집는다.
     vec2 ndc = vec2( 2.0 * a_pos.x / u_screen.x - 1.0,
                      1.0 - 2.0 * a_pos.y / u_screen.y );
     gl_Position = vec4(ndc, 0.0, 1.0);
@@ -81,8 +82,8 @@ void main() {
     // 불필요하게 흐려지는 것을 막는다.
     if (v_radius > 0.0) {
         float d = rounded_box_sdf(v_local, v_half, v_radius);
-        // 1픽셀 폭으로 부드럽게 자른다 — 모서리 안티앨리어싱이
-        // 별도 코드 없이 따라온다.
+        // 논리 UI 폭 1의 구간에서 알파를 완화한다. 물리 1픽셀이나
+        // 정확한 픽셀 coverage를 보장하는 식은 아니다.
         c.a *= 1.0 - smoothstep(-0.5, 0.5, d);
     }
 

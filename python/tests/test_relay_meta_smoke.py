@@ -32,6 +32,7 @@ import pytest
 
 from netbot.framing import (
     FramingError,
+    MAX_PAYLOAD_BYTES,
     MsgType,
     RejectReason,
     build_frame,
@@ -181,16 +182,27 @@ def _recv_match_found(sock: socket.socket, timeout: float = 5.0) -> tuple[int, i
 
 def _recv_frame(sock: socket.socket, want: MsgType, buf: bytearray,
                 timeout: float = 5.0) -> bytes:
-    """want 타입 프레임이 올 때까지 읽는다. buf 는 호출자가 보관 — 한 read 에
-    여러 프레임이 실려 오는 경우 나머지를 잃지 않기 위해서다."""
-    sock.settimeout(timeout)
+    """Consume one frame at a time; retain every byte after the wanted frame."""
     deadline = time.monotonic() + timeout
     while True:
-        for t, p in parse_frames(buf):
-            if t == want:
-                return p
-        if time.monotonic() >= deadline:
+        while len(buf) >= 2:
+            length = struct.unpack_from('<H', buf)[0]
+            if length > MAX_PAYLOAD_BYTES + 1:
+                # Keep the common parser's error and buffer-clearing contract.
+                parse_frames(buf)
+                raise AssertionError('oversized header unexpectedly accepted')
+            total = 2 + length + 4
+            if len(buf) < total:
+                break
+            one = bytearray(buf[:total])
+            del buf[:total]
+            for kind, payload in parse_frames(one):
+                if kind == want:
+                    return payload
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise TimeoutError(f"no {want!r} within deadline")
+        sock.settimeout(remaining)
         chunk = sock.recv(4096)
         if not chunk:
             raise RuntimeError(f"relay closed before {want!r}")
@@ -236,6 +248,76 @@ def _require_reactor_step() -> Path:
     if targeted and "reactor" not in Path(targeted).name:
         pytest.skip("이 실행은 스레드 모델을 겨눈다 — reactor 스텝에서 돈다")
     return reactor_bin
+
+
+def test_unranked_room_code_create_join_ready() -> None:
+    """Fresh OS-generated room codes still route both real clients to one match."""
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if not relay_bin:
+        pytest.skip("relay binary missing")
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), "--port", str(p)])
+    clients = []
+    try:
+        a = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        b = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        clients.extend([a, b])
+        a_buf, b_buf = bytearray(), bytearray()
+        a.sendall(_build_room_create(""))
+        code, status, peers = _parse_room_info(_recv_frame(a, MsgType.ROOM_INFO, a_buf))
+        assert len(code) == 5 and set(code) <= set("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        assert (status, peers) == (0, 1)
+        b.sendall(_build_room_join(code, ""))
+        joined, status, peers = _parse_room_info(_recv_frame(b, MsgType.ROOM_INFO, b_buf))
+        assert joined == code and (status, peers) == (0, 2)
+        a.sendall(build_frame(MsgType.READY, b"\x01"))
+        b.sendall(build_frame(MsgType.READY, b"\x01"))
+        found_a = _recv_frame(a, MsgType.MATCH_FOUND, a_buf)
+        found_b = _recv_frame(b, MsgType.MATCH_FOUND, b_buf)
+        assert {found_a[0], found_b[0]} == {1, 2}
+        assert struct.unpack_from("<Q", found_a, 1) == struct.unpack_from("<Q", found_b, 1)
+    finally:
+        for client in clients:
+            client.close()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3.0)
+
+
+def test_lone_queue_cancel_releases_connection_before_next_player() -> None:
+    """No second enqueue is needed to observe cancellation of a queued socket."""
+    relay_bin = _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
+    if not relay_bin:
+        pytest.skip("tetris_relay binary missing")
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), "--port", str(p)])
+    clients = []
+    try:
+        cancelled = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        clients.append(cancelled)
+        cancelled.sendall(_build_queue_join("") + build_frame(MsgType.QUEUE_CANCEL, b""))
+        assert cancelled.recv(1) == b"", "lone cancelled connection remained queued"
+        a = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        b = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        clients.extend([a, b])
+        a.sendall(_build_queue_join(""))
+        b.sendall(_build_queue_join(""))
+        role_a, seed_a = _recv_match_found(a)
+        role_b, seed_b = _recv_match_found(b)
+        assert {role_a, role_b} == {1, 2}
+        assert seed_a == seed_b
+    finally:
+        for client in clients:
+            client.close()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3.0)
 
 
 def test_relay_sigterm_drains_active_match() -> None:
@@ -518,8 +600,8 @@ def test_per_ip_session_cap_rejects_excess_connections(tmp_path):
     """세션 슬롯은 연결이 죽을 때까지 유지된다 — 한 IP 가 서버를 독식하지 못하게.
 
     핸드셰이크 슬롯만 두면 인증만 통과시키며 전역 상한(reactor --max-conns,
-    스레드 모델 포워딩 워커 512)까지 한 주소가 전부 차지할 수 있다. 상한이
-    아니라 속도 제한일 뿐이다.
+    스레드 모델의 여러 단계 예산)까지 연결을 쌓을 수 있다. 핸드셰이크
+    상한은 그 단계의 동시 점유만 제한하며 초당 접속 횟수를 제한하지 않는다.
 
     한 주소에서 kMaxSessionsPerIp 개를 붙여 전부 살아남는지 (상한이 정상
     사용자 집단을 자르지 않는지) 확인하고, 그 다음 하나가 거절되는지 (상한이
@@ -1274,7 +1356,7 @@ _RELAY_MAX_PAUSE_SEC = _RELAY_RATE_BURST_BYTES // _RELAY_MAX_BYTES_PER_SECOND   
 # 릴레이가 적는 종료 사유. 문자열이 달라지면 이 테스트들이 겨누는 갈래도 달라진 것이라
 # 그대로 일치해야 한다.
 _RATE_REASON = "byte rate 초과"
-_DEADLOCK_REASON = "상호 백프레셔 교착 (양쪽 read_paused)"
+_MUTUAL_STALL_REASON = "백프레셔 상한 초과 (송신 진행 없음)"
 
 # 백프레셔 테스트가 릴레이에 물리는 유휴 만기(--idle-timeout-sec). 운영 기본값은
 # 15초지만, 만기가 실제로 지나가는 것을 여러 번 봐야 하는 테스트에서 15초는 한
@@ -2500,28 +2582,15 @@ def test_reactor_does_not_refill_a_paused_connections_bucket():
 # 실제로 빼내는 상대와 붙은 정상 송신자가 16초마다 걷힌다.
 
 def test_reactor_reclaims_a_mutually_backpressured_pair():
-    """서로를 멈춰 세운 두 연결은 만기에 회수돼야 한다.
+    """양쪽 수신자가 읽지 않아 송신 진행도 멎은 페어는 정체 만기로 회수한다.
 
-    A 와 B 가 서로에게 붓기만 하고 아무도 읽지 않으면, 릴레이는 양쪽 tx 가
-    high-water 를 넘는 순간 **양쪽의 읽기를 모두** 멈춘다. 그때부터 두 연결은 읽기
-    이벤트가 영영 안 나고(멈춰 뒀으니), 쓰기도 진행되지 않으며(상대가 안 읽으니),
-    tx 도 더 안 자란다(멈춰 뒀으니) — 송신 버퍼 하드 상한도 영영 안 온다. 유휴
-    만기가 무조건 재무장하면 이 페어는 프로세스 재시작까지 fd 2개, per-IP 세션 슬롯
-    2개, 매치 1개를 물고 있는다. 주소를 갈아 가며 반복하면 연결 풀이 통째로
-    고정된다 — MEMORY 에 HIGH DoS 로 적힌 그 결함이다(34b5b11 이 고쳤다).
+    read_paused 두 개만으로는 교착을 증명하지 못한다. Write 관심은 별도로
+    유지되므로 양쪽이 읽기를 멈췄어도 커널 송신은 진행할 수 있다. 이 시나리오는
+    두 클라이언트가 모두 읽지 않고, 대기 바이트가 정지한 상태에서 정체 만기를
+    기다린다. 단계별 tx 관측은 자극 확인이며 개별 상태의 완전한 증명은 아니다.
+    실제 on_timeout의 두 방향 진행/정체 분기는 별도 메서드 대역 검사로 구별한다.
 
-    판정은 세 가지를 순서대로 본다.
-      1) 양쪽이 정말로 멈췄다: 붓기를 계속하는데도 [stats] 의 tx 가 방향당
-         high-water 두 몫을 넘긴 채 더 안 자란다. tx 절대값만으로는 "두 방향이 각각
-         넘었다" 와 "한 방향이 두 배로 물고 있다" 를 구분하지 못하지만(한 번의 read
-         가 4 KiB 를 얹는다), 안 멈춘 쪽이 하나라도 있으면 릴레이가 거기서 계속 읽어
-         tx 가 계속 자라므로 **붓는 중의 정지** 가 곧 "양쪽 다 멈춤" 이다.
-      2) 페어가 닫힌다 — 그것도 **교착 사유로**. 사유를 안 보면 유휴 만기나 레이트
-         초과로 끊긴 것을 회수로 오인한다. 회수가 없던 시절에도 다른 이유로는
-         끊길 수 있었다.
-      3) 자원이 실제로 돌아온다: 상태 줄이 conns=0 matches=0 이 된다.
-
-    reactor 전용이다 — 스레드 모델에는 "읽기를 멈춘다" 는 기제가 없다.
+    정체 사유, 양쪽 연결 종료, conns/matches 반환을 함께 검사한다.
     """
     reactor_bin = _require_reactor_step()
 
@@ -2570,7 +2639,7 @@ def test_reactor_reclaims_a_mutually_backpressured_pair():
         closes = stats.wait_for_closes_after(
             started, 2, _BP_MAX_PAUSE_SEC + _BP_IDLE_SEC + 6, (conn_a, conn_b))
         reasons = [why for _, why in closes]
-        assert _DEADLOCK_REASON in reasons, (
+        assert _MUTUAL_STALL_REASON in reasons, (
             f"교착된 페어가 회수되지 않았다 (만기 {_BP_IDLE_SEC}초, "
             f"{time.monotonic() - paused_at:.1f}초 관측). 이 구간의 종료 줄: "
             f"{reasons or '없음'} — 하나도 없으면 페어가 불멸이고, 사유가 다르면 "
@@ -2979,3 +3048,271 @@ def test_matching_then_going_silent_costs_the_silent_side_not_the_victim():
             "청구가 침묵한 쪽이 아니라 만기를 먼저 맞은 쪽에 붙고 있다는 뜻이다")
     finally:
         _shutdown(proc, opened)
+
+
+@pytest.mark.parametrize('kind,payload', [
+    (MsgType.READY, b''), (MsgType.READY, b'\x02'),
+    (MsgType.READY, b'\xff'), (MsgType.READY, b'\x01\x00'),
+    (MsgType.QUEUE_CANCEL, b'\x00'),
+])
+def test_queue_lobby_rejects_malformed_control(kind, payload):
+    """체크섬이 맞아도 READY의 도메인/길이와 CANCEL의 빈 본문 계약을 지킨다."""
+    relay_bin = _find_bin('tetris_relay', 'TETRIS_RELAY_BIN')
+    if not relay_bin:
+        pytest.skip('relay binary missing')
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), '--port', str(p)])
+    a = socket.create_connection(('127.0.0.1', port), timeout=2)
+    b = socket.create_connection(('127.0.0.1', port), timeout=2)
+    try:
+        a.sendall(_build_queue_join(''))
+        b.sendall(_build_queue_join(''))
+        _recv_match_found(a)
+        _recv_match_found(b)
+        a.sendall(build_frame(kind, payload))
+        # Read all complete frames, not just the first matching type in a batch.
+        for peer in (a, b):
+            buf = bytearray()
+            deadline = time.monotonic() + 2
+            while True:
+                peer.settimeout(max(.001, deadline - time.monotonic()))
+                chunk = peer.recv(4096)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                assert all(t != MsgType.READY or p != b'\x01'
+                           for t, p in parse_frames(buf)), 'malformed request advertised as accepted'
+                assert time.monotonic() < deadline, 'malformed lobby was not closed'
+    finally:
+        a.close()
+        b.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+@pytest.mark.parametrize('payload', [b'', b'\x02', b'\xff', b'\x01\x00'])
+def test_room_rejects_malformed_ready(payload):
+    relay_bin = _find_bin('tetris_relay', 'TETRIS_RELAY_BIN')
+    if not relay_bin:
+        pytest.skip('relay binary missing')
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), '--port', str(p)])
+    host = socket.create_connection(('127.0.0.1', port), timeout=2)
+    try:
+        host.sendall(_build_room_create(''))
+        _recv_frame(host, MsgType.ROOM_INFO, bytearray())
+        host.sendall(build_frame(MsgType.READY, payload))
+        deadline = time.monotonic() + 2
+        while True:
+            host.settimeout(max(.001, deadline - time.monotonic()))
+            if not host.recv(4096):
+                break
+            assert time.monotonic() < deadline
+    finally:
+        host.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+def test_queue_ready_preserves_coalesced_game_frames():
+    """READY와 같은 send의 게임 프레임을 로비가 버리지 않고 전달한다."""
+    relay_bin = _find_bin('tetris_relay', 'TETRIS_RELAY_BIN')
+    if not relay_bin:
+        pytest.skip('relay binary missing')
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), '--port', str(p)])
+    peers = [socket.create_connection(('127.0.0.1', port), timeout=2) for _ in range(2)]
+    try:
+        for peer in peers:
+            peer.sendall(_build_queue_join(''))
+        for peer in peers:
+            _recv_match_found(peer)
+        texts = [b'104 host tail', b'104 guest tail']
+        messages = [struct.pack('<H', len(text)) + text for text in texts]
+        for side, peer in enumerate(peers):
+            peer.sendall(build_frame(MsgType.READY, b'\x01') +
+                         build_frame(MsgType.CHAT, messages[side]))
+        for side, peer in enumerate(peers):
+            buf = bytearray()
+            seen = []
+            deadline = time.monotonic() + 3
+            while not (any(t == MsgType.READY and p == b'\x01' for t, p in seen) and
+                       any(t == MsgType.CHAT and p == messages[1-side] for t, p in seen)):
+                peer.settimeout(max(.001, deadline - time.monotonic()))
+                chunk = peer.recv(4096)
+                assert chunk, 'closed before both READY and preserved CHAT'
+                buf.extend(chunk)
+                seen.extend(parse_frames(buf))
+                assert time.monotonic() < deadline
+    finally:
+        for peer in peers:
+            peer.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+def test_recv_frame_helper_preserves_complete_and_partial_tail():
+    class NoRead:
+        def settimeout(self, timeout):
+            pass
+        def recv(self, size):
+            raise AssertionError('buffered frame must be returned before another recv')
+    first = build_frame(MsgType.READY, b'\x01')
+    second = build_frame(MsgType.CHAT, b'saved')
+    partial = build_frame(MsgType.CHAT, b'later')[:1]
+    buf = bytearray(first + second + partial)
+    assert _recv_frame(NoRead(), MsgType.READY, buf) == b'\x01'
+    assert buf == second + partial
+    assert _recv_frame(NoRead(), MsgType.CHAT, buf) == b'saved'
+    assert buf == partial
+
+
+def test_forwarder_rejects_oversized_header_before_body():
+    """A declared invalid boundary terminates the source, never resyncs on next recv."""
+    relay_bin = _find_bin('tetris_relay', 'TETRIS_RELAY_BIN')
+    if not relay_bin:
+        pytest.skip('relay binary missing')
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), '--port', str(p)])
+    peers = [socket.create_connection(('127.0.0.1', port), timeout=2) for _ in range(2)]
+    try:
+        for peer in peers:
+            peer.sendall(_build_queue_join(''))
+        for peer in peers:
+            _recv_match_found(peer)
+        for peer in peers:
+            peer.sendall(build_frame(MsgType.READY, b'\x01'))
+        for peer in peers:
+            assert _recv_frame(peer, MsgType.READY, bytearray()) == b'\x01'
+        peers[0].sendall(b'\xff\xff')
+        for peer in peers:
+            deadline = time.monotonic() + 2
+            while True:
+                peer.settimeout(max(.001, deadline - time.monotonic()))
+                if not peer.recv(4096):
+                    break
+                assert time.monotonic() < deadline
+    finally:
+        for peer in peers:
+            peer.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+def test_room_guest_rejoin_then_both_leave():
+    """A guest can leave/rejoin, then both exits close without server shutdown."""
+    relay_bin = _find_bin('tetris_relay', 'TETRIS_RELAY_BIN')
+    if not relay_bin:
+        pytest.skip('relay binary missing')
+    proc, port = _spawn_listening(lambda p: [str(relay_bin), '--port', str(p)])
+    peers = []
+    def connect():
+        sock = socket.create_connection(('127.0.0.1', port), timeout=2)
+        peers.append(sock)
+        return sock
+    def eof(sock):
+        deadline = time.monotonic() + 2
+        while True:
+            sock.settimeout(max(.001, deadline - time.monotonic()))
+            if not sock.recv(4096):
+                return
+            assert time.monotonic() < deadline
+    try:
+        host = connect()
+        host.sendall(_build_room_create(''))
+        hb = bytearray()
+        code, _, count = _parse_room_info(_recv_frame(host, MsgType.ROOM_INFO, hb))
+        assert count == 1
+        guest = connect()
+        guest.sendall(_build_room_join(code, ''))
+        assert _parse_room_info(_recv_frame(guest, MsgType.ROOM_INFO, bytearray()))[2] == 2
+        assert _parse_room_info(_recv_frame(host, MsgType.ROOM_INFO, hb))[2] == 2
+        guest.sendall(build_frame(MsgType.ROOM_LEAVE, b''))
+        eof(guest)
+        assert _parse_room_info(_recv_frame(host, MsgType.ROOM_INFO, hb))[2] == 1
+        replacement = connect()
+        replacement.sendall(_build_room_join(code, ''))
+        assert _parse_room_info(_recv_frame(replacement, MsgType.ROOM_INFO, bytearray()))[2] == 2
+        assert _parse_room_info(_recv_frame(host, MsgType.ROOM_INFO, hb))[2] == 2
+        # Both requests are sent before waiting for either close. No artificial
+        # claim that the OS schedules the two readers at exactly the same time.
+        host.sendall(build_frame(MsgType.ROOM_LEAVE, b''))
+        replacement.sendall(build_frame(MsgType.ROOM_LEAVE, b''))
+        eof(host)
+        eof(replacement)
+    finally:
+        for peer in peers:
+            peer.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux epoll socket migration contract")
+def test_reactor_shards_preserve_pair_streams_and_release_counts():
+    """Four matches span two shards; coalesced READY/input survives ownership transfer."""
+    reactor_bin = _require_reactor_step()
+    readers = []
+    proc, port = _spawn_listening(
+        lambda port: [str(reactor_bin), "--port", str(port), "--loops", "3",
+                      "--stats-interval-sec", "1", "--log-level", "debug"],
+        stdout_reader=lambda process: readers.append(_StatsReader(process)),
+    )
+    stats = readers[0]
+    sockets = []
+    try:
+        for match in range(4):
+            a = socket.create_connection(("127.0.0.1", port), timeout=3)
+            sockets.append(a)
+            b = socket.create_connection(("127.0.0.1", port), timeout=3)
+            sockets.append(b)
+            a.sendall(_build_queue_join(""))
+            b.sendall(_build_queue_join(""))
+            role_a, seed_a = _recv_match_found(a)
+            role_b, seed_b = _recv_match_found(b)
+            assert {role_a, role_b} == {1, 2} and seed_a == seed_b
+            forward = [bytes([match, index]) + b"a" * 61 for index in range(2)]
+            backward = [bytes([match, index]) + b"b" * 29 for index in range(2)]
+            a.sendall(build_frame(MsgType.READY, b"\x01") + b"".join(
+                build_frame(MsgType.INPUT, payload) for payload in forward))
+            b.sendall(build_frame(MsgType.READY, b"\x01") + b"".join(
+                build_frame(MsgType.INPUT, payload) for payload in backward))
+            buf_a, buf_b = bytearray(), bytearray()
+            assert [_recv_frame(b, MsgType.INPUT, buf_b) for _ in forward] == forward
+            assert [_recv_frame(a, MsgType.INPUT, buf_a) for _ in backward] == backward
+        sample = stats.wait_for_sample_after(time.monotonic(), timeout=5)
+        assert sample["matches"] == 4 and sample["conns"] == 8, stats.dump()
+        with stats._lock:
+            lines = "\n".join(stats.lines)
+        for shard in (1, 2):
+            assert len(re.findall(rf"\[shard {shard}\].*인계 받음", lines)) == 2, lines
+        since = time.monotonic()
+        for sock in sockets:
+            sock.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            sample = stats.wait_for_sample_after(since, timeout=5)
+            if sample["matches"] == sample["conns"] == sample["tx"] == 0:
+                break
+            since = time.monotonic()
+        else:
+            pytest.fail("sharded disconnect did not return counters:\n" + stats.dump())
+        proc.terminate()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        _shutdown(proc, sockets)

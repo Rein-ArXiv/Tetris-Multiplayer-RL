@@ -3,7 +3,7 @@
 // audio/audio.cpp (XAudio2) 와 동일한 audio.h 재생·설정 API 를
 // SDL_OpenAudioDevice 콜백으로 재구현.
 //   기성 프레임워크의 오디오 모듈이 하던 믹싱을 여기서는 SDL_AudioSpec.callback
-//   에서 직접 수행 (int16 합산 + 포화 클램핑).
+//   에서 직접 수행 (int32 누산 후 int16 포화 클램핑).
 //
 // 구조:
 //   - SDL 콜백에서 BGM 보이스 + SFX 보이스 풀(8) 을 믹스.
@@ -16,11 +16,17 @@
 //     오디오 콜백 스레드에서 할당을 피하기 위해서다.
 
 #include "audio.h"
+#include "pcm_layout.h"
+#include "mix_s16.h"
+#include "voice_order.h"
+#include <array>
+#include <algorithm>
+#include <limits>
 
-#ifndef DR_MP3_IMPLEMENTATION
-  #define DR_MP3_IMPLEMENTATION
-#endif
-#include "../third_party/dr_mp3.h"
+#include "mp3_decode.h"
+#include <memory>
+#include <new>
+#include <stdexcept>
 
 #include <SDL2/SDL.h>
 
@@ -47,12 +53,15 @@ struct Voice {
 
 static bool            s_initialized = false;
 static int             s_refCount    = 0;
+static bool            s_audioOwned  = false; // successful SDL subsystem reference
 static SDL_AudioDeviceID s_dev       = 0;
 
 static std::vector<SoundData> s_sounds;
 
 static constexpr int MAX_SFX_VOICES = 8;
+static_assert(MAX_SFX_VOICES + 1 <= audio_mix::kMaxVoices, "mixer accumulator bound");
 static Voice s_sfx[MAX_SFX_VOICES];
+static audio_pool::VoiceOrder<MAX_SFX_VOICES> s_sfxOrder;
 static Voice s_bgm;          // 단일 BGM 보이스
 
 // 설정 토글 (렌더/오디오 전용 — SimGame/결정성과 무관).
@@ -69,7 +78,7 @@ static std::mutex    s_mu;       // 콜백 ↔ API 간 공유 상태 보호
 
 // ─── 믹서 콜백 ────────────────────────────────────────────────────────────────
 // gain: 이 보이스 카테고리(BGM/SFX)의 0~1 볼륨. 합산 전에 샘플에 곱한다.
-static void mix_voice(Voice& v, int16_t* out, int frames, int outChannels, float gain)
+static void mix_voice(Voice& v, int32_t* out, int frames, int outChannels, float gain)
 {
     if (!v.active || v.handle <= 0) return;
     SoundData& sd = s_sounds[v.handle];
@@ -89,41 +98,62 @@ static void mix_voice(Voice& v, int16_t* out, int frames, int outChannels, float
         int16_t r = (sc >= 2) ? src[v.pos + 1] : l;
         v.pos += sc;
 
-        // 카테고리 게인 적용 후 포화 합산
+        // Keep the full sum until every voice has contributed.
         for (int c = 0; c < outChannels; ++c) {
-            int s = (int)((c == 0) ? l : r);
-            s = (int)(s * gain);
-            int acc = (int)out[f * outChannels + c] + s;
-            if (acc >  32767) acc =  32767;
-            if (acc < -32768) acc = -32768;
-            out[f * outChannels + c] = (int16_t)acc;
+            const int16_t sample = (c == 0) ? l : r;
+            out[f * outChannels + c] += audio_mix::scaled_sample(sample, gain);
         }
     }
+    // A buffer ending exactly at this request boundary is already reusable.
+    if (!v.loop && v.pos >= total) v.active = false;
 }
-
 static void SDLCALL audio_callback(void* /*ud*/, Uint8* stream, int len)
 {
-    int16_t* out = (int16_t*)stream;
-    int frames   = len / (s_have.channels * (int)sizeof(int16_t));
-    memset(stream, 0, (size_t)len);
+    if (len <= 0) return;
+    memset(stream, 0, static_cast<size_t>(len));
+    const int channels = s_have.channels;
+    if (channels < 1 || channels > 2) return;
+    const int frames = len / (channels * static_cast<int>(sizeof(int16_t)));
+    std::array<int32_t, audio_mix::kBlockFrames * 2> sum{};
 
     std::lock_guard<std::mutex> lk(s_mu);
-    mix_voice(s_bgm, out, frames, s_have.channels, s_musicVol);
-    for (int i = 0; i < MAX_SFX_VOICES; ++i)
-        mix_voice(s_sfx[i], out, frames, s_have.channels, s_sfxVol);
+    for (int offset = 0; offset < frames; ) {
+        const int count = std::min(frames - offset, static_cast<int>(audio_mix::kBlockFrames));
+        std::fill(sum.begin(), sum.end(), 0);
+        mix_voice(s_bgm, sum.data(), count, channels, s_musicVol);
+        for (int i = 0; i < MAX_SFX_VOICES; ++i)
+            mix_voice(s_sfx[i], sum.data(), count, channels, s_sfxVol);
+        for (int i = 0; i < count * channels; ++i) {
+            const int16_t value = audio_mix::finish_sample(sum[i]);
+            const size_t byteOffset = (static_cast<size_t>(offset) * channels + i) * sizeof(value);
+            memcpy(stream + byteOffset, &value, sizeof(value));
+        }
+        offset += count;
+    }
 }
-
 // ─── init / shutdown ─────────────────────────────────────────────────────────
 bool audio_init()
 {
     if (s_refCount > 0) { ++s_refCount; return s_initialized; }
     ++s_refCount;
 
+    // Prepare C++ storage before acquiring OS resources.
+    try {
+        s_sounds.clear();
+        s_sounds.push_back(SoundData{}); // sentinel handle 0
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "[audio] SDL_InitSubSystem(AUDIO) failed: %s\n", SDL_GetError());
         s_initialized = false;
         return false;
     }
+
+    s_audioOwned = true;
 
     SDL_AudioSpec want{};
     want.freq     = 44100;
@@ -140,13 +170,13 @@ bool audio_init()
     if (s_dev == 0) {
         fprintf(stderr, "[audio] SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        s_audioOwned = false;
         s_initialized = false;
         return false;
     }
 
-    s_sounds.clear();
-    s_sounds.push_back(SoundData{});  // sentinel handle 0
     for (auto& v : s_sfx) v = {};
+    s_sfxOrder.reset();
     s_bgm = {};
 
     SDL_PauseAudioDevice(s_dev, 0);
@@ -165,7 +195,14 @@ void audio_shutdown()
         SDL_CloseAudioDevice(s_dev);
         s_dev = 0;
     }
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    if (s_audioOwned) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        s_audioOwned = false;
+    }
+    for (auto& v : s_sfx) v = {};
+    s_sfxOrder.reset();
+    s_bgm = {};
+    s_currentMusic = 0;
     s_sounds.clear();
     s_initialized = false;
 }
@@ -173,104 +210,114 @@ void audio_shutdown()
 // ─── 로드 / 언로드 ─────────────────────────────────────────────────────────────
 AudioHandle audio_load_sound(const char* filepath)
 {
-    if (!s_initialized) return 0;
+    if (!s_initialized || !filepath || !*filepath) return 0;
 
-    FILE* f = fopen(filepath, "rb");
-    if (!f) { fprintf(stderr, "[audio] open %s failed\n", filepath); return 0; }
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
-    long sz = ftell(f);
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
-    if (sz <= 0) { fclose(f); return 0; }
-    std::vector<uint8_t> raw((size_t)sz);
-    const size_t nread = fread(raw.data(), 1, raw.size(), f);
-    fclose(f);
-    if (nread != raw.size()) {
-        fprintf(stderr, "[audio] read %s failed (%zu/%zu bytes)\n",
-                filepath, nread, raw.size());
+    try {
+        auto pcm = audio_mp3::load(filepath);
+        if (!pcm) {
+            fprintf(stderr, "[audio] decode %s failed: %s\n",
+                    filepath, audio_mp3::error_name(pcm.error));
+            return 0;
+        }
+
+        // SDL_AudioStreamPut takes an int byte count; validate the PCM layout
+        // against that API limit before narrowing.
+        const size_t frames = pcm.channels != 0
+            ? pcm.samples.size() / pcm.channels : 0;
+        const auto layout = audio_pcm::layout_s16(
+            frames, pcm.channels, pcm.rate,
+            static_cast<size_t>(std::numeric_limits<int>::max()));
+        if (!layout) {
+            fprintf(stderr, "[audio] unsupported PCM layout: %s\n", filepath);
+            return 0;
+        }
+
+        SoundData sd;
+
+        if ((int)pcm.channels == s_have.channels &&
+            (int)pcm.rate == s_have.freq)
+        {
+            // Already device format: move the decoded samples in.
+            sd.pcm = std::move(pcm.samples);
+            sd.channels   = pcm.channels;
+            sd.sampleRate = pcm.rate;
+            sd.valid      = true;
+        }
+        else
+        {
+            // Channel count or rate differs: run through an SDL converter.
+            std::unique_ptr<SDL_AudioStream, decltype(&SDL_FreeAudioStream)> conv(
+                SDL_NewAudioStream(
+                    AUDIO_S16SYS, (Uint8)pcm.channels, (int)pcm.rate,
+                    AUDIO_S16SYS, (Uint8)s_have.channels, s_have.freq),
+                &SDL_FreeAudioStream);
+            if (!conv) {
+                fprintf(stderr, "[audio] SDL_NewAudioStream failed for %s: %s\n",
+                        filepath, SDL_GetError());
+                return 0;
+            }
+
+            const int inBytes = static_cast<int>(layout->bytes);
+            if (SDL_AudioStreamPut(conv.get(), pcm.samples.data(), inBytes) != 0 ||
+                SDL_AudioStreamFlush(conv.get()) != 0) {
+                fprintf(stderr, "[audio] resample failed for %s: %s\n",
+                        filepath, SDL_GetError());
+                return 0;  // unique_ptr frees the stream on scope exit.
+            }
+            // Input PCM is no longer needed once the converter consumed it.
+            std::vector<int16_t>().swap(pcm.samples);
+
+            const int outBytes = SDL_AudioStreamAvailable(conv.get());
+            const int frameBytes = s_have.channels * static_cast<int>(sizeof(int16_t));
+            if (outBytes <= 0 || frameBytes <= 0 || outBytes % frameBytes != 0) {
+                fprintf(stderr, "[audio] resample produced incomplete PCM for %s\n", filepath);
+                return 0;
+            }
+            sd.pcm.resize((size_t)outBytes / sizeof(int16_t));
+            const int got = SDL_AudioStreamGet(conv.get(), sd.pcm.data(), outBytes);
+            if (got != outBytes) {
+                fprintf(stderr, "[audio] resample read incomplete for %s (%d/%d)\n",
+                        filepath, got, outBytes);
+                return 0;
+            }
+
+            sd.channels   = (uint32_t)s_have.channels;
+            sd.sampleRate = (uint32_t)s_have.freq;
+            sd.valid      = true;
+        }
+
+        std::lock_guard<std::mutex> lk(s_mu);
+        if (s_sounds.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+            fprintf(stderr, "[audio] sound handle limit reached: %s\n", filepath);
+            return 0;
+        }
+        AudioHandle h = (AudioHandle)s_sounds.size();
+        s_sounds.push_back(std::move(sd));
+        return h;
+    } catch (const std::bad_alloc&) {
+        fprintf(stderr, "[audio] allocation failed: %s\n", filepath);
+        return 0;
+    } catch (const std::length_error&) {
+        fprintf(stderr, "[audio] PCM storage limit: %s\n", filepath);
         return 0;
     }
-
-    drmp3_config cfg{};
-    drmp3_uint64 frames = 0;
-    drmp3_int16* samples = drmp3_open_memory_and_read_pcm_frames_s16(
-        raw.data(), raw.size(), &cfg, &frames, nullptr);
-    if (!samples || frames == 0) {
-        fprintf(stderr, "[audio] decode %s failed\n", filepath);
-        if (samples) drmp3_free(samples, nullptr);
-        return 0;
-    }
-
-    SoundData sd;
-    const size_t total = (size_t)frames * cfg.channels;
-
-    if ((int)cfg.channels == s_have.channels &&
-        (int)cfg.sampleRate == s_have.freq)
-    {
-        // 이미 디바이스 포맷 — 그대로 복사.
-        sd.pcm.assign(samples, samples + total);
-        sd.channels   = cfg.channels;
-        sd.sampleRate = cfg.sampleRate;
-        sd.valid      = true;
-        drmp3_free(samples, nullptr);
-    }
-    else
-    {
-        // 채널 수나 샘플레이트가 다르면 SDL 변환기를 통과시킨다.
-        SDL_AudioStream* conv = SDL_NewAudioStream(
-            AUDIO_S16SYS, (Uint8)cfg.channels, (int)cfg.sampleRate,
-            AUDIO_S16SYS, (Uint8)s_have.channels, s_have.freq);
-        if (!conv) {
-            fprintf(stderr, "[audio] SDL_NewAudioStream failed for %s: %s\n",
-                    filepath, SDL_GetError());
-            drmp3_free(samples, nullptr);
-            return 0;
-        }
-        const int inBytes = (int)(total * sizeof(int16_t));
-        if (SDL_AudioStreamPut(conv, samples, inBytes) != 0 ||
-            SDL_AudioStreamFlush(conv) != 0) {
-            fprintf(stderr, "[audio] resample failed for %s: %s\n",
-                    filepath, SDL_GetError());
-            SDL_FreeAudioStream(conv);
-            drmp3_free(samples, nullptr);
-            return 0;
-        }
-        drmp3_free(samples, nullptr);
-
-        const int outBytes = SDL_AudioStreamAvailable(conv);
-        if (outBytes <= 0) {
-            fprintf(stderr, "[audio] resample produced nothing for %s\n", filepath);
-            SDL_FreeAudioStream(conv);
-            return 0;
-        }
-        sd.pcm.resize((size_t)outBytes / sizeof(int16_t));
-        SDL_AudioStreamGet(conv, sd.pcm.data(), outBytes);
-        SDL_FreeAudioStream(conv);
-
-        sd.channels   = (uint32_t)s_have.channels;
-        sd.sampleRate = (uint32_t)s_have.freq;
-        sd.valid      = true;
-    }
-
-    std::lock_guard<std::mutex> lk(s_mu);
-    AudioHandle h = (AudioHandle)s_sounds.size();
-    s_sounds.push_back(std::move(sd));
-    return h;
 }
-
 void audio_unload_sound(AudioHandle h)
 {
     if (!s_initialized) return;
     if (h <= 0 || h >= (int)s_sounds.size()) return;
 
-    std::lock_guard<std::mutex> lk(s_mu);
-    if (s_bgm.handle == h) s_bgm = {};
-    if (s_currentMusic == h) s_currentMusic = 0;  // 언로드된 핸들로 off→on 복원 금지
-    for (auto& v : s_sfx) if (v.handle == h) v = {};
-    s_sounds[h].pcm.clear();
-    s_sounds[h].pcm.shrink_to_fit();
-    s_sounds[h].valid = false;
+    // Disconnect every reader under the lock; release storage after unlocking.
+    std::vector<int16_t> retired;
+    {
+        std::lock_guard<std::mutex> lk(s_mu);
+        if (s_bgm.handle == h) s_bgm = {};
+        if (s_currentMusic == h) s_currentMusic = 0;
+        for (auto& v : s_sfx) if (v.handle == h) v = {};
+        retired.swap(s_sounds[h].pcm);
+        s_sounds[h].valid = false;
+    }
 }
-
 // ─── 재생 ─────────────────────────────────────────────────────────────────────
 void audio_play_sound(AudioHandle h)
 {
@@ -283,8 +330,9 @@ void audio_play_sound(AudioHandle h)
     for (int i = 0; i < MAX_SFX_VOICES; ++i) {
         if (!s_sfx[i].active) { slot = i; break; }
     }
-    if (slot < 0) slot = 0;  // 모두 바쁘면 첫 번째를 강제 교체
+    if (slot < 0) slot = static_cast<int>(s_sfxOrder.oldest());
     s_sfx[slot] = Voice{ h, 0, false, true };
+    s_sfxOrder.mark_started(static_cast<size_t>(slot));
 }
 
 void audio_play_music(AudioHandle h)
@@ -308,6 +356,7 @@ void audio_stop_music()
 void audio_set_music_enabled(bool on)
 {
     std::lock_guard<std::mutex> lk(s_mu);
+    if (s_musicEnabled == on) return; // Setting a state is not a replay command.
     s_musicEnabled = on;
     if (!s_initialized) return;
     if (on) {
@@ -327,16 +376,14 @@ void audio_set_sfx_enabled(bool on)
 
 void audio_set_music_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     std::lock_guard<std::mutex> lk(s_mu);
     s_musicVol = v01;
 }
 
 void audio_set_sfx_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     std::lock_guard<std::mutex> lk(s_mu);
     s_sfxVol = v01;
 }

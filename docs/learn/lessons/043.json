@@ -1,0 +1,423 @@
+{
+  "id": "lesson-43",
+  "title": "T-spin과 콤보: 판정에 필요한 이력을 남기기",
+  "shortTitle": "회전 이력과 연속 삭제",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 공격량은 지운 줄 수만으로 계산하고, 회전 경로나 연속 삭제를 보상에 반영하지 않습니다.",
+  "finish": "완료: 회전 자격과 연속 삭제를 상태로 보관하고, 고정 전 판정과 고정 후 보상을 연결합니다.",
+  "objective": "입력과 성공한 전이를 구별하고, 서로 다른 수명의 상태와 판정 시점을 구현·예측합니다.",
+  "prerequisites": [
+    "42차시 체크포인트",
+    "회전 중심·킥 후보",
+    "고정·삭제·점수·공격 전달"
+  ],
+  "validation": [
+    "Linux SCRIPTED35/SDL35 CTests·경고0·CPU 독립 링크·UBSan",
+    "10048 모서리 배치·90 보상 전이·318 회전 거부·102 킥 성공·피스/틱/연속 상태 수명·레벨/포화 경계",
+    "실제 SimGame T-spin0/1/2·하드 드롭 이력 유지·성공/거부 이동·배치 API 제외·이력 해시; 루트9 CTests·tetris·기존 hash dump 일치",
+    "18 SDL offscreen GL: 0/1/2줄 T-spin 전후×3크기, 독립 보드 필터·VBO·모든 RGB 오차≤2/255; 점수/미리보기 제외",
+    "대기 초기화/2모서리/연속 초기화 누락 mutation Release 거부; native 게임 창·물리키·모니터·Win32 미검증",
+    "CUA43: 오답/재선택 숨김/정답 해설·검수 선택 해제·IsTSpinLock 스냅샷 문맥·390px 콤보 표 스크롤 확인",
+    "ApplyPlacement(INT_MIN) UBSan 재현 후 로컬 열+외부 열을 int64로 선검증; 양 극단256입력·유효 음수 원점·실패 시 해시 보존"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 작은 보상 함수 초안 검토; 현재 이력 API 대조; 경계·통합·GPU·화면 검사",
+    "draftJob": "out/learning-jobs/043-history-events.jsonl",
+    "corrections": [
+      "보조 초안의 saturating_add 네임스페이스 누락과 중복 상한 함수 교정",
+      "T-spin0의 점수 보상을 단순 유효 입력과 혼동한 초안 설명 폐기",
+      "현재 코드의 하드 드롭 이력 보존과 배치 API 제외,콤보 미구현을 명시"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "두 판을 진행한 뒤 새 공격량만 상대 대기에 전달합니다.",
+      "가비지는 받은 즉시가 아니라 고정 경계에서 보드를 바꿉니다.",
+      "상단 점유 손실과 스폰 충돌은 서로 다른 종료 조건입니다."
+    ],
+    "bridge": "이제 고정의 보상을 지운 행뿐 아니라 회전 경로와 연속 삭제 이력으로 확장합니다."
+  },
+  "sections": [
+    {
+      "title": "같은 모양인데 다음 보상이 달라진다면",
+      "body": "보드와 T의 위치·방향이 같은 두 판을 생각해 봅시다. 한 판은 회전으로 그 위치에 도착했고, 다른 판은 좌우 이동으로 도착했습니다. 규칙이 회전 경로에 보너스를 준다면 화면만으로 둘을 구분할 수 없습니다.\n\n상태란 단순히 보이는 물체의 목록이 아닙니다. **다음 입력의 결과를 결정하는 데 필요한 정보**입니다. 모든 과거 입력을 저장할 필요는 없지만, 규칙이 참조하는 과거의 요약은 남겨야 합니다. 이번에는 회전 자격을 bool로, 연속 삭제 횟수를 정수로 요약합니다.\n\n이렇게 필요한 이력을 현재 상태에 넣으면 다음 전이를 현재 상태와 입력으로 계산할 수 있습니다. 같은 현재 상태라면 더 오래된 과거를 다시 뒤질 필요가 없다는 의미입니다. 반대로 회전 자격을 빼놓은 “같은 상태”는 판정에 필요한 정보를 누락한 비교입니다.",
+      "notes": [
+        {
+          "kind": "생각 실험",
+          "title": "최종 위치만 기록한 리플레이",
+          "body": "회전 후 하드 드롭과, 목표 좌표를 직접 지정한 배치는 같은 네 칸을 채울 수 있습니다. 보상 규칙이 경로를 구별한다면 최종 위치만 기록해서는 둘의 보상을 복원할 수 없습니다. 어떤 입력 수준을 기록할지부터 계약으로 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "회전 요청과 회전 성공을 구별한다",
+      "body": "Round에 rotation_ready_를 추가합니다. 이는 “이번 틱에 Up을 눌렀는가”도, “화면의 방향이 기본 방향과 다른가”도 아닙니다. **회전이 성공한 뒤 자격을 없애는 전이가 아직 일어나지 않았는가**를 나타냅니다.\n\n| 받아들인 결과 | 회전 자격 |\n| --- | --- |\n| 회전 성공, 킥으로 원점이 옮겨진 경우 포함 | true |\n| 좌·우 이동 성공 | false |\n| 소프트 드롭 또는 자연 낙하가 실제 한 칸 이동 | false |\n| 이동·회전이 막힘, 아무 이동 없는 틱 | 유지 |\n| 하드 드롭 | 거리와 관계없이 유지 |\n| 고정 판정 완료, 다음 피스 준비 | false |\n\n하드 드롭의 보존은 이 프로젝트가 선택한 정책입니다. 아래로 한 칸씩 내리는 경로와 다르게 취급하므로 이름을 “마지막 위치 변경”이라고만 설명하면 틀립니다. 코드는 동작 이름이 아니라 실제로 어떤 함수에서 이력이 바뀌는지 읽어야 합니다.\n\n킥은 회전 후보를 찾는 과정입니다. 회전이 성공하면서 원점도 옮겨졌다고 좌우 이동 후처리를 한 번 더 적용하면 방금 얻은 자격을 지워버립니다. 최종적으로 성공한 **회전 전이 하나**로 기록합니다.",
+      "codes": [
+        {
+          "label": "좌우 이동과 회전의 이력 갱신",
+          "language": "cpp",
+          "text": "        const auto move = study_collision::try_shift(candidate.board_,\n                                                     *candidate.active_, direction);\n        if (move == study_movement::Result::invalid) return Step::invalid;\n        if (move == study_movement::Result::moved) candidate.rotation_ready_ = false;\n        auto turn = study_rotation::Result::blocked; // No requested shape change.\n        if (clockwise) {\n            const auto rotation = study_kicks::try_clockwise(candidate.board_,*candidate.active_,\n                                                             candidate.kind_,candidate.quarter_);\n            turn = rotation.result;\n            candidate.last_rotation_candidate_ = rotation.candidate_index;\n            if (turn == study_rotation::Result::invalid) return Step::invalid;\n            if (turn == study_rotation::Result::rotated) candidate.rotation_ready_ = true;\n        }"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::RotateBlockImpl()",
+        "invariant": "성공한 회전만 자격을 설정하고 거부된 요청은 기존 상태를 보존한다.",
+        "mayDiffer": "예제는 정해진 순서의 킥 후보를 사용하지만 현재 SimGame은 제자리 회전만 시도한다.",
+        "omitted": "표준 SRS·Mini 판정·회전 애니메이션은 구현하지 않는다."
+      }
+    },
+    {
+      "title": "한 틱에 여러 동작이 있으면 순서가 규칙이다",
+      "body": "예제의 입력 순서는 좌우→회전→소프트 시계 갱신입니다. 그 뒤 hard_drop이면 바로 착지·고정하고, 아니면 소프트 이동과 자연 중력을 진행합니다.\n\n따라서 좌우 이동과 회전이 함께 성공하면 마지막 회전이 자격을 다시 켭니다. 회전은 성공했어도 같은 틱의 자연 중력이 한 칸 내리면 자격은 꺼집니다. 반면 회전과 하드 드롭을 함께 요청하면 자격을 유지한 채 착지에서 판정합니다. 단순히 틱 끝에 clockwise 값을 복사하는 구현으로는 이 차이를 표현할 수 없습니다.\n\n대기 틱마다 초기화하는 last_rotation_candidate는 그 틱의 보고이고, rotation_ready_는 다음 틱으로 이어지는 규칙 상태입니다. 두 값은 수명이 다릅니다. invalid 입력은 후보를 버리므로 이력도 원본에 남고, stopped 판은 아무 전이도 하지 않습니다.",
+      "codes": [
+        {
+          "label": "하드 드롭은 자격을 유지한다",
+          "language": "cpp",
+          "text": "            // Project policy: hard drop preserves rotation eligibility, even with travel.\n            candidate.active_ = landing->piece;\n            candidate.last_hard_drop_distance_ = landing->distance;"
+        },
+        {
+          "label": "실제 아래 이동은 자격을 해제한다",
+          "language": "cpp",
+          "text": "            if (fall == study_gravity::TickResult::invalid) return Step::invalid;\n            if (soft == study_movement::Result::moved || fall == study_gravity::TickResult::moved)\n                candidate.rotation_ready_ = false;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "순서 예측",
+          "title": "회전 성공과 자연 낙하가 같은 틱이라면",
+          "body": "중력 시계가 만료되었더라도 아래가 막혀 있다면 실제 이동은 없습니다. 자격을 유지하고 고정합니다. 만료만으로 false를 쓰지 말고 TickResult::moved인지 확인해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "중심은 모양의 최소 사각형이 아니다",
+      "body": "T의 공통 로컬 회전 중심은 (1,1)입니다. 현재 네 칸만 감싸는 최소 사각형의 중앙이 아닙니다. 원점이 (17,3)이면 보드 중심은 (18,4), 대각선 모서리는 (17,3), (17,5), (19,3), (19,5)입니다.\n\n오른쪽을 향한 T는 (17,4), (18,4), (18,5), (19,4)를 차지합니다. 중심 주변 네 모서리에는 T 자신의 셀이 없습니다. 예를 들어 북서·남서·남동이 막혀 있으면 세 모서리 조건을 만족합니다. 보드 바깥도 막힘으로 취급합니다.\n\n판정 함수는 먼저 종류·방향과 로컬 모양의 일치, 현재 배치의 유효성을 확인합니다. 잘못된 배치는 nullopt, 유효하지만 T-spin이 아닌 경우는 false입니다. 원점과 중심의 덧셈은 넓은 정수에서 수행합니다. 현재 호출 계약으로 좌표가 작더라도 연산 순서를 명확히 남깁니다.",
+      "codes": [
+        {
+          "label": "고정 직전의 모서리 판정",
+          "language": "cpp",
+          "text": "inline std::optional<bool> classify(const study_grid::Grid& board,\n                                    const study_piece::Piece& piece,\n                                    study_catalog::Kind kind, int quarter,\n                                    bool rotation_ready) noexcept {\n    const auto shape = study_rotation::shape_at(kind,quarter);\n    if (!shape || !study_rotation::same_cells(*shape,piece.local) ||\n        study_collision::classify(board,piece) != study_collision::Placement::clear)\n        return std::nullopt;\n    if (kind != study_catalog::Kind::T || !rotation_ready) return false;\n    // T's fixed local pivot is (1,1), not its current bounding-box center.\n    // Widen before adding, even though the valid-pose contract bounds this origin.\n    const std::int64_t pr = std::int64_t{piece.origin.row} + 1;\n    const std::int64_t pc = std::int64_t{piece.origin.column} + 1;\n    int blocked = 0;\n    for (int dr : {-1,1}) for (int dc : {-1,1}) {\n        const auto r=pr+dr,c=pc+dc;\n        if (r<0 || r>=study_grid::Grid::kRows || c<0 || c>=study_grid::Grid::kColumns)\n            ++blocked;\n        else if (board.get(static_cast<int>(r),static_cast<int>(c)) == study_grid::Cell::filled)\n            ++blocked;\n    }\n    return blocked >= 3;\n}"
+        },
+        {
+          "label": "simulation/t_spin.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/simulation/t_spin.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "bool SimGame::IsTSpinLock() const",
+        "invariant": "T 종류·회전 자격·고정 전 보드의 세 모서리 조건을 함께 검사한다.",
+        "mayDiffer": "현재 함수는 SimGame 내부의 유효 배치를 전제로 한다. 예제는 입력 유효성까지 optional로 구분한다.",
+        "omitted": "회전 중간 궤적·Mini의 앞쪽 모서리 구분·벽킥 종류별 특별 판정은 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "C++ 읽기",
+          "title": "optional<bool>에는 세 가지 결과가 있다",
+          "body": "nullopt는 잘못된 입력, 값이 있는 false는 유효한 비-T-spin, 값이 있는 true는 T-spin입니다. if (!spin)은 값이 없는지만 검사합니다. 판정값을 읽으려면 값이 존재함을 확인한 뒤 *spin을 사용합니다. false가 들어 있다고 optional 자체가 비어 있는 것은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "판정은 고정 전, 보상은 행 삭제 후",
+      "body": "T-spin 여부와 삭제 수는 서로 다른 시점에 알 수 있습니다. 자격과 모서리는 현재 피스가 살아 있는 고정 직전에 읽습니다. 몇 행을 지웠는지는 네 셀을 보드에 기록하고 완성 행을 제거한 뒤 알 수 있습니다.\n\n1. 현재 피스와 보드로 spin을 판정합니다.\n2. 네 셀을 고정하고 활성 피스를 없앱니다.\n3. 완성 행을 지워 rows를 구합니다.\n4. 저장해 둔 spin과 rows로 점수·연속 삭제·공격을 계산합니다.\n5. 가비지·다음 큐·스폰 처리를 이어갑니다.\n\n삭제 후 보드로 모서리를 세면 이미 사라졌거나 아래로 이동한 셀을 보게 됩니다. 다음 피스로 바꾼 뒤 판정하면 아예 다른 피스의 중심을 읽습니다. 필요한 순간의 결론을 bool 값으로 보관하는 이유입니다. 후보 Round 전체가 성공했을 때만 이 결과와 보상 상태를 함께 게시합니다.",
+      "codes": [
+        {
+          "label": "판정값을 보상 단계까지 보관",
+          "language": "cpp",
+          "text": "        const auto spin = study_spin::classify(candidate.board_,*candidate.active_,\n                                               candidate.kind_,candidate.quarter_,candidate.rotation_ready_);\n        if (!spin) return Step::invalid;\n        if (study_locking::try_lock(candidate.board_, *candidate.active_) !=\n            study_locking::Result::locked) return Step::invalid;\n        candidate.active_.reset(); // The locked piece now belongs to the board.\n        // Resolve the board before testing the next spawn.\n        candidate.last_cleared_ = study_lines::clear_full_rows(candidate.board_);\n        candidate.last_t_spin_lines_ = *spin ? candidate.last_cleared_ : -1;\n        const auto scored = study_score::award(candidate.totals_,candidate.last_cleared_,*spin);\n        if (!scored) return Step::invalid;"
+        }
+      ]
+    },
+    {
+      "title": "0줄 T-spin도 점수와 공격이 다르다",
+      "body": "일반 삭제 점수는 그대로 두고 T-spin 표를 추가합니다. 0줄 T-spin도 레벨 1에서 400점을 얻지만 공격은 0입니다. “삭제하지 않았으니 아무 일도 없음”과는 다릅니다.\n\n| 삭제 수 | T-spin 기본 점수 | 기본 공격 |\n| --- | --- | --- |\n| 0 | 400 | 0 |\n| 1 | 800 | 2 |\n| 2 | 1200 | 4 |\n| 3 | 1600 | 6 |\n\n점수는 삭제 **직전 레벨**을 곱하고 누적값에 포화 덧셈합니다. 총 19줄·레벨 2에서 두 줄 T-spin이면 2400점을 얻고, 총 21줄이 된 뒤 레벨 3이 됩니다.\n\n레벨은 줄 합계에서 유도하므로 따로 임의 설정하지 않습니다. T-spin은 0~3줄, 일반은 0~4줄을 허용하고 범위 밖 입력은 거부합니다.",
+      "codes": [
+        {
+          "label": "T-spin 점수표",
+          "language": "cpp",
+          "text": "inline std::optional<std::uint64_t> spin_points(int rows, unsigned level) noexcept {\n    if (rows < 0 || rows > 3 || level < 1 || level > 20) return std::nullopt;\n    constexpr std::uint64_t table[] = {400,800,1200,1600};\n    return table[rows] * level;\n}"
+        },
+        {
+          "label": "삭제 전 레벨로 누적 점수 갱신",
+          "language": "cpp",
+          "text": "inline std::optional<Totals> award(const Totals& before, int rows, bool t_spin = false) noexcept {\n    const auto points = t_spin ? spin_points(rows,level(before)) : normal_points(rows,level(before));\n    if (!points) return std::nullopt;\n    Totals after = before;\n    after.points = saturating_add(before.points, *points);\n    after.lines = saturating_add(before.lines, static_cast<std::uint64_t>(rows));\n    return after;\n}"
+        }
+      ]
+    },
+    {
+      "title": "콤보는 틱 수가 아니라 삭제한 고정의 연속이다",
+      "body": "연속 삭제 규칙을 작게 추가합니다. chain.clears는 지금까지 연속으로 한 행 이상 지운 **고정 횟수**입니다. 한 번에 네 줄을 지워도 1 증가합니다. 삭제 0인 고정은 0으로 돌아가며, 고정하지 않은 대기 틱은 값을 유지합니다.\n\n| 고정에서 지운 행 | 1 | 1 | 1 | 0 | 1 |\n| --- | --- | --- | --- | --- | --- |\n| 고정 후 연속 횟수 | 1 | 2 | 3 | 0 | 1 |\n| 추가 공격 | 0 | 0 | 1 | 0 | 0 |\n\n이 예제의 추가 공격은 연속 1~2회 0,3~4회 1,5~6회 2,7~8회 3,9회 이상 4입니다. 기본 공격에 더하며 별도 콤보 점수는 없습니다. 상한에 도달해도 연속 횟수 자체는 uint64 범위에서 포화하며 기록됩니다.\n\nT-spin 0은 점수를 얻어도 삭제가 0이므로 연속 삭제를 끊습니다. 보상 유무와 연속 조건을 같은 bool로 묶으면 이 규칙을 잘못 구현합니다. Mini나 B2B처럼 다른 조건의 연속은 별도 계약이며 여기서는 넣지 않습니다.",
+      "notes": [
+        {
+          "kind": "용어",
+          "title": "첫 삭제를 0콤보라고 부르는 규칙도 있다",
+          "body": "이 예제의 clears는 첫 삭제를 1로 셉니다. 화면에 보일 콤보 이름과 내부 카운터의 기준을 구분하세요. 다른 게임의 표를 가져올 때 시작 번호만 다르다고 생각하지 말고 증가·초기화·보상 시점을 함께 비교해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "순수한 보상 함수는 상태를 반환한다",
+      "body": "reward는 이전 Chain과 rows·spin을 받고, 다음 Chain과 이번 공격량을 함께 반환합니다. 전역 상태나 숨은 타이머를 읽지 않습니다. 같은 인자에 같은 결과를 돌려주는 작은 순수 변환이므로 표의 경계와 초기화를 따로 실험할 수 있습니다.\n\n보너스를 구할 때 큰 uint64를 먼저 int로 바꾸지 않습니다. 9 이상이면 보너스 4라는 결론을 먼저 내리고, 작은 범위에서만 `(clears-1)/2`를 계산합니다. 0에서는 빼지 않습니다. 이렇게 비교를 앞에 두면 넓은 카운터 전체를 좁은 타입으로 표현할 필요가 없습니다.\n\n유효 입력의 기본 공격은 최대 6이고 보너스는 최대 4이므로 합은 최대 10입니다. 이 경계가 증명된 뒤에는 합계를 다시 임의로 잘라내는 중복 코드를 넣지 않습니다. Round는 결과를 자신의 chain_과 attack_sent_에 적용합니다.",
+      "codes": [
+        {
+          "label": "보너스의 작은 범위만 계산",
+          "language": "cpp",
+          "text": "inline int combo_bonus(std::uint64_t clears) noexcept {\n    if (clears >= 9) return 4;\n    if (clears == 0) return 0;\n    return static_cast<int>((clears - 1) / 2);\n}"
+        },
+        {
+          "label": "고정 보상과 다음 연속 상태",
+          "language": "cpp",
+          "text": "inline std::optional<ClearReward> reward(Chain before,\n                                         int rows,\n                                         bool t_spin) noexcept {\n    // Bounds: normal rows 0..4, spin rows 0..3; otherwise invalid.\n    if (rows < 0) return std::nullopt;\n    if (t_spin) {\n        if (rows > 3) return std::nullopt;\n    } else {\n        if (rows > 4) return std::nullopt;\n    }\n\n    // AFTER streak: positive locks extend saturating, zero lines reset.\n    Chain after;\n    if (rows > 0) {\n        after.clears = study_score::saturating_add(before.clears, static_cast<std::uint64_t>(1));\n    } else {\n        after.clears = 0;  // resets even for a T-spin 0\n    }\n\n    // Base attack from the variant table.\n    static const int k_normal[5] = {0, 0, 1, 2, 4};\n    static const int k_spin[4]   = {0, 2, 4, 6};\n    const int base = t_spin ? k_spin[rows] : k_normal[rows];\n\n    // Combo bonus only for clearing locks, based on the AFTER streak.\n    const int bonus = (rows > 0) ? detail::combo_bonus(after.clears) : 0;\n\n    ClearReward out;\n    out.chain = after;\n    out.attack = base + bonus;\n    return out;\n}"
+        },
+        {
+          "label": "simulation/history.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/simulation/history.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "한 고정의 결과를 Round에 모은다",
+      "body": "finish_lock은 판정값을 보관한 뒤 점수와 연속 삭제를 계산합니다. 새 Chain을 후보에 넣고 공격 총량에는 이번 reward.attack만 더합니다. 기존 Duel은 총량의 증가분을 전달하므로 콤보가 추가되어도 별도의 공격 전송 경로가 필요하지 않습니다.\n\n회전 자격은 현재 피스의 이력이므로 다음 피스를 준비할 때 꺼집니다. 연속 삭제는 피스 여러 개에 걸친 이력이므로 스폰 때문에 꺼지지 않습니다. 서로 다른 수명을 가진 상태를 초기화 함수 하나로 무조건 지우면 콤보가 영원히 1을 넘지 못합니다.\n\nlast_t_spin_lines는 -1이면 해당 틱에 T-spin 고정이 없고,0~3이면 그 결과입니다. 다음 대기 틱에서는 -1로 돌아갑니다. main은 고정 직후 이를 읽고, clear_streak는 현재 연속 상태로 읽습니다. 모든 연출 사건을 보관하는 큐는 아닙니다.",
+      "codes": [
+        {
+          "label": "보상 상태 적용과 현재 피스 이력 초기화",
+          "language": "cpp",
+          "text": "        const auto reward = study_history::reward(candidate.chain_,candidate.last_cleared_,*spin);\n        if (!reward) return Step::invalid;\n        candidate.chain_ = reward->chain;\n        candidate.rotation_ready_ = false;\n        candidate.attack_sent_ = study_score::saturating_add(candidate.attack_sent_,\n                                                           static_cast<std::uint64_t>(reward->attack));"
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/simulation/round.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "실제 배치형 봇이 알 수 없는 정보",
+      "body": "현재 SimGame은 성공한 좌·우·아래 이동에서 lastMoveWasRotate를 지우고 하드 드롭에서는 유지합니다. 하지만 ApplyPlacement는 목표 회전·열을 직접 지정하고 착지한 뒤 자격을 false로 만들어 고정합니다. 최종 배치만 받는 API에는 실제 회전 경로가 없기 때문입니다.\n\n따라서 같은 네 칸을 채워도 프레임 입력 경로와 배치 경로의 보상이 다를 수 있습니다. 배치형 모델이 지금 T-spin을 배울 수 있다고 가정해서는 안 됩니다. 향후 봇 단원에서는 도달 가능한 입력 순서 생성과 실행 속도, 보상 검증을 함께 설계해야 합니다. 결과 위치만 보고 회전 자격을 true로 추측하는 것은 해결책이 아닙니다.\n\n현재 게임에는 콤보 카운터와 보너스가 없습니다. 이번 누적 체크포인트에 추가한 교육용 정책과 구별합니다. 회전표·공격표를 바꾸는 것과, 경로를 표현하는 행동 공간을 바꾸는 것은 서로 다른 변경입니다.\n\n배치 좌표는 외부 인자이므로 셀 좌표를 만드는 연산부터 범위를 확인합니다. 현재 ApplyPlacement는 각 로컬 열에 요청 열을 int64로 더해 보드 범위인지 확인한 뒤 원점을 대입합니다. `col - oldOrigin`을 먼저 int로 계산하거나 잘못된 큰 원점을 대입한 뒤 충돌 검사에 맡기면, 검사에 도달하기 전에 정수 넘침이 발생할 수 있습니다. 원점이 음수여도 실제 네 셀이 모두 보드 안이면 유효할 수 있으므로 원점의 부호만으로 거부하지 않습니다.\n\n현재 LegalPlacements의 탐색 열은 0~9로 제한됩니다. 세로 I의 원점 -2처럼 셀은 보드 안이지만 목록에 없는 배치도 ApplyPlacement는 받을 수 있습니다. “검증 함수가 받을 수 있는 배치”와 “모델에 제시한 행동 목록”은 동일하지 않습니다. 행동 범위를 넓히는 작업은 모델의 출력·마스크·실행 계약과 함께 다뤄야 합니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement(int col, int rot)",
+        "invariant": "최종 배치 계약에 없는 경로 이력을 추측하지 않는다.",
+        "mayDiffer": "현재 배치 API는 회전 자격을 지운다. 예제 Round는 틱별 실제 전이에서 이력을 갱신한다.",
+        "omitted": "배치 API의 T-spin 학습 지원·입력 경로 계획·새 콤보의 실제 게임 이식은 이번 단계에서 수행하지 않는다."
+      }
+    },
+    {
+      "title": "해시는 이력을 비교하지만 결정론을 만들지는 않는다",
+      "body": "보드와 피스 좌표만 저장한 복사본에서 자격을 잊으면 다음 고정 보상이 달라질 수 있습니다. 재개에 필요한 데이터에는 보드·피스·큐뿐 아니라 회전 자격과 연속 삭제, 시계·난수 상태도 포함됩니다. 예제의 값 복사에는 새 멤버도 함께 들어갑니다.\n\n현재 StateHash는 lastMoveWasRotate를 포함합니다. 같은 T가 네 번 회전해서 처음 방향으로 돌아오면 모양은 같아도 회전 자격 때문에 해시가 달라질 수 있습니다. 그 차이는 불필요한 잡음이 아니라 규칙에 필요한 상태 차이입니다.\n\n해시에 넣는 것만으로 같은 상태가 만들어지는 것은 아닙니다. 같은 규칙·초기 상태와 같은 입력/틱 순서가 같은 전이를 만들어야 하고, 해시는 그 결과를 비교하는 보조 값입니다. 충돌 가능성이 있는 유한 요약이며 인증이나 어뷰징 방어를 대신하지 않습니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimGame::HashBreakdown SimGame::StateHashBreakdown() const",
+        "invariant": "다음 규칙 결과를 바꿀 수 있는 이력도 상태 비교에 포함한다.",
+        "mayDiffer": "현재 scoreFlags에는 회전 자격이 있으나 예제에서 새로 추가한 콤보는 현재 코드에 존재하지 않는다.",
+        "omitted": "체크포인트 직렬화·해시 알고리즘·재현 입력 기록은 시간과 재현성 단원에서 만든다."
+      }
+    },
+    {
+      "title": "작은 실행 기록으로 정책을 확인한다",
+      "body": "43-history는 42-combat의 누적 코드를 이어받습니다. simulation에 t_spin.h와 history.h를 추가하고 score.h·round.h를 확장합니다. 렌더러는 판정 함수를 호출하지 않습니다. 최종 Round의 점수·보드·피스를 읽는 역할을 유지합니다.\n\nhistory_demo는 T가 오른쪽으로 회전한 뒤 원점(17,3)에 착지하는 0·1·2줄 사례를 실행합니다. 그 다음 보상 함수에 삭제열 1,1,1,0,1을 넣어 콤보 초기화를 봅니다.\n\n```sh\ncmake -S docs/learn/checkpoints/43-history -B out/study-43 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-43\n./out/study-43/history_demo\nctest --test-dir out/study-43 --output-on-failure\n```\n\n```text\nspin=0 score=400 attack=0 streak=0\nspin=1 score=800 attack=2 streak=1\nspin=2 score=1200 attack=4 streak=1\nrows=1 streak=1 attack=0\nrows=1 streak=2 attack=0\nrows=1 streak=3 attack=1\nrows=0 streak=0 attack=0\nrows=1 streak=1 attack=0\n```\n\n앞의 세 판은 각각 새로 시작하므로 누적 연속 3회가 아닙니다. 뒤의 다섯 줄만 하나의 Chain을 이어받습니다. 같은 출력 줄들이라고 같은 상태 소유자를 공유한다고 읽지 마세요.",
+      "codes": [
+        {
+          "label": "src/history_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/src/history_demo.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 실행·검사 타깃",
+          "language": "cpp",
+          "text": "add_executable(history_demo src/history_demo.cpp)\ntarget_link_libraries(history_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(history_contract tests/history_contract.cpp)\n    target_link_libraries(history_contract PRIVATE study_mesh)\n    add_test(NAME history_contract COMMAND history_contract)\nendif()"
+        }
+      ]
+    },
+    {
+      "title": "창에서 판정과 화면을 따로 관찰한다",
+      "body": "SDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core 환경에서 한 판을 엽니다.\n\n```sh\ncmake -S docs/learn/checkpoints/43-history -B out/study-43-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-43-sdl\n./out/study-43-sdl/tetris T spin\n```\n\nUp으로 한 번 회전한 뒤 자연 낙하가 한 칸 진행되기 전에 Space로 고정합니다. 이력 보존 시 1줄 T-spin으로 800점·공격 2·연속 1을 얻습니다. 회전 후 자연 낙하나 Down으로 실제 이동했다면 자격이 꺼져 일반 1줄 100점입니다. 시간 순서를 직접 비교하기 어려우면 CPU 데모의 한 틱 입력부터 확인하세요.\n\n창은 최종 점수·보드·고스트를 갱신하고 콘솔에는 고정 직후 `spin lines`와 `clear streak`를 출력합니다. 콤보 배너나 별도 T-spin 애니메이션은 아직 없습니다. 키는 Left/Right 이동,Up 회전,Down 유지 낙하,Space 하드 드롭,Escape/닫기 종료입니다. 다중 구성 빌드는 구성별 실행 경로를 사용합니다.\n\n아래 그림은 준비된 T와 보드, 회전·고정·한 행 삭제 후 새 Z를 비교합니다. 점수·미리보기는 생략한 보드 관찰 그림입니다. 고스트의 위치가 달라지는 것은 최종 보드에서 다시 착지를 계산하기 때문입니다.\n\n![회전 전 준비 보드: 하단 한 줄의 빈틈과 T](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAADwCAIAAAD+Tyo8AAAGIUlEQVR4nO3asW2mVRRF0QkJCQkphVIoZTqjtKECO4Dt53OlZa3sBP70pK2b/D9++/0P4Kgf3/4FwH8mYDhMwHCYgOEwAcNhAobDBAyHCRgOEzAcJmA4TMBwmIDhMAHDYQKGwwQMhwkYDhMwHCZgOEzAcJiAM3/+9fdHvnT98c+vj3zjV32+UhFwRsACfk/AGQEL+D0BZwQs4PcEnBGwgN8TcEbAAn5PwBkBC/g9AWcELOD3BJwRsIDfEzAcJuDMd93Y/7O6wNcJOCNgAb8n4IyABfyegDMCFvB7As4IWMDvCTgjYAG/J+CMgAX8noAzAhbwewLOCFjA7wkYDhNw5ruu2cWVioAzm6lsrlQEnNlMZXOlIuDMZiqbKxUBZzZT2VypCDizmcrmSkXAmc1UNlcqAs5sprK5UhFwZjOVzZWKgOEwAWc2b93mSkXAmc1UNlcqAs5sprK5UhFwZjOVzZWKgDObqWyuVASc2Uxlc6Ui4MxmKpsrFQFnNlPZXKkIOLOZyuZKRcBwmIAzm7duc6Ui4MxmKpsrFQFnNlPZXKkIOLOZyuZKRcCZzVQ2VyoCzmymsrlSEXBmM5XNlYqAM5upbK5UBJzZTGVzpSJgOEzAmc1bt7lSEXBmM5XNlYqAM5upbK5UBJzZTGVzpSLgzGYqmysVAWc2U9lcqQg4s5nK5kpFwJnNVDZXKgLObKayuVIRMBwm4MzmrdtcqQg4s5nK5kpFwJnNVDZXKgLObKayuVIRcGYzlc2VioAzm6lsrlQEnNlMZXOlIuDMZiqbKxUBZzZT2VypCBgOE3Bm89ZtrlQEnNlMZXOlIuDMZiqbKxUBZzZT2VypCDizmcrmSkXAmc1UNlcqAs5sprK5UhFwZjOVzZWKgDObqWyuVAQMhwk4s3nrNlcqAs5sprK5UhFwZjOVzZWKgDObqWyuVASc2Uxlc6Ui4MxmKpsrFQFnNlPZXKkIOLOZyuZKRcCZzVQ2VyoChsMEnNm8dZsrFQFnNlPZXKkIOLOZyuZKRcCZzVQ2VyoCzmymsrlSEXBmM5XNlYqAM5upbK5UBJzZTGVzpSLgzGYqmysVAcNhAs5s3rrNlYqAM5upbK5UBJzZTGVzpSLgzGYqmysVAWc2U9lcqQg4s5nK5kpFwJnNVDZXKgLObKayuVIRcGYzlc2VioDhMAFnNm/d5kpFwJnNVDZXKgLObKayuVIRcGYzlc2VioAzm6lsrlQEnNlMZXOlIuDMZiqbKxUBZzZT2VypCDizmcrmSkXAcJiAM5u3bnOlIuDMZiqbKxUBZzZT2VypCDizmcrmSkXAmc1UNlcqAs5sprK5UhFwZjOVzZWKgDObqWyuVASc2Uxlc6UiYDhMwJnNW7e5UhFwZjOVzZWKgDObqWyuVASc2Uxlc6Ui4MxmKpsrFQFnNlPZXKkIOLOZyuZKRcCZzVQ2VyoCzmymsrlSETAcJuDM5q3bXKkIOLOZyuZKRcCZzVQ2VyoCzmymsrlSEXBmM5XNlYqAM5upbK5UBJzZTGVzpSLgzGYqmysVAWc2U9lcqQgYDhNw5ruu2c+P/77xq1zgNwScEbCA3xNwRsACfk/AGQEL+D0BZwQs4PcEnBGwgN8TcEbAAn5PwBkBC/g9AWcELOD3BAyHCTjzXTf2/6wu8HUCzghYwO8JOCNgAb8n4IyABfyegDMCFvB7As4IWMDvCTgjYAG/J+CMgAX8noAzAhbwewKGwwSc+bp79evnj4986f91gfcJOCNgAb8n4IyABfyegDMCFvB7As4IWMDvCTgjYAG/J+CMgAX8noAzAhbwewLOCFjA7wkYDhNwZvPWba5UBJzZTGVzpSLgzGYqmysVAWc2U9lcqQg4s5nK5kpFwJnNVDZXKgLObKayuVIRcGYzlc2VioAzm6lsrlQEDIcJOPP5L5a/bv381n3XV32+UvGaGQEL+D2vmRGwgN/zmhkBC/g9r5kRsIDf85oZAQv4Pa+ZEbCA3/OaGQEL+D2vmRGwgN/zmnCYgOEwAcNhAobDBAyHCRgOEzAcJmA4TMBwmIDhMAHDYQKGwwQMhwkYDhMwHCZgOEzAcJiA4TABw2EChsMEDIf9C9rebu+Dpiv1AAAAAElFTkSuQmCC)\n\n![T-spin Single 후: 한 행 삭제, 다음 Z와 다시 계산한 고스트](data:image/png;base64,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)",
+      "codes": [
+        {
+          "label": "src/spin_example.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/src/spin_example.h",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "반례는 경계마다 따로 만든다",
+      "body": "세 모서리 조건만 검사해서는 이력이 제대로 이어지는지 알 수 없습니다. 모서리 조합은 네 비트의 16가지 경우로 나누고, 각 방향·유효 원점에서 경계 밖 모서리와 실제 점유를 독립적으로 셉니다. 자격이 false일 때 같은 보드가 false를 내는지도 비교합니다.\n\n이력 검사는 회전→대기→하드 드롭, 회전→성공한 아래 이동→드롭, 실패한 회전, 성공한 킥을 구분합니다. 콤보는 세 번의 O 두 줄 삭제 뒤 0줄 고정으로 초기화를 확인하고, 사이에 대기 틱을 넣어 연속이 끊기지 않는지 봅니다.\n\n점수표에는 0줄 T-spin, 삭제 전 레벨 경계, 포화에 가까운 누적값을 넣습니다. 큰 연속 횟수를 먼저 좁은 정수로 바꾸는 실수도 검사합니다. 검사가 실패하면 어떤 수명의 상태를 어느 전이에서 잃었는지 추적하세요.",
+      "codes": [
+        {
+          "label": "tests/history_contract.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/43-history/tests/history_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "회전 성공·이동 성공·이동 실패·대기·고정의 자격 전이표를 작성한다.",
+      "T 원점(17,3)의 중심과 네 모서리를 그린다.",
+      "T-spin0과 일반0줄 고정의 점수·공격·콤보를 비교한다.",
+      "history_demo의 각 상태 소유자와 기대 출력을 확인한다.",
+      "동일 최종 배치를 만드는 프레임 입력과 배치 API의 보상 차이를 설명한다.",
+      "spin 모드에서 자연 낙하 전후로 고정해 자격 해제를 관찰한다."
+    ],
+    "expected": "판정에 필요한 이력을 상태로 모델링하고, 틱 보고·피스 이력·피스 사이 연속 상태의 수명을 구별한다.",
+    "failureChecks": [
+      "매 틱 회전 자격이나 콤보를 무조건 초기화하지 않는가?",
+      "회전 요청이 실패해도 자격을 설정하지 않는가?",
+      "하드 드롭을 한 칸 낙하 함수의 반복으로 바꾸며 이력 정책도 바꾸지 않았는가?",
+      "행 삭제나 다음 피스 교체 뒤 모서리를 세지 않는가?",
+      "0줄 T-spin의 점수와 콤보 초기화를 혼동하지 않는가?",
+      "실제 SimGame에 교육용 콤보가 있다고 가정하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "43-1",
+      "question": "회전 성공 뒤 이동 없는 틱이 지나고, 거리가 있는 하드 드롭으로 고정합니다. 이 예제의 회전 자격은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "대기 틱에서 해제된다"
+        },
+        {
+          "id": "b",
+          "text": "하드 드롭 거리만큼 줄어든다"
+        },
+        {
+          "id": "c",
+          "text": "고정 판정까지 유지된다"
+        },
+        {
+          "id": "d",
+          "text": "종류에 관계없이 T-spin으로 확정된다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "고정 판정까지 유지된다",
+      "explanation": "대기와 하드 드롭은 자격을 보존합니다. 자격이 있어도 T 종류와 세 모서리 조건을 따로 만족해야 합니다. 고정 판정 뒤 다음 피스용 자격은 해제합니다."
+    },
+    {
+      "id": "43-2",
+      "question": "같은 틱에서 회전이 성공하고 자연 중력이 실제로 한 칸 내렸습니다. 자격은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "회전 입력이 있으므로 true"
+        },
+        {
+          "id": "b",
+          "text": "아래 이동 성공으로 false"
+        },
+        {
+          "id": "c",
+          "text": "킥이 없을 때만 true"
+        },
+        {
+          "id": "d",
+          "text": "다음 틱에서만 false"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "아래 이동 성공으로 false",
+      "explanation": "이 예제는 회전 뒤 자연 중력을 진행합니다. 성공한 아래 이동이 자격을 해제합니다. 중력이 막혀 고정한 경우와 구분해야 합니다."
+    },
+    {
+      "id": "43-3",
+      "question": "연속 삭제 횟수 4인 판에서 0줄 T-spin으로 고정했습니다. 레벨 1의 점수 증가·공격·다음 연속 횟수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "400·0·0"
+        },
+        {
+          "id": "b",
+          "text": "0·0·0"
+        },
+        {
+          "id": "c",
+          "text": "400·2·5"
+        },
+        {
+          "id": "d",
+          "text": "400·1·4"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "400·0·0",
+      "explanation": "0줄 T-spin은 400점이지만 공격 0입니다. 콤보는 보상이 아니라 삭제 유무를 기준으로 하므로 0으로 초기화됩니다."
+    },
+    {
+      "id": "43-4",
+      "question": "한 행을 지우는 고정 세 번 사이에 대기 틱이 여러 번 있습니다. 셋째 고정의 연속 횟수와 공격량은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1과 0"
+        },
+        {
+          "id": "b",
+          "text": "3과 3"
+        },
+        {
+          "id": "c",
+          "text": "대기 틱 수와 같다"
+        },
+        {
+          "id": "d",
+          "text": "3과 1"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "3과 1",
+      "explanation": "대기 틱은 연속 상태를 바꾸지 않습니다. 셋째 고정의 연속은 3이고 일반 Single 기본 공격 0에 보너스 1을 더합니다."
+    },
+    {
+      "id": "43-5",
+      "question": "ApplyPlacement와 회전→하드 드롭이 같은 최종 네 칸을 채웠습니다. 현재 게임의 보상을 비교할 때 맞는 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "최종 보드가 같으니 T-spin도 같다"
+        },
+        {
+          "id": "b",
+          "text": "해시를 비교하면 누락 이력이 자동 복구된다"
+        },
+        {
+          "id": "c",
+          "text": "배치 API는 회전 자격을 지우므로 보상이 다를 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "배치 API는 항상 더 큰 점수를 준다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "배치 API는 회전 자격을 지우므로 보상이 다를 수 있다",
+      "explanation": "현재 ApplyPlacement는 경로를 표현하지 않고 자격을 false로 고정합니다. 같은 최종 배치만으로 입력 이력을 복원할 수 없습니다."
+    }
+  ]
+}

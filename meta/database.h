@@ -4,14 +4,16 @@
 //
 // 스레드 모델:
 //   cpp-httplib 의 요청 스레드 여러 개에서 동시에 호출될 수 있다. 이 클래스는
-//   내부 std::mutex 로 모든 public 메서드를 직렬화한다. 성능 최적화보다는
+//   내부 std::mutex 로 DB 연결에 접근하는 메서드를 직렬화한다. 정적 카탈로그 조회는
+//   공유 DB를 사용하지 않는다. 성능 최적화보다는
 //   데이터 정합성 + 단순함 우선. SQLite 자체도 SQLITE_THREADSAFE=1 (기본) 로
 //   컴파일되어 serialized 모드.
 //
 // 실패 정책:
 //   · open 실패 → 생성자가 std::runtime_error throw. main 이 exit(1).
-//   · 런타임 실패 (schema/쿼리) → fprintf(stderr) 로 로그 + nullopt 반환.
-//     호출자가 HTTP 500 으로 바꿔서 클라이언트에게 전달.
+//   · 스키마/마이그레이션 실패 → 생성자가 연결을 닫고 throw.
+//   · 쿼리 실패 → 메서드별 optional/상태값/빈 목록 반환. 호출부의 실패 매핑 확인.
+//     모든 실패가 반드시 HTTP 500으로 구분되는 것은 아니다.
 //
 // 스키마: players, player_icons, matches, elo_history, bot_rewards, schema_migrations.
 // WAL + foreign keys + FULL (credential rotation must survive a committed response).
@@ -47,7 +49,7 @@ struct IconCatalogEntry {
 
 struct MatchRecord {
     std::string                    match_uuid;  // 32 lowercase hex, unique/idempotent
-    // winner=std::nullopt → 무승부/검증실패 (RP 미반영).
+    // winner=std::nullopt → 검증된 무승부 (RP 미반영). 검증실패는 저장하지 않는다.
     int64_t                    player_a;
     int64_t                    player_b;
     std::optional<int64_t>     winner;
@@ -63,6 +65,8 @@ struct EloDelta {
     int elo_after;
     int delta;
 };
+
+enum class MatchSaveError { None, IdentityConflict, Database };
 
 struct MatchInsertResult {
     int64_t  match_id;
@@ -135,10 +139,12 @@ public:
                                     std::optional<Player>& out_player);
 
     // 매치 기록 + RP 업데이트 (winner != nullopt 일 때만). 같은 match_uuid가
-    // 재전송되면 저장된 최초 결과를 반환하고 RP/BP/XP를 다시 적용하지 않는다.
+    // 같은 내용으로 재전송되면 최초 결과를 반환하고 RP/BP/XP를 다시 적용하지 않는다.
+    // 같은 키의 내용이 다르면 IdentityConflict로 거절한다.
     // 단일 트랜잭션 안에서 matches INSERT → players UPDATE × 2 → elo_history × 2.
-    // 실패 시 nullopt (모두 롤백).
-    std::optional<MatchInsertResult> saveMatch(const MatchRecord& m);
+    // 실패 시 nullopt. 새 쓰기의 중간 실패는 롤백하고, 충돌은 쓰기 전에 거절한다.
+    std::optional<MatchInsertResult> saveMatch(const MatchRecord& m,
+                                               MatchSaveError* error = nullptr);
 
     // Verified PvE only: 10 BP/win, up to 100 BP per UTC day. No RP/XP/win-loss.
     // Ticket id is globally unique; the transaction makes retries idempotent.
@@ -146,14 +152,15 @@ public:
     std::optional<int> saveBotWin(int64_t player, const std::string& ticket, const std::string& opponent);
 
     // RP 내림차순 상위 N명. limit 은 1..100 으로 clamp.
-    std::vector<LeaderRow> leaderboard(int limit);
+    // Empty vector is a successful empty ranking; nullopt is a failed query.
+    std::optional<std::vector<LeaderRow>> leaderboard(int limit);
 
 private:
     void migrateCredentials();
     void execSchema();          // 스키마 CREATE + PRAGMA. 실패 시 throw.
 
     sqlite3*    db_ = nullptr;
-    std::mutex  mu_;            // 모든 public 메서드를 감싼다.
+    std::mutex  mu_;            // 공유 DB connection 접근을 직렬화한다.
 };
 
 } // namespace meta

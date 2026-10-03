@@ -51,7 +51,10 @@ AccountOperation resume_locked(MetaClient &api, const AccountStore &store) {
     const auto recovery = proto::find_string(*saved, "next_recovery");
     if ((operation != "backup" && operation != "rotate" && operation != "recover") ||
         !(operation == "recover" ? credentials::recovery(credential) : credentials::account(credential)) ||
-        !credentials::account(token) || !credentials::recovery(recovery))
+        !credentials::account(token) || !credentials::recovery(recovery) ||
+        (operation == "backup" && credential != token) ||
+        (operation == "rotate" && credential == token) ||
+        (operation == "recover" && credential == recovery))
         return failed("Pending change is damaged. Keep the file.", true);
 
     int status = 0;

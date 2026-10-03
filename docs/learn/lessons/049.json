@@ -1,0 +1,428 @@
+{
+  "id": "lesson-49",
+  "title": "7-bag: 공급 규칙과 균등한 선택을 구별하기",
+  "shortTitle": "7-bag와 선택 확률",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: Round가 소유한 패턴을 반복하며 현재 블록과 세 개의 미리보기를 공급합니다.",
+  "finish": "완료: 종류를 중복 없이 꺼내는 SevenBag를 만들고, 뽑은 순열을 Round에 연결하며 공급 간격과 선택 확률을 검증합니다.",
+  "objective": "가방의 상태와 선택 인덱스를 분리하고, 순열 수·조건부 균등성·가방 경계의 공백 상한을 코드와 함께 설명합니다.",
+  "prerequisites": [
+    "Kind 카탈로그와 값 소유",
+    "다음 블록 큐와 Round의 공급 시점",
+    "배열·std::optional·인덱스 범위"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "선택 자료로 받은 DeepSeek 초안을 교정하고 모든 선택 경로·실제 게임 함수·Part 설명을 대조",
+    "draftJob": "out/learning-jobs/049-bag-events.jsonl",
+    "corrections": [
+      "초안의 존재하지 않는 include 경로와 중첩 타입 using 선언을 수정",
+      "초안의 빈 상태 예제가 실제로7개를 꺼내도록 수정하고 잘못 이스케이프한 개행 교정",
+      "고정 순열의 Round 연결과 매 가방 재선택의 범위를 분리",
+      "Fisher–Yates와 같은 분포/같은 시드 결과를 구별하고 RNG 유일 호출 지점이라는 주석을 스트림별로 교정",
+      "배열 용량과 활성 개수 검사를 명시하여 Release에서 발생한 배열 상한 경고 해소; 실패 보존은 유지",
+      "원문의2^64개 균등 입력 가정을 실제 xorshift64* 분포와 혼동한 수치 설명 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED 전체41 CTests·SDL의 bag_contract/queue_contract/frame_contract 3 CTests 및 tetris 빌드; 두 구성 경고0",
+    "5,040개 순열과 모든 접두 상태·실패 보존·복사·재충전; 각 순열의 Round 생성과 세 번 승계",
+    "두 가방49쌍의 공백·세 가방2,401개 창의 빈도·최대 연속2 및 작은 modulo3/3/2",
+    "실제 SimGame 생성자1,000시드의 네 번 공급·시드0 처리·미리보기 관찰 상태 보존",
+    "실제 GetRandomBlock/GetAllBlocks 함수 추출로100,000회 선택의 종류·활성 순서·RNG 상태 대조",
+    "CPU 독립 링크·정확한 출력·학습 및 실제 함수 UBSan; 마지막 원소 교환·실패 전 refill·삭제 누락 세 Release 변형 거부",
+    "Win32/macOS 네이티브 실행 미수행. 사용자 요청으로 화면 조작·스크린샷 생략"
+  ],
+  "recap": {
+    "points": [
+      "비트마스크는 요청 집합이며 OR로 발생 여부를 합칩니다.",
+      "숫자 표현의 유효성 검사와 조작 정책을 나누고, 축소 전에 넓은 값을 검증합니다.",
+      "상태 표현을 바꿀 때에는 입력을 보관하고 소비하는 수명을 유지합니다."
+    ],
+    "bridge": "블록 공급에서도 저장 규칙과 선택 정책을 나눕니다. 남은 후보가 무엇인지부터 표현하고, 그 안에서 하나를 고르는 연산을 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "같은 종류를 기다리는 길이를 제한한다",
+      "body": "조각을 만들 때마다 일곱 종류 중 하나를 고른다고 생각해 봅시다. 매번 독립적으로 같은 확률로 고르면 I가 나올 확률은1/7입니다. 한 번 뽑은 뒤에도 후보 일곱 개를 그대로 두는 **복원 추출**입니다. n번 연속 I가 나오지 않을 확률은(6/7)ⁿ입니다. 유한한 n에서 이 값은0이 아니므로, 이 모델은 I를 기다리는 개수에 고정된 상한을 주지 않습니다.\n\n우리가 만들 공급기는 일곱 종류를 한 개씩 넣고, 뽑은 종류를 후보에서 지웁니다. 한 가방이 빌 때까지 같은 종류를 다시 뽑지 않는 **비복원 추출**입니다. 모두 꺼내면 새 가방을 채웁니다. 일곱 종류가 한 번씩 등장하는 공급 구간을 만들어 게임 규칙에 넣는 것입니다.\n\n| 질문 | 담당할 코드 |\n| --- | --- |\n| 어떤 종류가 아직 남았는가? | SevenBag의 슬롯과 개수 |\n| 남은 후보 중 몇 번째를 고를 것인가? | take에 index를 전달하는 호출자 |\n| 뽑은 종류를 언제 현재 블록으로 쓰는가? | Round와 다음 블록 큐 |\n\n이번에는 가방과 인덱스 선택을 분리합니다. 먼저 손으로 고른 인덱스로 상태 변화를 확인하고, 그 결과를 실제 Round의 공급 경로에 넣습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "독립이라는 말의 범위",
+          "body": "독립 추첨에서는 앞선 종류를 알아도 다음 종류의 확률이 바뀌지 않습니다. 가방 안에서는 이미 뽑은 종류를 후보에서 지우므로 다음 선택이 앞선 결과에 의존합니다. 이 의존성이 공급 간격을 제한하는 장치입니다."
+        }
+      ]
+    },
+    {
+      "title": "가방을 나타내는 최소 상태",
+      "body": "가방에는 원소뿐 아니라 **남은 순서**도 필요합니다. 같은 {J,L,O}를 가지고 있어도 배열이[J,L,O]인지[O,L,J]인지에 따라 index=0의 결과가 달라집니다. 지금 만들 상태는 고정 배열 slots_와 유효한 원소 수 count_입니다.\n\n배열의 앞부분 `[0, count_)`만 남은 가방으로 해석합니다. 이 연속된 앞부분을 **활성 접두 구간**이라고 부르겠습니다. 뒤쪽에는 예전 값이 남아 있어도 읽지 않습니다. 배열에 할당된 자리와 논리적으로 유효한 자리를 구별하는 표현입니다.\n\n| 시점 | 앞부분의 의미 | count_ |\n| --- | --- | --- |\n| 처음 | I J L O S T Z | 7 |\n| O를 꺼낸 뒤 | I J L S T Z | 6 |\n| 모두 꺼낸 뒤 | 빈 구간 | 0 |\n\n클래스의 불변 조건은 `0 <= count_ <= capacity`, 활성 구간의 모든 종류가 유효하고 서로 다르다는 것입니다. 불변 조건은 객체가 외부 호출에 응답하는 경계마다 지켜야 하는 상태 규칙입니다. private 멤버와 제한된 변경 함수로 이 조건을 관리합니다.",
+      "codes": [
+        {
+          "label": "simulation/seven_bag.h · 저장소",
+          "language": "cpp",
+          "text": "using Kind = study_catalog::Kind;\nstatic constexpr std::size_t capacity = 7;\nstatic_assert(study_catalog::definitions.size() == capacity,\n              \"catalog must enumerate exactly seven pieces\");\n\n// private 멤버\nstd::array<Kind, capacity> slots_{};\nstd::size_t count_ = 0;"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.h",
+        "symbol": "std::vector<SimBlock> blocks",
+        "invariant": "공급기가 아직 뽑지 않은 후보와 그 순서를 소유한다.",
+        "mayDiffer": "실제 게임은 SimBlock의 vector, 학습 코드는 Kind의 고정 배열과 활성 개수를 사용한다.",
+        "omitted": "전체 SimBlock의 좌표와 회전 데이터는 뽑은 종류에서 별도로 만든다."
+      }
+    },
+    {
+      "title": "종류 ID와 가방의 위치를 구별한다",
+      "body": "카탈로그 순서는 I,J,L,O,S,T,Z이고 Kind의 숫자 값은 L=1,J=2,I=3,O=4,S=5,T=6,Z=7입니다. 따라서 숫자1부터7까지 열거하거나 `static_cast<Kind>(index+1)`로 채우면 다른 순서가 됩니다. **ID는 종류의 이름표이고 인덱스는 현재 저장 위치**입니다.\n\nrefill은 카탈로그 정의를 순서대로 복사한 뒤 count_를7로 만듭니다. 생성자는 이 함수로 처음 상태를 준비합니다. 같은 작업을 한 함수에 모으면 최초 생성과 재충전의 순서가 어긋나지 않습니다.\n\n여기서 고정하는 순서는 재현 계약의 일부입니다. 호출자가 같은 인덱스를 전달했을 때 같은 종류를 받으려면 최초 배열 순서도 같아야 합니다. 카탈로그의 종류·도형 유효성 검사는 catalog.h가 맡고, SevenBag는 그 검사를 통과한 정의를 사용합니다.",
+      "codes": [
+        {
+          "label": "simulation/seven_bag.h · 생성과 재충전",
+          "language": "cpp",
+          "text": "SevenBag() noexcept { refill(); }\n\nvoid refill() noexcept {\n    for (std::size_t i = 0; i < capacity; ++i) {\n        slots_[i] = study_catalog::definitions[i].kind;\n    }\n    count_ = capacity;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "std::vector<SimBlock> SimGame::GetAllBlocks() const",
+        "invariant": "I,J,L,O,S,T,Z 순서가 인덱스와 종류를 연결한다.",
+        "mayDiffer": "객체를 만드는 팩토리와 불변 정의 테이블은 표현 방식이 다르다.",
+        "omitted": "렌더 색·고스트 ID는 공급 후보에 포함하지 않는다."
+      }
+    },
+    {
+      "title": "보관 개수와 다음 선택 범위",
+      "body": "remaining은 지금 보관한 개수를 반환합니다. 빈 가방의 remaining은0입니다. 반면 next_bound는 다음에 성공할 추출의 인덱스 상한을 반환합니다. 빈 가방은 다음 추출 때 새로 채우므로 next_bound는7입니다.\n\n두 값은 질문이 다릅니다. 남은 항목을 화면에 보여 주려면 remaining, 다음 항목을 고를 인덱스를 만들려면 next_bound를 사용합니다. 반환한 상한은 포함하지 않으므로, bound가3이면 유효한 인덱스는0,1,2입니다.\n\nat은 활성 구간을 관찰하고 Kind의 복사본을 반환합니다. 빈 가방의 at(0)은 nullopt입니다. 단순 조회가 refill을 실행하지 않으므로, 디버그 창에서 여러 번 살펴봐도 공급 상태가 변하지 않습니다.",
+      "codes": [
+        {
+          "label": "simulation/seven_bag.h · 관찰 함수",
+          "language": "cpp",
+          "text": "std::size_t remaining() const noexcept { return count_; }\n\nstd::size_t next_bound() const noexcept {\n    return count_ ? count_ : capacity;\n}\n\nstd::optional<Kind> at(std::size_t index) const noexcept {\n    if (index >= count_) return std::nullopt;\n    return slots_[index];\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "at(0)이 비어 있는데 take(0)은 성공하는 이유",
+          "body": "빈 상태에서 at은 현재 저장소를 관찰하고, take는 필요하면 채운 뒤 꺼내는 명령입니다. 조회와 상태 변경의 책임을 함수 이름과 계약으로 나눕니다."
+        }
+      ]
+    },
+    {
+      "title": "하나를 꺼내고 나머지 순서를 유지한다",
+      "body": "> **읽기 전 예측** · `[I,J,L,O,S,T,Z]`에서 index=3을 고릅니다. 반환 값과 남은 배열은 무엇일까요? 그 상태에서 다시 index=3을 고르면 무엇이 나올까요?\n\n처음에는 O를 복사하고 뒤 원소 S,T,Z를 한 칸씩 앞으로 당깁니다. 활성 구간은[I,J,L,S,T,Z]가 됩니다. 같은 index=3을 다시 고르면 S입니다. 선택한 위치 뒤의 상대 순서를 유지하며 지우는 방식을 **순서를 보존하는 삭제(stable erase)**라고 합니다.\n\n반복문의 시작은 선택 위치이고, 오른쪽 이웃이 활성 구간 안에 있을 동안만 복사합니다. `i + 1 < count_`이므로 마지막 유효 원소 뒤를 읽지 않습니다. 이동이 끝나면 count_를 하나 줄입니다. Kind를 미리 복사했으므로, 배열을 당겨도 반환할 값은 바뀌지 않습니다.\n\n범위 검사는 refill보다 먼저 합니다. 배열 용량 밖인 인덱스를 먼저 거르고, 남은 항목이 있을 때에는 그 개수도 상한으로 검사합니다. 빈 상태에서 take(7)을 호출하면 실패하고 계속 비어 있습니다. 반대로 take(0)은 새 가방을 채우고 I를 꺼내 count_=6이 됩니다. **실패하면 호출 전 상태를 보존한다**는 계약을 두 경우 모두 지킵니다.",
+      "codes": [
+        {
+          "label": "simulation/seven_bag.h · take 전체",
+          "language": "cpp",
+          "text": "std::optional<Kind> take(std::size_t index) noexcept {\n    if (index >= capacity || (count_ != 0 && index >= count_)) {\n        return std::nullopt;  // no refill, no mutation\n    }\n    if (count_ == 0) {\n        refill();\n    }\n    const Kind chosen = slots_[index];\n    for (std::size_t i = index; i + 1 < count_; ++i) {\n        slots_[i] = slots_[i + 1];\n    }\n    --count_;\n    return chosen;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimBlock SimGame::GetRandomBlock()",
+        "invariant": "선택 값을 복사하고 남은 후보의 상대 순서를 유지하며 제거한다.",
+        "mayDiffer": "실제 함수는 내부 RNG로 유효 인덱스를 만들고 SimBlock을 반환한다. 기준 함수는 외부 index를 검증하고 optional<Kind>를 반환한다.",
+        "omitted": "선택 품질과 시드 엔진은 take의 책임에 넣지 않는다."
+      }
+    },
+    {
+      "title": "일곱 번마다 한 종류씩 나오는 이유",
+      "body": "처음 가방에는 일곱 종류가 하나씩 있습니다. 성공할 때마다 그중 하나만 반환하고 제거합니다. 따라서 활성 구간은 이미 반환한 종류를 포함하지 않으며, 일곱 번째 성공 뒤에는 모든 종류가 정확히 한 번 나옵니다.\n\n이 설명은 **귀납적 불변 조건**으로 읽을 수 있습니다. 시작할 때 “남은 종류와 이미 뽑은 종류가 겹치지 않고, 둘을 합치면 전체 일곱 종류”입니다. 한 번의 take는 원소 하나를 남은 쪽에서 뽑은 쪽으로 옮기므로 이 조건을 유지합니다. 일곱 번 뒤 남은 쪽이 비면 결과가 전체 목록입니다.\n\nindex를 항상0으로 줘도 이 증명은 성립합니다. 결과가 매번 I,J,L,O,S,T,Z로 같을 뿐입니다. **한 가방에 중복이 없다는 성질과 순열을 고르는 확률은 별도로 검증합니다.**\n\n가능한 순서의 수는 첫 자리7개, 다음 자리6개, 이어5개…이므로 `7! = 7×6×5×4×3×2×1 = 5040`입니다. `!`는 팩토리얼 기호입니다. 각 자리에 하나씩 배치한 순서를 순열이라고 합니다.",
+      "codes": [
+        {
+          "label": "손으로 선택해 상태 변화를 확인한다",
+          "language": "cpp",
+          "text": "study_bag::SevenBag bag;\nfor (std::size_t n = 0; n < 7; ++n) {\n    const auto kind = bag.take(0);\n    // kind: I, J, L, O, S, T, Z\n}\n// remaining()==0, next_bound()==7"
+        }
+      ]
+    },
+    {
+      "title": "모든 순열의 확률이 같으려면",
+      "body": "특정 순서[I,J,L,O,S,T,Z]가 나올 확률을 계산해 봅시다. 첫 단계에서 I를 고를 확률은1/7, I가 나온 조건에서 J를 고를 확률은1/6이어야 합니다. 같은 방식으로 남은 후보 각각을 **그때까지의 선택을 조건으로 같은 확률로** 고르면 다음 곱을 얻습니다.\n\n`P(I,J,L,O,S,T,Z) = 1/7 × 1/6 × 1/5 × 1/4 × 1/3 × 1/2 × 1 = 1/5040`\n\n다른 순열도 같은 곱입니다. 이것이 균등한 순열 분포의 근거입니다. 모든 가능한 인덱스가 범위 안이라는 사실만으로 이 확률 조건을 얻을 수는 없습니다. 항상 index=0인 선택기는 범위 규칙을 지키면서 순열 하나만 만듭니다.\n\n**조건부 확률**은 이미 알고 있는 결과를 반영한 확률입니다. I를 뽑은 뒤 같은 가방에서 I를 또 뽑을 확률은0입니다. 처음 일곱 후보의1/7을 끝까지 그대로 사용하는 계산 대신, 줄어든 후보 수를 사용해야 합니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "순열을 모두 세는 검사와 확률 검증",
+          "body": "5,040개 유효 인덱스 경로가 서로 다른5,040개 결과를 만드는지 검사할 수 있습니다. 이는 경로와 순열의 일대일 대응을 확인합니다. 실제 난수 엔진이 그 경로를 어떤 빈도로 만드는지는 별도의 질문입니다."
+        }
+      ]
+    },
+    {
+      "title": "나머지 연산은 범위를 줄인다",
+      "body": "호출자가 큰 정수를 만들고 `value % bound`로 인덱스를 만든다고 해 봅시다. bound가 양수라면 결과는0부터 bound−1 안입니다. 범위는 맞지만 균등성은 따로 살펴야 합니다.\n\n균등하게 나오는 작은 입력0~7을3개 후보에 연결하면 다음 표가 됩니다.\n\n| 입력 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| 입력 % 3 | 0 | 1 | 2 | 0 | 1 | 2 | 0 | 1 |\n\n나머지0과1로 연결되는 입력은 각각3개, 나머지2로 연결되는 입력은2개입니다. 입력이 균등해도 출력 확률은3/8,3/8,2/8입니다. 이처럼 범위 축소가 만드는 차이를 **모듈로 편향**이라고 합니다.\n\n균등한0~7이라는 가정 아래에서는6과7을 버리고 다시 뽑으면 수락한0~5가 각 나머지에 두 개씩 연결됩니다. 유효한 표본을 얻을 때까지 다시 뽑는 접근을 거부 샘플링이라고 합니다. 엔진 호출 수가 가변적이므로, 저장된 시드와 호출 횟수에 기대는 프로그램에서는 변경 범위를 함께 검토해야 합니다.\n\n현재 게임의 nextUInt도 `%`를 사용합니다. 여기서는 현재 블록 순서를 유지하고, 함수가 보장하는 범위와 균등성의 가정을 구별합니다.",
+      "codes": [
+        {
+          "label": "작은 입력 공간에서 직접 세기",
+          "language": "cpp",
+          "text": "unsigned counts[3] = {0, 0, 0};\nfor (unsigned sample = 0; sample < 8; ++sample) {\n    ++counts[sample % 3];\n}\n// counts: 3, 3, 2"
+        }
+      ],
+      "reference": {
+        "path": "core/rng.h",
+        "symbol": "uint32_t nextUInt(uint32_t max)",
+        "invariant": "양수 상한에 대해 결과를 [0,max)로 줄인다.",
+        "mayDiffer": "실제 엔진은64비트 상태를 사용하며 이 작은8개 입력 표와 같은 분포라고 가정하지 않는다.",
+        "omitted": "엔진의 비트 전이·주기와 거부 샘플링 구현은 이 가방 실습에서 교체하지 않는다."
+      }
+    },
+    {
+      "title": "다른 삭제 방법과 같은 시드의 의미",
+      "body": "뒤 원소를 모두 당기는 대신 마지막 원소를 선택 위치로 옮기면 삭제가 빠릅니다. 그러나 남은 순서가 달라집니다.\n\n| [I,J,L,O,S,T,Z]에서 index=0 선택 뒤 | 남은 후보 | 다음 index=0 결과 |\n| --- | --- | --- |\n| 뒤 원소를 한 칸씩 이동 | J L O S T Z | J |\n| 마지막 Z로 선택 자리를 덮음 | Z J L O S T | Z |\n\n두 방법 모두 같은 종류를 한 가방에서 한 번씩 꺼낼 수 있고, 조건부 균등 선택 아래에서는 같은 균등 순열 분포를 만들 수 있습니다. 하지만 같은 인덱스 열이 같은 순열을 만드는 것은 아닙니다. 난수 엔진에 같은 시드를 넣더라도 저장 순서·선택 범위·호출 횟수가 달라지면 출력은 달라집니다.\n\n남은 후보 수를 n이라고 하면 순서 보존 삭제는 최악에 n−1개를 옮겨 O(n), 한 가방 전체는 최악 O(n²)입니다. 마지막 원소로 덮는 삭제는 O(1), 가방 전체는 O(n)입니다. 이 체크포인트는 등록된 기본 도형으로 작은 가방을 구성하므로 이동량이 작습니다. 재현성을 비교하려면 추출 대상 목록과 삭제 순서도 함께 맞춰야 합니다.\n\nFisher–Yates는 후보를 교환하며 순열을 만드는 대표적인 방식입니다. [Princeton의 구현과 확률 가정](https://algs4.cs.princeton.edu/11model/Knuth.java.html)을 보면 선택 범위와 교환 위치를 함께 정합니다. 알고리즘을 바꿀 때에는 분포가 같은지와 같은 시드의 결과가 같은지를 각각 질문해야 합니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "고정 크기인데 O(n)이라고 쓰는 이유",
+          "body": "이 구현에서 n은7 이하라 실제 작업량에 작은 상한이 있습니다. n을 사용한 표기는 종류 수를 일반화했을 때 늘어나는 작업을 비교하기 위한 것입니다. 종류를 더 추가하려면 capacity뿐 아니라 카탈로그·규칙·검사도 함께 검토합니다."
+        }
+      ]
+    },
+    {
+      "title": "가방 경계에서 생기는 반복과 공백",
+      "body": "가방 안에는 같은 종류가 한 번이지만, 경계 양쪽에는 같은 종류가 올 수 있습니다.\n\n`J L O S T Z I | I J L O S T Z`\n\n이 배열에는 I가 두 번 연속 나옵니다. 세 번 연속은 불가능합니다. 같은 종류를 세 개 얻으려면 세 가방에 걸쳐야 하고, 가운데 가방에는 다른 여섯 종류가 사이에 들어갑니다.\n\n가장 긴 공백은 한 가방의 처음에 I가 나오고, 다음 가방의 마지막에 I가 나올 때입니다.\n\n`I J L O S T Z | J L O S T Z I`\n\n두 I 사이에 다른 종류가6+6=12개 있습니다. 앞 I의 위치를0이라고 두면 다음 I의 위치는13입니다. **사이에 있는 개수12와 두 위치의 차이13을 구별합니다.**\n\n가방 안의 I 위치를0부터6까지 세어 a,b라고 하면, 사이 개수는 `(6−a)+b`입니다. a=6,b=0이면0개, a=0,b=6이면12개입니다. 종류가 바뀌어도 같은 계산입니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "공급 개수와 대기 시간",
+          "body": "상한12는 생성 순서의 성질입니다. 블록을 놓는 속도, 입력 지연, 게임 종료에 따라 시간은 달라집니다. 미리보기에서 보이는 위치와 실제 조작할 때의 시점도 구분합니다."
+        }
+      ]
+    },
+    {
+      "title": "구간을 어디서 자르는가",
+      "body": "완전한 두 가방은14개이며 각 종류가 두 번 있습니다. 그런데 임의의 위치에서14개를 자르면 앞 가방의 꼬리, 가운데 가방 전체, 뒤 가방의 머리에 걸칠 수 있습니다. 가운데 가방이 한 번을 보장하고 양끝에서 각각 한 번씩 더 올 수 있어, 특정 종류는1~3번 등장합니다.\n\n| 14개를 세는 범위 | 특정 종류의 개수 |\n| --- | --- |\n| 가방 시작에 맞춘 완전한 두 가방 | 정확히2개 |\n| 시작을 한 칸 이상 옮긴 구간 | 최소1개, 최대3개 |\n\n예를 들어 아래 세 가방에서 첫 줄의 두 번째 원소부터14개를 셉니다. 첫 가방의 I는 세는 범위 앞에 있고, 셋째 가방에서는 첫 J까지만 포함됩니다. I는 가운데 가방의 한 개만 남습니다.\n\n`I J L O S T Z | I J L O S T Z | J I L O S T Z`\n\n반대로 첫 가방의 I가 두 번째이고 셋째 가방이 I로 시작하면, 같은 길이의 구간에 I가 세 번 들어갈 수 있습니다. 공급기의 계약은 완전한 가방에 적용합니다. 미리보기나 최근 기록처럼 잘린 구간을 검사할 때에는 그 구간의 시작 위치를 함께 생각해야 합니다."
+    },
+    {
+      "title": "뽑은 순서를 실제 한 판에 연결한다",
+      "body": "이제 SevenBag의 출력을 Kind 배열에 모읍니다. 선택 인덱스는3,0,4,1,2,0,0입니다. 각 선택 때 후보 수가7,6,5,4,3,2,1로 줄어드므로 모두 유효합니다. 결과는 O,I,Z,L,T,J,S입니다.\n\nScriptedSource::from_pattern은 이 배열의 값을 소유하고 반복해서 제공합니다. Round::create는 공급기를 값으로 받아 현재 블록 하나와 다음 블록 세 개를 미리 꺼냅니다. 따라서 생성 직후 현재는O, 미리보기는I,Z,L이고 내부 커서는4입니다. 외부의 source는 별도 복사본이므로 커서0을 유지합니다.\n\n하드드롭으로 세 번 고정하면 I,Z,L이 차례로 현재가 됩니다. 그동안 미리보기 뒤를 T,J,S로 보충합니다. 현재L, 미리보기T,J,S, 공급 커서0입니다.0은 패턴 일곱 항목을 모두 읽고 시작 위치로 돌아왔다는 뜻입니다.\n\n이 실습은 **뽑은 한 순열을 반복하는 공급기**를 Round에 연결합니다. 매 가방마다 새 인덱스를 뽑는 자동 난수 공급기는 아직 구성하지 않습니다. tetris 실행기의 공급기 선택도 유지하고, bag_demo에서 같은 Round를 사용해 공급 경계를 확인합니다.",
+      "codes": [
+        {
+          "label": "src/bag_demo.cpp · 가방 → 소유한 패턴 → Round",
+          "language": "cpp",
+          "text": "study_bag::SevenBag supply;\nstd::array<study_catalog::Kind, 7> pattern{};\nconst std::array<std::size_t, 7> choices{3, 0, 4, 1, 2, 0, 0};\nfor (std::size_t i = 0; i < pattern.size(); ++i) {\n    const auto drawn = supply.take(choices[i]);\n    if (!drawn) return;\n    pattern[i] = *drawn;\n}\nconst auto source = study_next::ScriptedSource::from_pattern(pattern, pattern.size());\nif (!source) return;\nauto round = study_round::Round::create(study_grid::Grid{}, *source);\nif (!round) return;"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimGame::SimGame(uint64_t seed)",
+        "invariant": "현재 하나와 미리보기 세 개를 미리 공급하고, 읽기와 새 항목 소비를 구별한다.",
+        "mayDiffer": "현재 게임은 생성자부터 RNG로 후보를 선택하며, 학습 예제는 한 번 만든 순열을 ScriptedSource에 소유시킨다.",
+        "omitted": "Round의 공급기 타입 교체나 렌더·입력 루프 변경은 이 실습의 범위에 넣지 않는다."
+      }
+    },
+    {
+      "title": "선택 경로를 전부 검사한다",
+      "body": "작은 상태 공간에서는 모든 경로를 열거할 수 있습니다. 남은 후보마다 복사한 가방에서 하나를 뽑고, 그 복사본의 다음 선택으로 들어갑니다. 일곱 번 뽑은 지점에서 결과 순열을 집합에 넣습니다.\n\n검사 기준은 별도의 vector에 둡니다. 표준 erase로 지운 후보 목록과 SevenBag의 활성 구간을 매번 비교하면, 개수만 맞고 원소를 잘못 옮기는 오류를 찾을 수 있습니다. 모든 경로를 따라가면 완성 순열5,040개가 겹치지 않고, 각 종류가 각 자리에720번씩 등장해야 합니다. 여기서720은6!입니다. 한 자리를 정한 뒤 나머지 여섯 자리를 배치하는 수입니다.\n\n이와 함께 잘못된 인덱스를 넣어 실패 전후가 같은지, 복사본을 바꿔도 원본이 유지되는지, 빈 가방에서 다시 꺼내면 최초 순서대로 채워지는지 검사합니다. 순열 각각을 Round에 넣어 현재·미리보기·세 번의 승계를 확인하면 공급기만 통과하고 게임 연결은 틀리는 오류도 찾습니다.\n\n공백 상한은 특정 종류의 두 위치49가지, 임의14개 구간은 세 가방의 위치7³가지와 시작 위치7가지를 조합해2,401개를 검사합니다. 설명의 수식과 코드의 관찰 결과를 서로 대조하는 것입니다.",
+      "codes": [
+        {
+          "label": "tests/bag_contract.cpp · 별도 표현을 기준으로 비교",
+          "language": "cpp",
+          "text": "auto copy = bag;\nauto next = oracle; // std::vector<Kind>\nconst Kind expected = next[index];\nnext.erase(next.begin() + static_cast<std::ptrdiff_t>(index));\nconst auto value = copy.take(index);\nCHECK(value == expected);\ncompare(copy, next);\ncompare(bag, oracle); // 복사본만 변경했는지 확인"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "마지막 하나에도 RNG를 호출하는 현재 코드",
+          "body": "실제 GetRandomBlock은 후보가 하나 남아도 nextUInt(1)을 호출합니다. 반환 인덱스는0이지만 엔진 상태는 진행합니다. 이 호출을 생략하면 다음 가방의 난수 순서가 달라집니다. 같은 미래를 재현하려면 가방의 남은 순서·개수와 엔진 상태를 함께 고려합니다."
+        }
+      ]
+    },
+    {
+      "title": "파일 추가와 실행",
+      "body": "`49-seven-bag`는 누적 프로젝트에 seven_bag.h, bag_demo.cpp, bag_contract.cpp를 추가합니다. 기존 플랫폼·입력·Round 구현은 유지합니다. CMake에는 CPU 실행 파일 두 개를 등록하고 study_mesh의 공통 include 경로와 C++17 요구를 사용합니다.\n\nSCRIPTED 구성으로 가방과 큐 검사를 실행하면 창 없이 결과를 읽을 수 있습니다. 출력의 첫 줄과 둘째 줄은 의도적으로 정한 인덱스의 결과입니다. toy counts도0~7을 열거한 표이며 실제 엔진을 측정한 통계가 아닙니다.\n\n빈 가방 줄은 remaining=0, next_bound=7이어야 하고, 이어 실패한 take(7) 뒤에도 remaining=0이어야 합니다. Round 출력은 현재O/미리보기IZL에서 세 번 고정 뒤 현재L/미리보기TJS로 변합니다.",
+      "codes": [
+        {
+          "label": "CMakeLists.txt · 추가할 CPU 타깃",
+          "language": "cmake",
+          "text": "add_executable(bag_demo src/bag_demo.cpp)\ntarget_link_libraries(bag_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(bag_contract tests/bag_contract.cpp)\n    target_link_libraries(bag_contract PRIVATE study_mesh)\n    add_test(NAME bag_contract COMMAND bag_contract)\nendif()"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/49-seven-bag -B out/study-49 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-49 --target bag_demo bag_contract queue_contract\n./out/study-49/bag_demo\nctest --test-dir out/study-49 -R '^(bag_contract|queue_contract)$' --output-on-failure"
+        },
+        {
+          "label": "bag_demo의 출력",
+          "language": "text",
+          "text": "first-only x9: I J L O S T Z I J\nlast-only x9: Z T S O L J I Z T\nempty: remaining=0 next_bound=7\ntake(7) at empty -> null, remaining=0\nround current=O preview=IZL cursor=4\nafter 3 locks current=L preview=TJS cursor=0\nboundary: I J L O S T Z | I J L\ntoy counts=3/3/2 (toy, not actual RNG)"
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 변경 경계",
+      "body": "SevenBag는 후보 저장·범위 검사·순서 보존 삭제를 담당합니다. 호출자는 유효 범위 안에서 인덱스를 선택하고, Round는 공급받은 종류를 현재 블록과 미리보기에 배치합니다. 세 책임의 계약을 나누면 가방 오류, 선택 편향, 큐 승계 오류를 다른 입력으로 검사할 수 있습니다.\n\n현재 소스 뷰어에서는 GetAllBlocks로 채우는 순서, GetRandomBlock의 삭제 방식, 생성자와 LockBlock의 소비 시점을 따라 읽어 보세요. 강의 스니펫과 저장 타입이 달라도 “누가 남은 후보를 소유하고 언제 하나를 소비하는가”를 기준으로 비교할 수 있습니다.",
+      "codes": [
+        {
+          "label": "simulation/seven_bag.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/49-seven-bag/simulation/seven_bag.h",
+          "collapsed": true
+        },
+        {
+          "label": "src/bag_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/49-seven-bag/src/bag_demo.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::LockBlock()",
+        "invariant": "고정 뒤 다음 블록을 승계하고 비워진 미리보기 자리를 한 번 공급한다.",
+        "mayDiffer": "실제 피스 구조·미리보기 개수·공급기 표현은 변할 수 있다.",
+        "omitted": "스냅샷·네트워크 재현은 가방 외의 전체 미래 상태도 보존해야 한다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "49-1",
+      "kind": "결과 예측",
+      "question": "첫 가방[I,J,L,O,S,T,Z]에서 take(3), take(3)을 순서대로 호출했습니다. 반환된 두 종류는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "O, O"
+        },
+        {
+          "id": "b",
+          "text": "O, S"
+        },
+        {
+          "id": "c",
+          "text": "L, O"
+        },
+        {
+          "id": "d",
+          "text": "O, Z"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "O, S",
+      "explanation": "첫 호출은 O를 복사하고 S,T,Z를 왼쪽으로 당깁니다. 남은 배열[I,J,L,S,T,Z]의 index=3은 S입니다. 인덱스는 종류 ID가 아닙니다."
+    },
+    {
+      "id": "49-2",
+      "kind": "설계 해석",
+      "question": "index=0만 계속 고르는 SevenBag가 보장하는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든5,040개 순열의 같은 확률"
+        },
+        {
+          "id": "b",
+          "text": "모든 유효 인덱스가 같은 빈도로 선택됨"
+        },
+        {
+          "id": "c",
+          "text": "일곱 번째 추출 전에 가방이 재충전됨"
+        },
+        {
+          "id": "d",
+          "text": "완전한 각 가방에서 일곱 종류가 한 번씩 나옴"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "완전한 각 가방에서 일곱 종류가 한 번씩 나옴",
+      "explanation": "각 성공은 고른 종류를 제거하므로 완전한 가방에서 일곱 종류가 한 번씩 나옵니다. index=0만 사용하면 같은 순열을 반복하며, 다른 인덱스를 같은 빈도로 선택하지 않습니다. 재충전은 일곱 개를 모두 꺼낸 다음 유효한 추출에서 일어납니다."
+    },
+    {
+      "id": "49-3",
+      "kind": "경계 적용",
+      "question": "어떤 가방의 맨 앞에 I가, 바로 다음 가방의 맨 뒤에 I가 있습니다. 두 I 사이의 다른 조각 개수와 두 출현 위치의 차이는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "다른 조각12개, 위치 차이13"
+        },
+        {
+          "id": "b",
+          "text": "다른 조각13개, 위치 차이13"
+        },
+        {
+          "id": "c",
+          "text": "다른 조각6개, 위치 차이7"
+        },
+        {
+          "id": "d",
+          "text": "다른 조각14개, 위치 차이14"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "다른 조각12개, 위치 차이13",
+      "explanation": "첫 가방에서 I 뒤의6개와 다음 가방에서 I 앞의6개가 사이에 있습니다. 총12개를 건너 다음 I에 도달하므로 위치 차이는13입니다."
+    },
+    {
+      "id": "49-4",
+      "kind": "오류 원인",
+      "question": "빈 가방에서 take(7)을 호출했습니다. 범위 검사보다 refill을 먼저 실행하면 어떤 계약이 깨지나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Kind의 숫자 ID가 변경된다."
+        },
+        {
+          "id": "b",
+          "text": "반환된 종류의 좌표가 회전한다."
+        },
+        {
+          "id": "c",
+          "text": "실패했는데 remaining이0에서7로 바뀐다."
+        },
+        {
+          "id": "d",
+          "text": "가방의 최대 크기가8로 늘어난다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "실패했는데 remaining이0에서7로 바뀐다.",
+      "explanation": "7은 새 가방의 허용 인덱스0~6 밖입니다. refill부터 하면 반환은 nullopt여도 가방은 채워집니다. next_bound로 먼저 검사하면 빈 상태를 보존할 수 있습니다."
+    },
+    {
+      "id": "49-5",
+      "kind": "확률 해석",
+      "question": "균등한 정수0~7을 value%3으로 줄였습니다. 결과가0,1,2일 확률은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "각각1/3"
+        },
+        {
+          "id": "b",
+          "text": "각각3/8,3/8,2/8"
+        },
+        {
+          "id": "c",
+          "text": "각각2/8,3/8,3/8"
+        },
+        {
+          "id": "d",
+          "text": "각각1/7,1/6,1/5"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "각각3/8,3/8,2/8",
+      "explanation": "0으로 연결되는 입력은0,3,6이고1은1,4,7,2는2,5입니다. 유효 범위에 들어가는 것과 같은 확률로 선택되는 것은 다른 성질입니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "가방의 count와 다음 선택 상한을 각각 계산한다.",
+      "같은 인덱스 두 번을 선택해 순서 보존 삭제를 손으로 추적한다.",
+      "가방 하나의 모든 선택 경로와 순열을 세고 균등성 가정을 따로 적는다.",
+      "두 가방의 위치로 최대 공백12를 유도하고 임의14개 구간의 반례를 만든다.",
+      "뽑은 순열이 현재·미리보기·고정 뒤 보충으로 이동하는 값을 따라간다."
+    ],
+    "expected": "중복 방지·선택 확률·게임 소비 시점을 각각 구현하고 오류를 분리해 진단한다.",
+    "failureChecks": [
+      "빈 상태의 실패가 가방을 채워 버리지 않는가?",
+      "Kind의 ID를 배열 인덱스라고 해석하지 않았는가?",
+      "같은 분포와 같은 시드의 출력 순서를 구분했는가?",
+      "임의 구간에 완전한 가방의 개수 규칙을 적용하지 않았는가?",
+      "미리보기 조회가 새 항목을 소비하지 않는가?"
+    ]
+  }
+}

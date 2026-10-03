@@ -9,6 +9,8 @@
 #include <cstring>
 
 #include "platform.h"
+#include "../core/key_edges.h"
+#include "mouse_coordinates.h"
 
 #include <cstdio>
 
@@ -30,16 +32,14 @@ static int s_vp_y = 0;
 static int s_vp_w = 0;
 static int s_vp_h = 0;
 
-static bool s_key_state[256]{};
-static bool s_key_prev[256]{};
+static input_detail::KeyEdges<256> s_keys;
 static char s_char_queue[64]{};
 static int s_char_head = 0;
 static int s_char_tail = 0;
 
 static int s_mouse_x = 0;
 static int s_mouse_y = 0;
-static bool s_mouse_state[3]{};
-static bool s_mouse_prev[3]{};
+static input_detail::KeyEdges<3> s_mouse;
 static float s_mouse_wheel = 0.0f;
 
 static LARGE_INTEGER s_frequency{};
@@ -149,17 +149,46 @@ static void recompute_viewport()
     }
 }
 
+// Button messages also carry signed client coordinates; a motion message need
+// not immediately precede a click (e.g. after moving/resizing the window).
+static void update_mouse_position(LPARAM position)
+{
+    s_mouse_x = (int)(short)LOWORD(position);
+    s_mouse_y = (int)(short)HIWORD(position);
+}
+
+static void release_mouse_capture_if_idle(HWND hwnd)
+{
+    if (!s_mouse.down(0) && !s_mouse.down(1) && !s_mouse.down(2) &&
+        GetCapture() == hwnd) ReleaseCapture();
+}
+
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
                                     WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
     case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-        if (wparam < 256) s_key_state[wparam] = true;
+        s_keys.set(static_cast<std::size_t>(wparam), true, (lparam & (1LL << 30)) != 0);
         return 0;
+    case WM_SYSKEYDOWN:
+        s_keys.set(static_cast<std::size_t>(wparam), true, (lparam & (1LL << 30)) != 0);
+        return DefWindowProcA(hwnd, message, wparam, lparam);
     case WM_KEYUP:
+        s_keys.set(static_cast<std::size_t>(wparam), false);
+        return 0;
     case WM_SYSKEYUP:
-        if (wparam < 256) s_key_state[wparam] = false;
+        s_keys.set(static_cast<std::size_t>(wparam), false);
+        return DefWindowProcA(hwnd, message, wparam, lparam);
+    case WM_KILLFOCUS:
+        // 포커스 상실: held와 미전달 press를 취소하고 상위 입력 버퍼에 알린다.
+        s_keys.cancel();
+        s_mouse.cancel();
+        if (GetCapture() == hwnd) ReleaseCapture();
+        return 0;
+    case WM_CAPTURECHANGED:
+        // Normal button-up releases capture after held becomes false. Preserve
+        // that frame's press/release edges; cancel only interrupted holds.
+        if (s_mouse.down(0) || s_mouse.down(1) || s_mouse.down(2)) s_mouse.cancel();
         return 0;
     case WM_CHAR:
         if (wparam > 0 && wparam < 128) {
@@ -176,21 +205,26 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
         recompute_viewport();
         return 0;
     case WM_MOUSEMOVE:
-        s_mouse_x = (int)(short)LOWORD(lparam);
-        s_mouse_y = (int)(short)HIWORD(lparam);
+        update_mouse_position(lparam);
         return 0;
     case WM_LBUTTONDOWN:
-        s_mouse_state[0] = true; SetCapture(hwnd); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(0, true); SetCapture(hwnd); return 0;
     case WM_LBUTTONUP:
-        s_mouse_state[0] = false; ReleaseCapture(); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(0, false); release_mouse_capture_if_idle(hwnd); return 0;
     case WM_RBUTTONDOWN:
-        s_mouse_state[1] = true; SetCapture(hwnd); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(1, true); SetCapture(hwnd); return 0;
     case WM_RBUTTONUP:
-        s_mouse_state[1] = false; ReleaseCapture(); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(1, false); release_mouse_capture_if_idle(hwnd); return 0;
     case WM_MBUTTONDOWN:
-        s_mouse_state[2] = true; SetCapture(hwnd); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(2, true); SetCapture(hwnd); return 0;
     case WM_MBUTTONUP:
-        s_mouse_state[2] = false; ReleaseCapture(); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(2, false); release_mouse_capture_if_idle(hwnd); return 0;
     case WM_MOUSEWHEEL:
         s_mouse_wheel += (float)(short)HIWORD(wparam) / (float)WHEEL_DELTA;
         return 0;
@@ -225,6 +259,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 
 void platform_init(int width, int height, const char* title)
 {
+    s_keys.reset();
+    s_mouse.reset();
     // 창을 만들기 전에 켜야 한다. 창이 하나라도 생긴 뒤에는 프로세스 DPI
     // 인식 수준을 바꿀 수 없다.
     enable_dpi_awareness();
@@ -292,11 +328,16 @@ void platform_init(int width, int height, const char* title)
         s_should_close = true;
         return;
     }
-    wglMakeCurrent(s_hdc, legacy);
+    if (!wglMakeCurrent(s_hdc, legacy)) {
+        std::fprintf(stderr, "[GL] wglMakeCurrent(legacy) failed\n");
+        wglDeleteContext(legacy);
+        s_should_close = true;
+        return;
+    }
 
     using CreateCtxAttribs = HGLRC (WINAPI*)(HDC, HGLRC, const int*);
     auto wglCreateContextAttribsARB = (CreateCtxAttribs)
-        wglGetProcAddress("wglCreateContextAttribsARB");
+        platform_gl_get_proc("wglCreateContextAttribsARB");
 
     // 3.3 Core 를 못 받으면 여기서 멈춘다. 예전에는 legacy 컨텍스트를 들고
     // 계속 진행했지만, 그 다음 단계인 #version 330 core 셰이더가 그런 환경에서
@@ -328,11 +369,16 @@ void platform_init(int width, int height, const char* title)
 
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(legacy);
-    wglMakeCurrent(s_hdc, core);
+    if (!wglMakeCurrent(s_hdc, core)) {
+        std::fprintf(stderr, "[GL] wglMakeCurrent(core) failed\n");
+        wglDeleteContext(core);
+        s_should_close = true;
+        return;
+    }
     s_hglrc = core;
 
     // 컨텍스트가 current 인 지금이 확장을 조회할 수 있는 시점이다.
-    s_wglSwapInterval = (BOOL (WINAPI*)(int))wglGetProcAddress("wglSwapIntervalEXT");
+    s_wglSwapInterval = (BOOL (WINAPI*)(int))platform_gl_get_proc("wglSwapIntervalEXT");
     if (s_wglSwapInterval) s_wglSwapInterval(s_frame_pacing ? 1 : 0);
 
     ShowWindow(s_hwnd, SW_SHOW);
@@ -361,14 +407,16 @@ void platform_shutdown()
         s_hwnd = nullptr;
     }
     UnregisterClassA("TetrisWindow", GetModuleHandleA(nullptr));
+    s_keys.reset();
+    s_mouse.reset();
 }
 
 bool platform_should_close() { return s_should_close; }
 
 float platform_begin_frame()
 {
-    std::memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
-    std::memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_keys.begin_frame();
+    s_mouse.begin_frame();
     s_mouse_wheel = 0.0f;
 
     MSG message;
@@ -393,9 +441,9 @@ void platform_present()
 
 void* platform_gl_get_proc(const char* name)
 {
-    // wglGetProcAddress 는 GL 1.2 이상만 돌려준다. glEnable 같은 1.1 함수는
-    // NULL 이 나오므로 opengl32.dll 에서 직접 찾아야 한다. 이 폴백을
-    // 빠뜨리면 로더가 "missing entry point: glEnable" 로 멈춘다.
+    // 드라이버 조회가 시스템 DLL의 기본 GL 진입점을 모두 대신하지는 않는다.
+    // 조회되지 않은 glEnable 같은 기본 함수는 opengl32.dll에서도 찾는다.
+    // 비정상 sentinel은 함수 주소로 사용하지 않는다.
     void* p = (void*)wglGetProcAddress(name);
     if (p == nullptr || p == (void*)0x1 || p == (void*)0x2 ||
         p == (void*)0x3 || p == (void*)-1) {
@@ -446,13 +494,15 @@ void platform_end_frame()
 
 bool platform_key_pressed(int key)
 {
-    return key >= 0 && key < 256 && s_key_state[key] && !s_key_prev[key];
+    return key >= 0 && s_keys.pressed(static_cast<std::size_t>(key));
 }
 
 bool platform_key_down(int key)
 {
-    return key >= 0 && key < 256 && s_key_state[key];
+    return key >= 0 && s_keys.down(static_cast<std::size_t>(key));
 }
+
+bool platform_input_cancelled() { return s_keys.cancelled(); }
 
 char platform_get_char_pressed()
 {
@@ -464,31 +514,27 @@ char platform_get_char_pressed()
 
 int platform_mouse_x()
 {
-    if (s_vp_w <= 0) return s_mouse_x;
-    return (int)((double)(s_mouse_x - s_vp_x) * s_logical_w / s_vp_w);
+    return platform_detail::logical_mouse_axis(s_mouse_x, s_vp_x, s_vp_w, s_logical_w);
 }
 
 int platform_mouse_y()
 {
-    if (s_vp_h <= 0) return s_mouse_y;
-    return (int)((double)(s_mouse_y - s_vp_y) * s_logical_h / s_vp_h);
+    return platform_detail::logical_mouse_axis(s_mouse_y, s_vp_y, s_vp_h, s_logical_h);
 }
 
 bool platform_mouse_pressed(int button)
 {
-    return button >= 0 && button < 3 &&
-           s_mouse_state[button] && !s_mouse_prev[button];
+    return s_mouse.pressed(static_cast<std::size_t>(button));
 }
 
 bool platform_mouse_down(int button)
 {
-    return button >= 0 && button < 3 && s_mouse_state[button];
+    return s_mouse.down(static_cast<std::size_t>(button));
 }
 
 bool platform_mouse_released(int button)
 {
-    return button >= 0 && button < 3 &&
-           !s_mouse_state[button] && s_mouse_prev[button];
+    return s_mouse.released(static_cast<std::size_t>(button));
 }
 
 float platform_mouse_wheel() { return s_mouse_wheel; }

@@ -1,9 +1,10 @@
 #pragma once
 
 // [NET/RL] Pure, headless grid. No renderer, no rendering.
-// Layout (int grid[kRows][kCols]) must match the old Grid class so that
-// ComputeStateHash produces identical bytes when fnv1a64 is applied to the
-// contiguous memory range.
+// Keep the original int[kRows][kCols] representation for state-hash parity.
+// Arrays are contiguous regardless of whether their cells are int or uint8_t.
+// Raw-byte hash compatibility also depends on int width and byte order; this
+// in-memory layout is not a portable serialization format.
 class SimGrid
 {
 public:
@@ -36,8 +37,8 @@ public:
     {
         // 방어적 경계 검사: 범위 밖 좌표는 '비어있지 않음'(막힘)으로 처리한다.
         // 호출부는 보통 IsCellOutside 로 선검사하지만, 만약 무경계 접근이 들어와도
-        // OOB 읽기를 방지한다. 해시 대상은 grid 내용뿐이므로 결정성/리플레이 호환성에
-        // 영향이 없다.
+        // OOB 읽기를 방지한다. 정상 범위 입력의 셀 값이나 저장 레이아웃은 바꾸지 않는다.
+        // 이 가드는 public grid 배열에 직접 접근하는 다른 호출부까지 보호하지 않는다.
         if (IsCellOutside(row, column))
         {
             return false;

@@ -75,7 +75,9 @@ lockstep 은 "틱 t 의 입력" 이 반드시 도착해야 진행한다. 하나�
 
 ### 1.1 소켓의 기본 흐름
 
-TCP 소켓의 서버/클라이언트 수명주기:
+TCP 소켓의 서버/클라이언트 수명주기다. `accept`는 OS가 대기열에 둔 연결을 꺼내 새 핸들로 반환한다. 연결 수립은 애플리케이션의 `accept` 호출보다 먼저 완료될 수 있다. 리스너와 반환된 연결 소켓은 별개의 자원이다.
+
+이 코드의 `tcp_listen`은 블로킹 리스너를 만든다. 서버 호출자가 `tcp_set_nonblocking`으로 바꾼 뒤 폴링한다. 연결 소켓은 `tcp_accept`·`tcp_connect`가 논블로킹 설정에 성공해야 반환한다.
 
 ```mermaid
 sequenceDiagram
@@ -86,8 +88,8 @@ sequenceDiagram
     S->>S: tcp_listen(7777)
     Note over C: socket() → connect()
     C->>S: tcp_connect("192.168.1.100", 7777)
-    S->>S: tcp_accept() (논블로킹 폴링)
-    S-->>C: 연결 수립 (3-way handshake)
+    Note over S,C: OS의 TCP 스택이 연결 수립 (3-way handshake)
+    S->>S: tcp_accept() → 새 연결 소켓
     Note over S,C: 양방향 데이터 스트림
     S->>C: tcp_send_all(data)
     C->>S: tcp_send_all(data)
@@ -98,20 +100,20 @@ sequenceDiagram
 
 ### 1.2 `TcpSocket` — 참조 카운트 소유 핸들
 
-소켓 래퍼의 첫 번째 책임은 플랫폼 차이를 숨기는 것이지만, 더 중요한 책임은 **fd 정수의 소유권**을 명확히 하는 것이다.
+소켓 래퍼의 첫 번째 책임은 플랫폼 차이를 숨기는 것이지만, 더 중요한 책임은 **소켓 핸들의 소유권**을 명확히 하는 것이다.
 
 **현재 소스 발췌 — `net/socket.h`**
 
 ```cpp
 // TCP 소켓 핸들 — 참조 카운트 소유(ref-counted owning handle).
 //
-//   과거에는 평범한 { int fd } 였다. 같은 연결의 복사본을 여러 detached 스레드가
+//   과거에는 평범한 { NativeSocket fd } 였다. 같은 연결의 복사본을 여러 detached 스레드가
 //   값으로 들고 각자 ::close 했기 때문에, 한 스레드가 닫은 fd 정수를 곧바로 새
 //   accept() 가 재사용하면 살아있던 다른 스레드가 "엉뚱한 클라이언트 소켓"에
 //   read/write 하는 use-after-close / fd-reuse 경합이 있었다(공개 서버에서 교차
 //   연결 데이터 유출로 악용 가능).
 //
-//   이제 fd 는 shared_ptr<int> 가 소유하며, 모든 복사본은 같은 제어 블록을
+//   이제 fd 는 shared_ptr<NativeSocket> 가 소유하며, 모든 복사본은 같은 제어 블록을
 //   공유한다. 실제 ::close 는 "마지막 복사본이 사라지는 순간" deleter 에서
 //   정확히 한 번 호출된다(이중 close 와 fd 재사용 경합 제거).
 //
@@ -126,23 +128,24 @@ sequenceDiagram
 //   서로 다른 복사본을 각 스레드가 들고 read/close 하는 것은 안전하다.
 struct TcpSocket {
     std::shared_ptr<StreamTransport> transport; // client WSS; never a reactor fd
-    std::shared_ptr<int> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
+    std::shared_ptr<NativeSocket> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
 
-    int  fd()    const { return fdh ? *fdh : -1; }
-    bool valid() const { return transport ? transport->alive() : fdh && *fdh >= 0; }
+    NativeSocket fd() const { return fdh ? *fdh : kInvalidSocket; }
+    bool valid() const { return transport ? transport->alive() : fdh && socket_valid(*fdh); }
 };
 ```
 
-위 구조에는 TCP fd뿐 아니라 `ByteTransport` 소유권도 있다. WSS는 이 인터페이스의 send/receive/close로 위임하고, 아래 fd·shutdown 설명은 일반 TCP 경로에 적용된다. WSS의 별도 스레드·TLS·종료 수명은 Part 16에서 설명한다.
+위 구조에는 TCP fd뿐 아니라 `StreamTransport` 소유권도 있다. WSS는 이 인터페이스의 send/receive/close로 위임하고, 아래 fd·shutdown 설명은 일반 TCP 경로에 적용된다. WSS의 별도 스레드·TLS·종료 수명은 Part 16에서 설명한다.
 
-fd 를 닫는 코드는 딱 두 곳뿐이다 — 생성 실패 경로와 deleter.
+`net/native_socket.h`의 `NativeSocket`은 POSIX에서 `int`, Windows에서 포인터 크기의 부호 없는 정수다. Windows SOCKET을 `int`로 줄이면 핸들 값이 잘릴 수 있으므로 소유자·Reactor API·등록 컨테이너·서버 연결 상태까지 같은 타입을 전달한다. POSIX는 음수, Windows는 `INVALID_SOCKET`에 대응하는 값으로 무효 상태를 판정한다. 0도 유효한 핸들이 될 수 있다. `valid()`는 TCP 경로에서 자원 소유 여부를 확인하며 원격 연결의 건강 상태를 증명하지 않는다. [Microsoft SOCKET 타입 계약](https://learn.microsoft.com/en-us/windows/win32/winsock/socket-data-type-2)을 참고한다.
+
+fd를 닫는 경로는 생성 실패 정리와 마지막 소유자의 deleter다.
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 실제 fd 를 닫는다(플랫폼별). 오직 owning 핸들의 deleter 에서만 호출.
-static void close_fd(int fd) {
-    if (fd < 0) return;
+static void close_fd(NativeSocket fd) {
+    if (!socket_valid(fd)) return;
 #ifdef _WIN32
     closesocket(fd);
 #else
@@ -150,16 +153,23 @@ static void close_fd(int fd) {
 #endif
 }
 
-// [NET] 새로 생성된 fd 를 참조 카운트 소유 핸들로 감싼다.
-//   마지막 복사본이 사라질 때 deleter 가 close_fd 로 정확히 한 번 닫는다.
-static TcpSocket make_owned(int fd) {
+static TcpSocket make_owned(NativeSocket fd) {
     TcpSocket s;
-    s.fdh = std::shared_ptr<int>(new int(fd), [](int* p) {
-        if (p) { close_fd(*p); delete p; }
-    });
+    try {
+        // Keep the real handle unowned until both allocations succeed. If the
+        // control-block allocation fails, shared_ptr deletes only the sentinel.
+        auto owner = std::shared_ptr<NativeSocket>(new NativeSocket(kInvalidSocket),
+            [](NativeSocket* p) { if (p) { close_fd(*p); delete p; } });
+        *owner = fd;
+        s.fdh = std::move(owner);
+    } catch (const std::bad_alloc&) {
+        close_fd(fd);
+    }
     return s;
 }
 ```
+
+`make_owned`는 무효 핸들을 담은 저장소와 shared_ptr 제어 블록을 먼저 준비한 뒤 실제 핸들을 넣는다. 첫 할당 또는 제어 블록 할당이 실패해도 실제 소켓은 catch에서 한 번만 닫힌다. 제어 블록 준비 중 deleter가 호출되어도 그때는 무효 핸들만 갖고 있으므로 중복 close가 생기지 않는다.
 
 이 형태가 필요한 이유는 스레드 간에 소켓을 값으로 넘기기 때문이다. `{ int fd }` 구조체를 그대로 복사하면 소유자가 여러 명 생기지만, 커널 fd 정수는 소유권을 표현하지 못한다. 한 스레드가 `close(fd)` 한 직후 다른 `accept()` 가 같은 정수 값을 재사용하면, 아직 그 정수를 들고 있던 스레드가 새 연결에 `read/write` 하는 fd-reuse 경합이 생긴다. 공개 릴레이에서는 서로 다른 클라이언트 연결의 데이터가 교차할 수 있으므로 단순 안정성 버그가 아니라 데이터 유출 취약점이다.
 
@@ -170,11 +180,10 @@ static TcpSocket make_owned(int fd) {
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 빠른 재바인드를 위한 SO_REUSEADDR 설정
-static int set_reuse(int fd) {
+static int set_bind_policy(NativeSocket fd) {
     int yes = 1;
 #ifdef _WIN32
-    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+    return setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&yes, sizeof(yes));
 #else
     return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 #endif
@@ -184,12 +193,11 @@ static int set_reuse(int fd) {
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 포트에서 연결 대기 소켓을 생성합니다.
 TcpSocket tcp_listen(uint16_t port, int backlog, bool loopback_only) {
     if (!net_init()) return TcpSocket{};
-    int fd = (int)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd < 0) return TcpSocket{};
-    set_reuse(fd);
+    NativeSocket fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!socket_valid(fd)) return TcpSocket{};
+    if (set_bind_policy(fd) != 0) { close_fd(fd); return TcpSocket{}; }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(loopback_only ? INADDR_LOOPBACK : INADDR_ANY);
@@ -208,20 +216,19 @@ TcpSocket tcp_listen(uint16_t port, int backlog, bool loopback_only) {
 
 `loopback_only`를 켜면 내부 IPv4 loopback에만 bind한다. 공개 배포는 이 옵션과 별도의 WSS 게이트웨이를 조합한다. `tcp_accept`의 선택적 `AcceptResult` 출력은 연결 없음과 fd 고갈 같은 실패를 구분해 서버의 재시도·입장 제한 판단을 돕는다.
 
-**SO_REUSEADDR**: 설정하지 않으면 프로그램을 재시작했을 때 "Address already in use" 에러가 난다. 이전 연결의 TCP TIME_WAIT 상태(기본 2분)가 남아 있기 때문이다. `SO_REUSEADDR` 는 TIME_WAIT 중인 포트에 재바인드를 허용한다.
+**바인드 정책:** POSIX 경로는 `SO_REUSEADDR`를 요청해 주소 재사용 규칙을 완화한다. 실제 재바인드 가능 여부는 살아 있는 리스너·연결·주소와 OS 정책에 달려 있다. TIME_WAIT 기간이나 재시작 성공을 고정값으로 보장하지 않는다. Windows 경로는 `SO_EXCLUSIVEADDRUSE`를 bind 전에 설정한다. Windows의 `SO_REUSEADDR`는 사용 중인 포트에 강제로 바인드해 어느 소켓으로 전달될지 불명확하게 만들 수 있어 같은 의미로 쓰지 않는다. 옵션 설정이 실패하면 후보 소켓을 닫고 실패를 반환한다. 배타 바인드 역시 연결 상태 때문에 즉시 재바인드가 안 될 수 있다. [Microsoft의 주소 재사용·배타 사용 계약](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse)을 참고한다.
 
 수락은 `tcp_accept` 다. 수락된 자식 소켓에만 논블로킹 + NODELAY + keepalive 를 건다 — listen 소켓에 걸어도 자식으로 상속되지 않는 플랫폼이 있다. NODELAY 의 근거는 §15, keepalive 가 어떤 실패를 감지하는지는 §11.7 이 다룬다.
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 대기 소켓에서 1개 연결을 수락합니다.
 TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result) {
     auto report = [&](AcceptResult r) { if (out_result) *out_result = r; };
     if (!server.valid()) { report(AcceptResult::Error); return TcpSocket{}; }
     sockaddr_in addr{}; socklen_t alen = sizeof(addr);
-    int fd = (int)::accept(server.fd(), (sockaddr*)&addr, &alen);
-    if (fd < 0) {
+    NativeSocket fd = ::accept(server.fd(), (sockaddr*)&addr, &alen);
+    if (!socket_valid(fd)) {
 #ifdef _WIN32
         const int e = WSAGetLastError();
         report(e == WSAEWOULDBLOCK ? AcceptResult::WouldBlock
@@ -237,12 +244,14 @@ TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result) {
 #endif
         return TcpSocket{};
     }
-    report(AcceptResult::Ok);
+    report(AcceptResult::Error);
     // 수락된 소켓을 논블로킹 + NODELAY 로 설정.
-    set_nonblocking(fd);
+    if (!set_nonblocking(fd)) { close_fd(fd); return TcpSocket{}; }
     set_nodelay(fd);
     set_keepalive(fd);
-    return make_owned(fd);
+    auto owned = make_owned(fd);
+    if (owned.valid()) report(AcceptResult::Ok);
+    return owned;
 }
 ```
 
@@ -251,7 +260,6 @@ TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result) {
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 원격 호스트로 TCP 연결을 시도합니다.
 TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     if (!net_init()) return TcpSocket{};
 
@@ -259,20 +267,20 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
     addrinfo* res = nullptr; char portStr[16];
     std::snprintf(portStr, sizeof(portStr), "%u", (unsigned)port);
     if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0) return TcpSocket{};
-    int fd = -1;
+    NativeSocket fd = kInvalidSocket;
     for (addrinfo* p = res; p; p = p->ai_next) {
-        fd = (int)::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
+        fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (!socket_valid(fd)) continue;
         if (::connect(fd, p->ai_addr, (int)p->ai_addrlen) == 0) {
             break;
         }
         close_fd(fd);
-        fd = -1;
+        fd = kInvalidSocket;
     }
     freeaddrinfo(res);
-    if (fd < 0) return TcpSocket{};
-    // 연결된 소켓을 논블로킹 + NODELAY + keepalive 로 설정.
-    set_nonblocking(fd);
+    if (!socket_valid(fd)) return TcpSocket{};
+    // 연결된 소켓을 논블로킹 + NODELAY 로 설정.
+    if (!set_nonblocking(fd)) { close_fd(fd); return TcpSocket{}; }
     set_nodelay(fd);
     set_keepalive(fd);
     return make_owned(fd);
@@ -288,8 +296,7 @@ TcpSocket tcp_connect(const std::string& host, uint16_t port) {
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 논블로킹 모드 설정
-static bool set_nonblocking(int fd) {
+static bool set_nonblocking(NativeSocket fd) {
 #ifdef _WIN32
     u_long mode = 1;
     return ioctlsocket(fd, FIONBIO, &mode) == 0;
@@ -307,38 +314,35 @@ static bool set_nonblocking(int fd) {
 
 ### 1.6 `tcp_send_all` — 논블로킹 위의 "전량 송신"
 
-논블로킹 소켓에서 `send` 는 요청한 바이트를 다 보내지 못하고 일부만 보낼 수 있다. `tcp_send_all` 은 그 위에 "전부 보내거나 실패한다" 는 계약을 세운다.
+논블로킹 소켓에서 `send`는 요청한 바이트 중 일부만 받아들일 수 있다. 네이티브 TCP 경로의 `tcp_send_all`은 양수 반환량만큼 위치를 전진하며 전체 요청을 로컬 OS에 맡기면 true를 반환한다. 중간 실패 전 일부 바이트가 이미 받아들여졌을 수 있으므로 false를 전송0이나 원자적 취소로 해석하지 않는다.
+
+Windows의 send 길이는 int다. `net/io_size.h`의 `io_chunk_size`가 size_t 요청을 INT_MAX 이하로 제한한 뒤 변환한다. 전체 버퍼 길이와 호출 한 번의 길이를 분리하므로 큰 값의 부호·상위 비트 손실을 피한다. 논블로킹 `tcp_send_some`도 같은 제한을 사용하며 나중 호출이 실패해도 out_sent에 앞서 수락된 양을 남긴다.
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 전체 버퍼가 전송될 때까지 반복합니다(스트림 특성으로 부분 전송 가능).
 bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
     if (s.transport) return s.transport->send(data,len);
-    const int fd = s.fd();
-    if (fd < 0) return false;
+    const NativeSocket fd = s.fd();
+    if (!socket_valid(fd)) return false;
     const uint8_t* p = static_cast<const uint8_t*>(data);
     size_t sent = 0;
-    constexpr auto kBlockedTimeout = std::chrono::seconds(5);
-    std::chrono::steady_clock::time_point blockedSince{};
+    // Total call budget: intermittent progress must not restart the clock.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sent < len) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
 #ifdef _WIN32
-        int n = ::send(fd, (const char*)(p + sent), (int)(len - sent), 0);
+        int n = ::send(fd, (const char*)(p + sent), io_chunk_size(len - sent), 0);
         if (n < 0) {
             int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
-                if (err == WSAEWOULDBLOCK) {
-                    auto now = std::chrono::steady_clock::now();
-                    if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
-                    if (now - blockedSince >= kBlockedTimeout) return false;
-                }
+            if (err == WSAEWOULDBLOCK) {
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
-        if (n == 0) return false; // 연결 종료
+        if (n == 0) return false; // nonempty request made no progress
 #else
         int flags = 0;
 #ifdef MSG_NOSIGNAL
@@ -348,18 +352,14 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                auto now = std::chrono::steady_clock::now();
-                if (blockedSince == std::chrono::steady_clock::time_point{}) blockedSince = now;
-                if (now - blockedSince >= kBlockedTimeout) return false;
                 // 논블로킹에서 버퍼 가득참 - 짧은 대기 후 재시도
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             return false;
         }
-        if (n == 0) return false; // 연결 종료
+        if (n == 0) return false; // nonempty request made no progress
 #endif
-        blockedSince = {};
         sent += (size_t)n;
     }
     return true;
@@ -369,78 +369,61 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len) {
 여기서 놓치기 쉬운 사실 세 가지.
 
 - **소켓은 논블로킹이지만 `tcp_send_all` 은 "느슨하게 블로킹" 한다.** 커널 송신 버퍼가 가득 차면 1ms 씩 자며 재시도한다. 즉 호출자 스레드는 실제로 멈춘다 — 그래서 `sendMu` 를 잡은 채 호출하면 안 된다(스레드 모델 절 참조).
-- **`kBlockedTimeout = 5초`** 가 상한이다. 상대가 데이터를 전혀 읽지 않아 TCP 윈도우가 0 으로 닫힌 채 5초가 지나면 `false` 를 반환하고, 호출부는 이를 연결 실패로 취급한다. 이 상한이 없으면 죽은 피어 하나가 ioThread 를 영원히 붙잡는다.
+- **전체 호출의 마감시간은 시작 시각+5초다.** 매 send 시도 전에 단조 시계를 확인한다. 부분 진행이 있어도 갱신하지 않으므로 조금씩 읽는 상대가 호출을 계속 연장할 수 없다. 이 정책은 논블로킹 소켓을 전제로 한다. 스케줄링 지연으로 실제 반환 시각이 늦어질 수 있으며, 마지막 시도에서 모두 수락됐으면 성공한다.
 - **`MSG_NOSIGNAL` 과 `SIGPIPE`.** POSIX 에서 닫힌 소켓에 쓰면 기본적으로 프로세스가 `SIGPIPE` 로 죽는다. `net_init()` 이 `std::signal(SIGPIPE, SIG_IGN)` 로 무시하도록 만들고, 여기서는 플래그로도 한 번 더 막는다.
+
+전체 시간 제한과 무진행 제한은 다른 정책이다. 무진행 제한은 바이트가 조금이라도 진행되면 다시 시작하므로 전체 호출 시간을 제한하지 않는다. 현재 네이티브 함수는 전체 시간 제한을 사용한다. POSIX EINTR 재시도도 루프 위의 마감시간 검사를 다시 거친다. Windows WSAEINTR는 호출 취소로 오류 반환한다.
+
+실패 후 같은 연결에서 원래 버퍼를 처음부터 다시 보내면 이미 수락된 접두사가 중복된다. `tcp_send_some`의 true+out_sent<len은 보류 후 같은 연결의 남은 범위부터 재개할 수 있다는 계약이지만, false는 진행 불가 오류다. 현재 호출자는 false를 연결 실패로 처리한다. 새 연결에서 같은 요청을 재전송하려면 별도의 요청 식별·중복 처리 규약이 필요하다.
+
+WSS 경로는 `net/wss_client.cpp`의 `WssClient::send`로 분기한다. 이 구현의 true는 복사본이 로컬 비동기 송신 큐에 수락되었다는 뜻이며, 네이티브 함수의5초 루프를 실행하지 않는다. 큐 상한과 비동기 전송의 수명은 해당 어댑터의 계약이다. 어느 경로도 상대 애플리케이션의 처리 완료를 뜻하지 않는다. `net/stream_transport.h`를 읽을 때 반환값이 보장하는 계층을 함께 확인한다.
 
 수신은 대칭적으로 단순하다. "지금 읽을 수 있는 만큼만 누적 버퍼 뒤에 붙인다."
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 수신 가능한 만큼 한 번 읽어 누적 버퍼에 추가합니다.
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf) {
     if (s.transport) return s.transport->receive(outBuf);
-    const int fd = s.fd();
-    if (fd < 0) return false;
+    const NativeSocket fd = s.fd();
+    if (!socket_valid(fd)) return false;
     uint8_t tmp[4096];
+    for (;;) {
 #ifdef _WIN32
-    int n = ::recv(fd, (char*)tmp, (int)sizeof(tmp), 0);
-    if (n < 0) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
-            // 논블로킹에서 데이터 없음 - 정상
-            return true;
+        const int n = ::recv(fd, reinterpret_cast<char*>(tmp), sizeof(tmp), 0);
+        if (n < 0) {
+            const int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK) return true;
+            return false;
         }
-        // 실제 에러
-        return false;
-    }
-    if (n == 0) {
-        // 연결 종료
-        return false;
-    }
 #else
-    ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // 논블로킹에서 데이터 없음 - 정상
-            return true;
+        const ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+        if (n < 0) {
+            const int error = errno;
+            if (error == EINTR) continue;
+            if (error == EAGAIN || error == EWOULDBLOCK) return true;
+            return false;
         }
-        // 실제 에러
-        return false;
-    }
-    if (n == 0) {
-        // 연결 종료
-        return false;
-    }
 #endif
-    outBuf.insert(outBuf.end(), tmp, tmp + n);
-    return true;
+        if (n == 0) return false; // peer send direction ended after queued bytes
+        outBuf.insert(outBuf.end(), tmp, tmp + n);
+        return true;
+    }
 }
 ```
 
-반환값의 의미가 중요하다. **`true` 는 "바이트를 받았다" 가 아니라 "연결이 살아 있다" 는 뜻**이다. 데이터가 없어도 `true` 다. `false` 는 EOF 또는 진짜 에러뿐이다. 이 계약 때문에 호출부는 "몇 바이트가 늘었는지" 를 따로 계산해야 한다.
+반환값의 의미가 중요하다. **`true`에는 데이터 수신과 WouldBlock이 모두 포함**된다. 이번 호출에서 종료할 사유를 관찰하지 않았다는 뜻이며 상대의 생존을 증명하지 않는다. 호출부는 vector 크기의 증가량으로 실제 수신량을 확인한다. POSIX EINTR은 같은 수신을 다시 시도한다. Winsock WSAEINTR은 호출 취소라서 오류로 돌려주며, WSAEINPROGRESS도 WouldBlock과 같은 상태로 취급하지 않는다. EOF나 그 밖의 오류는 false다. 길이4096은 한 번의 임시 수신 버퍼 크기이며 메시지 길이가 아니다.
 
 ### 1.7 `tcp_close` 는 닫지 않는다
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 소켓 종료.
-//   ::shutdown 으로 같은 fd 를 폴링/대기 중인 다른 복사본의 recv 를 EOF 로
-//   깨워 루프를 빠져나가게 한다. 실제 ::close 는 마지막 TcpSocket 복사본이
-//   소멸할 때 deleter 에서 한 번만 일어난다(이중 close / fd 재사용 경합 방지).
-//   shutdown 은 일반 스레드에서 반복 호출해도 무해한 종료 신호로만 사용한다.
-//   TcpSocket 은 shared_ptr 를 읽으므로 tcp_close() 를 signal handler 에서 직접
-//   호출하면 안 된다.
-//   여기서 fdh 를 reset 하지 않는 이유: 같은 인스턴스를 다른 스레드가 읽고 있을
-//   수 있어(예: Session::sock 을 ioThread 가 read, 메인이 Close) reset 은
-//   shared_ptr 인스턴스에 대한 경합이 된다. 참조 해제는 RAII(소유 스레드의
-//   재대입/소멸)에 맡긴다.
 void tcp_close(TcpSocket& s) {
     if (s.transport) { s.transport->close(); return; }
     if (!s.fdh) return;
-    int fd = *s.fdh;
-    if (fd >= 0) {
+    NativeSocket fd = *s.fdh;
+    if (socket_valid(fd)) {
 #ifdef _WIN32
         ::shutdown(fd, SD_BOTH);
 #else
@@ -457,7 +440,6 @@ void tcp_close(TcpSocket& s) {
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 소켓을 논블로킹 모드로 전환(public 래퍼).
 void tcp_set_nonblocking(const TcpSocket& s) {
     if (s.valid()) set_nonblocking(s.fd());
 }
@@ -474,10 +456,16 @@ TCP 는 **바이트 스트림**이다. 메시지 경계가 없다. 5바이트를
 ```text
 송신: [HELLO][SEED message][INPUT message]
 수신: [HEL][LO SEED messa][ge INPUT message]
-      ← TCP 가 바이트 경계를 보장하지 않음 →
+      ← 송신 호출·메시지 경계와 수신 호출 경계가 일치하지 않을 수 있음 →
 ```
 
-해결: 각 메시지에 **길이 접두사**를 붙인다.
+수신 버퍼를 크게 만든다고 send 단위가 복구되는 것은 아니다. recv가 반환한 양수 길이만큼만 누적해야 하며, 버퍼의 나머지 부분은 이번 호출의 입력이 아니다. ABCDEF를 [ABC][DEF] 또는 [AB][CDEF]로 읽어도 누적 결과는 같아야 한다. TCP 세그먼트 역시 send/recv 호출 경계와 일대일 대응하지 않는다. [RFC9293 §3.7](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.7)의 경계 계약을 참고한다.
+
+데이터는 상대의 송신 종료를 관찰하기 전에 먼저 읽힐 수 있다. 양수 길이를 요청한 recv의0은 남은 데이터를 소비한 뒤의 EOF다. 양쪽이 데이터를 보낸 뒤 서로 EOF만 기다리면서 송신 방향을 닫지 않으면 함께 대기할 수 있다. EOF로 한 묶음을 끝내는 진단에서는 한쪽이 shutdown(SHUT_WR/SD_SEND) 후 계속 읽어 응답을 받을 수 있다. 게임처럼 같은 연결로 요청을 계속 주고받을 때는 이 방식만으로 각 메시지를 구별할 수 없다.
+
+고정 버퍼를 누적할 때는 `추가량 > 용량 - 사용량`을 먼저 검사한다. `사용량 + 추가량`의 오버플로를 피하고, 이번 추가가 거절되면 이미 받은 접두사를 그대로 유지한다. 메모리 상한과 대기 시간 상한은 별개다. 고정64바이트로 제한해도 상대가 EOF를 보내지 않으면 블로킹 recv는 계속 기다릴 수 있다.
+
+이 프로젝트의 반복 메시지 구분에는 각 메시지에 **길이 접두사**를 붙인다.
 
 ### 2.2 프레임 구조
 
@@ -499,7 +487,7 @@ LEN            = TYPE(1) + PAYLOAD(N)
 | PAYLOAD | LEN-1 bytes | 메시지별 데이터 |
 | CHECKSUM | 4 bytes (u32 LE) | PAYLOAD 의 FNV-1a 32-bit 해시 |
 
-모든 다중 바이트 필드는 **리틀 엔디안**으로 직렬화된다. x86/x64 · ARM(리틀 엔디안 모드)이 모두 리틀 엔디안이므로 실질적으로 바이트 스왑이 필요 없지만, 읽기/쓰기 헬퍼가 시프트 연산으로 명시적으로 조립하므로 빅 엔디안 기기에서도 같은 바이트열이 나온다.
+정수 필드는 규약에 명시한 폭과 **리틀 엔디안** 순서로 직렬화한다. 읽기/쓰기 헬퍼는 숫자의 비트를 시프트해 바이트를 조립하므로 CPU의 객체 저장 순서에 의존하지 않는다. `sizeof(struct)`나 호스트 포인터 크기는 wire 크기를 결정하지 않는다.
 
 **현재 소스 발췌 — `net/framing.cpp`**
 
@@ -515,6 +503,13 @@ void le_write_u64(std::vector<uint8_t>& v, uint64_t x) {
 }
 uint16_t le_read_u16(const uint8_t* p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 uint32_t le_read_u32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
+int32_t le_read_i32(const uint8_t* p) {
+    const uint32_t raw = le_read_u32(p);
+    const auto max = static_cast<uint32_t>((std::numeric_limits<int32_t>::max)());
+    if (raw <= max) return static_cast<int32_t>(raw);
+    // UINT32_MAX - raw fits int32_t here. No out-of-range unsigned→signed cast.
+    return -1 - static_cast<int32_t>((std::numeric_limits<uint32_t>::max)() - raw);
+}
 uint64_t le_read_u64(const uint8_t* p) {
     // 리틀엔디안: p[0]이 최하위 바이트
     uint64_t x=0; for (int i=7;i>=0;--i){ x = (x<<8) | p[i]; } return x;
@@ -542,17 +537,18 @@ $$h_0 = 2166136261, \quad h_i = (h_{i-1} \oplus \text{byte}_i) \times 16777619$$
 Part 1 에서 사용한 FNV-1a 64-bit 와 같은 알고리즘의 32비트 버전이다. CRC32 대신 이것을 고른 이유는 세 가지다.
 
 1. **구현과 검증 규약이 작다.** CRC32는 테이블이나 비트 단위 루프가 필요하고, 다항식·초기값·반전 규약을 맞추지 않으면 구현마다 값이 다르다. 이 프로젝트는 Python 미러(`python/netbot/framing.py`)와 바이트 단위로 일치해야 하므로 규약이 단순한 알고리즘이 유리하다.
-2. **이미 프로젝트에 있다.** Part 1 의 상태 해시가 FNV-1a 64 다. 상수 두 개만 32비트 버전으로 바꾸면 된다 — 새로 배울 것이 없다.
-3. **성능이 문제되지 않는다.** 최대 페이로드가 4 KiB, 실사용은 수십 바이트다.
+2. **이미 프로젝트에 있다.** Part 1 의 상태 해시가 FNV-1a 64 다. 같은 XOR·곱셈 순서를 사용하지만 상수와 누적 정수 폭을32비트 규약에 맞춘다.
+3. **계산량이 payload 길이에 비례한다.** 최대 페이로드는4 KiB다. 실제 비용은 메시지 빈도와 함께 측정해야 한다.
 
 #### 왜 PAYLOAD 만 덮는가 — 실제 트레이드오프
 
 체크섬은 `PAYLOAD` 만 덮는다. `LEN` 과 `TYPE` 은 덮지 않는다. 이 선택에는 분명한 대가가 있다.
 
-- **장점:** 파서가 프레임을 재조립하지 않고도 검증할 수 있다. 수신 버퍼의 `payload` 포인터를 그대로 `fnv1a32` 에 넘기면 끝 — 헤더까지 덮으려면 헤더와 페이로드가 연속임을 가정하거나 두 번 나눠 해싱해야 한다. 송신 측도 마찬가지로 `build_frame` 이 payload 를 받은 그 상태에서 바로 계산한다.
-- **대가:** **`LEN` 이 손상되면 검출할 수단이 없다.** `LEN` 이 깨지면 프레임 경계 자체가 어긋나고, 그 뒤의 모든 프레임이 잘못된 위치에서 읽힌다. 체크섬은 "잘못 잘린 payload" 에 대해 계산되므로 대부분 불일치로 드롭되지만, 스트림은 이미 오정렬된 상태다. 실제로 파서가 이 상황에서 하는 일은 "체크섬 틀린 프레임 하나 버리고 `offset += need` 로 다음 위치로 이동" 인데, 그 다음 위치도 틀렸다. 결국 스트림이 스스로 재동기화되지 않는다.
+송신 함수는 입력 payload만으로 체크섬을 계산한다. 수신 버퍼와 완성된 송신 프레임에서는 헤더와 payload가 이미 연속되어 있으므로, **헤더까지 검사하려면 반드시 별도 재조립이 필요하다는 설명은 맞지 않는다.** 현재 범위는 wire 규약의 선택이며, 변경하면 양쪽 구현과 버전 호환 정책을 함께 바꿔야 한다.
 
-TCP 가 이미 16비트 체크섬으로 세그먼트를 검증하고 그 아래 이더넷 FCS(CRC32)가 한 번 더 검증하므로, 실전에서 `LEN` 이 조용히 깨질 확률은 매우 낮다. 이 프레이밍 체크섬의 실제 역할은 "전송 오류 검출" 보다 **"우리 직렬화 코드의 버그와 프로토콜 버전 불일치를 조기에 잡는 것"** 에 가깝다. 실제로 Python 미러를 만들 때 `& 0xFFFFFFFF` 마스킹을 빠뜨린 버그가 이 체크섬 덕에 즉시 드러났다 ([Part 8](./part8-python-rl.md) 의 `fnv1a32` 절).
+LEN과 TYPE은 이 체크섬으로 직접 보호되지 않는다. 잘못된 LEN이 상한을 넘으면 길이 검사로 거절되고, 범위 안에서 달라지면 체크섬 불일치로 드러날 수도 있다. 그러나 그 길이가 가리키는 다음 위치도 틀릴 수 있어 체크섬을 건너뛰는 동작만으로 원래 경계를 되찾는다고 보장할 수 없다. 프레임 시작을 찾는 별도 재동기화 규약도 없다.
+
+TCP 자체의 오류 검출과 별개로 이 값은 직렬화 결과의 불일치를 찾는 데 쓰인다. 검출되지 않는 충돌이 존재하며, 악의적인 송신자는 올바른 값도 계산할 수 있다. 체크섬 일치만으로 버전 호환이나 상대의 신뢰성을 판정하지 않는다.
 
 #### 체크섬은 악의적 변조를 막지 못한다
 
@@ -582,7 +578,7 @@ constexpr std::size_t kFrameTypeBytes     = 1;     // TYPE 필드 (u8)
 constexpr std::size_t kFrameChecksumBytes = 4;     // CHECKSUM 필드 (u32 LE, FNV-1a)
 ```
 
-`kMaxPayloadBytes = 4096` 을 두는 이유는 u16 `LEN` 의 자연 한계(65535)가 사실상 "상한 없음" 이기 때문이다. 실사용 최대는 CHAT 200자 UTF-8(~800 B)이고 HASH/INPUT 은 수십 바이트라, 4 KiB 면 정상 트래픽에 닿지 않으면서 악성 길이 선언을 조기에 자를 수 있다. C++ 안에서는 이 헤더가 단일 진실 공급원이지만 언어 경계는 컴파일러가 지켜 주지 않는다 — Python 미러(`python/netbot/framing.py`)가 같은 값을 자체 상수로 다시 들고, 패리티 테스트(`python/tests/test_framing_parity.py`)가 양쪽 값을 고정한다. 컴파일 타임 공유가 불가능한 곳에서는 테스트가 상수의 계약을 대신 지킨다.
+`kMaxPayloadBytes = 4096` 을 두는 이유는 u16 `LEN`의 표현 범위(65535)보다 작은 애플리케이션 자원 한도를 적용하기 위해서다. 실사용 최대는 CHAT 200자 UTF-8(~800 B)이고 HASH/INPUT 은 수십 바이트라, 4 KiB 면 정상 트래픽에 닿지 않으면서 악성 길이 선언을 조기에 자를 수 있다. C++ 안에서는 이 헤더가 단일 진실 공급원이지만 언어 경계는 컴파일러가 지켜 주지 않는다 — Python 미러(`python/netbot/framing.py`)가 같은 값을 자체 상수로 다시 들고, 고정 벡터 테스트(`python/tests/test_framing_parity.py`)와 실제 두 구현을 실행하는 `scripts/check_learning_framing.py`로 이 계약을 검사한다. 컴파일 타임 공유가 불가능한 곳에서는 테스트가 상수의 계약을 대신 지킨다.
 
 **현재 소스 발췌 — `net/framing.cpp`**
 
@@ -616,34 +612,29 @@ std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload)
 bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
     size_t offset = 0;
     while (true) {
-        // 길이(u16)를 읽을 만큼 데이터가 준비되었는지 확인
-        // 주의: size_t는 unsigned이므로 뺄셈 대신 덧셈으로 비교 (언더플로 방지)
-        if (offset + kFrameLenBytes > streamBuf.size()) break;
+        // Invariant: offset <= size; advance only by a complete frame.
+        const size_t remaining = streamBuf.size() - offset;
+        if (remaining < kFrameLenBytes) break;
 
         // LEN = TYPE + PAYLOAD 길이
         const uint16_t len = le_read_u16(&streamBuf[offset]);
 
-        // 페이로드 상한 초과 선언 시 전체 스트림을 버린다.
-        // 부분 수신 상태에서 len 만 받았더라도 판정 가능 — 수신 버퍼가
-        // 상한 이상으로 불어나기 전에 조기 차단.
+        // Reject an oversized declaration before buffering the payload.
         if (static_cast<size_t>(len) > kMaxPayloadBytes + kFrameTypeBytes) {
             streamBuf.clear();
             return false;
         }
 
-        // 전체 프레임이 모였는지 확인: len 필드 + 본문(len) + 체크섬
         const size_t need = kFrameLenBytes + static_cast<size_t>(len) + kFrameChecksumBytes;
-        if (offset + need > streamBuf.size()) break;
+        if (remaining < need) break;
 
-        // len=0 이면 TYPE 바이트조차 없는 잘못된 프레임 — 스킵
+        // A zero length frame has no type byte.
         if (len < kFrameTypeBytes) { offset += need; continue; }
 
-        // TYPE 바이트와 PAYLOAD 범위 계산
         const uint8_t type = streamBuf[offset + kFrameLenBytes];
         const uint8_t* payload = &streamBuf[offset + kFrameLenBytes + kFrameTypeBytes];
         const size_t payloadLen = static_cast<size_t>(len) - kFrameTypeBytes; // LEN - TYPE(1)
 
-        // 체크섬 읽고 유효성 검사(FNV-1a32)
         const size_t chkPos = offset + kFrameLenBytes + static_cast<size_t>(len);
         const uint32_t chk = le_read_u32(&streamBuf[chkPos]);
         const uint32_t calc = (payloadLen == 0) ? 0u : fnv1a32(payload, payloadLen);
@@ -654,10 +645,9 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
             out.push_back(std::move(f));
         }
 
-        // 다음 프레임으로 이동
         offset += need;
     }
-    // 파싱된 부분 제거, 나머지는 다음 수신과 합쳐서 재시도
+    // Keep the incomplete tail for the next receive.
     if (offset > 0) streamBuf.erase(streamBuf.begin(), streamBuf.begin() + offset);
     return true;
 }
@@ -671,7 +661,9 @@ bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out) {
 4. **체크섬 불일치는 현재 구현에서 드롭이지 단절이 아니다.** 파서는 손상된 프레임 하나를 소비하고 뒤 프레임을 계속 읽는다. 다만 `INPUT`처럼 진행에 필수인 프레임이 드롭되면 애플리케이션 계층 재전송이 없어 lockstep은 스스로 복구하지 못한다. 따라서 이 동작은 스트림 파서를 살려 두는 정책일 뿐, 게임 세션 복구 보장은 아니다. 손상 프레임을 즉시 연결 실패로 승격할지는 운영 보안 정책으로 별도 결정해야 한다.
 5. **알 수 없는 TYPE 은 그대로 통과시킨다.** `static_cast<MsgType>(type)` 은 범위 검사를 하지 않는다. 걸러내는 곳은 `Session::handleFrame` 의 `switch` 의 `default: break;` 다 — 새 타입이 추가된 상대 버전과 붙어도 파서가 죽지 않는 포워드 호환성.
 
-반환값도 계약이 있다. `true` 는 "정상적으로 파싱했다(0개일 수도 있음)", `false` 는 "스트림이 오염됐으니 세션을 끊어라" 다. 현재 `Session::ioThread` 는 반환값을 무시하지만, 릴레이 서버([Part 7](./part7-relay-server.md))는 이 값을 보고 연결을 끊는다.
+반환값도 계약이 있다. `true` 는 "정상적으로 파싱했다(0개일 수도 있음)", `false` 는 "스트림이 오염됐으니 세션을 끊어라" 다. `Session::parseReceived`는 게임 I/O·커스텀 룸·매칭 대기·수락 로비의 네 경로에서 반환값을 확인한다. false이면 해당 호출이 모은 정상 접두사 프레임까지 버리고 실패/종료 상태를 기록한 뒤 전송 계층을 shutdown한다. 워커 안에서 `Close()`를 호출하면 자신을 join할 수 있으므로, join과 소유 핸들 해제는 세션 소유자의 `Close()`에 남긴다. 릴레이 서버([Part 7](./part7-relay-server.md))도 false를 연결 종료로 처리한다.
+
+원시 파서는 오류 전에 out에 추가한 프레임을 되돌리지 않는다. 이 점과 Session의 배치 폐기 정책을 구분해야 한다. 이미 앞선 호출에서 처리한 프레임까지 취소하는 트랜잭션은 아니다. 또한 프레임 길이 상한은 한 메시지의 크기만 제한한다. 연결당 누적량·프레임 빈도·무응답 시간은 호출자와 서버 정책에서 따로 제한한다.
 
 ### 2.6 size_t 뺄셈 주의
 
@@ -686,29 +678,23 @@ const size_t payloadLen = (size_t)len - 1;  // len=0 → SIZE_MAX!
 
 `size_t` 는 unsigned 이므로 `0 - 1 = SIZE_MAX`(64비트에서 약 $1.8 \times 10^{19}$). 이 값으로 `fnv1a32(payload, payloadLen)` 을 호출하면 수십 엑사바이트를 읽으려 해서 크래시한다. 현재 코드가 `if (len < kFrameTypeBytes) { offset += need; continue; }` 로 이 경로를 먼저 차단하는 이유다.
 
-같은 계열의 두 번째 함정은 비교식이다.
+버퍼의 남은 범위도 불변식으로 계산한다. 현재 루프는 `offset = 0`에서 시작해 **완성된 프레임 크기만큼만** 전진하므로 `offset <= streamBuf.size()`를 유지한다. 이 전제 아래 `remaining = size - offset`은 언더플로하지 않는다. `remaining < need`이면 기다리고, 아니면 offset에 need를 더해도 size를 넘지 않는다.
 
-**예시(실제 저장소에는 없음)**
-
-```cpp
-// 위험: buf.size() - offset가 음수일 수 있음
-if (buf.size() - offset < need) break;
-
-// 안전: 덧셈으로 변환
-if (offset + need > buf.size()) break;
-```
-
-일반 원칙: size_t 뺄셈은 항상 "결과가 음수가 될 수 있는가" 를 확인한다. 음수가 가능하면 **뺄셈 대신 덧셈으로 비교**한다. 현재 코드의 두 break 조건이 모두 덧셈 형태인 것은 우연이 아니다.
+임의의 unsigned 뺄셈을 덧셈으로 바꾸는 것만으로 안전해지지는 않는다. 덧셈도 범위를 넘으면 래핑한다. 먼저 각 값의 범위를 증명하고, 그 범위 안에서 계산하는 것이 핵심이다. 여기서는 LEN 상한을 확인한 뒤 `2 + LEN + 4`를 계산하므로 최대4103이다.
 
 ### 2.7 왜 바이너리인가 — 그리고 Python 미러
 
 JSON 이나 MessagePack 도 60Hz 에 충분히 빠르다. 그럼에도 고정 오프셋 바이너리를 쓰는 이유:
 
-- **모든 바이트가 예측 가능하다.** 패킷 덤프를 눈으로 읽을 때 오프셋이 항상 같다. 프레임 하나가 14바이트라는 사실이 대역폭 계산을 산수로 만든다.
-- **파싱에 할당이 없다.** `le_read_u32(p)` 는 포인터 산술이다. JSON 파서는 문자열 토큰마다 할당을 한다 — ioThread 의 hot path 에 두고 싶지 않은 성질이다.
+- **프레임의 필드 배치를 계산할 수 있다.** LEN은0, TYPE은2, payload는3에서 시작한다. 체크섬 위치와 총길이는 payload 크기에 따라 달라진다. payload가7바이트이면 프레임은14바이트다.
+- **고정 크기 필드 읽기가 작다.** `le_read_u32(p)` 자체는 바이트를 조립하며 동적 할당하지 않는다. 전체 파서는 `Frame::payload.assign`과 out 벡터 확장에서 할당할 수 있고, 수신 벡터도 별도 저장소를 쓴다. JSON 파서의 할당 여부 역시 구현에 달려 있으므로 형식 이름만으로 성능을 단정하지 않는다.
 - **게임 로직의 해시와 같은 FNV-1a 를 재사용한다.** 배운 것 하나로 두 곳을 덮는다.
 
-이 규약이 정말로 지켜지는지 확인하는 자동 테스트가 있다. `python/netbot/framing.py` 가 같은 와이어 포맷을 Python 으로 구현하고, `python/tests/test_framing_parity.py` 가 고정 벡터와 round-trip 으로 `build_frame` / `parse_frames` 의 동치성을 검증한다 — 미러와 테스트의 구현은 [Part 8](./part8-python-rl.md) 이 소유하고, 이 장은 완성 저장소에서 계약의 소비자로 실행만 한다. 빈 payload 체크섬 0, cap 초과 스트림 폐기, 부분 수신 재조립, 체크섬 불일치 drop이 모두 테스트 항목이다. Python은 정수가 넘치지 않으므로 FNV-1a의 각 곱셈 뒤에 `& 0xFFFFFFFF`를 적용해야 C++의 `uint32_t` wraparound와 같아진다.
+이 규약이 정말로 지켜지는지 확인하는 자동 테스트가 있다. `python/netbot/framing.py` 가 같은 와이어 포맷을 Python 으로 구현하고, `python/tests/test_framing_parity.py` 가 Python 구현의 고정 벡터와 round-trip을 검사한다 — 미러와 테스트의 구현은 [Part 8](./part8-python-rl.md) 이 소유하고, 이 장은 완성 저장소에서 계약의 소비자로 실행만 한다. 빈 payload 체크섬 0, cap 초과 스트림 폐기, 부분 수신 재조립, 체크섬 불일치 drop이 모두 테스트 항목이다. Python은 정수가 넘치지 않으므로 FNV-1a의 각 곱셈 뒤에 `& 0xFFFFFFFF`를 적용해야 C++의 `uint32_t` wraparound와 같아진다.
+
+`scripts/check_learning_framing.py`는 `tests/learning/framing_parity_probe.cpp`를 실제 `net/framing.cpp`와 컴파일해 Python 결과와 직접 비교한다. 16바이트 두 프레임의32768가지 분할에서 매 호출의 출력·남은 꼬리·실패 신호를 대조한다. 빈/최대 payload의 생성 결과, 잘못된 체크섬과 길이도 포함한다. 고정 Python 벡터만 실행하는 검사와 검증 범위가 다르다.
+
+알 수 없는 TYPE은 C++ 파서가 출력하고 Python 파서는 소비 후 버린다. 이 차이는 별도로 검사하며, 두 파서의 모든 출력이 같다고 주장하지 않는다. 알려진 타입의 wire 해석이 비교 대상이다.
 
 미러가 값만 복제하는 것은 아니다. §2.4 의 payload 상한(`net::kMaxPayloadBytes`)은 Python 쪽 상수로 중복돼 있고 패리티 테스트가 두 값을 함께 고정한다. 오버사이즈 선언에 대한 반응도 언어 관례에 맞게 번역됐다 — C++ `parse_frames` 는 `false` 를 반환해 호출자에게 "연결을 끊어라" 를 알리는데, 반환값은 조용히 무시되기 쉬우므로 Python 미러는 같은 상황에서 `FramingError` 예외를 던진다. 처리하지 않으면 전파되는 예외가, 그 언어에서 이 계약을 가장 무시하기 어려운 형태다.
 
@@ -720,6 +706,44 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 ```
 
 기대 결과: framing 패리티 파일에서 수집된 모든 항목이 통과한다.
+
+### 2.8 필드 폭과 payload 전체의 유효성
+
+프레임 파서는 메시지의 경계를 확인한다. payload를 해석하는 코드는 다시 각 필드의 읽기 가능한 범위와 값의 도메인을 확인해야 한다. `le_read_u32(p)`는 길이를 받지 않는 저수준 함수다. 호출자가 p부터4바이트가 실제로 읽기 가능함을 보장해야 한다. 포인터가 null이 아니라는 사실만으로 이 조건을 알 수는 없다.
+
+INPUT의 규약은 `[first_tick:u32LE][count:u16LE][mask:count]`다. 예를 들어 시작틱 `0x01020304`, 개수3, 입력 `01 00 10`은 `04 03 02 01 03 00 01 00 10`의9바이트 payload가 된다. 길이·TYPE·체크섬을 포함한 외부 프레임과 payload의9바이트를 구분한다.
+
+**현재 소스 발췌 — `net/input_message.h`**
+
+```cpp
+inline bool decode_input_payload(const std::vector<uint8_t>& payload,
+                                 InputBatchView& out) noexcept {
+    constexpr size_t header = 6;
+    if (payload.size() < header || payload.size() > kMaxPayloadBytes) return false;
+    const uint32_t first = le_read_u32(payload.data());
+    const uint16_t count = le_read_u16(payload.data() + 4);
+    if (count == 0 || payload.size() - header != count) return false;
+    // Sequence numbers do not wrap within one accepted batch.
+    if (static_cast<uint32_t>(count - 1) >
+        (std::numeric_limits<uint32_t>::max)() - first) return false;
+    const uint8_t* masks = payload.data() + header;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (!isValidInputMask(masks[i])) return false;
+    }
+    out = InputBatchView{first, count, masks};
+    return true;
+}
+```
+
+검증 순서는 저장소 범위 → 필드 읽기 → 정확한 본문 크기 → 틱 구간 → 모든 입력 비트다. count는1 이상이며 남은 payload 길이와 정확히 같아야 한다. 한 필드가 존재한다고 선언된 모든 항목이 존재하는 것은 아니다. 현재 INPUT 형식은 뒤의 추가 바이트를 허용하는 확장 규약이 없으므로 남는 바이트도 거절한다.
+
+`first_tick + count - 1`을 먼저 계산하면 unsigned 래핑으로 작은 틱이 생길 수 있다. 그래서 count가 양수임을 먼저 확인한 뒤 `count - 1 <= UINT32_MAX - first_tick`을 검사한다. 실패하면 해당 payload 전체를 적용하지 않는다. 원거리 틱 윈도우와 입력 큐 상한은 이 구조 검사 뒤 Session이 별도로 적용한다.
+
+입력 마스크는 `core/input.h`의 `isValidInputMask`로 알려진 비트만 허용한다. 0과 왼쪽+오른쪽의 조합은 허용되고, 요청 간 우선순위는 시뮬레이션 규칙에 남는다. 마지막 마스크가 잘못된 경우 앞의 정상 마스크까지 미리 입력 큐에 넣지 않도록 전체를 확인한 뒤 `InputBatchView`를 반환한다. 이 뷰는 payload를 차용하므로 payload보다 오래 보관할 수 없다.
+
+`MATCH_RESULT`의 signed32 필드는2의 보수 wire 표현을 따른다. C++17에서 표현 범위를 넘는 unsigned 값을 signed로 직접 변환한 결과는 구현 정의다([N4659 정수 변환 규칙](https://timsong-cpp.github.io/cppwp/n4659/conv.integral)). `le_read_i32`는 양수 범위와 음수 범위를 나누어 모두 표현 가능한 중간값으로 복원한다. 음수 저장은 `uint32_t`로의 모듈러 변환 후 바이트 단위로 쓸 수 있다. 객체 메모리를 재해석하지 않는다.
+
+검증은 `tests/input_message_test.cpp`의 길이·마스크·틱 경계와 signed 양끝 값, `scripts/check_learning_serialization.py`의 실제 Session 수신으로 나눈다. 서로 같은 오류를 가진 인코더와 디코더의 round-trip만으로 wire 규약을 증명하지 않도록 고정 바이트 벡터도 비교한다.
 
 ---
 ## 3. 메시지 타입
@@ -923,13 +947,24 @@ sequenceDiagram
 1. **acceptThread**: listen 소켓을 논블로킹으로 전환한 뒤 10ms 간격으로 `tcp_accept()` 를 폴링한다. **블로킹 대기가 아니다** — `tcp_close` 가 `shutdown` 만 하므로 블로킹 `accept` 를 깨우지 못하는 플랫폼이 있기 때문이다. 연결이 수립되면 `ioThread` 를 시작하고 HELLO + SEED 를 큐에 넣는다.
 2. **ioThread**: 논블로킹 recv/send 루프. 메시지 파싱 + 송신 큐 처리.
 
-`Host()` 는 스레드를 띄우기 전에 **이전 세션의 잔재를 전부 지운다**. 같은 `Session` 객체를 재사용하는 경로(타이틀 복귀 후 재접속)에서 이전 연결의 `sendQ` 가 새 연결의 첫 송신으로 새어 나가는 것을 막기 위함이다.
+시작과 종료는 한 소유자 스레드에서 순서대로 호출한다. `Host`·`Connect`·`QueueJoin`·`RoomCreate`·`RoomJoin`은 상태를 지우기 전에 아직 join하지 않은 워커가 있는지 검사한다. 워커 함수가 반환했거나 취소 플래그를 세웠어도 `std::thread`는 join 전까지 joinable이다. 이 상태의 스레드 객체를 새 스레드로 덮어쓰면 프로그램이 종료될 수 있으므로, 재시작은 `Close()`로 수명 정리를 마친 뒤 수행한다.
+
+**현재 소스 발췌 — `net/session.cpp`**
+```cpp
+bool Session::hasUnjoinedWorkers() const {
+    return ath.joinable() || qth.joinable() || rth.joinable() || th.joinable();
+}
+```
+
+검사 순서도 소유권을 따른다. accept·queue·room 워커가 `th`를 생성할 수 있으므로 이 세 워커를 먼저 검사한다. 하나라도 joinable이면 단락 평가로 `th`를 읽지 않는다. 이 조건은 임의의 여러 호출자에서 start/Close를 동시에 호출해도 된다는 잠금 장치가 아니다.
+
+`Host()`는 `Close()`로 이전 워커를 정리한 상태에서 수신 버퍼·입력/송신 큐·틱·해시 상태를 초기화한다. 같은 `Session` 객체를 재사용하는 경로(타이틀 복귀 후 재접속)에서 이전 연결의 `sendQ` 가 새 연결의 첫 송신으로 새어 나가는 것을 막기 위함이다.
 
 **현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
 bool Session::Host(uint16_t port, const SeedParams& sp) {
-    if (listening) return false;
+    if (hasUnjoinedWorkers()) return false;
 
     // Close() 이후 재사용을 위한 상태 리셋. 같은 Session 객체를 재활용할 때
     // 이전 세션의 sendQ / HASH 상태가 남아 새 연결의 ioThread 로 유출되는 것을
@@ -945,8 +980,8 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
 
     { std::lock_guard<std::mutex> lk(seedMu); seedParams = sp; }
     listening = true;
@@ -1019,7 +1054,8 @@ void Session::acceptThread(uint16_t port)
             le_write_u64(pl, seedParams.seed);
             le_write_u32(pl, seedParams.start_tick);
             pl.push_back(seedParams.input_delay);
-            pl.push_back((uint8_t)seedParams.role);
+            // SEED assigns the receiver's role; keep our local role unchanged.
+            pl.push_back((uint8_t)(seedParams.role == Role::Host ? Role::Peer : Role::Host));
         }
         auto fr = build_frame(MsgType::SEED, pl);
         pushSend(std::move(fr));
@@ -1070,6 +1106,7 @@ cmake --build build --target tetris
 
 ```cpp
 bool Session::Connect(const std::string& host, uint16_t port) {
+    if (hasUnjoinedWorkers()) return false;
     NET_TRACE("[NET] Connecting to " << host << ":" << port);
 
     // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
@@ -1085,8 +1122,8 @@ bool Session::Connect(const std::string& host, uint16_t port) {
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
 
     TcpSocket connectedSock = tcp_connect(host, port);
     if (!connectedSock.valid()) {
@@ -1117,11 +1154,13 @@ bool Session::Connect(const std::string& host, uint16_t port) {
 
 세 가지를 눈여겨볼 것.
 
-1. **결과를 로컬 변수 `connectedSock` 에 받는다.** `sock = tcp_connect(...)` 로 바로 대입하면 `sockMu_` 밖에서 `shared_ptr` 멤버를 쓰게 되어 `Close()` 와 경합한다. `tcp_connect` 는 블로킹이라 그 사이 유저가 취소 버튼을 누를 시간이 충분하다.
-2. **잠금 안에서 `quit` 를 재확인하고, 이미 종료 중이면 로컬 소켓을 닫고 빠져나온다.** 이걸 빼면 `Close()` 가 `sock.valid()` 를 확인한 직후에 publish 되어 fd 가 누수된다.
-3. **`ioThread` 를 먼저 띄우고 HELLO 를 큐에 넣는다.** 순서가 반대여도 동작하지만, 이 순서면 "큐에 넣는 순간 이미 드레이너가 돌고 있다" 가 보장된다.
+1. **연결 결과를 로컬 소유자로 받는다.** 연결 실패에서는 세션 소켓을 공개하지 않는다. 이 직접 `Connect` 경로는 호출자에서 동기적으로 실행되므로 호출 도중 같은 소유자가 UI 취소를 처리할 수는 없다.
+2. **공개할 때 `sockMu_`와 `quit` 검사를 유지한다.** 비동기 queue/room 경로도 이 공개 규약을 사용한다. 워커의 연결 결과가 취소 뒤 공개되지 않도록 하고, 실제 핸들 정리는 `Close()`의 join 뒤에 완료한다. 이 잠금 하나가 Session 전체의 동시 시작/종료를 허용하지는 않는다.
+3. **I/O 스레드를 생성하고 HELLO를 큐에 넣는다.** 생성됐다는 사실은 이미 CPU에서 실행 중이라는 뜻이 아니다. 송신 큐가 생산자와 소비자 사이의 실행 순서 차이를 흡수한다.
 
 클라이언트는 HELLO 를 보내고 호스트의 SEED 를 받으면 `ready = true` 가 된다(SEED를 처리하는 `handleFrame` 분기). 즉 **`connected` 와 `ready` 는 다른 시점**이다. `SendInput`은 둘 다 참일 때만 전송해야 하며, 그렇지 않으면 매치 대기 중 쌓인 INPUT이 준비 직후 한꺼번에 흘러가 첫 틱부터 DESYNC를 만든다.
+
+`Close()`는 종료 요청 → 공개된 전송 계층 shutdown → 생산 워커 join → I/O 워커 join → 소유 핸들 해제 순서를 따른다. join은 워커도 사용하는 잠금 밖에서 수행한다. 직접 native `tcp_connect`의 DNS 조회와 connect는 블로킹이며 별도의 애플리케이션 마감시간이 없다. 아직 소켓을 공개하지 않은 연결 시도는 `Close()`가 shutdown할 대상이 없어, 비동기 워커의 join도 해당 호출 반환까지 기다릴 수 있다. 취소 요청과 즉시 종료 완료를 같은 의미로 설명해서는 안 된다.
 
 ### 4.4 SEED 파라미터
 
@@ -1142,9 +1181,11 @@ struct SeedParams {
 - `seed` — 양쪽 `SimGame` 에 동일하게 전달되는 RNG 시드. lockstep 의 출발점.
 - `start_tick` — 시작 지연(기본 120틱 = 2초). SEED 프레임의 전달 시간과 양쪽 로딩 시차를 흡수하는 카운트다운이다.
 - `input_delay` — 네트워크 지터 흡수 버퍼(기본 2틱).
-- `role` — Host/Peer. 연습전 재시작 시 새 seed를 만들 주체다. 랭크전은 서버가 준 seed를 쓰며 재대전에는 새 매칭이 필요하다.
+- `role` — 로컬 플레이어의 Host/Peer 역할. SEED wire의 role은 **받는 쪽에 배정할 역할**이므로 호스트는 자신의 Host를 유지하고 Peer 값을 전송한다. 연습전 재시작 시 Host가 새 seed를 만든다. 랭크전은 서버가 준 seed를 쓰며 재대전에는 새 매칭이 필요하다.
 - `ranked` — MATCH_FOUND의 서버 정책 바이트로 정한다. SEED에는 실리지 않으며, 직결 P2P와 정책 바이트가 없는 옛 서버는 연습전으로 취급한다.
 - `local_icon_id` / `remote_icon_id` — 릴레이가 `MATCH_FOUND` 에 실어 보내는 플레이어 아이콘 식별자. **SEED 프레임에는 실리지 않는다** — 직결 P2P 경로에서는 기본값 `"default"` 그대로다. 아이콘 소유권과 카탈로그는 [Part 10](./part10-meta-and-ranking.md), 릴레이가 이 값을 채우는 경로는 [Part 7](./part7-relay-server.md) 이 다룬다.
+
+SEED를 큐에 넣은 호스트는 상대 확인 응답을 기다리지 않고 ready를 세운다. HELLO의 버전 값과 HELLO_ACK도 현재 분기에서는 엄격한 협상 관문이 아니다. 따라서 ready를 양쪽이 동시에 시작 조건을 확인했다는 뜻으로 해석하지 않는다. 시작 카운트다운 역시 각 기기의 로컬 지연이며 공통 벽시계 시각의 약속이 아니다.
 
 SEED 프레임의 와이어 페이로드는 앞의 네 필드만이다 (`[seed:u64][start_tick:u32][input_delay:u8][role:u8]` = 14바이트). `ranked`와 아이콘 문자열은 MATCH_FOUND에서 채운 세션 상태이며 SEED에는 직렬화하지 않는다.
 
@@ -1197,9 +1238,9 @@ sequenceDiagram
     Net->>H: PONG
 
     Note over H,C: 600틱(10초) 주기 검증
-    H->>Net: HASH(tick, hL ^ hR)
+    H->>Net: HASH(tick, role_ordered_hash)
     Net->>C: HASH
-    Note over C: 자기 링의 같은 틱 해시와 비교
+    Note over C: 보관 창에서 같은 틱의 두 해시를 소비해 비교
 ```
 
 `HELLO` 는 양쪽이 서로에게 보낸다(호스트는 `acceptThread` 에서, 클라이언트는 `Connect` 에서). 받은 쪽은 `HELLO_ACK` 로 답하지만, 현재 구현은 그 응답을 로그만 찍고 상태 전이에 쓰지 않는다 — 실제 "준비 완료" 신호는 SEED 다.
@@ -1210,13 +1251,13 @@ sequenceDiagram
 
 ### 5.1 safeTick 계산
 
-$$\text{safeTick} = \min(\text{lastLocalSent},\ \text{lastRemoteRecv}) - \text{inputDelay}$$
+$$\text{safeTick} = \min(\text{lastLocalSent} - \text{inputDelay},\ \text{lastRemoteRecv})$$
 
 - `lastLocalSent`: 로컬에서 마지막으로 전송한 틱 번호
-- `lastRemoteRecv`: 상대방에게서 마지막으로 수신한 틱 번호
+- `lastRemoteRecv`: 상대 입력 맵에 기록한 최대 틱 번호. 그 이하가 모두 채워졌다는 뜻은 아니다.
 - `inputDelay`: 네트워크 지터를 흡수하는 버퍼 (기본 2틱)
 
-**양쪽 피어의 입력이 모두 확보된 틱까지만 시뮬레이션을 진행한다.** 한쪽의 입력이 아직 도착하지 않았으면 시뮬레이션이 멈추고 기다린다.
+**safeTick은 진행 상한이며 입력 존재 여부는 매 틱 따로 확인한다.** 두 맵에 해당 틱의 입력이 모두 있어야 진행한다. 어느 한쪽이 비어 있으면 그 틱에서 기다린다.
 
 ### 5.2 타임라인 예시
 
@@ -1232,17 +1273,17 @@ sequenceDiagram
     A->>N: INPUT(tick=5, mask_A)
     B->>N: INPUT(tick=5, mask_B)
     Note over A: lastLocalSent=5, lastRemoteRecv=3
-    Note over A: safeTick = min(5,3) - 2 = 1 → 틱 1 까지 실행
-    Note over B: safeTick = min(5,3) - 2 = 1 → 틱 1 까지 실행
+    Note over A: safeTick = min(5-2,3) = 3 → 틱 3 까지 실행
+    Note over B: safeTick = min(5-2,3) = 3 → 틱 3 까지 실행
 
     Note over A,B: 틱 7 시점
     N->>A: INPUT(tick=5) 도착
     N->>B: INPUT(tick=5) 도착
     Note over A: lastLocalSent=7, lastRemoteRecv=5
-    Note over A,B: safeTick = min(7,5) - 2 = 3 → 틱 3 까지 실행
+    Note over A,B: safeTick = min(7-2,5) = 5 → 틱 5 까지 실행
 ```
 
-`inputDelay`의 역할은 지터(패킷 도착 시간의 변동) 흡수다. `inputDelay = 0`이면 패킷이 조금만 늦어도 시뮬레이션이 멈춘다. `inputDelay = 2`면 60Hz 기준 2틱의 입력 여유를 먼저 쌓고, `safeTick = min(localReceived, remoteReceived) - inputDelay`까지만 진행한다. 지연을 늘리면 정지는 줄지만 조작 반응이 늦어지는 직접적인 절충이다.
+`inputDelay`의 역할은 지터(패킷 도착 시간의 변동) 흡수다. `inputDelay = 0`이면 패킷이 조금만 늦어도 시뮬레이션이 멈춘다. `inputDelay = 2`면 60Hz 기준 2틱의 입력 여유를 먼저 쌓고, `safeTick = min(lastLocalSent - inputDelay, lastRemoteRecv)`까지만 진행한다. 지연을 늘리면 입력을 더 오래 보관한다. 실제 정지 횟수와 체감 반응은 도착 패턴과 루프 스케줄링에도 의존한다.
 
 ### 5.3 시뮬레이션 진행
 
@@ -1253,17 +1294,21 @@ sequenceDiagram
 ```cpp
                     int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
                     int64_t lastRemote    = (int64_t)session.maxRemoteTick();
-                    int64_t safeTick      = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
+                    // Delay follows local input production; already received remote
+                    // records remain usable when future arrivals briefly pause.
+                    int64_t safeTick      = std::min(lastLocalSent - (int64_t)inputDelay, lastRemote);
 
                     if ((int64_t)simTick <= safeTick && gameLocal && gameRemote &&
                         !gameLocal->gameOver && !gameRemote->gameOver)
                     {
-                        while ((int64_t)simTick <= safeTick)
+                        while ((int64_t)simTick <= safeTick &&
+                               !gameLocal->gameOver && !gameRemote->gameOver)
                         {
                             uint8_t li = 0, ri = 0;
-                            auto it = localInputs.find(simTick);
-                            if (it != localInputs.end()) li = it->second;
-                            if (!session.GetRemoteInput(simTick, ri)) break;
+                            if (!net::read_input_pair(localInputs, simTick,
+                                    [&](uint32_t tick, uint8_t& mask) {
+                                        return session.GetRemoteInput(tick, mask);
+                                    }, li, ri)) break;
                             gameLocal->SubmitInput(li);
                             gameRemote->SubmitInput(ri);
                             gameLocal->Tick();
@@ -1279,9 +1324,11 @@ sequenceDiagram
 
 세부 사항 세 가지.
 
-- **`gameOver` 가드가 조건에 들어 있다.** 한쪽 보드가 탑아웃된 뒤에도 루프가 돌면 게임오버 상태의 `SimGame` 이 계속 Tick 되어 양쪽 해시가 갈린다.
-- **`GetRemoteInput` 이 실패하면 `break`.** `maxRemoteTick` 은 "받은 최대 틱" 이지 "0..max 가 빠짐없이 있다" 는 뜻이 아니다. 중간이 비면 거기서 멈춘다.
-- **`localInputs.find` 가 실패하면 0 을 쓴다.** 로컬 입력은 우리가 채운 것이라 빠질 리 없지만, heartbeat catch-up 경계에서 방어적으로 0 을 쓴다.
+- **`gameOver` 가드를 매 반복 확인한다.** 한 번에 여러 틱을 따라잡는 도중 한 보드가 끝나면 그 틱까지만 적용한다. 바깥 조건만 검사하면 다음 반복에서 종료된 보드에 추가 입력을 제출할 수 있다.
+- **두 입력 중 하나라도 없으면 `break`.** `net::read_input_pair`는 로컬 맵과 상대 조회 결과를 함께 확인한다. 최대 수신 틱 아래에도 빈 틱이 있을 수 있다.
+- **맵에 저장된 0은 중립 입력이다.** 누락된 항목을 0으로 대신하면 실제로 생성·전송한 입력과 다른 기록을 재생할 수 있다. heartbeat catch-up에서 전송한 중립 입력을 맵에 기록하는 작업과 누락을 임의로 채우는 작업을 구분한다.
+
+두 조회를 조합하는 보조 함수는 `net/input_pair.h`의 `read_input_pair`다. 로컬 값은 임시 변수에 보관하고 상대 조회까지 성공한 뒤 두 출력을 함께 갱신한다. 어느 한쪽이 없으면 출력은 그대로다.
 
 `GetRemoteInput` 자체는 단순한 맵 조회다.
 
@@ -1302,6 +1349,8 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
 
 ```cpp
 void Session::SendInput(uint32_t tick, uint8_t mask) {
+    // Transport readiness is required; the caller also owns the gameplay phase.
+    if (!connected.load() || !ready.load() || quit.load()) return;
     // 메인 스레드 활성 시각 갱신 — ioThread 의 스톨 감지 (창 드래그 대응) 이 이 값
     // 을 기준으로 동작한다.
     lastMainActivityMs_.store(now_ms());
@@ -1348,7 +1397,7 @@ graph TB
     C -->|"sendMu"| I
     E -->|"sendMu"| I
     G -->|"inMu"| D
-    G -->|"hashMu_ / chatMu_"| A
+    G -->|"HashMailbox mutex / chatMu_"| A
     F -->|"기동"| IO
     J -->|"기동 + recvBuf preload"| IO
 ```
@@ -1363,7 +1412,7 @@ graph TB
 | `seedMu` | `seedParams` | main(읽기), ioThread(SEED 수신 시 쓰기), 로비 스레드(MATCH_FOUND 시 쓰기) | Part 6 |
 | `sendMu` | `sendQ` (게임 송신 큐) | main(SendInput/SendHash/...), ioThread(drain) | Part 6 |
 | `inMu` | `remoteInputs`, watermark | ioThread(INPUT 수신), main(GetRemoteInput) | Part 6 |
-| `hashMu_` | `lastHashTickRemote` + `lastHashRemote` **쌍** | ioThread(쓰기), main(읽기) | Part 6 |
+| `HashMailbox::mutex_` | 로컬/원격 틱 창·최신 진단 샘플·비교 커서 | ioThread(원격), main(로컬/소비) | Part 6 |
 | `chatMu_` | `chatQ_` | ioThread(쓰기), main(PullChat) | Part 6 |
 | `matchResultMu_` | `matchResult_` + `matchResultValid_` | ioThread(쓰기), main(GetMatchResult) | Part 6 |
 | `roomMu_` | `roomCode_` | roomThread(쓰기), main(읽기) | Part 7 |
@@ -1376,10 +1425,20 @@ graph TB
 
 **"왜 소켓 하나에 outbound writer 를 하나로 통일하지 않았나."** 가장 단순한 대안은 "소켓 하나 = 송신 큐 하나 = 드레이닝 스레드 하나" 다. 그러면 `sendMu` 하나만 남고 `roomSendMu_` / `queueSendMu_` / `*SockSendMu_` 네 개가 사라진다. 그런데 이 설계에는 그 통일을 막는 두 가지 제약이 있다.
 
-1. **소켓의 수명이 세 페이즈로 나뉘고, 각 페이즈의 소유 스레드가 다르다.** 릴레이 경로에서 소켓은 (a) `roomThread`/`queueThread` 가 로비 프레임을 주고받는 구간 → (b) 양쪽 수락 완료 → (c) `ioThread` 가 게임 프레임을 주고받는 구간을 거친다. 페이즈마다 "지금 무엇을 보내도 되는가" 가 다르다 — 로비에서 `INPUT` 을 보내면 릴레이가 무시하거나 끊고, 게임 중에 `READY` 를 보내면 상대 파서가 드롭한다. 큐를 분리하면 이 규칙이 자료구조로 강제된다.
+1. **소켓의 수명이 세 페이즈로 나뉘고, 각 페이즈의 소유 스레드가 다르다.** 릴레이 경로에서 소켓은 (a) `roomThread`/`queueThread` 가 로비 프레임을 주고받는 구간 → (b) 양쪽 수락 완료 → (c) `ioThread` 가 게임 프레임을 주고받는 구간을 거친다. 페이즈마다 "지금 무엇을 보내도 되는가" 가 다르다 — 로비에서 `INPUT` 을 보내면 릴레이가 무시하거나 끊고, 게임 중에 `READY` 를 보내면 상대 파서가 드롭한다. 큐 분리는 단계별 송신 경로를 구분한다. 큐 자체는 프레임 타입이나 현재 단계를 검사하지 않으므로, 실제 허용 여부는 각 송신 API와 수신 상태 검사로 강제해야 한다.
 2. **종료 경로가 "큐에 넣고 나간다" 를 허용하지 않는다.** `QueueDecline` 과 `RoomLeave` 는 큐에 프레임을 넣은 뒤 곧바로 `quit = true` 를 세우는데, 드레이닝 스레드는 `while (!quit)` 상단에서 quit 을 먼저 보고 **드레인 없이 종료**한다. 그러면 `READY(0)` / `ROOM_LEAVE` 가 실제로 나가지 않아 상대는 "거절" 이 아니라 "타임아웃" 을 본다. 그래서 두 메서드는 메인 스레드에서 **직접** `tcp_send_all` 을 호출하고, 그 호출이 드레이닝 스레드의 송신과 섞이지 않도록 `*SockSendMu_` 로 직렬화한다.
 
-정직하게 말하면 이건 트레이드오프다. 단일 writer 스레드 + 명시적 "flush 후 종료" 핸드셰이크로 만들었다면 뮤텍스 수는 줄었을 것이고, 대신 종료 프로토콜이 복잡해졌을 것이다. 이 프로젝트는 "종료를 단순하게, 대신 잠금을 하나 더" 를 택했다. `sendMu` 계열이 지키는 불변식은 하나로 요약된다 — **하나의 fd 에 대해 동시에 `tcp_send_all` 을 호출하는 스레드는 언제나 최대 하나다.**
+정직하게 말하면 이건 트레이드오프다. 단일 writer 스레드 + 명시적 "flush 후 종료" 핸드셰이크로 만들었다면 뮤텍스 수는 줄었을 것이고, 대신 종료 프로토콜이 복잡해졌을 것이다. 현재 코드는 거절·퇴장 프레임을 동기 송신한 뒤 종료한다. 이 경로는 송신 잠금을 기다리거나 I/O를 수행하는 동안 호출자인 main을 멈출 수 있다. `sendMu` 계열이 지키는 불변식은 하나로 요약된다 — **하나의 fd 에 대해 동시에 `tcp_send_all` 을 호출하는 스레드는 언제나 최대 하나다.**
+
+### 값 인계, 이벤트 큐와 최신 상태
+
+생산자는 큐에 저장을 마친 뒤 잠금을 풀고, 소비자는 같은 뮤텍스를 획득한 뒤 그 값을 읽는다. 이 동기화 관계가 큐 내용의 가시성을 제공한다. `atomic<bool> quit`만 사용하면서 컨테이너를 잠금 없이 읽고 쓰는 것은 안전하지 않다. 컨테이너 슬롯·크기·인덱스를 함께 보호해야 한다.
+
+큐 잠금 안에서는 소유하는 값만 복사하거나 이동하고, 네트워크 I/O·콜백·스레드 join은 밖에서 수행한다. `sendQ`에서 뺀 `pkt`는 워커의 지역 vector가 버퍼를 소유하므로 잠금을 푼 뒤에도 살아 있다. 반대로 main의 임시 버퍼 주소만 넣으면 원본 파괴나 변경과 경합할 수 있다.
+
+`remoteInputs`는 틱별 입력 기록이다. HASH는 HashExchange가 로컬·원격을 각각 8칸의 주기 창에 보관한다. 같은 mutex가 전체 기록과 창 이동을 보호하고, 양쪽이 모두 있는 가장 이른 틱만 PollHashComparison으로 소비한다. GetLastRemoteHash는 마지막 접수 값을 보는 진단용 API다. 최신 상태 조회와 비교 기록 소비의 계약을 구분한다.
+
+학습용 `docs/learn/checkpoints/93-thread-queues/net/thread_link.h`는 연결이 끝난 소켓을 워커에 이동하고 양방향 8칸 값 큐로 통신한다. 큐 full은 송신자에게 실패를 반환하며, 수신 큐 overflow는 연결을 실패로 끝낸다. 큐 닫기는 저장된 프레임을 소진하게 하지만 취소는 미전송 프레임을 포기할 수 있다. 이 구조는 종료 시 main이 소켓을 함께 닫는 현재 Session과 서로 다른 소유권 계약이다.
 
 ### 6.3 `ioThread` — 루프 전체
 
@@ -1387,6 +1446,7 @@ graph TB
 
 ```cpp
 void Session::ioThread() {
+    pendingPongs_ = PongWindow{};
     NET_TRACE("[NET] I/O thread started");
     auto startTime = std::chrono::steady_clock::now();
     const auto CONNECTION_TIMEOUT = std::chrono::seconds(10);
@@ -1404,16 +1464,18 @@ void Session::ioThread() {
             }
         }
 
-        // 1Hz PING 송신 — ready=true 이후에만. 상대가 얼어붙어도 여기선 계속
-        // 큐에 쌓이지만 tcp_send_all 자체가 막히지는 않는다(커널 버퍼 여유 범위).
+        // ready 이후 약 1초마다 probe를 큐에 넣는다. 수신·송신 대기와
+        // 스케줄링 지연 때문에 실제 wire 송신 간격이 고정되지는 않는다.
         if (ready.load()) {
             int64_t now = now_ms();
             int64_t lastSent = lastPingSentMs.load();
             if (lastSent == 0 || (now - lastSent) >= 1000) {
                 lastPingSentMs.store(now);
-                std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
-                auto fr = build_frame(MsgType::PING, pl);
-                pushSend(std::move(fr));
+                if (now >= 0 && pendingPongs_.remember(static_cast<uint64_t>(now))) {
+                    std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
+                    auto fr = build_frame(MsgType::PING, pl);
+                    pushSend(std::move(fr));
+                }
             }
 
             // 메인 스레드 스톨 자동 heartbeat — 창 드래그 시 메인 루프가 WM_ENTERSIZEMOVE
@@ -1421,7 +1483,7 @@ void Session::ioThread() {
             // INPUT(tick,0) 을 대신 송신해 lockstep 을 계속 진행시킨다.
             //   · lastMainActivityMs_ == 0  → 첫 입력 전 (게임 시작 전) 이라 건너뜀.
             //   · 스톨 기준: 300ms 이상 SendInput 없음. 일반 60Hz 틱 (=16ms) 에선 트리거 안 됨.
-            //   · 전송 주기: 16ms (60Hz) — 실제 게임 틱과 동일 속도로 catch-up.
+            //   · 전송 간격: 16ms 이상마다 최대 하나. 정확한 60Hz 생성이나 catch-up 보장은 아니다.
             int64_t mainAct = lastMainActivityMs_.load();
             if (mainAct > 0 && (now - mainAct) > 300) {
                 int64_t lastHeartbeat = lastHeartbeatMs_.load();
@@ -1456,8 +1518,11 @@ void Session::ioThread() {
             // 를 리턴하면 parse_frames 자체가 스킵되어 preload 가 소비되지 않는다.
             if (newBytes || !recvBuf.empty()) {
                 std::vector<Frame> frames;
-                parse_frames(recvBuf, frames);
-                for (auto& f : frames) handleFrame(f);
+                if (!parseReceived(recvBuf, frames)) break;
+                for (auto& f : frames) {
+                    if (quit.load()) break;
+                    handleFrame(f);
+                }
             }
         } else {
             NET_WARN("[NET] Connection lost or receive failed");
@@ -1466,7 +1531,8 @@ void Session::ioThread() {
             break;
         }
 
-        while (true) {
+        // Bound one drain pass so new receive/control work gets another turn.
+        for (size_t sentFrames = 0; sentFrames < 64 && !quit.load(); ++sentFrames) {
             std::vector<uint8_t> pkt;
             {
                 std::lock_guard<std::mutex> lk(sendMu);
@@ -1474,10 +1540,16 @@ void Session::ioThread() {
                 pkt = std::move(sendQ.front());
                 sendQ.pop_front();
                 hasActivity = true;
+                // Keep the byte charge while pkt lives outside the queue.
             }
-            // sendMu released before blocking I/O — main thread can SendInput() freely
-            if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
+            const bool sent = tcp_send_all(sock, pkt.data(), pkt.size());
+            {
+                std::lock_guard<std::mutex> lk(sendMu);
+                pendingSendBytes -= pkt.size();
+            }
+            if (!sent) {
                 NET_WARN("[NET] Send failed!");
+                connectionFailed = true;
                 quit = true;
                 break;
             }
@@ -1493,13 +1565,13 @@ void Session::ioThread() {
 
 루프의 다섯 단계를 순서대로 짚는다.
 
-1. **핸드셰이크 타임아웃.** `ready` 가 아닌 상태로 10초가 지나면 실패 처리. `--connect` 로 죽은 주소에 붙었을 때 UI 가 영원히 "Connecting..." 에 머무는 것을 막는다.
+1. **핸드셰이크 타임아웃.** `ready` 가 아닌 상태로 10초가 지나면 실패 처리. 이미 시작된 ioThread에서 핸드셰이크가 진행되지 않는 경우를 다룬다. ioThread가 시작되기 전 DNS 조회나 connect 대기에는 이 10초 검사가 적용되지 않는다.
 2. **1Hz PING.** `ready` 이후에만. 상세는 PING/PONG 절.
 3. **메인 스레드 스톨 heartbeat.** 창 드래그 대응. 상세는 PING/PONG 절.
 4. **수신 → 파싱 → 처리.**
 5. **송신 큐 드레인.** `sendMu` 를 **놓은 뒤** `tcp_send_all` 을 부른다. `tcp_send_all` 은 커널 버퍼가 차면 1ms 씩 자며 재시도하므로, 잠금을 쥔 채 부르면 메인 스레드의 `SendInput` 이 그 시간만큼 통째로 막힌다. 큐에서 하나 꺼내고 즉시 놓는 이 패턴이 lockstep 루프를 지킨다.
 
-마지막의 `hasActivity` 는 CPU 절약이다. 받은 것도 보낸 것도 없으면 2ms 잔다 — 즉 유휴 시 약 500Hz, 활동 중에는 사실상 busy loop 로 돈다.
+마지막의 `hasActivity` 는 CPU 절약이다. 받은 것도 보낸 것도 없으면 2ms 잔다 — 2ms는 요청한 휴식 길이이며 스케줄러 지연과 처리 시간을 포함한 실제 주파수를 보장하지 않는다. 활동이 있으면 추가 sleep 없이 다시 순회한다.
 
 **`newBytes || !recvBuf.empty()` 조건은 그냥 방어 코드가 아니다.** [Part 7](./part7-relay-server.md) 의 `queueThread` / `roomThread` 는 `MATCH_FOUND` 를 받은 뒤 같은 `recv` 에 딸려 온 게임 프레임을 재직렬화해 `recvBuf` 에 **미리 넣어 두고** ioThread 를 띄운다. 조건이 `newBytes` 뿐이면 ioThread 의 첫 `tcp_recv_some` 이 0 바이트를 반환하는 순간 `parse_frames` 자체가 스킵되어 그 preload 가 소비되지 않는다. 결과는 첫 `INPUT`/`PING` 유실 → lockstep stall 이다. 조건 한 개 차이로 릴레이 경로가 멈춘다.
 
@@ -1510,7 +1582,7 @@ void Session::ioThread() {
 ```cpp
 void Session::Close() {
     quit = true;
-    // 소켓을 먼저 닫아(shutdown) accept()/recv() 블로킹 스레드를 깨운다.
+    // 공개된 연결에 shutdown을 요청한다. accept 워커는 논블로킹 폴링에서 quit를 본다.
     //   sockMu_ 로 워커 스레드의 publish 와 직렬화 — Close 가 quit 를 먼저 세팅하므로
     //   워커는 이 잠금 이후 publish 하지 않거나(잠금 안에서 quit 재확인), 이미 publish
     //   한 값을 우리가 본다. (shared_ptr 멤버 data race 방지)
@@ -1519,7 +1591,8 @@ void Session::Close() {
         if (listening && listenSock.valid()) tcp_close(listenSock);
         if (sock.valid()) tcp_close(sock);
     }
-    // shutdown 후 스레드 join (블로킹 해제됨). join 은 반드시 잠금 밖에서.
+    // 공개 소켓에는 shutdown을 요청했지만, DNS/connect 등 미공개 작업의
+    // 완료 시간까지 보장하지는 않는다. join은 워커가 쓸 잠금 밖에서 수행한다.
     if (ath.joinable()) ath.join();
     if (qth.joinable()) qth.join();
     if (rth.joinable()) rth.join();
@@ -1562,8 +1635,8 @@ void Session::Close() {
     }
     // 게임 sendQ / HASH pair 도 함께 비움 — 같은 Session 객체 재사용 시 이전
     // 연결의 stale 프레임이 새 연결의 ioThread 에서 선두로 나가는 것 방지.
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     // MATCH_RESULT 도 초기화. ClearGameOverChoices 만 의존하면 타이틀→새 매치
     // 경로에서 이전 라운드 결과가 새 매치 게임오버 시점에 즉시 읽히는 경계가
     // 있었다. Close 는 세션 경계마다 반드시 실행되므로 여기서 보장.
@@ -1575,7 +1648,7 @@ void Session::Close() {
 }
 ```
 
-종료 순서가 중요하다. **먼저 종료 신호를 보내고, 그 다음 스레드를 join 하고, 마지막에 owning handle 을 비운다.** 순서를 바꾸면 데드락이나 fd 재사용 문제가 발생한다.
+종료 순서가 중요하다. **먼저 종료 신호를 보내고, 그 다음 스레드를 join 하고, 마지막에 owning handle 을 비운다.** join은 워커가 필요로 하는 잠금을 잡지 않은 상태에서 호출한다. join 자체에는 취소나 시간 제한 기능이 없으므로, 워커가 모든 대기 지점에서 빠져나올 경로도 필요하다. 공개 소켓의 shutdown은 아직 publish되지 않은 DNS/connect 작업까지 취소하지 않는다.
 
 ```text
 잘못된 순서:
@@ -1603,48 +1676,53 @@ void Session::Close() {
 
 ```cpp
 void Session::SendHash(uint32_t tick, uint64_t hash) {
+    const auto admission = hashMailbox_.record_local(tick, hash);
+    if (admission != HashPut::stored && admission != HashPut::duplicate) {
+        NET_WARN("[NET] Local HASH admission failed");
+        connectionFailed = true;
+        quit = true;
+        return;
+    }
     std::vector<uint8_t> pl; le_write_u32(pl, tick); le_write_u64(pl, hash);
     auto fr = build_frame(MsgType::HASH, pl);
     pushSend(std::move(fr));
 }
 ```
 
-수신 측에서 같은 틱의 해시를 비교한다. 불일치 = **디싱크(desynchronization)**. "어떤 해시를 보내야 하는가" 는 생각보다 함정이 많아서 별도 절 ("XOR 결합 해시")에서 두 번 고쳐 쓴다.
+수신 측에서 같은 틱의 해시를 비교한다. 불일치 = **디싱크(desynchronization)**. "어떤 해시를 보내야 하는가" 는 생각보다 함정이 많아서 §17에서 로컬 관점과 역할 순서, XOR 상쇄를 구분한다.
 
 ### 7.2 주기와 링 크기의 근거
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-    // F.2 — 자동 HASH 검증. 매 600틱(~10s) 로컬 해시를 SendHash 하고 링으로
-    // 기억. 상대의 HASH(tick, h) 가 들어오면 같은 틱의 로컬 해시와 비교 →
-    // 불일치 시 DESYNC 오버레이 + stderr 로그.
-    struct HashSnap { uint32_t tick = 0; uint64_t hash = 0; bool valid = false; };
-    constexpr uint32_t HASH_PERIOD_TICKS = 600;
-    constexpr size_t HASH_RING = 4;
-    HashSnap localHashRing[HASH_RING]{};
-    uint32_t lastHashSentTick = (uint32_t)-1;        // 중복 송신 방지
-    uint32_t lastRemoteHashSeenTick = 0;
+    // F.2 — Session retains both origins until each periodic pair is compared.
+    constexpr uint32_t HASH_PERIOD_TICKS = net::HashExchange::period;
+    uint32_t lastHashSentTick = (uint32_t)-1;
     uint32_t desyncTick = 0;
     bool desyncDetected = false;
+    auto resetHashComparison = [&] {
+        lastHashSentTick = (uint32_t)-1;
+        desyncDetected = false;
+        desyncTick = 0;
+    };
 ```
 
-- **600틱 = 10초.** 프레임 하나가 19바이트(len 2 + type 1 + payload 12 + 체크섬 4)이고 이걸 0.1Hz로 보내므로 대역폭은 사실상 0이다. 검증 주기를 줄여도 **감지 시점만 당겨질 뿐 상태를 복구하지는 못한다.** 반대로 더 드물게 하면 DESYNC가 난 뒤 화면이 오래 갈라진 채 방치된다. 10초는 사용자가 이상함을 느끼기 시작하는 시간과 맞춘 값이다.
-- **링 크기 4 → 과거 40초 이력.** 상대의 HASH 는 네트워크 지연과 양쪽 시뮬레이션 진행 차이 때문에 내가 그 틱을 지난 뒤에 도착한다. 슬롯이 하나뿐이면 "상대의 tick 600 해시가 도착했을 때 나는 이미 tick 1200 을 기록해 덮어썼다" 가 되어 비교가 영원히 실패한다. 4칸이면 40초 뒤처진 HASH 까지 비교 가능하다 — lockstep 특성상 양쪽 진행 차이가 40초까지 벌어지는 일은 없다(그 전에 `Lost` 판정).
-- **인덱스는 `(tick / HASH_PERIOD_TICKS) % HASH_RING`.** 링에 넣을 때와 비교할 때 같은 식을 쓰므로, `slot.tick == rt` 확인만으로 "덮어써졌는가" 를 판정한다.
+- **600틱은 60Hz 규칙 진행에서 약10초 분량이다.** 실제 벽시각은 대기·정지에 따라 길어진다. 기본 wire 프레임은19바이트이므로 샘플당 전송량은 작다. 주기는 감지 간격을 바꾸며 상태를 복구하지 않는다.
+- **창은 다음 비교 틱부터 8개의 주기 샘플을 보관한다.** 범위 밖을 거절하며 미비교 기록을 덮어쓰지 않는다. 틱 범위가 특정 벽시계 지연 보장은 아니다.
+- **인덱스는 `(tick / HASH_PERIOD_TICKS) % HASH_RING`이다.** 같은 슬롯을 여러 틱이 재사용하므로 `slot.tick == rt`도 확인한다.
+- **먼저 도착한 원격 해시는 아직 비교한 것이 아니다.** 같은 틱의 로컬 값이 생길 때까지 보관한다. PollHashComparison은 가장 이른 양쪽 기록을 한 번 소비하고 커서를 전진시킨다. 더 늦은 틱이 먼저 준비돼도 누락된 앞 틱을 건너뛰지 않는다.
 
-### 7.3 왜 감지만 하고 복구하지 않는가
+### 7.3 감지와 복구의 책임
 
-DESYNC 를 감지하면 화면에 빨간 배너를 띄우고 그걸로 끝이다. 자동 복구를 하지 않는다. 이건 게으름이 아니라 선택이다.
+현재 클라이언트는 불일치를 발견하면 배너와 로그를 남긴다. 해시만으로 어느 쪽 상태가
+올바른지 판단할 수 없으므로 임의로 상대 상태를 덮어쓰지 않는다. 합의된 체크포인트와
+입력 이력의 재실행, 권위 서버의 상태 복원, 라운드 중단·재시작 같은 대응에는 각각
+별도의 상태 형식·신뢰 기준·경기 결과 규약이 필요하다.
 
-lockstep 에서 DESYNC 를 복구하는 방법은 원리적으로 두 가지뿐이다.
-
-1. **상태 스냅샷 전송** — 한쪽이 자기 `SimGame` 전체를 직렬화해 보내고, 상대가 그걸로 덮어쓴다. 그러면 "입력만 교환한다" 는 lockstep 의 전제가 무너진다. 그리드 10×20 + RNG 상태 + 카운터를 직렬화하는 코드, 그 코드의 버전 호환성, 그리고 "누구의 상태가 옳은가" 를 정하는 권위 규칙이 전부 필요해진다. 권위 규칙은 P2P 에서 특히 고약하다 — 호스트를 믿기로 하면 호스트가 치팅 지점이 된다.
-2. **라운드 폐기** — 그냥 이 판을 무효로 하고 새 시드로 재시작한다.
-
-이 프로젝트는 (2) 의 수동 버전을 택했다. 배너를 보여주고, 사용자가 게임오버까지 가거나 타이틀로 나가면 세션이 자연스럽게 리셋된다. 근거는 단순하다 — **DESYNC 는 버그일 때만 발생한다.** 결정론 시뮬레이션 + 신뢰성 있는 전송이라는 전제가 지켜지면 확률적으로 발생하는 일이 아니다. 발생했다면 그건 고쳐야 할 코드 결함이지 런타임에 흡수할 사건이 아니다. 그래서 이 장치의 진짜 목적은 "복구" 가 아니라 **"회귀 탐지기"** 다. DESYNC 배너가 뜨는 빌드는 출시하면 안 된다는 신호다.
-
-그 판단의 대가는 명확하다. 만에 하나 필드에서 DESYNC 가 나면 그 매치는 버려진다. 그 대신 얻는 것은 "네트워크 계층이 시뮬레이션 상태를 아예 모른다" 는 계층 분리다 — `net/` 의 어느 파일도 `SimGame` 을 include 하지 않는다.
+불일치는 버그 외에도 다른 규칙 버전·잘못된 초기 조건·허위 해시 전송 때문에 나타날 수 있다.
+이 기능은 진단 도구이며 부정행위 판정이나 서버의 결과 검증을 대신하지 않는다.
+일치도 충돌 가능성·누락된 해시 대상·미비교 샘플까지 배제하는 증거는 아니다.
 
 ### 7.4 디싱크의 일반적 원인
 
@@ -1665,7 +1743,7 @@ lockstep 에서 DESYNC 를 복구하는 방법은 원리적으로 두 가지뿐�
 
 ### 8.1 상태 머신
 
-멀티플레이에서는 게임 오버 후 양쪽이 "재시작" 과 "타이틀로" 중 하나를 고르고, 그 선택을 `GAME_OVER_CHOICE` 프레임으로 교환한다.
+연습전 UI에서 R은 `Restart` 선택을 보내고 상대 선택을 기다린다. Q는 선택 메시지를 보내지 않고 바로 `GoingToTitle`로 전환해 세션을 닫는다. 프로토콜에는 `GoToTitle` 값과 불일치 처리 분기가 있지만, 현재 Q 버튼의 일반 경로와는 구분해야 한다. 랭크전은 같은 연결에서 재시작하지 않으며 메뉴로 돌아가 새 매칭을 요청한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -1691,8 +1769,7 @@ stateDiagram-v2
 
     WaitingForRemote --> SendingNewSeed: 양쪽 Restart + role=Host
     WaitingForRemote --> WaitingForNewSeed: 양쪽 Restart + role=Peer
-    WaitingForRemote --> GoingToTitle: 양쪽 Title
-    WaitingForRemote --> ShowingDisagreement: 선택 불일치
+    WaitingForRemote --> ShowingDisagreement: 원격 GoToTitle 수신
     WaitingForRemote --> GoingToTitle: 30초 타임아웃
 
     ShowingDisagreement --> GoingToTitle: 3초 카운트다운
@@ -1709,7 +1786,7 @@ stateDiagram-v2
 
 ### 8.2 의견 불일치 처리
 
-양쪽의 선택이 다르면(한쪽 Restart, 한쪽 Title) 3초 카운트다운 후 양쪽 모두 타이틀로 복귀한다. "다수결" 이나 "호스트 우선" 규칙 대신 안전하게 세션을 종료하는 쪽을 택했다 — 2인 게임에서 다수결은 성립하지 않고, 호스트 우선은 "나가겠다는 사람을 붙잡아두는" 결과가 된다.
+`WaitingForRemote`에서 내 Restart와 원격 GoToTitle이 다르면 그 클라이언트는 `ShowingDisagreement`에 들어가 3초 뒤 메뉴로 복귀한다. 현재 Q 경로는 GoToTitle을 보내지 않고 연결을 닫으므로 상대도 같은 3초 화면을 본다고 보장할 수 없다. 상대는 연결 종료나 대기 시간 제한 경로를 관찰할 수 있다. 재대전은 두 참여자의 의사가 모두 있어야 진행하며, 나가는 사람의 연결 유지가 전제가 되어서는 안 된다.
 
 ### 8.3 재시작 시 시드 교환
 
@@ -1726,7 +1803,8 @@ void Session::SendNewSeed(uint64_t newSeed) {
         le_write_u64(pl, seedParams.seed);
         le_write_u32(pl, seedParams.start_tick);
         pl.push_back(seedParams.input_delay);
-        pl.push_back((uint8_t)seedParams.role);
+        // SEED assigns the receiver's role; keep our local role unchanged.
+        pl.push_back((uint8_t)(seedParams.role == Role::Host ? Role::Peer : Role::Host));
     }
     auto fr = build_frame(MsgType::SEED, pl);
     pushSend(std::move(fr));
@@ -1734,9 +1812,19 @@ void Session::SendNewSeed(uint64_t newSeed) {
 }
 ```
 
-Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다가 값이 바뀌면 `RestartingGame` 으로 넘어간다. SEED 프레임을 직접 감시하는 대신 세션 상태의 변화를 보는 구조라, `handleFrame` 에 콜백을 추가할 필요가 없다.
+Guest는 `WaitingForNewSeed`에서 `session.params().seed`를 읽어 직전 시드와 다르면 재시작한다. 이 방식은 값의 변화를 사건으로 사용하므로 같은 시드가 다시 오면 새 프레임이어도 감지하지 못한다. 시드는 생성 규칙의 초기값이고 라운드 식별자는 실행 회차의 이름이다. 둘을 같은 의미로 사용하지 않으려면 별도의 증가하는 라운드 ID와 시작 확인 절차가 필요하다. 현재 wire에는 그 전체 절차가 없다.
 
-여기서 한 가지 함정이 있었다. Host 쪽 `SendingNewSeed` 상태는 원래 1.5초를 고정 대기했는데, 그 시차만큼 Host 의 카운트다운이 Guest 보다 늦게 시작돼 재시작 라운드 내내 lockstep 이 한쪽 입력에 묶여 영구 렉이 났다. 지금은 "시드 전송 → 즉시 시작" 으로 양쪽 시차를 RTT 수준으로 줄인다. `ClearInputs()` 는 이전 라운드 INPUT만 버리고 이미 도착한 SEED는 보존해야 Guest가 새 라운드 시작 신호를 잃지 않는다.
+Host는 `SendNewSeed`로 로컬 송신 큐에 넣은 뒤 바로 `RestartingGame`으로 이동한다. `ClearInputs()`는 큐에 남은 SEED를 보존한다. 고정 1.5초 대기를 제거해 인위적인 지연은 없앴지만, 실제 송신·수신·처리 시차는 큐와 스케줄링의 영향도 받으므로 RTT만으로 한정할 수 없다. 큐 수락을 상대의 시작 완료로 해석해서는 안 된다.
+
+### 8.4 종료 사건의 책임 경계
+
+시뮬레이션의 terminal은 규칙상 더 진행할 틱이 없다는 뜻이다. 재대전 선택은 사용자의 의사이며, 양쪽 Restart의 로컬 관측은 같은 연결에서 새 라운드를 준비할 조건이다. 다음 라운드의 ID·시드·역할·지연 합의는 별도의 시작 절차로 다룬다.
+
+네트워크에서 한쪽 송신 방향의 종료와 게임 판정도 구분한다. TCP는 한 방향의 송신을 끝낸 뒤 반대 방향을 계속 수신하는 동작을 지원한다([RFC 9293 §3.6](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.6)). 현재 `tcp_recv_some`은 EOF와 오류를 false로 묶고 Session은 이를 연결 종료 사유로 처리한다. 그 반환값만으로 상대의 기권 의사나 승자를 판단하지 않는다.
+
+랭크 경기의 `MATCH_SUMMARY`는 서버 최종화의 계기다. 서버의 입력 재실행 결과와 영속 저장 응답을 거쳐 `MATCH_RESULT`를 보낸다. 클라이언트의 게임오버 화면, 통신 종료, 서버 검증, 저장 확인은 각각 다른 상태다. `Applied`를 검증기 내부에서 임시로 산출하는 것과 저장 성공 후 wire로 보내는 것을 구분한다. 결과 저장 실패는 `SaveFailed`, 서버 시뮬레이션 미종료는 `Incomplete`다. 자세한 판정·저장 책임은 [Part 18](./part18-authoritative-results.md)에서 다룬다.
+
+학습용 `98-end-negotiation`은 한 소유자의 순수 상태 머신으로 이 경계를 실험한다. 현재 라운드의 원격 선택은 로컬 terminal 전에 와도 한 개 보관하되, 타이머는 로컬 종료 후 활성화할 때 시작한다. 다른 라운드의 선택과 중복·충돌을 구별하고, 마감 시각에 도달한 뒤에는 늦은 선택으로 협상을 되살리지 않는다. 이 기준의 TYPE42/round ID는 현재 게임의 TYPE9/1바이트 wire와 직접 호환되지 않는다.
 
 ---
 
@@ -1746,11 +1834,11 @@ Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다
 
 **증상:** `parse_frames` 에서 크래시. 또는 `buf.size() - offset` 이 음수여야 할 때 거대한 양수가 되어 조건 분기가 잘못됨.
 
-**원인:** `size_t` 는 unsigned. `0 - 1 = SIZE_MAX`.
+**원인:** size_t 범위의 unsigned 산술에서는 0에서 1을 빼면 최댓값으로 돌아간다. offset이 size를 넘은 상태에서 남은 길이를 계산하면 부족한 길이가 큰 양수처럼 보인다.
 
-**해결:** `buf.size() - offset < need` 대신 `offset + need > buf.size()` 형태로 비교. 뺄셈을 덧셈으로 변환하면 언더플로가 원천 차단된다.
+**해결:** 현재 파서는 `offset <= streamBuf.size()` 불변식을 유지한 뒤 `remaining = size - offset`을 계산하고 `remaining < need`를 검사한다. offset은 완전한 프레임의 길이만큼만 증가한다. 덧셈으로 바꾸는 것만으로 안전해지지는 않는다. `offset + need`도 범위 검증 전에 계산하면 오버플로할 수 있으므로, 뺄셈의 전제를 먼저 확보하고 남은 길이와 비교한다.
 
-> **레퍼런스:** C++ 표준 [conv.integral]: unsigned 정수의 산술은 모듈러 $2^n$ 으로 잘 정의된다. 그러나 의도하지 않은 모듈러 산술은 보안 취약점(buffer overflow)의 원인이 될 수 있다.
+> **레퍼런스:** [C++ 작업 초안의 unsigned 산술 규칙(basic.fundamental)](https://eel.is/c++draft/basic.fundamental#2). 모듈러 계산 자체가 정의되어 있어도, 그 결과를 잘못된 버퍼 길이로 사용하면 범위를 벗어날 수 있다.
 
 ### 9.2 `Close()` 에서 소켓 종료 전 thread join
 
@@ -1766,7 +1854,7 @@ Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다
 
 **원인:** `{ int fd }` 를 값으로 복사한 구조체가 여러 스레드에 퍼져 있고, 각 스레드가 독립적으로 `close(fd)` 한다. POSIX/WinSock fd 값은 단순 정수라서 닫힌 뒤 곧바로 새 socket/accept 결과로 재사용될 수 있다.
 
-**해결:** `TcpSocket` 을 `shared_ptr<int>` 기반 owning handle 로 만들고, 실제 close 는 마지막 복사본의 deleter 에서 한 번만 수행한다. `tcp_close()` 는 fd 를 닫지 않고 `shutdown(SHUT_RDWR)` 만 호출해 recv/send 루프를 깨운다. `Session::sock` 처럼 shared_ptr 멤버 자체를 재대입하는 곳은 `sockMu_` 로 직렬화한다.
+**해결:** `TcpSocket` 을 `shared_ptr<NativeSocket>` 기반 owning handle 로 만들고, 실제 close 는 마지막 복사본의 deleter 에서 한 번만 수행한다. `tcp_close()` 는 fd 를 닫지 않고 `shutdown(SHUT_RDWR)` 만 호출해 recv/send 루프를 깨운다. `Session::sock` 처럼 shared_ptr 멤버 자체를 재대입하는 곳은 `sockMu_` 로 직렬화한다.
 
 ### 9.4 `seedParams` 데이터 레이스
 
@@ -1782,7 +1870,7 @@ Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다
 
 **원인:** INPUT 메시지의 `count` 필드가 실제 페이로드보다 클 때 `arr[i]` 가 버퍼 범위를 초과.
 
-**해결:** `static_cast<size_t>(6) + cnt > f.payload.size()` 로 바운드 체크. 상세는 "악성 프레임 방어" 절.
+**해결:** 현재 `decode_input_payload`는 헤더를 먼저 확인하고 payload가 정확히 `6 + count`바이트인지 검사한다. count 상한·틱 범위·허용 입력 비트도 모두 확인한 뒤 배치를 적용한다. 상세는 "악성 프레임 방어" 절.
 
 ### 9.6 창 드래그 시 Lockstep 정체
 
@@ -1797,77 +1885,74 @@ Guest 쪽은 `WaitingForNewSeed` 에서 `session.params().seed` 를 폴링하다
 ---
 ## 10. inputDelay / safeTick 심화
 
-§5.1 에서 `safeTick = min(lastLocalSent, lastRemoteRecv) - inputDelay` 라는 공식을 소개했다. 실제 게임에서 이 값이 어떻게 움직이는지, `inputDelay` 를 어떻게 골라야 하는지 더 파고든다.
+§5.1 에서 `safeTick = min(lastLocalSent - inputDelay, lastRemoteRecv)` 라는 공식을 소개했다. 실제 게임에서 이 값이 어떻게 움직이는지, `inputDelay` 를 어떻게 골라야 하는지 더 파고든다.
 
-### 10.1 수식 유도
+### 10.1 로컬 생성 시계와 상대 입력 존재
 
-피어 A 의 관점에서 틱 `t` 의 시뮬레이션을 실행하려면 다음 두 입력이 모두 필요하다.
+입력 생성 순번과 시뮬레이션 소비 순번을 나눠 생각한다. 로컬 입력을 틱 n까지
+생성했다면, D틱의 입력 지연을 적용한 로컬 소비 상한은 `n-D`다.
+상대 입력도 있어야 하므로 현재 게임의 계산은 다음과 같다.
 
-- `localInputs[t]` — 내 입력. `SendInput(t, mask)` 을 호출한 **순간** 확정됨
-- `remoteInputs[t]` — 상대 입력. 상대의 `SendInput(t, mask)` 가 네트워크를 통해 `INPUT` 프레임으로 도착한 **순간** 확정됨
+$$\text{safeTick}_A = \min(n-D, r)$$
 
-A 가 현재 틱 `n` 을 진행하고 있다고 하자. `n` 틱 시점에 이미 `ConsumeInput()` 으로 로컬 마스크를 확정해 `SendInput(n, mask)` 까지 마쳤으므로:
+n은 로컬 생성·송신 요청한 마지막 번호, r은 상대 맵에 저장한 최대 번호다.
+송신 요청은 상대가 받았다는 확인이 아니다. 두 맵에 현재 simTick이 있는지는
+`read_input_pair`로 따로 검사한다. r이 커도 중간 입력이 비면 그 틱에서 기다린다.
 
-$$\text{lastLocalSent}_A = n$$
+입력 t는 `INPUT(t)`로 보내고 `remoteInputs[t]`에 그대로 보관한다. 번호를 t+D로
+바꾸지 않는다. 로컬 생성 순번이 t+D에 도달했을 때 t를 실행할 수 있도록 **소비 시점**을
+늦춘다. 시뮬레이션이 기다려도 입력 생성이 독립적으로 진행되어야 시작 지연을 벗어날 수 있다.
 
-상대 B 로부터 마지막으로 받은 `INPUT` 프레임의 최고 틱을 `lastRemoteRecv_A = r` 이라 하자. 그럼:
+`min(n,r)-D`를 사용하면 상대 입력이 잠깐 멈춘 동안 r-D도 그대로 멈춘다.
+이미 받은 입력까지 계속 D개 남겨야 해서 그 여유를 소비할 수 없다. 현재 식은 D를
+로컬 상한에서만 빼므로, 이미 도착한 상대 입력을 지연된 로컬 일정에 맞춰 소비한다.
 
-$$\text{safeTick}_A = \min(n, r)$$
+### 10.2 같은 도착 시간선에서 여유 입력을 소비하기
 
-만약 `inputDelay = 0` 이라면 A 는 `min(n, r)` 까지만 시뮬레이션할 수 있다. `r` 이 지체되면(네트워크 지연) A 도 같이 멈춘다. 잠깐의 지터에도 민감하게 반응한다.
+매 입력 생성 펄스마다 한 개의 로컬 입력을 만들고, 두 맵의 빈 구간이 없다고 하자.
+상대 입력이 처음에는 제때 도착하고 펄스 3~4에서 잠깐 멈췄다가 5에서 몰려온다.
+D=2이며 표의 숫자는 해당 펄스가 끝났을 때 **다음에 소비할 틱**이다.
 
-여기서 **송신 측에서 입력을 D 틱 뒤에 적용하도록 "미뤄서" 보내는** 아이디어가 나온다. A 가 틱 `n` 에 확정한 입력은 "틱 `n + D` 에 적용되는 입력" 이라고 약속하는 것이다. 그럼 양쪽은 다음 불변식을 지키면 된다.
+| 로컬 생성 마지막 n | 상대 최대 r | D=0 | D=2: min(n-D,r) | 비교: min(n,r)-D |
+|---|---|---|---|---|
+| 0 | 0 | 1 | 0 | 0 |
+| 1 | 1 | 2 | 0 | 0 |
+| 2 | 2 | 3 | 1 | 1 |
+| 3 | 2 | 3 | 2 | 1 |
+| 4 | 2 | 3 | 3 | 1 |
+| 5 | 5 | 6 | 4 | 4 |
+| 6 | 6 | 7 | 5 | 5 |
+| 7 | 7 | 8 | 6 | 6 |
 
-$$\text{시뮬레이션 가능 틱} = \min(n, r) - D$$
+D=2 경로는 초기 두 펄스를 기다린 뒤 매 펄스 하나씩 소비한다. D=0은 바로 시작하지만
+3~4에서 멈추고 5에서 세 틱을 따라잡는다. 비교 식도 3~4에서 멈추므로 예약한 입력이
+일시적 도착 공백을 메우지 못한다.
 
-틱 `min(n, r) - D` 를 실행할 때 필요한 양쪽 입력은 사실 약 `D` 틱 전에 송신됐으므로, 네트워크 RTT 가 `D` 틱 이하이면 이미 도착해 있을 가능성이 높다. `D` 가 클수록 지터에 관대해지지만 체감 입력 지연도 커진다.
-
-수학적으로는 `D` 를 송신 측에서 "틱 번호 재지정" 으로 구현해도 되고, 수신 측에서 "receive 한 입력을 D 틱 뒤 슬롯에 넣는다" 로 구현해도 된다. 이 프로젝트는 후자를 택했다. 송신은 여전히 `SendInput(localTickNow, mask)` 로 현재 틱 번호를 그대로 보낸다. 대신 **safeTick 계산식에서 빼준다** — 즉 "받은 입력이 `r` 이어도 `r - D` 까지만 적용한다". 뒤쪽 `D` 틱은 버퍼로 남겨둬서 다음 지터에 대비한다.
-
-이 선택의 실질적 이점은 **`inputDelay` 를 바꿔도 와이어 포맷이 바뀌지 않는다**는 것이다. 송신 측 재지정 방식이었다면 `input_delay` 가 다른 두 클라이언트가 붙었을 때 tick 번호 해석이 어긋난다.
-
-### 10.2 타임라인: inputDelay = 2, RTT = 30ms (2틱)
-
-60Hz(틱 16.67ms)로 돌고, 한쪽으로 15ms 씩 편도 지연, 상대 `INPUT` 이 우리에게 도착하기까지 2틱 늦는다고 가정.
-
-```mermaid
-sequenceDiagram
-    participant A as Peer A (틱 n)
-    participant N as 네트워크 (+2틱)
-    participant B as Peer B (틱 n)
-
-    Note over A,B: 틱 5 시점
-    A->>A: ConsumeInput → mask_A[5]
-    A->>N: INPUT(tick=5, mask_A[5])
-    B->>B: ConsumeInput → mask_B[5]
-    B->>N: INPUT(tick=5, mask_B[5])
-    Note over A,B: safeTick_A = min(5,3) - 2 = 1 → 틱 1 실행
-    Note over A,B: safeTick_B = min(5,3) - 2 = 1 → 틱 1 실행
-
-    Note over A,B: 틱 7 시점
-    N->>A: INPUT(tick=5) 도착
-    N->>B: INPUT(tick=5) 도착
-    Note over A: lastRemoteRecv_A = 5
-    Note over A,B: safeTick = min(7,5) - 2 = 3 → 틱 3 까지 실행
-```
-
-`inputDelay = 2` 는 **약 33ms 의 지터 여유** 를 준다. 한 번의 `INPUT` 프레임이 네트워크에서 33ms 안에 도착하기만 하면, 시뮬레이션은 끊기지 않고 똑같이 60Hz 로 흘러간다. 유저 입장에서 체감 지연은 33ms — 60Hz 화면에서 2프레임 차이. 격투 게임이라면 치명적이지만 테트리스에는 충분히 숨길 만한 값이다(§ 들어가며의 중력 주기 비교).
+이 표는 특정 도착 이력의 결과다. 공백이 더 길어 실제 다음 입력이 없으면 D=2도
+기다린다. 여러 틱을 따라잡는 경우의 작업량·표시 간격은 메인 루프의 예산과 함께 다룬다.
+D=2의 60Hz 환산값 약33.33ms는 로컬 입력을 의도적으로 늦춘 양이며, 총 체감 반응은
+상대 도착·스케줄링·렌더링 지연의 영향을 더 받는다.
 
 ### 10.3 inputDelay 선택의 트레이드오프
 
-| `inputDelay` | 체감 지연 | 지터 내성 | 적합한 매치 |
-|---|---|---|---|
-| 0 | 즉각적 | 없음 (1 틱 지연만 나도 멈춤) | LAN / loopback |
-| 1 | 16.67ms | ~16ms | 초저지연 인터넷 |
-| **2 (기본)** | **33.33ms** | **~33ms** | 일반 인터넷 |
-| 4 | 66.67ms | ~66ms | 지터가 큰 Wi-Fi |
-| 8 | 133ms | ~133ms | 모바일 / 장거리 |
+| `inputDelay` | 60Hz에서 정책상 추가 여유 |
+|---|---|
+| 0 | 0ms |
+| 1 | 약 16.67ms |
+| **2 (기본)** | **약 33.33ms** |
+| 4 | 약 66.67ms |
+| 8 | 약 133.33ms |
+
+표는 틱 수를 시간으로 환산한 값이다. 네트워크 종류별 적합성이나 총 체감 지연을
+보장하는 수치가 아니다. 입력 대기·보드 진행·프레임 출력 시점을 기록해 실제 경로에서 판단한다.
 
 이 프로젝트는 **SEED 메시지에 `input_delay` 를 실어서 호스트가 결정**한다. 호스트가 RTT 를 보고 클라이언트에게 통지하는 적응형 구조는 아직 구현되지 않았고, 기본 2 로 고정되어 있다. 확장 여지: 첫 PING 왕복 결과를 보고 호스트가 `SendNewSeed` 와 같은 방식으로 `input_delay` 를 조정하는 메시지를 추가하면 된다.
 
 ### 10.4 경계 케이스: 초반 start_tick 구간
 
-`start_tick = 120` (2초 카운트다운) 동안에는 양쪽이 서로에게 `INPUT` 을 보내지 않는다(그 이유는 "대기 중 stale INPUT backlog" 절). 이 구간의 `safeTick` 은 수학적으로 음수가 될 수 있다(`min(-1, -1) - 2 = -3`). `int64_t` 로 계산하는 이유가 이것이다 — `(localTickNext == 0) ? -1 : ...` 분기도 `uint32_t` 언더플로를 피하기 위한 방어였다.
+`start_tick = 120` (2초 카운트다운) 동안에는 양쪽이 서로에게 `INPUT` 을 보내지 않는다(그 이유는 "대기 중 stale INPUT backlog" 절). 이 구간의 `safeTick` 은 수학적으로 음수가 될 수 있다(`min(-1 - 2, 0) = -3`). `int64_t` 로 계산하는 이유가 이것이다 — `(localTickNext == 0) ? -1 : ...` 분기도 `uint32_t` 언더플로를 피하기 위한 방어였다.
+
+초기 `maxRemoteTick()`은 0이다. 이는 틱 0 수신의 증거가 아니며 실제 존재 여부는 맵 조회로 확인한다.
 
 `simTick` 은 `uint32_t` 이므로 비교 시 `(int64_t)simTick <= safeTick` 으로 캐스팅한다. 이러면 `simTick = 0`, `safeTick = -3` 일 때 `0 <= -3` 은 false — 루프가 돌지 않는다. 정상이다.
 
@@ -1878,9 +1963,9 @@ sequenceDiagram
 §3 의 프로토콜은 HELLO/SEED/INPUT/ACK/HASH/GAME_OVER_CHOICE 만으로 "깨끗한" 네트워크에서는 동작한다. 그런데 실제 환경에는 두 가지 **애매한 상황** 이 있다.
 
 1. **상대가 창을 드래그 중** — Win32 의 모달 메시지 루프가 main thread 를 점유해서 `SendInput()` 호출이 멈춘다. 하지만 ioThread 는 별도 스레드라 살아있고, TCP 연결도 끊어지지 않는다. 상대는 지금 "일시적으로 얼어있는" 상태.
-2. **상대가 랜 케이블 뽑힘 / 프로세스 크래시** — 실제로 연결이 끊어졌는데 TCP 는 기본 keep-alive 가 수 분 단위라 한참 동안 `recv()` 가 에러를 안 낸다.
+2. **경로가 조용히 끊김** — 케이블 단절이나 패킷 폐기처럼 FIN/RST가 도착하지 않으면 즉시 오류를 관찰하지 못할 수 있다. 프로세스 종료 때 OS가 연결을 정리해 FIN/RST가 도착하는 경우와 구분한다.
 
-두 상황은 **겉으로 똑같이 보인다** — `safeTick` 이 더 이상 올라가지 않는다. 하지만 UI 에서 유저에게 보여줘야 하는 메시지는 다르다. 전자는 "잠시 대기", 후자는 "타이틀 복귀 카운트다운". 이를 구별하는 장치가 **PING/PONG 하트비트** 다.
+입력 진행과 통신 응답은 별도로 관찰해야 한다. main이 멈춰도 ioThread가 응답하면 PONG은 계속 돌아올 수 있다. 반대로 PONG 지연만으로 케이블 단절·상대 프로세스 정지·로컬 I/O 지연 중 어느 것이 원인인지 확정할 수 없다. 하트비트는 일정 시간 응답을 관찰하지 못했을 때 대기·종료 정책을 적용하기 위한 근거다.
 
 ### 11.1 상태 정의
 
@@ -1888,13 +1973,13 @@ sequenceDiagram
 
 ```cpp
 // 링크 건강 상태 — 마지막 PONG 수신 경과 시간 기반
-//   OK     : 마지막 PONG < 2s (정상)
-//   Stalled: 2s ≤ 경과 < 10s (상대가 잠시 얼어붙음, Windows 창 드래그 등)
-//   Lost   : 경과 ≥ 10s 혹은 hasFailed() — 연결 공식 단절로 간주
+//   OK     : 확인된 PONG 이후 < 2s 또는 ready 직후 유예
+//   Stalled: 2s ≤ 경과 < 10s — 응답 지연, 원인은 이 상태만으로 알 수 없음
+//   Lost   : 경과 ≥ 10s 혹은 hasFailed() — 종료 정책에 사용할 관찰 결과
 enum class LinkStatus : uint8_t { OK=0, Stalled=1, Lost=2 };
 ```
 
-PING 페이로드는 `[timestamp:u64 LE]` 하나다. PONG 은 수신한 PING 의 payload 를 그대로 에코한다. RTT 측정에도 쓸 수 있는 형태지만, 현재 구현은 "언제 마지막으로 PONG 을 받았나" 만 기록한다.
+PING 페이로드는 `[timestamp:u64 LE]` 하나다. 응답자는 그 값을 해석하거나 자기 시계로 바꾸지 않고 그대로 PONG에 넣는다. 현재 `net/pong_window.h`의 `PongWindow`는 보낸 토큰을 16개 보관한다. ready 상태에서 정확히 8바이트이고 미소비 요청과 일치하며, 로컬 접수 시각부터 10초 미만인 응답만 건강 시각을 갱신한다. 같은 응답 재사용·미요청 값·미래 시각은 갱신하지 않는다. 같은 연결에서 한 번 발급한 시각 이하의 토큰은 다시 발급하지 않아, 빠른 ready 재설정으로 같은 밀리초가 반복돼도 소비한 토큰을 재사용하지 않는다. 토큰은 상관관계 확인용이며 신원 인증이나 게임 진행 증명은 아니다.
 
 ### 11.2 송신: ioThread 의 1Hz 타이머
 
@@ -1903,22 +1988,24 @@ PING 페이로드는 `[timestamp:u64 LE]` 하나다. PONG 은 수신한 PING 의
 **현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
-        // 1Hz PING 송신 — ready=true 이후에만. 상대가 얼어붙어도 여기선 계속
-        // 큐에 쌓이지만 tcp_send_all 자체가 막히지는 않는다(커널 버퍼 여유 범위).
+        // ready 이후 약 1초마다 probe를 큐에 넣는다. 수신·송신 대기와
+        // 스케줄링 지연 때문에 실제 wire 송신 간격이 고정되지는 않는다.
         if (ready.load()) {
             int64_t now = now_ms();
             int64_t lastSent = lastPingSentMs.load();
             if (lastSent == 0 || (now - lastSent) >= 1000) {
                 lastPingSentMs.store(now);
-                std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
-                auto fr = build_frame(MsgType::PING, pl);
-                pushSend(std::move(fr));
+                if (now >= 0 && pendingPongs_.remember(static_cast<uint64_t>(now))) {
+                    std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
+                    auto fr = build_frame(MsgType::PING, pl);
+                    pushSend(std::move(fr));
+                }
             }
 ```
 
-핵심: **PING 은 main thread 가 아니라 ioThread 가 찍는다.** 그래서 상대가 창 드래그 중이라 main thread 가 얼어도 그 상대의 ioThread 는 돌고 있다 → 우리 PING 에 상대 PONG 이 돌아온다 → 우리는 "상대 ioThread 살아있음" 을 알 수 있다.
+핵심: **PING 은 main thread 가 아니라 ioThread 가 찍는다.** main이 창 드래그로 멈춰도 ioThread가 계속 실행되고 통신 경로가 진행되면 응답할 수 있다. 이 응답이 main의 틱 처리나 렌더링까지 진행 중임을 뜻하지는 않는다.
 
-`lastPingSentMs` 는 각 진입점(`acceptThread`, SEED 수신, 로비 전환)에서 `0` 으로 리셋된다. `lastSent == 0` 분기가 "세션 시작 직후 즉시 한 번 보낸다" 를 보장한다.
+`lastPingSentMs` 는 각 진입점(`acceptThread`, SEED 수신, 로비 전환)에서 `0` 으로 리셋된다. `lastSent == 0` 분기는 ready 이후 워커가 해당 분기를 처음 실행할 때 큐에 넣게 한다. 실제 wire 송신 시점은 앞선 작업과 큐 대기의 영향을 받는다. `pendingPongs_`는 ioThread 시작 때 새 창으로 초기화하며 연결 간 요청 기록을 재사용하지 않는다.
 
 ### 11.3 수신: handleFrame 의 두 분기
 
@@ -1928,18 +2015,37 @@ PING 페이로드는 `[timestamp:u64 LE]` 하나다. PONG 은 수신한 PING 의
 
 ```cpp
     case MsgType::PING: {
-        // 상대의 PING 은 즉시 PONG 으로 에코 — io 스레드가 계속 돌고 있으면
-        // 메인 스레드가 얼어도(창 드래그 등) 상대는 우리를 살아있다고 판정.
-        std::vector<uint8_t> pong = f.payload; auto fr = build_frame(MsgType::PONG, pong);
+        // Valid control probes are echoed by the I/O worker, independently of main.
+        if (!ready.load() || f.payload.size() != 8) break;
+        auto fr = build_frame(MsgType::PONG, f.payload);
         pushSend(std::move(fr));
     } break;
     case MsgType::PONG: {
-        // 최신 PONG 도착 시각 기록 — linkStatus() 가 이 값을 기준으로 판정.
-        lastPongMs.store(now_ms());
+        if (!ready.load() || f.payload.size() != 8) break;
+        const int64_t now = now_ms();
+        const uint64_t token = le_read_u64(f.payload.data());
+        if (now >= 0 && pendingPongs_.consume(token, static_cast<uint64_t>(now), 10000))
+            lastPongMs.store(now);
     } break;
 ```
 
-두 분기는 극단적으로 단순하다. PING 을 받으면 바로 PONG 큐잉, PONG 을 받으면 시각 기록. 판정 로직은 전부 조회 측에 있다.
+잘못된 길이의 PING은 에코하지 않는다. PONG은 요청 창에서 정확히 한 번 소비돼야 시각을 기록한다. 일반 INPUT이나 PING 수신은 우리의 probe가 왕복했다는 증거가 아니므로 갱신하지 않는다. 수신 워커만 창을 수정하고 main은 atomic 건강 시각을 읽는다.
+
+**현재 소스 발췌 — `net/pong_window.h`**
+
+```cpp
+    bool consume(std::uint64_t token, std::uint64_t now,
+                 std::uint64_t max_age) noexcept {
+        if (now < token || now - token >= max_age) return false;
+        for (auto& item : pending_) {
+            if (item && *item == token) { item.reset(); return true; }
+        }
+        return false;
+    }
+
+```
+
+16개 창은 오래된 미응답 요청을 덮어쓴다. 약 1초 간격 요청과 10초 유효 기간을 위한 제한이며, 무제한 응답 이력 저장소가 아니다. 큐에 넣은 시점을 기준으로 하므로 느린 로컬 송신 대기도 응답 나이에 포함된다.
 
 ### 11.4 판정: `linkStatus()`
 
@@ -1960,17 +2066,17 @@ LinkStatus Session::linkStatus() const {
 
 | `now - lastPongMs` | 상태 | UI 표시 | 시뮬레이션 |
 |---|---|---|---|
-| `< 2000ms` | `OK` | 없음 | 정상 진행 |
-| `2000 ≤ _ < 10000` | `Stalled` | "Opponent frozen - waiting..." | 멈춤 (safeTick 정체) |
-| `≥ 10000` | `Lost` | "Opponent disconnected" + 10초 카운트다운 | 멈춤 → grace 후 타이틀 |
+| `< 2000ms` | `OK` | 없음 | 입력 쌍과 소비 일정에 따라 진행 |
+| `2000 ≤ _ < 10000` | `Stalled` | "Waiting for peer response..." | 입력 대기와 별도로 관찰 |
+| `≥ 10000` | `Lost` | "Peer response lost" + 복귀 유예 | 유예 종료 시 연결 정리 |
 
-2초는 1Hz PING 의 2 주기 여유다. 한 번의 PING 이 일시적으로 지연돼도 다음 번엔 회복될 거라는 가정. 10초는 "상대가 실제로 사라졌다" 고 결론내리는 컷오프 — TCP keep-alive 가 작동하기 전에 선제적으로 감지한다.
+2초와 10초는 이 게임의 관찰·종료 정책 기준이다. 네트워크 지연·스케줄링·로컬 송신 대기 모두 영향을 주므로 원격 장애의 증명으로 사용할 수 없다. ready 직후에는 유예 시작 시각으로 lastPongMs를 초기화한다. 이때 OK는 아직 응답을 확인했다는 뜻이 아니다.
 
 ### 11.5 grace 복귀 — Stalled → OK 자동 재개
 
 `linkStatus()` 가 `Stalled` 로 분류돼도 **세션을 닫지 않는다.** UI 오버레이만 띄우고, 다음 PONG 이 돌아와 2초 이내가 되면 조용히 `OK` 로 복귀한다.
 
-`Lost` 는 좀 더 적극적이다. 처음 `Lost` 를 본 순간부터 main.cpp 가 10초짜리 별도 카운트다운을 돌리고, 그 사이에 `Stalled` 나 `OK` 로 회복하면 취소한다. 창 드래그가 10초를 넘기는 일은 거의 없으므로, 이 이중 grace 구조로 "창 드래그" 와 "진짜 단절" 이 자연스럽게 분리된다.
+`Lost` 는 좀 더 적극적이다. 처음 `Lost` 를 본 순간부터 main.cpp 가 10초짜리 별도 카운트다운을 돌리고, 그 사이에 `Stalled` 나 `OK` 로 회복하면 취소한다. 이 유예는 일시적인 지연에서 회복할 기회를 제공한다. main이 정지하면 UI의 카운트다운 계산 자체도 지연되므로, 실제 경과 시간이나 원인 분류를 보장하지 않는다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -2019,7 +2125,7 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 - 드래그 중인 쪽의 `ioThread` 는 살아있어 PING/PONG 은 정상. `linkStatus` 도 `OK`.
 - 하지만 그 쪽의 **main thread** 는 `WM_ENTERSIZEMOVE` 모달 루프에 잡혀 `Session::SendInput()` 을 호출하지 못한다.
-- 상대의 `safeTick = min(localSent, remoteMax) - inputDelay` 계산에서 `remoteMax` 가 드래그 기간 내내 정체 → 상대방의 게임도 같이 멈춘다.
+- 상대의 `safeTick = min(localSent - inputDelay, remoteMax)` 계산에서 `remoteMax` 가 드래그 기간 내내 정체 → 보관한 입력을 소진하면 상대방의 게임도 기다린다.
 
 즉 "링크 건강 = OK, but 한 쪽이 INPUT 을 못 쏘고 있음" 상황이다. `linkStatus` 만으로는 판정 불가.
 
@@ -2035,7 +2141,7 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
             // INPUT(tick,0) 을 대신 송신해 lockstep 을 계속 진행시킨다.
             //   · lastMainActivityMs_ == 0  → 첫 입력 전 (게임 시작 전) 이라 건너뜀.
             //   · 스톨 기준: 300ms 이상 SendInput 없음. 일반 60Hz 틱 (=16ms) 에선 트리거 안 됨.
-            //   · 전송 주기: 16ms (60Hz) — 실제 게임 틱과 동일 속도로 catch-up.
+            //   · 전송 간격: 16ms 이상마다 최대 하나. 정확한 60Hz 생성이나 catch-up 보장은 아니다.
             int64_t mainAct = lastMainActivityMs_.load();
             if (mainAct > 0 && (now - mainAct) > 300) {
                 int64_t lastHeartbeat = lastHeartbeatMs_.load();
@@ -2090,26 +2196,26 @@ PING/PONG 은 "상대가 아직 살아있는가" 를 알려주지만, 창 드래
 
 상대는 `INPUT(t, 0)` 을 이미 받았으므로 자기 `remoteInputs[t] = 0` 으로 진행했다. 우리 `localInputs[t]` 를 같은 0 으로 채우지 않으면 **같은 tick 에서 우리 sim 은 실제 inputMask 를 쓰고 상대 sim 은 0 을 써 DESYNC** 가 난다. 한 줄의 catch-up 루프로 peer 의 관측치와 일치시킨다.
 
-이 구조 덕분에 창 드래그 동안 양쪽 게임 모두 정상 진행 — 드래그한 쪽의 sim 만 main 이 깨어난 뒤 rapid catch-up 으로 따라잡는다. 다만 드래그 측 본인의 시뮬레이션은 모달 루프 동안 정지하므로, 본질적 한계가 완전히 사라진 것은 아니다.
+이 경로는 상대에게 중립 입력을 공급하고, main이 돌아왔을 때 같은 입력을 로컬 기록에 채우도록 설계돼 있다. 드래그한 쪽의 규칙·렌더는 그동안 정지한다. 입력 생성과 복귀 시점의 인계, 틱 순환, catch-up 예산은 별도 경계이며 양쪽의 실시간 진행을 보장하지 않는다.
 
-**`hbEnd == 0` 가드의 왜.** 이 가드를 처음 작성할 땐 `hbEnd >= localTickNext` 한 줄이면 된다고 착각했는데, 게임 시작 직후 `localTickNext = 0, hbEnd = 0` 에서 조건이 `0 >= 0 → true` 로 평가돼 `localInputs[0] = 0` 으로 덮어씌우고 `localTickNext` 가 1 로 점프하는 치명적 버그가 있었다. 결과적으로 `INPUT(0)` 이 전송되지 않아 상대 `remoteInputs[0]` 이 영원히 비어 있고, `safeTick = min(local, remote) - inputDelay` 계산에서 `remote = 0` 으로 막혀 **양쪽 sim 이 완전히 프리즈**. `hbEnd == 0` 을 "heartbeat 미발동" sentinel 로 명확히 구분해야 한다(heartbeat 은 `lastLocalTick + 1` 부터 시작하니 실제 발동 시엔 항상 `hbEnd ≥ 1`).
+**`hbEnd == 0` 가드의 왜.** 이 가드를 처음 작성할 땐 `hbEnd >= localTickNext` 한 줄이면 된다고 착각했는데, 게임 시작 직후 `localTickNext = 0, hbEnd = 0` 에서 조건이 `0 >= 0 → true` 로 평가돼 `localInputs[0] = 0` 으로 덮어씌우고 `localTickNext` 가 1 로 점프하는 치명적 버그가 있었다. 결과적으로 `INPUT(0)` 이 전송되지 않아 상대 `remoteInputs[0]` 이 영원히 비어 있고, `safeTick = min(local - inputDelay, remote)` 계산의 상한만으로 해결되지 않고, 틱 0의 입력 조회가 실패해 **양쪽 sim 이 기다리는 상태**. `hbEnd == 0` 을 "heartbeat 미발동" sentinel 로 명확히 구분해야 한다(heartbeat 은 `lastLocalTick + 1` 부터 시작하니 실제 발동 시엔 항상 `hbEnd ≥ 1`).
 
 ### 11.7 TCP keepalive와 PING/PONG은 서로 다른 실패를 본다
 
-현재 `tcp_accept`와 `tcp_connect`는 모든 연결 소켓에 `set_keepalive` 를 걸어 `SO_KEEPALIVE`를 켠다. 켜는 것만으로는 부족하다 — 감지 시간의 기본값이 플랫폼마다 크게 다르기 때문이다. POSIX에서는 지원되는 옵션에 한해 idle 15초 · probe 간격 5초 · 실패 허용 횟수를 짧게 요청하고, Windows에서는 `SIO_KEEPALIVE_VALS` ioctl로 같은 idle 15초 / 간격 5초를 명시한다. Windows 기본 KeepAliveTime은 2시간이라 `SO_KEEPALIVE`만 켜서는 "FIN/RST 없이 사라진 피어 감지"가 사실상 동작하지 않는다 — 두 플랫폼의 감지 시간을 같은 자리로 맞추는 정합화다.
+현재 `tcp_accept`와 `tcp_connect`는 연결 소켓에 `set_keepalive`를 호출한다. POSIX에서 지원되는 옵션과 Windows `SIO_KEEPALIVE_VALS`로 idle 15초·간격 5초를 요청한다. 요청한 간격이 같아도 probe 횟수·OS 처리·옵션 성공 여부가 달라 실제 장애 감지 시간이 같다고 보장할 수 없다. 현재 함수는 설정 실패를 최선 노력 방식으로 무시한다.
+
+`SIO_KEEPALIVE_VALS`는 연결별 idle·interval을 지정한다. 최신 Windows에는 probe 횟수를 다루는 `TCP_KEEPCNT`도 있으며 Windows 10 1703부터 지원한다. 따라서 모든 Vista 이후 버전에서 횟수를 바꿀 수 없다는 설명을 일반화하지 않는다. 현재 코드는 그 옵션을 설정하지 않는다. [Microsoft SIO_KEEPALIVE_VALS](https://learn.microsoft.com/en-us/windows/win32/winsock/sio-keepalive-vals), [IPPROTO_TCP 옵션](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-tcp-socket-options)을 함께 확인한다.
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// FIN/RST 없이 사라진 피어를 커널이 회수하게 하는 폴백.
-static void set_keepalive(int fd) {
+static void set_keepalive(NativeSocket fd) {
     int yes = 1;
 #ifdef _WIN32
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&yes, sizeof(yes));
-    // Windows 기본 KeepAliveTime 은 2시간이라 SO_KEEPALIVE 만으로는 'FIN/RST 없이
-    // 사라진 피어 감지'가 사실상 동작하지 않는다(POSIX 분기의 idle 15s / interval 5s
-    // 와 비대칭). SIO_KEEPALIVE_VALS 로 같은 값을 명시해 양 플랫폼 감지 시간을 맞춘다.
-    // (Vista+ 는 probe 재전송 횟수가 10회 고정 — 대략 15s + 10*5s 내 감지.)
+    // SIO_KEEPALIVE_VALS requests per-connection idle/interval settings.
+    // Probe count and actual failure-detection latency remain platform-specific;
+    // this path does not set TCP_KEEPCNT. Option failures are best-effort below.
     tcp_keepalive ka{};
     ka.onoff = 1;
     ka.keepalivetime = 15000;     // idle 15초 후 첫 probe (ms)
@@ -2150,7 +2256,7 @@ static void set_keepalive(int fd) {
 
 ## 12. 악성 프레임 방어
 
-프로토콜을 확장하면서 한 가지 원칙이 생겼다. **payload 를 읽기 전에 크기와 값을 검증하라.** 손상된 프레임(체크섬 충돌)이나 악성 프레임(악의적 클라이언트 / fuzz 테스트)이 들어와도 프로세스가 터지면 안 된다.
+프로토콜을 확장하면서 한 가지 원칙이 생겼다. **필드를 읽기 전에 크기를, 상태에 적용하기 전에 값을 검증하라.** 손상된 프레임(체크섬 충돌)이나 악성 프레임(악의적 클라이언트 / fuzz 테스트)이 들어와도 프로세스가 터지면 안 된다.
 
 이 원칙을 위반한 옛 코드에서 여러 버그가 나왔다. 먼저 최종형을 통째로 보자.
 
@@ -2171,15 +2277,15 @@ void Session::handleFrame(const Frame& f) {
     } break;
     case MsgType::SEED: {
         NET_TRACE("[NET] Received SEED message");
-        if (f.payload.size() >= 8+4+1+1) {
+        if (f.payload.size() == 8+4+1+1 &&
+            (f.payload[13] == (uint8_t)Role::Host || f.payload[13] == (uint8_t)Role::Peer)) {
             const uint8_t* p = f.payload.data();
             std::lock_guard<std::mutex> lk(seedMu);
             seedParams.seed = le_read_u64(p);
             seedParams.start_tick = le_read_u32(p+8);
             seedParams.input_delay = p[12];
             uint8_t rawRole = p[13];
-            seedParams.role = (rawRole == (uint8_t)Role::Host || rawRole == (uint8_t)Role::Peer)
-                            ? (Role)rawRole : Role::Peer;
+            seedParams.role = (Role)rawRole;
             NET_TRACE("[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
                       << ", start_tick=" << std::dec << seedParams.start_tick
                       << ", input_delay=" << (int)seedParams.input_delay);
@@ -2188,17 +2294,15 @@ void Session::handleFrame(const Frame& f) {
             ready = true;
             NET_TRACE("[NET] Client session is ready!");
         } else {
-            NET_WARN("[NET] Invalid SEED message size: " << f.payload.size());
+            NET_WARN("[NET] Invalid SEED payload (length/role): " << f.payload.size());
         }
     } break;
     case MsgType::INPUT: {
-        if (f.payload.size() >= 6) {
-            const uint8_t* p = f.payload.data();
-            uint32_t from = le_read_u32(p);
-            uint16_t cnt = le_read_u16(p+4);
-            // 페이로드 크기 검증: 헤더(6) + cnt 바이트가 실제 크기 이내인지 확인
-            if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
-            const uint8_t* arr = p+6;
+        InputBatchView batch;
+        if (decode_input_payload(f.payload, batch)) {
+            const uint32_t from = batch.first_tick;
+            const uint16_t cnt = batch.count;
+            const uint8_t* arr = batch.masks;
             // [보안] 신뢰할 수 없는 피어의 INPUT 처리:
             //  - remoteInputs 무한 증가로 인한 메모리 고갈을 막기 위해 누적 크기를 제한.
             //  - tick 래핑/원거리 tick 주입으로 인한 desync 를 막기 위해 현재 수신
@@ -2208,12 +2312,25 @@ void Session::handleFrame(const Frame& f) {
             {
                 std::lock_guard<std::mutex> lk(inMu);
                 const uint32_t cur = lastRemoteTick.load();
+                // Check all eligible new keys before applying this batch. Partial
+                // admission could ACK beyond an input we silently dropped.
+                size_t newEntries = 0;
+                for (uint16_t i = 0; i < cnt; ++i) {
+                    const uint32_t tick = from + i;
+                    const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
+                    if (dist <= kMaxTickWindow && remoteInputs.find(tick) == remoteInputs.end())
+                        ++newEntries;
+                }
+                if (newEntries > kMaxRemoteInputs - remoteInputs.size()) {
+                    NET_WARN("[NET] INPUT storage limit reached; rejecting entire batch");
+                    connectionFailed = true;
+                    quit = true;
+                    break;
+                }
                 for (uint16_t i=0;i<cnt;++i) {
                     const uint32_t tick = from + i;
                     const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
                     if (dist > kMaxTickWindow) continue;  // 윈도우 밖(가비지/래핑) 폐기
-                    if (remoteInputs.size() >= kMaxRemoteInputs &&
-                        remoteInputs.find(tick) == remoteInputs.end()) continue;  // 버퍼 포화
                     remoteInputs.emplace(tick, arr[i]);
                     if (tick > lastRemoteTick) lastRemoteTick = tick;
                 }
@@ -2226,37 +2343,45 @@ void Session::handleFrame(const Frame& f) {
     case MsgType::ACK: {
     } break;
     case MsgType::HASH: {
-        if (f.payload.size() == 4+8) {
-            const uint8_t* p = f.payload.data();
-            uint32_t t = le_read_u32(p);
-            uint64_t h = le_read_u64(p+4);
-            std::lock_guard<std::mutex> lk(hashMu_);
-            lastHashTickRemote = t;
-            lastHashRemote = h;
+        if (f.payload.size() != 4+8) {
+            connectionFailed = true;
+            quit = true;
+            break;
+        }
+        const uint8_t* p = f.payload.data();
+        const auto admission = hashMailbox_.record_remote(le_read_u32(p), le_read_u64(p+4));
+        if (admission != HashPut::stored && admission != HashPut::duplicate &&
+            admission != HashPut::stale) {
+            NET_WARN("[NET] Remote HASH admission failed");
+            connectionFailed = true;
+            quit = true;
         }
     } break;
     case MsgType::GAME_OVER_CHOICE: {
-        if (f.payload.size() >= 1) {
-            uint8_t choice = f.payload[0];
-            // enum 정의 밖 값은 무시 — 손상/악의 프레임 방어.
-            if (choice == (uint8_t)GameOverChoice::Restart ||
-                choice == (uint8_t)GameOverChoice::GoToTitle) {
-                remoteGameOverChoice.store(choice);
-                NET_TRACE("[NET] Received game over choice: " << (int)choice);
-            } else {
-                NET_WARN("[NET] Dropping invalid game-over choice: " << (int)choice);
-            }
+        if (f.payload.size() != 1) break;
+        const uint8_t choice = f.payload[0];
+        if (choice != static_cast<uint8_t>(GameOverChoice::Restart) &&
+            choice != static_cast<uint8_t>(GameOverChoice::GoToTitle)) break;
+        // One intention per round: duplicates are harmless, conflicts are not updates.
+        uint8_t expected = 0;
+        if (!remoteGameOverChoice.compare_exchange_strong(expected, choice) && expected != choice) {
+            NET_WARN("[NET] Conflicting game-over choice");
+            connectionFailed = true;
+            quit = true;
         }
     } break;
     case MsgType::PING: {
-        // 상대의 PING 은 즉시 PONG 으로 에코 — io 스레드가 계속 돌고 있으면
-        // 메인 스레드가 얼어도(창 드래그 등) 상대는 우리를 살아있다고 판정.
-        std::vector<uint8_t> pong = f.payload; auto fr = build_frame(MsgType::PONG, pong);
+        // Valid control probes are echoed by the I/O worker, independently of main.
+        if (!ready.load() || f.payload.size() != 8) break;
+        auto fr = build_frame(MsgType::PONG, f.payload);
         pushSend(std::move(fr));
     } break;
     case MsgType::PONG: {
-        // 최신 PONG 도착 시각 기록 — linkStatus() 가 이 값을 기준으로 판정.
-        lastPongMs.store(now_ms());
+        if (!ready.load() || f.payload.size() != 8) break;
+        const int64_t now = now_ms();
+        const uint64_t token = le_read_u64(f.payload.data());
+        if (now >= 0 && pendingPongs_.consume(token, static_cast<uint64_t>(now), 10000))
+            lastPongMs.store(now);
     } break;
     case MsgType::CHAT: {
         // [text_len:2][utf8:N]
@@ -2276,9 +2401,9 @@ void Session::handleFrame(const Frame& f) {
         if (f.payload.size() < 12) break;
         const uint8_t* p = f.payload.data();
         MatchResult r;
-        r.elo_before = static_cast<int32_t>(le_read_u32(p));
-        r.elo_after  = static_cast<int32_t>(le_read_u32(p + 4));
-        r.delta      = static_cast<int32_t>(le_read_u32(p + 8));
+        r.elo_before = le_read_i32(p);
+        r.elo_after  = le_read_i32(p + 4);
+        r.delta      = le_read_i32(p + 8);
         if (f.payload.size() >= 13 && p[12] <= uint8_t(ResultStatus::Draw)) r.status = static_cast<ResultStatus>(p[12]);
         std::lock_guard<std::mutex> lk(matchResultMu_);
         matchResult_ = r;
@@ -2295,13 +2420,7 @@ void Session::handleFrame(const Frame& f) {
 
 INPUT 페이로드는 `[from_tick:u32][count:u16][mask0:u8]...[maskN-1:u8]` 형태다. `count` 는 "이 프레임에 실린 마스크 개수". 구 코드는 `count` 를 믿고 `arr[i]` 로 바로 읽었다 — `count = 10000` 이 왔는데 payload 는 6바이트(헤더만) 이면 버퍼 경계 밖으로 나가 크래시한다.
 
-**현재 소스 발췌 — `net/session.cpp`**
-
-```cpp
-            if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
-```
-
-`static_cast<size_t>(6) + cnt` 로 캐스팅한 이유: `uint16_t` 끼리 더하면 int 로 승격되지만, 비교 대상이 `size_t` 이므로 명시적으로 넓혀서 의도를 고정한다 (§2.6 의 size_t 원칙과 같은 계열).
+`net/input_message.h`의 `decode_input_payload`가 전체 payload를 검사한다(§2.8). 헤더를 읽은 뒤 `payload.size() - 6 == count`를 요구하므로 부족한 바이트와 불필요한 뒷부분을 모두 거절한다. count0·틱 구간 래핑·알 수 없는 입력 비트도 상태 변경 전에 거절한다. 성공한 `InputBatchView`만 Session의 큐 적용 루프로 들어간다.
 
 ### 12.2 INPUT — tick 윈도우와 맵 상한
 
@@ -2316,8 +2435,8 @@ INPUT 페이로드는 `[from_tick:u32][count:u16][mask0:u8]...[maskN-1:u8]` 형�
 
 두 가드가 서로 다른 공격을 막는다.
 
-- **`kMaxTickWindow = 4096`** — 현재 수신 지점(`lastRemoteTick`) 기준으로 과거·미래 4096틱(약 68초) 밖의 tick 은 버린다. `uint32_t` tick 이 래핑하거나 공격자가 `from_tick = 0xFFFFFF00` 같은 값을 주입해 맵을 흩뿌리는 것을 막는다. 거리 계산이 `(tick >= cur) ? (tick - cur) : (cur - tick)` 인 것도 언더플로 회피다.
-- **`kMaxRemoteInputs = 8192`** — 맵 크기가 상한에 닿으면 **새 키만** 거부한다 (`remoteInputs.find(tick) == remoteInputs.end()` 조건). 이미 있는 tick 은 `emplace` 가 어차피 무시하므로 실질적으로 "포화 후 신규 차단" 이다. 8192틱은 136초 분량 — lockstep 이 정상이면 맵에는 기껏해야 `inputDelay` 근방의 수십 개만 살아 있으므로 정상 플레이는 이 상한에 절대 닿지 않는다.
+- **`kMaxTickWindow = 4096`** — 현재 수신 지점(`lastRemoteTick`) 기준으로 과거·미래 4096틱(약 68초) 밖의 tick 은 버린다. 단일 배치의 틱 래핑은 decode_input_payload가 먼저 막는다. 이 거리 검사는 이미 유효한 틱 중 현재 수신 지점에서 멀리 떨어진 값을 제한한다. 거리 검사만으로 래핑 방어를 대신할 수 없다. 거리 계산이 `(tick >= cur) ? (tick - cur) : (cur - tick)` 인 것도 언더플로 회피다.
+- **`kMaxRemoteInputs = 8192`** — 같은 잠금 안에서 배치의 거리 정책을 통과하는 신규 키 수를 먼저 센다. 전부 보관할 수 없으면 map/watermark를 바꾸지 않고 ACK도 보내지 않으며 실패를 표시한다. 들어갈 수 있으면 적용한다. 남은 1칸에 신규 2개가 온 경우 한 개만 저장하는 오류를 막는다. 이미 보관한 키는 추가 공간을 요구하지 않으며 현재 emplace의 기존 값 유지 정책은 그대로다. 장기간 소비가 멈추거나 생산이 앞서면 정상 연결도 이 운영 상한에 닿을 수 있다.
 
 **`inMu` 잠금이 for 루프 밖에 한 번만 있다**는 점도 의도적이다. 예전에는 틱마다 lock/unlock 을 반복했는데, 매치 시작 직후 수백 프레임이 한꺼번에 도착하는 구간에서 메인 스레드의 `GetRemoteInput` 과 경합해 게임 루프가 밀렸다. 루프 전체를 한 번의 임계 구역으로 묶으면 메인 스레드가 기다리는 총 시간이 오히려 줄어든다.
 
@@ -2325,9 +2444,13 @@ INPUT 페이로드는 `[from_tick:u32][count:u16][mask0:u8]...[maskN-1:u8]` 형�
 
 ### 12.3 GAME_OVER_CHOICE — enum 범위 검증
 
-`GameOverChoice` 는 `None=0 / Restart=1 / GoToTitle=2` 세 값만 정의된다. 악성 프레임이 `choice = 99` 를 보내면? 구 코드는 그대로 `remoteGameOverChoice.store(99)` 로 저장했고, `GetRemoteGameOverChoice` 는 "0이 아니면 뭔가 선택했다" 는 이진 판정으로 읽기 때문에 "상대는 결정했다" 는 상태로 넘어갔다. 실제 선택 값은 아무도 모른다 — 그리고 그 값은 `myGameOverChoice == remoteChoice` 비교에서 항상 false 라 무조건 `ShowingDisagreement` 로 빠진다.
+`GameOverChoice`는 명시적으로 `uint8_t`를 기반 타입으로 사용한다. `None=0`은 로컬의 미선택 상태이고 wire로 허용하는 값은 `Restart=1`, `GoToTitle=2`다. C++ enum으로 형변환하는 것만으로 정의된 열거자에 속하는지 검사되지는 않는다. 모든 enum class의 기반 타입이 uint8_t인 것도 아니다.
 
-enum 을 쓴다고 런타임에 "정의된 값" 이 강제되지 않는다는 점을 기억해야 한다. C++ 의 `enum class` 도 실체는 `uint8_t` 다.
+수신에서는 payload가 **정확히 1바이트**인지 확인한 뒤 1 또는 2만 허용한다. 첫 바이트만 검사하면 `[1, 99]`처럼 불필요한 데이터가 붙은 잘못된 메시지도 승인할 수 있다. 길이·값이 잘못된 메시지는 선택 상태를 바꾸지 않고 무시한다. 송신 API도 유효한 두 값만 큐에 넣는다.
+
+`remoteGameOverChoice`는 최초 유효 선택을 `compare_exchange_strong`으로 저장한다. 같은 값의 재수신은 허용하고, 다른 값으로 번복하는 메시지는 기존 선택을 보존하며 연결 실패를 표시한다. 이는 반복 전달의 멱등성(같은 요청의 재적용이 결과를 바꾸지 않음)과 상충 요청의 검출을 구분한 정책이다.
+
+`ClearGameOverChoices()`는 로컬·원격 선택과 UI용 결과 버퍼를 비운다. 계정에 저장된 보상을 취소하는 함수는 아니다. 현재 wire에는 round ID가 없어 초기화 뒤 늦게 들어온 옛 선택을 식별하지 못한다. atomic 갱신은 한 값의 동시 접근을 보호하며, 라운드 전환 전체를 하나의 트랜잭션으로 만들지는 않는다.
 
 ### 12.4 CHAT — 길이 필드 클램프와 큐 상한
 
@@ -2343,7 +2466,7 @@ CHAT 페이로드는 `[text_len:u16 LE][utf8:N]`. 구 코드는 `text_len` 을 �
         chatQ_.push_back(std::move(text));
 ```
 
-`chatQ_` 는 메인 스레드가 `PullChat` 으로 비우는 큐다. UI 가 채팅을 읽지 않는 상태(메뉴 전환, 모달 표시)에서 상대가 CHAT 을 플러딩하면 큐가 무한히 자란다. 상한에 닿으면 **가장 오래된 것부터 버린다** — 최신 메시지를 살리는 쪽이 채팅 UX 에 맞다. 256줄 × 최대 1 KiB ≈ 256 KiB 가 최악의 메모리 상한이다.
+`chatQ_` 는 메인 스레드가 `PullChat` 으로 비우는 큐다. UI 가 채팅을 읽지 않는 상태(메뉴 전환, 모달 표시)에서 상대가 CHAT 을 플러딩하면 큐가 무한히 자란다. 상한에 닿으면 **가장 오래된 것부터 버린다** — 최신 메시지를 살리는 쪽이 채팅 UX 에 맞다. 256줄 × 최대 1 KiB ≈ 256 KiB는 보관한 텍스트 바이트의 상한이다. string/deque 객체·할당 오버헤드는 별도다.
 
 송신 측에서도 클램프를 건다.
 
@@ -2376,17 +2499,19 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 
 ### 12.5 SEED — role 바이트 범위 검증
 
-`SEED` 분기도 같은 원칙을 따른다. `rawRole` 이 1(Host) 도 2(Peer) 도 아니면 `Role::Peer` 로 강등한다. 이 값이 나중에 "재시작 시 누가 새 시드를 만드는가" 를 결정하므로, 정의되지 않은 값이 들어오면 **양쪽 다 Host 라고 믿는** 상황이 가능하다 — 그러면 두 개의 서로 다른 SEED 가 교차하며 라운드가 시작된다.
+`SEED`는 정확히 14바이트이며 role은 1(Host) 또는 2(Peer)여야 한다. 이 조건을 모두 검사한 뒤에만 seed·start_tick·input_delay·role을 갱신한다. 틀린 역할 값을 기본값으로 바꾸면서 나머지 필드를 수용하지 않고, 메시지 전체를 무시해 기존 설정과 ready 상태를 보존한다.
+
+초기 호스트와 SendNewSeed는 받는 쪽의 역할을 전송한다. 로컬 Host를 그대로 보내면 상대도 Host가 되어 연습전 재시작의 시드 결정자가 둘이 된다. 이전의 송신자 역할을 그대로 보내던 클라이언트와는 역할 해석이 달라지므로 직결 양쪽을 함께 갱신해야 한다. 이 필드만 보고 구버전의 의도를 자동 판별할 수는 없다. 정상 14바이트 SEED는 재대전에 사용되므로 이후 수신도 허용한다. 현재 검사는 메시지 문법을 검증하며, 상대의 권한·현재 경기 단계·재전송 여부를 모두 인증하는 검사는 아니다. start_tick/u8 input_delay의 별도 운영 상한과 HELLO 버전 협상도 이 검사와 구별해야 한다.
 
 ### 12.6 정리: 방어 규칙 다섯 가지
 
-1. **모든 다중 필드 payload** 는 읽기 전에 `payload.size() >= 기대크기` 검사.
-2. **길이 필드**(`count`, `text_len`, `code_len`)는 "헤더 크기 + 길이 ≤ payload.size()" 재검사. 뺄셈 대신 덧셈으로 언더플로 차단.
-3. **enum 으로 간주하는 바이트** 는 정의된 값만 수용. 그 외는 드롭하거나 안전한 기본값으로 강등.
+1. **다중 필드 payload**는 필수 헤더가 있는지 먼저 확인하고, 고정 길이 메시지는 정확한 길이까지 검사한다. 확장을 허용하는 메시지는 그 규약을 별도로 따른다.
+2. **길이 필드**는 헤더 존재를 확인한 뒤 남은 크기와 비교한다. 헤더를 확인한 뺄셈은 언더플로를 피하며, 검증 전 헤더+길이 덧셈은 오버플로할 수 있다. INPUT처럼 전체 길이가 정해진 문법은 남은 크기와 count의 정확한 일치를 요구한다.
+3. **enum 바이트**는 허용한 값만 수용한다. SEED의 잘못된 role은 메시지 전체를 거절한다. 기본값 대체는 프로토콜이 명시적으로 허용한 필드에만 적용한다.
 4. **송신 측에서도** 상한 클램프. 구 버전 클라이언트가 버그로 과장된 값을 보내지 않도록.
 5. **무한히 자랄 수 있는 자료구조에는 상한을 건다.** 프레임 하나의 크기를 막는 것과 프레임 개수를 막는 것은 다른 문제다. `remoteInputs` 는 tick 윈도우 + 맵 상한, `chatQ_` 는 큐 길이 상한으로 막는다.
 
-다섯 번째가 이 목록에서 가장 늦게 추가됐고, 가장 놓치기 쉬운 규칙이다. 처음 네 규칙은 "프레임 하나를 안전하게 읽는" 문제고, 다섯 번째는 "프레임이 계속 오는" 문제다. fuzz 테스트(랜덤 프레임을 던져 크래시 유도)는 앞의 넷을 잡지만, 플러딩 테스트가 아니면 다섯 번째는 드러나지 않는다.
+다섯 번째가 이 목록에서 가장 늦게 추가됐고, 가장 놓치기 쉬운 규칙이다. 처음 네 규칙은 "프레임 하나를 안전하게 읽는" 문제고, 다섯 번째는 "프레임이 계속 오는" 문제다. fuzz 테스트는 다양한 문법 실패를 탐색하는 데 도움이 되지만 모든 검증의 정확성을 증명하지 않는다. 경계값·실패 시 상태 보존을 직접 검사하고, 반복 요청의 자원 사용량도 별도로 관찰해야 한다.
 
 릴레이의 검증 범위는 모드에 따라 다르다. 두 모드 모두 프레임 **경계**는 훑는다 — 서버만 만들 수 있는 타입(§3.2)을 걸러 내려면 타입 바이트가 어디 있는지 알아야 하기 때문이다. 그 위에서 **unranked 매치는 통과한 프레임의 내용을 보지 않고** 원본 바이트를 그대로 흘리고, 끝점 `Session`이 프레임과 payload를 검증한다. **ranked 매치는 INPUT·SEED의 checksum과 구조를 공통 검증기에서 확인하고, MATCH_SUMMARY를 결과 확정 요청으로 소비**한다. 그 외 게임 프레임은 wire byte를 바꾸지 않고 상대에게 보낸다. relay가 전체 게임 프로토콜을 재구현하지 않는 것은 결정론 시뮬레이션과 중계 서버의 소유권을 분리하기 위해서다.
 
@@ -2400,11 +2525,11 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 |---|---|---|---|---|
 | `recvBuf` (프레임 파싱 전 누적) | `Session` (ioThread) | 파싱 후에는 최대 크기 프레임의 불완전 tail만 유지 | 매 recv 후 완성 프레임 제거, 오버사이즈 LEN 선언 시 `clear()` + `false` | `net/framing.cpp`, `net/session.cpp` |
 | 단일 프레임 payload | 프로토콜 | 4096 B (`net::kMaxPayloadBytes`) | 송신: 빈 벡터 반환 / 수신: 스트림 폐기 | `net/framing.h` |
-| `remoteInputs` (수신 입력 맵) | `Session` | 8192 엔트리 | 신규 키 거부(기존 값 유지) | `net/session.cpp` |
+| `remoteInputs` (수신 입력 맵) | `Session` | 8192 엔트리 | 배치의 적용 대상 신규 키가 전부 들어갈 수 없으면 배치 미적용·ACK 생략·실패 표시 | `net/session.cpp` |
 | INPUT tick 윈도우 | `Session` | ±4096 틱 | 해당 tick 폐기 | `net/session.cpp` |
 | `chatQ_` (수신 채팅 큐) | `Session` | 256줄 | 가장 오래된 것 pop | `net/session.cpp` |
 | CHAT 송신 텍스트 | `Session` | 1024 B | 잘라서 송신 | `net/session.cpp` |
-| `tcp_send_all` 커널 버퍼 대기 | `net/socket.cpp` | 5초 | `false` 반환 → 연결 실패 처리 | `net/socket.cpp` |
+| 네이티브 `tcp_send_all` 전체 호출 | `net/socket.cpp` | 시도 전5초 마감 검사 | `false` 반환 → 연결 실패 처리 | `net/socket.cpp` |
 | 릴레이 로비 수신 버퍼 | 릴레이 서버 | 64 KiB | 연결 종료 | `server/relay.cpp` (Part 7) |
 | 릴레이 보류 송신 (연결당) | 릴레이 서버 | 고수위에서 상대 읽기 정지, 하드 상한에서 종료 | 정지 → 종료 | `server/reactor_relay.cpp` ([Part 14](./part14-event-loop-scaling.md)) |
 | 릴레이 보류 송신 (프로세스 전체) | 릴레이 서버 | `--max-tx-mib` | 사유(`SERVER_REJECT`)를 밝히고 종료 | `server/reactor_relay.cpp` (Part 14) |
@@ -2412,23 +2537,24 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 | 릴레이 동시 연결 | 릴레이 서버 | `--max-conns` | 사유(`SERVER_REJECT`)를 밝히고 거부 | `server/reactor_relay.cpp` (Part 14) |
 | 릴레이 인증 대기 큐 | 릴레이 서버 | `--max-pending-auth` | 사유(`SERVER_REJECT`)를 밝히고 거부 | `server/reactor_relay.cpp` (Part 14) |
 | 릴레이 중계 워커 | 릴레이 서버 | 512 | 신규 매치 거부 | `server/relay.cpp` (Part 7) |
-| **`sendQ` (게임 송신 큐)** | `Session` | 4096 프레임 | 연결 실패 처리 | `Session::pushSend` |
+| `sendQ` (게임 송신 큐) | `Session` | 대기 4096프레임 | 새 접수 거절·실패 표시 | `Session::pushSend` |
+| `pendingSendBytes` | `Session`, `sendMu` | 대기 + 현재 transport 호출의 wire 바이트 1 MiB | 새 접수 거절·실패 표시 | `Session::pushSend` / `ioThread` |
 
-마지막 줄이 이 표에서 가장 늦게 채워진 칸이다. `sendQ` 는 오랫동안 이 시스템에서 **유일하게 상한이 없는 큐**였다. 왜 그랬는지, 그리고 왜 결국 상한을 걸었는지가 이 절의 주제다.
+개수 제한은 많은 작은 항목을, 바이트 제한은 적은 큰 항목을 다룬다. 둘을 함께 검사한다. 여기서 바이트는 직렬화한 프레임 길이이며 vector/deque 객체, 할당 여유 공간, OS 소켓 버퍼를 포함한 RSS 측정값은 아니다.
 
 ### 13.1 `sendQ` 가 자라는 조건
 
 `sendQ` 에 넣는 쪽은 메인 스레드(`SendInput`/`SendHash`/`SendChat`/ `SendGameOverChoice`/`SendMatchSummary`)와 ioThread(PING, heartbeat, PONG, ACK) 이고, 비우는 쪽은 ioThread 하나다. 자라려면 "넣는 속도 > 빼는 속도" 여야 한다.
 
 - **정상 상태**: 틱당 INPUT 1개(60Hz)를 넣고 ioThread 가 즉시 뺀다. 큐 길이는 0~2 를 오간다.
-- **상대가 데이터를 안 읽는 경우**: `tcp_send_all` 이 커널 버퍼 포화로 1ms 씩 자며 재시도한다. 이 동안 메인 스레드는 계속 넣는다 → 큐가 자란다. 그러나 `kBlockedTimeout = 5초` 가 지나면 `tcp_send_all` 이 `false` 를 반환하고 ioThread 가 `quit = true` 로 종료한다. **최악의 성장량은 5초 × 60프레임 × 14바이트 ≈ 4 KB** 다.
+- **상대가 데이터를 안 읽는 경우**: `tcp_send_all` 이 커널 버퍼 포화로 1ms 씩 자며 재시도한다. 이 동안 메인 스레드는 계속 넣는다 → 큐가 자란다. 현재 네이티브 `tcp_send_all`은 전체5초 마감시간을 검사하고, 실패하면 ioThread가 종료 상태로 전환한다. 60Hz의14바이트 INPUT만 생산한다고 가정하면5초 동안 약4.2KB의 wire 데이터가 추가된다. 이는 예시 생산량이며 실제 최악의 메모리 상한이 아니다. 다른 메시지·객체/할당 오버헤드·스케줄링 지연이 있으므로 sendQ의 독립된 프레임 개수 제한이 필요하다.
 - **`connected == true` 인데 `ready == false` 인 긴 구간**: 여기가 진짜 위험했다. 릴레이 매치메이킹 대기는 최대 5분이고, 그 동안 메인 스레드가 `SendInput` 을 계속 부르면 큐가 300초 × 60 × 14바이트 ≈ 250 KB(프레임 18,000개) 까지 자란다. 메모리보다 심각한 문제는 **매치 성립 직후 과거 프레임이 한꺼번에 전송돼 현재 틱과 섞이는 것**이다. `connected && ready && started` 전송 조건이 이 stale backlog를 상류에서 차단한다.
 
 ### 13.2 왜 상한을 걸지 않았나
 
-`sendQ` 에 상한을 걸면 "무엇을 버릴 것인가" 를 정해야 한다. 그런데 이 큐에는 버려도 되는 프레임(INPUT, HASH)과 **절대 버리면 안 되는 프레임**(SEED, GAME_OVER_CHOICE, MATCH_SUMMARY)이 섞여 있다. SEED 를 잃으면 상대는 `WaitingForNewSeed` 에서 10초 타임아웃으로 떨어지고, GAME_OVER_CHOICE 를 잃으면 30초 협상 타임아웃이다.
+`sendQ` 에 상한을 걸면 "무엇을 버릴 것인가" 를 정해야 한다. 현재 라운드의 INPUT은 lockstep 진행에 필요하므로 송신 지연만을 이유로 임의 폐기하면 안 된다. 라운드가 바뀌어 의미를 잃은 INPUT/HASH와 현재 라운드의 제어 프레임을 구분해야 한다. SEED 를 잃으면 상대는 `WaitingForNewSeed` 에서 10초 타임아웃으로 떨어지고, GAME_OVER_CHOICE 를 잃으면 30초 협상 타임아웃이다.
 
-즉 상한을 걸려면 타입별 정책이 필요하고, 그건 `ClearInputs()` 가 이미 하는 일과 같은 종류의 로직이다.
+일반 포화 정책과 라운드 전환 정리는 목적이 다르다. `ClearInputs()`는 이전 라운드의 의미를 잃은 입력을 제거하는 경계이며, 정상 진행 중 보류 바이트를 임의로 버려도 된다는 근거가 아니다.
 
 (`ClearInputs` 본문 중)
 
@@ -2455,37 +2581,44 @@ UTF-8 중간 바이트에서 잘릴 수 있으므로 호출부에서 "문자" �
 **현재 소스 발췌 — `net/session.cpp`**
 
 ```cpp
-// sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
-// 소켓이 막히면(상대가 멈췄거나 네트워크가 죽었거나) 큐가 무한히 자란다.
-//
-// 상한을 넘겼을 때 오래된 프레임을 버리는 선택지는 쓸 수 없다. lockstep 은
-// 모든 INPUT 이 순서대로 도착한다는 전제 위에 서 있어서, 한 프레임만 사라져도
-// 양쪽 시뮬레이션이 조용히 어긋난다. DESYNC 배너가 뜨기까지 한참 걸리고
-// 원인도 추적하기 어렵다.
-//
-// 그래서 큐가 넘치면 연결이 사실상 끊긴 것으로 보고 실패 처리한다.
-// 상위 UI 가 "상대 연결 끊김"을 띄우고 사용자가 재접속을 고르게 하는 편이,
-// 어긋난 채로 계속 도는 것보다 낫다.
-constexpr size_t kMaxSendQueue = 4096;   // 60Hz 기준 약 68초치 INPUT
+// A full queue is an admission failure, not proof that the peer disappeared.
+// Input records cannot be silently discarded while continuing the same match.
+constexpr size_t kMaxSendQueue = 4096; // Queued frames; one more may be in transport.
+constexpr size_t kMaxPendingSendBytes = 1024 * 1024; // Wire bytes, including active send.
+constexpr size_t kMaxSendFrameBytes = kMaxPayloadBytes + kFrameLenBytes +
+    kFrameTypeBytes + kFrameChecksumBytes;
 
 void Session::pushSend(std::vector<uint8_t>&& fr) {
     std::lock_guard<std::mutex> lk(sendMu);
-    if (sendQ.size() >= kMaxSendQueue) {
-        NET_WARN("[NET] sendQ overflow (" << sendQ.size()
-                 << " frames) - treating peer as disconnected");
+    if (quit.load() || fr.empty() || fr.size() > kMaxSendFrameBytes ||
+        sendQ.size() >= kMaxSendQueue ||
+        fr.size() > kMaxPendingSendBytes - pendingSendBytes) {
+        NET_WARN("[NET] send admission failed: queued=" << sendQ.size()
+                 << " pending_bytes=" << pendingSendBytes);
         connectionFailed = true;
         quit = true;
         return;
     }
     sendQ.push_back(std::move(fr));
+    pendingSendBytes += sendQ.back().size(); // Charge only after insertion succeeds.
 }
 ```
 
-여기서 **`ClearInputs` 의 타입 필터를 재사용하지 않았다**는 점이 중요하다. 그쪽은 "라운드 경계에서 이전 라운드의 잔재를 턴다" 는 맥락이라 INPUT/HASH 를 버려도 안전하다. 새 라운드는 새 tick 번호로 다시 시작하기 때문이다.
+`ClearInputs`는 라운드 전환 때 아직 큐 안에 있는 INPUT/HASH만 제거하고 그 크기만 예산에서 뺀다. 워커로 이동한 프레임의 charge는 남겨 두며 transport 호출이 끝난 쪽에서 반환한다. 이미 전송했거나 송신 중인 프레임까지 취소하는 기능은 아니다. 현재 wire에 round-id가 없으므로 이 필터만으로 이전 라운드 데이터 혼입을 완전히 막았다고 할 수 없다.
 
-반면 큐 오버플로는 **게임이 진행 중인 상태**다. 여기서 INPUT 을 하나라도 버리면 상대는 그 tick 을 영원히 기다리거나, 더 나쁘게는 다음 INPUT 을 그 자리에 끼워 넣어 조용히 어긋난다. 증상이 DESYNC 배너로 나타나기까지 수십 초가 걸리고, 그때는 원인이 어디였는지 알 수 없다.
+경기 중 INPUT을 조용히 버리면 현재 lockstep은 빠진 틱에서 기다릴 수 있다. 다음 입력은 자기 틱 번호를 가지므로 자동으로 그 자리를 메우지 않는다. 실패를 숨기고 계속 진행하는 대신 접수 실패를 연결 실패 상태로 드러낸다.
 
-큐가 4096 프레임까지 찼다는 것은 60Hz 기준 68초 동안 단 한 프레임도 소켓으로 나가지 못했다는 뜻이다. 그 상대는 이미 없는 것이나 마찬가지다. 그러면 조용히 망가지는 대신 **큰 소리로 실패하는 편**이 낫다.
+4096/60≈68.3초는 초당 정확히 60개만 생산하고 하나도 소비하지 않는 예의 계산이다. 순간적인 대량 생산·다른 메시지·지속적인 생산/소비 속도 차이도 큐를 채울 수 있어, 포화만으로 상대가 사라졌다고 판단할 수 없다. 현재 정책은 운영 상한을 넘긴 연결의 처리를 실패로 표시하는 것이다.
+
+### 13.4 접수와 송신 완료 사이의 예산
+
+`pendingSendBytes`는 큐에서 pop할 때 줄이지 않는다. `pkt`가 워커 지역 vector로 옮겨져도 transport 호출이 사용하는 바이트가 남아 있기 때문이다. 호출이 끝나면 성공·실패 모두 현재 pkt의 charge를 반환한다. 대기 프레임은 계속 charge되며 Close가 모든 워커를 join한 뒤 큐와 카운터를 함께 초기화한다. 각 시작 경로도 워커가 없는 상태에서 함께 초기화한다.
+
+큐 소진은 한 순회에 최대 64프레임으로 제한하고 각 반복 전에 quit를 확인한다. 계속 생산하는 동안 무한히 송신 큐만 비우며 수신·제어 처리를 굶기는 경계를 줄인다. 네이티브 호출 하나가 최대 5초 동안 진행될 수 있으므로 64개 제한이 특정 수신 지연을 보장하는 것은 아니다.
+
+WSS 경로의 `tcp_send_all` 성공은 어댑터의 비동기 큐 수락이다. 이때 Session charge를 반환해도 WssClient의 별도 128KiB 보류 송신 예산 아래 복사본이 남을 수 있다. 계층마다 어디까지 책임지는 예산인지 구분해야 한다.
+
+학습 기준 `docs/learn/checkpoints/95-backpressure/net/flow_queue.h`는 대기+활성 프레임 개수와 wire 바이트를 함께 제한한다. 고수위105B에 닿으면 접수를 쉬고, 완료로70B 이하가 됐을 때 재개하는 히스테리시스를 사용한다. 현재 Session은 이 고/저수위 재개 정책을 쓰지 않고 하드 상한 초과를 실패로 처리한다.
 
 ---
 ## 14. 대기 중 stale INPUT backlog 버그와 수정
@@ -2592,9 +2725,9 @@ sequenceDiagram
 
 반대 방향은 왜 멀쩡했나? 게스트는 호스트보다 **나중에** 큐에 들어갔기 때문이다. 게스트의 `sendQ` 에 쌓인 stale 프레임은 적거나 없었다 → 호스트 측 오염은 없거나 무시할 수준이었다. 관찰된 비대칭성이 정확히 이 시간 차이의 그림자였다.
 
-### 14.4 수정 — 네 겹 가드
+### 14.4 수정 — 입력을 생산할 수 있는 상태
 
-수정 후 코드는 전송 가능 상태를 다음 조건으로 명시한다.
+수정 후 코드는 연결·준비 상태와 실제 경기 진행 조건을 함께 검사한다. `SendInput` 자체도 connected/ready/quit를 검사해 준비 전 호출이 큐·입력 watermark·main 활동 시각을 바꾸지 않게 한다. 카운트다운과 게임오버는 Session이 모르는 UI/게임 상태이므로 호출부가 판단한다. 이 원자 변수 조회는 전체 라운드 전환의 원자적 합의를 뜻하지 않는다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -2614,7 +2747,7 @@ sequenceDiagram
                 //      수신 측 emplace 가 stale 로 선점할 위험.
                 //   4) 아직 양쪽 보드가 gameOver 가 아님 — 같은 프레임에 게임오버가
                 //      난 뒤 렌더 단계에서 FSM 이 전환되기 전이라도 추가 INPUT 금지.
-                if (gameLocal && gameRemote && startDelay == 0 &&
+                if (session.isReady() && gameLocal && gameRemote && startDelay == 0 &&
                     gameOverState == GameOverState::None &&
                     !gameLocal->gameOver && !gameRemote->gameOver)
                 {
@@ -2698,17 +2831,17 @@ sequenceDiagram
 
 ### 14.6 부수 효과
 
-이 수정은 DESYNC 를 고치는 것 외에 **매치 직후 초반 TCP 트래픽 스파이크** 도 함께 없앤다. 옛 버전은 MATCH_FOUND 시 수백 프레임을 한 번에 토해냈다 — TCP 스트림상 수 KB 의 즉시 전송, 그리고 상대 측 `handleFrame` 이 수백 번 연쇄 호출되어 `inMu` lock 경합 → 상대 main thread 의 `GetRemoteInput` 도 함께 밀렸다. 수정 후에는 `sendQ` 가 항상 "현재 틱 ± 1" 상태에 머물러 트래픽이 안정적인 60 frames/s 로 흐른다. 육안으로는 "매치 시작 직후 첫 1~2초 동안 호스트 창이 살짝 렉 걸렸다가 풀리는" 느낌이 사라진다.
+준비 전 생산을 막으면 매칭 대기 시간에 비례해 불필요한 INPUT이 쌓이는 원인을 제거한다. 다만 경기 중 큐의 길이와 송신 간격은 생산량·네트워크 대기·워커 스케줄링에 따라 달라진다. 이 가드가 큐를 항상 한 틱 이내로 유지하거나 정확히 초당 60개씩 송신한다고 보장하지 않는다. 지속적인 속도 차이는 §13의 개수/바이트 상한과 접수 정책으로 따로 다룬다.
 
 ### 14.7 교훈
 
-`std::unordered_map::emplace` vs `operator[]` 의 차이는 문서상 뻔하지만, 네트워크 경로의 "같은 키가 두 번 들어올 수 있다" 가 전제되지 않으면 간과된다. `remoteInputs` 가 `operator[]`(= 덮어쓰기)였다면 이 버그는 DESYNC 대신 "첫 수 틱의 상대 입력이 조금 이상함" 으로 숨어들어 더 찾기 어려웠을 수 있다. emplace 의 엄격함 덕분에 DESYNC 가 **즉시 · 결정론적으로** 터져 추적이 가능했다 — "엄격한 의미론" 이 디버깅에 도움 된 사례다.
+`emplace`는 같은 키가 이미 있으면 기존 값을 유지하고, `operator[]`에 대입하면 덮어쓴다. 어느 쪽도 그 값이 어느 라운드의 입력인지 알아내지는 못한다. 잘못된 이전 입력이 먼저 들어오면 첫 값 유지가 오류를 고정하고, 덮어쓰기로 바꾸면 도착 순서에 따라 실행 기록이 바뀔 수 있다. 동일 틱의 같은 값 재전송과 서로 다른 값 충돌을 구분하고, 라운드 식별은 그 앞에서 검사해야 한다. 이 버그의 특정 재현에서 해시 차이가 보였다는 사실을 모든 잘못된 입력이 즉시 DESYNC를 만든다는 보장으로 확장하지 않는다.
 
 두 번째 교훈은 **비대칭 증상은 후보의 우선순위를 바꾸는 정보**라는 것이다. 공용 framing 코드보다 방향별 큐와 페이즈 전환을 먼저 보게 만들었고, 실제 로그가 "양쪽이 서로 다른 시각에 세션 상태로 들어갔다"는 원인을 확인해 주었다. 증상만으로 다른 원인을 단정하지 않고, 관측 자료와 함께 범위를 좁히는 방식이 중요하다.
 
 ### 14.8 라운드 경계에서 지킬 것 — `ClearInputs()`
 
-이 버그의 일반형은 "게임으로 간주하면 안 되는 시간에 INPUT 을 보낸다" 이다. 회귀를 막는 첫 번째 방어선은 §14.4 의 네 겹 가드지만, 두 번째 방어선이 하나 더 있다. 재시작 경계에서 호출하는 `ClearInputs()` 다.
+이 버그의 일반형은 "게임으로 간주하면 안 되는 시간에 INPUT 을 보낸다" 이다. 회귀를 막는 첫 번째 방어선은 §14.4의 생산 조건 검사지만, 두 번째 방어선이 하나 더 있다. 재시작 경계에서 호출하는 `ClearInputs()` 다.
 
 **현재 소스 발췌 — `net/session.cpp`**
 
@@ -2734,19 +2867,19 @@ void Session::ClearInputs() {
         std::lock_guard<std::mutex> lk(sendMu);
         std::deque<std::vector<uint8_t>> keep;
         for (auto& fr : sendQ) {
-            if (fr.size() < 3) continue;  // malformed
-            MsgType t = (MsgType)fr[2];
-            if (t == MsgType::INPUT || t == MsgType::HASH) continue;  // 드롭
+            const bool discard = fr.size() < 3 ||
+                static_cast<MsgType>(fr[2]) == MsgType::INPUT ||
+                static_cast<MsgType>(fr[2]) == MsgType::HASH;
+            if (discard) {
+                pendingSendBytes -= fr.size(); // Only queued frames; active send stays charged.
+                continue;
+            }
             keep.push_back(std::move(fr));
         }
         sendQ = std::move(keep);
     }
     // 원격 HASH 도 초기화 — 이전 라운드 hash 가 새 라운드 tick 과 충돌 방지.
-    {
-        std::lock_guard<std::mutex> lk(hashMu_);
-        lastHashTickRemote = 0;
-        lastHashRemote = 0;
-    }
+    hashMailbox_.clear();
     // 재시작 경계에서 heartbeat 상태도 리셋 — 새 라운드의 tick 0 부터 다시 감지.
     lastMainActivityMs_.store(0);
     heartbeatTickEnd_.store(0);
@@ -2773,7 +2906,7 @@ void Session::ClearInputs() {
 1. SEED 프레임이 큐에서 사라진다 — 영원히 전송되지 않는다.
 2. Guest 는 `WaitingForNewSeed` 에서 `session.params().seed` 가 바뀌기를 기다린다.
 3. 10초 타임아웃 후 Guest 는 `GoingToTitle` 로 떨어진다.
-4. Host 는 새 라운드를 시작해 혼자 플레이하다가, PONG 이 끊겨 `Lost` 판정 → 10초 grace 후 타이틀.
+4. Host와 Guest의 게임 진행 상태가 달라질 수 있다. PONG 응답 경로는 게임 진행과 별개이므로, SEED 유실이 반드시 PONG 중단이나 특정 타임아웃 순서를 만든다고 단정할 수 없다.
 
 증상은 "재시작을 눌렀는데 가끔 둘 다 타이틀로 튕긴다" 이고, 네트워크가 빠른 개발 환경에서는 재현이 거의 안 된다.
 
@@ -2785,12 +2918,14 @@ void Session::ClearInputs() {
 | `HASH` | 드롭 | 같은 이유 — tick 600 의 해시가 어느 라운드 것인지 알 수 없다 |
 | `SEED` | 보존 | 유실 시 Guest 가 라운드에 진입하지 못한다 |
 | `GAME_OVER_CHOICE` | 보존 | 유실 시 상대가 30초 협상 타임아웃 |
-| `CHAT` / `PING` / `PONG` / `ACK` | 보존 | tick 공간과 무관 |
-| `MATCH_SUMMARY` | 보존 | 유실 시 랭킹이 집계되지 않는다 |
+| `CHAT` / `PING` / `PONG` / `ACK` | 보존 | 현재 타입 필터가 남기는 제어/부가 기록. ACK는 틱을 포함하므로 라운드와 무관하다는 뜻은 아님 |
+| `MATCH_SUMMARY` | 보존 | 현재 필터의 보존 대상. 랭킹 권한/집계 수락 여부는 서버 정책을 별도로 확인 |
 
 판정 방법이 재미있다. `sendQ` 에는 이미 직렬화된 바이트 배열이 들어 있으므로 프레임을 되파싱할 필요가 없다 — 와이어 레이아웃이 `[len:2][type:1][payload:N][chk:4]` 이므로 **`fr[2]` 가 곧 `MsgType`** 이다. `fr.size() < 3` 검사는 `build_frame` 이 상한 초과로 빈 벡터를 반환한 경우를 거른다.
 
-**근본적으로 이 필터링은 프로토콜 설계의 빈틈을 코드로 메우는 것이다.** SEED 프레임에 round-id(또는 epoch 카운터)를 넣고 INPUT/HASH 에도 같은 필드를 실었다면, 수신 측이 "이전 epoch 의 프레임" 을 그냥 무시할 수 있으므로 이 함수 자체가 필요 없다. 와이어에 1바이트를 더 쓰는 대신 송신 큐를 청소하는 쪽을 택한 것인데, 프로토콜을 다시 설계한다면 round-id 쪽이 옳다.
+이 필터는 아직 `sendQ` 안에 있는 INPUT/HASH만 제거한다. 워커 지역 버퍼, 어댑터 큐, OS 버퍼와 상대의 수신 경로에 들어간 데이터는 취소하지 않는다. 수신 맵을 비운 직후에도 그런 기록이 도착할 수 있다.
+
+라운드 번호를 INPUT/HASH와 협상 메시지에 포함하면 `(round, tick)`으로 기록을 구별할 수 있다. 그래도 새 경기의 규칙 상태·큐·커서를 초기화하는 작업은 남는다. 단일 바이트 번호는 256회 뒤 재사용되므로 단순히 필드 하나를 추가했다고 해결되는 것도 아니다. 번호 합의, 재접속 범위, 재사용 금지와 소진 정책을 함께 정의해야 한다. 현재 실제 게임 wire에는 이 식별자가 없으며, 학습 체크포인트의 확장은 아래에서 별도로 구현한다.
 
 ### 14.9 회귀를 막는 체크리스트
 
@@ -2801,7 +2936,17 @@ void Session::ClearInputs() {
 - 게임오버 화면/재시작 협상 중: 기존 `Game` 객체가 살아 있어도 라운드는 끝났다.
 - 새 seed 로 재시작 직전: tick 이 0 으로 재사용되므로 이전 라운드 INPUT 과 섞이면 안 된다.
 
-그리고 라운드 경계마다 `ClearInputs()` 를 호출한다 — 가드가 뚫렸을 때의 두 번째 그물이다.
+라운드 경계에서 `ClearInputs()`로 현재 보관 상태를 정리한다. 이것만으로 이미 송신 중인 이전 기록의 재유입을 차단하지는 못한다.
+
+### 14.10 학습 구현: 라운드가 붙은 입력과 서로 다른 카운트다운
+
+`docs/learn/checkpoints/96-round-inputs`의 TYPE41은 `[round:u64][first_tick:u32][count:u16][masks:count]`를 사용한다. round는 0을 예약하고 같은 연결 수명에서 증가만 허용한다. 실제 INPUT4와 별개의 학습 프로토콜 확장이다. 이 필드는 신원 인증이나 seed 합의를 대신하지 않는다.
+
+`RoundGate`는 waiting→countdown→playing→ended 전이를 관리한다. 로컬 캡처는 playing에서만 허용하지만, 같은 round의 상대 입력은 countdown 중에도 보관한다. 상대의 카운트다운이 먼저 끝날 수 있어서 이 값을 버리면 상대는 이미 보낸 틱을 다시 보낼 이유가 없고 lockstep은 영원히 기다릴 수 있다. 수신 보관 허가와 로컬 생산 허가는 서로 다른 조건이다.
+
+`RoundPlay`는 gate와 DelayedLockstep을 같은 소유자 아래 조합한다. 이전 round는 입력 맵에 넣기 전에 거절하고, 미래 round도 자동 전환하지 않는다. prepare는 양쪽이 번호·seed·역할·시작 틱을 합의한 뒤 호출하는 경계다. 기존 학습 SEED 메시지의 자동 확장이 아니며, 네트워크를 통한 재시작 협상은 별도 구현이 필요하다.
+
+현재 실제 Session의 워커 중립 입력 생성은 lastMainActivityMs_와 원자 틱 값을 별도로 읽는다. main의 경기 페이즈를 동일한 트랜잭션으로 인계받는 구조가 아니므로, 이번 main/SendInput 가드가 그 경로까지 막았다고 해석하지 않는다. 학습 구현에서는 입력 생산자를 하나로 두고, 관측용 PING/PONG과 규칙을 진행시키는 중립 입력을 구분한다.
 
 ---
 
@@ -2837,13 +2982,7 @@ Nagle 의 관점에서 보면:
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] Nagle 비활성화 (TCP_NODELAY).
-//   기본 Nagle 알고리즘은 작은 패킷(<MSS) 을 최대 200ms 까지 버퍼링해 모아
-//   보낸다. 우리 INPUT 프레임은 7바이트 / 60Hz 로 송신 → Nagle ON 이면 각
-//   프레임이 수십~200ms 지연되어 도착한다. lockstep 의 safeTick 은 상대 INPUT
-//   도착까지 대기하므로 → 체감상 "호스트가 렉 걸림".
-//   게임 트래픽은 지연이 대역폭보다 압도적으로 치명적 → 반드시 NODELAY.
-static int set_nodelay(int fd) {
+static int set_nodelay(NativeSocket fd) {
     int yes = 1;
 #ifdef _WIN32
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
@@ -2937,132 +3076,137 @@ bool GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
 
 실제 lockstep 은 정상인데 race 때문에 배너가 뜨는 사고다.
 
-### 16.2 수정 — mutex 로 pair 원자 보호
+### 16.2 같은 잠금 아래에서 기록을 복사한다
 
-두 필드를 atomic 에서 plain 으로 되돌리고 mutex 로 묶는다.
+현재 Session은 `HashExchange = HashMailbox<600, 8>`을 소유한다. HashSample은 tick/hash를 한 값으로 묶고, HashMailbox의 같은 mutex 아래에서 쓰고 복사한다. 하나의 필드만 atomic으로 바꾸거나 읽기 순서를 바꾸는 것으로 묶음의 일관성을 대신할 수 없다.
 
-**현재 소스 발췌 — `net/session.h`**
-
-```cpp
-    mutable std::mutex hashMu_;
-    uint32_t lastHashTickRemote{0};
-    uint64_t lastHashRemote{0};
-```
-
-`mutable` 키워드는 `const` 메서드 `GetLastRemoteHash` 에서도 lock 할 수 있게 해준다.
-
-수신 측은 §12 의 `handleFrame` 전체 인용에 있는 `case MsgType::HASH` 분기다 — `hashMu_` 를 잡은 뒤 두 필드를 연달아 쓴다. 조회 측은 다음과 같다.
-
-**현재 소스 발췌 — `net/session.cpp`**
+**현재 소스 발췌 — `net/hash_mailbox.h`**
 
 ```cpp
-bool Session::GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
-    std::lock_guard<std::mutex> lk(hashMu_);
-    tick = lastHashTickRemote;
-    hash = lastHashRemote;
-    return tick != 0;
-}
+bool latest_remote(HashSample& out) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!latest_) {
+            return false;
+        }
+        out = *latest_;
+        return true;
+    }
+
 ```
 
-### 16.3 비용
+`mutable` mutex는 const 조회에서도 잠금을 잡게 한다. 잠금 안에서 완전한 값을 호출자의 지역 변수로 복사한 뒤 반환하므로, 이후 기록이 교체돼도 이미 복사한 값은 바뀌지 않는다. 반환한 포인터로 내부 슬롯을 직접 읽게 하지 않는다.
 
-HASH 프레임은 600틱(= 10초) 주기로 오므로 `handleFrame` 의 이 분기는 0.1Hz 다. lock hold 시간은 두 정수 복사뿐이라, main thread 가 동시에 `GetLastRemoteHash` 를 호출해도 게임 루프에서 의미 있는 대기 요인이 되지 않는다.
+### 16.3 최신 관측과 모든 주기 기록 비교를 구분한다
 
-Atomic 두 개보다 mutex 하나가 성능상 **오히려 유리** 하기도 하다. 두 atomic 은 컴파일러가 각각에 메모리 배리어를 삽입하지만, 하나의 mutex 는 lock/unlock 쌍에서 한 번씩만 삽입한다. 가독성 면에서도 "이 두 필드는 세트다" 라는 의도가 명시된다.
+최신 값은 앞 값을 덮어써도 되는 상태 관측이다. 하지만 600의 불일치 뒤 1200의 일치가 도착했다고 600을 생략하면 비교 결과가 달라진다. 따라서 현재 게임 비교는 별도의 로컬/원격 틱 창에 기록한다.
 
-### 16.4 교훈
+**현재 소스 발췌 — `net/hash_mailbox.h`**
 
-`std::atomic<T>` 는 **단일 값** 의 원자성을 보장할 뿐, 여러 atomic 을 묶어서 원자적으로 갱신해주지 않는다. C++ 의 memory_order 가 아무리 엄격해도 "두 store 사이를 쪼갤 수 있다" 는 사실은 그대로다. 쌍으로 갱신해야 하는 데이터는:
+```cpp
+HashPut record_remote(uint32_t t, uint64_t hash) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const HashPut r = put(remote_, t, hash);
+        if (r == HashPut::stored || r == HashPut::duplicate) {
+            latest_ = HashSample{t, hash};
+        }
+        return r;
+    }
 
-1. `struct` 로 묶어서 단일 atomic 에 넣거나(sizeof ≤ 8 정도까지는 lock-free)
-2. mutex 로 보호하거나
-3. `std::atomic<std::shared_ptr<T>>` 로 포인터 스왑
+```
 
-이 프로젝트는 (2) 를 택했다 — 호출 빈도가 낮아 mutex 비용이 무시 가능하고 코드가 가장 단순하므로. 참고로 (1) 은 여기서 불가능하다. `{ uint32_t, uint64_t }` 는 패딩 포함 16바이트라 대부분의 플랫폼에서 lock-free 가 아니다.
+다음 비교 틱은 수신 값이 아니라 poll 성공으로만 전진한다. 양쪽의 가장 이른 슬롯이 모두 있어야 비교 쌍을 복사하고 제거한다. 값이 다른 쌍도 한 번 소비해 불일치를 보고한다. 0 해시는 유효한 값이며 optional의 존재 여부로 수신 유무를 표현한다.
+
+**현재 소스 발췌 — `net/hash_mailbox.h`**
+
+```cpp
+bool poll(HashComparison& out) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!local_[0] || !remote_[0]) {
+            return false;
+        }
+        const HashComparison candidate{
+            static_cast<uint32_t>(next_),
+            *local_[0],
+            *remote_[0],
+        };
+        shift(local_);
+        shift(remote_);
+        next_ += Period;
+        out = candidate;
+        return true;
+    }
+
+```
+
+### 16.4 상한과 실패 정책
+
+실제 게임은 완료 틱 600,1200,...을 8칸 창에 접수한다. 같은 틱/같은 값은 duplicate, 다른 값은 conflict다. 이미 비교한 틱은 stale이고, 주기에 맞지 않거나 0인 틱은 invalid다. 창보다 먼 틱은 too_far다. 원격 stale은 무시하며, 충돌·형식·범위·창 초과는 세션 실패로 표시한다. 로컬 접수 실패도 숨기고 송신하지 않는다.
+
+8칸은 4800틱 범위의 상한이며 특정 시간 동안의 지연을 보장하는 값이 아니다. 중간 HASH가 오지 않으면 뒤의 완성 쌍도 기다린다. 워커가 PONG을 계속 처리한다고 비교가 진행되는 것은 아니므로, 누락 감지의 시간 정책은 별도다. 현재는 창을 넘기면 실패하며, 무한 메모리나 조용한 덮어쓰기로 해결하지 않는다.
+
+GetLastRemoteHash는 마지막으로 접수한 원격 도착을 비소비 방식으로 보여 준다. 가장 큰 틱을 반환하는 계약은 아니다. 실제 main은 PollHashComparison으로 보관된 쌍을 순서대로 소비하고 잠금 밖에서 로그와 UI를 갱신한다.
+
+### 16.5 C++의 데이터 레이스와 논리적 혼합
+
+서로 다른 두 atomic을 seq_cst로 읽고 써도 writer의 tick 갱신과 hash 갱신 사이에 reader가 들어갈 수 있다. 이 접근 자체는 데이터 레이스가 없지만, 한 논리적 기록이라는 불변식을 깨뜨린다. release/acquire도 이후 게시가 읽기와 겹칠 수 있는 반복 갱신에서 자동으로 묶음 트랜잭션을 만들지는 않는다.
+
+시퀀스 번호 전후를 검사하더라도 그 사이 plain payload를 동시 읽기/쓰기하면 C++ 데이터 레이스가 될 수 있다. 묶은 trivially-copyable 값의 atomic, immutable 값 인계, mutex 등 각 방식의 언어 계약과 수명을 먼저 확인한다. lock-free 여부와 원자성 지원은 서로 다른 질문이다.
+
+clear는 보관된 기록과 비교 커서를 같은 잠금 아래 초기화한다. 이미 전송 중인 이전 라운드 메시지까지 취소하지 않으며 현재 wire에는 round-id가 없다. 새 라운드의 생산·수신 소속 문제는 §14의 범위와 함께 읽는다.
 
 ---
 
-## 17. XOR 결합 해시 (`gameLocal ^ gameRemote`)
+## 17. 역할 순서로 두 보드 해시 결합
 
-§16 을 고치고 나서도 DESYNC 오탐이 **여전히 10초마다** 나왔다. 이번엔 race 가 아니라 **해시 자체가 틀렸다**.
+### 17.1 로컬 관점만 비교하면 서로 다른 플레이어를 비교한다
 
-### 17.1 기존 버그 — gameLocal 만 해싱
+HOST의 gameLocal은 호스트 보드, PEER의 gameLocal은 상대 보드다. 정상 경기여도 입력이
+다르므로 두 값이 다를 수 있다. 반면 HOST.gameLocal과 PEER.gameRemote는 같은 플레이어를
+가리킨다. 두 보드의 식별 순서를 먼저 맞춘다.
 
-초기 구현은 이랬다.
+### 17.2 XOR가 놓치는 상쇄
 
-버그가 있던 옛 형태를 재구성
+XOR는 순서가 바뀌어도 같은 결과를 주지만, `a ^ a == 0`이라는 성질도 있다.
+한 프로세스의 두 보드가 해시11이고 다른 프로세스의 두 보드가 해시29이면,
+모두 XOR 결과가 0이다. 이는 독립적이고 균일한 난수 해시라는 가정으로 숨길 수 없는
+구조적 반례다. 같은 시드·비슷한 입력을 사용하는 두 보드는 독립이라고 보장할 수 없다.
 
-**예시(실제 저장소에는 없음)**
+현재는 호스트 보드 → 상대 보드 순서로 두 64비트 값을 결합한다. `core/hash.h`의
+`hash_player_pair`는 DUEL/버전1 구분 바이트와 두 값을 명시적인 little-endian 순서로
+FNV-1a에 누적한다. XOR의 동등값 상쇄를 피하지만 64비트 체크섬의 충돌 가능성은 남는다.
 
-```cpp
-if (simTick % HASH_PERIOD_TICKS == 0) {
-    uint64_t h = gameLocal->ComputeStateHash();   // gameLocal 만!
-    session.SendHash(simTick, h);
-    // 로컬 링에도 h 저장
-}
-```
+### 17.3 송신할 값과 로컬 기록을 같은 시점에 만든다
 
-보냈을 때 상대 측에서는 무엇과 비교하는가? 상대 main thread 의 검증 루프도 대칭적으로 자기 `gameLocal->ComputeStateHash()` 를 로컬 링에 넣는다. 그리고 상대로부터 받은 HASH 프레임의 값(= 내 gameLocal 해시)을 자기 링의 같은 틱 해시와 비교한다.
-
-- HOST 가 보낸 해시 = HOST.gameLocal.hash = "호스트 입력으로 돌린 게임" 해시
-- GUEST 의 로컬 링 슬롯 = GUEST.gameLocal.hash = "게스트 입력으로 돌린 게임" 해시
-
-**이 둘은 서로 다른 경기다.** 양쪽 다 같은 seed 로 피스 순서는 같지만, "어떤 입력이 들어갔느냐" 가 다르므로 grid · 현재 블록 위치 · score · combo 가 모두 다르다. 즉 lockstep 이 **완벽하게 정상이어도 이 두 해시는 언제나 다르다** → 매 10초 DESYNC 배너가 뜨는 게 당연한 동작이었다. HASH 검증 기능이 사실상 꺼져 있던 셈이다.
-
-### 17.2 수정 — 두 게임 해시를 XOR 결합
-
-lockstep 이 정상이면 양쪽 main thread 는 `gameLocal` 과 `gameRemote` 를 모두 보유한다. HOST 관점에서 gameLocal = "호스트 입력 게임", gameRemote = "게스트 입력 게임". GUEST 관점에서는 역할만 뒤집혀 있다. 즉 **양쪽에서 "두 게임의 집합" 은 같다**, 단지 "어느 게임이 local 인지" 만 다를 뿐이다.
-
-집합 동등성을 보존하면서 scalar 해시로 줄이는 가장 간단한 연산은 **XOR** 이다.
-
-$$h_{\text{combined}} = h_{\text{gameLocal}} \oplus h_{\text{gameRemote}}$$
-
-XOR 은 교환법칙과 결합법칙이 성립하므로:
-
-- HOST.h_combined = HOST.gameLocal.h ⊕ HOST.gameRemote.h = h_host ⊕ h_guest
-- GUEST.h_combined = GUEST.gameLocal.h ⊕ GUEST.gameRemote.h = h_guest ⊕ h_host
-- ∴ HOST.h_combined ≡ GUEST.h_combined (lockstep 정상 가정)
-
-이 두 값이 틀어지는 경우 = 어느 한쪽의 "두 게임 집합" 이 상대와 다른 경우 = 진짜 DESYNC 다. 정확히 우리가 감지하고 싶은 것이다.
-
-### 17.3 수정 코드
-
-(틱 루프 내부, `simTick++` 직후)
+`simTick++` 뒤이므로 HASH의 tick은 이미 적용한 틱 수다. 입력 599까지 실행했으면 상태 번호 600이다.
+게임 역할은 CLI의 isHost 플래그보다 세션이 확정한 role을 기준으로 읽는다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-                            // F.2: 600틱마다 양쪽 경기판 해시를 결합해 송신 + 링 기록.
-                            // gameLocal 만 해싱하면 "호스트의 gameLocal" vs "게스트의
-                            // gameLocal" 을 비교하게 되는데, 이 둘은 서로 다른 경기라
-                            // 항상 다를 수밖에 없다(DESYNC 오탐). lockstep 이 정상이면
-                            // 양쪽 모두 gameLocal+gameRemote 를 (같은 관점에서) 갖고
-                            // 있으므로 XOR 로 결합하면 동일 해시가 나온다.
-                            if (simTick > 0 && simTick % HASH_PERIOD_TICKS == 0 &&
+if (simTick > 0 && simTick % HASH_PERIOD_TICKS == 0 &&
                                 simTick != lastHashSentTick) {
                                 uint64_t hL = gameLocal->ComputeStateHash();
                                 uint64_t hR = gameRemote->ComputeStateHash();
-                                uint64_t h  = hL ^ hR;
+                                const bool localIsHost = session.params().role == net::Role::Host;
+                                uint64_t h = localIsHost ? hash_player_pair(hL, hR)
+                                                         : hash_player_pair(hR, hL);
                                 session.SendHash(simTick, h);
-                                auto& slot = localHashRing[(simTick / HASH_PERIOD_TICKS) % HASH_RING];
-                                slot.tick = simTick; slot.hash = h; slot.valid = true;
                                 lastHashSentTick = simTick;
                             }
 ```
 
-`simTick != lastHashSentTick` 가드는 같은 틱에서 이 블록이 여러 번 돌아도 한 번만 송신되게 한다(`while (simTick <= safeTick)` 내부에서 여러 번 체크될 수 있음). `simTick > 0` 가드는 tick 0 에서 `0 % 600 == 0` 이 참이 되는 것을 막는다 — 게임 시작 즉시 양쪽이 아직 아무 입력도 반영하지 않은 상태의 해시를 보내는 건 의미가 없다.
+두 클라이언트가 같은 결합 규약을 써야 한다. wire의 필드 폭이 같아도 구버전 XOR 값과는 서로 비교할 수 없으므로
+배포 시 양쪽 클라이언트를 함께 갱신한다. 이 프로토콜에는 해시 결합 알고리즘 협상 필드가 아직 없다.
 
-### 17.4 XOR 의 충돌 특성
+### 17.4 범위와 진단 한계
 
-이론적으로 XOR 결합 해시는 충돌률이 나빠질 수 있는가? 두 독립적인 64비트 해시 `hL`, `hR` 을 XOR 하면 결과도 64비트 uniform 분포다 — 충돌률은 개별 해시와 같은 $2^{-64}$ 수준. FNV-1a 의 출력 분포는 실용적으로 uniform 에 가까워(Part 1 참조) 이 용도에서는 XOR 결합으로 충분하다.
+주기 해시의 일치는 그 검사 지점에서 해시에 포함한 상태에 관한 신호다. 초기 상태도 검사할 가치가 있지만
+현재 게임은 초기 상태와 별도로 완료 틱 600부터 주기 송신한다. 수신 존재 여부는 optional로 표현하며, tick 0은 이 주기 창의 접수 범위에 포함하지 않는다.
+학습 기준은 별도의 존재 표현으로 초기 0 스냅샷도 교환한다.
 
-주의할 것은 XOR 이 **완벽하게 대칭** 이라는 점이다. 두 게임의 해시가 우연히 서로 뒤바뀌어도(즉 `gameLocal` 과 `gameRemote` 를 반대로 넣어도) 같은 값이 나온다. 이건 여기서 정확히 우리가 원하는 성질이지만, 만약 "누가 어느 쪽인지" 까지 검증하고 싶다면 XOR 은 부적절하다. 그럴 땐 역할별로 가중치를 다르게 준 `h1 * 0x9E3779B97F4A7C15 ^ h2` 같은 비대칭 믹싱이 필요하다 — 그러나 그러면 양쪽이 같은 값을 만들 수 없으므로, 역할에 따라 인자 순서를 바꿔 넣는 추가 로직이 붙는다. 이 프로젝트의 쓰임새(10초 주기 검증, 불일치 시 배너)에는 XOR 로 충분하다.
-
-### 17.5 DESYNC breakdown 과의 연관
-
-`StateHashBreakdown` 은 상태를 원인 도메인별 묶음(`grid`, `currentBlock`, `nextBlock`, `rng`, `scoreFlags`, `combat`)으로 나눈 개별 해시를 리턴한다. DESYNC 발생 시 전체 해시만 비교하지 않고 이 breakdown을 함께 찍어 어느 상태 묶음이 먼저 깨졌는지 좁힌다.
-
-그런데 주의: 송신되는 combined hash(XOR)는 **섹션 분리가 불가능** 하다. `grid_L ⊕ grid_R` 과 `cur_L ⊕ cur_R` 이 다시 섞이면 개별 값을 복원할 수 없다. 그래서 DESYNC 로그는 상대 combined hash 는 그대로 두고 **자기 쪽의 gameLocal / gameRemote breakdown 만** 출력한다. 상대도 같은 시점에 DESYNC 를 찍으므로, 양쪽 콘솔 로그를 나란히 놓으면 어느 필드가 먼저 갈라졌는지 좁힐 수 있다.
+최종 결합 해시에서 필드별 상태를 복원할 수는 없다. 필드별 breakdown을 남길 때는
+**비교 대상 틱**과 **breakdown을 계산한 틱**을 같이 기록한다. 서로 다르면 당시 원인에 관한 직접 증거로
+해석하지 말고 입력 이력과 상태 스냅샷으로 추적한다.
 
 ---
 
@@ -3092,55 +3236,47 @@ XOR 은 교환법칙과 결합법칙이 성립하므로:
 
 DESYNC 를 디버깅할 때 체크리스트:
 
-1. **양쪽 창의 `[INIT] seed=...` 가 같은가?** 다르면 SEED 프레임 전달 버그다. 네트워크 레이어 문제.
-2. **양쪽 창의 `[INIT] gameLocal hash` 가 같은가?** 다르면 `SimGame` 생성자가 seed 외의 비결정론 요소(예: `rand()` 호출, 시간 기반 초기화)를 쓴다는 증거다. Part 1 의 결정론 원칙 위반.
+1. **양쪽 창의 `[INIT] seed=...` 가 같은가?** 다르면 협상·역할·초기화·버전 차이를 조사한다.
+2. **양쪽 창의 `[INIT] gameLocal hash` 가 같은가?** 다르면 규칙 버전·초기화 데이터·시드 사용·해시 규약을 확인한다. 해시 하나로 특정 원인을 단정하지 않는다.
 3. **gameLocal 과 gameRemote 의 초기 hash 가 같은가?** 같아야 한다 — 둘 다 같은 seed, 같은 입력(아직 아무 입력 없음)이므로.
 
-이 세 조건이 모두 참이면 lockstep 의 출발점은 깨끗하다. 이후 DESYNC 는 시뮬레이션 중 갈라진 것이다.
+초기 해시가 같으면 출발점을 비교할 유용한 단서가 된다. 충돌·규칙 버전·해시에 포함하지 않은 상태까지 증명한 것은 아니다. 이후 샘플과 입력 이력을 함께 대조한다.
 
 ### 18.2 DESYNC breakdown — 어느 필드가 깨졌나
 
 **현재 소스 발췌 — `src/main.cpp`**
 
 ```cpp
-        // F.2 — 원격 HASH 수신 감지 + 링 비교. 같은 틱의 로컬 해시가 링에
-        // 있어야 비교 가능 (링 크기 4 → 과거 40초 이력 커버).
+        // F.2 — Compare pending samples in tick order, outside the mailbox lock.
         if (app == AppMode::Net && gameLocal) {
-            uint32_t rt = 0; uint64_t rh = 0;
-            if (session.GetLastRemoteHash(rt, rh) && rt != 0 && rt != lastRemoteHashSeenTick) {
-                lastRemoteHashSeenTick = rt;
-                auto& slot = localHashRing[(rt / HASH_PERIOD_TICKS) % HASH_RING];
-                if (slot.valid && slot.tick == rt) {
-                    if (slot.hash != rh) {
-                        // DESYNC 시 어느 섹션이 달라졌는지 즉시 판별할 수 있도록
-                        // 현재 시점의 gameLocal/gameRemote 섹션별 해시를 출력.
-                        // (원격 hash 는 이미 XOR 결합이라 섹션 분리 불가 — 자기 쪽만 출력.
-                        //  상대 쪽도 같은 시점에 DESYNC 를 찍으니 양쪽 콘솔을 대조하면
-                        //  어느 필드가 먼저 달라졌는지 좁힐 수 있다.)
-                        fprintf(stderr, "[DESYNC] tick=%u local=0x%016llx remote=0x%016llx\n",
-                                rt, (unsigned long long)slot.hash, (unsigned long long)rh);
-                        if (gameLocal && gameRemote) {
-                            auto bL = gameLocal->sim.StateHashBreakdown();
-                            auto bR = gameRemote->sim.StateHashBreakdown();
-                            fprintf(stderr, "  gameLocal : grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
-                                    (unsigned long long)bL.grid, (unsigned long long)bL.currentBlock,
-                                    (unsigned long long)bL.nextBlock, (unsigned long long)bL.rng,
-                                    (unsigned long long)bL.scoreFlags, (unsigned long long)bL.combat);
-                            fprintf(stderr, "  gameRemote: grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
-                                    (unsigned long long)bR.grid, (unsigned long long)bR.currentBlock,
-                                    (unsigned long long)bR.nextBlock, (unsigned long long)bR.rng,
-                                    (unsigned long long)bR.scoreFlags, (unsigned long long)bR.combat);
-                        }
-                        desyncDetected = true;
-                        desyncTick = rt;
+            uint32_t rt = 0; uint64_t localHash = 0, rh = 0;
+            // Each successful poll consumes one earliest complete pair.
+            while (session.PollHashComparison(rt, localHash, rh)) {
+                if (localHash != rh) {
+                    // Breakdown is sampled now, not from the compared snapshot.
+                    fprintf(stderr, "[DESYNC] tick=%u local=0x%016llx remote=0x%016llx\n",
+                            rt, (unsigned long long)localHash, (unsigned long long)rh);
+                    if (gameLocal && gameRemote) {
+                        fprintf(stderr, "[DESYNC-DIAGNOSTIC] captured_tick=%u compared_tick=%u\n", simTick, rt);
+                        auto bL = gameLocal->sim.StateHashBreakdown();
+                        auto bR = gameRemote->sim.StateHashBreakdown();
+                        fprintf(stderr, "  gameLocal : grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
+                                (unsigned long long)bL.grid, (unsigned long long)bL.currentBlock,
+                                (unsigned long long)bL.nextBlock, (unsigned long long)bL.rng,
+                                (unsigned long long)bL.scoreFlags, (unsigned long long)bL.combat);
+                        fprintf(stderr, "  gameRemote: grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
+                                (unsigned long long)bR.grid, (unsigned long long)bR.currentBlock,
+                                (unsigned long long)bR.nextBlock, (unsigned long long)bR.rng,
+                                (unsigned long long)bR.scoreFlags, (unsigned long long)bR.combat);
                     }
+                    desyncDetected = true;
+                    desyncTick = rt;
                 }
-                // 같은 틱이 링에 없을 수도 있음(시작 직후 등) — 이 경우 무시.
             }
         }
 ```
 
-`rt != 0` 가드가 있는 이유: `GetLastRemoteHash` 는 `tick != 0` 을 반환값으로 쓰지만, `lastRemoteHashSeenTick` 의 초기값도 0 이라 가드를 빼면 "아직 아무 HASH 도 안 받은 상태" 와 "tick 0 의 HASH" 를 구별하지 못한다. `simTick > 0` 조건 때문에 tick 0 의 HASH 는 애초에 송신되지 않지만, 조건을 두 곳에서 일치시켜 두는 편이 안전하다.
+PollHashComparison의 false는 가장 이른 비교 쌍이 아직 준비되지 않았다는 뜻이며 출력 인수를 바꾸지 않는다. true는 같은 틱의 두 값이 복사되고 소비됐다는 뜻이다. 해시 값 0도 비교한다. tick 0을 받지 않는 것은 존재 sentinel 때문이 아니라 현재 게임의 주기가 600부터 시작하는 정책 때문이다.
 
 `StateHashBreakdown()`은 `SimGame`의 전체 해시를 원인 도메인별 독립 해시로
 나눠 구조체로 반환한다. 필드 개수보다 각 묶음의 이름과 책임이 진단 계약이다.
@@ -3154,17 +3290,17 @@ DESYNC 를 디버깅할 때 체크리스트:
 | `scoreFlags` | 점수 · 레벨 · 게임오버 플래그 · 중력 카운터 | 점수 계산 식, 레벨업 경계 |
 | `combat` | 공격 라인 송수신 카운터 | 가비지 교환 로직 |
 
-양쪽 창의 로그를 나란히 놓고 첫 번째로 다른 섹션을 찾으면 DESYNC 의 **원인 도메인** 이 즉시 좁혀진다. 예를 들어 `rng` 만 다르면 RNG 호출 순서가 어긋난 것이고, `grid` 만 다르면 라인 클리어 / 가비지 처리 로직의 비결정성을 의심한다.
+같은 역할·같은 captured_tick의 로그가 있을 때 다른 섹션을 조사 단서로 삼는다. `rng` 차이는 시드·호출 순서·난수 구현을, `grid` 차이는 입력·충돌·라인 처리 등을 확인할 이유가 된다. 현재 시점의 차이만으로 과거 비교 틱의 최초 원인을 단정하지 않는다.
 
 ### 18.3 로그 출력 경로 — stdout 이 아닌 stderr
 
 두 덤프 모두 `fprintf(stderr, ...)` 를 쓴다. 이유는 세 가지다.
 
-1. **버퍼링** — Windows 의 stdout 은 콘솔 출력 시 line-buffered 이지만 stderr 은 unbuffered 다. 크래시 직전에 찍은 로그도 확실히 콘솔에 남는다.
+1. **진단 스트림** — stderr는 일반 출력과 분리된 오류·진단 통로다. 버퍼링·리다이렉션·프로세스 종료 방식에 따라 실제 기록 보존은 달라지므로 크래시 직전 출력의 영구 보존까지 보장하지 않는다.
 2. **리다이렉션 분리** — `tetris > out.log 2> err.log` 같이 DESYNC 로그만 따로 분리하고 싶을 때 편하다.
 3. **`NET_WARN` 과 일관** — 세션 계층의 경고도 stderr 로 나간다.
 
-`fprintf` 대신 `std::cout` 을 썼다면 main thread 가 `std::cout` 의 내부 mutex 와 flush 를 경유해 stdio 동기화 버퍼를 거친다. Windows 콘솔 I/O는 blocking이라 정상 게임 루프의 상시 로그가 틱을 밀 수 있다. DESYNC breakdown은 이상이 감지된 순간 한 번만 출력하고, 평상시 텔레메트리는 카운터로 모아 루프 밖에서 읽는다.
+`fprintf` 대신 `std::cout` 을 썼다면 main thread 가 `std::cout` 의 내부 mutex 와 flush 를 경유해 stdio 동기화 버퍼를 거친다. Windows 콘솔 I/O는 blocking이라 정상 게임 루프의 상시 로그가 틱을 밀 수 있다. DESYNC breakdown은 같은 틱의 비교에서 반복 출력하지 않고, 평상시 텔레메트리는 카운터로 모아 루프 밖에서 읽는다.
 
 ---
 
@@ -3394,7 +3530,8 @@ endif()
 | `SendGameOverChoice(choice)` | 재시작/타이틀 선택 송신 | **Part 6** |
 | `SendNewSeed(seed)` | 재시작용 새 시드 송신 | **Part 6** |
 | `GetRemoteInput(tick, out)` | 상대 입력 조회 | **Part 6** |
-| `GetLastRemoteHash(tick, hash)` | 상대 해시 쌍 조회 | **Part 6** |
+| `GetLastRemoteHash(tick, hash)` | 마지막 접수 원격 해시 진단 조회(비소비) | **Part 6** |
+| `PollHashComparison(tick, local, remote)` | 가장 이른 완성 비교 쌍 소비 | **Part 6** |
 | `GetRemoteGameOverChoice(out)` / `ClearGameOverChoices()` | 상대 선택 조회/리셋 | **Part 6** |
 | `SendChat(text)` / `PullChat(out)` | 인게임 채팅 | **Part 6** |
 | `maxRemoteTick()` / `maxLocalTick()` | safeTick 계산용 watermark | **Part 6** |
@@ -3465,7 +3602,7 @@ cmake --build build --target tetris
 
 네트 모드에서 양쪽 클라이언트가 같은 틱에 `H` 를 누르면 `local` 과 `remote` 가 서로 교차해서 일치해야 한다 — Host 쪽의 `local=0xABCD` 가 Client 쪽의 `remote=0xABCD` 와 같으면 시뮬레이션이 동기 상태다. 자동 HASH 검증(§7)이 10초 주기로 이를 대신하지만, 개발 중에 "지금 이 순간" 을 포착하고 싶을 때 `H` 가 즉시 답을 준다.
 
-주의: "같은 틱에 누른다" 는 것이 사람 손으로는 정확히 불가능하므로, 이 도구는 "완전히 갈라졌는가" 를 확인하는 용도지 정밀 비교용은 아니다. 정밀 비교는 `[DESYNC]` breakdown 이 담당한다.
+주의: "같은 틱에 누른다" 는 것이 사람 손으로는 정확히 불가능하므로, 이 도구는 "완전히 갈라졌는가" 를 확인하는 용도지 정밀 비교용은 아니다. 정밀 비교에는 같은 틱에서 보관한 상태나 입력 이력이 필요하다. `[DESYNC]` breakdown은 기록한 시점도 함께 확인한다.
 
 ### A.2 F5 / F6 — 리플레이 녹화
 
@@ -3473,16 +3610,15 @@ cmake --build build --target tetris
 
 `F5` 는 리플레이 녹화를 시작한다. 현재 `replay.frames` 를 비우고 `recording = true` 로 세팅하면, 이후 매 틱마다 main loop 이 입력을 `replay.frames` 에 추가한다. `F6` 은 녹화를 종료하고 `out/replay.txt` 로 저장한다.
 
-저장 포맷은 `core/replay.cpp` 의 `ReplayIO::Save`/`Load` 가 담당한다 — 단순 텍스트(헤더 한 줄 + 틱당 한 줄). 이렇게 저장된 리플레이는 같은 시드 + 같은 입력 시퀀스로 재실행했을 때 동일한 상태 해시가 나오는지 확인하는 데 쓴다.
+저장 포맷은 `core/replay.cpp`의 Save/Load가 담당한다. seed·ticks 두 헤더와 틱당 index·p1·p2를 십진수 텍스트로 기록한다. Load는 마스크의 허용 비트, 연속 인덱스, 선언 개수와 파일 상한을 검사하고 완성된 결과만 전달한다. [Part 4의 로더 계약](./part4-game-wrapper-and-loop.md#74-리플레이-파일에서-읽은-값을-검증한다)을 함께 본다.
 
-용도 세 가지:
+F5/F6는 현재 로컬 inputMask와 p2=0을 기록한다. 경기 중간의 상태 스냅샷·상대 입력·온라인 적용 틱을 모두 저장하지 않으므로 온라인 경기 전체를 이 파일만으로 재현할 수 있다고 가정하지 않는다. 완전한 재현에는 같은 규칙·초기 상태와 실제 적용한 양쪽 틱 입력이 필요하다.
 
-- **결정론 회귀 테스트**: Part 1 에서 만든 `sim_hash_dump` 는 시드 + 스텝 시퀀스를 받아 상태 해시를 찍어주는 헤드리스 유틸이다. 크로스 플랫폼 (Win/macOS/Linux, MSVC/Clang/GCC)에서 돌려 해시가 동일하면 바이트 단위 결정론이 확인된다.
-- **DESYNC 재현**: 의심스러운 DESYNC 가 발생한 매치에서 F5/F6 으로 확보한 리플레이가 있으면, 로컬에서 같은 입력으로 반복 재생하면서 §18 의 `[INIT]` 덤프 + DESYNC breakdown 로그를 뽑아 원인 탐색에 쓸 수 있다.
-- **봇 데모**: 인프로세스 ONNX 봇([Part 9](./part9-rl-onnx-bot.md))의 입력을
-  함께 기록해 같은 시드로 재생할 수 있다. 리플레이는 봇 모델을 다시 추론하지
-  않고 저장된 틱 입력을 사용하므로 모델 파일이 없어도 당시 판의 상태 전이를
-  재현한다.
+활용할 때 필요한 자료를 나누어 본다.
+
+- **결정론 회귀 테스트**: `sim_hash_dump`는 정한 시드와 입력 시퀀스로 상태 해시를 출력하는 헤드리스 도구다. 같은 사례를 여러 플랫폼에서 실행해 해시를 비교하면 검사한 경로의 불일치를 찾을 수 있다. 해시 일치가 모든 가능한 입력에 대한 증명이나 전체 메모리의 바이트 비교를 대신하지는 않는다.
+- **DESYNC 조사 자료**: F5/F6의 로컬 입력은 조사에 참고할 수 있다. 양쪽 시뮬레이션을 재현하려면 시작 상태와 실제 적용 틱별 두 입력을 별도로 확보해야 한다. §18의 초기 상태·DESYNC breakdown과 대응시켜 차이를 추적한다.
+- **봇 데모로 확장**: 실제 봇 틱 입력까지 기록하면 재생 때 모델을 다시 추론하는 대신 저장한 입력을 적용할 수 있다. 현재 F5/F6의 p2=0 경로에는 이 수집을 추가해야 한다. 봇 대전 전체를 재현하려면 같은 시작 상태와 가비지 교환 순서도 함께 맞춘다.
 
 ---
 
@@ -3492,7 +3628,7 @@ cmake --build build --target tetris
 
 ### B.1 PING/PONG 하트비트 + LinkStatus
 
-OS 기본 TCP keep-alive 는 수 분 단위인 데다 "상대가 창을 드래그 해서 얼어붙음" 과 "상대가 사라짐" 을 구분하지 못한다. 1Hz 로 양쪽이 `PING(timestamp_u64)` 을 보내고 받은 쪽은 즉시 같은 payload 로 `PONG` 에코. ioThread 가 PING 을 송신하고 PONG 수신 시각(`lastPongMs`)을 갱신한다. 상세는 §11 — 커널 keepalive 를 짧게 조정해 별도 안전망으로 쓰는 역할 분담은 §11.7.
+TCP keepalive는 게임 main의 진행을 확인하지 않는다. 감지 시점은 설정과 운영체제 동작에 따라 달라진다. 1Hz 로 양쪽이 `PING(timestamp_u64)` 을 보내고 받은 쪽은 즉시 같은 payload 로 `PONG` 에코. ioThread 가 PING 을 송신하고 유효한 미소비 요청에 대한 PONG을 확인한 시각(`lastPongMs`)을 갱신한다. 상세는 §11 — 커널 keepalive 를 짧게 조정해 별도 안전망으로 쓰는 역할 분담은 §11.7.
 
 ### B.2 5자리 코드 기반 커스텀 룸
 
@@ -3521,7 +3657,7 @@ Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon, match_uuid}
 
 ### B.5 주기 HASH 자동 검증 + DESYNC 배너
 
-600틱(10초)마다 `gameLocal ^ gameRemote` 결합 해시를 `SendHash` 하고 4칸 링에 기록. 상대로부터 받은 HASH 와 같은 틱의 로컬 해시를 매 프레임 비교한다. 불일치 시 UI 에 빨간 "DESYNC" 배너를 표시해 사용자가 게임을 리셋할 수 있게 한다. 상세는 §7, §17, §18.
+600틱마다 역할 순서로 결합한 두 보드 해시를 `SendHash`로 기록·송신한다. Session의 8칸 주기 창에 보관한 로컬/원격 값을 main이 같은 틱 순서로 소비해 비교한다. 불일치 시 UI 에 빨간 "DESYNC" 배너를 표시해 사용자가 게임을 리셋할 수 있게 한다. 상세는 §7, §17, §18.
 
 ### B.6 랭킹 연동 (MATCH_SUMMARY / MATCH_RESULT)
 
@@ -3535,7 +3671,7 @@ Relay → Client2: MATCH_FOUND{role=GUEST, seed, my_icon, peer_icon, match_uuid}
 - 길이-접두사 프레이밍과 FNV-1a 32 체크섬으로 TCP 바이트 스트림 위에 메시지 경계를 세웠다. 부분 수신, 오버사이즈 선언, 체크섬 불일치, 미지 타입이 모두 정의된 동작을 갖는다. 미지 타입을 흘려보내는 규칙 덕분에, 나중에 서버가 `SERVER_REJECT` 같은 새 프레임을 추가해도 구버전 클라이언트의 동작이 달라지지 않는다.
 - 타입 표의 **방향 칸을 신뢰 경계로** 승격했다. 서버만 만들 수 있는 타입을 술어(`net::is_server_only_type`)로 적어 두 릴레이 바이너리가 함께 호출하고, 클라이언트가 위조한 그런 프레임은 중계되지 않는다.
 - `HELLO` / `SEED` / `INPUT` / `ACK` / `PING` / `PONG` / `HASH` / `GAME_OVER_CHOICE` / `CHAT` 까지 직결 P2P 프로토콜의 메시지 흐름을 고정했다.
-- `safeTick = min(lastLocalSent, lastRemoteRecv) - inputDelay` 로 두 `SimGame` 을 동기 진행시키고, 600틱마다 XOR 결합 해시로 교차 검증한다.
+- `safeTick = min(lastLocalSent - inputDelay, lastRemoteRecv)` 로 두 `SimGame` 을 동기 진행시키고, 600틱마다 역할 순서로 결합한 해시로 교차 검증한다.
 - 창 드래그 · 일시 정지 · 진짜 단절을 PING/PONG + ioThread 자동 heartbeat 으로 구분해, 한쪽이 얼어도 상대 화면이 멈추지 않는다.
 - 신뢰할 수 없는 피어를 가정한 방어 다섯 규칙(크기 검사 · 길이 필드 재확인 · enum 범위 · 송신 클램프 · 큐 상한)을 프레임 처리 전 경로에 적용했다.
 
@@ -3577,7 +3713,7 @@ Start-Process build\Release\tetris.exe -ArgumentList "--connect","127.0.0.1:7777
 3. 2초 카운트다운 후 양쪽 보드가 같은 피스 순서로 시작한다.
 4. 10초 이상 플레이해도 `[DESYNC]` 가 **한 줄도** 찍히지 않는다.
 5. 한쪽 창을 마우스로 3~5초 드래그해도 상대 화면은 계속 흐르고, 놓으면 드래그한 쪽이 빠르게 따라잡는다. `[DESYNC]` 는 나오지 않는다.
-6. 한쪽 프로세스를 강제 종료하면 상대 화면에 "Opponent disconnected" 배너가 뜨고 10초 후 메뉴로 돌아간다.
+6. 한쪽 프로세스를 강제 종료하면 상대 화면에 "Peer response lost" 배너가 뜨고 10초 후 메뉴로 돌아간다.
 
 ### 결정론 회귀 (자동)
 

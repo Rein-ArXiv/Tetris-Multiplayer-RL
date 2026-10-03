@@ -113,13 +113,14 @@ enum class MsgType : uint8_t {
 //     것이 정상 동작이다.
 //   · CHAT 은 양방향이다.
 //   · MATCH_SUMMARY 는 C→S 라 클라이언트가 보내는 것이 맞다. 랭크드 릴레이가
-//     이것을 가로채는 이유는 "서버 전용이라서" 가 아니라 결과 교차검증에 쓰려고
-//     소비하기 때문이므로, 이 목록과는 성격이 다르다.
+//     이것을 가로채는 이유는 "서버 전용이라서"가 아니라 서버가 재현한 경기의
+//     결과 확정 계기로 소비하기 때문이다. 신고 점수 자체를 신뢰하지 않는다.
 //
 // 위반한 프레임 하나만 버리고 연결은 살린다. 포워딩은 양방향이라 여기서 연결을
 // 끊으면 위조한 쪽만이 아니라 상대의 경기까지 함께 끝난다 — 한 사람의 반칙으로
 // 무관한 사람의 판을 깨는 것은 이 프레임들을 막아서 지키려던 것과 같은 손해다.
-// 버리기만 해도 공격자가 얻는 것은 없다.
+// 이 폐기는 서버 전용 상태의 위조 전달을 막는다. 수신/파싱 비용까지 없어지지는
+// 않으므로 연결·바이트·로그의 자원 예산은 별도로 유지해야 한다.
 constexpr bool is_server_only_type(uint8_t type) {
     return type == static_cast<uint8_t>(MsgType::MATCH_FOUND)  ||
            type == static_cast<uint8_t>(MsgType::ROOM_INFO)    ||
@@ -149,18 +150,26 @@ struct Frame {
 // FNV-1a 32-bit 해시 (체크섬용)
 uint32_t fnv1a32(const uint8_t* data, size_t len, uint32_t seed=2166136261u);
 
-// 스트림 파싱: 누적 버퍼에서 완성된 프레임들 추출 (부분 수신 처리)
+// 완성된 프레임을 out 뒤에 추가하고, 미완성 꼬리는 streamBuf에 남긴다.
+// 길이 상한 초과: streamBuf를 비우고 false. out에는 오류 전 프레임이 남을 수 있다.
+// 호출자는 false를 확인해 연결을 종료해야 한다. Session은 해당 배치 전체를 버린다.
+// 현재 wire 정책: 완성된 LEN=0/체크섬 불일치는 소비하되 출력하지 않는다.
+// 알 수 없는 TYPE은 그대로 출력하므로 의미 검증은 호출자 책임이다.
+// true는 완성/미완성/건너뜀을 포함한다. EOF의 미완성 꼬리는 호출자가 처리한다.
 bool parse_frames(std::vector<uint8_t>& streamBuf, std::vector<Frame>& out);
 
 // 메시지 직렬화: TYPE + PAYLOAD → 프레임 바이트 배열
 std::vector<uint8_t> build_frame(MsgType t, const std::vector<uint8_t>& payload);
 
 // 리틀엔디안 직렬화/역직렬화
+// read 호출자는 해당 폭(2/4/8)의 읽기 가능한 바이트를 먼저 확인해야 한다.
 void le_write_u16(std::vector<uint8_t>& v, uint16_t x);
 void le_write_u32(std::vector<uint8_t>& v, uint32_t x);
 void le_write_u64(std::vector<uint8_t>& v, uint64_t x);
 uint16_t le_read_u16(const uint8_t* p);
 uint32_t le_read_u32(const uint8_t* p);
+// Signed wire values use two's-complement arithmetic, including on C++17.
+int32_t le_read_i32(const uint8_t* p);
 uint64_t le_read_u64(const uint8_t* p);
 
 }

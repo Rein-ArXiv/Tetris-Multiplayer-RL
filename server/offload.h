@@ -1,92 +1,113 @@
 #pragma once
+
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
-#include <deque>
+#include <exception>
 #include <functional>
+#include <list>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
 
-// ─────────────────────────────────────────────────────────────────────────────
-// server/offload.h — 이벤트 루프 밖에서 블로킹 작업을 돌리고 결과를 루프로 회수
-//
-// 왜 필요한가
-//   단일 reactor 루프의 최대 위험은 처리량이 아니라 "한 핸들러가 오래 걸리면 그
-//   매치만이 아니라 전원이 멈추는 것"이다. 릴레이에는 그런 지뢰가 둘 있다 —
-//   인증의 meta verify_token(HTTP 3초)과 매치 종료의 post_match(HTTP 10초). 이
-//   둘을 루프 스레드에서 부르면 그 왕복 동안 모든 연결의 전달이 정지한다.
-//
-//   Offload 는 그 블로킹 호출을 작은 워커 풀로 빼고, 결과만 reactor::wake() 로
-//   루프에 되돌린다. 소켓 I/O 는 여전히 루프 스레드에만 있어야 하므로(단일 스레드
-//   소켓 소유 불변식), 워커는 네트워크 결과를 계산만 하고 그 결과로 무엇을 할지
-//   (MATCH_RESULT 송신 등)는 루프가 한다.
-//
-// 계약
-//   submit(job): job 은 워커 스레드에서 실행되어 "continuation" 을 돌려준다.
-//   continuation 은 job 이 계산한 결과를 포착한 클로저로, 반드시 루프 스레드에서
-//   실행된다(drain 이 돌려준 것을 루프가 호출). 즉:
-//       offload.submit([=]() -> Offload::Cont {
-//           auto res = meta->verify_token(token, 3);      // 워커에서 블로킹
-//           return [=]{ resume_conn_on_loop(conn, res); };// 루프에서 실행
-//       });
-//   job 완료 시 wake 콜백이 불려 루프의 poll 이 깨어나고, 루프는 drain() 으로
-//   continuation 들을 걷어 순서대로 실행한다.
-//
-//   수명: continuation 은 연결 상태 객체를 포착할 수 있다. 종료 시 루프는 연결을
-//   파기하기 전에 shutdown()(진행 중 job 완료까지 대기) → 마지막 drain() 순으로
-//   비워야 use-after-free 가 없다.
-// ─────────────────────────────────────────────────────────────────────────────
+// 루프 소유의 게임 연결을 건드리는 후속 작업은 drain 이후 루프가 실행한다.
+// 워커의 HTTP 소켓은 워커가 사용할 수 있다. 게임 연결 소켓과 소유권을 구분한다.
+// submit/drain/shutdown은 같은 소유자가 순차 호출한다. 워커에서 shutdown하지 않는다.
+// capacity는 대기+실행+미회수 결과의 개수이며 바이트/실행 시간 상한은 아니다.
+// shutdown은 수락한 작업을 마치고 join한다. 그 뒤 마지막 drain/실행을 마친 다음
+// 연결/루프/외부 서비스를 파괴한다. 실행 중 연결 제거는 ID 재조회로 따로 처리한다.
+// wake 대상은 모든 워커보다 오래 살아야 한다. wake 예외는 기록하고 결과는 보존한다.
+// 예외 fallback을 주지 않은 작업은 루프에서 결과를 호출할 때 원래 예외를 재전파한다.
 
 namespace relay {
 
 class Offload {
 public:
-    using Cont = std::function<void()>;          // 루프 스레드에서 실행될 후속
-    using Job  = std::function<Cont()>;          // 워커 스레드에서 실행될 블로킹 작업
+    using Cont = std::function<void()>;  // reactor 스레드에서 실행될 후속
+    using Job  = std::function<Cont()>;  // 워커 스레드에서 실행될 블로킹 작업
 
-    // threads: 동시 블로킹 왕복 상한. wake: 완료 시 루프를 깨우는 콜백
-    // (보통 [r]{ r->wake(); } 로 reactor 에 바인딩).
-    Offload(std::size_t threads, std::function<void()> wake)
-        : wake_(std::move(wake))
+    struct Task {
+        Job                job;
+        Cont               failure;
+        Cont               result;
+        std::exception_ptr error;
+    };
+
+    // threads: 동시 블로킹 상한(0 이면 1). wake: 완료 시 루프를 깨우는 콜백.
+    // capacity: 미완료(outstanding) 슬롯 상한 — 개수 기준(시간/바이트 아님).
+    Offload(std::size_t threads, std::function<void()> wake, std::size_t capacity = 1024)
+        : capacity_(capacity), wake_(std::move(wake))
     {
+        if (capacity_ == 0) throw std::invalid_argument("Offload: capacity must be > 0");
         if (threads == 0) threads = 1;
-        for (std::size_t i = 0; i < threads; ++i) {
-            workers_.emplace_back([this] { run(); });
+        workers_.reserve(threads);
+        try {
+            for (std::size_t i = 0; i < threads; ++i)
+                workers_.emplace_back([this] { run(); });
+        } catch (...) {
+            shutdown();   // 이미 시작한 워커를 조인한 뒤 예외 전파
+            throw;
         }
     }
 
-    ~Offload() { shutdown(); }
+    ~Offload() { shutdown(); }  // completion 콜백은 호출하지 않음
 
-    // 블로킹 job 을 워커 풀에 제출한다. 루프 스레드에서 호출.
-    //
-    // 종료가 시작된 뒤에는 거절하고 false 를 돌려준다. 검사가 없으면 워커가 이미
-    // 빠져나간 뒤 제출된 job 이 큐에 남은 채 아무도 실행하지 않아, 호출자는 성공한
-    // 줄 알지만 결과(예: 경기 결과 저장)는 조용히 사라진다. 호출자는 false 를 보고
-    // 그 자리에서 대체 처리(로그·폴백)를 해야 한다.
-    bool submit(Job job) {
+    Offload(const Offload&)            = delete;
+    Offload& operator=(const Offload&) = delete;
+
+    // job 을 제출한다. 비었거나 stopping/용량 초과면 false.
+    // 노드 할당을 outstanding 증가보다 먼저 하므로 할당 실패 시 카운트는 그대로.
+    bool submit(Job job, Cont failure = {}) {
+        if (!job) return false;
+        Task task{std::move(job), std::move(failure), {}, {}};
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (stopping_) return false;
-            jobs_.push_back(std::move(job));
+            if (stopping_ || outstanding_ >= capacity_) return false;
+            jobs_.push_back(std::move(task));
+            ++outstanding_; // 노드 할당 성공 뒤 수락한 슬롯으로 센다.
         }
         cv_.notify_one();
         return true;
     }
 
-    // 완료된 continuation 들을 걷어 out 으로 옮긴다(루프 스레드에서 호출). wake()
-    // 후에 부른다. 반환값 = 걷은 개수.
+    // 완료된 Cont 를 out 뒤에 붙이고 옮긴 개수를 돌려준다(reactor 루프).
+    // closure 는 여기서 호출하지 않는다 — 호출은 루프가 drain 이후에 한다.
+    // error 노드: failure 가 있으면 옮기고, 없으면 rethrow 하는 Cont 를 만든다.
     std::size_t drain(std::vector<Cont>& out) {
+        std::list<Task> retired; // lock보다 먼저 선언: 캡처 소멸은 잠금 해제 후.
         std::lock_guard<std::mutex> lk(mu_);
-        for (auto& c : done_) out.push_back(std::move(c));
-        std::size_t n = done_.size();
-        done_.clear();
-        return n;
+        const std::size_t n = done_.size();
+        if (n == 0) return 0;
+
+        if (n > out.max_size() - out.size())
+            throw std::length_error("Offload::drain: vector capacity overflow");
+        out.reserve(out.size() + n);  // 이동 전에 확보 — 실패하면 done_ 유지
+
+        std::size_t moved = 0;
+        while (!done_.empty()) {
+            Task& t = done_.front();
+            if (t.error) {
+                if (t.failure) {
+                    out.push_back(std::move(t.failure));
+                } else {
+                    // 기본 처리: 루프가 이 Cont 를 호출할 때 예외를 다시 던진다
+                    Cont rethrow = [err = t.error] { std::rethrow_exception(err); };
+                    out.push_back(std::move(rethrow));
+                }
+            } else {
+                out.push_back(std::move(t.result));
+            }
+            retired.splice(retired.end(), done_, done_.begin()); // 전달 성공 뒤 회수
+            --outstanding_;
+            ++moved;
+        }
+        return moved;
     }
 
-    // 새 job 을 막고, 진행 중 job 이 끝날 때까지 워커를 조인한다. 이후 drain() 으로
-    // 남은 continuation 을 마저 비울 수 있다(idempotent).
+    // 새 job 을 막고 수락된 대기 job 을 마저 처리한 뒤 워커를 조인한다.
+    // reactor 루프 스레드에서만 호출, 중복 호출은 무해(idempotent, 순차 전제).
     void shutdown() {
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -98,10 +119,16 @@ public:
         workers_.clear();
     }
 
+    // wake 콜백에서 새던 예외 누적치를 0 으로 교환해 돌려준다.
+    // wake 실패는 이미 큐에 들어간 완료 결과를 제거하지 않는다(계속 drain 가능).
+    std::size_t take_wake_errors() noexcept {
+        return wake_errors_.exchange(0, std::memory_order_relaxed);
+    }
+
 private:
     void run() {
+        std::list<Task> running;      // 로컬 리스트 — splice 로 노드만 이동(할당 없음)
         for (;;) {
-            Job job;
             {
                 std::unique_lock<std::mutex> lk(mu_);
                 cv_.wait(lk, [this] { return stopping_ || !jobs_.empty(); });
@@ -109,25 +136,49 @@ private:
                     if (stopping_) return;
                     continue;
                 }
-                job = std::move(jobs_.front());
-                jobs_.pop_front();
+                running.splice(running.end(), jobs_, jobs_.begin());
             }
-            Cont cont = job();  // 블로킹 (HTTP 등) — 루프 밖
+
+            Task& t = running.back();
+            try {
+                t.result = t.job();   // 잠금 밖에서 블로킹 실행
+            } catch (...) {
+                t.error = std::current_exception();
+            }
+            t.job = nullptr;          // 잠금 밖에서 job 해제
+
+            const bool publish = static_cast<bool>(t.result) || static_cast<bool>(t.error);
+            bool wake = false;
             {
                 std::lock_guard<std::mutex> lk(mu_);
-                if (cont) done_.push_back(std::move(cont));
+                if (publish) {
+                    done_.splice(done_.end(), running, running.begin());
+                    wake = true;
+                } else {
+                    --outstanding_; // 빈 성공은 전달할 결과가 없어 즉시 슬롯 반환
+                }
             }
-            if (wake_) wake_();  // 루프의 poll 을 깨워 drain 하게 한다
+            running.clear(); // 빈 성공의 failure 캡처도 잠금 밖에서 파괴한다.
+            if (wake && wake_) {      // 잠금 밖에서 wake 호출
+                try {
+                    wake_();
+                } catch (...) {
+                    wake_errors_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
         }
     }
 
-    std::mutex               mu_;
-    std::condition_variable  cv_;
-    std::deque<Job>          jobs_;
-    std::vector<Cont>        done_;
-    bool                     stopping_ = false;
-    std::function<void()>    wake_;
-    std::vector<std::thread> workers_;
+    std::mutex                    mu_;
+    std::condition_variable       cv_;
+    std::list<Task>               jobs_;   // 대기 job (제출 순서)
+    std::list<Task>               done_;   // 배출 대기 완료 노드
+    std::size_t                   outstanding_ = 0;
+    std::size_t                   capacity_;
+    bool                          stopping_    = false;
+    std::function<void()>         wake_;
+    std::atomic<std::size_t>      wake_errors_{0};
+    std::vector<std::thread>      workers_;
 };
 
 } // namespace relay

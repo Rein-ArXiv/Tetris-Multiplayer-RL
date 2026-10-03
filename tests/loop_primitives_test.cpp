@@ -1,12 +1,15 @@
 // tests/loop_primitives_test.cpp — 이벤트 루프 원시 도구 회귀
 //
-// 단일 reactor 루프를 조립하기 전에, 그것이 의존하는 두 도구를 격리 검증한다:
+// 단일 reactor 루프를 조립하기 전에 기반 도구를 격리 검증한다:
+//   - MonotonicId/ByteBudget: 식별자 소진과 공유 바이트 예약 경계
 //   - TimerQueue: 만기 순서, 재무장(re-arm), 취소, 다음 만기까지 timeout 계산
 //   - Offload:    블로킹 job 을 워커에서 돌리고 continuation 을 루프 스레드로 회수,
 //                 완료 시 wake 콜백 발화
 
 #include "../server/timer_queue.h"
 #include "../server/offload.h"
+#include "../server/monotonic_id.h"
+#include "../server/byte_budget.h"
 
 #include <atomic>
 #include <chrono>
@@ -100,6 +103,26 @@ void test_timer_generation_reuse() {
     check(out.size() == 1 && out[0] == &conn, "진짜 만기가 유실되지 않음");
 }
 
+void test_timer_boundaries() {
+    using T = relay::TimerQueue::TimePoint;
+    using D = Clock::duration;
+    check(relay::TimerQueue::wait_ms_until(T{}, T{} + D(1)) == 1,
+          "미래 1 tick은 1ms 올림");
+    check(relay::TimerQueue::wait_ms_until(T::min(), T::max()) == 0x3fffffff,
+          "극단 시각은 뺄셈 전에 포화");
+    check(relay::TimerQueue::wait_ms_until(T::max(), T::min()) == 0,
+          "과거 극단 시각은 0");
+    check(relay::TimerQueue::wait_ms_until(T::max() - D(1), T::max()) == 1,
+          "최대 시각 부근의 짧은 미래");
+    relay::TimerQueue tq; int a, b, c;
+    tq.arm(&a, T{}); tq.arm(&b, T{}); tq.arm(&a, T{}); tq.arm(&c, T{});
+    std::vector<void*> out{nullptr}; tq.expired(T{}, out);
+    check(out == std::vector<void*>({nullptr, &b, &a, &c}),
+          "동일 만기는 최신 arm 순서, 결과는 append");
+    tq.cancel(&a);
+    check(out.size() == 4, "취소는 이미 반환한 배치를 철회하지 않음");
+}
+
 void test_offload() {
     std::atomic<int> wakes{0};
     relay::Offload off(2, [&] { ++wakes; });
@@ -164,12 +187,60 @@ void test_offload() {
     check(!ghost.load(), "거절된 job 은 실행되지 않음");
 }
 
+void test_offload_failure_and_capacity() {
+    int applied = 0;
+    relay::Offload off(1, [] { throw std::runtime_error("wake failure"); }, 2);
+    check(off.submit([]() -> relay::Offload::Cont {
+        throw std::runtime_error("job failure");
+    }, [&] { applied += 1; }), "실패 후속이 있는 작업 수락");
+    check(off.submit([&]() -> relay::Offload::Cont {
+        return [&] { applied += 2; };
+    }), "실패 이후 작업도 수락");
+    check(!off.submit([]() -> relay::Offload::Cont { return {}; }),
+          "대기/실행/미회수 결과 전체 슬롯 상한");
+    off.shutdown();
+    check(applied == 0, "실패 후속도 워커에서 실행하지 않음");
+    std::vector<relay::Offload::Cont> out;
+    check(off.drain(out) == 2, "wake 예외 이후에도 결과 보존");
+    for (auto& cont : out) cont();
+    check(applied == 3, "실패 후속과 다음 작업 모두 루프에서 실행");
+    check(off.take_wake_errors() == 2, "wake 예외 집계");
+}
+
+void test_id_exhaustion() {
+    relay::MonotonicId normal;
+    check(normal.take() == 1 && normal.take() == 2, "기본 ID는 1부터 단조 발급");
+    relay::MonotonicId end(UINT32_MAX - 1);
+    check(end.take() == UINT32_MAX - 1 && end.take() == UINT32_MAX, "마지막 유효 ID 발급");
+    check(end.take() == 0 && end.take() == 0, "소진 이후 ID 재사용 거절");
+    relay::MonotonicId empty(0);
+    check(empty.take() == 0, "0은 소진 상태");
+}
+
+void test_shared_byte_budget() {
+    std::atomic<size_t> used{7};
+    size_t total = 91;
+    check(relay::try_reserve_bytes(used, 10, 2, total) && total == 9 && used == 9,
+          "예약 결과는 공유 총량이며 호출자 초기값과 무관");
+    check(!relay::try_reserve_bytes(used, 10, 2, total) && total == 9 && used == 9,
+          "한도 실패는 카운터와 결과를 보존");
+    used = 1;
+    check(!relay::try_reserve_bytes(used, SIZE_MAX, SIZE_MAX, total), "덧셈 전에 넘침 거절");
+    used = 0;
+    check(relay::try_reserve_bytes(used, SIZE_MAX, SIZE_MAX, total) && total == SIZE_MAX,
+          "표현 가능한 마지막 예약 허용");
+}
+
 } // namespace
 
 int main() {
+    test_shared_byte_budget();
+    test_id_exhaustion();
     test_timer_queue();
     test_timer_generation_reuse();
+    test_timer_boundaries();
     test_offload();
+    test_offload_failure_and_capacity();
     if (g_failures == 0) {
         std::fprintf(stderr, "[loop-prim] all checks passed\n");
         return 0;

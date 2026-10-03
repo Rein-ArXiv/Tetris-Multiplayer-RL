@@ -1,0 +1,389 @@
+{
+  "id": "lesson-30",
+  "title": "충돌: 배열 범위와 점유 상태",
+  "shortTitle": "경계와 점유 충돌",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 보드 경계를 넘는 이동은 막지만, 채워진 Grid 셀 위로는 블록이 지나갈 수 있습니다.",
+  "finish": "완료: 모든 점유 칸의 범위와 빈칸 여부를 검사하고, 장애물과 겹치는 후보는 원본과 보드를 바꾸지 않고 거부합니다.",
+  "objective": "단일 배치·이동 경로·거부 이유를 구분하고, 읽기 전용 보드 검사로 자기 충돌 없이 점유 충돌을 구현합니다.",
+  "prerequisites": [
+    "29차시 체크포인트",
+    "optional·단락 평가·행열 경계",
+    "후보 검사와 확정·GPU 갱신"
+  ],
+  "validation": [
+    "Linux SCRIPTED22/SDL20 CTest·CPU 링크 독립·UBSan",
+    "63315배치·189945이동·단일 장애물 전200위치·24순열 우선순위·점유 무시 mutation",
+    "현재 SimGrid/SimBlock 좌표와 33768배치 허용 여부 비교; 실제 BlockFits 직접 호출은 아님",
+    "7종류×4위치×3크기 SDL offscreen GL3.3 Core Mesa Intel HD Graphics3000 저장소/전체RGB 비교",
+    "native main 창/키/모니터 표시·타OS·사이트 실화면은 미검증. CUA 브라우저 없음"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 선택 명세 초안 검토·좌표 타입과 idle 거부 오류 교정·기존 경계 helper 재사용",
+    "draftJob": "out/learning-jobs/collision-events.jsonl",
+    "corrections": [
+      "없는 study_piece::Position 대신 실제 반환 타입 추론 사용",
+      "방향0을 정상 idle 경로로 허용",
+      "분류 우선순위를 셀 저장 순서와 분리",
+      "현재 게임의 안전한 셀 조회와 단일 배치 판정 범위를 명시"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "이동은 작은 후보를 검사하고 성공했을 때만 원본에 대입합니다.",
+      "경계 전용 이동은 네 보드 좌표를 검사하지만 Grid의 채움 여부는 읽지 않습니다.",
+      "성공한 CPU 상태 변경만 새 정점과 GPU 저장소로 전파합니다."
+    ],
+    "bridge": "확정 전 조건에 보드 점유를 더해, 이미 쌓인 칸을 통과하지 못하게 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "벽 안이어도 이미 차 있는 칸에는 갈 수 없다",
+      "body": "지금 블록은 보드 밖으로 나가지는 않지만 주황색 칸을 통과합니다. 이동 함수가 행·열 범위만 확인하고 Grid의 저장된 값을 읽지 않았기 때문입니다. 이번에는 **후보의 네 칸이 보드 안이며 모두 비어 있어야 한다**는 조건을 추가합니다.\n\n규칙을 늘려도 화면 쪽 흐름을 다시 만들 필요는 없습니다. 허용한 이동이면 새 정점을 GPU에 반영하고, 거부한 이동이면 상태와 그림을 그대로 둡니다. 이제 main이 호출하는 함수에는 읽을 대상인 `const Grid&`가 들어갑니다.\n\n기본 T의 기준점은 (0,3)입니다. 주황색 셀 하나가 (1,2)에 있을 때 왼쪽 한 칸 후보를 직접 계산해 봅시다.\n\n| 구분 | 네 보드 좌표 |\n| --- | --- |\n| 현재 기준점 (0,3) | (0,4), (1,3), (1,4), (1,5) |\n| 왼쪽 후보 (0,2) | (0,3), (1,2), (1,3), (1,4) |\n\n후보 좌표는 모두 범위 안입니다. 하지만 (1,2)가 이미 차 있으므로 이동은 거부되어야 합니다. 이것이 보드 경계 검사에 더할 점유(occupancy) 검사입니다. 점유는 그 칸을 고정된 셀이 차지하고 있는지를 뜻합니다."
+    },
+    {
+      "title": "배치의 판정과 이동의 결과는 다른 질문이다",
+      "body": "`classify(board,piece)`는 주어진 배치가 어떤 상태인지 읽기만 합니다. Piece를 움직이거나 Grid에 기록하지 않습니다. 반면 `try_shift`는 방향을 받아 후보를 만들고 성공하면 현재 Piece를 바꿉니다.\n\n배치 분류 Placement는 네 값을 가집니다.\n\n| 분류 | 의미 |\n| --- | --- |\n| clear | 계산된 네 칸이 모두 보드 안이며 비어 있음 |\n| outside | 정수 좌표 계산은 됐지만 보드 밖 칸이 있음 |\n| occupied | 모든 칸이 보드 안이며 하나 이상 이미 차 있음 |\n| unrepresentable | 좌표 합을 결과의 int 값으로 표현할 수 없음 |\n\nclear는 ‘어떤 방법으로든 여기까지 이동할 수 있다’거나 ‘등록된 정식 모양이다’라는 뜻이 아닙니다. 이 함수가 검사한 단일 배치 조건만 만족한다는 뜻입니다. 이름을 같은 ‘유효함’ 하나로 뭉뚱그리지 않으면 호출자가 어떤 검사를 이미 했는지 이해하기 쉽습니다.\n\n이동 결과에는 기존 Result를 사용합니다. idle은 입력 방향 0, moved는 실제 확정, blocked는 경계 또는 점유 때문에 거부된 정상 시도입니다. invalid는 시작 상태나 입력·산술 전제가 틀렸다는 뜻입니다. Placement와 Result는 판정 대상이 다르므로 별도 열거형으로 둡니다.",
+      "codes": [
+        {
+          "label": "단일 배치의 거부 이유를 구분한다",
+          "language": "cpp",
+          "text": "enum class Placement {\n    clear,\n    outside,\n    occupied,\n    unrepresentable\n};"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "bool SimGame::BlockFits(const SimBlock& block) const",
+        "invariant": "블록이 점유할 모든 보드 칸을 읽어 배치 가능성을 판단한다.",
+        "mayDiffer": "현재 함수는 bool을 반환하며 범위 밖도 IsCellEmpty의 방어 검사로 false가 된다. 강의는 계산 실패/경계/점유 이유를 enum으로 나눈다.",
+        "omitted": "회전 보정·하드 드롭·고정과 게임 종료 정책은 아직 추가하지 않는다."
+      }
+    },
+    {
+      "title": "안전한 조회와 빈칸 여부를 분리해서 읽는다",
+      "body": "Grid::get은 범위 안이면 셀 값을 담은 optional을, 밖이면 nullopt를 반환합니다. ‘셀을 읽을 수 없다’와 ‘셀을 읽었는데 빈칸이다’가 다른 상태입니다. 점유 검사는 실제 빈칸만 허용해야 하므로 범위 밖을 empty로 대체하면 안 됩니다.\n\nGrid::is_empty는 조회 결과가 있고 그 값이 Cell::empty일 때만 true입니다. `&&`는 왼쪽이 false이면 오른쪽을 평가하지 않습니다. 따라서 값이 없는 optional을 `*cell`로 읽지 않도록 순서를 정합니다.\n\n내부 index_of는 행과 열을 각각 검사한 뒤 `row*10+column`을 계산합니다. (0,10)을 먼저 일차원 인덱스 10으로 바꾸고 전체 배열 길이만 검사하면 (1,0)과 혼동합니다. 메모리 주소가 배열 안이라는 사실만으로 2차원 좌표가 올바르지는 않습니다.\n\n현재 SimGrid::IsCellEmpty도 범위를 먼저 검사합니다. 그래서 BlockFits를 범위 검사 없이 직접 호출했다고 곧바로 배열 밖을 읽는 구조는 아닙니다. 외부의 경계 검사와 내부 조회의 방어 검사를 함께 두되, 각각 무엇을 보장하는지 설명해야 합니다. public 배열을 직접 읽는 다른 코드까지 이 함수가 보호하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "존재하는 빈 셀만 이동 가능한 공간으로 본다",
+          "language": "cpp",
+          "text": "constexpr bool is_empty(int row, int column) const noexcept {\n  const std::optional<Cell> cell = get(row, column);\n  return cell.has_value() && *cell == Cell::empty;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_grid.h",
+        "symbol": "bool IsCellEmpty(int row, int column) const",
+        "invariant": "배열을 읽기 전에 행과 열의 범위를 확인하며 범위 밖을 빈칸으로 허용하지 않는다.",
+        "mayDiffer": "현재 보드는 int ID0과 호환 ID8을 비어 있는 것으로 본다. 강의는 Cell::empty/filled 두 값으로 시작한다.",
+        "omitted": "고스트 표시·여러 ID·행 삭제·가비지 주입은 후속 범위다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "현재 코드의 ID8 호환 규약",
+          "body": "현재 SimGrid는 ID0 또는 ID8을 비어 있다고 취급합니다. 이 규약을 보고 활성 블록이나 고스트를 매번 보드 배열에 기록한다고 추측하지는 마세요. 고스트는 별도로 그립니다. 강의의 두 값 Cell을 현재 게임에 바로 대입하면 ID·해시·표현 계약도 달라지므로 그대로 교체하는 예제가 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "모든 경계를 먼저 확인하는 이유",
+      "body": "어떤 잘못된 배치에 점유된 칸과 보드 밖 칸이 동시에 있다고 합시다. 셀마다 범위와 점유를 한 번에 검사하고 처음 실패한 이유를 반환하면 배열 저장 순서에 따라 occupied 또는 outside가 나올 수 있습니다.\n\n예를 들어 기준점이 (-1,3)인 T에는 보드 밖의 (-1,4)와 보드 안의 (0,3)이 함께 있습니다. (0,3)이 차 있다면 두 이유가 모두 존재합니다. 네 칸의 목록 순서가 바뀌어도 같은 도형이라는 점은 그대로입니다.\n\n이 구현은 **unrepresentable → outside → occupied → clear** 순서로 우선순위를 정합니다. 변환이 성공해야 좌표를 판단하고, 모든 좌표가 안에 있어야 점유를 읽습니다. 이를 위해 범위 반복과 점유 반복을 분리합니다. 첫 범위 실패에서 반환해도 되고, 점유 검사는 그 반복 전체를 통과했을 때만 시작합니다.\n\n이것은 진단 결과를 일관되게 만드는 정책입니다. 한 번의 반복으로 범위·점유 중 무엇이든 발견하면 bool false를 반환하는 구현도 배치를 올바르게 거부할 수 있습니다. 범위에 안전한 is_empty를 사용한다면 두 번의 반복만이 유일하게 안전한 방법이라고 설명할 필요는 없습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "저장 순서가 의미가 되는 곳과 아닌 곳",
+          "body": "카탈로그에서 난수로 배열 인덱스를 뽑는다면 종류 순서가 결과에 영향을 줍니다. 여기서는 같은 모양의 칸 목록을 순열로 바꾸어도 단일 배치의 분류가 같아야 한다고 정합니다. ‘배열 순서는 중요하다/중요하지 않다’를 프로젝트 전체에 한 번에 적용하지 말고 소비하는 연산의 계약을 살펴보세요."
+        }
+      ]
+    },
+    {
+      "title": "CS 연결: 모두 만족과 하나라도 위반",
+      "body": "네 칸을 모두 검사하는 조건은 논리적으로 ‘모든 셀에 대해 범위 안이고 비어 있다’입니다. 하나라도 그 조건을 어기면 배치할 수 없습니다. 전체 조건을 각각 확인해 모두 true인지 모으는 것과, 반례 하나를 찾으면 즉시 거부하는 것은 같은 허용 집합을 만듭니다.\n\nclassify는 to_board의 완성된 좌표 배열을 받은 뒤 반례를 찾는 방식으로 작성합니다. 범위 반복에서 하나라도 밖이면 outside, 다음 점유 반복에서 하나라도 비어 있지 않으면 occupied입니다. 두 반복을 끝까지 통과하면 clear입니다.\n\n칸 수를 k로 보면 각 반복은 O(k)이고 여러 번 더해도 O(k)입니다. 이 예제에서는 k=4로 고정되어 있습니다.  다만 네 칸에서 좌표 목록을 복잡하게 캐시해 일관성 부담을 늘리기 전에, 읽기 쉬운 검사 경계를 먼저 완성합니다.\n\n이 함수는 시계·난수·입력 장치를 읽지 않습니다. 같은 값의 Grid와 Piece를 주면 같은 분류를 얻습니다. 따라서 창 없이 작은 상태표만 만들어 비교할 수 있습니다. 반환값을 GPU 색이나 효과와 직접 섞지 않는 이유이기도 합니다.",
+      "codes": [
+        {
+          "label": "좌표 계산·범위·점유를 순서대로 분류한다",
+          "language": "cpp",
+          "text": "inline Placement classify(const study_grid::Grid& board,\n                          const study_piece::Piece& piece) noexcept {\n    const auto cells = study_piece::to_board(piece);\n    if (!cells.has_value()) {\n        return Placement::unrepresentable;\n    }\n\n    // Pass 1: bounds. `outside` must win over `occupied` for every cell.\n    for (const auto& cell : *cells) {\n        if (!study_grid::Grid::contains(cell.row, cell.column)) {\n            return Placement::outside;\n        }\n    }\n\n    // Pass 2: occupancy. Only reached when every cell is inside the grid.\n    for (const auto& cell : *cells) {\n        if (!board.is_empty(cell.row, cell.column)) {\n            return Placement::occupied;\n        }\n    }\n\n    return Placement::clear;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "bool SimGame::BlockFits(const SimBlock& block) const",
+        "invariant": "블록이 점유할 모든 보드 칸을 읽어 배치 가능성을 판단한다.",
+        "mayDiffer": "현재 함수는 bool을 반환하며 범위 밖도 IsCellEmpty의 방어 검사로 false가 된다. 강의는 계산 실패/경계/점유 이유를 enum으로 나눈다.",
+        "omitted": "회전 보정·하드 드롭·고정과 게임 종료 정책은 아직 추가하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "같은 O(k)여도 실제 비용은 다르다",
+          "body": "네 칸을 한 번 검사하는 함수와 세 번 검사하는 함수는 모두 O(k)이지만 수행하는 연산 수는 다릅니다. Big-O는 입력 크기에 따른 증가율을 설명하므로, 실제 최적화에서는 반복 횟수와 측정 시간도 살펴봅니다."
+        }
+      ]
+    },
+    {
+      "title": "점유 사각형 전체를 충돌 칸으로 보지 않는다",
+      "body": "T의 점유 사각형은 가로 3칸·세로 2칸입니다. 하지만 그 안 여섯 칸이 모두 T의 셀은 아닙니다. 왼쪽 위와 오른쪽 위는 비어 있습니다.\n\n```text\n로컬 T       기준점 (0,3)일 때\n. # .        빈 모서리 (0,3), 점유 칸 (0,4)\n# # #        점유 칸 (1,3),(1,4),(1,5)\n```\n\nGrid의 (0,3)만 차 있다면 T는 그 칸을 점유하지 않으므로 clear입니다. 점유 사각형 전체를 검사하면 실제 모양과 겹치지 않는 장애물까지 충돌로 오인합니다. 사각형은 넓은 후보 영역을 빠르게 거르는 데 사용할 수 있지만, 이 격자 게임의 정확한 점유 판정은 실제 셀 목록으로 합니다.\n\n반대로 classify가 clear라고 해서 중복 칸이나 분리된 모양까지 등록해도 된다는 뜻은 아닙니다. 네 칸이 모두 같은 비어 있는 셀을 가리켜도 배치 조회 자체는 clear일 수 있습니다. 모양의 연결성·중복·종류 대응은 카탈로그 등록 계약으로, 실제 배치가 기존 보드와 겹치는지는 충돌 계약으로 나눕니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "보이는 픽셀 간격과 충돌 간격",
+          "body": "렌더러는 한 칸 간격 10 중 9만 칠해 경계선처럼 보이는 여백을 만듭니다. 이 여백 때문에 블록이 옆 칸을 통과할 수 있는 것은 아닙니다. 충돌은 픽셀 사각형이나 색을 읽지 않고 셀 좌표와 보드 값을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "보드와 활성 블록을 따로 두어 자기 충돌을 피한다",
+      "body": "Grid에는 이미 고정된 셀이 들어 있습니다. 움직이는 대상은 별도의 Piece입니다. 그리기는 둘을 합쳐 보여 주지만 저장소는 섞지 않습니다.\n\n현재 Piece의 네 칸을 먼저 Grid::set으로 filled로 바꾼 뒤 classify를 부르면 어떤 일이 생길까요? 모든 칸이 자신의 기록과 겹쳐 occupied가 됩니다. 이를 피하려고 이동 전에 원래 자리를 지우는 방식을 쓰면, 잘못된 겹침 상태에서 다른 고정 셀까지 지울 위험이 생깁니다.\n\n지금 이동 함수에는 `const Grid&`를 전달합니다. 이 함수는 보드를 읽고 Piece만 바꿀 수 있습니다. 고정은 낙하가 막혔을 때 보드에 값을 쓰는 별도의 상태 전이로 만들 예정입니다. ‘이번 프레임에 블록을 그렸다’와 ‘규칙상 보드에 고정했다’는 다른 사건입니다.\n\nconst 참조가 보드를 복사하거나 프로그램 전체에서 영구히 동결하는 것은 아닙니다. 이 참조를 통한 수정 경로를 제한합니다. 현재는 같은 메인 스레드에서 고정된 보드 상태를 읽으므로 검사와 확정 사이에 다른 작업이 보드를 바꾸지 않습니다. 다른 스레드가 동시에 수정할 수 있는 구조라면 const만으로 같은 조건이 유지되지는 않습니다.",
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::Draw()",
+        "invariant": "이미 고정된 보드와 움직이는 블록을 별도로 보관하고 함께 그린다.",
+        "mayDiffer": "현재 게임은 고스트·UI·애니메이션도 그린다. 강의는 고정 셀과 활성 블록의 불투명 그림만 사용한다.",
+        "omitted": "블록 고정·줄 지우기·효과·미리보기 UI는 후속 범위다."
+      }
+    },
+    {
+      "title": "기존 경계 이동을 이용해 후보만 움직인다",
+      "body": "새 study_collision::try_shift는 보드까지 읽는 이동 함수입니다. 경계만 검사하는 study_movement::try_shift는 작은 연산으로 남겨 두고, 새 함수 안에서 후보에 적용합니다. 정수 덧셈·표현 범위·보드 경계 계산을 다시 복사해서 작성하지 않습니다.\n\n순서는 다음과 같습니다.\n\n1. 방향이 -1/0/1인지, 현재 배치가 clear인지 확인합니다.\n2. 현재 Piece를 candidate에 복사합니다.\n3. 경계 이동 함수로 candidate를 이동합니다. idle·blocked·invalid면 바로 반환합니다.\n4. 이동한 candidate의 점유를 확인합니다. occupied면 blocked로 반환합니다.\n5. clear인 경우에만 `current = candidate`로 확정합니다.\n\n현재 상태가 이미 장애물과 겹쳐 있다면 방향 0도 invalid입니다. 이 helper는 잘못된 상태에서 빠져나오는 복구 함수를 겸하지 않습니다. 시작 상태의 전제와 새 후보가 막힌 상황을 구분해야 합니다.\n\n안쪽 함수가 candidate를 바꾸고 moved를 반환해도 바깥의 current는 아직 그대로입니다. 후보에 대한 성공과 게임 상태에 대한 최종 확정은 다른 단계입니다. 이 차이 덕분에 뒤늦게 점유를 발견해도 원본을 되돌리는 코드는 필요하지 않습니다.",
+      "codes": [
+        {
+          "label": "읽기 전용 보드 조건을 추가한 이동",
+          "language": "cpp",
+          "text": "inline study_movement::Result try_shift(const study_grid::Grid& board,\n                                        study_piece::Piece& current,\n                                        int direction) noexcept {\n    // Accept one-cell directions and idle; larger steps would skip path checks.\n    if (direction < -1 || direction > 1) {\n        return study_movement::Result::invalid;\n    }\n\n    // A piece that is not cleanly placed cannot be shifted.\n    if (classify(board, current) != Placement::clear) {\n        return study_movement::Result::invalid;\n    }\n\n    // Work on a copy: the original piece must stay intact until every check\n    // has passed.\n    study_piece::Piece candidate = current;\n\n    const study_movement::Result bounds_result =\n        study_movement::try_shift(candidate, direction);\n    if (bounds_result != study_movement::Result::moved) {\n        return bounds_result; // idle / blocked / invalid from the bounds helper\n    }\n\n    // On `moved` the bounds helper guarantees all cells are inside the board,\n    // so a non-clear result here can only be `occupied` (or an impossible\n    // state, which we treat as invalid).\n    const Placement after = classify(board, candidate);\n    if (after == Placement::occupied) {\n        return study_movement::Result::blocked;\n    }\n    if (after != Placement::clear) {\n        return study_movement::Result::invalid;\n    }\n\n    current = candidate; // commit only after all checks pass\n    return study_movement::Result::moved;\n}"
+        },
+        {
+          "label": "simulation/collision.h · 완성 파일",
+          "file": "checkpoints/30-collision/simulation/collision.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::MoveBlockLeft()",
+        "invariant": "점유 충돌로 거부된 이동은 현재 배치를 보존한다.",
+        "mayDiffer": "현재 함수는 상태 변경 후 역이동한다. 강의는 경계 검사 helper로 후보를 이동한 뒤 점유까지 확인하고 확정한다.",
+        "omitted": "고스트·마지막 성공 동작·음향 이벤트는 후속 범위다."
+      }
+    },
+    {
+      "title": "허용된 목적지가 이동 경로까지 보장하지는 않는다",
+      "body": "T의 기준점 열이 0이고 장애물이 (1,3)에 있다고 합시다. 현재 T의 아래쪽 칸은 열 0·1·2라 겹치지 않습니다. 목적지 열 4의 아래쪽 칸은 4·5·6이므로 그 배치도 clear입니다. 그렇다고 열 0에서 4까지 장애물 없이 지나갈 수 있는 것은 아닙니다.\n\n한 칸 오른쪽 후보는 아래쪽 열 1·2·3을 차지하므로 즉시 장애물에 막힙니다. 목적지만 검사해 한 번에 네 칸 옮기면 중간 장애물을 뛰어넘습니다. 이런 경로 누락을 연속 충돌 문제에서는 터널링(tunneling)이라고 부르기도 합니다.\n\n이번 API가 -1/0/1만 받는 것은 단순한 사용자 인터페이스 제한이 아니라 이동 검사의 전제입니다. 여러 칸 이동을 만들려면 한 칸씩 중간 상태를 검사하거나, 별도의 경로 검사를 설계해야 합니다. 완성된 단일 배치를 바로 적용하는 RL 행동은 키를 여러 번 누르는 경로와 다른 계약일 수 있으므로 나중에 따로 비교합니다.\n\n서로 다른 크기의 블록이거나 칸을 연속적인 좌표로 움직이는 게임까지 이 한 칸 규칙을 그대로 일반화하지 않습니다. 여기서는 같은 격자에서 네 칸짜리 모양을 수평 한 셀씩 평행이동합니다."
+    },
+    {
+      "title": "화면 연결에서 바뀌는 것은 허용 여부를 묻는 대상이다",
+      "body": "main의 입력 의도 계산은 그대로입니다. 경계 전용 함수 대신 board를 받는 충돌 함수를 호출합니다. moved 뒤에만 보드 좌표·정점·GPU 저장소를 갱신하는 경로도 유지합니다.\n\n초기 Piece도 classify가 clear인지를 확인합니다. 이후 모든 확정은 경계와 점유를 통과한 배치이므로 블록의 네 칸은 모두 보드 안에 남고 정점 수도 계속 24입니다. 같은 크기 버퍼 갱신 계약을 바꿀 필요가 없습니다.\n\nblocked는 벽 또는 채운 칸에 막힌 정상적인 결과입니다. CPU 상태가 변하지 않아 새 정점도 보내지 않습니다. invalid나 GPU 갱신 실패는 정상 이동 거부와 구분해 세션을 끝냅니다. 그래픽 실패까지 게임 상태가 자동 원복되는 것은 아닙니다.\n\n기존 movement_demo와 movement_probe는 경계 전용 연산을 관찰하는 도구로 남습니다. 새 tetris와 collision_demo가 점유를 포함한 동작을 보여 줍니다. 파일 이름과 호출한 함수 이름을 함께 확인해야 서로 다른 실습의 결과를 오류로 오인하지 않습니다.",
+      "codes": [
+        {
+          "label": "성공한 충돌 검사가 끝난 뒤에만 GPU를 갱신한다",
+          "language": "cpp",
+          "text": "const int direction = study_movement::horizontal_intent(\n    platform_key_pressed(Key::Left), platform_key_pressed(Key::Right));\nconst auto move = study_collision::try_shift(board, piece, direction);\nif (move == study_movement::Result::invalid) return 1;\nif (move == study_movement::Result::moved) {\n    const auto updated_cells = study_piece::to_board(piece);\n    if (!updated_cells) return 1;\n    const auto updated_mesh = study_piece_view::make_visible_mesh(*updated_cells);\n    if (!piece_buffer.replace_same_size(updated_mesh.vertices.data(),\n                                        updated_mesh.count)) return 1;\n    std::printf(\"moved: column=%d (bounds and occupancy)\\n\", piece.origin.column);\n} else if (move == study_movement::Result::blocked) {\n    std::puts(\"blocked by boundary or occupied cell; state unchanged\");\n}"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/30-collision/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "CPU 예측과 창에서 같은 장애물을 관찰한다",
+      "body": "저장소 루트에서 C++17·CMake로 CPU 실습을 빌드합니다. simulation/collision.h와 src/collision_demo.cpp가 새 파일입니다. CMake에는 데모·계약 검사·SCRIPTED 입력 검사·SDL 비교 타깃을 추가합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/30-collision -B out/study-30 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-30\n./out/study-30/collision_demo\nctest --test-dir out/study-30 --output-on-failure\n```\n\n기본 T의 기준점 열 3은 clear, 열 2는 occupied, 열 -1과 8은 outside입니다. 이어 왼쪽·0·오른쪽·왼쪽·왼쪽을 시도하면 열은 `3→3→3→4→3→3`입니다. 첫 거부와 마지막 거부는 같은 장애물 때문입니다.\n\nSDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core 환경에서는 창으로 비교합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/30-collision -B out/study-30-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-30-sdl\n./out/study-30-sdl/tetris T\n```\n\nT는 처음부터 왼쪽 한 칸이 막힙니다. 오른쪽으로 한 칸 움직인 뒤 왼쪽으로 돌아올 수 있지만, 다시 왼쪽을 누르면 (1,2)의 주황색 셀 때문에 멈춥니다. 한 번 눌렀다 놓을 때 한 칸이며 같은 프레임의 양쪽 눌림은 취소합니다. Escape/닫기로 종료합니다. 다중 구성 생성기는 구성과 실행 경로를 맞춥니다.\n\nI/J/L/O/S/T/Z 선택도 유지합니다. 모양의 실제 셀이 다르므로 같은 장애물 앞에서 마지막 기준점이 항상 같을 필요는 없습니다. Z의 기본 방향은 아래쪽 칸이 로컬 열 1·2라, (1,2) 장애물 앞에서 기준점 열 2까지 갈 수 있습니다. 같은 폭이라는 이유만으로 T와 같은 결과를 기대하지 않습니다.\n\n아래 배치에서 T는 기준점 열 3에 머뭅니다. 왼쪽 후보가 (1,2)의 주황색 셀을 덮기 때문입니다. 청록색 블록을 덧그려도 주황색 보드 데이터는 바꾸지 않습니다.\n\n![주황색 장애물 바로 오른쪽에서 왼쪽 이동이 막힌 T 블록](data:image/png;base64,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)",
+      "codes": [
+        {
+          "label": "src/collision_demo.cpp · 완성 파일",
+          "file": "checkpoints/30-collision/src/collision_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/30-collision/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "충돌 검사의 반례를 만들고 다음 상태 전이로 잇는다",
+      "body": "충돌 검사는 정상 배치 하나보다 조건이 겹치는 반례에서 오류가 잘 드러납니다. 다음 입력을 직접 만들어 분류와 상태 보존을 예상해 보세요.\n\n| 입력 | 기대할 성질 |\n| --- | --- |\n| T의 비어 있는 점유 사각형 모서리에 장애물 | clear |\n| 실제 점유 칸 하나에 장애물 | occupied |\n| 보드 밖 칸과 점유 칸이 함께 있음 | 셀 순서와 무관하게 outside |\n| 현재 정상, 후보만 장애물과 겹침 | blocked, 원본과 Grid 보존 |\n| 현재부터 겹친 상태에 방향 0 | invalid, 복구를 시도하지 않음 |\n| 목적지는 clear지만 중간 한 칸에 장애물 | 단일 배치 조회와 경로 판정을 구분 |\n| 원래 블록을 Grid에 미리 기록 | 자기 충돌로 occupied |\n\n보드의 모든 위치에 장애물을 하나씩 놓아 보고, 여러 종류·기준점에서 판정을 비교할 수 있습니다. 첫 셀에만 장애물이 있는 사례로 끝내면 나머지 칸 검사를 빠뜨린 구현을 놓칠 수 있습니다. 밖인 칸과 점유 칸의 목록 순서를 바꾸는 실험은 진단 우선순위가 저장 순서에 의존하는지 드러냅니다.\n\n같은 함수 결과뿐 아니라 실패 전후 Piece의 모든 필드와 Grid를 비교합니다. const 매개변수가 있다는 사실과 실제 호출 흐름에서 원본 상태가 유지된다는 사실을 함께 읽어야 합니다. 화면에서는 장애물 색·위치가 보존되고 블록이 그 앞에 멈추는지 관찰합니다.\n\n다음에는 입력이 없어도 일정한 규칙 시점마다 아래로 이동하게 만들겠습니다. 지금 만든 ‘후보를 만들고 범위·점유를 검사한 뒤 확정’하는 구조를 사용하되, **언제 한 번 시도하는가**를 렌더링 프레임 수와 분리해 정할 차례입니다.",
+      "codes": [
+        {
+          "label": "tests/collision_contract.cpp · 완성 파일",
+          "file": "checkpoints/30-collision/tests/collision_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/collision_input.cpp · 완성 파일",
+          "file": "checkpoints/30-collision/tests/collision_input.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/collision_real.cpp · 완성 파일",
+          "file": "checkpoints/30-collision/tests/collision_real.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "T 기준점(0,3)과 왼쪽 후보의 네 좌표를 적어 (1,2) 장애물과 비교한다.",
+      "T의 빈 모서리 (0,3)에 장애물을 두고 점유 사각형 검사와 셀 검사를 구분한다.",
+      "범위 밖과 점유가 섞인 배치에서 셀 순서를 바꾸어 우선순위를 확인한다.",
+      "거부한 이동 전후 Piece 전체와 Grid를 비교한다.",
+      "목적지는 비어 있지만 중간 이동이 막히는 배치를 만들어 경로 검사의 필요성을 설명한다."
+    ],
+    "expected": "경계·점유·계산 실패를 구분하고, 고정 셀과 활성 블록을 분리해 장애물 앞에서만 이동을 멈춘다.",
+    "failureChecks": [
+      "범위 밖 조회를 빈칸으로 바꾸고 있지 않은가?",
+      "범위/점유 우선순위가 목록 순서에 따라 달라지지 않는가?",
+      "T의 빈 모서리까지 블록으로 판정하지 않는가?",
+      "후보 검사 전 current 또는 Grid를 수정하지 않는가?",
+      "배치 조회 하나로 여러 칸 이동 경로를 보장한다고 가정하지 않는가?",
+      "새 main이 점유를 읽는 함수 대신 경계 전용 helper를 호출하고 있지 않은가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "30-1",
+      "kind": "범위와 점유",
+      "question": "기본 T의 기준점은 (0,3), 보드의 (1,2)는 filled입니다. 왼쪽 한 칸의 판정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "범위 안이므로 moved다."
+        },
+        {
+          "id": "b",
+          "text": "범위 안이지만 후보가 겹쳐 blocked다."
+        },
+        {
+          "id": "c",
+          "text": "현재부터 겹쳐 있으므로 invalid다."
+        },
+        {
+          "id": "d",
+          "text": "보드 밖으로 나가므로 outside다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "범위 안이지만 후보가 겹쳐 blocked다.",
+      "explanation": "후보 기준점은 (0,2)이고 아래쪽 칸은 (1,2),(1,3),(1,4)입니다. 모두 보드 안이지만 (1,2)가 차 있어 후보를 거부합니다. 원래 T는 겹치지 않으며 그대로 남습니다."
+    },
+    {
+      "id": "30-2",
+      "kind": "진단 우선순위",
+      "question": "배치에 보드 밖 칸과 이미 점유된 칸이 모두 있습니다. 셀 저장 순서를 바꿨을 때 이 classify의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "처음 읽은 칸에 따라 occupied 또는 outside다."
+        },
+        {
+          "id": "b",
+          "text": "두 이유가 있으므로 clear다."
+        },
+        {
+          "id": "c",
+          "text": "합계 셀 수가 네 개면 occupied다."
+        },
+        {
+          "id": "d",
+          "text": "좌표 계산이 성공했다면 순서와 무관하게 outside다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "좌표 계산이 성공했다면 순서와 무관하게 outside다.",
+      "explanation": "모든 경계 검사를 통과해야 점유 반복으로 넘어갑니다. 어느 칸부터 저장했든 밖인 칸이 하나라도 있으면 outside가 우선합니다. 계산 자체가 실패하면 unrepresentable이 먼저입니다."
+    },
+    {
+      "id": "30-3",
+      "kind": "실제 점유 모양",
+      "question": "기준점 (0,3)의 T에서 보드 (0,3)만 filled이고 다른 셀은 비었습니다. 배치 분류는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "clear: 그 모서리는 T의 실제 점유 칸이 아니다."
+        },
+        {
+          "id": "b",
+          "text": "occupied: 점유 사각형 안이면 모두 T다."
+        },
+        {
+          "id": "c",
+          "text": "outside: 기준점 칸이 차면 범위 밖이다."
+        },
+        {
+          "id": "d",
+          "text": "unrepresentable: T는 사각형이 아니기 때문이다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "clear: 그 모서리는 T의 실제 점유 칸이 아니다.",
+      "explanation": "T의 위쪽 실제 칸은 (0,4) 하나입니다. (0,3)은 점유 사각형의 빈 모서리입니다. 정확한 겹침 검사는 사각형 전체가 아니라 네 셀 목록으로 합니다."
+    },
+    {
+      "id": "30-4",
+      "kind": "저장 책임",
+      "question": "현재 Piece의 셀을 먼저 Grid에 filled로 기록한 뒤 classify를 부르면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "그리기 순서에 따라 clear가 될 수도 있다."
+        },
+        {
+          "id": "b",
+          "text": "같은 Piece의 기록이므로 자동으로 무시한다."
+        },
+        {
+          "id": "c",
+          "text": "자신이 기록한 셀과 겹쳐 occupied가 된다."
+        },
+        {
+          "id": "d",
+          "text": "Grid의 const 참조가 기록을 삭제한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "자신이 기록한 셀과 겹쳐 occupied가 된다.",
+      "explanation": "classify는 누가 셀을 채웠는지 알지 못합니다. 활성 Piece는 보드와 별도로 보관하고, 고정할 때만 Grid에 쓰는 상태 전이를 만들어야 자기 충돌을 피할 수 있습니다."
+    },
+    {
+      "id": "30-5",
+      "kind": "목적지와 경로",
+      "question": "시작 배치와 네 칸 오른쪽 목적지가 모두 clear지만 중간 한 칸 이동은 occupied입니다. 올바른 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "classify가 시작과 목적지 사이의 경로를 이미 검사했다."
+        },
+        {
+          "id": "b",
+          "text": "목적지 판정만으로 경로를 보장하지 않으며 중간 상태 검사 등이 필요하다."
+        },
+        {
+          "id": "c",
+          "text": "오른쪽 입력을 int로 넘기면 중간 장애물은 자동 검출된다."
+        },
+        {
+          "id": "d",
+          "text": "보드 경계를 넘지 않으면 네 칸 이동은 항상 가능하다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "목적지 판정만으로 경로를 보장하지 않으며 중간 상태 검사 등이 필요하다.",
+      "explanation": "classify는 주어진 한 배치만 검사합니다. 목적지만 바꾸어 순간이동하면 장애물을 건너뛸 수 있습니다. 이 이동 API는 한 셀 방향만 받고, 더 긴 이동에는 별도 경로 계약이 필요합니다."
+    }
+  ]
+}

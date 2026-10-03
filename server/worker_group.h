@@ -5,14 +5,20 @@
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace relay {
 
 // Tracks detached workers so their owner can stop accepting new work and wait
-// until every running callback has released its references.
+// until every callback and its owned captures have been destroyed.
+// stopAccepting does not cancel running jobs. The owner must wake them before
+// waiting, and finish/join external callers before destroying this group.
+// A task must not wait on its own group. TLS destructors/OS thread exit are
+// outside this task-drain boundary; use join ownership when those matter.
 class WorkerGroup {
 public:
     explicit WorkerGroup(
@@ -43,25 +49,37 @@ public:
             ++active_;
         }
 
+        std::thread worker;
         try {
-            std::thread([this, work = std::forward<Fn>(fn)]() mutable {
+            worker = std::thread(
+                [this, work = std::make_unique<std::decay_t<Fn>>(std::forward<Fn>(fn))]() mutable {
                 Completion completion{this};
+                // Locals die in reverse order. Destroy the task (including its
+                // captures) before Completion releases the active slot.
+                auto ownedWork = std::move(work);
                 try {
-                    work();
+                    (*ownedWork)();
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "[%s] worker failed: %s\n", name_, e.what());
                 } catch (...) {
                     std::fprintf(stderr, "[%s] worker failed: unknown exception\n", name_);
                 }
-            }).detach();
+            });
         } catch (const std::exception& e) {
-            finish();
             std::fprintf(stderr, "[%s] worker launch failed: %s\n", name_, e.what());
+            finish();
             return false;
         } catch (...) {
-            finish();
             std::fprintf(stderr, "[%s] worker launch failed: unknown exception\n", name_);
+            finish();
             return false;
+        }
+        // A failed detach must not destroy a joinable temporary. The task
+        // already started, so only its Completion releases the slot.
+        try {
+            worker.detach();
+        } catch (...) {
+            worker.join(); // Fallback may block. A join failure is fail-fast.
         }
         return true;
     }

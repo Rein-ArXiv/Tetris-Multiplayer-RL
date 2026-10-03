@@ -1,0 +1,447 @@
+{
+  "id": "lesson-54",
+  "title": "Game 래퍼: 규칙과 표현 사이의 어댑터",
+  "shortTitle": "어댑터·값 뷰·소유권",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: main이 FrameRunner 진행·규칙 조회·잠금 효과를 직접 연결하며 표현 값의 소유 계약이 흩어져 있습니다.",
+  "finish": "완료: CPU Game 어댑터가 규칙 진행과 효과를 연결하고, 값 뷰를 실제 렌더 준비에 전달합니다. 장치 자원의 복사·해제 경계도 구별합니다.",
+  "objective": "합성·명령/조회·값/참조·보고 소비·자원 수명으로 어댑터를 설계하고, 실제 게임의 복사와 종료 오류를 진단합니다.",
+  "prerequisites": [
+    "FrameRunner의 배치·보고·실패 보존",
+    "Round의 값 상태와 파생 고스트",
+    "GPU 자원의 수명·표현 난수·회귀 비교"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek의 작은 GameView 초안을 검토하고 실제 main에 연결; 실제 Game을 장치 대역에 링크해 복사 결함과 수명 계약 검증",
+    "draftJob": "out/learning-jobs/054-adapter-events.jsonl",
+    "corrections": [
+      "실제 Game 복사 시 원본 별칭·4개 중복 해제·초기화 참조 -1을 재현해 복사/이동 삭제",
+      "정상 종료에서 세션/게임 소유자를 백엔드 종료 전에 정리",
+      "학습 Game은 값 멤버만 소유하므로 복사를 허용; 장치 소유자와 구별",
+      "CPU 데모의 시간 양자화로 0틱이 나오는 입력을 0.017초로 바꾸고 기대 1틱을 검사"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED 48/SDL 49 CTests와 누적 tetris·adapter_demo 빌드·경고0",
+    "100시드×150프레임의 직접 위임·규칙 바이트·시간 위상·보고·표현 상태·값 뷰 대조",
+    "뷰 수정/과거 뷰 유지·조회100회·복사 독립성·무효 시간·깨진 배치 뷰 실패·한 배치 두 잠금·stopped 검사",
+    "실제 Game 장치 대역의 별칭·unique_ptr 전달·공유 음악·사건 소비·실패 초기화·대체 재생·1회 해제 검사",
+    "복사/이동 컴파일 거부·학습/실제 UBSan·이중 진행/첫 보고 누락/조회 중 소비 3개 Release 변형 거부",
+    "루트 클라이언트 빌드·16 CTests·기존 sim_hash_dump 전체 골든 유지; 정상 종료 순서는 소스 검토",
+    "사용자 요청으로 GUI 검사 생략. 실제 음향·픽셀 및 Win32/macOS 네이티브 실행 미수행"
+  ],
+  "recap": {
+    "points": [
+      "골든은 입력·관측 경계·형식을 고정해 검토한 기준 기록입니다.",
+      "최초 관측 차이는 원인이 생긴 최초 틱과 다를 수 있습니다.",
+      "기준 비교와 후보 생성은 분리하고 실패로 기준을 자동 갱신하지 않습니다."
+    ],
+    "bridge": "동작 유지 근거를 가진 상태에서, 규칙과 표현의 연결을 작은 어댑터로 옮기고 같은 결과를 확인합니다."
+  },
+  "sections": [
+    {
+      "title": "상태와 화면 사이의 연결 지점을 만든다",
+      "body": "현재 main은 입력을 모아 FrameRunner에 넘기고, Round에서 표시할 값과 고스트를 읽고, 잠금 보고로 배경색을 바꿉니다. 각 기능은 동작하지만 규칙 진행과 표현 준비의 연결 규칙이 main 곳곳에 흩어져 있습니다.\n\n이번에는 이 연결을 `study_game::Game`에 모읍니다. Game은 FrameRunner와 표현용 난수 상태를 소유하고, 새 보고를 처리하며, 표시할 값을 GameView로 내보냅니다. main은 플랫폼 입력과 GPU 자원의 수명을 계속 담당합니다.\n\n이처럼 한쪽의 인터페이스를 다른 쪽이 쓰기 좋은 형태로 연결하는 객체를 **어댑터(adapter)**라고 합니다. 여기서 바꾸는 것은 틱 규칙 자체가 아니라 호출과 데이터 전달의 경계입니다.",
+      "codes": [
+        {
+          "label": "소유와 호출 방향",
+          "language": "text",
+          "text": "main ──→ Game ──→ FrameRunner ──→ Round\n  │        ├──→ AccentNoise       │\n  │        └──→ GameView ←────────┘\n  └──→ GPU 버퍼·프로그램·그리기\n\n규칙 결과 → 표현용 값 → 그리기 명령"
+        }
+      ],
+      "reference": {
+        "path": "src/game.h",
+        "symbol": "class Game",
+        "invariant": "클라이언트 경계가 규칙 객체와 표현 경로를 연결한다.",
+        "mayDiffer": "실제 Game은 SimGame과 오디오 핸들을 소유하며 Draw 함수까지 제공한다.",
+        "omitted": "학습 Game은 CPU 어댑터이고 GL 자원은 main의 렌더 스코프에 남긴다."
+      }
+    },
+    {
+      "title": "합성으로 소유 관계를 표현한다",
+      "body": "**합성(composition)**은 객체가 다른 객체를 멤버로 소유해 동작을 구성하는 방식입니다. Game 안의 FrameRunner가 Round를 소유하고, Game 안의 AccentNoise가 표현 엔진을 소유합니다.\n\nGame은 새로운 이동·충돌·가비지 규칙을 정의하지 않습니다. advance는 FrameRunner에 시간과 입력을 한 번 전달합니다. 규칙 결과가 돌아오면 클라이언트 효과를 처리합니다. 책임을 나눈다는 것은 함수 수를 줄이는 것보다 **누가 어떤 상태를 바꿀 수 있는가**를 분명히 하는 일입니다.\n\n| 소유자 | 바꿀 수 있는 상태 | 외부에 제공할 것 |\n| --- | --- | --- |\n| Round | 보드·조각·점수·공급기 | 규칙 관찰과 틱 결과 |\n| FrameRunner | Round·시간 잔여량·보류 입력 | 틱 배치 보고 |\n| Game | FrameRunner·표현 RNG·배경색 | advance·값 뷰·진단 조회 |\n| main의 렌더 스코프 | GL 버퍼·프로그램·창 연결 | 실제 제출과 화면 표시 |\n\n이 설계에서 캡슐화는 소유한 상태를 정해진 경로로 진행시키고 필요한 관찰값을 제공하는 데 있습니다.",
+      "codes": [
+        {
+          "label": "어댑터의 값 소유 멤버",
+          "language": "cpp",
+          "text": "private:\n    study_loop::FrameRunner runner_;\n    study_presentation::AccentNoise accent_;\n    study_blend::Rgba background_{0.03125, 0.0625, 0.09375, 1};\n};"
+        }
+      ]
+    },
+    {
+      "title": "명령과 조회를 구별한다",
+      "body": "**명령(command)**은 상태를 바꾸는 요청이고 **조회(query)**는 현재 값을 읽는 요청입니다. Game::advance는 규칙과 효과를 진행하므로 명령입니다. view·background·phase는 조회입니다.\n\n화면을 두 번 그리거나 창 크기 때문에 뷰를 다시 읽었다고 다음 조각이나 배경 난수까지 진행하면 표현 횟수가 동작을 바꾸게 됩니다. 그래서 난수 소비를 advance 안에 두고 view에서는 현재 값을 복사하거나 파생값을 계산합니다.\n\nC++의 const는 이 구별을 표현하는 한 도구입니다. 하지만 mutable 필드나 외부 객체를 수정하는 함수 호출까지 자동으로 금지하는 것은 아니므로, 실제 호출 내용을 확인해야 합니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "const 조회가 미래 값까지 고정할까?",
+          "body": "const Round&는 그 참조를 통해 일반 필드를 수정하지 못하게 합니다. 소유자 Game이 advance를 호출하면 같은 Round 객체의 상태가 달라질 수 있습니다. const 참조와 과거 시점의 값 복사본은 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "표현에 필요한 값만 복사한다",
+      "body": "GameView는 보드·활동 조각·고스트·미리보기·점수·종료 이유를 값으로 담습니다. **값 스냅샷**은 읽은 시점의 데이터를 자신의 저장 공간에 보관합니다. 반환된 뷰를 수정해도 원본 Round를 수정하지 않습니다.\n\n이 뷰의 필드는 보드 메시·조각·고스트·미리보기·점수·종료 표시를 구성하는 자료입니다. 화면이 필요로 하는 값에 맞춰 경계를 정합니다.\n\n멤버 타입도 살펴봅니다. Grid는 고정 배열, Piece는 네 셀과 원점, Queue는 고정 배열 기반의 값입니다. optional은 값의 유무를 표현하며 포함된 Piece나 Landing도 자신의 값으로 보관합니다. 포인터나 참조를 저장한 뷰라면 같은 독립성을 기대할 수 없습니다.",
+      "codes": [
+        {
+          "label": "표현용 값의 계약",
+          "language": "cpp",
+          "text": "struct GameView {\n    study_grid::Grid board;\n    std::optional<study_piece::Piece> active;\n    std::optional<study_ghost::Landing> ghost;\n    study_next::Queue next;\n    std::uint64_t score = 0;\n    study_round::EndReason end_reason = study_round::EndReason::none;\n};"
+        }
+      ],
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::DrawGrid(",
+        "invariant": "표현은 규칙이 제공한 관찰값을 읽어 구성한다.",
+        "mayDiffer": "실제 DrawGrid는 sim.Grid()의 const 참조를 호출 중에 읽는다. 학습 뷰는 값으로 떼어 보관한다.",
+        "omitted": "보드 복사 방식과 즉시 참조 방식은 비용·수명 계약이 다르다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "표현 뷰로 경기를 이어 실행할 수 있을까?",
+          "body": "전체 경기를 이어 실행하려면 RNG·남은 가방·시간 누적기·보류 입력도 필요합니다. GameView는 표시값을 보관한 스냅샷이며, 미래 규칙 복원을 위한 전체 상태 파일과는 범위가 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "파생값을 만들고 실패를 전달한다",
+      "body": "make_view는 ghost를 한 번 계산합니다. 활동 조각이 있는데 유효한 고스트를 얻지 못하면 nullopt를 반환합니다. 활동 조각이 없는 종료 상태에서는 ghost도 없는 것이 정상입니다.\n\n필요한 표시 자료를 만들 수 없으면 그 실패를 호출자에게 전달합니다. 성공하면 선택한 값들을 복사해 반환합니다. 뷰를 만드는 동안 규칙이 동시에 바뀌지 않는 단일 스레드 호출이 전제입니다.\n\n`view.board = round.board()`는 참조 대입이 아니라 Grid 값 대입입니다. `round.board()`가 참조를 반환하더라도, 왼쪽 멤버가 Grid 값이므로 배열 내용이 복사됩니다. 반환 타입뿐 아니라 데이터를 받는 쪽의 타입까지 읽어야 합니다.",
+      "codes": [
+        {
+          "label": "규칙을 바꾸지 않는 표현 투영",
+          "language": "cpp",
+          "text": "inline std::optional<GameView> make_view(const study_round::Round& round) noexcept {\n    const std::optional<study_ghost::Landing> ghost = round.ghost();  // 1회만 조회\n    const std::optional<study_piece::Piece> active = round.active();\n    if (active.has_value() && !ghost.has_value()) {\n        return std::nullopt;\n    }\n\n    GameView view;\n    view.board = round.board();\n    view.active = active;\n    view.ghost = ghost;\n    view.next = round.next();\n    view.score = round.score();\n    view.end_reason = round.end_reason();\n    return view;\n}"
+        },
+        {
+          "label": "presentation/game_view.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/54-game-adapter/presentation/game_view.h",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "조회 실패의 검사 사례",
+          "body": "정상 Round는 활동 조각의 배치 불변 조건을 유지합니다. 검사에서는 그 조각과 겹치는 셀을 의도적으로 넣어 ghost 계산 실패를 만들고, 뷰가 nullopt를 반환하며 상태를 고치지 않는지 확인합니다. 이 결함 주입은 정상 편집 API를 추가하는 일이 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "잠금 효과는 새 보고를 받을 때 소비한다",
+      "body": "advance가 실패하면 FrameRunner는 원래 상태를 유지하고 Game도 효과를 소비하지 않습니다. 성공하면 보고 배열을 순서대로 읽고, lock이 있는 항목마다 표현 RNG를 한 번 진행시킵니다.\n\n한 프레임에서 여러 틱이 실행되므로 lock 보고도 여러 개일 수 있습니다. 예를 들어 6틱 배치에서 잠금이 두 번 있으면 두 번 샘플링하고 마지막 색이 현재 배경색이 됩니다. 단순히 board_changed가 참인지 한 번만 확인하면 보고 횟수를 잃습니다.\n\n보고의 값은 main에도 반환해 로그나 다른 표현에 사용할 수 있습니다. 배경색의 소비 책임은 Game 한 곳에 있으므로 main이 보고를 다시 읽는 행위가 배경 난수를 다시 진행시키지는 않습니다.",
+      "codes": [
+        {
+          "label": "위임 한 번, 보고마다 효과 한 번",
+          "language": "cpp",
+          "text": "std::optional<study_loop::FrameReport> advance(double seconds,\n                                             study_loop::FrameInput input) noexcept {\n    auto report = runner_.advance(seconds, input);\n    if (!report) return std::nullopt;\n    // Consume each new report exactly once here. View/draw never consume it.\n    for (unsigned i = 0; i < report->ticks; ++i) {\n        if (report->observations[i].lock)\n            background_.b = 0.09375 + 0.002 * accent_.sample();\n    }\n    return report;\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::SubmitInput(uint8_t inputMask)",
+        "invariant": "규칙을 위임한 뒤 해당 소비자가 담당하는 표현 사건을 처리한다.",
+        "mayDiffer": "실제 오디오는 bool 플래그를 재생 후 지운다. 학습 배치 보고는 발생 순서와 개수를 값으로 보관한다.",
+        "omitted": "오디오 장치와 효과음 로딩은 이번 학습 어댑터에 추가하지 않는다."
+      }
+    },
+    {
+      "title": "실패와 트랜잭션의 범위를 정한다",
+      "body": "FrameRunner는 한 프레임을 후보 값으로 계산하고 성공할 때 게시합니다. Game의 후속 효과 처리는 고정 배열 순회와 예외 없는 값 연산이라 별도 실패 경로가 없습니다. 따라서 실패한 advance에서 표현 RNG만 먼저 진행하는 상황을 만들지 않습니다.\n\nGPU 업로드나 표시 실패는 그 다음 단계입니다. 이미 게시한 규칙 틱까지 되돌린다는 계약은 없습니다. main은 표시 준비가 실패하면 자원을 정리하고 실행을 끝냅니다. 한 틱의 규칙 갱신과 장치에 화면을 보여 주는 작업의 실패 범위를 나누어 읽습니다.\n\n어댑터에 나중에 실패 가능한 표현 작업을 넣는다면 이 순서를 다시 검토해야 합니다. 외부 장치의 부작용을 값 복사로 되돌릴 수 있다고 가정해서는 안 됩니다.",
+      "codes": [
+        {
+          "label": "조회 API와 전체 어댑터",
+          "language": "cpp",
+          "text": "std::optional<GameView> view() const noexcept { return make_view(runner_.round()); }\n// Borrowed rule state for diagnostics; invalid when this Game is destroyed.\nconst study_round::Round& round() const noexcept { return runner_.round(); }\nstudy_blend::Rgba background() const noexcept { return background_; }\nstd::uint64_t accent_state() const noexcept { return accent_.state(); }\nstd::uint64_t phase() const noexcept { return runner_.phase(); }"
+        },
+        {
+          "label": "client/game.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/54-game-adapter/client/game.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "메인 루프에서 뷰를 사용한다",
+      "body": "run_session은 Game을 만들고 처음 GameView를 얻습니다. 보드·활동 조각·고스트·미리보기·점수의 CPU 메시 준비는 이 뷰를 읽습니다. GL 자원 생성과 제출은 같은 렌더 스코프에 남아 있습니다.\n\n배치 처리 뒤 board_changed 또는 piece_changed가 참이거나 점수가 바뀌면 뷰를 다시 얻습니다. 표시값이 그대로인 타이머 진행만으로 매번 보드 전체를 다시 복사할 필요는 없습니다. 다만 변경 플래그에 새 표시 필드를 반영하지 않으면 오래된 뷰가 남으므로 뷰 계약을 늘릴 때 갱신 조건도 검토합니다.\n\n규칙 해시 로그는 Game의 const Round 관찰을 사용합니다. 그 참조는 같은 객체의 최신 상태를 읽습니다. 보관해 둔 GameView는 다음 대입 전까지 자신의 시점 값을 유지합니다.",
+      "codes": [
+        {
+          "label": "처음 소유자와 값 뷰를 만든다",
+          "language": "cpp",
+          "text": "study_game::Game game(initial_round);\nconst auto& round = game.round();\nauto view = game.view();\nif (!view) return 1;"
+        },
+        {
+          "label": "표시 변경 뒤 스냅샷을 갱신한다",
+          "language": "cpp",
+          "text": "const auto report = game.advance(frame.dt,raw);\nif (!report) return 1;\n// Refresh visible data only after a reported visible change.\nif (report->board_changed || report->piece_changed || round.score() != view->score) {\n    view = game.view();\n    if (!view) return 1;\n}"
+        }
+      ]
+    },
+    {
+      "title": "그리기는 효과를 재실행하지 않는다",
+      "body": "main의 잠금 보고 순회에서 배경 난수 호출을 제거합니다. 배경색은 game.background()에서 읽어 render에 전달합니다. 활동 조각과 종료 마커도 같은 뷰에서 표시 여부를 결정합니다.\n\n여기서 “한 번 소비”는 이 어댑터의 호출 흐름에 대한 계약입니다. 성공한 advance가 반환한 보고에 대해 Game이 한 번 처리한다는 뜻입니다. 네트워크 재전송이나 영구 이벤트 로그의 중복 방지 기능까지 뜻하지 않습니다.\n\n뷰를 100번 읽어도 규칙 바이트와 표현 RNG 상태가 유지되는지 확인해 봅니다. 색이 같다는 것만 보면 우연히 같은 색을 다시 고른 중복 소비를 놓칠 수 있으므로 검사에서는 엔진 상태도 관찰합니다.",
+      "codes": [
+        {
+          "label": "그리기에 현재 배경값을 전달한다",
+          "language": "cpp",
+          "text": "if (!study_board_scene::render(gl,empty_program.name(),filled_program.name(),\n        vertex_array.name(),vertex_buffer.vertex_count(),mesh.empty_vertices,*layout,game.background())) return 1;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "다른 소비자가 같은 사건을 읽을 때",
+          "body": "오디오와 흔들림이 같은 bool을 읽고 지우면 먼저 읽은 쪽이 뒤 소비자의 알림을 없앨 수 있습니다. 현재 게임은 dropSoundEvent와 hardDropEvent를 구별합니다. 학습 보고는 값으로 반환되지만 어떤 효과를 누가 처리할지는 여전히 명시해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "값 복사가 안전한 이유를 멤버에서 찾는다",
+      "body": "학습 Game은 FrameRunner·AccentNoise·RGBA 값을 소유합니다. 이 타입들은 자신의 배열·카운터·엔진 값을 보관하므로 기본 복사로 규칙 진행 상태와 표현 상태를 각각 복사합니다. 복사한 Game을 진행해도 원본은 변하지 않습니다.\n\n이 경우 특별한 해제 동작이 없어서 복사·이동·소멸자를 직접 작성할 필요가 없습니다. 이런 설계를 흔히 **Rule of Zero**라고 부릅니다. 이름만으로 판단하기보다 멤버가 외부 자원을 어떻게 소유하는지 확인하는 것이 핵심입니다.\n\nGameView의 값 복사는 과거 표시값을 남깁니다. const Round&를 보관하면 소유자 내부의 같은 객체를 계속 바라봅니다. Game이 파괴되면 그 참조는 사용할 수 없습니다. 값 스냅샷과 빌린 참조 중 무엇을 선택했는지가 사용 가능한 수명을 결정합니다.",
+      "codes": [
+        {
+          "label": "서로 다른 복사의 목적",
+          "language": "cpp",
+          "text": "auto old_view = game.view();  // 이 시점의 표시값을 보관\nauto fork = game;             // 규칙 진행기와 표현 상태를 독립적으로 복사\nconst auto& live = game.round(); // 소유자의 최신 규칙 상태를 빌려 읽음"
+        }
+      ]
+    },
+    {
+      "title": "실제 Game의 참조 별칭과 핸들은 별도 정책이 필요하다",
+      "body": "현재 프로젝트의 Game은 다른 멤버 구성을 가집니다. SimGame 값과 함께 `bool& gameOver`, `int& score`를 보관하고 오디오 핸들을 소유합니다. 생성자는 별칭을 자기 sim의 필드에 연결합니다.\n\n참조 멤버를 기본 복사하면 복사본의 참조가 원본을 계속 가리킵니다. 원본 Game을 a, 복사본을 b라 하면 b.sim은 복사되지만 b.score는 a.sim.score를 가리킬 수 있습니다. 여기에 오디오 핸들 숫자도 그대로 복사하면 두 소멸자가 같은 자원을 해제합니다.\n\n실제 Game은 복사 생성·대입, 이동 생성·대입을 명시적으로 삭제합니다. 사용자 정의 소멸자가 있다고 복사 생성이 자동 금지되지는 않습니다. 이동을 지원하려면 참조의 재연결과 핸들·공유 카운트의 이전을 설계해야 합니다. 현재 사용처에서는 객체 주소를 유지하는 정책을 택합니다.",
+      "codes": [
+        {
+          "label": "장치 자원 소유자의 복사·이동 정책",
+          "language": "cpp",
+          "text": "Game(const Game&) = delete;\nGame& operator=(const Game&) = delete;\nGame(Game&&) = delete;\nGame& operator=(Game&&) = delete;"
+        }
+      ],
+      "reference": {
+        "path": "src/game.h",
+        "symbol": "Game(const Game&) = delete;",
+        "invariant": "자원 소유와 자기 멤버를 가리키는 참조가 복사 정책을 결정한다.",
+        "mayDiffer": "학습 CPU Game은 외부 자원과 참조 멤버가 없어 값 복사를 허용한다.",
+        "omitted": "두 클래스의 이름이 같아도 같은 복사 계약을 강제하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "std::move를 쓰면 이동 구현이 생길까?",
+          "body": "std::move는 이동을 고려하도록 값 범주를 바꾸는 연산입니다. 참조를 재연결하거나 핸들을 비우는 함수를 만들어 주지 않습니다. 명시적 이동이 없는 경우 복사 생성자가 호출 후보가 될 수도 있으므로, 객체의 실제 생성자 계약을 확인해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "소유자 포인터를 옮기고 장치보다 먼저 정리한다",
+      "body": "현재 main은 unique_ptr<Game>으로 게임 객체를 소유합니다. unique_ptr을 이동하면 객체 자체는 같은 주소에 남고 소유자만 바뀝니다. 참조 별칭도 같은 sim을 계속 가리킵니다. 새 판을 만들 때는 make_unique로 새 객체를 만듭니다.\n\n자원 해제에도 순서가 있습니다. Game 소멸자는 효과음을 해제하고 공유 음악 사용 수를 내리며 오디오 초기화 참조를 반납합니다. 이 작업은 오디오 백엔드가 살아 있을 때 실행되어야 합니다.\n\n정상 종료에서는 세션의 소켓 작업을 닫고 Game 소유자들을 reset한 다음 이미지·렌더러·플랫폼·네트워크 백엔드를 정리합니다. SDL 플랫폼의 SDL_Quit까지 실행한 뒤 뒤늦게 오디오 자원을 해제하는 순서를 피합니다.",
+      "codes": [
+        {
+          "label": "객체를 옮기지 않고 소유권을 전달한다",
+          "language": "cpp",
+          "text": "auto owner = std::make_unique<Game>(1);\nGame* address = owner.get();\nauto next_owner = std::move(owner);\n// owner는 비었고, next_owner.get() == address."
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "// Join socket work and release Game-owned audio",
+        "invariant": "장치와 백엔드가 살아 있는 동안 그 자원의 소유자를 먼저 정리한다.",
+        "mayDiffer": "플랫폼·오디오 구현이 달라도 의존하는 자원을 먼저 파괴하는 수명 계약을 유지한다.",
+        "omitted": "정상 종료 순서와 예외·조기 실패 경로의 범위는 각각 검토해야 한다."
+      }
+    },
+    {
+      "title": "작은 CPU 실습과 실제 연결을 확인한다",
+      "body": "`54-game-adapter`는 두 헤더와 adapter_demo·adapter_contract를 추가하고 main의 규칙/표현 연결을 바꿉니다. Round·FrameRunner·골든 시나리오의 규칙은 그대로입니다.\n\n데모는 0.017초와 하드 드롭 요청을 주어 한 틱을 진행합니다. 현재 조각이 고정되고 미리보기의 맨 앞이 다음으로 이동합니다. 100번 뷰를 조회한 뒤에도 규칙 지문과 표현 엔진 상태가 유지되어야 합니다.\n\nSCRIPTED 구성으로 CPU 경계를 검사한 뒤 SDL 구성의 tetris를 만들면 같은 어댑터가 실제 화면 준비에 사용됩니다. 화면을 열기 위해서는 SDL과 OpenGL 3.3 Core 환경이 필요합니다. 비교와 어댑터 검사는 장치 없이 실행할 수 있습니다.",
+      "codes": [
+        {
+          "label": "CPU 데모와 어댑터 검사",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/54-game-adapter -B out/study-54 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-54 --target adapter_demo adapter_contract golden_trace\n./out/study-54/adapter_demo\nctest --test-dir out/study-54 -R '^(adapter_contract|golden_)' --output-on-failure"
+        },
+        {
+          "label": "실제 게임 타깃을 연결한다",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/54-game-adapter -B out/study-54-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-54-sdl --target tetris\n./out/study-54-sdl/tetris --seed 1"
+        },
+        {
+          "label": "src/adapter_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/54-game-adapter/src/adapter_demo.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "어댑터 경계에 맞는 검사를 고른다",
+      "body": "위임을 두 번 하면 규칙이 두 번 진행합니다. 조회 중 난수를 소비하면 화면 조회가 효과 상태를 바꿉니다. 보고 배열의 첫 항목을 건너뛰면 잠금 효과를 놓칩니다. 각각 다른 계약 위반이므로 작은 결함을 넣었을 때 맞는 검사가 실패하는지 확인합니다.\n\n직접 FrameRunner를 실행한 결과와 Game을 통해 실행한 결과를 같은 입력·시간으로 대조합니다. Round 바이트·시간 위상·보고·표현 엔진·값 뷰를 각각 확인합니다. 한 배치에 두 잠금이 발생하는 높은 보드와, 종료 뒤 stopped·0틱 프레임·잘못된 시간도 포함합니다.\n\n실제 Game은 오디오·그리기 대역과 연결해 초기화/해제 수, 핸들 중복 해제, 공유 음악, 실패한 초기화, 효과음 대체 재생과 사건 소비를 확인합니다. 이 대역은 자원 호출 계약을 검사하며 실제 소리나 화면 픽셀을 검증하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "tests/adapter_contract.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/54-game-adapter/tests/adapter_contract.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "tests/game_wrapper_test.cpp",
+        "symbol": "int main()",
+        "invariant": "자원 소유자의 생성·호출·소멸과 불허된 복사를 검사한다.",
+        "mayDiffer": "실제 Game 구현을 대역 함수와 링크해 장치 없이 호출 계약을 관찰한다.",
+        "omitted": "백엔드의 실제 소리·장치 드라이버 동작은 별도 검사 범위이다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "54-1",
+      "kind": "수명과 값",
+      "question": "GameView를 얻은 뒤 Game을 진행했습니다. 저장한 옛 뷰의 Grid는 어떻게 되는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "자동으로 최신 보드로 바뀐다."
+        },
+        {
+          "id": "b",
+          "text": "조회할 때마다 원본 메모리를 다시 읽는다."
+        },
+        {
+          "id": "c",
+          "text": "다음 대입 전까지 복사한 시점의 보드를 유지한다."
+        },
+        {
+          "id": "d",
+          "text": "Game이 진행되면 뷰의 Grid 참조가 즉시 무효가 된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "다음 대입 전까지 복사한 시점의 보드를 유지한다.",
+      "explanation": "Grid는 뷰의 값 멤버입니다. 고정 배열의 내용이 복사되므로 소유자의 진행과 독립적으로 보관됩니다. 참조나 포인터를 저장한 뷰와 구별합니다."
+    },
+    {
+      "id": "54-2",
+      "kind": "효과 소비",
+      "question": "6틱 배치에서 lock 보고가 두 번 발생했고, 이후 view를 10번 읽었습니다. 배경 RNG의 추가 소비 횟수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "2번"
+        },
+        {
+          "id": "b",
+          "text": "6번"
+        },
+        {
+          "id": "c",
+          "text": "10번"
+        },
+        {
+          "id": "d",
+          "text": "12번"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "2번",
+      "explanation": "성공한 advance가 lock 보고마다 한 번씩 소비합니다. view는 조회라 소비하지 않습니다. 배치 마지막에 두 번째 색이 현재 배경색으로 남습니다."
+    },
+    {
+      "id": "54-3",
+      "kind": "복사 결함",
+      "question": "SimGame 값과 자기 sim.score를 가리키는 int& score를 가진 객체를 기본 복사했습니다. 위험한 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "복사본의 score가 자동으로 복사본 sim에 다시 연결된다."
+        },
+        {
+          "id": "b",
+          "text": "참조 멤버는 기본 복사에서 언제나 0으로 초기화된다."
+        },
+        {
+          "id": "c",
+          "text": "원본의 SimGame까지 자동으로 이동되어 비워진다."
+        },
+        {
+          "id": "d",
+          "text": "복사본 score는 원본을 가리키고 복사본 sim은 따로 존재할 수 있다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "복사본 score는 원본을 가리키고 복사본 sim은 따로 존재할 수 있다.",
+      "explanation": "참조 멤버의 복사는 참조 대상을 새 멤버에 재연결하지 않습니다. 자원 핸들까지 값으로 복사하면 중복 해제 문제도 생겨 실제 Game은 복사·이동을 삭제합니다."
+    },
+    {
+      "id": "54-4",
+      "kind": "소유권 이동",
+      "question": "Game 자체의 이동은 금지됐습니다. unique_ptr<Game>을 다른 unique_ptr로 이동할 때 맞는 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Game의 모든 멤버가 새 주소로 이동한다."
+        },
+        {
+          "id": "b",
+          "text": "Game은 같은 주소에 있고 소유자만 바뀐다."
+        },
+        {
+          "id": "c",
+          "text": "Game의 복사 생성자가 대신 호출된다."
+        },
+        {
+          "id": "d",
+          "text": "Game의 오디오 핸들이 자동으로 모두 해제된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Game은 같은 주소에 있고 소유자만 바뀐다.",
+      "explanation": "unique_ptr의 이동은 포인터 소유권을 전달합니다. 가리키는 Game을 이동 생성하지 않아 자기 sim에 연결된 참조 별칭과 객체 주소가 유지됩니다."
+    },
+    {
+      "id": "54-5",
+      "kind": "실패 계약",
+      "question": "Game::advance에 NaN 시간을 주어 FrameRunner가 실패했습니다. 올바른 어댑터 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "기존 규칙·표현 상태를 유지하고 실패를 반환한다."
+        },
+        {
+          "id": "b",
+          "text": "규칙은 유지하되 표시용 난수는 한 번 진행한다."
+        },
+        {
+          "id": "c",
+          "text": "뷰를 만들기 위해 새 조각을 하나 공급한다."
+        },
+        {
+          "id": "d",
+          "text": "오류를 숨기고 성공한 1틱 보고를 만든다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "기존 규칙·표현 상태를 유지하고 실패를 반환한다.",
+      "explanation": "FrameRunner가 게시하지 않은 프레임에는 소비할 새 보고가 없습니다. 어댑터는 즉시 실패를 전달하고 표현 상태도 유지합니다. 이후 GPU 실패의 계약과는 별개의 경계입니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "Game·FrameRunner·Round·렌더 스코프의 소유를 그린다.",
+      "값 뷰를 보관하고 원본 진행 뒤에도 과거 값이 유지되는지 확인한다.",
+      "한 배치 두 잠금과 반복 조회의 효과 소비 수를 예측한다.",
+      "CPU 값 어댑터와 실제 자원 소유자의 복사 정책을 설명한다.",
+      "unique_ptr 전달·정상 종료 순서와 회귀 결과를 확인한다."
+    ],
+    "expected": "규칙 전이를 유지하며 표현 경계를 나누고, 값/참조와 자원 소유 차이로 복사·소멸 동작을 판단한다.",
+    "failureChecks": [
+      "뷰 조회가 규칙이나 표현 난수를 소비하지 않는가?",
+      "새 보고를 놓치거나 두 번 소비하지 않는가?",
+      "빌린 참조가 소유자 파괴 뒤에 사용되지 않는가?",
+      "핸들과 참조 별칭의 복사 정책이 명확한가?",
+      "자원 소유자가 백엔드보다 먼저 정리되는가?"
+    ]
+  }
+}

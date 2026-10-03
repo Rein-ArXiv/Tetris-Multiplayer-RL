@@ -1,0 +1,396 @@
+{
+  "id": "lesson-36",
+  "title": "다음 블록: 큐와 소유권",
+  "shortTitle": "다음 큐와 값 소유권",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 고정 후 같은 종류를 반복 생성하며 다음 블록의 별도 저장소가 없습니다.",
+  "finish": "완료: 다음 세 종류를 FIFO로 보관하고 고정 때 하나씩 승격·보충하며, 화면에서 소비 없이 미리 봅니다.",
+  "objective": "원형 배열의 논리 순서, 조회와 소비, 값과 참조의 수명, 큐·공급자의 소유권과 실패 시 상태를 설명하고 예측합니다.",
+  "prerequisites": [
+    "35차시 체크포인트",
+    "고정 배열·optional·값 복사",
+    "고정/스폰 전이·정점 버퍼 갱신"
+  ],
+  "validation": [
+    "Linux SCRIPTED28/SDL26 CTest·경고0·CPU 링크 독립·UBSan",
+    "250000 deque모델 비교·감김/용량/범위/복사·7시작종류승격·큐/공급자실패보존·미리보기0~72정점",
+    "100 production시드에서조회무소비/해시보존·실제하드드롭승격/보충·값스냅샷독립",
+    "7시작종류×4상태×3크기=84 SDLoffscreen GL활성/보드/미리보기저장소·전체RGB비교",
+    "SDL입력은실제큐/pump fixture. native main·물리키·모니터·타OS·29~36사이트실화면미검증",
+    "잘못된원고코드블록6종을HTML생성전에거부"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 큐 초안 검토; 독립deque모델·Round소유권·실제previewAPI·GPU비교",
+    "draftJob": "out/learning-jobs/036-queue-events.jsonl",
+    "corrections": [
+      "미리보기큐와가방공급자구분",
+      "const참조와값스냅샷·reserve/size구분",
+      "정상스폰충돌과invalid의소비정책구분",
+      "코드블록에객체를잘못전달한원고오류를수정하고목록/원천형식검증추가",
+      "화면에서 강조 구문이 문자로 남던 FIFO 괄호 경계를 수정"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "킥은 정해진 후보 순서에서 첫 성공을 확정합니다.",
+      "회전 실패는 원래 배치를 보존하고 중력은 계속 진행합니다.",
+      "고정 후 보드·활성 블록·화면 데이터가 함께 갱신됩니다."
+    ],
+    "bridge": "같은 종류를 반복 생성하는 부분을 다음 큐로 교체하고, 상태를 읽는 일과 소비하는 일을 나누겠습니다."
+  },
+  "sections": [
+    {
+      "title": "다음 블록은 읽는 순간 뽑히면 안 된다",
+      "body": "화면에 다음 블록을 그릴 때마다 새 종류를 뽑는다면 어떻게 될까요? 렌더링 횟수에 따라 블록 순서가 달라지고, 보고 있던 미리보기와 실제 생성될 블록도 달라질 수 있습니다.\n\n다음에 나올 종류는 규칙 상태에 이미 저장되어 있어야 합니다. 화면은 그 값을 읽기만 하고, 실제 생성 단계에서만 앞 항목을 소비합니다. 앞으로 세 개를 순서대로 보관하는 FIFO 큐를 만들겠습니다.\n\n**FIFO**(First In, First Out)는 먼저 넣은 항목을 먼저 꺼내는 계약입니다. 큐는 이 동작을 정의하는 추상 자료형이고, vector·deque·원형 배열은 그 계약을 구현하는 서로 다른 저장 방식입니다. 이번에는 고정 배열 세 칸으로 구현합니다.\n\n활성 Piece는 지금 움직이는 블록의 형상·원점을 가집니다. 미리보기 큐는 아직 움직이지 않는 Kind 값만 가집니다. 실제 게임은 SimBlock 객체들을 보관하지만, 이 단계에서는 종류만으로 기본 형상을 다시 만들 수 있으므로 작은 식별자를 저장하겠습니다."
+    },
+    {
+      "title": "head와 size가 물리 배열을 논리 순서로 바꾼다",
+      "body": "Queue의 배열 slots_는 물리 저장 공간이고 head_는 다음에 꺼낼 항목의 위치입니다. size_는 유효한 항목 수입니다. 논리적인 i번째 항목은 `(head + i) % capacity`에 있습니다.\n\n물리 인덱스0이 항상 다음 블록은 아닙니다. 앞 항목을 꺼낸 뒤 head가 움직이면 다음 블록은 다른 슬롯에 있습니다. 그릴 때 배열0부터 순회하면 큐가 한 바퀴 돈 뒤 순서가 틀어집니다.\n\n이 구현은 size를 따로 두어 세 슬롯을 모두 사용합니다. head와tail이 같을 때 빈 상태인지 가득 찬 상태인지 구분하려고 한 칸을 비워 두는 다른 구현도 있지만, 그 규칙을 여기에 섞으면 용량이 불필요하게 줄어듭니다.\n\n| 상태 | size | 의미 |\n| --- | --- | --- |\n| 비어 있음 | 0 | 조회·꺼내기 불가 |\n| 일부 사용 | 1 또는2 | 앞부터 size개가 유효 |\n| 가득 참 | 3 | 추가 삽입 불가 |\n\n꺼낸 슬롯의 옛 값이 물리 배열에 남아 있어도 live 항목은 아닙니다. 유효성은 저장된 숫자가 아니라 head와size가 정합니다. 미사용 슬롯에0이 있다고 블록 ID0을 꺼내면 안 됩니다.",
+      "notes": [
+        {
+          "kind": "불변식",
+          "title": "반복해서 확인할 세 조건",
+          "body": "항상 0≤head<3, 0≤size≤3이며, 논리 인덱스0≤i<size의 Kind는 카탈로그에 존재합니다. private 필드와 검사된 push/pop을 통해 이 조건을 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "push는 뒤에 넣고 가득 차면 그대로 실패한다",
+      "body": "삽입 위치는 `(head + size) % 3`입니다. 아직 사용 중인 앞 항목을 덮어쓰지 않도록 full을 먼저 확인합니다. 알 수 없는 Kind도 저장하지 않습니다. 두 실패 모두 원래 큐를 유지합니다.\n\n종류의 유효성을 확인하는 것과 순서를 선택하는 것은 다릅니다. Queue는 ‘이 Kind를 저장해도 되는가’를 검사하지만 ‘다음은 어떤 종류인가’를 결정하지 않습니다. 공급자는 뒤에서 따로 만들겠습니다.\n\n삽입이 성공하면 슬롯을 기록한 뒤 size를 하나 늘립니다. head는 그대로입니다. 앞에 있던 항목이 계속 다음 순서이기 때문입니다.\n\n가득 찼을 때 앞 항목을 자동으로 버리는 정책도 다른 용도에서는 쓸 수 있지만, 다음 블록 큐에서는 미리 알려 준 순서를 잃게 됩니다. 여기서는 false를 반환하고 호출자가 실패를 처리하게 합니다.",
+      "codes": [
+        {
+          "label": "검증 후 논리 맨 뒤에 삽입",
+          "language": "cpp",
+          "text": "    bool push(Kind kind) noexcept {\n        if (study_catalog::find(kind) == nullptr || full()) {\n            return false;\n        }\n        slots_[(head_ + size_) % capacity] = kind;\n        ++size_;\n        return true;\n    }"
+        }
+      ]
+    },
+    {
+      "title": "peek는 조회하고 pop만 앞 항목을 소비한다",
+      "body": "peek는 논리 인덱스를 먼저 검사합니다. index가size 이상이면 nullopt입니다. 특히 SIZE_MAX 같은 큰 입력을 받은 뒤 먼저 head와 더하면 덧셈이 감기거나 잘못된 슬롯을 가리킬 수 있습니다. 범위를 검사한 뒤 유효한 작은 값으로 인덱스를 계산합니다.\n\npeek의 반환형은 `optional<Kind>`이며 Kind를 복사합니다. 반환값을 저장한 뒤 큐를 바꾸어도 이미 받은 값은 그대로입니다. 저장 공간의 주소를 빌려 주지 않습니다.\n\npop은 빈 상태면 nullopt, 아니면 앞 Kind를 값으로 꺼내고 head를 한 칸 전진시킨 뒤 size를 줄입니다. 남은 원소를 배열 앞쪽으로 옮길 필요가 없습니다.\n\n| 연산 | 읽은 값 | head·size 변경 |\n| --- | --- | --- |\n| peek() | 다음 Kind의 복사본 | 없음 |\n| peek(1) | 그다음 Kind의 복사본 | 없음 |\n| pop() | 다음 Kind의 복사본 | 앞을 소비 |\n| 빈 큐 pop() | nullopt | 없음 |\n\n관찰 함수가 상태를 바꾸지 않는다는 계약은 UI뿐 아니라 테스트·로그에서도 중요합니다. 로그 한 줄을 추가했다고 다음 블록 순서가 변하면 안 됩니다.",
+      "codes": [
+        {
+          "label": "값으로 조회하고 앞 항목 소비",
+          "language": "cpp",
+          "text": "    std::optional<Kind> peek(std::size_t index = 0) const noexcept {\n        if (index >= size_) {\n            return std::nullopt;\n        }\n        return slots_[(head_ + index) % capacity];\n    }\n\n    // Removes the logical front and returns it by value. Leaves slots_ and all\n    // surviving entries physically in place; only head_ and size_ advance.\n    std::optional<Kind> pop() noexcept {\n        if (empty()) {\n            return std::nullopt;\n        }\n        const Kind kind = slots_[head_];\n        head_ = (head_ + 1) % capacity;\n        --size_;\n        return kind;\n    }"
+        },
+        {
+          "label": "simulation/next_queue.h · 완성 파일",
+          "file": "checkpoints/36-next-queue/simulation/next_queue.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "감긴 배열을 작은 표로 따라간다",
+      "body": "I,O,T를 차례로 넣으면 head=0,size=3이고 물리 슬롯도 I,O,T입니다. I를 꺼낸 뒤 Z를 넣어 보겠습니다.\n\n| 단계 | 물리 슬롯0·1·2 | head | size | 논리 순서 |\n| --- | --- | --- | --- | --- |\n| I,O,T 삽입 | I · O · T | 0 | 3 | I,O,T |\n| pop으로 I 소비 | I · O · T | 1 | 2 | O,T |\n| Z 삽입 | Z · O · T | 1 | 3 | O,T,Z |\n\n새 Z는 `(1+2)%3`, 즉 슬롯0에 들어갑니다. 첫 슬롯이 Z라고 다음 블록이 Z가 되지는 않습니다. head부터 읽어야 O,T,Z입니다.\n\n모든 슬롯을 비운 뒤에도 head를0으로 돌릴 필요는 없습니다. size=0이면 live 항목이 없고, 새 삽입은 현재 head에서 시작해 같은 계약을 지킵니다.\n\n배열 안의 원소를 밀지 않으므로 push/pop/peek의 인덱스 작업은 항목 수에 대해 O(1)입니다. 현재 게임의 vector 앞 삭제는 뒤 원소 이동이 필요합니다. 하지만 세 항목이라는 작은 크기에서 무조건 큰 속도 향상을 얻는다고 말할 수는 없습니다. 여기서는 용량과 소유권이 명확한 구현을 선택한 것입니다."
+    },
+    {
+      "title": "큐와 공급자를 분리해 순서를 재현한다",
+      "body": "큐는 이미 정해진 순서를 보관하고, 공급자는 새 Kind를 하나씩 제공합니다. 이번 ScriptedSource는 검증한 패턴을 배열에 복사하고 cursor를 진행합니다. 패턴 끝에서는0으로 돌아갑니다.\n\ncycle(first)는 선택한 종류부터 카탈로그 순서를 순환합니다. 예를 들어 O에서 시작하면 O,S,T,Z,I,J,L,O,…입니다. 정해진 순서이므로 입력과 결과를 손으로 확인하기 쉽습니다. 이것은 난수나 섞인7-bag가 아닙니다.\n\nfrom_pattern은 실제 사용할 개수1~7과 각 Kind를 검사합니다. 원본 배열을 빌리는 대신 값을 복사하므로 호출자가 그 배열을 바꾸어도 공급자의 패턴은 바뀌지 않습니다.\n\n공급자를 복사하면 cursor도 복사됩니다. 복사본을 next로 진행해도 원본 cursor는 그대로입니다. 이것은 동일한 상태에서 다른 진행을 시도하거나 후보 전체를 버릴 수 있게 하는 기반입니다.\n\ncursor는 지금까지 뽑은 총횟수가 아니라 패턴 안의 다음 위치입니다. 길이7에서 일곱 번 소비하면0으로 돌아오지만 게임이 처음 상태로 돌아간 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "simulation/scripted_source.h · 완성 파일",
+          "file": "checkpoints/36-next-queue/simulation/scripted_source.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "책임 구별",
+          "title": "가방과 미리보기 큐",
+          "body": "현재 게임의 blocks는 남은 종류를 공급하는 가방이고 nextBlocks는 이미 결정된 다음 세 피스입니다. 공급 방식을 바꾸더라도 큐의 조회·소비 계약은 따로 유지할 수 있습니다. 분포와 시드는7-bag·RNG 단원에서 다룹니다."
+        }
+      ]
+    },
+    {
+      "title": "Round가 공급자와 큐를 함께 소유한다",
+      "body": "Round::create의 공급자 인자는 값으로 받습니다. Round는 자기 source_ 복사본에서 현재 Kind 하나를 얻고, 이어서 세 Kind를 next_에 넣습니다. 처음에는 총 네 번 공급자를 진행합니다.\n\n현재 O를 선택했다면 활성 Kind는O, 큐는S,T,Z입니다. 호출자가 넘긴 source의 cursor는0이고 Round 안의 복사본 cursor는4입니다. 생성 과정이 호출자 자료를 몰래 소비하지 않습니다.\n\nRound의 후보 복사는 보드·활성 Piece·방향·중력·큐·공급자를 모두 포함합니다. 후속 검사가 invalid를 반환하면 후보를 버려 큐와 공급자의 진행까지 되돌립니다. 보드만 복사하고 공급자를 외부에 공유했다면, 실패한 시도에서 다음 순서를 소비해 버릴 수 있습니다.\n\n같은 종류를 반복하는 Kind 인자 오버로드도 유지합니다. 이것은 작은 이동·고정 실험을 그대로 실행하기 위한 repeating 공급자로 위임하는 편의 함수입니다. 실제 main은 cycle 공급자를 만들어 여러 종류가 나오는 새 경로를 사용합니다.",
+      "codes": [
+        {
+          "label": "현재 하나와 다음 세 개 준비",
+          "language": "cpp",
+          "text": "    // Own a value copy of the producer and prefill three upcoming kinds.\n    static std::optional<Round> create(const study_grid::Grid& board,\n                                      study_next::ScriptedSource source,\n                                      int interval = 30) noexcept {\n        if(interval<=0)return std::nullopt;\n        Round round(source);\n        round.board_=board;\n        round.gravity_.interval=interval;\n        round.kind_=round.source_.next();\n        const auto spawn=study_catalog::make_piece(round.kind_);\n        if(!spawn)return std::nullopt;\n        for(std::size_t i=0;i<study_next::Queue::capacity;++i)\n            if(!round.next_.push(round.source_.next()))return std::nullopt;\n        if(study_collision::classify(board,*spawn)==study_collision::Placement::clear)\n            round.active_=spawn;\n        // Initial collision still yields a finished round with a full preview.\n        return round;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "원자성의 범위",
+          "title": "함께 확정한다는 말",
+          "body": "단일 스레드의 후보 객체를 값 대입하는 구조입니다. 다른 스레드가 동시에 안전하게 읽거나 쓴다는 보장이 아닙니다. 네트워크·동시성 계층에서는 접근 시점과 소유권 계약을 별도로 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "승격할 종류를 읽고, 소비하고, 뒤를 보충한다",
+      "body": "블록을 고정하고 줄을 정리한 뒤 큐의 앞 Kind를 peek합니다. 그 Kind로 기본 방향 Piece를 준비하고, 성공적으로 준비되면 pop으로 큐 앞을 소비합니다. 뒤에는 source.next()로 얻은 Kind 하나를 넣습니다.\n\nO에서 첫 고정이 끝나면 S가 활성 블록으로 승격됩니다. 큐는 S,T,Z에서 T,Z,I로 바뀌고, 현재 방향과 중력 경과는0으로 초기화됩니다. 이미 미리보기에서 본 S와 실제 생성되는 종류가 일치합니다.\n\npop과push 사이에는 큐 크기가2인 중간 상태가 있습니다. 외부에는 Round의 후보를 최종 확정한 뒤 보여 주므로, 정상 전이가 끝난 시점의 미리보기는 항상3개입니다. Queue 자체는0~3개를 표현할 수 있고, Round가 그보다 강한 ‘전이 완료 후3개’ 규칙을 지키는 것입니다.\n\n빈 큐나 잘못된 Kind를0번 종류로 대신하지 않습니다. 내부 불변식이 깨져 앞 값을 얻지 못하거나 생성 데이터를 만들 수 없으면 invalid로 후보 전체를 버립니다. 정상 사용에서는 검증된 큐와 공급자가 이 경로를 막아 줍니다.",
+      "codes": [
+        {
+          "label": "앞 항목 준비·소비·보충",
+          "language": "cpp",
+          "text": "            const auto next_kind=candidate.next_.peek();\n            if(!next_kind)return Step::invalid;\n            const auto spawn=study_catalog::make_piece(*next_kind);\n            if(!spawn)return Step::invalid;\n            // A spawn attempt consumes the selected kind, even if its placement\n            // is blocked. Refill before publishing the finished state as well.\n            if(!candidate.next_.pop() || !candidate.next_.push(candidate.source_.next()))\n                return Step::invalid;\n            candidate.kind_=*next_kind;"
+        },
+        {
+          "label": "simulation/round.h · 완성 파일",
+          "file": "checkpoints/36-next-queue/simulation/round.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "스폰 충돌과 잘못된 요청은 소비 규칙이 다르다",
+      "body": "형상 데이터를 만들 수 없는 오류와, 유효한 블록의 스폰 공간이 막힌 상황을 구별합니다. 후자는 게임 규칙상 종료 조건입니다.\n\n이번 정책에서는 새 스폰을 시도한 Kind를 소비하고 뒤를 보충한 다음, 정리된 보드에서 배치를 검사합니다. 스폰이 막혔어도 고정된 보드와 진행된 큐를 확정하고 game_over를 반환합니다. 다음 틱은 stopped라 더 소비하지 않습니다.\n\n| 결과 | 큐·공급자 |\n| --- | --- |\n| 이동·회전·대기 | 소비 없음 |\n| 고정 후 스폰 성공 | 앞1개 소비, 뒤1개 보충 |\n| 고정 후 스폰 충돌 | 앞1개 소비, 뒤1개 보충 후 종료 |\n| 잘못된 입력 invalid | 전체 상태 보존 |\n| 이미 종료된 상태 stopped | 전체 상태 보존 |\n\nkind()는 활성 블록이 있으면 그 종류이고, 종료 상태라면 가장 최근에 스폰을 시도한 종류입니다. 종류 값이 있다는 이유로 active도 있다고 가정하지 않습니다.\n\n현재 SimGame도 고정 때 preview를 소비·보충하지만 줄 제거 전에 스폰 충돌을 판단합니다. 기준 Round는 줄 제거 뒤 판단합니다. 소비 계약의 공통점이 판정 순서까지 같다는 뜻은 아닙니다. 종료 판정은 이어지는 차시에서 더 자세히 분리합니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::LockBlock()",
+        "invariant": "앞 피스를 승격하고 큐를 소비·보충하는 것은 규칙 상태 전이이다.",
+        "mayDiffer": "현재는 줄 제거 전에 스폰을 판정한다. 강의는 줄 제거 뒤 판정하며, 공급자도 고정 패턴이다.",
+        "omitted": "점수·가비지·RNG 해시와 종료 원인 분류는 이 단계에 함께 옮기지 않는다."
+      }
+    },
+    {
+      "title": "현재 코드의 const 참조는 스냅샷이 아니다",
+      "body": "현재 게임의 NextBlock()은 큐 맨 앞 SimBlock의 const 참조를 돌려주는 조회 함수입니다. 이름이 Next여도 호출만으로 항목이 사라지지 않습니다. 실제 소비는 LockBlock의 erase입니다.\n\n`currentBlock = NextBlock()`는 삭제 전에 값을 복사합니다. SimBlock 내부의 map과vector도 각자의 값을 소유하므로, 현재 블록을 회전하거나 움직여도 preview의 객체를 같이 수정하지 않습니다.\n\n반면 `const SimBlock& saved = NextBlock()`는 복사본을 만들지 않습니다. const는 그 참조를 통한 수정이 제한된다는 뜻이지 대상이 영원히 고정된다는 뜻이 아닙니다. 다음 고정에서 vector의 앞을 삭제하면 그 원소 참조를 계속 사용할 수 없습니다.\n\n고정 전후를 비교하려면 `SimBlock saved = NextBlock()` 또는 ID 값을 복사하세요. reserve로 재할당을 피했다고 erase가 무효화하는 참조까지 보호되지는 않습니다. 컨테이너 객체에 대한 참조와 내부 원소에 대한 참조도 구별합니다.\n\n학습 Queue는 peek/pop에서 작은 Kind 값을 반환해 이 수명 문제를 API에서 줄였습니다. Round::next() 자체는 내부 큐의 const 참조이므로 Round보다 오래 저장하거나, 그 참조가 과거 큐 내용을 보존한다고 생각하면 안 됩니다.",
+      "reference": {
+        "path": "src/sim_game.h",
+        "symbol": "const SimBlock& NextBlock() const",
+        "invariant": "미리보기 조회는 소비하지 않는다. 반환 형식에 따라 값 소유와 빌린 참조를 구분한다.",
+        "mayDiffer": "현재는 SimBlock const 참조, 강의 peek는 optional<Kind> 값이다.",
+        "omitted": "vector 원소 참조를 고정 전이 뒤까지 보존하는 용도로 사용하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "C++ 용어",
+          "title": "reserve는 원소를 만들지 않는다",
+          "body": "현재 생성자의 nextBlocks.reserve(3)은 저장 용량을 준비합니다. 실제 size는 뒤의 세 번 push_back으로3이 됩니다. reserve 직후 인덱스0~2에 쓰는 코드는 올바르지 않습니다. 용량과 살아 있는 원소 수를 나누어 읽습니다."
+        }
+      ]
+    },
+    {
+      "title": "미리보기는 논리 순서와 기본 형상으로 그린다",
+      "body": "renderer/next_preview.h는 큐의 논리 인덱스0,1,2를 peek합니다. 각 Kind의 카탈로그 기본 셀을 작은 사각형으로 바꾸고, 화면 오른쪽의 세 슬롯에 위에서부터 놓습니다.\n\n활성 블록의 원점이나 회전 방향을 복사해서 그리지 않습니다. 미리보기는 아직 스폰되지 않은 종류의 기본 형상입니다. 보드에 이미 놓인 것으로 취급해 충돌 검사를 할 필요도 없습니다.\n\n슬롯 시작은 논리 좌표x244,y40이고 다음 슬롯은60만큼 아래입니다. 셀 간격은6,잉크 크기는5입니다. 현재 논리 화면320×240 안에서 네 셀짜리 블록 세 개가 최대72정점을 사용합니다.\n\n현재 Game::DrawBlockMini는 점유 칸의 최소 행·열을 빼서 축소 그림을 정렬합니다. 이것은 표시용 좌표의 변환이며 시뮬레이션 형상을 바꾸는 것이 아닙니다. 기준 코드는4×4 로컬 틀을 그대로 보여 줍니다. 회전 계산에서 원점을 임의로 재정렬하면 규칙이 바뀌는 문제와 구별하세요.",
+      "codes": [
+        {
+          "label": "큐를 읽어 미리보기 정점 스냅샷 생성",
+          "language": "cpp",
+          "text": "inline std::optional<Mesh> make_mesh(const study_next::Queue& queue) noexcept {\n    Mesh mesh;\n    for(std::size_t slot=0;slot<queue.size();++slot){\n        const auto kind=queue.peek(slot);\n        const auto* definition=kind?study_catalog::find(*kind):nullptr;\n        if(!definition)return std::nullopt;\n        for(auto cell:definition->cells){\n            const double x=244.0+cell.column*6.0;\n            const double y=40.0+slot*60.0+cell.row*6.0;\n            for(auto vertex:study_board::quad_vertices({x,y,x+5.0,y+5.0}))\n                mesh.vertices[mesh.count++]=vertex;\n        }\n    }\n    return mesh;\n}"
+        },
+        {
+          "label": "renderer/next_preview.h · 완성 파일",
+          "file": "checkpoints/36-next-queue/renderer/next_preview.h",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::DrawNextQueueMini(",
+        "invariant": "정해진 미리보기 순서를 읽어 표시하며 조회 중 종류를 소비하지 않는다.",
+        "mayDiffer": "현재는 SimBlock 배열과 축소 팔레트 사각형을 사용한다. 강의는 Kind와 기본 셀의72정점 묶음이다.",
+        "omitted": "폰트·테두리·아이콘 애니메이션은 표현 단원에서 추가한다."
+      }
+    },
+    {
+      "title": "고정 뒤 미리보기 VBO도 한 번 갱신한다",
+      "body": "main은 시작할 때72정점을 업로드하고 VAO를 한 번 설정합니다. 고정이 발생하면 최종 큐로 미리보기 메시를 다시 만들고 같은 VBO를 교체합니다. 보드가 바뀌는 고정 사건에서 큐도 정확히 한 번 진행하므로, 같은 변경 표식을 사용할 수 있습니다.\n\n행을 지우지 않은 고정에서도 다음 블록은 바뀝니다. 제거 수가0이라는 이유로 미리보기 갱신을 건너뛰면 오래된 다음 순서를 보여 줍니다. 스폰 충돌로 종료된 프레임에서도 보충된 최종 큐를 그립니다.\n\nRound가 정상 전이 후 세 항목을 유지하므로 정점 수는 계속72입니다. Queue와 메시 helper는0~3개도 다룰 수 있지만, main은 이 강한 불변식을 확인한 뒤 같은 크기 갱신 API를 사용합니다. 서로 다른 층의 전제를 구분해서 읽으세요.\n\nboard pass가 화면을 지운 뒤 활성 Piece와 미리보기를 추가로 그립니다. 미리보기 pass가 화면을 다시 지우면 보드가 사라집니다. 이미 설정된 viewport와 불투명 그리기 상태를 빌리고, 같은 청록색 프로그램을 사용합니다. 이 렌더링 경로는 source.next나queue.pop을 호출하지 않습니다.",
+      "codes": [
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "file": "checkpoints/36-next-queue/src/main.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "O에서 시작해 승격과 미리보기 변화를 관찰한다",
+      "body": "체크포인트 `36-next-queue`는 큐·공급자·미리보기 메시를 추가하고 Round와main을 연결합니다. 저장소 루트에서 C++17·CMake로 CPU 데모를 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/36-next-queue -B out/study-36 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-36\n./out/study-36/queue_demo\nctest --test-dir out/study-36 --output-on-failure\n```\n\n```text\ncurrent=O next=S T Z cursor=4\ncurrent=S next=T Z I cursor=5\ncurrent=T next=Z I J cursor=6\ncaller source cursor=0\n```\n\nCPU 데모는 O가 두 줄을 완성하도록 준비된 보드에서 시작하며 중력 주기는1틱입니다. 실제 시간을 기다리지 않고 두 번의 고정을 계산합니다. 마지막 줄은 호출자 공급자가 소비되지 않았음을 보여 줍니다.\n\nSDL2 개발 패키지·pkg-config·desktop OpenGL3.3 Core 환경에서 창으로 비교합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/36-next-queue -B out/study-36-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-36-sdl\n./out/study-36-sdl/tetris O\n```\n\n오른쪽 위부터 S,T,Z가 보입니다. O를 입력 없이 떨어뜨려 두 줄을 지우면 활성 S가 생성되고 미리보기는 T,Z,I가 됩니다. 창의 중력 주기는30틱입니다. 좌우·Up으로 이동/회전하면 고정 배치와 줄 제거 결과가 달라질 수 있습니다.\n\n인자를 I/J/L/O/S/T/Z로 바꾸면 그 종류부터 같은 카탈로그 순서를 순환합니다. Escape/닫기로 종료하고, 다중 구성 생성기는 구성과 실행 경로를 맞춥니다.\n\n아래는 O가 바닥에 도착한 상태입니다. 오른쪽 미리보기는 위에서부터 S,T,Z입니다. 청록색 O는 아직 보드에 고정되지 않았습니다.\n\n![바닥의 O와 오른쪽의 S T Z 미리보기](data:image/png;base64,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)\n\n고정과 두 줄 제거 뒤에는 활성 S가 위에 나타납니다. 미리보기는 T,Z,I로 진행합니다. 표식 셀도 줄 제거에 맞게 아래로 옮겨졌습니다.\n\n![O 고정과 두 줄 제거 후 활성 S 및 T Z I 미리보기](data:image/png;base64,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)",
+      "codes": [
+        {
+          "label": "src/queue_demo.cpp · 완성 파일",
+          "file": "checkpoints/36-next-queue/src/queue_demo.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt · 완성 파일",
+          "file": "checkpoints/36-next-queue/CMakeLists.txt",
+          "language": "cmake",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "같은 구현을 복사하지 않고 큐의 계약을 검사한다",
+      "body": "원형 배열의 기대값을 또 원형 배열로 만들면 같은 인덱스 오류를 공유할 수 있습니다. 테스트에서는 std::deque에 동일한 push/pop을 적용하고, 논리 순서와 크기·가득 참·빈 상태를 비교합니다.\n\n반복해서 감기는 경우, 세 칸을 모두 채운 경우, 가득 찬 push와빈 큐 pop, SIZE_MAX 조회, 잘못된 Kind를 포함하세요. peek한 복사본과 큐 복사본을 보관한 뒤 원본을 바꾸어 소유권도 확인합니다.\n\n통합 검사에서는 큐만 보지 않습니다. 현재 종류가 옛 큐의 첫 항목으로 바뀌었는지, 나머지 두 항목이 유지되는지, 공급자가 정확히 하나 진행했는지, 방향과중력은 초기화되는지 함께 봅니다. invalid와stopped 전후에는 보드·큐·공급자·이벤트 값을 모두 비교합니다.\n\n현재 SimGame에서는 조회를 반복해도 상태 해시가 같고, 하드드롭 뒤 옛 preview 첫 피스가 current로 승격되는지 대조할 수 있습니다. 공급 순서는 난수 가방이므로 기준 코드의 고정 순서와 같다고 요구하지 않습니다.\n\n이제 현재 Piece, 다음 큐, 순서 공급자를 각자 값으로 관리합니다. 이어서 게임 오버가 어느 시점의 어떤 상태를 기준으로 판정되는지 분리해 보겠습니다.",
+      "codes": [
+        {
+          "label": "tests/queue_contract.cpp · 완성 파일",
+          "file": "checkpoints/36-next-queue/tests/queue_contract.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "I,O,T를 채우고 pop/push 후 물리 배열과 논리 순서를 적는다.",
+      "peek을 반복해도 큐가 같은지 확인한다.",
+      "공급자 복사 전후 cursor를 비교한다.",
+      "첫 고정 뒤 현재 종류와 세 미리보기가 어떻게 바뀌는지 예측한다.",
+      "스폰 충돌과 잘못된 입력의 큐 소비 차이를 설명한다.",
+      "오른쪽 미리보기와 실제 생성 종류가 일치하는지 확인한다."
+    ],
+    "expected": "다음 순서를 값으로 소유하고, 조회·승격·소비·보충과 화면 갱신을 구별해 구현한다.",
+    "failureChecks": [
+      "물리 배열0번을 무조건 다음 블록으로 그리지 않는가?",
+      "가득 찬 push가 앞 항목을 덮어쓰지 않는가?",
+      "peek이나 렌더링에서 공급자를 진행하지 않는가?",
+      "후보 복사에 큐와 공급자가 빠져 있지 않은가?",
+      "const 원소 참조를 고정 전이 뒤에도 사용하지 않는가?",
+      "줄 제거0일 때 미리보기 갱신을 누락하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "36-1",
+      "kind": "논리 순서",
+      "question": "I,O,T로 찬 큐에서 I를 pop한 뒤 Z를 push했습니다. 다음 순서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Z,O,T다."
+        },
+        {
+          "id": "b",
+          "text": "O,T,Z다."
+        },
+        {
+          "id": "c",
+          "text": "O,Z,T다."
+        },
+        {
+          "id": "d",
+          "text": "T,Z,O다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "O,T,Z다.",
+      "explanation": "물리 슬롯은 Z,O,T지만 head가1이므로 논리 순서는 O,T,Z입니다. 화면도 peek으로 논리 순서를 읽어야 합니다."
+    },
+    {
+      "id": "36-2",
+      "kind": "조회와 소비",
+      "question": "미리보기를 한 프레임에 두 번 만들며 peek을 반복했습니다. 큐는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 항목을 소비한다."
+        },
+        {
+          "id": "b",
+          "text": "공급자가 새 세 종류를 뽑는다."
+        },
+        {
+          "id": "c",
+          "text": "size는 같지만 head가 전진한다."
+        },
+        {
+          "id": "d",
+          "text": "내용과 크기·head가 그대로다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "내용과 크기·head가 그대로다.",
+      "explanation": "peek은 const 값 조회입니다. 그리는 횟수가 순서 소비를 결정하지 않도록 pop 및 공급자 next와 구분합니다."
+    },
+    {
+      "id": "36-3",
+      "kind": "참조 수명",
+      "question": "현재 코드에서 고정 전의 다음 블록을 고정 후에도 비교하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SimBlock이나 필요한 ID를 값으로 복사한다."
+        },
+        {
+          "id": "b",
+          "text": "const 참조이므로 원소 참조를 계속 쓴다."
+        },
+        {
+          "id": "c",
+          "text": "reserve만 하면 erase 뒤 참조도 유효하다."
+        },
+        {
+          "id": "d",
+          "text": "NextBlock을 읽기만 하면 자동 복제된다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "SimBlock이나 필요한 ID를 값으로 복사한다.",
+      "explanation": "현재 NextBlock은 const 참조입니다. 값 대입은 복사지만 const 참조 변수는 대상을 빌릴 뿐입니다. vector 앞 삭제는 원소 참조를 무효화하므로 과거 값은 직접 소유해야 합니다."
+    },
+    {
+      "id": "36-4",
+      "kind": "값 소유권",
+      "question": "cursor0의 공급자를 Round::create에 넘겼습니다. 현재1+다음3을 준비한 직후 길이7 패턴의 cursor는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "호출자4, Round4다."
+        },
+        {
+          "id": "b",
+          "text": "호출자4, Round0이다."
+        },
+        {
+          "id": "c",
+          "text": "호출자0, Round4다."
+        },
+        {
+          "id": "d",
+          "text": "호출자0, Round0이다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "호출자0, Round4다.",
+      "explanation": "Round는 공급자 값 복사본을 소유하고 자기 복사본에서 네 번 next를 호출합니다. 외부 공급자는 진행하지 않습니다."
+    },
+    {
+      "id": "36-5",
+      "kind": "스폰 실패 정책",
+      "question": "기준 Round에서 유효한 블록을 고정했지만 다음 스폰이 막혔습니다. 큐는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소비 없이 같은 앞 항목을 영원히 재시도한다."
+        },
+        {
+          "id": "b",
+          "text": "앞1개를 소비하고 뒤1개를 보충한 상태로 종료한다."
+        },
+        {
+          "id": "c",
+          "text": "모든 미리보기를 지우고 빈 큐로 종료한다."
+        },
+        {
+          "id": "d",
+          "text": "렌더 프레임마다 하나씩 계속 소비한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "앞1개를 소비하고 뒤1개를 보충한 상태로 종료한다.",
+      "explanation": "이번 정책은 스폰 시도 시 소비/보충을 확정합니다. 게임 오버는 정상 규칙 전이이고 invalid와 다릅니다. 종료 후 stopped는 추가 소비를 하지 않습니다."
+    }
+  ]
+}

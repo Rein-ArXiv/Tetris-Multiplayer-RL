@@ -1,0 +1,464 @@
+{
+  "id": "lesson-105",
+  "title": "포워더: 방향별 상태와 종료",
+  "shortTitle": "양방향 전달·부분 송신·정리",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 두 연결의 수락이 끝났고 게임 바이트가 든 파서를 인계받을 수 있습니다.",
+  "finish": "완료: 방향별 파서와 송신 위치로 입력을 반대 클라이언트에 전달하고, 한 방향이 끝나면 연결 쌍을 정리합니다.",
+  "objective": "전이중 중계의 방향별 상태·부분 송신·백프레셔·EOF와 최종 정리의 책임을 구현하고 설명합니다.",
+  "prerequisites": [
+    "수락과 parser 인계",
+    "논블로킹 수신·부분 송신",
+    "고정 버퍼와 객체 수명"
+  ],
+  "recap": {
+    "points": [
+      "수락과 실제 게임 진행은 다른 단계입니다.",
+      "READY 뒤 이미 읽은 바이트는 parser와 함께 인계합니다.",
+      "서버의 준비 관측과 상대 애플리케이션의 처리 완료를 구별합니다."
+    ],
+    "bridge": "이제 인계받은 바이트를 실제 반대 소켓에 보내고 각 방향의 진행 위치와 종료를 관리합니다."
+  },
+  "sections": [
+    {
+      "title": "수락 뒤에는 양쪽 입력이 실제로 건너가야 한다",
+      "body": "두 사람이 수락했고 소켓과 파서를 넘겨받았습니다. 이제 A가 보낸 입력은 B에게, B가 보낸 입력은 A에게 전달해야 합니다. 서버 쪽에서 입력을 읽어 게임 규칙에 넣는 실험을 넘어, 실제 반대 클라이언트가 그 입력을 받게 만들어 봅시다.\n\n한 TCP 연결은 송신과 수신을 동시에 할 수 있는 전이중 통신입니다. 하지만 중계에는 클라이언트별 연결 두 개가 있으므로 A 소켓에서 읽은 바이트를 B 소켓에 쓰는 과정과 그 반대 과정이 필요합니다. A→B와 B→A를 각각 하나의 방향으로 모델링합니다.\n\n각 방향은 받은 프레임의 일부, 송신할 프레임, 이미 송신 API가 수락한 위치를 보관합니다. 두 방향이 같은 offset이나 수신 버퍼를 공유하면 서로 다른 바이트 스트림이 섞입니다. 반면 “이 경기의 전달을 끝낸다”는 정책은 연결 쌍 수준에서 결정합니다.",
+      "codes": [
+        {
+          "label": "두 연결과 두 방향",
+          "text": "A ── 서버 A에서 recv ──[ A→B 상태 ]── 서버 B에 send ──→ B\nB ── 서버 B에서 recv ──[ B→A 상태 ]── 서버 A에 send ──→ A",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "void forwarderLoop",
+        "invariant": "소스·목적지와 수신/송신 진행 상태를 방향별로 구별한다.",
+        "mayDiffer": "현재 threaded 서버는 방향당 worker 하나를 쓴다. 기준 실습은 한 실행 주체가 두 방향을 번갈아 처리한다."
+      }
+    },
+    {
+      "title": "서로 다른 세 가지 진행 위치",
+      "body": "받은 바이트, 완성한 프레임, 상대 소켓에 넘긴 바이트는 같은 위치가 아닙니다. 예를 들어 수신 버퍼에 두 프레임과 부분 헤더가 있고, 첫 프레임의 절반만 송신했을 수 있습니다. 이를 하나의 “처리 완료” 플래그로 나타낼 수 없습니다.\n\nFrameParser는 아직 프레임으로 꺼내지 않은 바이트를 갖습니다. pending은 꺼낸 프레임을 다시 인코딩한 바이트이고, offset은 그중 로컬 송신 API가 수락한 개수입니다. remaining=pending.size−offset입니다. offset은 pending의 범위를 넘지 않아야 합니다.\n\n학습 프레이밍은 길이·타입·본문이 하나의 정해진 바이트 표현을 가지므로 파싱 후 재인코딩해도 유효 프레임의 원래 바이트를 얻습니다. 게임 입력의 의미를 해석하거나 인증을 하는 것은 아닙니다. 현재 서비스는 체크섬이 있는 원본 바이트를 구간째 보존하고 서버 전용 타입을 거르는 별도 정책도 수행합니다.",
+      "codes": [
+        {
+          "label": "방향이 소유하는 상태",
+          "text": "FrameParser parser_{};\nEncodedFrame pending_{};\nstd::size_t offset_{0};\nint last_error_{0};\nForwardState state_{ForwardState::running};",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "std::vector<uint8_t> streamBuf",
+        "invariant": "프레임 조립 위치와 전송 진행 위치를 혼동하지 않는다.",
+        "mayDiffer": "서비스의 raw/streamBuf와 동기 tcp_send_all 내부 offset으로 책임이 나뉜다. 기준 구현은 pending/offset을 방향 객체가 직접 보관한다."
+      }
+    },
+    {
+      "title": "이미 읽은 prefix를 새 recv보다 먼저 처리한다",
+      "body": "수락 로비에서 넘어온 파서에는 게임 프레임 전체가 들어 있을 수도 있습니다. 새 소켓 데이터를 기다리기 전에 그 파서를 채택하고 첫 완성 프레임을 준비합니다. 입력이 이미 유저 공간에 있는데 다시 recv만 기다리면 진행이 멈출 수 있습니다.\n\n생성자는 prefix를 옮긴 뒤 원본을 빈 파서로 만듭니다. FrameParser의 배열 이동만으로 원본이 자동으로 비워지지 않기 때문입니다. 생성자에서는 송신하지 않고 pending만 준비합니다. 송신 API를 호출하는 시점은 호출자가 결정합니다.\n\nprefix에 완성 프레임이 여러 개 있어도 pending에는 한 개만 꺼냅니다. 현재 프레임을 다 보낸 뒤 다음 프레임을 준비하면 순서와 메모리 소유를 단순하게 유지할 수 있습니다. 부분 헤더만 남았을 때 비로소 소스에서 더 읽습니다.",
+      "codes": [
+        {
+          "label": "로비 파서를 채택한다",
+          "text": "ForwardDirection(FrameParser&& prefix) noexcept {\n    parser_ = std::move(prefix);\n    prefix = FrameParser{};\n    parse_buffered();\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "파서에서 한 프레임만 준비",
+          "text": "void parse_buffered() noexcept {\n    if (state_ != ForwardState::running || has_pending()) {\n        return;\n    }\n    Frame frame{};\n    const ParseStatus status = parser_.next(frame);\n    if (status == ParseStatus::need_more) {\n        return;\n    }\n    if (status == ParseStatus::error) {\n        state_ = ForwardState::protocol_error;\n        return;\n    }\n    EncodedFrame encoded{};\n    if (!encode_frame(frame, encoded)) {\n        // Only reachable if the parser ever produced an over-long frame;\n        // treated as a wire fault because encode itself cannot fail here.\n        state_ = ForwardState::protocol_error;\n        return;\n    }\n    pending_ = encoded;\n    offset_ = 0;\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "bool havePrefix",
+        "invariant": "새 수신보다 앞 단계가 이미 가져온 바이트를 먼저 소비한다.",
+        "mayDiffer": "현재 서비스는 prefixFromA/B 원시 벡터를 raw로 옮긴다. 기준 구현은 파서 자체를 이어 쓴다."
+      }
+    },
+    {
+      "title": "송신이 막힌 방향에서는 더 읽지 않는다",
+      "body": "B가 읽지 않으면 A→B의 송신이 멈출 수 있습니다. 서버가 A에서 계속 읽어 임시 벡터에 쌓는다면 B의 속도와 무관하게 메모리가 늘어납니다. 여기서는 pending이 남아 있는 동안 A를 더 읽지 않는 간단한 백프레셔 정책을 사용합니다.\n\ncan_read는 running이고 pending이 없을 때만 true입니다. 호출자는 recv를 하기 전에 이를 확인합니다. 이미 recv한 뒤 feed가 거절하면 그 바이트는 커널에서 사라졌으므로 다시 받을 수 없습니다. “나중에 같은 소켓을 읽으면 되겠지”라는 복구는 성립하지 않습니다.\n\n수신을 멈추면 해당 방향의 커널 버퍼와 TCP 흐름 제어를 통해 송신자에게도 압력이 전달될 수 있습니다. 기준 객체의 저장량은 고정이지만 커널 버퍼와 전체 연결 수까지 이 객체가 제한하는 것은 아닙니다. 다른 방향 B→A는 독립적으로 시도할 수 있어야 합니다.",
+      "codes": [
+        {
+          "label": "수신을 해도 되는 시점",
+          "text": "bool can_read() const noexcept {\n    return state_ == ForwardState::running && !has_pending();\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "수신한 바이트의 접수",
+          "text": "bool feed(const std::uint8_t* data, std::size_t count) noexcept {\n    if (!can_read()) {\n        return false;\n    }\n    if (count > 0 && data == nullptr) {\n        return false;\n    }\n    if (!parser_.append(data, count)) {\n        state_ = ForwardState::buffer_limit;\n        return false;\n    }\n    parse_buffered();\n    return true;\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "고정 저장 공간의 범위",
+          "body": "각 방향은64바이트 parser 저장 공간과 최대35바이트 EncodedFrame을 갖습니다. 객체의 크기에는 길이·offset·상태와 정렬 여백도 포함됩니다. 임시 Frame, 소켓, 커널 버퍼와 연결 쌍의 비용까지 합쳐99바이트라고 계산하면 안 됩니다."
+        }
+      ]
+    },
+    {
+      "title": "부분 송신은 실패가 아니라 진행량이다",
+      "body": "8바이트 프레임을 보내려는데 send가3바이트를 수락했다면 offset은3이고 나머지는5입니다. 다음 시도에서 would_block이면 그대로5바이트를 보관합니다. 그 뒤2바이트가 수락되면 offset은5, 나머지는3입니다. 이미 보낸 앞부분을 다시 보내지 않습니다.\n\nflush는 한 번의 송신 콜백만 호출합니다. 결과가 progress이면 count가1 이상이고 remaining 이하이며 error가0인지 확인한 뒤 offset을 증가시킵니다. 콜백이 불가능한 개수를 반환했을 때 그대로 더하면 범위 밖 포인터를 만들거나 바이트를 건너뛸 수 있습니다.\n\n한 프레임의 송신이 끝나면 pending을 비우고 파서에 남은 다음 프레임을 준비합니다. 그러나 같은 flush에서 다음 프레임까지 계속 보내지는 않습니다. 호출자가 반대 방향과 종료 요청을 관측할 기회를 갖도록 한 번의 작업량을 제한합니다.",
+      "codes": [
+        {
+          "label": "단 한 번의 송신과 진행량 검증",
+          "text": "template <typename Sender>\nForwardState flush(Sender&& send) noexcept {\n    static_assert(\n        std::is_nothrow_invocable_r_v<SendAttempt, Sender&,\n                                      const std::uint8_t*, std::size_t>,\n        \"Sender must be noexcept and return SendAttempt\");\n\n    if (state_ != ForwardState::running || !has_pending()) {\n        return state_;\n    }\n\n    const std::size_t remaining = pending_.size - offset_;\n    const SendAttempt attempt =\n        send(pending_.bytes.data() + offset_, remaining);\n\n    switch (attempt.state) {\n        case SendState::progress:\n            if (attempt.count < 1 || attempt.count > remaining ||\n                attempt.error != 0) {\n                state_ = ForwardState::invalid_send_result;\n                return state_;\n            }\n            offset_ += attempt.count;\n            if (offset_ == pending_.size) {\n                // Whole frame accepted: drop it and prime the next buffered\n                // frame, but never send it from this call.\n                pending_ = EncodedFrame{};\n                offset_ = 0;\n                parse_buffered();\n            }\n            return state_;",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "수락과 수신 확인",
+          "body": "send의 성공은 로컬 송신 경로가 바이트를 수락했다는 뜻입니다. 상대 애플리케이션이 읽거나 입력을 시뮬레이션에 반영했다는 확인이 아닙니다. 재연결 후 같은 입력을 재전송하려면 틱·라운드·중복 처리 규약이 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "지금 못 보냄과 더는 못 보냄을 구별한다",
+      "body": "would_block은 지금 송신 여유가 없다는 관측입니다. interrupted는 호출이 중단되어 이번 시도에 진전이 없다는 결과입니다. 두 경우는 남은 바이트와 offset을 그대로 유지하고 호출자에게 돌아갑니다. 같은 자리에서 무한 반복하지 않습니다.\n\nerror는 이 방향의 송신을 끝냅니다. 앞부분이 이미 수락됐을 수 있으므로 전체 프레임을0부터 자동 재전송하지 않습니다. last_error와 bytes_pending은 남은 상태를 진단하는 데 쓸 수 있지만, 종료된 객체를 다시 running으로 바꾸지는 않습니다.\n\n콜백이 would_block과 count=3을 함께 보고하면 계약이 모순됩니다. invalid_send_result로 끝내고 offset을 바꾸지 않습니다. OS 결과를 래퍼로 옮길 때도 이 구별이 유지되어야 상위 상태 기계가 정확한 위치를 보관할 수 있습니다.",
+      "codes": [
+        {
+          "label": "정체·중단·오류를 분리한다",
+          "text": "        case SendState::would_block:\n        case SendState::interrupted:\n            // Retain the unsent bytes; count and error must both be zero.\n            if (attempt.count != 0 || attempt.error != 0) {\n                state_ = ForwardState::invalid_send_result;\n            }\n            return state_;\n\n        case SendState::error:\n            if (attempt.count != 0) {\n                state_ = ForwardState::invalid_send_result;\n                return state_;\n            }\n            // Already locally accepted bytes cannot be recalled; the rest is\n            // aborted. No automatic retry or reconnect.\n            last_error_ = attempt.error;\n            state_ = ForwardState::send_error;\n            return state_;\n\n        default:\n            state_ = ForwardState::invalid_send_result;\n            return state_;\n    }\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.h",
+        "symbol": "bool tcp_send_some",
+        "invariant": "실패나 정체를 전체 메시지의 송신0으로 단순화하지 않는다.",
+        "mayDiffer": "실제 tcp_send_some은 bool과 out_sent로 결과를 전달하며 실패 전에 수락된 바이트도 기록한다. 기준 콜백은 SendAttempt로 결과를 분리한다."
+      }
+    },
+    {
+      "title": "EOF와 부분 프레임은 서로 다른 관측이다",
+      "body": "recv의 EOF는 상대가 그 TCP 방향으로 더 보낼 데이터가 없음을 나타냅니다. 그 시점에 parser가 비어 있으면 source_closed, 부분 프레임이 남아 있으면 truncated입니다. 완성한 프레임을 아직 다 보내지 못한 상태에서 외부가 EOF를 알려 주면 undelivered로 구별합니다.\n\n보통 호출자는 pending이 있는 동안 읽지 않으므로 그 순간 새 EOF를 직접 recv하지는 않습니다. 이 경우의 구분은 외부 종료 관측이나 상태 검사에서 유용합니다. 완성 프레임을 못 보냈다는 이유만으로 송신자가 잘못된 문법을 보냈다고 진단하지 않습니다.\n\nTCP에서는 한쪽 송신만 끝내고 상대의 응답을 계속 읽는 반닫힘도 가능합니다. 이 게임 실습은 한 방향이 끝나면 연결 쌍을 종료하는 정책을 선택합니다. 웹 요청처럼 EOF 뒤의 응답 배출이 필요한 프록시에 이 정책을 그대로 적용하면 정상 데이터를 잃을 수 있습니다.",
+      "codes": [
+        {
+          "label": "종료 시 남은 상태를 구별한다",
+          "text": "ForwardState eof() noexcept {\n    if (state_ != ForwardState::running) {\n        return state_;\n    }\n    if (has_pending()) {\n        state_ = ForwardState::undelivered;\n    } else if (parser_.pending_bytes() > 0) {\n        state_ = ForwardState::truncated;\n    } else {\n        state_ = ForwardState::source_closed;\n    }\n    return state_;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "한 방향의 종료를 연결 쌍에 적용한다",
+      "body": "방향 객체는 소켓을 닫지 않습니다. 두 소켓을 함께 소유한 호출자가 어느 방향이 끝났는지 관측하고 상대 방향에 stop을 요청한 뒤 소켓을 정리합니다. 객체 안에서 임의의 다른 소켓을 닫게 하면 방향별 처리와 쌍의 수명 책임이 섞입니다.\n\n기준 stop은 running을 cancelled로만 바꿉니다. 이미 source_closed나 send_error인 방향의 이유를 cancelled로 덮어쓰지 않습니다. 단절 원인과 그로 인해 같이 정지한 방향을 구별할 수 있습니다. 어느 클라이언트가 게임에서 졌는지는 이 정보로 결정하지 않습니다.\n\n현재 threaded 서비스는 두 worker가 공유 Channel의 closed와 forwarder_count를 사용합니다. closed는 상대 루프에 대한 정지 요청이고, 카운터가0이 된 마지막 completion이 최종 정리를 수행합니다. 그 카운터는 객체 참조 수나 TCP 연결 수와 다른, 완료를 기다리는 작업 수입니다.",
+      "codes": [
+        {
+          "label": "이미 확정된 종료 이유는 보존",
+          "text": "ForwardState stop() noexcept {\n    if (state_ == ForwardState::running) {\n        state_ = ForwardState::cancelled;\n    }\n    return state_;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "호출자가 두 소켓의 수명을 끝낸다",
+          "text": "require(received[0] && received[1] && client_closed);\nrequire(a_to_b.state() == ForwardState::source_closed);\nb_to_a.stop(); // Pair policy: one direction ending ends this game transport.\npeers[0]->socket.reset();peers[1]->socket.reset();\nrequire(b_to_a.state() == ForwardState::cancelled);",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "struct ForwarderCompletion",
+        "invariant": "방향의 실패 관측과 연결 쌍의 최종 정리를 구별한다.",
+        "mayDiffer": "현재 서버는 두 worker의 종료를 atomic 카운터로 모은다. 기준 실습은 한 호출자라 소켓 정리를 한 지점에서 수행한다."
+      }
+    },
+    {
+      "title": "잠금이 필요한 공유와 필요 없는 독립 상태",
+      "body": "한 호출자가 두 방향 객체를 관리하는 기준 실습에는 내부 mutex가 없습니다. 각 객체의 parser와 offset은 다른 객체가 바꾸지 않습니다. 객체의 복사·이동을 막아 커서를 실수로 복제하는 경로도 줄입니다. 여러 참조로 동시에 호출하는 행위까지 자동으로 막지는 않으므로 소유 규약을 지켜야 합니다.\n\n현재 서비스는 게임 바이트 외에도 결과 통지를 같은 목적지 소켓에 보낼 수 있습니다. 두 송신 루프가 같은 소켓에 부분 프레임을 번갈아 쓰면 바이트가 섞이므로 목적지별 sendMu로 전체 프레임 송신 구간을 직렬화합니다. A의 수신과 B의 수신이 독립적이라는 사실이 모든 송신도 독립적이라는 뜻은 아닙니다.\n\natomic closed만 있다고 동기 송신이 즉시 취소되지는 않습니다. 실행 중인 호출이 반환하고 루프가 다시 확인해야 정지 요청을 관측합니다. 공유 상태의 일관성, 외부 호출의 대기 시간, 객체를 파괴해도 되는 시점은 각각 따로 설계합니다.",
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "bool sendToA",
+        "invariant": "같은 목적지의 부분 송신이 서로 섞이지 않도록 직렬화한다.",
+        "mayDiffer": "기준 probe는 한 호출자만 송신하고, 실제 서비스는 결과 통지와 양방향 worker가 목적지 잠금을 공유한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "종료 함수 이름과 실제 역할",
+          "body": "현재 finalizeForfeit라는 이름은 과거 설계를 반영합니다. 실제로는 서버 시뮬레이션이 확정한 결과를 저장하는 경로이며 연결이 끊겼다는 이유만으로 상대 승리를 만들지 않습니다. 함수 이름만으로 판정 규칙을 추론하지 말고 호출 조건과 반환 상태를 함께 읽습니다."
+        }
+      ]
+    },
+    {
+      "title": "잘못된 헤더 뒤에 새 경계를 추측하지 않는다",
+      "body": "길이 헤더가 허용 범위를 넘으면 그 스트림에서 다음 프레임의 시작을 신뢰할 수 없습니다. 버퍼를 지우고 다음 recv의 첫 바이트를 새 헤더라고 생각해 봅시다. TCP는 같은 바이트를 서로 다른 크기로 나눠 전달할 수 있으므로, 우연히 어디서 recv가 끝났는지에 따라 전혀 다른 메시지 해석이 됩니다.\n\n기준 FrameParser는 잘못된 길이를 오류로 고정하며 ForwardDirection도 protocol_error로 끝납니다. 현재 두 relay 역시 과대한 선언 길이를 받으면 소스를 종료합니다. ranked 경로는 검증 상태를 무효화하여 불완전한 관측을 정상 경기 결과로 사용하지 않게 합니다.\n\n오류보다 앞선 유효 프레임 일부가 이미 상대에게 전달됐을 수 있습니다. 연결 종료는 그 바이트를 회수하지 않습니다. 따라서 “이 배치가 전부 적용되거나 전부 취소된다”는 트랜잭션으로 설명할 수 없습니다. 서비스의 서버 전용 타입 차단처럼 경계를 알고 특정 프레임만 버리는 정책과도 구별합니다.",
+      "codes": [
+        {
+          "label": "유효 프레임 뒤 잘못된 경계",
+          "text": "    auto bytes=wire(41,1);const auto good=bytes.size();bytes.push_back(0);bytes.push_back(0);\n    ForwardDirection d;require(d.feed(bytes.data(),bytes.size()));require(d.state()==ForwardState::running);\n    std::size_t sent=0;\n    d.flush([&](const std::uint8_t*,std::size_t size) noexcept {sent+=size;return SendAttempt{SendState::progress,size,0};});\n    require(sent==good && d.state()==ForwardState::protocol_error && !d.can_read());\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "enum class ForwardScreenResult",
+        "invariant": "프레임 경계 오류의 소스와 송신 실패의 목적지를 구별한다.",
+        "mayDiffer": "현재 서비스는 원본 프레임 구간을 전송하고 서버 전용 타입도 필터링한다. 기준 포워더는 학습 문법의 모든 타입을 전달한다."
+      }
+    },
+    {
+      "title": "실제 연결에서 서로의 입력을 받는다",
+      "body": "TCP 실습은 방 코드 조회와 수락까지 연결한 뒤 로비의 두 파서를 각각 A→B와 B→A에 넘깁니다. 각 클라이언트는 자신의 TYPE41 입력을 READY 뒤에 붙여 보냈으므로, 일부는 prefix에 있고 일부는 커널에 있을 수 있습니다.\n\n한 반복에서 각 방향에 송신을 한 번 시도하고, 더 읽어도 될 때만 최대3바이트를 수신합니다. 송신 콜백은 한 번에 최대2바이트만 보내도록 해서 offset을 실제 소켓에서도 사용하게 만듭니다. 반대 방향도 방문하므로 한쪽 would_block이 그 반복 전체를 차지하지 않습니다.\n\n클라이언트 A는 게스트의 중립 입력을, B는 호스트의 drop 입력을 받습니다. 두 클라이언트가 실제 받은 프레임을 RoundPlay에 넣어 한 tick 뒤의 양쪽 보드 상태 바이트를 비교합니다. 소스에서 읽은 것과 목적지가 받은 것을 구별해 중계 경로의 끝까지 연결합니다.",
+      "codes": [
+        {
+          "label": "수락 파서에서 방향별 상태로",
+          "text": "ForwardDirection a_to_b(std::move(handoff.parsers[0]));\nForwardDirection b_to_a(std::move(handoff.parsers[1]));\nstd::array<ForwardDirection*,2> directions{&a_to_b,&b_to_a};\nstd::array<Frame,2> delivered;\nstd::array<bool,2> received{false,false};\nbool client_closed = false;",
+          "language": "cpp"
+        },
+        {
+          "label": "두 방향에 한 번씩 진행 기회를 준다",
+          "text": "for (std::size_t side=0;side<2;++side) {\n    auto& direction = *directions[side];\n    direction.flush([&](const std::uint8_t* data,std::size_t size) noexcept {\n        // Cap progress to two bytes to exercise the saved offset.\n        return try_send(peers[1-side]->socket,data,(std::min)(size,std::size_t{2}));\n    });\n    if (direction.state() != ForwardState::running) break;\n    if (direction.can_read()) {\n        std::uint8_t bytes[3];auto r=try_receive(peers[side]->socket,bytes,sizeof(bytes));\n        if (r.state == ReceiveState::progress) require(direction.feed(bytes,r.count));\n        else if (r.state == ReceiveState::eof) direction.eof();\n        else require(r.state == ReceiveState::would_block || r.state == ReceiveState::interrupted);\n    }\n    if (direction.state() != ForwardState::running) break;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "한쪽을 닫고 살아 있는 상대의 EOF를 확인한다",
+      "body": "입력이 양쪽에 도착하면 실습은 A 클라이언트 소켓을 닫습니다. 서버가 A 소켓의 EOF를 관측하면 A→B는 source_closed가 되고 호출자는 B→A를 cancelled로 바꾼 뒤 두 서버 소켓을 정리합니다. B 클라이언트가 실제 EOF를 읽는 것까지 확인합니다.\n\n이 실험의2초 마감은 호출자의 전체 실험 예산입니다. 방향 객체 자체는 시계를 읽지 않으므로 진행이 없는 객체를 호출하지 않고 방치하면 자동으로 시간 초과되지 않습니다. 제품에서는 유휴 시간·송신 정체·종료 요청을 구별한 정책을 호출자에 연결해야 합니다.\n\n현재 threaded 서비스의 수신 무활동 제한과 송신 전체 시간 제한은 서로 다른 대기 구간을 다룹니다. 설정된 시간과 실제 종료 관측 시점은 스케줄링 때문에 같지 않을 수 있습니다. 종료 조건을 설명할 때 어떤 작업이 어떤 시계를 확인하는지까지 적어야 합니다.",
+      "codes": [
+        {
+          "label": "살아 있는 상대에서도 정리 결과 관측",
+          "text": "for (;;) {\n    std::uint8_t byte;auto r=try_receive(clients[1].socket,&byte,1);\n    if (r.state == ReceiveState::eof) break;\n    require(Clock::now()<end && (r.state==ReceiveState::would_block || r.state==ReceiveState::interrupted));\n    std::this_thread::sleep_for(std::chrono::milliseconds(1));\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/relay.cpp",
+        "symbol": "constexpr auto kIdleTimeout",
+        "invariant": "대기 시간과 진행 관측을 호출자의 루프에서 관리한다.",
+        "mayDiffer": "서비스는 방향별 idle/rate 정책과 송신 마감을 갖는다. probe의2초는 실험 종료 상한을 검사하는 협조적 예산이다."
+      }
+    },
+    {
+      "title": "6,006가지 조합과 실패 지점을 공급한다",
+      "body": "검사는0~32바이트 본문을 가진 프레임과 두 번째 프레임을 이어 붙입니다. 모든 자르는 위치에서 수신을 둘로 나누고, 송신 cap을1~7바이트로 바꿉니다. 콜백에는 would_block과 interrupted도 반복해서 섞습니다. 총6,006개 조합의 출력 바이트가 원래 입력과 같아야 합니다.\n\n예상 결과는 입력 wire 자체입니다. 구현의 parser나 offset 계산을 검사 코드에서 그대로 복제해 정답을 만들지 않습니다. 또 한 flush가 콜백을 최대 한 번만 부르는지, pending이 남았을 때 feed를 거절하고 상태를 보존하는지 확인합니다.\n\n별도 실패 검사에서는 부분 수락 뒤 error, 범위 밖 count, 잘못된 SendState, prefix의 원본 비우기, EOF와 부분 헤더, 완성 프레임 미전달, 상한 초과와 정지 후 불변을 다룹니다. 반복 조합이 실제 OS의 모든 스케줄을 증명하는 것은 아니며, 실제 TCP 실습과 목적이 다릅니다.",
+      "codes": [
+        {
+          "label": "앞부분 수락 뒤 송신 실패",
+          "text": "    const auto bytes=wire(41,3);FrameParser prefix;\n    require(prefix.append(bytes.data(),bytes.size()));\n    ForwardDirection d(std::move(prefix));require(prefix.pending_bytes()==0 && !d.can_read());\n    const auto pending=d.bytes_pending();require(!d.feed(bytes.data(),bytes.size()) && d.bytes_pending()==pending);\n    d.flush([](const std::uint8_t*,std::size_t) noexcept {return SendAttempt{SendState::progress,2,0};});\n    require(d.bytes_pending()==pending-2);\n    d.flush([](const std::uint8_t*,std::size_t) noexcept {return SendAttempt{SendState::error,0,77};});\n    require(d.state()==ForwardState::send_error && d.last_error()==77 && d.bytes_pending()==pending-2);\n    unsigned calls=0;d.flush([&](const std::uint8_t*,std::size_t) noexcept {++calls;return SendAttempt{SendState::error,0,1};});\n    require(calls==0);\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "검사 보조 함수도 바이트를 잃을 수 있습니다",
+          "body": "parse_frames가 완성 프레임 목록을 모두 반환한 뒤 첫 목표 프레임에서 return하면 목록의 나머지를 잃습니다. 실제 Python 보조 함수는 한 프레임 단위로 소비하도록 되어 있으며, 목표 프레임 뒤의 완성 프레임과 부분 헤더를 모두 buf에 남깁니다."
+        }
+      ],
+      "reference": {
+        "path": "python/tests/test_relay_meta_smoke.py",
+        "symbol": "def _recv_frame",
+        "invariant": "원하는 메시지를 찾은 뒤에도 이미 받은 후속 바이트를 보존한다.",
+        "mayDiffer": "서비스 프레이밍을 쓰는 Python 테스트 보조 함수이며 학습 C++ parser와 다른 형식이다."
+      }
+    },
+    {
+      "title": "누적 프로젝트에 추가하고 실행한다",
+      "body": "ForwardDirection은 parser와 SendAttempt 계약에만 의존합니다. OS를 호출하는 코드는 probe에 있으므로 contract는 실제 소켓 없이 모든 분할과 오류를 공급할 수 있습니다. 두 실행 파일을 별도로 빌드하고 결과를 비교해 보세요.\n\ncontract는6006조합과 실패 계약의 결과를 출력합니다. probe는 코드 주소 조회, 두 방향의 짧은 송신, 실제 상대 입력 수신, EOF에 따른 쌍 종료와 RoundPlay 일치를 출력합니다. SDL 구성에서도 이 두 타깃은 창을 열지 않습니다.",
+      "codes": [
+        {
+          "label": "방향별 계약과 TCP 실습 타깃",
+          "text": "# Directional forwarding after the acceptance handoff.\nadd_executable(forward_direction_contract tests/forward_direction_contract.cpp)\ntarget_include_directories(forward_direction_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME forward_direction_contract COMMAND forward_direction_contract)\nset_tests_properties(forward_direction_contract PROPERTIES TIMEOUT 15)\nadd_executable(forwarder_probe tools/forwarder_probe.cpp)\ntarget_include_directories(forwarder_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_link_libraries(forwarder_probe PRIVATE StudySocket Threads::Threads)\nadd_test(NAME forwarder_probe COMMAND forwarder_probe)\nset_tests_properties(forwarder_probe PROPERTIES TIMEOUT 15)\n",
+          "language": "cmake"
+        },
+        {
+          "label": "빌드와 검사",
+          "text": "cmake -S docs/learn/checkpoints/105-forwarder -B out/study-105 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-105 --target forward_direction_contract forwarder_probe -j2\nctest --test-dir out/study-105 -R \"^(forward_direction_contract|forwarder_probe)$\" --output-on-failure",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "전체 파일에서 소유권과 정책을 따라간다",
+      "body": "핵심 계약은 방향별 커서 독립, prefix 우선 처리, 부분 송신 위치 보존, 막힌 방향의 수신 억제, 종료 후 재사용 금지입니다. 버퍼 크기나 OS 이벤트 방식이 바뀌어도 이 관계는 유지되어야 합니다.\n\n이 단계의 학습 포워더는 프레임의 문법만 확인해 전달합니다. 현재 서비스의 서버 전용 타입 필터, 계정 신원, 입력 검증기, 결과 저장은 별도 정책입니다. 중계가 바이트를 보존했다는 사실과 그 바이트를 믿고 보상을 지급해도 된다는 판단을 합치지 않습니다.\n\n프레임을 옮기는 함수와 연결 쌍을 닫는 호출자, 최종 게임 판정을 내리는 계층을 각각 찾아 보세요. 같은 “종료”라는 단어가 나와도 입력 스트림의 끝, worker의 완료, 객체의 파괴, 게임의 승패 확정은 서로 다른 사건입니다.",
+      "codes": [
+        {
+          "label": "net/forward_direction.h",
+          "language": "cpp",
+          "file": "checkpoints/105-forwarder/net/forward_direction.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/forward_direction_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/105-forwarder/tests/forward_direction_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/forwarder_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/105-forwarder/tools/forwarder_probe.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "105-1",
+      "question": "8바이트 중3바이트를 수락한 뒤 would_block이 왔습니다. 다음 송신 시도는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0번 위치부터8바이트"
+        },
+        {
+          "id": "b",
+          "text": "3번 위치부터5바이트"
+        },
+        {
+          "id": "c",
+          "text": "5번 위치부터3바이트"
+        },
+        {
+          "id": "d",
+          "text": "프레임을 지우고 다음 프레임"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "3번 위치부터5바이트",
+      "explanation": "would_block은 진행0입니다. 이미 수락한 앞3바이트를 다시 보내지 않고 남은5바이트를 보관합니다."
+    },
+    {
+      "id": "105-2",
+      "question": "A→B에 pending이 남아 있습니다. 기준 호출자의 올바른 행동은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "A에서 계속 읽어 벡터에 쌓기"
+        },
+        {
+          "id": "b",
+          "text": "A를 더 읽기 전에 pending 송신을 진행하고 B→A도 방문하기"
+        },
+        {
+          "id": "c",
+          "text": "A 소켓에서 같은 바이트를 다시 읽기"
+        },
+        {
+          "id": "d",
+          "text": "두 방향의 offset을 합치기"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "A를 더 읽기 전에 pending 송신을 진행하고 B→A도 방문하기",
+      "explanation": "수신 전에 can_read를 확인합니다. 막힌 방향의 추가 수신을 억제하면서 반대 방향의 진행 기회도 보존합니다."
+    },
+    {
+      "id": "105-3",
+      "question": "EOF 관측 때 완성 프레임은 없고 헤더 한 바이트만 parser에 남았습니다. 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "source_closed"
+        },
+        {
+          "id": "b",
+          "text": "undelivered"
+        },
+        {
+          "id": "c",
+          "text": "truncated"
+        },
+        {
+          "id": "d",
+          "text": "running"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "truncated",
+      "explanation": "프레임이 완성되기 전에 스트림이 끝났으므로 truncated입니다. 완성했지만 못 보낸 프레임인 undelivered와 구별합니다."
+    },
+    {
+      "id": "105-4",
+      "question": "길이 상한을 넘는 헤더 뒤 버퍼를 비우고 다음 recv를 새 프레임으로 취급하면 안 되는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "recv는 항상 한 바이트만 반환해서"
+        },
+        {
+          "id": "b",
+          "text": "TCP 수신 경계는 프로토콜 프레임의 시작을 보장하지 않아서"
+        },
+        {
+          "id": "c",
+          "text": "모든 오류는 체크섬으로 복구되어서"
+        },
+        {
+          "id": "d",
+          "text": "unsigned 정수가 항상 음수여서"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "TCP 수신 경계는 프로토콜 프레임의 시작을 보장하지 않아서",
+      "explanation": "TCP는 바이트 스트림입니다. 분할 위치가 바뀔 때마다 다른 바이트를 헤더로 해석하게 되므로 손상된 경계를 임의로 재동기화하지 않습니다."
+    },
+    {
+      "id": "105-5",
+      "question": "B→A 송신 오류로 연결 쌍을 닫았습니다. 이 관측만으로 알 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "B가 게임에서 패배했다"
+        },
+        {
+          "id": "b",
+          "text": "A가 고의로 연결을 끊었다"
+        },
+        {
+          "id": "c",
+          "text": "서버 결과가 반드시 무승부다"
+        },
+        {
+          "id": "d",
+          "text": "해당 목적지 송신이 실패했으며 승패는 별도 판정이 필요하다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "해당 목적지 송신이 실패했으며 승패는 별도 판정이 필요하다",
+      "explanation": "실패 관측 위치는 진단 정보입니다. 공격 의도나 승패는 네트워크 오류만으로 증명되지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "A→B와 B→A의 source/destination/parser/offset을 표로 적습니다.",
+      "8바이트에서3바이트 진행·정체·2바이트 진행 뒤 남은 구간을 계산합니다.",
+      "prefix에 두 프레임을 넣고 flush마다 어느 프레임을 보내는지 확인합니다.",
+      "TCP probe에서 실제 상대 입력 수신 뒤 한쪽 종료와 반대편 EOF를 관찰합니다."
+    ],
+    "failureChecks": [
+      "이미 수신한 바이트를 feed가 거절하면 누가 보관할지 점검합니다.",
+      "부분 헤더에서 EOF와 완성 프레임 미전달을 구별합니다.",
+      "상한 위반 길이 뒤 새 수신을 헤더로 다시 해석하지 않는지 확인합니다."
+    ],
+    "expected": "부분 송신과 수신 분할에도 양방향 바이트를 보존하고, 종료 원인을 덮어쓰지 않으며 연결 쌍을 정리한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 방향별 포워더 초안 직접 검토·6006 조합·실제 TCP·손상 헤더/검사 보조 함수 회귀",
+    "draftJob": "out/learning-jobs/105-forward-events.jsonl",
+    "corrections": [
+      "복사 금지=단일 접근 보장 및 로컬 수락=ack 오해 교정",
+      "두 실제 포워더의 과대 헤더 뒤 임의 재동기화 제거·ranked 검증 무효화",
+      "Python _recv_frame의 반환 뒤 완성 프레임 손실 수정",
+      "Part7의 단절=몰수패/벌점, 실시간 idle/고정1초 제한 단정 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "104 누적 불변 파일 보존, 새2타깃 SCRIPTED2/SDL2 CTest",
+    "6006 수신분할/본문크기/송신cap 조합과 정체·EINTR·오류·EOF·prefix·상한 계약 ASan/UBSan",
+    "실제 방 코드/수락/2바이트 송신/상대 입력 수신/EOF 쌍종료/실제 RoundPlay 정규 바이트 일치 ASan/UBSan",
+    "수정 전 두 relay의 과대 헤더 후 연결 유지 및 Python 보조 함수의 후속 프레임 손실 재현",
+    "수정 후 두 relay 각각 정상방/수락꼬리/종료/과대헤더 및 helper 계약5passed·0skip",
+    "Windows/macOS 네이티브·수동GUI·WAN/부하·ranked 인증/DB 통합은 미검증; ranked 위반 무효화는 소스 검토·빌드 범위"
+  ]
+}

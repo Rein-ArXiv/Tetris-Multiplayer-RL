@@ -62,30 +62,39 @@ uint64_t Matchmaker::nextSeed() {
     return seed_src.next();
 }
 
-void Matchmaker::enqueue(PlayerInfo p) {
+bool Matchmaker::enqueue(PlayerInfo p) {
     {
         std::lock_guard<std::mutex> lk(mu);
+        // Serialize admission with shutdown: a late producer cannot repopulate
+        // a queue whose consumer has already stopped.
+        if (stopping.load() || waiting.size() >= kMaxWaiting) {
+            net::tcp_close(p.sock);
+            return false;
+        }
         waiting.push_back(std::move(p));
+        cv.notify_one();
     }
-    cv.notify_one();
+    return true;
 }
 
 std::optional<Match> Matchmaker::waitForPair() {
     std::unique_lock<std::mutex> lk(mu);
     while (true) {
-        // predicate 형태의 wait: spurious wakeup 에 안전
-        cv.wait(lk, [this] { return stopping.load() || waiting.size() >= 2; });
         if (stopping.load()) return std::nullopt;
-
-        while (!waiting.empty() && !waitingPlayerStillActive(waiting.front())) {
-            waiting.pop_front();
-        }
-        if (waiting.size() < 2) continue;
-
-        while (waiting.size() >= 2 && !waitingPlayerStillActive(waiting[1])) {
-            waiting.erase(waiting.begin() + 1);
+        // Observe cancellation even when only one player is waiting. Poll all
+        // pending entries so stale sessions do not retain admission leases.
+        for (auto it = waiting.begin(); it != waiting.end();) {
+            if (!waitingPlayerStillActive(*it)) it = waiting.erase(it);
+            else ++it;
         }
         if (waiting.size() >= 2) break;
+        if (waiting.empty()) {
+            cv.wait(lk, [this] { return stopping.load() || !waiting.empty(); });
+        } else {
+            // Socket data does not notify this condition_variable.
+            // This is a cooperative polling interval, not a hard deadline.
+            cv.wait_for(lk, std::chrono::milliseconds(50));
+        }
     }
 
     Match m;

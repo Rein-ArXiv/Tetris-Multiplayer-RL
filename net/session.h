@@ -1,5 +1,7 @@
 #pragma once
 #include "match_result.h"
+#include "pong_window.h"
+#include "hash_mailbox.h"
 #include <cstdint>
 #include <vector>
 #include <deque>
@@ -21,9 +23,9 @@ namespace net {
 enum class Role : uint8_t { Host=1, Peer=2 };
 
 // 링크 건강 상태 — 마지막 PONG 수신 경과 시간 기반
-//   OK     : 마지막 PONG < 2s (정상)
-//   Stalled: 2s ≤ 경과 < 10s (상대가 잠시 얼어붙음, Windows 창 드래그 등)
-//   Lost   : 경과 ≥ 10s 혹은 hasFailed() — 연결 공식 단절로 간주
+//   OK     : 확인된 PONG 이후 < 2s 또는 ready 직후 유예
+//   Stalled: 2s ≤ 경과 < 10s — 응답 지연, 원인은 이 상태만으로 알 수 없음
+//   Lost   : 경과 ≥ 10s 혹은 hasFailed() — 종료 정책에 사용할 관찰 결과
 enum class LinkStatus : uint8_t { OK=0, Stalled=1, Lost=2 };
 
 // 게임 오버 후 선택
@@ -65,6 +67,10 @@ public:
     void SetTicketIssuer(std::function<std::optional<std::string>(const std::string&)> issuer) { ticketIssuer_ = std::move(issuer); }
     ~Session();
 
+    // Start/Close calls are serialized by one owner thread. A start returns
+    // false without changing state until Close() has joined every prior worker.
+    // Worker failure/EOF and QueueCancel alone do not make a Session reusable.
+    // Never call Close() on a Session worker: it would join itself.
     // 네트워크 연결
     bool Host(uint16_t port, const SeedParams& sp);  // 호스트: 포트 대기, 파라미터 결정
     bool Connect(const std::string& host, uint16_t port);  // 클라이언트: 호스트 연결
@@ -74,12 +80,13 @@ public:
     //   1) tcp_connect + QUEUE_JOIN 송신
     //   2) MATCH_FOUND 대기 (최대 5분, 내부 큐 스레드)
     //   3) 수신 시 seedParams 채우고 ioThread 시작 → ready=true
-    // 호출 즉시 true 리턴 (큐 스레드가 기동된 경우). 연결 자체가 실패하면 false.
+    // 워커 기동 시 true; 아직 정리하지 않은 워커가 있으면 false.
+    // 실제 연결 실패는 비동기로 hasFailed()에 반영된다.
     // 호출부는 isReady() / hasFailed() 로 진행 상태를 폴링한다.
     bool QueueJoin(const std::string& host, uint16_t port,
                    uint32_t start_tick = 120, uint8_t input_delay = 2,
                    const std::string& auth_token = {});
-    // 매칭 대기 중 취소. 소켓을 닫아 큐 스레드를 즉시 해제.
+    // 매칭 취소를 요청한다. 워커 join과 소유 핸들 해제는 Close에서 완료한다.
     void QueueCancel();
 
     // 랜덤 큐 수락 로비 (MATCH_FOUND 수신 이후 ~ 게임 시작 직전).
@@ -140,7 +147,9 @@ public:
 
     // 게임 데이터 수신
     bool GetRemoteInput(uint32_t tick, uint8_t& outMask);
+    // Diagnostic latest arrival; non-consuming. Comparisons use PollHashComparison.
     bool GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const;
+    bool PollHashComparison(uint32_t& tick, uint64_t& local, uint64_t& remote);
     bool GetRemoteGameOverChoice(GameOverChoice& outChoice) const;
     void ClearGameOverChoices();
 
@@ -163,7 +172,7 @@ public:
     struct MatchResult { int32_t elo_before; int32_t elo_after; int32_t delta; ResultStatus status = ResultStatus::Unknown; };
     bool GetMatchResult(MatchResult& out) const;
 
-    // 안전 틱 계산용: safeTick = min(local, remote) - inputDelay
+    // 안전 틱 계산용: safeTick = min(local - inputDelay, remote)
     uint32_t maxRemoteTick() const { return lastRemoteTick; }
     uint32_t maxLocalTick() const { return lastLocalTick; }
 
@@ -177,9 +186,11 @@ public:
     void Close();  // 세션 종료 (스레드 정리, 소켓 닫기)
 
 private:
+    bool hasUnjoinedWorkers() const;
     std::function<std::optional<std::string>(const std::string&)> ticketIssuer_;
     bool prepareGameCredential(const std::string& host, std::string& credential);
     void ioThread();  // I/O 루프 (송수신, 메시지 파싱)
+    bool parseReceived(std::vector<uint8_t>& bytes, std::vector<Frame>& frames);
     void handleFrame(const Frame& f);  // 메시지 처리
     void acceptThread(uint16_t port);  // 호스트 전용: 연결 대기
     void queueThread(std::string host, uint16_t port,
@@ -246,6 +257,7 @@ private:
 
     std::mutex sendMu;
     std::deque<std::vector<uint8_t>> sendQ;
+    size_t pendingSendBytes = 0; // sendMu: queued plus the active transport call.
     // 전송 큐에 프레임 하나를 넣는다. sendMu 는 이 안에서 잡는다.
     // 상한을 넘으면 프레임을 버리는 대신 연결을 실패 처리한다 — 이유는 .cpp 참고.
     void pushSend(std::vector<uint8_t>&& fr);
@@ -255,12 +267,8 @@ private:
     std::atomic<uint32_t> lastRemoteTick{0};
     std::atomic<uint32_t> lastLocalTick{0};
 
-    // 주의: tick 과 hash 는 pair 로 원자 갱신되어야 한다. 두 atomic 을 쪼개서
-    // 쓰면 store 사이에 reader 가 들어가 새 tick + 옛 hash 를 읽어 DESYNC 오탐.
-    // 단일 mutex 로 pair 전체를 보호. HASH 프레임은 10s 주기라 lock 부담 없음.
-    mutable std::mutex hashMu_;
-    uint32_t lastHashTickRemote{0};
-    uint64_t lastHashRemote{0};
+    // One lock protects whole samples and pending per-tick comparisons.
+    HashExchange hashMailbox_;
 
     std::atomic<uint8_t> localGameOverChoice{0};
     std::atomic<uint8_t> remoteGameOverChoice{0};
@@ -268,6 +276,7 @@ private:
     // PING/PONG 하트비트 — steady_clock milliseconds.
     // lastPongMs 는 ready=true 전환 시점에 now 로 초기화.
     std::atomic<int64_t> lastPongMs{0};
+    PongWindow pendingPongs_; // ioThread only; reset once per transport worker.
     std::atomic<int64_t> lastPingSentMs{0};
 
     // 메인 스레드 스톨 감지 — 창 드래그 시 WM_ENTERSIZEMOVE 모달 루프가 메인을

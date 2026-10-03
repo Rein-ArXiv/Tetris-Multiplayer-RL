@@ -9,6 +9,7 @@
 #include "colors.h"
 #include "presentation.h"
 #include "../renderer/renderer.h"
+#include <utility>   // std::exchange
 #include <climits>   // INT_MAX
 
 namespace {
@@ -69,24 +70,34 @@ Game::~Game()
 void Game::SubmitInput(uint8_t inputMask)
 {
     sim.SubmitInput(inputMask);
-    if (sim.rotateSoundEvent)  { audio_play_sound(sndRotate);  sim.rotateSoundEvent  = false; }
-    // drop 전용 에셋(Sounds/drop.mp3)이 없으면 무음 대신 rotate 로 대체해
-    // 피드백을 유지한다 (audio_play_sound(0) 은 no-op). 핸들 alias 가 아니라
-    // 재생 시점 fallback 이므로 소멸자의 이중 unload 가 없다.
-    if (sim.dropSoundEvent)    { audio_play_sound(sndDrop ? sndDrop : sndRotate); sim.dropSoundEvent = false; }
+    ConsumeSoundEvents();
 }
 
 void Game::Tick()
 {
     sim.Tick();
-    if (sim.clearSoundEvent)   { audio_play_sound(sndClear);   sim.clearSoundEvent   = false; }
-    // garbage 전용 에셋이 없으면 clear 로 대체 (위 drop 과 동일 이유).
-    if (sim.garbageSoundEvent) { audio_play_sound(sndGarbage ? sndGarbage : sndClear); sim.garbageSoundEvent = false; }
+    ConsumeSoundEvents();
 }
 
 void Game::MoveBlockDown()
 {
     sim.MoveBlockDown();
+    ConsumeSoundEvents();
+}
+
+void Game::ConsumeSoundEvents()
+{
+    // Detach every pending request before calling the presentation backend.
+    // A bool coalesces same-kind occurrences within one simulation call.
+    const bool rotate = std::exchange(sim.rotateSoundEvent, false);
+    const bool drop = std::exchange(sim.dropSoundEvent, false);
+    const bool clear = std::exchange(sim.clearSoundEvent, false);
+    const bool garbage = std::exchange(sim.garbageSoundEvent, false);
+    if (rotate) audio_play_sound(sndRotate);
+    // Choose a fallback at playback time; each handle keeps unique ownership.
+    if (drop) audio_play_sound(sndDrop ? sndDrop : sndRotate);
+    if (clear) audio_play_sound(sndClear);
+    if (garbage) audio_play_sound(sndGarbage ? sndGarbage : sndClear);
 }
 
 unsigned long long Game::ComputeStateHash() const
@@ -129,7 +140,7 @@ void Game::DrawBlock(const SimBlock& block, int offsetX, int offsetY, int cellSi
 void Game::Draw()
 {
     DrawGrid(11, 11);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), 11, 11);
+    if (g_ghostEnabled && !sim.IsGameOver()) DrawBlock(sim.GhostBlock(), 11, 11);
     DrawBlock(sim.CurrentBlock(), 11, 11);
 
     const SimBlock& next = sim.NextBlock();
@@ -149,7 +160,7 @@ void Game::DrawBoardAt(int offsetX, int offsetY, int cellSize)
     draw_rect(offsetX - 2, offsetY - 2, bw + 4, bh + 4, {55, 62, 100, 255});
     draw_rect(offsetX,     offsetY,     bw,     bh,     {14, 16, 30, 255});
     DrawGrid(offsetX, offsetY, cellSize);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
+    if (g_ghostEnabled && !sim.IsGameOver()) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
     DrawBlock(sim.CurrentBlock(), offsetX, offsetY, cellSize);
 }
 
@@ -199,7 +210,7 @@ void Game::DrawNextQueueMini(int offsetX, int offsetY, int cellSize,
 
 void Game::DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const
 {
-    // SimBlock::GetCellPositions 는 블록의 로컬 좌표(0-based bounding box)를 반환.
+    // SimBlock::GetCellPositions 는 로컬 셀에 row/column 오프셋을 더한 위치를 반환.
     // cellSize 를 파라미터로 받아 축소 그리기. DrawBlock 과 달리 색상 팔레트를
     // 직접 인덱싱하고 전체 크기를 조절한다.
     std::vector<Position> tiles = block.GetCellPositions();

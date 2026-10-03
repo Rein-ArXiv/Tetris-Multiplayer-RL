@@ -15,26 +15,28 @@
 
 ## 1. 왜 릴레이인가 — P2P 와의 트레이드오프
 
-Part 6 에서 TCP 기반 lockstep 네트워킹을 만들었다. 한쪽이 `tcp_listen()` 으로 포트를 열고 반대쪽이 `tcp_connect()` 로 붙는 구조. 단순하고 결정론적이지만 실제 인터넷 환경에서는 바로 깨진다.
+직접 연결에서는 한 클라이언트가 listen하고 다른 클라이언트가 그 주소로 connect한다. 같은 규칙과 입력을 사용하는 lockstep은 이 연결 위에서 실행된다. 공개 인터넷에서 이 방식을 사용하려면 접속 가능한 주소와 방화벽·NAT 정책부터 해결해야 한다.
 
-- **NAT.** 집에서 공유기를 쓰는 사용자가 "호스트" 가 되려면 포트포워딩을 해야 한다. 일반 사용자에게 이걸 시킬 수 없다. UPnP 는 환경 의존이 크고, 둘 다 NAT 뒤일 때는 홀펀칭이 필요하다.
-- **디스커버리.** "아무나" 와 붙고 싶을 때 두 명을 모아주는 주체가 P2P 에는 없다.
-- **룸 코드.** 친구와 하려면 5자리 코드 하나면 충분해야 한다. IP 를 주고받게 하고 싶지 않다.
+- **접근 가능성:** 외부에서 NAT 뒤의 listen 소켓에 도달하려면 적절한 포트 매핑이나 연결 설정 절차가 필요할 수 있다. 공인 주소가 있어도 방화벽이 차단할 수 있고, 상위 NAT 때문에 사용자가 설정할 수 없는 경우도 있다.
+- **상대 찾기:** 직접 게임 연결과 중앙 매칭은 공존할 수 있다. 누가 누구와 만날지 정하는 제어 기능과 실제 게임 바이트의 경로를 분리한다.
+- **접속 정보:** 방 코드는 서버의 방 레코드를 찾는 식별자다. 코드를 안다고 운영체제가 그 코드로 TCP 연결을 만드는 것은 아니다. 클라이언트는 설정된 서버 주소에 접속하고 프로토콜로 코드를 보낸다.
 
-### 1.1 홀펀칭을 버리는 대가
+### 1.1 연결 경로를 단순화하는 선택
 
-STUN/TURN 계열의 홀펀칭은 UDP 를 전제로 한다. TCP 홀펀칭도 이론상 가능하지만 성공률이 NAT 구현에 크게 좌우되고, 실패 시 결국 TURN(= 릴레이)으로 폴백해야 한다. 즉 **홀펀칭을 하더라도 릴레이는 어차피 필요하다.** 그렇다면 처음부터 릴레이 하나만 공인 IP 에 올려두고 모든 클라이언트가 동일하게 `tcp_connect("relay:7777")` 만 하게 만드는 편이 코드 경로가 하나로 줄어든다. 이 프로젝트가 택한 길이다.
+STUN은 주소 매핑 발견 등에 사용하는 도구이며 그 자체가 완전한 연결 보장 절차는 아니다. STUN은 UDP뿐 아니라 TCP 등에서도 사용할 수 있다([RFC8489](https://www.rfc-editor.org/rfc/rfc8489.html)). TURN은 중계 자원을 제공하며, TCP allocation 확장도 있다([RFC6062](https://www.rfc-editor.org/rfc/rfc6062.html)). 이들을 모두 UDP 홀펀칭이라고 부르면 각 프로토콜의 역할과 전송 경계를 섞게 된다.
+
+이 프로젝트는 사용자의 게임 포트를 직접 열게 하는 대신 양쪽 클라이언트가 도달 가능한 relay에 접속하는 경로를 선택한다. 직접 연결 시도와 중계 폴백을 모두 구현할 수도 있지만 접속 상태와 운영해야 할 경로가 늘어난다. 중계가 모든 환경에서 필수라는 뜻보다는, 이 서비스가 선택한 지원 범위와 구현 비용의 절충으로 이해한다. 현재 공개 경로는 문서 상단의 WSS 게이트웨이를 포함하고, 아래 TCP 그림은 내부 게임 전송 구조다.
 
 ### 1.2 TCP 릴레이가 실제로 지불하는 비용
 
-이 선택은 공짜가 아니다. 문서에 적어두지 않으면 나중에 "왜 가끔 화면이 멈추지" 를 설명할 수 없다.
+- **순서 대기:** TCP에서 앞 바이트의 유실이 복구되지 않으면 뒤의 바이트도 순서대로 애플리케이션에 전달될 수 없다. lockstep은 필요한 틱의 입력을 기다리므로 시뮬레이션이 정체될 수 있다. UI 렌더링이나 독립 애니메이션까지 반드시 멈추는 것은 아니다. UDP로 뒤 틱이 먼저 도착해도 같은 규칙 상태를 유지하려면 빠진 입력을 채우거나 예측·재실행 정책이 필요하다.
+- **복구 시간:** 모든 손실의 최초 재전송이 고정200ms 뒤에 일어나는 것은 아니다. 빠른 재전송은 타이머 만료 전에 일어날 수 있다([RFC5681 §3.2](https://www.rfc-editor.org/rfc/rfc5681.html#section-3.2)). RTO 계산도 별도 규약과 구현 조건에 따른다([RFC6298](https://www.rfc-editor.org/rfc/rfc6298.html)). 실제 입력 도착 분포와 정체를 관측해 지연 정책을 고른다.
+- **경로와 큐:** 중계 경로는 A→R→B다. 두 구간의 전송 지연과 R에서의 대기·처리를 더한다. 이 경로의 합이 실제 A→B 직접 경로보다 항상 크다고 단정할 수는 없다. 양방향 경로가 비대칭일 수 있어 RTT를2로 나눈 값도 한 방향 지연의 정확한 측정값은 아니다.
+- **서버 자원:** 2인 경기 N개는 서버의 연결 소켓2N개를 사용한다(리스너·관리 연결 별도). 스레드형 relay는 전송 중 방향별 포워더2개를 사용한다. 랜덤 큐 수락 로비1개는 앞 단계이며 전환 중 잠깐 겹칠 수 있어 언제나 매치당3개로 합산하지 않는다. reactor형은 다른 스레드 소유 모델을 갖는다.
 
-- **Head-of-line 블로킹.** TCP 는 순서 보장 스트림이다. 세그먼트 하나가 유실되면 그 뒤에 이미 도착한 바이트가 커널 버퍼에 있어도 애플리케이션으로 올라오지 않는다. lockstep 은 "상대 입력이 전부 도착해야 시뮬레이션을 진행" 하므로, 이 지연이 **그대로 화면 정지**로 보인다. UDP 라면 한 틱을 건너뛰고 다음 틱 입력을 먼저 쓸 수 있지만, TCP 에서는 불가능하다.
-- **재전송 타이머의 하한.** 최초 재전송은 RTO 에 걸리고 리눅스 기본 하한은 200ms 다. 60Hz 기준 12틱이다. `inputDelay` 를 2틱(약 33ms) 으로 두는 한 이 구간은 흡수되지 않고 stall 로 노출된다.
-- **홉이 하나 늘어난다.** A→B 가 아니라 A→R→B 다. 추가 지연은 릴레이 위치와 경로에 따라 달라지므로 고정 수치를 박지 않는다. 운영 지역이 정해지면 실측한 RTT 로 `input_delay` 기본값을 조정한다.
-- **서버 자원.** 모든 매치의 모든 바이트가 서버를 통과한다. 매치당 소켓 2개 + 포워더 스레드 2개 + (랜덤 큐라면) 로비 스레드 1개가 잡힌다. 대역폭은 P2P 였다면 0이었을 몫이다.
+두 클라이언트가 각각 초당 F프레임, 프레임당 B바이트를 보내고 서버가 각 바이트를 한 번 전달한다면 N개 경기의 애플리케이션 ingress와 egress는 각각 `2×N×B×F`바이트/초다. 합산 I/O와 송신만의 비용을 구분한다. TCP/IP·WSS·TLS·ACK·재전송·제어 메시지와 검증 CPU는 이 단순 식에 포함하지 않는다. 연결당 큐 예산 Q를 잡으면 `2×N×Q`바이트지만 이것도 실제 RSS가 아니다.
 
-그럼에도 TCP 를 쓰는 이유는 단순하다. **결정론적 lockstep 은 입력 유실을 허용하지 못한다.** UDP 로 내려가면 재전송·순서 복원·중복 제거를 직접 구현해야 하고, 그건 결국 TCP 를 다시 만드는 일이다. 손실을 견디는 진짜 해법은 전송 계층이 아니라 게임 계층에 있다 — 매 패킷에 최근 N틱 입력을 중복해 실어 보내는 redundancy, 그리고 롤백. 둘 다 결정론 모델 자체를 바꾸는 큰 변경이라 이 시리즈 범위 밖이다.
+입력 중복 전송은 과거 입력을 여러 메시지에 넣어 유실 복구 기회를 늘리는 전송 정책이다. 롤백은 상태를 저장하고 늦은 입력으로 재실행하는 게임 실행 정책이다. 둘 모두 같은 상태·입력의 결정적 규칙 함수를 활용할 수 있으며, 그 함수 자체를 반드시 바꾸어야 하는 것은 아니다. 현재 lockstep 경로의 TCP 선택은 복구 책임을 어디에 둘지에 관한 선택이다.
 
 ### 1.3 릴레이가 소유하는 상태와 소유하지 않는 상태
 
@@ -105,7 +107,7 @@ graph TB
 
 `queueLobbyThread` 와 `forwarderLoop` 를 합친 relay 워커의 상한은 512다.
 
-소유권 모델은 `net::TcpSocket`을 그대로 쓴다. 파일 디스크립터를 `shared_ptr<int>` 제어 블록으로 소유하는 handle이라 값 복사·이동이 안전하고, 실제 `close(2)`는 마지막 복사본이 사라질 때 한 번 일어난다. `tcp_close()`는 fd를 즉시 파괴하는 함수가 아니라 `shutdown()`으로 대기 중인 `recv`를 깨우는 **종료 신호**다. 블로킹 `accept`는 플랫폼에 따라 `shutdown`으로 깨어나지 않으므로 listen 소켓만은 §5 처럼 논블로킹 폴링으로 돌린다. worker와 shutdown 경로가 복사본을 잠시 함께 가져도 use-after-close와 이중 close가 나지 않는다는 것이 모든 스레드 인계의 전제다.
+소유권 모델은 `net::TcpSocket`을 그대로 쓴다. 플랫폼별 소켓 값을 `shared_ptr<NativeSocket>` 제어 블록으로 소유하는 handle이라 값 복사·이동이 안전하고, 실제 `close(2)`는 마지막 복사본이 사라질 때 한 번 일어난다. `tcp_close()`는 fd를 즉시 파괴하는 함수가 아니라 `shutdown()`으로 대기 중인 `recv`를 깨우는 **종료 신호**다. 블로킹 `accept`는 플랫폼에 따라 `shutdown`으로 깨어나지 않으므로 listen 소켓만은 §5 처럼 논블로킹 폴링으로 돌린다. worker와 shutdown 경로가 복사본을 잠시 함께 가져도 use-after-close와 이중 close가 나지 않는다는 것이 모든 스레드 인계의 전제다.
 
 서버 쪽 룸 상태를 상태 기계로 보면 이렇다. 클라이언트의 `RoomState`는 같은 장의 `roomThread` 설명에서 서버 status와 함께 연결한다.
 
@@ -131,7 +133,7 @@ stateDiagram-v2
 
 다리를 놓는 방법은 둘이다.
 
-1. **실패 의미론을 지키는 스텁을 직접 쓴다 (권장).** `verify_token`/`post_match` 가 항상 `std::nullopt` 를(네트워크 실패와 같은 의미) 반환하는 최소 구현이면 이 장의 완료 게이트 — unranked smoke 테스트 — 는 전부 통과한다. 신경망을 만들 때 encoder/decoder 껍데기를 먼저 선언하고 이후에 채우는 것과 같은 전개다: 인터페이스 계약을 먼저 손에 쥐면, 메타·랭킹 장에서 본문을 채울 때 이 장의 relay 코드가 그 계약을 어떻게 소비하는지 이미 알고 있는 상태가 된다.
+1. **실패 의미론을 지키는 스텁을 직접 쓴다 (권장).** `verify_token`/`post_match` 가 항상 `std::nullopt` 를(유효한 인증/저장 확인 응답을 얻지 못한 상태) 반환하는 최소 구현이면 이 장의 완료 게이트 — unranked smoke 테스트 — 는 전부 통과한다. 신경망을 만들 때 encoder/decoder 껍데기를 먼저 선언하고 이후에 채우는 것과 같은 전개다: 인터페이스 계약을 먼저 손에 쥐면, 메타·랭킹 장에서 본문을 채울 때 이 장의 relay 코드가 그 계약을 어떻게 소비하는지 이미 알고 있는 상태가 된다.
 2. **최종 저장소의 세 파일을 그대로 가져온다.** `third_party/httplib.h` 와 함께 복사만 하면 되고, 내용 이해는 뒤로 미뤄도 된다. 이 장의 relay 코드는 `meta::client::MetaClient*` 를 **null 일 수 있는 서비스 의존성**으로만 다루므로, `--meta` 없이 띄우는 한 이 코드는 링크만 되고 실행되지 않는다.
 
 일반화하면 이렇다. **링커는 실행되지 않는 코드 경로의 심볼도 요구한다.** 빌드 의존성과 런타임 의존성은 다른 축이고, 한 장의 빌드 게이트가 뒤 장 소유의 파일을 가로지를 때 표준적인 다리는 "인터페이스의 실패 의미론을 지키는 스텁"이다. 스텁이 성공을 흉내 내면 뒤 장을 붙일 때 가짜 성공 경로가 실제 계약과 충돌하지만, 실패만 반환하는 스텁은 나중에 진짜 구현으로 바꿔도 동작 변화가 "안 되던 것이 되게" 한 방향뿐이라 안전하다.
@@ -175,6 +177,8 @@ if (TETRIS_BUILD_RELAY)
         server/player_conn.cpp
         server/relay.cpp
         server/room.cpp
+        server/room_code.cpp
+        server/room_code.h
         net/socket.cpp
         net/framing.cpp
         meta/http_client.cpp
@@ -199,7 +203,7 @@ if (TETRIS_BUILD_RELAY)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
     if (WIN32)
-        target_link_libraries(tetris_relay PRIVATE ws2_32)
+        target_link_libraries(tetris_relay PRIVATE ws2_32 bcrypt)
     else()
         # Linux/macOS: std::thread 는 pthread 를 필요로 함 (libstdc++)
         find_package(Threads REQUIRED)
@@ -229,13 +233,16 @@ endif()
 
 ## 4. `WorkerGroup` — detached 워커의 수명과 예외 격리
 
-서버 코드를 쓰기 전에 스레드 수명 정책부터 정한다. 릴레이는 연결마다, 매치마다 스레드를 만든다. 가장 쉬운 구현은 `std::thread(...).detach()` 지만 그러면 세 가지가 동시에 깨진다.
+연결 처리와 매치 전달은 서로 다른 수명의 작업이다. 작업마다 스레드를 만들고
+detach할 때에는 아래 책임을 별도로 구현해야 한다.
 
-1. **상한이 없다.** `connect()` 플러딩만으로 스레드와 핸들이 고갈된다.
-2. **예외가 프로세스를 죽인다.** detached 스레드에서 예외가 빠져나오면 `std::terminate` 다.
-3. **종료 시 참조가 먼저 죽는다.** `main` 이 반환하면서 `Matchmaker`/`RoomRegistry`/ `MetaClient` 를 파괴하는데, 아직 살아 있는 워커가 그 참조를 쓰고 있으면 use-after-free 다.
+1. **접수 상한:** 작업이 무제한 시작되지 않도록 예약과 상한 검사를 묶는다.
+2. **본문 예외 처리:** 스레드 진입 함수 밖으로 예외가 빠져나가면 프로세스가 종료될 수 있다. detach 여부와 별개다.
+3. **참조 수명:** 작업이 빌려 쓴 Matchmaker·RoomRegistry·MetaClient는 작업과 캡처 정리보다 오래 살아 있어야 한다.
 
-세 문제를 한 클래스로 묶은 것이 헤더 전용 `server/worker_group.h`다.
+헤더 전용 WorkerGroup은 접수한 작업의 실행과 캡처 정리를 센다. 작업마다 새 OS
+스레드를 만들므로 스레드 풀은 아니다. active 상한도 완료 통지 뒤의 OS 정리·TLS
+소멸까지 포함한 모든 네이티브 스레드 수의 엄밀한 상한으로 해석하지 않는다.
 
 **현재 소스 발췌 — `server/worker_group.h`**
 
@@ -247,14 +254,20 @@ endif()
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace relay {
 
 // Tracks detached workers so their owner can stop accepting new work and wait
-// until every running callback has released its references.
+// until every callback and its owned captures have been destroyed.
+// stopAccepting does not cancel running jobs. The owner must wake them before
+// waiting, and finish/join external callers before destroying this group.
+// A task must not wait on its own group. TLS destructors/OS thread exit are
+// outside this task-drain boundary; use join ownership when those matter.
 class WorkerGroup {
 public:
     explicit WorkerGroup(
@@ -285,25 +298,37 @@ public:
             ++active_;
         }
 
+        std::thread worker;
         try {
-            std::thread([this, work = std::forward<Fn>(fn)]() mutable {
+            worker = std::thread(
+                [this, work = std::make_unique<std::decay_t<Fn>>(std::forward<Fn>(fn))]() mutable {
                 Completion completion{this};
+                // Locals die in reverse order. Destroy the task (including its
+                // captures) before Completion releases the active slot.
+                auto ownedWork = std::move(work);
                 try {
-                    work();
+                    (*ownedWork)();
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "[%s] worker failed: %s\n", name_, e.what());
                 } catch (...) {
                     std::fprintf(stderr, "[%s] worker failed: unknown exception\n", name_);
                 }
-            }).detach();
+            });
         } catch (const std::exception& e) {
-            finish();
             std::fprintf(stderr, "[%s] worker launch failed: %s\n", name_, e.what());
+            finish();
             return false;
         } catch (...) {
-            finish();
             std::fprintf(stderr, "[%s] worker launch failed: unknown exception\n", name_);
+            finish();
             return false;
+        }
+        // A failed detach must not destroy a joinable temporary. The task
+        // already started, so only its Completion releases the slot.
+        try {
+            worker.detach();
+        } catch (...) {
+            worker.join(); // Fallback may block. A join failure is fail-fast.
         }
         return true;
     }
@@ -349,17 +374,46 @@ private:
 }  // namespace relay
 ```
 
-### 4.1 카운터를 증가시키는 시점
+### 4.1 접수 예약과 생성 실패
 
-`launch` 는 스레드를 만들기 **전에** `active_` 를 올린다. 순서를 뒤집어 스레드를 먼저 만들고 그 안에서 올리면, `launch` 가 반환한 직후 `wait()` 가 호출됐을 때 아직 카운터가 0이라 "다 끝났다" 고 오판한다. 반대로 `std::thread` 생성이 예외를 던지면 이미 올린 카운터를 되돌려야 하므로 두 catch 블록이 `finish()` 를 부른다.
+상한 검사·accepting 검사·active 증가는 같은 mutex 임계구역 안에서 수행한다.
+검사 후 lock을 풀고 따로 증가하면 두 생산자가 같은 빈 자리를 보고 모두 통과할 수 있다.
+작업을 시작한 뒤 그 작업 안에서 active를 올려도 안 된다. 시작 직후의 wait가 아직
+0을 보고 반환할 수 있기 때문이다. 여러 연결 worker가 동시에 큐에 진입하므로
+matchmaker의 생산자도 하나라고 가정하지 않는다.
 
-`maxActive_` 검사도 같은 임계구역 안에 있다. 검사와 증가가 분리되면 상한을 넘겨 통과하는 창이 생긴다.
+예약 뒤 callable 저장소와 std::thread를 만든다. 이 생성이 실패하면 catch에서
+예약을 한 번 반납한다. 오류 기록도 finish 이전에 남겨 완료 통지 후 그룹을 다시
+사용하지 않는다. task 본문에서 발생한 예외는 이미 시작한 worker 안에서 처리한다.
 
-### 4.2 `Completion` 이 RAII 인 이유
+생성된 스레드는 이름 있는 worker 변수에 보관한 뒤 detach한다. detach 실패는
+작업 생성 실패와 다르다. 이미 시작된 작업의 Completion이 카운터를 반납하므로
+호출자가 다시 finish하면 안 된다. 현재 정책은 join으로 기다린 뒤 true를 반환하는
+폴백이다. 드문 이 경로에서는 launch가 작업 종료까지 막힐 수 있고, join 자체 실패는
+noexcept 경계를 통해 fail-fast한다. 지원할 시스템 자원 오류의 복구 정책은 별도다.
+[join·detach의 계약](https://eel.is/c++draft/thread.thread.member)과
+[joinable thread의 소멸](https://eel.is/c++draft/thread.thread.destr)을 함께 읽는다.
 
-워커 본문은 `work()` 를 `try/catch(...)` 로 감싼다. 그런데 감소 처리를 catch 블록 뒤에 그냥 써두면, `std::fprintf` 같은 정리 코드 자체가 던지거나 `work` 가 catch 로 잡히지 않는 방식으로 스택을 벗어날 때 카운터가 영원히 줄지 않는다. 그러면 `wait()` 가 영구 블록된다.
+### 4.2 본문 반환과 캡처 소멸을 구별한다
 
-`Completion`은 스레드 함수 본문의 **첫 줄**에 선언된 스택 객체다. 어떤 경로로 나가든 소멸자가 `finish()`를 호출한다. 감소 책임을 제어 흐름이 아니라 스코프에 묶은 것이다. `forwarderLoop`의 `ForwarderCompletion`도 같은 패턴으로 양방향 포워더 중 마지막 종료자만 채널 정리를 수행하게 한다.
+Completion은 스코프를 나갈 때 finish를 호출한다. 이 RAII는 정상 반환과 C++ 예외
+처리 흐름의 감소 책임을 한곳에 묶는다. abort·강제 프로세스 종료·비정상적인 소멸자
+예외까지 자원 정리를 보장한다는 뜻은 아니다. fprintf가 일반적으로 C++ 예외를
+던지므로 guard가 필요하다는 설명도 사용하지 않는다.
+
+람다에 work 객체를 직접 캡처하면 본문 지역 객체인 Completion이 먼저 파괴되고,
+람다의 work 캡처는 그 뒤에 파괴될 수 있다. 이때 active가 0이라고 해도 소켓·슬롯
+등의 캡처 정리가 아직 끝나지 않았을 수 있다. 따라서 callable을 unique_ptr로
+보관하고, Completion을 선언한 다음 그 포인터를 지역 ownedWork로 이동한다.
+
+지역 객체는 선언의 역순으로 파괴된다. ownedWork가 callable과 캡처를 정리한 뒤
+Completion이 슬롯을 놓는다. 원래 람다에 남은 포인터는 비어 있다. shared_ptr를
+캡처했다면 여기서 놓는 것은 이 작업의 참조이며 다른 소유자가 가진 객체까지 강제로
+파괴하지 않는다. 작업 중 소켓을 큐나 다른 단계에 인계했다면 그 새 소유권은 계속된다.
+
+wait는 이 작업/캡처 완료 경계를 기다린다. detached 스레드의 OS 종료와 TLS 소멸까지
+join하는 것은 아니다. thread_local 소멸자가 그룹이나 먼저 파괴될 상태를 다시
+사용하는 설계라면 join 소유권 등 더 강한 수명 정책이 필요하다.
 
 ### 4.3 `finish()` 가 lock 을 쥔 채 notify 하는 이유
 
@@ -383,7 +437,17 @@ sequenceDiagram
 
 lock 을 쥔 채 notify 하면 이 창이 닫힌다. `wait()` 가 술어를 확인하고 반환하려면 반드시 `mu_` 를 다시 잡아야 하는데, `finish()` 가 `mu_` 를 놓기 전까지는 잡을 수 없다. `finish()` 가 `mu_` 를 놓는 시점에는 `notify_all()` 이 이미 끝나 있다. 성능 손해는 스레드 종료 경로 한 번의 락 경합이고, 얻는 것은 소멸 순서 안전성이다.
 
-> 이 트레이드오프는 "condition variable 을 그 waiter 보다 오래 살려둘 수 없는 구조" 에서 항상 나타난다. `WorkerGroup` 은 스택/전역 객체이지 `shared_ptr` 로 관리되는 대상이 아니므로, 수명 보장을 락으로 만들어야 한다.
+이 선택은 마지막 완료 통지 뒤 소유자가 그룹을 파괴할 수 있는 현재 구조의 수명 조건에
+맞춘 것이다. 별도 공유 상태가 condition_variable의 수명을 보장하는 설계도 가능하다.
+notify를 언제나 lock 안이나 밖에 두어야 한다는 일반 규칙으로 바꾸지 않는다.
+wait는 알림의 개수가 아니라 같은 mutex로 보호한 active==0 술어를 반복 확인한다.
+[condition_variable의 wait 계약](https://eel.is/c++draft/thread.condition.condvar)이
+잠금 해제·대기·재획득과 허위 깨움의 관계를 설명한다.
+
+stopAccepting은 새 접수만 닫는다. 이미 기다리는 작업은 별도의 종료 플래그·큐 닫기·
+notify 또는 I/O 취소로 빠져나오게 해야 한다. 그 다음 wait하고 빌려 준 상태를
+파괴한다. 그룹 안의 작업이 자기 그룹을 wait하면 자기 active를 기다리므로
+교착될 수 있다. 그룹 파괴 전에는 외부 launch/wait 호출자도 모두 정리해야 한다.
 
 ### 4.4 회귀 테스트
 
@@ -460,6 +524,12 @@ cmake -S . -B build -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_TEST=ON
 cmake --build build --target worker_group_test
 ./build/worker_group_test && echo "WorkerGroup OK"
 ```
+
+캡처 정리 순서는 tests/learning/worker_lifetime.cpp의 추가 회귀로 검사한다.
+마지막 캡처의 소멸자를 조건 변수에서 멈춘 뒤 같은 상한 1 그룹에 새 작업을 넣는다.
+이때 거절되어야 한다. sleep으로 실행 속도를 추측하지 않고 소멸자 진입 사건을 기다린다.
+이 검사는 CTest의 worker_lifetime이며, callable 이동 생성 실패의 예약 복원,
+알려진/알 수 없는 본문 예외, move-only 작업, 동시 생산자의 상한과 접수 중단도 검사한다.
 
 ## 5. 서버 엔트리 `server/main.cpp`
 
@@ -827,7 +897,9 @@ sequenceDiagram
     Note over M: 이제서야 mm / rr / metaClient 파괴
 ```
 
-`beginShutdown()` 을 가장 먼저 부르는 이유는 이미 돌고 있는 로비/포워더가 새 작업을 시작하지 못하게 막기 위해서다. `mm.shutdown()`/`rr.shutdown()` 은 블로킹 중인 워커를 깨우는 역할이고, `connWorkers.wait()` 와 `relay::waitForShutdown()` 이 실제로 모든 워커가 참조를 놓을 때까지 기다린다. 이 두 wait 이 `main` 의 지역 변수 `mm`/`rr`/ `metaClient` 소멸보다 먼저 완료되므로 use-after-free 가 없다.
+`beginShutdown()` 을 가장 먼저 부르는 이유는 이미 돌고 있는 로비/포워더가 새 작업을 시작하지 못하게 막기 위해서다. `mm.shutdown()`/`rr.shutdown()` 은 블로킹 중인 워커를 깨우는 역할이고, `connWorkers.wait()` 와 `relay::waitForShutdown()` 이 실제로 모든 워커가 참조를 놓을 때까지 기다린다. 이 두 wait을 main의 mm·rr·metaClient 소멸보다 먼저 마치면 추적하는 작업 본문과
+캡처가 빌린 참조의 수명을 지킬 수 있다. 다른 추적되지 않은 작업이나 TLS 소멸의
+접근까지 보장하는 것은 아니므로 참조를 전달하는 모든 실행 경로를 함께 확인한다.
 
 이 시점에서 빌드하면 서버는 "연결을 받아 워커를 띄운다" 까지만 한다. 실제 분기는 `playerConnThread` 에 있다.
 
@@ -943,10 +1015,9 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
 
 } // namespace
 
-// 정상 클라이언트는 connect 직후 첫 프레임을 보낸다.
-// 3s 는 위성/모바일 등 고지연 회선에서 meta 토큰 검증 왕복까지 겹치면 정상
-// 접속도 끊는 사례가 있어 5s 로 완화 — slow-loris 류 슬롯 점유 방어에는
-// 여전히 충분히 짧다.
+// Bound the initial polling phase from worker entry, without extending it on
+// partial/unknown frames. This cooperative check does not cancel a blocking
+// authenticate() call; the HTTP client's own limits apply to that call.
 static constexpr auto kJoinTimeout  = std::chrono::seconds(5);
 static constexpr auto kPollInterval = std::chrono::milliseconds(10);
 
@@ -971,7 +1042,11 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
         if (!stream.empty()) {
             std::vector<net::Frame> frames;
-            net::parse_frames(stream, frames);
+            if (!net::parse_frames(stream, frames)) {
+                RLOG_WARN("[conn " << conn_id << "] close: invalid frame boundary");
+                net::tcp_close(sock);
+                return;
+            }
             for (size_t i = 0; i < frames.size(); ++i) {
                 const net::Frame& f = frames[i];
                 if (f.type == net::MsgType::QUEUE_JOIN) {
@@ -996,9 +1071,12 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
                     // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
                     pi.streamBuf = residual_stream(frames, i + 1, stream);
-                    RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
-                               << " player_id=" << pi.player_id);
-                    mm.enqueue(std::move(pi));
+                    if (mm.enqueue(std::move(pi))) {
+                        RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
+                                   << " player_id=" << auth->player_id);
+                    } else {
+                        RLOG_INFO("[conn " << conn_id << "] queue unavailable");
+                    }
                     return;
                 }
                 if (f.type == net::MsgType::QUEUE_CANCEL) {
@@ -1078,10 +1156,9 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 **현재 소스 발췌 — `server/player_conn.cpp`**
 
 ```cpp
-// 정상 클라이언트는 connect 직후 첫 프레임을 보낸다.
-// 3s 는 위성/모바일 등 고지연 회선에서 meta 토큰 검증 왕복까지 겹치면 정상
-// 접속도 끊는 사례가 있어 5s 로 완화 — slow-loris 류 슬롯 점유 방어에는
-// 여전히 충분히 짧다.
+// Bound the initial polling phase from worker entry, without extending it on
+// partial/unknown frames. This cooperative check does not cancel a blocking
+// authenticate() call; the HTTP client's own limits apply to that call.
 static constexpr auto kJoinTimeout  = std::chrono::seconds(5);
 static constexpr auto kPollInterval = std::chrono::milliseconds(10);
 
@@ -1106,7 +1183,11 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
         if (!stream.empty()) {
             std::vector<net::Frame> frames;
-            net::parse_frames(stream, frames);
+            if (!net::parse_frames(stream, frames)) {
+                RLOG_WARN("[conn " << conn_id << "] close: invalid frame boundary");
+                net::tcp_close(sock);
+                return;
+            }
             for (size_t i = 0; i < frames.size(); ++i) {
                 const net::Frame& f = frames[i];
                 if (f.type == net::MsgType::QUEUE_JOIN) {
@@ -1131,9 +1212,12 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
                     // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
                     pi.streamBuf = residual_stream(frames, i + 1, stream);
-                    RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
-                               << " player_id=" << pi.player_id);
-                    mm.enqueue(std::move(pi));
+                    if (mm.enqueue(std::move(pi))) {
+                        RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
+                                   << " player_id=" << auth->player_id);
+                    } else {
+                        RLOG_INFO("[conn " << conn_id << "] queue unavailable");
+                    }
                     return;
                 }
                 if (f.type == net::MsgType::QUEUE_CANCEL) {
@@ -1203,14 +1287,40 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
 ### 6.1 첫 프레임 데드라인과 셧다운 게이트
 
-루프 조건이 둘이다: `now < deadline && !isShuttingDown()`.
+루프 조건은 `now < deadline && !isShuttingDown()`이다. `deadline`은 worker가
+함수에 들어온 때의 `steady_clock` 값에 5초를 더해 한 번 정한다. 일부 바이트나
+낯선 프레임이 도착해도 연장하지 않는다. 요청을 조금씩 보내며 입장 worker를
+계속 점유하는 연결의 초기 대기 시간을 제한하려는 정책이다.
 
-- **데드라인.** 클라이언트는 `connect()` 성공 직후 바로 첫 프레임을 보내므로 5초 안에 `QUEUE_JOIN`·`ROOM_CREATE`·`ROOM_JOIN` 중 하나가 없으면 끊는다. 연결만 열어두는 slowloris가 worker와 fd를 오래 점유하지 못하게 한다. 처음에는 3초였으나, 고지연 회선에서 첫 프레임 도착과 meta 토큰 검증 왕복이 겹치면 정상 접속까지 끊는 사례가 있어 5초로 완화했다 — 점유 방어 타임아웃은 "공격자가 무료로 점유하는 시간의 상한"과 "정상 최악 케이스의 하한" 사이에서 고르는 값이고, 후자를 침범하면 방어가 오탐이 된다.
-- **셧다운 게이트.** `relay::isShuttingDown()`이 없으면 서버 종료 뒤에도 이 스레드가 데드라인까지 살아 `connWorkers.wait()`를 붙잡는다. 마지막 타임아웃 로그도 `if (!isShuttingDown())`으로 감싸 정상 종료를 공격 로그와 구분한다.
+이 검사는 루프가 다시 조건을 평가할 때 작동하는 **협력적 시간 제한**이다.
+accept 직후부터 재는 전체 접속 시간이나 정확히 5초에 실행되는 취소 타이머가 아니다.
+스케줄링·반복 내부 작업·sleep 때문에 관측 시점이 늦어질 수 있다. 특히 동기
+`authenticate()`의 HTTP 호출을 중단하지 않으며, 그 호출에는 HTTP 클라이언트의
+자체 제한이 적용된다. 첫 프레임 제한과 인증까지 포함한 전체 제한이 필요하다면
+마감의 전달·남은 시간 계산·취소 또는 결과 폐기 정책을 따로 설계해야 한다.
 
-### 6.2 폴링 루프
+셧다운 게이트는 반복을 재개할 때 새 입장 처리를 그만두게 한다. 진행 중인 HTTP
+작업을 즉시 취소하지는 않는다. 마지막 로그도 `!isShuttingDown()`일 때만 남겨
+정상 종료와 첫 프레임 시간 초과를 구별한다.
 
-`tcp_recv_some`은 "지금 읽을 수 있는 만큼만" 읽는 논블로킹 계열 호출이다. 바이트가 없으면 `stream`을 그대로 두고 `true`를 반환한다(연결이 끊겼을 때만 `false`). 그래서 `stream.empty()`면 10ms 자고 다시 시도한다. 전역 worker 256개와 더불어 같은 peer IP의 setup worker를 16개로 제한하므로, 한 주소의 연결 폭주가 전체 입장 슬롯을 독점하기 어렵다.
+### 6.2 폴링 루프와 파서 실패
+
+`tcp_recv_some`은 논블로킹 수신을 시도한다. 읽은 바이트가 있거나 잠시 읽을 수
+없는 상태이면 `true`, EOF 또는 치명적 I/O 오류이면 `false`다. 프레임을 완성하지
+못했어도 오류로 닫지 않고 다음 반복에서 이어 받는다. 반복 끝의 10ms sleep은
+폴링 빈도를 줄이는 정책이며, 정확한 실행 주기를 보장하지 않는다.
+
+`stream.reserve(64)`는 재할당을 줄이기 위한 초기 예약이다. 벡터의 크기 상한을
+64바이트로 제한하지 않는다. 프레임 길이 상한과 수신량·연결 예산은 각자의 검사에서
+확인해야 한다. 전역 worker 예산과 같은 peer IP의 setup worker 예산도 첫 프레임
+타임아웃과 별개의 자원 제한이다.
+
+`parse_frames`가 `false`이면 첫 단계는 소켓을 닫고 반환한다. 특히 지나치게 큰
+길이 선언을 만나기 전에 정상 프레임 일부가 `frames`에 들어 있을 수 있으므로,
+반환값 검사보다 프레임 분기를 먼저 실행하면 안 된다. 방 대기 루프에서도 같은
+실패를 확인한 뒤 `break`하여 공통 방·참가자·소켓 정리 경로로 간다.
+이 반환값은 파서가 치명적으로 분류한 오류를 뜻한다. 현재 파서가 건너뛰도록 정한
+체크섬 오류 등의 정책까지 모든 잘못된 프레임이 즉시 종료한다고 일반화하지 않는다.
 
 ### 6.3 스트림 소유권 규칙 — `residual_stream`
 
@@ -1220,26 +1330,35 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
 `residual_stream(frames, i + 1, stream)` 이 하는 일은 두 가지다.
 
-1. 아직 소비하지 않은 완성 프레임(`frames[i+1..]`)을 `build_frame` 으로 **재직렬화**한다. `build_frame` 은 같은 payload 에 대해 항상 같은 바이트를 만들므로(체크섬 포함) 원본과 비트 단위로 동일하다.
+1. 아직 소비하지 않은 유효한 완성 프레임(`frames[i+1..]`)을 `build_frame`으로 **재직렬화**한다. 현재 정규 프레임 형식에서 같은 TYPE·payload는 같은 길이·체크섬을 만든다. 파서가 이미 버린 잘못된 바이트까지 원본 수신 전체를 복원하는 것은 아니다.
 2. `parse_frames` 가 소비하고 남긴 미완성 tail(`stream`)을 그 뒤에 이어 붙인다.
 
 순서가 중요하다. 완성 프레임이 앞, partial tail 이 뒤여야 스트림의 시간 순서가 보존된다. 반환된 바이트는 `PlayerInfo::streamBuf` 또는 `roomLoop_` 의 초기 수신 버퍼로 이동한다.
 
 일반화하면 이렇다: **프로토콜 상태가 바뀔 때는 소켓뿐 아니라 그 소켓에서 이미 읽은 바이트도 함께 인계해야 한다.** 같은 규칙이 이 장의 단계 전환마다 반복된다 — `PlayerInfo::streamBuf` → `queueLobbyThread` 의 `bufA`/`bufB` → `Channel::prefixFromA/B` → `forwarderLoop` 의 첫 iteration, 그리고 클라이언트 쪽 `Session::recvBuf`.
 
-### 6.4 `ROOM_JOIN` 길이 상한 (`kMaxCodeLen = 5`)
+### 6.4 `ROOM_JOIN` 길이 상한과 단계별 허용 정책
 
-`ROOM_JOIN` 페이로드는 `[code_len:1][code:N][tok_len:1][token:N]` 이다. `code_len` 이 `uint8_t` 라 문법적으로 255까지 허용된다. `room.cpp` 의 `kCodeLen = 5` 는 코드 **생성** 상수일 뿐 입력 검증이 아니다. 상한이 없으면 `code_len=200` + 쓰레기 200바이트가 그대로 통과해서
+`ROOM_JOIN` 페이로드는 `[code_len:1][code:N][tok_len:1][token:N]`이다.
+바깥 분기는 code 길이 1~5와 해당 바이트의 존재를 확인한다. 0이나 5 초과,
+코드 바이트 부족이면 해당 프레임을 건너뛰고 초기 마감까지 기다린다.
+`room.cpp`의 생성 길이 5와 수신 분기의 허용 길이 1~5는 서로 다른 조건이다.
+여기서 길이를 제한해도 알파벳이나 제어문자까지 검증한 것은 아니다.
 
-- `unordered_map<string, Entry>::find` 가 200자 키로 호출되고,
-- 로그에 제어문자를 포함한 200자 문자열이 그대로 찍히며(터미널·로그 파이프라인 오염),
-- 악성 트래픽이 `handleJoin` 구조 깊숙이 도달한다.
+이 경로를 통해 들어온 `handleJoin` 호출에는 길이 조건이 성립한다. 다른 호출자가
+생기면 같은 조건을 지키거나 함수 경계에서 검증해야 한다. 생성 상수만으로 외부
+입력이 검증되었다고 가정하거나, 길이 상한만으로 로그의 문자 안전성을 보장하지 않는다.
 
-그래서 `constexpr uint8_t kMaxCodeLen = 5;` 를 두고 `n > kMaxCodeLen` 이면 프레임을 조용히 버리고 다음 프레임을 기다린다. 5자를 넘는 코드는 정상 클라이언트가 만들 수 없으므로 여기 걸리는 건 프로토콜 버그이거나 악성 연결이다. 어느 쪽이든 드롭이 가장 덜 파괴적인 선택이다.
+`HELLO` 등 이 단계에서 처리하지 않는 완성 프레임은 무시하고 계속 기다린다.
+이는 현재 프로토콜의 관용 정책이며, 버전 호환성을 자동 보장하는 일반 원칙은 아니다.
+필수 기능을 뜻하는 낯선 프레임도 있는 프로토콜이라면 버전 협상이나 명시적 거절이
+필요하다. 무시하더라도 마감을 연장하지 않으며, 알려진 명령의 형식 오류와
+모르는 종류의 프레임을 구별해 정책을 정한다.
 
-**경계 검증은 바깥에서부터 좁혀 들어가야 한다.** `player_conn.cpp` 가 프로토콜의 바깥 경계이므로 룸 코드에 대한 구조적 불변조건은 여기서 확정한다. 그 덕에 `handleJoin` 은 "내가 받는 code 는 길이 ≤ 5" 를 안전히 가정할 수 있다. 계층 아래로 갈수록 불변조건이 단순해지는 편이 유지보수에 유리하다.
-
-**낯선 프레임은 무시한다.** `HELLO` 같은 프레임이 이 단계에 오면 그냥 `continue` 다. 프로토콜 오용일 수도, 언젠가 추가될 기능일 수도 있다. "모르면 버리고 계속 기다리기" 가 버전 간 전방 호환에 가장 안전하다.
+HTML의 첫 입장 실습은 이 경계를 작게 구현한다. TYPE50 한 종류 안에 경로를
+명시하고 join 코드에는 정확히 5개의 대문자·숫자를 요구한다. 잘못된 TYPE50은
+즉시 거절하며, 낯선 프레임은 4개까지 허용하고 단계 수신량은 128바이트로 묶는다.
+이 학습용 규약과 숫자는 현재 서버의 wire 형식·인증·예산과 다르다.
 
 ## 7. `Matchmaker` — FIFO 큐
 
@@ -1266,10 +1385,9 @@ struct PlayerInfo {
     // 큐 → 로비 → 포워딩 Channel 로 함께 옮겨 간다 (session_lease 와 같은 결).
     std::shared_ptr<IpAdmission> ip_session;
 
-    // 큐 대기 중 이 소켓에서 recv 됐지만 아직 완성 프레임이 못 된 잔여 바이트.
-    // 폴링 1회마다 로컬 버퍼를 쓰면 프레임이 TCP 세그먼트 경계에 걸쳐 도착할 때
-    // 앞쪽 절반이 유실되어 스트림이 어긋난다 — 반드시 여기 누적하고, 매치 성립
-    // 후에는 lobby 버퍼의 초기값으로 이관한다 (relay.cpp queueLobbyThread).
+    // 이미 recv했으나 이 단계에서 아직 소비하지 않은 바이트.
+    // 첫 인계에는 완성된 QUEUE_CANCEL도 포함될 수 있다. 큐 파싱 뒤 남은
+    // 부분 꼬리는 다음 폴링 또는 로비의 초기 버퍼로 이어 간다.
     std::vector<uint8_t> streamBuf;
 };
 
@@ -1286,13 +1404,16 @@ struct Match {
 
 class Matchmaker {
 public:
+    static constexpr std::size_t kMaxWaiting = 1024;
     Matchmaker();
     ~Matchmaker();
 
-    // 프로듀서: QUEUE_JOIN 이 확인된 플레이어를 큐에 등록. 컨슈머를 깨움.
-    void enqueue(PlayerInfo p);
+    // 여러 생산자가 호출 가능. 등록 성공이면 true.
+    // 종료 중/대기 상한이면 소켓을 종료하고 소유한 슬롯을 반납하며 false.
+    bool enqueue(PlayerInfo p);
 
-    // 컨슈머: 2명 모일 때까지 블로킹. shutdown() 호출 시 std::nullopt.
+    // 단일 컨슈머: 취소/끊김을 주기적으로 정리하고 살아남은 앞의 두 명을 인계.
+    // shutdown()이면 nullopt. 새 데이터 도착은 다음 폴링에서 관측할 수 있다.
     std::optional<Match> waitForPair();
 
     // 모든 대기 스레드를 깨우고 큐에 남은 소켓을 닫는다.
@@ -1317,7 +1438,10 @@ private:
 
 ### 7.2 페어링 전에 생존을 확인한다
 
-큐에 들어간 뒤 상대를 기다리는 동안 클라이언트가 창을 닫거나 `QUEUE_CANCEL` 을 보낼 수 있다. 이걸 페어링 **후에** 발견하면 상대는 `MATCH_FOUND` 를 받자마자 EOF 를 보게 되어 "매칭됐다가 즉시 끊김" 이라는 최악의 UX 가 나온다. 그래서 큐에서 꺼내기 직전에 검사한다.
+큐에서 기다리는 동안 클라이언트가 창을 닫거나 QUEUE_CANCEL을 보낼 수 있다.
+매처는 대기 연결을 주기적으로 확인해 취소·끊김을 관측하고 제거한다. 한 명만 남아도
+다음 등록이 올 때까지 정리를 미루지 않는다. 검사 직후에도 연결이 끊길 수 있으므로
+로비·포워딩 단계의 오류 처리는 계속 필요하다.
 
 **현재 소스 발췌 — `server/matchmaker.cpp`**
 
@@ -1362,11 +1486,17 @@ bool waitingPlayerStillActive(PlayerInfo& p) {
 }  // namespace
 ```
 
-세 가지 사유로 큐에서 제거한다: **EOF**(창 닫힘/프로세스 종료), **malformed frame** (`parse_frames` 실패), **`QUEUE_CANCEL`**.
+제거 사유는 수신 EOF 또는 복구 불가능한 I/O 오류, 프레임 파싱 실패, QUEUE_CANCEL이다.
+제거된 PlayerInfo가 소유한 세션 lease와 IP 슬롯도 마지막 참조가 풀리면 반납된다.
 
-`p.streamBuf` 에 누적하는 것이 핵심이다. 지역 버퍼를 쓰면 폴링 사이에 걸친 부분 프레임의 앞 절반이 사라져 스트림 전체가 어긋난다. `parse_frames` 는 완성된 프레임만큼만 앞에서 소비하고 나머지는 그대로 남기므로, 남은 tail 은 다음 폴링이나 로비 단계로 자연스럽게 넘어간다.
+streamBuf는 이미 수신했지만 아직 소비하지 않은 바이트다. 첫 입장 처리기에서
+넘긴 완성된 취소 프레임도 들어갈 수 있다. parse_frames는 완성 프레임을 소비하고
+미완성 꼬리를 남긴다. 이 꼬리는 다음 폴링 또는 로비의 초기 버퍼로 이어진다.
 
-부작용이 하나 있다. 이 함수는 `parse_frames` 로 완성 프레임을 **소비해 버린다**. `QUEUE_CANCEL` 이 아닌 프레임(예: 성급한 `READY`)이 여기서 사라진다는 뜻이다. 실제로는 클라이언트가 `MATCH_FOUND` 를 받기 전에 `READY` 를 보낼 이유가 없으므로 문제가 되지 않지만, 프로토콜을 확장할 때는 기억해야 할 제약이다.
+현재 큐는 QUEUE_CANCEL 이외의 완성 프레임을 소비한 뒤 무시한다. 일찍 보낸 READY도
+저장되지 않는다. 클라이언트는 MATCH_FOUND 이후 로비 규약에 따라 READY를 보낸다.
+선행 전송을 허용하도록 프로토콜을 확장한다면 허용 종류·순서와 버퍼 인계 정책도
+함께 바꿔야 한다. 부분 바이트 보존과 모든 완성 메시지 보존은 서로 다른 계약이다.
 
 ### 7.3 큐 본체
 
@@ -1386,30 +1516,39 @@ uint64_t Matchmaker::nextSeed() {
     return seed_src.next();
 }
 
-void Matchmaker::enqueue(PlayerInfo p) {
+bool Matchmaker::enqueue(PlayerInfo p) {
     {
         std::lock_guard<std::mutex> lk(mu);
+        // Serialize admission with shutdown: a late producer cannot repopulate
+        // a queue whose consumer has already stopped.
+        if (stopping.load() || waiting.size() >= kMaxWaiting) {
+            net::tcp_close(p.sock);
+            return false;
+        }
         waiting.push_back(std::move(p));
+        cv.notify_one();
     }
-    cv.notify_one();
+    return true;
 }
 
 std::optional<Match> Matchmaker::waitForPair() {
     std::unique_lock<std::mutex> lk(mu);
     while (true) {
-        // predicate 형태의 wait: spurious wakeup 에 안전
-        cv.wait(lk, [this] { return stopping.load() || waiting.size() >= 2; });
         if (stopping.load()) return std::nullopt;
-
-        while (!waiting.empty() && !waitingPlayerStillActive(waiting.front())) {
-            waiting.pop_front();
-        }
-        if (waiting.size() < 2) continue;
-
-        while (waiting.size() >= 2 && !waitingPlayerStillActive(waiting[1])) {
-            waiting.erase(waiting.begin() + 1);
+        // Observe cancellation even when only one player is waiting. Poll all
+        // pending entries so stale sessions do not retain admission leases.
+        for (auto it = waiting.begin(); it != waiting.end();) {
+            if (!waitingPlayerStillActive(*it)) it = waiting.erase(it);
+            else ++it;
         }
         if (waiting.size() >= 2) break;
+        if (waiting.empty()) {
+            cv.wait(lk, [this] { return stopping.load() || !waiting.empty(); });
+        } else {
+            // Socket data does not notify this condition_variable.
+            // This is a cooperative polling interval, not a hard deadline.
+            cv.wait_for(lk, std::chrono::milliseconds(50));
+        }
     }
 
     Match m;
@@ -1435,13 +1574,42 @@ void Matchmaker::shutdown() {
 }
 ```
 
-`waitForPair` 의 바깥 `while (true)` 는 정리 후 인원이 2명 미만으로 줄면 다시 `cv.wait` 로 돌아가기 위한 것이다. head 를 먼저 정리하고, 그다음 `waiting[1]` 을 정리한다. head 부터 하는 이유는 pop 이 인덱스를 흔들지 않기 때문이고, 두 번째 루프가 `erase(begin()+1)` 인 이유는 head 는 이미 살아 있음이 확인됐으므로 건드리지 않기 위해서다.
+**접수와 종료를 같은 잠금 아래 결정한다.** enqueue는 종료 상태와 대기 상한 1024를
+확인한 뒤 등록한다. 거절하면 소켓을 종료하고 false를 반환하며, 호출자는 성공했을
+때만 queued 로그를 남긴다. shutdown이 먼저 큐를 비웠다면 늦게 도착한 생산자가
+다시 채울 수 없다. 대기열 상한은 대기 연결을 제한하고, 연결 worker 상한은 실행 중인
+첫 요청 작업을 제한한다. 두 자원의 수명과 예산은 서로 다르다.
 
-`waitingPlayerStillActive` 를 `mu` 를 쥔 채로 부른다는 점은 의도된 단순화다. `tcp_recv_some` 은 논블로킹이라 오래 잡지 않는다. 반대로 큐를 락 밖에서 검사하면 그사이 `enqueue` 가 컨테이너를 재할당해 참조가 무효화된다.
+**대기는 기다리는 사건에 맞춘다.** waitForPair는 모든 대기 항목을 검사하고 살아남은
+두 명을 꺼낸다. 아무도 없으면 등록·종료 알림을 predicate wait로 기다린다. 한 명이면
+50ms wait_for 뒤 다시 검사한다. 소켓에 취소 바이트가 도착해도 이 조건 변수에 notify가
+자동 발생하지 않기 때문이다. 50ms는 재검사 간격이며 스케줄링·잠금 대기까지 포함한
+취소 처리의 최대 시간을 보장하지 않는다.
 
-**FIFO 의 페어링 순서.** 큐 head 가 먼저 기다린 사람이므로 HOST(`m.a`), 새로 들어온 쪽이 GUEST(`m.b`) 다. 릴레이는 대칭이라 기능상 차이가 없지만, 로그를 읽을 때 "A 가 먼저, B 가 나중" 이 일관되게 유지된다.
+생존 검사는 mu 안에서 실행한다. 논블로킹 recv는 데이터 도착을 기다리지 않지만
+파싱·로그·삭제 비용은 남는다. 한 번에 큐를 순회하고 중간 삭제 시 이동도 수행하므로
+부하가 커지면 잠금 점유 시간을 별도로 측정해야 한다. 블로킹 인증이나 외부 API를
+이 임계 구역에 넣지 않는다.
 
-**멱등성 키는 매치가 태어나는 곳에서 발급한다.** `matchmaker.cpp` 는 `match_uuid.h` 를 include 하고, 페어가 확정되는 이 지점에서 `new_match_uuid()` 로 32자리 hex 키를 부여한다. 결과를 저장하는 경로는 뒤에서 여럿으로 갈라지지만(정상 교차검증, 몰수패, 재시도) 키의 발급 주체가 하나이므로 어느 경로가 몇 번을 시도해도 meta 에는 같은 경기 하나로 남는다. 룸 경로도 §8.7 의 매치 조립 지점에서 같은 함수를 부른다 — "식별자는 리소스 생성과 같은 원자적 순간에, 한 곳에서" 라는 멱등성 설계의 기본형이다.
+컨테이너 무효화 규칙도 정확히 구별한다. deque 끝의 삽입은 반복자를 무효화하지만
+기존 원소의 참조는 유지한다. 중간 삭제는 더 넓은 무효화를 일으킬 수 있다.
+이 코드가 잠금을 사용하는 이유는 순회·제거·두 연결의 인계를 다른 변경과 직렬화하기
+위해서다. [C++ deque 변경 계약](https://eel.is/c++draft/deque.modifiers)을 참고한다.
+
+**FIFO는 등록 성공 순서다.** 서로 다른 연결 worker가 mutex를 얻어 등록한 순서 중
+취소·끊김으로 제거되지 않은 앞의 두 명을 선택한다. accept 순서나 사용자가 버튼을
+누른 시각과 같다고 보장하지 않는다. 먼저 꺼낸 연결이 HOST, 다음이 GUEST다.
+Match로 이동한 소켓·부분 스트림·lease는 이제 큐 밖의 소유자가 책임진다.
+shutdown은 남은 큐를 비우며, 매처와 생산자의 종료 대기는 main의 join·wait가 담당한다.
+
+**멱등성 키는 매치 생성 시 발급해 재사용한다.** new_match_uuid로 만든 키를 결과
+재시도에도 유지한다. 저장 중복 방지는 키 생성만으로 완성되지 않는다. meta의 unique
+제약과 원자적인 결과 저장이 같은 키의 재요청을 한 경기로 처리해야 한다.
+룸 경로도 매치 조립 시 같은 함수를 호출한다.
+
+회귀 검사는 tests/learning/matchmaker_queue.cpp에서 단독 취소, 종료 뒤 등록 거절,
+상한 거절, 취소 후 생존자 FIFO를 확인한다. python/tests/test_relay_meta_smoke.py의
+단독 취소 실험은 실제 서버에 취소를 보내고 다음 참가자가 오기 전에 EOF를 확인한다.
 
 ### 7.4 `MATCH_FOUND` 포맷과 seed 를 서버가 정하는 이유
 
@@ -1455,7 +1623,7 @@ MATCH_FOUND (12) 페이로드 =
   match_uuid : relay가 만든 32자리 소문자 hex 멱등성 키
 ```
 
-결정론적 lockstep 은 두 클라이언트가 **동일한 RNG 스트림**을 공유해야 한다. Part 6 의 직접 접속에서는 호스트가 seed 를 뽑아 `SEED` 프레임으로 알려준다. 릴레이 경로에서는 서버가 seed 를 한 번 정해 `MATCH_FOUND` 에 실어 양쪽에 동시에 보낸다. 그래서 릴레이 경로에서는 `HELLO`/`HELLO_ACK`/`SEED` 핸드셰이크를 **다시 하지 않는다**. HOST/GUEST 역할은 보드 배치·로그·재시작 협상 같은 클라이언트 내부 비대칭을 일관되게 만들기 위한 라벨이다.
+결정론적 lockstep 은 두 클라이언트가 **동일한 RNG 스트림**을 공유해야 한다. Part 6 의 직접 접속에서는 호스트가 seed 를 뽑아 `SEED` 프레임으로 알려준다. 릴레이 경로에서는 서버가 seed 를 한 번 정해 `MATCH_FOUND` 에 실어 양쪽에 같은 값으로 전달한다. 그래서 릴레이 경로에서는 `HELLO`/`HELLO_ACK`/`SEED` 핸드셰이크를 **다시 하지 않는다**. HOST/GUEST 역할은 보드 배치·로그·재시작 협상 같은 클라이언트 내부 비대칭을 일관되게 만들기 위한 라벨이다.
 
 icon 필드는 각 클라이언트 관점에서 `my_icon` → `peer_icon` 순으로 들어간다. 즉 같은 매치라도 A에게 가는 프레임과 B에게 가는 프레임의 icon 순서가 서로 뒤바뀐다. 뒤쪽 필드는 구버전 클라이언트 호환을 위해 optional처럼 파싱하므로 9바이트뿐인 과거 프레임도 유효하다. 현재 클라이언트는 UUID를 직접 쓰지 않아도 trailing 필드를 안전하게 무시하고, relay와 meta가 결과 멱등성에 사용한다.
 
@@ -1507,11 +1675,11 @@ icon 필드는 각 클라이언트 관점에서 `my_icon` → `peer_icon` 순으
     };
 ```
 
-`Entry` 는 호스트/게스트 두 슬롯을 대칭으로 갖는다. `present`(연결 살아 있음), `ready`(READY(1) 보냄), `exited`(read 루프 이탈함) 세 플래그가 각각 별개인 점에 주의한다. 셋은 서로 다른 시점에 바뀌고, 매치 인계는 세 조합을 모두 본다.
+`Entry` 는 호스트/게스트 두 슬롯을 대칭으로 갖는다. `present`(서버가 슬롯을 재실로 관리 중), `ready`(READY(1) 보냄), `exited`(read 루프 이탈함) 세 플래그가 각각 별개인 점에 주의한다. 셋은 서로 다른 시점에 바뀌고, 매치 인계는 세 조합을 모두 본다.
 
-`hostSessionLease`/`guestSessionLease` 는 §6 의 인증이 획득한 세션 lease 의 룸 단계 보관처다. 방이 매치로 넘어가면 §8.7 에서 `Match` 로 옮겨 타고, 방이 매치 없이 끝나면 떠나는 쪽 슬롯이 비워질 때 함께 풀린다.
+`hostSessionLease`/`guestSessionLease` 는 §6 의 인증이 획득한 세션 lease 의 룸 단계 보관처다. 방이 매치로 넘어가면 §8.7 에서 `Match` 로 옮겨 타고, 일반 퇴장에서는 떠나는 쪽 참조를 지역 변수로 옮긴 뒤 상태 잠금 밖에서 해제한다. 다른 소유자가 남아 있다면 실제 반납은 마지막 참조가 풀릴 때 일어난다.
 
-`roomInfoVersion`은 이 `Entry`의 상태가 몇 번 바뀌었는지 세는 단조 증가 번호다. 락을 풀고 네트워크 송신을 한 뒤 다시 잡았을 때, 그 사이 상태가 바뀌었는지 판별해 오래된 `ROOM_INFO`를 보내지 않는 낙관적 버전 검사에 쓴다.
+`roomInfoVersion`은 레지스트리의 공통 카운터에서 방 생성·입장·퇴장 때 발급하는 알림 버전이다. READY 변경 횟수나 개별 방의 변화 횟수와 같지 않다. 송신 게이트를 잡은 뒤 상태 잠금 안에서 버전을 확인하고, 상태 잠금만 풀어 송신한다. 검사 전에 오래된 알림은 버리고, 이미 시작한 송신 뒤에는 새 알림이 게이트 순서대로 이어진다. 송신 중 퇴장은 가능하므로 수신 순간까지 최신 상태라는 보장은 아니다.
 
 레지스트리 자체의 동기화 자원은 이렇다.
 
@@ -1526,7 +1694,7 @@ icon 필드는 각 클라이언트 관점에서 `my_icon` → `peer_icon` 순으
     static constexpr size_t kRoomSendShardCount = 64;
     std::array<std::mutex, kRoomSendShardCount> roomSendMu_;
     std::atomic<bool>       stopping{false};
-    uint64_t                code_rng_state_ = 0;
+
     // match seed 는 MATCH_FOUND 로 나가는 값이라 스트림을 두지 않는다.
     relay::MatchSeedSource  seed_src_;
     uint64_t                next_room_info_version_ = 1;
@@ -1542,79 +1710,127 @@ icon 필드는 각 클라이언트 관점에서 `my_icon` → `peer_icon` 순으
 
 `next_match_id_` 가 100000 부터 시작하는 것은 `Matchmaker` 의 `next_match_id`(1부터)와 로그에서 겹치지 않게 하려는 것이다. 두 카운터는 별개 객체라 값 자체가 충돌해도 동작에는 문제가 없지만, 로그를 읽는 사람에게는 문제가 된다.
 
-### 8.2 룸 코드 RNG — 충돌보다 예측이 문제다
+### 8.2 방 코드 — 공간·충돌·난수원
 
-**현재 소스 발췌 — `server/room.cpp`**
+방 코드의 알파벳은 A~Z와 2~9에서 I·O를 제외한 32자다. 다섯 자리의 공간은
+32^5 = 33,554,432개, 즉 25비트다. 읽어 전달할 때 0/O·1/I 혼동을 줄이되,
+충돌 처리와 반복 추측 방어는 별도의 책임으로 둔다.
+
+균등·독립 후보라는 가정에서 현재 N개 방이 살아 있으면 후보 하나의 충돌 확률은
+N / 32^5다. 500개 방에서는 약 0.00149%다. 빈 공간에 500개 후보를 독립적으로
+뽑을 때 후보들 사이에 한 번 이상 충돌할 확률은 생일 문제 근사로 약 0.37%다.
+두 확률은 질문이 다르다. 저장소는 확률에 기대어 덮어쓰지 않고, 이미 쓰는 코드면
+새 후보로 재시도한다. 32회 한도를 넘거나 난수원이 실패하면 생성을 거절한다.
+
+**현재 소스 발췌 — `server/room_code.h`**
 
 ```cpp
-namespace {
+inline constexpr char kRoomCodeAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+inline constexpr std::size_t kRoomCodeLength = 5;
+static_assert(sizeof(kRoomCodeAlphabet) - 1 == 32);
 
-// base32 알파벳 — 혼동 쉬운 0/O/1/I 제외 (plan §D.1)
-constexpr char   kCodeAlphabet[]    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-constexpr size_t kCodeAlphabetN     = sizeof(kCodeAlphabet) - 1;
-constexpr size_t kCodeLen           = 5;
-constexpr auto   kPollInterval      = std::chrono::milliseconds(10);
-
-// roomLoop_ 대기 단계 데드라인 — queueLobbyThread 의 kConfirmTimeout 과 같은 결.
-// 방이 무기한 열려 있으면 워커 슬롯·IP admission·세션 lease 가 그만큼 잠긴 채
-// 새 연결을 굶기므로, 진행이 없는 방은 서버가 먼저 정리한다.
-constexpr auto   kRoomGuestWaitTimeout = std::chrono::minutes(15);  // 개설 후 게스트 무입장
-constexpr auto   kRoomReadyTimeout     = std::chrono::seconds(60);  // 게스트 입장 후 READY 미확정
-
-// ROOM_INFO status 바이트 (plan §D.2 / framing.h)
-constexpr uint8_t kStatusWaiting    = 0;
-constexpr uint8_t kStatusFull       = 1;
-constexpr uint8_t kStatusNotFound   = 2;
-constexpr uint8_t kStatusGoneFull   = 3;
-
-uint64_t xorshift64_(uint64_t& s) {
-    uint64_t x = s;
-    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-    s = x;
-    return x;
+// Five low-to-high groups of five bits. All-zero input is the valid code AAAAA.
+// Uniform 32-bit input gives uniform 25-bit codes; the upper seven bits are unused.
+inline std::string roomCodeFromWord(std::uint32_t word) {
+    std::string code(kRoomCodeLength, 'A');
+    for (char& c : code) {
+        c = kRoomCodeAlphabet[word & 31u];
+        word >>= 5;
+    }
+    return code;
 }
 
-}  // namespace
+// Fresh OS random bytes per candidate. Failure returns nullopt; no clock/PRNG fallback.
+std::optional<std::uint32_t> roomCodeRandomWord() noexcept;
+
+// Caller must serialize this search AND its subsequent insertion against other
+// changes to the same registry. A returned candidate is not itself a reservation.
+// Injection separates collision policy from the OS source for deterministic tests.
+template <class Next, class Occupied>
+std::optional<std::string> selectRoomCode(Next&& next, Occupied&& occupied) {
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+        const auto word = next();
+        if (!word) return std::nullopt;
+        auto code = roomCodeFromWord(*word);
+        if (!occupied(code)) return code;
+    }
+    return std::nullopt;
+}
 ```
 
-32 글자 알파벳 × 5자리 = 32^5 ≈ 33.5M 조합이다. 동시에 몇백 개 방이 떠 있어도 충돌 확률은 무시할 수준이고, 어차피 생성 시 재시도한다. 혼동하기 쉬운 `0`/`O`/`1`/`I` 를 뺀 것은 음성·문자 전달 실수를 줄이기 위해서다 — 친구에게 "내 방 코드 H3K9W" 라고 불러줄 때 `0` 과 `O` 를 헷갈리면 안 된다.
+roomCodeFromWord는 32비트 입력에서 하위 5비트씩 다섯 묶음을 꺼낸다.
+32개 기호가 5비트 값 전체에 일대일 대응하므로 균등한 입력이면 코드도 균등하다.
+상위 7비트는 사용하지 않으며 0도 유효한 AAAAA다. 중간 몫이 0이 되었다는 이유로
+새 난수를 섞으면 이 단순한 대응이 달라진다.
 
-함께 보이는 두 데드라인 상수 `kRoomGuestWaitTimeout`/`kRoomReadyTimeout` 은 대기실 수명의 상한이다. 왜 필요한지, 어느 시점에 어떤 값으로 재장전되는지는 §8.6 의 루프 본문에서 다룬다.
+예전 xorshift·MT 엔진은 게임 시뮬레이션용 난수와 같은 결정적 생성기 계열이다.
+시드에 난수를 섞었다는 사실만으로 반복 관측에 대한 암호학적 예측 저항성이 생기지
+않는다. 현재 두 릴레이는 후보마다 OS 난수원을 사용하고 실패 시 약한 값으로 대체하지 않는다.
+
+**현재 소스 발췌 — `server/room_code.cpp`**
+
+```cpp
+std::optional<std::uint32_t> roomCodeRandomWord() noexcept {
+    unsigned char bytes[4]{};
+#if defined(_WIN32)
+    if (BCryptGenRandom(nullptr, bytes, sizeof(bytes),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return std::nullopt;
+#elif defined(__linux__)
+    // Refuse creation if the OS source is not ready. Even short/error reads fail
+    // closed, rather than waiting or substituting a predictable candidate.
+    if (::getrandom(bytes, sizeof(bytes), GRND_NONBLOCK) != sizeof(bytes))
+        return std::nullopt;
+#else
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    const int fd = ::open("/dev/urandom", flags);
+    if (fd < 0) return std::nullopt;
+    const auto received = ::read(fd, bytes, sizeof(bytes));
+    ::close(fd);
+    if (received != sizeof(bytes)) return std::nullopt;
+#endif
+    return std::uint32_t(bytes[0]) | (std::uint32_t(bytes[1]) << 8) |
+           (std::uint32_t(bytes[2]) << 16) | (std::uint32_t(bytes[3]) << 24);
+}
+```
+
+Linux는 getrandom의 GRND_NONBLOCK으로 난수원 준비를 기다리지 않는다.
+Windows는 BCryptGenRandom의 시스템 제공자를 사용한다. 다른 POSIX 경로는
+/dev/urandom을 읽는다. 어느 경로든 정확히 4바이트를 얻지 못하면 nullopt다.
+짧은 읽기·일시 중단도 이번 생성을 실패시키는 단순 정책이며 시각값으로 폴백하지 않는다.
+[Linux getrandom 계약](https://man7.org/linux/man-pages/man2/getrandom.2.html)과
+[Windows BCryptGenRandom 계약](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom)을 참고한다.
+Windows 타깃에는 bcrypt 링크가 추가된다.
+
+난수원 교체는 짧은 주소의 길이를 늘리지 않는다. 방 코드를 아는 사람을 입장시키는
+현재 규약에는 반복 추측 예산과 연결 제한도 필요하다. 강한 비공개 방을 원하면
+별도의 긴 초대 토큰이나 호스트 승인이 필요하며, 계정 입장권 인증과도 구별한다.
+매치 seed와 방 코드는 서로 다른 용도의 값으로 생성한다.
 
 **현재 소스 발췌 — `server/room.cpp`**
 
 ```cpp
-RoomRegistry::RoomRegistry() {
-    using clock = std::chrono::high_resolution_clock;
-    const auto t = static_cast<uint64_t>(clock::now().time_since_epoch().count());
-    // 룸코드는 추측되면 남의 방에 난입할 수 있으므로 부팅 시각만으로 시드하지
-    // 않는다 — random_device(주요 플랫폼에서 OS CSPRNG)를 섞어 예측을 차단.
-    std::random_device rd;
-    const uint64_t r = (static_cast<uint64_t>(rd()) << 32) | rd();
-    code_rng_state_ = (t ^ r) ? (t ^ r) : 0xC0FFEE0DDB0B0BAAULL;
-}
+RoomRegistry::RoomRegistry() = default;
 
 std::string RoomRegistry::generateCode_() {
-    // mu 잡힘. 충돌 나면 재시도 — 실질적으로 매우 드물다 (32^5 = 33M 조합).
-    for (int attempt = 0; attempt < 32; ++attempt) {
-        std::string c(kCodeLen, 'A');
-        uint64_t x = xorshift64_(code_rng_state_);
-        for (size_t i = 0; i < kCodeLen; ++i) {
-            c[i] = kCodeAlphabet[x % kCodeAlphabetN];
-            x /= kCodeAlphabetN;
-            if (x == 0) x = xorshift64_(code_rng_state_);
-        }
-        if (rooms.find(c) == rooms.end()) return c;
-    }
-    return {};  // 상상 속 병리적 충돌
+    // mu remains held from candidate search through insertion in handleCreate.
+    auto code = selectRoomCode(roomCodeRandomWord, [this](const std::string& c) {
+        return rooms.find(c) != rooms.end();
+    });
+    return code ? std::move(*code) : std::string{};
 }
 ```
 
-룸 코드는 방을 찾는 짧은 초대 주소이고, 계정 인증은 별도의 입장권이 맡는다. `code_rng_state_`는 부팅 시각에 `std::random_device` 출력을 섞지만 이후 생성기는 xorshift64다. **이 코드를 비밀방의 강한 인증 수단으로 간주하지 않는다.** 짧은 코드의 추측과 반복 관측에 대한 방어는 입장 제한만으로 완결되지 않으며, 비공개 방이 필요하면 암호학적 초대 토큰이나 호스트 승인이 별도 요구사항이다.
+코드 후보 조회와 rooms 삽입은 같은 mu 임계 구역 안에서 끝낸다. 후보를 찾았다는
+반환값만으로는 예약이 된 것이 아니다. 잠금을 풀었다가 삽입하면 다른 생성자가
+같은 코드를 먼저 등록할 수 있다. Reactor는 방 표를 소유한 한 루프에서 조회와
+삽입을 중간 양보 없이 처리하고, 동일한 생성 헬퍼를 사용한다.
 
-매치 seed는 `seed_src_`의 `MatchSeedSource`가 따로 만든다. 매번 새 난수 입력을 사용하며, 게임 클라이언트에게 공개되는 seed 하나에서 뒤 경기의 스트림을 그대로 이어 계산하는 옛 구조를 피한다. 룸 코드 상태에 상수만 XOR해 게임 seed를 만드는 구현은 현재 사용하지 않는다.
-
-`generateCode_` 의 나눗셈 루프는 64비트 난수 하나를 base32 자릿수로 계속 쪼개다가 `x` 가 0이 되면 새 난수를 뽑는다. 32^5 를 담으려면 25비트면 되므로 보통 난수 한 개로 5글자가 다 나온다.
+HTML 기준 구현은 고정 슬롯과 세대 번호로 코드 재사용 뒤의 오래된 제거 요청도
+구별한다. 실제 RoomRegistry는 unordered_map과 roomInfoVersion으로 알림을
+조정하므로 두 버전의 세부 계약을 같은 것으로 간주하지 않는다.
 
 ### 8.3 송신 헬퍼 3종
 
@@ -1683,41 +1899,63 @@ void RoomRegistry::handleCreate(net::TcpSocket sock, uint32_t conn_id,
                                 std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
     std::string code;
-    uint64_t roomInfoVersion = 0;
-    {
-        std::unique_lock<std::mutex> lk(mu);
-        code = generateCode_();
-        if (code.empty()) {
-            lk.unlock();
-            net::tcp_close(sock);
-            return;
+    try {
+        uint64_t roomInfoVersion = 0;
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            // Serialize admission with shutdown; the early check is only a fast path.
+            if (stopping.load()) {
+                lk.unlock();
+                net::tcp_close(sock);
+                return;
+            }
+            code = generateCode_();
+            if (code.empty()) {
+                lk.unlock();
+                net::tcp_close(sock);
+                return;
+            }
+            // Prepare potentially allocating fields before publishing the entry.
+            // A failed string copy must not leave a room with no owning roomLoop.
+            static_assert(std::is_nothrow_move_constructible_v<Entry>);
+            Entry r;
+            r.code         = code;
+            r.hostSock     = sock;
+            r.hostConn     = conn_id;
+            r.hostPresent  = true;
+            r.hostPlayerId = player_id;
+            r.hostElo      = elo;
+            r.hostUsername = username;
+            r.hostToken    = token;
+            r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+            r.hostSessionLease = std::move(session_lease);
+            r.hostIpSession    = std::move(ip_session);
+            roomInfoVersion = r.roomInfoVersion = next_room_info_version_;
+            rooms.emplace(code, std::move(r));
+            ++next_room_info_version_;
         }
-        Entry& r       = rooms[code];
-        r.code         = code;
-        r.hostSock     = sock;
-        r.hostConn     = conn_id;
-        r.hostPresent  = true;
-        r.hostPlayerId = player_id;
-        r.hostElo      = elo;
-        r.hostUsername = username;
-        r.hostToken    = token;
-        r.hostSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
-        r.hostSessionLease = std::move(session_lease);
-        r.hostIpSession    = std::move(ip_session);
-        roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
+        RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                  << " created code=" << code);
+        sendRoomInfoIfCurrent_(sock, code, kStatusWaiting, 1, roomInfoVersion);
+        roomLoop_(code, /*isHost=*/true, sock, std::move(streamPrefix));
+    } catch (...) {
+        abortRoom_(code, sock);
+        throw;
     }
-    RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-              << " created code=" << code);
-    sendRoomInfoIfCurrent_(sock, code, kStatusWaiting, 1, roomInfoVersion);
-    roomLoop_(code, /*isHost=*/true, std::move(streamPrefix));
 }
 ```
 
 이 진입점은 소켓과 `conn_id`, 인증에서 얻은 `player_id`·`elo`·`username`·`token`·`selected_icon_id`·`session_lease`, accept 단계에서 잡아 둔 `ip_session`, §6.3의 잔여 바이트 `streamPrefix`를 함께 받는다. 인증 정보는 나중에 `Match`를 조립할 때 그대로 쓰이므로 여기서 `Entry`에 보관하고, 계정 lease 와 IP 세션 슬롯도 같은 임계구역에서 `hostSessionLease`·`hostIpSession` 으로 이동한다. 매개변수가 늘어날수록 호출 실수가 쉬워지므로 장기적으로는 인증 문맥과 스트림 인계를 구조체로 묶는 편이 낫다.
 
-락 안에서 코드 발급과 `Entry` 등록, 그리고 `roomInfoVersion` 확정까지 마친다. 발급한 버전 번호를 지역 변수에 복사해두고, 락을 나온 뒤 `sendRoomInfoIfCurrent_` 로 "그 버전이 아직 최신이면" 보낸다. 이 시점에는 호스트 혼자라 사실 경쟁자가 없지만, 모든 송신 경로를 같은 헬퍼로 통일하는 편이 규칙을 어길 여지를 없앤다.
+락 안에서 코드 발급과 `Entry` 등록, 그리고 `roomInfoVersion` 확정까지 마친다. 발급한 버전 번호를 지역 변수에 복사해두고, 락을 나온 뒤 `sendRoomInfoIfCurrent_` 로 "그 버전이 아직 최신이면" 보낸다. 잠금을 놓은 뒤에는 종료나 다른 참가자의 상태 변경이 가능하므로 안내 버전을 다시 확인한다.
 
-마지막 줄에서 `roomLoop_` 로 들어간다. **`handleCreate` 는 방이 끝날 때까지 반환하지 않는다.** 호출자인 `playerConnThread` 가 그대로 대기실 루프가 되는 구조다.
+마지막 줄에서 `roomLoop_` 로 들어간다. 성공 경로에서 **`handleCreate`는 이 연결의 대기실 단계가 끝날 때까지 반환하지 않는다.** 호출자인 `playerConnThread` 가 그대로 대기실 루프가 되는 구조다.
+
+생성의 빠른 stopping 검사는 mutex 밖에 있지만, 잠금을 얻은 뒤 다시 검사한다.
+shutdown도 같은 mu 아래 종료 상태를 바꾼다. 따라서 종료가 등록보다 먼저 결정되면
+뒤늦은 생성은 ROOM_INFO를 발급하지 않고 연결을 닫는다. 등록이 먼저 끝난 방은
+이미 실행 중인 roomLoop와 소유자의 drain 절차가 정리한다. 게스트 등록에도 같은
+종료 검사를 적용한다. shutdown의 알림 자체가 모든 호출자의 종료를 기다리지는 않는다.
 
 ### 8.5 방 입장 — `handleJoin`
 
@@ -1732,65 +1970,84 @@ void RoomRegistry::handleJoin(const std::string& code, net::TcpSocket sock, uint
                               std::shared_ptr<IpAdmission> ip_session,
                               std::vector<uint8_t> streamPrefix) {
     if (stopping.load()) { net::tcp_close(sock); return; }
-    bool entered = false;
-    uint64_t roomInfoVersion = 0;
-    {
-        // send gate를 먼저 잡은 뒤 guestPresent를 공개한다. 반대 순서면 host
-        // roomLoop가 그 사이 guest를 발견하고 CHAT/READY를 ROOM_INFO보다 먼저
-        // 보낼 수 있다. 모든 중첩 잠금은 send gate -> state mu 순서를 따른다.
-        const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
-        std::unique_lock<std::mutex> sendLk(roomSendMu_[shard]);
-        std::unique_lock<std::mutex> lk(mu);
-        auto it = rooms.find(code);
-        if (it == rooms.end()) {
-            lk.unlock();
-            sendRoomInfo_(sock, code, kStatusNotFound, 0);
-            net::tcp_close(sock);
-            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-                      << " close: join " << code << " notfound match_uuid=-");
-            return;
-        }
-        auto& r = it->second;
-        if (r.guestPresent || r.matchStarted) {
-            const uint8_t peerCount =
-                static_cast<uint8_t>((r.hostPresent ? 1 : 0) + (r.guestPresent ? 1 : 0));
-            lk.unlock();
-            sendRoomInfo_(sock, code, kStatusFull, peerCount);
-            net::tcp_close(sock);
-            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-                      << " close: join " << code << " full match_uuid=-");
-            return;
-        }
-        r.guestSock     = sock;
-        r.guestConn     = conn_id;
-        r.guestPresent  = true;
-        r.guestPlayerId = player_id;
-        r.guestElo      = elo;
-        r.guestUsername = username;
-        r.guestToken    = token;
-        r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
-        r.guestSessionLease = std::move(session_lease);
-        r.guestIpSession    = std::move(ip_session);
-        net::TcpSocket hs = r.hostSock;
-        net::TcpSocket gs = r.guestSock;
-        roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
-        lk.unlock();
+    try {
+        bool entered = false;
+        uint64_t roomInfoVersion = 0;
         {
-            std::lock_guard<std::mutex> stateLk(mu);
-            auto current = rooms.find(code);
-            entered = current != rooms.end() &&
-                      current->second.roomInfoVersion == roomInfoVersion;
+            // send gate를 먼저 잡은 뒤 guestPresent를 공개한다. 반대 순서면 host
+            // roomLoop가 그 사이 guest를 발견하고 CHAT/READY를 ROOM_INFO보다 먼저
+            // 보낼 수 있다. 모든 중첩 잠금은 send gate -> state mu 순서를 따른다.
+            const size_t shard = std::hash<std::string>{}(code) % kRoomSendShardCount;
+            std::unique_lock<std::mutex> sendLk(roomSendMu_[shard]);
+            std::unique_lock<std::mutex> lk(mu);
+            if (stopping.load()) {
+                lk.unlock();
+                net::tcp_close(sock);
+                return;
+            }
+            auto it = rooms.find(code);
+            if (it == rooms.end()) {
+                lk.unlock();
+                sendRoomInfo_(sock, code, kStatusNotFound, 0);
+                net::tcp_close(sock);
+                RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                          << " close: join " << code << " notfound match_uuid=-");
+                return;
+            }
+            const auto& current = it->second;
+            if (current.guestPresent || current.matchStarted) {
+                const uint8_t peerCount =
+                    static_cast<uint8_t>((current.hostPresent ? 1 : 0) + (current.guestPresent ? 1 : 0));
+                lk.unlock();
+                sendRoomInfo_(sock, code, kStatusFull, peerCount);
+                net::tcp_close(sock);
+                RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                          << " close: join " << code << " full match_uuid=-");
+                return;
+            }
+            Entry r = current; // Copy before changing the live room.
+            r.guestSock     = sock;
+            r.guestConn     = conn_id;
+            r.guestPresent  = true;
+            r.guestPlayerId = player_id;
+            r.guestElo      = elo;
+            r.guestUsername = username;
+            r.guestToken    = token;
+            r.guestSelectedIconId = selected_icon_id.empty() ? "default" : selected_icon_id;
+            r.guestSessionLease = std::move(session_lease);
+            r.guestIpSession    = std::move(ip_session);
+            net::TcpSocket hs = r.hostSock;
+            net::TcpSocket gs = r.guestSock;
+            roomInfoVersion = r.roomInfoVersion = next_room_info_version_;
+            static_assert(std::is_nothrow_move_assignable_v<Entry>);
+            it->second = std::move(r);
+            ++next_room_info_version_;
+            lk.unlock();
+            {
+                std::lock_guard<std::mutex> stateLk(mu);
+                auto current = rooms.find(code);
+                entered = current != rooms.end() &&
+                          current->second.roomInfoVersion == roomInfoVersion;
+            }
+            if (entered) {
+                // 두 참가자의 ROOM_INFO 사이에도 READY/CHAT이 끼지 않는다.
+                sendRoomInfo_(hs, code, kStatusWaiting, 2);
+                sendRoomInfo_(gs, code, kStatusWaiting, 2);
+            }
         }
         if (entered) {
-            // 두 참가자의 ROOM_INFO 사이에도 READY/CHAT이 끼지 않는다.
-            sendRoomInfo_(hs, code, kStatusWaiting, 2);
-            sendRoomInfo_(gs, code, kStatusWaiting, 2);
+            RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
+                      << " joined " << code);
+            roomLoop_(code, /*isHost=*/false, sock, std::move(streamPrefix));
+        } else {
+            // The published guest still owns a slot if a concurrent state change
+            // invalidated its initial notice. No reader loop will reclaim it.
+            abortRoom_(code, sock);
+            net::tcp_close(sock);
         }
-    }
-    if (entered) {
-        RLOG_INFO("[room] conn=" << conn_id << " player_id=" << player_id
-                  << " joined " << code);
-        roomLoop_(code, /*isHost=*/false, std::move(streamPrefix));
+    } catch (...) {
+        abortRoom_(code, sock);
+        throw;
     }
 }
 ```
@@ -1826,7 +2083,7 @@ sequenceDiagram
 
 두 `ROOM_INFO` 를 **같은 임계구간 안에서 연속으로** 보내는 것도 같은 이유다. 사이에 다른 프레임이 끼면 호스트와 게스트가 보는 방 상태 순서가 어긋난다.
 
-`lk.unlock()` 후 다시 `mu` 를 잡아 버전을 재확인하는 `entered` 검사는, 그 짧은 사이에 방이 사라지거나(호스트가 나감) 다른 상태 갱신이 끼어들었는지 보는 것이다. 버전이 바뀌었으면 `ROOM_INFO` 를 보내지 않고 `roomLoop_` 에도 들어가지 않는다.
+`lk.unlock()` 후 다시 `mu` 를 잡아 버전을 재확인하는 `entered` 검사는, 그 짧은 사이에 방이 사라지거나(호스트가 나감) 다른 상태 갱신이 끼어들었는지 보는 것이다. 버전이 바뀌었으면 `ROOM_INFO`를 보내지 않고 `roomLoop_`에도 들어가지 않는다. 이미 공개한 게스트 슬롯은 그 연결의 소유자 확인 후 정리하고 연결을 닫아, 읽는 작업 없이 남는 방을 방지한다.
 
 `ROOM_INFO` 의 status 바이트는 네 값이다.
 
@@ -1837,6 +2094,41 @@ sequenceDiagram
 | 2 | NOT_FOUND | 그런 코드 없음 |
 | 3 | GONE_FULL | 상대가 나가서 혼자 남음 |
 
+**예외 경로에도 방을 책임지는 실행 흐름이 필요하다.** handleCreate는 문자열 복사가
+실패해도 반쯤 채운 항목이 남지 않도록 지역 Entry를 완성한 뒤 emplace한다.
+handleJoin도 현재 항목의 사본을 준비한 뒤 예외 없는 이동 대입으로 공개한다.
+등록 성공 뒤에도 안내 프레임의 버퍼 할당이나 roomLoop 초기화가 실패할 수 있다.
+두 진입 함수의 catch는 잠금이 해제된 뒤 abortRoom_을 호출하고 예외를 다시 전달한다.
+
+**현재 소스 발췌 — `server/room.cpp`**
+
+```cpp
+// An exceptional owner exit must not leave an entry without its reader loop.
+// Compare owning handle identities, not reusable fd numbers or only the code.
+void RoomRegistry::abortRoom_(const std::string& code, const net::TcpSocket& owner) {
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        const auto it = rooms.find(code);
+        if (it == rooms.end()) return;
+        const auto same = [&](const net::TcpSocket& socket) {
+            return (owner.fdh || owner.transport) &&
+                   socket.fdh == owner.fdh && socket.transport == owner.transport;
+        };
+        if (!same(it->second.hostSock) && !same(it->second.guestSock)) return;
+        net::tcp_close(it->second.hostSock);
+        net::tcp_close(it->second.guestSock);
+        rooms.erase(it);
+    }
+    cv.notify_all();
+}
+```
+
+예외 정리는 코드 문자열만 비교하지 않는다. 해당 방에 보관한 소켓과 실패한 작업의
+소유 핸들이 같은지 확인한 뒤 양쪽 연결을 종료하고 항목을 지운다. 코드가 재사용되어도
+다른 연결의 방을 지우지 않게 하는 조건이다. 이 검사는 예외 정리 경로의 계약이며,
+모든 비동기 콜백이 자동으로 같은 보호를 받는 것은 아니다. 준비·종료·매치 인계는
+각 경로의 소유권과 버전을 별도로 대조해야 한다.
+
 ### 8.6 대기실 루프 — `roomLoop_`
 
 호스트와 게스트 스레드가 각각 한 벌씩 이 함수를 돈다. 함수 전체를 싣는다.
@@ -1845,15 +2137,19 @@ sequenceDiagram
 
 ```cpp
 void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
+                             const net::TcpSocket& expected,
                              std::vector<uint8_t> streamPrefix) {
-    // 내 소켓 사본 확보 (lock 밖에서 recv 하기 위함)
-    net::TcpSocket mySock;
+    // Keep the caller's owning identity: the same code/role may be reused.
+    net::TcpSocket mySock = expected;
+    bool ownsSlot = false;
     {
         std::lock_guard<std::mutex> lk(mu);
-        auto it = rooms.find(code);
-        if (it == rooms.end()) return;
-        auto& r = it->second;
-        mySock = isHost ? r.hostSock : r.guestSock;
+        const auto it = rooms.find(code);
+        ownsSlot = it != rooms.end() && ownsSlot_(it->second, isHost, mySock);
+    }
+    if (!ownsSlot) {
+        net::tcp_close(mySock);
+        return;
     }
 
     // playerConnThread 가 첫 프레임과 함께 끌어온 잔여 바이트를 수신 버퍼의
@@ -1898,21 +2194,30 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
 
         if (!stream.empty()) {
             std::vector<net::Frame> frames;
-            net::parse_frames(stream, frames);
+            if (!net::parse_frames(stream, frames)) {
+                RLOG_WARN("[room] code=" << code << " close: invalid frame boundary");
+                break; // Use the common room/peer/socket cleanup below.
+            }
             for (const auto& f : frames) {
                 if (f.type == net::MsgType::READY) {
-                    const bool ready = !f.payload.empty() && f.payload[0] != 0;
+                    if (f.payload.size() != 1 || f.payload[0] > 1) {
+                        leaveRequested = true;
+                        break; // Common cleanup releases the room slot and socket.
+                    }
+                    const bool ready = f.payload[0] == 1;
                     net::TcpSocket fwd{};
                     bool hasFwd = false;
                     {
                         std::lock_guard<std::mutex> lk(mu);
                         auto it = rooms.find(code);
-                        if (it != rooms.end()) {
+                        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
                             auto& r = it->second;
                             if (isHost) r.hostReady  = ready;
                             else        r.guestReady = ready;
                             if (isHost && r.guestPresent) { fwd = r.guestSock; hasFwd = true; }
                             if (!isHost && r.hostPresent) { fwd = r.hostSock;  hasFwd = true; }
+                        } else {
+                            leaveRequested = true;
                         }
                     }
                     if (hasFwd) {
@@ -1922,6 +2227,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                     }
                 } else if (f.type == net::MsgType::ROOM_LEAVE) {
                     leaveRequested = true;
+                    break;
                 } else if (f.type == net::MsgType::CHAT) {
                     // 대기 중 채팅 — 상대에게 그대로 전달
                     net::TcpSocket fwd{};
@@ -1929,10 +2235,12 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                     {
                         std::lock_guard<std::mutex> lk(mu);
                         auto it = rooms.find(code);
-                        if (it != rooms.end()) {
+                        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
                             auto& r = it->second;
                             if (isHost && r.guestPresent) { fwd = r.guestSock; hasFwd = true; }
                             if (!isHost && r.hostPresent) { fwd = r.hostSock;  hasFwd = true; }
+                        } else {
+                            leaveRequested = true;
                         }
                     }
                     if (hasFwd) {
@@ -1940,6 +2248,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
                         sendRoomFrame_(code, fwd, out);
                     }
                 }
+                if (leaveRequested) break;
                 // 다른 타입(HELLO 등)은 이 단계에서는 무시
             }
         }
@@ -1951,7 +2260,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
         {
             std::lock_guard<std::mutex> lk(mu);
             auto it = rooms.find(code);
-            if (it == rooms.end()) break;
+            if (it == rooms.end() || !ownsSlot_(it->second, isHost, mySock)) break;
             auto& r = it->second;
             bothPresentNow = r.hostPresent && r.guestPresent;
 
@@ -1993,16 +2302,17 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             cv.wait(lk, [&] {
                 if (stopping.load()) return true;
                 auto it = rooms.find(code);
-                if (it == rooms.end()) return true;
+                if (it == rooms.end() || !ownsSlot_(it->second, isHost, mySock)) return true;
                 auto& r = it->second;
                 if (isHost)  return r.guestExited || !r.guestPresent;
                 else         return r.hostExited  || !r.hostPresent;
             });
 
             auto it = rooms.find(code);
-            if (it == rooms.end() || stopping.load()) {
-                // 상대 사라짐 — 내 소켓만 닫고 종료
-                if (it != rooms.end()) rooms.erase(it);
+            const bool stillOwns = it != rooms.end() && ownsSlot_(it->second, isHost, mySock);
+            if (!stillOwns || stopping.load()) {
+                // Never erase a replacement room reached by an old reader.
+                if (stillOwns) rooms.erase(it);
                 net::tcp_close(mySock);
                 return;
             }
@@ -2067,28 +2377,35 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
     net::TcpSocket peerSock{};
     bool notifyPeer = false;
     uint64_t roomInfoVersion = 0;
+    std::shared_ptr<PlayerSessionLease> retiredLease;
+    std::shared_ptr<IpAdmission> retiredIp;
     {
         std::lock_guard<std::mutex> lk(mu);
         auto it = rooms.find(code);
-        if (it != rooms.end()) {
+        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
             auto& r = it->second;
-            // 떠나는 쪽의 세션 lease 와 per-IP 세션 슬롯은 즉시 반납한다 —
-            // 상대가 남아 방 Entry 가 유지되는 동안에도 이 플레이어가 새 연결로
-            // 재인증할 수 있어야 하고, 타임아웃 정리 시 자원 회수가 방 소멸
-            // 시점까지 미뤄지지 않게 한다. (이 소켓은 아래에서 닫힌다.)
+            // Move departure leases out; release them after mu, before peer I/O.
+            // A surviving room must not keep the departed admission alive.
+            // Other aliases, if any, may still defer final release.
             if (isHost) {
                 r.hostPresent = false;  r.hostReady  = false;
-                r.hostSessionLease.reset(); r.hostIpSession.reset();
+                r.hostSock = {}; // mySock retains the departing owner until close below.
+                retiredLease = std::move(r.hostSessionLease); retiredIp = std::move(r.hostIpSession);
             } else {
                 r.guestPresent = false; r.guestReady = false;
-                r.guestSessionLease.reset(); r.guestIpSession.reset();
+                r.guestSock = {};
+                retiredLease = std::move(r.guestSessionLease); retiredIp = std::move(r.guestIpSession);
             }
             if (isHost && r.guestPresent) { peerSock = r.guestSock; notifyPeer = true; }
             if (!isHost && r.hostPresent) { peerSock = r.hostSock;  notifyPeer = true; }
             roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
             if (!r.hostPresent && !r.guestPresent) rooms.erase(it);
+            // A starter may be waiting for this presence change, not reader-exit.
+            cv.notify_all();
         }
     }
+    retiredLease.reset();
+    retiredIp.reset();
 
     if (notifyPeer) {
         sendRoomInfoIfCurrent_(peerSock, code, kStatusGoneFull, 1,
@@ -2099,7 +2416,7 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
 }
 ```
 
-**읽기 루프의 첫 줄이 중요하다.** `std::vector<uint8_t> stream = std::move(streamPrefix);` — `playerConnThread` 가 끌어온 잔여 바이트를 수신 버퍼의 **초기값**으로 쓴다. 빈 벡터로 시작하면 `ROOM_CREATE` 와 같은 세그먼트에 담겨온 `READY` 가 그대로 사라져, 호스트가 방을 만들자마자 READY 를 눌렀을 때 서버가 영원히 그 사실을 모른다.
+**이미 읽은 바이트를 유지한다.** `std::vector<uint8_t> stream = std::move(streamPrefix);` — `playerConnThread` 가 끌어온 잔여 바이트를 수신 버퍼의 **초기값**으로 쓴다. 빈 벡터로 시작하면 `ROOM_CREATE` 와 같은 세그먼트에 담겨온 `READY` 가 그대로 사라져, 호스트가 방을 만들자마자 READY 를 눌렀을 때 서버가 영원히 그 사실을 모른다.
 
 **방에도 데드라인이 있다.** 첫 프레임 5초(§6.1)와 수락 로비 30초(§10.5)가 있는데 정작 대기실만 무기한이면, 침묵하는 방 하나가 연결 워커 스레드와 IP admission 슬롯, 그리고 ranked 라면 세션 lease 까지 서버가 살아 있는 내내 점유한다. 방을 만들어 두고 떠나는 것만으로 — 악의든 부주의든 — 워커 예산 256개가 서서히 마르는 구조다. **점유형 자원에는 모든 대기 단계마다 상한이 있어야 하고, 상한이 없는 단계 하나가 전체 예산의 배수구가 된다.** 그래서 두 단계로 나눠 데드라인을 건다.
 
@@ -2117,6 +2434,26 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
 
 먼저 락을 잡은 쪽이 starter 가 되고 다른 쪽은 반드시 두 번째 분기를 못 본다. `startPump` 가 두 번 불리는 일이 구조적으로 불가능하다.
 
+**코드·역할과 연결의 소유 동일성.** 같은 방 코드와 게스트 자리에는 다른 연결이
+들어올 수 있다. `roomLoop_`는 호출자가 넘긴 `expected` 소켓을 붙들고 시작한다.
+READY 갱신, CHAT 대상 선택, 시작 대기, 일반 퇴장마다 `ownsSlot_`로 현재 슬롯의
+소유 핸들과 같은지 확인한다. 재사용 가능한 숫자 fd만 비교하지 않는다.
+
+**현재 소스 발췌 — `server/room.cpp`**
+
+```cpp
+bool RoomRegistry::ownsSlot_(const Entry& entry, bool isHost,
+                             const net::TcpSocket& expected) {
+    const auto& socket = isHost ? entry.hostSock : entry.guestSock;
+    const bool present = isHost ? entry.hostPresent : entry.guestPresent;
+    return present && (expected.fdh || expected.transport) &&
+           socket.fdh == expected.fdh && socket.transport == expected.transport;
+}
+```
+
+오래된 작업이 새 방을 찾아도 새 연결의 상태를 바꾸거나 그 방을 삭제하지 않는다.
+이 검사는 서버 내부 작업과 슬롯의 연결 관계를 확인하며, 클라이언트 인증을 대체하지 않는다.
+
 ### 8.7 룸에서 매치로의 인계 — `iAmStarter` 분기
 
 이 프로젝트에서 가장 미묘한 부분이다. 다시 떼어 본다.
@@ -2133,16 +2470,17 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
             cv.wait(lk, [&] {
                 if (stopping.load()) return true;
                 auto it = rooms.find(code);
-                if (it == rooms.end()) return true;
+                if (it == rooms.end() || !ownsSlot_(it->second, isHost, mySock)) return true;
                 auto& r = it->second;
                 if (isHost)  return r.guestExited || !r.guestPresent;
                 else         return r.hostExited  || !r.hostPresent;
             });
 
             auto it = rooms.find(code);
-            if (it == rooms.end() || stopping.load()) {
-                // 상대 사라짐 — 내 소켓만 닫고 종료
-                if (it != rooms.end()) rooms.erase(it);
+            const bool stillOwns = it != rooms.end() && ownsSlot_(it->second, isHost, mySock);
+            if (!stillOwns || stopping.load()) {
+                // Never erase a replacement room reached by an old reader.
+                if (stillOwns) rooms.erase(it);
                 net::tcp_close(mySock);
                 return;
             }
@@ -2198,6 +2536,14 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
 
 **게스트 스레드는 소켓을 닫지 않는다.** `peerStartedMatch` 분기가 그냥 `return` 이다. 소켓 소유권은 starter 가 `Match` 에 복사해 포워더로 넘겼다. `TcpSocket` 이 참조 카운트 핸들이라 게스트 스레드의 지역 사본이 소멸해도 fd 는 살아 있다.
 
+조건 변수의 알림은 저장된 사건이 아니라 **조건을 다시 검사할 기회**다.
+여기서는 상대의 reader 이탈뿐 아니라 `!guestPresent` 또는 `!hostPresent`도
+대기를 끝내므로 일반 퇴장도 상태 변경 뒤 `cv.notify_all()`을 호출한다.
+알림이 먼저 발생해도 같은 mutex로 보호한 predicate가 참이면 wait는 잠들지 않는다.
+가짜 깨움이 있어도 predicate를 다시 검사한다. 소켓이 닫혔다는 이유만으로 이 조건 변수가
+자동으로 깨어나는 것은 아니다. 깨어난 starter는 소유 동일성도 재확인하여
+같은 코드로 다시 생긴 방을 지우지 않는다.
+
 ### 8.8 일반 종료 경로
 
 **현재 소스 발췌 — `server/room.cpp`**
@@ -2210,28 +2556,35 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
     net::TcpSocket peerSock{};
     bool notifyPeer = false;
     uint64_t roomInfoVersion = 0;
+    std::shared_ptr<PlayerSessionLease> retiredLease;
+    std::shared_ptr<IpAdmission> retiredIp;
     {
         std::lock_guard<std::mutex> lk(mu);
         auto it = rooms.find(code);
-        if (it != rooms.end()) {
+        if (it != rooms.end() && ownsSlot_(it->second, isHost, mySock)) {
             auto& r = it->second;
-            // 떠나는 쪽의 세션 lease 와 per-IP 세션 슬롯은 즉시 반납한다 —
-            // 상대가 남아 방 Entry 가 유지되는 동안에도 이 플레이어가 새 연결로
-            // 재인증할 수 있어야 하고, 타임아웃 정리 시 자원 회수가 방 소멸
-            // 시점까지 미뤄지지 않게 한다. (이 소켓은 아래에서 닫힌다.)
+            // Move departure leases out; release them after mu, before peer I/O.
+            // A surviving room must not keep the departed admission alive.
+            // Other aliases, if any, may still defer final release.
             if (isHost) {
                 r.hostPresent = false;  r.hostReady  = false;
-                r.hostSessionLease.reset(); r.hostIpSession.reset();
+                r.hostSock = {}; // mySock retains the departing owner until close below.
+                retiredLease = std::move(r.hostSessionLease); retiredIp = std::move(r.hostIpSession);
             } else {
                 r.guestPresent = false; r.guestReady = false;
-                r.guestSessionLease.reset(); r.guestIpSession.reset();
+                r.guestSock = {};
+                retiredLease = std::move(r.guestSessionLease); retiredIp = std::move(r.guestIpSession);
             }
             if (isHost && r.guestPresent) { peerSock = r.guestSock; notifyPeer = true; }
             if (!isHost && r.hostPresent) { peerSock = r.hostSock;  notifyPeer = true; }
             roomInfoVersion = r.roomInfoVersion = next_room_info_version_++;
             if (!r.hostPresent && !r.guestPresent) rooms.erase(it);
+            // A starter may be waiting for this presence change, not reader-exit.
+            cv.notify_all();
         }
     }
+    retiredLease.reset();
+    retiredIp.reset();
 
     if (notifyPeer) {
         sendRoomInfoIfCurrent_(peerSock, code, kStatusGoneFull, 1,
@@ -2241,9 +2594,9 @@ void RoomRegistry::roomLoop_(const std::string& code, bool isHost,
     net::tcp_close(mySock);
 ```
 
-내 present/ready 를 내리고 **내 세션 lease 를 즉시 반납한** 뒤, 상대가 남아 있으면 그 소켓 사본과 새 버전 번호를 확보하고, 아무도 안 남았으면 방을 지운다. 여기까지가 `mu` 안이다. 실제 `ROOM_INFO(GONE_FULL)` 송신은 락 밖에서 게이트를 통해 나간다.
+내 present/ready 를 내리고 **내 세션 lease 참조를 지역 변수로 옮긴** 뒤, 상대가 남아 있으면 그 소켓 사본과 새 버전 번호를 확보하고, 아무도 안 남았으면 방을 지운다. 여기까지가 `mu` 안이다. 잠금을 놓은 뒤 지역 lease 참조를 해제하고, 실제 `ROOM_INFO(GONE_FULL)` 송신은 게이트를 통해 수행한다. 비운 슬롯의 소켓 참조도 제거하되 내 지역 소켓이 정리까지 수명을 유지한다. 다른 참조가 남아 있으면 실제 자원 소멸은 늦어질 수 있다.
 
-lease 반납을 방 소멸까지 미루지 않는 이유는 상대가 남은 방의 `Entry` 가 계속 살기 때문이다. 떠난 플레이어의 lease 가 `Entry` 안에 잔류하면, 그 사람이 새 연결로 재접속했을 때 §6 의 `PlayerSessionLease::acquire` 가 "이미 활성 세션 있음" 으로 거절한다 — 자기 자신의 유령에게 막히는 셈이다. **lease 는 그것이 대표하는 실체(활성 연결)가 끝나는 바로 그 지점에서 풀려야 하고, 보관 컨테이너의 수명에 편승시키면 안 된다.**
+lease 반납을 방 소멸까지 미루지 않는 이유는 상대가 남은 방의 `Entry` 가 계속 살기 때문이다. 떠난 플레이어의 lease 가 `Entry` 안에 잔류하면, 그 사람이 새 연결로 재접속했을 때 §6 의 `PlayerSessionLease::acquire` 가 "이미 활성 세션 있음" 으로 거절한다 — 자기 자신의 유령에게 막히는 셈이다. 방 단계에서 더는 사용하지 않는 lease 참조는 일반 퇴장 처리에서 해제한다. 실제 반납 시점은 남은 소유 참조의 수명에도 영향을 받는다.
 
 이 짧은 코드에는 세 가지 방어가 겹쳐 있다. `TcpSocket` owning handle 사본이 락을 푼 뒤에도 fd 수명을 보존하고, `roomInfoVersion`이 stale 스냅샷을 걸러 내며, send gate가 `ROOM_INFO`와 포워딩 프레임의 wire 순서를 보장한다.
 
@@ -2253,7 +2606,10 @@ lease 반납을 방 소멸까지 미루지 않는 이유는 상대가 남은 방
 
 ```cpp
 void RoomRegistry::shutdown() {
-    if (stopping.exchange(true)) return;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (stopping.exchange(true)) return;
+    }
     cv.notify_all();
     // roomLoop_ 들은 stopping 을 보고 자기 소켓을 닫으며 종료한다.
 }
@@ -2639,21 +2995,6 @@ void startPump(Match match, meta::client::MetaClient* meta) {
 **현재 소스 발췌 — `server/relay.cpp`**
 
 ```cpp
-// 랜덤 큐 전용: MATCH_FOUND 이후 양쪽 READY(1) 확인까지 대기하는 로비 루프.
-// 추적되는 worker에서 돌아 matcher를 블록하지 않는다.
-//
-// 규칙:
-//   · READY(1) 두 번 모두 수신 → startForwarding.
-//   · READY(0) / QUEUE_CANCEL / EOF / send 실패 / 30s 타임아웃 → 양측 close.
-//   · 수락 상태는 상대에게 그대로 forward — 클라 UI 에서 "peer ready" 표시용.
-//
-// 주의 — 프레임 소비 정책:
-//   클라이언트는 상대 READY(1) 포워딩을 본 순간 ioThread 로 전환해 곧바로 PING 등
-//   게임 프레임을 송신할 수 있다. 그 바이트는 아직 forwarder 가 recv 하기 전 lobby
-//   스레드 차원의 TCP 버퍼에 쌓일 수 있으므로, 이 함수는 parse_frames(전체 소비)
-//   대신 "한 프레임씩 앞에서 파싱" 방식으로 동작한다. READY/QUEUE_CANCEL 은 직접
-//   처리하고, 그 외 타입을 만나면 더 파싱하지 않고 멈춰 나머지 바이트를
-//   Channel::prefixFromA / prefixFromB 로 forwarder 에게 이관한다.
 void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
     constexpr auto kConfirmTimeout = std::chrono::seconds(30);
     constexpr auto kPollInterval   = std::chrono::milliseconds(10);
@@ -2661,18 +3002,14 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
     constexpr size_t TYPE_FIELD         = 1;
     constexpr size_t CHECKSUM_FIELD     = 4;
     // 페이로드 상한은 net::kMaxPayloadBytes (framing.h) 를 직접 참조한다.
-    // ready 확정 후 forwarder 이관 전까지 쌓일 수 있는 raw 바이트 상한.
-    // 정상 클라이언트는 READY 직후 PING/INPUT 몇 프레임 수준(<1KB)이므로 64KB 면
-    // 충분하다. 상한이 없으면 악성 클라가 30초 동안 회선 속도로 밀어넣어 relay
-    // 메모리를 소모시킬 수 있다.
+    // Bound bytes received between READY and forwarder ownership.
     constexpr size_t kMaxLobbyBufBytes  = 64 * 1024;
 
     bool aReady = false;
     bool bReady = false;
     bool abort  = false;
 
-    // 매치메이킹 큐 폴링 단계에서 이미 recv 된 잔여 바이트를 이어받는다
-    // (PlayerInfo::streamBuf 주석 참조). 없으면 그냥 빈 버퍼.
+    // Continue from bytes already read during matchmaking.
     std::vector<uint8_t> bufA = std::move(match.a.streamBuf);
     std::vector<uint8_t> bufB = std::move(match.b.streamBuf);
 
@@ -2684,9 +3021,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
         return net::tcp_send_all(dst, fr.data(), fr.size());
     };
 
-    // "한 프레임씩 처리" — READY/QUEUE_CANCEL 은 소비하고 action 실행.
-    // 그 외 타입(게임 프레임)을 만나면 즉시 멈춰 버퍼의 현재 상태를 그대로 보존한다.
-    // 반환값: 0=진행 계속, 1=이 사이드 ready 확정, 2=이 사이드 decline/cancel, -1=send 실패.
+    // Return 0=continue, 1=ready, 2=decline, -1=send failure.
     auto consume_ready_frames = [&](std::vector<uint8_t>& buf,
                                      const net::TcpSocket& peer) -> int {
         while (buf.size() >= LEN_FIELD + CHECKSUM_FIELD) {
@@ -2726,8 +3061,14 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
                 continue;
             }
 
-            if (type == (uint8_t)net::MsgType::READY) {
-                const uint8_t v = payloadLen == 0 ? 0 : buf[LEN_FIELD + TYPE_FIELD];
+            // Validate the complete control message before changing consent.
+            const bool isReady = type == (uint8_t)net::MsgType::READY;
+            if ((isReady && (payloadLen != 1 || buf[LEN_FIELD + TYPE_FIELD] > 1)) ||
+                (!isReady && payloadLen != 0)) {
+                return -1;
+            }
+            if (isReady) {
+                const uint8_t v = buf[LEN_FIELD + TYPE_FIELD];
                 buf.erase(buf.begin(), buf.begin() + totalNeeded);
                 if (v == 0) {
                     forward_ready(peer, 0);
@@ -2849,7 +3190,7 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
 
 세 가지를 짚는다.
 
-**한 프레임씩 앞에서 파싱한다.** `parse_frames` 를 쓰지 않는다. `parse_frames` 는 버퍼에 있는 완성 프레임을 **전부** 소비하는데, 클라이언트는 상대의 `READY(1)` 포워딩을 본 순간 곧바로 `ioThread` 를 띄워 첫 `PING` 을 쏜다. 그 `PING` 이 같은 recv 에 묶여 로비 스레드로 들어오면, `parse_frames` 가 그것까지 삼켜버리고 포워더는 영영 받지 못한다. lockstep 첫 틱이 그대로 멈춘다.
+**한 프레임씩 앞에서 파싱한다.** `parse_frames` 를 쓰지 않는다. `parse_frames` 는 버퍼에 있는 완성 프레임을 **전부** 소비하는데, 클라이언트는 상대의 `READY(1)` 포워딩을 본 순간 곧바로 `ioThread` 를 띄워 첫 `PING` 을 쏜다. 그 `PING`이나 게임 입력이 같은 recv에 묶여 로비에 들어왔을 때, 파서가 반환한 나머지 프레임을 호출자가 보관하지 않으면 다음 단계로 전달되지 않는다. 입력을 잃으면 해당 틱의 진행이 막힐 수 있다. 전체 파싱 자체가 손실의 원인은 아니며, 결과와 미완성 꼬리를 모두 인계하는 구현도 가능하다.
 
 그래서 `consume_ready_frames` 는 직접 프레이밍을 돈다. `READY`/`QUEUE_CANCEL` 만 소비하고, 그 외 타입을 만나면 **아무것도 지우지 않고 즉시 반환**한다. 남은 바이트는 `bufA`/`bufB` 에 그대로 있다가 `startForwardingWithPrefix` 로 `Channel::prefixFromA/B` 에 실린다.
 
@@ -2860,11 +3201,29 @@ void queueLobbyThread(Match match, meta::client::MetaClient* meta) {
 - B 가 창을 닫는다 → B 소켓 EOF. **릴레이는 B 를 읽지 않으므로 감지하지 못한다.**
 - A 화면에는 최대 30초 동안 "Opponent: READY" 가 그대로 남는다.
 
-지금은 EOF 를 양쪽에서 감시하고, 끊긴 쪽을 발견하면 상대에게 `READY(0)` 을 보낸 뒤 양 소켓을 닫는다. ready 확정 쪽에서 읽은 raw 바이트도 `bufA`/`bufB` 에 그대로 쌓이므로 prefix 이관 로직은 영향받지 않는다. 파싱만 건너뛸 뿐 recv 는 계속한다.
+현재는 양쪽 EOF를 검사하고, 조건에 따라 상대에게 READY(0) 송신을 시도한 뒤 양쪽을 닫는다. 상대가 수락했으나 본인은 아직 수락하지 않은 상태에서 상대 EOF를 관측하면, 현재 분기는 별도 READY(0) 없이 연결 종료로 알릴 수도 있다. ready 확정 쪽에서 읽은 raw 바이트도 `bufA`/`bufB` 에 그대로 쌓이므로 prefix 이관 로직은 영향받지 않는다. 파싱만 건너뛸 뿐 recv 는 계속한다.
 
-**버퍼 상한 64KiB.** ready 확정 후 포워더 이관까지 쌓이는 raw 바이트를 제한한다. 정상 클라이언트는 그 사이 `PING`/`INPUT` 몇 프레임(1KB 미만)만 보낸다. 상한이 없으면 악성 클라이언트가 30초 동안 회선 속도로 밀어넣어 릴레이 메모리를 소모시킬 수 있다.
+**버퍼 검사 기준 64KiB.** READY 확정 후 포워더 인계까지 쌓이는 원시 바이트가 기준을 넘으면 종료한다. threaded의 직접 TCP 경로는 tcp_recv_some 호출 뒤 검사하므로 한 번의 최대4096바이트 수신만큼 검사 전에 넘어설 수 있다. vector의 capacity, 두 연결의 합계, 커널 버퍼까지 정확히64KiB라는 뜻은 아니다. 일반적인 클라이언트는 이 짧은 구간에 소수의 PING/INPUT을 보낸다. 상한이 없으면 악성 클라이언트가 30초 동안 회선 속도로 밀어넣어 릴레이 메모리를 소모시킬 수 있다.
 
-프레임 페이로드 상한은 로컬 사본 상수가 아니라 `net/framing.h` 가 공개 상수로 승격한 `net::kMaxPayloadBytes` 를 직접 참조한다. 같은 4096 을 파서마다(framing, 로비, 포워더) 따로 적어 두면 언젠가 한 곳만 바뀌어 어긋난다 — **경계 상수는 wire 계약의 일부이므로 계약을 소유한 헤더가 공개하고 나머지는 참조만 해야** drift 가 원천 차단된다.
+프레임 페이로드 상한은 로컬 사본 상수가 아니라 `net/framing.h` 가 공개 상수로 승격한 `net::kMaxPayloadBytes` 를 직접 참조한다. 같은 4096 을 파서마다(framing, 로비, 포워더) 따로 적어 두면 언젠가 한 곳만 바뀌어 어긋난다 — **경계 상수는 wire 계약의 일부이므로 계약을 소유한 헤더가 공개하고 나머지는 참조만 해야** 상수 사본이 서로 달라지는 원인을 줄인다. 길이 계산과 적용 위치의 오류는 별도 검사가 필요하다.
+
+READY는 체크섬 검증 다음에 **정확히 한 바이트이며 값이0 또는1인지** 확인한다.
+QUEUE_CANCEL은 빈 본문만 허용한다. 길이와 값이 틀리면 수락 플래그를 바꾸거나
+상대에게 READY(1)을 알리기 전에 연결 쌍을 종료한다. 체크섬 일치는 전송된 내용의
+응용 규약 유효성이나 송신자 인증을 보장하지 않는다. Reactor 로비도 같은 규약을 적용한다.
+방 대기실 역시 READY의 길이·값을 확인하지만, 방에서0은 준비 해제이고 랜덤 수락
+로비에서0은 매치 거절이다. 상태가 다른 두 단계에 같은 UI 의미를 부여하지 않는다.
+
+수락한 쪽의 뒤따르는 바이트는 파싱하지 않고 인계한다. 따라서 그 뒤에 보낸
+QUEUE_CANCEL을 로비가 재취소로 처리한다고 가정하면 안 된다. 수락 취소를 계속
+지원하려면 게임 입력을 보낼 수 있는 시점과 양쪽의 확정 응답 규약을 함께 바꿔야 한다.
+현재 unknown 타입이 READY 앞에 있으면 threaded 로비는 파싱을 멈추고 마감까지 기다릴 수 있다.
+HTML 기준 상태 기계는 준비 전 다른 타입을 즉시 거절하는 더 엄격한 정책을 사용한다.
+
+30초는 steady_clock 기준 마감이며, 한 번의 검사 순간에 지난 시간이 마감을 넘었는지
+판정한다. 스레드 스케줄링과 송신 대기를 포함해 정확히30초 안에 소켓이 닫힌다는 보장은 아니다.
+양쪽 준비 플래그 확인은 서버의 국소적 결정이며 두 클라이언트가 동시에 화면을 전환하거나
+실제 게임을 끝까지 진행한다는 분산된 보장을 뜻하지 않는다. 전송 실패와 경기 중 EOF는 별도로 처리한다.
 
 ### 10.6 `forwarderLoop`
 
@@ -3009,9 +3368,9 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             // 정상 트래픽에서 send 는 예전처럼 배치당 한 번이다.
             //
             // 늘어난 비용은 정확히 둘이다. (1) 프레임당 헤더 3바이트 읽기,
-            // (2) 이 배치를 streamBuf 로 한 번 복사하는 것(≤4 KiB 선형 복사 —
-            // 잘린 프레임의 꼬리를 다음 읽기까지 이어 붙이려면 누적 버퍼가
-            // 있어야 한다). 프레임마다 도는 일이 아니라 배치마다 한 번이다.
+            // (2) 이 배치를 streamBuf 로 한 번 복사하는 것(일반 TCP recv는 최대4KiB,
+            // 로비 prefix는 더 클 수 있다). 잘린 프레임의 꼬리를 이어 붙이려면 버퍼가
+            // 있어야 한다. 이 복사는 프레임마다가 아니라 배치마다 한 번이다.
             // 위의 숫자는 이 저장소의 기존 측정치이고, 이 구현을 다시 잰
             // 값이 아니다 — 벤치(python/tools/relay_shard_bench.py)는 Linux
             // 전용이라 배포 대상에서 돌려 확인해야 한다.
@@ -3022,19 +3381,19 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             // 한 번에 들어온다.
             streamBuf.insert(streamBuf.end(), raw.begin(), raw.end());
             size_t pos = 0, sent = 0;
-            bool dropRest = false, sendFailed = false;
+            bool invalidBoundary = false, sendFailed = false;
             while (streamBuf.size() - pos >= 2) {
                 const uint8_t* p   = streamBuf.data() + pos;
                 const uint16_t len = static_cast<uint16_t>(p[0]) |
                                      (static_cast<uint16_t>(p[1]) << 8);
                 if (static_cast<size_t>(len) > net::kMaxPayloadBytes + 1u) {
-                    // 랭크드 경로와 같은 정책 — 경계를 믿을 수 없으니 남은
-                    // 바이트를 버린다. 앞의 정상 구간은 이미 보냈다.
+                    // The next recv is not a new frame boundary. End this
+                    // source stream; already accepted output cannot be recalled.
                     RLOG_WARN("[relay] match=" << ch->match_id
                               << " uuid=" << ch->match_uuid
-                              << " dropping over-sized frame (len=" << len
+                              << " closing on over-sized frame (len=" << len
                               << ") from " << (a_to_b ? "A" : "B"));
-                    dropRest = true;
+                    invalidBoundary = true;
                     break;
                 }
                 const size_t total = 2u + static_cast<size_t>(len) + 4u;
@@ -3059,9 +3418,11 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
                 disconnectSide = a_to_b ? 2 : 1;
                 break;
             }
-            if (dropRest)  streamBuf.clear();
-            else if (pos)  streamBuf.erase(streamBuf.begin(),
-                                           streamBuf.begin() + pos);
+            if (invalidBoundary) {
+                disconnectSide = a_to_b ? 1 : 2;
+                break;
+            }
+            if (pos) streamBuf.erase(streamBuf.begin(), streamBuf.begin() + pos);
             continue;
         }
 
@@ -3080,9 +3441,13 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             if (static_cast<size_t>(payloadAndType) > net::kMaxPayloadBytes + 1u) {
                 RLOG_WARN("[relay] match=" << ch->match_id
                           << " uuid=" << ch->match_uuid
-                          << " dropping over-sized frame (len=" << payloadAndType
+                          << " closing on over-sized frame (len=" << payloadAndType
                           << ") from " << (a_to_b ? "A" : "B"));
-                streamBuf.clear();
+                {
+                    std::lock_guard<std::mutex> lock(ch->sumMu);
+                    ch->verified->invalidate();
+                }
+                disconnectSide = a_to_b ? 1 : 2;
                 break;
             }
 
@@ -3163,6 +3528,8 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
             streamBuf.erase(streamBuf.begin(), streamBuf.begin() + totalNeeded);
         }
 
+        if (disconnectSide != 0 && !sendFailed) break;
+
         // 양쪽 MATCH_SUMMARY 모두 모였다면 finalize. (매 루프 체크 — 가벼움)
         // sendFailed 로 빠져나가기 "직전"에도 반드시 수행한다 — 양 방향이 거의
         // 동시에 send 실패로 죽는 타이밍에는, 이 배치에서 마지막 요약을 방금
@@ -3217,19 +3584,43 @@ void forwarderLoop(std::shared_ptr<Channel> ch, bool a_to_b)
 
 대가가 없지는 않다. 잘린 프레임의 꼬리를 다음 읽기까지 들고 있어야 하므로(경계를 모르면 거를 수 없다) 세그먼트 경계에 걸린 프레임은 예전보다 한 번 늦게 나간다. 랭크드 경로가 이미 그렇게 동작하고 있고 락스텝 프레임은 수십 바이트라 한 세그먼트에 통째로 들어오는 것이 보통이다. **거르지 않는 빠른 경로는 "빠르다" 가 아니라 "신뢰 경계가 없다" 다.**
 
-**위반한 프레임만 버리고 연결은 살린다.** 반칙한 쪽을 끊고 싶은 충동이 자연스럽지만, 포워딩은 양방향이라 여기서 연결을 끊으면 위조한 쪽만이 아니라 **상대의 경기까지 함께 끝난다.** 한 사람의 반칙으로 무관한 사람의 판을 깨는 것은, 이 프레임들을 막아서 지키려던 것과 정확히 같은 손해다. 그리고 프레임이 아무 데도 안 가면 공격자가 얻는 것도 없다.
+**경계가 유효한 서버 전용 타입은 해당 프레임만 버린다.** 반칙한 쪽을 끊고 싶은 충동이 자연스럽지만, 포워딩은 양방향이라 여기서 연결을 끊으면 위조한 쪽만이 아니라 **상대의 경기까지 함께 끝난다.** 한 사람의 반칙으로 무관한 사람의 판을 깨는 것은, 이 프레임들을 막아서 지키려던 것과 정확히 같은 손해다. 해당 프레임이 상대에게 도달하는 것을 막지만, 송신량·파싱 비용·연결 점유에 대한 별도 제한은 여전히 필요하다.
 
 **그리고 위반 로그는 방향당 한 줄만 남긴다.** 프레임마다 찍으면 위조 프레임을 쏟아붓는 것만으로 다른 모든 로그를 밀어낼 수 있다. 그건 이 결함을 고치면서 새로 만드는 또 하나의 값싼 공격이다. 보안 검사를 추가할 때 그 검사가 만드는 **로그·메트릭·알림의 양이 공격자가 정하는 값이 되지 않는지** 함께 봐야 한다 — 이 함정은 로그에서만 나오는 것이 아니라, 실패마다 이메일을 보내거나 캐시를 무효화하는 모든 방어 코드에서 같은 모양으로 나온다.
 
 **both 체크는 `sendFailed` 로 빠져나가기 전에 온다.** 마지막 요약을 방금 가로챈 그 배치에서 송신이 실패하면, `break` 를 먼저 하는 배치 구조에서는 어느 방향도 루프를 한 바퀴 더 돌지 못해 두 요약이 다 있는데도 정상 확정이 생략되고 disconnect 경로로 흘러가는 경합이 있었다. finalize 를 배치 처리 직후·탈출 판정 직전에 두면 "관측한 정보는 소켓이 닫히기 전에 소진한다" 가 코드 순서로 보장된다. `finalizeForfeit`도 같은 서버 판정 확정 함수에 위임하므로 정확성은 겹으로 지켜지지만, 살아 있는 소켓으로 `MATCH_RESULT` 를 보내려면 여기가 먼저여야 한다.
 
-**방향별 idle 15초.** `tcp_recv_some` 이 빈 결과만 주는 상태가 15초를 넘으면 그 방향을 실패로 보고 끊는다. FIN/RST 없이 사라진 모바일 peer 나 반쪽 열린 연결이 매치 슬롯을 무기한 점유하는 것을 막는 애플리케이션 계층의 확정 장치다. 정상 lockstep 은 매 틱 `INPUT`/`PING` 을 흘리므로 15초 무활동은 게임이 이미 죽었다는 뜻이다. TCP keepalive(§13.2)와의 역할 분담도 그곳에서 정리한다.
+**프레임 경계를 잃으면 연결을 끝낸다.** 선언 길이가 net::kMaxPayloadBytes+1을
+넘으면 현재 버퍼만 지우고 다음 recv를 새 헤더로 취급해서는 안 된다. TCP 수신 경계에는
+프로토콜 재동기화 의미가 없기 때문이다. 두 relay 모두 해당 소스를 닫으며, ranked 경로는
+검증 상태도 invalidate한다. 앞서 상대 소켓에 수락된 바이트는 되돌릴 수 없다.
+서버 전용 타입 하나를 거르는 정책과 길이를 신뢰할 수 없는 스트림을 종료하는 정책을 구별한다.
 
-**방향별 64KiB/s 상한.** 프레임 크기 상한만으로는 부족하다 — 4KB 이하 프레임도 회선 속도로 반복하면 릴레이 대역폭과 상대 클라이언트의 파싱 CPU 를 태울 수 있다. 그래서 1초 창에서 받은 raw byte 를 합산해 64KiB 를 넘긴 방향을 끊는다. 두 경계 모두 **읽은 쪽(from)을 실패자로 기록한다** — flood 를 일으킨 송신자와 침묵한 쪽이 벌점을 받는 방향이고, 송신(`sendTo*`) 실패만은 목적지 소켓이 죽은 것이므로 반대쪽을 기록한다.
+**방향별 idle 15초.** 실제 수신 진행이 없고 현재 시각이 lastActivity보다15초 이상
+지났음을 루프에서 관측하면 종료한다. 이는 경기의 무응답 허용 정책이다. 상대가 물리적으로
+고장 났다는 증명은 아니며, 송신 대기와 스케줄링으로 종료 관측이 늦어질 수도 있다.
+TCP keepalive와 애플리케이션의 대기 정책은 서로 다른 계층에 있다.
 
-**한쪽이 끊기면 반대쪽도 닫힌다.** `ForwarderCompletion` 이 `closed = true` 를 세우고, 반대 방향 루프는 다음 iteration 상단의 `!ch->closed.load()` 에서 빠져나온다. 그쪽 소멸자에서 `forwarder_count` 가 0이 되어 몰수패 판정 후 양 소켓을 닫는다. 종료 트리거가 단일 소스다.
+**방향별 수신량 검사.** 각 방향의1초 구간에서 읽은 바이트가64KiB를 넘으면 종료한다.
+고정된 구간을 갱신하는 방식이므로 임의의 연속1초 구간에 항상64KiB 이하라는 보장은 아니다.
+소스의 EOF·수신 제한·잘못된 길이는 from을, 목적지 송신 실패는 to를 진단 대상으로 기록한다.
+이 값은 네트워크 실패 관측 위치이며 공격 의도나 승패의 증거가 아니다.
 
-**idle 시 1ms 슬립.** `tcp_recv_some` 이 빈 결과를 주면 1ms 잔다. 60Hz lockstep 에서 프레임 간격이 16ms 이므로 지연 기여는 무시할 수준이고, 바쁜 대기로 코어를 태우지도 않는다.
+**한 방향 종료와 마지막 소유자의 정리.** ForwarderCompletion은 closed를 세우고
+두 worker의 카운터를 줄인다. 나머지 worker는 자신의 다음 검사에서 closed를 관측한다.
+마지막 completion이 결과 확정 함수를 호출하고 양쪽 소켓을 정리한다. finalizeForfeit라는
+이름이 남아 있지만, 실제 저장 여부와 승패는 서버 검증 결과에 따르며 단절만으로 상대의
+승리를 만들어 내지 않는다. 운영 종료는 별도 stopping 분기로 처리한다.
+
+**진행 중인 호출은 즉시 중단되지 않는다.** atomic closed는 정지 요청이다. 다른 방향이
+송신이나 외부 작업 안에 있으면 그 호출이 반환해야 다음 검사에 도달한다. 이 경로의 직접
+TCP 송신에는 전체5초 마감이 있지만 스케줄러 지연까지 포함한 실시간 보장은 아니다.
+방향마다 읽는 루프는 하나이고, 같은 목적지에 결과 알림과 게임 바이트를 보낼 수 있으므로
+목적지별 sendMu는 부분 송신들이 서로 섞이지 않도록 유지한다.
+
+**idle 시1ms 양보.** 빈 수신 결과 뒤 sleep_for(1ms)를 호출해 바쁜 폴링을 줄인다.
+잠든 시간과 재스케줄 시각은 정확히1ms로 고정되지 않는다. GUI의 프레임 주기와 비교한
+체감 지연은 실제 부하와 OS에서 따로 판단해야 한다.
 
 ### 10.7 종료 프로토콜
 
@@ -3267,7 +3658,7 @@ bool isShuttingDown()
     bool QueueJoin(const std::string& host, uint16_t port,
                    uint32_t start_tick = 120, uint8_t input_delay = 2,
                    const std::string& auth_token = {});
-    // 매칭 대기 중 취소. 소켓을 닫아 큐 스레드를 즉시 해제.
+    // 매칭 취소를 요청한다. 워커 join과 소유 핸들 해제는 Close에서 완료한다.
     void QueueCancel();
 
     // 랜덤 큐 수락 로비 (MATCH_FOUND 수신 이후 ~ 게임 시작 직전).
@@ -3309,7 +3700,7 @@ bool isShuttingDown()
     }
 ```
 
-설계 원칙이 하나다: **메인 스레드를 절대 블록하지 않는다.** 게임 루프는 60Hz 로 돌아야 하므로 "릴레이에 접속하고 상대를 기다리는" 동안 `tcp_connect` 나 `recv` 에서 멈출 수 없다. 그래서 모든 릴레이 진입점은 전용 스레드를 띄우고 즉시 반환하며, 호출부는 `isReady()`/`hasFailed()`/`roomState()`/`isQueueMatched()` 를 매 프레임 폴링한다. 룸 상태 전이는 `roomThread`의 `ROOM_INFO` 처리와 함께 읽는다.
+연결·대기 작업은 전용 스레드로 옮겨 게임 루프가 상태를 관찰하게 한다. 호출부는 `isReady()`/`hasFailed()`/`roomState()`/`isQueueMatched()`를 매 프레임 폴링한다. 다만 취소·종료에서의 join과 거절·퇴장 프레임의 동기 송신은 호출자인 main을 기다리게 할 수 있다. 모든 공개 호출이 즉시 반환한다는 계약으로 일반화하지 않는다. 룸 상태 전이는 `roomThread`의 `ROOM_INFO` 처리와 함께 읽는다.
 
 ### 11.2 큐 진입점 네 개
 
@@ -3319,7 +3710,7 @@ bool isShuttingDown()
 bool Session::QueueJoin(const std::string& host, uint16_t port,
                         uint32_t start_tick, uint8_t input_delay,
                         const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable()) return false;
+    if (hasUnjoinedWorkers()) return false;
 
     // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
     quit = false;
@@ -3334,8 +3725,8 @@ bool Session::QueueJoin(const std::string& host, uint16_t port,
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     queueMatched_.store(false);
     queueLocalReady_.store(false);
     queuePeerReady_.store(false);
@@ -3467,7 +3858,7 @@ void Session::queueThread(std::string host, uint16_t port,
             return;
         }
         std::vector<Frame> frames;
-        parse_frames(buf, frames);
+        if (!parseReceived(buf, frames)) return;
         // MATCH_FOUND 뒤에 같은 recv 에 실린 프레임을 다음 단계(로비)로 넘기기 위한 보존 버퍼.
         // build_frame 은 동일 payload 에 대해 bit-identical 재생산되므로 체크섬 포함 복원 가능.
         std::vector<uint8_t> preserve;
@@ -3557,7 +3948,7 @@ void Session::queueThread(std::string host, uint16_t port,
             return;
         }
         std::vector<Frame> frames;
-        parse_frames(buf, frames);
+        if (!parseReceived(buf, frames)) return;
         bool peerDeclined = false;
         // 로비 외 프레임(INPUT/PING/HASH 등)은 재직렬화해 recvBuf 에 바로 적재한다.
         // 릴레이는 양쪽 READY 를 본 순간부터 게임 바이트 포워딩을 시작하므로, 상대
@@ -3628,7 +4019,7 @@ void Session::queueThread(std::string host, uint16_t port,
 bool Session::RoomCreate(const std::string& host, uint16_t port,
                          uint32_t start_tick, uint8_t input_delay,
                          const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
+    if (hasUnjoinedWorkers()) return false;
     quit = false;
     connectionFailed = false;
     connected = false;
@@ -3638,8 +4029,8 @@ bool Session::RoomCreate(const std::string& host, uint16_t port,
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     roomState_.store(RoomState::Connecting);
     roomPeerCount_.store(0);
     { std::lock_guard<std::mutex> lk(roomMu_); roomCode_.clear(); }
@@ -3653,7 +4044,7 @@ bool Session::RoomJoin(const std::string& host, uint16_t port,
                        const std::string& code,
                        uint32_t start_tick, uint8_t input_delay,
                        const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
+    if (hasUnjoinedWorkers()) return false;
     if (code.empty() || code.size() > 255) return false;
     quit = false;
     connectionFailed = false;
@@ -3664,8 +4055,8 @@ bool Session::RoomJoin(const std::string& host, uint16_t port,
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     roomState_.store(RoomState::Connecting);
     roomPeerCount_.store(0);
     { std::lock_guard<std::mutex> lk(roomMu_); roomCode_ = code; }
@@ -3804,7 +4195,10 @@ void Session::roomThread(std::string host, uint16_t port,
         }
 
         std::vector<Frame> frames;
-        parse_frames(buf, frames);
+        if (!parseReceived(buf, frames)) {
+            roomState_.store(RoomState::Failed);
+            return;
+        }
         bool matchFound = false;
         for (auto& f : frames) {
             if (f.type == MsgType::ROOM_INFO) {
@@ -4121,7 +4515,7 @@ sequenceDiagram
 |---|---|---|---|
 | `kMaxConnWorkers` | 256 | `server/main.cpp` | connect 플러딩으로 인한 스레드/핸들 고갈 |
 | `kMaxHandshakesPerIp` | 16 | `server/ip_admission.h` | 한 IP가 *인증 중인* 연결로 입장 경로를 독점하는 공격 |
-| `kMaxSessionsPerIp` | 64 (기본값, `--max-sessions-per-ip`) | `server/ip_admission.h` | 한 IP가 *인증을 마친* 연결로 서버를 독식하는 것 |
+| `kMaxSessionsPerIp` | 64 (기본값, `--max-sessions-per-ip`) | `server/ip_admission.h` | accept부터 최종 반납까지 한 IP의 동시 세션 점유 |
 | `kMaxRelayWorkers` | 512 | `server/relay.cpp` | 로비/포워더 스레드 무한 생성 |
 | `kJoinTimeout` | 5초 | `server/player_conn.cpp` | 첫 프레임을 안 보내는 연결 점유 |
 | `kMaxCodeLen` | 5 | `server/player_conn.cpp` | 과대 룸 코드로 인한 로그 오염·조회 비용 |
@@ -4140,9 +4534,20 @@ sequenceDiagram
 
 프레임 크기와 전송률은 서로 다른 경계다. 4KB 이하 프레임도 회선 속도로 반복하면 릴레이 대역폭과 상대 CPU를 소모시킬 수 있으므로 `forwarderLoop`가 방향별 1초 창에서 받은 raw byte를 합산한다. 64KiB를 넘긴 방향은 공격 또는 고장으로 보고 끊는다. 정상 60Hz INPUT/PING/CHAT 트래픽에는 넉넉하지만 파일 전송용 프로토콜로 확장할 때는 메시지 종류별 token bucket으로 바꿔야 한다.
 
-**상한에 걸린 연결에 사유를 알려 주는가**는 바이너리마다 다르다. 이 장의 `tetris_relay` 는 소켓을 그냥 닫는다. 실제 배포 대상인 이벤트 루프 릴레이는 닫기 직전에 `SERVER_REJECT`(타입 21) 프레임으로 사유 코드를 먼저 내려보내고, 프로세스 전체 예산 몇 가지를 더 갖는다 — 그 계약과 근거는 [Part 6](./part6-lockstep-networking.md) 과 [Part 14](./part14-event-loop-scaling.md) 에 있다. 표의 값 자체는 두 바이너리가 공유하므로 여기서 정한 경계가 그대로 배포에 적용된다.
+**예산의 단위를 구분한다.** 동시 핸드셰이크16은 지금 입장 처리 중인 수이고,
+초당16회라는 뜻이 아니다. 세션64는 인증 전후를 통틀어 같은 IP가 붙들 수 있는 소유
+슬롯 수다. 핸드셰이크를 빨리 끝내는 접속은 짧은 시간에 여러 번 이 예산을 재사용할 수
+있으므로 요청 빈도·CPU 작업량은 별도 정책으로 제한해야 한다. NAT 뒤 정상 사용자도
+하나의 IP 예산을 공유하며, 여러 IP를 쓰는 행위자는 여러 예산을 얻을 수 있다.
 
-TCP keepalive도 모든 accept/connect 소켓에 켠다. POSIX에서는 idle 15초, probe 간격 5초, 3회 실패를 요청한다. Windows는 기본 KeepAliveTime이 2시간이라 `SO_KEEPALIVE`만으로는 "FIN/RST 없이 사라진 peer 감지"가 사실상 동작하지 않으므로, `SIO_KEEPALIVE_VALS`로 같은 15초/5초를 명시해 두 플랫폼의 감지 시간을 맞춘다. 어느 쪽이든 애플리케이션 포워더의 15초 무활동 제한이 더 빠르게 게임 의미의 단절을 확정한다. keepalive는 NAT·커널 수준의 죽은 연결 회수이고 애플리케이션 제한은 매치 정책이므로 둘은 대체 관계가 아니다.
+**연결 워커 수와 연결 수는 다르다.** 큐에 들어간 연결은 연결 워커가 반환한 뒤에도
+살아 있다. 방 reader, 수락 로비, 게임 포워더도 각각 다른 수명을 가진다.512 relay
+워커만 보고 프로세스 전체의 연결 수가512라고 계산하지 않는다. 대기 큐에는 별도로
+kMaxWaiting=1024 상한이 있으며 Reactor의 --max-conns는 또 다른 계수 범위를 가진다.
+
+**상한에 걸린 연결에 사유를 알려 주는가**는 바이너리마다 다르다. 이 장의 `tetris_relay` 는 소켓을 그냥 닫는다. 실제 배포 대상인 이벤트 루프 릴레이는 닫기 직전에 `SERVER_REJECT`(타입 21) 프레임으로 사유 코드를 먼저 내려보내고, 프로세스 전체 예산 몇 가지를 더 갖는다 — 그 계약과 근거는 [Part 6](./part6-lockstep-networking.md) 과 [Part 14](./part14-event-loop-scaling.md) 에 있다. 이 표는 threaded relay의 해당 상수를 기준으로 읽는다. 공유 헤더의 제한과 구현별 전송률·타이머·큐 예산은 구별해야 하며, 이벤트 루프 배포 옵션은 그 구현의 정의와 함께 확인한다.
+
+TCP keepalive도 모든 accept/connect 소켓에 켠다. POSIX에서는 idle 15초, probe 간격 5초, 3회 실패를 요청한다. Windows는 기본 KeepAliveTime이 2시간이라 `SO_KEEPALIVE`만으로는 "FIN/RST 없이 사라진 peer 감지"가 사실상 동작하지 않으므로, `SIO_KEEPALIVE_VALS`로 같은 15초/5초를 명시해 두 플랫폼의 감지 시간을 맞춘다. 실제 감지 순서는 OS 타이머와 애플리케이션 스케줄링에 따라 달라진다. 포워더의15초 무활동 정책은 경기 대기의 허용 시간을 정한다. keepalive는 NAT·커널 수준의 죽은 연결 회수이고 애플리케이션 제한은 매치 정책이므로 둘은 대체 관계가 아니다.
 
 ### 13.3 인증 중복, meta 장애, 갑작스러운 단절
 
@@ -4157,13 +4562,19 @@ public:
     static std::shared_ptr<PlayerSessionLease> acquire(int64_t player_id)
     {
         if (player_id <= 0) return {};
+        // An unregistered candidate can be destroyed without touching active_.
+        // Allocate its object/control block before committing the set entry.
+        auto candidate = std::shared_ptr<PlayerSessionLease>(
+            new PlayerSessionLease(player_id));
         std::lock_guard<std::mutex> lk(mu_);
         if (!active_.insert(player_id).second) return {};
-        return std::shared_ptr<PlayerSessionLease>(new PlayerSessionLease(player_id));
+        candidate->registered_ = true;
+        return candidate;
     }
 
     ~PlayerSessionLease()
     {
+        if (!registered_) return;
         std::lock_guard<std::mutex> lk(mu_);
         active_.erase(player_id_);
     }
@@ -4175,12 +4586,13 @@ private:
     explicit PlayerSessionLease(int64_t player_id) : player_id_(player_id) {}
 
     int64_t player_id_;
+    bool registered_ = false;
     inline static std::mutex mu_;
     inline static std::unordered_set<int64_t> active_;
 };
 ```
 
-집합에 `insert` 성공한 쪽만 객체를 얻고, 소멸자가 집합에서 지운다 — lease 의 존재 자체가 곧 등록이므로 "해제를 잊는" 경로가 타입 수준에서 없다. `player_id <= 0`(unranked) 은 빈 `shared_ptr` 를 돌려주는데, §6 의 `authenticate` 는 meta 미연동일 때 lease 검사를 아예 하지 않으므로 unranked 입장은 막히지 않는다.
+객체와 shared_ptr 제어 블록을 먼저 만든 뒤 집합에 insert한다. 등록 성공 때만 registered_를 세우고 소유 핸들을 반환한다. 미등록 후보의 소멸자는 집합을 건드리지 않으므로, 중복 요청이나 할당 실패가 다른 참가자의 등록을 지우지 않는다. 마지막 등록 소유자의 소멸자가 집합에서 지운다. `player_id <= 0`(unranked) 은 빈 `shared_ptr` 를 돌려주는데, §6 의 `authenticate` 는 meta 미연동일 때 lease 검사를 아예 하지 않으므로 unranked 입장은 막히지 않는다.
 
 현재 relay는 오프라인 인증 캐시를 사용하지 않는다. 60초·1회용 입장권을 meta에서
 원자적으로 소비해야 한다. meta 장애를 최근 인증 기록으로 우회하면 폐기된 키와 사용한
@@ -4215,7 +4627,7 @@ void finalizeForfeit(Channel& ch, int disconnectSide)
 - 서버 자체 종료는 운영 작업을 기권으로 보지 않고 기존 종료 drain을 따른다.
 
 요약 두 장이 일치하거나 남아 있는 사람이 승리를 주장하는 것은 실제 승리의 증명이
-아니다. Part 18은 이 신뢰 경계를 없앤 공통 검증기와 정확한 제한을 설명한다.
+아니다. Part 18은 자기 신고 대신 규칙을 재현하는 공통 검증기와 입력 제한을 설명한다.
 모든 저장 경로는 같은 UUID를 사용해 meta의 중복 지급 차단에 연결한다.
 
 **현재 소스 발췌 — `server/match_uuid.h`**
@@ -4251,7 +4663,7 @@ inline std::string new_match_uuid()
 }
 ```
 
-부팅 난수·고해상도 시각·단조 카운터를 섞어 finalizer 해시로 펴므로 프로세스 재시작을 가로질러도 충돌하지 않는 32자리 hex 가 나온다. 첫 줄 주석이 위협 모델을 못 박는다 — 이 값은 **식별자이지 인증 비밀이 아니다**. `MATCH_FOUND` 로 양쪽 클라이언트에 공개되므로 예측 불가능성이 보안 속성일 필요가 없고, 요구 속성은 유일성뿐이다. 룸 코드(§8.2)가 사실상 인증 수단이라 예측 차단이 필요했던 것과 대비되는 지점이다.
+부팅 난수·고해상도 시각·단조 카운터를 섞어 32자리 hex 키를 만든다. 재시작 간 중복 가능성을 낮추려는 설계이며, 저장소의 unique 제약과 충돌 처리는 계속 필요하다. 첫 줄 주석이 위협 모델을 못 박는다 — 이 값은 **식별자이지 인증 비밀이 아니다**. `MATCH_FOUND` 로 양쪽 클라이언트에 공개되므로 예측 불가능성이 보안 속성일 필요가 없고, 요구 속성은 유일성뿐이다. 룸 코드(§8.2)는 방을 찾는 짧은 주소다. 현재 입장 규약에서 코드 추측이 접근으로 이어질 수 있으므로 난수원·추측 예산을 적용하지만, 강한 인증 토큰으로 취급하지 않는다.
 
 ### 13.4 지연
 

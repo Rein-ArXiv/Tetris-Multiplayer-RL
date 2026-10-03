@@ -1,0 +1,484 @@
+{
+  "id": "lesson-59",
+  "title": "이미지 디코딩: 파일 형식에서 RGBA로",
+  "shortTitle": "파일·채널·디코더 소유권",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: RGBA 배열로 만든 아이콘을 Texture에 올리고 고정 사각형에서 표시합니다.",
+  "finish": "완료: PNG/JPEG 파일을 제한된 입력으로 읽고 RGBA를 소유한 뒤, 같은 Texture 경로로 게임에 표시합니다.",
+  "objective": "파일과 픽셀 크기·채널 수·행 배치를 구별하고, 디코딩 실패와 할당 예외에서도 소유권을 유지하는 로더를 구현합니다.",
+  "prerequisites": [
+    "RGBA8 뷰와 동기 텍스처 업로드",
+    "vector·optional·unique_ptr와 지역 객체의 수명",
+    "정수 범위 검사와 번역 단위"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek BGRA 행 helper 초안의 정수 경계와 주석 검토; stb/GDI+ 계약 및 실제 decode_image와 대조",
+    "draftJob": "out/learning-jobs/059-row-events.jsonl",
+    "corrections": [
+      "채널 이동 주석 교정",
+      "최종 출력 크기 정책과 총 디코더 작업 메모리 구별",
+      "원본 성분 수와 요청 출력 수, 메타데이터 성공과 전체 복원 성공 구별"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED55/SDL56CTest, -Wall -Wextra -Wpedantic 빌드 경고0, player PNG 데모 8×8/source4/RGBA256",
+    "PNG RGB/RGBA/gray 정확 바이트, JPEG ±2, 알파 보존, 입력 덮어쓰기 후 소유 결과 유지, 확장자/한글 경로/빈 파일/파일 및 출력 제한/손상 입력 검사",
+    "실제 stb 할당 추적과 vector 24바이트 할당 bad_alloc 주입: 임시 할당0, allocation 반환 및 다음 성공; UBSan",
+    "실제 루트 decode_image 함수 추출: 수정 전 copy bad_alloc에서 임시 픽셀 누수 재현, 수정 후 해제/출력 보존/실패 및 정상 커밋 확인 (stb 대역)",
+    "실제 image_rows helper UBSan: 3952 signed/padded BGRA 행 배치, alpha 및 계산 실패 시 출력 보존; R/B 교환 누락 mutation 거부",
+    "BitmapReadLock 실제 구조체 추출과 GDI+ 대역: 미획득/명시해제/예외/해제실패에서 해제 시도 정확히 한 번; Windows SDK 실행 증거와 구별",
+    "SDL offscreen llvmpipe LLVM21.1.8: PNG decoded badge의 세 Layout 9216/9025/5184픽셀과 바깥 보존, hostile unpack 3×2 픽셀 복사 검사",
+    "root 클라이언트 빌드/16CTest 및 sim_hash_dump 기존 골든 동일",
+    "수동 GUI/모니터/타OS 네이티브 실행 미검증; 준비한 파일 코퍼스와 할당 실패 검사이며 전체 포맷 퍼징/실제 GPU OOM 검사가 아님"
+  ],
+  "recap": {
+    "points": [
+      "RGBA8 뷰는 픽셀 배열을 빌리고 Texture는 GPU 저장소를 소유합니다.",
+      "업로드는 입력 형식과 unpack 상태를 맞추고 성공한 자원만 공개합니다.",
+      "픽셀의 첫 행과 사각형의 UV 연결이 표시 방향을 결정합니다."
+    ],
+    "bridge": "이 픽셀 계약 앞에 파일 읽기와 디코딩을 붙여 콘텐츠를 데이터로 공급합니다."
+  },
+  "sections": [
+    {
+      "title": "그림 파일을 입력으로 바꾸고 표시 계약은 유지한다",
+      "body": "아이콘의 색을 C++ 배열에 직접 쓰면 콘텐츠를 바꿀 때 프로그램도 다시 빌드해야 합니다. 이제 `assets/player.png`를 읽어 같은 8×8 아이콘을 만듭니다. 그림을 읽는 일은 시작할 때 한 번만 수행하고, 렌더 루프는 완성된 텍스처를 계속 사용합니다.\n\n입력 파일에서 화면까지는 네 종류의 자료가 지나갑니다. 압축된 파일 바이트, CPU의 RGBA 픽셀, GPU의 텍스처, 화면에 놓인 사각형입니다. 각 단계에서 소유자와 크기의 의미가 바뀝니다. 파일을 읽고 픽셀을 복원하는 **디코딩(decoding)**은 CPU 책임으로 두고, 성공한 픽셀만 Texture에 넘깁니다.\n\n누적 게임의 규칙·배치·입력은 그대로 두며 절차적으로 만들던 픽셀의 공급원을 파일로 교체합니다.",
+      "codes": [
+        {
+          "label": "자료와 소유자의 이동",
+          "language": "text",
+          "text": "파일 ─읽기─▶ vector<바이트> ─디코딩─▶ Image.pixels\n     파일 스트림 소유         디코더 임시 메모리 → vector로 복사\nImage.view() ─동기 upload─▶ Texture ─Quad.draw─▶ 화면\n  CPU 메모리 빌림             GPU 자원 소유"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "static bool decode_image(",
+        "invariant": "파일 형식 해석으로 CPU RGBA를 만들고 성공한 결과만 넘긴다.",
+        "mayDiffer": "루트는 OS별 디코더와 bool 출력 인자를 사용하고, 학습 코드는 PNG/JPEG 전용 Result와 명시적 크기 정책을 사용한다.",
+        "omitted": "색상 프로필 처리·애니메이션 이미지·디코더 자체 구현은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "파일의 길이와 픽셀의 길이는 서로 다른 값이다",
+      "body": "폭 3·높이 2의 RGB 원본에는 색상 성분이 `3×2×3=18`개 있습니다. RGBA8로 변환한 출력은 `3×2×4=24`바이트입니다. 디스크에 저장된 PNG의 길이는 이 둘과 다를 수 있습니다. 파일에는 시그니처·크기·압축 자료·검사 값 같은 형식 정보도 들어갑니다.\n\nPNG는 보통 행의 인접 픽셀 관계를 이용하는 필터를 거친 뒤 압축합니다. 디코더는 압축 해제와 필터 역변환을 거쳐 샘플을 복원하고, 필요한 채널 변환을 수행합니다. 무손실이라는 성질은 저장된 샘플을 복원한다는 뜻입니다. 16비트 입력을 8비트로 요청하는 등 출력 형식을 바꾸면 표현 정밀도가 달라질 수 있습니다.\n\nJPEG는 일반적으로 색 공간 변환·블록 변환·양자화 등을 거친 손실 압축 자료입니다. 그래서 PNG 픽셀은 정확한 값으로 비교할 수 있지만, JPEG를 원래 RGB와 비교하는 시험에는 인코딩 손실과 반올림을 고려합니다. 디코더 내부 알고리즘은 라이브러리에 맡기고 우리 코드는 입력 범위와 출력 형식을 관리합니다.",
+      "codes": [
+        {
+          "label": "8×8 아이콘의 출력 크기",
+          "language": "text",
+          "text": "width = 8, height = 8, output_channels = 4\noutput_bytes = 8 × 8 × 4 = 256\nencoded_bytes = 실제 PNG 파일 길이"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "확장자와 실제 형식",
+          "body": "파일 이름의 .png는 사람이 형식을 짐작하는 단서입니다. 디코더는 실제 바이트의 형식을 판별합니다. PNG 바이트를 가진 .txt도 이 로더에서 읽힐 수 있습니다. 이 동작과 업로드 서비스의 파일명 정책은 별도로 정합니다."
+        }
+      ]
+    },
+    {
+      "title": "디코더를 한 번역 단위의 의존성으로 둔다",
+      "body": "`stb_image.h`는 선언과 구현을 한 헤더에 담은 라이브러리입니다. `STB_IMAGE_IMPLEMENTATION`을 정의한 cpp에서 구현을 생성하고, 나머지 코드는 우리 `image_decode.h`만 포함합니다. 여러 cpp에서 구현 매크로를 정의하면 같은 외부 함수 정의가 중복될 수 있습니다.\n\n학습 빌드에서는 PNG/JPEG만 활성화하고 파일 I/O는 직접 담당합니다. 그래서 `STBI_NO_STDIO`를 지정하고 메모리 입력 API를 호출합니다. 라이브러리의 모든 형식을 지원하는 선택과 필요한 형식만 포함하는 선택 중 후자를 택해 계약의 범위를 줄입니다.\n\n헤더는 체크포인트의 third_party에 고정해 두고 빌드 중 네트워크에서 가져오지 않습니다. 함께 둔 README에 버전·내용 해시·출처가 있으며 헤더 끝의 MIT/public-domain 라이선스 원문을 보존합니다. 라이브러리를 갱신할 때는 해시와 픽셀·실패 검사를 함께 갱신합니다.",
+      "codes": [
+        {
+          "label": "image_decode.cpp의 구현 설정",
+          "language": "cpp",
+          "text": "#define STBI_ONLY_PNG\n#define STBI_ONLY_JPEG\n#define STBI_NO_STDIO\n#define STBI_MAX_DIMENSIONS 8192\n#define STB_IMAGE_IMPLEMENTATION\n#include <stb_image.h>"
+        },
+        {
+          "label": "프로젝트 경계에 한 번 링크한다",
+          "language": "cmake",
+          "text": "add_library(study_image STATIC renderer/image_decode.cpp)\ntarget_compile_features(study_image PUBLIC cxx_std_17)\ntarget_include_directories(study_image PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_include_directories(study_image SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)\ntarget_link_libraries(tetris PRIVATE study_image)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "SYSTEM include의 의미",
+          "body": "SYSTEM은 외부 헤더를 컴파일러의 시스템 헤더 경로로 취급하게 합니다. 경고 처리에 영향을 줄 수 있지만 파일의 신뢰성이나 실행 안전성을 보증하는 설정은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "성공한 이미지가 픽셀을 소유하게 한다",
+      "body": "`Image`는 크기와 원본 성분 수, 변환된 픽셀 벡터를 함께 소유합니다. `view()`는 그 저장소의 주소와 길이를 빌려 Texture에 전달합니다. 뷰의 수명은 소유 객체보다 길 수 없고, 벡터를 재할당하면 이전 주소도 더는 사용할 수 없습니다.\n\n`Result`는 이미지가 있으면 성공이고 없으면 Error로 실패 이유를 알려줍니다. 두 필드의 조합은 성공일 때 image 있음/none, 실패일 때 image 없음/오류로 맞춥니다. 호출자는 bool로 성공을 확인한 다음에만 image를 읽습니다.\n\nsource_channels는 진단용 원본 성분 수입니다. pixels의 원소 수를 계산할 때는 출력 계약인 4를 씁니다.",
+      "codes": [
+        {
+          "label": "픽셀 소유와 결과 타입",
+          "language": "cpp",
+          "text": "enum class Error { none, invalid_input, encoded_limit, file_io,\n                   decode_failed, dimensions, allocation };\nconst char* error_text(Error error) noexcept;\nstruct Image {\n    int width=0, height=0, source_channels=0;\n    std::vector<std::uint8_t> pixels;\n    study_texture::RgbaView view() const noexcept {\n        return {pixels.data(),pixels.size(),width,height};\n    }\n};\nstruct Result {\n    std::optional<Image> image;\n    Error error=Error::none;\n    explicit operator bool() const noexcept { return image.has_value(); }\n};\n// Input bytes must stay readable and unchanged throughout the call.\n// PNG/JPEG only; output is top-down tightly packed RGBA8 with straight alpha.\n// Limits bound accepted input/output, not total decoder working memory or time."
+        },
+        {
+          "label": "공개 계약 전체",
+          "language": "cpp",
+          "file": "checkpoints/59-image-decode/renderer/image_decode.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "static bool decode_image(",
+        "invariant": "파일 형식 해석으로 CPU RGBA를 만들고 성공한 결과만 넘긴다.",
+        "mayDiffer": "루트는 OS별 디코더와 bool 출력 인자를 사용하고, 학습 코드는 PNG/JPEG 전용 Result와 명시적 크기 정책을 사용한다.",
+        "omitted": "색상 프로필 처리·애니메이션 이미지·디코더 자체 구현은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "binary 읽기에서 길이와 실패를 먼저 확인한다",
+      "body": "파일은 `binary | ate`로 엽니다. binary는 바이트를 문자 줄바꿈 규칙으로 변환하지 않게 하고, ate는 연 직후 끝에 위치시켜 길이를 물을 수 있게 합니다. `tellg`가 실패했거나 길이가 0이면 픽셀 복원을 시작하지 않습니다.\n\n파일 길이를 벡터 크기로 바꾸기 전에 8 MiB 상한을 검사합니다. 이후 처음으로 이동해 그 길이만큼 읽습니다. 요청한 길이보다 적게 읽었으면 file_io로 실패합니다. 추가로 한 바이트가 더 있는지 확인하여 처음 길이를 잰 뒤 늘어난 파일의 접두사만 조용히 처리하지 않게 합니다.\n\n이 흐름은 일반적인 로컬 애셋 파일을 대상으로 합니다. 파일 바이트를 소유 벡터로 읽은 뒤 디코더에 넘기므로 스트림과 픽셀의 수명은 서로 독립입니다.",
+      "codes": [
+        {
+          "label": "범위를 확인하고 파일을 읽는다",
+          "language": "cpp",
+          "text": "Result decode_file(const std::filesystem::path& path) noexcept {\n    try {\n        std::ifstream file(path,std::ios::binary|std::ios::ate);\n        if(!file)return failure(Error::file_io);\n        const auto end=file.tellg();\n        if(end<0)return failure(Error::file_io);\n        if(end==0)return failure(Error::invalid_input);\n        if(end>static_cast<std::streamoff>(max_encoded_bytes))return failure(Error::encoded_limit);\n        const auto count=static_cast<std::size_t>(end);\n        std::vector<std::uint8_t> bytes(count);\n        file.seekg(0,std::ios::beg);\n        if(!file || !file.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(count)))\n            return failure(Error::file_io);\n        // Detect growth after tellg instead of silently decoding a prefix.\n        if(file.peek()!=std::char_traits<char>::eof() || file.bad())return failure(Error::file_io);\n        return decode_memory(bytes.data(),bytes.size());\n    } catch(const std::bad_alloc&) {return failure(Error::allocation);}\n      catch(const std::length_error&) {return failure(Error::allocation);}\n      catch(const std::ios_base::failure&) {return failure(Error::file_io);}\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "동시에 바뀌는 파일",
+          "body": "길이 검사와 읽기는 한 번의 원자적 스냅샷 연산이 아닙니다. 다른 프로세스가 같은 길이로 내용을 바꾸는 일까지 검출하지는 못합니다. 애셋을 완성한 뒤 읽게 하거나, 완성 파일로 교체하는 배포 규칙을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "압축 입력과 복원 출력에 각각 정책을 둔다",
+      "body": "압축률이 높은 이미지에서는 작은 파일로도 매우 큰 픽셀 배열을 선언할 수 있습니다. 파일 8 MiB 제한만으로 출력 메모리를 제한할 수 없으므로 한 변 8192, RGBA 출력 64 MiB를 별도로 정합니다.\n\n8192×8192 RGBA는 256 MiB이므로 한 변 제한을 만족해도 출력 제한에서 거절합니다. 4096×4096 RGBA는 64 MiB로 출력 상한에 들어옵니다. 계산은 부호 있는 int끼리 먼저 곱하지 않고, 양수와 size_t 곱 범위를 검사하는 `rgba_byte_count`를 사용합니다.\n\nstb 메모리 API의 길이는 int입니다. 입력 정책이 int 최대값 이하임을 static_assert로 고정하고, 실제 입력 길이가 정책 이하인지 확인한 뒤 변환합니다. 컴파일 시간의 정책 검사와 실행 시간의 입력 검사가 연결됩니다.",
+      "codes": [
+        {
+          "label": "출력 정책",
+          "language": "cpp",
+          "text": "bool allowed(int width,int height) noexcept {\n    const auto bytes=study_texture::rgba_byte_count(width,height);\n    return bytes && width<=max_side && height<=max_side && *bytes<=max_decoded_bytes;\n}"
+        },
+        {
+          "label": "입력 길이와 API 타입",
+          "language": "cpp",
+          "text": "if(!bytes || !size)return failure(Error::invalid_input);\n    if(size>max_encoded_bytes)return failure(Error::encoded_limit);\n    static_assert(max_encoded_bytes<=static_cast<std::size_t>((std::numeric_limits<int>::max)()));\n    const auto length=static_cast<int>(size);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "64 MiB는 최대 총 메모리가 아니다",
+          "body": "디코더 내부 작업 공간, 압축 바이트 벡터, 디코더 출력과 최종 벡터가 동시에 존재할 수 있습니다. 64 MiB는 최종 픽셀 배열의 정책입니다. 프로세스 전체 메모리나 처리 시간의 상한이 필요하면 별도 자원 제한과 격리를 설계합니다."
+        }
+      ]
+    },
+    {
+      "title": "헤더 검사는 디코딩을 시작할지 결정한다",
+      "body": "`stbi_info_from_memory`로 파일 앞부분 등의 형식 정보를 해석하여 폭·높이·성분 수를 확인합니다. 크기가 정책 밖이면 전체 픽셀을 복원하기 전에 중단합니다. 통과하면 같은 바이트 버퍼로 `stbi_load_from_memory`를 호출합니다.\n\n정상적인 헤더 뒤에 압축 자료가 손상되어 있을 수 있으므로 info의 성공만으로 Image를 만들면 안 됩니다. 실제 load가 반환한 포인터를 확인하고, 최종 크기도 정책에 맞는지 다시 확인합니다. 두 호출이 사용하는 원본 바이트는 호출이 끝날 때까지 유효하고 변경되지 않아야 합니다.\n\n여기서 decode_failed는 형식·손상·디코더 내부 자원 문제 등을 묶은 결과입니다. nullptr만으로 내부 실패를 항상 세분할 수 없으므로 손상 파일이라고 단정하지 않습니다.",
+      "codes": [
+        {
+          "label": "메타데이터에서 실제 복원으로",
+          "language": "cpp",
+          "text": "int width=0,height=0,source_channels=0;\n    if(!stbi_info_from_memory(bytes,length,&width,&height,&source_channels))\n        return failure(Error::decode_failed);\n    if(!allowed(width,height))return failure(Error::dimensions);\n    try {\n        StbiPixels decoded(stbi_load_from_memory(bytes,length,&width,&height,&source_channels,4),stbi_image_free);\n        if(!decoded)return failure(Error::decode_failed);\n        // Header inspection is not proof that decompression succeeded.\n        if(!allowed(width,height))return failure(Error::dimensions);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "디코더가 읽을 수 있는 입력과 엄격한 검증",
+          "body": "일부 불완전한 파일이나 남는 바이트를 디코더가 받아들일 수 있습니다. 성공은 이 API가 이미지를 복원했다는 뜻입니다. 파일 형식 표준 전체에 대한 엄격한 적합성 검사로 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "원본이 RGB여도 출력은 RGBA로 통일한다",
+      "body": "폭 3·높이 2의 RGB PNG에 출력 성분 수 4를 요청하면 source_channels는 3이고 반환 버퍼는 24바이트입니다. 없는 알파는 255로 채워집니다. 그레이스케일도 색을 R/G/B에 확장하여 같은 출력 계약을 사용합니다. 알파가 있는 입력은 그 값을 보존합니다.\n\n출력은 첫 픽셀이 왼쪽 위이고, 한 행을 왼쪽에서 오른쪽으로 진행한 뒤 아래 행으로 이어집니다. 이 디코더 구성에서는 수직 반전 옵션을 변경하지 않습니다. Quad의 화면 위쪽 v=0 연결과 맞아야 그림이 뒤집히지 않습니다.\n\n예를 들어 RGBA `(0,255,0,128)`은 초록 채널 255와 알파 128을 각각 저장합니다. straight alpha에서는 RGB에 알파를 미리 곱하지 않습니다. 투명도를 화면 색과 섞는 블렌딩 설정은 업로드 다음의 그리기 책임입니다. [stb_image의 출력 규약](https://github.com/nothings/stb/blob/master/stb_image.h)을 기준으로 자료 형식을 맞춥니다.",
+      "codes": [
+        {
+          "label": "픽셀 길이의 기준",
+          "language": "text",
+          "text": "source_channels = 3;            // 원본은 RGB\noutput_channels = 4;            // 요청한 출력은 RGBA\nbytes = width * height * 4;     // 앞에서 범위 검사를 마친 뒤의 계산\n// RGB(11,22,33) → RGBA(11,22,33,255)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "색 관리와 방향 메타데이터",
+          "body": "이 로더의 계약에는 ICC 색상 프로필 변환과 EXIF 방향 적용이 들어 있지 않습니다. 편집 도구에서 보이는 방향·색과 제품 표시를 일치시키려면 애셋 내보내기 규약이나 별도 처리 단계를 정합니다."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "애셋의 PNG 범위",
+          "body": "이 실습은 표준 PNG/JPEG 애셋을 사용합니다. iOS용 비표준 CgBI PNG는 stb 기본 설정에서 채널·premultiplied alpha 처리가 다를 수 있어 이 출력 계약에서 제외합니다. 로더가 모든 비표준 변형을 엄격히 거절하는 것은 아니므로, 콘텐츠는 편집 도구에서 일반 PNG로 내보냅니다."
+        }
+      ]
+    },
+    {
+      "title": "C 라이브러리의 포인터를 바로 소유 객체로 감싼다",
+      "body": "디코더는 픽셀 포인터를 돌려주지만 vector가 그 메모리의 소유자가 된 것은 아닙니다. `assign`은 새 저장소에 바이트를 복사합니다. 복사가 끝난 다음 디코더 메모리를 해제해야 합니다.\n\n문제는 assign이 메모리 부족으로 예외를 던질 수 있다는 점입니다. 포인터를 받은 뒤 마지막 줄에서만 free를 호출하면 중간 예외가 해제를 건너뜁니다. 획득 즉시 unique_ptr에 넣고, deleter로 stbi_image_free를 지정하면 정상 반환·조기 반환·예외에서 같은 정리 경로를 사용합니다. 이것이 자원의 수명을 객체의 수명에 묶는 RAII입니다.\n\n할당과 해제는 라이브러리가 정한 쌍을 사용합니다. 여기서는 delete[]를 호출하지 않습니다. 결과 Image는 자신의 vector를 가지고 있고 디코더의 임시 버퍼와 주소를 공유하지 않습니다.",
+      "codes": [
+        {
+          "label": "픽셀 복사의 예외 경계",
+          "language": "cpp",
+          "text": "Result decode_memory(const std::uint8_t* bytes,std::size_t size) noexcept {\n    if(!bytes || !size)return failure(Error::invalid_input);\n    if(size>max_encoded_bytes)return failure(Error::encoded_limit);\n    static_assert(max_encoded_bytes<=static_cast<std::size_t>((std::numeric_limits<int>::max)()));\n    const auto length=static_cast<int>(size);\n    int width=0,height=0,source_channels=0;\n    if(!stbi_info_from_memory(bytes,length,&width,&height,&source_channels))\n        return failure(Error::decode_failed);\n    if(!allowed(width,height))return failure(Error::dimensions);\n    try {\n        StbiPixels decoded(stbi_load_from_memory(bytes,length,&width,&height,&source_channels,4),stbi_image_free);\n        if(!decoded)return failure(Error::decode_failed);\n        // Header inspection is not proof that decompression succeeded.\n        if(!allowed(width,height))return failure(Error::dimensions);\n        const auto count=*study_texture::rgba_byte_count(width,height);\n        Image result;\n        result.width=width;result.height=height;result.source_channels=source_channels;\n        result.pixels.assign(decoded.get(),decoded.get()+count);\n        return {std::move(result),Error::none};\n    } catch(const std::bad_alloc&) {return failure(Error::allocation);}\n      catch(const std::length_error&) {return failure(Error::allocation);}\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "static bool decode_image(",
+        "invariant": "파일 형식 해석으로 CPU RGBA를 만들고 성공한 결과만 넘긴다.",
+        "mayDiffer": "루트는 OS별 디코더와 bool 출력 인자를 사용하고, 학습 코드는 PNG/JPEG 전용 Result와 명시적 크기 정책을 사용한다.",
+        "omitted": "색상 프로필 처리·애니메이션 이미지·디코더 자체 구현은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "결과를 마지막에 확정하면 실패를 다루기 쉬워진다",
+      "body": "학습 API는 지역 Image를 완성해 Result에 이동합니다. 이동은 큰 픽셀 벡터를 다시 바이트 복사하지 않고 소유권을 결과로 넘길 수 있게 합니다. 디코더의 임시 메모리는 지역 unique_ptr가 정리합니다. 파일 읽기 버퍼도 decode_file이 끝나면 해제됩니다.\n\n현재 게임의 decode_image는 출력 배열과 크기를 참조 인자로 받습니다. 이 형태에서는 작업 중에 출력 width부터 바꾸면 실패 후 새 크기와 옛 배열이 섞일 수 있습니다. 지역 크기·지역 배열로 처리한 뒤 마지막에 swap과 크기 대입을 수행하면 실패 시 기존 출력이 보존됩니다.\n\n이 원칙을 **커밋 지점**으로 생각할 수 있습니다. 실패할 수 있는 준비 작업을 앞에서 끝내고, 완성된 결과를 외부에 공개하는 지점을 작게 만듭니다. 여기서는 기본 allocator의 vector swap과 정수 대입이 그 경계입니다.",
+      "codes": [
+        {
+          "label": "루트 디코더가 결과를 공개하는 지점",
+          "language": "cpp",
+          "text": "rgba.swap(result);\nwidth=w;height=h;\nreturn true;"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "static bool decode_image(",
+        "invariant": "파일 형식 해석으로 CPU RGBA를 만들고 성공한 결과만 넘긴다.",
+        "mayDiffer": "루트는 OS별 디코더와 bool 출력 인자를 사용하고, 학습 코드는 PNG/JPEG 전용 Result와 명시적 크기 정책을 사용한다.",
+        "omitted": "색상 프로필 처리·애니메이션 이미지·디코더 자체 구현은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "Windows에서는 바이트 순서와 signed 행 간격을 맞춘다",
+      "body": "현재 게임은 Windows에서 GDI+를 사용합니다. Bitmap을 만든 뒤 LockBits로 임시 픽셀 영역을 빌리고 UnlockBits로 반납합니다. 잠금은 객체 안에 묶어 조기 반환 때도 정리되게 하며, 큰 출력 배열은 잠금을 얻기 전에 할당합니다.\n\n32bpp ARGB 값을 리틀 엔디언 메모리에서 바이트로 읽으면 B/G/R/A 순서입니다. 출력 계약 R/G/B/A에 맞추려면 R과 B의 위치를 바꿉니다. 또한 Stride는 다음 논리 행까지의 부호 있는 바이트 거리이므로 음수를 보존해야 합니다. 예를 들어 폭 2의 행이 8바이트이고 stride=-12라면 다음 행은 현재 주소보다 12바이트 앞에 있고 행 끝 4바이트는 복사하지 않습니다.\n\n이 주소 계산에는 각 행 메모리가 유효하다는 계약과 정수 계산 범위 검사가 모두 필요합니다. 음수 최솟값을 단순히 abs로 바꾸면 표현 범위를 넘을 수 있어 먼저 거절합니다. [GDI+ LockBits의 버퍼 계약](https://learn.microsoft.com/en-us/windows/win32/api/gdiplusheaders/nf-gdiplusheaders-bitmap-lockbits)에 맞춰 빌린 기간 안에서만 행을 읽습니다.",
+      "codes": [
+        {
+          "label": "signed stride와 채널 변환의 핵심 — 설명용 발췌",
+          "language": "cpp",
+          "text": "// 크기·stride·주소 계산 범위를 검사한 뒤 실행하는 부분\nconst auto* src = scan0 + static_cast<std::ptrdiff_t>(y) * stride;\nauto* dst = out + static_cast<std::size_t>(y) * row_bytes;\nfor (std::size_t x=0; x<row_bytes; x+=4) {\n    dst[x+0]=src[x+2];\n    dst[x+1]=src[x+1];\n    dst[x+2]=src[x+0];\n    dst[x+3]=src[x+3];\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_rows.h",
+        "symbol": "inline bool copy_bgra_rows(",
+        "invariant": "signed 행 간격과 채널 순서를 공통 밀집 RGBA로 변환한다.",
+        "mayDiffer": "원본 행의 패딩·높이·stride 부호는 디코더에 따라 달라진다.",
+        "omitted": "포인터의 실제 할당 크기 확인과 색 관리 변환은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "파일 오류를 GPU 호출 앞에서 처리한다",
+      "body": "게임의 시작 경로에서 이미지를 읽고 성공하면 view를 upload에 넘깁니다. 파일 열기나 디코딩이 실패하면 오류를 출력하고 세션을 종료합니다. 성공한 Image가 있는 범위에서 동기 업로드를 마치므로 CPU 바이트가 먼저 해제되는 문제가 생기지 않습니다.\n\n업로드 뒤 CPU Image를 해제해도 GPU 텍스처 저장소는 별도로 유지됩니다. 매 프레임 파일을 다시 읽을 필요가 없습니다. Texture와 Quad는 GL 컨텍스트가 살아 있는 동안 소유 객체로 유지하고, 기존 색상 배치를 끝낸 뒤 아이콘을 그립니다.\n\n디코더는 알파를 보존하지만 누적 게임의 고정 Quad는 불투명 아이콘을 전제로 합니다. 실습용 player.png는 모든 알파가 255입니다. 임의의 투명 파일을 넣어 기대하는 합성 결과를 얻으려면 그리기 파이프라인의 블렌딩 계약도 함께 맞춰야 합니다.",
+      "codes": [
+        {
+          "label": "세션 시작의 CPU → GPU 연결",
+          "language": "cpp",
+          "text": "study_texture::Texture badge(gl);\n    {\n        const auto decoded=study_image::decode_file(std::filesystem::u8path(image_path));\n        if(!decoded){std::fprintf(stderr,\"Badge: %s\\n\",study_image::error_text(decoded.error));return 1;}\n        if(!badge.upload(decoded.image->view()))return 1;\n    } // CPU pixels are no longer needed after the upload returns."
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "ImageHandle image_load(",
+        "invariant": "디코딩 성공 뒤에만 GPU 이미지 생성을 호출한다.",
+        "mayDiffer": "루트는 저장소 핸들을 반환하고 학습 세션은 Texture를 직접 소유한다.",
+        "omitted": "실행 중 애셋 재로딩·캐시·핸들 세대 관리는 포함하지 않는다."
+      }
+    },
+    {
+      "title": "성공 사례와 경계 입력을 짝지어 확인한다",
+      "body": "RGB·RGBA·회색 PNG의 정확한 바이트를 비교합니다. RGB의 자동 알파 255, RGBA의 중간 알파 128과 알파 0인 픽셀의 RGB 보존을 각각 확인합니다. JPEG는 일정한 색 이미지를 디코딩하고 작은 오차 허용 범위로 비교합니다.\n\n같은 자료에서 빈 입력·잘린 압축 자료·정책을 넘는 헤더·존재하지 않는 파일도 만듭니다. 헤더가 매우 큰 시험 파일은 전체 디코딩 전에 dimensions로 거절해야 합니다. 입력 버퍼를 덮어쓴 뒤에도 성공 결과가 유지되는지 확인하면 소유 복사가 이루어졌는지 관찰할 수 있습니다.\n\n벡터 복사 시점의 bad_alloc을 주입하고 디코더 할당 수가 0으로 돌아오는지도 검사합니다. 단순한 성공 검사로는 보이지 않는 자원 정리 경로를 직접 실행하는 방법입니다. 마지막으로 파일로 만든 아이콘을 텍스처에 올려 기준 픽셀과 비교하면 파일→CPU→GPU 연결까지 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "계약별 기대 결과",
+          "language": "text",
+          "text": "RGB PNG 3×2         → source_channels=3, RGBA 24바이트\nRGBA PNG 2×2        → 16바이트, 알파 255/128/0/44 보존\n8192×8192 RGBA 헤더 → dimensions (출력 256 MiB)\n픽셀 vector 할당 실패 → allocation, 디코더 임시 할당 0개\n원본 입력 덮어쓰기    → 이미 완성한 Image의 픽셀 유지"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "검사 자료의 범위",
+          "body": "준비한 손상 사례만으로 모든 잘못된 파일에 대한 동작을 증명하지는 못합니다. 디코더를 외부 업로드에 노출할 때의 퍼징·버전 관리·격리 정책은 애셋 로더의 계약 검사와 별도의 범위입니다."
+        }
+      ]
+    },
+    {
+      "title": "파일 배치와 빌드 경로를 재현 가능하게 만든다",
+      "body": "CMake는 player.png를 빌드 디렉터리의 assets에 복사합니다. 실행 파일을 찾는 경로와 실행 중 애셋을 찾는 현재 작업 디렉터리는 구별해야 합니다. 저장소 루트에서 실행할 때는 아래처럼 --image로 복사된 파일 경로를 전달합니다. 기본값 assets/player.png는 현재 작업 디렉터리를 기준으로 찾습니다.\n\n이 체크포인트의 --image PATH는 마지막 두 인자로 받습니다. Windows의 다중 구성 생성기에서는 실행 파일이 Release 등의 하위 디렉터리에 있으므로 실행 파일 경로를 구성에 맞춰 바꾸고 이미지 경로도 명시합니다.\n\ndecode_demo는 GL 문맥 없이 파일 크기·원본 채널·RGBA 바이트 수를 확인하는 작은 도구입니다. 정상 player.png는 8×8, 원본 4채널, 출력 256바이트가 됩니다. 전체 게임은 같은 픽셀을 표시하며 기존 키 조작을 유지합니다.",
+      "codes": [
+        {
+          "label": "빌드와 파일 입력 실행",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/59-image-decode -B out/study59 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study59 -j3\nctest --test-dir out/study59 --output-on-failure\nout/study59/decode_demo out/study59/assets/player.png\nout/study59/tetris --seed 1 --image out/study59/assets/player.png\npython3 scripts/check_learning_decode.py"
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 현재 코드의 비교 기준",
+      "body": "핵심은 파일 바이트와 픽셀 바이트를 구별하는 것, 디코더의 메모리를 소유 객체로 정리하는 것, 성공한 RGBA만 GPU에 넘기는 것입니다. 아이콘의 그림·해상도와 파일 정책의 수치는 바뀔 수 있습니다.\n\n학습 디코더는 모든 플랫폼에서 고정한 stb_image와 PNG/JPEG 정책을 사용합니다. 현재 게임은 Windows GDI+와 비Windows stb_image를 공통 RGBA 계약 뒤에 둡니다. 학습 코드의 8 MiB·64 MiB 제한이 현재 게임에도 적용되었다고 가정하지 말고 레퍼런스의 실제 입력 경로를 확인합니다. 여러 이미지 저장소·동적 콘텐츠 수명은 이 디코더의 책임 밖에 둡니다.",
+      "codes": [
+        {
+          "label": "디코더 구현 전체",
+          "language": "cpp",
+          "file": "checkpoints/59-image-decode/renderer/image_decode.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CPU 진단 도구 전체",
+          "language": "cpp",
+          "file": "checkpoints/59-image-decode/src/decode_demo.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "게임 연결 전체",
+          "language": "cpp",
+          "file": "checkpoints/59-image-decode/src/main.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "static bool decode_image(",
+        "invariant": "파일 형식 해석으로 CPU RGBA를 만들고 성공한 결과만 넘긴다.",
+        "mayDiffer": "루트는 OS별 디코더와 bool 출력 인자를 사용하고, 학습 코드는 PNG/JPEG 전용 Result와 명시적 크기 정책을 사용한다.",
+        "omitted": "색상 프로필 처리·애니메이션 이미지·디코더 자체 구현은 포함하지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "59-1",
+      "question": "3×2 RGB PNG에 출력 성분 수 4를 요청했습니다. source_channels와 출력 길이는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "4와 18바이트"
+        },
+        {
+          "id": "b",
+          "text": "3과 24바이트"
+        },
+        {
+          "id": "c",
+          "text": "3과 파일 길이"
+        },
+        {
+          "id": "d",
+          "text": "4와 6바이트"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "3과 24바이트",
+      "explanation": "source_channels는 원본 성분 수 3입니다. 출력은 요청한 RGBA이므로 3×2×4=24바이트이며 알파는 255로 채워집니다."
+    },
+    {
+      "id": "59-2",
+      "question": "헤더 검사는 성공했지만 뒤의 압축 자료가 손상되어 load가 nullptr를 반환했습니다. 호출자가 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "헤더 크기의 빈 배열을 성공으로 반환한다."
+        },
+        {
+          "id": "b",
+          "text": "파일을 텍스처 포인터로 전달한다."
+        },
+        {
+          "id": "c",
+          "text": "dimensions로 고정해 반환한다."
+        },
+        {
+          "id": "d",
+          "text": "decode_failed로 실패하고 GPU 업로드를 시작하지 않는다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "decode_failed로 실패하고 GPU 업로드를 시작하지 않는다.",
+      "explanation": "메타데이터 해석과 전체 픽셀 복원은 별도 단계입니다. load 실패는 decode_failed로 처리하고 Image가 없는 결과를 반환합니다. 헤더 크기가 유효하더라도 업로드할 픽셀이 없습니다."
+    },
+    {
+      "id": "59-3",
+      "question": "디코더 포인터를 받은 뒤 vector::assign이 bad_alloc을 던졌습니다. 임시 픽셀을 정리하는 구조는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "stbi_image_free를 deleter로 둔 unique_ptr가 범위를 빠져나가며 해제한다."
+        },
+        {
+          "id": "b",
+          "text": "catch에서 포인터 변수만 nullptr로 바꾼다."
+        },
+        {
+          "id": "c",
+          "text": "assign 다음 줄의 free가 예외 후 자동으로 실행된다."
+        },
+        {
+          "id": "d",
+          "text": "delete[]로 해제하도록 Texture에 포인터를 넘긴다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "stbi_image_free를 deleter로 둔 unique_ptr가 범위를 빠져나가며 해제한다.",
+      "explanation": "예외로 assign 다음 줄은 건너뛸 수 있습니다. 획득 즉시 RAII 소유자에 넣으면 스택을 빠져나가며 지정한 해제 함수가 실행됩니다. 포인터 값을 비우는 일만으로 메모리가 해제되지는 않습니다."
+    },
+    {
+      "id": "59-4",
+      "question": "학습 정책에서 파일은 1 MiB, 헤더는 8192×8192 RGBA입니다. 올바른 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "파일이 작으므로 출력도 1 MiB 이하이다."
+        },
+        {
+          "id": "b",
+          "text": "한 변 8192를 만족하므로 반드시 성공한다."
+        },
+        {
+          "id": "c",
+          "text": "출력 256 MiB가 64 MiB를 넘으므로 전체 복원 전에 거절한다."
+        },
+        {
+          "id": "d",
+          "text": "64 MiB만 복원해 작은 이미지로 성공시킨다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "출력 256 MiB가 64 MiB를 넘으므로 전체 복원 전에 거절한다.",
+      "explanation": "8192×8192×4는 268435456바이트, 즉 256 MiB입니다. 파일 길이 제한과 출력 길이 제한을 모두 만족해야 합니다. 일부 픽셀을 잘라 성공으로 반환하는 계약은 아닙니다."
+    },
+    {
+      "id": "59-5",
+      "question": "BGRA 입력의 stride가 -12이고 Scan0가 첫 논리 행입니다. 둘째 행 시작과 첫 픽셀 R을 얻는 방법은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Scan0+12, src[0]"
+        },
+        {
+          "id": "b",
+          "text": "Scan0-12, src[2]"
+        },
+        {
+          "id": "c",
+          "text": "Scan0-8, src[3]"
+        },
+        {
+          "id": "d",
+          "text": "Scan0+8, src[1]"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Scan0-12, src[2]",
+      "explanation": "다음 논리 행은 signed stride를 더해 Scan0-12입니다. BGRA 순서에서 R은 인덱스 2이므로 출력 R에 src[2]를 씁니다. 패딩을 포함한 행 간격과 픽셀 안의 채널 위치를 별도로 계산합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "RGB 3×2 PNG의 원본 성분 수와 RGBA 출력 바이트 수를 계산하고 decode_demo로 확인한다.",
+      "헤더가 유효하지만 픽셀 복원이 실패하는 입력의 반환 경로를 따라간다.",
+      "vector 복사 예외에서 두 임시 저장소와 최종 결과의 수명을 설명한다.",
+      "PNG 아이콘을 같은 Texture에 연결하고 파일 경로를 바꾸어 읽기 실패를 확인한다."
+    ],
+    "failureChecks": [
+      "출력 크기 검사를 정수 곱 이후에 하지 않는지 확인한다.",
+      "source_channels를 출력 길이로 사용하지 않는지 확인한다.",
+      "디코더 임시 버퍼가 모든 반환·예외 경로에서 해제되는지 확인한다."
+    ],
+    "expected": "파일 바이트에서 소유한 RGBA 픽셀을 만들고 성공한 경우에만 GPU에 올리며, 입력·복원·할당 실패를 구별해 처리한다."
+  }
+}

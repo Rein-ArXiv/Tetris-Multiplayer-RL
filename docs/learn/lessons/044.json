@@ -1,0 +1,390 @@
+{
+  "id": "lesson-44",
+  "title": "게임 루프: 규칙 진행과 화면 그리기를 분리하기",
+  "shortTitle": "프레임 진행과 최종 화면",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: main 안에 시간 배분·입력 소비·규칙 틱·결과 출력·GL 갱신이 함께 들어 있습니다.",
+  "finish": "완료: FrameRunner가 규칙 진행과 틱별 보고를 반환하고, main은 보고와 최종 상태로 화면을 구성합니다.",
+  "objective": "프레임과 틱, 최종 상태와 사건 보고를 구분하고 입출력 없이 실행 루프의 결과를 검사합니다.",
+  "prerequisites": [
+    "43차시 체크포인트",
+    "규칙 틱·고정·상태 이력",
+    "PendingControls와 기존 FixedClock"
+  ],
+  "validation": [
+    "Linux SCRIPTED36/SDL36 CTests·경고0·CPU 독립 링크·UBSan",
+    "0/1/6틱·한 배치3고정·종료후중복억제·invalid시간후시계/입력/규칙보존·보고값수명·동일60틱분할·읽기전용메시",
+    "18 SDL offscreen GL: FrameRunner 0틱입력보관→1틱T-spin0/1/2전후×3크기,독립보드·VBO·모든RGB오차≤2/255",
+    "0틱입력손실/보고덮어쓰기/보드변경플래그누락 mutation Release 거부; 실제 게임규칙변경없음",
+    "native 게임창·물리키·모니터·Win32실행 미검증; GL관찰그림은점수/미리보기/종료마커제외",
+    "CUA44: 제목/목차/즉시 정답 해설·검수 답안 해제/접힘·Game::Tick79행 스냅샷/비교 문맥·390px 단계표·뷰포트원복/목표복귀 확인"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 실행기 초안 검토; 누적 상태/보고/입력 경계와 실제 루프 대조",
+    "draftJob": "out/learning-jobs/044-frame-events.jsonl",
+    "corrections": [
+      "초안의 FixedClock/PendingControls 네임스페이스 누락 교정",
+      "배열 용량을 넘는 틱을 조용히 잘라내던 루프를 명시적 거부로 교정",
+      "정확히1틱 렌더 지연·단방향만으로 결정론 보장·일괄사건보존 표현 교정",
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "회전 자격은 현재 피스의 이력이고 연속 삭제는 여러 피스에 걸친 상태입니다.",
+      "고정 전 모서리 판정과 고정 후 보상 계산은 서로 다른 시점입니다.",
+      "마지막 틱 보고와 계속 보관할 규칙 상태의 수명을 구별합니다."
+    ],
+    "bridge": "이번에는 이 틱 여러 개를 한 화면 프레임에 배정하고, 중간 사건과 최종 상태를 각각 전달합니다."
+  },
+  "sections": [
+    {
+      "title": "그리는 횟수와 진행하는 횟수는 다르다",
+      "body": "창을 갱신하는 바깥 반복을 프레임, 규칙을 한 단계 적용하는 호출을 틱이라고 부르겠습니다. 지금의 Round::tick에는 경과 초가 없습니다. 호출 한 번이 이동·시계·고정의 규칙 한 단계를 진행합니다.\n\n한 프레임마다 무조건 tick을 한 번 호출하면 그림을 자주 그리는 컴퓨터에서 게임도 자주 진행됩니다. 누적 프로젝트는 이미 FixedClock으로 이번 프레임에 허용할 틱 수를 구합니다. 한 프레임에는 0개, 1개 또는 여러 틱이 들어갑니다.\n\n이번에는 그 계산을 새로 발명하지 않고 **프레임 진행의 책임을 main에서 분리**합니다. main은 입력과 시간을 전달하고, 실행기는 필요한 틱을 진행합니다. main은 결과를 읽어 장치에 그리기 명령을 보냅니다. 구분 기준은 파일 길이가 아니라 누가 시간·입력·규칙·장치를 소유하는가입니다."
+    },
+    {
+      "title": "한 프레임을 네 단계로 읽는다",
+      "body": "| 단계 | 읽는 것 | 만드는 것 |\n| --- | --- | --- |\n| 수집 | OS 메시지와 키 상태, 경과 시간 | FrameInput과 dt |\n| 진행 | 보관한 입력, 시계, Round | 다음 Round와 틱별 보고 |\n| 표현 준비 | 최종 Round와 보고 목록 | 보드·피스·점수 메시, 로그·연출 요청 |\n| 그리기·제출 | 준비한 메시와 창 크기 | GL 명령과 스왑 요청 |\n\n입력 수집은 매 프레임 하지만 규칙 전이는 틱 수만큼만 합니다. 그리기는 그 틱들이 끝난 뒤의 최종 상태를 읽습니다.\n\n지금 프레임에서 4틱을 진행했다면 마지막 상태를 그립니다. 그리기를 앞에 놓으면 그 4틱의 결과는 다음 그리기까지 보이지 않습니다. 반대로 0틱 프레임에서는 순서를 바꿔도 규칙 상태 차이가 없을 수 있습니다. 언제나 정확히 1틱만 늦어진다고 설명할 수 없는 이유입니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "float accumulator = 0.0f;",
+        "invariant": "입력 수집·시간 배분·규칙 진행·표현 갱신·제출의 순서를 명시한다.",
+        "mayDiffer": "실제 main은 모드·모달·네트워크·비동기 보상 작업을 함께 조율하고 float 누산기를 쓴다.",
+        "omitted": "온라인 진행 가능 틱·프레임 페이싱·모달 중지 정책의 세부는 각각의 단원에서 다룬다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "한 프레임과 draw call의 수",
+          "body": "여기서 한 번 그린다는 것은 최종 상태로 한 프레임을 구성한다는 뜻입니다. 그 안에서 보드·고스트·피스·글자를 제출하는 draw call은 여러 번 발생할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "FrameRunner는 장치 없이 프레임을 진행한다",
+      "body": "loop/frame_runner.h를 추가합니다. FrameRunner는 Round, FixedClock, PendingControls를 값으로 소유합니다. 벽시계를 직접 읽지 않고 호출자가 준 seconds를 사용합니다. GL·SDL·오디오나 파일 출력도 호출하지 않습니다.\n\nFrameInput은 플랫폼의 Key 열거형을 가져오지 않습니다. 필요한 다섯 상태만 bool 값으로 받습니다. 같은 실행기를 창 없이도 호출할 수 있고, 테스트에서는 시간과 입력을 직접 지정할 수 있습니다. 운영체제 이벤트를 읽는 책임과 게임 틱을 배정하는 책임이 분리됩니다.\n\n읽기 전용 round()는 소유한 Round를 참조합니다. main은 이 참조로 **현재 최종 상태**를 봅니다. 실행기가 다음 프레임을 진행하면 같은 멤버의 값이 바뀌므로 이 참조는 과거 상태의 보관본이 아닙니다. 오래 남겨야 할 결과는 따로 복사해야 합니다.",
+      "codes": [
+        {
+          "label": "프레임에서 수집할 값",
+          "language": "cpp",
+          "text": "struct FrameInput {\n    bool left = false;\n    bool right = false;\n    bool up = false;\n    bool down = false;\n    bool drop = false;\n};"
+        },
+        {
+          "label": "실행기의 공개 읽기 경계",
+          "language": "cpp",
+          "text": "class FrameRunner {\npublic:\n    explicit FrameRunner(study_round::Round round) noexcept : round_(round) {}\n\n    const study_round::Round& round() const noexcept { return round_; }\n\n    std::uint64_t phase() const noexcept { return clock_.phase(); }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "소유권",
+          "title": "참조와 스냅샷",
+          "body": "const 참조는 이 참조를 통해 수정하지 못한다는 뜻입니다. 소유자가 이후에 바꾸지 못한다는 뜻은 아닙니다. Round의 최종 조회와 아래의 값으로 복사한 LockReport를 구별하세요."
+        }
+      ]
+    },
+    {
+      "title": "상태 보고를 나중에 읽으면 늦을 수 있다",
+      "body": "한 프레임의 첫 틱에서 T-spin Single을 고정하고, 나머지 다섯 틱은 새 피스가 기다린다고 합시다. 첫 틱 직후 last_t_spin_lines는 1이지만 다음 수락 틱에서 -1로 초기화됩니다. 여섯 틱이 끝난 뒤 그 값만 읽으면 T-spin 사건을 놓칩니다. 점수 800과 최종 보드는 그대로 남아도 사건의 세부는 남지 않습니다.\n\n따라서 각 틱 직후 보고를 LockReport 값으로 복사합니다. TickObservation은 그 틱의 Step, 킥 후보 번호, 선택적인 고정 보고를 담습니다. 고정하지 않은 틱은 lock이 비어 있습니다. false 플래그 하나로 모든 고정을 합치지 않으므로 같은 프레임에 세 번 고정하면 세 보고를 읽을 수 있습니다.\n\n이 구조는 Round가 한 틱에 최대 한 번 고정한다는 계약을 사용합니다. 틱 내부에서 여러 고정을 허용하는 구현으로 바꾸면 한 TickObservation의 optional 하나로는 부족합니다. 보고 형식도 규칙의 사건 수와 함께 검토해야 합니다.",
+      "codes": [
+        {
+          "label": "고정 시점의 값 보관",
+          "language": "cpp",
+          "text": "struct LockReport {\n    int cleared = 0;\n    int hard_drop_distance = -1;\n    int spin_lines = -1;\n    int inserted = 0;\n    int pending = 0;\n    std::uint64_t points = 0;\n    std::uint64_t awarded = 0;\n    std::uint64_t lines = 0;\n    std::uint64_t attack_total = 0;\n    std::uint64_t streak = 0;\n    unsigned level = 0;\n    int interval = 0;\n    study_round::EndReason end_reason{};\n};"
+        },
+        {
+          "label": "틱 하나의 결과",
+          "language": "cpp",
+          "text": "struct TickObservation {\n    study_round::Step step = study_round::Step::waiting;\n    int kick = -1;\n    std::optional<LockReport> lock;\n};"
+        }
+      ]
+    },
+    {
+      "title": "이번 프레임의 배열은 영구 사건 기록이 아니다",
+      "body": "FrameReport는 최대 6개의 TickObservation과 유효 구간 길이 ticks를 가집니다. 현재 FixedClock은 프레임당 최대 100ms, 초당 60틱을 받으므로 나머지 위상을 포함해도 한 호출에 최대 6틱을 배정합니다. 이 조건을 static_assert로 연결합니다. 시계 정책을 바꾸면 보고 용량도 다시 맞춰야 합니다.\n\n배열의 모든 원소를 순회하지 말고 `i < report.ticks`까지만 읽습니다. 0틱 프레임에서도 배열 저장 공간은 존재하지만 새 틱 결과는 없습니다. 각 유효 원소가 stopped일 수도 있습니다. ticks는 Round::tick을 호출한 횟수입니다. 종료 뒤의 stopped도 유효한 호출 결과로 셉니다.\n\n보고는 반환된 값이므로 다음 프레임에도 보관할 수 있습니다. 하지만 FrameRunner가 모든 과거 프레임을 축적하지는 않습니다. 저장·네트워크 전송·다시 재생하려면 보관 정책을 별도로 만들어야 합니다. 같은 보고를 두 번 소비하면 로그나 효과도 두 번 발생할 수 있으며 읽는 행위가 보고를 지우지는 않습니다.",
+      "codes": [
+        {
+          "label": "현재 시계와 보고 용량의 연결",
+          "language": "cpp",
+          "text": "constexpr unsigned max_ticks = 6;\n\nstatic_assert(FixedClock::units > 0, \"positive phase denominator\");\nstatic_assert((FixedClock::max_frame_ns * FixedClock::rate) % FixedClock::units == 0,\n              \"this bound assumes a whole number of ticks per maximum frame\");\nstatic_assert((FixedClock::max_frame_ns * FixedClock::rate) / FixedClock::units == max_ticks,\n              \"report capacity must match the clock's maximum batch\");"
+        },
+        {
+          "label": "한 프레임의 결과",
+          "language": "cpp",
+          "text": "struct FrameReport {\n    unsigned ticks = 0;\n    bool clamped = false;\n    bool board_changed = false;\n    bool piece_changed = false;\n    int cleared = 0;\n    std::array<TickObservation, max_ticks> observations{};\n};"
+        }
+      ]
+    },
+    {
+      "title": "후보에서 진행한 뒤 결과를 게시한다",
+      "body": "advance는 실행기 전체의 후보를 복사합니다. 먼저 경과 시간이 유한하고 음수가 아닌지 시계가 검사합니다. 성공하면 입력을 한 번 보관하고, 배정된 틱마다 consume과 Round::tick을 호출합니다. 중간에 invalid가 나오면 후보를 버리고 nullopt를 반환합니다.\n\n후보 안에는 Round뿐 아니라 시계의 나머지와 미소비 입력도 있습니다. Round만 되돌리고 입력은 이미 지워졌다면 같은 요청을 다시 시도할 수 없습니다. 실패 시 무엇을 보존할지 정했다면 관련 상태를 같은 경계 안에 넣어야 합니다.\n\n모든 틱이 성공한 뒤 `*this = candidate`로 다음 값을 게시하고 보고를 반환합니다. 이는 한 스레드에서의 실패 보존 계약입니다. 출력과 GL 호출은 이 함수 밖에서 하므로 후보 처리 중간에 소리를 재생했다가 취소해야 하는 문제도 없습니다.",
+      "codes": [
+        {
+          "label": "프레임 전이를 한 경계에 모으기",
+          "language": "cpp",
+          "text": "    std::optional<FrameReport> advance(double seconds, FrameInput raw) noexcept {\n        // Work on a private copy; publish only after the whole frame succeeds.\n        FrameRunner candidate = *this;\n\n        const auto batch = candidate.clock_.advance_seconds(seconds);\n        if (!batch.has_value()) {\n            // nan / inf / negative: nothing about the original may change.\n            return std::nullopt;\n        }\n\n        if (batch->ticks > max_ticks) return std::nullopt; // Never silently truncate work.\n\n        // Capture exactly once, even for a zero-tick frame, so a latched edge\n        // is not lost and the latest soft-drop state survives.\n        candidate.pending_.capture(raw.left, raw.right, raw.up, raw.down, raw.drop);\n\n        FrameReport report{};\n        report.clamped = batch->clamped;\n\n        for (unsigned i = 0; i < batch->ticks; ++i) {\n            const auto controls = candidate.pending_.consume();\n\n            const study_round::Step step = candidate.round_.tick(\n                controls.horizontal, controls.clockwise, controls.soft_drop, controls.hard_drop);\n\n            if (step == study_round::Step::invalid) {\n                return std::nullopt;\n            }\n\n            TickObservation observation{};\n            observation.step = step;\n\n            // A stopped round exposes no fresh rotation event; old reports may\n            // still be readable inside the Round and must not be re-published.\n            if (step != study_round::Step::stopped) {\n                observation.kick = candidate.round_.last_rotation_candidate();\n            }\n\n            if (step == study_round::Step::locked || step == study_round::Step::game_over) {\n                // Snapshot every field right now; never borrow from the Round.\n                LockReport lock{};\n                lock.cleared = candidate.round_.last_cleared();\n                lock.hard_drop_distance = candidate.round_.last_hard_drop_distance();\n                lock.spin_lines = candidate.round_.last_t_spin_lines();\n                lock.inserted = candidate.round_.last_garbage();\n                lock.pending = candidate.round_.pending_garbage();\n                lock.points = candidate.round_.score();\n                lock.awarded = candidate.round_.last_awarded();\n                lock.lines = candidate.round_.total_lines();\n                lock.attack_total = candidate.round_.attack_sent();\n                lock.streak = candidate.round_.clear_streak();\n                lock.level = candidate.round_.level();\n                lock.interval = candidate.round_.gravity().interval;\n                lock.end_reason = candidate.round_.end_reason();\n\n                observation.lock = lock;\n\n                report.cleared += lock.cleared;\n                report.board_changed = true;\n                report.piece_changed = true;\n            }\n\n            if (step == study_round::Step::changed) {\n                report.piece_changed = true;\n            }\n\n            report.observations[i] = observation;\n            report.ticks = i + 1;  // counted incl. a stopped tick.\n        }\n\n        // Commit and hand back a self-contained snapshot, not a view.\n        *this = candidate;\n        return report;\n    }"
+        },
+        {
+          "label": "loop/frame_runner.h · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/44-frame-loop/loop/frame_runner.h",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "실패 경계",
+          "title": "화면 제출 실패는 규칙을 되돌리지 않는다",
+          "body": "advance가 성공한 뒤 main에서 버퍼 갱신이 실패하면 규칙 상태는 이미 확정되어 있습니다. 이 예제는 오류를 보고하고 실행을 종료합니다. 규칙 처리와 장치 제출의 실패 경계가 서로 다릅니다."
+        },
+        {
+          "kind": "곁들여 읽기",
+          "title": "후보 게시와 동시 접근",
+          "body": "*this = candidate는 값의 복사 대입입니다. 다른 스레드와 실행기를 공유하려면 별도의 동기화가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "0틱 프레임도 입력을 받아야 한다",
+      "body": "예제의 첫 프레임이 8ms라면 아직 한 틱 분량이 아닙니다. 이때 Up과 Space가 잡혔다고 입력 수집을 건너뛰면 다음 프레임에는 눌림이 사라질 수 있습니다. 실행기는 0틱이어도 PendingControls에 요청을 남깁니다.\n\n다음 프레임에 9ms가 더 들어오면 한 틱이 배정됩니다. 그 첫 consume에서 회전·하드 드롭 요청을 한 번 사용합니다. 같은 프레임에 추가 틱이 있더라도 두 번째부터는 그 요청이 꺼집니다. 반면 Down은 유지 상태라 마지막 수집값을 각 틱에서 다시 읽습니다.\n\n이 bool 보관은 수집된 여러 눌림을 하나로 합칩니다. 물리 키의 모든 눌림·해제를 정확히 보존하는 큐는 아닙니다. Down은 0틱 프레임 사이에 해제되면 최신 false로 덮이고 짧은 탭이 사라질 수 있습니다. 입력의 정확한 보존 범위는 별도의 입력 단원에서 확장합니다.",
+      "codes": [
+        {
+          "label": "틱이 없어도 입력 보관",
+          "language": "cpp",
+          "text": "        // Capture exactly once, even for a zero-tick frame, so a latched edge\n        // is not lost and the latest soft-drop state survives.\n        candidate.pending_.capture(raw.left, raw.right, raw.up, raw.down, raw.drop);"
+        }
+      ]
+    },
+    {
+      "title": "변경 플래그는 OR, 사건은 순서 있는 값이다",
+      "body": "board_changed는 이번 틱에 고정이 있었는지를 누적합니다. 첫 틱에서 true가 됐다면 뒤의 대기 틱이 false로 덮지 않아야 합니다. piece_changed도 이동이나 고정이 한 번이라도 있었다면 끝까지 true입니다.\n\n이 플래그는 GPU 데이터를 다시 준비할지 판단하는 힌트입니다. 사건 개수나 최종 상태가 시작 상태와 실제로 다른지까지 증명하지 않습니다. 여러 이동 후 처음 위치로 돌아와도 true일 수 있습니다. 약간의 중복 업로드는 허용하지만 필요한 업로드를 빠뜨리면 오래된 보드나 고스트를 그립니다.\n\n고정 보고는 별도로 배열에 남깁니다. 종료 뒤의 stopped 틱에는 Round 안에 과거 보고가 남아 있을 수 있으므로 새 LockReport를 만들지 않습니다. Step이 locked 또는 game_over일 때만 복사하는 조건이 같은 종료 연출의 반복을 막습니다."
+    },
+    {
+      "title": "main은 보고를 소비하고 최종 상태를 그린다",
+      "body": "run_session의 인자는 initial_round로 바꾸고 FrameRunner를 만듭니다. main이 직접 clock과 pending을 따로 소유하던 부분을 없애고, 프레임마다 raw 입력을 구성해 runner.advance를 한 번 호출합니다.\n\n반환된 보고를 순서대로 읽어 고정 시점의 점수·공격·스핀·종료를 출력합니다. 여기서 round.score()를 반복해서 읽으면 모든 로그에 마지막 점수를 적게 됩니다. 과거 사건을 출력할 때는 그 사건에 복사해 둔 lock.points를 사용합니다.\n\n그 뒤에는 최종 Round 하나로 보드·피스·고스트·점수·미리보기 메시를 준비합니다. 고정이 세 번 있었다고 그 중간 보드를 세 번 보여 주지는 않습니다. 중간 과정을 애니메이션으로 재생하려면 별도의 표현 상태와 정책이 필요합니다. 모든 규칙 틱의 계산과 모든 중간 화면의 표시는 다른 요구입니다.",
+      "codes": [
+        {
+          "label": "수집과 진행, 보고 소비",
+          "language": "cpp",
+          "text": "        const study_loop::FrameInput raw{\n            platform_key_pressed(Key::Left),platform_key_pressed(Key::Right),\n            platform_key_pressed(Key::Up),platform_key_down(Key::Down),\n            platform_key_pressed(Key::Space)};\n        const auto report = runner.advance(frame.dt,raw);\n        if (!report) return 1;\n        // Reports own per-tick values; the Round reference now shows final state.\n        for (unsigned i=0;i<report->ticks;++i) {\n            const auto& observation=report->observations[i];\n            if (observation.kick>0)\n                std::printf(\"rotation accepted: kick candidate=%d\\n\",observation.kick);\n            if (observation.lock) {\n                const auto& lock=*observation.lock;\n                std::printf(\"attack total=%llu pending=%d inserted=%d\\n\",\n                    static_cast<unsigned long long>(lock.attack_total),lock.pending,lock.inserted);\n                std::printf(\"spin lines=%d clear streak=%llu\\n\",lock.spin_lines,\n                    static_cast<unsigned long long>(lock.streak));\n                if (lock.hard_drop_distance>=0)\n                    std::printf(\"hard drop: %d row(s) before lock\\n\",lock.hard_drop_distance);\n                std::printf(\"score=%\" PRIu64 \" (+%\" PRIu64 \") lines=%\" PRIu64 \" level=%u interval=%d ticks\\n\",\n                    lock.points,lock.awarded,lock.lines,lock.level,lock.interval);\n                if(lock.end_reason!=study_round::EndReason::none)\n                    std::puts(study_ui::end_message(lock.end_reason));\n            }\n        }\n        if (report->cleared>0)std::printf(\"cleared %d row(s) this frame\\n\",report->cleared);\n        const bool board_changed=report->board_changed,piece_changed=report->piece_changed;"
+        },
+        {
+          "label": "src/main.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/44-frame-loop/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "버퍼를 바꾸지 않아도 프레임은 그린다",
+      "body": "변경 플래그가 false라고 화면 제출까지 건너뛰지는 않습니다. 창이 다시 노출되거나 크기가 바뀔 수 있고, 이후에 넣을 UI 애니메이션은 규칙 상태가 멈춰 있어도 진행할 수 있습니다. 기존 버퍼를 재사용해 화면을 구성하는 일과 GPU 버퍼 내용을 갱신하는 일을 구분합니다.\n\n예제는 창 크기로 유효한 레이아웃을 만들지 못하면 그리기와 present를 생략합니다. 그러나 규칙 진행은 그 전에 수행됐고 platform_end_frame은 계속 호출합니다. “보이지 않음”이 자동으로 일시정지를 뜻하지 않습니다. 중지 정책을 원하면 시간과 입력 처리까지 명시적으로 설계해야 합니다.\n\npresent는 스왑 요청입니다. CPU가 다음 줄에 도달했다는 사실만으로 사용자가 모니터에서 그 프레임을 봤다고 말할 수 없습니다. 명령 제출과 실제 표시는 GPU·창 시스템·모니터의 처리 과정을 거칩니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void renderer_end()",
+        "invariant": "남은 그리기 작업 제출과 플랫폼의 스왑 요청을 연결한다.",
+        "mayDiffer": "현재 렌더러는 배치 큐를 flush한다. 강의 렌더러는 준비한 VAO와 버퍼로 각 계층을 그린다.",
+        "omitted": "GPU 완료 동기화·실제 표시 시각 측정·프레임 보간은 이번 리팩터링의 기능이 아니다."
+      }
+    },
+    {
+      "title": "현재 Game 래퍼는 규칙 이외의 일도 한다",
+      "body": "현재 Game::SubmitInput은 SimGame을 호출한 뒤 회전·드롭 소리를 소비합니다. Game::Tick은 규칙 틱 뒤 삭제·가비지 소리를 소비합니다. 함수 이름이 Tick이라고 해서 전체가 순수한 규칙 함수인 것은 아닙니다. 장치 없이 실행하려면 SimGame을 직접 사용하는 경계가 중요합니다.\n\nmain의 apply_fx는 SubmitInput과 Tick 뒤에 마지막 삭제·스핀·가비지 보고와 bool 플래그를 읽고 지웁니다. 소비 전 여러 고정이 발생했다면 마지막 값은 앞선 값을 덮고 bool은 여러 사건을 합칩니다. 틱마다 소비한다고 함수 내부 사건까지 모두 복원되는 것은 아닙니다.\n\n이번 FrameRunner는 한 틱 최대 한 고정인 Round에 맞춰 값을 복사합니다. 기존 보상·리플레이·온라인 경기를 이식하려면 각 호출의 사건 수, 진행 가능 틱, 상태 수명을 먼저 맞춰야 합니다.",
+      "reference": {
+        "path": "src/game.cpp",
+        "symbol": "void Game::Tick()",
+        "invariant": "규칙 전이와 장치 효과 소비의 실제 호출 경계를 구분한다.",
+        "mayDiffer": "현재 Game 래퍼는 오디오도 호출한다. 교육용 FrameRunner는 보고를 반환하고 입출력을 호출하지 않는다.",
+        "omitted": "실제 게임의 전체 사건 큐 이식·오디오 중복 정책·온라인 루프 통합은 후속 범위다."
+      }
+    },
+    {
+      "title": "짧은 시간열을 손으로 실행한다",
+      "body": "44-frame-loop는 43-history의 누적 프로젝트를 이어받습니다. loop/frame_runner.h를 추가하고 main의 내부 틱 반복을 실행기로 옮깁니다. Round의 T-spin·콤보·가비지 규칙은 그대로입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/44-frame-loop -B out/study-44 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-44\n./out/study-44/frame_demo\nctest --test-dir out/study-44 --output-on-failure\n```\n\n```text\nframe=1 ticks=0 locks=0 boardChanged=0 score=0 lastSpin=-1\nframe=2 ticks=1 locks=1 boardChanged=1 score=800 lastSpin=1\nframe=3 ticks=3 locks=0 boardChanged=0 score=800 lastSpin=-1\n```\n\n첫 프레임에서만 Up·Space를 전달합니다. 8ms에는 요청만 보관하고, 9ms가 더해진 프레임에 고정합니다. 다음 50ms는 세 틱을 진행하지만 새 고정은 없습니다. 마지막 보고가 -1로 돌아가도 점수 800은 남습니다.\n\nSDL 창은 다음처럼 엽니다. SDL2 개발 패키지·pkg-config·desktop OpenGL 3.3 Core가 필요하며 다중 구성 빌드는 구성별 실행 경로를 사용합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/44-frame-loop -B out/study-44-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-44-sdl\n./out/study-44-sdl/tetris T spin\n```\n\nLeft/Right 이동, Up 회전, Down 유지 낙하, Space 하드 드롭, Escape/닫기 종료를 유지합니다. 창의 조작 속도 때문에 결과가 달라 보이면 먼저 위 CPU 시간열로 요청이 소비된 틱을 확인하세요.",
+      "codes": [
+        {
+          "label": "src/frame_demo.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/44-frame-loop/src/frame_demo.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "실행·계약 검사 타깃",
+          "language": "cmake",
+          "text": "add_executable(frame_demo src/frame_demo.cpp)\ntarget_link_libraries(frame_demo PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(frame_contract tests/frame_contract.cpp)\n    target_link_libraries(frame_contract PRIVATE study_mesh)\n    add_test(NAME frame_contract COMMAND frame_contract)\n    if(STUDY_PLATFORM STREQUAL \"SDL\")\n        add_executable(frame_probe tests/frame_real.cpp)\n        target_link_libraries(frame_probe PRIVATE study_triangle study_program study_shader\n            study_vertex_array study_buffer StudySDL2)\n    endif()\nendif()\n"
+        }
+      ]
+    },
+    {
+      "title": "실패 사례로 경계를 검증한다",
+      "body": "검사는 먼저 0틱에서 잡힌 요청이 다음 틱까지 남는지 확인합니다. 그 사이에 NaN·무한대·음수 시간을 넣으면 시계와 입력과 Round가 모두 이전 값으로 남아야 합니다. 잘못된 프레임의 입력이 나중에 섞여 나오지 않는지도 확인합니다.\n\n다음으로 한 프레임에서 고정→이동→이동→고정→종료→stopped가 발생하도록 O 피스와 지지 셀을 준비합니다. 고정 보고는 세 개이고, 마지막 stopped는 새 사건을 만들지 않아야 합니다. 처음의 board_changed가 마지막 틱 때문에 사라지면 화면 갱신 오류입니다.\n\n그리기 횟수와 규칙 진행을 분리한 효과는 같은 입력 틱 열로 비교합니다. 20ms 프레임 50개와 100ms 프레임 10개는 이 설정에서 각각 60틱입니다. 입력 차이와 클램프가 없는 이 사례에서는 같은 최종 Round가 나와야 합니다.\n\nGL 비교는 0틱 입력 보관 후 1틱 진행을 실행기를 통해 수행하고, T-spin 0·1·2줄의 보드·활성 피스·고스트를 확인합니다. 아래 그림은 0틱 프레임의 준비 보드와 한 틱 고정 후 상태입니다. 점수·미리보기·종료 마커는 이 관찰 그림에서 생략합니다.\n\n![0틱 프레임: 회전·드롭 요청은 보관되고 보드는 그대로](data:image/png;base64,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)\n\n![다음 1틱 프레임: 고정·삭제 후 새 Z와 최종 고스트](data:image/png;base64,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)",
+      "codes": [
+        {
+          "label": "tests/frame_contract.cpp · 완성 파일",
+          "language": "cpp",
+          "file": "checkpoints/44-frame-loop/tests/frame_contract.cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "같은 입력 틱 열로 비교하는 이유",
+          "body": "실제 키의 눌림·해제를 프레임마다 표본화하면 프레임 경계에 따라 수집되는 입력이 달라질 수 있습니다. 시간 분할의 효과만 비교하려면 규칙에 전달하는 입력 틱 열과 클램프 조건을 같게 맞춥니다."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "main의 수집·진행·표현 준비·제출 경계를 표시한다.",
+      "8ms→9ms→50ms의 틱 수와 요청 소비 위치를 예측한다.",
+      "FrameRunner에 규칙 외의 장치 호출이 없는지 확인한다.",
+      "첫 틱 보고와 프레임 최종 Round의 마지막 보고를 비교한다.",
+      "여러 고정 뒤 stopped가 같은 사건을 다시 만들지 않는지 검사한다.",
+      "최종 상태 참조와 보관한 값 보고가 다음 프레임에 어떻게 보이는지 설명한다."
+    ],
+    "expected": "프레임 횟수와 규칙 틱 수를 분리하고, 사건 스냅샷과 최종 화면의 책임을 구현한다.",
+    "failureChecks": [
+      "0틱 프레임에서 입력 수집을 건너뛰지 않는가?",
+      "최종 Round의 보고만 읽어 중간 사건을 잃지 않는가?",
+      "변경 플래그를 마지막 틱의 값으로 덮지 않는가?",
+      "stopped의 과거 보고를 새 사건으로 다시 복사하지 않는가?",
+      "보고 배열 전체를 유효 구간 길이와 무관하게 순회하지 않는가?",
+      "const 참조를 과거 상태 복사본으로 오해하지 않는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "44-1",
+      "question": "0틱 프레임에서 Up과 Space가 수집됐습니다. 다음 프레임에 한 틱이 생길 때까지 필요한 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "그리지 않았으므로 요청도 버린다"
+        },
+        {
+          "id": "b",
+          "text": "PendingControls에 보관하고 첫 consume에서 사용한다"
+        },
+        {
+          "id": "c",
+          "text": "Round를 즉시 두 번 호출한다"
+        },
+        {
+          "id": "d",
+          "text": "키가 계속 눌렸을 때만 복원한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "PendingControls에 보관하고 첫 consume에서 사용한다",
+      "explanation": "입력 수집과 규칙 틱의 빈도는 다릅니다. 0틱이어도 눌림 요청을 보관해야 다음 consume에서 사용할 수 있습니다. 이 bool 보관은 여러 눌림의 개수까지 보존하지는 않습니다."
+    },
+    {
+      "id": "44-2",
+      "question": "6틱 프레임의 첫 틱에서 T-spin을 고정하고 나머지는 대기했습니다. 프레임 끝의 last_t_spin_lines는 -1입니다. 사건을 표시하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "점수에서 T-spin 여부를 역산한다"
+        },
+        {
+          "id": "b",
+          "text": "다음 피스의 방향으로 추측한다"
+        },
+        {
+          "id": "c",
+          "text": "첫 틱 직후 복사한 LockReport를 읽는다"
+        },
+        {
+          "id": "d",
+          "text": "마지막 틱을 다시 실행한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "첫 틱 직후 복사한 LockReport를 읽는다",
+      "explanation": "최종 Round의 마지막 보고는 이후 틱에서 초기화됩니다. 사건 시점에 값으로 복사한 보고를 읽으면 중간 결과를 보존할 수 있습니다."
+    },
+    {
+      "id": "44-3",
+      "question": "첫 틱에서 보드가 바뀌고 뒤의 틱은 대기했습니다. 프레임의 board_changed는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "true를 유지한다"
+        },
+        {
+          "id": "b",
+          "text": "마지막 틱의 false로 덮는다"
+        },
+        {
+          "id": "c",
+          "text": "그린 횟수와 같다"
+        },
+        {
+          "id": "d",
+          "text": "보고 개수가 짝수일 때 true다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "true를 유지한다",
+      "explanation": "이 값은 프레임 중 한 번이라도 보드 변경이 있었는지 누적하는 힌트입니다. 마지막 틱만 대입하면 필요한 메시 갱신을 놓칩니다."
+    },
+    {
+      "id": "44-4",
+      "question": "FrameReport를 보관한 뒤 실행기가 다음 프레임을 진행했습니다. 맞는 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "보관한 lock.points도 최종 점수로 바뀐다"
+        },
+        {
+          "id": "b",
+          "text": "const Round 참조가 옛 상태를 영구 보관한다"
+        },
+        {
+          "id": "c",
+          "text": "보고를 읽으면 자동으로 소비되어 사라진다"
+        },
+        {
+          "id": "d",
+          "text": "보고의 복사 값은 남고 Round 참조는 현재 상태를 본다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "보고의 복사 값은 남고 Round 참조는 현재 상태를 본다",
+      "explanation": "보고는 값의 스냅샷이고 Round 참조는 실행기 멤버의 현재 값입니다. const는 그 참조로 쓰지 못한다는 뜻이며 소유자의 갱신을 막지 않습니다."
+    },
+    {
+      "id": "44-5",
+      "question": "실행기가 성공한 뒤 GPU 버퍼 갱신이 실패했습니다. 이 예제의 실패 경계는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "진행한 규칙도 자동으로 되돌아간다"
+        },
+        {
+          "id": "b",
+          "text": "규칙은 이미 게시됐고 main이 오류로 종료한다"
+        },
+        {
+          "id": "c",
+          "text": "보고 배열이 GPU 상태를 복구한다"
+        },
+        {
+          "id": "d",
+          "text": "다음 프레임에 같은 틱을 자동 재시도한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "규칙은 이미 게시됐고 main이 오류로 종료한다",
+      "explanation": "후보 게시의 실패 보존 범위는 advance 내부입니다. 이후 장치 호출의 실패까지 되돌리는 계약은 없습니다. 재시도가 필요하면 별도 복구 정책을 설계해야 합니다."
+    }
+  ]
+}

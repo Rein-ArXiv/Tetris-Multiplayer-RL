@@ -198,7 +198,7 @@ def parse_frames(stream_buf: bytearray) -> list[tuple[MsgType, bytes]]:
     Bytes belonging to fully-parsed frames are removed from ``stream_buf`` in
     place — partial frames at the end are left for the next call. Frames whose
     checksum doesn't match are silently dropped (same behaviour as the C++
-    parser, which keeps the lockstep loop forgiving rather than fatal).
+    parser). Dropping a required INPUT does not repair lockstep progress.
 
     Raises:
         FramingError: 선언된 길이(LEN)가 상한

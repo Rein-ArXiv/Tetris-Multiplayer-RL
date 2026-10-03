@@ -1,0 +1,414 @@
+{
+  "id": "lesson-48",
+  "title": "입력 비트마스크: 요청 집합을 한 바이트로 표현하기",
+  "shortTitle": "비트마스크와 입력 변환",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: PendingControls가 여러 bool과 좌우 상태를 보관하고 틱마다 Intent를 반환합니다.",
+  "finish": "완료: 요청을 마스크로 보관하고, 유효성 검사와 Intent 변환을 거쳐 같은 틱 동작을 유지합니다.",
+  "objective": "비트 연산으로 입력을 합치고 조회하며, 정수 축소 전 검증과 표현·조작 정책의 차이를 설명합니다.",
+  "prerequisites": [
+    "pressed의 보관과 consume의 수명",
+    "Intent와 FrameRunner의 값 전달",
+    "정수 타입·enum·std::optional"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek의 선택 코드 초안을 검토하고 전 입력 값·프레임 조합 및 실제 서버/리플레이 경계를 대조",
+    "draftJob": "out/learning-jobs/048-mask-events.jsonl",
+    "corrections": [
+      "초안의 프레임당 여러 capture 주석을 실제 main의 프레임당 한 번 계약으로 수정",
+      "학습 마스크를 현재 wire 조작 정책과 동일하게 표현한 주석을 범위가 드러나게 수정",
+      "현재 리플레이 로더의256→0 축소 수락을 재현하고 엄격한 파싱·출력 보존·자원 상한으로 수정",
+      "1바이트 값과 텍스트/패킷 총 크기를 같다고 설명한 Part 문장 및 F5/F6 재현 범위 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "SCRIPTED 전체40 CTests·SDL의 mask_contract/frame_contract/input_pipeline/key_edges_contract 4 CTests·두 구성 경고0 및 실제 SDL tetris 타깃 빌드",
+    "65,536 원시 값·65,536 비트 조회 조합·24개 의미 Intent·32,768 프레임 이력과 기존 소비 정책 대조",
+    "CPU mask_demo의 정확한 출력과 SDL/플랫폼 독립 링크, 마스크·실제 리플레이 UBSan 검사",
+    "축소 선행·XOR 누적·held OR 보관의 세 Release 변형 거부",
+    "실제 루트 tetris 빌드·14 CTests 통과: 로컬 파서/랭킹/봇 수신의 전체 바이트 범위, 완전한 파일·크기 상한·실패 보존·쓰기 오류 검사",
+    "Win32/macOS 네이티브 실행 미수행. 사용자 요청에 따라 화면 조작·스크린샷 생략"
+  ],
+  "recap": {
+    "points": [
+      "사건별 래치가 프레임 안의 짧은 탭을 기록하고, pending이 다음 틱까지 보관합니다.",
+      "눌림 요청은 소비하면서 지우고 유지 입력은 최신 상태를 전달합니다.",
+      "bool에 합쳐진 요청은 발생 여부를 보존하며 횟수·순서는 남기지 않습니다."
+    ],
+    "bridge": "같은 발생 여부를 여러 변수 대신 정수의 각 비트에 담아 봅니다. 저장 표현이 바뀌어도 입력의 수명은 유지합니다."
+  },
+  "sections": [
+    {
+      "title": "조작의 의미를 유지하며 표현을 바꾼다",
+      "body": "회전 요청, 하드드롭 요청, 좌우 요청은 각각 발생 여부를 기억합니다. 이를 여러 bool로 보관해도 동작하지만, 파일이나 메시지로 전달할 때에는 값 하나로 묶을 수 있습니다. 정수의 각 비트에 의미를 배정한 표현을 **비트마스크(bitmask)**라고 합니다.\n\n이번에는 PendingControls의 내부 보관 방식을 바꿉니다. 입력을 받는 capture와 틱이 사용하는 consume의 호출 계약은 유지합니다. 새 input_mask.h가 숫자 표현과 Intent의 변환을 맡고, 실제 게임 실행기는 같은 FrameRunner를 계속 사용합니다.\n\n| 층 | 사용하는 표현 | 책임 |\n| --- | --- | --- |\n| 플랫폼 | 키별 held·pressed | OS 사건 수집 |\n| PendingControls | pending 마스크와 held 샘플 | 프레임 사이 보관 |\n| 변환 함수 | Mask ↔ Intent | 비트 의미·유효성·좌우 해석 |\n| Round | horizontal·clockwise 등 | 이동·충돌·회전 규칙 |\n\n표현을 줄이는 목적은 바이트 수 자체보다 **서로 다른 소비자가 공유할 명확한 입력 규약**을 만드는 데 있습니다."
+    },
+    {
+      "title": "2진수의 각 자리에 의미를 붙인다",
+      "body": "2진수 한 자리는 0 또는 1입니다. 오른쪽부터 비트 0, 1, 2라고 부르면 각 자리의 값은 1, 2, 4, 8처럼 두 배씩 커집니다. `1u << n`은 unsigned 정수 1을 왼쪽으로 n자리 옮겨 해당 자리만1로 만듭니다. 여기서는 n을0~4의 고정 값으로 사용합니다.\n\n| 요청 | 비트 번호 | 8자리 표시 | 십진수 |\n| --- | --- | --- | --- |\n| left | 0 | 00000001 | 1 |\n| right | 1 | 00000010 | 2 |\n| down | 2 | 00000100 | 4 |\n| rotate | 3 | 00001000 | 8 |\n| drop | 4 | 00010000 | 16 |\n\n예를 들어 9는 1+8이므로 `00001001`, 즉 left와 rotate가 설정된 값입니다.5개의 비트가 각각 켜지거나 꺼질 수 있어 가능한 마스크는2⁵=32개입니다. 0은 모든 요청이 꺼진 유효한 값입니다.\n\n`Mask = std::uint8_t`는8비트 부호 없는 정수를 뜻합니다. 비트 5~7은 현재 사용하지 않습니다. 저장할 자리가 남아 있다는 것과 그 자리에 입력 의미가 정의되어 있다는 것은 별개입니다.",
+      "codes": [
+        {
+          "label": "simulation/input_mask.h · 비트 규약",
+          "language": "cpp",
+          "text": "using Mask = std::uint8_t;\n\ninline constexpr Mask left = 1u << 0;\ninline constexpr Mask right = 1u << 1;\ninline constexpr Mask down = 1u << 2;\ninline constexpr Mask rotate = 1u << 3;\ninline constexpr Mask drop = 1u << 4;\n\ninline constexpr Mask known = left | right | down | rotate | drop;"
+        }
+      ],
+      "reference": {
+        "path": "core/input.h",
+        "symbol": "enum InputBits",
+        "invariant": "조작마다 겹치지 않는 비트 위치를 고정한다.",
+        "mayDiffer": "요청이 추가되면 모든 생산자·검증기·소비자의 규약을 함께 갱신해야 한다.",
+        "omitted": "반시계 회전·홀드 같은 새 게임 기능은 이번 표현 변경에 포함하지 않는다."
+      }
+    },
+    {
+      "title": "OR는 발생 여부를 합친다",
+      "body": "> **읽기 전 예측** · left가 이미 들어 있는 마스크에 left를 한 번 더 기록합니다. OR와 덧셈의 결과가 같을까요?\n\nOR 연산 `|`는 각 자리에서 하나라도1이면 결과를 1로 만듭니다. `left | rotate`는9이고, 여기에 left를 다시 OR해도9입니다. 같은 연산을 반복해 결과가 더 변하지 않는 성질을 **멱등성(idempotence)**이라고 합니다. `x | x == x`가 프레임마다 같은 요청을 수집하는 코드에 알맞습니다.\n\n덧셈은 다릅니다. `1 + 1 == 2`이므로 left를 두 번 더하면 right 비트가 켜집니다. 마스크 수집에는 발생 횟수의 합이 아니라 자리별 합집합이 필요합니다.\n\n논리 OR인 `||`는 두 값을 참/거짓으로 해석해 bool 결과를 만듭니다.1과8을 `||`로 합치면 true 하나만 남습니다. 비트를 유지할 때는 `|`를 사용합니다.",
+      "codes": [
+        {
+          "label": "요청을 추가하는 연산",
+          "language": "cpp",
+          "text": "Mask mask = 0;\nmask |= left;       // 00000001\nmask |= rotate;     // 00001001\nmask |= left;       // 00001001: 중복 요청은 합쳐진다"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "기록 순서는 남지 않는다",
+          "body": "left|rotate와 rotate|left는 같습니다. 마스크는 요청 집합입니다. 회전 후 이동과 이동 후 회전을 구별하려면 순서가 있는 다른 표현이 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "AND로 하나라도 있는지, 모두 있는지 묻는다",
+      "body": "AND 연산 `&`는 양쪽이 모두1인 자리만 남깁니다. `mask & left`가0이 아니면 left가 포함되어 있습니다. 여러 비트를 묶어 조회할 때는 질문을 분명히 해야 합니다.\n\n| mask=9, query=left\\|right=3 | 계산 | 결과 |\n| --- | --- | --- |\n| 하나라도 있는가 | (9 & 3) != 0 | true |\n| 모두 있는가 | (9 & 3) == 3 | false |\n\nhas_any는 교집합이 비어 있는지, has_all은 요청한 집합 전체가 포함되는지 묻습니다. query=0이면 has_any는 false이고 has_all은 true입니다. 두 번째는 확인해야 할 비트가 하나도 없기 때문입니다. “아무 조작도 없는가”는 `mask == 0`으로 묻습니다.\n\n비교 연산과 함께 쓸 때는 괄호를 써서 비트 연산의 범위를 드러냅니다. `(mask & bits) != 0`처럼 작성하면 연산자 우선순위를 다시 계산하지 않고 읽을 수 있습니다.",
+      "codes": [
+        {
+          "label": "simulation/input_mask.h · 조회",
+          "language": "cpp",
+          "text": "inline constexpr bool has_any(Mask value, Mask bits) noexcept {\n    return (value & bits) != 0;\n}\n\ninline constexpr bool has_all(Mask value, Mask bits) noexcept {\n    return (value & bits) == bits;\n}"
+        }
+      ],
+      "reference": {
+        "path": "core/input.h",
+        "symbol": "inline constexpr bool hasInput",
+        "invariant": "AND로 요청 비트와 겹치는지 검사한다.",
+        "mayDiffer": "현재 hasInput은 겹침 검사 하나를 제공하고 기준 코드는 any/all을 나누어 보여 준다.",
+        "omitted": "조회 함수는 마스크 전체의 허용 비트 검사를 대신하지 않는다."
+      }
+    },
+    {
+      "title": "비트를 지울 때는 연산 폭을 확인한다",
+      "body": "좌우 두 비트를 지우려면 그 자리만0이고 다른 자리는1인 마스크와 AND합니다. `~`는 비트별 반전입니다.8비트 관점에서00000011을 반전한11111100과 AND하면 좌우만 제거됩니다.\n\nC++에서는 uint8_t가 비트 연산 전에 int로 승격된다는 점을 함께 봐야 합니다. 이 타입의 모든 값을 int가 표현할 수 있으므로 정수 승격 대상입니다. `~`의 계산 결과가 처음부터8비트 값이라고 가정하지 말고, 의도한 계산 타입과 저장 타입을 표시합니다. [C++ 정수 승격 규칙](https://eel.is/c++draft/conv.prom)에서 이 변환을 확인할 수 있습니다.\n\n아래 코드는 unsigned 폭으로 반전한 뒤 하위8비트를 Mask로 저장합니다. 목적이 정해진 자리 제거이므로 이 축소는 의도한 동작입니다. 외부 숫자가 유효한지 판단하는 검사에서는 축소 시점이 달라집니다.",
+      "codes": [
+        {
+          "label": "지울 비트와 남길 비트",
+          "language": "cpp",
+          "text": "const unsigned directions = static_cast<unsigned>(left | right);\nconst Mask keep = static_cast<Mask>(~directions);\nMask mask = static_cast<Mask>(left | right | rotate); // 11\nmask = static_cast<Mask>(mask & keep);              // 8"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "XOR는 켜진 비트를 다시 끈다",
+          "body": "`^`는 두 자리의 값이 다를 때1을 만듭니다. 비트를 토글할 때 유용하지만 pending에 같은 요청을 두 번 XOR하면 사라집니다. 발생 여부를 누적하는 OR와 역할이 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "의미를 담는 Intent를 독립 헤더로 옮긴다",
+      "body": "비트 표현을 해석하는 함수는 Intent를 알아야 하고, PendingControls는 변환 함수를 사용합니다. Intent를 PendingControls 안에 계속 두면 서로의 헤더를 포함해야 하는 순환 의존이 생깁니다. 작은 값 타입을 intent.h로 분리해 의존 방향을 한쪽으로 만듭니다.\n\n```text\nintent.h ← input_mask.h ← pending_controls.h ← frame_runner.h\n```\n\nIntent.horizontal은 -1, 0, +1 중 하나이고 나머지는 bool입니다. 이것은 규칙이 읽기 좋은 표현입니다. Mask는 전달·저장에 맞춘 숫자 표현입니다. 같은 개념을 서로 다른 경계에 적합하게 표현하고, 변환 코드를 한 곳에 모읍니다.",
+      "codes": [
+        {
+          "label": "simulation/intent.h",
+          "language": "cpp",
+          "text": "#pragma once\n\nnamespace study_input {\n\n// One simulation tick's semantic input.\n// horizontal: -1 = left, 0 = neutral, +1 = right.\nstruct Intent {\n    int horizontal;\n    bool clockwise;\n    bool soft_drop = false;\n    bool hard_drop = false;\n};\n\n} // namespace study_input"
+        }
+      ]
+    },
+    {
+      "title": "Intent를 마스크로 인코딩한다",
+      "body": "인코딩(encoding)은 정한 규약에 따라 의미를 숫자 표현으로 바꾸는 작업입니다. encode는 먼저 horizontal이 -1~1 범위인지 검사합니다. 범위 밖이면 nullopt를 반환합니다. 그다음 해당 요청의 비트를 OR합니다.\n\n예를 들어 `Intent{-1, true, false, false}`는 left와 rotate가 있어9가 됩니다. horizontal=0이고 나머지가false이면 값 0을 가진 optional을 반환합니다. **0이라는 값이 있는 것**과 **실패하여 값이 없는 것**은 구별해야 합니다.\n\n로컬 mask를 완성해서 반환하므로 호출자의 Intent를 바꾸지 않습니다. `noexcept`는 이 함수가 예외를 밖으로 전달하지 않는 계약이며, 입력 오류는 optional로 표현합니다.",
+      "codes": [
+        {
+          "label": "simulation/input_mask.h · encode",
+          "language": "cpp",
+          "text": "inline std::optional<Mask> encode(const Intent& intent) noexcept {\n    if (intent.horizontal < -1 || intent.horizontal > 1) {\n        return std::nullopt;\n    }\n    Mask mask = 0;\n    if (intent.horizontal < 0) {\n        mask |= left;\n    }\n    if (intent.horizontal > 0) {\n        mask |= right;\n    }\n    if (intent.clockwise) {\n        mask |= rotate;\n    }\n    if (intent.soft_drop) {\n        mask |= down;\n    }\n    if (intent.hard_drop) {\n        mask |= drop;\n    }\n    return mask;\n}"
+        }
+      ]
+    },
+    {
+      "title": "범위를 줄이기 전에 허용 비트를 검사한다",
+      "body": "> **읽기 전 예측** · 파일에서 읽은 숫자가256입니다. uint8_t로 바꾼 다음0~31인지 검사하면 원래의 잘못된 값을 찾을 수 있을까요?\n\n8비트 부호 없는 정수로 변환하면256은0이 됩니다. 정보를 잃은 뒤에는 원래0이었는지256이었는지 구분할 수 없습니다. [정수 변환 규칙](https://eel.is/c++draft/conv.integral)에 따라 unsigned 목적 타입의 범위로 환산되는 결과입니다.\n\nvalid는 더 넓은 unsigned 값을 그대로 받고, known의 바깥에 켜진 비트가 있는지 검사합니다. 값256의 비트8은 known에 없으므로 거부합니다. 검사에 성공한 값만 decode에서 Mask로 변환합니다.\n\n현재 비트가0~4에 연속해서 배치되어 유효한 수가0~31이지만, 일반적인 비트 규약은 숫자 상한 검사와 같지 않습니다. 허용 비트가00001001뿐이라면4는9보다 작아도 허용되지 않은 비트를 사용합니다. `value & ~known`은 이런 배치에도 의미가 유지됩니다.",
+      "codes": [
+        {
+          "label": "simulation/input_mask.h · valid",
+          "language": "cpp",
+          "text": "inline constexpr bool valid(unsigned value) noexcept {\n    return (value & ~static_cast<unsigned>(known)) == 0u;\n}"
+        }
+      ],
+      "reference": {
+        "path": "core/input.h",
+        "symbol": "inline constexpr bool isValidInputMask",
+        "invariant": "허용 비트를 넓은 값에서 검사한 뒤 작은 타입에 저장한다.",
+        "mayDiffer": "현재 파일 파서는 uint64_t를 읽으므로 공통 검증 함수도 uint64_t를 받는다. 기준 도구는 unsigned 범위의 값을 받는다.",
+        "omitted": "숫자 문법·파일 크기·메시지 인증은 비트 검사 밖의 계약이다."
+      }
+    },
+    {
+      "title": "디코딩에 들어가는 조작 정책을 드러낸다",
+      "body": "디코딩(decoding)은 마스크를 해석해 Intent로 바꾸는 작업입니다. 허용 비트 검사를 통과한 뒤 left와 right를 읽습니다. 기준 코드의 정책은 한쪽만 요청되면 그 방향, 양쪽이면 중립입니다. 이는 PendingHorizontal이 사용하던 정책을 유지한 것입니다.\n\n그 결과 raw 마스크3과0은 모두 horizontal=0으로 해석됩니다. `encode(decode(3))`은0이고 원래3으로 돌아가지 않습니다. 같은 의미를 대표 표현 하나로 바꾸는 것을 여기서는 **정규화(canonicalization)**라고 부릅니다.\n\n| 입력 표현 | 디코딩 의미 | 다시 인코딩 |\n| --- | --- | --- |\n| 1 | 왼쪽 | 1 |\n| 2 | 오른쪽 | 2 |\n| 3 | 중립 | 0 |\n| 19 = 3+16 | 중립 + 하드드롭 | 16 |\n\n유효한 Intent는 encode→decode 왕복에서 같은 의미로 돌아옵니다. raw 마스크의 decode→encode 왕복은 정규화된 값으로 돌아옵니다.32개의 raw 마스크가 horizontal 3가지 × 나머지 bool 8가지인 24개의 의미로 합쳐지기 때문입니다.",
+      "codes": [
+        {
+          "label": "simulation/input_mask.h · decode",
+          "language": "cpp",
+          "text": "inline std::optional<Intent> decode(unsigned value) noexcept {\n    if (!valid(value)) {\n        return std::nullopt;\n    }\n    const Mask mask = static_cast<Mask>(value);\n    int horizontal = 0;\n    if (has_any(mask, left) && !has_any(mask, right)) {\n        horizontal = -1;\n    } else if (has_any(mask, right) && !has_any(mask, left)) {\n        horizontal = +1;\n    }\n    Intent intent{horizontal, has_any(mask, rotate)};\n    intent.soft_drop = has_any(mask, down);\n    intent.hard_drop = has_any(mask, drop);\n    return intent;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "마스크가 유효해도 경기 판정은 별개다",
+          "body": "허용 비트 검사로 알 수 있는 것은 표현 규약에 맞는다는 사실입니다. 제출 가능한 틱·입력 빈도·종료 상태·보상 자격은 별도 검증이 필요합니다. 현재 서버는 RankedGame에서 이 경계들을 함께 검사합니다."
+        }
+      ]
+    },
+    {
+      "title": "pending을 마스크로 바꾸고 입력 수명은 유지한다",
+      "body": "PendingControls의 내부를 `Mask pending_`와 `bool soft_drop_`로 바꿉니다. capture는 left·right·up·space의 발생 여부를 마스크로 만들고 pending에 OR합니다. Down의 held는 최신 샘플로 대입합니다.\n\nconsume_mask는 pending을 꺼내고 0으로 초기화한 뒤, 현재 soft_drop이 true면 down 비트를 더합니다. 원시 좌우 비트는 그대로 남깁니다. consume은 이 값에 decode를 적용해 기존 Intent를 반환합니다. 클래스의 모든 쓰기가 known 안의 비트만 사용하므로 내부 decode는 성공한다는 불변식을 가집니다.\n\nFrameRunner는 계속 consume을 부릅니다. 따라서 새 마스크는 CPU 시연뿐 아니라 누적 게임의 실제 입력 경로에서 사용됩니다.0틱 보관·여러 틱의 첫 소비·취소의 순서는 유지됩니다.",
+      "codes": [
+        {
+          "label": "simulation/pending_controls.h · capture",
+          "language": "cpp",
+          "text": "    void capture(bool left_pressed, bool right_pressed, bool up,\n                 bool downHeld = false, bool spacePressed = false) noexcept {\n        Mask edges = 0;\n        if (left_pressed) {\n            edges |= left;\n        }\n        if (right_pressed) {\n            edges |= right;\n        }\n        if (up) {\n            edges |= rotate;\n        }\n        if (spacePressed) {\n            edges |= drop;\n        }\n        pending_ |= edges;\n        // Held-state sample: replace, do not latch.\n        soft_drop_ = downHeld;\n    }"
+        },
+        {
+          "label": "simulation/pending_controls.h · consume과 raw 마스크",
+          "language": "cpp",
+          "text": "    Intent consume() noexcept {\n        // Only allowed bits are ever stored, so decode() cannot fail here.\n        return *decode(consume_mask());\n    }\n\n    // Drain the pending mask and fold in the current held-state sample.\n    //\n    // Edges are consumed once (cleared here). soft_drop_ is a level and is\n    // re-reported on EVERY call until a later capture replaces it. A raw\n    // left+right pair is preserved in the raw mask; decode() normalizes it to\n    // a neutral horizontal.\n    Mask consume_mask() noexcept {\n        Mask mask = pending_;\n        pending_ = 0;\n        if (soft_drop_) {\n            mask |= down;\n        }\n        return mask;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "static void AccumulateInput(bool suppress = false)",
+        "invariant": "사건 요청은 OR로 누적하고 소비 시 지우며 held는 따로 반영한다.",
+        "mayDiffer": "루트는 uint8_t 마스크를 직접 만들고 좌우 DAS/ARR까지 합친다. 기준 코드는 마스크와 Intent 변환을 분리한다.",
+        "omitted": "반복 지연·간격과 앱 모드별 입력 소유권은 이번 저장 표현 변경에 포함하지 않는다."
+      }
+    },
+    {
+      "title": "처리 순서는 마스크 밖에서 정한다",
+      "body": "마스크 9에는 left와 rotate가 있습니다. 어느 쪽을 먼저 실행할지는 숫자에 들어 있지 않습니다. 벽 옆에서 먼저 이동한 뒤 회전하는 경우와 회전한 뒤 이동하는 경우는 충돌 조건이 달라질 수 있습니다.\n\n현재 SimGame::SubmitInput은 LEFT→RIGHT→DOWN→ROTATE→DROP 순서로 각 비트를 검사합니다. left와 right가 모두 있으면 두 if가 모두 실행됩니다. 왼쪽 벽에서 왼쪽 시도가 막힌 뒤 오른쪽 시도가 성공하면 한 칸 오른쪽으로 움직일 수 있습니다. 양쪽 요청을 중립으로 해석하는 학습 Intent와 다른 정책입니다.\n\n또한 실제 로컬 ConsumeInput은 양쪽 **held**가 true일 때 좌우 비트를 지웁니다. 이미 뗀 두 키의 pressed가 pending에 함께 남은 경우와 현재 두 키를 누르는 경우를 같다고 읽으면 안 됩니다. 숫자 표현, 프레임의 상태, 규칙의 처리 순서를 나누어 비교하세요.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "void SimGame::SubmitInput",
+        "invariant": "요청의 적용 순서는 규칙 코드가 정한다.",
+        "mayDiffer": "현재 SimGame은 좌우를 순차 시도하고 학습 Intent는 양쪽을 중립으로 해석한다.",
+        "omitted": "이번 변경은 실제 경기의 방향 충돌 정책이나 기존 리플레이 의미를 바꾸지 않는다."
+      }
+    },
+    {
+      "title": "한 바이트 값과 파일·패킷 크기를 구별한다",
+      "body": "한 Mask 값은 8비트입니다. 하지만 여러 필드를 가진 Intent의 메모리를 그대로 파일에 쓰는 것은 다른 일입니다. 정수의 크기, 멤버 배치와 패딩은 명시한 전송 규약이 아닙니다. encode로 조작 값 하나를 만들고, 메시지나 파일이 그 값을 어떤 형태로 넣을지 정해야 합니다.\n\n| 경계 | 실제 표현 |\n| --- | --- |\n| 마스크 값 | uint8_t 하나 |\n| INPUT 메시지 payload | 시작 틱·개수·마스크 바이트들 |\n| 로컬 리플레이 파일 | seed·ticks 헤더와 index/p1/p2의 십진수 텍스트 |\n| 학습 mask_demo 출력 | 숫자와 읽기 위한 8자리 비트 문자열 |\n\n두 플레이어의 마스크를 매 60Hz마다 저장한다면 원시 입력 값만 초당 120바이트입니다. 텍스트 파일에는 숫자 문자·인덱스·공백·개행·헤더가 추가됩니다. 네트워크 메시지도 프레이밍 비용을 더합니다.\n\nuint8_t는 환경에 따라 unsigned char의 별칭이어서 스트림 출력이 문자처럼 보일 수 있습니다. mask_demo는 `static_cast<unsigned>(mask)`로 숫자 출력을 명시합니다. `std::bitset<8>`은 사람이 읽을 표시이며 전송 형식으로 사용하지 않습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "비트 번호와 바이트 순서",
+          "body": "마스크의 비트0을 오른쪽에 적는 표기와, 여러 바이트 정수를 어떤 순서로 보내는 엔디언은 다른 개념입니다. 마스크 한 바이트 자체에는 바이트를 나열하는 선택이 없지만 메시지의 틱 번호처럼 여러 바이트인 필드는 순서를 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "파일 경계에서도 같은 검증기를 사용한다",
+      "body": "현재 core/replay.cpp는 숫자를 넓은 uint64_t로 읽고 isValidInputMask를 호출한 뒤 uint8_t로 저장합니다. 예를 들어256, 알 수 없는 비트를 가진32, 누락된 p2는 모두 거부 대상입니다.\n\n파싱은 임시 ReplayData에 수행합니다. 선언한 틱 개수만큼 연속 인덱스를 읽고 뒤에 다른 데이터가 없는지 확인한 후 결과를 대입합니다. 실패한 파일이 기존의 유효한 기록을 부분적으로 바꾸지 않도록 하는 **검증 후 반영** 구조입니다.\n\n입력 값과 자원 사용량도 별도로 검사합니다. 현재 로컬 파일 API는 틱 수·파일 바이트 수에 상한을 두고, 숫자 토큰도 파서가 허용하는 자릿수 이내에서 읽습니다. 랭킹 경기나 봇 보상은 각 목적에 맞는 다른 제한을 사용합니다.\n\nSave는 잘못된 마스크·개수를 파일을 열기 전에 거부하고 쓰기와 flush 결과를 확인합니다. 저장하려는 내용의 타당성, 저장 작업의 성공, 재생 시 같은 게임 상태가 나오는지는 각각 확인할 조건입니다.",
+      "reference": {
+        "path": "core/replay.cpp",
+        "symbol": "bool Load(",
+        "invariant": "넓은 값에서 검증하고 완성된 후보만 호출자에게 전달한다.",
+        "mayDiffer": "현재 파일은 단순 텍스트이고 숫자·파일·틱 상한은 API 정책에 따라 바뀔 수 있다.",
+        "omitted": "완전한 경기 기록기의 시작 상태·버전·양쪽 입력 수집은 이 파서만으로 구성되지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "F5/F6 파일의 재현 범위",
+          "body": "현재 디버그 경로는 로컬 inputMask와 p2=0을 기록하며 경기 중간 상태 스냅샷을 담지 않습니다. 임의 시점의 F5 파일을 시드만으로 완전 재생할 수 있다고 가정하지 않습니다. 재현에는 같은 규칙·초기 상태와 실제 적용된 모든 입력이 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "표현 변경이 동작을 바꾸지 않았는지 검사한다",
+      "body": "검사는 마스크 값과 의미를 분리합니다. raw 0~65535를 decode에 넣어 0~31만 수락하는지 확인하고, 허용된24개 Intent는 encode→decode 왕복에서 같은 필드를 얻는지 검사합니다. raw 왕복은 좌우 동시 비트를 중립으로 정규화한 결과와 비교합니다.\n\nhas_any/has_all은 value와 query 각각0~255를 조합한65,536쌍을 확인합니다. 기대값은 각 자리의 포함 개수를 세어 구합니다. 정답 계산에 검사 대상과 똑같은 비트식을 복사하는 대신, 다른 표현으로 결과를 비교하는 방식입니다.\n\n입력 수명은32가지 프레임 샘플을3번 조합한32,768개 이력으로 확인합니다. 좌우·회전·드롭은 발생 여부를 모으고 Down은 마지막 샘플만 사용한 기대값과 비교합니다. 소비를 두 번 호출했을 때 두 번째에 held만 남는지, clear 뒤에는 모두 비어 있는지도 봅니다.\n\n실제 파일 검사는256개 바이트 전체,256처럼 축소하면 정상 값으로 보이는 숫자, 잘린 파일·중복 인덱스·여분 데이터와 실패 시 출력 보존을 확인합니다. 작은 정수로 바꾸는 위치 하나가 경계의 신뢰성을 바꿀 수 있음을 직접 관찰할 수 있습니다.",
+      "codes": [
+        {
+          "label": "simulation/input_mask.h",
+          "language": "cpp",
+          "file": "checkpoints/48-input-mask/simulation/input_mask.h",
+          "collapsed": true
+        },
+        {
+          "label": "simulation/pending_controls.h",
+          "language": "cpp",
+          "file": "checkpoints/48-input-mask/simulation/pending_controls.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "조립하고 숫자로 실행 결과를 읽는다",
+      "body": "파일을 다음과 같이 나눕니다. 기존 FrameRunner·Round·플랫폼 구현은 유지합니다.\n\n| 파일 | 역할 |\n| --- | --- |\n| simulation/intent.h | 의미를 나타내는 값 타입 |\n| simulation/input_mask.h | 비트 규약·조회·검증·인코딩·디코딩 |\n| simulation/pending_controls.h | 마스크 보관과 틱 소비 |\n| src/mask_demo.cpp | 변환과 프레임 수명 출력 |\n| tests/mask_contract.cpp | 전체 조합과 변환 계약 검사 |\n\n저장소 루트에서 실행합니다. 명령은 단일 구성 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/48-input-mask -B out/study-48 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-48 --target mask_demo mask_contract frame_contract\n./out/study-48/mask_demo\nctest --test-dir out/study-48 -R '^(mask_contract|frame_contract)$' --output-on-failure\n```\n\n출력 중 `raw=9 bits=00001001 h=-1 cw=1 soft=0 hard=0`을 비트 표와 대조하세요. raw 19는 좌우와 드롭이 함께 있지만 h=0으로 나옵니다. raw 32와 256은 invalid입니다. 마지막 연속 소비의 두 번째 결과는 h=0, soft=1이고 clear 뒤에는 soft도0입니다.\n\n실제 SDL 사건에서 틱까지 연결하려면 SDL2 개발 라이브러리가 있는 환경에서 아래 경로도 사용할 수 있습니다. input_pipeline의 CTest 설정은 dummy 드라이버로 사건을 공급합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/48-input-mask -B out/study-48-sdl -DSTUDY_PLATFORM=SDL\ncmake --build out/study-48-sdl --target input_pipeline\nctest --test-dir out/study-48-sdl -R '^input_pipeline$' --output-on-failure\n```\n\npending의 OR를 XOR로 바꾸면 같은 눌림을 두 번 수집하는 검사가 왜 실패하는지 설명해 보세요. valid에서 먼저 Mask로 변환하면 어느 넓은 값이 잘못 수락되는지도 예측한 뒤 확인합니다."
+    }
+  ],
+  "questions": [
+    {
+      "id": "48-1",
+      "kind": "결과 예측",
+      "question": "마스크0에 left, rotate, left를 순서대로 OR 누적했습니다. 최종 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "10: left를 두 번 더한다."
+        },
+        {
+          "id": "b",
+          "text": "9: 같은 비트는 한 번 설정된 상태를 유지한다."
+        },
+        {
+          "id": "c",
+          "text": "1: 마지막 요청만 남는다."
+        },
+        {
+          "id": "d",
+          "text": "8: 중복된 left가 제거된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "9: 같은 비트는 한 번 설정된 상태를 유지한다.",
+      "explanation": "OR는 자리별 발생 여부를 합칩니다.1|8|1=9입니다. 덧셈의 자리올림이나 XOR의 토글과 다릅니다."
+    },
+    {
+      "id": "48-2",
+      "kind": "적용",
+      "question": "value=9, query=left|right=3일 때 (has_any, has_all)은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(true, true)"
+        },
+        {
+          "id": "b",
+          "text": "(false, true)"
+        },
+        {
+          "id": "c",
+          "text": "(false, false)"
+        },
+        {
+          "id": "d",
+          "text": "(true, false)"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "(true, false)",
+      "explanation": "9에는 left와 rotate가 있습니다. query의 left는 있지만 right는 없어 하나라도 포함은true, 모두 포함은false입니다."
+    },
+    {
+      "id": "48-3",
+      "kind": "오류 원인",
+      "question": "외부 값256을 Mask로 바꾼 다음 valid를 호출했습니다. 어떤 문제가 생기나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0으로 바뀌어 원래의 잘못된 값을 찾지 못한다."
+        },
+        {
+          "id": "b",
+          "text": "32로 바뀌어 drop이 반복된다."
+        },
+        {
+          "id": "c",
+          "text": "uint8_t 변환 자체가 항상 예외를 던진다."
+        },
+        {
+          "id": "d",
+          "text": "valid가 원래256을 자동으로 복원한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "0으로 바뀌어 원래의 잘못된 값을 찾지 못한다.",
+      "explanation": "uint8_t 축소 결과는0입니다.0은 유효한 무입력 마스크이므로 검증 전에 정보가 사라집니다. 넓은 값에서 검사한 뒤 변환해야 합니다."
+    },
+    {
+      "id": "48-4",
+      "kind": "설계 해석",
+      "question": "학습 코드에서 encode(decode(19))의 결과와 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "19: 모든 raw 마스크가 그대로 왕복한다."
+        },
+        {
+          "id": "b",
+          "text": "3: 드롭을 소비하여 지운다."
+        },
+        {
+          "id": "c",
+          "text": "16: 양쪽 방향을 중립으로 해석하고 드롭을 남긴다."
+        },
+        {
+          "id": "d",
+          "text": "0: 좌우 동시 입력은 마스크 전체가 무효다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "16: 양쪽 방향을 중립으로 해석하고 드롭을 남긴다.",
+      "explanation": "19는LEFT|RIGHT|DROP입니다. 허용 비트만 있으므로 유효하지만, 기준 decode는 양쪽 방향을 중립으로 해석합니다. 다시 encode하면DROP16만 남습니다. 현재 SimGame의 순차 방향 시도와는 다른 정책입니다."
+    },
+    {
+      "id": "48-5",
+      "kind": "경계 구분",
+      "question": "두 플레이어의 입력 마스크를60Hz로 기록합니다. “120바이트/초”가 가리키는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "현재 텍스트 리플레이 파일의 정확한 증가량"
+        },
+        {
+          "id": "b",
+          "text": "두 입력 마스크 값만의 양"
+        },
+        {
+          "id": "c",
+          "text": "TCP 패킷 헤더까지 포함한 전송량"
+        },
+        {
+          "id": "d",
+          "text": "Intent 구조체 두 개의 메모리 크기"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "두 입력 마스크 값만의 양",
+      "explanation": "플레이어당1바이트×2명×60틱입니다. 텍스트 숫자·인덱스·공백·헤더나 네트워크 프레이밍의 크기는 별도로 계산해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "비트 표 없이9·19·31을 요청 집합으로 풀어 쓴다.",
+      "같은 요청을 OR·덧셈·XOR로 두 번 기록한 차이를 계산한다.",
+      "any/all 조회와 무입력 검사에서0의 의미를 구분한다.",
+      "Intent 왕복과 raw 마스크 왕복의 서로 다른 기대값을 검사한다.",
+      "0틱 보관과 여러 틱 소비가 저장 표현 변경 뒤에도 유지되는지 확인한다.",
+      "256을 축소하기 전과 후의 검증 결과를 비교한다."
+    ],
+    "expected": "표현의 유효성·입력의 수명·조작의 적용 정책을 나누어 마스크를 구현하고 검증한다.",
+    "failureChecks": [
+      "비트 OR 대신 논리 OR나 덧셈을 사용하지 않았는가?",
+      "정수 승격 이후의 연산 폭을 확인했는가?",
+      "외부 값을 줄이기 전에 허용 비트를 검사했는가?",
+      "raw 좌우 동시 비트와 의미상 중립을 구분했는가?",
+      "마스크 값의 크기를 파일·패킷 전체 크기로 설명하지 않았는가?"
+    ]
+  }
+}

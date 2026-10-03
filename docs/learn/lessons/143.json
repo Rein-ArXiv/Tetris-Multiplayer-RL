@@ -1,0 +1,393 @@
+{
+  "id": "lesson-143",
+  "title": "서버 시뮬레이션: 신고 대신 재현 판정",
+  "shortTitle": "공통 입력·같은 규칙·완결된 결과",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 계정과 입력 주체를 확인하지만 클라이언트가 주장한 승패만으로는 보상을 결정할 수 없습니다.",
+  "finish": "완료: 서버가 같은 규칙 코어로 입력을 진행하고 실제 종료에서만 인증된 계정의 저장 레코드를 만듭니다.",
+  "objective": "입력 수신·규칙 진행·종료 판정·결과 저장의 경계를 설명하고, 묶음과 도착 순서를 바꿔도 같은 판정이 나오는지 검사합니다.",
+  "prerequisites": [
+    "인증된 연결 주체와 입력 권한",
+    "틱별 입력 쌍·결정론적 Round와 Duel",
+    "경기 결과 제출과 중복 저장 방지"
+  ],
+  "recap": {
+    "points": [
+      "불확실한 서버 요청은 같은 식별자와 내용으로 확인한다.",
+      "로컬 완료와 원격 저장 성공은 다른 상태다."
+    ],
+    "bridge": "계정 요청의 신뢰 경계를 갖췄으므로 경기에서는 어떤 근거로 결과를 만들고 저장 계층에 넘길지 구성합니다."
+  },
+  "sections": [
+    {
+      "title": "두 사람이 같은 말을 해도 경기가 증명되지는 않는다",
+      "body": "두 클라이언트가 모두 “HOST가 이겼고 점수도 이렇다”고 같은 값을 보냈다고 합시다. 서로 모순되는 신고는 걸러낼 수 있지만, 두 클라이언트를 함께 통제하는 사람이 같은 거짓말을 보내는 경우는 구별하지 못합니다. **일관성**은 이야기끼리 맞는다는 성질이고, 이 게임의 **권위 있는 판정**은 서버가 받아들인 입력으로 규칙을 실행한 결과입니다.\n\n서버에는 점수를 신고받아 결정하는 인터페이스 대신 입력을 받아 진행하는 AuthoritativeMatch를 둡니다. 주체는 인증된 연결에서, seed와 경기 ID는 서버의 경기 생성에서 들어옵니다. 클라이언트가 보낸 결과 프레임은 판정 입력이 될 수 없습니다.\n\n계정 인증이 끝났다는 사실도 경기 결과를 증명하지는 않습니다. 인증은 누가 연결했는지를, 규칙 실행은 그 입력으로 어떤 경기가 만들어졌는지를 담당합니다.",
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "새 규칙을 만들지 않고 같은 코어를 서버에 둔다",
+      "body": "서버용으로 낙하·회전·공격 규칙을 다시 작성하면 같은 버그 수정이 한쪽에만 반영되거나 처리 순서가 달라질 수 있습니다. 화면과 분리한 Round와 Duel을 그대로 재사용합니다. 렌더러·소리·창·키보드 장치는 이 실행에 필요하지 않습니다.\n\n결정론의 전제는 같은 규칙 버전·설정·초기 상태·seed·틱별 입력 순서입니다. 프레임이 도착한 실제 시간이나 화면 표시 횟수를 규칙의 난수나 낙하 계산에 섞지 않습니다. 서버와 클라이언트는 표현 속도가 달라도 같은 논리 틱을 실행합니다.\n\n같은 코드를 쓴다는 이유만으로 모든 플랫폼 동작이 자동으로 같아지는 것은 아닙니다. 정수 범위·직렬화·난수 알고리즘과 초기화 계약도 맞아야 합니다. 여기서는 누적 코어의 그 계약을 그대로 서버의 입력 처리와 연결합니다.\n\n```mermaid\nflowchart LR\n C[\"연결의 고정 주체\"] --> G[\"입력 권한·형식·경기 검사\"]\n G --> W[\"같은 틱의 입력 쌍\"]\n W --> D[\"Duel 규칙 진행\"]\n D --> T{\"규칙 종료?\"}\n T -- \"아니오\" --> W\n T -- \"예\" --> R[\"서버 결과 스냅샷\"]\n R --> S[\"저장 제출과 확인\"]\n```",
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "서버의 초기 상태에서 각 보드의 소유권을 시작한다",
+      "body": "생성자는 경기 ID·HOST 계정·PEER 계정·서버 seed·진행 예산을 받습니다. 계정 식별자는 입장권 검증과 연결 매핑에서 얻은 값이며 프레임 본문에서 읽지 않습니다. 경기·계정 ID는 입장과 저장 계층이 사용하는 정수 폭을 유지합니다.\n\nmake_duel은 빈 보드에서 seed로 Round를 만들고 값 복사로 두 보드를 구성합니다. 시작 상태가 같아도 두 보드는 별개의 난수·큐·낙하 상태를 소유합니다. 한쪽의 난수 소비가 다른 보드 객체의 상태를 직접 움직이지 않습니다.\n\n클라이언트가 임의 보드나 seed를 주입하는 공개 함수는 두지 않습니다. 서버가 생성한 경기 설정을 신뢰할 수 있는 생성자 경계로 묶습니다. 실험은 재현을 위해 고정 seed를 사용하고, 실제 경기의 seed 선택 정책은 경기 생성자가 담당합니다.",
+      "codes": [
+        {
+          "label": "같은 초기 상태를 독립 소유한다",
+          "language": "cpp",
+          "text": "    static study_combat::Duel make_duel(std::uint64_t seed) {\n        const std::optional<study_round::Round> seeded =\n            study_round::Round::create_seeded(study_grid::Grid{}, seed);\n        if (!seeded.has_value()) {\n            throw std::invalid_argument(\n                \"AuthoritativeMatch: unable to create seeded round\");\n        }\n        return study_combat::Duel(*seeded, *seeded);\n    }"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "판정 상태에 저장 성공을 섞지 않는다",
+      "body": "VerifiedMatch는 미완료·완결·규칙 입력 무효·진행 예산 소진을 나눕니다. winner는 완결된 경기에서만 의미가 있습니다. 양쪽 보드가 같은 틱에 끝나면 draw이고, 아직 끝나지 않은 경기는 none입니다.\n\n점수와 라인은 완결 시 스냅샷으로 채웁니다. 진행 틱은 성공적으로 실행한 입력 쌍의 수입니다. 오류 때문에 게임을 진행하지 못했는데 틱만 증가하면 기록과 규칙 상태가 어긋납니다.\n\n여기서 finished는 서버 규칙이 종료됐다는 뜻입니다. DB가 결과를 저장하거나 BP를 지급했다는 뜻은 아닙니다. 현재 RankedGame이 쓰는 Applied 열거값도 해당 함수 안에서는 정상 승패 판정 분류이며, 최종 저장 응답은 별도로 확인해야 합니다.",
+      "codes": [
+        {
+          "label": "규칙 판정의 상태와 통계",
+          "language": "cpp",
+          "text": "enum class MatchState {\n    incomplete,\n    finished,\n    invalid,\n    budget_exhausted,\n};\n\nenum class Winner {\n    none,\n    host,\n    peer,\n    draw,\n};\n\nstruct VerifiedMatch {\n    MatchState state = MatchState::incomplete;\n    Winner winner = Winner::none;\n    std::uint64_t ticks = 0;\n    std::uint64_t score_host = 0;\n    std::uint64_t score_peer = 0;\n    std::uint64_t lines_host = 0;\n    std::uint64_t lines_peer = 0;\n};"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "프레임은 연결에 묶인 주체로 제출한다",
+      "body": "MatchInputStream은 생성할 때 받은 actor를 변경하지 않고 프레임을 AuthoritativeMatch::submit에 전달합니다. 프레임 안에는 “내가 HOST다”라는 자기 선언으로 소유자를 바꾸는 경로가 없습니다.\n\nInputAuthority는 경기 태그·메시지 종류·입력 형식·주체·보관 창을 검사합니다. 익명·참가자가 아닌 계정·다른 경기·결과를 가장한 타입은 규칙 진행을 만들지 않습니다. 형태가 맞는 INPUT도 같은 틱의 값을 바꾸려 하면 conflict가 됩니다.\n\n학습 정책은 참가자의 잘못된 입력 형식과 값 충돌에서 경기를 invalid로 닫습니다. 거절된 입력 묶음은 보관 창을 부분 변경하지 않습니다. 프레임 경계 자체가 손상되면 연결 소유자가 abort를 호출합니다. 일반 연결 종료로 입력이 끊긴 미완료 경기와 잘못된 바이트 스트림은 구분할 수 있습니다.",
+      "codes": [
+        {
+          "label": "허용된 입력만 규칙 진행으로 연결한다",
+          "language": "cpp",
+          "text": "    InputDecision submit(std::uint64_t actor, const Frame& frame) noexcept {\n        if (is_terminal(result_.state)) {\n            return InputDecision::inactive;\n        }\n\n        const InputDecision decision = authority_.submit(actor, frame);\n\n        if (decision == InputDecision::malformed ||\n            decision == InputDecision::conflict) {\n            invalidate();\n            return decision;\n        }\n\n        if (decision == InputDecision::stored ||\n            decision == InputDecision::duplicate) {\n            drain();\n        }\n\n        return decision;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "없는 입력과 중립 입력은 다른 상태다",
+      "body": "HOST의 틱 0 입력이 도착하고 PEER의 틱 1 입력만 도착했다면 어떤 틱을 실행할 수 있을까요? 틱 0의 PEER 입력이 없으므로 아직 실행할 수 없습니다. 도착한 것끼리 순서대로 짝지으면 서로 다른 틱을 섞게 됩니다.\n\n입력 값 0은 “이 틱에서 조작하지 않았다”는 실제 기록입니다. 입력이 없는 상태는 아직 알 수 없다는 뜻입니다. 누락을 0으로 대체하면 서버가 임의의 플레이를 추가하고, 지연된 실제 입력과 결과가 달라질 수 있습니다.\n\nInputAuthority::take는 양쪽의 같은 다음 틱이 준비됐을 때만 값을 꺼냅니다. 둘 중 하나라도 빠져 있으면 false이며 규칙과 성공 틱 수가 그대로 남습니다. 연결·경기 대기 기한은 별도의 수명 정책으로 처리합니다.",
+      "codes": [
+        {
+          "label": "같은 틱의 입력 쌍이 있어야 진행한다",
+          "language": "cpp",
+          "text": "        while (result_.state == MatchState::incomplete) {\n            std::uint8_t host_mask = 0;\n            std::uint8_t peer_mask = 0;\n            if (!authority_.take(host_mask, peer_mask)) {\n                return;\n            }"
+        }
+      ]
+    },
+    {
+      "title": "공통 접두사만 한 번씩 소비한다",
+      "body": "각 참가자의 기록이 틱 순서로 이어졌을 때, 양쪽 모두 준비한 처음 구간을 **공통 접두사**라고 볼 수 있습니다. HOST가 0부터 4까지, PEER가 0부터 2까지 갖고 있다면 공통으로 진행할 수 있는 끝은 PEER 기록의 끝입니다.\n\n서버는 준비된 쌍을 꺼내 decode하고 Duel::tick에 전달합니다. 성공한 스텝마다 ticks를 증가시키고 다음 쌍을 확인합니다. 입력이 먼저 많이 도착한 한쪽만 독립적으로 게임을 진행시키지 않습니다.\n\n이미 대기 중인 같은 값의 재전송은 duplicate이며 효과를 추가하지 않습니다. 학습 창에서 이미 소비한 틱은 stale로 거절합니다. 현재 서버는 보관 중인 전체 기록과 비교해 오래된 동일 값도 확인할 수 있습니다. 보관 방식은 달라도 한 틱의 규칙 효과를 중복 적용하지 않는 것이 공통 계약입니다.",
+      "codes": [
+        {
+          "label": "쌍을 해석하고 성공 스텝만 센다",
+          "language": "cpp",
+          "text": "            const auto host_intent = study_input::decode(host_mask);\n            const auto peer_intent = study_input::decode(peer_mask);\n            if (!host_intent.has_value() || !peer_intent.has_value()) {\n                invalidate();\n                return;\n            }\n\n            const auto step = duel_.tick(*host_intent, *peer_intent);\n            if (!step.has_value()) {\n                invalidate();\n                return;\n            }\n\n            result_.ticks += 1;"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "한 틱에서 두 보드를 먼저 진행한다",
+      "body": "HOST 보드를 진행하자마자 공격을 PEER에게 전달한 뒤 PEER 보드를 진행하면, PEER는 같은 틱의 공격을 먼저 받은 상태에서 상쇄·고정을 처리할 수 있습니다. 실행 순서만으로 한쪽의 조건이 달라지는 문제입니다.\n\nDuel은 두 보드의 틱을 먼저 진행한 뒤 공격 증가분을 교환합니다. 각 보드의 attack_sent는 누적 총계입니다. 예를 들어 총계가 3에서 5가 됐다면 이번에 전달할 양은 2입니다. 매번 총계 5를 보내면 과거 공격까지 반복 전달합니다.\n\n양쪽 증가분은 상대 보드의 pending garbage에 넣습니다. 받는 보드의 처리 한도는 규칙의 상수를 참조하고, 이미 끝난 보드에는 진행을 다시 열지 않습니다. 이 순서도 결정론 계약의 일부이므로 서버와 클라이언트가 같은 Duel을 사용합니다.",
+      "codes": [
+        {
+          "label": "두 규칙 스텝 뒤 공격 증가분을 교환한다",
+          "language": "cpp",
+          "text": "        const auto ls = candidate.left_.tick(li.horizontal,li.clockwise,li.soft_drop,li.hard_drop);\n        const auto rs = candidate.right_.tick(ri.horizontal,ri.clockwise,ri.soft_drop,ri.hard_drop);\n        if (ls == study_round::Step::invalid || rs == study_round::Step::invalid)\n            return std::nullopt;\n        // Both boards have advanced before either can receive this tick's attack.\n        const auto lt = candidate.left_.attack_sent(), rt = candidate.right_.attack_sent();\n        if (lt < candidate.left_delivered_ || rt < candidate.right_delivered_)\n            return std::nullopt; // Do not wrap an unsigned subtraction after reset.\n        const auto ld = lt - candidate.left_delivered_, rd = rt - candidate.right_delivered_;\n        constexpr std::uint64_t cap = study_grid::Grid::kRows;\n        // Cross the two amounts: a board must never receive its own attack.\n        if (ld && !candidate.right_.finished() &&\n            !candidate.right_.add_garbage(static_cast<int>(ld > cap ? cap : ld)))\n            return std::nullopt;\n        if (rd && !candidate.left_.finished() &&\n            !candidate.left_.add_garbage(static_cast<int>(rd > cap ? cap : rd)))\n            return std::nullopt;"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "첫 종료 틱의 양쪽 상태로 승패를 정한다",
+      "body": "한 보드가 종료됐는지 검사하기 전에 같은 틱의 두 보드 진행이 끝나 있어야 합니다. HOST만 종료됐다면 PEER 승리, PEER만 종료됐다면 HOST 승리, 양쪽이 함께 종료됐다면 무승부입니다.\n\n완결 순간에 점수·라인·진행 틱을 확보하고 학습 입력 게이트를 닫습니다. 한 입력 묶음에 종료 뒤의 조작까지 들어 있어도 추가 틱을 실행하지 않습니다. 종료 뒤 입력을 계속 진행하면 사라진 활성 블록을 다루거나 이미 끝난 통계를 바꾸게 됩니다.\n\n학습 클래스는 완결 결과를 확정한 뒤 후속 입력을 inactive로 거절합니다. 현재 RankedGame은 보드를 더 진행하지 않으면서도 뒤따른 잘못된 입력으로 검증 상태를 무효화할 수 있습니다. 보드 종료와 입력 수명 정책을 비교할 때 이 차이를 함께 봅니다.",
+      "codes": [
+        {
+          "label": "동시 종료까지 확인한 결과 스냅샷",
+          "language": "cpp",
+          "text": "    void finish(bool host_finished, bool peer_finished) noexcept {\n        result_.state = MatchState::finished;\n        if (host_finished && peer_finished) {\n            result_.winner = Winner::draw;\n        } else if (peer_finished) {\n            result_.winner = Winner::host;\n        } else {\n            result_.winner = Winner::peer;\n        }\n        result_.score_host = duel_.left().score();\n        result_.score_peer = duel_.right().score();\n        result_.lines_host = duel_.left().total_lines();\n        result_.lines_peer = duel_.right().total_lines();\n        close_gate();\n    }"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "진행 예산이 끝나도 무승부를 만들어서는 안 된다",
+      "body": "규칙상 종료하지 않은 경기를 무한히 계산하도록 둘 수는 없습니다. 생성자로 최대 진행 틱을 받고, 그 범위가 wire 틱 표현 안에 들어오는지 확인합니다. 서버 정책값과 입력 정수의 표현 한계는 서로 다른 제한입니다.\n\n성공 스텝 뒤에는 실제 종료를 먼저 검사하고 그 다음 예산 소진을 검사합니다. 마지막 허용 틱에서 보드가 끝났다면 완결된 경기입니다. 같은 틱 수에 도달했어도 보드가 끝나지 않았다면 budget_exhausted이며 승자·지급 기록을 만들지 않습니다.\n\n이 예산은 총 계산량을 제한합니다. 입력을 비정상적으로 빨리 보내 짧은 실제 시간에 많은 틱을 진행하는 문제까지 해결하지는 않습니다. 공개 경기에는 실제 경과 시간 대비 입력 진행량과 연결 수명 정책도 함께 필요합니다.",
+      "codes": [
+        {
+          "label": "실제 종료를 예산 판정보다 먼저 확인한다",
+          "language": "cpp",
+          "text": "            const bool host_finished = duel_.left().finished();\n            const bool peer_finished = duel_.right().finished();\n            if (host_finished || peer_finished) {\n                finish(host_finished, peer_finished);\n                return;\n            }\n\n            if (result_.ticks >= max_ticks_) {\n                result_.state = MatchState::budget_exhausted;\n                result_.winner = Winner::none;\n                close_gate();\n                return;\n            }\n        }\n    }"
+        }
+      ]
+    },
+    {
+      "title": "승리한 편을 인증된 계정 ID로 연결한다",
+      "body": "winner의 host와 peer는 경기 안에서의 편입니다. 값이 HOST라는 이유로 DB 사용자 ID를 특정 작은 정수로 쓰면 안 됩니다. 생성 시 고정한 host_와 peer_가 실제 저장 대상 계정입니다.\n\nrecord는 finished 상태에서만 MatchRecord를 만듭니다. 경기 키와 ID는 서버가 정하고, 점수·라인·틱·승자는 서버의 스냅샷에서 가져옵니다. 클라이언트가 제공한 점수 필드를 복사하는 부분은 없습니다.\n\n저장 프로토콜의 라인 필드가 더 좁은 정수라면 변환 전에 상한을 확인합니다. 캐스팅은 검증이 아니며, 표현할 수 없는 통계를 작은 값으로 잘라 저장하지 않습니다.\n\n한 경기에서 저장 키는 처음 정한 값을 계속 사용합니다. 재전송할 때 새 키를 발급하면 저장 계층이 같은 경기인지 알아보지 못할 수 있습니다.",
+      "codes": [
+        {
+          "label": "완결된 서버 상태만 저장 레코드로 변환한다",
+          "language": "cpp",
+          "text": "    std::optional<MatchRecord> record(std::uint64_t key) const noexcept {\n        if (result_.state != MatchState::finished || key == 0 ||\n            result_.lines_host > std::numeric_limits<std::uint32_t>::max() ||\n            result_.lines_peer > std::numeric_limits<std::uint32_t>::max()) return {};\n        MatchRecord out;\n        out.key = key; out.round = round_; out.player_a = host_; out.player_b = peer_;\n        out.ticks = result_.ticks;\n        out.score_a = result_.score_host; out.score_b = result_.score_peer;\n        out.lines_a = static_cast<std::uint32_t>(result_.lines_host);\n        out.lines_b = static_cast<std::uint32_t>(result_.lines_peer);\n        out.winner = result_.winner == Winner::host ? MatchRecord::a\n                   : result_.winner == Winner::peer ? MatchRecord::b : MatchRecord::draw;\n        return out;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    },
+    {
+      "title": "결과 제출 포트는 저장 여부를 따로 확인한다",
+      "body": "MatchSubmission은 완결된 MatchRecord를 준비하고 저장 서비스에 전달하는 기존 경계입니다. AuthoritativeMatch::record가 없으면 prepare하지 않습니다. 미완료·무효·예산 소진을 draw 레코드로 만들어 제출하는 우회도 두지 않습니다.\n\n제출 성공을 모르는 상황에서는 같은 경기 키와 같은 통계를 재시도합니다. 서버 규칙의 중복 틱 방지와 저장 서비스의 경기 키 중복 방지는 서로 다른 계층입니다. 하나만 있어서는 재화가 한 번만 반영된다고 결론낼 수 없습니다.\n\n이 차시의 소켓 도구는 저장 포트 자리에 확인 응답을 돌려주는 검사 대역을 사용합니다. 따라서 출력된 완료는 실제 계정 DB 지급 실험이 아닙니다. 포트에 넘길 값이 신뢰할 수 있는 서버 상태에서 나왔는지 확인하는 범위입니다."
+    },
+    {
+      "title": "수신 방식이 달라도 상태 소유자는 하나다",
+      "body": "AuthoritativeMatch는 mutex나 스레드를 내부에 만들지 않습니다. 소유자가 한 이벤트 루프에서 호출하거나, 여러 스레드에서 접근할 경우 외부 잠금으로 직렬화해야 합니다. result와 state의 const 참조도 다른 스레드의 동시 변경을 자동으로 막지는 않습니다.\n\n프로브는 각 소켓을 고정 actor와 MatchInputStream에 연결하고 CallbackLoop에서 프레임을 읽습니다. 실제 TCP 읽기를 작은 조각으로 나누어 프레임 경계가 read 호출 경계와 달라도 파서가 같은 입력을 복원하는지 확인합니다. poll과 epoll은 관찰 수단이 다르고 같은 경기 객체의 규칙은 바뀌지 않습니다.\n\n프로브의 actor는 이미 인증됐다는 전제의 fixture입니다. 실제 서비스에서는 티켓 소비 결과로 연결의 actor를 정해야 하며, 이 프로브가 새 로그인 프로토콜을 구현한 것은 아닙니다."
+    },
+    {
+      "title": "묶음과 도착 순서를 바꾸며 같은 규칙 상태를 비교한다",
+      "body": "직접 비교용 실행은 프레임이나 서버 수신 창 없이 같은 Round 두 개를 Duel로 진행합니다. 그때 사용한 양쪽 입력을 기록하고, AuthoritativeMatch에는 다른 묶음 크기와 도착 순서로 전달합니다.\n\n최종 승패·점수·라인뿐 아니라 각 보드의 정규 직렬화 바이트를 비교합니다. 같은 해시만 확인하는 것보다 어떤 상태가 같아야 하는지 직접 드러낼 수 있습니다. 프로브에서는 각 성공 틱마다 직접 실행 상태와 비교합니다.\n\n이 비교는 수신·묶음·진행을 연결하는 코드의 오류를 찾습니다. 공유한 Duel 규칙의 오류는 양쪽에 같이 나타날 수 있으므로, 공격 순서·상쇄·종료 경계는 기존 규칙 계약 검사도 함께 유지합니다. 단일 비교만으로 게임 전체의 정확성을 증명하지 않습니다."
+    },
+    {
+      "title": "헤드리스 도구를 빌드하고 판정 경계를 관찰한다",
+      "body": "새 타깃은 창을 만들지 않으며 누적 순수 규칙과 소켓 계층을 연결합니다. 다음 명령으로 계약 검사와 실제 loopback 프로브를 실행합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/143-authoritative-simulation -B out/study-143 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-143 --target authoritative_contract authoritative_probe -j2\nout/study-143/authoritative_contract\nout/study-143/authoritative_probe\n# Linux에서는 동일 프로브의 관찰 방식을 바꿔 실행한다.\nout/study-143/authoritative_probe --epoll\n```\n\nBoost 헤더가 기본 경로 밖에 있으면 STUDY_BOOST_INCLUDE에 경로를 지정합니다. 누적 체크포인트의 전체 설정에 필요한 의존성과 새 타깃이 실제 실행 중 사용하는 기능은 구별합니다.\n\n```sh\npython3 scripts/check_learning_authoritative_simulation.py --boost /path/to/boost/include\n```\n\n허위 결과 타입과 참가자가 아닌 입력은 규칙 틱을 만들지 않아야 합니다. 한쪽 입력만 전달한 구간에서 틱이 유지되고, 양쪽 입력을 채운 뒤 실제 종료와 서버 기록이 생기는지 출력과 검사 조건을 함께 읽습니다."
+    },
+    {
+      "title": "전체 구현에서 신뢰가 넘어가는 지점을 찾는다",
+      "body": "입장 단계가 연결 주체를 정하고, InputAuthority가 허용된 입력을 보관하며, AuthoritativeMatch가 Duel을 진행해 결과를 만듭니다. record는 그 결과를 저장 경계의 형식으로 변환합니다. 각 경계가 어떤 값을 믿고 어떤 값을 검사하는지 따라가면 서버 책임을 읽기 쉬워집니다.\n\n규칙상 유효한 입력이라는 사실은 사람이 직접 조작했다는 증거가 아닙니다. 자동 플레이·담합·반복 지급은 입력 재현과 별도의 정책 문제입니다. 이 구현이 증명하는 것은 서버가 받아들인 입력과 고정 규칙으로 실제 종료가 계산됐다는 범위입니다.",
+      "codes": [
+        {
+          "label": "전체 파일 — 서버 소유 경기 판정",
+          "language": "cpp",
+          "file": "checkpoints/143-authoritative-simulation/net/authoritative_match.h"
+        },
+        {
+          "label": "전체 파일 — 고정 주체와 프레임 스트림",
+          "language": "cpp",
+          "file": "checkpoints/143-authoritative-simulation/net/match_input_stream.h"
+        },
+        {
+          "label": "전체 파일 — 묶음·순서·종료·제출 계약",
+          "language": "cpp",
+          "file": "checkpoints/143-authoritative-simulation/tests/authoritative_contract.cpp"
+        },
+        {
+          "label": "전체 파일 — 실제 TCP 판정 프로브",
+          "language": "cpp",
+          "file": "checkpoints/143-authoritative-simulation/tools/authoritative_probe.cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "서버가 정한 초기 상태와 받아들인 양쪽 입력으로 같은 규칙 코어를 진행하여 종료와 통계를 계산한다.",
+        "mayDiffer": "현재 코드는 SimGame과 전체 입력 기록을, 학습 코드는 Round·Duel과 유한 입력 창을 사용한다. 학습 프레임의 인코딩과 종료 후 입력 정책도 다르다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "143-1",
+      "question": "두 클라이언트가 같은 승패와 점수를 신고했지만 입력으로 경기가 끝나지 않았습니다. 서버는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "동의했으므로 지급"
+        },
+        {
+          "id": "b",
+          "text": "무승부 참가 보상 지급"
+        },
+        {
+          "id": "c",
+          "text": "미완료로 두고 지급 레코드를 만들지 않음"
+        },
+        {
+          "id": "d",
+          "text": "점수가 높은 쪽 승리"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "미완료로 두고 지급 레코드를 만들지 않음",
+      "explanation": "일치하는 신고는 실제 종료의 증거가 아닙니다. 서버 규칙 실행의 완결 상태가 결과 생성 조건입니다."
+    },
+    {
+      "id": "143-2",
+      "question": "HOST 틱0은 있지만 PEER는 틱1만 있습니다. 다음 행동은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "PEER 틱0이 올 때까지 틱0을 진행하지 않음"
+        },
+        {
+          "id": "b",
+          "text": "PEER 틱1과 HOST 틱0을 묶음"
+        },
+        {
+          "id": "c",
+          "text": "PEER 틱0을 중립으로 채움"
+        },
+        {
+          "id": "d",
+          "text": "HOST만 먼저 진행"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "PEER 틱0이 올 때까지 틱0을 진행하지 않음",
+      "explanation": "서로 같은 틱의 입력 쌍이 필요합니다. 누락과 명시적 중립 입력은 다릅니다."
+    },
+    {
+      "id": "143-3",
+      "question": "공격 누적 총계가 3에서 5로 늘었습니다. 이번 틱에 상대에게 전달할 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "5"
+        },
+        {
+          "id": "b",
+          "text": "2"
+        },
+        {
+          "id": "c",
+          "text": "3"
+        },
+        {
+          "id": "d",
+          "text": "매 틱마다 누적 합계 전체"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "2",
+      "explanation": "이미 전달한 총계를 빼 증가분만 보냅니다. 두 보드의 틱을 끝낸 뒤 교환하여 호출 순서에 따른 차이도 막습니다."
+    },
+    {
+      "id": "143-4",
+      "question": "마지막 허용 틱에서 한 보드가 실제 종료됐습니다. 어떤 순서가 맞을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "예산부터 보고 무조건 무효"
+        },
+        {
+          "id": "b",
+          "text": "클라이언트 신고 대기 후 무승부"
+        },
+        {
+          "id": "c",
+          "text": "두 보드를 더 진행해 재확인"
+        },
+        {
+          "id": "d",
+          "text": "규칙 종료를 먼저 판정하여 완결로 처리"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "규칙 종료를 먼저 판정하여 완결로 처리",
+      "explanation": "성공한 해당 틱의 종료를 예산 소진보다 먼저 확인합니다. 종료하지 않은 예산 소진과 구별합니다."
+    },
+    {
+      "id": "143-5",
+      "question": "서버가 finished 결과와 MatchRecord를 만들었습니다. 이때 확정할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "BP 저장 완료"
+        },
+        {
+          "id": "b",
+          "text": "모든 플랫폼에서 검증 완료"
+        },
+        {
+          "id": "c",
+          "text": "규칙상 경기가 완결됐으며 DB 저장 확인은 별도"
+        },
+        {
+          "id": "d",
+          "text": "사람이 직접 조작했음"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "규칙상 경기가 완결됐으며 DB 저장 확인은 별도",
+      "explanation": "판정은 규칙 실행의 결과입니다. 저장 여부·입력 주체가 사람인지 여부는 다른 계약입니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "같은 입력 기록을 서로 다른 묶음 크기와 도착 순서로 전달한다.",
+      "한쪽 입력을 비워 두고 중립 입력을 넣었을 때와 비교한다.",
+      "실제 종료·동시 종료·예산 소진에서 record 생성 여부를 확인한다."
+    ],
+    "failureChecks": [
+      "허위 결과 타입과 다른 연결 주체가 규칙을 진행시키지 못하는지 확인한다.",
+      "공격 총계 대신 증가분을 교환해야 하는 이유를 작은 값으로 설명한다.",
+      "finished와 저장 서비스의 확인 응답을 구분한다."
+    ],
+    "expected": "서버가 받아들인 공통 입력만 같은 규칙으로 실행하며 완결된 경기만 저장 레코드로 이어진다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 선택 판정 초안·기존 규칙 직접 비교·실제 TCP·현재 두 relay/meta 통합 검사",
+    "corrections": [
+      "정의되지 않은 Actor 타입과 좁아진 경기/계정 ID 수정",
+      "보드 종료·입력 종료·DB 저장 상태의 의미 분리",
+      "전체 기록과 유한 입력 창의 오래된 입력 정책 차이 명시",
+      "현재 RankedGame에 직접 SimGame 비교 검사 추가"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 각7CTest: 새 서버 판정·poll/epoll 실제 TCP·누적 combat/lockstep/입력 권한/결과 제출 통과",
+    "직접 Duel 상태 바이트·승패·통계와 배치/도착 순서 비교, 중립/누락·동시 종료·예산 경계·종료 뒤 묶음 suffix·잘못된 입력·64비트 ID·완결 제출 통과",
+    "학습 규칙/스트림/실제 TCP와 현재 RankedGame 직접 SimGame 비교 ASan/UBSan 통과",
+    "현재 thread/reactor relay·ranked_game_test Release 빌드 및 CTest 통과",
+    "현재 두 relay와 meta/SQLite 실제 통합14사례 통과: 허위 일치 신고·정상 terminal의 거짓 신고/연결 종료·잘못된 입력·미완료 이탈 보상 없음. 인증 호환 fixture이며 신규 TLS/입장권 검증은 별도 범위",
+    "신규 및 현재 타깃 검사 빌드 경고 없음",
+    "인라인9·현재 심볼·누적 파일 보존·Part 발췌 확인",
+    "Windows/macOS native·실제 전원/장치·실사용 경기·사람 조작 여부 미검증; 수동GUI·공개배포 없음"
+  ]
+}

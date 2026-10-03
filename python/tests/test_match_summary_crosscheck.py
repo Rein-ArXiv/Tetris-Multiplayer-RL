@@ -13,6 +13,8 @@ import sqlite3
 import struct
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import urllib.request
 from pathlib import Path
 
@@ -164,7 +166,7 @@ def _spawn_meta(tmp_path, relay_secret: str | None = TEST_RELAY_SECRET):
     return proc, f"http://127.0.0.1:{port}"
 
 
-def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SECRET, binary=None):
+def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SECRET, binary=None, send_mode=None):
     bin_ = binary or _find_bin("tetris_relay", "TETRIS_RELAY_BIN")
     if not bin_:
         pytest.skip("tetris_relay binary missing")
@@ -174,11 +176,25 @@ def _spawn_relay(meta_url: str | None, relay_secret: str | None = TEST_RELAY_SEC
         args += ["--meta", meta_url]
         if relay_secret:
             args += ["--meta-secret", relay_secret]
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    relay_env = os.environ.copy()
+    # Test-only Linux syscall shim; never injected into meta or the test client.
+    if relay_env.get("TETRIS_TEST_RELAY_PRELOAD"):
+        relay_env["LD_PRELOAD"] = relay_env["TETRIS_TEST_RELAY_PRELOAD"]
+    if send_mode:
+        relay_env["TETRIS_TEST_SEND_MODE"] = send_mode
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=relay_env)
     if not _wait_listen(port, 5.0):
         proc.kill()
         pytest.fail("relay failed to listen")
     return proc, port
+
+
+def _assert_no_sanitizer_report(proc):
+    if not os.environ.get("TETRIS_TEST_SANITIZED_RELAY"):
+        return
+    stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+    assert proc.returncode == 0, stderr[-6000:]
+    assert "ERROR: AddressSanitizer" not in stderr and "runtime error:" not in stderr, stderr[-6000:]
 
 
 # ---- 테스트 ------------------------------------------------------------------
@@ -201,7 +217,9 @@ def meta_relay(tmp_path, request):
         for proc in (rp, mp):
             proc.terminate()
             try: proc.wait(timeout=3)
-            except subprocess.TimeoutExpired: proc.kill()
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.wait(timeout=3)
+        _assert_no_sanitizer_report(rp)
 
 
 def _consistent_summaries(my1_score=5000, my1_lines=20,
@@ -420,7 +438,7 @@ def test_relay_without_meta_rejects_token(tmp_path):
         except subprocess.TimeoutExpired: rp.kill()
 
 
-@pytest.mark.parametrize("disconnect", [False, True])
+@pytest.mark.parametrize("disconnect", [False, True, "simultaneous"])
 def test_verified_terminal_game_ignores_false_claims(meta_relay, disconnect):
     base = meta_relay["meta_url"]
     players = [_post(f"{base}/v1/guest") for _ in range(2)]
@@ -444,7 +462,17 @@ def test_verified_terminal_game_ignores_false_claims(meta_relay, disconnect):
         # both streams; it can award even when a client withholds its summary.
         assert _recv_until(host, MsgType.INPUT) is not None
         assert _recv_until(guest, MsgType.INPUT) is not None
-        if disconnect:
+        if disconnect == "simultaneous":
+            barrier = Barrier(2)
+            def send_claim(sock, claim):
+                barrier.wait(timeout=3)
+                sock.sendall(claim * 8)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [pool.submit(send_claim, host, _summary(0, 99999, 999, 88888, 888)),
+                           pool.submit(send_claim, guest, _summary(1, 88888, 888, 99999, 999))]
+                for future in pending:
+                    future.result(timeout=5)
+        elif disconnect:
             guest.close()
         else:
             host.sendall(_summary(0, 99999, 999, 88888, 888))
@@ -465,7 +493,7 @@ def test_verified_terminal_game_ignores_false_claims(meta_relay, disconnect):
             sock.close()
 
 
-@pytest.mark.parametrize("violation", ["mask", "rewrite", "seed"])
+@pytest.mark.parametrize("violation", ["mask", "rewrite", "seed", "length", "tick_overflow"])
 def test_invalid_input_never_posts_a_match(meta_relay, violation):
     base = meta_relay["meta_url"]
     players = [_post(f"{base}/v1/guest") for _ in range(2)]
@@ -481,6 +509,10 @@ def test_invalid_input_never_posts_a_match(meta_relay, violation):
         if violation == "seed":
             seed = struct.unpack_from("<Q", found[host_index], 1)[0]
             host.sendall(build_frame(MsgType.SEED, struct.pack("<QIBB", seed ^ 1, 120, 2, 1)))
+        elif violation == "length":
+            host.sendall(build_frame(MsgType.INPUT, struct.pack("<IHB", 0, 2, 0)))
+        elif violation == "tick_overflow":
+            host.sendall(build_frame(MsgType.INPUT, struct.pack("<IHB", 0xffffffff, 1, 0)))
         elif violation == "mask":
             host.sendall(build_frame(MsgType.INPUT, struct.pack("<IHB", 0, 1, 32)))
         else:
@@ -497,3 +529,63 @@ def test_invalid_input_never_posts_a_match(meta_relay, violation):
     finally:
         for sock in sockets:
             sock.close()
+
+@pytest.mark.parametrize("mode", ["queue", "blocked", "fail-first"])
+def test_result_fifo_and_bounded_close(tmp_path, mode):
+    """Actual reactor with test-only syscall injection, not packet-timing guesses."""
+    if not os.environ.get("TETRIS_TEST_RELAY_PRELOAD"):
+        pytest.skip("Linux result-send shim not configured")
+    build = Path(os.environ["TETRIS_SECURE_BUILD"])
+    mp, base = _spawn_meta(tmp_path)
+    rp, port = _spawn_relay(base, binary=(build / "tetris_relay_reactor").resolve(), send_mode=mode)
+    sockets = []
+    try:
+        players = [_post(f"{base}/v1/guest") for _ in range(2)]
+        sockets = [socket.create_connection(("127.0.0.1", port), timeout=2) for _ in range(2)]
+        for sock, player in zip(sockets, players):
+            sock.sendall(_qjoin(player["token"]))
+        found = [_recv_until(sock, MsgType.MATCH_FOUND) for sock in sockets]
+        assert all(found)
+        host_index = next(i for i,data in enumerate(found) if data[0] == 1)
+        host, guest = sockets[host_index], sockets[1-host_index]
+        _queue_accept(host, guest)
+        # The first forwarded marker is held after its wire header by the shim.
+        if mode == "queue":
+            guest.sendall(build_frame(MsgType.PING, b"fifo145!"))
+        if mode == "fail-first":
+            host.sendall(_summary(1,999,9,0,0))
+            guest.sendall(_summary(0,0,0,999,9))
+            observer = guest  # A's result send is forced to fail before B's enqueue.
+        else:
+            guest.close()
+            observer = host
+        started = time.monotonic()
+        observer.settimeout(4)
+        raw = bytearray()
+        while True:
+            data = observer.recv(4096)
+            if not data:
+                break
+            raw.extend(data)
+        elapsed = time.monotonic()-started
+        buffer = bytearray(raw)
+        decoded = list(parse_frames(buffer))
+        assert not buffer, "truncated frame at graceful EOF"
+        if mode == "blocked":
+            assert not decoded and elapsed < 3.5, "drain deadline must bound teardown"
+        else:
+            kinds = [kind for kind,_ in decoded]
+            assert kinds == ([MsgType.PING, MsgType.MATCH_RESULT] if mode == "queue" else [MsgType.MATCH_RESULT])
+            assert decoded[-1][1][12] == 3  # Incomplete is not a win or saved draw.
+        with sqlite3.connect(tmp_path / "test.db") as con:
+            assert con.execute("SELECT count(*) FROM matches").fetchone()[0] == 0
+    finally:
+        for sock in sockets:
+            sock.close()
+        for proc in (rp,mp):
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill();proc.wait(timeout=3)
+        _assert_no_sanitizer_report(rp)

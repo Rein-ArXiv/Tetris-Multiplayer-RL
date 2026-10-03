@@ -1,0 +1,491 @@
+{
+  "id": "lesson-74",
+  "title": "PCM과 샘플: 소리의 데이터 표현",
+  "shortTitle": "표본·채널·프레임과 안전한 크기 계산",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 메뉴와 설정은 갖추었지만 소리의 배열과 시간·채널 정보를 표현할 자료형은 없습니다.",
+  "finish": "완료: 형식을 검증한 PCM 배열을 소유하고, 1초 파형의 샘플·프레임·바이트 수와 기준점을 실행으로 확인합니다.",
+  "objective": "샘플링과 양자화를 구별하고 인터리브 인덱스·기간·메모리 크기를 계산하며, 잘린 프레임과 범위 초과 입력을 진단합니다.",
+  "prerequisites": [
+    "정수 범위·나머지·실수 나눗셈",
+    "vector 소유권과 const 조회",
+    "CMake 타깃과 오류 반환"
+  ],
+  "recap": {
+    "points": [
+      "설정 파일은 후보를 검증한 뒤 실행 중 값에 적용합니다.",
+      "값과 읽기·저장 상태를 나누면 기본값으로 계속 실행하면서 원본을 보호할 수 있습니다.",
+      "직렬화된 데이터의 해석 규칙과 소유 수명을 함께 설계합니다."
+    ],
+    "bridge": "소리 데이터도 저장된 값과 해석 규칙을 함께 필요로 합니다. 채널과 시간 기준을 가진 배열부터 만들어 보겠습니다."
+  },
+  "sections": [
+    {
+      "title": "소리도 값의 배열부터 만든다",
+      "body": "메뉴의 그림과 글자는 화면에 보낼 데이터와 표현 자원으로 나뉘어 있습니다. 소리도 먼저 **어떤 값이 어떤 시각의 어느 채널을 나타내는지** 정해야 합니다. `int16_t` 배열만 받아서는 한 값이 왼쪽인지 오른쪽인지, 얼마나 빨리 소비해야 하는지 알 수 없습니다.\n\n이번 산출물은 `Pcm16`이라는 소유 자료형과 1초 파형을 만드는 `pcm_probe`입니다. 누적 프로젝트에 CPU 데이터 모듈을 추가하고, 배열의 길이·채널 순서·진폭을 콘솔에서 확인합니다. 게임 main은 그대로 두고 장치 출력 없이 데이터 준비 경로를 완성합니다.\n\n화면에 보이는 도형이 정점의 해석 규칙을 필요로 하듯, PCM도 표본 값과 형식 정보가 한 쌍입니다. 코드가 커져도 유지할 핵심은 **데이터를 소유하는 객체가 그 해석에 필요한 정보를 함께 보관한다**는 점입니다.",
+      "codes": [
+        {
+          "label": "이번에 추가하는 의존 관계",
+          "language": "text",
+          "text": "tools/pcm_probe.cpp → audio/pcm_s16.h → audio/pcm_layout.h\n                      소유·조회·파형       단위 계산·범위 검사\n\ntests/pcm_contract.cpp → 같은 CPU 모듈\n게임 main·규칙·플랫폼·렌더링: 현재 흐름 유지"
+        }
+      ]
+    },
+    {
+      "title": "시간을 고르고, 진폭을 숫자로 고른다",
+      "body": "마이크 앞의 공기압은 연속적으로 변합니다. 일정 간격으로 그 신호의 값을 얻는 **샘플링(표본화)**은 시간축을 이산적으로 만듭니다. 샘플레이트가 44,100 Hz이면 한 채널의 표본 사이 간격은 `1/44100초`, 약 22.68 μs입니다. Hz는 여기서 초당 표본 횟수입니다.\n\n읽어낸 진폭을 유한한 단계 중 하나로 표현하는 과정은 **양자화**입니다. 시간을 더 촘촘히 관찰하는 것과 한 진폭을 더 정밀한 숫자로 표현하는 것은 서로 다른 선택입니다. 시간축에는 샘플레이트, 진폭축에는 표현 형식과 비트 깊이가 관여합니다.\n\n이 실습에서는 부호 있는 16비트 정수 PCM을 사용합니다. 한 값은 2바이트이며 -32768부터 32767까지 65,536단계를 표현합니다. 0은 중심값입니다. 모든 샘플이 0인 버퍼는 디지털 무음이고, 양수와 음수는 순간 진폭의 서로 반대 극성입니다. 파형을 코드로 계산하면 녹음 장치 없이도 이 값들을 만들 수 있습니다.",
+      "codes": [
+        {
+          "label": "두 축을 따로 읽는다",
+          "language": "text",
+          "text": "시각(초)     0        1/rate    2/rate    3/rate\n채널 값      0          256       512       768\n             └── 시간 간격 ──┘\n정수 단계: … -2, -1, 0, 1, 2 …"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "16비트가 소리 크기를 뜻할까",
+          "body": "16비트는 표현 가능한 진폭 단계 수를 정합니다. 실제 음량은 배열의 진폭과 게인, 출력 장치 등에도 영향을 받습니다. 16비트 배열에 0만 채우면 무음입니다. 또한 float PCM처럼 다른 수치 형식도 있으며, 이번 코드는 signed16에 한정합니다."
+        }
+      ]
+    },
+    {
+      "title": "샘플·채널·프레임의 세 단위를 분리한다",
+      "body": "여기서 **샘플**은 한 채널의 스칼라 값 하나, **PCM 프레임**은 같은 시각의 모든 채널 값을 묶은 단위입니다. 모노는 프레임당 샘플 하나, 스테레오는 왼쪽·오른쪽 샘플 두 개입니다.\n\n샘플레이트는 채널마다 적용됩니다. 44,100 Hz 스테레오라면 초당 44,100프레임, 전체 배열에는 초당 88,200샘플이 필요합니다. 두 채널을 번갈아 담았다고 시간이 두 배 늘어나지는 않습니다.\n\n배열에 `[100, -100, 200, -200, 300, -300]`이 있고 채널 수가 2라고 합시다. 오디오 프레임 수는 3입니다. 같은 여섯 값을 모노로 해석하면 6프레임이 됩니다. **배열의 원소 개수만으로 기간을 계산할 수 없다**는 이유가 여기에 있습니다.",
+      "codes": [
+        {
+          "label": "같은 시각끼리 묶기",
+          "language": "text",
+          "text": "프레임 번호       왼쪽       오른쪽\n0                 100        -100\n1                 200        -200\n2                 300        -300\n\n스칼라 샘플 6개 / 채널 2개 = PCM 프레임 3개"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "게임 프레임과 MP3 프레임",
+          "body": "화면 프레임은 한 번 그린 화면이고, MP3 프레임은 압축 비트스트림의 단위입니다. PCM 프레임은 같은 시각의 채널 값 묶음입니다. API나 문서에서 frame을 만나면 어느 층의 단위인지 먼저 확인하세요."
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "struct SoundData",
+        "invariant": "배열과 채널·샘플레이트를 함께 보관한다.",
+        "mayDiffer": "현재 SDL은 로드 시 장치용 형식으로 변환한 PCM을 저장한다. 학습 단계는 CPU 데이터만 만든다."
+      }
+    },
+    {
+      "title": "인터리브 배열에서 원하는 값을 찾는다",
+      "body": "인터리브(interleaved)는 한 시각의 채널 값을 나란히 놓고 다음 시각으로 진행하는 배치입니다. 스테레오는 `L0, R0, L1, R1, ...` 순서입니다. 프레임 `f`, 채널 `c`, 채널 수 `C`일 때 원소 인덱스는 `f*C+c`입니다. 모두 0부터 시작합니다.\n\n프레임 1의 오른쪽 값은 인덱스 `1*2+1=3`, 위 배열에서는 -200입니다. 그 프레임의 첫 바이트 위치는 `1*2*2=4`입니다. 원소 인덱스에 이미 sizeof를 곱해 놓고 다시 int16_t 포인터 덧셈에 쓰면 단위를 두 번 변환하게 됩니다.\n\n`at`은 먼저 프레임과 채널 범위를 각각 검사합니다. 채널 2를 허용하면 `f*2+2`가 다음 프레임의 왼쪽을 가리켜, 배열 범위 안인데도 의미가 틀린 조회가 됩니다. 메모리 범위와 논리적인 좌표 범위를 함께 지켜야 합니다.",
+      "codes": [
+        {
+          "label": "Pcm16::at의 조회 경계",
+          "language": "cpp",
+          "text": "    std::int16_t at(std::size_t frame, std::size_t channel) const {\n        if (channel >= channels_ || frame >= samples_.size() / channels_) {\n            throw std::out_of_range(\"Pcm16::at frame/channel out of range\");\n        }\n        return samples_[frame * channels_ + channel];\n    }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "채널별 배열로 나누는 배치",
+          "body": "L0,L1,L2와 R0,R1,R2를 따로 보관하는 planar 배치도 있습니다. 어떤 배치를 쓰는지는 API 계약입니다. 현재의 인덱스 공식은 인터리브용이며, XAudio2 제출 버퍼도 [인터리브 채널 배치](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/ns-xaudio2-xaudio2_buffer)를 사용합니다."
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "struct Voice",
+        "invariant": "재생 위치의 단위를 배열 배치와 일치시킨다.",
+        "mayDiffer": "현재 Voice.pos는 채널을 포함한 int16 원소 인덱스다. 이번 학습 at은 프레임·채널 좌표를 받아 원소 인덱스로 변환한다."
+      }
+    },
+    {
+      "title": "길이와 메모리를 같은 식에서 구한다",
+      "body": "프레임 수를 N, 채널 수를 C, 샘플레이트를 R이라고 하면 signed16 PCM의 원소 수는 `N*C`, 바이트 수는 `N*C*2`, 기간은 `N/R초`입니다. 샘플 하나의 2바이트는 이번 형식의 상수입니다.\n\n48,000 Hz 스테레오에서 480프레임을 만들면 얼마의 시간과 메모리가 필요할까요? 기간은 `480/48000=0.01초`, 원소는 `480*2=960개`, 바이트는 `960*2=1920`입니다. C++에서 정수끼리 나누면 0이 될 수 있으므로 기간을 계산할 때 double로 변환합니다.\n\n1초짜리 44,100 Hz 스테레오 파형은 44,100프레임·88,200샘플·176,400바이트입니다. 헤더나 vector 객체 자체의 관리 정보는 이 페이로드 계산에 포함하지 않습니다.",
+      "codes": [
+        {
+          "label": "필드마다 단위를 이름에 담는다",
+          "language": "cpp",
+          "text": "struct Layout {\n    std::size_t frames = 0;           // one instant across all channels\n    std::size_t samples = 0;          // scalar samples (frames * channels)\n    std::size_t bytes = 0;            // total payload bytes\n    std::size_t bytes_per_frame = 0;  // channels * sizeof(int16_t)\n    double seconds = 0.0;             // frames / rate\n}\n;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "마지막 샘플 시각과 버퍼 기간",
+          "body": "N개 프레임의 시각은 0부터 (N-1)/R까지입니다. 마지막 프레임도 한 표본 간격을 차지하며 장치가 N프레임을 소비하는 기간은 N/R입니다. 100 Hz의 100프레임에서 마지막 위치는 0.99초, 버퍼 기간은 1초입니다."
+        }
+      ]
+    },
+    {
+      "title": "샘플레이트를 높이면 무엇이 달라질까",
+      "body": "레이트 R은 시간축을 읽는 간격입니다. 파형이 100프레임마다 반복되면 R=44,100에서 초당 441번 반복됩니다. R을 48,000이라고 적고 같은 배열을 그 속도로 소비하면 초당 480번 반복하며 버퍼 기간은 짧아집니다.\n\n같은 시간의 소리를 다른 레이트로 표현하는 **리샘플링**은 새 표본 시각에 맞는 값을 계산하는 작업입니다. 원래 레이트와 출력 레이트를 알고 그에 맞게 변환해야 합니다. 단순히 메타데이터 숫자만 바꾸면 시간 기준이 바뀝니다.\n\n샘플링 자체에도 정보의 한계가 있습니다. 1,000 Hz로 `sin(2π*100*t)`와 `sin(2π*1100*t)`를 읽으면 n번째 표본은 같습니다. 뒤의 각도는 앞의 각도에 `2π*n`이 더해진 것이고, sin은 한 바퀴마다 반복하기 때문입니다. 다른 연속 신호를 같은 표본으로 관찰하는 현상이 **에일리어싱(aliasing)**입니다.\n\n기저대역 신호를 표본에서 재구성하려면 가장 높은 주파수 B가 R/2보다 작도록 대역을 제한하고 적절한 재구성 조건을 갖춰야 합니다. R/2는 Nyquist 주파수입니다. 실제 녹음은 표본화 전에 높은 성분을 줄이는 필터를 사용합니다. [MIT의 샘플링 강의](https://ocw.mit.edu/courses/6-003-signals-and-systems-fall-2011/resources/lecture-21-sampling/)에서 표본화와 필터의 관계를 더 살펴볼 수 있습니다.",
+      "codes": [
+        {
+          "label": "같은 표본이 되는 계산",
+          "language": "text",
+          "text": "t = n / 1000\n1100 * t = 100 * n / 1000 + n\nsin(2π * 1100 * t) = sin(2π * 100 * n / 1000 + 2π*n)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Nyquist 경계에 딱 맞추면",
+          "body": "R/2인 sin파를 위상 0에서 읽으면 sin(π*n)=0이 되어 모든 값이 0입니다. “주파수의 두 배면 어떤 경우든 충분”이라고 외우기보다 대역 제한과 경계 조건을 함께 이해해야 합니다. 이번 삼각파는 정수 표본을 직접 합성한 검사 신호이며, 이상적인 연속 삼각파를 완벽히 재구성한다는 전제를 두지 않습니다."
+        },
+        {
+          "kind": "concept",
+          "title": "변환 결과를 어디에 담을까",
+          "body": "리샘플러는 버퍼 전체를 새로 만들 수도 있고 작은 블록이나 순환 버퍼에 결과를 채울 수도 있습니다. 필요한 것은 새 시각에 맞는 값이며, 배열 전체를 반드시 새로 할당해야 하는 것은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "비트 깊이·전송률·정규화",
+      "body": "비트 깊이는 샘플 하나의 표현 정밀도이고, 비트레이트는 초당 데이터 비트 수입니다. 이번 비압축 signed16 PCM의 비트레이트는 `R*C*16`입니다. 44,100 Hz 스테레오이면 1,411,200 bit/s입니다. MP3 파일의 압축 비트레이트와 같은 식으로 취급하지 않습니다.\n\n정수 진폭을 비율로 볼 때는 `x/32768.0`을 쓸 수 있습니다. -32768은 -1.0, 0은 0.0, 32767은 약 0.999969입니다. 음수 끝점이 하나 더 있는 signed16의 비대칭이 그대로 남습니다. 분모를 double로 써 정수 나눗셈을 피합니다.\n\n이 값은 디지털 진폭의 비율입니다. 이번 파형의 최댓값 6400은 약 0.1953이고, 이 숫자만으로 스피커의 물리적 소리 크기를 확정할 수는 없습니다. 표현 범위와 재생 환경의 역할을 나누어 이해하세요.",
+      "codes": [
+        {
+          "label": "스칼라 샘플을 실수 비율로 읽기",
+          "language": "cpp",
+          "text": "std::int16_t x = -32768;\ndouble normalized = x / 32768.0; // -1.0\n// 정수 x / 32768은 대부분의 작은 진폭을 0으로 만든다."
+        }
+      ]
+    },
+    {
+      "title": "곱하기 전에 허용되는 프레임 수를 구한다",
+      "body": "파일이나 디코더에서 받은 프레임 수가 매우 크다고 합시다. `frames*channels*2`부터 계산한 뒤 한도와 비교하면, unsigned 곱셈이 감겨 작은 값처럼 보일 수 있습니다. size_t로 먼저 줄여도 원래 숫자를 잃을 수 있습니다.\n\n양수인 프레임당 바이트 수를 B라 할 때, 허용 조건은 `frames <= max_bytes/B`입니다. 나눗셈으로 상한을 구한 뒤 검사하고, 통과한 값만 size_t로 변환합니다. max_bytes 자체가 size_t이므로 메모리 주소 크기 범위도 이 예산 안에 들어 있습니다. 지원 대상은 size_t가 64비트 이하인 환경으로 명시합니다.\n\n채널은 1 또는 2, 레이트는 8,000~192,000 Hz, 프레임 수는 양수로 제한합니다. 이는 모듈의 지원 정책입니다. 채널 검사를 먼저 하므로 B는 2 또는 4이고 0으로 나누지 않습니다. 실패는 nullopt, 성공은 단위별 Layout을 반환합니다.",
+      "codes": [
+        {
+          "label": "할당 없는 크기 검사",
+          "language": "cpp",
+          "text": "inline std::optional<Layout> layout_s16(std::uint64_t frames,\n                                        std::uint32_t channels,\n                                        std::uint32_t rate,\n                                        std::size_t max_bytes = SIZE_MAX) noexcept {\n    if (frames == 0) return std::nullopt;\n    if (channels == 0 || channels > kMaxChannels) return std::nullopt;\n    if (rate < kMinRate || rate > kMaxRate) return std::nullopt;\n\n    const std::uint64_t bytes_per_frame =\n        static_cast<std::uint64_t>(channels) * 2u;\n\n    // size_t is at most 64 bits on the supported targets. The caller's\n    // size_t budget also bounds addressable bytes; divide before multiplying.\n    static_assert(sizeof(std::size_t) <= sizeof(std::uint64_t),\n                  \"layout_s16 requires size_t no wider than uint64_t\");\n    if (frames > static_cast<std::uint64_t>(max_bytes) / bytes_per_frame)\n        return std::nullopt;\n\n    Layout out;\n    out.frames = static_cast<std::size_t>(frames);\n    out.bytes_per_frame = static_cast<std::size_t>(bytes_per_frame);\n    out.samples = out.frames * channels;\n    out.bytes = out.samples * 2u;\n    out.seconds = static_cast<double>(frames) / static_cast<double>(rate);\n    return out;\n}\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "숫자가 들어간다고 메모리를 확보할 수 있을까",
+          "body": "산술 범위 안이어도 실제 메모리 할당은 실패할 수 있습니다. Layout은 계산 가능성과 호출자가 정한 바이트 예산을 확인합니다. 이 단계에서 메모리를 예약하지 않으며, vector 할당 실패 처리는 별도의 책임입니다."
+        }
+      ],
+      "reference": {
+        "path": "audio/pcm_layout.h",
+        "symbol": "layout_s16",
+        "invariant": "큰 프레임 수를 먼저 검사한 뒤 타입 변환과 곱셈을 수행한다.",
+        "mayDiffer": "바이트 예산은 호출자의 용도에 따른다. 학습은 16MiB, 현재 SDL은 int 길이 한도, XAudio2는 버퍼 API 한도를 사용한다."
+      }
+    },
+    {
+      "title": "검증된 배열과 형식을 함께 소유한다",
+      "body": "Pcm16의 생성 함수는 rate·channels·샘플 배열을 받습니다. 비어 있는 배열과 채널 수로 나누어떨어지지 않는 배열을 거절하고 Layout을 검사합니다. `{10,20,30}`을 스테레오로 받으면 마지막 시각의 한 채널이 없으므로 실패합니다. 나눗셈으로 1프레임만 남기고 잘린 값을 버리는 정책을 숨기지 않습니다.\n\n멤버를 private으로 두고 const 조회만 제공하면 생성 후 채널 수만 바꾸거나 샘플을 하나 덧붙여 불변조건을 깨는 일을 막을 수 있습니다. 배열 개수·프레임 수·기간은 실제 보관 배열에서 계산합니다. 여러 곳에 같은 길이를 저장하고 동시에 갱신할 필요가 없습니다.\n\nmake는 vector를 값으로 받습니다. lvalue를 전달하면 복사본을, std::move로 전달하면 이동된 저장소를 받습니다. 반환 객체가 배열을 소유하며, samples()가 돌려주는 참조는 잠깐 빌린 조회입니다. 소유자의 파괴·이동·대입을 넘겨 그 참조를 보관하지 않습니다.",
+      "codes": [
+        {
+          "label": "공개 생성 경계",
+          "language": "cpp",
+          "text": "    static std::optional<Pcm16> make(std::uint32_t rate,\n                                     std::uint32_t channels,\n                                     std::vector<std::int16_t> samples) {\n        if (samples.empty()) return std::nullopt;\n        if (channels == 0) return std::nullopt;\n        if (samples.size() % channels != 0) return std::nullopt;\n\n        const std::uint64_t frames =\n            static_cast<std::uint64_t>(samples.size() / channels);\n        const auto layout =\n            audio_pcm::layout_s16(frames, channels, rate, kTeachingBudgetBytes);\n        if (!layout) return std::nullopt;\n\n        return Pcm16(rate, channels, std::move(samples));\n    }\n"
+        },
+        {
+          "label": "길이의 기준은 소유 배열 하나",
+          "language": "cpp",
+          "text": "    audio_pcm::Layout layout() const noexcept {\n        return {samples_.size() / channels_, samples_.size(),\n                samples_.size() * sizeof(std::int16_t),\n                channels_ * sizeof(std::int16_t),\n                static_cast<double>(samples_.size() / channels_) / rate_};\n    }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "16MiB 예산이 적용되는 시점",
+          "body": "make가 받는 vector는 호출 전에 이미 할당되어 있습니다. 16MiB는 이 모듈이 유효한 데이터로 받아 보관할지의 기준입니다. 외부 파일에서 큰 할당 자체를 막으려면 디코더나 읽기 단계에서도 할당 전에 별도 제한을 걸어야 합니다."
+        },
+        {
+          "kind": "concept",
+          "title": "이동한 원본 객체는 어떻게 볼까",
+          "body": "이동 후 원본 vector는 유효하지만 상태가 미지정입니다. 구현은 실제 잔여 배열에서 길이를 구하므로 오래된 프레임 개수로 빈 저장소를 읽지 않습니다. 원본이 항상 특정 길이라고 가정하지 않고, 목적지 객체의 데이터 계약을 사용합니다."
+        },
+        {
+          "kind": "concept",
+          "title": "대입 중 복사가 실패한다면",
+          "body": "포맷과 배열을 차례로 덮어쓰면 배열 복사가 실패했을 때 형식만 바뀔 수 있습니다. 대입 연산자는 값 매개변수의 복사부터 완성하고, 그다음 멤버를 예외 없는 swap으로 교체합니다. 생성한 후보를 확인한 뒤 적용하는 방식으로 객체의 계약을 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "반복 주기를 정수로 가진 파형을 만든다",
+      "body": "관찰하기 쉬운 파형으로 정수 삼각파를 만듭니다. 한 주기를 100프레임으로 정하고 각 프레임의 위상을 `n%100`으로 구합니다. 위상 0에서 0, 25에서 +25, 50에서 0, 75에서 -25, 다음 주기의 0에서 다시 0이 되는 ramp를 구성합니다.\n\nramp에 256을 곱하면 진폭 범위는 -6400~6400입니다. int16_t 범위 안이라는 것을 계산으로 확인한 뒤 변환합니다. 위상은 size_t이므로 감소 구간에서 빼기 전에 int로 바꿉니다. unsigned 상태로 `50-phase`를 계산하면 음수가 필요한 구간에서 큰 양수로 감길 수 있습니다.\n\nrate=44,100에서 100프레임 주기는 441 Hz의 기본주파수입니다. 삼각파에는 고조파도 있으므로 441 Hz 정현파와 모양이 다릅니다. 44,100프레임은 441주기, 정확히 1초 분량입니다. 같은 값을 왼쪽·오른쪽에 복제해 인터리브 배열에 넣습니다.",
+      "codes": [
+        {
+          "label": "한 프레임의 값 계산",
+          "language": "cpp",
+          "text": "const std::size_t phase = n % 100;\nint ramp;\nif (phase < 25) ramp = static_cast<int>(phase);\nelse if (phase < 75) ramp = 50 - static_cast<int>(phase);\nelse ramp = static_cast<int>(phase) - 100;\nconst auto sample = static_cast<std::int16_t>(ramp * 256);\nsamples.push_back(sample); // L_n\nsamples.push_back(sample); // R_n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "채널이 두 개면 공간감도 생길까",
+          "body": "이번에는 L과 R에 같은 값을 넣으므로 양쪽 신호가 같습니다. 서로 다른 채널 값을 표현할 수 있는 구조를 만든 것이며, 두 채널 사이의 시간·진폭 차이를 합성하지는 않았습니다. 두 채널 복제가 청감상 반드시 몇 dB 커진다고 일반화할 수도 없습니다."
+        }
+      ]
+    },
+    {
+      "title": "모듈을 누적 빌드에 연결한다",
+      "body": "`audio/pcm_layout.h`, `audio/pcm_s16.h`, `tools/pcm_probe.cpp`, `tests/pcm_contract.cpp`를 추가합니다. CMake의 study_pcm은 헤더 경로와 C++17 요구를 전달하는 INTERFACE 타깃입니다. 별도 오브젝트 파일이 필요 없는 헤더 모듈에 맞는 선택입니다.\n\npcm_probe와 pcm_contract가 같은 타깃을 사용하므로 도구와 검사가 다른 헤더 경로를 쓰지 않습니다. 이 모듈은 OS 오디오 헤더를 포함하지 않아 SCRIPTED 빌드에서도 실행됩니다. SDL 빌드에서는 누적 게임과 데이터 도구를 함께 빌드할 수 있습니다.\n\n파형 생성은 도구가 시작할 때 한 번 수행합니다. 큰 vector를 할당하고 채우는 책임이 데이터 준비 경로에 모여 있습니다. 게임 틱이나 규칙 난수를 읽지 않으므로 같은 입력 상수에서 같은 정수 파형을 만듭니다.",
+      "codes": [
+        {
+          "label": "체크포인트에 추가한 CMake 타깃",
+          "language": "cmake",
+          "text": "add_library(study_pcm INTERFACE)\ntarget_include_directories(study_pcm INTERFACE \"${CMAKE_CURRENT_SOURCE_DIR}\")\ntarget_compile_features(study_pcm INTERFACE cxx_std_17)\nadd_executable(pcm_probe tools/pcm_probe.cpp)\ntarget_link_libraries(pcm_probe PRIVATE study_pcm)\nadd_executable(pcm_contract tests/pcm_contract.cpp)\ntarget_link_libraries(pcm_contract PRIVATE study_pcm)"
+        }
+      ]
+    },
+    {
+      "title": "출력을 예측하고 실제로 실행한다",
+      "body": "저장소 루트에서 아래 명령을 실행합니다. 콘솔의 첫 줄은 형식과 길이, 둘째 줄은 삼각파의 다섯 기준점입니다. 프로그램은 PCM 배열을 실제로 만들고 그 배열의 메타데이터와 원소를 조회해 출력합니다.\n\n우선 176400이 어떤 단위인지 말로 설명해 보세요. 바이트 수를 프레임 수라고 생각하면 기간 계산부터 틀어집니다. 다음으로 channels를 1로 바꾸는 실험을 하려면 저장 루프도 한 번만 push해야 합니다. 형식 정보와 데이터 배치를 함께 바꾸어야 의도한 모노가 됩니다.\n\n이 실행의 결과는 콘솔 데이터입니다. 누적 게임을 실행하는 SDL 타깃과 별도로, 장치 없이 오디오 표현을 실험할 수 있습니다. 빌드 생성기와 OS에 따라 실행 파일이 Release 폴더에 생기거나 .exe가 붙을 수 있습니다.",
+      "codes": [
+        {
+          "label": "CPU 실습 빌드와 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/74-pcm -B out/study74 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study74 -j3\nctest --test-dir out/study74 --output-on-failure\n./out/study74/pcm_probe"
+        },
+        {
+          "label": "예상 출력",
+          "language": "text",
+          "text": "rate=44100 channels=2 frames=44100 samples=88200 bytes=176400 seconds=1\nlandmarks=0,6400,0,-6400,0"
+        }
+      ]
+    },
+    {
+      "title": "실패 사례로 형식 계약을 확인한다",
+      "body": "정상 파형만 검사하면 길이 단위를 바꾼 코드도 우연히 통과할 수 있습니다. 테스트에는 좌우 값이 다른 `{100,-100,200,-200,300,-300}`을 사용해 프레임 1의 오른쪽이 -200인지 확인합니다. 삼각파의 L/R은 같아서 채널 인덱스를 뒤바꿔도 잘 드러나지 않기 때문입니다.\n\n예산 경계는 1,920바이트에 스테레오 480프레임은 허용하고 481프레임은 거절하는 식으로 잡습니다. UINT64_MAX 프레임 같은 입력도 실제 거대한 버퍼를 만들지 않고 Layout 함수에만 전달할 수 있습니다. 순수 크기 계산과 할당을 나눈 덕분입니다.\n\n생성된 파형에서는 최솟값·최댓값, 100프레임 간격의 반복, 두 채널의 일치, 1초 구간의 합이 0인지 확인합니다. 서로 다른 조건을 검사해 인덱스 오류와 파형 계산 오류를 구분합니다.",
+      "codes": [
+        {
+          "label": "거대한 할당 없이 확인하는 경계",
+          "language": "cpp",
+          "text": "auto exact = audio_pcm::layout_s16(480, 2, 48000, 1920);\nauto over = audio_pcm::layout_s16(481, 2, 48000, 1920);\n// exact: 480프레임, 960샘플, 1920바이트\n// over: nullopt\nauto huge = audio_pcm::layout_s16(UINT64_MAX, 2, 44100);\n// huge도 메모리를 할당하지 않고 nullopt"
+        }
+      ]
+    },
+    {
+      "title": "현재 게임 코드와 대조하는 기준",
+      "body": "현재 SDL 로더는 디코더가 반환한 프레임 수에서 샘플·바이트 수를 구하고, 채널이나 레이트가 다르면 SDL 변환기로 장치용 PCM을 준비합니다. `SDL_AudioStreamPut`의 길이는 int **바이트 수**이므로 [API 길이 계약](https://wiki.libsdl.org/SDL2/SDL_AudioStreamPut)에 맞춰 범위를 검사한 뒤 변환합니다. 변환 결과의 길이는 완성 프레임의 배수여야 하고, 실제 Get 반환값도 요청한 바이트 수와 같아야 등록합니다.\n\nWindows 로더는 같은 크기 계산을 사용하되 [XAudio2 버퍼 한도](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2/ns-xaudio2-xaudio2_buffer)를 전달합니다. WAVEFORMATEX의 nBlockAlign은 프레임당 바이트, nAvgBytesPerSec은 초당 바이트를 나타냅니다. 배열의 원소 타입이 uint8_t인지 int16_t인지에 따라 size()의 단위도 달라집니다.\n\n학습 Pcm16은 생성 파형을 소유하고 현재 루트는 MP3 디코더 결과와 재생용 핸들을 다룹니다. 유지되는 핵심은 형식·저장소·길이의 일치와 API 경계에서의 단위 검사입니다. 디코더, 장치, 보이스 수명, 믹싱은 현재 소스에서 별도 책임으로 존재합니다.",
+      "codes": [
+        {
+          "label": "SDL 제출 전 검사 — 현재 소스와 같은 계산",
+          "language": "cpp",
+          "text": "const auto layout = audio_pcm::layout_s16(\n    frames, cfg.channels, cfg.sampleRate,\n    static_cast<size_t>(std::numeric_limits<int>::max()));\nif (!layout) {\n    drmp3_free(samples, nullptr);\n    return 0;\n}\n// 변환기로 보낼 때\nconst int inBytes = static_cast<int>(layout->bytes);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "이번 크기 검사의 위치",
+          "body": "현재 루트의 검사는 전체 디코딩 뒤에 수행합니다. 이후의 복사·API 길이 경계를 검증하지만 MP3 파일 읽기와 디코더의 내부 할당 전체를 제한하지는 않습니다. 신뢰할 수 없는 큰 파일을 다룰 때는 그 앞 단계의 자원 정책도 필요합니다."
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "AudioHandle audio_load_sound",
+        "invariant": "프레임·스칼라 샘플·바이트 단위를 구별하고 유효한 전체 결과만 등록한다.",
+        "mayDiffer": "실제 디코더/장치 변환/핸들 저장은 학습 Pcm16보다 범위가 넓다. 재생 실패 처리를 이 순수 데이터 실습과 구별한다."
+      }
+    },
+    {
+      "title": "완성 파일에서 책임을 따라 읽는다",
+      "body": "Layout부터 읽고, Pcm16의 생성·조회, 파형 생성, 도구 출력 순서로 따라가세요. 완성 파일은 아래에서 펼칠 수 있습니다. 검사 파일의 입력을 바꿀 때는 먼저 기대하는 단위와 값을 적고 실행 결과와 비교합니다.",
+      "codes": [
+        {
+          "label": "audio/pcm_layout.h",
+          "language": "cpp",
+          "file": "checkpoints/74-pcm/audio/pcm_layout.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/pcm_s16.h",
+          "language": "cpp",
+          "file": "checkpoints/74-pcm/audio/pcm_s16.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/pcm_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/74-pcm/tools/pcm_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/pcm_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/74-pcm/tests/pcm_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/74-pcm/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "74-1",
+      "question": "48,000 Hz·스테레오·signed16 PCM 480프레임의 기간과 바이트 수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "10 ms, 960바이트"
+        },
+        {
+          "id": "b",
+          "text": "20 ms, 1920바이트"
+        },
+        {
+          "id": "c",
+          "text": "10 ms, 1920바이트"
+        },
+        {
+          "id": "d",
+          "text": "5 ms, 1920바이트"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "10 ms, 1920바이트",
+      "explanation": "480/48000=0.01초입니다. 채널 2개를 포함한 샘플 수는 960이고, 각각 2바이트이므로 1920바이트입니다."
+    },
+    {
+      "id": "74-2",
+      "question": "인터리브 배열 {100,-100,200,-200,300,-300}에서 프레임 1·채널 1의 값은? 채널은 0=왼쪽, 1=오른쪽입니다.",
+      "options": [
+        {
+          "id": "a",
+          "text": "-100"
+        },
+        {
+          "id": "b",
+          "text": "-200"
+        },
+        {
+          "id": "c",
+          "text": "200"
+        },
+        {
+          "id": "d",
+          "text": "300"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "-200",
+      "explanation": "스칼라 인덱스는 f*C+c=1*2+1=3입니다. 인덱스 3의 값은 -200입니다. 프레임 인덱스와 배열 인덱스를 구별해야 합니다."
+    },
+    {
+      "id": "74-3",
+      "question": "곱셈 전에 frames <= max_bytes/(channels*2)를 확인하는 핵심 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "계산이 먼저 넘쳐 작은 값으로 보이는 일을 막기 위해"
+        },
+        {
+          "id": "b",
+          "text": "나눗셈이 모든 CPU에서 곱셈보다 빠르기 때문에"
+        },
+        {
+          "id": "c",
+          "text": "size_t가 음수를 저장할 수 있기 때문에"
+        },
+        {
+          "id": "d",
+          "text": "검사를 통과하면 메모리 확보까지 보장되기 때문에"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "계산이 먼저 넘쳐 작은 값으로 보이는 일을 막기 위해",
+      "explanation": "양수인 프레임당 바이트 수로 예산을 나누어 최대 프레임 수부터 구합니다. 범위 확인 뒤 캐스트와 곱셈을 수행합니다. 실제 메모리 할당 성공은 별도 조건입니다."
+    },
+    {
+      "id": "74-4",
+      "question": "44,100프레임 배열을 그대로 두고 레이트만 44,100에서 88,200으로 바꿔 그 속도로 소비합니다. 배열의 100프레임 반복 신호는 어떻게 되는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1초, 기본주파수 441 Hz"
+        },
+        {
+          "id": "b",
+          "text": "2초, 기본주파수 220.5 Hz"
+        },
+        {
+          "id": "c",
+          "text": "0.5초, 기본주파수 441 Hz"
+        },
+        {
+          "id": "d",
+          "text": "0.5초, 기본주파수 882 Hz"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "0.5초, 기본주파수 882 Hz",
+      "explanation": "기간은 44100/88200=0.5초, 초당 반복은 88200/100=882회입니다. 같은 시간을 유지하는 리샘플링을 하지 않고 해석 레이트만 바꾼 경우입니다."
+    },
+    {
+      "id": "74-5",
+      "question": "signed16 원소 세 개 {10,20,30}을 Pcm16::make(44100,2,...)에 전달하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "마지막 값이 없는 채널은 자동으로 0을 채운다."
+        },
+        {
+          "id": "b",
+          "text": "마지막 프레임을 버리고 한 프레임을 반환한다."
+        },
+        {
+          "id": "c",
+          "text": "완성되지 않은 프레임이 있으므로 nullopt를 반환한다."
+        },
+        {
+          "id": "d",
+          "text": "채널 수를 자동으로 1로 바꾸어 반환한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "완성되지 않은 프레임이 있으므로 nullopt를 반환한다.",
+      "explanation": "3은 채널 수 2로 나누어떨어지지 않습니다. 이 생성 계약은 자동 수정 대신 반프레임 입력을 거절합니다. 완성 데이터의 해석 규칙을 호출자와 일치시키는 선택입니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "누적 체크포인트의 SCRIPTED 빌드에서 pcm_probe를 실행하고 각 출력 숫자의 단위를 적습니다.",
+      "좌우 값이 다른 세 프레임 배열에서 원하는 프레임·채널의 원소 인덱스를 직접 계산해 at 결과와 비교합니다.",
+      "파형의 주기 100프레임과 레이트 44100으로 기간·기본주파수·메모리 크기를 예측합니다."
+    ],
+    "failureChecks": [
+      "스테레오 샘플 세 개, 채널 0, 레이트 7999를 각각 전달해 거절을 확인합니다.",
+      "1920바이트 예산에서 480/481프레임을 비교하고 UINT64_MAX 입력은 할당 없이 검사합니다.",
+      "채널 경계를 넘는 at 조회와 배열 끝 프레임 조회가 out_of_range인지 확인합니다."
+    ],
+    "expected": "PCM 데이터의 단위와 소유권을 코드로 설명하고 정상 파형·반프레임·범위 초과를 서로 다른 근거로 판별한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 구현·구성 후보 직접 검토, 단위 계산/파형 경계 및 공식 API와 대조",
+    "draftJob": "out/learning-jobs/074-outline-events.jsonl",
+    "corrections": [
+      "초안의1100Hz→-100Hz설명을sin주기의+100Hz동일표본계산으로교정",
+      "Nyquist경계를단순최고주파수보장에서대역제한과엄격한경계조건으로교정",
+      "리샘플링항상새배열·정규화완전대칭·API차이는vector타입때문이라는단정제거",
+      "초안공개mutable구조체대신실제private생성경계로설명통일",
+      "이동후오래된Layout캐시를실제배열기반조회로교정",
+      "make_reference_tone은할당실패도던질수있도록주석수정",
+      "전체선택지a정답초안을사례·선택순서와함께재작성",
+      "형식과배열의부분대입가능성을값매개변수복사후swap으로보강"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED79/SDL80CTest·누적tetris·경고0",
+    "실습16MiB/반프레임/좌우서로다른값/정수상한·44100삼각파프레임·ASan/UBSan",
+    "실제SDL로더함수와실제변환기: Get오류/짧은읽기거절·프레임정렬·거대한프레임수·직접복사; 반환검사제거반례",
+    "XAudio로더함수·MakeWaveFormat을Linux대역타입/작은API상한으로검사; Windows네이티브검증아님",
+    "완전한SDL백엔드·실제rotate.mp3·dummy오디오장치초기화/재생/언로드/종료",
+    "root tetris빌드·17CTest·sim_hash_dump골든유지",
+    "수동GUI/실제스피커출력/Windows·macOS네이티브실행미검증"
+  ]
+}

@@ -1,0 +1,361 @@
+{
+  "id": "lesson-13",
+  "title": "정점 데이터: 연속 배열과 바이트 크기",
+  "shortTitle": "정점 배열과 메모리 배치",
+  "state": "reviewed",
+  "version": "1.0.2",
+  "start": "시작: GL 정보를 조회하는 세션이 있지만 그리기에 사용할 정점 데이터는 아직 없습니다.",
+  "finish": "완료: 정점 세 개를 만들고 CPU에서 개수·stride·offset·바이트 범위를 검증합니다. 같은 데이터를 누적 SDL 세션에 연결합니다.",
+  "objective": "값·주소·바이트 범위를 구분하고, 배열 배치를 예측하며 vector의 용량과 원소 수를 혼동한 오류를 진단합니다.",
+  "prerequisites": [
+    "12차시 체크포인트",
+    "구조체·배열·참조의 기본 문법"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 빌드·CPU 관찰 출력·CTest 통과",
+    "잘못된 필드 배치와 좌표를 주입해 검사 실패 확인",
+    "GPU 업로드·실제 GUI·Windows/macOS 실행 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "OpenCode DeepSeek 코드/문항 후보를 C++ 계약·현재 렌더러·빌드/실행 결과와 대조",
+    "draftJob": "vertex-data",
+    "corrections": [
+      "반복된 정점 수 상수를 없애 실제 배열 크기로 바이트 수 계산",
+      "clear 검사에서 >=3만 확인하던 후보를 직전 capacity와 동일 비교로 보강",
+      "원소 포인터 무효화의 불확실한 표현과 reserve 보장 범위를 보정",
+      "문항을 새 수치/구체적인 실패 상황으로 재작성",
+      "현재 소스와 Part의 재할당 방지·단일 텍스처 보편 제한 설명 보정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ],
+    "learnerProseEdit": {
+      "date": "2026-09-21",
+      "note": "집필자 검수 보고는 내부 기록에만 유지. 학습 본문은 구현 원리·실행 방법·예상 결과로 정리. 문항 ID와 코드 유지."
+    },
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "GL 함수 주소가 있어도 정확한 타입과 유효한 컨텍스트·지원 기능을 확인해야 합니다.",
+      "로딩 실패와 실제 GL 정보 조회를 구분하고, 컨텍스트가 살아 있는 동안 테이블을 사용합니다."
+    ],
+    "bridge": "호출 경계가 준비됐으므로 이제 함수에 전달할 데이터를 만듭니다. 첫 도형의 배열에서 시작 주소와 사용할 바이트 범위를 정확히 계산해 봅니다."
+  },
+  "sections": [
+    {
+      "title": "드라이버를 호출하기 전에 보낼 데이터를 만든다",
+      "body": "**먼저 예측해 보세요.** 삼각형의 꼭짓점이 세 개라면 업로드할 데이터도 3바이트일까요? 꼭짓점의 개수와 각 꼭짓점을 표현하는 저장 공간은 다른 양입니다. 데이터를 받는 쪽에 주소만 알려 주어도 이 두 양을 저절로 알아낼 수는 없습니다.\n\n여기서 **정점**(vertex)은 그리기에 사용할 한 점의 속성 묶음입니다. 위치만 가질 수도 있고 위치·색·텍스처 좌표를 함께 가질 수도 있습니다. 화면의 픽셀과는 다릅니다. 세 정점을 준비했다고 화면에 점 세 개를 칠한 것도, 삼각형 내부를 채운 것도 아닙니다.\n\n지금은 CPU에서 x·y를 가진 정점 세 개를 준비하고 저장 범위를 확인합니다. 좌표값에 어떤 변환을 적용할지, GPU가 어떻게 읽을지는 버퍼·속성·셰이더를 만들면서 지정합니다. `(-0.5, -0.5)`라는 숫자 자체에 픽셀 좌표나 NDC라는 의미가 내장되어 있지는 않습니다.\n\n추가할 파일은 `renderer/mesh.h`, 관찰용 `src/layout_demo.cpp`, 검사 `tests/mesh_contract.cpp`입니다. 플랫폼과 GL 로더는 유지하고 SDL 세션도 같은 정점 생성 함수를 사용하게 연결합니다. 창이 없어도 데이터 준비 단계는 실행해 볼 수 있습니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "static void push_vertex",
+        "invariant": "렌더러가 CPU에서 정점 속성을 만든다.",
+        "mayDiffer": "현재 게임은 위치·UV·색 등 정점 필드를 쌓는다. 실습은 위치만 담은 형식부터 시작한다.",
+        "omitted": "GPU 업로드·속성 지정·셰이더·그리기"
+      }
+    },
+    {
+      "title": "값 세 개를 소유하는 배열부터 정의한다",
+      "body": "`Vertex2`는 `float x`와 `float y`를 묶는 타입입니다. `Triangle`은 `Vertex2` 세 개를 직접 소유하는 `std::array`의 별명입니다. 첫 번째 원소는 `vertices[0]`, 마지막은 `vertices[2]`입니다. `[3]`은 범위를 벗어나므로 읽거나 쓰지 않습니다.\n\n`make_triangle()`은 값을 반환합니다. 함수 안 지역 변수의 주소를 빌려주는 방식이 아니므로 반환 후에도 호출자의 배열이 자신의 데이터를 소유합니다. 반환 과정의 최적화 여부와 무관하게 이러한 값 의미가 성립합니다. `constexpr`를 붙이면 조건을 만족하는 호출을 상수식에서도 사용할 수 있습니다.\n\n정점 수가 고정된 첫 도형에는 배열이 간단합니다. 게임처럼 도형 수가 달라지면 동적 크기의 `vector`가 편리합니다. 두 컨테이너 중 하나가 언제나 더 좋은 것이 아니라, 고정된 개수인지와 변경 방법에 맞춰 고릅니다.",
+      "codes": [
+        {
+          "label": "새 헤더의 핵심 · 정점 타입과 값 생성",
+          "language": "cpp",
+          "text": "struct Vertex2 { float x; float y; };\nusing Triangle = std::array<Vertex2, 3>;\n\nconstexpr Triangle make_triangle() {\n    return Triangle{{\n        Vertex2{-0.5f, -0.5f},\n        Vertex2{ 0.5f, -0.5f},\n        Vertex2{ 0.0f,  0.5f},\n    }};\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "용어와 계약",
+          "title": "연속 배열은 물리 RAM에서도 한 덩어리인가요?",
+          "body": "여기서 연속은 C++ 원소를 주소 순서로 연달아 접근할 수 있다는 계약입니다. 가상 주소에 대응하는 물리 메모리 페이지까지 인접하다는 뜻은 아닙니다. 순차 접근은 캐시의 공간 지역성을 활용할 기회를 주지만, 특정 속도나 캐시 적중률을 보장하지는 않습니다. [표준 초안의 std::array 계약](https://eel.is/c++draft/array.overview)은 고정 크기와 연속 저장을 구분해 확인할 참고 자료입니다."
+        }
+      ]
+    },
+    {
+      "title": "개수에 원소 크기를 곱해 바이트 범위를 구한다",
+      "body": "**바이트**(byte)는 여기서 주소로 구분하는 저장 단위입니다. C++의 `sizeof`는 그 타입의 객체 크기를 C++ 바이트 수로 반환하고, 한 바이트의 비트 수는 `CHAR_BIT`입니다. 대상 환경에서 1바이트=8비트, float=4바이트라는 조건을 곧 명시하겠습니다. 전제를 먼저 고정한 뒤 3×8=24를 계산합니다.\n\n| 구하는 양 | 코드 | 이 실습의 결과 |\n| --- | --- | --- |\n| 정점 원소 수 | `vertices.size()` | 3 |\n| 정점 한 개의 크기 | `sizeof(vertices[0])` | 8바이트 |\n| 사용할 원소 범위의 크기 | `vertices.size() * sizeof(vertices[0])` | 24바이트 |\n| 시작 주소 | `vertices.data()` | 첫 Vertex2를 가리키는 포인터 |\n\n`sizeof`의 표현식은 이 예에서 실행되지 않습니다. `sizeof(vertices[0])`는 첫 정점의 좌표를 읽거나 x·y 값의 크기를 측정하는 것이 아니라 원소 **타입의 객체 크기**를 구합니다. 숫자 `0.5f`를 `1000.0f`로 바꿔도 float 한 개의 저장 크기는 같습니다.\n\n크기 계산은 `std::size_t`로 보관합니다. 이 타입은 sizeof의 결과를 표현하는 부호 없는 정수 타입입니다. 어떤 환경에서도 무조건 64비트라고 가정하지 않습니다. 여기서는 원소가 세 개라 곱셈 범위가 작지만, 외부 입력으로 정한 큰 배열의 `개수 × 크기`는 오버플로 검사와 대상 API의 정수 범위 검사도 필요합니다.",
+      "codes": [
+        {
+          "label": "추가 · 사용할 바이트 수 계산",
+          "language": "cpp",
+          "text": "constexpr std::size_t byte_count(const Triangle& vertices) {\n    return vertices.size() * sizeof(Vertex2);\n}\n\nconst auto vertices = study_mesh::make_triangle();\nconst auto count = vertices.size();\nconst auto stride = sizeof(vertices[0]);\nconst auto bytes = study_mesh::byte_count(vertices);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "전달할 데이터 범위는 채운 원소 수와 원소 크기로 계산한다.",
+        "mayDiffer": "현재 코드는 float 원소 수를 곱하고, 실습은 Vertex2 원소 수를 곱한다.",
+        "omitted": "GLsizeiptr 범위 검사와 실제 버퍼 전송"
+      }
+    },
+    {
+      "title": "메모리 배치는 offset과 stride로 읽는다",
+      "body": "다음 표의 숫자는 실제 주소가 아니라 배열 시작점으로부터의 바이트 거리입니다. 정점 안의 x·y 위치를 **offset(시작점에서 떨어진 거리)**, 다음 정점으로 넘어가는 간격을 **stride**라고 부릅니다. 컨테이너 원소가 Vertex2이므로 다음 원소 간격은 `sizeof(Vertex2)`입니다.\n\n| 정점 | x의 시작 위치 | y의 시작 위치 | 원소가 차지하는 범위 |\n| --- | --- | --- | --- |\n| 0 | 0 | 4 | 0~7 |\n| 1 | 8 | 12 | 8~15 |\n| 2 | 16 | 20 | 16~23 |\n\n두 번째 정점의 y 위치는 `1 × stride + offsetof(Vertex2, y)`이므로 12입니다. `offsetof`는 표준 레이아웃 타입에서 멤버까지의 바이트 거리를 구합니다. **표준 레이아웃**은 C++의 배치 관련 조건을 만족하는 타입 분류이지, 모든 멤버가 빈틈없이 붙어 있다는 보장은 아닙니다.\n\n**정렬**(alignment)은 객체를 배치할 주소가 만족해야 하는 간격 조건입니다. 컴파일러는 조건을 맞추려고 멤버 사이 또는 객체 끝에 **패딩**(padding)을 둘 수 있습니다. 일반 구조체의 크기를 멤버 크기의 합만으로 계산하면 틀릴 수 있습니다. 따라서 이 예에서는 offsetof와 sizeof로 기대 배치를 확인합니다.\n\n`const Vertex2* p = vertices.data()`일 때 `p + 1`은 1바이트 뒤가 아니라 다음 Vertex2를 가리킵니다. 멤버는 `p[1].y`처럼 접근합니다. x·y가 붙어 있다고 `&p[0].x`를 여섯 원소짜리 float 배열처럼 순회하지 않습니다. 실제 C++ 배열 원소는 Vertex2이며, 구조체 멤버가 별도 float 배열로 바뀌지는 않습니다.",
+      "notes": [
+        {
+          "kind": "다음 구현의 준비",
+          "title": "왜 sizeof와 offsetof를 둘 다 확인하나요?",
+          "body": "y가 4바이트 뒤에 있어도 객체 끝에 패딩이 있을 수 있습니다. offset은 원소 내부, stride는 다음 원소까지의 간격을 설명합니다. 이후 GPU에 속성을 지정할 때도 두 정보를 각각 전달합니다. [sizeof와 패딩의 표준 초안 설명](https://eel.is/c++draft/expr.sizeof)을 참고할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "가정을 컴파일 때 확인하는 계약으로 만든다",
+      "body": "작은 실습에서는 float 두 개가 8바이트로 붙은 형식을 채택합니다. 이 형식을 만족하지 않는 대상을 우연히 성공시키는 대신 `static_assert`로 빌드를 거부합니다. 이는 C++의 보편적 보장이 아니라 **이번 실습이 지원하는 데이터 형식의 조건**입니다. 다른 형식을 지원하려면 선언만 바꾸지 말고 변환 또는 속성 해석도 함께 설계해야 합니다.\n\n`std::is_trivially_copyable`은 같은 타입의 객체 표현을 바이트 복사로 보존할 수 있는 조건과 관련됩니다. 이를 확인해도 바이트 순서가 다른 컴퓨터에 그대로 보내는 네트워크 형식이 되는 것은 아닙니다. 패딩·엔디언·float 표현·프로토콜의 별도 약속이 필요합니다. 여기서는 같은 프로세스에서 GL에 넘길 데이터 준비만 다룹니다.\n\n헤더는 사용하는 표준 기능에 맞춰 `<array>`, `<climits>`, `<cstddef>`, `<limits>`, `<type_traits>`를 직접 포함합니다. 다른 헤더가 우연히 대신 포함해 주는 것에 기대지 않습니다. 아래 핵심 검사 외에 완성 파일에는 x의 offset과 단순 복사 가능 조건도 들어 있습니다.",
+      "codes": [
+        {
+          "label": "헤더 · 기대 배치를 명시적으로 검사",
+          "language": "cpp",
+          "text": "static_assert(CHAR_BIT == 8, \"8-bit bytes required\");\nstatic_assert(sizeof(float) == 4, \"4-byte float required\");\nstatic_assert(std::numeric_limits<float>::is_iec559, \"IEC 559 float required\");\nstatic_assert(std::is_standard_layout<study_mesh::Vertex2>::value,\n              \"Vertex2 must be standard-layout\");\nstatic_assert(offsetof(study_mesh::Vertex2, y) == sizeof(float),\n              \"y directly after x\");\nstatic_assert(sizeof(study_mesh::Vertex2) == 2 * sizeof(float),\n              \"no padding in Vertex2\");"
+        },
+        {
+          "label": "새 파일 · 타입·배치 계약·정점 생성 전체",
+          "language": "cpp",
+          "file": "checkpoints/13-vertex-data/renderer/mesh.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "주소와 컨테이너 크기를 데이터 크기로 착각하지 않는다",
+      "body": "다음 두 실수는 모두 컴파일될 수 있습니다. `sizeof(vertices.data())`는 데이터 크기가 아니라 **포인터 타입의 크기**입니다. 포인터에는 첫 주소만 있고 원소 개수가 따라붙지 않습니다. 큰 배열과 작은 배열의 첫 주소도 같은 포인터 타입입니다.\n\n`sizeof(vector변수)`는 컨테이너 제어 객체의 크기입니다. vector가 따로 확보한 원소 저장소까지 합산하지 않습니다. 구현에 따라 포인터 여러 개 정도의 크기로 보일 수 있지만 그 내부 표현에 기대서 코드를 쓰지 않습니다. 컨테이너 종류와 무관하게 이번 전송 범위는 `size() × 원소 크기`로 설명합니다.\n\n내장 배열 `Vertex2 raw[3]`에는 `sizeof(raw)`로 전체 배열 크기를 얻을 수 있습니다. 하지만 매개변수의 `Vertex2 raw[]`는 포인터 매개변수로 조정되어 함수 안 sizeof는 포인터 크기입니다. `std::array`는 이런 암묵적 포인터 변환을 하지 않으며, 이번 함수는 `const Triangle&`로 개수와 타입을 유지합니다.\n\n주소만 필요한 API에는 `data()`를 넘기되 크기도 계약에 맞춰 전달합니다. 첫 주소를 받는 쪽이 우리가 원하는 마지막 원소를 추측하도록 두지 않습니다.",
+      "codes": [
+        {
+          "label": "비교용 부분 코드 · 사용할 크기와 다른 크기",
+          "language": "cpp",
+          "text": "const auto vertices = study_mesh::make_triangle();\nconst auto* first = vertices.data();\nconst auto payload_bytes = vertices.size() * sizeof(vertices[0]); // 24\nconst auto pointer_bytes = sizeof(first); // pointer size, NOT payload size\n// std::vector<Vertex2> dynamic;\n// sizeof(dynamic) is the control object, NOT its element storage."
+        }
+      ]
+    },
+    {
+      "title": "vector의 size와 capacity를 따로 관찰한다",
+      "body": "정점 수를 실행 중 바꾸려면 vector를 사용할 수 있습니다. `size()`는 존재하는 원소 수이고 `capacity()`는 재할당 없이 담을 수 있는 원소 수입니다. **reserve(3)을 호출한 직후 v[0]에 쓸 수 있을까요?** 아닙니다. 공간을 예약해도 원소 수는 0입니다. push_back으로 원소를 추가하거나 resize로 크기를 늘린 뒤 유효한 인덱스에 접근해야 합니다.\n\n| 동작 | size | capacity | 읽을 수 있는 원소 |\n| --- | --- | --- | --- |\n| 빈 vector 생성 | 0 | 아직 가정하지 않음 | 없음 |\n| reserve(3) | 0 | 3 이상 | 없음 |\n| 정점 세 개 push_back | 3 | 3 이상 | 0, 1, 2 |\n| clear() | 0 | 직전 값 유지 | 없음 |\n\ncapacity는 최대 크기 제한이 아닙니다. 삽입 후 size가 capacity를 초과하면 새 저장소가 필요할 수 있으며, 재할당이 발생하면 기존 원소 포인터·참조·반복자가 무효화됩니다. 저장해 둔 `data()`를 그 뒤에 쓰지 않습니다. clear도 원소를 제거하므로 용량이 남았다는 이유로 옛 정점을 읽지 않습니다.\n\n이번 데모는 실제 capacity를 3이라고 단정하지 않고 `>= 3`인지 출력합니다. clear 전 값을 저장해 정확히 유지되는지도 비교합니다. 실패를 보여 주려고 무효 포인터를 실제 역참조하지 않습니다. 그 실행이 우연히 잘 보이는 것은 유효성의 증거가 되지 못합니다.",
+      "codes": [
+        {
+          "label": "관찰 실험 · 공간 예약과 원소 생성 분리",
+          "language": "cpp",
+          "text": "std::vector<study_mesh::Vertex2> verts;\nverts.reserve(3);                 // size is still 0\nfor (const auto& vertex : vertices) verts.push_back(vertex);\nconst auto saved_capacity = verts.capacity();\n// Read or copy elements here, before clear().\nverts.clear();                    // size=0; no elements to read\nconst bool retained = verts.capacity() == saved_capacity;"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "static std::vector<float> s_verts",
+        "invariant": "채운 원소 범위를 사용하고 필요할 때 저장 공간을 재사용한다.",
+        "mayDiffer": "현재 게임은 정점 형식과 초기 배치 용량에 맞춰 저장 공간을 예약하며, 필요하면 더 커질 수 있다.",
+        "omitted": "동적 배칭의 flush 조건·할당 실패 정책"
+      },
+      "notes": [
+        {
+          "kind": "공식 계약 더 읽기",
+          "title": "reserve와 resize가 다른 이유",
+          "body": "[vector 용량의 표준 초안](https://eel.is/c++draft/vector.capacity)은 reserve가 size를 바꾸지 않음과 재할당 때의 무효화를 설명합니다. resize는 원소 수를 바꾸는 동작입니다. 문서의 최신 추가 기능 전체가 C++17 기능이라는 뜻은 아니며, 여기서는 C++17에도 있는 size·capacity·reserve·resize만 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "현재 렌더러의 평평한 float 배열과 비교한다",
+      "body": "실제 게임은 Vertex2 구조체 배열 대신 `std::vector<float>`에 위치·UV·색·모서리 계산 자료 등 정점 필드의 성분을 순서대로 넣습니다. 성분 수는 `kFloatsPerVertex`, 저장 순서는 `push_vertex`와 속성 테이블에서 확인합니다. 지금 모든 속성의 용도를 외울 필요는 없지만 **vector의 원소 타입이 float**라는 차이는 중요합니다.\n\n| 데이터 형식 | 정점 수 | 컨테이너 원소 수 | 4바이트 float일 때 범위 |\n| --- | --- | --- | --- |\n| 실습 Vertex2 배열 | 3 | Vertex2 3개 | 24바이트 |\n| 실제 형식의 삼각형 | 3 | float 42개 | 168바이트 |\n| 실제 형식의 사각형 두 삼각형 | 6 | float 84개 | 336바이트 |\n\n따라서 실제 `glb_flush`는 바이트 수를 `s_verts.size() * sizeof(float)`로 구하고 정점 수는 `s_verts.size() / kFloatsPerVertex`로 구합니다. 단위가 다르므로 같은 size 값을 그대로 두 자리에 넣지 않습니다. 나머지가 없는 것은 각 push_vertex가 정확히 14성분을 추가한다는 내부 계약에 기대는 것입니다. `/ 14`만 쓴다고 잘못 채운 입력이 자동 검증되지는 않습니다.\n\n구조체 방식은 멤버 이름으로 의미를 표현하기 편하고, 평평한 배열 방식은 성분 순서를 한곳에서 엄격히 맞춰야 합니다. 이번에는 이름과 배치를 함께 배우려고 Vertex2를 사용합니다. 현재 레퍼런스의 형식까지 바꿀 필요는 없습니다. 어느 쪽이든 데이터를 만드는 순서와 읽는 형식이 맞아야 합니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "static constexpr int kFloatsPerVertex",
+        "invariant": "정점 형식과 업로드 바이트 범위·그리기 개수의 단위를 맞춘다.",
+        "mayDiffer": "실습은 위치 구조체를 사용하고, 현재 구현은 정점 필드들을 평평한 float 배열에 저장한다.",
+        "omitted": "색 정규화·UV·SDF·텍스처 배치"
+      }
+    },
+    {
+      "title": "누적 프로젝트와 창 없는 관찰 실행을 연결한다",
+      "body": "12-gl-loader를 `13-vertex-data`로 복사하고 새 파일 세 개를 추가합니다. 헤더만 제공하는 `study_mesh`는 **INTERFACE 타깃**으로 선언합니다. 자체 오브젝트 파일을 만들지 않고, 사용하는 타깃에 헤더 경로와 C++17 요구를 전달합니다. `layout_demo`와 SDL의 `tetris`가 같은 데이터를 사용합니다.\n\nSDL 세션의 GL 진단 다음에 아래 코드도 추가합니다. 이는 CPU 데이터가 준비됐다는 로그이며, GL 버퍼 업로드를 수행하지 않습니다. `layout_demo`는 같은 헤더에 연결한 별도 관찰용 실행 파일입니다. 이후 VBO를 만들 때 이 배열을 누적 세션에서 그대로 전달합니다.\n\n저장소 루트에서 아래처럼 빌드합니다. SCRIPTED 선택은 SDL 개발 패키지 없이 메모리 실습을 실행하기 위한 방법입니다. Linux 단일 구성 생성기의 실행 경로이며, 다중 구성 생성기를 쓰면 `--config Debug`와 Debug 하위 경로를 적용합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/13-vertex-data -B out/study-13 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-13\nctest --test-dir out/study-13 --output-on-failure\n./out/study-13/layout_demo\n```\n\nSDL 누적 프로젝트는 다른 빌드 디렉터리에 `-DSTUDY_PLATFORM=SDL`로 구성합니다. CPU 관찰 결과가 맞아도 창·더블 버퍼·실제 GL 조건이 별도로 충족되어야 tetris 세션을 실행할 수 있습니다.",
+      "codes": [
+        {
+          "label": "run_session에 추가 · GL 진단 후 입력 루프 전",
+          "language": "cpp",
+          "text": "const auto vertices = study_mesh::make_triangle();\nstd::printf(\"CPU vertices=%zu stride=%zu bytes=%zu (not uploaded)\\n\",\n            vertices.size(), sizeof(vertices[0]), study_mesh::byte_count(vertices));"
+        },
+        {
+          "label": "교체 · CMake 타깃 연결 전체",
+          "language": "cmake",
+          "file": "checkpoints/13-vertex-data/CMakeLists.txt",
+          "collapsed": true
+        },
+        {
+          "label": "관찰 실행 · layout_demo 전체",
+          "language": "cpp",
+          "file": "checkpoints/13-vertex-data/src/layout_demo.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "누적 세션 · main 전체",
+          "language": "cpp",
+          "file": "checkpoints/13-vertex-data/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "출력과 실패 검사를 통해 범위를 확인한다",
+      "body": "관찰 실행의 첫 출력은 아래와 같습니다. 뒤에는 정점 좌표와 reserve 후 size=0, push 후 size=3, clear 후 size=0 및 용량 유지 여부가 나옵니다. 주소값이나 정확한 capacity 숫자는 구현마다 달라질 수 있어 기대 출력으로 고정하지 않았습니다.\n\n```text\ncount=3\nstride=8\nbytes=24\noffset x=0\noffset y=4\n```\n\n`mesh_contract`는 좌표 순서와 배치·크기·복사의 독립성을 확인합니다. 검사에는 Release에서 사라지는 assert 대신 실패 횟수와 종료 코드를 사용합니다. 한 원소를 복사한 뒤 원본의 x만 수정해도 복사본은 그대로여야 합니다. 이 실험은 값 복사와 같은 원소를 가리키는 참조의 차이를 보여 줍니다.\n\n`python3 scripts/check_learning_mesh.py`는 SDL/SCRIPTED 빌드와 관찰 출력, 좌표·배치 계약을 검사합니다. 임시 사본의 y를 double로 바꾸면 배치 조건이 컴파일을 거부하고, 세 번째 좌표를 바꾸면 실행 검사가 실패해야 합니다.\n\n다음에는 이 24바이트를 보관할 GL 데이터 저장소를 만들고, CPU 배열의 수명과 버퍼 객체의 수명을 나눠 봅니다.",
+      "codes": [
+        {
+          "label": "계약 검사 전체 · Release에서도 결과 확인",
+          "language": "cpp",
+          "file": "checkpoints/13-vertex-data/tests/mesh_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "12-gl-loader 사본에 mesh.h·layout_demo.cpp·mesh_contract.cpp를 추가하고 CMake를 갱신한다.",
+      "main에 mesh.h를 포함하고 run_session의 진단 다음에 CPU 정점 준비 로그를 넣는다.",
+      "실행 전에 각 정점 x·y의 바이트 위치와 전체24바이트를 종이에 계산한다.",
+      "SCRIPTED 빌드의 layout_demo를 실행하고 reserve·push·clear 전후의 size와 capacity를 비교한다.",
+      "현재 코드 보기에서 float 원소 수를 바이트 수와 정점 수로 바꾸는 두 식을 찾는다."
+    ],
+    "expected": "정점 수3·stride8·바이트 수24·x/y offset0/4를 관찰하고, 이 결과가 GPU 그리기 성공과 다른 단계임을 설명합니다.",
+    "failureChecks": [
+      "정점 수와 float 성분 수를 혼동했는지 확인한다.",
+      "sizeof의 대상이 원소인지 포인터/컨테이너인지 확인한다.",
+      "reserve만 한 공간에 인덱스로 쓰지 않았는지 확인한다.",
+      "clear 또는 재할당 후 얻어 둔 원소 포인터를 사용하지 않는다.",
+      "컴파일 배치 검사가 실패하면 assertion을 지우기 전에 형식과 대상 환경을 확인한다."
+    ]
+  },
+  "questions": [
+    {
+      "id": "13-1",
+      "kind": "단위 계산",
+      "question": "Vertex2가 8바이트인 환경에서 정점 5개를 담은 배열의 업로드 범위와 정점 수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "5바이트, 정점 5개"
+        },
+        {
+          "id": "b",
+          "text": "40바이트, 정점 5개"
+        },
+        {
+          "id": "c",
+          "text": "40바이트, 정점 40개"
+        },
+        {
+          "id": "d",
+          "text": "8바이트, 정점 5개"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "40바이트, 정점 5개",
+      "explanation": "원소 수 5에 원소 크기 8바이트를 곱하면 40바이트입니다. 정점 수는 그대로 5개이며, 포인터 크기나 바이트 수를 정점 개수로 사용하지 않습니다."
+    },
+    {
+      "id": "13-2",
+      "kind": "원소와 용량",
+      "question": "빈 vector<Vertex2> v에 reserve(10)만 호출했습니다. 원소 하나를 기록하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "v[0]에 대입한다. 예약으로 10개 원소가 생겼다."
+        },
+        {
+          "id": "b",
+          "text": "v.data()[0]에 대입한다. 포인터 접근은 size와 무관하다."
+        },
+        {
+          "id": "c",
+          "text": "capacity가 정확히 10인지 확인한 뒤 v[0]에 대입한다."
+        },
+        {
+          "id": "d",
+          "text": "push_back으로 원소를 추가하거나 resize 후 유효한 인덱스에 대입한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "push_back으로 원소를 추가하거나 resize 후 유효한 인덱스에 대입한다.",
+      "explanation": "reserve는 size를 바꾸지 않으므로 이 시점에 원소는 없습니다. capacity가 충분하다는 사실과 접근할 원소가 존재한다는 사실은 다릅니다. capacity가 요청보다 클 수도 있으므로 정확히10을 요구하지 않습니다."
+    },
+    {
+      "id": "13-3",
+      "kind": "포인터 수명",
+      "question": "원소가 든 vector에서 data()를 저장했습니다. 그 뒤의 삽입이 재할당을 일으켰을 때 올바른 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "옛 원소 포인터 사용을 중단하고 현재 data()와 size를 다시 얻는다."
+        },
+        {
+          "id": "b",
+          "text": "옛 포인터가 null이 아니면 그대로 사용한다."
+        },
+        {
+          "id": "c",
+          "text": "reserve를 한 번 호출한 적이 있으면 옛 포인터를 유지한다."
+        },
+        {
+          "id": "d",
+          "text": "새 capacity가 더 크므로 옛 포인터로 더 많은 원소를 읽는다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "옛 원소 포인터 사용을 중단하고 현재 data()와 size를 다시 얻는다.",
+      "explanation": "재할당은 기존 원소 포인터를 무효화합니다. null 여부나 과거 reserve 호출로 유효성이 회복되지 않습니다. 새 범위를 얻은 뒤에도 이후 변경이 일어나는 시점과 사용 범위를 관리해야 합니다."
+    },
+    {
+      "id": "13-4",
+      "kind": "offset과 stride",
+      "question": "새 구조체의 sizeof가12, y의 offsetof가4입니다. 연속 배열의 세 번째 정점 y는 배열 시작에서 몇 바이트 뒤인가요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "8"
+        },
+        {
+          "id": "b",
+          "text": "24"
+        },
+        {
+          "id": "c",
+          "text": "28"
+        },
+        {
+          "id": "d",
+          "text": "36"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "28",
+      "explanation": "세 번째 원소의 인덱스는2입니다. 시작 거리는 2×12+4=28바이트입니다. 원소 내부 offset과 원소 간 stride를 따로 계산해야 하며, 멤버 두 개만 보고 stride를8로 가정하면 틀립니다."
+    },
+    {
+      "id": "13-5",
+      "kind": "저장 형식 계산",
+      "question": "계산 예제로 정점당 float 14개를 저장한다고 가정합니다. s_verts.size()가 84, sizeof(float)가 4라면 사용할 바이트 수와 정점 수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "84바이트, 정점84개"
+        },
+        {
+          "id": "b",
+          "text": "336바이트, 정점6개"
+        },
+        {
+          "id": "c",
+          "text": "336바이트, 정점84개"
+        },
+        {
+          "id": "d",
+          "text": "capacity×4바이트, 정점6개"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "336바이트, 정점6개",
+      "explanation": "size는 채운 float 원소 수입니다. 84×4=336바이트를 사용하고 정점 수는84÷14=6입니다. capacity는 아직 원소가 없는 여유 공간까지 포함할 수 있어 데이터 범위로 쓰지 않습니다."
+    }
+  ]
+}

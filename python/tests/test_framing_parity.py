@@ -1,13 +1,9 @@
-"""Frame format parity tests for ``netbot.framing``.
+"""Frozen wire-vector tests for the Python framing implementation.
 
-These tests are pure Python — they don't need the native ``tetris_py`` module
-or a running C++ host. They lock in the wire format so refactors to either
-``net/framing.cpp`` or ``netbot/framing.py`` immediately fail loud if either
-side drifts.
-
-If you need to regenerate the reference frames against a real C++ binary,
-write a tiny dump program that calls ``net::build_frame`` for the same
-``(type, payload)`` pairs and compares the bytes against the literals below.
+These tests do not execute C++. For a direct comparison of both real
+implementations (including receive partitions and error state), run
+scripts/check_learning_framing.py. Unknown types intentionally differ:
+C++ exposes them to dispatch, while Python drops them inside the parser.
 """
 
 from __future__ import annotations

@@ -1839,7 +1839,7 @@ class FramingError(Exception):
 - **LEN=0 처리** — `length < TYPE_FIELD_BYTES`면 TYPE 바이트조차 없다. 그 완성된 malformed frame은 소비하고 건너뛰어 unsigned 길이 계산과 반복 재파싱을 막는다.
 - **체크섬 불일치·미지 타입 소비** — 결과에는 넣지 않지만 `offset`은 전진한다. 바이트를 남기면 다음 호출도 같은 프레임에서 멈춘다.
 
-오버사이즈 분기에서 C++ 과 Python 의 **신호 방식**이 갈린다는 점이 이 절의 설계 포인트다. C++ `net::parse_frames` 는 이 상황에서 수신 버퍼를 비우고 `return false` 하며, 호출자(relay 의 forwarder, 클라이언트 `Session`)는 그 false 를 보고 소켓을 닫는다. 같은 신호를 Python 에서도 bool 반환으로 옮기면 위험하다 — Python 호출부는 반환된 프레임 리스트만 순회하고 성공 여부 플래그는 조용히 버리기 쉽고, 무시된 실패 신호는 "스트림이 오염됐는데 연결은 계속 살아 있는" 상태를 만든다. 그래서 Python 미러는 같은 상황을 `FramingError` **예외로 승격**한다. 예외는 무시가 기본값이 아니다 — 잡지 않으면 테스트 하네스가 그 자리에서 죽고, 잡으면 연결 종료로 대응하게 된다. 일반화하면 이렇다: **반환값은 협조하는 호출자를 위한 신호이고, 예외는 협조를 강제하는 신호다.** 오류를 무시했을 때의 결과가 조용한 상태 오염이라면 예외 쪽이 맞다. 신호 방식이 달라도 데이터 계약은 같다 — 버퍼는 비워지고, 오염 전 프레임은 보존된다.
+오버사이즈 분기에서 C++ 과 Python 의 **신호 방식**이 갈린다는 점이 이 절의 설계 포인트다. C++ `net::parse_frames` 는 이 상황에서 수신 버퍼를 비우고 `return false` 하며, 호출자(relay 의 forwarder, 클라이언트 `Session`)는 그 false 를 보고 소켓을 닫는다. 같은 신호를 Python 에서도 bool 반환으로 옮기면 위험하다 — Python 호출부는 반환된 프레임 리스트만 순회하고 성공 여부 플래그는 조용히 버리기 쉽고, 무시된 실패 신호는 "스트림이 오염됐는데 연결은 계속 살아 있는" 상태를 만든다. 그래서 Python 미러는 같은 상황을 `FramingError` **예외로 승격**한다. 예외는 무시가 기본값이 아니다 — 잡지 않으면 테스트 하네스가 그 자리에서 죽고, 잡으면 연결 종료로 대응하게 된다. 예외는 처리하지 않으면 호출 스택을 따라 전파된다. 다만 예외를 잡고 무시할 수도 있으므로 자동으로 연결 종료가 보장되는 것은 아니다. 반환값과 예외 어느 쪽이든 호출자의 종료 정책을 실제로 검사해야 한다. 신호 방식이 달라도 원시 파서는 버퍼를 비우고 오류 전 프레임을 출력 인자 또는 예외 속성에 남긴다. Session은 실패한 호출의 프레임을 추가로 폐기한다. 이 호출자 정책과 파서의 계약을 구분한다.
 
 LEN=0 경계에는 전용 테스트가 있다.
 
@@ -1855,7 +1855,7 @@ def test_parse_frames_drops_malformed_zero_length_frame() -> None:
     assert len(stream) == 0
 ```
 
-이 밖에 `test_framing_parity.py`는 대표 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 시 `FramingError`(버퍼 폐기 + 오염 전 프레임의 `frames` 전달), `MsgType` 정수값 고정, UTF-8 CHAT 통과를 잠근다. 길이에는 type 한 바이트가 포함되고 checksum은 **payload에만** 적용된다. 불완전 프레임은 버퍼에 남고 과대 선언은 스트림 전체를 폐기한다는 wire 규약까지 C++과 Python 양쪽에서 검증한다.
+이 밖에 `test_framing_parity.py`는 대표 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 시 `FramingError`(버퍼 폐기 + 오염 전 프레임의 `frames` 전달), `MsgType` 정수값 고정, UTF-8 CHAT 통과를 잠근다. 길이에는 type 한 바이트가 포함되고 checksum은 **payload에만** 적용된다. 불완전 프레임은 버퍼에 남고 과대 선언은 스트림 전체를 폐기한다는 wire 규약을 Python 고정 벡터로 검증한다. 실제 C++ 구현과의 직접 비교는 `scripts/check_learning_framing.py`가 별도로 수행한다(Part6 §2.7).
 
 ### 12.4 `expand_placement` — placement 를 프레임 마스크로
 

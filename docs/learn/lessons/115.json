@@ -1,0 +1,500 @@
+{
+  "id": "lesson-115",
+  "title": "RP·XP·BP: 서로 다른 목적의 수치",
+  "shortTitle": "실력·경험·재화와 정산",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 경기와 BP 지급을 한 번 확정하고 원래 정산 응답을 보존합니다.",
+  "finish": "완료: RP·XP를 같은 거래로 확정하고, XP에서 레벨·진행량을 계산하며 과거 정산과 현재 프로필을 구별합니다.",
+  "objective": "세 수치의 정책을 분리해 구현하고, 산술 경계·곡선 변경·부분 실패가 저장과 표시에 미치는 영향을 설명합니다.",
+  "prerequisites": [
+    "순수 함수와 정수/실수 연산",
+    "경기·보상의 원자적 저장",
+    "업무 키와 최초 정산 내역"
+  ],
+  "recap": {
+    "points": [
+      "같은 키·내용은 같은 경기의 재시도다.",
+      "현재 잔액과 당시 지급량은 다른 정보다.",
+      "한쪽 저장 실패는 전체 정산을 취소한다."
+    ],
+    "bridge": "같은 저장 경계 안에 서로 다른 역할을 가진 RP와 XP를 연결하고, 화면 값을 유도합니다."
+  },
+  "sections": [
+    {
+      "title": "한 경기의 결과를 세 가지 의미로 기록한다",
+      "body": "경기 결과와 BP 지급은 한 번 확정하고, 재전송에는 당시 정산 내역을 돌려주는 상태입니다. 이제 승패에 따른 RP와 플레이 경험인 XP를 같은 정산에 연결합니다. XP에서 레벨과 진행률을 계산하는 작은 조회 도구도 만듭니다.\n\n먼저 예측해 보세요. RP가 0인 두 사람이 대전해 A가 이겼습니다. A의 RP와 XP가 오르는 것은 자연스럽습니다. B의 RP는 0 아래로 내릴까요? B에게 XP와 BP도 지급할까요? 어느 값은 소비할 수 있을까요? 정수라는 저장 형식이 같아도 각 수치의 **변화 규칙**은 다릅니다.\n\n이 기준 구현의 승리/패배 지급은 BP 10/3, XP 100/50이며, 무승부는 둘 다 0입니다. RP는 상대의 RP를 반영한 식으로 계산하고 0을 바닥으로 둡니다. 수치는 정책이고, 계산·저장·표시의 책임을 나누는 것이 이번 구현의 핵심입니다."
+    },
+    {
+      "title": "RP·XP·BP의 단위를 구별한다",
+      "body": "**RP(Rating Point)**는 대전 결과로 갱신하는 실력 추정치입니다. 이기면 대체로 오르고 지면 내려가며, 상대와의 차이에 따라 변화량이 달라집니다. **XP(Experience Point)**는 이 정책에서 누적하는 경험입니다. **BP(Battle Point)**는 아이콘 등에 소비할 수 있는 잔액입니다.\n\n| 값 | 이번 정산의 변화 | 소비 | 주된 질문 |\n| --- | --- | --- | --- |\n| RP | 상대 RP·승패·계수로 갱신 | 하지 않음 | 어느 정도 실력의 상대와 만날까? |\n| XP | 승리 100, 패배 50, 무승부 0 | 하지 않음 | 경험이 얼마나 쌓였을까? |\n| BP | 승리 10, 패배 3, 무승부 0 | 상점에서 차감 | 지금 무엇을 구매할 수 있을까? |\n| 레벨 | XP와 곡선에서 계산 | 해당 없음 | 누적 경험을 어떻게 구간으로 보여 줄까? |\n\n이는 **단위가 있는 값**을 구별하는 문제입니다. 길이와 시간을 둘 다 double로 저장해도 더할 수 없듯, XP와 BP를 같은 int라고 합쳐서는 의미가 없습니다. `Career{rp,xp}`와 별도 지갑을 두고 함수 인자를 `before`, `amount`처럼 역할에 맞춰 읽습니다. 값의 교환이 늘어나는 프로젝트라면 RP·XP·BP를 각각 감싼 타입으로 잘못된 대입을 컴파일 단계에서 막는 방법도 있습니다.",
+      "codes": [
+        {
+          "label": "현재 누적 상태와 한 경기의 변화",
+          "text": "inline constexpr int kProgressLimit = 2147483647;\nstruct Career { int rp=0; int xp=0; };\nstruct ProgressAward { int before=0; int after=0; int xp=0; int policy=0; };\nstruct ProgressPair { ProgressAward a; ProgressAward b; };",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "추정치와 노력의 총량",
+          "body": "많이 플레이했다는 사실만으로 실력이 높다고 단정할 수 없습니다. XP를 매칭 기준에 곧바로 대입하거나 구매 후 줄어드는 BP를 실력으로 해석하면 수치의 목적이 바뀝니다. 어떤 수치를 UI에 보여 주는지도 같은 의미를 따라야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "기대 점수는 상대와의 차이로 구한다",
+      "body": "여기서 사용할 Elo 형태의 기대 점수는 `E(A,B)=1/(1+10^((B-A)/400))`입니다. 기대 점수는 결과를 숫자로 보았을 때의 모델 예측값입니다. 승패만 있는 경우 승리 확률로 읽을 수 있습니다. 같은 RP이면 차이가 0이어서 0.5, A가 400 낮으면 `1/(1+10)=1/11`, A가 400 높으면 `10/11`입니다.\n\n분모의 400은 차이가 400일 때 승리 대 패배의 비를 10배로 만드는 척도입니다. A와 B에 같은 상수를 더해도 차이는 같으므로 **이 식의 기대 점수**는 유지됩니다. 다만 뒤의 K 구간과 0 바닥까지 이동시키는 것은 별도의 정책 변경입니다.\n\n구현에서 먼저 볼 것은 `(b-a)`의 자료형입니다. `int`끼리 빼고 나서 400.0으로 나누면 차감은 이미 int 연산으로 끝났습니다. 충분히 큰 값에서 넘친 뒤 실수로 바꾸어도 복구되지 않습니다. 두 값을 double로 바꾼 뒤 차감을 수행합니다.",
+      "codes": [
+        {
+          "label": "피연산자를 먼저 실수로 변환",
+          "text": "inline double expected_score(int a, int b) {\n    return 1.0/(1.0+std::pow(10.0,(static_cast<double>(b)-static_cast<double>(a))/400.0));\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/elo.h",
+        "symbol": "inline double expected",
+        "invariant": "차이는 넓은 표현으로 계산하며 같은 RP에서 기대 점수는 0.5다.",
+        "mayDiffer": "척도와 정책 계수는 조정할 수 있다. 실제 내부 명칭은 elo, 화면 명칭은 RP다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "모델 예측의 의미",
+          "body": "1/11은 이 모델의 예측값입니다. 실제 이용자의 승률이 반드시 그 값이라는 보장은 없으며, 매칭 결과를 관찰해 정책을 평가해야 합니다. 이 게임의 무승부 정산은 아래에서 별도로 정의합니다."
+        }
+      ]
+    },
+    {
+      "title": "예측과 실제 결과의 차이를 RP에 반영한다",
+      "body": "새 RP는 `R + round(K × (S-E))`로 계산합니다. S는 이번 결과의 점수로 승리 1, 패배 0입니다. E가 높아 원래 이길 것으로 예상한 사람이 이기면 `(1-E)`가 작고, 낮은 RP의 사람이 강한 상대를 이기면 값이 커집니다.\n\nK는 한 경기의 영향력입니다. 기준 구현은 RP 300 미만에서 32, 600 미만에서 24, 그 이상에서 16을 사용합니다. **경기 전 RP**로 각자의 K를 고릅니다. RP 299인 A가 RP 300인 B를 이기면 A는 약 16을 얻고 B는 약 12를 잃습니다. 따라서 두 사람의 RP 합이 항상 일정한 규칙은 아닙니다.\n\n`std::round`는 가장 가까운 정수로 반올림하며 정확히 중간인 경우 0에서 멀어지는 방향을 택합니다. 반올림 결과는 최대 수십 점이지만, 그 작은 값을 INT_MAX 가까이의 RP에 더하는 순간에도 넘칠 수 있습니다. 합은 int64_t로 계산하고 저장 범위인 0..2,147,483,647 안으로 제한합니다.",
+      "codes": [
+        {
+          "label": "K 선택",
+          "text": "inline int rating_k(int rp) { return rp<300 ? 32 : (rp<600 ? 24 : 16); }",
+          "language": "cpp"
+        },
+        {
+          "label": "넓게 더한 후 포화",
+          "text": "inline int next_rating(int before, double score, double expected) {\n    const auto delta=static_cast<int>(std::round(rating_k(before)*(score-expected)));\n    const std::int64_t sum=static_cast<std::int64_t>(before)+delta;\n    return static_cast<int>(std::clamp<std::int64_t>(sum,0,kProgressLimit));\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/elo.h",
+        "symbol": "inline Update update",
+        "invariant": "갱신 전 값으로 계산하고 넓은 합을 저장 범위로 제한한다.",
+        "mayDiffer": "실제 함수는 승자/패자 순서를 받으며 학습 함수는 A/B 순서로 반환한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "포화와 거절을 선택하는 기준",
+          "body": "포화는 범위를 넘는 결과를 끝값으로 제한하는 연산입니다. 이 정책의 RP는 0과 상한에서 포화시킵니다. 반면 약속한 XP/BP를 일부만 지급하고 성공이라고 하면 정산 내역과 어긋나므로, 지급 합이 저장 범위를 넘으면 거래 전체를 거절합니다. 숫자마다 실패 정책도 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "승리·패배·무승부를 한 순수 함수로 묶는다",
+      "body": "**순수 계산**은 주어진 입력으로 결과를 만들며 DB나 현재 시간을 읽지 않습니다. 테스트는 A/B의 RP와 승자를 전달하고 두 사람의 RP 전후·XP 지급을 확인하면 됩니다. 이 함수가 승자를 결정하는 것은 아닙니다. 승자 판정은 입력이고, 여기서는 이미 받은 결과에 정책을 적용합니다.\n\nRP 0 대 0에서 A 승리라면 반올림 전 증감은 +16/-16입니다. 바닥을 적용한 결과는 A 16, B 0이며 XP는 A 100, B 50입니다. 무승부에는 RP를 유지하고 XP 0을 반환합니다. 일반적인 Elo 설명에서 무승부를 S=0.5로 두기도 하지만, 이 게임은 무승부 때 RP를 갱신하지 않는 별도 정책을 택했습니다.\n\n반환값에 경기 전후 RP와 XP 지급량을 넣습니다. `policy=1`은 이번 학습 RP/XP 정책의 식별자입니다. 저장 구조의 버전 4, BP 지급 정책의 버전 1과는 서로 다른 번호입니다.",
+      "codes": [
+        {
+          "label": "입력으로 받은 승패에 정책 적용",
+          "text": "inline ProgressPair progress_for(int a, int b, std::uint8_t winner) {\n    if(a<0 || b<0)throw std::invalid_argument(\"negative rating\");\n    if(winner==study_net::MatchRecord::draw)return {{a,a,0,1},{b,b,0,1}};\n    if(winner!=study_net::MatchRecord::a && winner!=study_net::MatchRecord::b)\n        throw std::invalid_argument(\"invalid winner\");\n    const bool a_won=winner==study_net::MatchRecord::a;\n    return {{a,next_rating(a,a_won?1.0:0.0,expected_score(a,b)),a_won?100:50,1},\n            {b,next_rating(b,a_won?0.0:1.0,expected_score(b,a)),a_won?50:100,1}};\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "실수 계산은 서버에서 한 번 확정한다",
+          "body": "양쪽 클라이언트가 각각 std::pow로 계산한 결과를 진실로 취급하지 않습니다. 경계에서의 부동소수점 차이를 포함해 운영상 계산 주체를 정하고, 서버가 확정한 정수 결과를 저장해 재사용합니다. 정책 번호를 붙이는 것만으로 모든 플랫폼의 실수 연산이 같아지는 것은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "XP 곡선은 단계 비용의 합이다",
+      "body": "레벨 1에서 시작하며 다음 레벨의 비용을 100,120,140,…으로 정합니다. 레벨 n에서 n+1로 가는 비용은 `100+20(n-1)`입니다. 레벨 L까지는 L-1번 올라가므로 `k=L-1`로 놓으면 누적 임계값은 `100k + 20k(k-1)/2`입니다.\n\n| 도달 레벨 | 직전부터 필요한 XP | 누적 임계값 |\n| --- | ---: | ---: |\n| 1 | 시작 | 0 |\n| 2 | 100 | 100 |\n| 3 | 120 | 220 |\n| 4 | 140 | 360 |\n| 60 | 1,260 | 40,120 |\n\n등차수열의 합이므로 **단계 비용은 선형**, **누적량은 이차식**입니다. 레벨 60까지는 60번이 아닌 59번의 전이가 있습니다. 단계 비용을 고정 100으로 바꾸면 5,900 XP입니다. 현재 곡선에서 승리마다 100 XP만 받는다면 401승은 40,100이라 아직 부족하고 402승에 최대 레벨이 됩니다.\n\n같은 상수를 두 계산이 공유하게 만듭니다. 비용 함수의 숫자만 고치고 누적 함수의 숫자를 놓치면 레벨 표시와 다음 단계 요구량이 서로 맞지 않게 됩니다.",
+      "codes": [
+        {
+          "label": "곡선의 공통 상수",
+          "text": "inline constexpr int kMaxLevel = 60;\ninline constexpr int kBaseCost = 100;\ninline constexpr int kCostStep = 20;",
+          "language": "cpp"
+        },
+        {
+          "label": "범위를 제한한 누적 임계값과 단계 비용",
+          "text": "constexpr int bounded_level(int level) {\n    return level < 1 ? 1 : (level > kMaxLevel ? kMaxLevel : level);\n}\n\n// Cumulative xp needed to reach a level (total_xp_for_level(1) == 0).\nconstexpr int total_xp_for_level(int level) {\n    const int k = bounded_level(level) - 1;\n    return kBaseCost * k + kCostStep * k * (k - 1) / 2;\n}\n\n// Xp needed to advance from a level to the next; 0 at max level.\nconstexpr int xp_to_next(int level) {\n    const int l = bounded_level(level);\n    return l == kMaxLevel ? 0 : kBaseCost + kCostStep * (l - 1);\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/levels.h",
+        "symbol": "constexpr int total_xp_for_level",
+        "invariant": "단계 비용과 누적 임계값이 공통 상수를 사용한다.",
+        "mayDiffer": "기준 구현은 Progress 구조체를 반환하고 실제 함수는 출력 참조도 제공한다."
+      }
+    },
+    {
+      "title": "레벨을 저장하지 않고 XP에서 유도한다",
+      "body": "누적 XP가 219이면 레벨 2이고, 220이면 레벨 3입니다. 필요한 것은 **현재 XP 이하인 가장 높은 레벨의 임계값**입니다. level을 1에서 시작해 다음 임계값을 충족할 동안 증가시키면 됩니다. 최대 레벨이 60이므로 다음 임계값 비교는 최대 59번입니다.\n\n`level`을 DB에 함께 저장하면 XP 갱신과 레벨 갱신이 어긋날 가능성이 하나 더 생깁니다. 여기서는 XP를 원본으로 두고 레벨을 **유도 상태(derived state)**로 계산합니다. 목록 응답이 아주 커지거나 계산이 복잡해지면 캐시나 이진 탐색을 검토할 수 있지만, 캐시에는 무효화 시점이라는 새 계약도 필요합니다.\n\n`bounded_level`은 레벨 인자를 1..60으로 제한한 후 산술에 넣습니다. INT_MAX를 입력한 다음 곱셈 결과만 자르려 하면 곱셈이 먼저 넘칠 수 있습니다. 입력 범위가 제한됐으므로 현재 상수에서 가장 큰 곱도 int에 들어갑니다. 최대 레벨이나 계수를 크게 변경한다면 이 산술 범위도 다시 계산해야 합니다.",
+      "codes": [
+        {
+          "label": "경계에서 다음 레벨로 넘어가는 조건",
+          "text": "inline int level_for_xp(int xp) {\n    if (xp < 0) xp = 0;\n    int level = 1;\n    while (level < kMaxLevel && xp >= total_xp_for_level(level + 1))\n        ++level;\n    return level;\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "곡선 변경과 기존 이용자",
+          "body": "곡선을 바꾸고 누적 XP를 보존하면 레벨 컬럼 이관은 필요 없지만, 같은 XP의 표시 레벨이 달라질 수 있습니다. 예전 레벨 보전·적용 시점·정책별 곡선 중 어떤 계약을 제공할지 먼저 정하세요. 과거 정산과 현재 표시를 모두 재현해야 한다면 당시 곡선 버전을 보존할 수도 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "진행률의 분자와 분모를 정의한다",
+      "body": "XP 219의 레벨은 2입니다. 그 레벨의 시작 임계값은 100이므로 `into=219-100=119`, 다음 레벨로 가는 전체 비용은 `need=120`입니다. 남은 XP는 1이고, 진행률은 실수로 변환한 `119.0/120`입니다. 정수 나눗셈 `119/120`은 0이 되므로 화면 비율에 그대로 쓰지 않습니다.\n\n최대 레벨에서는 다음 단계가 없어 `into=0, need=0`을 반환합니다. 호출자는 먼저 `need==0`을 검사해 “최대 레벨”을 표시하고 나눗셈을 생략합니다. 누적 XP 자체를 0으로 바꾸는 것은 아닙니다.\n\n이 표시 함수는 음수 XP를 0으로 정규화해 1레벨의 진행 0/100을 반환합니다. 영속 데이터 경계에서는 음수를 거절해야 합니다. 화면 함수의 완만한 처리가 손상된 DB 수치를 정상으로 저장할 이유가 되지는 않습니다.",
+      "codes": [
+        {
+          "label": "현재 레벨 안의 진행량",
+          "text": "struct Progress {\n    int level;  // current level, always 1..kMaxLevel\n    int into;   // xp gained inside the current level\n    int need;   // xp required to finish the current level\n};\n\n// Normalize xp, then report progress; at max level into/need are 0.\ninline Progress progress(int xp) {\n    if (xp < 0) xp = 0;\n    const int level = level_for_xp(xp);\n    if (level >= kMaxLevel) return {kMaxLevel, 0, 0};\n    return {level, xp - total_xp_for_level(level), xp_to_next(level)};\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/levels.h",
+        "symbol": "inline void level_progress",
+        "invariant": "음수 표시값을 정규화하고 최대 레벨에서 0분모를 호출자가 구별한다.",
+        "mayDiffer": "구조체 반환과 출력 참조는 형식 차이다. into/need 의미는 같다."
+      }
+    },
+    {
+      "title": "현재 수치와 과거 정산을 따로 저장한다",
+      "body": "`careers`에는 플레이어의 현재 RP·XP를 넣고 레벨은 넣지 않습니다. `match_progress`에는 참가자별 RP 전후·XP 지급량·정책을 넣습니다. 현재 RP가 100이 되어도 옛 경기의 RP가 0→16이었다는 사실은 그대로 남아야 하기 때문입니다.\n\nSQLite의 INTEGER는 64비트 값을 담습니다. C++의 이번 업무 값은 0..2,147,483,647 범위를 사용하므로 **저장 타입과 범위**를 함께 검사합니다. `INTEGER`라고 선언한 것만으로 모든 입력이 원하는 정수라는 보장이 되지는 않습니다. 스키마의 CHECK와 읽기 함수의 검사로 경계를 명시합니다.\n\n`PRIMARY KEY(match_id,player_id)`는 한 경기에서 같은 참가자의 진행 내역이 두 번 생기는 것을 막습니다. 두 참가자의 행이 모두 존재해야 한다는 조건은 이 키 하나로 완성되지 않으므로 트랜잭션과 조회·이관 검사를 함께 사용합니다.",
+      "codes": [
+        {
+          "label": "수치와 정산 내역의 저장 계약",
+          "text": "inline constexpr const char* kProgressionSchema = R\"sql(\nCREATE TABLE careers (\n  player_id TEXT PRIMARY KEY NOT NULL REFERENCES players(id) ON DELETE CASCADE,\n  rp INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rp)='integer' AND rp BETWEEN 0 AND 2147483647),\n  xp INTEGER NOT NULL DEFAULT 0 CHECK(typeof(xp)='integer' AND xp BETWEEN 0 AND 2147483647)\n);\nCREATE TABLE match_progress (\n  match_id INTEGER NOT NULL REFERENCES matches(id),\n  player_id TEXT NOT NULL REFERENCES players(id),\n  rp_before INTEGER NOT NULL CHECK(typeof(rp_before)='integer' AND rp_before BETWEEN 0 AND 2147483647),\n  rp_after INTEGER NOT NULL CHECK(typeof(rp_after)='integer' AND rp_after BETWEEN 0 AND 2147483647),\n  xp_delta INTEGER NOT NULL CHECK(typeof(xp_delta)='integer' AND xp_delta IN (0,50,100)),\n  policy INTEGER NOT NULL CHECK(policy IN (0,1)),\n  PRIMARY KEY(match_id,player_id)\n);\n)sql\";",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "bool read_nonnegative_int",
+        "invariant": "64비트 저장 값을 타입·범위 검사 후 업무 int로 좁힌다.",
+        "mayDiffer": "실제 DB는 players에 수치를 모으고 matches에 RP 전후를 보관한다. 학습용은 역할을 별도 테이블로 나눈다."
+      }
+    },
+    {
+      "title": "구 학습 DB의 경기를 소급 지급하지 않는다",
+      "body": "학습 스키마는 버전 3에서 4로 올라갑니다. 이미 존재하는 플레이어에게 RP 0·XP 0의 career를 만들고, 이미 존재하는 경기에는 RP 전후0·XP0·policy0의 내역을 채웁니다. 지금 새 수치를 도입하는 정책이므로 오래된 경기의 승패를 다시 계산해 경험치를 주지 않습니다.\n\nBP 기록은 그대로 유지합니다. 따라서 같은 옛 경기의 **BP 정책은 1, RP/XP 정책은 0**일 수 있습니다. 이는 서로 다른 정책 축이므로 모순이 아닙니다. 기존 BP 지급을 없애거나 새 RP/XP를 과거에 준 것처럼 꾸미지 않는 것이 이관의 목적입니다.\n\n이관은 기존 `ImmediateTransaction` 안에서 수행합니다. 표 구조 추가·초기값 채우기·이력 버전 기록·헤더 변경이 함께 커밋돼야 합니다. 실행 도중 실패하면 재실행 가능한 옛 상태로 돌아갑니다. 별도 위치에 복사한 학습 DB로 이관 실습을 하고 실제 계정 DB와 섞지 마세요.",
+      "codes": [
+        {
+          "label": "구 경기의 명시적인 무지급 내역",
+          "text": "inline constexpr const char* kProgressionBackfill = R\"sql(\nINSERT INTO careers(player_id) SELECT id FROM players;\nINSERT INTO match_progress(match_id,player_id,rp_before,rp_after,xp_delta,policy)\n  SELECT id,player_a,0,0,0,0 FROM matches\n  UNION ALL SELECT id,player_b,0,0,0,0 FROM matches;\n)sql\";",
+          "language": "cpp"
+        },
+        {
+          "label": "버전 4 이관 분기",
+          "text": "    if(version==3) {\n        db.exec(kProgressionSchema);\n        db.exec(kProgressionBackfill);\n        db.exec(\"INSERT INTO study_schema_history VALUES(4,'progression_v4');\");\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "XP를 더하기 전에 저장 가능한지 판정한다",
+      "body": "승자에게 100 XP를 지급할 때 현재 XP가 INT_MAX-100이면 정확히 상한에 도달하므로 허용합니다. 현재 XP가 INT_MAX-99이면 1만큼 넘으므로 거절합니다. `before+amount > limit`를 먼저 계산하면 바로 그 덧셈이 넘칠 수 있습니다. 먼저 amount가 0..100인지 확인하고 `before > limit-amount`로 검사합니다.\n\n이 함수는 예상치 못한 음수도 거절합니다. 화면 진행률의 정규화와 달리 정산 입력의 오류를 감춰서는 안 됩니다. 실패하면 예외가 `put`까지 전달되고 트랜잭션이 롤백됩니다.\n\n저장 경계의 `read_career`는 행 부재·잘못된 타입·범위를 구별해 실패시킵니다. DB의 INTEGER를 읽을 때 먼저 64비트로 받고 검사 후 int로 변환합니다. int로 먼저 줄인 값을 검사하면 이미 잘린 값을 정상으로 오인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "덧셈 전 범위 확인",
+          "text": "inline int add_xp(int before, int amount) {\n    if(before<0 || amount<0 || amount>100 || before>kProgressLimit-amount)\n        throw std::overflow_error(\"XP range exceeded\");\n    return before+amount;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "현재 RP·XP의 복원",
+          "text": "    Career read_career(std::uint64_t player) {\n        Statement q(db_.get(),\"SELECT rp,xp FROM careers WHERE player_id=?1\");\n        q.text(1,std::to_string(player));\n        if(!q.next())throw std::runtime_error(\"career missing\");\n        const auto rp=q.integer_column(0), xp=q.integer_column(1);\n        if(rp<0 || rp>kProgressLimit || xp<0 || xp>kProgressLimit)\n            throw std::runtime_error(\"invalid career\");\n        return {static_cast<int>(rp),static_cast<int>(xp)};\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "경기·BP·RP·XP를 하나의 커밋에 묶는다",
+      "body": "새 경기 행과 BP 지급을 작성한 뒤, 두 사람의 경기 전 career를 읽습니다. **양쪽의 계산은 모두 경기 전 RP**를 사용합니다. A를 갱신한 새 RP로 B의 기대 점수를 계산하면 같은 경기에 서로 다른 기준을 적용하게 됩니다.\n\n순수 함수가 반환한 두 결과를 `advance`로 반영합니다. 각 호출은 현재 수치를 바꾸고 해당 경기의 진행 내역을 추가합니다. UPDATE가 정상 종료했더라도 대상 행을 실제로 하나 바꾸었는지 확인합니다. 마지막에만 트랜잭션을 커밋합니다.\n\nB의 XP 범위 검사에서 실패하면 A의 RP·XP, A/B의 BP, 새 경기 행, 각 정산 내역을 모두 롤백합니다. 이후 같은 요청을 다시 보낼 수 있지만, 원인을 해결하지 않고 반복하면 같은 실패를 만납니다. 실패 후 현재 수치를 읽어 일부만 반영되지 않았는지 확인하는 검사가 이 계약을 검증합니다.",
+      "codes": [
+        {
+          "label": "두 사람의 계산 기준을 먼저 고정",
+          "text": "            const auto a=read_career(record.player_a), b=read_career(record.player_b);\n            const auto progress=progress_for(a.rp,b.rp,record.winner);\n            advance(row,record.player_a,a,progress.a);\n            if(hook)hook(RewardPoint::after_progress_a);\n            advance(row,record.player_b,b,progress.b);\n            if(hook)hook(RewardPoint::after_progress_b);\n            if(hook)hook(RewardPoint::before_commit);\n            transaction.commit();",
+          "language": "cpp"
+        },
+        {
+          "label": "현재 수치와 최초 내역을 함께 작성",
+          "text": "    void advance(sqlite3_int64 match, std::uint64_t player, Career before, ProgressAward award) {\n        // put owns the write transaction and mutex throughout both participants.\n        const int xp=add_xp(before.xp,award.xp);\n        Statement q(db_.get(),\"UPDATE careers SET rp=?1,xp=?2 WHERE player_id=?3\");\n        q.integer(1,award.after);q.integer(2,xp);q.text(3,std::to_string(player));q.done();\n        if(sqlite3_changes(db_.get())!=1)throw std::runtime_error(\"career update missing\");\n        Statement receipt(db_.get(),\"INSERT INTO match_progress VALUES(?1,?2,?3,?4,?5,?6)\");\n        receipt.integer(1,match);receipt.text(2,std::to_string(player));\n        receipt.integer(3,award.before);receipt.integer(4,award.after);\n        receipt.integer(5,award.xp);receipt.integer(6,award.policy);receipt.done();\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::saveMatch",
+        "invariant": "경기와 양쪽 RP·XP·BP 갱신은 전체 성공 또는 전체 실패로 확정된다.",
+        "mayDiffer": "실제 코드는 players의 승패 횟수도 갱신한다. BP 지급량은 정산 정책에서 정하며 학습 예제와 서비스 정책이 다를 수 있다."
+      }
+    },
+    {
+      "title": "재전송은 현재 RP로 다시 계산하지 않는다",
+      "body": "키17의 첫 결과가 A RP 0→16, XP+100이었다고 합시다. 키18을 처리한 뒤 A의 현재 RP·XP는 더 커집니다. 키17을 재전송하면 현재 값을 입력으로 `progress_for`를 다시 실행하는 대신 저장된 `match_progress`를 읽습니다. 현재 프로필과 원래 경기의 정산 내역이 서로 달라도 정상입니다.\n\n같은 키의 내용을 비교한 뒤 원래 BP 내역과 RP/XP 내역이 모두 있는지 확인합니다. 일부가 누락되어 있다면 저장 오류로 처리합니다. 누락을 새 경기로 해석하면 이미 지급한 경험치를 다시 쌓을 수 있습니다.\n\nHTTP v1/v2 응답의 기존 형식은 유지합니다. v2의 `policy`는 BP 정책이며, 새 RP/XP 내역은 이번 로컬 조회 도구에서 확인합니다. 공개 프로필 응답이나 새 정산 API를 확장하려면 그 필드와 정책 이름을 별도로 정의해야 합니다.",
+      "codes": [
+        {
+          "label": "원래 내역이 존재하는 재전송만 확인",
+          "text": "            if (const auto found = read_match(record.key)) {\n                if (found->record != record)\n                    return {SqlStatus::conflict, {}};\n                const auto saved=read_awards(record.key);\n                if(!saved || !read_progress(record.key))throw std::runtime_error(\"saved receipt missing\");\n                return {SqlStatus::accepted,\n                        {record.key, found->row, record.player_a, record.player_b}, *saved};\n            }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "지급 정책만으로 어뷰징이 막히지는 않는다",
+          "body": "실패한 플레이도 XP/BP를 받으므로 고의 패배·자동 반복 플레이의 유인이 생길 수 있습니다. 지급 입력은 신뢰된 경기 판정과 연결하고, 업무 키·경기 참가·지급 한도를 검사해야 합니다. 이 학습 서비스는 local fixture이며, put에 승자를 전달할 수 있다는 사실 자체가 승자 판정 권한을 주는 것은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "경계와 중간 실패를 검사한다",
+      "body": "검사 입력은 식의 한가운데보다 **조건이 바뀌는 지점**을 우선 고릅니다. RP는 299/300·599/600에서 K가 바뀌고, 0과 INT_MAX에서 포화됩니다. XP는 각 레벨 임계값 바로 전·정확히 임계값·다음 구간을 비교합니다.\n\n레벨 임계값 검사는 기대값을 같은 닫힌식으로 다시 계산하기보다 비용 100,120,…을 순서대로 더해 만듭니다. 서로 다른 계산 과정으로 비교해야 같은 식을 잘못 복사해도 함께 통과하는 위험을 줄입니다.\n\n거래 검사는 A 갱신 직후 예외를 넣고 경기 수·두 지갑·두 career·정산 내역을 확인합니다. B의 XP만 상한에 둔 경우도 넣습니다. 마지막으로 다른 경기를 사이에 처리한 뒤 옛 키를 다시 보내 최초 RP 내역과 현재 XP가 각각 유지되는지 확인합니다.",
+      "codes": [
+        {
+          "label": "임계값을 단계 비용의 합으로 대조",
+          "text": "    int sum=0;\n    for(int level=1;level<=60;++level) {\n        CHECK(levels::total_xp_for_level(level)==sum);\n        CHECK(levels::level_for_xp(sum)==level);\n        if(sum)CHECK(levels::level_for_xp(sum-1)==level-1);\n        if(level<60){CHECK(levels::xp_to_next(level)==100+20*(level-1));sum+=100+20*(level-1);}\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "정산 도구로 옛 경기와 현재 프로필을 비교한다",
+      "body": "저장소 루트에서 아래 명령을 실행합니다. 처음 만드는 학습 DB이면 키17에서 A는 RP16·XP100·BP10·레벨2·진행0/120, B는 RP0·XP50·BP3·레벨1·진행50/100입니다. 키18을 처리한 뒤 A는 RP31·XP200·BP20, B는 RP0·XP100·BP6입니다.\n\n마지막 키17 호출의 첫 줄은 여전히 `A RP=0->16 XP+100 policy=1`입니다. 아래 프로필 줄은 현재 누적값이므로 A XP200을 보여 줍니다. 명령을 다시 실행해도 같은 키의 지급은 늘어나지 않습니다. 완전히 새 실험을 하고 싶으면 다른 학습 DB 경로를 선택하세요.\n\n이 도구는 DB를 직접 여는 로컬 진단용입니다. `study_meta_db`의 v1/v2로 새 경기를 제출해도 같은 `put`을 사용해 RP/XP가 반영됩니다. Windows 다중 구성 생성기는 빌드의 `--config Release`와 실행 파일의 Release 하위 경로를 맞춥니다. 체크포인트만 별도로 복사했다면 `STUDY_VENDOR_DIR`에 SQLite·HTTP 헤더 위치를 지정합니다.",
+      "codes": [
+        {
+          "label": "빌드와 키17·18·17 비교",
+          "text": "cmake -S docs/learn/checkpoints/115-progression -B out/study-115 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-115 --target study_meta_db progression_probe progression_contract -j2\nout/study-115/progression_probe out/study-115/progression.db 17\nout/study-115/progression_probe out/study-115/progression.db 18\nout/study-115/progression_probe out/study-115/progression.db 17",
+          "language": "sh"
+        },
+        {
+          "label": "반복 가능한 자동 검사",
+          "text": "python3 scripts/check_learning_progression.py",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "현재 소스와 기준 구현을 같은 질문으로 읽는다",
+      "body": "소스 뷰어에서 `meta/elo.h`, `meta/levels.h`, `Database::saveMatch`를 이어서 읽어 보세요. 기대 점수와 갱신 정책, XP에서 표시를 유도하는 함수, 계산 결과를 확정하는 저장 경계가 각각 어디에 있는지 찾는 것이 목적입니다.\n\n유지할 핵심은 세 수치의 의미 분리, 경기 전 값으로 양쪽 계산, 범위 검사 후 변환·저장, 같은 트랜잭션의 정산, 현재 상태와 최초 결과의 구별입니다. 바뀔 수 있는 것은 지급량·K 구간·곡선·카탈로그 가격·테이블 배치입니다. 실제 게임은 BP30/10을 사용하며 봇 보상 등 다른 경로도 별도로 존재합니다.\n\n표시 함수는 값을 설명하고, 정산 함수는 정책을 적용하며, 저장 계층은 그 효과를 한 번 확정합니다. 계수 하나를 바꿀 때에도 어느 사용자 값과 과거 기록이 달라지는지 이 세 책임을 따라 확인할 수 있어야 합니다.",
+      "codes": [
+        {
+          "label": "추가 타깃",
+          "text": "add_executable(progression_contract tests/progression_contract.cpp)\ntarget_link_libraries(progression_contract PRIVATE study_meta_http study_sqlite)\nadd_executable(progression_probe tools/progression_probe.cpp)\ntarget_link_libraries(progression_probe PRIVATE study_meta_http study_sqlite)",
+          "language": "cmake"
+        },
+        {
+          "label": "meta/progression_policy.h",
+          "language": "cpp",
+          "file": "checkpoints/115-progression/meta/progression_policy.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/progression_levels.h",
+          "language": "cpp",
+          "file": "checkpoints/115-progression/meta/progression_levels.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/progression_schema.h",
+          "language": "cpp",
+          "file": "checkpoints/115-progression/meta/progression_schema.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/sqlite_results.h",
+          "language": "cpp",
+          "file": "checkpoints/115-progression/meta/sqlite_results.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/progression_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/115-progression/tools/progression_probe.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "constexpr int kXpWin",
+        "invariant": "정산 의미와 저장 경계를 유지하면서 콘텐츠 수치를 변경한다.",
+        "mayDiffer": "학습 코드는 fixture ID와 단순 정책을 사용하고 실제 서비스는 별도 인증·경기 판정 경계를 가진다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "115-1",
+      "question": "RP 0 대 0에서 A가 이겼습니다. 이번 정책의 B 정산 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "RP -16, XP 50, BP 3"
+        },
+        {
+          "id": "b",
+          "text": "RP 0, XP 50, BP 3"
+        },
+        {
+          "id": "c",
+          "text": "RP 0, XP 0, BP 0"
+        },
+        {
+          "id": "d",
+          "text": "RP 16, XP 100, BP 10"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "RP 0, XP 50, BP 3",
+      "explanation": "패배의 RP 계산은 -16이지만 바닥 0으로 제한됩니다. XP와 BP는 별도 정책이므로 패배에도 각각 50과 3을 지급합니다."
+    },
+    {
+      "id": "115-2",
+      "question": "누적 XP 219에서 1 XP를 더 받았습니다. 화면에 표시할 레벨과 진행량은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "레벨 2, 진행 120/120"
+        },
+        {
+          "id": "b",
+          "text": "레벨 3, 진행 220/140"
+        },
+        {
+          "id": "c",
+          "text": "레벨 3, 진행 0/140"
+        },
+        {
+          "id": "d",
+          "text": "레벨 2, 진행 0/120"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "레벨 3, 진행 0/140",
+      "explanation": "레벨 3의 누적 임계값은 100+120=220입니다. 정확히 도달하면 레벨 3이며, 그 안의 진행량은 220-220=0, 다음 비용은 140입니다."
+    },
+    {
+      "id": "115-3",
+      "question": "int a와 b의 차이를 계산할 때 (b-a)/400.0이 큰 값에서 위험한 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "400.0이 정수로 저장되기 때문에"
+        },
+        {
+          "id": "b",
+          "text": "나눗셈보다 int 차감이 먼저 수행되기 때문에"
+        },
+        {
+          "id": "c",
+          "text": "double은 음수를 표현할 수 없기 때문에"
+        },
+        {
+          "id": "d",
+          "text": "RP의 K가 항상 400이기 때문에"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "나눗셈보다 int 차감이 먼저 수행되기 때문에",
+      "explanation": "피연산자가 둘 다 int이므로 b-a는 int로 먼저 계산됩니다. 차감 전에 각 값을 double로 바꾸어야 정수 차감의 넘침을 피합니다."
+    },
+    {
+      "id": "115-4",
+      "question": "A의 RP·XP를 쓴 뒤 B의 XP가 저장 상한을 넘는다고 판정했습니다. 커밋 전 해야 할 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "A와 BP만 커밋하고 B는 생략"
+        },
+        {
+          "id": "b",
+          "text": "B의 XP만 상한으로 잘라 성공 응답"
+        },
+        {
+          "id": "c",
+          "text": "원래 경기 기록을 삭제한 뒤 A의 값 유지"
+        },
+        {
+          "id": "d",
+          "text": "경기·BP·양쪽 RP/XP·내역을 모두 롤백"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "경기·BP·양쪽 RP/XP·내역을 모두 롤백",
+      "explanation": "이번 지급 계약은 한 경기 정산의 전체 성공 또는 전체 실패입니다. B의 실패도 같은 트랜잭션을 취소해야 일부 지급이나 중복 정산을 막을 수 있습니다."
+    },
+    {
+      "id": "115-5",
+      "question": "XP는 유지하고 레벨 곡선의 공통 계수만 바꿨습니다. 옳은 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 XP의 표시 레벨이 달라질 수 있어 적용 정책이 필요하다"
+        },
+        {
+          "id": "b",
+          "text": "level 컬럼이 없으므로 모든 이용자의 표시도 같다"
+        },
+        {
+          "id": "c",
+          "text": "과거 경기의 XP 지급량을 새 곡선으로 다시 계산해야 한다"
+        },
+        {
+          "id": "d",
+          "text": "BP 잔액도 같은 비율로 자동 환산된다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "같은 XP의 표시 레벨이 달라질 수 있어 적용 정책이 필요하다",
+      "explanation": "레벨은 XP와 곡선 두 입력에서 유도됩니다. XP를 그대로 두어도 곡선이 바뀌면 표시가 달라집니다. 과거 지급량과 BP의 변경은 별도 계약이며 자동으로 따라오지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "RP 0 대 0의 승패 결과를 먼저 계산합니다.",
+      "XP 99/100·219/220·40,119/40,120의 표시를 비교합니다.",
+      "새 DB에 키17·18·17을 제출해 원래 RP 내역과 현재 XP를 비교합니다.",
+      "중간 실패·B의 XP 상한·구 v3 DB 이관 검사를 실행합니다."
+    ],
+    "failureChecks": [
+      "int 차감/덧셈 뒤에 변환해 넘침을 숨기지 않습니다.",
+      "최대 레벨의 need=0을 나눗셈 분모로 쓰지 않습니다.",
+      "새 요청의 B 계산에 A의 갱신된 RP를 넣지 않습니다.",
+      "구 경기의 재시도에 새 지급 정책을 다시 적용하지 않습니다."
+    ],
+    "expected": "세 수치의 계산·저장·표시 책임을 설명하고, 같은 거래의 실패와 재시도 결과를 예측한다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "선택 명세 DeepSeek 초안·직접 수식/구현 대조·경계와 롤백 검수",
+    "draftJob": "out/learning-jobs/115-levels-events.jsonl",
+    "corrections": [
+      "수치 연산 전 변환·범위 제한",
+      "표시 정규화와 DB 오류 거절 구분",
+      "공통 XP 곡선 상수·59전이·402승",
+      "BP와 RP/XP 정책 버전 구분",
+      "구 데이터 무소급 정산",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL의 관련 SQLite·HTTP·이관·보상·멱등·진행 타깃 및 계약 검사",
+    "모든 레벨 임계값·RP 양끝/K 경계·음수 표시·중간 예외·XP 상한 롤백·재전송·v3 이관 검사",
+    "새 진행 C++와 실제 수치/DB 경계 ASan/UBSan 검사",
+    "실제 메타 서버 재빌드 및 43개 pytest 회귀",
+    "다른 OS 네이티브·수동 GUI·실서비스 부하 미검증"
+  ]
+}

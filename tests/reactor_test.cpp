@@ -43,7 +43,7 @@ void check(bool cond, const char* what) {
 }
 
 // listen 소켓이 실제로 바인딩된 포트를 읽는다(ephemeral 포트 0 사용 시 필요).
-uint16_t bound_port(int fd) {
+uint16_t bound_port(net::NativeSocket fd) {
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
     if (::getsockname(static_cast<
@@ -98,7 +98,7 @@ int main() {
     if (!reactor) { net::net_shutdown(); return 2; }
 
     // 루프백 연결 한 쌍을 만든다: listen → 백그라운드 connect → accept.
-    net::TcpSocket listener = net::tcp_listen(0, 1);
+    net::TcpSocket listener = net::tcp_listen(0, 1, true);
     check(listener.valid(), "tcp_listen(ephemeral)");
     uint16_t port = bound_port(listener.fd());
     check(port != 0, "bound_port");

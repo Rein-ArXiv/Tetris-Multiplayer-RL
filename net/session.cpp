@@ -1,5 +1,6 @@
 #include "session.h"
 #include "wss_client.h"
+#include "input_message.h"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -45,6 +46,24 @@ static void parse_match_icons(const std::vector<uint8_t>& payload,
 Session::Session() {}
 Session::~Session() { Close(); }
 
+// All receive phases share the same fatal-framing policy. Run on the active
+// receive worker: Close() would join that worker, so signal failure and shut
+// down transport here; the owner later calls Close() to join/release handles.
+bool Session::parseReceived(std::vector<uint8_t>& bytes, std::vector<Frame>& frames) {
+    if (parse_frames(bytes, frames)) return true;
+    frames.clear(); // Do not dispatch a valid prefix from a rejected batch.
+    NET_WARN("[NET] Invalid frame length; disconnecting");
+    ready = false;
+    connected = false;
+    quit = true;
+    {
+        std::lock_guard<std::mutex> lk(sockMu_);
+        if (sock.valid()) tcp_close(sock);
+    }
+    connectionFailed = true;
+    return false;
+}
+
 LinkStatus Session::linkStatus() const {
     if (connectionFailed.load()) return LinkStatus::Lost;
     if (!ready.load()) return LinkStatus::OK;
@@ -56,8 +75,15 @@ LinkStatus Session::linkStatus() const {
     return LinkStatus::OK;
 }
 
+// Called by the single owner before a start operation changes any state.
+// Check the workers that may publish th before reading th itself. Even an
+// exited worker stays joinable until Close() joins it; it cannot be overwritten.
+bool Session::hasUnjoinedWorkers() const {
+    return ath.joinable() || qth.joinable() || rth.joinable() || th.joinable();
+}
+
 bool Session::Host(uint16_t port, const SeedParams& sp) {
-    if (listening) return false;
+    if (hasUnjoinedWorkers()) return false;
 
     // Close() 이후 재사용을 위한 상태 리셋. 같은 Session 객체를 재활용할 때
     // 이전 세션의 sendQ / HASH 상태가 남아 새 연결의 ioThread 로 유출되는 것을
@@ -73,8 +99,8 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
 
     { std::lock_guard<std::mutex> lk(seedMu); seedParams = sp; }
     listening = true;
@@ -83,6 +109,7 @@ bool Session::Host(uint16_t port, const SeedParams& sp) {
 }
 
 bool Session::Connect(const std::string& host, uint16_t port) {
+    if (hasUnjoinedWorkers()) return false;
     NET_TRACE("[NET] Connecting to " << host << ":" << port);
 
     // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
@@ -98,8 +125,8 @@ bool Session::Connect(const std::string& host, uint16_t port) {
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
 
     TcpSocket connectedSock = tcp_connect(host, port);
     if (!connectedSock.valid()) {
@@ -128,6 +155,8 @@ bool Session::Connect(const std::string& host, uint16_t port) {
 }
 
 void Session::SendInput(uint32_t tick, uint8_t mask) {
+    // Transport readiness is required; the caller also owns the gameplay phase.
+    if (!connected.load() || !ready.load() || quit.load()) return;
     // 메인 스레드 활성 시각 갱신 — ioThread 의 스톨 감지 (창 드래그 대응) 이 이 값
     // 을 기준으로 동작한다.
     lastMainActivityMs_.store(now_ms());
@@ -139,12 +168,20 @@ void Session::SendInput(uint32_t tick, uint8_t mask) {
 }
 
 void Session::SendHash(uint32_t tick, uint64_t hash) {
+    const auto admission = hashMailbox_.record_local(tick, hash);
+    if (admission != HashPut::stored && admission != HashPut::duplicate) {
+        NET_WARN("[NET] Local HASH admission failed");
+        connectionFailed = true;
+        quit = true;
+        return;
+    }
     std::vector<uint8_t> pl; le_write_u32(pl, tick); le_write_u64(pl, hash);
     auto fr = build_frame(MsgType::HASH, pl);
     pushSend(std::move(fr));
 }
 
 void Session::SendGameOverChoice(GameOverChoice choice) {
+    if (choice != GameOverChoice::Restart && choice != GameOverChoice::GoToTitle) return;
     localGameOverChoice.store((uint8_t)choice);
     std::vector<uint8_t> pl;
     pl.push_back((uint8_t)choice);
@@ -161,7 +198,8 @@ void Session::SendNewSeed(uint64_t newSeed) {
         le_write_u64(pl, seedParams.seed);
         le_write_u32(pl, seedParams.start_tick);
         pl.push_back(seedParams.input_delay);
-        pl.push_back((uint8_t)seedParams.role);
+        // SEED assigns the receiver's role; keep our local role unchanged.
+        pl.push_back((uint8_t)(seedParams.role == Role::Host ? Role::Peer : Role::Host));
     }
     auto fr = build_frame(MsgType::SEED, pl);
     pushSend(std::move(fr));
@@ -220,34 +258,31 @@ bool Session::GetRemoteInput(uint32_t tick, uint8_t& outMask) {
     outMask = it->second; return true;
 }
 
-// sendQ 는 ioThread 가 소켓으로 흘려보내는 속도보다 빠르게 쌓일 수 있다.
-// 소켓이 막히면(상대가 멈췄거나 네트워크가 죽었거나) 큐가 무한히 자란다.
-//
-// 상한을 넘겼을 때 오래된 프레임을 버리는 선택지는 쓸 수 없다. lockstep 은
-// 모든 INPUT 이 순서대로 도착한다는 전제 위에 서 있어서, 한 프레임만 사라져도
-// 양쪽 시뮬레이션이 조용히 어긋난다. DESYNC 배너가 뜨기까지 한참 걸리고
-// 원인도 추적하기 어렵다.
-//
-// 그래서 큐가 넘치면 연결이 사실상 끊긴 것으로 보고 실패 처리한다.
-// 상위 UI 가 "상대 연결 끊김"을 띄우고 사용자가 재접속을 고르게 하는 편이,
-// 어긋난 채로 계속 도는 것보다 낫다.
-constexpr size_t kMaxSendQueue = 4096;   // 60Hz 기준 약 68초치 INPUT
+// A full queue is an admission failure, not proof that the peer disappeared.
+// Input records cannot be silently discarded while continuing the same match.
+constexpr size_t kMaxSendQueue = 4096; // Queued frames; one more may be in transport.
+constexpr size_t kMaxPendingSendBytes = 1024 * 1024; // Wire bytes, including active send.
+constexpr size_t kMaxSendFrameBytes = kMaxPayloadBytes + kFrameLenBytes +
+    kFrameTypeBytes + kFrameChecksumBytes;
 
 void Session::pushSend(std::vector<uint8_t>&& fr) {
     std::lock_guard<std::mutex> lk(sendMu);
-    if (sendQ.size() >= kMaxSendQueue) {
-        NET_WARN("[NET] sendQ overflow (" << sendQ.size()
-                 << " frames) - treating peer as disconnected");
+    if (quit.load() || fr.empty() || fr.size() > kMaxSendFrameBytes ||
+        sendQ.size() >= kMaxSendQueue ||
+        fr.size() > kMaxPendingSendBytes - pendingSendBytes) {
+        NET_WARN("[NET] send admission failed: queued=" << sendQ.size()
+                 << " pending_bytes=" << pendingSendBytes);
         connectionFailed = true;
         quit = true;
         return;
     }
     sendQ.push_back(std::move(fr));
+    pendingSendBytes += sendQ.back().size(); // Charge only after insertion succeeds.
 }
 
 void Session::Close() {
     quit = true;
-    // 소켓을 먼저 닫아(shutdown) accept()/recv() 블로킹 스레드를 깨운다.
+    // 공개된 연결에 shutdown을 요청한다. accept 워커는 논블로킹 폴링에서 quit를 본다.
     //   sockMu_ 로 워커 스레드의 publish 와 직렬화 — Close 가 quit 를 먼저 세팅하므로
     //   워커는 이 잠금 이후 publish 하지 않거나(잠금 안에서 quit 재확인), 이미 publish
     //   한 값을 우리가 본다. (shared_ptr 멤버 data race 방지)
@@ -256,7 +291,8 @@ void Session::Close() {
         if (listening && listenSock.valid()) tcp_close(listenSock);
         if (sock.valid()) tcp_close(sock);
     }
-    // shutdown 후 스레드 join (블로킹 해제됨). join 은 반드시 잠금 밖에서.
+    // 공개 소켓에는 shutdown을 요청했지만, DNS/connect 등 미공개 작업의
+    // 완료 시간까지 보장하지는 않는다. join은 워커가 쓸 잠금 밖에서 수행한다.
     if (ath.joinable()) ath.join();
     if (qth.joinable()) qth.join();
     if (rth.joinable()) rth.join();
@@ -299,8 +335,8 @@ void Session::Close() {
     }
     // 게임 sendQ / HASH pair 도 함께 비움 — 같은 Session 객체 재사용 시 이전
     // 연결의 stale 프레임이 새 연결의 ioThread 에서 선두로 나가는 것 방지.
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     // MATCH_RESULT 도 초기화. ClearGameOverChoices 만 의존하면 타이틀→새 매치
     // 경로에서 이전 라운드 결과가 새 매치 게임오버 시점에 즉시 읽히는 경계가
     // 있었다. Close 는 세션 경계마다 반드시 실행되므로 여기서 보장.
@@ -314,7 +350,7 @@ void Session::Close() {
 bool Session::QueueJoin(const std::string& host, uint16_t port,
                         uint32_t start_tick, uint8_t input_delay,
                         const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable()) return false;
+    if (hasUnjoinedWorkers()) return false;
 
     // Close() 이후 재사용을 위한 상태 리셋 (sendQ / HASH 포함)
     quit = false;
@@ -329,8 +365,8 @@ bool Session::QueueJoin(const std::string& host, uint16_t port,
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     queueMatched_.store(false);
     queueLocalReady_.store(false);
     queuePeerReady_.store(false);
@@ -389,7 +425,7 @@ void Session::QueueDecline() {
 bool Session::RoomCreate(const std::string& host, uint16_t port,
                          uint32_t start_tick, uint8_t input_delay,
                          const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
+    if (hasUnjoinedWorkers()) return false;
     quit = false;
     connectionFailed = false;
     connected = false;
@@ -399,8 +435,8 @@ bool Session::RoomCreate(const std::string& host, uint16_t port,
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     roomState_.store(RoomState::Connecting);
     roomPeerCount_.store(0);
     { std::lock_guard<std::mutex> lk(roomMu_); roomCode_.clear(); }
@@ -414,7 +450,7 @@ bool Session::RoomJoin(const std::string& host, uint16_t port,
                        const std::string& code,
                        uint32_t start_tick, uint8_t input_delay,
                        const std::string& auth_token) {
-    if (qth.joinable() || th.joinable() || ath.joinable() || rth.joinable()) return false;
+    if (hasUnjoinedWorkers()) return false;
     if (code.empty() || code.size() > 255) return false;
     quit = false;
     connectionFailed = false;
@@ -425,8 +461,8 @@ bool Session::RoomJoin(const std::string& host, uint16_t port,
     lastRemoteTick = 0;
     lastLocalTick = 0;
     recvBuf.clear();
-    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); }
-    { std::lock_guard<std::mutex> lk(hashMu_); lastHashTickRemote = 0; lastHashRemote = 0; }
+    { std::lock_guard<std::mutex> lk(sendMu); sendQ.clear(); pendingSendBytes = 0; }
+    hashMailbox_.clear();
     roomState_.store(RoomState::Connecting);
     roomPeerCount_.store(0);
     { std::lock_guard<std::mutex> lk(roomMu_); roomCode_ = code; }
@@ -551,7 +587,10 @@ void Session::roomThread(std::string host, uint16_t port,
         }
 
         std::vector<Frame> frames;
-        parse_frames(buf, frames);
+        if (!parseReceived(buf, frames)) {
+            roomState_.store(RoomState::Failed);
+            return;
+        }
         bool matchFound = false;
         for (auto& f : frames) {
             if (f.type == MsgType::ROOM_INFO) {
@@ -716,7 +755,7 @@ void Session::queueThread(std::string host, uint16_t port,
             return;
         }
         std::vector<Frame> frames;
-        parse_frames(buf, frames);
+        if (!parseReceived(buf, frames)) return;
         // MATCH_FOUND 뒤에 같은 recv 에 실린 프레임을 다음 단계(로비)로 넘기기 위한 보존 버퍼.
         // build_frame 은 동일 payload 에 대해 bit-identical 재생산되므로 체크섬 포함 복원 가능.
         std::vector<uint8_t> preserve;
@@ -806,7 +845,7 @@ void Session::queueThread(std::string host, uint16_t port,
             return;
         }
         std::vector<Frame> frames;
-        parse_frames(buf, frames);
+        if (!parseReceived(buf, frames)) return;
         bool peerDeclined = false;
         // 로비 외 프레임(INPUT/PING/HASH 등)은 재직렬화해 recvBuf 에 바로 적재한다.
         // 릴레이는 양쪽 READY 를 본 순간부터 게임 바이트 포워딩을 시작하므로, 상대
@@ -855,6 +894,7 @@ void Session::queueThread(std::string host, uint16_t port,
 }
 
 void Session::ioThread() {
+    pendingPongs_ = PongWindow{};
     NET_TRACE("[NET] I/O thread started");
     auto startTime = std::chrono::steady_clock::now();
     const auto CONNECTION_TIMEOUT = std::chrono::seconds(10);
@@ -872,16 +912,18 @@ void Session::ioThread() {
             }
         }
 
-        // 1Hz PING 송신 — ready=true 이후에만. 상대가 얼어붙어도 여기선 계속
-        // 큐에 쌓이지만 tcp_send_all 자체가 막히지는 않는다(커널 버퍼 여유 범위).
+        // ready 이후 약 1초마다 probe를 큐에 넣는다. 수신·송신 대기와
+        // 스케줄링 지연 때문에 실제 wire 송신 간격이 고정되지는 않는다.
         if (ready.load()) {
             int64_t now = now_ms();
             int64_t lastSent = lastPingSentMs.load();
             if (lastSent == 0 || (now - lastSent) >= 1000) {
                 lastPingSentMs.store(now);
-                std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
-                auto fr = build_frame(MsgType::PING, pl);
-                pushSend(std::move(fr));
+                if (now >= 0 && pendingPongs_.remember(static_cast<uint64_t>(now))) {
+                    std::vector<uint8_t> pl; le_write_u64(pl, (uint64_t)now);
+                    auto fr = build_frame(MsgType::PING, pl);
+                    pushSend(std::move(fr));
+                }
             }
 
             // 메인 스레드 스톨 자동 heartbeat — 창 드래그 시 메인 루프가 WM_ENTERSIZEMOVE
@@ -889,7 +931,7 @@ void Session::ioThread() {
             // INPUT(tick,0) 을 대신 송신해 lockstep 을 계속 진행시킨다.
             //   · lastMainActivityMs_ == 0  → 첫 입력 전 (게임 시작 전) 이라 건너뜀.
             //   · 스톨 기준: 300ms 이상 SendInput 없음. 일반 60Hz 틱 (=16ms) 에선 트리거 안 됨.
-            //   · 전송 주기: 16ms (60Hz) — 실제 게임 틱과 동일 속도로 catch-up.
+            //   · 전송 간격: 16ms 이상마다 최대 하나. 정확한 60Hz 생성이나 catch-up 보장은 아니다.
             int64_t mainAct = lastMainActivityMs_.load();
             if (mainAct > 0 && (now - mainAct) > 300) {
                 int64_t lastHeartbeat = lastHeartbeatMs_.load();
@@ -924,8 +966,11 @@ void Session::ioThread() {
             // 를 리턴하면 parse_frames 자체가 스킵되어 preload 가 소비되지 않는다.
             if (newBytes || !recvBuf.empty()) {
                 std::vector<Frame> frames;
-                parse_frames(recvBuf, frames);
-                for (auto& f : frames) handleFrame(f);
+                if (!parseReceived(recvBuf, frames)) break;
+                for (auto& f : frames) {
+                    if (quit.load()) break;
+                    handleFrame(f);
+                }
             }
         } else {
             NET_WARN("[NET] Connection lost or receive failed");
@@ -934,7 +979,8 @@ void Session::ioThread() {
             break;
         }
 
-        while (true) {
+        // Bound one drain pass so new receive/control work gets another turn.
+        for (size_t sentFrames = 0; sentFrames < 64 && !quit.load(); ++sentFrames) {
             std::vector<uint8_t> pkt;
             {
                 std::lock_guard<std::mutex> lk(sendMu);
@@ -942,10 +988,16 @@ void Session::ioThread() {
                 pkt = std::move(sendQ.front());
                 sendQ.pop_front();
                 hasActivity = true;
+                // Keep the byte charge while pkt lives outside the queue.
             }
-            // sendMu released before blocking I/O — main thread can SendInput() freely
-            if (!tcp_send_all(sock, pkt.data(), pkt.size())) {
+            const bool sent = tcp_send_all(sock, pkt.data(), pkt.size());
+            {
+                std::lock_guard<std::mutex> lk(sendMu);
+                pendingSendBytes -= pkt.size();
+            }
+            if (!sent) {
                 NET_WARN("[NET] Send failed!");
+                connectionFailed = true;
                 quit = true;
                 break;
             }
@@ -1017,7 +1069,8 @@ void Session::acceptThread(uint16_t port)
             le_write_u64(pl, seedParams.seed);
             le_write_u32(pl, seedParams.start_tick);
             pl.push_back(seedParams.input_delay);
-            pl.push_back((uint8_t)seedParams.role);
+            // SEED assigns the receiver's role; keep our local role unchanged.
+            pl.push_back((uint8_t)(seedParams.role == Role::Host ? Role::Peer : Role::Host));
         }
         auto fr = build_frame(MsgType::SEED, pl);
         pushSend(std::move(fr));
@@ -1046,15 +1099,15 @@ void Session::handleFrame(const Frame& f) {
     } break;
     case MsgType::SEED: {
         NET_TRACE("[NET] Received SEED message");
-        if (f.payload.size() >= 8+4+1+1) {
+        if (f.payload.size() == 8+4+1+1 &&
+            (f.payload[13] == (uint8_t)Role::Host || f.payload[13] == (uint8_t)Role::Peer)) {
             const uint8_t* p = f.payload.data();
             std::lock_guard<std::mutex> lk(seedMu);
             seedParams.seed = le_read_u64(p);
             seedParams.start_tick = le_read_u32(p+8);
             seedParams.input_delay = p[12];
             uint8_t rawRole = p[13];
-            seedParams.role = (rawRole == (uint8_t)Role::Host || rawRole == (uint8_t)Role::Peer)
-                            ? (Role)rawRole : Role::Peer;
+            seedParams.role = (Role)rawRole;
             NET_TRACE("[NET] Parsed SEED: seed=0x" << std::hex << seedParams.seed
                       << ", start_tick=" << std::dec << seedParams.start_tick
                       << ", input_delay=" << (int)seedParams.input_delay);
@@ -1063,17 +1116,15 @@ void Session::handleFrame(const Frame& f) {
             ready = true;
             NET_TRACE("[NET] Client session is ready!");
         } else {
-            NET_WARN("[NET] Invalid SEED message size: " << f.payload.size());
+            NET_WARN("[NET] Invalid SEED payload (length/role): " << f.payload.size());
         }
     } break;
     case MsgType::INPUT: {
-        if (f.payload.size() >= 6) {
-            const uint8_t* p = f.payload.data();
-            uint32_t from = le_read_u32(p);
-            uint16_t cnt = le_read_u16(p+4);
-            // 페이로드 크기 검증: 헤더(6) + cnt 바이트가 실제 크기 이내인지 확인
-            if (static_cast<size_t>(6) + cnt > f.payload.size()) break;
-            const uint8_t* arr = p+6;
+        InputBatchView batch;
+        if (decode_input_payload(f.payload, batch)) {
+            const uint32_t from = batch.first_tick;
+            const uint16_t cnt = batch.count;
+            const uint8_t* arr = batch.masks;
             // [보안] 신뢰할 수 없는 피어의 INPUT 처리:
             //  - remoteInputs 무한 증가로 인한 메모리 고갈을 막기 위해 누적 크기를 제한.
             //  - tick 래핑/원거리 tick 주입으로 인한 desync 를 막기 위해 현재 수신
@@ -1083,12 +1134,25 @@ void Session::handleFrame(const Frame& f) {
             {
                 std::lock_guard<std::mutex> lk(inMu);
                 const uint32_t cur = lastRemoteTick.load();
+                // Check all eligible new keys before applying this batch. Partial
+                // admission could ACK beyond an input we silently dropped.
+                size_t newEntries = 0;
+                for (uint16_t i = 0; i < cnt; ++i) {
+                    const uint32_t tick = from + i;
+                    const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
+                    if (dist <= kMaxTickWindow && remoteInputs.find(tick) == remoteInputs.end())
+                        ++newEntries;
+                }
+                if (newEntries > kMaxRemoteInputs - remoteInputs.size()) {
+                    NET_WARN("[NET] INPUT storage limit reached; rejecting entire batch");
+                    connectionFailed = true;
+                    quit = true;
+                    break;
+                }
                 for (uint16_t i=0;i<cnt;++i) {
                     const uint32_t tick = from + i;
                     const uint32_t dist = (tick >= cur) ? (tick - cur) : (cur - tick);
                     if (dist > kMaxTickWindow) continue;  // 윈도우 밖(가비지/래핑) 폐기
-                    if (remoteInputs.size() >= kMaxRemoteInputs &&
-                        remoteInputs.find(tick) == remoteInputs.end()) continue;  // 버퍼 포화
                     remoteInputs.emplace(tick, arr[i]);
                     if (tick > lastRemoteTick) lastRemoteTick = tick;
                 }
@@ -1101,37 +1165,45 @@ void Session::handleFrame(const Frame& f) {
     case MsgType::ACK: {
     } break;
     case MsgType::HASH: {
-        if (f.payload.size() == 4+8) {
-            const uint8_t* p = f.payload.data();
-            uint32_t t = le_read_u32(p);
-            uint64_t h = le_read_u64(p+4);
-            std::lock_guard<std::mutex> lk(hashMu_);
-            lastHashTickRemote = t;
-            lastHashRemote = h;
+        if (f.payload.size() != 4+8) {
+            connectionFailed = true;
+            quit = true;
+            break;
+        }
+        const uint8_t* p = f.payload.data();
+        const auto admission = hashMailbox_.record_remote(le_read_u32(p), le_read_u64(p+4));
+        if (admission != HashPut::stored && admission != HashPut::duplicate &&
+            admission != HashPut::stale) {
+            NET_WARN("[NET] Remote HASH admission failed");
+            connectionFailed = true;
+            quit = true;
         }
     } break;
     case MsgType::GAME_OVER_CHOICE: {
-        if (f.payload.size() >= 1) {
-            uint8_t choice = f.payload[0];
-            // enum 정의 밖 값은 무시 — 손상/악의 프레임 방어.
-            if (choice == (uint8_t)GameOverChoice::Restart ||
-                choice == (uint8_t)GameOverChoice::GoToTitle) {
-                remoteGameOverChoice.store(choice);
-                NET_TRACE("[NET] Received game over choice: " << (int)choice);
-            } else {
-                NET_WARN("[NET] Dropping invalid game-over choice: " << (int)choice);
-            }
+        if (f.payload.size() != 1) break;
+        const uint8_t choice = f.payload[0];
+        if (choice != static_cast<uint8_t>(GameOverChoice::Restart) &&
+            choice != static_cast<uint8_t>(GameOverChoice::GoToTitle)) break;
+        // One intention per round: duplicates are harmless, conflicts are not updates.
+        uint8_t expected = 0;
+        if (!remoteGameOverChoice.compare_exchange_strong(expected, choice) && expected != choice) {
+            NET_WARN("[NET] Conflicting game-over choice");
+            connectionFailed = true;
+            quit = true;
         }
     } break;
     case MsgType::PING: {
-        // 상대의 PING 은 즉시 PONG 으로 에코 — io 스레드가 계속 돌고 있으면
-        // 메인 스레드가 얼어도(창 드래그 등) 상대는 우리를 살아있다고 판정.
-        std::vector<uint8_t> pong = f.payload; auto fr = build_frame(MsgType::PONG, pong);
+        // Valid control probes are echoed by the I/O worker, independently of main.
+        if (!ready.load() || f.payload.size() != 8) break;
+        auto fr = build_frame(MsgType::PONG, f.payload);
         pushSend(std::move(fr));
     } break;
     case MsgType::PONG: {
-        // 최신 PONG 도착 시각 기록 — linkStatus() 가 이 값을 기준으로 판정.
-        lastPongMs.store(now_ms());
+        if (!ready.load() || f.payload.size() != 8) break;
+        const int64_t now = now_ms();
+        const uint64_t token = le_read_u64(f.payload.data());
+        if (now >= 0 && pendingPongs_.consume(token, static_cast<uint64_t>(now), 10000))
+            lastPongMs.store(now);
     } break;
     case MsgType::CHAT: {
         // [text_len:2][utf8:N]
@@ -1151,9 +1223,9 @@ void Session::handleFrame(const Frame& f) {
         if (f.payload.size() < 12) break;
         const uint8_t* p = f.payload.data();
         MatchResult r;
-        r.elo_before = static_cast<int32_t>(le_read_u32(p));
-        r.elo_after  = static_cast<int32_t>(le_read_u32(p + 4));
-        r.delta      = static_cast<int32_t>(le_read_u32(p + 8));
+        r.elo_before = le_read_i32(p);
+        r.elo_after  = le_read_i32(p + 4);
+        r.delta      = le_read_i32(p + 8);
         if (f.payload.size() >= 13 && p[12] <= uint8_t(ResultStatus::Draw)) r.status = static_cast<ResultStatus>(p[12]);
         std::lock_guard<std::mutex> lk(matchResultMu_);
         matchResult_ = r;
@@ -1164,12 +1236,21 @@ void Session::handleFrame(const Frame& f) {
 }
 
 bool Session::GetLastRemoteHash(uint32_t& tick, uint64_t& hash) const {
-    std::lock_guard<std::mutex> lk(hashMu_);
-    tick = lastHashTickRemote;
-    hash = lastHashRemote;
-    return tick != 0;
+    HashSample sample;
+    if (!hashMailbox_.latest_remote(sample)) return false;
+    tick = sample.tick;
+    hash = sample.hash;
+    return true;
 }
 
+bool Session::PollHashComparison(uint32_t& tick, uint64_t& local, uint64_t& remote) {
+    HashComparison comparison;
+    if (!hashMailbox_.poll(comparison)) return false;
+    tick = comparison.tick;
+    local = comparison.local;
+    remote = comparison.remote;
+    return true;
+}
 bool Session::GetRemoteGameOverChoice(GameOverChoice& outChoice) const {
     uint8_t val = remoteGameOverChoice.load();
     if (val == 0) return false;
@@ -1209,19 +1290,19 @@ void Session::ClearInputs() {
         std::lock_guard<std::mutex> lk(sendMu);
         std::deque<std::vector<uint8_t>> keep;
         for (auto& fr : sendQ) {
-            if (fr.size() < 3) continue;  // malformed
-            MsgType t = (MsgType)fr[2];
-            if (t == MsgType::INPUT || t == MsgType::HASH) continue;  // 드롭
+            const bool discard = fr.size() < 3 ||
+                static_cast<MsgType>(fr[2]) == MsgType::INPUT ||
+                static_cast<MsgType>(fr[2]) == MsgType::HASH;
+            if (discard) {
+                pendingSendBytes -= fr.size(); // Only queued frames; active send stays charged.
+                continue;
+            }
             keep.push_back(std::move(fr));
         }
         sendQ = std::move(keep);
     }
     // 원격 HASH 도 초기화 — 이전 라운드 hash 가 새 라운드 tick 과 충돌 방지.
-    {
-        std::lock_guard<std::mutex> lk(hashMu_);
-        lastHashTickRemote = 0;
-        lastHashRemote = 0;
-    }
+    hashMailbox_.clear();
     // 재시작 경계에서 heartbeat 상태도 리셋 — 새 라운드의 tick 0 부터 다시 감지.
     lastMainActivityMs_.store(0);
     heartbeatTickEnd_.store(0);

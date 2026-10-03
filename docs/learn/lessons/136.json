@@ -1,0 +1,430 @@
+{
+  "id": "lesson-136",
+  "title": "WSS: TLS 종단과 터널 범위",
+  "shortTitle": "메시지·바이트·TLS 종단·내부 전달",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: HTTPS에서 상대의 체인과 서비스 이름을 확인하고, 게임 연결에는 WSS가 필요하다는 계획이 있습니다.",
+  "finish": "완료: WSS 진단기로 서로 다른 메시지 포장을 전송하고 같은 게임 프레임을 복원하며, 게이트웨이의 보호·거절 경계를 설명합니다.",
+  "objective": "TLS 종단·WebSocket 메시지·게임 프레임의 경계를 코드로 분리하고 분할·오류·종료의 결과를 예측합니다.",
+  "prerequisites": [
+    "TCP 바이트 스트림과 길이 프레임 파서",
+    "TLS 체인·서비스 이름·두 연결의 분리",
+    "버퍼 소유권·콜백·역압력"
+  ],
+  "recap": {
+    "points": [
+      "API와 게임 연결은 주소·상태·실패 범위를 따로 관리한다.",
+      "TLS는 신뢰 체인과 접속하려던 서비스 이름을 함께 검사한다."
+    ],
+    "bridge": "게임 연결을 실제로 열고, 암호화와 메시지 조립 아래에서 게임 바이트가 어떻게 이어지는지 관찰합니다."
+  },
+  "sections": [
+    {
+      "title": "암호화된 연결의 끝을 표시한다",
+      "body": "게임 프레임을 WSS로 전송하려 합니다. 공개 연결에서는 TLS를 사용하고, 게이트웨이는 데이터를 내부 릴레이로 넘깁니다. 여기서 암호화가 끝나는 지점을 먼저 표시해야 합니다. **TLS 종단**은 TLS 상태와 키를 가진 채 암호문을 읽고 평문을 얻는 상대입니다. 이 배치에서는 게이트웨이가 종단입니다.\n\n```mermaid\nflowchart LR\n  C[클라이언트 게임 프레임] -->|TLS 안의 WebSocket| G[게이트웨이: 복호화·메시지 처리]\n  G -->|loopback TCP 바이트| R[릴레이: 인증·게임 프로토콜]\n```\n\n게이트웨이 프로세스는 게임 데이터의 평문을 볼 수 있습니다. 내부 TCP는 같은 호스트의 loopback을 사용하고 릴레이도 loopback에만 바인딩합니다. 릴레이를 다른 머신으로 옮기면 그 구간에 TLS나 보호된 터널을 별도로 마련해야 합니다. 클라이언트 주소가 wss로 시작한다는 사실만으로 내부 경로까지 암호화되지는 않습니다.\n\n이번에는 완성된 WebSocket 메시지를 게임 프레임으로 복원하는 MessageStream과 실제 WSS 왕복 진단기를 만듭니다. 진단기는 그래픽 루프와 별도로 실행합니다. 게임 규칙과 wire 형식을 바꾸지 않고, 전송의 경계를 바꾸어도 같은 프레임이 나오는지 관찰하는 도구입니다.",
+      "reference": {
+        "path": "server/wss_gateway.cpp",
+        "symbol": "class Connection",
+        "invariant": "외부 TLS 종단과 내부 TCP 소켓을 다른 전송 상태로 관리한다.",
+        "mayDiffer": "실제 게이트웨이는 장시간 양방향 중계를 수행한다. 실습은 해당 경로에 진단 데이터를 보내 복원을 확인한다."
+      }
+    },
+    {
+      "title": "바이트 스트림·메시지·게임 프레임을 구분한다",
+      "body": "TCP는 순서 있는 바이트 스트림입니다. 한 번 보낸 바이트가 한 번의 읽기로 도착한다는 경계를 제공하지 않습니다. WebSocket은 그 위에 **메시지**라는 단위를 제공합니다. 메시지에는 text 또는 binary 타입이 있고, 전송할 때 여러 WebSocket 프레임으로 분할할 수도 있습니다.\n\n게임 프로토콜의 프레임은 또 다른 단위입니다. 길이와 타입을 읽어 한 입력·해시·입장 요청을 복원합니다. 이 세 경계를 같은 것으로 다루면 수신 코드가 특정 네트워크 분할에 의존하게 됩니다.\n\n| 경계 | 누가 복원하는가 | 보장하거나 검사할 것 |\n| --- | --- | --- |\n| TCP 바이트 순서 | TCP 구현 | 연결 안에서의 바이트 순서 |\n| WebSocket 메시지 | Beast | 분할 조립·opcode·마스킹·제어 프레임 |\n| 게임 프레임 | FrameParser | 길이·타입·payload 범위 |\n\n예를 들어 게임 프레임 A의 길이 헤더 첫 바이트만 메시지 M에 넣고, 나머지를 메시지 N에 넣어도 바이트를 이어 읽는 터널에서는 A를 복원할 수 있습니다. 반대로 A와 B를 한 binary 메시지에 함께 넣을 수도 있습니다. 파서의 남은 바이트는 메시지 처리가 끝날 때 지우지 않습니다.",
+      "reference": {
+        "path": "net/stream_transport.h",
+        "symbol": "class StreamTransport",
+        "invariant": "Session에는 게임 프레임을 복원할 순서 있는 바이트를 제공한다.",
+        "mayDiffer": "실제 전송 객체는 수신 데이터를 공유 버퍼에 모은다. 실습은 완성 메시지를 직접 파서에 공급한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "WebSocket 프레임의 분할과 게임 프레임의 분할",
+          "body": "하나의 WebSocket 메시지가 여러 WebSocket 프레임으로 나뉘는 것은 WebSocket 구현이 조립합니다. 게임 프레임이 여러 메시지에 걸치는 것은 게임의 바이트 파서가 이어 읽습니다. 같은 “분할”이어도 상태를 소유하는 계층이 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "연결은 TCP → TLS → Upgrade 순서로 진행한다",
+      "body": "진단기의 연결 순서를 펼치면 실패 지점을 구분할 수 있습니다. resolver가 주소를 찾고 TCP 연결을 연 뒤 TLS 핸드셰이크를 수행합니다. 인증서 검증이 성공한 다음에 HTTP Upgrade 요청을 보냅니다. WebSocket의 핸드셰이크 성공 이후에 게임 바이트를 보냅니다.\n\nHTTP Upgrade는 같은 연결의 이후 통신 방식을 WebSocket으로 바꾸는 절차입니다. 요청에는 경로와 WebSocket 버전·키 등이 있고, 서버가 수락하면 101 응답과 대응 헤더를 돌려줍니다. Beast가 이 프로토콜 세부를 처리하므로 애플리케이션은 HTTP 응답의 첫 줄만 보고 성공으로 판단하지 않습니다.\n\n```mermaid\nsequenceDiagram\n  participant C as 진단기\n  participant G as 게이트웨이\n  participant R as 내부 TCP\n  C->>G: TCP 연결\n  C->>G: TLS 핸드셰이크·체인과 이름 검사\n  C->>G: GET /play + WebSocket Upgrade\n  G-->>C: Upgrade 수락\n  G->>R: 설정된 loopback 목적지 연결\n  C->>G: binary 메시지\n  G->>R: 메시지 데이터 바이트\n```\n\n현재 게이트웨이는 Upgrade 수락 뒤 내부 TCP에 연결합니다. 따라서 클라이언트가 Upgrade 성공을 보더라도 내부 연결은 실패할 수 있습니다. 계정 인증과 방 입장은 게임 프로토콜의 응답으로 확인해야 합니다. 통신 단계의 성공을 업무 단계의 성공으로 확대하지 않는 것이 핵심입니다.",
+      "reference": {
+        "path": "server/wss_gateway.cpp",
+        "symbol": "void upgrade()",
+        "invariant": "각 단계의 성공 뒤 다음 단계로 진행하고 실패한 연결은 닫는다.",
+        "mayDiffer": "실제 게이트웨이는 비동기 콜백과 설정 마감을 사용한다. 진단기는 한 작업을 관찰하기 위한 동기 호출을 사용한다."
+      }
+    },
+    {
+      "title": "신뢰 체인과 접속 이름을 함께 검사한다",
+      "body": "진단기는 실험에서 발급한 CA 파일을 읽고 verify_peer를 설정합니다. 검증 콜백에서는 OpenSSL이 체인을 검사한 결과인 preverified가 거짓이면 바로 거절합니다. 체인의 중간 인증서는 그 결과를 따르고, 깊이 0인 서버 인증서에는 접속하려던 host가 SAN과 일치하는지 확인합니다.\n\nSAN은 인증서가 주장하는 서비스 이름이나 IP 주소를 담는 확장입니다. DNS 접속에는 DNS SAN, 숫자 IP 접속에는 IP SAN을 비교합니다. 서버가 제시한 CN을 접속 대상의 근거로 삼지 않습니다. 이미 신뢰하는 체인과 사용자가 선택한 접속 이름이 함께 일치해야 그 서버로 판단할 수 있습니다.",
+      "codes": [
+        {
+          "label": "진단기 — 체인 결과를 보존하는 이름 검사",
+          "language": "cpp",
+          "text": "        tls.load_verify_file(argv[3]);tls.set_verify_mode(asio::ssl::verify_peer);\n        websocket::stream<beast::ssl_stream<beast::tcp_stream>,false> ws(io,tls);\n        ws.next_layer().set_verify_callback([&host](bool preverified,asio::ssl::verify_context& ctx) {\n            if(!preverified)return false;\n            auto* store=ctx.native_handle();\n            return X509_STORE_CTX_get_error_depth(store)>0 ||\n                tls_identity::matches_host(X509_STORE_CTX_get_current_cert(store),host);\n        });"
+        }
+      ],
+      "reference": {
+        "path": "net/wss_client.cpp",
+        "symbol": "X509_VERIFY_PARAM_set_hostflags",
+        "invariant": "체인 검증을 유지하면서 URL의 host와 SAN을 비교한다.",
+        "mayDiffer": "실제 WssClient는 OpenSSL 검증 매개변수에 DNS/IP 이름을 등록한다. 진단기는 깊이별 콜백과 학습용 SAN helper로 같은 경계를 드러낸다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "서비스 이름 검증의 기준",
+          "body": "[RFC 9525의 서비스 식별](https://www.rfc-editor.org/rfc/rfc9525.html)과 [OpenSSL 이름 설정 API](https://docs.openssl.org/3.0/man3/SSL_set1_host/)를 참고합니다. CN만 있는 사설 인증서를 사용 중이라면 SAN을 포함해 다시 발급합니다. 이름 확인에 실패했을 때 CA 검증을 끄면 원인을 고치는 대신 신뢰 경계를 없애게 됩니다."
+        }
+      ]
+    },
+    {
+      "title": "SNI·Host·Origin은 서로 다른 질문에 답한다",
+      "body": "SNI는 TLS 핸드셰이크에서 서버가 인증서와 서비스를 고를 때 쓰는 DNS 이름입니다. HTTP Host는 Upgrade 요청의 대상 authority를 나타냅니다. Origin은 브라우저가 이 연결을 시작한 페이지의 출처를 나타냅니다. 어느 이름이든 문자열이 있다는 사실만으로 사용자 신원이 증명되지는 않습니다.\n\n진단기는 숫자 IP 접속에서는 SNI를 넣지 않습니다. HTTP authority는 IPv6 주소라면 대괄호로 감싼 뒤 포트를 붙입니다. 인증서 비교에는 대괄호 없는 host를 사용합니다.\n\n브라우저가 보낸 Origin은 scheme·host·port의 출처를 나타내며 서버의 허용 목록과 정확히 비교합니다. 현재 게이트웨이는 Origin을 생략한 네이티브 접속도 받습니다. 네이티브 프로그램은 헤더를 자유롭게 만들 수 있으므로 Origin 통과를 계정 인증으로 사용하지 않습니다.",
+      "codes": [
+        {
+          "label": "진단기 — DNS SNI와 요청 authority",
+          "language": "cpp",
+          "text": "        boost::system::error_code address_error;asio::ip::make_address(host,address_error);\n        if(address_error && !SSL_set_tlsext_host_name(ws.next_layer().native_handle(),host.c_str()))return 3;\n        if(!SSL_set_min_proto_version(ws.next_layer().native_handle(),TLS1_2_VERSION))return 3;\n        tcp::resolver resolver(io);\n        beast::get_lowest_layer(ws).connect(resolver.resolve(host,port));\n        ws.next_layer().handshake(asio::ssl::stream_base::client);\n        ws.read_message_max(kMessageLimit);ws.binary(true);\n        if(argc==6)ws.set_option(websocket::stream_base::decorator([origin=std::string(argv[5])](websocket::request_type& req) {\n            req.set(beast::http::field::origin,origin);\n        }));\n        const auto authority=(host.find(':')!=std::string::npos?\"[\"+host+\"]\":host)+\":\"+port;\n        ws.handshake(authority,\"/play\");"
+        }
+      ],
+      "reference": {
+        "path": "server/wss_gateway.cpp",
+        "symbol": "req.count(http::field::origin)>1",
+        "invariant": "경로와 출처 정책은 업그레이드 수락 전에 확인한다.",
+        "mayDiffer": "현재 정책은 등록한 HTTPS origin의 정확한 일치와 네이티브의 헤더 생략을 허용한다. 목록은 배포 설정으로 정한다."
+      }
+    },
+    {
+      "title": "binary 옵션과 받은 타입 검사는 별개다",
+      "body": "`ws.binary(true)`는 이 스트림이 보내는 메시지의 타입을 binary로 정합니다. 상대가 text 메시지를 보내는 것을 금지하는 설정은 아닙니다. 읽기가 완료된 뒤 `got_binary()`를 확인해야 받은 메시지의 타입을 알 수 있습니다.\n\nbinary 데이터에는 NUL이나 UTF-8로 해석할 수 없는 바이트도 들어갈 수 있습니다. 게임 프레임을 문자열의 끝까지 읽거나 JSON이라고 가정하면 그 의미가 바뀝니다. 어댑터에는 데이터 포인터와 바이트 길이를 함께 전달합니다.\n\n메시지 크기 상한도 두 곳에서 필요합니다. `read_message_max`는 Beast가 메시지를 조립하는 동안 사용할 입력 범위를 제한합니다. MessageStream의 상한은 이미 받은 완성 메시지를 파서 경계에서 검사합니다. 뒤쪽 검사만 두면 큰 메시지를 조립하는 비용을 먼저 치를 수 있습니다.",
+      "reference": {
+        "path": "net/wss_client.cpp",
+        "symbol": "if(!ws_.got_binary())",
+        "invariant": "송신 타입 설정과 수신 타입 검증을 각각 수행한다.",
+        "mayDiffer": "실제 어댑터에는 비동기 송신 큐와 수신 누적량 상한이 더 있다. 진단기는 순차 왕복을 관찰한다."
+      }
+    },
+    {
+      "title": "작은 파서에 큰 메시지를 공급하는 방법",
+      "body": "완성 binary 메시지에 게임 프레임이 여러 개 들어 있습니다. 메시지 전체를 고정 크기 FrameParser에 한 번에 append하면, 각각은 정상인 프레임인데도 누적 공간을 넘을 수 있습니다. **조금 공급하고, 완성 프레임을 꺼내고, 다시 공급**하는 순서를 사용합니다.\n\n파서를 need_more까지 비웠을 때 남은 꼬리는 최대 게임 프레임 크기보다 작습니다. 수신 저장 공간을 B, 최대 프레임 크기를 F라고 하면 한 번에 B−F 바이트를 추가해도 꼬리와 새 구간의 합이 B를 넘지 않습니다. 이 계산은 B>F와 매 구간 뒤의 drain을 전제로 합니다.\n\nMessageStream은 FrameParser를 멤버로 소유하고 WebSocket 메시지마다 재생성하지 않습니다. 메시지 크기 상한은 생성자 인수로 받습니다. 파서의 저장 공간과 WebSocket 메시지의 상한은 서로 다른 정책입니다.",
+      "codes": [
+        {
+          "label": "어댑터 — 소유하는 상태와 메시지 상한",
+          "language": "cpp",
+          "text": "  explicit MessageStream(std::size_t message_limit) noexcept\n      : message_limit_(message_limit) {}"
+        },
+        {
+          "label": "어댑터 — 안전한 공급 구간 계산",
+          "language": "cpp",
+          "text": "    constexpr std::size_t kChunkBytes = kReceiveCapacity - kMaxFrameBytes;\n    static_assert(kChunkBytes > 0, \"chunk capacity must be positive\");\n    static_assert(kChunkBytes <= kReceiveCapacity,\n                  \"chunk must fit the parser receive buffer\");\n\n    std::size_t offset = 0;\n    while (offset < size) {\n      const std::size_t chunk = std::min(kChunkBytes, size - offset);\n      if (!parser_.append(data + offset, chunk)) {\n        failed_ = true;\n        return false;\n      }\n      offset += chunk;"
+        }
+      ],
+      "reference": {
+        "path": "net/framing.cpp",
+        "symbol": "parse_frames",
+        "invariant": "전송이 제공한 바이트에서 완성 프레임과 남은 꼬리를 구분한다.",
+        "mayDiffer": "현재 파서는 vector 기반이고 FNV 필드를 포함한다. 학습 파서는 길이·타입·payload를 고정 저장 공간에서 다룬다."
+      }
+    },
+    {
+      "title": "완성 프레임을 모두 꺼내고 꼬리는 남긴다",
+      "body": "append 뒤 next를 한 번만 호출하면 메시지 안의 나머지 완성 프레임이 저장 공간을 차지합니다. 다음 구간을 넣기 전에 need_more까지 반복해야 용량 계산의 전제가 유지됩니다.\n\nframe이면 sink에 값을 전달하고 계속 꺼냅니다. need_more이면 현재 꼬리를 그대로 두고 새 구간이나 다음 메시지를 기다립니다. error이면 실패를 기억하고 더 이상 입력을 받지 않습니다. sink가 false를 반환하는 경우도 그 연결의 진행을 중단합니다.\n\nsink는 디코딩된 프레임을 소비하는 호출자입니다. 진단기에서는 예상한 프레임과 비교하지만, 게임에서는 타입·상태·권한을 검사하는 상위 계층으로 연결할 수 있습니다. 프레임을 복원했다는 사실과 그 요청을 승인했다는 사실은 별개입니다.",
+      "codes": [
+        {
+          "label": "어댑터 — drain과 오류 전파",
+          "language": "cpp",
+          "text": "      // Drain until the parser needs more input; repeat after every chunk.\n      for (;;) {\n        Frame frame{};\n        const ParseStatus status = parser_.next(frame);\n        if (status == ParseStatus::need_more) {\n          break;\n        }\n        if (status == ParseStatus::error) {\n          failed_ = true;\n          return false;\n        }\n        if (!sink(static_cast<const Frame&>(frame))) {\n          failed_ = true;\n          return false;\n        }\n      }\n    }\n    return true;\n  }"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "parse_frames",
+        "invariant": "바이트 프레이밍 뒤에 메시지 타입과 세션 상태에 따른 처리를 둔다.",
+        "mayDiffer": "실제 Session의 wire와 상태 분기는 진단용 프레임과 다르다."
+      }
+    },
+    {
+      "title": "메시지 앞 검사와 스트리밍 실패를 구분한다",
+      "body": "text 타입, 상한 초과, 길이가 있는데 포인터가 없는 입력은 프레임 처리 전에 거절합니다. 이 경우 sink는 한 번도 호출하지 않습니다. 반면 정상 메시지 안에 완성 프레임 A와 잘못된 길이의 B가 순서대로 있다면 A를 전달한 뒤 B에서 실패할 수 있습니다.\n\n이 어댑터의 계약은 **유효한 앞부분을 순서대로 전달**하는 것입니다. 메시지 전체를 하나의 트랜잭션으로 승인하지 않습니다. WebSocket 메시지는 전송 단위이므로 게임의 원자적 입력 배치와 같다고 정하면 발신자의 포장 방식이 업무 의미를 바꾸게 됩니다.\n\n업무상 여러 입력을 전부 승인하거나 전부 거절해야 한다면, 그 묶음을 게임 프로토콜에서 정의하고 별도의 후보에 검증한 뒤 반영해야 합니다. sink 예외도 이미 꺼낸 프레임을 되돌리지 않습니다. 호출자는 예외를 처리하면서 이 스트림과 연결을 정리합니다.",
+      "codes": [
+        {
+          "label": "어댑터 — 입력 전체에 적용하는 선행 검사",
+          "language": "cpp",
+          "text": "    if (failed_) {\n      return false;\n    }\n    // Reject text (also empty text) before touching the parser.\n    if (!binary) {\n      failed_ = true;\n      return false;\n    }\n    // Reject messages larger than the configured bound.\n    if (size > message_limit_) {\n      failed_ = true;\n      return false;\n    }\n    // Reject a null buffer that claims to carry bytes.\n    if (data == nullptr && size != 0) {\n      failed_ = true;\n      return false;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "콜백이 다시 같은 어댑터를 호출하면",
+          "body": "이 어댑터는 단일 소유자의 순차 처리를 전제로 합니다. sink 안에서 같은 MessageStream을 재진입시키거나 다른 스레드가 동시에 accept를 호출하지 않습니다. 프레임을 외부 큐로 넘기려면 필요한 값을 복사하고, 큐 실패를 sink의 결과로 전달합니다."
+        }
+      ]
+    },
+    {
+      "title": "메시지의 끝과 연결의 끝을 다르게 처리한다",
+      "body": "binary 메시지가 끝났는데 파서에 길이 헤더의 일부가 남아 있습니다. 다음 메시지가 이어 줄 수 있으므로 이때는 성공한 공급으로 처리합니다. 빈 binary 메시지도 게임 바이트를 추가하지 않는 정상 메시지입니다.\n\n실제 전송이 끝났을 때는 의미가 달라집니다. 남은 바이트를 채울 수 없으므로 미완성 꼬리가 있으면 잘린 게임 프레임으로 판단합니다. finish는 이 마지막 확인에만 사용합니다. 메시지마다 호출하면 정상적인 분할 전달을 오류로 만들게 됩니다.\n\nWebSocket의 Close 절차, TLS 종료, TCP 종료는 계층별 절차입니다. 진단기는 예상 프레임을 받은 뒤 WebSocket Close 핸드셰이크를 마치고 finish를 확인합니다. 네트워크 오류로 비정상 종료된 경우는 예외 경로에서 실패합니다. 정상 Close를 관찰했더라도 게임 업무가 완료됐다는 뜻은 아니므로 경기 결과는 별도로 판정합니다.",
+      "codes": [
+        {
+          "label": "어댑터 — 최종 꼬리 검사",
+          "language": "cpp",
+          "text": "  bool finish() noexcept {\n    if (failed_ || parser_.pending_bytes() != 0) {\n      failed_ = true;\n      return false;\n    }\n    return true;\n  }\n\n  bool failed() const noexcept { return failed_; }"
+        }
+      ]
+    },
+    {
+      "title": "서로 다른 전송 포장으로 같은 프레임을 보낸다",
+      "body": "진단기는 타입과 payload가 정해진 프레임 목록을 만든 뒤 encode_frame으로 바이트를 구성합니다. 이 데이터에는 계정 토큰이나 실제 사용자 기록이 없습니다. 응답을 받을 때도 프레임의 타입·길이·각 payload 바이트를 비교합니다.\n\nsplit은 게임 길이 헤더를 완성 WebSocket 메시지 사이에서 나눕니다. bundle은 여러 게임 프레임을 한 메시지에 넣습니다. fragment는 하나의 WebSocket 메시지를 나누고 중간에 Ping을 보냅니다. Ping은 게임 데이터에 섞여서는 안 됩니다.\n\n이 세 실험의 공통 기대값은 같은 프레임 순서와 내용입니다. 내부 TCP 읽기가 어떤 크기로 나뉠지는 OS에 따라 달라질 수 있으므로 “응답 WebSocket 메시지가 몇 개 왔다”를 정답으로 삼지 않습니다.",
+      "codes": [
+        {
+          "label": "진단기 — 메시지 경계와 프레임 경계를 독립적으로 바꾸기",
+          "language": "cpp",
+          "text": "        if(mode==\"split\") {\n            // Split an application length header across complete WS messages.\n            ws.write(asio::buffer(bytes.data(),1));\n            ws.write(asio::buffer(bytes.data()+1,bytes.size()-1));\n        } else if(mode==\"fragment\") {\n            // One WS message fragmented around a control frame.\n            ws.write_some(false,asio::buffer(bytes.data(),1));\n            ws.ping(websocket::ping_data(\"study\"));\n            ws.write_some(true,asio::buffer(bytes.data()+1,bytes.size()-1));\n        } else ws.write(asio::buffer(bytes));"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "분할과 제어 프레임의 역할",
+          "body": "[Beast 메시지 처리](https://www.boost.org/doc/libs/latest/libs/beast/doc/html/beast/using_websocket/messages.html)와 [RFC 6455의 분할 규칙](https://www.rfc-editor.org/rfc/rfc6455.html#section-5.4)을 참고합니다. 클라이언트 마스킹은 프로토콜 규칙이며 암호화 기능은 아닙니다. 기밀성과 전송 무결성은 TLS에서 확보합니다."
+        }
+      ]
+    },
+    {
+      "title": "메시지를 읽고 같은 어댑터로 이어 복원한다",
+      "body": "Beast의 read는 완성 메시지를 flat_buffer에 넣습니다. 진단기는 그 바이트를 연속 저장 공간으로 복사하고 got_binary 결과와 함께 MessageStream에 넘깁니다. message는 반복마다 새로 만들지만 stream은 반복 밖에 남아 있습니다. 수명이 다른 두 버퍼를 구분해야 메시지 사이의 게임 프레임 꼬리가 유지됩니다.\n\nsink는 예상 목록의 현재 위치만 검사합니다. 잘못된 타입·payload·추가 프레임이면 false로 끝냅니다. 프레임을 모두 확인하면 Close 핸드셰이크를 수행하고, 남은 꼬리가 없는지 확인합니다. 이 프로브는 정해진 왕복 실험용이며 일반 클라이언트의 지속 수신 루프는 아닙니다.",
+      "codes": [
+        {
+          "label": "진단기 — 한 파서로 여러 메시지를 읽기",
+          "language": "cpp",
+          "text": "        MessageStream stream(kMessageLimit);std::size_t received=0;\n        auto sink=[&](const Frame& f) {\n            if(received>=expected.size())return false;\n            const auto& e=expected[received];\n            if(f.type!=e.type||f.size!=e.size||f.payload!=e.payload)return false;\n            ++received;return true;\n        };\n        while(received<expected.size()) {\n            beast::flat_buffer message;ws.read(message);\n            std::vector<std::uint8_t> chunk(message.size());\n            asio::buffer_copy(asio::buffer(chunk),message.data());\n            if(!stream.accept(ws.got_binary(),chunk.data(),chunk.size(),sink))return 5;\n        }\n        ws.close(websocket::close_code::normal);\n        if(!stream.finish())return 5;"
+        }
+      ],
+      "reference": {
+        "path": "net/wss_client.cpp",
+        "symbol": "bool receive(std::vector<uint8_t>& out) override",
+        "invariant": "전송 객체에서 꺼낸 바이트의 순서를 상위 파서에 유지한다.",
+        "mayDiffer": "실제 클라이언트는 전용 I/O 스레드가 수신한 바이트를 mutex 아래에 보관하고 Session이 꺼낸다."
+      }
+    },
+    {
+      "title": "목적지는 서버가 정하고 전달량은 단계별로 제한한다",
+      "body": "공개 게이트웨이가 요청에 적힌 임의의 host와 port로 연결하게 만들면 게임 서버 외의 목적지에 접근하는 중계기가 될 수 있습니다. 현재 게이트웨이는 목적지를 loopback과 서버 설정의 backend port로 제한합니다. `/play`도 정확히 일치해야 하며 쿼리에 자격 증명을 넣지 않습니다.\n\n양방향 전달에는 각각 읽기와 쓰기 순서가 있습니다. 클라이언트 메시지를 받으면 내부 TCP 쓰기가 끝난 뒤 다음 메시지를 읽습니다. 내부 TCP에서 받은 바이트도 WebSocket 쓰기가 끝난 뒤 다음 TCP 읽기를 시작합니다. 느린 수신자를 기다릴 때 애플리케이션에 무한 큐를 쌓지 않게 하는 역압력입니다.\n\n여기에 메시지 크기·연결 수·속도·시간 정책을 함께 둡니다. 각각 제한하는 자원이 다르므로 어느 하나로 나머지를 대체할 수 없습니다. 커널과 TLS 라이브러리에도 버퍼가 있으므로 방향별 애플리케이션 버퍼만 보고 프로세스 전체 메모리를 계산하지 않습니다.",
+      "reference": {
+        "path": "server/wss_gateway.cpp",
+        "symbol": "void from_client()",
+        "invariant": "전달 버퍼가 사용 중인 동안 보존하고 쓰기 완료 후 다음 읽기를 시작한다.",
+        "mayDiffer": "실제 게이트웨이의 상한과 시간 정책은 운영 설정·구현에서 확인한다. 실습의 메시지 한도는 파서 연결을 관찰하기 위한 별도 조건이다."
+      }
+    },
+    {
+      "title": "누적 프로젝트에 진단 타깃을 추가한다",
+      "body": "체크포인트에서 `net/message_stream.h`, `tests/message_stream_contract.cpp`, `tools/wss_roundtrip.cpp`를 추가합니다. 누적 게임과 HTTPS 프로브는 유지합니다. wss_roundtrip은 동기 네트워크 호출이므로 GUI 프레임 함수에서 호출하지 않습니다. 별도 프로세스로 실행하고 실험 실행자가 전체 시간 제한을 겁니다.\n\nOpenSSL 개발 라이브러리와 Boost.Beast 헤더가 필요합니다. Boost가 기본 검색 경로에 없다면 STUDY_BOOST_INCLUDE로 헤더 루트를 지정합니다. TLS 라이브러리와 컴파일러는 같은 대상 OS·아키텍처를 사용해야 합니다.",
+      "codes": [
+        {
+          "label": "CMake — 별도 WSS 진단 타깃",
+          "language": "cmake",
+          "text": "# Message boundaries do not replace the game frame parser.\nadd_executable(message_stream_contract tests/message_stream_contract.cpp)\ntarget_compile_features(message_stream_contract PRIVATE cxx_std_17)\ntarget_include_directories(message_stream_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME message_stream_contract COMMAND message_stream_contract)\n\n# Standalone, blocking diagnostic; it is not called by the graphical loop.\nfind_path(STUDY_BOOST_INCLUDE boost/beast.hpp)\nif(NOT STUDY_BOOST_INCLUDE)\n    message(FATAL_ERROR \"WSS diagnostic requires Boost.Beast headers; set STUDY_BOOST_INCLUDE\")\nendif()\nadd_executable(wss_roundtrip tools/wss_roundtrip.cpp)\ntarget_compile_features(wss_roundtrip PRIVATE cxx_std_17)\ntarget_include_directories(wss_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_include_directories(wss_roundtrip SYSTEM PRIVATE ${STUDY_BOOST_INCLUDE})\ntarget_compile_definitions(wss_roundtrip PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)\ntarget_link_libraries(wss_roundtrip PRIVATE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)\nif(WIN32)\n    target_link_libraries(wss_roundtrip PRIVATE ws2_32 mswsock)\nendif()"
+        },
+        {
+          "label": "저장소 루트에서 구성·빌드·실험",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/136-wss-tunnel -B out/study-136 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-136 --target message_stream_contract wss_roundtrip -j2\nctest --test-dir out/study-136 -R message_stream_contract --output-on-failure\npython3 scripts/check_learning_wss_tunnel.py"
+        }
+      ]
+    },
+    {
+      "title": "실제 경로에서 성공과 거절의 위치를 비교한다",
+      "body": "검사 스크립트는 임시 CA와 인증서를 만들고 loopback TCP echo 서버, 현재 게이트웨이, 진단기를 차례로 실행합니다. echo 서버는 받은 데이터만 돌려주므로 게임 계정이나 입장권 없이 터널 계층의 전달을 관찰할 수 있습니다. 실험이 끝나면 프로세스와 임시 키를 회수합니다.\n\n잘못된 경로·Origin은 내부 TCP 연결 자체가 생기지 않아야 합니다. text·마스킹 누락·너무 큰 메시지는 Upgrade가 이미 끝났더라도 payload가 백엔드로 전달되면 안 됩니다. 인증서 검증 실패는 Upgrade보다 앞에서 일어나야 합니다. “실패했다”는 출력만 비교하지 않고 어느 경계까지 도달했는지 함께 확인합니다.\n\n어댑터의 CPU 검사는 같은 바이트열의 모든 두 절단 위치, byte 단위 분할, 파서 저장 공간보다 큰 메시지, 오류 앞의 정상 프레임, 미완성 꼬리의 종료를 대조합니다. 선택한 정상 예제 하나만 통과하면 분할에 독립적인지 알 수 없기 때문입니다."
+    },
+    {
+      "title": "완성 파일에서 소유 관계를 다시 읽는다",
+      "body": "MessageStream은 게임 파서와 미완성 꼬리를 소유합니다. 진단기의 WebSocket 객체는 TLS와 메시지 조립을 소유합니다. 게이트웨이는 외부 WebSocket과 내부 TCP의 양방향 전달을 소유합니다. 각 소유자의 성공·실패가 어느 단계까지 의미하는지 따라가며 전체 파일을 읽습니다.\n\n현재 소스를 비교할 때도 이 관계를 먼저 찾습니다. 큐 용량이나 메시지 상한이 달라져도 바이트 순서 보존, TLS 이름 확인, 메시지 타입 검사, 내부 목적지 제한은 각각의 책임으로 남아야 합니다.",
+      "codes": [
+        {
+          "label": "완성 코드 — 메시지와 게임 프레임의 연결",
+          "language": "cpp",
+          "file": "checkpoints/136-wss-tunnel/net/message_stream.h",
+          "collapsed": true
+        },
+        {
+          "label": "완성 코드 — WSS 왕복 진단기",
+          "language": "cpp",
+          "file": "checkpoints/136-wss-tunnel/tools/wss_roundtrip.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "완성 코드 — 분할과 실패 경계 검사",
+          "language": "cpp",
+          "file": "checkpoints/136-wss-tunnel/tests/message_stream_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "136-1",
+      "question": "binary 메시지 M에는 게임 길이 헤더의 첫 바이트만, N에는 나머지 헤더와 payload가 있습니다. 어댑터의 올바른 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "M 끝에서 파서를 새로 만든다"
+        },
+        {
+          "id": "b",
+          "text": "M의 꼬리를 보관하고 N을 이어 공급한다"
+        },
+        {
+          "id": "c",
+          "text": "N만 완성 게임 프레임으로 취급한다"
+        },
+        {
+          "id": "d",
+          "text": "메시지 하나마다 finish를 호출한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "M의 꼬리를 보관하고 N을 이어 공급한다",
+      "explanation": "WebSocket 메시지 경계는 게임 프레임 경계가 아닙니다. 같은 FrameParser가 미완성 꼬리를 보관해야 N을 이어 읽어 원래 프레임을 복원합니다."
+    },
+    {
+      "id": "136-2",
+      "question": "ws.binary(true)를 설정한 뒤 상대가 text 메시지를 보냈습니다. 읽기가 완료된 직후 필요한 검사는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "내가 binary로 설정했으므로 그대로 전달한다"
+        },
+        {
+          "id": "b",
+          "text": "UTF-8이면 게임 입력으로 승인한다"
+        },
+        {
+          "id": "c",
+          "text": "got_binary()로 받은 타입을 확인한다"
+        },
+        {
+          "id": "d",
+          "text": "모든 바이트를 널 종료 문자열로 바꾼다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "got_binary()로 받은 타입을 확인한다",
+      "explanation": "binary(true)는 송신 타입 설정입니다. 수신 메시지의 타입은 got_binary로 별도 확인하고 text는 게임 바이트로 전달하기 전에 거절합니다."
+    },
+    {
+      "id": "136-3",
+      "question": "게이트웨이가 Upgrade 수락 응답을 보낸 직후 내부 TCP 연결에 실패했습니다. 클라이언트가 확정할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "방 입장과 계정 인증이 완료됐다"
+        },
+        {
+          "id": "b",
+          "text": "내부 릴레이가 payload를 처리했다"
+        },
+        {
+          "id": "c",
+          "text": "경기 결과가 저장됐다"
+        },
+        {
+          "id": "d",
+          "text": "WebSocket Upgrade 단계가 수락됐다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "WebSocket Upgrade 단계가 수락됐다",
+      "explanation": "현재 게이트웨이는 Upgrade 뒤 백엔드에 연결합니다. 단계별 성공의 범위가 다르므로 계정 인증·방 입장은 게임 프로토콜의 응답으로 확인해야 합니다."
+    },
+    {
+      "id": "136-4",
+      "question": "한 메시지의 정상 프레임 A를 sink에 전달한 뒤 잘못된 길이의 B를 발견했습니다. MessageStream의 계약은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "A의 전달은 남고 실패를 기억한다"
+        },
+        {
+          "id": "b",
+          "text": "A가 자동으로 취소된다"
+        },
+        {
+          "id": "c",
+          "text": "B를 지우고 다음 입력부터 복구한다"
+        },
+        {
+          "id": "d",
+          "text": "메시지가 binary이므로 B도 전달한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "A의 전달은 남고 실패를 기억한다",
+      "explanation": "이 어댑터는 스트리밍 처리입니다. 이미 전달한 앞부분을 되돌리지 않고 오류를 기억합니다. 업무상 원자적 묶음이 필요하면 게임 프로토콜 계층에 별도의 검증·반영 단계를 둡니다."
+    },
+    {
+      "id": "136-5",
+      "question": "공개 WSS가 게이트웨이에서 끝나고 게이트웨이가 loopback TCP로 릴레이에 전달합니다. 내부 릴레이를 다른 호스트로 옮길 때 필요한 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "WSS였으므로 내부 구간도 자동 암호화된다"
+        },
+        {
+          "id": "b",
+          "text": "내부 구간의 보호와 접근 범위를 별도로 설계한다"
+        },
+        {
+          "id": "c",
+          "text": "WebSocket 마스킹을 켜면 내부 TCP도 암호화된다"
+        },
+        {
+          "id": "d",
+          "text": "Origin을 허용하면 다른 호스트의 신원이 증명된다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "내부 구간의 보호와 접근 범위를 별도로 설계한다",
+      "explanation": "TLS는 해당 종단 사이를 보호합니다. 게이트웨이 이후의 평문 바이트를 다른 호스트로 전달하려면 그 구간의 TLS·보호된 터널·접근 제어를 별도로 설계해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "MessageStream과 진단 타깃을 추가하고 message_stream_contract를 실행한다.",
+      "실제 게이트웨이와 loopback echo를 연결하는 검사 스크립트에서 split·bundle·fragment의 결과를 비교한다.",
+      "현재 WSS 클라이언트의 인증서 설정과 게이트웨이의 업그레이드·전달 함수를 읽고 각 실패의 도달 지점을 표시한다."
+    ],
+    "failureChecks": [
+      "메시지마다 파서를 재생성했을 때 분할 헤더 사례가 실패하는지 설명한다.",
+      "got_binary 검사를 없애면 text의 바이트가 어디까지 전달될지 예상한다.",
+      "CA 파일 누락·다른 이름·SAN 없는 인증서와 정상 DNS/IP 연결의 내부 TCP 도달 여부를 비교한다."
+    ],
+    "expected": "분할 방식이 달라도 게임 프레임의 순서와 payload가 같고, 경로·Origin·인증서·메시지 오류는 각각 정한 경계에서 거절된다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 선택 어댑터 초안 검수·현재 코드·RFC/Beast/OpenSSL 계약·실제 loopback WSS 대조",
+    "corrections": [
+      "sink 예외가 이전 상태를 보존한다는 초안 주석 제거",
+      "sink에는 const Frame 참조를 전달",
+      "현재 WSS의 CN-only 허용을 실제 재현 후 SAN 필수 정책으로 수정"
+    ]
+  },
+  "validation": [
+    "SCRIPTED 누적 CMake 구성·message_stream/connection_policy CTest 통과; SDL tetris/message_stream/wss_roundtrip 빌드",
+    "실제 WSS split/bundle/fragment × native/Origin 왕복 프레임·payload 일치",
+    "경로·쿼리·빈/null/미허용/중복 Origin은 내부 TCP 연결 전 거절",
+    "분할 메시지 사이 Ping/Pong 분리, text·unmasked·초과 메시지는 payload 전달 전 거절",
+    "현재 WSS 수정 전 CN-only 허용 재현, 수정 후 SAN 필수로 내부 TCP 연결 전 거절",
+    "현재 네이티브 정상 DNS/IP·SAN충돌·CN-only·이름불일치·미신뢰 CA·만료·와일드카드 반례 대조",
+    "NUL URL 거절과 출력 인수 보존, 어댑터 모든 두 절단 위치·최대 프레임·메시지 상한·prefix오류·잘린 EOF·sink예외 ASan/UBSan",
+    "공용 테스트 CA의 keyUsage 보강 후 HTTPS GET/POST·리다이렉트·평문대체 회귀 통과",
+    "Linux GNU15/Boost1.83/OpenSSL3.5; Windows/macOS 네이티브·전체 실제 경기·외부 서비스 미검증",
+    "수동 화면·스크린샷·공개 배포 없음"
+  ]
+}

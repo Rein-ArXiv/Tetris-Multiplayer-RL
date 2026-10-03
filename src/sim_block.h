@@ -11,12 +11,15 @@ class SimBlock
 public:
     SimBlock() : id(0), rotationState(0), rowOffset(0), columnOffset(0) {}
 
+    // Internal deltas/offsets must fit int; board bounds and collision are checked by SimGame.
     void Move(int rows, int columns)
     {
         rowOffset += rows;
         columnOffset += columns;
     }
 
+    // New value snapshot in board coordinates, not pixels; it may contain out-of-board cells.
+    // The selected rotation must exist and each local+offset sum must fit int.
     std::vector<Position> GetCellPositions() const
     {
         const std::vector<Position>& tiles = cells.at(rotationState);

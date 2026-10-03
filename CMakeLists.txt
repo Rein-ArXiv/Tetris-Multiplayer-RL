@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 # C 언어도 활성화 — third_party/sqlite3.c (amalgamation) 를 빌드하려면 필요.
-# tetris_meta 타겟만 C 를 쓰지만 enable_language 는 프로젝트 루트에서 선언해야 한다.
+# 현재 구성은 루트에서 두 언어를 선언해 필요한 하위 타깃에 제공한다.
 project(tetris CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -114,6 +114,7 @@ if (TETRIS_BUILD_GAME)
             "tetris_meta 서버 호출 (guest 토큰) 용. 다운로드 후 재시도.")
     endif()
     set(TETRIS_GAME_COMMON
+        audio/mp3_decode.cpp
         ${TETRIS_SIM_SOURCES}
         src/main.cpp
         src/account_screen.cpp
@@ -145,6 +146,7 @@ if (TETRIS_BUILD_GAME)
         src/colors.h
         src/presentation.h
         core/replay.h
+        core/utf8.h
         net/socket.h
         net/framing.h
         net/session.h
@@ -155,6 +157,11 @@ if (TETRIS_BUILD_GAME)
         renderer/gl_shaders.h
         renderer/shake.h
         renderer/image.h
+        renderer/texture_upload.h
+        renderer/mask_upload.h
+        renderer/font_raster_policy.h
+        renderer/image_rows.h
+        renderer/handle_pool.h
         audio/audio.h
         bot/placement.h
         bot/bot_onnx.h
@@ -340,6 +347,33 @@ if (TETRIS_BUILD_TEST)
     )
     target_include_directories(sim_hash_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+    add_executable(replay_io_test tests/replay_io_test.cpp core/replay.cpp)
+    target_include_directories(replay_io_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME replay_io COMMAND replay_io_test)
+
+    add_executable(sim_t_spin_test tests/sim_t_spin_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_t_spin_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_combat_test tests/sim_combat_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_combat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_hard_drop_test tests/sim_hard_drop_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_hard_drop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_soft_drop_test tests/sim_soft_drop_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_soft_drop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_ghost_test tests/sim_ghost_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_ghost_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # Real Game linked with audio/draw probes; no device/backend dependency.
+    add_executable(game_wrapper_test tests/game_wrapper_test.cpp src/game.cpp
+        src/colors.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(game_wrapper_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(utf8_test tests/utf8_test.cpp)
+    target_include_directories(utf8_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME utf8 COMMAND utf8_test)
+
+    add_executable(sim_hash_test tests/sim_hash_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_hash_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(sim_score_test tests/sim_score_test.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(sim_score_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
     add_executable(worker_group_test
         tests/worker_group_test.cpp
         server/worker_group.h
@@ -349,6 +383,32 @@ if (TETRIS_BUILD_TEST)
         find_package(Threads REQUIRED)
         target_link_libraries(worker_group_test PRIVATE Threads::Threads)
     endif()
+
+    add_executable(worker_lifetime_test tests/learning/worker_lifetime.cpp)
+    target_include_directories(worker_lifetime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (NOT WIN32)
+        target_link_libraries(worker_lifetime_test PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(matchmaker_queue_test tests/learning/matchmaker_queue.cpp
+        server/matchmaker.cpp server/log.cpp net/socket.cpp net/framing.cpp)
+    target_include_directories(matchmaker_queue_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (WIN32)
+        target_link_libraries(matchmaker_queue_test PRIVATE ws2_32)
+    else()
+        target_link_libraries(matchmaker_queue_test PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(room_code_test tests/learning/room_code.cpp server/room_code.cpp)
+    target_include_directories(room_code_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if (WIN32)
+        target_link_libraries(room_code_test PRIVATE bcrypt)
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_definitions(room_code_test PRIVATE ROOM_RANDOM_WRAP)
+        target_link_options(room_code_test PRIVATE "-Wl,--wrap=getrandom")
+    endif()
+    add_test(NAME room_code COMMAND room_code_test)
+    set_tests_properties(room_code PROPERTIES TIMEOUT 15)
 
     # reactor_test — 이벤트 루프(net::Reactor) 준비성·wake 계약 회귀.
     # 플랫폼별 백엔드(Windows=IOCP, Linux=epoll; macOS는 타깃 제외)를 각자 검증한다. 두 백엔드
@@ -406,6 +466,8 @@ if (TETRIS_BUILD_RELAY)
         server/player_conn.cpp
         server/relay.cpp
         server/room.cpp
+        server/room_code.cpp
+        server/room_code.h
         net/socket.cpp
         net/framing.cpp
         meta/http_client.cpp
@@ -430,7 +492,7 @@ if (TETRIS_BUILD_RELAY)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
     if (WIN32)
-        target_link_libraries(tetris_relay PRIVATE ws2_32)
+        target_link_libraries(tetris_relay PRIVATE ws2_32 bcrypt)
     else()
         # Linux/macOS: std::thread 는 pthread 를 필요로 함 (libstdc++)
         find_package(Threads REQUIRED)
@@ -460,6 +522,8 @@ if (TETRIS_BUILD_RELAY AND TETRIS_BUILD_REACTOR)
     add_executable(tetris_relay_reactor
         ${TETRIS_SIM_SOURCES}
         server/reactor_relay.cpp
+        server/room_code.cpp
+        server/room_code.h
         server/log.cpp
         net/socket.cpp
         net/framing.cpp
@@ -485,7 +549,7 @@ if (TETRIS_BUILD_RELAY AND TETRIS_BUILD_REACTOR)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
     if (WIN32)
-        target_link_libraries(tetris_relay_reactor PRIVATE ws2_32)
+        target_link_libraries(tetris_relay_reactor PRIVATE ws2_32 bcrypt)
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_relay_reactor PRIVATE Threads::Threads)
@@ -580,7 +644,22 @@ if (TETRIS_BUILD_META)
 endif()
 
 if (TETRIS_BUILD_TEST)
+    add_test(NAME sim_t_spin COMMAND sim_t_spin_test)
+    add_test(NAME sim_combat COMMAND sim_combat_test)
+    add_test(NAME sim_hard_drop COMMAND sim_hard_drop_test)
+    add_test(NAME sim_soft_drop COMMAND sim_soft_drop_test)
+    add_test(NAME sim_ghost COMMAND sim_ghost_test)
+    add_test(NAME game_wrapper COMMAND game_wrapper_test)
+    add_test(NAME sim_hash COMMAND sim_hash_test)
+    add_test(NAME sim_score COMMAND sim_score_test)
     add_test(NAME worker_group COMMAND worker_group_test)
+    add_test(NAME worker_lifetime COMMAND worker_lifetime_test)
+    add_test(NAME matchmaker_queue COMMAND matchmaker_queue_test)
+    add_test(NAME matchmaker_closed COMMAND matchmaker_queue_test late)
+    add_test(NAME matchmaker_lone_cancel COMMAND matchmaker_queue_test lone)
+    add_test(NAME matchmaker_full COMMAND matchmaker_queue_test full)
+    set_tests_properties(matchmaker_queue matchmaker_closed matchmaker_lone_cancel matchmaker_full PROPERTIES TIMEOUT 15)
+    set_tests_properties(worker_lifetime PROPERTIES TIMEOUT 15)
     add_test(NAME loop_primitives COMMAND loop_primitives_test)
     if (TARGET reactor_test)
         add_test(NAME reactor COMMAND reactor_test)
@@ -615,6 +694,14 @@ if (TETRIS_BUILD_TEST)
     target_include_directories(bot_replay_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME bot_replay COMMAND bot_replay_test)
     if (TETRIS_BUILD_META)
+        # Fault-injected digest implementation is compiled only into this test.
+        add_executable(account_change_exception_test tests/account_change_exception_test.cpp meta/database.cpp ${TETRIS_SQLITE3_SOURCE})
+        target_include_directories(account_change_exception_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+        target_link_libraries(account_change_exception_test PRIVATE OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
+        add_executable(credentials_test tests/credentials_test.cpp meta/credentials.cpp)
+        target_include_directories(credentials_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(credentials_test PRIVATE OpenSSL::Crypto)
+        add_test(NAME credentials COMMAND credentials_test)
         add_executable(bot_reward_db_test tests/bot_reward_db_test.cpp meta/database.cpp meta/credentials.cpp ${TETRIS_SQLITE3_SOURCE})
         target_include_directories(bot_reward_db_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
         target_compile_definitions(bot_reward_db_test PRIVATE SQLITE_THREADSAFE=1 SQLITE_DEFAULT_FOREIGN_KEYS=1)
@@ -705,10 +792,37 @@ if (APPLE AND TETRIS_ENABLE_HTTPS AND OpenSSL_FOUND)
     endforeach()
 endif()
 
+# Service identity checks do not need sockets or a window.
+if (TETRIS_BUILD_TEST AND TARGET OpenSSL::SSL)
+    add_executable(tls_identity_test tests/tls_identity_test.cpp)
+    target_link_libraries(tls_identity_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    add_test(NAME tls_identity COMMAND tls_identity_test)
+endif()
+
 # Shared authority and API grammar are independently testable without a game window.
 if (TETRIS_BUILD_TEST)
     add_executable(ranked_game_test tests/ranked_game_test.cpp ${TETRIS_SIM_SOURCES} net/framing.cpp)
     add_test(NAME ranked_game COMMAND ranked_game_test)
     add_executable(json_input_test tests/json_input_test.cpp)
     add_test(NAME json_input COMMAND json_input_test)
+endif()
+
+if (TETRIS_BUILD_TEST)
+    add_executable(framing_test tests/framing_test.cpp net/framing.cpp)
+    target_include_directories(framing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME framing COMMAND framing_test)
+endif()
+
+if (TETRIS_BUILD_TEST)
+    add_executable(input_message_test tests/input_message_test.cpp net/framing.cpp)
+    target_include_directories(input_message_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME input_message COMMAND input_message_test)
+endif()
+
+if (TETRIS_BUILD_TEST)
+    find_package(Threads REQUIRED)
+    add_executable(hash_mailbox_test tests/hash_mailbox_test.cpp)
+    target_link_libraries(hash_mailbox_test PRIVATE Threads::Threads)
+    target_include_directories(hash_mailbox_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME hash_mailbox COMMAND hash_mailbox_test)
 endif()

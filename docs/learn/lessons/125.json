@@ -1,0 +1,442 @@
+{
+  "id": "lesson-125",
+  "title": "준비성과 완료: 두 I/O 모델",
+  "shortTitle": "읽기 힌트·제출 결과·버퍼 수명",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 실제 소켓의 폴링 비용을 측정하지만, 준비성 통지와 제출한 읽기의 완료를 구분하는 실습은 없습니다.",
+  "finish": "완료: 같은 TCP 프레임을 준비성 경로와 작업자 기반 완료 경로로 읽고, 부분 수신·취소·EOF와 버퍼 수명을 구분합니다.",
+  "objective": "통지·수신 완료·메시지 완성을 구별하고, 한 제출 작업의 버퍼 소유권과 회수 전 재사용 금지를 구현하고 설명합니다.",
+  "prerequisites": [
+    "논블로킹 수신 결과·부분 송수신·FrameParser",
+    "스레드/큐 소유권·future의 ready와 get",
+    "steady_clock 마감·협력적 취소·원시 측정 경계"
+  ],
+  "recap": {
+    "points": [
+      "에코 지연은 큐·폴링·OS 실행·내용 확인까지 포함한 관찰 구간이다.",
+      "성공 표본과 미완료 요청을 따로 기록해야 분포가 실패를 숨기지 않는다.",
+      "폴링 간격은 실제 재실행 시각이나 전체 지연의 상한을 보장하지 않는다."
+    ],
+    "bridge": "이번에는 기다림의 간격뿐 아니라 무엇을 기다리는지를 구분하고, 같은 바이트를 두 호출 흐름으로 처리합니다."
+  },
+  "sections": [
+    {
+      "title": "통지는 무엇이 끝났다고 말하는가",
+      "body": "실제 통신 경로의 큐·폴링·실행 대기가 지연에 포함된다는 것을 측정할 수 있습니다. 이제 수신 함수를 계속 호출하는 대신, **읽기를 시도할 조건을 기다리는 방식**과 **읽기를 맡기고 결과를 받는 방식**을 나란히 만듭니다.\n\n준비성(readiness)은 소켓에서 I/O를 시도할 조건을 알립니다. 완료(completion)는 이미 제출한 특정 연산의 결과를 알립니다. “소켓에 무언가 일어남”, “수신 연산이 끝남”, “게임 메시지가 완성됨”은 각각 다른 사건입니다.\n\n이번 산출물 `io_models_probe`는 같은 loopback TCP와 누적 FrameParser로 두 흐름을 실행합니다. 첫째는 poll/WSAPoll로 기다린 뒤 직접 읽습니다. 둘째는 소켓을 소유한 PostedReceiver 작업자에 읽기를 맡기고 결과를 회수합니다.\n\n두 번째 구현은 **작업자 기반의 완료 API**입니다. 내부에서 실제 준비성 대기와 수신을 수행하므로 바이트와 수명은 실제로 움직입니다. 네이티브 IOCP나 io_uring 자체의 성능·실행을 재현하는 것은 아닙니다. 현재 소스 뷰어의 Windows 백엔드와는 계약과 소유권을 기준으로 비교합니다.",
+      "reference": {
+        "path": "net/reactor.h",
+        "symbol": "struct Event {",
+        "invariant": "통지의 의미와 실제 바이트 처리의 책임을 분리한다.",
+        "mayDiffer": "현재 Reactor 이벤트는 준비성 비트와 token이다. 이번 완료 어댑터의 결과는 연산 ID·수량·상태·소유한 바이트를 가진다."
+      }
+    },
+    {
+      "title": "세 가지 질문을 한 단어로 합치지 않는다",
+      "body": "I/O를 설명할 때 서로 다른 질문이 “비동기” 한 단어로 섞이기 쉽습니다. 먼저 호출 자체가 기다리는지, 일을 누가 언제 실행하는지, 통지가 무엇을 알리는지 분리합니다.\n\n| 질문 | 이번 구현에서의 예 |\n| --- | --- |\n| 호출이 지금 기다리는가? | wait_readable은 지정 시간 동안 기다릴 수 있음 |\n| 실제 읽기 시도가 기다리는가? | 논블로킹 try_receive는 현재 결과를 반환 |\n| 작업을 다른 실행 흐름에 맡겼는가? | post가 작업자를 시작하고 호출자는 돌아옴 |\n| 통지가 무엇을 뜻하는가? | ReadHint는 조건, ReadCompletion은 제출 연산의 결과 |\n| 메시지가 완성됐는가? | FrameParser가 별도로 판단 |\n\n소켓이 논블로킹이어도 poll 자체는 기다릴 수 있습니다. 반대로 완료를 기다리는 future.get도 준비되기 전에 부르면 호출자를 멈출 수 있습니다. 여기서는 ready를 먼저 확인해 이미 준비된 결과만 get합니다.\n\n이 구분이 있으면 API의 이름만 보고 “절대 안 멈춘다”거나 “이제 메시지가 다 왔다”고 추측하지 않고, 실제 호출 순서와 반환 계약을 읽을 수 있습니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "이번 완료의 단위",
+          "body": "단발 읽기 한 번의 결과입니다. 다른 API의 multi-shot 요청이나 스트리밍 구독처럼 하나의 제출에서 여러 완료가 생기는 형태까지 일반화하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "소켓 하나의 읽기 힌트를 기다린다",
+      "body": "`wait_readable`은 소켓을 빌려 준비성 API를 딱 한 번 호출합니다. 데이터를 읽거나 소켓을 닫거나 논블로킹 설정을 바꾸지 않습니다. 소유자는 기다리는 동안 다른 실행 흐름이 그 소켓을 닫지 않도록 해야 합니다.\n\n이번 계약의 timeout_ms는 0~1000입니다. 0은 즉시 관찰이고, 양수는 기다릴 수 있는 요청 시간입니다. 반환은 ready·timeout·interrupted·error 중 하나입니다. POSIX EINTR는 바깥에서 취소·마감을 다시 볼 수 있도록 별도 상태로 남깁니다.\n\nready에도 readable·hangup·fault가 구분되어 있습니다. hangup은 남은 데이터를 모두 읽었다는 뜻이 아닙니다. 상대가 송신을 끝내도 수신 큐에 바이트가 남아 있으면 먼저 그 바이트를 읽을 수 있습니다.\n\n[Linux poll의 사건·타임아웃 계약](https://man7.org/linux/man-pages/man2/poll.2.html)과 [Windows WSAPoll](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll)을 같은 작은 반환형에 대응시킵니다. 이 함수는 연결된 스트림 소켓의 읽기 관찰로 범위를 좁힙니다.",
+      "codes": [
+        {
+          "label": "조건 통지에는 바이트 수가 없다",
+          "text": "enum class WaitState { ready, timeout, interrupted, error };\nstruct ReadHint {\n    WaitState state;\n    bool readable = false;\n    bool hangup = false;\n    bool fault = false;\n    int error = 0;\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "OS별 준비성 대기를 한 번 호출",
+          "text": "#if defined(_WIN32)\n    WSAPOLLFD pfd{};\n    pfd.fd = static_cast<SOCKET>(socket.native());\n    pfd.events = POLLRDNORM;\n    const int rc = ::WSAPoll(&pfd, 1, timeout_ms);\n#else\n    struct pollfd pfd{};\n    pfd.fd = socket.native();\n    pfd.events = POLLIN;\n    const int rc = ::poll(&pfd, 1, timeout_ms);\n#endif",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/reactor_epoll.cpp",
+        "symbol": "::epoll_wait",
+        "invariant": "준비성 API의 반환을 실제 수신과 구분한다.",
+        "mayDiffer": "현재 백엔드는 등록된 여러 fd를 epoll로 관찰한다. 이번 함수는 한 소켓을 poll/WSAPoll로 기다린다."
+      }
+    },
+    {
+      "title": "오류와 정상적인 기다림을 구분한다",
+      "body": "준비성 대기의 반환값이 0이면 timeout이고, 음수이면 OS 오류를 바로 보관합니다. 다른 함수 호출 뒤에 오류 코드를 읽으면 원래 원인을 잃을 수 있습니다. POSIX에서 EINTR만 interrupted로 구분하고, Windows 경로에서는 Winsock 오류로 전달합니다.\n\n양수 반환은 검사할 사건이 있다는 뜻입니다. POLLNVAL처럼 잘못된 핸들을 가리키는 사건은 error로 처리합니다. 읽기·종료·오류 사건은 ready와 비트로 반환합니다. fault 비트는 대기 호출 자체의 실패 코드와 다릅니다.\n\n이 함수를 부르는 루프는 timeout이나 interrupted에서 같은 마감 시각과 취소 상태를 다시 확인합니다. 매번 5초를 새로 시작하면 반복되는 중단 때문에 전체 요청이 끝없이 늘어날 수 있습니다.\n\nreadable을 받았다는 이유로 블로킹 recv를 호출해도 항상 안전하다고 가정하지 않습니다. 준비성과 실제 호출 사이에 상태가 바뀔 수 있으므로 실제 수신도 논블로킹 계약을 유지합니다.",
+      "codes": [
+        {
+          "label": "호출 실패의 원인을 즉시 캡처",
+          "text": "    if (rc == 0) {\n        hint.state = WaitState::timeout;\n        return hint;\n    }\n\n    if (rc < 0) {\n#if defined(_WIN32)\n        hint.error = ::WSAGetLastError();\n        hint.state = WaitState::error;\n#else\n        const int err = errno;\n        hint.error = err;\n        hint.state = (err == EINTR) ? WaitState::interrupted : WaitState::error;\n#endif\n        return hint;\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "사건 비트와 대기 호출 오류를 분리",
+          "text": "    const short revents = pfd.revents;\n\n    if (revents & POLLNVAL) {\n        hint.state = WaitState::error;\n#if defined(_WIN32)\n        hint.error = WSAENOTSOCK;\n#else\n        hint.error = EBADF;\n#endif\n        return hint;\n    }\n\n#if defined(_WIN32)\n    hint.readable = (revents & POLLRDNORM) != 0;\n#else\n    hint.readable = (revents & POLLIN) != 0;\n#endif\n    hint.hangup = (revents & POLLHUP) != 0;\n    hint.fault = (revents & POLLERR) != 0;\n\n    if (hint.readable || hint.hangup || hint.fault) {\n        hint.state = WaitState::ready;\n        hint.error = 0;\n        return hint;\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "낡은 준비성은 바이트를 예약하지 않는다",
+      "body": "프레임 전체 11바이트 중 길이 헤더 2바이트만 먼저 보냅니다. 수신 소켓의 wait_readable이 ready를 반환한 뒤 다시 관찰해도 ready입니다. 관찰 함수가 데이터를 소비하지 않았기 때문입니다.\n\n같은 소유자가 그 2바이트를 실제로 읽은 다음, 저장해 둔 첫 힌트를 근거로 다시 try_receive를 호출하면 어떤 결과가 나올까요? 아직 새 데이터가 없으므로 WouldBlock입니다. 힌트를 가진 호출자에게 바이트가 예약되는 것이 아니라는 것을 실제 소켓으로 확인할 수 있습니다.\n\n실습은 다른 스레드가 몰래 읽게 하지 않고 같은 소유자의 순차 호출로 조건을 만듭니다. 이렇게 하면 수명 경쟁을 추가하지 않고도 **관찰 뒤 상태가 바뀜**이라는 원인을 분리할 수 있습니다.\n\n받은 헤더를 FrameParser에 붙여도 결과는 need_more입니다. 읽기 가능 통지도, 수신한 2바이트도 메시지 완성을 의미하지 않습니다. 나머지 body를 보낸 뒤 파서가 전체 type·payload를 복원합니다.",
+      "codes": [
+        {
+          "label": "수신을 소비한 뒤 옛 힌트는 남아 있어도 WouldBlock",
+          "text": "    std::uint8_t scratch[16];\n    require(try_receive(pair.receiver, scratch, sizeof(scratch)).state == ReceiveState::would_block,\n            \"stale hint does not reserve bytes\");\n    Frame frame;\n    require(parser.next(frame) == ParseStatus::need_more, \"header is not frame\");\n    std::puts(\"READINESS: notification -> read header -> stale hint yields would_block; parser needs body\");",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_recv_some",
+        "invariant": "관찰 뒤의 실제 수신 결과가 현재 바이트 상태를 결정한다.",
+        "mayDiffer": "현재 함수는 vector에 바이트를 이어 붙인다. 학습 try_receive는 한 번의 결과와 바이트 수를 반환한다."
+      }
+    },
+    {
+      "title": "완료 API는 연산과 결과를 연결한다",
+      "body": "완료 형태에서는 호출자가 나중에 실제 recv를 한 번 더 실행하여 결과를 만드는 대신, 제출한 읽기의 결과를 받습니다. 필요한 정보는 어떤 연산인지, 어떻게 끝났는지, 몇 바이트인지, 그 바이트가 어디에 있는지입니다.\n\nReadCompletion은 id·state·count·error와 16바이트 배열을 소유합니다. data라면 count 범위가 유효한 수신 바이트입니다. eof·cancelled·timeout·error에서는 count가 0입니다. EOF와 취소가 같은 숫자 0이라는 이유로 하나의 상태가 되지 않습니다.\n\nid는 호출자가 붙인 요청 식별자입니다. 여기서는 한 번에 한 요청만 허용해 결과 대응을 단순하게 만듭니다. 일반적인 여러 연산 API에서는 제출 순서와 완료 순서가 다를 수 있으므로 식별 정보를 더 엄격히 관리해야 합니다.\n\n결과가 배열 값을 소유하므로 take 이후 다음 읽기를 제출해도 이미 받은 결과의 바이트가 바뀌지 않습니다. 내부 임시 버퍼의 포인터만 돌려주면 다음 수신이 앞선 결과를 덮어쓰는 실수를 만들기 쉽습니다.",
+      "codes": [
+        {
+          "label": "연산 결과의 의미와 바이트 소유권",
+          "text": "enum class CompletionState { data, eof, cancelled, timeout, error };\nstruct ReadCompletion {\n    std::uint64_t id = 0;\n    CompletionState state = CompletionState::error;\n    std::size_t count = 0;\n    int error = 0;\n    std::array<std::uint8_t, 16> bytes{};\n};",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "어느 바이트까지 유효한가",
+          "body": "배열 크기가 16이라는 사실은 16바이트를 받았다는 뜻이 아닙니다. 반드시 count까지만 파서에 전달합니다. 남는 공간을 0으로 초기화해도 그 부분이 프로토콜 데이터가 되지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "소켓과 버퍼를 작업보다 오래 살린다",
+      "body": "PostedReceiver 생성자는 연결된 Socket을 이동받고 논블로킹 모드로 설정합니다. 이 객체가 소켓과 내부 버퍼를 소유합니다. 네트워크 Runtime은 PostedReceiver보다 오래 살아야 합니다.\n\npost는 id·최대 수신량·마감 시간을 값으로 작업자에 전달합니다. 소켓과 버퍼에는 this를 통해 접근합니다. 작업자가 참조하는 객체 주소가 바뀌지 않도록 복사와 이동을 모두 금지합니다.\n\npending future는 멤버 선언의 마지막에 둡니다. C++ 멤버는 선언의 역순으로 파괴되므로 작업 수명이 소켓·버퍼보다 먼저 끝나게 배치합니다. 소멸자에서도 취소를 요청하고 실행 종료를 기다리는 순서를 명시합니다.\n\n이 소유권 구조 덕분에 호출자가 post한 직후 지역 버퍼를 없애는 형태의 오용을 인터페이스에서 줄입니다. 대신 객체를 파괴할 때 작업 회수까지 기다릴 수 있다는 비용을 계약에 포함합니다.",
+      "codes": [
+        {
+          "label": "연결 소유권과 주소 안정성",
+          "text": "    explicit PostedReceiver(Socket socket) : socket_(std::move(socket)) {\n        int error = 0;\n        if (!set_nonblocking(socket_, true, error))\n            throw std::runtime_error(\"nonblocking receive setup\");\n    }\n    PostedReceiver(const PostedReceiver&) = delete;\n    PostedReceiver& operator=(const PostedReceiver&) = delete;\n    PostedReceiver(PostedReceiver&&) = delete;\n    PostedReceiver& operator=(PostedReceiver&&) = delete;",
+          "language": "cpp"
+        },
+        {
+          "label": "작업이 참조하는 상태와 역순 파괴",
+          "text": "    Socket socket_;\n    std::array<std::uint8_t, 16> buffer_{};\n    std::atomic_bool cancel_{false};\n    std::future<ReadCompletion> pending_; // Last: execution ends before borrowed state dies.",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "struct SockState {",
+        "invariant": "비동기 연산이 사용하는 저장소와 완료를 식별할 상태는 연산보다 오래 살아야 한다.",
+        "mayDiffer": "현재 IOCP는 OVERLAPPED를 SockState 안에 둔다. 학습 어댑터는 std::async 작업이 소켓과 배열을 빌린다."
+      }
+    },
+    {
+      "title": "완료됐어도 회수 전에는 새 요청을 받지 않는다",
+      "body": "post는 수신량 1~16바이트, 제한 시간 1ms~5초만 받습니다. pending.valid가 참이면 새 요청도 거절합니다. 여기에는 실행 중인 작업뿐 아니라 **끝났지만 아직 take하지 않은 결과**도 포함됩니다.\n\n| 단계 | future | 새 post |\n| --- | --- | --- |\n| 아직 제출하지 않음 | invalid | 허용 |\n| 실행 중 | valid·not ready | 거절 |\n| 실행 종료·결과 대기 | valid·ready | 거절 |\n| take로 결과 회수 | invalid | 허용 |\n\n이 정책은 같은 버퍼를 둘이 쓰거나, 아직 읽지 않은 결과를 새 future로 덮어쓰는 것을 막습니다. take는 ready일 때만 get하며 한 결과를 두 번 돌려주지 않습니다. future를 주기적으로 확인하는 호출자도 바쁜 반복 대신 적절히 쉬거나 자신의 이벤트 루프를 진행해야 합니다.\n\nstd::launch::async를 명시하여 작업이 get 시점까지 지연 실행되는 선택을 피합니다. 실행 자원이 부족하면 post 안의 std::async가 예외를 던질 수 있습니다. 이때 제출 성공을 보고하지 않고 호출자가 시작 실패로 처리합니다.",
+      "codes": [
+        {
+          "label": "상한과 미회수 작업을 검사한 뒤 제출",
+          "text": "    bool post(std::uint64_t id, std::size_t capacity, std::chrono::milliseconds timeout) {\n        if (pending_.valid() || capacity == 0 || capacity > buffer_.size() ||\n            timeout < std::chrono::milliseconds(1) || timeout > std::chrono::seconds(5))\n            return false;\n        cancel_.store(false, std::memory_order_relaxed);\n        buffer_.fill(0);\n        const auto deadline = Clock::now() + timeout;\n        pending_ = std::async(std::launch::async, [this, id, capacity, deadline] {\n            return run(id, capacity, deadline);\n        });\n        return true;\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "이미 준비된 결과만 정확히 한 번 회수",
+          "text": "    bool ready() const {\n        return pending_.valid() &&\n               pending_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;\n    }\n    std::optional<ReadCompletion> take() {\n        if (!ready()) return std::nullopt;\n        return pending_.get(); // Exactly once; next post is permitted afterwards.\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "작업자는 준비성 위에 완료를 구현한다",
+      "body": "작업자의 run은 취소와 고정된 deadline을 확인한 뒤 최대 20ms를 요청하여 읽기 조건을 기다립니다. ready일 때 논블로킹 try_receive를 수행합니다. data·EOF·오류는 해당 연산의 최종 결과로 반환합니다.\n\nWouldBlock이나 interrupted는 아직 바이트 결과가 정해지지 않은 상태이므로 같은 루프로 돌아갑니다. 바깥에서는 새 deadline을 만들지 않고 남은 시간과 취소를 다시 확인합니다. 완료 API의 내부가 준비성 API를 사용할 수 있다는 것을 코드에서 볼 수 있습니다.\n\n이 20ms는 취소를 관찰할 기회를 만드는 대기 조각입니다. OS가 반드시 20ms 안에 다시 작업자를 실행한다는 보장은 아닙니다. 마감도 협력적인 관찰 기준이며 하드 실시간 보장으로 설명하지 않습니다.\n\nread가 한 바이트만 진행해도 이번 단발 연산은 data로 끝날 수 있습니다. capacity는 채워야 하는 목표량이 아니라 최대 수신량입니다. 전체 프레임은 호출자가 여러 결과를 파서에 붙여 완성합니다.",
+      "codes": [
+        {
+          "label": "실제 I/O 결과를 완료값으로 바꾸는 작업자",
+          "text": "    ReadCompletion run(std::uint64_t id, std::size_t capacity, Clock::time_point deadline) {\n        const auto finish = [&](CompletionState state, std::size_t count = 0, int error = 0) {\n            return ReadCompletion{id, state, count, error, buffer_};\n        };\n        for (;;) {\n            if (cancel_.load(std::memory_order_relaxed)) return finish(CompletionState::cancelled);\n            if (Clock::now() >= deadline) return finish(CompletionState::timeout);\n            // A finite wait lets this teaching worker observe cancellation/deadline.\n            // It is not a hard bound on when the OS schedules the worker again.\n            const auto hint = wait_readable(socket_, 20);\n            if (hint.state == WaitState::error) return finish(CompletionState::error, 0, hint.error);\n            if (hint.state != WaitState::ready) continue;\n            if (Clock::now() >= deadline) return finish(CompletionState::timeout);\n            const auto attempt = try_receive(socket_, buffer_.data(), capacity);\n            if (attempt.state == ReceiveState::progress)\n                return finish(CompletionState::data, attempt.count);\n            if (attempt.state == ReceiveState::eof) return finish(CompletionState::eof);\n            if (attempt.state == ReceiveState::error)\n                return finish(CompletionState::error, 0, attempt.error);\n            // would_block/interrupted: recheck cancellation and the same deadline.\n        }\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "I/O 완료 뒤에도 프레임 파싱은 남는다",
+      "body": "11바이트 프레임에서 헤더 두 바이트만 보내고 최대 수신량 2로 읽기를 제출합니다. 반환 count는 1 또는 2일 수 있습니다. 성공한 data 완료를 파서에 전달해도 아직 프레임은 완성되지 않습니다.\n\n나머지 바이트를 보내고 송신 방향을 닫은 다음, 읽기를 다시 제출해 받은 부분을 이어 붙입니다. 프레임이 완성되면 내용까지 검사합니다. 그 후 별도의 읽기 결과에서 EOF를 확인합니다. 한 번의 완료가 TCP 세그먼트 한 개나 메시지 한 개와 일치한다고 가정하지 않습니다.\n\n헤더만 보내고 종료한 변형에서는 data 완료 뒤 EOF가 와도 파서에 두 바이트가 남습니다. 이 연결은 정상적인 TCP 송신 종료를 했지만 애플리케이션 문서는 잘렸습니다. “소켓 종료가 정상”과 “프로토콜 메시지가 정상”의 경계가 다릅니다.\n\n[overlapped WSARecv의 부분 수신 설명](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsarecv)도 요청 버퍼가 모두 채워져야만 완료되는 것으로 해석하지 않아야 합니다. 현재의 순차 파서를 완료 결과에도 연결할 수 있는 이유입니다.",
+      "codes": [
+        {
+          "label": "첫 완료를 받아도 파서는 need_more일 수 있다",
+          "text": "    auto first = collect(receiver);\n    require(first.id == 41 && first.state == CompletionState::data && first.count > 0 && first.count <= 2,\n            \"first completion\");\n    require(!receiver.take(), \"one collection\");\n    FrameParser parser;\n    require(parser.append(first.bytes.data(), first.count), \"completion append\");\n    Frame frame;\n    require(parser.next(frame) == ParseStatus::need_more, \"I/O completion != frame completion\");",
+          "language": "cpp"
+        },
+        {
+          "label": "EOF 뒤에도 파서의 남은 바이트를 확인",
+          "text": "    require(eof && parser.pending_bytes() == 2, \"EOF still requires protocol interpretation\");\n    std::puts(\"PROTOCOL: successful data completion followed by EOF can still leave a truncated frame\");",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "취소 요청과 최종 결과를 분리한다",
+      "body": "request_cancel은 작업자가 읽는 atomic 플래그를 세웁니다. 이 호출은 작업 종료나 결과 회수를 기다리지 않습니다. 따라서 취소 직후 buffer나 Socket을 파괴하는 대신, 완료를 회수하거나 소멸자의 대기를 통과해야 합니다.\n\n작업자가 취소를 확인하면 cancelled로 끝납니다. 그러나 이미 data 결과가 준비된 뒤에 취소를 요청했다면 그 성공을 취소로 고쳐 쓰지 않습니다. 실제 수신과 취소가 가까이 경쟁하면 어느 단계까지 진행했는지에 따라 결과가 달라질 수 있습니다. 항상 반환된 최종 상태를 확인합니다.\n\n플래그의 relaxed 순서는 여기서 다른 데이터를 공개하는 신호로 쓰지 않기 때문에 가능합니다. 버퍼와 최종 결과의 전달은 future의 완료·get 동기화가 담당합니다. atomic 하나가 주변 모든 자료의 수명을 보장해 주는 것은 아닙니다.\n\n네이티브 [CancelIoEx의 계약](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)도 취소 요청 후 성공·취소·다른 오류 중 무엇으로 끝났는지 확인하도록 요구합니다. 다만 학습 atomic 플래그가 CancelIoEx와 같은 OS 동작을 수행하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "파괴 전에는 실행 종료까지 기다린다",
+          "text": "    ~PostedReceiver() {\n        request_cancel();\n        // Request != completion: keep socket and buffer alive until execution ends.\n        if (pending_.valid()) pending_.wait();\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "완료 후 늦은 취소가 결과를 바꾸지 않는지 확인",
+          "text": "    require(!receiver.post(42, 2, Millis(1000)), \"overlap rejected\");\n    EncodedFrame encoded;\n    require(encode_frame(probe_frame(9, 3), encoded), \"encode\");\n    send_bytes(pair.sender, encoded.bytes.data(), 2);\n    auto first = collect(receiver);\n    require(first.id == 41 && first.state == CompletionState::data && first.count > 0 && first.count <= 2,\n            \"first completion\");\n    require(!receiver.take(), \"one collection\");\n    FrameParser parser;\n    require(parser.append(first.bytes.data(), first.count), \"completion append\");\n    Frame frame;\n    require(parser.next(frame) == ParseStatus::need_more, \"I/O completion != frame completion\");\n    const auto saved = first.bytes;\n    send_bytes(pair.sender, encoded.bytes.data() + 2, encoded.size - 2);\n    int error = 0; require(shutdown_send(pair.sender, error), \"half close\");\n    bool got_frame = false, eof = false;\n    unsigned operations = 0;\n    for (std::uint64_t id = 42; !eof && operations < 16; ++id, ++operations) {\n        require(receiver.post(id, 16, Millis(1000)), \"post remainder\");\n        const auto result = collect(receiver);\n        require(result.id == id, \"completion identity\");\n        if (result.state == CompletionState::data) {\n            require(parser.append(result.bytes.data(), result.count), \"append remainder\");\n            ParseStatus parsed;\n            while ((parsed = parser.next(frame)) == ParseStatus::frame) {\n                require(!got_frame && matches_probe(frame, 9, 3), \"completion frame\");\n                got_frame = true;\n            }\n            require(parsed == ParseStatus::need_more, \"parse state\");\n        } else { require(result.state == CompletionState::eof, \"completion eof\"); eof = true; }\n    }\n    require(got_frame && eof && parser.pending_bytes() == 0 && first.bytes == saved,\n            \"independent result ownership\");\n    std::puts(\"COMPLETION: owned buffer -> submit -> collect bytes/status/id; first completion is only part of frame\");\n    std::puts(\"COMPLETION: one pending operation; resubmission preserves previously collected bytes; EOF collected\");\n}\nvoid cancellation() {\n    auto pair = make_pair();\n    PostedReceiver receiver(std::move(pair.receiver));\n    require(receiver.post(1, 16, Millis(1000)), \"post cancelled\");\n    receiver.request_cancel();\n    const auto cancelled = collect(receiver);\n    require(cancelled.id == 1 && cancelled.state == CompletionState::cancelled && cancelled.count == 0,\n            \"cancel collected\");\n    require(receiver.post(2, 16, Millis(10)), \"post timeout\");\n    const auto timed = collect(receiver);\n    require(timed.id == 2 && timed.state == CompletionState::timeout && timed.count == 0, \"timeout\");\n    const std::uint8_t byte = 77;\n    send_bytes(pair.sender, &byte, 1);\n    require(receiver.post(3, 1, Millis(1000)), \"post data\");\n    const auto deadline = Clock::now() + std::chrono::seconds(2);\n    while (!receiver.ready() && Clock::now() < deadline) std::this_thread::sleep_for(Millis(1));\n    require(receiver.ready(), \"completion ready\");\n    require(!receiver.post(4, 1, Millis(1000)), \"uncollected result remains pending\");\n    receiver.request_cancel(); // Already completed: does not rewrite its result.\n    const auto completed = collect(receiver);\n    require(completed.state == CompletionState::data && completed.bytes[0] == 77, \"completion wins\");",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "~IocpReactor() override",
+        "invariant": "취소 요청만으로 비동기 작업의 저장소를 해제하지 않는다.",
+        "mayDiffer": "현재 IOCP는 등록된 연산과 제거 대기 연산의 완료를 회수한다. 학습 객체는 자신의 future 실행 종료를 기다린다."
+      }
+    },
+    {
+      "title": "현재 Windows 백엔드는 무엇을 변환하는가",
+      "body": "현재 Reactor 인터페이스는 바이트 수 없이 readable·writable·error와 token을 돌려줍니다. Linux 백엔드는 epoll 준비성을 사용합니다. Windows 백엔드는 zero-byte overlapped WSARecv의 완료를 이 준비성 형태로 바꿉니다.\n\n0바이트 수신은 사용자 payload를 복사하지 않는 연산입니다. 그 완료는 이후 실제 수신을 시도할 힌트가 됩니다. 양수 크기로 실행한 일반 recv의 반환값 0이 EOF를 뜻하는 규칙과, 처음부터 0바이트를 요청한 연산을 섞으면 안 됩니다. 실제 데이터·EOF·오류는 뒤의 수신 경로에서 해석합니다.\n\npayload 저장소가 작아져도 OVERLAPPED와 연결 상태의 수명은 남습니다. 전체 Reactor 종료에서도 아직 등록된 읽기와 제거 대기 읽기의 완료를 모두 회수해야 합니다. 시간 초과 한 번이나 일정 반복 횟수만으로 OS의 참조가 끝났다고 판단할 수 없습니다.\n\n현재 소멸자는 정상 경로에서 회수를 기다립니다. 완료 포트 자체가 복구 불가능하게 실패해 종료를 증명할 수 없는 경우에는 진단을 남기고 미완료 저장소를 프로세스 종료까지 보존합니다. 이는 정상 회수가 아닌 오류 시 메모리 보존 정책이며, 반복 발생하면 원인 조사가 필요합니다.",
+      "reference": {
+        "path": "net/reactor_iocp.cpp",
+        "symbol": "void arm_read(",
+        "invariant": "외부의 준비성 형태와 내부 연산의 완료 수명은 별개의 계약이다.",
+        "mayDiffer": "학습 어댑터는 완료 결과를 직접 반환한다. 현재 IOCP 어댑터는 완료를 readiness 비트로 바꾸고 실제 수신은 상위에서 한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "플랫폼 능력을 질의하는 이유",
+          "body": "IOCP에 연결된 핸들은 수명 동안 해당 포트에 연결되므로 현재 can_migrate_sockets는 false입니다. 모든 완료 API의 공통 제약은 아닙니다. 준비성 쪽도 이전 이벤트 참조와 소유권을 정리한 뒤 이관해야 합니다. 능력 질의는 런타임 정보이며 폴백 구현을 자동으로 만들어 주지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "성능과 메모리를 모델 이름만으로 판정하지 않는다",
+      "body": "준비성 방식도 연결별 파서·송신 큐·커널 소켓 버퍼가 필요합니다. 완료 방식의 메모리도 연결 수뿐 아니라 제출한 연산의 수·버퍼 크기·풀 정책에 따라 달라집니다. “준비성은 유휴 메모리 0, 완료는 연결마다 큰 버퍼 하나”라는 비교는 실제 자원 구성을 놓칩니다.\n\npoll은 관심 대상 배열을 전달하는 API입니다. epoll은 관심 집합을 유지하며 준비된 사건을 수집합니다. io_uring은 제출·완료 큐와 배치 동작을 제공합니다. 이를 역사적 승패나 언제나 시스템 콜 하나를 줄이는 공식으로 설명하지 않습니다.\n\n[io_uring의 연산 식별·완료 플래그](https://man7.org/linux/man-pages/man7/io_uring.7.html)처럼 개별 API는 추가 계약을 가집니다. multi-shot 연산, 버퍼 선택, 취소 결과를 단발 future의 규칙으로 덮을 수는 없습니다.\n\n이번 비교의 핵심은 소유권과 호출 순서를 읽는 것입니다. 같은 프레이밍과 성공 조건을 유지했을 때 어떤 경계가 바뀌는지 설명한 뒤, 해당 구현과 부하에 맞는 성능 측정을 설계합니다. 운영 Reactor 전체의 구현은 현재 소스 뷰어에서 분리해 읽습니다."
+    },
+    {
+      "title": "만들고 실행하며 경계를 확인한다",
+      "body": "CMake에서 read_hint.cpp를 누적 StudySocket에 추가하고 io_models_probe를 연결합니다. 게임·랭킹·측정 도구는 그대로 남습니다. 새 실행 파일은 창 없이 실제 loopback 연결을 만들고, 고정된 시나리오의 각 조건을 확인합니다.\n\n출력은 읽기 힌트가 데이터를 소비하지 않음 → 옛 힌트 뒤 WouldBlock → 부분 완료와 프레임 파싱 → 취소 회수 → 늦은 취소 → 잘린 프레임의 EOF 순서를 보여 줍니다. 이 출력의 완료 경로는 worker-backed라는 실행 도움말과 함께 읽습니다.\n\n일부러 바꿔 볼 지점도 명확합니다. capacity를 1로 바꾸면 같은 메시지를 완성하는 읽기 횟수가 늘 수 있습니다. post 직후 두 번째 post는 거절되고, ready 뒤 take 전의 post도 거절되어야 합니다. 오류·EOF·취소를 모두 count=0 하나로 합치면 마지막 실험에서 원인을 설명할 수 없게 됩니다.\n\n명령은 저장소 루트 기준입니다. 다중 구성 생성기는 --config Release와 -C Release를 추가하고 실행 경로의 Release 하위 폴더를 맞춥니다. SDL 게임은 별도 폴더에 STUDY_PLATFORM=SDL로 구성한 뒤 tetris 타깃을 빌드합니다.",
+      "codes": [
+        {
+          "label": "기존 소켓 라이브러리에 읽기 관찰을 연결",
+          "text": "# Readiness observation and a worker-backed posted read share real socket code.\ntarget_sources(StudySocket PRIVATE net/read_hint.cpp)\nadd_executable(io_models_probe tools/io_models_probe.cpp)\ntarget_link_libraries(io_models_probe PRIVATE StudySocket)\nadd_test(NAME io_models_probe COMMAND io_models_probe)\nset_tests_properties(io_models_probe PROPERTIES TIMEOUT 15)",
+          "language": "cmake"
+        },
+        {
+          "label": "빌드와 실제 소켓 실험",
+          "text": "cmake -S docs/learn/checkpoints/125-io-models -B out/study-125 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-125 --target io_models_probe -j2\nout/study-125/io_models_probe\nctest --test-dir out/study-125 -R '^io_models_probe$' --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "원시 구현과 누적 계약 검사를 함께 실행",
+          "text": "python3 scripts/check_learning_io_models.py\npython3 scripts/check_learning_iocp_lifetime.py",
+          "language": "sh"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "실행 파일이 반환하는 결과",
+          "body": "정상 시나리오를 모두 만족하면 0, 조건 위반은 1, 잘못된 인자는 2, 네트워크 Runtime 준비 실패는 3입니다. 내부에서 취소나 잘린 프레임을 만들더라도 예상한 경계로 분류되면 실험 자체는 성공입니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일에서 책임의 경계를 찾는다",
+      "body": "read_hint는 준비성 관찰 하나를, PostedReceiver는 소켓·버퍼와 한 작업의 수명을, io_models_probe는 요청 순서와 프로토콜 판단을 담당합니다. 통신 프레임 형식과 실제 송수신 함수는 누적 구현을 재사용합니다.\n\n전체 파일을 펼쳐 읽을 때는 함수 이름만 따라가지 말고 “이 시점에 버퍼를 누가 쓸 수 있는가”, “이 반환값이 메시지 완성을 뜻하는가”, “지금 객체를 해제해도 되는가”를 각 경계에서 확인합니다.",
+      "codes": [
+        {
+          "label": "준비성 관찰의 OS 구현",
+          "file": "checkpoints/125-io-models/net/read_hint.cpp",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "제출 수신의 수명과 결과 전체",
+          "file": "checkpoints/125-io-models/net/posted_receive.h",
+          "language": "cpp",
+          "collapsed": true
+        },
+        {
+          "label": "실제 loopback 비교 실험 전체",
+          "file": "checkpoints/125-io-models/tools/io_models_probe.cpp",
+          "language": "cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "125-1",
+      "question": "읽기 ready를 관찰한 뒤 같은 소유자가 모든 바이트를 읽었습니다. 옛 힌트로 다시 논블로킹 수신하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "반드시 같은 바이트를 다시 받는다"
+        },
+        {
+          "id": "b",
+          "text": "항상 EOF를 받는다"
+        },
+        {
+          "id": "c",
+          "text": "WouldBlock일 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "전체 프레임이 자동으로 복원된다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "WouldBlock일 수 있다",
+      "explanation": "준비성 관찰은 바이트를 소비하거나 예약하지 않습니다. 실제 수신 전에 상태가 바뀌었으므로 새 데이터가 없으면 WouldBlock이 정상입니다. EOF 여부는 별도의 소켓 상태입니다."
+    },
+    {
+      "id": "125-2",
+      "question": "11바이트 프레임의 헤더 2바이트를 성공적으로 수신 완료했습니다. 올바른 다음 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "유효한 count만 파서에 붙이고 필요하면 더 읽는다"
+        },
+        {
+          "id": "b",
+          "text": "완료됐으므로 메시지 하나를 처리한다"
+        },
+        {
+          "id": "c",
+          "text": "남은 배열 공간도 데이터로 파서에 붙인다"
+        },
+        {
+          "id": "d",
+          "text": "2바이트를 EOF로 처리한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "유효한 count만 파서에 붙이고 필요하면 더 읽는다",
+      "explanation": "읽기 연산의 완료와 메시지 완성은 다릅니다. 실제 받은 count만 사용하고, 파서가 need_more이면 남은 바이트를 기다립니다."
+    },
+    {
+      "id": "125-3",
+      "question": "PostedReceiver가 ready이지만 take를 부르지 않았습니다. 이때 새 post를 거절하는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소켓이 자동으로 닫혔기 때문"
+        },
+        {
+          "id": "b",
+          "text": "EOF만 받을 수 있기 때문"
+        },
+        {
+          "id": "c",
+          "text": "준비성 비트가 거짓이기 때문"
+        },
+        {
+          "id": "d",
+          "text": "미회수 결과와 버퍼 재사용 경계를 지키기 위해"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "미회수 결과와 버퍼 재사용 경계를 지키기 위해",
+      "explanation": "future가 ready여도 valid 상태에는 아직 회수하지 않은 결과가 있습니다. take 후에만 다음 작업을 받아 결과 덮어쓰기와 버퍼 수명 혼동을 막습니다."
+    },
+    {
+      "id": "125-4",
+      "question": "성공 결과가 이미 준비된 뒤 취소를 요청했습니다. 어떤 결과를 받아야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "무조건 cancelled로 바뀐다"
+        },
+        {
+          "id": "b",
+          "text": "준비된 성공 결과를 그대로 회수한다"
+        },
+        {
+          "id": "c",
+          "text": "결과를 삭제하고 다시 수신한다"
+        },
+        {
+          "id": "d",
+          "text": "버퍼를 즉시 해제하고 회수를 생략한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "준비된 성공 결과를 그대로 회수한다",
+      "explanation": "취소 요청은 이미 만들어진 결과를 다시 쓰지 않습니다. 실제 최종 상태를 회수해야 하며, 요청만으로 저장소를 해제할 수 없습니다."
+    },
+    {
+      "id": "125-5",
+      "question": "양수 버퍼 읽기에서 EOF를 받았는데 파서에 미완성 헤더가 남았습니다. 맞는 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "연결 종료가 정상이므로 메시지도 완성됐다"
+        },
+        {
+          "id": "b",
+          "text": "헤더를 0으로 채워 정상 메시지를 만든다"
+        },
+        {
+          "id": "c",
+          "text": "TCP 송신 종료와 별개로 프로토콜은 잘린 상태다"
+        },
+        {
+          "id": "d",
+          "text": "EOF이면 남은 바이트 수를 볼 필요가 없다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "TCP 송신 종료와 별개로 프로토콜은 잘린 상태다",
+      "explanation": "EOF는 더 읽을 바이트가 없다는 전송 계층의 결과입니다. 파서가 완성하지 못한 바이트를 보유하면 애플리케이션 문서는 잘린 상태로 처리해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "ReadHint와 ReadCompletion의 필드를 비교하고 각 반환이 확정하는 사실을 적습니다.",
+      "헤더만 보내 준비성 두 번 관찰 후 실제 수신과 WouldBlock을 확인합니다.",
+      "capacity를 줄여 여러 완료가 한 메시지를 완성하는 과정을 따라갑니다.",
+      "실행 중·완료 후 미회수·회수 후의 post 허용 여부를 비교합니다.",
+      "취소·시간초과·완료 후 취소·잘린 프레임 EOF를 각각 실행합니다."
+    ],
+    "failureChecks": [
+      "ready를 특정 바이트의 예약이나 메시지 완성으로 해석하지 않습니다.",
+      "배열 용량 대신 실제 count만 파서에 전달합니다.",
+      "취소 요청 직후 소켓·버퍼를 파괴하지 않습니다.",
+      "완료를 회수하기 전에 새 작업으로 덮어쓰지 않습니다.",
+      "작업자 어댑터의 성능을 네이티브 IOCP/io_uring의 성능이라고 설명하지 않습니다."
+    ],
+    "expected": "실제 I/O의 조건·결과·프로토콜 해석을 분리하고, 진행 중 연산의 저장소를 회수 시점까지 유지할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 선택 준비성 래퍼 직접 검수·공식 poll/WSAPoll/WSARecv/CancelIoEx 계약 대조·실제 소켓과 현재 IOCP 소멸자 회귀",
+    "draftJob": "out/learning-jobs/125-read-hint-events.jsonl",
+    "corrections": [
+      "불필요한 ws2tcpip include 제거",
+      "프로브의 송신 결과 필드를 실제 SendOutcome 계약에 맞춤",
+      "this를 빌리는 객체의 복사·이동 금지를 명시",
+      "현재 IOCP 소멸자의 미완료 상태 조기 해제 교정",
+      "Part14의 완료 후 할 일 없음·유휴 메모리0·모델 우열·poll 스캔 제거·런타임 질의의 컴파일 보장 단정 교정"
+    ]
+  },
+  "validation": [
+    "Linux SCRIPTED/SDL 4개 계약·누적 SDL 게임 빌드",
+    "실제 loopback 준비성/부분 완료/재제출/취소/EOF 시나리오20회 반복",
+    "전체 새 I/O 소스 ASan/UBSan·실제 소켓 수행",
+    "현재 IOCP 소멸자 추출+행동 대역: 수정 전 조기 해제, 수정 후 timeout/70회wake/미제거연산/포트오류/빈종료",
+    "Windows/macOS 네이티브·실제 IOCP/io_uring 실행·수동GUI·공개배포 검증 없음"
+  ]
+}

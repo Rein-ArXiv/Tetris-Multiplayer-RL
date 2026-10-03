@@ -1,0 +1,494 @@
+{
+  "id": "lesson-65",
+  "title": "아틀라스: 작은 이미지들을 한 텍스처에",
+  "shortTitle": "공유 텍스처·배치·UV 수명",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 화면 이름의 글자마다 RGBA 텍스처를 만들고 별도로 소유합니다.",
+  "finish": "완료: 글자의 coverage를 한 R8 페이지에 배치하고, 여백·UV·갱신과 참조 수명을 관리합니다.",
+  "objective": "정수 사각형 배치와 UV를 계산하고, 선형 보간의 여백·픽셀 업로드 상태·공간 재사용의 실패 경계를 설명하고 구현합니다.",
+  "prerequisites": [
+    "글리프 coverage·advance·기준선",
+    "텍스처와 UV·straight-alpha 블렌딩",
+    "값 객체 복사·RAII·GL 컨텍스트 수명"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek Shelf 초안 직접 검토·Khronos API 대조·독립 배치/선형 보간 기준·실제 렌더러 재사용 오류 재현",
+    "draftJob": "out/learning-jobs/065-shelf-events.jsonl",
+    "corrections": [
+      "여백 좌표 예약과 0 픽셀 업로드의 책임 구별",
+      "실패한 줄 변경의 커서 보존 및 GPU 성공 후 배치 확정",
+      "루트 아틀라스 재사용의 남은 여백 픽셀·unpack 상태·실패 캐시 보정"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED67/SDL68CTest·누적 tetris/atlas_demo 빌드·경고0",
+    "Shelf 독립 점유 격자: 2374성공/82746거절, padded 영역 경계·겹침·거절 후 커서·정수 범위; UBSan 통과",
+    "아틀라스/루트R8 helper 각각 생성25·업로드19단계 오류 주입; 초기0·네 방향 여백·unpack 복원·재시도·자원 해제",
+    "GL offscreen llvmpipeLLVM21.1.8:6사례·1838980픽셀·11254잉크,4220경계 제외·독립 쌍선형 coverage/기준선/straight 합성 기준·RGBA허용오차2.01바이트",
+    "세대 변경/외부 Region/번호 소진·실패한 clear와 복구·옛 라벨 draw 거절",
+    "루트 pack_glyph 재사용 전후 추출: 옛 여백 픽셀 재현, padded0쓰기·옛UV먼저제출·업로드실패시새커서미확정",
+    "root클라이언트빌드17CTest·sim_hash_dump골든 유지·64차시 비트맵실패/폰트교체 회귀 유지",
+    "수동GUI·Windows/macOS 네이티브 검증 아님. 단일렌더스레드·level0 선형필터·살아 있는 GL컨텍스트 전제",
+    "root glyph_for 실제 함수 추출: 아틀라스 생성/부분 업로드 실패 모두 advance 유지·bitmap 해제·캐시 생략, 재시도 성공/캐시 재사용 확인"
+  ],
+  "recap": {
+    "points": [
+      "문자 값에서 글리프의 메트릭과 coverage를 준비합니다.",
+      "기준선과 xoff/yoff로 모양을 놓고 advance로 다음 원점을 구합니다.",
+      "CPU 자료와 GPU 이미지의 소유권을 구분합니다."
+    ],
+    "bridge": "글자마다 만든 GPU 저장 공간을 공유 페이지로 바꾸고, 그 안의 위치를 관리하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "여러 글자의 저장 공간을 하나로 모은다",
+      "body": "화면 이름의 각 글자는 작은 coverage 비트맵입니다. 지금은 이 비트맵마다 흰 RGBA 이미지를 만들고 별도의 텍스처에 올립니다. 글자를 여섯 개 준비하면 비어 있는 모양을 제외한 만큼 텍스처 객체를 소유합니다. 이번에는 256×256 저장 공간을 한 번 만들고, 각 글자에 그 안의 사각형을 배정하겠습니다.\n\n**텍스처 아틀라스(texture atlas)**는 여러 작은 이미지를 한 텍스처의 서로 다른 영역에 놓는 자료 배치 방식입니다. 개별 글자를 찾는 정보가 ‘텍스처 이름’에서 ‘공유 텍스처 이름 + 내부 사각형’으로 바뀝니다. 글자 모양과 기준선의 계산은 그대로 두고, GPU 저장과 참조 방식을 교체합니다.\n\n설계 질문은 세 가지입니다. 새 글자를 어디에 놓을 것인가, 그 부분만 어떻게 업로드할 것인가, 공간을 다시 쓰면 옛 좌표를 가진 라벨은 어떻게 다룰 것인가. 순수한 좌표 배치 → GPU 저장 → 라벨의 수명 순서로 구현하겠습니다.",
+      "codes": [
+        {
+          "label": "책임과 데이터의 흐름",
+          "language": "text",
+          "text": "Font → Glyph.coverage\n               ↓\nShelf → outer/ink 사각형 → MaskTexture 부분 업로드\n               ↓ 성공 후 확정\nGlyphAtlas → Region{ink, revision}\n               ↓\nAtlasLine → 화면 사각형 + UV → ImageQuad"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "아틀라스·캐시·배칭은 맡는 일이 다르다",
+          "body": "아틀라스는 저장 위치를 묶습니다. 캐시는 같은 글자를 다시 요청할 때 이미 준비한 결과를 찾습니다. 배칭은 여러 사각형을 모아 그리기 호출을 줄입니다. 여기서는 저장을 공유하고 ImageQuad는 글자마다 호출합니다. 한 텍스처를 쓴다는 사실만으로 draw 호출 수가 줄지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "색 대신 한 채널의 coverage를 저장한다",
+      "body": "글자 마스크의 각 바이트는 coverage 하나를 담습니다. 이를 RGBA로 확장하면 흰 RGB 세 바이트를 모든 픽셀에 반복 저장합니다. R8은 텍셀마다 정규화된 8비트 성분 하나를 저장하는 형식입니다. 글자 색은 그릴 때 tint에서 받고, 저장 공간에는 모양만 남길 수 있습니다.\n\n256×256 R8의 성분 자료량은 65,536바이트입니다. 같은 크기의 RGBA8은 262,144바이트입니다. 이 계산은 포맷의 성분 자료량이며 드라이버의 내부 배치·할당 비용은 제외합니다. 페이지에 실제 글자 여섯 개만 넣었다면 빈 공간도 할당하므로 작은 개별 텍스처들의 합보다 커질 수 있습니다. 페이지 크기는 필요한 글자 수와 크기를 보고 정합니다.\n\n생성 함수에는 GPU 내부 형식 R8, 입력 성분 배열 RED, 입력 원소 타입 UNSIGNED_BYTE를 각각 지정합니다. CPU의 Glyph와 Line은 그대로 사용하고, 새 업로드 경로는 Glyph.coverage를 읽습니다. Line에 남아 있는 RGBA 변환 결과는 이 경로에서 소비하지 않습니다.",
+      "codes": [
+        {
+          "label": "저장 형식과 입력 형식을 분리해서 읽는다",
+          "language": "cpp",
+          "text": "gl.TexImage2D(Texture2D, 0, R8, width, height, 0,\n              Red, UnsignedByte, zero.data());"
+        }
+      ],
+      "reference": {
+        "path": "renderer/text_gl.cpp",
+        "symbol": "static bool ensure_atlas()",
+        "invariant": "coverage를 단일 채널 텍스처에 저장한다.",
+        "mayDiffer": "루트는 최대 2048의 정사각형을 요청하며 학습 페이지는 256×256이다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "R8의 R이 빨간 글자를 뜻할까?",
+          "body": "R은 저장 성분의 이름입니다. 최종 색은 셰이더가 그 성분을 어떻게 쓰는지 결정합니다. 여기서는 R을 읽어 투명도에 곱하므로 흰색·파란색 등 원하는 tint로 같은 모양을 그릴 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "잉크 사각형과 예약 사각형을 나눈다",
+      "body": "잉크가 5×3인 글자를 배치한다고 합시다. 실제 모양을 담는 ink와 그 주위에 1텍셀씩 여백을 둔 outer를 구별합니다. outer는 7×5입니다. outer의 시작이 (0,0)이면 ink는 (1,1)에서 시작하며 크기는 여전히 5×3입니다.\n\n사각형을 반열린 구간으로 다루겠습니다. outer의 x 구간은 [0,7), y 구간은 [0,5)입니다. 오른쪽 경계 7 자체는 포함하지 않으므로 다음 사각형이 x=7에서 시작해도 겹치지 않습니다. `x + w`를 마지막 픽셀 인덱스로 혼동하면 한 열을 덜 쓰거나 겹치게 됩니다.\n\n여백을 **예약하는 일과 0을 쓰는 일**은 서로 다른 작업입니다. Shelf는 좌표만 계산합니다. GlyphAtlas가 outer 크기의 0 배열을 만들고 중앙에 coverage를 복사한 뒤, outer 전체를 업로드해야 GPU의 여백도 비워집니다.",
+      "codes": [
+        {
+          "label": "한 칸의 구조: .은 coverage 0",
+          "language": "text",
+          "text": ".......\n.#####.\n.#####.\n.#####.\n.......\n\nouter=(0,0,7,5)    ink=(1,1,5,3)\n다음 outer의 시작 x=7"
+        }
+      ],
+      "reference": {
+        "path": "renderer/text_gl.cpp",
+        "symbol": "static bool pack_glyph(",
+        "invariant": "샘플링에 쓰일 잉크 영역과 이웃 여백을 함께 관리한다.",
+        "mayDiffer": "루트는 Glyph의 UV를 바로 채우며 학습 코드는 정수 Region을 반환한다."
+      }
+    },
+    {
+      "title": "선반처럼 왼쪽부터 채우는 배치 알고리즘",
+      "body": "Shelf는 같은 줄에 왼쪽부터 이미지를 놓습니다. 상태는 다음 시작 x, 현재 줄의 y, 현재 줄에서 가장 높은 outer의 높이입니다. 너비가 남지 않으면 x를 0으로 돌리고 y에 줄 높이를 더합니다. 새 줄의 높이는 다시 0에서 시작합니다.\n\n줄 높이가 최대값인 이유를 생각해 봅시다. 높이 5인 글자 다음에 높이 6인 글자가 들어왔는데 줄 간격을 5로 유지하면 다음 줄이 두 번째 글자와 겹칩니다. 따라서 성공할 때 `max(현재 줄 높이, 새 outer 높이)`를 기록합니다.\n\n이 방식은 입력 순서대로 처리하는 간단한 직사각형 배치 휴리스틱입니다. 낮은 글자 위에 남은 공간이나 줄 오른쪽의 작은 틈을 재활용하지 않습니다. 이미 반환한 위치를 옮기지 않고 상태 세 값으로 진행할 수 있다는 이점을 선택합니다. 빈 면적의 합이 충분해도 새 사각형이 들어갈 연속 공간은 없을 수 있습니다.",
+      "codes": [
+        {
+          "label": "후보 위치 계산: Shelf::insert의 핵심",
+          "language": "cpp",
+          "text": "int candidate_x = cursor_x_;\nint candidate_y = cursor_y_;\nint candidate_row_height = row_height_;\nif (outer_width > width_ - candidate_x) {\n    candidate_x = 0;\n    candidate_y += row_height_;\n    candidate_row_height = 0;\n}\nif (outer_height > height_ - candidate_y)\n    return std::nullopt;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "더 촘촘하게 채우고 싶다면",
+          "body": "높이순 정렬은 전체 입력을 미리 알아야 하고 입력에 대한 별도 대응이 필요합니다. skyline이나 빈 사각형 목록을 쓰면 틈을 더 활용할 수 있지만 검색·분할·병합 상태가 늘어납니다. 현재 라벨의 적은 글자 수에서는 단순한 선반 배치의 비용과 실패 경로를 먼저 명확히 합니다."
+        }
+      ]
+    },
+    {
+      "title": "16×12 페이지를 손으로 채워 본다",
+      "body": "5×3, 6×4, 3×2의 잉크를 차례로 요청해 봅시다. 각 축에 2를 더한 outer는 7×5, 8×6, 5×4입니다. 첫 두 개를 넣으면 x는 15, 줄 높이는 6이 됩니다. 세 번째는 남은 너비 1에 들어가지 못해 (0,6)으로 줄을 바꿉니다.\n\n이제 12×2를 요청하면 outer는 14×4입니다. 현재 x=5에서 시작할 수 없어 새 줄 y=10을 후보로 만듭니다. 남은 높이는 2라서 거절합니다. 여기서 커서를 y=10으로 확정하면, 그 뒤의 작은 글자까지 들어가지 못하게 됩니다.\n\n실패한 후보를 버리고 x=5, y=6, row_height=4를 유지해야 합니다. 이어서 1×1을 요청하면 outer 3×3을 (5,6)에 놓을 수 있습니다. `atlas_demo`는 이 순서의 결과를 출력합니다.",
+      "codes": [
+        {
+          "label": "숫자 추적",
+          "language": "text",
+          "text": "잉크    outer 시작/크기     ink 시작    이후 x/y/줄 높이\n5×3     (0,0)  7×5         (1,1)       7/0/5\n6×4     (7,0)  8×6         (8,1)       15/0/6\n3×2     (0,6)  5×4         (1,7)       5/6/4\n12×2    거절                            5/6/4 유지\n1×1     (5,6)  3×3         (6,7)       8/6/4"
+        }
+      ]
+    },
+    {
+      "title": "실패하기 전의 상태를 보존한다",
+      "body": "Shelf::insert는 멤버를 직접 움직이지 않고 지역 변수로 후보를 계산합니다. 입력이 유효하고 outer가 페이지에 들어간다는 것을 모두 확인한 뒤 커서에 대입합니다. 이 구조는 ‘배치 거절은 관찰 가능한 배치 상태를 바꾸지 않는다’는 계약을 구현합니다.\n\n정수 범위도 먼저 제한합니다. 페이지의 각 축은 3~4096이고 잉크는 양수여야 합니다. `ink_width + 2`부터 계산하면 아주 큰 입력에서 덧셈이 넘칠 수 있습니다. `ink_width > width_ - 2`를 먼저 검사하면 덧셈을 하기 전에 유효 범위가 정해집니다. 같은 이유로 남은 공간도 `outer_width > width_ - candidate_x`로 비교합니다.\n\nGPU 업로드까지 이어지면 Shelf 성공만으로 전체 작업을 확정할 수 없습니다. GlyphAtlas는 Shelf를 복사한 candidate에서 배치하고, 실제 업로드까지 성공한 뒤 원본을 candidate로 바꿉니다. 복사 대상은 커서와 크기의 작은 값 객체라 텍스처나 픽셀 배열을 복사하지 않습니다.",
+      "codes": [
+        {
+          "label": "업로드 완료가 배치의 확정 지점이다",
+          "language": "cpp",
+          "text": "auto candidate = shelf_;\nconst auto placement = candidate.insert(glyph.width, glyph.height);\nif (!placement) return std::nullopt;\n// padded 생성과 coverage 복사\nif (!texture_.write(placement->outer, padded))\n    return std::nullopt;\nshelf_ = candidate;\nreturn Region{placement->ink, revision_};"
+        }
+      ]
+    },
+    {
+      "title": "페이지 생성과 부분 업로드의 계약",
+      "body": "MaskTexture::init는 페이지 전체를 한 번 할당하고 0으로 초기화합니다. GL_MAX_TEXTURE_SIZE를 조회해 장치가 허용하는 크기도 확인합니다. 크기 제한 안에 들어가더라도 실제 할당은 실패할 수 있으므로, 생성한 이름은 후보로 두고 업로드·상태 복원까지 성공한 뒤 소유 멤버에 넣습니다.\n\n새 글자가 들어올 때는 TexSubImage2D로 outer 영역만 교체합니다. 대상 텍스처의 크기와 포맷은 유지하고 (x,y)에서 시작하는 직사각형의 내용을 바꿉니다. 매 글자마다 TexImage2D를 호출해 전체 이미지를 다시 정의하면 다른 글자도 보존해야 하는 저장 계약과 맞지 않습니다.\n\n배열의 원소 수는 `outer.w * outer.h`여야 합니다. write는 좌표·크기·페이지 경계·자료 길이를 확인한 뒤 GL을 호출합니다. GlyphAtlas에서 요청 실패는 nullopt, MaskTexture에서는 false로 전달합니다. 현재 인터페이스는 공간 부족과 업로드 실패를 같은 실패 값으로 반환하므로 원인을 살펴볼 때 배치 계산과 GL 호출 단계를 나누어 추적합니다.",
+      "codes": [
+        {
+          "label": "테두리를 포함한 부분 자료 만들기",
+          "language": "cpp",
+          "text": "std::vector<unsigned char> padded(std::size_t(outer.w)*outer.h, 0);\nfor (int row=0; row<glyph.height; ++row)\n    std::copy_n(glyph.coverage.data()+std::size_t(row)*glyph.width,\n                glyph.width,\n                padded.data()+std::size_t(row+1)*outer.w+1);\n// MaskTexture::write 내부\ngl_.TexSubImage2D(Texture2D, 0, r.x, r.y, r.w, r.h,\n                  Red, UnsignedByte, bytes.data());"
+        }
+      ],
+      "reference": {
+        "path": "renderer/mask_upload.h",
+        "symbol": "inline GLuint create_mask8(",
+        "invariant": "초기 할당과 부분 갱신을 구분하고 실패한 자원을 소유 상태에 남기지 않는다.",
+        "mayDiffer": "학습 MaskTexture는 사각형 크기와 자료 길이까지 갖고 검증한다. 루트 update_mask8의 페이지 경계·버퍼 길이는 호출자가 보장한다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "공식 API 계약 읽기",
+          "body": "[Khronos의 TexImage2D 정의](https://raw.githubusercontent.com/KhronosGroup/OpenGL-Refpages/main/gl4/glTexImage2D.xml)에서 internalformat·format·type을 구분하고, [TexSubImage2D 정의](https://raw.githubusercontent.com/KhronosGroup/OpenGL-Refpages/main/gl4/glTexSubImage2D.xml)에서 대상 영역의 오프셋과 경계를 확인할 수 있습니다. 문서는 XML 원문이며 이 구현은 OpenGL 3.3에서 제공하는 2D 경로를 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "한 행 13바이트를 GPU가 어떻게 읽는가",
+      "body": "R8 자료의 너비가 13이면 CPU vector에는 한 행 13바이트가 바로 이어집니다. 그런데 unpack alignment가 4이면 GL은 다음 행 시작을 4바이트 배수에 맞추어 16바이트 뒤에서 읽습니다. 두 번째 행부터 3바이트씩 잘못된 위치를 읽게 됩니다. 밀집 배열의 계약에 맞추어 alignment를 1로 설정합니다.\n\n행 정렬 외에도 row length와 skip rows/pixels가 남아 있으면 읽기 위치가 달라집니다. 또한 pixel unpack buffer가 연결되어 있으면 마지막 포인터 값은 CPU 주소가 아니라 버퍼 안의 바이트 오프셋으로 해석됩니다. CPU vector를 넘길 때는 그 버퍼 연결을 0으로 만듭니다.\n\nCpuUnpack은 현재 활성 텍스처 유닛의 바인딩과 관련 unpack 상태를 저장하고, 이 함수에 필요한 상태로 맞춘 뒤 복원합니다. 활성 유닛 자체는 바꾸지 않습니다. 정상 반환과 오류 경로 양쪽에서 복원을 시도하며, 복원 오류도 성공으로 처리하지 않습니다. 바이트 원소에는 다중 바이트 값의 순서 교환 설정이 영향을 주지 않으므로 이 경로에서 바꾸지 않습니다.",
+      "codes": [
+        {
+          "label": "CPU 밀집 R8의 업로드 상태",
+          "language": "cpp",
+          "text": "gl_.BindTexture(Texture2D, texture);\ngl_.BindBuffer(PixelUnpackBuffer, 0);\ngl_.PixelStorei(UnpackAlignment, 1);\ngl_.PixelStorei(UnpackRowLength, 0);\ngl_.PixelStorei(UnpackSkipRows, 0);\ngl_.PixelStorei(UnpackSkipPixels, 0);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/mask_upload.h",
+        "symbol": "class CpuUnpack",
+        "invariant": "공유 GL 상태를 저장·정규화·복원해 CPU 입력의 해석을 고정한다.",
+        "mayDiffer": "루트는 전역 GL 함수 포인터를 쓰며 학습 코드는 GlApi를 빌린다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "관련 상태를 찾는 기준",
+          "body": "[Khronos의 PixelStore 정의](https://raw.githubusercontent.com/KhronosGroup/OpenGL-Refpages/main/gl4/glPixelStore.xml)에는 여러 차원·자료형을 위한 설정이 함께 있습니다. 사용하는 2D·unsigned-byte 입력에 어떤 설정이 영향을 주는지 추려 읽으세요. 컨텍스트 손실처럼 호출 자체가 더 이상 정상 동작하지 않는 상황까지 복원 성공을 보장하는 계약은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "UV는 잉크 영역의 경계를 가리킨다",
+      "body": "ink=(8,1,6,4), 페이지=16×12라고 합시다. u의 시작은 8/16, 끝은 14/16입니다. v는 1/12에서 5/12까지입니다. 여백은 텍스처 안에 존재하지만 화면 사각형의 크기에는 포함하지 않습니다. 화면에는 6×4 크기의 잉크 영역을 놓습니다.\n\n정규화 좌표의 텍셀 중심은 `(i+0.5)/W`에 있습니다. 반면 사각형의 왼쪽·오른쪽 꼭짓점에는 잉크 경계 `x/W`, `(x+w)/W`를 넣습니다. 같은 크기로 정렬해 그릴 때 화면의 첫 픽셀 중심이 꼭짓점에서 0.5만큼 떨어져 있으므로, 보간된 UV가 첫 텍셀 중심에 도달합니다. 양쪽 UV를 무조건 반 텍셀씩 안으로 밀면 영역의 배율이 바뀝니다.\n\nCPU 비트맵의 첫 행을 아틀라스의 작은 y에 복사하고, 화면 사각형의 위쪽에 작은 v를 대응시킵니다. GL 텍스처의 좌표 명칭과 별개로 이 자료·UV·화면 대응을 함께 유지하면 글자가 뒤집히지 않습니다.",
+      "codes": [
+        {
+          "label": "AtlasLine의 좌표 변환",
+          "language": "cpp",
+          "text": "const auto r = item.region.ink;\nrequest.rect = {x+item.x, baseline+item.y, float(r.w), float(r.h)};\nrequest.uv = {r.x/w, r.y/h, (r.x+r.w)/w, (r.y+r.h)/h};"
+        }
+      ],
+      "reference": {
+        "path": "renderer/text_gl.cpp",
+        "symbol": "static bool pack_glyph(",
+        "invariant": "잉크의 정수 경계를 페이지 크기로 나누어 UV를 구한다.",
+        "mayDiffer": "학습은 draw 시 변환하고 루트는 업로드 후 Glyph에 UV를 저장한다."
+      }
+    },
+    {
+      "title": "선형 보간에서 옆 글자가 섞이는 이유",
+      "body": "선형 샘플링은 가까운 텍셀 값을 가중 평균합니다. 한 축의 정규화 좌표 u를 텍셀 중심 기준으로 바꾸면 `s=u*W-0.5`입니다. i=floor(s), t=s−i로 두면 i번째와 i+1번째 값을 (1−t):t 비율로 섞습니다. 2차원에서는 x와 y의 가중치를 곱해 네 텍셀을 섞습니다.\n\n잉크의 왼쪽 경계에서 조금 안쪽을 읽어 s가 x−0.25가 되었다고 합시다. 바로 왼쪽 여백과 첫 잉크 텍셀을 0.25:0.75로 읽습니다. 여백이 0이면 글자 바깥으로 자연스럽게 투명해집니다. 여백에 다른 글자의 255가 남아 있으면 그 색이 가장자리 coverage에 더해집니다.\n\nCLAMP_TO_EDGE는 텍스처 전체 바깥의 주소 처리를 정합니다. 아틀라스 내부의 개별 글자 경계는 알지 못합니다. 그래서 각 글자 주변의 픽셀을 직접 관리합니다. 이 구현은 level 0의 LINEAR min/mag 필터를 쓰고 밉맵을 만들지 않습니다. 해당 조건에서 잉크 경계를 대상으로 보간할 이웃 한 칸을 0으로 보장합니다.",
+      "codes": [
+        {
+          "label": "1차원 보간 예: 여백의 값이 결과를 바꾼다",
+          "language": "text",
+          "text": "s = x - 0.25\ncoverage = 0.25 * 왼쪽 여백 + 0.75 * 첫 잉크\n\n첫 잉크=128, 여백=0   → 96\n첫 잉크=128, 여백=255 → 159.75"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "필터의 영향 범위",
+          "body": "축소용 밉맵을 만들면 다른 레벨에서 경계 픽셀들이 평균화됩니다. 1텍셀 여백만으로 모든 레벨과 필터를 다룰 수 있다는 뜻은 아닙니다. 여기서는 기본 레벨만 사용하며 사각형 바깥의 조각은 생성하지 않으므로 글자 기하 밖까지 전이 영역을 그리지도 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "R 채널을 알파로 연결한다",
+      "body": "R8 텍스처를 기본 성분 대응으로 읽으면 r은 저장된 coverage, g와 b는 0, a는 1입니다. RGBA 이미지 셰이더처럼 texture(...).a를 모양으로 읽으면 사각형 전체가 불투명해집니다. coverage 셰이더는 r을 읽어 tint.a에 곱합니다.\n\nRGB는 tint.rgb 그대로 둡니다. straight-alpha 블렌딩이 RGB에 최종 알파를 곱하므로 셰이더에서 coverage를 RGB에도 곱하면 가장자리 밝기를 한 번 더 줄이게 됩니다. 예를 들어 coverage=0.5, tint.a=0.8이면 소스 알파는 0.4입니다.\n\nImageQuad::init에 Sampling을 추가합니다. 기본값 rgba는 이미지의 기존 동작을 유지하고, coverage를 선택한 text_quad에는 새 조각 셰이더를 연결합니다. 저장 포맷을 해석하는 책임이 그리기 파이프라인에 드러나도록 만드는 것입니다.",
+      "codes": [
+        {
+          "label": "coverage 전용 조각 셰이더의 핵심",
+          "language": "glsl",
+          "text": "float coverage = texture(u_image, v_uv).r;\nout_color = vec4(v_tint.rgb, v_tint.a * coverage);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "kQuadFrag",
+        "invariant": "글리프의 단일 채널 값을 색의 알파에 곱한다.",
+        "mayDiffer": "루트는 공통 셰이더의 타입 분기를 사용하고 학습은 별도 ImageQuad 프로그램을 초기화한다."
+      }
+    },
+    {
+      "title": "공간을 다시 쓰면 좌표의 의미도 바뀐다",
+      "body": "페이지를 비운 뒤 같은 위치에 다른 글자를 넣으면, 숫자로 같은 UV가 전혀 다른 모양을 가리킵니다. Region에는 잉크 사각형뿐 아니라 revision을 저장하겠습니다. GlyphAtlas::clear가 성공하면 새 revision을 발급하고 Shelf를 처음으로 돌립니다. AtlasLine은 준비할 때의 revision과 현재 값을 비교한 뒤 그립니다.\n\nrevision은 렌더 스레드에서 프로세스 전체에 걸쳐 단조 증가시킵니다. 객체마다 1부터 시작하면 다른 아틀라스의 Region을 같은 것으로 오인할 수 있기 때문입니다. 0은 무효 상태이고, 정수의 끝에 도달하면 오래된 번호로 돌아가지 않고 새 발급을 거절합니다.\n\nclear가 쓰기를 시작한 뒤 실패하면 어느 내용을 신뢰해야 할지 알 수 없으므로 현재 revision을 0으로 만들고 기존 참조를 거절합니다. 다시 clear가 성공해야 삽입과 그리기를 재개합니다. 번호 소진처럼 GPU 작업 전에 거절하는 경우는 현재 내용을 유지합니다. 번호 검사는 살아 있는 객체의 내용 세대를 확인하는 장치이며, 파괴된 객체의 포인터를 사용할 수 있게 해 주지는 않습니다.",
+      "codes": [
+        {
+          "label": "AtlasLine이 오래된 참조를 거절한다",
+          "language": "cpp",
+          "text": "if (!ready_ || atlas_->revision()!=revision_ ||\n    !std::isfinite(x) || !std::isfinite(baseline)) return false;\nfor (std::size_t i=0; i<count_; ++i)\n    if (!atlas_->contains(items_[i].region)) return false;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "언제 비울 것인가",
+          "body": "학습 GlyphAtlas는 꽉 차면 insert를 거절합니다. 호출자가 라벨 사용 시점을 알고 clear와 재준비를 선택합니다. 자동으로 비워 버리면 앞서 준비해 두었던 다른 라벨까지 무효화되므로 이 정책을 저장 함수 안에 숨기지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "CPU에 남은 그리기 요청을 먼저 제출한다",
+      "body": "실제 렌더러는 글자 사각형을 CPU 정점 큐에 모았다가 GL에 제출합니다. 큐에는 UV가 들어 있고 coverage 자체는 들어 있지 않습니다. 큐를 남겨 둔 채 아틀라스 픽셀을 바꾸면, 나중에 제출한 사각형은 새로운 픽셀을 읽습니다.\n\n따라서 같은 컨텍스트에서 옛 UV를 가진 큐를 제출한 뒤 텍스처를 갱신해야 합니다. 이 순서를 지키면 GL은 앞의 draw와 뒤의 갱신이 올바른 결과를 내도록 처리합니다. 필요한 것은 CPU에 아직 머무는 요청을 GL 호출로 내보내는 일입니다. glFinish로 모든 GPU 실행 완료를 매번 기다리는 일을 요구하지 않습니다.\n\n학습 AtlasLine의 ImageQuad는 글자별 draw를 바로 호출하므로 별도 문자 큐는 없습니다. clear의 호출 계약에는 그래도 옛 CPU 큐를 먼저 제출해야 한다는 조건을 남깁니다. 루트 pack_glyph는 공간이 부족하면 glb_flush → 캐시 삭제 → 커서 초기화 → 새 padded 영역 업로드 순서로 재사용합니다. 매번 새 글자의 네 방향 여백까지 쓰므로 같은 페이지에 남아 있는 옛 잉크가 새 경계에 섞이지 않습니다.",
+      "codes": [
+        {
+          "label": "현재 게임의 공간 재사용 순서",
+          "language": "text",
+          "text": "옛 UV가 담긴 CPU 정점 큐\n  ↓ glb_flush()\nGL draw 제출\n  ↓ 캐시/배치 커서 초기화\n새 글자의 잉크+네 방향 0 여백 업로드\n  ↓\n새 UV로 후속 사각형 준비"
+        }
+      ],
+      "reference": {
+        "path": "renderer/text_gl.cpp",
+        "symbol": "static bool pack_glyph(",
+        "invariant": "텍스처 내용을 바꾸기 전에 옛 UV의 CPU 큐를 제출한다.",
+        "mayDiffer": "루트는 공간 부족 시 자동 재사용하며, 학습은 호출자가 명시적으로 clear하고 라벨을 다시 준비한다."
+      }
+    },
+    {
+      "title": "라벨의 실패와 소유권 경계를 정한다",
+      "body": "AtlasLine은 아틀라스를 소유하지 않고 빌립니다. 메뉴와 플레이 라벨이 같은 페이지를 쓰므로 한 라벨을 지울 때 페이지 전체를 삭제하면 다른 라벨도 깨집니다. reset은 자기 참조만 비우며 MaskTexture가 아틀라스의 유일한 GPU 소유자입니다. GL 컨텍스트와 GlApi는 MaskTexture보다 오래 살아 있어야 합니다.\n\n라벨 준비는 지역 배열에 Region과 오프셋을 모읍니다. 모든 글자 삽입이 성공한 뒤에만 배열과 ready 상태를 확정합니다. 중간에 실패하면 새 라벨은 그릴 수 없는 상태로 남습니다. 다만 앞부분에서 성공한 아틀라스 영역은 이미 할당되어 있으므로 페이지를 clear할 때까지 남습니다. 이 저장소는 추가만 가능한 배치자이며 개별 영역 반환을 구현하지 않았습니다.\n\n빈 공백은 Region의 잉크 크기가 0입니다. 업로드와 draw를 생략하지만 CPU Line에 계산된 pen 위치는 유지합니다. 배치 방식이 바뀌어도 공백의 advance, 글리프의 xoff/yoff, 기준선은 그대로 라벨의 화면 위치를 결정합니다.",
+      "codes": [
+        {
+          "label": "누적 main에서의 선언·준비 순서",
+          "language": "cpp",
+          "text": "study_atlas::GlyphAtlas atlas(gl,256,256);\nstudy_text::AtlasLine menu_text,play_text;\nstudy_image_quad::ImageQuad text_quad(gl);\nif (!atlas.init() ||\n    !text_quad.init(study_image_quad::Sampling::coverage) ||\n    !menu_text.init(atlas,*menu_pixels) ||\n    !play_text.init(atlas,*play_label_pixels)) return 1;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "재시도에서 공간이 줄어드는 경우",
+          "body": "라벨의 세 번째 글자 업로드에서 실패했다면 첫 두 영역은 남습니다. 이 계약에서 같은 라벨 준비를 반복하면 공간을 더 소비할 수 있습니다. 새 배치자의 전체 rollback, 글리프 중복 캐시, 미리 공간 예약하기는 서로 다른 확장 선택입니다. 여기서는 적은 수의 정적 라벨을 한 번 준비하고 실패를 호출자에게 반환합니다."
+        }
+      ]
+    },
+    {
+      "title": "누적 프로젝트를 빌드하고 경계를 시험한다",
+      "body": "체크포인트 65-atlas는 Font·Line·규칙·입력을 보존합니다. text/shelf.h와 renderer의 MaskTexture·GlyphAtlas·AtlasLine을 추가하고 main의 TextLine 준비를 바꿉니다. GL 함수표와 로더에는 TexSubImage2D를 추가합니다. CMake에는 atlas_demo와 shelf_contract·atlas_contract를 연결합니다.\n\natlas_demo에서 16×12 예제의 좌표를 확인하고, 게임에서는 같은 위치의 대기실·플레이 글자가 유지되는지 관찰합니다. 글자별 저장이 한 페이지로 바뀌어도 baseline=82와 높이16은 바뀌지 않습니다. 픽셀 경계는 선형 보간을 사용하므로 확대 시 nearest 이미지 경로와 다르게 보간됩니다.\n\n배치 검사는 outer 영역의 모든 셀을 표시해 겹침을 찾습니다. 거절 뒤 작은 요청을 넣어 커서 보존도 확인합니다. 업로드 검사는 일부러 unpack 설정을 바꾸거나 GL 오류를 넣어 성공 여부·자원 해제·재시도를 살펴봅니다. 전체 프로젝트의 검사는 새 저장 방식이 규칙과 입력 처리에 영향을 주지 않았는지도 함께 확인합니다.",
+      "codes": [
+        {
+          "label": "빌드와 실행",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/65-atlas -B out/study65 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study65 -j3\nctest --test-dir out/study65 --output-on-failure\ncd out/study65\n./atlas_demo\n./tetris --seed 1"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "실습 환경 선택",
+          "body": "SCRIPTED는 창 없이 좌표 데모와 CPU·대역 검사를 실행합니다. SDL 게임은 OpenGL 3.3 컨텍스트가 필요합니다. 여러 구성을 만드는 빌드 도구에서는 Release 등 실행 파일의 실제 경로를 사용하되 assets를 찾도록 빌드 디렉터리를 작업 디렉터리로 맞춥니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일에서 성공 확정 지점을 찾는다",
+      "body": "Shelf를 읽을 때는 후보 좌표를 언제 멤버로 옮기는지, MaskTexture에서는 임시 텍스처가 언제 소유 상태가 되는지 찾아보세요. GlyphAtlas는 둘을 연결해 업로드 성공 후에 배치를 확정합니다. AtlasLine은 완성된 Region들을 빌려 화면 좌표와 UV로 바꿉니다.\n\n같은 ‘실패’라도 보존하는 범위가 다릅니다. 개별 삽입 실패는 Shelf의 확정을 막고, 라벨 실패는 라벨 공개를 막지만 성공한 앞부분의 영역은 남깁니다. 페이지 clear의 실패는 옛 참조를 무효화합니다. 입력·결과·소유권과 함께 이 경계를 읽으면 오류 처리의 의도를 코드에서 따라갈 수 있습니다.",
+      "codes": [
+        {
+          "label": "순수 좌표 배치 Shelf",
+          "language": "cpp",
+          "file": "checkpoints/65-atlas/text/shelf.h",
+          "collapsed": true
+        },
+        {
+          "label": "단일 채널 GPU 저장 MaskTexture",
+          "language": "cpp",
+          "file": "checkpoints/65-atlas/renderer/mask_texture.h",
+          "collapsed": true
+        },
+        {
+          "label": "배치와 세대의 소유자 GlyphAtlas",
+          "language": "cpp",
+          "file": "checkpoints/65-atlas/renderer/glyph_atlas.h",
+          "collapsed": true
+        },
+        {
+          "label": "공유 페이지를 빌리는 AtlasLine",
+          "language": "cpp",
+          "file": "checkpoints/65-atlas/renderer/atlas_line.h",
+          "collapsed": true
+        },
+        {
+          "label": "누적 main 전체",
+          "language": "cpp",
+          "file": "checkpoints/65-atlas/src/main.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "65-1",
+      "question": "16×12 Shelf에서 현재 x=5, y=6, 줄 높이=4입니다. 12×2 잉크를 거절한 뒤 1×1 잉크의 outer 시작점은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0,10)"
+        },
+        {
+          "id": "b",
+          "text": "(5,6)"
+        },
+        {
+          "id": "c",
+          "text": "(6,7)"
+        },
+        {
+          "id": "d",
+          "text": "(0,0)"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "(5,6)",
+      "explanation": "12×2의 outer 14×4는 새 줄 y=10에 들어가지 못합니다. 거절은 상태를 보존하므로 다음 1×1의 outer 3×3은 (5,6)에 놓입니다. (6,7)은 그 안의 ink 시작점입니다."
+    },
+    {
+      "id": "65-2",
+      "question": "너비 16인 페이지에서 ink의 x=4, w=3입니다. 꼭짓점의 u 시작·끝과 첫 텍셀 중심의 u는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "4/16, 7/16; 중심 4.5/16"
+        },
+        {
+          "id": "b",
+          "text": "4.5/16, 6.5/16; 중심 4/16"
+        },
+        {
+          "id": "c",
+          "text": "4/16, 6/16; 중심 4.5/16"
+        },
+        {
+          "id": "d",
+          "text": "3/16, 8/16; 중심 4/16"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "4/16, 7/16; 중심 4.5/16",
+      "explanation": "잉크의 반열린 구간은 [4,7)입니다. 꼭짓점에 경계 4/16과 7/16을 주면 정렬된 첫 픽셀 중심이 4.5/16에 대응합니다. 여백은 UV 사각형의 폭에 포함하지 않습니다."
+    },
+    {
+      "id": "65-3",
+      "question": "밀집 R8 배열의 너비가 13입니다. unpack alignment=4이고 다른 행/skip 설정은 0, PBO는 연결하지 않았습니다. 두 번째 행은 어떻게 읽히는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "13바이트 뒤에서 읽어 정상이다."
+        },
+        {
+          "id": "b",
+          "text": "12바이트 뒤에서 읽어 첫 행을 반복한다."
+        },
+        {
+          "id": "c",
+          "text": "16바이트 뒤에서 읽어 3바이트를 건너뛴다."
+        },
+        {
+          "id": "d",
+          "text": "포인터가 PBO 오프셋으로 해석된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "16바이트 뒤에서 읽어 3바이트를 건너뛴다.",
+      "explanation": "4바이트 정렬은 행 시작 간격을 13에서 16으로 올립니다. vector의 다음 행은 13바이트 뒤에 있으므로 서로 다릅니다. 밀집 바이트 입력에 alignment=1을 설정하고 호출 후 원래 값을 복원합니다."
+    },
+    {
+      "id": "65-4",
+      "question": "기본 성분 대응의 R8에서 coverage=0.5, tint=(1,1,1,0.8)입니다. straight-alpha 셰이더 출력으로 맞는 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(0.5,0.5,0.5,0.4)"
+        },
+        {
+          "id": "b",
+          "text": "(1,1,1,0.8)"
+        },
+        {
+          "id": "c",
+          "text": "(0.5,0,0,1)"
+        },
+        {
+          "id": "d",
+          "text": "(1,1,1,0.4)"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "(1,1,1,0.4)",
+      "explanation": "R에서 coverage를 읽어 tint.a와 곱하면 0.4입니다. RGB는 tint의 흰색을 유지합니다. 기본 R8 샘플의 a=1을 읽으면 모양이 사라지고, RGB에도 coverage를 곱하면 straight 블렌딩에서 밝기가 중복 감소합니다."
+    },
+    {
+      "id": "65-5",
+      "question": "현재 렌더러의 CPU 큐에 옛 글자의 UV가 남아 있고, 아틀라스 공간을 새 글자로 재사용하려 합니다. 필요한 순서는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "캐시 삭제 → 새 업로드 → 옛 큐 제출"
+        },
+        {
+          "id": "b",
+          "text": "옛 큐 제출 → 캐시/커서 초기화 → 여백을 포함한 새 업로드"
+        },
+        {
+          "id": "c",
+          "text": "새 업로드 → GL Finish → 캐시 삭제"
+        },
+        {
+          "id": "d",
+          "text": "커서 초기화 → 옛 큐의 UV 그대로 유지"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "옛 큐 제출 → 캐시/커서 초기화 → 여백을 포함한 새 업로드",
+      "explanation": "옛 큐가 GL에 제출되기 전에 픽셀을 덮으면 그 큐도 새 내용을 읽습니다. 같은 컨텍스트에서 draw를 먼저 제출한 뒤 갱신하고 새 UV를 준비합니다. 사방의 여백도 덮어써야 재사용 공간의 옛 잉크가 보간에 섞이지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "16×12 페이지에 다섯 요청을 넣고 outer·ink·커서 표를 완성한다.",
+      "texel 중심과 사각형 경계의 UV를 각각 계산한다.",
+      "R8 한 샘플을 tint 알파와 블렌딩 식에 연결한다.",
+      "clear 뒤 옛 라벨 그리기가 거절되는 이유와 재준비 순서를 추적한다."
+    ],
+    "failureChecks": [
+      "거절된 줄 변경이 다음 요청의 배치를 바꾸지 않는지 확인한다.",
+      "글자의 네 방향 여백이 실제 0으로 업로드되는지 확인한다.",
+      "밀집 배열과 GL unpack 상태의 행 간격이 일치하는지 확인한다.",
+      "아틀라스보다 빌린 라벨과 GL 호출이 더 오래 남지 않는지 확인한다."
+    ],
+    "expected": "같은 글자 모양을 공유 텍스처에서 그리며, 가장자리 섞임·행 간격 오류·오래된 UV·공간 부족을 서로 다른 경계에서 진단한다."
+  }
+}

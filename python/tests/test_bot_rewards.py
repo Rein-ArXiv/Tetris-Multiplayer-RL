@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import subprocess
+import sqlite3
 import time
 import pytest
 from .test_meta_db_smoke import _find_meta_bin, _free_port, _wait_listen, _post, meta_server
@@ -27,7 +28,7 @@ def server(tmp_path):
             status, body = _post(url + "/v1/guest")
             assert status == 200
             return body["token"]
-        yield url, guest(), guest(), binary
+        yield url, guest(), guest(), binary, tmp_path / "meta.db"
     finally:
         process.terminate()
         process.communicate(timeout=10)
@@ -41,7 +42,7 @@ def start(url, token):
 
 
 def test_verified_win_retry_and_ownership(server):
-    url, token, other, binary = server
+    url, token, other, binary, _ = server
     helper = binary.with_name("bot_replay_test" + binary.suffix)
     assert helper.exists(), "build the bot_replay_test target"
     began = time.monotonic()
@@ -61,7 +62,7 @@ def test_verified_win_retry_and_ownership(server):
 
 
 def test_forgery_supersession_and_rate_limit(server):
-    url, token, other, _ = server
+    url, token, other, _, _ = server
     assert _post(url + "/v1/bots/challenge", {"token": "fake", "opponent_id": "rush"})[0] == 401
     first = start(url, token)
     second = start(url, token)
@@ -80,3 +81,37 @@ def test_forgery_supersession_and_rate_limit(server):
 def test_rewards_disabled_by_default(meta_server):
     # Existing deployments opt in only after installing their official catalog.
     assert _post(meta_server + "/v1/bots/challenge", {"token": "x", "opponent_id": "rush"})[0] == 404
+
+
+@pytest.mark.parametrize("earned_today,overflow", [(95, False), (100, False), (0, True)])
+def test_daily_receipts_zero_award_and_atomic_failure(server, earned_today, overflow):
+    url, token, _, binary, db_path = server
+    helper = binary.with_name("bot_replay_test" + binary.suffix)
+    began = time.monotonic()
+    challenge = start(url, token)
+    replay = subprocess.check_output([str(helper), str(challenge["seed"])], text=True).strip()
+    with sqlite3.connect(db_path) as db:
+        # This isolated server creates our account first. Direct DB edits are fault fixtures.
+        player = db.execute("SELECT id FROM players ORDER BY id LIMIT 1").fetchone()[0]
+        if earned_today:
+            db.execute("INSERT INTO bot_rewards VALUES (?,?,?,?,?)",
+                       ("f" * 32, player, "rush", earned_today, int(time.time())))
+        before = 2147483647 if overflow else 0
+        db.execute("UPDATE players SET bp=? WHERE id=?", (before, player))
+    time.sleep(max(0, len(replay) / 120 - (time.monotonic() - began)) + 0.1)
+    payload = {"token": token, "ticket": challenge["ticket"], "inputs_hex": replay}
+    status, body = _post(url + "/v1/bots/claim", payload, timeout=10)
+    if overflow:
+        assert status == 503, body
+        with sqlite3.connect(db_path) as db:
+            assert db.execute("SELECT count(*) FROM bot_rewards WHERE ticket=?", (challenge["ticket"],)).fetchone()[0] == 0
+            assert db.execute("SELECT bp FROM players WHERE id=?", (player,)).fetchone()[0] == before
+            db.execute("UPDATE players SET bp=0 WHERE id=?", (player,))
+        status, body = _post(url + "/v1/bots/claim", payload, timeout=10)
+    expected = min(10, max(0, 100 - earned_today))
+    assert status == 200 and body["awarded_bp"] == expected and body["bp"] == expected, body
+    # A recorded zero is still a receipt; retry needs neither a live ticket nor replay.
+    assert _post(url + "/v1/bots/claim", {"token": token, "ticket": challenge["ticket"]}) == (200, body)
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT awarded_bp FROM bot_rewards WHERE ticket=?", (challenge["ticket"],)).fetchall() == [(expected,)]
+        assert db.execute("SELECT bp FROM players WHERE id=?", (player,)).fetchone()[0] == expected

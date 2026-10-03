@@ -1,0 +1,361 @@
+{
+  "id": "lesson-142",
+  "title": "복구 저널: 응답을 잃어도 다시 시도",
+  "shortTitle": "전송 전 저장·재시작·부분 완료",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 서버는 동일 교체 요청을 재확인하지만 클라이언트가 요청 후보를 잃으면 재전송할 수 없습니다.",
+  "finish": "완료: 요청을 비밀 파일로 먼저 저장하고 응답 유실·부분 저장·프로세스 종료 후 같은 작업을 이어갑니다.",
+  "objective": "원자적 파일 교체·내구성 확인·서버 성공·로컬 완료를 구분하고 각 중단 상태에서 재개할 동작을 구현합니다.",
+  "prerequisites": [
+    "원자적 자격 교체와 최신 요청 영수증",
+    "비공개 파일 교체와 RAII 잠금",
+    "HTTP 결과 분류와 계정 부트스트랩"
+  ],
+  "recap": {
+    "points": [
+      "서버는 같은 계정의 자격과 세대를 함께 교체한다.",
+      "최신 동일 요청은 추가 교체 없이 성공을 재확인한다."
+    ],
+    "bridge": "같은 요청을 다시 보낼 수 있도록 클라이언트가 전송 전에 의도를 보관하고 종료 뒤에도 읽을 수 있게 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "응답이 사라져도 열쇠를 잃지 않으려면",
+      "body": "접근 키 교체가 서버에 커밋된 직후 연결이 끊겼다고 합시다. 서버는 새 키를 요구하지만, 클라이언트가 새 키를 메모리에만 두었다가 종료하면 계정에 다시 접근하기 어렵습니다. 서버의 영수증만으로는 잃어버린 새 비밀을 복원할 수 없습니다.\n\n따라서 클라이언트는 **전송 전에** 현재 증명과 새 후보를 디스크에 남겨야 합니다. 이 기록을 복구 저널이라고 부릅니다. 저널은 작업을 다시 수행하는 데 필요한 의도를 보관하며, 성공 결과만 적는 활동 로그와 역할이 다릅니다.\n\n이번 산출물은 누적 계정 서버에 연결하는 account_journal 도구입니다. connect는 미완료 교체부터 재개하고, 작업이 없을 때 계정 부트스트랩으로 이어집니다. 그래픽 화면은 같은 작업 결과를 받아 표시할 수 있도록 저장·HTTP·진행 순서를 분리합니다.",
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation resume_locked",
+        "invariant": "저장한 동일 요청으로 서버 결과를 확인하고 로컬 저장이 끝난 뒤 진행 상태를 정리한다.",
+        "mayDiffer": "현재 게임은 AccountOperation을 화면에 전달하고 pending 파일을 삭제한다. 학습 도구는 상태 enum을 출력하며 원자적으로 idle 표시를 저장한다."
+      }
+    },
+    {
+      "title": "파일에 필요한 것은 동일 요청을 재현할 정보다",
+      "body": "PendingChange에는 서버 origin, 작업 종류, 현재 증명, 새 접근 키, 새 복구 코드, 기대하는 player ID를 저장합니다. 요청을 다시 만들 때 난수를 다시 뽑지 않습니다. 후보를 바꾸면 서버가 기억한 영수증과 다른 요청이 됩니다.\n\nplayer ID는 복구할 계정을 일관되게 확인하는 값입니다. backup과 rotate는 접근 파일에서, recover는 복구 파일에서 가져옵니다. 복구 시 기기에 저장된 다른 계정의 ID를 기대값으로 사용하면 올바른 복구 응답도 거절하게 됩니다.\n\n저널은 강한 비밀을 포함합니다. 서버 DB의 해시 보관과 용도가 다릅니다. 서버에 원문을 다시 제출해야 하므로 여기서는 원문을 보존하고 비공개 파일 권한을 적용합니다. 파일 암호화를 추가한다면 암호화 키의 보관·복구도 별도로 설계해야 합니다.",
+      "codes": [
+        {
+          "label": "재전송할 요청의 값",
+          "language": "cpp",
+          "text": "struct PendingChange {\n    std::string origin;\n    std::string operation;\n    std::string credential;\n    std::string next_token;\n    std::string next_recovery;\n    std::uint64_t expected_player_id = 0;\n};"
+        }
+      ]
+    },
+    {
+      "title": "계정 파일과 진행 상태를 나눈다",
+      "body": "누적 계정 파일 account.json에 더해 recovery.json과 change.pending.json을 둡니다. 활성 접근 키를 먼저 덮어쓴 뒤 서버에 보내면 서버가 거절했을 때 로컬 키만 바뀝니다. 반대로 전송 후 처음으로 후보를 저장하면 응답 유실과 종료에 취약합니다.\n\n| 저장물 | 사용 목적 |\n| --- | --- |\n| account.json | 정상 인증에 사용할 접근 키와 계정 ID |\n| recovery.json | 접근 키를 잃었을 때 사용할 복구 코드와 계정 ID |\n| change.pending.json | 미완료 요청 전체 또는 비밀 없는 idle 상태 |\n| account.lock | 같은 프로필의 동시 작업을 조정하는 잠금 파일 |\n\n완료 후 학습 구현은 pending 파일에 origin과 idle만 원자적으로 저장합니다. 이는 요청 비밀을 논리적으로 비운 표시입니다. 현재 게임은 파일을 삭제합니다. 재시작이 미완료 요청과 완료 상태를 구별한다는 계약은 같습니다. 과거 디스크 블록의 안전 삭제까지 의미하지는 않습니다."
+    },
+    {
+      "title": "어느 서버의 비밀인지 읽을 때마다 확인한다",
+      "body": "같은 폴더 경로처럼 보여도 그 안의 파일이 현재 서버용인지 확인해야 합니다. 파일 안에 origin을 저장하고 접근·복구·pending 문서를 모두 검사합니다. 한 파일만 확인하면 다른 서버의 복구 파일을 새 값으로 덮을 수 있습니다.\n\n학습 도구는 loopback 포트에서 정확한 origin을 만들고 사용자가 지정한 프로필 폴더를 사용합니다. 현재 게임은 정규화한 HTTPS origin의 짧은 해시를 폴더 이름으로 사용합니다. 그 해시는 위치를 찾기 위한 locator이며 전체 origin 비교를 대신하지 않습니다.\n\n읽기 결과는 없음·정상·크기 초과·읽기 불가로 구별합니다. 손상이나 읽기 실패를 파일 없음으로 취급하면 새 계정을 생성하거나 복구 자료를 덮을 수 있습니다. 협조적인 작성자와 애플리케이션 소유 폴더를 전제로 하며, 같은 사용자 권한의 악성 프로세스를 이 검사만으로 격리하지는 않습니다.",
+      "reference": {
+        "path": "meta/account_store.cpp",
+        "symbol": "bool AccountStore::owns_existing_files() const",
+        "invariant": "쓰기와 자격 전송 전에 모든 계정 문서의 서버 소유를 확인한다.",
+        "mayDiffer": "현재 서버 폴더는 origin locator로 선택한다. 학습 도구는 명시한 폴더와 loopback origin을 사용하고 문서 필드도 다르다."
+      }
+    },
+    {
+      "title": "형식 검사 다음에는 값 사이의 관계를 검사한다",
+      "body": "문자열이 각각 올바른 모양이어도 작업은 잘못될 수 있습니다. backup은 현재 접근 키를 유지하고 rotate는 접근 키를 바꿔야 합니다. recover의 새 복구 코드는 제출한 복구 코드와 달라야 합니다.\n\n이 관계가 깨진 로컬 저널은 전송하지 않고 보존합니다. 서버의 400 응답을 받아 확정 거절로 정리하는 경로에 넣으면 손상된 복구 자료를 자동으로 없앨 수 있습니다. 로컬 파일 검증 실패와 정상 요청에 대한 서버 거절은 다른 사건입니다.\n\n파서는 중복 키·추가 필드·다른 타입·다른 origin을 거절합니다. 원문을 포함할 수 있는 JSON 예외 메시지는 화면이나 로그에 그대로 내보내지 않습니다.",
+      "codes": [
+        {
+          "label": "각 필드와 관계를 검사한다",
+          "language": "cpp",
+          "text": "inline bool valid_pending(const PendingChange& p) {\n    if (p.origin.empty() || !p.expected_player_id ||\n        !study_credentials::valid_account(p.next_token) || !valid_recovery(p.next_recovery)) return false;\n    if (p.operation == \"recover\") return valid_recovery(p.credential) && p.credential != p.next_recovery;\n    if (!study_credentials::valid_account(p.credential)) return false;\n    if (p.operation == \"backup\") return p.credential == p.next_token;\n    if (p.operation == \"rotate\") return p.credential != p.next_token;\n    return false;\n}"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation resume_locked",
+        "invariant": "저장한 동일 요청으로 서버 결과를 확인하고 로컬 저장이 끝난 뒤 진행 상태를 정리한다.",
+        "mayDiffer": "현재 게임은 AccountOperation을 화면에 전달하고 pending 파일을 삭제한다. 학습 도구는 상태 enum을 출력하며 원자적으로 idle 표시를 저장한다."
+      }
+    },
+    {
+      "title": "프로세스 잠금은 파일의 존재와 다르다",
+      "body": "같은 프로필을 사용하는 두 게임이 동시에 교체를 진행하면 서버에는 요청 B의 키, 로컬에는 요청 A의 키가 남을 수 있습니다. 잠금 범위는 파일 쓰기 한 번이 아니라 준비·저장·HTTP·마무리 전체입니다.\n\nJournalStore는 생성할 때 AccountFileLock을 얻고 수명 동안 유지합니다. 일반 부트스트랩과 같은 account.lock을 사용하여 계정 발급과 교체가 경쟁하지 않게 합니다. POSIX에서는 flock, Windows에서는 공유를 허용하지 않는 파일 핸들이 같은 역할을 맡습니다.\n\n잠금 파일이 디스크에 남아 있어도 프로세스가 종료하면 OS의 핸들 잠금은 해제됩니다. 존재 여부를 잠김으로 판단하거나 실행 중 잠금 파일을 지우고 다시 만들지 않습니다. 이름은 같아도 서로 다른 파일 객체를 잠그는 문제가 생길 수 있습니다.",
+      "reference": {
+        "path": "meta/private_file.cpp",
+        "symbol": "AccountFileLock::AccountFileLock",
+        "invariant": "한 계정 폴더의 협조적인 프로세스들을 OS 핸들 수명으로 직렬화한다.",
+        "mayDiffer": "잠금 파일 이름과 프로필 경로 선택은 구현마다 다를 수 있다. 악성 프로세스의 규약 무시는 별도 권한 문제다."
+      }
+    },
+    {
+      "title": "후보 생성과 저널 저장을 전송보다 앞에 둔다",
+      "body": "작업을 시작할 때 활성 pending이 없는지 먼저 확인합니다. 현재 증명과 계정 ID를 읽고, 바꿀 후보를 CSPRNG로 생성합니다. 난수 생성 실패에서는 요청을 만들거나 서버에 보내지 않습니다.\n\nbegin은 같은 origin인지, 입력 관계가 유효한지, 다른 미완료 요청이 없는지 다시 확인한 뒤 저널을 원자적으로 저장합니다. 이 저장을 성공으로 확인한 다음에만 resume_change를 호출합니다. 재개 함수에는 후보 생성 기능을 두지 않아 동일 요청 재전송 규칙을 코드 구조로 드러냅니다.\n\n쓰기 실패가 보고됐는데 새 저널이 이미 보일 수도 있습니다. 이 경우 현재 호출은 전송하지 않습니다. 다음 실행이 디스크를 읽고 완전한 저널이면 그 요청을 재개합니다.",
+      "codes": [
+        {
+          "label": "저널 저장의 선행 조건",
+          "language": "cpp",
+          "text": "    bool begin(const PendingChange& p) const {\n        if (p.origin!=origin_ || !valid_pending(p) || load_pending().state!=JournalRead::missing) return false;\n        return write(\"change.pending.json\",pending_json(p));\n    }"
+        }
+      ]
+    },
+    {
+      "title": "원자적 교체와 내구성 확인을 분리한다",
+      "body": "비밀 파일은 같은 디렉터리에 임시 파일을 만들고 내용을 모두 쓴 뒤 교체합니다. POSIX 경로는 제한된 권한·전체 write·파일 fsync·rename·부모 디렉터리 fsync 순서입니다. Windows는 제한 ACL·FlushFileBuffers·교체 옵션을 사용합니다.\n\n**원자적 교체**는 다른 관찰자가 목적 파일에서 중간 내용 대신 교체 전이나 후의 완성 내용을 보게 하는 계약입니다. **내구성**은 성공한 쓰기를 장치·파일시스템의 동기화 계약 아래에서 보존하는 문제입니다. rename 후 디렉터리 fsync가 실패하면 새 파일이 이미 보여도 함수는 저장을 확인하지 못했다고 반환합니다.\n\n따라서 false는 “기존 파일이 반드시 그대로다”와 같지 않습니다. 파일이 반쯤 쓰인 상황과 완성된 파일이 공개됐으나 동기화 확인에 실패한 상황을 구별하고, 재시작에서는 실제 문서를 다시 읽습니다.",
+      "reference": {
+        "path": "meta/private_file.cpp",
+        "symbol": "bool write_private_file",
+        "invariant": "완성한 임시 파일을 같은 디렉터리에서 교체하며 동기화 결과를 확인한다.",
+        "mayDiffer": "OS별 파일·디렉터리 동기화 계약은 다르다. 이 API는 교체 후 실패를 상세 enum 대신 bool로 전달한다."
+      }
+    },
+    {
+      "title": "서버 결과를 세 가지로 분류한다",
+      "body": "HTTP 어댑터는 accepted·rejected·uncertain으로 결과를 나눕니다. 정상 성공 응답은 엄격히 파싱한 계정 ID와 세대를 포함해야 합니다. 성공 상태 코드만 있고 본문이 손상됐다면 로컬 파일을 새 값으로 확정하지 않습니다.\n\n| 관찰 | 분류 | 저널 처리 |\n| --- | --- | --- |\n| 정상 성공 응답과 기대 계정 ID | accepted | 로컬 파일 교체로 진행 |\n| 계약상 확정 거절인 400·401·409 | rejected | 현재 요청 정리 |\n| 연결 단절·시간 초과·429·5xx | uncertain | 같은 요청 보존 |\n| 성공 본문 손상·다른 ID | uncertain | 원문 보존 후 확인 재시도 |\n\n계정 ID 비교는 응답의 일관성 검사입니다. 신뢰할 서버인지 증명하는 인증 수단은 아니므로 외부 연결은 TLS와 올바른 서버 검증을 전제로 합니다. 이 실습 HTTP는 loopback 전용입니다.",
+      "codes": [
+        {
+          "label": "HTTP 관찰을 작업 결과로 바꾼다",
+          "language": "cpp",
+          "text": "            if (!reply) return {};\n            if (reply->status==400 || reply->status==401 || reply->status==409)\n                return {RemoteState::rejected,0,0};\n            if (reply->status!=200) return {};\n            const auto j=object(reply->body,2);\n            if (!j) return {};\n            const auto id=number(*j,\"player_id\"),epoch=number(*j,\"auth_epoch\");\n            if (!id || !*id || !epoch || *epoch>static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return {};\n            return {RemoteState::accepted,*id,*epoch};"
+        }
+      ]
+    },
+    {
+      "title": "같은 저널을 한 번 보내고 결과를 기다린다",
+      "body": "resume_change는 저장소와 API의 준비 상태·origin을 확인한 뒤 저널을 읽습니다. 작업이 없으면 idle, 손상이나 다른 서버의 파일이면 blocked를 반환합니다. 정상 저널을 얻으면 그 값을 그대로 HTTP 어댑터에 한 번 전달합니다.\n\n연결 실패나 불확실한 응답은 pending을 반환합니다. 무한 재시도 루프로 UI를 붙잡지 않습니다. 호출자는 작업자를 종료하고 Retry나 다음 실행에 재개할 수 있습니다. 이때 서버의 최신 영수증이 이미 수행된 같은 요청을 다시 교체하지 않게 합니다.\n\n서버에 도착한 횟수와 DB 교체 효과의 횟수는 다릅니다. 네트워크를 통해 정확히 한 번만 전송했다고 보장하는 대신, 같은 요청의 반복 효과를 서버에서 제어하는 구조입니다.",
+      "codes": [
+        {
+          "label": "저장한 요청을 그대로 전달한다",
+          "language": "cpp",
+          "text": "        have_pending = true;\n        const PendingChange request = loaded.request;\n\n        // Replay the stored request exactly once; no candidates are generated.\n        RemoteChange remote = api.change(request);"
+        }
+      ]
+    },
+    {
+      "title": "복구 파일·접근 파일·완료 표시 순서를 지킨다",
+      "body": "accepted를 받으면 recovery.json을 먼저 저장하고 account.json을 저장합니다. 둘 다 저장을 확인한 뒤에만 pending을 idle 상태로 바꿉니다. 각 파일의 교체는 독립적이며 파일 묶음 전체의 원자성은 제공하지 않습니다.\n\n복구 파일만 갱신된 상태에서 종료해도 pending에는 새 접근 키가 남아 있습니다. 접근 파일까지 갱신됐지만 완료 표시 전에 종료했다면 같은 요청의 성공을 재확인하고 저장을 반복할 수 있습니다. 둘 다 실패한 경우에도 전송 전에 저장한 후보가 재시도의 근거입니다.\n\n쓰기 또는 완료 정리가 실패하면 local_incomplete를 반환합니다. 서버가 성공했다고 확인한 뒤의 실패를 “서버 교체 실패”라고 안내하지 않습니다. 완료 표시 쓰기가 이미 공개된 뒤 실패했을 가능성도 있으므로 재시작에서는 저널을 다시 읽습니다.",
+      "codes": [
+        {
+          "label": "로컬 완료를 순서대로 확인한다",
+          "language": "cpp",
+          "text": "        try {\n            if (!store.save_recovery(request, remote.player_id))\n                return {JournalState::local_incomplete, 0};\n            if (!store.save_access(request, remote.player_id))\n                return {JournalState::local_incomplete, 0};\n            if (!store.remove_pending())\n                return {JournalState::local_incomplete, 0};\n        } catch (...) {\n            return {JournalState::local_incomplete, 0};\n        }"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation resume_locked",
+        "invariant": "저장한 동일 요청으로 서버 결과를 확인하고 로컬 저장이 끝난 뒤 진행 상태를 정리한다.",
+        "mayDiffer": "현재 게임은 AccountOperation을 화면에 전달하고 pending 파일을 삭제한다. 학습 도구는 상태 enum을 출력하며 원자적으로 idle 표시를 저장한다."
+      }
+    },
+    {
+      "title": "예외와 재시작은 서로 다른 정리 경로를 갖는다",
+      "body": "일반 예외는 스택을 해제하므로 저장소의 잠금 소멸자가 실행됩니다. 프로세스를 강제로 종료하면 C++ 소멸자가 실행되지 않을 수 있어도 OS가 파일 핸들을 회수합니다. 남은 저널은 다음 프로세스가 읽습니다.\n\n전송 이후 아직 accepted를 확인하지 못한 예외는 pending, accepted를 확인한 뒤 저장 중 예외는 local_incomplete로 분류합니다. 상태는 사용자가 다음에 해야 할 행동을 정하는 정보이므로 모두 같은 실패 메시지로 합치지 않습니다.\n\n실험 도구는 파일 쓰기를 확인한 직후 _Exit로 종료할 수 있습니다. 이 검사는 새 프로세스가 남은 파일로 이어가는지를 확인합니다. 실제 전원 장애나 장치의 동기화 계약까지 대신 검사하지는 않습니다."
+    },
+    {
+      "title": "부트스트랩은 미완료 작업을 건너뛰지 않는다",
+      "body": "connect 동작은 저널을 먼저 재개합니다. complete면 복구한 계정으로 끝내고, pending·blocked·local_incomplete면 사용자에게 해당 상태를 전달합니다. idle일 때만 잠금을 놓고 일반 AccountBootstrap을 호출합니다.\n\n일반 LocalAccountStore에도 방어선을 둡니다. 활성 저널이 있거나 접근 파일은 없는데 복구 파일이 있으면 이를 빈 프로필로 취급하지 않습니다. 이 경로는 새 계정 생성으로 진행하지 않고 저장소 확인을 요청합니다.\n\n같은 프로세스에서 저장소 객체 둘을 동시에 열면 자기 자신이 잠금에 막힐 수 있습니다. CLI의 중괄호 범위가 JournalStore를 파괴한 뒤 LocalAccountStore를 만들도록 수명을 나눕니다.",
+      "codes": [
+        {
+          "label": "새 계정 발급 전에 미완료 자료를 확인한다",
+          "language": "cpp",
+          "text": "            const auto pending = read_local_document(file_.parent_path()/\"change.pending.json\");\n            if (pending.state != LocalRead::missing &&\n                !(pending.state == LocalRead::ready && idle_journal(pending.body,origin_)))\n                return {AccountLoad::invalid,{}};\n            const auto document = read_local_document(file_);\n            if (document.state == LocalRead::missing &&\n                read_local_document(file_.parent_path()/\"recovery.json\").state != LocalRead::missing)\n                return {AccountLoad::invalid,{}};\n            if (document.state == LocalRead::missing) return {AccountLoad::missing, {}};"
+        }
+      ]
+    },
+    {
+      "title": "실제 서버와 프로필 폴더로 작업을 실행한다",
+      "body": "C++17·OpenSSL Crypto·누적 HTTP 및 비밀 파일 도구를 사용합니다. 서버를 먼저 시작하고 출력된 PORT 값을 다른 터미널의 클라이언트 인자로 사용합니다. 프로필 폴더는 이 실험 전용 경로로 지정합니다.\n\n```sh\ncmake -S docs/learn/checkpoints/142-recovery-journal -B out/study-142 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-142 --target study_account_db account_journal journal_contract -j2\nout/study-142/study_account_db 0 out/study-142/service.db\n```\n\n```sh\n# PORT는 서버가 출력한 포트로 바꾼다.\nout/study-142/account_journal PORT out/study-142/profile connect\nout/study-142/account_journal PORT out/study-142/profile backup\nout/study-142/account_journal PORT out/study-142/profile rotate\nout/study-142/account_journal PORT out/study-142/profile resume\n```\n\nBoost 헤더가 기본 경로 밖에 있으면 STUDY_BOOST_INCLUDE를 지정합니다. backup은 새 복구 파일을 만들거나 교체하므로 사용자는 최신 파일을 안전한 곳에 보관해야 합니다. recover는 현재 프로필 폴더의 복구 파일에 적힌 계정으로 접근 키를 교체하는 명시적인 작업입니다."
+    },
+    {
+      "title": "중단 지점마다 남을 파일을 먼저 예상한다",
+      "body": "rotate 뒤 추가 인자로 crash-pending, crash-recovery, crash-account를 주면 해당 파일의 저장 확인 직후 종료합니다. fail-account와 fail-clear는 해당 저장을 실패시킵니다. uncertain-pending·uncertain-account·uncertain-clear는 파일을 실제 교체한 뒤 실패를 보고하여 교체 후 확인 실패를 모사합니다.\n\n```sh\nout/study-142/account_journal PORT out/study-142/profile rotate crash-recovery\nout/study-142/account_journal PORT out/study-142/profile connect\npython3 scripts/check_learning_recovery_journal.py --boost /path/to/boost/include\n```\n\n강제 종료는 실험용 동작입니다. 공개 서버의 사용자 입력으로 실패 지점을 선택하는 기능을 만들지 않습니다. 검사에서는 서버 DB의 세대·기기 파일·실제 전송 본문을 함께 비교합니다.\n\n응답을 버리는 프록시는 서버에 전달해 커밋을 마친 뒤 클라이언트 연결을 닫습니다. 그 뒤 새 프로세스로 재개하여 같은 요청 바이트가 전달되고 세대는 다시 증가하지 않는지 확인합니다. 잘못된 성공 본문·다른 계정 ID·잠금 경쟁·다른 origin·손상된 저널도 함께 검사합니다."
+    },
+    {
+      "title": "전체 파일에서 상태와 부작용의 경계를 읽는다",
+      "body": "journal_flow.h에는 상태 전이 순서를, journal_store.h에는 파일 검증·잠금·저장을, journal_http.h에는 HTTP 관찰의 분류를 둡니다. 도구는 준비된 요청을 저장한 뒤 재개 함수를 호출하고 결과만 출력합니다.\n\n순수한 계약 검사에서는 저장 실패·예외·계정 불일치에서 호출 순서를 확인합니다. 통합 검사에서는 실제 파일과 서버를 사용해 그 어댑터의 계약도 확인합니다. 인터페이스를 주입한 검사만 통과했다고 OS 저장 동작까지 검증된 것으로 판단하지 않습니다.",
+      "codes": [
+        {
+          "label": "전체 파일 — 재개 상태 흐름",
+          "language": "cpp",
+          "file": "checkpoints/142-recovery-journal/meta/journal_flow.h"
+        },
+        {
+          "label": "전체 파일 — 프로필 파일과 잠금",
+          "language": "cpp",
+          "file": "checkpoints/142-recovery-journal/meta/journal_store.h"
+        },
+        {
+          "label": "전체 파일 — 재전송 HTTP",
+          "language": "cpp",
+          "file": "checkpoints/142-recovery-journal/meta/journal_http.h"
+        },
+        {
+          "label": "전체 파일 — 실행과 중단 실험",
+          "language": "cpp",
+          "file": "checkpoints/142-recovery-journal/tools/account_journal.cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation resume_locked",
+        "invariant": "저장한 동일 요청으로 서버 결과를 확인하고 로컬 저장이 끝난 뒤 진행 상태를 정리한다.",
+        "mayDiffer": "현재 게임은 AccountOperation을 화면에 전달하고 pending 파일을 삭제한다. 학습 도구는 상태 enum을 출력하며 원자적으로 idle 표시를 저장한다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "142-1",
+      "question": "서버가 교체를 커밋했지만 성공 응답이 유실됐습니다. 새 프로세스는 무엇을 보내야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새 후보를 다시 생성한 요청"
+        },
+        {
+          "id": "b",
+          "text": "저널에 저장된 증명과 후보 그대로"
+        },
+        {
+          "id": "c",
+          "text": "옛 접근 키만"
+        },
+        {
+          "id": "d",
+          "text": "새 게스트 생성 요청"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "저널에 저장된 증명과 후보 그대로",
+      "explanation": "서버 영수증과 같은 요청이어야 이미 성공한 결과를 확인할 수 있습니다. 전송 전에 후보를 보관하는 이유입니다."
+    },
+    {
+      "id": "142-2",
+      "question": "파일 rename 뒤 디렉터리 fsync가 실패하여 쓰기 함수가 false를 반환했습니다. 옳은 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "옛 내용이 반드시 유지된다"
+        },
+        {
+          "id": "b",
+          "text": "파일 내용이 반드시 절반이다"
+        },
+        {
+          "id": "c",
+          "text": "서버가 롤백됐다"
+        },
+        {
+          "id": "d",
+          "text": "새 내용이 보일 수 있으므로 재시작에서 실제 파일을 읽는다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "새 내용이 보일 수 있으므로 재시작에서 실제 파일을 읽는다",
+      "explanation": "공개 시점과 내구성 확인은 다릅니다. 교체 후 실패를 아무 변화도 없었다는 뜻으로 해석하면 안 됩니다."
+    },
+    {
+      "id": "142-3",
+      "question": "rotate 저널의 옛 키와 새 키가 같고 각 문자열 형식은 정상입니다. 어떻게 처리할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "로컬 손상으로 보존하고 전송하지 않는다"
+        },
+        {
+          "id": "b",
+          "text": "서버로 보내 400이면 삭제한다"
+        },
+        {
+          "id": "c",
+          "text": "새 후보로 몰래 덮는다"
+        },
+        {
+          "id": "d",
+          "text": "새 계정으로 초기화한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "로컬 손상으로 보존하고 전송하지 않는다",
+      "explanation": "필드 사이의 관계도 저널 계약입니다. 손상된 자료와 정상 요청에 대한 서버 거절을 같은 정리 경로로 합치지 않습니다."
+    },
+    {
+      "id": "142-4",
+      "question": "서버 성공을 확인하고 복구 파일만 저장한 뒤 접근 파일 저장에 실패했습니다. 올바른 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "완료, pending 삭제"
+        },
+        {
+          "id": "b",
+          "text": "서버 교체 실패, 새 요청 생성"
+        },
+        {
+          "id": "c",
+          "text": "서버 성공·로컬 미완료, 저널로 재개"
+        },
+        {
+          "id": "d",
+          "text": "복구 파일 삭제 후 처음부터"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "서버 성공·로컬 미완료, 저널로 재개",
+      "explanation": "서버에서 바뀐 상태를 되돌렸다고 말할 수 없습니다. 저널에 후보가 남아 있어 같은 요청 확인 후 로컬 저장을 이어갑니다."
+    },
+    {
+      "id": "142-5",
+      "question": "잠금 파일은 남아 있지만 그것을 연 프로세스는 종료됐습니다. 다음 프로세스의 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "파일이 있으므로 영구 잠김"
+        },
+        {
+          "id": "b",
+          "text": "OS 잠금 획득 결과로 판단하고 파일 존재와 구별"
+        },
+        {
+          "id": "c",
+          "text": "잠금 파일을 먼저 지운다"
+        },
+        {
+          "id": "d",
+          "text": "항상 새 프로필을 만든다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "OS 잠금 획득 결과로 판단하고 파일 존재와 구별",
+      "explanation": "잠금의 수명은 OS 핸들에 연결됩니다. 실행 중 파일 삭제·재생성은 서로 다른 파일 객체를 잠그는 경쟁을 만들 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "각 강제 종료 지점에서 남을 접근·복구·pending 상태와 서버 세대를 예상한다.",
+      "같은 프로필로 새 프로세스를 열어 connect가 작업을 재개하는지 확인한다.",
+      "응답 유실과 로컬 저장 실패에서 전송 본문·계정 ID·세대를 비교한다."
+    ],
+    "failureChecks": [
+      "손상된 저널과 다른 origin에서 HTTP 요청이 나가지 않는지 확인한다.",
+      "저널이 있을 때 일반 부트스트랩이 새 계정을 만들지 않는지 확인한다.",
+      "쓰기 false 뒤 새 내용이 보이는 경우에도 재개가 올바른지 확인한다."
+    ],
+    "expected": "후보를 잃지 않고 동일 요청을 재전송하며 두 활성 파일의 저장을 확인한 뒤에만 작업을 정리한다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 선택 상태 흐름 초안·현재 클라이언트·실제 HTTP/파일·강제 종료와 새 프로세스 재개 대조",
+    "corrections": [
+      "계정 ID 일치가 서버 인증을 증명한다는 초안 주석 수정",
+      "교체 후 쓰기 실패의 관찰과 재시작 검사 보완",
+      "일반 부트스트랩의 활성 저널·복구 파일 우회 차단",
+      "현재 클라이언트의 의미적으로 손상된 저널 전송·삭제 수정"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 신규 저널·부트스트랩 타깃 및 계약 검사 통과",
+    "실제 HTTP·파일·새 프로세스: 응답 유실·잘못된 성공 본문/ID·429/503·저장 단계 강제 종료·부분 실패·교체 후 실패·동일 재시도 통과",
+    "origin·손상/의미 오류·잠금·0600 권한·비밀 출력 부재·기존 부트스트랩의 미완료 우회 차단·복구·확정 거절 통과",
+    "실제 현재 클라이언트 손상 저널 전송/삭제 재현 후 보존 수정; 실제 native HTTP/파일 회귀8사례 통과",
+    "신규 C++ 저널 CLI·파일·잠금 구현 ASan/UBSan으로 실제 통합 행렬 통과; 서버/기존 bootstrap 실행 파일은 비계측",
+    "GNU15 표준 regex 내부 maybe-uninitialized 경고 및 기존 vendor SQLite 경고 로그 보존; 경고 억제나 라이브러리 전체 무결성 주장 없음",
+    "인라인7·현재 소스 심볼·누적 파일 보존 확인",
+    "Windows/macOS 네이티브·실제 전원/장치 장애·적대적 같은 사용자 파일 경쟁 미검증; 수동GUI·공개배포 없음"
+  ]
+}

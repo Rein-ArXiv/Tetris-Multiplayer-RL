@@ -1,0 +1,521 @@
+{
+  "id": "lesson-110",
+  "title": "테이블과 키: 사용자·아이콘·경기",
+  "shortTitle": "행·관계·키·NULL·영속 저장",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 별도 HTTP 서비스가 경기 결과를 메모리 행으로만 보관합니다.",
+  "finish": "완료: 사용자·아이콘·소유·경기를 SQLite 테이블로 저장하고, 서비스를 재시작해 같은 경기 행을 확인합니다.",
+  "objective": "행의 의미와 키·외래 키·값 제약을 설계하고, NULL·오류·타입 범위를 구별하며 C++ 저장 경계를 구현합니다.",
+  "prerequisites": [
+    "프로세스와 저장 객체의 수명",
+    "고정된 경기 제출 값과 HTTP 계약",
+    "RAII·mutex·optional"
+  ],
+  "recap": {
+    "points": [
+      "호출자가 종료되어도 서비스의 메모리는 유지되지만 서비스가 종료되면 사라집니다.",
+      "메타는 저장 객체를 소유하고 HTTP 핸들러는 이를 빌립니다.",
+      "같은 경기 키와 내용은 최초 저장 결과를 다시 확인하는 데 사용합니다."
+    ],
+    "bridge": "그 경계를 유지하면서 저장 객체 안에 실제 테이블과 파일을 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "서비스를 껐다 켜도 남아야 하는 값",
+      "body": "HTTP 서비스는 호출자가 끝난 뒤에도 경기 행을 가지고 있습니다. 그러나 그 행은 메모리 배열에 있으므로 서비스를 종료하면 사라집니다. 이번에는 **같은 경기 키로 다시 물었을 때, 서비스를 다시 시작한 뒤에도 최초 행 번호를 받는 것**을 만듭니다.\n\n호출 프로그램의 MatchRecord와 HTTP 형식은 유지합니다. 새 실행 파일 study_meta_db가 SQLite 파일을 소유하고, 그 안에 사용자·아이콘·소유 관계·경기 테이블을 구성합니다. 저장 방식의 변화는 서비스 내부에 모입니다.\n\n기록을 파일에 남기기 전에 질문부터 정해야 합니다. “이 이름은 누구인가?”, “이 아이콘을 두 번 소유할 수 있는가?”, “승자는 반드시 경기 참가자인가?”, “같은 경기 요청인가?”입니다. 테이블 설계는 이 질문에 답할 수 있는 값과 관계를 정하는 작업입니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "const char* kSchema",
+        "invariant": "장기 보관할 상태의 구조와 관계를 스키마로 선언한다.",
+        "mayDiffer": "학습에는 네 테이블과 고정 실습 선수가 있고 실제 서비스에는 계정 자격 증명·보상·이력·마이그레이션도 있다."
+      }
+    },
+    {
+      "title": "행 하나가 무엇을 뜻하는가",
+      "body": "**테이블**은 같은 구조를 따르는 행의 모음이고, **행**은 한 대상을 표현하며, **열**은 그 대상의 속성을 담습니다. 행을 찾는 기준과 속성의 의미를 먼저 적으면 C++ 객체를 그대로 바이트 복사해 파일에 쓰려는 생각에서 벗어날 수 있습니다.\n\n| 테이블 | 한 행의 의미 | 예 |\n| --- | --- | --- |\n| players | 사용자 하나 | ID101, 표시 이름 Player A |\n| icons | 아이콘 종류 하나 | IDruby, 표시 이름 Ruby |\n| player_icons | 사용자가 아이콘 하나를 소유한다는 관계 | 101이 ruby 소유 |\n| matches | 완료된 경기 기록 하나 | 요청 키17, 선수101·202, 승자101 |\n\n사용자 행에 아이콘 이름을 쉼표로 합쳐 넣으면 특정 아이콘의 중복을 판정할 때마다 문자열을 해석해야 합니다. 아이콘마다 열을 하나씩 늘리면 종류가 늘 때 테이블 구조를 바꿔야 합니다. 관계를 별도 행으로 두면 새 소유는 행 하나의 추가가 됩니다.\n\n관계형 모델에서 **키**는 행을 구별하는 값 또는 값의 조합입니다. 저장 위치나 C++ 포인터가 아니라 데이터 안에 있는 값으로 식별하므로 연결과 프로세스가 바뀌어도 참조를 이어 갈 수 있습니다. SQL 조회 결과의 순서는 ORDER BY로 정합니다. 행 번호가 커졌다는 이유만으로 SELECT 결과 순서를 가정하지 않습니다."
+    },
+    {
+      "title": "사용자 이름과 사용자 ID를 분리한다",
+      "body": "플레이어101의 이름을 Player A에서 별빛으로 바꾸어 봅시다. 경기 기록과 소유권이 이름을 참조하면 관련 행을 모두 찾아 바꿔야 합니다. 이름이 같은 두 플레이어가 생기면 누구를 가리키는지도 모호해집니다.\n\nplayers의 **기본 키(PRIMARY KEY)**는 id입니다. display_name은 바꿀 수 있는 표시 속성이고 중복을 허용합니다. “ID가 같으면 같은 사용자”라는 정책을 정했으므로 다른 테이블은 이름 대신 ID를 저장합니다. UPDATE는 WHERE id 조건으로 대상 행을 선택하고 이름만 바꿉니다.\n\n여기서 이름은 실습용 표시 문자열입니다. 익명 계정의 ID와 계정을 사용할 권한을 증명하는 비밀 값도 서로 다른 역할을 가집니다. ID를 알았다는 사실만으로 그 계정의 소유자가 되는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "ID를 조건으로 이름만 수정",
+          "text": "bool rename_player(std::uint64_t id, const std::string& name) {\n        std::lock_guard<std::mutex> lock(mutex_);\n        Statement q(db_.get(), \"UPDATE players SET display_name=?1 WHERE id=?2\");\n        q.text(1, name);\n        q.text(2, std::to_string(id));\n        q.done();\n        return sqlite3_changes(db_.get()) != 0;\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.h",
+        "symbol": "struct Player",
+        "invariant": "식별자와 표시 속성·인증 정보를 구별한다.",
+        "mayDiffer": "학습 ID는 호출자가 정한 uint64이고 실제 계정 ID는 DB의 signed 정수다. 학습 API에는 로그인이나 토큰이 없다."
+      }
+    },
+    {
+      "title": "C++의 uint64를 SQL INTEGER로 옮기기 전에",
+      "body": "타입 이름이 비슷하다고 표현 범위가 같지는 않습니다. 학습 MatchRecord의 키·틱·점수는 uint64_t로, 최대값은18446744073709551615입니다. SQLite INTEGER의 값 범위는 signed64이므로 최대9223372036854775807까지 표현합니다. 그보다 큰 uint64를 signed 정수로 좁혀서 저장하면 원래 값을 보존할 수 없습니다. [SQLite 저장 클래스](https://www.sqlite.org/datatype3.html#storage_classes_and_datatypes)\n\n이 실습은 HTTP 계약의 전체 범위를 유지하려고 uint64 필드를 **부호 없는 정규 십진 문자열**로 저장합니다. 17은 `\"17\"`, 0은 `\"0\"`이고 `\"017\"`·`\"+17\"`·`\"17.0\"`은 허용하지 않습니다. 동일 숫자의 여러 표기가 서로 다른 키가 되는 일을 막습니다. ID·키·라운드·틱은 양수, 점수는0도 허용합니다.\n\n행 번호 id는 DB가 배정하는 INTEGER PRIMARY KEY로 따로 둡니다. 클라이언트가 정한 match_key와 저장소가 배정한 id는 생성 주체가 다릅니다. 요청을 다시 보낼 때 유지할 값은 match_key이고, 응답에서 확인할 값은 최초 저장 행의 id입니다. 라인 수는 uint32라 signed64에 들어가므로 INTEGER로 저장합니다.\n\n| 값 | C++ | 학습 DB |\n| --- | --- | --- |\n| 사용자·경기 키, 라운드·틱·점수 | uint64_t | 정규 십진 TEXT |\n| 라인 수 | uint32_t | 범위를 제한한 INTEGER |\n| 저장 행 번호 | 양수 uint64_t로 반환 | INTEGER PRIMARY KEY |\n| 승자 | draw/a/b | 참가자 ID TEXT 또는 NULL |",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "다른 표현을 고를 때",
+          "body": "서비스 계약 자체를 signed64 범위로 제한하면 INTEGER를 쓸 수 있습니다. 고정 길이 BLOB도 대안입니다. TEXT 선택에는 비용이 있습니다. 기본 문자열 정렬에서 \"10\"은 \"2\"보다 앞서며, SQL 산술에 곧바로 넘기면 전 범위의 정밀도를 유지하지 못할 수 있습니다. 이 실습은 동등 비교·저장·읽기 중심이며 숫자 집계를 구현할 때 표현을 다시 검토해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "열 선언과 값 제약을 함께 쓴다",
+      "body": "일반 SQLite 테이블에서 TEXT·INTEGER 선언은 **타입 친화도(affinity)**를 정합니다. 입력값을 저장할 때 어느 타입으로 변환하려 하는지에 관한 규칙이며, C++ 변수 선언처럼 모든 다른 타입을 자동 거절하는 뜻은 아닙니다. **저장 클래스**는 변환 후 실제 값이 가진 NULL·INTEGER·REAL·TEXT·BLOB 구분입니다. [타입 친화도](https://www.sqlite.org/datatype3.html#type_affinity)\n\n따라서 제약을 덧붙입니다. NOT NULL은 값 부재를 막고, CHECK는 값이 만족할 조건을 적습니다. players.id는 text인지 확인하고, 숫자 문자만 허용하며, 선행0을 금지하고, 최대20자리와 최댓값을 제한합니다. 20자리끼리는 자릿수가 같고 숫자만 있으므로 문자열 대소 비교로 상한을 판정할 수 있습니다.\n\nCHECK의 `AND`는 조건을 함께 만족시키는 논리 연산입니다. BETWEEN 1 AND 20은 양 끝을 포함한 길이 범위입니다. GLOB의 `*[^0-9]*`는 숫자가 아닌 문자가 하나라도 있는 문자열과 맞으므로 NOT GLOB으로 거절합니다. C++의 정규 십진 변환과 SQL의 저장 제약이 같은 표현을 요구하게 합니다.\n\n외부 입력의 원래 타입은 HTTP 해석 단계에서 검사합니다. SQLite가 숫자 입력을 TEXT로 변환한 다음 typeof 검사를 통과시킬 수 있으므로 DB 제약만으로 JSON의 원래 타입까지 알아낼 수는 없습니다.",
+      "codes": [
+        {
+          "label": "필수 식별자와 십진 표현의 제약",
+          "text": "CREATE TABLE IF NOT EXISTS players (\n  id TEXT PRIMARY KEY NOT NULL\n    CHECK(typeof(id)='text'\n      AND instr(id,char(0))=0\n      AND length(id) BETWEEN 1 AND 20\n      AND id NOT GLOB '*[^0-9]*'\n      AND (id='0' OR substr(id,1,1)<>'0')\n      AND (length(id)<20 OR id<='18446744073709551615')\n      AND id<>'0'),\n  display_name TEXT NOT NULL\n);",
+          "language": "sql"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "문자열 안의 NUL",
+          "body": "바인딩은 길이를 받으므로 문자열 중간의 NUL도 값으로 전달할 수 있습니다. SQLite의 일부 문자열 연산은 NUL 앞까지만 살핍니다. 식별자의 숨은 접미사를 허용하지 않도록 instr(id,char(0))=0을 별도로 검사합니다. 표시 문자열의 허용 문자 정책과 식별자의 정규 표현 정책은 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "아이콘 종류와 소유 관계를 나눈다",
+      "body": "ruby라는 아이콘 종류 하나를 여러 플레이어가 소유할 수 있고, 플레이어 하나도 여러 아이콘을 소유할 수 있습니다. 이런 관계를 **다대다 관계**라고 합니다. 가운데 player_icons를 두고 각 소유 조합을 한 행으로 표현합니다.\n\nPRIMARY KEY(player_id,icon_id)는 두 열의 **조합 전체**가 유일하다는 뜻입니다. (101,ruby)를 두 번 넣을 수 없지만 (101,default)와 (202,ruby)는 함께 있을 수 있습니다. 각 열을 따로 UNIQUE로 만들면 플레이어당 한 아이콘·아이콘당 한 소유자라는 잘못된 규칙이 됩니다.\n\nREFERENCES는 **외래 키**를 선언합니다. 소유 행의 player_id는 players.id를, icon_id는 icons.id를 참조합니다. 아이콘 종류가 없거나 사용자가 없는 소유 행을 막습니다. 종류 목록과 소유 목록의 의미도 구별할 수 있습니다.",
+      "codes": [
+        {
+          "label": "아이콘 종류",
+          "text": "CREATE TABLE IF NOT EXISTS icons (\n  id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),\n  label TEXT NOT NULL\n);",
+          "language": "sql"
+        },
+        {
+          "label": "소유 관계의 복합 키와 외래 키",
+          "text": "CREATE TABLE IF NOT EXISTS player_icons (\n  player_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,\n  icon_id TEXT NOT NULL REFERENCES icons(id),\n  PRIMARY KEY(player_id,icon_id)\n);",
+          "language": "sql"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "CREATE TABLE IF NOT EXISTS player_icons",
+        "invariant": "소유권은 사용자와 아이콘의 조합으로 중복을 막는다.",
+        "mayDiffer": "현재 실제 카탈로그는 C++ 자료이므로 icons SQL 테이블은 없다. 실제 icon_id의 유효성은 카탈로그 조회로 검사한다."
+      }
+    },
+    {
+      "title": "참조가 살아 있어야 하는 범위를 정한다",
+      "body": "외래 키 선언을 썼다면 **그 연결에서 검사를 켜야 합니다**. SqliteResults는 DB를 연 직후 foreign_keys=ON을 설정하고 조회 결과가1인지 확인합니다. 같은 파일을 여는 별도 연결에도 각각 설정해야 합니다. [SQLite 외래 키 활성화](https://www.sqlite.org/foreignkeys.html#fk_enable)\n\n삭제 동작도 관계마다 다릅니다. player_icons의 ON DELETE CASCADE는 사용자가 삭제될 때 그 사용자의 소유 행도 삭제합니다. matches의 참가자 참조에는 이 옵션이 없습니다. 이미 경기 기록이 참조하는 사용자를 삭제하려 하면 기본 즉시 외래 키 검사에서 거절됩니다. 소유 행은 사용자에 종속되고, 경기 기록은 참가자를 보존해야 한다는 실습 정책입니다.\n\n이 차이를 모르고 모든 관계에 CASCADE를 붙이면 사용자 삭제가 경기 기록 삭제로 번질 수 있습니다. 반대로 어떤 삭제도 허용하지 않으면 임시·미사용 계정을 정리하기 어렵습니다. 서비스가 보관해야 할 역사와 삭제 정책을 먼저 정한 뒤 관계별 동작을 선택합니다.",
+      "codes": [
+        {
+          "label": "연결마다 검사 활성화 후 스키마 생성",
+          "text": "explicit SqliteResults(const std::string& path) : db_(path) {\n        db_.exec(\"PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;\");\n        {\n            Statement enabled(db_.get(), \"PRAGMA foreign_keys\");\n            if (!enabled.next() || enabled.integer_column(0) != 1)\n                throw std::runtime_error(\"foreign keys unavailable\");\n        }\n        db_.exec(kStudySchema);\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "PRAGMA foreign_keys = ON;",
+        "invariant": "외래 키 검사 설정은 연결을 여는 경로에서 명시한다.",
+        "mayDiffer": "실제 서비스는 WAL과 보안·마이그레이션 설정도 적용한다. 학습 파일은 SQLite 기본 저널 방식을 사용한다."
+      }
+    },
+    {
+      "title": "경기 키와 승자의 관계를 선언한다",
+      "body": "matches에는 두 종류의 키가 있습니다. id는 저장 행을 가리키는 기본 키이고, match_key는 호출자가 같은 경기 요청을 식별하도록 보내는 유일 키입니다. UNIQUE는 중복 값을 막지만 필수 입력까지 뜻하지는 않으므로 match_key에는 NOT NULL도 함께 둡니다.\n\nplayer_a와 player_b의 외래 키는 각각 “존재하는 사용자”라는 조건을 보장합니다. 여기에 CHECK(player_a<>player_b)를 더해 자기 자신과의 경기를 막습니다. winner의 외래 키만으로는 충분하지 않습니다. 사용자303이 존재해도 101과202의 경기 승자가 될 수는 없습니다. 따라서 승자는 NULL이거나 두 참가자 중 하나라는 행 내부 관계를 CHECK로 적습니다.\n\n키·참조·행 안의 관계는 다른 질문에 답합니다. 하나의 제약에 모든 검증을 맡기지 않고 무엇을 보장하는지 읽어 봅시다.",
+      "codes": [
+        {
+          "label": "경기의 참가자 참조",
+          "text": "  player_a TEXT NOT NULL REFERENCES players(id),\n  player_b TEXT NOT NULL REFERENCES players(id),\n  winner TEXT REFERENCES players(id),",
+          "language": "sql"
+        },
+        {
+          "label": "라인 범위와 참가자·승자 관계",
+          "text": "  lines_a INTEGER NOT NULL\n    CHECK(typeof(lines_a)='integer'\n      AND lines_a BETWEEN 0 AND 4294967295),\n  lines_b INTEGER NOT NULL\n    CHECK(typeof(lines_b)='integer'\n      AND lines_b BETWEEN 0 AND 4294967295),\n  CHECK(player_a<>player_b),\n  CHECK(winner IS NULL OR winner=player_a OR winner=player_b)\n);",
+          "language": "sql"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "INTEGER PRIMARY KEY의 자동 배정",
+          "body": "일반 SQLite rowid 테이블에서 정확한 INTEGER PRIMARY KEY 선언은 rowid와 연결됩니다. INSERT에서 id를 생략하면 엔진이 번호를 배정합니다. 이 실습은 행을 삭제하지 않습니다. 이 번호가 모든 삭제·복구 뒤에도 영원히 재사용되지 않는 전역 식별자라고 가정하지 않습니다. 요청의 정체성은 별도 match_key가 담당합니다. [테이블 제약](https://www.sqlite.org/lang_createtable.html#the_primary_key)"
+        }
+      ]
+    },
+    {
+      "title": "NULL과 오류 입력에 다른 의미를 준다",
+      "body": "경기가 끝났지만 승자가 없을 때 winner에는 NULL을 저장합니다. 이는 “이 경기의 승자 값 없음”이라는 도메인 의미입니다. 사용자 ID0이나 빈 문자열을 가상의 사용자로 등록하지 않아도 됩니다.\n\nSQL의 NULL은 비교와도 관계가 있습니다. winner=NULL이라는 등호 비교는 참이 되지 않으므로 부재 검사는 IS NULL을 씁니다. 이 스키마의 CHECK(winner IS NULL OR ...)는 무승부를 명시적으로 허용합니다. CHECK는 결과가0일 때 위반이며 NULL 평가만으로는 거절되지 않으므로, 필수 값의 부재는 NOT NULL로 따로 막습니다. [CHECK·NOT NULL 계약](https://www.sqlite.org/lang_createtable.html#check_constraints)\n\nC++ MatchRecord는 draw/a/b를 쓰고, DB 쓰기에서는 draw를 bind_null로 바꿉니다. 읽기에서는 column_type이 NULL인지 먼저 확인한 뒤 draw로 복구합니다. HTTP의 학습 wire는 여전히 winner:0/1/2이며, SQL의 NULL 표현을 HTTP 형식으로 그대로 노출하지 않습니다.\n\n실제 서비스의 HTTP 형식은 winner에 참가자 ID 또는 명시적인 JSON null을 받습니다. 숫자 해석 실패도 빈 optional로 반환한다면 null과 오류가 같은 값으로 합쳐집니다. 그래서 필드의 존재와 JSON null 여부를 먼저 구별하고, null이 아닌 값은 정수로 해석됐을 때만 받습니다. 필드 누락·문자열·소수·불리언·범위 초과를 무승부로 저장하면 잘못된 경기 내용으로 요청 키가 확정됩니다.",
+      "codes": [
+        {
+          "label": "도메인 승자에서 SQL 값으로",
+          "text": "if (record.winner == study_net::MatchRecord::draw)\n                q.null(5);\n            else\n                q.text(5, std::to_string(record.winner == study_net::MatchRecord::a\n                                             ? record.player_a\n                                             : record.player_b));",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/api_server.cpp",
+        "symbol": "const auto match_input",
+        "invariant": "명시적 값 부재와 해석 실패를 구별한 뒤 저장한다.",
+        "mayDiffer": "학습 HTTP는 승자 위치0/1/2, 실제 HTTP는 참가자 ID/null을 쓴다. DB 안의 의미는 모두 승자 또는 무승부다."
+      }
+    },
+    {
+      "title": "연결과 SQL 문장의 소유자를 만든다",
+      "body": "C API의 sqlite3*는 열린 연결을, sqlite3_stmt*는 준비된 SQL 문장을 가리킵니다. 연결은 오래 살아 있고 문장은 한 작업 동안만 사용합니다. C++의 **RAII**로 이 두 수명을 표현합니다. SqliteDb는 연결을 소유하고 Statement는 문장을 소유하며, Statement가 빌린 연결은 문장보다 오래 살아야 합니다.\n\nopen_v2가 실패해도 오류 정보를 가진 연결 포인터를 돌려줄 수 있습니다. 반환 코드를 검사하기 전에 raw를 unique_ptr 보호자에 넣으면 예외를 던지는 경로에서도 닫힙니다. 성공한 뒤에는 보호자의 소유권을 멤버로 옮깁니다. 복사와 이동을 금지해 다른 객체가 빌린 주소의 수명을 단순하게 유지합니다.\n\nStatement도 prepare_v2로 받은 포인터를 즉시 보호합니다. 스코프를 빠져나가면 finalize가 실행됩니다. 이로써 SQL을 해석·바인딩·실행하다 예외가 나도 문장 핸들이 남지 않습니다. 연결을 가진 객체는 HTTP 서버보다 먼저 만들고, 서버가 핸들러 사용을 끝낸 뒤 파괴되게 둡니다.",
+      "codes": [
+        {
+          "label": "오류가 나도 열린 핸들을 정리",
+          "text": "        sqlite3* raw = nullptr;\n        const int rc = sqlite3_open_v2(\n            path.c_str(), &raw,\n            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);\n\n        // Guard the handle immediately, even on failure: SQLite may return a\n        // handle carrying an error message that still has to be closed.\n        std::unique_ptr<sqlite3, Close> guard(raw);\n\n        if (rc != SQLITE_OK) {\n            const char* message =\n                raw != nullptr ? sqlite3_errmsg(raw) : \"unknown error\";\n            throw std::runtime_error(std::string(\"SQLite open failed: \") + message);\n        }\n        if (raw == nullptr) {\n            throw std::runtime_error(\"SQLite open failed: no handle\");\n        }\n\n        handle_ = std::move(guard);\n\n        if (sqlite3_busy_timeout(handle_.get(), 1000) != SQLITE_OK) {\n            throw std::runtime_error(\"SQLite busy timeout setup failed\");\n        }",
+          "language": "cpp"
+        },
+        {
+          "label": "문장 준비와 소유권 이전",
+          "text": "        sqlite3_stmt* raw = nullptr;\n        const int rc = sqlite3_prepare_v2(db, sql, -1, &raw, nullptr);\n\n        // Guard before any throw so a partially prepared handle is finalized.\n        std::unique_ptr<sqlite3_stmt, Finalize> guard(raw);\n\n        if (rc != SQLITE_OK) {\n            throw std::runtime_error(\"SQLite prepare failed\");\n        }\n        if (raw == nullptr) {\n            throw std::runtime_error(\"SQLite prepare produced no statement\");\n        }\n\n        stmt_ = std::move(guard);",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "struct StmtGuard",
+        "invariant": "핸들은 성공·실패 경로 모두에서 소유자에 의해 정리한다.",
+        "mayDiffer": "실제 StmtGuard는 작은 구조체이고 학습은 unique_ptr와 별도 Statement 클래스로 바인딩·읽기 검사까지 묶는다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "자원 정리와 변경 취소",
+          "body": "finalize는 SQL 문장 자원 정리입니다. 여러 문장을 하나의 트랜잭션으로 실행하다 실패했을 때 이미 바뀐 내용을 취소하는 ROLLBACK과는 다른 책임입니다. 실습 초기 자료를 넣는 seed_demo는 BEGIN/COMMIT과 실패 시 ROLLBACK을 별도로 둡니다."
+        }
+      ]
+    },
+    {
+      "title": "SQL 구조와 값을 분리해서 전달한다",
+      "body": "이름에 작은따옴표가 들어 있으면 어떻게 저장할까요? SQL 문자열에 이름을 이어 붙이면 따옴표가 값의 일부인지 SQL 문법인지 혼동됩니다. **준비된 문장**은 SQL 구조를 먼저 해석하고, ?1·?2 같은 매개변수 자리에 값을 따로 바인딩합니다.\n\nadd_player는 INSERT 구조를 고정하고 ID 문자열과 표시 이름을 text로 전달합니다. 이름이 `'); DROP TABLE matches; --`여도 문장을 하나 더 실행하는 명령으로 해석되지 않고 이름 값으로 들어갑니다. 바인딩은 문법과 값을 분리하며, ID가 양수인지 같은 도메인 조건은 별도로 검사합니다.\n\nSQLITE_TRANSIENT는 SQLite가 문자열 바이트를 복사하도록 합니다. std::to_string(id)가 만든 임시 문자열은 함수 호출 뒤 사라지지만 바인딩된 값은 문장을 실행할 때까지 유지됩니다. bind_text64에 길이를 직접 전달하므로 문자열 안의 NUL도 잘리지 않습니다. 그 값을 해당 열에 허용할지는 스키마가 판단합니다.",
+      "codes": [
+        {
+          "label": "사용자 행 삽입",
+          "text": "void add_player(std::uint64_t id, const std::string& name) {\n        std::lock_guard<std::mutex> lock(mutex_);\n        Statement q(db_.get(), \"INSERT INTO players(id,display_name) VALUES(?1,?2)\");\n        q.text(1, std::to_string(id));\n        q.text(2, name);\n        q.done();\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "문자열 바이트의 바인딩 수명",
+          "text": "    void text(int index, const std::string& value) {\n        const int rc = sqlite3_bind_text64(\n            stmt_.get(), index, value.data(),\n            static_cast<sqlite3_uint64>(value.size()), SQLITE_TRANSIENT,\n            SQLITE_UTF8);\n        if (rc != SQLITE_OK) {\n            throw std::runtime_error(\"SQLite bind text failed\");\n        }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "sqlite3_bind_text",
+        "invariant": "데이터를 SQL 구조와 분리하고 바인딩하는 문자열 수명을 맞춘다.",
+        "mayDiffer": "보조 클래스 이름과 오류 전달 방식은 달라도 바인딩·문장 수명 계약은 같다."
+      }
+    },
+    {
+      "title": "관계 하나를 삽입하고 목록으로 읽는다",
+      "body": "grant_icon은 (player_id,icon_id) 한 쌍을 넣습니다. ON CONFLICT(player_id,icon_id) DO NOTHING은 **그 복합 키의 중복**일 때만 새 행을 만들지 않는 정책입니다. 존재하지 않는 사용자·아이콘 때문에 외래 키가 실패하는 경우까지 성공으로 바꾸지 않습니다.\n\nq.done()은 sqlite3_step이 DONE인지 확인합니다. 실제로 새 소유 행이 생겼으면 sqlite3_changes는1이고, 중복으로 아무 변화가 없으면0입니다. 연결의 마지막 변경 수를 읽는 동안 같은 연결을 다른 요청이 사용하지 않도록 동일 mutex를 유지합니다.\n\n목록 조회는 WHERE player_id=?1로 한 사용자의 소유 행을 고르고 ORDER BY icon_id로 순서를 정합니다. next()는 ROW일 때 true, DONE일 때 false를 반환하고 오류면 예외를 던집니다. 조회 실패와 소유 행0개를 같은 빈 목록으로 합치지 않습니다. 각 문자열을 벡터로 복사한 뒤 잠금을 해제하므로 호출자는 DB 내부 메모리 수명을 신경 쓰지 않고 결과를 사용할 수 있습니다.",
+      "codes": [
+        {
+          "label": "중복 소유의 처리와 목록 조회",
+          "text": "bool grant_icon(std::uint64_t player, const std::string& icon) {\n        std::lock_guard<std::mutex> lock(mutex_);\n        Statement q(db_.get(), \"INSERT INTO player_icons(player_id,icon_id) VALUES(?1,?2) \"\n                              \"ON CONFLICT(player_id,icon_id) DO NOTHING\");\n        q.text(1, std::to_string(player));\n        q.text(2, icon);\n        q.done();\n        return sqlite3_changes(db_.get()) != 0;\n    }\n    std::vector<std::string> icons(std::uint64_t player) {\n        std::lock_guard<std::mutex> lock(mutex_);\n        Statement q(db_.get(),\n                    \"SELECT icon_id FROM player_icons WHERE player_id=?1 ORDER BY icon_id\");\n        q.text(1, std::to_string(player));\n        std::vector<std::string> out;\n        while (q.next())\n            out.push_back(q.text_column(0));\n        return out;\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "경기 쓰기의 입력과 출력 계약을 지킨다",
+      "body": "put은 기본 경기 필드를 검증하고 mutex를 잡습니다. 같은 match_key가 있으면 저장된 내용 전체를 비교합니다. 같으면 최초 row를 반환하고, 다르면 conflict로 거절합니다. 새 경기면 두 사용자가 존재하는지 확인한 뒤 INSERT 하나로 기록합니다.\n\nINSERT의 열 순서와 ?1부터 ?10까지의 바인딩 순서는 반드시 맞아야 합니다. 이 코드는 키·라운드·두 참가자·승자·틱·두 점수·두 라인 수를 그 순서로 전달합니다. score가 문자열이고 lines가 정수인 이유는 각 타입의 범위 선택에서 정했습니다.\n\nq.done()이 성공한 뒤 연결의 last_insert_rowid를 읽어 영수증을 구성합니다. 이 실습에는 트리거가 없고 잠금 구간 안에 다른 INSERT가 끼어들지 않으므로 방금 넣은 경기 행을 가리킵니다. SQLite의 자동 커밋 상태에서 단일 INSERT가 완료된 뒤 확인 응답을 만들며, 파일 잠금·저장 오류는 storage_error로 반환합니다.",
+      "codes": [
+        {
+          "label": "동일 키 확인과 새 경기 삽입",
+          "text": "SqlResult put(const study_net::MatchRecord& record) {\n        study_net::MatchSubmission validator(0);\n        if (!validator.prepare(record))\n            return {SqlStatus::invalid, {}};\n        std::lock_guard<std::mutex> lock(mutex_);\n        try {\n            if (const auto found = read_match(record.key)) {\n                if (found->record != record)\n                    return {SqlStatus::conflict, {}};\n                return {SqlStatus::accepted,\n                        {record.key, found->row, record.player_a, record.player_b}};\n            }\n            if (!has_player(record.player_a) || !has_player(record.player_b))\n                return {SqlStatus::invalid, {}};\n            Statement q(db_.get(), \"INSERT INTO matches(match_key,round,player_a,player_b,winner,ticks,score_a,score_b,lines_a,lines_b) \"\n                                  \"VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)\");\n            q.text(1, std::to_string(record.key));\n            q.text(2, std::to_string(record.round));\n            q.text(3, std::to_string(record.player_a));\n            q.text(4, std::to_string(record.player_b));\n            if (record.winner == study_net::MatchRecord::draw)\n                q.null(5);\n            else\n                q.text(5, std::to_string(record.winner == study_net::MatchRecord::a\n                                             ? record.player_a\n                                             : record.player_b));\n            q.text(6, std::to_string(record.ticks));\n            q.text(7, std::to_string(record.score_a));\n            q.text(8, std::to_string(record.score_b));\n            q.integer(9, record.lines_a);\n            q.integer(10, record.lines_b);\n            q.done();\n            const auto row = sqlite3_last_insert_rowid(db_.get());\n            if (row <= 0)\n                throw std::runtime_error(\"invalid row identity\");\n            return {SqlStatus::accepted,\n                    {record.key, static_cast<std::uint64_t>(row), record.player_a, record.player_b}};\n        } catch (const std::exception&) {\n            // A SQL/storage error is not an empty result or a confirmed receipt.\n            return {SqlStatus::storage_error, {}};\n        }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "mutex와 UNIQUE가 보호하는 범위",
+          "body": "mutex는 같은 SqliteResults 객체를 사용하는 스레드를 직렬화합니다. 별도 프로세스나 별도 연결을 보호하는 잠금은 아닙니다. 다른 연결이 조회와 삽입 사이에 같은 키를 넣으면 UNIQUE가 중복 행을 막고 이번 호출은 storage_error가 될 수 있습니다. 같은 요청을 다시 보내 저장된 행을 확인할 수 있지만 모든 연결의 첫 호출이 곧바로 accepted를 받는다고 약속하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "읽기에서도 표현과 관계를 확인한다",
+      "body": "읽는 경로는 쓰기의 역변환입니다. SQL TEXT를 uint64로 바꿀 때 from_chars의 오류와 입력 끝까지 소비했는지를 확인합니다. 다시 std::to_string으로 만든 문자열과 같은지도 검사해 정규 표현을 요구합니다.\n\nread_match는 SELECT가 DONE이면 해당 키 없음으로 반환하고, ROW면 열 타입을 확인하며 경기 객체를 구성합니다. winner가 NULL이면 draw, 참가자A의 ID면 a, 참가자B의 ID면 b입니다. 다른 사용자 ID가 나오면 저장 자료의 관계 오류입니다. 라인 수는 실제 INTEGER인지 확인하고 uint32 상한을 검사한 뒤 변환합니다.\n\n“행 없음”과 “행을 읽지 못함”은 호출자의 다음 판단이 다릅니다. 없음은 신규 삽입을 시도할 근거지만, 읽기 오류를 없음으로 숨기면 불확실한 상태에서 쓰기를 진행하게 됩니다. lookup은 행 부재만 nullopt로 표현하고 SQL·변환 오류는 예외로 남깁니다.",
+      "codes": [
+        {
+          "label": "정규 십진 문자열을 uint64로 복원",
+          "text": "static std::uint64_t decimal(const std::string& text) {\n        std::uint64_t value = 0;\n        const auto result = std::from_chars(text.data(), text.data() + text.size(), value);\n        if (result.ec != std::errc{} || result.ptr != text.data() + text.size()\n            || std::to_string(value) != text)\n            throw std::runtime_error(\"invalid unsigned decimal\");\n        return value;\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "승자 관계 복원",
+          "text": "if (q.is_null(4))\n            r.winner = study_net::MatchRecord::draw;\n        else {\n            const auto winner = decimal(q.text_column(4));\n            if (winner != r.player_a && winner != r.player_b)\n                throw std::runtime_error(\"invalid winner relation\");\n            r.winner = winner == r.player_a ? study_net::MatchRecord::a : study_net::MatchRecord::b;\n        }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "새 저장소를 HTTP 서비스에 연결한다",
+      "body": "study_meta_db는 포트와 DB 경로를 인자로 받습니다. 저장소를 열고 실습 자료를 채운 다음에 HTTP 수신을 시작합니다. DB를 열 수 없다면 포트를 열기 전에 실패하므로 “서버는 떠 있지만 초기화된 저장소가 없다”는 상태를 만들지 않습니다.\n\nseed_demo는 선수101·202와 default·ruby 종류, 기본 아이콘 소유를 넣습니다. 같은 파일을 다시 열 때 이미 있는 키는 유지합니다. 이는 실습 자료의 준비 단계입니다. 계정 생성이나 아이콘 구매를 위한 외부 API는 추가하지 않습니다.\n\n핸들러는 parse_record 결과를 store.put에 전달하고 accepted는200, 같은 키의 내용 충돌은409, 잘못된 참가자는400, 저장 실패는503으로 대응합니다. 호출자 meta_submit과 wire는 그대로 사용합니다. 같은 HTTP 계약 뒤의 메모리 저장 구현을 영속 구현으로 바꾸어도 호출자에게 SQL이 들어갈 필요가 없습니다.",
+      "codes": [
+        {
+          "label": "DB 준비가 수신보다 먼저",
+          "text": "    study_meta::SqliteResults store(argv[2]);\n    store.seed_demo();",
+          "language": "cpp"
+        },
+        {
+          "label": "저장 결과를 HTTP 응답으로 변환",
+          "text": "        const auto result=store.put(*record);\n        using Status=study_meta::SqlStatus;\n        if(result.status==Status::accepted) {\n            res.set_content(study_meta::receipt_json(result.receipt).dump(),\"application/json\");\n        }else {\n            res.status=result.status==Status::conflict ? 409 : result.status==Status::storage_error ? 503 : 400;\n            res.set_content(\"{\\\"error\\\":\\\"not_accepted\\\"}\",\"application/json\");\n        }\n    });",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "meta::ApiServer api",
+        "invariant": "저장 객체 초기화를 끝낸 뒤 API 수신을 시작한다.",
+        "mayDiffer": "실제 서비스의 경로·인증·오류 코드는 학습 API와 다르다. 학습은127.0.0.1 고정의 로컬 실습용이다."
+      }
+    },
+    {
+      "title": "C와 C++를 링크하고 재시작해 본다",
+      "body": "SQLite 구현은 third_party/sqlite3.c입니다. CMake 프로젝트의 언어를 C와 CXX로 선언하고, study_sqlite 정적 라이브러리를 C11로 컴파일해 새 서비스에 링크합니다. 래퍼와 HTTP 코드는 C++17 계약을 사용합니다. 외부 SQLite 실행 프로그램을 띄우는 구조가 아닙니다.\n\n저장소 루트에서 아래 명령을 실행합니다. 서버 터미널을 켜 두고 다른 터미널에서 키17을 두 번 제출하세요. 새 DB라면 둘 다 row=1을 받습니다. 서버를 종료하고 **같은 DB 경로**로 다시 실행한 뒤 키17을 다시 제출하면 같은 row를 받습니다. 키18은 새 행이 됩니다.\n\nDB 경로가 상대 경로라면 실행한 현재 폴더를 기준으로 해석됩니다. 다른 폴더에서 실행해 새 파일을 열면 기록이 사라진 것처럼 보일 수 있습니다. 재시작 실험에서는 같은 작업 폴더나 같은 절대 경로를 사용합니다. 창을 쓰지 않는 새 타깃이며, Windows 여러 구성 생성기에서는 실행 파일의 구성 하위 폴더와 --config 옵션을 맞춥니다.",
+      "codes": [
+        {
+          "label": "SQLite 라이브러리와 새 서비스",
+          "text": "add_library(study_sqlite STATIC ${STUDY_VENDOR_DIR}/sqlite3.c)\nset_target_properties(study_sqlite PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)\ntarget_include_directories(study_sqlite SYSTEM PUBLIC ${STUDY_VENDOR_DIR})\ntarget_link_libraries(study_sqlite PUBLIC Threads::Threads ${CMAKE_DL_LIBS})\nadd_executable(study_meta_db meta/database_service.cpp)\ntarget_link_libraries(study_meta_db PRIVATE study_meta_http study_sqlite)",
+          "language": "cmake"
+        },
+        {
+          "label": "빌드와 계약 검사",
+          "text": "cmake -S docs/learn/checkpoints/110-tables-keys -B out/study-110 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-110 --target study_meta_db meta_submit sqlite_tables_contract -j2\nctest --test-dir out/study-110 -R \"^sqlite_tables_contract$\" --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "서버 터미널: 재시작할 때도 같은 파일",
+          "text": "out/study-110/study_meta_db 18081 out/study-110/lesson.db",
+          "language": "sh"
+        },
+        {
+          "label": "호출자 터미널",
+          "text": "out/study-110/meta_submit 18081 17\nout/study-110/meta_submit 18081 17\nout/study-110/meta_submit 18081 18",
+          "language": "sh"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "실습 DB와 서비스 DB의 구분",
+          "body": "이 실습에는 새 파일 경로를 사용합니다. 실제 계정 DB와 스키마·ID 표현이 다릅니다. CREATE TABLE IF NOT EXISTS는 테이블이 있으면 건너뛰며 기존 열을 새 정의로 고치지 않습니다. 실제 DB 이전은 마이그레이션 정책을 따라야 합니다. 저장 성공 뒤 프로세스를 다시 실행하는 실험과 전원 장애 복구 검증도 범위가 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "제약을 깨뜨리는 입력으로 설계를 확인한다",
+      "body": "정상 경기 하나를 넣는 것만으로는 스키마를 이해했는지 알기 어렵습니다. 아래 입력이 어느 경계에서 거절되어야 할지 먼저 예상하고 sqlite_tables_contract의 해당 호출을 찾아보세요.\n\n| 입력·변화 | 예상 |\n| --- | --- |\n| 같은 표시 이름을 가진 새 ID303 | 허용: 이름은 키가 아님 |\n| 101의 이름 변경 후 경기 조회 | 참가자 ID101 유지 |\n| (101,ruby)를 두 번 부여 | 소유 행 하나 |\n| 존재하지 않는 아이콘 부여 | 외래 키 위반 |\n| 101·202 경기의 승자를303으로 변경 | 참가자 관계 CHECK 위반 |\n| 키를 NULL 또는 선행0 있는 문자열로 변경 | 필수 값·정규 표현 제약 위반 |\n| 점수에 UINT64_MAX 저장 후 재열기 | 전체 값 보존 |\n| SQL처럼 보이는 이름을 바인딩 | 이름 값으로 저장 |\n| 같은 경기 키로 서로 다른 내용 제출 | conflict, 원래 행 보존 |\n\n원래 메모리 서비스 타깃 study_meta는 비교를 위해 남아 있습니다. 실행 이름을 구별해 메모리 재시작 실험과 파일 재시작 실험의 결과를 설명할 수 있어야 합니다. 테스트는 자신이 새로 만든 임시 DB만 정리하며 기존 경로의 파일을 임의로 삭제하지 않습니다."
+    },
+    {
+      "title": "현재 프로젝트에서 같은 책임을 찾는다",
+      "body": "현재 meta/database.cpp의 kSchema에서 players·player_icons·matches를 찾아 각 행의 의미와 키를 읽습니다. 실제 프로젝트는 사용자를 INTEGER ID로 식별하고, 경기 재시도에는 문자열 UUID를 사용합니다. 점수·라인·시간은 API에서 범위를 제한한 정수입니다. 학습의 uint64 TEXT 선택을 실제 스키마 전체에 그대로 적용할 이유는 없습니다.\n\n아이콘 카탈로그도 비교할 지점입니다. 학습은 아이콘 종류를 테이블에 넣어 외래 키를 보여 주지만, 실제 서비스는 C++ 카탈로그로 존재·가격을 검사합니다. 실제 matches의 외래 키는 사용자의 존재를 검사하고 참가자 간 관계와 통계 범위는 API가 검사합니다. 제약이 DB에 있는지 API에 있는지를 정확히 찾아야 직접 DB를 호출할 때 필요한 전제를 알 수 있습니다.\n\n유지할 핵심은 안정적인 식별자, 한 행의 의미, 소유 관계의 중복 방지, 명시적인 부재, 타입 변환, 저장 오류와 부재의 구별입니다. 카탈로그 저장 위치·ID 표현·표시 이름·콘텐츠 수는 바뀔 수 있습니다. 아래 전체 파일은 방금 만든 코드의 연결을 확인하는 데 사용하고, 옆의 현재 소스에서는 더 큰 서비스의 같은 책임을 찾아보세요.",
+      "codes": [
+        {
+          "label": "meta/schema.h",
+          "language": "cpp",
+          "file": "checkpoints/110-tables-keys/meta/schema.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/sqlite_handle.h",
+          "language": "cpp",
+          "file": "checkpoints/110-tables-keys/meta/sqlite_handle.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/sqlite_results.h",
+          "language": "cpp",
+          "file": "checkpoints/110-tables-keys/meta/sqlite_results.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/database_service.cpp",
+          "language": "cpp",
+          "file": "checkpoints/110-tables-keys/meta/database_service.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/sqlite_tables_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/110-tables-keys/tests/sqlite_tables_contract.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "std::optional<MatchInsertResult>",
+        "invariant": "저장된 경기의 정체성과 내용을 보존하고 중복 반영을 막는다.",
+        "mayDiffer": "실제 saveMatch는 RP/BP/XP와 이력까지 한 트랜잭션으로 갱신한다. 학습 저장은 경기 행과 실습 소유 관계를 다룬다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "110-1",
+      "question": "player_icons의 키가 (player_id,icon_id)입니다. 이미 (101,ruby)가 있을 때 허용할 새 관계는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(101,ruby) 한 행 더"
+        },
+        {
+          "id": "b",
+          "text": "(101,default)와 (202,ruby)"
+        },
+        {
+          "id": "c",
+          "text": "player_id가 같으면 모두 거절"
+        },
+        {
+          "id": "d",
+          "text": "icon_id가 같으면 모두 거절"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "(101,default)와 (202,ruby)",
+      "explanation": "복합 키는 조합 전체의 중복을 막습니다. 각 열을 별도 UNIQUE로 만들지 않았으므로 한 사용자가 여러 아이콘을, 여러 사용자가 같은 종류를 소유할 수 있습니다. 외래 키 대상은 존재해야 합니다."
+    },
+    {
+      "id": "110-2",
+      "question": "실제 HTTP API가 winner:\"101\"을 받았고 정수 해석은 실패했습니다. 올바른 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "빈 optional이므로 무승부 저장"
+        },
+        {
+          "id": "b",
+          "text": "문자열을 무조건 정수로 변환"
+        },
+        {
+          "id": "c",
+          "text": "winner 누락과 모두 같은 정상값 처리"
+        },
+        {
+          "id": "d",
+          "text": "400으로 거절하고 경기 키를 저장하지 않음"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "400으로 거절하고 경기 키를 저장하지 않음",
+      "explanation": "명시적인 JSON null만 무승부입니다. 해석 실패를 null로 바꾸면 잘못된 내용으로 경기 키가 확정됩니다. 거절된 요청은 같은 키로 올바른 내용을 다시 제출할 수 있어야 합니다."
+    },
+    {
+      "id": "110-3",
+      "question": "학습 DB가 uint64 점수를 정규 십진 TEXT로 저장하는 직접적인 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SQLite INTEGER의 signed64 범위를 넘는 값도 보존하려고"
+        },
+        {
+          "id": "b",
+          "text": "TEXT가 항상 숫자 정렬에 더 빠르므로"
+        },
+        {
+          "id": "c",
+          "text": "문자열에는 중복이 생기지 않으므로"
+        },
+        {
+          "id": "d",
+          "text": "SQL의 모든 정수가32비트이므로"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "SQLite INTEGER의 signed64 범위를 넘는 값도 보존하려고",
+      "explanation": "uint64 최댓값은 signed64 최대를 넘습니다. 학습은 wire의 전체 범위를 보존하려고 TEXT를 택했습니다. 기본 문자열 정렬·산술이 uint64 숫자 연산과 같아지는 것은 아닙니다."
+    },
+    {
+      "id": "110-4",
+      "question": "101·202 경기의 winner를 존재하는 사용자303으로 바꿉니다. 외래 키만으로 왜 충분하지 않을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "외래 키는 NULL만 검사하므로"
+        },
+        {
+          "id": "b",
+          "text": "외래 키는 항상 꺼져 있으므로"
+        },
+        {
+          "id": "c",
+          "text": "계정의 존재와 이번 경기 참가 여부는 다른 조건이므로"
+        },
+        {
+          "id": "d",
+          "text": "기본 키가 있으면 외래 키가 무시되므로"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "계정의 존재와 이번 경기 참가 여부는 다른 조건이므로",
+      "explanation": "활성화된 외래 키는303이 players에 존재함을 확인할 수 있습니다. 참가자A/B 중 하나라는 관계는 별도 CHECK 또는 API 검사가 필요합니다. 학습 스키마는 CHECK로도 막습니다."
+    },
+    {
+      "id": "110-5",
+      "question": "동일 DB 경로로 서비스를 재시작한 뒤 같은 키와 같은 경기 내용을 제출했습니다. 기대할 응답은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "키는 같지만 새 행을 만들었다는 응답"
+        },
+        {
+          "id": "b",
+          "text": "저장된 최초 행 번호"
+        },
+        {
+          "id": "c",
+          "text": "서버 메모리가 비어 있으므로 무조건404"
+        },
+        {
+          "id": "d",
+          "text": "계정 이름이 바뀌었으므로 항상 충돌"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "저장된 최초 행 번호",
+      "explanation": "경기 키·내용·행 번호가 파일에 저장되어 다시 조회됩니다. 표시 이름은 참가자 ID와 분리되어 있으므로 이름 변경만으로 경기의 정체성이 달라지지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "네 테이블 각각의 행 의미와 키를 말로 적습니다.",
+      "선수의 이름을 바꾸어도 경기·소유 참조가 유지되는 이유를 설명합니다.",
+      "같은 키를 제출하고 서비스를 재시작한 뒤 응답 행 번호를 비교합니다.",
+      "UINT64_MAX·NULL·중복 소유·존재하지 않는 참가자를 어느 경계에서 검사하는지 찾습니다."
+    ],
+    "failureChecks": [
+      "잘못된 타입을 무승부나 행 없음으로 바꾸는 경로가 없는지 확인합니다.",
+      "별도 연결에서도 외래 키 검사를 활성화했는지 확인합니다.",
+      "SQL처럼 보이는 표시 이름이 문자열 값으로 저장되는지 검사합니다."
+    ],
+    "expected": "키·참조·NULL·타입 범위를 설명하고, 프로세스 재시작 뒤에도 같은 경기 결과를 확인할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek RAII 초안 직접 검토·관계 스키마·경계값·실제 프로세스 재시작 대조",
+    "draftJob": "out/learning-jobs/110-sqlite-events.jsonl",
+    "corrections": [
+      "선언 타입과 실제 저장 클래스 주석 구분",
+      "uint64 전체 범위와 NUL 포함 식별자 제약",
+      "실제 winner 해석 실패를 명시적 null과 구별",
+      "Part10 복합 PK 인덱스 중복 설명·카탈로그 책임·nullable 키·입력 검증 발췌 교정",
+      "DeepSeek 저장 클래스 서식 정리: C++ 토큰·문자열·주석 동일성 검사 후 반영"
+    ]
+  },
+  "validation": [
+    "누적109 파일 보존; SCRIPTED/SDL 신규 SQLite 타깃·관계 제약·재열기·16스레드 검사",
+    "실제 HTTP 두 프로세스·서비스 재시작·12동시요청·uint64·NULL·외부 파일 쓰기 잠금503/해제후200·잘못된 DB경로 검사",
+    "C++ 래퍼/저장 어댑터 ASan/UBSan; SQLite 엔진은 동일 C11 Release 아카이브",
+    "실제 메타 잘못된 winner7종 수정전실패 재현; 수정후 HTTP·SQLite37검사",
+    "타OS 네이티브·수동GUI·전원장애·공개 인증 없는 학습 API 운영 미검증"
+  ]
+}

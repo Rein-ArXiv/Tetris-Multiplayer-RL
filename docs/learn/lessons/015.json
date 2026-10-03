@@ -1,0 +1,411 @@
+{
+  "id": "lesson-15",
+  "title": "VAO: 바이트를 정점으로 읽는 규칙",
+  "shortTitle": "VAO와 정점 속성",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 버퍼에 정점 세 개의 24바이트를 보관하고 내용을 다시 읽을 수 있습니다.",
+  "finish": "완료: VAO에 위치 속성의 버퍼·타입·성분 수·stride·offset을 연결하고 두 VAO의 상태를 비교합니다.",
+  "objective": "정점 데이터와 해석 규칙을 분리합니다. 바이트 위치를 계산하고 바인딩·속성 설정·활성화가 바꾸는 상태를 예측하며 VAO 소유자를 구현합니다.",
+  "prerequisites": [
+    "14차시 체크포인트",
+    "Vertex2의 sizeof·offsetof",
+    "GL 함수 테이블·current 컨텍스트·RAII"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release와 loader/mesh/buffer/VAO CTest 통과",
+    "Mesa llvmpipe4.5 Core 실제 상태 조회·버퍼 연결·VAO 전환·offset·잘못된 stride 관찰",
+    "호스트 Khronos 8함수 타입 일치, NDEBUG 삭제 누락·잘못된 stride 검출",
+    "실제 그리기·물리 GPU·네이티브 Windows/macOS 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "OpenCode DeepSeek vao 구현 초안 검수, Khronos 계약 대조, 대역과 실제 GL 상태 검사",
+    "draftJob": "vao",
+    "corrections": [
+      "초안의 차시 번호와 입력0 설명을 수정",
+      "재설정 거부와 GL 진입 오류의 우선순위를 혼동한 문제 후보 제외",
+      "버퍼 삭제 시 VAO 참조 수명을 단순 단정한 문제 후보 제외",
+      "실제 GL의 EnableVertexAttribArray(0 VAO) 오류0 관찰은 별도 기록. 실패 실습은 GL3.3 Core가 명시한 VertexAttribPointer로 구성",
+      "집필 환경 보고는 내부 기록에만 보관",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "recap": {
+    "points": [
+      "BufferData는 CPU 원본 바이트를 GL 저장소로 복사합니다. 원본 배열과 버퍼 객체의 수명은 다릅니다.",
+      "바인딩은 작업할 대상을 선택하며 연결 해제와 삭제는 다릅니다. 버퍼는 current 컨텍스트가 살아 있을 때 정리합니다."
+    ],
+    "bridge": "저장된 24바이트를 위치 세 개로 읽는 규칙이 아직 없습니다. 이번에는 그 규칙과 버퍼 연결을 VAO에 기록합니다."
+  },
+  "sections": [
+    {
+      "title": "같은 24바이트에도 읽는 규칙이 필요하다",
+      "body": "**먼저 예측해 보세요.** 버퍼에 float 여섯 개가 들어 있습니다. GL은 이것을 2차원 정점 세 개로 읽어야 한다는 사실까지 알까요? 저장소의 바이트 수만으로는 알 수 없습니다. float 세 개씩 묶은 3차원 정점 두 개일 수도 있습니다.\n\n**데이터의 바이트 표현과 해석 규칙**은 별개입니다. 파일에 숫자의 바이트를 저장해도 파일 형식이 필요하듯, 정점 버퍼에도 성분의 종류·개수·간격·시작 위치를 알려 주어야 합니다. C++의 Vertex2 선언은 컴파일러가 CPU 메모리를 배치할 때 사용한 정보입니다. BufferData는 바이트를 복사하며 그 선언을 GL에 전달하지 않습니다.\n\n이번에는 **VAO**(Vertex Array Object)를 만들고, 위치 속성 하나에 ‘이 버퍼에서 float 두 개를 8바이트 간격으로 읽는다’고 기록합니다. VAO는 정점 배열의 또 다른 복사본이 아닙니다. 정점 속성의 해석 규칙과 읽을 버퍼 연결을 보관합니다.\n\n| 준비물 | 담고 있는 것 | 이번에 하는 일 |\n| --- | --- | --- |\n| CPU Triangle | Vertex2 세 개 | 원본 정점 값을 만든다 |\n| VBO | 복사된 24바이트 | 읽을 데이터를 보관한다 |\n| VAO | 속성 형식·버퍼 연결·활성화 | 바이트를 어떻게 읽는지 정한다 |\n\n셰이더와 그리기 호출은 아직 연결하지 않습니다. 먼저 설정을 다시 조회해 우리가 의도한 계약이 기록됐는지 확인합니다. 그 뒤 이 입력을 받을 프로그램을 만들면, 데이터 문제와 셰이더 문제를 구별하며 진행할 수 있습니다."
+    },
+    {
+      "title": "속성 번호와 성분 수를 구별한다",
+      "body": "**속성**은 정점 하나에 딸린 입력 항목입니다. 위치, 색상, 텍스처 좌표 등을 서로 다른 속성으로 보낼 수 있습니다. 속성 번호인 location은 그 항목의 자리 번호입니다. 정점 번호도, 배열의 바이트 위치도 아닙니다.\n\n위치 한 항목을 location 0에 놓고, 그 항목이 float 두 성분 x·y로 이루어졌다고 정합니다. ‘속성 0, 성분 수 2’는 x가 속성 0이고 y가 속성 1이라는 뜻이 아닙니다. 하나의 속성에서 두 값을 함께 읽습니다. 나중에 셰이더의 `layout(location = 0) in vec2 ...`와 이 약속을 맞추게 됩니다.\n\n아래는 설정의 핵심입니다. vao와 vbo는 생성된 이름이고, vbo에는 삼각형 데이터가 들어 있다고 가정합니다. 지금은 순서를 먼저 읽고, 실패 처리와 이름의 소유권은 뒤에서 붙입니다.",
+      "codes": [
+        {
+          "label": "설정 순서의 뼈대 · 유효한 이름과 current 컨텍스트가 전제",
+          "language": "cpp",
+          "text": "gl.BindVertexArray(vao);\ngl.BindBuffer(study_gl::ArrayBuffer, vbo);\ngl.VertexAttribPointer(0, 2, study_gl::Float, study_gl::False,\n                       sizeof(study_mesh::Vertex2), nullptr);\ngl.EnableVertexAttribArray(0);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "용어 구별",
+          "title": "정점 번호 0과 속성 번호 0은 다른 축입니다",
+          "body": "정점 번호는 여러 정점 중 어느 것을 처리할지 고릅니다. 속성 번호는 한 정점에서 위치·색상 등 어느 입력을 전달할지 고릅니다. 한 위치 속성을 설정하면 그 규칙을 여러 정점에 적용합니다."
+        }
+      ]
+    },
+    {
+      "title": "stride와 offset을 바이트 주소 계산으로 읽는다",
+      "body": "버퍼의 시작을 기준으로 첫 속성 값까지 건너뛰는 바이트 수가 **offset**입니다. 한 정점의 속성 시작에서 다음 정점의 같은 속성 시작까지의 간격이 **stride**입니다. 현재 Vertex2는 x가 offset 0, y가 offset 4이고 전체 크기가 8입니다. mesh.h의 static_assert가 이 배치를 확인합니다.\n\n인덱스 i의 속성 시작 위치는 **offset + i × stride**입니다. 실제 CPU 포인터에 이 값을 더하는 코드를 작성한다는 뜻은 아닙니다. GL 버퍼 내부에서 어디를 읽게 하는지 계산하는 모델입니다. 이번 위치 속성은 시작점부터 float 두 개, 즉 8바이트를 읽습니다.\n\n| 정점 i | 위치 속성 시작 | x의 바이트 | y의 바이트 | 읽는 값 (x, y) |\n| --- | --- | --- | --- | --- |\n| 0 | 0 + 0 × 8 = 0 | 0~3 | 4~7 | (-0.5, -0.5) |\n| 1 | 0 + 1 × 8 = 8 | 8~11 | 12~15 | (0.5, -0.5) |\n| 2 | 0 + 2 × 8 = 16 | 16~19 | 20~23 | (0, 0.5) |\n\n마지막 정점까지 읽을 때 끝 위치는 16 + 8 = 24입니다. 저장소의 24바이트 범위와 맞습니다. 정점 개수 3을 stride에 넣거나 전체 버퍼 크기 24를 stride에 넣으면 의미가 달라집니다. stride는 **정점 사이 간격**입니다.\n\n필드가 늘어나면 sizeof와 offsetof를 사용해 배치를 표현합니다. 형식을 바꿀 때 설정 숫자만 따로 남아 버리는 실수를 줄일 수 있습니다. 정점 크기와 최대 인덱스가 커지면 곱셈 오버플로와 저장소 범위 검사도 필요합니다.",
+      "notes": [
+        {
+          "kind": "배치 방식",
+          "title": "필드를 섞은 배열과 필드별 배열",
+          "body": "Vertex2 배열은 x0,y0,x1,y1처럼 한 정점의 필드를 묶는 방식입니다. x만 담은 배열과 y만 담은 배열로 나누는 방식도 있습니다. 어느 쪽이든 읽는 쪽의 시작점·간격이 실제 배치와 맞아야 합니다. 이 강의는 한 정점의 필드를 묶는 방식으로 진행합니다."
+        }
+      ]
+    },
+    {
+      "title": "포인터 모양 인자와 stride 0의 함정을 푼다",
+      "body": "`VertexAttribPointer`의 마지막 인자는 const void* 모양이지만, 여기서는 CPU 배열 주소가 아닙니다. 연결된 버퍼의 **바이트 offset**을 이 API 형식으로 전달합니다. offset 0은 nullptr로 표현합니다. BufferData의 data 포인터가 CPU 원본을 가리키던 것과 역할이 다릅니다.\n\n관찰용으로 y만 읽는 속성을 하나 더 만든다고 해 봅시다. y의 첫 위치는 4바이트이고, 다음 y까지는 Vertex2 전체 크기인 8바이트를 건너야 합니다. offsetof는 그 멤버의 바이트 위치를 줍니다. 이 코드는 standard-layout 형식이라는 mesh.h의 전제에 기대며, 변환한 값을 C++에서 역참조하지 않습니다.\n\n이 GL 3.3의 VertexAttribPointer에서 **stride 0**은 ‘항상 같은 값’이 아니라 해당 속성 값들이 빈틈없이 연속됐다고 해석하라는 뜻입니다. 위치 두 float에는 8바이트 간격이어서 현재의 빈틈없는 배치와 맞습니다. 그러나 y 하나를 읽는 속성에 stride 0을 쓰면 간격은 float 하나인 4바이트가 됩니다. 4, 8, 12에서 읽으므로 y0, x1, y1 순서가 되어 잘못됩니다. 필요한 위치는 4, 12, 20입니다.\n\n따라서 여러 필드가 섞인 정점 형식에서는 sizeof(Vertex2)처럼 전체 정점 간격을 명시합니다. 뒤에 배울 별도의 속성 바인딩 API에는 stride 0의 의미가 다른 경우도 있으니 함수 이름과 계약을 함께 읽어야 합니다.",
+      "codes": [
+        {
+          "label": "관찰용 두 번째 속성 · y만 읽는 형식",
+          "language": "cpp",
+          "text": "// <cstddef> for offsetof, <cstdint> for std::uintptr_t\ngl.VertexAttribPointer(1, 1, study_gl::Float, study_gl::False,\n    sizeof(study_mesh::Vertex2),\n    reinterpret_cast<const void*>(static_cast<std::uintptr_t>(\n        offsetof(study_mesh::Vertex2, y))));\ngl.EnableVertexAttribArray(1);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "API 계약",
+          "title": "const void*가 항상 CPU 주소는 아닙니다",
+          "body": "[Khronos VertexAttribPointer 인자 설명](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glVertexAttribPointer.xhtml)의 pointer와 stride를 함께 보세요. 이번 Desktop GL Core 경로에서는 버퍼의 offset을 전달합니다. BufferData에 같은 식으로 숫자 4를 주소처럼 넘기면 CPU 메모리를 잘못 읽게 됩니다."
+        }
+      ]
+    },
+    {
+      "title": "버퍼 연결은 어느 순간 VAO에 기록될까?",
+      "body": "이름 A의 버퍼를 바인딩한 뒤 VertexAttribPointer를 호출하면, 그 **호출 시점**의 버퍼 A가 현재 VAO의 해당 속성에 기록됩니다. 이후 ARRAY_BUFFER에 B를 연결하는 것만으로 기록이 B로 바뀌지는 않습니다. 다른 버퍼로 바꾸려면 그 버퍼를 연결하고 속성 설정 호출을 다시 해야 합니다.\n\n이 규칙은 두 종류의 상태를 구분하면 이해하기 쉽습니다. ARRAY_BUFFER 바인딩은 지금 버퍼 명령이 사용할 대상입니다. VAO 속성의 버퍼 연결은 이후 정점을 읽을 대상입니다. 설정 호출이 전자의 값을 후자에 기록합니다.\n\n| 동작 | 일반 ARRAY_BUFFER 바인딩 | 첫 VAO의 위치 속성에 기록된 버퍼 |\n| --- | --- | --- |\n| 첫 VAO 선택, 버퍼 A 바인딩 | A | 아직 지정하지 않음 |\n| VertexAttribPointer 호출 | A | A |\n| 버퍼 B 바인딩 | B | A |\n| 버퍼 0 바인딩 | 없음 | A |\n| 버퍼 B 바인딩 후 Pointer 재호출 | B | B |\n\nVAO를 다른 것으로 바꾼 뒤 돌아오면 그 VAO에 기록된 형식과 버퍼 연결을 다시 사용합니다. **일반 ARRAY_BUFFER 바인딩 자체는 VAO를 선택한다고 복원되지 않습니다.** 셰이더 프로그램과 텍스처도 VAO가 저장하는 상태가 아닙니다. VAO를 ‘렌더링의 모든 설정 저장소’로 생각하지 않는 것이 중요합니다.",
+      "notes": [
+        {
+          "kind": "적용 범위",
+          "title": "모든 버퍼 바인딩에 같은 규칙을 적용하지 않습니다",
+          "body": "여기서는 ARRAY_BUFFER를 다룹니다. 인덱스 그리기에서 사용할 ELEMENT_ARRAY_BUFFER 바인딩은 VAO 상태에 속합니다. 인덱스 버퍼를 도입할 때 그 차이를 실제 코드로 다룹니다."
+        }
+      ]
+    },
+    {
+      "title": "형식 설정과 배열 활성화는 별개다",
+      "body": "VertexAttribPointer는 읽는 형식을 정합니다. EnableVertexAttribArray는 그 속성에서 배열 값을 사용하도록 켭니다. 새 VAO의 속성 배열은 기본적으로 꺼져 있으므로 두 호출이 모두 필요합니다. 형식만 지정하고 활성화를 빠뜨려도 그 문장 자체가 반드시 오류를 내지는 않습니다.\n\n배열이 꺼진 속성은 정점마다 버퍼를 읽는 대신 해당 속성의 current 일반 값으로 전달됩니다. 이 값은 이번 실습에서 설정하지 않습니다. ‘꺼져 있으면 위치가 알아서 버퍼에서 읽힌다’고 생각하지 않으면 됩니다. 활성화 상태는 VAO별로 독립적이므로 두 번째 VAO에서 위치 속성을 꺼도 첫 번째 VAO의 활성화는 유지됩니다.\n\n`normalized`는 벡터 길이를 1로 만드는 수학적 정규화가 아닙니다. 정수 형식의 데이터를 부동소수점 속성으로 읽을 때 값의 범위를 변환할지 정하는 옵션입니다. 예를 들어 unsigned byte 색상에 true를 쓰면 0~255가 0~1 범위로 대응합니다. 현재 데이터는 이미 float이므로 False로 지정하고 원래 값을 사용합니다. 셰이더의 정수 입력에는 또 다른 함수인 VertexAttribIPointer가 필요하므로 입력 타입도 함께 맞추어야 합니다.\n\nCore 프로파일에서는 생성한 VAO를 바인딩한 뒤 설정합니다. BindVertexArray(0)은 선택 해제이며, 다른 실제 VAO를 대신 만들어 주지 않습니다. VAO가 없는 상태에서 VertexAttribPointer를 호출하는 실패는 관찰 프로그램에서 따로 확인합니다.",
+      "notes": [
+        {
+          "kind": "추가 개념",
+          "title": "배열 활성화와 current 값의 소유 위치",
+          "body": "[Khronos 활성화 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glEnableVertexAttribArray.xhtml)과 [속성 상태 조회](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glGetVertexAttrib.xhtml)를 구별해 읽어 보세요. 활성화 플래그는 VAO 상태지만 배열이 꺼졌을 때 쓸 current 일반 속성 값은 같은 종류의 VAO 저장 항목이 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "필요한 진입점과 소유자 계약을 추가한다",
+      "body": "GlApi에 여덟 함수를 추가합니다. Gen/Bind/DeleteVertexArrays는 객체 수명을, VertexAttribPointer와 Enable/DisableVertexAttribArray는 속성을, GetVertexAttribiv와 GetVertexAttribPointerv는 관찰을 담당합니다. GLboolean은 unsigned char로 선언합니다. float 배열이라는 사실과 GL_FLOAT 토큰을 혼동해 함수 인자 타입을 float으로 바꾸지 않습니다.\n\n로더는 총 17개 이름을 모두 조회한 다음 완성된 테이블만 공개합니다. 일부 함수 주소를 얻지 못했을 때의 동작은 유지합니다. tests/loader_contract.cpp는 각 진입점 하나씩 누락한 경우, 모두 누락한 경우, 성공 후 실패한 재로딩을 확인하도록 갱신합니다. 함수가 늘어날 때 누락 조합을 무조건 전수 열거하면 경우의 수가 두 배씩 커집니다. 이 검사는 각 슬롯의 연결과 실패 시 비우기 계약에 집중합니다.\n\n새 VertexArray는 GLuint 이름 하나를 소유합니다. configure에 받은 VBO 이름은 빌린 참조이며 이 클래스에서 DeleteBuffers를 호출하지 않습니다. 테이블·컨텍스트·VBO를 먼저 만들고 VAO를 나중에 선언하여, VAO를 사용하는 동안 필요한 것들이 살아 있게 합니다.\n\n소유자 복사와 이동은 이번 작은 클래스에서 막습니다. 비어 있는 객체에 한 번 설정하고, 이미 설정됐다면 기존 객체를 보존하며 false를 반환합니다. reset 뒤에는 다시 설정할 수 있습니다. 이 일회 설정 규칙은 학습 클래스의 정책이지 VAO가 재설정을 금지한다는 뜻은 아닙니다.",
+      "codes": [
+        {
+          "label": "GlApi에 추가 · 진입점의 정확한 타입",
+          "language": "cpp",
+          "text": "void (STUDY_GL_CALL* GenVertexArrays)(GLsizei, GLuint*) = nullptr;\nvoid (STUDY_GL_CALL* BindVertexArray)(GLuint) = nullptr;\nvoid (STUDY_GL_CALL* DeleteVertexArrays)(GLsizei, const GLuint*) = nullptr;\nvoid (STUDY_GL_CALL* VertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*) = nullptr;\nvoid (STUDY_GL_CALL* EnableVertexAttribArray)(GLuint) = nullptr;\nvoid (STUDY_GL_CALL* DisableVertexAttribArray)(GLuint) = nullptr;\nvoid (STUDY_GL_CALL* GetVertexAttribiv)(GLuint, GLenum, GLint*) = nullptr;\nvoid (STUDY_GL_CALL* GetVertexAttribPointerv)(GLuint, GLenum, void**) = nullptr;"
+        },
+        {
+          "label": "교체 · 함수 테이블과 상수 전체",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/renderer/gl_api.h",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 로더 전체",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/renderer/gl_api.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · VAO 소유자 계약",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/renderer/vertex_array.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_api.h",
+        "symbol": "#define GL_FUNCS",
+        "invariant": "호출할 GL 함수의 타입과 로딩 목록을 맞춘다.",
+        "mayDiffer": "현재 게임의 GL 목록은 그리기까지 포함하며 학습용 상태 조회 함수는 일부 없다.",
+        "omitted": "X-매크로와 렌더러 전체 진입점"
+      }
+    },
+    {
+      "title": "생성 중 실패해도 소유한 이름을 정리한다",
+      "body": "configure는 입력 버퍼가 0이거나 이미 VAO를 소유한 경우 GL을 호출하지 않습니다. 이 검사는 잘못된 사용을 일찍 잡지만, 0이 아닌 모든 정수가 유효한 VBO라는 뜻은 아닙니다. 호출자가 실제 살아 있는 버퍼를 제공해야 합니다.\n\n정상 경로는 이름 생성 → VAO 바인딩 → VBO 바인딩 → 형식 지정 → 활성화입니다. 각 단계 직후 오류를 확인하고, 실패하면 reset으로 가진 VAO 이름을 지운 뒤 false를 반환합니다. 버퍼 연결 단계에서 실패했다고 빌린 버퍼까지 지우면 소유권 계약을 어기게 됩니다.\n\nsizeof는 size_t이고 API의 stride는 부호 있는 GLsizei이므로 표현 가능한 범위인지 먼저 확인합니다. 지금은 8바이트지만 이 변환이 일어나는 지점을 드러냅니다. 진입부터 GL 오류가 남아 있으면 작업을 시작하지 않고 알리는 정책도 유지합니다. GetError를 한 번 읽는 진단과 모든 오류를 모으는 시스템은 구분합니다.\n\n성공 후 VAO와 ARRAY_BUFFER는 설정된 채로 남습니다. 초기화 단계의 함수이며 호출 전 바인딩을 복원하지 않습니다. 실패 시에도 바깥 코드의 모든 상태를 원래대로 되돌린다고 약속하지 않습니다. 소유 자원을 정리한다는 보장과 GL 상태를 복원한다는 보장은 별개입니다.",
+      "codes": [
+        {
+          "label": "configure의 형식 지정과 활성화 · 단계별 실패 처리",
+          "language": "cpp",
+          "text": "gl_.VertexAttribPointer(0, 2, Float, False,\n                        static_cast<GLsizei>(stride), nullptr);\nif (!stage_ok(gl_, \"glVertexAttribPointer\")) {\n    reset();\n    return false;\n}\ngl_.EnableVertexAttribArray(0);\nif (!stage_ok(gl_, \"glEnableVertexAttribArray\")) {\n    reset();\n    return false;\n}"
+        },
+        {
+          "label": "새 파일 · 설정과 정리의 전체 구현",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/renderer/vertex_array.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "세션에 연결하고 저장한 설정을 다시 읽는다",
+      "body": "run_session에서 버퍼를 만든 다음 VAO 소유자를 선언합니다. configure가 성공한 뒤 위치 속성의 stride와 활성화 값을 조회합니다. 현재 바인딩된 VAO의 location 0을 읽는 것이므로, 관찰 중 다른 VAO를 선택했다면 먼저 원하는 VAO로 돌아와야 합니다.\n\nGetVertexAttribiv는 정수 항목을 읽습니다. 더 자세한 vao_probe에서는 성분 수·타입·정규화·stride·활성화·연결된 버퍼까지 비교합니다. offset은 GetVertexAttribPointerv로 읽습니다. 출력 변수의 주소를 넘기는 void**와, 거기서 되돌려 받는 offset 표현을 구분하세요.\n\nGL 객체 이름은 종류별로 관리되므로 VAO와 VBO가 우연히 같은 숫자를 받아도 같은 객체라는 뜻이 아닙니다. 삭제도 해당 종류의 함수로 합니다. run_session이 끝나면 선언 역순으로 VAO, VBO, 함수 테이블이 정리되고, 그 뒤 main이 플랫폼을 종료합니다. VAO 삭제가 VBO 삭제를 대신하지 않습니다.",
+      "codes": [
+        {
+          "label": "main에 추가 · 버퍼 선언과 업로드 뒤",
+          "language": "cpp",
+          "text": "study_gl::VertexArray vertex_array(gl);\nif (!vertex_array.configure(vertex_buffer.name())) return 1;\nstudy_gl::GLint stride = 0, enabled = 0;\ngl.GetVertexAttribiv(0, study_gl::AttribStride, &stride);\ngl.GetVertexAttribiv(0, study_gl::AttribEnabled, &enabled);\nif (gl.GetError() != 0 || stride != sizeof(study_mesh::Vertex2) || enabled != 1)\n    return 1;"
+        },
+        {
+          "label": "offset 조회 · 출력 주소와 결과의 의미",
+          "language": "cpp",
+          "text": "void* offset = nullptr;\ngl.GetVertexAttribPointerv(0, study_gl::AttribPointer, &offset);\nif (gl.GetError() != 0 || offset != nullptr) return false; // expected byte offset 0"
+        },
+        {
+          "label": "교체 · VAO를 포함한 세션 전체",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/src/main.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void renderer_shutdown()",
+        "invariant": "컨텍스트가 current인 동안 VAO와 버퍼 등 GL 자원을 정리한다.",
+        "mayDiffer": "현재 게임은 명시적인 renderer_shutdown을 사용하고 학습 코드는 지역 소유자를 사용한다.",
+        "omitted": "여러 컨텍스트·삭제된 객체의 지연 수명"
+      }
+    },
+    {
+      "title": "관찰 프로그램으로 두 VAO를 비교한다",
+      "body": "vao_probe는 버퍼 A·B와 VAO first·second를 만듭니다. first의 위치 속성은 A, second의 위치 속성은 B를 참조합니다. 화면의 모양을 추측하기 전에 설정을 직접 읽는 실험입니다.\n\n1. first를 설정하고 위치 속성이 두 float, stride 8, offset 0, enabled 1인지 읽습니다.\n2. ARRAY_BUFFER에 B를 연결하고 0으로 비워도 first가 기록한 버퍼는 A인지 확인합니다.\n3. second에서 위치 배열을 끈 뒤 first로 돌아옵니다. first의 enabled는 1이며, 일반 ARRAY_BUFFER는 B인 상태가 유지되는지 봅니다.\n4. first에 관찰용 y 속성을 더해 offset 4·stride 8을 읽습니다. second에는 그 활성화가 전파되지 않아야 합니다.\n5. 위치 stride를 일부러 4로 기록합니다. GL이 설정을 받아들여도 우리가 계산한 데이터 배치와 맞는지 따로 판단합니다. 확인 뒤 8로 복구합니다.\n6. VAO를 0으로 비우고 VertexAttribPointer를 호출하면 GL_INVALID_OPERATION인지 확인합니다. 마지막에는 VAO만 삭제한 뒤 버퍼 A의 크기가 여전히 24인지 읽습니다.\n\n**stride 4가 왜 잘못됐을까요?** 정점 1의 시작을 4바이트로 잡으면 두 성분은 원본 y0와 x1이 됩니다. 이 배열에서는 (-0.5, 0.5)를 읽게 되어 원래 정점 1인 (0.5, -0.5)와 다릅니다. 두 값 모두 정상 float이라 타입 오류만 찾는 검사로는 의도를 알 수 없습니다.\n\n이 실험은 상태 설정과 그 조회를 다룹니다. 버퍼 범위 밖을 실제로 읽는 draw를 넣어 오류를 유도하지 않습니다. 읽을 개수·형식·저장소 크기를 대조한 뒤 그리기를 붙이는 순서를 지킵니다.",
+      "codes": [
+        {
+          "label": "독립 상태 관찰의 핵심",
+          "language": "cpp",
+          "text": "gl.BindVertexArray(first.name());\ngl.BindBuffer(study_gl::ArrayBuffer, b.name());\nstudy_gl::GLint captured = 0;\ngl.GetVertexAttribiv(0, study_gl::AttribBufferBinding, &captured);\n// captured should still identify A: no new VertexAttribPointer call here."
+        },
+        {
+          "label": "새 파일 · 두 VAO의 실제 상태 관찰",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/tests/vao_real.cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "관찰 방법",
+          "title": "어느 객체의 상태를 읽는가",
+          "body": "[Khronos offset 조회 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glGetVertexAttribPointerv.xhtml)은 현재 VAO에서 읽는다고 명시합니다. 조회 함수도 현재 바인딩에 의존하므로 디버깅할 때 대상 선택부터 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "확장된 정점 형식에도 같은 규칙을 적용한다",
+      "body": "현재 렌더러는 위치·UV·색 등을 평평한 float 배열에 이어 저장합니다. 위치만 담은 실습 형식보다 필드가 많지만 주소를 계산하는 규칙은 같습니다. `{loc, size, offset}` 테이블의 `size`는 성분 수이고, `offset`은 float 원소 단위의 시작 위치입니다. `VertexAttribPointer`에 넘길 때 `sizeof(float)`를 곱해 바이트 단위로 바꿉니다.\n\n| 구할 값 | 이 저장 형식에서의 계산 |\n| --- | --- |\n| 속성의 바이트 offset | 앞에 저장한 필드들의 성분 수 합 × `sizeof(float)` |\n| 정점 전체의 stride | `kFloatsPerVertex` × `sizeof(float)` |\n| 정점 인덱스 i의 속성 시작 | 버퍼 시작 + i × stride + 속성의 바이트 offset |\n\n성분 수와 저장 순서는 `push_vertex`와 속성 테이블에서 확인합니다. 위 합산식은 패딩 없이 float를 이어 저장하는 이 형식에 적용됩니다. C++ 구조체로 저장할 때는 패딩을 포함하는 `sizeof`와 `offsetof`로 실제 배치를 확인합니다.\n\nVAO는 초기화할 때 형식을 기록하고, 배치를 flush할 때 VBO 내용이 새로 채워집니다. 같은 버퍼에 새 데이터가 들어갔다고 형식 자체를 매번 다시 정의할 필요는 없습니다. 반대로 정점 구조를 바꾸었다면 CPU에서 값을 쌓는 코드, 속성 테이블, 셰이더 입력의 세 곳을 함께 검토해야 합니다. 세 코드가 모두 컴파일된다는 사실만으로 서로 같은 형식을 약속한 것은 아닙니다.",
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "const GLsizei stride = kFloatsPerVertex",
+        "invariant": "정점 전체 간격과 각 속성의 성분 수·offset을 실제 저장 형식에 맞춘다.",
+        "mayDiffer": "현재 게임은 위치·UV·색상 등 여러 속성을 사용한다. 학습 코드의 기본 형식은 위치만 다룬다.",
+        "omitted": "각 속성의 셰이더 의미·텍스처·둥근 사각형 계산"
+      }
+    },
+    {
+      "title": "파일을 연결하고 자신의 예측과 비교한다",
+      "body": "14-vbo를 `15-vao`로 복사합니다. vertex_array.h/cpp와 두 검사 파일을 추가하고, gl_api.h/cpp·main·loader_contract.cpp·CMakeLists.txt를 교체합니다. 플랫폼·Vertex2·버퍼 소유자의 계약은 유지합니다.\n\n새 study_vertex_array는 study_gl과 study_mesh에 의존합니다. tetris는 버퍼와 VAO 소유자를 함께 사용하고, vao_probe는 SDL과 두 소유자 라이브러리에 연결됩니다. vao_contract는 GL 함수 대역으로 중간 단계 실패와 삭제 횟수를 확인합니다. 생성 실패 뒤에 형식 설정까지 진행하면 안 되고, VAO를 정리하면서 빌린 VBO를 지워서도 안 됩니다.\n\n저장소 루트에서 빌드합니다. SDL2 개발 패키지·pkg-config가 필요합니다. 아래 실행 경로는 Linux의 단일 구성 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/15-vao -B out/study-15 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-15\nctest --test-dir out/study-15 --output-on-failure\n./out/study-15/tetris\n```\n\nVAO 설정 후 `VAO location 0: two floats, stride 8, offset 0, enabled (not drawn)` 로그를 확인합니다. Windows 다중 구성 생성기에서는 빌드와 CTest의 구성 이름, 실행 파일의 Debug/Release 경로를 맞춥니다.\n\nLinux에서 SDL offscreen GL을 지원한다면 다음으로 상태 관찰을 실행할 수 있습니다. 표시 없이 조회만 하므로 이 프로그램은 단일 버퍼를 요청합니다. 그래픽 세션에서는 환경변수 없이 vao_probe를 실행할 수도 있습니다.\n\n```sh\nSDL_VIDEODRIVER=offscreen ./out/study-15/vao_probe\n```\n\n출력을 보기 전에 ‘B를 바인딩하면 first의 연결도 바뀌는가’, ‘first로 돌아오면 ARRAY_BUFFER도 A로 돌아오는가’를 예측해 보세요. 다른 결과라면 객체 이름만 보지 말고 어느 VAO가 선택됐는지, Pointer 호출이 언제 실행됐는지부터 추적합니다.\n\n이제 바이트와 읽는 형식이 준비됐습니다. 다음에는 위치 입력을 실제로 처리할 GLSL 소스를 작성하고, 셰이더 객체에 넣어 컴파일 오류를 읽는 경로를 만듭니다.",
+      "codes": [
+        {
+          "label": "추가할 CMake 연결의 핵심",
+          "language": "cmake",
+          "text": "add_library(study_vertex_array STATIC renderer/vertex_array.cpp)\ntarget_link_libraries(study_vertex_array PUBLIC study_gl study_mesh)\nif(TARGET tetris)\n    target_link_libraries(tetris PRIVATE study_vertex_array)\nendif()"
+        },
+        {
+          "label": "교체 · CMake 전체",
+          "language": "cmake",
+          "file": "checkpoints/15-vao/CMakeLists.txt",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 17개 진입점 로딩 검사",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/tests/loader_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · VAO 형식·소유권·실패 검사",
+          "language": "cpp",
+          "file": "checkpoints/15-vao/tests/vao_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "14-vbo 사본에 VertexArray와 두 검사 파일을 추가하고 함수 테이블·로더·CMake·main을 갱신한다.",
+      "Vertex2의 위치 속성과 y만 읽는 속성의 offset·stride·세 정점 시작 위치를 계산한다.",
+      "두 VAO에서 버퍼 연결과 enabled를 조회하고 ARRAY_BUFFER 변경과 비교한다.",
+      "stride 4가 API 오류 없이도 의도와 어긋나는 이유를 실제 원본 값으로 설명한다.",
+      "VAO → VBO → 플랫폼 종료 순서와 부분 실패 정리를 따라간다."
+    ],
+    "expected": "위치 속성이 두 float·stride 8·offset 0·enabled 1로 기록됩니다. VAO별 형식·버퍼 연결과 일반 ARRAY_BUFFER 바인딩을 구분하고 잘못된 형식을 진단합니다.",
+    "failureChecks": [
+      "현재 VAO와 ARRAY_BUFFER를 확인한 뒤 속성 설정 호출 순서를 읽는다.",
+      "성분 수와 바이트 수, float 단위 offset과 바이트 offset을 구분한다.",
+      "속성 배열의 활성화가 빠졌는지 확인한다.",
+      "조회하기 전에 확인할 VAO를 다시 바인딩했는지 확인한다.",
+      "함수 테이블과 컨텍스트보다 소유자가 먼저 소멸하는지 확인한다."
+    ]
+  },
+  "questions": [
+    {
+      "id": "15-1",
+      "kind": "상태 캡처",
+      "question": "VAO first를 선택하고 버퍼 A로 VertexAttribPointer를 호출했습니다. 그 뒤 ARRAY_BUFFER에 B만 바인딩했습니다. first의 해당 속성이 참조하는 버퍼는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "버퍼 B. 마지막에 바인딩한 버퍼를 항상 따라간다."
+        },
+        {
+          "id": "b",
+          "text": "버퍼 A. 속성 설정 호출 시점의 연결이 남는다."
+        },
+        {
+          "id": "c",
+          "text": "연결 없음. 다른 버퍼를 바인딩하면 연결이 삭제된다."
+        },
+        {
+          "id": "d",
+          "text": "버퍼 A와 B. 두 저장소의 내용을 합친다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "버퍼 A. 속성 설정 호출 시점의 연결이 남는다.",
+      "explanation": "VertexAttribPointer가 호출될 때 선택된 버퍼를 속성 상태에 기록합니다. 일반 ARRAY_BUFFER 바인딩을 바꾸는 것만으로 그 기록은 바뀌지 않습니다. B로 바꾸려면 B를 연결하고 속성 설정을 다시 해야 합니다."
+    },
+    {
+      "id": "15-2",
+      "kind": "바이트 계산",
+      "question": "Vertex2{x,y} 배열에서 y만 읽습니다. y의 offset은 4, 정점 크기는 8바이트입니다. 정점 인덱스 2의 y를 읽는 시작 위치는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "8바이트: 정점 번호에 float 크기를 곱한다."
+        },
+        {
+          "id": "b",
+          "text": "12바이트: offset과 정점 크기를 한 번 더한다."
+        },
+        {
+          "id": "c",
+          "text": "16바이트: offset 없이 정점 크기만 두 번 더한다."
+        },
+        {
+          "id": "d",
+          "text": "20바이트: 4 + 2 × 8로 계산한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "20바이트: 4 + 2 × 8로 계산한다.",
+      "explanation": "속성 시작 위치는 offset + i × stride입니다. y는 첫 정점 안에서 4바이트 뒤에 있고 정점 사이 간격은 8이므로 20입니다. 여기서 float 한 개인 4바이트를 읽으면 전체 24바이트 범위에 맞습니다."
+    },
+    {
+      "id": "15-3",
+      "kind": "암묵적 간격",
+      "question": "같은 Vertex2 배열에서 y만 읽는 속성을 size=1, type=Float, offset=4, stride=0으로 설정했습니다. 이 VertexAttribPointer 호출에서 stride=0의 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "float 하나씩 촘촘한 배열로 해석하여 y 사이 간격과 어긋난다."
+        },
+        {
+          "id": "b",
+          "text": "항상 같은 주소에서 y0만 읽는다."
+        },
+        {
+          "id": "c",
+          "text": "C++ Vertex2를 알아내 자동으로 8바이트 간격을 사용한다."
+        },
+        {
+          "id": "d",
+          "text": "전체 저장소 24바이트를 간격으로 사용한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "float 하나씩 촘촘한 배열로 해석하여 y 사이 간격과 어긋난다.",
+      "explanation": "이 함수의 stride 0은 해당 속성의 성분들이 촘촘히 저장됐다고 해석합니다. float 한 성분이면 간격은 4바이트여서 4,8,12를 읽습니다. y만 읽으려는 실제 위치는 4,12,20이므로 stride 8을 명시해야 합니다."
+    },
+    {
+      "id": "15-4",
+      "kind": "소유권",
+      "question": "VAO 소유자의 reset이 DeleteVertexArrays를 호출했습니다. 따로 살아 있는 VertexBuffer 소유자가 같은 버퍼를 계속 소유합니다. 올바른 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "VAO 삭제가 연결된 모든 VBO도 삭제하므로 다시 업로드해야 한다."
+        },
+        {
+          "id": "b",
+          "text": "두 객체 이름 숫자가 같으면 VBO도 반드시 삭제된다."
+        },
+        {
+          "id": "c",
+          "text": "VAO 설정은 없어지지만 VBO는 자기 소유자가 별도로 정리한다."
+        },
+        {
+          "id": "d",
+          "text": "VAO 삭제는 CPU Triangle 배열의 메모리를 해제한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "VAO 설정은 없어지지만 VBO는 자기 소유자가 별도로 정리한다.",
+      "explanation": "VertexArray는 VAO 이름만 소유하고 입력 VBO를 빌립니다. VAO와 VBO의 삭제 책임은 분리됩니다. 객체 종류가 다르면 이름 숫자가 우연히 같아도 같은 자원이 아닙니다."
+    },
+    {
+      "id": "15-5",
+      "kind": "오류와 의도",
+      "question": "위치 속성은 float 두 개이고 실제 정점 간격은 8바이트입니다. stride를 4로 넣었는데 GetError가 0입니다. 어떻게 판단해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "GL 오류가 없으므로 모든 정점은 의도한 좌표로 읽힌다."
+        },
+        {
+          "id": "b",
+          "text": "정점 1부터 시작 위치가 어긋날 수 있으므로 배치 계산과 설정을 대조한다."
+        },
+        {
+          "id": "c",
+          "text": "GL이 stride를 자동으로 8로 고쳤으니 수정하지 않는다."
+        },
+        {
+          "id": "d",
+          "text": "normalized를 true로 바꾸면 stride 오류가 해결된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "정점 1부터 시작 위치가 어긋날 수 있으므로 배치 계산과 설정을 대조한다.",
+      "explanation": "양수 stride 4는 API가 받아들일 수 있지만 우리가 만든 Vertex2의 간격과 다릅니다. 두 번째 정점은 y0와 x1을 읽게 됩니다. 호출의 유효성, 저장소 범위, 의도한 의미는 각각 확인해야 합니다."
+    }
+  ]
+}

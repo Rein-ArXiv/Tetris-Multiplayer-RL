@@ -1,0 +1,522 @@
+{
+  "id": "lesson-102",
+  "title": "매칭 큐: 등록과 취소를 함께 설계",
+  "shortTitle": "FIFO·취소·연결 인계",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 여러 연결의 입장 작업을 관리하지만, 대기 중인 연결의 등록·취소·선택은 아직 한 계약으로 묶지 않았습니다.",
+  "finish": "완료: 취소된 참가자를 제외한 앞의 두 연결을 선택하고, 소켓·parser를 넘겨 실제 게임 입력을 처리합니다.",
+  "objective": "FIFO의 순서 기준과 취소·선택의 소유권 경계를 설명하고, 단독 대기·상한·종료의 오류를 재현하여 고칩니다.",
+  "prerequisites": [
+    "이동과 RAII·optional",
+    "mutex·조건 변수·작업 완료 대기",
+    "입장 프레임과 parser 인계"
+  ],
+  "recap": {
+    "points": [
+      "작업이 빌린 상태보다 작업 본문과 캡처 정리가 먼저 끝나야 합니다.",
+      "접수 중단·대기 깨우기·완료 대기는 별도의 단계입니다.",
+      "소켓과 이미 수신한 미소비 바이트를 같은 소유자에게 인계합니다."
+    ],
+    "bridge": "이제 입장이 끝난 연결을 큐에 맡기고, 취소와 매칭 중 어느 쪽이 자원을 가져가는지 정합니다."
+  },
+  "sections": [
+    {
+      "title": "연결의 목적지를 대기열로 바꾼다",
+      "body": "서버는 연결을 받아 첫 요청을 해석하고, 작업 그룹으로 여러 입장 요청의 수명을 관리할 수 있습니다. 랜덤 대전 요청은 잠시 상대를 기다려야 합니다. 그동안 소켓을 누가 소유하고, 사용자가 취소하면 누가 정리할지 결정해 봅시다.\n\n단순히 ID 두 개를 골라 반환하면 이미 닫힌 연결이나 취소한 참가자가 선택될 수 있습니다. 대기 항목에는 연결 ID와 실제 자원을 함께 보관합니다. 이번 산출물 PairQueue는 등록·취소·두 항목 선택·종료를 한 경계 안에서 처리합니다. 꺼낸 Pair가 소켓과 parser를 넘겨받으면 대기열의 책임은 끝납니다.\n\n종이에 A·B·C를 순서대로 적고 B에 취소선을 그어 보세요. 선택할 쌍은 A·C입니다. 이제 취소선 긋기와 두 항목 꺼내기를 다른 스레드가 동시에 실행한다면 어떤 결과를 허용할지 생각하며 구현합니다.",
+      "codes": [
+        {
+          "label": "자원 소유자가 바뀌는 지점",
+          "language": "text",
+          "text": "입장 작업 → pending Entry { id, socket, parser }\n  취소 관측 → Entry 제거·자원 정리\n  두 명 선택 → Pair { first, second } → 로비/게임 담당자\n  큐 종료   → 아직 pending인 Entry 정리"
+        }
+      ],
+      "reference": {
+        "path": "server/matchmaker.h",
+        "symbol": "struct PlayerInfo",
+        "invariant": "연결과 미소비 바이트를 같은 소유권 경로로 인계한다.",
+        "mayDiffer": "현재 PlayerInfo는 계정·IP 세션 lease와 표시 정보도 함께 옮긴다."
+      }
+    },
+    {
+      "title": "FIFO에서 먼저라는 말의 기준",
+      "body": "FIFO는 먼저 들어간 항목이 먼저 나오는 순서 규칙입니다. 여기서 들어갔다는 사건은 enqueue가 잠금을 획득하고 항목을 삽입한 순간으로 정합니다. 접속을 먼저 수락한 A가 인증을 기다리는 동안 B의 입장 작업이 먼저 등록을 끝낼 수도 있습니다. 이 경우 큐에서는 B가 앞입니다.\n\n여러 생산자는 각각 연결 작업이고, 소비자는 쌍을 꺼내는 매처입니다. 생산자와 소비자가 하나의 mutex로 큐 상태를 바꾸면 성공한 삽입들의 순서를 정할 수 있습니다. 취소는 그 순서에서 항목을 제거하며 나머지의 상대 순서를 유지합니다.\n\n등록 순서가 A·B·C·D이고 B가 취소되었다면 첫 쌍은 A·C이고 D가 남습니다. 이것은 등록 순서에 대한 FIFO입니다. 스레드가 잠금을 기다리는 순서의 공정성까지 의미하지는 않습니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "사용자가 누른 시각을 기준으로 매칭하려면",
+          "body": "서로 다른 기기의 시각·네트워크 지연·인증 시간을 고려하는 별도 정책이 필요합니다. 클라이언트가 주장한 시각만으로 우선권을 주면 순서 조작도 검토해야 합니다. 이 큐는 서버가 실제 등록한 순서를 사용합니다."
+        }
+      ],
+      "reference": {
+        "path": "server/matchmaker.cpp",
+        "symbol": "bool Matchmaker::enqueue",
+        "invariant": "성공한 등록 순서에서 제거되지 않은 앞의 두 명을 선택한다.",
+        "mayDiffer": "실제 서버는 deque와 단일 matcher를 사용한다. 기준 큐는 고정 배열을 사용한다."
+      }
+    },
+    {
+      "title": "빈 슬롯과 살아 있는 항목을 구별한다",
+      "body": "PairQueue<T, Capacity>에서 T는 큐가 소유할 자원 묶음입니다. 테스트에서는 unique_ptr<unsigned>, TCP 실험에서는 소켓·parser 묶음을 넣습니다. 큐는 T를 복사하지 않고 이동해 소유권을 전달합니다.\n\n배열은 Capacity칸을 미리 확보하고, 각 칸을 optional<Entry>로 만듭니다. 비어 있는 칸에는 Entry 객체가 아직 없습니다. 따라서 T를 Capacity번 기본 생성하거나, 가짜 ID로 빈 칸을 표현할 필요가 없습니다. [0,count_)만 값이 있고 [count_,Capacity)는 비어 있다는 불변식을 유지합니다.\n\n이 불변식은 매 연산 뒤에도 참이어야 하는 내부 약속입니다. 중간 항목을 제거할 때 뒤 항목을 당기면 검색과 선택이 이 조밀한 앞부분만 보면 됩니다. 슬롯 수는 고정되지만 T 내부의 동적 저장소와 OS 소켓 버퍼까지 고정되는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "항목 하나와 선택 결과",
+          "language": "cpp",
+          "text": "    struct Entry {\n        std::uint64_t id;\n        T value;\n    };\n\n    struct Pair {\n        Entry first;\n        Entry second;\n    };"
+        },
+        {
+          "label": "채워진 앞부분의 길이를 별도로 저장한다",
+          "language": "cpp",
+          "text": "    mutable std::mutex mu_;\n    std::condition_variable cv_;\n    bool closed_ = false;\n    std::size_t count_ = 0;\n    std::array<Slot, Capacity> slots_{};  // dense prefix [0, count_)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "예외가 중간 상태를 남기지 않게 한다",
+          "body": "등록 성공과 슬롯 당기기는 이동 연산에 의존합니다. 이 구현은 T의 이동 생성·이동 대입·소멸이 예외를 던지지 않도록 static_assert로 제한합니다. mutex 획득 실패까지 모든 연산이 noexcept라는 뜻은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "거절할 수 있는 검사를 이동보다 먼저 한다",
+      "body": "등록 함수는 T&를 받아 검사에 실패하면 호출자의 값을 그대로 둡니다. closed, ID 0, 대기 중 ID 중복, full 순서로 판단합니다. 예를 들어 닫힌 큐에 ID 0을 주면 결과는 closed입니다. 여러 조건이 함께 틀렸을 때의 우선순위도 API 계약입니다.\n\n모든 검사는 같은 잠금 안에 있습니다. 상한 검사를 밖에서 하면 남은 자리가 하나일 때 두 생산자가 모두 자리가 있다고 판단할 수 있습니다. 닫힘 검사만 밖에서 해도 검사 직후 close가 실행되고 그 뒤 새 항목이 들어갈 수 있습니다. 검사와 삽입을 하나의 임계 구역으로 묶습니다.\n\n성공이 확정되면 Entry를 만들어 마지막 빈 슬롯에 이동 생성하고 count_를 늘립니다. notify_all은 대기자에게 다시 상태를 살펴보라는 신호를 줍니다. 자원을 가져갔는지는 반환값 queued로 확인합니다. std::move라는 표현만으로 임의의 타입이 비워진다고 판단하지 말고 해당 타입의 이동 계약을 따릅니다.",
+      "codes": [
+        {
+          "label": "등록 결과",
+          "language": "cpp",
+          "text": "enum class QueueJoin {\n    queued,\n    closed,\n    invalid_id,\n    duplicate,\n    full,\n};"
+        },
+        {
+          "label": "검사한 뒤 자원을 이동한다",
+          "language": "cpp",
+          "text": "    QueueJoin enqueue(std::uint64_t id, T& value) {\n        std::lock_guard<std::mutex> lk(mu_);\n        if (closed_) return QueueJoin::closed;\n        if (id == 0) return QueueJoin::invalid_id;\n        for (std::size_t i = 0; i < count_; ++i) {\n            if (slots_[i]->id == id) return QueueJoin::duplicate;\n        }\n        if (count_ == Capacity) return QueueJoin::full;\n\n        slots_[count_].emplace(Entry{id, std::move(value)});\n        ++count_;\n        cv_.notify_all();\n        return QueueJoin::queued;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "요청 ID와 계정 인증",
+          "body": "ID는 대기 요청을 구별하는 키입니다. 중복 검사는 현재 pending 항목만 봅니다. 지연된 취소 요청이 옛 ID를 참조하는 동안 같은 ID를 새 요청에 재사용하면 다른 참가자를 취소할 수 있으므로 호출자가 수명을 관리해야 합니다. ID가 있다는 사실은 계정 인증을 대신하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "중간을 제거해도 생존자의 순서는 유지한다",
+      "body": "슬롯이 A·B·C·D일 때 B를 제거해 봅시다. 먼저 B를 out으로 이동합니다. C를 B가 있던 칸으로, D를 C가 있던 칸으로 이동 대입하고 마지막 칸을 reset합니다. 결과는 A·C·D이고 out이 B의 자원을 소유합니다.\n\noptional을 이동했다고 원래 optional의 has_value가 자동으로 false가 되는 것은 아닙니다. 이동된 값이 남은 슬롯을 다음 대입 대상으로 쓰고, 마지막 슬롯은 명시적으로 reset합니다. 이 순서로 살아 있는 항목을 복제하지 않으면서 조밀한 앞부분을 유지합니다.\n\ntake_at_locked는 이미 mutex를 가진 내부 함수이며 유효한 인덱스만 받습니다. 외부 cancel은 ID를 찾아 이 함수를 호출하고 제거한 Entry를 반환합니다. 호출자는 반환값을 처리하거나 소멸시켜 자원을 정리할 수 있습니다. 대상이 없으면 nullopt입니다.",
+      "codes": [
+        {
+          "label": "원소를 꺼내고 뒤를 당긴다",
+          "language": "cpp",
+          "text": "    Entry take_at_locked(std::size_t idx) {\n        Entry out = std::move(*slots_[idx]);\n        for (std::size_t i = idx + 1; i < count_; ++i) {\n            slots_[i - 1] = std::move(slots_[i]);\n        }\n        slots_[count_ - 1].reset();\n        --count_;\n        return out;\n    }"
+        },
+        {
+          "label": "취소 결과가 자원을 소유한다",
+          "language": "cpp",
+          "text": "    std::optional<Entry> cancel(std::uint64_t id) {\n        std::lock_guard<std::mutex> lk(mu_);\n        for (std::size_t i = 0; i < count_; ++i) {\n            if (slots_[i]->id == id) {\n                std::optional<Entry> removed = take_at_locked(i);\n                cv_.notify_all();\n                return removed;\n            }\n        }\n        return std::nullopt;\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "배열을 고른 비용",
+          "body": "한 번의 삭제는 뒤 항목 수만큼 이동하므로 O(N)입니다. 여러 항목을 차례로 제거하는 한 번의 정리는 최악 O(N²)이 될 수 있습니다. 작은 고정 상한에서 순서와 소유권을 눈으로 추적하기 쉬운 구현입니다. 상한을 크게 늘릴 때는 한 번의 압축이나 다른 자료구조와 비교합니다."
+        }
+      ]
+    },
+    {
+      "title": "취소와 선택이 겹치면 누가 가져가는가",
+      "body": "A·B가 대기 중일 때 cancel(A)와 try_pair가 동시에 호출될 수 있습니다. 두 연산이 같은 mutex를 사용하면 둘 중 하나가 먼저 내부 상태를 바꿉니다. 취소가 먼저라면 A는 취소 결과로 나가고 B만 남습니다. 선택이 먼저라면 Pair가 A·B를 가져가고 취소는 대기열에서 A를 찾지 못합니다.\n\n이처럼 동시에 겹친 연산을 허용되는 하나의 순서로 해석하는 관점을 선형화라고 합니다. 이 큐에서는 잠금 안의 제거와 인계가 소유권 결정 경계입니다. 같은 A를 취소 결과와 Pair가 모두 소유하는 결과는 허용하지 않습니다.\n\n실제 네트워크의 취소는 서버가 메시지를 읽고 해석해야 관측됩니다. 사용자가 버튼을 누른 시각이 서버의 선택보다 빨랐다는 이유만으로 선택을 소급해서 취소할 수는 없습니다. Pair로 이미 넘어간 연결에는 로비나 게임 단계의 취소·끊김 정책이 적용됩니다.",
+      "codes": [
+        {
+          "label": "허용되는 두 순서",
+          "language": "text",
+          "text": "순서 1: cancel(A) → A 반환 → try_pair → 상대 부족\n순서 2: try_pair → Pair(A,B) → cancel(A) → nullopt\n금지:   cancel도 A 반환, Pair에도 A 포함"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "알림과 성공 응답",
+          "body": "cv.notify_all은 서버 안의 대기 스레드를 깨우는 신호입니다. 클라이언트에게 취소 성공을 알리는 프로토콜 응답이 아닙니다. 이 둘을 분리해야 화면의 취소 상태를 서버의 관측 결과와 맞출 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "선택 전에 대기 상태를 정리한다",
+      "body": "큐 자체는 소켓 규약을 몰라도 됩니다. 대신 poll(id,T&)이라는 정책 함수를 받아 현재 항목을 유지할지 결정합니다. false라면 꺼낸 Entry를 그 자리에서 소멸시키고, true라면 다음 인덱스로 진행합니다. 제거 뒤 인덱스를 증가시키지 않는 이유를 A·B·C에서 B와 C가 모두 취소된 예로 확인해 보세요. C가 당겨진 칸도 검사해야 합니다.\n\n모든 pending 항목을 검사한 뒤 두 명 이상이면 앞의 두 명을 꺼냅니다. Poll과 제거·선택은 같은 잠금 안에 있으므로 그 사이 다른 cancel이 끼어들어 같은 자원을 꺼내지 못합니다. try_pair는 상대가 생길 때까지 기다리지 않지만 mutex 획득에서는 대기할 수 있습니다.\n\n콜백을 잠금 안에서 호출하는 만큼 계약이 중요합니다. Poll은 noexcept이고 작업량이 제한되어야 하며 블로킹 I/O나 큐 재진입을 해서는 안 됩니다. 큐를 다시 부르면 같은 비재귀 mutex를 기다려 멈출 수 있습니다. 제거 시 T의 소멸도 잠금 안이므로 같은 주의가 필요합니다.",
+      "codes": [
+        {
+          "label": "제거하면 같은 인덱스를 다시 검사한다",
+          "language": "cpp",
+          "text": "    template <class Poll>\n    void prune_locked(Poll& poll) {\n        std::size_t i = 0;\n        while (i < count_) {\n            if (poll(slots_[i]->id, slots_[i]->value)) {\n                ++i;\n            } else {\n                take_at_locked(i);\n            }\n        }\n    }"
+        },
+        {
+          "label": "살아남은 앞의 두 항목을 인계한다",
+          "language": "cpp",
+          "text": "    template <class Poll>\n    std::optional<Pair> try_pair(Poll&& poll) {\n        static_assert(\n            std::is_nothrow_invocable_r_v<bool, Poll&, std::uint64_t, T&>,\n            \"Poll must be noexcept-invocable as bool(std::uint64_t, T&)\");\n        std::lock_guard<std::mutex> lk(mu_);\n        if (closed_) return std::nullopt;\n\n        prune_locked(poll);\n        if (count_ < 2) return std::nullopt;\n\n        Entry a = take_at_locked(0);\n        Entry b = take_at_locked(0);\n        return std::optional<Pair>{Pair{std::move(a), std::move(b)}};\n    }"
+        }
+      ],
+      "reference": {
+        "path": "server/matchmaker.cpp",
+        "symbol": "bool waitingPlayerStillActive",
+        "invariant": "취소·수신 오류를 관측한 항목을 제거하고 남은 순서로 선택한다.",
+        "mayDiffer": "실제 서버는 QUEUE_CANCEL과 framing 규약을 직접 검사한다. 학습 큐는 정책을 주입받는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "확인 직후의 끊김",
+          "body": "Poll이 true를 반환한 직후에도 상대가 종료할 수 있습니다. 큐는 이미 관측한 취소·오류를 제외하며, 인계받은 로비와 게임 단계에서도 수신·송신 실패를 처리해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "한 명만 남았을 때 기다리는 사건",
+      "body": "빈 큐의 소비자는 등록 또는 종료를 기다리면 됩니다. 두 사건은 큐를 수정하는 함수가 condition_variable에 알립니다. 하지만 한 명이 소켓으로 취소를 보내는 사건은 큐 함수 호출이 아닙니다. 네트워크 바이트가 도착했다고 C++ 조건 변수가 자동으로 깨어나지는 않습니다.\n\ncount_ >= 2만 기다리는 predicate를 쓰면 혼자 남은 A의 취소는 B가 등록할 때까지 읽히지 않을 수 있습니다. 소켓과 세션 슬롯도 그동안 유지됩니다. 그래서 0명이면 등록·종료 predicate wait를, 1명이면 50ms의 wait_for를 사용합니다. 깨어난 뒤 바깥 반복문에서 종료·생존·인원 조건을 다시 확인합니다.\n\nwait는 기다리는 동안 mutex를 놓고 반환 전에 다시 얻습니다. 덕분에 생산자와 종료 호출이 상태를 바꿀 수 있습니다. 알림은 작업을 진행할 허가가 아니므로 허위 기상이나 다른 소비자의 변경 뒤에도 조건을 다시 읽습니다. 50ms는 재검사를 시도하는 간격이며 실제 처리 지연에는 스케줄링·잠금 대기·검사 비용이 더해집니다.",
+      "codes": [
+        {
+          "label": "빈 큐와 단독 대기의 조건을 나눈다",
+          "language": "cpp",
+          "text": "    template <class Poll>\n    std::optional<Pair> wait_pair(Poll&& poll) {\n        static_assert(\n            std::is_nothrow_invocable_r_v<bool, Poll&, std::uint64_t, T&>,\n            \"Poll must be noexcept-invocable as bool(std::uint64_t, T&)\");\n        std::unique_lock<std::mutex> lk(mu_);\n        for (;;) {\n            if (closed_) return std::nullopt;\n\n            prune_locked(poll);\n            if (count_ >= 2) {\n                Entry a = take_at_locked(0);\n                Entry b = take_at_locked(0);\n                return std::optional<Pair>{Pair{std::move(a), std::move(b)}};\n            }\n\n            if (count_ == 0) {\n                cv_.wait(lk, [this] { return closed_ || count_ != 0; });\n            } else {\n                cv_.wait_for(lk, std::chrono::milliseconds(50));\n            }\n        }\n    }"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "폴링 비용과 이벤트 연결",
+          "body": "한 명인 동안 재검사 사이에는 잠들어 바쁜 반복을 피합니다. 많은 큐를 운영한다면 소켓 준비성 이벤트와 큐 상태 변경을 한 이벤트 루프에 연결하는 설계도 비교할 수 있습니다. 현재 구현의 장점은 기다리는 조건과 종료 경로가 한 함수에 보인다는 점입니다."
+        }
+      ]
+    },
+    {
+      "title": "큐를 닫는 것과 사용자를 끝내는 것",
+      "body": "close는 closed_를 세우고 남은 항목을 정리한 뒤 대기자를 깨웁니다. 같은 함수를 여러 번 호출해도 추가 항목이 되살아나지 않습니다. enqueue와 같은 mutex 아래 검사하므로 종료가 먼저라면 그 뒤 등록은 closed로 거절됩니다.\n\nPair로 이동한 항목은 이미 slots_ 밖에 있습니다. 따라서 대기열 close만으로 진행 중인 경기의 소켓이 닫히지는 않습니다. 서버 전체를 종료하려면 로비와 게임 담당자에게도 종료를 요청하고 그 작업의 완료를 기다려야 합니다.\n\n알림을 보냈다고 wait_pair를 실행하던 스레드가 곧바로 반환한 것은 아닙니다. 소유자는 close 후 큐를 사용하는 모든 생산자·소비자의 join 또는 drain을 마친 다음 큐를 파괴합니다. 큐 소멸자에서 자동으로 사용자를 기다리지 않으므로 이 순서를 소유자의 스코프에 드러냅니다.",
+      "codes": [
+        {
+          "label": "남은 대기 자원만 정리한다",
+          "language": "cpp",
+          "text": "    void close() {\n        std::lock_guard<std::mutex> lk(mu_);\n        if (closed_) return;\n        closed_ = true;\n        for (std::size_t i = 0; i < count_; ++i) {\n            slots_[i].reset();\n        }\n        count_ = 0;\n        cv_.notify_all();\n    }"
+        },
+        {
+          "label": "종료의 소유권 순서",
+          "language": "text",
+          "text": "새 입장 작업 접수 중단\n큐 close → wait_pair 깨우기\n입장 작업과 매처 join/drain\n큐 소멸\n\n이미 인계된 로비/게임 작업은 그 소유자의 종료 절차로 정리"
+        }
+      ],
+      "reference": {
+        "path": "server/matchmaker.cpp",
+        "symbol": "void Matchmaker::shutdown",
+        "invariant": "접수를 닫고 대기를 깨운 뒤 사용자가 끝날 때까지 소유자가 기다린다.",
+        "mayDiffer": "현재 서버는 main의 matcher.join과 connWorkers.wait로 매치메이커를 참조하는 작업을 회수한다."
+      }
+    },
+    {
+      "title": "소켓과 parser를 하나의 대기 항목으로",
+      "body": "실제 연결을 넣기 위해 Peer를 만듭니다. socket은 앞으로 받을 바이트의 통로이고 parser는 이미 받은 바이트를 보관합니다. 입장 요청과 취소가 같은 수신 묶음에 있었다면 취소는 parser 안에 있을 수 있습니다. 커널 소켓만 검사하면 이미 읽힌 취소를 놓칠 수 있습니다.\n\npoll_peer는 먼저 parser의 완성 프레임을 꺼내고, 그다음 논블로킹 수신을 한 번 수행한 뒤 다시 parser를 확인합니다. TYPE51은 취소이며 payload가 잘못 붙은 취소도 연결 제거로 처리합니다. 파싱 오류·수신 EOF·복구 불가능한 수신 오류도 제거합니다. would_block과 interrupted는 지금 종료를 확정할 근거가 없으므로 유지합니다.\n\n다른 완성 프레임은 이 단계에서 소비합니다. 반면 아직 완성되지 않은 꼬리는 parser에 남아 다음 검사나 인계로 이어집니다. 게임 입력은 선택된 뒤 보내는 순서로 실험합니다. 선행 입력을 보존하려면 허용 메시지와 버퍼 정책부터 별도로 정해야 합니다.",
+      "codes": [
+        {
+          "label": "연결의 두 상태를 함께 이동한다",
+          "language": "cpp",
+          "text": "struct Peer\n{\n    Socket socket;\n    FrameParser parser;\n};\n\nbool poll_peer(std::uint64_t, Peer& peer) noexcept\n{\n    for (unsigned pass = 0; pass < 2; ++pass)\n    {\n        for (;;)\n        {\n            Frame f;\n            auto parsed = peer.parser.next(f);\n            if (parsed == ParseStatus::error)\n                return false;\n            if (parsed == ParseStatus::need_more)\n                break;\n            if (f.type == 51)\n                return false; // Empty = cancel; malformed cancel also closes.\n            // Other complete messages are not accepted in the queue phase.\n        }\n        if (pass == 1)\n            return true;\n        std::uint8_t bytes[16];\n        auto r = try_receive(peer.socket, bytes, sizeof(bytes));\n        if (r.state == ReceiveState::would_block || r.state == ReceiveState::interrupted)\n            return true;\n        if (r.state != ReceiveState::progress || !peer.parser.append(bytes, r.count))\n            return false;\n    }\n    return true;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "논블로킹의 작업량",
+          "body": "이 함수는 수신을 한 번, 최대 16바이트로 제한합니다. parser도 누적 저장 한도를 갖습니다. 데이터 도착을 기다리지 않아도 파싱과 소멸 비용은 들므로 큐 상한을 늘릴 때는 전체 잠금 점유 시간을 확인해야 합니다."
+        }
+      ],
+      "reference": {
+        "path": "server/matchmaker.cpp",
+        "symbol": "bool waitingPlayerStillActive",
+        "invariant": "이미 받은 부분 스트림을 연결과 함께 유지하고 단계별 메시지 정책을 적용한다.",
+        "mayDiffer": "실제 타입 번호·수신 버퍼 크기·보유 정보는 다르며 다른 완성 프레임은 큐에서 소비한다."
+      }
+    },
+    {
+      "title": "세 연결에서 가운데 취소를 확실히 재현한다",
+      "body": "TCP 실험은 loopback listener에 세 클라이언트를 연결합니다. 각자 입장 TYPE50을 보내고 두 번째만 곧바로 취소 TYPE51을 덧붙입니다. 입장 처리기로 소켓과 parser를 넘긴 다음 ID 1·2·3을 순서대로 큐에 넣습니다.\n\n취소를 빠르게 보냈다는 사실만으로 서버가 선택 전에 읽었다고 가정하면 검사 결과가 타이밍에 흔들립니다. admit_fixture는 자신이 보낸 바이트 수를 알고, 한 번의 receive 용량을 최대 3으로 제한해 그만큼 모은 뒤 FirstAdmission에 전달합니다. 이렇게 두 번째 취소가 parser 안에 이미 들어간 조건을 만듭니다. 운영 서버가 미래 메시지 길이를 안다는 뜻은 아닙니다.\n\nwait_pair가 1·3을 반환하면 mutex와 조건 변수로 main에 선택 완료를 알립니다. 그 뒤 main이 두 클라이언트에서 게임 입력을 보냅니다. 큐 인계·선택 완료·게임 입력의 순서가 명시되어 있으므로 네트워크의 우연한 합쳐짐에 기대지 않습니다.",
+      "codes": [
+        {
+          "label": "입장 뒤 취소가 parser에 남는 입력을 구성한다",
+          "language": "cpp",
+          "text": "Peer admit_fixture(Socket socket, std::size_t expected)\n{\n    // The fixture knows whether it sent5 or8 bytes. Gather with cap3 before feed\n    // so the cancel is deterministically already buffered, not a TCP timing bet.\n    std::array<std::uint8_t, 16> bytes{};\n    std::size_t done = 0;\n    require(expected <= bytes.size());\n    while (done < expected)\n    {\n        auto r = receive_some(socket, bytes.data() + done, std::min<std::size_t>(3, expected - done));\n        require(r.status == StreamStatus::progress && r.count);\n        done += r.count;\n    }\n    auto first = *FirstAdmission::create(0, 1000);\n    require(first.feed(bytes.data(), done, 1) == AdmissionState::routed);\n    AdmissionHandoff handoff;\n    require(first.take(handoff) && handoff.request.route == AdmissionRoute::queue);\n    int error = 0;\n    require(set_nonblocking(socket, true, error));\n    return {std::move(socket), std::move(handoff.parser)};\n}"
+        },
+        {
+          "label": "실제 세 연결을 등록한다",
+          "language": "cpp",
+          "text": "std::array<Socket, 3> clients;\nPairQueue<Peer, 8> queue;\nfor (unsigned i = 0; i < 3; ++i)\n{\n    clients[i] = connect_loopback(port, error);\n    require(clients[i].valid());\n    auto accepted = accept_one(listener, error);\n    require(accepted.valid());\n    Frame first;\n    first.type = 50;\n    first.size = 2;\n    first.payload = {1, 0};\n    std::vector<std::uint8_t> wire;\n    append(wire, first);\n    if (i == 1)\n    {\n        Frame cancel;\n        cancel.type = 51;\n        append(wire, cancel);\n    }\n    send_fixture(clients[i], wire);\n    auto p = admit_fixture(std::move(accepted), wire.size());\n    require(queue.enqueue(i + 1, p) == QueueJoin::queued && !p.socket.valid());\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실험 제어와 프로토콜 구현",
+          "body": "이 fixture는 입장/취소 인계를 관찰하기 위한 제어 장치입니다. 서비스의 인증·MATCH_FOUND·READY 교환을 대신 구현한 것이 아닙니다. round=1, seed=77과 역할은 실험이 직접 공급합니다."
+        }
+      ]
+    },
+    {
+      "title": "선택된 연결로 실제 게임 입력을 처리한다",
+      "body": "매처 작업은 반환된 Pair에서 두 소켓을 읽어 TYPE41을 해석합니다. round=1, 첫 tick=0, 입력 수=1을 확인하고, 같은 초기 보드로 준비한 host와 peer에 각 로컬 입력과 상대 입력을 넣습니다. 1은 drop, 3은 중립 입력을 보냅니다.\n\nhost와 peer는 자기 로컬 입력의 위치가 다르지만 규칙에 넘기는 두 플레이어의 입력 순서는 일치해야 합니다. 둘 다 한 tick 진행한 뒤 left·right 보드의 정규 상태 바이트를 비교합니다. 해시값만 같다고 판단하지 않고 직렬화한 전체 바이트가 같은지 확인합니다.\n\nmain은 게임 입력을 보낸 뒤 대기 큐를 닫습니다. 매처가 가진 Pair는 큐 밖에 있으므로 처리를 끝낼 수 있습니다. 작업 그룹의 wait 뒤에 verified와 실패 수를 읽으면 기록한 결과의 수명·동기화 경계도 함께 드러납니다.",
+      "codes": [
+        {
+          "label": "선택된 참가자의 입력이 같은 시뮬레이션으로 간다",
+          "language": "cpp",
+          "text": "const Frame a = read_input(pair->first.value), b = read_input(pair->second.value);\nRoundBatch ia, ib;\nrequire(decode_round_input(a, ia) && decode_round_input(b, ib));\nrequire(ia.round == 1 && ib.round == 1 && ia.inputs.first_tick == 0 && ib.inputs.first_tick == 0 && ia.inputs.count == 1 && ib.inputs.count == 1);\nauto board = study_round::Round::create_seeded(study_grid::Grid{}, 77);\nrequire(bool(board));\nRoundPlay host, peer;\nconst study_combat::Duel duel(*board, *board);\nrequire(host.prepare(1, duel, Side::host, 0) && peer.prepare(1, duel, Side::peer, 0) && host.start() && peer.start());\nFrame local_a, local_b;\nrequire(host.capture(ia.inputs.masks[0], local_a).input == Put::stored && peer.capture(ib.inputs.masks[0], local_b).input == Put::stored);\nrequire(host.receive(b).input == Put::stored && peer.receive(a).input == Put::stored);\nrequire(host.advance() == Advance::advanced && peer.advance() == Advance::advanced);\nrequire(snapshot(host) == snapshot(peer));\nverified = true;"
+        },
+        {
+          "label": "대기열 종료 후 인계된 작업 완료를 기다린다",
+          "language": "cpp",
+          "text": "// The pair now owns its sockets; closing the pending queue does not close it.\nqueue.close();\nworkers.wait();\nrequire(verified && workers.failed_tasks() == 0 && queue.size() == 0);"
+        }
+      ]
+    },
+    {
+      "title": "행동 모델과 경합의 허용 결과로 검사한다",
+      "body": "자료구조 검사는 내부 배열을 직접 읽는 대신 std::deque로 단순한 기준 모델을 만듭니다. 같은 등록·취소·제거 정책·선택 요청을 양쪽에 보내 결과와 남은 순서·크기를 비교합니다. 64묶음에 각각 512연산을 수행해 32768개의 상태 변화를 관찰합니다. 입력은 고정된 의사난수 흐름으로 재현합니다.\n\n실패 입력 보존도 확인합니다. 등록 전에 unique_ptr의 주소를 기억하고 거절 뒤 주소와 값이 유지되는지 검사합니다. 성공하면 호출자의 포인터는 비고 큐에서 꺼낸 항목이 값을 소유해야 합니다. 값이 맞아도 자원이 두 번 정리되거나 거절 때 사라지는 오류는 별도로 잡아야 합니다.\n\n경합 검사는 A·B를 넣고 취소와 선택을 두 스레드에서 시작합니다. 둘 다 끝난 뒤 취소 성공과 Pair 존재 중 정확히 하나만 참이어야 합니다. 128번 반복은 다양한 실행 순서를 관찰하는 보조 수단입니다. 모든 스케줄을 열거한 증명은 아니므로 허용 결과는 mutex와 소유권 계약에서도 설명할 수 있어야 합니다.",
+      "codes": [
+        {
+          "label": "취소와 선택 결과는 A의 소유권을 동시에 얻을 수 없다",
+          "language": "cpp",
+          "text": "CHECK(bool(cancelled) != bool(paired));\nif (cancelled)\n{\n    CHECK(cancelled->id == 1 && q.size() == 1);\n    auto survivor = q.cancel(2);\n    CHECK(survivor && survivor->id == 2);\n}\nelse\n    CHECK(paired->first.id == 1 && paired->second.id == 2 && q.size() == 0);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "단독 취소가 두 번째 참가자에 의존하는지 검사",
+          "body": "별도 검사에서는 첫 Poll이 live=true를 읽은 사실을 확인한 다음 live=false로 바꿉니다. 큐에 등록하거나 notify하지 않아도 재검사가 발생해야 합니다. 그 뒤 close와 join을 마치고 결과를 확인합니다. 검사 시간 제한은 멈춤을 찾는 장치이며 API의 처리 시간 보장이 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "현재 서버에서 지킬 경계와 비용",
+      "body": "현재 Matchmaker는 PlayerInfo를 값으로 받아 deque에 이동합니다. 성공하면 true를, 종료 중이거나 대기 상한 1024에 닿으면 연결을 종료하고 false를 반환합니다. 기준 PairQueue가 등록 실패 때 호출자 T를 보존하는 것과 API가 다릅니다. 호출자는 자신이 쓰는 API의 반환값과 자원 정리 정책을 함께 읽어야 합니다.\n\n대기열 상한과 worker 상한은 필요한 자원이 다릅니다. 입장 worker가 등록 후 끝나도 연결은 큐에서 살아 있습니다. worker 수만 제한해서는 이 대기 연결 수를 제한할 수 없습니다. 반대로 대기열의 1024 상한만으로 로비·경기·커널 버퍼를 포함한 서버 전체 메모리까지 제한하지도 못합니다.\n\n서버의 순회·정리·선택은 같은 잠금 안에서 진행합니다. deque 끝 삽입은 반복자를 무효화하지만 기존 원소 참조는 보존하고, 중간 삭제는 더 넓은 무효화를 일으킬 수 있습니다. 잠금의 이유를 단순히 “삽입하면 모든 참조가 깨진다”로 설명하면 실제 컨테이너 계약을 오해하게 됩니다. 잠금은 공유 큐의 변경과 순회·소유권 인계를 직렬화합니다. [C++ deque 변경 계약](https://eel.is/c++draft/deque.modifiers)에서 경우별 규칙을 확인할 수 있습니다.",
+      "reference": {
+        "path": "server/matchmaker.h",
+        "symbol": "static constexpr std::size_t kMaxWaiting",
+        "invariant": "단계의 수명이 유지되는 동안 그 단계의 자원 상한도 유지한다.",
+        "mayDiffer": "현재 서버는 계정/IP lease·seed·UUID를 함께 관리하며 소비자는 하나다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "잠금 밖으로 꺼내 검사하는 대안",
+          "body": "느린 I/O를 잠금 안에 넣는 대신 검사 대상의 소유권을 별도 상태로 옮기고 잠금을 풀 수 있습니다. 그동안 취소·종료가 어디에서 그 대상을 찾는지 추가 상태 설계가 필요합니다. 현재 방식은 작은 대기 상한과 논블로킹 수신으로 단순한 소유권 경계를 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "누적 프로젝트에 추가하고 결과를 읽는다",
+      "body": "누적 체크포인트에 PairQueue 헤더와 계약 검사·TCP 실험 타깃을 추가합니다. 큐 자체는 헤더 템플릿이며 mutex와 조건 변수를 쓰므로 Threads 의존성을 표시합니다. TCP 실험은 StudySocket에도 연결합니다. 누적 main의 창과 게임 조작 경로는 그대로 두고 별도 실행 파일에서 서버 쪽 흐름을 관찰합니다.\n\n저장소 루트에서 아래 명령을 실행하면 이번에 추가한 두 검사만 선택합니다. 계약 검사는 자료구조와 경합·단독 재검사를, probe는 실제 연결 인계와 게임 입력을 확인합니다. SDL 설정에서도 창을 띄우지 않는 두 타깃의 책임은 같습니다.\n\n실행 결과에서 1·3이 선택되었다는 사실과 큐를 닫은 뒤 상태 바이트가 같다는 사실을 각각 읽습니다. 참가자 선택, 자원 수명, 게임 상태 일치를 별도 관찰값으로 나누면 어디서 흐름이 어긋났는지 찾기 쉽습니다.",
+      "codes": [
+        {
+          "label": "두 추가 타깃",
+          "language": "cmake",
+          "text": "add_executable(pair_queue_contract tests/pair_queue_contract.cpp)\ntarget_include_directories(pair_queue_contract PRIVATE .)\ntarget_link_libraries(pair_queue_contract PRIVATE Threads::Threads)\nadd_test(NAME pair_queue_contract COMMAND pair_queue_contract)\nset_tests_properties(pair_queue_contract PROPERTIES TIMEOUT 20)\n\nadd_executable(pair_queue_probe tools/pair_queue_probe.cpp)\ntarget_include_directories(pair_queue_probe PRIVATE .)\ntarget_link_libraries(pair_queue_probe PRIVATE StudySocket Threads::Threads)\nadd_test(NAME pair_queue_probe COMMAND pair_queue_probe)\nset_tests_properties(pair_queue_probe PROPERTIES TIMEOUT 15)"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/102-match-queue -B out/study-102 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-102 --target pair_queue_contract pair_queue_probe -j2\nctest --test-dir out/study-102 -R '^pair_queue_(contract|probe)$' --output-on-failure"
+        }
+      ]
+    },
+    {
+      "title": "전체 파일에서 소유권의 끝을 찾아본다",
+      "body": "전체 코드를 읽을 때는 T가 어디로 이동하고 어느 스코프에서 소멸하는지 표시해 보세요. 등록 실패는 호출자, 취소 성공은 반환 Entry, 생존 검사 제거는 큐 내부, 선택 성공은 Pair가 소유합니다. close는 아직 pending인 항목만 정리합니다.\n\n설계에서 유지할 핵심은 같은 상태를 바꾸는 연산의 직렬화, 생존자 순서, 소켓과 parser의 동반 인계, 큐 사용자의 종료 대기입니다. 저장 컨테이너·상한·폴링 간격·취소 프레임 번호는 정책에 따라 달라질 수 있습니다. 변경할 때는 이 소유권 표와 단독 취소 실험을 기준으로 동작을 대조합니다.",
+      "codes": [
+        {
+          "label": "net/pair_queue.h",
+          "language": "cpp",
+          "file": "checkpoints/102-match-queue/net/pair_queue.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/pair_queue_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/102-match-queue/tests/pair_queue_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/pair_queue_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/102-match-queue/tools/pair_queue_probe.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "server/matchmaker.cpp",
+        "symbol": "std::optional<Match> Matchmaker::waitForPair",
+        "invariant": "대기 항목에서 선택 결과로 이동한 순간 소유자를 바꾼다.",
+        "mayDiffer": "현재 Match는 서버에서 정한 seed·match ID·UUID를 더해 로비로 넘긴다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "102-1",
+      "question": "A·B·C 순서로 등록했고 B의 취소가 선택보다 먼저 큐에서 처리되었습니다. 생존 검사에서 다른 연결은 유지됩니다. 첫 Pair는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "A·B"
+        },
+        {
+          "id": "b",
+          "text": "B·C"
+        },
+        {
+          "id": "c",
+          "text": "A·C"
+        },
+        {
+          "id": "d",
+          "text": "취소가 있으면 전체 큐 폐기"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "A·C",
+      "explanation": "중간 제거는 생존자의 상대 순서를 유지합니다. A·C가 앞의 두 항목이 되어 Pair로 이동합니다."
+    },
+    {
+      "id": "102-2",
+      "question": "대기자가 A 한 명일 때 count >= 2인 predicate만 기다립니다. A가 소켓으로 취소를 보내도 처리되지 않는 직접적인 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소켓 데이터가 이 조건 변수의 알림을 발생시키지 않는다"
+        },
+        {
+          "id": "b",
+          "text": "mutex가 있으면 recv를 호출할 수 없다"
+        },
+        {
+          "id": "c",
+          "text": "FIFO는 취소를 허용하지 않는다"
+        },
+        {
+          "id": "d",
+          "text": "TCP는 상대가 두 명이어야 송신한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "소켓 데이터가 이 조건 변수의 알림을 발생시키지 않는다",
+      "explanation": "등록·종료 함수는 notify하지만 소켓 바이트 도착은 별개 사건입니다. 단독 상태에서 주기적으로 다시 검사하거나 소켓 이벤트를 대기 흐름에 연결해야 합니다."
+    },
+    {
+      "id": "102-3",
+      "question": "기준 PairQueue에서 closed와 ID 0 조건을 동시에 만족하는 등록이 거절됩니다. 반환값과 입력 T의 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "invalid_id, T는 큐로 이동됨"
+        },
+        {
+          "id": "b",
+          "text": "closed, T는 큐로 이동됨"
+        },
+        {
+          "id": "c",
+          "text": "invalid_id, T 보존"
+        },
+        {
+          "id": "d",
+          "text": "closed, T 보존"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "closed, T 보존",
+      "explanation": "검사 순서는 closed가 먼저이며 모든 검사 뒤에만 이동합니다. 실제 서버의 값 인수·거절 시 연결 종료 API와 구별합니다."
+    },
+    {
+      "id": "102-4",
+      "question": "A·B가 대기하고 Poll은 모두 유지합니다. cancel(A)와 try_pair가 경합할 때 이 구현이 허용하는 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "취소 결과와 Pair가 모두 A를 소유한다"
+        },
+        {
+          "id": "b",
+          "text": "취소가 A를 얻거나 Pair가 A·B를 얻는 둘 중 하나다"
+        },
+        {
+          "id": "c",
+          "text": "어느 순서든 취소가 반드시 이긴다"
+        },
+        {
+          "id": "d",
+          "text": "경합하면 B도 반드시 폐기한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "취소가 A를 얻거나 Pair가 A·B를 얻는 둘 중 하나다",
+      "explanation": "두 연산의 상태 변경은 같은 mutex로 직렬화됩니다. 먼저 제거한 쪽이 A를 소유하고, 나중 연산은 바뀐 큐를 관측합니다."
+    },
+    {
+      "id": "102-5",
+      "question": "wait_pair가 Pair를 반환한 뒤 main이 큐를 close했습니다. 안전한 다음 행동은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Pair의 소켓도 이미 닫혔다고 가정한다"
+        },
+        {
+          "id": "b",
+          "text": "깨운 소비자가 반환하기 전에 큐를 파괴한다"
+        },
+        {
+          "id": "c",
+          "text": "큐 사용자를 drain하고, 인계된 Pair 작업은 그 수명에 맞춰 완료시킨다"
+        },
+        {
+          "id": "d",
+          "text": "close가 worker의 join까지 자동 처리하므로 바로 모든 상태를 파괴한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "큐 사용자를 drain하고, 인계된 Pair 작업은 그 수명에 맞춰 완료시킨다",
+      "explanation": "close는 pending 항목 정리와 알림을 담당합니다. Pair는 독립적인 소유자이며 큐를 참조하는 모든 사용자의 종료를 기다린 뒤 큐를 파괴해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "A·B·C·D 중 두 항목을 순서대로 취소하며 슬롯 이동과 count를 적습니다.",
+      "cancel과 try_pair의 두 허용 실행 순서를 그리고 소유자를 표시합니다.",
+      "단독 취소 검사에서 큐 notify 없이 다시 Poll되는 이유를 설명합니다.",
+      "세 연결 probe를 실행하고 Pair 인계 전후 소켓·parser와 게임 입력 경계를 따라갑니다."
+    ],
+    "failureChecks": [
+      "닫힘·상한 검사를 mutex 밖으로 옮겼을 때 가능한 실행 순서를 찾습니다.",
+      "완성 프레임 소비와 미완성 바이트 보존을 구별합니다.",
+      "큐 close만 호출하고 사용자를 기다리지 않은 채 파괴하는 수명 오류를 찾습니다."
+    ],
+    "expected": "취소·정리 후 생존자의 등록 순서대로 두 연결을 선택하고, 대기열 종료와 인계된 작업의 수명을 각각 관리한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 큐 초안 검토·실제 서버 단독 취소/종료 후 등록 오류 재현·기준 모델·경합·실제 TCP/RoundPlay 대조",
+    "draftJob": "out/learning-jobs/102-queue-events.jsonl",
+    "corrections": [
+      "enum class와 호출자 ID 재사용 책임을 명시하고 try_pair의 mutex 대기 가능성을 구별",
+      "현재 Matchmaker의 종료 후 등록과 단독 대기 취소 누락 수정, 대기 상한1024와 호출자 반환 처리 추가",
+      "Part7 FIFO·잔여 스트림·deque 무효화·비블로킹 비용·UUID 멱등 저장 조건과 Part13 현재 CMake 발췌 교정",
+      "DeepSeek로 새 검사/실험 파일 2개의 들여쓰기와 줄바꿈만 정리하고 C++ 토큰·주석 동일성 및 문법 검사 확인; 인라인6개도 동일 위치로 재발췌"
+    ],
+    "formatJob": "out/learning-jobs/102-format-events.jsonl"
+  },
+  "validation": [
+    "101 누적 구현 바이트 일치. 새 contract/probe만 SCRIPTED2·SDL2 CTest와 경고 없는 빌드로 검사; 변경 없는 과거 전체 타깃은 재빌드하지 않음",
+    "기준32768 모델 연산·128 취소/선택 경합·단독 폴링·close 및 실제 root FIFO/종료후등록/단독취소/상한 회귀 ASan/UBSan 통과",
+    "실제 root 수정 전 late lease·lone cancel 실패 재현, 수정 후 해소. root 두 기존 구성26/25 CTest 통과",
+    "실제 TCP3연결의 buffered cancel2 제거·Pair1,3 소유권 인계와 queue close 후 RoundPlay 전체 상태 바이트 일치 ASan/UBSan 통과",
+    "실제 tetris_relay 단독취소 EOF 및 두 참가자 매칭, 활성 경기 SIGTERM 회귀 pytest2passed/0skip",
+    "C++ deque.modifiers 원문 계약 대조. loopback fixture는 round/seed/roles를 공급하며 인증·MATCH_FOUND·READY 전체 경로 구현이 아님",
+    "Windows/macOS 네이티브·수동GUI·WAN/부하·모든 스케줄 열거·인증/DB 전체 종료 통합은 미검증",
+    "인라인17(C++16/CMake1) 구현 일치; Part 발췌/링크·Markdown27·504문제와 전체 DOM 차시 탐색·단일 마운트·완료/답안 저장·이전 읽던 위치·file URL/저장 실패 계약 통과. 수동 GUI는 수행하지 않음"
+  ]
+}

@@ -1,0 +1,372 @@
+{
+  "id": "lesson-12",
+  "title": "GL 함수 주소: 선언에서 실제 호출까지",
+  "shortTitle": "함수 주소와 호출 규약",
+  "state": "reviewed",
+  "version": "1.0.2",
+  "start": "시작: SDL 창과 컨텍스트를 만들 수 있지만 애플리케이션에는 GL 함수를 호출할 테이블이 없습니다.",
+  "finish": "완료: 함수 주소 세 개를 정확한 타입으로 조회해 버전·프로파일·장치 정보를 읽습니다. 누락된 주소를 모두 보고하고 실패한 테이블은 공개하지 않습니다.",
+  "objective": "이름, 선언, 링크, 실행 중 주소 조회를 하나의 호출 흐름으로 연결합니다. 작은 GL 로더를 직접 만들며 호출 규약·포인터 수명·기능 지원 검사의 역할을 구분합니다.",
+  "prerequisites": [
+    "11차시 체크포인트",
+    "함수 포인터·참조·템플릿의 기본 문법",
+    "현재 컨텍스트와 자원 수명"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED 빌드·로더 누락 조합·실제 소스 44함수 검사",
+    "실제 offscreen GL 조회: Mesa llvmpipe 4.5 Core·정점 속성 상한 16",
+    "WGL 반환값 모델 검사. 네이티브 Windows/macOS·실제 화면 표시는 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "OpenCode DeepSeek 구현/문제 초안을 SDL2·Microsoft 공식 계약, 실제 GL 호출, 현재 로더 회귀와 대조",
+    "draftJob": "gl-loader / wgl-lookup",
+    "corrections": [
+      "Fn으로 충분한 캐스트에서 불필요한 remove_reference 제거",
+      "3개 진입점이 모두 조회되도록 단락 평가 순서를 명시",
+      "지원되지 않는 이름에도 non-null 가능하다는 SDL 계약 반영",
+      "SDL 설정 조회와 실제 GL 버전 조회 차이를 실험해 11차시 v1.0.1로 정정",
+      "32비트 Windows GL 호출 규약과 WGL 직접 조회 우회 경로 보강",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ],
+    "learnerProseEdit": {
+      "date": "2026-09-21",
+      "note": "집필자 검수 보고는 내부 기록에만 유지. 학습 본문은 구현 원리·실행 방법·예상 결과로 정리. 문항 ID와 코드 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "창과 GL 컨텍스트는 별도 자원이며 GL 호출에는 호출 스레드의 current 연결이 필요합니다.",
+      "초기화 중 자원은 후보에 보관하고, 실패하면 의존 관계에 맞춰 정리합니다."
+    ],
+    "bridge": "이 환경에서 이름으로 함수 주소를 얻고, 그 주소를 올바른 타입으로 호출해 드라이버가 제공하는 정보를 확인합니다."
+  },
+  "sections": [
+    {
+      "title": "함수 이름을 안다고 호출할 수 있는 것은 아니다",
+      "body": "**먼저 예측해 보세요.** 헤더에 `glCreateShader`의 선언을 적으면 링크 오류가 해결될까요? 선언은 컴파일러에게 호출의 모양을 알려 줍니다. 실제로 실행할 코드까지 제공하지는 않습니다.\n\n| 시점 | 필요한 것 | 빠졌을 때의 예 |\n| --- | --- | --- |\n| 컴파일 | 이름·반환형·매개변수 선언 | 이름을 모른다는 오류 |\n| 일반적인 링크 | 직접 호출할 심볼의 정의 또는 연결 정보 | undefined reference / unresolved external symbol |\n| 이번 런타임 조회 | 현재 GL 환경에서 얻은 함수 주소 | 주소 조회 실패 또는 지원 불일치 |\n| 호출 | 주소·타입·호출 규약·유효한 컨텍스트 | 잘못된 호출, GL 오류, 실행 실패 |\n\n심볼은 링커 등이 코드를 식별하는 이름입니다. 선언을 추가하는 일과 심볼의 구현을 연결하는 일은 다릅니다. Windows의 시스템 OpenGL 라이브러리는 오래된 기본 진입점과 이후 함수의 제공 경로가 달라 현대 GL 함수에는 런타임 조회가 필요합니다. 이 프로젝트는 OS별 차이를 플랫폼 함수 하나로 감춥니다.\n\n이번에는 셰이더를 만들지 않고 정보 조회용 세 함수부터 연결합니다. `GetString`은 문자열 정보를, `GetIntegerv`는 정수 정보를, `GetError`는 GL 오류 코드를 얻습니다. 이 함수 자체는 오래된 데스크톱 GL에도 있는 기본 기능이며, 어떤 정보 항목을 조회할 수 있는지는 컨텍스트 버전에 달려 있습니다.",
+      "reference": {
+        "path": "renderer/gl_api.h",
+        "symbol": "#define GL_FUNCS",
+        "invariant": "렌더러가 사용하는 GL 진입점을 명시한다.",
+        "mayDiffer": "현재 게임은 렌더러 기능에 필요한 진입점을 로딩한다. 학습 코드는 정보 조회용 진입점부터 시작한다.",
+        "omitted": "셰이더·버퍼·텍스처의 실제 사용"
+      },
+      "notes": [
+        {
+          "kind": "연결해서 보기",
+          "title": "정적 라이브러리 안에 구현을 넣으면 해결되지 않나요?",
+          "body": "직접 만든 함수라면 그 정의를 아카이브에 넣어 링크할 수 있습니다. GL 드라이버 구현은 우리가 정의한 함수가 아닙니다. [라이브러리와 의존성](#lesson-5)에서 다룬 빌드 연결과, 실행 환경이 제공하는 주소를 얻는 단계를 구분해 보세요."
+        }
+      ]
+    },
+    {
+      "title": "호출할 주소와 주소를 찾아주는 함수를 나눈다",
+      "body": "로더는 GL 함수를 찾지만, SDL을 직접 알아야 할 필요는 없습니다. `Resolver`는 문자열 이름을 받아 주소를 돌려주는 **조회 함수의 타입**입니다. 이 조회 함수를 로더에 전달하면 이름 목록과 OS별 조회 방법을 분리할 수 있습니다.\n\n`void* (*)(const char*)`를 안쪽부터 읽어 봅시다. `*`는 함수 포인터, 괄호 뒤 `(const char*)`는 입력, 앞의 `void*`는 반환형입니다. 이것은 GL의 `GetString` 타입이 아닙니다. 이름으로 GL 주소를 찾아주는 함수의 타입입니다.\n\n호출 흐름은 `load` → 전달받은 `resolver(\"glGetString\")` → `platform_gl_get_proc` → SDL의 주소 조회입니다. 로더는 받은 주소를 테이블에 넣습니다. 테이블의 함수를 나중에 호출할 때는 조회 함수를 다시 거치지 않습니다.\n\n이는 의존성 주입의 작은 사례입니다. “주입”은 프레임워크 이름이 아니라 필요한 동작을 인자로 전달한다는 뜻입니다. 테스트에서는 같은 자리에 가짜 조회 함수를 전달해 정확히 두 번째 주소만 빠진 상황도 만들 수 있습니다.",
+      "codes": [
+        {
+          "label": "새 공개 계약 · 조회 함수와 GL 테이블",
+          "language": "cpp",
+          "text": "using Resolver = void* (*)(const char*);\n\nstruct GlApi {\n    // Null until load() succeeds. Calling a null slot is not allowed.\n    const unsigned char* (STUDY_GL_CALL* GetString)(GLenum)          = nullptr;\n    void                 (STUDY_GL_CALL* GetIntegerv)(GLenum, GLint*) = nullptr;\n    GLenum               (STUDY_GL_CALL* GetError)(void)             = nullptr;\n};"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "void* platform_gl_get_proc",
+        "invariant": "OS별 주소 조회를 플랫폼 경계에서 수행한다.",
+        "mayDiffer": "학습 코드는 조회 함수를 인자로 받고, 현재 게임은 플랫폼 함수를 직접 호출한다.",
+        "omitted": "동적 모듈 일반화·플러그인 로더"
+      }
+    },
+    {
+      "title": "포인터의 타입에는 호출 규약도 들어간다",
+      "body": "`GetString`의 타입을 `const unsigned char* (*)(GLenum)`이라고 쓰면 반환형과 인자 형식은 드러납니다. 하지만 OS와 CPU에 따라 함수가 인자를 전달하고 호출 뒤 상태를 정리하는 규약도 맞춰야 합니다. 이 기계 수준의 약속을 **ABI**(Application Binary Interface)의 일부라고 부릅니다. C++ 소스에서 보이는 API와 구분합니다.\n\n예를 들어 32비트 Windows의 `__stdcall`은 호출받은 쪽이 인자에 사용한 스택 공간을 정리하는 규칙입니다. 호출자와 함수가 다른 규칙을 가정하면 반환 후 스택 위치가 어긋날 수 있습니다. 이 문제는 포인터가 NULL이 아닌지 검사해서 해결되지 않습니다.\n\n아래 `STUDY_GL_CALL`을 세 GL 포인터 타입에 넣습니다. Windows에서는 `__stdcall`, 다른 대상에서는 빈 매크로입니다. [SDL의 주소 조회 문서](https://wiki.libsdl.org/SDL2/SDL_GL_GetProcAddress)는 GL 포인터에 APIENTRY 호출 규약을 쓰도록 설명하며, [Microsoft의 __stdcall 설명](https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170)은 x64에서는 이 지정이 무시됨을 명시합니다. 따라서 x64에서 잘 실행된 결과만으로 32비트에서도 맞다고 추정하면 안 됩니다.\n\n컴파일러가 반환형·인자·규약을 알도록 한 뒤 받은 주소를 그 타입으로 바꿉니다. `reinterpret_cast`가 원래 함수의 시그니처를 검사해 주지는 않습니다. 이름과 타입을 올바르게 짝지을 책임은 로더에 남습니다.",
+      "codes": [
+        {
+          "label": "헤더 · 플랫폼별 GL 호출 규약",
+          "language": "cpp",
+          "text": "#if defined(_WIN32)\n#define STUDY_GL_CALL __stdcall\n#else\n#define STUDY_GL_CALL\n#endif"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_api.h",
+        "symbol": "#define TETRIS_GL_APIENTRY",
+        "invariant": "선언과 정의, 주소 변환에서 같은 호출 규약을 유지한다.",
+        "mayDiffer": "현재 게임은 GL_FUNCS 매크로로 선언·정의·로딩을 생성한다.",
+        "omitted": "32비트 Windows ABI의 세부 규칙"
+      }
+    },
+    {
+      "title": "주소를 함수 포인터로 바꾸는 한 자리를 만든다",
+      "body": "`resolve_slot`은 함수 포인터 한 칸을 채우는 보조 함수입니다. `Fn&`에 `candidate.GetString`을 전달하면 Fn은 GetString의 포인터 타입으로 추론되고, slot은 그 칸을 가리키는 참조가 됩니다. 그래서 `reinterpret_cast<Fn>(raw)`는 호출 규약까지 포함한 타입을 사용합니다.\n\n여기서 `decltype(slot)`을 바로 캐스트 대상으로 쓰면 Fn이 아니라 `Fn&`라는 참조 타입을 얻습니다. 선언이 어떻게 생겼는지 모르고 decltype을 붙이는 것보다, 템플릿이 이미 알려 준 Fn을 쓰는 편이 정확합니다. 반면 실제 게임의 전역 포인터 변수에 쓰는 `decltype(gl_GetString)`은 그 변수의 포인터 타입입니다.\n\nSDL은 이름 조회의 결과를 `void*`로 전달합니다. 이 값과 함수 포인터 사이의 변환은 SDL과 대상 구현이 지원하는 계약을 이용합니다. ISO C++의 모든 환경에서 객체 포인터와 함수 포인터의 표현이 같다고 일반화하지 않습니다. 주소를 얻어도 인자 형식이 틀린 함수 포인터로 호출하면 올바른 호출이 되지 않습니다.",
+      "codes": [
+        {
+          "label": "추가 · 한 진입점의 조회",
+          "language": "cpp",
+          "text": "template <typename Fn>\nbool resolve_slot(Fn& slot, Resolver resolver, const char* name)\n{\n    void* raw = resolver(name);\n    if (raw == nullptr) {\n        // Report this name and keep going, so the caller sees every gap.\n        std::fprintf(stderr, \"[GL] missing entry point: %s\\n\", name);\n        return false;\n    }\n    // `Fn` is the value type of the slot. The void* -> function-pointer conversion is the\n    // platform (SDL) contract, not a universally portable ISO rule.\n    slot = reinterpret_cast<Fn>(raw);\n    return true;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "반환값의 의미",
+          "title": "주소가 있으면 그 기능을 써도 될까요?",
+          "body": "항상 그렇지는 않습니다. 일부 구현은 지원하지 않는 이름에도 non-null 주소를 줄 수 있습니다. 이 실습은 알려진 기본 조회 함수만 로딩하고, 이후 렌더링 전에 GL 버전·프로파일을 확인합니다. 확장 기능을 넣으면 해당 확장 지원 여부도 별도로 검사해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "실패를 모두 모으되 불완전한 테이블은 버린다",
+      "body": "첫 번째 조회가 실패해도 두 번째와 세 번째 이름을 확인해야 로그가 전체 누락 상황을 보여 줍니다. 그렇다고 일부만 채워진 포인터를 사용자에게 넘기지는 않습니다. 로더 입구에서 out을 비우고, 지역 `candidate`에 채운 뒤 모두 성공했을 때만 대입합니다.\n\n아래는 `ok = resolve_slot(...) && ok`입니다. 왼쪽 조회가 매번 실행되므로 ok가 이미 false여도 다음 이름을 검사합니다. 순서를 `ok && resolve_slot(...)`로 바꾸면 첫 실패 뒤의 조회는 생략됩니다. 논리 결과가 같아 보여도 부수 효과인 **어떤 이름을 실제로 조회했는가**가 달라집니다.\n\n| 누락 | 조회 횟수 | 결과 | 호출자에게 남는 테이블 |\n| --- | --- | --- | --- |\n| 없음 | 3 | true | 세 주소 모두 저장 |\n| GetString만 | 3 | false | 모두 nullptr |\n| 세 함수 모두 | 3 | false | 모두 nullptr |\n| 조회 함수 자체가 없음 | 0 | false | 모두 nullptr |\n\n실패 후에도 옛 테이블을 유지하는 정책을 설계할 수는 있습니다. 하지만 그러려면 옛 컨텍스트의 수명이 아직 유효하다는 보장도 필요합니다. 이 실습은 세션 하나와 테이블 하나로 한정하고 재로딩 실패 시 비웁니다. 다중 스레드에서 동시에 읽는 테이블을 안전하게 교체하는 알고리즘은 아닙니다.",
+      "codes": [
+        {
+          "label": "로더 전체 · 성공 후 테이블 공개",
+          "language": "cpp",
+          "text": "bool load(GlApi& out, Resolver resolver)\n{\n    // Clear first: a previous successful load must not survive a new attempt.\n    out = GlApi{};\n\n    if (resolver == nullptr) {\n        std::fprintf(stderr, \"[GL] load called with a null resolver.\\n\");\n        return false;\n    }\n\n    // Fill a local candidate. `out` stays cleared unless every slot resolves.\n    GlApi candidate;\n    bool ok = true;\n    ok = resolve_slot(candidate.GetString,   resolver, \"glGetString\") && ok;\n    ok = resolve_slot(candidate.GetIntegerv, resolver, \"glGetIntegerv\") && ok;\n    ok = resolve_slot(candidate.GetError,    resolver, \"glGetError\") && ok;\n\n    if (!ok) {\n        return false; // candidate is discarded; `out` remains cleared.\n    }\n\n    out = candidate; // all slots valid: publish at once.\n    return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_api.cpp",
+        "symbol": "bool gl_load_functions()",
+        "invariant": "필요한 주소를 모두 검사하고 실패하면 GL 사용을 시작하지 않는다.",
+        "mayDiffer": "현재 게임은 전역 슬롯에 채우며 false를 받은 호출자가 렌더러 초기화를 중단한다. 학습 예제는 out 전체를 비운다.",
+        "omitted": "다중 컨텍스트·동시 테이블 교체"
+      }
+    },
+    {
+      "title": "SDL 설정과 GL 드라이버의 실제 정보를 구분한다",
+      "body": "컨텍스트 생성 후 SDL에 질의한 버전 설정은 드라이버의 실제 버전과 다를 수 있습니다. SDL2는 버전과 프로파일 항목에 내부 설정값을 돌려주는 경로가 있기 때문입니다. 예를 들어 설정 조회가 3.3이어도 `glGetString(GL_VERSION)`은 더 높은 버전을 보고할 수 있습니다.\n\n`GetIntegerv`로 GL의 주 버전·부 버전·프로파일 마스크를 직접 읽습니다. 3.3 이상인지 순서쌍으로 비교하고, Core 비트가 켜져 있는지 확인합니다. 프로파일 마스크는 비트 집합이므로 `(profile & CoreProfileBit)`로 해당 비트를 검사합니다. 정점 속성 상한도 `MaxVertexAttribs`로 읽어 사용하며 고정된 숫자로 가정하지 않습니다.\n\nGetString이 반환한 문자열은 GL 쪽이 관리하는 읽기 전용 데이터입니다. `delete`나 `SDL_free`로 해제하지 않으며 컨텍스트를 지운 뒤 그 주소를 계속 쓰지 않습니다. 로그에 쓸 때는 컨텍스트가 살아 있는 동안 읽습니다. 정수 질의의 포인터 인자는 결과를 저장할 **우리 변수의 주소**이므로 소유권 관계가 다릅니다.\n\n이 코드는 현재 세션 초기화의 실패를 검사하는 진단입니다. GetError 한 번으로 프로그램 전체가 언제나 올바르다고 증명하지 않습니다. 특히 필요한 버전의 지원, 주소 조회 성공, 개별 GL 호출 결과, 실제 그림 출력은 각각 다른 관찰 대상입니다.",
+      "codes": [
+        {
+          "label": "run_session 내부 · 직접 GL 조회",
+          "language": "cpp",
+          "text": "    const auto* version = gl.GetString(study_gl::Version);\n    const auto* renderer = gl.GetString(study_gl::Renderer);\n    study_gl::GLint attributes = 0, major = 0, minor = 0, profile = 0;\n    gl.GetIntegerv(study_gl::MajorVersion, &major);\n    gl.GetIntegerv(study_gl::MinorVersion, &minor);\n    gl.GetIntegerv(study_gl::ContextProfileMask, &profile);\n    gl.GetIntegerv(study_gl::MaxVertexAttribs, &attributes);\n    const bool version_ok = major > 3 || (major == 3 && minor >= 3);\n    if (!version || !renderer || gl.GetError() != 0 || !version_ok ||\n        !(profile & study_gl::CoreProfileBit)) {\n        std::fputs(\"GL diagnostic query/version/profile failed\\n\", stderr);\n        return 1;\n    }\n    std::printf(\"GL %s | %s | actual=%d.%d core, max attributes=%d\\n\",\n                reinterpret_cast<const char*>(version), reinterpret_cast<const char*>(renderer),\n                major, minor, attributes);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_api.cpp",
+        "symbol": "const unsigned char* ver",
+        "invariant": "현재 컨텍스트가 살아 있을 때 GL 정보를 조회한다.",
+        "mayDiffer": "학습 코드는 정수 버전·프로파일도 직접 확인하며, 현재 게임은 버전/렌더러 문자열을 로그에 남긴다.",
+        "omitted": "GPU 성능·셰이더·실제 픽셀 출력 검사"
+      }
+    },
+    {
+      "title": "컨텍스트 수명 안에서만 테이블을 사용한다",
+      "body": "main은 플랫폼을 먼저 초기화한 뒤 `run_session()`을 호출합니다. 함수 안에서 GL 테이블을 만들고 로딩·진단·입력 루프를 실행합니다. run_session이 실패 코드를 반환해도 main은 플랫폼을 종료합니다. 컨텍스트와 테이블의 사용 범위를 코드 구조로 보여 주는 순서입니다.\n\nGlApi는 함수 주소를 가진 비소유 테이블입니다. 함수 포인터를 버린다고 드라이버나 GL 객체가 삭제되지는 않습니다. 반대로 컨텍스트를 먼저 파괴하면 변수에 주소값이 남아 있어도 그 세션의 함수를 계속 사용할 근거가 없어집니다.\n\n컨텍스트를 재생성하면 새 컨텍스트를 current로 만든 뒤 새 테이블을 로딩합니다. 주소가 우연히 같아 보여도 재조회 규칙을 생략하지 않습니다. 이식성을 위해 Windows의 컨텍스트별 주소 수명까지 만족시키는 정책을 택합니다.",
+      "codes": [
+        {
+          "label": "main · 실패 후에도 플랫폼 정리",
+          "language": "cpp",
+          "text": "int main()\n{\n    if (!platform_init(640, 480, \"Tetris study: GL loader\")) return 1;\n    const int result = run_session();\n    platform_shutdown(); // Failure in loading also reaches this cleanup.\n    return result;\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "빌드 타깃에서 입력 비교와 GL 실습을 구분한다",
+      "body": "새 `renderer/gl_api.h`와 `renderer/gl_api.cpp`를 추가하고 `study_gl` 정적 라이브러리로 묶습니다. 이 타깃은 SDL 헤더나 플랫폼 구현을 링크하지 않습니다. 함수 주소를 조회하는 동작을 인자로 받으므로 테스트 프로그램도 같은 라이브러리를 사용할 수 있습니다.\n\n`src/main.cpp`는 GL 세션을 실행하는 코드로 교체합니다. 입력 비교 코드는 `src/input_demo.cpp`에 보존합니다. SDL 빌드에는 `tetris`와 `input_demo`를 만들고, GL을 제공하지 않는 학습용 SCRIPTED/WIN32 빌드에는 `input_demo`만 만듭니다. 현재 게임의 Win32 구현은 별도로 WGL 초기화를 제공합니다.\n\n저장소 루트에서 실행합니다. SDL2 개발 패키지와 pkg-config가 구성된 환경이 전제이며, 아래 실행 파일 경로는 Linux 단일 구성 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/12-gl-loader -B out/study-12 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-12\nctest --test-dir out/study-12 --output-on-failure\n./out/study-12/tetris\n```\n\n창 실습은 더블 버퍼를 사용합니다. 창 표시 없이 GL 정보를 조회하려면 offscreen 컨텍스트를 사용하는 별도 진단 프로그램을 실행할 수 있습니다.\n\n```sh\ncmake -S docs/learn/checkpoints/12-gl-loader -B out/study-12-input -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-12-input\n./out/study-12-input/input_demo\n```\n\nSCRIPTED 빌드는 창 없이 입력 흐름과 함수 주소 누락 처리를 확인할 때 사용합니다.\n\n공개 헤더에는 `void* platform_gl_get_proc(const char* name);`를 선언합니다. SCRIPTED/WIN32 입력 전용 파일에는 `void* platform_gl_get_proc(const char*) { return nullptr; }`를 추가합니다. 이 함수가 있는 것과 해당 백엔드가 GL을 지원하는 것은 다르므로 GL 실행 타깃은 SDL에서만 만듭니다.",
+      "codes": [
+        {
+          "label": "SDL 구현에 추가 · 현재 세션의 주소 조회",
+          "language": "cpp",
+          "text": "void* platform_gl_get_proc(const char* name)\n{\n    if (!active || !name || !*name ||\n        SDL_GL_GetCurrentContext() != active->context.get() ||\n        SDL_GL_GetCurrentWindow() != active->window.get()) return nullptr;\n    return SDL_GL_GetProcAddress(name);\n}\n"
+        },
+        {
+          "label": "교체 · CMake 타깃 구성 전체",
+          "language": "cmake",
+          "file": "checkpoints/12-gl-loader/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "Windows의 주소 조회 경계를 따라간다",
+      "body": "현재 게임은 GL 함수 선언과 정의에 호출 규약을 명시하고, 캐스트에 `decltype(gl_##name)`을 사용합니다. 선언의 타입을 재사용하면 캐스트에서만 호출 규약을 빠뜨리는 실수를 줄일 수 있습니다.\n\nWGL의 공통 조회 함수는 NULL뿐 아니라 1·2·3·-1도 호출할 주소로 사용하지 않고 시스템 라이브러리 조회로 넘어갑니다. 컨텍스트 생성 확장과 swap interval 확장도 이 공통 함수를 사용합니다. [Microsoft 공식 반환 계약](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-wglgetprocaddress)은 실패 시 NULL이며, 추가 숫자 필터는 이 구현의 방어 정책입니다.\n\n임시 컨텍스트와 최종 컨텍스트를 current로 만드는 단계가 실패하면 다음 GL 호출로 넘어가지 않습니다. 현재 소스 뷰어에서 주소 조회의 공통 함수와 두 확장 조회 지점을 찾아보세요. 실패 처리를 한곳에 모으면 호출마다 같은 검사를 반복하지 않아도 됩니다.",
+      "reference": {
+        "path": "platform/win32.cpp",
+        "symbol": "void* platform_gl_get_proc",
+        "invariant": "OS별 주소 조회와 비정상 반환 처리를 플랫폼 경계로 모은다.",
+        "mayDiffer": "SDL은 SDL_GL_GetProcAddress를 사용하고 WGL은 드라이버 조회 후 시스템 라이브러리 조회를 시도한다.",
+        "omitted": "WGL bootstrap 전체 구현·Windows 실제 드라이버 검증"
+      }
+    },
+    {
+      "title": "함수 누락에 대한 로더의 동작을 확인한다",
+      "body": "세 함수 각각을 찾거나 찾지 못하는 경우를 조합하면 8가지입니다. 학습용 테스트는 이 조합을 넣어, 하나가 빠져도 나머지 이름을 모두 조회하는지와 실패한 테이블이 비어 있는지 확인합니다. 조회 함수 자체가 nullptr인 경우도 포함합니다.\n\n특히 성공했던 테이블에 다시 load를 호출하고 두 번째 함수만 누락시켜 보세요. 옛 주소가 남으면 로딩 실패를 놓친 호출자가 이전 세션의 주소를 사용할 수 있습니다. `out = GlApi{}`가 재로딩 시작에 필요한 이유입니다.\n\nLinux에서 `python3 scripts/check_learning_loader.py`로 로더 검사를 실행할 수 있습니다. SDL2와 GL 개발 헤더, offscreen GL 지원이 필요합니다. 아래 완성 파일과 구현을 비교한 뒤, 다음에는 GL 함수에 전달할 정점 데이터를 배열로 준비합니다.",
+      "codes": [
+        {
+          "label": "새 파일 · GL 타입과 로더 계약",
+          "language": "cpp",
+          "file": "checkpoints/12-gl-loader/renderer/gl_api.h",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · GL 로더 전체",
+          "language": "cpp",
+          "file": "checkpoints/12-gl-loader/renderer/gl_api.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · GL 세션과 기존 입력 루프",
+          "language": "cpp",
+          "file": "checkpoints/12-gl-loader/src/main.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 로더 계약 검사",
+          "language": "cpp",
+          "file": "checkpoints/12-gl-loader/tests/loader_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "11-gl-context 사본에 renderer/gl_api.h와 gl_api.cpp를 추가하고 CMake와 main을 교체한다. 기존 main은 input_demo.cpp로 보존한다.",
+      "platform.h에 조회 계약을 추가하고 SDL 구현에서 현재 세션의 SDL_GL_GetProcAddress를 연결한다. 입력 전용 백엔드는 nullptr를 반환한다.",
+      "로더 검사에서 glGetIntegerv만 누락시켜도 glGetError까지 조회하는지 예상하고 CTest로 확인한다.",
+      "실제 GL 진단을 실행할 수 있다면 SDL 설정 버전과 GL 직접 조회 버전을 각각 기록한다.",
+      "컨텍스트가 사라진 뒤 테이블의 포인터 값이 남아 있는 경우 왜 재사용하면 안 되는지 설명한다."
+    ],
+    "expected": "알려진 기본 진입점을 올바른 타입으로 호출해 실제 GL 정보를 읽고, 조회 실패·지원 기능·컨텍스트 수명을 별도로 판단합니다.",
+    "failureChecks": [
+      "컴파일 오류인지 링크 오류인지 런타임 조회 오류인지 발생 시점을 먼저 구분한다.",
+      "주소가 없어도 뒤의 이름까지 검사되도록 단락 평가 순서를 확인한다.",
+      "버전이 다르게 보이면 SDL 설정 조회와 GL 직접 조회를 섞지 않았는지 확인한다.",
+      "32비트 Windows 문제라면 반환형·인자·호출 규약을 함께 대조한다.",
+      "offscreen 진단 성공을 더블 버퍼 창 표시 성공으로 집계하지 않는다."
+    ]
+  },
+  "questions": [
+    {
+      "id": "12-1",
+      "kind": "단락 평가",
+      "question": "첫 조회가 실패해 ok=false가 됐습니다. 세 이름을 끝까지 확인하려면 어떤 코드가 맞나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "ok = ok && resolve_slot(...);"
+        },
+        {
+          "id": "b",
+          "text": "ok = resolve_slot(...) && ok;"
+        },
+        {
+          "id": "c",
+          "text": "if (ok) resolve_slot(...);"
+        },
+        {
+          "id": "d",
+          "text": "if (!ok) return false;"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "ok = resolve_slot(...) && ok;",
+      "explanation": "&&는 왼쪽이 false이면 오른쪽을 생략합니다. 조회 함수를 왼쪽에 두면 이전 ok 값과 무관하게 매번 실행합니다. 결과는 false로 유지하면서 모든 누락 이름을 보고합니다."
+    },
+    {
+      "id": "12-2",
+      "kind": "실패 후 상태",
+      "question": "out에는 이전 세션의 주소가 있습니다. 새 load에서 두 번째 이름만 없었다면 이 학습 로더의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "첫 번째 새 주소와 나머지 옛 주소를 함께 유지합니다."
+        },
+        {
+          "id": "b",
+          "text": "세 번째 조회를 생략하고 이전 테이블을 유지합니다."
+        },
+        {
+          "id": "c",
+          "text": "true를 반환하되 두 번째 슬롯만 nullptr로 둡니다."
+        },
+        {
+          "id": "d",
+          "text": "세 이름을 모두 조회하고 false를 반환하며 out 전체를 비웁니다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "세 이름을 모두 조회하고 false를 반환하며 out 전체를 비웁니다.",
+      "explanation": "입구에서 out을 초기화하고 candidate에만 채웁니다. 하나라도 실패하면 candidate를 대입하지 않으므로 이전 주소나 부분 로딩 결과가 남지 않습니다. 호출자는 false를 확인하고 GL 사용을 시작하지 않습니다."
+    },
+    {
+      "id": "12-3",
+      "kind": "호출 계약",
+      "question": "Linux x64에서는 정상인데 32비트 Windows에서 GL 호출 직후 문제가 납니다. 주소는 non-null입니다. 우선 비교할 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "동일 함수의 반환형·인자 형식·호출 규약이 선언과 실제 API에서 일치하는지"
+        },
+        {
+          "id": "b",
+          "text": "주소를 저장한 변수 이름이 드라이버 함수 이름과 같은지"
+        },
+        {
+          "id": "c",
+          "text": "포인터 크기가 크면 더 빠른 GPU를 선택했는지"
+        },
+        {
+          "id": "d",
+          "text": "함수 주소가 실행마다 같은 숫자로 유지되는지"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "동일 함수의 반환형·인자 형식·호출 규약이 선언과 실제 API에서 일치하는지",
+      "explanation": "주소 존재는 타입 일치를 증명하지 않습니다. 32비트 Windows에서 __stdcall 같은 호출 규약까지 맞아야 스택 처리의 약속이 일치합니다. x64에서 통과한 결과로 이 차이를 검증했다고 볼 수 없습니다."
+    },
+    {
+      "id": "12-4",
+      "kind": "지원과 주소",
+      "question": "처음 보는 GL 확장 이름을 조회했더니 non-null이 나왔습니다. 호출 전에 어떤 판단이 필요한가요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "NULL이 아니므로 모든 컨텍스트에서 호출해도 됩니다."
+        },
+        {
+          "id": "b",
+          "text": "함수 이름의 대소문자를 바꿔 같은 주소인지 비교하면 지원이 증명됩니다."
+        },
+        {
+          "id": "c",
+          "text": "현재 컨텍스트의 버전/확장이 해당 기능을 지원하는지와 정확한 함수 타입을 확인합니다."
+        },
+        {
+          "id": "d",
+          "text": "같은 주소를 두 번 얻으면 확장 지원 검사를 생략합니다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "현재 컨텍스트의 버전/확장이 해당 기능을 지원하는지와 정확한 함수 타입을 확인합니다.",
+      "explanation": "일부 구현은 지원되지 않는 이름에도 주소를 돌려줄 수 있습니다. 기능 지원과 주소 조회는 별개이며, 지원이 확인돼도 올바른 타입과 유효한 current 컨텍스트가 필요합니다."
+    },
+    {
+      "id": "12-5",
+      "kind": "진단 해석",
+      "question": "SDL 설정 조회는 3.3, GL 직접 조회는 4.5 Core·llvmpipe를 보고합니다. 적절한 기록은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "SDL 설정과 드라이버 직접 조회를 구분하고 CPU 구현의 GL 호출 성공으로 기록합니다."
+        },
+        {
+          "id": "b",
+          "text": "두 숫자가 다르므로 함수 포인터가 잘못됐다고 확정합니다."
+        },
+        {
+          "id": "c",
+          "text": "4.5가 나왔으므로 물리 GPU와 화면 표시까지 통과한 것으로 기록합니다."
+        },
+        {
+          "id": "d",
+          "text": "3.3을 요청했으므로 GL이 직접 보고한 4.5를 오류로 버립니다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "SDL 설정과 드라이버 직접 조회를 구분하고 CPU 구현의 GL 호출 성공으로 기록합니다.",
+      "explanation": "SDL2 일부 속성은 내부 설정값이며 실제 드라이버 버전과 다를 수 있습니다. llvmpipe는 CPU 소프트웨어 GL 구현입니다. 실제 함수 호출 성공과 하드웨어 가속·그림 표시는 서로 다른 증거가 필요합니다."
+    }
+  ]
+}

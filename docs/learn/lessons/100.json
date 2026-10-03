@@ -1,0 +1,462 @@
+{
+  "id": "lesson-100",
+  "title": "accept와 첫 프레임: 연결의 역할 결정",
+  "shortTitle": "첫 요청·마감·상태 인계",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 실제 TCP로 입력을 전달하지만, 새 연결이 원하는 역할을 정하는 입구는 아직 없습니다.",
+  "finish": "완료: 첫 요청을 제한 안에서 해석하고, 요청·미소비 바이트·연결을 다음 처리 단계로 인계합니다.",
+  "objective": "프레임 경계와 단계 경계를 구별하고 마감·수량·EOF의 결과를 예측하며, 연결 인계에서 바이트가 사라지는 원인을 진단합니다.",
+  "prerequisites": [
+    "TCP 부분 수신과 프레임 파서",
+    "소켓 수명과 단일 소유권",
+    "단조 시각·범위 검사·RoundPlay 입력"
+  ],
+  "recap": {
+    "points": [
+      "연결 경로·매칭·규칙 권위는 서로 다른 책임입니다.",
+      "TCP 연결의 양 끝은 각각 별도 소켓을 소유합니다.",
+      "전달한 바이트를 해석하고 접수하는 정책은 각 처리 단계에 있습니다."
+    ],
+    "bridge": "이제 새 연결이 어느 처리 경로를 원하는지 읽고, 이미 받은 바이트까지 다음 단계에 넘기는 입구를 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "accept 다음에 결정할 것",
+      "body": "listen 소켓에서 accept하면 한 연결을 읽고 쓸 소켓이 생깁니다. 게임 서버는 이제 이 연결이 대기열 참가·방 생성·방 입장 중 무엇을 원하는지 알아야 합니다. 연결이 만들어진 사건과 애플리케이션 요청이 검증된 사건을 구별하는 것이 출발점입니다.\n\n**프로토콜 단계**는 같은 연결에 대해 지금 어떤 메시지를 처리할지 정한 상태입니다. 첫 요청 단계가 끝나면 대기열이나 방 단계가 뒤따릅니다. 단계마다 허용하는 메시지가 다르고, 요청의 형식 검사·계정 확인·짝 찾기·경기 준비도 서로 다른 작업입니다.\n\n이번 산출물은 FirstAdmission입니다. 입력은 현재 시각·수신 바이트·EOF 관측이고, 출력은 요청 경로 또는 종료 사유입니다. OS 호출은 바깥 루프가 맡습니다. 따라서 단위 검사에서는 시각을 숫자로 넣어 경계값을 재현하고, 연결 실험에서는 실제 소켓과 함께 사용할 수 있습니다.",
+      "codes": [
+        {
+          "label": "단계 전환과 다음 소유자",
+          "language": "text",
+          "text": "accept → waiting → routed → take → 다음 단계\n             └→ 시간·형식·예산·EOF에 따른 종료\n\n함께 이어질 자원: 연결 소켓 + 이미 읽은 미소비 바이트"
+        }
+      ],
+      "reference": {
+        "path": "server/player_conn.cpp",
+        "symbol": "void playerConnThread",
+        "invariant": "첫 요청을 해석해 다음 처리 경로와 수신 상태를 정한다.",
+        "mayDiffer": "현재 서버는 meta 입장권 소비와 IP·계정 슬롯 인계도 포함한다. 기준 구현은 경로 결정에 집중한다."
+      }
+    },
+    {
+      "title": "작은 wire 계약을 먼저 적는다",
+      "body": "학습용 입장 명령은 TYPE50 하나로 묶습니다. payload의 첫 바이트는 경로, 둘째 바이트는 방 코드의 바이트 수입니다. queue=1과 create=2는 코드 없이 정확히 2바이트, join=3은 길이 5와 코드 5바이트를 합쳐 정확히 7바이트입니다. 코드는 ASCII 대문자 A~Z 또는 숫자 0~9만 허용합니다.\n\n예를 들어 queue payload는 [1,0], join은 [3,5,'A','B','C','D','9']입니다. 길이가 맞아도 route=9이면 의미를 정하지 않은 명령입니다. 반대로 queue 뒤에 불필요한 1바이트가 붙으면 우리가 정한 문법과 다릅니다. 검사할 필드를 읽기 전에 전체 크기가 가능한 모양인지 확인하겠습니다.\n\n형식을 작게 정하면 **구문 검사**와 **사용 가능 여부**를 분리할 수 있습니다. ABCD9라는 코드가 문법에 맞는지는 여기서 알 수 있지만 실제 방이 존재하는지는 방 저장소가 판단합니다. 같은 문자열을 입력했다고 계정의 신원을 확인한 것도 아닙니다.",
+      "codes": [
+        {
+          "label": "명령의 값과 고정 크기 저장",
+          "language": "cpp",
+          "text": "enum class AdmissionRoute : std::uint8_t {\n  queue = 1,\n  create = 2,\n  join = 3,\n};\n\nstruct AdmissionRequest {\n  AdmissionRoute route{AdmissionRoute::queue};\n  std::array<std::uint8_t, 5> room{};\n};\n\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실제 서버와 wire 형식 비교",
+          "body": "현재 서버는 QUEUE_JOIN·ROOM_CREATE·ROOM_JOIN을 별도 TYPE으로 구분하고 토큰 필드를 포함합니다. ROOM_JOIN 바깥 검사는 코드 길이 1~5를 허용합니다. 학습용 TYPE50을 현재 서버에 그대로 보내는 호환 클라이언트로 해석하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "검증한 후보만 출력에 반영한다",
+      "body": "디코더는 실패하면서 출력의 route만 먼저 바꾸면 안 됩니다. 호출자가 실패를 놓쳤을 때 반쯤 갱신된 요청으로 동작할 수 있고, 오류를 다루는 쪽도 원래 값을 잃습니다. 지역 candidate를 만들고 모든 조건이 맞을 때만 out에 대입합니다.\n\n먼저 TYPE과 size를 검사합니다. 그다음 route의 허용 값을 고르고, join이면 length와 각 문자를 검사합니다. code 길이를 5로 고정했으므로 인덱스 2+i의 최댓값은 6입니다. size=7 검사가 이 읽기 범위를 뒷받침합니다. queue/create 경로도 size=2와 length=0을 함께 검사해야 불필요한 꼬리나 모순된 길이를 허용하지 않습니다.\n\nstd::array의 room은 문자열 종료 문자가 없는 바이트 5개입니다. 로그나 UI에 출력할 때는 길이를 함께 사용해야 합니다. 배열의 뒤에 우연히 0이 있다고 가정해 C 문자열 함수에 넘기는 방식은 이 자료 구조의 계약과 맞지 않습니다.",
+      "codes": [
+        {
+          "label": "정확한 형식 검사와 한 번의 반영",
+          "language": "cpp",
+          "text": "inline bool decode_admission(const Frame& frame, AdmissionRequest& out) noexcept {\n  if (frame.type != kAdmissionType) {\n    return false;\n  }\n  if (frame.size != 2 && frame.size != 7) {\n    return false;\n  }\n  const std::uint8_t route_raw = frame.payload[0];\n  const std::uint8_t room_len = frame.payload[1];\n\n  AdmissionRoute route = AdmissionRoute::queue;\n  if (route_raw == static_cast<std::uint8_t>(AdmissionRoute::queue)) {\n    route = AdmissionRoute::queue;\n  } else if (route_raw == static_cast<std::uint8_t>(AdmissionRoute::create)) {\n    route = AdmissionRoute::create;\n  } else if (route_raw == static_cast<std::uint8_t>(AdmissionRoute::join)) {\n    route = AdmissionRoute::join;\n  } else {\n    return false;\n  }\n\n  AdmissionRequest candidate{};\n  candidate.route = route;\n\n  if (route == AdmissionRoute::join) {\n    if (frame.size != 7 || room_len != 5) {\n      return false;\n    }\n    for (std::size_t i = 0; i < 5; ++i) {\n      const std::uint8_t c = frame.payload[2 + i];\n      const bool upper = c >= static_cast<std::uint8_t>('A') &&\n                         c <= static_cast<std::uint8_t>('Z');\n      const bool digit = c >= static_cast<std::uint8_t>('0') &&\n                         c <= static_cast<std::uint8_t>('9');\n      if (!upper && !digit) {\n        return false;\n      }\n      candidate.room[i] = c;\n    }\n  } else {\n    if (frame.size != 2 || room_len != 0) {\n      return false;\n    }\n  }\n\n  out = candidate;\n  return true;\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "server/player_conn.cpp",
+        "symbol": "std::string extract_token",
+        "invariant": "길이를 확인한 범위에서만 payload를 읽고 다음 처리에 필요한 값을 만든다.",
+        "mayDiffer": "현재 extract_token은 입장권 문자열을 추출한다. TYPE50 후보 구조와 정확한 크기·문자 정책은 학습용이다."
+      }
+    },
+    {
+      "title": "마감은 활동량에 따라 밀리지 않는다",
+      "body": "시작 시각이 100, 허용 시간이 10이면 경과 시간 10에 도달한 110부터 실패합니다. 109에 온 정상 명령은 받아도 110에 온 정상 명령은 늦었습니다. 중간에 1바이트가 왔다고 시작 시각을 109로 바꾸면, 상대는 조금씩 보내며 제한을 계속 뒤로 미룰 수 있습니다.\n\n외부에서 넣는 시각은 한 단위의 단조 증가 값입니다. 실험은 steady_clock에서 지난 밀리초를 만듭니다. now < last_를 먼저 검사한 뒤 now - start_를 계산합니다. 이렇게 하면 start + timeout을 더할 때 정수 범위를 넘는 경우를 피하면서, 역행 시각은 별도 호출 오류로 돌려줄 수 있습니다.\n\nclock_error는 객체를 끝내는 상태로 저장하지 않습니다. 이 호출에서 어떤 것도 소비하지 않았음을 알려 주므로 올바른 시각으로 다시 시도할 수 있습니다. timeout=0은 시작하자마자 늦은 계약이므로 factory가 거절합니다. 초와 밀리초를 섞으면 정수 계산이 맞아도 마감 정책은 틀리므로 호출자와 단위도 합의해야 합니다.",
+      "codes": [
+        {
+          "label": "유효한 시작 조건",
+          "language": "cpp",
+          "text": "static std::optional<FirstAdmission> create(std::uint64_t start,\n                                              std::uint64_t timeout) noexcept {\n    if (timeout == 0) {\n      return std::nullopt;\n    }\n    return FirstAdmission(start, timeout);\n  }\n"
+        },
+        {
+          "label": "시각 역행과 마감 경계",
+          "language": "cpp",
+          "text": "AdmissionState poll(std::uint64_t now) noexcept {\n    if (now < last_) {\n      return AdmissionState::clock_error;\n    }\n    last_ = now;\n    if (state_ == AdmissionState::waiting) {\n      if (now - start_ >= timeout_) {\n        state_ = AdmissionState::timed_out;\n      } else if (received_ >= kAdmissionByteLimit) {\n        state_ = AdmissionState::byte_limit;\n      }\n    }\n    return state_;\n  }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "협력적 검사와 취소 타이머",
+          "body": "poll은 호출되는 순간 상태를 검사합니다. 다음 호출이 늦으면 정리도 늦습니다. 블로킹 함수가 실행 중일 때 이 객체가 중단시켜 주지는 않습니다. 바깥 루프가 계속 진행할 수 있어야 시간 제한이 의미를 가집니다."
+        }
+      ]
+    },
+    {
+      "title": "시간·바이트·메시지 수는 다른 예산이다",
+      "body": "마감이 남아 있어도 아주 빠른 연결은 많은 프레임을 보낼 수 있습니다. 시간만으로 처리량이 고정되지 않으므로 첫 단계에 넘기는 바이트 총량과 무시할 프레임 수를 따로 제한합니다. 여기서는 단계에 넘긴 바이트 128, 낯선 완성 프레임 4개, 한 번의 feed 16바이트로 정합니다.\n\nread_capacity는 한 번 읽어도 되는 양을 min(16, 128-received)로 계산합니다. 예를 들어 120바이트를 받았다면 다음 요청 상한은 8입니다. 호출자는 읽기 전에 poll하고 이 상한으로 수신을 시도합니다. feed는 같은 상한을 다시 확인하므로 호출자의 잘못된 크기도 감지합니다. TCP 패킷 크기나 전체 연결 수를 제한하는 숫자는 아닙니다.\n\n128바이트에 도달하는 호출 안에서 유효한 첫 요청을 찾으면 인계할 수 있습니다. 해당 호출의 바이트를 처리했는데도 waiting이면 byte_limit입니다. 반면 시각 마감은 feed의 맨 앞에서 확인하므로 정확히 마감인 호출은 바이트를 처리하지 않습니다. 이런 우선순위를 적어 두어야 경계값 결과를 예측할 수 있습니다.",
+      "codes": [
+        {
+          "label": "서로 다른 세 가지 상한",
+          "language": "cpp",
+          "text": "inline constexpr std::size_t kAdmissionReadBytes = 16;\ninline constexpr std::size_t kAdmissionByteLimit = 128;\ninline constexpr std::size_t kAdmissionIgnoredLimit = 4;\n\n"
+        },
+        {
+          "label": "다음 수신 길이",
+          "language": "cpp",
+          "text": "std::size_t read_capacity() const noexcept {\n    if (state_ != AdmissionState::waiting) {\n      return 0;\n    }\n    if (received_ >= kAdmissionByteLimit) {\n      return 0;\n    }\n    const std::size_t remaining = kAdmissionByteLimit - received_;\n    return remaining < kAdmissionReadBytes ? remaining : kAdmissionReadBytes;\n  }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "고정 버퍼와 누적 바이트",
+          "body": "파서 저장소는 64바이트여도 단계 전체에서 여러 번 읽고 소비하여 128바이트를 처리할 수 있습니다. 물리적 저장 용량과 누적 통과량은 다릅니다. 단계 예산에는 첫 명령 뒤에 같은 read로 함께 온 바이트도 포함됩니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 프레임 하나씩 읽고 경계에서 멈춘다",
+      "body": "수신 결과를 parser에 붙인 뒤 next를 반복합니다. need_more이면 현재 꼬리를 남겨 두고 다음 수신을 기다립니다. error이면 첫 단계가 protocol_error로 끝납니다. 프레임이 완성되었다면 이 단계의 메시지 정책을 적용합니다.\n\n알 수 없는 TYPE은 네 개까지 건너뜁니다. 다섯 번째는 ignored_limit입니다. 반면 TYPE50인데 구문 검사를 통과하지 못하면 즉시 protocol_error로 종료합니다. 알려진 명령의 잘못된 형식과 이 단계에서 처리하지 않는 종류를 구별한 정책입니다.\n\n정상 TYPE50을 발견하면 request를 저장하고 routed로 바꾼 뒤 반복을 멈춥니다. 뒤에 완성 프레임이 더 있어도 첫 단계가 계속 해석하지 않습니다. 다음 단계의 메시지는 다음 소유자가 판단해야 합니다. 이 경계를 지키면 같은 연결에서 역할이 달라질 때 검사 정책도 자연스럽게 바뀝니다.",
+      "codes": [
+        {
+          "label": "프레임별로 해석하고 첫 경로에서 멈춤",
+          "language": "cpp",
+          "text": "    while (state_ == AdmissionState::waiting) {\n      Frame frame{};\n      const ParseStatus status = parser_.next(frame);\n      if (status == ParseStatus::error) {\n        state_ = AdmissionState::protocol_error;\n        break;\n      }\n      if (status == ParseStatus::need_more) {\n        break;\n      }\n      if (frame.type != kAdmissionType) {\n        ++ignored_;\n        if (ignored_ > kAdmissionIgnoredLimit) {\n          state_ = AdmissionState::ignored_limit;\n          break;\n        }\n        continue;\n      }\n      AdmissionRequest candidate{};\n      if (!decode_admission(frame, candidate)) {\n        state_ = AdmissionState::protocol_error;\n        break;\n      }\n      request_ = candidate;\n      state_ = AdmissionState::routed;\n      break;\n    }\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "낯선 TYPE을 무시하는 선택",
+          "body": "이것은 제한된 관용 정책입니다. 낯선 메시지가 필수 기능이나 버전 불일치를 뜻하는 규약이라면 명시적 거절이 적합할 수 있습니다. 무시 정책을 도입해도 마감과 수량 제한은 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "recv 한 번에 여러 단계가 들어오면",
+      "body": "queue 요청은 wire에서 5바이트입니다. 그 뒤에 4바이트짜리 후속 메시지 A와 B를 붙이면 13바이트입니다. 한 번에 13바이트를 받을 수도, queue의 일부만 먼저 받을 수도 있습니다. 어느 경우든 바이트 순서는 같고 read 경계만 달라집니다.\n\n첫 요청을 완성한 순간 parser 안에는 A 전체와 B 일부가 있을 수 있습니다. 소켓만 옮기고 parser를 버리면 이 바이트는 사라집니다. 이미 커널에서 읽어 왔으므로 새 소유자가 다시 recv한다고 같은 바이트를 돌려받지 못합니다. 반대로 아직 read하지 않은 후속 바이트는 소켓과 함께 계속 읽을 수 있습니다.\n\n따라서 인계 대상은 요청과 parser, 그리고 바깥이 소유한 소켓입니다. parser가 현재 읽기 위치를 갖고 있으므로 완성 프레임과 부분 꼬리를 따로 쪼개어 복원할 필요가 없습니다. 논리적 소비 위치를 포함한 상태를 이어 주는 방식입니다.",
+      "codes": [
+        {
+          "label": "하나의 wire, 여러 수신 분할",
+          "language": "text",
+          "text": "wire: [queue 5B][A 4B][B 4B]\nread 예1: [queue 5B][A 4B][B 앞2B] | [B 뒤2B]\n인계: request=queue, parser=[A 4B][B 앞2B], socket=나머지를 읽을 연결\n\nread 예2: [queue 앞1B] | [queue 뒤4B] | [A 4B][B 4B]\n인계 시 parser가 비어 있어도 후속 바이트는 같은 socket에서 이어 읽는다."
+        }
+      ],
+      "reference": {
+        "path": "server/player_conn.cpp",
+        "symbol": "std::vector<uint8_t> residual_stream",
+        "invariant": "이미 읽었지만 아직 처리하지 않은 후속 메시지 순서와 부분 꼬리를 함께 인계한다.",
+        "mayDiffer": "현재 코드는 프레임 묶음을 먼저 파싱하여 남은 유효 프레임을 재직렬화하고 미완성 tail을 뒤에 붙인다."
+      }
+    },
+    {
+      "title": "한 번의 인계를 코드로 만든다",
+      "body": "take는 routed에서만 성공합니다. 아직 요청이 없거나, 실패했거나, 이미 인계했으면 출력도 바꾸지 않습니다. 성공하면 request와 parser를 후보에 복사하고 out에 넣은 뒤 내부 parser를 비우고 handed_off로 바꿉니다. 두 번째 take가 같은 내용을 다시 내보내지 못하게 하는 전이입니다.\n\n여기서 파서의 고정 배열은 값 복사됩니다. 메모리 주소를 바꾸는 작업과 논리적 소유권 전환은 구별해야 합니다. 복사 이후 첫 단계의 접근을 끝내고 다음 단계만 소비한다는 계약이 핵심입니다. 실제 Socket은 move-only라 std::move로 이동시키고 원래 핸들은 비웁니다.\n\nFirstAdmission 객체 자체를 복사해 두 처리자가 따로 진행시키면 이 계약을 깨뜨릴 수 있습니다. 이 순차 실습에서는 살아 있는 상태 객체를 단일 소유자가 유지합니다. 여러 worker 사이에 넘길 때도 공유 읽기 버퍼를 각자 소비하게 만드는 대신 실행 책임과 데이터 인계를 함께 정해야 합니다.",
+      "codes": [
+        {
+          "label": "성공한 단계만 한 번 인계",
+          "language": "cpp",
+          "text": "bool take(AdmissionHandoff& out) noexcept {\n    if (state_ != AdmissionState::routed) {\n      return false;\n    }\n    AdmissionHandoff candidate{request_, parser_};\n    out = candidate;\n    parser_ = FrameParser{};\n    state_ = AdmissionState::handed_off;\n    return true;\n  }\n"
+        },
+        {
+          "label": "실제 소켓까지 다음 소유자로",
+          "language": "cpp",
+          "text": " AdmissionHandoff handoff;REQUIRE(admission.take(handoff)&&handoff.request.route==AdmissionRoute::queue);\n Socket next_owner=std::move(accepted);REQUIRE(!accepted.valid()&&next_owner.valid());\n"
+        }
+      ]
+    },
+    {
+      "title": "EOF는 남아 있는 바이트와 함께 판단한다",
+      "body": "첫 요청을 기다리다가 EOF를 관측했을 때 parser가 비어 있으면 peer_closed입니다. 일부 프레임 바이트가 남았다면 필요한 나머지를 더 받을 수 없으므로 truncated입니다. 완성된 낯선 프레임을 소비한 뒤 EOF가 와도 미완성 꼬리가 없다면 peer_closed입니다. 연결을 정상적으로 닫았다는 관측과 게임 입장 요청을 완료했다는 판단은 별개입니다.\n\n이미 routed라면 EOF가 와도 그 결정을 유지합니다. 다음 처리자가 이미 받아 둔 후속 프레임을 처리할 수 있기 때문입니다. 이 객체는 transport의 EOF 플래그를 보관하지 않으므로 호출자가 그것도 다음 단계에 전달해야 합니다. 소켓에서 더 읽을 수 있는지와 parser에 처리할 것이 남았는지를 두 축으로 봅니다.\n\neof도 먼저 poll합니다. 마감에 도달했다면 timed_out을 유지하고, 시각이 역행하면 clock_error를 반환해 상태를 그대로 둡니다. poll의 반환값을 무시한 채 peer_closed로 덮어쓰면, 잘못된 시각 호출이 상태를 바꿔 버립니다.",
+      "codes": [
+        {
+          "label": "파서 꼬리·마감·역행 시각을 구별",
+          "language": "cpp",
+          "text": "AdmissionState eof(std::uint64_t now) noexcept {\n    const auto observed = poll(now);\n    if (observed == AdmissionState::clock_error) return observed;\n    if (state_ == AdmissionState::waiting) {\n      state_ = parser_.pending_bytes() != 0 ? AdmissionState::truncated\n                                            : AdmissionState::peer_closed;\n    }\n    return state_;\n  }\n"
+        }
+      ]
+    },
+    {
+      "title": "OS 호출과 순수 상태 전이를 연결한다",
+      "body": "admission_probe는 loopback listen 소켓을 열고 클라이언트를 연결한 뒤 accept합니다. 연결 소켓만 nonblocking으로 설정하고 listen 소켓은 닫습니다. Runtime은 소켓보다 먼저 만들어 역순 소멸에서 소켓 정리가 먼저 일어나도록 합니다.\n\n서버 루프는 경과 밀리초를 넣어 poll하고, waiting이면 허용된 크기로 try_receive합니다. progress는 feed에 넘기고 would_block·interrupted는 짧게 기다린 뒤 다시 시도합니다. would_block을 EOF로 해석하면 아직 보내지 않은 정상 클라이언트도 끊게 됩니다. 실제 서비스에서는 EOF와 다른 I/O 실패를 종료 사유에 맞춰 처리합니다. 이 실험은 정해진 성공 시나리오이므로 예상 밖 결과를 REQUIRE로 잡습니다.\n\n버퍼가 고정 64바이트이고 최대 wire 프레임은 35바이트입니다. 완성 프레임을 매번 소비하면 waiting에 남는 미완성 꼬리는 35바이트보다 작고, 다음 추가량은 최대 16바이트이므로 이 조합은 저장소 안에 들어갑니다. 길이 상한을 바꾸면 이 관계도 다시 확인해야 합니다.",
+      "codes": [
+        {
+          "label": "논블로킹 수신과 상태 갱신",
+          "language": "cpp",
+          "text": " const auto start=Clock::now();auto admission=*FirstAdmission::create(0,1000);\n for(;;){\n  const auto state=admission.poll(elapsed_ms(start));\n  if(state==AdmissionState::routed)break;\n  REQUIRE(state==AdmissionState::waiting);\n  std::uint8_t bytes[16];const auto read=try_receive(accepted,bytes,admission.read_capacity());\n  if(read.state==ReceiveState::progress){const auto next=admission.feed(bytes,read.count,elapsed_ms(start));REQUIRE(next==AdmissionState::waiting||next==AdmissionState::routed);}\n  else {REQUIRE(read.state==ReceiveState::would_block||read.state==ReceiveState::interrupted);std::this_thread::sleep_for(std::chrono::milliseconds(1));}\n }\n"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_recv_some",
+        "invariant": "수신 결과와 바이트 누적을 메시지 해석과 구분한다.",
+        "mayDiffer": "현재 helper는 vector 누적과 bool 결과를 사용한다. 기준 try_receive는 progress·would_block·interrupted 등을 구분한다."
+      }
+    },
+    {
+      "title": "다음 소유자가 실제 게임 입력까지 읽는다",
+      "body": "클라이언트는 queue 요청, TYPE60의 A, TYPE61인 B의 앞 2바이트를 보냅니다. 첫 단계가 경로를 결정한 뒤 소켓과 parser를 다음 소유자로 옮깁니다. 그다음 B의 나머지와 TYPE41 RoundInput을 보내고 송신 방향을 닫습니다.\n\n다음 소유자는 parser.next를 먼저 호출합니다. 이미 온 완성 프레임을 처리한 다음 need_more일 때만 소켓을 읽습니다. A→B→RoundInput의 순서가 유지되는지 확인하고, 마지막 프레임을 실제 RoundPlay에 넣습니다. 실험 드라이버가 round=1·seed=77·peer 역할을 정하고 로컬 중립 입력과 원격 drop을 묶어 틱 0을 진행합니다.\n\n이로써 인계한 바이트가 누적 게임 실행 계층까지 도달함을 관찰할 수 있습니다. queue라는 요청 값에서 상대가 자동으로 생긴 것은 아닙니다. 이 작은 드라이버에서는 짝 찾기와 준비 합의 대신 초기 조건을 직접 공급해 인계 구간을 고정합니다.",
+      "codes": [
+        {
+          "label": "이미 받은 프레임을 먼저 처리",
+          "language": "cpp",
+          "text": "Frame read_next(Socket& socket,FrameParser& parser){\n const auto stop=Clock::now()+std::chrono::seconds(1);\n for(;;){\n  Frame frame;const auto parsed=parser.next(frame);\n  if(parsed==ParseStatus::frame)return frame;\n  REQUIRE(parsed==ParseStatus::need_more&&Clock::now()<stop);\n  std::uint8_t bytes[16];const auto read=try_receive(socket,bytes,sizeof(bytes));\n  if(read.state==ReceiveState::progress)REQUIRE(parser.append(bytes,read.count));\n  else {REQUIRE(read.state==ReceiveState::would_block||read.state==ReceiveState::interrupted);std::this_thread::sleep_for(std::chrono::milliseconds(1));}\n }\n}\n"
+        },
+        {
+          "label": "입력 프레임의 실제 규칙 소비",
+          "language": "cpp",
+          "text": " const auto board=study_round::Round::create_seeded(study_grid::Grid{},77);REQUIRE(board);\n RoundPlay peer;REQUIRE(peer.prepare(1,study_combat::Duel(*board,*board),Side::peer,0)&&peer.start());\n Frame own;REQUIRE(peer.capture(0,own).input==Put::stored&&peer.receive(received).input==Put::stored&&peer.advance()==Advance::advanced);\n REQUIRE(peer.game()->next_tick()==1&&handoff.parser.pending_bytes()==0);\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실험에서 읽기 경계를 고정하지 않는 이유",
+          "body": "두 번 send했다고 두 번 recv되는 것은 아닙니다. 이 실행은 parser와 소켓에 남은 바이트를 모두 보존해야 성공합니다. parser 안에 전체 후속 프레임과 부분 꼬리가 함께 들어 있는 경우는 별도의 분할 단위 검사로 확실히 만듭니다."
+        }
+      ]
+    },
+    {
+      "title": "파서가 실패했는데 앞의 프레임을 처리하면",
+      "body": "현재 서버의 parse_frames는 완성 프레임 여러 개를 한 번에 꺼냅니다. 정상 첫 요청 뒤에 허용 범위를 넘는 길이 헤더가 붙어 있다면, 정상 요청을 frames에 넣은 다음 false를 반환할 수 있습니다. 반환값을 확인하지 않고 for문으로 넘어가면 치명적 파싱 실패 뒤에도 대기열 참가나 방 처리가 진행됩니다.\n\n첫 연결 경로에서는 false일 때 소켓을 닫고 반환합니다. 방 대기 루프에서는 false일 때 break하여 공통 참가자·방·소켓 정리 경로를 사용합니다. 경로마다 필요한 정리가 다르므로 같은 오류라도 return을 기계적으로 복사하지 않습니다.\n\n기준 구현은 next를 하나씩 호출하다가 첫 요청을 접수하면 멈춥니다. 뒤에 잘못된 헤더가 있다면 다음 소유자가 검사합니다. 현재 서버는 같은 묶음의 치명적 오류를 먼저 확인하고 해당 묶음의 분기를 막습니다. 어느 단계에서 얼마를 해석하는지에 따라 오류 관측 위치가 달라지며, 선택한 정책에서 파서 실패를 무시하지 않는 것이 공통 조건입니다.",
+      "reference": {
+        "path": "server/player_conn.cpp",
+        "symbol": "close: invalid frame boundary",
+        "invariant": "치명적 파서 실패를 확인한 뒤에만 요청을 dispatch한다.",
+        "mayDiffer": "현재 room.cpp는 break로 공통 정리를 거친다. 학습 상태 머신은 protocol_error 결과를 바깥 소유자에게 알린다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "모든 잘못된 프레임이 같은 결과인가",
+          "body": "현재 파서는 일부 체크섬 오류 등을 건너뛰도록 구현되어 있습니다. false에 대한 종료 처리를 추가했다고 모든 잘못된 입력이 즉시 종료되는 것은 아닙니다. 프레임 파서의 분류와 호출자의 종료 정책을 함께 읽습니다."
+        }
+      ]
+    },
+    {
+      "title": "분할과 경계값으로 계약을 흔든다",
+      "body": "13바이트 사이에는 끊을 수 있는 위치가 12개 있습니다. 각 위치를 끊거나 잇는 선택은 2의 12제곱, 4,096가지입니다. 각 분할에서 첫 요청 전에는 FirstAdmission에, 인계 후에는 넘겨받은 parser에 넣어 A와 B를 같은 순서로 읽는지 확인합니다. 재수신을 가정하거나 read 한 번을 메시지 하나로 처리하는 구현은 이 검사에서 드러납니다.\n\n디코더는 TYPE·size·route의 조합, join의 각 문자 위치와 length를 바꾸어 유효한 값만 접수하는지 확인합니다. 실패할 때 미리 채워 둔 out이 그대로 남는지도 봅니다. 선언한 size가 저장소보다 커도 가능한 모양 검사를 먼저 하므로 그 길이로 배열을 읽지 않아야 합니다.\n\n상태 검사에서는 마감 직전/정각, 역행한 poll·feed·eof, 낯선 네 번째/다섯 번째, 한 번의 읽기 상한, 총량 소진, 부분 프레임 뒤 EOF를 넣습니다. 경계값끼리 만날 때 어떤 조건을 먼저 검사하는지 예측한 후 결과와 비교하세요. 실시간으로 10초씩 기다리는 대신 숫자를 넣을 수 있는 것이 순수 상태 전이의 장점입니다."
+    },
+    {
+      "title": "누적 프로젝트에 추가하고 실행한다",
+      "body": "net/first_admission.h에 상태 머신을 추가하고 tests/admission_contract.cpp와 tools/admission_probe.cpp를 새 실행 타깃으로 연결합니다. admission_contract는 헤더만 사용하고 admission_probe는 누적 StudySocket에 링크합니다. 렌더러·보드·입력 계층은 같은 체크포인트 안에 유지합니다.\n\n계약 검사는 분할·마감·예산·EOF를 확인했다는 요약을 출력합니다. 연결 실험은 queue 경로를 정했고 소켓과 parser를 인계했으며 RoundPlay가 틱 0을 소비했다고 출력합니다. 실행을 따라가며 어느 순간에 커널 수신 버퍼에서 사용자 공간으로 바이트가 옮겨졌는지 표시해 보세요.",
+      "codes": [
+        {
+          "label": "두 타깃과 외부 실행 제한",
+          "language": "cmake",
+          "text": "add_executable(admission_contract tests/admission_contract.cpp)\ntarget_include_directories(admission_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME admission_contract COMMAND admission_contract)\nadd_executable(admission_probe tools/admission_probe.cpp)\ntarget_link_libraries(admission_probe PRIVATE StudySocket)\nadd_test(NAME admission_probe COMMAND admission_probe)\nset_tests_properties(admission_probe PROPERTIES TIMEOUT 15)\n"
+        },
+        {
+          "label": "프로젝트 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/100-first-admission -B out/study100 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study100 -j3\nctest --test-dir out/study100 --output-on-failure\n./out/study100/admission_contract\n./out/study100/admission_probe"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실험 실행 조건",
+          "body": "loopback 소켓을 열 수 있는 환경이 필요합니다. 작은 클라이언트 쓰기는 제어된 blocking fixture이며 admission 수신은 nonblocking입니다. CTest에는 실험 전체의 15초 제한도 둡니다. Windows 다중 구성에서는 --config Release와 CTest -C Release를 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "전체 구현에서 유지할 경계",
+      "body": "유지할 핵심은 입력 전 길이 검사, 검증 후 후보 반영, 연장되지 않는 단계 마감, 처리량 제한, 파서 실패에 대한 명시적 전이, 소켓과 미소비 바이트의 공동 인계입니다. 요청의 TYPE·코드 문법·시간·바이트 숫자는 프로토콜과 운영 조건에 맞춰 달라질 수 있습니다.\n\n현재 서버를 비교할 때는 worker 진입 시점에 만들어진 인증 대기 마감을 찾으세요. 반복 조건에서 검사하므로 동기 authenticate의 HTTP 호출을 취소하지 않습니다. `stream.reserve(...)`도 초기 할당 예약일 뿐 벡터의 최대 길이가 아닙니다. 이름이나 숫자만 보고 제한 범위를 추정하는 대신 어떤 동작 앞뒤에서 검사되는지 읽어야 합니다.\n\n아래 전체 파일에서 feed의 순서와 take 이후 상태를 이어 읽으면, 완료된 요청과 아직 처리하지 않은 바이트가 어디에 남는지 추적할 수 있습니다. 계정 인증·방 조회·짝 찾기는 각 기능의 상태와 결과를 이 경계에 연결하는 별도 책임입니다.",
+      "codes": [
+        {
+          "label": "net/first_admission.h",
+          "language": "cpp",
+          "file": "checkpoints/100-first-admission/net/first_admission.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/admission_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/100-first-admission/tools/admission_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/admission_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/100-first-admission/tests/admission_contract.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "server/room.cpp",
+        "symbol": "close: invalid frame boundary",
+        "invariant": "방 단계도 파서 실패와 정상 처리·정리 경로를 명시적으로 구별한다.",
+        "mayDiffer": "실제 방은 참가자 목록·READY·상대 알림·인증 정보를 함께 관리한다. 이 실습의 다음 소유자는 순차 드라이버다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "100-1",
+      "question": "queue 요청과 후속 프레임 A 전체·B 일부를 같은 recv로 읽었습니다. 첫 요청 처리 뒤 필요한 인계는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소켓만 넘기고 parser는 비운다"
+        },
+        {
+          "id": "b",
+          "text": "소켓과 미소비 바이트가 남은 parser를 함께 넘긴다"
+        },
+        {
+          "id": "c",
+          "text": "A와 B를 커널에서 다시 읽는다"
+        },
+        {
+          "id": "d",
+          "text": "첫 단계가 뒤의 모든 프레임도 입장 요청으로 처리한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "소켓과 미소비 바이트가 남은 parser를 함께 넘긴다",
+      "explanation": "이미 recv한 바이트는 커널에서 다시 받을 수 없습니다. parser의 읽기 위치와 남은 바이트를 소켓과 함께 이어 줘야 합니다."
+    },
+    {
+      "id": "100-2",
+      "question": "start=100, timeout=10입니다. 일부 바이트를105에 받고 정상 요청을 완성하는 나머지가110에 도착하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "110부터 새로10을 기다린다"
+        },
+        {
+          "id": "b",
+          "text": "완성 요청이므로 routed다"
+        },
+        {
+          "id": "c",
+          "text": "feed가 먼저 마감을 확인하여 timed_out이다"
+        },
+        {
+          "id": "d",
+          "text": "부분 수신이 있었으므로 truncated다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "feed가 먼저 마감을 확인하여 timed_out이다",
+      "explanation": "마감은 부분 수신으로 연장하지 않으며 경과>=timeout이면 늦습니다. feed는 파싱보다 poll을 먼저 수행합니다."
+    },
+    {
+      "id": "100-3",
+      "question": "poll(105)까지 waiting인 객체에 eof(104)를 호출했습니다. 올바른 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "clock_error를 반환하고 상태를 보존한다"
+        },
+        {
+          "id": "b",
+          "text": "peer_closed로 바꾼다"
+        },
+        {
+          "id": "c",
+          "text": "start를104로 옮긴다"
+        },
+        {
+          "id": "d",
+          "text": "시간을 무시하고 take를 성공시킨다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "clock_error를 반환하고 상태를 보존한다",
+      "explanation": "역행 시각은 일시적인 호출 오류입니다. eof가 poll 결과를 무시하면 잘못된 시간 호출로 종료 상태가 생기므로 그대로 반환합니다."
+    },
+    {
+      "id": "100-4",
+      "question": "현재 서버의 parse_frames가 정상 요청을 frames에 넣은 뒤 초과 길이로 false를 반환했습니다. 첫 연결 경로는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "앞의 정상 요청만 대기열에 넣는다"
+        },
+        {
+          "id": "b",
+          "text": "frames가 비어 있지 않으므로 true로 간주한다"
+        },
+        {
+          "id": "c",
+          "text": "같은 stream을 무제한 재시도한다"
+        },
+        {
+          "id": "d",
+          "text": "요청 분기 전에 연결을 닫고 반환한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "요청 분기 전에 연결을 닫고 반환한다",
+      "explanation": "현재 일괄 파서 정책에서는 false를 확인한 뒤 해당 묶음의 dispatch를 막습니다. 방 루프에서는 공통 정리를 위해 break를 사용합니다."
+    },
+    {
+      "id": "100-5",
+      "question": "총112바이트를 처리했고 낯선 프레임 제한은 넘지 않았습니다. 마감 전에16바이트를 더 받아 정확히128번째 바이트에서 정상 첫 요청이 완성되면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "128에 닿기 전에 무조건 byte_limit이다"
+        },
+        {
+          "id": "b",
+          "text": "요청을 찾아 routed가 될 수 있다"
+        },
+        {
+          "id": "c",
+          "text": "한 번에16바이트는 항상 protocol_error다"
+        },
+        {
+          "id": "d",
+          "text": "마감을16만큼 연장하고 waiting이다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "요청을 찾아 routed가 될 수 있다",
+      "explanation": "feed는 허용량을 추가한 뒤 프레임을 처리합니다. 정상 요청을 찾으면 routed이고, 모두 처리한 뒤에도 waiting인 경우에 총량 소진으로 실패합니다. 시각 마감은 이보다 먼저 검사합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "13바이트 요청·후속 프레임 열에 세 가지 read 경계를 직접 표시합니다.",
+      "FirstAdmission의 poll·feed·take를 따라 상태와 parser의 남은 바이트를 적습니다.",
+      "계약 검사와 loopback 실험을 실행하고 실제 RoundPlay까지 이어지는 경로를 읽습니다.",
+      "현재 player_conn·room의 파서 실패 분기와 잔여 스트림 인계를 비교합니다."
+    ],
+    "failureChecks": [
+      "마감 직전과 정각에 같은 정상 요청을 넣어 우선순위를 확인합니다.",
+      "역행 시각의 EOF가 waiting을 종료 상태로 바꾸지 않는지 확인합니다.",
+      "첫 요청 뒤의 완성 프레임과 부분 꼬리를 버리거나 재처리하지 않는지 확인합니다."
+    ],
+    "expected": "첫 요청을 정확한 형식·시간·예산 안에서 접수하고, 소켓과 parser의 다음 소유자가 바이트 손실 없이 게임 입력을 이어 읽는다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 상태 머신 초안 검토·누적 실제 소켓 실험·현재 첫 연결/방 분기의 실패 재현·Part7 대조",
+    "draftJob": "out/learning-jobs/100-admission-events.jsonl",
+    "corrections": [
+      "eof가 역행 시각의 poll 결과를 무시해 상태를 바꾸던 초안 교정",
+      "크기 검사 선행과 무효 기본 요청 getter 제거",
+      "현재 첫 연결·방 루프가 parse_frames의 치명적 실패를 무시하던 분기 교정",
+      "5초 마감의 시작점·협력적 범위·HTTP 비취소 및 재직렬화 설명 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "99 누적 파일 보존, SCRIPTED129/SDL134 CTest 및 -Wall/-Wextra/-Wpedantic 경고 없는 빌드 통과",
+    "디코더 type0..255/size0..39/route0..255 및 각 join 문자/길이,13바이트의 모든4096분할, 한번 인계·출력보존 ASan/UBSan 통과",
+    "정확 마감·u64경계·역행 poll/feed/eof·낯선4/5개·읽기 상한·128바이트 소진/정확 경계 성공·EOF/부분꼬리·후속 잘못된 헤더의 다음 단계 검사 통과",
+    "실제 loopback TCP에서 nonblocking 입장 처리, socket/parser 인계, 후속 TYPE60/61 및 실제 RoundPlay TYPE41 틱0 진행 ASan/UBSan 통과",
+    "실제 first/room 파싱 분기 발췌에서 수정 전 정상prefix+과대길이 dispatch 실패 재현, 수정 후 실패차단/정상·부분입력/잔여순서 통과. 검사 도구는 임시 백업 없이 이전의 무시 분기를 재구성",
+    "현재 게임/양relay 빌드와 root21/20 CTest 통과. 최종 추가 경계의 SCRIPTED admission_contract 재빌드/CTest 통과",
+    "인라인14(C++13/CMake1) 누적 소스 일치, Part구조/현재발췌/로컬링크·Markdown27·494문제·전체DOM 탐색/저장/복원/단일차시렌더링 계약 통과",
+    "Windows/macOS 네이티브·수동GUI·운영 서버 인증/매칭 통합·WAN/부하 검사는 미수행. root 회귀는 실제 분기 발췌 검사이며 서버 전체 통합 검증으로 보지 않음"
+  ]
+}

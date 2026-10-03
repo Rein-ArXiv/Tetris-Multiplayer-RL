@@ -11,14 +11,22 @@
 // main.cpp 의 GameSettings.ghostOn 변경 시 호출해 Draw 의 고스트 그리기를 게이트.
 void game_set_ghost_enabled(bool on);
 
-// [NET] Handmade 렌더러 래퍼 — SimGame 위에 draw_rect() 기반 렌더링 + XAudio2 오디오.
+// [NET] Handmade 렌더러 래퍼 — SimGame 위에 draw_rect() 기반 렌더링과 선택된 오디오 백엔드.
 // 렌더링은 renderer/renderer.h 의 draw_rect() 를 사용.
-// 오디오는 audio/audio.h 의 XAudio2 래퍼를 사용.
+// 오디오는 audio/audio.h의 공통 API를 사용하며 빌드가 SDL/XAudio2 구현을 선택한다.
 class Game
 {
 public:
     Game(uint64_t seed = 0);
     ~Game();
+
+    // Owns audio handles and reference aliases into sim. Copying would alias
+    // another object's state and release its handles; moving requires rebinding.
+    // Keep object identity stable; transfer ownership through unique_ptr<Game>.
+    Game(const Game&) = delete;
+    Game& operator=(const Game&) = delete;
+    Game(Game&&) = delete;
+    Game& operator=(Game&&) = delete;
 
     // ── 렌더링 ──────────────────────────────────────────────────────────────
     void Draw();
@@ -49,13 +57,14 @@ public:
     int&  score;
 
 private:
+    void ConsumeSoundEvents();
     void DrawGrid(int offsetX, int offsetY, int cellSize = 30) const;
     void DrawBlock(const SimBlock& block, int offsetX, int offsetY, int cellSize = 30) const;
     void DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const;
 
     std::vector<Color> cellColors;
 
-    // ── 오디오 핸들 (XAudio2) ───────────────────────────────────────────────
+    // ── 오디오 핸들 (선택된 백엔드) ───────────────────────────────────────────────
     AudioHandle sndRotate  = 0;
     AudioHandle sndClear   = 0;
     AudioHandle sndDrop    = 0;

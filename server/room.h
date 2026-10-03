@@ -104,7 +104,13 @@ private:
     uint64_t    nextSeed_();       // mu 잡은 상태에서 호출
     uint32_t    nextMatchId_();    // mu 잡은 상태에서 호출
 
+    void abortRoom_(const std::string& code, const net::TcpSocket& owner);
+
+    // A code/role identifies a slot; only this owning socket may mutate it.
+    static bool ownsSlot_(const Entry& entry, bool isHost,
+                          const net::TcpSocket& expected);
     void roomLoop_(const std::string& code, bool isHost,
+                   const net::TcpSocket& expected,
                    std::vector<uint8_t> streamPrefix = {});
     void sendRoomInfo_(const net::TcpSocket& sock, const std::string& code,
                        uint8_t status, uint8_t peerCount);
@@ -124,7 +130,6 @@ private:
     static constexpr size_t kRoomSendShardCount = 64;
     std::array<std::mutex, kRoomSendShardCount> roomSendMu_;
     std::atomic<bool>       stopping{false};
-    uint64_t                code_rng_state_ = 0;
     // match seed 는 MATCH_FOUND 로 나가는 값이라 스트림을 두지 않는다.
     relay::MatchSeedSource  seed_src_;
     uint64_t                next_room_info_version_ = 1;

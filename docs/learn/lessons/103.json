@@ -1,0 +1,507 @@
+{
+  "id": "lesson-103",
+  "title": "방 코드: 생성·충돌·소유권",
+  "shortTitle": "코드 예약·세대·자원 인계",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 랜덤 큐에서 두 연결을 선택할 수 있지만, 친구에게 전달할 주소로 특정 호스트를 찾지는 못합니다.",
+  "finish": "완료: 다섯 자리 코드를 예약·안내하고 게스트가 그 주소의 호스트를 찾게 하며, 충돌과 오래된 제거 요청을 처리합니다.",
+  "objective": "코드 공간과 충돌 확률을 구별하고, 후보 생성·원자적 등록·세대별 제거·예외 정리의 경계를 구현하고 설명합니다.",
+  "prerequisites": [
+    "소켓·parser의 인계",
+    "mutex·이동·optional과 자원 수명",
+    "비트 연산·조건부 실패 반환"
+  ],
+  "recap": {
+    "points": [
+      "등록 순서는 서버의 성공한 삽입 순서로 정의합니다.",
+      "취소와 선택이 같은 자원을 동시에 가져가지 않도록 직렬화합니다.",
+      "저장소 종료와 인계된 작업의 완료는 서로 다른 수명 경계입니다."
+    ],
+    "bridge": "이번에는 순서 대신 짧은 주소를 키로 연결을 찾고, 같은 주소가 다시 쓰였을 때의 정리까지 설계합니다."
+  },
+  "sections": [
+    {
+      "title": "임의의 상대 대신 같은 주소를 찾는다",
+      "body": "랜덤 매칭은 살아 있는 대기자 중 앞의 두 명을 선택합니다. 친구와 만나려면 지정한 대상을 찾는 과정이 필요합니다. 호스트가 방을 만들고 받은 짧은 코드를 전달하면, 게스트가 그 코드로 등록소를 조회하도록 바꿔 봅시다.\n\n방 코드는 공개할 주소이고, 등록소는 주소와 서버가 소유한 상태를 연결합니다. 이 구별이 중요합니다. 코드 문자열을 복사한 것만으로 소켓이 복사되거나 방의 수명이 늘어나지는 않습니다. 서버는 방을 등록한 때부터 삭제하거나 다음 소유자에게 넘길 때까지 연결을 관리해야 합니다.\n\n이번 RoomDirectory는 호스트 자원을 등록하고 코드로 찾은 뒤 인계하는 작은 저장소입니다. 두 사람이 READY를 주고받는 로비 규약은 이 저장소와 별도의 책임입니다. 실제 TCP 실험에서는 방 코드 발급·게스트의 코드 전송·호스트 인계를 연결한 뒤 게임 입력을 처리합니다.",
+      "codes": [
+        {
+          "label": "주소와 자원의 경계",
+          "text": "호스트 입장 → 코드 예약 + 호스트 자원 보관 → 코드 안내\n게스트 입장 → 코드 조회 → 해당 방의 현재 식별자 확인\n인계 → 등록소에서 호스트 자원 꺼내기 → 다음 단계가 소유",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "server/room.h",
+        "symbol": "class RoomRegistry",
+        "invariant": "공개된 방 주소와 서버가 소유하는 연결 상태를 구별한다.",
+        "mayDiffer": "현재 Registry는 호스트·게스트·준비 상태·세션 lease까지 보관한다. 기준 Directory는 코드와 호스트 자원 인계에 집중한다."
+      }
+    },
+    {
+      "title": "다섯 글자는 몇 가지 상태를 표현하는가",
+      "body": "알파벳은 A~Z와 2~9에서 I·O를 제외한 32자입니다. 0/O·1/I를 혼동하기 쉬워 이 네 기호를 제외합니다. 한 자리에는 32가지 선택이 있으므로 다섯 자리에는 32^5 = 33,554,432가지 코드가 있습니다. 32는 2^5이므로 코드 하나는 25비트의 선택 공간을 표현합니다.\n\n32비트 word에서 하위 5비트씩 꺼내 기호의 인덱스로 사용합니다. 첫 기호가 가장 낮은 비트 묶음입니다. word=103이면 103=3×32+7이므로 인덱스 7,3,0,0,0을 차례로 읽어 HDAAA가 됩니다. 일반적인 십진수 표기처럼 높은 자릿수부터 쓰는 문자열과 순서가 다르므로 인코딩 규칙을 명시합니다.\n\n0은 AAAAA라는 정상 코드입니다. 상위 7비트는 사용하지 않습니다. 균등한 32비트 입력에서 각 25비트 값은 128개의 원본 값에 대응하므로 코드 분포도 균등합니다. 저장소에서 이미 쓰는 코드인지 확인하는 일은 이 인코딩 함수 밖에서 합니다.",
+      "codes": [
+        {
+          "label": "기호 집합과 5비트 인코딩",
+          "text": "using RoomCode = std::array<char, 5>;\n\ninline constexpr std::size_t kRoomCodeLength = 5;\ninline constexpr char kRoomCodeAlphabet[] = \"ABCDEFGHJKLMNPQRSTUVWXYZ23456789\";\ninline constexpr std::size_t kRoomCodeAlphabetSize = 32;\n\n// The alphabet deliberately drops I/O/0/1 to avoid look-alike confusion, which\n// is exactly what makes 32 symbols fit the five 5-bit groups below.\nstatic_assert(sizeof(kRoomCodeAlphabet) - 1 == kRoomCodeAlphabetSize,\n              \"room code alphabet must contain exactly 32 symbols\");\n\n// Packs five 5-bit groups from the low bits of `word` into a code. All-zero\n// input is legal and yields \"AAAAA\".\ninline RoomCode code_from_word(std::uint32_t word) noexcept {\n    RoomCode code{};\n    for (std::size_t i = 0; i < kRoomCodeLength; ++i) {\n        code[i] = kRoomCodeAlphabet[word & 31u];\n        word >>= 5;\n    }\n    return code;\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "32개가 아닌 기호 집합이라면",
+          "body": "예를 들어 30개 기호에 5비트 값 % 30을 적용하면 0·1 인덱스에 대응하는 입력이 두 개씩 생깁니다. 균등 분포를 유지하려면 초과 값을 버리는 재추출 등 다른 변환이 필요합니다. 여기서는 32개가 5비트 전체에 정확히 대응합니다."
+        }
+      ],
+      "reference": {
+        "path": "server/room_code.h",
+        "symbol": "inline std::string roomCodeFromWord",
+        "invariant": "기호 수와 비트 묶음의 대응을 명시하고 0도 유효하게 처리한다.",
+        "mayDiffer": "현재 서비스는 string을, 기준 코드는 고정 크기 RoomCode 배열을 반환한다."
+      }
+    },
+    {
+      "title": "충돌 확률은 어떤 사건을 묻는가",
+      "body": "코드 공간이 커도 같은 후보가 나올 수 있습니다. 현재 N개의 방이 있고 후보가 균등하다면, 후보 하나가 이미 쓰는 코드에 닿을 확률은 N/33,554,432입니다. 방이 500개면 약 0.00149%입니다. 작은 확률이지만 충돌한 항목을 덮어써도 된다는 뜻은 아닙니다.\n\n다른 질문도 있습니다. 비어 있는 공간에 500개의 후보를 독립적으로 뽑았을 때 그 후보들끼리 한 번 이상 겹칠 확률은 약 0.37%입니다. 비교할 쌍이 500×499/2개라는 점이 차이입니다. 이것이 생일 문제와 같은 구조입니다. 한 번의 신규 후보 충돌과 묶음 전체의 충돌을 구별해 수치를 읽습니다.\n\n저장소는 이미 사용 중인 후보를 버리고 새 후보를 요청합니다. 여기서는 최대 32번입니다. 계속 같은 값을 주는 고장 난 소스나 인위적으로 만든 충돌도 종료되어야 하므로 재시도에 한도를 둡니다. 한도 소진은 발급 실패이며 다른 방의 내용을 바꾸지 않습니다.",
+      "codes": [
+        {
+          "label": "후보와 예약을 구별한다",
+          "text": "현재 방: AAAAA, BAAAA\n후보 AAAAA → 충돌, 그대로 유지\n후보 BAAAA → 충돌, 그대로 유지\n후보 HDAAA → 비어 있음 → 잠금 안에서 새 방 등록",
+          "language": "text"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "근사의 전제",
+          "body": "0.37%는 균등·독립 후보에 대한 1−exp(−n(n−1)/(2M)) 근사입니다. 실제 등록소는 충돌을 발견하면 재시도하므로 성공적으로 등록된 방끼리는 코드가 겹치지 않아야 합니다. 통계는 정책을 대신하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "재현용 입력과 서비스용 난수원을 분리한다",
+      "body": "검사에서 매번 우연히 충돌이 나기를 기다릴 수는 없습니다. 등록소는 Next라는 함수에서 후보 word를 받습니다. 실습은 0,0,103 같은 고정 목록을 공급해 충돌 두 번 뒤 성공을 재현하고, nullopt를 주어 난수원 실패를 재현합니다. 후보를 어떻게 얻는지와 후보가 겹쳤을 때 무엇을 할지를 분리한 설계입니다.\n\n서비스의 초대 주소는 반복 관측으로 다음 값을 쉽게 계산할 수 있는 시뮬레이션용 난수 스트림과 목적이 다릅니다. 결정적 생성기에 난수 시드를 넣는 것만으로 암호학적 예측 저항성이 보장되지는 않습니다. 현재 두 릴레이는 후보마다 운영체제 난수원에서 새 4바이트를 얻으며, 실패하면 코드 발급을 거절합니다.\n\nLinux 경로는 getrandom의 GRND_NONBLOCK을 사용하고 정확히 4바이트를 얻지 못하면 실패합니다. Windows 경로는 BCryptGenRandom의 시스템 제공자를 사용합니다. 다른 POSIX 경로는 /dev/urandom을 읽습니다. 사용한 값이 없으면 시각값이나 고정값으로 대체하지 않습니다. [Linux 난수원 계약](https://man7.org/linux/man-pages/man2/getrandom.2.html), [Windows 난수원 계약](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom)에서 실패 조건과 호출 규약을 확인할 수 있습니다.",
+      "reference": {
+        "path": "server/room_code.cpp",
+        "symbol": "std::optional<std::uint32_t> roomCodeRandomWord",
+        "invariant": "후보를 공급할 수 없으면 생성을 거절하고 약한 대체값을 쓰지 않는다.",
+        "mayDiffer": "기준 코드의 Next는 주입하는 정책이며 TCP 실험의 상수103은 재현 전용이다. 서비스의 OS 난수원과 연결되어 있지 않다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "좋은 난수원과 짧은 코드의 한계",
+          "body": "난수원이 좋아져도 다섯 자리의 공간은 25비트 그대로입니다. 현재 프로토콜은 방 코드를 알면 그 방에 입장을 시도할 수 있으므로 반복 추측 예산과 연결 제한도 필요합니다. 강한 비공개 초대는 긴 토큰이나 호스트 승인 같은 별도 정책을 요구합니다. 계정 인증과 방 선택은 서로 다른 판단입니다."
+        }
+      ]
+    },
+    {
+      "title": "코드·소유자·세대 번호를 한 값으로 묶는다",
+      "body": "사용자가 보는 코드가 같아도 방 인스턴스는 다를 수 있습니다. 방 AAAAA를 지운 뒤 우연히 같은 코드로 새 방이 생성됐다고 합시다. 옛 작업이 “AAAAA를 지워라”라는 요청을 뒤늦게 처리하면 새 방을 삭제할 수 있습니다.\n\nRoomHandle은 code, owner, generation을 함께 담습니다. owner는 서버가 정한 연결 요청의 식별자이고 generation은 등록 성공마다 증가하는 이 저장소 내부의 세대 번호입니다. 같은 owner가 같은 code를 다시 받아도 generation이 다르므로 오래된 핸들을 구별합니다.\n\n이러한 재사용 문제는 A였던 자리가 사라졌다가 다시 A처럼 보인다는 뜻에서 ABA 문제와 연결해 생각할 수 있습니다. 여기서는 주소가 같다는 사실만으로 같은 객체라고 판단한 것이 원인입니다. 세대 번호를 비교하면 객체의 이번 수명까지 식별할 수 있습니다.",
+      "codes": [
+        {
+          "label": "공개 주소와 내부 인스턴스 식별자",
+          "text": "struct RoomHandle {\n    RoomCode code{};\n    std::uint64_t generation = 0;\n    std::uint64_t owner = 0;\n};\n\n// A live entry owns its payload in the directory until take() transfers it out.\ntemplate <class T>\nstruct RoomEntry {\n    RoomHandle handle{};\n    T value;\n};",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "핸들이 곧 인증인가",
+          "body": "RoomHandle은 서버 내부의 값 타입이며 암호화된 자격 증명이 아닙니다. 클라이언트가 임의의 owner·generation을 선택하게 해서는 안 됩니다. 이 설계가 지키는 것은 등록소 안의 식별과 소유권 일치입니다. 번호는 프로세스 재시작을 넘는 영속 식별자로 쓰지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "순서가 필요 없는 저장소에는 빈 칸을 허용한다",
+      "body": "FIFO 큐는 앞에서부터 순서를 유지하기 위해 중간 제거 뒤 항목을 당겼습니다. 방 조회의 기준은 코드입니다. 슬롯 위치 순서에 의미가 없으므로 지운 칸은 비워 두고 새 방이 처음 발견한 빈 칸을 사용하도록 만듭니다.\n\n각 슬롯은 optional<RoomEntry<T>>입니다. 비어 있으면 T 객체를 만들지 않아도 됩니다. count_는 값이 있는 슬롯 수이고, 검색은 배열 전체에서 살아 있는 슬롯만 봅니다. count_ < Capacity라면 최소 하나의 빈 슬롯이 있다는 불변식으로 삽입 위치를 찾습니다.\n\nT는 소켓·parser 같은 자원 묶음을 옮길 수 있어야 합니다. 이 구조는 이동 생성과 소멸이 예외를 던지지 않도록 제한하며, 빈 구멍을 메우지 않으므로 이동 대입은 필요하지 않습니다. 슬롯은 고정이지만 T가 가리키는 객체나 OS 버퍼까지 고정 크기가 되는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "빈 슬롯을 찾는 내부 함수",
+          "text": "std::size_t first_empty_slot_() const {\n    for (std::size_t i = 0; i < Capacity; ++i) {\n        if (!entries_[i].has_value()) {\n            return i;\n        }\n    }\n    return Capacity;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "저장소 상태",
+          "text": "std::array<std::optional<RoomEntry<T>>, Capacity> entries_{};\nstd::size_t count_ = 0;\nmutable std::mutex mutex_;\nbool closed_ = false;\nstd::uint64_t next_generation_ = 1;",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실제 서버가 unordered_map을 쓰는 이유",
+          "body": "키로 찾는 자료구조를 사전이라고 부릅니다. 이 작은 사전은 선형 검색하므로 O(Capacity)입니다. 실제 서버는 unordered_map으로 평균적인 키 조회 비용을 줄입니다. 해시 표도 메모리 할당·재해시·최악의 탐색 비용을 가지므로 무조건 O(1)이라고만 설명하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "등록 실패의 의미를 먼저 정한다",
+      "body": "create는 자원을 받기 전에 저장소가 닫혔는지, owner가 0인지, 같은 owner의 살아 있는 방이 있는지, 세대 번호를 더 쓸 수 있는지, 빈 자리가 있는지를 검사합니다. 순서는 공개된 계약입니다. 닫힌 저장소에 잘못된 owner를 주면 closed가 먼저 반환됩니다.\n\n이 단계에서 거절하면 Next를 호출하지 않고 value도 이동하지 않습니다. 호출자는 실패 이유에 맞게 재시도하거나 연결을 정리할 수 있습니다. 빈 자리가 없는데 먼저 난수를 뽑는 식으로 관계없는 비용을 쓰지 않습니다.\n\n닫힘 검사와 남은 자리 검사는 mutex 안에서 합니다. 밖에서 확인한 빈 자리는 다른 생성자가 사용할 수 있고, 열려 있던 저장소는 종료될 수 있습니다. 검사의 결과가 삽입할 때까지 유지되도록 상태 변경을 하나의 임계 구역으로 묶습니다.",
+      "codes": [
+        {
+          "label": "실패 이유는 자원 이동보다 먼저 결정한다",
+          "text": "enum class RoomCreate {\n    created,\n    closed,\n    invalid_owner,\n    duplicate_owner,\n    generation_exhausted,\n    full,\n    source_failed,\n    collision_limit,\n};\n\nstruct RoomCreated {\n    RoomCreate status = RoomCreate::source_failed;\n    std::optional<RoomHandle> handle;\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "같은 잠금 안에서 선행 조건을 검사한다",
+          "text": "template <class Next>\n[[nodiscard]] RoomCreated create(std::uint64_t owner, T& value, Next&& next) {\n    static_assert(\n        std::is_nothrow_invocable_r_v<std::optional<std::uint32_t>, Next&>,\n        \"next must be a noexcept callable returning optional<uint32_t>\");\n\n    std::lock_guard<std::mutex> lock(mutex_);\n\n    if (closed_) {\n        return RoomCreated{RoomCreate::closed, std::nullopt};\n    }\n    if (owner == 0) {\n        return RoomCreated{RoomCreate::invalid_owner, std::nullopt};\n    }\n    if (has_owner_(owner)) {\n        return RoomCreated{RoomCreate::duplicate_owner, std::nullopt};\n    }\n    if (next_generation_ == 0) {\n        return RoomCreated{RoomCreate::generation_exhausted, std::nullopt};\n    }\n    if (count_ >= Capacity) {\n        return RoomCreated{RoomCreate::full, std::nullopt};\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "후보 검색에서 등록까지 잠금을 놓지 않는다",
+      "body": "Next가 값을 주면 code_from_word로 후보를 만들고 모든 살아 있는 코드와 비교합니다. 사용 중이면 다음 후보로 넘어갑니다. 비어 있으면 빈 슬롯에 핸들과 value를 이동 생성한 뒤 count_와 세대 번호를 갱신합니다. 성공 반환값에 그 핸들을 담습니다.\n\n후보 조회 뒤 잠금을 풀고 등록하면 두 작업이 같은 빈 코드를 발견할 수 있습니다. “중복이 없었다”는 조회 결과는 예약이 아닙니다. 검색·충돌 판단·삽입이 같은 잠금 안에서 이어져야 한 작업만 그 코드를 차지합니다. 현재 Reactor 구현은 방 표를 소유하는 한 이벤트 루프에서 이 구간을 중간 양보 없이 실행합니다.\n\nNext는 잠금 안에서 호출되므로 noexcept, 제한된 작업량, 비블로킹, 저장소 재진입 금지라는 조건이 있습니다. 이 조건은 템플릿의 예외 성질 검사만으로 전부 증명되지 않습니다. API를 연결하는 사람이 실제 콜백의 행동도 확인해야 합니다.",
+      "codes": [
+        {
+          "label": "성공한 삽입에서만 값과 세대를 소비한다",
+          "text": "    for (std::uint32_t attempt = 0; attempt < kRoomCreateAttempts; ++attempt) {\n        std::optional<std::uint32_t> word = std::invoke(next);\n        if (!word.has_value()) {\n            return RoomCreated{RoomCreate::source_failed, std::nullopt};\n        }\n\n        const RoomCode candidate = code_from_word(*word);\n        if (code_in_use_(candidate)) {\n            continue;  // Retry against every live code, not just one slot.\n        }\n\n        const std::size_t slot = first_empty_slot_();\n        const std::uint64_t generation = next_generation_;\n        const RoomHandle handle{candidate, generation, owner};\n\n        entries_[slot].emplace(RoomEntry<T>{handle, std::move(value)});\n        ++count_;\n\n        // Never wrap back to 1, which would alias the first generation.\n        next_generation_ = (generation == std::numeric_limits<std::uint64_t>::max())\n                               ? 0\n                               : generation + 1;\n\n        return RoomCreated{RoomCreate::created, handle};\n    }\n\n    return RoomCreated{RoomCreate::collision_limit, std::nullopt};\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/room_code.h",
+        "symbol": "std::optional<std::string> selectRoomCode",
+        "invariant": "후보 검색과 실제 등록 사이에 다른 등록이 끼지 않게 한다.",
+        "mayDiffer": "현재 helper는 후보만 반환한다. RoomRegistry는 mu를 유지하며 삽입하고 Reactor는 단일 루프에서 처리한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "최대 세대 번호 다음은 무엇인가",
+          "body": "UINT64_MAX 세대를 사용한 뒤에는 0을 소진 표식으로 두고 이후 생성을 거절합니다. 1로 돌아가면 아주 오래된 핸들과 다시 같아질 수 있습니다. 실패한 생성은 세대를 소비하지 않습니다. 재시작을 넘는 요청을 보관한다면 별도의 저장소 식별자도 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "조회 결과를 얻어도 자원을 빌린 것은 아니다",
+      "body": "find는 코드를 찾아 RoomHandle 사본을 반환합니다. T의 참조나 배열 요소의 포인터를 밖으로 빌려주지 않습니다. 잠금을 놓은 뒤에도 반환한 값 자체는 읽을 수 있지만, 그 방이 계속 존재한다는 보장은 별개입니다.\n\nfind와 take 사이에 다른 작업이 방을 제거할 수 있습니다. take는 code·generation·owner를 다시 확인하고 셋이 모두 같은 항목만 꺼냅니다. 그때 항목을 이동하고 슬롯을 비우며 count_를 줄입니다. 다른 작업이 먼저 가져갔다면 nullopt입니다.\n\n조회와 삭제를 무조건 하나의 외부 잠금으로 감싸는 대신, 값으로 식별자를 전달하고 변경 연산에서 현재 상태를 재검사하는 형태입니다. 사용자는 실패 가능성을 API 결과로 처리해야 합니다. 등록소가 오래된 핸들을 받아도 새 방은 그대로 남습니다.",
+      "codes": [
+        {
+          "label": "조회는 핸들 사본을 반환한다",
+          "text": "[[nodiscard]] std::optional<RoomHandle> find(const RoomCode& code) const {\n    std::lock_guard<std::mutex> lock(mutex_);\n    for (const auto& slot : entries_) {\n        if (slot.has_value() && slot->handle.code == code) {\n            return slot->handle;\n        }\n    }\n    return std::nullopt;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "같은 인스턴스만 꺼낸다",
+          "text": "[[nodiscard]] std::optional<RoomEntry<T>> take(const RoomHandle& handle) {\n    std::lock_guard<std::mutex> lock(mutex_);\n    for (auto& slot : entries_) {\n        if (!slot.has_value()) {\n            continue;\n        }\n        const RoomHandle& current = slot->handle;\n        if (current.code != handle.code ||\n            current.generation != handle.generation ||\n            current.owner != handle.owner) {\n            continue;\n        }\n\n        std::optional<RoomEntry<T>> result{std::move(slot.value())};\n        slot.reset();\n        --count_;\n        return result;\n    }\n    return std::nullopt;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "예외가 나도 반쯤 등록된 방을 남기지 않는다",
+      "body": "기준 Directory는 고정 슬롯과 예외 없는 T 이동으로 삽입 구간을 작게 만들었습니다. 실제 서버의 Entry에는 여러 string과 소켓·세션 정보가 있고, unordered_map도 노드를 할당합니다. 그중 하나가 실패할 때 어떤 상태가 남는지 생각해 봅시다.\n\nrooms[code]로 빈 항목부터 공개하고 username·token 등을 채우면 중간 문자열 할당 실패 뒤에 미완성 방이 남을 수 있습니다. 실제 handleCreate는 지역 Entry의 필드를 먼저 준비한 뒤 emplace합니다. handleJoin도 사본에 게스트 정보를 채운 뒤 예외 없는 이동 대입으로 공개합니다. 준비 단계가 실패하면 아직 살아 있는 표의 상태를 바꾸지 않습니다.\n\n등록 뒤의 작업도 중요합니다. 안내 프레임의 버퍼를 만들거나 roomLoop를 시작하다가 예외가 날 수 있습니다. 진입 함수는 그 경로에서 해당 연결이 소유한 방을 정리하고 예외를 다시 작업 그룹으로 전달합니다. 코드 문자열만 보고 삭제하지 않고, 보관된 소켓의 소유 핸들과 실패한 작업의 핸들이 같은지 확인합니다. 이미 다른 방으로 재사용된 코드는 건드리지 않습니다.\n\n안내 버전이 갱신되어 게스트가 roomLoop에 들어가지 않는 경로에서도 이미 공개한 슬롯을 정리합니다. 예외 발생 여부보다 중요한 조건은 등록된 자원을 실행하거나 회수할 소유 작업이 남아 있느냐는 것입니다.",
+      "codes": [
+        {
+          "label": "준비·공개·실행·실패 정리",
+          "text": "지역 Entry 준비 (할당 실패 가능)\n  → 표에 등록 (등록 성공 전에는 공유하지 않음)\n  → 응답 생성·전송과 roomLoop 실행\n  → 예외: 같은 연결이 소유한 방인지 확인 → 정리 → 예외 전달",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "server/room.cpp",
+        "symbol": "void RoomRegistry::abortRoom_",
+        "invariant": "등록 전 준비와 등록 이후 실패 정리를 모두 소유권 경계에 포함한다.",
+        "mayDiffer": "현재 예외 정리는 소켓의 공유 소유 핸들 동일성을 비교한다. 기준 Directory의 generation 검사와 구현 방식이 다르며 모든 서버 경로가 자동으로 같은 계약을 얻지는 않는다."
+      }
+    },
+    {
+      "title": "닫힌 저장소와 인계된 자원의 수명",
+      "body": "close는 닫힘 상태를 세우고 아직 보관 중인 항목을 정리합니다. 이미 take로 반환한 Entry는 호출자가 소유하므로 close가 그 Entry를 찾아 정리하지 않습니다. 인계 후에는 새로운 소유자의 종료 절차가 필요합니다.\n\nT가 unique_ptr이면 Entry 이동이 가리키는 객체의 단독 소유권도 옮깁니다. T가 shared_ptr이면 해당 shared_ptr 한 개의 소유권이 옮겨지고, 다른 사본이 있으면 객체는 계속 살아 있습니다. “슬롯을 지웠다”와 “모든 자원이 즉시 소멸했다”를 같은 의미로 쓰지 않습니다.\n\n저장소의 소멸은 API를 호출하는 스레드가 모두 끝난 뒤에 일어나야 합니다. close는 사용자의 join을 대신하지 않습니다. 실제 서버에서는 종료 결정과 등록이 같은 mu 아래 직렬화되고, 소유자가 연결 작업의 완료를 기다린 뒤 Registry를 파괴합니다.",
+      "codes": [
+        {
+          "label": "남은 슬롯을 닫는다",
+          "text": "void close() {\n    std::lock_guard<std::mutex> lock(mutex_);\n    if (closed_) {\n        return;\n    }\n    closed_ = true;\n    for (auto& slot : entries_) {\n        slot.reset();\n    }\n    count_ = 0;\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/room.cpp",
+        "symbol": "void RoomRegistry::shutdown",
+        "invariant": "종료 상태와 새 등록을 같은 동기화 경계에서 판단한다.",
+        "mayDiffer": "현재 Registry는 종료 플래그를 세우고 roomLoop가 정리하게 한다. 기준 Directory는 자신이 보관한 항목을 close에서 정리한다."
+      }
+    },
+    {
+      "title": "코드는 등록 성공 뒤에 안내한다",
+      "body": "TCP 실험의 호스트는 TYPE50의 create 경로를 전송합니다. FirstAdmission이 소켓과 parser를 넘기면 서버는 Peer를 등록소에 맡깁니다. 후보 소스는 재현을 위해 word=103을 공급합니다. 성공한 핸들의 코드를 TYPE52 응답에 다섯 바이트로 담습니다.\n\n코드를 먼저 안내하고 뒤에 등록하면 게스트가 그 사이 조회했을 때 없는 방이 됩니다. 따라서 등록 성공 뒤에 안내합니다. 성공 반환값을 통해 실제로 예약한 코드만 사용합니다.\n\n응답에 쓸 소켓은 shared_ptr<Peer>의 짧은 소유 사본으로 보관합니다. pending 사본은 create에서 이동되고, response_peer는 응답 후 reset합니다. 그 뒤에는 Directory가 호스트 Peer의 유일한 shared_ptr을 보관합니다. 별도의 사본을 오래 남기지 않아 누가 연결의 수명을 붙들고 있는지 추적할 수 있게 합니다.",
+      "codes": [
+        {
+          "label": "등록한 코드만 같은 호스트에게 응답한다",
+          "text": "auto response_peer = std::make_shared<Peer>(admit(std::move(accepted),host_request));\nrequire(host_request.route == AdmissionRoute::create);\nRoomDirectory<std::shared_ptr<Peer>,4> directory;\nauto pending = response_peer; // A short-lived owning alias for the response.\nauto made = directory.create(101,pending,[]() noexcept -> std::optional<uint32_t> { return 103; });\nrequire(made.status == RoomCreate::created && made.handle && !pending);\nFrame info; info.type = 52; info.size = 5;\nfor (unsigned i = 0; i < 5; ++i) info.payload[i] = static_cast<std::uint8_t>(made.handle->code[i]);\nsend_frame(response_peer->socket,info); // Advertise only after reservation succeeds.\nresponse_peer.reset(); // Directory now holds the sole shared_ptr to the host Peer.",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실험의 TYPE52",
+          "body": "이 실습의 TYPE52는 코드 다섯 바이트만 전달합니다. 실제 서비스의 ROOM_INFO는 코드 길이·코드·상태·참가자 수를 담습니다. 인증이나 READY 규약을 완성했다고 해석하지 않고, 주소 안내와 자원 보관 사이의 순서를 관찰합니다."
+        }
+      ]
+    },
+    {
+      "title": "게스트가 전달한 문자열을 조회 키로 바꾼다",
+      "body": "호스트 클라이언트가 받은 HDAAA를 게스트가 TYPE50 join 요청에 넣습니다. 서버는 입장 경로를 해석하고 요청 안의 문자열을 parse_room_code로 검증합니다. 길이는 정확히 다섯이고 모든 문자는 이 등록소의 32자 알파벳에 속해야 합니다.\n\nFirstAdmission의 join 문법은 A~Z와 0~9를 허용합니다. 방 생성기의 알파벳은 이보다 좁으므로 입장 경로를 통과했다고 바로 유효한 코드 키라고 가정하지 않습니다. 계층마다 자신이 책임지는 형식을 검사합니다. 소문자 변환이나 공백 제거는 이 함수가 자동으로 수행하지 않습니다.\n\n유효한 코드로 find를 호출해 현재 핸들을 얻고 take로 호스트 자원을 꺼냅니다. 그 뒤 등록소를 닫아도 호스트와 게스트의 두 연결은 다음 작업의 소유자로 살아 있습니다. 숫자나 문자열을 맞춘 것에서 실제 자원 인계까지 이어지는 흐름입니다.",
+      "codes": [
+        {
+          "label": "등록소 코드의 정확한 문법",
+          "text": "inline std::optional<RoomCode> parse_room_code(std::string_view text) noexcept {\n    if (text.size() != kRoomCodeLength) {\n        return std::nullopt;\n    }\n    RoomCode code{};\n    for (std::size_t i = 0; i < kRoomCodeLength; ++i) {\n        std::size_t index = kRoomCodeAlphabetSize;\n        for (std::size_t j = 0; j < kRoomCodeAlphabetSize; ++j) {\n            if (kRoomCodeAlphabet[j] == text[i]) {\n                index = j;\n                break;\n            }\n        }\n        if (index == kRoomCodeAlphabetSize) {\n            return std::nullopt;\n        }\n        code[i] = text[i];\n    }\n    return code;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "전달된 코드에서 현재 방의 자원을 찾는다",
+          "text": "const std::string requested(guest_request.room.begin(),guest_request.room.end());\nconst auto code = parse_room_code(requested); require(bool(code));\nconst auto handle = directory.find(*code); require(bool(handle));\nauto host = directory.take(*handle); require(host && host->handle.owner == 101);\ndirectory.close(); require(!directory.find(*code));",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "두 연결의 입력이 같은 게임 상태로 이어진다",
+      "body": "인계받은 호스트 연결과 게스트 연결에서 각각 TYPE41 게임 입력을 읽습니다. 실험은 round=1, 첫 tick=0, 입력 수=1을 요구합니다. 호스트는 drop, 게스트는 중립 입력을 보내며 양쪽 RoundPlay에 각자의 로컬 입력과 상대 입력을 배치합니다.\n\n두 시뮬레이션이 한 tick을 진행한 뒤 left·right 보드의 정규 상태 바이트를 모두 비교합니다. 방 코드가 일치했다는 결과와 게임 상태가 일치했다는 결과를 따로 확인합니다. 주소 조회는 상대 연결을 찾는 책임이고, 입력 순서를 일치시키는 것은 게임 통신 계층의 책임입니다.\n\n여기서 round·seed·역할은 실험이 직접 공급합니다. 누적된 게임 규칙과 입력 처리는 실제로 호출하지만, 서비스의 인증·READY 합의 전체를 이 실험에 섞지는 않습니다. 창을 여는 main 대신 별도 TCP 실행 파일에서 서버 쪽 연결 경계를 관찰합니다.",
+      "codes": [
+        {
+          "label": "방 조회로 얻은 실제 입력을 규칙에 넘긴다",
+          "text": "const Frame a = read_frame(*host->value), b = read_frame(guest);\nRoundBatch ia,ib; require(decode_round_input(a,ia) && decode_round_input(b,ib));\nrequire(ia.round == 1 && ib.round == 1 && ia.inputs.first_tick == 0 && ib.inputs.first_tick == 0 &&\n        ia.inputs.count == 1 && ib.inputs.count == 1);\nauto board = study_round::Round::create_seeded(study_grid::Grid{},77); require(bool(board));\nconst study_combat::Duel duel(*board,*board); RoundPlay left,right;\nrequire(left.prepare(1,duel,Side::host,0) && right.prepare(1,duel,Side::peer,0) && left.start() && right.start());\nFrame local_a,local_b;\nrequire(left.capture(ia.inputs.masks[0],local_a).input == Put::stored &&\n        right.capture(ib.inputs.masks[0],local_b).input == Put::stored);\nrequire(left.receive(b).input == Put::stored && right.receive(a).input == Put::stored);\nrequire(left.advance() == Advance::advanced && right.advance() == Advance::advanced);\nrequire(snapshot(left) == snapshot(right));",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "운이 좋은 성공 대신 실패 조건을 공급한다",
+      "body": "계약 검사는 후보 소스를 제어해 충돌·난수원 실패·공간 부족을 정확히 만듭니다. 같은 코드로 만든 방을 지우고 같은 owner로 다시 등록한 뒤 옛 핸들로 take하면 실패해야 합니다. 새 핸들은 여전히 유효해야 하며 실패한 등록은 호출자의 포인터와 다음 세대를 보존해야 합니다.\n\n기준 모델 검사는 map에 코드·owner·generation만 기록하고 실제 Directory와 같은 요청을 보냅니다. 64묶음에 각 256연산을 수행해 16,384개의 등록·조회·제거 결과를 비교합니다. 내부 배열 배치를 그대로 흉내 내지 않고 관찰 가능한 상태를 대조합니다.\n\n동시 충돌 검사는 두 생산자가 같은 후보를 만들도록 합니다. 하나만 등록되고 다른 하나는 32회 충돌 한도로 실패해야 합니다. 이를 64번 실행하면서 소유권과 크기를 확인합니다. 반복 횟수 자체를 모든 실행 순서의 증명으로 삼지 않고, 한 mutex가 조회와 등록을 직렬화한다는 설명과 연결합니다.",
+      "codes": [
+        {
+          "label": "같은 주소와 owner라도 세대가 다르다",
+          "text": "Directory q; auto value = std::make_unique<unsigned>(9);\nauto a = q.create(1,value,zero); CHECK(a.handle && !value);\nauto taken = q.take(*a.handle); CHECK(taken);\nvalue = std::move(taken->value);\nauto b = q.create(1,value,zero); CHECK(b.handle && b.handle->generation != a.handle->generation);\nCHECK(!q.take(*a.handle)); // Same visible code and owner; old generation loses.\nauto wrong_owner = *b.handle; wrong_owner.owner = 2; CHECK(!q.take(wrong_owner));",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실제 서버의 오류 주입",
+          "body": "root 검사는 운영체제 난수 호출의 짧은 읽기·EAGAIN·EINTR을 실패로 만들고, 등록 직전 작업을 멈춘 동안 종료를 요청합니다. 할당 실패 검사는 실제 create의 여러 할당 위치를 실패시켜 표에 소유 작업 없는 방이 남는지 확인합니다. 이런 실험은 구현의 실패 처리를 확인하며 난수의 암호학적 품질을 통계로 증명하는 검사는 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "빌드해서 주소와 인계 결과를 확인한다",
+      "body": "RoomDirectory는 헤더 템플릿이며, 계약 검사에는 Threads 의존성을 연결합니다. TCP 실험은 StudySocket을 함께 사용합니다. 누적 코드에 두 타깃만 추가하며 방 생성기가 게임 규칙 안으로 들어가지 않도록 의존 방향을 유지합니다.\n\n저장소 루트에서 아래 명령을 실행합니다. 계약 검사와 TCP 실험을 선택해서 실행하며, SDL 구성은 별도의 빌드 디렉터리에 STUDY_PLATFORM=SDL을 지정합니다. 두 새 타깃은 그래픽 창 없이 동작합니다.\n\nTCP 출력에서는 코드 HDAAA가 등록되고 클라이언트에게 전달된 뒤, 게스트가 같은 코드로 호스트를 찾아 인계받았는지 읽습니다. 등록소 close 뒤에도 게임 입력 처리가 끝나고 상태 바이트가 같은지 함께 확인합니다.",
+      "codes": [
+        {
+          "label": "두 추가 타깃",
+          "text": "add_executable(room_directory_contract tests/room_directory_contract.cpp)\ntarget_include_directories(room_directory_contract PRIVATE .)\ntarget_link_libraries(room_directory_contract PRIVATE Threads::Threads)\nadd_test(NAME room_directory_contract COMMAND room_directory_contract)\nset_tests_properties(room_directory_contract PROPERTIES TIMEOUT 20)\n\nadd_executable(room_directory_probe tools/room_directory_probe.cpp)\ntarget_include_directories(room_directory_probe PRIVATE .)\ntarget_link_libraries(room_directory_probe PRIVATE StudySocket Threads::Threads)\nadd_test(NAME room_directory_probe COMMAND room_directory_probe)\nset_tests_properties(room_directory_probe PROPERTIES TIMEOUT 15)",
+          "language": "cmake"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "text": "cmake -S docs/learn/checkpoints/103-room-code -B out/study-103 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-103 --target room_directory_contract room_directory_probe -j2\nctest --test-dir out/study-103 -R '^room_directory_(contract|probe)$' --output-on-failure",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "전체 구현에서 유지할 계약",
+      "body": "전체 파일에서는 코드 후보를 정하는 함수와 방을 실제 등록하는 함수를 구별해 보세요. 후보를 찾았을 때가 아니라 잠금 안에서 슬롯을 채웠을 때 등록이 완료됩니다. 핸들을 반환한 뒤의 find·take는 현재 세대를 다시 확인합니다.\n\n유지할 핵심은 중복 코드의 덮어쓰기 방지, 인스턴스 식별, 등록 실패 시 자원 보존, 인계 이후 소유권, 종료와 등록의 직렬화입니다. 알파벳·길이·저장 컨테이너·세대 번호 표현은 바뀔 수 있지만 입력 문법·인코딩·저장 한도·클라이언트 안내를 함께 조정해야 합니다. 코드만 길게 만드는 변경과 접근 권한 정책을 강화하는 변경도 구별합니다.",
+      "codes": [
+        {
+          "label": "net/room_directory.h",
+          "language": "cpp",
+          "file": "checkpoints/103-room-code/net/room_directory.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/room_directory_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/103-room-code/tests/room_directory_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/room_directory_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/103-room-code/tools/room_directory_probe.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "server/room.cpp",
+        "symbol": "void RoomRegistry::handleCreate",
+        "invariant": "등록할 상태를 준비한 뒤 공개하고, 자원을 책임질 작업과 함께 수명을 관리한다.",
+        "mayDiffer": "현재 서버의 양쪽 준비·버전 알림·송신 잠금·매치 인계는 추가 책임이며 기준 Directory의 단순 take와 같지 않다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "103-1",
+      "question": "코드 공간이 32기호×5자리일 때 현재 500개 방에 대한 신규 후보 하나의 충돌 확률을 구하는 식은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "500 / 32^5"
+        },
+        {
+          "id": "b",
+          "text": "500×499 / 2"
+        },
+        {
+          "id": "c",
+          "text": "32 / 500^5"
+        },
+        {
+          "id": "d",
+          "text": "항상 0"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "500 / 32^5",
+      "explanation": "균등한 후보 하나가 기존 500개 코드 중 하나에 닿는 사건입니다. 여러 후보를 뽑아 서로 충돌하는 생일 문제와 구별합니다."
+    },
+    {
+      "id": "103-2",
+      "question": "방 AAAAA를 지운 뒤 같은 owner가 같은 코드로 다시 방을 만들었습니다. 옛 핸들로 take했을 때 새 방이 유지되는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "코드를 한 번 썼으면 다시 등록할 수 없어서"
+        },
+        {
+          "id": "b",
+          "text": "소켓 주소는 문자열로 비교해서"
+        },
+        {
+          "id": "c",
+          "text": "generation이 달라 세 필드 비교가 실패해서"
+        },
+        {
+          "id": "d",
+          "text": "삭제 요청은 항상 무시해서"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "generation이 달라 세 필드 비교가 실패해서",
+      "explanation": "보이는 주소와 owner가 같아도 방의 이번 수명을 나타내는 세대가 다릅니다. take는 code·generation·owner 모두 일치해야 인계합니다."
+    },
+    {
+      "id": "103-3",
+      "question": "공간이 있는 기준 Directory에 유효한 owner로 등록하며 Next가 즉시 nullopt를 반환했습니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "시간값으로 코드를 만들고 등록한다"
+        },
+        {
+          "id": "b",
+          "text": "source_failed이며 value와 다음 generation을 보존한다"
+        },
+        {
+          "id": "c",
+          "text": "빈 코드를 예약하고 성공한다"
+        },
+        {
+          "id": "d",
+          "text": "value를 파괴하고 재시도를 무한히 한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "source_failed이며 value와 다음 generation을 보존한다",
+      "explanation": "소스를 사용할 수 없으면 약한 폴백 없이 실패합니다. 값 이동과 세대 소비는 성공한 슬롯 삽입 뒤에만 일어납니다."
+    },
+    {
+      "id": "103-4",
+      "question": "두 생산자가 같은 빈 코드를 조회한 뒤 잠금을 풀고 나중에 삽입하도록 바꾸려 합니다. 반드시 해결해야 할 문제는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "5비트 인코딩이 네트워크 순서를 뒤집는다"
+        },
+        {
+          "id": "b",
+          "text": "코드를 string으로 표현할 수 없다"
+        },
+        {
+          "id": "c",
+          "text": "mutex가 난수의 분포를 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "조회와 삽입 사이에 다른 생성자가 같은 코드를 차지할 수 있다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "조회와 삽입 사이에 다른 생성자가 같은 코드를 차지할 수 있다",
+      "explanation": "조회는 예약이 아닙니다. 후보 검사와 삽입을 같은 임계 구역에 두거나 삽입 자체에서 충돌을 검증하고 재시도하는 원자적 계약이 필요합니다."
+    },
+    {
+      "id": "103-5",
+      "question": "실제 서버가 지역 Entry를 완성한 뒤 표에 등록했습니다. 그 뒤 응답 버퍼 할당이 실패할 수 있다면 추가로 필요한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "등록했으니 예외를 무시한다"
+        },
+        {
+          "id": "b",
+          "text": "코드만 보고 무조건 방을 지운다"
+        },
+        {
+          "id": "c",
+          "text": "이번 연결이 소유한 방인지 확인하는 예외 정리 경로를 둔다"
+        },
+        {
+          "id": "d",
+          "text": "코드 길이를 한 자리 늘리면 해결된다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "이번 연결이 소유한 방인지 확인하는 예외 정리 경로를 둔다",
+      "explanation": "등록 전 준비만으로 등록 이후 실패까지 처리되지는 않습니다. 소유 작업 없이 남는 방을 정리하되 같은 코드를 재사용한 다른 방은 보존해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "word103에서 하위5비트를 차례로 꺼내 HDAAA가 되는 과정을 적습니다.",
+      "동일 후보 두 번 뒤 다른 후보를 주는 소스로 충돌 재시도를 관찰합니다.",
+      "코드·owner를 같게 재사용하고 옛 핸들의 take가 실패하는지 확인합니다.",
+      "TCP probe에서 등록·코드 안내·게스트 조회·호스트 인계 순서를 따라갑니다."
+    ],
+    "failureChecks": [
+      "후보 조회와 삽입을 분리할 때 생기는 중복 등록 순서를 그립니다.",
+      "난수원 실패나 full에서 호출자의 자원을 잃지 않는지 확인합니다.",
+      "등록 이후 응답 생성 실패에도 자원을 책임질 정리 경로가 있는지 확인합니다."
+    ],
+    "expected": "중복 코드를 덮어쓰지 않고 현재 방 인스턴스의 자원만 인계·정리하며, 실제 코드 주소로 두 연결의 게임 입력을 이어 준다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 기준 등록소 초안 검토·실제 방 생성 종료 경합 및 할당 실패 재현·OS 난수 계약·TCP 입장과 게임 입력 검증",
+    "draftJob": "out/learning-jobs/103-directory-events.jsonl",
+    "corrections": [
+      "불투명 핸들/인증 권한/호출자 소유라는 초안의 부정확한 설명 교정",
+      "실제 두 릴레이의 비암호학적 코드 생성기를 OS 난수원으로 교체하고 실패 시 거절",
+      "종료와 등록 판단 직렬화·지역 Entry 준비·등록 후 예외 소유자 확인 정리 추가",
+      "Part7의 한 후보 충돌/생일 문제·초대 주소/인증·후보/예약·UUID 충돌 단정 교정",
+      "게스트 등록 뒤 초기 안내 버전이 무효해져 reader에 진입하지 않는 경로의 방/lease 잔류 수정"
+    ]
+  },
+  "validation": [
+    "102 누적 코드 바이트 보존, 새2타깃 SCRIPTED2/SDL2 CTest와 경고 없는 빌드; 이전 전체 체크포인트 재빌드 없음",
+    "학습160자리 조합·16384 기준 모델 연산·64 동시 동일코드 경합·stale 세대/owner·실패 소유권·UINT64_MAX소진 ASan/UBSan 통과",
+    "실제 TCP host create/TYPE52 안내/guest join/버전 take와 Directory close 후 실제 RoundPlay 전체 상태 바이트 일치 ASan/UBSan 통과",
+    "실제 root 종료 전 생성 gate에서 수정 전 ROOM_INFO가 종료 후 송신됨 재현, 수정 후 무송신·연결닫힘·lease해제. 게이트는 잠금 직전 일정 제어만 삽입",
+    "실제 handleCreate 할당 실패로 수정 전 미완성 방과 등록 후 안내 실패 잔류를 재현. 최종 준비/예외정리에서 표에 잔류 없음. 검사 전용 헤더에는 크기 조회만 추가",
+    "공통 room_code의160자리/0/상위7비트/32충돌/소스실패 및 실제 Linux getrandom·짧은읽기/EAGAIN/EINTR 주입 ASan/UBSan 통과",
+    "추출한 옛 xorshift 생성기에서 충돌/숨은호출/짧은몫재추출 없는 연속7코드로64비트 상태 복원,8번째 예측 일치. 모든 관측 상황으로 일반화하지 않음",
+    "Linux getrandom·Windows BCryptGenRandom 공식 계약 대조. Windows/macOS 네이티브·수동GUI·WAN/부하·암호학적 강도 통계증명·인증/DB 전체 통합은 미검증",
+    "실제 handleJoin의 등록 후 안내 버전 변경을 gate로 주입: 수정 전 rooms1·열린guest·lease잔류, 수정 후 방0·연결닫힘·lease반납·무안내. 검사 전용 상태 준비/조회만 추가",
+    "최종 root 두 구성 빌드·27/26 CTest 통과. 실제 tetris_relay 및 tetris_relay_reactor의 create/join/READY/MATCH_FOUND 각각 pytest1passed/0skip",
+    "인라인16(C++15/CMake1) 기준 구현 일치·Part 발췌/링크·Markdown27·509문제 및 전체 DOM 탐색/단일마운트/현재소스/저장복원/file URL 실패 계약 통과. 수동GUI는 수행하지 않음"
+  ]
+}

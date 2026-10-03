@@ -4,7 +4,7 @@
 
 namespace net {
 bool parse_wss_endpoint(const std::string& url, WssEndpoint& out) {
-    if (url.rfind("wss://", 0) != 0 || url.size() > 2048 ||
+    if (url.rfind("wss://", 0) != 0 || url.size() > 2048 || url.find('\0') != std::string::npos ||
         url.find_first_of(" \r\n\t?#@\\") != std::string::npos) return false;
     const auto slash = url.find('/', 6);
     WssEndpoint ep;
@@ -49,6 +49,7 @@ TcpSocket game_connect(const std::string& host,uint16_t port) {
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 #include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 #include "system_trust.h"
 #include <atomic>
 #include <cstdlib>
@@ -124,10 +125,22 @@ public:
         if(const char* ca=std::getenv("TETRIS_CA_FILE")) tls_.load_verify_file(ca);
         tls_.set_verify_mode(asio::ssl::verify_peer);
         ws_.next_layer().set_verify_mode(asio::ssl::verify_peer);
-        ws_.next_layer().set_verify_callback(asio::ssl::host_name_verification(endpoint_.host));
-        if(!SSL_set_tlsext_host_name(ws_.next_layer().native_handle(),endpoint_.host.c_str()))
-            throw std::runtime_error("TLS server name setup failed");
-        SSL_set_min_proto_version(ws_.next_layer().native_handle(),TLS1_2_VERSION);
+        // Let OpenSSL verify the chain AND the configured reference identity.
+        // SAN is required; never fall back to CN or accept partial-label wildcards.
+        auto* ssl = ws_.next_layer().native_handle();
+        auto* verify = SSL_get0_param(ssl);
+        X509_VERIFY_PARAM_set_hostflags(verify,
+            X509_CHECK_FLAG_NEVER_CHECK_SUBJECT | X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        Error addressError;
+        asio::ip::make_address(endpoint_.host, addressError);
+        const bool isAddress = !addressError;
+        const int identitySet = isAddress
+            ? X509_VERIFY_PARAM_set1_ip_asc(verify, endpoint_.host.c_str())
+            : SSL_set1_host(ssl, endpoint_.host.c_str());
+        if(identitySet != 1 ||
+           (!isAddress && !SSL_set_tlsext_host_name(ssl, endpoint_.host.c_str())) ||
+           !SSL_set_min_proto_version(ssl, TLS1_2_VERSION))
+            throw std::runtime_error("TLS peer verification setup failed");
     }
     bool connect() {
         auto result=connected_.get_future();

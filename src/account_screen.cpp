@@ -1,4 +1,5 @@
 #include "account_screen.h"
+#include <iterator>
 #include "gui.h"
 #include "../renderer/renderer.h"
 #include "../platform/platform.h"
@@ -8,19 +9,29 @@ std::string AccountScreen::draw(bool busy, bool unsaved, const std::string &serv
     gui_text_center(360, 60, "Account & Recovery", 36, WHITE);
     gui_text_center(360, 105, "Keep your progress without a sign-up.", 18, GRAY);
     gui_text_center(360, 130, server.c_str(), 14, GRAY);
-    gui_text_center(360, 157, busy ? "Saving account changes..." : status.c_str(), 14, unsaved ? RED : GRAY);
-    const char *labels[] = {"Save recovery file", "Replace access keys",  "Restore recovery file",
-                            "Retry / reconnect",  "Import older account", "Create separate account"};
-    const char *actions[] = {"backup", "rotate", "recover", "resume", "import", "create"};
-    for (int i = 0; i < 6; ++i) {
-        if (!gui_button(60 + (i % 2) * 310, 194 + (i / 2) * 47, 290, 36, labels[i], 18) || busy)
+    gui_text_center(360, 157, busy ? "Processing account request..." : status.c_str(), 14, unsaved ? RED : GRAY);
+    struct AccountAction {
+        const char *label;
+        const char *action;
+        bool reconnect;
+    };
+    constexpr AccountAction actions[] = {
+        {"Save recovery file", "backup", false},
+        {"Replace access keys", "rotate", false},
+        {"Restore recovery file", "recover", false},
+        {"Retry / reconnect", "resume", true},
+        {"Import older account", "import", false},
+        {"Create separate account", "create", false},
+    };
+    for (int i = 0; i < static_cast<int>(std::size(actions)); ++i) {
+        if (!gui_button(60 + (i % 2) * 310, 194 + (i / 2) * 47, 290, 36, actions[i].label, 18) || busy)
             continue;
-        if (i == 3)
+        if (actions[i].reconnect)
             return unsaved ? "save" : "resume";
         if (unsaved)
             status = "Save the current key with Retry before changing accounts.";
         else
-            confirmation = actions[i];
+            confirmation = actions[i].action;
     }
     if (unsaved)
         gui_text_center(360, 348, "Online rewards are disabled until the key is saved.", 16, RED);

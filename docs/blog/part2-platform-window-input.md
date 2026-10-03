@@ -42,7 +42,7 @@ flowchart LR
 - 프레임 누산기와 고정 스텝 (Part 4 의 `main()`)
 - 위젯 hit-test (Part 3 의 `gui_hover_rect`)
 
-경계선이 미묘한 항목이 하나 있다. **GL 컨텍스트 생성은 플랫폼 계층이 소유하고, GL 함수 포인터 로딩과 셰이더는 렌더러가 소유한다.** 컨텍스트는 창에 묶여 있어서 창을 만드는 코드와 분리할 수 없고, 컨텍스트를 만드는 API 는 Win32 와 SDL 이 완전히 다르다. 반면 함수 포인터 테이블과 셰이더는 두 백엔드가 똑같이 쓰는 것이라 렌더러에 두는 편이 중복이 없다. 그 사이를 잇는 것이 이 장에서 새로 만드는 `platform_gl_get_proc` 한 함수다.
+경계선이 미묘한 항목이 하나 있다. **GL 컨텍스트 생성은 플랫폼 계층이 소유하고, GL 함수 포인터 로딩과 셰이더는 렌더러가 소유한다.** 이 프로젝트는 창과 연결된 컨텍스트의 수명을 플랫폼에 모아 관리한다. 이 둘을 다른 모듈에서 만들 수 없다는 API 제약은 아니며, Win32와 SDL의 생성 차이를 렌더러에 노출하지 않으려는 선택이다. 반면 함수 포인터 테이블과 셰이더는 두 백엔드가 똑같이 쓰는 것이라 렌더러에 두는 편이 중복이 없다. 그 사이를 잇는 것이 이 장에서 새로 만드는 `platform_gl_get_proc` 한 함수다.
 
 이 구분이 중요한 이유는 두 구현이 존재하기 때문이다. `platform/win32.cpp`와 `platform/sdl.cpp`는 **같은 헤더를 구현하는 형제**이고 링크 시점에 하나만 선택된다. 인터페이스가 넓어지면 두 파일이 같은 속도로 넓어지므로, 계약은 창·프레임·시간·입력·표시 제어라는 작은 책임 집합으로 제한한다.
 
@@ -96,7 +96,7 @@ graph TB
 // 학습 포인트:
 //   라이브러리가 "창을 하나 연다" 한 줄로 숨기던 창·GL 컨텍스트 초기화를
 //   platform_init() 이 맡는다.
-//   "이 키가 눌렸는가" 조회는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
+//   "이 키가 눌렸는가" 조회는 키 사건으로 갱신하는 KeyEdges 조회.
 //   프레임 델타타임은 QueryPerformanceCounter 두 번의 차이.
 // ─────────────────────────────────────────────────────────────────────────────
 ```
@@ -122,7 +122,7 @@ constexpr Color RAYWHITE = {245, 245, 245, 255};
 
 // ─── 키코드 ───────────────────────────────────────────────────────────────────
 // 값이 Win32 VK_* 상수와 직접 대응하므로 별도 매핑 테이블이 필요 없습니다.
-// WndProc의 WM_KEYDOWN 에서 wParam 을 그대로 keyState[] 인덱스로 씁니다.
+// WndProc의 WM_KEYDOWN 에서 wParam 값을 KeyEdges의 키 번호로 전달합니다.
 enum PlatformKey : int {
     PKEY_LEFT   = 0x25,  // VK_LEFT
     PKEY_RIGHT  = 0x27,  // VK_RIGHT
@@ -152,7 +152,7 @@ enum PlatformKey : int {
 
 **첫째, `Color` 는 4바이트 POD 다.** `uint8_t r, g, b, a` 순서이며 패딩이 없다. 렌더러가 `Color` 를 값으로 받아 레지스터에 담아 넘길 수 있고, 배열로 만들어도 메모리가 촘촘하다. Part 3 의 렌더러는 이 네 바이트를 정점 하나의 색 속성으로 바꿔 GPU 로 보낸다.
 
-**둘째, `PlatformKey` 의 값이 Win32 `VK_*` 상수와 그대로 같다.** `PKEY_LEFT = 0x25` 는 `VK_LEFT` 다. 그래서 Win32 백엔드는 매핑 테이블이 필요 없다 — `WM_KEYDOWN` 의 `wParam` 을 그대로 `s_key_state[]` 인덱스로 쓴다. 이 설계의 대가는 SDL 쪽이 치른다. SDL 은 자기 `SDL_Keycode` 를 `PlatformKey` 로 **역매핑**해야 하고, 그 매핑 테이블이 `sdl_to_platform_key` 다. 테이블에 없는 키는 `-1` 로 버려진다. 즉 **게임이 쓰는 키만 SDL 에서 살아난다** — 새 키를 바인딩하려면 `PlatformKey` 에 상수를 추가하고 `sdl_to_platform_key` 에 `case` 를 추가하는 두 곳 편집이 항상 짝이다.
+**둘째, `PlatformKey` 의 값이 Win32 `VK_*` 상수와 그대로 같다.** `PKEY_LEFT = 0x25` 는 `VK_LEFT` 다. 그래서 Win32 백엔드는 매핑 테이블이 필요 없다 — `WM_KEYDOWN` 의 `wParam` 을 그대로 `KeyEdges<256>`의 키 번호로 쓴다. 이 설계의 대가는 SDL 쪽이 치른다. SDL 은 자기 `SDL_Keycode` 를 `PlatformKey` 로 **역매핑**해야 하고, 그 매핑 테이블이 `sdl_to_platform_key` 다. 테이블에 없는 키는 `-1` 로 버려진다. 즉 **게임이 쓰는 키만 SDL 에서 살아난다** — 새 키를 바인딩하려면 `PlatformKey` 에 상수를 추가하고 `sdl_to_platform_key` 에 `case` 를 추가하는 두 곳 편집이 항상 짝이다.
 
 **셋째, 색 상수 이름이 출발점이었던 기성 즉시 그리기 라이브러리 그대로다.** `WHITE`, `GRAY`, `GREEN`, `YELLOW`, `RED`, `RAYWHITE`. 이 프로젝트는 그런 라이브러리에서 출발해 자작 계층으로 갈아탄 이력이 있고, 상위 코드의 diff 를 줄이려고 이름을 유지했다. `RAYWHITE` 라는 상수가 남아 있는 이유가 그것이다.
 
@@ -224,12 +224,16 @@ void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 **현재 소스 발췌 — `platform/platform.h`**
 
 ```cpp
-// 이 프레임에 처음 눌린 키인가? (edge)
-// keyState[key] == true && keyPrev[key] == false
+// 이 프레임에 눌림 전이가 있었는가? OS 자동 반복은 제외한다.
+// 같은 프레임에 떼어도 true. 포커스 상실 이전의 눌림은 취소한다.
 bool   platform_key_pressed(int key);
 
 // 현재 눌려있는 키인가? (level)
 bool   platform_key_down(int key);
+
+// 이 프레임에 포커스를 잃었는가? 상위 계층의 미전달 입력도 취소한다.
+// 취소 이후 같은 프레임에 새로 발생한 pressed는 전달할 수 있다.
+bool platform_input_cancelled();
 
 // WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0).
 char   platform_get_char_pressed();
@@ -290,9 +294,11 @@ void   platform_set_vsync(bool on);
 
 창을 만들었다고 바로 그릴 수 있는 것은 아니다. OpenGL 로 그리려면 그 전에 **컨텍스트(context)** 가 있어야 한다.
 
-컨텍스트는 드라이버가 우리를 위해 들고 있는 상태 덩어리다. 어떤 셰이더 프로그램이 걸려 있는지, 어떤 텍스처가 어느 유닛에 바인딩되어 있는지, 블렌딩과 시저가 켜졌는지, 정점 버퍼의 내용이 무엇인지가 전부 컨텍스트 안에 있다. `glClear` 같은 GL 함수는 인자로 "어디에 그릴지" 를 받지 않는다 — **현재 스레드에 current 로 걸린 컨텍스트**에 대고 동작한다. 그래서 컨텍스트를 만들고 current 로 만드는 일이 모든 GL 호출보다 먼저 일어나야 한다.
+컨텍스트는 OpenGL 호출이 사용할 상태와 자원 접근 환경이다. 현재 셰이더 프로그램, 텍스처 바인딩, 블렌딩과 시저 같은 상태를 포함한다. 버퍼·텍스처 객체는 공유 설정에 따라 여러 컨텍스트가 접근할 수도 있으므로, 모든 데이터가 컨텍스트 하나의 전용 메모리에 들어 있다고 이해하면 안 된다. `glClear`는 창 핸들을 받지 않고 **호출 스레드에 current로 연결된 컨텍스트**의 상태와 현재 프레임버퍼를 사용한다. 컨텍스트 생성과 current 연결이 GL 사용보다 먼저 필요한 이유다.
 
-컨텍스트는 창에도 묶인다. 정확히는 창의 드로어블(Win32 에서는 픽셀 포맷이 설정된 DC)에 묶인다. 창 없이 컨텍스트를 만들 수 없고, 창을 만든 코드가 아닌 곳에서 컨텍스트를 만들기도 번거롭다. 그래서 이 프로젝트는 **컨텍스트 생성을 `platform_init` 안에 둔다.** 렌더러가 자기 초기화 시점에 컨텍스트를 만들게 하면 창 핸들을 렌더러에 노출해야 하고, 그 핸들의 타입은 백엔드마다 다르다. 계약이 오염된다.
+이 프로젝트는 화면에 표시할 창을 만들고 그 창을 그리기 대상으로 쓰는 컨텍스트를 연결한다. SDL에서는 `SDL_Window`와 `SDL_GLContext`, Win32에서는 픽셀 포맷이 설정된 DC와 HGLRC의 관계다. OpenGL 자체가 항상 보이는 창을 요구하는 것은 아니다. [Mesa EGL의 surfaceless·pbuffer 경로](https://docs.mesa3d.org/egl.html)처럼 화면 밖에서 사용하는 구성이 있다. 여기서는 **창과 컨텍스트의 생성을 `platform_init` 안에 둔다.** 렌더러에 OS별 창 핸들을 전달하지 않고 GL 사용 환경을 먼저 준비하기 위한 책임 배분이다.
+
+컨텍스트를 소유한다는 것과 호출 스레드에 current로 연결했다는 것은 다르다. 다른 스레드에 핸들만 전달해도 GL 호출 환경이 자동으로 옮겨지지는 않는다. 이 프로젝트의 창·렌더링·종료 호출은 초기화한 스레드에서 수행한다. SDL2의 [SDL_GL_CreateContext](https://wiki.libsdl.org/SDL2/SDL_GL_CreateContext)는 성공 시 생성한 컨텍스트를 current로도 만든다. 실제 SDL 구현의 추가 MakeCurrent 호출 역시 실패를 검사한다.
 
 완성된 프로그램의 초기화 순서는 아래와 같다. 이 장의 검증 범위는 창과 GL context가
 유효하고 `platform_gl_get_proc`로 심볼을 얻을 수 있는 지점까지다. renderer와 font는
@@ -321,15 +327,15 @@ sequenceDiagram
 
 이 차이는 셰이더 소스를 갈라놓는다. `#version 130` 으로 쓴 셰이더는 Windows/Linux 호환 컨텍스트에서는 통하지만 macOS Core 프로파일에서는 거부된다. 그러면 플랫폼별 셰이더를 따로 유지해야 하고, 한쪽만 고치는 순간 다른 쪽이 조용히 깨진다.
 
-그래서 세 플랫폼 모두에 **3.3 Core 를 명시적으로 요청**한다. 요청이 성공하면 어디서든 `#version 330 core` 셰이더 한 벌이 그대로 통한다. 요청 방법은 백엔드마다 다르다 — SDL 은 창을 만들기 전에 속성을 걸고, Win32 는 컨텍스트를 두 번 만든다. 아래 §4.5 가 그 이유다.
+그래서 세 플랫폼 모두에 **3.3 Core 를 명시적으로 요청**한다. 이는 `#version 330 core`가 요구하는 기능 수준과 프로파일을 맞추는 조건이다. 속성 요청과 컨텍스트 생성의 성공은 셰이더 소스의 컴파일·링크 성공까지 보장하지 않으므로 렌더러는 해당 결과를 별도로 검사한다. 요청 방법은 백엔드마다 다르다 — SDL 은 창을 만들기 전에 속성을 걸고, Win32 는 컨텍스트를 두 번 만든다. 아래 §4.5 가 그 이유다.
 
-3.3 을 고른 기준은 필요한 기능의 하한선이다. VAO, `glBindBuffer`/`glBufferData` 스트리밍, `layout(location = N)` 정점 속성, 텍스처 유닛 — 이 프로젝트가 쓰는 기능은 전부 3.3 안에 있다. 그 위 버전을 요구하면 지원 하드웨어만 줄어든다. 반대로 3.3 은 2010년 이후 GPU 라면 사실상 전부 지원한다.
+3.3 을 고른 기준은 필요한 기능의 하한선이다. VAO, `glBindBuffer`/`glBufferData` 스트리밍, `layout(location = N)` 정점 속성, 텍스처 유닛 — 이 프로젝트가 쓰는 기능은 전부 3.3 안에 있다. 그 위 버전을 요구하면 지원 하드웨어만 줄어든다. 지원 여부는 GPU 출시 연도만으로 판정하지 않는다. 운영체제·설치된 드라이버·원격 세션 등 실행 환경에서 실제 컨텍스트 획득 결과를 확인한다.
 
 ### 3.2 실패하면 즉시 멈춘다
 
-컨텍스트 생성 실패는 복구 경로가 없는 실패다. 컨텍스트가 없으면 함수 포인터도 못 받고, 셰이더도 못 만들고, 화면에 아무것도 나오지 않는다. 소프트웨어 폴백을 준비해 두는 선택지도 있지만 그건 렌더러를 두 벌 유지한다는 뜻이다.
+이 프로젝트는 요구한 컨텍스트를 얻지 못하면 렌더러 초기화를 중단한다. 현재 컨텍스트 없이 함수 로딩·셰이더 생성으로 계속 진행하지 않는 정책이다. OpenGL의 모든 실패가 원천적으로 복구 불가능하다는 뜻은 아니다. 예를 들어 [Mesa LLVMpipe](https://docs.mesa3d.org/drivers/llvmpipe.html)는 OpenGL을 CPU에서 실행하는 소프트웨어 구현이며, 같은 GL 호출을 사용할 수 있다. 다만 그 드라이버의 배포·선택·지원 기능·성능을 검증하는 일은 별도이고 이 프로젝트가 이를 자체 설치하는 폴백은 제공하지 않는다.
 
-한 단계 약한 폴백도 있다 — 3.3 Core 를 못 받았을 때 드라이버가 주는 레거시 호환 컨텍스트로라도 계속 가는 것이다. 이 프로젝트도 예전에는 그렇게 했다. 그러나 이 폴백은 실패를 뒤로 미룰 뿐이다. 그 위에 올라갈 셰이더가 전부 `#version 330 core` 라서, 레거시 컨텍스트에서는 셰이더 컴파일이 실패하고 결과는 어차피 검은 창이다. "덜 예쁘게라도 동작" 이 아니라 **원인에서 더 멀어진 자리에서 실패**하는 것뿐이다. 그래서 지금 구현은 이유를 말할 수 있는 자리 — 컨텍스트 생성 지점 — 에서 즉시 실패한다.
+한 단계 약한 폴백도 있다 — 3.3 Core 를 못 받았을 때 드라이버가 주는 레거시 호환 컨텍스트로라도 계속 가는 것이다. 이 프로젝트도 예전에는 그렇게 했다. 그러나 필요한 3.3 기능이 없는 레거시 컨텍스트로 계속 가면 실패를 뒤로 미룬다. 그 위에 올라갈 셰이더가 `#version 330 core`를 요구하기 때문이다. 호환 프로파일이라는 이름만으로 무조건 지원 불가라는 뜻은 아니며, 지원 버전과 기능을 함께 봐야 한다. "덜 예쁘게라도 동작" 이 아니라 **원인에서 더 멀어진 자리에서 실패**하는 것뿐이다. 그래서 지금 구현은 이유를 말할 수 있는 자리 — 컨텍스트 생성 지점 — 에서 즉시 실패한다.
 
 실패의 구체적 형태는 이렇다. 두 백엔드 모두 실패하면 `stderr` 에 이유를 한 줄 찍고 `s_should_close = true` 로 만든다. 호출자는 `platform_init` 직후 `platform_should_close()` 를 확인하는 것이 계약이다 — 완성형 `src/main.cpp` 는 이 검사에서 실패를 발견하면 `platform_fatal_error` 로 이유를 띄우고 종료 코드 1 로 끝난다. **조용히 검은 화면을 띄우는 대신 이유를 남기고 끝내는 것**이 이런 종류의 실패를 다루는 올바른 방법이다.
 
@@ -401,16 +407,14 @@ static int s_vp_y = 0;
 static int s_vp_w = 0;
 static int s_vp_h = 0;
 
-static bool s_key_state[256]{};
-static bool s_key_prev[256]{};
+static input_detail::KeyEdges<256> s_keys;
 static char s_char_queue[64]{};
 static int s_char_head = 0;
 static int s_char_tail = 0;
 
 static int s_mouse_x = 0;
 static int s_mouse_y = 0;
-static bool s_mouse_state[3]{};
-static bool s_mouse_prev[3]{};
+static input_detail::KeyEdges<3> s_mouse;
 static float s_mouse_wheel = 0.0f;
 
 static LARGE_INTEGER s_frequency{};
@@ -526,7 +530,7 @@ static void adjust_window_rect(RECT& rect, DWORD style, HWND hwnd)
 
 **둘째, 모니터 사이를 이동할 때의 리스케일이 앱 책임이 된다.** per-monitor 인식을 선언하면 OS 는 더 이상 창을 대신 확대·축소해 주지 않는다. 아무 처리도 하지 않는 앱의 창을 150% 모니터에서 100% 모니터로 끌고 가면 물리적으로 1.5배 크기로 남는다. 대신 OS 는 `WM_DPICHANGED` 메시지로 "새 DPI 에서 같은 물리 크기가 되는" 제안 사각형을 보내 주고, 그것을 적용하는 것은 앱의 몫이다. 이 프로젝트의 처리는 §5 의 `window_proc` 에 있다 — 제안 사각형을 `SetWindowPos` 로 그대로 적용하면 크기 변화가 `WM_SIZE` 로 이어져 기존 뷰포트 재계산 경로를 탄다.
 
-SDL 백엔드는 반대 방향의 선택을 했다. `SDL_WINDOW_ALLOW_HIGHDPI` 를 쓰지 않아 창 크기와 마우스 좌표를 point 단위 하나로 통일한다(§12.2). 고해상도 백버퍼의 이득 대신 좌표 단위가 어긋날 가능성을 없앤 것이다. 어느 쪽이든 원칙은 같다 — **창 크기·마우스 좌표·백버퍼 크기가 같은 단위를 쓰는지**를 백엔드마다 명시적으로 정해 두어야, §8 의 레터박스·역매핑 계산이 성립한다.
+현재 게임의 SDL 백엔드는 `SDL_WINDOW_ALLOW_HIGHDPI`를 요청하지 않고 창 크기 기준으로 뷰포트를 계산한다(§12.2). 고DPI drawable을 도입할 때에는 플래그만 켜서는 안 된다. 창 크기와 drawable 픽셀 크기를 각각 조회하고 입력도 같은 사각형으로 변환해야 한다. 학습 체크포인트 `24-letterbox`는 이 두 크기를 분리한다.
 
 ### 4.2 `platform_init` — 순서가 계약이다
 
@@ -537,6 +541,8 @@ SDL 백엔드는 반대 방향의 선택을 했다. `SDL_WINDOW_ALLOW_HIGHDPI` �
 ```cpp
 void platform_init(int width, int height, const char* title)
 {
+    s_keys.reset();
+    s_mouse.reset();
     // 창을 만들기 전에 켜야 한다. 창이 하나라도 생긴 뒤에는 프로세스 DPI
     // 인식 수준을 바꿀 수 없다.
     enable_dpi_awareness();
@@ -604,11 +610,16 @@ void platform_init(int width, int height, const char* title)
         s_should_close = true;
         return;
     }
-    wglMakeCurrent(s_hdc, legacy);
+    if (!wglMakeCurrent(s_hdc, legacy)) {
+        std::fprintf(stderr, "[GL] wglMakeCurrent(legacy) failed\n");
+        wglDeleteContext(legacy);
+        s_should_close = true;
+        return;
+    }
 
     using CreateCtxAttribs = HGLRC (WINAPI*)(HDC, HGLRC, const int*);
     auto wglCreateContextAttribsARB = (CreateCtxAttribs)
-        wglGetProcAddress("wglCreateContextAttribsARB");
+        platform_gl_get_proc("wglCreateContextAttribsARB");
 
     // 3.3 Core 를 못 받으면 여기서 멈춘다. 예전에는 legacy 컨텍스트를 들고
     // 계속 진행했지만, 그 다음 단계인 #version 330 core 셰이더가 그런 환경에서
@@ -640,11 +651,16 @@ void platform_init(int width, int height, const char* title)
 
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(legacy);
-    wglMakeCurrent(s_hdc, core);
+    if (!wglMakeCurrent(s_hdc, core)) {
+        std::fprintf(stderr, "[GL] wglMakeCurrent(core) failed\n");
+        wglDeleteContext(core);
+        s_should_close = true;
+        return;
+    }
     s_hglrc = core;
 
     // 컨텍스트가 current 인 지금이 확장을 조회할 수 있는 시점이다.
-    s_wglSwapInterval = (BOOL (WINAPI*)(int))wglGetProcAddress("wglSwapIntervalEXT");
+    s_wglSwapInterval = (BOOL (WINAPI*)(int))platform_gl_get_proc("wglSwapIntervalEXT");
     if (s_wglSwapInterval) s_wglSwapInterval(s_frame_pacing ? 1 : 0);
 
     ShowWindow(s_hwnd, SW_SHOW);
@@ -710,9 +726,9 @@ void platform_init(int width, int height, const char* title)
 ```cpp
 void* platform_gl_get_proc(const char* name)
 {
-    // wglGetProcAddress 는 GL 1.2 이상만 돌려준다. glEnable 같은 1.1 함수는
-    // NULL 이 나오므로 opengl32.dll 에서 직접 찾아야 한다. 이 폴백을
-    // 빠뜨리면 로더가 "missing entry point: glEnable" 로 멈춘다.
+    // 드라이버 조회가 시스템 DLL의 기본 GL 진입점을 모두 대신하지는 않는다.
+    // 조회되지 않은 glEnable 같은 기본 함수는 opengl32.dll에서도 찾는다.
+    // 비정상 sentinel은 함수 주소로 사용하지 않는다.
     void* p = (void*)wglGetProcAddress(name);
     if (p == nullptr || p == (void*)0x1 || p == (void*)0x2 ||
         p == (void*)0x3 || p == (void*)-1) {
@@ -725,11 +741,11 @@ void* platform_gl_get_proc(const char* name)
 
 이유는 역사적이다. Windows 의 `opengl32.dll` 은 마이크로소프트가 1990년대에 만든 이후 **GL 1.1 까지만 export 한다.** 그 위 버전의 함수는 전부 그래픽 드라이버가 제공하고, 링커가 찾을 수 있는 심볼이 아니다. `glCreateShader` 를 그냥 호출하면 링크 에러가 난다.
 
-반대로 `wglGetProcAddress` 는 **드라이버 확장만** 돌려준다. GL 1.1 함수인 `glEnable`, `glClear`, `glViewport` 를 물어보면 `NULL` 을 준다. 두 경로가 정확히 상보적이라, 어느 쪽도 단독으로는 전체 함수 집합을 덮지 못한다.
+반대로 `wglGetProcAddress`는 current 컨텍스트의 확장 진입점을 조회하는 경로이며, 시스템 DLL의 기본 export 전체를 대신한다고 가정하지 않는다. `glEnable`, `glClear`, `glViewport` 같은 기본 함수도 조회 함수 하나로 다루려면 DLL 조회 폴백이 필요하다. 그래서 이 프로젝트는 드라이버 조회와 시스템 라이브러리 조회를 조합한다. 반환 주소만으로 기능 지원을 추정하지 않고 먼저 요구하는 GL 버전과 프로파일을 확보한다.
 
 그래서 이 함수는 `wglGetProcAddress` 를 먼저 시도하고, 실패하면 `opengl32.dll` 을 직접 열어 `GetProcAddress` 로 찾는다. `s_opengl32` 는 그 모듈 핸들을 캐시해 두는 자리다. 여러 GL 진입점을 순회하는 동안 `LoadLibraryA`를 반복하지 않게 한다.
 
-`0x1 / 0x2 / 0x3 / -1` 을 실패로 취급하는 검사는 유명한 함정이다. **일부 드라이버는 실패 시 `NULL` 이 아니라 이런 작은 값을 돌려준다.** MSDN 의 `wglGetProcAddress` 문서에도 명시되어 있다. 이 검사가 없으면 `0x1` 을 함수 포인터로 믿고 호출해 즉시 크래시한다. 원인이 "함수 주소 조회" 에 있다는 것을 스택 트레이스로 알아내기가 매우 어렵다.
+`0x1 / 0x2 / 0x3 / -1` 을 실패로 취급하는 검사는 유명한 함정이다. **일부 드라이버는 실패 시 `NULL` 이 아니라 이런 작은 값을 돌려준다.** [Microsoft 공식 문서](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-wglgetprocaddress)는 실패 반환을 NULL로 규정한다. 이 구현은 그 계약 외의 비정상 주소도 방어적으로 거부한다. 이 검사가 없으면 `0x1` 을 함수 포인터로 믿고 호출해 즉시 크래시한다. 원인이 "함수 주소 조회" 에 있다는 것을 스택 트레이스로 알아내기가 매우 어렵다.
 
 SDL 쪽은 이 모든 것을 SDL 이 처리해 준다.
 
@@ -758,12 +774,27 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 {
     switch (message) {
     case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-        if (wparam < 256) s_key_state[wparam] = true;
+        s_keys.set(static_cast<std::size_t>(wparam), true, (lparam & (1LL << 30)) != 0);
         return 0;
+    case WM_SYSKEYDOWN:
+        s_keys.set(static_cast<std::size_t>(wparam), true, (lparam & (1LL << 30)) != 0);
+        return DefWindowProcA(hwnd, message, wparam, lparam);
     case WM_KEYUP:
+        s_keys.set(static_cast<std::size_t>(wparam), false);
+        return 0;
     case WM_SYSKEYUP:
-        if (wparam < 256) s_key_state[wparam] = false;
+        s_keys.set(static_cast<std::size_t>(wparam), false);
+        return DefWindowProcA(hwnd, message, wparam, lparam);
+    case WM_KILLFOCUS:
+        // 포커스 상실: held와 미전달 press를 취소하고 상위 입력 버퍼에 알린다.
+        s_keys.cancel();
+        s_mouse.cancel();
+        if (GetCapture() == hwnd) ReleaseCapture();
+        return 0;
+    case WM_CAPTURECHANGED:
+        // Normal button-up releases capture after held becomes false. Preserve
+        // that frame's press/release edges; cancel only interrupted holds.
+        if (s_mouse.down(0) || s_mouse.down(1) || s_mouse.down(2)) s_mouse.cancel();
         return 0;
     case WM_CHAR:
         if (wparam > 0 && wparam < 128) {
@@ -780,26 +811,33 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
         recompute_viewport();
         return 0;
     case WM_MOUSEMOVE:
-        s_mouse_x = (int)(short)LOWORD(lparam);
-        s_mouse_y = (int)(short)HIWORD(lparam);
+        update_mouse_position(lparam);
         return 0;
     case WM_LBUTTONDOWN:
-        s_mouse_state[0] = true; SetCapture(hwnd); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(0, true); SetCapture(hwnd); return 0;
     case WM_LBUTTONUP:
-        s_mouse_state[0] = false; ReleaseCapture(); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(0, false); release_mouse_capture_if_idle(hwnd); return 0;
     case WM_RBUTTONDOWN:
-        s_mouse_state[1] = true; SetCapture(hwnd); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(1, true); SetCapture(hwnd); return 0;
     case WM_RBUTTONUP:
-        s_mouse_state[1] = false; ReleaseCapture(); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(1, false); release_mouse_capture_if_idle(hwnd); return 0;
     case WM_MBUTTONDOWN:
-        s_mouse_state[2] = true; SetCapture(hwnd); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(2, true); SetCapture(hwnd); return 0;
     case WM_MBUTTONUP:
-        s_mouse_state[2] = false; ReleaseCapture(); return 0;
+        update_mouse_position(lparam);
+        s_mouse.set(2, false); release_mouse_capture_if_idle(hwnd); return 0;
     case WM_MOUSEWHEEL:
         s_mouse_wheel += (float)(short)HIWORD(wparam) / (float)WHEEL_DELTA;
         return 0;
     case WM_DPICHANGED: {
-        // per-monitor 인식에서는 모니터 간 이동 리스케일이 앱 책임이다 (§4.1).
+        // per-monitor v2 에서는 DPI 가 다른 모니터로 창을 옮겨도 OS 가 창을
+        // 대신 리스케일해 주지 않는다 — 앱 책임이다. 이 처리가 없으면 150%
+        // 모니터에서 100% 모니터로 옮긴 창이 물리적으로 1.5배 크기로 남는다.
         // OS 가 lparam 에 "새 DPI 에서 같은 물리 크기가 되는" 제안 RECT 를
         // 담아 주므로 그대로 적용한다. 크기가 실제로 바뀌면 WM_SIZE 가
         // 뒤따라 들어와 기존 뷰포트 재계산 경로(recompute_viewport)를 탄다.
@@ -828,21 +866,50 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 
 이 함수에 입력 계층의 프레임별 상태 전이 정책이 모여 있다. 동작 순서대로 본다.
 
-**`wparam < 256` 검사.** `s_key_state` 는 256칸 배열이다. `VK_*` 상수는 0~255 범위지만 IME 나 일부 장치가 그보다 큰 값을 보낼 수 있다. 검사 없이 인덱싱하면 스택 밖 쓰기다.
+**키 번호의 범위 검사.** `core/key_edges.h`의 `KeyEdges<256>::set`은 번호가 256 이상이면 쓰기 전에 반환한다. 조회 함수도 범위를 확인한다. Win32는 가상 키 값을 전달하고 SDL은 매핑한 키 번호를 전달한다. 고정 크기 배열은 객체 안에 있으며 이 객체는 백엔드의 정적 저장 기간을 가진다.
 
-**`WM_SYSKEYDOWN` 도 같이 받는다.** Alt 조합 키는 `WM_KEYDOWN` 이 아니라 `WM_SYSKEYDOWN` 으로 온다. 두 케이스를 같은 분기에 두지 않으면 Alt 를 누른 채로는 방향키가 먹지 않는다.
+**`WM_SYSKEYDOWN`도 키 상태에 반영하되 기본 처리를 남긴다.** Alt 조합 등 시스템 키 메시지를 일반 키처럼 상태에 기록한다. 다만 무조건 0을 반환하면 기본 시스템 동작을 막을 수 있어 `DefWindowProcA`로 넘긴다. `WM_SYSKEYUP`도 같은 정책이다. [Microsoft 키 입력 안내](https://learn.microsoft.com/en-us/windows/win32/learnwin32/keyboard-input)는 시스템 키의 기본 처리를 보존하도록 설명한다.
+
+**포커스를 잃으면 눌림과 미전달 요청을 취소한다.** 창 밖에서 키를 놓으면 해제 사건을 받지 못할 수 있다. `WM_KILLFOCUS`와 `SDL_WINDOWEVENT_FOCUS_LOST`에서 `s_keys.cancel()`을 호출한다. 이 프레임의 앞선 눌림은 지우고, held를 해제로 바꾸며 취소 플래그를 세운다. `AccumulateInput`은 이 플래그를 읽어 이미 보관 중인 틱 입력과 좌우 반복 카운터도 지운다. 취소 뒤 도착한 새로운 눌림은 다시 수집한다. 마우스는 현재 상태를 지우고 이전 상태를 유지해 해제 전이를 관찰한다. Win32는 자기 창의 캡처를 놓으며 `WM_CAPTURECHANGED`에서도 마우스 상태를 지운다. 문자 큐의 수명은 별도다.
 
 **`WM_SIZE` 가 뷰포트를 다시 계산한다.** 창 스타일이 `WS_OVERLAPPEDWINDOW` 가 되면서 이 메시지가 실제로 자주 온다. 사용자가 테두리를 끄는 동안 매 픽셀마다 도착한다. 여기서 하는 일은 `s_win_w/h` 갱신과 `recompute_viewport()` 뿐이고, `glViewport` 는 부르지 않는다. GL 호출은 렌더링 스레드의 프레임 안에서만 일어나야 하고, 실제로 Part 3 의 렌더러가 매 프레임 `platform_viewport()` 를 읽어 그때 설정한다.
 
 **`WM_DPICHANGED` 는 §4.1 이 선언한 책임의 이행부다.** per-monitor DPI 인식을 선언한 순간 모니터 간 이동 시의 창 리스케일은 앱 몫이 되었다. OS 가 lparam 에 담아 주는 제안 사각형("새 DPI 에서 같은 물리 크기")을 `SetWindowPos` 로 그대로 적용한다. 크기가 실제로 바뀌면 `WM_SIZE` 가 뒤따라 들어오므로 뷰포트 재계산 경로는 하나로 유지된다 — DPI 전용 재계산 코드를 따로 두지 않는 것이 요점이다.
 
-**`SetCapture` / `ReleaseCapture`.** 버튼을 누른 순간 마우스를 캡처하면, 커서가 창 밖으로 나가도 `WM_MOUSEMOVE`와 `WM_LBUTTONUP`이 계속 이 창으로 온다. 이게 없으면 **드래그 도중 창 밖에서 버튼을 놓았을 때 `s_mouse_state[0]`이 영원히 `true`로 남는다.** 슬라이더 같은 드래그 UI가 이 계약에 의존한다. 캡처 중 좌표는 음수이거나 창 크기를 넘을 수 있으므로, viewport 역매핑은 창 바깥 좌표도 안전하게 변환하고 위젯 hit test가 최종 범위를 판정해야 한다.
+여러 버튼을 함께 누를 수 있으므로 하나의 up만으로 캡처를 놓지 않는다. 모든 held가 해제된 경우에만 이 창의 캡처를 반환한다.
+
+**현재 소스 발췌 — `platform/win32.cpp`**
+
+```cpp
+static void release_mouse_capture_if_idle(HWND hwnd)
+{
+    if (!s_mouse.down(0) && !s_mouse.down(1) && !s_mouse.down(2) &&
+        GetCapture() == hwnd) ReleaseCapture();
+}
+```
+
+**마우스 엣지도 사건에서 누적한다.** `s_mouse`는 키보드와 같은 `KeyEdges<3>`를 사용한다. 한 번의 사건 펌프 안에 down과 up이 모두 있어도 pressed와 released가 함께 남고 최종 down은 false다. 프레임 시작 때 사건 플래그만 비운다. 이전/현재 down 스냅샷만 비교하면 이 짧은 클릭을 놓친다. 포커스 상실은 held와 미전달 press를 취소한다. Win32에서 정상 button-up 뒤의 ReleaseCapture가 만드는 캡처 변경은 이미 끝난 클릭의 엣지를 지우지 않고, 누르는 중의 강제 캡처 상실만 취소한다. 마우스 좌표 API는 가장 최근 좌표를 반환하며, 이 엣지 누적만으로 개별 누름 시각의 좌표나 여러 클릭의 순서를 보관하지는 않는다.
+
+**`SetCapture` / `ReleaseCapture`.** 버튼을 누른 순간 마우스를 캡처하면, 커서가 창 밖으로 나가도 `WM_MOUSEMOVE`와 `WM_LBUTTONUP`이 계속 이 창으로 온다. 이게 없으면 **드래그 도중 창 밖에서 버튼을 놓았을 때 `s_mouse.down(0)`이 계속 `true`로 남을 수 있다.** 슬라이더 같은 드래그 UI가 이 계약에 의존한다. 캡처 중 좌표는 음수이거나 창 크기를 넘을 수 있으므로, viewport 역매핑은 창 바깥 좌표도 안전하게 변환하고 위젯 hit test가 최종 범위를 판정해야 한다.
 
 **`WM_ERASEBKGND` 에서 `return 1`.** "배경은 내가 지웠다" 는 뜻이다. 이 응답을 하지 않으면 GDI 가 창 클래스의 배경 브러시로 클라이언트 영역을 칠하고, 그 위에 다음 `SwapBuffers` 결과가 얹힌다. 그 사이에 흰색/회색 면이 한 순간 보인다. 창 크기 조절이 가능해진 지금은 이 방어가 예전보다 훨씬 자주 발동한다 — 테두리를 끄는 동안 프레임마다 배경 지우기 요청이 오기 때문이다. 창 클래스에 `hbrBackground` 를 지정하지 않은 것과 짝을 이루는 방어다.
 
 **`WM_MOUSEWHEEL` 은 누적한다.** `+=` 인 이유는 한 프레임에 휠 메시지가 여러 번 올 수 있기 때문이다. 값은 `WHEEL_DELTA`(120) 로 나눠 "노치 개수" 로 정규화한다. 누적된 값은 `platform_begin_frame` 이 프레임마다 0 으로 리셋한다.
 
 **`WM_CLOSE` 와 `WM_DESTROY` 만 종료로 친다.** ESC 키는 여기 없다. `platform_should_close()` 는 창 닫기 버튼과 창 파괴만 본다. ESC 는 상위 게임 코드가 채팅 취소·설정 나가기·룸 퇴장에 각각 바인딩하며, 인게임에서 게임을 나가는 것은 우상단 X 버튼(`gui_close_button`)이다.
+
+**버튼 메시지도 좌표를 갱신한다.** `update_mouse_position(lparam)`은 이동과 여섯 버튼 down/up 메시지에서 함께 호출한다. 창 이동·리사이즈 뒤에는 직전 motion 좌표가 클릭 위치를 나타내지 않을 수 있으므로, 버튼 메시지 자체의 좌표를 읽는다. 가장 최근 사건의 좌표를 보관하는 계약은 유지한다.
+
+**현재 소스 발췌 — `platform/win32.cpp`**
+
+```cpp
+static void update_mouse_position(LPARAM position)
+{
+    s_mouse_x = (int)(short)LOWORD(position);
+    s_mouse_y = (int)(short)HIWORD(position);
+}
+
+```
 
 **`LOWORD(lparam)` 에 `(short)` 캐스트가 붙어 있다.** `WM_MOUSEMOVE` 의 좌표는 부호 있는 16비트다. 캡처 중 커서가 창 왼쪽으로 나가면 음수 좌표가 오는데, `(short)` 없이 `LOWORD` 만 쓰면 65535 같은 큰 양수가 된다.
 
@@ -855,41 +922,33 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message,
 ```cpp
 bool platform_key_pressed(int key)
 {
-    return key >= 0 && key < 256 && s_key_state[key] && !s_key_prev[key];
+    return key >= 0 && s_keys.pressed(static_cast<std::size_t>(key));
 }
 
 bool platform_key_down(int key)
 {
-    return key >= 0 && key < 256 && s_key_state[key];
+    return key >= 0 && s_keys.down(static_cast<std::size_t>(key));
 }
 ```
 
-```mermaid
-stateDiagram-v2
-    [*] --> Up
-    Up --> JustPressed: WM_KEYDOWN 도착
-    JustPressed --> Held: 다음 platform_begin_frame
-    Held --> JustReleased: WM_KEYUP 도착
-    JustReleased --> Up: 다음 platform_begin_frame
-    note right of JustPressed
-        key_pressed = true
-        key_down = true
-    end note
-    note right of Held
-        key_pressed = false
-        key_down = true
-    end note
-```
+키 하나의 `held`는 현재 상태이고 `pressed`와 `released`는 이번 프레임에 있었던 전이의 기록이다. 해제 상태에서 down→up이 한 펌프에 들어오면 `held=false`, `pressed=true`, `released=true`가 된다. 끝점 두 개만 비교하는 `current && !previous`로는 이 경우를 구별할 수 없다.
 
-edge 검출이 성립하려면 **`previous` 를 갱신하는 시점이 딱 한 곳**이어야 한다. 그 자리가 `platform_begin_frame` 의 첫 두 줄이다.
+| 사건 순서 | held | pressed | released |
+| --- | --- | --- | --- |
+| down | true | true | false |
+| down → up | false | true | true |
+| down → up → down | true | true | true |
+| down → focus lost | false | false | true |
+
+각 행은 해제된 새 상태에서 시작한다. `KeyEdges`는 OS가 전달한 사건마다 전이를 누적한다. 다음 `begin_frame`에서 pressed·released·cancelled만 지우고 held는 유지한다. 코드의 전체 계약은 `core/key_edges.h`에 있다. 공개 게임 API는 pressed/down/cancelled를 사용하고, released는 내부 공통 구현과 학습 체크포인트에서 조회한다.
 
 **현재 소스 발췌 — `platform/win32.cpp`**
 
 ```cpp
 float platform_begin_frame()
 {
-    std::memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
-    std::memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_keys.begin_frame();
+    s_mouse.begin_frame();
     s_mouse_wheel = 0.0f;
 
     MSG message;
@@ -908,17 +967,17 @@ float platform_begin_frame()
 }
 ```
 
-순서가 핵심이다. **① 현재 상태를 `previous` 로 복사 → ② 메시지 펌프를 돌려 `state` 갱신 → ③ dt 계산.** 이 순서를 뒤집으면 같은 프레임에 도착한 키 이벤트가 `previous` 에도 반영되어 edge 가 사라진다.
+순서는 **① 프레임 전이 기록 초기화 → ② 사건마다 held·전이 기록 갱신 → ③ 상위 계층에서 조회**다. 메시지 처리 뒤에 초기화하면 방금 수집한 입력이 사라진다. 마우스의 이전 상태 복사와 키의 사건 래치는 서로 다른 구현이다. dt 측정은 같은 함수에 있지만 입력 기록의 수명을 결정하는 일과 별개다.
 
 ### 6.1 `TranslateMessage` 를 빼면 문자 입력이 죽는다
 
-메시지 펌프의 세 줄 중 가운데가 `TranslateMessage(&message)` 다. 이 호출은 `WM_KEYDOWN` 을 보고 현재 키보드 레이아웃·Shift·IME 상태를 반영해 **`WM_CHAR` 메시지를 새로 만들어 큐에 넣는다.** 빼면 `WM_KEYDOWN` 은 그대로 오지만 `WM_CHAR` 가 영원히 오지 않는다. 방향키로 블록은 움직이는데 채팅창과 이름 입력창에는 글자가 하나도 안 찍히는, 원인을 찾기 어려운 증상이 된다.
+메시지 펌프의 세 줄 중 가운데가 `TranslateMessage(&message)` 다. 이 호출은 가상 키 메시지를 문자 메시지로 변환할 때 사용하며, 일반적인 키보드 문자 입력 경로에 필요하다. 빼면 키 사건을 계속 받더라도 해당 변환으로 생길 문자 메시지는 생성되지 않는다. 다른 코드가 직접 보낸 문자 메시지 등 모든 발생 경로가 불가능해진다는 뜻은 아니다. 또한 이 호출 하나로 Unicode 입력·IME 조합 표시·편집 기능까지 완성되는 것은 아니다.
 
 ### 6.2 키 리피트: 이 코드가 무시하는 것
 
-OS 는 키를 누르고 있으면 자동 반복(auto-repeat) `WM_KEYDOWN` 을 계속 보낸다. `WM_KEYUP` 은 그 사이에 오지 않는다. 그래서 `s_key_state[key]` 는 계속 `true` 이고, `s_key_prev[key]` 도 두 번째 프레임부터 `true` 다. 결과적으로 **`platform_key_pressed` 는 반복 입력을 걸러낸다** — 최초 1회만 `true` 다.
+키를 계속 누르면 OS가 반복 눌림 메시지를 보낸다. SDL은 `event.key.repeat != 0`으로, Win32는 눌림 메시지의 `lParam` 비트 30으로 반복을 판별한다. `KeyEdges::set`은 반복 down을 상태 변경 전에 무시한다. 평소에는 held를 유지하고, 포커스 취소 뒤에 반복 메시지만 도착해도 오래된 키를 새 눌림으로 복원하지 않는다.
 
-이건 버그가 아니라 이 계층이 의도한 정책이다. 테트리스의 좌우 이동은 OS 의 자동 반복 지연(기본 약 250ms)과 반복 속도에 끌려다니면 안 된다. 게임이 원하는 것은 자기 규칙에 따른 DAS(delayed auto shift)이고, 그건 `platform_key_down` 이 반환하는 level 상태 위에서 게임 코드가 직접 구현한다. SDL 백엔드도 같은 정책을 따른다. `SDL_KeyboardEvent` 에는 `repeat` 필드가 있지만 `platform/sdl.cpp` 는 읽지 않는다 — 어차피 `s_key_state[key] = true` 를 다시 쓰는 것뿐이라 결과가 같다.
+[SDL 키 사건의 repeat 필드](https://wiki.libsdl.org/SDL2/SDL_KeyboardEvent)와 [Microsoft WM_KEYDOWN 계약](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-keydown)에 대응한다. 게임 좌우 이동의 반복 지연·간격은 `platform_key_down`과 규칙 틱으로 계산하는 DAS/ARR가 소유한다.
 
 ### 6.3 폴링 대 이벤트 큐, 그리고 프레임 경계 지연
 
@@ -926,15 +985,17 @@ OS 는 키를 누르고 있으면 자동 반복(auto-repeat) `WM_KEYDOWN` 을 �
 
 이 변환의 대가는 **지연과 병합**이다.
 
-- 한 프레임(16.7ms) 안에 같은 키가 눌렸다 떼어지면 `state` 는 `false` 로 끝나고 `previous` 도 `false` 라 **edge 가 통째로 사라진다.** 사람 손으로는 어렵지만 매크로나 키보드 채터링에서는 일어난다.
+- 프레임 내 down→up의 발생은 보존한다. 두 번의 완전한 탭도 같은 pressed=true로 합쳐지므로 횟수와 순서는 사라진다.
 - 입력이 도착한 시각 정보가 버려진다. 프레임 시작 직후 들어온 입력과 프레임 끝에 들어온 입력이 구분되지 않는다.
-- 실질 입력 지연은 평균 반 프레임 + 표시 지연이다.
+- 입력을 일정 간격으로 한 번 읽고 도착 시점이 고르게 분포한다는 단순 모델에서는 다음 샘플까지 평균 반 간격을 기다린다. 실제 체감 지연은 펌프·시뮬레이션·표시 순서와 대기 시간에 따라 달라지므로 언제나 반 프레임이라고 단정하지 않는다.
 
-이 정도 손실을 받아들이는 대신 게임 코드는 상태 머신 없이 단순해진다. 그리고 [Part 6](./part6-lockstep-networking.md) 의 lockstep 은 **틱 단위로 압축된 입력 비트마스크**를 주고받으므로, 애초에 틱보다 미세한 타이밍을 표현할 방법이 없다. 즉 이 계층의 손실은 네트워크 계층의 요구와 이미 맞춰져 있다.
+호출자는 한 프레임 동안 같은 값을 여러 번 조회할 수 있다. 조회는 기록을 소비하지 않는다. [Part 4의 입력 누적](./part4-game-wrapper-and-loop.md#5-입력-손실-문제)은 이를 틱까지 별도로 보관하고 소비한다. [Part 6](./part6-lockstep-networking.md)의 입력 마스크도 틱별 발생 여부를 표현한다. 모든 탭의 순서·개수를 요구하는 조작이라면 사건 큐와 틱 배정 정책을 설계해야 한다.
+
+[HTML 입력 손실 강의](../learn/index.html#lesson-47)는 프레임 래치·0틱 프레임·포커스 취소의 연결을 단계적으로 만든다. 초기 입력 체크포인트는 당시의 끝점 비교 구현을 보존하므로 현재 소스의 내부 표현과 다를 수 있다.
 
 ## 7. 문자 입력 — 64칸 링버퍼
 
-게임 조작 키와 문자 입력은 다른 개념이다. `WM_KEYDOWN` 은 물리 키에 가깝고, `WM_CHAR` 는 레이아웃과 조합을 거친 문자다. 이름 입력·채팅·주소 입력은 후자를 써야 한다.
+게임 조작 키와 문자 입력은 다른 개념이다. `WM_KEYDOWN`의 가상 키 식별자와 `WM_CHAR`의 문자 값은 목적이 다르다. 가상 키·물리 스캔 코드·문자를 같은 값으로 취급하지 않는다. 이름 입력·채팅·주소 입력은 후자를 써야 한다.
 
 버퍼는 64칸 원형 큐다. `window_proc` 의 `WM_CHAR` 분기가 밀어 넣고, 게임이 다음 함수로 하나씩 꺼낸다.
 
@@ -952,11 +1013,11 @@ char platform_get_char_pressed()
 
 계약을 정확히 적어 두면 이렇다.
 
-1. **가득 차면 조용히 버린다.** `window_proc` 은 `next != s_char_head` 일 때만 쓴다. 큐가 가득 차 있으면 그냥 무시한다. 예외도 로그도 없다. 한 프레임에 63자 이상 입력되는 상황은 붙여넣기 정도인데, 이 게임에는 붙여넣기 경로가 없다.
+1. **가득 차면 조용히 버린다.** `window_proc` 은 `next != s_char_head` 일 때만 쓴다. 큐가 가득 차 있으면 그냥 무시한다. 예외도 로그도 없다. head==tail을 빈 상태로, next==head를 가득 찬 상태로 구분하므로 실제 용량은 63개다. 소비하지 않은 ASCII가 63개 쌓인 뒤 추가되는 값은 버린다. 포화는 소비 지연이나 여러 사건 누적으로도 생길 수 있으므로 붙여넣기 유무만으로 배제하지 않는다.
 2. **비ASCII 는 버린다.** Win32 쪽은 `wparam > 0 && wparam < 128`, SDL 쪽은 UTF-8 바이트별로 `value >= 128 continue`. 즉 **한글은 입력되지 않는다.**
 3. **꺼내면 사라진다.** `platform_get_char_pressed()` 는 0 을 반환할 때까지 반복 호출하는 패턴으로 쓴다.
 
-2번은 이 시리즈에서 가장 눈에 띄는 비대칭이다. Part 3 의 `draw_text` 는 UTF-8 을 디코드해 한글을 **렌더링**할 수 있고, 실제로 게임 UI 문자열에 한글이 들어간다. 그런데 **입력은 ASCII 만 받는다.** 사용자가 자기 이름을 한글로 칠 수 없다는 뜻이다. 이건 의도적 단순화다. 한글 입력을 지원하려면 IME 조합 상태(`WM_IME_COMPOSITION`, SDL 의 `SDL_TEXTEDITING`)를 관리하고, 조합 중인 글자를 커서 위치에 미리보기로 그리고, 링버퍼를 `char` 가 아니라 code point 로 바꿔야 한다. 그 작업은 이 프로젝트의 범위 밖이고, 대신 **한계를 명시적으로 문서화하는 쪽**을 택했다.
+2번은 이 시리즈에서 가장 눈에 띄는 비대칭이다. Part 3 의 `draw_text` 는 UTF-8 을 디코드해 한글을 **렌더링**할 수 있고, 실제로 게임 UI 문자열에 한글이 들어간다. 그런데 **입력은 ASCII 만 받는다.** 사용자가 자기 이름을 한글로 칠 수 없다는 뜻이다. 이건 의도적 단순화다. 한글 입력을 지원하려면 IME 조합 상태(`WM_IME_COMPOSITION`, SDL 의 `SDL_TEXTEDITING`)를 관리하고, 조합 중인 글자를 커서 위치에 미리보기로 그리고, 큐의 표현과 길이·삭제 경계를 다시 설계해야 한다. 코드 포인트 큐나 UTF-8 문자열 큐 등 선택지가 있으며, 화면에서 한 글자로 느끼는 단위가 항상 코드 포인트 하나인 것도 아니다. 그 작업은 이 프로젝트의 범위 밖이고, 대신 **한계를 명시적으로 문서화하는 쪽**을 택했다.
 
 ## 8. 논리 해상도와 레터박스
 
@@ -992,7 +1053,7 @@ static void recompute_viewport()
 }
 ```
 
-논리 종횡비는 720/640 = 1.125 (9:8) 다. 창이 그보다 넓으면(가로가 남으면) 높이를 꽉 채우고 좌우에 검은 바를 두고, 좁으면 폭을 꽉 채우고 위아래에 바를 둔다. 나눗셈에 `double` 을 쓰고 `std::lround` 로 반올림하는 이유는, 정수 나눗셈으로 자르면 큰 창에서 1픽셀 오차가 종횡비 왜곡으로 보이기 때문이다.
+논리 종횡비는 720/640 = 1.125 (9:8) 다. 창이 그보다 넓으면(가로가 남으면) 높이를 꽉 채우고 좌우에 검은 바를 두고, 좁으면 폭을 꽉 채우고 위아래에 바를 둔다. `std::lround`는 이상적인 실수 크기와 가까운 정수 크기를 고르는 정책이다. 정수 픽셀로 크기를 정하는 이상 두 축의 배율이 정확히 같다고 보장할 수 없다. 안쪽으로 내림하는 정책도 가능하며, 중요한 것은 확정된 같은 사각형을 렌더링과 입력에 사용하는 것이다.
 
 같은 함수가 `platform/sdl.cpp` 에도 글자 하나까지 같은 형태로 존재한다. 두 백엔드가 같은 규칙을 쓰는 것이 중요하다 — 어긋나면 같은 게임이 OS 마다 다른 자리에 버튼을 그린다.
 
@@ -1023,8 +1084,8 @@ SDL 쪽도 같은 변환을 한다.
 void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
 {
     // s_vp_* 는 창 좌상단 원점이다. GL 은 좌하단 원점이라 y 를 뒤집어 준다.
-    // 지금은 뷰포트가 항상 세로 중앙이라 두 값이 같지만, 나중에 상단 고정
-    // 같은 배치로 바꾸면 이 변환이 없을 때만 조용히 어긋난다.
+    // 중앙 정렬이어도 남는 높이가 홀수면 위아래 여백이 1픽셀 다르다.
+    // 배치 정책과 관계없이 아래쪽 여백으로 변환한다.
     x_out = s_vp_x;
     y_out = s_win_h - s_vp_y - s_vp_h;
     w_out = s_vp_w;
@@ -1034,7 +1095,7 @@ void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
 
 **왜 좌하단 원점인가.** 이 값은 렌더러가 `glViewport(x, y, w, h)` 에 그대로 넘긴다. OpenGL 의 창 좌표계는 **왼쪽 아래가 (0,0)** 이고 y 가 위로 증가한다. 반면 창 시스템(Win32 의 `WM_SIZE`, SDL 의 마우스 좌표)은 왼쪽 위가 (0,0) 이다. 변환을 어딘가에서는 해야 하는데, 이 계층에서 하는 편이 낫다 — 렌더러가 두 백엔드의 좌표 관습을 따로 알 필요가 없어진다. 이름이 `platform_viewport` 인 것도 "GL 뷰포트에 넣을 값" 이라는 뜻이다.
 
-지금은 레터박스가 항상 중앙 정렬이라 `s_vp_y` 와 뒤집은 값이 우연히 같다(위아래 여백이 대칭이므로). 그래서 변환을 빠뜨려도 증상이 없다. 나중에 "논리 화면을 창 위쪽에 붙인다" 같은 배치를 도입하는 순간 조용히 어긋난다. 두 백엔드 모두 주석으로 이 함정을 남겨 둔 이유다.
+중앙 정렬도 위아래 여백이 항상 같지는 않다. 남는 높이가 홀수면 정수 나눗셈 때문에 아래 여백이 1픽셀 더 크다. 예를 들어 높이 603에 높이 600의 영역을 넣으면 위쪽 y는 1, GL의 아래쪽 y는 2다. `win_h - vp_y - vp_h` 변환은 중앙 정렬에서도 생략할 수 없다.
 
 **같은 사각형을 마우스도 쓴다.** 이 점이 이 함수의 존재 이유 중 절반이다. 여기서 갈림길이 하나 있다 — "창의 그리기 가능 영역 크기" 를 돌려주는 함수(`platform_drawable_size` 같은 이름이 자연스럽다)를 따로 두고 렌더러가 창 전체에 늘려 그리게 하는 설계도 가능하다. **이 프로젝트가 처음에 그렇게 했고, 실제로 버그가 났다.**
 
@@ -1051,32 +1112,55 @@ void platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out)
 ```cpp
 int platform_mouse_x()
 {
-    if (s_vp_w <= 0) return s_mouse_x;
-    return (int)((double)(s_mouse_x - s_vp_x) * s_logical_w / s_vp_w);
+    return platform_detail::logical_mouse_axis(s_mouse_x, s_vp_x, s_vp_w, s_logical_w);
 }
 
 int platform_mouse_y()
 {
-    if (s_vp_h <= 0) return s_mouse_y;
-    return (int)((double)(s_mouse_y - s_vp_y) * s_logical_h / s_vp_h);
+    return platform_detail::logical_mouse_axis(s_mouse_y, s_vp_y, s_vp_h, s_logical_h);
 }
 ```
 
 여기서는 `s_vp_*` 를 **뒤집지 않고** 쓴다는 점을 놓치면 안 된다. 마우스 좌표는 창 좌표계(좌상단 원점)로 들어오고 논리 좌표도 좌상단 원점이므로, 이 계산에는 y 뒤집기가 끼어들 자리가 없다. y 를 뒤집는 곳은 GL 에 넘기는 `platform_viewport` 뿐이다.
 
-`double` 로 곱한 뒤 `(int)` 로 캐스팅한다. C++ 의 `(int)` 캐스팅은 **0 쪽으로 절단(truncate toward zero)** 한다. 여기에 함정이 하나 숨어 있다.
+C++의 정수 나눗셈과 실수→정수 변환은 0 쪽으로 절단한다. 음수 -0.59가 0이 되면 왼쪽 여백이 논리 x=0인 위젯에 들어온다. 예를 들어 offset=352, viewport 폭=1215, 논리 폭=720에서 창 x=351은 그 경우다.
 
-배율이 1보다 크면(창이 논리 해상도보다 크면) 뷰포트 **바로 왼쪽 1픽셀**이 논리 좌표 0 으로 매핑된다. 예를 들어 1920×1080 전체화면에서 `s_vp_x = 352`, `s_vp_w = 1215` 일 때, 화면 좌표 351 은 `(351 - 352) * 720 / 1215 = -0.59` 이고 `(int)` 절단으로 **0** 이 된다. 즉 레터박스 바의 마지막 1픽셀 열이 게임 화면 왼쪽 끝과 같은 논리 좌표를 갖는다. 위쪽 바의 마지막 1픽셀 행도 마찬가지다. `SetCapture` 중 커서가 창 밖으로 나가 좌표가 -1 이 되는 경우도 같은 결과다.
+두 백엔드는 이제 같은 `logical_mouse_axis`를 호출한다. 음수 나머지가 있으면 몫에서 1을 더 빼서 수학적 내림을 구현한다. 위 예는 -1이 되고, x=352는 0, 오른쪽 경계 x=1567은 720이 된다. UI는 여전히 반열린 구간 `x <= mx && mx < x+w`로 검사한다. 밖 좌표를 0으로 강제하면 이 경계 구분을 다시 잃는다.
 
-실전에서 문제가 되는지는 그 1픽셀에 무엇이 있느냐에 달렸다. 게임 화면 좌상단 (0,0) 에 클릭 가능한 위젯을 두지 않으면 증상이 없다. 하지만 "레터박스 클릭은 언제나 안전하다" 고 단정하면 안 된다. 엄밀하게 하려면 역매핑 전에 `s_mouse_x < s_vp_x` 를 검사해 음수 논리 좌표를 반환하거나, `std::floor` 를 써서 -1 이 나오게 해야 한다. 현재 코드는 그 검사를 하지 않는다.
+**현재 소스 발췌 — `platform/mouse_coordinates.h`**
 
-반대쪽 경계는 안전하다. 뷰포트 오른쪽 끝을 넘으면 논리 좌표가 720 이상이 되고, 모든 위젯 hit-test 가 `mx < x + w` 를 쓰므로 통과하지 못한다.
+```cpp
+#pragma once
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+
+namespace platform_detail {
+// Map a window coordinate to an integer logical coordinate. Floor preserves
+// negative positions outside the left/top edge; truncation toward zero does not.
+// Saturate only values outside int range (e.g. captured mouse far off-window).
+inline int logical_mouse_axis(int coordinate, int offset, int extent, int logical_extent) noexcept
+{
+    static_assert(std::numeric_limits<int>::digits <= 31, "requires at most 32-bit int");
+    if (extent <= 0 || logical_extent <= 0) return -1;
+    const std::int64_t delta = static_cast<std::int64_t>(coordinate) - offset;
+    const std::int64_t numerator = delta * logical_extent;
+    std::int64_t result = numerator / extent;
+    if (numerator < 0 && numerator % extent != 0) --result;
+    return static_cast<int>(std::clamp(result,
+        static_cast<std::int64_t>(std::numeric_limits<int>::min()),
+        static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+}
+} // namespace platform_detail
+```
+
+뺄셈 전에 64비트로 올리고, 곱셈도 64비트로 처리한다. 이 함수는 최대 32비트 int를 전제로 하며 반환 int 범위를 넘는 값만 포화시킨다. 유효하지 않은 크기는 -1로 돌려준다. 캡처된 마우스의 창 밖 좌표도 다루되, OS 이벤트의 좌표 단위 자체를 바꾸는 함수는 아니다.
 
 ### 8.3 논리 해상도는 고정, 창만 커진다
 
 여기서 한 가지를 분명히 해 둘 필요가 있다. 창이 커져도 **논리 좌표계는 720×640 그대로**다. 게임 코드는 창 크기를 전혀 모른다.
 
-CPU 로 픽셀을 만들던 시절에는 이 구조에 대가가 있었다. 720×640 배열을 만든 뒤 큰 창으로 확대하면 확대된 만큼 흐릿하거나 계단이 보였다. GPU 로 넘어오면서 그 대가가 사라진다. 렌더러가 GPU 에 넘기는 것은 픽셀이 아니라 **실수 좌표의 정점**이고, 래스터화는 `glViewport` 로 지정한 실제 창 해상도에서 일어난다. 720×640 좌표로 지정한 사각형이 2160 높이 창에서는 2160 해상도로 다시 그려진다. 코드는 그대로인데 결과가 선명해진다.
+CPU 로 픽셀을 만들던 시절에는 이 구조에 대가가 있었다. 720×640 배열을 만든 뒤 큰 창으로 확대하면 확대된 만큼 흐릿하거나 계단이 보였다. 정점을 직접 래스터화하면 작은 완성 이미지를 확대하는 단계를 피할 수 있다. 렌더러가 GPU 에 넘기는 것은 픽셀이 아니라 **실수 좌표의 정점**이고, 래스터화는 `glViewport` 로 지정한 실제 창 해상도에서 일어난다. 720×640 좌표로 지정한 사각형이 2160 높이 창에서는 2160 해상도로 다시 그려진다. 더 촘촘한 픽셀 격자에서 다시 계산하지만 계단 현상 제거까지 보장하지는 않는다. 경계 샘플링·안티앨리어싱·텍스처 원본 해상도는 따로 고려한다.
 
 ### 8.4 모니터에 들어가는 크기 — `platform_display_size`
 
@@ -1154,7 +1238,9 @@ void platform_present()
 }
 ```
 
-두 구현 모두 몸통이 널 가드와 버퍼 교체 요청 하나뿐이다. 여기서 픽셀이 이동하지 않는다. 그림은 이미 GPU 안의 백버퍼에 들어 있고, 이 호출은 드라이버에게 **백버퍼와 프론트버퍼의 역할을 바꿔 달라**고 요청할 뿐이다. 실제로는 포인터 두 개를 교환하는 수준의 일이고, 그마저도 컴포지터가 관여하면 형태가 달라진다.
+두 구현의 몸통은 널 가드와 버퍼 교체 요청으로 작다. 하지만 함수가 짧다는 사실은 작업이 포인터 두 개의 교환으로 끝난다는 뜻이 아니다. 렌더 명령은 아직 처리 중일 수 있고, 드라이버나 OS는 버퍼 교환·복사·합성 등의 경로를 사용할 수 있다. 이 API 경계에서 그 구현을 고정하지 않는다.
+
+`platform_present` 반환은 화면 표시 완료를 보고하지 않는다. CPU의 요청, GL 작업의 완료, 데스크톱 합성기(compositor)의 화면 조합, 디스플레이 주사는 서로 다른 단계다. SDL2의 SwapWindow는 반환값이 없는 함수이고, Win32 SwapBuffers의 BOOL 성공도 이 래퍼에서는 전달하지 않는다. 따라서 이 void API로 실제 표시 시각이나 native 실패 여부까지 판정할 수 없다. 다음 프레임은 새로 그리며, 교체 뒤 back buffer에 직전 그림이 보존된다고 가정하지 않는다.
 
 **CPU 로 픽셀을 만드는 구조였다면 이 자리가 훨씬 무거웠을 것이다.** 720×640 배열을 창 크기 backbuffer 에 확대 복사하고(Win32 라면 `StretchDIBits`), 그 backbuffer 를 창 DC 로 옮기고(`BitBlt`), 창 크기가 바뀔 때마다 backbuffer 를 다시 만들어야 한다. SDL 이라면 `SDL_CreateRGBSurfaceFrom` + `SDL_BlitScaled` + `SDL_UpdateWindowSurface` 3단이다. 그러면 이 계층이 픽셀의 생김새까지 알아야 한다 — 채널이 어떤 순서로 놓이는지, 리틀 엔디언에서 바이트 배치가 어떻게 되는지, 한 행의 바이트 수(pitch)가 폭과 다를 수 있는지. 계약에 인자가 네 개쯤 붙고, 두 백엔드가 그 인자를 서로 다르게 해석하기 시작한다.
 
@@ -1182,24 +1268,24 @@ GL 컨텍스트를 쓰는 지금은 그 전부가 필요 없다. 46만 픽셀을
 
 주의할 점은 **클램프가 문제를 감춘다**는 것이다. 프레임 하나가 진짜로 100ms 넘게 걸리는 성능 문제가 있어도 dt 는 0.1 로만 보인다. 성능 조사를 할 때는 dt 가 아니라 실제 경과 시간을 따로 재야 한다.
 
-### 10.2 vsync — 이제는 진짜 vsync 다
+### 10.2 swap interval과 타이머 페이싱을 구분하기
 
-`platform_set_vsync(bool)` 은 헤더의 주석이 말하는 것보다 넓은 일을 한다. 주석은 "소프트웨어 프레임 페이싱 on/off" 라고 되어 있는데, 그것은 그래픽 컨텍스트 없이 60 Hz 를 맞추려면 타이머로 재는 수밖에 없기 때문에 붙은 설명이다. 타이머는 모니터가 언제 새 프레임을 읽어 가는지 모르므로 그렇게 맞춘 60 FPS 는 vsync 가 아니다. GL 컨텍스트가 생긴 지금은 **swap interval** 이라는 진짜 수단이 함께 켜진다.
+`platform_set_vsync(bool)`은 GL swap interval 요청과 소프트웨어 페이싱 목표를 함께 바꾼다. 헤더도 이 두 책임을 명시한다. 타이머로 반복 속도를 제한하는 것과 디스플레이의 갱신에 교체를 맞추는 것은 다르다. 60 FPS를 만들었다는 사실만으로 VSync가 적용됐다고 판정하지 않는다.
 
 **현재 소스 발췌 — `platform/sdl.cpp`**
 
 ```cpp
 void platform_set_vsync(bool on)
 {
-    // 이제는 진짜 VSync 다. GL swap interval 1 이면 SDL_GL_SwapWindow 가
-    // vblank 까지 기다리므로 tearing 이 사라진다. 소프트웨어 페이싱과 달리
-    // 디스플레이 주사율에 실제로 동기화된다.
+    // GL swap interval을 요청한다. 소프트웨어 대기와 달리 버퍼 교체 동기화를
+    // 제어하지만 드라이버가 요청을 지원/적용해야 한다. 호출 성공이나 실제 표시
+    // 주기를 여기서는 검증하지 않으므로 tearing 제거를 무조건 보장하지 않는다.
     s_frame_pacing = on;
     if (s_glctx) SDL_GL_SetSwapInterval(on ? 1 : 0);
 }
 ```
 
-swap interval 이 1 이면 `SDL_GL_SwapWindow` 가 디스플레이의 수직 귀선(vblank)까지 블록한다. 프레임 페이싱이 드라이버 수준에서 이루어지고, 화면 찢김(tearing)이 실제로 사라진다. 소프트웨어 타이머로는 흉내 낼 수 없는 것이다 — 타이머는 모니터가 언제 새 프레임을 읽어 가는지 모른다.
+swap interval 1은 수직 갱신과의 동기화를 요청한다. 지원 여부와 드라이버·합성기 정책에 따라 적용이나 대기 위치가 달라진다. 특정 swap 호출이 반드시 vblank까지 블록한다거나, 반환이 해당 프레임의 표시 완료를 뜻한다고 단정하지 않는다. SDL_GL_SetSwapInterval의 성공 여부와 SDL_GL_GetSwapInterval의 보고값을 함께 기록할 수 있지만 보고값 0에는 상태를 알 수 없는 경우도 포함된다. 그것도 실측 주사율은 아니다. 현재 설정 변경 함수는 반환값을 호출자에게 전달하지 않으므로 UI의 on 상태는 요청 상태로 읽어야 한다.
 
 Win32 백엔드도 같은 일을 한다. 다만 그 함수를 얻는 과정이 한 단계 더 있다.
 
@@ -1279,15 +1365,15 @@ void platform_end_frame()
 }
 ```
 
-**vsync 가 실제로 걸려 있으면 두 백엔드의 `platform_end_frame` 은 거의 항상 아무 일도 하지 않는다.** 버퍼 교체가 이미 vblank 까지 기다렸으므로 `elapsed` 가 16.67ms 를 넘고 `remaining` 이 음수가 되기 때문이다. 그런데도 이 코드를 남겨 두는 이유는 swap interval 이 항상 걸리는 것이 아니기 때문이다. Windows 에 `WGL_EXT_swap_control` 이 없는 경우, 드라이버 제어판에서 vsync 를 강제로 끈 경우, 컴포지터가 요청을 무시하는 경우 — 어느 쪽이든 하드웨어 동기화 없이 도는 루프를 이 타이머 페이싱이 받아 낸다.
+**교체 대기와 타이머 대기는 중첩될 수 있다.** 프레임 경과 시간에 교체 호출의 CPU 대기도 포함되므로, 그 시간이 목표를 넘었다면 end_frame은 더 기다리지 않는다. 하지만 swap interval 1이 곧 16.67ms를 뜻하지는 않는다. 예를 들어 144Hz의 한 주기는 약6.94ms이며, 현재 코드의 60Hz 목표 타이머가 추가로 기다릴 수 있다. 대기 위치가 드라이버 내부로 옮겨갈 수도 있으므로 “VSync on이면 타이머는 거의 항상 아무 일도 하지 않는다”는 일반화는 성립하지 않는다.
 
-정리하면 프레임 조절은 세 모드로 동작한다. **vsync 켜짐** — swap interval 1 의 vblank 동기화가 1차 수단이고, `platform_end_frame` 의 타이머 페이싱이 60Hz 목표의 안전망으로 뒤를 받친다. **vsync 꺼짐** — swap interval 0 이 되고, 타이머 페이싱이 240fps 상한만 건다. **확장 부재** — swap interval 을 걸 수단 자체가 없으므로 타이머 페이싱이 유일한 조절 수단으로 남는다. `platform_set_vsync` 는 `s_frame_pacing` 플래그 하나로 swap interval 과 타이머 목표치를 함께 바꾼다.
+정리하면 프레임 조절은 세 모드로 동작한다. **설정 on** — swap interval 1을 요청하고 `platform_end_frame`은 60Hz를 목표로 남은 시간을 기다린다. **설정 off** — swap interval 0을 요청하고 타이머는 240Hz를 목표로 제한한다. 요청 지원·실제 주기·정확한 상한은 별도이며 타이머 지연은 목표 시간을 보장하지 않는다. **확장 부재** — swap interval 을 걸 수단 자체가 없으므로 타이머 페이싱이 유일한 조절 수단으로 남는다. `platform_set_vsync` 는 `s_frame_pacing` 플래그 하나로 swap interval 과 타이머 목표치를 함께 바꾼다.
 
-**시뮬레이션 결정론에는 어느 쪽도 영향이 없다.** Part 4 의 고정 스텝 누산기가 렌더 빈도와 무관하게 60Hz 틱을 만들고, `SimGame` 은 dt 를 아예 보지 않는다. 프레임이 30 FPS 로 떨어져도, 144 FPS 로 올라가도 틱 수열은 같다.
+**규칙의 한 틱은 렌더 주기와 분리한다.** Part 4 의 고정 스텝 누산기가 경과 시간으로 진행할 틱 수를 정하고, `SimGame` 은 렌더 dt 를 직접 받지 않는다. 같은 초기 상태·난수·틱별 입력·규칙 버전을 사용하면 렌더 빈도가 달라도 같은 틱 위치의 상태를 비교할 수 있다. 다만 클램프나 따라잡기 상한은 실제 시간당 진행량을 바꾸며, 실시간 입력을 어느 틱에 배정하는지도 별도 문제다. 고정 스텝 하나만으로 전체 실행의 결정론이 보장되지는 않는다.
 
 ## 11. 종료 순서
 
-자원은 생성의 정확한 역순으로 정리한다. GL 컨텍스트가 목록의 맨 앞에 온다.
+자원의 의존 관계를 거슬러 정리한다. 이 플랫폼 종료 목록에서는 GL 컨텍스트를 창보다 먼저, 창을 SDL 종료보다 먼저 정리한다. 렌더러의 GL 자원은 컨텍스트가 유효한 동안 먼저 정리되어야 한다. 서로 독립적인 자원까지 생성 순서의 정확한 역순이어야 한다는 보편 규칙은 아니다.
 
 **현재 소스 발췌 — `platform/win32.cpp`**
 
@@ -1314,6 +1400,8 @@ void platform_shutdown()
         s_hwnd = nullptr;
     }
     UnregisterClassA("TetrisWindow", GetModuleHandleA(nullptr));
+    s_keys.reset();
+    s_mouse.reset();
 }
 ```
 
@@ -1337,6 +1425,8 @@ void platform_shutdown()
         s_window = nullptr;
     }
     SDL_Quit();
+    s_keys.reset();
+    s_mouse.reset();
 }
 ```
 
@@ -1403,7 +1493,7 @@ static int sdl_to_platform_key(SDL_Keycode key)
 }
 ```
 
-두 가지가 눈에 띈다. `SDLK_RETURN` 과 `SDLK_KP_ENTER`(숫자패드 엔터)가 같은 `PKEY_ENTER` 로 합쳐진다. 그리고 **테이블에 없는 키는 `-1`** 이다. 호출부가 `if (key >= 0 && key < 256)` 로 걸러 버린다. 게임이 쓰지 않는 키는 아예 상태 배열에 들어오지 않으므로, `s_key_state` 는 SDL 빌드에서 `PlatformKey` 에 나열된 키의 슬롯만 사용된다.
+두 가지가 눈에 띈다. `SDLK_RETURN` 과 `SDLK_KP_ENTER`(숫자패드 엔터)가 같은 `PKEY_ENTER` 로 합쳐진다. 그리고 **테이블에 없는 키는 `-1`** 이다. 호출부가 `if (key >= 0 && key < 256)` 로 걸러 버린다. 게임이 쓰지 않는 키는 아예 상태 배열에 들어오지 않으므로, `s_keys`는 SDL 빌드에서 `PlatformKey` 에 나열된 키의 슬롯만 사용된다.
 
 이 설계의 실제 결과: 새 단축키를 추가하려면 반드시 두 곳을 같이 고쳐야 한다. `platform.h` 의 `PlatformKey` 에 상수 추가, `sdl_to_platform_key` 에 `case` 추가. 한쪽만 고치면 Windows 에서는 되고 Linux/macOS 에서는 안 되는 버그가 된다.
 
@@ -1414,6 +1504,8 @@ static int sdl_to_platform_key(SDL_Keycode key)
 ```cpp
 void platform_init(int width, int height, const char* title)
 {
+    s_keys.reset();
+    s_mouse.reset();
     s_win_w = s_logical_w = width;
     s_win_h = s_logical_h = height;
     recompute_viewport();
@@ -1426,12 +1518,17 @@ void platform_init(int width, int height, const char* title)
     set_macos_resource_cwd();
 #endif
     // OpenGL 3.3 Core 를 명시적으로 요청한다. 세 플랫폼 모두 같은 프로파일을
-    // 받아야 셰이더(#version 330 core)가 그대로 통한다. macOS 는 Core 프로파일이
-    // 아니면 3.x 자체를 주지 않으므로 이 설정이 필수다.
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    // 받도록 맞춰야 셰이더(#version 330 core)가 전제하는 컨텍스트와 어긋나지
+    // 않는다. macOS 는 Core 프로파일이 아니면 3.x 자체를 주지 않으므로 이
+    // 설정이 필수다.
+    if (SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE) != 0 ||
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3) != 0 ||
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3) != 0 ||
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1) != 0) {
+        std::fprintf(stderr, "[SDL] GL attribute setup failed: %s\n", SDL_GetError());
+        s_should_close = true;
+        return;
+    }
 
     s_window = SDL_CreateWindow(
         title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -1450,10 +1547,25 @@ void platform_init(int width, int height, const char* title)
         s_should_close = true;
         return;
     }
-    SDL_GL_MakeCurrent(s_window, s_glctx);
-    SDL_GL_SetSwapInterval(s_frame_pacing ? 1 : 0);
-    SDL_StartTextInput();
+    if (SDL_GL_MakeCurrent(s_window, s_glctx) != 0) {
+        std::fprintf(stderr, "[SDL] GL make current failed: %s\n", SDL_GetError());
+        // 창/컨텍스트는 여기서 파괴하지 않고 남긴다. 호출자는 실패해도 항상
+        // platform_shutdown 을 호출하므로 정리는 거기서 이뤄진다.
+        s_should_close = true;
+        return;
+    }
+    if (SDL_GL_SetSwapInterval(s_frame_pacing ? 1 : 0) != 0) {
+        // 비치명적 경고. 페이싱은 sleep 폴백이 있으므로 s_frame_pacing 정책은
+        // 그대로 두고 실패를 알리기만 한다.
+        std::fprintf(stderr, "[SDL] swap interval unavailable (nonfatal): %s\n", SDL_GetError());
+    }
     s_frequency = SDL_GetPerformanceFrequency();
+    if (s_frequency == 0) {
+        std::fprintf(stderr, "[SDL] performance frequency unavailable\n");
+        s_should_close = true;
+        return;
+    }
+    SDL_StartTextInput();
     s_init_time = SDL_GetPerformanceCounter();
     s_frame_start = s_init_time;
 }
@@ -1467,11 +1579,13 @@ SDL2 경로가 Win32 경로보다 짧은 이유의 대부분은 컨텍스트 생
 
 **`SDL_WINDOW_RESIZABLE` 이 붙었다.** Win32 의 `WS_OVERLAPPEDWINDOW` 와 짝을 이루는 설정이다. 두 백엔드가 같은 조건이어야 "Linux 에서는 창이 늘어나는데 Windows 에서는 안 된다" 같은 차이가 생기지 않는다.
 
-**`SDL_WINDOW_ALLOW_HIGHDPI` 는 여전히 없다.** macOS 의 HiDPI 디스플레이에서 SDL 이 픽셀 배율을 적용하지 않는다는 뜻이다. 결과적으로 마우스 좌표와 창 크기가 **둘 다 point 단위**로 일치한다. 배율이 섞이면 `recompute_viewport` 의 창 크기와 `SDL_MOUSEMOTION` 의 좌표가 다른 단위가 되어, §8.1 에서 본 것과 똑같은 종류의 어긋남이 생긴다. Win32 백엔드가 §4.1 에서 DPI 인식을 켠 것과 반대 방향의 선택이지만, "창 크기와 마우스 좌표가 같은 단위" 라는 목표는 같다.
+**현재 게임은 `SDL_WINDOW_ALLOW_HIGHDPI`를 요청하지 않는다.** 창 크기와 마우스 좌표는 SDL의 screen coordinates로 읽지만, 그 사실만으로 모든 환경의 drawable 픽셀 크기를 증명하지는 않는다. 고DPI 지원을 확장할 때는 `SDL_GL_GetDrawableSize`로 실제 픽셀 크기를 구하고 window→drawable→논리 변환을 함께 적용한다. 창 좌표를 물리 픽셀과 혼용하지 않는 것이 핵심이다.
 
 **컨텍스트 생성 실패 시 창을 먼저 정리한다.** `SDL_DestroyWindow` 를 부르고 `s_window = nullptr` 로 만든 뒤 `s_should_close = true`. 이렇게 해 두면 `platform_shutdown` 이 나중에 불려도 이미 파괴된 창을 다시 파괴하지 않는다.
 
-`SDL_StartTextInput()` 호출도 필수다. **이게 없으면 `SDL_TEXTINPUT` 이벤트가 아예 오지 않는다.** SDL2 는 텍스트 입력 모드를 명시적으로 켜야 IME 를 활성화하고 문자 이벤트를 발생시킨다. 빼면 SDL 빌드에서만 채팅과 이름 입력이 죽는다 — Win32 빌드에서 `TranslateMessage` 를 빼먹은 것과 정확히 대칭인 실수다. `platform_shutdown` 의 첫 줄이 `SDL_StopTextInput()` 인 것도 짝을 이룬다.
+`SDL_StartTextInput()`은 텍스트 입력을 사용할 기간을 명시한다. SDL2는 데스크톱에서 텍스트 입력이 기본 활성화될 수 있으므로 “이 호출을 빼면 모든 환경에서 문자가 오지 않는다”는 단정은 맞지 않는다. 명시적인 시작/종료 쌍으로 의도를 드러내고, 문자와 조합 이벤트를 지원할 범위를 구분해야 한다. 이 코드의 `platform_shutdown`은 `SDL_StopTextInput()`으로 사용 기간을 끝낸다. [SDL2 공식 텍스트 입력 안내](https://wiki.libsdl.org/SDL2/SDL_StartTextInput)도 플랫폼별 기본 상태를 설명한다.
+
+속성 설정과 MakeCurrent는 실패 반환값을 확인해 `s_should_close`로 호출자에게 전달한다. 타이머 주파수 0도 초기화 실패로 처리한다. 이 구현은 학습용 RAII 예제와 달리 실패한 뒤에도 호출자가 `platform_shutdown`을 실행해야 남은 SDL·창·컨텍스트가 정리된다. `src/main.cpp`는 이 계약을 지킨다. swap interval 설정 실패는 경고 후 계속 진행하며, `platform_end_frame`의 시간 제한은 유지된다. 이 시간 제한이 화면 주사와의 동기화를 대신 보장하지는 않는다.
 
 ### 12.3 이벤트 루프
 
@@ -1480,8 +1594,8 @@ SDL2 경로가 Win32 경로보다 짧은 이유의 대부분은 컨텍스트 생
 ```cpp
 float platform_begin_frame()
 {
-    std::memcpy(s_key_prev, s_key_state, sizeof(s_key_state));
-    std::memcpy(s_mouse_prev, s_mouse_state, sizeof(s_mouse_state));
+    s_keys.begin_frame();
+    s_mouse.begin_frame();
     s_mouse_wheel = 0.0f;
 
     SDL_Event event;
@@ -1494,7 +1608,7 @@ float platform_begin_frame()
         case SDL_KEYUP: {
             const int key = sdl_to_platform_key(event.key.keysym.sym);
             if (key >= 0 && key < 256)
-                s_key_state[key] = event.type == SDL_KEYDOWN;
+                s_keys.set(static_cast<std::size_t>(key), event.type == SDL_KEYDOWN, event.key.repeat != 0);
         } break;
         case SDL_TEXTINPUT:
             for (const char* p = event.text.text; *p; ++p) {
@@ -1518,7 +1632,7 @@ float platform_begin_frame()
             else if (event.button.button == SDL_BUTTON_RIGHT) button = 1;
             else if (event.button.button == SDL_BUTTON_MIDDLE) button = 2;
             if (button >= 0) {
-                s_mouse_state[button] = event.type == SDL_MOUSEBUTTONDOWN;
+                s_mouse.set(static_cast<std::size_t>(button), event.type == SDL_MOUSEBUTTONDOWN);
                 s_mouse_x = event.button.x;
                 s_mouse_y = event.button.y;
             }
@@ -1532,6 +1646,10 @@ float platform_begin_frame()
                 s_win_w = event.window.data1;
                 s_win_h = event.window.data2;
                 recompute_viewport();
+            } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                // 키·마우스 held와 미전달 press를 취소한다. 문자 큐는 유지.
+                s_keys.cancel();
+                s_mouse.cancel();
             }
             break;
         }
@@ -1551,7 +1669,7 @@ Win32 의 `platform_begin_frame` + `window_proc` 을 합친 것과 같은 일을
 - **마우스 버튼 이벤트가 좌표도 갱신한다.** `event.button.x/y` 를 `s_mouse_x/y` 에 쓴다. 터치패드나 원격 데스크톱처럼 motion 이벤트 없이 클릭이 도착하는 경우를 위한 방어다.
 - **휠은 `event.wheel.y` 를 그대로 더한다.** Win32 처럼 `WHEEL_DELTA` 로 나누지 않는다. SDL 이 이미 노치 단위로 정규화해 준다.
 - **`SDL_TEXTINPUT` 은 UTF-8 문자열을 준다.** 한 이벤트에 여러 바이트가 온다. 바이트별로 순회하며 128 이상은 버린다 — 결과적으로 한글은 통째로 사라진다.
-- **`SDL_WINDOWEVENT` 가 창 크기 변화의 유일한 통로다.** `SDL_WINDOW_RESIZABLE` 이 붙은 지금은 사용자가 창을 끌 때마다 이 이벤트가 쏟아진다. CPU surface 로 표시하는 구조라면 매 프레임 `SDL_GetWindowSurface` 로 실제 크기를 다시 읽어 보정할 수 있지만, GL 경로에는 그렇게 물어볼 surface 가 없다. **이 이벤트를 놓치면 뷰포트가 옛 크기로 남는다.** `SIZE_CHANGED` 와 `RESIZED` 를 둘 다 받는 이유도 같다 — 사용자 드래그는 둘 다 보내지만 `SDL_SetWindowSize` 같은 프로그램적 변경은 `SIZE_CHANGED` 만 보낸다.
+- **현재 구현은 `SDL_WINDOWEVENT` 로 보관 중인 창 크기를 갱신한다.** `SDL_WINDOW_RESIZABLE` 이 붙어 있으므로 크기 변경 이벤트를 받아 뷰포트를 다시 계산한다. 이 경로에서 이벤트를 놓치면 보관한 크기가 옛 값으로 남을 수 있다. 다만 이벤트가 크기를 알아내는 유일한 API는 아니다. GL 창도 [`SDL_GetWindowSize`](https://wiki.libsdl.org/SDL2/SDL_GetWindowSize)로 창 좌표 단위 크기를, [`SDL_GL_GetDrawableSize`](https://wiki.libsdl.org/SDL2/SDL_GL_GetDrawableSize)로 실제 그리기 영역의 픽셀 크기를 조회할 수 있다. 고 DPI 환경에서는 둘을 구분해야 한다. 현재 이벤트 처리는 `SIZE_CHANGED` 와 `RESIZED` 를 모두 받아 같은 갱신 경로로 보낸다.
 
 ## 13. SDL 백엔드의 플랫폼별 예외
 
@@ -1610,6 +1728,24 @@ bool platform_fullscreen_supported() { return true; }
 `SDL_WINDOW_FULLSCREEN_DESKTOP` 은 해상도를 바꾸지 않고 데스크톱 크기의 borderless 창으로 만든다. 진짜 모드 전환(`SDL_WINDOW_FULLSCREEN`)보다 전환이 빠르고 Alt+Tab 이 매끄럽다. 전환 후 `SDL_GetWindowSize` 로 새 크기를 읽고 `recompute_viewport()` 를 부른다 — 이벤트가 오기를 기다리지 않고 즉시 갱신하는 것이 중요하다. 16:9 모니터에서 9:8 논리 화면을 띄우면 좌우에 굵은 검은 바가 생긴다. 왜곡 대신 레터박스를 택한 결과다.
 
 Win32 백엔드의 대응 구현은 `platform_set_fullscreen`이 no-op이고 `platform_fullscreen_supported()`가 `false`인 것이 전부다. 이 비대칭을 상위 계층이 알 수 있게 만든 것이 `platform_fullscreen_supported()` 계약이다. Windows에서 전체화면을 구현하려면 창 스타일을 `WS_POPUP`으로 바꾸고 모니터 작업 영역 크기로 `SetWindowPos`를 호출하며, 복귀용 이전 스타일과 사각형을 보관해야 한다. 코드 양보다 창 상태 복원 규칙이 핵심이며 현재는 구현되어 있지 않다.
+
+### 13.3 학습용 콘솔 진입점과 SDL 준비
+
+학습 체크포인트는 C++ 콘솔 `main`을 유지한다. SDL 헤더가 플랫폼에 따라 `main`을
+`SDL_main`으로 바꾸는 어댑터 경로와 섞지 않도록 `SDL_MAIN_HANDLED`를 정의하고,
+`SDL_Init` 전에 `SDL_SetMainReady()`를 호출한다. 전자는 헤더의 이름 재정의를 제어하고
+후자는 SDL의 초기 진입 준비를 알린다. [SDL의 공식 진입점 계약](https://wiki.libsdl.org/SDL2/SDL_SetMainReady)을
+함께 확인한다. SDL을 직접 포함하는 작은 진단 실행 파일도 같은 규칙을 적용한다.
+
+SDL을 main.cpp 밖으로 옮기는 것만으로 SDL 초기화의 플랫폼 조건까지 사라지지는 않는다.
+초기 창 실습부터 누적 백엔드·GL 진단기까지 준비 호출을 유지한다. 학습 CMake는
+`StudySDL2` INTERFACE 타깃으로 컴파일 정의와 선택한 패키지의 사용 요구 사항을 전달한다.
+SDL2의 Config 패키지를 우선 찾고, 없으면 pkg-config를 대안으로 사용한다.
+Windows의 vcpkg 도구 체인이나 별도 설치의 CMAKE_PREFIX_PATH는 대상 아키텍처에 맞춘다.
+
+GL 진단 실행 파일도 Core 컨텍스트와 forward-compatible 플래그를 함께 요청한다.
+요청 플래그·컴파일 성공·실제 장치의 컨텍스트와 Retina 좌표 검증은 서로 다른 증거다.
+macOS의 창 크기와 drawable 크기, Windows 런타임 DLL 탐색은 대상 기기에서 따로 확인한다.
 
 ## 14. CMakeLists 확장
 
@@ -1693,7 +1829,7 @@ if (TETRIS_BUILD_PART2_DEMO)
 endif()
 ```
 
-`find_package(OpenGL REQUIRED)` 와 `opengl32` 링크가 이 장에서 새로 들어간 줄이다. **함수 포인터를 런타임에 받는데 왜 링크가 필요한가**라는 의문이 자연스럽다. 이유는 컨텍스트를 만드는 진입점이다. `wglCreateContext`, `wglGetProcAddress`, `SwapBuffers` 는 확장이 아니라 `opengl32.dll` / `gdi32.dll` 의 정식 export 이고, 링커가 찾을 수 있어야 한다. Linux 에서도 SDL 이 `libGL` 을 필요로 한다.
+`find_package(OpenGL REQUIRED)` 와 `opengl32` 링크가 이 장에서 새로 들어간 줄이다. **함수 포인터를 런타임에 받는데 왜 링크가 필요한가**라는 의문이 자연스럽다. 이유는 컨텍스트를 만드는 진입점이다. `wglCreateContext`, `wglGetProcAddress`, `SwapBuffers` 는 확장이 아니라 `opengl32.dll` / `gdi32.dll` 의 정식 export 이고, 링커가 찾을 수 있어야 한다. SDL 경로에서 GL 라이브러리를 찾는 일과 애플리케이션이 GL 심볼을 직접 링크하는 일은 구별한다. SDL 함수만 직접 호출하고 GL 주소를 조회하는 학습용 타깃은 SDL 링크만으로 구성한다. 완성형 타깃의 OpenGL 탐색 설정을 모든 축소 예제의 필수 조건으로 일반화하지 않는다.
 
 **Linux 에서는 GL 개발 패키지가 필요하다.** `sudo apt install libgl1-mesa-dev`(Debian/Ubuntu) 또는 `sudo dnf install mesa-libGL-devel`(Fedora). macOS 는 Xcode Command Line Tools 에 OpenGL 프레임워크가 들어 있고, Windows 는 `opengl32.lib` 이 Windows SDK 에 들어 있어 추가 설치가 필요 없다.
 
@@ -1730,13 +1866,19 @@ using GLfloat    = float;
 #define GL_RENDERER         0x1F01
 #define GL_VERSION          0x1F02
 
-static void (*gl_Enable)(GLenum);
-static void (*gl_Disable)(GLenum);
-static void (*gl_Viewport)(GLint, GLint, GLsizei, GLsizei);
-static void (*gl_Scissor)(GLint, GLint, GLsizei, GLsizei);
-static void (*gl_ClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
-static void (*gl_Clear)(GLbitfield);
-static const unsigned char* (*gl_GetString)(GLenum);
+#if defined(_WIN32)
+#define PART2_GL_CALL __stdcall
+#else
+#define PART2_GL_CALL
+#endif
+
+static void (PART2_GL_CALL *gl_Enable)(GLenum);
+static void (PART2_GL_CALL *gl_Disable)(GLenum);
+static void (PART2_GL_CALL *gl_Viewport)(GLint, GLint, GLsizei, GLsizei);
+static void (PART2_GL_CALL *gl_Scissor)(GLint, GLint, GLsizei, GLsizei);
+static void (PART2_GL_CALL *gl_ClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
+static void (PART2_GL_CALL *gl_Clear)(GLbitfield);
+static const unsigned char* (PART2_GL_CALL *gl_GetString)(GLenum);
 
 template <typename Fn>
 static bool load_gl(Fn& slot, const char* name)
@@ -1752,7 +1894,10 @@ int main()
     const int H = 640;   // 논리 화면 높이
 
     platform_init(W, H, "Part 2 platform demo");
-    if (platform_should_close()) return 1;   // 창/컨텍스트 생성 실패
+    if (platform_should_close()) {
+        platform_shutdown(); // 실패 중 획득한 자원도 정리한다.
+        return 1;
+    }
 
     bool ok = true;
     ok = load_gl(gl_Enable,     "glEnable")     && ok;

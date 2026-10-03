@@ -1,0 +1,425 @@
+{
+  "id": "lesson-70",
+  "title": "마우스 역매핑: 그림과 클릭을 일치",
+  "shortTitle": "좌표 단위·프레임 배치·변경 취소",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 체크박스와 선택기가 논리 좌표에서 동작하지만, 크기 변경 전에 받은 클릭도 현재 배치로 해석합니다.",
+  "finish": "완료: 한 프레임의 배치를 입력과 그리기가 공유하고, 크기·배율 변화로 기준이 바뀐 포인터 입력을 취소합니다.",
+  "objective": "좌표 공간·역변환 순서·정수 경계와 사건 시점을 구별하고, 독립 계산과 픽셀 비교로 그림과 클릭의 일치를 검사합니다.",
+  "prerequisites": [
+    "window·drawable·logical과 letterbox",
+    "위젯의 순수 판정·단일 요청 적용",
+    "optional과 프레임 입력 취소"
+  ],
+  "recap": {
+    "points": [
+      "설정 값은 호출자가 소유하고 위젯은 변경 요청을 반환합니다.",
+      "마우스와 키보드를 행동 하나로 모아 한 번 적용합니다.",
+      "그리기는 갱신된 설정을 읽으며 같은 요청을 다시 실행하지 않습니다."
+    ],
+    "bridge": "이번에는 그 입력 위치를 해석하는 배치가 바뀔 때도 같은 책임 경계를 유지하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "창을 늘리는 순간 체크박스가 시작 버튼이 된다면",
+      "body": "메뉴에서 장식 표시를 누르는 순간 창 크기가 바뀌었다고 생각해 봅시다. 눌림 위치는 옛 창을 기준으로 기록됐는데 판정은 새 viewport를 사용하면, 같은 좌표가 다른 위젯을 가리킬 수 있습니다. 좌표 숫자가 올바른 것만으로는 충분하지 않습니다. **그 숫자를 해석하는 배치와 시점**도 맞아야 합니다.\n\n창과 drawable이 모두 640×480이고 논리 화면이 320×240이면, 창 좌표 (240,180)은 논리 (120,90)입니다. 장식 표시 행 안에 있습니다. 그런데 창을 1200×617로 바꾸면 새 viewport는 폭 822·높이 617이고 왼쪽 여백은 189입니다. 같은 사건 좌표를 새 배치로 변환하면 약 (19.85,70.02), 즉 시작 버튼 안으로 옮겨집니다.\n\n이번에는 한 프레임의 배치를 입력과 그리기에 함께 전달하는 `FrameMapping`을 만들겠습니다. 크기가 바뀐 프레임에서는 포인터 입력을 취소하고 새 배치로 그림은 계속 그립니다. 사용자는 새 배치에서 다시 눌러 조작합니다. 키보드 조작은 유지합니다.",
+      "codes": [
+        {
+          "label": "같은 숫자가 다른 행동이 되는 경로",
+          "language": "text",
+          "text": "사건 위치 (240,180)\n  옛 배치: 640×480  → 논리 (120,90)       → 장식 표시\n  새 배치: 1200×617 → 논리 (19.85,70.02)  → 시작\n\n배치 변경 감지 → 이 프레임의 포인터 취소 → 새 배치로 그리기"
+        }
+      ]
+    },
+    {
+      "title": "좌표의 이름에 공간과 단위를 붙인다",
+      "body": "이 경로에는 세 공간이 있습니다. **window**는 SDL 창 크기와 마우스 사건이 사용하는 좌표 단위입니다. **drawable**은 OpenGL이 그리는 픽셀 공간입니다. **logical**은 UI를 배치한 320×240의 논리 단위입니다. layout.viewport의 x/y/폭/높이는 drawable의 왼쪽 위 원점을 기준으로 보관합니다.\n\n`SDL_GetWindowSize`와 `SDL_GL_GetDrawableSize`를 따로 조회합니다. SDL은 고밀도 창에서 두 크기가 다를 수 있다고 설명합니다. 예를 들어 window 폭 640에 drawable 폭 1280이면 가로 방향으로 창 1단위가 drawable 2픽셀에 해당합니다. 이 비율은 모니터의 물리적인 인치당 픽셀 수를 직접 뜻하지 않습니다. 이번 계산은 보고된 두 크기의 비율을 사용합니다. [SDL drawable 크기 계약](https://wiki.libsdl.org/SDL2/SDL_GL_GetDrawableSize).\n\nx축은 drawable.width/window.width, y축은 drawable.height/window.height로 각각 환산합니다. 하나의 ‘배율’ 숫자를 추측해 두 축에 공통으로 넣으면, 정수 크기 반올림이나 서로 다른 시험 크기 조합에서 실제 보고 값과 어긋날 수 있습니다. `Point` 자체에는 단위 태그가 없으므로 변수 이름과 함수의 입력·반환 계약으로 구분합니다.",
+      "codes": [
+        {
+          "label": "한 프레임에서 읽는 크기",
+          "language": "cpp",
+          "text": "const auto window = platform_window_size();\nconst auto drawable = platform_drawable_size();\n// window: 사건 좌표의 단위, drawable: GL 픽셀, logical: UI 단위\nconst auto mapped = mapping.update(\n    {window.width, window.height},\n    {drawable.width, drawable.height},\n    study_board_scene::logical, platform_window_pointer());"
+        }
+      ]
+    },
+    {
+      "title": "역변환은 그리는 변환을 반대 순서로 푼다",
+      "body": "논리 좌표를 화면에 표시하는 과정을 x축으로 쓰면 `drawableX = viewportX + logicalX * viewportWidth / logicalWidth`입니다. 이것을 창 단위로 표현하려면 `windowX = drawableX * windowWidth / drawableWidth`로 바꿉니다. 크기 비율을 곱하는 확대·축소와 일정한 값을 더하는 평행 이동의 조합입니다. 이런 변환을 **아핀 변환(affine transform)**이라 부릅니다.\n\n입력의 역변환은 이 연산을 역순으로 풉니다. 창 좌표를 drawable로 바꾸고, viewport의 왼쪽 여백을 빼고, 표시 영역의 비율을 되돌립니다. 여백은 drawable 단위이므로 창 좌표에서 바로 빼면 서로 다른 단위의 값을 뺀 셈입니다. y축도 같은 원리로 계산하되 이 단계에서는 둘 다 왼쪽 위 원점이므로 뒤집지 않습니다.\n\nwindow=1000×400, drawable=1500×600이면 viewport는 (350,0,800,600)입니다. 창의 (300,120)을 1.5배 하면 drawable (450,180), 여백을 빼면 (100,180), 논리 비율로 되돌리면 (40,72)입니다. 시작 버튼 안입니다. 반대로 창 x에서 350을 먼저 빼면 음수가 되어 완전히 다른 판정을 만듭니다.",
+      "codes": [
+        {
+          "label": "x축 역변환을 세 단계로 적는다",
+          "language": "text",
+          "text": "drawableX = windowX * drawableWidth / windowWidth;\nlocalX = drawableX - viewportX;\nlogicalX = localX * logicalWidth / viewportWidth;"
+        }
+      ]
+    },
+    {
+      "title": "이상적인 배율 대신 확정된 정수 사각형을 사용한다",
+      "body": "viewport의 위치와 크기는 GL에 넘길 정수 픽셀입니다. 논리 종횡비에 정확히 맞춘 실수 크기를 구해도 모든 크기가 정수로 표현되지는 않습니다. 학습 make_layout은 들어맞는 변을 내림하고, 남는 여백을 정수 나눗셈으로 가운데 배치합니다.\n\n1200×617 drawable에 320×240을 맞추면 높이 617, 폭 floor(617×320/240)=822입니다. 실제 가로 비율 822/320과 세로 비율 617/240은 조금 다릅니다. 입력 변환에서 이상적인 단일 배율 617/240만 두 축에 쓰면 렌더러에 제출한 실제 폭 822와 어긋납니다. 따라서 확정된 viewport.width와 viewport.height를 각각 사용합니다.\n\n크기가 0이거나 맞춘 변이 0이 되면 make_layout은 빈 optional을 반환합니다. 0을 임의로 1로 바꾸면 사용할 수 없는 화면에 가상의 조작 영역을 만들 수 있습니다. FrameMapping은 이 결과를 입력과 그리기에 같은 방식으로 전달합니다.",
+      "codes": [
+        {
+          "label": "프레임이 공유할 값",
+          "language": "cpp",
+          "text": "struct MappingFrame {\n    std::optional<study_letterbox::Layout> layout;\n    Input input;\n    bool geometry_changed = false;\n};"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "정수 반올림 정책과 비율 오차",
+          "body": "현재 루트 플랫폼은 맞춘 변에 lround를 사용하고 학습은 내림을 사용합니다. 선택한 정책의 차이는 1픽셀 배치를 바꿀 수 있습니다. 어느 쪽이든 최종 사각형을 공유해야 하며, lround라는 함수 이름이 떨림이나 부동소수 오차를 없애 주지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "한 번 계산한 layout을 두 소비자에게 전달한다",
+      "body": "main의 프레임 반복문 밖에 `FrameMapping mapping`을 둡니다. 매 프레임 update가 layout을 한 번 만들고 그 layout으로 포인터를 변환합니다. main은 결과의 layout을 GL 그리기에, input을 메뉴 판정에 넘깁니다. 그리기용 배치를 또 계산할 두 번째 경로를 만들지 않습니다.\n\n**스냅샷(snapshot)**은 어떤 시점에 관찰한 값을 묶어 이후 처리에서 같은 기준으로 읽는 것입니다. MappingFrame은 이번 호출의 크기와 변환 결과를 값으로 보관합니다. main의 const 참조는 그 프레임의 지역 결과가 살아 있는 동안 사용합니다. 값을 전역 포인터로 보관하거나 다음 프레임까지 참조를 넘길 필요가 없습니다.\n\n학습 main도 이미 같은 layout으로 포인터와 그림을 처리했습니다. 이번에는 그 결합을 타입의 반환값으로 드러내고, 프레임 사이의 변경 감지까지 한 곳으로 모읍니다. ‘같은 숫자를 다시 계산해도 될 것’이라는 가정보다 어떤 결과를 공유하는지 코드에서 확인하기 쉬워집니다.",
+      "codes": [
+        {
+          "label": "main에서 계산 결과를 함께 사용한다",
+          "language": "cpp",
+          "text": "study_ui::FrameMapping mapping; // while 밖\n\n// 프레임 안\nconst auto mapped = mapping.update(window_size, drawable_size, logical_size, raw_pointer);\nconst auto& layout = mapped.layout;\nconst auto& pointer = mapped.input;\n// pointer → 메뉴 평가 / layout → 같은 프레임의 그림"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "OS 전체를 원자적으로 읽는다는 뜻은 아니다",
+          "body": "창 크기·drawable·포인터를 읽는 API 호출들은 서로 다른 호출입니다. MappingFrame은 넘겨받은 값의 기준을 일관되게 사용하지만 OS의 변경을 잠그거나 사건 당시 크기를 복원하지 않습니다. 관찰된 크기 변경과 SDL 크기 사건을 취소하는 정책으로 알려진 불일치를 처리합니다."
+        }
+      ]
+    },
+    {
+      "title": "여섯 크기 값이 달라지면 포인터를 취소한다",
+      "body": "FrameMapping은 직전 window·drawable·logical의 가로·세로, 총 여섯 값을 기억합니다. 같은 창 크기로 다른 배율의 화면에 옮겼다면 drawable만 바뀔 수도 있습니다. 논리 화면 크기 정책을 바꾸는 경우에는 logical만 달라질 수 있습니다. 종횡비만 비교하면 이런 변화를 놓칩니다.\n\n첫 호출에는 비교할 기준이 없으므로 geometry_changed를 true로 취급합니다. 새 layout을 만들되 Input을 비우고 cancelled=true를 설정합니다. 첫 프레임도 포인터 조작을 받지 않는 보수적인 정책입니다. 키보드는 별도 경로여서 즉시 사용할 수 있습니다.\n\n유효하지 않은 크기도 previous에 저장합니다. 최소화로 크기가 0이 된 프레임은 layout이 없고, 같은 0이 반복되면 geometry_changed는 false이지만 여전히 layout이 없습니다. 다시 양의 크기가 관찰되면 복구 프레임을 변경으로 판단해 포인터를 취소합니다. 변경 여부와 그릴 수 있는 배치의 존재 여부는 서로 다른 정보입니다.",
+      "codes": [
+        {
+          "label": "변경을 감지한 뒤 그릴 배치는 유지한다",
+          "language": "cpp",
+          "text": "out.layout = study_letterbox::make_layout(window, drawable, logical);\nout.input = map_pointer(out.layout, frame);\nif (changed) {\n    out.input = Input{};\n    out.input.cancelled = true;\n}\nreturn out;"
+        }
+      ]
+    },
+    {
+      "title": "같은 펌프 안에서 원래 크기로 돌아오는 경우를 처리한다",
+      "body": "프레임 시작과 끝의 크기가 같아도 중간에 바뀌었을 수 있습니다. 사건 큐에 click → resize A→B → resize B→A가 들어오면 직전/현재 크기 비교는 같다고 판단합니다. 사건이 발생한 배치를 보존하지 않았으므로 그 클릭을 안전하게 재해석할 근거가 없습니다.\n\nSDL 입력 수집기는 이 창의 SIZE_CHANGED 또는 RESIZED 사건을 만나면 pointer.cancel을 호출합니다. cancel 표시는 프레임 끝까지 유지되므로, 같은 펌프 뒤쪽에 다른 press가 들어와도 그 프레임의 포인터 snapshot은 취소됩니다. FrameMapping의 크기 비교는 drawable만 바뀐 경우 같은 조회 결과의 변화를 잡고, 사건 계층의 취소는 중간에 왕복한 변화를 잡습니다.\n\n두 검사는 서로 다른 증거를 봅니다. 창 크기 사건만 처리하면 사건 없이 조회되는 배율 변화에 약하고, 끝 크기만 비교하면 중간 변화를 놓칩니다. 포인터를 취소하는 정책은 클릭 하나를 버릴 수 있지만 다른 UI 행동으로 잘못 바꾸는 위험을 줄입니다. 모든 클릭을 보존하려면 각 사건에 당시 배치 식별자나 변환 정보를 함께 기록하는 더 풍부한 계약이 필요합니다.",
+      "codes": [
+        {
+          "label": "이 창의 크기 사건도 취소 조건에 포함한다",
+          "language": "cpp",
+          "text": "event.type == SDL_WINDOWEVENT &&\nevent.window.windowID == SDL_GetWindowID(state.window.get()) &&\n(event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||\n event.window.event == SDL_WINDOWEVENT_RESIZED ||\n event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||\n event.window.event == SDL_WINDOWEVENT_LEAVE ||\n event.window.event == SDL_WINDOWEVENT_MINIMIZED)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "프레임 값은 사건 이력 전체가 아니다",
+          "body": "pointer::Frame은 최초 press 하나와 최종 down·현재 위치를 보관합니다. 같은 프레임의 여러 클릭을 원래 순서대로 재생할 충분한 정보가 없습니다. 좌표를 따로 보관한다는 사실과 전체 사건을 기록한다는 주장을 구분해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "현재 위치와 누름 위치를 같은 기준으로 따로 변환한다",
+      "body": "배치가 안정된 프레임에서는 현재 위치와 최초 press 위치를 각각 변환합니다. 버튼 안에서 누른 뒤 창 안의 다른 곳으로 움직였다면 activated는 press로, hovered는 position으로 결정됩니다. 최종 위치로 press를 덮어쓰지 않습니다.\n\n배치가 바뀐 프레임은 두 위치와 down을 모두 입력 결과에서 비웁니다. 오래된 press만 지우고 held를 계속 표현할지 선택할 수도 있지만, 이 작은 메뉴는 변경 프레임의 hover·held·activation을 함께 쉬는 정책을 사용합니다. 다음 안정된 프레임에서 현재 위치로 hover가 다시 나타나며, 취소된 press를 되살리지는 않습니다.\n\n메뉴의 Keys.cancelled와 Input.cancelled는 계속 분리합니다. 마우스 배치가 바뀌어도 키보드 포커스가 있다면 Space로 시작하거나 장식을 바꿀 수 있습니다. FrameMapping이 게임 규칙 입력이나 키보드 값을 소유하지 않으므로 포인터의 변경을 게임 키 전체의 취소로 퍼뜨리지 않습니다.",
+      "codes": [
+        {
+          "label": "취소 범위의 구분",
+          "language": "text",
+          "text": "배치 변화          → 포인터 Input 취소, layout은 새 값\n키보드 포커스 유지 → 키보드 메뉴 조작 가능\n안정된 다음 프레임 → 새 포인터 위치를 현재 배치로 변환"
+        }
+      ]
+    },
+    {
+      "title": "GL 원점과 픽셀 중심은 다른 문제다",
+      "body": "입력과 논리 좌표는 왼쪽 위가 원점이고 아래로 y가 증가합니다. OpenGL viewport의 y는 아래쪽에서 잽니다. 높이 H인 drawable에서 위쪽 기준 viewport가 (x,y,w,h)라면 GL y는 `H-y-h`입니다. 중앙 배치라도 남는 높이가 홀수이면 위아래 여백이 다르므로 y를 그대로 넘길 수 없습니다. 위 여백 1·아래 여백 2이면 GL y는 2입니다.\n\n픽셀의 정수 인덱스와 연속 좌표도 구분합니다. 단일 샘플 래스터화의 비교 검사에서는 픽셀 (i,j)의 중심을 (i+0.5,j+0.5)로 잡습니다. drawable 중심점을 창 공간으로 환산한 뒤 역변환하여 버튼 안인지 판정하고, GL이 실제로 그 픽셀에 색을 썼는지 비교할 수 있습니다. 이 점은 검사를 위해 만든 연속 좌표이며 SDL이 보낸 정수 사건 좌표가 아닙니다.\n\n버튼 hit 영역은 반열린 사각형입니다. 오른쪽·아래 경계는 밖으로 봅니다. 그림의 꼭짓점 위치를 구하는 logical_to_window는 닫힌 끝점도 허용하므로, 그 반환값이 모두 클릭 가능한 위치라는 뜻은 아닙니다. 경계에서의 부동소수 왕복 오차를 없애겠다고 hit 영역에 무작정 epsilon을 더하면 이웃 버튼이 겹칠 수 있습니다.",
+      "codes": [
+        {
+          "label": "원점 변환과 표본 중심",
+          "language": "text",
+          "text": "GL viewport y = drawableHeight - viewportTop - viewportHeight\n\ndrawable 표본 중심 = (column + 0.5, rowFromTop + 0.5)\n창 좌표 = 표본 중심 × windowSize / drawableSize"
+        }
+      ]
+    },
+    {
+      "title": "정수 클릭 좌표는 음수에서 내림을 보존한다",
+      "body": "현재 게임의 platform_mouse_x/y는 정수 논리 좌표를 반환합니다. 왼쪽 여백에서 계산 결과가 -0.59라면 논리 화면 밖입니다. 이를 C++ 정수 변환으로 0 방향 절단하면 0이 되어 왼쪽 끝 위젯 안으로 들어올 수 있습니다. 수학적 floor는 -1이므로 바깥 상태를 보존합니다.\n\n공통 logical_mouse_axis는 뺄셈과 곱셈을 int64로 수행하고, 음수 분자에 나머지가 있으면 정수 나눗셈 결과를 하나 낮춥니다. 반환 int 범위를 넘는 값만 포화시키며, 보통의 음수를 화면 경계 0으로 고정하지 않습니다. 유효하지 않은 extent에는 -1을 반환합니다.\n\n학습 UI는 optional<Point>로 viewport 밖을 거절하고 연속 논리 좌표를 유지합니다. 정수 API와 반환 모양은 다르지만, 범위 밖 좌표를 유효한 버튼 위치로 바꾸지 않는 의도는 같습니다. 정수화 방식과 영역 판정 정책을 같은 것으로 혼동하지 않도록 반환 계약을 읽어야 합니다.",
+      "codes": [
+        {
+          "label": "음수에서 floor로 보정하는 핵심",
+          "language": "cpp",
+          "text": "std::int64_t result = numerator / extent;\nif (numerator < 0 && numerator % extent != 0) --result;"
+        }
+      ],
+      "reference": {
+        "path": "platform/mouse_coordinates.h",
+        "symbol": "inline int logical_mouse_axis(",
+        "invariant": "바깥 좌표를 0으로 잘라 유효한 클릭으로 만들지 않는다.",
+        "mayDiffer": "루트는 정수 floor와 포화, 학습은 연속 논리 좌표와 optional 범위 거절을 사용한다."
+      }
+    },
+    {
+      "title": "왕복 검사에 독립적인 기준을 더한다",
+      "body": "logical→window→logical 왕복은 두 함수가 서로 맞는지 확인하는 데 유용합니다. 하지만 두 함수가 똑같이 잘못된 offset을 사용하면 왕복이 맞아도 그림은 어긋날 수 있습니다. **검사 기준(oracle)**은 기대 결과를 제공하는 근거입니다. 구현의 계산을 그대로 복사한 검사는 독립성이 약합니다.\n\n먼저 몇 가지 크기에서 viewport를 손으로 계산한 표와 대조합니다. 다음으로 정수 창 좌표를 샘플링하고, 나눗셈 대신 넓은 정수의 곱셈 부등식으로 버튼 내부 여부를 계산해 역변환 결과와 비교합니다. 표현 가능한 정확한 경계는 별도 사례로 확인하고, 실수 왕복은 경계에서 충분히 떨어진 점을 사용합니다.\n\n그림과의 연결은 실제 GL readback으로 확인합니다. 흰 텍스처를 빨간 사각형으로 그리고 픽셀 색과 그 중심의 hit 판정을 비교합니다. 둥근 버튼은 바깥 사각형을 hit 영역으로 쓰는 정책이므로, 이 변환 검사는 둥글지 않은 축 정렬 사각형으로 격리합니다. 마지막으로 resize·drawable만 변화·최소화·복구·같은 펌프의 크기 왕복 시나리오를 검사해 공간 계산과 시간상의 계약을 함께 확인합니다.",
+      "codes": [
+        {
+          "label": "독립된 기대값을 만드는 x축 부등식",
+          "language": "text",
+          "text": "dx = windowX * drawableWidth - viewportX * windowWidth\n전체 분모 = viewportWidth * windowWidth  // 양수\n\n버튼 왼쪽 안: dx * logicalWidth >= buttonLeft * 전체 분모\n버튼 오른쪽 안: dx * logicalWidth < buttonRight * 전체 분모\n\n시험 크기에서 곱셈이 int64 범위 안임을 확인하고 사용한다."
+        }
+      ]
+    },
+    {
+      "title": "현재 플랫폼 코드와 기준 구현의 경계를 읽는다",
+      "body": "현재 루트 Win32와 SDL은 platform_mouse_x/y에서 논리 정수 좌표를 돌려줍니다. 학습 SDL은 원시 창 좌표를 전달하고 FrameMapping에서 연속 논리 좌표로 바꿉니다. 변환 위치가 달라도 그리는 viewport와 입력이 같은 기준을 사용해야 한다는 책임은 같습니다.\n\nWin32 마우스 버튼 메시지에는 버튼 사건 당시의 클라이언트 좌표가 들어 있습니다. motion 메시지가 바로 앞에 있었다고 가정하면 창 이동이나 크기 변경 뒤의 클릭 위치를 놓칠 수 있습니다. 현재 코드의 update_mouse_position은 이동과 여섯 버튼 down/up 메시지에서 같은 방식으로 부호 있는 좌표를 추출합니다. [Win32 버튼 메시지의 좌표 계약](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-lbuttondown).\n\n루트 SDL의 현재 viewport 계산은 window와 drawable이 1:1이라는 전제를 사용하고 고밀도 창 플래그를 명시적으로 요청하지 않습니다. 학습의 별도 drawable 조회와 같은 지원 범위로 읽으면 안 됩니다. 또한 루트는 가장 최근 마우스 좌표를 보관하고 학습은 최초 press 위치도 보관합니다. FrameMapping의 크기 변경 취소 역시 학습 체크포인트에 추가한 정책입니다.",
+      "codes": [
+        {
+          "label": "버튼 메시지에서도 좌표를 읽는다",
+          "language": "cpp",
+          "text": "static void update_mouse_position(LPARAM position)\n{\n    s_mouse_x = (int)(short)LOWORD(position);\n    s_mouse_y = (int)(short)HIWORD(position);\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "platform/win32.cpp",
+        "symbol": "static void update_mouse_position(",
+        "invariant": "입력 메시지의 좌표를 올바른 단위와 부호로 보관한 뒤 논리 공간으로 변환한다.",
+        "mayDiffer": "루트는 최신 사건 좌표이며 학습은 현재 위치와 최초 press 위치를 나누어 보관한다."
+      }
+    },
+    {
+      "title": "빌드하고 크기 변화와 새 클릭을 관찰한다",
+      "body": "누적 프로젝트는 `checkpoints/70-pointer-mapping`입니다. main에 FrameMapping 객체와 공유 결과를 연결하고 SDL 크기 사건을 포인터 취소 조건에 추가합니다. UI·설정 값·게임 규칙은 같은 코드를 사용합니다. CMake에 frame_mapping_contract를 등록하고, SDL 빌드에는 실제 픽셀 비교용 pointer_pixels 도구를 추가합니다.\n\nSDL2와 OpenGL 3.3 Core 환경에서 빌드한 뒤 메뉴 창을 가로로 넓히거나 세로로 길게 바꿔 보세요. 레터박스 안의 버튼과 클릭 위치가 함께 바뀌어야 합니다. 크기를 바꾸는 프레임에는 마우스 강조가 잠시 사라질 수 있고, 안정된 배치에서 새로 누르면 다시 반응해야 합니다. 키보드 Up/Down·Space는 계속 사용할 수 있습니다.\n\n크기가 0인 동안에는 그릴 layout이 없습니다. 복구 시 새 layout으로 그림을 재개하되 그 프레임의 포인터는 취소합니다. 재시도한 클릭이 계속 무시된다면 update를 한 프레임에 여러 번 호출하는지, FrameMapping을 반복문 안에서 매번 초기화하는지, 크기 사건을 잘못 반복 주입하는지 확인합니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 빌드·실행",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/70-pointer-mapping -B out/lesson70 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/lesson70\nctest --test-dir out/lesson70 --output-on-failure\ncd out/lesson70\n./tetris"
+        }
+      ]
+    },
+    {
+      "title": "완성 파일에서 좌표와 수명을 함께 추적한다",
+      "body": "frame_mapping.h에서 이전 크기와 이번 결과를 먼저 읽고, main이 결과의 layout과 input을 각각 어디로 전달하는지 찾으세요. SDL 펌프의 크기 취소는 최종 크기가 같아도 사건이 있었다는 증거를 보관합니다. frame_mapping_contract는 같은 좌표가 서로 다른 버튼을 누르는 반례를 포함합니다.\n\n기준 스니펫은 이 변환 순서와 입력 취소 계약을 설명합니다. 현재 소스 뷰어의 파일은 프로젝트 변경에 따라 배치 숫자나 플랫폼 세부가 달라질 수 있습니다. 비교할 핵심은 좌표 단위·원점·확정한 viewport·사건의 기준 시점입니다.",
+      "codes": [
+        {
+          "label": "client/frame_mapping.h",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/client/frame_mapping.h",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/letterbox.h",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/renderer/letterbox.h",
+          "collapsed": true
+        },
+        {
+          "label": "client/immediate_ui.h",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/client/immediate_ui.h",
+          "collapsed": true
+        },
+        {
+          "label": "platform/sdl.cpp",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/platform/sdl.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/src/main.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/frame_mapping_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/tests/frame_mapping_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/pointer_sdl.cpp",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/tests/pointer_sdl.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/pointer_pixels.cpp",
+          "language": "cpp",
+          "file": "checkpoints/70-pointer-mapping/tests/pointer_pixels.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/70-pointer-mapping/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "70-1",
+      "question": "window=1000×400, drawable=1500×600, viewport=(350,0,800,600), logical=320×240입니다. 창 좌표 (300,120)의 논리 위치는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "(-20,48)"
+        },
+        {
+          "id": "b",
+          "text": "(120,72)"
+        },
+        {
+          "id": "c",
+          "text": "(40,72)"
+        },
+        {
+          "id": "d",
+          "text": "(180,120)"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "(40,72)",
+      "explanation": "창 좌표를 1.5배 하면 drawable (450,180)입니다. 왼쪽 여백 350을 빼고 (100,180)에 320/800과 240/600을 곱하면 (40,72)가 됩니다."
+    },
+    {
+      "id": "70-2",
+      "question": "같은 사건 펌프 안에서 창이 A→B→A로 바뀌고, 프레임 양 끝 크기는 같습니다. 오래된 클릭을 막는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "이 창의 SDL 크기 사건에서 pointer.cancel을 호출하는 경로"
+        },
+        {
+          "id": "b",
+          "text": "previous 크기와 현재 크기의 비교만으로 충분하다."
+        },
+        {
+          "id": "c",
+          "text": "모든 클릭 좌표를 (0,0)으로 고정한다."
+        },
+        {
+          "id": "d",
+          "text": "같은 크기로 돌아왔으므로 당시 클릭도 항상 유효하다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "이 창의 SDL 크기 사건에서 pointer.cancel을 호출하는 경로",
+      "explanation": "끝 크기 비교는 중간의 왕복 변화를 놓칩니다. 사건 계층의 취소 표시가 프레임 끝까지 유지되어야 합니다. FrameMapping의 조회 값 비교와 사건 취소는 서로 다른 증거를 사용합니다."
+    },
+    {
+      "id": "70-3",
+      "question": "FrameMapping이 첫 유효한 layout을 만들었습니다. 이 프레임에 대한 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "layout을 버리고 키보드도 취소한다."
+        },
+        {
+          "id": "b",
+          "text": "포인터가 새 값이므로 모든 입력을 즉시 허용한다."
+        },
+        {
+          "id": "c",
+          "text": "기존 설정과 라운드 해시를 초기화한다."
+        },
+        {
+          "id": "d",
+          "text": "layout으로 그리되 포인터는 취소하고 키보드 경로는 유지한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "layout으로 그리되 포인터는 취소하고 키보드 경로는 유지한다.",
+      "explanation": "첫 호출은 비교 기준이 없어 변경으로 취급합니다. 그릴 layout은 유지하며 Input만 취소합니다. 키보드 상태는 FrameMapping의 소유가 아닙니다."
+    },
+    {
+      "id": "70-4",
+      "question": "표시 영역의 남는 세로 공간이 3픽셀이고 위쪽 여백이 1픽셀입니다. GL viewport에 넣을 아래쪽 기준 y는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1"
+        },
+        {
+          "id": "b",
+          "text": "2"
+        },
+        {
+          "id": "c",
+          "text": "3"
+        },
+        {
+          "id": "d",
+          "text": "-1"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "2",
+      "explanation": "아래쪽 여백은 3-1=2입니다. 중앙 배치도 홀수 여백에서는 위아래가 다르므로 H-y-h 변환이 필요합니다."
+    },
+    {
+      "id": "70-5",
+      "question": "정방향과 역방향 함수가 모두 같은 잘못된 viewport를 사용해 왕복 검사를 통과했습니다. 가장 유용한 추가 검사는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "왕복 검사를 같은 점에서 더 많이 반복한다."
+        },
+        {
+          "id": "b",
+          "text": "경계 오차를 숨기도록 hit 영역을 크게 늘린다."
+        },
+        {
+          "id": "c",
+          "text": "손으로 계산한 viewport 표와 실제 픽셀 중심의 hit·색을 비교한다."
+        },
+        {
+          "id": "d",
+          "text": "logical 좌표를 정수로 잘라 오차를 없앤다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "손으로 계산한 viewport 표와 실제 픽셀 중심의 hit·색을 비교한다.",
+      "explanation": "서로 맞는 두 함수가 함께 잘못될 수 있습니다. 독립적으로 계산한 배치와 실제 래스터 결과가 그림에 대응하는 기준을 제공합니다. 정수 절단이나 epsilon 확대는 오히려 경계 오류를 만들 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "좌표마다 공간·단위를 표시하고 (300,120)의 역변환을 손으로 계산한다.",
+      "FrameMapping을 반복문 밖에 두고 반환한 layout과 input을 함께 사용한다.",
+      "크기 변화·drawable만 변화·최소화 복구에서 취소 범위를 확인한다.",
+      "왕복 계산에 독립 viewport 표와 픽셀 중심 비교를 더한다."
+    ],
+    "failureChecks": [
+      "drawable 여백을 창 단위 좌표에서 바로 빼지 않는지 확인한다.",
+      "양 끝 크기가 같은 중간 resize 사건을 취소하는지 확인한다.",
+      "음수를 0으로 절단해 바깥 클릭을 안으로 옮기지 않는지 확인한다.",
+      "포인터 취소를 키보드나 게임 규칙 상태의 초기화로 확대하지 않는지 확인한다."
+    ],
+    "expected": "그림/클릭 불일치를 좌표 단위·배치 반올림·원점·사건 시점으로 나누어 진단하고 같은 프레임 기준을 구현한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek FrameMapping 및 원고 후보 직접 검토; 실제 코드·독립 좌표식·공식 SDL/Win32 계약 대조",
+    "draftJob": "out/learning-jobs/070-outline-events.jsonl",
+    "corrections": [
+      "SDL_GetDrawableSize라는 잘못된 API를 SDL_GL_GetDrawableSize로 교정",
+      "원고의 정방향/역방향 기준을 논리→표시와 입력→논리로 명시",
+      "최초press 프레임 값으로 여러 클릭 전체를 재생할 수 있다는 단정 제거",
+      "새 position이 오면 취소한다는 표현을 배치 변경 프레임으로 한정",
+      "기본 letterbox 반복보다 배치와 사건 시점·독립 검증·원점 오개념 중심으로 재구성"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED74/SDL75CTest·누적 tetris 빌드·경고0",
+    "독립 viewport표·정수 유리식204834내부hit조합·정확경계·내부점왕복·여섯치수단독변화·최소화복구·키보드독립·UBSan/float-cast-overflow",
+    "같은 raw좌표가 old체크박스→new시작으로 재해석되는 반례와 FrameMapping취소 확인",
+    "실제SDL사건큐+통제한포인터/포커스 fixture: 같은pump크기왕복·뒤쪽press도취소·다음프레임새press허용",
+    "실제SDL offscreen/llvmpipe 픽셀 중심2755407개와hit일치, 내부43568개·경계제외0; 통제한5크기쌍, 실제모니터배율검증아님",
+    "기존widget_render36설정/포커스/DPI조합·7라벨·atlas참조검증",
+    "rootWin32수정전button좌표누락재현; 수정후6버튼분기부호좌표/captureAPI모형검증·rootSDL입력회귀",
+    "root17CTest·sim_hash_dump골든유지. 수동GUI·Windows/macOS네이티브 미검증"
+  ]
+}

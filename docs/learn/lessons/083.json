@@ -1,0 +1,490 @@
+{
+  "id": "lesson-83",
+  "title": "소켓: 프로세스 사이의 바이트 통로",
+  "shortTitle": "핸들·끝점·연결·소유권·첫 통신",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 게임의 규칙·화면·소리가 한 프로세스 안에서 동작합니다.",
+  "finish": "완료: 두 프로세스가 loopback TCP로 1바이트를 주고받고, 연결·핸들·대기·정리의 흐름을 설명합니다.",
+  "objective": "주소·포트와 OS 핸들을 구별하고, 리스너와 연결 소켓을 각각 소유하며, 정상 응답·EOF·오류를 판별하는 작은 통신 프로그램을 만듭니다.",
+  "prerequisites": [
+    "RAII·이동 소유권과 지역 객체의 파괴 순서",
+    "정적 라이브러리·실행 파일·플랫폼별 링크",
+    "규칙 코드와 OS 자원의 책임 분리"
+  ],
+  "recap": {
+    "points": [
+      "OS 자원은 준비 성공 여부와 부분 정리를 함께 관리합니다.",
+      "API 호출이 받아들여졌다는 사실과 최종 사용자가 결과를 관찰했다는 사실을 구별합니다.",
+      "규칙 계산과 외부 입출력의 책임을 분리합니다."
+    ],
+    "bridge": "이번에는 다른 프로세스에 바이트를 전달하는 OS 자원을 같은 수명·실패 관점에서 다룹니다."
+  },
+  "sections": [
+    {
+      "title": "다른 프로세스에는 내 변수의 주소를 보낼 수 없다",
+      "body": "게임을 두 번 실행하면 각 실행은 별도의 **프로세스**입니다. 프로세스는 자신의 가상 주소 공간과 OS 자원을 갖습니다. 한 게임의 보드 포인터가 0x1234라고 해도 다른 프로세스에서 그 숫자는 같은 보드를 가리키지 않습니다. 전달할 값을 바이트로 표현하고, OS가 제공하는 통신 경로로 보내야 합니다.\n\n이번 산출물은 누적 게임 옆에 놓는 `socket_probe`입니다. 서버 역할로 실행한 프로세스는 연결을 하나 수락하고, 클라이언트 역할의 프로세스가 보낸 숫자 42를 돌려줍니다. 운영체제가 제공하는 **소켓(socket)**은 이 통신을 요청하는 인터페이스이자 자원입니다. 이 실습에서는 IPv4 주소와 TCP를 사용하는 스트림 소켓을 만듭니다.\n\n시뮬레이션·렌더러·오디오 코드는 유지합니다. 아직 게임 입력은 보내지 않습니다. 바이트 표현과 읽기 대기 정책을 정립한 뒤 네트워크 입력 계층에 통합할 실험 기반입니다. 지금 블로킹 진단 코드를 게임의 매 프레임 함수에 넣으면 상대를 기다리는 동안 창 처리도 멈춥니다.",
+      "codes": [
+        {
+          "label": "실습의 책임 경계",
+          "text": "누적 게임: 입력 → 규칙 → 화면·소리\n\nsocket_probe listen 0 : OS에 대기 주소 마련 → 수락 → 1바이트 수신 → 되돌려 보내기\nsocket_probe connect P: OS에 연결 요청   → 42 송신 → 1바이트 응답 확인",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.h",
+        "symbol": "struct TcpSocket",
+        "invariant": "OS 통신을 소켓 계층으로 감싼다.",
+        "mayDiffer": "기준 실습은 독립 실행 파일이다. 실제 게임은 Session·프로토콜·릴레이와 연결된다."
+      }
+    },
+    {
+      "title": "핸들, 주소·포트, 연결을 따로 그린다",
+      "body": "**핸들(handle)**은 현재 프로세스가 OS 자원을 지칭할 때 사용하는 값입니다. POSIX 소켓은 파일 디스크립터에 속하며 보통 작은 음이 아닌 정수로 보입니다. Windows의 SOCKET은 포인터 크기의 부호 없는 핸들입니다. 핸들은 통신 상대에게 알려 줄 주소가 아닙니다.\n\n**끝점(endpoint)**은 여기서 IPv4 주소와 TCP 포트의 조합입니다. 주소는 통신할 인터페이스를 지정하고, 포트는 그 주소에서 TCP 통신을 구분하는 16비트 번호입니다. 서버는 알려진 끝점에서 기다리고 클라이언트는 그 끝점으로 연결을 요청합니다. 클라이언트 쪽 주소·포트도 필요하며 이 실습에서는 OS가 적절한 로컬 주소와 임시 포트를 선택합니다.\n\n연결은 양쪽 끝점을 갖습니다. 예를 들어 서버가 127.0.0.1:41000에서 기다릴 때 클라이언트 하나는 127.0.0.1:52001에서 연결할 수 있습니다. 다른 클라이언트는 다른 끝점으로 같은 서버 포트에 연결할 수 있습니다. 서버 포트 하나를 열었다는 사실과 서버에 연결 하나만 존재한다는 말은 다릅니다.\n\n프로그램에서 `listen 0`의 0은 OS에게 사용 가능한 포트를 골라 달라는 요청입니다. 출력된 실제 포트를 클라이언트에 전달합니다. 반면 핸들 0은 이미 할당된 유효 자원일 수 있습니다. 같은 숫자라도 어느 값의 계약인지 구별해야 합니다.",
+      "codes": [
+        {
+          "label": "이 값들은 서로 대신할 수 없다",
+          "text": "서버 프로세스: 리스너 핸들 3 → 127.0.0.1:41000\n서버 프로세스: 연결 핸들   4 → 로컬 :41000 ↔ 원격 :52001\n클라이언트  : 연결 핸들   3 → 로컬 :52001 ↔ 원격 :41000\n\n서로 다른 프로세스의 핸들 3은 서로 다른 자원이다.",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "net/native_socket.h",
+        "symbol": "using NativeSocket",
+        "invariant": "운영체제의 핸들 값을 줄이지 않고 보존한다.",
+        "mayDiffer": "기준 헤더는 Runtime::Native라는 이름을 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "포트 번호와 사용자 신원",
+          "body": "포트와 IP는 접속 경로를 찾는 정보입니다. 사용자 계정이나 인증 증명이 아닙니다. 재접속하면 클라이언트 포트가 바뀔 수 있고, 여러 사용자가 공인 IP를 공유할 수도 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "리스너와 연결 소켓은 두 개의 자원이다",
+      "body": "서버는 `socket → bind → listen` 순서로 준비합니다. socket은 통신 자원을 만들고, bind는 로컬 주소를 붙이며, listen은 들어오는 연결을 기다리는 역할로 바꿉니다. 클라이언트는 `socket → connect`로 연결을 요청합니다.\n\nOS의 TCP 스택은 연결 수립 절차를 수행하고 수락할 연결을 대기열에 둡니다. **accept**는 그 연결 하나를 꺼내 새로운 소켓 핸들을 반환합니다. 애플리케이션이 accept를 부르기 전에도 클라이언트의 connect가 성공할 수 있습니다. 그래서 검사 코드는 connect 성공 뒤 같은 스레드에서 accept를 호출할 수 있습니다.\n\n수신과 송신은 반환된 연결 소켓에서 수행합니다. 리스너는 다른 연결을 수락할 용도로 남아 있습니다. 여기서는 한 연결만 처리하기로 했으므로 accept 성공 직후 리스너를 닫습니다. 이미 수락한 소켓은 별도의 소유자가 갖고 있어 계속 통신합니다.\n\n`listen(fd, 1)`의 두 번째 인자는 대기열 크기와 관련된 요청값입니다. OS가 이 값을 해석하거나 조정할 수 있습니다. 처리할 총 고객 수를 1명으로 제한하는 코드는 ‘accept 한 번 뒤 리스너 닫기’입니다.",
+      "codes": [
+        {
+          "label": "수명 두 줄을 추적한다",
+          "text": "리스너: 생성 ─ bind ─ listen ─ accept ─ close\n                               │\n연결:                          생성 ─ recv ─ send ─ close\n\n클라이언트: 생성 ─ connect ─ send ─ recv ─ close",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "TcpSocket tcp_accept",
+        "invariant": "accept가 만든 새 연결의 소유권을 호출자에게 반환한다.",
+        "mayDiffer": "실제 tcp_accept는 반환 전에 논블로킹 설정을 요구한다. 기준 실습은 블로킹이다."
+      }
+    },
+    {
+      "title": "소유권을 한 객체에 두고 이동으로 넘긴다",
+      "body": "핸들 값만 복사하면 OS 자원이 복제되지는 않습니다. 소유자로 생각하는 두 객체가 같은 숫자를 close하면 문제가 생깁니다. 첫 close 뒤 OS가 그 숫자를 새 자원에 재사용할 수 있어서, 나중 close가 다른 연결을 닫을 수도 있습니다.\n\n기준 `Socket`은 복사를 금지하고 이동만 허용합니다. 이동 생성은 원본의 release를 호출합니다. release는 핸들을 돌려주면서 원본을 무효 상태로 바꿉니다. 이동 대입은 목적지가 이미 갖고 있던 자원을 정리한 뒤 새 핸들을 받습니다. 자기 자신에게 이동 대입하는 경우는 그대로 둡니다.\n\n`native()`는 소유권을 넘기지 않는 조회입니다. 반환값을 직접 닫거나 별도 Socket으로 다시 감싸면 소유권 계약이 깨집니다. 명시적인 핸들 생성자는 OS에서 방금 받은, 아직 다른 객체가 소유하지 않은 핸들을 맡길 때만 씁니다. `valid()` 역시 숫자 표현을 확인할 뿐 상대가 살아 있는지 검사하지 않습니다.\n\n무효 값은 POSIX에서는 -1, Windows에서는 모든 비트가 1인 값입니다. POSIX 음수 전체를 거절하고 Windows는 지정된 무효 값만 비교합니다. Windows 핸들을 int에 담아 검사하면 상위 비트를 잃을 수 있습니다. 헤더는 OS 헤더를 포함하지 않고 정수 타입만 선언하며, 구현에서 실제 SOCKET 크기·무효 값과 정적 검사를 수행합니다.",
+      "codes": [
+        {
+          "label": "소유권 전달과 목적지 정리",
+          "text": "    Socket(Socket&& other) noexcept : native_(other.release()) {}\n\n    Socket& operator=(Socket&& other) noexcept {\n        if (this != &other) {\n            reset();\n            native_ = other.release();\n        }\n        return *this;\n    }\n",
+          "language": "cpp"
+        },
+        {
+          "label": "release: 닫는 대신 소유권을 꺼낸다",
+          "text": "    Runtime::Native release() noexcept {\n        Runtime::Native n = native_;\n        native_ = Runtime::kInvalid;\n        return n;\n    }\n",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "static TcpSocket make_owned",
+        "invariant": "하나의 실제 소켓이 중복으로 닫히지 않도록 소유권을 표현한다.",
+        "mayDiffer": "현재 서버는 여러 작업의 TcpSocket 복사본이 한 shared_ptr 제어 블록을 공유한다. 단일 소유 기준 실습과 정책이 다르다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "공유 소유권은 I/O 직렬화와 별개",
+          "body": "shared_ptr는 마지막 소유자의 자원 해제 시점을 조절합니다. 여러 스레드가 같은 스트림으로 메시지를 보내는 순서를 자동으로 정하지는 않습니다. 같은 TcpSocket 변수 자체를 동시에 바꾸는 일에도 별도의 동기화가 필요합니다."
+        },
+        {
+          "kind": "concept",
+          "title": "공식 타입 계약",
+          "body": "[Microsoft의 SOCKET 데이터 타입](https://learn.microsoft.com/en-us/windows/win32/winsock/socket-data-type-2)은 unsigned 값과 INVALID_SOCKET 비교를 설명합니다. 반환된 바이트 수·오류 코드는 핸들과 별도 타입입니다."
+        }
+      ]
+    },
+    {
+      "title": "런타임 준비가 소켓보다 오래 살아야 한다",
+      "body": "Windows에서는 Winsock 사용 전에 WSAStartup을 호출합니다. 이 함수의 실패 코드는 반환값으로 받습니다. 성공한 준비 호출은 WSACleanup과 짝을 맞춰야 합니다. 기준 Runtime은 성공 여부를 저장하고 성공했을 때만 정리합니다. POSIX 경로는 이 준비가 필요 없어 바로 ready가 됩니다.\n\n지역 객체는 생성의 역순으로 파괴됩니다. 따라서 Runtime을 먼저 선언하고 listener·peer를 나중에 선언합니다. 함수 중간에서 오류로 반환해도 소켓이 먼저 정리되고 런타임 정리가 뒤따릅니다. 복사·이동을 금지한 Runtime은 준비 책임이 우연히 복제되는 일도 막습니다.\n\n소켓 함수는 ready 상태의 Runtime이 살아 있다는 전제에서 호출합니다. 구현마다 자동 준비를 숨기기보다 main에서 수명 순서를 읽을 수 있게 합니다. 정리 함수는 정상 종료·조기 반환에서 작동하지만, 프로세스를 강제 종료하면 C++ 지역 객체의 소멸자가 실행된다는 보장은 없습니다.",
+      "codes": [
+        {
+          "label": "Runtime::Runtime()",
+          "text": "Runtime::Runtime() noexcept : ready_(false), error_(0) {\n#ifdef _WIN32\n    WSADATA data;\n    const int rc = ::WSAStartup(MAKEWORD(2, 2), &data);\n    if (rc != 0) {\n        error_ = rc; // ready_ stays false; no matching WSACleanup is owed\n        return;\n    }\n#endif\n    ready_ = true; // POSIX needs no startup; consider it ready immediately\n}\n",
+          "language": "cpp"
+        },
+        {
+          "label": "Runtime::~Runtime()",
+          "text": "Runtime::~Runtime() {\n#ifdef _WIN32\n    if (ready_) {\n        ::WSACleanup();\n    }\n#endif\n}\n",
+          "language": "cpp"
+        },
+        {
+          "label": "선언 순서가 정리 순서가 된다",
+          "text": "study_net::Runtime runtime;\nif (!runtime.ready()) return fail(\"runtime\", runtime.error(), false);\n\n// 이 아래에서 만든 Socket들이 runtime보다 먼저 소멸한다.\nstudy_net::Socket listener;\nstudy_net::Socket peer;",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool net_init",
+        "invariant": "플랫폼별 준비 성공과 실패를 구별한다.",
+        "mayDiffer": "현재 net_init은 전역 준비 플래그를 공유한다. 기준 Runtime은 객체마다 성공한 준비 호출 하나를 정리한다."
+      }
+    },
+    {
+      "title": "주소 구조체를 채우고 대기 포트를 알아낸다",
+      "body": "`sockaddr_in`은 IPv4 끝점을 OS에 전달하는 구조체입니다. 0으로 초기화한 뒤 주소 계열 AF_INET, 주소, 포트를 채웁니다. OS의 공통 소켓 함수가 받는 `sockaddr*`로 형식을 바꿔 넘기되 길이는 실제 sockaddr_in 크기를 전달합니다.\n\n주소와 포트 필드는 **네트워크 바이트 순서**, 즉 큰 자릿값 바이트를 먼저 두는 표현을 사용합니다. 호스트의 메모리 바이트 순서는 CPU에 따라 다를 수 있으므로 `htons`로 16비트 포트를, `htonl`로 32비트 주소 값을 변환합니다. 예를 들어 포트 0x1234는 네트워크 표현에서 12 34 순서의 바이트입니다. 이 함수들은 현재 CPU에 맞게 필요한 변환을 합니다.\n\n이 실습의 주소는 127.0.0.1로 고정합니다. loopback은 해당 네트워크 환경 안에서 자기 자신을 가리킵니다. 다른 기기에서 이 주소를 사용하면 그 다른 기기 자신에게 접속합니다. `bind`에 포트 0을 주었다면 성공 후 `getsockname`으로 OS가 선택한 끝점을 읽고 `ntohs`로 포트를 호스트 정수로 되돌려 출력합니다.\n\nWindows에서는 bind 전에 SO_EXCLUSIVEADDRUSE를 설정하며 그 실패도 검사합니다. POSIX 기준 실습은 재사용 옵션을 설정하지 않습니다. 연결 실패를 고칠 때 주소·포트·실행 순서를 먼저 확인할 수 있도록 정책을 작게 둡니다.",
+      "codes": [
+        {
+          "label": "Socket listen_loopback",
+          "text": "Socket listen_loopback(std::uint16_t requested_port,\n                       std::uint16_t& bound_port,\n                       int& error) noexcept {\n    bound_port = 0;\n    error = 0;\n\n    const native_t fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);\n    if (fd == kNativeInvalid) {\n        error = last_error();\n        return Socket();\n    }\n    Socket candidate(static_cast<Runtime::Native>(fd));\n\n#ifdef _WIN32\n    // Request exclusive binding for this listener. Required before\n    // bind(), and a failure here is fatal for this teaching demo.\n    BOOL exclusive = TRUE;\n    if (::setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,\n                     reinterpret_cast<const char*>(&exclusive),\n                     static_cast<socklen_type>(sizeof(exclusive))) != 0) {\n        error = last_error();\n        return Socket(); // candidate closes on return, before error is used\n    }\n#elif defined(__APPLE__)\n    if (!configure_no_sigpipe(fd, error)) {\n        return Socket();\n    }\n#endif\n    // POSIX/Linux: deliberately no SO_REUSEADDR in this teaching demo.\n\n    sockaddr_in addr{};\n    addr.sin_family = AF_INET;\n    addr.sin_port = htons(requested_port);\n    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);\n\n    if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr),\n               static_cast<socklen_type>(sizeof(addr))) != 0) {\n        error = last_error();\n        return Socket();\n    }\n\n    if (::listen(fd, 1) != 0) { // pending-connection queue hint, not a total-client limit\n        error = last_error();\n        return Socket();\n    }\n\n    sockaddr_in actual{};\n    socklen_type actual_len = static_cast<socklen_type>(sizeof(actual));\n    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual), &actual_len) != 0) {\n        error = last_error();\n        return Socket();\n    }\n    bound_port = ntohs(actual.sin_port);\n\n    return candidate; // NRVO, or move when copy elision is not performed\n}\n",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "TcpSocket tcp_listen",
+        "invariant": "생성·옵션·bind·listen 단계가 실패하면 후보 소켓을 정리한다.",
+        "mayDiffer": "현재 엔진은 loopback_only를 선택하며 POSIX SO_REUSEADDR를 사용한다. 기준 실습은 loopback 고정과 임시 포트를 지원한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "주소 재사용 옵션의 플랫폼 차이",
+          "body": "Windows의 SO_REUSEADDR는 사용 중인 주소를 강제로 공유하게 만들 수 있어 POSIX 재시작 용도와 같은 의미로 취급하면 안 됩니다. [Microsoft의 두 옵션 비교](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse)를 참고하세요. 배타 바인드를 사용해도 남아 있는 연결 때문에 즉시 재바인드가 안 될 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "실패 지점에서 오류를 붙잡는다",
+      "body": "실패한 OS 호출 다음에 오류 코드를 바로 복사합니다. POSIX는 errno, Winsock은 WSAGetLastError를 사용합니다. 이 저장소는 함수의 명시적인 반환값과 별개이며, 다른 OS 호출이 값을 바꿀 수 있습니다. 오류를 지역 error에 저장한 뒤 candidate의 소멸자가 핸들을 닫게 해야 원래 bind·connect 실패를 보고할 수 있습니다.\n\nRAII 소유자가 후보 소켓을 갖고 있으면 각 실패 가지에 close를 반복하지 않아도 됩니다. 성공은 candidate를 반환해 소유권을 넘기고, 실패는 빈 Socket을 반환하면서 후보가 정리됩니다. 반환 과정에서는 복사 생략이 적용되거나 이동 생성자가 사용됩니다.\n\n인터럽트도 호출별로 다룹니다. accept와 이 실습의 1바이트 송수신은 POSIX 실패 결과가 EINTR이면 다시 호출합니다. 연결 수립 도중 인터럽트가 발생한 connect는 같은 핸들에 무작정 반복하지 않고 오류를 저장한 뒤 후보를 닫습니다. close는 이 구현에서 재시도하지 않습니다. 특히 Linux에서는 close가 EINTR을 반환해도 디스크립터가 이미 해제될 수 있어 다시 닫으면 재사용된 자원을 건드릴 수 있습니다.",
+      "codes": [
+        {
+          "label": "Socket connect_loopback",
+          "text": "Socket connect_loopback(std::uint16_t port, int& error) noexcept {\n    error = 0;\n    if (port == 0) {\n        error = invalid_argument_error();\n        return Socket();\n    }\n\n    const native_t fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);\n    if (fd == kNativeInvalid) {\n        error = last_error();\n        return Socket();\n    }\n    Socket candidate(static_cast<Runtime::Native>(fd));\n\n#ifdef __APPLE__\n    if (!configure_no_sigpipe(fd, error)) {\n        return Socket();\n    }\n#endif\n\n    sockaddr_in addr{};\n    addr.sin_family = AF_INET;\n    addr.sin_port = htons(port);\n    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);\n\n    if (::connect(fd, reinterpret_cast<const sockaddr*>(&addr),\n                  static_cast<socklen_type>(sizeof(addr))) != 0) {\n        // An interrupted connect is NOT blindly retried: the state of the\n        // half-open connection is ambiguous, so report the failure instead.\n        error = last_error();\n        return Socket();\n    }\n\n    return candidate;\n}\n",
+          "language": "cpp"
+        },
+        {
+          "label": "void Socket::reset()",
+          "text": "void Socket::reset() noexcept {\n    if (Runtime::native_valid(native_)) {\n        // Close exactly once. A POSIX close() interrupted by a signal is NOT\n        // blindly retried: the descriptor state is ambiguous after EINTR.\n        const auto owned = release();\n        close_native(static_cast<native_t>(owned));\n    }\n}\n",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "이식성과 close의 오류 계약",
+          "body": "close 오류 후 디스크립터 상태는 OS 계약을 확인해야 합니다. 기준 코드는 Linux·macOS·Winsock 대상의 소켓 실습이며 모든 POSIX 구현의 close 정책을 일반화하지 않습니다. [Linux close 설명](https://man7.org/linux/man-pages/man2/close.2.html)은 EINTR과 재시도 위험을 다룹니다. reset은 소유자 값을 먼저 무효화하고 한 번의 OS 해제를 요청합니다."
+        },
+        {
+          "kind": "concept",
+          "title": "Windows의 취소와 POSIX 인터럽트",
+          "body": "Winsock의 WSAEINTR은 취소된 호출을 뜻하므로 기준 코드는 이를 호출자에게 돌려줍니다. POSIX 신호 인터럽트의 자동 재시도와 같은 정책으로 묶지 않습니다. [Winsock recv 오류 계약](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-recv)을 참고하세요."
+        }
+      ]
+    },
+    {
+      "title": "연결을 얻으면 리스너는 따로 정리한다",
+      "body": "accept가 성공하면 서버는 새 연결 소켓을 받습니다. 리스너가 유효하지 않으면 OS에 호출을 보내기 전에 입력 오류로 돌려줍니다. 시스템 인터럽트인 경우에만 수락을 다시 시도하며 그 밖의 실패는 호출자에게 전달합니다.\n\nmacOS에서는 쓰기 대상이 닫혔을 때 발생할 수 있는 SIGPIPE를 소켓 옵션으로 억제합니다. 새 소켓뿐 아니라 수락된 소켓에도 SO_NOSIGPIPE 설정 결과를 확인합니다. Linux는 송신 호출의 MSG_NOSIGNAL 플래그를 사용합니다. 프로세스 전체의 신호 처리 방침을 바꾸지 않고 이 소켓 경계에서 쓰기 실패를 결과값으로 다룹니다.\n\n이 실습은 단일 스레드가 소유권과 호출을 관리합니다. 한 연결의 read가 대기 중일 때 다른 스레드가 객체를 이동·파괴하는 상황은 API의 사용 범위 밖입니다. 사용 조건을 작게 두어 누가 무엇을 닫는지 먼저 추적할 수 있습니다.",
+      "codes": [
+        {
+          "label": "Socket accept_one",
+          "text": "Socket accept_one(const Socket& listener, int& err) noexcept {\n    err = 0;\n    if (!listener.valid()) {\n        err = invalid_argument_error();\n        return Socket();\n    }\n\n    for (;;) {\n        const native_t fd = ::accept(static_cast<native_t>(listener.native()),\n                                     nullptr, nullptr);\n        if (fd != kNativeInvalid) {\n#ifdef __APPLE__\n            if (!configure_no_sigpipe(fd, err)) {\n                close_native(fd); // do not leak an unconfigured accepted socket\n                return Socket();\n            }\n#endif\n            return Socket(static_cast<Runtime::Native>(fd));\n        }\n        const int e = last_error();\n        if (is_interrupted(e)) {\n            continue; // accept() is safe to retry after EINTR\n        }\n        err = e;\n        return Socket();\n    }\n}\n",
+          "language": "cpp"
+        },
+        {
+          "label": "한 번만 수락하는 서버",
+          "text": "int run_server(std::uint16_t requested_port) {\n    // Runtime is constructed BEFORE any Socket and destroyed AFTER them, so\n    // sockets close while the OS networking stack is still available.\n    study_net::Runtime runtime;\n    if (!runtime.ready()) {\n        return fail(\"runtime\", runtime.error(), false);\n    }\n\n    std::uint16_t bound_port = 0;\n    int error = 0;\n    study_net::Socket listener =\n        study_net::listen_loopback(requested_port, bound_port, error);\n    if (!listener.valid()) {\n        return fail(\"listen\", error, false);\n    }\n\n    // bound_port is the actual port the OS assigned (possibly ephemeral).\n    std::printf(\"LISTEN 127.0.0.1:%u\\n\", static_cast<unsigned>(bound_port));\n    std::fflush(stdout);\n\n    study_net::Socket peer = study_net::accept_one(listener, error);\n    if (!peer.valid()) {\n        return fail(\"accept\", error, false);\n    }\n\n    // We serve exactly one client: close the listener now, before further I/O,\n    // so the port stops accepting and the handle is released promptly.\n    listener.reset();\n\n    std::uint8_t byte = 0;\n    bool eof = false;\n    if (!study_net::receive_byte(peer, byte, eof, error)) {\n        return fail(\"receive\", error, eof);\n    }\n\n    int send_error = 0;\n    if (!study_net::send_byte(peer, byte, send_error)) {\n        return fail(\"send\", send_error, false);\n    }\n\n    std::printf(\"RECEIVED %u ECHOED %u\\n\", static_cast<unsigned>(byte),\n                static_cast<unsigned>(byte));\n    std::fflush(stdout);\n    return 0;\n}\n",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "TcpSocket tcp_accept",
+        "invariant": "새로 수락한 소켓의 설정 실패도 수락 실패로 처리한다.",
+        "mayDiffer": "현재 엔진은 WouldBlock·자원 고갈·일반 실패를 분리하고, POSIX 초기화에서 SIGPIPE를 프로세스 전체에 무시하도록 설정한다."
+      }
+    },
+    {
+      "title": "1바이트 송신과 수신 종료를 구분한다",
+      "body": "지금 보내는 것은 문자열 \"42\"가 아니라 정수 값 42인 바이트 하나입니다. 문자열 \"42\"는 문자 두 개를 인코딩한 바이트 열입니다. 검사에는 0과 255도 사용하므로 널 종료 문자열 함수에 기대지 않고 명시적인 길이 1을 전달합니다.\n\n`send`가 1을 반환하면 로컬 OS가 바이트 하나를 받아들였습니다. 이것만으로 상대 애플리케이션이 그 바이트를 읽었다고 판단할 수는 없습니다. 클라이언트는 서버가 같은 값을 돌려주는 응답까지 확인합니다. 이 응답은 실습의 애플리케이션 수준 확인입니다.\n\n길이 1을 요청한 recv의 결과는 세 갈래입니다. 1이면 데이터, 0이면 더 읽을 데이터 없이 상대의 송신 종료를 관찰한 EOF, 오류 반환이면 원인을 확인합니다. 이 실습에서 정상 바이트 값 0과 recv의 반환값 0은 다릅니다. 값을 담는 byte 변수와 실제 읽은 길이 n을 구분하면 혼동을 피할 수 있습니다.\n\nEOF는 수신 방향에 관한 결과입니다. TCP는 양방향이므로 상대가 송신 방향만 닫는 것도 가능합니다. 기준 함수는 false와 함께 eof=true·error=0을 주어 이 상황을 오류와 구별합니다. 응답을 기대하던 클라이언트에게는 이 EOF도 실습 실패입니다.",
+      "codes": [
+        {
+          "label": "bool send_byte",
+          "text": "bool send_byte(Socket& socket, std::uint8_t byte, int& error) noexcept {\n    error = 0;\n    if (!socket.valid()) {\n        error = invalid_argument_error();\n        return false;\n    }\n\n    for (;;) {\n#ifdef MSG_NOSIGNAL\n        const int flags = MSG_NOSIGNAL; // Linux: avoids process-wide SIGPIPE\n#else\n        const int flags = 0; // Windows; macOS uses SO_NOSIGPIPE instead\n#endif\n        const auto n = ::send(static_cast<native_t>(socket.native()),\n                              reinterpret_cast<const char*>(&byte), 1, flags);\n        if (n == 1) {\n            return true; // handed to the OS; not delivery, not an ACK\n        }\n        if (n == 0) {\n            error = invalid_argument_error(); // no progress for a nonempty request\n            return false;\n        }\n        const int e = last_error();\n        if (is_interrupted(e)) {\n            continue; // interrupted before transferring this byte\n        }\n        error = e;\n        return false;\n    }\n}\n",
+          "language": "cpp"
+        },
+        {
+          "label": "bool receive_byte",
+          "text": "bool receive_byte(Socket& socket, std::uint8_t& byte, bool& eof,\n                  int& error) noexcept {\n    error = 0;\n    eof = false;\n    if (!socket.valid()) {\n        error = invalid_argument_error();\n        return false;\n    }\n\n    for (;;) {\n        char buffer = 0;\n        const auto n = ::recv(static_cast<native_t>(socket.native()),\n                              &buffer, 1, 0);\n        if (n == 1) {\n            byte = static_cast<std::uint8_t>(\n                static_cast<unsigned char>(buffer));\n            return true;\n        }\n        if (n == 0) {\n            eof = true; // orderly shutdown by the peer; not an error\n            error = 0;\n            return false;\n        }\n        const int e = last_error();\n        if (is_interrupted(e)) {\n            continue; // safe to retry after EINTR\n        }\n        error = e;\n        return false;\n    }\n}\n",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool tcp_recv_some",
+        "invariant": "수신 바이트 수와 종료·오류를 구별해 상위 계층에 알린다.",
+        "mayDiffer": "현재 tcp_recv_some은 누적 vector와 bool 계약이다. 기준 실습은 단일 바이트와 eof/error 출력을 따로 둔다."
+      }
+    },
+    {
+      "title": "실행 파일을 추가하고 두 터미널에서 연결한다",
+      "body": "CMake에 StudySocket 정적 라이브러리와 socket_probe 실행 파일을 추가합니다. 플랫폼 코드가 필요로 하는 Winsock 라이브러리는 Windows 타깃일 때만 연결합니다. PUBLIC 의존성은 정적 라이브러리를 사용하는 실행 파일의 최종 링크까지 전달됩니다. 창과 소리가 없는 검사도 가능하도록 이 타깃은 게임에 의존하지 않습니다.\n\n저장소 루트에서 아래 명령으로 빌드합니다. 첫 터미널에서 listen 0을 실행하면 실제 포트가 출력되고 수락 대기에 들어갑니다. 둘째 터미널에서 그 포트를 connect에 전달합니다. 예시의 41000은 자신의 출력값으로 바꿉니다. 두 프로세스가 한 번의 요청·응답을 끝내면 모두 종료됩니다.\n\nWindows의 다중 구성 생성기를 사용한다면 빌드에 `--config Release`를 추가하고 실행 파일은 out/study83/Release/socket_probe.exe에서 찾습니다. SCRIPTED는 창 없이 누적 게임을 검사하는 선택이며 이 소켓 실험도 실행할 수 있습니다.",
+      "codes": [
+        {
+          "label": "추가할 타깃",
+          "text": "# Separate process-level experiment; the game does not depend on StudySocket yet.\nadd_library(StudySocket STATIC net/socket.cpp)\ntarget_compile_features(StudySocket PUBLIC cxx_std_17)\ntarget_include_directories(StudySocket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})\nif(WIN32)\n    target_link_libraries(StudySocket PUBLIC ws2_32)\nendif()\nadd_executable(socket_probe tools/socket_probe.cpp)\ntarget_link_libraries(socket_probe PRIVATE StudySocket)\nadd_test(NAME socket_probe_help COMMAND socket_probe --help)",
+          "language": "cmake"
+        },
+        {
+          "label": "빌드와 서버 실행",
+          "text": "cmake -S docs/learn/checkpoints/83-sockets -B out/study83 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study83 --target socket_probe socket_contract -j3\nctest --test-dir out/study83 -R \"^socket_\" --output-on-failure\n\n# 첫 터미널\n./out/study83/socket_probe listen 0\n# 출력 예: LISTEN 127.0.0.1:41000",
+          "language": "sh"
+        },
+        {
+          "label": "클라이언트 실행과 기대 출력",
+          "text": "# 둘째 터미널: 자신의 LISTEN 출력값 사용\n./out/study83/socket_probe connect 41000\n# SENT 42 RECEIVED 42\n\n# 첫 터미널의 이어지는 출력\n# RECEIVED 42 ECHOED 42",
+          "language": "sh"
+        }
+      ]
+    },
+    {
+      "title": "대기는 상태이며, 입력 오류는 빨리 돌려준다",
+      "body": "클라이언트를 실행하지 않으면 서버는 accept에서 기다립니다. 연결만 하고 데이터를 보내지 않으면 서버는 recv에서 기다립니다. 이 실습은 블로킹이며 별도 제한 시간이 없습니다. 진단을 끝내려면 Ctrl+C로 종료할 수 있습니다. 공개 서버처럼 여러 상대를 처리하는 곳에서는 이 대기를 연결별 정책으로 다뤄야 합니다.\n\n포트 입력은 from_chars로 10진 정수를 파싱합니다. 오류 코드뿐 아니라 읽은 끝 위치가 문자열 끝인지도 확인합니다. \"41000x\"를 41000으로 받아들이면 사용자가 쓴 값과 프로그램이 해석한 값이 달라집니다. 65535를 넘는 값, 부호, 빈 문자열, 공백도 거절합니다. listen의 포트 0은 허용하지만 connect의 포트 0은 사용자가 실제 끝점을 지정하지 않은 것으로 거절합니다.\n\n종료 코드는 성공 0, 실행 중 통신 실패 1, 명령 사용 오류 2로 나눕니다. 오류 출력에는 단계·OS 오류 코드·EOF 여부를 담습니다. 주소가 맞는데 접속이 거절되면 그 포트에서 서버가 실제 대기 중인지 확인합니다. listen이 실패하면 주소 충돌이나 옵션 실패처럼 대기 준비 단계의 원인을 살펴봅니다.",
+      "codes": [
+        {
+          "label": "끝 위치까지 검사하는 포트 파서",
+          "text": "bool parse_port(std::string_view text, std::uint16_t& port_out) {\n    if (text.empty()) {\n        return false;\n    }\n    unsigned value = 0;\n    const char* first = text.data();\n    const char* last = text.data() + text.size();\n    const auto result = std::from_chars(first, last, value, 10);\n    if (result.ec != std::errc() || result.ptr != last) {\n        return false;\n    }\n    if (value > 65535u) {\n        return false;\n    }\n    port_out = static_cast<std::uint16_t>(value);\n    return true;\n}\n",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "loopback 실습과 공개 서비스의 경계",
+          "body": "같은 네트워크 환경에서 이 포트에 접근 가능한 다른 프로세스도 연결할 수 있습니다. loopback은 인증이 아닙니다. 네이티브 게임의 TCP, 브라우저의 WebSocket/WSS, 공개 페이지 호스팅은 서로 다른 역할이므로 학습 HTML을 공개하는 것만으로 TCP 서버가 배포되지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "수명과 실패를 관찰 가능한 검사로 만든다",
+      "body": "정상 요청 하나만 확인하면 소유권 버그를 놓칠 수 있습니다. socket_contract는 리스너를 닫은 뒤에도 수락된 소켓으로 255와 0을 주고받고, 이동 후 원본이 무효인지 확인합니다. 이미 자원을 가진 목적지에 이동 대입했을 때 그 이전 자원도 정리되는지 검사합니다.\n\nPOSIX 검사에서는 실제 디스크립터 0을 소켓으로 만들어 유효성·해제를 확인합니다. 상대가 닫힌 소켓으로 보내도 프로세스가 SIGPIPE로 종료되지 않고 false와 오류를 받는지 확인합니다. EOF 검사에서는 먼저 보낸 데이터를 모두 읽은 뒤 상대 소켓을 닫아 수신 종료를 관찰합니다.\n\n프로세스 검사에서는 LISTEN 출력이 도착한 뒤 클라이언트를 시작합니다. ‘서버 시작 후 일정 시간 자면 준비되었을 것’이라고 추측하는 대신 실제 준비 신호를 사용합니다. 검사에는 제한 시간을 두어 오류로 무한 대기하지 않게 합니다. 실습 프로그램의 블로킹 정책과 검사 도구의 시간 제한은 서로 다른 책임입니다.\n\n현재 코드와 비교할 핵심은 OS 핸들 보존, 소유권, 주소 준비, 실패 정리입니다. 보드 콘텐츠나 포트 기본값이 바뀌어도 이 책임은 유지됩니다. 실제 TcpSocket은 공유 소유권과 논블로킹 누적 I/O를 제공하므로 기준 코드와 함수 모양까지 같아야 하는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "실패 상황에서 예상할 결과",
+          "text": "리스너 close 후 수락된 peer 사용 → 요청·응답 가능\nSocket 원본을 이동                → 원본 무효, 목적지가 해제 책임\nrecv 요청1에 반환값0              → EOF, 수신 byte=0과 구별\nconnect 포트0                     → 명령 오류2\n바인드 준비 실패                 → 후보 소켓 정리 후 실패1",
+          "language": "text"
+        }
+      ],
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "static TcpSocket make_owned",
+        "invariant": "실패 중에도 OS 자원이 중복 해제되거나 유실되지 않아야 한다.",
+        "mayDiffer": "현재 공유 소유자는 저장소·제어 블록의 두 할당 실패를 처리한다. 기준 Socket 자체는 힙 할당 없이 핸들을 보관한다."
+      }
+    },
+    {
+      "title": "완성 파일을 펼쳐 책임의 연결을 확인한다",
+      "body": "선언을 읽을 때는 누가 핸들을 갖는지, 구현에서는 어느 호출이 대기하거나 실패하는지, 실행 파일에서는 어떤 순서로 객체가 정리되는지 확인합니다. 전체 파일은 아래에서 펼쳐 볼 수 있습니다. 누적 게임 파일은 이번 소켓 실험의 영향을 받지 않습니다.",
+      "codes": [
+        {
+          "label": "net/socket.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/83-sockets/net/socket.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/socket.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/83-sockets/net/socket.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/socket_probe.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/83-sockets/tools/socket_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/socket_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/83-sockets/tests/socket_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "83-1",
+      "question": "서버가 accept로 peer를 받은 뒤 listener만 닫았습니다. 이 실습에서 예상할 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "peer도 같은 핸들이므로 즉시 무효가 된다"
+        },
+        {
+          "id": "b",
+          "text": "이미 수락한 peer로 요청·응답을 이어 갈 수 있다"
+        },
+        {
+          "id": "c",
+          "text": "클라이언트가 accept를 호출해야 통신이 계속된다"
+        },
+        {
+          "id": "d",
+          "text": "peer의 서버 포트가 자동으로 다른 포트로 바뀐다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "이미 수락한 peer로 요청·응답을 이어 갈 수 있다",
+      "explanation": "accept는 리스너와 별도의 연결 소켓을 반환합니다. 리스너를 닫아 새 연결 수락을 끝내도, 소유 중인 peer는 기존 연결의 I/O를 계속 수행합니다."
+    },
+    {
+      "id": "83-2",
+      "question": "길이 1을 요청한 recv가 1을 반환했고 byte 값은 0입니다. 무엇을 관찰했나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "빈 메시지이므로 다시 읽어야 한다"
+        },
+        {
+          "id": "b",
+          "text": "상대가 정상 종료했다"
+        },
+        {
+          "id": "c",
+          "text": "오류 코드가 0이므로 수신 실패다"
+        },
+        {
+          "id": "d",
+          "text": "값이 0인 바이트 하나를 읽었다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "값이 0인 바이트 하나를 읽었다",
+      "explanation": "반환값 1은 실제 읽은 길이이고 byte는 내용입니다. EOF를 뜻하는 것은 길이 1을 요청한 recv의 반환값이 0인 경우입니다."
+    },
+    {
+      "id": "83-3",
+      "question": "Windows의 64비트 SOCKET 값을 int로 변환한 뒤 저장하면 어떤 문제가 생길 수 있나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "상위 비트가 잘려 다른 핸들 값이 저장될 수 있다"
+        },
+        {
+          "id": "b",
+          "text": "포트가 16비트이므로 언제나 같은 값이 유지된다"
+        },
+        {
+          "id": "c",
+          "text": "핸들 값이 자동으로 같은 소켓의 복제본이 된다"
+        },
+        {
+          "id": "d",
+          "text": "양수로 저장되면 원래 핸들과 같은 자원임이 보장된다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "상위 비트가 잘려 다른 핸들 값이 저장될 수 있다",
+      "explanation": "Windows 핸들은 int 범위를 넘을 수 있습니다. 네이티브 크기를 유지하고 INVALID_SOCKET으로 무효를 검사해야 합니다. 주소·포트 크기는 핸들의 표현 범위와 별개입니다."
+    },
+    {
+      "id": "83-4",
+      "question": "bind 실패 후 candidate 소멸자가 소켓을 닫습니다. 호출자에게 원래 실패를 전달하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "close 이후 errno를 처음 읽는다"
+        },
+        {
+          "id": "b",
+          "text": "성공한 listen의 결과를 대신 전달한다"
+        },
+        {
+          "id": "c",
+          "text": "bind 실패 직후 오류를 복사하고 후보를 정리한다"
+        },
+        {
+          "id": "d",
+          "text": "소켓을 닫지 않아야만 오류를 보존할 수 있다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "bind 실패 직후 오류를 복사하고 후보를 정리한다",
+      "explanation": "다른 OS 호출이 오류 저장소를 바꿀 수 있으므로 실패 직후 값을 보관합니다. 복사한 오류와 자원 정리는 함께 유지할 수 있습니다."
+    },
+    {
+      "id": "83-5",
+      "question": "클라이언트의 send_byte가 성공했습니다. 응답을 받기 전까지 확정할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "서버 애플리케이션이 byte를 읽었다"
+        },
+        {
+          "id": "b",
+          "text": "로컬 OS가 1바이트의 송신 요청을 받아들였다"
+        },
+        {
+          "id": "c",
+          "text": "서버가 값을 확인하고 응답을 보냈다"
+        },
+        {
+          "id": "d",
+          "text": "상대 연결이 이후에도 끊어지지 않는다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "로컬 OS가 1바이트의 송신 요청을 받아들였다",
+      "explanation": "send 성공은 로컬 송신 수락입니다. 실습의 클라이언트는 응답 바이트까지 수신하고 비교해야 서버의 처리 결과를 확인할 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "리스너·서버 연결·클라이언트 연결의 핸들과 양쪽 끝점을 각각 그립니다.",
+      "두 터미널에서 listen 0의 실제 포트를 connect에 전달해 42의 왕복을 확인합니다.",
+      "서버만 실행하거나 연결만 하고 보내지 않을 때 어느 호출에서 기다리는지 설명합니다.",
+      "소유자 이동·목적지 교체·EOF 검사 순서를 코드에서 추적합니다."
+    ],
+    "failureChecks": [
+      "connect 0·음수·65536·숫자 뒤 문자를 명령 오류로 거절하는지 확인합니다.",
+      "상대가 데이터를 보내지 않고 송신 방향을 닫을 때 EOF와 OS 오류를 구별합니다.",
+      "리스너를 닫아도 수락한 연결의 통신이 유지되는지 확인합니다."
+    ],
+    "expected": "소켓 자원과 끝점·연결을 구별하고, 두 프로세스의 바이트 왕복과 실패 시 정리 순서를 코드로 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 소켓 초안 직접 검토·OS 공식 계약·실제 net/서버/Reactor 코드·Part 발췌 대조",
+    "draftJob": "out/learning-jobs/083-socket-events.jsonl",
+    "corrections": [
+      "초안 release의 미정의 Native 타입·POSIX 음수 판정·무효화 순서 교정",
+      "backlog를 총 접속자 제한으로 해석한 주석·NRVO 단정 교정",
+      "실제 Windows 핸들 int 축소·소유자 할당 실패 누수·bind 옵션·논블로킹 실패 처리 교정",
+      "Part6 accept와 연결 수립 순서·Windows 재사용·StreamTransport 명칭 최신화",
+      "84집필 중 API대조:Winsock취소를POSIX인터럽트처럼재시작하던정책교정(v1.0.1)"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED93/SDL98 CTest 통과·빌드 경고 없음·게임/렌더러/오디오 파일 바이트 유지",
+    "실제 두 프로세스 loopback 왕복·0/128/255·EOF·접속 거절·잘못된 CLI9종 검사",
+    "소켓 move/목적지 교체/descriptor0/EOF/닫힌 상대 송신 ASan·UBSan 통과",
+    "실제 net/socket.cpp: 두 할당 실패·공유 소유자·바인드 옵션 실패·connect/accept 논블로킹 실패 주입 통과",
+    "실제 릴레이·Reactor 릴레이 빌드·root18 CTest·sim_hash_dump 골든 유지",
+    "Windows 공개 헤더 타입 검사:64비트 핸들·0·무효 sentinel·Reactor 인자; Windows/macOS 네이티브 빌드/실행은 미검증",
+    "실제 게임 타깃 빌드·기존 root17 CTest 통과",
+    "Part 발췌·13개 구현 스니펫·Markdown27사례·409문제와 전체 차시 DOM 탐색/저장/참조 통과; 수동 GUI 없음",
+    "84집필에서Winsock취소정책교정;동일소켓코드를포함한84누적검사로재확인(원본83/84소켓파일동일)"
+  ]
+}

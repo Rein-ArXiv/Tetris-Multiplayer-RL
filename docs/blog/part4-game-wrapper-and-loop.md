@@ -23,7 +23,7 @@ Part 1에서 게임 로직을, Part 2~3에서 창과 렌더러를 만들었다. 
 
 게임 루프의 핵심 문제: `update()` 호출 빈도가 렌더 프레임률에 묶이면 게임 속도가 하드웨어에 종속된다. 이 저장소의 플랫폼 계층은 페이싱을 꺼도 `platform_end_frame` 이 240 fps 상한(`kUncappedMaxFps`, `platform/win32.cpp`·`platform/sdl.cpp`)을 걸어 렌더 루프가 수천 fps 로 CPU/GPU 를 태우는 것만은 막아 두었다. 그러나 상한은 자원 정책이지 정답이 아니다 — 상한 240 에서도 틱당 한 프레임이면 초당 240 번의 `MoveBlockDown()` 이 실행되어 블록이 4배 빨리 떨어진다. 페이싱을 켜더라도 60 FPS PC와 144 FPS PC에서 게임 속도가 다르다.
 
-해결: **렌더링 속도와 시뮬레이션 속도를 분리**한다. 렌더링은 가능한 한 빠르게 (또는 프레임 페이싱에 맞춰), 시뮬레이션은 **정확히 60Hz**로 실행한다. 이 패턴이 고정 틱 어큐뮬레이터(fixed-tick accumulator)다.
+해결: **렌더링 속도와 시뮬레이션 속도를 분리**한다. 렌더링은 가능한 한 빠르게 (또는 프레임 페이싱에 맞춰), 시뮬레이션은 **논리 시간 1/60초의 고정 스텝**으로 진행한다. 실행 가능할 때 경과 시간에 맞춰 틱을 발행하며, OS가 정확한 간격으로 깨워 준다는 뜻은 아니다. 이 패턴이 고정 틱 어큐뮬레이터(fixed-tick accumulator)다.
 
 ---
 
@@ -84,7 +84,7 @@ graph TB
 
 ### 2.1 경계는 취향이 아니라 빌드가 강제한다
 
-"상속 대신 composition" 은 표면적인 이유다. 진짜 이유는 **CMake 의 소스 목록**이다.
+Game은 규칙 객체를 멤버로 소유하는 합성(composition)을 사용한다. 소유·호출 방향을 정한 설계와 **CMake의 타깃 경계**를 함께 확인한다.
 
 `SimGame` 은 `TETRIS_SIM_SOURCES` 에만 들어간다.
 
@@ -112,7 +112,7 @@ set(TETRIS_SIM_HEADERS
 
 `sim_hash_dump`(`CMakeLists.txt`) 와 `tetris_py` 는 **이 두 변수만** 쓴다. 즉 `renderer/`, `audio/`, `platform/` 오브젝트 파일이 링크 라인에 아예 없다. 반대로 `Game` 은 `TETRIS_GAME_COMMON` 안에 있고, 그쪽에서만 `renderer/renderer.cpp` 와 오디오 백엔드가 함께 링크된다.
 
-그래서 경계 위반은 리뷰가 아니라 **링커가** 잡는다. 만약 `src/sim_game.cpp` 에 `draw_rect(...)` 를 한 줄 넣으면 `tetris` 는 멀쩡히 빌드되지만 `sim_hash_dump` 와 `tetris_py` 가 `undefined reference to draw_rect` 로 죽는다. 반대 방향도 마찬가지다 — `src/game.h` 는 `../audio/audio.h` 를 include 하는데, 이 헤더가 `SimGame` 쪽으로 넘어가는 순간 headless 타깃이 `audio_init` 을 못 찾는다.
+이 타깃 분리는 규칙 코드가 렌더러·오디오의 정의에 의존하는 오류를 발견하는 데 도움이 된다. 예를 들어 선언을 포함한 뒤 `SimGame`에서 실제 `draw_rect(...)` 호출을 추가하면, 해당 경로를 링크하는 실행 파일은 렌더러 정의가 필요해진다. 다만 헤더의 함수 선언을 포함하는 것만으로 `audio_init` 등의 미해결 심볼이 생기지는 않는다. 사용하지 않는 코드의 제거 여부나 공유 라이브러리의 미해결 심볼 정책도 결과에 영향을 준다. 의존 방향은 헤더 검토와 타깃 구성 검토로 확인하고, headless 빌드·실행을 함께 검사한다.
 
 이 성질 덕분에 Part 8의 Python 학습 루프는 렌더러도 사운드 장치도 없는 서버에서 `tetris_py` 하나만 임포트해 초당 수만 틱을 돌릴 수 있다.
 
@@ -126,6 +126,14 @@ class Game
 public:
     Game(uint64_t seed = 0);
     ~Game();
+
+    // Owns audio handles and reference aliases into sim. Copying would alias
+    // another object's state and release its handles; moving requires rebinding.
+    // Keep object identity stable; transfer ownership through unique_ptr<Game>.
+    Game(const Game&) = delete;
+    Game& operator=(const Game&) = delete;
+    Game(Game&&) = delete;
+    Game& operator=(Game&&) = delete;
 
     // ── 렌더링 ──────────────────────────────────────────────────────────────
     void Draw();
@@ -156,13 +164,14 @@ public:
     int&  score;
 
 private:
+    void ConsumeSoundEvents();
     void DrawGrid(int offsetX, int offsetY, int cellSize = 30) const;
     void DrawBlock(const SimBlock& block, int offsetX, int offsetY, int cellSize = 30) const;
     void DrawBlockMini(const SimBlock& block, int offsetX, int offsetY, int cellSize) const;
 
     std::vector<Color> cellColors;
 
-    // ── 오디오 핸들 (XAudio2) ───────────────────────────────────────────────
+    // ── 오디오 핸들 (선택된 백엔드) ───────────────────────────────────────────────
     AudioHandle sndRotate  = 0;
     AudioHandle sndClear   = 0;
     AudioHandle sndDrop    = 0;
@@ -224,7 +233,20 @@ Game::Game(uint64_t seed)
 
 Part 4 체크포인트에서는 `cellColors = GetCellColors();` 까지만 필요하다. 완성형 생성자는 여기서 오디오 백엔드를 초기화하고 SFX를 인스턴스 소유로, BGM을 프로세스 공유 자원으로 등록한다. 규칙 엔진에는 오디오 의존성을 넣지 않고 `Game` 경계에서만 붙인다는 구조는 변하지 않는다.
 
-참조 멤버라서 생기는 제약이 하나 있다: **`Game` 은 대입 불가능하다.** 참조 멤버가 있는 클래스는 암시적 `operator=` 가 삭제되기 때문이다. 그래서 `main.cpp` 는 재시작할 때 `*gameSingle = Game(seed)` 가 아니라 `gameSingle = std::make_unique<Game>(sessionSeed)` 로 **객체를 통째로 교체**한다 (`src/main.cpp`). 결과적으로 재시작 경로에 "이전 판의 잔재가 남는" 버그가 구조적으로 불가능해진다.
+참조 멤버라서 생기는 제약이 하나 있다: **`Game` 은 대입 불가능하다.** 참조 멤버가 있는 클래스는 암시적 `operator=` 가 삭제되기 때문이다. 그래서 `main.cpp` 는 재시작할 때 `*gameSingle = Game(seed)` 가 아니라 `gameSingle = std::make_unique<Game>(sessionSeed)` 로 **객체를 통째로 교체**한다 (`src/main.cpp`). 이렇게 교체하면 해당 `Game` 객체가 소유한 상태는 새 생성자로 초기화된다. 다만 전역·공유 자원과 `main`이 별도로 소유한 입력·누적 시간까지 초기화되는 것은 아니므로, 재시작 경계에서 그 상태도 따로 다뤄야 한다.
+
+참조 멤버의 기본 복사는 새 객체의 sim에 다시 연결하는 연산이 아니다. 복사본의 score가
+원본 sim.score를 계속 가리키는 반면 복사본 sim은 별도로 복사될 수 있다. 동시에 정수
+오디오 핸들을 그대로 복사하면 두 소멸자가 같은 장치 자원을 해제하게 된다.
+
+따라서 실제 Game은 복사 생성·대입과 이동 생성·대입을 명시적으로 삭제한다. 사용자 정의
+소멸자가 있다는 사실만으로 복사 생성이 금지되지는 않는다. 기본 이동 역시 자기 sim으로
+참조를 재연결하고 핸들/공유 카운트를 이전하는 정책을 자동으로 만들어 주지 않는다.
+
+현재 main은 unique_ptr<Game>을 소유한다. 포인터를 이동하면 Game 객체는 같은 주소에
+남고 소유자만 바뀐다. 새 게임은 make_unique로 새 객체를 만든다. 이미 빌린 Game/SimGame
+참조는 해당 객체가 파괴되면 사용할 수 없으며, unique_ptr의 재대입으로 새 게임을 만들 때도
+이 수명 경계를 지켜야 한다. SimGame 자체의 값 복사로 규칙 실험을 하는 것은 별도 계약이다.
 
 ### 2.4 `Game` 이 소유하는 것
 
@@ -237,9 +259,13 @@ Part 4 체크포인트에서는 `cellColors = GetCellColors();` 까지만 필요
 | `bool musicUser` + 익명 네임스페이스 `sharedMusic` / `sharedMusicUsers` | **인스턴스 간 공유** BGM 참조 카운트 | 마지막 `Game` 소멸까지 | Part 5 |
 | `bool audioInitCalled` | `audio_shutdown()` 을 부를 자격 표시 | 생성자~소멸자 | Part 5 |
 
-마지막 세 줄이 중요하다. Net/BotSingle 모드에서는 `Game` 이 **두 개** 살아 있다. BGM 을 인스턴스마다 틀면 같은 곡이 두 번 겹쳐 나온다. 그래서 음악만 익명 네임스페이스의 `sharedMusic` + `sharedMusicUsers` 참조 카운트로 승격돼 있고, SFX 는 인스턴스마다 따로 로드한다. `Game::~Game()` 이 카운트를 내려 마지막 사용자가 음악과 백엔드를 정리한다. 일부 파일 로드가 실패하면 해당 효과음만 무음이 되며, 이미 얻은 핸들과 공유 카운트는 같은 소멸 경로로 회수된다. `Game` 이 "SimGame 을 감싼 얇은 껍데기" 가 아니라 **실제 소유권 모델을 가진 래퍼**인 이유가 여기 있다.
+마지막 세 줄이 중요하다. Net/BotSingle 모드에서는 `Game` 이 **두 개** 살아 있다. BGM 을 인스턴스마다 틀면 같은 곡이 두 번 겹쳐 나온다. 그래서 음악만 익명 네임스페이스의 `sharedMusic` + `sharedMusicUsers` 참조 카운트로 승격돼 있고, SFX 는 인스턴스마다 따로 로드한다. `Game::~Game()` 이 카운트를 내려 마지막 사용자가 음악과 백엔드를 정리한다. 일부 파일 로드가 실패하면 해당 효과음만 무음이 되며, 이미 얻은 핸들과 공유 카운트는 같은 소멸 경로로 회수된다. `Game`은 규칙 값과 별도로 장치 자원의 소유권과 해제 시점을 관리한다.
 
 `Draw()` 계열은 **읽기만 한다.** `Grid()`, `GhostBlock()`, `CurrentBlock()`, `NextBlocks()` 를 renderer 호출로 바꿀 뿐 `SimGame` 상태를 변경하지 않는다.
+
+`DrawGrid`는 `(row, col)`을 `x = offsetX + col * cellSize`, `y = offsetY + row * cellSize`로 바꾼다. `cellSize`는 칸 시작점 사이의 간격이며, 실제 사각형의 너비·높이는 `cellSize - 1`이다. 따라서 칸 오른쪽·아래쪽에 1 논리 단위의 간격이 남는다. 이 값은 확대된 drawable의 물리 픽셀 1개를 뜻하지 않는다. 현재 호출자는 양수인 크기를 전달하며, 임의 외부 값을 허용하는 범용 API로 쓰려면 크기와 좌표 연산 범위도 검증해야 한다.
+
+색은 보드 규칙이 아니라 `Game`의 `cellColors`에서 고른다. 이 코드의 `draw_rect` 호출은 정점을 누적한다. 실제 GL 제출은 프레임 종료뿐 아니라 텍스처·뷰 오프셋 변경으로 배치를 비울 때에도 일어날 수 있다. 따라서 사각형 호출 수와 GL 드로우 호출 수는 일대일이 아니다. 보드를 읽는 것, CPU 정점을 만드는 것, GPU로 제출하는 것은 서로 다른 작업이다.
 
 **현재 소스 발췌 — `src/game.cpp`**
 
@@ -247,7 +273,7 @@ Part 4 체크포인트에서는 `cellColors = GetCellColors();` 까지만 필요
 void Game::Draw()
 {
     DrawGrid(11, 11);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), 11, 11);
+    if (g_ghostEnabled && !sim.IsGameOver()) DrawBlock(sim.GhostBlock(), 11, 11);
     DrawBlock(sim.CurrentBlock(), 11, 11);
 
     const SimBlock& next = sim.NextBlock();
@@ -316,9 +342,9 @@ while (!quit) {
 
 표의 첫 두 행이 서로 다른 층의 문제라는 점을 구분해야 한다. `platform_end_frame` 의 240 fps 상한은 **자원 소모**를 막는 플랫폼 정책이고, 시뮬레이션 속도의 하드웨어 종속은 **정확성** 문제다. 상한을 아무리 조여도 두 번째 문제는 사라지지 않는다 — 240 이든 144 든 60 이 아닌 모든 값에서 게임 속도가 달라진다. 그래서 해법은 프레임률을 제어하는 것이 아니라 시뮬레이션을 프레임률에서 떼어내는 것이어야 한다.
 
-`deltaTime`을 곱해 이동량을 조절하는 방법도 있지만, 테트리스처럼 이산적(discrete) 셀 단위로 이동하는 게임에서는 적합하지 않다. 블록은 "0.7셀만큼 이동"할 수 없다.
+셀 상태와 경과 시간은 서로 다른 단위다. 셀 좌표를 정수로 유지하면서도 시간을 누적해 이동 시점을 정할 수 있다. 이 프로젝트는 규칙의 중력·입력·리플레이를 정수 틱 단위로 표현하므로, 호스트 루프가 경과 시간을 틱 수로 바꾸고 시뮬레이션에는 틱별 입력을 전달한다.
 
-여기에 결정적인 제약이 하나 더 있다. Part 6의 lockstep 은 "틱 N에서 입력 X를 적용" 이라는 **정수 틱 번호**로 두 피어를 동기화한다. 가변 스텝에는 동기화할 틱 번호가 아예 존재하지 않는다. 즉 고정 틱은 이 프로젝트에서 취향이 아니라 전제 조건이다.
+Part 6의 lockstep은 "틱 N에서 입력 X를 적용"이라는 **정수 틱 번호**를 동기화 단위로 사용한다. 가변 간격의 갱신에도 순번을 붙일 수 있지만, 이 프로토콜은 피어마다 다른 시간 간격을 틱의 입력으로 합의하지 않는다. 같은 규칙·초기 상태에서 같은 틱별 입력 순서를 처리하도록 고정된 논리 시간 단위를 공유한다.
 
 ---
 
@@ -330,36 +356,25 @@ while (!quit) {
 
 $$\text{acc} \mathrel{+}= \Delta t$$ $$\text{while } \text{acc} \geq \frac{1}{60}: \quad \text{tick}(); \quad \text{acc} \mathrel{-}= \frac{1}{60}$$
 
-렌더링은 어큐뮬레이터와 무관하게 매 프레임 실행된다. 시뮬레이션은 정확히 60Hz.
+렌더링은 어큐뮬레이터와 무관하게 매 프레임 실행된다. 시뮬레이션은 논리적으로 초당 60틱을 기준으로 진행하며, 한 렌더 프레임에 0개 또는 여러 틱이 들어갈 수 있다.
 
-```mermaid
-sequenceDiagram
-    participant Frame as 렌더링 프레임
-    participant Acc as 어큐뮬레이터
-    participant Tick as 시뮬레이션 틱
+다음 표는 60 Hz의 몫과 나머지를 정수로 추적한다. 경과 나노초에 60을 곱한
+값을 누적하고, 1,000,000,000당 한 틱을 발행한다. `phase`는 이 계산의 나머지다.
 
-    Note over Frame: Frame 1 (dt=0.018s)
-    Frame->>Acc: acc += 0.018
-    Note over Acc: acc = 0.018 > 0.01667
-    Acc->>Tick: Tick #1
-    Note over Acc: acc = 0.018 - 0.01667 = 0.00133
+| 프레임 | 경과 시간 | 이전 phase + 추가량 | 발행 틱 | 다음 phase |
+| --- | --- | --- | --- | --- |
+| 1 | 18 ms | 0 + 1,080,000,000 | 1 | 80,000,000 |
+| 2 | 15 ms | 80,000,000 + 900,000,000 | 0 | 980,000,000 |
+| 3 | 17 ms | 980,000,000 + 1,020,000,000 | 2 | 0 |
 
-    Note over Frame: Frame 2 (dt=0.015s)
-    Frame->>Acc: acc += 0.015
-    Note over Acc: acc = 0.01633 < 0.01667
-    Note over Acc: 틱 없음 (렌더링만)
+프레임 3의 경과 시간만 보면 약 한 틱이지만, 앞서 남은 시간까지 합치면 두 틱을
+진행할 수 있다. 이것이 **캐치업(catch-up)** 이다. 나머지는 다음 프레임으로 보존한다.
+`while (acc >= step)`에서 뺄셈은 조건을 만족할 때만 수행하므로, 반올림한 설명 숫자로
+조건을 무시하고 한 번 더 빼서 음수 나머지를 만드는 식으로 추적하면 안 된다.
 
-    Note over Frame: Frame 3 (dt=0.017s)
-    Frame->>Acc: acc += 0.017
-    Note over Acc: acc = 0.03333 > 0.01667
-    Acc->>Tick: Tick #2
-    Note over Acc: acc = 0.03333 - 0.01667 = 0.01666
-    Acc->>Tick: Tick #3
-    Note over Acc: acc = 0.01666 - 0.01667 < 0 → 종료
-    Note over Acc: (실제로 acc = -0.00001)
-```
-
-프레임 3처럼 `deltaTime`이 2틱분 이상이면 while 루프에서 여러 틱이 연속 실행된다. 이것이 **캐치업(catch-up)** 이다.
+실제 `src/main.cpp`는 아래처럼 float 초를 사용한다. 위 표는 [HTML 45차시의 정수
+위상 추적](../learn/index.html#lesson-45)과 대응하며, 실제 float 계산의 비트 단위
+출력을 나타내는 표는 아니다. 두 표현의 단위와 반올림 경계를 구분해서 읽는다.
 
 ### 4.2 틱 간격 상수
 
@@ -376,7 +391,7 @@ constexpr int TICKS_PER_SECOND = 60;
 constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
 ```
 
-이 상수가 `TETRIS_SIM_HEADERS` 에 들어 있다는 사실(`CMakeLists.txt`)이 중요하다 — Python 학습 환경도 같은 60 Hz 를 본다. 학습된 정책이 실제 클라이언트에서 같은 속도로 동작하는 근거가 이 한 줄이다.
+이 헤더는 `TETRIS_SIM_HEADERS`에 포함되어 시뮬레이션 경로에서 같은 논리 틱 단위를 사용한다. 다만 파일 목록에 넣는 것만으로 실행 속도가 정해지지는 않는다. 학습 환경의 한 행동이 몇 틱을 진행하는지, 클라이언트가 언제 입력을 소비하는지까지 함께 맞춰야 정책의 행동 간격이 같아진다.
 
 ### 4.3 루프의 실제 형태
 
@@ -456,7 +471,7 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
 계속 진행되지 않게 한다. `apply_fx`는 tick이 만든 이벤트를 소비해 callout과 보드별
 shake로 바꾸지만 `SimGame`의 결정 상태에는 값을 되돌려 쓰지 않는다.
 
-리플레이 기록은 `core/replay.h` 의 `FrameInputs` 구조체 하나로 끝난다. 틱마다 `p1`/`p2` 각 1바이트만 밀어 넣으면 시드와 함께 그 판 전체가 재현된다 — 고정 틱의 직접적인 배당금이다. `F5` 로 기록을 시작하고 `F6` 으로 `out/replay.txt` 에 저장한다 (`src/main.cpp`).
+`core/replay.h`의 `FrameInputs`는 두 플레이어의 틱별 마스크를 갖는다. 같은 규칙 버전·초기 상태·시드와 적용된 모든 틱 입력을 기록해야 재현할 수 있다. 현재 F5/F6 경로는 로컬 inputMask와 p2=0을 기록하는 디버그 도구다. 경기 중간 상태나 온라인 양쪽 입력을 모두 담는 완전한 경기 기록기는 아니다. `F5` 로 기록을 시작하고 `F6` 으로 `out/replay.txt` 에 저장한다 (`src/main.cpp`).
 
 이 구조의 성질:
 
@@ -473,7 +488,7 @@ shake로 바꾸지만 `SimGame`의 결정 상태에는 값을 되돌려 쓰지 �
 
 ### 5.1 엣지 트리거의 특성
 
-`platform_key_pressed()`는 "이번 프레임에 처음 눌린" 키만 감지하는 엣지 트리거다 (Part 2의 `platform_key_pressed`: `keyState[key] && !keyPrev[key]`). 이 값은 **한 프레임만** true이다.
+`platform_key_pressed()`는 이번 프레임의 눌림 전이를 기록한 값이다. Part 2의 `KeyEdges`가 사건마다 누적하므로 같은 펌프 안에서 down→up이 끝나도 관찰할 수 있다. 다음 프레임이 시작되면 이 기록은 초기화된다. 포커스를 잃으면 그보다 앞선 미전달 눌림을 취소한다.
 
 문제: FPS가 높으면 60Hz 틱 사이에 여러 프레임이 지나간다. 키를 눌렀다 뗀 프레임이 틱 프레임과 어긋나면, 틱이 그 입력을 보지 못한다.
 
@@ -491,9 +506,9 @@ T1 시점에 pressed는 이미 false → 입력 소실!
 
 ### 5.2 증상
 
-페이싱을 끄면 FPS 가 상한인 240 까지 올라간다 — 60 Hz 틱 하나에 렌더 프레임 네 개꼴이다. 이 상태에서 방향키를 빠르게 누르면 일부 입력이 "씹힌다". 특히 스페이스바(하드 드롭)가 간헐적으로 무시되는 것이 가장 눈에 띈다. 틱이 실행되지 않는 프레임에서 눌렀다 뗀 엣지 입력을 틱이 볼 방법이 없기 때문이다.
+입력 누적이 없는 루프에서 렌더가 약240FPS, 규칙이60Hz라면 틱 하나 사이에 렌더 프레임이 약네 개 들어간다. 틱 없는 프레임에서 나온 pressed를 보관하지 않으면 짧은 좌우 이동·회전·하드드롭이 사라질 수 있다.
 
-이 문제는 `platform_set_vsync(true)`(60 FPS)이면 잘 드러나지 않는다. 프레임과 틱이 거의 1:1 대응하기 때문이다. 그러나 페이싱을 끄는 순간 틱당 프레임 수가 늘어나 즉시 발생한다. 입력 소실은 FPS 의 절대값이 아니라 **"틱보다 프레임이 잦다"는 구조**에서 나오므로, 상한을 240 에서 어느 값으로 바꾸든 문제의 본질은 같다.
+`platform_set_vsync(true)`는 swap interval과 소프트웨어 페이싱을 요청한다. 정확한60FPS나 프레임당1틱을 보장하지 않으며, 모니터·드라이버·부하·누산기 위상에 따라0틱 또는여러틱 프레임이 생긴다. 입력 보존은 표시 설정과 무관하게 성립해야 한다.
 
 ### 5.3 해결: AccumulateInput / ConsumeInput
 
@@ -572,6 +587,10 @@ static uint8_t HorizontalRepeatInput()
 
 static void AccumulateInput(bool suppress = false)
 {
+    if (platform_input_cancelled()) {
+        s_pendingInput = 0;
+        s_leftHoldTicks = s_rightHoldTicks = 0;
+    }
     if (suppress)
     {
         s_pendingInput = 0;
@@ -627,6 +646,8 @@ $$\text{tickInput} = \text{pending} \;|\; \text{held}$$ $$\text{pending} \leftar
 
 소프트 드롭은 "키를 누르고 있는 동안 일정 주기로 아래로 이동"하므로 held 상태를 매 틱 직접 확인한다. 회전과 하드 드롭은 "한 번 누르면 한 번 실행"이므로 엣지 트리거를 누적해야 한다.
 
+플랫폼의 프레임 기록과 `s_pendingInput`은 수명이 다르다. 포커스 상실 시 플랫폼만 초기화하면 0틱 프레임에서 보관했던 회전·드롭이 복귀 후 실행될 수 있다. `platform_input_cancelled()`를 확인해 틱 버퍼와 DAS 카운터를 먼저 비우고, 취소 뒤 도착한 새 pressed를 수집한다. 틱이 없는 프레임에도 이 취소 처리는 실행한다.
+
 ### 5.4 멀티틱 캐치업 시 주의점
 
 프레임이 길어서 한 프레임에 3틱이 실행되는 경우, `ConsumeInput()`이 첫 번째 틱에서 pending을 클리어하므로 나머지 틱은 **held 키에서 생성된 입력만** 실행된다. 이것은 의도된 동작이다: 사용자가 한 번 누른 회전/하드드롭 키가 여러 틱에 걸쳐 반복 적용되면 "스페이스 한 번 눌렀는데 블록 3개가 하드 드롭" 되는 현상이 발생한다.
@@ -639,11 +660,9 @@ $$\text{tickInput} = \text{pending} \;|\; \text{held}$$ $$\text{pending} \leftar
 
 ### 6.1 문제: 창 드래그
 
-창의 타이틀바를 잡고 드래그하면 OS의 모달 메시지 루프가 메시지 펌프를 점유한다. 이 동안 게임의 메인 루프가 **멈춘다**. 드래그를 놓으면 `platform_begin_frame()`이 반환하는 `deltaTime`이 급등한다. 2초 동안 드래그했으면 `deltaTime = 2.0` 이고, 클램프가 없으면 그 한 프레임에 120틱이 한꺼번에 실행된다:
+일부 창 시스템에서는 타이틀바 드래그 중 모달 메시지 루프가 처리를 점유해 게임의 메인 루프가 멈출 수 있다. OS·창 관리자에 따라 다르며, 디버거 중단이나 긴 작업도 비슷한 정지를 만든다. 측정 구간이 2초라면 **상한 적용 전 경과 시간**은 약 2.0초다. 현재 platform_begin_frame은 이를 0.1초로 제한해 반환한다.
 
-- 블록이 즉시 바닥에 닿고 잠김
-- 다음 블록도 자동 하강으로 즉시 잠김
-- 게임 상태가 수초 분량 한꺼번에 진행 ("시간 점프")
+상한 없이 2초를 누적하고 정확한 60 Hz 시간 배분을 적용하면 120틱 분량이 생긴다. 이를 화면을 다시 그리기 전에 모두 처리하면 블록의 이동·고정 등 여러 변화가 한 화면에 합쳐 보일 수 있다. 실제 이동 칸 수와 고정 여부는 중력 간격·보드·입력 상태에 따라 달라진다.
 
 ### 6.2 클램프는 플랫폼 계층이 이미 걸어 놓았다
 
@@ -652,27 +671,53 @@ $$\text{tickInput} = \text{pending} \;|\; \text{held}$$ $$\text{pending} \leftar
 - Win32: `platform/win32.cpp` 의 `return dt < 0.1f ? dt : 0.1f;`
 - SDL2: `platform/sdl.cpp` 의 `return std::min(dt, 0.1f);`
 
-`platform/platform.h` 의 주석 `MAX_DELTA = 100ms 클램핑 포함` 이 이 계약을 인터페이스 문서로 못 박아 둔 것이다. 그러니 `main.cpp` 는 **dt 를 다시 검사하지 않는다** — 클램프는 계층 하나에만 있어야 하고, 두 곳에 두면 값이 갈릴 때 어느 쪽이 진짜인지 알 수 없게 된다.
+`platform/platform.h` 의 주석 `MAX_DELTA = 100ms 클램핑 포함` 이 이 계약을 인터페이스 문서로 못 박아 둔 것이다. 따라서 현재 `main.cpp`는 이 상한을 다시 적용하지 않는다. 여러 계층에서 제한할 수도 있지만,
+각 제한의 목적과 최종 허용량을 명시해야 한다. 이 저장소는 플랫폼의 계약을 사용한다.
+강의 체크포인트의 플랫폼 API는 별도로 버전 관리되므로 같은 제한이 있다고 추측하지 않는다.
 
 ### 6.3 어큐뮬레이터 쪽에서 본 의미
 
-100 ms 상한은 어큐뮬레이터 관점에서 "한 프레임의 while 루프는 최대 $\lfloor 0.1 / (1/60) \rfloor = 6$회 돈다" 로 번역된다. 이 6이 다음 두 가지를 동시에 보장한다.
+100 ms 상한은 한 프레임에 추가하는 논리 시간의 양을 제한한다. 루프가 남긴 시간이
+한 스텝 미만이라는 전제에서, 정확한 산술로 60틱/초를 계산하면 한 프레임에 최대 6틱이다.
+실제 float 경계에서는 근삿값을 사용하므로, 이 식을 모든 구현의 엄밀한 실행 횟수 증명으로
+대신 쓰면 안 된다. 강의의 정수 위상 어댑터는 나머지 범위와 정수 나눗셈으로 상한을 정한다.
 
-1. **상한이 있는 캐치업.** 최악의 프레임에서도 `Tick()` 6회 + 렌더 1회로 끝나므로 프레임 시간이 폭주하지 않는다. 캐치업이 다음 프레임을 더 길게 만들고, 그게 다시 더 큰 캐치업을 부르는 "죽음의 나선(spiral of death)"이 원천 차단된다.
-2. **누적 오차 억제.** `accumulator` 가 커질 일이 없으므로 float 유효자릿수가 `SECONDS_PER_TICK` 비교를 망칠 만큼 소진되지 않는다(§15-(3) 참조).
+1. **따라잡기 작업량 제한.** 긴 정지 뒤 수초 분량을 한 번에 실행하는 상황을 줄인다.
+   그러나 Tick 한 회나 렌더링 자체가 비싸면 여전히 프레임은 늦어진다. 시간 상한이
+   과부하를 원천 제거하거나 목표 FPS를 보장하지는 않는다.
+2. **잔여 시간 유지.** 처리한 스텝을 빼고 나머지를 다음 프레임으로 넘긴다.
+   값의 크기를 작게 유지하지만 부동소수점 반올림 오차를 없애지는 않는다.
 
-클램핑 값 선택의 트레이드오프:
+클램프를 넘은 경과 시간은 다음 프레임으로 미뤄 두지 않고 버린다. 두 플랫폼 모두
+`s_frame_start = now`로 측정 기준을 갱신한 뒤 제한한 dt를 반환하기 때문이다.
+시간 제한만 사용하는 로컬 진행에서는 버린 양만큼 규칙에 배정하는 시간이 줄어든다.
 
-| 클램핑 값 | 최대 캐치업 틱 | 장점 | 단점 |
+**시간 상한과 작업 예산은 서로 다른 제한이다.** 입력 시간을 100ms로 자르는 정책과,
+시간은 전부 보관하되 한 프레임에 6틱만 처리하는 정책은 긴 정지 뒤의 상태가 다르다.
+후자는 밀린 전체 틱이 남으므로, 다음 호출에서도 그 분량을 처리할 수 있다. 반대로 처리하지
+못한 전체 틱 분량을 버리고 한 틱 미만의 나머지만 유지할 수도 있다.
+[HTML 46차시](../learn/index.html#lesson-46)는 세 정책을 같은 정수 입력과 보고 형식으로 비교한다.
+
+| 클램핑 값 | 정확한 산술에서의 최대 틱 수 | 장점 | 단점 |
 |----------|-------------|------|------|
-| 0.05s (50ms) | 3틱 | 스파이크 영향 최소 | 30 FPS 환경에서 시뮬이 뒤처짐 |
-| 0.1s (100ms) | 6틱 | 적당한 균형 | 드래그 후 약간의 점프 |
-| 1.0s | 60틱 | 캐치업 빠름 | 1초 정지 후 60틱 폭발 |
-| 클램핑 없음 | 무제한 | N/A | 장시간 정지 후 게임 붕괴 |
+| 0.05s (50ms) | 3틱 | 정지 후 한 번에 진행할 양이 작음 | 50ms를 넘는 프레임의 초과 시간 손실 |
+| 0.1s (100ms) | 6틱 | 50ms보다 더 많은 경과 시간 허용 | 최대 여섯 틱의 변화가 한 화면에 보일 수 있음 |
+| 1.0s | 60틱 | 긴 정지 뒤 더 많이 따라잡음 | 한 프레임의 시뮬레이션 작업량 증가 |
+| 클램핑 없음 | 경과 시간에 비례 | 경과 시간을 임의로 버리지 않음 | 긴 정지 후 따라잡기 비용 증가 |
 
-0.1초는 "사람이 인지하지 못하는 수준의 프레임 스킵(6틱 = 100 ms)"과 "극단적 스파이크 차단" 사이의 합리적 타협점이다. 30 FPS 환경(dt = 0.033)에서 한 프레임 2틱이 여유롭게 들어간다.
+30FPS의 프레임은 약 33.3ms이므로 50ms 상한보다 작다. 이 상한 때문에 매 프레임
+시간이 잘리지는 않는다. 반면 100ms의 정지는 눈에 보일 수 있으며, 상한은 인지 불가능한
+값이 아니라 반응성과 진행량 사이의 정책 선택이다.
 
-Net 모드에서는 이야기가 한 겹 더 있다. 클램프 때문에 **잘려 나간 시간만큼 로컬 틱이 상대보다 뒤처지는데**, 상대는 그동안 계속 진행한다. 그래서 `Session` 의 ioThread 가 메인 스레드 정지 구간을 `INPUT(t, 0)` 하트비트로 대신 메운다. 메인 루프가 돌아오면 `heartbeatTickEnd()` 가 ioThread가 이미 보낸 마지막 틱을 반환하고, 그 범위의 `localInputs` 를 0으로 채워 동일한 틱 번호를 다시 보내지 않게 한다.
+Net 모드는 경과 시간으로 도는 바깥 루프 안에서 `safeTick`까지의 입력을 처리하는
+별도 while을 사용한다. 입력 준비 조건이 충족되면 바깥 루프 한 번에도 여러 시뮬레이션
+틱을 진행하므로, 위의 6틱 계산을 온라인 경기 전체의 실행 횟수 상한으로 적용할 수 없다.
+이 경로의 작업 예산을 추가하려면 미처리 입력·틱 번호를 보존하며 별도로 제한해야 한다.
+
+메인 스레드가 멈춘 동안 `Session`의 ioThread가 `INPUT(t, 0)` 하트비트를 보냈다면,
+메인 루프는 `heartbeatTickEnd()`까지 `localInputs`를 0으로 채워 상대가 본 입력과 맞춘다.
+실제 진행량은 입력 도착·inputDelay·카운트다운·경기 상태에 달려 있다. 로컬 경과 시간의
+클램프와 네트워크 틱의 따라잡기는 각자의 진행 기준을 가진다.
 
 ---
 
@@ -685,10 +730,12 @@ Net 모드에서는 이야기가 한 겹 더 있다. 클램프 때문에 **잘�
 **현재 소스 발췌 — `core/input.h`**
 
 ```cpp
+#pragma once
+#include <cstdint>
+
 // Bitmask representing per-tick inputs
-// [NET] 틱마다 입력을 비트마스크로 수집/전송하면, 
-// '틱, 입력마스크'만으로 시뮬레이션을 재현할 수 있습니다(리플레이/Lockstep).
-// 직렬화가 간단하고 대역폭 효율이 좋습니다.
+// 같은 규칙 버전·초기 상태·시드·틱별 입력 순서가 재현의 전제다.
+// 마스크는 요청의 집합이며, 처리 순서는 SubmitInput이 정한다.
 enum InputBits : uint8_t {
     INPUT_NONE   = 0,
     INPUT_LEFT   = 1 << 0,
@@ -698,7 +745,19 @@ enum InputBits : uint8_t {
     INPUT_DROP   = 1 << 4,
 };
 
-inline bool hasInput(uint8_t mask, InputBits bit) { return (mask & bit) != 0; }
+inline constexpr uint8_t INPUT_KNOWN_MASK =
+    INPUT_LEFT | INPUT_RIGHT | INPUT_DOWN | INPUT_ROTATE | INPUT_DROP;
+
+// Validate wide parsed values BEFORE narrowing to uint8_t. Zero is valid.
+// Both direction bits are allowed; their meaning belongs to the simulation.
+inline constexpr bool isValidInputMask(uint64_t value) noexcept {
+    return (value & ~uint64_t(INPUT_KNOWN_MASK)) == 0;
+}
+
+// Tests overlap; INPUT_NONE (zero) is never reported as present.
+inline constexpr bool hasInput(uint8_t mask, InputBits bit) noexcept {
+    return (mask & bit) != 0;
+}
 ```
 
 현재 입력 계약은 한 틱의 조작을 `uint8_t` 비트마스크 하나에 담는다. 열거값에
@@ -706,8 +765,8 @@ inline bool hasInput(uint8_t mask, InputBits bit) { return (mask & bit) != 0; }
 이 설계의 이점은 다음과 같다.
 
 1. **직렬화 효율**: lockstep의 `INPUT` payload가 플레이어마다 틱당 1바이트다.
-2. **OR 누적**: `s_pendingInput |= INPUT_LEFT` 로 간단히 비트 합산
-3. **리플레이 저장**: `FrameInputs` 가 `p1`/`p2` 각 1바이트 — 60 Hz × 2 = 120 B/s
+2. **OR 누적**: `s_pendingInput |= INPUT_LEFT`로 발생 여부 병합. 같은 비트를 다시 OR해도 한 번 설정된 상태를 유지한다.
+3. **입력 값의 양**: p1/p2 두 마스크의 원시 값은 60Hz에서 초당120바이트다. 현재 리플레이 파일은 시드·틱 수·인덱스·십진수·공백·개행을 저장하므로 실제 파일 크기는 더 크다.
 4. **언어 간 계약**: Python framing과 placement 입력 확장기도 같은 마스크를
    생성한다. RL의 배치 행동 공간은 별도 표현이지만, 선택한 배치를 틱 입력으로
    풀어낼 때 이 계약으로 합류한다.
@@ -728,15 +787,15 @@ void SimGame::SubmitInput(uint8_t inputMask)
     if (hasInput(inputMask, INPUT_LEFT))   MoveBlockLeft();
     if (hasInput(inputMask, INPUT_RIGHT))  MoveBlockRight();
 
-    // 소프트 드롭: 매 틱 호출되면 60셀/초(너무 빠름). N틱마다 1회로 제한.
-    //   최초 눌림(카운터=0) 은 즉시 반응, 그 다음부터 kSoftDropIntervalTicks
-    //   (=3, 60Hz → 약 15셀/초) 간격. 뗐다가 다시 눌러도 즉시.
-    //   결정론: 이 카운터는 상태 해시에 포함되므로 양쪽 클라이언트 동일 전개.
-    constexpr int kSoftDropIntervalTicks = 3;
+    // DOWN이 처음 관찰된 호출은 즉시 시도하고, 이후 3호출을 건너뛴다.
+    // 한 틱당 SubmitInput 1회라면 4틱 주기: 60Hz에서 초당 15회 시도.
+    // 자연 중력은 Tick에서 별도로 더해진다. false가 관찰되면 다음 눌림을 재준비한다.
+    // 이 카운터는 미래 전이에 영향을 주므로 상태 해시에 포함한다.
+    constexpr int kSoftDropCooldownTicks = 3;
     if (hasInput(inputMask, INPUT_DOWN)) {
         if (softDropCounterTicks <= 0) {
             MoveBlockDown();
-            softDropCounterTicks = kSoftDropIntervalTicks;
+            softDropCounterTicks = kSoftDropCooldownTicks;
         } else {
             softDropCounterTicks--;
         }
@@ -751,7 +810,7 @@ void SimGame::SubmitInput(uint8_t inputMask)
 }
 ```
 
-좌 → 우 → 하 → 회전 → 드롭. 맨 앞의 `if (gameOver) return;` 가드 덕분에 게임오버 팝업이 떠 있는 동안 `main.cpp` 가 계속 `SubmitInput` 을 불러도 상태가 움직이지 않는다. 소프트 드롭만 `softDropCounterTicks` 로 게이트되는데, 이 카운터가 상태 해시에 포함되므로 양쪽 클라이언트에서 동일하게 전개되어 결정론을 깨지 않는다.
+좌 → 우 → 하 → 회전 → 드롭. 맨 앞의 `if (gameOver) return;` 가드 덕분에 게임오버 팝업이 떠 있는 동안 `main.cpp` 가 계속 `SubmitInput` 을 불러도 상태가 움직이지 않는다. 소프트 드롭은 `softDropCounterTicks`로 게이트한다. 3은 건너뛸 호출 수이고 실제 주기는 4호출이다. 카운터를 해시에 포함해 시간 상태의 차이도 비교한다. 재현성에는 같은 초기 상태와 입력·Tick 호출 순서가 필요하며 해시 포함만으로 보장되지는 않는다. 자연 중력은 이어지는 Tick에서 별도로 진행한다.
 
 `Game::SubmitInput` 은 여기에 오디오 소비 한 겹만 얹는다.
 
@@ -761,21 +820,35 @@ void SimGame::SubmitInput(uint8_t inputMask)
 void Game::SubmitInput(uint8_t inputMask)
 {
     sim.SubmitInput(inputMask);
-    if (sim.rotateSoundEvent)  { audio_play_sound(sndRotate);  sim.rotateSoundEvent  = false; }
-    // drop 전용 에셋(Sounds/drop.mp3)이 없으면 무음 대신 rotate 로 대체해
-    // 피드백을 유지한다 (audio_play_sound(0) 은 no-op). 핸들 alias 가 아니라
-    // 재생 시점 fallback 이므로 소멸자의 이중 unload 가 없다.
-    if (sim.dropSoundEvent)    { audio_play_sound(sndDrop ? sndDrop : sndRotate); sim.dropSoundEvent = false; }
+    ConsumeSoundEvents();
 }
 ```
 
-Part 4 체크포인트에서는 본문이 `sim.SubmitInput(inputMask);` 한 줄이다. 완성형은 호출 전후의 이벤트 카운터를 비교해 drop SFX를 내고, `Game::Tick()`도 같은 방식으로 `clearSoundEvent` / `garbageSoundEvent`를 소비한다. 소리는 결정 상태를 바꾸지 않는 파생 효과이므로 입력 제출과 틱이 성공한 뒤에만 재생한다.
+Part 4 체크포인트에서는 본문이 `sim.SubmitInput(inputMask);` 한 줄이다. 현재 구현은 호출 후 `ConsumeSoundEvents()`로 네 종류의 요청을 분리하고 재생한다. `Game::Tick()`과 `Game::MoveBlockDown()`도 같은 소비 함수를 사용한다. 하드 드롭 안에서 줄 삭제·가비지 주입이 일어나면 그 호출에서 바로 소비한다. 소리는 규칙 상태에서 파생된 효과이며, 장치 실패가 규칙 전이를 되돌리지 않는다.
+
+### 7.3 비트의 유효성과 조작 정책
+
+`isValidInputMask`는 `INPUT_KNOWN_MASK` 밖의 비트가 있는지만 검사한다. 0~31은 현재 규약에서 모두 유효하고, LEFT|RIGHT도 이 집합에 포함된다. `hasInput`은 포함 여부를 묻는 함수이므로 마스크 전체의 유효성 검사를 대신하지 않는다.
+
+로컬 `ConsumeInput`은 **현재 held가 양쪽 true일 때** 좌우 비트를 지운다. 두 키를 짧게 눌렀다 떼어 pending에만 양쪽 비트가 남은 경우에는 조건이 다르다. SimGame에 좌우 비트가 모두 전달되면 왼쪽 시도 후 오른쪽 시도를 한다. 벽에서 한쪽이 막히면 결과가 중립과 다를 수 있다. HTML의 기준 Intent는 양쪽 요청을 중립으로 해석하는 별도 정책을 유지한다. 같은 비트 위치를 사용한다는 사실만으로 두 규칙의 동등성을 주장하지 않는다.
+
+### 7.4 리플레이 파일에서 읽은 값을 검증한다
+
+`core/replay.cpp`는 seed와 ticks 두 헤더, 틱별 `index p1 p2`를 십진수 텍스트로 저장한다. 정수 크기를 줄이기 전에 `isValidInputMask`로 검사하고, 인덱스가0부터 순서대로 이어지는지와 선언한 개수를 모두 읽었는지 확인한다. 뒤에 남은 데이터도 거부한다.
+
+Load는 임시 ReplayData에 읽고 끝까지 성공한 뒤 out에 대입한다. 잘린 파일이나 잘못된 값이 기존 기록을 부분적으로 덮어쓰지 않는다. 숫자 토큰은 최대20자리 십진수이며, 로컬 파일 제한은 `ReplayIO::kMaxTicks` 1,000,000틱과 `kMaxFileBytes` 64MiB다. 메모리와 파일 처리량을 제한하기 위한 값으로, 랭킹 경기·봇 보상 제한과는 별개다.
+
+Save는 입력 마스크와 개수를 검증한 뒤 파일을 열고, 쓰기·flush 실패를 false로 반환한다. 파일을 열기 전의 잘못된 입력은 기존 파일을 지우지 않지만, 쓰기 중 실패에 대한 원자적 파일 교체까지 제공하는 API는 아니다.
+
+`tests/replay_io_test.cpp`는 모든 바이트 값, 넓은 정수의 축소 전 검사, 누락·중복 인덱스, 실패 시 출력 보존, 자원 상한과 저장 오류를 확인한다.
+
+[HTML 비트마스크 강의](../learn/index.html#lesson-48)는 비트 연산·정수 승격·축소 전 검증과 조작 의도의 변환을 작은 코드로 구현한다.
 
 ---
 
 ## 8. `AppMode` — 하나의 루프, 여러 화면
 
-`main.cpp` 는 화면마다 루프를 따로 두지 않는다. **단 하나의 `while (!quitRequested && !platform_should_close())` 안에서 `AppMode` 열거값으로 분기**한다(§4.3). 시뮬 단계에도 렌더 단계에도 같은 `app` 변수가 쓰이고, 모드 전환은 그 변수에 대입하는 것뿐이다.
+`main.cpp` 는 화면마다 루프를 따로 두지 않는다. **단 하나의 `while (!quitRequested && !platform_should_close())` 안에서 `AppMode` 열거값으로 분기**한다(§4.3). 시뮬 단계와 렌더 단계가 같은 `app`을 읽는다. 전환은 모드 값 변경에 더해 게임 객체의 생성·해제, 입력·시간·연출 상태의 처리를 함께 결정한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -790,8 +863,8 @@ enum class AppMode {
 ```
 
 현재 `AppMode`는 메뉴, 싱글플레이, 봇, 네트워크 큐·룸, 설정과 꾸미기 화면을
-한 루프 안에서 구분하는 완성된 상태 집합이다. 아래 전이도는 각 모드가 어떤
-행동으로 생성되고 어떤 자원을 정리하며 빠져나오는지를 한 번에 보여 준다.
+한 루프 안에서 구분한다. 아래 전이도는 주요 화면의 진입·복귀 경로를 요약한다.
+계정 화면과 네트워크 내부 협상 등 모든 전이를 열거한 도표는 아니다.
 `Menu`와 `Single`만 떼어 구현해도 같은 구조를 검증할 수 있지만, 모드를 늘릴
 때는 열거값뿐 아니라 생성·입력·렌더·정리 경계를 함께 추가해야 한다.
 
@@ -829,14 +902,14 @@ stateDiagram-v2
 
 **모드 전환의 규칙 두 가지.**
 
-1. **`AppMode` 를 바꿀 때 그 모드가 쓰는 `unique_ptr` 를 함께 세팅하거나 비운다.** `app = AppMode::Single;` 다음 줄이 항상 `gameSingle = std::make_unique<Game>(...)` 이고, 나가는 쪽은 항상 `gameSingle.reset();` 이다. 렌더 블록이 전부 `if (app == AppMode::Single && gameSingle)` 처럼 **모드 + 포인터**를 같이 검사하기 때문에, 한쪽만 바꿔도 화면이 조용히 비는 대신 안전하게 넘어간다.
-2. **`ESC`는 창을 닫지 않는다.** `platform_should_close()`는 창 닫기 요청(`WM_CLOSE`/`WM_DESTROY`, SDL은 `SDL_QUIT`)에 반응하고, 예외 하나로 `platform_init` 이 실패했을 때도 true 가 된다 — `main()` 진입부가 그 신호로 초기화 실패를 감지한다(§12.1). `ESC`는 채팅 취소와 메뉴형 화면의 뒤로가기처럼 각 앱 모드가 해석한다. **인게임에서 ESC를 눌러도 아무 일도 일어나지 않는다** — 나가기 모달은 우상단 X 버튼(`gui_close_button`) 전용이다(부록 C).
+1. **모드와 자원 상태를 함께 맞춘다.** 싱글플레이 진입·재시작은 `beginSingleRound`로 모았다. 새 Game을 먼저 준비하고, 소유자를 교체한 다음 호출자가 소유한 시간·입력·연출을 초기화하고 `app`을 바꾼다. `app == AppMode::Single && gameSingle` 검사는 빈 포인터 접근을 막는 보조 조건이다. 잘못된 모드·자원 조합을 정상 상태로 복구하는 기능까지 제공하지는 않는다.
+2. **`ESC`는 창을 닫지 않는다.** `platform_should_close()`는 창 닫기 요청(`WM_CLOSE`/`WM_DESTROY`, SDL은 `SDL_QUIT`)에 반응하고, 예외 하나로 `platform_init` 이 실패했을 때도 true 가 된다 — `main()` 진입부가 그 신호로 초기화 실패를 감지한다(§12). `ESC`는 채팅 취소와 메뉴형 화면의 뒤로가기처럼 각 앱 모드가 해석한다. **인게임에서 ESC를 눌러도 아무 일도 일어나지 않는다** — 나가기 모달은 우상단 X 버튼(`gui_close_button`) 전용이다(부록 C).
 
 ---
 
 ## 9. 게임오버와 재시작
 
-완료 게이트가 요구하는 "메뉴 → 게임 → 게임오버 → 재시작" 의 마지막 두 단계는 렌더 단계의 팝업 하나로 구현된다. 시뮬 쪽은 이미 `SimGame::SubmitInput` / `Tick` 의 `if (gameOver) return;` 가드가 멈춰 세워 뒀기 때문에, 화면만 얹으면 된다.
+게임오버에서는 마지막 보드를 유지하고 재시작·타이틀 복귀 선택을 표시한다. `SimGame::SubmitInput`과 `Tick`은 종료된 규칙 상태의 진행을 멈춘다. 현재 main은 렌더 단계의 팝업에서 재시작 요청을 받아 Game과 호출자 상태를 초기화한다.
 
 **현재 소스 발췌 — `src/main.cpp`**
 
@@ -850,8 +923,7 @@ stateDiagram-v2
             gui_text_center(360, 382, "[Q] Go to Title", 28, YELLOW);
             if (platform_key_pressed(PKEY_R))
             {
-                gameSingle = std::make_unique<Game>(sessionSeed);
-                if (recording) replay.frames.clear();
+                beginSingleRound();
             }
             else if (platform_key_pressed(PKEY_Q))
             {
@@ -863,8 +935,40 @@ stateDiagram-v2
 세 가지가 눈여겨볼 만하다.
 
 - **`gameSingle->gameOver` 는 `sim.gameOver` 의 참조 별칭**(§2.3)이므로 Sim 이 톱아웃을 선언한 그 프레임에 곧바로 true 가 된다. `Game` 쪽에 별도 플래그를 두고 동기화하는 코드가 아예 없다.
-- **재시작은 대입이 아니라 재생성이다.** `std::make_unique<Game>(sessionSeed)` 로 같은 시드의 새 객체를 만든다. 참조 멤버 때문에 대입이 불가능하다는 §2.3의 제약이 여기서 "잔재 없는 리셋" 이라는 이득으로 돌아온다.
-- **같은 시드를 다시 쓴다.** `sessionSeed` 를 새로 뽑지 않으므로 `[R]` 을 누르면 **같은 피스 순서**로 다시 시작한다. 실력 비교와 리플레이 검증에 유리한 선택이고, 이 때문에 `if (recording) replay.frames.clear();` 로 리플레이 프레임만 비워 "시드는 그대로, 입력 기록만 새로" 를 맞춘다.
+- **새 객체와 호출자 상태를 함께 초기화한다.** `std::make_unique<Game>(sessionSeed)`가 새 Game의 규칙·이벤트 상태를 만들고, `beginSingleRound`가 `accumulator`, 보류 입력, 좌우 반복 카운터, 콜아웃·흔들림을 비운다. 장치와 플랫폼이 소유한 상태는 계속 유지한다.
+- **같은 시드를 다시 쓴다.** `sessionSeed` 를 새로 뽑지 않으므로 `[R]` 을 누르면 **같은 피스 순서**로 다시 시작한다. 실력 비교와 리플레이 검증에 유리한 선택이고, 기록 중이면 입력 프레임을 비우고 `replay.seed`를 현재 세션 시드로 맞춘다. 운영 중 세션 시드가 바뀌었더라도 새 기록의 초기 조건이 일치한다.
+
+### 9.1 재시작의 경계와 외부 상태
+
+**현재 소스 발췌 — `src/main.cpp`**
+
+```cpp
+    auto beginSingleRound = [&]() {
+        auto next = std::make_unique<Game>(sessionSeed);
+        gameSingle = std::move(next);
+        accumulator = 0.0f;
+        s_pendingInput = 0;
+        s_leftHoldTicks = s_rightHoldTicks = 0;
+        coLocal = {};
+        shakeLeft = {};
+        if (recording) { replay.frames.clear(); replay.seed = sessionSeed; }
+        app = AppMode::Single;
+    };
+```
+
+새 Game 생성이 예외를 던지면 교체 전에 호출자 상태를 유지한다. 현재 실행 루프의
+예외 처리 정책과 사용자 오류 표시는 별개다. `unique_ptr`의 교체는 이전 Game을
+정리하고 새 객체를 소유한다. 렌더러·창·오디오 백엔드는 이때 살아 있다.
+
+전환은 렌더 단계에서 처리하므로 해당 프레임 앞부분의 경과 시간은 새 게임에
+다시 더하지 않는다. 외부 누적기의 남은 분수 시간과 아직 틱이 소비하지 않은
+입력도 비운다. **물리적으로 계속 누르고 있는 키**는 플랫폼 상태다. 실제 게임은
+다음 프레임에 그 상태를 다시 읽으므로 Down을 누른 채 재시작하면 새 라운드에도
+Down이 적용될 수 있다. 키를 전부 뗀 뒤 조작을 받는 정책은 별도의 입력 게이트가
+필요하며, HTML 학습 체크포인트의 Application은 그 정책을 구현한다.
+
+모든 화면이 같은 수명 정책을 가지지는 않는다. 네트워크 재시작에는 상대와의 합의,
+입력 큐와 틱 번호 처리도 필요하다. 싱글플레이 함수로 그 프로토콜을 대신하지 않는다.
 
 봇 대전은 승패 판정과 보상 상태가 붙고, 재경기는 새 challenge 요청으로 시작한다. Part 9가 채우는 블록이지만, 게임오버 UI 관례가 Single 과 동일하다는 점만 여기서 확인해 둔다.
 
@@ -942,7 +1046,7 @@ stateDiagram-v2
 세 덩어리로 읽힌다.
 
 1. **봇 입력 페이싱.** `bot::Controller`가 생각 시간·입력 간격·최소 배치 시간을 틱 단위로 관리한다. 새 피스에서는 큐를 비워 이전 계획이 넘어오지 않는다. 프레임 단위로 기다리면 FPS가 높은 기기에서 봇만 빨라지므로 시뮬레이션 틱으로 센다.
-2. **가비지 교환.** 두 `SimGame` 은 서로를 모른다. 연결은 `AttackLinesSent()` 누적치의 **델타**를 읽어 반대편 `AddPendingGarbage()` 로 넣는 이 다섯 줄뿐이다. 누적치의 델타를 쓰는 이유는 `LockBlock` 이 한 틱에 여러 줄을 보낼 수도, 캐치업으로 여러 틱이 한 프레임에 돌 수도 있기 때문이다 — "지난번에 읽은 값" 만 기억하면 어느 경우에도 빠뜨리거나 두 번 세지 않는다.
+2. **가비지 교환.** 두 `SimGame` 은 서로를 모른다. 연결은 `AttackLinesSent()` 누적치의 **델타**를 읽어 반대편 `AddPendingGarbage()` 로 넣는 이 다섯 줄뿐이다. 누적치의 델타를 쓰는 이유는 `LockBlock` 이 한 틱에 여러 줄을 보낼 수도, 캐치업으로 여러 틱이 한 프레임에 돌 수도 있기 때문이다 — 같은 판의 누적값이 단조 증가하고 기준값을 제때 갱신할 때 "지난번에 읽은 값"으로 새 증가분을 구분할 수 있다. 새 경기에는 기준값도 리셋해야 하며, int 상한에서 누적값이 포화되면 이후 증가분은 보존되지 않는다. 양쪽 판을 먼저 진행하고 가비지를 교환하므로 이번 틱의 공격은 다음 고정부터 적용될 수 있다.
 3. **연출 소비.** 두 보드가 각자의 `Callout` 과 `ShakeState` 를 갖고 같은 `apply_fx` 람다를 탄다(부록 A).
 
 이 세 책임은 Net 모드에도 유지된다 (`src/main.cpp`). 차이는 상대 입력이 `botController.next()` 대신 `session.GetRemoteInput(simTick, ri)` 에서 온다는 것뿐이다. Part 9의 봇을 "네트워크 대신 추론에서 입력이 나오는 피어" 로 취급할 수 있는 이유가 여기 있다.
@@ -955,7 +1059,7 @@ Part 4 체크포인트의 시뮬 단계는 Single 분기 하나뿐이므로 `bot
 
 ### 11.1 고정 틱과 Lockstep
 
-고정 틱 어큐뮬레이터가 멀티플레이의 **전제 조건**이다. 모든 피어가 동일한 틱 레이트(60Hz)로 시뮬레이션을 실행하므로, "틱 N에서 입력 X를 적용"이라는 명세만으로 상태가 동기화된다.
+이 프로젝트의 lockstep은 60 Hz 논리 틱을 공유한다. 호스트 어큐뮬레이터는 실행 가능한 시간 분량을 배정하고, 세션은 해당 틱의 입력이 준비됐는지 판단한다. 상태가 일치하려면 같은 규칙·초기 상태·틱별 입력 순서와 결정적인 상태 전이를 함께 유지해야 한다.
 
 ```mermaid
 sequenceDiagram
@@ -971,7 +1075,7 @@ sequenceDiagram
     C->>Sim: Tick #101 (input: NONE)
 ```
 
-FPS가 다르면 렌더링 빈도가 다르지만, 시뮬레이션은 정확히 같은 속도로 진행된다. Host가 200 FPS이고 Client가 60 FPS라도, 양쪽의 `SimGame` 상태는 같은 틱에서 동일하다.
+FPS가 다르면 렌더링 빈도가 다르지만, 같은 초기 상태·규칙·입력 이력을 적용한 시뮬레이션은 같은 틱에서 동일한 상태를 만든다. Host가 200 FPS이고 Client가 60 FPS라도 이 계약은 유지된다. 실제 진행 시각은 입력 도착과 작업 지연 때문에 다를 수 있다.
 
 ### 11.2 네트워크 입력 흐름
 
@@ -989,15 +1093,19 @@ while (accumulator >= SECONDS_PER_TICK)
     session.SendInput(localTickNext, inputMask);
     localTickNext++;
 
-    // 2. safeTick 계산: 양쪽 입력이 확보된 최대 틱
-    int64_t safeTick = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
+    // 2. 로컬 생성 시계에 지연을 적용한 뒤 상대 수신 상한과 비교
+    int64_t lastLocalSent = (int64_t)localTickNext - 1;
+    int64_t lastRemote = (int64_t)session.maxRemoteTick();
+    int64_t safeTick = std::min(lastLocalSent - (int64_t)inputDelay, lastRemote);
 
     // 3. safeTick까지만 시뮬레이션 진행
-    while ((int64_t)simTick <= safeTick)
+    while ((int64_t)simTick <= safeTick && !gameLocal->gameOver && !gameRemote->gameOver)
     {
-        uint8_t li = localInputs[simTick];
-        uint8_t ri = 0;
-        if (!session.GetRemoteInput(simTick, ri)) break;
+        uint8_t li = 0, ri = 0;
+        if (!net::read_input_pair(localInputs, simTick,
+                [&](uint32_t tick, uint8_t& mask) {
+                    return session.GetRemoteInput(tick, mask);
+                }, li, ri)) break;
         gameLocal->SubmitInput(li);
         gameRemote->SubmitInput(ri);
         gameLocal->Tick();
@@ -1011,11 +1119,11 @@ while (accumulator >= SECONDS_PER_TICK)
 
 safeTick의 의미:
 
-$$\text{safeTick} = \min(\text{lastLocalSent},\ \text{lastRemote}) - \text{inputDelay}$$
+$$\text{safeTick} = \min(\text{lastLocalSent} - \text{inputDelay},\ \text{lastRemote})$$
 
-양쪽 피어의 입력이 모두 도착한 틱까지만 시뮬레이션을 진행한다. 한쪽 피어의 입력이 늦으면 다른 쪽의 시뮬레이션도 대기한다. 이것이 **Lockstep** 동기화의 핵심이다.
+로컬 생성 일정에 지연을 적용한 상한 안에서, 양쪽 피어의 입력이 실제 있는 틱까지만 진행한다. 상대의 미래 입력이 잠시 늦어도 보관 중인 입력을 소비할 수 있지만, 당장 필요한 틱이 없으면 기다린다. 이것이 **Lockstep** 동기화의 핵심이다.
 
-여기서 §4의 float 어큐뮬레이터와 대비되는 사실 하나. **네트워크 계층은 float 시간을 전혀 모른다.** `localTickNext` 와 `simTick` 은 `uint32_t` 정수 틱 카운터이고, 와이어에 실려 나가는 것도 정수 틱 번호 + 1바이트 마스크뿐이다. 즉 어큐뮬레이터는 "언제 정수 틱을 하나 올릴지" 만 결정하는 국소적 장치이고, 그 위의 모든 것 — 리플레이, lockstep, 해시 검증 — 은 이미 정수 세계에서 산다. 이것이 §15-(3)의 부동소수점 누적 오차가 실제로는 문제가 되지 않는 근본 이유다.
+여기서 §4의 float 어큐뮬레이터와 대비되는 사실 하나. **INPUT payload에는 float 시간이 들어가지 않는다.** `localTickNext` 와 `simTick` 은 `uint32_t` 정수 틱 카운터이고, 와이어에 실려 나가는 것도 정수 틱 번호 + 1바이트 마스크뿐이다. 즉 어큐뮬레이터는 "언제 정수 틱을 하나 올릴지" 만 결정하는 국소적 장치이고, 그 위의 모든 것 — 리플레이, lockstep, 해시 검증 — 은 이미 정수 세계에서 산다. 이렇게 시계와 규칙을 분리해도 틱별 입력의 일치와 순서 보장이 필요하다. 정수 번호만 붙인다고 서로 다른 입력이 같아지지는 않는다(§15-(3)).
 
 ---
 
@@ -1071,7 +1179,7 @@ Part 4 체크포인트에는 `net::net_init()`/`net_shutdown()` 이 아직 없�
 
 ### 12.2 한 프레임의 전체 실행 순서
 
-루프 안으로 들어오면, 한 프레임은 언제나 같은 순서로 돈다.
+다음은 단일 게임의 핵심 경로다. 실제 루프는 비동기 작업 확인·채팅·모달·앱 모드 분기를 포함한다. 특히 온라인 경기는 시간 여유뿐 아니라 입력 수신 상태로 진행 가능한 틱을 제한하므로 아래 흐름만으로 전체 모드를 설명할 수는 없다.
 
 ```mermaid
 flowchart TB
@@ -1114,22 +1222,50 @@ flowchart TB
     }
 ```
 
-각 단계가 실제로 무엇을 하는지 정확히 짚어 둔다. `draw_*` 는 즉시 그리지 않고 정점을 큐에 쌓기만 하므로, "화면에 나가는" 지점이 흔한 오해와 다르다.
+각 단계의 책임을 구분한다. `draw_*`는 정점을 배치에 쌓되 텍스처 전환이나 배치 용량 경계에서 먼저 제출할 수 있다. 명령 생성·GPU 제출·스왑 요청·실제 화면 표시는 서로 다른 시점이다.
 
 | 호출 | 실제 동작 | 근거 |
 |---|---|---|
 | `platform_begin_frame()` | 키 스냅샷 + 메시지 펌프 + dt 반환(100 ms 클램프) | `platform/win32.cpp` |
 | `renderer_begin(bg)` | `platform_viewport` 로 표시 영역을 받아 `glViewport`, `glClear` 두 번(창 전체 검정 → 뷰포트 안 배경색), 셰이더·유니폼 바인딩 | `renderer/renderer.cpp` |
-| `draw_rect` 등 | 그리지 않는다. `glb_rect` 가 정점 6개를 `s_verts` 에 쌓는다 | `renderer/renderer.cpp` |
+| `draw_rect` 등 | `glb_rect`가 정점 6개를 쌓는다. 텍스처 전환 시 앞선 배치를 제출할 수 있다 | `renderer/renderer.cpp` |
 | `renderer_end()` | `glb_flush()` 로 남은 정점을 draw call 로 내보낸 뒤 `platform_present()` | `renderer/renderer.cpp` |
-| `platform_present` | Win32: `SwapBuffers(s_hdc)` / SDL2: `SDL_GL_SwapWindow` — **여기가 화면 출력** | `platform/win32.cpp` |
+| `platform_present` | Win32: `SwapBuffers(s_hdc)` / SDL2: `SDL_GL_SwapWindow` — 스왑 요청이며 실제 모니터 표시 완료의 확인은 아님 | `platform/win32.cpp` |
 | `platform_end_frame()` | **소프트웨어 프레임 페이싱** — 페이싱 ON 이면 60 Hz, OFF 면 240 fps 상한(`kUncappedMaxFps`)을 목표로 남은 시간만큼 `Sleep`. 화면 출력 아님 | `platform/win32.cpp` |
 
-시뮬레이션이 렌더링 **이전**에 실행되므로, 렌더링은 항상 최신 상태를 그린다. 만약 순서를 바꾸면 (렌더링 → 시뮬레이션), 화면에 1틱 전의 상태가 그려지는 "1프레임 지연"이 발생한다.
+이 경로는 해당 프레임에서 허용된 규칙 틱들을 진행한 뒤 그 최종 상태로 그리기 명령을 만든다. 매 프레임 정확히 한 틱을 실행하는 것은 아니다. 그리기를 먼저 하면 이후에 진행한 틱들의 결과를 다음 그리기까지 반영하지 못한다. 그 차이는0틱 또는 여러 틱일 수 있으므로 “항상1틱 지연”으로 설명할 수 없다. GPU와 창 시스템의 표시 지연은 별도로 존재한다.
 
 `renderer_set_view_offset(0, 0)` 이 `renderer_begin` **앞**에 오는 것도 의도적이다. 직전 프레임의 마지막 드로우가 보드 셰이크 오프셋을 남겨 놨을 수 있는데, 그대로 두면 이번 프레임의 UI 가 통째로 밀린다. 프레임 진입점에서 한 번 0으로 되돌려 놓으면 이후 모든 블록이 "오프셋은 내가 켠 만큼만" 이라고 가정할 수 있다.
 
 ---
+
+
+### 12.1 종료 순서도 의존 방향을 따른다
+
+Game은 오디오 백엔드가 살아 있는 동안 효과음 핸들을 해제하고 초기화 참조를 반납한다.
+정상 종료에서는 소켓 작업을 닫고 네 Game 소유자를 먼저 reset한 뒤 이미지·렌더러·플랫폼·
+네트워크 백엔드를 정리한다. 특히 SDL 플랫폼 종료의 SDL_Quit 뒤에 Game 소멸자를
+뒤늦게 호출하지 않도록 명시적으로 순서를 둔다.
+
+**현재 소스 발췌 — `src/main.cpp`**
+
+```cpp
+    // Join socket work and release Game-owned audio while backends still exist.
+    session.Close();
+    gameSingle.reset();
+    gameLocal.reset();
+    gameRemote.reset();
+    gameBot.reset();
+
+    for (const auto& item : opponentImages) if (item.second) image_unload(item.second);
+    for (ImageHandle h : playerIconCatalogHandles) image_unload(h);
+    image_unload(iconDefaultPlayer);
+    image_unload(iconDefaultOpponent);
+    image_unload(iconBot);
+    renderer_shutdown();
+    platform_shutdown();
+    net::net_shutdown();
+```
 
 ## 13. CMakeLists 확장
 
@@ -1278,7 +1414,7 @@ endif()
 
 ### 14.1 알파는 도형마다 켜는 것이 아니라 파이프라인 상태다
 
-반투명 고스트 블록을 그리려면 무엇을 "켜야" 하는가? **드로우 시점에는 아무것도 켜지 않는다.** `renderer_init` 이 시작할 때 `gl_Enable(GL_BLEND)` 와 `gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` (`renderer/renderer.cpp`) 를 한 번 걸어 두고, 그 뒤로는 조각 셰이더가 내놓는 `fragColor.a` 가 곧 합성 가중치가 된다.
+반투명 고스트 블록을 그리려면 무엇을 "켜야" 하는가? **드로우 시점에는 아무것도 켜지 않는다.** `renderer_init` 이 시작할 때 `gl_Enable(GL_BLEND)` 와 `gl_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` (`renderer/renderer.cpp`) 를 한 번 걸어 두고, 그 뒤로는 조각 셰이더가 내놓는 `fragColor.a` 가 곧 합성 가중치가 된다. 이 설명은 RGB 가중치에 관한 것이다. 같은 설정의 저장 알파는 `As*As + Ad*(1-As)`이므로 투명한 중간 결과의 source-over 알파와 다르다. 표현 방식과 별도 알파 계수는 [Part 3의 초기화 설명](./part3-rendering-and-ui.md#18-초기화--프레임-수명주기--종료-순서)에서 구분한다.
 
 **현재 소스 발췌 — `renderer/gl_shaders.h`**
 
@@ -1295,8 +1431,8 @@ void main() {
     // 불필요하게 흐려지는 것을 막는다.
     if (v_radius > 0.0) {
         float d = rounded_box_sdf(v_local, v_half, v_radius);
-        // 1픽셀 폭으로 부드럽게 자른다 — 모서리 안티앨리어싱이
-        // 별도 코드 없이 따라온다.
+        // 논리 UI 폭 1의 구간에서 알파를 완화한다. 물리 1픽셀이나
+        // 정확한 픽셀 coverage를 보장하는 식은 아니다.
         c.a *= 1.0 - smoothstep(-0.5, 0.5, d);
     }
 
@@ -1309,7 +1445,7 @@ void main() {
 
 1. **텍스처 샘플.** 단색 도형은 1×1 흰 텍스처를 보므로 `tex` 가 항상 `(1,1,1,1)` 이고, 글리프는 R8 텍스처라 `r` 채널을 알파로 승격시킨다. `v_channel` 이 그 둘을 가르는 스위치다.
 2. **정점 색과 곱하기.** `c = sampled * v_color` 한 줄이 팔레트의 알파를 `c.a` 로 실어 온다. "도형의 알파" 와 "픽셀의 덮임 정도" 가 곱해져 한 값이 되는 것은 CPU 로 그리든 GPU 로 그리든 같다.
-3. **둥근 모서리는 알파를 한 번 더 깎는다.** SDF 거리 `d` 를 `smoothstep(-0.5, 0.5, d)` 로 통과시키면 경계 1픽셀이 부드럽게 빠진다. 안티앨리어싱을 위한 코드를 따로 쓰지 않았는데도 따라온다.
+3. **둥근 모서리는 알파를 한 번 더 깎는다.** SDF 거리 `d`에 `smoothstep(-0.5, 0.5, d)`를 적용해 경계의 알파를 근사적으로 완화한다. 폭은 논리 UI 단위로 1이며, 확대된 drawable에서도 물리 1픽셀이라는 뜻이나 정확한 coverage 적분이라는 뜻은 아니다.
 4. **`c.a <= 0.0` 이면 `discard`.** 완전 투명한 조각이 블렌드 유닛까지 가지 않는다.
 
 그 뒤 $\text{out} = S \cdot a + D \cdot (1 - a)$ 를 GPU 의 블렌드 유닛이 부동소수로 계산한다. 사각형·텍스트·이미지·둥근 사각형이 전부 이 프로그램 **하나**를 지나므로 알파 합성 코드가 저장소에 딱 한 벌이다.
@@ -1326,7 +1462,7 @@ const Color garbageColor = { 80,  80,  90, 255};  // id=9 — 가비지 셀 (어
 const Color ghostColor   = {200, 200, 210,  70};
 ```
 
-고스트의 알파 70 은 정점 색에서 $70/255 \approx 0.27$ 로 정규화되어 보드 배경과 $27:73$ 으로 섞인다. 27 % 라는 숫자가 핵심이다 — 보드 배경이 충분히 비쳐서 "여기 떨어질 거다" 는 미리보기로만 읽히고, 실제 `currentBlock` 과 헷갈리지 않는다. 이 값을 바꾸는 것 외에 고스트의 반투명도를 조절할 다른 스위치는 존재하지 않는다.
+고스트의 알파 70 은 정점 색에서 $70/255 \approx 0.27$ 로 정규화되어 보드 배경과 $27:73$ 으로 섞인다. 27 % 라는 숫자가 핵심이다 — 보드 배경이 충분히 비쳐서 "여기 떨어질 거다" 는 미리보기로만 읽히고, 실제 `currentBlock` 과 헷갈리지 않는다. 이 값은 기본 팔레트다. `presentation_load`의 `cell.8` 설정은 `presentation_palette`를 통해 RGBA를 덮어쓸 수 있다. 고스트 표시 설정은 그리기 자체를 켜고 끄며, 팔레트의 알파를 바꾸는 것과 구별한다.
 
 ### 14.2 다크 네이비 배경 + 보드 테두리
 
@@ -1351,7 +1487,7 @@ void Game::DrawBoardAt(int offsetX, int offsetY, int cellSize)
     draw_rect(offsetX - 2, offsetY - 2, bw + 4, bh + 4, {55, 62, 100, 255});
     draw_rect(offsetX,     offsetY,     bw,     bh,     {14, 16, 30, 255});
     DrawGrid(offsetX, offsetY, cellSize);
-    if (g_ghostEnabled) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
+    if (g_ghostEnabled && !sim.IsGameOver()) DrawBlock(sim.GhostBlock(), offsetX, offsetY, cellSize);
     DrawBlock(sim.CurrentBlock(), offsetX, offsetY, cellSize);
 }
 ```
@@ -1485,23 +1621,30 @@ cmake --build build
 
 **증상:** 클램프가 너무 크면(1초) 창 드래그 후 60틱이 한꺼번에 실행되어 게임이 급진행. 너무 작으면(0.01초) 30 FPS 환경에서 한 프레임에 필요한 2틱을 못 채워 시뮬레이션이 점점 뒤처진다.
 
-**해결:** 0.1초(100 ms) = 최대 6틱. Part 2의 `platform_begin_frame` 이 이미 걸어 뒀고, `main.cpp` 는 다시 검사하지 않는다(§6.2).
+**해결:** 현재 플랫폼 정책은 100ms 상한이며 초과 시간은 버린다. 로컬 루프에서 남은 시간이 한 틱 미만일 때 정확한 산술로 최대 6틱 분량을 배정한다. Net의 별도 따라잡기 루프는 입력 준비 상태로 진행하므로 이 실행 횟수 상한을 그대로 적용하지 않는다(§6).
 
-> **레퍼런스:** Glenn Fiedler, "Fix Your Timestep!" (gafferongames.com, 2004). "If you clamp at 250ms you'll get at most 4-5 iterations of the loop."
+> **참고:** Glenn Fiedler의 [Fix Your Timestep!](https://gafferongames.com/post/fix_your_timestep/)은
+> 고정 스텝·잔여 시간·따라잡기 비용을 설명한다. 글의 250ms 상한 예시를 60틱/초에
+> 적용하면 정확한 산술에서 15틱 분량이다. 특정 반복 횟수는 스텝 크기와 함께 계산해야 한다.
 
 ### (3) 부동소수점 누적 오차
 
-**증상:** 장시간 플레이 시 시뮬레이션 속도가 미세하게 어긋난다.
+**가능한 문제:** 근사한 시간의 덧셈·뺄셈 결과가 임계값 근처에 있으면,
+한 프레임에서 발행하는 틱 수가 달라질 수 있다. 모든 오차가 계속 커진다거나
+항상 몇 마이크로초 안에서 끝난다고 단정할 수는 없다.
 
-**원인:** `accumulator += deltaTime` 과 `accumulator -= SECONDS_PER_TICK` 에서 float 의 유한 정밀도로 인한 오차가 매 프레임 누적된다. float32 의 유효 자릿수는 약 7자리이므로, `accumulator` 가 10초 이상으로 커지면 $1/60 \approx 0.01667$ 과의 비교에서 유효 자릿수가 5자리로 줄어든다.
+**책임 분리:** 현재 float 어큐뮬레이터는 로컬 경과 시간을 틱 발행량으로 바꾸고,
+SimGame은 정수 틱 카운터로 규칙을 진행한다. 정상적으로 스텝을 모두 소모한 뒤
+잔여 시간은 한 스텝 미만이지만, `1/60`의 표현과 반복 연산은 여전히 근사다.
 
-**왜 여기서는 문제가 아닌가.** 세 겹의 방어가 있다.
+재현성을 비교할 때는 벽시계의 같은 시점이 아니라 **같은 초기 상태·같은 틱 번호까지의
+동일한 입력 순서**를 비교한다. 두 기기가 같은 순간에 같은 틱까지 진행했다는 보장은
+정수 번호만으로 생기지 않는다. 네트워크는 필요한 입력을 기다리거나 정해진 정책으로
+배정해야 하고, 리플레이는 기록한 입력을 같은 순서로 소비해야 한다.
 
-1. 100 ms 클램프(§6) 때문에 `accumulator` 는 한 프레임에 0.1 이상 늘지 않고, while 루프가 즉시 다시 깎으므로 정상 상태에서 항상 `[0, 1/60)` 근처에 머문다. 큰 값으로 자랄 경로 자체가 없다.
-2. 오차가 생겨도 **틱 하나가 몇 마이크로초 일찍/늦게 돌 뿐 틱 번호는 어긋나지 않는다.** 틱 카운터(`simTick`, `localTickNext`, `replay.frames.size()`)는 전부 정수다.
-3. 그 정수 틱만이 네트워크와 리플레이에 나간다(§11.2). 두 피어의 float 어큐뮬레이터 값이 서로 완전히 달라도 lockstep 은 영향을 받지 않는다 — 동기화 단위가 애초에 시간이 아니라 틱 번호이기 때문이다.
-
-즉 "정수 틱 카운터로 전환" 이라는 흔한 처방은 이 프로젝트에서 **이미 상위 계층에 적용돼 있고**, float 어큐뮬레이터는 그 정수 틱을 언제 발행할지 정하는 국소 장치로만 남아 있다. 이 분리가 되어 있는 한 float 로 충분하다.
+정수 나노초나 유리수 위상으로 로컬 어댑터를 만들면 일부 근사 연산을 줄일 수 있지만,
+시계의 측정 정밀도·시간 양자화·입력 배정 문제까지 자동 해결되지는 않는다.
+현재 구현의 float 사용과 규칙의 정수 사용은 서로 다른 계약으로 검토한다.
 
 ### (4) `AppMode` 만 바꾸고 포인터를 안 바꾸기
 
@@ -1529,7 +1672,7 @@ cmake --build build
 
 고정 틱 어큐뮬레이터와 입력 누적은 게임 루프의 두 가지 핵심 문제를 해결한다:
 
-1. **시뮬레이션 속도 독립**: FPS와 무관하게 정확히 60Hz
+1. **시뮬레이션 속도 분리**: FPS와 별도로 논리 시간 1/60초 스텝을 발행한다. 정지·클램프·처리 지연은 실제 진행 속도에 영향을 준다
 2. **입력 무손실**: 엣지 트리거 입력을 비트 OR로 누적하여 틱 간 프레임에서의 소실 방지
 
 그리고 이 장은 세 번째 것을 함께 만들었다 — **다른 기능이 끼워질 자리**. 시뮬은 고정 틱 while 안, 화면은 `renderer_begin`/`renderer_end` 사이, 모드는 `AppMode` 분기에 놓인다. 오디오는 `Game`이 시뮬레이션 이벤트를 소비하는 경계에, lockstep은 고정 틱의 입력 공급 경계에, 봇은 같은 틱 루프의 상대 입력 생산자에 붙는다. 랭킹 HUD는 렌더 구간에서 서버가 확정한 결과만 읽는다. 어느 기능도 별도의 메인 루프를 만들지 않는다.
@@ -1575,9 +1718,9 @@ Lockstep 동기화의 전제는 "모든 피어가 같은 시드 + 같은 입력 
 **현재 소스 발췌 — `src/sim_game.h`**
 
 ```cpp
-    // ---- One-shot event flags for audio in the Game wrapper ----
-    // Set by SimGame when the corresponding event occurs (successful rotate,
-    // line clear). The Game wrapper reads and clears them each tick.
+    // ---- Coalescing audio flags, not an ordered event queue ----
+    // SubmitInput consumes rotate/drop flags; Game::Tick consumes clear/garbage.
+    // A bool remembers occurrence, not the number or order before consumption.
     mutable bool rotateSoundEvent  = false;
     mutable bool clearSoundEvent   = false;
     mutable bool dropSoundEvent    = false;  // 하드드롭(Space) 시
@@ -1599,11 +1742,10 @@ Lockstep 동기화의 전제는 "모든 피어가 같은 시드 + 같은 입력 
 
 | 그룹 | 필드 | 소비자 | 소관 |
 |---|---|---|---|
-| 사운드 | `rotateSoundEvent`, `dropSoundEvent` | `Game::SubmitInput` | Part 5 |
-| 사운드 | `clearSoundEvent`, `garbageSoundEvent` | `Game::Tick` | Part 5 |
+| 사운드 | `rotateSoundEvent`, `dropSoundEvent`, `clearSoundEvent`, `garbageSoundEvent` | 세 상태 변경 래퍼가 호출하는 `Game::ConsumeSoundEvents` | Part 5 |
 | 연출 | `hardDropEvent`, `lastLinesCleared`, `lastTSpinLines`, `lastGarbageReceived`, `gameOverEvent` | `main.cpp` 의 `apply_fx` | Part 4 |
 
-`hardDropEvent` 가 `dropSoundEvent` 와 **일부러 분리된** 이유가 이 표에 그대로 있다. 둘 다 "하드드롭이 일어났다" 는 같은 사건을 알리지만 소비자가 다르다. `dropSoundEvent` 는 `Game::SubmitInput` 이 읽고 즉시 false 로 지운다. 만약 흔들림이 같은 플래그를 보면, `Game` 이 먼저 지워 버려서 **오디오가 켜진 빌드에서만 흔들리고 무음 빌드에서는 안 흔들리는** 결합이 생긴다. 렌더 전용 플래그를 하나 더 두는 비용이 그 결합보다 싸다. `hardDropEvent` 는 상태 해시에 들어가지 않으므로 lockstep/리플레이와도 무관하다.
+`hardDropEvent` 가 `dropSoundEvent` 와 **일부러 분리된** 이유가 이 표에 그대로 있다. 둘 다 "하드드롭이 일어났다" 는 같은 사건을 알리지만 소비자가 다르다. `dropSoundEvent`는 `Game::ConsumeSoundEvents`가 읽으면서 false로 지운다. 만약 흔들림이 같은 플래그를 보고 `Game`이 먼저 지우면, 뒤의 흔들림 소비자는 사건을 보지 못한다. 현재 소비 함수는 실제 소리가 재생되었는지와 관계없이 플래그를 false로 지운다. 따라서 오디오 설정만으로 어느 빌드에서 흔들림이 발생할지 단정하면 안 된다. 소비자별 플래그는 이 소비 순서 결합을 끊는다. `hardDropEvent`는 규칙 상태 해시에서 제외되지만, 입력 재생으로 하드 드롭이 다시 일어나면 새로 설정될 수 있다. 플래그가 해시에서 제외된다는 말과 리플레이 중 표현을 전혀 만들지 않는다는 말은 다르다. bool 플래그는 소비 사이의 발생 횟수나 순서를 보존하지 않는다.
 
 **"이벤트 발생 틱에만 설정된다" 는 표현은 정확하지 않다.** 실제 `LockBlock` 은 매번 무조건 대입한다:
 
@@ -1646,7 +1788,11 @@ graph TB
     FX --> SH
 ```
 
-Sim 의 플래그가 한 방향으로만 흐른다는 것이 핵심이다. 보조 레이어는 Sim 을 읽고 플래그를 초기화할 뿐 게임 상태를 되돌려 쓰지 않는다. 이 단방향성이 결정론 경계를 지킨다.
+소비자는 규칙 계산에 쓰지 않는 표현 보고만 초기화하고 보드·점수·난수·규칙 시계를 바꾸지 않아야 한다. 플래그가 mutable이라는 사실이나 호출 방향만으로 결정론이 보장되지는 않는다. 규칙이 표현 보고에 의존하지 않는 계약과 같은 입력/틱 순서가 필요하다.
+
+또한 현재 apply_fx는 SubmitInput과 Tick 뒤에 호출된다. 소비 전에 여러 고정이 일어나면 마지막 보고는 앞선 값을 덮고 bool은 여러 사건을 합친다. 틱마다 읽는다고 함수 내부에서 발생한 모든 사건을 복원할 수 있는 것은 아니다. 모든 고정 결과가 필요한 표현에는 각 고정에서 값을 기록하는 사건 목록이 필요하다.
+
+44차시 예제의 FrameRunner는 한 틱에 최대 한 고정이라는 Round 계약을 이용한다. 틱 직후 보고를 값으로 복사하고 한 프레임의 최대6틱을 담는 배열로 반환한다. 최종 Round는 최종 보드 표시용, 보고 목록은 틱별 사건 소비용이다. 이 배열은 영구 리플레이나 스레드 간 큐가 아니며 실제 SimGame에 같은 목록을 이식한 것은 아니다.
 
 ### A.3 소비 지점을 한 곳에 모은다 — 파라미터화된 람다 하나
 
@@ -1862,9 +2008,8 @@ Part 6의 HASH 검증이 shake 를 완전히 무시해도 안전한 것이 이 �
 ```cpp
 void renderer_set_view_offset(int dx, int dy)
 {
-    // 오프셋이 바뀌기 전에 쌓인 것을 비운다. 그렇지 않으면 이전 오프셋으로
-    // 만들어진 정점과 새 오프셋 정점이 한 배치에 섞인다.
-    if (dx != s_view_ox || dy != s_view_oy) glb_flush();
+    // glb_rect/glb_quad bake the offset into each submitted CPU vertex.
+    // Different baked offsets can share one ordered batch; no GPU state changes.
     s_view_ox = dx;
     s_view_oy = dy;
 }
@@ -1875,7 +2020,10 @@ void renderer_set_view_offset(int dx, int dy)
 - `glb_rect` 는 화면 밖 판정을 하기 전에 `x += (float)s_view_ox; y += (float)s_view_oy;` 로 사각형 자체를 옮긴다 (`renderer/renderer.cpp`). 단색 사각형·둥근 사각형·글리프·이미지가 모두 이 경로다.
 - 회전한 이미지는 꼭짓점 네 개를 직접 받는 `glb_quad` 를 타는데, 거기서도 정점마다 같은 값을 더한다 (`renderer/renderer.cpp`).
 
-앞의 `glb_flush()` 한 줄이 이 방식의 대가다. 오프셋은 셰이더가 아니라 CPU 쪽 정점 생성에 녹아 들어가므로, 값이 바뀌는 순간 이미 큐에 쌓인 정점과 앞으로 쌓일 정점의 기준이 달라진다. 그래서 바뀔 때마다 배치를 한 번 끊는다. Net 프레임에서 오프셋이 네 번 바뀌므로 draw call 이 그만큼 나뉘지만, 한 프레임에 서너 번 더 나가는 것은 문제가 되지 않는다.
+각 정점에는 이미 오프셋을 더한 최종 좌표가 들어 있다. 예를 들어 같은 x=10을
+오프셋0과100에서 넣으면 큐에는10과110이 저장된다. 이 값들을 호출 순서대로 같은
+배치에 제출해도 위치가 유지되므로 setter는 배치를 끊지 않는다. 텍스처 등 공유
+렌더링 상태가 달라지는 경계는 별도로 처리한다.
 
 그래서 "오프셋이 걸린 구간에 그린 모든 것" 이 한 덩어리로 이동한다 — 보드 테두리, 격자 셀, 고스트, 현재 피스, 가비지 바까지. 개별 엘리먼트에 좌표 보정을 넣을 필요가 없다. 반대로 오프셋을 0으로 되돌린 뒤 그린 것은 절대 움직이지 않는다.
 
@@ -1885,7 +2033,7 @@ void renderer_set_view_offset(int dx, int dy)
 |---|---|
 | 클리핑이 자동 | 오프셋을 더한 뒤 화면 밖 판정(`renderer/renderer.cpp`)을 타므로, 밀려 나간 사각형은 정점조차 만들어지지 않는다. 걸쳐 있는 것은 뷰포트와 시저 박스가 잘라 낸다 |
 | 상태가 프레임을 넘어 남는다 | 전역 두 개라서 리셋하지 않으면 다음 프레임까지 유효 — 그래서 프레임 진입부에서 0을 찍는다(§12.2) |
-| 비용이 0에 가깝다 | 사각형 하나당 float 덧셈 두 번. 픽셀 수와 무관하다 |
+| 위치 준비 비용 | 축 정렬 사각형은 원점의 두 성분, 회전 사각형은 각 꼭짓점의 두 성분에 더한다. 픽셀 수에 비례하는 CPU 루프를 추가하지 않는다 |
 
 렌더러 쪽 전체 파이프라인은 `glb_rect` 가 정점을 큐에 쌓고, `glb_flush` 가 쌓인 것을 draw call 로 내보내고, `platform_present` 가 백버퍼를 창에 붙이는 구조다 — 뷰 오프셋은 그중 첫 단계, 정점을 만드는 자리에 끼어드는 정수 두 개일 뿐이다.
 
@@ -2235,8 +2383,7 @@ bool gui_button_highlighted(int x, int y, int w, int h, const char* label,
             if (activated >= 0) {
                 switch (items[activated].action) {
                 case MenuAction::Single:
-                    app = AppMode::Single;
-                    gameSingle = std::make_unique<Game>(sessionSeed);
+                    beginSingleRound();
                     break;
                 case MenuAction::BotSelect:
                     // 봇 선택 화면으로. 실제 BotSingle 진입은 거기서 모델 로드 성공 후.
@@ -2381,7 +2528,7 @@ cmake --build build --config Release
 2. `Single Play` 를 키보드 Enter 로도, 마우스 클릭으로도 진입할 수 있다.
 3. 좌우 방향키를 짧게 톡 치면 한 칸, 꾹 누르면 약 133 ms 뒤부터 약 50 ms 간격으로 주르륵 이동한다. 좌우를 동시에 누르면 멈춘다.
 4. 스페이스를 아무리 빠르게 연타해도 씹히지 않는다(엣지 누적). 아래 방향키를 누르고 있으면 초당 약 15칸 속도로 내려간다.
-5. 창 타이틀바를 잡고 2~3초 끌었다 놓아도 블록이 순간이동하지 않는다 — 최대 6틱만 캐치업된다.
+5. 메인 루프가 긴 정지에서 돌아온 뒤 플랫폼 dt가 0.1초 이하인지 확인한다. 로컬 게임의 진행량과 Net의 입력 따라잡기를 나누어 관찰한다. 한 프레임에 보이는 이동량은 중력·입력·모드에 따라 다르다.
 6. 우측 패널에 SCORE / LEVEL + LINES / NEXT(3개)가 보이고, 고스트 블록 너머로 보드 격자가 비친다.
 7. 톱아웃하면 `GAME OVER` 팝업 + `[R] Restart` / `[Q] Go to Title`. `R` 은 같은 피스 순서로 새 판을 시작하고, `Q` 는 메뉴로 돌아간다.
 8. 게임 중 우상단 X 를 클릭하면 확인 모달이 뜨고 **블록이 그 자리에 멈춘다**. `N` 또는 "아니오" 로 닫으면 같은 지점에서 재개된다. **ESC 는 아무 반응이 없다** — 창도 닫히지 않고 모달도 뜨지 않는다.

@@ -11,10 +11,16 @@
 //   - 참조 카운팅으로 멀티플레이(두 Game 인스턴스)에서도 안전.
 //   - SFX 는 fire-and-forget 보이스 풀, BGM 은 루프 재생 전용 보이스.
 
-#define DR_MP3_IMPLEMENTATION
-#include "../third_party/dr_mp3.h"
+#include "mp3_decode.h"
+#include <new>
+#include <stdexcept>
 
 #include "audio.h"
+#include "pcm_layout.h"
+#include "mix_s16.h"
+#include "voice_order.h"
+#include "../core/once_flags.h"
+#include <limits>
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +28,9 @@
 #include <vector>
 
 // Windows / XAudio2
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <xaudio2.h>
 
@@ -36,7 +45,7 @@ struct SoundData
 
 static bool                      s_initialized  = false;
 static int                       s_refCount     = 0;
-static bool                      s_comOwned     = false;  // 우리가 CoInitialize 했는가?
+static bool                      s_comOwned     = false;  // 우리가 이 스레드에서 성공한 COM 초기화 참조를 보유하는가?
 static IXAudio2*                 s_xaudio       = nullptr;
 static IXAudio2MasteringVoice*   s_masterVoice  = nullptr;
 
@@ -59,6 +68,7 @@ static float                     s_sfxVol       = 1.0f;
 
 // SFX 보이스 풀
 static constexpr int             MAX_SFX_VOICES = 8;
+static audio_pool::VoiceOrder<MAX_SFX_VOICES> s_sfxOrder;
 static IXAudio2SourceVoice*      s_sfxVoices[MAX_SFX_VOICES] = {};
 static WAVEFORMATEX              s_sfxFormats[MAX_SFX_VOICES] = {};
 // 각 보이스가 지금 어느 핸들의 PCM 을 물고 있는지. XAudio2 는 SubmitSourceBuffer 에
@@ -66,9 +76,18 @@ static WAVEFORMATEX              s_sfxFormats[MAX_SFX_VOICES] = {};
 // 해제하기 전에 해당 보이스를 먼저 멈춰야 한다.
 static AudioHandle               s_sfxHandles[MAX_SFX_VOICES] = {};
 
+// Repeated failed play requests must not flood stderr. One diagnostic per
+// stage and device lifetime; additional shared init calls do not reset it.
+enum class PlaybackFailure { sfx_create, sfx_start, music_create, music_start, count };
+static once_flags::Flags<static_cast<size_t>(PlaybackFailure::count)> s_failureNotices;
+static bool first_failure(PlaybackFailure failure)
+{
+    return s_failureNotices.take(static_cast<size_t>(failure));
+}
+
 // ─── 내부 유틸 ──────────────────────────────────────────────────────────────────
 
-static WAVEFORMATEX MakeWaveFormat(drmp3_uint32 channels, drmp3_uint32 sampleRate)
+static WAVEFORMATEX MakeWaveFormat(std::uint32_t channels, std::uint32_t sampleRate)
 {
     WAVEFORMATEX wf = {};
     wf.wFormatTag      = WAVE_FORMAT_PCM;
@@ -100,7 +119,19 @@ bool audio_init()
     }
     ++s_refCount;
 
-    // COM 초기화. 이미 다른 곳에서 초기화했으면 S_FALSE 반환 -- 괜찮다.
+    s_failureNotices.reset();
+
+    // Allocate the sentinel before owning COM or audio graph resources.
+    try {
+        s_sounds.clear();
+        s_sounds.push_back(SoundData{{}, {}, false});
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+
+    // 호출 스레드의 COM 초기화. 같은 모델로 이미 초기화됐다면 S_FALSE.
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (hr == S_OK)
     {
@@ -108,18 +139,18 @@ bool audio_init()
     }
     else if (hr == S_FALSE)
     {
-        // 이미 초기화됨 (다른 스레드/모듈). COM 사용 가능.
+        // 호출한 이 스레드가 같은 모델로 이미 초기화됨. 이번 성공도 해제와 짝짓는다.
         s_comOwned = true;  // CoUninitialize 호출 필요 (S_FALSE 도 짝 맞춰야 함)
     }
     else if (hr == RPC_E_CHANGED_MODE)
     {
-        // 다른 스레딩 모델로 이미 초기화됨. XAudio2 는 대부분 동작하지만 경고.
+        // 호출 스레드의 모델을 바꾸지 않고 엔진 생성을 시도한다. 성공 여부는 아래에서 검사.
         fprintf(stderr, "[audio] COM already initialized with different threading model\n");
         s_comOwned = false;
     }
     else
     {
-        fprintf(stderr, "[audio] CoInitializeEx failed: 0x%08lx\n", hr);
+        fprintf(stderr, "[audio] CoInitializeEx failed: 0x%08lx\n", static_cast<unsigned long>(hr));
         s_initialized = false;
         return false;
     }
@@ -128,7 +159,7 @@ bool audio_init()
     hr = XAudio2Create(&s_xaudio, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr))
     {
-        fprintf(stderr, "[audio] XAudio2Create failed: 0x%08lx\n", hr);
+        fprintf(stderr, "[audio] XAudio2Create failed: 0x%08lx\n", static_cast<unsigned long>(hr));
         if (s_comOwned) CoUninitialize();
         s_comOwned = false;
         s_initialized = false;
@@ -139,7 +170,7 @@ bool audio_init()
     hr = s_xaudio->CreateMasteringVoice(&s_masterVoice);
     if (FAILED(hr))
     {
-        fprintf(stderr, "[audio] CreateMasteringVoice failed: 0x%08lx\n", hr);
+        fprintf(stderr, "[audio] CreateMasteringVoice failed: 0x%08lx\n", static_cast<unsigned long>(hr));
         s_xaudio->Release();
         s_xaudio = nullptr;
         if (s_comOwned) CoUninitialize();
@@ -148,10 +179,8 @@ bool audio_init()
         return false;
     }
 
-    // sentinel slot (index 0 = 무효 핸들)
-    s_sounds.clear();
-    s_sounds.push_back(SoundData{{}, {}, false});
 
+    s_sfxOrder.reset();
     s_initialized = true;
     return true;
 }
@@ -204,69 +233,50 @@ void audio_shutdown()
 
 AudioHandle audio_load_sound(const char* filepath)
 {
-    if (!s_initialized) return 0;
+    if (!s_initialized || !filepath || !*filepath) return 0;
 
-    // 파일 전체를 메모리로 읽기
-    FILE* f = fopen(filepath, "rb");
-    if (!f)
-    {
-        fprintf(stderr, "[audio] Cannot open: %s\n", filepath);
+    try {
+        auto pcm = audio_mp3::load(filepath);
+        if (!pcm) {
+            fprintf(stderr, "[audio] MP3 decode failed: %s (%s)\n",
+                    filepath, audio_mp3::error_name(pcm.error));
+            return 0;
+        }
+
+        // Frame to byte count is checked against the API limit and size_t range.
+        const size_t frames = pcm.channels != 0
+            ? pcm.samples.size() / pcm.channels : 0;
+        const auto layout = audio_pcm::layout_s16(
+            frames, pcm.channels, pcm.rate, XAUDIO2_MAX_BUFFER_BYTES);
+        if (!layout) {
+            fprintf(stderr, "[audio] Unsupported PCM layout: %s\n", filepath);
+            return 0;
+        }
+
+        // SoundData store
+        SoundData sd;
+        sd.format = MakeWaveFormat(pcm.channels, pcm.rate);
+        const size_t pcmBytes = layout->bytes;
+        sd.pcmData.resize(pcmBytes);
+        memcpy(sd.pcmData.data(), pcm.samples.data(), pcmBytes);
+        sd.valid = true;
+
+        if (s_sounds.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+            fprintf(stderr, "[audio] Sound handle limit reached: %s\n", filepath);
+            return 0;
+        }
+        // Store and return handle
+        AudioHandle handle = static_cast<AudioHandle>(s_sounds.size());
+        s_sounds.push_back(std::move(sd));
+        return handle;
+    } catch (const std::bad_alloc&) {
+        fprintf(stderr, "[audio] allocation failed: %s\n", filepath);
+        return 0;
+    } catch (const std::length_error&) {
+        fprintf(stderr, "[audio] PCM storage limit: %s\n", filepath);
         return 0;
     }
-
-    fseek(f, 0, SEEK_END);
-    long fileSize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (fileSize <= 0)
-    {
-        fprintf(stderr, "[audio] Empty file: %s\n", filepath);
-        fclose(f);
-        return 0;
-    }
-
-    std::vector<uint8_t> fileData(static_cast<size_t>(fileSize));
-    const size_t nread = fread(fileData.data(), 1, fileData.size(), f);
-    fclose(f);
-    // 부분 읽기를 잡지 않으면 잘린 데이터가 그대로 디코더로 넘어가
-    // "MP3 decode failed" 로 오진된다. 실제 원인은 I/O 오류다.
-    if (nread != fileData.size())
-    {
-        fprintf(stderr, "[audio] Short read: %s (%zu/%zu bytes)\n",
-                filepath, nread, fileData.size());
-        return 0;
-    }
-
-    // dr_mp3 로 디코딩 (signed 16-bit PCM)
-    drmp3_config cfg = {};
-    drmp3_uint64 totalFrames = 0;
-    drmp3_int16* samples = drmp3_open_memory_and_read_pcm_frames_s16(
-        fileData.data(), fileData.size(),
-        &cfg, &totalFrames, nullptr);
-
-    if (!samples || totalFrames == 0)
-    {
-        fprintf(stderr, "[audio] MP3 decode failed: %s\n", filepath);
-        if (samples) drmp3_free(samples, nullptr);
-        return 0;
-    }
-
-    // SoundData 구성
-    SoundData sd;
-    sd.format = MakeWaveFormat(cfg.channels, cfg.sampleRate);
-    size_t pcmBytes = static_cast<size_t>(totalFrames) * cfg.channels * 2;  // 16-bit = 2 bytes
-    sd.pcmData.resize(pcmBytes);
-    memcpy(sd.pcmData.data(), samples, pcmBytes);
-    sd.valid = true;
-
-    drmp3_free(samples, nullptr);
-
-    // 저장 및 핸들 반환
-    AudioHandle handle = static_cast<AudioHandle>(s_sounds.size());
-    s_sounds.push_back(std::move(sd));
-    return handle;
 }
-
 void audio_unload_sound(AudioHandle handle)
 {
     if (!s_initialized) return;
@@ -286,17 +296,11 @@ void audio_unload_sound(AudioHandle handle)
     for (int i = 0; i < MAX_SFX_VOICES; ++i)
     {
         if (!s_sfxVoices[i] || s_sfxHandles[i] != handle) continue;
-        s_sfxVoices[i]->Stop();
-        s_sfxVoices[i]->FlushSourceBuffers();
-        // Flush 는 즉시 반환하지만 오디오 스레드가 현재 quantum 을 끝낼 때까지
-        // 버퍼를 놓지 않을 수 있다. 큐가 빌 때까지만 짧게 기다린다.
-        for (int spin = 0; spin < 100; ++spin)
-        {
-            XAUDIO2_VOICE_STATE st;
-            s_sfxVoices[i]->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            if (st.BuffersQueued == 0) break;
-            Sleep(1);
-        }
+        // DestroyVoice waits until this voice can no longer read the PCM.
+        // A bounded polling timeout is not proof that the buffer is unused.
+        s_sfxVoices[i]->DestroyVoice();
+        s_sfxVoices[i] = nullptr;
+        s_sfxFormats[i] = {};
         s_sfxHandles[i] = 0;
     }
 
@@ -343,18 +347,16 @@ void audio_play_sound(AudioHandle handle)
         }
     }
 
-    // 모든 보이스가 바쁘면 가장 오래된(첫 번째) 보이스를 강제 중단
+    // A full pool steals the oldest successful start, not a fixed index.
     if (slot == -1)
     {
-        slot = 0;
-        s_sfxVoices[slot]->Stop();
-        s_sfxVoices[slot]->FlushSourceBuffers();
+        slot = static_cast<int>(s_sfxOrder.oldest());
+        // Stop/Flush may still be pending on the audio thread. End the old
+        // borrow before overwriting the only handle that tracks its PCM.
+        s_sfxVoices[slot]->DestroyVoice();
+        s_sfxVoices[slot] = nullptr;
+        s_sfxFormats[slot] = {};
         s_sfxHandles[slot] = 0;
-        if (!FormatMatches(s_sfxFormats[slot], sd.format))
-        {
-            s_sfxVoices[slot]->DestroyVoice();
-            s_sfxVoices[slot] = nullptr;
-        }
     }
 
     // 보이스가 없으면 생성
@@ -363,7 +365,8 @@ void audio_play_sound(AudioHandle handle)
         HRESULT hr = s_xaudio->CreateSourceVoice(&s_sfxVoices[slot], &sd.format);
         if (FAILED(hr))
         {
-            fprintf(stderr, "[audio] CreateSourceVoice failed: 0x%08lx\n", hr);
+            if (first_failure(PlaybackFailure::sfx_create))
+                fprintf(stderr, "[audio] CreateSourceVoice failed: 0x%08lx\n", static_cast<unsigned long>(hr));
             return;
         }
         s_sfxFormats[slot] = sd.format;
@@ -376,11 +379,21 @@ void audio_play_sound(AudioHandle handle)
     buf.Flags      = XAUDIO2_END_OF_STREAM;
 
     s_sfxVoices[slot]->SetVolume(s_sfxVol);
-    s_sfxVoices[slot]->SubmitSourceBuffer(&buf);
-    s_sfxVoices[slot]->Start();
-    // 이 보이스가 물고 있는 PCM 의 주인을 기록해 둔다. audio_unload_sound 가
-    // 버퍼를 해제하기 전에 이 보이스를 멈춰야 하기 때문이다.
+    HRESULT hr = s_sfxVoices[slot]->SubmitSourceBuffer(&buf);
+    if (SUCCEEDED(hr)) hr = s_sfxVoices[slot]->Start();
+    if (FAILED(hr))
+    {
+        // Start can fail after submission, so release the borrow explicitly.
+        s_sfxVoices[slot]->DestroyVoice();
+        s_sfxVoices[slot] = nullptr;
+        s_sfxFormats[slot] = {};
+        s_sfxHandles[slot] = 0;
+        if (first_failure(PlaybackFailure::sfx_start))
+            fprintf(stderr, "[audio] SFX submit/start failed: 0x%08lx\n", static_cast<unsigned long>(hr));
+        return;
+    }
     s_sfxHandles[slot] = handle;
+    s_sfxOrder.mark_started(static_cast<size_t>(slot));
 }
 
 // 실제 BGM 보이스를 생성·시작한다 (s_musicEnabled 검사는 호출부가 한다).
@@ -396,7 +409,8 @@ static void start_music_voice(AudioHandle handle)
     HRESULT hr = s_xaudio->CreateSourceVoice(&s_musicVoice, &sd.format);
     if (FAILED(hr))
     {
-        fprintf(stderr, "[audio] CreateSourceVoice (music) failed: 0x%08lx\n", hr);
+        if (first_failure(PlaybackFailure::music_create))
+            fprintf(stderr, "[audio] CreateSourceVoice (music) failed: 0x%08lx\n", static_cast<unsigned long>(hr));
         return;
     }
 
@@ -408,8 +422,19 @@ static void start_music_voice(AudioHandle handle)
     buf.LoopCount  = XAUDIO2_LOOP_INFINITE;
 
     s_musicVoice->SetVolume(s_musicVol);
-    s_musicVoice->SubmitSourceBuffer(&buf);
-    s_musicVoice->Start();
+    hr = s_musicVoice->SubmitSourceBuffer(&buf);
+    if (SUCCEEDED(hr)) hr = s_musicVoice->Start();
+    if (FAILED(hr))
+    {
+        // Submission may already have lent the PCM to the worker.
+        s_musicVoice->DestroyVoice();
+        s_musicVoice = nullptr;
+        s_currentMusic = 0;
+        if (first_failure(PlaybackFailure::music_start))
+            fprintf(stderr, "[audio] Music submit/start failed: 0x%08lx\n",
+                static_cast<unsigned long>(hr));
+        return;
+    }
     s_currentMusic = handle;
 }
 
@@ -470,15 +495,13 @@ void audio_set_sfx_enabled(bool on)
 
 void audio_set_music_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     s_musicVol = v01;
     if (s_musicVoice) s_musicVoice->SetVolume(s_musicVol);  // 재생 중이면 즉시 반영
 }
 
 void audio_set_sfx_volume(float v01)
 {
-    if (v01 < 0.0f) v01 = 0.0f;
-    if (v01 > 1.0f) v01 = 1.0f;
+    v01 = audio_mix::normalize_gain(v01);
     s_sfxVol = v01;  // 다음 audio_play_sound 부터 적용
 }

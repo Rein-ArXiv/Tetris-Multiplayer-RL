@@ -97,10 +97,9 @@ authenticate(meta::client::MetaClient* meta, const std::string& token,
 
 } // namespace
 
-// 정상 클라이언트는 connect 직후 첫 프레임을 보낸다.
-// 3s 는 위성/모바일 등 고지연 회선에서 meta 토큰 검증 왕복까지 겹치면 정상
-// 접속도 끊는 사례가 있어 5s 로 완화 — slow-loris 류 슬롯 점유 방어에는
-// 여전히 충분히 짧다.
+// Bound the initial polling phase from worker entry, without extending it on
+// partial/unknown frames. This cooperative check does not cancel a blocking
+// authenticate() call; the HTTP client's own limits apply to that call.
 static constexpr auto kJoinTimeout  = std::chrono::seconds(5);
 static constexpr auto kPollInterval = std::chrono::milliseconds(10);
 
@@ -125,7 +124,11 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
 
         if (!stream.empty()) {
             std::vector<net::Frame> frames;
-            net::parse_frames(stream, frames);
+            if (!net::parse_frames(stream, frames)) {
+                RLOG_WARN("[conn " << conn_id << "] close: invalid frame boundary");
+                net::tcp_close(sock);
+                return;
+            }
             for (size_t i = 0; i < frames.size(); ++i) {
                 const net::Frame& f = frames[i];
                 if (f.type == net::MsgType::QUEUE_JOIN) {
@@ -150,9 +153,12 @@ void playerConnThread(net::TcpSocket sock, uint32_t conn_id,
                     // 같은 recv 로 이미 도착한 후속 프레임/부분 바이트를 큐
                     // 폴링 버퍼로 이관 (즉시 QUEUE_CANCEL 유실 방지).
                     pi.streamBuf = residual_stream(frames, i + 1, stream);
-                    RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
-                               << " player_id=" << pi.player_id);
-                    mm.enqueue(std::move(pi));
+                    if (mm.enqueue(std::move(pi))) {
+                        RLOG_DEBUG("[conn " << conn_id << "] QUEUE_JOIN -> queued"
+                                   << " player_id=" << auth->player_id);
+                    } else {
+                        RLOG_INFO("[conn " << conn_id << "] queue unavailable");
+                    }
                     return;
                 }
                 if (f.type == net::MsgType::QUEUE_CANCEL) {

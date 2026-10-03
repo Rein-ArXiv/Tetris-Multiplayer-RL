@@ -1,0 +1,428 @@
+{
+  "id": "lesson-69",
+  "title": "버튼·선택기: 상태 소유 위치",
+  "shortTitle": "선택 값·의도·단일 적용",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 메뉴에 클릭과 Space로 동작하는 시작 버튼이 있습니다.",
+  "finish": "완료: 장식 표시와 아이콘 선택을 호출자가 보관하고, 입력 요청을 한 번 적용한 뒤 현재 값으로 메뉴와 게임 화면을 그립니다.",
+  "objective": "표현 설정·포커스·GPU 자원·게임 규칙의 수명을 구분하고, 불변식과 입력 중재를 지키는 체크박스·선택기를 구현합니다.",
+  "prerequisites": [
+    "순수 버튼 판정과 press 사건",
+    "프레임 갱신·화면 전이",
+    "글리프 캐시와 GPU 참조 수명"
+  ],
+  "recap": {
+    "points": [
+      "버튼은 현재 위치·누름 사건·최종 누름 상태를 서로 구별해 판정합니다.",
+      "위젯의 순수 계산 결과는 호출자가 앱의 동작으로 해석합니다.",
+      "같은 논리 사각형을 입력 판정과 그리기에 사용합니다."
+    ],
+    "bridge": "여러 위젯이 다루는 값을 추가하고, 그 값의 소유자와 요청을 적용하는 지점을 정하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "메뉴에 두 가지 선택을 추가한다",
+      "body": "메뉴에 **장식 표시** 체크박스와 **기본 / 대체** 아이콘 선택기를 넣겠습니다. 장식을 끄면 왼쪽 패널의 잘라낸 이미지와 반투명 이미지가 사라지고, 주 아이콘은 남습니다. 아이콘을 바꾸면 메뉴와 게임 화면에서 같은 선택을 사용합니다. 이미 준비한 두 이미지를 사용하므로 새로운 이미지 로딩 형식은 필요하지 않습니다.\n\n먼저 선택을 바꾼 뒤 게임을 시작하고 Escape로 메뉴에 돌아왔다고 생각해 봅시다. 장식 표시와 아이콘은 유지하되 키보드 커서는 시작 버튼으로 돌아오게 하겠습니다. ‘얼마나 오래 기억할 값인가’에 따라 보관 위치가 달라집니다. 실행을 종료하면 이번 설정은 사라집니다.\n\n구현 경로는 입력 → 위젯의 요청 → 메뉴의 행동 하나 → 설정 갱신 → 현재 값으로 그리기입니다. 버튼을 몇 개 더 그리는 기능을 통해 값의 소유자, 변경을 적용하는 지점, 화면에 드러나는 순서를 함께 설계하겠습니다.",
+      "codes": [
+        {
+          "label": "이번에 만들 메뉴와 조작",
+          "language": "text",
+          "text": "시작            Space: 게임 시작\n장식 표시       Space 또는 클릭: 켜기/끄기\n기본 / 대체     Left/Right 또는 화살표 클릭: 선택\n\nUp/Down: 키보드 커서 이동\n선택기는 양 끝에서 멈춤, 메뉴 재진입 시 커서는 시작으로"
+        }
+      ]
+    },
+    {
+      "title": "값의 수명에 맞춰 소유자를 정한다",
+      "body": "**상태**는 다음 처리에 영향을 주기 위해 보관하는 값입니다. **소유자**는 그 값의 수명과 변경 규칙을 관리하는 코드입니다. 장식 표시와 아이콘 인덱스는 `Preferences`가 소유하고, `run_session`이 Preferences 객체를 프레임 반복문 밖에 둡니다. 객체를 반복문 안에서 매번 생성하면 기본값으로 계속 초기화됩니다.\n\n게임 라운드를 새로 만들어도 선택을 유지하려면 Preferences를 라운드 안에 넣지 않습니다. 한편 키보드 커서 `Focus`는 메뉴 재진입 때 초기화하는 별도 값입니다. 선택한 아이콘의 번호, 업로드된 이미지의 GPU 핸들, 게임 규칙의 블록 위치도 서로 다른 수명을 가집니다. 번호는 표현 설정, 핸들은 ImageStore가 관리하는 자원, 블록 위치는 Application이 가진 게임 상태에 속합니다.\n\n**단일 진실 공급원(single source of truth)**은 같은 사실의 기준이 되는 값을 하나로 정한다는 뜻입니다. 체크박스 내부에 별도의 bool을 두고 Preferences와 서로 맞추는 대신, Preferences의 값을 읽어 매 프레임 체크 모양을 결정합니다. 계산한 표시용 복사본은 만들 수 있지만 변경 기준으로 삼을 독립적인 원본은 늘리지 않습니다.",
+      "codes": [
+        {
+          "label": "프레임 반복문 밖에서 수명을 시작한다",
+          "language": "cpp",
+          "text": "study_app::Application app(initial_round);\nstudy_menu::Preferences preferences;\nauto menu_focus = study_menu::Focus::start;\n\nwhile (!platform_should_close()) {\n    // 입력을 읽고 preferences와 menu_focus를 갱신한다.\n    // 화면이나 라운드가 바뀌어도 preferences 객체는 유지된다.\n}"
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "auto checkbox_row =",
+        "invariant": "호출자가 설정 값과 포커스를 보관하고 위젯 결과를 해석한다.",
+        "mayDiffer": "루트는 g_settings와 settingsIndex를 사용한다. 학습 Preferences는 실행 중 두 표현 값만 유지한다."
+      }
+    },
+    {
+      "title": "체크 값과 변경 요청은 서로 다른 질문의 답이다",
+      "body": "체크박스가 반환하는 `checked`는 **호출할 때 받은 값**입니다. `toggle_requested`는 **이번 입력으로 반전을 요청했는가**입니다. checked가 false일 때 요청이 없다면 계속 false이고, 요청이 있다면 적용 후 true가 됩니다. 두 필드를 하나로 합치면 ‘꺼져 있다’와 ‘끄라는 요청이 왔다’를 구별하기 어려워집니다.\n\n위젯은 버튼 판정 결과 `activated`를 요청으로 바꾸고 checked를 복사합니다. `enabled=false`는 상호작용을 막지만 전달받은 체크 값을 false로 덮어쓰지 않습니다. 값을 유지한 채 조작만 비활성화할 수 있어야 합니다.\n\n이 함수는 호출자가 가진 상태를 수정하지 않는 순수 계산입니다. 같은 bounds·입력·checked·enabled를 주면 같은 결과를 돌려줍니다. 예측 가능한 계산을 사용하면 GUI 창을 띄우지 않고도 ‘체크된 상태에서 눌렀을 때 원래 값과 요청이 각각 무엇인가’를 검사할 수 있습니다.",
+      "codes": [
+        {
+          "label": "값을 소유하지 않는 체크박스",
+          "language": "cpp",
+          "text": "inline Checkbox checkbox(Rect bounds, const Input& input, bool checked,\n                         bool enabled = true) noexcept {\n    Checkbox box;\n    box.checked = checked;\n    box.interaction = button(bounds, input, enabled);\n    box.toggle_requested = box.interaction.activated;\n    return box;\n}\n"
+        },
+        {
+          "label": "값과 요청의 조합",
+          "language": "text",
+          "text": "입력 checked   toggle_requested   적용 후 값\nfalse          false              false\nfalse          true               true\ntrue           false              true\ntrue           true               false"
+        }
+      ],
+      "reference": {
+        "path": "src/gui.cpp",
+        "symbol": "bool gui_checkbox(",
+        "invariant": "체크 값을 인자로 받고 클릭 결과를 반환하며, 반전은 호출자가 수행한다.",
+        "mayDiffer": "루트는 그리기와 클릭 판정을 함께 수행한다. 학습 checkbox는 순수 결과만 반환한다."
+      }
+    },
+    {
+      "title": "선택 인덱스의 불변식을 증감 전에 지킨다",
+      "body": "아이콘이 두 개라면 유효한 인덱스는 0과 1입니다. **불변식(invariant)**은 객체가 사용 가능한 상태일 때 계속 유지해야 할 조건입니다. 여기서는 `0 <= badge < badge_count`를 유지합니다. 초기값 0을 정하고, 외부에 읽기 접근자만 제공하며, 값 변경은 `apply`로 모읍니다.\n\n인덱스가 `std::size_t`라는 부호 없는 정수일 때 0에서 먼저 빼면 큰 값으로 돌아갑니다. 그 뒤 0보다 작은지 검사해도 발견할 수 없습니다. 따라서 감소 전에 0인지 검사하고, 증가 전에는 마지막 인덱스인지 검사합니다. 선택기는 끝에서 멈추는 정책을 사용합니다. 마지막에서 처음으로 돌아가는 순환 정책은 별도의 선택입니다.\n\nPreferences의 개수는 2라는 양의 상수입니다. 여러 곳에서 재사용할 위젯 함수는 count가 0인 경우도 받으므로 `count == 0`을 먼저 확인한 다음 `count - 1`을 계산합니다. 함수의 전제 조건과 객체 내부의 보장 조건을 나누어 읽으면 검사가 왜 서로 다른 위치에 있는지 이해할 수 있습니다.",
+      "codes": [
+        {
+          "label": "값을 바꾸기 전에 경계를 검사한다",
+          "language": "cpp",
+          "text": "case Action::previous_badge:\n    if (badge_ == 0) return false;\n    --badge_;\n    return true;\ncase Action::next_badge:\n    if (badge_ >= badge_count - 1) return false;\n    ++badge_;\n    return true;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "private만으로 불변식이 완성되지는 않는다",
+          "body": "private는 임의의 직접 대입 경로를 줄입니다. 생성자와 모든 멤버 변경 함수가 조건을 지켜야 불변식이 유지됩니다. 설정 파일에서 값을 읽어오는 경로를 추가한다면 그 경로에도 유효 범위 검사가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "선택기는 방향을 제안하고 끝의 조작을 막는다",
+      "body": "선택기는 왼쪽·오른쪽 버튼과 가운데 라벨 공간으로 구성합니다. 전체 높이가 h이면 양쪽 버튼은 h×h 정사각형이고, 중앙 공간을 남기려면 전체 폭은 `2*h`보다 커야 합니다. 예를 들어 폭 180, 높이 24이면 중앙에 132의 폭이 남습니다. 서로 겹치는 버튼은 같은 입력에서 양쪽 의도를 동시에 만들 수 있으므로 배치 단계에서 거절합니다.\n\n`selector`는 index와 count, 유한하고 양수인 배치, 화살표의 실제 경계를 차례로 확인합니다. 부동소수점에서는 아주 큰 위치에 작은 폭을 더해도 같은 값으로 반올림될 수 있으므로, 각 화살표가 유효한 사각형인지도 확인합니다. 이 구현은 작은 고정 논리 좌표를 쓰지만 함수의 반환 계약은 잘못된 입력에도 정해 둡니다.\n\n왼쪽은 index>0일 때, 오른쪽은 index<count-1일 때만 활성화합니다. 반환하는 direction은 -1·0·+1이며 실제 인덱스를 바꾸지 않습니다. count가 1이면 양쪽이 모두 비활성이고, count가 0이거나 index가 범위를 벗어나면 기본 결과를 반환합니다. 렌더링 코드는 활성 여부를 읽어 사용할 수 없는 화살표 문자를 숨깁니다.",
+      "codes": [
+        {
+          "label": "범위와 방향 계산",
+          "language": "cpp",
+          "text": "if (count == 0 || index >= count) return {};\n// 사각형과 두 화살표의 배치 검증 뒤\ns.previous_enabled = enabled && index > 0;\ns.next_enabled = enabled && index < count - 1;\ns.previous = button(left, input, s.previous_enabled);\ns.next = button(right, input, s.next_enabled);\nif (s.previous.activated) s.direction = -1;\nelse if (s.next.activated) s.direction = 1;"
+        }
+      ],
+      "reference": {
+        "path": "src/gui.cpp",
+        "symbol": "int gui_value_selector(",
+        "invariant": "위젯은 이동 방향을 반환하고 호출자가 값을 갱신한다.",
+        "mayDiffer": "루트는 allowPrevious/allowNext를 호출자가 전달한다. 학습 함수는 index/count에서 활성 여부를 계산하고, 그리기는 별도 함수가 수행한다."
+      }
+    },
+    {
+      "title": "요청을 한 번 적용하는 이유를 반전으로 확인한다",
+      "body": "체크박스를 눌렀는데 겉으로 아무 일도 일어나지 않는 경우를 생각해 봅시다. 입력 처리에서 `value = !value`를 하고 그리기에서도 같은 요청을 적용했다면 false → true → false가 됩니다. 입력 판정은 정확했지만 변경을 두 번 실행한 것입니다.\n\n**멱등성(idempotence)**은 같은 연산을 여러 번 적용한 결과가 한 번 적용한 결과와 같은 성질입니다. `value = true`는 같은 대입을 반복해도 true이지만 `value = !value`는 그렇지 않습니다. 반전은 두 번 실행하면 원래 값으로 돌아오는 비멱등 연산입니다. 다음 아이콘으로 이동하는 요청도 중복 실행하면 둘 이상 이동할 수 있습니다.\n\n`evaluate`는 Focus와 Action을 담은 Intent를 반환하고, main은 그 Action을 Preferences에 한 번 적용합니다. 순수 평가 함수를 두 번 호출해도 설정 값은 바뀌지 않지만, 두 결과를 모두 apply하면 중복 변경됩니다. ‘함수가 순수하다’는 계산의 성질이고 ‘요청을 한 번 소비한다’는 호출 흐름의 규칙입니다.",
+      "codes": [
+        {
+          "label": "평가와 적용 경계를 한 곳에 둔다",
+          "language": "cpp",
+          "text": "const auto intent = study_menu::evaluate(preferences, menu_focus, pointer, keys);\nmenu_focus = intent.focus;\n(void)preferences.apply(intent.action);\nconfirm = intent.action == study_menu::Action::start;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "새 값 반환을 선택할 수도 있다",
+          "body": "체크박스가 반전 요청 대신 희망하는 새 bool을 반환하도록 설계할 수도 있습니다. 같은 새 값의 대입은 멱등이지만, 오래된 스냅샷에서 만든 새 값을 나중에 적용하면 최신 변경을 덮어쓸 수 있습니다. 여기서는 프레임 안에서 평가→적용을 이어 실행하는 요청 모델을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "요청 여부와 실제 변경 여부를 구분한다",
+      "body": "Preferences의 `apply` 반환값은 ‘액션을 받았다’가 아니라 **저장된 값이 바뀌었다**입니다. 마지막 아이콘에서 next_badge 요청을 받아도 값은 유지되고 false를 반환합니다. none도 false이며, start는 게임 화면 전이 요청이므로 Preferences를 바꾸지 않아 false입니다.\n\n반환값의 의미를 잘못 해석해 `if (preferences.apply(action)) start_game();`이라고 쓰면 아이콘을 바꾸었을 때 게임이 시작되고, start 요청은 무시됩니다. 화면 전이는 Action::start인지 따로 판정해 Application의 confirm에 전달해야 합니다.\n\n일반적으로 변경 여부는 재계산·저장·외부 알림처럼 값이 실제로 달라졌을 때만 해야 하는 후속 처리를 결정하는 데 유용합니다. 이번 main은 매 프레임 최신 표현 값을 읽으므로 반환값을 사용하지 않음을 `(void)`로 드러냅니다. apply라는 이름만 보고 성공/실패로 추측하지 않고 반환 계약을 읽는 습관이 필요합니다.",
+      "codes": [
+        {
+          "label": "서로 다른 두 결과",
+          "language": "text",
+          "text": "action              설정 값 변경?    화면 confirm?\nnone                false            false\ntoggle_decorations  true             false\nnext_badge (끝)     false            false\nstart               false            true"
+        }
+      ]
+    },
+    {
+      "title": "마우스와 키보드를 행동 하나로 모은다",
+      "body": "클릭과 Space가 같은 프레임에 들어올 수 있습니다. 두 입력 경로가 각각 설정을 반전하면 한 번 조작한 것처럼 보였는데 두 번 반전됩니다. 메뉴의 `evaluate`는 한 프레임에 **Action 하나**를 반환하도록 만들어 이 결정을 모읍니다.\n\n정책은 위젯 영역의 유효한 press를 우선하는 것입니다. 시작 버튼, 체크박스, 선택기를 검사하고 처음 받아들인 대상에서 반환합니다. 아무 위젯에도 해당하지 않는 클릭이나 단순 마우스 이동은 키보드 조작을 막지 않습니다. 선택기 중앙과 비활성 화살표를 누른 경우에도 선택기에 포커스를 옮기고 Action::none으로 그 프레임을 소비합니다.\n\n예를 들어 키보드 커서가 시작에 있을 때, 사용할 수 없는 왼쪽 화살표를 누르면서 Space를 눌렀다고 합시다. 선택기가 아무 행동도 만들지 않았다는 이유로 키보드 처리까지 이어 가면 게임이 시작됩니다. **동작 없음**과 **입력을 받지 않음**을 구분해야 합니다. 여기서는 선택기 영역에서 반환하는 Intent 자체가 입력을 받았다는 분기 경계입니다.",
+      "codes": [
+        {
+          "label": "비활성 영역도 선택기가 소비한다",
+          "language": "cpp",
+          "text": "if (!input.cancelled && input.press &&\n    study_ui::contains(badge_bounds, *input.press)) {\n    const auto s = study_ui::selector(badge_bounds, input,\n        prefs.badge(), Preferences::badge_count);\n    const auto action = s.direction < 0 ? Action::previous_badge\n                      : s.direction > 0 ? Action::next_badge : Action::none;\n    return Intent{Focus::badge, action};\n}"
+        }
+      ]
+    },
+    {
+      "title": "포커스 이동과 입력 취소의 범위를 정한다",
+      "body": "키보드는 Up/Down으로 Focus를 먼저 옮긴 뒤 도착한 항목에 Space 또는 Left/Right를 해석합니다. 시작에서 Down과 Space가 함께 눌리면 장식 항목으로 이동한 뒤 장식을 반전합니다. Up과 Down이 동시에 눌리면 이동하지 않고, 선택기에서 Left와 Right가 동시에 눌리면 값도 바꾸지 않습니다. 이 규칙은 키가 검사되는 코드 순서 때문에 우연히 결정되지 않도록 명시합니다.\n\n메뉴 재진입 때 Focus는 start로 초기화하지만 Preferences는 유지합니다. 모든 프레임에서 Focus를 초기화하면 Down으로 옮긴 커서가 다음 프레임에 시작으로 돌아옵니다. 초기화는 화면이 실제로 바뀐 분기 안에 둡니다.\n\n취소도 범위를 나눕니다. `Input.cancelled`는 포인터 판정을 막습니다. 포인터가 창 밖에 있거나 논리 좌표로 변환할 수 없어도, 키보드 포커스가 있는 창은 키로 조작할 수 있습니다. `Keys.cancelled`는 플랫폼의 키보드 입력 취소를 전달하며, 이 메뉴는 그 프레임의 메뉴 명령 전체를 무시합니다. 단순한 포인터 사용 불가와 창의 키보드 입력 취소를 같은 조건으로 합치면 조작 가능한 경로를 불필요하게 막게 됩니다.",
+      "codes": [
+        {
+          "label": "Focus를 초기화하는 조건",
+          "language": "cpp",
+          "text": "if (app.screen() != shown_screen) {\n    shown_screen = app.screen();\n    if (shown_screen == study_app::Screen::menu)\n        menu_focus = study_menu::Focus::start;\n}"
+        },
+        {
+          "label": "취소 정책",
+          "language": "text",
+          "text": "키보드 취소 없음 + 포인터 없음 → 키보드 경로 사용\n키보드 취소 없음 + 위젯 press → 마우스 대상 우선\n키보드 취소 있음              → 메뉴 명령 없음"
+        }
+      ]
+    },
+    {
+      "title": "갱신한 값을 같은 프레임에 그린다",
+      "body": "main은 입력을 모아 evaluate → apply를 수행하고 Application을 갱신한 다음 그립니다. 장식 반전을 적용한 프레임에서는 새 값으로 장식 두 개를 그릴지 결정합니다. 선택한 아이콘 번호는 이미 준비한 두 핸들 중 하나로 바꾸어 사용합니다. 설정 변경이 이미지 파일을 다시 디코딩하거나 게임 규칙의 난수를 소비할 필요는 없습니다.\n\n그리기 함수 `controls`는 Preferences를 const 참조로 읽고 pointer를 값으로 받습니다. 지역 복사본의 press를 지운 뒤 hover·held와 활성 상태를 계산하므로, 그리기 호출이 설정 변경 요청을 다시 처리하지 않습니다. 배경, 체크 모양, 라벨, 포커스 밑줄 순서가 코드에 드러납니다. 키보드 포커스에는 색 외에도 밑줄을 사용하고, 비활성 화살표는 문자를 숨겨 구별합니다.\n\nUI 판정의 스냅샷은 갱신 전 checked를 담을 수 있습니다. 그것을 계속 그리기에 쓰면 한 프레임 늦은 체크 모양을 보게 됩니다. 이번 구현은 그리는 시점에 Preferences를 다시 읽습니다. 현재 루트 gui_checkbox는 그리기와 판정을 함께 하므로, 반환 뒤에 반전한 값은 다음 프레임의 위젯 그림에서 보입니다. 두 구조의 갱신 순서를 구별해서 읽어야 합니다.",
+      "codes": [
+        {
+          "label": "표현 설정에서 그릴 자원을 고른다",
+          "language": "cpp",
+          "text": "const auto icon = preferences.badge() == 0 ? base_icon : alternate_icon;\n// 주 아이콘은 항상 그리고, 장식 두 개는 설정에 따라 그린다.\nif (preferences.decorations()) {\n    if (!images.draw(badge_quad, icon, crop) ||\n        !images.draw(badge_quad, icon, translucent)) return 1;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "화면이 다시 그려진다고 상태 동기화가 저절로 해결되지는 않는다",
+          "body": "즉시모드도 호출자가 오래된 값을 넘기거나 요청을 중복 적용할 수 있습니다. 값의 소유자, 입력의 소비 지점, 갱신과 그리기 순서를 함께 정해야 합니다. 이 체크박스 함수가 상태를 보관하지 않는다는 사실을 모든 즉시모드 UI의 성질로 확대하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "늘어난 라벨의 준비와 수명을 한 곳에 모은다",
+      "body": "화면에 필요한 글자는 시작·플레이·장식 표시·기본·대체·왼쪽·오른쪽 화살표의 일곱 종류입니다. `Labels`는 Label 열거값으로 각 글자의 문단과 준비된 GPU 텍스트를 찾아 사용합니다. main에 일곱 개의 별도 변수와 DPI 변경 분기를 반복하는 대신 같은 준비 규칙을 배열의 각 항목에 적용합니다.\n\n`init`은 지역 candidate 배열에 모든 라벨을 준비한 뒤 성공했을 때 entries로 이동합니다. 중간 라벨이 실패하면 Labels를 준비 완료로 공개하지 않습니다. 글리프 캐시는 준비 과정에서 채워질 수 있으므로 이 처리가 공유 atlas 전체를 되돌리는 트랜잭션이라는 뜻은 아닙니다. main은 초기화 실패를 받으면 세션을 종료합니다.\n\nDPI가 바뀌어 장치 글자 높이가 달라지면 Labels의 옛 참조를 reset하고, GPU/CPU 캐시와 atlas를 정리한 다음 일곱 라벨을 함께 준비합니다. Labels는 문단과 텍스트 스냅샷을 보관하지만 atlas 텍스처를 소유하지 않습니다. 이미지 선택 번호, 글리프 캐시, 라벨의 참조 수명을 따로 관리해야 UI 선택을 바꿀 때 자원을 잘못 없애지 않습니다.",
+      "codes": [
+        {
+          "label": "공유 페이지를 비우기 전 참조를 정리한다",
+          "language": "cpp",
+          "text": "if (plan->device_height != prepared_height) {\n    ui_labels.reset();\n    gpu_cache.clear();\n    font.clear();\n    if (!atlas.clear() || !ui_labels.init(font, gpu_cache, density)) return 1;\n    prepared_height = plan->device_height;\n}"
+        }
+      ]
+    },
+    {
+      "title": "실패 사례를 상태표로 검사한다",
+      "body": "테스트에서는 메뉴를 그렸다는 사실보다 상태 전이가 계약과 맞는지를 확인합니다. 장식 두 값 × 아이콘 두 값 × 포커스 세 값에서 시작하고 키 조합별 도착 포커스와 Action을 표로 적습니다. 기대 결과를 구현과 같은 if 문으로 다시 계산하면 구현의 실수를 그대로 복사하기 쉽습니다. 작은 상태 공간은 별도로 적은 표와 대조하기 좋습니다.\n\n포인터가 없어도 키보드 표의 결과가 유지되는지 확인하고, 마우스가 실제 위젯을 눌렀을 때는 같은 프레임 키 입력보다 우선하는지 검사합니다. 선택기 중앙·비활성 끝 화살표에서 Space가 시작으로 새어 나가는 경우도 넣습니다. evaluate를 반복 호출한 뒤 Preferences가 그대로인지, 한 번 apply한 뒤에만 바뀌는지도 구별합니다.\n\n게임과의 경계에서는 설정을 바꾸어도 규칙 상태 해시가 변하지 않아야 합니다. 여기서 해시 비교는 전체 프로그램의 무결성을 증명하는 절차가 아니라, 선택한 같은 라운드 상태에서 표현 설정만 바꾼 시나리오의 회귀 검사입니다. 메뉴로 돌아가 다시 시작할 때 설정은 유지하고 라운드는 초기 조건에서 시작하는지 확인합니다.",
+      "codes": [
+        {
+          "label": "비멱등 요청의 중복 적용을 드러내는 검사",
+          "language": "cpp",
+          "text": "study_menu::Preferences p;\nconst auto intent = study_menu::evaluate(p, study_menu::Focus::start,\n    press_on_checkbox, {});\nCHECK(p.decorations());       // 평가만으로는 변경되지 않는다.\nCHECK(p.apply(intent.action));\nCHECK(!p.decorations());\nCHECK(p.apply(intent.action));\nCHECK(p.decorations());       // 중복 적용하면 원래 값으로 돌아온다."
+        }
+      ]
+    },
+    {
+      "title": "파일을 연결하고 메뉴에서 관찰한다",
+      "body": "누적 프로젝트는 `checkpoints/69-widget-state`입니다. `client/widgets.h`가 순수 위젯을, `client/menu_model.h`가 설정 값·키보드 포커스·메뉴 행동을, `renderer/menu_controls.h`와 `menu_labels.h`가 현재 값의 표현을 담당합니다. main은 이들을 프레임 순서로 연결합니다. 새 헤더는 C++17 인라인 함수로 구성하고 기존 tetris 타깃에서 포함합니다. 상태 검사는 독립 실행 파일 `widget_state_contract`로 등록합니다.\n\nSDL2와 OpenGL 3.3 Core 환경에서 아래 명령으로 빌드하고 실행합니다. 빌드 디렉터리로 이동해서 실행해야 복사된 assets의 이미지와 폰트를 찾습니다. 메뉴에서 Down으로 장식 항목을 선택하고 Space로 끈 뒤, Down과 Right로 대체 아이콘을 고릅니다. 시작 항목으로 돌아가 게임을 시작한 뒤 Escape로 메뉴에 돌아와 선택 값과 커서 위치를 관찰합니다.\n\n주 아이콘은 남고 장식 두 개만 사라져야 합니다. 기본에서는 왼쪽 화살표, 대체에서는 오른쪽 화살표가 사라집니다. 포커스는 시작으로 돌아오고 선택 값은 유지됩니다. 프로그램을 종료하고 다시 실행하면 기본 설정으로 시작합니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 빌드와 실행",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/69-widget-state -B out/lesson69 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/lesson69\nctest --test-dir out/lesson69 --output-on-failure\ncd out/lesson69\n./tetris"
+        }
+      ]
+    },
+    {
+      "title": "완성 파일을 책임별로 따라 읽는다",
+      "body": "먼저 Preferences의 두 값과 apply의 변경 규칙을 읽고, evaluate가 입력을 어떻게 Action 하나로 좁히는지 따라가세요. 다음으로 main에서 적용 지점을 찾고, controls가 갱신한 값을 읽기만 하는지 확인합니다. 라벨 준비와 GPU 핸들은 설정 값의 변경 규칙에서 분리되어 있습니다.\n\n본문 스니펫은 상태 소유와 단일 적용을 설명하는 기준입니다. 아래 전체 파일은 이 차시의 누적 구현이고, 옆의 현재 코드 레퍼런스는 프로젝트가 바뀌면서 세부가 달라질 수 있습니다. 비교할 핵심은 위젯 개수나 좌표 숫자보다 누가 값을 보관하고, 요청을 어디서 적용하며, 어떤 값으로 그리는가입니다.",
+      "codes": [
+        {
+          "label": "client/widgets.h",
+          "language": "cpp",
+          "file": "checkpoints/69-widget-state/client/widgets.h",
+          "collapsed": true
+        },
+        {
+          "label": "client/menu_model.h",
+          "language": "cpp",
+          "file": "checkpoints/69-widget-state/client/menu_model.h",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/menu_labels.h",
+          "language": "cpp",
+          "file": "checkpoints/69-widget-state/renderer/menu_labels.h",
+          "collapsed": true
+        },
+        {
+          "label": "renderer/menu_controls.h",
+          "language": "cpp",
+          "file": "checkpoints/69-widget-state/renderer/menu_controls.h",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp",
+          "language": "cpp",
+          "file": "checkpoints/69-widget-state/src/main.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/widget_state_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/69-widget-state/tests/widget_state_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/69-widget-state/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "69-1",
+      "question": "장식이 켜진 상태에서 체크박스를 한 번 눌렀습니다. evaluate를 두 번 호출하고 각 결과를 모두 apply하면 최종 값은 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "꺼진다. 평가 두 번은 요청 하나로 합쳐진다."
+        },
+        {
+          "id": "b",
+          "text": "켜져 있다. 반전이 두 번 적용되어 원래 값으로 돌아온다."
+        },
+        {
+          "id": "c",
+          "text": "설정은 바뀌지 않고 포커스만 사라진다."
+        },
+        {
+          "id": "d",
+          "text": "순수 함수가 상태 변경을 금지하므로 apply도 실행되지 않는다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "켜져 있다. 반전이 두 번 적용되어 원래 값으로 돌아온다.",
+      "explanation": "evaluate는 값을 바꾸지 않지만 같은 반전 요청을 반환합니다. 각 요청을 apply하면 true→false→true가 됩니다. 순수 평가와 요청의 단일 소비는 별개의 계약입니다."
+    },
+    {
+      "id": "69-2",
+      "question": "기본 아이콘을 선택한 상태이며 키보드 포커스는 시작 버튼에 있습니다. 비활성 왼쪽 화살표를 누르면서 Space가 함께 들어오면 어떻게 처리하나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "게임을 시작하고 선택기는 그대로 둔다."
+        },
+        {
+          "id": "b",
+          "text": "마지막 아이콘으로 순환한다."
+        },
+        {
+          "id": "c",
+          "text": "체크박스 값을 반전한다."
+        },
+        {
+          "id": "d",
+          "text": "선택기로 포커스를 옮기고, 아이콘 변경이나 게임 시작은 하지 않는다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "선택기로 포커스를 옮기고, 아이콘 변경이나 게임 시작은 하지 않는다.",
+      "explanation": "선택기 전체 영역이 press를 소비합니다. 비활성 끝점은 Action::none을 반환하지만 키보드 경로로 계속 진행하지 않습니다. 입력을 받았는지와 실제 변경이 있는지를 구분합니다."
+    },
+    {
+      "id": "69-3",
+      "question": "포인터가 창 밖에 있지만 키보드 포커스는 유지됩니다. 장식 항목에 포커스가 있고 Space를 누르면 어떤 결과가 맞나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "마우스 판정은 건너뛰고 장식을 반전한다."
+        },
+        {
+          "id": "b",
+          "text": "포인터가 없으므로 모든 키 입력을 무시한다."
+        },
+        {
+          "id": "c",
+          "text": "항상 시작 항목으로 포커스를 초기화한다."
+        },
+        {
+          "id": "d",
+          "text": "마우스 좌표를 (0,0)으로 바꿔 첫 위젯을 누른다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "마우스 판정은 건너뛰고 장식을 반전한다.",
+      "explanation": "Input.cancelled는 포인터 경로를 막습니다. Keys.cancelled가 false라면 키보드 경로는 계속 사용할 수 있습니다. 포인터 사용 불가를 키보드 취소와 합치지 않습니다."
+    },
+    {
+      "id": "69-4",
+      "question": "대체 아이콘에서 next_badge를 apply했더니 false가 반환됐습니다. 이 값은 무엇을 의미하나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "아이콘 파일 업로드가 실패했다."
+        },
+        {
+          "id": "b",
+          "text": "위젯 사각형이 잘못되어 프로그램을 종료해야 한다."
+        },
+        {
+          "id": "c",
+          "text": "저장된 설정 값이 바뀌지 않았다."
+        },
+        {
+          "id": "d",
+          "text": "포커스가 메뉴에서 사라졌다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "저장된 설정 값이 바뀌지 않았다.",
+      "explanation": "apply의 bool은 저장 값의 실제 변경 여부입니다. 마지막 인덱스의 다음 요청은 경계에서 멈추므로 false입니다. 입력 요청 존재 여부나 GPU 성공 여부를 의미하지 않습니다."
+    },
+    {
+      "id": "69-5",
+      "question": "매 프레임의 반복문 안에서 Preferences를 새로 생성했더니 선택이 유지되지 않습니다. 요구한 수명을 만족시키는 수정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "각 체크박스 함수 안에 static bool을 추가한다."
+        },
+        {
+          "id": "b",
+          "text": "Preferences를 run_session의 반복문 밖에 두고, 메뉴 재진입 시 Focus만 초기화한다."
+        },
+        {
+          "id": "c",
+          "text": "아이콘 인덱스를 매 프레임 게임 규칙의 난수 값으로 대체한다."
+        },
+        {
+          "id": "d",
+          "text": "설정 값을 GPU 텍스처 핸들 안에 저장한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Preferences를 run_session의 반복문 밖에 두고, 메뉴 재진입 시 Focus만 초기화한다.",
+      "explanation": "표현 설정은 메뉴·게임 전이와 라운드 재시작을 지나 유지해야 하므로 run_session이 소유합니다. 메뉴 포커스는 별도 초기화 정책을 사용합니다. 영구 저장은 이번 구현에 포함하지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "Preferences를 프레임 반복문 밖에 두고 메뉴 재진입 때 Focus만 초기화한다.",
+      "체크 값·반전 요청·실제 변경 여부를 표로 구분한다.",
+      "같은 프레임의 마우스와 키 입력을 Action 하나로 모은다.",
+      "설정 갱신 뒤 현재 값으로 체크·아이콘·화살표를 그린다."
+    ],
+    "failureChecks": [
+      "반전 요청이 입력과 그리기에서 중복 적용되지 않는지 확인한다.",
+      "0항목·끝점·비활성 화살표 press와 Space 조합을 검사한다.",
+      "포인터 사용 불가가 키보드를 막지 않는지 확인한다.",
+      "설정 변경과 메뉴 재진입이 게임 규칙의 초기 조건을 바꾸지 않는지 확인한다."
+    ],
+    "expected": "UI의 값·의도·변경 결과를 구별하고, 수명과 갱신 순서를 따라 중복 반전·설정 초기화·입력 누수를 진단한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 위젯 및 원고 후보를 직접 검토하고 누적 구현·루트 코드·상태표와 대조",
+    "draftJob": "out/learning-jobs/069-outline-events.jsonl",
+    "corrections": [
+      "즉시모드 일반의 무상태 단정 제거; 이 순수 위젯의 계약으로 한정",
+      "화면이 바뀌면 항상 포커스 초기화한다는 설명을 메뉴 재진입 분기로 교정",
+      "모든 마우스 입력이 우선한다는 표현을 위젯의 유효한 press로 한정",
+      "기본 Selector 반환만으로 임의 배치를 안전하게 그릴 수 있다는 단정 제거",
+      "마우스 사용 불가와 키보드 취소 분리; apply의 멱등/변경 여부·Label 준비 실패 범위 설명",
+      "재진술 문제를 중복 적용·비활성 끝점 소비·수명 시나리오로 재작성"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED73/SDL74CTest·누적 tetris 빌드·경고0",
+    "독립 상태표 768 키/포커스/입력채널 조합·단일 적용·경계 소비·설정 수명·규칙 해시 분리; UBSan/float-cast-overflow",
+    "SDL 실제 사건 큐와 통제한 포인터 fixture의 기존 빠른 클릭·취소·메뉴 전이 회귀",
+    "루트 checkbox 수정전 signed overflow·selector 중첩 영역 재현; 수정후 16764 독립 좌표/방향 활성 조합·무효 배치·UBSan",
+    "실제 SDL offscreen/llvmpipe 단일 버퍼 시험 컨텍스트: 일곱 라벨·36 설정/포커스/DPI 조합·참조 revision/reset·GL오류 없음; 수동 GUI 검증 아님",
+    "root17CTest·sim_hash_dump골든 유지. 수동 GUI·Windows/macOS네이티브 미검증"
+  ]
+}

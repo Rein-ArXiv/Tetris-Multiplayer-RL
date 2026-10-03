@@ -5,12 +5,12 @@
 // platform/platform.h  — OS 추상화 인터페이스
 //
 // 기성 즉시 그리기 라이브러리의 창·입력·시간 API 를 대체한다.
-// 구현은 platform/win32.cpp에 있습니다.
+// 구현은 빌드에서 선택한 platform/win32.cpp 또는 platform/sdl.cpp에 있습니다.
 //
 // 학습 포인트:
-//   "창을 하나 연다" 한 줄은 아래 platform_init() 이 호출하는 80줄을 숨겨놓은 것.
-//   "이 키가 눌렸는가" 조회는 WM_KEYDOWN 메시지로 채우는 keyState[] 테이블 조회.
-//   프레임 델타타임은 QueryPerformanceCounter 두 번의 차이.
+//   platform_init()은 창과 GL 컨텍스트의 획득·실패 처리를 담당한다.
+//   키 상태는 Win32 메시지 또는 SDL 이벤트를 공통 키 값으로 변환해 저장한다.
+//   경과 시간은 백엔드의 고해상도 카운터 차이를 초 단위로 환산한다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── 색상 ─────────────────────────────────────────────────────────────────────
@@ -26,8 +26,8 @@ constexpr Color RED      = {230,  41,  55, 255};
 constexpr Color RAYWHITE = {245, 245, 245, 255};
 
 // ─── 키코드 ───────────────────────────────────────────────────────────────────
-// 값이 Win32 VK_* 상수와 직접 대응하므로 별도 매핑 테이블이 필요 없습니다.
-// WndProc의 WM_KEYDOWN 에서 wParam 을 그대로 keyState[] 인덱스로 씁니다.
+// 공통 값은 Win32 VK_*에 맞췄다. Win32는 직접 사용하고 SDL은 이벤트 키를
+// 이 값으로 매핑한다. 게임/UI는 백엔드의 원래 키 값을 사용하지 않는다.
 enum PlatformKey : int {
     PKEY_LEFT   = 0x25,  // VK_LEFT
     PKEY_RIGHT  = 0x27,  // VK_RIGHT
@@ -57,6 +57,7 @@ enum PlatformKey : int {
 // 윈도우와 입력/타이머 백엔드 초기화. OpenGL 3.3 Core 컨텍스트를 함께 만든다.
 // 컨텍스트 생성에 실패하면 프로그램을 계속 진행할 수 없으므로 즉시 실패한다.
 // 실패 시 platform_should_close() 가 true 가 되므로 호출자는 반드시 확인한다.
+// 실패한 경우에도 platform_shutdown()으로 획득한 자원을 정리한 뒤 종료한다.
 void   platform_init(int w, int h, const char* title);
 
 // 창을 띄우지 못했거나 렌더러를 만들지 못했을 때 사용자에게 이유를 보여준다.
@@ -72,14 +73,16 @@ void   platform_shutdown();
 // ESC 키는 여기 관여하지 않는다 — 화면별 뒤로가기로만 쓰인다.
 bool   platform_should_close();
 
-// 프레임 시작: 이전 키 상태 스냅샷 + 메시지 루프(PeekMessage) + 델타타임 반환.
+// 프레임 시작: 이전 키 상태 스냅샷 + Win32/SDL 이벤트 처리 + 델타타임 반환.
 // MAX_DELTA = 100ms 클램핑 포함.
 float  platform_begin_frame();
 
-// 프레임 끝. 소프트웨어 VSync가 켜졌다면 60 Hz에 맞춰 남은 시간을 쉰다.
+// 프레임 끝의 소프트웨어 페이싱. 설정 on은 60 Hz, off는 240 Hz를 목표로
+// 남은 시간을 쉰다. GL 버퍼 교체 동기화 자체는 별도이며 정확한 주기를 보장하지 않는다.
 void   platform_end_frame();
 
-// 그린 프레임을 화면에 내보낸다 (버퍼 교체).
+// 현재 창의 버퍼 교체를 요청한다. 반환은 GPU 완료/모니터 표시 완료를 뜻하지 않는다.
+// 다음 프레임의 back buffer 내용 보존은 가정하지 않는다.
 void   platform_present();
 
 // ─── OpenGL 연동 ─────────────────────────────────────────────────────────────
@@ -96,19 +99,26 @@ void*  platform_gl_get_proc(const char* name);
 // 지점과 그려진 버튼이 서로 다른 곳을 가리키게 된다.
 void   platform_viewport(int& x_out, int& y_out, int& w_out, int& h_out);
 
-// 이 프레임에 처음 눌린 키인가? (edge)
-// keyState[key] == true && keyPrev[key] == false
+// 이 프레임에 눌림 전이가 있었는가? OS 자동 반복은 제외한다.
+// 같은 프레임에 떼어도 true. 포커스 상실 이전의 눌림은 취소한다.
 bool   platform_key_pressed(int key);
 
 // 현재 눌려있는 키인가? (level)
 bool   platform_key_down(int key);
 
-// WM_CHAR 로 받은 문자 하나 꺼내기 (없으면 0).
+// 이 프레임에 포커스를 잃었는가? 상위 계층의 미전달 입력도 취소한다.
+// 취소 이후 같은 프레임에 새로 발생한 pressed는 전달할 수 있다.
+bool platform_input_cancelled();
+
+// 백엔드 문자 이벤트에서 받은 ASCII 문자 하나 꺼내기 (없으면 0).
+// 일반적인 UTF-8 입력 API가 아니며 한글 등 비ASCII 문자는 현재 큐에 넣지 않는다.
 char   platform_get_char_pressed();
 
 // ─── 마우스 ───────────────────────────────────────────────────────────────────
 // 버튼 인덱스: 0 = Left, 1 = Right, 2 = Middle.
-// 좌표는 클라이언트 영역 기준 (0,0 = 좌상단). 창 밖이면 마지막 값 유지.
+// 좌표는 뷰포트를 역매핑한 논리 좌표다 (0,0 = 논리 영역 좌상단).
+// 음수는 아래 정수로 내림해 왼쪽/위 여백이 0으로 들어오지 않게 한다.
+// 유효하지 않은 크기에서는 -1. 영역 밖 좌표는 UI가 히트 영역으로 검사한다.
 int    platform_mouse_x();
 int    platform_mouse_y();
 // 이번 프레임에 처음 눌림 (edge).
@@ -144,5 +154,6 @@ void   platform_set_fullscreen(bool on);
 // 비활성(회색) 으로 그려 "켜도 아무 일 없는" 거짓 토글을 막는다.
 bool   platform_fullscreen_supported();
 
-// 소프트웨어 프레임 페이싱 on/off. on이면 platform_end_frame이 60 Hz를 목표로 한다.
+// GL swap interval을 요청하고 소프트웨어 페이싱 목표도 바꾼다.
+// 요청의 실제 적용은 드라이버/백엔드 지원에 달리며, on이면 end_frame의 목표는 60 Hz다.
 void   platform_set_vsync(bool on);

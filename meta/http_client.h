@@ -8,7 +8,7 @@
 //   · tetris_relay  : post_match()     (경기 결과 저장 + RP 갱신)
 //
 // 네트워크 실패/서버 에러는 std::nullopt 로 통합 처리 — 호출자가 장애 정책
-// (매치 거부 / result 미반영) 적용. 에러 원인은 stderr 로 간단 로그만.
+// (입장 거부 / 결과 저장 확인 불가) 적용. 에러 원인은 stderr 로 간단 로그만.
 //
 // 구현: third_party/httplib.h 의 httplib::Client/SSLClient 위에 thin wrapper.
 
@@ -85,7 +85,7 @@ public:
         NetworkError,   // 연결 실패 / 타임아웃 / 그 외 — 토큰은 유지하고 다음에 재시도
     };
 
-    // 주요 엔드포인트. timeout_s: 네트워크 전체 deadline. 계획문서의 기본값과 동일.
+    // timeout_s sets connect/read/write limits; it is not one hard total deadline.
     std::optional<GuestInfo>  request_guest  (int timeout_s = 5);
     // 기존 호출 호환: outcome 무시 시 nullopt 가 unknown 또는 network 실패.
     // 호출부가 회복 정책을 적용하려면 outcome 인자를 채워서 호출.
@@ -118,6 +118,8 @@ public:
                                               const std::string& icon_id,
                                               int timeout_s = 5,
                                               int* out_http_status = nullptr);
+    // nullopt means no validated receipt, not proof that no DB write occurred.
+    // Retrying a logical match must reuse its match_uuid and identical fields.
     std::optional<MatchResult> post_match    (const std::string& match_uuid,
                                               int64_t player_a, int64_t player_b,
                                               std::optional<int64_t> winner,

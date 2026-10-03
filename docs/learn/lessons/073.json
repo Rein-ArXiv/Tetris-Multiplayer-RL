@@ -1,0 +1,446 @@
+{
+  "id": "lesson-73",
+  "title": "설정 저장: 기본값·검증·복구",
+  "shortTitle": "후보 파싱·파일 상태·교체와 복구",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 장식 표시와 캐릭터 선택은 실행 중 메모리에만 남아 재실행하면 기본값으로 돌아갑니다.",
+  "finish": "완료: 설정 파일을 검증해 복원하고 실제 변경을 저장하며, 손상된 원본과 저장 실패를 구분해 처리합니다.",
+  "objective": "논리 값과 직렬화, 기본값과 파일 상태, 원자적 교체와 영속성 확인을 구별하고 재시작·실패·복구 경로를 검사합니다.",
+  "prerequisites": [
+    "캐릭터 ID와 string/string_view 수명",
+    "명령과 조회·실제 설정 변경",
+    "오류 반환과 RAII 자원 정리"
+  ],
+  "recap": {
+    "points": [
+      "표현용 시계는 게임 규칙 시간과 분리합니다.",
+      "시작 위상은 독립 난수 객체에서 정하고 조회는 상태를 바꾸지 않습니다.",
+      "장식 설정을 끄면 표시와 시간 진행의 정책을 적용합니다."
+    ],
+    "bridge": "이제 사용자가 고른 설정을 실행 수명 밖에도 남기고, 다음 실행에서 같은 의도로 복원하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "다시 실행해도 같은 선택에서 시작한다",
+      "body": "메뉴에서 루크를 고르고 장식을 꺼도 프로그램을 다시 실행하면 기본 선택으로 돌아옵니다. Preferences가 프로세스 메모리에만 있기 때문입니다. 이번에는 두 선택을 `study-settings.cfg`에 기록하고 시작할 때 복원하겠습니다.\n\n저장할 값은 장식 표시 여부와 캐릭터 ID입니다. 이름이나 목록 인덱스 대신 `rook`을 쓰면 표의 표시 순서가 달라져도 같은 캐릭터를 찾을 수 있습니다. GPU 핸들은 실행 시 ImageStore가 다시 준비하고 대기 효과의 시계는 새로 시작합니다.\n\n이 파일의 목적은 **사용자가 고른 표현 설정의 유지**입니다. 리플레이나 세이브게임을 만들면 규칙 상태·난수·시간도 그 기능에 맞는 형식으로 저장할 수 있습니다. 여기서는 설정과 진행 상태의 목적을 나누어, 작은 파일이 무엇을 복원하는지 명확히 합니다.",
+      "codes": [
+        {
+          "label": "파일과 실행 중 객체의 역할",
+          "language": "text",
+          "text": "파일 Config → Preferences → 캐릭터 ID/장식 표시\n                   │\n                   └→ ArtSet 조회·메뉴 효과 활성 조건\n\n실행마다 준비: 이미지 핸들·GL 객체·대기 효과 시계\n별도 책임: 게임 보드·규칙 난수·리플레이"
+        }
+      ]
+    },
+    {
+      "title": "형식을 정하면 생략과 오류의 의미가 생긴다",
+      "body": "세 줄의 key=value 형식으로 시작합니다. `version=1`은 필수이고, decorations와 character가 없으면 각각 true와 player를 사용합니다. bool은 0 또는 1만 받습니다. 캐릭터 값은 현재 카탈로그에 있어야 합니다.\n\nversion은 파서가 어떤 규칙으로 해석할지 결정하는 형식 식별자입니다. 숫자가 2인 파일을 발견했다고 1의 규칙으로 읽고 다시 쓰면, 새 버전의 정보를 지울 수 있습니다. 여기서는 지원하지 않는 버전을 별도 오류로 분류합니다. 실제 버전 이관이 필요하면 어떤 값이 어떻게 바뀌는지 정의한 변환을 추가해야 합니다.\n\n공백·탭·CR을 양끝에서 제거하고 # 뒤는 주석으로 처리합니다. CRLF와 마지막 개행이 없는 파일도 받습니다. 같은 키 두 번, 모르는 키, 등호가 없거나 두 개인 줄은 거절합니다. 설정 몇 개를 저장하는 작은 형식에서 오타를 발견하기 쉬운 정책을 고른 것입니다.",
+      "codes": [
+        {
+          "label": "읽고 쓰는 최소 형식",
+          "language": "text",
+          "text": "version=1\ndecorations=0\ncharacter=rook\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "true도 bool인데 왜 거절할까",
+          "body": "C++ bool 타입과 설정 파일의 문법은 별개입니다. 이 형식은 0/1만 정의했습니다. 현재 게임의 설정 파서는 true/false/on/off도 받으므로, 같은 단어를 써도 파일 형식의 계약을 확인해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "후보를 완성한 뒤 적용한다",
+      "body": "`version=1`, `decorations=0`, `character=removed`라는 파일을 읽는다고 합시다. 앞의 두 줄이 맞더라도 캐릭터 ID가 없으므로 문서 전체를 거절합니다. 화면의 장식 값도 기본 true로 시작합니다. 파싱 중 Preferences를 직접 바꾸지 않기 때문에 부분 적용을 되돌리는 코드가 필요하지 않습니다.\n\nparse는 지역 Config 후보에 값을 채우고 모든 검사를 통과한 뒤 result.config에 복사합니다. 실패하면 기본 Config와 오류 종류·줄 번호가 남습니다. 이것은 파서의 **전부 적용 또는 적용하지 않음** 정책입니다. 디스크 기록까지 되돌리는 트랜잭션과는 범위가 다릅니다.\n\n누락된 선택 키와 잘못된 선택 키도 구별합니다. 누락은 정의한 기본값을 쓰는 정상 문서입니다. 알려지지 않은 ID, 중복 키, 오타는 사용자의 의도를 확정할 수 없어 거절합니다. 파일 전체가 아주 작으므로 이번에는 엄격한 정책을 일관되게 적용합니다.",
+      "codes": [
+        {
+          "label": "정상 값과 오류 정보를 함께 반환한다",
+          "language": "cpp",
+          "text": "struct Parsed {\n    Config config; // 기본값으로 시작\n    ParseError error = ParseError::none;\n    std::size_t line = 0;\n    explicit operator bool() const noexcept {\n        return error == ParseError::none;\n    }\n};\n\n// 모든 줄을 검사한 뒤에만\nresult.config = cfg;\nreturn result;"
+        }
+      ]
+    },
+    {
+      "title": "입력 버퍼를 빌리는 동안과 결과를 소유하는 동안",
+      "body": "파일에서 읽은 바이트 배열은 load가 반환되면 사라집니다. parse는 그 배열을 string_view로 빌려 줄과 키를 잘라 봅니다. 이 view를 결과 Config에 보관하면 나중에 존재하지 않는 문자 범위를 읽게 됩니다.\n\nConfig.character는 std::string입니다. 카탈로그에서 찾은 정식 ID를 복사해 소유하므로 읽기 버퍼가 사라져도 값이 남습니다. Session이 Preferences에 적용할 때는 다시 ID를 검사하고 카탈로그의 정적 리터럴 view를 저장합니다. ‘문자열’이라는 이름만 같아도 두 객체가 기대하는 수명은 다릅니다.\n\n생명주기를 따라 보면 `파일 바이트 → 잠깐 빌린 view → 소유하는 Config → 정적 카탈로그를 참조하는 Preferences`입니다. 저장할 때는 Preferences에서 작은 Config 스냅샷을 만들어 직렬화합니다.",
+      "codes": [
+        {
+          "label": "입력 버퍼를 가리키지 않는 결과",
+          "language": "cpp",
+          "text": "const auto* found = study_characters::find(value);\nif (!found) {\n    result.error = ParseError::invalid_value;\n    result.line = line_no;\n    return result;\n}\ncfg.character.assign(found->id.data(), found->id.size());"
+        }
+      ]
+    },
+    {
+      "title": "버퍼 조각과 물리적인 줄을 혼동하지 않는다",
+      "body": "고정 크기 fgets 버퍼로 읽으면 긴 한 줄이 여러 번에 나뉘어 들어옵니다. 255개의 공백 뒤에 `ghost=0`이 있고 개행은 맨 끝에 있다고 생각해 봅시다. 앞 조각은 공백이라 무시하고 다음 조각을 새 줄처럼 파싱하면, 물리적으로 한 줄인 입력을 여러 설정처럼 취급하게 됩니다.\n\n학습 로더는 최대 4097바이트를 읽어 파일이 4096바이트를 넘는지 확인합니다. 파서는 개행 위치로 물리적인 줄을 나누고 한 줄 256바이트를 검사합니다. 주석을 지우기 전의 원래 길이를 검사하며, CRLF의 CR은 줄 길이에 포함합니다. 파일 크기와 줄 크기는 서로 다른 제한입니다.\n\nNUL도 거절합니다. 길이가 있는 string_view는 NUL 뒤의 바이트를 포함할 수 있지만 C 문자열 함수는 거기서 끝났다고 볼 수 있습니다. 두 해석이 섞이지 않도록 설정 텍스트의 바이트 계약을 정합니다. 제한은 글자 수가 아니라 바이트 수입니다.",
+      "codes": [
+        {
+          "label": "한 바이트 더 읽어 크기 초과를 구별한다",
+          "language": "cpp",
+          "text": "std::array<char, kMaxFileBytes + 1> buffer{};\nin.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));\nconst auto got = in.gcount();\n// bad/fail 상태와 got > kMaxFileBytes를 확인한 뒤 parse한다."
+        }
+      ]
+    },
+    {
+      "title": "같은 기본값이어도 파일 상태는 다르다",
+      "body": "파일이 없는 첫 실행과 파일이 손상된 실행은 화면에서 같은 기본값을 보여 줄 수 있습니다. 그러나 다음 저장을 허용할지는 다릅니다. 첫 실행에는 새 파일을 만들면 되고, 손상된 파일에는 복구할 정보가 남아 있을 수 있습니다.\n\nLoaded는 Config와 함께 loaded·missing·invalid·io_error 상태를 반환합니다. 정상 해석과 파일 없음만 writable입니다. 잘못된 문법·미지원 버전·큰 파일은 invalid, 일반 파일이 아니거나 읽을 수 없는 경로는 io_error입니다. 이 두 상태에서 Session은 기존 파일을 보호합니다.\n\n기본값을 반환한 것만 보고 저장 가능 여부를 판단하지 마세요. 값과 진단 상태를 분리해 두면 화면을 계속 사용할지와 디스크를 바꿀지를 독립적으로 결정할 수 있습니다.",
+      "codes": [
+        {
+          "label": "저장 허용은 성공적인 해석 여부와 연결한다",
+          "language": "cpp",
+          "text": "bool writable() const noexcept {\n    return status == LoadStatus::loaded ||\n           status == LoadStatus::missing;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "이 검사가 경로 전체를 잠그는 것은 아니다",
+          "body": "파일 상태를 검사한 뒤 여는 사이에 외부 프로그램이 파일을 바꿀 수 있습니다. 이 실습은 로컬 사용자 경로를 한 프로세스가 관리하는 조건입니다. 여러 작성자의 수정 충돌을 감지하거나 적대적인 디렉터리 변경을 막는 기능은 별도 설계가 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "화면 적용과 디스크 저장의 결과를 구별한다",
+      "body": "Session.apply는 먼저 Preferences에 Action을 적용합니다. 값이 변하지 않은 요청이면 unchanged로 끝냅니다. 선택기 끝점이나 시작 버튼 때문에 설정 파일을 다시 쓰지 않습니다. 실제 값이 변한 경우에만 저장 허용을 검사하고 한 번 저장합니다.\n\n파일을 보호 중이면 blocked를 반환하지만 실행 중 설정은 바뀝니다. 저장을 시도했으나 확인하지 못하면 failed입니다. 이 경우에도 UI 값을 이전으로 되돌리지 않습니다. main은 ‘현재 실행에는 적용됐고 디스크 저장은 확인되지 않았다’는 진단을 남깁니다.\n\n유효한 세션에서 저장이 실패하면 다음 실제 설정 변경 때 현재 값 전체를 다시 저장합니다. 프레임마다 재시도하지 않습니다. 손상 파일 때문에 blocked인 세션은 파일을 밖에서 고쳐도 재시작 전까지 차단을 유지합니다.",
+      "codes": [
+        {
+          "label": "변경·보호·저장 결과를 반환한다",
+          "language": "cpp",
+          "text": "Change apply(study_menu::Action action) {\n    if (!preferences_.apply(action)) return Change::unchanged;\n    if (!loaded_.writable()) return Change::blocked;\n    const Config snapshot{preferences_.decorations(),\n                          std::string(preferences_.character_id())};\n    return save(path_, snapshot) ? Change::saved : Change::failed;\n}"
+        }
+      ]
+    },
+    {
+      "title": "직렬화는 메모리 모양을 파일에 복사하는 일이 아니다",
+      "body": "Config에는 bool과 std::string이 있지만 객체 메모리를 그대로 파일에 쓰지 않습니다. std::string 내부에는 실행 중 주소나 구현별 관리 정보가 있을 수 있습니다. **직렬화(serialization)**는 논리 값을 명시한 바이트 형식으로 바꾸는 과정입니다.\n\nencode는 version·decorations·character 순서로 줄을 만듭니다. bool은 0/1, ID는 정식 문자열입니다. 같은 논리 값이면 같은 형식이 나오므로 비교와 진단이 쉬워집니다. 잘못된 캐릭터 ID가 담긴 Config는 기록 전에 거절합니다.\n\n이때 보존할 대상은 값입니다. 주석·공백·키의 원래 순서·CRLF는 정규화 과정에서 바뀝니다. `parse(encode(config))`가 원래 Config와 같다는 검사를 **왕복(round-trip) 검사**라고 합니다. 원문 바이트 보존을 검사하는 것과 구별하세요.",
+      "codes": [
+        {
+          "label": "표현은 달라도 같은 값을 나타낸다",
+          "language": "text",
+          "text": "입력:\n  character = rook # 선택\n  version=1\n  decorations=0\n\n저장:\nversion=1\ndecorations=0\ncharacter=rook\n"
+        }
+      ]
+    },
+    {
+      "title": "기존 파일을 먼저 비우면 무엇을 잃을까",
+      "body": "`fopen(path, \"wb\")`가 성공하면 기존 파일의 내용이 먼저 잘립니다. 새 내용을 쓰다가 디스크 한도나 I/O 오류를 만나면 새로운 설정뿐 아니라 예전 설정도 잃을 수 있습니다. 저장 함수가 false를 반환하는 것만으로 이 손실을 막지는 못합니다.\n\n기존 내용을 유지하려면 다른 파일에 새 문서를 완성한 뒤 마지막에 대상 경로를 교체합니다. 직렬화도 먼저 끝내 두면 문자열 생성 실패가 기존 파일에 영향을 주지 않습니다. 임시 파일은 대상과 같은 디렉터리에 두어 파일시스템 경계를 건너는 이동을 피합니다.\n\n임시 파일 이름이 이미 있으면 덮어쓰는 대신 배타적으로 생성합니다. 학습 writer는 현재 게임의 private_file 구현을 재사용하며, POSIX는 mkstemp와 소유자 권한, Windows는 CREATE_NEW와 사용자 ACL 경로를 사용합니다. 이 저장 helper가 계정 코드에 있다고 설정 값을 서버로 보내는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "대상 파일을 바꾸는 시점을 뒤로 미룬다",
+          "language": "text",
+          "text": "Config → 전체 문자열\n       → 같은 디렉터리 임시 파일 생성\n       → 쓰기·파일 동기화·닫기\n       → 대상 경로 교체\n       → 디렉터리 동기화 확인 (POSIX)"
+        }
+      ],
+      "reference": {
+        "path": "meta/private_file.cpp",
+        "symbol": "bool write_private_file(",
+        "invariant": "완성한 임시 파일을 교체하고 각 단계의 오류를 확인한다.",
+        "mayDiffer": "학습은 writer만 별도 네임스페이스로 복사한다. 계정 잠금과 네트워크 기능은 연결하지 않는다."
+      }
+    },
+    {
+      "title": "원자적 교체와 저장 장치 동기화를 나누어 읽는다",
+      "body": "Linux의 rename은 기존 대상 경로를 원자적으로 교체합니다. 여기서 **원자성(atomicity)**은 교체 중에 대상 경로가 사라지는 중간 상태를 보이지 않는다는 뜻입니다. 이미 열어 둔 파일 기술자는 다른 수명으로 유지됩니다. [Linux rename 계약](https://man7.org/linux/man-pages/man2/rename.2.html).\n\n**영속성(durability)**은 성공한 변경이 저장 장치에 반영되는 문제입니다. 사용자 공간 버퍼를 닫는 일, 파일의 내용과 메타데이터를 동기화하는 일, 디렉터리의 이름 연결을 동기화하는 일은 구별됩니다. Linux에서는 파일 fsync만으로 디렉터리 항목까지 동기화된다고 할 수 없어 디렉터리에도 fsync를 호출합니다. [Linux fsync 계약](https://man7.org/linux/man-pages/man2/fsync.2.html).\n\nWindows 분기는 FlushFileBuffers 후 MoveFileExW에 교체와 write-through 옵션을 전달합니다. API와 실패 조건이 POSIX와 같다는 가정 대신 플랫폼별 경로로 읽으세요. [Microsoft MoveFileExW 옵션](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw). 이 함수의 성공 확인을 장치·파일시스템의 모든 장애 상황에 대한 증명으로 확대하지 않습니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "두 프로그램이 동시에 저장하면",
+          "body": "각 작성자가 완전한 문서를 교체해도 마지막 교체가 앞선 설정을 덮을 수 있습니다. 원자적 교체 자체에는 변경 병합이나 오래된 값 감지가 없습니다. 이 실습은 실행 한 개가 설정 경로를 관리하는 방식입니다."
+        }
+      ]
+    },
+    {
+      "title": "false가 반환됐는데 새 파일이 보일 수 있다",
+      "body": "POSIX 경로에서 파일 내용 쓰기나 파일 fsync가 실패하면 대상 교체까지 가지 않습니다. 임시 파일을 정리하고 이전 대상은 유지합니다. 반면 rename이 성공한 뒤 디렉터리 fsync가 실패하면 이미 새 대상이 보일 수 있습니다.\n\n이 writer는 두 상황 모두 false를 반환합니다. bool만으로는 ‘아직 교체하지 못함’과 ‘교체했지만 영속성 확인을 마치지 못함’을 구별할 수 없습니다. 그래서 UI 진단도 ‘저장 확인 실패’라고 표현합니다. 자동으로 예전 값을 덮어써 되돌리는 코드를 추가하면 다른 변경을 잃을 수 있습니다.\n\n상태를 더 자세히 다뤄야 하는 프로그램이라면 저장 결과를 단계별 enum으로 확장할 수 있습니다. 지금은 작은 설정 저장의 계약에 맞춰 bool을 유지하고, 실패 후 어떤 파일이 보이는지 단정하지 않습니다.",
+      "codes": [
+        {
+          "label": "동일한 실패 반환, 다른 파일 상태",
+          "language": "text",
+          "text": "실패 지점             대상 경로의 내용\n임시 파일 쓰기/fsync   이전 내용 유지\n교체 후 디렉터리 fsync 새 내용이 이미 보일 수 있음\n\n공통: 저장 완료를 확인하지 못했으므로 false"
+        }
+      ]
+    },
+    {
+      "title": "복구는 원본을 보관한 뒤 선택한다",
+      "body": "버전을 99로 바꾸고 실행해 보면 기본 선택으로 시작하면서 파일 보호 진단이 나옵니다. 이때 메뉴에서 루크를 고르거나 장식을 꺼도 파일은 그대로입니다. 실행 중 기본값 사용과 디스크 복구는 다른 동작입니다.\n\n직접 고칠 수 있다면 프로그램을 종료하고 올바른 형식으로 수정한 뒤 다시 실행합니다. 처음부터 기본값으로 시작하려면 현재 파일을 다른 이름으로 보관하고 다시 실행합니다. 백업 이름에 이미 다른 파일이 없는지 먼저 확인하세요. 새 실행은 missing 상태가 되어 다음 실제 설정 변경 때 새 파일을 만듭니다.\n\n자동으로 손상 파일을 삭제하거나 같은 백업 이름을 덮어쓰지는 않습니다. 파일 보호 결정은 시작 시 LoadStatus를 기준으로 하므로, 실행 중 파일만 이름을 바꾸었다고 저장이 풀리지는 않습니다. 재시작은 파일 상태를 다시 읽는 시점입니다.",
+      "codes": [
+        {
+          "label": "손상 원본을 남기는 복구 순서",
+          "language": "text",
+          "text": "프로그램 종료\n→ study-settings.cfg를 별도 이름으로 보관 (기존 백업을 덮지 않음)\n→ 프로그램 재실행: missing + 기본값\n→ 메뉴에서 설정 변경: 새 파일 저장\n→ 재실행해서 복원 확인"
+        }
+      ]
+    },
+    {
+      "title": "현재 게임의 관대한 파서와 비교한다",
+      "body": "현재 게임은 잘못된 줄만 건너뛰고 유효한 줄을 적용하는 정책입니다. 학습의 문서 전체 거절·버전 검사·저장 보호 게이트와 구별해야 합니다. 정책이 다르더라도 숫자 전체를 읽었는지, 구형 키가 기존 값을 잘못 바꾸지 않는지, 물리적 줄을 정확히 나누는지는 확인할 수 있습니다.\n\n정수 파서는 Windows와 Linux의 long 크기 차이를 피하도록 long long으로 변환하는 strtoll의 끝 포인터가 문자열 끝인지와 ERANGE를 확인합니다. `12junk`와 변환 범위를 넘는 수는 현재 값을 유지합니다. 유효한 정수 150은 볼륨 범위 0~100으로 자릅니다. 문법 오류와 정상 숫자의 범위 조정은 다른 단계입니다.\n\n구형 `bgm` 키는 bool 파싱 성공 여부를 optional로 받고, 성공한 경우에만 0/100으로 변환합니다. `bgm_vol=37` 뒤의 `bgm=oops`는 37을 유지합니다. ‘실패 시 기본값’이라고 설명하면 앞에서 읽은 유효 값도 초기화한다고 오해할 수 있어, **호출자가 넘긴 현재 값 유지**라고 읽습니다.\n\n루트 로더는 전체 16 KiB·물리적 줄 255바이트를 제한하고, 저장은 공통 임시 파일 writer를 사용합니다. 루트 UI는 저장 오류를 stderr로 알리며 학습 Session의 invalid 파일 보호까지 구현한 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "정수 변환이 전체 입력을 소비했는지 확인한다",
+          "language": "cpp",
+          "text": "errno = 0;\nlong long n = std::strtoll(s.c_str(), &end, 10);\nif (end == s.c_str() || end != s.c_str() + s.size() || errno == ERANGE)\n    return fallback;\n// 유효하게 변환된 정수에만 설정 범위 clamp를 적용한다."
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "static GameSettings load_settings(",
+        "invariant": "유효한 설정 값과 오류 입력을 구별하고 파일을 읽는 경계를 명시한다.",
+        "mayDiffer": "현재 게임은 줄별 관대한 적용, 학습은 문서 전체 후보 검증과 저장 보호를 사용한다."
+      }
+    },
+    {
+      "title": "정상 저장만 검사하면 놓치는 경우를 넣는다",
+      "body": "파서는 정상 CRLF와 마지막 개행 없음, 빠진 선택 키, 중복 키, 모르는 ID, NUL, 줄·파일 크기 경계를 따로 검사합니다. 마지막 줄에서 실패했을 때 앞의 decorations=0이 적용되지 않았는지도 확인합니다. 네 가지 유효 설정 조합은 encode→parse에서 논리 값이 같아야 합니다.\n\n파일 검사는 임시 연습 디렉터리에서 진행합니다. 새 파일 생성, 두 번째 저장의 교체, 재시작 복원, 손상 원본 보존, 이름을 바꾼 뒤 기본값 복구를 확인합니다. 저장 대상 자리에 디렉터리가 생기면 실패하지만 현재 실행의 선택은 유지되는지도 검사합니다.\n\n저장 함수가 false인지만 확인하면 예전 파일이 비워졌는지 놓칩니다. 쓰기·파일 동기화·교체·디렉터리 동기화 지점에 오류를 주입하고 이전/새 바이트와 임시 파일 정리를 비교해야 실패 계약을 검증할 수 있습니다. 실제 전원 차단 실험과 이러한 함수 오류 주입의 범위도 구별합니다.",
+      "codes": [
+        {
+          "label": "원래 파일 보존을 확인하는 기대 결과",
+          "language": "text",
+          "text": "준비: 대상 파일에 \"previous settings\" 저장\n실험 A: 임시 파일 쓰기 실패 → 이전 바이트 유지\n실험 B: 파일 동기화 실패   → 이전 바이트 유지\n실험 C: 교체 후 디렉터리 동기화 실패 → 새 완성 문서가 보이면서 실패 보고"
+        }
+      ]
+    },
+    {
+      "title": "빌드하고 값이 다시 살아오는 경로를 추적한다",
+      "body": "누적 프로젝트는 `checkpoints/73-settings`입니다. config는 형식, store는 파일 상태와 I/O, session은 실행 중 설정과 저장 허용을 담당합니다. private_file.cpp는 OS별 파일 교체 구현입니다. main의 직접 Preferences 대신 Session을 만들고 그 안의 Preferences를 읽습니다.\n\nCMake에 study_settings_io 라이브러리를 추가하고 게임 실행 파일에 연결합니다. 입력 전용 빌드에는 tetris 타깃이 없으므로 `if(TARGET tetris)`로 연결 대상을 확인합니다. Windows에서는 ACL 함수가 필요한 advapi32도 연결합니다.\n\n빌드 폴더에서 실행하고 루크 선택·장식 끄기 후 종료해 보세요. 같은 폴더에서 다시 실행하면 선택이 복원됩니다. 파일은 실행 작업 디렉터리 기준이므로 다른 폴더에서 실행하면 다른 설정 파일을 읽습니다. 아래 완성 파일은 파싱부터 화면 적용, 저장 결과까지 순서대로 따라갈 수 있습니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 빌드·실행",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/73-settings -B out/lesson73 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/lesson73\nctest --test-dir out/lesson73 --output-on-failure\ncd out/lesson73\n./tetris"
+        },
+        {
+          "label": "settings/config.h",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/settings/config.h",
+          "collapsed": true
+        },
+        {
+          "label": "settings/store.h",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/settings/store.h",
+          "collapsed": true
+        },
+        {
+          "label": "settings/session.h",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/settings/session.h",
+          "collapsed": true
+        },
+        {
+          "label": "settings/private_file.h",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/settings/private_file.h",
+          "collapsed": true
+        },
+        {
+          "label": "settings/private_file.cpp",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/settings/private_file.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "client/menu_model.h",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/client/menu_model.h",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/src/main.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/settings_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/73-settings/tests/settings_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/73-settings/CMakeLists.txt",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "실제 배포에서 설정 경로를 고를 때",
+          "body": "현재 게임은 platform/user_data 경로를 사용해 설치 폴더와 사용자 쓰기 위치를 분리합니다. 학습은 먼저 파일 계약을 관찰하기 쉬운 작업 디렉터리의 전용 이름을 사용합니다. 배포 경로 정책과 파서·저장 계약을 별개의 책임으로 비교하세요."
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "73-1",
+      "question": "version=1, decorations=0 다음 줄에 character=removed가 있고 removed는 카탈로그에 없습니다. 학습 세션의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "장식만 끄고 파일 저장을 허용한다."
+        },
+        {
+          "id": "b",
+          "text": "기본값으로 실행하고 invalid 상태로 기존 파일을 보호한다."
+        },
+        {
+          "id": "c",
+          "text": "새 캐릭터를 카탈로그에 추가하고 저장한다."
+        },
+        {
+          "id": "d",
+          "text": "파일을 자동 삭제하고 missing으로 바꾼다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "기본값으로 실행하고 invalid 상태로 기존 파일을 보호한다.",
+      "explanation": "후보 전체를 거절하므로 장식도 기본 true입니다. invalid는 기본값과 별도로 보관되고 Session이 저장을 차단합니다. 파일 자체를 삭제하거나 복구한 것은 아닙니다."
+    },
+    {
+      "id": "73-2",
+      "question": "Config를 encode한 뒤 다시 parse했더니 값은 같지만 주석과 CRLF가 사라졌습니다. 이 형식의 계약으로 옳은 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "파일 바이트가 달라졌으므로 반드시 오류다."
+        },
+        {
+          "id": "b",
+          "text": "string_view가 입력을 소유하지 않아 우연히 사라졌다."
+        },
+        {
+          "id": "c",
+          "text": "논리 값을 보존하는 정규화이므로 정상이다."
+        },
+        {
+          "id": "d",
+          "text": "직렬화에는 객체 메모리를 그대로 써야 한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "논리 값을 보존하는 정규화이므로 정상이다.",
+      "explanation": "encode는 키 순서와 개행 형식을 정규화합니다. 왕복 검사의 대상은 bool과 캐릭터 ID이며 원문 편집 형식이 아닙니다. 원문 보존이 필요하면 별도의 문서 모델을 설계해야 합니다."
+    },
+    {
+      "id": "73-3",
+      "question": "정상 세션에서 저장 중 rename은 성공했고 그 뒤 디렉터리 fsync가 실패했습니다. 올바른 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "false여도 새 완성 파일이 이미 보일 수 있다."
+        },
+        {
+          "id": "b",
+          "text": "false이면 반드시 예전 파일 그대로다."
+        },
+        {
+          "id": "c",
+          "text": "rename이 자동으로 되돌려졌으므로 true다."
+        },
+        {
+          "id": "d",
+          "text": "파일 내용은 절반만 섞인 상태여야 한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "false여도 새 완성 파일이 이미 보일 수 있다.",
+      "explanation": "가시적인 교체가 끝난 뒤 영속성 확인 단계가 실패한 경우입니다. writer는 false를 반환하지만 교체를 자동 롤백하지 않습니다. 따라서 저장 확인 실패와 기존 내용 보존을 같은 뜻으로 쓰면 안 됩니다."
+    },
+    {
+      "id": "73-4",
+      "question": "현재 루트 파일에서 bgm_vol=37 뒤에 bgm=oops가 나옵니다. 수정된 파서의 볼륨 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0"
+        },
+        {
+          "id": "b",
+          "text": "100"
+        },
+        {
+          "id": "c",
+          "text": "기본 볼륨으로 무조건 초기화"
+        },
+        {
+          "id": "d",
+          "text": "37"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "37",
+      "explanation": "구형 bool 파싱이 실패했으므로 호출자가 넘긴 현재 볼륨 37을 유지합니다. 이전 방식처럼 fallback을 true/false로 줄인 뒤 0/100으로 바꾸면 부분 볼륨을 잃습니다."
+    },
+    {
+      "id": "73-5",
+      "question": "시작할 때 미지원 버전 파일이어서 저장이 차단됐습니다. 메뉴에서 장식을 끈 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "화면도 바뀌지 않고 파일만 새로 쓴다."
+        },
+        {
+          "id": "b",
+          "text": "이번 실행에는 적용하지만 파일은 보존하고 blocked를 반환한다."
+        },
+        {
+          "id": "c",
+          "text": "파일 버전을 자동으로 1로 바꾸고 saved를 반환한다."
+        },
+        {
+          "id": "d",
+          "text": "설정 변경마다 파일을 삭제하고 다시 만든다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "이번 실행에는 적용하지만 파일은 보존하고 blocked를 반환한다.",
+      "explanation": "Session은 실행 중 값 적용과 파일 쓰기 허용을 나눕니다. 보호 상태에서는 메모리 변경만 적용합니다. 파일을 고치거나 다른 이름으로 보관한 뒤 재시작해야 로드 상태를 새로 판정합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "유효 설정과 누락·중복·알 수 없는 ID의 결과를 먼저 예측한다.",
+      "입력 바이트의 view가 Config 수명까지 남지 않는지 추적한다.",
+      "메뉴에서 값을 바꾸고 종료·재실행해 복원을 확인한다.",
+      "프로그램 종료 후 버전을 바꾸어 보호 상태와 실행 중 변경을 비교한다.",
+      "원본을 다른 이름으로 보관한 뒤 재시작해 기본값 복구와 새 저장을 확인한다.",
+      "쓰기 실패 지점마다 이전/새 파일 바이트를 검사한다."
+    ],
+    "failureChecks": [
+      "파일 없음과 읽기 실패를 모두 저장 가능으로 처리하지 않는지 확인한다.",
+      "파싱 실패 전에 읽은 값이 실제 Preferences에 적용되지 않는지 확인한다.",
+      "물리적 긴 줄의 뒤쪽을 새 키로 읽지 않는지 확인한다.",
+      "실제 설정 변경이 없는 프레임마다 파일을 쓰지 않는지 확인한다.",
+      "false 반환을 항상 이전 파일 유지라고 설명하지 않는지 확인한다."
+    ],
+    "expected": "설정을 재실행 사이에 유지하고, 파싱·적용·저장·복구 실패를 각각의 상태와 파일 증거로 진단한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 설정 헤더/구성 후보 직접 검토; 실제 root파서 반례·파일 오류주입·Linux/Microsoft 파일 API 대조",
+    "draftJob": "out/learning-jobs/073-outline-events.jsonl",
+    "corrections": [
+      "초안의 존재하지 않는 hana를 실제rook으로 교정하고 오류 선행순서에 맞춰 문제 재작성",
+      "규칙/RNG/애니메이션 상태는 절대로 직렬화할 수 없다는 단정을 파일 목적의 분리로 교정",
+      "이전차시번호 반복·외부전송 작업보고 제거",
+      "Session에는없는 동일bool setter예시를 실제 Action/끝점/unchanged로 교정",
+      "설정 변경횟수제한이파일손상을막는다는 인과를 불필요쓰기감소와 임시파일보존으로 분리",
+      "원자성만있고내구성은없다는 단정을 fsync확인과실패시점·플랫폼별범위로 교정",
+      "store::save 단독은읽기상태gate를강제하지않고Session책임임을명시"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED77/SDL78CTest·누적tetris·경고0",
+    "파일4096/줄256바이트경계·CRLF/EOF/NUL·후보전체거절·소유ID·4설정왕복·실제생성/교체/재시작/보호/백업복구/저장실패후메모리유지",
+    "UBSan/float-cast-overflow; 실제root수정전접미사/오버플로/NUL정수/legacy/물리긴줄/NUL줄 각각재현",
+    "RLIMIT_FSIZE쓰기실패: 이전writer는대상비움, 새writer는이전바이트유지",
+    "Linux실제writer의filefsync/rename실패시old보존·dirfsync실패시new완성파일가시성과false·임시파일정리",
+    "누적SDL입력·위젯36/DPI·포인터2755407픽셀·캐릭터921600픽셀·효과4915200픽셀회귀",
+    "root tetris 빌드·17CTest·sim_hash_dump골든; 최종strtoll변경후root관련검사재실행",
+    "수동GUI·Windows/macOS네이티브파일교체·전원차단/다중프로세스충돌전체미검증"
+  ]
+}

@@ -1,0 +1,416 @@
+{
+  "id": "lesson-78",
+  "title": "믹싱: 더하기·게인·클리핑",
+  "shortTitle": "넓은 누산·게인 정책·최종 제한",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 단일 음원의 PCM을 출력하지만 동시에 울리는 여러 신호의 합산 정책은 없습니다.",
+  "finish": "완료: 여러 보이스에 게인을 적용하고 int32로 누산한 뒤 최종 int16 출력으로 바꾸는 Mixer를 만듭니다.",
+  "objective": "중간 클리핑과 NaN 변환 오류를 수치로 설명하고, 보이스·게인 상한을 근거로 누산 범위를 증명하며 출력과 커서를 검사합니다.",
+  "prerequisites": [
+    "PCM 채널·프레임·인터리브",
+    "Voice의 커서와 PCM 대여 수명",
+    "콜백 준비/소비 경계와 잠금 밖 해제"
+  ],
+  "recap": {
+    "points": [
+      "콜백 len은바이트이며 형식으로 나누어 프레임 수를 구합니다.",
+      "공유 상태 변경과 이미 분리한 PCM 해제를 다른 스코프에 둡니다.",
+      "고정된 임시 저장소와 출력 검사는 실제장치 지연 보장과 구별합니다."
+    ],
+    "bridge": "준비된 보이스들을 같은 출력 시각에 모으면서, 저장 형식보다 넓은 계산 범위와 명시적인 게인 정책을 사용하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "같은 시각의 샘플을 더한다",
+      "body": "배경음악과 회전 효과음이 동시에 나려면 같은 출력 시각에 두 음원의 값을 합쳐야 합니다. 이를 믹싱이라고 합니다. 스테레오라면 왼쪽 출력은 각 음원의 왼쪽 값을, 오른쪽 출력은 각 음원의 오른쪽 값을 모읍니다.\n\nsigned16 PCM의 음수와 양수는 신호의 서로 다른 방향을 나타냅니다. 한 시각에 +1000과 -400이 겹치면 합은 +600입니다. 숫자가 큰 소리를 골라 내는 연산이나 두 값을 항상 평균 내는 연산으로 정의하지 않습니다. 각 신호에 원하는 게인을 곱한 후 더합니다.\n\n이번 산출물은 고정된 보이스 슬롯을 가진 CPU Mixer입니다. 공통 샘플 연산을 실제 게임과 학습 코드가 함께 사용하고, Player의 콜백도 이 믹서를 거쳐 출력하도록 연결합니다. 샘플 연산을 검증하는 mix_probe는 장치 없이 실행할 수 있습니다.",
+      "codes": [
+        {
+          "label": "채널마다 같은 시각의 값을 합친다",
+          "language": "text",
+          "text": "음원 A의 프레임: [L=1000, R=-200]\n음원 B의 프레임: [L=-400, R=500]\n게인 모두1인 합: [L=600,  R=300]"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "mix_voice",
+        "invariant": "동일한 출력 형식으로 준비된 보이스의 기여량을 채널별로 더한다.",
+        "mayDiffer": "현재 엔진은 BGM과 SFX의 재생 공간을 구분한다. 학습 Mixer는 호출자가 슬롯 번호를 지정한다."
+      }
+    },
+    {
+      "title": "표현 범위와 계산 범위를 나눈다",
+      "body": "int16_t의 범위는 -32768부터32767까지입니다. 두 샘플이 각각30000이면 합은60000이라 최종 PCM 한 샘플에 담을 수 없습니다. 그렇다고 중간 계산도 그 좁은 범위에 묶을 필요는 없습니다.\n\n계산용 누산기(accumulator)는 여러 입력의 합을 보관하는 임시 값입니다. int32_t 배열에 누산하면 큰 중간 합을 유지한 채 다른 음원의 반대 방향 기여량을 더할 수 있습니다. 모든 보이스를 처리한 뒤 최종 출력 형식에 맞춥니다.\n\n이번 정책은 최대9보이스, 각 게인0~1입니다. 가장 큰 절댓값을 보수적으로9×32768=294912로 계산하면 int32 범위 안입니다. 보이스 수나 증폭 한도를 바꿀 때는 이 범위 증명도 함께 바뀝니다. 넓은 정수를 썼다는 사실만으로 무제한 합산이 안전해지는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "상한을 구현 상수와 연결한다",
+          "language": "cpp",
+          "text": "constexpr std::size_t kMaxVoices = 9;\nconstexpr std::size_t kBlockFrames = 256;\n\nstatic_assert(kMaxVoices * 32768ll <=\n                  std::numeric_limits<std::int32_t>::max(),\n              \"9 voices must fit in an int32 accumulator\");\n\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "C++ 정수 승격과 출력 형식",
+          "body": "int16 값을 더하는 식에서는 정수 승격이 적용될 수 있습니다. 중요한 것은 최종 대입 대상과 중간 합의 범위입니다. 범위를 벗어난 값을 작은 정수에 넣는 동작에 의존하지 않고, int32로 합산한 뒤 명시적으로 범위를 제한합니다. signed 누산기의 오버플로도 피해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "매번 자르면 합산 순서가 결과를 바꾼다",
+      "body": "세 기여량이 +30000,+30000,-30000이라고 합시다. 수학적인 합은30000입니다. 한 보이스를 더할 때마다 int16 범위로 자르면 두 번째 단계에서60000이32767로 바뀌고, 마지막에는2767이 됩니다.\n\n순서를 +30000,-30000,+30000으로 바꾸면 중간 합은0을 거쳐30000이 됩니다. 같은 시각의 같은 소리인데 슬롯에 들어간 순서만으로 결과가 달라집니다. 잃어버린 중간 값을 뒤에서 복구할 수 없기 때문입니다.\n\n따라서 ‘넓은 누산→최종 한 번 클램핑’으로 정합니다. [SDL_MixAudioFormat 문서](https://wiki.libsdl.org/SDL2/SDL_MixAudioFormat)도 좁은 출력에 반복적으로 합성할 때 중간 클리핑으로 왜곡될 수 있음을 설명합니다. 믹서를 직접 작성할 때도 같은 문제가 생깁니다.",
+      "codes": [
+        {
+          "label": "중간 손실을 비교한다",
+          "language": "text",
+          "text": "매번 클램프: 0 → 30000 → 32767 → 2767\n넓게 합산:  0 → 30000 → 60000 → 30000 → 최종30000\n다른 순서:  0 → 30000 →     0 → 30000 → 최종30000"
+        },
+        {
+          "label": "출력 직전 한 번 제한한다",
+          "language": "cpp",
+          "text": "inline std::int16_t finish_sample(std::int32_t sum) noexcept {\n    if (sum < -32768) return static_cast<std::int16_t>(-32768);\n    if (sum > 32767) return static_cast<std::int16_t>(32767);\n    return static_cast<std::int16_t>(sum);\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "audio_callback",
+        "invariant": "모든 보이스의 기여량을 누산한 뒤 출력 샘플을 한 번 제한한다.",
+        "mayDiffer": "현재 콜백과 학습 Mixer는 모두 고정 크기 블록을 사용하지만 보이스 상태 표현은 다르다."
+      }
+    },
+    {
+      "title": "게인은 진폭을 곱하는 값이다",
+      "body": "게인1은 원래 샘플을 유지하고0은 기여량을0으로 만듭니다. 0.5는 각 샘플의 진폭을 절반으로 줄입니다. 사람이 느끼는 크기가 정확히 절반이라는 뜻으로 사용하지 않습니다. 청감은 신호의 주파수·환경·재생 장치에도 영향을 받습니다.\n\n우리 앱은 감쇠 범위인0~1을 선택합니다. 오디오 API 전체의 한계가 이 범위인 것은 아닙니다. 예를 들어 [XAudio2의 볼륨 계약](https://learn.microsoft.com/en-us/windows/win32/xaudio2/xaudio2-volume-and-pitch-control)은1보다 큰 증폭과 음수 게인에 의한 위상 반전도 다룹니다. 학습 믹서는 그런 기능을 요청하지 않습니다.\n\n게인을 곱하는 위치도 확인하세요. 30000인 소리 두 개에 각각0.5를 곱하면15000+15000=30000입니다. 먼저32767로 잘라 버린 뒤0.5를 곱하면16383이 되어 원래 합의 절반과 달라집니다. 마스터 게인을 두더라도 이미 클리핑으로 잃은 정보를 복원할 수는 없습니다.",
+      "codes": [
+        {
+          "label": "카테고리 게인과 합산 위치",
+          "language": "text",
+          "text": "출력 전 단계:\n각 보이스 샘플 × 해당 게인\n→ 보이스별 정수 기여량\n→ int32 누산\n→ 최종 int16 클램프\n→ 출력 바이트"
+        }
+      ]
+    },
+    {
+      "title": "NaN은 두 번의 비교를 모두 통과한다",
+      "body": "float에는 유한한 숫자 외에 NaN과 양·음의 무한대가 있습니다. NaN에 대해 `gain < 0`과 `gain > 1`은 모두 거짓이므로, 이 두 조건만 사용한 클램프는 NaN을 그대로 남깁니다.\n\nNaN을 샘플에 곱해도 NaN이고, 이를 int로 변환하면 유효한 정수 기여량이 되지 않습니다. [C++ 부동소수점→정수 변환 규칙](https://eel.is/c++draft/conv.fpint)은 절삭한 값이 대상 정수에 표현되지 않을 때 정의되지 않은 동작을 명시합니다. 범위 검사는 변환 전에 끝나야 합니다.\n\n공통 normalize_gain은 NaN과 무한대를0으로, 유한한 값은0~1로 처리합니다. 이는 이 앱이 정한 실패 입력 정책입니다. 잘못된 값이 소음이나 변환 오류로 이어지는 대신 무음 기여량이 되게 합니다. SDL과 Windows 설정 세터 모두 같은 함수를 사용합니다.",
+      "codes": [
+        {
+          "label": "유한성 검사부터 수행",
+          "language": "cpp",
+          "text": "inline float normalize_gain(float gain) noexcept {\n    if (!std::isfinite(gain)) return 0.0f;\n    if (gain <= 0.0f) return 0.0f;\n    if (gain >= 1.0f) return 1.0f;\n    return gain;\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/audio.cpp",
+        "symbol": "void audio_set_music_volume",
+        "invariant": "백엔드에 전달하기 전에 공통 볼륨 정책으로 값을 정리한다.",
+        "mayDiffer": "Windows는 XAudio2 보이스에 값을 전달하고 SDL은 자체 믹서의 게인으로 사용한다."
+      }
+    },
+    {
+      "title": "정수로 만드는 시점도 오디오 정책이다",
+      "body": "샘플3에 게인0.5를 곱하면1.5입니다. 이번 함수는 int32로 변환하며0 방향으로 소수 부분을 버려1을 만듭니다. -3×0.5=-1.5는-1입니다. 반올림이나 항상 작은 정수로 내리는 floor와 다릅니다.\n\n보이스별로 이 변환을 수행하므로, 샘플1인 소리 두 개에0.5를 적용하면0+0=0입니다. 부동소수점 상태로 합쳐1.0을 만든 뒤 정수로 바꾸면1입니다. 어느 값을 만들 것인지 구현과 설명을 일치시켜야 합니다.\n\n현재 정책에서는 각 보이스가 고정된 정수 기여량을 만들고, 범위 안에서 정수 덧셈을 수행합니다. 그래서 기여량이 같으면 합산 순서에 의존하지 않습니다. 이를 임의의 부동소수점 합산까지 확장하면 안 됩니다. 정수 양자화는 오차를 남기며 작은 신호에서 상대적인 영향이 커질 수 있습니다.",
+      "codes": [
+        {
+          "label": "곱셈과 변환의 경계",
+          "language": "cpp",
+          "text": "inline std::int32_t scaled_sample(std::int16_t sample, float gain) noexcept {\n    const float product = static_cast<float>(sample) * normalize_gain(gain);\n    return static_cast<std::int32_t>(product);  // truncates toward zero\n}\n"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "다른 품질 정책을 선택한다면",
+          "body": "float 누산·최종 반올림·디더링처럼 다른 선택도 가능합니다. 그 경우 정밀도·클리핑·잡음·순서 재현성을 다시 정의해야 합니다. 지금은 보이스별0방향 절삭을 명시하고 같은 정책을 실제 코드와 검사에서 추적합니다."
+        }
+      ]
+    },
+    {
+      "title": "Mixer는 음원을 소유하지 않는다",
+      "body": "Mixer에는9개의 슬롯이 있고 각 슬롯은 Voice와 게인만 보관합니다. 실제 PCM은 호출자가 소유합니다. start에 넘긴 음원은 해당 슬롯이 교체·정지되거나 믹서가 종료될 때까지 살아 있고 변경되지 않아야 합니다.\n\nconfigure는 출력 레이트와 채널을 정합니다. 성공하면 모든 보이스 연결을 끊고 형식을 바꿉니다. 잘못된 형식이면 현재 상태를 유지합니다. start도 슬롯 번호·빈 음원·형식을 먼저 검사하므로 잘못된 후보가 재생 중인 슬롯을 지우지 않습니다.\n\n같은 출력 시각을 더하려면 각 음원의 시간 간격과 채널 배치가 맞아야 합니다. 이 학습 믹서는 출력과 레이트·채널이 정확히 일치하는 음원만 받습니다. 현재 게임은 로드 단계에서 SDL 변환기를 사용해 이 조건을 준비합니다.",
+      "codes": [
+        {
+          "label": "슬롯에 연결하기 전 검사",
+          "language": "cpp",
+          "text": "    bool start(std::size_t slot, const Pcm16& clip, float gain = 1.0f) noexcept {\n        if (slot >= kSlots) return false;\n        if (!configured_) return false;\n        if (clip.samples().empty()) return false;\n        if (clip.rate() != rate_) return false;\n        if (clip.channels() != channels_) return false;\n\n        slots_[slot].gain = audio_mix::normalize_gain(gain);\n        slots_[slot].voice.start(clip);\n        return true;\n    }\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "AudioHandle audio_load_sound",
+        "invariant": "소비할 형식에 맞는 PCM을 준비한 뒤 재생 자원으로 사용한다.",
+        "mayDiffer": "학습 믹서는 형식 불일치를 거절한다. 현재 SDL 엔진은 로드 시 변환한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "슬롯 번호는 자동 배정 정책이 아니다",
+          "body": "이번 start는 호출자가 지정한 슬롯을 다시 시작합니다. 비어 있는 보이스 찾기나 가장 오래된 효과음 교체 같은 자동 배정은 하지 않습니다. 여러 음원을 합치는 수학과 재생 요청에 자리를 배정하는 정책을 분리해 읽으세요."
+        }
+      ]
+    },
+    {
+      "title": "고정 크기 임시 배열로 요청을 나눈다",
+      "body": "출력 요청이 항상 같은 길이라고 가정하지 않습니다. render는 전체 요청을 최대256프레임씩 나눕니다. 예를 들어513프레임은256+256+1입니다. 각 조각마다 sum을0으로 만들고 활성 보이스들의 PCM을 임시 배열에 받아 기여량을 더합니다.\n\n스테레오 기준 int16 임시 배열은512샘플×2바이트=1024바이트, int32 누산 배열은512×4=2048바이트입니다. 두 배열의 저장소는 합계3KiB이며 요청 크기에 따라 힙을 늘리지 않습니다. 이 크기는 전체 함수 스택 사용량을 측정한 값이 아니라 두 배열의 크기입니다.\n\n각 블록을 마친 뒤 int16로 제한하고 memcpy로 출력합니다. 출력 주소가 int16 정렬에 맞지 않는 바이트 주소여도 직접 int16 포인터로 변환하지 않습니다. 마지막 부분 프레임의 바이트는 처음 채운0으로 남습니다.",
+      "codes": [
+        {
+          "label": "요청량에 비례해 처리하되 임시 저장소는 고정",
+          "language": "cpp",
+          "text": "    void render(void* out, std::size_t bytes) noexcept {\n        if (bytes == 0) return;\n\n        auto* dst = static_cast<std::uint8_t*>(out);\n        std::memset(dst, 0, bytes);\n        if (!configured_ || channels_ == 0) return;\n\n        const std::size_t frame_bytes = channels_ * sizeof(std::int16_t);\n\n        const std::size_t total_frames = bytes / frame_bytes;\n        if (total_frames == 0) return;  // partial frame only: stays zeroed\n\n        std::array<std::int16_t, kScratchSamples> scratch{};\n        std::array<std::int32_t, kScratchSamples> sum{};\n\n        std::size_t offset = 0;\n        while (offset < total_frames) {\n            std::size_t block = total_frames - offset;\n            if (block > audio_mix::kBlockFrames) block = audio_mix::kBlockFrames;\n\n            const std::size_t scalars = block * channels_;\n            sum.fill(0);\n\n            for (std::size_t s = 0; s < kSlots; ++s) {\n                if (!slots_[s].voice.playing()) continue;\n                // Render even when the gain is 0 so the cursor still advances.\n                slots_[s].voice.render(scratch.data(),\n                                       scalars * sizeof(std::int16_t));\n                const float gain = slots_[s].gain;\n                for (std::size_t i = 0; i < scalars; ++i) {\n                    sum[i] += audio_mix::scaled_sample(scratch[i], gain);\n                }\n            }\n\n            // memcpy each scalar so an unaligned byte destination is never\n            // reinterpreted as int16_t.\n            std::uint8_t* block_out = dst + offset * frame_bytes;\n            for (std::size_t i = 0; i < scalars; ++i) {\n                const std::int16_t value = audio_mix::finish_sample(sum[i]);\n                std::memcpy(block_out + i * sizeof(std::int16_t), &value,\n                            sizeof(value));\n            }\n            offset += block;\n        }\n    }\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "audio_mix::kBlockFrames",
+        "invariant": "요청을 고정 크기 블록으로 처리하고 최종 샘플만 출력 형식으로 좁힌다.",
+        "mayDiffer": "현재 게임은 PCM에서 곧바로 int32 누산기로 읽는다. 학습 믹서는 기존 Voice::render를 재사용하기 위한 int16 임시 배열이 하나 더 있다."
+      }
+    },
+    {
+      "title": "음소거와 재생 정지는 커서가 다르다",
+      "body": "게인이0이면 출력 기여량은0이지만 시간은 계속 진행합니다. 10,20,30인 음원에서 첫 프레임을 게인0으로 처리하고 곧바로 게인을1로 바꾸면 다음 출력은20입니다.10부터 다시 시작하지 않습니다.\n\n따라서 gain==0이라는 이유로 Voice::render 호출을 건너뛰면 안 됩니다. 그렇게 하면 커서가 멈추어 음소거 해제 시 과거 샘플부터 재생하는 다른 기능이 됩니다. 현재 Mixer는 먼저 Voice를 진행시키고 게인을 적용합니다.\n\n반면 stop은 연결을 끊고 커서를0으로 돌립니다. 게임 UI가 볼륨0과 enabled=false를 함께 전달한다면 상위 정책에 따라 보이스를 멈출 수도 있습니다. 여기서는 **순수 게인0의 계약**과 UI 토글 동작을 구분합니다.",
+      "codes": [
+        {
+          "label": "커서가 유지하는 시간",
+          "language": "text",
+          "text": "PCM:        [10, 20, 30]\n첫 요청:     gain=0 → 출력0, cursor=1\n게인 변경:   gain=1\n다음 요청:   출력20, cursor=2\nstop 호출:   연결 해제, cursor=0"
+        }
+      ]
+    },
+    {
+      "title": "Player와 실제 게임에 연결한다",
+      "body": "Player는 음원 하나를 소유하는 공개 인터페이스를 유지하면서 내부 Voice를 Mixer로 바꿉니다. open에서 형식을 설정하고 play가0번 슬롯을 시작합니다. 상태 조회는 그 슬롯의 진행 위치를 읽습니다. 단일 음원·게인1의 출력은 같은 PCM 바이트를 유지해야 합니다.\n\nreplace와 unload에서는 mixer_.stop_all로 읽기 연결을 끊고 이전 PCM을 retired로 옮깁니다. 실제 저장소 해제는 장치 잠금 밖이라는 수명 순서를 유지합니다. 내부 구현을 바꾸면서도 사용자에게 보이는 stop·unload·close의 뜻을 보존하는 작업입니다.\n\n현재 게임의 SDL 믹서는 BGM과 SFX를 공통 int32 블록에 누산합니다. Windows는 동일한 게인 입력 정책을 사용하지만 실제 합성과 출력 처리는 XAudio2가 수행합니다. 두 백엔드의 출력 샘플이 비트 단위로 같다는 계약까지 추가하지 않습니다.",
+      "codes": [
+        {
+          "label": "기존 콜백이 새 믹서를 소비한다",
+          "language": "cpp",
+          "text": "void Player::callback(void* userdata, Uint8* out, int len) noexcept {\n    if (len <= 0) return;\n    auto* self = static_cast<Player*>(userdata);\n    self->mixer_.render(out, static_cast<std::size_t>(len));\n}\n"
+        },
+        {
+          "label": "단일 음원도 같은 경로로 재생한다",
+          "language": "cpp",
+          "text": "bool Player::play() noexcept {\n    if (dev_ == 0 || !clip_.has_value()) return false;\n    {\n        DeviceLock lock(dev_);\n        mixer_.start(0, *clip_);\n    }\n    SDL_PauseAudioDevice(dev_, 0);\n    return true;\n}\n"
+        }
+      ],
+      "reference": {
+        "path": "audio/sdl_audio.cpp",
+        "symbol": "mix_voice",
+        "invariant": "최종 클램프 전까지 넓은 정수 합을 유지한다.",
+        "mayDiffer": "현재 엔진은 루프와 카테고리별 볼륨을 다룬다. 학습 Mixer는 명시한 슬롯과 개별 게인으로 연산을 드러낸다."
+      }
+    },
+    {
+      "title": "클리핑은 마지막에도 정보를 버린다",
+      "body": "중간 클리핑을 없앴다고 최종 클리핑까지 없어지는 것은 아닙니다.30000+30000의 최종 합60000은 여전히32767로 제한됩니다. 연속된 파형의 위쪽이나 아래쪽이 평평하게 잘리면 원래 신호와 다른 모양이 되어 왜곡이 생길 수 있습니다.\n\n헤드룸은 여러 소리가 겹칠 때를 위해 최대 진폭까지 여유를 남기는 것입니다. 음원 자체의 레벨과 카테고리 게인을 조절하여 겹친 피크가 범위를 넘을 가능성을 줄입니다. 소리들이 서로 상쇄할 수도 있지만 항상 그러리라고 기대해서는 안 됩니다.\n\n‘현재 활성 보이스 수로 나누면 된다’는 방법도 별도의 정책입니다. 효과음이 하나 추가되는 순간 BGM까지 작아지는 식의 변화가 생길 수 있습니다. 평균 내기·에셋 레벨 조정·리미터는 서로 다른 청취 결과를 만듭니다. 이번 믹서는 자동 레벨 보정을 추가하지 않고 게인과 최종 제한을 명시합니다."
+    },
+    {
+      "title": "수치와 경계를 독립적으로 검사한다",
+      "body": "mixing_contract는16비트 모든 입력에 대해 게인0·0.5·1을 확인합니다.0.5의 기대값은 정수 나눗셈으로 따로 계산합니다. 세 음원의 모든 순열을 시험하여 중간 클리핑이 다시 들어오면 결과가 달라지는지 찾습니다.\n\n최대9보이스의 양·음 극단값, 레이트 불일치 거절, 잘못된 슬롯, 게인0에서도 커서 진행,256프레임 경계를 넘는 요청을 검사합니다. 모노·스테레오와1/255/256/257/513프레임을 조합하고 기대 합은 별도의 int64 연산으로 계산합니다. 출력 앞뒤 가드와 부분 프레임 꼬리도 확인합니다.\n\n데이터 준비는 콜백 전에 끝납니다. Player를 통한 기존 callback_contract는 새 믹싱 경로에서도 출력·수명·추적한 C++ 할당/해제 계약을 확인합니다. 산술 정확성과 메모리 경계 검사는 장치의 청감 품질이나 물리적 지연을 대신 측정하지 않습니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/78-mixing -B out/study78 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study78 -j3\nctest --test-dir out/study78 --output-on-failure\n./out/study78/mix_probe\n# sum=30000 mixed=30000 legacy=2767\nSDL_AUDIODRIVER=dummy ./out/study78/playback_probe docs/learn/checkpoints/78-mixing/assets/rotate.mp3\n# submitted frames=16128"
+        }
+      ]
+    },
+    {
+      "title": "전체 파일과 변경 경계",
+      "body": "mix_s16.h는 실제 게임과 기준 코드가 공유하는 작은 연산 정책입니다. Mixer는 기존 Voice를 사용해 여러 기여량을 모으고, Player는 장치·PCM 소유와 콜백 동기화를 담당합니다. 코드 레퍼런스에서는 이 책임이 현재 엔진의 핸들 저장소와 카테고리 볼륨에 어떻게 연결되는지 비교하세요.\n\n기준 코드에는 수치 예제와 정책을 고정합니다. 콘텐츠 수나 사운드 종류가 달라져도 같은 시각·같은 채널을 더하고, 누산 범위를 증명하며, 비정상 게인을 변환 전에 처리한다는 핵심을 유지합니다. 보이스 수를 늘리거나1보다 큰 증폭을 허용하면 현재의 범위 증명과 검사를 다시 설계해야 합니다.",
+      "codes": [
+        {
+          "label": "audio/mix_s16.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/78-mixing/audio/mix_s16.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/mixer.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/78-mixing/audio/mixer.h",
+          "collapsed": true
+        },
+        {
+          "label": "audio/player.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/78-mixing/audio/player.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/mix_probe.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/78-mixing/tools/mix_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/mixing_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/78-mixing/tests/mixing_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "78-1",
+      "question": "+30000,+30000,-30000을 게인1로 합칩니다. 이번 믹서의 출력은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "2767: 두 번째 합을 먼저 자름"
+        },
+        {
+          "id": "b",
+          "text": "30000: 넓게 더한 뒤 한 번 제한"
+        },
+        {
+          "id": "c",
+          "text": "32767: 가장 큰 중간 합을 유지"
+        },
+        {
+          "id": "d",
+          "text": "0: 세 보이스의 부호를 평균 냄"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "30000: 넓게 더한 뒤 한 번 제한",
+      "explanation": "중간 합60000을 유지한 채-30000을 더하면30000입니다. 중간마다16비트로 자를 때 생기는2767을 피합니다."
+    },
+    {
+      "id": "78-2",
+      "question": "NaN 게인에 대해 `<0`과 `>1` 두 비교만 수행하면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "첫 비교가 참이 되어0이 됨"
+        },
+        {
+          "id": "b",
+          "text": "두 번째 비교가 참이 되어1이 됨"
+        },
+        {
+          "id": "c",
+          "text": "항상 예외가 발생해 함수가 중단됨"
+        },
+        {
+          "id": "d",
+          "text": "두 비교 모두 거짓이어서 NaN이 남음"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "두 비교 모두 거짓이어서 NaN이 남음",
+      "explanation": "NaN은 두 범위 비교로 정리되지 않습니다. isfinite 검사를 먼저 수행하고 정수 변환 전에 앱의 정책으로 처리합니다."
+    },
+    {
+      "id": "78-3",
+      "question": "각 샘플이1인 두 보이스에 게인0.5를 적용합니다. 이번 보이스별 절삭 정책의 합은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0: 각각0으로 절삭한 뒤 더함"
+        },
+        {
+          "id": "b",
+          "text": "1: float 합산 후 한 번 절삭"
+        },
+        {
+          "id": "c",
+          "text": "2: 정수 샘플에는 게인을 적용하지 않음"
+        },
+        {
+          "id": "d",
+          "text": "-1: 항상 아래 정수로 반올림"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "0: 각각0으로 절삭한 뒤 더함",
+      "explanation": "이번 정책은 보이스별 float 곱을0방향 절삭해 정수 기여량을 만든 뒤 누산합니다. 최종까지 float로 보관하는 정책과 구별합니다."
+    },
+    {
+      "id": "78-4",
+      "question": "음원[10,20,30]에서 게인0으로 첫 프레임을 처리한 뒤 게인을1로 바꿨습니다. 다음 출력은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "10: 음소거 중 커서는 멈춤"
+        },
+        {
+          "id": "b",
+          "text": "0: 음소거가 영구적으로 음원을 바꿈"
+        },
+        {
+          "id": "c",
+          "text": "20: 커서는 계속 진행함"
+        },
+        {
+          "id": "d",
+          "text": "30: 음소거 해제 시 한 프레임을 추가로 건너뜀"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "20: 커서는 계속 진행함",
+      "explanation": "순수 게인0은 샘플 기여량을0으로 만들면서 Voice를 진행시킵니다. stop이나 pause 정책과 다릅니다."
+    },
+    {
+      "id": "78-5",
+      "question": "최대9보이스·게인0~1의 int32 누산 범위를 설명한 것으로 맞는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "입력이int16이면 보이스 수와 관계없이 안전"
+        },
+        {
+          "id": "b",
+          "text": "최대 절댓값을9×32768로 제한해 int32 범위와 비교"
+        },
+        {
+          "id": "c",
+          "text": "매번int16로 줄이므로 누산 증명이 불필요"
+        },
+        {
+          "id": "d",
+          "text": "float게인이므로 정수 합에도 오버플로가 없음"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "최대 절댓값을9×32768로 제한해 int32 범위와 비교",
+      "explanation": "고정한 보이스 수와 게인 범위에서294912라는 보수적 절댓값 상한을 얻습니다. 증폭이나 보이스 수가 달라지면 상한과 검사를 다시 확인해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "30000,30000,-30000의 모든 합산 순서를 중간클램프/최종클램프로 각각 계산합니다.",
+      "mix_probe를 실행하고legacy값과새값이 다른 단계에 표시합니다.",
+      "Mixer::render의256프레임블록·채널별 인덱스·최종 바이트 오프셋을 추적합니다.",
+      "Player의Mixer0번슬롯연결과 현재엔진의BGM/SFX누산경로를 비교합니다."
+    ],
+    "failureChecks": [
+      "NaN·양/음무한대·음수·1초과게인을normalize_gain에 넣고정수변환전정책을확인합니다.",
+      "음소거후게인복원에서커서가정지하지않는지검사합니다.",
+      "요청크기255/256/257/513과부분프레임꼬리·미정렬출력을검사합니다."
+    ],
+    "expected": "시간과채널이맞는신호를넓게누산하고최종범위로제한하며,게인정책·양자화시점·자원수명·산술상한을연결해설명한다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek연산/Mixer초안직접검토·SDL/Microsoft/C++공식규칙대조",
+    "draftJob": "out/learning-jobs/078-mixing-events.jsonl",
+    "corrections": [
+      "초안의Voice중복정의를제거하고기존voice.h재사용",
+      "Mixer의중복된형식방어분기를검증된configure계약에맞게간소화",
+      "실제SDL중간클리핑순서의존을넓은누산후최종클램프로교정",
+      "두백엔드의NaN·무한대게인정책통일",
+      "Part5/11현재발췌·양자화·클리핑·AudioStream과장치공급방식설명교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED84/SDL88 CTest·누적게임·경고0",
+    "전S16값×게인0/.5/1·6순열·9보이스극단·모노/스테레오×5요청크기×4회 독립int64oracle",
+    "비정상게인·형식거절·무음커서·미정렬출력·부분프레임꼬리·ASan/UBSan/float-cast-overflow",
+    "root실제SDL믹서 수정전순서의존/NaN UB 재현,수정후순열·513프레임·finite정책 통과",
+    "실제Windows볼륨setter본문대역정책검사,네이티브XAudio2미실행",
+    "root77콜백/76수명회귀·실제게임17CTest·sim_hash_dump골든",
+    "실제스피커·Windows/macOS네이티브·청감/물리적지연미검증"
+  ]
+}

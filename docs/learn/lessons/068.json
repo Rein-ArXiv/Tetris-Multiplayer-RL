@@ -1,0 +1,411 @@
+{
+  "id": "lesson-68",
+  "title": "즉시모드 UI: 그리기와 입력 판정",
+  "shortTitle": "UI·포인터·클릭 의도",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 메뉴의 패널과 글자를 그리며 Space로 게임을 시작합니다.",
+  "finish": "완료: 같은 논리 사각형으로 시작 버튼을 그리고 입력을 판정해, 클릭 의도를 앱의 화면 전이에 한 번 전달합니다.",
+  "objective": "현재 위치·누름 사건·앱 상태의 소유자를 구별하고, 좌표 변환과 취소를 포함한 즉시모드 UI 경로를 구현합니다.",
+  "prerequisites": [
+    "창·drawable·논리 좌표와 letterbox",
+    "프레임 입력과 화면 상태 전이",
+    "글리프 캐시·둥근 사각형·그리기 순서"
+  ],
+  "recap": {
+    "points": [
+      "같은 글리프의 계산과 업로드는 캐시로 재사용합니다.",
+      "논리 advance·기준선과 화면용 비트맵 해상도를 나눕니다.",
+      "폰트·페이지 변경에서는 사용 중인 참조의 수명을 처리합니다."
+    ],
+    "bridge": "이제 그리는 사각형과 글자를 마우스 입력에 연결하고, 판정 결과를 앱의 동작으로 전달하겠습니다."
+  },
+  "sections": [
+    {
+      "title": "메뉴의 그림을 누를 수 있는 시작 버튼으로 만든다",
+      "body": "메뉴 화면에는 패널과 글자가 있고 Space로 게임을 시작할 수 있습니다. 패널 안의 논리 사각형 `(14,64,64,28)`을 시작 버튼으로 만들겠습니다. 같은 사각형으로 입력을 판정하고 배경을 그린 뒤, 캐시로 준비한 ‘시작’ 글자를 가운데 놓습니다. 키보드 Space도 계속 사용할 수 있습니다.\n\n버튼을 만드는 일에는 세 질문이 들어 있습니다. 포인터가 지금 어디에 있는가, 누르는 사건은 어디에서 발생했는가, 그 사건을 받으면 앱이 어떤 상태로 바뀌는가입니다. 첫 두 질문은 UI의 관찰이고 마지막 질문은 앱의 동작입니다. 이번 구현은 누르는 순간 시작하는 버튼 하나를 만들고, 판정 결과를 `Application::advance`의 confirm으로 전달합니다.\n\n버튼은 포인터가 올라오면 밝은 색, 누른 채 올라와 있으면 눌림 색을 사용합니다. 클릭 판정은 누르는 사건이 기록된 위치를 사용합니다. 현재 위치와 사건 위치가 달라질 수 있다는 점을 코드 구조에 드러내겠습니다.",
+      "codes": [
+        {
+          "label": "한 프레임의 경로",
+          "language": "text",
+          "text": "SDL 사건 수집 → 포인터 프레임 값\n    ↓ 창 좌표를 논리 좌표로 변환\nbutton(시작 사각형, 입력) → hovered / held / activated\n    ├─ activated → 메뉴 confirm → Application 전이\n    └─ hovered·held → 배경색 → 배경·글자 그리기"
+        }
+      ]
+    },
+    {
+      "title": "즉시모드는 현재 상태로 UI를 다시 기술하는 방식이다",
+      "body": "**즉시모드 UI(immediate-mode UI)**에서는 호출자가 매 프레임 현재 화면과 값에 따라 UI 함수를 호출합니다. 예를 들어 메뉴일 때 시작 버튼을 호출하고 게임 중에는 호출하지 않습니다. UI를 구성하는 코드의 조건문과 앱의 현재 상태가 화면의 구조를 결정합니다.\n\n보관형 UI에서는 위젯 객체나 트리를 만들어 두고 속성을 갱신하는 구성이 흔합니다. 두 방식은 지속적인 UI 구조를 어디에 두고 어떻게 갱신하는지가 다릅니다. 즉시모드 구현도 포커스·드래그 대상·텍스트 편집 상태를 내부에 둘 수 있습니다. 이번 작은 버튼 함수는 상태를 보관하지 않고, 입력 이력은 플랫폼이, 메뉴·게임 상태는 Application이 보관합니다.\n\nUI 함수의 호출 시점과 GPU가 픽셀을 만드는 시점도 나누어 생각해야 합니다. 즉시모드 함수가 내부에서 그리기 명령을 배치에 쌓을 수 있습니다. ‘즉시’라는 이름이 호출 순간 GPU 실행 완료를 보장하지 않습니다. OpenGL의 옛 `glBegin/glEnd` 방식은 그래픽스 명령을 지정하는 API에 관한 용어이며, 여기서 배우는 UI 구성 방식과 계층이 다릅니다.",
+      "reference": {
+        "path": "src/gui.h",
+        "symbol": "// 이 위젯 함수들은",
+        "invariant": "체크 값이나 메뉴 선택의 소유권을 호출 계약으로 정한다.",
+        "mayDiffer": "루트 gui 함수는 그리기 요청과 판정을 함께 수행하고 학습 코드는 순수 판정과 그리기 소비를 분리한다."
+      }
+    },
+    {
+      "title": "지속 상태와 프레임 값을 구분한다",
+      "body": "`Edges`에는 버튼이 계속 눌려 있는지와 최신 위치가 프레임을 넘어 남습니다. `begin_frame`은 이번 프레임의 press와 취소 표시를 비우지만 held 상태는 보존합니다. 키를 누른 채 기다리는 것과 같은 원리입니다.\n\n사건 수집이 끝나면 `Frame` 값을 읽습니다. `position`은 현재 위치, `press`는 이 프레임에서 처음 발생한 누름의 위치입니다. 위치가 없을 수 있으므로 `optional<Point>`로 표현합니다. `(0,0)`은 유효한 창 좌상단이어서 ‘위치 없음’의 표시로 쓸 수 없습니다. `down`은 최종 누름 상태이고 `cancelled`는 이 프레임의 입력을 무시해야 한다는 뜻입니다.\n\nmain은 이 값을 한 번 읽어 논리 입력으로 변환하고 판정과 표현에 사용합니다. 중간에 포인터를 다시 조회하면 시간이 흐르면서 위치가 달라질 수 있습니다. 하나의 프레임 값으로 판단 근거를 고정하면 어느 관찰에서 동작이 결정됐는지 추적하기 쉽습니다. 다만 창 크기 변화나 여러 사건의 상세 시각 전체까지 저장하는 기록은 아닙니다.",
+      "codes": [
+        {
+          "label": "포인터 프레임 값",
+          "language": "cpp",
+          "text": "struct Frame {\n    std::optional<Point> position;\n    std::optional<Point> press;\n    bool down = false;\n    bool cancelled = false;\n};"
+        }
+      ]
+    },
+    {
+      "title": "누르고 있는 상태와 누른 사건은 다르다",
+      "body": "**level**은 지금 누르고 있는 상태, **edge**는 상태가 바뀐 사건을 뜻합니다. 버튼을 누른 채 세 프레임을 보내면 down은 계속 true이지만 pressed는 처음 한 번만 발생해야 합니다. 반대로 한 번의 사건 펌프 안에 down과 up이 모두 들어오면 마지막 down은 false여도 누르는 사건은 존재합니다.\n\n이 작은 수집기는 유한 상태 기계로 읽을 수 있습니다. held=false에서 down 사건을 받으면 held=true가 되고 press 위치를 남깁니다. held=true에서 같은 down을 받으면 새 누름으로 보지 않습니다. up 사건은 held=false로 바꿉니다. 프레임 경계는 press를 지우지만 held는 유지합니다.\n\n이력 전체를 저장하지 않고 프레임 안의 첫 press 하나로 압축하는 정책을 선택했습니다. down→up→down이 한 프레임에 들어와도 첫 위치를 유지하고 최종 down만 true가 됩니다. 한 프레임에 여러 클릭을 순서대로 처리해야 하는 편집기라면 사건 목록을 보존하는 계약이 필요합니다. 이 메뉴는 프레임당 한 번의 시작 의도를 처리합니다.",
+      "codes": [
+        {
+          "label": "한 프레임 안의 상태 변화",
+          "language": "text",
+          "text": "사건              최종 down    보관한 press\nbegin_frame       false        없음\ndown at (10,20)   true         (10,20)\nup at (10,20)     false        (10,20)\nmove to (90,80)   false        (10,20)\n다음 begin_frame  false        없음"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "bool platform_mouse_pressed(",
+        "invariant": "누름 엣지는 사건에서 누적해 같은 펌프 안의 down/up도 보존한다.",
+        "mayDiffer": "루트 KeyEdges는 세 버튼의 pressed/released를 보관하고 학습 Edges는 왼쪽 버튼의 최초 press 위치도 보관한다."
+      }
+    },
+    {
+      "title": "누른 곳과 나중에 이동한 곳을 따로 판정한다",
+      "body": "버튼 A 안에서 누른 다음 버튼 B 쪽으로 움직였고, 이 사건들이 같은 프레임에서 처리됐다고 가정해 봅시다. 최종 위치만 사용하면 B를 눌렀다고 판단할 수 있습니다. 여기서는 press에 저장한 A의 위치로 activated를 결정하고, 최종 position으로 hovered를 결정합니다.\n\n따라서 `activated=true, hovered=false, down=false`도 가능한 조합입니다. A를 빠르게 눌렀다 떼고, 같은 창 안의 다른 곳으로 이동한 경우입니다. 세 값은 서로 다른 질문의 답이므로 모두 같은 불리언으로 합치지 않습니다.\n\n학습 버튼은 **누르는 시점에 발동**합니다. 누른 대상을 기억해 두고 그 안에서 놓았을 때만 확정하는 버튼은 press→이동→release의 지속적인 상호작용 상태가 필요합니다. 여기서 held는 단순히 ‘현재 안에 있고 왼쪽 버튼이 내려가 있음’이라는 표현 값입니다. 누름이 반드시 이 버튼에서 시작됐다는 뜻은 아닙니다.",
+      "codes": [
+        {
+          "label": "세 결과의 정의",
+          "language": "text",
+          "text": "hovered   = 현재 위치가 사각형 안인가\nheld      = hovered && 최종 down\nactivated = 최초 press 위치가 사각형 안인가"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "창을 떠나는 사건이 있었다면",
+          "body": "이 예제의 SDL 어댑터는 창을 떠남·포커스 상실·최소화 사건을 취소로 처리합니다. 앞의 예는 그런 취소 사건 없이 같은 창 안에서 위치가 달라진 경우입니다. 취소가 기록되면 남아 있던 press도 사용하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "보이는 사각형과 같은 논리 좌표로 바꾼다",
+      "body": "SDL 사건의 x/y와 현재 커서 조회값은 창 좌표입니다. GPU의 drawable 픽셀 수는 창 좌표 크기와 다를 수 있습니다. UI 사각형은 논리 화면 320×240에 있으므로 창→drawable→뷰포트 내부→논리 좌표의 순서를 따라야 합니다.\n\n`window_to_logical`은 창 좌표에 drawable/window 비율을 곱하고, letterbox 뷰포트의 좌상단을 뺀 뒤 논리 크기로 나눕니다. 뷰포트 밖의 검은 띠는 `nullopt`입니다. 검은 띠의 좌표를 버튼 가장자리로 강제로 붙이지 않으므로, 화면 밖 클릭이 가장자리 버튼 클릭으로 바뀌지 않습니다.\n\n현재 위치와 press 위치를 각각 변환합니다. 예를 들어 창800×600, drawable1600×1200, 논리320×240이면 창의 `(100,200)`은 논리 `(40,80)`입니다. 현재 위치가 `(500,400)`으로 바뀌어도 저장된 press는 `(40,80)`을 유지합니다. layout은 `make_layout`이 반환한 값을 그대로 사용합니다.",
+      "codes": [
+        {
+          "label": "같은 변환을 두 관찰에 적용한다",
+          "language": "cpp",
+          "text": "if (frame.position)\n    input.position = window_to_logical(layout, current_window_point);\nif (frame.press)\n    input.press = window_to_logical(layout, press_window_point);"
+        }
+      ],
+      "reference": {
+        "path": "platform/mouse_coordinates.h",
+        "symbol": "inline int logical_mouse_axis(",
+        "invariant": "렌더링 뷰포트와 입력 역변환은 같은 논리 공간을 사용한다.",
+        "mayDiffer": "루트는 정수 논리 좌표와 범위 밖 값을 반환하고 학습 변환은 연속 double 좌표와 optional을 사용한다."
+      }
+    },
+    {
+      "title": "반열린 구간으로 공유 경계를 한쪽에 맡긴다",
+      "body": "버튼의 x 범위를 `[x,x+w)`로 정합니다. 왼쪽 경계는 포함하고 오른쪽 경계는 제외하는 **반열린 구간**입니다. `[0,10)`과 `[10,20)`이 맞닿으면 x=10은 오른쪽 버튼에만 포함됩니다. y도 같은 규칙을 씁니다.\n\n크기가 0 이하이면 입력 영역이 없습니다. NaN이나 무한 좌표도 거절합니다. double의 경우 `x+w`가 무한대가 되거나, 큰 x에 매우 작은 w를 더해 같은 값으로 반올림될 수도 있으므로 계산한 끝점이 유한하며 시작점보다 큰지 확인합니다. 유효한 사각형만 비교식에 도달하도록 만드는 것입니다.\n\n정수 UI에서는 다른 함정이 있습니다. int의 최댓값에 양수 폭을 더하면 signed overflow가 발생할 수 있습니다. 루트 `gui_hover_rect`는 덧셈 전에 int64로 넓혀 경계를 계산합니다. 결과를 다시 int로 잘라 비교하면 보강의 의미가 없어지므로 비교도 넓은 값으로 수행합니다.\n\n반열린 경계는 맞닿은 영역을 구분하지만 면적 자체가 겹친 위젯의 우선순위는 정하지 않습니다. 위에 그린 창이 입력도 우선 받게 하려면 그 규칙을 입력 전달 단계에 따로 구현해야 합니다.",
+      "codes": [
+        {
+          "label": "유효성 확인 뒤의 포함 판정",
+          "language": "cpp",
+          "text": "return r.x <= p.x && p.x < r.x + r.w &&\n       r.y <= p.y && p.y < r.y + r.h;"
+        }
+      ],
+      "reference": {
+        "path": "src/gui.cpp",
+        "symbol": "bool gui_hover_rect(",
+        "invariant": "양수 크기와 반열린 경계를 검사하고 덧셈 오버플로를 피한다.",
+        "mayDiffer": "루트는 int 입력을 int64 경계와 비교하며 학습 UI는 유한한 double 좌표를 사용한다."
+      }
+    },
+    {
+      "title": "순수 판정 함수는 의도를 돌려준다",
+      "body": "`button(bounds,input,enabled)`는 앱 상태를 바꾸거나 GL을 호출하지 않습니다. 같은 사각형과 같은 입력 값을 주면 같은 Button 값을 돌려줍니다. 이처럼 판단에 필요한 값을 인자로 받고 결과로 답하는 함수를 **순수 계산**으로 분리하면, 창을 띄우지 않고 경계·취소·이동 사례를 검사할 수 있습니다.\n\nenabled=false 또는 cancelled=true이면 모든 결과를 false로 돌려줍니다. 입력이 없는 상태와 비활성 상태에서 색이나 동작이 남지 않게 하는 정책입니다. 정상 입력에서는 현재 위치로 hover, 최초 누름 위치로 activated를 계산합니다.\n\n순수 함수에는 사건을 소비했다는 숨은 상태도 없습니다. 같은 입력으로 함수를 두 번 부르면 activated=true가 두 번 반환될 수 있습니다. 겹친 두 버튼을 호출해도 둘 다 true일 수 있습니다. 반환값을 어디에서 몇 번 처리할지는 호출자가 정해야 합니다. 이번 main은 메뉴의 시작 버튼 의도를 한 번만 앱 명령으로 전달합니다.",
+      "codes": [
+        {
+          "label": "판정과 앱 동작의 경계",
+          "language": "cpp",
+          "text": "const auto result = study_ui::button(start_bounds, pointer);\nconst bool start_clicked = app.screen() == Screen::menu && result.activated;\n// 여기서 한 번만 Application의 confirm에 합친다.\napp.advance(dt, gameplay_input, keyboard_confirm || start_clicked,\n            keyboard_back, gameplay_keys_released);"
+        }
+      ]
+    },
+    {
+      "title": "취소는 유효한 클릭을 만들지 않는 전이다",
+      "body": "포커스가 사라지면 버튼 up을 받지 못할 수 있습니다. held를 계속 유지하면 돌아왔을 때 누르지 않은 버튼이 눌린 것처럼 보입니다. 같은 프레임에 저장된 press가 남으면 포커스를 잃은 화면에서 시작 동작이 실행될 수도 있습니다. `cancel()`은 위치·press·down을 비우고 이번 프레임의 취소 표시를 남깁니다.\n\n같은 펌프 안에서 취소 뒤에 새 사건이 들어올 수 있습니다. 수집기는 그 사건으로 내부 최신 상태를 갱신하되, 취소가 표시된 프레임의 snapshot은 빈 입력을 반환합니다. 다음 begin_frame이 취소 표시를 지웁니다. 이미 취소해 버린 press를 되살려 실행하지 않습니다.\n\nSDL 어댑터는 왼쪽 버튼 사건과 모션의 windowID를 확인해 이 창의 사건만 받습니다. 오른쪽 버튼은 이번 기능의 입력이 아닙니다. 현재 마우스 포커스가 이 창에 없거나 창이 최소화·종료 상태이면 포인터 조회도 취소합니다. 입력 전용 SCRIPTED/WIN32 학습 백엔드는 포인터를 제공하지 않으며, 그래픽 누적 게임은 SDL 경로를 사용합니다.",
+      "codes": [
+        {
+          "label": "취소된 프레임의 관찰",
+          "language": "cpp",
+          "text": "Frame snapshot() const noexcept {\n    if (cancelled_)\n        return {std::nullopt, std::nullopt, false, true};\n    return {position_, press_, down_, false};\n}"
+        }
+      ]
+    },
+    {
+      "title": "화면 전이에 입력을 한 번만 전달한다",
+      "body": "main은 platform_begin_frame 다음에 창·drawable·layout을 구하고 포인터 프레임을 읽습니다. 논리 입력과 시작 버튼 결과를 구한 뒤, **전이 전 화면이 메뉴일 때** activated를 confirm으로 바꿉니다. Space의 confirm과 논리 OR로 합쳐 두 입력 경로가 같은 앱 동작에 도달하게 합니다.\n\nApplication이 confirm으로 게임을 만들면 그 프레임에는 라운드 틱을 진행하지 않습니다. 시작 의도가 게임의 하드 드롭으로 새어 들어가지 않도록 전이 프레임을 분리한 계약을 그대로 사용합니다. 포인터 클릭을 gameplay_input에 넣지 않는 것도 이 책임 분리에 포함됩니다.\n\n상태 전이 뒤에는 현재 화면을 그립니다. 게임으로 바뀌었다면 시작 버튼을 그리지 않습니다. 같은 press로 새 화면의 다른 버튼을 다시 호출해 동작시키는 루프도 만들지 않습니다. UI 함수의 반환과 그 결과로 바뀐 화면의 표현이 어느 시점에 처리되는지 코드 순서로 확인할 수 있어야 합니다.",
+      "codes": [
+        {
+          "label": "입력 기준 화면과 그릴 화면",
+          "language": "text",
+          "text": "프레임 시작 화면: menu\n  → 시작 의도 판정\n  → Application::advance(confirm=true)\n  → 현재 화면: playing, 이 프레임의 규칙 틱 없음\n  → 게임 화면 그리기, 시작 버튼은 생략"
+        }
+      ],
+      "reference": {
+        "path": "src/gui.cpp",
+        "symbol": "bool gui_button(",
+        "invariant": "위젯의 결과를 호출자가 앱 동작으로 해석한다.",
+        "mayDiffer": "루트 함수는 배경·글자를 그리면서 클릭 여부를 반환하고 누적 학습 main은 판정→전이→현재 화면 그리기 순서를 명시한다."
+      }
+    },
+    {
+      "title": "같은 사각형으로 배경과 라벨을 그린다",
+      "body": "메뉴일 때 `start_bounds`의 x/y/w/h를 RoundedQuad의 rect로 넘깁니다. 입력 판정용 숫자와 그리기용 숫자를 따로 적으면 나중에 한쪽만 수정하기 쉽습니다. 좌표의 출처를 한 곳으로 모으고 경계에서 double→float 표현으로 넘깁니다. 여기서는 작은 고정 정수 좌표여서 정확하게 표현됩니다.\n\n배경색은 held, hovered, 기본값 순으로 선택하고, 흰색 텍스처를 색칠해 둥근 배경을 그립니다. 글자는 ‘시작’ 문단을 글리프 캐시에서 준비하고 advance 폭으로 패널 안에 가운데 놓습니다. 배경 다음에 글자를 그리는 순서를 유지합니다.\n\n이번 입력 영역은 둥근 배경의 바깥 사각형 전체입니다. 모서리의 시각적인 투명 부분도 그 사각형 안이면 눌립니다. 둥근 모양 그대로 판정하려면 동일 반지름을 사용한 모서리 거리 검사 등을 추가할 수 있습니다. 표현의 모양과 조작 영역이 꼭 같아야 하는 것은 아니지만, 선택한 영역을 분명하게 정의해야 합니다.",
+      "codes": [
+        {
+          "label": "색 선택에 쓰는 UI 결과",
+          "language": "cpp",
+          "text": "button.image.tint = start_button.held\n    ? Tint{.12f,.23f,.40f,1}\n    : start_button.hovered\n        ? Tint{.24f,.38f,.60f,1}\n        : Tint{.15f,.22f,.35f,1};"
+        }
+      ]
+    },
+    {
+      "title": "반복 비용과 입력 우선순위를 분리해 생각한다",
+      "body": "매 프레임 UI를 기술하면 판정·좌표 변환·측정·그리기 요청이 반복됩니다. 프레임버퍼를 지운다는 사실이 그 작업의 CPU/GPU 비용을 없애 주지는 않습니다. 현재 구현은 작은 수의 사각형 판정만 반복하고 글리프 생성·업로드는 캐시를 재사용합니다. 어떤 작업이 반복되는지 분리해야 줄일 지점도 찾을 수 있습니다.\n\n그리기 순서는 배경보다 글자를 위에 놓는 표현 규칙입니다. 입력 우선순위는 겹친 버튼이나 모달에서 누구에게 사건을 전달할지 정하는 규칙입니다. 마지막에 그렸다는 이유만으로 다른 버튼의 `activated`가 자동으로 false가 되지 않습니다. 영역이 겹치는 UI를 추가할 때는 상단 모달만 평가하거나, 대상 선택 뒤 한 곳에 전달하는 정책이 필요합니다.\n\n또한 이번 버튼은 press 발동 정책이며, press를 시작한 대상의 ID를 보관하는 capture나 release 확정은 갖지 않습니다. 이러한 상호작용을 추가하려면 해당 지속 상태의 소유자를 정한 뒤 사건 순서와 취소를 함께 확장해야 합니다. 즉시모드라는 호출 방식은 그 설계를 대신 결정해 주지 않습니다."
+    },
+    {
+      "title": "현재 게임의 입력 계약과 비교한다",
+      "body": "루트 SDL·Win32 마우스도 키보드와 같은 `KeyEdges<3>`로 사건을 누적합니다. 같은 펌프 안의 down/up에서는 pressed와 released가 모두 true이고 최종 down은 false입니다. Win32는 모든 버튼의 held가 해제됐을 때만 캡처를 놓으며, 정상 해제에 뒤따르는 WM_CAPTURECHANGED가 완료된 클릭 엣지를 지우지 않게 구분합니다.\n\n취소 범위도 구별합니다. 루트 KeyEdges의 cancel은 그 시점의 held와 press를 비우며 같은 프레임의 후속 새 down은 다시 기록할 수 있습니다. 학습 Edges의 snapshot은 취소된 프레임 전체의 입력을 숨깁니다. 각 소비자가 어느 취소 정책을 쓰는지 함께 읽어야 합니다.\n\n현재 루트 `platform_mouse_x/y()`는 가장 최근 좌표를 반환합니다. 학습 Edges는 첫 press 위치까지 저장합니다. 따라서 ‘누르는 사건을 보존한다’와 ‘그 사건의 위치를 보존한다’는 서로 다른 계약입니다. 학습의 위치 보존 정책을 현재 코드에서도 적용하려면 공개 입력 API와 이를 읽는 위젯을 함께 바꿔야 합니다.\n\n루트 위젯은 그리기와 판정을 같은 함수에서 수행합니다. 학습 코드는 순수 판정 함수를 두고 main에서 그 결과를 앱 명령과 색으로 소비합니다. 두 구현에서 유지되는 핵심은 논리 좌표의 일치, level과 edge의 구별, 앱 상태의 소유자, 취소·전이 시 사건 소비 순서입니다. 구체적인 상태 저장 방식과 함수 배치는 다를 수 있습니다.",
+      "reference": {
+        "path": "platform/win32.cpp",
+        "symbol": "static void release_mouse_capture_if_idle(",
+        "invariant": "정상 버튼 해제와 누르는 중의 강제 캡처 상실을 구분한다.",
+        "mayDiffer": "학습 SDL 예제는 창 떠남에 취소하며, 루트 Win32는 OS 캡처를 통해 창 밖 마우스 사건도 받는다."
+      }
+    },
+    {
+      "title": "실행하고 경계 사례를 추적한다",
+      "body": "`68-immediate-ui`를 SDL로 빌드해 메뉴의 시작 버튼을 누르거나 Space로 시작합니다. 포인터를 버튼의 왼쪽·오른쪽 경계와 letterbox 검은 띠로 이동해 입력 영역을 비교합니다. 현재 위치와 press가 다른 사례는 `immediate_ui_contract`의 고정 사건 열로 확인할 수 있습니다.\n\n`pointer_edges.h`는 상태 전이, `immediate_ui.h`는 좌표 변환과 순수 판정, platform의 SDL 구현은 native 사건 변환을 담당합니다. main은 그 결과를 Application과 렌더러에 연결합니다. 전체 파일을 읽을 때 각 상태를 누가 보관하고 각 함수가 어떤 부작용을 만드는지 표시해 보세요.\n\n검사 스크립트는 순수 좌표 판정, SDL 사건 큐 어댑터, 앱 전이와 루트 hit-test를 나누어 검사합니다. 그림이 한 번 보인다는 관찰과 모든 사건 순서가 맞는다는 검증은 범위가 다릅니다. 빠른 down/up, focus loss, 다른 창 사건, 최종 위치가 바뀐 press를 각각 입력해 결과를 예측해 봅니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 빌드",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/68-immediate-ui -B out/lesson68 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/lesson68\nctest --test-dir out/lesson68 --output-on-failure\ncd out/lesson68\n./tetris"
+        },
+        {
+          "label": "입력과 UI 계약 검사",
+          "language": "sh",
+          "text": "python3 scripts/check_learning_immediate_ui.py"
+        },
+        {
+          "label": "platform/pointer_edges.h",
+          "language": "cpp",
+          "file": "checkpoints/68-immediate-ui/platform/pointer_edges.h",
+          "collapsed": true
+        },
+        {
+          "label": "client/immediate_ui.h",
+          "language": "cpp",
+          "file": "checkpoints/68-immediate-ui/client/immediate_ui.h",
+          "collapsed": true
+        },
+        {
+          "label": "platform/platform.h",
+          "language": "cpp",
+          "file": "checkpoints/68-immediate-ui/platform/platform.h",
+          "collapsed": true
+        },
+        {
+          "label": "platform/sdl.cpp",
+          "language": "cpp",
+          "file": "checkpoints/68-immediate-ui/platform/sdl.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "src/main.cpp",
+          "language": "cpp",
+          "file": "checkpoints/68-immediate-ui/src/main.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/immediate_ui_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/68-immediate-ui/tests/immediate_ui_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/68-immediate-ui/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "68-1",
+      "question": "같은 창 안에서 A 버튼 안을 눌렀다 떼고 A 밖으로 이동했습니다. 모두 같은 프레임이며 취소 사건은 없습니다. A의 hovered·held·activated는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "false·false·false"
+        },
+        {
+          "id": "b",
+          "text": "true·true·true"
+        },
+        {
+          "id": "c",
+          "text": "false·false·true"
+        },
+        {
+          "id": "d",
+          "text": "true·false·true"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "false·false·true",
+      "explanation": "현재 위치는 A 밖이고 최종 down은 false입니다. 그러나 press에는 A 안에서 발생한 최초 누름 위치가 남아 있어 activated는 true입니다."
+    },
+    {
+      "id": "68-2",
+      "question": "순수 button 함수에 동일한 사각형과 동일한 press 입력을 두 번 전달했습니다. 첫 결과로 앱 동작을 실행한 뒤 두 번째 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "함수가 자동으로 사건을 소비해 false다."
+        },
+        {
+          "id": "b",
+          "text": "같은 activated를 다시 반환하므로 호출자가 중복 실행을 막아야 한다."
+        },
+        {
+          "id": "c",
+          "text": "두 번째 호출부터 입력 위치가 지워진다."
+        },
+        {
+          "id": "d",
+          "text": "그리기 순서가 늦을수록 activated가 false가 된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "같은 activated를 다시 반환하므로 호출자가 중복 실행을 막아야 한다.",
+      "explanation": "순수 판정 함수는 사건 소비 상태를 저장하지 않습니다. 앱 명령으로 해석하는 호출 지점에서 한 번만 처리해야 하며, 겹친 위젯의 우선순위도 별도 정책입니다."
+    },
+    {
+      "id": "68-3",
+      "question": "버튼들이 [0,10)과 [10,20)의 x 범위를 사용하고 y는 둘 다 포함합니다. x=10에 대한 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "오른쪽 버튼에만 포함된다."
+        },
+        {
+          "id": "b",
+          "text": "왼쪽 버튼에만 포함된다."
+        },
+        {
+          "id": "c",
+          "text": "두 버튼 모두 포함한다."
+        },
+        {
+          "id": "d",
+          "text": "두 버튼 모두 제외한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "오른쪽 버튼에만 포함된다.",
+      "explanation": "반열린 구간은 시작점을 포함하고 끝점을 제외합니다. 이 규칙은 맞닿은 경계의 중복을 막으며, 면적 자체가 겹친 위젯의 입력 우선순위까지 정하지는 않습니다."
+    },
+    {
+      "id": "68-4",
+      "question": "창 크기를 바꾸어 pointer가 letterbox 검은 띠에 놓였습니다. 논리 좌표 변환과 버튼 판정은 어떻게 처리할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "가장 가까운 화면 가장자리로 좌표를 붙인다."
+        },
+        {
+          "id": "b",
+          "text": "마지막 유효 좌표를 그대로 사용해 클릭한다."
+        },
+        {
+          "id": "c",
+          "text": "검은 띠의 창 좌표를 논리 좌표로 간주한다."
+        },
+        {
+          "id": "d",
+          "text": "변환 결과를 없음으로 두어 그 위치가 버튼에 닿지 않게 한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "변환 결과를 없음으로 두어 그 위치가 버튼에 닿지 않게 한다.",
+      "explanation": "검은 띠는 논리 UI 뷰포트 밖입니다. nullopt를 유지해야 화면 밖 입력이 가장자리 버튼 클릭으로 변하지 않습니다. 현재 위치와 press 위치는 각각 변환합니다."
+    },
+    {
+      "id": "68-5",
+      "question": "즉시모드 메뉴에 체크박스를 추가할 때 상태 소유에 관한 설명으로 적절한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "즉시모드에서는 모든 상태를 프레임마다 지워야 한다."
+        },
+        {
+          "id": "b",
+          "text": "체크 값을 Application에 둘 수 있고 입력 이력은 platform에 남길 수 있다."
+        },
+        {
+          "id": "c",
+          "text": "GPU가 체크 값을 보관해야 한다."
+        },
+        {
+          "id": "d",
+          "text": "즉시모드는 키보드나 마우스 이력을 저장할 수 없다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "체크 값을 Application에 둘 수 있고 입력 이력은 platform에 남길 수 있다.",
+      "explanation": "즉시모드는 UI를 기술하는 호출 방식입니다. 체크 값·선택·입력 이력·포커스 같은 상태의 소유 위치는 API와 앱 설계로 정합니다. 이번 위젯의 순수함을 모든 즉시모드 구현의 무상태성과 혼동하지 않습니다."
+    }
+  ],
+  "review": {
+    "date": "2026-09-28",
+    "method": "DeepSeek 순수 입력/UI 초안·구성/문제 후보를 검토 후 집필; 상태·사건·좌표·부작용 계약 대조",
+    "draftJob": "out/learning-jobs/068-ui-input-events.jsonl",
+    "corrections": [
+      "native pixels를 window coordinates로 교정하고 상태 기계가 없다는 오개념 주석 제거",
+      "원고를 용어 나열 대신 메뉴 시작 버튼의 구현 순서로 재구성",
+      "문제의 answer 값/정답 위치를 교정하고 구현 한 줄 재진술을 상태 소유·중복 dispatch 문제로 교체",
+      "즉시모드 무상태·추가 비용0·그리기 순서가 입력을 소비한다는 단정 방지"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED72/SDL73CTest·누적 tetris 빌드·경고0",
+    "순수 UI 6456681 반정수 좌표와 정수 부등식 oracle, 빠른클릭/최초press/취소/중복down/HiDPI/letterbox/반열린경계/비유한값·UBSan/float-cast-overflow",
+    "SDL 실제 사건 큐와 학습 platform 펌프·통제한 최종커서/포커스·입력전용 세션: 다른창/오른쪽버튼/빠른클릭/취소/종료·앱전이시 규칙틱없음",
+    "루트 hit-test 수정전 int overflow UBSan 재현, 수정후 독립 차이식 oracle531441경계 조합",
+    "루트 SDL 수정전 같은펌프 down/up 누락 재현, 수정후 실제 SDL 사건 큐·포커스·잘못된버튼인덱스 회귀",
+    "Win32 실제 소스 마우스분기 추출+capture API모형: 정상해제/복수버튼/강제상실·UBSan. Windows네이티브 검증 아님",
+    "root 빌드17CTest·sim_hash_dump골든 유지",
+    "offscreen환경의 doublebuffer=0 때문에 GL플랫폼 초기화 기반 입력 검사는 불가; 실제 플랫폼 요구를 유지하고 입력전용 테스트 세션으로 분리. 수동GUI/타OS네이티브 미검증"
+  ],
+  "practice": {
+    "steps": [
+      "down→up→move 사건 뒤의 position·press·down을 표로 추적한다.",
+      "같은 사각형을 입력 판정과 배경 그리기에 전달한다.",
+      "검은 띠·공유 경계·포커스 상실 사례의 결과를 예측한다.",
+      "메뉴 confirm이 게임 하드 드롭으로 재소비되지 않는 전이 순서를 따라간다."
+    ],
+    "failureChecks": [
+      "최종 down만 비교해 같은 프레임의 짧은 클릭을 놓치지 않는지 확인한다.",
+      "현재 위치로 최초 press 위치를 덮어쓰지 않는지 확인한다.",
+      "취소된 프레임의 press를 실행하지 않는지 확인한다.",
+      "같은 순수 판정 결과를 앱 명령으로 중복 실행하지 않는지 확인한다."
+    ],
+    "expected": "프레임 관찰·순수 판정·앱 전이·그리기의 책임을 나누고 입력 사건의 수명과 좌표를 설명한다."
+  }
+}

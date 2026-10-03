@@ -1,0 +1,397 @@
+{
+  "id": "lesson-93",
+  "title": "스레드와 큐: 데이터 소유권",
+  "shortTitle": "값 인계·유한 큐·취소와 종료",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 연결의 송수신을 호출한 스레드가 직접 수행하고 수신에서 기다립니다.",
+  "finish": "완료: 워커가 연결 이후 소켓과 파서를 소유하고, 두 유한 큐로 프레임 값을 전달하며 완료·취소·과부하를 구분합니다.",
+  "objective": "공유 상태의 동기화와 소유권을 구분하고, 값 인계 큐·논블로킹 워커·안전한 종료 순서를 구현합니다.",
+  "prerequisites": [
+    "이동 소유 Socket과 RAII",
+    "부분 송수신·프레임 파서·반쪽 종료",
+    "틱별 입력과 해시 보관 창"
+  ],
+  "recap": {
+    "points": [
+      "상태 번호와 플레이어 역할을 맞춰 해시를 비교합니다.",
+      "원격 샘플이 먼저 오면 같은 틱의 로컬 샘플을 기다립니다.",
+      "보관과 비교의 책임은 메시지 송수신과 구분됩니다."
+    ],
+    "bridge": "통신을 별도 스레드로 옮겨도 규칙과 비교 창의 소유자는 하나로 유지합니다."
+  },
+  "sections": [
+    {
+      "title": "소유자를 정하면 잠글 데이터가 줄어든다",
+      "body": "통신 호출이 main에서 기다리는 동안 창의 이벤트 처리와 렌더링도 멈춥니다. 호출을 다른 스레드로 옮기면 main은 계속 일할 수 있지만, 두 스레드가 같은 게임 객체를 수정하면 새로운 문제가 생깁니다. 예를 들어 수신 워커가 보드에 입력을 적용하는 중 main이 보드를 그리거나 해시를 만들 수 있습니다.\n\n이번에는 게임과 HashAudit를 main에 남겨 두고, 연결이 끝난 Socket과 FrameParser를 통신 워커에 맡깁니다. main은 보낼 Frame 값을 송신 큐에 복사하고, 워커는 해석한 Frame 값을 수신 큐에 넣습니다. 게임 틱을 진행할 권한은 main 하나가 가집니다.\n\n동시성은 여러 일이 겹쳐 진행될 수 있는 구조입니다. 병렬 실행은 실제로 둘 이상이 같은 순간 실행되는 경우입니다. CPU 코어가 하나여도 스레드 전환 사이에 공유 상태 접근이 겹칠 수 있으므로 소유권 규칙은 필요합니다.",
+      "codes": [
+        {
+          "label": "소유권과 값 전달",
+          "language": "text",
+          "text": "main: 게임 · HashAudit · 입력 일정\n    ── Frame 값 → [송신 큐 8칸] → 워커\n    ← Frame 값 ── [수신 큐 8칸] ← 워커\n워커: Socket · FrameParser · 부분 송신 버퍼\n공유: 두 큐 · 취소 플래그 · 종료 보고"
+        }
+      ],
+      "reference": {
+        "path": "net/session.h",
+        "symbol": "sendMu",
+        "invariant": "공유 자료와 접근 경계를 식별한다.",
+        "mayDiffer": "현재 Session은 단계별 워커와 소켓 공유 소유권을 사용한다. 기준은 연결 이후 단일 워커 소유다."
+      }
+    },
+    {
+      "title": "데이터 경합과 잘못된 순서는 다른 문제다",
+      "body": "두 스레드가 같은 메모리에 동기화 없이 접근하고 그중 하나가 쓰면 C++ 데이터 경합이 될 수 있습니다. 결과가 조금 늦게 보이는 정도가 아니라 프로그램의 정의된 동작을 잃는 문제입니다. 큐의 count만 atomic으로 바꾸더라도 슬롯을 채우는 쓰기와 읽기의 안전한 인계가 저절로 생기지는 않습니다.\n\nmutex는 한 스레드가 보호 구역을 사용하는 동안 다른 스레드의 같은 mutex 획득을 기다리게 합니다. 생산자가 슬롯·개수를 변경하고 unlock한 뒤 소비자가 같은 mutex를 획득하면, 그 동기화 관계를 통해 앞선 쓰기를 볼 수 있습니다. 이를 설명할 때 사용하는 happens-before는 단순한 벽시계상의 선후가 아니라 언어가 정하는 순서 관계입니다.\n\n그러나 잠금이 있어도 INPUT(8)을 INPUT(7)보다 먼저 규칙에 적용하는 논리 오류는 남습니다. 큐는 인계 순서를 보존하고, 틱별 입력 창은 게임에서 소비할 순서를 결정합니다. 각각 해결하는 문제가 다릅니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "const 참조로 받는 원본도 수명이 필요하다",
+          "body": "try_push가 값을 복사하는 동안 호출자는 원본 Frame을 다른 스레드에서 수정하면 안 됩니다. 큐 내부 mutex는 호출자가 소유한 원본까지 보호하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "저장 공간과 상태를 함께 보호한다",
+      "body": "Frame은 고정 배열로 payload를 소유합니다. 따라서 큐에 복사한 뒤 호출자의 임시 Frame이 사라져도 큐의 내용은 유지됩니다. 포인터만 넣는 큐라면 pointee의 수명과 수정 권한을 별도로 정해야 합니다.\n\nFrameQueue<Capacity>는 슬롯 배열·head·count·closed를 하나의 mutex로 보호합니다. head는 가장 오래된 항목의 위치이고, 다음 삽입 위치는 (head + count) % Capacity입니다. 2칸 큐에 A,B를 넣고 A를 꺼낸 뒤 C를 넣으면 빈 0번 칸을 재사용하고 소비 순서는 B,C입니다. 배열을 매번 앞으로 복사할 필요가 없습니다.\n\n반환값은 stored/full/closed/invalid로 구분합니다. full이면 이번 프레임은 저장되지 않았으므로 호출자가 같은 값을 보관했다가 재시도하거나 연결을 끝낼 수 있습니다. 성공으로 간주하고 다음 입력으로 넘어가면 입력 하나를 잃습니다.",
+      "codes": [
+        {
+          "label": "크기 검사와 삽입을 하나의 연산으로",
+          "language": "cpp",
+          "text": "QueuePut try_push(const Frame& frame) {\n    if (frame.size > kMaxPayloadBytes) {\n      return QueuePut::invalid;\n    }\n    std::lock_guard<std::mutex> guard(mutex_);\n    if (closed_) {\n      return QueuePut::closed;\n    }\n    if (count_ == Capacity) {\n      return QueuePut::full;\n    }\n    buffer_[(head_ + count_) % Capacity] = frame;\n    ++count_;\n    return QueuePut::stored;\n  }\n"
+        }
+      ]
+    },
+    {
+      "title": "빈 큐와 닫힌 큐를 구별한다",
+      "body": "try_pop은 항목이 있으면 가장 오래된 값을 out에 복사한 뒤 인덱스와 개수를 갱신합니다. 아무것도 없으면 out을 바꾸지 않습니다. empty는 나중에 더 올 수 있다는 뜻이고 closed는 저장된 항목까지 모두 소진됐다는 뜻입니다.\n\nclose는 새로운 삽입을 막되 남은 항목을 지우지 않습니다. A,B를 넣고 close해도 두 번의 pop은 item을 반환하고 세 번째부터 closed를 반환합니다. 이 계약이 있어야 송신 완료 요청 뒤 이미 접수한 프레임을 비울 수 있습니다.\n\ntry라는 이름은 데이터나 빈칸이 생길 때까지 기다리지 않는다는 뜻입니다. 이 구현은 mutex를 획득할 때 기다릴 수 있습니다. 스케줄러가 잠금 소유자를 오래 정지시키면 대기도 길어질 수 있으므로 lock-free나 일정 시간 완료를 주장할 수 없습니다.",
+      "codes": [
+        {
+          "label": "값을 인계하고 빈칸을 되돌린다",
+          "language": "cpp",
+          "text": "QueueGet try_pop(Frame& out) {\n    std::lock_guard<std::mutex> guard(mutex_);\n    if (count_ == 0) {\n      return closed_ ? QueueGet::closed : QueueGet::empty;\n    }\n    out = buffer_[head_];\n    head_ = (head_ + 1) % Capacity;\n    --count_;\n    return QueueGet::item;\n  }\n"
+        },
+        {
+          "label": "닫기는 남은 값을 보존한다",
+          "language": "cpp",
+          "text": "void close() {\n    std::lock_guard<std::mutex> guard(mutex_);\n    closed_ = true;\n  }\n"
+        }
+      ]
+    },
+    {
+      "title": "연결이 끝난 소켓을 워커로 이동한다",
+      "body": "ThreadLink는 Socket을 값으로 받아 워커의 람다 안으로 이동합니다. Socket은 복사할 수 없으므로 호출자는 std::move(socket)으로 소유권을 넘깁니다. 이동 후 main은 그 소켓을 읽거나 닫지 않습니다. 워커가 소켓과 부분 수신 상태를 독점합니다.\n\nworker_는 멤버 중 마지막에 선언합니다. C++ 멤버 초기화는 초기화 목록에 적은 순서가 아니라 선언 순서를 따르므로, 스레드가 this를 사용하기 전에 큐·플래그·보고 잠금이 모두 만들어져 있어야 합니다. ThreadLink 자체도 복사·이동을 금지합니다. 실행 중인 람다가 바라보는 this 주소를 바꾸지 않기 위해서입니다.\n\n생성이 반환되기 전에도 새 스레드는 실행될 수 있습니다. 반대로 스레드 생성이 실패하면 생성자가 예외를 던질 수 있습니다. 소켓은 이동된 RAII 객체가 정리합니다. Runtime은 소켓 및 ThreadLink보다 오래 살아 있어야 하므로 main에서 먼저 생성합니다.",
+      "codes": [
+        {
+          "label": "멤버 준비 후 워커를 시작하고 결과를 공개한다",
+          "language": "cpp",
+          "text": "ThreadLink::ThreadLink(Socket socket)\n    : worker_([this, owned = std::move(socket)]() mutable {\n          const LinkReport result = run(owned);\n          owned.reset(); // Close in the owning thread, before publishing completion.\n          outbound_.close();\n          inbound_.close(); // Already queued frames can still be drained.\n          std::lock_guard<std::mutex> lock(report_mutex_);\n          report_ = result;\n      }\n"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::Close",
+        "invariant": "워커 종료 전에 공유 상태와 소켓 수명을 끝내지 않는다.",
+        "mayDiffer": "현재 Session은 공유 소켓에 shutdown을 요청한다. 기준은 소켓을 워커 밖에서 만지지 않는다."
+      }
+    },
+    {
+      "title": "취소를 보려면 수신 호출도 돌아와야 한다",
+      "body": "종료 플래그를 atomic으로 만들어도 워커가 블로킹 recv 안에서 영원히 기다리면 그 플래그를 다시 읽지 못합니다. ThreadLink는 소켓을 한 번 논블로킹 모드로 바꾼 뒤 유지합니다. try_receive는 recv를 한 번 시도하고 progress/would_block/interrupted/eof/error를 반환합니다.\n\nwould_block은 지금 읽을 바이트가 없다는 뜻이며 EOF와 다릅니다. POSIX의 EINTR는 루프 상단에서 취소를 다시 확인한 뒤 재시도합니다. Winsock의 WSAEINTR는 이 어댑터에서 오류로 전달합니다. 0바이트 요청을 미리 거절하므로 실제 recv 결과 0은 상대 송신 방향의 종료로 해석할 수 있습니다.\n\n한 호출에서 읽는 양은 16바이트입니다. 파서가 need_more를 반환할 때만 다음 조각을 읽고, 완성 프레임은 먼저 꺼냅니다. 여러 프레임이 이미 파서 안에 있는데 계속 read만 하면 제한된 버퍼가 불필요하게 넘칠 수 있습니다.",
+      "codes": [
+        {
+          "label": "OS 수신을 한 번만 시도한다",
+          "language": "cpp",
+          "text": "ReceiveAttempt try_receive(Socket& socket, std::uint8_t* data,\n                           std::size_t count) noexcept {\n  if (!socket.valid() || data == nullptr || count == 0) {\n    return ReceiveAttempt{ReceiveState::error, 0, invalid_argument_error()};\n  }\n\n  const int request = io_chunk_size(count);\n  const auto received =\n      ::recv(socket.native(), reinterpret_cast<char*>(data), request, 0);\n\n  if (received > 0) {\n    return ReceiveAttempt{ReceiveState::progress,\n                          static_cast<std::size_t>(received), 0};\n  }\n  if (received == 0) {\n    return ReceiveAttempt{ReceiveState::eof, 0, 0};\n  }\n\n#ifdef _WIN32\n  const int err = WSAGetLastError();\n  if (err == WSAEWOULDBLOCK) {\n    return ReceiveAttempt{ReceiveState::would_block, 0, err};\n  }\n  return ReceiveAttempt{ReceiveState::error, 0, err};\n#else\n  const int err = errno;\n  if (err == EAGAIN || err == EWOULDBLOCK) {\n    return ReceiveAttempt{ReceiveState::would_block, 0, err};\n  }\n  if (err == EINTR) {\n    return ReceiveAttempt{ReceiveState::interrupted, 0, err};\n  }\n  return ReceiveAttempt{ReceiveState::error, 0, err};\n#endif\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "부분 송신은 큐 밖의 워커 상태다",
+      "body": "워커는 송신 큐에서 한 프레임을 꺼내 EncodedFrame으로 직렬화하고 offset을 0으로 시작합니다. 커널이 27바이트 중 5바이트만 받았다면 다음 시도는 5번 위치부터 남은 22바이트를 보냅니다. 현재 프레임을 끝내기 전에 다음 프레임을 꺼내 섞지 않습니다.\n\n부분 송신 버퍼는 워커 지역 변수가 소유합니다. 큐 잠금은 값을 꺼내는 동안만 사용하고 socket send 동안에는 잡지 않습니다. 같은 루프에서 수신도 조금씩 진행하므로 한 방향이 would_block이어도 반대 방향을 살필 수 있습니다.\n\n5초 제한은 프레임을 큐에서 꺼낸 순간부터입니다. 큐에서 기다린 시간까지 제한하는 계약은 아니며, 상대 애플리케이션이 적용한 시점도 알 수 없습니다. 마감이 지나거나 I/O가 실패하면 연결을 끝냅니다. 일부 바이트가 이미 나갔을 수 있어 프레임 전체를 무조건 다시 보내서는 안 됩니다.",
+      "codes": [
+        {
+          "label": "남은 바이트와 동일한 마감을 유지한다",
+          "language": "cpp",
+          "text": "if (sending) {\n            if (Clock::now() >= deadline) return {LinkEnd::send_timeout};\n            const auto sent = try_send(socket, pending.bytes.data() + offset,\n                                       pending.size - offset);\n            if (sent.state == SendState::error) return {LinkEnd::io_error, sent.error};\n            if (sent.state == SendState::progress) {\n                offset += sent.count;\n                sending = offset != pending.size;\n                activity = true;\n            }\n        }"
+        }
+      ],
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::ioThread",
+        "invariant": "큐 잠금을 놓은 뒤 소유 버퍼로 송신한다.",
+        "mayDiffer": "현재 코드는 tcp_send_all 동기 완료를 기다린다. 기준 워커는 송수신 시도를 번갈아 수행한다."
+      }
+    },
+    {
+      "title": "유한 큐는 넘쳤을 때의 정책까지 포함한다",
+      "body": "양쪽 큐는 각각 8개 Frame을 보관합니다. 워커는 송신 중인 프레임 하나와 파서 버퍼도 따로 가지므로 전체 보관량을 큐의 8개만으로 세면 안 됩니다. OS의 송수신 버퍼도 별도입니다. 다만 응용 프로그램 큐가 실행 시간에 비례해 계속 자라지는 않습니다.\n\n송신 큐 full은 호출자에게 즉시 반환합니다. 수신 큐 full은 프로토콜 실패와 구분한 receive_full로 연결을 끝냅니다. INPUT이나 HASH 한 개를 버린 뒤 정상 연결인 것처럼 계속하면 진행·비교의 근거를 잃기 때문입니다. 이미 수신 큐에 들어간 8개는 읽을 수 있지만 해당 연결 전체가 성공했다는 뜻은 아닙니다.\n\n다른 선택은 큐에 빈칸이 생길 때까지 read를 멈추는 것입니다. TCP 흐름 제어를 통해 상대 송신도 점차 느려질 수 있습니다. 그 경우에도 취소·상대 무응답·송신 진행을 어떻게 함께 처리할지 정해야 합니다. 이번 기준 구현은 명시적인 실패 정책으로 한정합니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "스냅샷과 사건 기록",
+          "body": "마우스의 현재 위치처럼 최신값만 필요한 데이터는 덮어쓸 수 있습니다. 틱별 입력이나 모든 검사점의 해시는 앞 기록을 처리했는지 중요합니다. 자료의 의미에 맞춰 저장 방식을 고릅니다."
+        }
+      ]
+    },
+    {
+      "title": "종료 보고는 프레임 큐와 별도로 보관한다",
+      "body": "수신 큐가 가득 차서 끝났는데 실패 이유까지 같은 큐에 넣으면 종료 보고도 저장하지 못할 수 있습니다. ThreadLink는 optional<LinkReport>를 별도 mutex로 보호합니다. 값이 없으면 아직 보고 전이고, 값이 있으면 complete/cancelled/receive_full 같은 결과를 얻습니다.\n\n워커는 소켓을 닫고 양쪽 큐를 닫은 뒤 보고를 게시합니다. 따라서 main이 receive에서 closed를 관찰한 직후에는 report가 아직 비어 있을 수 있습니다. 또 보고가 먼저 관찰돼도 수신 큐에는 읽지 않은 프레임이 있을 수 있습니다. 애플리케이션은 큐가 소진됐는지와 종료 결과를 모두 확인합니다.\n\nreport는 값 복사로 반환하므로 잠금을 푼 뒤 안전하게 살펴볼 수 있습니다. 내부 optional을 참조로 반환하면 다음 읽기의 수명과 동기화 규칙을 호출자에게 떠넘기게 됩니다.",
+      "codes": [
+        {
+          "label": "종료 결과의 일관된 복사",
+          "language": "cpp",
+          "text": "std::optional<LinkReport> ThreadLink::report() const {\n    std::lock_guard<std::mutex> lock(report_mutex_);\n    return report_;\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "완료 요청, 취소 요청, join을 분리한다",
+      "body": "finish_sending은 송신 큐를 닫습니다. 워커가 남은 프레임과 현재 부분 송신을 모두 끝내면 shutdown_send를 호출합니다. 반대 방향의 수신은 계속하며, 상대 EOF까지 확인해야 complete가 됩니다. 상대 EOF가 먼저 와도 우리 송신은 남아 있을 수 있습니다.\n\nrequest_stop은 중단 요청입니다. 아직 보낼 프레임을 모두 전송한다는 약속이 없고 결과도 cancelled입니다. 소멸자는 이 요청을 보낸 뒤 join으로 워커가 끝나기를 기다립니다. join은 스레드를 강제로 종료하지 않으며, 큐 잠금을 잡은 채 호출하면 워커가 마지막 큐 접근을 위해 그 잠금을 기다리는 교착이 생길 수 있습니다.\n\n취소 atomic은 이번 설계에서 다른 데이터의 공개 신호로 사용하지 않습니다. 큐와 보고는 각각 mutex로 보호되므로 플래그는 relaxed로 읽고 씁니다. 일반 bool이나 volatile로 바꾸면 이 동시 접근의 안전성을 대체하지 못합니다.\n\n유휴 시 1ms sleep 뒤 재확인하지만 실제 종료 시간을 1ms로 보장하지 않습니다. 이 구현의 연결 이후 워커는 무기한 소켓 대기를 피하지만, 시작 단계의 accept/connect와 OS 스케줄링은 별도입니다.",
+      "codes": [
+        {
+          "label": "워커가 쓰는 상태를 파괴하기 전에 합류한다",
+          "language": "cpp",
+          "text": "ThreadLink::~ThreadLink() {\n    request_stop();\n    // No queue/report lock held: the worker may need those locks to finish.\n    if (worker_.joinable()) worker_.join();\n}\n"
+        }
+      ]
+    },
+    {
+      "title": "게임 스레드에서 프레임을 소비한다",
+      "body": "수신 큐에서 꺼낸 Frame은 이제 main의 지역 값입니다. TYPE20이면 입력 코덱을 통과시킨 뒤 DelayedLockstep.receive_batch로, TYPE21이면 해시 코덱을 통과시킨 뒤 HashAudit.record_remote로 전달할 수 있습니다. 워커는 이 객체들을 참조하지 않습니다.\n\n수신을 무조건 끝까지 처리하는 while 루프는 생산자가 계속 공급할 때 게임 루프를 오래 점유할 수 있습니다. 게임의 한 순회에서는 예를 들어 최대 8프레임까지만 처리하고 이벤트·규칙·렌더 단계로 돌아오도록 작업량을 제한할 수 있습니다. 이 수치와 수신 큐 용량은 실제 패킷 빈도와 main 정지 시간을 고려해 함께 정합니다.\n\n이번 thread_probe는 네 개의 알려진 StateStamp 값을 교환해 인계 경계만 관찰합니다. 11+i, 29+i는 게임에서 계산한 해시가 아닙니다. 누적 hash_probe의 규칙·해시 비교는 그대로 남아 있으며, 새 전송 계층과 지속 경기 일정을 합치는 데에는 송신 full 재시도와 틱별 소비 정책을 연결해야 합니다.",
+      "codes": [
+        {
+          "label": "게임 루프에 연결할 처리 순서",
+          "language": "text",
+          "text": "프레임 예산 안에서 receive\n  item → 타입·내용 검증 → 입력 창 / 해시 창에 반영\n  empty → 이번 수신 처리를 마침\n  closed → 남은 기록과 종료 보고를 확인\n같은 틱의 입력 쌍이 준비됐는지 확인 → 규칙 진행\n같은 상태 번호의 해시가 모였는지 확인 → 비교\n이벤트·렌더 처리를 계속"
+        }
+      ]
+    },
+    {
+      "title": "현재 Session에서 같은 경계를 찾아본다",
+      "body": "Session.sendQ는 main이 만든 vector를 워커의 지역 pkt로 이동하고 잠금을 푼 뒤 송신합니다. 이때 vector가 바이트 저장소를 소유하므로 원본 큐에서 제거해도 송신 중 수명이 유지됩니다. input map은 틱별 보관을, HASH pair는 최신값 조회를 제공합니다. 같은 mutex 사용 여부만 보지 말고 무엇을 잃지 않아야 하는 자료인지 확인해야 합니다.\n\nHASH의 최신 pair는 쓰기가 연달아 오면 미소비 샘플을 덮어쓸 수 있습니다. 모든 샘플을 비교하려면 단순히 큐 하나를 추가하는 것 외에도 로컬 샘플 보존 길이, 지나간 틱의 처리, 과부하와 새 라운드 경계를 함께 정해야 합니다. 현재 API의 조회를 큐 소비처럼 해석하지 않습니다.\n\n로비·게임 큐 분리는 보내는 경로를 구분하지만 허용 메시지 타입을 자동으로 검사하지는 않습니다. 현재 단계의 송신 API·수신 상태 검증이 그 계약을 담당합니다. 또한 ioThread 내부의 핸드셰이크 시간 제한은 그 전에 실행하는 DNS/connect를 제한하지 않습니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::pushSend",
+        "invariant": "기록을 조용히 버리고 성공으로 계속하지 않는다.",
+        "mayDiffer": "현재 큐는 상한을 둔 vector이며 용량 초과에서 세션을 실패 처리한다. 기준은 송신자에게 full을 반환한다."
+      }
+    },
+    {
+      "title": "빌드하고 전달·실패를 각각 관찰한다",
+      "body": "92-hash-audit를 복사한 93-thread-queues에 frame_queue, receive_socket, thread_link와 두 실행 타깃을 추가합니다. StudySocket에 Threads::Threads를 연결해 플랫폼별 스레드 링크 요구를 전달합니다. 기존 동기 Connection과 진단 도구도 계속 빌드합니다.\n\n두 터미널에서 thread_probe를 실행하면 각각 DONE frames=4 end=0을 출력합니다. end=0은 LinkEnd::complete이며, 네 값을 FIFO로 받고 두 송신 방향이 종료됐다는 뜻입니다. 게임 상태 일치나 상대가 받은 값을 저장했음을 인증하는 결과로 해석하지 않습니다.\n\nthread_contract는 2칸 순환·닫힌 큐 소진·원본 변경 후 복사본 보존·10,000개 스레드 간 인계를 검사합니다. 연결 검사는 무응답 상대 취소, 잘린 프레임, 잘못된 길이, 소비하지 않는 수신 큐의 overflow, 먼저 도착한 EOF 뒤 남은 송신을 포함합니다.",
+      "codes": [
+        {
+          "label": "추가 타깃",
+          "language": "cmake",
+          "text": "find_package(Threads REQUIRED)\ntarget_sources(StudySocket PRIVATE net/receive_socket.cpp net/thread_link.cpp)\ntarget_link_libraries(StudySocket PUBLIC Threads::Threads)\nadd_executable(thread_contract tests/thread_contract.cpp)\ntarget_link_libraries(thread_contract PRIVATE StudySocket)\nadd_test(NAME thread_contract COMMAND thread_contract)\nset_tests_properties(thread_contract PROPERTIES TIMEOUT 20)\nadd_executable(thread_probe tools/thread_probe.cpp)\ntarget_link_libraries(thread_probe PRIVATE StudySocket)\nadd_test(NAME thread_probe_help COMMAND thread_probe --help)\nadd_executable(thread_policy tests/thread_policy.cpp)\ntarget_link_libraries(thread_policy PRIVATE StudySocket)\nadd_test(NAME thread_policy COMMAND thread_policy)\nset_tests_properties(thread_policy PROPERTIES TIMEOUT 15)"
+        },
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/93-thread-queues -B out/study93 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study93 -j3\nctest --test-dir out/study93 --output-on-failure\n./out/study93/thread_probe listen 0\n# 다른 터미널: LISTEN에 출력한 포트\n./out/study93/thread_probe connect 포트번호"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성",
+          "body": "빌드에는 --config Release, CTest에는 -C Release를 붙이고 Release/thread_probe.exe를 실행합니다. 예제는 동일 기기의 루프백을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 유지할 계약",
+      "body": "유지할 핵심은 소켓·파서를 워커 하나가 소유하고, 게임 상태는 main 하나가 소유하며, 두 소유자 사이에는 수명이 독립적인 값을 인계하는 것입니다. 큐 용량·유휴 대기 방법·과부하 정책은 바뀔 수 있지만 stored와 원격 처리 완료를 구분하는 계약은 유지해야 합니다.\n\n컨테이너에 잠금이 있다는 사실만으로 객체의 전체 수명이 보호되지는 않습니다. ThreadLink를 파괴하는 동안 다른 호출자가 send나 receive를 실행하지 않도록 소유자가 정리 순서를 지켜야 합니다. 현재 API는 main 한 개와 내부 워커 사이의 사용을 전제로 합니다.\n\n잠금 기반 고정 큐는 구조를 추적하기 쉽고 호출당 복사량이 작습니다. 더 큰 메시지·다수 연결·엄격한 지연 요구가 생기면 측정 결과에 따라 이동 소유 메시지, 이벤트 통지, 비동기 I/O를 검토할 수 있습니다.",
+      "codes": [
+        {
+          "label": "net/frame_queue.h",
+          "language": "cpp",
+          "file": "checkpoints/93-thread-queues/net/frame_queue.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/thread_link.h",
+          "language": "cpp",
+          "file": "checkpoints/93-thread-queues/net/thread_link.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/thread_link.cpp",
+          "language": "cpp",
+          "file": "checkpoints/93-thread-queues/net/thread_link.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/thread_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/93-thread-queues/tools/thread_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/thread_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/93-thread-queues/tests/thread_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "93-1",
+      "question": "2칸 큐에 A,B를 넣고 close한 뒤 세 번 pop합니다. 반환 순서는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "closed, closed, closed"
+        },
+        {
+          "id": "b",
+          "text": "item(A), item(B), closed"
+        },
+        {
+          "id": "c",
+          "text": "item(A), empty, closed"
+        },
+        {
+          "id": "d",
+          "text": "empty, empty, closed"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "item(A), item(B), closed",
+      "explanation": "닫기는 새 삽입을 막되 보관된 값을 소진하게 합니다. close와 clear는 다른 계약입니다."
+    },
+    {
+      "id": "93-2",
+      "question": "송신 큐에 INPUT(10)을 넣는 결과가 full입니다. 어떤 처리가 올바를까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "성공으로 간주하고 입력을 버린다"
+        },
+        {
+          "id": "b",
+          "text": "큐 맨 앞 프레임을 삭제한다"
+        },
+        {
+          "id": "c",
+          "text": "같은 값을 보관해 재시도하거나 명시적으로 연결을 실패 처리한다"
+        },
+        {
+          "id": "d",
+          "text": "규칙 틱을 0으로 바꾼다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "같은 값을 보관해 재시도하거나 명시적으로 연결을 실패 처리한다",
+      "explanation": "full은 접수되지 않았다는 결과입니다. 입력을 조용히 빠뜨리면 이후 lockstep 소비가 막히거나 서로 다른 이력을 가질 수 있습니다."
+    },
+    {
+      "id": "93-3",
+      "question": "atomic 취소 플래그가 있는데도 join이 끝나지 않습니다. 워커가 블로킹 recv 안에 있다면 무엇이 필요한가요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "atomic을 volatile로 바꾼다"
+        },
+        {
+          "id": "b",
+          "text": "큐 용량만 두 배로 늘린다"
+        },
+        {
+          "id": "c",
+          "text": "join 안에서 프레임을 복사한다"
+        },
+        {
+          "id": "d",
+          "text": "수신 대기가 반환하거나 취소를 다시 검사하도록 I/O 계약을 바꾼다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "수신 대기가 반환하거나 취소를 다시 검사하도록 I/O 계약을 바꾼다",
+      "explanation": "플래그는 실행 흐름을 강제로 중단하지 않습니다. 워커가 취소 확인 지점에 도달할 수 있어야 합니다."
+    },
+    {
+      "id": "93-4",
+      "question": "receive가 closed를 반환했는데 report는 아직 비어 있습니다. 이번 구현에서 가능한 이유는 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "워커가 큐를 닫은 뒤 종료 보고를 별도로 게시한다"
+        },
+        {
+          "id": "b",
+          "text": "해시 값 0을 받았다"
+        },
+        {
+          "id": "c",
+          "text": "mutex가 항상 데이터 경합을 만든다"
+        },
+        {
+          "id": "d",
+          "text": "상대 게임이 반드시 승리했다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "워커가 큐를 닫은 뒤 종료 보고를 별도로 게시한다",
+      "explanation": "큐 닫기와 보고 게시는 두 동기화 연산입니다. 그 사이를 관찰할 수 있으므로 둘을 각각 확인합니다."
+    },
+    {
+      "id": "93-5",
+      "question": "원격 HASH(600), HASH(1200)을 최신 pair 한 칸에 차례로 쓰고 나서 main이 읽습니다. mutex가 보장하는 것은 무엇일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "600과 1200 두 사건을 모두 보존한다"
+        },
+        {
+          "id": "b",
+          "text": "동기화된 조회가 일관된 pair를 읽게 하지만 600의 보존까지 보장하지 않는다"
+        },
+        {
+          "id": "c",
+          "text": "서로 다른 틱도 같은 상태로 비교해도 된다"
+        },
+        {
+          "id": "d",
+          "text": "상대 해시가 정답임을 보장한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "동기화된 조회가 일관된 pair를 읽게 하지만 600의 보존까지 보장하지 않는다",
+      "explanation": "원자적인 pair 조회와 모든 사건 보존은 별개입니다. 후자는 큐와 보관·초과 정책이 필요합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "main·워커·공유 자료의 소유권 표를 만듭니다.",
+      "2칸 큐의 인덱스와 닫힌 뒤 결과를 예측합니다.",
+      "두 프로세스에서 네 Frame이 독립 값으로 전달되는지 검사합니다.",
+      "무응답·EOF·잘린 프레임·큐 overflow를 구분합니다."
+    ],
+    "failureChecks": [
+      "큐 잠금을 잡은 채 I/O나 join하지 않는지 확인합니다.",
+      "stored를 상대 적용 완료로 해석하지 않는지 확인합니다.",
+      "최신값 조회와 사건별 소비를 구별합니다."
+    ],
+    "expected": "네트워크 워커의 데이터 인계와 종료 조건을 구현하고 각 실패의 원인을 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 큐·수신 초안 검토, 워커 소유권·종료 순서·실제 Session/Part 비교",
+    "draftJob": "out/learning-jobs/093-queue-events.jsonl",
+    "corrections": [
+      "잠금 대기 시간이 짧다고 보장하는 주석 제거",
+      "불필요한 size/closed 관찰 API 제거와 Winsock 헤더 우선 배치",
+      "원문의 큐 분리만으로 타입 규칙 강제·DNS/connect 시간 제한·join 대기 보장 설명 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED114 / SDL119 CTest·경고 없음·92 누적 파일 변경 범위 확인",
+    "실제 thread_contract: FIFO·닫힌 큐 소진·출력 보존·값 복사·10000개 동시 인계·무응답 취소·20회 즉시 파괴·길이 오류·잘린 EOF·수신 overflow·half-close ASan/UBSan 및 ThreadSanitizer 통과",
+    "실제 ThreadLink 루프+송수신 대역: 한 바이트씩 송신·EINTR/would_block·프레임 FIFO·부분 송신 오류·5초 마감 ASan/UBSan. 커널의 동일 동작을 입증하는 검사가 아님",
+    "독립된 두 프로세스의 네 StateStamp FIFO 교환 4회·9개 인라인 구현 스니펫·Part 발췌·Markdown27 검사",
+    "Windows/macOS 네이티브·지속 GUI 경기·thread 생성/뮤텍스 시스템 실패 복구는 미검증; 수동 화면 검사 없음"
+  ]
+}

@@ -1,0 +1,392 @@
+{
+  "id": "lesson-88",
+  "title": "연결 수명: 시작·종료·재연결",
+  "shortTitle": "소켓 소유·방향별 종료·파서 초기화",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 소켓·수신 파서·송신 정책을 호출부에서 각각 관리합니다.",
+  "finish": "완료: 연결 객체가 소켓과 파서의 수명을 묶고, 방향별 종료와 재시작 조건을 관리합니다.",
+  "objective": "핸들 소유·송신 종료·수신 EOF·요청 완료를 구분하고, 새 연결에 이전 파서 상태가 섞이지 않는 수명 경계를 구현합니다.",
+  "prerequisites": [
+    "소켓의 단일 소유와 RAII",
+    "프레임 파서의 미완성 바이트와 고정 오류 상태",
+    "부분 송신·논블로킹 전제·전체 마감시간"
+  ],
+  "recap": {
+    "points": [
+      "송신 실패에도 이미 수락된 접두사는 남습니다.",
+      "전체 마감시간은 부분 진행으로 연장하지 않습니다.",
+      "송신 수락과 상대의 요청 처리 완료는 서로 다른 계약입니다."
+    ],
+    "bridge": "이제 송신을 중단한 뒤 누가 연결을 닫고 어떤 상태를 버릴지 하나의 소유 경계로 정합니다."
+  },
+  "sections": [
+    {
+      "title": "연결을 다시 만들면 파서도 새로 시작해야 한다",
+      "body": "수신 버퍼에 길이 헤더의 첫 바이트 02만 남은 상태에서 연결이 끊겼다고 합시다. 새 연결의 첫 바이트가 01이면, 같은 파서를 계속 쓸 때 두 연결의 바이트를 02 01이라는 한 헤더로 해석할 수 있습니다. TCP가 각 연결 안의 순서를 지켜도 애플리케이션이 상태를 섞으면 의미가 깨집니다.\n\n이번에는 소켓과 FrameParser, 양방향 종료 상태를 Connection 하나로 묶습니다. 이 객체가 연결 수명의 경계를 소유합니다. 게임·렌더러·오디오 경로는 유지하고 connection_probe라는 통신 진단에서 사용합니다.\n\n재연결은 새 소켓을 얻는 일에 더해, 그 소켓에 속할 해석 상태를 새로 만드는 일입니다. 입력 틱이나 경기 결과 같은 상위 상태를 이어 갈지는 통신 재연결과 별도로 약속해야 합니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::Close()",
+        "invariant": "연결 경계에서 이전 연결의 버퍼와 상태를 정리한다.",
+        "mayDiffer": "기준 객체는 동기 소켓과 파서만 소유하며 실제 Session은 입력·송신 큐·워커·경기 결과도 관리한다."
+      }
+    },
+    {
+      "title": "연결됨이라는 말에 네 가지 질문이 숨어 있다",
+      "body": "**핸들 소유**는 현재 객체가 닫아야 할 OS 자원을 갖고 있는지에 관한 질문입니다. **송신 가능**은 우리 쪽에서 더 보낼 수 있는지, **수신 종료**는 상대의 송신 종료를 EOF로 관찰했는지에 관한 질문입니다. **요청 완료**는 필요한 응답이 올바르게 도착했는지에 관한 애플리케이션의 판단입니다.\n\nactive()는 첫 질문에만 답합니다. true인 채로 송신이 끝났을 수도 있고 상대가 응답하지 않을 수도 있습니다. peer_eof()와 send_closed()를 별도로 두면 한 비트에 서로 다른 뜻을 겹치지 않을 수 있습니다.\n\n현재 게임의 connected와 ready도 구분해야 합니다. TCP 연결을 만들었어도 역할·시드·입력 지연 같은 게임 시작 조건이 확정되기 전에는 lockstep을 시작할 수 없습니다.",
+      "codes": [
+        {
+          "label": "핸들을 소유하는 동안 가능한 방향 상태",
+          "language": "text",
+          "text": "send_closed  peer_eof  의미\nfalse        false     두 방향의 종료를 아직 관찰하지 않음\ntrue         false     우리 송신 종료, 상대 데이터는 계속 수신\nfalse        true      상대 송신 종료, 우리 응답은 계속 송신\ntrue         true      두 방향 종료, 핸들은 close까지 소유\n\nactive=false: 소켓 없음, 파서와 두 방향 플래그는 초기 상태"
+        }
+      ]
+    },
+    {
+      "title": "자원 수명과 해석 상태를 같은 소유자에 둔다",
+      "body": "Connection은 Socket과 FrameParser를 값 멤버로 가집니다. 외부에서 파서 포인터를 받아 보관하거나 원시 소켓 번호를 공유하지 않습니다. 메서드가 자신의 연결에 대해서만 상태를 갱신하도록 범위를 좁힙니다.\n\nC++의 멤버는 선언 순서로 생성되고 역순으로 파괴됩니다. Connection의 소멸 과정에서 파서가 사라지고 Socket의 소멸자가 핸들을 해제합니다. 하지만 Windows의 네트워크 런타임 수명은 이 객체 바깥에 있습니다. Runtime을 먼저 선언하고 Connection을 나중에 선언하면 지역 변수의 역순 소멸로 연결이 먼저 정리됩니다.\n\n현재 기준은 복사와 이동을 모두 금지합니다. Socket 자체는 이동할 수 있지만, 연결 객체의 주소와 수명을 고정해 호출 순서에 집중합니다. 나중에 이동을 허용할 때는 파서와 두 플래그도 소켓과 함께 옮겨야 합니다.",
+      "codes": [
+        {
+          "label": "지역 선언 순서로 종료 순서를 만든다",
+          "language": "cpp",
+          "text": "study_net::Runtime runtime;\n    if(!runtime.ready()) return 1;\n    // Runtime is declared first and destroyed last; all socket calls finish first.\n    study_net::Connection connection;"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "정수 핸들은 연결의 영구 식별자가 아니다",
+          "body": "닫은 소켓 번호를 OS가 다른 소켓에 다시 배정할 수 있습니다. 같은 숫자를 보았다고 같은 연결이라고 판단할 수 없습니다. 원시 번호의 복사와 자원 소유권의 복사는 다르며, 사용 가능한 기간을 소유 객체에 묶어야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "시작은 후보 연결을 만든 뒤 한 번만 공개한다",
+      "body": "start는 우선 이미 핸들을 소유하고 있는지 검사합니다. 그렇다면 busy를 반환하고 파서·방향 플래그를 바꾸지 않습니다. 바쁜 객체를 초기화부터 해 버리면 기존 연결의 해석 상태를 잃습니다. 검사의 위치가 동작을 결정합니다.\n\n빈 객체에서는 connect_loopback으로 후보 소켓을 만듭니다. 연결 실패라면 io_error와 캡처한 OS 오류를 반환합니다. 성공했을 때 새 파서와 방향 상태를 준비하고 std::move로 소켓 소유권을 옮깁니다. 소켓 복사본 두 개가 각각 같은 핸들을 닫는 구조가 되지 않습니다.\n\n기준 start는 블로킹 호출입니다. started는 TCP 연결의 성립을 뜻하며 상대 애플리케이션의 준비 응답까지 받은 상태가 아닙니다.",
+      "codes": [
+        {
+          "label": "검사 → 후보 생성 → 새 상태 → 소유권 이전",
+          "language": "cpp",
+          "text": "Connection::StartReport Connection::start(std::uint16_t port) {\n    // A live socket means this Connection is already in use; refuse to touch it.\n    if (socket_.valid()) {\n        return StartReport{StartState::busy, 0};\n    }\n\n    int error = 0;\n    Socket candidate = connect_loopback(port, error);\n    if (!candidate.valid()) {\n        // `candidate` is invalid and closes nothing; the captured error is kept.\n        return StartReport{StartState::io_error, error};\n    }\n\n    // Fresh receive state for the fresh connection: no stale partial frame or\n    // half-closed flag may survive a previous session.\n    parser_ = FrameParser{};\n    send_closed_ = false;\n    peer_eof_ = false;\n\n    // Adopt ownership of the connected handle exactly once (move transfers it).\n    socket_ = std::move(candidate);\n    return StartReport{StartState::started, 0};\n}"
+        }
+      ]
+    },
+    {
+      "title": "송신 방향만 끝내고 응답을 기다린다",
+      "body": "TCP 연결은 두 방향으로 데이터를 주고받습니다. **half-close**는 그중 한 방향만 종료하는 동작입니다. 요청 바이트를 모두 수락시킨 뒤 shutdown_send를 호출하면 우리 쪽에서 더 보내지 않겠다는 경계를 만들면서 상대의 응답은 계속 읽을 수 있습니다.\n\nfinish_sending은 처음 성공한 shutdown을 send_closed_에 기록합니다. 같은 메서드를 다시 호출하면 저장된 성공 상태를 돌려주며 OS 호출을 반복하지 않습니다. 이처럼 반복 호출의 효과를 한 번과 같게 만드는 성질을 **멱등성**이라고 합니다. 멱등성은 구현이 보장하는 API의 성질이며 모든 OS 종료 호출이 같은 결과를 준다는 가정이 아닙니다.\n\n실패했을 때는 오류 코드를 남기고 연결을 정리합니다. inactive에서 호출하면 OS 오류가 없으므로 false와 error=0을 반환하는 로컬 상태 오류입니다. 반환값과 오류 코드의 역할을 함께 읽어야 합니다.",
+      "codes": [
+        {
+          "label": "송신 종료를 기억하고 수신 소유권은 유지한다",
+          "language": "cpp",
+          "text": "bool Connection::finish_sending(int& error) noexcept {\n    if (!active()) {\n        // Pure local invalid state: no OS call, no captured error.\n        error = 0;\n        return false;\n    }\n    if (send_closed_) {\n        error = 0;\n        return true;\n    }\n\n    if (!shutdown_send(socket_, error)) {\n        // shutdown_send already stored the immediate platform error.\n        close();\n        return false;\n    }\n    send_closed_ = true;\n    return true;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "shutdown과 핸들 해제",
+          "body": "[Linux shutdown](https://man7.org/linux/man-pages/man2/shutdown.2.html)과 [Winsock shutdown](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-shutdown)은 종료할 방향을 지정합니다. shutdown 뒤에도 소켓 자원을 해제하는 close/closesocket이 필요합니다. 기준에서는 Socket의 소유권 해제가 이 역할을 맡습니다."
+        }
+      ]
+    },
+    {
+      "title": "EOF를 보기 전에 완성된 프레임을 모두 꺼낸다",
+      "body": "next_frame은 OS 수신보다 parser_.next를 먼저 호출합니다. 직전 read에 프레임 두 개가 들어왔을 때 첫 번째만 반환했다면 두 번째는 이미 메모리에 있습니다. 먼저 recv를 호출하면 읽을 데이터가 더 없어서 기다리는 동안 완성된 프레임을 놓아둘 수 있습니다.\n\n파서가 need_more를 반환한 뒤에만 최대 16바이트를 읽습니다. 미완성 꼬리는 최대 34바이트이고 한 번의 read는 최대 16바이트이므로 합계는 50바이트로 64바이트 저장소 안에 들어갑니다. 완성 프레임을 먼저 배출한다는 순서가 이 크기 계산의 전제입니다.\n\n양수 길이의 recv에서 0을 받으면 EOF입니다. 이때 미완성 바이트가 없다면 peer_eof_를 기록하고 eof를 반환합니다. 그 이후에는 EOF를 캐시해 수신을 반복하지 않습니다. 상대의 송신만 끝났으므로 우리 송신은 여전히 가능할 수 있습니다.",
+      "codes": [
+        {
+          "label": "파서 배출 → 필요한 수신 → 종료 분류",
+          "language": "cpp",
+          "text": "Connection::ReadReport Connection::next_frame(Frame& out) {\n    if (!socket_.valid()) {\n        return ReadReport{ReadState::closed, 0};\n    }\n    if (peer_eof_) {\n        // Cached EOF: the receive side ended, but the socket stays open so the\n        // send direction can still be used.\n        return ReadReport{ReadState::eof, 0};\n    }\n\n    for (;;) {\n        // parser_.next leaves `out` untouched for need_more/error.\n        const ParseStatus status = parser_.next(out);\n        if (status == ParseStatus::frame) {\n            return ReadReport{ReadState::frame, 0};\n        }\n        if (status == ParseStatus::error) {\n            // This parser has no resynchronization rule after a malformed length.\n            close();\n            return ReadReport{ReadState::protocol_error, 0};\n        }\n\n        // need_more: pull a bounded chunk and feed the parser. An incomplete\n        // tail is < kMaxFrameBytes, so 16 bytes never overflow the parser.\n        std::uint8_t scratch[kReceiveScratchBytes];\n        const StreamResult result =\n            receive_some(socket_, scratch, sizeof(scratch));\n        if (result.status == StreamStatus::error) {\n            const int error = result.error;\n            close();\n            return ReadReport{ReadState::io_error, error};\n        }\n        if (result.status == StreamStatus::eof) {\n            if (parser_.pending_bytes() != 0) {\n                // EOF with a partial frame pending means the peer truncated.\n                close();\n                return ReadReport{ReadState::truncated, 0};\n            }\n            // Clean boundary: cache EOF but keep the socket for sending.\n            peer_eof_ = true;\n            return ReadReport{ReadState::eof, 0};\n        }\n\n        // StreamStatus::progress: hand the bytes over and retry. A rejected\n        // append (handler overflow) latches the parser, so treat it as a\n        // protocol error and close.\n        if (!parser_.append(scratch, result.count)) {\n            close();\n            return ReadReport{ReadState::protocol_error, 0};\n        }\n    }\n}"
+        }
+      ]
+    },
+    {
+      "title": "정상 EOF와 잘린 프레임은 다르게 끝난다",
+      "body": "헤더 한 바이트만 받은 뒤 EOF가 오면 완전한 메시지 경계가 아닙니다. 길이 2를 읽었는데 TYPE만 오고 payload 한 바이트가 빠진 경우도 마찬가지입니다. 기준은 이런 경우를 truncated로 반환하고 연결을 닫습니다.\n\n길이가 0이거나 상한보다 크면 protocol_error입니다. 이 파서에는 오염된 바이트 열에서 다음 경계를 찾는 복구 규칙이 없으므로 연결을 종료합니다. OS 수신 오류는 io_error와 원래 오류 코드로 구별합니다. non-frame 결과에서는 호출자가 넘긴 Frame 출력값을 보존합니다.\n\n정상 EOF도 요청 성공을 증명하지는 않습니다. 아무 응답 없이 상대가 송신을 끝낼 수 있기 때문입니다. connection_probe는 응답 TYPE·필드 값·정확히 한 개라는 조건을 확인한 뒤 EOF를 검사합니다.",
+      "codes": [
+        {
+          "label": "동일한 수신 종료에도 결과가 다르다",
+          "language": "text",
+          "text": "01 00 02 → EOF : 빈 payload의 TYPE2 프레임, 그 다음 eof\n02 → EOF       : 헤더가 미완성, truncated\n02 00 02 → EOF : payload가 미완성, truncated\n00 00          : 길이 규약 위반, protocol_error\n바이트 없음→EOF: 프레임 경계는 정상; 기대한 응답이 왔는지는 별도 검사"
+        }
+      ]
+    },
+    {
+      "title": "송신 실패를 연결 정리 정책에 연결한다",
+      "body": "send_frame은 Frame을 지역 EncodedFrame으로 인코딩하고, 논블로킹 모드 설정을 확인한 뒤 send_bounded를 호출합니다. 지역 배열은 동기 송신이 반환할 때까지 살아 있으므로 차용 포인터의 수명이 유지됩니다.\n\n잘못된 Frame 크기나 닫힌 송신 방향 같은 호출 오류는 invalid_request로 반환합니다. 반면 모드 설정 실패·시간 초과·전송 실패는 연결을 닫습니다. 부분 프레임 뒤에 다른 메시지가 이어져 하나로 해석되는 일을 막기 위한 이 진단의 정책입니다. 이미 수락된 길이는 결과에 남깁니다.\n\n모든 바이트가 수락됐어도 블로킹 모드 복귀가 실패할 수 있습니다. 이때도 연결을 닫고 error를 반환하되 accepted는 전체 길이를 보존합니다. ‘함수 실패면 상대가 아무것도 받지 않았다’고 해석하면 안 되는 구체적인 사례입니다.",
+      "codes": [
+        {
+          "label": "수락된 양을 보존하며 연결 정책을 적용한다",
+          "language": "cpp",
+          "text": "SendReport Connection::send_frame(const Frame& frame,\n                                  std::chrono::steady_clock::time_point deadline) {\n    // Locally invalid requests never mutate the Connection.\n    if (!active() || send_closed_) {\n        return SendReport{SendOutcome::invalid_request, 0, 0};\n    }\n\n    EncodedFrame encoded{};\n    if (!encode_frame(frame, encoded)) {\n        // A frame that cannot be encoded is a caller error, not an I/O failure,\n        // so the Connection is left open.\n        return SendReport{SendOutcome::invalid_request, 0, 0};\n    }\n\n    int error = 0;\n    if (!set_nonblocking(socket_, true, error)) {\n        close();\n        return SendReport{SendOutcome::error, 0, error};\n    }\n\n    // `encoded` is local; the bounded send returns before it goes out of scope.\n    const SendReport report =\n        send_bounded(socket_, encoded.bytes.data(), encoded.size, deadline);\n    if (report.outcome != SendOutcome::complete) {\n        // The accepted prefix is known, but a frame may be incomplete at the\n        // peer. End this connection and preserve the original send report.\n        close();\n        return report;\n    }\n\n    // The whole frame was accepted; restore blocking mode for later calls. If\n    // that fails the stream is unusable, so close but keep the accepted count.\n    if (!set_nonblocking(socket_, false, error)) {\n        close();\n        return SendReport{SendOutcome::error, report.accepted, error};\n    }\n    return report;\n}"
+        }
+      ]
+    },
+    {
+      "title": "close는 연결에 속한 상태를 한 번에 버린다",
+      "body": "close는 Socket을 reset하고 FrameParser와 방향 플래그를 초기화합니다. 닫힌 Socket의 reset은 아무 핸들도 해제하지 않으므로 반복 close도 같은 닫힌 상태가 됩니다. 파서의 고정 오류 상태도 새 파서로 교체해 없앱니다.\n\n두 방향이 이미 종료됐어도 active가 true이면 새 start는 busy입니다. 핸들 해제와 방향 종료를 별도 경계로 삼았기 때문입니다. 반대로 전송 오류로 메서드 내부에서 close가 수행됐다면 새 start를 명시적으로 호출할 수 있습니다.\n\n새 연결에 요청을 다시 보내는 것은 이 객체가 자동으로 결정하지 않습니다. 상대가 요청을 처리하고 응답만 유실된 경우에는 같은 요청을 반복하면 효과가 중복될 수 있습니다. 연결 재시작과 거래·보상 재실행 정책은 서로 다른 문제입니다.",
+      "codes": [
+        {
+          "label": "재시작 전에 없애야 할 상태",
+          "language": "cpp",
+          "text": "void Connection::close() noexcept {\n    // Reset the socket first so the handle is invalidated before anything else,\n    // then clear the parser and flags. Safe to repeat.\n    socket_.reset();\n    parser_ = FrameParser{};\n    send_closed_ = false;\n    peer_eof_ = false;\n}"
+        }
+      ]
+    },
+    {
+      "title": "동기 소유 모델에서 취소의 한계를 정한다",
+      "body": "기준 Connection은 한 호출자가 직렬로 사용합니다. next_frame이 수신을 기다리는 동안 다른 스레드가 close를 호출하도록 설계하지 않았습니다. 그렇게 사용하면 소켓 멤버와 파서에 동시 접근이 생기고 핸들 재사용 문제까지 얽힙니다.\n\n송신 마감시간은 송신에만 적용됩니다. start와 next_frame의 블로킹 대기에는 전체 요청의 마감시간이 없습니다. 여기서는 loopback에서 종료 순서를 관찰하고, 실패한 진단은 별도의 프로세스 시간 제한으로 멈춥니다. 서비스의 응답 시간 정책을 만들려면 연결 수립·응답 대기 각각에도 취소 가능한 I/O와 시간 예산이 필요합니다.\n\n‘close를 호출하면 즉시 끝난다’는 한 문장으로 모든 API를 설명하지 않습니다. 이 기준은 이미 실행 중인 호출이 돌아온 뒤 소유 상태를 해제하는 방식이고, 워커가 있는 실제 Session은 종료 요청과 종료 확인 사이의 단계를 더 가집니다.",
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "네트워크 런타임도 공유 자원이다",
+          "body": "기준의 Runtime은 성공한 Winsock 초기화 한 번에 종료 한 번을 대응시킵니다. 실제 엔진의 net_init/net_shutdown은 프로세스 범위의 별도 계약입니다. 연결 하나의 RAII가 프로세스 런타임의 동시 초기화나 조기 종료까지 자동으로 해결하지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "워커가 있는 실제 Session은 join이 수명의 경계다",
+      "body": "**스레드 종료**는 실행 함수가 반환한 상태이고, **join**은 소유자가 그 스레드의 종료를 기다리고 실행 자원을 회수하는 동작입니다. 함수가 이미 반환했어도 std::thread 객체는 join 전까지 joinable일 수 있습니다. joinable인 스레드에 새 스레드를 대입하면 std::terminate로 이어집니다.\n\n실제 Session의 시작 메서드는 hasUnjoinedWorkers를 먼저 검사합니다. 워커가 실패했거나 QueueCancel로 quit를 세웠어도 Close로 정리하기 전에는 새 시작을 거절합니다. 연결 상태 플래그를 먼저 초기화하면 기존 워커가 보고 있는 종료 조건을 되돌릴 수 있으므로 검사를 가장 앞에 둡니다.\n\n검사에서는 ath·qth·rth를 th보다 먼저 봅니다. 앞의 워커들은 I/O 스레드 th를 생성할 수 있습니다. 이들 중 하나라도 joinable이면 단락 평가로 th를 읽지 않아 생성 중인 스레드 멤버와의 경합을 피합니다. 소유자 쪽 start/Close 호출 자체는 직렬이어야 합니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "bool Session::hasUnjoinedWorkers()",
+        "invariant": "재시작 전에 기존 워커의 수명을 끝내고 상태 변경 전 시작을 거절한다.",
+        "mayDiffer": "기준은 동기 객체라 워커가 없고, 실제 엔진은 accept·queue·room·I/O 워커를 순서대로 정리한다."
+      }
+    },
+    {
+      "title": "종료 요청·워커 종료·핸들 해제의 순서를 읽는다",
+      "body": "실제 Close는 quit를 세우고 공개된 소켓에 shutdown을 요청합니다. 그 다음 워커들을 join하고 마지막으로 공유 소켓 멤버를 비웁니다. join을 sockMu_를 잡은 채 호출하면 그 잠금을 필요로 하는 워커와 서로 기다릴 수 있으므로 잠금 밖에서 수행합니다.\n\nTcpSocket의 복사본들은 같은 핸들의 소유권을 공유합니다. 실제 OS close는 마지막 참조가 없어질 때 수행됩니다. 종료 신호와 자원 해제를 분리하면 워커가 아직 사용하는 원시 번호를 먼저 닫아 OS가 다른 연결에 재사용하는 경합을 줄일 수 있습니다. 같은 shared_ptr 변수 자체를 동시에 재대입해도 된다는 뜻은 아니므로 공개 지점의 잠금은 필요합니다.\n\n연결 시도가 아직 로컬 후보에 있고 DNS나 connect에서 대기 중이면 Close가 shutdown할 공개 소켓이 없습니다. 현재 native 경로에는 그 대기를 제한하는 애플리케이션 마감시간이 없어 join도 기다릴 수 있습니다. 취소 요청을 보냈다는 사실과 종료가 완료됐다는 사실을 구분해 읽습니다.",
+      "reference": {
+        "path": "net/session.cpp",
+        "symbol": "void Session::Close()",
+        "invariant": "종료 요청 뒤 사용자가 끝난 것을 확인하고 소유 핸들을 해제한다.",
+        "mayDiffer": "기준 close는 동기 호출 종료 후 실행된다. 현재 Session은 공유 소유와 워커 join을 추가로 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "현재 코드와 유지되는 설계",
+          "body": "소켓 숫자·실제 버퍼 크기·재시도 간격은 바뀔 수 있습니다. 연결 단위 상태를 한 경계에서 정리하고, 실행 중인 사용자가 끝나기 전에 자원을 해제하지 않는 계약이 핵심입니다. 경기 재개와 자동 재접속 정책은 이 기준 객체에 포함하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "요청 송신을 먼저 닫는 진단을 실행한다",
+      "body": "connection_probe는 입력 묶음을 프레임으로 보내고 finish_sending으로 요청 방향을 끝냅니다. framing_probe 서버는 요청을 응답으로 바꾸어 보내고 EOF를 관찰한 뒤 자신의 송신을 끝냅니다. 클라이언트는 응답 필드와 EOF를 검사한 뒤 close합니다.\n\n출력의 send_closed=1, peer_eof=1은 두 방향의 종료를 관찰했다는 뜻입니다. 다음 CLOSED 줄의 active=0은 소유 핸들까지 해제했다는 뜻입니다. 이 두 출력 사이의 차이를 설명해 보세요.\n\nCMake에서는 StudySocket에 connection.cpp를 추가하고 새 진단·검사 타깃을 연결합니다. 기존 직렬화 진단도 유지되므로 작은 함수 조합과 소유 객체 조합을 비교할 수 있습니다.",
+      "codes": [
+        {
+          "label": "저장소 루트에서 실행",
+          "language": "sh",
+          "text": "cmake -S docs/learn/checkpoints/88-connection-lifetime -B out/study88 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study88 -j3\nctest --test-dir out/study88 --output-on-failure\n./out/study88/framing_probe listen 0 2\n# 다른 터미널에서 LISTEN 포트 사용\n./out/study88/connection_probe 실제포트"
+        },
+        {
+          "label": "예상 출력",
+          "language": "text",
+          "text": "VERIFIED tick=42 count=1 send_closed=1 peer_eof=1\nCLOSED active=0 pending=0"
+        },
+        {
+          "label": "추가한 빌드 항목",
+          "language": "cmake",
+          "text": "target_sources(StudySocket PRIVATE net/connection.cpp)\nadd_executable(connection_contract tests/connection_contract.cpp)\ntarget_link_libraries(connection_contract PRIVATE StudySocket)\nadd_test(NAME connection_contract COMMAND connection_contract)\nset_tests_properties(connection_contract PROPERTIES TIMEOUT 15)\nadd_executable(connection_probe tools/connection_probe.cpp)\ntarget_link_libraries(connection_probe PRIVATE StudySocket)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Windows 다중 구성",
+          "body": "빌드에는 --config Release, CTest에는 -C Release를 붙이고 Release/ 아래 exe를 실행합니다. 두 프로그램은 같은 기기의 loopback 주소로 연결합니다."
+        }
+      ]
+    },
+    {
+      "title": "상태 경계를 검사하고 완성 파일을 읽는다",
+      "body": "connection_contract는 실제 loopback에서 여러 프레임을 보낸 뒤 한쪽 송신만 종료합니다. EOF 뒤에 반대 방향의 응답이 도착하는지, 송신 종료 반복이 안전한지, active가 close까지 유지되는지를 확인합니다.\n\n잘린 헤더·잘못된 길이·만료된 송신 마감시간으로 연결을 실패시킨 뒤 같은 객체로 새 연결을 만듭니다. 정상 프레임을 다시 읽어 이전 꼬리나 파서 오류가 섞이지 않았는지 확인합니다. 실패 반환만 검사하면 상태 누출을 놓칠 수 있으므로 그다음 사용까지 검사하는 것입니다.\n\n실제 Session의 검사는 진행 중인 각 진입 경로와 실패한 워커 상태에서 모든 새 시작을 거절하는지 확인합니다. 이어서 Close를 반복하고 새 연결을 만들어 종료와 재사용의 경계를 함께 검사합니다.",
+      "codes": [
+        {
+          "label": "net/connection.h 전체",
+          "language": "cpp",
+          "file": "checkpoints/88-connection-lifetime/net/connection.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/connection.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/88-connection-lifetime/net/connection.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/connection_probe.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/88-connection-lifetime/tools/connection_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/connection_contract.cpp 전체",
+          "language": "cpp",
+          "file": "checkpoints/88-connection-lifetime/tests/connection_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "88-1",
+      "question": "헤더 한 바이트를 받은 연결이 끊겼습니다. 새 연결을 시작할 때 올바른 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "소켓만 교체하고 같은 파서를 이어 쓴다"
+        },
+        {
+          "id": "b",
+          "text": "파서와 방향별 종료 상태도 새 연결의 상태로 만든다"
+        },
+        {
+          "id": "c",
+          "text": "옛 헤더 뒤에 새 연결 바이트를 붙인다"
+        },
+        {
+          "id": "d",
+          "text": "포트 번호가 같으면 모든 수신 상태를 유지한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "파서와 방향별 종료 상태도 새 연결의 상태로 만든다",
+      "explanation": "서로 다른 TCP 연결의 바이트를 같은 메시지로 해석하지 않도록 연결에 속한 해석 상태를 함께 초기화합니다."
+    },
+    {
+      "id": "88-2",
+      "question": "상대가 송신 방향만 종료해 정상 EOF를 받았습니다. 기준 Connection의 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "핸들이 자동 해제되고 active가 false다"
+        },
+        {
+          "id": "b",
+          "text": "우리 쪽 송신도 반드시 불가능하다"
+        },
+        {
+          "id": "c",
+          "text": "peer_eof가 true이며 우리 송신은 가능할 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "상대가 요청을 성공적으로 처리했다는 뜻이다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "peer_eof가 true이며 우리 송신은 가능할 수 있다",
+      "explanation": "EOF는 상대 송신 방향의 종료입니다. 요청 성공과 핸들 해제는 별도의 조건이며 반대 방향은 계속 사용할 수 있습니다."
+    },
+    {
+      "id": "88-3",
+      "question": "길이 헤더는 완성됐지만 payload가 덜 온 상태에서 EOF입니다. 반환해야 할 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "정상 eof"
+        },
+        {
+          "id": "b",
+          "text": "아무 프레임이나 만들어 frame"
+        },
+        {
+          "id": "c",
+          "text": "need_more를 무한히 반복"
+        },
+        {
+          "id": "d",
+          "text": "truncated 후 연결 정리"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "truncated 후 연결 정리",
+      "explanation": "스트림의 끝에서 미완성 프레임을 더 완성할 수 없으므로 잘린 메시지로 분류합니다. 출력 프레임은 보존하고 연결을 정리합니다."
+    },
+    {
+      "id": "88-4",
+      "question": "Session 워커가 실패하여 실행 함수는 반환했지만 Close를 호출하지 않았습니다. 새 시작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "거절하고 소유자가 Close로 join한 뒤 다시 시작한다"
+        },
+        {
+          "id": "b",
+          "text": "hasFailed만 false로 바꾸면 된다"
+        },
+        {
+          "id": "c",
+          "text": "함수가 반환했으므로 같은 std::thread에 바로 대입한다"
+        },
+        {
+          "id": "d",
+          "text": "수신 버퍼만 비우고 새 워커를 띄운다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "거절하고 소유자가 Close로 join한 뒤 다시 시작한다",
+      "explanation": "실행 종료와 join은 다릅니다. joinable인 std::thread를 덮어쓰지 않고 수명 정리를 먼저 완료해야 합니다."
+    },
+    {
+      "id": "88-5",
+      "question": "send_frame이 전체 프레임을 수락시킨 뒤 모드 복귀에 실패했습니다. 어떤 결과가 계약에 맞을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "성공으로 돌리고 다음 수신을 바로 시도한다"
+        },
+        {
+          "id": "b",
+          "text": "error로 반환하고 accepted는 전체 길이를 보존한다"
+        },
+        {
+          "id": "c",
+          "text": "실패했으므로 accepted를 0으로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "같은 프레임을 자동으로 다시 보낸다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "error로 반환하고 accepted는 전체 길이를 보존한다",
+      "explanation": "함수의 후속 단계 실패는 앞선 송신 효과를 취소하지 않습니다. 연결을 정리하되 실제 수락량을 보존해야 호출자가 중복 실행을 판단할 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "핸들 소유와 두 방향의 종료를 세 비트 상태로 그립니다.",
+      "peer EOF 뒤 우리 응답을 보내는 순서를 실행합니다.",
+      "잘린 프레임 뒤 재연결해서 정상 프레임을 읽습니다.",
+      "실제 Close의 shutdown·join·소유 참조 해제 순서를 따라갑니다."
+    ],
+    "failureChecks": [
+      "busy 반환이 파서와 기존 상태를 바꾸지 않는지 확인합니다.",
+      "send_closed 뒤 송신을 거절하고 반복 finish_sending은 성공하는지 봅니다.",
+      "요청 내용이 틀려도 정상 EOF가 나올 수 있음을 검사합니다."
+    ],
+    "expected": "방향별 종료·핸들 해제·프로토콜 완료를 분리하고, 새 연결에 이전 상태가 누출되지 않도록 소유 경계를 만들 수 있다."
+  },
+  "review": {
+    "date": "2026-09-29",
+    "method": "DeepSeek 한정 구현 초안·Linux/Winsock 종료 계약·실제 Session/Part 대조·loopback 수명/재시작 검사",
+    "draftJob": "out/learning-jobs/088-connection-events.jsonl",
+    "corrections": [
+      "중첩 반환 타입 수식·부분 송신 접두사의 의미·실패가 내부 close한 뒤 재시작 가능한 계약 교정",
+      "실제 Session의 다섯 시작 경로에 워커 검사 통일·생산 워커 우선 단락 평가",
+      "Part의 동시 취소·스레드 생성 즉시 실행·QueueJoin 반환값 설명 교정"
+    ]
+  },
+  "validation": [
+    "누적 SCRIPTED 101 / SDL 106 CTest·경고 없음·87 기존 파일 변경 범위 확인",
+    "실제 loopback Connection: half-close 양방향·EOF 캐시·잘린 헤더/잘못된 길이·출력 보존·반복 종료·파서 초기화·송신 마감 후 재시작 ASan/UBSan",
+    "실제 connection_probe: 수신 상한 4종·응답 전 요청 half-close·누락/잘못된/중복/잘린 응답 6종 거절",
+    "실제 Session: 진행/실패한 워커 8경로에서 5시작 모두 거절·반복 Close·재연결 ASan/UBSan; 수정 전 8경로 회귀 실패 확인",
+    "현재 게임/양 릴레이 빌드 및 root 20/19 CTest 통과; Windows/macOS 네이티브 미검증·수동 GUI 없음",
+    "실제 구현 스니펫 7개·Part 발췌·Markdown 27경우·434문제·전체 차시 DOM 참조/저장/복사/탐색·정적 배포 재현성 통과"
+  ]
+}

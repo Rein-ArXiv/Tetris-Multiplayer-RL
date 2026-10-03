@@ -1,0 +1,462 @@
+{
+  "id": "lesson-118",
+  "title": "JSON 경계: 문법·타입·중복 키",
+  "shortTitle": "문서·타입·입력 경계",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 상점과 정산 API가 공통 wire.h에서 본문을 해석합니다.",
+  "finish": "완료: 문서 파싱·타입 추출·게임 규칙을 분리하고, 잘못된 본문이 계정과 BP를 바꾸기 전에 거절되도록 만듭니다.",
+  "objective": "문법·스키마·도메인·권한을 구별하고, 중복 키·NUL·정수 범위의 실패 입력과 허용 입력을 설계합니다.",
+  "prerequisites": [
+    "상점의 서버 가격·소유 관계·쓰기 거래",
+    "std::string·optional·람다·정수 자료형",
+    "HTTP 본문과 저장 상태의 구분"
+  ],
+  "recap": {
+    "points": [
+      "구매는 소유 관계를 추가하고 선택은 장착 상태만 바꾼다.",
+      "인증·소유 확인과 변경을 하나의 쓰기 거래 안에 둔다.",
+      "조회 실패를 미소유로 해석하면 권한 판단이 달라진다."
+    ],
+    "bridge": "그 거래로 들어가는 명령을 전체 바이트와 필드 타입부터 확인합니다."
+  },
+  "sections": [
+    {
+      "title": "문자가 상태 변경 명령이 되기까지",
+      "body": "상점은 인증된 계정의 BP와 소유권을 한 거래로 바꿉니다. 그런데 그 거래에 도달하기 전에는 HTTP 본문이라는 바이트열만 있습니다. `{\"icon_id\":\"ruby\"}`를 사고 싶은 아이콘으로 해석하려면 어디까지 확인해야 할까요?\n\n이번에는 wire.h에 모여 있던 공통 처리를 json_document.h와 json_fields.h로 나눕니다. 문서 파싱은 전체 입력을 읽고, 필드 추출은 타입을 확인하며, shop_catalog.h는 아이콘 ID의 형식을 검사합니다. DB는 그 뒤에 가격·인증·소유·잔액을 판단합니다. 같은 분리를 경기 결과와 프로필 응답에도 적용합니다.\n\n만들 결과는 **잘못된 본문으로 계정·BP·소유권이 바뀌지 않는 입력 경계**입니다. 유효한 요청의 저장 구조와 보상 정책은 유지합니다. 실패 입력만 모으지 않고 공백·이스케이프 표기·정수 경계값처럼 받아들여야 하는 입력도 함께 검사합니다."
+    },
+    {
+      "title": "문법·구조·도메인·권한을 네 단계로 나눈다",
+      "body": "**문법**은 입력이 JSON 문서로 읽히는지에 관한 규칙입니다. **스키마**는 그 문서가 이 API의 필드 이름·타입·구조를 갖췄는지에 관한 계약입니다. **도메인 규칙**은 게임에서 의미 있는 값의 조건이고, **권한**은 그 계정이 해당 행동을 해도 되는지입니다.\n\n| 입력 또는 상황 | 판단할 층 | 결과 |\n| --- | --- | --- |\n| 닫는 따옴표가 없는 본문 | 문법 | 거절 |\n| icon_id가 숫자 100 | 스키마 | 문자열이 아니므로 거절 |\n| icon_id가 빈 문자열 | ID 형식 | 길이 조건으로 거절 |\n| icon_id가 unknown | 카탈로그 | 형식은 맞아도 없는 콘텐츠 |\n| ruby 선택, 본인 소유 아님 | 권한·상태 | 선택 거절 |\n| ruby 구매, BP99 | 거래 조건 | 잔액 부족 |\n\nJSON으로 읽혔다는 이유만으로 구매를 허용하지 않습니다. 반대로 존재하지 않는 아이콘이라는 사실을 JSON 문법 오류라고 부르면 어느 층을 수정해야 하는지 흐려집니다. 이 단계들을 함수 경계에 맞춰 두면 콘텐츠 추가가 파서 변경으로 번지는 일을 줄일 수 있습니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "null과 누락",
+          "body": "{\"winner\":null}은 winner라는 필드가 존재하고 값이 null인 문서입니다. {}는 필드가 없습니다. 무승부를 null로 정한 API라면 둘을 따로 검사해야 합니다. 학습 경기 요청은 winner를 0·1·2 정수로 표현하므로 null을 허용하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "문자열 검색 대신 구조를 한 번 만든다",
+      "body": "**어휘 분석**은 따옴표·숫자·중괄호 같은 토큰을 구별하는 과정이고, **구문 분석**은 그 토큰이 어떤 객체와 배열에 속하는지 구성하는 과정입니다. 여기서는 라이브러리가 둘을 수행해 Json 값을 만듭니다. 프로그램은 원래 본문에서 단어를 찾는 대신 객체에서 키를 조회합니다.\n\n예를 들어 `{\"child\":{\"icon_id\":\"ruby\"}}`에서 icon_id라는 글자는 존재하지만 루트 객체에는 없습니다. 루트의 find(\"icon_id\")가 실패하는 것이 요청 계약에 맞습니다. 문자열 값 속에 icon_id가 쓰였거나 이스케이프된 따옴표가 있어도 같은 원리로 구별됩니다.\n\n파싱 결과를 가진 Json은 객체·배열·문자열·숫자·불리언·null 중 하나를 표현합니다. 필요한 필드를 이 값에서 여러 번 읽을 수 있으므로 각 필드마다 본문을 다시 해석할 필요가 없습니다. 학습 구현은 요청별 parse_record/parse_profile/parse_icon_choice가 한 번 파싱하고 const 참조로 필드를 조회합니다.",
+      "codes": [
+        {
+          "label": "경기 요청은 문서를 한 번 읽고 필드를 조회",
+          "text": "inline std::optional<study_net::MatchRecord> parse_record(const std::string& body) {\n    const auto j=object(body,10);if(!j)return std::nullopt;\n    const auto key=number(*j,\"key\"),round=number(*j,\"round\"),a=number(*j,\"player_a\"),b=number(*j,\"player_b\");\n    const auto ticks=number(*j,\"ticks\"),sa=number(*j,\"score_a\"),sb=number(*j,\"score_b\");\n    const auto la=number(*j,\"lines_a\"),lb=number(*j,\"lines_b\"),winner=number(*j,\"winner\");\n    if(!key || !round || !a || !b || !ticks || !sa || !sb || !la || !lb || !winner ||\n       *la>std::numeric_limits<std::uint32_t>::max() || *lb>std::numeric_limits<std::uint32_t>::max() || *winner>2)\n        return std::nullopt;\n    return study_net::MatchRecord{*key,*round,*a,*b,*ticks,*sa,*sb,\n        static_cast<std::uint32_t>(*la),static_cast<std::uint32_t>(*lb),\n        static_cast<study_net::MatchRecord::MatchWinner>(*winner)};\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/match_response.h",
+        "symbol": "parse_match_response",
+        "invariant": "루트와 하위 객체를 구조적으로 구별해 값을 조회한다.",
+        "mayDiffer": "실제 경기 응답은 a/b 하위 객체를 허용한다. 학습 요청·응답은 평면 형식별 필드 수를 정한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "파싱 비용과 함수 인터페이스",
+          "body": "실제 protocol.h의 find_string/find_int/find_bool은 각각 본문을 받아 다시 파싱합니다. 필드 k개를 이런 방식으로 읽으면 문서 전체를 최대 k번 처리합니다. 오류라고 단정할 구조는 아니지만, 많은 필드를 읽는 경로는 검증된 객체를 전달하면 반복 비용을 줄일 수 있습니다. 타입을 받도록 바꿀 때는 호출자가 검증 전 객체를 넘기지 않는지도 검토해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "크기 제한과 원시 NUL은 파싱 전에 확인한다",
+      "body": "HTTP 본문의 크기는 std::string::size()로 **바이트 수**를 셉니다. 학습 API의 한도는 1024바이트입니다. 빈 객체 뒤에 공백을 붙여 전체가 정확히 1024면 허용하고, 1025면 거절합니다. 한글 한 글자를 한 바이트로 세는 제한이 아닙니다.\n\n원시 NUL은 값이 0인 실제 바이트입니다. 이 저장소에 포함된 파서는 그 바이트를 입력 끝으로 취급할 수 있습니다. 그러면 `{}` 뒤에 NUL과 다른 내용이 붙은 본문이 빈 객체로 해석됩니다. 파싱 전에 전체 std::string에서 NUL을 찾아 거절하면 유효한 접두부 뒤의 내용을 숨길 수 없습니다.\n\n아래 코드의 `'\\0'`은 C++ 문자 리터럴 하나이며 실제 0 바이트를 나타냅니다. JSON 문서에 쓰인 여섯 글자 `\\u0000`과는 다른 입력입니다.",
+      "codes": [
+        {
+          "label": "바이트 수와 원시 NUL을 먼저 제한",
+          "text": "inline constexpr std::size_t kJsonBodyBytes = 1024;\n\n// Parse one complete flat object. Field names/types are checked by the caller.\ninline std::optional<Json> object(const std::string& body, std::size_t fields) {\n    if (body.size() > kJsonBodyBytes || body.find('\\0') != std::string::npos)\n        return std::nullopt;",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/json_input.h",
+        "symbol": "inline std::optional<Json> object",
+        "invariant": "문서가 끝난 것으로 오인되는 원시 NUL과 과도한 본문을 파싱 전에 거절한다.",
+        "mayDiffer": "실제 메타와 학습 API는 각자의 요청 크기 상한을 사용한다. 두 한도 모두 문자 수가 아닌 원시 바이트 수다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "라이브러리 버전과 계약",
+          "body": "이 체크포인트는 저장소에 포함된 nlohmann/json을 사용합니다. 라이브러리의 최신 NUL 처리 설정 유무에 의존하지 않고 입력 경계에서 직접 검사합니다. [공식 NUL 처리 설명](https://json.nlohmann.me/api/macros/json_strict_nul_handling/)과 현재 포함된 헤더의 버전은 구별해서 읽으세요."
+        }
+      ]
+    },
+    {
+      "title": "평면 구조를 읽는 동안 제한한다",
+      "body": "학습 요청은 루트 객체의 값으로 숫자·문자열 같은 단일 값만 사용합니다. 따라서 array_start 사건은 어디서 발생해도 거절하고, object_start는 depth가 0인 루트에서만 허용합니다. 파싱이 끝난 거대한 구조를 나중에 버리기보다 읽는 도중 계약을 벗어나는 지점에서 중단합니다.\n\n**콜백**은 파서가 특정 사건을 읽을 때 호출하는 함수입니다. 람다가 참조로 캡처한 keys는 object 함수 안에 있고, 동기 parse 호출이 끝날 때까지 살아 있습니다. 동시에 들어온 다른 요청은 별도 object 호출과 별도 keys를 가집니다.\n\n여기서 false 반환은 입력 거절의 의미가 아닙니다. 이 라이브러리는 false를 반환한 값을 결과에서 제외하는 필터로 사용할 수 있습니다. 잘못된 입력 전체를 중단하려면 예외를 던지고 바깥에서 nullopt로 바꿉니다. [파서 콜백 계약](https://json.nlohmann.me/features/parsing/parser_callbacks/)은 필터링과 중단의 차이를 설명합니다.",
+      "codes": [
+        {
+          "label": "읽는 중 구조·키 중복 검사",
+          "text": "        std::set<std::string> keys;\n        auto callback = [&](int depth, Json::parse_event_t event, Json& value) {\n            if (event == Json::parse_event_t::array_start ||\n                (event == Json::parse_event_t::object_start && depth != 0))\n                throw std::runtime_error(\"flat object required\");\n            if (event == Json::parse_event_t::key &&\n                !keys.insert(value.get<std::string>()).second)\n                throw std::runtime_error(\"duplicate key\");\n            return true;\n        };",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "범용 JSON과 학습 API의 범위",
+          "body": "배열과 중첩 객체는 유효한 JSON입니다. 이 평면 API가 요구하지 않아 제한하는 것입니다. 실제 메타의 파서는 중첩을 허용하되 콜백 depth가 16을 넘으면 중단합니다. 깊이 숫자의 의미를 바꾸려면 라이브러리가 보고하는 사건과 경계값을 함께 검사해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "중복 키는 덮어쓰기 전에 잡는다",
+      "body": "`{\"icon_id\":\"ruby\",\"icon_id\":\"gold\"}`를 한 번 파싱한 객체에서 크기만 확인해 보세요. 파서가 한 값만 보관했다면 크기는 1일 수 있습니다. 이미 사라진 첫 번째 값을 결과 객체만 보고 복원할 수 없습니다.\n\n콜백의 key 사건에서 std::set에 이름을 넣고 반환값의 second를 확인합니다. true면 처음 들어온 키, false면 같은 이름이 이미 있는 키입니다. 이번 API는 같은 값을 두 번 적어도 거절합니다. 어떤 계층은 첫 값을, 다른 계층은 마지막 값을 채택하는 해석 차이를 없애려는 정책입니다.\n\n키 사건의 문자열은 이스케이프가 해석된 이름입니다. `icon_id`와 `icon_\\u0069d`는 둘 다 icon_id가 되므로 중복입니다. 하지만 이스케이프 표기로 키를 한 번만 보낸 요청은 허용합니다. 표기가 다르다는 이유만으로 정상 요청을 거절하지 않습니다.\n\nJSON 표준은 한 객체의 키가 유일할 것을 권고하고 중복 처리의 차이를 설명합니다. 중복을 모두 문법 위반으로 단정하기보다 **이 API가 엄격히 거절하는 정책**으로 이해합니다. [RFC 8259의 객체 규칙](https://www.rfc-editor.org/rfc/rfc8259.html#section-4)을 참고할 수 있습니다.",
+      "codes": [
+        {
+          "label": "표기 변형은 허용하고 같은 이름 두 번은 거절",
+          "text": "    CHECK(parse_icon_choice(\" { \\\"icon_\\\\u0069d\\\" : \\\"ruby\\\" } \") == \"ruby\");\n    CHECK(!parse_icon_choice(R\"({\"icon_id\":\"ruby\",\"icon_\\u0069d\":\"gold\"})\"));",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/json_input.h",
+        "symbol": "std::vector<std::set<std::string>> keys",
+        "invariant": "객체가 완성되기 전에 해석된 키 이름으로 중복을 확인한다.",
+        "mayDiffer": "실제 파서는 객체별 집합을 스택으로 유지한다. 평면 학습 API는 하나의 집합이면 충분하다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "키 이름의 범위",
+          "body": "{\"a\":{\"x\":1},\"b\":{\"x\":2}}의 두 x는 서로 다른 객체의 키라 중복이 아닙니다. 실제 파서가 object_start에서 집합을 추가하고 object_end에서 제거하는 이유입니다. Unicode escape 해석과 Unicode 정규화도 다릅니다. 겉모양이 같아도 코드 포인트가 다른 이름까지 자동으로 같은 키로 취급하지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "필드 수만으로 허용 목록이 만들어지지 않는다",
+      "body": "문서 파싱은 result가 객체이며 요청한 fields 개수를 갖는지 확인합니다. 그러나 필드가 하나라는 사실만으로 그 이름이 icon_id임을 알 수 없습니다. `{\"other\":\"ruby\"}`도 필드는 하나입니다.\n\nparse_icon_choice가 icon_id를 필수로 읽고 전체 개수가 1임을 함께 요구하므로 다른 필드는 끼어들 수 없습니다. 경기 요청도 필요한 10개 이름을 모두 읽으면서 전체 개수 10을 요구합니다. **전체 개수 + 각 필수 이름·타입 확인**이 함께 있어야 이 형태의 정확한 필드 집합 검사가 됩니다.\n\n확장 가능한 응답에는 모르는 필드를 허용하는 정책을 선택할 수도 있습니다. 실제 parse_match_response는 필수 필드의 위치·타입·범위를 검사하고 추가 필드는 허용합니다. 엄격한 요청 계약과 호환 가능한 응답 계약을 같은 개수 제한으로 묶지 않습니다.",
+      "codes": [
+        {
+          "label": "전체 파싱 결과의 루트와 크기 검사",
+          "text": "        auto result = Json::parse(body, callback);\n        if (result.is_object() && result.size() == fields)\n            return result;\n    } catch (const std::exception&) {\n        // Parser diagnostics may contain the request body; do not log them.\n    }\n    return std::nullopt;\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "아이콘 요청에서 이름·타입·길이 확인",
+          "text": "inline std::optional<std::string> parse_icon_choice(const std::string& body) {\n    auto obj = object(body, 1);\n    if (!obj) {\n        return std::nullopt;\n    }\n    const auto field = text(*obj, \"icon_id\");\n    if (!field) {\n        return std::nullopt;\n    }\n    const std::string& value = *field;\n    if (value.empty() || value.size() > 32) {\n        return std::nullopt;\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "오류 메시지에는 입력을 그대로 싣지 않는다",
+          "body": "파서 예외에는 읽다가 실패한 본문 일부가 포함될 수 있습니다. 토큰을 본문으로 받는 경로도 있으므로 예외 문자열을 그대로 로그나 응답에 복사하지 않습니다. 내부 검사에는 고정 오류 범주와 요청 추적 번호 같은 비밀이 아닌 정보를 사용할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "정수 변환은 타입 확인과 범위 확인 뒤에 한다",
+      "body": "JSON에는 number라는 수 표현이 있고, 이 C++ 라이브러리는 읽은 값을 signed 정수·unsigned 정수·부동소수점으로 구별해 저장합니다. 우리의 ID·점수 필드는 정수 형태만 받습니다. 1.0과 1e0은 수학적으로 1이어도 이 파서에서는 부동소수점으로 읽히므로 거절합니다. true나 문자열 \"1\"도 정수로 바꾸지 않습니다.\n\nnumber 함수는 is_number_integer로 검사한 뒤 unsigned인 경우 uint64_t로 직접 읽습니다. 먼저 int64_t로 읽으면 UINT64_MAX를 보존할 수 없습니다. signed이면 음수를 먼저 거절하고 그 다음 unsigned로 변환합니다. 0을 유효하게 읽은 optional과 값이 없는 nullopt도 구별됩니다.\n\n| 본문 값 | number 결과 | 이유 |\n| --- | --- | --- |\n| 0, -0 | 0 | 정수로 읽히고 음수 값이 아님 |\n| -1 | 실패 | 비음수 계약 |\n| 18446744073709551615 | UINT64_MAX | uint64 범위의 정수 |\n| 18446744073709551616 | 실패 | uint64를 넘어서 정수 타입 계약 불충족 |\n| 1.0, 1e0 | 실패 | 부동소수점 표현 |\n| true, null, \"1\" | 실패 | 다른 JSON 타입 |\n\n도메인별 작은 범위도 별도로 검사합니다. player_id는 양수이고, BP·XP·RP는 0..2147483647입니다. line 수를 uint32_t로 바꾸기 전에는 UINT32_MAX 이하인지 확인합니다. 넓은 값부터 좁힌 뒤 검사하면 원래 범위를 잃습니다.",
+      "codes": [
+        {
+          "label": "uint64를 보존하는 타입 추출",
+          "text": "inline std::optional<std::uint64_t> number(const Json& object, const char* name) {\n    if (!object.is_object() || name == nullptr) {\n        return std::nullopt;\n    }\n\n    const auto it = object.find(name);\n    if (it == object.end()) {\n        return std::nullopt;\n    }\n\n    const Json& value = *it;\n    if (!value.is_number_integer()) {\n        return std::nullopt;\n    }\n\n    if (value.is_number_unsigned()) {\n        return value.get<std::uint64_t>();\n    }\n\n    const std::int64_t signed_value = value.get<std::int64_t>();\n    if (signed_value < 0) {\n        return std::nullopt;\n    }\n    return static_cast<std::uint64_t>(signed_value);\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "프로필의 범위 확인 뒤 대입",
+          "text": "  // player_id must be positive; int fields must fit before any cast.\n  if (*player_id == 0) return std::nullopt;\n  if (*rp > kMaxInt32 || *xp > kMaxInt32 || *bp > kMaxInt32) return std::nullopt;\n\n  PublicProfile p;\n  p.player_id = *player_id;  // preserve full 64-bit id unchanged\n  p.rp = static_cast<int>(*rp);\n  p.xp = static_cast<int>(*xp);\n  p.bp = static_cast<int>(*bp);",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/json_input.h",
+        "symbol": "inline std::optional<int64_t> integer",
+        "invariant": "정수 타입과 목적 자료형 범위를 확인한 뒤 변환한다.",
+        "mayDiffer": "실제 helper는 signed int64를 반환하므로 INT64_MAX 초과 unsigned를 거절한다. 학습 ID는 uint64 전체를 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "브라우저와 64비트 ID",
+          "body": "이 C++ 파서가 uint64를 정확히 보존해도 JavaScript Number 소비자가 큰 정수를 똑같이 보존한다는 뜻은 아닙니다. 브라우저와 공유할 프로토콜에서 64비트 ID가 필요하면 십진 문자열 같은 표현과 버전을 별도로 정해야 합니다. 현재 학습 도구는 C++와 Python으로 읽는 계약이며 이 한계를 숨기지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "문자열은 길이와 내용, 용도를 따로 검사한다",
+      "body": "text 함수는 문자열 타입이면 std::string 전체를 돌려줍니다. 빈 문자열은 값이 있는 optional이고, 필드 누락·다른 타입은 nullopt입니다. 이 층에서 빈 이름을 금지하면 빈 문자열이 의미 있는 다른 필드까지 영향을 받으므로, 길이 조건은 사용처가 정합니다.\n\n`{\"x\":\"a\\u0000b\"}`는 이스케이프된 문자 데이터를 가진 유효한 JSON입니다. 파싱 후 문자열은 a·NUL·b 세 바이트입니다. C 문자열 API에 c_str()만 넘겨 길이를 잊으면 첫 NUL에서 끝나므로 \"a\"처럼 보일 수 있습니다. std::string 비교와 size는 전체 길이를 유지합니다.\n\n아이콘 ID는 1..32바이트이며 소문자 ASCII·숫자·밑줄·하이픈만 허용합니다. 따라서 디코딩된 NUL, 한글, 빈 문자열은 ID 형식에서 거절됩니다. 표시 이름까지 이 제한으로 검사해야 한다는 뜻은 아닙니다. [JSON 문자열 규칙](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)은 제어문자를 이스케이프해야 함을 설명합니다.",
+      "codes": [
+        {
+          "label": "누락과 빈 문자열을 구별하는 추출",
+          "text": "inline std::optional<std::string> text(const Json& object, const char* name) {\n    if (!object.is_object() || name == nullptr) {\n        return std::nullopt;\n    }\n\n    const auto it = object.find(name);\n    if (it == object.end()) {\n        return std::nullopt;\n    }\n\n    if (!it->is_string()) {\n        return std::nullopt;\n    }\n\n    return it->get<std::string>();\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "아이콘 ID만의 허용 문자",
+          "text": "    for (unsigned char c : value) {\n        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||\n                        c == '_' || c == '-';\n        if (!ok) {\n            return std::nullopt;\n        }\n    }\n    return value;\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "UTF-8 바이트와 화면의 글자",
+          "body": "JSON 파서는 잘못된 UTF-8 바이트열과 짝이 맞지 않는 surrogate escape를 거절합니다. 올바른 UTF-8이어도 글자 수·화면 폭·사용 가능한 닉네임인지는 별도 조건입니다. 바이트 길이 제한을 “화면에서 몇 글자” 제한으로 설명하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "오류 입력은 상태를 바꾸기 전에 반환한다",
+      "body": "계정 생성 경로는 본문이 빈 객체인지 확인한 뒤에야 난수를 만들고 register_account를 호출합니다. 구매 경로는 인증 헤더 형식과 parse_icon_choice를 통과한 다음 buy_icon으로 들어갑니다. 파서 콜백 안에서 DB를 수정하면 뒤쪽의 문법 오류가 밝혀졌을 때 이미 변경된 상태가 생길 수 있습니다.\n\nHTTP 라이브러리에도 payload 한도를 둡니다. 네트워크에서 무한히 받은 뒤 파서의 size 검사만 하는 구조를 피하기 위해서입니다. 읽기 시간 제한은 느린 연결을, 본문 한도는 요청 하나의 바이트를, 요청 수 제한은 반복 호출을 다룹니다. 서로 다른 자원을 제한합니다.\n\n실제 메타는 json_post가 본문 수신 뒤 문서 검증을 하고 원래 핸들러를 부릅니다. pre-routing은 본문 수신 전이므로 본문 검증 위치로 사용할 수 없습니다. 문서 검증 후에도 필드 규칙과 인증·거래 조건이 이어집니다.",
+      "codes": [
+        {
+          "label": "본문 한도와 계정 생성 전 검증",
+          "text": "    http.set_payload_max_length(study_meta::kJsonBodyBytes);\n    http.set_read_timeout(2,0);http.set_write_timeout(2,0);\n    http.Get(\"/healthz\",[](const httplib::Request&,httplib::Response& res){reply(res,200,{{\"ok\",true}});});\n    http.Post(\"/study/v1/guest\",[&store](const httplib::Request& req,httplib::Response& res) {\n        if(req.get_header_value(\"Content-Type\")!=\"application/json\" || !req.params.empty() ||\n           !study_meta::object(req.body,0)) {\n            reply(res,400,{{\"error\",\"invalid_request\"}});return;\n        }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/json_routes.h",
+        "symbol": "inline void json_post",
+        "invariant": "완전한 본문 검증을 통과한 요청만 상태 변경 핸들러에 도달한다.",
+        "mayDiffer": "실제 공통 래퍼는 문서만 검증한다. 학습 경로는 엔드포인트 파서가 문서와 필드 계약을 함께 확인한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "검증과 트랜잭션의 역할",
+          "body": "입력 검사는 잘못된 명령이 저장 계층에 들어가지 않게 합니다. 트랜잭션은 명령 처리 도중 저장 오류나 경쟁이 생겨도 부분 상태가 남지 않게 합니다. 유효한 JSON이라는 사실이 DB 거래의 필요성을 없애지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "검사는 거절과 허용을 쌍으로 만든다",
+      "body": "검사에는 실패를 예상하는 입력과 성공을 예상하는 입력을 함께 둡니다. 모든 요청을 거절하는 파서는 공격 입력 검사만 통과할 수 있기 때문입니다.\n\n| 거절 사례 | 함께 확인할 허용 사례 |\n| --- | --- |\n| 닫히지 않은 문자열, 잘못된 UTF-8 | 한글·올바른 surrogate pair |\n| 원시 NUL이 어느 위치에든 삽입됨 | 문자열 안의 이스케이프된 NUL |\n| 같은 객체의 중복 키 | 하나의 이스케이프 표기 키 |\n| 1025바이트 | 1024바이트 |\n| uint64 최대 초과 | UINT64_MAX |\n| icon_id가 null·숫자·빈 값 | ruby 문자열 |\n\ndocument_contract는 정상 요청의 각 바이트 경계에 NUL을 삽입해 거절하는지 확인합니다. 제어문자·잘못된 UTF-8·중복 키·필드 타입·범위도 별도로 확인합니다. Release에서도 검사되도록 CHECK는 assert의 비활성화 여부에 의존하지 않습니다.\n\nHTTP 검사에서는 새 임시 DB를 열어 잘못된 guest 요청 뒤 계정 수가 0인지 확인합니다. 구매 검사에서는 BP300과 default 소유 상태를 준비한 뒤 잘못된 요청들이 잔액과 소유 목록을 그대로 두는지 확인합니다. 이어서 정상 ruby 요청이 BP200과 새 소유권을 만드는지 확인해 실제 변경 경로까지 연결합니다.",
+      "codes": [
+        {
+          "label": "원시 NUL의 모든 삽입 위치 검사",
+          "text": "    const std::string good = R\"({\"x\":\"ruby\"})\";\n    for (std::size_t i = 0; i <= good.size(); ++i) {\n        auto body = good; body.insert(i, 1, '\\0');\n        CHECK(!parse(body));\n    }\n    CHECK(!parse(good + '\\0' + \"ignored\"));",
+          "language": "cpp"
+        },
+        {
+          "label": "경계 크기 양쪽 검사",
+          "text": "    CHECK(parse(\"{}\" + std::string(max_bytes - 2, ' ')));\n    CHECK(!parse(\"{}\" + std::string(max_bytes - 1, ' ')));",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "분리한 파일을 누적 프로젝트에 연결한다",
+      "body": "체크포인트 118-json-boundary는 상점·계정·정산 코드를 이어받습니다. wire.h의 공통 파싱과 숫자 추출을 두 헤더로 옮기고, shop_catalog.h는 text를 통해 필드를 읽도록 바꿉니다. 저장 스키마 v5와 구매 트랜잭션은 그대로입니다.\n\n| 파일 | 맡는 일 |\n| --- | --- |\n| meta/json_document.h | 전체 바이트·평면 구조·중복 키·필드 수 |\n| meta/json_fields.h | 이미 파싱된 객체의 정수·문자열 타입 추출 |\n| meta/wire.h | 경기 요청·영수증의 필드와 범위 |\n| meta/profile_wire.h | 프로필 ID·진행 수치의 범위 |\n| meta/shop_catalog.h | 아이콘 ID 형식과 카탈로그 |\n| tests/json_boundary_contract.cpp | 입력 경계의 허용·거절 사례 |\n\n아래 빌드 후 출력에 JSON 경계 검사 통과가 나타납니다. 조건을 바꿔 볼 때는 예를 들어 1024 경계를 1025로 바꾸고 기대한 입력 집합이 어떻게 달라지는지 예측한 뒤 실행하세요. 서버까지 이어지는 검사는 별도 명령으로 실행하며 자체 임시 DB를 사용합니다. 실제 계정 DB를 실습 입력으로 사용하지 않습니다.\n\nOpenSSL 개발 패키지가 필요합니다. Windows의 다중 구성 생성기를 쓰면 빌드와 CTest에 --config Release와 -C Release를 각각 맞춥니다. 소스만 독립 복사하면 STUDY_VENDOR_DIR로 포함된 외부 헤더·SQLite 위치를 지정합니다.",
+      "codes": [
+        {
+          "label": "JSON 입력 계약 빌드·실행",
+          "text": "cmake -S docs/learn/checkpoints/118-json-boundary -B out/study-118 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-118 --target json_boundary_contract study_account_db -j2\nctest --test-dir out/study-118 -R '^json_boundary_contract$' --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "HTTP 경계와 현재 파서까지 검증",
+          "text": "python3 scripts/check_learning_json_boundary.py",
+          "language": "sh"
+        },
+        {
+          "label": "검사 실행 파일 연결",
+          "text": "add_executable(json_boundary_contract tests/json_boundary_contract.cpp)\ntarget_link_libraries(json_boundary_contract PRIVATE study_meta_http)\nadd_test(NAME json_boundary_contract COMMAND json_boundary_contract)",
+          "language": "cmake"
+        }
+      ]
+    },
+    {
+      "title": "변경에 견디는 경계는 의미를 유지한다",
+      "body": "콘텐츠가 늘어나면 허용 ID와 가격은 바뀔 수 있습니다. 요청이 중첩 구조를 필요로 하면 평면 제한을 바꾸고 객체별 중복 검사와 새 깊이 경계를 설계할 수 있습니다. 새 필드는 버전과 호환 정책에 맞춰 추가합니다.\n\n유지할 핵심은 전체 바이트 검증, 해석된 키의 일관성, 정확한 부모 객체와 필드 타입, 좁히기 전 범위 확인, 상태 변경 전 거절입니다. 출력 데이터도 외부에서 받으면 같은 신뢰 경계를 가집니다. 서버가 보냈다는 전제만으로 응답의 타입과 범위를 생략하지 않습니다.\n\n소스 뷰어에서는 json_input.h의 원시 바이트 검사에서 json_routes.h의 핸들러 호출까지 따라 읽어 보세요. 문법이 완벽한 반복 등록이나 잘못된 경기 판정은 각각 요청 예산과 서버 권위의 문제로 남습니다. 지금 만든 경계가 어떤 입력을 어떤 상태 변경 전에 거절하는지 설명할 수 있으면 정책을 어디에 추가할지도 분명해집니다.",
+      "codes": [
+        {
+          "label": "meta/json_document.h",
+          "language": "cpp",
+          "file": "checkpoints/118-json-boundary/meta/json_document.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/json_fields.h",
+          "language": "cpp",
+          "file": "checkpoints/118-json-boundary/meta/json_fields.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/shop_catalog.h",
+          "language": "cpp",
+          "file": "checkpoints/118-json-boundary/meta/shop_catalog.h",
+          "collapsed": true
+        },
+        {
+          "label": "tests/json_boundary_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/118-json-boundary/tests/json_boundary_contract.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/json_input.h",
+        "symbol": "inline std::optional<Json> object",
+        "invariant": "요청과 응답의 외부 입력을 파싱한 뒤 목적에 맞는 계약으로 좁힌다.",
+        "mayDiffer": "크기·깊이·필드별 범위·추가 필드 허용 정책은 API에 맞게 정한다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "118-1",
+      "question": "{\"icon_id\":\"ruby\",\"icon_\\u0069d\":\"gold\"}를 거절하는 핵심 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "gold가 비싸기 때문이다"
+        },
+        {
+          "id": "b",
+          "text": "키 문자가 모두 ASCII이기 때문이다"
+        },
+        {
+          "id": "c",
+          "text": "이스케이프 해석 후 같은 객체에 같은 키가 두 번 있기 때문이다"
+        },
+        {
+          "id": "d",
+          "text": "모든 Unicode escape를 금지했기 때문이다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "이스케이프 해석 후 같은 객체에 같은 키가 두 번 있기 때문이다",
+      "explanation": "콜백이 받는 이름은 이미 해석되어 둘 다 icon_id입니다. 하나의 키를 이스케이프로 쓴 정상 요청은 허용합니다."
+    },
+    {
+      "id": "118-2",
+      "question": "필드 수가 1인 객체만 받으면 icon_id 요청 스키마가 완성될까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "아니요. 필수 이름과 그 타입도 확인해야 합니다"
+        },
+        {
+          "id": "b",
+          "text": "네. 모든 키는 icon_id로 변환됩니다"
+        },
+        {
+          "id": "c",
+          "text": "네. 객체 크기가 타입도 검증합니다"
+        },
+        {
+          "id": "d",
+          "text": "아니요. 필드 수 검사는 항상 제거해야 합니다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "아니요. 필수 이름과 그 타입도 확인해야 합니다",
+      "explanation": "{\"other\":\"ruby\"}도 필드는 하나입니다. 필수 키·타입 확인과 정확한 개수가 함께 있어야 추가·누락 필드를 막을 수 있습니다."
+    },
+    {
+      "id": "118-3",
+      "question": "이번 number 함수에 값 1e0이 들어왔습니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1로 허용한다"
+        },
+        {
+          "id": "b",
+          "text": "0으로 바꾼다"
+        },
+        {
+          "id": "c",
+          "text": "unsigned 최대값으로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "부동소수점으로 읽히므로 거절한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "부동소수점으로 읽히므로 거절한다",
+      "explanation": "수학적 정수 여부와 API의 정수 표현 계약은 다릅니다. is_number_integer를 요구하고 실수나 문자열을 묵시적으로 변환하지 않습니다."
+    },
+    {
+      "id": "118-4",
+      "question": "JSON 문자열 \"a\\u0000b\"와 객체 뒤의 원시 NUL을 어떻게 처리하나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "둘 다 입력 끝으로 취급한다"
+        },
+        {
+          "id": "b",
+          "text": "원시 NUL은 파싱 전 거절하고 이스케이프는 문자열로 해석한 뒤 용도에 맞게 검사한다"
+        },
+        {
+          "id": "c",
+          "text": "둘 다 무조건 빈 문자열로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "둘 다 아이콘 ID로 허용한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "원시 NUL은 파싱 전 거절하고 이스케이프는 문자열로 해석한 뒤 용도에 맞게 검사한다",
+      "explanation": "원시 0 바이트를 거절해 숨겨진 접미부를 막습니다. 이스케이프된 U+0000은 유효한 문자열 데이터지만, 아이콘 ID의 허용 문자에는 포함되지 않습니다."
+    },
+    {
+      "id": "118-5",
+      "question": "잘못된 구매 요청이 400을 반환하는 검사에 무엇을 더해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "응답 시간만 재면 충분하다"
+        },
+        {
+          "id": "b",
+          "text": "마지막 DB 파일만 삭제하면 된다"
+        },
+        {
+          "id": "c",
+          "text": "잔액·소유권이 그대로인지, 정상 입력은 실제 구매되는지 확인한다"
+        },
+        {
+          "id": "d",
+          "text": "모든 정상 입력도 거절되도록 바꾼다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "잔액·소유권이 그대로인지, 정상 입력은 실제 구매되는지 확인한다",
+      "explanation": "거절 응답만으로 상태 무변경을 증명할 수 없습니다. 실패 전후 저장 상태와 성공 대조군을 함께 확인해야 경계와 연결을 검증할 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "입력마다 문법·스키마·도메인·권한 중 실패할 층을 예측합니다.",
+      "NUL·이스케이프 키·uint64 최대값·크기 경계의 결과를 비교합니다.",
+      "json_boundary_contract를 빌드해 기대 결과를 확인합니다.",
+      "잘못된 HTTP 요청 뒤 계정 수·BP·소유 목록이 유지되는지 검사합니다."
+    ],
+    "failureChecks": [
+      "중복 키를 파싱 결과의 크기만으로 판단하지 않습니다.",
+      "NUL을 만나 앞부분만 읽은 본문을 완전한 요청으로 받아들이지 않습니다.",
+      "숫자를 먼저 좁히거나 문자열을 정수로 자동 변환하지 않습니다.",
+      "실패 응답과 상태 무변경을 같은 증거로 취급하지 않습니다."
+    ],
+    "expected": "입력이 거절되는 단계와 이유를 설명하고, 타입·범위·구조 정책을 코드와 실패 사례로 연결한다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 필드helper 검수·vendored parser 재현·실제 HTTP 부작용 회귀·공식 JSON 계약 대조",
+    "draftJob": "out/learning-jobs/118-fields-events.jsonl",
+    "corrections": [
+      "단순 필드helper의 과도한 범위설명 주석을 간결화",
+      "원시 NUL의 유효접두부 처리 문제를 실제 서버와 학습 경계에서 수정",
+      "Part10의 수동 응답파서 설명을 현재 구조파서로 교정",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL JSON 계약 타깃과 HTTP 거절 시 계정/잔액/소유권 보존",
+    "UTF-8·원시/이스케이프 NUL·중복/이스케이프 키·숫자폭·평면구조·바이트 경계",
+    "현재 파서16/17깊이·객체별 중복범위·응답NUL·ASan/UBSan",
+    "계정·구매·정산·진행 회귀와 실제 API58pytest 통과(native/initial_guest9선택제외)",
+    "타OS 네이티브·수동GUI·운영부하 미검증"
+  ]
+}

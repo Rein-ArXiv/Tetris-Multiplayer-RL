@@ -1,5 +1,6 @@
 #pragma once
 #include "../src/sim_game.h"
+#include "../core/input.h"
 #include "../net/framing.h"
 #include "../net/match_result.h"
 #include <algorithm>
@@ -67,7 +68,7 @@ class RankedGame {
         for (uint32_t i = 0; i < count; ++i) {
             const auto mask = data[6 + i];
             const auto tick = from + i;
-            if (mask & ~uint8_t(31)) {
+            if (!isValidInputMask(mask)) {
                 valid_ = false;
                 return;
             }

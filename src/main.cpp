@@ -20,11 +20,17 @@
 #include <cstring>
 #include <charconv>
 #include <cctype>
+#include <cerrno>
+#include <array>
+#include <fstream>
+#include <sstream>
+#include <optional>
 #include "../core/constants.h"
 #include "../core/input.h"
 #include "../core/replay.h"
 #include "../core/hash.h"
 #include "../net/session.h"
+#include "../net/input_pair.h"
 #include "../net/socket.h"
 #include "../net/framing.h"
 #include <thread>
@@ -53,6 +59,7 @@
 #include "../bot/reward_replay.h"
 #include "../meta/http_client.h"
 #include "../meta/account_client.h"
+#include "../meta/private_file.h"
 #include "account_screen.h"
 #include "../platform/user_data.h"
 #include "../meta/levels.h"
@@ -171,12 +178,24 @@ static int max_window_scale()
 // 전역 설정. apply_fx 람다(트리거 시점) 에서 shake 를 게이트한다.
 static GameSettings g_settings;
 
-static bool parse_bool01(const std::string& v, bool fallback)
+static std::optional<bool> parse_bool_value(const std::string& v)
 {
     const std::string s = trim_copy(v);
-    if (s == "1" || s == "true"  || s == "on")  return true;
+    if (s == "1" || s == "true" || s == "on") return true;
     if (s == "0" || s == "false" || s == "off") return false;
-    return fallback;
+    return std::nullopt;
+}
+
+static bool parse_bool01(const std::string& v, bool fallback)
+{
+    return parse_bool_value(v).value_or(fallback);
+}
+
+// Invalid legacy bool leaves a partial volume unchanged rather than rounding to 100.
+static int parse_legacy_volume(const std::string& v, int fallback)
+{
+    const auto value = parse_bool_value(v);
+    return value ? (*value ? 100 : 0) : fallback;
 }
 
 // 정수(예: 볼륨 0~100, 스케일 인덱스) 파싱. lo..hi 로 클램프. 비정상 시 fallback.
@@ -185,8 +204,10 @@ static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
     const std::string s = trim_copy(v);
     if (s.empty()) return fallback;
     char* end = nullptr;
-    long n = std::strtol(s.c_str(), &end, 10);
-    if (end == s.c_str()) return fallback;
+    errno = 0;
+    long long n = std::strtoll(s.c_str(), &end, 10);
+    if (end == s.c_str() || end != s.c_str() + s.size() || errno == ERANGE)
+        return fallback;
     if (n < lo) n = lo;
     if (n > hi) n = hi;
     return (int)n;
@@ -196,12 +217,24 @@ static int parse_int_clamped(const std::string& v, int fallback, int lo, int hi)
 static GameSettings load_settings(const char* path)
 {
     GameSettings s;
-    FILE* f = std::fopen(path, "rb");
-    if (!f) return s;
-
-    char line[256];
-    while (std::fgets(line, sizeof(line), f)) {
-        std::string ln(line);
+    if (!path || !*path) return s;
+    const auto file = std::filesystem::u8path(path);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec)) return s;
+    std::ifstream input(file, std::ios::binary);
+    if (!input) return s;
+    std::array<char, 16385> bytes{};
+    input.read(bytes.data(), bytes.size());
+    const auto count = input.gcount();
+    if (input.bad() || (input.fail() && !input.eof()) || count > 16384) {
+        std::fprintf(stderr, "[settings] unreadable or oversized file: %s\n", path);
+        return s;
+    }
+    std::istringstream lines(std::string(bytes.data(), static_cast<size_t>(count)));
+    std::string ln;
+    while (std::getline(lines, ln)) {
+        // One physical line is one record; never interpret an overlong suffix as a new key.
+        if (ln.size() > 255 || ln.find('\0') != std::string::npos) continue;
         const size_t hash = ln.find('#');
         if (hash != std::string::npos) ln.resize(hash);
         const size_t eq = ln.find('=');
@@ -211,8 +244,8 @@ static GameSettings load_settings(const char* path)
         // 볼륨 키 — 신형. 구형 호환: 과거 bgm=1/sfx=0 (bool) 도 받아 0/100 으로.
         if (key == "bgm_vol")        s.bgmVol = parse_int_clamped(val, s.bgmVol, 0, 100);
         else if (key == "sfx_vol")   s.sfxVol = parse_int_clamped(val, s.sfxVol, 0, 100);
-        else if (key == "bgm")       s.bgmVol = parse_bool01(val, s.bgmVol > 0) ? 100 : 0;
-        else if (key == "sfx")       s.sfxVol = parse_bool01(val, s.sfxVol > 0) ? 100 : 0;
+        else if (key == "bgm")       s.bgmVol = parse_legacy_volume(val, s.bgmVol);
+        else if (key == "sfx")       s.sfxVol = parse_legacy_volume(val, s.sfxVol);
         else if (key == "shake")     s.shakeOn = parse_bool01(val, s.shakeOn);
         else if (key == "harddrop_shake") s.hardDropShakeOn = parse_bool01(val, s.hardDropShakeOn);
         else if (key == "window_scale")   s.windowScale = parse_int_clamped(val, s.windowScale, 0, kWindowScaleCount - 1);
@@ -221,7 +254,6 @@ static GameSettings load_settings(const char* path)
         else if (key == "idle_animation") s.idleAnimation = parse_bool01(val, s.idleAnimation);
         else if (key == "ghost")          s.ghostOn = parse_bool01(val, s.ghostOn);
     }
-    std::fclose(f);
     return s;
 }
 
@@ -229,40 +261,29 @@ static GameSettings load_settings(const char* path)
 // 처리하며, 실패는 stderr에 남겨 설정 변경이 조용히 사라지지 않게 한다.
 static bool save_settings(const char* path, const GameSettings& s)
 {
-    namespace fs = std::filesystem;
-    const fs::path target(path);
-    const fs::path parent = target.parent_path();
-    if (!parent.empty()) {
-        std::error_code ec;
-        fs::create_directories(parent, ec);
-        if (ec) {
-            std::fprintf(stderr, "[settings] cannot create '%s': %s\n",
-                         parent.string().c_str(), ec.message().c_str());
-            return false;
-        }
+    if (!path || !*path) return false;
+    try {
+        // Serialize before touching the existing file. This writer publishes a
+        // complete temporary file in the same directory, then confirms syncing.
+        std::ostringstream text;
+        text << "bgm_vol=" << s.bgmVol << '\n'
+             << "sfx_vol=" << s.sfxVol << '\n'
+             << "shake=" << int(s.shakeOn) << '\n'
+             << "harddrop_shake=" << int(s.hardDropShakeOn) << '\n'
+             << "window_scale=" << s.windowScale << '\n'
+             << "fullscreen=" << int(s.fullscreen) << '\n'
+             << "vsync=" << int(s.vsyncOn) << '\n'
+             << "ghost=" << int(s.ghostOn) << '\n'
+             << "idle_animation=" << int(s.idleAnimation) << '\n';
+        auto target = std::filesystem::u8path(path);
+        if (target.parent_path().empty()) target = std::filesystem::path(".") / target;
+        if (text && meta::client::write_private_file(target.u8string(), text.str())) return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[settings] save exception: %s\n", e.what());
     }
-
-    FILE* f = std::fopen(path, "wb");
-    if (!f) {
-        std::fprintf(stderr, "[settings] cannot open '%s' for writing\n", path);
-        return false;
-    }
-
-    bool ok = true;
-    ok = ok && std::fprintf(f, "bgm_vol=%d\n",        s.bgmVol) >= 0;
-    ok = ok && std::fprintf(f, "sfx_vol=%d\n",        s.sfxVol) >= 0;
-    ok = ok && std::fprintf(f, "shake=%d\n",          s.shakeOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "harddrop_shake=%d\n", s.hardDropShakeOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "window_scale=%d\n",   s.windowScale) >= 0;
-    ok = ok && std::fprintf(f, "fullscreen=%d\n",     s.fullscreen ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "vsync=%d\n",          s.vsyncOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "ghost=%d\n",          s.ghostOn ? 1 : 0) >= 0;
-    ok = ok && std::fprintf(f, "idle_animation=%d\n", s.idleAnimation ? 1 : 0) >= 0;
-    if (std::fclose(f) != 0) ok = false;
-    if (!ok) {
-        std::fprintf(stderr, "[settings] failed while writing '%s'\n", path);
-    }
-    return ok;
+    // A sync error after rename can report failure even if new contents are visible.
+    std::fprintf(stderr, "[settings] save could not be confirmed: %s\n", path);
+    return false;
 }
 
 static void set_icon_px(std::vector<uint8_t>& px, int x, int y, Color c)
@@ -409,6 +430,10 @@ static uint8_t HorizontalRepeatInput()
 
 static void AccumulateInput(bool suppress = false)
 {
+    if (platform_input_cancelled()) {
+        s_pendingInput = 0;
+        s_leftHoldTicks = s_rightHoldTicks = 0;
+    }
     if (suppress)
     {
         s_pendingInput = 0;
@@ -1045,17 +1070,16 @@ int main(int argc, char** argv)
     float startFlashTimer = 0.0f;
     const float START_FLASH_DURATION = 0.7f;
 
-    // F.2 — 자동 HASH 검증. 매 600틱(~10s) 로컬 해시를 SendHash 하고 링으로
-    // 기억. 상대의 HASH(tick, h) 가 들어오면 같은 틱의 로컬 해시와 비교 →
-    // 불일치 시 DESYNC 오버레이 + stderr 로그.
-    struct HashSnap { uint32_t tick = 0; uint64_t hash = 0; bool valid = false; };
-    constexpr uint32_t HASH_PERIOD_TICKS = 600;
-    constexpr size_t HASH_RING = 4;
-    HashSnap localHashRing[HASH_RING]{};
-    uint32_t lastHashSentTick = (uint32_t)-1;        // 중복 송신 방지
-    uint32_t lastRemoteHashSeenTick = 0;
+    // F.2 — Session retains both origins until each periodic pair is compared.
+    constexpr uint32_t HASH_PERIOD_TICKS = net::HashExchange::period;
+    uint32_t lastHashSentTick = (uint32_t)-1;
     uint32_t desyncTick = 0;
     bool desyncDetected = false;
+    auto resetHashComparison = [&] {
+        lastHashSentTick = (uint32_t)-1;
+        desyncDetected = false;
+        desyncTick = 0;
+    };
 
     // Section I — 공격 라인 전달 상태. lockstep 을 통해 양쪽이 동일한 attack 값을
     // 산출하므로 네트워크 프레임은 필요 없다. 매 Tick 뒤 누적치의 델타만큼을
@@ -1122,6 +1146,20 @@ int main(int argc, char** argv)
     };
 
     float accumulator = 0.0f;
+    // A local round owns more than Game: reset the caller's clock, controls,
+    // transient effects and recorded input together. Physical held keys remain
+    // platform state and are sampled normally on the following frame.
+    auto beginSingleRound = [&]() {
+        auto next = std::make_unique<Game>(sessionSeed);
+        gameSingle = std::move(next);
+        accumulator = 0.0f;
+        s_pendingInput = 0;
+        s_leftHoldTicks = s_rightHoldTicks = 0;
+        coLocal = {};
+        shakeLeft = {};
+        if (recording) { replay.frames.clear(); replay.seed = sessionSeed; }
+        app = AppMode::Single;
+    };
 
     // 메뉴 Quit 요청 플래그. return 으로 즉시 끝내지 않고 메인 루프를 빠져나가
     // 파일 하단의 공통 정리 경로를 타기 위한 것 (MenuAction::Quit 참고).
@@ -1229,7 +1267,7 @@ int main(int argc, char** argv)
                 //      수신 측 emplace 가 stale 로 선점할 위험.
                 //   4) 아직 양쪽 보드가 gameOver 가 아님 — 같은 프레임에 게임오버가
                 //      난 뒤 렌더 단계에서 FSM 이 전환되기 전이라도 추가 INPUT 금지.
-                if (gameLocal && gameRemote && startDelay == 0 &&
+                if (session.isReady() && gameLocal && gameRemote && startDelay == 0 &&
                     gameOverState == GameOverState::None &&
                     !gameLocal->gameOver && !gameRemote->gameOver)
                 {
@@ -1264,6 +1302,7 @@ int main(int argc, char** argv)
                     iconOpponent = resolvePlayerIcon(sp.remote_icon_id);
                     gameLocal   = std::make_unique<Game>(sessionSeed);
                     gameRemote  = std::make_unique<Game>(sessionSeed);
+                    resetHashComparison();
                     localInputs.clear();
                     localTickNext = 0; simTick = 0;
                     startDelay = sp.start_tick;
@@ -1296,17 +1335,21 @@ int main(int argc, char** argv)
 
                     int64_t lastLocalSent = (localTickNext == 0) ? -1 : (int64_t)localTickNext - 1;
                     int64_t lastRemote    = (int64_t)session.maxRemoteTick();
-                    int64_t safeTick      = std::min(lastLocalSent, lastRemote) - (int64_t)inputDelay;
+                    // Delay follows local input production; already received remote
+                    // records remain usable when future arrivals briefly pause.
+                    int64_t safeTick      = std::min(lastLocalSent - (int64_t)inputDelay, lastRemote);
 
                     if ((int64_t)simTick <= safeTick && gameLocal && gameRemote &&
                         !gameLocal->gameOver && !gameRemote->gameOver)
                     {
-                        while ((int64_t)simTick <= safeTick)
+                        while ((int64_t)simTick <= safeTick &&
+                               !gameLocal->gameOver && !gameRemote->gameOver)
                         {
                             uint8_t li = 0, ri = 0;
-                            auto it = localInputs.find(simTick);
-                            if (it != localInputs.end()) li = it->second;
-                            if (!session.GetRemoteInput(simTick, ri)) break;
+                            if (!net::read_input_pair(localInputs, simTick,
+                                    [&](uint32_t tick, uint8_t& mask) {
+                                        return session.GetRemoteInput(tick, mask);
+                                    }, li, ri)) break;
                             gameLocal->SubmitInput(li);
                             gameRemote->SubmitInput(ri);
                             gameLocal->Tick();
@@ -1330,20 +1373,16 @@ int main(int argc, char** argv)
                             }
                             simTick++;
 
-                            // F.2: 600틱마다 양쪽 경기판 해시를 결합해 송신 + 링 기록.
-                            // gameLocal 만 해싱하면 "호스트의 gameLocal" vs "게스트의
-                            // gameLocal" 을 비교하게 되는데, 이 둘은 서로 다른 경기라
-                            // 항상 다를 수밖에 없다(DESYNC 오탐). lockstep 이 정상이면
-                            // 양쪽 모두 gameLocal+gameRemote 를 (같은 관점에서) 갖고
-                            // 있으므로 XOR 로 결합하면 동일 해시가 나온다.
+                            // Record the post-tick state in canonical host/peer order.
+                            // Local/remote presentation order is reversed on the peer.
                             if (simTick > 0 && simTick % HASH_PERIOD_TICKS == 0 &&
                                 simTick != lastHashSentTick) {
                                 uint64_t hL = gameLocal->ComputeStateHash();
                                 uint64_t hR = gameRemote->ComputeStateHash();
-                                uint64_t h  = hL ^ hR;
+                                const bool localIsHost = session.params().role == net::Role::Host;
+                                uint64_t h = localIsHost ? hash_player_pair(hL, hR)
+                                                         : hash_player_pair(hR, hL);
                                 session.SendHash(simTick, h);
-                                auto& slot = localHashRing[(simTick / HASH_PERIOD_TICKS) % HASH_RING];
-                                slot.tick = simTick; slot.hash = h; slot.valid = true;
                                 lastHashSentTick = simTick;
                             }
 
@@ -1440,42 +1479,33 @@ int main(int argc, char** argv)
             linkLostCountdown = 0.0f;
         }
 
-        // F.2 — 원격 HASH 수신 감지 + 링 비교. 같은 틱의 로컬 해시가 링에
-        // 있어야 비교 가능 (링 크기 4 → 과거 40초 이력 커버).
+        // F.2 — Compare pending samples in tick order, outside the mailbox lock.
         if (app == AppMode::Net && gameLocal) {
-            uint32_t rt = 0; uint64_t rh = 0;
-            if (session.GetLastRemoteHash(rt, rh) && rt != 0 && rt != lastRemoteHashSeenTick) {
-                lastRemoteHashSeenTick = rt;
-                auto& slot = localHashRing[(rt / HASH_PERIOD_TICKS) % HASH_RING];
-                if (slot.valid && slot.tick == rt) {
-                    if (slot.hash != rh) {
-                        // DESYNC 시 어느 섹션이 달라졌는지 즉시 판별할 수 있도록
-                        // 현재 시점의 gameLocal/gameRemote 섹션별 해시를 출력.
-                        // (원격 hash 는 이미 XOR 결합이라 섹션 분리 불가 — 자기 쪽만 출력.
-                        //  상대 쪽도 같은 시점에 DESYNC 를 찍으니 양쪽 콘솔을 대조하면
-                        //  어느 필드가 먼저 달라졌는지 좁힐 수 있다.)
-                        fprintf(stderr, "[DESYNC] tick=%u local=0x%016llx remote=0x%016llx\n",
-                                rt, (unsigned long long)slot.hash, (unsigned long long)rh);
-                        if (gameLocal && gameRemote) {
-                            auto bL = gameLocal->sim.StateHashBreakdown();
-                            auto bR = gameRemote->sim.StateHashBreakdown();
-                            fprintf(stderr, "  gameLocal : grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
-                                    (unsigned long long)bL.grid, (unsigned long long)bL.currentBlock,
-                                    (unsigned long long)bL.nextBlock, (unsigned long long)bL.rng,
-                                    (unsigned long long)bL.scoreFlags, (unsigned long long)bL.combat);
-                            fprintf(stderr, "  gameRemote: grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
-                                    (unsigned long long)bR.grid, (unsigned long long)bR.currentBlock,
-                                    (unsigned long long)bR.nextBlock, (unsigned long long)bR.rng,
-                                    (unsigned long long)bR.scoreFlags, (unsigned long long)bR.combat);
-                        }
-                        desyncDetected = true;
-                        desyncTick = rt;
+            uint32_t rt = 0; uint64_t localHash = 0, rh = 0;
+            // Each successful poll consumes one earliest complete pair.
+            while (session.PollHashComparison(rt, localHash, rh)) {
+                if (localHash != rh) {
+                    // Breakdown is sampled now, not from the compared snapshot.
+                    fprintf(stderr, "[DESYNC] tick=%u local=0x%016llx remote=0x%016llx\n",
+                            rt, (unsigned long long)localHash, (unsigned long long)rh);
+                    if (gameLocal && gameRemote) {
+                        fprintf(stderr, "[DESYNC-DIAGNOSTIC] captured_tick=%u compared_tick=%u\n", simTick, rt);
+                        auto bL = gameLocal->sim.StateHashBreakdown();
+                        auto bR = gameRemote->sim.StateHashBreakdown();
+                        fprintf(stderr, "  gameLocal : grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
+                                (unsigned long long)bL.grid, (unsigned long long)bL.currentBlock,
+                                (unsigned long long)bL.nextBlock, (unsigned long long)bL.rng,
+                                (unsigned long long)bL.scoreFlags, (unsigned long long)bL.combat);
+                        fprintf(stderr, "  gameRemote: grid=%016llx cur=%016llx nxt=%016llx rng=%016llx sf=%016llx co=%016llx\n",
+                                (unsigned long long)bR.grid, (unsigned long long)bR.currentBlock,
+                                (unsigned long long)bR.nextBlock, (unsigned long long)bR.rng,
+                                (unsigned long long)bR.scoreFlags, (unsigned long long)bR.combat);
                     }
+                    desyncDetected = true;
+                    desyncTick = rt;
                 }
-                // 같은 틱이 링에 없을 수도 있음(시작 직후 등) — 이 경우 무시.
             }
         }
-
         // 3) 렌더링
         // Section I: shake 업데이트. 각 보드는 독립 ShakeState를 가지며, 해당
         // 보드를 그리기 직전에만 오프셋을 적용한다. UI/오버레이로 넘어갈 때
@@ -1618,8 +1648,7 @@ int main(int argc, char** argv)
             if (activated >= 0) {
                 switch (items[activated].action) {
                 case MenuAction::Single:
-                    app = AppMode::Single;
-                    gameSingle = std::make_unique<Game>(sessionSeed);
+                    beginSingleRound();
                     break;
                 case MenuAction::BotSelect:
                     // 봇 선택 화면으로. 실제 BotSingle 진입은 거기서 모델 로드 성공 후.
@@ -1848,9 +1877,11 @@ int main(int argc, char** argv)
             // ── ROW_SCALE: 창 스케일 선택기 ──────────────────────────────────
             draw_label(ROW_SCALE, "Window");
             {
+                const int hi = max_window_scale();
                 int dir = gui_value_selector(ctrlX, rowY(ROW_SCALE), ctrlW, boxSize,
                                              kWindowScaleLabel[g_settings.windowScale],
-                                             settingsIndex == ROW_SCALE);
+                                             settingsIndex == ROW_SCALE,
+                                             g_settings.windowScale > 0, g_settings.windowScale < hi);
                 if (settingsIndex == ROW_SCALE) {
                     if (kLeft)  dir = -1;
                     if (kRight) dir = +1;
@@ -1859,7 +1890,6 @@ int main(int argc, char** argv)
                     // 양 끝에서 wrap 하지 않고 clamp 한다 (가장 큰 값에서
                     // Right → 720 으로 점프하는, picker 답지 않은 동작 방지).
                     // 상한은 프리셋 개수가 아니라 이 모니터에 들어가는 최대치다.
-                    const int hi = max_window_scale();
                     int ns = g_settings.windowScale + dir;
                     if (ns < 0) ns = 0;
                     if (ns > hi) ns = hi;
@@ -2639,8 +2669,7 @@ int main(int argc, char** argv)
             gui_text_center(360, 382, "[Q] Go to Title", 28, YELLOW);
             if (platform_key_pressed(PKEY_R))
             {
-                gameSingle = std::make_unique<Game>(sessionSeed);
-                if (recording) replay.frames.clear();
+                beginSingleRound();
             }
             else if (platform_key_pressed(PKEY_Q))
             {
@@ -2765,7 +2794,7 @@ int main(int argc, char** argv)
                 if (session.GetMatchResult(mr)) {
                     haveMatchResult = true;
                     lastMatchResult = mr;
-                    myElo = mr.elo_after;  // 클라 내부 상태 갱신
+                    myElo = net::rating_after_result(myElo, mr.elo_after, mr.status);
                     // bp/xp 는 프레임에 없으므로 메뉴 복귀 시 verify 로 갱신.
                     if (metaOnline) metaRefreshPending = true;
                 }
@@ -2856,13 +2885,10 @@ int main(int argc, char** argv)
                 draw_popup_panel(130, 250, 460, 190);
                 gui_text_center(360, 277, "GAME OVER", 60, WHITE);
                 gui_text_center(360, 365, "Starting new round...", 24, GRAY);
-                // 새 시드를 보내고 곧장 새 라운드로 진입한다. 예전엔 여기서 1.5초를
-                // 고정 대기했는데, 그 시차만큼 host 의 카운트다운이 guest 보다 늦게
-                // 시작돼(guest 가 먼저 끝나 입력 송신 시작) 재시작 라운드 내내 한쪽
-                // 입력이 lockstep safeTick 에 묶여 영구 렉이 났다. 이제 최초 게임
-                // 시작과 동일하게 "시드 전송 → 즉시 시작" 으로 양쪽 시작 시차를 ~RTT
-                // 수준으로 줄인다. SEED 프레임은 RestartingGame 의 ClearInputs() 가
-                // 보존(INPUT/HASH 만 드롭)하므로 곧장 넘어가도 안전하다.
+                // Queue the new seed, then enter the local restart path.
+                // ClearInputs preserves queued SEED frames, but queue acceptance
+                // does not acknowledge peer receipt or bound the start skew.
+                // The current peer detects a changed seed value, not a round ID.
                 sessionSeed = (uint64_t)(platform_get_time() * 1000000.0) + rand();
                 session.SendNewSeed(sessionSeed);
                 gameOverState = GameOverState::RestartingGame;
@@ -2903,15 +2929,7 @@ int main(int argc, char** argv)
                 haveMatchResult = false;
                 lastMatchResult = {};
                 session.ClearGameOverChoices();
-                // HASH 관련 상태 초기화 — 이전 라운드의 slot 이 남아있으면
-                // 새 라운드 tick 600 snapshot 을 이전 라운드 스냅샷과 비교하거나,
-                // lastHashSentTick 때문에 새 라운드의 첫 HASH 송신이 스킵될 수 있음.
-                // 결과: 실제 게임은 정상인데 DESYNC 배너만 뜨는 오탐.
-                for (auto& slot : localHashRing) slot = HashSnap{};
-                lastHashSentTick       = (uint32_t)-1;
-                lastRemoteHashSeenTick = 0;
-                desyncDetected         = false;
-                desyncTick             = 0;
+                resetHashComparison();
                 if (recording) { replay.frames.clear(); replay.seed = sessionSeed; }
                 gameOverState = GameOverState::None;
             }
@@ -3098,11 +3116,11 @@ int main(int argc, char** argv)
             if (linkLostActive) {
                 int remain = (int)(linkLostCountdown + 0.999f);
                 draw_rect(60, 240, 600, 120, {0, 0, 0, 200});
-                draw_text("Opponent disconnected", 130, 260, 32, RED);
+                draw_text("Peer response lost", 130, 260, 32, RED);
                 draw_text(fmt_buf("Returning to title in %d...", remain),
                           130, 308, 24, WHITE);
             } else if (ls == net::LinkStatus::Stalled && gameLocal && gameRemote) {
-                draw_text("Opponent frozen - waiting...", 60, 560, 14, YELLOW);
+                draw_text("Waiting for peer response...", 60, 560, 14, YELLOW);
             }
 
             // F.2 DESYNC 배너 — 한 번 감지되면 세션 종료까지 유지.
@@ -3243,6 +3261,13 @@ int main(int argc, char** argv)
         renderer_end();
         platform_end_frame();
     }
+
+    // Join socket work and release Game-owned audio while backends still exist.
+    session.Close();
+    gameSingle.reset();
+    gameLocal.reset();
+    gameRemote.reset();
+    gameBot.reset();
 
     for (const auto& item : opponentImages) if (item.second) image_unload(item.second);
     for (ImageHandle h : playerIconCatalogHandles) image_unload(h);

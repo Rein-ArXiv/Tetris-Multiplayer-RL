@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS elo_history (
   created_at  INTEGER NOT NULL
 );
 
--- PRAGMA user_version 은 sqlite3 .dump/.restore 에 보존되지 않는다. 데이터
+-- SQL .dump를 새 DB에 재실행하면 user_version 헤더는 복원되지 않는다. 데이터
 -- 테이블의 marker도 함께 기록해 데이터 변환 마이그레이션을 멱등하게 만든다.
 CREATE TABLE IF NOT EXISTS schema_migrations (
   name        TEXT PRIMARY KEY,
@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE INDEX IF NOT EXISTS idx_players_elo    ON players(elo DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_played ON matches(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_elo_pid        ON elo_history(player_id);
-CREATE INDEX IF NOT EXISTS idx_player_icons_pid ON player_icons(player_id);
+-- The composite ownership PK already supports the current lookup.
+-- Also remove the redundant legacy index when reopening an existing DB.
+DROP INDEX IF EXISTS idx_player_icons_pid;
 )sql";
 
 const char* kDefaultIconId = "default";
@@ -141,17 +143,26 @@ const IconCatalogEntry* find_icon_def(const std::string& icon_id)
     return nullptr;
 }
 
+// SQLite INTEGER is 64-bit. Validate its storage type and range before narrowing.
+bool read_nonnegative_int(sqlite3_stmt* statement, int column, int& out) {
+    if (sqlite3_column_type(statement, column) != SQLITE_INTEGER) return false;
+    const auto value = sqlite3_column_int64(statement, column);
+    if (value < 0 || value > 2147483647) return false;
+    out = static_cast<int>(value);
+    return true;
+}
+
 std::optional<Player> read_player(sqlite3_stmt *statement) {
     if (sqlite3_step(statement) != SQLITE_ROW)
         return std::nullopt;
     Player p;
     p.id = sqlite3_column_int64(statement, 0);
     p.username = read_nullable_text(statement, 1);
-    p.elo = sqlite3_column_int(statement, 2);
-    p.wins = sqlite3_column_int(statement, 3);
-    p.losses = sqlite3_column_int(statement, 4);
-    p.bp = sqlite3_column_int(statement, 5);
-    p.xp = sqlite3_column_int(statement, 6);
+    if (!read_nonnegative_int(statement, 2, p.elo) ||
+        !read_nonnegative_int(statement, 3, p.wins) ||
+        !read_nonnegative_int(statement, 4, p.losses) ||
+        !read_nonnegative_int(statement, 5, p.bp) ||
+        !read_nonnegative_int(statement, 6, p.xp)) return std::nullopt;
     auto icon = sqlite3_column_text(statement, 7);
     p.selected_icon_id = icon ? reinterpret_cast<const char *>(icon) : kDefaultIconId;
     if (!find_icon_def(p.selected_icon_id))
@@ -173,31 +184,55 @@ std::optional<Player> read_player_by_token(sqlite3 *db, const std::string &token
     return read_player(g.s);
 }
 
-bool player_owns_icon(sqlite3 *db, int64_t player_id, const std::string &icon_id) {
+// Shop authorization and mutation share one write transaction across DB connections.
+class ShopTransaction {
+public:
+    explicit ShopTransaction(sqlite3* db) : db_(db) {
+        active_ = sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) == SQLITE_OK;
+    }
+    ~ShopTransaction() {
+        if (active_) sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
+    ShopTransaction(const ShopTransaction&) = delete;
+    ShopTransaction& operator=(const ShopTransaction&) = delete;
+    bool started() const { return active_; }
+    bool commit() {
+        if (!active_ || sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+        active_ = false;
+        return true;
+    }
+private:
+    sqlite3* db_;
+    bool active_ = false;
+};
+
+std::optional<bool> player_owns_icon(sqlite3 *db, int64_t player_id, const std::string &icon_id) {
     const IconCatalogEntry* def = find_icon_def(icon_id);
     if (!def) return false;
     if (def->default_owned) return true;
-
     StmtGuard g;
     const char* sql =
         "SELECT 1 FROM player_icons WHERE player_id=?1 AND icon_id=?2";
-    if (sqlite3_prepare_v2(db, sql, -1, &g.s, nullptr) != SQLITE_OK) return false;
+    if (sqlite3_prepare_v2(db, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
     sqlite3_bind_int64(g.s, 1, player_id);
     sqlite3_bind_text (g.s, 2, icon_id.c_str(), -1, SQLITE_TRANSIENT);
-    return sqlite3_step(g.s) == SQLITE_ROW;
+    const int rc = sqlite3_step(g.s);
+    if (rc == SQLITE_ROW) return true;
+    if (rc == SQLITE_DONE) return false;
+    return std::nullopt;
 }
 
 bool insert_icon_ownership(sqlite3* db, int64_t player_id, const std::string& icon_id)
 {
     StmtGuard g;
     const char* sql =
-        "INSERT OR IGNORE INTO player_icons(player_id,icon_id,created_at)"
+        "INSERT INTO player_icons(player_id,icon_id,created_at)"
         " VALUES(?1,?2,?3)";
     if (sqlite3_prepare_v2(db, sql, -1, &g.s, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_int64(g.s, 1, player_id);
     sqlite3_bind_text (g.s, 2, icon_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(g.s, 3, now_unix());
-    return sqlite3_step(g.s) == SQLITE_DONE;
+    return sqlite3_step(g.s) == SQLITE_DONE && sqlite3_changes(db) == 1;
 }
 
 } // namespace
@@ -234,8 +269,8 @@ void Database::execSchema()
         throw std::runtime_error(msg);
     }
 
-    // 기존 tetris.db 를 보존하면서 신규 컬럼을 붙인다. duplicate column 은 이미
-    // 마이그레이션된 DB 라는 뜻이므로 무시한다.
+    // 기존 tetris.db 를 보존하면서 신규 컬럼을 붙인다. duplicate column은
+    // 같은 이름의 열이 존재한다는 뜻이며, 열 정의 전체의 일치 검사는 아니다.
     auto alter_if_needed = [&](const char* sql) {
         char* alterErr = nullptr;
         int alterRc = sqlite3_exec(db_, sql, nullptr, nullptr, &alterErr);
@@ -277,11 +312,14 @@ void Database::execSchema()
     //   no-op 이고, 버전만 1 로 올라간다. (meta/elo.h 참조)
     int userVersion = 0;
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &s, nullptr) == SQLITE_OK
-            && sqlite3_step(s) == SQLITE_ROW)
-            userVersion = sqlite3_column_int(s, 0);
-        sqlite3_finalize(s);
+        StmtGuard version;
+        if (sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &version.s, nullptr) != SQLITE_OK)
+            throw std::runtime_error("schema migration version prepare failed");
+        if (sqlite3_step(version.s) != SQLITE_ROW)
+            throw std::runtime_error("schema migration version read failed");
+        userVersion = sqlite3_column_int(version.s, 0);
+        if (userVersion < 0)
+            throw std::runtime_error("schema migration version invalid");
     }
     bool rpRebaseApplied = false;
     {
@@ -290,7 +328,10 @@ void Database::execSchema()
                 "SELECT 1 FROM schema_migrations WHERE name='elo_to_rp_v1'",
                 -1, &g.s, nullptr) != SQLITE_OK)
             throw std::runtime_error("schema migration marker prepare failed");
-        rpRebaseApplied = sqlite3_step(g.s) == SQLITE_ROW;
+        const int markerRc = sqlite3_step(g.s);
+        if (markerRc != SQLITE_ROW && markerRc != SQLITE_DONE)
+            throw std::runtime_error("schema migration marker read failed");
+        rpRebaseApplied = markerRc == SQLITE_ROW;
     }
 
     if (!rpRebaseApplied) {
@@ -331,6 +372,15 @@ Database::registerGuest(const std::string& token)
 
     if(!credentials::account(token))return std::nullopt;
     const auto hash=credentials::digest("account",token);
+    if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    struct RegistrationTransaction {
+        sqlite3* db;
+        bool committed = false;
+        ~RegistrationTransaction() {
+            if (!committed) sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    } transaction{db_};
     StmtGuard g;
     const char* sql =
         "INSERT INTO players(username,token_hash,elo,wins,losses,created_at) "
@@ -360,11 +410,14 @@ Database::registerGuest(const std::string& token)
     p.selected_icon_id = kDefaultIconId;
     // username 은 기본 NULL
     if (!insert_icon_ownership(db_, p.id, kDefaultIconId)) {
-        // default 아이콘은 default_owned=true 라 실동작엔 지장 없지만, 소유 행
-        // 누락은 DB 이상 신호이므로 조용히 넘기지 않는다.
+        // 계정과 기본 소유권은 하나의 등록이다. 부분 성공을 반환하지 않는다.
         std::fprintf(stderr, "[db] registerGuest: default icon ownership insert "
                      "failed for player_id=%lld\n", static_cast<long long>(p.id));
+        return std::nullopt;
     }
+    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    transaction.committed = true;
     return p;
 }
 
@@ -390,49 +443,32 @@ Database::purchaseIcon(const std::string& token,
 {
     out_player.reset();
     std::lock_guard<std::mutex> lk(mu_);
-
     const IconCatalogEntry* icon = find_icon_def(icon_id);
     if (!icon) return IconPurchaseResult::InvalidIcon;
-
+    ShopTransaction transaction(db_);
+    if (!transaction.started()) return IconPurchaseResult::DbError;
     auto p = read_player_by_token(db_, token);
     if (!p) return IconPurchaseResult::UnknownToken;
-    if (player_owns_icon(db_, p->id, icon_id))
-        return IconPurchaseResult::AlreadyOwned;
-    if (p->bp < icon->price_bp)
-        return IconPurchaseResult::InsufficientBp;
-
-    char* err = nullptr;
-    if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, &err) != SQLITE_OK) {
-        std::fprintf(stderr, "[db] purchaseIcon BEGIN: %s\n", err ? err : "?");
-        sqlite3_free(err);
-        return IconPurchaseResult::DbError;
-    }
-
-    auto rollback = [&] {
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return IconPurchaseResult::DbError;
-    };
-
+    const auto owned = player_owns_icon(db_, p->id, icon_id);
+    if (!owned) return IconPurchaseResult::DbError;
+    if (*owned) return IconPurchaseResult::AlreadyOwned;
+    if (p->bp < icon->price_bp) return IconPurchaseResult::InsufficientBp;
     {
         StmtGuard g;
-        const char* sql = "UPDATE players SET bp=bp-?1 WHERE id=?2 AND bp>=?1";
+        const char* sql = "UPDATE players SET bp=bp-?1 WHERE id=?2 AND typeof(bp)='integer' AND bp>=?1";
         if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
-            return rollback();
-        sqlite3_bind_int  (g.s, 1, icon->price_bp);
+            return IconPurchaseResult::DbError;
+        sqlite3_bind_int(g.s, 1, icon->price_bp);
         sqlite3_bind_int64(g.s, 2, p->id);
         if (sqlite3_step(g.s) != SQLITE_DONE || sqlite3_changes(db_) != 1)
-            return rollback();
+            return IconPurchaseResult::DbError;
     }
-    if (!insert_icon_ownership(db_, p->id, icon_id)) return rollback();
-
-    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK) {
-        std::fprintf(stderr, "[db] purchaseIcon COMMIT: %s\n", err ? err : "?");
-        sqlite3_free(err);
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return IconPurchaseResult::DbError;
-    }
-    out_player = read_player_by_token(db_, token);
-    return out_player ? IconPurchaseResult::Ok : IconPurchaseResult::DbError;
+    if (!insert_icon_ownership(db_, p->id, icon_id)) return IconPurchaseResult::DbError;
+    // Read the response before COMMIT, while the authenticated identity is stable.
+    auto after = read_player_by_token(db_, token);
+    if (!after || !transaction.commit()) return IconPurchaseResult::DbError;
+    out_player = std::move(after);
+    return IconPurchaseResult::Ok;
 }
 
 IconSelectResult
@@ -442,69 +478,38 @@ Database::selectIcon(const std::string& token,
 {
     out_player.reset();
     std::lock_guard<std::mutex> lk(mu_);
-
     if (!find_icon_def(icon_id)) return IconSelectResult::InvalidIcon;
+    ShopTransaction transaction(db_);
+    if (!transaction.started()) return IconSelectResult::DbError;
     auto p = read_player_by_token(db_, token);
     if (!p) return IconSelectResult::UnknownToken;
-    if (!player_owns_icon(db_, p->id, icon_id)) return IconSelectResult::NotOwned;
-
-    StmtGuard g;
-    const char* sql = "UPDATE players SET selected_icon_id=?1 WHERE id=?2";
-    if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
-        return IconSelectResult::DbError;
-    sqlite3_bind_text (g.s, 1, icon_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(g.s, 2, p->id);
-    if (sqlite3_step(g.s) != SQLITE_DONE)
-        return IconSelectResult::DbError;
-
-    out_player = read_player_by_token(db_, token);
-    return out_player ? IconSelectResult::Ok : IconSelectResult::DbError;
+    const auto owned = player_owns_icon(db_, p->id, icon_id);
+    if (!owned) return IconSelectResult::DbError;
+    if (!*owned) return IconSelectResult::NotOwned;
+    {
+        StmtGuard g;
+        const char* sql = "UPDATE players SET selected_icon_id=?1 WHERE id=?2";
+        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK)
+            return IconSelectResult::DbError;
+        sqlite3_bind_text(g.s, 1, icon_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(g.s, 2, p->id);
+        if (sqlite3_step(g.s) != SQLITE_DONE || sqlite3_changes(db_) != 1)
+            return IconSelectResult::DbError;
+    }
+    auto after = read_player_by_token(db_, token);
+    if (!after || !transaction.commit()) return IconSelectResult::DbError;
+    out_player = std::move(after);
+    return IconSelectResult::Ok;
 }
 
 // -----------------------------------------------------------------------------
 std::optional<MatchInsertResult>
-Database::saveMatch(const MatchRecord& m)
+Database::saveMatch(const MatchRecord& m, MatchSaveError* error)
 {
+    if (error) *error = MatchSaveError::Database;
     std::lock_guard<std::mutex> lk(mu_);
 
-    // Return the original result without applying a retried match twice.
-    {
-        StmtGuard g;
-        const char* sql =
-            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after,"
-            "player_a,player_b "
-            "FROM matches WHERE match_uuid=?1";
-        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
-        sqlite3_bind_text(g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(g.s) == SQLITE_ROW) {
-            MatchInsertResult r;
-            r.match_id = sqlite3_column_int64(g.s, 0);
-            const int ab = sqlite3_column_int(g.s, 1);
-            const int aa = sqlite3_column_int(g.s, 2);
-            const int bb = sqlite3_column_int(g.s, 3);
-            const int ba = sqlite3_column_int(g.s, 4);
-            // 같은 match_uuid 재전송인데 참가자가 다르면 uuid 충돌이거나 relay
-            // 버그(재사용/뒤바뀐 payload)다. 저장된 결과를 그대로 반환하는 기존
-            // 동작은 유지하되(멱등성 보장), stderr 경고로 조기 발견을 돕는다.
-            const int64_t stored_a = sqlite3_column_int64(g.s, 5);
-            const int64_t stored_b = sqlite3_column_int64(g.s, 6);
-            if (stored_a != m.player_a || stored_b != m.player_b) {
-                std::fprintf(stderr,
-                    "[db] saveMatch: match_uuid=%s replay with mismatched players "
-                    "(stored a=%lld b=%lld, request a=%lld b=%lld); returning stored result\n",
-                    m.match_uuid.c_str(),
-                    static_cast<long long>(stored_a),
-                    static_cast<long long>(stored_b),
-                    static_cast<long long>(m.player_a),
-                    static_cast<long long>(m.player_b));
-            }
-            r.a = {ab, aa, aa - ab};
-            r.b = {bb, ba, ba - bb};
-            return r;
-        }
-    }
-
-    // 트랜잭션 시작. IMMEDIATE: 쓰기 락 즉시 확보해 reader 때문에 밀리지 않게.
+    // 쓰기 트랜잭션을 먼저 확보한다. BEGIN/COMMIT의 잠금 대기는 여전히 실패할 수 있다.
     char* err = nullptr;
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, &err) != SQLITE_OK) {
         std::fprintf(stderr, "[db] BEGIN: %s\n", err ? err : "?");
@@ -512,10 +517,58 @@ Database::saveMatch(const MatchRecord& m)
         return std::nullopt;
     }
 
+    struct MatchTransaction {
+        sqlite3* db;
+        bool committed = false;
+        ~MatchTransaction() {
+            if (!committed) sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    } transaction{db_};
+
+    // Inspect the key while holding the write transaction, across connections too.
+    // Returning a saved result rolls back only this read-only transaction.
+    {
+        StmtGuard g;
+        const char* sql =
+            "SELECT id,elo_a_before,elo_a_after,elo_b_before,elo_b_after,"
+            "player_a,player_b,winner,score_a,score_b,lines_a,lines_b,duration_s "
+            "FROM matches WHERE match_uuid=?1";
+        if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(g.s, 1, m.match_uuid.c_str(), -1, SQLITE_TRANSIENT);
+        const int lookupRc = sqlite3_step(g.s);
+        if (lookupRc != SQLITE_ROW && lookupRc != SQLITE_DONE) return std::nullopt;
+        if (lookupRc == SQLITE_ROW) {
+            MatchInsertResult r;
+            r.match_id = sqlite3_column_int64(g.s, 0);
+            int ab, aa, bb, ba;
+            if (!read_nonnegative_int(g.s, 1, ab) || !read_nonnegative_int(g.s, 2, aa) ||
+                !read_nonnegative_int(g.s, 3, bb) || !read_nonnegative_int(g.s, 4, ba))
+                return std::nullopt;
+            // A retry is the same operation only when every persisted input
+            // agrees. A reused key must not confirm somebody else's result.
+            const bool stored_draw = sqlite3_column_type(g.s, 7) == SQLITE_NULL;
+            const bool same_winner = stored_draw ? !m.winner
+                : m.winner && sqlite3_column_int64(g.s, 7) == *m.winner;
+            if (sqlite3_column_int64(g.s, 5) != m.player_a ||
+                sqlite3_column_int64(g.s, 6) != m.player_b || !same_winner ||
+                sqlite3_column_int(g.s, 8) != m.score_a ||
+                sqlite3_column_int(g.s, 9) != m.score_b ||
+                sqlite3_column_int(g.s, 10) != m.lines_a ||
+                sqlite3_column_int(g.s, 11) != m.lines_b ||
+                sqlite3_column_int(g.s, 12) != m.duration_s) {
+                if (error) *error = MatchSaveError::IdentityConflict;
+                return std::nullopt;
+            }
+            if (error) *error = MatchSaveError::None;
+            r.a = {ab, aa, aa - ab};
+            r.b = {bb, ba, ba - bb};
+            return r;
+        }
+    }
+
     auto rollback = [&](const char* why) -> std::optional<MatchInsertResult> {
         std::fprintf(stderr, "[db] saveMatch rollback: %s (%s)\n",
                      why, sqlite3_errmsg(db_));
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
         return std::nullopt;
     };
 
@@ -554,8 +607,7 @@ Database::saveMatch(const MatchRecord& m)
         sqlite3_bind_int64(g.s, 1, pid);
         int rc = sqlite3_step(g.s);
         if (rc != SQLITE_ROW) return false;
-        out = sqlite3_column_int(g.s, 0);
-        return true;
+        return read_nonnegative_int(g.s, 0, out);
     };
 
     int elo_a_before = 0, elo_b_before = 0;
@@ -600,14 +652,20 @@ Database::saveMatch(const MatchRecord& m)
         auto update_player = [&](int64_t pid, int new_elo, bool won) -> bool {
             StmtGuard g;
             const char* sql = won
-                ? "UPDATE players SET elo=?1, wins=wins+1,     bp=bp+?3, xp=xp+?4 WHERE id=?2"
-                : "UPDATE players SET elo=?1, losses=losses+1, bp=bp+?3, xp=xp+?4 WHERE id=?2";
+                ? "UPDATE players SET elo=?1, wins=wins+1, bp=bp+?3, xp=xp+?4 WHERE id=?2 "
+                  "AND typeof(wins)='integer' AND wins BETWEEN 0 AND 2147483646 "
+                  "AND typeof(bp)='integer' AND bp BETWEEN 0 AND 2147483647-?3 "
+                  "AND typeof(xp)='integer' AND xp BETWEEN 0 AND 2147483647-?4"
+                : "UPDATE players SET elo=?1, losses=losses+1, bp=bp+?3, xp=xp+?4 WHERE id=?2 "
+                  "AND typeof(losses)='integer' AND losses BETWEEN 0 AND 2147483646 "
+                  "AND typeof(bp)='integer' AND bp BETWEEN 0 AND 2147483647-?3 "
+                  "AND typeof(xp)='integer' AND xp BETWEEN 0 AND 2147483647-?4";
             if (sqlite3_prepare_v2(db_, sql, -1, &g.s, nullptr) != SQLITE_OK) return false;
             sqlite3_bind_int  (g.s, 1, new_elo);
             sqlite3_bind_int64(g.s, 2, pid);
             sqlite3_bind_int  (g.s, 3, won ? kBpWin : kBpLoss);
             sqlite3_bind_int  (g.s, 4, won ? kXpWin : kXpLoss);
-            return sqlite3_step(g.s) == SQLITE_DONE;
+            return sqlite3_step(g.s) == SQLITE_DONE && sqlite3_changes(db_) == 1;
         };
         if (!update_player(m.player_a, elo_a_after, a_won)) return rollback("update player_a");
         if (!update_player(m.player_b, elo_b_after, b_won)) return rollback("update player_b");
@@ -636,19 +694,20 @@ Database::saveMatch(const MatchRecord& m)
     if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK) {
         std::fprintf(stderr, "[db] COMMIT: %s\n", err ? err : "?");
         sqlite3_free(err);
-        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
         return std::nullopt;
     }
 
+    transaction.committed = true;
     MatchInsertResult r;
     r.match_id = match_id;
     r.a = { elo_a_before, elo_a_after, elo_a_after - elo_a_before };
     r.b = { elo_b_before, elo_b_after, elo_b_after - elo_b_before };
+    if (error) *error = MatchSaveError::None;
     return r;
 }
 
 // -----------------------------------------------------------------------------
-std::vector<LeaderRow>
+std::optional<std::vector<LeaderRow>>
 Database::leaderboard(int limit)
 {
     std::lock_guard<std::mutex> lk(mu_);
@@ -663,19 +722,22 @@ Database::leaderboard(int limit)
         std::fprintf(stderr, "[db] leaderboard prepare: %s\n", sqlite3_errmsg(db_));
         return {};
     }
-    sqlite3_bind_int(g.s, 1, limit);
+    if (sqlite3_bind_int(g.s, 1, limit) != SQLITE_OK) return std::nullopt;
 
     std::vector<LeaderRow> rows;
-    while (sqlite3_step(g.s) == SQLITE_ROW) {
+    int step = SQLITE_OK;
+    while ((step = sqlite3_step(g.s)) == SQLITE_ROW) {
         LeaderRow r;
         r.player_id = sqlite3_column_int64(g.s, 0);
+        if (r.player_id <= 0) return std::nullopt;
         r.username  = read_nullable_text(g.s, 1);
-        r.elo       = sqlite3_column_int(g.s, 2);
-        r.wins      = sqlite3_column_int(g.s, 3);
-        r.losses    = sqlite3_column_int(g.s, 4);
-        r.xp        = sqlite3_column_int(g.s, 5);
+        if (!read_nonnegative_int(g.s, 2, r.elo) ||
+            !read_nonnegative_int(g.s, 3, r.wins) ||
+            !read_nonnegative_int(g.s, 4, r.losses) ||
+            !read_nonnegative_int(g.s, 5, r.xp)) return {};
         rows.push_back(std::move(r));
     }
+    if (step != SQLITE_DONE) return std::nullopt;
     return rows;
 }
 
@@ -745,39 +807,62 @@ void Database::migrateCredentials() {
         StmtGuard columns;
         if (sqlite3_prepare_v2(db_, "PRAGMA table_info(players)", -1, &columns.s, nullptr) != SQLITE_OK)
             throw std::runtime_error("credential schema inspection failed");
-        while (sqlite3_step(columns.s) == SQLITE_ROW) {
+        int columnRc;
+        while ((columnRc = sqlite3_step(columns.s)) == SQLITE_ROW) {
             const auto name = reinterpret_cast<const char *>(sqlite3_column_text(columns.s, 1));
             if (name && std::string(name) == "token")
                 legacy = true;
         }
+        if (columnRc != SQLITE_DONE)
+            throw std::runtime_error("credential schema inspection read failed");
     }
     exec("BEGIN IMMEDIATE");
     try {
         if (legacy) {
             exec("ALTER TABLE players RENAME COLUMN token TO token_hash");
-            StmtGuard rows, update;
-            // Row-id order stays stable while the unique credential index changes.
-            if (sqlite3_prepare_v2(db_, "SELECT id,token_hash FROM players ORDER BY id", -1, &rows.s,
-                                   nullptr) != SQLITE_OK ||
-                sqlite3_prepare_v2(db_, "UPDATE players SET token_hash=?1 WHERE id=?2", -1, &update.s,
-                                   nullptr) != SQLITE_OK)
+            StmtGuard update;
+            if (sqlite3_prepare_v2(db_, "UPDATE players SET token_hash=?1 WHERE id=?2", -1,
+                                   &update.s, nullptr) != SQLITE_OK)
                 throw std::runtime_error("credential migration prepare failed");
-            int rc;
-            while ((rc = sqlite3_step(rows.s)) == SQLITE_ROW) {
-                const auto raw = sqlite3_column_text(rows.s, 1);
-                const std::string token = raw ? reinterpret_cast<const char *>(raw) : "";
+            std::optional<sqlite3_int64> last;
+            for (;;) {
+                sqlite3_int64 id;
+                std::string token;
+                {
+                    // Finish each SELECT before mutating its table. Keyset progression
+                    // uses an unchanged primary key and does not overflow at the last ID.
+                    StmtGuard row;
+                    const char *sql = last
+                        ? "SELECT id,token_hash FROM players WHERE id>?1 ORDER BY id LIMIT 1"
+                        : "SELECT id,token_hash FROM players ORDER BY id LIMIT 1";
+                    if (sqlite3_prepare_v2(db_, sql, -1, &row.s, nullptr) != SQLITE_OK ||
+                        (last && sqlite3_bind_int64(row.s, 1, *last) != SQLITE_OK))
+                        throw std::runtime_error("credential migration prepare failed");
+                    const int rc = sqlite3_step(row.s);
+                    if (rc == SQLITE_DONE) break;
+                    if (rc != SQLITE_ROW)
+                        throw std::runtime_error("credential migration read failed");
+                    if (sqlite3_column_type(row.s, 1) != SQLITE_TEXT)
+                        throw std::runtime_error("invalid legacy credential; migration rolled back");
+                    const auto raw = sqlite3_column_text(row.s, 1);
+                    if (!raw)
+                        throw std::runtime_error("credential migration text read failed");
+                    const int bytes = sqlite3_column_bytes(row.s, 1);
+                    token.assign(reinterpret_cast<const char *>(raw),
+                                 static_cast<std::size_t>(bytes));
+                    id = sqlite3_column_int64(row.s, 0);
+                }
                 if (!credentials::account(token))
                     throw std::runtime_error("invalid legacy credential; migration rolled back");
                 const auto hash = credentials::digest("account", token);
-                sqlite3_reset(update.s);
-                sqlite3_clear_bindings(update.s);
-                sqlite3_bind_text(update.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int64(update.s, 2, sqlite3_column_int64(rows.s, 0));
-                if (sqlite3_step(update.s) != SQLITE_DONE)
+                if (sqlite3_reset(update.s) != SQLITE_OK ||
+                    sqlite3_clear_bindings(update.s) != SQLITE_OK ||
+                    sqlite3_bind_text(update.s, 1, hash.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+                    sqlite3_bind_int64(update.s, 2, id) != SQLITE_OK ||
+                    sqlite3_step(update.s) != SQLITE_DONE || sqlite3_changes(db_) != 1)
                     throw std::runtime_error("credential migration update failed");
+                last = id;
             }
-            if (rc != SQLITE_DONE)
-                throw std::runtime_error("credential migration read failed");
         }
         exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recovery_hash) WHERE "
              "recovery_hash IS NOT NULL");
@@ -797,7 +882,10 @@ void Database::migrateCredentials() {
         if (sqlite3_prepare_v2(db_, "SELECT 1 FROM schema_migrations WHERE name='credential_scrub_v1'", -1,
                                &marker.s, nullptr) != SQLITE_OK)
             throw std::runtime_error("credential scrub marker unavailable");
-        scrubbed = sqlite3_step(marker.s) == SQLITE_ROW;
+        const int markerRc = sqlite3_step(marker.s);
+        if (markerRc != SQLITE_ROW && markerRc != SQLITE_DONE)
+            throw std::runtime_error("credential scrub marker read failed");
+        scrubbed = markerRc == SQLITE_ROW;
     }
     if (!scrubbed) {
         auto checkpoint = [&] {
@@ -846,8 +934,20 @@ AccountChangeResult Database::changeAccount(const std::string &operation, const 
     std::lock_guard<std::mutex> lock(mu_);
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
         return AccountChangeResult::DbError;
+    struct AccountTransaction {
+        sqlite3* db;
+        std::optional<Player>& output;
+        bool committed = false;
+        ~AccountTransaction() {
+            if (!committed) {
+                sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+                output.reset();
+            }
+        }
+    } transaction{db_, out_player};
     auto rollback = [&](AccountChangeResult result) {
-        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        // The guard also rolls back C++ exceptions; output is published only on commit.
+        out_player.reset();
         return result;
     };
     {
@@ -859,30 +959,45 @@ AccountChangeResult Database::changeAccount(const std::string &operation, const 
                 "SELECT 1 FROM players WHERE last_credential_op=?1 AND token_hash=?2 AND recovery_hash=?3",
                 -1, &prior.s, nullptr) != SQLITE_OK)
             return rollback(AccountChangeResult::DbError);
-        sqlite3_bind_text(prior.s, 1, receipt.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(prior.s, 2, nextHash.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(prior.s, 3, recoveryHash.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(prior.s) == SQLITE_ROW) {
+        if (sqlite3_bind_text(prior.s, 1, receipt.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+            sqlite3_bind_text(prior.s, 2, nextHash.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+            sqlite3_bind_text(prior.s, 3, recoveryHash.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)
+            return rollback(AccountChangeResult::DbError);
+        const int prior_rc = sqlite3_step(prior.s);
+        if (prior_rc != SQLITE_ROW && prior_rc != SQLITE_DONE)
+            return rollback(AccountChangeResult::DbError);
+        if (prior_rc == SQLITE_ROW) {
             out_player = read_player_by_token(db_, next_token);
             if (!out_player || sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
                 return rollback(AccountChangeResult::DbError);
+            transaction.committed = true;
             return AccountChangeResult::Ok;
         }
     }
     int64_t player_id = 0;
     {
         StmtGuard owner;
-        const char *sql = recovering ? "SELECT id FROM players WHERE recovery_hash=?1"
-                                     : "SELECT id FROM players WHERE token_hash=?1";
+        const char *sql = recovering ? "SELECT id,token_hash,recovery_hash FROM players WHERE recovery_hash=?1"
+                                     : "SELECT id,token_hash,recovery_hash FROM players WHERE token_hash=?1";
         if (sqlite3_prepare_v2(db_, sql, -1, &owner.s, nullptr) != SQLITE_OK)
             return rollback(AccountChangeResult::DbError);
-        sqlite3_bind_text(owner.s, 1, oldHash.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_bind_text(owner.s, 1, oldHash.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)
+            return rollback(AccountChangeResult::DbError);
         const int rc = sqlite3_step(owner.s);
         if (rc == SQLITE_DONE)
             return rollback(AccountChangeResult::InvalidCredential);
         if (rc != SQLITE_ROW)
             return rollback(AccountChangeResult::DbError);
         player_id = sqlite3_column_int64(owner.s, 0);
+        const auto current_token = read_nullable_text(owner.s, 1);
+        const auto current_recovery = read_nullable_text(owner.s, 2);
+        if (!current_token)
+            return rollback(AccountChangeResult::DbError);
+        // Exact retries were handled above. A new change must retire the values
+        // it promises to replace, even if a custom client reuses its candidates.
+        if ((recovering && *current_token == nextHash) ||
+            (current_recovery && *current_recovery == recoveryHash))
+            return rollback(AccountChangeResult::InvalidRequest);
     }
     {
         StmtGuard update;
@@ -892,20 +1007,24 @@ AccountChangeResult Database::changeAccount(const std::string &operation, const 
                                "WHERE id=?4 AND auth_epoch<9223372036854775807",
                                -1, &update.s, nullptr) != SQLITE_OK)
             return rollback(AccountChangeResult::DbError);
-        sqlite3_bind_text(update.s, 1, nextHash.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(update.s, 2, recoveryHash.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(update.s, 3, receipt.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(update.s, 4, player_id);
+        if (sqlite3_bind_text(update.s, 1, nextHash.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+            sqlite3_bind_text(update.s, 2, recoveryHash.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+            sqlite3_bind_text(update.s, 3, receipt.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+            sqlite3_bind_int64(update.s, 4, player_id) != SQLITE_OK)
+            return rollback(AccountChangeResult::DbError);
         const auto rc = sqlite3_step(update.s);
-        if (rc != SQLITE_DONE)
-            return rollback(rc == SQLITE_CONSTRAINT ? AccountChangeResult::Conflict
-                                                    : AccountChangeResult::DbError);
+        if (rc != SQLITE_DONE) {
+            const int detail = sqlite3_extended_errcode(db_);
+            const bool duplicate = detail == SQLITE_CONSTRAINT_UNIQUE || detail == SQLITE_CONSTRAINT_PRIMARYKEY;
+            return rollback(duplicate ? AccountChangeResult::Conflict : AccountChangeResult::DbError);
+        }
         if (sqlite3_changes(db_) != 1)
             return rollback(AccountChangeResult::DbError);
     }
     out_player = read_player_by_token(db_, next_token);
     if (!out_player || sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
         return rollback(AccountChangeResult::DbError);
+    transaction.committed = true;
     return AccountChangeResult::Ok;
 }
 } // namespace meta

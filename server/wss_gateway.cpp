@@ -131,7 +131,8 @@ public:
             [self=shared_from_this()](Error error){if(!self->failed(error))self->upgrade();});
     }
     void close() {
-        if(closed_)return;closed_=true;
+        if(closed_)return;
+        closed_=true;
         deadline_.cancel();Error ignored;
         backend_.cancel(ignored);backend_.close(ignored);
         auto& socket=beast::get_lowest_layer(ws_).socket();

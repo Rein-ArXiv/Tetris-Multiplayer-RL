@@ -1,13 +1,13 @@
 // server/matchmaker.h — FIFO 매치 큐
 //
 // 역할: 들어오는 플레이어를 FIFO 로 쌓아두고 2명이 모이면 페어링 해서 Match 리턴.
-// 단일 프로듀서(accept 스레드 → playerConnThread) / 단일 컨슈머(matcher 스레드).
+// 여러 연결 worker가 생산자이며 matcher 스레드 하나가 소비자다.
 // 동기화는 std::mutex + std::condition_variable.
 //
 // 학습 포인트:
 //   - std::condition_variable 의 전형적 predicate wait 패턴
 //   - shutdown 시 대기 스레드 깨우기 (notify_all + 상태 플래그)
-//   - 소켓 핸들(TcpSocket) 은 shared_ptr<int> 기반 참조 카운트 소유 핸들이다.
+//   - 소켓 핸들(TcpSocket) 은 shared_ptr<NativeSocket> 기반 참조 카운트 소유 핸들이다.
 //     복사본들이 같은 fd 소유권을 공유하며, 마지막 복사본이 소멸할 때 fd 가
 //     정확히 한 번 ::close 된다. 따라서 move/복사 후에도 fd 는 살아있고, 모든
 //     복사본이 사라질 때까지 OS 가 그 fd 번호를 새 연결에 재사용하지 않는다.
@@ -19,6 +19,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -46,10 +47,9 @@ struct PlayerInfo {
     // 큐 → 로비 → 포워딩 Channel 로 함께 옮겨 간다 (session_lease 와 같은 결).
     std::shared_ptr<IpAdmission> ip_session;
 
-    // 큐 대기 중 이 소켓에서 recv 됐지만 아직 완성 프레임이 못 된 잔여 바이트.
-    // 폴링 1회마다 로컬 버퍼를 쓰면 프레임이 TCP 세그먼트 경계에 걸쳐 도착할 때
-    // 앞쪽 절반이 유실되어 스트림이 어긋난다 — 반드시 여기 누적하고, 매치 성립
-    // 후에는 lobby 버퍼의 초기값으로 이관한다 (relay.cpp queueLobbyThread).
+    // 이미 recv했으나 이 단계에서 아직 소비하지 않은 바이트.
+    // 첫 인계에는 완성된 QUEUE_CANCEL도 포함될 수 있다. 큐 파싱 뒤 남은
+    // 부분 꼬리는 다음 폴링 또는 로비의 초기 버퍼로 이어 간다.
     std::vector<uint8_t> streamBuf;
 };
 
@@ -66,13 +66,16 @@ struct Match {
 
 class Matchmaker {
 public:
+    static constexpr std::size_t kMaxWaiting = 1024;
     Matchmaker();
     ~Matchmaker();
 
-    // 프로듀서: QUEUE_JOIN 이 확인된 플레이어를 큐에 등록. 컨슈머를 깨움.
-    void enqueue(PlayerInfo p);
+    // 여러 생산자가 호출 가능. 등록 성공이면 true.
+    // 종료 중/대기 상한이면 소켓을 종료하고 소유한 슬롯을 반납하며 false.
+    bool enqueue(PlayerInfo p);
 
-    // 컨슈머: 2명 모일 때까지 블로킹. shutdown() 호출 시 std::nullopt.
+    // 단일 컨슈머: 취소/끊김을 주기적으로 정리하고 살아남은 앞의 두 명을 인계.
+    // shutdown()이면 nullopt. 새 데이터 도착은 다음 폴링에서 관측할 수 있다.
     std::optional<Match> waitForPair();
 
     // 모든 대기 스레드를 깨우고 큐에 남은 소켓을 닫는다.

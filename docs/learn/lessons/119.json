@@ -1,0 +1,438 @@
+{
+  "id": "lesson-119",
+  "title": "HTTP 실패: 상태 코드·시간 제한·재시도",
+  "shortTitle": "미확인·중단·시간 예산",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 제출 객체가 요청을 보존하지만 HTTP 실패가 모두 같은 미확인 결과로 합쳐집니다.",
+  "finish": "완료: 자동 중단과 재시도 후보를 구별하고, 동일 요청의 횟수·대기·시간 예산을 한 곳에서 관리합니다.",
+  "objective": "응답 유실의 불확실성을 설명하고, 상태 코드·영수증·대기 힌트로 다음 행동을 결정하며 시간 제한의 보장 범위를 구별합니다.",
+  "prerequisites": [
+    "멱등 키·동일 내용·최초 영수증",
+    "JSON 문서·타입·필드 검증",
+    "상태 전이와 단조 시계"
+  ],
+  "recap": {
+    "points": [
+      "문서가 JSON이어도 필드 타입과 범위를 확인한다.",
+      "중복 키와 원시 NUL은 전체 요청 해석을 모호하게 만들 수 있다.",
+      "입력 거절은 상태 변경 전에 끝내며 정상 입력도 함께 검사한다."
+    ],
+    "bridge": "이제 유효한 요청이 전송된 뒤 어떤 응답을 받았는지에 따라 자동 작업의 다음 행동을 정합니다."
+  },
+  "sections": [
+    {
+      "title": "응답이 사라져도 이미 저장됐을 수 있다",
+      "body": "경기 결과는 고정된 key와 필드로 제출하고, 서버는 같은 결과를 다시 받으면 최초 영수증을 돌려줍니다. 본문의 문법·타입도 검증합니다. 이제 연결이 끊기거나 서버가 오류를 반환할 때 호출자가 무엇을 해야 하는지 구현합니다.\n\n예를 들어 서버가 결과를 커밋한 뒤 응답을 보내다가 연결이 끊겼다고 해 봅시다. 클라이언트가 관찰한 것은 “응답을 받지 못함”입니다. 서버의 저장 실패까지 관찰한 것은 아닙니다. 이때 새 key로 다시 보내면 다른 경기로 저장될 수 있습니다.\n\n이번 산출물은 **같은 요청을 보존하면서 재시도 가능 여부·횟수·대기시간을 관리하는 제출 흐름**입니다. HttpSender는 한 번만 전송하고, MatchSubmission은 요청과 확인 상태를 소유하며, retry_submission이 다음 호출 시점을 정합니다. HTTP 오류를 전부 같은 실패로 뭉뚱그리지 않습니다."
+    },
+    {
+      "title": "관찰한 결과와 다음 행동을 분리한다",
+      "body": "**전송 결과**는 HTTP 응답을 확보했는지입니다. **프로토콜 결과**는 상태 코드와 본문이 계약에 맞는지입니다. **저장 확인**은 이번 요청에 대응하는 유효한 영수증을 얻었는지입니다. **재시도 정책**은 지금 가진 정보로 같은 요청을 자동으로 다시 보낼지 정하는 규칙입니다.\n\n| 관찰 | 저장에 대해 아는 것 | 이번 자동 동작 |\n| --- | --- | --- |\n| 응답 없음 | 저장 여부 미확인 | 예산 안에서 재시도 |\n| HTTP429 또는 5xx | 유효한 영수증 없음 | 대기 조건을 보고 재시도 |\n| HTTP400·401·403·409 | 같은 요청의 계약·권한·충돌 문제 | 중단 |\n| HTTP200, 잘못된 영수증 | 이번 저장을 확인하지 못함 | 중단 |\n| HTTP200, 이번 요청의 유효한 영수증 | 저장 확인 | 완료 |\n\n5xx라고 반드시 잠깐 뒤 정상화되는 것은 아닙니다. 여기서는 자동 재시도의 후보로만 분류하고 횟수와 시간을 제한합니다. 중단은 운영자나 사용자 확인이 필요한 상태이며, 과거 시도가 절대로 저장되지 않았다는 결론이 아닙니다.\n\n화면에도 이 차이를 보존해야 합니다. 응답 유실을 “보상 지급 실패, 다시 새 경기로 등록”으로 안내하면 중복 처리를 유도합니다. “저장 확인 중” 또는 “자동 재시도 중단, 상태 확인 필요”처럼 알고 있는 범위만 표현합니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "같은 상태 코드도 API 계약을 읽는다",
+          "body": "이 경기 제출 API의 409는 같은 키의 내용 충돌입니다. 아이콘 구매 API의 409 already_owned는 이미 소유한 상태입니다. 상태 코드 숫자 하나로 모든 API에서 같은 후속 동작을 결정하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "상태 코드 분류는 순수 함수로 둔다",
+      "body": "http_action은 숫자만 받아 다음 해석 단계를 돌려줍니다. DB나 소켓을 건드리지 않는 **순수 계산**이므로 정해진 허용 값과 경계 바깥의 값을 네트워크 없이 검사할 수 있습니다. 실제 HTTP의 일반 상태 코드 범위와 함수가 잘못된 입력을 받았을 때의 기본 동작도 구별해 확인합니다.\n\n200은 inspect_receipt입니다. 성공이라는 숫자만으로 저장 확인 상태로 바꾸지 않고 본문을 검사합니다. 429와 500..599는 retry 후보이며, 다른 숫자는 stop입니다. 201·204처럼 다른 API에서 성공으로 쓰는 코드도 이 엔드포인트가 약속한 영수증 응답 200과 다르므로 자동으로 받아들이지 않습니다.\n\n상태 코드 분류를 바꾸어도 요청의 key와 점수는 바뀌지 않아야 합니다. 오류 처리 때문에 새로운 경기 데이터를 만드는 의존 관계를 넣지 않습니다.",
+      "codes": [
+        {
+          "label": "HTTP 상태를 다음 해석 단계로 변환",
+          "text": "inline HttpAction http_action(int status) noexcept {\n  if (status == 200) {\n    return HttpAction::inspect_receipt;\n  }\n  if (status == 429 || (status >= 500 && status <= 599)) {\n    return HttpAction::retry;\n  }\n  return HttpAction::stop;\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "MetaClient::post_match",
+        "invariant": "상태 코드에 따라 같은 요청의 재시도 여부를 결정한다.",
+        "mayDiffer": "실제 함수는 optional 결과로 확인 실패를 모은다. 학습 코드는 중단과 예산 소진을 호출자에게 따로 돌려준다."
+      }
+    },
+    {
+      "title": "중단 상태에도 원래 요청을 남긴다",
+      "body": "Reply에 stopped를 추가합니다. unconfirmed는 제한된 재시도를 허용하는 미확인 결과, stopped는 자동 전송을 더 진행하지 말라는 결과입니다. MatchSubmission에도 stopped 상태가 생기고, 그 상태에서 submit을 다시 호출해도 전송 함수를 호출하지 않습니다.\n\nconfirmed 응답도 accepts가 key·양쪽 참가자·양수 row를 확인해야 최종 confirmed가 됩니다. 잘못된 영수증이나 알 수 없는 ReplyKind는 stopped로 갑니다. 프로토콜이 잘못된 응답을 계속 돌려주는데 똑같이 세 번 보내는 일을 피합니다.\n\nstopped나 budget_exhausted에서 request는 남고 receipt는 없습니다. 따라서 요청을 조사하거나 서버의 저장 상태를 확인할 식별자가 사라지지 않습니다. 이 객체는 메모리에 있으므로 프로세스를 종료하면 남은 요청도 사라집니다. 재시작 복구까지 하려면 별도의 영속 대기열이 필요합니다.",
+      "codes": [
+        {
+          "label": "전송 어댑터가 전달하는 결과",
+          "text": "struct Reply {\n  enum ReplyKind : std::uint8_t { confirmed = 0, unconfirmed = 1, stopped = 2 };\n\n  ReplyKind kind = unconfirmed;  // benign default: nothing known to be stored\n  Receipt receipt{};\n  std::chrono::milliseconds retry_after{0}; // minimum wait before another attempt\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "영수증 확인·미확인·중단 전이",
+          "text": "    if (reply.kind == Reply::confirmed && accepts(reply.receipt)) {\n      receipt_ = reply.receipt;\n      state_ = SubmissionState::confirmed;\n      return SubmitStep::confirmed;\n    }\n    if (reply.kind == Reply::unconfirmed) {\n      retry_after_ = reply.retry_after;\n      return SubmitStep::unconfirmed;\n    }\n    // A bad receipt or stop signal ends automatic attempts, without asserting\n    // that the server did not commit this operation.\n    state_ = SubmissionState::stopped;\n    return SubmitStep::stopped;\n  }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "멱등 효과와 전송 횟수",
+          "body": "같은 key와 같은 내용의 재요청이 상태를 한 번만 바꾸는 성질은 서버 저장 계약이 제공합니다. 네트워크에는 요청이 여러 번 전달될 수 있습니다. 전달 횟수 한 번과 저장 효과 한 번을 같은 의미로 쓰지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "한 번 전송하는 함수에는 재시도 루프를 넣지 않는다",
+      "body": "HttpSender는 연결·읽기·쓰기 제한을 설정하고 POST를 딱 한 번 호출합니다. 그 결과를 Reply로 바꾸어 반환합니다. retry_submission이 세 번 호출하고 HttpSender도 내부에서 세 번 호출하면 최대 아홉 번 전송될 수 있으므로, 재시도 반복의 소유자를 하나로 정합니다.\n\nJSON 본문은 같은 MatchRecord에서 생성합니다. MatchSubmission이 준비 때 복사한 record는 외부에서 바뀌지 않으며 매번 같은 필드가 직렬화됩니다. 서버의 멱등성 검사에는 key만 아니라 내용도 일치해야 합니다.\n\n응답이 없으면 unconfirmed, 허용하지 않는 상태 코드는 stopped입니다. 200 본문은 parse_receipt를 통과해야 confirmed 후보가 됩니다. 예외를 만난 로컬 처리 실패도 자동 진행을 멈춥니다. HttpSender가 반환한 후보의 요청 일치는 MatchSubmission이 마지막으로 확인합니다.",
+      "codes": [
+        {
+          "label": "한 번의 HTTP 요청과 단계별 제한",
+          "text": "    study_net::Reply operator()(const study_net::MatchRecord& record,\n                                std::chrono::milliseconds phase_limit) const noexcept {\n        using Reply = study_net::Reply;\n        try {\n            if (port_ < 1 || port_ > 65535 || phase_limit.count() <= 0)\n                return {Reply::stopped, {}};\n            httplib::Client client(\"127.0.0.1\", port_);\n            client.set_connection_timeout(phase_limit);\n            client.set_read_timeout(phase_limit);\n            client.set_write_timeout(phase_limit);\n            const auto response = client.Post(\"/study/v1/matches\",\n                record_json(record).dump(), \"application/json\");\n            if (!response) return {};",
+          "language": "cpp"
+        },
+        {
+          "label": "200 응답도 본문을 확인",
+          "text": "            case HttpAction::inspect_receipt:\n                const auto receipt = parse_receipt(response->body);\n                if (!receipt) return {Reply::stopped, {}};\n                return {Reply::confirmed, *receipt};\n            }\n        } catch (const std::exception&) {\n            // Local errors stop automatic work; never log a remote body here.\n        }\n        return {Reply::stopped, {}};\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "POST를 다시 보내도 되는 근거",
+          "body": "POST라는 메서드 이름만으로 재시도가 안전해지지는 않습니다. 이 흐름은 동일 key·동일 내용의 재전송을 서버가 중복 적용하지 않는다는 응용 계약에 기대고 있습니다. [HTTP 멱등성과 자동 재시도](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2)의 구별도 이 전제를 요구합니다. 신규 guest 생성에는 같은 저장 계약이 없으므로 이 제출 루프를 그대로 붙이지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "대기시간은 서버에 더 많은 일을 시키지 않기 위한 장치다",
+      "body": "실패 직후 루프를 빠르게 돌면 같은 장애에 요청을 계속 보냅니다. **백오프**는 다음 시도 전에 간격을 두는 정책입니다. 여기서는 첫 실패 뒤 100ms, 두 번째 실패 뒤 200ms를 기다립니다. 최대 시도 횟수는 첫 호출을 포함해 3입니다.\n\nretry_backoff는 완료된 시도 수를 받습니다. 0은 0ms, 1은 100ms, 2 이상은 200ms입니다. 지수 계산이나 큰 정수 곱셈을 쓰지 않아 시도 수가 비정상적으로 커져도 대기시간 계산이 넘치지 않습니다.\n\n대기는 UI·게임 틱 루프에서 직접 수행하면 화면을 멈춥니다. 이 체크포인트의 meta_submit은 별도의 콘솔 도구이므로 동기 대기를 사용합니다. 게임에 연결할 때는 작업 스레드나 이벤트 기반 타이머가 대기를 맡고, 결과를 안전한 경계로 전달해야 합니다.",
+      "codes": [
+        {
+          "label": "작은 고정 백오프 정책",
+          "text": "inline std::chrono::milliseconds retry_backoff(unsigned attempts) noexcept {\n  if (attempts == 0) {\n    return std::chrono::milliseconds{0};\n  }\n  if (attempts == 1) {\n    return std::chrono::milliseconds{100};\n  }\n  return std::chrono::milliseconds{200};\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "동시에 재시도하는 여러 클라이언트",
+          "body": "동일한 간격은 여러 클라이언트의 요청이 다시 몰리게 할 수 있습니다. 실제 부하에 대응하려면 최대 간격과 임의 지연인 jitter를 추가할 수 있습니다. 학습 정책은 세 번의 시도를 쉽게 추적하도록 고정 간격을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "Retry-After는 남은 예산에 맞춰 줄이지 않는다",
+      "body": "서버가 Retry-After: 1을 주었다면 다음 요청까지 최소 1초를 기다리라는 힌트입니다. 로컬 백오프가 100ms여도 1000ms를 택합니다. [429 응답 규칙](https://www.rfc-editor.org/rfc/rfc6585.html#section-4)은 서버가 이런 헤더를 줄 수 있음을 설명합니다.\n\n이번 작은 구현은 라이브러리가 꺼내 준 헤더 값 중 음이 아닌 정수 초만 해석합니다. from_chars로 전체 숫자를 읽고, 밀리초 자료형의 최대값을 1000으로 나눈 값 이하인지 확인한 다음 곱합니다. 잘못된 값·중복 헤더·지원하지 않는 날짜 형식이면 자동 재시도를 중단합니다.\n\nHTTP 규격은 날짜 형식도 허용합니다. 날짜를 해석하지 않는 학습 구현의 제한을 날짜가 잘못된 HTTP라는 뜻으로 설명하면 안 됩니다. 여기서는 해석하지 못한 힌트를 무시하고 더 일찍 보내는 대신 중단합니다. [Retry-After 형식](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3)을 확장할 때는 벽시계와 단조 시계의 변환도 설계해야 합니다.\n\n서버가 10초를 요구하고 로컬 예산이 5초 남았다면 5초만 기다렸다가 보내지 않습니다. 그 자동 작업은 예산 소진으로 종료하고 원래 요청을 보존합니다.",
+      "codes": [
+        {
+          "label": "정수 초의 전체 해석과 곱셈 전 범위 검사",
+          "text": "inline std::optional<std::chrono::milliseconds> retry_after_seconds(\n    const std::string& value) noexcept {\n  if (value.empty()) {\n    return std::nullopt;\n  }\n  for (char c : value) {\n    if (c < '0' || c > '9') {\n      return std::nullopt;\n    }\n  }\n\n  std::uint64_t seconds = 0;\n  const char* const first = value.data();\n  const char* const last = first + value.size();\n  const std::from_chars_result parsed = std::from_chars(first, last, seconds);\n  if (parsed.ec != std::errc{} || parsed.ptr != last) {\n    return std::nullopt;\n  }\n\n  using rep = std::chrono::milliseconds::rep;\n  constexpr std::uint64_t kMaxSeconds =\n      static_cast<std::uint64_t>(std::numeric_limits<rep>::max()) / 1000;\n  if (seconds > kMaxSeconds) {\n    return std::nullopt;\n  }\n\n  return std::chrono::milliseconds{static_cast<rep>(seconds) * 1000};\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "응답에서 최소 대기 힌트 수집",
+          "text": "            case HttpAction::retry: {\n                std::chrono::milliseconds delay{0};\n                const auto count = response->get_header_value_count(\"Retry-After\");\n                if (count > 1) return {Reply::stopped, {}};\n                if (count == 1) {\n                    const auto hint = retry_after_seconds(response->get_header_value(\"Retry-After\"));\n                    if (!hint) return {Reply::stopped, {}};\n                    delay = *hint;\n                }\n                return {Reply::unconfirmed, {}, delay};\n            }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "횟수 제한·I/O 제한·공유 예산을 구별한다",
+      "body": "**횟수 제한**은 전송 함수를 몇 번 호출할 수 있는지 정합니다. **단계별 시간 제한**은 연결·읽기·쓰기 과정에 각각 적용합니다. **공유 예산**은 자동 작업을 시작한 뒤 얼마나 지났는지 보며 다음 시도의 진입을 제한합니다.\n\nretry_submission은 now()의 시작 값을 저장하고, 반복할 때 남은 밀리초를 계산합니다. 예산이 없거나 시도 수가 찼다면 새 호출을 하지 않습니다. 대기를 했다면 시계를 다시 읽습니다. sleep이 요청한 시간보다 늦게 끝날 수 있기 때문입니다.\n\n새 시도의 phase_limit은 남은 예산과 2000ms 중 작은 값입니다. 이 값으로 연결·읽기·쓰기를 각각 제한해도 전체 함수가 반드시 그 시간 안에 끝나는 것은 아닙니다. 여러 단계, 반복 I/O, 이름 해석, 스케줄 지연이 있기 때문입니다. 이 구현의 공유 예산은 **새 시도 진입 제한**입니다.",
+      "codes": [
+        {
+          "label": "예산·횟수 확인과 대기 뒤 시계 재확인",
+          "text": "    const auto start = now();\n    for (;;) {\n        if (submission.state() == State::empty) return RetryExit::no_request;\n        if (submission.state() == State::confirmed) return RetryExit::confirmed;\n        if (submission.state() == State::stopped) return RetryExit::stopped;\n        if (submission.attempts() >= submission.max_attempts())\n            return RetryExit::budget_exhausted;\n        if (budget.count() <= 0) return RetryExit::budget_exhausted;\n        auto left = budget - std::chrono::duration_cast<Millis>(now() - start);\n        if (left.count() <= 0) return RetryExit::budget_exhausted;\n        if (submission.attempts() != 0) {\n            const auto delay = std::max(retry_backoff(submission.attempts()),\n                                        submission.retry_after());\n            // Do not shorten the server's minimum wait to fit our budget.\n            if (delay >= left) return RetryExit::budget_exhausted;\n            wait(delay);\n            left = budget - std::chrono::duration_cast<Millis>(now() - start);\n            if (left.count() <= 0) return RetryExit::budget_exhausted;\n        }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "const auto deadline",
+        "invariant": "단조 시계로 남은 재시도 예산을 판단하고 단계별 제한과 구별한다.",
+        "mayDiffer": "실제 구현은 초 단위 공유 마감, 학습 드라이버는 주입된 시계와 밀리초 예산이다. 둘 다 전체 작업의 강제 취소 마감은 아니다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "왜 steady_clock을 사용하는가",
+          "body": "날짜·시각을 나타내는 시계는 사용자 설정이나 시간 동기화로 달라질 수 있습니다. 경과 시간을 재는 단조 시계는 그런 벽시계 조정과 목적이 다릅니다. 여기서 now 콜백도 값이 뒤로 가지 않는 계약을 갖습니다."
+        }
+      ]
+    },
+    {
+      "title": "예산 뒤에 도착한 유효한 영수증은 버리지 않는다",
+      "body": "예산 50ms에서 전송을 시작했는데 I/O 호출이 80ms 뒤에 유효한 영수증을 반환했다고 해 봅시다. 새 시도는 더 시작할 수 없지만, 이미 받아서 검증한 저장 증거는 유효합니다. 따라서 confirmed로 끝냅니다.\n\n반대로 응답이 없었다면 예산 소진 뒤 unconfirmed 상태를 보존합니다. 예산이 찼다는 것은 기다리기를 멈췄다는 뜻이지 서버의 트랜잭션을 취소했다는 뜻이 아닙니다. 서버가 아직 처리 중일 수도 있습니다.\n\n아래 타임라인에서 A와 B는 같은 key와 같은 내용입니다.\n\n| 시점 | 클라이언트 | 서버 |\n| --- | --- | --- |\n| 0ms | A 전송 | 처리 시작 |\n| 20ms | 응답 대기 | DB 커밋 |\n| 30ms | 응답 유실 관찰 | 최초 영수증 저장 |\n| 130ms | B 재전송 | 동일 요청으로 최초 영수증 조회 |\n| 이후 | 유효한 영수증으로 확인 | 추가 보상 없음 |\n\n저장 후 응답 유실이라는 상황은 클라이언트의 타임아웃만으로 판별할 수 없습니다. 서버가 같은 작업을 다시 확인할 수 있게 설계한 이유입니다.",
+      "codes": [
+        {
+          "label": "호출 완료 후 저장 확인을 우선 반영",
+          "text": "        const auto phase_limit = std::min(left, Millis{2000});\n        const auto step = submission.submit([&](const study_net::MatchRecord& r) noexcept {\n            return sender(r, phase_limit);\n        });\n        if (step == Step::confirmed) return RetryExit::confirmed;\n        if (step == Step::stopped) return RetryExit::stopped;\n        // A started I/O call can finish after budget; its valid receipt still counts.\n    }\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "늦은 성공을 확인 상태로 유지하는 검사",
+          "text": "    FakeClock slow;MatchSubmission late_success(3);CHECK(late_success.prepare(record));\n    CHECK(run(late_success,[&](const auto& r,Millis limit)noexcept{\n        CHECK(limit==Millis{50});slow.elapsed+=Millis{80};return confirmed(r);\n    },slow,Millis{50})==RetryExit::confirmed);",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "시계와 대기를 주입하면 시간 논리를 정확히 검사할 수 있다",
+      "body": "운영체제의 실제 대기만으로 100ms·200ms 경계를 반복 검사하면 실행 환경의 스케줄링에 영향을 받습니다. FakeClock은 현재 경과시간과 요청받은 대기 목록을 값으로 보관합니다. wait 호출은 실제로 잠들지 않고 그 값만 전진시킵니다.\n\n이렇게 **외부 효과를 주입**하면 드라이버는 “현재 시간 조회”와 “대기”라는 계약만 사용합니다. HttpSender가 네트워크를 맡는 것과 같은 의존 방향입니다. 테스트는 가짜 응답과 시간을 공급해 호출 횟수·동일 요청·대기시간·단계별 제한을 정확히 비교할 수 있습니다.\n\n예산 100ms에서 첫 실패 뒤 필요한 대기 100ms가 나오면 새 시도가 들어갈 여유가 없으므로 즉시 예산 소진입니다. 대기 함수가 예상보다 1000ms 늦게 돌아오는 사례도 넣어 두 번째 전송이 시작되지 않는지 확인합니다. 별도의 실제 loopback 검사에서는 읽기 제한으로 응답을 못 받은 뒤 동일 요청으로 다시 확인하는 경로를 실행합니다.",
+      "codes": [
+        {
+          "label": "잠들지 않고 경과시간을 제어하는 검사 시계",
+          "text": "struct FakeClock {\n    Millis elapsed{0};\n    std::vector<Millis> sleeps;\n    auto now()const{return std::chrono::steady_clock::time_point{}+elapsed;}\n    void wait(Millis delay){CHECK(delay.count()>=0);sleeps.push_back(delay);elapsed+=delay;}\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "시계 재확인이 필요한 늦은 대기",
+          "text": "    FakeClock overslept;MatchSubmission missed(3);CHECK(missed.prepare(record));\n    CHECK(retry_submission(missed,[](const auto&,Millis)noexcept{return Reply{};},\n        [&]{return overslept.now();},[&](Millis){overslept.elapsed+=Millis{1000};},Millis{500})==RetryExit::budget_exhausted);\n    CHECK(missed.attempts()==1);",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "가짜 시간이 증명하는 범위",
+          "body": "FakeClock은 분기·예산 계산·호출 횟수의 증거입니다. 운영체제에서 요청한 시간만큼 정확히 잠든다는 증거는 아닙니다. 실제 네트워크 검사도 특정 경로를 실행하는 것이며 인터넷의 모든 지연·단절 상황을 대신하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "진단 로그에는 상태를 남기고 외부 본문을 복사하지 않는다",
+      "body": "오류 응답 본문은 신뢰 경계 밖의 데이터입니다. 서버나 중간 장치가 요청 내용을 그대로 돌려줄 수도 있고, 줄바꿈을 넣어 별도 로그 줄처럼 보이게 할 수도 있습니다. 인증 요청의 토큰이 오류 본문에 반사되면 본문 전체를 기록하는 로그가 비밀을 보관하게 됩니다.\n\n이 구현은 응답 본문을 그대로 출력하지 않습니다. 실제 MetaClient의 guest·verify·matches 오류도 경로와 상태 코드만 남깁니다. 잘못된 URL은 거절 사유만 남기고 입력 URL 전체를 출력하지 않습니다. 거절된 URL 안에 사용자 정보가 있었을 가능성도 있기 때문입니다.\n\n검사는 합성된 표시 문자열과 위조 로그 줄을 응답으로 돌려줍니다. 실패 분류와 재시도 횟수는 유지되며, 표시는 stderr에 나타나지 않아야 합니다. 정상적인 경로·HTTP 상태는 남아 있어 진단 단서도 유지됩니다.",
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "MetaClient::verify_token",
+        "invariant": "외부 응답 본문이나 자격 증명이 포함될 수 있는 입력을 그대로 로그에 남기지 않는다.",
+        "mayDiffer": "실제 클라이언트는 경로·상태를 출력한다. 학습 HttpSender는 결과 값으로만 실패를 전달한다."
+      },
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "운영 진단을 더 붙일 때",
+          "body": "응답 전체 대신 정해진 오류 코드·시도 번호·요청 추적 ID처럼 허용한 항목을 기록할 수 있습니다. 추적 ID도 자격 증명이나 전체 요청 본문을 대신 붙이는 방식으로 만들지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "콘솔 제출 도구에 자동 시도를 연결한다",
+      "body": "체크포인트 119-http-failure는 JSON 경계·계정·상점·정산을 이어받습니다. net/match_submission.h에는 중단 상태와 최소 대기값을, meta/http_retry_policy.h에는 순수 분류와 헤더 해석을, meta/retry_submission.h에는 반복의 시간 정책을 둡니다. HttpSender는 한 번의 네트워크 시도만 수행합니다.\n\nmeta_submit은 신뢰된 로컬 시뮬레이션 결과를 준비하고 최대 3회, 공유 예산 5000ms로 제출합니다. 성공하면 confirmed key/row/ticks를 출력합니다. 자동 중단과 예산 소진은 서로 다른 문구로 표시합니다. 사용자가 승리 값을 보내 보상을 받는 경로는 만들지 않습니다.\n\n아래 서버를 연 뒤 별도 터미널에서 meta_submit을 같은 key로 두 번 실행하면 같은 row를 받습니다. 자동 검사에서는 503 뒤 정상 영수증, 429 대기 힌트, 400·401·403·409 중단, 잘못된 200 본문, 잘못된 요청 식별자, 예산을 넘는 대기, 읽기 타임아웃을 나누어 확인합니다.\n\nOpenSSL 개발 패키지가 필요합니다. Windows 다중 구성 생성기는 --config Release와 CTest의 -C Release 및 실행 파일 경로를 맞춥니다. 서버는 loopback 학습용 DB를 사용합니다.",
+      "codes": [
+        {
+          "label": "기존 제출 도구에 드라이버 연결",
+          "text": "    study_net::MatchSubmission submission(3);\n    if(!submission.prepare(record))return 1;\n    const auto result=study_meta::retry_submission(submission,study_meta::HttpSender(port),\n        []{return std::chrono::steady_clock::now();},\n        [](std::chrono::milliseconds delay){std::this_thread::sleep_for(delay);},\n        std::chrono::milliseconds{5000});\n    if(result!=study_meta::RetryExit::confirmed) {\n        std::puts(result==study_meta::RetryExit::stopped ? \"automatic retry stopped\" : \"unconfirmed: budget exhausted\");\n        return 3;\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "재시도 계약 빌드와 DB 서버 실행",
+          "text": "cmake -S docs/learn/checkpoints/119-http-failure -B out/study-119 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-119 --target http_retry_contract meta_submit study_meta_db -j2\nctest --test-dir out/study-119 -R '^http_retry_contract$' --output-on-failure\nout/study-119/study_meta_db 18081 out/study-119/matches.db",
+          "language": "sh"
+        },
+        {
+          "label": "별도 터미널에서 같은 경기 확인과 전체 자동검사",
+          "text": "out/study-119/meta_submit 18081 119\nout/study-119/meta_submit 18081 119\npython3 scripts/check_learning_http_failure.py",
+          "language": "sh"
+        },
+        {
+          "label": "검사 실행 파일 연결",
+          "text": "add_executable(http_retry_contract tests/http_retry_contract.cpp)\ntarget_link_libraries(http_retry_contract PRIVATE study_meta_http)\nadd_test(NAME http_retry_contract COMMAND http_retry_contract)\nset_tests_properties(http_retry_contract PROPERTIES TIMEOUT 30)",
+          "language": "cmake"
+        }
+      ]
+    },
+    {
+      "title": "반복의 소유권과 상태의 의미를 유지한다",
+      "body": "재시도 횟수는 MatchSubmission 하나가 누적하고, 드라이버는 그 객체를 유지한 채 다음 시각을 결정합니다. 예산 소진 때 새 객체를 만들어 같은 반복을 바로 시작하면 횟수 제한의 목적을 잃습니다. 다시 시도할지에 대한 상위 정책과 관찰 가능한 상태가 필요합니다.\n\n바뀔 수 있는 것은 시도 횟수·간격·대기 힌트 형식·비동기 실행 방식입니다. 유지할 핵심은 같은 요청의 정체성, 저장 확인과 전송 실패의 구별, 중단 후 무호출, 서버의 최소 대기를 앞당기지 않는 정책, 한 곳에서 소유하는 반복입니다.\n\n현재 소스 뷰어에서는 post_match의 고정 body, 재시도 조건, 공유 마감, nullopt 반환을 따라 읽어 보세요. 실제 함수는 Retry-After를 해석하지 않으며 오류 상태를 optional 하나로 모읍니다. 학습 코드와 수치·반환 형태가 달라도, 어떤 사실을 알고 어떤 행동을 할지 나누어 읽는 기준은 같습니다.",
+      "codes": [
+        {
+          "label": "meta/http_retry_policy.h",
+          "language": "cpp",
+          "file": "checkpoints/119-http-failure/meta/http_retry_policy.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/http_sender.h",
+          "language": "cpp",
+          "file": "checkpoints/119-http-failure/meta/http_sender.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/retry_submission.h",
+          "language": "cpp",
+          "file": "checkpoints/119-http-failure/meta/retry_submission.h",
+          "collapsed": true
+        },
+        {
+          "label": "net/match_submission.h",
+          "language": "cpp",
+          "file": "checkpoints/119-http-failure/net/match_submission.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "MetaClient::post_match",
+        "invariant": "동일 요청을 제한적으로 재시도하고 유효한 응답으로만 저장을 확인한다.",
+        "mayDiffer": "학습 드라이버는 중단/예산 소진과 정수 초 Retry-After를 추가로 구별한다. 실제 구현의 헤더 정책과 UI 전달은 별도다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "119-1",
+      "question": "서버가 커밋한 뒤 응답이 사라졌습니다. 클라이언트의 올바른 재시도는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새 key로 같은 점수를 보낸다"
+        },
+        {
+          "id": "b",
+          "text": "같은 key와 동일 내용으로 최초 결과를 확인한다"
+        },
+        {
+          "id": "c",
+          "text": "점수를 0으로 바꾸고 같은 key로 보낸다"
+        },
+        {
+          "id": "d",
+          "text": "DB에 저장되지 않았다고 확정한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "같은 key와 동일 내용으로 최초 결과를 확인한다",
+      "explanation": "응답 유실은 저장 실패의 증거가 아닙니다. 서버의 멱등 계약을 이용하려면 요청 정체성과 내용이 모두 유지돼야 합니다."
+    },
+    {
+      "id": "119-2",
+      "question": "이번 경기 API가 409를 반환했습니다. stopped 상태의 뜻은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "DB에서 경기를 삭제했다"
+        },
+        {
+          "id": "b",
+          "text": "서버에 어떤 기록도 없다"
+        },
+        {
+          "id": "c",
+          "text": "자동 재전송을 중단하며 요청은 남긴다"
+        },
+        {
+          "id": "d",
+          "text": "새 key로 세 번 더 보낸다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "자동 재전송을 중단하며 요청은 남긴다",
+      "explanation": "중단은 자동 동작의 정책입니다. 앞선 요청의 저장 여부까지 증명하지 않으므로 요청을 보존하고 충돌 원인·서버 상태를 확인합니다."
+    },
+    {
+      "id": "119-3",
+      "question": "로컬 예산이 500ms 남았는데 Retry-After가 1초입니다. 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "500ms 기다리고 보낸다"
+        },
+        {
+          "id": "b",
+          "text": "헤더를 무시하고 100ms 기다린다"
+        },
+        {
+          "id": "c",
+          "text": "즉시 성공 처리한다"
+        },
+        {
+          "id": "d",
+          "text": "예산 소진으로 끝내고 추가 요청을 보내지 않는다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "예산 소진으로 끝내고 추가 요청을 보내지 않는다",
+      "explanation": "최소 대기를 로컬 예산에 맞춰 줄이면 서버 요청보다 일찍 보냅니다. 기다린 뒤 전송할 여유가 없으면 자동 작업을 멈춥니다."
+    },
+    {
+      "id": "119-4",
+      "question": "50ms 예산으로 시작한 I/O가 80ms 뒤 유효한 영수증을 반환했습니다. 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "확인된 저장 증거를 받아 confirmed로 끝낸다"
+        },
+        {
+          "id": "b",
+          "text": "반드시 서버에서 롤백한다"
+        },
+        {
+          "id": "c",
+          "text": "영수증을 버리고 새 key를 만든다"
+        },
+        {
+          "id": "d",
+          "text": "이미 지난 30ms를 서버에서 차감한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "확인된 저장 증거를 받아 confirmed로 끝낸다",
+      "explanation": "공유 예산은 새 시도의 진입을 제한합니다. 이미 시작된 호출이 늦게 끝나더라도 유효한 저장 증거가 도착했으면 확인 상태로 처리합니다."
+    },
+    {
+      "id": "119-5",
+      "question": "오류 응답 본문에 요청 토큰과 줄바꿈이 들어 있습니다. 진단 로그의 처리로 알맞은 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "전체 본문을 그대로 남긴다"
+        },
+        {
+          "id": "b",
+          "text": "첫 줄만 남기면 토큰이 없어지므로 안전하다"
+        },
+        {
+          "id": "c",
+          "text": "정해진 경로·상태 코드만 남기고 본문을 복사하지 않는다"
+        },
+        {
+          "id": "d",
+          "text": "HTTP 상태도 성공으로 바꾼다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "정해진 경로·상태 코드만 남기고 본문을 복사하지 않는다",
+      "explanation": "오류 본문은 자격 증명을 반사하거나 로그 줄을 위조할 수 있습니다. 실패 의미를 유지하면서 허용한 진단 정보만 남깁니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "응답 없음·409·503·잘못된 200을 저장 지식과 자동 행동으로 나눕니다.",
+      "같은 요청이 재시도 때도 유지되는지 확인합니다.",
+      "가짜 시계로 100/200ms·서버 대기·예산 소진을 검사합니다.",
+      "동일 key 제출의 최초 영수증과 오류 로그의 비밀 비노출을 확인합니다."
+    ],
+    "failureChecks": [
+      "응답 유실을 DB 실패로 확정하지 않습니다.",
+      "같은 경기에 새 key를 만들어 재시도하지 않습니다.",
+      "서버 최소 대기를 남은 예산으로 줄이지 않습니다.",
+      "단계별 timeout을 함수 전체의 강제 마감으로 설명하지 않습니다."
+    ],
+    "expected": "같은 작업의 중복 적용을 피하면서, 실패 관찰에서 다음 동작까지의 상태와 시간 정책을 설명한다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek순수정책초안검수·실제로그반사재현·주입시계/loopback검사·HTTP공식계약대조",
+    "draftJob": "out/learning-jobs/119-policy-events.jsonl",
+    "corrections": [
+      "5xx를항상일시적실패로단정하는주석을정책상재시도후보로교정",
+      "실제외부응답본문/거절URL의로그출력제거",
+      "음수예산은경과시간빼기전에거절"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 관련 제출·HTTP 타깃/CTest",
+    "가짜시계의정확대기·예산경계·늦은대기·늦은성공·횟수상한·동일요청",
+    "loopback503/429/4xx/잘못된200·Retry-After·읽기timeout·DB동일영수증",
+    "HTTP계약ASan/UBSan 및 실제TLS지원컴파일·상태별호출횟수/로그비노출",
+    "수동GUI·실제TLS통신·다른OS네이티브·인터넷장애/부하미검증"
+  ]
+}

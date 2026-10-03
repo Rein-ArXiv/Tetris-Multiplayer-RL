@@ -1,0 +1,440 @@
+{
+  "id": "lesson-129",
+  "title": "타이머 힙: 다음 일을 정렬",
+  "shortTitle": "절대 만기·지연 무효화·대기 루프",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 소켓 준비성·수신 완료를 처리하지만 아무 입력도 오지 않을 때 실행할 만기 작업을 모으지 못합니다.",
+  "finish": "완료: 만기를 재설정·취소하는 힙을 만들고 실제 대기 루프에 연결하여 조용해진 연결을 닫습니다.",
+  "objective": "힙과 최신 설정 표의 역할을 설명하고, 세대 재사용·시간 변환·배치 수명 오류를 예측하여 타이머 루프를 구현합니다.",
+  "prerequisites": [
+    "Reactor 대기·등록 번호·콜백 소유권",
+    "time_point와 duration·정수 표현 범위",
+    "프레임 누적·RAII·예외 처리"
+  ],
+  "recap": {
+    "points": [
+      "I/O 완료와 패킷 회수는 서로 다른 단계다.",
+      "취소 요청만으로 비동기 저장소를 재사용할 수 없다.",
+      "wake나 대기 시간 초과는 수신 결과 자체가 아니다."
+    ],
+    "bridge": "통지로 돌아오는 경로에 시간 조건을 더해, 아무 데이터가 오지 않아도 루프가 필요한 일을 처리하게 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "아무 입력도 오지 않을 때 처리할 일",
+      "body": "소켓 준비성이나 수신 완료가 오면 루프가 일을 할 수 있습니다. 그런데 상대가 연결만 맺고 아무것도 보내지 않으면 어떨까요? 첫 프레임을 5초 안에 보내라는 정책은 새로운 I/O 이벤트가 없어도 실행되어야 합니다.\n\n**만기(deadline)**는 어떤 일을 처리할 기준 시각입니다. “5초 기다린다”는 기간이고, “시작 시각 + 5초에 검사한다”는 절대 만기입니다. 만기는 저장해 두고, 대기를 시작할 때마다 남은 기간을 계산합니다.\n\n만들 것은 TimerHeap입니다. 등록된 연결마다 만기를 하나 두고, 재설정·취소·도래한 대상 수집을 지원합니다. 그런 다음 CallbackLoop의 대기 시간에 연결하여 첫 프레임을 받은 연결도 이후 조용해지면 닫는 작은 프로그램을 만듭니다.\n\n타이머는 소켓을 닫는 방법이나 프레임 의미를 모릅니다. 반환한 등록 번호를 받아 정책을 실행하는 쪽은 루프입니다. 준비성·완료 통지와 시간 조건을 같은 실행 주체가 처리하되, 조건을 모으는 자료구조와 게임 정책은 분리합니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "void run()",
+        "invariant": "대기 전 가장 가까운 만기를 구하고, 돌아온 뒤 시간 조건을 처리한다.",
+        "mayDiffer": "현재 서버는 여러 연결 상태와 오프로드·샤드 인계도 처리한다. 학습 프로브는 한 연결의 프레임과 idle 만기에 집중한다."
+      }
+    },
+    {
+      "title": "저장하는 시각과 대기에 넘기는 수",
+      "body": "현재 시각이 100ms이고 A의 만기가 140ms, B가 900ms라고 해 봅시다. 다른 일이 없다면 우선 40ms를 요청하면 됩니다. I/O 때문에 110ms에 돌아왔다면 A는 아직 만기가 아닙니다. 155ms에 돌아오면 A가 도래했습니다. 요청한 40을 현재 시각에 기계적으로 더하는 대신 실제 시계를 다시 읽습니다.\n\nsteady_clock은 경과 시간을 재는 단조 시계입니다. 운영체제의 날짜가 바뀌는 일과 게임 서버의 idle 기간을 분리할 수 있습니다. time_point는 그 시계의 한 시점이고 duration은 두 시점 사이의 기간입니다.\n\n타이머 API는 now를 인자로 받습니다. 테스트는 실제로 기다리지 않고 100ms·150ms·2000ms를 직접 넣습니다. 실행에서는 Clock::now()를 호출하여 얻은 같은 종류의 시각을 전달합니다.\n\nToken은 한 Reactor가 발급한 등록 번호입니다. 0은 무효 번호로 예약합니다. TimerHeap 하나와 Reactor 하나를 짝지어 사용하며, 서로 다른 Reactor의 번호를 같은 타이머에 무심코 합치지 않습니다.",
+      "codes": [
+        {
+          "label": "시계·시각·대상의 타입",
+          "text": "    using Token = std::uint64_t; // 한 Reactor 인스턴스가 발급한 등록 번호\n    using Clock     = std::chrono::steady_clock;\n    using TimePoint = Clock::time_point;",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "달력 시각과 저장",
+          "body": "steady_clock의 epoch는 달력 날짜나 다른 기기의 공통 기준이 아닙니다. 프로세스 재시작 뒤 복구할 실제 날짜가 필요하면 벽시계 기준과 재계산 정책을 별도로 설계합니다. [표준의 steady_clock 정의](https://eel.is/c++draft/time.clock.steady)를 참고할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "가장 이른 만기만 빠르게 찾는다",
+      "body": "처음에는 모든 연결을 순회해 최소 만기를 찾을 수 있습니다. 살아 있는 만기가 L개면 다음 대기를 구할 때 O(L)입니다. 구현이 단순하므로 작은 작업량에서는 좋은 출발점입니다. 여기서는 갱신이 반복되어도 가장 이른 후보를 꼭대기에서 찾도록 이진 힙을 씁니다.\n\n이진 힙은 부모가 자식보다 우선하는 부분 순서입니다. 배열로 표현하면 i번의 자식은 2i+1과 2i+2에 놓을 수 있습니다. 전체 배열이 완전히 정렬되어 있을 필요는 없습니다. 꼭대기가 최소라는 성질만 있으면 다음 후보를 찾는 데 충분합니다.\n\n| 예시 배열 | 의미 |\n| --- | --- |\n| [40, 90, 60, 200] | 부모 40은 90·60보다 이르고, 부모 90은 200보다 이름 |\n| 새 값 30 삽입 | 끝에 놓은 뒤 부모와 교환하며 올라가 최상단이 됨 |\n| 최상단 제거 | 마지막 값을 위로 옮긴 뒤 자식과 비교하며 내려감 |\n\nH개 항목의 높이는 O(log H)라 삽입·제거의 정렬 비교도 그 범위입니다. std::priority_queue에 이 과정을 맡깁니다. 기본 비교는 큰 값을 top에 두므로, 더 늦은 when을 낮은 우선순위로 보는 Later를 넘깁니다.\n\nwhen이 같으면 seq가 작은 설정을 먼저 꺼냅니다. 이 순서를 명시해야 테스트와 동작을 예측할 수 있습니다. 같은 시각이라는 이유만으로 컨테이너가 삽입 순서를 보존한다고 가정하지 않습니다.",
+      "codes": [
+        {
+          "label": "최소 만기와 동일 시각의 순서를 정하는 비교자",
+          "text": "    struct Entry {\n        TimePoint when;\n        Token     token;\n        std::uint64_t  seq;\n    };\n    struct Later {\n        // 이른 만기 우선, 같은 시각은 arm 순서. 포인터 대소 비교는 쓰지 않는다.\n        bool operator()(const Entry& a, const Entry& b) const {\n            return a.when != b.when ? a.when > b.when : a.seq > b.seq;\n        }\n    };",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "비교자가 지킬 성질",
+          "body": "같은 항목을 자기 자신보다 늦다고 판단하지 않고, 순서가 순환하지 않도록 비교해야 합니다. when과 seq의 사전식 비교는 이 조건을 만족합니다. [priority_queue의 Compare 계약](https://eel.is/c++draft/priority.queue)은 strict weak ordering입니다. 동등한 시각·번호는 서로 낮은 우선순위라고 판단하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "힙의 과거와 표의 현재를 나눈다",
+      "body": "A를 1000ms로 설정한 뒤 100ms로 바꾸려면 힙 가운데에 있는 과거 항목을 찾아 지워야 할까요? std::priority_queue에는 임의 위치 삭제 인터페이스가 없습니다. 새 항목을 넣고 **어떤 설정이 현재인지** 별도로 기록할 수 있습니다.\n\nlive 표는 Token → seq를 저장합니다. 힙에는 when·token·seq의 설정 기록이 남습니다. 꺼낸 항목의 seq가 표와 같으면 유효하고, 다르거나 토큰이 표에 없으면 버립니다. 이것이 지연 무효화입니다. 즉시 삭제하는 대신 사용할 때 유효성을 확인합니다.\n\n| 작업 | live 표 | 힙의 논리적 항목 |\n| --- | --- | --- |\n| A, 1000ms 설정 | A → 1 | A:1000/1 |\n| A, 100ms 재설정 | A → 2 | A:100/2, A:1000/1 |\n| A 취소 | 없음 | 두 항목 모두 낡음 |\n\n등록 번호는 연결 등록을 구별하고, seq는 그 연결의 **여러 만기 설정**을 구별합니다. 같은 연결을 계속 사용하는 동안에도 seq는 매번 달라집니다. 자료구조 두 개가 하나의 논리적 상태를 표현하므로 갱신 순서와 실패 경로를 함께 설계해야 합니다.",
+      "codes": [
+        {
+          "label": "후보 힙과 최신 설정 표",
+          "text": "    std::priority_queue<Entry, std::vector<Entry>, Later> heap_;\n    std::unordered_map<Token, std::uint64_t> live_;\n    std::uint64_t next_seq_ = 0;",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/timer_queue.h",
+        "symbol": "std::priority_queue<Entry",
+        "invariant": "힙의 설정 번호와 최신 표를 대조하여 과거 설정을 폐기한다.",
+        "mayDiffer": "현재 토큰은 Conn 주소다. 학습 코드는 등록 ID를 사용하며 메모리 주소를 비교하지 않는다."
+      }
+    },
+    {
+      "title": "재설정을 성공한 뒤에 공개한다",
+      "body": "arm은 새 seq를 발급하고 힙 삽입이 끝난 다음 live 표를 갱신합니다. 순서가 반대면 힙 할당 실패 시 표만 새 번호를 가리켜 기존 유효 만기도 찾지 못할 수 있습니다.\n\n힙 삽입이 실패하면 live의 기존 값이 유지됩니다. 새 토큰을 표에 넣다가 할당이 실패하면 미공개 힙 항목이 남을 수 있지만 현재 항목으로 인정되지 않습니다. 호출자는 예외로 실패를 알며 이미 있던 만기는 보존됩니다. 실패한 시도에서 쓴 seq는 건너뜁니다.\n\nseq는 큐 전체에서 증가합니다. 64비트 최댓값에 도달하면 예외를 던져 더 이상 설정하지 않습니다. 매우 큰 공간이어도 순환하여 과거 번호를 다시 발급하는 동작은 계약에서 제외합니다. 일반 동작은 1부터 시작합니다.\n\n이 코드는 단일 루프 소유입니다. 힙과 표 사이에 잠금이 없으므로 다른 스레드가 동시에 arm·cancel을 호출할 수 없습니다. 외부 요청은 루프로 전달하고 루프가 순서대로 반영합니다.",
+      "codes": [
+        {
+          "label": "새 설정을 저장한 뒤 유효 번호로 공개",
+          "text": "    // token 의 데드라인을 when 으로 설정/교체한다. 이미 있으면 이전 것은 무효화된다.\n    void arm(Token token, TimePoint when) {\n        if (token == 0) throw std::invalid_argument(\"invalid timer token\");\n        if (next_seq_ == std::numeric_limits<std::uint64_t>::max())\n            throw std::overflow_error(\"timer sequence exhausted\");\n        const std::uint64_t seq = ++next_seq_;  // 실패한 시도의 번호도 재사용하지 않는다.\n        heap_.push(Entry{when, token, seq});\n        // 힙 삽입 성공 후 공개한다. 할당 실패 시 기존 유효 만기는 유지된다.\n        live_[token] = seq;\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "같은 값으로 돌아오면 같은 설정일까",
+      "body": "토큰마다 seq를 세다가 만기를 반환할 때 그 카운터도 지운다고 가정해 봅시다. A:1000/1을 A:100/2로 바꾸고 100ms에서 반환하면, 힙에는 A:1000/1이 남습니다. 같은 A를 다시 2000ms에 설정하면서 번호를 1로 시작하면 어떻게 될까요?\n\n1000ms에서 과거 항목의 1과 표의 1이 일치합니다. A를 조기에 반환한 뒤 표를 지워 버리므로 2000ms의 진짜 항목도 유실됩니다. 같은 표면 값이 서로 다른 이력을 가리는 재사용 문제입니다.\n\n큐 전역 seq를 유지하면 새 설정은 3이 되어 1000ms의 1을 거절할 수 있습니다. 아래 검사는 시간을 직접 넘겨 이 과정을 재현합니다. 첫 번째 반환 뒤 out.clear()를 하는 것도 관찰하십시오. 결과를 모으는 배열은 호출자가 소유합니다.",
+      "codes": [
+        {
+          "label": "과거 항목이 새 만기를 훔치지 않는지 검사",
+          "text": "        timer.arm(1, T{} + ms(1000)); timer.arm(1, T{} + ms(100));\n        std::vector<TimerHeap::Token> out;\n        timer.expired(T{} + ms(150), out);\n        require(out == std::vector<TimerHeap::Token>{1}, \"first generation\");\n        out.clear(); timer.arm(1, T{} + ms(2000));\n        timer.expired(T{} + ms(1000), out); require(out.empty(), \"old generation rejected\");\n        timer.expired(T{} + ms(2000), out); require(out.size() == 1, \"new generation survives\");",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "tests/loop_primitives_test.cpp",
+        "symbol": "void test_timer_generation_reuse()",
+        "invariant": "발화 후 같은 토큰을 다시 무장해도 남은 과거 설정이 최신으로 인정되지 않는다.",
+        "mayDiffer": "현재 서버는 연결 주소 재사용도 가능하다. 번호는 큐 안의 설정을 구별하며 대상 객체의 생존은 루프가 관리한다."
+      }
+    },
+    {
+      "title": "취소는 표에서, 청소는 꼭대기에서",
+      "body": "cancel은 live에서 토큰을 지웁니다. 힙의 모든 항목을 찾아다니는 작업을 취소 호출에 넣지 않습니다. 이후 조회에서 꼭대기를 보며 유효하지 않은 항목을 제거합니다.\n\nprune_stale은 top의 토큰이 표에 있고 번호가 같으면 멈춥니다. 그 외에는 pop하고 다음 후보를 검사합니다. 만기가 아직 미래여도 이미 무효라면 바로 제거할 수 있습니다. 꼭대기의 낡은 항목을 그대로 사용하면 필요 없는 시점에 루프를 깨우거나 빈 큐를 잘못 판단합니다.\n\n해시 표 제거는 평균 O(1)입니다. 청소에서는 낡은 항목 k개마다 힙 제거를 하므로 그 호출에 비용이 몰릴 수 있습니다. “취소가 빠르다”는 설명에는 이 지연 비용까지 포함해야 합니다.",
+      "codes": [
+        {
+          "label": "취소",
+          "text": "    // 아직 큐에 있는 만기를 취소한다. 이미 out 으로 반환한 결과는 철회하지 않는다.\n    void cancel(Token token) {\n        live_.erase(token);\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "다음 후보를 보기 전에 낡은 꼭대기 제거",
+          "text": "    // 힙 앞쪽의 낡은(무효화된) 항목을 걷어낸다. timeout_ms/empty 가 정확한 top 을\n    // 보게 한다.\n    void prune_stale() {\n        while (!heap_.empty()) {\n            const Entry& e = heap_.top();\n            auto it = live_.find(e.token);\n            if (it != live_.end() && it->second == e.seq) break;  // 최신 — 유효\n            heap_.pop();\n        }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "만기 정보가 여러 종류라면",
+          "body": "현재 계약은 토큰당 만기 하나입니다. 동시에 idle·재전송·인증 제한을 독립적으로 관리하려면 토큰과 종류를 합친 키, 별도 타이머 ID, 또는 상태별 가장 가까운 만기 재계산이 필요합니다. 하나의 live 값을 연달아 덮으면 마지막 설정만 남습니다."
+        }
+      ]
+    },
+    {
+      "title": "도래한 결과를 한 번 전달한다",
+      "body": "expired는 top.when ≤ now인 동안 후보를 꺼냅니다. 최신 번호와 일치할 때만 out에 토큰을 추가하고 live에서 소진합니다. 반복 실행을 원하면 호출자가 다시 arm합니다.\n\nout.push_back을 먼저 해야 그 할당이 실패해도 아직 전달하지 못한 항목이 남습니다. 성공한 항목은 바로 소진하므로 여러 항목 중 나중에 실패했다고 앞의 전달까지 되돌리지는 않습니다. 재시도할 때는 이미 out에 들어간 결과도 보존하여 처리해야 합니다.\n\nout은 append 계약입니다. 각 루프 반복에서 새 결과만 받으려면 시작 전에 clear합니다. 힙은 같은 만기에서 seq 순서를 사용하므로 A 설정→B 설정→A 재설정이라면 유효한 B가 A보다 먼저 나옵니다.",
+      "codes": [
+        {
+          "label": "결과에 넣은 뒤 유효 설정 소진",
+          "text": "    // now 까지 도래한 최신 token 을 out 뒤에 추가한다. out 은 호출자가 비운다.\n    // 반환 결과는 일회성: 반복은 다시 arm. token 대상의 생존 여부는 상위에서 검사한다.\n    void expired(TimePoint now, std::vector<Token>& out) {\n        while (!heap_.empty() && heap_.top().when <= now) {\n            Entry e = heap_.top();\n            auto it = live_.find(e.token);\n            if (it != live_.end() && it->second == e.seq) {\n                out.push_back(e.token); // 할당 실패해도 이 항목은 아직 힙/맵에 있다.\n                live_.erase(it);  // 한 번 발화하고 소진\n            }\n            heap_.pop(); // seq 불일치인 낡은 항목도 제거한다.\n        }\n    }",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "배치에 나온 토큰과 살아 있는 연결",
+      "body": "만기 반환은 시점 now에 도래한 결과를 **배치로 확정**합니다. 그 뒤 cancel(A)를 호출해도 이미 만들어진 out에서 A가 지워지지 않습니다. A가 다른 콜백에 의해 닫혔다면 실행 직전 current(A)를 검사하여 건너뜁니다.\n\n등록 ID는 대상 주소를 직접 역참조하지 않습니다. CallbackLoop가 등록 제거와 소켓 저장소의 수명을 관리합니다. 타이머는 등록 ID를 보유하고 있을 뿐 연결 소유자가 아닙니다.\n\n같은 만기 배치의 첫 콜백이 아직 살아 있는 B의 타이머를 재설정해도 이미 반환한 B 결과는 남습니다. 재설정만으로 그 결과까지 무효화하려는 정책이라면 반환 결과에 설정 번호도 넣고 실행 직전에 재검증하는 다른 계약이 필요합니다. 이번 구현은 배치 확정 의미를 사용합니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "현재 서버의 주소 토큰",
+          "body": "현재 서버는 `void*` 토큰을 `Conn*`로 바꾼 뒤 alive를 확인하고 배치 끝 sweep에서 저장소를 회수합니다. 이 방식은 같은 배치에 남은 포인터의 유효 기간까지 상위가 보장해야 합니다. 타이머의 seq만으로 객체 수명이 연장되지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "미래 0.4ms를 어떻게 기다릴까",
+      "body": "poll에 넘기는 단위는 정수 밀리초입니다. 미래 0.4ms를 버림하면 0이 됩니다. 대기가 즉시 돌아오고 아직 만기는 아니라서 같은 계산을 반복할 수 있습니다. 미래는 ceil<milliseconds>로 올림하여 최소 1ms를 요청합니다.\n\n과거와 정확히 현재의 만기는 0입니다. 만기가 없으면 timeout_ms는 -1을 반환합니다. 이 값을 바로 모든 API에 넘길 수 있는 것은 아닙니다. 학습 StudyReactor는 0~1000ms를 받으므로 상위에서 빈 큐의 점검 주기를 선택합니다.\n\n올림으로 요청 기간이 1ms 미만 늘어날 수 있습니다. 실제 반환은 I/O 때문에 빨라지거나 스케줄링 때문에 늦어질 수 있으므로, 만기 판정에는 돌아온 시각을 사용합니다. 이 정책은 실시간 실행 보장을 제공하지 않습니다.",
+      "codes": [
+        {
+          "label": "유효한 최상단의 상대 대기 계산",
+          "text": "    // 유효 만기가 없으면 -1. 상위 루프는 종료 확인 주기와 별도로 최솟값을 취한다.\n    int timeout_ms(TimePoint now) {\n        prune_stale();\n        if (heap_.empty()) return -1;\n        return deadline_wait_ms(now, heap_.top().when);\n    }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "기간 변환의 규칙",
+          "body": "정수 duration_cast는 단위를 바꾸면서 소수 부분을 보존하지 않습니다. ceil은 대상 단위에서 원래 기간보다 작지 않은 최소 값을 구합니다. [duration 변환과 올림 정의](https://eel.is/c++draft/time.duration.cast)를 실제 양수·음수 예와 함께 읽을 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "뺄셈한 뒤 제한하면 이미 늦다",
+      "body": "when-now를 구한 뒤 너무 크면 cap으로 제한한다고 합시다. now가 time_point::min(), when이 max()라면 뺄셈 결과부터 signed duration 범위를 넘을 수 있습니다. 표현할 수 없는 중간 계산을 한 뒤 최종 int만 제한하는 순서는 안전하지 않습니다.\n\n먼저 when ≤ now면 0으로 반환합니다. 나머지는 미래입니다. cap을 시계의 duration으로 바꾸고, now+cap을 만들 수 있는 범위인지 확인합니다.\n\n| 조건 | 결론 |\n| --- | --- |\n| now ≤ max-cap이고 when ≥ now+cap | 차이가 cap 이상이므로 계산 없이 cap 반환 |\n| now ≤ max-cap이고 when < now+cap | 차이가 cap 미만이므로 안전하게 뺄셈 |\n| now > max-cap | when ≤ max이므로 차이가 cap 미만 |\n\n마지막 두 경로에서만 when-now를 구하고 올림합니다. cap은 약 12.4일에 해당하는 밀리초 수이며 이 변환 함수의 반환 상한입니다. 실제 루프는 더 짧은 점검 주기와 최솟값을 취할 수 있습니다.\n\n지원 시계가 cap을 정확히 표현하는지 static_assert로 확인합니다. 다른 해상도나 표현 범위의 시계를 도입할 때는 이 전제를 함께 검토합니다. 아래 함수에는 현재 시각을 읽거나 대기하는 부수 효과가 없습니다.",
+      "codes": [
+        {
+          "label": "범위를 비교한 뒤 차이를 계산",
+          "text": "inline int deadline_wait_ms(std::chrono::steady_clock::time_point now,\n                            std::chrono::steady_clock::time_point when) {\n  using Clock = std::chrono::steady_clock;\n  using TimePoint = Clock::time_point;\n  using Duration = Clock::duration;\n\n  // The cap as a Clock::duration. On the supported target clocks a\n  // millisecond is represented exactly (the tick period evenly divides 1 ms),\n  // so this round-trips to the same whole-millisecond count.\n  constexpr Duration cap_duration =\n      std::chrono::duration_cast<Duration>(std::chrono::milliseconds(kMaxTimerWaitMs));\n  static_assert(\n      std::chrono::duration_cast<std::chrono::milliseconds>(cap_duration).count() == kMaxTimerWaitMs,\n      \"target clock cannot represent the millisecond cap exactly\");\n\n  if (when <= now) {\n    return 0;  // Deadline already expired: nothing to wait for.\n  }\n\n  // Clamp before subtracting. Computing when - now first could overflow a\n  // signed duration for far-future deadlines. The comparison below is itself\n  // overflow-free, because cap_duration is non-negative so max()-cap_duration\n  // is a valid time point.\n  if (now <= TimePoint::max() - cap_duration && when >= now + cap_duration) {\n    return kMaxTimerWaitMs;\n  }\n\n  // Reaching here proves the gap is representable and strictly smaller than\n  // cap_duration, so this subtraction cannot overflow. Round up to the next\n  // whole millisecond: a positive sub-millisecond gap would otherwise\n  // truncate to 0, and a zero timeout is the classic cause of a busy spin\n  // when a caller loops on a deadline. The result is the requested wait, not\n  // a promise of the actual scheduler wake time.\n  const Duration remaining = when - now;\n  return static_cast<int>(\n      std::chrono::ceil<std::chrono::milliseconds>(remaining).count());\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/timer_queue.h",
+        "symbol": "static int wait_ms_until(",
+        "invariant": "과거 검사·사전 포화·미래 올림 뒤 정수 대기를 반환한다.",
+        "mayDiffer": "현재 서버는 같은 보조 함수를 수락 재개 백오프에도 사용한다. 학습 기준 함수는 독립 헤더에 둔다."
+      }
+    },
+    {
+      "title": "프레임을 받으면 idle 기한으로 바꾼다",
+      "body": "실제 소켓을 누적 CallbackLoop에 등록합니다. 처음에는 1초 안에 프레임을 받도록 설정합니다. 테스트 상대가 프레임을 보내면 수신 결과를 FrameParser에 누적하고, 완성된 내용이 맞는지 확인합니다.\n\n프레임을 처리한 시각 + 30ms를 새 idle 만기로 설정합니다. 1초짜리 과거 항목은 힙에 남을 수 있지만 같은 등록 번호의 최신 seq가 바뀌므로 더 이상 유효하지 않습니다. 실습의 짧은 값은 동작을 관찰하기 위한 정책입니다.\n\n소켓 읽기가 would_block이나 interrupted이면 콜백을 반환합니다. 프레임이 일부만 왔다면 파서에 남겨 두고 다음 준비성을 기다립니다. 완성된 프레임을 확인한 경로에서만 이번 예제의 idle 기간을 시작합니다.",
+      "codes": [
+        {
+          "label": "수신 콜백에서 상태에 맞는 만기 재설정",
+          "text": "        const auto id = loop.attach(std::move(sockets.receiver), Read,\n            [&](CallbackLoop&, Socket& socket, const ReadyEvent& event) {\n                std::uint8_t bytes[16];\n                const auto result = try_receive(socket, bytes, sizeof(bytes));\n                if (result.state == ReceiveState::would_block || result.state == ReceiveState::interrupted) return;\n                require(result.state == ReceiveState::progress && parser.append(bytes, result.count), \"receive\");\n                Frame frame;\n                const auto parsed = parser.next(frame);\n                if (parsed == ParseStatus::need_more) return;\n                require(parsed == ParseStatus::frame && matches_probe(frame, 12, 7), \"frame\");\n                received = true;\n                idle_deadline = TimerHeap::Clock::now() + std::chrono::milliseconds(30);\n                timers.arm(event.id, idle_deadline);\n                std::puts(\"FRAME: received; first-frame deadline replaced by idle deadline\");\n            });",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "timers_.arm(raw,",
+        "invariant": "정책이 정한 절대 시각을 타이머에 등록하고 상태 변화에 맞게 교체한다.",
+        "mayDiffer": "운영 서버의 첫 프레임·로비·룸·idle 정책과 기간은 더 다양하다. 어떤 입력을 활동으로 인정하는지도 각 상태가 정한다."
+      }
+    },
+    {
+      "title": "대기, 입력 처리, 새 시각의 만기 판정",
+      "body": "루프는 timeout_ms와 100ms 점검 주기의 최솟값으로 기다립니다. 큐가 비어 -1이면 100ms를 선택합니다. 같은 선택을 매 반복 수행하므로 새 만기가 설정되면 다음 대기도 바뀝니다.\n\n돌아온 배치의 I/O를 먼저 처리합니다. 콜백이 만기를 갱신했다면 그 뒤 expired가 최신 설정을 봅니다. 이것은 입력 처리에 먼저 기회를 주는 정책입니다. 만기와 함께 준비성이 관찰되었다고 실제 패킷이 어느 쪽보다 먼저 도착했는지 알 수는 없습니다.\n\ndue.clear() 뒤 실제 Clock::now()를 전달합니다. 만기 토큰은 current로 재확인하고 등록을 제거합니다. 이 프로브에서는 유효한 만기가 idle 하나이므로 received와 idle_deadline도 검사합니다. 반환 결과가 한 번 소비되고 등록이 제거되면 종료합니다.\n\n프로그램이 넣은 wake는 일찍 돌아오는 경로도 만듭니다. 그 경우에도 만기 판단은 같은 절차를 사용합니다. 타이머가 만료될 때까지 전용 sleep을 걸면 그 동안 소켓 입력을 처리할 수 없으므로, Reactor의 대기 시간에 합칩니다.",
+      "codes": [
+        {
+          "label": "타이머와 실제 Reactor가 만나는 반복",
+          "text": "        std::vector<TimerHeap::Token> due;\n        const auto stop = TimerHeap::Clock::now() + std::chrono::seconds(2);\n        while (!timed_out && TimerHeap::Clock::now() < stop) {\n            const auto before_wait = TimerHeap::Clock::now();\n            const int next = timers.timeout_ms(before_wait);\n            const int wait = next < 0 ? 100 : std::min(next, 100);\n            const auto batch = loop.observe(wait);\n            require(batch.state != PollState::error, \"observe\");\n            loop.dispatch(batch); // Application policy: process observed input before expiry.\n            due.clear();\n            timers.expired(TimerHeap::Clock::now(), due);\n            for (const auto token : due) {\n                if (!loop.current(token)) continue;\n                require(received && TimerHeap::Clock::now() >= idle_deadline, \"not early\");\n                timers.cancel(token);\n                require(loop.close(token), \"timeout closes registration before socket destruction\");\n                timed_out = true;\n                std::puts(\"TIMER: idle deadline reached; connection removed once\");\n            }\n        }",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "엄격한 마감과 공정성",
+          "body": "마감 뒤 처리된 입력을 모두 거절하는 정책이라면 입력을 실행하기 전 시각 검사 등 별도 계약을 정해야 합니다. 또한 만기나 콜백이 한꺼번에 많으면 한 반복이 길어집니다. 요청 대기 상한만으로 루프 지연을 제한할 수는 없습니다. 작업 예산을 둘 경우 나머지 만기를 다음 반복으로 넘기는 지연 정책도 정해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "낡은 항목의 공간 비용을 계산한다",
+      "body": "유효 만기는 L개여도 힙에는 H개가 남습니다. 한 연결을 자주 재설정하고 다른 유효 항목이 더 이른 시각에서 앞을 막으면 과거 설정들이 그 아래에 쌓일 수 있습니다. 취소가 평균 상수 시간이어도 공간 비용은 현재 연결 수만으로 정해지지 않습니다.\n\n이번 구현에는 힙 크기 상한과 압축이 없습니다. 그 제한을 이해한 상태에서 사용할 수 있도록 H·L·재설정 빈도·청소 시간을 함께 관찰하는 것이 좋습니다. 특정 틱률만으로 최대 항목 수가 정해지려면 기한 범위와 호출 패턴 같은 전제도 필요합니다.\n\n| 대안 | 해결하는 비용 | 새로 맡는 책임 |\n| --- | --- | --- |\n| 현재 설정만으로 힙 재구축 | 과거 항목 공간 회수 | 현재 시각 보관, 재구축 시점과 일시적 작업량 |\n| 인덱스 힙 | 재설정·취소 시 해당 위치 직접 수정 | sift할 때 위치표 동기화 |\n| 순서 있는 트리 | 현재 항목만 저장하고 삭제 | 노드·할당·반복자 수명 관리 |\n| 타이머 휠 | 구간으로 묶인 대량 만기 처리 | 버킷 해상도·범위·집중·계층 이동 |\n\n자료구조 선택은 다음 동작을 무엇으로 단순하게 표현할지와, 비용이 어디에 모일지를 함께 정하는 일입니다. 프로토콜 만기와 객체 소유권 계약을 유지하면 이 내부 표현은 교체할 수 있습니다."
+    },
+    {
+      "title": "합치고 실행하며 계약을 확인한다",
+      "body": "129-timers는 128-iocp의 누적 파일을 보존하고 deadline_wait.h·timer_heap.h·타이머 검사·프로브를 추가합니다. CMake에 독립 계약 검사와 실제 소켓 프로그램을 등록합니다. Linux에서는 같은 프로브를 epoll로도 실행합니다.\n\n아래 명령은 저장소 루트에서 실행하는 단일 구성 예입니다. Windows의 다중 구성 생성기는 빌드와 CTest에 --config Release와 -C Release를 사용하고 실행 파일은 Release 하위 폴더에서 찾습니다. timer_probe의 기본 백엔드는 poll/WSAPoll이고 --epoll은 Linux 전용입니다. 누적 게임은 SDL 구성의 tetris 타깃으로 계속 빌드할 수 있습니다.\n\n출력은 FRAME에서 새 idle 기한을 설정하고 TIMER에서 등록을 한 번 제거하는 흐름입니다. 정확히 30ms에 출력되는지를 합격 조건으로 삼지 않고, 도래 전에는 닫지 않으며 충분한 관찰 기한 안에 결과를 얻는지 확인합니다.\n\n순수 검사는 sleep 없이 극단 시각·1 tick·재설정·취소·같은 만기·배치 의미를 검사합니다. 30000번의 작업은 현재 값만 저장한 표를 기준 모델로 삼아 매번 도래 순서와 다음 만기를 비교합니다. 단순한 입력 사례와 긴 상태 전이를 함께 사용하면 오류의 의미와 누적 영향을 모두 확인할 수 있습니다.",
+      "codes": [
+        {
+          "label": "추가한 빌드 대상",
+          "text": "add_executable(timer_contract tests/timer_contract.cpp)\ntarget_include_directories(timer_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})\nadd_test(NAME timer_contract COMMAND timer_contract)\nadd_executable(timer_probe tools/timer_probe.cpp)\ntarget_link_libraries(timer_probe PRIVATE StudySocket)\nadd_test(NAME timer_probe COMMAND timer_probe)\nset_tests_properties(timer_contract timer_probe PROPERTIES TIMEOUT 10)\nif(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")\n    add_test(NAME epoll_timer_probe COMMAND timer_probe --epoll)\n    set_tests_properties(epoll_timer_probe PROPERTIES TIMEOUT 10)\nendif()",
+          "language": "cmake"
+        },
+        {
+          "label": "기준 코드 빌드와 실행",
+          "text": "cmake -S docs/learn/checkpoints/129-timers -B out/study-129 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-129 --target timer_contract timer_probe -j2\nout/study-129/timer_probe\nctest --test-dir out/study-129 -R \"^(timer_contract|timer_probe|epoll_timer_probe)$\" --output-on-failure",
+          "language": "sh"
+        },
+        {
+          "label": "시간 변환 전체",
+          "language": "cpp",
+          "file": "checkpoints/129-timers/net/deadline_wait.h",
+          "collapsed": true
+        },
+        {
+          "label": "타이머 힙 전체",
+          "language": "cpp",
+          "file": "checkpoints/129-timers/net/timer_heap.h",
+          "collapsed": true
+        },
+        {
+          "label": "실제 소켓 루프 전체",
+          "language": "cpp",
+          "file": "checkpoints/129-timers/tools/timer_probe.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "고정 시각·기준 모델 검사 전체",
+          "language": "cpp",
+          "file": "checkpoints/129-timers/tests/timer_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "129-1",
+      "question": "A:1000/1을 A:100/2로 재설정하고 100ms에 반환했습니다. 같은 A를 2000ms에 다시 설정할 때 번호를 1로 되돌리면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "과거 1000ms 항목이 최신으로 인정되어 조기 반환될 수 있다"
+        },
+        {
+          "id": "b",
+          "text": "항상 2000ms까지 기다린다"
+        },
+        {
+          "id": "c",
+          "text": "힙이 토큰의 모든 과거 항목을 자동 삭제한다"
+        },
+        {
+          "id": "d",
+          "text": "같은 주소이므로 새 설정도 반드시 같은 작업이다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "과거 1000ms 항목이 최신으로 인정되어 조기 반환될 수 있다",
+      "explanation": "힙에 남은 A:1000/1과 표의 새 1이 일치합니다. 큐 전역 번호를 계속 발급하면 새 번호3과 과거1을 구별할 수 있습니다."
+    },
+    {
+      "id": "129-2",
+      "question": "현재보다 0.4ms 미래인 만기를 정수 밀리초 대기로 변환합니다. 이 구현의 선택은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0ms를 요청하고 만기가 온 것으로 처리한다"
+        },
+        {
+          "id": "b",
+          "text": "항상 500ms를 요청한다"
+        },
+        {
+          "id": "c",
+          "text": "1ms를 요청하고 돌아온 실제 시각으로 다시 판단한다"
+        },
+        {
+          "id": "d",
+          "text": "현재 시각을 정확히 1ms 늘려 결과로 사용한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "1ms를 요청하고 돌아온 실제 시각으로 다시 판단한다",
+      "explanation": "미래를 올림하여 즉시 대기 반복을 피합니다. 요청값은 실제 반환 시각이 아니므로 도래 판단은 새 시각으로 합니다."
+    },
+    {
+      "id": "129-3",
+      "question": "expired가 out에 A와 B를 넣었습니다. A를 처리하는 동안 B를 cancel하지만 B의 연결은 살아 있습니다. out의 B는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "취소 호출이 out까지 찾아 자동 삭제한다"
+        },
+        {
+          "id": "b",
+          "text": "이미 확정한 배치에 남으며 이 계약에서는 실행 대상이다"
+        },
+        {
+          "id": "c",
+          "text": "재설정이 없으면 반드시 새 연결 번호로 바뀐다"
+        },
+        {
+          "id": "d",
+          "text": "실제 OS 타이머가 out을 비운다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "이미 확정한 배치에 남으며 이 계약에서는 실행 대상이다",
+      "explanation": "cancel은 큐의 현재 설정만 제거합니다. 이미 반환한 배치를 철회하는 API가 아닙니다. 연결 제거는 current 검사로 걸러지고, 살아 있는 연결의 설정 변경까지 반영하려면 추가적인 결과 재검증 계약이 필요합니다."
+    },
+    {
+      "id": "129-4",
+      "question": "when-now 계산 뒤 int 상한으로 제한하는 코드에 min·max 시각을 넣으면 무엇이 문제일 수 있나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "정수 비교가 항상 날짜 문자열로 변환된다"
+        },
+        {
+          "id": "b",
+          "text": "상한을 두었으므로 모든 중간 계산도 안전하다"
+        },
+        {
+          "id": "c",
+          "text": "ceil이 시계 자체를 앞으로 이동한다"
+        },
+        {
+          "id": "d",
+          "text": "차이 계산 자체가 signed duration 범위를 넘을 수 있다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "차이 계산 자체가 signed duration 범위를 넘을 수 있다",
+      "explanation": "최종 변환을 제한하기 전에 중간 뺄셈이 넘칠 수 있습니다. 미래 여부와 cap 경계를 비교해 차이가 표현 가능한 경로에서만 뺄셈합니다."
+    },
+    {
+      "id": "129-5",
+      "question": "힙+지연 무효화에서 유효 토큰은 L개, 저장 항목은 H개입니다. 정확한 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "H는 항상 L과 같다"
+        },
+        {
+          "id": "b",
+          "text": "취소가 평균 O(1)이므로 이후 청소 비용도 없다"
+        },
+        {
+          "id": "c",
+          "text": "재설정으로 H가 커질 수 있어 공간과 청소 지연을 함께 관찰한다"
+        },
+        {
+          "id": "d",
+          "text": "낡은 항목은 어떤 경우에도 자기 만기 전에는 제거할 수 없다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "재설정으로 H가 커질 수 있어 공간과 청소 지연을 함께 관찰한다",
+      "explanation": "live 표는 현재 상태이고 힙은 과거 설정까지 보관합니다. 낡은 꼭대기는 만기 전에도 제거할 수 있지만 유효한 더 이른 항목 아래에 묻힌 기록은 남을 수 있습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "A의 1000→100→발화→2000 재설정을 표와 힙에 각각 적습니다.",
+      "0.4ms·1ms·1ms+1tick·이미 지난 시각의 요청값을 예측합니다.",
+      "같은 만기의 arm 순서를 바꿔 유효 결과 순서를 확인합니다.",
+      "프레임 수신이 첫 기한을 idle 기한으로 교체하는 루프를 실행합니다.",
+      "취소 전후와 이미 반환된 배치의 의미를 나누어 설명합니다."
+    ],
+    "failureChecks": [
+      "정수 상한 적용 전에 시간 뺄셈이 넘치지 않는지 확인합니다.",
+      "live 공개 전에 힙 삽입이 실패해도 기존 만기를 잃지 않아야 합니다.",
+      "만기 배치마다 out을 의도에 맞게 비우고 대상 등록을 재검사합니다.",
+      "타이머의 세대 번호를 연결 저장소 소유권으로 해석하지 않습니다.",
+      "힙 항목 수를 현재 연결 수와 동일하다고 계산하지 않습니다."
+    ],
+    "expected": "새 입력과 만기 조건을 같은 루프에서 처리하며 재설정·취소·대기 반환의 순서를 코드로 추적할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "선별 시간 변환 DeepSeek 초안 검토·현재 서버/Part14 대조·결정적 기준 모델·실제 poll/epoll·실패 주입",
+    "draftJob": "out/learning-jobs/129-deadline-events.jsonl",
+    "corrections": [
+      "시간 차이 계산 전 포화·미래 밀리초 올림",
+      "타이머 재설정/결과 전달의 할당 실패 순서와 번호 소진 검사",
+      "동일 만기 순서를 seq로 명시",
+      "수락 백오프에도 동일 시간 변환 적용",
+      "Part14§6 도입과6.1의 비용·지연·메모리 상한·수명 단정 교정"
+    ]
+  },
+  "validation": [
+    "Linux SCRIPTED/SDL 각9CTest·누적 SDL 게임 빌드",
+    "30000 상태 전이 기준 모델 ASan/UBSan",
+    "실제/학습 헤더 할당 실패와 각각20000개 넓은 정수 시간 기준값 UBSan",
+    "현재 loop_primitives 회귀·실제 tetris_relay_reactor 빌드",
+    "MinGW Windows 타이머 프로브/계약 검사 교차 링크; Windows 실행 없음",
+    "수동GUI·스크린샷·공개배포 없음",
+    "실제 loop_primitives_test도 MinGW Windows PE 링크; 네이티브 실행은 하지 않음"
+  ]
+}

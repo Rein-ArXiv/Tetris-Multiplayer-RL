@@ -1,0 +1,552 @@
+{
+  "id": "lesson-60",
+  "title": "이미지 핸들: 로드·조회·해제의 책임",
+  "shortTitle": "핸들·발급 번호·자원 소유",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 파일에서 만든 픽셀을 한 Texture가 소유하고 고정 사각형에 표시합니다.",
+  "finish": "완료: 이미지 저장소가 여러 Texture를 소유하고, 화면은 검증되는 핸들로 이미지를 골라 사용합니다.",
+  "objective": "자원의 위치와 수명을 구별하는 핸들을 구현하고, 오래된 참조·등록 실패·해제 순서·소유 책임을 설명하고 검증합니다.",
+  "prerequisites": [
+    "이미지 디코딩과 RGBA 소유·Texture 수명",
+    "unique_ptr 이동·벡터 재할당·예외 처리",
+    "CPU 배치 제출 경계와 GL 컨텍스트 수명"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek HandlePool 초안 검토; 실제 인덱스 핸들의 오삭제 재현 후 루트와 학습 저장소 보강",
+    "draftJob": "out/learning-jobs/060-pool-events.jsonl",
+    "corrections": [
+      "초안에서 발급 공간 소진을 벡터 확장 전에 거절하도록 보강",
+      "타입/인스턴스/번역 단위를 공유하는 발급 상태와 비재진입 계약 명시",
+      "값 매개변수 소멸 관찰을 호출 문장 뒤로 분리하고 표준의 full-expression 계약과 대조"
+    ]
+  },
+  "validation": [
+    "Release SCRIPTED57/SDL58CTest, 누적 tetris 빌드, -Wall -Wextra -Wpedantic 경고0; handles_demo same slot1/same token0/old found0/new value20",
+    "학습/현재 HandlePool 각각 UBSan: 512회 확장과 포인터 유지, 복사/삭제/재사용/clear/외부풀/다른T·번역단위/잘못된토큰/할당실패/발급소진",
+    "ImageStore UBSan+GL 대역: 복수이미지/파일로드/무효자료/업로드실패/출력보존/등록공간소진/clear/소멸 후 live GL 이름0",
+    "실제 루트 함수 추출: 수정 전 stale handle의 새이미지 조회/오삭제 재현; 수정 후 조회/기본·회전draw/해제/재초기화에서 stale 거절",
+    "루트 Entry 할당과 업로드 후 슬롯 등록 bad_alloc 주입, 모든 GL upload 단계 실패/크기제한/번호소진에서 공개 핸들0・미등록・GPU정리; 미제출사용 flush→delete 순서 검사",
+    "발급 번호 비교 누락 mutation을 Release 계약 검사가 거부; Windows max 매크로를 정의한 현재 helper/API 추출 컴파일",
+    "SDL offscreen llvmpipe: 파일청록/절차적주황 두 아이콘×3Layout(640×480,639×477,479×479) 전체 RGBA 일치와 바깥보존; stale draw 거절/재로드/clear",
+    "root 클라이언트 빌드/16CTest・기존 sim_hash_dump 골든 동일; 59차시 루트 decode 예외 정리/BitmapReadLock 대역 회귀 유지",
+    "수동 GUI/타OS 네이티브 실행 및 실제 GPU OOM 미검증. 핸들 발급 상태는 단일 렌더링 스레드용이며 보안·직렬화 식별자가 아님"
+  ],
+  "recap": {
+    "points": [
+      "파일 바이트를 CPU에서 해석하여 소유한 RGBA 픽셀을 만듭니다.",
+      "디코더의 임시 메모리는 RAII로 정리하고 성공한 결과만 공개합니다.",
+      "업로드를 마친 뒤 CPU 픽셀을 해제해도 GPU 텍스처는 독립적으로 유지됩니다."
+    ],
+    "bridge": "그 GPU 자원이 여러 개일 때 식별·조회·해제의 책임을 저장소로 모읍니다."
+  },
+  "sections": [
+    {
+      "title": "화면은 이미지를 고르고 저장소는 이미지를 소유한다",
+      "body": "메뉴와 플레이 화면에서 서로 다른 아이콘을 골라 보겠습니다. 파일 아이콘과 주황색 절차적 아이콘을 한 번씩 만들고, 화면 상태에 따라 사용할 핸들만 바꿉니다. 텍스처를 프레임마다 다시 만들지 않습니다.\n\n작은 정수 값을 복사해 이미지를 가리키는 **핸들(handle)**을 도입합니다. 저장소가 실제 GPU 자원을 소유하고, 화면은 핸들을 저장하거나 전달합니다. 조회 경계에서 핸들이 아직 유효한지 확인한 뒤 그리기에 필요한 자원을 빌립니다.\n\n메뉴 이미지와 플레이 이미지는 개별 수명을 가진 두 자원입니다. 여러 화면이 같은 핸들을 사용하면 하나의 자원을 함께 참조하는 것입니다. 이 차이를 정해야 누가 해제할지 분명해집니다.",
+      "codes": [
+        {
+          "label": "소유와 사용의 방향",
+          "language": "text",
+          "text": "ImageStore ─소유─▶ Texture A (파일 아이콘)\n           └소유─▶ Texture B (절차적 아이콘)\nmenu_icon ─조회─▶ A\nplay_icon ─조회─▶ B\n화면 상태 → 핸들 선택 → 저장소 검사 → Quad.draw"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "ImageHandle image_create_rgba(",
+        "invariant": "완성된 이미지가 저장소에 등록되어야 호출자가 유효 핸들을 받는다.",
+        "mayDiffer": "루트의 Entry는 GL 이름을 값으로 담고 등록 실패의 GL 해제를 생성 함수가 담당한다. 학습 Texture는 소멸자가 해제한다.",
+        "omitted": "원격 파일 다운로드와 캐시 키 정책은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "핸들·주소·GL 이름·콘텐츠 ID를 구별한다",
+      "body": "핸들은 우리 저장소가 해석하는 값입니다. CPU 포인터는 프로세스 메모리의 객체를 가리키고, GL 이름은 GL 객체를 선택할 때 사용하는 API 값입니다. 같은 정수 표현을 쓸 수 있어도 해석하는 주체와 수명이 다릅니다.\n\n`player_icon` 같은 콘텐츠 키는 설정이나 카탈로그에서 어떤 그림인지 찾는 이름입니다. 파일을 로드하면 그 실행에서 쓸 핸들을 얻습니다. 저장 파일이나 네트워크에는 콘텐츠 키를 사용하고, 실행 중 발급한 핸들은 그 실행의 저장소에서만 사용합니다.\n\n공개 타입을 uint64_t로 정하되 호출자는 0인지 검사하거나 그대로 전달합니다. int로 줄이면 상위 발급 번호를 잃습니다. 핸들을 1씩 증가시켜 다음 이미지를 찾는 방법도 사용하지 않습니다.",
+      "codes": [
+        {
+          "label": "분리된 식별 체계",
+          "language": "text",
+          "text": "콘텐츠 키: \"player_icon\"     → 어떤 애셋인가\nImageHandle: 64비트 토큰     → 현재 저장소의 어떤 수명인가\nTexture*                    → CPU 소유 객체를 빌린 주소\nGLuint                      → 현재 GL 문맥이 해석하는 객체 이름"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image.h",
+        "symbol": "using ImageHandle =",
+        "invariant": "이미지 API는 불투명한 실행 중 토큰을 주고받는다.",
+        "mayDiffer": "현재 타입은 uint64_t이며 과거 int 선언과 ABI가 다르므로 호출부를 함께 빌드한다.",
+        "omitted": "영구 ID·서버 권한 토큰으로 사용하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "핸들이 권한 증명이 되지는 않는다",
+          "body": "클라이언트 안의 자원 핸들은 복사하거나 수치를 추측할 수 있습니다. 보유 아이콘이나 BP 사용 권한을 서버에서 검증하는 문제와는 별도의 식별 체계입니다."
+        }
+      ]
+    },
+    {
+      "title": "배열 번호만 쓰면 해제된 복사본이 되살아난다",
+      "body": "가장 단순한 저장소는 벡터의 인덱스를 핸들로 돌려줍니다. A가 슬롯 0을 쓰고 h=0을 다른 화면에도 복사했다고 생각해 봅시다. A를 해제한 뒤 B를 슬롯 0에 넣으면 두 값만으로 A의 옛 참조와 B의 새 참조를 구별할 수 없습니다. 무효값 0을 피하려고 인덱스에 1을 더해도 문제는 같습니다.\n\n다음 상태표를 보고 오래된 a로 unload를 호출하면 무엇이 지워질지 예측해 보세요. 인덱스만 검사하는 코드에서는 B가 지워집니다. 메모리 주소가 우연히 같은 경우와도 비슷하게, **위치의 재사용**을 **같은 자원의 연속 수명**으로 착각한 것입니다.\n\n해결하려면 위치 외에 그 자원이 발급된 수명을 구별하는 값이 필요합니다.",
+      "codes": [
+        {
+          "label": "같은 위치, 다른 자원",
+          "language": "text",
+          "text": "1. load(A)   → slot 0, a=1\n2. copy=a    → copy=1\n3. unload(a) → slot 0 비움\n4. load(B)   → slot 0, b=1\n5. unload(copy) → B를 잘못 삭제"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "스테일 핸들",
+          "body": "이미 유효 기간이 끝났는데 남아 있는 값을 stale handle이라고 부릅니다. 변수에 0을 대입하면 그 변수는 비워지지만 다른 곳에 복사한 값까지 바뀌지는 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "슬롯 위치와 발급 번호를 한 토큰에 담는다",
+      "body": "64비트를 두 부분으로 나눕니다. 하위 32비트는 슬롯 인덱스+1, 상위 32비트는 0이 아닌 발급 번호입니다. 슬롯 0의 번호 7과 슬롯 0의 번호 8은 같은 위치를 가리키지만 서로 다른 수명을 나타냅니다.\n\n인덱스+1을 저장하면 하위 값 0을 무효로 남길 수 있습니다. 실제 벡터의 슬롯 0을 사용하지 않고 버릴 필요는 없습니다. 토큰을 만들 때는 발급 번호를 먼저 64비트로 바꾼 뒤 32비트 왼쪽으로 이동합니다. 32비트 타입을 32만큼 이동시키는 연산과 구별해야 합니다.\n\n조회에서는 두 부분이 0이 아닌지, 인덱스가 범위 안인지, 저장된 발급 번호가 같은지, 객체가 있는지를 확인합니다. 이 모든 조건을 만족할 때만 포인터를 반환합니다.",
+      "codes": [
+        {
+          "label": "64비트로 바꾼 뒤 결합",
+          "language": "cpp",
+          "text": "inline Handle make_handle(std::uint32_t stamp, std::uint32_t slot_plus_one) noexcept {\n    return (static_cast<Handle>(stamp) << 32) | static_cast<Handle>(slot_plus_one);\n}"
+        },
+        {
+          "label": "토큰을 해석한다",
+          "language": "cpp",
+          "text": "static bool decode(Handle handle, std::size_t& index, std::uint32_t& stamp) noexcept {\n        std::uint32_t const low = static_cast<std::uint32_t>(handle & 0xFFFFFFFFu);\n        std::uint32_t const high = static_cast<std::uint32_t>(handle >> 32);\n        if (low == 0u || high == 0u) {\n            return false;\n        }\n        index = static_cast<std::size_t>(low - 1u);\n        stamp = high;\n        return true;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "renderer/handle_pool.h",
+        "symbol": "class HandlePool final",
+        "invariant": "조회 때 슬롯 위치와 발급 번호를 함께 검사하고 소유 객체를 저장소가 정리한다.",
+        "mayDiffer": "루트는 GL 이름을 담은 ImageEntry를, 학습 코드는 Texture 소유 객체를 보관한다.",
+        "omitted": "동시 접근·직렬화·공유 라이브러리 사이의 ID 서비스는 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "시프트 전 타입 변환이 필요한 이유",
+          "body": "이동 횟수가 왼쪽 피연산자의 승격 후 비트 폭 이상이면 정의되지 않은 동작입니다. stamp를 64비트 Handle로 먼저 변환하고 32만큼 이동하여 상위 절반을 만듭니다. [C++ 비트 시프트 규약](https://eel.is/c++draft/expr.shift#1)을 참고하세요."
+        }
+      ]
+    },
+    {
+      "title": "발급 번호는 재초기화 후에도 되감지 않는다",
+      "body": "슬롯마다 번호를 증가시키는 방법도 가능하지만, 풀을 새로 만들며 번호를 1로 초기화하면 다른 풀의 슬롯 0이나 종료 전 슬롯 0과 다시 충돌할 수 있습니다. 이번 구현은 같은 실행 파일의 모든 HandlePool이 하나의 발급 카운터를 공유합니다. 템플릿 밖의 inline 변수이므로 T가 달라도 같은 발급 순서를 사용합니다.\n\n새 번호를 발급할 때마다 증가시키고, 마지막 번호 2³²−1을 쓴 다음에는 0으로 고정합니다. 오버플로로 1을 다시 발급하지 않습니다. clear와 저장소 재초기화도 카운터를 되감지 않습니다. 이 정책에서 최대 발급 수는 실행 전체에서 2³²−1이며, 번호가 소진되면 새 생성이 실패합니다. 이미 유효한 자원의 조회·해제는 계속 가능합니다.\n\n모든 이미지 작업은 렌더링 스레드에서 호출합니다. 공유 카운터에 원자 연산을 붙이는 것만으로 벡터·GL 문맥·소유권 전체가 동시 접근에 안전해지지는 않으므로, 여기서는 단일 스레드 계약을 명시합니다.",
+      "codes": [
+        {
+          "label": "마지막 번호 다음에는 발급을 중단한다",
+          "language": "cpp",
+          "text": "inline std::uint32_t take_stamp(std::uint32_t& next) noexcept {\n    std::uint32_t const current = next;\n    if (current == 0u || current == (std::numeric_limits<std::uint32_t>::max)()) {\n        next = 0u;\n    } else {\n        next = current + 1u;\n    }\n    return current;\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/handle_pool.h",
+        "symbol": "class HandlePool final",
+        "invariant": "조회 때 슬롯 위치와 발급 번호를 함께 검사하고 소유 객체를 저장소가 정리한다.",
+        "mayDiffer": "루트는 GL 이름을 담은 ImageEntry를, 학습 코드는 Texture 소유 객체를 보관한다.",
+        "omitted": "동시 접근·직렬화·공유 라이브러리 사이의 ID 서비스는 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "세대 번호와 발급 번호의 선택",
+          "body": "같은 슬롯을 재사용할 때 번호가 달라진다는 점에서 세대 검사와 같은 역할을 합니다. 이 구현의 번호는 슬롯별 재사용 횟수 대신 풀 전체의 발급 순서입니다. 외부에 노출하는 API에서는 그 산술적 의미에 의존하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "슬롯은 소유 포인터와 번호를 함께 보관한다",
+      "body": "저장소의 슬롯은 stamp와 unique_ptr<T>를 가집니다. unique_ptr가 비어 있으면 빈 슬롯입니다. 성공한 조회는 그 객체를 빌려주지만 소유권을 넘기지 않습니다. T의 소멸자는 예외를 던지지 않는 계약으로 제한합니다.\n\n슬롯 벡터가 커질 때 Slot 자체는 이동할 수 있습니다. unique_ptr의 이동은 같은 T 객체를 가리키는 소유권을 옮기므로 T의 주소는 유지됩니다. 이 설계에서 find로 받은 T 포인터는 다른 삽입으로 벡터가 커져도 유지됩니다. 해당 자원의 해제·clear·저장소 소멸 이후에는 사용할 수 없습니다.\n\n저장소를 복사하거나 이동하는 연산은 막습니다. 자원 소유권과 핸들의 소속이 코드 복사 한 줄로 바뀌지 않게 한 선택입니다. 값으로 복사하는 것은 핸들뿐입니다.",
+      "codes": [
+        {
+          "label": "메타데이터와 자원의 위치",
+          "language": "cpp",
+          "text": "struct Slot {\n        std::uint32_t stamp = 0u;\n        std::unique_ptr<T> value{};\n    };"
+        },
+        {
+          "label": "저장소의 구조",
+          "language": "text",
+          "text": "vector<Slot>: [ stamp, unique_ptr ] [ stamp, unique_ptr ] ...\n                           │                    │\n                           ▼                    ▼\n                        Texture A            Texture B\n벡터 확장: Slot 위치는 바뀔 수 있음 / Texture 객체 주소는 유지"
+        }
+      ],
+      "reference": {
+        "path": "renderer/handle_pool.h",
+        "symbol": "class HandlePool final",
+        "invariant": "조회 때 슬롯 위치와 발급 번호를 함께 검사하고 소유 객체를 저장소가 정리한다.",
+        "mayDiffer": "루트는 GL 이름을 담은 ImageEntry를, 학습 코드는 Texture 소유 객체를 보관한다.",
+        "omitted": "동시 접근·직렬화·공유 라이브러리 사이의 ID 서비스는 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "빌린 포인터를 오래 보관할 필요가 없다면",
+          "body": "일반 화면 코드는 핸들을 보관하고 그릴 때마다 조회하면 됩니다. 학습 ImageStore도 Texture 포인터를 외부에 돌려주지 않고 draw 안에서 잠깐 조회합니다. 장기간의 빌린 포인터 수명 관리 부담을 줄이는 인터페이스입니다."
+        }
+      ]
+    },
+    {
+      "title": "삽입은 준비와 공개를 나누어 구현한다",
+      "body": "insert는 unique_ptr를 값으로 받아 소유권을 인수합니다. 빈 입력이나 소진된 발급 공간은 실패합니다. 먼저 빈 슬롯을 찾고 없으면 벡터를 늘립니다. 이 할당에 실패하면 번호를 소비하지 않고 0을 반환합니다.\n\n슬롯을 확보한 뒤 새 번호를 발급하고, 포인터를 이동하고, live_count를 증가시킵니다. 이 구간에는 실패할 수 있는 벡터 확장을 넣지 않습니다. 마지막에 토큰을 반환해야 호출자가 완성된 자원을 볼 수 있습니다.\n\n빈 슬롯을 앞에서부터 찾는 삽입은 슬롯 수에 비례하는 O(n) 탐색입니다. 핸들을 통한 조회는 인덱스를 바로 해석하므로 O(1)입니다. 아이콘처럼 자원 수가 적고 로드가 드문 단계에서는 이 차이를 받아들입니다. 빈 슬롯 목록을 따로 유지하면 탐색 비용을 줄일 수 있지만 그 목록의 일관성도 관리해야 합니다.",
+      "codes": [
+        {
+          "label": "소유권을 소비하는 삽입",
+          "language": "cpp",
+          "text": "Handle insert(std::unique_ptr<T> value) noexcept {\n        if (!value || next_stamp == 0u) {\n            return 0u;\n        }\n\n        // First empty slot wins; otherwise a new slot is appended.\n        std::size_t index = slots_.size();\n        for (std::size_t i = 0; i < slots_.size(); ++i) {\n            if (!slots_[i].value) {\n                index = i;\n                break;\n            }\n        }\n\n        // The low 32 bits hold slot + 1, which must remain representable. The\n        // value is never zero, and slot + 1 fits while slot <= UINT32_MAX - 1.\n        if (index > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)() - 1u)) {\n            return 0u;\n        }\n\n        // Grow the vector before consuming a stamp so a failed allocation cannot\n        // waste one.\n        if (index == slots_.size()) {\n            try {\n                slots_.emplace_back();\n            } catch (std::bad_alloc const&) {\n                return 0u;\n            } catch (std::length_error const&) {\n                return 0u;\n            }\n        }\n\n        std::uint32_t const stamp = take_stamp(next_stamp);\n        if (stamp == 0u) {\n            return 0u; // stamp space exhausted; `value` is destroyed on return\n        }\n\n        // From here on nothing throws.\n        Slot& slot = slots_[index];\n        slot.stamp = stamp;\n        slot.value = std::move(value);\n        ++live_count_;\n        return make_handle(stamp, static_cast<std::uint32_t>(index + 1u));\n    }"
+        }
+      ],
+      "reference": {
+        "path": "renderer/handle_pool.h",
+        "symbol": "class HandlePool final",
+        "invariant": "조회 때 슬롯 위치와 발급 번호를 함께 검사하고 소유 객체를 저장소가 정리한다.",
+        "mayDiffer": "루트는 GL 이름을 담은 ImageEntry를, 학습 코드는 Texture 소유 객체를 보관한다.",
+        "omitted": "동시 접근·직렬화·공유 라이브러리 사이의 ID 서비스는 포함하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "실패한 호출의 정리를 관찰하는 문장",
+          "body": "소유 포인터를 값으로 받는 매개변수의 소멸 시점은 함수 종료 또는 호출을 포함한 전체 식의 끝일 수 있습니다. 반환값을 먼저 변수에 저장하고, 그 문장이 끝난 다음 소멸 횟수를 검사하면 두 경우를 모두 다룰 수 있습니다. [C++ 함수 호출의 매개변수 소멸 규약](https://eel.is/c++draft/expr.call#7)을 참고하세요."
+        }
+      ]
+    },
+    {
+      "title": "조회와 해제에 같은 검사를 사용한다",
+      "body": "조회 검사를 find와 erase에 따로 작성하면 한쪽에서 발급 번호를 빠뜨릴 수 있습니다. 내부 lookup이 공통 검사를 수행하고 각 연산은 그 결과를 사용합니다. 아래 코드를 읽으며 오래된 번호·범위 밖 슬롯·0 핸들이 각각 어디에서 거절되는지 따라가 보세요.\n\nerase는 번호를 먼저 무효화하고 소유 포인터를 비운 다음 살아 있는 개수를 줄입니다. 같은 핸들을 다시 erase하면 false입니다. clear는 모든 객체와 슬롯의 논리적 내용을 비우고 개수를 0으로 만듭니다. 발급 카운터는 유지합니다.\n\n리소스 소멸자나 for_each 콜백에서 같은 풀을 다시 변경하는 재진입은 허용하지 않습니다. 작업 중인 슬롯의 수명을 외부 호출이 바꾸지 않게 하는 계약입니다.",
+      "codes": [
+        {
+          "label": "공통 조회 경계",
+          "language": "cpp",
+          "text": "Slot* lookup(Handle handle) noexcept {\n        std::size_t index = 0;\n        std::uint32_t stamp = 0;\n        if (!decode(handle, index, stamp) || index >= slots_.size()) {\n            return nullptr;\n        }\n        Slot& slot = slots_[index];\n        if (slot.stamp != stamp || !slot.value) {\n            return nullptr;\n        }\n        return &slot;\n    }"
+        },
+        {
+          "label": "한 번의 해제",
+          "language": "cpp",
+          "text": "bool erase(Handle handle) noexcept {\n        Slot* slot = lookup(handle);\n        if (!slot) {\n            return false;\n        }\n        slot->stamp = 0u; // invalidate before releasing the value\n        slot->value.reset();\n        --live_count_;\n        return true;\n    }"
+        },
+        {
+          "label": "다시 초기화해도 번호는 재사용하지 않는다",
+          "language": "cpp",
+          "text": "void clear() noexcept {\n        for (Slot& slot : slots_) {\n            slot.stamp = 0u;\n            slot.value.reset();\n        }\n        slots_.clear();\n        live_count_ = 0u;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "renderer/handle_pool.h",
+        "symbol": "class HandlePool final",
+        "invariant": "조회 때 슬롯 위치와 발급 번호를 함께 검사하고 소유 객체를 저장소가 정리한다.",
+        "mayDiffer": "루트는 GL 이름을 담은 ImageEntry를, 학습 코드는 Texture 소유 객체를 보관한다.",
+        "omitted": "동시 접근·직렬화·공유 라이브러리 사이의 ID 서비스는 포함하지 않는다."
+      }
+    },
+    {
+      "title": "GPU 자원을 저장소에 넣으면 실패도 소유자가 정리한다",
+      "body": "ImageStore는 HandlePool<Texture>를 사용합니다. create는 RGBA 뷰를 검사하고 Texture 소유 객체를 만든 뒤 업로드합니다. 업로드가 실패하면 Texture가 빈 상태 또는 정리된 상태로 소멸합니다. 업로드까지 성공했어도 풀 등록이 실패할 수 있습니다.\n\n등록 함수가 unique_ptr를 소비하므로 실패한 Texture도 소멸하며 GL 이름을 삭제합니다. 생성 함수에 실패 경로마다 DeleteTextures를 흩어놓는 대신 소유 객체의 소멸자와 현재 GL 문맥 계약을 이용합니다. 등록 성공 뒤에는 풀만 그 Texture의 소유자입니다.\n\n현재 루트 구현은 Entry에 GL 이름을 값으로 보관하므로 풀의 CPU 객체 소멸만으로 GL 해제가 되지 않습니다. 그래서 등록 실패 시 생성 함수에서 GL 이름을 명시적으로 삭제합니다. 두 구조 모두 마지막 자원까지 누가 정리하는지 확인해야 합니다.",
+      "codes": [
+        {
+          "label": "학습 저장소의 RGBA 생성",
+          "language": "cpp",
+          "text": "Handle create(study_texture::RgbaView pixels) noexcept {\n        if(!study_texture::valid(pixels)) return 0;\n        try {\n            auto texture=std::make_unique<study_texture::Texture>(gl_);\n            if(!texture->upload(pixels)) return 0;\n            return images_.insert(std::move(texture));\n        } catch(const std::bad_alloc&) { return 0; }\n    }"
+        },
+        {
+          "label": "파일 로드와 동일 생성 경로",
+          "language": "cpp",
+          "text": "Handle load(const std::filesystem::path& path) noexcept {\n        const auto decoded=decode_file(path);\n        return decoded ? create(decoded.image->view()) : 0;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "ImageHandle image_create_rgba(",
+        "invariant": "완성된 이미지가 저장소에 등록되어야 호출자가 유효 핸들을 받는다.",
+        "mayDiffer": "루트의 Entry는 GL 이름을 값으로 담고 등록 실패의 GL 해제를 생성 함수가 담당한다. 학습 Texture는 소멸자가 해제한다.",
+        "omitted": "원격 파일 다운로드와 캐시 키 정책은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "조회 결과는 필요한 값만 호출자에게 전달한다",
+      "body": "size는 내부 Texture를 찾아 크기만 반환합니다. 실패하면 출력 인자를 건드리지 않습니다. 호출자는 bool을 확인해 유효한 값을 사용합니다. draw는 조회에 성공한 동안만 Texture를 Quad에 빌려 즉시 제출합니다.\n\n이 단계의 load/create 실패 값은 0으로 통일합니다. 파일·디코딩·GL 업로드·저장소 등록 중 하나가 실패한 결과입니다. 세부 원인을 추적할 때는 각 계층의 진단과 독립 도구를 사용합니다. 하나의 실패 숫자만으로 파일 손상이라고 단정하지 않습니다.\n\n무효 핸들의 처리는 API마다 분명히 정합니다. 학습 draw/unload는 false를 반환해 실습에서 관찰하게 하고, 루트의 void 그리기/해제 API는 아무 작업 없이 돌아옵니다. 어느 쪽이든 오래된 핸들로 다른 이미지를 처리하지 않아야 합니다.",
+      "codes": [
+        {
+          "label": "크기 조회의 실패 보존",
+          "language": "cpp",
+          "text": "bool size(Handle handle,int& width,int& height) const noexcept {\n        const auto* image=images_.find(handle);\n        if(!image) return false;\n        width=image->width();height=image->height();return true;\n    }"
+        },
+        {
+          "label": "그리기 직전에 확인하는 수명",
+          "language": "cpp",
+          "text": "bool draw(study_texture::Quad& quad,Handle handle) const noexcept {\n        const auto* image=images_.find(handle);\n        return image && quad.draw(*image);\n    }"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "bool image_size(",
+        "invariant": "전체 토큰을 검사하고 실패 시 출력 크기를 보존한다.",
+        "mayDiffer": "루트는 전역 렌더러 API, 학습 코드는 세션의 ImageStore 멤버 함수다.",
+        "omitted": "호출자에게 GPU 소유권을 넘기지 않는다."
+      }
+    },
+    {
+      "title": "복사된 핸들에는 해제 권한이 자동으로 따라오지 않는다",
+      "body": "load 한 번으로 얻은 h를 menu와 preview에 복사해도 GPU 이미지가 두 개 만들어지지는 않습니다. 두 값은 같은 자원을 빌립니다. 참조 카운트가 증가하는 것도 아닙니다. 소유자가 unload하면 두 참조가 함께 무효가 됩니다.\n\n현재 게임은 기본 아이콘·카탈로그 이미지·봇 이미지 캐시를 로드하고, 화면에는 선택한 핸들을 전달합니다. 카탈로그의 소유 목록은 실제로 로드한 이미지를 정리하고, 기본 이미지로 대체해 빌려준 경우에는 그 기본 이미지의 소유자가 정리합니다.\n\n발급 번호는 이미 끝난 수명의 오사용을 거절합니다. 아직 유효한 핸들을 잘못된 화면 코드가 unload하는 것까지 막지는 못합니다. 따라서 생성·소유 목록·공유하는 참조·종료 경로를 구별해야 합니다.",
+      "codes": [
+        {
+          "label": "하나를 로드하고 여러 곳에서 빌린다",
+          "language": "cpp",
+          "text": "const auto owner = images.load(path);\nconst auto menu = owner;\nconst auto preview = owner;\n// menu/preview는 조회와 그리기에 사용한다.\nimages.unload(owner);\n// menu/preview는 값이 남아 있어도 조회에 실패한다."
+        }
+      ],
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "std::vector<ImageHandle> playerIconCatalogHandles;",
+        "invariant": "로드한 자원의 소유 목록과 화면에서 빌리는 선택 핸들을 구별한다.",
+        "mayDiffer": "아이콘 키·카탈로그 개수·봇 콘텐츠는 바뀔 수 있다.",
+        "omitted": "이 학습 저장소에는 설정 파일과 상점·캐시 정책을 추가하지 않는다."
+      }
+    },
+    {
+      "title": "게임의 화면 상태로 두 핸들 중 하나를 선택한다",
+      "body": "세션이 시작될 때 PNG를 로드해 메뉴 아이콘을 만들고, 색상 배열로 플레이 아이콘을 만듭니다. 두 생성이 모두 성공해야 루프에 들어갑니다. 플레이 아이콘은 청록 얼굴 성분만 주황으로 바꾼 별도 픽셀 배열입니다. 그림 데이터의 변경과 저장소의 수명 코드는 분리합니다.\n\n화면이 menu이면 menu_icon, 그 외 플레이·종료 화면이면 play_icon을 선택합니다. 공유 색상 배치를 마친 뒤 전체 클립으로 아이콘을 그리는 순서는 유지합니다. 이미지 선택은 표현 책임이며 규칙 상태와 해시에는 들어가지 않습니다.\n\nImageStore를 Quad보다 먼저 선언해 Quad가 먼저 소멸하도록 하고, 둘 다 GL 함수표와 컨텍스트보다 먼저 정리합니다. 소멸 순서는 C++ 객체만의 문제로 끝나지 않고, 해제 함수가 필요로 하는 외부 GL 문맥의 수명까지 포함합니다.",
+      "codes": [
+        {
+          "label": "루프 밖에서 한 번 생성",
+          "language": "cpp",
+          "text": "study_image::ImageStore images(gl);\n    const auto menu_icon=images.load(std::filesystem::u8path(image_path));\n    const auto play_pixels=study_texture::make_play_badge();\n    const auto play_icon=images.create({play_pixels.data(),play_pixels.size(),8,8});\n    if(!menu_icon || !play_icon) {\n        std::fprintf(stderr,\"Image load/upload/registration failed\\n\");\n        return 1;\n    }\n    study_texture::Quad badge_quad(gl);\n    if (!badge_quad.init()) return 1;"
+        },
+        {
+          "label": "상태가 결정하는 핸들",
+          "language": "cpp",
+          "text": "const auto icon = app.screen()==study_app::Screen::menu ? menu_icon : play_icon;\nif (!sink.set_clip(full) || !images.draw(badge_quad,icon)) return 1;"
+        },
+        {
+          "label": "절차적 플레이 아이콘",
+          "language": "cpp",
+          "file": "checkpoints/60-image-handles/renderer/session_icons.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "ImageHandle image_create_rgba(",
+        "invariant": "완성된 이미지가 저장소에 등록되어야 호출자가 유효 핸들을 받는다.",
+        "mayDiffer": "루트의 Entry는 GL 이름을 값으로 담고 등록 실패의 GL 해제를 생성 함수가 담당한다. 학습 Texture는 소멸자가 해제한다.",
+        "omitted": "원격 파일 다운로드와 캐시 키 정책은 포함하지 않는다."
+      }
+    },
+    {
+      "title": "그리기 큐를 비우고 자원을 해제한다",
+      "body": "CPU에 정점만 쌓아 두고 아직 GL에 제출하지 않았다면 그 정점이 참조할 텍스처도 살아 있어야 합니다. 루트의 image_unload는 해당 이름을 쓰는 배치를 제출한 뒤 삭제합니다. 발급 번호가 추가되어도 이 렌더링 순서 계약은 필요합니다.\n\n학습 ImageStore의 draw는 Quad를 통해 즉시 제출하고 텍스처 바인딩을 비웁니다. 별도의 CPU 이미지 큐를 보관하지 않습니다. 이 저장소를 다른 배처에 연결할 때는 unload·clear·소멸 전에 그 배처의 미제출 사용을 끝내야 합니다.\n\n저장소 종료 뒤 새 이미지를 만들 수 있어도 예전에 받은 토큰을 재사용하지 않습니다. 새 토큰을 다시 받아 저장합니다. 발급 번호가 이 실수를 거절해 주며, 콘텐츠 키는 새 실행에서도 원하는 애셋을 다시 찾는 데 사용합니다.",
+      "codes": [
+        {
+          "label": "현재 코드의 해제 경계",
+          "language": "cpp",
+          "text": "void image_unload(ImageHandle handle)\n{\n    const ImageEntry* entry=s_images.find(handle);\n    if(!entry) return;\n    if(entry->tex) {\n        glb_before_texture_delete(entry->tex);\n        gl_DeleteTextures(1,&entry->tex);\n    }\n    s_images.erase(handle);\n}"
+        }
+      ],
+      "reference": {
+        "path": "renderer/image_gl.cpp",
+        "symbol": "void image_unload(",
+        "invariant": "유효 토큰 조회 후 미제출 사용을 끝내고 GPU 자원을 해제한다.",
+        "mayDiffer": "루트는 공용 배처를 사용하고 학습 고정 Quad는 즉시 제출한다.",
+        "omitted": "GPU 완료를 기다리는 동기화나 참조 카운팅을 수행하지 않는다."
+      }
+    },
+    {
+      "title": "오래된 값과 실패를 실제로 만들어 검사한다",
+      "body": "먼저 A 로드 → 핸들 복사 → A 해제 → B를 같은 슬롯에 삽입하는 순서를 만듭니다. 옛 값으로 size/draw/unload를 호출해 모두 거절되는지, 새 B가 그대로 남는지 확인합니다. 다른 저장소의 슬롯 0도 섞어서 소속을 혼동하지 않는지 검사합니다.\n\n벡터를 여러 번 늘린 뒤 빌린 포인터가 유지되는지, clear 뒤 옛 핸들이 무효인지, 두 번역 단위가 같은 발급 카운터를 쓰는지도 확인합니다. 번호 끝을 테스트 프로세스에서 강제로 만들어 마지막 한 번의 발급과 이후 거절을 관찰합니다. 앱에서 카운터를 임의로 되감는 방식으로 이 테스트를 따라 하지는 않습니다.\n\n할당 실패는 GPU 자원을 만들기 전과 등록 시점에 각각 주입합니다. 특히 GPU 업로드가 끝난 뒤 등록이 실패해도 살아 있는 GL 이름 수가 원래대로 돌아와야 합니다. 마지막으로 두 핸들이 서로 다른 아이콘 픽셀을 내는지 비교해 조회부터 화면 결과까지 연결합니다.",
+      "codes": [
+        {
+          "label": "GL 없는 CPU 토큰 실험 실행",
+          "language": "bash",
+          "text": "out/study60/handles_demo\n# same slot=1, same token=0, old found=0, new value=20"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "변형 검사가 확인하는 것",
+          "body": "검사에서 발급 번호 비교를 일부러 제거하면 오래된 핸들을 받아들이는 실패가 나타나야 합니다. 테스트가 단순 성공 호출만 확인하는지, 중요한 오류를 실제로 발견하는지 확인하는 방법입니다."
+        }
+      ]
+    },
+    {
+      "title": "완성 파일과 실행 경로",
+      "body": "handle_pool.h는 GPU를 모르는 토큰·소유 저장소입니다. image_store.h가 디코딩·Texture·Quad와 연결합니다. session_icons.h는 콘텐츠 픽셀만 담당하고, main은 세션 수명과 화면별 선택을 관리합니다. 같은 저장소 알고리즘을 CPU 값으로도 시험할 수 있어 자원 식별 규칙과 GL 실패를 따로 진단할 수 있습니다.\n\n실행 파일과 PNG 경로는 아래처럼 지정합니다. 메뉴에서 파일 아이콘을 보고 시작하면 주황색 아이콘으로 바뀝니다. Escape로 메뉴에 돌아오면 파일 아이콘을 다시 사용합니다. Windows 다중 구성 빌드에서는 실행 파일의 Release 등 구성 디렉터리를 경로에 반영합니다.\n\n유지할 핵심은 위치와 수명을 함께 검증하는 핸들, 단일 소유자, 완성된 자원만 공개하는 생성, 의존 자원보다 먼저 끝내는 정리입니다. 그림 개수와 콘텐츠·비트 배치·빈 슬롯 탐색 자료구조는 필요에 따라 바뀔 수 있습니다.",
+      "codes": [
+        {
+          "label": "빌드와 검증",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/60-image-handles -B out/study60 -DSTUDY_PLATFORM=SDL -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study60 -j3\nctest --test-dir out/study60 --output-on-failure\nout/study60/handles_demo\nout/study60/tetris --seed 1 --image out/study60/assets/player.png\npython3 scripts/check_learning_handles.py"
+        },
+        {
+          "label": "핸들 풀 전체",
+          "language": "cpp",
+          "file": "checkpoints/60-image-handles/renderer/handle_pool.h",
+          "collapsed": true
+        },
+        {
+          "label": "이미지 저장소 전체",
+          "language": "cpp",
+          "file": "checkpoints/60-image-handles/renderer/image_store.h",
+          "collapsed": true
+        },
+        {
+          "label": "누적 게임 연결",
+          "language": "cpp",
+          "file": "checkpoints/60-image-handles/src/main.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/handle_pool.h",
+        "symbol": "class HandlePool final",
+        "invariant": "조회 때 슬롯 위치와 발급 번호를 함께 검사하고 소유 객체를 저장소가 정리한다.",
+        "mayDiffer": "루트는 GL 이름을 담은 ImageEntry를, 학습 코드는 Texture 소유 객체를 보관한다.",
+        "omitted": "동시 접근·직렬화·공유 라이브러리 사이의 ID 서비스는 포함하지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "60-1",
+      "question": "A를 해제한 슬롯에 B를 넣었습니다. 옛 A의 핸들이 B를 가리키지 않게 하는 핵심 검사는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "슬롯이 벡터 범위 안인지 확인한다."
+        },
+        {
+          "id": "b",
+          "text": "폭과 높이가 같은지 확인한다."
+        },
+        {
+          "id": "c",
+          "text": "슬롯의 발급 번호가 핸들의 번호와 같은지 확인한다."
+        },
+        {
+          "id": "d",
+          "text": "핸들 값이 0보다 큰지만 확인한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "슬롯의 발급 번호가 핸들의 번호와 같은지 확인한다.",
+      "explanation": "범위 안의 같은 슬롯은 이미 B가 사용하고 있을 수 있습니다. 위치와 발급 번호가 함께 일치해야 같은 수명으로 판단합니다."
+    },
+    {
+      "id": "60-2",
+      "question": "GPU 업로드 성공 후 HandlePool<Texture>의 슬롯 할당이 실패했습니다. 학습 구현의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0을 반환하고 소유 Texture의 소멸자가 GPU 이름을 정리한다."
+        },
+        {
+          "id": "b",
+          "text": "GPU 이름을 유효 핸들로 반환한다."
+        },
+        {
+          "id": "c",
+          "text": "호출자가 직접 찾아 삭제할 때까지 Texture를 남긴다."
+        },
+        {
+          "id": "d",
+          "text": "벡터 확장이 성공할 때까지 렌더 루프에서 재시도한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "0을 반환하고 소유 Texture의 소멸자가 GPU 이름을 정리한다.",
+      "explanation": "insert는 unique_ptr 소유권을 소비합니다. 실패한 호출의 정리가 끝나면 Texture의 소멸자가 이름을 해제하고 호출자는 0을 받습니다. 루트의 plain Entry 방식에서는 이 GL 정리를 생성 함수가 명시적으로 수행합니다."
+    },
+    {
+      "id": "60-3",
+      "question": "하나를 로드한 핸들을 두 화면 변수에 복사했습니다. 이 저장소에서 의미하는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 GPU 이미지와 두 소유자가 생겼다."
+        },
+        {
+          "id": "b",
+          "text": "참조 횟수가 2만큼 증가했다."
+        },
+        {
+          "id": "c",
+          "text": "각 복사본을 unload해야 실제 이미지가 삭제된다."
+        },
+        {
+          "id": "d",
+          "text": "같은 이미지의 비소유 참조 두 개이며 소유자가 해제하면 함께 무효다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "같은 이미지의 비소유 참조 두 개이며 소유자가 해제하면 함께 무효다.",
+      "explanation": "핸들 복사는 정수 토큰 복사입니다. 참조 카운팅이나 자원 복제를 하지 않으므로 소유자는 별도로 정하고 한 번 해제합니다."
+    },
+    {
+      "id": "60-4",
+      "question": "마지막 발급 번호를 쓴 뒤 clear하고 다시 이미지를 생성합니다. 이번 정책에서 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1부터 다시 발급한다."
+        },
+        {
+          "id": "b",
+          "text": "새 생성은 0으로 실패하며 번호를 재사용하지 않는다."
+        },
+        {
+          "id": "c",
+          "text": "clear 전에 쓰던 핸들을 새 이미지에 부여한다."
+        },
+        {
+          "id": "d",
+          "text": "슬롯 번호만 유효하면 생성 성공으로 본다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "새 생성은 0으로 실패하며 번호를 재사용하지 않는다.",
+      "explanation": "발급 공간 소진은 실행 전체에 적용됩니다. clear는 자원과 슬롯을 비우지만 카운터를 되감지 않아 옛 토큰과의 충돌을 방지합니다."
+    },
+    {
+      "id": "60-5",
+      "question": "HandlePool<Texture>의 벡터가 확장되었습니다. 확장 전 find로 빌린 Texture 포인터의 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Slot이 이동하므로 언제나 무효다."
+        },
+        {
+          "id": "b",
+          "text": "저장소 소멸 후에도 유효하다."
+        },
+        {
+          "id": "c",
+          "text": "해당 이미지를 해제하지 않았다면 unique_ptr가 가리키는 객체 주소는 유지된다."
+        },
+        {
+          "id": "d",
+          "text": "포인터로 직접 delete하면 풀도 자동 갱신된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "해당 이미지를 해제하지 않았다면 unique_ptr가 가리키는 객체 주소는 유지된다.",
+      "explanation": "이 구현은 Texture 자체가 아니라 unique_ptr를 슬롯에 둡니다. 벡터 확장으로 소유 포인터가 이동해도 객체 주소는 유지됩니다. erase·clear·풀 소멸 후에는 무효이며 호출자가 삭제하지 않습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "인덱스만 쓰는 저장소에서 A 해제 후 B를 같은 슬롯에 넣고 옛 핸들의 결과를 예측한다.",
+      "슬롯+발급 번호 토큰에서 같은 위치의 다른 수명이 거절되는 경로를 따라간다.",
+      "업로드 성공 후 등록 실패 시 CPU 객체와 GL 이름을 각각 누가 해제하는지 설명한다.",
+      "메뉴와 플레이 아이콘을 서로 다른 핸들로 만들어 상태 전환에서 선택한다."
+    ],
+    "failureChecks": [
+      "조회와 삭제가 모두 발급 번호를 검사하는지 확인한다.",
+      "실패한 등록에서 GPU 자원이 남지 않는지 확인한다.",
+      "clear/재초기화가 발급 번호를 되감지 않는지 확인한다.",
+      "GL 문맥보다 이미지 저장소가 먼저 정리되는지 확인한다."
+    ],
+    "expected": "화면은 불투명한 핸들을 빌리고 저장소가 이미지 수명을 소유하며, 오래된 토큰과 실패한 등록이 다른 자원을 손상하지 않는다."
+  }
+}

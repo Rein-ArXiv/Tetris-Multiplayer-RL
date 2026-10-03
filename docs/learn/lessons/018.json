@@ -1,0 +1,477 @@
+{
+  "id": "lesson-18",
+  "title": "첫 삼각형: 준비한 상태를 그리기 호출로 연결한다",
+  "shortTitle": "첫 삼각형 그리기",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: VBO·VAO·프로그램은 준비되어 있지만 프레임 버퍼에 도형을 그리지 않습니다.",
+  "finish": "완료: 픽셀 크기에 맞춰 배경을 지우고 삼각형을 그린 뒤 표시합니다. 잘못된 개수·호출 순서를 실험으로 구별합니다.",
+  "objective": "초기화와 프레임 작업을 나눠 첫 삼각형을 만들고, 정점 개수·픽셀 크기·상태·표시 순서로 빈 화면의 원인을 좁힐 수 있습니다.",
+  "prerequisites": [
+    "17차시 체크포인트",
+    "VBO·VAO·프로그램의 역할",
+    "지역 객체 수명과 상태 조회"
+  ],
+  "validation": [
+    "Linux SDL/SCRIPTED Release 각7 CTest·실제 offscreen GL 픽셀 읽기",
+    "창 픽셀 크기/표시 수명 경계는 SDL 호출 대역 검사",
+    "X11 사용 불가. 실제 모니터 표시·물리GPU·Windows/macOS 네이티브는 미검증"
+  ],
+  "review": {
+    "date": "2026-09-21",
+    "method": "DeepSeek 함수 초안 검토 후 기준 코드·실제 GL 픽셀·공식 계약·Part 대조",
+    "draftJob": "out/learning-jobs/triangle-events.jsonl",
+    "corrections": [
+      "clear가 viewport만 지운다는 설명 수정",
+      "업로드 후 CPU 원본을 유지할 필요가 없음을 명시",
+      "stage enum을 제거하고 오류 지점 문자열로 단순화",
+      "Part3의 draw 반환/관찰 불가 단정과 VSync 보장 표현 보완",
+      "현재 renderer_begin의 빈 영역 분기가 이전 GL viewport를 남기는 오류를 재현하고0×0설정을 추가"
+    ],
+    "focusedEdit": {
+      "date": "2026-09-23",
+      "note": "부정문을 문맥별 검토하여 불필요한 반박·중복은 삭제하고 보충적 오개념 설명은 메모로 이동. 구현 전제·실패 계약·문제 ID 유지."
+    }
+  },
+  "recap": {
+    "points": [
+      "링크는 각 stage의 입출력을 연결하고 LinkStatus로 결과를 판정합니다.",
+      "성공한 프로그램은 임시 셰이더를 정리한 뒤에도 남습니다.",
+      "새 프로그램 링크와 UseProgram으로 현재 사용할 프로그램을 고르는 일은 별개입니다."
+    ],
+    "bridge": "이제 VAO가 읽는 데이터와 실행할 프로그램을 한 프레임 안에서 함께 선택합니다. 그 결과가 픽셀로 만들어지고 화면에 전달되는 순서를 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "배경 위에 삼각형을 만든다",
+      "body": "만들 결과는 단순합니다. 어두운 남색 배경 위에 청록색 삼각형 하나가 나타나고, 창을 늘리면 전체 그리기 영역도 따라갑니다. 아래는 128×128 픽셀 결과의 예입니다. 이 단계는 창 전체를 사용하므로 종횡비가 바뀌면 삼각형도 가로·세로로 늘어납니다. 비율을 유지하는 레터박스는 별도 단계에서 만듭니다.\n\n![어두운 남색 배경의 중앙에 위쪽을 향한 청록색 삼각형](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABhklEQVR4nO3asU0AUQwFQRogI6cIOqco6gCJErg7+7MjbQHWm9Qvr2/vGuxl/IJ4AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIA/9PH59dP4GQDmLykC/K5/ugEAAH9e/2gDAACuWP9cAwAALlr/UAMAAK5b/0QDAAAuXf84AwAArl7/LAMAAG5Y/yADAADuWf8UAwAAblv/CAMAAO5cf78BAAA3r7/cAACA+9ffbAAAwCPrrzUAAOCp9XcaAADw4PoLDQAAeHb9bQYAADy+/ioDAAAm1t9jACAPMLX+EgMAbYDZ9TcYAAgDjE+/wQBAFWB89CUGAJIA43PvMQDQAxgfepUBgBjA+MTbDACUAMbHXWgAIAMwPutOAwANgPFB1xoACACMT7nZAMB/BxgfcbnB/FdEPAAA2gEA0A4AgHYAALQDAKAdAADtAABoBwBAOwAA2gEA0A4AgHYAALQDAKAdAADtAABoB2C4bxMrWaU9JBLDAAAAAElFTkSuQmCC)\n\n삼각형을 매 프레임 화면에 만들지만, CPU 정점 배열을 매 프레임 새로 업로드하지는 않습니다. 세 정점이 고정되어 있으므로 VBO·VAO·프로그램을 초기화할 때 한 번 준비하고 계속 사용합니다. **화면을 다시 그리는 일과 정점 데이터를 다시 보내는 일은 다릅니다.**\n\n| 시점 | 해야 할 작업 | 끝난 뒤 유지할 것 |\n| --- | --- | --- |\n| 초기화 | 컨텍스트·로더·VBO·VAO·프로그램 준비 | GL 소유 객체 |\n| 각 프레임 | 입력 처리 → 픽셀 크기 조회 → 지우기 → 그리기 → 표시 | 다음 프레임에도 사용할 정점과 프로그램 |\n| 종료 | GL 자원 정리 → 컨텍스트·창 정리 | 세션 밖에 남길 GL 이름 없음 |\n\n화면 출력이 없다는 이유만으로 셰이더부터 전부 다시 작성하지 마세요. 어떤 단계까지 준비됐고 어떤 상태로 draw를 호출했는지 확인하는 순서를 함께 만듭니다."
+    },
+    {
+      "title": "VBO와 프레임 버퍼는 서로 다른 저장소다",
+      "body": "VBO에는 정점의 입력 데이터가 들어 있습니다. 이번 VBO는 `(-0.5, -0.5)`, `(0.5, -0.5)`, `(0, 0.5)`라는 세 위치입니다. 반면 프레임 버퍼(framebuffer)는 렌더링 결과를 기록할 색상·깊이 등의 저장소를 묶어 다루는 대상입니다. 지금은 창에 연결된 기본 프레임 버퍼의 색상 저장소를 사용합니다.\n\nDrawArrays는 정점을 읽는 방식과 셰이더를 이미 선택한 상태에서 도형 처리를 요청합니다. 정점 셰이더가 위치를 계산하고, 삼각형이 덮는 영역에 프래그먼트 처리가 이루어집니다. 프래그먼트 셰이더의 색상 출력은 해당 프레임 버퍼의 색상 저장소에 기록되는 경로로 이어집니다. 프래그먼트와 최종 픽셀은 테스트·혼합 등에 의해 달라질 수 있지만 이 첫 실습은 그런 상태를 추가하지 않습니다.\n\n이번 vertex는 `gl_Position = vec4(a_position, 0.0, 1.0)`입니다. w가1이라 원근 나눗셈 뒤 x/y가 그대로 남습니다. 따라서 -1~1 범위의 중심 쪽을 차지하는 삼각형이 됩니다. clip 좌표와 NDC, 화면 좌표의 계산은 다음 구현에서 단계별로 확장합니다. 지금은 C++ 배열의0.5가 곧 화면의0.5픽셀이라는 오해를 피하면 됩니다.\n\nfragment 출력에는 `layout(location = 0)`을 명시해 색상 출력 번호를 고정합니다. vertex 입력의 location 0과 fragment 출력의 location 0은 **서로 다른 경계의 번호**입니다. 그 사이의 v_color 연결은 이름·타입 계약을 유지합니다.",
+      "codes": [
+        {
+          "label": "출력 위치를 명시한 fragment",
+          "language": "glsl",
+          "text": "#version 330 core\nin vec3 v_color;\nlayout(location = 0) out vec4 out_color;\nvoid main() {\n    out_color = vec4(v_color, 1.0);\n}"
+        },
+        {
+          "label": "교체 · 출력 위치를 포함한 두 GLSL 소스",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/renderer/shader_sources.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/gl_shaders.h",
+        "symbol": "kQuadVert",
+        "invariant": "입력 위치를 clip 위치로 만들고 fragment가 색상 결과를 출력한다.",
+        "mayDiffer": "현재 셰이더는 논리 해상도와 uniform, UV·색·도형 속성을 함께 사용한다.",
+        "omitted": "좌표계 수식·보간·텍스처와 화면 비율 유지의 상세 구현은 후속 차시에서 만든다."
+      }
+    },
+    {
+      "title": "DrawArrays의 3은 바이트가 아니라 정점 개수다",
+      "body": "`DrawArrays(Triangles, 0, 3)`의 세 인자를 따로 읽습니다. Triangles는 연속 정점을 3개씩 묶어 삼각형으로 해석하는 방식입니다. 0은 시작 정점 인덱스(first), 3은 사용할 정점 개수(count)입니다. 인덱스 버퍼에서 번호를 읽는 DrawElements는 아직 사용하지 않습니다.\n\nVertex2에는 float 2개가 있으므로 세 정점은 float 6개, 4바이트 float 전제에서 24바이트입니다. 업로드에는 24바이트를 넘겼지만 draw에는 3개를 넘깁니다. **같은 데이터를 다루더라도 API 인자가 요구하는 단위는 다릅니다.**\n\n| 값 | 이번 예제 | 쓰이는 곳 |\n| --- | --- | --- |\n| 정점 개수 | 3 | DrawArrays의 count |\n| 정점 한 개의 간격 | 8바이트 | VAO의 stride |\n| 업로드 범위 | 24바이트 | BufferData의 size |\n| 삼각형 개수 | 1 | 세 정점을 한 묶음으로 해석한 결과 |\n\ncount를 2로 바꾸면 완성되는 삼각형이 없습니다. API 오류 없이 배경만 남는 실험입니다. 반대로 24를 넘겨 보는 것은 좋은 진단 실험이 아닙니다. VBO에 정점 3개밖에 없는데 범위를 넘어 읽도록 요청하게 됩니다. GetError가 모든 범위 실수를 안전하게 잡아 줄 것이라고 기대해서는 안 됩니다. 시작 위치와 개수의 유효 범위를 호출자가 관리합니다. [Khronos DrawArrays 인자 계약](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glDrawArrays.xhtml).",
+      "codes": [
+        {
+          "label": "정점 세 개를 한 번 제출",
+          "language": "cpp",
+          "text": "gl.DrawArrays(Triangles, 0, 3);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "정점 범위·VAO·프로그램을 준비한 상태에서 DrawArrays로 삼각형을 제출한다.",
+        "mayDiffer": "현재 렌더러는 배치마다 동적 업로드하고 텍스처를 선택한다. 기준 코드는 정점 3개를 한 번 업로드해 반복 사용한다.",
+        "omitted": "사각형 배칭·텍스처·SDF·uniform 변경과 성능 최적화는 이후에 추가한다."
+      }
+    },
+    {
+      "title": "그리기 직전에 프로그램과 VAO를 선택한다",
+      "body": "DrawArrays에는 프로그램 이름이나 VBO 이름을 직접 넘기지 않습니다. 그래서 짧은 함수 호출 뒤에 여러 상태 전제가 숨어 있습니다. current 컨텍스트, 사용할 프로그램, 선택한 VAO와 그 안의 속성 연결이 준비되어 있어야 합니다.\n\n`UseProgram(program)`은 실행할 프로그램을 선택합니다. `BindVertexArray(vao)`는 정점 읽기 설정을 선택합니다. VAO에 기록한 location 0은 업로드한 버퍼와 stride 8·offset 0·float 2개를 가리킵니다. **프로그램을 선택한다고 VAO가 선택되거나, VAO를 선택한다고 프로그램이 따라 바뀌지 않습니다.**\n\n초기화가 끝난 뒤 일반 ARRAY_BUFFER 바인딩을 0으로 바꿔도 VAO가 캡처한 속성의 버퍼 연결은 남습니다. 이를 직접 픽셀 관찰로 확인합니다. draw 직전에 BindBuffer(ArrayBuffer, buffer)를 다시 하지 않아도 되는 이유입니다. 그러나 버퍼를 삭제해도 무조건 괜찮다는 뜻은 아닙니다. 기준 코드의 VertexBuffer 소유자는 VAO 사용이 끝날 때까지 살아 있습니다.\n\n이번 함수는 새 GL 컨텍스트의 기본 상태를 유지하는 전용 그리기 단계입니다. 기본 프레임 버퍼를 사용하고, 영역 제한(scissor), 깊이/스텐실 검사, 혼합, 뒷면 제거, 래스터화 중단을 켜지 않으며 모든 색상 성분을 쓸 수 있어야 합니다. 이런 기능을 사용하는 다른 렌더러와 섞을 때는 해당 상태도 명시적으로 관리해야 합니다. draw 함수가 모든 상태를 검사하거나 복구하는 범용 렌더러라고 해석하지 마세요.",
+      "codes": [
+        {
+          "label": "서로 독립적인 두 상태 선택",
+          "language": "cpp",
+          "text": "gl.UseProgram(program);\ngl.BindVertexArray(vao);"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "상태 의존성",
+          "title": "빈 화면이 꼭 GL 오류는 아닙니다",
+          "body": "프로그램과 VAO가 유효해도 위치가 보이는 범위를 벗어나거나 정점 개수가 부족하면 원하는 픽셀이 생기지 않습니다. API 오류 검사는 호출 계약을 확인하는 한 수단이며, 의미상 올바른 그림인지까지 증명하지 않습니다."
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "정점 범위·VAO·프로그램을 준비한 상태에서 DrawArrays로 삼각형을 제출한다.",
+        "mayDiffer": "현재 렌더러는 배치마다 동적 업로드하고 텍스처를 선택한다. 기준 코드는 정점 3개를 한 번 업로드해 반복 사용한다.",
+        "omitted": "사각형 배칭·텍스처·SDF·uniform 변경과 성능 최적화는 이후에 추가한다."
+      }
+    },
+    {
+      "title": "창의 크기 대신 그릴 픽셀 크기를 조회한다",
+      "body": "운영체제가 알려 주는 창 크기의 단위와 GL이 그리는 픽셀 수는 다를 수 있습니다. 예를 들어 창 크기가 640×480이고 표시 배율 때문에 drawable이 1280×960 픽셀이라면 viewport에는 1280×960을 사용합니다. 논리 크기를 그대로 넣으면 창의 일부분만 사용하게 될 수 있습니다.\n\n플랫폼 계약에 `DrawableSize`와 `platform_drawable_size()`를 추가합니다. SDL 구현은 SDL_GL_GetDrawableSize로 실제 그리기 영역의 크기를 묻습니다. 창 크기를 바꿀 수 있도록 RESIZABLE, 고해상도 drawable을 허용하도록 ALLOW_HIGHDPI 플래그를 지정합니다. ALLOW_HIGHDPI가 항상 2배 배율을 강제하는 것은 아닙니다. 환경마다 다를 수 있으므로 반환값을 사용합니다.\n\n최소화 상태이거나 플랫폼이 없으면 0×0을 돌려주는 정책을 둡니다. main은 크기가 양수일 때만 draw/present를 호출합니다. 그릴 수 없는 동안에도 입력·종료 처리와 프레임 페이싱은 계속합니다. GL 구현이 없는 SCRIPTED/WIN32 학습 백엔드는 이 단계까지 입력 전용이므로 크기 0, present 무동작으로 계약을 구현합니다. GL 실행 타깃은 SDL에서만 만듭니다.\n\n[SDL_GL_GetDrawableSize의 픽셀 단위](https://wiki.libsdl.org/SDL2/SDL_GL_GetDrawableSize)를 SDL_GetWindowSize의 창 크기와 구별해서 읽어 보세요.",
+      "codes": [
+        {
+          "label": "새 플랫폼 계약",
+          "language": "cpp",
+          "text": "struct DrawableSize { int width = 0; int height = 0; };\nDrawableSize platform_drawable_size();\nvoid platform_present();"
+        },
+        {
+          "label": "SDL 구현 · drawable 크기",
+          "language": "cpp",
+          "text": "DrawableSize platform_drawable_size()\n{\n    if (!active || active->should_close ||\n        (SDL_GetWindowFlags(active->window.get()) & SDL_WINDOW_MINIMIZED)) return {};\n    DrawableSize size;\n    SDL_GL_GetDrawableSize(active->window.get(), &size.width, &size.height);\n    return size;\n}"
+        },
+        {
+          "label": "교체 · 크기와 표시 계약",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/platform/platform.h",
+          "collapsed": true
+        },
+        {
+          "label": "scripted.cpp와 win32.cpp에 각각 추가 · 입력 전용",
+          "language": "cpp",
+          "text": "DrawableSize platform_drawable_size() { return {}; }\nvoid platform_present() {}"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "void platform_viewport(",
+        "invariant": "플랫폼이 그릴 픽셀 영역을 제공하고 렌더러는 그 사각형을 사용한다.",
+        "mayDiffer": "현재 프로젝트는 창 전체 크기 대신 논리 비율을 보존하는 레터박스 사각형을 반환한다.",
+        "omitted": "마우스 역매핑·DPI 변경 통지·레터박스 계산은 후속 구현에서 연결한다."
+      }
+    },
+    {
+      "title": "viewport와 clear는 서로 다른 범위를 다룬다",
+      "body": "Viewport는 정규화된 위치를 프레임 버퍼의 어느 사각형으로 옮길지 지정합니다. 이번에는 왼쪽 아래(0,0)에서 시작해 drawable 전체를 사용합니다. 창 크기가 달라질 수 있으므로 매 프레임 현재 크기로 설정합니다.\n\nClearColor는 다음 색상 지우기에 쓸 값을 정합니다. 그 호출만으로 픽셀은 변하지 않습니다. Clear(ColorBufferBit)가 현재 선택된 색상 저장소를 지웁니다. 이번에는 어두운 남색 `(0.05, 0.08, 0.12, 1.0)`을 사용합니다.\n\n**Clear는 viewport 사각형으로 제한되지 않습니다.** 영역을 제한하는 scissor 검사와 쓰기 마스크 등은 별도의 상태입니다. 현재 실습처럼 scissor를 사용하지 않고 색상 쓰기가 모두 켜져 있으면, viewport를 0×0으로 바꿔도 Clear는 색상 저장소를 지울 수 있습니다. 이것이 viewport 0 실험에서 배경색은 바뀌는데 삼각형은 나타나지 않는 이유입니다.\n\n순서도 중요합니다. 배경을 지운 뒤 삼각형을 그려야 두 결과가 함께 남습니다. 삼각형을 그린 뒤 Clear로 덮으면 배경만 남습니다. 해당 상태에서 오류가 없는 호출끼리 순서만 잘못되어도 결과가 달라집니다. [Viewport의 좌표 변환](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glViewport.xhtml)과 [Clear에 영향을 주는 상태](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glClear.xhtml)는 별개 계약입니다.",
+      "codes": [
+        {
+          "label": "프레임 시작의 세 호출",
+          "language": "cpp",
+          "text": "gl.Viewport(0, 0, width, height);\ngl.ClearColor(0.05f, 0.08f, 0.12f, 1.0f);\ngl.Clear(ColorBufferBit);"
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void renderer_begin(Color bg)",
+        "invariant": "현재 픽셀 영역과 배경을 준비한 뒤 도형을 그린다.",
+        "mayDiffer": "현재 렌더러는 전체를 검게 지우고 scissor로 레터박스 내부만 배경색으로 지운다.",
+        "omitted": "두 번 지우기와 scissor의 상태 관리는 비율 유지 단계에서 자세히 구현한다."
+      }
+    },
+    {
+      "title": "소유권 없는 그리기 함수로 묶는다",
+      "body": "새 draw_triangle 함수는 GlApi·프로그램 이름·VAO 이름·픽셀 크기를 받습니다. 이름을 빌릴 뿐 새 GL 객체를 만들거나 삭제하지 않습니다. 정점 업로드도 하지 않습니다. 프레임마다 변하는 크기와 선택·지우기·그리기만 책임집니다.\n\n진입할 때 크기와 이름이 유효한지 확인하고, 남아 있던 GL API 오류가 있으면 작업을 시작하지 않습니다. 이후 각 호출 뒤 오류를 읽어 실패 지점을 출력합니다. 임의의 GLuint가 0이 아니라는 이유만으로 실제 객체의 종류나 버퍼 범위를 증명하지는 않으므로 헤더의 전제를 함께 지켜야 합니다.\n\n함수가 성공하면 VAO와 프로그램을 각각 0으로 해제합니다. 실패 경로에서도 지역 보호자가 두 해제를 시도합니다. 이는 이전 상태를 저장했다가 복원하는 구현이 아니라 **이 실습의 프레임 경계를 정리하는 정책**입니다. viewport와 지우기 색상은 설정한 값으로 남습니다. 작업 도중 이미 지운 픽셀을 되돌리는 트랜잭션도 아닙니다. 실패 반환은 정상 프레임이라고 간주하지 말라는 신호입니다.\n\n오류 보고는 fprintf로 하고 새 문자열이나 vector를 만들지 않으므로 함수는 noexcept입니다. 완성 파일에는 성공 경로의 해제 오류도 검사합니다. 실패 정리 호출 자체가 실패하면 모든 상태가 복구됐다고 보장할 수는 없습니다.",
+      "codes": [
+        {
+          "label": "그리기 함수의 공개 계약",
+          "language": "cpp",
+          "text": "bool draw_triangle(const GlApi& gl, GLuint program, GLuint vao,\n                   int width, int height) noexcept;"
+        },
+        {
+          "label": "매 프레임 수행하는 핵심 순서 · 오류 검사는 완성 파일 참조",
+          "language": "cpp",
+          "text": "gl.UseProgram(program);\ngl.BindVertexArray(vao);\ngl.Viewport(0, 0, width, height);\ngl.ClearColor(0.05f, 0.08f, 0.12f, 1.0f);\ngl.Clear(ColorBufferBit);\ngl.DrawArrays(Triangles, 0, 3);\ngl.BindVertexArray(0);\ngl.UseProgram(0);"
+        },
+        {
+          "label": "새 파일 · 전제와 상태 정책",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/renderer/triangle.h",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 단계별 실패 검사와 해제 보호자",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/renderer/triangle.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void glb_flush()",
+        "invariant": "정점 범위·VAO·프로그램을 준비한 상태에서 DrawArrays로 삼각형을 제출한다.",
+        "mayDiffer": "현재 렌더러는 배치마다 동적 업로드하고 텍스처를 선택한다. 기준 코드는 정점 3개를 한 번 업로드해 반복 사용한다.",
+        "omitted": "사각형 배칭·텍스처·SDF·uniform 변경과 성능 최적화는 이후에 추가한다."
+      }
+    },
+    {
+      "title": "그린 버퍼를 창에 전달한다",
+      "body": "더블 버퍼 창에서는 화면에 제공할 결과를 준비하는 back buffer와 표시 쪽의 front buffer를 구분해 생각할 수 있습니다. draw와 Clear는 그릴 저장소에 결과를 만듭니다. 이것만으로 OS에 새 프레임을 표시하도록 전달하는 단계가 끝나지는 않습니다.\n\n플랫폼의 present는 SDL_GL_SwapWindow를 호출합니다. SDL 창 핸들은 플랫폼만 알고, 삼각형의 정점이나 셰이더는 전달받지 않습니다. 따라서 렌더러는 SDL 헤더 없이 그리기 역할을 유지할 수 있습니다. 이 경계는 다음에 플랫폼 구현을 바꾸어도 유효합니다.\n\n‘버퍼 교체’를 매번 모든 픽셀을 CPU로 복사하는 작업이라고 단정하지 마세요. 교체 방식과 실제 표시 시점은 플랫폼·드라이버·합성기의 영향을 받습니다. 또한 교체 후 새 back buffer의 내용이 직전 프레임 그대로 유지된다고 가정하지 않습니다. 이 실습은 매 프레임 필요한 배경과 삼각형을 다시 만듭니다.\n\n[SDL_GL_SwapWindow](https://wiki.libsdl.org/SDL2/SDL_GL_SwapWindow)는 그리기 명령을 대신 생성하지 않습니다. 이번 플랫폼은 여전히 타이머 기반 페이싱을 사용합니다. 이는 화면 주사와 동기화하는 VSync 설정과 다릅니다. [스왑 인터벌](https://wiki.libsdl.org/SDL2/SDL_GL_SetSwapInterval)은 해당 기능을 다루는 단계에서 적용합니다.",
+      "codes": [
+        {
+          "label": "SDL 구현 · 준비된 프레임 표시",
+          "language": "cpp",
+          "text": "void platform_present()\n{\n    const auto size = platform_drawable_size();\n    if (size.width > 0 && size.height > 0) SDL_GL_SwapWindow(active->window.get());\n}"
+        },
+        {
+          "label": "교체 · 고해상도 창과 조회·표시 구현",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/platform/sdl.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "void platform_present()",
+        "invariant": "표시는 플랫폼이 창과 컨텍스트를 사용해 수행한다.",
+        "mayDiffer": "현재 플랫폼은 프로젝트의 viewport·VSync·전체화면 정책과 함께 동작한다.",
+        "omitted": "정확한 프레임 페이싱·표시 지연·다중 창은 이 단순 실습의 범위 밖이다."
+      }
+    },
+    {
+      "title": "반복문 안에 그리기와 표시를 넣는다",
+      "body": "자원 생성 코드는 반복문 밖에 그대로 둡니다. 반복문은 이벤트를 처리하고 종료 요청을 확인한 뒤, 현재 drawable 크기를 읽습니다. 양수 크기면 draw_triangle을 호출하고 성공했을 때 present합니다. 마지막에 platform_end_frame으로 페이싱합니다.\n\n종료 요청이 들어왔는데 한 프레임을 더 그릴 필요는 없습니다. 이벤트 처리 바로 뒤의 should_close/Escape 검사는 유지합니다. 크기 0이면 draw/present만 건너뛰며, 플랫폼 종료를 하지 않습니다. 사용자가 창을 복원하면 다음 프레임의 크기로 다시 그립니다.\n\n프레임마다 VBO를 생성하거나 프로그램을 다시 링크하면 처음부터 준비를 반복하는 구조가 됩니다. 이번 정점과 셰이더가 바뀌지 않는 동안에는 그럴 필요가 없습니다. 이후 움직임을 넣을 때도 ‘CPU 데이터 갱신’, ‘GPU 저장소 갱신’, ‘같은 데이터로 다시 그리기’를 구별할 것입니다.\n\nmain은 draw 실패 때 세션에서 반환합니다. 지역 GL 소유자들의 정리가 끝난 뒤 플랫폼이 컨텍스트를 종료합니다. 성공한 draw 함수는 프로그램 선택을 해제하므로 Program 소유자의 정리 정책도 지킬 수 있습니다.",
+      "codes": [
+        {
+          "label": "입력 처리와 종료 검사 뒤에 추가",
+          "language": "cpp",
+          "text": "const auto size = platform_drawable_size();\nif (size.width > 0 && size.height > 0) {\n    if (!study_gl::draw_triangle(gl, program.name(), vertex_array.name(),\n                                 size.width, size.height)) return 1;\n    platform_present();\n}\nplatform_end_frame();"
+        },
+        {
+          "label": "교체 · 초기화와 프레임 그리기",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/src/main.cpp",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "측정 범위",
+          "title": "프레임 끝의 대기에 포함되는 시간",
+          "body": "platform_end_frame은 프레임 시작부터 경과한 시간을 읽습니다. 그리기·표시 호출에서 걸린 CPU 시간도 포함하므로 남은 목표 시간만 기다립니다. 이 계산이 실제 GPU 완료 시간이나 모니터 표시 시간을 직접 측정하는 것은 아닙니다."
+        },
+        {
+          "kind": "구현 비교",
+          "title": "크기가0일 때 다른 코드도 계속 그릴 수 있다면?",
+          "body": "기준 main은 draw 호출 자체를 건너뜁니다. 현재 게임은 프레임 시작 뒤에도 도형을 큐에 추가할 수 있어서 renderer_begin의 빈 영역 분기가 GL viewport를 0×0으로 명시합니다. CPU가 크기 0을 계산해도 GL 상태는 저절로 바뀌지 않습니다. 두 구현의 차이는 뒤따르는 그리기 호출을 누가 막는가에 있습니다."
+        }
+      ],
+      "reference": {
+        "path": "renderer/renderer.cpp",
+        "symbol": "void renderer_end()",
+        "invariant": "남은 그리기 작업을 먼저 제출한 뒤 플랫폼 표시를 호출한다.",
+        "mayDiffer": "현재 코드에서는 renderer_begin/end 사이에 여러 도형을 모아 flush한다. 기준 코드는 삼각형 한 번만 제출한다.",
+        "omitted": "복수 배치와 UI 명령 큐는 도형을 늘리는 과정에서 구현한다."
+      }
+    },
+    {
+      "title": "오류가 없는 빈 화면을 실험으로 진단한다",
+      "body": "정상 결과를 확인한 뒤 한 조건씩 바꿔 봅니다. triangle_probe가 아래 실험을 순서대로 수행하며, 픽셀 읽기로 삼각형 내부와 바깥 배경을 비교합니다. 함수 대역 검사는 인자와 호출 순서, 실제 GL 검사는 렌더링 결과를 확인하므로 둘을 구별합니다.\n\n| 바꾼 조건 | 예상되는 관찰 | 먼저 의심할 것 |\n| --- | --- | --- |\n| count가2 | 배경만 남음, API 오류 없음 | 완성된 도형을 만들 정점 수 |\n| draw 뒤 Clear | 잠깐 만든 도형이 배경으로 덮임 | 호출 순서 |\n| viewport가0×0 | Clear 색은 바뀌지만 삼각형은 없음 | 좌표가 매핑될 영역 |\n| ARRAY_BUFFER만0 | VAO 캡처가 유효하면 삼각형 유지 | 일반 바인딩과 속성 연결의 차이 |\n| 정상 함수로 다음 프레임 | 크기·색상을 다시 설정하고 삼각형 복구 | 프레임 경계의 책임 |\n\n여기서는 안전한 범위 안의 실험만 합니다. 정점 3개짜리 버퍼를 넘겨 읽거나 삭제한 이름을 억지로 사용하는 방식으로 ‘오류 메시지를 기다리는’ 실험은 하지 않습니다. 의미가 틀려도 API가 허용하는 상태와, 호출 전제를 깨는 상태를 분리합니다.\n\n삼각형 경계 픽셀은 샘플 위치·래스터화 규칙에 민감할 수 있으므로 검사점은 내부와 멀리 떨어진 배경을 고릅니다. 8비트 색상 변환의 반올림을 고려해 작은 허용 오차도 둡니다."
+    },
+    {
+      "title": "픽셀 읽기와 실제 표시는 다른 증거다",
+      "body": "DrawArrays가 반환됐다고 GPU 작업과 모니터 표시가 모두 끝났다고 할 수는 없습니다. 명령 처리가 비동기일 수 있기 때문입니다. 그렇다고 draw 직후에는 어떤 결과도 검사할 수 없는 것은 아닙니다.\n\n이 실습의 ReadPixels는 pixel-pack buffer를 바인딩하지 않고 CPU 배열에 RGBA 결과를 받습니다. 이 경우 호출이 필요한 작업과 읽기를 마친 뒤 CPU가 결과를 사용할 수 있습니다. 별도의 Finish를 매번 추가하지 않습니다. 다만 동기화 때문에 대기가 생길 수 있으므로 매 프레임 전체 화면을 읽는 코드를 성능 측정 경로에 그대로 넣지는 않습니다.\n\nRGBA 각 성분을 unsigned byte로 받으면 픽셀 하나는 4바이트입니다. 아래 배열의 크기와 ReadPixels의 1×1 요청을 맞춥니다. 좌표는 GL의 왼쪽 아래 기준입니다. 전체 이미지로 저장할 때는 일반적인 이미지 파일의 위쪽 첫 행과 순서가 다르다는 점도 고려합니다.\n\nprobe는 표시가 필요 없는 단일 버퍼 컨텍스트를 요청하고 실제 속성에 맞춰 Front/Back 읽기 대상을 고릅니다. main의 창은 더블 버퍼 정책을 유지합니다. 픽셀 검사용 probe와 창 실행용 main의 요구 조건을 분리합니다. 픽셀 결과를 읽었다는 사실은 모니터에서 언제 보였는지를 측정한 것이 아닙니다. [Khronos ReadPixels](https://registry.khronos.org/OpenGL-Refpages/gl4/html/glReadPixels.xhtml).",
+      "codes": [
+        {
+          "label": "128×128 실습에서 내부 픽셀 하나 읽기",
+          "language": "cpp",
+          "text": "std::array<unsigned char, 4> rgba{};\ngl.ReadPixels(64, 60, 1, 1, RGBA, UnsignedByte, rgba.data());\nif (gl.GetError() != 0) return false;\n// 정상 내부색은 RGB 약 (51, 179, 230). 변환의 반올림 오차를 허용한다."
+        }
+      ],
+      "notes": [
+        {
+          "kind": "메모리 전제",
+          "title": "pack 상태가 달라지면 배열 크기도 다시 계산합니다",
+          "body": "이번 probe는 새 컨텍스트의 기본 pack 설정을 유지합니다. RGBA8의 한 행은4의 배수라 기본 PACK_ALIGNMENT와 맞습니다. RGB처럼3바이트 픽셀을 여러 행 읽거나 pack row length/skip을 바꾸면 행 간격과 필요한 공간이 달라집니다. 일반 이미지 읽기 도구로 확장할 때 이 전제도 함께 관리해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "필요한 파일을 바꾸고 삼각형을 실행한다",
+      "body": "`17-program` 사본을 `18-triangle`로 만듭니다. triangle.h/cpp와 두 검사 파일을 추가합니다. GL 함수에는 Viewport·ClearColor·Clear·DrawArrays 및 관찰용 ReadPixels·ReadBuffer를 추가하며, 로더와 누락 검사도 37개 진입점으로 맞춥니다. GLint/GLsizei는 좌표와 크기, GLfloat는 색상, GLbitfield는 지울 버퍼 종류의 비트 표시입니다.\n\n플랫폼 헤더와 SDL 구현에 크기 조회·표시를 추가하고 입력 전용 백엔드의 빈 구현도 맞춥니다. shader_sources.h에는 fragment 출력 위치를 명시합니다. main은 준비를 반복문 밖에 유지한 채 프레임 호출만 추가합니다. study_triangle은 study_gl에만 의존하며 SDL은 플랫폼과 실제 GL probe에만 필요합니다.\n\n저장소 루트, SDL2 개발 패키지와 pkg-config가 있는 환경에서 실행합니다. 다음은 Linux 단일 구성 경로입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/18-triangle -B out/study-18 -DSTUDY_PLATFORM=SDL\ncmake --build out/study-18\nctest --test-dir out/study-18 --output-on-failure\n./out/study-18/tetris\n```\n\n어두운 배경에 청록색 삼각형이 보입니다. 창 크기를 바꾸어 전체 영역을 사용하는지 확인하고 Escape로 종료합니다. Windows 다중 구성 생성기는 구성 이름과 Debug/Release 실행 경로를 맞춥니다. 창에 GL3.3 Core·더블 버퍼를 제공할 수 없는 환경에서는 해당 요구를 먼저 충족해야 합니다.\n\n표시 없이 픽셀 결과와 실패 사례를 관찰할 때는 SDL offscreen GL을 지원하는 Linux에서 다음을 실행합니다. 그래픽 세션에서는 환경변수 없이 probe를 실행할 수도 있습니다.\n\n```sh\nSDL_VIDEODRIVER=offscreen ./out/study-18/triangle_probe\n```\n\n첫 삼각형까지 연결하면 다음 질문이 구체적이 됩니다. x좌표 0.5는 왜 화면 너비의 75% 위치가 되며, 창 크기를 바꾸면 삼각형 모양이 늘어날까요? 다음에는 clip 좌표·원근 나눗셈·NDC·viewport를 실제 수치로 이어서 계산합니다.",
+      "codes": [
+        {
+          "label": "교체 · 그리기와 읽기 타입/상수",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/renderer/gl_api.h",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 37개 진입점 로더",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/renderer/gl_api.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 37개 진입점 누락 검사",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/tests/loader_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "교체 · 그리기 타깃 연결",
+          "language": "cmake",
+          "file": "checkpoints/18-triangle/CMakeLists.txt",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 인자/호출 순서/실패 정리 검사",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/tests/triangle_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "새 파일 · 픽셀 관찰과 대조 실험",
+          "language": "cpp",
+          "file": "checkpoints/18-triangle/tests/triangle_real.cpp",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "steps": [
+      "초기화에서 정점·VAO·프로그램을 준비하고 반복문에서 재생성하지 않는다.",
+      "플랫폼에서 drawable 픽셀 크기를 조회해 viewport에 연결한다.",
+      "clear → draw → present 순서로 삼각형을 표시한다.",
+      "count2·draw 뒤 clear·viewport 0을 한 번씩 적용해 결과를 예측하고 관찰한다.",
+      "정상 함수를 다시 호출해 결과를 복구하고 자원 정리 순서를 설명한다."
+    ],
+    "expected": "어두운 배경에 삼각형이 보이고 크기 변경을 따라갑니다. API 오류가 없는 빈 화면도 개수·순서·영역의 문제로 구별할 수 있습니다.",
+    "failureChecks": [
+      "DrawArrays의 count에 바이트 수 24나 float 수 6을 넘기지 않았는가?",
+      "프로그램과 VAO를 모두 선택했고 버퍼 소유자가 살아 있는가?",
+      "창 논리 크기 대신 drawable 픽셀 크기를 사용했는가?",
+      "ClearColor만 부르고 Clear를 빠뜨리거나 draw 뒤에 clear하지 않았는가?",
+      "그린 뒤 present하는가? 픽셀 읽기 결과와 모니터 표시 증거를 구별하는가?"
+    ]
+  },
+  "questions": [
+    {
+      "id": "18-1",
+      "kind": "단위",
+      "question": "Vertex2 세 개를 24바이트로 업로드했습니다. 전체를 삼각형 하나로 그릴 DrawArrays의 first/count는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "first 0, count 24"
+        },
+        {
+          "id": "b",
+          "text": "first 0, count 6"
+        },
+        {
+          "id": "c",
+          "text": "first 0, count 3"
+        },
+        {
+          "id": "d",
+          "text": "first 1, count 1"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "first 0, count 3",
+      "explanation": "first는 시작 정점 인덱스, count는 정점 개수입니다. 24는 업로드 바이트 수이고, 6은 float 성분 개수이며 DrawArrays의 count로 대신 사용할 수 없습니다."
+    },
+    {
+      "id": "18-2",
+      "kind": "크기",
+      "question": "창 크기는640×480이고 drawable은1280×960픽셀입니다. 이번 전체 영역 실습의 viewport 크기는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "1280×960"
+        },
+        {
+          "id": "b",
+          "text": "640×480"
+        },
+        {
+          "id": "c",
+          "text": "640×960"
+        },
+        {
+          "id": "d",
+          "text": "고정128×128"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "1280×960",
+      "explanation": "Viewport는 프레임 버퍼의 픽셀 단위를 사용합니다. 고해상도 환경에서 창 크기와 실제 drawable 크기는 다를 수 있으므로 조회한 픽셀 크기를 전달합니다."
+    },
+    {
+      "id": "18-3",
+      "kind": "순서",
+      "question": "scissor 없이 색상을 모두 쓸 수 있는 이번 실습에서 삼각형을 그린 뒤 배경색으로 Clear하고 present했습니다. 무엇이 남을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "삼각형과 배경이 자동으로 합성된다."
+        },
+        {
+          "id": "b",
+          "text": "Clear는 viewport 안을 지우지 못해 삼각형만 남는다."
+        },
+        {
+          "id": "c",
+          "text": "API 오류가 나서 직전 그림이 항상 유지된다."
+        },
+        {
+          "id": "d",
+          "text": "삼각형이 지워진 배경색 결과가 표시 대상으로 전달된다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "삼각형이 지워진 배경색 결과가 표시 대상으로 전달된다.",
+      "explanation": "Clear가 그리기 뒤의 색상 결과를 덮습니다. API 호출이 각각 유효해도 순서가 틀리면 원하는 그림이 남지 않습니다."
+    },
+    {
+      "id": "18-4",
+      "kind": "VAO 연결",
+      "question": "VAO에 살아 있는 VBO의 위치 속성을 설정한 뒤 일반 ARRAY_BUFFER 바인딩만0으로 바꿨습니다. 프로그램과 해당 VAO를 선택해 그리면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "VBO 저장소가 삭제되어 읽을 수 없다."
+        },
+        {
+          "id": "b",
+          "text": "VAO에 캡처한 버퍼 연결로 정점을 읽을 수 있다."
+        },
+        {
+          "id": "c",
+          "text": "ARRAY_BUFFER0이 fragment 출력 위치0을 지운다."
+        },
+        {
+          "id": "d",
+          "text": "매 정점마다 BufferData를 다시 호출해야 한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "VAO에 캡처한 버퍼 연결로 정점을 읽을 수 있다.",
+      "explanation": "일반 ARRAY_BUFFER 바인딩과 VAO 속성이 캡처한 버퍼 관계는 다릅니다. 버퍼 소유자를 유지하는 한 초기화 때 기록한 연결을 draw에서 사용할 수 있습니다."
+    },
+    {
+      "id": "18-5",
+      "kind": "관찰 범위",
+      "question": "pixel-pack buffer 없이 ReadPixels로 삼각형 내부 픽셀을 CPU 배열에 읽어 예상 색을 확인했습니다. 무엇을 확인한 것일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모니터가 이미 해당 프레임을 표시한 시각"
+        },
+        {
+          "id": "b",
+          "text": "다음 프레임에서 GPU 대기가 전혀 없다는 사실"
+        },
+        {
+          "id": "c",
+          "text": "읽기 대상의 픽셀 결과가 예상과 맞는다는 사실"
+        },
+        {
+          "id": "d",
+          "text": "현재 창에 VSync가 설정되어 있다는 사실"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "읽기 대상의 픽셀 결과가 예상과 맞는다는 사실",
+      "explanation": "CPU로 읽은 픽셀은 렌더링 결과를 관찰하는 증거입니다. 표시 시각·VSync·앞으로의 실행 비용까지 이 검사로 증명할 수는 없습니다."
+    }
+  ]
+}

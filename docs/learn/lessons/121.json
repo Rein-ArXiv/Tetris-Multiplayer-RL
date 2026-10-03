@@ -1,0 +1,448 @@
+{
+  "id": "lesson-121",
+  "title": "저장 불확실: 응답 유실을 성공/실패로 단정하지 않기",
+  "shortTitle": "요청 보관·재개·저장 지식",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 같은 경기 요청을 재시도하지만 프로세스가 끝나면 메모리의 미확인 작업도 사라집니다.",
+  "finish": "완료: 원래 요청과 영수증을 보관하며 재시작 후 같은 작업을 이어가고, 서버 확인과 로컬 저장을 따로 표시합니다.",
+  "objective": "중단 위치별 복구 자료를 예측하고, 요청 선저장·멱등 재전송·영수증 보관을 구현하며 미확인 값으로 확인된 상태를 덮는 오류를 진단합니다.",
+  "prerequisites": [
+    "동일 key·내용의 멱등 경기 저장",
+    "원자적 파일 교체·내구성 확인·협력 잠금",
+    "저장과 인증을 구별하는 상태·실패 주입"
+  ],
+  "recap": {
+    "points": [
+      "발급·로컬 저장·현재 인증은 각각 다른 관찰이다.",
+      "파일의 부재만 신규 발급으로 이어지며 손상과 읽기 실패는 보존한다.",
+      "잠금은 작업 경쟁을, 원자적 교체는 부분 파일 노출을 다룬다."
+    ],
+    "bridge": "이번에는 파일에 원래 경기 제출을 남겨, 응답 유실과 프로그램 종료를 넘어서 같은 작업을 다시 찾습니다."
+  },
+  "sections": [
+    {
+      "title": "응답을 놓친 작업을 다시 찾는다",
+      "body": "경기 제출 객체는 같은 key와 내용을 보존하고 제한된 재시도를 수행합니다. 계정 저장소는 파일의 부재·손상·서버 소속을 구분하며 임시 파일 교체와 잠금을 사용합니다. 이제 이 두 기반을 연결해 **프로그램을 다시 실행해도 원래 경기 제출을 찾을 수 있는 보관함**을 만듭니다.\n\n서버가 경기 결과를 저장한 직후 응답이 사라졌다고 해 봅시다. 이때 프로그램까지 종료하면 메모리의 MatchSubmission도 사라집니다. 사용자가 새 key를 만들어 같은 결과를 다시 등록하면 다른 경기로 반영될 수 있습니다. 원래 key와 모든 결과 필드를 디스크에 먼저 남겨야 합니다.\n\n산출물은 `meta_outbox` 도구입니다. prepare는 신뢰하는 로컬 시뮬레이션에서 만든 결과를 파일에 준비하고, resume은 그 파일의 작업을 전송하거나 확인된 영수증을 읽습니다. 한 폴더는 한 작업을 소유합니다. UI에 연결하기 전에 저장 지식과 로컬 보관 상태의 계약을 콘솔에서 완성합니다.",
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "MetaClient::post_match",
+        "invariant": "재시도할 때 같은 경기 식별자와 내용을 유지한다.",
+        "mayDiffer": "현재 함수는 호출 동안 고정된 본문을 재사용한다. 학습 도구는 파일 보관을 추가해 재시작으로 범위를 넓힌다."
+      }
+    },
+    {
+      "title": "서버 결과와 로컬 보관 상태는 두 축이다",
+      "body": "**서버 결과에 대한 지식**은 원격 저장을 확인했는지입니다. **로컬 보관 상태**는 그 지식과 원래 작업을 현재 기기에 저장했다고 확인했는지입니다. 두 값을 성공/실패 bool 하나로 합치면, 서버는 저장했는데 영수증 파일만 못 쓴 상황을 표현하기 어렵습니다.\n\n| 서버에 대해 아는 것 | 로컬 관찰 | 표시와 다음 동작 |\n| --- | --- | --- |\n| 유효한 영수증 없음 | 원래 요청 저장 확인 | 저장 미확인, 동일 작업으로 재개 |\n| 자동 전송 중단 | stopped 기록 저장 확인 | 원래 작업 확인, 자동 전송 없음 |\n| 유효한 영수증 있음 | 영수증 저장 확인 | 서버 반영 확인, 다음 실행도 재전송 없음 |\n| 유효한 영수증 있음 | 영수증 파일 저장 실패 | 서버 반영은 확인, 로컬 영수증만 재저장 |\n\nDeliveryResult는 state·local_saved·선택적 receipt를 함께 반환합니다. **confirmed + local_saved=false**가 유효한 조합입니다. 로컬 파일 쓰기 오류 때문에 이미 얻은 서버의 영수증을 없던 사실로 바꾸지 않습니다.\n\nstorage_blocked는 이번 호출이 파일 또는 목적지 조건 때문에 새 HTTP를 시작하지 못했다는 뜻입니다. 과거 시도까지 서버에 도착하지 않았다는 결론은 아닙니다.",
+      "codes": [
+        {
+          "label": "서버 지식과 로컬 보관 여부",
+          "text": "enum class DeliveryState { empty, storage_blocked, unconfirmed, stopped, confirmed };\nstruct DeliveryResult {\n    DeliveryState state = DeliveryState::storage_blocked;\n    bool local_saved = false;\n    std::optional<study_net::Receipt> receipt;\n};",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation resume_locked",
+        "invariant": "서버 응답 미확인과 서버 성공 뒤 로컬 저장 실패를 구분한다.",
+        "mayDiffer": "현재 계정 서비스는 pending과 안내 문구를 사용한다. 학습 도구는 경기 영수증과 local_saved를 별도 값으로 전달한다."
+      }
+    },
+    {
+      "title": "전송 전에 기록하는 이유를 실패 순서로 본다",
+      "body": "먼저 HTTP를 보내고 나중에 요청을 파일에 쓰면, 서버가 저장한 뒤 파일 쓰기 전에 종료되는 틈이 생깁니다. 같은 요청을 재구성할 근거가 없습니다. 순서를 **요청 저장 확인 → HTTP → 유효한 영수증 확인 → 영수증 저장 확인**으로 바꿉니다.\n\n| 멈춘 위치 | 남아 있는 자료 | 재개 동작 |\n| --- | --- | --- |\n| 요청 준비 성공 전 | 재시작 자료가 없을 수 있음 | 이 보관함의 복구 범위 밖 |\n| 준비 성공 후·HTTP 전 | pending 요청 | 같은 요청 전송 |\n| 서버 커밋 후·응답 수신 전 | pending 요청 | 같은 key·같은 내용으로 최초 영수증 확인 |\n| 영수증 수신 후·파일 저장 전 | 파일에는 pending, 메모리에는 영수증 | 같은 세션은 파일만 재저장; 재시작은 동일 요청 재확인 |\n| 영수증 저장 확인 후 | confirmed 요청·영수증 | 로컬 영수증 사용, HTTP 생략 |\n\n이 순서가 로컬 파일과 원격 DB를 한 트랜잭션으로 묶지는 않습니다. 두 저장소 사이의 틈은 여전히 존재합니다. 원래 요청을 남기고 서버의 멱등성에 기대어 그 틈에서 재개할 수 있게 만든 것입니다.\n\n**멱등성**은 같은 작업을 반복해도 의도한 저장 효과가 한 번과 같도록 하는 성질입니다. 서버는 같은 key에 다른 내용이 오면 거절하고, 같은 내용이면 최초 영수증을 돌려줍니다. 보관함만 추가하고 이 서버 계약을 빼면 중복 반영을 막을 수 없습니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "HTTP 메서드와 응용 계약",
+          "body": "POST 자체가 멱등성을 보장하지는 않습니다. [RFC 9110의 재시도 조건](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2)은 메서드와 실제 응용 의미를 구분합니다. 이 도구는 경기 key·본문의 중복 처리 계약을 근거로 재전송합니다."
+        }
+      ]
+    },
+    {
+      "title": "파일에는 작업의 정체성과 상태를 함께 둔다",
+      "body": "OutboxDocument는 origin·request·status·receipt를 소유합니다. request에는 경기 key뿐 아니라 참가자·라운드·틱·점수·줄 수·승자가 모두 들어갑니다. 복구할 때 화면의 현재 점수로 요청을 다시 만들지 않고 보관한 값을 그대로 사용합니다.\n\n상태는 pending·stopped·confirmed입니다. pending은 **저장 여부를 확인할 영수증이 아직 없음**을 뜻합니다. 한 번도 전송하지 않았을 수도, 서버에는 이미 반영됐을 수도 있습니다. stopped는 자동 전송을 멈췄다는 정책이며, 서버 미반영의 증명은 아닙니다.\n\n디스크 형식에는 version=1도 넣습니다. 지원하지 않는 버전이나 알 수 없는 상태를 임의의 기본값으로 바꾸지 않습니다. 모르는 형식을 pending으로 해석하면 이미 끝난 작업을 새로 전송할 수 있기 때문입니다.\n\n이 실습은 작은 flat JSON 파서를 유지하기 위해 request와 receipt를 JSON 문자열로 담습니다. 외부 문서를 읽은 뒤 문자열 안의 문서를 다시 해석합니다. 중첩 객체를 지원하는 별도 스키마도 가능한 대안이며, 여기서는 검증된 경기 wire 함수를 재사용하는 쪽을 선택합니다.",
+      "codes": [
+        {
+          "label": "작업 문서의 타입",
+          "text": "enum class OutboxStatus { pending, stopped, confirmed };\n\nstruct OutboxDocument {\n  std::string origin;\n  study_net::MatchRecord request;\n  OutboxStatus status = OutboxStatus::pending;\n  std::optional<study_net::Receipt> receipt;\n};",
+          "language": "cpp"
+        },
+        {
+          "label": "버전·문자열 payload를 포함한 직렬화",
+          "text": "inline std::string outbox_json(const OutboxDocument& doc) {\n  if (!valid_outbox(doc)) {\n    throw std::invalid_argument(\"invalid outbox document\");\n  }\n\n  // Exactly five flat fields; request/receipt are JSON payloads stored as\n  // strings so the existing small flat-wire parser can reuse them directly.\n  Json j = Json::object();\n  j[\"version\"] = 1;\n  j[\"origin\"] = doc.origin;\n  j[\"request\"] = record_json(doc.request).dump();\n  switch (doc.status) {\n    case OutboxStatus::pending:\n      j[\"status\"] = \"pending\";\n      break;\n    case OutboxStatus::stopped:\n      j[\"status\"] = \"stopped\";\n      break;\n    case OutboxStatus::confirmed:\n      j[\"status\"] = \"confirmed\";\n      break;\n    default:\n      throw std::invalid_argument(\"invalid outbox status\");\n  }\n  j[\"receipt\"] = doc.receipt.has_value()\n                     ? receipt_json(*doc.receipt).dump()\n                     : std::string();\n  return j.dump();\n}",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation change_saved_account",
+        "invariant": "재개에 필요한 원래 작업을 원격 변경 전에 파일로 보관한다.",
+        "mayDiffer": "현재 코드는 계정 교체의 이전 증명과 새 키를 저널에 담는다. 학습 문서는 비밀 키가 없는 경기 요청·영수증이다."
+      }
+    },
+    {
+      "title": "필드 하나씩뿐 아니라 조합도 검사한다",
+      "body": "request를 파싱할 수 있어도 도메인 조건은 남습니다. key·round·ticks는 양수이고 두 참가자는 달라야 합니다. valid_outbox는 MatchSubmission의 prepare를 작은 검증용 객체에 호출해 이 조건을 재사용합니다.\n\nconfirmed에는 영수증이 있어야 하고, 그 영수증의 양수 row와 key·참가자가 요청과 맞아야 합니다. pending과 stopped에는 영수증이 없어야 합니다. 각 필드가 올바른 타입인 것과 **필드 조합이 한 상태로 성립하는 것**을 따로 확인하는 셈입니다.\n\nparse_outbox는 외부 객체의 다섯 필드, 버전, 정확한 문자열 타입, request/receipt 내부 문서, 마지막 조합 조건 순서로 검사합니다. 빈 receipt 문자열은 없음이라는 파일 형식상의 표현입니다. confirmed에서 이 값이 비어 있으면 거절합니다.\n\n이 검사는 파일 작성자의 권한까지 증명하지 않습니다. 로컬 보관함은 신뢰하는 작업자가 관리하는 폴더에 둡니다. 같은 사용자가 조작한 파일을 서버 판정이나 보상 권한의 근거로 받아들이는 설계가 아닙니다.",
+      "codes": [
+        {
+          "label": "영수증 대응과 상태별 조합 불변식",
+          "text": "inline bool receipt_matches(const study_net::MatchRecord& request,\n                            const study_net::Receipt& receipt) {\n  return receipt.row > 0 && receipt.key == request.key &&\n         receipt.player_a == request.player_a &&\n         receipt.player_b == request.player_b;\n}\n\ninline bool valid_outbox(const OutboxDocument& doc) {\n  if (doc.origin.empty()) return false;\n  if (!study_net::MatchSubmission(1).prepare(doc.request)) return false;\n\n  switch (doc.status) {\n    case OutboxStatus::confirmed:\n      return doc.receipt.has_value() &&\n             receipt_matches(doc.request, *doc.receipt);\n    case OutboxStatus::pending:\n    case OutboxStatus::stopped:\n      return !doc.receipt.has_value();\n  }\n  return false;  // unknown enum value\n}",
+          "language": "cpp"
+        },
+        {
+          "label": "문서·payload·도메인을 차례로 확인",
+          "text": "inline std::optional<OutboxDocument> parse_outbox(const std::string& body) {\n  const auto j = object(body, 5);\n  if (!j) return std::nullopt;\n\n  const auto version = number(*j, \"version\");\n  if (!version || *version != 1) return std::nullopt;\n\n  const auto origin = text(*j, \"origin\");\n  const auto request_payload = text(*j, \"request\");\n  const auto status_text = text(*j, \"status\");\n  const auto receipt_payload = text(*j, \"receipt\");\n  if (!origin || !request_payload || !status_text || !receipt_payload) {\n    return std::nullopt;\n  }\n\n  // Decode the JSON payloads before any semantic checks.\n  const auto request = parse_record(*request_payload);\n  if (!request) return std::nullopt;\n\n  OutboxStatus status;\n  if (*status_text == \"pending\") {\n    status = OutboxStatus::pending;\n  } else if (*status_text == \"stopped\") {\n    status = OutboxStatus::stopped;\n  } else if (*status_text == \"confirmed\") {\n    status = OutboxStatus::confirmed;\n  } else {\n    return std::nullopt;  // no defaulting of unknown values\n  }\n\n  std::optional<study_net::Receipt> receipt;\n  if (!receipt_payload->empty()) {\n    const auto parsed = parse_receipt(*receipt_payload);\n    if (!parsed) return std::nullopt;\n    receipt = *parsed;\n  }\n\n  OutboxDocument doc;\n  doc.origin = *origin;\n  doc.request = *request;\n  doc.status = status;\n  doc.receipt = receipt;\n\n  if (!valid_outbox(doc)) return std::nullopt;\n  return doc;\n}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "파일 읽기는 공통 책임으로 추출한다",
+      "body": "계정 파일과 보관함 모두 파일 없음·종류 오류·읽기 오류·크기 초과를 구별해야 합니다. 이 경계 처리를 read_local_document로 옮기고 LocalAccountStore와 LocalOutbox가 공유하도록 합니다. 계정 키나 경기 상태를 해석하는 로직은 이 함수에 넣지 않습니다.\n\n결과는 missing·ready·too_large·unavailable입니다. ready는 제한 안의 바이트를 읽었다는 뜻이며 JSON이나 계정·경기 문서가 유효하다는 뜻은 아닙니다. 각 저장소가 자신의 파서를 호출합니다.\n\n허용량 1024바이트보다 하나 더 읽어 초과를 검출합니다. 최종 경로 요소가 링크·디렉터리면 중단합니다. 구조를 공통 함수로 바꾸어도 계정 파일의 오류 분류는 유지해야 하므로 계정 부트스트랩 검사도 함께 실행합니다. 추출은 중복을 줄이는 작업인 동시에 기존 계약을 보존하는 작업입니다.",
+      "codes": [
+        {
+          "label": "계정과 보관함이 공유하는 제한 읽기",
+          "text": "enum class LocalRead { missing, ready, too_large, unavailable };\nstruct LocalDocument { LocalRead state = LocalRead::unavailable; std::string body; };\n// Read one bounded local document without following a final-component symlink.\n// Application-owned folder and cooperative writers remain caller preconditions.\ninline LocalDocument read_local_document(const std::filesystem::path& path) {\n    try {\n        std::error_code error;\n        const auto status = std::filesystem::symlink_status(path, error);\n        if (error == std::errc::no_such_file_or_directory ||\n            (!error && status.type() == std::filesystem::file_type::not_found))\n            return {LocalRead::missing, {}};\n        if (error || !std::filesystem::is_regular_file(status)) return {};\n        std::ifstream stream(path, std::ios::binary);\n        if (!stream) return {};\n        std::array<char, kJsonBodyBytes + 1> bytes{};\n        stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));\n        if (stream.bad() || (stream.fail() && !stream.eof())) return {};\n        const auto count = static_cast<std::size_t>(stream.gcount());\n        if (count > kJsonBodyBytes) return {LocalRead::too_large, {}};\n        return {LocalRead::ready, std::string(bytes.data(), count)};\n    } catch (const std::exception&) { return {}; }\n}",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "책임의 경계",
+          "body": "공통 함수는 바이트와 파일 상태를 반환합니다. origin 비교, 키 형식, 경기 영수증 대응 같은 도메인 조건까지 한 함수에 모으면 두 저장소가 서로의 정책에 의존하게 됩니다."
+        }
+      ]
+    },
+    {
+      "title": "보관한 요청을 교체하거나 확인 상태를 되돌리지 않는다",
+      "body": "LocalOutbox는 outbox.lock과 outbox.json을 소유합니다. 한 Store가 살아 있는 동안 같은 폴더의 협력 작업자가 동시에 수정하지 못하도록 잠금을 유지합니다. 다른 경기에는 다른 폴더를 사용합니다.\n\nprepare는 파일이 없는 경우에만 pending 문서를 저장합니다. 이미 있는 결과를 새 key로 덮지 않습니다. save는 원래 request의 모든 필드가 같아야 하며, 확인된 영수증을 pending으로 되돌리는 쓰기도 거절합니다. confirmed에서 같은 영수증을 다시 쓰는 것은 허용하지만 row가 바뀌면 거절합니다.\n\n이것은 상태를 **이미 확보한 근거를 잃는 방향으로 되돌리지 않는 정책**입니다. 같은 세션에서 영수증 파일 재저장이 필요할 때도 최초 확인값을 유지합니다. stopped 역시 새 pending으로 자동 전환하지 않습니다.\n\n파일이 손상됐거나 origin이 다르면 load는 blocked입니다. 오류 파일을 지우고 비어 있는 보관함처럼 동작하지 않습니다.",
+      "codes": [
+        {
+          "label": "새 작업은 빈 보관함에서 준비",
+          "text": "    bool prepare(const study_net::MatchRecord& request) const {\n        if (load().state != OutboxLoad::missing) return false;\n        return save(OutboxDocument{origin_, request, OutboxStatus::pending, {}});\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "같은 요청·허용된 전이만 저장",
+          "text": "    bool save(const OutboxDocument& next) const {\n        if (!available() || next.origin != origin_ || !valid_outbox(next)) return false;\n        const auto current = load();\n        if (current.state == OutboxLoad::blocked) return false;\n        if (current.state == OutboxLoad::missing) {\n            if (next.status != OutboxStatus::pending) return false;\n        } else {\n            const auto& old = *current.document;\n            if (old.request != next.request) return false;\n            if (old.status == OutboxStatus::stopped && next.status != OutboxStatus::stopped) return false;\n            if (old.status == OutboxStatus::confirmed &&\n                (next.status != OutboxStatus::confirmed || old.receipt->row != next.receipt->row)) return false;\n        }\n        try {\n            const auto body = outbox_json(next) + \"\\n\";\n            return body.size() <= kJsonBodyBytes && writer_(file_.u8string(), body);\n        } catch (const std::exception&) { return false; }\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation change_saved_account",
+        "invariant": "이미 진행 중인 작업을 새로운 요청으로 덮지 않는다.",
+        "mayDiffer": "현재 계정 서비스는 pending이 있으면 새 교체를 거절한다. 학습 보관함은 확인된 경기 영수증까지 계속 보관한다."
+      }
+    },
+    {
+      "title": "재개 시 읽기 성공 뒤에도 저장 장벽을 둔다",
+      "body": "이전에 write_private_file이 rename까지 성공하고 디렉터리 동기화에서 실패했다고 생각해 봅시다. 다음 실행에서 파일을 읽을 수는 있지만, 그 관찰만으로 이전 쓰기가 내구성 확인까지 성공했다고 결론낼 수 없습니다.\n\nOutboxDelivery는 처음 문서를 읽으면 dirty=true로 표시합니다. pending 요청을 전송하기 전에 flush가 같은 문서를 다시 저장하고 성공해야 합니다. 이를 여기서는 **저장 장벽**이라고 부릅니다. 장벽을 넘지 못하면 HTTP 호출 수는 0입니다. 프로세스가 살아 있고 이미 장벽을 넘은 불변 요청을 명시적으로 재시도할 때는 같은 세션의 저장 확인을 유지합니다.\n\nAPI의 origin도 문서와 같아야 합니다. OutboxHttp는 origin 문자열과 실제 HttpSender를 같은 포트 값에서 만들므로 두 목적지가 따로 바뀌는 실수를 줄입니다. Store는 세션보다 오래 살아 있어야 하며 잠금도 유지해야 합니다.",
+      "codes": [
+        {
+          "label": "읽은 문서의 저장 확인 후에만 전송",
+          "text": "        if (!document_) {\n            const auto loaded = store_.load();\n            if (loaded.state == OutboxLoad::missing) return {DeliveryState::empty, false, {}};\n            if (loaded.state != OutboxLoad::ready || !loaded.document) return {};\n            document_ = loaded.document;\n            dirty_ = true; // Visible after a failed prior save is not yet a durability confirmation.\n        }\n        if (document_->status != OutboxStatus::pending) return finish();\n        if (!api.valid() || api.origin() != document_->origin) return {};\n        if (dirty_ && !flush()) return {}; // No HTTP before the durable request barrier.\n        study_net::MatchSubmission submission(3);\n        if (!submission.prepare(document_->request)) return {};",
+          "language": "cpp"
+        },
+        {
+          "label": "하나의 포트에서 origin과 실제 전송 생성",
+          "text": "class OutboxHttp {\npublic:\n    explicit OutboxHttp(int port) : port_(port) {}\n    bool valid() const { return port_ > 0 && port_ <= 65535; }\n    std::string origin() const { return valid() ? \"http://127.0.0.1:\" + std::to_string(port_) : \"\"; }\n    study_net::Reply operator()(const study_net::MatchRecord& record,\n                               std::chrono::milliseconds limit) const noexcept {\n        return HttpSender(port_)(record, limit);\n    }\nprivate:\n    int port_;\n};",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "기록 전에 종료된 경기는",
+          "body": "이 보관함의 재시작 보존 범위는 요청 준비가 성공한 뒤입니다. 경기가 끝난 순간부터 요청 준비 전까지 종료되는 경우의 복구에는 별도의 게임 상태·결과 기록이 필요합니다. 이를 파일 보관함의 성공으로 대신 주장하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "확인된 영수증은 파일 실패에도 메모리에 남긴다",
+      "body": "retry_submission이 유효한 영수증을 반환하면 문서를 confirmed로 바꾸고 영수증을 복사합니다. 그다음 dirty=true로 표시해 파일 저장을 시도합니다. 저장에 실패하더라도 document의 상태와 receipt는 그대로 남습니다.\n\n같은 세션에서 다시 deliver하면 confirmed 분기를 먼저 만나 finish로 갑니다. HTTP를 다시 보내지 않고 flush만 시도합니다. 저장 실패가 여러 번이어도 서버 확인 상태를 잃지 않습니다. 반면 파일에 pending만 남은 채 프로세스가 종료됐다면 다음 실행은 같은 요청을 재전송해 서버의 최초 영수증을 다시 얻을 수 있습니다.\n\n따라서 “서버 반영 확인, 이 기기 영수증 저장 미완료”라는 안내가 필요합니다. 서버 성공 자체를 실패로 표시하면 사용자가 새 경기 key를 만들어 다시 등록할 수 있습니다.",
+      "codes": [
+        {
+          "label": "원격 결과를 먼저 상태에 남기고 로컬 확정을 시도",
+          "text": "        const auto result = retry_submission(submission, api, now, wait, budget);\n        if (result == RetryExit::confirmed) {\n            document_->status = OutboxStatus::confirmed;\n            document_->receipt = *submission.receipt();\n        } else if (result == RetryExit::stopped) {\n            document_->status = OutboxStatus::stopped;\n        } else {\n            return {DeliveryState::unconfirmed, true, {}};\n        }\n        dirty_ = true;\n        return finish();\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "확인된 사실을 유지하며 파일만 재저장",
+          "text": "    bool flush() {\n        if (!dirty_) return true;\n        if (!store_.save(*document_)) return false;\n        dirty_ = false;\n        return true;\n    }\n    DeliveryResult finish() {\n        const bool saved = flush();\n        const auto state = document_->status == OutboxStatus::confirmed\n            ? DeliveryState::confirmed : DeliveryState::stopped;\n        return {state, saved, document_->receipt};\n    }",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "meta/account_client.cpp",
+        "symbol": "AccountOperation resume_locked",
+        "invariant": "서버 변경 확인 후 로컬 저장 실패에서도 원래 재개 자료를 보존한다.",
+        "mayDiffer": "현재 계정 서비스는 같은 교체 요청을 다시 보내고 로컬 파일을 확정한다. 학습 세션은 이미 받은 경기 영수증을 메모리에 유지해 파일만 재시도할 수 있다."
+      }
+    },
+    {
+      "title": "재시도 예산과 재시작 정책을 구분한다",
+      "body": "deliver 한 번은 최대 3회·공유 진입 예산 5000ms의 자동 재시도를 사용합니다. 예산을 소진하면 파일은 pending으로 남고 명령이 끝납니다. 사용자가 resume을 다시 실행하면 같은 작업에 새 제한 예산을 부여합니다. 전체 수명에 걸친 최대 3회라는 뜻은 아닙니다.\n\n409나 잘못된 영수증처럼 자동 중단으로 분류한 결과는 stopped로 저장합니다. 재시작 후에도 이 문서는 HTTP를 다시 보내지 않습니다. stopped는 미반영 확정이 아니라 자동 작업 중단이므로 요청은 보관합니다.\n\nstopped 기록의 파일 저장 자체가 실패하면 같은 세션에서는 중단 상태를 유지하고 저장만 재시도합니다. 프로세스를 종료한 뒤 파일에 pending만 남았다면 그 중단 사실은 재시작 후 알 수 없습니다. 따라서 결과에는 local_saved를 남기고 종료 전에 현재 기기의 상태 저장을 안내합니다.\n\n횟수와 시간 제한은 무제한 반복을 줄이는 운영 정책이며, 요청의 정체성과 서버의 멱등성은 중복 효과를 막는 저장 계약입니다. 둘 중 하나가 다른 하나를 대신하지 않습니다."
+    },
+    {
+      "title": "0이라는 숫자로 저장 성공을 추정하지 않는다",
+      "body": "시작 RP가 0인 플레이어가 정상적으로 패배해도 RP 변화가 0일 수 있습니다. 반대로 저장 응답을 못 받았을 때 relay가 임시로 변화량 0을 채울 수도 있습니다. 숫자만 비교하면 정상 결과와 미확인을 구별할 수 없습니다.\n\n현재 MATCH_RESULT는 before·after·delta와 별도로 ResultStatus를 보냅니다. Applied와 Draw는 확인된 결과이고, SaveFailed는 저장 성공 응답을 확인하지 못했다는 상태입니다. 화면 문구와 내부 캐시 갱신 모두 이 상태를 사용해야 합니다.\n\nrating_after_result는 Applied·Draw에서만 보고된 RP를 반영합니다. Unknown·SaveFailed·검증 실패 등에서는 현재 캐시 값을 유지합니다. 보고된 값이 0이라는 이유로 무조건 무시하는 것도 잘못입니다. **확인 상태를 먼저 보고 그 상태가 보증하는 값을 사용**하는 순서가 필요합니다.\n\nBP·XP는 해당 결과 프레임에 없으므로 본인 조회로 갱신합니다. 경기 한 건의 영수증과 계정의 최신 전체 프로필도 서로 다른 자료입니다.",
+      "reference": {
+        "path": "net/match_result.h",
+        "symbol": "inline int rating_after_result",
+        "invariant": "불확실한 응답의 임시 숫자로 확인된 캐시를 덮지 않는다.",
+        "mayDiffer": "학습 보관함은 receipt와 local_saved를 전달하고, 현재 게임은 결과 상태 바이트로 RP 반영 가능 여부를 판단한다."
+      }
+    },
+    {
+      "title": "실제 커밋 뒤 응답만 버리는 실험을 만든다",
+      "body": "서버를 아예 끄는 실험은 요청이 전달되지 않은 실패를 확인하는 데 유용합니다. 이번 핵심 반례에는 **서버에 저장은 됐고 응답만 사라진 경로**가 필요합니다.\n\n검사 도구의 loopback 중계기는 요청을 실제 SQLite 학습 서버에 전달하고, 서버의 응답을 읽은 뒤 클라이언트 연결만 닫습니다. 세 번의 재시도에 동일한 본문이 전달됐는지, DB의 경기 행은 하나인지, 보상 잔액이 한 번만 반영됐는지 확인합니다. 클라이언트는 끝까지 영수증을 못 받았으므로 unconfirmed로 종료합니다.\n\n중계기를 정상 응답 모드로 바꾸고 새 클라이언트 프로세스를 실행합니다. 파일에서 읽은 동일 요청으로 최초 row를 얻고 confirmed를 저장해야 합니다. 한 번 더 재개하면 저장된 영수증을 사용하므로 HTTP 횟수가 늘지 않아야 합니다.\n\n가짜 저장소 검사는 다른 경계를 다룹니다. 요청 선저장은 성공시키고 영수증 쓰기만 실패시킨 다음, 반환이 confirmed·local_saved=false인지와 로컬 재시도에 HTTP가 없는지를 검사합니다. 두 종류의 실패를 한 테스트 이름으로 뭉뚱그리지 않습니다.",
+      "codes": [
+        {
+          "label": "서버 확인 뒤 파일 실패를 독립적으로 주입",
+          "text": "    FakeStore store;FakeApi api;OutboxDelivery session(store);\n    store.failing=true;\n    CHECK(drive(session,api).state==DeliveryState::storage_blocked && api.calls==0);\n    store.failing=false;store.fail_at=3; // request flush succeeds; receipt save fails\n    const auto confirmed=drive(session,api);\n    CHECK(confirmed.state==DeliveryState::confirmed && !confirmed.local_saved && confirmed.receipt->row==7);\n    CHECK(store.document.status==OutboxStatus::pending && api.calls==1);\n    store.failing=true;\n    CHECK(drive(session,api).state==DeliveryState::confirmed && api.calls==1);\n    store.failing=false;\n    CHECK(drive(session,api).local_saved && api.calls==1);\n    OutboxDelivery reopened(store);FakeApi unused;\n    CHECK(drive(reopened,unused).state==DeliveryState::confirmed && unused.calls==0);",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "실패 주입이 증명하는 범위",
+          "body": "이 실험은 프로세스 재시작·응답 유실·쓰기 반환 실패에서 상태와 부작용을 확인합니다. 실제 전원 차단과 저장 장치 고장, 손상된 백업에서 복원하는 전체 재해 복구를 대신하는 검사는 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "준비와 전송을 다른 명령으로 실행한다",
+      "body": "체크포인트 `121-save-uncertainty`는 계정·상점·경기 정산을 유지하고 LocalOutbox·OutboxDelivery·meta_outbox를 추가합니다. 두 경기 콘솔이 사용하던 로컬 시뮬레이션 예제는 tools/sample_match.h로 공유합니다. 점수·승패를 명령행 입력으로 받지 않습니다.\n\nC++17·CMake·OpenSSL 개발 패키지를 준비합니다. SCRIPTED 빌드는 표시 장치 없이 실행합니다. SDL을 선택하면 SDL2 개발 패키지도 필요합니다. 저장소 루트에서 아래 명령으로 결과를 준비한 뒤 서버를 실행합니다. prepare는 서버가 꺼져 있어도 가능하며 HTTP를 보내지 않습니다.\n\n다른 터미널에서 resume을 두 번 실행하면 같은 key와 row가 출력됩니다. 두 번째 실행은 영수증 파일을 사용합니다. 다른 경기는 다른 폴더와 겹치지 않는 key를 사용합니다. 같은 폴더에서 prepare를 다시 호출하면 기존 자료를 보존하며 거절합니다.\n\n서버를 끈 채 pending 요청을 resume하면 종료 코드 3과 unconfirmed를 얻습니다. 서버를 같은 DB·포트로 다시 실행한 뒤 resume으로 이어갑니다. 실제 커밋 후 응답 유실은 통합 검사에서 자동으로 재현합니다.",
+      "codes": [
+        {
+          "label": "첫 터미널 — 준비한 다음 서버 실행",
+          "text": "cmake -S docs/learn/checkpoints/121-save-uncertainty -B out/study-121 -DSTUDY_PLATFORM=SCRIPTED -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-121 --target meta_outbox meta_submit study_meta_db outbox_contract bootstrap_contract -j2\nctest --test-dir out/study-121 -R '^(outbox_contract|bootstrap_contract)$' --output-on-failure\nout/study-121/meta_outbox 18083 out/study-121/result-121 prepare 121\nout/study-121/study_meta_db 18083 out/study-121/study.db",
+          "language": "sh"
+        },
+        {
+          "label": "두 번째 터미널 — 같은 작업 재개",
+          "text": "out/study-121/meta_outbox 18083 out/study-121/result-121 resume\nout/study-121/meta_outbox 18083 out/study-121/result-121 resume\npython3 scripts/check_learning_save_uncertainty.py",
+          "language": "sh"
+        },
+        {
+          "label": "기존 파일 보관 의존성에 새 타깃 연결",
+          "text": "add_executable(meta_outbox tools/meta_outbox.cpp)\ntarget_link_libraries(meta_outbox PRIVATE study_bootstrap)\nadd_executable(outbox_contract tests/outbox_contract.cpp)\ntarget_link_libraries(outbox_contract PRIVATE study_bootstrap)\nadd_test(NAME outbox_contract COMMAND outbox_contract)\nset_tests_properties(outbox_contract PROPERTIES TIMEOUT 20)",
+          "language": "cmake"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "출력과 종료 코드",
+          "body": "확인·로컬 저장 완료는 0, 미확인은 3, 자동 중단·상태 저장 완료는 4, 보관함 준비 불가는 5입니다. 확인/중단 상태의 로컬 저장을 재시도하지 않고 종료하면 6입니다. 다중 구성 생성기는 --config Release/-C Release와 실행 경로를 맞춥니다. 독립 복사는 STUDY_VENDOR_DIR를 지정합니다."
+        }
+      ]
+    },
+    {
+      "title": "같은 작업·더 강한 근거라는 원칙을 유지한다",
+      "body": "OutboxDocument는 작업과 근거, LocalOutbox는 파일 정책과 잠금, OutboxDelivery는 재개 순서, OutboxHttp는 실제 목적지와 전송을 담당합니다. 콘솔은 두 축의 결과를 출력합니다. 파일 형식과 UI가 달라져도 역할 간 계약을 읽을 수 있는 구조입니다.\n\n유지할 핵심은 전송 전 요청 보관, 같은 key·전체 내용·origin, 서버의 멱등 처리, 확인된 영수증 보존, 원격 확인과 로컬 저장의 구분입니다. 같은 작업의 상태를 다시 pending으로 초기화해 문제를 감추지 않습니다.\n\n이번 보관함은 한 폴더에 한 작업을 보관하며 완료 파일도 남깁니다. 대량 작업 큐의 정리·보관 기간·공개 서버 인증을 구현한 운영용 배달 시스템은 아닙니다. 학습 서버의 loopback API와 신뢰하는 시뮬레이션 결과를 사용합니다. 현재 relay의 post_match에는 이 파일 보관함이 붙어 있지 않으므로, 학습 구현의 재시작 계약을 현재 서버가 이미 제공한다고 가정하지 않습니다.",
+      "codes": [
+        {
+          "label": "meta/outbox_wire.h",
+          "language": "cpp",
+          "file": "checkpoints/121-save-uncertainty/meta/outbox_wire.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/local_outbox.h",
+          "language": "cpp",
+          "file": "checkpoints/121-save-uncertainty/meta/local_outbox.h",
+          "collapsed": true
+        },
+        {
+          "label": "meta/outbox_delivery.h",
+          "language": "cpp",
+          "file": "checkpoints/121-save-uncertainty/meta/outbox_delivery.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/meta_outbox.cpp",
+          "language": "cpp",
+          "file": "checkpoints/121-save-uncertainty/tools/meta_outbox.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tools/sample_match.h",
+          "language": "cpp",
+          "file": "checkpoints/121-save-uncertainty/tools/sample_match.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "meta/http_client.cpp",
+        "symbol": "MetaClient::post_match",
+        "invariant": "한 경기의 식별자와 내용을 바꾸지 않고 유효한 저장 증거를 확인한다.",
+        "mayDiffer": "학습 코드는 원격 결과와 로컬 확정 상태, 재시작 보관을 추가했다. 현재 서버의 영속 제출 큐로 자동 적용된 것은 아니다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "121-1",
+      "question": "서버가 경기 121을 커밋했지만 응답이 사라지고 클라이언트도 종료됐습니다. pending 파일로 재개할 때의 요청은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새 key와 같은 점수"
+        },
+        {
+          "id": "b",
+          "text": "같은 key와 현재 화면의 새 점수"
+        },
+        {
+          "id": "c",
+          "text": "보관한 key와 전체 결과 필드"
+        },
+        {
+          "id": "d",
+          "text": "점수를 0으로 바꾼 같은 key"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "보관한 key와 전체 결과 필드",
+      "explanation": "파일은 원래 작업을 보존합니다. 같은 key뿐 아니라 모든 의미 필드가 같아야 서버가 최초 영수증을 반환하고 중복 보상을 피할 수 있습니다."
+    },
+    {
+      "id": "121-2",
+      "question": "유효한 영수증을 받은 뒤 로컬 파일 쓰기만 실패했습니다. 올바른 결과 표현은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "서버 반영 확인, 로컬 영수증 저장 미완료"
+        },
+        {
+          "id": "b",
+          "text": "서버와 로컬 저장 모두 실패"
+        },
+        {
+          "id": "c",
+          "text": "서버 미반영 확정, 새 경기 준비"
+        },
+        {
+          "id": "d",
+          "text": "서버 상태를 알 수 없으므로 영수증 삭제"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "서버 반영 확인, 로컬 영수증 저장 미완료",
+      "explanation": "서버에 대한 확인 근거는 이미 있습니다. 로컬 오류 때문에 그 사실을 취소하지 않고, 같은 세션에서는 영수증 파일만 재저장합니다."
+    },
+    {
+      "id": "121-3",
+      "question": "쓰기 함수가 게시 후 false를 반환했습니다. 다음 실행에서 pending 파일을 읽을 수 있을 때 코드가 먼저 하는 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "읽혔으므로 바로 HTTP 전송"
+        },
+        {
+          "id": "b",
+          "text": "서버에 다른 key로 조회"
+        },
+        {
+          "id": "c",
+          "text": "pending을 confirmed로 변경"
+        },
+        {
+          "id": "d",
+          "text": "같은 요청의 저장 성공을 확인한 뒤 전송"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "같은 요청의 저장 성공을 확인한 뒤 전송",
+      "explanation": "파일이 읽히는 것과 내구성 확인 성공은 같은 관찰이 아닙니다. 새 세션은 dirty로 시작해 저장 장벽을 넘은 뒤 HTTP를 보냅니다."
+    },
+    {
+      "id": "121-4",
+      "question": "로컬 영수증이 confirmed로 저장돼 있습니다. resume의 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 key를 새 경기로 바꾼다"
+        },
+        {
+          "id": "b",
+          "text": "영수증을 사용하고 HTTP를 보내지 않는다"
+        },
+        {
+          "id": "c",
+          "text": "조회 전에 영수증을 삭제한다"
+        },
+        {
+          "id": "d",
+          "text": "서버를 세 번 호출해 반드시 다시 확인한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "영수증을 사용하고 HTTP를 보내지 않는다",
+      "explanation": "이미 보관한 유효한 영수증은 그 경기의 저장 근거입니다. 준비 상태로 되돌리지 않습니다. 최신 전체 프로필 조회는 별개의 작업입니다."
+    },
+    {
+      "id": "121-5",
+      "question": "현재 RP가 200인데 SaveFailed 프레임의 임시 RP가 0입니다. 이어서 Applied 프레임이 RP 0을 보고합니다. 각 경우의 반영은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "둘 다 0이므로 무시한다"
+        },
+        {
+          "id": "b",
+          "text": "둘 다 0으로 갱신한다"
+        },
+        {
+          "id": "c",
+          "text": "SaveFailed에서는 200 유지, Applied에서는 0 반영"
+        },
+        {
+          "id": "d",
+          "text": "SaveFailed에서 0 반영, Applied에서 200 유지"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "SaveFailed에서는 200 유지, Applied에서는 0 반영",
+      "explanation": "값이 0인지가 아니라 결과 상태가 확인을 뜻하는지로 판단합니다. 미확인 임시 값은 캐시를 덮지 않고 정상적으로 확인된 0은 그대로 반영합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "요청 준비·원격 커밋·영수증 수신·로컬 확정 사이에 멈추는 경우를 표에 대입합니다.",
+      "서버가 꺼진 상태에서 prepare하고 HTTP 호출이 없는지 확인합니다.",
+      "같은 폴더의 resume을 반복해 같은 key·row와 영수증 재사용을 확인합니다.",
+      "응답 유실 중계기로 DB의 한 행·한 번의 보상과 새 프로세스 재개를 확인합니다.",
+      "영수증 파일 쓰기를 실패시켜 confirmed와 local_saved=false가 함께 반환되는지 확인합니다."
+    ],
+    "failureChecks": [
+      "응답 유실을 서버 미반영으로 단정하지 않습니다.",
+      "재시도할 때 새 key나 현재 UI 값으로 본문을 재구성하지 않습니다.",
+      "읽기 성공만으로 요청 저장 장벽을 생략하지 않습니다.",
+      "미확인 임시 RP와 확인된 0 RP를 같은 정책으로 처리하지 않습니다."
+    ],
+    "expected": "같은 작업을 재시작 후에도 이어가며 서버에 대한 지식과 이 기기의 보관 상태를 나누어 설명하고 검사할 수 있다."
+  },
+  "review": {
+    "date": "2026-09-30",
+    "method": "DeepSeek 문서 codec 초안 검수·실제 커밋/응답 유실 대조·RP 캐시 변경 전후 재현",
+    "draftJob": "out/learning-jobs/121-wire-events.jsonl",
+    "corrections": [
+      "stopped를abandoned/never acknowledged로단정한모델주석을자동전송중단으로교정",
+      "읽기성공을내구성증거로쓰지않도록재개시재저장장벽추가",
+      "실제RP갱신은Applied/Draw상태에서만허용"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL outbox·계정 회귀 타깃/CTest·기존 경기 제출 출력 보존",
+    "실제 SQLite 커밋 후 모든 응답 유실·새 프로세스 동일 요청 재개·1행/1회 보상·확인 뒤 HTTP무호출",
+    "선저장 장벽·게시후false·영수증 파일 실패·상태/원문/origin 불변·잠금·손상·중단 보존",
+    "ASan/UBSan 및 실제 src/main.cpp RP 반영문 추출 256상태 대조·수정 전 실패 재현",
+    "현재 Linux 게임 타깃 빌드 통과; 수동GUI·실제 전원차단·타OS·공개 TLS/운영큐 검증 없음"
+  ]
+}

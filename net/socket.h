@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "stream_transport.h"
+#include "native_socket.h"
 
 // TCP 소켓 추상화: 플랫폼 독립적 네트워킹 (Windows WinSock / Linux BSD)
 // 상세: ARCHITECTURE.md §7.1
@@ -18,7 +19,7 @@ namespace net {
 //   read/write 하는 use-after-close / fd-reuse 경합이 있었다(공개 서버에서 교차
 //   연결 데이터 유출로 악용 가능).
 //
-//   이제 fd 는 shared_ptr<int> 가 소유하며, 모든 복사본은 같은 제어 블록을
+//   이제 fd 는 shared_ptr<NativeSocket> 가 소유하며, 모든 복사본은 같은 제어 블록을
 //   공유한다. 실제 ::close 는 "마지막 복사본이 사라지는 순간" deleter 에서
 //   정확히 한 번 호출된다(이중 close 와 fd 재사용 경합 제거).
 //
@@ -33,10 +34,10 @@ namespace net {
 //   서로 다른 복사본을 각 스레드가 들고 read/close 하는 것은 안전하다.
 struct TcpSocket {
     std::shared_ptr<StreamTransport> transport; // client WSS; never a reactor fd
-    std::shared_ptr<int> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
+    std::shared_ptr<NativeSocket> fdh;  // 제어 블록: *fdh == fd. 마지막 참조 소멸 시 ::close.
 
-    int  fd()    const { return fdh ? *fdh : -1; }
-    bool valid() const { return transport ? transport->alive() : fdh && *fdh >= 0; }
+    NativeSocket fd() const { return fdh ? *fdh : kInvalidSocket; }
+    bool valid() const { return transport ? transport->alive() : fdh && socket_valid(*fdh); }
 };
 
 // 네트워킹 초기화/종료 (Windows: WSAStartup/Cleanup, Linux: no-op)
@@ -44,7 +45,7 @@ bool net_init();
 void net_shutdown();
 
 // TCP 연결 설정
-TcpSocket tcp_listen(uint16_t port, int backlog=1, bool loopback_only=false);  // 서버: 포트에서 대기 (bind + listen + SO_REUSEADDR)
+TcpSocket tcp_listen(uint16_t port, int backlog=1, bool loopback_only=false);  // 서버: 포트에서 대기 (bind + listen; POSIX 재사용 / Windows 배타 바인드)
 // accept 가 실패한 *이유*. 호출자가 EAGAIN 과 fd 고갈을 구분해야 하기 때문이다 —
 // 둘 다 "소켓을 못 얻었다" 지만 대응이 정반대다. EAGAIN 은 그냥 다음 이벤트를
 // 기다리면 되고, fd 고갈은 기다려도 저절로 낫지 않는다. 레벨 트리거 리스너에서
@@ -57,18 +58,24 @@ TcpSocket tcp_accept(const TcpSocket& server, AcceptResult* out_result = nullptr
 TcpSocket tcp_connect(const std::string& host, uint16_t port);  // 클라이언트: 서버 연결 (getaddrinfo + connect)
 
 // TCP 데이터 송수신
-bool tcp_send_all(const TcpSocket& s, const void* data, size_t len);  // 전체 데이터 송신 (부분 전송 시 재시도)
+// Native TCP requires a nonblocking socket. Success means local acceptance,
+// not peer application acknowledgement. Failure can follow partial acceptance.
+// A 5s total deadline is checked before each send attempt (scheduler overshoot
+// is possible). StreamTransport/WSS uses its own queue/deadline contract.
+bool tcp_send_all(const TcpSocket& s, const void* data, size_t len);
 
 // 논블로킹 부분 송신. 커널 송신 버퍼가 받아 준 만큼만 보내고 그 길이를 out_sent 에
 // 넣는다. 버퍼가 가득 차 한 바이트도 못 보낸 경우(WOULDBLOCK)는 오류가 아니라
 // out_sent == 0 으로 나타나며 반환값은 true 다 — 호출자는 남은 바이트를 보류
 // 버퍼에 쌓고 쓰기 준비성(Reactor 의 kWrite)을 기다렸다가 다시 부른다.
-// 반환 false 는 연결이 끊겼거나 회복 불가 오류라는 뜻이다.
+// 반환 false는 진행 불가 오류다. 그 전에 OS가 받아 준 바이트도 out_sent에 남는다.
+// false를 송신0으로 해석해 전체 메시지를 다른 연결에 자동 재전송하면 안 된다.
+// WSS transport 경로의 수락은 OS 송신 완료가 아니라 로컬 비동기 큐의 수락이다.
 //
-// tcp_send_all 과의 차이: 저쪽은 다 보낼 때까지 최대 5초 잠들며 재시도하므로
-// 이벤트 루프에서 부르면 그 사이 모든 연결의 전달이 멈춘다. 루프는 이 함수를 쓴다.
+// tcp_send_all은 전체 호출의 5초 마감시간을 검사하며 재시도한다.
+// 그동안 호출자 스레드를 점유하므로 이벤트 루프는 보류 버퍼와 이 함수를 쓴다.
 bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out_sent);
-bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf);  // 논블로킹 수신 (누적 버퍼에 추가)
+bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf);  // 양수 수신만 누적. true에는 WouldBlock도 포함; 연결 생존 증명 아님.
 void tcp_close(TcpSocket& s);  // shutdown(SHUT_RDWR) 으로 피어/폴러(recv)를 EOF 로 깨운다. 실제 ::close 는 마지막 TcpSocket 복사본 소멸 시 RAII 로 일어난다(멱등).
 void tcp_set_nonblocking(const TcpSocket& s);  // 소켓을 논블로킹으로 전환. listen 소켓 accept 폴링용(shutdown 은 블로킹 accept 를 깨우지 못하므로).
 void tcp_set_sndbuf(const TcpSocket& s, int bytes);  // 커널 송신 버퍼 상한. 안 읽는 상대를 커널이 대신 흡수하지 못하게 묶는다(backpressure 가시성).

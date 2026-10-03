@@ -1,0 +1,354 @@
+{
+  "id": "lesson-140",
+  "title": "토큰 이관: 평문을 지우는 전체 과정",
+  "shortTitle": "원자적 변환·WAL·재시작·정리",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 해시로 인증을 조회할 수 있지만 원문을 보관하던 설치 DB를 중단에 견디며 변환하는 절차는 없습니다.",
+  "finish": "완료: ID와 재화를 유지하는 이관 도구를 만들고 논리 롤백·커밋 후 정리 재시도·옛 reader·외부 사본의 경계를 검사합니다.",
+  "objective": "이관 중 어느 지점에서 종료되어도 재시작이 수행할 작업과 보존할 상태를 설명하고 구현합니다.",
+  "prerequisites": [
+    "목적별 자격 해시와 원문 형식 검사",
+    "SQLite 트랜잭션·prepared statement·RAII",
+    "WAL·파일과 프로세스의 수명"
+  ],
+  "recap": {
+    "points": [
+      "원문을 목적별로 해시한 값으로 계정을 조회한다.",
+      "형식 검사와 생성 과정의 예측 불가능성은 다른 계약이다."
+    ],
+    "bridge": "저장 표현을 바꾸는 계산이 준비됐으므로 이미 존재하는 파일을 계정 보존과 실패 복구 조건 아래에서 변환합니다."
+  },
+  "sections": [
+    {
+      "title": "사용자의 계정을 유지하면서 저장 형식을 바꾼다",
+      "body": "서버가 원문 대신 해시로 인증할 수 있어도, 이미 설치된 DB에는 옛 원문이 남아 있을 수 있습니다. 새 테이블만 선언해서는 기존 파일의 데이터가 바뀌지 않습니다. **이관**은 저장된 구조와 값을 새로운 코드가 기대하는 상태로 변환하는 작업입니다.\n\n유지할 것은 player ID와 보상·기록이며, 바꿀 것은 인증을 조회하는 표현입니다. 클라이언트가 보유한 원문은 계속 같은 계정을 찾아야 합니다. 중간 오류에서 일부 계정만 바뀐 상태를 서비스에 노출하지 않는 것이 첫 계약입니다.\n\n누적 학습 계정 DB는 처음부터 해시를 저장하므로 그대로 유지합니다. 여기서는 오래된 설치본을 재현한 별도 파일에 이관 도구를 만듭니다. 실제 서버의 migrateCredentials와 같은 변환·중단·재시작 흐름을 작은 스키마에서 관찰합니다. 실습 파일은 누적 게임 DB나 실제 운영 파일로 대체하지 않습니다."
+    },
+    {
+      "title": "새 형식과 완료 상태를 함께 설계한다",
+      "body": "실험 파일의 players에는 명시적인 INTEGER PRIMARY KEY인 id, 원문 token, 재화 bp가 있습니다. 변환 후에는 token_hash가 같은 자리에 있고 나머지 값은 유지됩니다. 원문과 해시를 같은 이름으로 혼용하면 재시작 때 현재 상태를 판단하기 어려워집니다.\n\n```sql\n-- 이관 전 실험 스키마\nCREATE TABLE players(\n  id INTEGER PRIMARY KEY,\n  token TEXT UNIQUE NOT NULL,\n  bp INTEGER NOT NULL\n);\n-- 트랜잭션 안에서 열 이름을 바꾸고 각 값을 해시로 갱신한다.\nALTER TABLE players RENAME COLUMN token TO token_hash;\n```\n\nmarker는 작업을 어디까지 끝냈는지 DB 안에 기록한 이름입니다. hash_v1은 논리 변환 커밋, scrub_v1은 현재 파일 정리 완료를 나타냅니다. 두 기록을 나누면 변환 후 정리 도중 중단된 상태를 표현할 수 있습니다.\n\n| 열·기록 상태 | 다음 행동 |\n| --- | --- |\n| token, 완료 기록 없음 | 트랜잭션으로 변환 |\n| token_hash, hash_v1만 있음 | 파일 정리 재시도 |\n| token_hash, 두 기록 모두 있음 | 변환과 정리 생략 |\n| 열과 기록이 모순되거나 알 수 없는 기록 | 실험 도구 시작 거절 |\n\n이 실습의 marker는 진행 상태입니다. 공격자가 DB를 변조하지 않았음을 증명하는 서명은 아닙니다."
+    },
+    {
+      "title": "서비스 시작 전의 작업으로 배치한다",
+      "body": "이관은 인증 요청을 받기 전에 끝냅니다. 요청 처리와 변환을 동시에 허용하면 어떤 요청은 원문 열을, 다른 요청은 해시 열을 기대할 수 있습니다. 도구는 자기 연결과 자기 트랜잭션 경계를 사용하고, 중첩 트랜잭션이나 별도 attached DB가 있으면 거절합니다.\n\n설정은 트랜잭션 전에 적용합니다. 실습은 WAL 모드, synchronous=FULL, secure_delete=ON을 요청하고 다시 읽어 실제 설정을 확인합니다. SQLite의 알 수 없는 PRAGMA는 오류 없이 무시될 수 있으므로 요청을 보냈다는 사실만으로 적용을 판단하지 않습니다.\n\nFULL은 커밋 내구성에 필요한 동기화를 요청하는 정책입니다. 장치와 파일시스템이 동기화 계약을 지킨다는 전제가 남습니다. secure_delete는 이후 삭제·변경에서 잔여 값을 줄이는 설정이며 과거 모든 사본을 지우는 명령이 아닙니다. [SQLite PRAGMA 계약](https://sqlite.org/pragma.html)을 기준으로 설정과 확인을 나눕니다.",
+      "codes": [
+        {
+          "label": "설정 요청 뒤 실제 모드를 확인한다",
+          "language": "cpp",
+          "text": "    db.exec(\"PRAGMA secure_delete=ON;\");\n    db.exec(\"PRAGMA synchronous=FULL;\");\n    db.exec(\"PRAGMA journal_mode=WAL;\");\n\n    {\n        Statement st(db.get(), \"PRAGMA journal_mode;\");\n        if (!st.next()) throw std::runtime_error(\"credential migration: journal_mode missing\");\n        const std::string mode = st.text_column(0);\n        if (mode != \"wal\") throw std::runtime_error(\"credential migration: WAL required\");\n    }"
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "void Database::migrateCredentials()",
+        "invariant": "요청을 받기 전 이관을 완료하고 실패하면 시작을 거절한다.",
+        "mayDiffer": "현재 서버는 DB 초기화에서 다른 스키마 보강도 수행한다. 그 작업 전체가 자격 이관 하나의 롤백 범위에 속하지는 않는다."
+      }
+    },
+    {
+      "title": "BEGIN IMMEDIATE는 변환할 상태를 붙잡는다",
+      "body": "이관은 읽기로 시작하지만 뒤에서 열과 값을 쓸 작업입니다. BEGIN IMMEDIATE로 쓰기 트랜잭션을 먼저 시작하면 다른 writer가 변환 도중 같은 파일을 바꾸는 것을 막을 수 있습니다. 별도 reader의 오래된 스냅샷을 즉시 없애는 효과까지 있는 것은 아닙니다.\n\nImmediateTransaction은 성공한 commit 전까지 active 상태를 유지합니다. 예외로 범위를 벗어나면 소멸자가 롤백을 시도합니다. 실제 프로세스가 갑자기 종료되면 C++ 소멸자가 실행되지 않을 수 있으므로 SQLite의 저널 복구가 그 경우를 맡습니다.\n\n열 이름 변경·모든 행의 요약 변환·hash_v1 기록을 하나의 논리 트랜잭션에 묶습니다. 마지막 행이 잘못되었어도 처음 행부터 바꾼 값을 모두 되돌릴 수 있어야 합니다.",
+      "codes": [
+        {
+          "label": "논리 변환의 시작과 상태 확인",
+          "language": "cpp",
+          "text": "    {\n        ImmediateTransaction tx(db);\n        db.exec(\"CREATE TABLE IF NOT EXISTS credential_steps(name TEXT PRIMARY KEY);\");\n        detail::reject_unknown_markers(db);\n\n        const detail::PlayersSchema schema = detail::inspect_players(db);\n        const bool hash_marker = has_step(db, \"hash_v1\");\n        scrub_marker = has_step(db, \"scrub_v1\");\n\n        if (schema.legacy && (hash_marker || scrub_marker))\n            throw std::runtime_error(\"credential migration: marker on legacy players\");\n        if (schema.hashed && !hash_marker)\n            throw std::runtime_error(\"credential migration: hashed players without hash marker\");"
+        }
+      ]
+    },
+    {
+      "title": "스키마와 읽기 오류를 구별한다",
+      "body": "PRAGMA table_info로 실험 파일에 기대한 열이 있는지 확인합니다. token과 token_hash가 둘 다 있거나 둘 다 없으면 자동으로 의미를 추측하지 않습니다. ID는 변환 중 바뀌지 않는 정수 기본 키여야 합니다.\n\nhas_step은 정확한 marker 이름을 바인딩하여 조회합니다. Statement::next는 SQLITE_ROW를 true, 정상 조회 종료인 SQLITE_DONE을 false로 반환하고 나머지는 예외로 전달합니다. 파일 읽기 오류를 marker 없음으로 처리하면 이미 끝난 변환을 다시 시작할 수 있습니다.\n\n실습의 스키마 검사는 알려진 실험 파일의 상태를 구별하는 범위입니다. 임의 SQL 구조의 의미적 동등성이나 변조된 DB의 모든 트리거를 검증하는 일반 이관 엔진은 아닙니다.",
+      "codes": [
+        {
+          "label": "읽기 실패와 기록 없음을 나눈다",
+          "language": "cpp",
+          "text": "inline bool has_step(SqliteDb& db, const std::string& name) {\n    Statement st(db.get(), \"SELECT 1 FROM credential_steps WHERE name=?1 LIMIT 1;\");\n    st.text(1, name);\n    return st.next();\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "실제 서버의 새 DB 초기화",
+          "body": "현재 서버는 새 DB의 token_hash 열을 만든 뒤 이관 기록을 처음 넣는 경로도 지원합니다. 실험 도구는 이미 존재하는 옛 설치 파일만 받아서, 해시 열에 hash marker가 없는 상태를 거절합니다. 새 DB 생성과 옛 DB 이관은 진입 조건이 다릅니다."
+        }
+      ]
+    },
+    {
+      "title": "SQLite의 선언형과 실제 저장형을 나눈다",
+      "body": "일반 SQLite 테이블의 TEXT 선언만으로 모든 값의 실제 저장형이 TEXT라고 가정할 수는 없습니다. 원문을 읽을 때 storage class를 확인하고, BLOB이나 NULL을 문자열처럼 조용히 바꾸지 않습니다.\n\ntext_column은 sqlite3_column_type을 확인한 다음, sqlite3_column_text와 sqlite3_column_bytes로 전체 바이트를 복사합니다. 원문 안에 NUL이 있어도 그 뒤의 길이가 포함됩니다. 정상 길이의 접두사 뒤에 NUL과 추가 바이트가 붙어 있으면 account_digest의 형식 검사에서 거절됩니다.\n\n반환된 SQLite 포인터는 문장에 종속된 임시 저장소입니다. 다음 step이나 finalize 전에 std::string으로 복사해야 조회 문장을 닫고 안전하게 사용할 수 있습니다.",
+      "codes": [
+        {
+          "label": "현재 저장형과 전체 바이트를 읽는 래퍼",
+          "language": "cpp",
+          "text": "    std::string text_column(int column) const {\n        if (sqlite3_column_type(stmt_.get(), column) != SQLITE_TEXT) {\n            throw std::runtime_error(\"SQLite column is not text\");\n        }\n        const unsigned char* bytes = sqlite3_column_text(stmt_.get(), column);\n        if (bytes == nullptr) {\n            // Not NULL (checked above), so a null pointer means allocation\n            // failure inside SQLite.\n            throw std::runtime_error(\"SQLite text column read failed\");\n        }\n        const int size = sqlite3_column_bytes(stmt_.get(), column);\n        if (size < 0) {\n            throw std::runtime_error(\"SQLite text column size failed\");\n        }\n        return std::string(reinterpret_cast<const char*>(bytes),\n                           static_cast<std::size_t>(size));\n    }"
+        }
+      ]
+    },
+    {
+      "title": "조회 중인 테이블을 바꾸며 계속 읽지 않는다",
+      "body": "한 SELECT를 열어 모든 행을 step하면서 매 행마다 같은 테이블을 UPDATE하면 편리해 보입니다. 하지만 같은 연결에서 SELECT가 실행 중인 테이블을 변경한 뒤 계속 step할 때 어떤 변경이 보이는지는 SQLite의 보장된 결과로 가정할 수 없습니다. ORDER BY를 추가하는 것만으로 이 문제가 없어지지 않습니다.\n\n대신 **키셋 순회**를 사용합니다. 첫 행을 읽고 ID와 원문을 복사한 뒤 조회 문장을 파괴합니다. 그 행을 변환하고, 다음 조회는 마지막 ID보다 큰 행 중 첫 행을 찾습니다. 정렬 기준인 ID는 변환 중 바꾸지 않습니다. [SQLite 같은 연결의 읽기·쓰기 규칙](https://sqlite.org/isolation.html)을 이 문장 수명에 연결합니다.\n\nlast는 optional 정수입니다. 값이 없으면 첫 조회이고, 값이 있으면 WHERE id > last를 사용합니다. last+1을 계산하지 않아 최대 정수 ID에서도 오버플로가 없습니다. 읽는 원문은 한 행씩만 보유합니다.",
+      "codes": [
+        {
+          "label": "문장을 닫은 다음 갱신할 행을 확보한다",
+          "language": "cpp",
+          "text": "            std::optional<sqlite3_int64> last;\n            for (;;) {\n                sqlite3_int64 id = 0;\n                std::string token;\n                {\n                    const char* sql = last\n                        ? \"SELECT id, token_hash FROM players WHERE id>?1 ORDER BY id LIMIT 1;\"\n                        : \"SELECT id, token_hash FROM players ORDER BY id LIMIT 1;\";\n                    Statement row(db.get(), sql);\n                    if (last) row.integer(1, *last);\n                    if (!row.next()) break;\n                    id = row.integer_column(0);\n                    token = row.text_column(1);\n                } // Finalize the reader before changing the table."
+        }
+      ],
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "void Database::migrateCredentials()",
+        "invariant": "고정 ID로 다음 행을 찾고 조회 문장의 수명을 UPDATE 전에 끝낸다.",
+        "mayDiffer": "현재 서버도 keyset으로 순회하며 갱신 문장은 재사용한다. 실습은 RAII Statement를 각 갱신마다 생성한다."
+      }
+    },
+    {
+      "title": "한 행의 실패도 전체 변환 실패가 된다",
+      "body": "복사한 원문은 account_digest로 형식을 검사하고 해시합니다. UPDATE에는 요약과 ID를 바인딩합니다. SQL에 원문을 문자열 연결로 삽입하지 않으며 실패 메시지에도 원문을 넣지 않습니다.\n\nStatement::done은 SQLITE_DONE을 요구하고, sqlite3_changes가 정확히 한 행인지 확인합니다. 쓰기 성공 코드만으로 의도한 행을 바꾸었다고 판단하지 않습니다. 모든 행을 성공한 뒤 hash_v1을 기록하고 commit합니다.\n\nafter_row는 로컬 실패 주입 지점입니다. 여기서 예외를 던지면 트랜잭션의 열 이름과 갱신된 행이 모두 복원되어야 합니다. 공개 fixture의 뒤쪽 행을 잘못된 문자열이나 BLOB으로 바꾸어 같은 결과를 검사할 수도 있습니다.",
+      "codes": [
+        {
+          "label": "행 갱신과 논리 완료 기록",
+          "language": "cpp",
+          "text": "                const std::string hash = study_credentials::account_digest(token);\n\n                {\n                    Statement up(db.get(),\n                        \"UPDATE players SET token_hash=?1 WHERE id=?2;\");\n                    up.text(1, hash);\n                    up.integer(2, id);\n                    up.done();\n                }\n                if (sqlite3_changes(db.get()) != 1)\n                    throw std::runtime_error(\"credential migration: update count\");\n\n                last = id;\n                if (hook) hook(Point::after_row);\n            }\n\n            detail::insert_marker(db, \"hash_v1\");\n        }\n\n        tx.commit();\n    }"
+        }
+      ]
+    },
+    {
+      "title": "커밋 후에는 파일에서 무엇이 남는가",
+      "body": "SQL로 token_hash를 조회했을 때 요약만 보인다고 파일의 과거 바이트까지 모두 사라졌다고 결론낼 수는 없습니다. DB에는 빈 페이지나 과거 내용이 남은 공간이 있고, WAL에는 변경 페이지의 기록이 존재할 수 있습니다.\n\nWAL 모드에서 커밋된 변경은 먼저 WAL을 통해 보일 수 있습니다. checkpoint는 그 변경을 DB 본체로 반영합니다. TRUNCATE 모드는 필요한 처리를 마친 뒤 WAL 크기를 줄입니다. VACUUM은 현재 논리 내용을 바탕으로 DB 파일을 다시 구성합니다. 이관은 checkpoint → VACUUM → checkpoint 순서로 진행합니다.\n\nVACUUM은 열린 트랜잭션 안에서 실행할 수 없습니다. 조회 문장과 논리 트랜잭션의 범위를 끝낸 뒤 별도 정리 단계로 실행해야 합니다. [VACUUM의 트랜잭션·파일 재구성 조건](https://sqlite.org/lang_vacuum.html)을 확인합니다.",
+      "notes": [
+        {
+          "kind": "scope",
+          "title": "재구성과 ID의 관계",
+          "body": "VACUUM은 명시적인 INTEGER PRIMARY KEY가 없는 테이블의 내부 rowid를 바꿀 수 있습니다. 실험 players의 ID는 명시적 기본 키이며 사용자 식별자입니다. 순회 편의를 위해 우연히 생긴 내부 위치를 장기 계정 ID로 사용하는 설계와 구별합니다."
+        }
+      ]
+    },
+    {
+      "title": "정리의 완료는 반환 행 안에서도 확인한다",
+      "body": "PRAGMA wal_checkpoint(TRUNCATE)는 결과 행을 돌려줍니다. SQLITE_ROW를 얻었다는 것만으로 정리가 끝났다고 판단하지 않습니다. 첫 열의 busy 결과를 검사하고, 성공한 경우에만 다음 단계로 갑니다.\n\n실습은 busy이면 예외로 시작을 거절합니다. 끝없이 재시도하여 시작 화면만 멈춘 상태를 만들지 않습니다. 다른 reader가 필요로 하는 WAL을 수동으로 삭제해서 강제 진행하지 않습니다. 작업 중인 SQLite 파일은 엔진의 연결·잠금 규칙에 따라 정리합니다.\n\n[checkpoint API의 reader 대기와 실패 조건](https://sqlite.org/c3ref/wal_checkpoint_v2.html)을 참고하면, 커밋 성공과 checkpoint 완료가 왜 다른 사건인지 연결할 수 있습니다.",
+      "codes": [
+        {
+          "label": "결과 행의 busy 상태를 확인한다",
+          "language": "cpp",
+          "text": "inline void checkpoint(SqliteDb& db) {\n    Statement st(db.get(), \"PRAGMA wal_checkpoint(TRUNCATE);\");\n    if (!st.next()) throw std::runtime_error(\"credential migration: checkpoint missing row\");\n    if (st.integer_column(0) != 0) throw std::runtime_error(\"credential migration: checkpoint busy\");\n    if (st.next()) throw std::runtime_error(\"credential migration: checkpoint extra row\");\n}"
+        }
+      ]
+    },
+    {
+      "title": "오래된 reader로 중단을 재현한다",
+      "body": "별도 연결 R에서 BEGIN 후 원문을 SELECT합니다. 연결 W에서는 해시 이관을 수행합니다. WAL에서는 R이 읽는 옛 스냅샷을 유지하면서 W가 새 상태를 커밋할 수 있습니다.\n\n```mermaid\nsequenceDiagram\n participant R as 옛 reader\n participant W as 이관 연결\n participant N as 새 조회 연결\n R->>R: BEGIN 후 원문 조회\n W->>W: 해시 변환과 hash marker COMMIT\n N->>N: 해시와 hash marker 확인\n W->>W: TRUNCATE checkpoint에서 busy\n R->>R: 같은 트랜잭션은 옛 원문 유지\n R->>R: ROLLBACK 후 닫기\n W->>W: 재시작하여 정리만 수행\n```\n\n이때 W의 논리 변환은 이미 커밋되었습니다. 정리 실패를 이유로 해시를 다시 원문으로 돌릴 수 있는 상태는 아닙니다. reader를 해제한 후 시작하면 열과 marker를 보고 변환을 건너뛰고 정리를 반복합니다. 새로운 계정을 만들거나 기존 보상을 초기화하지 않습니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "credential WAL scrub busy",
+        "invariant": "논리 이관의 커밋과 물리 정리의 실패를 서로 다른 상태로 보존한다.",
+        "mayDiffer": "현재 서버는 다른 reader를 닫고 재시작하도록 진단한다. 실험 도구는 외부 테스트가 연결을 잡고 풀어 중단을 재현한다."
+      }
+    },
+    {
+      "title": "정리 marker는 마지막에 남긴다",
+      "body": "scrub_v1을 먼저 쓰고 VACUUM을 시작하면, 중간 종료 뒤 다음 시작이 정리를 생략할 수 있습니다. marker는 필요한 정리 작업이 모두 성공한 뒤 저장합니다.\n\n반대로 정리는 끝났는데 marker 저장 직전에 종료되면 어떨까요? 재시작은 정리를 한 번 더 수행합니다. 더 수행해도 논리 계정 상태가 달라지지 않는 작업이므로 완료를 잘못 선언하는 것보다 복구하기 쉽습니다. 이와 같은 반복 가능성이 재시도 설계의 핵심입니다.\n\nmarker의 기록 자체도 DB 쓰기라 WAL에 새 기록을 만들 수 있습니다. 그 뒤 WAL 파일이 존재한다고 옛 원문이 반드시 남았다는 뜻은 아닙니다. 파일 존재 여부와 특정 비밀의 잔존은 다른 관찰입니다.",
+      "codes": [
+        {
+          "label": "정리 성공 뒤 완료를 기록한다",
+          "language": "cpp",
+          "text": "    if (!scrub_marker) {\n        checkpoint(db);\n        db.exec(\"VACUUM;\");\n        if (hook) hook(Point::after_vacuum);\n        checkpoint(db);\n        if (hook) hook(Point::before_scrub_marker);\n\n        ImmediateTransaction tx(db);\n        detail::insert_marker(db, \"scrub_v1\");\n        tx.commit();\n    }\n}"
+        }
+      ]
+    },
+    {
+      "title": "예외와 갑작스러운 종료를 별도로 검사한다",
+      "body": "계약 검사는 after_row·after_commit·after_vacuum·before_scrub_marker에서 예외를 던집니다. 행 변환 도중이면 원문 열과 모든 행이 복원되고, 커밋 뒤이면 해시와 hash marker가 유지되어야 합니다.\n\nCLI의 crash-row·crash-commit·crash-vacuum 모드는 해당 위치에서 std::_Exit를 호출합니다. 이 경로는 스택의 RAII 소멸자를 실행하지 않고 프로세스를 끝냅니다. 다시 열었을 때 SQLite가 미완료 트랜잭션을 복구하고 완료한 트랜잭션을 유지하는지 확인합니다.\n\n이 검사는 프로세스 중단 실험입니다. 실제 전원 차단으로 장치의 쓰기 캐시까지 사라지는 경우와 같다고 간주하지 않습니다. fixture는 공개된 검사 문자열을 사용하고 진단 출력에는 자격 바이트를 넣지 않습니다."
+    },
+    {
+      "title": "정리한 파일과 외부 사본을 구별한다",
+      "body": "실험을 시작하기 전에 닫힌 fixture DB의 외부 사본을 하나 만듭니다. 이관 후 현재 DB와 남아 있는 WAL에서 공개 fixture 바이트를 찾지 못하더라도, 외부 사본에는 그대로 있어야 합니다. 이관 함수가 그 사본을 처리한 적이 없기 때문입니다.\n\n운영 중인 DB를 백업할 때는 DB 본체 파일만 임의로 복사하지 않습니다. WAL의 커밋 상태까지 포함하는 SQLite Backup API 같은 일관된 백업 절차가 필요합니다. 복구용 백업이 옛 원문을 포함하면 그 파일도 비밀 자료로 보관하고 폐기 정책을 적용합니다.\n\n파일 바이트 검사는 검사한 논리 파일의 관찰입니다. 파일시스템 스냅샷·복제본·장치의 과거 블록·프로세스 메모리까지 지워졌다는 증거가 아닙니다. 이관 계획에는 변환 코드와 함께 남은 사본의 관리 범위도 적어야 합니다."
+    },
+    {
+      "title": "도구를 빌드하고 중단 후 재시작한다",
+      "body": "C++17·OpenSSL Crypto·누적 SQLite 래퍼를 사용합니다. 아래 DB는 실험용 새 경로로 지정합니다. init은 파일이 이미 있으면 거절하고, migrate와 crash 모드는 기존 파일만 받습니다.\n\n```sh\ncmake -S docs/learn/checkpoints/140-credential-migration -B out/study-140 -DSTUDY_PLATFORM=SCRIPTED -DSTUDY_AUDIO=NONE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study-140 --target credential_migration credential_migration_contract -j2\nout/study-140/credential_migration init out/study-140/experiment.db\nout/study-140/credential_migration crash-commit out/study-140/experiment.db\nout/study-140/credential_migration migrate out/study-140/experiment.db\npython3 scripts/check_learning_credential_migration.py --boost /path/to/boost/include\n```\n\ncrash-commit은 의도적으로 실패 종료합니다. 다음 migrate를 별도 명령으로 실행합니다. 자동 검사는 임시 디렉터리를 사용하므로 같은 검사 명령을 반복할 수 있습니다. 계약 검사 실행 파일을 직접 사용할 때는 아직 존재하지 않는 실험 디렉터리 경로를 인수로 전달합니다.\n\n누적 WSS 구성에 별도 Boost 경로가 필요하면 STUDY_BOOST_INCLUDE를 지정합니다. Windows 다중 구성은 빌드에 --config Release를 더하고 Release 하위 실행 파일을 사용합니다."
+    },
+    {
+      "title": "변환의 완료 조건을 단계별로 읽는다",
+      "body": "첫째, 모든 계정 원문이 목적 해시로 바뀌어도 ID와 재화가 유지되어야 합니다. 둘째, 잘못된 원문·저장형·쓰기 실패에서 논리 변환은 전체 롤백되어야 합니다. 셋째, 커밋 뒤 중단은 재해시가 아니라 미완료 정리로 이어져야 합니다.\n\n현재 서버의 migrateCredentials에서는 같은 경계를 더 큰 스키마에 연결합니다. 새 자격을 발급하는 동작과 기존 자격의 저장 표현을 바꾸는 동작은 구별합니다. 클라이언트가 제출한 원문이 여전히 같은 계정으로 인증되는 것을 서버 API로 확인합니다.\n\n전체 파일에서는 SELECT의 수명이 끝나는 중괄호, 논리 commit, 두 checkpoint, scrub marker의 순서를 찾아보세요. 어떤 지점에서 중단되더라도 다음 시작이 읽을 수 있는 상태를 설명하는 것이 이관 설계의 핵심입니다.",
+      "codes": [
+        {
+          "label": "전체 파일 — 논리 변환과 정리 단계",
+          "language": "cpp",
+          "file": "checkpoints/140-credential-migration/meta/credential_migration.h"
+        },
+        {
+          "label": "전체 파일 — 강제 종료 실험 도구",
+          "language": "cpp",
+          "file": "checkpoints/140-credential-migration/tools/credential_migration.cpp"
+        },
+        {
+          "label": "전체 파일 — 단계별 계약 검사",
+          "language": "cpp",
+          "file": "checkpoints/140-credential-migration/tests/credential_migration_contract.cpp"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "140-1",
+      "question": "해시 변환을 커밋한 뒤 checkpoint가 busy로 실패했습니다. 재시작에서는 무엇을 해야 할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든 해시를 다시 해시한다"
+        },
+        {
+          "id": "b",
+          "text": "새 계정을 생성한다"
+        },
+        {
+          "id": "c",
+          "text": "커밋된 해시를 유지하고 정리 단계를 재시도한다"
+        },
+        {
+          "id": "d",
+          "text": "scrub marker를 먼저 넣고 서버를 연다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "커밋된 해시를 유지하고 정리 단계를 재시도한다",
+      "explanation": "논리 변환과 정리의 완료는 분리됩니다. hash 상태를 유지하고 reader가 해제된 뒤 미완료 정리를 반복해야 합니다."
+    },
+    {
+      "id": "140-2",
+      "question": "SELECT를 끝내기 전에 같은 테이블을 UPDATE하면서 계속 step합니다. ORDER BY id가 있으면 충분할까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "정렬만으로 변경 관찰이 보장되지는 않으므로 조회를 닫고 다음 ID로 다시 찾는다"
+        },
+        {
+          "id": "b",
+          "text": "모든 SQLite 버전에서 항상 안전하다"
+        },
+        {
+          "id": "c",
+          "text": "WAL이면 같은 연결에서도 자동 격리된다"
+        },
+        {
+          "id": "d",
+          "text": "UPDATE 뒤 last+1을 계산하면 모든 문제가 해결된다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "정렬만으로 변경 관찰이 보장되지는 않으므로 조회를 닫고 다음 ID로 다시 찾는다",
+      "explanation": "같은 연결에서 실행 중인 SELECT가 수정 결과를 어떻게 보는지 가정하지 않습니다. 변하지 않는 키로 다음 행을 찾고, 마지막 ID에 덧셈하지 않아 경계값도 처리합니다."
+    },
+    {
+      "id": "140-3",
+      "question": "뒤쪽 행의 원문이 BLOB으로 저장되어 있습니다. 일부 앞 행은 이미 변환했습니다. 올바른 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "BLOB을 TEXT로 자동 변환하고 계속한다"
+        },
+        {
+          "id": "b",
+          "text": "그 계정만 삭제한다"
+        },
+        {
+          "id": "c",
+          "text": "앞 행만 커밋한다"
+        },
+        {
+          "id": "d",
+          "text": "오류로 전체 논리 이관을 롤백한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "오류로 전체 논리 이관을 롤백한다",
+      "explanation": "저장형·길이·문자 검사까지 이관의 계약입니다. 열 변경과 모든 행 변환을 한 트랜잭션으로 묶어 부분 이관이 서비스에 남지 않게 합니다."
+    },
+    {
+      "id": "140-4",
+      "question": "VACUUM과 두 번째 checkpoint가 끝났지만 scrub marker를 쓰기 전에 프로세스가 종료됐습니다. 올바른 복구는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "원문으로 되돌린다"
+        },
+        {
+          "id": "b",
+          "text": "정리를 다시 수행하고 마지막에 marker를 기록한다"
+        },
+        {
+          "id": "c",
+          "text": "hash marker도 지운다"
+        },
+        {
+          "id": "d",
+          "text": "WAL 파일을 수동으로 삭제한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "정리를 다시 수행하고 마지막에 marker를 기록한다",
+      "explanation": "정리는 반복 가능하도록 구성합니다. 완료를 잘못 기록하는 것보다 이미 끝난 정리를 반복하는 편이 상태를 복구할 수 있습니다."
+    },
+    {
+      "id": "140-5",
+      "question": "현재 DB와 WAL에서 공개 fixture 원문이 검색되지 않습니다. 이 결과가 증명하는 범위는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든 과거 백업이 안전 삭제됐다"
+        },
+        {
+          "id": "b",
+          "text": "SSD의 이전 블록까지 지워졌다"
+        },
+        {
+          "id": "c",
+          "text": "검사한 파일에서 해당 바이트를 찾지 못했으며 외부 사본은 별도 확인이 필요하다"
+        },
+        {
+          "id": "d",
+          "text": "실행 중 메모리에도 원문이 없다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "검사한 파일에서 해당 바이트를 찾지 못했으며 외부 사본은 별도 확인이 필요하다",
+      "explanation": "논리 파일의 바이트 관찰과 외부 백업·스냅샷·장치·메모리의 삭제는 다른 범위입니다. 이 실습은 외부 사본에 원문이 남는 것도 함께 확인합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "실험 DB를 만든 뒤 각 중단 모드에서 열 이름과 완료 기록을 예상한다.",
+      "강제 종료 후 migrate를 반복하여 같은 ID·재화와 단일 해시가 유지되는지 확인한다.",
+      "별도 reader를 유지해 정리 실패를 재현하고 연결 해제 후 재시도한다."
+    ],
+    "failureChecks": [
+      "NUL 뒤 추가 바이트·BLOB·중간 행 실패가 앞선 갱신까지 롤백하는지 확인한다.",
+      "해시 변환 커밋 뒤 scrub marker가 없다고 전체를 재해시하면 왜 인증이 깨지는지 설명한다.",
+      "현재 파일 검사와 외부 사본의 바이트를 비교하여 삭제 범위를 구분한다."
+    ],
+    "expected": "원자적 논리 이관은 계정과 재화를 유지하며, 커밋 후 중단은 해시를 보존하고 미완료 정리만 반복한다."
+  },
+  "review": {
+    "date": "2026-10-03",
+    "method": "DeepSeek 선택 이관 초안·SQLite 공식 격리/정리 계약·실제 서버/강제 종료/reader 회귀 대조",
+    "corrections": [
+      "조회 문장 종료 후 keyset 갱신으로 실제 코드와 교재의 커서 가정 제거",
+      "중첩 트랜잭션·attached DB 거절과 정수 기본 키 확인 보완",
+      "현재 서버의 bind/reset/변경 행 수 반환 검사 보완",
+      "현재 누적 해시 DB와 옛 설치본 실험 파일의 용도 구별"
+    ]
+  },
+  "validation": [
+    "SCRIPTED/SDL 도구·계약 타깃 빌드와 임시 DB 계약 검사 통과; 누적 게임 소스는139와 동일",
+    "극단 ID·전체 롤백·중단 단계·반복 시작·NUL/BLOB·중첩/attached 거절 통과",
+    "실제 프로세스 _Exit 후 row/commit/vacuum 단계 재시작 및 현재 파일 정리·외부 사본 잔존 통과",
+    "학습 WAL reader 유지→해시 커밋→scrub 실패→reader 해제→재시작 통과",
+    "실제 meta 빌드 및 HTTP/DB 회귀5사례 통과: 여러 ID/최대 ID·재시작·덤프 복원·잘못된 원문/NUL/BLOB 롤백·옛 reader와 scrub 재시도",
+    "학습 C++ 이관 경로 ASan/UBSan 통과; 연결된 기존 SQLite static archive 자체는 sanitizer 비계측",
+    "기존 vendor SQLite const 폐기·strlen overread GNU15 경고는 빌드 로그에 보존, 신규 이관 코드 경고 없음",
+    "인라인8·심볼·누적 파일 보존·Part 발췌 통과",
+    "Windows/macOS native·실제 전원 장애·파일시스템/장치 안전 삭제·실제 운영 DB 이관 미검증; 수동GUI·공개배포 없음"
+  ]
+}

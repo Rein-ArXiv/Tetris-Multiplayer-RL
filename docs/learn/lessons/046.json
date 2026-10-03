@@ -1,0 +1,356 @@
+{
+  "id": "lesson-46",
+  "title": "긴 프레임: 시간을 버릴까, 나누어 따라잡을까",
+  "shortTitle": "긴 프레임과 처리 예산",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 100ms 상한을 가진 FixedClock과 프레임 실행기가 연결되어 있습니다.",
+  "finish": "완료: 세 가지 시간 정책을 같은 입력으로 비교하고, 배정·보관·폐기량을 보존식으로 검증합니다.",
+  "objective": "입력 시간 상한과 틱 처리 예산을 구분하고, 긴 정지와 지속 과부하에서 각 정책이 남기는 상태를 설명합니다.",
+  "prerequisites": [
+    "정수 위상의 몫·나머지와 시간 보존식",
+    "FrameRunner의 틱별 보고",
+    "uint64_t와 실패 시 상태 보존"
+  ],
+  "review": {
+    "date": "2026-09-23",
+    "method": "DeepSeek 초안을 실제 시간 단위와 독립 보존식으로 검토하고 플랫폼/Net 루프를 대조",
+    "draftJob": "out/learning-jobs/046-budget-events.jsonl",
+    "corrections": [
+      "초안의 6초를 6틱으로 잘못 적은 입력을 100ms+1ns로 수정",
+      "clamp에서 잘린 1ns를 보관하는 잘못된 기대값 수정",
+      "0인 상태만 보던 실패 보존 검사를 비영 위상·backlog 및 덧셈 용량 경계로 보완",
+      "phase를 다음 틱까지 필요한 양으로 오해할 수 있는 주석 수정",
+      "시나리오 열로 서로 다른 시계의 출력 경계를 명시",
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+    ]
+  },
+  "validation": [
+    "Linux SCRIPTED 전체38 CTests·SDL의 frame_contract/clock_accounting/budget_contract 3 CTests·경고0",
+    "세 정책 30,000개 접두 보존식·기존 FixedClock 2,000표본 대조·1ns 경계·보류분 소진·잘못된 정책/큰 입력/덧셈 용량 실패 보존",
+    "CPU 도구·검사의 SDL/GL 독립 링크 및 DISPLAY 없는 실행, UBSan 통과",
+    "보류분 손실·폐기량 보고 누락·용량 검사 제거의 세 변형을 Release 검사에서 거부",
+    "45차시 기존 구현 파일과 바이트 동일 확인. 사용자 요청에 따라 화면 조작/스크린샷 검사 생략"
+  ],
+  "recap": {
+    "points": [
+      "나노초×60 위상은 틱 간격의 분수를 정수 몫·나머지로 보존합니다.",
+      "나머지는 아직 소비하지 않은 시간이며 다음 호출로 이어집니다.",
+      "분할 비교는 수락한 정수 시간 합과 양자화 경계를 맞춰야 합니다."
+    ],
+    "bridge": "이번에는 처리할 시간이 한꺼번에 많이 들어왔을 때 무엇을 보관하고 무엇을 버릴지 정책으로 나눕니다."
+  },
+  "sections": [
+    {
+      "title": "멈췄던 창이 돌아왔을 때 무엇을 따라잡을까",
+      "body": "디버거에서 한동안 멈췄다가 실행을 재개했다고 생각해 봅시다. 시간 측정은 1초가 흘렀다고 알려 주지만, 그동안 화면과 게임 규칙은 진행하지 못했습니다. 60Hz 기준으로는 60틱 분량이 생깁니다.\n\n가능한 선택은 여러 가지입니다. 60틱을 모두 처리하고 새 화면을 만들 수도 있고, 일부만 처리한 뒤 나머지는 다음 프레임에 이어갈 수도 있습니다. 게임이 정지에서 돌아올 때 따라잡을 시간을 제한하고 초과분을 버리는 정책도 있습니다.\n\n이번에는 `CatchUpClock`과 `budget_trace`를 만들어 세 정책을 같은 입력으로 비교합니다. 기존 게임 실행기는 FixedClock을 계속 사용합니다. 새 CPU 도구에서는 **한 호출의 틱 배정량**, **미처리 시간**, **버린 시간**을 각각 관찰합니다."
+    },
+    {
+      "title": "입력량과 처리량은 서로 다른 제한이다",
+      "body": "일을 만드는 쪽과 처리하는 쪽을 나눠 보면 정책이 선명해집니다. 경과 시간은 처리할 틱 분량을 만들고, 틱 예산은 한 호출에서 처리할 분량을 정합니다.\n\n| 정책 | 새로 들어온 시간 | 한 호출에서 배정 | 남은 전체 틱 |\n| --- | --- | --- | --- |\n| clamp_elapsed | 최대 100ms만 수락 | 수락 분량에서 최대 6틱 | 없음 |\n| keep_backlog | 표현 범위 안의 입력 전부 수락 | 최대 6틱 | 다음 호출로 보관 |\n| discard_backlog | 표현 범위 안의 입력 전부 수락 | 최대 6틱 | 폐기량으로 보고하고 제거 |\n\n세 정책 모두 한 틱 미만의 나머지는 보존합니다. 다만 입력 단계에서 잘린 시간은 누산기에 들어오지 않습니다. 그래서 100ms+1ns를 넣으면 clamp_elapsed는 마지막 1ns를 버리지만, 나머지 두 정책은 그 1ns를 위상 60으로 남깁니다.\n\nkeep_backlog의 backlog는 이미 도착했지만 처리하지 못한 일의 양입니다. 여기에 보관하는 것은 틱 분량을 나타내는 정수이고, 실제 과거 키 입력 목록은 별도의 자료입니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "예산의 단위는 CPU 시간이 아니다",
+          "body": "여기서 예산 6은 최대 틱 개수입니다. 한 틱의 비용이 바뀌면 같은 6틱도 실행 시간이 달라집니다. 실제 밀리초 예산을 쓰려면 비용 측정과 중단 지점에 관한 계약을 추가해야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "동일한 1초 정지를 세 가지로 처리한다",
+      "body": "> **읽기 전 예측** · 새 시계에 1초를 넣고, 다음 호출에는 추가 경과 시간 0을 넣습니다. 두 번째 호출에서도 6틱이 나오는 정책은 어느 것일까요?\n\n| 정책 | 첫 호출 틱 | 남은 전체 틱 | 첫 호출에서 버린 양 | 다음 0ns 호출의 틱 |\n| --- | --- | --- | --- | --- |\n| clamp_elapsed | 6 | 0 | 입력 900,000,000ns | 0 |\n| keep_backlog | 6 | 54 | 0 | 6 |\n| discard_backlog | 6 | 0 | 전체 틱 54개 분량 | 0 |\n\n첫 호출의 배정량만 보면 모두 같습니다. 차이는 그 뒤에 남기는 상태와 보고에 있습니다. keep_backlog는 새 시간이 추가되지 않아도 54틱 분량 중 6틱을 꺼내고 48틱을 남깁니다. 같은 방식으로 이어 가면 정지했던 1초 분량을 모두 처리할 수 있습니다.\n\n실제 실행에서는 따라잡는 작업 중에도 시간이 흐릅니다. 0ns 호출은 보관된 일만 따로 관찰하기 위한 실험 입력입니다. 실제 플랫폼은 다음 측정에서 작업 시간까지 포함한 새 경과 시간을 전달합니다."
+    },
+    {
+      "title": "보고서의 각 숫자에 단위를 붙인다",
+      "body": "Report는 이번 호출의 결과를 값으로 반환합니다. ticks는 호출자가 실행할 규칙 틱 수, pending_ticks는 배정 뒤에도 남은 전체 틱 수입니다. phase는 한 틱 미만의 미소비 위상입니다.\n\n폐기량은 두 경계로 나눠 기록합니다. clamped_ns는 입력에서 잘린 나노초이고, dropped_ticks는 작업 예산 뒤에 버린 전체 틱 분량입니다. 이렇게 나누면 시간이 어느 단계에서 사라졌는지 출력만 보고도 알 수 있습니다.\n\n`phase == 20`은 이미 모였지만 아직 소비하지 않은 위상이 20이라는 뜻입니다. 다음 틱을 만들기 위해 추가로 필요한 양은 `units - 20`입니다. “남은 시간”이라는 말을 쓸 때 보관 중인 양과 앞으로 더 필요한 양을 구분하세요.",
+      "codes": [
+        {
+          "label": "timing/catch_up_clock.h · 정책과 보고",
+          "text": "enum class Policy {\n    clamp_elapsed,    // 입력을 100ms 로 자르고 나머지를 clamped_ns 로 보고\n    keep_backlog,     // 전체 틱 + fraction 모두 보존\n    discard_backlog,  // 전체 틱은 버리고 fraction 만 보존\n};\n\n// 한 번의 advance_ns() 결과 보고. 모든 필드는 정수이며 단위를 주석으로 명시한다.\nstruct Report {\n    unsigned ticks = 0;              // 이번 호출에서 발행한 틱 수 [tick]\n    std::uint64_t pending_ticks = 0; // 남아 있는 \"전체\" 틱 수 [tick]\n    std::uint64_t phase = 0;         // 남은 sub-tick 크레딧 [unit, 1e9 unit == 1 tick]\n    std::uint64_t clamped_ns = 0;    // 정책에 의해 잘려나간 입력 시간 [ns]\n    std::uint64_t dropped_ticks = 0; // 정책에 의해 버려진 \"전체\" 틱 수 [tick]\n};",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "전체 틱도 보관할 수 있는 누산기를 둔다",
+      "body": "기존 FixedClock의 phase_는 항상 한 틱 미만입니다. 새 시계는 보류한 전체 틱도 함께 보관해야 하므로 멤버를 credits_라고 부릅니다. 단위는 그대로 나노초×60입니다.\n\n```text\ncredits_ = pending_ticks × units + phase\npending_ticks = credits_ / units\nphase = credits_ % units\n```\n\n정책은 생성할 때 정하고 시계의 수명 동안 유지합니다. 같은 미처리 시간을 보관한 채 정책만 바꾸면, 변경 순간에 버릴 양을 어떻게 처리할지 새 계약이 필요하기 때문입니다. 비교 도구에서는 정책마다 새 시계를 만들어 동일한 출발점으로 실행합니다.\n\n상수에는 시간 상한과 작업 예산의 관계를 검사하는 static_assert도 둡니다. clamp_elapsed가 전체 틱을 남기지 않고도 모든 수락 분량을 배정하려면 100ms가 정확히 6틱 예산에 맞아야 합니다. 예산만 3으로 바꾸어 시간이 조용히 사라지는 변경을 컴파일 단계에서 잡습니다.",
+      "codes": [
+        {
+          "label": "timing/catch_up_clock.h · 상수와 생성자",
+          "text": "static constexpr std::uint64_t rate = 60;                  // [tick/s]\n    static constexpr std::uint64_t units = 1'000'000'000;      // [unit/tick]\n    static constexpr std::uint64_t max_frame_ns = 100'000'000; // [ns] == 100ms\n    static constexpr unsigned budget = 6;                      // 한 호출 최대 발행 틱 [tick]\n\n    static_assert(max_frame_ns * rate == static_cast<std::uint64_t>(budget) * units,\n                  \"clamp policy must fit exactly in the per-call tick budget\");\n\n    explicit CatchUpClock(Policy policy) noexcept : policy_(policy) {}",
+          "language": "cpp"
+        }
+      ]
+    },
+    {
+      "title": "곱한 뒤 검사하지 말고 남은 용량부터 계산한다",
+      "body": "입력 시간을 전부 보관하는 정책에는 큰 정수도 들어올 수 있습니다. `accepted_ns * 60`을 먼저 계산한 뒤 결과를 검사하면, 그 곱셈 자체가 이미 uint64_t의 범위를 넘어 순환했을 수 있습니다.\n\n현재 credits_가 차지하고 남은 용량을 `UINT64_MAX - credits_`로 구합니다. 여기에 새 시간이 들어가려면 다음 조건을 만족해야 합니다.\n\n```text\naccepted_ns ≤ (UINT64_MAX - credits_) / 60\n```\n\n검사는 곱셈과 덧셈 전에 수행합니다. 조건을 넘으면 nullopt를 반환하고 원래 나머지와 전체 틱을 그대로 둡니다. 같은 원리로 정책 값이 유효한지도 상태를 바꾸기 전에 확인합니다.\n\nclamp_elapsed는 이 검사 전에 입력을 100ms로 제한합니다. 그래서 UINT64_MAX 같은 큰 나노초 입력도 수락 분량은 작으며, 잘린 양을 보고할 수 있습니다. keep_backlog와 discard_backlog는 입력 전체를 계산해야 하므로 표현할 수 없는 큰 입력을 거부합니다.",
+      "codes": [
+        {
+          "label": "timing/catch_up_clock.h · 수락 시간과 안전한 누적",
+          "text": "std::uint64_t accepted_ns = elapsed_ns;\n        std::uint64_t clamped_ns = 0;\n        if (policy == Policy::clamp_elapsed && elapsed_ns > max_frame_ns) {\n            clamped_ns = elapsed_ns - max_frame_ns; // clamped_ns 는 여기서 한 번만 계산\n            accepted_ns = max_frame_ns;\n        }\n\n        // 2) 곱셈 overflow 검사는 total 계산 전에 수행한다(원본 상태 보존).\n        const std::uint64_t room = UINT64_MAX - credits_;\n        if (accepted_ns > room / rate) return std::nullopt;\n\n        // 3) 모든 값을 local 로 계산한다(멤버 부분 변경 금지).\n        const std::uint64_t total = credits_ + accepted_ns * rate; // [unit]\n        const std::uint64_t whole = total / units;                 // [tick]\n        const unsigned issued = whole > budget ? budget : static_cast<unsigned>(whole);",
+          "language": "cpp"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "부호 없는 순환이 정의되어 있어도 검사하는 이유",
+          "body": "uint64_t의 범위 초과 연산은 모듈러 산술로 순환합니다. 프로그램이 계속 실행될 수 있다는 사실과 경과 시간을 올바르게 보존한다는 성질은 다릅니다. 여기서는 표현 범위를 넘는 입력을 명시적으로 거부합니다."
+        }
+      ]
+    },
+    {
+      "title": "세 정책은 남길 값을 계산하는 곳에서 갈라진다",
+      "body": "total을 units로 나눈 몫이 전체 틱 분량입니다. 그중 예산 6까지 issued로 배정합니다. 이후의 차이는 next_credits와 폐기 보고를 계산하는 분기에 모읍니다.\n\n- clamp_elapsed는 입력 상한과 기존 나머지 범위 덕분에 전체 틱이 예산 안에 들어옵니다. 나머지만 보관합니다.\n- keep_backlog는 issued틱의 위상만 빼고 나머지 전부를 보관합니다.\n- discard_backlog는 `whole - issued`를 폐기한 전체 틱 수로 보고하고, 한 틱 미만의 나머지만 보관합니다.\n\n각 분기는 지역 변수로 결과를 만듭니다. 모든 계산이 끝나면 credits_에 한 번 대입하고 Report를 반환합니다. 실패 분기가 중간에 추가되어도 원본을 보존할 수 있는 경계입니다.",
+      "codes": [
+        {
+          "label": "timing/catch_up_clock.h · 정책별 잔여 계산",
+          "text": "std::uint64_t next_credits = 0;\n        std::uint64_t pending_ticks = 0;\n        std::uint64_t dropped_ticks = 0;\n        if (policy == Policy::clamp_elapsed) {\n            // backlog 를 쌓지 않는다: 발행하지 못한 전체 틱은 존재하지 않는다.\n            next_credits = total % units;\n        } else if (policy == Policy::keep_backlog) {\n            // 발행하고 남은 전체 틱 + fraction 을 그대로 보존한다.\n            next_credits = total - static_cast<std::uint64_t>(issued) * units;\n            pending_ticks = next_credits / units;\n        } else { // discard_backlog\n            // 남은 전체 틱은 버리고 fraction 만 보존한다.\n            dropped_ticks = whole - issued;\n            next_credits = total % units; // 곱셈 없이 바로 다음 credits 계산\n        }\n\n        credits_ = next_credits; // 마지막에 한 번만 대입\n        return Report{issued, pending_ticks, next_credits % units, clamped_ns,\n                      dropped_ticks};\n    }",
+          "language": "cpp"
+        },
+        {
+          "label": "timing/catch_up_clock.h",
+          "language": "cpp",
+          "file": "checkpoints/46-catch-up/timing/catch_up_clock.h",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "버린 시간까지 포함해 보존식을 확장한다",
+      "body": "시간을 의도적으로 버리는 정책도 회계는 맞아야 합니다. 입력 누적 나노초를 N, 배정한 틱 합계를 T, 남은 전체 틱을 B, 현재 위상을 P라고 하겠습니다. 입력에서 잘린 나노초의 누적합은 C, 예산 뒤 버린 전체 틱의 누적합은 D입니다.\n\n```text\nN × 60 = T × units + B × units + P + C × 60 + D × units\n```\n\n모든 항을 위상 단위로 바꾸면 같은 식에서 비교할 수 있습니다. keep_backlog는 C와 D가 0이고, clamp_elapsed는 B와 D가 0입니다. discard_backlog는 B와 C가 0입니다.\n\n입력 1초의 위상은 60,000,000,000입니다. clamp_elapsed라면 배정한 6틱의 6,000,000,000과 잘린 900,000,000ns×60이 합쳐져 왼쪽과 같아집니다. discard_backlog는 같은 폐기량을 54틱×units로 기록합니다.\n\n검사에서는 여러 입력을 넣은 **매 호출 뒤** 이 식을 확인합니다. 최종 합계만 보면 중간에 생겼다가 나중에 우연히 상쇄된 오류를 놓칠 수 있습니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "폐기한 틱 분량과 틱 번호",
+          "body": "dropped_ticks는 진행에 사용하지 않은 시간 분량입니다. 이를 simTick에 더해 규칙 전이 없이 틱 번호를 건너뛰는 동작으로 해석하면 안 됩니다. 리플레이나 네트워크 틱 번호는 실제로 적용한 상태 전이의 순서와 맞아야 합니다."
+        }
+      ]
+    },
+    {
+      "title": "밀린 시간을 보관하면 결국 따라잡을 수 있을까",
+      "body": "보관 정책은 시간이 사라지는 것을 막지만, 밀린 일이 줄어들려면 처리할 여유가 있어야 합니다. 매 프레임 새로 6틱 분량이 도착하고 예산도 6틱이면, 기존에 밀린 54틱은 그대로 남습니다. 새 입력이 2틱 분량일 때 6틱을 처리할 수 있다면 그 호출에서 밀린 일이 4틱 줄어듭니다.\n\n한 틱의 실행에 25ms가 든다고 가정해 봅시다. 규칙만 60틱 실행해도 1.5초가 필요합니다. 한 스레드에서 이를 처리하며 현실의 매 1초를 계속 따라가려면 이미 처리 능력이 부족합니다. 그리기와 이벤트 처리까지 더해지면 여유는 더 줄어듭니다.\n\n이때 따라잡는 틱을 늘리면 프레임 작업 시간이 길어지고, 다음 측정에서는 더 많은 경과 시간이 들어옵니다. 늘어난 시간이 다시 틱을 더 요구하는 악순환을 **spiral of death**라고 부릅니다. 틱 예산은 한 호출의 반복 횟수를 제한하고, 시간 폐기는 밀린 분량의 증가를 억제합니다. 두 정책이 해결하는 지점이 다릅니다.\n\n선택 기준은 서비스가 지켜야 할 시간 의미입니다. 로컬 게임에서 긴 정지를 일부 건너뛰는 동작과, 권위 있는 경기 입력을 끝까지 순서대로 처리하는 동작은 같은 정책으로 묶기 어렵습니다. 먼저 처리할 일의 의미를 정하고, 비용을 줄이거나 진행을 제한할 위치를 선택합니다.",
+      "notes": [
+        {
+          "kind": "곁들여 읽기",
+          "title": "가정한 비용과 측정한 비용",
+          "body": "25ms는 처리 용량을 계산하기 위해 정한 예시입니다. 실제 틱 비용은 보드·사건·장치 작업에 따라 달라질 수 있습니다. 측정할 때는 규칙 처리와 렌더링·대기를 나누어 기록해야 병목을 찾을 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "현재 플랫폼에서는 시간이 어디서 잘릴까",
+      "body": "현재 SDL 백엔드는 프레임 시작 시각과 현재 시각의 차이를 초로 바꾼 뒤, 측정 기준을 now로 갱신하고 정해진 상한 이내의 경과 시간을 반환합니다. Win32도 같은 순서로 상한을 적용합니다.\n\n이 순서에서 초과분은 다음 호출의 시각 차이에 다시 나타나지 않습니다. 1초 중 0.1초만 반환했다면 나머지 0.9초는 플랫폼 경계에서 이미 버린 것입니다. main이 전달받은 dt만으로 그 원래 분량을 복구할 수는 없습니다.\n\n다른 정책을 실제 게임에 적용하려면 먼저 원시 경과 시간과 수락 시간을 어느 계층에서 구별해 전달할지 정해야 합니다. 이번 실험 도구는 원시 정수 나노초를 직접 받으므로, 입력 제한과 처리 예산을 독립적으로 비교할 수 있습니다.",
+      "codes": [
+        {
+          "label": "platform/sdl.cpp · 현재 소스의 시간 반환",
+          "text": "const uint64_t now = SDL_GetPerformanceCounter();\nconst float dt = (float)(now - s_frame_start) / (float)s_frequency;\ns_frame_start = now;\nreturn std::min(dt, 0.1f);",
+          "language": "cpp"
+        }
+      ],
+      "reference": {
+        "path": "platform/sdl.cpp",
+        "symbol": "const uint64_t now = SDL_GetPerformanceCounter();",
+        "invariant": "측정 구간을 정하고 반환할 시간의 상한을 적용한다.",
+        "mayDiffer": "현재 플랫폼은 float 초를 반환하며 초과량을 별도 보고하지 않는다.",
+        "omitted": "원시 시간과 폐기량을 전달하는 공개 플랫폼 API 변경은 여기서 하지 않는다."
+      }
+    },
+    {
+      "title": "온라인 따라잡기는 다른 반복문을 가진다",
+      "body": "현재 main의 바깥 while은 accumulator에서 한 틱 분량을 소비합니다. 로컬 게임에서는 이 경계에서 규칙 진행을 읽을 수 있습니다. Net 모드는 그 안에서 준비된 입력 범위인 safeTick까지 진행하는 별도 while을 사용합니다.\n\n```text\n경과 시간 기반 바깥 루프\n  → 송신할 입력과 세션 상태 확인\n  → safeTick 계산\n  → 입력이 준비된 simTick들을 순서대로 처리\n  → 바깥 누산기에서 한 틱 분량 소비\n```\n\n따라서 플랫폼의 100ms 상한만으로 Net의 한 프레임 전체 시뮬레이션 호출 수를 최대 6으로 제한했다고 판단할 수 없습니다. 입력이 많이 준비되어 있다면 안쪽 반복에서 여러 틱을 따라잡습니다. 중간 입력을 얻지 못하면 그 반복을 멈춥니다.\n\n이 경로에 작업 예산을 추가할 때는 아직 처리하지 않은 입력과 simTick을 이어 가야 합니다. 세션이 보내거나 합의한 틱을 로컬 화면이 느리다는 이유로 건너뛰면 두 피어가 다른 상태 전이를 적용하게 됩니다. 시간 정책과 네트워크 입력 순서의 책임을 구별하는 지점입니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "while ((int64_t)simTick <= safeTick &&",
+        "invariant": "입력 준비 조건을 만족하는 틱을 같은 순서로 적용한다.",
+        "mayDiffer": "온라인 모드는 경과 시간 루프 안에 별도 따라잡기 루프를 가진다.",
+        "omitted": "예제 시계를 온라인 경기로 이식하거나 틱 예산을 새로 강제하지 않는다."
+      }
+    },
+    {
+      "title": "동일한 입력을 넣는 비교 도구",
+      "body": "budget_trace는 정책마다 새 CatchUpClock을 만들고 1초, 0ns, 0ns를 차례로 전달합니다. CSV의 scenario 열이 burst인 세 줄은 같은 시계를 공유합니다. boundary는 별도 새 시계에 16,666,667ns를 넣는 실험입니다.\n\n각 행에서 ticks만 읽지 말고 pending_ticks·clamped_ns·dropped_ticks도 함께 보세요. keep_backlog의 54→48→42와, 나머지 정책의 0→0→0이 다음 호출의 차이를 설명합니다. boundary 실험에서는 모두 1틱을 배정하고 위상 20이 남습니다.\n\n프로그램은 실제로 1초를 기다리지 않고 그 길이를 입력값으로 전달합니다. 같은 시간 입력을 여러 정책에 정확히 반복해 넣기 위한 CPU 실험입니다.",
+      "codes": [
+        {
+          "label": "src/budget_trace.cpp",
+          "language": "cpp",
+          "file": "checkpoints/46-catch-up/src/budget_trace.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "정책이 달라도 검사할 수 있는 공통 성질",
+      "body": "검사는 다음 조건을 정책별로 확인합니다.\n\n- 한 호출의 ticks는 6 이하이고 phase는 units 미만이다.\n- 입력 상한 정책과 전체 틱 폐기 정책에는 처리 후 전체 틱이 남지 않는다.\n- 보관 정책에서는 시간 폐기량이 0이다.\n- 잘못된 정책 값이나 표현 범위를 넘는 입력을 거부한 뒤 상태가 보존된다.\n- 전체 입력·배정·보관·폐기량이 매 단계의 보존식을 만족한다.\n\n표현 범위 검사에는 이미 큰 backlog가 있는 상태도 넣습니다. 입력의 곱셈만 범위 안이라고 충분하지 않습니다. 기존 credits_와 더한 합도 들어가야 합니다.\n\n기존 FixedClock과 clamp_elapsed의 틱 수·나머지·클램프 여부를 같은 정수 입력에 대해 대조합니다. 그와 별도로 독립 보존식을 검사해, 두 구현이 같은 실수를 공유할 가능성을 줄입니다.",
+      "codes": [
+        {
+          "label": "tests/budget_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/46-catch-up/tests/budget_contract.cpp",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "파일을 연결하고 결과를 해석한다",
+      "body": "46-catch-up은 누적 체크포인트에 다음 파일을 추가합니다. 게임의 tetris 타깃은 기존 FixedClock과 FrameRunner를 계속 사용합니다.\n\n| 파일 | 추가하는 역할 |\n| --- | --- |\n| timing/catch_up_clock.h | 세 정책·수락/보관/폐기 보고·표현 범위 검사 |\n| src/budget_trace.cpp | 정책별 같은 입력 시나리오 출력 |\n| tests/budget_contract.cpp | 보존식·경계·기존 시계 동등성 검사 |\n| CMakeLists.txt | CPU 도구와 검사 타깃 등록 |\n\n저장소 루트에서 실행합니다. 아래 명령은 단일 구성 생성기 기준입니다.\n\n```sh\ncmake -S docs/learn/checkpoints/46-catch-up -B out/study-46 -DSTUDY_PLATFORM=SCRIPTED\ncmake --build out/study-46 --target budget_trace budget_contract\n./out/study-46/budget_trace\nctest --test-dir out/study-46 -R '^budget_contract$' --output-on-failure\n```\n\n출력의 세 가지 1초 실험을 보존식으로 설명해 보세요. 그다음 입력을 100ms+1ns로 바꿔, 입력 상한과 전체 틱 폐기가 어떤 차이를 만드는지 예측합니다. 이 작은 경계값이 두 정책을 정확히 구별합니다.",
+      "codes": [
+        {
+          "label": "CMakeLists.txt · 비교 도구 등록",
+          "text": "add_executable(budget_trace src/budget_trace.cpp)\ntarget_link_libraries(budget_trace PRIVATE study_mesh)\nif(BUILD_TESTING)\n    add_executable(budget_contract tests/budget_contract.cpp)\n    target_link_libraries(budget_contract PRIVATE study_mesh)\n    add_test(NAME budget_contract COMMAND budget_contract)\nendif()",
+          "language": "cmake"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "46-1",
+      "kind": "적용",
+      "question": "새 keep_backlog 시계에 1초를 넣고 다시 0ns를 넣습니다. 두 번째 보고는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0틱, 보류 54틱"
+        },
+        {
+          "id": "b",
+          "text": "6틱, 보류 48틱"
+        },
+        {
+          "id": "c",
+          "text": "6틱, 보류 0틱"
+        },
+        {
+          "id": "d",
+          "text": "54틱, 보류 0틱"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "6틱, 보류 48틱",
+      "explanation": "첫 호출에서 60틱 분량 중 6틱을 배정하고 54틱을 보관합니다. 다음에는 추가 시간이 0이어도 보류분에서 예산 6을 배정하여 48틱을 남깁니다."
+    },
+    {
+      "id": "46-2",
+      "kind": "적용",
+      "question": "초기 상태에서 100ms+1ns를 넣을 때 clamp_elapsed와 discard_backlog의 phase는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "둘 다 0"
+        },
+        {
+          "id": "b",
+          "text": "둘 다 60"
+        },
+        {
+          "id": "c",
+          "text": "각각 60과 0"
+        },
+        {
+          "id": "d",
+          "text": "각각 0과 60"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "각각 0과 60",
+      "explanation": "clamp_elapsed는 100ms를 넘는 입력 1ns를 자릅니다. discard_backlog는 전체 틱 중 예산 초과분만 버리므로, 6틱을 배정하고 남은 1ns의 위상 60을 보관합니다."
+    },
+    {
+      "id": "46-3",
+      "kind": "적용",
+      "question": "한 틱에 25ms가 드는 단일 스레드에서 60Hz 규칙을 계속 따라잡으려 합니다. 그리기 비용을 0으로 보아도 필요한 규칙 처리 시간은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "현실 1초마다 1.5초라 처리 여유가 부족하다."
+        },
+        {
+          "id": "b",
+          "text": "현실 1초마다 0.15초라 충분한 여유가 있다."
+        },
+        {
+          "id": "c",
+          "text": "틱 예산 6이면 처리 시간은 프레임당 6ms다."
+        },
+        {
+          "id": "d",
+          "text": "한 틱이 100ms보다 짧으므로 지연이 쌓이지 않는다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "현실 1초마다 1.5초라 처리 여유가 부족하다.",
+      "explanation": "60×25ms=1,500ms입니다. 예산은 호출당 개수를 제한하지만 처리 능력 자체를 늘리지는 않습니다. 밀린 일을 보존만 하면 이런 지속 과부하에서는 backlog가 증가합니다."
+    },
+    {
+      "id": "46-4",
+      "kind": "적용",
+      "question": "새 시간을 누적할 때 accepted_ns ≤ (UINT64_MAX - credits_) / 60을 먼저 검사하는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "배정할 틱 수를 언제나 0으로 제한하려고"
+        },
+        {
+          "id": "b",
+          "text": "입력 나노초를 밀리초로 환산하려고"
+        },
+        {
+          "id": "c",
+          "text": "곱셈과 기존 값과의 덧셈이 모두 들어가는지 보려고"
+        },
+        {
+          "id": "d",
+          "text": "위상이 항상 60의 배수가 되도록 반올림하려고"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "곱셈과 기존 값과의 덧셈이 모두 들어가는지 보려고",
+      "explanation": "기존 값이 차지한 공간을 뺀 뒤 새 입력의 배율을 고려합니다. 곱셈만 범위 안이어도 기존 backlog를 더하면 넘칠 수 있으므로 남은 용량을 기준으로 검사합니다."
+    },
+    {
+      "id": "46-5",
+      "kind": "적용",
+      "question": "현재 플랫폼이 dt를 100ms로 제한하면 Net 모드의 한 프레임 전체도 항상 6틱 이하일까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "그렇다. 바깥 while이 안쪽 반복 횟수도 제한한다."
+        },
+        {
+          "id": "b",
+          "text": "아니다. Net은 준비된 입력까지 도는 별도 루프가 있다."
+        },
+        {
+          "id": "c",
+          "text": "그렇다. inputDelay가 매 프레임 6으로 고정된다."
+        },
+        {
+          "id": "d",
+          "text": "아니다. 플랫폼의 반환 상한은 1초다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "아니다. Net은 준비된 입력까지 도는 별도 루프가 있다.",
+      "explanation": "현재 main은 경과 시간 기반 바깥 루프 안에서 simTick부터 safeTick까지 입력을 처리하는 별도 while을 사용합니다. 플랫폼의 시간 상한과 그 안쪽 루프의 작업량은 서로 다른 경계입니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "1초→0ns 입력을 세 정책에 넣기 전에 결과를 예측한다.",
+      "budget_trace의 배정·보류·폐기 열을 보존식으로 대조한다.",
+      "100ms+1ns로 입력 상한과 전체 틱 폐기의 경계 차이를 확인한다.",
+      "표현 범위를 넘는 입력을 거부한 뒤 상태가 보존되는지 검사한다.",
+      "현재 플랫폼의 측정 기준 갱신과 Net 안쪽 while을 찾아 시간 정책의 위치를 설명한다."
+    ],
+    "expected": "같은 틱 예산에서도 시간 손실과 backlog가 달라지는 이유를 코드와 수치로 설명한다.",
+    "failureChecks": [
+      "입력 상한과 처리량 상한을 같은 정책으로 읽지 않았는가?",
+      "phase를 다음 틱까지 더 필요한 양으로 읽지 않았는가?",
+      "기존 credits와 더하기 전 표현 범위를 확인했는가?",
+      "폐기량과 보관량을 중복 합산하지 않았는가?",
+      "Net의 별도 루프에도 로컬 6틱 계산을 적용하지 않았는가?"
+    ]
+  }
+}

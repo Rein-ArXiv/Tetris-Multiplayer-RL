@@ -37,7 +37,7 @@ def source_allowed(path: Path) -> bool:
     # inside the named repository path, without following external targets.
     if path.resolve() != path or not path.is_file():
         return False
-    return rel.as_posix() == "CMakeLists.txt" or (
+    return rel.as_posix() in {"CMakeLists.txt", "CMakePresets.json", "cmake/TetrisOnnxRuntime.cmake"} or (
         rel.parts[0] in SOURCE_ROOTS and path.suffix in SOURCE_EXTENSIONS
     )
 
@@ -66,7 +66,7 @@ def build() -> tuple[str, str]:
     paths += sorted(p for p in (ROOT / "docs").glob("*.md") if p.name not in {"learning-companion.md", "README.md"})
     docs = {}
     path_to_doc = {p.resolve(): ("part" + re.search(r"part(\d+)", p.name)[1] if re.match(r"part\d+-", p.name) else p.stem) for p in paths}
-    source_paths = {ROOT / "CMakeLists.txt"} | lesson_source_paths(ROOT / "docs/learn/lessons")
+    source_paths = {ROOT / "CMakeLists.txt", ROOT / "CMakePresets.json"} | lesson_source_paths(ROOT / "docs/learn/lessons")
     # Only source files actually named in the teaching corpus become browser data.
     for path in paths:
         text = path.read_text(encoding="utf-8")

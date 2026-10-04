@@ -2533,7 +2533,7 @@ cmake --build build --config Release
 ```
 
 - 단일 구성 제너레이터(Makefiles/Ninja)에서는 `--config` 가 무시되고 산출물은 `build/tetris` 다. 두 플랫폼 경로를 섞어 쓰지 않는다.
-- `--target tetris` 로 타깃을 지정하면 `copy_assets`(ALL 타깃)가 돌지 않아 빌드 디렉터리에 `Font/`(이후 파트가 `Sounds/` 등을 더한다)가 없다. **타깃을 지정하지 말고 `cmake --build build` 를 쓰거나, 저장소 루트에서 실행**한다.
+- 이 Part의 중간 체크포인트는 `copy_assets`가 게임에 의존하므로 기본 전체 빌드로 자산을 준비한다. 현재 저장소는 반대로 게임이 자산 복사에 의존하도록 보강해 `--target tetris`에도 복사를 포함한다. 현재 구현은 [Part 13 §3.5](part13-structure-and-build-reference.md#35-copy_assets-커스텀-타깃)에서 비교한다.
 
 기대 결과:
 

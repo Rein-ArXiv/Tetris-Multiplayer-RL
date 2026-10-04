@@ -1,0 +1,123 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "role-base",
+      "hidden": true,
+      "displayName": "Role Base",
+      "description": "Hidden base preset that disables all optional components and defines common Release configuration.",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TETRIS_BUILD_GAME": "OFF",
+        "TETRIS_BUILD_PY": "OFF",
+        "TETRIS_BUILD_TEST": "OFF",
+        "TETRIS_BUILD_RELAY": "OFF",
+        "TETRIS_BUILD_META": "OFF",
+        "TETRIS_BUILD_REACTOR": "OFF",
+        "TETRIS_BUILD_BOT": "OFF",
+        "TETRIS_BUILD_WSS": "OFF",
+        "BUILD_TESTING": "OFF",
+        "TETRIS_ENABLE_HTTPS": "ON"
+      }
+    },
+    {
+      "name": "client",
+      "displayName": "Client",
+      "description": "Configures the client build with the game component enabled.",
+      "inherits": "role-base",
+      "cacheVariables": {
+        "TETRIS_BUILD_GAME": "ON"
+      }
+    },
+    {
+      "name": "servers",
+      "displayName": "Servers",
+      "description": "Configures the server build with relay and meta services enabled.",
+      "inherits": "role-base",
+      "cacheVariables": {
+        "TETRIS_BUILD_RELAY": "ON",
+        "TETRIS_BUILD_META": "ON"
+      }
+    },
+    {
+      "name": "training",
+      "displayName": "Training",
+      "description": "Configures the training build with the Python component enabled.",
+      "inherits": "role-base",
+      "cacheVariables": {
+        "TETRIS_BUILD_PY": "ON"
+      }
+    },
+    {
+      "name": "checks",
+      "displayName": "Checks",
+      "description": "Configures the test build with testing support enabled.",
+      "inherits": "role-base",
+      "cacheVariables": {
+        "TETRIS_BUILD_TEST": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "client",
+      "displayName": "Client Build",
+      "description": "Builds the client target in Release configuration.",
+      "configurePreset": "client",
+      "configuration": "Release",
+      "targets": [
+        "tetris"
+      ]
+    },
+    {
+      "name": "servers",
+      "displayName": "Servers Build",
+      "description": "Builds the relay and meta server targets in Release configuration.",
+      "configurePreset": "servers",
+      "configuration": "Release",
+      "targets": [
+        "tetris_relay",
+        "tetris_meta"
+      ]
+    },
+    {
+      "name": "training",
+      "displayName": "Training Build",
+      "description": "Builds the Python target in Release configuration.",
+      "configurePreset": "training",
+      "configuration": "Release",
+      "targets": [
+        "tetris_py"
+      ]
+    },
+    {
+      "name": "checks",
+      "displayName": "Checks Build",
+      "description": "Builds the default targets for the checks configuration in Release.",
+      "configurePreset": "checks",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "checks",
+      "displayName": "Checks Tests",
+      "description": "Runs the test suite in Release configuration, failing when no tests are found.",
+      "configurePreset": "checks",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    }
+  ]
+}

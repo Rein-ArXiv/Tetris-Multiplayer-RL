@@ -43,6 +43,12 @@ endif()
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
 # 실패한다. Single vs Bot과 내장 휴리스틱 봇은 그대로 사용할 수 있다.
 option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
+set(TETRIS_ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime" CACHE PATH
+    "ONNX Runtime SDK in include/ and lib/<platform>/ layout")
+if(TETRIS_BUILD_BOT AND (TETRIS_BUILD_GAME OR TETRIS_BUILD_META OR TETRIS_BUILD_TEST))
+    include(cmake/TetrisOnnxRuntime.cmake)
+    tetris_import_onnxruntime("${TETRIS_ORT_ROOT}")
+endif()
 option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is available" ON)
 option(TETRIS_ENABLE_DEBUG_UI "Enable in-game debug overlays in the game client" OFF)
 option(TETRIS_ENABLE_NET_TRACE "Enable verbose game-client net/session trace logs" OFF)
@@ -237,24 +243,11 @@ if (TETRIS_BUILD_GAME)
     # ------------------------------------------------------------------------
     # Optional: ONNX Runtime for Section C (Single vs Bot inference)
     # third_party/onnxruntime/ 에 공식 CPU 번들을 풀어두면 링크된다.
-    # 없거나 OFF 면 bot/bot_onnx.cpp 가 스텁으로 빌드됨 → Load 항상 실패.
+    # OFF는 스텁 빌드. ON에서 SDK가 불완전하면 configure 단계에서 실패.
     # ------------------------------------------------------------------------
     if (TETRIS_BUILD_BOT)
-        set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
-        if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
-            message(FATAL_ERROR
-                "TETRIS_BUILD_BOT=ON 이지만 ${ORT_ROOT}/include/onnxruntime_cxx_api.h 가 없습니다. "
-                "third_party/fetch_onnxruntime.sh 로 벤더링하거나 TETRIS_BUILD_BOT=OFF 로 빌드하세요.")
-        endif()
         target_compile_definitions(tetris PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
-        target_include_directories(tetris PRIVATE "${ORT_ROOT}/include")
-        if (WIN32)
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
-        elseif (APPLE)
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
-        else()
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
-        endif()
+        target_link_libraries(tetris PRIVATE Tetris::OnnxRuntime)
     endif()
 
     # ------------------------------------------------------------------------
@@ -291,24 +284,25 @@ if (TETRIS_BUILD_GAME)
         # TETRIS_BUILD_RELAY 블록에서 직접 설정한다 (아래 참조).
     endif()
 
-    # Copy assets (fonts + sounds + icons + model)
-    #   assets/ 와 model/ 은 없을 수도 있으므로 directory 존재 검사 후 복사.
+    # Runtime resources are a prerequisite of an explicit client build.
+    # This target uses the default runtime layout: <build> or <build>/<config>.
+    set(_asset_dir "${CMAKE_CURRENT_BINARY_DIR}")
+    if (CMAKE_CONFIGURATION_TYPES)
+        string(APPEND _asset_dir "/$<CONFIG>")
+    endif()
     set(_copy_cmds
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Font   ${CMAKE_CURRENT_BINARY_DIR}/Font
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Sounds ${CMAKE_CURRENT_BINARY_DIR}/Sounds
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Font" "${_asset_dir}/Font"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Sounds" "${_asset_dir}/Sounds"
     )
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
-        list(APPEND _copy_cmds
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${CMAKE_CURRENT_BINARY_DIR}/assets)
-    endif()
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/model")
-        list(APPEND _copy_cmds
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/model ${CMAKE_CURRENT_BINARY_DIR}/model)
-    endif()
-    add_custom_target(copy_assets ALL
-        ${_copy_cmds}
-        DEPENDS tetris
-    )
+    foreach(_optional_assets IN ITEMS assets model)
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_optional_assets}")
+            list(APPEND _copy_cmds
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/${_optional_assets}" "${_asset_dir}/${_optional_assets}")
+        endif()
+    endforeach()
+    add_custom_target(copy_assets ALL ${_copy_cmds} VERBATIM)
+    add_dependencies(tetris copy_assets)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -688,19 +682,8 @@ endif()
 
 # PvE verification uses the same optional CPU inference backend as the client.
 if (TETRIS_BUILD_META AND TETRIS_BUILD_BOT)
-    set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
-    if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
-        message(FATAL_ERROR "TETRIS_BUILD_BOT=ON requires the ONNX Runtime CPU bundle for meta verification too.")
-    endif()
     target_compile_definitions(tetris_meta PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
-    target_include_directories(tetris_meta PRIVATE "${ORT_ROOT}/include")
-    if (WIN32)
-        target_link_libraries(tetris_meta PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
-    elseif (APPLE)
-        target_link_libraries(tetris_meta PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
-    else()
-        target_link_libraries(tetris_meta PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
-    endif()
+    target_link_libraries(tetris_meta PRIVATE Tetris::OnnxRuntime)
 endif()
 
 if (TETRIS_BUILD_TEST)
@@ -732,17 +715,10 @@ if (TETRIS_BUILD_TEST)
 endif()
 
 if (TETRIS_BUILD_TEST AND TETRIS_BUILD_BOT)
-    set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
     add_executable(bot_onnx_contract_test tests/bot_onnx_contract_test.cpp bot/bot_onnx.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
-    target_include_directories(bot_onnx_contract_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} "${ORT_ROOT}/include")
+    target_include_directories(bot_onnx_contract_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(bot_onnx_contract_test PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
-    if (WIN32)
-        target_link_libraries(bot_onnx_contract_test PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
-    elseif (APPLE)
-        target_link_libraries(bot_onnx_contract_test PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
-    else()
-        target_link_libraries(bot_onnx_contract_test PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
-    endif()
+    target_link_libraries(bot_onnx_contract_test PRIVATE Tetris::OnnxRuntime)
 endif()
 
 # Beast is header-only; TLS remains OpenSSL. No WebSocket or crypto parser is vendored.

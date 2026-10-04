@@ -354,6 +354,8 @@ CMake 3.15 는 `find_package` 의 `CONFIG` 모드, `target_link_libraries` 의 �
 
 MSVC 의 `/utf-8` 는 소스/실행 인코딩 모두 UTF-8 로 설정하는 플래그다. 이 저장소는 C++ 주석이 한국어로 많이 적혀 있고, MSVC 가 기본으로 가정하는 시스템 로케일(CP949 등)에서 컴파일하면 `warning C4819` 가 쏟아진다. `/utf-8` 하나로 전부 해결.
 
+`tetris_wss_gateway`에는 MSVC에서만 `/bigobj`를 적용한다. Beast/Asio의 TLS 템플릿 인스턴스가 많아 기본 COFF 오브젝트의 섹션 수 한도를 넘을 수 있기 때문이다. 이 옵션은 오브젝트 파일 형식의 한도를 늘리며 프로그램의 송수신 제한이나 서버 메모리 예산은 바꾸지 않는다.
+
 ### 3.2 옵션 플래그와 캐시 변수
 
 **현재 소스 발췌 — `CMakeLists.txt`**
@@ -381,6 +383,12 @@ endif()
 # OFF 이면 bot_onnx 가 "not vendored" 스텁으로 빌드되어 ONNX 모델 로드는
 # 실패한다. Single vs Bot과 내장 휴리스틱 봇은 그대로 사용할 수 있다.
 option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
+set(TETRIS_ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime" CACHE PATH
+    "ONNX Runtime SDK in include/ and lib/<platform>/ layout")
+if(TETRIS_BUILD_BOT AND (TETRIS_BUILD_GAME OR TETRIS_BUILD_META OR TETRIS_BUILD_TEST))
+    include(cmake/TetrisOnnxRuntime.cmake)
+    tetris_import_onnxruntime("${TETRIS_ORT_ROOT}")
+endif()
 option(TETRIS_ENABLE_HTTPS "Enable HTTPS for tetris_meta clients when OpenSSL is available" ON)
 option(TETRIS_ENABLE_DEBUG_UI "Enable in-game debug overlays in the game client" OFF)
 option(TETRIS_ENABLE_NET_TRACE "Enable verbose game-client net/session trace logs" OFF)
@@ -697,25 +705,18 @@ SDL2 경로 Linux 분기에서 `find_package(Threads REQUIRED)` 이 필요한 �
 
 ```cmake
     if (TETRIS_BUILD_BOT)
-        set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
-        if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
-            message(FATAL_ERROR
-                "TETRIS_BUILD_BOT=ON 이지만 ${ORT_ROOT}/include/onnxruntime_cxx_api.h 가 없습니다. "
-                "third_party/fetch_onnxruntime.sh 로 벤더링하거나 TETRIS_BUILD_BOT=OFF 로 빌드하세요.")
-        endif()
         target_compile_definitions(tetris PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
-        target_include_directories(tetris PRIVATE "${ORT_ROOT}/include")
-        if (WIN32)
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
-        elseif (APPLE)
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
-        else()
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
-        endif()
+        target_link_libraries(tetris PRIVATE Tetris::OnnxRuntime)
     endif()
 ```
 
-`TETRIS_HAS_ONNXRUNTIME=1` 매크로가 정의되면 `bot/bot_onnx.cpp` 가 실제 `Ort::Session` 경로로 컴파일된다 (정의 안 되면 스텁). CMake 는 **헤더 존재 여부만 사전 검사**하고, 그마저도 없으면 친절히 `fetch_onnxruntime.sh` 를 가리키는 에러로 실패한다. `linux-aarch64` 는 스크립트가 배치는 하지만 CMake 의 `else()` 분기가 `linux-x64` 경로를 하드코딩하고 있으므로, ARM64 리눅스에서 봇을 링크하려면 이 줄을 손봐야 한다.
+`TETRIS_HAS_ONNXRUNTIME=1` 매크로가 정의되면 `bot/bot_onnx.cpp`의 실제
+`Ort::Session` 경로를 컴파일한다. `Tetris::OnnxRuntime`은
+`cmake/TetrisOnnxRuntime.cmake`에서 한 번 만든 IMPORTED 타깃이다.
+게임·meta·ONNX 검사기가 같은 SDK 선택을 공유한다. Linux는 대상 CPU에 따라
+x64/aarch64 폴더를 선택하고, Windows는 지원하는 x64 import library와 DLL을 함께
+확인한다. 이 링크 연결 자체가 실행용 DLL·SO를 배포 폴더에 복사하지는 않는다.
+
 
 (f) **rpath & .app 번들 메타** — 배포용 설정.
 
@@ -770,30 +771,33 @@ Windows 는 rpath 개념이 없다 — DLL 은 "실행 파일과 같은 폴더" 
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
+    # Runtime resources are a prerequisite of an explicit client build.
+    # This target uses the default runtime layout: <build> or <build>/<config>.
+    set(_asset_dir "${CMAKE_CURRENT_BINARY_DIR}")
+    if (CMAKE_CONFIGURATION_TYPES)
+        string(APPEND _asset_dir "/$<CONFIG>")
+    endif()
     set(_copy_cmds
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Font   ${CMAKE_CURRENT_BINARY_DIR}/Font
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Sounds ${CMAKE_CURRENT_BINARY_DIR}/Sounds
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Font" "${_asset_dir}/Font"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Sounds" "${_asset_dir}/Sounds"
     )
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
-        list(APPEND _copy_cmds
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${CMAKE_CURRENT_BINARY_DIR}/assets)
-    endif()
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/model")
-        list(APPEND _copy_cmds
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/model ${CMAKE_CURRENT_BINARY_DIR}/model)
-    endif()
-    add_custom_target(copy_assets ALL
-        ${_copy_cmds}
-        DEPENDS tetris
-    )
+    foreach(_optional_assets IN ITEMS assets model)
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_optional_assets}")
+            list(APPEND _copy_cmds
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/${_optional_assets}" "${_asset_dir}/${_optional_assets}")
+        endif()
+    endforeach()
+    add_custom_target(copy_assets ALL ${_copy_cmds} VERBATIM)
+    add_dependencies(tetris copy_assets)
 endif()
 ```
 
-핵심은 세 가지:
+핵심은 타깃 의존 관계다. `add_dependencies(tetris copy_assets)`는 게임을 빌드하기 전에 자산 복사를 실행한다. 따라서 기본 빌드뿐 아니라 `--target tetris`도 같은 준비 과정을 거친다. `copy_assets`를 직접 빌드하면 복사만 수행한다.
 
-1. **`${CMAKE_COMMAND} -E copy_directory`** — CMake 자체의 플랫폼 독립 `cp -R`. `cp` / `robocopy` 로 분기할 필요 없음.
-2. **`ALL`** — 기본 빌드에 포함(타깃 이름을 명시하지 않아도 실행). 반대로 `cmake --build build --target tetris` 처럼 **타깃을 명시하면 이 복사가 돌지 않는다.** 빌드 디렉터리에서 실행했을 때 폰트가 없다면 대부분 이 이유다.
-3. **`DEPENDS tetris`** — 실행 파일이 먼저 빌드된 후 복사. 병렬 빌드 시에도 순서 보장.
+`copy_assets`는 출력 파일의 시각을 추적하는 규칙이 아닌 커스텀 타깃이다. 실행 파일이 최신 상태여도 자산 변경을 복사하고, 삭제된 목적지 파일을 다시 준비한다. 그 대신 선택한 자산 디렉터리를 매번 훑는다. `VERBATIM`과 인자별 따옴표는 공백이 있는 경로를 빌드 도구에 전달할 때 필요하다.
+
+단일 구성은 빌드 폴더, 다중 구성은 그 아래 `$<CONFIG>` 폴더에 복사한다. 이는 현재 `tetris`의 기본 출력 배치와 짝을 이룬다. 실행 파일 출력 속성을 바꿀 때는 자산 위치도 함께 변경해야 한다. 복사는 실행 시 작업 디렉터리를 바꾸지 않으며, 원본에서 삭제한 파일을 목적지에서 제거하는 동기화 기능도 아니다. 배포는 별도 깨끗한 번들에서 검사한다.
 
 `assets/`, `model/` 은 **없을 수도 있다**. `assets/` 에는 `images.cfg` 와 아이콘 PNG 가, `model/` 에는 배포용 ONNX 모델과 선택적 `bots.cfg` 가 들어간다. 권장 경로는 `model/bots/*.onnx` 이고, 예전 단일 모델 배포를 위해 legacy `model/*.onnx` 도 스캔한다. 둘 다 선택적이므로 `if (EXISTS ...)` 로 조건부 추가해 에러를 막는다.
 
@@ -1150,13 +1154,18 @@ detect_platform() {
             case "$arch" in
                 x86_64)  echo "linux-x64" ;;
                 aarch64) echo "linux-aarch64" ;;
-                *)       echo "linux-x64" ;;  # fallback
+                *) echo >&2 "Unsupported Linux architecture: $arch"; exit 1 ;;
             esac ;;
         Darwin)
-            # universal2 빌드가 arm64 + x86_64 모두 포함.
-            echo "osx-universal2" ;;
+            case "$arch" in
+                x86_64|arm64) echo "osx-universal2" ;;
+                *) echo >&2 "Unsupported macOS architecture: $arch"; exit 1 ;;
+            esac ;;
         MINGW*|MSYS*|CYGWIN*|Windows_NT)
-            echo "win-x64" ;;
+            case "$arch" in
+                x86_64|AMD64) echo "win-x64" ;;
+                *) echo >&2 "Unsupported Windows architecture: $arch"; exit 1 ;;
+            esac ;;
         *)
             echo >&2 "[fetch_onnxruntime] Unknown OS: $os"; exit 1 ;;
     esac
@@ -1178,86 +1187,114 @@ PLATFORM="$(detect_platform)"
 case "$PLATFORM" in
     win-x64)
         ARCHIVE="onnxruntime-win-x64-${ORT_VERSION}.zip"
-        EXTRACT="unzip -q" ;;
+        EXTRACT=(unzip -q) ;;
     osx-universal2)
         ARCHIVE="onnxruntime-osx-universal2-${ORT_VERSION}.tgz"
-        EXTRACT="tar xzf" ;;
+        EXTRACT=(tar xzf) ;;
     linux-x64)
         ARCHIVE="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
-        EXTRACT="tar xzf" ;;
+        EXTRACT=(tar xzf) ;;
     linux-aarch64)
         ARCHIVE="onnxruntime-linux-aarch64-${ORT_VERSION}.tgz"
-        EXTRACT="tar xzf" ;;
+        EXTRACT=(tar xzf) ;;
     *) echo >&2 "Unsupported platform: $PLATFORM"; exit 1 ;;
 esac
 
 URL="${BASE_URL}/${ARCHIVE}"
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+ORT_STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$ORT_STAGE_DIR"' EXIT
 
 echo "[fetch_onnxruntime] Downloading $URL ..."
 if command -v curl &>/dev/null; then
-    curl -fSL "$URL" -o "$TMPDIR/$ARCHIVE"
+    curl -fSL "$URL" -o "$ORT_STAGE_DIR/$ARCHIVE"
 elif command -v wget &>/dev/null; then
-    wget -q "$URL" -O "$TMPDIR/$ARCHIVE"
+    wget -q "$URL" -O "$ORT_STAGE_DIR/$ARCHIVE"
 else
     echo >&2 "Neither curl nor wget found."; exit 1
 fi
 
 echo "[fetch_onnxruntime] Extracting ..."
-cd "$TMPDIR"
-$EXTRACT "$ARCHIVE"
+cd "$ORT_STAGE_DIR"
+"${EXTRACT[@]}" "$ARCHIVE"
 
-# 추출된 폴더 이름 찾기 (아카이브에 따라 이름이 약간 다를 수 있음).
-EXTRACTED="$(find . -maxdepth 1 -type d -name 'onnxruntime-*' | head -1)"
-if [ -z "$EXTRACTED" ]; then
-    echo >&2 "Extraction failed — no onnxruntime-* directory found."; exit 1
-fi
+# Validate the selected release layout before touching the installed SDK.
+EXTRACTED="$ORT_STAGE_DIR/onnxruntime-${PLATFORM}-${ORT_VERSION}"
+REQUIRED=(include/onnxruntime_c_api.h include/onnxruntime_cxx_api.h
+          include/onnxruntime_cxx_inline.h include/onnxruntime_float16.h)
+case "$PLATFORM" in
+    win-x64) REQUIRED+=(lib/onnxruntime.lib lib/onnxruntime.dll) ;;
+    osx-universal2) REQUIRED+=(lib/libonnxruntime.dylib) ;;
+    linux-*) REQUIRED+=(lib/libonnxruntime.so) ;;
+esac
+for relative in "${REQUIRED[@]}"; do
+    if [ ! -f "$EXTRACTED/$relative" ]; then
+        echo >&2 "Incomplete ONNX Runtime SDK: $relative"; exit 1
+    fi
+done
 
 # 대상 구조 생성.
 mkdir -p "$DEST/include" "$DEST/lib/$PLATFORM"
 
 echo "[fetch_onnxruntime] Installing to $DEST ..."
 # include/ — 공통 헤더
-cp -f "$EXTRACTED/include/"*.h "$DEST/include/" 2>/dev/null || true
+cp -f "$EXTRACTED/include/"*.h "$DEST/include/"
 
 # lib/ — 플랫폼 라이브러리
 case "$PLATFORM" in
     win-x64)
-        cp -f "$EXTRACTED/lib/"*.lib "$DEST/lib/$PLATFORM/" 2>/dev/null || true
-        cp -f "$EXTRACTED/lib/"*.dll "$DEST/lib/$PLATFORM/" 2>/dev/null || true
+        cp -P "$EXTRACTED/lib/"*.lib "$DEST/lib/$PLATFORM/"
+        cp -P "$EXTRACTED/lib/"*.dll "$DEST/lib/$PLATFORM/"
         ;;
     osx-universal2)
-        cp -f "$EXTRACTED/lib/"*.dylib "$DEST/lib/$PLATFORM/" 2>/dev/null || true
+        cp -P "$EXTRACTED/lib/"*.dylib "$DEST/lib/$PLATFORM/"
         ;;
     linux-*)
-        cp -f "$EXTRACTED/lib/"*.so* "$DEST/lib/$PLATFORM/" 2>/dev/null || true
+        cp -P "$EXTRACTED/lib/"*.so* "$DEST/lib/$PLATFORM/"
         ;;
 esac
+
+# Keep upstream redistribution notices with the SDK when supplied.
+for notice in LICENSE ThirdPartyNotices.txt; do
+    if [ -f "$EXTRACTED/$notice" ]; then cp -f "$EXTRACTED/$notice" "$DEST/"; fi
+done
 
 echo "[fetch_onnxruntime] Done — $DEST ready for CMake -DTETRIS_BUILD_BOT=ON"
 echo "  include/: $(ls "$DEST/include/" | wc -l) header(s)"
 echo "  lib/$PLATFORM/: $(ls "$DEST/lib/$PLATFORM/" | wc -l) file(s)"
 ```
 
-`trap 'rm -rf "$TMPDIR"' EXIT` 로 임시 디렉터리를 반드시 청소하고, 압축을 푼 뒤 실제 폴더 이름을 `find` 로 찾는다(릴리스마다 접미사가 조금씩 다르다). 복사 명령에 붙은 `2>/dev/null || true` 는 "그 확장자 파일이 없어도 계속" 이라는 뜻이다 — 릴리스별 파일 구성 차이를 흡수한다.
+`ORT_STAGE_DIR`는 이번 다운로드만을 위한 임시 폴더다. `trap`으로 종료 때 정리한다.
+선택한 릴리스 디렉터리에서 필수 헤더·라이브러리를 모두 확인한 뒤 설치 위치에 복사한다.
+필수 복사의 실패를 무시하지 않으므로 불완전한 결과를 준비 완료로 출력하지 않는다.
+라이브러리의 심볼릭 링크는 `cp -P`로 유지하고 제공된 라이선스·고지 파일도 SDK에 보관한다.
 
-### 4.3 설계 결정 세 가지
+이 복사는 SDK 디렉터리 전체의 원자적 교체가 아니다. 쓰기 도중 실패하면 일부 파일이
+바뀌었을 수 있으므로 그 SDK를 빌드에 사용하지 말고 새 경로에 다시 준비한다. 서로 다른
+릴리스의 헤더와 바이너리를 섞지 않는다. 다운로드는 실행 중인 서비스 업데이트와도
+분리한다. 대상 OS·아키텍처의 링크 경로 선택은 `cmake/TetrisOnnxRuntime.cmake`가 맡는다.
 
-**왜 CMake `FetchContent` 나 `ExternalProject_Add` 가 아닌가.** ONNX Runtime 은 공식 배포가 **이미 바이너리** 다 — CMake 빌드 스크립트가 들어 있지 않다. `FetchContent` 로 끌어와도 빌드할 수 없고, 단지 압축을 풀어 경로를 맞추는 일이 전부다. 그 일은 쉘이 더 잘 한다. 또한 CMake 시점에 네트워크 요청을 하면 오프라인 빌드가 깨진다. 스크립트는 한 번 실행하고 결과물을 커밋하지 않은 채 로컬에 남겨두는 편이 관리가 쉽다.
 
-**버전 핀 전략.** 기본값 `1.18.1` 이 스크립트에 하드코딩돼 있다. 첫 번째 인자로 다른 버전(`./fetch_onnxruntime.sh 1.19.0`)을 넘길 수 있지만, CMake 는 이 값을 모른다 — 그저 `include/onnxruntime_cxx_api.h` 와 `lib/<platform>/` 하위의 확장자만 본다. API 레벨의 호환성은 Microsoft 가 세마 버저닝으로 보장한다. 이 프로젝트가 쓰는 `Ort::Session` API 는 대략 1.16 ~ 1.19 범위를 겨냥해 작성했지만, 이는 모든 패치 버전에서 측정한 보장이 아니라 가이드 정도로 본다 — 그래서 보통은 버전을 자주 건드릴 일이 없다.
+### 4.3 준비·선택·검증의 책임
 
-**파일 배치 규칙.** 스크립트는 아카이브를 풀어 `third_party/onnxruntime/include/` (헤더) 와 `third_party/onnxruntime/lib/<platform>/` (라이브러리) 로 정리한다. `<platform>` 은 `win-x64`, `osx-universal2`, `linux-x64`, `linux-aarch64` 중 하나. CMakeLists 는 앞의 `TETRIS_BUILD_BOT` 블록에서 이 경로를 직접 참조한다.
+**다운로드와 구성을 나눈다.** 사전 빌드 SDK를 받은 뒤 CMake를 실행하므로 같은 SDK가
+준비된 환경에서는 구성 단계에 네트워크가 필요하지 않다. `FetchContent`로 파일을
+가져오는 설계도 가능하지만, 그것만으로 이미 빌드된 라이브러리의 링크 계약이 생기지는
+않는다. 현재 프로젝트는 별도 준비 스크립트와 IMPORTED 타깃으로 책임을 나눈다.
 
-CMake 쪽 에러 메시지도 스크립트를 정확히 가리킨다:
+**버전과 대상이 함께 맞아야 한다.** 스크립트의 기본 버전은 검증 기준이며 첫 인자로
+바꿀 수 있다. 헤더와 바이너리는 같은 릴리스에서 준비한다. CMake의 파일 존재 검사는
+ABI 호환성의 증명이 아니므로 변경한 SDK로 래퍼를 컴파일하고 실제 모델을 실행한다.
+Python의 `onnxruntime` 패키지 버전과 C++ SDK 버전도 서로 독립이다.
 
-```text
-FATAL_ERROR: TETRIS_BUILD_BOT=ON 이지만 third_party/onnxruntime/include/onnxruntime_cxx_api.h
-가 없습니다. third_party/fetch_onnxruntime.sh 로 벤더링하거나 TETRIS_BUILD_BOT=OFF 로 빌드하세요.
-```
+**실행할 대상을 선택한다.** 준비 스크립트는 실행한 기기의 OS·CPU를 사용한다. 교차
+컴파일은 대상 SDK를 따로 준비하고 `TETRIS_ORT_ROOT`로 지정한다.
+`cmake/TetrisOnnxRuntime.cmake`는 CMake 대상 OS·CPU와 포인터 폭을 검사하고
+`Tetris::OnnxRuntime`에 include 경로·공유 라이브러리·Windows import library를 모은다.
+현재 제공 레이아웃에 없는 대상은 x64로 대체하지 않고 거절한다.
 
-Windows PowerShell 에서 bash 가 없다면 WSL 이나 Git Bash 를 써야 한다 — 또는 해당 아카이브를 수동으로 받아 같은 경로에 풀어도 된다.
+Windows PowerShell에서 bash가 없다면 대상 Windows SDK를 수동 배치하거나 Git Bash를
+사용한다. WSL의 Linux 셸에서 자동 감지로 받은 Linux SDK는 Windows MSVC의 링크 입력이
+될 수 없다. 설치 경로뿐 아니라 대상 플랫폼을 함께 확인한다.
 
 ---
 
@@ -1265,28 +1302,50 @@ Windows PowerShell 에서 bash 가 없다면 WSL 이나 Git Bash 를 써야 한�
 
 툴체인 설치는 [Part 0](./part0-project-setup.md) 에 있고, 릴리스 번들 생성은 [Part 12](./part12-hardening-and-release.md) 가 다룬다. 여기서는 그 사이 — **무엇을 빌드하고 싶을 때 어떤 옵션을 주는가** — 만 정리한다.
 
-기본값은 게임 클라이언트와 회귀 테스트다. 나머지는 전부 명시적으로 켜야 한다.
+새 빌드 폴더에서 기본 ON인 게임·검사 외에도, Reactor 기본값은 대상 OS에 따라 달라진다. Linux/Windows에서는 켜지고 macOS에서는 꺼진다. relay가 꺼져 있어도 검사 옵션과 조합하면 Reactor 검사 타깃이 생길 수 있다. “나머지는 모두 OFF”라고 가정하지 않는다.
 
-| 만들고 싶은 것 | 옵션 | 산출물 |
+역할을 반복해서 선택할 때는 저장소의 [CMakePresets.json](../../CMakePresets.json)을 사용한다. 프리셋 명령은 CMake 3.21 이상에서 사용할 수 있으며, 직접 `-S/-B/-D`를 사용하는 기존 경로도 유지한다. 프리셋은 선택값을 묶은 것이며 SDK를 설치하거나 서버를 실행하지 않는다.
+
+| 역할 | configure 프리셋 | build 산출물/범위 |
 |---|---|---|
-| 게임 + 회귀 테스트 (기본) | (없음) | `tetris`, `sim_hash_dump`, `worker_group_test` |
-| 시뮬레이션만 (헤드리스) | `-DTETRIS_BUILD_GAME=OFF` | `sim_hash_dump`, `worker_group_test` |
-| 릴레이 서버 | `-DTETRIS_BUILD_RELAY=ON` | `tetris_relay` |
-| 메타 서버 | `-DTETRIS_BUILD_META=ON` | `tetris_meta` |
-| Python 모듈 | `-DTETRIS_BUILD_PY=ON -Dpybind11_DIR=$(uv run python -m pybind11 --cmakedir)` | `tetris_py` |
-| 봇 포함 게임 | `-DTETRIS_BUILD_BOT=ON` (먼저 `third_party/fetch_onnxruntime.sh`) | ONNX 추론이 링크된 `tetris` |
-| 서버만 (클라이언트 없이) | `-DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON` | `tetris_relay`, `tetris_meta` |
+| 게임 클라이언트 | `client` | `tetris`와 선행 자산 복사 |
+| 일반 스레드 릴레이와 메타 서버 | `servers` | `tetris_relay`, `tetris_meta` |
+| 학습용 네이티브 모듈 | `training` | 현재 Python 환경용 `tetris_py` |
+| 헤드리스 회귀 검사 | `checks` | 검사 실행 파일들, 이후 CTest로 실행 |
 
-옵션은 CMake 캐시에 남으므로 조합할 수 있다.
+공통 설정은 제품/확장 옵션을 명시적으로 끈 뒤 역할에 필요한 것만 켠다. 따라서 기본 프리셋에는 Reactor·WSS·ONNX Runtime이 포함되지 않는다. 봇 화면의 내장 휴리스틱과 학습된 ONNX 모델 추론은 구분한다. ONNX 상대를 보상 카탈로그에 등록한 서버에는 별도로 BOT 기능과 해당 모델/SDK가 필요하다.
 
 ```bash
-cmake -S . -B build -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON
-cmake --build build -j8
+cmake --list-presets=all
+cmake --preset servers
+cmake --build --preset servers --parallel 2
+cmake --preset checks
+cmake --build --preset checks --parallel 2
+ctest --preset checks
 ```
 
-**`--target` 을 지정하지 않는 편이 낫다.** `copy_assets` 가 ALL 타깃이라 타깃을 명시하면 `Font/` 와 `Sounds/` 가 복사되지 않는다. 자세한 것은 §6.1 에 있다.
+위 명령은 저장소 루트에서 실행한다. 역할마다 `out/build/<프리셋 이름>`을 사용해 캐시를 분리한다. 빌드 명령은 configure 결과를 사용하며, 필요한 옵션 변경을 자동으로 추측하지 않는다. `checks`는 검사 타깃 생성과 CTest 등록을 함께 켠다. CTest만 실행하면 아직 만들지 않은 검사 실행 파일을 컴파일해 주지 않는다.
 
-`TETRIS_BUILD_GAME` 이 기본 ON 이라는 점이 중요하다. 이 시리즈를 [Part 3](./part3-rendering-and-ui.md) 까지 따라오는 동안에는 게임 클라이언트의 소스가 아직 다 없으므로 반드시 `-DTETRIS_BUILD_GAME=OFF` 를 줘야 한다.
+Python의 경우 학습에 사용할 인터프리터와 그 환경의 pybind11을 명시한다.
+
+```bash
+cmake --preset training -DPython_EXECUTABLE=/path/to/python -Dpybind11_DIR=/path/to/pybind11/share/cmake/pybind11
+cmake --build --preset training --parallel 2
+```
+
+이 경로는 각자 설치한 환경으로 바꾼다. 개인 경로·툴체인은 명령 인자나 커밋하지 않는 `CMakeUserPresets.json`에 둔다. Python 모듈을 빌드해도 학습 스크립트가 실행되지는 않는다. 모듈은 그 모듈을 만든 환경과 호환되는 Python 프로세스에서 import한다.
+
+직접 옵션을 조합할 때도 역할을 명시할 수 있다.
+
+```bash
+cmake -S . -B out/manual-servers -DCMAKE_BUILD_TYPE=Release \
+  -DTETRIS_BUILD_GAME=OFF -DTETRIS_BUILD_PY=OFF -DTETRIS_BUILD_TEST=OFF \
+  -DBUILD_TESTING=OFF -DTETRIS_BUILD_RELAY=ON -DTETRIS_BUILD_META=ON \
+  -DTETRIS_BUILD_REACTOR=OFF -DTETRIS_BUILD_WSS=OFF -DTETRIS_BUILD_BOT=OFF
+cmake --build out/manual-servers --config Release --target tetris_relay tetris_meta
+```
+
+캐시 안의 값은 재사용된다. 이미 구성한 폴더에서 어떤 `-D`를 생략하는 것은 그 값을 초기 기본값으로 되돌리라는 뜻이 아니다. 생성기·컴파일러·대상 OS를 바꾸는 경우에는 별도의 빌드 디렉터리를 선택한다. `--target`은 이미 구성된 그래프에서 빌드할 가지를 고르는 기능이다. configure 단계의 모든 `find_package`를 건너뛰게 하지 않으므로, GUI 의존성이 필요 없는 서버 빌드는 먼저 GAME을 꺼야 한다.
 
 ## 6. 플랫폼별로 다른 것
 
@@ -1302,7 +1361,7 @@ cmake --build build --config Release
 .\build\Release\tetris.exe
 ```
 
-**여기에 함정이 하나 있다.** 실행 파일은 `build\Release\` 에 생기는데 `copy_assets` 는 `${CMAKE_CURRENT_BINARY_DIR}` — 즉 `build\` 로 에셋을 복사한다. 그래서 `build\Release\` 로 들어가서 실행하면 폰트와 사운드를 찾지 못한다. 저장소 루트에서 경로를 지정해 실행하는 것이 가장 안전하다.
+실행 파일과 자산은 선택한 구성의 `build\Release\`에 준비된다. 게임의 상대 경로는 프로세스 작업 디렉터리를 기준으로 하므로 해당 폴더에서 실행하거나, 같은 자산이 있는 저장소 루트에서 실행한다. 실행 파일의 경로를 지정하는 것만으로 작업 디렉터리가 바뀌지는 않는다.
 
 Win32 백엔드가 기본이므로 SDL2 없이 빌드된다. 창은 `CreateWindowExA`, GL 컨텍스트는 WGL(`opengl32.lib`), 오디오는 XAudio2 — 전부 Windows SDK 에 있다.
 

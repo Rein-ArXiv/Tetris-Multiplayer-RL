@@ -2,11 +2,11 @@
 
 강의 사이트는 게임 서버와 별개인 정적 HTML 사이트다. 개발용 소스 조회 API가 없어도
 강의 본문·코드·전체 참고 원문·배포 시점 소스·확인 문제를 읽을 수 있다.
-2026-09-23 “시간과 재현성” 챕터까지의 **1~55차시·269문항**을 공개했다.
 [공개 강의 사이트](https://rein-arxiv.github.io/Tetris-Multiplayer-RL/)에서 접속한다.
-최초 공개 이후 강조·사이드바 교정을 반영했다. 마지막 공개본의 배포 ID·커밋·검증 기록은
-`PUBLICATION.json`을 기준으로 확인한다.
-이후 강의는 로컬에서 집필하고, 검수한 배포물을 올릴 때 공개본을 갱신한다.
+`main`의 검수 완료 강의와 코드 레퍼런스를 정적 배포물로 생성한다.
+공개 배포 결과는 저장소의 **Learning site** Actions 작업과 `github-pages` 환경에서,
+실제 제공 중인 내용 식별값은 사이트의 `site-manifest.json`에서 확인한다.
+`PUBLICATION.json`은 배포 방식과 과거 공개 이력을 기록한다.
 
 ## 배포물 만들기
 
@@ -73,46 +73,33 @@ ID는 입력 자산 내용에서 계산한다. 변경이 없다면 같은 배포
 
 ## 이 저장소의 GitHub Pages 경로
 
-`Rein-ArXiv/Tetris-Multiplayer-RL`은 public 저장소다. 현재 Pages는 **Deploy from a
-branch → gh-pages → /(root)**를 사용하며 HTTPS를 강제한다. 공개본의 코드 레퍼런스는
-배포 시점 스냅샷이다. 로컬 작업 폴더를 바꿔도 공개본은 자동으로 바뀌지 않는다.
-
-첫 공개는 검증된 15개 정적 파일과 Jekyll 처리를 끄는 빈 `.nojekyll`을 별도
-배포 체크아웃에 담아 수행했다. 원고·작업 기록·빌드 결과·AI 작업 자료는 배포 브랜치에
-포함하지 않았다. `library.js`에 명시적으로 묶인 참고 원문과 소스는 공개본에 포함된다.
+`Rein-ArXiv/Tetris-Multiplayer-RL`의 개발 소스와 강의 원고는 `main`에서 관리한다.
+Pages Source는 **GitHub Actions**이며 `.github/workflows/learning-pages.yml`이
+자료 갱신·Markdown/원문 발췌·객관식 검사를 통과한 정적 묶음을 배포한다.
+공개본의 코드 레퍼런스는 배포 시점 스냅샷이다. 로컬 수정만으로는 공개본이 바뀌지 않는다.
 
 - 공개 주소: [Tetris 동행 강의](https://rein-arxiv.github.io/Tetris-Multiplayer-RL/)
-- 배포 브랜치: `gh-pages` (학습 원고를 편집하는 main과 별개)
-- 첫 공개 커밋: `0cdd9be69d02e0489394f367c2f8bf2d33ebb47b`
-- [첫 Pages 배포 작업](https://github.com/Rein-ArXiv/Tetris-Multiplayer-RL/actions/runs/35855628510): 성공
-- HTTPS 첫 페이지 200과 15개 파일의 바이트가 검수된 배포물과 일치함을 확인했다.
-  이 확인은 실제 다른 기기의 브라우저 조작 검사를 뜻하지 않는다.
+- 집필·제품 코드 기준: `main`
+- 배포 입력: 정적 내보내기의 허용 목록에 포함된 파일
+- 과거 `gh-pages`: 이전 정적 배포 이력으로 보존하며 현재 소스에 병합하지 않는다.
 
 ### 공개본 갱신
 
-1. 로컬에서 집필·검수를 끝내고 교재·자료·강의 생성물을 갱신한다.
-2. `python3 scripts/check_learning_site.py`로 정적 배포물과 재현성을 검사한다.
-3. 별도 디렉터리에서 원격 `gh-pages`를 체크아웃한다. 집필 중인 main 작업 폴더를
-   배포용으로 갈아 끼우지 않는다.
-4. 새 배포 ID의 디렉터리를 기준으로 정적 파일을 교체하고 `.nojekyll`을 유지한다.
-   이전 manifest에만 있는 자산이 남지 않았는지 확인하고, 커밋 파일 목록을 대조한다.
-5. `gh-pages`에 일반 커밋·푸시한다. 원격 이력을 강제로 덮어쓰지 않는다.
-6. Pages 배포 성공을 확인하고, 실제 HTTPS 파일을 새 배포물과 대조한다.
-   그 뒤 `PUBLICATION.json`의 배포 ID·커밋·검증 기록을 갱신한다.
+1. 집필·코드·Part 문서 검수를 마치고 자료 생성물을 갱신한다.
+2. `python3 scripts/check_learning_site.py`로 허용 목록·해시·재현성을 검사한다.
+3. 검수된 변경을 큰 단원 경계에서 `main`에 커밋·푸시한다.
+4. **Learning site**의 build 성공 뒤 deploy 성공을 확인한다. PR에서는 deploy를 실행하지 않는다.
+5. 공개 HTTPS의 `site-manifest.json`과 파일 해시를 배포물에 대조한다.
+   실패하면 해당 Actions 로그에서 원인을 확인한다. 저장소 커밋과 공개 완료는 구분한다.
 
-55차시 이후 집필은 로컬에서 계속한다. 공개본 업데이트를 의도하지 않은 원고 수정은
-`gh-pages`에 푸시하지 않는다. 답안은 각 브라우저에 저장되며 기기 간 자동 동기화되지 않는다.
+동일 main을 다시 배포할 때는 Actions의 **Learning site → Run workflow**를 사용할 수 있다.
+빌드는 외부 AI 모델·API 키 없이 저장소 자료만 사용한다. 공개 사이트에는 게임 서버나
+개발용 임의 파일 읽기 API를 올리지 않는다. 답안은 각 브라우저에 저장되며 기기 간
+자동 동기화되지 않는다.
 
-### 준비해 둔 사용자 정의 워크플로
-
-`.github/workflows/learning-pages.yml`은 원고와 소스에서 정적 배포물을 만드는 별도의
-GitHub Actions 대안이다. 현재 첫 공개에 사용한 경로는 위의 브랜치 배포다.
-이 대안을 실제로 채택할 때는 필요한 원고·소스·도구를 main에 커밋하고 Pages Source를
-GitHub Actions로 전환해야 한다. 두 배포 방식을 동시에 사용하는 절차로 읽지 않는다.
-워크플로는 push/PR에서 검증·패키지만 준비하고, main의 수동 실행에서 공개한다.
-외부 AI 모델이나 API 키는 빌드에 필요하지 않다.
-
-설정 근거: [GitHub Pages API의 생성·소스 설정](https://docs.github.com/en/rest/pages/pages#create-a-github-pages-site),
+첫 공개는 별도 `gh-pages` 브랜치 방식이었다. 현재 방식은 main에서 생성한 Actions
+산출물을 배포하므로 배포 브랜치의 HTML로 main 소스를 교체할 필요가 없다.
+설정 근거: [GitHub Pages API](https://docs.github.com/en/rest/pages/pages#update-information-about-a-github-pages-site),
 [사용자 정의 워크플로](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
 
 

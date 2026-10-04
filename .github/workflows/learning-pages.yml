@@ -49,10 +49,10 @@ jobs:
         with:
           path: ${{ steps.site.outputs.directory }}
 
-  # Public publishing is deliberately an explicit Run workflow on main.
-  # Push/PR runs validate and package the site without publishing drafts.
+  # Publish the reviewed static export from main after the site checks pass.
+  # Pull requests validate the export without changing the public site.
   deploy:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

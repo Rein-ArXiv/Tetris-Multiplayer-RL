@@ -6954,3 +6954,70 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - 전달 리뷰의 library/Mermaid 지연 로드, SDL 진입점, SDL2 Config 우선, noscript, 모바일 공백, 동적 개수, 그래픽 지도/절 제목 수정이 유지되는지 확인했다. 첫 로딩이 일괄1/3이 된다는 추정과 macOS 전체 검증 단정은 채택하지 않는다. 선수 차시 번호의 반복 표기도 복원하지 않는다.
 - **최종 마감**: 전체166차시 DOM 계약 통과(166-module-navigation.log,11399 exit0). 마지막 Part 발췌 동기화로 coverage를 바꾼 뒤 강의 묶음 재생성을 빠뜨려 배포 최신성 검사가 한 번 실패했다. 재생성 후 최종 released08e0892cffd8487·16파일·허용목록·상대자산·해시·재현ZIP 통과(166-site-final.log,63116 exit0). 바뀐 것은 이미 검토한 대응 메타데이터이며 본문/공통UI는 동일하다. 최종HTTP 생성자료·현재소스 해시 일치(166-http-final.log), Part/coverage/diff 통과. 단원 커밋 뒤 사용자 요청대로 goal paused;167은 미착수, 공개1~55 동결·푸시 없음.
 - 커밋 준비 시 신규 누적 스냅샷의 기존 라이선스·외부 dr_mp3 헤더·기존 헤더 끝 공백이 staged whitespace 경고로 나타났다.148의 해당 원본과 바이트 동일성을 대조하여 상속된 파일에만 있는 경고임을 확인하고 보존한다. 변경 코드의 공백 검사와 누적 보존 검사를 대신 생략하지 않는다(166-staged-whitespace.log).
+
+## 167차시 준비 — 역할별 실제 빌드와 자산 선행 의존성 (2026-10-04)
+
+- 직전166 턴은 단원 검수/커밋4457e34와 명시 중지를 완료한 progress다. 이번 목표 continuation에서 get_goal의 상태가 active로 재개된 것을 확인하고 module-13의167 준비를 시작했다. 공개1~55 동결·푸시 없음, 다음 큰 단원 경계에서 커밋한다.167은 draft이며 아직 강의 완료로 표시하지 않는다.
+- DeepSeek에 실제 코드/환경 대신 빌드 옵션 명세만 보내 CMakePresets JSON 초안을 받았다(167-presets-events.jsonl,11365 exit0). tool_use 이벤트 없음. 직접 검토하면서 Ninja 강제를 제거했다. CMake 자체의 설치된 공식 매뉴얼에서 schema3의 generator 생략/기본 탐색을 확인하고 실제 --list-presets 및 구성으로 검증했다. 개인 Python 경로/툴체인/주소/비밀은 추적 프리셋에 넣지 않는다.
+- CMakePresets.json: client/servers/training/checks의 독립 binaryDir와 공통 명시 옵션을 추가했다. configure/build/test를 나누며 checks는 TETRIS_BUILD_TEST와 BUILD_TESTING을 함께 켜고 빈 테스트 집합을 오류로 취급한다. Reactor/WSS/BOT은 기본 프리셋에서 OFF이며 공개 서비스용 번들이나 학습 실행으로 오인하지 않게 문서화했다. CMake 3.21 이상 프리셋 경로와 기존 직접 옵션 경로를 구분한다. CMakeUserPresets.json만 .gitignore에 추가했다.
+- 실제 오류 수정: copy_assets가 tetris에 의존해 --target tetris에서는 실행되지 않았다. tetris가 copy_assets를 선행하도록 반전했다. 자산 변경은 실행 파일이 최신이어도 복사하며 공백 경로를 보존한다. 기본 런타임 출력 배치에 맞춰 single-config는 빌드 루트, multi-config는 구성 하위 폴더를 사용한다. 현재 출력 속성을 바꿀 때 함께 조정해야 하며 copy_directory가 삭제 동기화나 배포 완결성 검사가 아님을 명시했다.
+- tests/learning/test_client_assets.py가 실제 루트 CMake의 해당 블록을 가져와 컴파일 가능한 fixture에 적용한다. 공백 경로·선택 타깃만 빌드·미선택 타깃 제외·자산 변경/삭제 후 최신 실행 파일 재빌드·선택적 모델 폴더 부재 검사. 임시 Python 검증 환경에 Ninja만 설치하여 Linux의 Ninja 및 Ninja Multi-Config Debug/Release 두 계약 통과(167-assets.log,52493 exit0). Windows 자체 실행 근거로 확대하지 않는다.
+- 새 실제 프리셋으로 Linux SDL 클라이언트 tetris 전체 링크, 일반 relay/meta 전체 링크, Python 확장 전체 빌드가 성공했다(167-client-build.log/24023,167-servers.log/58763,167-training.log/71510 모두 exit0). 이전 기록의 SDL SDK 부재를 그대로 가정하지 않고 이번 실제 configure 결과에서 사용 가능함을 확인했다. GUI 실행/화면 검사는 하지 않았다.
+- checks 전체33CTest 통과(167-checks.log,45724 exit0). 새 training 디렉터리의 실제 확장을 선행 import하고 경로를 확인한 뒤 binding/versus28계약 통과(167-native-import.log,9644 exit0). 새 서버 바이너리를 지정한 실제 임시 DB/loopback HTTP+relay 검사70통과·16skip(167-services-smoke.log,74824 exit0). 명시한 thread relay 범위이며 미선택 reactor 등의 skip을 통과로 세지 않는다.
+- scripts/check_build_roles.py가 CMake File API로 생성된 실제 각 역할의 제품 타깃 집합과 client의 copy_assets 의존성, checks의 CTest 등록을 검사했다(167-role-graphs.log,90205 exit0). 단순 JSON 일치 검사와 실제 빌드 그래프 증거를 구분한다.
+- Part13의 “나머지 기본 옵션은 모두 OFF”를 Reactor의 OS별 기본값에 맞춰 교정했다. 역할별 프리셋·캐시·선택 타깃과 configure 의존성·작업 디렉터리를 설명하고 Part3/4/5/6/9/11/12·목차·start-here의 낡은 자산 지시를 동기화했다. Part4 중간 체크포인트의 옛 그래프는 보존하고 현재 루트와 차이를 명시했다. 개인 설정은 제외하고 CMakePresets.json만 소스 뷰어의 명시 허용 목록에 추가, 관련 경계4검사 통과.
+- 기존partial5절의 자산 관련 변경만 재검토해 해시를 갱신했다.167의 새 빌드 내용이 완성 강의에 대응됐다고 표시하지 않는다. Part 발췌/링크·824객관식·lazy assets·Markdown27검사 통과. 첫 배포 검사는 마지막 문서 수정/생성 시점 차이로 실패해, 문서를 고정한 뒤 생성물 전체와 정적 배포를 다시 검사한다. 최종 결과는 아래에 기록한다.
+- **다음 작업**:167 본문·CS(전처리/컴파일/링크/로더·DAG·캐시·configure/build/run)·안정적인 기준 스니펫·누적 실습 빌드 산출물 연결·문제/복습을 작성하고 검수한다. 현재 루트 프리셋은 실제 제품 타깃용이며 CP166의 거대한 누적 CMake(데모/계약)와 bindings/inference 독립 진입점을 같은 것으로 복사하면 안 된다. 누적 실습에서 역할별 선택과 실제 의존성이 어떻게 이어지는지 먼저 설계하고, source-viewer의 현재 루트 프리셋과 비교할 것.167 완료 전168로 넘기지 않는다.
+- 최종 정적 release3a0db7b55c582095·16파일의 허용목록/상대자산/해시/재현ZIP 통과(167-site-final.log,64360 exit0). 현재 자료28문서·250소스. 로컬18767 생성자산과 CMakeLists/CMakePresets의 현재 소스 bytes/해시 일치(167-http-final.log). diff 검사 통과. 모든 외부/빌드 검증 핸들은 종료했고 기존 로컬 읽기 서버만 유지한다. 아직167 완성 원고·새 CP는 만들지 않았으므로 다음 턴은 그 연결과 집필부터 계속한다. goal active 유지, 커밋/푸시 없음.
+
+## 2026-10-04 — 167차시 빌드 타깃과 푸시 후 CI 감사
+
+-167 본문16절·5문제·인라인5, 누적CP167 roles의 RULES/SERVICE/TRAINING/POLICY 빌드를 완료. 원래166 파일은 루트 README 외 바이트 보존. 역할별 실제 산출물과 현재 제품 프리셋의 차이를 명시했다. DeepSeek roles 명세 초안(167-roles-events)과 CI 실행기 명세 초안(167-ci-runner-events)은 도구 호출 없이 텍스트만 반환. 실행기 초안의 잘못된 테스트 경로를 수정하고 실제 파일 목록·네이티브 경로 실패·Windows 접미사를 검토해 적용. 키/계정/설정/전체 저장소 전송 없음.
+- CP 실제 역할별 CMake File API·UNKNOWN 구성 실패·RULES2/바인딩21/POLICY1 CTest·계정 fresh DB 계약·native oracle동일·ONNX621프레임 대조 통과(167-cp.log). CPHTTP health/guest/auth profile 통과(167-cp-http.log). 기존 루트 client/servers/training 실제 빌드·checks33CTest·자산 증분/단일·다중구성/공백경로 검사에 더해 현재 소스/스니펫 계약 통과.
+- 집중167 DOM·공통 탐색/답안/저장/뷰어/file URL·829객관식·Markdown27·lazy·허용목록/상대자산/해시/재현 ZIP 통과. 이 시점 정적release d96ee5948c1874a2(후속CI/Part수정 전). 수동 브라우저·화면 검사 없음.167 Part13 타깃 조합 절은 내용 대조 후 covered;다른 부분 대응 상태는 유지.
+- 사용자의 연속 진행·단원별 commit/push 요청으로4457e34를 origin/main에 푸시. 학습 사이트 원격 검사37219572994 성공. 제품CI37219572983은 실패: Linux/macOS 서버 pytest수집의Torch선택의존성 누락, Windows 서버/클라이언트의 system_trust.cpp 헤더 순서에 따른 max매크로 충돌. Linux/macOS클라이언트 컴파일은 성공. push는 Pages deploy를 실행하지 않으며 공개1~55는 유지한다.
+- 선택 학습 테스트6개의Torch가드를 복구하고 versus테스트는 Gym부재/네이티브확장부재만 skip, 이미 존재하는 확장의 ABI/로더 오류는 다시 던지도록 수정. torch없는기존 .venv의전체1999항목 수집 통과(167-ci-collection.log). 서버CI에서 학습코드를 단순 제외하지 않고 training-cpu 작업을 추가, CPU Torch2.8.0을 명시검증기준으로 고정하고 학습/내보내기 의존성 설치. fresh바인딩과C++대조실행기를 빌드하여 scripts/check_training_ci.py가 실제 경로와 필수패키지를 선확인하고 skip을 실패로 처리.
+- CPU실제환경에서1919검사·37subtests 통과/skip없음(167-training-ci.log). ONNX legacyexporter경고는 유지. missingoracle/collectionskip/testskip/assertionfailure가 모두 비성공인 음성검사 통과(167-ci-negative.log). CPU의존성 명령 dry-run은 설치변경없음(167-ci-deps-dry.log). ColabGPU 전체조합·C++ORT서버는 이전용job범위밖이다.
+- system_trust.cpp에 OpenSSL 이전 NOMINMAX 선언. Linux WSS타깃 실제컴파일 통과(167-trust-linux-final.log). 처음166-root에는 WSS타깃이 없어 실패했으며 기존WSS켜진build-secure로 수행. Windows수정후실행은 다음단원푸시CI에서 확인해야 한다. Part12검사범위·Part16헤더경계 설명과부분대응해시를 갱신. 새CI아직원격실행전이며 실패한옛commit이통과됐다고표현하지 않는다.
+- 다음168 패키지/ABI/SDK: rootORT경로가세번반복되고Linuxx64고정, fetch스크립트미지원arch가x64로fallback·필수복사실패무시, Linuxrelease의BOT/WSS문자열처리와빌드BOOL불일치 후보를 조사. 단원13끝에서commit/push후목표까지계속. :memory:.ses는 제외.
+
+## 2026-10-04 — 168차시 의존성과 설치 이동
+
+- **168차시 제작·검수 완료.** API/ABI, 호스트/대상, 헤더/링크/로더/모델의 경계, IMPORTED 타깃, Windows import library/DLL, 정적 래퍼의 링크 전파, 빌드/설치 RPATH, SONAME, 작업 디렉터리와 실행 파일 기준 경로, 실제 설치 이동을 재구성했다. 본문15절·5문제·인라인7·기준 전체 파일2개(기본 접힘). 부정문으로 플랫폼 검수 보고를 본문에 끼워 넣지 않았다.
+- CP168은167의 README와 inference/CMakeLists.txt만 바꾸고 다른 누적 파일을 바이트 보존했다. dependencies/OnnxRuntime.cmake와 실제 SDK 초기화용 dependency_probe를 추가했다. 루트 cmake/TetrisOnnxRuntime.cmake와 기준 모듈은 현재 같은 바이트이며 후속 레퍼런스와 강의 스니펫의 독립 계약을 유지한다.
+- **DeepSeek 사용:** /tmp의 선택된 IMPORTED 모듈 명세만 전달했다(168-import-events/draft). 이벤트는 step_start/text뿐이며 도구 사용·추가 저장소/설정 읽기 없음. 초안의 잘못된 macOS 명시 아키텍처 수용, SDK 루트 재지정의 무시를 직접 고쳤다. 로컬 CMake 공식 속성/변수 문서를 확인하여 Visual Studio의 실제 대상 플랫폼과 CMAKE_SYSTEM_PROCESSOR의 호스트 가능성도 반영했다.
+- **현재 코드 교정:** 게임/meta/ONNX 검사기의 반복 SDK 경로를 Tetris::OnnxRuntime에 모았다. TETRIS_ORT_ROOT를 명시 입력으로 제공하고 Linux ARM64 경로를 선택할 수 있게 했다. 지원하지 않는 대상·잘못된 포인터 폭·필수 헤더/링크 파일·Windows DLL 누락은 configure에서 거절한다. 파일 존재를 ABI 검증으로 주장하지 않는다. Linux ONNX 활성 게임의 실제 SDL/OpenGL 링크, meta와 ONNX 계약 실행기 빌드가 통과했다(168-client.log,168-root-ort.log).
+- SDK 준비 스크립트의 미지원 CPU→x64 fallback 및 필수 복사 실패 무시를 제거했다. 추출 결과를 먼저 확인하고 준비 전용 ORT_STAGE_DIR·명령 배열·symlink 보존 복사·제공된 upstream 고지 보관으로 정리했다. SDK 전체 원자적 교체를 구현했다고 주장하지 않으며 디스크 복사 실패 후 일부 갱신 가능성을 명시한다. 로컬 가짜 아카이브로 정상 alias/고지·미지원 CPU·불완전 SDK의 이전 입력 보존·복사 실패 비성공4검사 통과(168-sdk-script.log); 실제 다운로드나 vendored SDK 교체는 하지 않았다.
+- 실제 SDK1.18.1로 새 CP 바인딩을 빌드하고 누적21CTest 통과. POLICY 실제2CTest, 설치→트리 이동→검사용 개발 SDK/빌드 삭제→저장소 밖 실행 통과. readelf로 설치 RPATH와 개발 SDK 절대 경로 부재를 확인했다. 설치한 policy_match_probe로 실제 모델/NaN 정책·두 보드·적격성621프레임 대조 통과. 설치 lib를 숨기면 로더에서 비성공을 반환했다(168-contracts.log). system libc 등 기존 Linux 시스템 환경은 공유하므로 다른 배포판/OS 호환성을 증명하지 않는다.
+- root 유효/잘못된 폭/NaN/±inf/valueNaN ONNX 계약 및 실제 meta 정책 실패7HTTP검사 통과(168-root-runtime.log). Windows/macOS/ARM 선택 fixture는 구성 분기만 검사했고 해당 대상의 실제 ABI 실행 근거와 구분한다. macOS ARM64 host/Windows x64 선택 등 표준 변수 의미를 교정한 뒤 선택/누락/SDK혼합 검사를 재실행했다. 외부 ORT128byte LSan 미해결 한계는 유지한다.
+- Part9§9, Part13 옵션/SDK 연결/준비 설명을 현재 소스와 동기화했다. WSL host SDK를 Windows target SDK로 오인하는 안내, FetchContent가 사전 빌드 파일에 사용 불가하다는 단정, 세마 버전만으로 ABI 보장이라는 설명도 고쳤다. 부분 대응 범위는 유지하고 SDK 절의 대응을 추가했다. Part 현재 발췌·대응 해시 drift 없음. .gitignore의 *.cmake 예외를 정확한 유지 파일과 누적 학습 모듈에 추가해 누락 커밋을 방지했다. 소스 뷰어는 해당 cmake 파일만 추가 허용하며 개인 toolchain 전체를 노출하지 않는다.
+- 새 강의 집중 DOM/공통 탐색·답안·저장·뷰어·file URL,834객관식, lazy 로딩, Markdown27, 소스 허용 목록5검사, 스니펫7·누적 보존, Part 검사 통과. 초기 lazy 명령의 파일명/NODE_PATH 누락은 실행기 호출 문제였고 올바른 경로로 재검사했다. 수동 브라우저·스크린샷 없음. 처음 SDK혼합 음성검사는 CMake 줄바꿈 때문에 문자열 assertion이 실패했고 공백 정규화로 교정했다.
+- 최종 정적 release **8af8eccfb056bef1**,16파일의 상대 자산·허용 목록·해시·재현 ZIP 통과(168-site-final.log). 최종 로컬18767 강의/원문/coverage 및 현재 CMake/의존성 모듈/CI실행기/Windows 어댑터 소스 해시 일치(168-http-final.log). 모든168 작업 종료. 기존 로컬 읽기 서버 유지.
+- 다음169: Linux 서버의 실행 순서/주소/포트/준비 상태를 실제 프로세스로 연결한다. release_linux/release_server_linux의 BOT/WSS=ON과 문자열1 비교 불일치, 필수 Runtime 누락 처리, x64 전용 bundle의 host 조건, 오래된 thread relay 결함 주석을 검토한다. systemd After는 준비 완료를 보장하지 않는다는 점과 계정 DB·실행 디렉터리를 분리한다.169 파일·외부 초안은 아직 생성하지 않았다.
+- 최신 요청대로 module13 마감에서 범위 감사·커밋·푸시 후 목표까지 계속.167 CI 교정의 원격 결과는 그 푸시 후 확인한다. 공개 Pages1~55는 별도 유지. :memory:.ses는 계속 제외한다.
+
+
+## 2026-10-04 — 반복 CI 실패 우선 교정 (진행 중)
+
+- 사용자 최신 요청으로 단원 경계 전 CI 수정만 별도 커밋/푸시했다. b0e7196: 서버 전용 환경의 선택 Torch import guard, Windows system_trust의 OpenSSL 이전 NOMINMAX, 실제 CPU 학습 CI와 skip 거절 실행기. 원격 학습 job 통과.
+- 후속 run37222611697에서 가려져 있던 Windows 마우스 numeric_limits min/max 매크로 충돌, MSVC WSS COFF 섹션 한도(C1128), Linux Reactor 테스트의 과거 종료 로그 문자열 기대가 드러났다. 40151af에서 매크로 안전 호출, WSS 타깃 한정 /bigobj, 현재 배수 종료 사유 및 실제 소켓 종료 검사로 교정. UTF-8 노트북과 학습 manifest/result 읽기에 인코딩을 명시하고 CP1252 + 한글 경로 회귀 추가.
+- DeepSeek에는 두 Python 읽기 표현과 작은 마우스 좌표 헤더를 별도 선택 전달했다. 두 응답은 step_start/text뿐이며 추가 파일 읽기/도구 실행 없음. 반환 수정 직접 검토. Windows 매크로를 활성화한 강화 테스트는 b0e7196 헤더 컴파일을 거절하고 수정 헤더로는 좌표 경계 검사를 통과한다.
+- Part2 소스 발췌 누락을 바로잡은 최종 54d4867 기준 Learning site CI 통과. 중간40151af CI는 최종 커밋으로 대체해 취소. 최신 전체 CI는 run37223680416이며 아직 Windows 결과 대기 중. 이미 끝난 옛 실패 이력을 수정 성공으로 바꾸지 않는다.
+- 로컬 검사는 git archive 기반 별도 소스로 수행해167~168 미커밋 CMake/강의 변경과 분리했다. 최초 Boost 경로가 사라진 임시 경로였으므로 실제 SDK /tmp/study136-boost/root/usr/include로 구성했다. 소켓 제한 상태 CTest 실패는 실행 권한을 허용한 동일 검사36통과로 확인했다. 전체 Reactor108통과/결과 송신 주입 미설정3skip, UTF-8/프로필41통과37subtests/네이티브 대조 부재1skip. 선택 기능 skip을 전체 실행으로 주장하지 않는다.
+- 현재 Part13에 타깃별 /bigobj 의미를 추가하고 Part2/13 부분 대응 해시만 검토 갱신. 로컬 HTML 원문·소스 스냅샷과 정적 release8956e73123f7a264, 허용 목록/해시/재현 ZIP 및834객관식 검증 통과. 공개 Pages 범위 변경/배포 없음. 수정 코드의 별도 실행 결과를 학습 본문에 넣지 않았다.
+- Windows 대기 중169 Linux 서비스 실행·포트/준비 상태의 개념 질문 명세만 DeepSeek에 전달했다. 원고·체크포인트는 아직 생성하지 않았다. 후속 집필은 CI 실제 성공 확인 후 이어간다.
+
+### CI 후속 — Windows app-local 경합과 최종 재실행
+
+- run37223680416 결과: Linux/macOS 서버, Windows/Linux/macOS 클라이언트, Native training CPU, Learning site 성공. Windows 서버에서 tetris_meta/tetris_wss_gateway/wss_probe 등 전체 소스 컴파일·링크 성공 후 sim_combat_test의 vcpkg z-applocal 단계가 "The process cannot access the file because it is being used by another process"/MSB3073 code32로 실패했다. 증거 ci-repair-final-windows-failure.log. 과거 max매크로/C1128은 이 실행에서 재발하지 않았다.
+- CI6b30039: Windows 서버/클라이언트 타깃은 --parallel1, 다른OS는4로 한정한다. 같은 Release 폴더로 실행 DLL을 복사하는 app-local 단계의 경합을 없앤다. 컴파일 오류 무시·재시도 성공 위장·테스트 제외는 없다. 최신 remote CI37224758450/사이트37224758496 결과 대기. Windows 실제 CTest/통신 성공은 아직 주장하지 않는다.
+- Linux 결과 송신 fault shim을 별도 빌드·설정한 뒤 앞서 skip된3검사를 실제 실행해 전부 통과했다(ci-repair-result-drain.log). 정상 FIFO/송신 정체 종료 제한/첫 상대 송신 실패 후 결과 처리를 대조했다.
+- 대기 중169 준비: DeepSeek 명세 응답 두 건 도구실행 없음. 질문의 cwd 모순·loopback 설명 반대문장·healthz·systemd 과대단정 수정. 보조 함수의 PORT엄격문법·응답길이·UTF-8오류·503·자식회수 한도 교정. out/learning-jobs/169-authoring-notes.txt에 남은 범위와 실제 HTTP/SQLite 재시작·실패경로 검증 기록. 학습 원고/체크포인트/공개 상태는 아직 추가하지 않았다.
+
+
+## 2026-10-04 — 검수된 강의·제품 개선의 main 반영과 Pages 통합
+
+- 사용자 요청으로 현재 작업 브랜치main 및origin/main일치를 확인했다. 이미166까지main에 있으며 gh-pages는 이전 정적출력 전용 브랜치다. main을배포HTML로교체하거나 강제푸시하지 않는다. 검수완료167·168과관련코드/Part개선을한번에커밋한다.
+- Pages설정은legacy/gh-pages였고 main 워크플로는수동배포전용이었다. main push 및 수동실행에서 학습사이트검사성공뒤배포하도록조건수정. PR은배포제외. DeepSeek에는조건명세만전달했으며step_start/text외도구없음; 조건을직접검토했다. GitHub공식Pages API의workflow/legacy구분확인.
+- README/학습안내/DEPLOYMENT와집필계약을새공개정책에맞췄다. PUBLICATION은고정된오래된공개수치를현재상태로보이지않도록이전배포이력을중첩보존하고현재배포증거위치를Actions와실제manifest로안내한다. 과거진행기록은이력이며상단최신요청이우선한다.
+-167/168스니펫·현재심볼·누적보존재검사통과. 에셋복사검사는처음PATH에Ninja가없어구성실패했으나기존/tmp/study161-python의검증용Ninja를명시해재실행한다. SDK준비4검사통과. 기존의실제역할빌드/추론/설치이동검증은167·168항목을따른다.

@@ -23,13 +23,18 @@ detect_platform() {
             case "$arch" in
                 x86_64)  echo "linux-x64" ;;
                 aarch64) echo "linux-aarch64" ;;
-                *)       echo "linux-x64" ;;  # fallback
+                *) echo >&2 "Unsupported Linux architecture: $arch"; exit 1 ;;
             esac ;;
         Darwin)
-            # universal2 빌드가 arm64 + x86_64 모두 포함.
-            echo "osx-universal2" ;;
+            case "$arch" in
+                x86_64|arm64) echo "osx-universal2" ;;
+                *) echo >&2 "Unsupported macOS architecture: $arch"; exit 1 ;;
+            esac ;;
         MINGW*|MSYS*|CYGWIN*|Windows_NT)
-            echo "win-x64" ;;
+            case "$arch" in
+                x86_64|AMD64) echo "win-x64" ;;
+                *) echo >&2 "Unsupported Windows architecture: $arch"; exit 1 ;;
+            esac ;;
         *)
             echo >&2 "[fetch_onnxruntime] Unknown OS: $os"; exit 1 ;;
     esac
@@ -41,62 +46,76 @@ PLATFORM="$(detect_platform)"
 case "$PLATFORM" in
     win-x64)
         ARCHIVE="onnxruntime-win-x64-${ORT_VERSION}.zip"
-        EXTRACT="unzip -q" ;;
+        EXTRACT=(unzip -q) ;;
     osx-universal2)
         ARCHIVE="onnxruntime-osx-universal2-${ORT_VERSION}.tgz"
-        EXTRACT="tar xzf" ;;
+        EXTRACT=(tar xzf) ;;
     linux-x64)
         ARCHIVE="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
-        EXTRACT="tar xzf" ;;
+        EXTRACT=(tar xzf) ;;
     linux-aarch64)
         ARCHIVE="onnxruntime-linux-aarch64-${ORT_VERSION}.tgz"
-        EXTRACT="tar xzf" ;;
+        EXTRACT=(tar xzf) ;;
     *) echo >&2 "Unsupported platform: $PLATFORM"; exit 1 ;;
 esac
 
 URL="${BASE_URL}/${ARCHIVE}"
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+ORT_STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$ORT_STAGE_DIR"' EXIT
 
 echo "[fetch_onnxruntime] Downloading $URL ..."
 if command -v curl &>/dev/null; then
-    curl -fSL "$URL" -o "$TMPDIR/$ARCHIVE"
+    curl -fSL "$URL" -o "$ORT_STAGE_DIR/$ARCHIVE"
 elif command -v wget &>/dev/null; then
-    wget -q "$URL" -O "$TMPDIR/$ARCHIVE"
+    wget -q "$URL" -O "$ORT_STAGE_DIR/$ARCHIVE"
 else
     echo >&2 "Neither curl nor wget found."; exit 1
 fi
 
 echo "[fetch_onnxruntime] Extracting ..."
-cd "$TMPDIR"
-$EXTRACT "$ARCHIVE"
+cd "$ORT_STAGE_DIR"
+"${EXTRACT[@]}" "$ARCHIVE"
 
-# 추출된 폴더 이름 찾기 (아카이브에 따라 이름이 약간 다를 수 있음).
-EXTRACTED="$(find . -maxdepth 1 -type d -name 'onnxruntime-*' | head -1)"
-if [ -z "$EXTRACTED" ]; then
-    echo >&2 "Extraction failed — no onnxruntime-* directory found."; exit 1
-fi
+# Validate the selected release layout before touching the installed SDK.
+EXTRACTED="$ORT_STAGE_DIR/onnxruntime-${PLATFORM}-${ORT_VERSION}"
+REQUIRED=(include/onnxruntime_c_api.h include/onnxruntime_cxx_api.h
+          include/onnxruntime_cxx_inline.h include/onnxruntime_float16.h)
+case "$PLATFORM" in
+    win-x64) REQUIRED+=(lib/onnxruntime.lib lib/onnxruntime.dll) ;;
+    osx-universal2) REQUIRED+=(lib/libonnxruntime.dylib) ;;
+    linux-*) REQUIRED+=(lib/libonnxruntime.so) ;;
+esac
+for relative in "${REQUIRED[@]}"; do
+    if [ ! -f "$EXTRACTED/$relative" ]; then
+        echo >&2 "Incomplete ONNX Runtime SDK: $relative"; exit 1
+    fi
+done
 
 # 대상 구조 생성.
 mkdir -p "$DEST/include" "$DEST/lib/$PLATFORM"
 
 echo "[fetch_onnxruntime] Installing to $DEST ..."
 # include/ — 공통 헤더
-cp -f "$EXTRACTED/include/"*.h "$DEST/include/" 2>/dev/null || true
+cp -f "$EXTRACTED/include/"*.h "$DEST/include/"
 
 # lib/ — 플랫폼 라이브러리
 case "$PLATFORM" in
     win-x64)
-        cp -f "$EXTRACTED/lib/"*.lib "$DEST/lib/$PLATFORM/" 2>/dev/null || true
-        cp -f "$EXTRACTED/lib/"*.dll "$DEST/lib/$PLATFORM/" 2>/dev/null || true
+        cp -P "$EXTRACTED/lib/"*.lib "$DEST/lib/$PLATFORM/"
+        cp -P "$EXTRACTED/lib/"*.dll "$DEST/lib/$PLATFORM/"
         ;;
     osx-universal2)
-        cp -f "$EXTRACTED/lib/"*.dylib "$DEST/lib/$PLATFORM/" 2>/dev/null || true
+        cp -P "$EXTRACTED/lib/"*.dylib "$DEST/lib/$PLATFORM/"
         ;;
     linux-*)
-        cp -f "$EXTRACTED/lib/"*.so* "$DEST/lib/$PLATFORM/" 2>/dev/null || true
+        cp -P "$EXTRACTED/lib/"*.so* "$DEST/lib/$PLATFORM/"
         ;;
 esac
+
+# Keep upstream redistribution notices with the SDK when supplied.
+for notice in LICENSE ThirdPartyNotices.txt; do
+    if [ -f "$EXTRACTED/$notice" ]; then cp -f "$EXTRACTED/$notice" "$DEST/"; fi
+done
 
 echo "[fetch_onnxruntime] Done — $DEST ready for CMake -DTETRIS_BUILD_BOT=ON"
 echo "  include/: $(ls "$DEST/include/" | wc -l) header(s)"

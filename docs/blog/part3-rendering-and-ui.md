@@ -1638,7 +1638,7 @@ bool renderer_load_font(const char* path)
 
 현재 `main()`은 `presentation_load("assets/theme.cfg")`를 호출한다. 표현 계층이 설정된 폰트를 먼저 시도하고 실패하면 `renderer_load_font()`의 반환값을 보고 `Font/NanumGothic.ttf`로 복구한다. 둘 다 실패한 경우에는 위의 글자 누락 증상이 남는다. **NanumGothic 을 쓰는 이유는 한글 글리프가 들어 있기 때문이다.** UTF-8 디코더가 한글 code point를 뽑아내더라도 해당 폰트에 매핑이 없으면 glyph 0(`.notdef`)으로 처리된다. 그 모양은 폰트에 따라 사각형이나 빈 모양일 수 있다. 저장소에는 `Font/monogram.ttf` 도 있지만 그쪽은 ASCII 픽셀 폰트다.
 
-경로가 상대 경로라는 점이 중요하다. 빌드 디렉터리에서 실행하면 `Font/` 가 없어서 폰트 로드가 실패한다. 저장소 루트에서 실행하거나, `cmake --build build` 를 타깃 지정 없이 돌려 `copy_assets` 가 함께 실행되게 해야 한다. macOS `.app` 번들에서는 Part 2 의 `set_macos_resource_cwd()` 가 작업 디렉터리를 옮겨 이 문제를 해결한다.
+경로가 상대 경로라는 점이 중요하다. 빌드 디렉터리에서 실행하면 `Font/` 가 없어서 폰트 로드가 실패한다. 저장소 루트에서 실행하거나 자산을 준비한 빌드 폴더를 작업 디렉터리로 사용한다. 현재 저장소는 `--target tetris`에도 자산 복사를 포함하며, 중간 체크포인트는 해당 빌드 규칙의 준비 절차를 따른다. macOS `.app` 번들에서는 Part 2 의 `set_macos_resource_cwd()` 가 작업 디렉터리를 옮겨 이 문제를 해결한다.
 
 ### 13.2 측정
 

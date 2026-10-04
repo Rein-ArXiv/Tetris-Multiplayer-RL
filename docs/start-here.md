@@ -23,6 +23,20 @@ Velog용 [Part 15](blog/part15-release-polishing.md)는 표현·봇·보상,
 `meta`는 기록 담당, `relay`는 연결·매칭 담당, `tetris`는 화면과 게임 규칙 담당이다.
 랭크 PvP relay는 입력으로 보드 종료를 검증하고 meta가 기록한다. 봇 BP는 별도로 meta가 보드를 재현한다.
 
+## 반복 빌드용 역할 설정
+
+CMake 3.21 이상에서는 저장소 루트의 `CMakePresets.json`으로 역할별 옵션을 선택할 수 있다.
+`cmake --list-presets=all`로 목록을 보고, `cmake --preset servers` 후
+`cmake --build --preset servers`로 일반 스레드 relay와 meta를 만든다.
+`client`는 게임, `training`은 Python 모듈, `checks`는 회귀 검사다.
+각 역할은 `out/build/<역할>`의 별도 캐시를 사용한다. 검사 실행은 빌드 뒤 `ctest --preset checks`다.
+
+이 기본 조합에는 WSS·Reactor·ONNX Runtime이 포함되지 않는다. 공개 웹 전송이나 학습 모델
+추론에 필요한 기능은 배포 목적에 맞춰 추가해야 한다. Python 인터프리터와 pybind11 경로,
+운영 주소·SDK 등 환경별 값은 자동으로 설정하지 않는다. 자세한 옵션과 configure/build/run의
+차이는 [Part 13 빌드 조합](blog/part13-structure-and-build-reference.md#5-타깃별-빌드-조합)을 참고한다.
+아래 직접 옵션 명령도 계속 사용할 수 있다.
+
 ## 1. 게임부터 켜기
 
 모든 명령은 저장소 루트에서 실행한다. 아래 빌드 폴더는 용도별로 분리해
@@ -67,8 +81,8 @@ Apple/Intel용 라이브러리 아키텍처는 실행 파일과 같아야 한다
 macOS에서는 reactor 타깃을 기본 제외한다. 클라이언트와 기본 단위 테스트는 빌드할 수 있다.
 
 메뉴에서 `Single Play` 또는 `Single vs Bot`을 선택한다. 파일을 찾는 기준이 실행
-작업 폴더이므로 개발 중에는 위처럼 **저장소 루트에서 실행**한다. `--target tetris`만
-빌드하면 별도 `copy_assets` 타깃은 실행되지 않는다. 일반 전체 빌드에는 포함된다.
+작업 폴더이므로 개발 중에는 위처럼 **저장소 루트에서 실행**한다. 현재는 `--target tetris`에도 선행 자산 복사가 포함된다.
+단일 구성은 빌드 폴더, 다중 구성은 선택한 구성 폴더에 자산을 준비한다.
 
 ## 2. 서버 빌드 — Linux 주 서버 / Windows 예비 서버 공통
 

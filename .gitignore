@@ -43,6 +43,8 @@ CMakeFiles/
 cmake_install.cmake
 Makefile.bak
 *.cmake
+!/cmake/TetrisOnnxRuntime.cmake
+!/docs/learn/checkpoints/*/dependencies/OnnxRuntime.cmake
 
 # 디버그 파일
 *.pdb
@@ -107,3 +109,6 @@ account.json.tmp-*
 token.tmp-*
 account-recovery.json.tmp-*
 account-change.pending.json.tmp-*
+
+# Machine-local CMake paths and toolchains; shared roles live in CMakePresets.json.
+CMakeUserPresets.json

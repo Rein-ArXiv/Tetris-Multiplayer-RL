@@ -25,6 +25,18 @@ class Sources(unittest.TestCase):
   for path in ('python/missing.py','../outside.py','python/.secret.py','accounts.sqlite','/etc/passwd'):
    self.lesson(path)
    with self.assertRaises(ValueError):library.lesson_source_paths(self.lessons)
+ def test_only_shared_preset_is_source(self):
+  for name in ('CMakePresets.json','CMakeUserPresets.json','settings.json'):
+   (self.root/name).write_text('{}')
+  self.assertTrue(library.source_allowed(self.root/'CMakePresets.json'))
+  self.assertFalse(library.source_allowed(self.root/'CMakeUserPresets.json'))
+  self.assertFalse(library.source_allowed(self.root/'settings.json'))
+ def test_named_cmake_dependency_only(self):
+  folder=self.root/'cmake';folder.mkdir()
+  for name in ('TetrisOnnxRuntime.cmake','private-toolchain.cmake'):
+   (folder/name).write_text('# local fixture')
+  self.assertTrue(library.source_allowed(folder/'TetrisOnnxRuntime.cmake'))
+  self.assertFalse(library.source_allowed(folder/'private-toolchain.cmake'))
  def test_reject_symlink_files_and_parent_directories(self):
   outside=Path(self.temp.name)/'outside';outside.mkdir();(outside/'model.py').write_text('private = 1\n')
   (self.root/'python/link.py').symlink_to(outside/'model.py')

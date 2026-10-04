@@ -762,32 +762,25 @@ option(TETRIS_BUILD_BOT   "Link onnxruntime (Section C bot inference)"      OFF)
     # ------------------------------------------------------------------------
     # Optional: ONNX Runtime for Section C (Single vs Bot inference)
     # third_party/onnxruntime/ 에 공식 CPU 번들을 풀어두면 링크된다.
-    # 없거나 OFF 면 bot/bot_onnx.cpp 가 스텁으로 빌드됨 → Load 항상 실패.
+    # OFF는 스텁 빌드. ON에서 SDK가 불완전하면 configure 단계에서 실패.
     # ------------------------------------------------------------------------
     if (TETRIS_BUILD_BOT)
-        set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
-        if (NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
-            message(FATAL_ERROR
-                "TETRIS_BUILD_BOT=ON 이지만 ${ORT_ROOT}/include/onnxruntime_cxx_api.h 가 없습니다. "
-                "third_party/fetch_onnxruntime.sh 로 벤더링하거나 TETRIS_BUILD_BOT=OFF 로 빌드하세요.")
-        endif()
         target_compile_definitions(tetris PRIVATE TETRIS_HAS_ONNXRUNTIME=1)
-        target_include_directories(tetris PRIVATE "${ORT_ROOT}/include")
-        if (WIN32)
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/win-x64/onnxruntime.lib")
-        elseif (APPLE)
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/osx-universal2/libonnxruntime.dylib")
-        else()
-            target_link_libraries(tetris PRIVATE "${ORT_ROOT}/lib/linux-x64/libonnxruntime.so")
-        endif()
+        target_link_libraries(tetris PRIVATE Tetris::OnnxRuntime)
     endif()
 ```
 
-여기서 정확히 짚어야 할 것이 세 가지다.
+루트 구성은 필요한 ONNX 소비자가 켜졌을 때 `cmake/TetrisOnnxRuntime.cmake`를
+읽고 `TETRIS_ORT_ROOT`의 SDK를 가져온다. `Tetris::OnnxRuntime`이 대상 OS·CPU의
+라이브러리 경로와 헤더 사용 요구사항을 모은다. 필수 파일이나 지원 대상이 맞지 않으면
+configure 단계에서 실패한다.
 
-1. **자동 탐지가 아니다.** `find_package(onnxruntime)` 같은 것이 없다. 헤더가 있는지 `EXISTS` 로 확인할 뿐이고, **없으면 탐지 실패가 아니라 `FATAL_ERROR` 로 configure 자체가 중단된다.** "라이브러리를 찾으면 켜진다" 가 아니라 "켜라고 했는데 없으면 죽는다" 다. 에러 메시지가 두 가지 해결책(벤더링하거나 OFF 로 빌드)을 직접 알려준다.
-2. **`TETRIS_HAS_ONNXRUNTIME` 은 여기서만 정의된다.** `bot/bot_onnx.cpp` 의 `#if defined(TETRIS_HAS_ONNXRUNTIME)` 이 이 매크로를 본다. 정의되지 않으면 스텁 구현이 빌드된다(§10.5).
-3. **이 블록은 게임 타깃을 설정한다.** 별도로 meta 서버와 `bot_onnx_contract_test`에도 ONNX 링크 경로가 있다. `TETRIS_BUILD_GAME=OFF`, `TETRIS_BUILD_TEST=ON`, `TETRIS_BUILD_BOT=ON` 조합으로 창 없이 C++ 모델 계약 검사기를 빌드할 수 있다.
+이 블록은 게임 소비자에 `TETRIS_HAS_ONNXRUNTIME`을 정의한다. 같은 매크로와
+IMPORTED 타깃 연결을 meta 서버 및 `bot_onnx_contract_test`에도 적용한다.
+매크로가 없는 소비자는 `bot/bot_onnx.cpp`의 스텁 분기를 컴파일한다.
+`TETRIS_BUILD_GAME=OFF`, `TETRIS_BUILD_TEST=ON`, `TETRIS_BUILD_BOT=ON` 조합은
+창 없이 C++ 모델 계약 검사기를 빌드한다. 헤더/링크 경로를 찾는 것과 실행 시
+동적 로더가 SDK 바이너리를 찾는 것은 별도 단계다.
 
 벤더링은 `third_party/fetch_onnxruntime.sh` 가 담당한다. 공식 CPU 번들을 받아 `third_party/onnxruntime/{include,lib/<platform>}` 구조로 풀어놓는다.
 
@@ -1551,7 +1544,7 @@ cmake --build build --config Release
 .\build\Release\tetris.exe
 ```
 
-`--target tetris` 를 지정하지 않는 이유는 `copy_assets` 가 ALL 타깃이라 `Font/`·`Sounds/`·`model/` 이 빌드 디렉터리로 복사되어야 하기 때문이다. 저장소 루트에서 실행해도 된다.
+현재 저장소에서는 전체 빌드와 `--target tetris` 모두 `Font/`·`Sounds/`·존재하는 `model/`을 준비한다. 실행 파일 경로와 작업 디렉터리는 별도이므로, 상대 모델 경로를 읽을 수 있는 위치에서 실행한다.
 
 메뉴에서 "Single vs Bot" 을 열면 `Practice Partner` 가 보여야 한다. 이 상태에서도 "Single Play", "Matchmaking Multi", "Custom Room Multi" 는 그대로 사용할 수 있어야 한다. `.onnx` 파일이 하나도 없으면 ONNX 로드 시도 자체가 없으므로 오류 표시도 없어야 정상이다.
 

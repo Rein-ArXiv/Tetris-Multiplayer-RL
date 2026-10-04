@@ -1,21 +1,30 @@
 {
   "url": "https://rein-arxiv.github.io/Tetris-Multiplayer-RL/",
-  "release": "708d2e519c17c011",
-  "commit": "b04c0232fe009e3f0ab475f75c908d339c594358",
-  "branch": "gh-pages",
-  "status": "published-http-verified",
-  "lessons": 55,
-  "questions": 269,
-  "pagesSourcePath": "/",
-  "buildType": "legacy",
+  "sourceBranch": "main",
+  "buildType": "workflow",
+  "workflow": ".github/workflows/learning-pages.yml",
+  "publicationPolicy": "reviewed-static-export-on-main-push-or-manual-run",
+  "currentDeploymentEvidence": "GitHub Actions Learning site deploy + live site-manifest.json",
   "httpsEnforced": true,
-  "runUrl": "https://github.com/Rein-ArXiv/Tetris-Multiplayer-RL/actions/runs/35882459789",
-  "verifiedAt": "2026-09-23T15:34:36.615219+00:00",
-  "verifiedFiles": 15,
-  "hostingExtraFiles": [
-    ".nojekyll"
-  ],
-  "baseRelease": "efc2a7a910aa83d6",
-  "renderingFix": "korean-emphasis/1",
-  "sidebarFix": "completion-check-and-reading-location/1"
+  "previousBranchPublication": {
+    "url": "https://rein-arxiv.github.io/Tetris-Multiplayer-RL/",
+    "release": "708d2e519c17c011",
+    "commit": "b04c0232fe009e3f0ab475f75c908d339c594358",
+    "branch": "gh-pages",
+    "status": "published-http-verified",
+    "lessons": 55,
+    "questions": 269,
+    "pagesSourcePath": "/",
+    "buildType": "legacy",
+    "httpsEnforced": true,
+    "runUrl": "https://github.com/Rein-ArXiv/Tetris-Multiplayer-RL/actions/runs/35882459789",
+    "verifiedAt": "2026-09-23T15:34:36.615219+00:00",
+    "verifiedFiles": 15,
+    "hostingExtraFiles": [
+      ".nojekyll"
+    ],
+    "baseRelease": "efc2a7a910aa83d6",
+    "renderingFix": "korean-emphasis/1",
+    "sidebarFix": "completion-check-and-reading-location/1"
+  }
 }

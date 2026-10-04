@@ -1601,8 +1601,8 @@
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "8. 논리 해상도와 레터박스",
       "startLine": 1022,
-      "endLine": 1217,
-      "sha256": "d0d78e4794d4cdcc988e845c2683df4529e0380e498065eedcdad0b41222d389",
+      "endLine": 1219,
+      "sha256": "bc89b6f46dfbcf56b2c0a148c470d97f0cf30f622e0d99beba451d2014b1b867",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1643,8 +1643,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "9. 프레임 표시 — `platform_present`",
-      "startLine": 1218,
-      "endLine": 1252,
+      "startLine": 1220,
+      "endLine": 1254,
       "sha256": "9ea9363327871ce9e158c5c39bab2e7cdaa9b7f868a428ca5ec81cf2fdbf2da3",
       "candidateUnits": [
         "unit-001",
@@ -1685,8 +1685,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "10. 시간 — 델타타임 클램프와 페이싱",
-      "startLine": 1253,
-      "endLine": 1373,
+      "startLine": 1255,
+      "endLine": 1375,
       "sha256": "17d7a87d265b8efa85fb1beaf10d7f6f61ffc3875c729ccdf025c4555f48fff1",
       "candidateUnits": [
         "unit-001",
@@ -1729,8 +1729,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "11. 종료 순서",
-      "startLine": 1374,
-      "endLine": 1436,
+      "startLine": 1376,
+      "endLine": 1438,
       "sha256": "427f0c6a3af8610e9f4d6944026fe45f94d43371e6e9fe6dbe68244bc49ff5d5",
       "candidateUnits": [
         "unit-001",
@@ -1775,8 +1775,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "12. SDL2 백엔드",
-      "startLine": 1437,
-      "endLine": 1673,
+      "startLine": 1439,
+      "endLine": 1675,
       "sha256": "e83a7b44ded4433430eb01a5eef14c9c91c3dd378b4ea965592cdd3cedfc0c4b",
       "candidateUnits": [
         "unit-001",
@@ -1825,8 +1825,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "13. SDL 백엔드의 플랫폼별 예외",
-      "startLine": 1674,
-      "endLine": 1749,
+      "startLine": 1676,
+      "endLine": 1751,
       "sha256": "d746d694b7090455cf296fc3494097190c3354d48a5b5e1696094a47179e78fb",
       "candidateUnits": [
         "unit-001",
@@ -1868,8 +1868,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "14. CMakeLists 확장",
-      "startLine": 1750,
-      "endLine": 1837,
+      "startLine": 1752,
+      "endLine": 1839,
       "sha256": "d92df2f937d81b6e688878fdabd5bc117fbe3d94bd86550fc73bbaff59eff3d6",
       "candidateUnits": [
         "unit-001",
@@ -1911,8 +1911,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "15. Part 2 체크포인트 데모",
-      "startLine": 1838,
-      "endLine": 2017,
+      "startLine": 1840,
+      "endLine": 2019,
       "sha256": "fe8e78e91b6bad71b2bbf9734eea60645f3d9abc77e5182846f9f1f6cf2601cd",
       "candidateUnits": [
         "unit-001",
@@ -1953,8 +1953,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 2018,
-      "endLine": 2029,
+      "startLine": 2020,
+      "endLine": 2031,
       "sha256": "ea084b281bc591cf894463182716f7945f26c7559373d361f09dee7ee520b8a3",
       "candidateUnits": [
         "unit-002",
@@ -1972,8 +1972,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "수동 테스트",
-      "startLine": 2030,
-      "endLine": 2064,
+      "startLine": 2032,
+      "endLine": 2066,
       "sha256": "9897a92c45c85f1137f542c4dca9874b8c415e9817876c3c2535c5cf3f780819",
       "candidateUnits": [
         "unit-002",
@@ -1993,8 +1993,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "마무리",
-      "startLine": 2065,
-      "endLine": 2072,
+      "startLine": 2067,
+      "endLine": 2074,
       "sha256": "14f842f4c62a9754571da3f62ed2829745bb2aec1f4e250f1a75f62148ff4707",
       "candidateUnits": [
         "unit-011",
@@ -2857,7 +2857,7 @@
       "title": "13. 텍스트 (4) — 로딩, 측정, 배치",
       "startLine": 1578,
       "endLine": 1771,
-      "sha256": "036075b16f5e2e646e02fb90c81c9f3e4da81e357af15f61e35b9adab70e11b9",
+      "sha256": "e67365c39aa3aa65fcb9e5f4f901005d8fed1f34b8ee85c1e85fba080d6636b3",
       "candidateUnits": [
         "unit-011",
         "unit-012",
@@ -2920,7 +2920,7 @@
         "lesson-67"
       ],
       "state": "partial",
-      "note": "57차시에서 큐/아틀라스 수명,64차시에서 폰트 바이트 수명·실패와 누락 글리프·기준선/advance 배치를 연결했다. 실제 폰트 교체 전 큐 제출 누락을 수정하고 복사된 UV 참조 설명·예외/불신 폰트 관련 단정을 교정했다. 커닝·멀티라인 측정과 전체 배치 API는 후속 검토 대상이다. 65차시에서 비트맵/업로드 실패의 그리기 생략·advance 유지·재시도와 큐/아틀라스 수명을 대조했다. 나머지 GL 호출까지 정상이라는 단정은 제거했다. 66차시에서 커닝/개행 상태·행advance폭/메트릭높이/비트맵경계·동일배치결과로 측정/그리기·정렬을 재구성했다. root 측정의 GPU 의존을 제거하고 큰 폭 반환을 제한했다. 폰트교체/자원API 전체 운영·DPI캐시는 다른 차시와 함께 추적한다.; 67차시에서 메트릭/화면용 비트맵 분리, 제한된 키 포장, 양자화 후 정수 높이, CPU 스냅샷/GPU 영역 캐시, 폰트 교체·페이지 세대·실패 재시도를 재구성했다. 루트 결합 캐시와 학습 분리 캐시의 수명 차이를 설명하며 전체 절 대응은 기존 부분 상태를 유지한다."
+      "note": "57차시에서 큐/아틀라스 수명,64차시에서 폰트 바이트 수명·실패와 누락 글리프·기준선/advance 배치를 연결했다. 실제 폰트 교체 전 큐 제출 누락을 수정하고 복사된 UV 참조 설명·예외/불신 폰트 관련 단정을 교정했다. 커닝·멀티라인 측정과 전체 배치 API는 후속 검토 대상이다. 65차시에서 비트맵/업로드 실패의 그리기 생략·advance 유지·재시도와 큐/아틀라스 수명을 대조했다. 나머지 GL 호출까지 정상이라는 단정은 제거했다. 66차시에서 커닝/개행 상태·행advance폭/메트릭높이/비트맵경계·동일배치결과로 측정/그리기·정렬을 재구성했다. root 측정의 GPU 의존을 제거하고 큰 폭 반환을 제한했다. 폰트교체/자원API 전체 운영·DPI캐시는 다른 차시와 함께 추적한다.; 67차시에서 메트릭/화면용 비트맵 분리, 제한된 키 포장, 양자화 후 정수 높이, CPU 스냅샷/GPU 영역 캐시, 폰트 교체·페이지 세대·실패 재시도를 재구성했다. 루트 결합 캐시와 학습 분리 캐시의 수명 차이를 설명하며 전체 절 대응은 기존 부분 상태를 유지한다. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다."
     },
     {
       "id": "part3--section-16",
@@ -4762,7 +4762,7 @@
       "title": "수동 테스트",
       "startLine": 2519,
       "endLine": 2565,
-      "sha256": "9dbf072ea36e68ee19a536e0b3032978b0b7f126d690d5a90509e91dd0036757",
+      "sha256": "668dc0e1ef940fd7ecfc89c717a4e54d4e883195fc083d8e8d3c731aebefd490",
       "candidateUnits": [
         "unit-025",
         "unit-026",
@@ -4816,7 +4816,7 @@
         "lesson-46"
       ],
       "state": "partial",
-      "note": "; 46차시: 수락/보관/폐기 시간과 작업 예산을 분리하고 세 정책을 독립 보존식으로 비교. 반환 dt와 상한 전 측정값·Net 별도 따라잡기 루프의 실행량을 구별하도록 원문 수정. 전체 네트워크 예산/장치별 실측은 후속 범위."
+      "note": "; 46차시: 수락/보관/폐기 시간과 작업 예산을 분리하고 세 정책을 독립 보존식으로 비교. 반환 dt와 상한 전 측정값·Net 별도 따라잡기 루프의 실행량을 구별하도록 원문 수정. 전체 네트워크 예산/장치별 실측은 후속 범위. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다."
     },
     {
       "id": "part5--section-00",
@@ -5142,7 +5142,7 @@
       "title": "10. 비치명적 에러 처리와 실패 모드",
       "startLine": 1954,
       "endLine": 2044,
-      "sha256": "3cd515043ff393cb88a60c262250d2bfe706b74ad25a899f5b4d4a4e61bb4071",
+      "sha256": "b1c7ea7df89af5ad4645ec72beb8e17c9df0ff3d050d289a987f2adf6c6ee4bc",
       "candidateUnits": [
         "unit-074",
         "unit-075",
@@ -5161,7 +5161,7 @@
         "lesson-82"
       ],
       "state": "partial",
-      "note": " 75차시에서 공통MP3모듈·빌린입력/소유PCM·증분읽기·별도예산·RAII·부분손상정책과빌드연결을대조했다. 장치/보이스/실시간콜백/전체믹서대응은후속.; 79차시 작업에서 공통 사건 소비 함수 발췌와 호출 위치를 검토·동기화했다. 해당 절 전체 대응 범위는 확대하지 않는다.; 81차시: BGM 실패 정리·COM 모델 충돌·로더 단계 실패가 API 가드 이전일 수 있음을 교정.; 82차시: 선택 기능 실패/내부 불변식/로더 실패 구별, 상태 기계·예외 경계·실패 주입·반복 진단 상한, 오래된 로그/자동복구/콘솔 단정 교정."
+      "note": " 75차시에서 공통MP3모듈·빌린입력/소유PCM·증분읽기·별도예산·RAII·부분손상정책과빌드연결을대조했다. 장치/보이스/실시간콜백/전체믹서대응은후속.; 79차시 작업에서 공통 사건 소비 함수 발췌와 호출 위치를 검토·동기화했다. 해당 절 전체 대응 범위는 확대하지 않는다.; 81차시: BGM 실패 정리·COM 모델 충돌·로더 단계 실패가 API 가드 이전일 수 있음을 교정.; 82차시: 선택 기능 실패/내부 불변식/로더 실패 구별, 상태 기계·예외 경계·실패 주입·반복 진단 상한, 오래된 로그/자동복구/콘솔 단정 교정. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다."
     },
     {
       "id": "part5--section-13",
@@ -5169,8 +5169,8 @@
       "path": "docs/blog/part5-audio.md",
       "title": "11. 빌드 시스템",
       "startLine": 2045,
-      "endLine": 2273,
-      "sha256": "f7789e1f0559936edf1927a060cac54b30fae2571130d5bdd27a128627558ac6",
+      "endLine": 2274,
+      "sha256": "ec0141538009b08ab12ccacfafa2d7ae435c912e12f80ade2ba647badba4b6dc",
       "candidateUnits": [
         "unit-074",
         "unit-075",
@@ -5188,15 +5188,15 @@
         "lesson-81"
       ],
       "state": "partial",
-      "note": " 75차시에서 공통MP3모듈·빌린입력/소유PCM·증분읽기·별도예산·RAII·부분손상정책과빌드연결을대조했다. 장치/보이스/실시간콜백/전체믹서대응은후속.; 81차시: 창/오디오 독립 빌드 선택·Windows SDK 헤더/링크/런타임·일반 main SDL 진입 준비 설명."
+      "note": " 75차시에서 공통MP3모듈·빌린입력/소유PCM·증분읽기·별도예산·RAII·부분손상정책과빌드연결을대조했다. 장치/보이스/실시간콜백/전체믹서대응은후속.; 81차시: 창/오디오 독립 빌드 선택·Windows SDK 헤더/링크/런타임·일반 main SDL 진입 준비 설명. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다."
     },
     {
       "id": "part5--section-14",
       "part": 5,
       "path": "docs/blog/part5-audio.md",
       "title": "12. 전체 흐름 요약",
-      "startLine": 2274,
-      "endLine": 2356,
+      "startLine": 2275,
+      "endLine": 2357,
       "sha256": "3e2998b35ac5147531df9b82d63517c89cb8239d6aeb5f305409334876e70d7e",
       "candidateUnits": [
         "unit-074",
@@ -5221,8 +5221,8 @@
       "part": 5,
       "path": "docs/blog/part5-audio.md",
       "title": "13. 오류와 함정",
-      "startLine": 2357,
-      "endLine": 2529,
+      "startLine": 2358,
+      "endLine": 2530,
       "sha256": "211f933b482e9b1cc8c3bf7ac37c4042121ba86fc82dfb6858e5352408c50526",
       "candidateUnits": [
         "unit-074",
@@ -5248,8 +5248,8 @@
       "part": 5,
       "path": "docs/blog/part5-audio.md",
       "title": "정리",
-      "startLine": 2530,
-      "endLine": 2548,
+      "startLine": 2531,
+      "endLine": 2549,
       "sha256": "efd2f94b7c2911d85e0ad1767f1106aeab1f4f1df2c773e78a8ee1f9c962c041",
       "candidateUnits": [
         "unit-074",
@@ -5272,8 +5272,8 @@
       "part": 5,
       "path": "docs/blog/part5-audio.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 2549,
-      "endLine": 2560,
+      "startLine": 2550,
+      "endLine": 2561,
       "sha256": "8f45379967e34e8b13d10134c0011f35ffdaaf9cb0eaf5db3ad5689daf448651",
       "candidateUnits": [
         "unit-074",
@@ -5296,9 +5296,9 @@
       "part": 5,
       "path": "docs/blog/part5-audio.md",
       "title": "수동 테스트",
-      "startLine": 2561,
-      "endLine": 2606,
-      "sha256": "9d2f1105161ebef3dda185747e348ab957f54f7a8b3a6b6a97d71c9b921cba97",
+      "startLine": 2562,
+      "endLine": 2607,
+      "sha256": "23b59ae0798847bdac22be08dad7940e5352e5ae508b94144d047790c10ad329",
       "candidateUnits": [
         "unit-074",
         "unit-075",
@@ -5320,8 +5320,8 @@
       "part": 5,
       "path": "docs/blog/part5-audio.md",
       "title": "참고 자료",
-      "startLine": 2607,
-      "endLine": 2626,
+      "startLine": 2608,
+      "endLine": 2627,
       "sha256": "a82e2aac52d442218d507402ee8f32a591c271818aa2595961e7656fea9cc4bd",
       "candidateUnits": [
         "unit-074",
@@ -6352,7 +6352,7 @@
       "title": "수동 테스트",
       "startLine": 3678,
       "endLine": 3729,
-      "sha256": "42d86701c146ada9622369bf6807660b02cd595104ecc1368d1e7f3f64f009e0",
+      "sha256": "c9a7e74ed5249fedf6e77be8008dbc6327b4c2f73876a1a011d050055e7146c5",
       "candidateUnits": [
         "unit-044",
         "unit-045",
@@ -7750,8 +7750,8 @@
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "9. CMakeLists 확장 — `TETRIS_BUILD_BOT` 과 `TETRIS_HAS_ONNXRUNTIME`",
       "startLine": 740,
-      "endLine": 803,
-      "sha256": "3bc656a3c383fae940f040fb5db821cef425486f089cd33c51b0e79343f900dd",
+      "endLine": 796,
+      "sha256": "99fe2fc33715aece7c8a5e375aed2d3e835a1a0675235635fb099168ce318c16",
       "candidateUnits": [
         "unit-149",
         "unit-150",
@@ -7777,15 +7777,15 @@
         "lesson-162"
       ],
       "state": "partial",
-      "note": "162: headless bot 검사 타깃과 SDK·모델·추론 실패 구별. 전체 빌드 설정 대응은 별도."
+      "note": "162: headless bot 검사 타깃과 SDK·모델·추론 실패 구별. 전체 빌드 설정 대응은 별도. 168: 공통 SDK 타깃·대상 CPU 선택·필수 입력 검사·개발/설치 경로 분리를 현재 코드와 동기화. 기존 부분 대응 범위는 유지."
     },
     {
       "id": "part9--section-11",
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "10. `bot/bot_onnx.cpp` — C++에서 추론 파일을 실행한다",
-      "startLine": 804,
-      "endLine": 1056,
+      "startLine": 797,
+      "endLine": 1049,
       "sha256": "e26cd276b478fd531afd6f5e43ec655157c31c33cf7751d7b3af022fbd01f5ff",
       "candidateUnits": [
         "unit-149",
@@ -7820,8 +7820,8 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "11. `bot/placement.cpp` — fallback 과 진짜 휴리스틱",
-      "startLine": 1057,
-      "endLine": 1177,
+      "startLine": 1050,
+      "endLine": 1170,
       "sha256": "ab89c9fcef1a6f4bdcdf541f5bee668d721bdcbc8109a5baeab5cbd8b3db1141",
       "candidateUnits": [
         "unit-149",
@@ -7857,8 +7857,8 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "12. Input Expander: 목표 배치를 입력 요청으로",
-      "startLine": 1178,
-      "endLine": 1273,
+      "startLine": 1171,
+      "endLine": 1266,
       "sha256": "af26c32b619f25b19c8e8f59167921c2bf3e63589b2998e431bfb97e5b77ddb9",
       "candidateUnits": [
         "unit-149",
@@ -7892,8 +7892,8 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "13. 봇 실행 경로 — `Single vs Bot`",
-      "startLine": 1274,
-      "endLine": 1524,
+      "startLine": 1267,
+      "endLine": 1517,
       "sha256": "40753f7d011d42a58f364954e14492b12590f18a9e47b7743ecb2edf98a528d4",
       "candidateUnits": [
         "unit-149",
@@ -7929,8 +7929,8 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 1525,
-      "endLine": 1533,
+      "startLine": 1518,
+      "endLine": 1526,
       "sha256": "d75347a25dcfaf785b63c82345b88e6131ec0ca3338c85a99029def320a71cde",
       "candidateUnits": [
         "unit-149",
@@ -7962,9 +7962,9 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "수동 테스트",
-      "startLine": 1534,
-      "endLine": 1653,
-      "sha256": "f13fc29f0cf3392c22522d9629944286e5e1f94177b54684fc3edf26ab478c8f",
+      "startLine": 1527,
+      "endLine": 1646,
+      "sha256": "cc0a67f7f75358424d1c7cac84dd895505f8df85c5cf0f896cf8da684be25232",
       "candidateUnits": [
         "unit-149",
         "unit-150",
@@ -7995,8 +7995,8 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "참고",
-      "startLine": 1654,
-      "endLine": 1672,
+      "startLine": 1647,
+      "endLine": 1665,
       "sha256": "6aa00ea7e5d997b268ec570ab5c96836808c4627a82576957a22e2893fc96182",
       "candidateUnits": [
         "unit-161",
@@ -8013,8 +8013,8 @@
       "part": 9,
       "path": "docs/blog/part9-rl-onnx-bot.md",
       "title": "적용 범위",
-      "startLine": 1673,
-      "endLine": 1677,
+      "startLine": 1666,
+      "endLine": 1670,
       "sha256": "a86e7dea21eac3a6a8c97a365f28548eb6335e4fddcd39ab434fe87a5900a019",
       "candidateUnits": [
         "unit-161",
@@ -9190,14 +9190,37 @@
       "title": "수동 테스트",
       "startLine": 1338,
       "endLine": 1382,
-      "sha256": "140bc00aeeb9f5896155f747533c9b8f58d11b0777edd25e2e837fcc04603a67",
+      "sha256": "29f1b1e6b58a7b370cd110c3189e9687073cbc4a4b9b31f7c68a83472f49f54e",
       "candidateUnits": [
-        "unit-073",
+        "unit-056",
+        "unit-057",
+        "unit-058",
+        "unit-059",
+        "unit-060",
+        "unit-061",
+        "unit-062",
+        "unit-063",
+        "unit-064",
+        "unit-065",
+        "unit-066",
+        "unit-067",
+        "unit-068",
         "unit-069",
         "unit-070",
-        "unit-078"
+        "unit-071",
+        "unit-072",
+        "unit-073",
+        "unit-074",
+        "unit-075",
+        "unit-076",
+        "unit-077",
+        "unit-078",
+        "unit-079",
+        "unit-080",
+        "unit-081",
+        "unit-082"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [],
       "state": "unassigned",
       "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
@@ -9602,14 +9625,36 @@
       "title": "10. 릴리스 빌드와 패키징",
       "startLine": 1388,
       "endLine": 1488,
-      "sha256": "1d7eca9a7e7d57300162fad1c0c16639ee80c306565a17fa6156f73b6fc06d0f",
+      "sha256": "dcc249f60636119d9b8cccf6702011ca8848728ea4996a4cb9c9d7ac52fd0feb",
       "candidateUnits": [
+        "unit-107",
+        "unit-134",
+        "unit-135",
+        "unit-136",
+        "unit-137",
+        "unit-138",
+        "unit-139",
+        "unit-140",
+        "unit-141",
+        "unit-142",
+        "unit-143",
+        "unit-144",
+        "unit-145",
+        "unit-146",
+        "unit-147",
+        "unit-148",
         "unit-167",
         "unit-168",
         "unit-169",
-        "unit-135"
+        "unit-170",
+        "unit-171",
+        "unit-172",
+        "unit-173",
+        "unit-174",
+        "unit-175",
+        "unit-176"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [],
       "state": "unassigned",
       "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
@@ -9639,15 +9684,37 @@
       "path": "docs/blog/part12-hardening-and-release.md",
       "title": "12. 전체 회귀 검증",
       "startLine": 1693,
-      "endLine": 1768,
-      "sha256": "38306e6c31fae4e0b139f44f8d679afea3e40051de7a967e39f0fe8849638094",
+      "endLine": 1781,
+      "sha256": "7fdd7a08ab2a1c57547d163a7ddac0925b17581b6f37a9d0a0577af70c7a267d",
       "candidateUnits": [
-        "unit-174",
+        "unit-107",
+        "unit-134",
+        "unit-135",
+        "unit-136",
+        "unit-137",
+        "unit-138",
+        "unit-139",
+        "unit-140",
+        "unit-141",
+        "unit-142",
         "unit-143",
         "unit-144",
-        "unit-146"
+        "unit-145",
+        "unit-146",
+        "unit-147",
+        "unit-148",
+        "unit-167",
+        "unit-168",
+        "unit-169",
+        "unit-170",
+        "unit-171",
+        "unit-172",
+        "unit-173",
+        "unit-174",
+        "unit-175",
+        "unit-176"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [],
       "state": "unassigned",
       "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
@@ -9657,8 +9724,8 @@
       "part": 12,
       "path": "docs/blog/part12-hardening-and-release.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 1769,
-      "endLine": 1795,
+      "startLine": 1782,
+      "endLine": 1808,
       "sha256": "a9d794a80004efce1aa6501a7c2bd4760fb2a7c6575a77ef3d4052481e60aa74",
       "candidateUnits": [
         "unit-107",
@@ -9698,8 +9765,8 @@
       "part": 12,
       "path": "docs/blog/part12-hardening-and-release.md",
       "title": "수동 테스트",
-      "startLine": 1796,
-      "endLine": 1830,
+      "startLine": 1809,
+      "endLine": 1843,
       "sha256": "431405b2481bbd7b5c157b86b6e355dcb5834413e4e01c3cdec4ebfec70169d2",
       "candidateUnits": [
         "unit-174",
@@ -9718,8 +9785,8 @@
       "part": 12,
       "path": "docs/blog/part12-hardening-and-release.md",
       "title": "회고 — 이 시리즈가 감춘 것",
-      "startLine": 1831,
-      "endLine": 1848,
+      "startLine": 1844,
+      "endLine": 1861,
       "sha256": "d6c59c1a72060ce73ad8eb855476cfe4e60a0ff33f32d0ce325f7770946677d6",
       "candidateUnits": [
         "unit-107",
@@ -9761,8 +9828,8 @@
       "part": 12,
       "path": "docs/blog/part12-hardening-and-release.md",
       "title": "마치며",
-      "startLine": 1849,
-      "endLine": 1853,
+      "startLine": 1862,
+      "endLine": 1866,
       "sha256": "b7d232af0335a92de55153491577cf2852762eccb758496606abb478f32385cb",
       "candidateUnits": [
         "unit-107",
@@ -9884,10 +9951,12 @@
       ],
       "routingState": "needs-review",
       "lessons": [
-        "lesson-161"
+        "lesson-161",
+        "lesson-167",
+        "lesson-168"
       ],
       "state": "partial",
-      "note": "161차시에서 Python export extra와 Colab requirements의 ONNX Runtime 의존성을 갱신하고 실제 CPU export 검증과 연결. 의존성 총정리의 모든 플랫폼/타깃 대응을 완료한 것은 아님."
+      "note": "161차시에서 Python export extra와 Colab requirements의 ONNX Runtime 의존성을 갱신하고 실제 CPU export 검증과 연결. 의존성 총정리의 모든 플랫폼/타깃 대응을 완료한 것은 아님. 167: 타깃별 패키지 요구·C/C++ 활성화·정적/인터페이스 링크·Python ABI 경계를 재구성했다. 전체 패키지 설치/배포는 남는다. 168의 API/ABI·타깃 SDK·헤더/링크/로더·실제 설치 이동/모델 대조. 다른 SDK 확보·전체 제품 의존성 조합은 부분 대응."
     },
     {
       "id": "part13--section-04",
@@ -9895,8 +9964,8 @@
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "3. CMakeLists.txt 해부",
       "startLine": 312,
-      "endLine": 1118,
-      "sha256": "e214537276bd7c12c2ee47a31341c7bd1c3fd9094c5d2dc2a53bc8857d28f17b",
+      "endLine": 1122,
+      "sha256": "33b09bca8c0001f1a497c64a179bcbe0e4146fb92f52bf6e507147773ac03e5c",
       "candidateUnits": [
         "unit-167",
         "unit-168",
@@ -9915,60 +9984,90 @@
         "lesson-101",
         "lesson-102",
         "lesson-103",
-        "lesson-109"
+        "lesson-109",
+        "lesson-167"
       ],
       "state": "partial",
-      "note": "101차시: 현재 CMake의 worker_lifetime 회귀 타깃·스레드링크 연결을 검토하고 발췌 갱신. 누적 학습 타깃은 worker_contract/probe로 재구성. 전체 CMake옵션·빌드조합 재구성은 남음. 102: 실제 매칭 큐 회귀 타깃의 추가와 현재 CMake 발췌를 대조했다. 전체 빌드 옵션 대응은 기존 부분 범위를 유지한다. 103: 공통 room_code 소스·bcrypt 링크·room_code 회귀 타깃의 현재 발췌를 대조했다. 다른 빌드 옵션의 기존 부분 범위를 유지한다. 109: 메타 실행 옵션에서 무인증 개발 모드의 숫자loopback 제한을 교정했다. root CMake 전체 해부는 부분 대응으로 유지한다.; 149차시 대조에서 바인딩 grid 설명/CMake 탐색 주석의 현행 발췌만 동기화했다. 기존 대응 범위를 유지한다."
+      "note": "101차시: 현재 CMake의 worker_lifetime 회귀 타깃·스레드링크 연결을 검토하고 발췌 갱신. 누적 학습 타깃은 worker_contract/probe로 재구성. 전체 CMake옵션·빌드조합 재구성은 남음. 102: 실제 매칭 큐 회귀 타깃의 추가와 현재 CMake 발췌를 대조했다. 전체 빌드 옵션 대응은 기존 부분 범위를 유지한다. 103: 공통 room_code 소스·bcrypt 링크·room_code 회귀 타깃의 현재 발췌를 대조했다. 다른 빌드 옵션의 기존 부분 범위를 유지한다. 109: 메타 실행 옵션에서 무인증 개발 모드의 숫자loopback 제한을 교정했다. root CMake 전체 해부는 부분 대응으로 유지한다.; 149차시 대조에서 바인딩 grid 설명/CMake 탐색 주석의 현행 발췌만 동기화했다. 기존 대응 범위를 유지한다. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다. 167: 구성/빌드/실행·역할 분기·소스 재사용·PUBLIC/PRIVATE/INTERFACE·자산 DAG·현재 프리셋을 실제 빌드로 대조했다. 모든 플랫폼 링크 및 기능 확장의 세부는 부분 대응이다. 168: 공통 SDK 타깃·대상 CPU 선택·필수 입력 검사·개발/설치 경로 분리를 현재 코드와 동기화. 기존 부분 대응 범위는 유지."
     },
     {
       "id": "part13--section-05",
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "4. `third_party/fetch_onnxruntime.sh` 의 역할",
-      "startLine": 1119,
-      "endLine": 1263,
-      "sha256": "8114f29dbbc7e966ae0751c9476ba42e5f62cdb34efc42b19f6c72d82a220783",
+      "startLine": 1123,
+      "endLine": 1300,
+      "sha256": "db98bcefed5e48b9cb997dc122f0875d4ad0f1ed83647e4fc776b363e3fe6322",
       "candidateUnits": [
+        "unit-167",
         "unit-168",
-        "unit-167"
+        "unit-169",
+        "unit-170",
+        "unit-171",
+        "unit-172",
+        "unit-173",
+        "unit-174",
+        "unit-175",
+        "unit-176",
+        "unit-177"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-168"
+      ],
+      "state": "partial",
+      "note": " 168의 API/ABI·타깃 SDK·헤더/링크/로더·실제 설치 이동/모델 대조. 다른 SDK 확보·전체 제품 의존성 조합은 부분 대응."
     },
     {
       "id": "part13--section-06",
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "5. 타깃별 빌드 조합",
-      "startLine": 1264,
-      "endLine": 1290,
-      "sha256": "ca820bf751a554789a25dea7923fa3ea13fa7d1d70ba31243120155833144dda",
+      "startLine": 1301,
+      "endLine": 1349,
+      "sha256": "37b85513e7ccf5fa54cc0999f71241f0b198bf0c40d8605f3a62b09c9ec8c3be",
       "candidateUnits": [
         "unit-167",
-        "unit-168"
+        "unit-168",
+        "unit-169",
+        "unit-170",
+        "unit-171",
+        "unit-172",
+        "unit-173",
+        "unit-174",
+        "unit-175",
+        "unit-176",
+        "unit-177"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-167"
+      ],
+      "state": "covered",
+      "note": "167의 역할 표·현재 프리셋·별도 캐시·직접 구성과 선택 타깃·Python 경로·추가 기능 조건·개인 설정 및 실패 사례가 이 절의 빌드 조합을 재구성한다. 실습 역할과 현재 제품 역할의 차이를 명시하고 실제 제품 빌드/생성 그래프 및 누적 계약으로 검토했다. 이는 대상 OS 전체 실행 인증이 아니다."
     },
     {
       "id": "part13--section-07",
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "6. 플랫폼별로 다른 것",
-      "startLine": 1291,
-      "endLine": 1353,
-      "sha256": "735751ca0930d66d15b7d1f44f934f123de33ebf7a85012cd9f0d6f2039c74b8",
+      "startLine": 1350,
+      "endLine": 1412,
+      "sha256": "e98feeec8c26876ec98eadb085ef1777fffde1feaff6f0e530612b2b7ee9ca84",
       "candidateUnits": [
-        "unit-170",
+        "unit-167",
         "unit-168",
         "unit-169",
-        "unit-167"
+        "unit-170",
+        "unit-171",
+        "unit-172",
+        "unit-173",
+        "unit-174",
+        "unit-175",
+        "unit-176",
+        "unit-177"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [],
       "state": "unassigned",
       "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
@@ -9978,8 +10077,8 @@
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "7. 고치려면 어디를 건드리나",
-      "startLine": 1354,
-      "endLine": 1596,
+      "startLine": 1413,
+      "endLine": 1655,
       "sha256": "08a327037800269e1fa52303439d7c90e64c0926e2d445c0c8583d7f7351e90e",
       "candidateUnits": [
         "unit-175",
@@ -9996,8 +10095,8 @@
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "8. 컴파일러가 잡아주지 않는 계약",
-      "startLine": 1597,
-      "endLine": 1620,
+      "startLine": 1656,
+      "endLine": 1679,
       "sha256": "5ebbc2b1ad33d4bec1f7e38404693948ce8bf776134558e768e042f229fc1bb2",
       "candidateUnits": [
         "unit-175",
@@ -10014,8 +10113,8 @@
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 1621,
-      "endLine": 1626,
+      "startLine": 1680,
+      "endLine": 1685,
       "sha256": "cbab26063f980bf52c05c2ffc240557b45fc5140f42b45ca6ebc2dbb65199c1c",
       "candidateUnits": [
         "unit-167",
@@ -10032,8 +10131,8 @@
       "part": 13,
       "path": "docs/blog/part13-structure-and-build-reference.md",
       "title": "마치며",
-      "startLine": 1627,
-      "endLine": 1633,
+      "startLine": 1686,
+      "endLine": 1692,
       "sha256": "cb0a41dabcb3e7fbde54bede2e2f0f5ee64ced818162802fd5c2f1547772b192",
       "candidateUnits": [
         "unit-175",
@@ -11001,8 +11100,8 @@
       "path": "docs/blog/part16-secure-admission.md",
       "title": "4. TLS와 비동기 I/O의 수명",
       "startLine": 268,
-      "endLine": 420,
-      "sha256": "8a4e99b26b827a382023c5bf85bfbf0bb02de6fba08c4a4c043fa8e53bf015e3",
+      "endLine": 426,
+      "sha256": "228a3a574adc6bfd28673e879541c17b62414d1fca5eac288ee9ef979634dc08",
       "candidateUnits": [
         "unit-134",
         "unit-135",
@@ -11027,15 +11126,15 @@
         "lesson-138"
       ],
       "state": "partial",
-      "note": ";135:API/게임의주소·수명·TLS종단·지원빌드분리와체인/peer/SAN검증을재구성.실제HTTPS SAN충돌/CN-only허용재현뒤GET/POST수정검사.HTTPS CA파일대체/WSS추가설명교정.Part16§4비동기수명전체및실제프록시배포는미검증이므로partial. 136차시에서 현재 WSS의 SAN 필수 검증과 DNS/IP/SNI, NUL URL 거절을 실제 연결로 대조했다. 138에서 취소/마감/늦은 완료/버퍼 소유/전용 join과 공유 문맥 소유 모델을 구현·비교했다. 실제 TLS·Upgrade·read stall과 단계별 취소 및 해제를 대조했다. 네이티브 trust 저장소의 OS별 구현 전체는 미대응으로 partial."
+      "note": ";135:API/게임의주소·수명·TLS종단·지원빌드분리와체인/peer/SAN검증을재구성.실제HTTPS SAN충돌/CN-only허용재현뒤GET/POST수정검사.HTTPS CA파일대체/WSS추가설명교정.Part16§4비동기수명전체및실제프록시배포는미검증이므로partial. 136차시에서 현재 WSS의 SAN 필수 검증과 DNS/IP/SNI, NUL URL 거절을 실제 연결로 대조했다. 138에서 취소/마감/늦은 완료/버퍼 소유/전용 join과 공유 문맥 소유 모델을 구현·비교했다. 실제 TLS·Upgrade·read stall과 단계별 취소 및 해제를 대조했다. 네이티브 trust 저장소의 OS별 구현 전체는 미대응으로 partial. 167 후속 CI 감사: 선택 학습 의존성과 전용 CPU 실검사 분리, Windows 인증서 어댑터의 매크로 선행 선언을 교정. 기존 부분 대응 범위 유지."
     },
     {
       "id": "part16--section-06",
       "part": 16,
       "path": "docs/blog/part16-secure-admission.md",
       "title": "5. 게이트웨이를 무제한 중계기로 만들지 않는다",
-      "startLine": 421,
-      "endLine": 452,
+      "startLine": 427,
+      "endLine": 458,
       "sha256": "ba8a61fe6bd78565fbb3ab518afe9c909369b8c0ca38b890e007838598a2b097",
       "candidateUnits": [
         "unit-134",
@@ -11066,8 +11165,8 @@
       "part": 16,
       "path": "docs/blog/part16-secure-admission.md",
       "title": "6. 빌드와 실행 — 무엇부터 켜는가",
-      "startLine": 453,
-      "endLine": 568,
+      "startLine": 459,
+      "endLine": 574,
       "sha256": "2aec3dae4e85c64a1b275a2b8a48c791b0c18aa351957854f91fa86330be0dc3",
       "candidateUnits": [
         "unit-135",
@@ -11084,8 +11183,8 @@
       "part": 16,
       "path": "docs/blog/part16-secure-admission.md",
       "title": "7. 프로토콜 이행과 호환성",
-      "startLine": 569,
-      "endLine": 596,
+      "startLine": 575,
+      "endLine": 602,
       "sha256": "59d32a39da0dd4fc4798839b2961f0e109272432befe64f92fdcf8f1d31c4067",
       "candidateUnits": [
         "unit-134",
@@ -11116,8 +11215,8 @@
       "part": 16,
       "path": "docs/blog/part16-secure-admission.md",
       "title": "8. 검증하고 남은 경계를 구분한다",
-      "startLine": 597,
-      "endLine": 627,
+      "startLine": 603,
+      "endLine": 633,
       "sha256": "5b1516be5db42c3f64fe54e061c5b5e34663e0332c4a99f780415041f888153e",
       "candidateUnits": [
         "unit-146",

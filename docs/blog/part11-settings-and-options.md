@@ -1355,7 +1355,7 @@ cmake --build build --config Release
 type %APPDATA%\Tetris\settings.cfg
 ```
 
-`cmake --build build` 를 타깃 없이 부르는 이유는 `copy_assets` 가 ALL 타깃이기 때문이다. `--target tetris` 만 지정하면 `Font/`·`Sounds/` 가 빌드 디렉터리로 복사되지 않는다. macOS 의 설정 경로는 `~/Library/Application Support/Tetris/settings.cfg` 다.
+현재 빌드는 전체 빌드와 `--target tetris` 모두 자산 복사를 포함한다. 실행할 때는 작업 디렉터리에 `Font/`·`Sounds/`가 보이는지 확인한다. macOS의 설정 경로는 `~/Library/Application Support/Tetris/settings.cfg`다.
 
 이 장의 완료 게이트에는 **설정이 결정성을 건드리지 않는다**는 항목이 있다. 그것은 눈으로 확인할 수 없으므로 골든 해시로 잠근다.
 

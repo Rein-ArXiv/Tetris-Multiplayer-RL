@@ -2014,7 +2014,7 @@ audio_init() 실패
 3. **설정 값.** `settings.cfg` 의 볼륨이 0 이면 `audio_set_*_enabled(false)` 로 매핑돼 무음이다(§9.5).
 4. **OS 볼륨 믹서.** Windows: `sndvol.exe`. 앱별 볼륨이 0 일 수 있다. Linux: `pavucontrol`.
 5. **출력 경로.** 기본 장치·앱별 볼륨·케이블과 실제 출력 대상을 확인한다. 초기화 성공은 이후 장치 상태나 실제 청취를 보증하지 않는다. 재시작으로 회복되는지와 자동 복구 구현 유무를 구별한다.
-6. **에셋 경로.** `Sounds/rotate.mp3` 가 **실행 디렉터리 기준**으로 존재하는지. `cmake --build build --target tetris` 는 `copy_assets` 를 돌리지 않으므로 빌드 디렉터리에 `Sounds/` 가 없다(§11.4).
+6. **에셋 경로.** `Sounds/rotate.mp3`가 프로세스의 **작업 디렉터리 기준**으로 존재하는지 확인한다. 현재 게임 타깃 빌드에는 자산 복사가 포함되지만, 실행 파일의 경로를 지정하는 것만으로 작업 디렉터리가 바뀌지는 않는다(§11.4).
 7. **파일 무결성.** 손상된 MP3 는 dr_mp3 가 프레임 0 으로 반환할 수 있다. 핸들이 0 이 아닌지 확인하고, 의심되면 `ffmpeg -i foo.mp3 -f null -` 로 검증.
 8. **이벤트 플래그 소비 누락.** 상태 변경 래퍼에서 `ConsumeSoundEvents` 호출을 빠뜨리면 요청이 남는다. 특히 `game.sim`을 직접 변경하면 이 소비 경로를 우회한다(§4.6).
 9. **`audio_init()` 반환값.** `false` 를 무시하고 `audio_load_sound` 를 호출하면 모든 핸들이 0 이다.
@@ -2230,29 +2230,30 @@ SDL2 경로의 Windows 분기는 `gdiplus ws2_32` 만 추가로 링크한다. `x
 **현재 소스 발췌 — `CMakeLists.txt`**
 
 ```cmake
-    # Copy assets (fonts + sounds + icons + model)
-    #   assets/ 와 model/ 은 없을 수도 있으므로 directory 존재 검사 후 복사.
+    # Runtime resources are a prerequisite of an explicit client build.
+    # This target uses the default runtime layout: <build> or <build>/<config>.
+    set(_asset_dir "${CMAKE_CURRENT_BINARY_DIR}")
+    if (CMAKE_CONFIGURATION_TYPES)
+        string(APPEND _asset_dir "/$<CONFIG>")
+    endif()
     set(_copy_cmds
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Font   ${CMAKE_CURRENT_BINARY_DIR}/Font
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/Sounds ${CMAKE_CURRENT_BINARY_DIR}/Sounds
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Font" "${_asset_dir}/Font"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Sounds" "${_asset_dir}/Sounds"
     )
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
-        list(APPEND _copy_cmds
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${CMAKE_CURRENT_BINARY_DIR}/assets)
-    endif()
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/model")
-        list(APPEND _copy_cmds
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/model ${CMAKE_CURRENT_BINARY_DIR}/model)
-    endif()
-    add_custom_target(copy_assets ALL
-        ${_copy_cmds}
-        DEPENDS tetris
-    )
+    foreach(_optional_assets IN ITEMS assets model)
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_optional_assets}")
+            list(APPEND _copy_cmds
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/${_optional_assets}" "${_asset_dir}/${_optional_assets}")
+        endif()
+    endforeach()
+    add_custom_target(copy_assets ALL ${_copy_cmds} VERBATIM)
+    add_dependencies(tetris copy_assets)
 ```
 
 `Font/` 와 `Sounds/` 는 항상 복사하고, `assets/`(아이콘)와 `model/`(ONNX)은 디렉터리가 있을 때만 복사한다. `audio_load_sound("Sounds/rotate.mp3")` 의 경로가 **상대 경로**라 프로세스의 현재 작업 디렉터리를 기준으로 해석된다는 점이 여기서 중요해진다.
 
-주의: `copy_assets` 는 `ALL` 타깃이므로 `cmake --build build` (타깃 미지정)에는 포함되지만, `cmake --build build --target tetris` 에는 **포함되지 않는다.** 빌드 디렉터리에서 실행할 계획이라면 타깃을 지정하지 말고 빌드하거나, 저장소 루트에서 실행하라. "빌드는 성공했는데 소리만 안 난다" 의 가장 흔한 원인이다.
+`copy_assets`는 기본 빌드에 포함되며 `tetris`의 선행 타깃이기도 하다. 따라서 `cmake --build build --target tetris`에도 자산 복사가 포함된다. 단일 구성에서는 빌드 폴더, 다중 구성에서는 선택한 구성 폴더에 자산을 준비한다. 실행 시의 작업 디렉터리는 별도이므로, 그 자산 폴더가 보이는 위치에서 게임을 실행한다.
 
 ### 11.5 dr_mp3 벤더링
 
@@ -2577,7 +2578,7 @@ cmake --build build --config Release
 ./build/Release/tetris.exe
 ```
 
-두 경로를 섞어 쓰지 않는다. 단일 구성 제너레이터(Makefiles/Ninja)에서는 `--config` 가 무시되고 산출물은 `build/tetris` 다. 그리고 위에서 `--target tetris` 를 쓰지 않은 것은 의도적이다 — `copy_assets` 를 함께 돌려야 빌드 디렉터리에도 `Sounds/` 가 생긴다(§11.4). 저장소 루트에서 실행하면 루트의 `Sounds/` 를 쓰므로 어느 쪽이든 무방하다.
+두 경로를 섞어 쓰지 않는다. 단일 구성 생성기(Makefiles/Ninja)는 configure 때 빌드 유형을 선택하며 산출물이 `build/tetris`에 나온다. 현재 자산 복사는 전체 빌드와 게임 타깃 빌드에 모두 포함된다. 저장소 루트에서 실행하면 루트의 `Sounds/`를, 준비된 빌드 폴더에서 실행하면 그 폴더의 `Sounds/`를 읽는다.
 
 기대 결과:
 

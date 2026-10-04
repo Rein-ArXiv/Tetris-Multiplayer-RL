@@ -157,7 +157,7 @@ cmake --build build --config Release --target tetris
 ./build/Release/tetris.exe
 ```
 
-**3. `--target tetris` 는 `copy_assets` 를 돌리지 않는다.** `copy_assets` 는 ALL 타깃이라 타깃을 지정하면 건너뛴다. 빌드 디렉터리에서 실행하면 `Font/`·`Sounds/` 가 없어 폰트와 소리가 빠진다. 저장소 루트에서 실행하거나, 타깃을 지정하지 않고 `cmake --build build` 로 빌드한다.
+**3. 게임 빌드와 작업 디렉터리를 구분한다.** 현재 저장소는 `tetris`의 선행 타깃으로 자산을 복사하므로 `--target tetris`에도 `Font/`·`Sounds/`가 준비된다. 단일 구성은 빌드 폴더, 다중 구성은 선택한 구성 폴더다. 실행 시 상대 경로는 작업 디렉터리를 기준으로 읽는다. 중간 체크포인트는 해당 Part의 의존 관계와 실행 지시를 따른다.
 
 **4. relay/room smoke 테스트는 포트 7788 고정이다.** `python/tests/test_relay_smoke.py`와 `test_room_smoke.py`는 `RELAY_PORT = 7788`을 사용한다. 기본 7777로 띄우면 실패가 아니라 **skip**이 될 수 있으므로 `pytest -rs` 출력에서 각 모듈이 실제 실행됐는지 확인한다.
 

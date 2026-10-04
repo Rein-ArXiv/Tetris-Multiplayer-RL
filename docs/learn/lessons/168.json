@@ -1,0 +1,407 @@
+{
+  "id": "lesson-168",
+  "title": "의존성과 패키징: 헤더에서 옮겨 실행하기까지",
+  "shortTitle": "API·ABI·대상 SDK·IMPORTED 타깃·로더·설치 트리",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 역할별 빌드는 나뉘었지만 추론 실행기는 개발 SDK의 경로에 기대고 있습니다.",
+  "finish": "완료: 대상 SDK의 계약을 타깃으로 묶고 설치 트리를 옮겨 실제 정책 실행을 대조합니다.",
+  "objective": "컴파일·링크·로더의 의존성을 구분하고 개발 환경과 분리한 설치 결과를 검사한다.",
+  "prerequisites": [
+    "타깃의 사용 요구사항과 링크",
+    "Python 바인딩과 ONNX 정책 실행",
+    "구성·빌드·실행 단계의 구분"
+  ],
+  "recap": {
+    "points": [
+      "타깃은 만드는 산출물과 선행 작업의 관계를 표현한다.",
+      "캐시는 빌드 폴더에 남으며 역할과 툴체인을 별도 폴더로 구분할 수 있다.",
+      "PRIVATE·PUBLIC·INTERFACE는 요구사항이 전달되는 범위를 정한다."
+    ],
+    "bridge": "이 관계에 외부 SDK를 연결하고, 만들어진 프로그램을 개발 경로 밖으로 옮겨 봅니다."
+  },
+  "sections": [
+    {
+      "title": "실행 파일 하나만 옮겨 보는 사고 실험",
+      "body": "정책 실행기를 빌드 폴더에서는 실행할 수 있습니다. 실행 파일만 빈 폴더에 복사하면 같은 결과가 나올까요? 코드가 바뀌지 않았어도 ONNX Runtime을 찾지 못하면 `main`에 들어가기 전에 종료할 수 있습니다.\n\n외부 의존성에는 **개발할 때 필요한 입력**과 **실행할 때 필요한 입력**이 있습니다. 헤더는 선언과 인라인 구현을 컴파일러에 제공합니다. 링크용 라이브러리는 외부 심볼을 연결할 때 사용합니다. 공유 라이브러리는 실행 프로세스에 로드할 코드와 데이터를 제공합니다. 한 파일이 링크와 실행에 모두 사용되는 플랫폼도 있지만, 두 역할은 구분해 생각합니다.\n\n이번에는 누적 `inference` 빌드에서 SDK 경로를 IMPORTED 타깃으로 묶고, 설치 트리에 실행 파일과 Runtime을 배치합니다. 마지막에는 개발 SDK와 빌드 폴더를 사용하지 않는 위치에서 실제 정책을 실행합니다.",
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "target_link_libraries(tetris PRIVATE Tetris::OnnxRuntime)",
+        "invariant": "소비자가 같은 외부 SDK의 사용 요구사항을 타깃으로 전달받는다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "API와 ABI: 선언을 아는 것과 함께 실행되는 것",
+      "body": "API는 호출자가 사용할 수 있는 이름·타입·인자·결과의 계약입니다. 예를 들어 정책 래퍼는 모델을 로드하고, 관측을 받아 선택과 값을 반환합니다. 컴파일러는 선언을 읽어 호출 형태가 맞는지 검사합니다.\n\nABI는 이미 컴파일된 코드가 만나는 바이너리 수준의 계약입니다. 인자를 어떤 레지스터나 스택 위치로 전달하는지, 자료형을 어떻게 배치하는지, 어떤 심볼 이름으로 연결하는지 등이 포함됩니다. 같은 함수 선언을 읽어도 대상 CPU나 운영체제의 바이너리 형식이 다르면 바로 연결해 실행할 수 없습니다.\n\n64비트 포인터를 쓰는 Linux x64와 Linux ARM64는 명령어 집합이 다릅니다. 같은 x64라도 Linux의 ELF 공유 객체와 Windows의 PE DLL은 서로 다른 로더 환경을 전제로 합니다. 따라서 “64비트 라이브러리”라는 정보만으로 SDK를 고르면 부족합니다.\n\nONNX의 C++ 헤더 래퍼는 C API를 통해 Runtime에 연결합니다. C 경계는 C++ 이름 장식 등 일부 차이를 줄이는 선택이지만, 대상 OS·CPU·지원 API 버전과 시스템 런타임의 조건까지 없애지는 않습니다.",
+      "reference": {
+        "path": "bot/bot_onnx.cpp",
+        "symbol": "Ort::Session",
+        "invariant": "외부 Runtime의 바이너리 계약은 래퍼의 C++ 호출 형태와 별도로 확인한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "의존성이 생기는 단계를 표로 만든다",
+      "body": "| 자료 | 사용하는 단계 | 없거나 맞지 않을 때의 대표 증상 |\n|---|---|---|\n| `onnxruntime_cxx_api.h` 등 SDK 헤더 | 전처리·컴파일 | 헤더를 찾지 못하거나 선언이 맞지 않음 |\n| Linux SO, macOS dylib, Windows import library | 링크 | 필요한 심볼·대상 형식이 맞지 않음 |\n| 실행용 SO·dylib·DLL | 로더·초기화 | 라이브러리를 찾지 못하거나 로드 실패 |\n| 모델 파일 | 프로그램의 모델 로드 | 파일·그래프·연산·입출력 계약 검사 실패 |\n| Python 인터프리터와 확장 모듈 | 학습 프로세스 시작 | 모듈 검색 또는 확장 로딩 실패 |\n\n이 표의 실패는 뒤 단계까지 가야만 발견되는 것도 있습니다. 파일이 존재하는지 확인하는 구성 검사는 빠르고 설명하기 쉽습니다. 그 뒤의 실제 컴파일·링크·실행 검사는 별도 증거를 더합니다.\n\n소스가 `#include`를 통과했다고 모델 호환성이 확인된 것은 아닙니다. 반대로 모델 이름을 바꿔도 로더가 DLL을 못 찾는 문제는 해결되지 않습니다. 오류가 어느 경계에서 발생했는지 먼저 정하면 변경할 입력이 좁혀집니다.",
+      "reference": {
+        "path": "bot/bot_onnx.cpp",
+        "symbol": "bool BotOnnx::Load",
+        "invariant": "SDK 준비와 프로그램이 수행하는 모델 로드를 독립된 실패 경계로 취급한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "빌드하는 기기와 실행할 기기를 구분한다",
+      "body": "호스트는 도구를 실행하는 기기이고, 대상은 만들어진 바이너리가 실행될 환경입니다. 같은 Linux PC에서 그 PC용 실행 파일을 만들면 둘이 일치합니다. Linux에서 Windows용 컴파일러를 사용하면 서로 다릅니다.\n\nCMake의 `CMAKE_SYSTEM_NAME`은 대상 OS를 표현합니다. `CMAKE_SYSTEM_PROCESSOR`는 교차 컴파일 툴체인에서 대상 CPU에 맞춰 지정해야 합니다. 교차 컴파일이 아닐 때는 보통 호스트 CPU 값과 같아서 실제 컴파일 대상과 반드시 일치하지는 않습니다. Visual Studio는 선택된 대상 플랫폼도 따로 확인하고, 포인터 폭 검사와 실제 링크를 함께 사용합니다. 툴체인은 이 정보와 대상 컴파일러·검색 경로를 함께 설정해야 합니다. 변수 문자열만 Windows로 바꾸면 Linux 컴파일러가 Windows 실행 파일을 만들어 주지는 않습니다.\n\n준비 스크립트의 `uname`은 실행한 셸의 시스템을 보고합니다. WSL에서 자동 감지로 받은 Linux SDK를 Windows MSVC에 연결하면 호스트와 대상 선택이 섞입니다. 이번 모듈은 **CMake의 대상 정보**를 사용하고, SDK 경로는 호출자가 명시합니다.",
+      "reference": {
+        "path": "cmake/TetrisOnnxRuntime.cmake",
+        "symbol": "string(TOLOWER",
+        "invariant": "빌드 호스트와 실행 대상을 구분하고 선택한 SDK의 입력을 검증한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "대상에 맞는 SDK 가지를 고른다",
+      "body": "SDK를 `include/`와 `lib/<platform>/`로 정리합니다. 이 레이아웃은 이번 빌드 모듈의 입력 계약입니다. 공식 압축의 디렉터리 모양이 다르면 먼저 이 구조로 배치합니다. 폴더 이름만 바꾸어 바이너리의 CPU가 바뀌지는 않습니다.\n\nLinux 분기는 대상 프로세서 이름을 정규화하고 지원하는 SDK 폴더를 선택합니다. 모르는 대상은 configure에서 멈춥니다. Windows는 대상 프로세서·생성기 플랫폼·포인터 폭을 함께 검사하고, macOS에서 여러 아키텍처를 명시했다면 목록의 각 항목을 검사합니다. 이미 선택한 SDK를 조용히 다른 경로의 것으로 바꾸지 않도록 같은 IMPORTED 타깃을 다시 요청할 때의 루트도 대조합니다.",
+      "codes": [
+        {
+          "label": "dependencies/OnnxRuntime.cmake — 대상 Linux 가지",
+          "language": "cmake",
+          "text": "if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")\n    if(_tetris_proc STREQUAL \"x86_64\" OR _tetris_proc STREQUAL \"amd64\")\n      set(_tetris_platform \"linux-x64\")\n    elseif(_tetris_proc STREQUAL \"aarch64\" OR _tetris_proc STREQUAL \"arm64\")\n      set(_tetris_platform \"linux-aarch64\")\n    else()\n      message(FATAL_ERROR \"tetris_import_onnxruntime: unsupported Linux processor '${CMAKE_SYSTEM_PROCESSOR}'\")\n    endif()\n    set(_tetris_runtime \"${_tetris_root}/lib/${_tetris_platform}/libonnxruntime.so\")"
+        }
+      ],
+      "reference": {
+        "path": "cmake/TetrisOnnxRuntime.cmake",
+        "symbol": "if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")",
+        "invariant": "빌드 호스트와 실행 대상을 구분하고 선택한 SDK의 입력을 검증한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      },
+      "notes": [
+        {
+          "kind": "범위",
+          "title": "경로 선택 검사의 한계",
+          "body": "이 모듈은 선택한 파일의 실제 CPU 명령어와 모든 ABI 속성을 파싱하지 않습니다. 잘못 이름 붙인 SDK도 파일 검사까지는 통과할 수 있습니다. 실제 대상 컴파일러의 링크와 대상 환경 실행으로 이어 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "IMPORTED 타깃에 외부 파일의 역할을 적는다",
+      "body": "일반적인 `add_library` 타깃은 프로젝트의 소스를 컴파일합니다. `IMPORTED` 타깃은 이미 만들어진 외부 산출물의 위치와 사용 요구사항을 표현합니다. CMake에 그 라이브러리를 다시 빌드하라는 소스 목록을 주지 않습니다.\n\n`IMPORTED_LOCATION`에는 실행용 공유 라이브러리의 위치를 기록합니다. Windows에서는 `.dll`이 이 위치에 해당하고, 링크할 `.lib`를 `IMPORTED_IMPLIB`에 따로 기록합니다. `INTERFACE_INCLUDE_DIRECTORIES`는 소비자의 컴파일에 필요한 SDK 헤더 경로입니다.\n\n`GLOBAL`은 이 IMPORTED 타깃 이름을 현재 CMake 프로젝트의 다른 디렉터리에서도 볼 수 있게 합니다. OS 전역 설치나 모든 프로세스가 공유하는 객체를 뜻하지 않습니다.",
+      "codes": [
+        {
+          "label": "외부 Runtime의 링크 계약",
+          "language": "cmake",
+          "text": "add_library(Tetris::OnnxRuntime SHARED IMPORTED GLOBAL)\n  set_target_properties(Tetris::OnnxRuntime PROPERTIES\n    TETRIS_SDK_ROOT \"${_tetris_root}\"\n    IMPORTED_LOCATION \"${_tetris_runtime}\"\n    INTERFACE_INCLUDE_DIRECTORIES \"${_tetris_include}\"\n  )\n  if(CMAKE_SYSTEM_NAME STREQUAL \"Windows\")\n    set_target_properties(Tetris::OnnxRuntime PROPERTIES\n      IMPORTED_IMPLIB \"${_tetris_implib}\"\n    )\n  endif()"
+        }
+      ],
+      "reference": {
+        "path": "cmake/TetrisOnnxRuntime.cmake",
+        "symbol": "add_library(Tetris::OnnxRuntime",
+        "invariant": "빌드 호스트와 실행 대상을 구분하고 선택한 SDK의 입력을 검증한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "래퍼를 쓰는 코드와 SDK를 직접 쓰는 코드",
+      "body": "`study_policy`의 공개 헤더는 학습용 관측·예측 인터페이스를 노출합니다. ONNX 세부는 구현 파일에서 사용하므로 SDK를 PRIVATE 의존성으로 둡니다. 이 래퍼는 STATIC 라이브러리로 만들며, 실행 파일 링크에 필요한 Runtime 연결은 CMake가 이어 전달합니다.\n\n`onnx_probe`는 SDK의 버전 API도 직접 호출합니다. 이 실행 파일은 래퍼만 사용하는 소비자와 달리 SDK 헤더도 필요하므로 `Tetris::OnnxRuntime`을 직접 연결합니다. 의존성 줄은 “관련 있어 보이는 라이브러리 목록”이 아니라 각 타깃이 실제로 사용하는 계약을 표현합니다.",
+      "codes": [
+        {
+          "label": "inference/CMakeLists.txt — 공개 래퍼와 내부 SDK",
+          "language": "cmake",
+          "text": "add_library(study_policy STATIC ../bot/onnx_policy.cpp)\ntarget_compile_features(study_policy PUBLIC cxx_std_17)\ntarget_include_directories(study_policy PUBLIC \"${CMAKE_CURRENT_SOURCE_DIR}/..\")\ntarget_link_libraries(study_policy PRIVATE Tetris::OnnxRuntime)\nadd_executable(onnx_probe ../tools/onnx_probe.cpp)\ntarget_link_libraries(onnx_probe PRIVATE study_policy Tetris::OnnxRuntime)"
+        }
+      ],
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "target_link_libraries(tetris_meta PRIVATE Tetris::OnnxRuntime)",
+        "invariant": "소비자가 같은 외부 SDK의 사용 요구사항을 타깃으로 전달받는다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "모델 없이 먼저 Runtime을 시작해 본다",
+      "body": "모델 파일이 없어서 실패하는 것과 라이브러리가 로드되지 않는 것을 분리하기 위해 작은 진단기를 추가합니다. 실제 SDK와 링크하고 `Ort::Env`를 생성한 뒤 Runtime 버전을 출력합니다. 예외를 출력하고 비성공 종료 코드를 반환하는 경계도 둡니다.\n\n실행이 `main`에 진입하기 전에 로더에서 실패하면 이 `catch`는 실행되지 않습니다. 프로그램 안에서 처리할 수 있는 예외와 프로그램을 시작하지 못한 오류를 구분하는 관찰점입니다. 진단기가 성공하면 SDK의 이 초기화 경로가 동작했다는 뜻이고, 실제 모델의 입출력 검사는 정책 실행기로 이어갑니다.",
+      "codes": [
+        {
+          "label": "tools/dependency_probe.cpp — 실제 SDK 초기화",
+          "language": "cpp",
+          "text": "#include <onnxruntime_cxx_api.h>\n#include <exception>\n#include <iostream>\n\nint main() {\n    try {\n        Ort::Env environment(ORT_LOGGING_LEVEL_WARNING, \"dependency-probe\");\n        std::cout << \"ONNX Runtime \" << OrtGetApiBase()->GetVersionString() << '\\n';\n    } catch (const std::exception& error) {\n        std::cerr << error.what() << '\\n';\n        return 1;\n    }\n}"
+        }
+      ],
+      "reference": {
+        "path": "bot/bot_onnx.cpp",
+        "symbol": "ORT_LOGGING_LEVEL_WARNING",
+        "invariant": "초기화·모델 로드·추론은 각각 관찰 가능한 경계다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "빌드 트리와 설치 트리를 따로 만든다",
+      "body": "빌드 트리에는 목적 파일·캐시·생성 규칙과 실행 파일이 함께 있습니다. CMake는 여기서 실행하기 편하도록 외부 SDK 경로를 빌드용 런타임 검색 경로에 넣을 수 있습니다. 개발 PC에서 성공하는 이유가 그 경로라면 실행 파일 하나를 복사해서는 같은 조건이 유지되지 않습니다.\n\n설치 트리는 `cmake --install`이 설치 규칙에 따라 모은 산출물입니다. 이번 실습은 실행 파일을 `bin/`, Linux·macOS의 Runtime 파일을 `lib/`에 둡니다. Windows는 Runtime DLL을 설치된 실행 파일과 같은 `bin/`에 둡니다. `--prefix`는 이 트리의 맨 위 경로입니다.\n\n설치 명령은 필요한 빌드를 자동으로 모두 수행하는 명령이 아닙니다. 먼저 선택한 구성의 타깃을 빌드하고 같은 구성으로 설치합니다. Python 학습 모듈이나 계정 DB는 이 정책 실행기 설치 목록에 포함하지 않습니다.",
+      "reference": {
+        "path": "cmake/TetrisOnnxRuntime.cmake",
+        "symbol": "IMPORTED_LOCATION",
+        "invariant": "빌드 호스트와 실행 대상을 구분하고 선택한 SDK의 입력을 검증한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "실행 파일 기준으로 라이브러리를 찾는다",
+      "body": "Linux 실습의 설치 실행 파일은 `$ORIGIN/../lib`를 사용합니다. `$ORIGIN`은 이 경우 실행 파일이 놓인 디렉터리이며 셸의 현재 작업 폴더와 구별합니다. `moved/bin/dependency_probe`라면 인접한 `moved/lib`와의 관계를 유지합니다. 셸 명령에서 같은 문자열을 넘길 때는 셸이 먼저 변수로 확장하지 않도록 작은따옴표를 사용합니다.\n\nCMake의 `INSTALL_RPATH`는 설치할 실행 파일의 검색 경로를 지정합니다. `INSTALL_RPATH_USE_LINK_PATH`를 끄면 외부 SDK의 링크 디렉터리를 설치 경로에 자동 덧붙이는 것을 막을 수 있습니다. 빌드 때의 경로와 설치 뒤의 경로를 따로 확인합니다.\n\nmacOS 분기는 `@loader_path/../lib`를 기록합니다. 실제 dylib의 install name과 대상 환경도 맞아야 합니다. Windows에는 이 ELF식 RPATH를 적용하지 않고 DLL 배치와 해당 플랫폼의 로더 경로를 확인합니다.",
+      "codes": [
+        {
+          "label": "설치 대상의 런타임 검색 관계",
+          "language": "cmake",
+          "text": "set(_study_packaged_targets dependency_probe onnx_probe policy_match_probe)\nforeach(_study_target IN LISTS _study_packaged_targets)\n    if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")\n        set_target_properties(${_study_target} PROPERTIES INSTALL_RPATH \"$ORIGIN/../lib\")\n    elseif(APPLE)\n        set_target_properties(${_study_target} PROPERTIES INSTALL_RPATH \"@loader_path/../lib\")\n    endif()\n    set_target_properties(${_study_target} PROPERTIES INSTALL_RPATH_USE_LINK_PATH FALSE)\nendforeach()"
+        }
+      ],
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "INSTALL_RPATH \"$ORIGIN/lib\"",
+        "invariant": "검색 경로의 기준과 실제 배포 폴더 구조를 함께 맞춘다.",
+        "mayDiffer": "학습 설치는 bin/과 lib/가 형제여서 ../lib, 현재 게임 번들은 실행 파일 옆 lib/를 사용한다."
+      }
+    },
+    {
+      "title": "링크에 사용한 이름과 로더가 찾는 이름",
+      "body": "Linux에서 링크 명령에 `libonnxruntime.so`를 주어도 ELF의 필요한 라이브러리 항목에는 버전이 포함된 다른 이름이 기록될 수 있습니다. 공유 라이브러리의 **SONAME**이 그 런타임 식별 이름을 제공하기 때문입니다. 링크용 파일 이름 하나만 보고 같은 이름만 복사하면 필요한 버전 파일이 빠질 수 있습니다.\n\n실습은 선택한 SDK의 라이브러리 디렉터리에서 SO·dylib 파일과 링크를 함께 설치합니다. Windows에서는 `.lib`를 실행 파일 옆에 복사하는 것으로 DLL을 대신할 수 없습니다. 링크 입력과 실행 입력이 별개이기 때문입니다.\n\nLinux의 `readelf -d`로 설치 실행 파일의 `NEEDED`와 `RUNPATH` 또는 `RPATH` 항목을 확인합니다. 어떤 이름을 요구하고 어디에서 찾도록 기록됐는지가 관찰 대상입니다. 현재 SDK의 버전 문자열을 안내문에 영구 상수로 옮기지 않습니다.",
+      "codes": [
+        {
+          "label": "선택한 SDK 디렉터리의 Runtime 배치",
+          "language": "cmake",
+          "text": "install(TARGETS ${_study_packaged_targets} RUNTIME DESTINATION bin)\nget_target_property(_study_ort_runtime Tetris::OnnxRuntime IMPORTED_LOCATION)\nget_filename_component(_study_ort_dir \"${_study_ort_runtime}\" DIRECTORY)\nif(WIN32)\n    install(DIRECTORY \"${_study_ort_dir}/\" DESTINATION bin FILES_MATCHING PATTERN \"*.dll\")\nelse()\n    install(DIRECTORY \"${_study_ort_dir}/\" DESTINATION lib\n        FILES_MATCHING PATTERN \"*.so*\" PATTERN \"*.dylib*\")\nendif()"
+        }
+      ],
+      "reference": {
+        "path": "cmake/TetrisOnnxRuntime.cmake",
+        "symbol": "set(_tetris_implib",
+        "invariant": "빌드 호스트와 실행 대상을 구분하고 선택한 SDK의 입력을 검증한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "옮겨서 실행하는 실험을 구성한다",
+      "body": "체크포인트 디렉터리에서 SDK 경로를 지정해 POLICY 역할을 구성합니다. 아래의 `/path/to/...`는 자신의 경로로 바꿉니다.\n\n```sh\ncmake -S roles -B build-policy -DSTUDY_ROLE=POLICY -DCMAKE_BUILD_TYPE=Release -DORT_ROOT=/path/to/sdk\ncmake --build build-policy --config Release --parallel 2\nctest --test-dir build-policy -C Release --output-on-failure\ncmake --install build-policy --config Release --prefix /path/to/study-install\n```\n\nLinux에서는 설치 트리 전체를 다른 임시 경로로 옮기고, 저장소 밖의 작업 디렉터리에서 `bin/dependency_probe`를 실행합니다. 버전 출력이 나와야 합니다. `readelf -d`에서 개발 SDK의 절대 경로에 기대고 있지 않은지도 확인합니다.\n\n검사용으로 복사해 둔 SDK·빌드 트리를 제거한 뒤 같은 실행을 반복하면 숨은 경로 의존을 더 직접적으로 확인할 수 있습니다. 원래 개발 SDK나 사용 중인 설치를 삭제하지 말고, 버려도 되는 복사본으로 실험합니다. 이어 그 임시 설치의 `lib` 폴더 이름을 바꾸면 누락된 라이브러리 이름과 함께 로더가 실패해야 합니다. 원복 후에는 다시 실행됩니다.",
+      "reference": {
+        "path": "scripts/check_learning_dependencies.py",
+        "symbol": "shutil.rmtree(sdk)",
+        "invariant": "옮긴 산출물은 개발 경로 없이 실행하고 필수 파일 누락도 실제로 관찰한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "진단기의 성공 뒤에 실제 정책을 대조한다",
+      "body": "SDK 초기화만으로 모델 계약 검사가 끝나지는 않습니다. 설치한 `policy_match_probe`에 실제 모델을 주고, 같은 누적 규칙의 Python 기준 실행과 행동·상태 결과를 비교합니다. 추론 실패 모델도 넣어 보상 적격성 경계가 유지되는지 확인합니다.\n\n`tests/policy_match_inference.py`는 TRAINING 역할로 만든 네이티브 `study_py`와 정책 실행기 경로를 인자로 받습니다. 개발 빌드 실행기 대신 **설치한 실행기 경로**를 주면, 같은 추론·경기 검사를 설치 결과에 적용할 수 있습니다.\n\n실행 파일을 옮겼다는 이유로 모델·입력의 의미 계약이 달라져서는 안 됩니다. 반대로 실행이 성공해도 승률·공정성 같은 게임 성능이 증명되지는 않습니다. 여기서는 의존성 배치와 같은 계산의 연결을 확인합니다.",
+      "reference": {
+        "path": "scripts/check_learning_dependencies.py",
+        "symbol": "str(moved/'bin/policy_match_probe')",
+        "invariant": "설치된 프로그램을 같은 관측·입력·상태 계약으로 대조한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      }
+    },
+    {
+      "title": "프로젝트의 다른 의존성에도 같은 질문을 적용한다",
+      "body": "SDK마다 확보 방법은 달라도 읽을 질문은 같습니다. SDL의 CMake Config 패키지는 설치된 include·링크 요구사항을 타깃으로 표현할 수 있고, pkg-config는 검색한 패키지의 컴파일·링크 플래그를 전달합니다. 어느 방식으로 찾았든 그 패키지가 선택한 대상용인지 확인합니다. 헤더 전용 라이브러리도 OS API나 다른 링크 의존성을 사용할 수 있습니다.\n\nPython에서는 인터프리터·가상 환경·네이티브 확장의 ABI가 추가됩니다. PyTorch CPU 패키지와 GPU 패키지는 실행 환경이 다르고, `pip`의 ONNX Runtime 설치가 C++용 헤더와 이 실습 레이아웃을 자동 준비하는 것은 아닙니다. 실제 import 경로를 확인하는 이유가 여기에 있습니다.\n\n현재 프로젝트는 `TETRIS_ORT_ROOT`와 공통 IMPORTED 타깃으로 게임·meta·검사기의 ONNX 경로를 공유합니다. 봇 옵션을 끄면 그 소비자는 스텁 경로로 빌드됩니다. 켰다면 SDK 누락을 명시적으로 실패시킵니다. 기능을 켰는데 조용히 빠진 산출물을 성공으로 취급하지 않는 것이 핵심입니다.",
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "set(TETRIS_ORT_ROOT",
+        "invariant": "소비자가 같은 외부 SDK의 사용 요구사항을 타깃으로 전달받는다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      },
+      "codes": [
+        {
+          "label": "inference/CMakeLists.txt — 명시한 SDK를 가져오는 진입점",
+          "language": "cmake",
+          "text": "set(ORT_ROOT \"\" CACHE PATH \"ONNX Runtime SDK in include/ and lib/<platform>/ layout\")\ninclude(\"${CMAKE_CURRENT_SOURCE_DIR}/../dependencies/OnnxRuntime.cmake\")\ntetris_import_onnxruntime(\"${ORT_ROOT}\")"
+        },
+        {
+          "label": "dependencies/OnnxRuntime.cmake — 전체 기준 파일",
+          "language": "cmake",
+          "file": "checkpoints/168-dependencies/dependencies/OnnxRuntime.cmake",
+          "collapsed": true
+        },
+        {
+          "label": "inference/CMakeLists.txt — 전체 빌드·설치 규칙",
+          "language": "cmake",
+          "file": "checkpoints/168-dependencies/inference/CMakeLists.txt",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "설치 결과의 범위와 의존성 목록",
+      "body": "이번 설치는 정책 실행기와 선택한 ONNX Runtime 파일의 이동 실습입니다. 모델은 명시한 경로로 입력하고, 계정 DB·토큰·서버 설정은 복사하지 않습니다. 실제 제품의 폰트·아이콘·소리·상대 모델 카탈로그는 제품 패키징 규칙에서 별도로 선택해야 합니다.\n\n공유 라이브러리 자체도 시스템 라이브러리에 의존합니다. 개발 PC와 같은 PC에서 옮겨 실행한 결과는 그 시스템 조건을 공유합니다. 다른 Linux 배포판의 glibc·C++ 런타임이나 그래픽 드라이버까지 호환되는지 판단하려면 실제 지원 환경에서 실행해야 합니다. Runtime 파일을 아무 것이나 전부 복사하는 대신, 포함할 파일과 대상 시스템이 제공할 파일을 정합니다.\n\n의존성 기록에는 출처·버전·대상·확보 방법·배포 시 필요한 파일과 고지 자료를 남깁니다. 자동 다운로드 스크립트가 성공했다고 실행 검사를 생략하지 않습니다. 현재 SDK 준비 스크립트는 필수 파일을 확인하고 복사 실패를 반환하지만 디렉터리 전체를 원자적으로 교체하지는 않으므로, 실패한 준비 결과를 다음 빌드 입력으로 사용하지 않습니다.",
+      "reference": {
+        "path": "scripts/check_learning_dependencies.py",
+        "symbol": "environment.pop('LD_LIBRARY_PATH',None)",
+        "invariant": "검사에서 제공한 실행 환경과 배포 산출물의 범위를 명시한다.",
+        "mayDiffer": "SDK 버전·지원 대상·타깃 이름은 바뀔 수 있습니다. 헤더·링크 입력·실행 파일의 역할과 선택한 대상의 일치는 유지합니다."
+      },
+      "notes": [
+        {
+          "kind": "오해 점검",
+          "title": "RUNPATH 하나로 모든 하위 의존성을 해결할까?",
+          "body": "ELF의 RPATH와 RUNPATH는 검색 우선순위와 전이 의존성에 적용되는 방식이 다릅니다. 실행 파일의 RUNPATH가 모든 자식 라이브러리의 의존성까지 같은 방식으로 해결한다고 일반화하지 않습니다. 실제 설치 트리의 각 바이너리와 대상 시스템에서 확인합니다."
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "168-1",
+      "question": "Windows용 실행 파일이 링크됐지만 시작할 때 onnxruntime.dll을 찾지 못합니다. 우선 고칠 경계는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "헤더에 같은 함수 선언을 다시 추가한다"
+        },
+        {
+          "id": "b",
+          "text": "실행용 DLL과 Windows 로더 검색 경로를 확인한다"
+        },
+        {
+          "id": "c",
+          "text": "모델의 학습률을 낮춘다"
+        },
+        {
+          "id": "d",
+          "text": "링크용 .lib의 이름만 .dll로 바꾼다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "실행용 DLL과 Windows 로더 검색 경로를 확인한다",
+      "explanation": "링크 성공과 실행용 DLL 확보는 별개입니다. 파일 확장자를 바꾸어 import library가 Runtime 구현으로 바뀌지 않습니다."
+    },
+    {
+      "id": "168-2",
+      "question": "Linux x64 호스트에서 Linux ARM64 대상으로 구성했습니다. 공통 SDK 모듈이 폴더를 고를 때 기준은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "호스트에서 실행한 uname 결과만 사용한다"
+        },
+        {
+          "id": "b",
+          "text": "헤더를 마지막으로 수정한 기기의 CPU를 사용한다"
+        },
+        {
+          "id": "c",
+          "text": "모델 파일 이름에 적힌 CPU를 사용한다"
+        },
+        {
+          "id": "d",
+          "text": "대상 툴체인의 OS·CPU 정보와 선택한 SDK를 사용한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "대상 툴체인의 OS·CPU 정보와 선택한 SDK를 사용한다",
+      "explanation": "빌드 호스트와 실행 대상은 다를 수 있습니다. 대상 정보와 실제 컴파일러·SDK를 함께 맞추며 변수 이름만 바꾸어 교차 컴파일이 완성되지는 않습니다."
+    },
+    {
+      "id": "168-3",
+      "question": "빌드 폴더에서 성공한 진단기가 설치 폴더에서 실패했습니다. 설치 결과가 개발 경로에 기대는지 가장 직접적으로 확인하는 실험은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "임시 설치 트리를 옮기고 검사 전용 SDK·빌드 복사본 없이 실행한다"
+        },
+        {
+          "id": "b",
+          "text": "같은 빌드 폴더에서 같은 명령을 다시 실행한다"
+        },
+        {
+          "id": "c",
+          "text": "실행 파일 이름을 길게 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "정책 네트워크의 은닉층을 늘린다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "임시 설치 트리를 옮기고 검사 전용 SDK·빌드 복사본 없이 실행한다",
+      "explanation": "설치 경로와 개발 입력을 분리하면 숨은 절대 경로 의존을 드러낼 수 있습니다. 사용 중인 SDK는 건드리지 않고 버릴 수 있는 검사 복사본으로 수행합니다."
+    },
+    {
+      "id": "168-4",
+      "question": "헤더와 라이브러리 파일의 존재를 모두 확인했습니다. 아직 남은 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "프로젝트의 모든 모델이 자동으로 같은 행동을 낸다는 보장"
+        },
+        {
+          "id": "b",
+          "text": "C++ 컴파일러를 설치할 필요가 없다는 보장"
+        },
+        {
+          "id": "c",
+          "text": "선택한 대상에서 실제 링크·초기화·모델 실행이 호환되는지 확인"
+        },
+        {
+          "id": "d",
+          "text": "계정 DB를 반드시 실행 파일 옆에 복사해야 하는지 확인"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "선택한 대상에서 실제 링크·초기화·모델 실행이 호환되는지 확인",
+      "explanation": "파일 존재는 SDK 레이아웃의 필요조건입니다. 바이너리 형식·ABI·로더·모델 계약은 실제 다음 단계에서 확인합니다."
+    },
+    {
+      "id": "168-5",
+      "question": "Linux 설치 트리가 package/bin/probe와 package/lib/Runtime 구조입니다. probe의 설치 검색 경로로 이 상대 관계를 표현한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "$ORIGIN/lib"
+        },
+        {
+          "id": "b",
+          "text": "$ORIGIN/../lib"
+        },
+        {
+          "id": "c",
+          "text": "현재 셸의 작업 폴더를 SDK 폴더로 고정"
+        },
+        {
+          "id": "d",
+          "text": "원래 개발 SDK의 절대 경로만 기록"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "$ORIGIN/../lib",
+      "explanation": "$ORIGIN이 실행 파일 디렉터리인 이 경우 한 단계 위의 lib로 이동합니다. 현재 제품처럼 실행 파일과 lib가 같은 부모에 있다면 다른 관계가 필요합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "대상 SDK로 POLICY 역할을 구성하고 dependency_probe·정책 실행기를 빌드한다.",
+      "선택한 구성으로 설치한 뒤 Linux 임시 설치 트리를 다른 경로로 옮겨 버전과 로더 경로를 확인한다.",
+      "설치한 policy_match_probe를 누적 Python 기준과 대조하고 임시 Runtime 누락 시 시작 실패를 관찰한다."
+    ],
+    "expected": "선택한 대상·링크 입력·실행 의존성을 설명하고 개발 SDK 없이 설치 실행기가 실제 정책을 수행함을 확인한다.",
+    "failureChecks": [
+      "지원하지 않는 대상과 필수 SDK 파일 누락은 구성에서 거절되는지 확인한다.",
+      "빌드 실행 파일과 설치 실행 파일을 혼동하지 않도록 검사 경로를 출력한다.",
+      "검사 복사본의 Runtime을 뺐을 때 로더 실패가 생기고 원복 후 실행되는지 확인한다."
+    ]
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek IMPORTED 모듈 초안 직접 검토·공식 CMake 속성 문서·실제 SDK 링크/설치/정책 대조",
+    "corrections": [
+      "대상 아키텍처와 호스트 감지 분리",
+      "잘못된 macOS 명시 아키텍처와 다른 SDK 루트 혼합 거절",
+      "헤더 검사와 ABI/로더/모델 검증의 범위 구분"
+    ]
+  },
+  "validation": [
+    "대상 선택 fixture·필수 파일/SDK 혼합 실패: OS별 네이티브 실행과 구분",
+    "새 누적 바인딩21CTest·추론2CTest, 실제 Runtime과 설치 정책621프레임 대조",
+    "임시 SDK/빌드 삭제 뒤 Linux 설치 이동 실행·필수 Runtime 누락 실패",
+    "root meta/ONNX 계약 실제 링크·유효/오류 모델·보상 실패7HTTP검사",
+    "다른 OS/ARM ABI 실행·제품 전체 배포·외부 ORT128byte LSan문제는 별도",
+    "root ONNX 활성 게임 Linux SDL/OpenGL 링크 성공; 실제 창 실행 아님"
+  ]
+}

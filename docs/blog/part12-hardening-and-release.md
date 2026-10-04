@@ -1414,7 +1414,7 @@ cmake -S . -B build-release \
 cmake --build build-release --config Release --target tetris
 ```
 
-`--target tetris` 는 `copy_assets`(ALL 타깃)를 돌리지 않는다. 번들 스크립트가 `Font/`·`Sounds/` 를 따로 복사하는 이유이고, 빌드 디렉터리에서 직접 실행할 때 폰트가 없어 보이는 이유이기도 하다.
+현재 `--target tetris`는 선행 자산 복사를 포함한다. 번들 스크립트는 배포할 별도 디렉터리에 실행 파일·자산·런타임 라이브러리를 모은다. 개발 빌드의 자산 준비와 배포 번들의 완결성 검사는 서로 다른 단계다.
 
 ### 10.2 클라이언트 번들 스크립트
 
@@ -1734,6 +1734,19 @@ bash -n scripts/release_linux.sh scripts/release_server_linux.sh \
 각 단계가 지키는 계약은 이렇다.
 
 완료 기준은 고정된 통과 개수가 아니라 pytest가 수집한 항목이 실패하지 않고, 선택 의존성이나 네이티브 모듈 부재로 생긴 skip의 사유가 의도와 일치하는 것이다. `-rs`로 사유를 확인하고, 기능을 켠 릴리스 검증에서는 해당 의존성을 설치해 skip을 실제 실행으로 바꾼다.
+
+CI의 서버 행렬은 `uv sync --dev` 환경에서 통신·계정·규칙을 검사한다. 학습용
+PyTorch·Gymnasium·ONNX는 선택 의존성이므로 이 환경에 없는 학습 검사는 건너뛴다.
+대신 `training-cpu` 작업이 CPU PyTorch와 학습·내보내기 의존성을 설치하고,
+같은 체크아웃에서 `tetris_py`와 C++ 대조 실행기를 새로 빌드한다.
+`scripts/check_training_ci.py`는 가져온 확장의 실제 경로와 필수 패키지를 확인한 뒤
+선택한 학습·패리티·내보내기 검사를 실행한다. 여기서는 skip도 실패로 취급한다.
+선택 기능을 설치하지 않은 서버 검사와 그 기능 자체의 검증을 구분하는 구성이다.
+
+학습 CI의 CPU PyTorch 버전은 명시된 검증 기준이다. Colab의 GPU 환경이나
+`uv.lock`의 모든 조합을 대신하지 않는다. 버전을 바꾸면 실제 수집·업데이트·저장·ONNX
+대조까지 다시 실행한다. C++ ONNX Runtime 서버 추론과 TLS 통합도 별도 실행 경로다.
+
 
 | 단계 | 무엇을 지키는가 |
 | --- | --- |

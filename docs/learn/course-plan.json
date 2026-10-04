@@ -3583,7 +3583,7 @@
         {
           "id": "unit-167",
           "title": "빌드 타깃: 클라이언트·relay·meta·학습",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3592,12 +3592,15 @@
           "lessonId": "lesson-167",
           "previous": "unit-166",
           "next": "unit-168",
-          "validation": []
+          "validation": [
+            "역할별 누적 빌드·실제 모델·계정 서비스·규칙 바이트 대조",
+            "현재 제품 프리셋·CMake 생성 그래프·자산 의존성 검사"
+          ]
         },
         {
           "id": "unit-168",
           "title": "외부 의존성: 선택 기능과 패키징",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3606,7 +3609,14 @@
           "lessonId": "lesson-168",
           "previous": "unit-167",
           "next": "unit-169",
-          "validation": []
+          "validation": [
+            "대상 선택 fixture·필수 파일/SDK 혼합 실패: OS별 네이티브 실행과 구분",
+            "새 누적 바인딩21CTest·추론2CTest, 실제 Runtime과 설치 정책621프레임 대조",
+            "임시 SDK/빌드 삭제 뒤 Linux 설치 이동 실행·필수 Runtime 누락 실패",
+            "root meta/ONNX 계약 실제 링크·유효/오류 모델·보상 실패7HTTP검사",
+            "다른 OS/ARM ABI 실행·제품 전체 배포·외부 ORT128byte LSan문제는 별도",
+            "root ONNX 활성 게임 Linux SDL/OpenGL 링크 성공; 실제 창 실행 아님"
+          ]
         },
         {
           "id": "unit-169",

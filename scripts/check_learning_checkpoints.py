@@ -154,6 +154,7 @@ def main():
             '164-bot-pacing': 'bot_pacing',
             '165-characters': 'characters',
             '166-policy-fallback': 'policy_fallback',
+            '167-build-targets': 'build_targets', '168-dependencies': 'dependencies',
         }
         if name in later_checks:
             script = ROOT / f'scripts/check_learning_{later_checks[name]}.py'

@@ -3704,7 +3704,7 @@ Start-Process build\Release\tetris.exe -ArgumentList "--host","7777"
 Start-Process build\Release\tetris.exe -ArgumentList "--connect","127.0.0.1:7777"
 ```
 
-`--target tetris` 대신 타깃을 지정하지 않은 것은 `copy_assets`(ALL 타깃)를 함께 돌려 `Font/` 와 `Sounds/` 를 빌드 디렉터리에 두기 위해서다. 저장소 루트에서 실행한다면 `--target tetris` 로도 된다.
+현재 저장소는 `tetris`가 자산 복사에 의존하므로 전체 빌드와 `--target tetris` 모두 같은 자산을 준비한다. 게임을 실행할 때는 그 자산 디렉터리가 보이는 작업 디렉터리를 사용한다.
 
 기대 결과:
 

@@ -9,8 +9,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-sim_mod = pytest.importorskip("sim")
 pytest.importorskip("gymnasium")
+try:
+    import sim as sim_mod
+except ImportError as exc:
+    # Missing optional extension is expected in the server-only job. A found
+    # extension that fails to load (ABI/dependency error) must fail collection.
+    cause = exc.__cause__
+    if isinstance(cause, ModuleNotFoundError) and cause.name == "tetris_py":
+        pytest.skip("build the optional tetris_py extension", allow_module_level=True)
+    raise
 
 from common.env_versus import (  # noqa: E402
     GreedyBCTSOpponent,

@@ -1,5 +1,5 @@
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from common.returns import gae_targets,normalize_advantages
 
 def example():

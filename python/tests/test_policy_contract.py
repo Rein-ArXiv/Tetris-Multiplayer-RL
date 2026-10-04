@@ -1,6 +1,6 @@
 """Policy axes, input metadata, gradients and graph compatibility."""
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from common import BOARD_ROWS as H, BOARD_COLS as W, NUM_PIECE_TYPES as K
 from common.models import TetrisPolicyNet, masked_log_softmax, masked_entropy
 

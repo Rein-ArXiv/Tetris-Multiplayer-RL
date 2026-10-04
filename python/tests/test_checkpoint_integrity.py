@@ -2,7 +2,7 @@
 from pathlib import Path
 from unittest.mock import patch
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from common.models import TetrisPolicyNet
 from common.checkpoint import save_checkpoint, load_checkpoint, CHECKPOINT_META_KEY
 

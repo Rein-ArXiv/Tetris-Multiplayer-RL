@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from common import BOARD_ROWS as H, BOARD_COLS as W, NUM_PIECE_TYPES as K, NUM_PLACEMENTS as A
 from train import dqn_tetris as dqn, muzero_tetris as muzero
 from train.rl_common import ReplayBuffer

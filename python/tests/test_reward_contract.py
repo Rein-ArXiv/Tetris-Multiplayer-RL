@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import numpy as np
 import pytest
+
+pytest.importorskip("torch")
 from common import BOARD_ROWS,BOARD_COLS
 from train.ppo_tetris import board_features,shaping_reward
 from train.rl_common import bcts_shaped_reward

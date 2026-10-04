@@ -1,3 +1,7 @@
+#if defined(_WIN32) && !defined(NOMINMAX)
+// OpenSSL may include Windows headers before httplib can set this guard.
+#define NOMINMAX
+#endif
 #include "system_trust.h"
 #include <openssl/ssl.h>
 #if defined(_WIN32) || defined(__APPLE__)

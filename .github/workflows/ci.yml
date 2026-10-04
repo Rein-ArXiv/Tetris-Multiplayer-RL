@@ -57,8 +57,10 @@ jobs:
           -DTETRIS_BUILD_WSS=ON
           -DTETRIS_ENABLE_HTTPS=ON
 
+      # vcpkg app-local steps copy shared DLLs into the same Release directory.
+      # Serialize Windows targets to avoid sharing violations between those steps.
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel ${{ runner.os == 'Windows' && '1' || '4' }}
 
       # 산출물 경로가 생성기마다 다르다. 단일 구성(Makefiles/Ninja)은 build/,
       # multi-config(Visual Studio)는 build/Release/ 다.
@@ -232,4 +234,4 @@ jobs:
       - name: Configure client
         run: cmake -S . -B build-client -DCMAKE_BUILD_TYPE=Release -DTETRIS_BUILD_GAME=ON -DTETRIS_BUILD_TEST=OFF -DTETRIS_BUILD_PY=OFF -DTETRIS_BUILD_WSS=ON -DTETRIS_ENABLE_HTTPS=ON
       - name: Compile client
-        run: cmake --build build-client --config Release --parallel 4
+        run: cmake --build build-client --config Release --parallel ${{ runner.os == 'Windows' && '1' || '4' }}

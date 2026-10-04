@@ -976,7 +976,8 @@ class _StatsReader:
     이유로 끊긴 것(레이트 초과·하드 상한·유휴)을 재려던 조건이 성립한 것으로
     오인한다. --log-level error 로 띄우면 이 줄들이 사라져 아무것도 판정할 수 없다.
 
-    구간을 자르는 기준은 전부 "받은 시각" 이다 — 기동 확인용 탐침 연결(_wait_listen)
+    상태·종료 구간은 "받은 시각"으로 자르고, 페어링은 수신 목록의 커서로 자른다.
+    시계 값이 같아도 커서 뒤의 새 페어링은 구분된다. 기동 확인용 탐침 연결(_wait_listen)
     도 종료 줄을 남기므로, 재려는 구간이 시작된 뒤에 도착한 줄만 봐야 그 잡음이
     안 섞인다.
     """
@@ -1103,9 +1104,15 @@ class _StatsReader:
                 return None
             time.sleep(0.02)
 
-    def wait_for_pairing_after(self, when: float, timeout: float = 10.0):
-        """페어링 줄에서 (ch->a 의 연결 번호, ch->b 의 연결 번호) 를 읽는다.
+    def pairing_cursor(self) -> int:
+        """다음 페어링을 기다릴 위치. 명령을 보내기 전에 캡처한다."""
+        with self._lock:
+            return len(self._pairings)
 
+    def wait_for_pairing_after(self, cursor: int, timeout: float = 10.0):
+        """커서 뒤 첫 페어링 줄의 (ch->a 연결 번호, ch->b 연결 번호)를 읽는다.
+
+        수신 시계는 연속 이벤트에 같은 값을 줄 수 있으므로 순번으로 구분한다.
         MATCH_FOUND 의 role 바이트가 1 이면 그 소켓이 ch->a, 2 면 ch->b 다
         (reactor_relay.cpp 의 start_match). 그래서 이 두 값과 role 을 맞추면 "내
         소켓이 릴레이의 몇 번 연결인가" 를 접속 순서 같은 추정 없이 확정할 수 있다.
@@ -1113,12 +1120,12 @@ class _StatsReader:
         deadline = time.monotonic() + timeout
         while True:
             with self._lock:
-                for ts, id_a, id_b in self._pairings:
-                    if ts > when:
-                        return id_a, id_b
+                if cursor < len(self._pairings):
+                    _, id_a, id_b = self._pairings[cursor]
+                    return id_a, id_b
             if time.monotonic() >= deadline:
                 raise AssertionError(
-                    "페어링 줄이 안 나왔다 — 두 클라이언트가 매칭되지 않았다:\n"
+                    "커서 뒤 페어링 줄을 관찰하지 못했다:\n"
                     + self.dump())
             time.sleep(0.02)
 
@@ -1523,7 +1530,7 @@ def _forwarding_pair(stats, port, lobby_burn: int = 0):
     """
     assert lobby_burn % len(_LOBBY_BURN_FRAME) == 0, (
         f"lobby_burn 은 {len(_LOBBY_BURN_FRAME)} 의 배수여야 태운 양이 정확해진다")
-    when = time.monotonic()
+    pairing_cursor = stats.pairing_cursor()
     a = socket.create_connection(("127.0.0.1", port), timeout=3.0)
     b = socket.create_connection(("127.0.0.1", port), timeout=3.0)
     try:
@@ -1541,7 +1548,7 @@ def _forwarding_pair(stats, port, lobby_burn: int = 0):
                 left -= n
         a.sendall(build_frame(MsgType.READY, b"\x01"))
         b.sendall(build_frame(MsgType.READY, b"\x01"))
-        id_a, id_b = stats.wait_for_pairing_after(when)
+        id_a, id_b = stats.wait_for_pairing_after(pairing_cursor)
     except BaseException:
         a.close()
         b.close()
@@ -2452,6 +2459,7 @@ def test_reactor_does_not_refill_a_paused_connections_bucket():
     a = b = None
     try:
         when = time.monotonic()
+        pairing_cursor = stats.pairing_cursor()
         # 허용치를 세는 기준. 버킷은 연결이 생기는 순간 만충이므로 여기서 잡는다.
         t0 = time.monotonic()
         a = socket.create_connection(("127.0.0.1", port), timeout=3.0)
@@ -2540,7 +2548,7 @@ def test_reactor_does_not_refill_a_paused_connections_bucket():
         while quiet.backlog() and time.monotonic() < deadline:
             quiet.pump()
             time.sleep(0.002)
-        conn_a, conn_b = stats.wait_for_pairing_after(when)   # make_channel(host, guest)
+        conn_a, conn_b = stats.wait_for_pairing_after(pairing_cursor)   # make_channel(host, guest)
 
         during = stats.samples_after(paused_at)
         assert len(during) >= 3 and all(s.get("tx", 0) > _RELAY_SEND_HIGH_WATER

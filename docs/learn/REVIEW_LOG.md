@@ -7148,3 +7148,10 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - 현재 제품 ROOT 빌드 out/ci-http-fix 전체 빌드와38CTest, 관련 실제 제품177pytest/37subtests 통과(module13-root-build.log, module13-root-ctest.log, module13-product-tests.log). out/ci-repair의 과거 snapshot과 구분한다.
 - 정적 release0dc17f28a8faad2f,허용목록/상대자산/해시/재현ZIP 통과(module13-site.log). 이 기록 시점 원격 CI/Pages는 단원 커밋·푸시 뒤 확인할 단계이며 성공을 선기록하지 않는다. 최종 원격 결과는 out/learning-jobs/module13-deployment-verification.json에 보관.
 - 최신 사용자 중지 조건: 이번 단원 main 커밋·푸시/원격Windows포함CI·Pages실자산 확인 후 goal paused. 전체 coverage 추가감사나 새 집필은 시작하지 않는다. :memory:.ses는 기존 미추적 파일로 제외한다.
+
+## 2026-10-04 — 단원 마감 원격 CI의 페어링 관찰 경계
+
+- main4431898 단원 커밋/푸시, Pages37235561503 성공. 실제 HTTPS release0dc17f28a8faad2f의 manifest와15자산 해시 일치·177본문 포함 확인. 제품 CI37235561549에서 Linux/macOS 서버·세 OS 클라이언트·CPU학습 성공. Windows 기본 서버 통합 검사는 이전 meta기동 실패 없이 통과했지만 리액터 단일루프의 백프레셔 검사1건 실패.
+- 실패 로그에는 실제 paired/forwarding과 양 연결 유지가 있는데 관찰 helper가 페어링을 못 찾았다. 수신 timestamp > 시작timestamp는 같은 시계 값의 새 이벤트를 놓칠 수 있다. 페어링 관찰만 명령 전 잠금 아래 캡처한 목록 커서로 전환하고, 실제 경과시간/레이트 판정은 그대로 유지했다. 서버 성공 로그와 검사 관찰 실패를 구분하도록 오류 문구도 교정했다. 원격 로그에 수신timestamp 자체는 없어 당시 동률을 직접 측정했다고 주장하지 않는다.
+- DeepSeek에 저장소 코드 없이 작은 회귀 명세만 전송(module13-pairing-events.jsonl,67230exit0,step_start/text). 초안의 없는 import·timeout=None 가정·반환형 오류를 고쳐 실제 parser/reader를 쓰는4검사 작성. 동일timestamp의 새 이벤트,기존/소비 이벤트 제외,reader thread 전달 통과. 실제 Linux 리액터 백프레셔 검사도 통과(module13-pairing-socket.log).
+- 변경된 현재 소스 뷰어 snapshot을 갱신하고 원격 최종 확인을 이어간다. 이 수정은 단원 마감 CI 범위이며 새 차시/추가coverage감사는 시작하지 않는다. 최종 성공 후 사용자 요청대로 paused.

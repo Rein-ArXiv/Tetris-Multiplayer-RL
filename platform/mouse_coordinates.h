@@ -16,7 +16,7 @@ inline int logical_mouse_axis(int coordinate, int offset, int extent, int logica
     std::int64_t result = numerator / extent;
     if (numerator < 0 && numerator % extent != 0) --result;
     return static_cast<int>(std::clamp(result,
-        static_cast<std::int64_t>(std::numeric_limits<int>::min()),
-        static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+        static_cast<std::int64_t>((std::numeric_limits<int>::min)()),
+        static_cast<std::int64_t>((std::numeric_limits<int>::max)())));
 }
 } // namespace platform_detail

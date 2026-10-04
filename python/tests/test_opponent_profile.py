@@ -199,7 +199,7 @@ def test_package_path_boundary_stays_strict(tmp_path,asset):
 
 def test_notebook_registration_uses_validated_encoder():
     root=Path(__file__).resolve().parents[2]
-    notebook=json.loads((root/'python/train/train_model_zoo_colab.ipynb').read_text())
+    notebook=json.loads((root/'python/train/train_model_zoo_colab.ipynb').read_text(encoding='utf-8'))
     cell=next(''.join(c['source']) for c in notebook['cells'] if 'profile_line = encode_profile(fields)' in ''.join(c['source']))
     assert cell.index('encode_profile(fields)')<cell.index('cfg.write_text')
     assert 'encoding=\'utf-8\'' in cell

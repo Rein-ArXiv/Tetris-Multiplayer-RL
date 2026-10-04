@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parents[2]
 
 def test_notebook_code_is_plain_checked_python():
     for file in ('setup_colab.ipynb','train_model_zoo_colab.ipynb'):
-        doc=json.loads((ROOT/'python/train'/file).read_text())
+        doc=json.loads((ROOT/'python/train'/file).read_text(encoding='utf-8'))
         code='\n'.join(''.join(c['source']) for c in doc['cells'] if c['cell_type']=='code')
         ast.parse(code)
         assert '!pip' not in code and '!rm' not in code and 'git\', \'pull' not in code
@@ -92,8 +92,12 @@ def test_failed_and_repeated_runs_are_not_success(tmp_path):
     assert not (outputs/'long').exists()
 
 
-def test_success_smoke_and_long_gate(tmp_path):
-    ready=receipt(tmp_path);outputs=tmp_path/'runs'
+def test_success_smoke_and_long_gate(tmp_path, monkeypatch):
+    ready=receipt(tmp_path/'한글 경로');outputs=tmp_path/'runs'
+    original_read_text = Path.read_text
+    def windows_read_text(path, encoding=None, errors=None):
+        return original_read_text(path, encoding=encoding or 'cp1252', errors=errors)
+    monkeypatch.setattr(Path, 'read_text', windows_read_text)
     def execute(command,*,cwd,log_path):
         # Test fixture for artifact admission; actual native/PPO runs are separate.
         directory=Path(log_path).parent

@@ -146,8 +146,8 @@ def run_experiment(ready, *, algo, run_name, preset, checkpoint_dir, smoke_run=N
     if preset == 'long':
         if smoke_run is None:
             raise ValueError('long preset requires a successful smoke run directory')
-        prior = json.loads((Path(smoke_run)/'manifest.json').read_text())
-        finish = json.loads((Path(smoke_run)/'result.json').read_text())
+        prior = json.loads((Path(smoke_run)/'manifest.json').read_text(encoding='utf-8'))
+        finish = json.loads((Path(smoke_run)/'result.json').read_text(encoding='utf-8'))
         if (prior['preset'] != 'smoke' or prior['algo'] != algo or finish['status'] != 'success'
                 or prior['preparation'] != ready):
             raise RuntimeError('smoke does not match this algorithm/preparation')

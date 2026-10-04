@@ -1776,7 +1776,8 @@ def test_reactor_closes_the_peer_that_never_drains():
     지목이 이 계약의 전부다. 멈춰 세워진 쪽을 대신 닫으면 "매치가 회수됐다" 는
     그대로 참이지만, 릴레이는 자기가 입을 막아 둔 정상 플레이어를 걷어낸 것이 된다.
     그래서 close 줄을 연결 번호까지 맞춰 본다 — 안 빼내는 쪽(B)이 상한 사유로,
-    멈춰 세워졌던 쪽(A)이 그 여파("상대 이탈")로.
+    멈춰 세워졌던 쪽(A)은 남은 송신을 배수한 뒤 종료되는지 확인한다.
+    이 비랭크 Forward 연결에는 별도 결과 프레임이 없으므로 실제 소켓 종료도 확인한다.
 
     B 는 여기서도 자기 유휴 데드라인을 살려 둔다. 안 그러면 만기(15초)가 상한(16초)
     보다 먼저 와서 B 가 그냥 유휴로 걷히고, 이 테스트는 상한을 하나도 재지 못한 채
@@ -1848,9 +1849,21 @@ def test_reactor_closes_the_peer_that_never_drains():
             f"상한에 걸려 닫힌 것이 정체를 만든 쪽(B=conn {conn_b})이 아니다: "
             f"{closes}. 멈춰 세워진 쪽을 닫으면 릴레이가 자기가 입을 막아 둔 정상 "
             "플레이어를 걷어낸 것이다:\n" + stats.dump())
-        assert by_conn.get(conn_a) == "상대 이탈", (
+        assert by_conn.get(conn_a) == "최종 통지 배수 완료", (
             f"멈춰 세워졌던 쪽(A=conn {conn_a})이 그 여파로 닫힌 것이 아니다: "
             f"{closes}. 지목이 뒤집혔거나 다른 기제가 먼저 걷어갔다:\n" + stats.dump())
+        # 로그만 남기고 연결이 살아 있는 회귀도 잡는다. A가 이미 보낸 미처리
+        # 입력이 남아 있으면 OS는 FIN 대신 RST로 종료를 알릴 수 있다.
+        deadline = time.monotonic() + 2.0
+        while True:
+            a.settimeout(max(0.001, deadline - time.monotonic()))
+            try:
+                chunk = a.recv(65536)
+            except ConnectionResetError:
+                break
+            if not chunk:
+                break
+            assert time.monotonic() < deadline, "A 연결이 배수 후에도 닫히지 않았다"
     finally:
         _shutdown(proc, (a, b))
 

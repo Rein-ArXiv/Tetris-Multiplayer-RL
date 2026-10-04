@@ -1,7 +1,14 @@
-#include "platform/mouse_coordinates.h"
+#include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
+// Model Windows header macros even on Linux; the shared helper must survive them.
+#define min(a, b) unexpected_windows_min_macro
+#define max(a, b) unexpected_windows_max_macro
+#include "platform/mouse_coordinates.h"
+#undef min
+#undef max
 #define CHECK(...) do{if(!(__VA_ARGS__)){std::fprintf(stderr,"mouse line %d\n",__LINE__);std::exit(1);}}while(false)
 int main(){
     using platform_detail::logical_mouse_axis;

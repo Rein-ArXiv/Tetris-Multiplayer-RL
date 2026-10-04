@@ -1,0 +1,451 @@
+{
+  "id": "lesson-150",
+  "title": "관측: 보드 상태를 텐서로",
+  "shortTitle": "정보 선택·축·범주·dtype·메모리 공유·관측 대조",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: Python에서 Round를 진행하고 값 복사를 얻지만 정책이 읽을 관측 규약은 없습니다.",
+  "finish": "완료: 스키마에 따라 점유맵과 종류 벡터를 만들고 CPU 텐서·배치·숨긴 상태의 영향을 검사합니다.",
+  "objective": "관측과 전체 상태를 구별하고 형상·종류 순서·자료형·메모리 관계를 구현하며 실제 두 언어의 관측을 대조한다.",
+  "prerequisites": [
+    "Python 바인딩·스냅샷과 clone",
+    "입력 틱·가비지·정규 상태 비교",
+    "배열 인덱스와 값 복사"
+  ],
+  "recap": {
+    "points": [
+      "Python은 같은 C++ 규칙의 한 틱을 호출하고 형식 변환을 담당한다.",
+      "값 복사와 내부 참조는 과거 관측 보존과 수명에 서로 다른 계약을 만든다."
+    ],
+    "bridge": "규칙에서 읽은 값을 정책이 소비할 배열로 바꾸며 정보 선택과 저장소 관계를 명시합니다."
+  },
+  "sections": [
+    {
+      "title": "상태에서 무엇을 보여 줄지 정한다",
+      "body": "시뮬레이터에는 보드, 활성 피스, 예고, 난수 상태, 중력 카운터가 있습니다. 정책이 행동을 선택할 때 읽는 값은 그중 선택한 **관측(observation)**입니다. 전체 상태를 s, 변환 함수를 f라고 하면 관측은 `o = f(s)`입니다.\n\n이번에는 잠긴 셀의 점유맵과 현재·첫 번째 다음 피스 종류를 만듭니다. 화면 픽셀을 캡처하지 않고 규칙 객체에서 직접 읽습니다. 색, 그림자, 파티클을 규칙 정보와 섞지 않을 수 있고, 창이 없는 환경에서도 같은 데이터를 얻습니다.\n\n일부 정보만 읽으면 서로 다른 상태가 같은 관측을 만들 수 있습니다. 어느 정보가 생략되는지까지 포함해서 입력 계약을 작성해야 모델이 실제로 무엇을 알 수 있는지 설명할 수 있습니다.",
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def build_observation",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "같은 관측과 같은 상태는 다르다",
+      "body": "낙하 간격이 2틱인 실습 조건에서 같은 시드로 만든 두 Session을 생각합니다. 한쪽만 중립 입력을 한 번 진행하면 아직 피스가 내려가지 않아 잠긴 보드와 피스 종류가 같습니다. 하지만 중력 카운터가 달라 정규 상태 바이트는 다릅니다.\n\n**Markov 성질**은 현재 상태와 행동을 알면 다음 상태의 분포를 설명할 때 과거 이력에 추가로 의존하지 않는다는 성질입니다. 정책 입력을 만들었다는 이유만으로 그 관측에 이 성질이 있다고 가정할 수는 없습니다.\n\n현재 게임에서는 대기 가비지가 다른 두 판이 같은 관측을 만들 수 있습니다. 같은 배치를 적용하면 한쪽에만 가비지가 들어와 다음 보드가 달라집니다. 시간, 예고의 나머지, 난수 등도 생략되어 있습니다. 매 틱 입력을 선택할지 배치를 선택할지에 따라 필요한 정보와 결정 시점을 검토합니다.\n\n이 차시에서는 현재 정책과 비교할 수 있는 작은 관측 규약을 구현하고 그 한계를 드러냅니다. 필드를 추가해 관측을 풍부하게 만들 때는 모델과 모든 소비자의 입력 계약을 함께 바꿉니다.",
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def build_observation",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "info와 보상을 보면 숨긴 정보를 알 수 있지 않을까?",
+          "body": "학습 로그나 환경의 info에 넣은 정보가 정책 함수로 자동 전달되지는 않습니다. 행동 선택에 사용할 정보라면 입력이나 기억 상태로 연결해야 합니다. 보상은 행동 이후의 평가 신호이며 현재 입력의 누락을 자동 복원하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "하나의 소유자 호출에서 스냅샷을 만든다",
+      "body": "Session.snapshot은 보드와 현재·다음 종류를 값으로 반환합니다. 보드를 읽고 게임을 진행한 뒤 종류를 읽으면 서로 다른 시점의 값을 섞을 수 있으므로, 선택한 필드를 한 메서드 안에서 모읍니다.\n\n이 Session은 한 소유 스레드에서 접근하고 Python 바인딩 호출도 GIL을 유지합니다. 따라서 여기서 한 호출로 모은다는 설명은 그 접근 계약 아래에서 성립합니다. 원자적 CPU 명령이나 여러 스레드에 대한 자동 잠금이라는 뜻은 아닙니다.\n\n다음 피스가 없으면 정상 관측을 만들 수 없으므로 예외를 전달합니다. 종료한 판에서도 큐의 계약은 유지되며 종류 정보는 읽을 수 있습니다. 종료 여부는 Session.finished()로 확인합니다. 관측 내용만 보고 다음 행동을 허용할지 판단하지 않습니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 관측 스냅샷",
+          "language": "cpp",
+          "text": "    struct Snapshot {\n        std::vector<std::vector<int>> board;\n        int current_id;\n        int next_id;\n    };\n    Snapshot snapshot() const {\n        const auto next = round_.next().peek();\n        if (!next) throw std::runtime_error(\"observation: missing next piece\");\n        return {grid(), static_cast<int>(round_.kind()), static_cast<int>(*next)};\n    }"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"grid\"",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "숫자의 개수보다 의미와 순서를 먼저 고정한다",
+      "body": "관측의 **스키마(schema)**는 이름, 의미, 형상, 자료형과 범주 순서를 묶은 계약입니다. 보드 행·열은 Grid에서, 피스 목록은 카탈로그에서 얻습니다. Python에 종류 개수를 다시 적는 대신 바인딩의 observation_schema()를 읽습니다.\n\n카탈로그 ID는 피스를 식별하고, 벡터의 인덱스는 모델이 해석할 위치입니다. 둘은 같은 개념이 아닙니다. 예를 들어 실습용 목록 `(7, 42)`에서 종류 42는 두 번째 범주입니다. `id - 1`로 배열에 넣을 수 없습니다. `order_of`가 ID를 카탈로그 순서에 연결합니다.\n\n목록 순서를 바꾸면 길이가 같아도 의미가 바뀝니다. 모델이 첫 칸을 어떤 피스로 배웠는지가 달라지기 때문입니다. 이 체크포인트의 schema version은 의미를 구별하는 번호이며, 카탈로그 변화가 자동으로 새 모델 호환성을 만드는 장치는 아닙니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 카탈로그 순서",
+          "language": "cpp",
+          "text": "    static std::vector<int> piece_ids() {\n        std::vector<int> result;\n        for (const auto& entry : study_catalog::definitions)\n            result.push_back(static_cast<int>(entry.kind));\n        return result;\n    }"
+        },
+        {
+          "label": "bindings/study_py.cpp — 스키마 공개",
+          "language": "cpp",
+          "text": "    m.def(\"observation_schema\", [] {\n        py::dict schema;\n        schema[\"version\"] = 1;\n        schema[\"rows\"] = study_grid::Grid::kRows;\n        schema[\"cols\"] = study_grid::Grid::kColumns;\n        schema[\"piece_ids\"] = Session::piece_ids();\n        return schema;\n    });"
+        }
+      ],
+      "reference": {
+        "path": "python/common/__init__.py",
+        "symbol": "NUM_PIECE_TYPES",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "텐서의 축마다 이름을 붙인다",
+      "body": "여기서 **텐서(tensor)**는 수치 계산에 사용하는 다차원 배열입니다. shape는 각 축의 길이이고 rank는 축의 수입니다. 한 게임의 보드는 `(채널, 행, 열)`인 CHW로 만듭니다. 점유 여부라는 한 종류의 특징을 담으므로 이 스키마에는 점유 채널 하나가 있습니다.\n\n같은 표본 여러 개를 묶는 축이 **배치(batch)**입니다. 한 게임의 채널 축과 여러 게임의 배치 축을 구분합니다. C=채널 수, H=행 수, W=열 수, K=피스 어휘 크기, N=표본 수라고 쓰면 계약은 다음과 같습니다.\n\n| 필드 | 한 표본 | 배치 | 의미 |\n| --- | --- | --- | --- |\n| board | (C,H,W) | (N,C,H,W) | 잠긴 셀 점유 |\n| current | (K,) | (N,K) | 현재 종류의 one-hot |\n| next | (K,) | (N,K) | 첫 예고 종류의 one-hot |\n\n배치 축의 길이는 환경 개수, 모아 둔 표본 개수 등 호출 목적에 따라 정합니다. 추론에서도 배치 축이 존재하며 표본 하나를 묶어 호출할 수 있습니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "행 우선 순서와 전치를 작은 보드에서 확인한다",
+      "body": "실습 예제로 2행 3열 보드 `[[0,1,0],[1,0,1]]`을 사용합니다. 행 우선으로 펴면 첫 행이 먼저 와서 `[0,1,0,1,0,1]`이 됩니다. C++에서는 `(r,c)`의 위치가 `r * W + c`입니다. 채널을 추가해도 이 공간 순서는 유지되어야 합니다.\n\nreshape는 저장 순서를 주어진 형상으로 다시 해석합니다. `(2,3)`을 `(3,2)`로 reshape하는 것은 행과 열의 의미를 맞바꾸는 전치와 다릅니다. 전치는 축의 대응을 바꾸며 NumPy에서는 stride만 바뀐 뷰가 될 수도 있습니다.\n\n**stride**는 특정 축에서 인덱스를 하나 늘릴 때 메모리 주소가 얼마나 이동하는지 나타냅니다. C-contiguous 배열은 행 우선으로 연속한 배치입니다. 소비자가 연속 메모리를 요구하면 contiguity도 확인합니다. 형상만 같은 두 배열이 같은 셀 의미를 담는다고 단정하지 않습니다.",
+      "reference": {
+        "path": "bot/placement.cpp",
+        "symbol": "void observe",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "점유맵으로 바꿀 때 값 검사를 먼저 한다",
+      "body": "누적 Round의 Grid는 잠긴 셀을 빈칸/채워짐으로 저장합니다. encode는 원래 배열의 shape와 수치 종류를 검사하고 유한한 이진 값인지 확인합니다. 그 뒤 새 float32 배열로 복사하고 앞에 채널 축을 붙입니다.\n\n`dtype`는 원소 하나의 수치 표현입니다. 모델 입력 규약에 맞춰 float32를 선택해도 모든 실수가 정확히 표현되는 것은 아닙니다. 0과 1은 정확히 표현되지만 그 근처의 다른 값은 변환 중 같은 값으로 반올림될 수 있습니다.\n\n예를 들어 검사용 값 `1 + 10⁻¹⁰`은 float32로 먼저 바꾸면 1이 될 수 있습니다. 그 후 이진 검사를 하면 잘못된 입력을 놓칩니다. 따라서 원래 값에서 검사한 뒤 변환합니다. NaN·무한대·복소수·문자열도 정상 점유값으로 취급하지 않습니다.\n\n현재 SimGame의 그리드는 피스의 색 ID를 저장하므로 현재 관측은 그 값을 점유 여부로 투영합니다. 이 학습 체크포인트의 이진 보드 검사를 현재 색 ID 그리드에 그대로 적용하면 안 됩니다.",
+      "codes": [
+        {
+          "label": "python/observation.py — 변환 전에 검사",
+          "language": "python",
+          "text": "    raw = np.asarray(snapshot[\"board\"])\n    if raw.shape != (rows, cols):\n        raise ValueError(\"board must have shape (rows, cols)\")\n    if raw.dtype.kind not in \"biuf\" or not np.all(np.isfinite(raw)):\n        raise ValueError(\"board must contain finite real numbers\")\n    if not np.all((raw == 0) | (raw == 1)):\n        raise ValueError(\"board cells must be binary\")\n    board = np.array(raw, dtype=np.float32, order=\"C\", copy=True)[None, :, :]"
+        }
+      ],
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def build_observation",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "종류 ID를 one-hot으로 바꾼다",
+      "body": "종류를 정수 하나로 입력하면 숫자의 크기나 차이가 의미 있는 것처럼 모델에 전달됩니다. 이 식별자에는 “42가 7보다 여섯 배 크다”는 의미가 없습니다. **one-hot**은 해당 범주의 자리만 1이고 다른 자리는 0인 벡터로 나타냅니다.\n\n입력 목록의 길이 K로 벡터를 할당하고 ID를 찾은 인덱스에 1을 씁니다. 중복 ID가 있으면 ID와 인덱스의 대응이 모호해지므로 목록을 거절합니다. 목록 밖 종류도 정상 범주로 만들지 않습니다.\n\n인덱스 범위는 대입 전에 확인합니다. Python/NumPy의 음수 인덱스는 뒤에서 세는 의미가 있으므로, -1을 검사하지 않고 쓰면 마지막 종류로 잘못 표현할 수 있습니다. 현재 코드의 `_piece_one_hot`은 범위 밖 ID를 영벡터로 만드는 기존 동작을 유지합니다. 학습 실습은 오류를 드러내기 위해 거절하는 계약을 선택했습니다.",
+      "codes": [
+        {
+          "label": "python/observation.py — one-hot",
+          "language": "python",
+          "text": "def one_hot(order, size):\n    order, size = integer(order), integer(size)\n    if not 0 <= order < size:\n        raise ValueError(\"one-hot index outside vocabulary\")\n    vec = np.zeros(size, dtype=np.float32)\n    vec[order] = 1.0\n    return vec"
+        }
+      ],
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def _piece_one_hot",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "복사한 원본과 공유하는 중간 저장소를 구별한다",
+      "body": "배열 경로를 소유권으로 읽어 봅니다. Session.snapshot의 list는 C++ Grid와 독립입니다. encode는 새 NumPy float32 저장소를 만들고, `torch.from_numpy`는 그 NumPy 저장소를 공유하는 CPU 텐서를 만듭니다.\n\n따라서 텐서의 원소를 고치면 중간 NumPy 배열도 바뀌지만 C++ 게임은 바뀌지 않습니다. “관측은 복사했다”와 “배열과 텐서는 공유한다”가 동시에 성립합니다. 무엇과 무엇의 관계인지 지정해야 합니다.\n\n텐서가 배열 저장소의 수명을 유지하므로 배열의 Python 변수 이름을 삭제해도 텐서는 데이터를 사용할 수 있습니다. 별도로 수정할 복사본이 필요하면 텐서의 clone()을 사용합니다. 여러 관측 호출이 하나의 전역 배열을 재사용하면 과거 관측이 오염될 수 있으므로 encode는 매번 새 저장소를 만듭니다.",
+      "codes": [
+        {
+          "label": "python/observation.py — 텐서 연결",
+          "language": "python",
+          "text": "def to_tensors(arrays):\n    \"\"\"CPU tensors share these owned NumPy arrays; no copy and no GPU upload.\"\"\"\n    import torch\n    return {k: torch.from_numpy(v) for k, v in arrays.items()}"
+        }
+      ],
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def build_observation",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "공유 메모리의 공식 계약",
+          "body": "[torch.from_numpy](https://docs.pytorch.org/docs/stable/generated/torch.from_numpy.html)는 CPU 배열과 텐서의 저장소 공유를 설명합니다. 함수 이름에 from이 붙었다는 이유만으로 깊은 복사를 예상하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "배치를 쌓아도 채널의 의미는 유지한다",
+      "body": "`stack_batch`는 encode가 만든 같은 스키마의 관측들을 받습니다. 각 필드에 `np.stack(..., axis=0)`을 적용하면 새 배치 축이 앞에 생깁니다. 공간 배열의 원소 순서를 그대로 두고 표본별 묶음을 추가합니다.\n\n실습의 2행 3열 보드 두 개를 쌓으면 board는 `(2,1,2,3)`입니다. 앞의 2는 표본 수이고 뒤의 2는 행 수입니다. 숫자가 같아도 축의 역할은 다릅니다. 기존 채널 축을 따라 concatenate하면 이 계약과 다른 형상이 됩니다.\n\n빈 배치에는 추론할 shape 근거가 없으므로 거절합니다. 필드 집합·dtype가 다른 자료도 거절하며 shape가 다른 배열은 stack이 거절합니다. 스키마가 같은지 확인할 책임에는 종류 순서도 포함됩니다. 길이가 같다는 이유만으로 다른 어휘 순서의 관측을 섞지 않습니다.\n\nstack의 새 배열은 입력 관측과 독립입니다. 같은 관측 객체를 두 번 쌓아도 한 배치 행을 수정했을 때 다른 행까지 바뀌지 않는지 실습에서 확인합니다.",
+      "codes": [
+        {
+          "label": "python/observation.py — 배치 축 추가",
+          "language": "python",
+          "text": "def stack_batch(observations):\n    \"\"\"Batch encode() outputs with the same schema; input arrays remain independent.\"\"\"\n    obs = list(observations)\n    if not obs or any(set(o) != set(FIELDS) for o in obs):\n        raise ValueError(\"batch must contain observations with the schema keys\")\n    if any(o[k].dtype != np.float32 for o in obs for k in FIELDS):\n        raise ValueError(\"batch inputs must be float32\")\n    return {k: np.ascontiguousarray(np.stack([o[k] for o in obs], axis=0)) for k in FIELDS}"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "def forward",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "축을 추가하는 연산과 이어 붙이는 연산",
+          "body": "[NumPy stack](https://numpy.org/doc/stable/reference/generated/numpy.stack.html)은 새 축을 만듭니다. concatenate는 존재하는 축을 따라 이어 붙이므로 결과를 소비할 축 계약에 맞춰 선택합니다."
+        }
+      ]
+    },
+    {
+      "title": "CPU 텐서를 만든 것과 GPU 계산은 다르다",
+      "body": "to_tensors는 함수 안에서 torch를 가져옵니다. NumPy 관측을 만드는 코드와 PyTorch 텐서가 필요한 호출의 의존성을 나누기 위해서입니다. 관측 생성만 확인할 때는 모델이나 GPU가 필요하지 않습니다.\n\n`torch.from_numpy`로 만든 텐서는 CPU에 있습니다. GPU에서 모델을 실행하려면 장치로 이동시키는 호출과 그 장치의 모델이 필요합니다. 그 이동은 CPU 배열과의 저장소 공유와 별개의 계약입니다. 출력의 dtype, device, shape를 눈으로 확인하는 이유도 이 경계를 구분하기 위해서입니다.\n\n이 실습은 CPU 텐서까지 만듭니다. 학습을 돌리지 않으므로 손실 함수나 optimizer는 필요하지 않습니다. 관측이 올바르다는 검사와 학습된 정책이 좋은 행동을 한다는 평가는 별도로 다룹니다.",
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def build_observation",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "순수 변환과 실제 게임 연결을 함께 읽는다",
+      "body": "observation.py의 encode는 값 스냅샷과 스키마를 받아 배열을 만듭니다. 작은 비대칭 보드와 불연속 ID 목록으로 독립 실행할 수 있습니다. observe는 Session에서 스냅샷을 읽고 그 순수 변환에 전달하는 연결 함수입니다.\n\n순수 변환 검사에서는 축이 뒤집히거나 알 수 없는 ID를 정상 범주로 처리하는 오류를 찾습니다. 실제 Session 검사는 생성·회전·고정·종료를 거치며 스냅샷의 의미가 유지되는지 확인합니다. 둘 중 하나만 통과하면 전체 연결을 검증했다고 할 수 없습니다.\n\n기준 파일은 아래에서 펼쳐 볼 수 있습니다. 바인딩에 추가한 것은 값 스냅샷과 스키마 조회이며, 상태 전이 함수는 유지합니다.",
+      "codes": [
+        {
+          "label": "python/observation.py",
+          "language": "python",
+          "file": "checkpoints/150-observation/python/observation.py",
+          "collapsed": true
+        },
+        {
+          "label": "bindings/session.h",
+          "language": "cpp",
+          "file": "checkpoints/150-observation/bindings/session.h",
+          "collapsed": true
+        },
+        {
+          "label": "bindings/study_py.cpp",
+          "language": "cpp",
+          "file": "checkpoints/150-observation/bindings/study_py.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"current_block_id\"",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "작은 관측 실험을 실행한다",
+      "body": "아래 명령은 설치된 CPython 3.12로 새 가상환경을 만들고 pybind11·NumPy·PyTorch 2.8 실습 조합을 설치합니다. GPU용 패키지가 없어도 이 실습을 실행할 수 있습니다. CMake에는 같은 Python 실행파일과 pybind11 경로를 지정합니다.\n\n다음 명령은 저장소 루트의 Linux POSIX 셸 예입니다. macOS에서는 PyTorch 설치 줄의 `--index-url`을 빼고 `pip install torch==2.8.0`을 사용합니다. Windows는 CPU 인덱스를 사용하며 가상환경 생성은 `py -3.12 -m venv`처럼 선택한 인터프리터로 실행합니다. 다른 셸에서는 변수·줄바꿈 문법을 맞추고 Windows의 다중 구성 빌드에도 --config Release를 전달합니다. 가상환경 Python은 POSIX의 bin/python, Windows의 Scripts/python.exe 경로에 있습니다. 실제 빌드한 확장 파일의 디렉터리를 --module-dir에 줍니다.\n\n실행 결과에서 같은 관측과 다른 전체 상태가 함께 True인지 확인합니다. 이어서 board/current/next의 형상, float32, cpu, 연속 배치를 확인합니다. 텐서를 수정한 뒤 NumPy 배치에는 보이지만 원래 관측과 게임에는 반영되지 않아야 합니다.",
+      "codes": [
+        {
+          "label": "설치·빌드·실행",
+          "language": "sh",
+          "text": "# CPython 3.12가 설치되어 있다는 전제의 Linux 예다.\npython3.12 -m venv /tmp/study-observation-env\nSTUDY_PYTHON=/tmp/study-observation-env/bin/python\n$STUDY_PYTHON -m pip install pybind11==3.0.1 numpy\n$STUDY_PYTHON -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu\nSTUDY_PYBIND=$($STUDY_PYTHON -m pybind11 --cmakedir)\ncmake -S docs/learn/checkpoints/150-observation/bindings -B out/study-150 \\\n  -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=\"$STUDY_PYTHON\" \\\n  -Dpybind11_DIR=\"$STUDY_PYBIND\"\ncmake --build out/study-150 --config Release -j2\nctest --test-dir out/study-150 -C Release --output-on-failure\n$STUDY_PYTHON docs/learn/checkpoints/150-observation/python/observation_demo.py \\\n  --module-dir out/study-150/python/Release"
+        },
+        {
+          "label": "python/observation_demo.py",
+          "language": "python",
+          "file": "checkpoints/150-observation/python/observation_demo.py",
+          "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "OS별 패키지 설치 조건",
+          "body": "[PyTorch 버전별 공식 설치 안내](https://pytorch.org/get-started/previous-versions/#v280)에서 선택한 OS·Python·CPU/GPU 조합을 확인합니다. 이 실습은 텐서 생성만 하므로 torchvision과 torchaudio는 사용하지 않습니다. 새 Python 버전에서 예전 wheel이 없으면 임의로 바이너리 이름을 바꾸지 말고 지원되는 조합으로 환경을 만듭니다."
+        }
+      ]
+    },
+    {
+      "title": "잘못된 배열이 정상 입력으로 바뀌는 순간을 검사한다",
+      "body": "관측 계약 검사는 예쁘게 생긴 빈 보드 하나에만 의존하지 않습니다. 비대칭 보드로 행·열을 구별하고, 불연속 종류 ID로 인덱스 계산을 확인하며, 범위 밖 ID·중복 목록·비유한 수·잘못된 shape를 거절합니다. float32에서 0이나 1로 반올림되는 잘못된 값도 포함합니다.\n\nNumPy와 텐서의 공유 관계는 한쪽에 값을 써서 다른 쪽에서 읽는 방식으로 검사합니다. 입력 list·원래 관측·C++ 상태가 그대로인지도 확인합니다. 객체의 변수 이름을 지운 뒤 남은 텐서를 읽는 검사는 수명 관계를 확인합니다.\n\n같은 관측이 다른 전체 상태에서 나오는 예도 실패가 아니라 명시한 투영의 성질로 검사합니다. 어떤 불일치는 버그이고 어떤 불일치는 의도한 정보 생략인지 계약을 기준으로 구별합니다.",
+      "codes": [
+        {
+          "label": "tests/observation_contract.py",
+          "language": "python",
+          "file": "checkpoints/150-observation/tests/observation_contract.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/tests/test_observation_parity.py",
+        "symbol": "def test_hidden_garbage_changes_state_without_changing_features",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "현재 Python과 C++의 관측 원소를 직접 비교한다",
+      "body": "현재 게임에서는 Python build_observation과 C++ bot::observe가 서로 다른 언어의 변환 코드입니다. 한쪽에서만 필터 조건이나 인덱스를 바꾸면 학습·추론 입력이 달라집니다. 같은 문장을 두 파일에 주석으로 쓰는 것만으로는 이 차이를 막을 수 없습니다.\n\nobservation_dump는 실제 SimGame을 진행시키고 실제 bot::observe의 결과를 출력합니다. Python 검사는 같은 시드·입력 마스크·가비지 요청을 새 네이티브 모듈에 적용합니다. 진행한 상태 해시를 먼저 대조한 뒤 모든 관측 원소, dtype, 축 크기, 연속 배치를 비교합니다. 잠긴 셀이 생기고 게임이 종료되는 경로도 포함합니다.\n\n현재 Python 변환기는 모델 스키마와 다른 보드 shape를 ValueError로 거절합니다. C++에서는 schema의 행·열과 SimGrid 크기가 어긋나면 static_assert가 컴파일을 막습니다. 배열 접근 범위와 모델 입력 크기가 조용히 갈라지지 않게 하는 경계입니다.\n\n이 비교가 확인하는 것은 선택한 관측 규약의 양쪽 구현입니다. ONNX 모델의 입력 이름·축 계약과 실제 추론, 정책의 성능 평가는 별도의 검증 대상입니다.",
+      "reference": {
+        "path": "bot/placement.cpp",
+        "symbol": "void observe",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    },
+    {
+      "title": "유지할 계약과 바꿀 수 있는 설계를 분리한다",
+      "body": "유지할 핵심은 규칙 상태에서 입력을 만들고, 이름·종류 순서·축·dtype·소유권을 함께 관리하며, 모든 소비자가 같은 의미를 읽게 하는 것입니다. 보드 크기와 피스 목록은 해당 선언에서 가져옵니다.\n\n정보 선택은 정책의 설계입니다. 활성 피스를 별도 공간 채널에 놓거나, 예고를 더 읽거나, 대기 가비지·시간을 별도 수치 입력으로 추가할 수 있습니다. 이는 단순 배열 크기 수정이 아니라 모델이 받는 정보의 변경이므로 스키마와 학습·배포 계약을 함께 관리합니다.\n\n잠긴 보드, 현재 종류, 첫 예고라는 지금의 관측을 그 자체로 완전한 상태라고 부르지 않습니다. 무엇을 보여 주고 무엇을 생략했는지 설명할 수 있을 때, 행동과 보상 설계의 전제도 명확해집니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "ARCH_VERSION",
+        "invariant": "게임 상태에서 정책 입력을 선택하며 필드 의미·종류 순서·축·dtype·복사 관계를 함께 계약으로 관리한다. 두 언어의 실제 원소를 대조한다.",
+        "mayDiffer": "학습 schema는 누적 Round의 binary grid와 카탈로그 순서를 사용한다. 현재 SimGame은 색 ID 그리드에서 점유맵을 만들고 설정의 ID-minus-one 순서와 알려지지 않은 ID의 영벡터를 유지한다. 학습 실습의 종류 오류는 거절한다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "150-1",
+      "question": "실습의 2행 3열 점유맵 한 개를 (1,2,3)으로 만든 뒤 두 표본을 stack(axis=0)했습니다. 각 축의 의미는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "채널·표본·열·행"
+        },
+        {
+          "id": "b",
+          "text": "표본·채널·행·열"
+        },
+        {
+          "id": "c",
+          "text": "행·열·표본·채널"
+        },
+        {
+          "id": "d",
+          "text": "표본·행·열"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "표본·채널·행·열",
+      "explanation": "새 배치 축이 앞에 추가되어 (2,1,2,3)입니다. 같은 숫자 2가 표본 수와 행 수에 각각 나타나므로 크기뿐 아니라 축 이름을 구분해야 합니다."
+    },
+    {
+      "id": "150-2",
+      "question": "목록 (7,42)에 대한 one-hot 입력에서 종류 42의 표현은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "[42,0]"
+        },
+        {
+          "id": "b",
+          "text": "[1,0]"
+        },
+        {
+          "id": "c",
+          "text": "[0,1]"
+        },
+        {
+          "id": "d",
+          "text": "[0,0]"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "[0,1]",
+      "explanation": "카탈로그 순서에서 42는 두 번째 범주입니다. ID는 배열 인덱스가 아니므로 id-1을 그대로 쓰지 않습니다."
+    },
+    {
+      "id": "150-3",
+      "question": "새 NumPy 관측 배열을 torch.from_numpy로 연결한 뒤 텐서 원소를 수정했습니다. 이 실습에서 예상되는 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "NumPy 배열도 바뀌고 C++ 게임은 유지된다"
+        },
+        {
+          "id": "b",
+          "text": "C++ 게임과 모든 과거 관측이 바뀐다"
+        },
+        {
+          "id": "c",
+          "text": "NumPy와 C++ 모두 자동으로 읽기 전용이 된다"
+        },
+        {
+          "id": "d",
+          "text": "CPU 배열이 GPU로 자동 이동한다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "NumPy 배열도 바뀌고 C++ 게임은 유지된다",
+      "explanation": "텐서와 중간 NumPy 배열은 공유하지만 그 배열은 C++ 상태에서 복사해 만든 것입니다. 공유 관계의 대상을 구별해야 합니다."
+    },
+    {
+      "id": "150-4",
+      "question": "같은 보드·현재 종류·첫 예고를 가진 두 판에서 대기 가비지만 다릅니다. 같은 배치 뒤 보드가 달라졌습니다. 적절한 해석은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "one-hot 길이를 늘리면 항상 해결된다"
+        },
+        {
+          "id": "b",
+          "text": "결정론 규칙은 서로 다른 결과를 낼 수 없다"
+        },
+        {
+          "id": "c",
+          "text": "원래 C++ 상태가 같았는데 랜덤 오류가 났다"
+        },
+        {
+          "id": "d",
+          "text": "관측에서 생략한 상태가 전이에 영향을 주었다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "관측에서 생략한 상태가 전이에 영향을 주었다",
+      "explanation": "관측은 전체 상태의 일부입니다. 입력과 관측이 같아도 숨긴 상태가 다르면 결과가 달라질 수 있으므로 완전한 Markov 상태라고 단정할 수 없습니다."
+    },
+    {
+      "id": "150-5",
+      "question": "이진 값 검사를 float32 변환보다 먼저 하는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "float32는 0을 표현하지 못해서"
+        },
+        {
+          "id": "b",
+          "text": "형 변환이 모든 잘못된 값을 예외로 바꿔서"
+        },
+        {
+          "id": "c",
+          "text": "0·1 근처의 잘못된 값이 변환 중 정상 값으로 반올림될 수 있어서"
+        },
+        {
+          "id": "d",
+          "text": "NumPy는 배열 shape를 읽을 수 없어서"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "0·1 근처의 잘못된 값이 변환 중 정상 값으로 반올림될 수 있어서",
+      "explanation": "변환이 정보를 잃은 뒤 검사하면 원래 값의 오류를 놓칠 수 있습니다. 원래 배열의 유한성·이진 조건을 검사한 뒤 모델 dtype으로 바꿉니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "카탈로그 스키마와 한 호출의 값 스냅샷을 연결한다.",
+      "비대칭 보드·불연속 ID로 축과 one-hot 대응을 확인한다.",
+      "배치·CPU 텐서를 만들고 저장소 공유와 숨긴 상태 사례를 실행한다."
+    ],
+    "failureChecks": [
+      "shape·중복/미등록 ID·비유한 값·형 변환 전 오류를 거절하는지 확인한다.",
+      "관측 수정과 게임 진행이 다른 스냅샷을 바꾸지 않는지 확인한다.",
+      "현재 C++와 Python에 같은 입력열을 주고 원소별 관측이 일치하는지 확인한다."
+    ],
+    "expected": "선택한 정보를 일관된 CPU 텐서로 표현하고, 스키마 변경과 부분 관측의 영향을 설명한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek bounded NumPy 초안과 문제 후보를 검수, 실제 Round/NumPy/PyTorch·현행 SimGame/bot::observe 비교",
+    "corrections": [
+      "float32 변환 뒤 검사하던 초안을 원래 값 검사 후 변환으로 교정",
+      "ID 타입/중복/음수 인덱스/배치 키·dtype 확인 보강",
+      "관측이 완전한 상태이거나 info가 정책 입력을 자동 보완한다는 오개념 제거",
+      "현재 shape 불일치 거절을 실패 재현 후 추가하고 직접 관측 패리티 부재 문구 갱신"
+    ]
+  },
+  "validation": [
+    "실제 확장모듈 및 누적 바인딩/새 NumPy·CPU PyTorch 관측 계약 CTest 통과",
+    "비대칭 축·불연속ID·실제모든종류/고정/종료·복사/배치/공유수명·숨긴카운터 검사",
+    "새 C++ snapshot ASan/UBSan 통과(Python/PyTorch 비계측)",
+    "현재실제 C++/Python 관측·가비지후 분기·shape거절 및이전바인딩9회귀 통과",
+    "Windows/macOSnative·CUDA·ONNX·Colab학습 미검증"
+  ]
+}

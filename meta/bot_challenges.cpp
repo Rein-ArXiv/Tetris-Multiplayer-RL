@@ -3,6 +3,9 @@
 #include "protocol.h"
 #include "../bot/bot_onnx.h"
 #include "../bot/reward_replay.h"
+#include "../bot/reward_catalog.h"
+#include <fstream>
+#include <cstdio>
 #include "httplib.h"
 #include "json_routes.h"
 #include <charconv>
@@ -13,11 +16,44 @@
 namespace meta {
 namespace {
 using Clock=std::chrono::steady_clock;
-struct Ticket { int64_t player; uint64_t seed; bot::Opponent opponent; Clock::time_point issued; };
+struct PreparedOpponent {
+    bot::Opponent profile;
+    std::shared_ptr<bot::BotOnnx> model;
+    bool ready=false;
+};
+struct Ticket { int64_t player; uint64_t seed; PreparedOpponent opponent; Clock::time_point issued; };
 struct State {
     std::mutex mutex, verifier;
     std::unordered_map<std::string,Ticket> tickets;
-    std::vector<bot::Opponent> opponents=bot::discover_opponents();
+    std::vector<PreparedOpponent> opponents;
+    bool catalogReady=false;
+    State() {
+        std::vector<bot::Opponent> profiles;
+        try {
+            std::ifstream input("assets/opponents.cfg");
+            profiles=bot::read_reward_catalog(input);
+        } catch(const std::exception& error) {
+            std::fprintf(stderr,"[bot rewards] catalog unavailable: %s\n",error.what());
+            return;
+        }
+        std::unordered_map<std::string,std::shared_ptr<bot::BotOnnx>> models;
+        for(auto profile:profiles) {
+            PreparedOpponent entry{std::move(profile),{},false};
+            if(entry.profile.path=="@heuristic")entry.ready=true;
+            else {
+                auto cached=models.find(entry.profile.path);
+                if(cached==models.end()) {
+                    auto model=std::make_shared<bot::BotOnnx>();
+                    if(!model->Load(entry.profile.path))model.reset();
+                    cached=models.emplace(entry.profile.path,std::move(model)).first;
+                }
+                entry.model=cached->second;
+                entry.ready=static_cast<bool>(entry.model);
+            }
+            opponents.push_back(std::move(entry));
+        }
+        catalogReady=true;
+    }
 };
 void reply(httplib::Response& res,int status,const std::string& body) {
     res.status=status;res.set_header("Cache-Control","no-store");
@@ -34,12 +70,11 @@ void register_bot_challenges(httplib::Server& svr,Database& db,
     json_post(svr, "/v1/bots/challenge",[state,&db,secure_id](const httplib::Request& req,httplib::Response& res){
         auto player=db.getByToken(proto::find_string(req.body,"token"));
         if(!player){error(res,401,"unknown_token");return;}
+        if(!state->catalogReady){error(res,503,"catalog_unavailable");return;}
         const auto id=proto::find_string(req.body,"opponent_id");
-        auto entry=std::find_if(state->opponents.begin(),state->opponents.end(),[&](const bot::Opponent& e){return e.id==id;});
+        auto entry=std::find_if(state->opponents.begin(),state->opponents.end(),[&](const PreparedOpponent& e){return e.profile.id==id;});
         if(entry==state->opponents.end()){error(res,404,"unknown_opponent");return;}
-#ifndef TETRIS_HAS_ONNXRUNTIME
-        if(entry->path!="@heuristic"){error(res,503,"model_unavailable");return;}
-#endif
+        if(!entry->ready){error(res,503,"model_unavailable");return;}
         auto ticket=secure_id();
         if(!ticket){error(res,503,"entropy_unavailable");return;}
         uint64_t seed=0;
@@ -53,9 +88,9 @@ void register_bot_challenges(httplib::Server& svr,Database& db,
         if(state->tickets.size()>=256){error(res,503,"challenge_capacity");return;}
         state->tickets.emplace(*ticket,Ticket{player->id,seed,*entry,now});
         reply(res,200,"{\"ticket\":\""+*ticket+"\",\"seed\":"+std::to_string(seed)+
-            ",\"input_ticks\":"+std::to_string(entry->inputIntervalTicks)+
-            ",\"think_ticks\":"+std::to_string(entry->thinkTicks)+
-            ",\"min_piece_ticks\":"+std::to_string(entry->minPieceTicks)+"}");
+            ",\"input_ticks\":"+std::to_string(entry->profile.inputIntervalTicks)+
+            ",\"think_ticks\":"+std::to_string(entry->profile.thinkTicks)+
+            ",\"min_piece_ticks\":"+std::to_string(entry->profile.minPieceTicks)+"}");
     });
     json_post(svr, "/v1/bots/claim",[state,&db](const httplib::Request& req,httplib::Response& res){
         const auto token=proto::find_string(req.body,"token");
@@ -84,13 +119,17 @@ void register_bot_challenges(httplib::Server& svr,Database& db,
         // One replay verification at a time. Never queue expensive jobs behind each other.
         std::unique_lock<std::mutex> worker(state->verifier,std::try_to_lock);
         if(!worker.owns_lock()){res.set_header("Retry-After","2");error(res,429,"verifier_busy");return;}
-        bot::BotOnnx model;
-        if(ticket.opponent.path!="@heuristic" && !model.Load(ticket.opponent.path)){error(res,503,"model_unavailable");return;}
+        // Sessions were prepared at startup. Replacing a path cannot change an issued match.
+        // All shared inference uses the verifier lock held above.
         auto picker=[&](const SimGame& sim,int& col,int& rot){
-            bool ok=ticket.opponent.path=="@heuristic"?bot::heuristic_placement(sim,col,rot):model.Infer(sim,col,rot);
-            return ok || bot::fallback_placement(sim,col,rot);
+            return ticket.opponent.profile.path=="@heuristic" ? bot::heuristic_placement(sim,col,rot)
+                : ticket.opponent.model && ticket.opponent.model->Infer(sim,col,rot);
         };
-        if(!bot::verify_victory(ticket.seed,ticket.opponent,inputs,picker)) {
+        const auto result=bot::verify_result(ticket.seed,ticket.opponent.profile,inputs,picker);
+        if(result==bot::Verification::policy_unavailable) {
+            error(res,503,"policy_unavailable");return;
+        }
+        if(result!=bot::Verification::victory) {
             // A failed proof cannot be refined indefinitely against the same challenge.
             std::lock_guard<std::mutex> lock(state->mutex);state->tickets.erase(id);
             error(res,422,"victory_not_verified");return;
@@ -99,7 +138,7 @@ void register_bot_challenges(httplib::Server& svr,Database& db,
             std::lock_guard<std::mutex> lock(state->mutex);
             // A new challenge may have superseded this one while verification ran.
             if(!state->tickets.count(id)){error(res,409,"challenge_superseded");return;}
-            auto earned=db.saveBotWin(player->id,id,ticket.opponent.id);
+            auto earned=db.saveBotWin(player->id,id,ticket.opponent.profile.id);
             if(!earned){error(res,503,"reward_save_failed");return;}
             state->tickets.erase(id);
             success(*earned);

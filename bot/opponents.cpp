@@ -1,4 +1,5 @@
 #include "opponents.h"
+#include "opponent_profile.h"
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
@@ -32,33 +33,30 @@ bool number(const std::string& s, int& out, int low, int high) {
     out = value;
     return true;
 }
-bool valid_id(const std::string& id) {
-    return !id.empty() && id.size() <= 32 && id.find_first_not_of(
-        "abcdefghijklmnopqrstuvwxyz0123456789_-") == std::string::npos;
-}
 std::string key(const std::filesystem::path& p) { return p.lexically_normal().generic_u8string(); }
 }
-int clamp_input_interval(int ticks) { return std::clamp(ticks, 1, 30); }
+int clamp_input_interval(int ticks) { return std::clamp(ticks, Pacing::interval_min, Pacing::interval_max); }
 
 std::vector<Opponent> discover_opponents(const char* characters, const char* legacy) {
     std::vector<Opponent> roster;
     std::unordered_set<std::string> ids, configuredModels;
     std::ifstream file(characters);
     std::string line;
+    std::size_t lineNumber=0;
     while (std::getline(file, line)) {
-        auto f = fields(line);
-        if (f[0].empty()) continue;
-        Opponent entry;
-        if (f.size() != 9 || !valid_id(f[0]) || f[1].empty() || f[1].size() > 96 || f[2].empty() ||
-            !number(f[6], entry.inputIntervalTicks, 1, 30) ||
-            !number(f[7], entry.thinkTicks, 0, 180) ||
-            !number(f[8], entry.minPieceTicks, 1, 600) || !ids.insert(f[0]).second) {
-            std::fprintf(stderr, "[opponents] invalid or duplicate character: %s\n", f[0].c_str());
+        ++lineNumber;
+        auto parsed=parse_opponent_profile(line);
+        if(!parsed.error.empty()) {
+            std::fprintf(stderr,"[opponents] line %zu: %s\n",lineNumber,parsed.error.c_str());
             continue;
         }
-        entry.id=f[0]; entry.name=f[1]; entry.path=key(std::filesystem::u8path(f[2]));
-        entry.iconPath=f[3]; entry.portraitPath=f[4];
-        if (!f[5].empty()) entry.difficulty=f[5];
+        if(!parsed.entry)continue;
+        auto entry=std::move(*parsed.entry);
+        if(!ids.insert(entry.id).second) {
+            std::fprintf(stderr,"[opponents] line %zu: duplicate identity\n",lineNumber);
+            continue;
+        }
+        entry.path=key(std::filesystem::u8path(entry.path));
         configuredModels.insert(entry.path);
         roster.push_back(std::move(entry));
     }
@@ -101,9 +99,9 @@ std::vector<Opponent> discover_opponents(const char* characters, const char* leg
         if (it==overrides.end()) continue;
         const auto& f=it->second;
         if (f.size()>1 && !f[1].empty()) entry.name=f[1];
-        if (f.size()>2) number(f[2],entry.inputIntervalTicks,1,30);
-        if (f.size()>3) number(f[3],entry.thinkTicks,0,180);
-        if (f.size()>4) number(f[4],entry.minPieceTicks,1,600);
+        if (f.size()>2) number(f[2],entry.inputIntervalTicks,Pacing::interval_min,Pacing::interval_max);
+        if (f.size()>3) number(f[3],entry.thinkTicks,Pacing::think_min,Pacing::think_max);
+        if (f.size()>4) number(f[4],entry.minPieceTicks,Pacing::minimum_min,Pacing::minimum_max);
     }
     return roster;
 }

@@ -2,7 +2,7 @@
 
 This trainer keeps deployment simple by using the canonical
 ``common.models.TetrisPolicyNet`` as the Q-network: ``policy_logits`` are
-interpreted as Q-values over the 40 placement actions, and the value head is
+interpreted as Q-values over the configured placement actions, and the value head is
 unused. ``--target-mode ddqn`` uses Double DQN targets; ``--target-mode dqn``
 uses the classic target-network max. Checkpoints saved here load directly in
 ``netbot.export_onnx``.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import os
+import math
 import sys
 import time
 from pathlib import Path
@@ -35,6 +35,7 @@ if str(_PY_ROOT) not in sys.path:
     sys.path.insert(0, str(_PY_ROOT))
 
 from train.rl_common import (
+    bcts_shaped_reward,
     LinearSchedule,
     ReplayBuffer,
     evaluate_greedy,
@@ -43,16 +44,12 @@ from train.rl_common import (
 )
 from common.checkpoint import load_checkpoint, save_checkpoint
 from common.env import TetrisPlacementEnv
-from common.features import bcts_score
 from common.models import TetrisPolicyNet
 
 
 def shaped_reward(next_obs: dict[str, np.ndarray], lines: float, coef: float) -> float:
     """Optional BCTS shaping for sparse early DQN learning."""
-    if coef == 0.0:
-        return float(lines)
-    board = np.asarray(next_obs["board"], dtype=np.float32).reshape(20, 10)
-    return float(lines) + float(coef) * bcts_score(board, int(lines))
+    return bcts_shaped_reward(next_obs, lines, coef)
 
 
 @torch.no_grad()
@@ -89,34 +86,57 @@ def train_step(
     q_all, _ = model(batch["board"], batch["current"], batch["next"])
     q = q_all.gather(1, batch["action"].unsqueeze(1)).squeeze(1)
 
+    if target_mode not in ('dqn', 'ddqn'):
+        raise ValueError('unknown target mode')
     with torch.no_grad():
-        next_q_target, _ = target(batch["next_board"], batch["next_current"], batch["next_next"])
-        if target_mode == "ddqn":
-            next_q_online, _ = model(batch["next_board"], batch["next_current"], batch["next_next"])
-            next_actions = masked_argmax(next_q_online, batch["next_mask"]).unsqueeze(1)
-            next_q = next_q_target.gather(1, next_actions).squeeze(1)
-        else:
-            next_q = next_q_target.masked_fill(~batch["next_mask"], float("-inf")).max(dim=1).values
-
-        no_next = batch["done"].bool() | (~batch["next_mask"].any(dim=1))
-        target_q = batch["reward"] + gamma * (~no_next).float() * next_q
+        # Replay done denotes MDP termination, not an external reset boundary.
+        active = ~batch['done'].bool()
+        legal = batch['next_mask'][active]
+        if not legal.any(dim=1).all():
+            raise ValueError('nonterminal successor needs a legal action')
+        target_q = batch['reward'].clone()
+        if active.any():
+            inputs = [batch[key][active] for key in ('next_board', 'next_current', 'next_next')]
+            next_q_target, _ = target(*inputs)
+            if target_mode == 'ddqn':
+                next_q_online, _ = model(*inputs)
+                next_actions = masked_argmax(next_q_online, legal).unsqueeze(1)
+                next_q = next_q_target.gather(1, next_actions).squeeze(1)
+            else:
+                next_q = next_q_target.masked_fill(~legal, float('-inf')).max(dim=1).values
+            target_q[active] += gamma * next_q
 
     loss = F.smooth_l1_loss(q, target_q)
+    if not torch.isfinite(loss):
+        raise ValueError("DQN loss must be finite")
     opt.zero_grad(set_to_none=True)
     loss.backward()
-    nn_utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+    nn_utils.clip_grad_norm_(model.parameters(), max_grad_norm, error_if_nonfinite=True)
     opt.step()
     return float(loss.detach().item())
 
 
 def train(args: argparse.Namespace) -> None:
+    for name in ('steps','warmup','replay_size','batch','train_every','updates_per_step',
+                 'target_every','log_every','eps_decay_steps','eval_max_pieces'):
+        if type(getattr(args,name)) is not int or getattr(args,name) <= 0:
+            raise ValueError(name + ' must be positive')
+    if args.warmup > args.replay_size:
+        raise ValueError('warmup cannot exceed replay capacity')
+    for name in ('gamma','eps_start','eps_end'):
+        if not math.isfinite(getattr(args,name)) or not 0 <= getattr(args,name) <= 1:
+            raise ValueError(name + ' must be in [0,1]')
+    for name in ('lr','max_grad_norm'):
+        if not math.isfinite(getattr(args,name)) or getattr(args,name) <= 0:
+            raise ValueError(name + ' must be finite and positive')
+    if not math.isfinite(args.shaping_coef):
+        raise ValueError('shaping_coef must be finite')
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    env = TetrisPlacementEnv(seed=args.seed)
-    if args.resume and os.path.exists(args.resume):
-        print(f"[dqn] resuming from {args.resume}")
+    if args.resume:
+        print(f"[dqn] weights-only warm start from {args.resume}; optimizer/replay start fresh")
         model = load_checkpoint(args.resume, device=device)
         model.train()
     else:
@@ -129,130 +149,131 @@ def train(args: argparse.Namespace) -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    obs, info = env.reset(seed=args.seed)
-    ep_lines = 0.0
-    ep_len = 0
-    ep_count = 0
-    recent_lines: list[float] = []
-    recent_len: list[int] = []
-    losses: list[float] = []
-    best_eval_lines = -1e9
-    t0 = time.time()
+    env = TetrisPlacementEnv(seed=args.seed)
+    try:
+        obs, info = env.reset(seed=args.seed)
+        ep_lines = 0.0
+        ep_len = 0
+        ep_count = 0
+        recent_lines: list[float] = []
+        recent_len: list[int] = []
+        losses: list[float] = []
+        best_eval_lines = -1e9
+        t0 = time.time()
 
-    for step in range(1, args.steps + 1):
-        mask = np.asarray(info["legal_mask"], dtype=bool)
-        if not mask.any():
-            obs, info = env.reset()
-            ep_lines = 0.0
-            ep_len = 0
+        for step in range(1, args.steps + 1):
             mask = np.asarray(info["legal_mask"], dtype=bool)
+            if not mask.any():
+                raise RuntimeError('live DQN observation has no legal action')
 
-        epsilon = eps_schedule.value(step)
-        action = epsilon_greedy_action(model, obs, mask, epsilon=epsilon, device=device)
-        next_obs, raw_reward, term, trunc, next_info = env.step(action)
-        done = bool(term or trunc)
-        next_mask = np.asarray(next_info["legal_mask"], dtype=bool)
-        reward = shaped_reward(next_obs, float(raw_reward), args.shaping_coef)
+            epsilon = eps_schedule.value(step)
+            action = epsilon_greedy_action(model, obs, mask, epsilon=epsilon, device=device)
+            next_obs, raw_reward, term, trunc, next_info = env.step(action)
+            done = bool(term or trunc)
+            next_mask = np.asarray(next_info["legal_mask"], dtype=bool)
+            reward = shaped_reward(next_obs, float(raw_reward), args.shaping_coef)
 
-        replay.add(obs, mask, action, reward, done, next_obs, next_mask)
+            replay.add(obs, mask, action, reward, bool(term), next_obs, next_mask)
 
-        obs, info = next_obs, next_info
-        ep_lines += float(raw_reward)
-        ep_len += 1
-        if done:
-            ep_count += 1
-            recent_lines.append(ep_lines)
-            recent_len.append(ep_len)
-            recent_lines = recent_lines[-50:]
-            recent_len = recent_len[-50:]
-            obs, info = env.reset()
-            ep_lines = 0.0
-            ep_len = 0
+            obs, info = next_obs, next_info
+            ep_lines = float(next_info["lines"])
+            ep_len += 1
+            if done:
+                ep_count += 1
+                recent_lines.append(ep_lines)
+                recent_len.append(ep_len)
+                recent_lines = recent_lines[-50:]
+                recent_len = recent_len[-50:]
+                obs, info = env.reset()
+                ep_lines = 0.0
+                ep_len = 0
 
-        if len(replay) >= args.warmup and step % args.train_every == 0:
-            for _ in range(args.updates_per_step):
-                loss = train_step(
-                    model,
-                    target,
-                    opt,
-                    replay,
-                    batch_size=args.batch,
-                    gamma=args.gamma,
-                    target_mode=args.target_mode,
-                    device=device,
-                    max_grad_norm=args.max_grad_norm,
+            if len(replay) >= args.warmup and step % args.train_every == 0:
+                for _ in range(args.updates_per_step):
+                    loss = train_step(
+                        model,
+                        target,
+                        opt,
+                        replay,
+                        batch_size=args.batch,
+                        gamma=args.gamma,
+                        target_mode=args.target_mode,
+                        device=device,
+                        max_grad_norm=args.max_grad_norm,
+                    )
+                    losses.append(loss)
+                    losses = losses[-100:]
+
+            if step % args.target_every == 0:
+                target.load_state_dict(model.state_dict())
+                target.eval()
+
+            if step % args.log_every == 0:
+                sps = int(step / max(1e-6, time.time() - t0))
+                avg_lines = float(np.mean(recent_lines)) if recent_lines else float("nan")
+                avg_len = float(np.mean(recent_len)) if recent_len else float("nan")
+                avg_loss = float(np.mean(losses)) if losses else float("nan")
+                print(
+                    f"[dqn] step {step:>9} eps {epsilon:.3f} replay {len(replay):>7} "
+                    f"episodes {ep_count:>5} lines/ep {avg_lines:7.2f} len {avg_len:7.1f} "
+                    f"loss {avg_loss:8.4f} {sps} step/s",
+                    flush=True,
                 )
-                losses.append(loss)
-                losses = losses[-100:]
 
-        if step % args.target_every == 0:
-            target.load_state_dict(model.state_dict())
-            target.eval()
+            if args.eval_every > 0 and args.eval_episodes > 0 and step % args.eval_every == 0:
+                stats = evaluate_greedy(
+                    model,
+                    episodes=args.eval_episodes,
+                    seed=args.eval_seed,
+                    device=device,
+                    max_pieces=args.eval_max_pieces,
+                )
+                print(
+                    f"[eval] step {step:>9} avg_lines {stats['avg_lines']:8.2f} "
+                    f"avg_score {stats['avg_score']:9.1f} avg_pieces {stats['avg_pieces']:8.1f}",
+                    flush=True,
+                )
+                if stats["avg_lines"] > best_eval_lines:
+                    best_eval_lines = stats["avg_lines"]
+                    save_checkpoint(
+                        model,
+                        out_path.with_suffix(".eval_best.pt"),
+                        extra={
+                            "algorithm": args.target_mode,
+                            "target_mode": args.target_mode,
+                            "training_steps": step,
+                            "eval_avg_lines": stats["avg_lines"],
+                            "eval_avg_score": stats["avg_score"],
+                            "eval_avg_pieces": stats["avg_pieces"],
+                        },
+                    )
 
-        if step % args.log_every == 0:
-            sps = int(step / max(1e-6, time.time() - t0))
-            avg_lines = float(np.mean(recent_lines)) if recent_lines else float("nan")
-            avg_len = float(np.mean(recent_len)) if recent_len else float("nan")
-            avg_loss = float(np.mean(losses)) if losses else float("nan")
-            print(
-                f"[dqn] step {step:>9} eps {epsilon:.3f} replay {len(replay):>7} "
-                f"episodes {ep_count:>5} lines/ep {avg_lines:7.2f} len {avg_len:7.1f} "
-                f"loss {avg_loss:8.4f} {sps} step/s",
-                flush=True,
-            )
-
-        if args.eval_every > 0 and args.eval_episodes > 0 and step % args.eval_every == 0:
-            stats = evaluate_greedy(
-                model,
-                episodes=args.eval_episodes,
-                seed=args.eval_seed,
-                device=device,
-                max_pieces=args.eval_max_pieces,
-            )
-            print(
-                f"[eval] step {step:>9} avg_lines {stats['avg_lines']:8.2f} "
-                f"avg_score {stats['avg_score']:9.1f} avg_pieces {stats['avg_pieces']:8.1f}",
-                flush=True,
-            )
-            if stats["avg_lines"] > best_eval_lines:
-                best_eval_lines = stats["avg_lines"]
+            if args.save_every > 0 and step % args.save_every == 0:
                 save_checkpoint(
                     model,
-                    out_path.with_suffix(".eval_best.pt"),
+                    out_path,
                     extra={
                         "algorithm": args.target_mode,
                         "target_mode": args.target_mode,
                         "training_steps": step,
-                        "eval_avg_lines": stats["avg_lines"],
-                        "eval_avg_score": stats["avg_score"],
-                        "eval_avg_pieces": stats["avg_pieces"],
+                        "epsilon": epsilon,
+                        "replay_size": len(replay),
                     },
                 )
 
-        if args.save_every > 0 and step % args.save_every == 0:
-            save_checkpoint(
-                model,
-                out_path,
-                extra={
-                    "algorithm": args.target_mode,
-                    "target_mode": args.target_mode,
-                    "training_steps": step,
-                    "epsilon": epsilon,
-                    "replay_size": len(replay),
-                },
-            )
-
-    save_checkpoint(
-        model,
-        out_path,
-        extra={
-            "algorithm": args.target_mode,
-            "target_mode": args.target_mode,
-            "training_steps": args.steps,
-            "replay_size": len(replay),
-        },
-    )
-    print(f"[dqn] done. saved {out_path}")
+        save_checkpoint(
+            model,
+            out_path,
+            extra={
+                "algorithm": args.target_mode,
+                "target_mode": args.target_mode,
+                "training_steps": args.steps,
+                "replay_size": len(replay),
+            },
+        )
+        print(f"[dqn] done. saved {out_path}")
+    finally:
+        env.close()
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -275,7 +296,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--shaping-coef", type=float, default=0.02,
                    help="BCTS shaping coefficient; 0 uses raw line clears only")
     p.add_argument("--out", type=str, default="checkpoints/dqn.pt")
-    p.add_argument("--resume", type=str, default="")
+    p.add_argument("--resume", type=str, default="", help="weights-only warm start; fresh optimizer and replay")
     p.add_argument("--save-every", type=int, default=10_000)
     p.add_argument("--log-every", type=int, default=1_000)
     p.add_argument("--eval-every", type=int, default=25_000)

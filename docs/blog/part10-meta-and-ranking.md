@@ -2177,7 +2177,7 @@ public:
     std::optional<std::vector<IconEntry>> fetch_icon_catalog(int timeout_s = 5);
 
     std::optional<BotChallenge> start_bot_challenge(const std::string& token, const std::string& opponent, int* status = nullptr);
-    std::optional<BotReward> claim_bot_reward(const std::string& token, const std::string& ticket, const std::string& inputs, int* status = nullptr);
+    std::optional<BotReward> claim_bot_reward(const std::string& token, const std::string& ticket, const std::string& inputs, int* status = nullptr, std::string* server_error = nullptr);
 
     // out_http_status: 0 = 네트워크 실패, 그 외 HTTP 상태 코드. UI 가
     // 402(insufficient_bp) / 403(not_owned) / 409(already_owned) 를 구분해

@@ -1,19 +1,13 @@
-"""Reference-behavior tests for ``netbot.input_expander.expand_placement``.
+"""Python reference cases for request encoding.
 
-The C++ port at ``bot/placement.cpp`` is byte-for-byte identical to the Python
-implementation here. This test file pins down the Python side so that a future
-edit that silently changes the sequence order (e.g. "let's move before
-rotating") fails loud, and the C++ port must be updated in lockstep.
-
-If we later wire a pybind11 binding for ``bot::expand_placement``, extend this
-file with a direct C++-vs-Python comparison. For now the exhaustive table below
-plus the invariants documented in :func:`expand_placement`'s docstring are the
-contract.
+The separate test_action_codec_parity compares actual C++ output. Neither
+encoding comparison proves that a route succeeds through a populated board.
 """
 
 from __future__ import annotations
 
 import pytest
+from common import NUM_COLS, NUM_ROTATIONS
 
 from netbot.input_expander import (
     INPUT_DROP,
@@ -70,10 +64,10 @@ def test_expand_placement_reference_table(
 # single INPUT_DROP, (b) contain no mixed L/R within the same sequence, and
 # (c) have all rotations before any horizontal move.
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("cur_col", range(10))
-@pytest.mark.parametrize("tgt_col", range(10))
-@pytest.mark.parametrize("cur_rot", range(4))
-@pytest.mark.parametrize("tgt_rot", range(4))
+@pytest.mark.parametrize("cur_col", range(NUM_COLS))
+@pytest.mark.parametrize("tgt_col", range(NUM_COLS))
+@pytest.mark.parametrize("cur_rot", range(NUM_ROTATIONS))
+@pytest.mark.parametrize("tgt_rot", range(NUM_ROTATIONS))
 def test_expand_placement_invariants(
     cur_col: int, tgt_col: int, cur_rot: int, tgt_rot: int
 ) -> None:
@@ -95,7 +89,7 @@ def test_expand_placement_invariants(
         assert max(rotate_idxs) < min(move_idxs)
 
     # Rotate count matches the forward-only wrap formula.
-    assert len(rotate_idxs) == (tgt_rot - cur_rot) % 4
+    assert len(rotate_idxs) == (tgt_rot - cur_rot) % NUM_ROTATIONS
 
     # Horizontal step count matches |col delta|.
     assert len(move_idxs) == abs(tgt_col - cur_col)

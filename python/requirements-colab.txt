@@ -15,3 +15,6 @@ onnxscript>=0.1
 # cleanrl>=1.2
 # LightZero
 # ray[rllib]
+
+# CPU execution validates exported tensors before publishing a model.
+onnxruntime>=1.16

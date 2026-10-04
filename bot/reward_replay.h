@@ -1,5 +1,6 @@
 #pragma once
 #include "controller.h"
+#include "policy_decision.h"
 #include "../core/input.h"
 #include "opponents.h"
 #include <chrono>
@@ -17,26 +18,42 @@ inline void exchange_garbage(SimGame& human, SimGame& enemy, int& humanAttack, i
     humanAttack=a; enemyAttack=b;
 }
 
+enum class Verification { victory, not_victory, policy_unavailable };
+
 template<class Picker>
-bool verify_victory(uint64_t seed, const Opponent& opponent,
-                    const std::vector<uint8_t>& inputs, Picker picker) {
-    if(inputs.empty() || inputs.size()>kMaxRewardTicks) return false;
+Verification verify_result(uint64_t seed, const Opponent& opponent,
+                           const std::vector<uint8_t>& inputs, Picker picker) {
+    if(inputs.empty() || inputs.size()>kMaxRewardTicks) return Verification::not_victory;
     SimGame human(seed), enemy(seed);
     Controller controller;
     controller.reset(opponent.inputIntervalTicks,opponent.thinkTicks,opponent.minPieceTicks);
     int humanAttack=0, enemyAttack=0;
+    RunStatus status;status.reset(Mode::reward);
+    const auto strictPicker=[&](const SimGame& sim,int& col,int& rot) {
+        const auto decision=choose_policy(sim,picker,fallback_placement,false,col,rot);
+        status.observe(decision.fault);
+        return decision.selected();
+    };
     const auto start=std::chrono::steady_clock::now();
     for(size_t i=0;i<inputs.size();++i) {
-        if(!isValidInputMask(inputs[i]))return false;
-        if(i%120==0 && std::chrono::steady_clock::now()-start>std::chrono::seconds(5))return false;
-        auto botInput=controller.next(enemy,picker);
+        if(!isValidInputMask(inputs[i]))return Verification::not_victory;
+        if(i%120==0 && std::chrono::steady_clock::now()-start>std::chrono::seconds(5))return Verification::not_victory;
+        const auto botInput=controller.next(enemy,strictPicker);
+        if(!status.reward_eligible())return Verification::policy_unavailable;
+        // blocked/target_lost are reproducible route outcomes; replanning is normal.
         human.SubmitInput(inputs[i]); enemy.SubmitInput(botInput);
         human.Tick(); enemy.Tick();
         exchange_garbage(human,enemy,humanAttack,enemyAttack);
         if(human.IsGameOver() || enemy.IsGameOver())
-            return i+1==inputs.size() && enemy.IsGameOver() && !human.IsGameOver();
+            return i+1==inputs.size() && enemy.IsGameOver() && !human.IsGameOver()
+                ? Verification::victory : Verification::not_victory;
     }
-    return false;
+    return Verification::not_victory;
+}
+template<class Picker>
+bool verify_victory(uint64_t seed,const Opponent& opponent,
+                    const std::vector<uint8_t>& inputs,Picker picker) {
+    return verify_result(seed,opponent,inputs,picker)==Verification::victory;
 }
 inline bool decode_inputs(const std::string& hex, std::vector<uint8_t>& out) {
     if(hex.empty() || hex.size()%2 || hex.size()>kMaxRewardTicks*2) return false;

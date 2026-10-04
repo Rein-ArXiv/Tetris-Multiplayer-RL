@@ -2,20 +2,18 @@
 
 This is the garbage-trading counterpart to ``common.env.TetrisPlacementEnv``.
 The learning agent controls board A; an *opponent* controls board B. Line
-clears send garbage to the other board, exactly mirroring the C++ game's
-combat wiring (``src/main.cpp``: take the ``attack_lines_sent()`` delta after a
-placement and route it to the other board's ``add_pending_garbage()``; the
-garbage is injected at the receiving board's next lock — ``SimGame::LockBlock``).
+clears produce an ``attack_lines_sent()`` delta, queued through the other
+board's ``add_pending_garbage()`` and injected at its next lock. These are the
+same native combat primitives used by the game. This environment's ordered
+A-then-B placement schedule is a turn-based approximation of real-time play.
 
 Design goals:
 
-* **Drop-in for existing single-agent trainers.** The observation is identical
-  to ``TetrisPlacementEnv`` (the agent's own ``board``/``current``/``next``), so
-  ``common.models.TetrisPolicyNet`` and the PPO/DQN/A2C/CEM loops train against
-  it unchanged. The competitive pressure arrives *through the board* (received
-  garbage raises the agent's stack) and *through the reward* (attack sent +
-  win/loss bonus). Extra competitive signals live in ``info`` for wrappers that
-  want them.
+* **Shared observation schema.** The agent's own ``board``/``current``/``next``
+  match ``TetrisPlacementEnv`` and ``common.models.TetrisPolicyNet``. Trainers
+  still need to select the environment and handle reward/termination semantics.
+  Received garbage changes the board; attack and win/loss terms change reward.
+  Extra competitive signals live in ``info`` for wrappers that need them.
 * **Self-play ready.** Pass any ``opponent`` — a scripted heuristic
   (``GreedyBCTSOpponent``, the default), random legal play
   (``RandomLegalOpponent``), or a snapshot of the current policy via
@@ -23,9 +21,9 @@ Design goals:
 
 Action / observation contract (agent side)::
 
-    action_space      = Discrete(40)                      # encode_action(col, rot)
+    action_space      = Discrete(NUM_PLACEMENTS)                      # encode_action(col, rot)
     observation_space = Dict(board, current, next)        # same as single-player
-    info["legal_mask"]        = bool (40,)
+    info["legal_mask"]        = bool (NUM_PLACEMENTS,)
     info["incoming_garbage"]  = int   # queued on the agent's board
     info["agent_attack"]      = int   # lines the agent sent this step
     info["opp_attack"]        = int   # lines the opponent sent this step
@@ -34,7 +32,8 @@ Action / observation contract (agent side)::
 Reward per step = ``lines_cleared + attack_weight * attack_sent``; on the
 terminal step ``+win_bonus`` if only the opponent topped out, ``-loss_penalty``
 if the agent topped out (including a simultaneous top-out). Treating a mutual
-top-out as a loss prevents the learning agent from exploiting suicidal attacks.
+top-out as a loss penalizes mutual failure; it does not prove that all
+suicidal attack strategies have negative total return.
 """
 
 from __future__ import annotations
@@ -57,26 +56,28 @@ from . import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES, NUM_PLACEMENTS
 from .action_mask import decode_action, encode_action, legal_mask
 from .features import bcts_score
 from .obs import build_observation
+from .gym_contract import optional_seed, action_index, positive_limit, draw_seed
+from .versus_reward import finite_coefficient, versus_reward
 
 
 def _terminal_bonus(
     a_dead: bool, b_dead: bool, win_bonus: float, loss_penalty: float
 ) -> float:
     """Terminal reward from the learning agent's perspective."""
-    if b_dead and not a_dead:
-        return float(win_bonus)
-    if a_dead:
-        return -float(loss_penalty)
-    return 0.0
+    return versus_reward(0, 0, a_dead, b_dead, 0.0, win_bonus, loss_penalty)
 
 
 # --- 상대 정책 ---
 class VersusOpponent:
-    """Decides one placement for a board. Return an encoded action (0..39) or
-    ``None`` if the board has no legal move (treated as a pass)."""
+    """Decides one placement for a board. Return an encoded action in the schema domain or
+    ``None`` only if the board has no legal move. The environment supplies a
+    disposable clone, so mutations to the argument are never committed."""
 
     def reset(self) -> None:  # noqa: D401 - optional hook
         """Called on env reset. Override to reset per-episode state."""
+
+    def reseed(self, seed: int) -> None:
+        """Override when a custom opponent owns randomness used during an episode."""
 
     def act(self, sim: Any) -> Optional[int]:
         raise NotImplementedError
@@ -88,6 +89,9 @@ class RandomLegalOpponent(VersusOpponent):
     def __init__(self, seed: int | None = None) -> None:
         self._rng = random.Random(seed)
 
+    def reseed(self, seed: int) -> None:
+        self._rng.seed(seed)
+
     def act(self, sim: Any) -> Optional[int]:
         placements = sim.legal_placements()
         if not placements:
@@ -97,12 +101,15 @@ class RandomLegalOpponent(VersusOpponent):
 
 
 class GreedyBCTSOpponent(VersusOpponent):
-    """One-ply Dellacherie/BCTS greedy: clone the board, try every legal
-    placement, keep the one with the best post-placement BCTS score. A solid,
-    dependency-light sparring partner (the same evaluator CBMPI improves on)."""
+    """One-ply board evaluator: clone each legal placement and keep its best score.
+
+    line_weight adds to the rows_cleared coefficient already in bcts_score.
+    Equal scores keep the first native placement; terminal states have no
+    separate priority. These are policy choices, not performance guarantees.
+    """
 
     def __init__(self, line_weight: float = 1.0) -> None:
-        self._line_weight = line_weight
+        self._line_weight = finite_coefficient(line_weight, "line_weight")
 
     def act(self, sim: Any) -> Optional[int]:
         placements = sim.legal_placements()
@@ -117,6 +124,8 @@ class GreedyBCTSOpponent(VersusOpponent):
                 continue
             board = np.asarray(child.grid(), dtype=np.float32)
             score = self._line_weight * float(cleared) + bcts_score(board, cleared)
+            if not np.isfinite(score):
+                raise ValueError("greedy evaluation is not finite")
             if score > best_score:
                 best_score = score
                 best_action = encode_action(int(p.col), int(p.rot))
@@ -136,7 +145,7 @@ class PolicyOpponent(VersusOpponent):
         mask = legal_mask(sim).numpy()
         if not mask.any():
             return None
-        return int(self._policy_fn(obs, mask))
+        return action_index(self._policy_fn(obs, mask), NUM_PLACEMENTS)
 
 
 # --- 대전 환경 ---
@@ -164,21 +173,26 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         from sim import SimGame  # noqa: PLC0415 - lazy so common/ imports without the native module
 
         self._SimGame = SimGame
-        self._seed = seed if seed is not None else 0
-        # 두 보드에 서로 다른 seed를 준다. 실제 대전도 블록 순서가 같지 않다.
-        # 같은 seed를 주면 상대 수를 그대로 따라 하는 것만 배우게 된다.
-        self._opp_seed = opponent_seed if opponent_seed is not None else self._seed + 1
+        self._initial_seed = optional_seed(seed)
+        self._seed = self._initial_seed
+        self._has_reset = False
+        self._needs_reset = True
+        self.render_mode = None
+        # An explicit opponent board seed remains fixed across environment resets.
+        self._configured_opp_seed = optional_seed(opponent_seed)
+        self._opp_seed = self._configured_opp_seed
         self._opponent = opponent if opponent is not None else GreedyBCTSOpponent()
 
-        self.attack_weight = float(attack_weight)
-        self.win_bonus = float(win_bonus)
-        self.loss_penalty = float(loss_penalty)
-        self.max_pieces = int(max_pieces)
+        self.attack_weight = finite_coefficient(attack_weight, "attack_weight")
+        self.win_bonus = finite_coefficient(win_bonus, "win_bonus")
+        self.loss_penalty = finite_coefficient(loss_penalty, "loss_penalty")
+        # Legacy option name: the limit counts decisions, including blocked requests.
+        self.max_pieces = positive_limit(max_pieces)
+        if self.max_pieces is None:
+            raise ValueError("max_pieces must be a positive decision budget")
 
         self.simA: Any = None  # agent board
         self.simB: Any = None  # opponent board
-        self._last_attack_a = 0
-        self._last_attack_b = 0
         self._pieces = 0
 
         self.action_space = spaces.Discrete(NUM_PLACEMENTS)
@@ -197,91 +211,107 @@ class TetrisVersusEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        if seed is not None:
-            self._seed = seed
-            self._opp_seed = seed + 1
+        if options is not None and (not isinstance(options, dict) or options):
+            raise ValueError("reset options are not supported")
+        seed = optional_seed(seed)
+        effective = seed if seed is not None else (self._initial_seed if not self._has_reset else None)
+        self._needs_reset = True  # A failing custom reset hook cannot leave a live episode.
+        super().reset(seed=effective)
+        self._seed = effective if effective is not None else draw_seed(self.np_random)
+        self._opp_seed = (self._configured_opp_seed if self._configured_opp_seed is not None
+                          else (self._seed + 1) % (1 << 64))
         self.simA = self._SimGame(self._seed)
         self.simB = self._SimGame(self._opp_seed)
-        self._last_attack_a = 0
-        self._last_attack_b = 0
         self._pieces = 0
+        self._opponent.reseed(self._opp_seed)
         self._opponent.reset()
+        self._has_reset = True
+        self._needs_reset = False
         return self._observation(self.simA), self._info(0, 0)
 
     def step(
         self, action: int
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        assert self.simA is not None, "Call reset() before step()"
+        if self._needs_reset:
+            raise gym.error.ResetNeeded("Call reset() before starting or continuing an episode")
+        action = action_index(action, NUM_PLACEMENTS)
+        # Preserve committed boards. A callback can advance its own RNG, so any
+        # later failure requires reset rather than retrying an ambiguous episode.
+        self._needs_reset = True
+        candidate_a = self.simA.clone()
+        candidate_b = self.simB.clone()
+        col, rot = decode_action(action)
+        attack_before_a = candidate_a.attack_lines_sent()
+        cleared = candidate_a.apply_placement(col, rot)
+        agent_attack = opp_attack = 0
 
-        col, rot = decode_action(int(action))
-        cleared = self.simA.apply_placement(col, rot)
+        if cleared >= 0:
+            agent_attack = candidate_a.attack_lines_sent() - attack_before_a
+            if agent_attack > 0 and not candidate_b.game_over():
+                candidate_b.add_pending_garbage(agent_attack)
 
-        if cleared < 0:
-            # 불법 수면 내 보드는 그대로 두고 넘어간다.
-            # 상대는 계속 두므로 결과적으로 한 수를 손해 보는 셈이다.
-            return (
-                self._observation(self.simA),
-                0.0,
-                self.simA.game_over(),
-                False,
-                self._info(0, 0),
-            )
+            # The policy sees its own board after incoming attack has been queued.
+            # Give it an isolated copy; policy-side mutations are never committed.
+            if not candidate_b.game_over():
+                opp_action = self._opponent.act(candidate_b.clone())
+                mask = legal_mask(candidate_b).numpy()
+                if opp_action is None:
+                    if mask.any():
+                        raise ValueError("opponent passed despite having legal actions")
+                else:
+                    opp_action = action_index(opp_action, NUM_PLACEMENTS)
+                    if not mask[opp_action]:
+                        raise ValueError("opponent returned a blocked action")
+                    attack_before_b = candidate_b.attack_lines_sent()
+                    bc, br = decode_action(opp_action)
+                    if candidate_b.apply_placement(bc, br) < 0:
+                        raise RuntimeError("opponent action disagreed with legal mask")
+                    opp_attack = candidate_b.attack_lines_sent() - attack_before_b
+                    if opp_attack > 0 and not candidate_a.game_over():
+                        candidate_a.add_pending_garbage(opp_attack)
 
-        # 이번 수로 보낸 공격을 상대 보드에 쌓는다.
-        # 누적값의 차이를 쓰는 이유는 SimGame이 총합만 들고 있기 때문이다.
-        agent_attack = self.simA.attack_lines_sent() - self._last_attack_a
-        self._last_attack_a = self.simA.attack_lines_sent()
-        if agent_attack > 0:
-            self.simB.add_pending_garbage(agent_attack)
-
-        # 상대도 한 수 둔다. 그쪽 공격은 반대로 내 보드에 쌓인다.
-        opp_attack = 0
-        if not self.simB.game_over():
-            opp_action = self._opponent.act(self.simB)
-            if opp_action is not None:
-                bc, br = decode_action(int(opp_action))
-                if self.simB.apply_placement(bc, br) >= 0:
-                    opp_attack = self.simB.attack_lines_sent() - self._last_attack_b
-                    self._last_attack_b = self.simB.attack_lines_sent()
-                    if opp_attack > 0:
-                        self.simA.add_pending_garbage(opp_attack)
-
-        a_dead = self.simA.game_over()
-        b_dead = self.simB.game_over()
-
-        reward = float(cleared) + self.attack_weight * float(agent_attack)
+        a_dead, b_dead = candidate_a.game_over(), candidate_b.game_over()
+        reward = (versus_reward(cleared, agent_attack, a_dead, b_dead,
+                                self.attack_weight, self.win_bonus, self.loss_penalty)
+                  if cleared >= 0 else 0.0)
         terminated = a_dead or b_dead
-        if terminated:
-            reward += _terminal_bonus(
-                a_dead, b_dead, self.win_bonus, self.loss_penalty
-            )
-            # 둘 다 동시에 죽으면 패배로 친다.
-            # 무승부를 인정하면 '같이 죽자'는 전략이 이득이 되어 버린다.
+        decisions = self._pieces + 1
+        truncated = decisions >= self.max_pieces
+        obs = self._observation(candidate_a)
+        info = self._info(agent_attack, opp_attack, sim_a=candidate_a,
+                          sim_b=candidate_b, decisions=decisions)
+        info["action_applied"] = cleared >= 0
+        self.simA, self.simB = candidate_a, candidate_b
+        self._pieces = decisions
+        self._needs_reset = terminated or truncated
+        return obs, reward, terminated, truncated, info
 
-        self._pieces += 1
-        truncated = self._pieces >= self.max_pieces
-        return (
-            self._observation(self.simA),
-            reward,
-            terminated,
-            truncated,
-            self._info(agent_attack, opp_attack),
-        )
+    def close(self) -> None:
+        self.simA = self.simB = None
+        self._needs_reset = True
 
     # --- 내부 헬퍼 ---
     def _observation(self, sim: Any) -> dict[str, np.ndarray]:
         return {k: v.numpy() for k, v in build_observation(sim).items()}
 
-    def _info(self, agent_attack: int, opp_attack: int) -> dict[str, Any]:
-        assert self.simA is not None and self.simB is not None
+    def _info(self, agent_attack: int, opp_attack: int, *,
+              sim_a=None, sim_b=None, decisions=None) -> dict[str, Any]:
+        sim_a = self.simA if sim_a is None else sim_a
+        sim_b = self.simB if sim_b is None else sim_b
+        decisions = self._pieces if decisions is None else decisions
+        assert sim_a is not None and sim_b is not None
         return {
-            "legal_mask": legal_mask(self.simA).numpy(),
-            "score": self.simA.score(),
-            "state_hash": self.simA.state_hash(),
-            "incoming_garbage": self.simA.pending_garbage(),
+            "legal_mask": legal_mask(sim_a).numpy(),
+            "episode_seed": self._seed,
+            "opponent_seed": self._opp_seed,
+            "decisions": decisions,
+            "score": sim_a.score(),
+            "lines": sim_a.total_lines_cleared(),
+            "state_hash": sim_a.state_hash(),
+            "incoming_garbage": sim_a.pending_garbage(),
             "agent_attack": int(agent_attack),
             "opp_attack": int(opp_attack),
-            "opp_alive": not self.simB.game_over(),
-            "agent_lines": self.simA.total_lines_cleared(),
-            "opp_lines": self.simB.total_lines_cleared(),
+            "opp_alive": not sim_b.game_over(),
+            "agent_lines": sim_a.total_lines_cleared(),
+            "opp_lines": sim_b.total_lines_cleared(),
         }

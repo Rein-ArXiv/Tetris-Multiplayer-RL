@@ -8,7 +8,7 @@ checkpoints that export directly to ONNX:
 
 Available modes:
 
-- ``reinforce``: episodic Monte-Carlo policy gradient with value baseline.
+- ``reinforce``: episodic returns with a value baseline; external cutoffs use a value tail.
 - ``a2c``: synchronous advantage actor-critic on fixed rollouts.
 - ``nstep-ac``: same actor-critic update, usually run with shorter rollouts for
   lower-latency n-step targets.
@@ -17,10 +17,10 @@ Available modes:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
+from numbers import Real
 
 import numpy as np
 import torch
@@ -32,10 +32,12 @@ if str(_PY_ROOT) not in sys.path:
     sys.path.insert(0, str(_PY_ROOT))
 
 from train.rl_common import bcts_shaped_reward, evaluate_greedy, obs_to_batch
+from common.returns import gae_targets
+from common.model_contract import positive_size
 from common import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES
 from common.checkpoint import load_checkpoint, save_checkpoint
 from common.env import TetrisPlacementEnv
-from common.models import TetrisPolicyNet, masked_log_softmax
+from common.models import TetrisPolicyNet, masked_log_softmax, masked_entropy
 
 
 def _masked_logp_entropy(
@@ -43,9 +45,14 @@ def _masked_logp_entropy(
     mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     logp = masked_log_softmax(logits, mask)
-    probs = logp.exp()
-    entropy = -torch.where(mask, probs * logp, torch.zeros_like(probs)).sum(dim=1)
+    entropy = masked_entropy(logp, mask)
     return logp, entropy
+
+
+def policy_temperature(value):
+    if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value) or value <= 0:
+        raise ValueError("temperature must be finite and positive")
+    return float(value)
 
 
 @torch.no_grad()
@@ -60,7 +67,7 @@ def sample_action(
     mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device).unsqueeze(0)
     batch = obs_to_batch(obs, device)
     logits, value = model(batch["board"], batch["current"], batch["next"])
-    logits = logits / max(float(temperature), 1e-6)
+    logits = logits / policy_temperature(temperature)
     logp, _entropy = _masked_logp_entropy(logits, mask)
     probs = logp.exp()
     action = torch.multinomial(probs, 1).squeeze(1)
@@ -104,7 +111,7 @@ def update_policy(
         for start in range(0, n, args.batch):
             idx = torch.as_tensor(idx_np[start:start + args.batch], dtype=torch.long, device=device)
             logits, value = model(batch["board"][idx], batch["current"][idx], batch["next"][idx])
-            logp, entropy = _masked_logp_entropy(logits, batch["mask"][idx])
+            logp, entropy = _masked_logp_entropy(logits / policy_temperature(args.temperature), batch["mask"][idx])
             action_logp = logp.gather(1, batch["action"][idx].unsqueeze(1)).squeeze(1)
 
             adv = batch["advantage"][idx]
@@ -140,10 +147,10 @@ def append_transition(
     mask: np.ndarray,
     action: int,
 ) -> None:
-    data["board"].append(np.asarray(obs["board"], dtype=np.float32))
-    data["current"].append(np.asarray(obs["current"], dtype=np.float32))
-    data["next"].append(np.asarray(obs["next"], dtype=np.float32))
-    data["mask"].append(np.asarray(mask, dtype=np.bool_))
+    data["board"].append(np.array(obs["board"], dtype=np.float32, copy=True))
+    data["current"].append(np.array(obs["current"], dtype=np.float32, copy=True))
+    data["next"].append(np.array(obs["next"], dtype=np.float32, copy=True))
+    data["mask"].append(np.array(mask, dtype=np.bool_, copy=True))
     data["action"].append(int(action))
 
 
@@ -176,6 +183,7 @@ def collect_reinforce_episode(
     rewards: list[float] = []
     values: list[float] = []
     raw_lines = 0.0
+    term = False
 
     for _piece in range(args.max_pieces):
         mask = np.asarray(info["legal_mask"], dtype=bool)
@@ -186,12 +194,18 @@ def collect_reinforce_episode(
         next_obs, raw_reward, term, trunc, info = env.step(action)
         rewards.append(bcts_shaped_reward(next_obs, float(raw_reward), args.shaping_coef))
         values.append(value)
-        raw_lines += float(raw_reward)
+        raw_lines = float(info["lines"])
         obs = next_obs
         if term or trunc:
             break
 
-    returns = discounted_returns(rewards, args.gamma)
+    bootstrap = 0.0
+    if rewards and not term:
+        with torch.no_grad():
+            endpoint = obs_to_batch(obs, device)
+            _, v = model(endpoint["board"], endpoint["current"], endpoint["next"])
+            bootstrap = float(v[0])
+    returns = discounted_returns(rewards, args.gamma, bootstrap)
     data["return"] = returns
     data["advantage"] = [ret - val for ret, val in zip(returns, values, strict=True)]
     return data, raw_lines, len(rewards)
@@ -205,6 +219,7 @@ def collect_a2c_rollout(
     args: argparse.Namespace,
     *,
     device: torch.device,
+    progress: dict | None = None,
 ) -> tuple[dict[str, list], dict[str, np.ndarray], dict, list[float], list[int]]:
     data: dict[str, list] = {
         "board": [],
@@ -219,43 +234,51 @@ def collect_a2c_rollout(
     values: list[float] = []
     episode_lines: list[float] = []
     episode_lengths: list[int] = []
-    ep_lines = 0.0
-    ep_len = 0
+    progress = {} if progress is None else progress
+    ep_lines = float(progress.get("lines", 0.0))
+    ep_len = int(progress.get("decisions", 0))
+    next_values, terminals, boundaries = [], [], []
 
     for _ in range(args.rollout):
         mask = np.asarray(info["legal_mask"], dtype=bool)
         if not mask.any():
-            obs, info = env.reset()
-            ep_lines = 0.0
-            ep_len = 0
-            mask = np.asarray(info["legal_mask"], dtype=bool)
+            raise RuntimeError("live A2C observation has no legal action")
 
         action, value = sample_action(model, obs, mask, device=device, temperature=args.temperature)
         append_transition(data, obs, mask, action)
         next_obs, raw_reward, term, trunc, next_info = env.step(action)
         rewards.append(bcts_shaped_reward(next_obs, float(raw_reward), args.shaping_coef))
         values.append(value)
-        ep_lines += float(raw_reward)
+        ep_lines = float(next_info["lines"])
         ep_len += 1
         obs, info = next_obs, next_info
 
-        if term or trunc or ep_len >= args.max_pieces:
+        boundary = bool(term or trunc or ep_len >= args.max_pieces)
+        terminals.append(bool(term))
+        boundaries.append(boundary)
+        endpoint_value = 0.0
+        if not term:
+            with torch.no_grad():
+                endpoint = obs_to_batch(next_obs, device)
+                _, v = model(endpoint["board"], endpoint["current"], endpoint["next"])
+                endpoint_value = float(v[0])
+        next_values.append(endpoint_value)
+        if boundary:
             episode_lines.append(ep_lines)
             episode_lengths.append(ep_len)
             obs, info = env.reset()
             ep_lines = 0.0
             ep_len = 0
 
-    bootstrap = 0.0
-    if np.asarray(info["legal_mask"], dtype=bool).any():
-        with torch.no_grad():
-            batch = obs_to_batch(obs, device)
-            _logits, v = model(batch["board"], batch["current"], batch["next"])
-            bootstrap = float(v.squeeze(0).item())
-
-    returns = discounted_returns(rewards, args.gamma, bootstrap)
-    data["return"] = returns
-    data["advantage"] = [ret - val for ret, val in zip(returns, values, strict=True)]
+    progress.update(lines=ep_lines, decisions=ep_len)
+    f = lambda x: torch.tensor(x, dtype=torch.float32)
+    b = lambda x: torch.tensor(x, dtype=torch.bool)
+    advantages, returns = gae_targets(
+        f(rewards), f(values), f(next_values), torch.full((len(rewards),), args.gamma),
+        b(terminals), b(boundaries), 1.0,
+    )
+    data["return"] = returns.tolist()
+    data["advantage"] = advantages.tolist()
     return data, obs, info, episode_lines, episode_lengths
 
 
@@ -300,12 +323,15 @@ def maybe_eval_and_save(
 
 
 def train(args: argparse.Namespace) -> None:
+    for name in ("steps", "rollout", "epochs", "batch", "max_pieces"):
+        positive_size(getattr(args, name), name)
+    policy_temperature(args.temperature)
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.resume and os.path.exists(args.resume):
-        print(f"[pg] resuming from {args.resume}")
+    if args.resume:
+        print(f"[pg] warm start weights from {args.resume}; optimizer/RNG/environment restart")
         model = load_checkpoint(args.resume, device=device)
         model.train()
     else:
@@ -323,11 +349,16 @@ def train(args: argparse.Namespace) -> None:
     recent_lines: list[float] = []
     recent_len: list[int] = []
     t0 = time.time()
+    rollout_progress = {}
 
     while step < args.steps:
+        collection_args = argparse.Namespace(**vars(args))
+        collection_args.rollout = min(args.rollout, args.steps - step)
+        if args.algo == "reinforce":
+            collection_args.max_pieces = min(args.max_pieces, args.steps - step)
         model.eval()
         if args.algo == "reinforce":
-            data, lines, pieces = collect_reinforce_episode(model, env, args, device=device)
+            data, lines, pieces = collect_reinforce_episode(model, env, collection_args, device=device)
             recent_lines.append(lines)
             recent_len.append(pieces)
             batch_steps = pieces
@@ -337,8 +368,9 @@ def train(args: argparse.Namespace) -> None:
                 env,
                 obs,
                 info,
-                args,
+                collection_args,
                 device=device,
+                progress=rollout_progress,
             )
             recent_lines.extend(lines_list)
             recent_len.extend(len_list)
@@ -420,7 +452,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--shaping-coef", type=float, default=0.02)
     p.add_argument("--max-pieces", type=int, default=5000)
     p.add_argument("--out", type=str, default="checkpoints/a2c.pt")
-    p.add_argument("--resume", type=str, default="")
+    p.add_argument("--resume", type=str, default="",
+                   help="weights-only warm start; new optimizer, RNG and environment")
     p.add_argument("--save-every", type=int, default=10)
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--eval-every", type=int, default=25_000)

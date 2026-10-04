@@ -13,7 +13,6 @@ to ONNX.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -179,8 +178,8 @@ def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.resume and os.path.exists(args.resume):
-        print(f"[cem] resuming from {args.resume}")
+    if args.resume:
+        print(f"[cem] weights-only warm start from {args.resume}; optimizer starts fresh")
         model = load_checkpoint(args.resume, device=device)
         model.train()
     else:
@@ -288,7 +287,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--epsilon", type=float, default=0.05)
     p.add_argument("--max-pieces", type=int, default=2000)
     p.add_argument("--out", type=str, default="checkpoints/cem.pt")
-    p.add_argument("--resume", type=str, default="")
+    p.add_argument("--resume", type=str, default="", help="weights-only warm start; fresh optimizer and collected samples")
     p.add_argument("--save-every", type=int, default=1)
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--eval-episodes", type=int, default=5)

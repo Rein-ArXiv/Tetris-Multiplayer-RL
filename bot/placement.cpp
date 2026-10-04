@@ -5,16 +5,27 @@
 #include "../core/input.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace bot {
+
+// Catch schema/SimGrid drift before a raw output loop can read outside the grid.
+static_assert(kBoardRows == SimGrid::kRows && kBoardCols == SimGrid::kCols,
+              "bot observation schema must match SimGrid dimensions");
 
 std::vector<uint8_t> expand_placement(int cur_col,
                                       int cur_rot,
                                       int tgt_col,
                                       int tgt_rot)
 {
+    // A bounded command domain; actual reachability needs live-state checks.
+    if (cur_col < -kNumCols || cur_col >= kNumCols ||
+        tgt_col < 0 || tgt_col >= kNumCols ||
+        cur_rot < 0 || cur_rot >= kNumRotations ||
+        tgt_rot < 0 || tgt_rot >= kNumRotations)
+        throw std::invalid_argument("placement input outside command domain");
     std::vector<uint8_t> seq;
-    seq.reserve(8);
+    seq.reserve(static_cast<size_t>(kNumRotations + 2 * kNumCols));
 
     // 회전은 항상 시계 방향으로만 돈다. SimBlock에 반시계 회전이 없기 때문에
     // 목표 rotation까지 1~3번 돌리는 식으로 맞춘다.
@@ -85,9 +96,8 @@ namespace {
 inline bool is_locked(int v) { return v > 0 && v != 8; }
 
 // 보드를 한 숫자로 점수화한다. 클수록 좋은 판이다.
-//   score = -0.51*총높이 + 0.76*삭제줄 - 0.36*구멍 - 0.18*요철
-// 널리 쓰이는 Tetris 휴리스틱 가중치다. 구멍(위가 막힌 빈칸)에 큰 벌점을 주는
-// 것이 핵심이고, 나머지는 판을 낮고 평평하게 유지하라는 뜻이다.
+// 아래 계수는 이 구현의 선형 평가 설정이다. 성능이나 특정 논문의 재현을 보장하지 않는다.
+// Python 평가에는 우물 항과 상대의 추가 줄 가중치도 있으므로 같은 함수가 아니다.
 double eval_board(const int (&grid)[kBoardRows][kBoardCols], int lines_cleared)
 {
     int heights[kBoardCols] = {0};

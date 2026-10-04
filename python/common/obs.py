@@ -2,22 +2,18 @@
 
 This module is the **only** Python place that converts a ``SimGame`` snapshot
 into a network input. The C++ in-game bot's ``observe()`` (bot/placement.cpp)
-mirrors this contract. There is not yet a direct Python-vs-C++ observation
-parity test, so schema changes must update both implementations and be checked
-with an ONNX smoke test. Keeping the conversion in one spot per language
-prevents the classic "trained on one format, deployed on another" failure.
+mirrors this contract. ``test_observation_parity.py`` compares actual CPU
+observations from both paths. Schema changes must update both implementations;
+model input and ONNX integration checks remain separate.
 
-The schema:
+Schema (unbatched): board float32 (1, BOARD_ROWS, BOARD_COLS), current and next
+float32 (NUM_PIECE_TYPES,). The board contains locked occupancy only; current
+and first-preview ids use the configured id-minus-one vocabulary order.
 
-- ``board``   : float32 (1, 20, 10), 1 where the cell is occupied by a locked
-  piece, 0 otherwise. The currently falling piece and the ghost preview are
-  excluded — the policy reasons about *committed* state plus the piece id.
-- ``current`` : float32 (7,), one-hot of ``current_block_id - 1``
-- ``next``    : float32 (7,), one-hot of ``next_block_id - 1``
-
-The ghost block id is 8 in the C++ sim, and the ghost lives directly on the
-grid layout in *some* paths but not in ``SimGrid::grid`` (locked cells only).
-We treat any cell with value ``> 0 and != 8`` as occupied to be defensive.
+Active coordinates, remaining previews, timing, pending garbage and hidden RNG
+state are omitted. This feature projection is not a full Markov state. The
+legacy occupancy predicate also excludes display id 8, although SimGame.Grid()
+itself contains locked cells rather than a rendered ghost.
 """
 
 from __future__ import annotations
@@ -26,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from . import NUM_PIECE_TYPES
+from . import NUM_PIECE_TYPES, BOARD_ROWS, BOARD_COLS
 
 if TYPE_CHECKING:
     import torch
@@ -42,9 +38,11 @@ def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
     """
     import torch
 
-    raw = np.asarray(sim.grid(), dtype=np.float32)  # (20, 10)
+    raw = np.asarray(sim.grid(), dtype=np.float32)
+    if raw.shape != (BOARD_ROWS, BOARD_COLS):
+        raise ValueError(f"board shape {raw.shape} does not match {(BOARD_ROWS, BOARD_COLS)}")
     occupied = ((raw > 0) & (raw != 8)).astype(np.float32)
-    board = occupied[None, :, :]  # (1, 20, 10)
+    board = occupied[None, :, :]  # channel, row, column; no batch axis yet
 
     current = _piece_one_hot(sim.current_block_id())
     nxt = _piece_one_hot(sim.next_block_id())
@@ -57,7 +55,7 @@ def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
 
 
 def _piece_one_hot(piece_id: int) -> np.ndarray:
-    """One-hot encode a piece id (1..7) into a length-7 float32 vector."""
+    """Encode the configured id order; unknown ids retain the legacy all-zero vector."""
     out = np.zeros(NUM_PIECE_TYPES, dtype=np.float32)
     if 1 <= piece_id <= NUM_PIECE_TYPES:
         out[piece_id - 1] = 1.0

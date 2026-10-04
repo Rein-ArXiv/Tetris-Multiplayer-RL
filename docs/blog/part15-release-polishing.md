@@ -161,13 +161,13 @@ ONNX 파일 하나가 캐릭터 하나라는 가정은 곧 한계가 된다. 같
 struct Opponent {
     std::string name;
     std::string path;
-    int inputIntervalTicks = 6;
+    int inputIntervalTicks = Pacing{}.interval;
     std::string id;
     std::string iconPath;
     std::string portraitPath;
     std::string difficulty = "Normal";
-    int thinkTicks = 18;
-    int minPieceTicks = 60;
+    int thinkTicks = Pacing{}.think;
+    int minPieceTicks = Pacing{}.minimum;
 };
 ```
 
@@ -178,30 +178,50 @@ struct Opponent {
 rook|Rook|@heuristic|assets/icons/bot.png|assets/icons/bot.png|Normal|6|18|60
 ```
 
-`discover_opponents`는 중복 ID와 잘못된 숫자를 거절한다. 명시된 캐릭터 설정을 먼저
-읽고, 아직 등록되지 않은 `model/*.onnx`, `model/bots/*.onnx`를 덧붙인다.
-기존 `model/bots.cfg`는 자동 탐색 항목의 이름·속도만 덮어쓴다. 새 설정과 기존 설정이
-서로 덮어써 최종 속도를 알 수 없게 하지 않기 위한 우선순위다.
+`bot/opponent_profile.h`의 `parse_opponent_profile`은 모델과 이미지를 로드하지 않고
+한 행을 `Opponent` 값으로 바꾼다. 빈 행/주석, 잘못된 행, 유효한 항목을 구별한다.
+선두 UTF-8 BOM과 줄 끝 `#` 주석을 처리하며, 이름 길이는 글자 수가 아니라 UTF-8
+바이트 수로 검사한다. 프로필 숫자는 부호 없는 ASCII 십진 표기와 Pacing 범위를 따른다.
+필드 안 제어 문자는 거절한다. 이 검사는 경로의 안전성이나 모델 출처를 인증하지 않는다.
+
+`discover_opponents`는 잘못된 행과 중복 ID를 진단하고 유효한 항목을 유지한다.
+명시된 캐릭터를 먼저 읽고, 아직 등록되지 않은 `model/*.onnx`, `model/bots/*.onnx`를
+정렬하여 덧붙인다. 같은 모델을 명시 캐릭터 여러 개가 공유하는 것은 허용한다.
+기존 `model/bots.cfg`는 자동 탐색 항목과 기본 연습 상대의 이름·속도만 덮어쓴다.
+명시 프로필이 없는 경우의 기본 상대와 잘못된 행의 건너뛰기 정책은 실행 편의이며,
+설정 검증 성공을 의미하지 않는다. 배포 도구는 잘못된 목록을 거절한다.
+
+Colab 등록 셀과 패키징은 `python/tools/opponent_profile.py`의 공통 필드 계약을 사용한다.
+읽을 때는 주석을 제거하고, 쓸 때는 이름/경로 안의 `#`·구분자·제어 문자를 거절한다.
+그렇지 않으면 저장한 이름이 런타임에서 주석 시작으로 해석될 수 있다.
+C++/Python 규약은 같은 설정 사례를 양쪽 파서에 넣어 직접 대조한다.
 
 `main.cpp`의 BotSelect는 이 목록을 그린다. 선택한 항목이 ONNX면 먼저 모델을
-검사하고, 실패하면 그 상대를 시작하지 않는다. 준비되면 `selectedOpponent`를
-복사해 그 경기의 설정으로 고정한다. 그림 핸들은 경로별 캐시에 보관하고 종료 시 해제한다.
-기본 Lumen/Rook/Vega는 같은 휴리스틱의 속도 변형과 기존 임시 이미지다.
+검사하고 실패하면 그 상대를 시작하지 않는다. 준비되면 `selectedOpponent`를
+복사해 경기의 설정으로 고정한다. 그림 핸들은 경로별 캐시에 보관하고 종료 시 해제한다.
+그림 로드 실패는 기본 아이콘으로 표시하며 모델 선택을 바꾸지 않는다. 기본 캐릭터들은
+같은 휴리스틱의 속도 변형과 임시 이미지 예시다.
+
+학습 체크포인트 `165-characters`는 표시용 Appearance와 행동용 Behavior를 별도로
+구성한다. 명시 목록에 하나라도 오류가 있으면 후보 전체를 거절하고 기존 카탈로그를
+유지한다. 선택한 경기 설정은 값 복사이므로 이후 카탈로그 교체의 영향을 받지 않는다.
+현재 게임의 부분 수용·legacy 탐색 정책과 이 엄격한 실습의 차이를 구별한다.
 
 ## 4. 빠른 추론과 빠른 손을 분리한다
 
-Part 9의 `expand_placement`는 목표 열·회전을 회전 → 좌우 이동 → 하드 드롭의
-입력 마스크로 바꾼다. 기존 코드는 그 큐를 휴리스틱은 2틱, ONNX는 1틱마다 소비했다.
-60Hz에서 각각 0.033초·0.017초다. 모델이 빨리 답을 냈다는 이유로 캐릭터도
-즉시 움직여야 할 필요는 없다.
+정책은 목표를 고르고 Controller는 조작 시점을 정한다. 계산이 끝나는 wall-clock 시간과
+규칙이 소비하는 틱을 구별한다. bot/pacing.h의 Pacing이 기본값과 허용 범위를 모으고
+TickGate가 대기·간격·드롭 조건을 판단한다.
 
-`bot::Controller`는 세 시간을 독립적으로 관리한다.
+| 값 | 의미 |
+|---|---|
+| `thinkTicks` | 새 피스를 관찰한 뒤 첫 계획 전까지 기다릴 호출 수 |
+| `inputIntervalTicks` | 조작이나 실패 재시도 사이의 틱 간격 |
+| `minPieceTicks` | 현재 틱을 포함해 자발적 드롭 전 소비할 최소 틱 수 |
 
-| 값 | 의미 | 기본 보통 상대 |
-|---|---|---|
-| `thinkTicks` | 새 피스가 나온 뒤 첫 계획까지 | 18틱 = 0.3초 |
-| `inputIntervalTicks` | 계획 안의 입력 사이 간격 | 6틱 = 0.1초 |
-| `minPieceTicks` | 피스 등장부터 자발적 하드 드롭까지 최소 시간 | 60틱 = 1초 |
+속도를 바꿀 때는 캐릭터 설정의 값을 조정한다. 제어기가 처음 피스를 관찰한 호출을0으로
+두면 준비 움직임 없는 목표의 첫 드롭은 max(thinkTicks, minPieceTicks-1)이다. 자연
+중력 잠금은 이 조건과 별개다. 총 경과 시간을 구할 때 포화된 게이트 나이를 사용하지 않는다.
 
 호출 흐름은 다음과 같다.
 
@@ -232,10 +252,10 @@ flowchart TD
 **현재 소스 발췌 — `bot/controller.h`**
 
 ```cpp
-if (!spawned_ || pieceRng_ != sim.RngState()) {
-    spawned_ = true; pieceRng_ = sim.RngState();
-    queue_.clear(); cooldown_ = age_ = 0;
-}
+        if (!spawned_ || pieceRng_ != sim.RngState()) {
+            spawned_ = true; pieceRng_ = sim.RngState();
+            queue_.clear(); gate_.new_piece();
+        }
 ```
 
 중력과 규칙은 유지된다. 최소 배치 시간 전에 자연 낙하로 굳을 수 있다.
@@ -245,7 +265,7 @@ if (!spawned_ || pieceRng_ != sim.RngState()) {
 
 ## 5. Colab의 결과를 배포 가능한 캐릭터로 바꾼다
 
-로컬은 학습하지 않는다. `python/train/train_model_zoo_colab.ipynb`에서 학습·export를
+긴 학습은 Colab에서 수행한다. `python/train/train_model_zoo_colab.ipynb`에서 학습·export를
 완료하고, 실행 머신에는 ONNX와 OS별 CPU Runtime만 둔다.
 
 1. `CHARACTER_ID`, `CHARACTER_NAME`, `ALGO`, `RUN_NAME`을 정한다.
@@ -263,7 +283,7 @@ if (!spawned_ || pieceRng_ != sim.RngState()) {
 
 ### 5.1 ONNX 계약을 경기 시작 전에 검사한다
 
-이름만 맞고 출력이 41개인 모델을 40개처럼 읽으면 문제가 숨어 버린다. `BotOnnx::Load`
+출력 폭이 행동 schema와 다른 모델을 그대로 읽으면 잘못된 인덱스나 버퍼 접근이 생긴다. `BotOnnx::Load`
 단계에서 다음 이름·float32 타입·고정 shape를 검사하고, 추론 출력도 다시 확인한다.
 
 | 텐서 | shape |
@@ -297,10 +317,30 @@ sequenceDiagram
     M-->>C: awarded_bp + 현재 BP
 ```
 
-`bot::verify_victory`는 사람 입력 → 봇 입력 → 양쪽 Tick → 가비지 교환 순서로
+`bot::verify_result`는 사람 입력 → 봇 입력 → 양쪽 Tick → 가비지 교환 순서로
 재현한다. `main.cpp`도 같은 가비지 함수를 사용하므로 순서가 갈라지지 않는다.
 첫 종료 시점이 기록의 마지막 틱이고 사람만 살아 있어야 승리다. 패배·무승부·미완료·
 종료 뒤 덧붙인 입력은 지급 대상이 아니다.
+
+정책의 유효한 선택과 대체 선택을 구별한다. `choose_policy`는 먼저 합법 후보를 확인하고
+후보가 있을 때만 원래 정책을 호출한다. 후보 없음은 규칙 상태이며 추론 오류와 다르다.
+정책 실패·예외·불법 목표가 발생하면 클라이언트는 RunStatus에 최초 오류를 유지하고
+티켓을 비워 무보상 연습으로 표시한다. 원래 정책이 나중에 회복되어도 그 경기에서
+보상 적격성을 되살리지 않는다. UI는 승리만으로 고정 지급량을 약속하지 않는다.
+
+서버 `verify_result`는 fallback을 허용하지 않는다. 정책 오류면 policy_unavailable로
+구별하고 지급 저장까지 도달하지 않는다. 정상 경로가 벽에 막히거나 목표를 잃어
+재계획하는 상태는 같은 틱 규칙으로 재현한다. 그것만으로 정책 장애로 분류하지 않는다.
+
+보상 목록은 `read_reward_catalog`가 명시 설정 전체를 검증한다. 잘못된 행·중복·빈 목록·
+읽기 실패이면 카탈로그를 사용할 수 없다. 클라이언트의 legacy 자동 탐색이나 기본 연습
+상대는 서버의 공식 보상 목록에 자동으로 들어오지 않는다.
+
+서버는 시작 시 공식 ONNX를 로드하고 같은 경로의 캐릭터가 준비된 세션을 공유한다.
+티켓도 그 세션을 참조하여 경기 중 경로 교체가 청구의 상대를 바꾸지 않게 한다. 추론은
+검증기 잠금 안에서 직렬화한다. 서버 재시작은 카탈로그/모델을 새로 준비하고 진행 티켓을
+없애는 운영 경계다. 클라이언트 모델과 서버 모델의 버전 일치가 자동 협상되는 기능은
+없으므로 동일 배포 묶음을 사용해야 한다. 비신뢰 ONNX 격리 기능으로 확대하지 않는다.
 
 ### 6.1 검증 비용을 제한한다
 
@@ -310,9 +350,9 @@ sequenceDiagram
 claim에 들어온 승패나 점수는 지급 근거가 되지 않는다.
 
 검증기 mutex는 try-lock으로 확보한다. 다른 재현이 실행 중이면 긴 작업 줄을 만들지 않고
-혼잡 응답을 보낸다. `verify_victory`는 반복 중 주기적으로 경과 시간을 확인하지만 이 검사는
-실행 중인 모델 로드나 단일 추론 호출을 강제로 중단하지 않는다. ONNX 파일 로드도 반복의
-시간 측정 전에 수행된다. 이 경로의 시간 예산을 전체 HTTP 요청의 강제 종료 기한으로
+혼잡 응답을 보낸다. `verify_result`는 반복 중 주기적으로 경과 시간을 확인하지만 이 검사는
+단일 추론 호출을 강제로 중단하지 않는다. 모델 로드는 서버 시작의 준비 단계에서
+수행되며 재현 루프의 시간 예산과 별개다. 이 경로의 시간 예산을 전체 HTTP 요청의 강제 종료 기한으로
 설명하면 안 된다. 강한 CPU 격리가 필요하면 검증을 별도 프로세스로 분리해야 한다.
 
 실패한 재현은 같은 티켓으로 계속 수정해 제출하지 못하게 소모한다. 형식 거절·조기 제출·

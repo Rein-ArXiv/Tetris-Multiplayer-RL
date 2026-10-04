@@ -3,12 +3,13 @@
 // 이 파일은 ONNX Runtime이 없어도 항상 컴파일된다.
 // TETRIS_BUILD_BOT=ON일 때만 CMake가 TETRIS_HAS_ONNXRUNTIME을 정의하고
 // 실제 구현이 빌드된다. 그렇지 않으면 파일 끝의 stub이 대신 들어가
-// Load()가 언제나 실패하고 게임은 heuristic bot으로 넘어간다.
+// Load()가 언제나 실패한다. 모델 선택 실패의 처리는 호출자 정책이다.
 // 덕분에 ONNX Runtime을 받지 않은 사람도 저장소를 그대로 빌드할 수 있다.
 
 #include "bot_onnx.h"
 
 #include "placement.h"
+#include "policy_choice.h"
 #include "../src/sim_game.h"
 
 #include <array>
@@ -78,6 +79,7 @@ struct BotOnnx::Impl {
             session.reset();
             return false;
         }
+        if (err_out) err_out->clear();
         return true;
     }
 
@@ -85,9 +87,9 @@ struct BotOnnx::Impl {
     {
         if (!session) return false;
 
-        float board[kBoardRows * kBoardCols];   // flatten (1, 1, 20, 10)
-        float current[kNumPieceTypes];          // (1, 7)
-        float nxt[kNumPieceTypes];              // (1, 7)
+        float board[kBoardRows * kBoardCols];   // row-major occupancy
+        float current[kNumPieceTypes];          // catalog-order one-hot
+        float nxt[kNumPieceTypes];
         observe(sim, board, current, nxt);
 
         std::array<int64_t, 4> boardShape = {1, 1, kBoardRows, kBoardCols};
@@ -105,32 +107,20 @@ struct BotOnnx::Impl {
 
         Ort::Value inputs[3] = {std::move(boardT), std::move(curT), std::move(nxtT)};
 
-        std::vector<Ort::Value> outs;
-        try {
-            outs = session->Run(
-                Ort::RunOptions{nullptr},
-                inputNames.data(), inputs, 3,
-                outputNames.data(), outputNames.size());
-        } catch (const Ort::Exception&) {
-            return false;
-        }
-        if (outs.empty()) return false;
-
-        // 잘못 export된 모델은 shape을 물어보는 것만으로도 예외를 던진다.
-        // 그래서 검증과 데이터 접근을 통째로 try 안에 둔다.
-        const float* logits = nullptr;
-        try {
-            if (!outs[0].IsTensor()) return false;
-            const auto info = outs[0].GetTensorTypeAndShapeInfo();
+        // Run is synchronous; input arrays and wrappers remain alive until return.
+        auto outs = session->Run(Ort::RunOptions{nullptr}, inputNames.data(),
+                                 inputs, inputNames.size(), outputNames.data(), outputNames.size());
+        if (outs.size() != outputNames.size()) return false;
+        const std::array<std::vector<int64_t>, 2> shapes = {{{1, kNumPlacements}, {1}}};
+        for (size_t i = 0; i < outs.size(); ++i) {
+            if (!outs[i].IsTensor()) return false;
+            const auto info = outs[i].GetTensorTypeAndShapeInfo();
             if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-                info.GetElementCount() != static_cast<size_t>(kNumPlacements)) {
-                return false;
-            }
-            logits = outs[0].GetTensorData<float>();
-        } catch (const Ort::Exception&) {
-            return false;
+                info.GetShape() != shapes[i]) return false;
         }
-        // 출력은 항상 40개(10열 x 4회전)여야 한다.
+        // These pointers borrow output storage. Consume them before outs is destroyed.
+        const float* logits = outs[0].GetTensorData<float>();
+        if (!std::isfinite(outs[1].GetTensorData<float>()[0])) return false;
 
         // 규칙상 둘 수 있는 자리만 남긴다. 모델이 뭘 내놓든 불법 수는 못 고른다.
         auto placements = sim.LegalPlacements();
@@ -142,39 +132,40 @@ struct BotOnnx::Impl {
             if (a >= 0 && a < kNumPlacements) legal[a] = true;
         }
 
-        // 남은 것 중 점수가 제일 높은 자리를 고른다 (greedy).
-        int   bestIdx = -1;
-        float bestVal = -std::numeric_limits<float>::infinity();
-        for (int i = 0; i < kNumPlacements; ++i) {
-            if (!legal[i]) continue;
-            if (logits[i] > bestVal) {
-                bestVal = logits[i];
-                bestIdx = i;
-            }
-        }
-        if (bestIdx < 0) {
-            // 합법 수는 있는데 전부 -inf인 경우. 모델이 NaN을 뱉으면 이렇게 된다.
-            // 게임이 멈추는 것보다는 아무 수나 두는 편이 낫다.
-            return fallback_placement(sim, col_out, rot_out);
-        }
+        int bestIdx = -1;
+        if (!choose_finite_legal(logits, legal, kNumPlacements, bestIdx)) return false;
         decode_action(bestIdx, col_out, rot_out);
         return true;
     }
 };
 
-BotOnnx::BotOnnx() : impl_(std::make_unique<Impl>()) {}
+BotOnnx::BotOnnx() = default;
 BotOnnx::~BotOnnx() = default;
 
 bool BotOnnx::Load(const std::string& onnx_path, std::string* err_out)
 {
-    if (!impl_) impl_ = std::make_unique<Impl>();
-    return impl_->LoadModel(onnx_path, err_out);
+    try {
+        if (!impl_) impl_ = std::make_unique<Impl>();
+        return impl_->LoadModel(onnx_path, err_out);
+    } catch (const std::exception& error) {
+        impl_.reset();
+        if (err_out) *err_out = error.what();
+        return false;
+    }
 }
 
 bool BotOnnx::Infer(const SimGame& sim, int& col_out, int& rot_out)
 {
     if (!impl_ || !impl_->session) return false;
-    return impl_->InferOnce(sim, col_out, rot_out);
+    try {
+        int col = 0, rot = 0;
+        if (!impl_->InferOnce(sim, col, rot)) return false;
+        col_out = col;
+        rot_out = rot;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 bool BotOnnx::IsLoaded() const
@@ -188,7 +179,7 @@ bool BotOnnx::IsLoaded() const
 // 호출자가 IsLoaded()로 걸러 주므로 Infer까지 오지 않는다.
 struct BotOnnx::Impl { bool loaded = false; };
 
-BotOnnx::BotOnnx() : impl_(std::make_unique<Impl>()) {}
+BotOnnx::BotOnnx() = default;
 BotOnnx::~BotOnnx() = default;
 
 bool BotOnnx::Load(const std::string& onnx_path, std::string* err_out)

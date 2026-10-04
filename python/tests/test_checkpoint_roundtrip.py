@@ -1,16 +1,6 @@
-"""Checkpoint save/load round-trip + arch-version mismatch test.
+"""Model weight round trips and explicit class/version compatibility.
 
-The contract this test enforces:
-
-1. ``save_checkpoint`` -> ``load_checkpoint`` returns a model whose state_dict
-   matches the original (Colab -> local handoff works).
-2. A checkpoint whose ``arch_version`` doesn't match the current
-   ``TetrisPolicyNet.ARCH_VERSION`` raises ``RuntimeError`` rather than
-   silently loading wrong-shape weights.
-3. A checkpoint whose ``class`` field isn't ``"TetrisPolicyNet"`` is rejected.
-
-If you bump ``ARCH_VERSION`` in ``common/models.py``, this test will fail
-until you regenerate any cached checkpoints — that's the *intent*.
+This does not exercise a Colab machine or optimizer/environment resume.
 """
 
 from __future__ import annotations

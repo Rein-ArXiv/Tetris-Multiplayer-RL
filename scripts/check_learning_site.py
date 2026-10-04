@@ -23,6 +23,8 @@ def export():
     return json.loads(result.stdout.splitlines()[-1])
 
 def main():
+    subprocess.run([sys.executable, str(ROOT/"tests/learning/test_library_sources.py")],
+                   check=True, cwd=ROOT, capture_output=True, text=True)
     first=export();directory=Path(first['directory']);archive=Path(first['zip'])
     before=hashlib.sha256(archive.read_bytes()).hexdigest()
     second=export()

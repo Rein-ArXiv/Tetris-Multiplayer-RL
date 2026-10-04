@@ -1,0 +1,404 @@
+{
+  "id": "lesson-165",
+  "title": "캐릭터: 정책·일러스트·아이콘을 분리",
+  "shortTitle": "안정적 ID·표시와 행동·설정 문법·선택 스냅샷",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 모델과 틱 실행기는 연결됐지만 상대의 정체성·표시 자원·행동 설정을 묶는 선택 경계가 필요합니다.",
+  "finish": "완료: 캐릭터 카탈로그를 읽고 ID로 선택한 값에서 표시와 행동을 분리해 실제 정책 실행기에 연결합니다.",
+  "objective": "ID와 이름·경로의 차이를 설명하고, 검증한 캐릭터 설정의 소유권과 표시 독립성을 구현한다.",
+  "prerequisites": [
+    "정책과 틱 간격 실행기",
+    "값 복사·예외와 상태 보존",
+    "이미지 핸들·텍스트와 리소스 캐시"
+  ],
+  "recap": {
+    "points": [
+      "생각 대기·조작 간격·드롭 허용 시점은 서로 다른 조건이다.",
+      "빈 입력에도 규칙과 중력이 진행한다.",
+      "입력 속도가 바뀌면 같은 모델의 실제 플레이도 달라질 수 있다."
+    ],
+    "bridge": "모델과 시간 설정을 행동 묶음으로 만들고, 캐릭터의 이름과 그림은 별도로 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "모델 파일과 캐릭터가 일대일일 필요는 없다",
+      "body": "같은 정책을 쓰는 두 상대가 서로 다른 그림과 조작 속도를 가질 수 있습니다. 반대로 한 상대의 모델을 더 잘 학습된 파일로 교체해도 이름과 초상화를 유지할 수 있습니다. 파일 이름을 곧 캐릭터의 정체성으로 쓰면 이런 변경이 서로 묶입니다.\n\n`165-characters`는 캐릭터 목록을 읽고 선택한 상대의 표시 데이터와 행동 설정을 나눕니다. 같은 Session·ONNX Policy·Driver에 행동 설정만 연결하고, 표시 데이터는 이름·아이콘·초상화를 그리는 쪽으로 보냅니다. 규칙과 학습 코드는 이미지 파일을 알 필요가 없습니다.",
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "캐릭터 정체성·표시 자원·정책·조작 설정을 독립 필드로 관리한다.",
+        "mayDiffer": "현재 타입은 평평한 레코드다. 실습은 표시와 행동을 중첩 타입으로 묶는다."
+      }
+    },
+    {
+      "title": "이름은 표현이고 ID는 연결의 기준이다",
+      "body": "표시 이름은 번역하거나 바꿀 수 있고 두 상대가 같은 이름을 사용할 수도 있습니다. ID는 목록·선택·저장 기록에서 같은 대상을 가리키는 안정적인 키입니다. **키**는 레코드를 찾는 데 사용하는 값이며, 이 카탈로그에서는 ID 하나가 항목 하나를 식별하도록 중복을 거절합니다.\n\n예를 들어 calm이라는 ID의 표시 이름을 바꾸어도 선택 요청은 calm을 유지합니다. 이름으로 선택을 검색하면 번역 뒤 대상을 찾지 못할 수 있습니다. 모델 경로도 교체될 수 있으므로 명시 캐릭터의 ID와 분리합니다. 자동 탐색 모델의 경로 기반 ID는 개발 편의 기능이며 장기 기록용 명시 ID와 변경 특성이 다릅니다.\n\nID를 유지하는 것만으로 상대의 난이도까지 고정되지는 않습니다. 모델·시간 설정·규칙을 바꾸면 같은 ID의 행동이 바뀔 수 있습니다. 재현이나 보상 검증에는 당시 행동 설정과 모델 버전도 필요합니다.",
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "캐릭터 정체성·표시 자원·정책·조작 설정을 독립 필드로 관리한다.",
+        "mayDiffer": "현재 타입은 평평한 레코드다. 실습은 표시와 행동을 중첩 타입으로 묶는다."
+      }
+    },
+    {
+      "title": "함께 바뀌는 데이터끼리 묶는다",
+      "body": "Appearance에는 이름·아이콘·초상화·난이도 문구를, Behavior에는 모델 참조와 Pacing을 둡니다. Character가 ID와 두 묶음을 조합합니다. 이것은 상속 계층을 늘리는 대신 필요한 값을 소유하는 **구성**입니다.\n\n어떤 필드끼리 같은 이유로 바뀌는지 보면 경계를 정하기 쉽습니다. 그림 교체는 Appearance를, 추론기나 조작 속도 교체는 Behavior를 바꿉니다. 난이도 문구는 표시용입니다. 문구를 Hard로 바꾸는 것만으로 모델 출력이나 입력 간격이 달라지지 않습니다.\n\n현재 게임의 Opponent는 같은 값을 평평하게 보관합니다. 중첩 구조 자체가 정답은 아닙니다. 중요한 점은 규칙 실행기가 표시 자원에 의존하지 않고 필요한 행동 데이터만 받는 것입니다.",
+      "codes": [
+        {
+          "label": "표시와 행동을 조합한 값 타입",
+          "language": "cpp",
+          "text": "struct Appearance {\n    std::string name, icon, portrait, difficulty;\n};\nstruct Behavior {\n    std::string model;\n    bot::Pacing pacing;\n};\nstruct Character {\n    std::string id;\n    Appearance appearance;\n    Behavior behavior;\n};"
+        }
+      ],
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "캐릭터 정체성·표시 자원·정책·조작 설정을 독립 필드로 관리한다.",
+        "mayDiffer": "현재 타입은 평평한 레코드다. 실습은 표시와 행동을 중첩 타입으로 묶는다."
+      }
+    },
+    {
+      "title": "설정 문법과 의미 검사를 분리해서 생각한다",
+      "body": "설정의 한 행은 구분자로 나뉜 필드들입니다. 파서는 먼저 BOM·주석·바깥 공백을 처리하고 필드 개수를 확인합니다. 이 단계는 문자열의 구조를 해석하는 **구문 분석**입니다. 이어 ID 형식, 필수 이름·모델, 숫자의 표현과 허용 범위를 확인합니다. 이 단계는 각 값이 이 프로그램에서 유효한지 보는 **의미 검사**입니다.\n\n파싱 중에는 모델이나 이미지를 열지 않습니다. 경로라는 문자열이 잘 들어왔는지와 그 파일이 존재하는지, 파일의 모델 규약이 맞는지는 서로 다른 검사입니다. 분리하면 잘못된 행을 재현하는 데 GPU·이미지 파일·ONNX SDK가 필요하지 않습니다.",
+      "codes": [
+        {
+          "label": "파서 결과에서 무시할 행과 오류를 구별한다",
+          "language": "cpp",
+          "text": "struct ProfileLine {\n    std::optional<Opponent> entry;\n    std::string error; // Empty entry + empty error means a blank/comment line.\n};"
+        },
+        {
+          "label": "주석과 필드의 경계를 읽는다",
+          "language": "cpp",
+          "text": "    if(line.substr(0,3)==\"\\xef\\xbb\\xbf\")line.remove_prefix(3);\n    line=line.substr(0,line.find('#'));\n    if(profile_detail::trim(line).empty())return {};\n    std::vector<std::string> fields;\n    for(;;) {\n        const auto end=line.find('|');fields.push_back(profile_detail::trim(line.substr(0,end)));\n        if(end==line.npos)break;\n        line.remove_prefix(end+1);\n    }\n    if(fields.size()!=9)return {{},\"expected profile fields\"};"
+        }
+      ],
+      "reference": {
+        "path": "bot/opponent_profile.h",
+        "symbol": "inline ProfileLine parse_opponent_profile",
+        "invariant": "텍스트를 검증한 값으로 바꾸고 리소스 로딩을 분리한다.",
+        "mayDiffer": "현재 런타임은 잘못된 행을 진단 후 건너뛰며 실습 카탈로그는 전체 후보를 거절한다."
+      }
+    },
+    {
+      "title": "읽을 때 제거하는 문자는 쓸 때도 고려한다",
+      "body": "이 형식에서 #는 줄 끝 주석의 시작이고 |는 필드 구분자입니다. 표시 이름을 R#name으로 그대로 저장하면 읽는 쪽은 # 이후를 주석으로 버립니다. 작성자의 의도와 실제 로드 결과가 달라지는 이유입니다. 등록 encoder는 필드 안의 구분자·주석 문자·제어 문자를 거절하고, parser는 문법으로 쓰인 주석과 바깥 공백을 처리합니다.\n\n이것을 단순히 특수문자를 삭제하는 방법으로 해결하면 서로 다른 이름이 같은 값으로 바뀔 수 있습니다. 이 작은 형식은 인용·이스케이프 규칙을 제공하지 않으므로 표현할 수 없는 필드는 오류로 알립니다. 그런 문자가 필요한 콘텐츠가 생기면 형식을 확장하고 읽기·쓰기·배포 도구를 함께 바꿔야 합니다.\n\nUTF-8 BOM은 텍스트 시작에 붙을 수 있는 표시 바이트입니다. 파서가 이를 ID 일부로 읽으면 정상 ID가 거절됩니다. 명시적으로 제거할 자리와 일반 필드 내용을 구분합니다.",
+      "reference": {
+        "path": "python/tools/opponent_profile.py",
+        "symbol": "def encode_profile",
+        "invariant": "저장할 필드가 읽기 문법에서 다른 의미가 되지 않도록 검사한다.",
+        "mayDiffer": "등록 encoder는 불명확한 필드를 거절하고 reader는 허용한 바깥 공백/주석을 정규화한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "UTF-8 바이트 수와 화면 글자 수",
+          "body": "C++ string의 size는 이 설정에서 UTF-8 바이트 수입니다. Python len(name)은 코드 포인트 수이므로 같은 제한을 확인하려면 len(name.encode(\"utf-8\"))를 사용합니다. 둘 다 화면에 보이는 자소 묶음이나 픽셀 너비를 직접 재는 값은 아닙니다."
+        }
+      ]
+    },
+    {
+      "title": "숫자는 전체 문자열을 읽은 뒤 범위를 확인한다",
+      "body": "값이 6x일 때 앞의 6만 받아들이면 오타가 정상 설정으로 실행됩니다. 숫자 필드는 ASCII 십진 숫자로만 이루어졌는지 확인하고, from_chars가 끝까지 읽었는지와 표현 범위 오류를 검사합니다. 그 뒤 Pacing의 콘텐츠 허용 범위를 적용합니다.\n\n표현 가능한 int라는 조건과 유효한 조작 간격이라는 조건은 다릅니다. 매우 큰 숫자는 정수 변환에서 거절하고, 표현 가능한 0이라도 입력 간격의 계약에 맞지 않으면 거절합니다. 출력 변수는 모든 검사가 성공한 뒤 바꿉니다. 기본값을 먼저 덮어쓴 뒤 오류를 보고하는 부분 갱신을 피합니다.",
+      "codes": [
+        {
+          "label": "표현과 의미 범위를 모두 확인한다",
+          "language": "cpp",
+          "text": "inline bool number(const std::string& text,int& out,int low,int high) {\n    if(text.empty() || text.find_first_not_of(\"0123456789\")!=text.npos)return false;\n    int value=0;const auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);\n    if(parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size() || value<low || value>high)return false;\n    out=value;return true;\n}"
+        }
+      ],
+      "reference": {
+        "path": "bot/opponent_profile.h",
+        "symbol": "inline ProfileLine parse_opponent_profile",
+        "invariant": "텍스트를 검증한 값으로 바꾸고 리소스 로딩을 분리한다.",
+        "mayDiffer": "현재 런타임은 잘못된 행을 진단 후 건너뛰며 실습 카탈로그는 전체 후보를 거절한다."
+      }
+    },
+    {
+      "title": "목록 안의 중복은 행 검사 뒤에 알 수 있다",
+      "body": "한 행의 ID 형식은 올바르더라도 다른 행과 같을 수 있습니다. 이 조건은 파서 하나만으로 확인할 수 없으므로 카탈로그가 처리합니다. unordered_set에 ID를 삽입한 결과의 second로 새 ID인지 확인합니다. 같은 모델 경로의 재사용은 허용하고 같은 ID의 재사용은 거절합니다.\n\n실습에서는 후보 카탈로그를 지역 변수로 완성한 뒤 반환합니다. 잘못된 행·중복·읽기 실패·빈 목록이면 예외를 전달하고 호출자는 기존 카탈로그를 유지합니다. 스트림의 EOF와 읽기 오류도 구별합니다. EOF는 정상 입력의 끝일 수 있지만 badbit는 읽기 실패를 나타냅니다.\n\n현재 게임의 discover_opponents는 유효한 행을 유지하고 오류 행을 진단 후 건너뜁니다. 플레이 가능한 목록을 만드는 정책과 배포할 목록 전체를 검증하는 정책은 목적이 다릅니다. 실제 런타임의 fallback 상대가 보인다고 설정 검사가 성공했다고 해석하지 않습니다.",
+      "codes": [
+        {
+          "label": "후보 목록에서 ID를 검사하고 표시/행동으로 옮긴다",
+          "language": "cpp",
+          "text": "            const auto& e=*parsed.entry;\n            if(!ids.insert(e.id).second)throw std::invalid_argument(\"duplicate character identity\");\n            candidate.entries_.push_back({e.id,{e.name,e.iconPath,e.portraitPath,e.difficulty},\n                {e.path,{e.inputIntervalTicks,e.thinkTicks,e.minPieceTicks}}});"
+        },
+        {
+          "label": "정상 EOF와 읽기 실패를 구별한다",
+          "language": "cpp",
+          "text": "        if(input.bad() || (input.fail() && !input.eof()))throw std::runtime_error(\"profile read failed\");\n        if(candidate.entries_.empty())throw std::invalid_argument(\"empty character catalog\");\n        return candidate;"
+        }
+      ],
+      "reference": {
+        "path": "bot/opponent_profile.h",
+        "symbol": "inline ProfileLine parse_opponent_profile",
+        "invariant": "텍스트를 검증한 값으로 바꾸고 리소스 로딩을 분리한다.",
+        "mayDiffer": "현재 런타임은 잘못된 행을 진단 후 건너뛰며 실습 카탈로그는 전체 후보를 거절한다."
+      }
+    },
+    {
+      "title": "선택한 경기는 값 복사로 설정을 소유한다",
+      "body": "카탈로그 안의 항목을 포인터로 오래 보관하면 목록 교체 시 수명이 끝나거나 다른 설정을 보게 될 수 있습니다. Catalog.select는 Character 값을 반환합니다. 그 경기의 선택값은 목록을 다시 읽어도 유지됩니다.\n\n이 복사는 문자열과 시간 설정의 스냅샷입니다. 모델 파일의 바이트나 GPU 이미지까지 복제하지는 않습니다. 같은 경로의 파일이 바뀌면 새 로드의 내용은 달라질 수 있습니다. 실행 중 고정해야 하는 리소스는 성공적으로 로드한 정책 세션과 이미지 핸들의 수명으로 관리하고, 재현용 파일 식별값은 별도로 기록합니다.\n\n목록에서 항목을 찾을 때는 표시 이름이 아니라 ID를 사용합니다. 없는 ID는 첫 항목으로 바꾸지 않고 오류로 알립니다. 선택자가 고른 상대와 실제 실행되는 상대가 달라지는 일을 막기 위한 계약입니다.",
+      "codes": [
+        {
+          "label": "선택값은 카탈로그의 참조가 아니다",
+          "language": "cpp",
+          "text": "    Character select(const std::string& id) const {\n        for(const auto& entry:entries_)if(entry.id==id)return entry;\n        throw std::out_of_range(\"unknown character identity\");\n    }"
+        }
+      ],
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "캐릭터 정체성·표시 자원·정책·조작 설정을 독립 필드로 관리한다.",
+        "mayDiffer": "현재 타입은 평평한 레코드다. 실습은 표시와 행동을 중첩 타입으로 묶는다."
+      }
+    },
+    {
+      "title": "그림의 수명과 모델의 수명을 분리한다",
+      "body": "화면은 선택값의 Appearance로 이름과 이미지를 표시합니다. 아이콘은 작은 프레임, 초상화는 선택·결과 화면의 넓은 영역에 사용하며 누적 이미지 그리기의 비율 유지 규칙을 적용합니다. 규칙 틱은 이 이미지 크기나 로드 결과를 입력으로 받지 않습니다.\n\n현재 main.cpp는 경로별 캐시에 이미지 핸들을 보관합니다. 같은 경로를 매 프레임 다시 읽지 않고, 실패한 로드도 캐시에 남겨 기본 아이콘을 보여 줍니다. 실패 뒤 파일만 고쳐도 즉시 재로딩되는 구조는 아니므로 개발 중 재시작 또는 명시적 캐시 무효화가 필요합니다. 캐시의 핸들은 종료 정리에서 해제합니다.\n\n모델을 읽지 못한 실패는 그림이 없어서 기본 아이콘을 쓰는 경우와 다릅니다. 정책 실패 시 어떤 상대를 실행할지는 별도로 결정해야 합니다. 이번 콘솔 probe는 ONNX가 준비되지 않으면 명시적으로 종료합니다.",
+      "reference": {
+        "path": "src/main.cpp",
+        "symbol": "auto opponentImage",
+        "invariant": "표시 자원 캐시와 정책/규칙의 소유권을 분리한다.",
+        "mayDiffer": "실습 콘솔은 이미지 경로를 출력한다. 실제 게임은 이미지 핸들을 로드하고 GUI에 그린다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "경로와 콘텐츠는 다르다",
+          "body": "경로 캐시의 키는 파일 위치 문자열입니다. 같은 경로의 내용을 교체했다고 이미 로드한 이미지가 자동 갱신되지는 않습니다. 리소스 갱신을 지원하려면 캐시 세대·해제·사용 중 핸들의 수명을 함께 설계합니다."
+        }
+      ]
+    },
+    {
+      "title": "선택한 행동 설정을 누적 실행기에 연결한다",
+      "body": "character_probe는 파일을 읽고 ID로 Character를 선택합니다. Behavior의 Pacing을 Driver에 전달하고 모델 경로로 Policy를 로드합니다. Driver가 정책을 요청하는 틱마다 같은 Session에서 추론하며 빈 틱까지 진행합니다.\n\nprobe의 첫 줄은 ID와 표시 데이터를, 다음 줄들은 규칙 실행 기록을 출력합니다. 이 콘솔 도구는 실제 ONNX 모델을 실행하지만 이미지를 그리지는 않습니다. 그래픽 계층에 필요한 값이 무엇인지 확인한 뒤 같은 Appearance를 이미지·텍스트 그리기에 전달할 수 있습니다. @heuristic도 카탈로그 문법상 유효하나 이 probe는 ONNX 연결 검사용이므로 해당 실행 요청을 거절합니다.",
+      "codes": [
+        {
+          "label": "선택값으로 실행기의 의존성을 구성한다",
+          "language": "cpp",
+          "text": "        const auto catalog=study_characters::Catalog::read(input);\n        const auto selected=catalog.select(argv[2]);\n        const auto seed=number<std::uint64_t>(argv[3]);const int ticks=number<int>(argv[4]);\n        if(ticks<=0)throw std::invalid_argument(\"positive tick budget required\");\n        study_paced::Driver driver(selected.behavior.pacing);\n        study_inference::Policy model;std::string error;\n        if(selected.behavior.model==\"@heuristic\")throw std::invalid_argument(\"this probe requires an ONNX profile\");\n        if(!model.load(selected.behavior.model,error))throw std::runtime_error(error);"
+        },
+        {
+          "label": "bot/characters.h",
+          "language": "cpp",
+          "file": "checkpoints/165-characters/bot/characters.h",
+          "collapsed": true
+        },
+        {
+          "label": "bot/opponent_profile.h",
+          "language": "cpp",
+          "file": "checkpoints/165-characters/bot/opponent_profile.h",
+          "collapsed": true
+        },
+        {
+          "label": "tools/character_probe.cpp",
+          "language": "cpp",
+          "file": "checkpoints/165-characters/tools/character_probe.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "캐릭터 정체성·표시 자원·정책·조작 설정을 독립 필드로 관리한다.",
+        "mayDiffer": "현재 타입은 평평한 레코드다. 실습은 표시와 행동을 중첩 타입으로 묶는다."
+      }
+    },
+    {
+      "title": "같은 모델을 공유한다는 것을 검사로 확인한다",
+      "body": "실습 검사에서는 같은 실제 모델과 같은 Pacing을 가진 두 캐릭터를 만듭니다. ID·이름·그림 경로·난이도 문구만 다르게 하고 같은 시드로 실행하면 표시 줄은 다르지만 틱별 입력과 규칙 상태는 같아야 합니다. 이것은 표시 데이터가 규칙에 새어 들어가지 않았는지 확인하는 검사입니다.\n\n별도의 상대는 모델을 유지하고 Pacing을 바꿉니다. 선택한 예제에서 입력 스케줄이 달라지는지 확인합니다. Python 모델로 결정 시점의 행동을 대조하고 실제 마스크로 native Session을 진행하여 전체 상태 bytes를 비교합니다. 표현 독립성·속도 적용·정책 연결을 각각 확인하는 것입니다.\n\nID 중복·없는 ID·오류 행·카탈로그 교체 실패도 검사합니다. 이미지 파일이 없는 상황은 parser 실패로 만들지 않습니다. 이 단계는 경로를 담는 값의 계약을 검사하고 파일 존재는 리소스 로더나 패키징의 책임으로 남깁니다.",
+      "codes": [
+        {
+          "label": "tests/character_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/165-characters/tests/character_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/character_inference.py",
+          "language": "python",
+          "file": "checkpoints/165-characters/tests/character_inference.py",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "등록·패키징·서버가 같은 값을 다르게 책임진다",
+      "body": "Colab 등록 셀은 공통 encoder를 거쳐 한 행을 저장합니다. 패키징은 공통 parser로 읽은 뒤 모델·이미지의 허용 폴더, 확장자, 저장소 밖 경로, 누락 파일을 검사합니다. 형식이 맞는다는 이유만으로 파일이 준비됐다고 간주하지 않습니다. 새 정책을 연결하려면 export 규약 검사도 통과해야 합니다.\n\n클라이언트는 상대 ID로 서버에 경기를 요청합니다. 서버는 자신의 카탈로그에서 그 ID를 찾아 티켓에 설정값을 복사합니다. 클라이언트가 표시 이름이나 difficulty를 수정했다고 서버의 상대 설정이나 지급 기준이 바뀌지는 않습니다. ID는 상대를 찾는 키이며 권한을 증명하는 비밀 값은 아닙니다.\n\n현재 티켓에는 Opponent 값이 들어가지만 모델 파일의 바이트까지 복제하지는 않습니다. 경기 중 배포 파일을 교체하는 운영과 모델 버전 검증은 별도 문제입니다. 파싱·경로 검사·모델 계약·경기 검증을 하나의 보안 기능으로 묶어 설명하지 않습니다.",
+      "reference": {
+        "path": "meta/bot_challenges.cpp",
+        "symbol": "struct Ticket",
+        "invariant": "클라이언트의 표시 데이터 대신 서버 소유 카탈로그의 상대 설정을 사용한다.",
+        "mayDiffer": "실습 카탈로그는 로컬 단일 실행기다. 서버 권위의 티켓·재생·보상은 다른 계층이다."
+      }
+    },
+    {
+      "title": "실행하며 바꿀 필드를 분명히 한다",
+      "body": "체크포인트에서 bindings를 빌드하면 캐릭터와 누적 규칙의 검사를 실행할 수 있습니다. 실제 모델 probe는 inference 타깃으로 빌드합니다. characters.cfg에 이 Session용으로 export한 ONNX 경로를 적고, 실행할 ID·시드·틱 예산을 넘깁니다. 상대 경로는 프로세스를 실행한 폴더 기준입니다.\n\n먼저 이름·그림 경로만 바꾸어 표시 줄을 비교하고, 다음에는 Pacing만 바꾸어 틱 기록을 비교합니다. 모델만 교체할 때는 관측·행동 규약과 파일 로드를 먼저 확인합니다. 이렇게 한 종류의 변경씩 비교하면 캐릭터 표현과 정책 실력, 조작 속도가 어떻게 결합하는지 추적할 수 있습니다.",
+      "codes": [
+        {
+          "label": "README.md",
+          "language": "markdown",
+          "file": "checkpoints/165-characters/README.md",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "165-1",
+      "question": "캐릭터의 표시 이름을 번역했습니다. 같은 대상을 선택하는 요청에 유지할 값은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "번역된 이름"
+        },
+        {
+          "id": "b",
+          "text": "캐릭터 ID"
+        },
+        {
+          "id": "c",
+          "text": "아이콘 너비"
+        },
+        {
+          "id": "d",
+          "text": "목록의 현재 순번"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "캐릭터 ID",
+      "explanation": "ID는 변경 가능한 표시 이름과 분리된 연결 기준입니다. 순번도 정렬이나 항목 추가에 따라 달라질 수 있습니다."
+    },
+    {
+      "id": "165-2",
+      "question": "같은 모델·Pacing·시드에서 초상화 경로만 바꿨습니다. 규칙 실행의 기대 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "매번 다른 목표 선택"
+        },
+        {
+          "id": "b",
+          "text": "생각 대기 제거"
+        },
+        {
+          "id": "c",
+          "text": "동일한 입력과 상태 전이"
+        },
+        {
+          "id": "d",
+          "text": "즉시 보상 지급"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "동일한 입력과 상태 전이",
+      "explanation": "표시 자원은 규칙 입력에 참여하지 않습니다. 같은 실행 조건에서 표현 변경이 규칙을 바꾸면 계층 경계를 점검해야 합니다."
+    },
+    {
+      "id": "165-3",
+      "question": "이 형식의 등록기에 이름 R#name을 전달했습니다. 적절한 처리는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "그대로 저장한다"
+        },
+        {
+          "id": "b",
+          "text": "주석으로 잘릴 수 있으므로 거절한다"
+        },
+        {
+          "id": "c",
+          "text": "ID를 무작위로 바꾼다"
+        },
+        {
+          "id": "d",
+          "text": "모델 파일을 지운다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "주석으로 잘릴 수 있으므로 거절한다",
+      "explanation": "#는 주석 문법입니다. 이 형식은 필드 안의 #를 표현하는 인용 규칙이 없으므로 저장 전에 오류로 알려야 합니다."
+    },
+    {
+      "id": "165-4",
+      "question": "Character를 값 복사해 선택한 뒤 카탈로그를 교체했습니다. 복사로 고정된 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모델 파일의 모든 바이트"
+        },
+        {
+          "id": "b",
+          "text": "외부 이미지의 최신 내용"
+        },
+        {
+          "id": "c",
+          "text": "서버의 지급 정책"
+        },
+        {
+          "id": "d",
+          "text": "문자열과 시간 설정 값"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "문자열과 시간 설정 값",
+      "explanation": "값 복사는 레코드의 문자열과 Pacing을 소유합니다. 파일 내용과 로드된 리소스의 수명은 별도로 관리해야 합니다."
+    },
+    {
+      "id": "165-5",
+      "question": "클라이언트가 difficulty 문구를 최고 난이도로 바꾸어 보냈습니다. 서버가 상대를 판단할 기준은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "클라이언트의 문구"
+        },
+        {
+          "id": "b",
+          "text": "아이콘 색"
+        },
+        {
+          "id": "c",
+          "text": "서버 카탈로그와 티켓의 설정"
+        },
+        {
+          "id": "d",
+          "text": "파일 이름의 길이"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "서버 카탈로그와 티켓의 설정",
+      "explanation": "표시 문구는 권위를 갖지 않습니다. 서버는 자신의 설정에서 상대를 찾고 경기 계약에 따라 판단합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "ID·Appearance·Behavior로 캐릭터 레코드를 구성한다.",
+      "같은 모델을 공유하는 상대를 등록하고 선택값을 복사한다.",
+      "표시 변경과 Pacing 변경의 틱 기록을 비교한다."
+    ],
+    "failureChecks": [
+      "#·구분자·잘못된 숫자·중복 ID를 조용히 다른 설정으로 바꾸지 않는다.",
+      "카탈로그 재로딩 실패가 현재 선택과 목록을 덮어쓰지 않는지 확인한다.",
+      "서버 상대 설정과 클라이언트 표시 문구를 혼동하지 않는다."
+    ],
+    "expected": "캐릭터 콘텐츠를 모델 재학습·규칙 변경 없이 교체하고 각 변경의 책임과 검증 위치를 설명할 수 있다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek 순수 Python 프로필 codec 초안·실제 C++ parser/패키징/정책 실행 대조",
+    "corrections": [
+      "Colab # 허용과 런타임 주석 해석 충돌 방지",
+      "패키징의 줄 끝 주석/BOM 해석을 런타임과 동기화",
+      "오래된 로스터 설명과 고정 시간 안내 교정"
+    ]
+  },
+  "validation": [
+    "실제 C++/Python 프로필 파서와 패키징 회귀",
+    "독립 누적 native CTest·표시 독립성/선택 스냅샷 검사",
+    "실제 공유 ONNX 모델과 Python/native 상태 대조",
+    "Windows/macOS native·GUI 이미지·장기 난이도 미검증"
+  ]
+}

@@ -1,116 +1,59 @@
-"""Convert a trained TetrisPolicyNet checkpoint to ONNX for the C++ netbot.
+"""Export a canonical checkpoint through the C++ bot's fixed I/O contract.
 
-The C++ runtime uses onnxruntime (see ``bot/bot_onnx.cpp``) rather than libtorch
-or a Python subprocess. Training/export can stay in Colab; deployment only
-needs the exported ONNX file and the ONNX Runtime CPU bundle.
+The deployment artifact is one ONNX file with embedded weights. Structure,
+fixed float32 I/O and CPU Runtime outputs are checked before replacement.
+Default probes exercise tensors; pass native observation cases for game-state
+coverage. Neither probe set establishes playing strength or all-input parity.
 
-Input/output names are load-bearing: ``bot/bot_onnx.cpp`` looks them up by
-string. If you rename one here, the C++ side must change in lockstep (and the
-existing ``model/*.onnx`` / ``model/bots/*.onnx`` bundles must be re-exported).
-
-Usage::
-
-    uv run --directory python python -m netbot.export_onnx \\
-        checkpoints/run42/step_2000000.pt \\
-        ../model/bots/run42.onnx
+Usage from python/: python -m netbot.export_onnx checkpoint.pt model.onnx
+Install the export extra (PyTorch, ONNX and ONNX Runtime) in the export machine.
 """
-
 from __future__ import annotations
-
 import argparse
-import inspect
+import hashlib
+import json
 from pathlib import Path
 
-try:
-    import torch
-except ImportError as exc:  # pragma: no cover - depends on optional local env
-    raise SystemExit(
-        "export_onnx requires PyTorch. Run this in Colab, or install the "
-        "optional export dependencies (`uv sync --extra export`)."
-    ) from exc
+import torch
+from common import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES, NUM_PLACEMENTS
+from common.checkpoint import load_checkpoint, IO_CONTRACT
+from .onnx_pipeline import export_checked, tensor_probes
 
-from common import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES
-from common.checkpoint import load_checkpoint
-from common.models import TetrisPolicyNet
-
-
-# bot/bot_onnx.cpp의 inputNames / outputNames와 한 글자도 달라선 안 된다.
-# 여기가 어긋나면 C++ Load 단계의 계약 검사에서 거절한다.
-INPUT_NAMES = ["board", "current", "next"]
-OUTPUT_NAMES = ["policy_logits", "value"]
+# Keep order/names consistent with BotOnnx's runtime boundary.
+INPUT_SPECS=[('board',(1,1,BOARD_ROWS,BOARD_COLS)),
+             ('current',(1,NUM_PIECE_TYPES)),('next',(1,NUM_PIECE_TYPES))]
+OUTPUT_SPECS=[('policy_logits',(1,NUM_PLACEMENTS)),('value',(1,))]
+INPUT_NAMES=[name for name,_ in INPUT_SPECS]
+OUTPUT_NAMES=[name for name,_ in OUTPUT_SPECS]
 
 
-def export(ckpt_path: str | Path, out_path: str | Path, opset: int = 17) -> None:
-    """Load ``ckpt_path`` (a TetrisPolicyNet .pt) and write an ONNX graph to
-    ``out_path``.
-
-    Batch size is fixed at 1 — the C++ netbot only ever runs single-step
-    inference on one SimGame at a time. If a training-side consumer ever needs
-    batched ONNX inference, add ``dynamic_axes={"board": {0: "batch"}, ...}``.
-    """
-    ckpt_path = Path(ckpt_path)
-    out_path = Path(out_path)
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    model = load_checkpoint(ckpt_path, device="cpu")
-    model.eval()
-
-    # export할 때 넘기는 예제 입력. shape만 맞으면 되고 값은 의미 없다.
-    # common.obs.build_observation의 출력에 batch 차원 하나를 더한 모양이다.
-    dummy_board = torch.zeros(1, 1, BOARD_ROWS, BOARD_COLS, dtype=torch.float32)
-    dummy_current = torch.zeros(1, NUM_PIECE_TYPES, dtype=torch.float32)
-    dummy_next = torch.zeros(1, NUM_PIECE_TYPES, dtype=torch.float32)
-
-    kwargs = {
-        "input_names": INPUT_NAMES,
-        "output_names": OUTPUT_NAMES,
-        "opset_version": opset,
-        "dynamic_axes": None,
-        "do_constant_folding": True,
-    }
-    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
-        # 구형 exporter를 명시적으로 쓴다. 최신 PyTorch가 기본으로 삼는
-        # dynamo exporter는 onnxscript를 따로 요구하는데, Colab에는 onnx만
-        # 깔려 있는 경우가 많아 export가 그냥 실패한다.
-        # 이 정도 크기의 conv + linear 모델에는 구형 경로로 충분하다.
-        kwargs["dynamo"] = False
-
-    print(f"[export_onnx] torch {torch.__version__}, opset {opset}")
-    try:
-        torch.onnx.export(
-            model,
-            (dummy_board, dummy_current, dummy_next),
-            str(out_path),
-            **kwargs,
-        )
-    except Exception as exc:
-        message = str(exc)
-        if (
-            "Module onnx is not installed" in message
-            or "No module named 'onnx'" in message
-            or "No module named 'onnxscript'" in message
-        ):
-            raise SystemExit(
-                "ONNX export dependency is missing. In Colab, run the setup "
-                "cell again so `pip install -r python/requirements-colab.txt` "
-                "installs onnx/onnxscript, then rerun this export cell."
-            ) from exc
-        raise
-    import onnx
-    onnx.checker.check_model(str(out_path))
-    print(f"[export_onnx] wrote {out_path} from {ckpt_path}")
+def export(ckpt_path: str | Path, out_path: str | Path, opset: int=17, *, cases=None) -> dict:
+    """Validate a private loaded model, then commit a checked single-file graph."""
+    source,destination=Path(ckpt_path).resolve(),Path(out_path).resolve()
+    if source == destination:
+        raise ValueError('checkpoint and ONNX destination cannot be the same path')
+    before=hashlib.sha256(source.read_bytes()).hexdigest()
+    model=load_checkpoint(source,device='cpu')
+    if hashlib.sha256(source.read_bytes()).hexdigest() != before:
+        raise RuntimeError('checkpoint changed while loading')
+    if (model.board_channels != 1 or model.n_piece_types != NUM_PIECE_TYPES
+            or model.n_placements != NUM_PLACEMENTS):
+        raise ValueError('model dimensions differ from the C++ deployment contract')
+    metadata={'tetris.policy':json.dumps(dict(format_version=1,io_contract=IO_CONTRACT,
+              checkpoint_sha256=before,arch_version=model.ARCH_VERSION),sort_keys=True),
+              'tetris.exporter':json.dumps(dict(torch=str(torch.__version__),mode='torchscript',opset=opset))}
+    evidence=export_checked(model,destination,INPUT_SPECS,OUTPUT_SPECS,
+                            tensor_probes(INPUT_SPECS,NUM_PLACEMENTS) if cases is None else cases,
+                            opset=opset,metadata=metadata)
+    print('[export_onnx] wrote',destination,'from',source,json.dumps(evidence,allow_nan=False))
+    return evidence
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("ckpt", help="path to trained .pt checkpoint (TetrisPolicyNet)")
-    ap.add_argument("out",  help="output .onnx path (e.g. ../model/bots/run42.onnx)")
-    ap.add_argument("--opset", type=int, default=17, help="ONNX opset (default: 17)")
-    args = ap.parse_args()
-    export(args.ckpt, args.out, args.opset)
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('ckpt');parser.add_argument('out')
+    parser.add_argument('--opset',type=int,default=17,help='ONNX operator-set revision; target Runtime must support it')
+    args=parser.parse_args();export(args.ckpt,args.out,args.opset)
 
 
-if __name__ == "__main__":
-    main()
+if __name__=='__main__':main()

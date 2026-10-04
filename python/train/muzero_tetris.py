@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -38,7 +37,8 @@ if str(_PY_ROOT) not in sys.path:
 
 from train.rl_common import ReplayBuffer, masked_softmax_np, obs_to_batch
 from common import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES, NUM_PLACEMENTS
-from common.checkpoint import save_checkpoint
+from common.checkpoint import save_checkpoint, IO_CONTRACT
+from common.atomic_save import atomic_torch_save
 from common.env import TetrisPlacementEnv
 from common.models import TetrisPolicyNet
 
@@ -236,26 +236,39 @@ def run_mcts(
         value = expand_node(net, node, mask=None, device=device)
         backup(path, value, args.gamma)
 
-    visits = np.zeros(NUM_PLACEMENTS, dtype=np.float32)
+    visits = np.zeros(net.n_actions, dtype=np.float64)
     for action, child in root.children.items():
         visits[action] = float(child.visit_count)
     if visits.sum() <= 0.0:
         for action, child in root.children.items():
             visits[action] = float(child.prior)
-    visits *= mask.astype(np.float32)
+    visits *= mask
     if visits.sum() <= 0.0:
         visits[legal] = 1.0
 
-    if args.action_temperature <= 1e-6:
-        policy = np.zeros(NUM_PLACEMENTS, dtype=np.float32)
-        policy[int(legal[np.argmax(visits[legal])])] = 1.0
-    else:
-        scaled = np.power(visits, 1.0 / args.action_temperature)
-        scaled *= mask.astype(np.float32)
-        policy = scaled / max(float(scaled.sum()), 1e-12)
-
-    action = int(np.random.choice(np.arange(NUM_PLACEMENTS), p=policy))
+    policy = visit_policy(visits, mask, args.action_temperature)
+    action = int(np.random.choice(np.arange(net.n_actions), p=policy))
     return action, policy.astype(np.float32)
+
+
+def visit_policy(visits, mask, temperature):
+    """Temperature over visit counts, normalized in log space to avoid overflow."""
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError('temperature must be finite and nonnegative')
+    visits, mask = np.asarray(visits,dtype=np.float64), np.asarray(mask,dtype=bool)
+    if visits.shape != mask.shape or visits.ndim != 1 or not np.isfinite(visits).all() or (visits < 0).any():
+        raise ValueError('invalid visit counts')
+    active = mask & (visits > 0)
+    if not active.any():
+        raise ValueError('visit policy needs positive legal mass')
+    policy = np.zeros_like(visits)
+    if temperature <= 1e-6:
+        policy[np.flatnonzero(active)[np.argmax(visits[active])]] = 1.
+    else:
+        log_counts = np.log(visits[active])
+        weights = np.exp((log_counts - log_counts.max()) / temperature)
+        policy[active] = weights / weights.sum()
+    return policy
 
 
 def self_play_episode(
@@ -267,54 +280,55 @@ def self_play_episode(
     device: torch.device,
 ) -> tuple[float, int]:
     env = TetrisPlacementEnv(seed=args.seed + episode)
-    obs, info = env.reset(seed=args.seed + episode)
-    trajectory: list[dict[str, Any]] = []
-    lines = 0.0
+    was_training = net.training
+    try:
+        net.eval()
+        obs, info = env.reset(seed=args.seed + episode)
+        trajectory: list[dict[str, Any]] = []
+        lines = 0.0
+        terminal = False
+        for _piece in range(args.max_pieces):
+            mask = np.asarray(info['legal_mask'], dtype=bool)
+            if not mask.any():
+                raise RuntimeError('live MuZero observation has no legal action')
+            action, policy = run_mcts(net, obs, mask, args, device=device)
+            # Keep the input before step can reuse an observation buffer.
+            before = {key: np.array(value, copy=True) for key,value in obs.items()}
+            before_mask = mask.copy()
+            next_obs, reward, term, trunc, next_info = env.step(action)
+            terminal = bool(term)
+            trajectory.append(dict(obs=before, mask=before_mask, action=action,
+                reward=float(reward), done=terminal,
+                next_obs={key:np.array(value,copy=True) for key,value in next_obs.items()},
+                next_mask=np.array(next_info['legal_mask'],dtype=bool,copy=True), policy=policy.copy()))
+            lines = float(next_info['lines'])
+            obs, info = next_obs, next_info
+            if term or trunc:
+                break
 
-    for _piece in range(args.max_pieces):
-        mask = np.asarray(info["legal_mask"], dtype=bool)
-        if not mask.any():
-            break
-        action, policy = run_mcts(net, obs, mask, args, device=device)
-        next_obs, reward, term, trunc, next_info = env.step(action)
-        done = bool(term or trunc)
-        trajectory.append(
-            {
-                "obs": obs,
-                "mask": mask,
-                "action": action,
-                "reward": float(reward),
-                "done": done,
-                "next_obs": next_obs,
-                "next_mask": np.asarray(next_info["legal_mask"], dtype=bool),
-                "policy": policy,
-            }
-        )
-        lines += float(reward)
-        obs, info = next_obs, next_info
-        if done:
-            break
+        # Value is trained in scaled units; returns below accumulate raw rewards.
+        value = 0.0
+        if trajectory and not terminal:
+            with torch.no_grad():
+                batch = obs_to_batch(obs, device)
+                latent = net.represent(batch['board'], batch['current'], batch['next'])
+                _, tail = net.predict(latent)
+                value = float(tail.item()) * args.value_scale
+        returns = [0.0] * len(trajectory)
+        for i in reversed(range(len(trajectory))):
+            value = trajectory[i]['reward'] + args.gamma * value
+            if not math.isfinite(value):
+                raise ValueError('MuZero return must be finite')
+            returns[i] = value
 
-    value = 0.0
-    returns = [0.0] * len(trajectory)
-    for i in reversed(range(len(trajectory))):
-        value = trajectory[i]["reward"] + args.gamma * value
-        returns[i] = value
-
-    for item, target_value in zip(trajectory, returns, strict=True):
-        replay.add(
-            item["obs"],
-            item["mask"],
-            item["action"],
-            item["reward"] / args.reward_scale,
-            item["done"],
-            item["next_obs"],
-            item["next_mask"],
-            policy_target=item["policy"],
-            value_target=target_value / args.value_scale,
-        )
-
-    return lines, len(trajectory)
+        for item, target_value in zip(trajectory, returns, strict=True):
+            replay.add(item['obs'], item['mask'], item['action'], item['reward']/args.reward_scale,
+                       item['done'], item['next_obs'], item['next_mask'],
+                       policy_target=item['policy'], value_target=target_value/args.value_scale)
+        return lines, len(trajectory)
+    finally:
+        net.train(was_training)
+        env.close()
 
 
 def policy_loss(logits: torch.Tensor, mask: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -350,8 +364,10 @@ def train_muzero_step(
     loss = pi + args.value_loss_coef * v + args.reward_loss_coef * reward_loss
     loss = loss + args.consistency_loss_coef * consistency
     opt.zero_grad(set_to_none=True)
+    if not torch.isfinite(loss):
+        raise ValueError("MuZero loss must be finite")
     loss.backward()
-    nn_utils.clip_grad_norm_(net.parameters(), args.max_grad_norm)
+    nn_utils.clip_grad_norm_(net.parameters(), args.max_grad_norm, error_if_nonfinite=True)
     opt.step()
 
     return {
@@ -364,12 +380,17 @@ def train_muzero_step(
 
 
 def save_muzero_checkpoint(net: MuZeroNet, path: Path, args: argparse.Namespace, *, episodes: int) -> None:
+    if any(t.layout != torch.strided or t.dtype != torch.float32 or not torch.isfinite(t).all()
+           for t in net.state_dict().values()):
+        raise ValueError('MuZero weights must be finite dense float32')
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
+    atomic_torch_save(
         {
             "state_dict": net.state_dict(),
             "__meta__": {
                 "class": "MuZeroNet",
+                "format_version": 1,
+                "io_contract": dict(IO_CONTRACT),
                 "algorithm": "muzero_style",
                 "episodes": episodes,
                 "hidden": net.hidden,
@@ -383,16 +404,43 @@ def save_muzero_checkpoint(net: MuZeroNet, path: Path, args: argparse.Namespace,
     )
 
 
-def load_muzero_checkpoint(path: str | Path, device: torch.device) -> MuZeroNet:
-    payload = torch.load(str(path), map_location=device, weights_only=True)
-    meta = payload.get("__meta__", {})
-    net = MuZeroNet(
-        hidden=int(meta.get("hidden", 256)),
-        latent=int(meta.get("latent", 256)),
-        n_actions=int(meta.get("n_actions", NUM_PLACEMENTS)),
-    ).to(device)
-    net.load_state_dict(payload["state_dict"])
-    return net
+def load_muzero_checkpoint(path: str | Path, device: torch.device, *, value_scale=None, reward_scale=None) -> MuZeroNet:
+    payload = torch.load(str(path), map_location='cpu', weights_only=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get('__meta__'), dict):
+        raise ValueError('invalid MuZero payload')
+    meta = payload['__meta__']
+    if meta.get('class') != 'MuZeroNet':
+        raise ValueError('expected MuZeroNet checkpoint')
+    version = meta.get('format_version')
+    if 'format_version' in meta:
+        contract = meta.get('io_contract')
+        if (type(version) is not int or version != 1 or not isinstance(contract,dict)
+                or set(contract) != set(IO_CONTRACT)
+                or any(type(contract[k]) is not int or contract[k] != value for k,value in IO_CONTRACT.items())):
+            raise ValueError('MuZero checkpoint contract mismatch')
+    elif 'io_contract' in meta:
+        raise ValueError('missing format version')
+    for name in ('hidden','latent','n_actions'):
+        if type(meta.get(name)) is not int or meta[name] <= 0:
+            raise ValueError('invalid MuZero dimensions')
+    if meta['n_actions'] != NUM_PLACEMENTS:
+        raise ValueError('MuZero action contract mismatch')
+    for name, expected in (('value_scale',value_scale),('reward_scale',reward_scale)):
+        value = meta.get(name)
+        if type(value) not in (int,float) or not math.isfinite(value) or value <= 0:
+            raise ValueError('invalid MuZero scaling')
+        if expected is not None and value != expected:
+            raise ValueError(name + ' differs from the warm-start checkpoint')
+    if meta['value_scale'] != meta['reward_scale']:
+        raise ValueError('MuZero search requires the same reward/value scale')
+    state = payload['state_dict']
+    if not isinstance(state,dict) or not state or any(
+        not isinstance(t,torch.Tensor) or t.layout != torch.strided or t.dtype != torch.float32
+        or not torch.isfinite(t).all() for t in state.values()):
+        raise ValueError('MuZero weights must be finite dense float32')
+    net = MuZeroNet(hidden=meta['hidden'], latent=meta['latent'], n_actions=meta['n_actions'])
+    net.load_state_dict(state, strict=True)
+    return net.to(device).eval()
 
 
 def distill_policy(
@@ -416,8 +464,10 @@ def distill_policy(
         v = F.mse_loss(value, batch["value_target"])
         loss = pi + args.distill_value_loss_coef * v
         opt.zero_grad(set_to_none=True)
+        if not torch.isfinite(loss):
+            raise ValueError("distillation loss must be finite")
         loss.backward()
-        nn_utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+        nn_utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm, error_if_nonfinite=True)
         opt.step()
         losses.append(float(loss.detach().item()))
 
@@ -442,13 +492,31 @@ def distill_policy(
 
 
 def train(args: argparse.Namespace) -> None:
+    for name in ('episodes','max_pieces','replay_size','warmup','batch','train_steps_per_episode',
+                 'mcts_simulations','hidden','latent','distill_batch'):
+        if type(getattr(args,name)) is not int or getattr(args,name) <= 0:
+            raise ValueError(name + ' must be positive')
+    if args.warmup > args.replay_size:
+        raise ValueError('warmup cannot exceed replay capacity')
+    for name in ('value_scale','reward_scale','lr','distill_lr','pb_c_base','max_grad_norm'):
+        if not math.isfinite(getattr(args,name)) or getattr(args,name) <= 0:
+            raise ValueError(name + ' must be finite and positive')
+    if args.value_scale != args.reward_scale:
+        raise ValueError('MuZero search requires the same reward/value scale')
+    for name in ('gamma','root_exploration_fraction'):
+        if not math.isfinite(getattr(args,name)) or not 0 <= getattr(args,name) <= 1:
+            raise ValueError(name + ' must be in [0,1]')
+    for name in ('action_temperature','root_dirichlet_alpha','pb_c_init','value_loss_coef',
+                 'reward_loss_coef','consistency_loss_coef','distill_value_loss_coef'):
+        if not math.isfinite(getattr(args,name)) or getattr(args,name) < 0:
+            raise ValueError(name + ' must be finite and nonnegative')
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.resume and os.path.exists(args.resume):
-        print(f"[muzero] resuming from {args.resume}")
-        net = load_muzero_checkpoint(args.resume, device)
+    if args.resume:
+        print(f"[muzero] weights-only warm start from {args.resume}; optimizer/replay start fresh")
+        net = load_muzero_checkpoint(args.resume, device, value_scale=args.value_scale, reward_scale=args.reward_scale)
     else:
         net = MuZeroNet(hidden=args.hidden, latent=args.latent).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
@@ -519,7 +587,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--max-grad-norm", type=float, default=5.0)
     p.add_argument("--out", type=str, default="checkpoints/muzero.pt")
-    p.add_argument("--resume", type=str, default="")
+    p.add_argument("--resume", type=str, default="", help="weights-only warm start; fresh optimizer and replay")
     p.add_argument("--policy-out", type=str, default="")
     p.add_argument("--save-every", type=int, default=25)
     p.add_argument("--log-every", type=int, default=5)

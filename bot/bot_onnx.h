@@ -8,17 +8,12 @@
 //
 // 학습은 Colab에서 PyTorch로 하고, 그 결과를 export_onnx.py로 .onnx 파일에
 // 내보낸다. 게임 쪽은 그 파일만 읽으면 되므로 PyTorch를 설치할 필요가 없다.
-// 배포 머신에 필요한 것은 onnxruntime 공유 라이브러리 하나뿐이다.
+// 대상 OS/CPU에 맞는 ONNX Runtime 공유 라이브러리와 그 시스템 의존성이 필요하다.
 //
-// 학습 쪽과 맞춰야 하는 입출력 계약:
-//   입력  "board"   (1, 1, 20, 10) float32 — 칸이 차 있으면 1
-//         "current" (1, 7)         float32 — 현재 블록 one-hot
-//         "next"    (1, 7)         float32 — 다음 블록 one-hot
-//   출력  "policy_logits" (1, 40)  float32 — 40가지 placement의 점수
-//         "value"         (1,)     float32 — 학습에만 쓰고 여기선 무시
-//
-// 이름, float32 타입, 고정 shape이 어긋나면 Load에서 거절한다. 바꿀 일이 있으면
-// python/netbot/export_onnx.py의 INPUT_NAMES/OUTPUT_NAMES도 같이 고친다.
+// float32 I/O: board=(1,1,kBoardRows,kBoardCols), current/next=(1,kNumPieceTypes),
+// policy_logits=(1,kNumPlacements), value=(1,). Names/order match export_onnx.py.
+// Load checks structural I/O; observation/action semantics require a matching exporter.
+// This wrapper does not authenticate models or sandbox an untrusted graph.
 
 class SimGame;
 
@@ -34,14 +29,14 @@ public:
 
     // .onnx 파일을 읽는다. 파일이 없거나, 깨졌거나, 입출력 이름이 위 계약과
     // 다르면 false. 이 경우 err_out에 개발 로그용 상세 사유가 담긴다.
-    // 실패해도 예외를 던지지 않는다 — 모델이 없는 것은 정상 상황이고
-    // 호출자는 해당 상대를 시작하지 않고 다른 상대 선택을 안내한다.
+    // 런타임/파일 오류는 false로 반환한다. 실패하면 미로드 상태, 성공하면 err_out은 빈 값.
+    // 진단 문자열 할당까지 noexcept로 보장하지는 않는다. 호출은 한 소유 스레드에서 직렬화한다.
     bool Load(const std::string& onnx_path, std::string* err_out = nullptr);
 
     // 현재 판을 보고 둘 곳을 정한다.
-    // 불법 수의 logit을 -inf로 눌러 놓고 최댓값을 고르므로, 모델이 이상한
-    // 값을 내도 규칙에 어긋난 수는 나오지 않는다.
-    // 둘 곳이 아예 없으면(게임 오버 직전) false.
+    // 출력의 타입·형상·유한성을 검사하고 합법 후보 중 첫 최댓값을 고른다.
+    // 실행 오류/비유한 출력/빈 후보는 false이며 col_out/rot_out을 보존한다.
+    // 대체 정책을 쓸지는 호출자가 결정한다. 로드·추론·파괴를 동시에 호출하지 않는다.
     bool Infer(const SimGame& sim, int& col_out, int& rot_out);
 
     bool IsLoaded() const;

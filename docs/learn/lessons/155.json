@@ -1,0 +1,392 @@
+{
+  "id": "lesson-155",
+  "title": "휴리스틱: 비교할 기준 정책",
+  "shortTitle": "특징·선형 평가·후보 탐색·동점·평가 조건",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 두 보드 환경과 상대 선택 경계가 있지만 비교할 계획 정책이 없습니다.",
+  "finish": "완료: 실제 후보를 복사해 평가하는 기준 정책과 정보 접근 어댑터를 만들고 재현 가능한 조건으로 비교합니다.",
+  "objective": "특징·평가식·후보 선택을 분리하고 동점·종료 우선순위·정보/계산 예산이 정책 비교에 미치는 영향을 설명한다.",
+  "prerequisites": [
+    "두 보드의 공동 전이와 상대 관측 경계",
+    "Session 복사·실제 행동 경로·종료",
+    "입력 검증·유한한 보상·고정 실험 시드"
+  ],
+  "recap": {
+    "points": [
+      "공격 큐와 실제 잠금 적용의 시점을 구별한다.",
+      "상대의 반환을 검증하고 두 후보를 성공한 전이에서 함께 반영한다.",
+      "관측 배열과 규칙 복사본은 정책에 제공하는 정보가 다르다."
+    ],
+    "bridge": "합법 행동을 실제로 시험할 수 있는 규칙 모델 위에 명시적인 평가와 선택 기준을 놓습니다."
+  },
+  "sections": [
+    {
+      "title": "학습 전에 비교할 수 있는 정책을 만든다",
+      "body": "환경이 두 보드를 진행하고 보상을 반환합니다. 이제 학습된 모델이 없어도 일관된 기준으로 행동하는 정책을 만듭니다. **휴리스틱(heuristic)**은 문제의 특성을 이용해 유망한 선택을 빠르게 찾는 규칙입니다. 여기서는 배치 뒤의 높이·구멍·표면을 수치로 요약하고 가장 높은 평가를 받은 후보를 선택합니다.\n\n**기준 정책(baseline)**은 새 방법의 성적을 해석할 비교 대상입니다. 이미 구현하기 쉽고 재현 가능한 정책이 있으면, 학습 결과가 바뀌었을 때 환경·평가·모델 중 어디를 조사할지 기준을 얻습니다. 그 정책의 성적이 모든 학습 방법의 보장된 하한은 아닙니다.\n\n구현은 특징 추출, 선형 평가, 후보 선택, 평가 실행으로 나눕니다. 점수 함수를 바꿨는지, 후보를 생성하는 경로를 바꿨는지, 실험 조건을 바꿨는지를 따로 설명할 수 있도록 하기 위해서입니다.",
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class GreedyBCTSOpponent",
+        "invariant": "합법 후보를 복사해 실행하고 평가식과 동점 규칙으로 행동을 고른다. 원본은 보존한다.",
+        "mayDiffer": "현재 상대는 즉시 배치·추가 줄 가중치·native 열거 순서 동점이다. 학습 정책은 실제 틱 배치·선택적 생존 우선·작은 라벨 동점을 명시한다."
+      }
+    },
+    {
+      "title": "특징은 상태를 줄여 표현하는 선택이다",
+      "body": "**특징(feature)**은 원래 입력에서 골라낸 요약값입니다. 보드 전체를 비교하는 대신 열 높이, 빈 구멍 수 같은 값을 사용합니다. 서로 다른 보드가 같은 특징을 가질 수 있으므로 요약에는 정보 손실이 있습니다.\n\n높이 합이 같아도 한 열에 높게 쌓인 판과 여러 열에 낮게 퍼진 판은 다릅니다. 설명용 높이 목록 `[4,0]`과 `[2,2]`의 합은 같지만 최대 높이는 다릅니다. 최대 높이의 계수를 0으로 둔 것은 그 특징을 이번 설정에서 사용하지 않는다는 뜻이며 합계 높이가 그것을 완전히 대신한다는 뜻은 아닙니다.\n\n줄 삭제 수는 최종 보드만으로 계산할 수 없는 전이 사건입니다. 같은 도착 보드에 도달했어도 어떤 줄을 지웠는지는 다를 수 있습니다. 따라서 특징 추출은 보드를 받고, 평가 함수는 별도 인수로 이번 행동의 lines를 받습니다.",
+      "codes": [
+        {
+          "label": "python/heuristic_features.py — 특징 값의 묶음",
+          "language": "python",
+          "text": "@dataclass(frozen=True)\nclass Features:\n    '''Immutable surface statistics of a binary board.'''\n\n    heights: tuple[int, ...]\n    aggregate_height: int\n    bumpiness: int\n    holes: int\n    max_height: int\n    wells: int"
+        }
+      ],
+      "reference": {
+        "path": "python/common/features.py",
+        "symbol": "def all_features",
+        "invariant": "보드에서 계산한 특징과 행동에서 발생한 줄 사건을 구별한다. 입력 형상·값 범위를 확인한다.",
+        "mayDiffer": "현재 함수는 공유 스키마의 NumPy 보드와 raw ID/이진 점유를 받는다. 학습용 extract는 입력에서 크기를 읽는 이진 정수 행 목록을 받는다."
+      }
+    },
+    {
+      "title": "행의 방향을 정하고 높이와 구멍을 계산한다",
+      "body": "입력의 행은 위에서 아래로 증가합니다. 열에서 처음 점유한 행을 top, 보드 높이를 H라 하면 열 높이는 H-top입니다. 점유 셀이 없는 열의 높이는 0입니다. 처음 점유 셀 아래의 빈칸은 구멍으로 셉니다.\n\n예를 들어 위에서 아래로 `[1,0,0,1]`인 한 열은 높이 4, 구멍 2입니다. 구멍은 점유 셀 바로 아래 한 칸만을 뜻하지 않습니다. 위에 점유 셀이 하나라도 있어 떨어지는 블록으로 곧바로 채우기 어려운 빈 셀이라는 근사입니다. 실제 이동·회전 경로까지 판정하는 함수는 아닙니다.\n\n입력은 비어 있지 않은 직사각형의 이진 정수 행 목록으로 검사합니다. bool도 이진 셀로 받을 수 있지만 0.5나 NaN을 점유로 조용히 바꾸지 않습니다. 현재 게임의 raw 블록 ID는 현재 코드의 점유 변환을 먼저 거쳐야 하며 이 학습 함수에 그대로 섞지 않습니다.",
+      "codes": [
+        {
+          "label": "python/heuristic_features.py — 높이와 구멍",
+          "language": "python",
+          "text": "def extract(board):\n    '''Return Features for a board given top-to-bottom rows of 0/1 cells.'''\n    grid, width = _validated(board)\n    height = len(grid)\n\n    heights = []\n    holes = 0\n    for col in range(width):\n        top = None\n        for row in range(height):\n            if grid[row][col]:\n                top = row\n                break\n        if top is None:\n            heights.append(0)\n            continue\n        heights.append(height - top)\n        for row in range(top + 1, height):\n            if not grid[row][col]:\n                holes += 1"
+        }
+      ],
+      "reference": {
+        "path": "python/common/features.py",
+        "symbol": "def all_features",
+        "invariant": "보드에서 계산한 특징과 행동에서 발생한 줄 사건을 구별한다. 입력 형상·값 범위를 확인한다.",
+        "mayDiffer": "현재 함수는 공유 스키마의 NumPy 보드와 raw ID/이진 점유를 받는다. 학습용 extract는 입력에서 크기를 읽는 이진 정수 행 목록을 받는다."
+      }
+    },
+    {
+      "title": "요철과 우물은 다른 표면 특징이다",
+      "body": "요철은 인접 열 높이 차이의 절대값을 합합니다. 높이 `[4,3,0]`의 요철은 1+3=4입니다. 열의 순서를 바꾸면 높이 합은 같아도 요철이 달라질 수 있습니다.\n\n우물은 양쪽 이웃의 낮은 높이보다 현재 열이 낮은 깊이 d로 정의합니다. 보드 가장자리의 바깥 이웃은 보드 높이인 벽으로 취급합니다. 각 우물은 `d(d+1)/2`를 더합니다. 깊이 3 하나는 6, 깊이 1 셋은 합 3이므로 깊은 우물을 더 크게 평가하는 곡률을 갖습니다.\n\n이 함수는 **표면 높이로 만든 우물 근사**입니다. 같은 높이여도 옆 셀이 비어 있는 구멍 구조는 다를 수 있습니다. 특정 블록만 넣을 수 있는지나 회전으로 들어갈 수 있는지를 보장하지 않습니다. 계수를 조정할 때 그 특징이 실제로 측정하는 양부터 확인합니다.",
+      "codes": [
+        {
+          "label": "python/heuristic_features.py — 표면 요철과 우물",
+          "language": "python",
+          "text": "    heights = tuple(heights)\n    bumpiness = sum(abs(heights[i] - heights[i + 1]) for i in range(width - 1))\n\n    wells = 0\n    for col in range(width):\n        left = heights[col - 1] if col > 0 else height\n        right = heights[col + 1] if col + 1 < width else height\n        depth = min(left, right) - heights[col]\n        if depth > 0:\n            wells += depth * (depth + 1) // 2"
+        }
+      ],
+      "reference": {
+        "path": "python/common/features.py",
+        "symbol": "def well_sum",
+        "invariant": "우물의 경계 높이·깊이·누적 공식을 명시하고 기하학적 도달성과 구별한다.",
+        "mayDiffer": "현재 함수는 공유 보드 크기의 높이 배열을 검사한다. 학습 함수는 전달된 보드에서 얻은 높이와 행 수를 사용한다."
+      }
+    },
+    {
+      "title": "선형 평가는 계수와 단위를 함께 읽는다",
+      "body": "특징을 f, 계수를 w라고 쓰면 평가는 항별 곱의 합 `w₁f₁ + w₂f₂ + …`입니다. 음의 높이 계수는 높은 판을 덜 선호하고 양의 줄 계수는 줄 삭제를 더 선호하게 만듭니다. 계수의 부호만으로 장기 생존이나 승리를 보장하지는 않습니다.\n\n높이를 셀 단위에서 보드 높이에 대한 비율로 바꾸면 같은 계수의 의미도 달라집니다. 특징의 단위와 범위를 먼저 정하고 계수를 기록합니다. 여기의 기본값은 구현을 관찰할 실험 설정이며 특정 연구 결과나 최적 가중치라는 이름을 붙이지 않습니다.\n\nWeights는 불변 데이터로 둡니다. 후보들을 비교하는 도중 계수가 바뀌면 한 argmax 안의 점수들이 같은 기준으로 계산되지 않습니다. 생성할 때 유한한 실수인지 검사하고, 계산 뒤에도 overflow로 비유한 결과가 되지 않았는지 확인합니다.",
+      "codes": [
+        {
+          "label": "python/heuristic.py — 불변 설정",
+          "language": "python",
+          "text": "@dataclass(frozen=True)\nclass Weights:\n    # Checkpoint experiment settings, not universal or learned coefficients.\n    aggregate_height: float = -1.0\n    bumpiness: float = -0.5\n    holes: float = -4.0\n    max_height: float = 0.0\n    wells: float = 0.0\n    lines: float = 10.0\n\n    def __post_init__(self):\n        for field in fields(self):\n            value = finite_coefficient(getattr(self, field.name), field.name)\n            object.__setattr__(self, field.name, value)"
+        },
+        {
+          "label": "python/heuristic.py — 보드 특징과 줄 사건의 평가",
+          "language": "python",
+          "text": "def evaluate(features: Features, lines: int, weights: Weights):\n    if type(lines) is not int or lines < 0:\n        raise ValueError('lines must be a nonnegative integer')\n    try:\n        value = sum(getattr(weights, name) * getattr(features, name)\n                    for name in ('aggregate_height', 'bumpiness', 'holes', 'max_height', 'wells'))\n        value += weights.lines * lines\n    except OverflowError as exc:\n        raise ValueError('evaluation overflow') from exc\n    if not math.isfinite(value):\n        raise ValueError('evaluation must be finite')\n    return value"
+        }
+      ],
+      "reference": {
+        "path": "python/common/features.py",
+        "symbol": "def bcts_score",
+        "invariant": "특징별 가중치와 전이 사건을 명시적으로 합하고 유한한 결과를 요구한다.",
+        "mayDiffer": "현재 BCTS_WEIGHTS는 저장소의 별도 설정이며 학습 Weights와 같지 않다. 현재 상대의 line_weight는 추가 항이다."
+      }
+    },
+    {
+      "title": "평가 함수에 선택 루프를 붙인다",
+      "body": "좋은 보드를 점수화하는 함수만으로 행동은 나오지 않습니다. **argmax**는 가능한 후보 중 함수값을 가장 크게 만드는 후보를 찾는 연산입니다. 합법 행동을 열거하고, 원본의 복사본에 각 행동을 실행하고, 평가값을 비교합니다.\n\n원본 Session은 실행하기 전 상태를 유지해야 합니다. 첫 후보를 원본에 적용한 뒤 두 번째 후보를 시도하면 같은 시작점에서 비교한 것이 아닙니다. choose가 반환하는 것은 행동과 진단값이며, 실제 진행은 호출자가 그 행동을 환경에 보내 수행합니다.\n\n이 탐색은 **한 결정 깊이(one-ply)**입니다. B의 응답이나 다음 피스의 모든 선택을 추가로 탐색하지 않습니다. 현재 피스의 후보를 실제 규칙으로 실행한다는 점은 정확하지만, 그 뒤의 장기 가치는 사람이 고른 보드 특징으로 근사합니다.",
+      "codes": [
+        {
+          "label": "python/heuristic.py — 후보 복사와 선택",
+          "language": "python",
+          "text": "    def choose(self, session):\n        best = None\n        actions = sorted(session.legal_actions())\n        for action in actions:\n            candidate = session.clone()\n            event = candidate.apply_action(action)\n            features = extract(candidate.grid())\n            score = evaluate(features, event['lines'], self.weights)\n            alive = not candidate.finished()\n            # Exact ties choose the smaller label, independent of enumeration order.\n            key = (alive if self.prefer_survival else True, score, -action)\n            if best is None or key > best[0]:\n                best = key, Decision(action, score, not alive, len(actions))\n        return None if best is None else best[1]"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class GreedyBCTSOpponent",
+        "invariant": "합법 후보를 복사해 실행하고 평가식과 동점 규칙으로 행동을 고른다. 원본은 보존한다.",
+        "mayDiffer": "현재 상대는 즉시 배치·추가 줄 가중치·native 열거 순서 동점이다. 학습 정책은 실제 틱 배치·선택적 생존 우선·작은 라벨 동점을 명시한다."
+      }
+    },
+    {
+      "title": "종료 여부를 점수보다 먼저 볼지 선택한다",
+      "body": "종료 후보의 보드가 낮게 보일 수도 있습니다. 예를 들어 가비지 삽입으로 위쪽 셀이 잘려 나간 뒤 규칙은 탑아웃인데, 보드 특징만 보면 이전보다 낮아질 수 있습니다. 높이 벌점만으로 종료를 정확히 해석할 수 없는 이유입니다.\n\nprefer_survival이 참이면 비교 키의 첫 항은 `not candidate.finished()`입니다. 살아 있는 후보가 하나라도 있으면 그 집합 안에서 점수를 비교합니다. 모두 종료한다면 그 안에서 점수가 가장 높은 후보를 고릅니다. 합법 후보가 없을 때의 None과 “모든 합법 행동이 종료한다”는 경우를 구별합니다.\n\n이것은 정책 설계의 선택입니다. 특정 점수 과제에서 큰 즉시 보상을 얻고 끝내는 선택을 허용하려면 우선순위를 달리 정할 수 있습니다. 현재 Python·C++ 휴리스틱에는 별도의 생존 우선 키가 없으므로 현재 소스와 학습 구현의 차이로 표시합니다.",
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class GreedyBCTSOpponent",
+        "invariant": "합법 후보를 복사해 실행하고 평가식과 동점 규칙으로 행동을 고른다. 원본은 보존한다.",
+        "mayDiffer": "현재 상대는 즉시 배치·추가 줄 가중치·native 열거 순서 동점이다. 학습 정책은 실제 틱 배치·선택적 생존 우선·작은 라벨 동점을 명시한다."
+      }
+    },
+    {
+      "title": "동점 처리도 재현 규칙의 일부다",
+      "body": "두 후보의 점수가 같으면 무엇을 고를까요? 순회 중 처음 만난 후보를 고르는 구현은 후보 열거 순서에 의존합니다. 현재 SimGame은 방향을 바깥 반복, 열을 안쪽 반복으로 열거하고, 현재 선택기는 엄격히 더 큰 점수에서만 교체합니다.\n\n학습 정책은 키를 `(생존 우선값, score, -action)`으로 비교합니다. Python tuple 비교는 앞에서부터 처음 다른 항을 비교하는 **사전식 순서**입니다. 끝의 -action 때문에 정확한 동점에서는 작은 라벨을 고릅니다. 후보 순서를 바꾸어도 이 규칙은 유지됩니다.\n\n정확한 동점과 아주 가까운 부동소수점 값은 다릅니다. 임의 epsilon 안의 점수를 모두 같은 값으로 보는 규칙을 추가하면 서로 이어지는 근접값에서 비교가 비일관적일 수도 있습니다. 이 구현은 계산된 유한 값의 정확한 비교를 사용하고, 플랫폼 간 재현성은 실제 선택 결과로 따로 확인합니다.",
+      "reference": {
+        "path": "bot/placement.cpp",
+        "symbol": "bool heuristic_placement",
+        "invariant": "후보 생성·상태 복사·평가·동점 선택을 실제 소스에서 대조한다.",
+        "mayDiffer": "C++ 평가는 Python의 우물 항과 상대의 추가 줄 가중치를 포함하지 않는다. 일부 계수의 일치가 동일 정책을 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "공유하는 계수와 동일한 정책을 혼동하지 않는다",
+      "body": "현재 C++ 평가와 Python 평가에는 이름이 같은 특징과 같은 계수 리터럴이 있습니다. 하지만 Python에는 우물 항이 더 있고, GreedyBCTSOpponent는 별도의 `line_weight × cleared`를 더합니다. 줄 삭제의 유효 계수는 두 줄 항의 계수를 합한 값입니다.\n\n평가 함수를 재사용한다는 이유로 추가 항을 잊으면 무엇을 최적화하는지 잘못 설명할 수 있습니다. 여기서는 현재 공식을 임의로 바꾸지 않고 전체 항을 명시합니다. 학습 체크포인트는 Weights.lines에 줄 계수를 한 곳에 모았습니다.\n\n`tests/heuristic_dump.cpp`는 실제 C++ 선택기를 실행합니다. Python 회귀는 같은 네이티브 상태의 모든 후보를 펼쳐 C++ 공식과 Python 공식을 각각 적용하고 실제 선택을 대조합니다. 단순히 두 구현이 같은 행동인지 검사하는 대신, 각자가 선언한 정책을 구현하는지와 어디서 선택이 달라지는지를 확인합니다.",
+      "reference": {
+        "path": "bot/placement.cpp",
+        "symbol": "bool heuristic_placement",
+        "invariant": "후보 생성·상태 복사·평가·동점 선택을 실제 소스에서 대조한다.",
+        "mayDiffer": "C++ 평가는 Python의 우물 항과 상대의 추가 줄 가중치를 포함하지 않는다. 일부 계수의 일치가 동일 정책을 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "모델 접근이 가능한 상대를 별도 어댑터로 연결한다",
+      "body": "일반 상대는 B의 관측과 마스크만 받습니다. 그런데 후보를 실제로 실행해 보는 GreedyPolicy에는 규칙 모델이 필요합니다. 숨은 전역 변수로 현재 보드를 가져오면 정책이 접근할 수 있는 정보가 호출 계약에서 사라집니다.\n\nVersusEnv의 `_opponent_action`은 관측 기반 호출을 한 곳에 모읍니다. PlanningVersusEnv는 그 지점만 바꾸어 B의 복사본을 GreedyPolicy에 전달합니다. 행동 타입·합법성 검사와 두 보드의 공동 반영은 원래 환경이 계속 담당합니다.\n\n계획 상대는 큐·다음 피스·RNG 상태를 포함한 규칙 복사본에 접근할 수 있습니다. 실제 평가식이 그중 일부만 쓰더라도 관측 기반 정책과 정보 예산이 다릅니다. 이것을 같은 입력 조건의 순수 추론 성능 비교로 소개하지 않습니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 기본 상대 호출의 경계",
+          "language": "python",
+          "text": "    def _opponent_action(self, board, mask):\n        return self._opponent.act(observe(board, self._observation_schema), mask.copy())"
+        },
+        {
+          "label": "python/heuristic.py — 모델 접근 어댑터",
+          "language": "python",
+          "text": "class PlanningVersusEnv(VersusEnv):\n    \"\"\"An explicit model-access adapter; observation-only opponents use VersusEnv.\"\"\"\n    def __init__(self, *, planner=None, **kwargs):\n        if 'opponent' in kwargs:\n            raise ValueError('supply planner to the model-access environment')\n        super().__init__(opponent=planner if planner is not None else GreedyPolicy(), **kwargs)\n\n    def _opponent_action(self, board, mask):\n        decision = self._opponent.choose(board.clone())\n        return None if decision is None else decision.action"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class VersusOpponent",
+        "invariant": "정책에 제공하는 관측/모델과 환경의 실행 권한을 구별한다.",
+        "mayDiffer": "현재 일반 상대는 폐기용 SimGame 복사본을 받고 PolicyOpponent가 관측으로 변환한다. 학습 구현은 관측 기반과 모델 접근 환경을 명시적으로 나눈다."
+      }
+    },
+    {
+      "title": "후보 수와 계산 예산을 나누어 기록한다",
+      "body": "합법 후보 수를 A, 보드 셀 수를 H×W라고 합시다. 특징 계산은 보드를 훑으므로 대략 H×W에 비례합니다. 그러나 전체 선택 비용은 A×H×W만으로 끝나지 않습니다. 후보 복사와 실제 행동 전개·충돌·틱 실행의 비용도 포함됩니다.\n\n현재 Session은 합법성을 확인할 때 경로를 계획하고 apply_action에서도 그 행동 경로를 계산합니다. Decision.candidates는 평가한 합법 후보의 수입니다. 내부 계획의 모든 시도 횟수나 CPU 명령 수를 뜻하지 않습니다. 비교 실험에서는 이런 논리적인 작업량과 실제 실행 시간을 별도로 측정합니다.\n\n더 깊은 탐색은 더 많은 미래 선택을 볼 수 있지만 비용도 늘어납니다. 캐시를 도입하려면 보드 그림만 아니라 미래를 바꾸는 큐·피스·RNG·시간 상태와 정책 설정까지 키에 포함할지 검토해야 합니다. 불완전한 캐시는 서로 다른 후보를 같은 상태로 취급할 수 있습니다.",
+      "codes": [
+        {
+          "label": "python/heuristic.py — 선택 결과의 진단 정보",
+          "language": "python",
+          "text": "@dataclass(frozen=True)\nclass Decision:\n    action: int\n    score: float\n    ended: bool\n    candidates: int"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class GreedyBCTSOpponent",
+        "invariant": "합법 후보를 복사해 실행하고 평가식과 동점 규칙으로 행동을 고른다. 원본은 보존한다.",
+        "mayDiffer": "현재 상대는 즉시 배치·추가 줄 가중치·native 열거 순서 동점이다. 학습 정책은 실제 틱 배치·선택적 생존 우선·작은 라벨 동점을 명시한다."
+      }
+    },
+    {
+      "title": "비교 실험의 질문과 조건을 먼저 고정한다",
+      "body": "정책을 비교할 때 “점수가 더 높다”만으로는 질문이 부족합니다. 단일 보드 줄 삭제가 목표인지, 대전 승률인지, 같은 계산 예산에서의 성능인지 먼저 정합니다. 보상 합과 게임의 원래 줄·공격·승패 지표도 함께 구별합니다.\n\n같은 시드·규칙·상대·예산으로 정책 쌍을 실행하면 시작 조건의 차이를 줄일 수 있습니다. 그래도 행동에 따라 서로 다른 난수 소비·종료 경로가 생길 수 있으므로 실행 전체가 같은 궤적이 된다는 뜻은 아닙니다. 시드별 결과 차이와 분포를 살펴봅니다.\n\n계수를 고를 때 본 시드를 다시 최종 평가에만 쓰면 그 표본에 맞춘 선택을 일반 성능처럼 보일 수 있습니다. 튜닝용과 최종 평가용 시드를 분리합니다. 횟수 제한으로 끊긴 경기는 실제 패배와 구분하고, 제한 안의 줄 수라는 관측을 무제한 생존 능력으로 확대하지 않습니다.",
+      "reference": {
+        "path": "python/common/features.py",
+        "symbol": "BCTS_WEIGHTS",
+        "invariant": "평가 설정·규칙·정보·예산·지표를 함께 기록하여 기준 정책의 성적을 해석한다.",
+        "mayDiffer": "현재 고정 계수와 학습용 기본 계수는 별도 실험 조건이다. 어떤 쪽의 성능 우위도 코드 선언만으로 보장하지 않는다."
+      }
+    },
+    {
+      "title": "작은 특징 사례와 실제 규칙 실행을 함께 검사한다",
+      "body": "작은 보드는 수치를 손으로 계산하기 쉽습니다. 높이·구멍·삼각 우물의 기대값을 적고 함수 결과와 대조합니다. 빈 보드, 비직사각형, 소수 셀, NaN, 큰 계수의 overflow도 검사합니다. 입력을 값으로 바꾸기 전에 검증해야 반올림으로 오류가 사라지지 않습니다.\n\n후보 선택은 실제 Session에서 검사합니다. choose 전후의 상태 bytes가 같아야 하고, 반환 행동은 그 상태의 합법 목록 안에 있어야 합니다. 별도 후보 비교로 최고 키를 계산해 실제 선택과 대조합니다. 줄 삭제가 실제로 일어나는 사례도 포함합니다.\n\n모든 계수를 0으로 만들어 동점을 의도적으로 만들고 작은 라벨 선택을 확인합니다. 생존과 종료 후보가 실제로 함께 존재하는 보드를 찾아 생존 우선 키도 검사합니다. “종료 후보가 있었다면”이라는 조건만 넣고 실제로는 그 경로를 한 번도 실행하지 않는 검사를 피합니다.",
+      "reference": {
+        "path": "python/tests/test_heuristic_contract.py",
+        "symbol": "def test_python_and_cpp_choices_follow_their_own_formulas",
+        "invariant": "실제 후보·선택·원본 보존을 확인하고 각 구현이 선언한 평가식과 대조한다.",
+        "mayDiffer": "현재 검사는 SimGame의 Python/C++ 공식 차이를 대조한다. 학습 검사는 Session의 동점·생존 우선과 계획 상대 연결을 추가로 확인한다."
+      }
+    },
+    {
+      "title": "고정 조건의 작은 실험을 실행한다",
+      "body": "heuristic_demo는 고정된 예제 시드와 결정 예산에서 계획 정책끼리 대전합니다. 각 실행의 줄·공격·보상·평가 후보 수·종료 종류와 계수를 출력합니다. 이 예제의 수치는 실험 조건이며 게임의 콘텐츠 개수나 영구적인 성능 기준이 아닙니다.\n\n체크포인트의 bindings를 구성하고 같은 가상환경 Python으로 실행합니다. 누적 검사에 필요한 NumPy·Gymnasium·CPU PyTorch와 OS별 경로는 README를 따릅니다. 네이티브 규칙은 대전 체크포인트와 같지만 별도 구성으로 소스와 import 경로를 맞춥니다.\n\n출력에서 truncated=True가 보이면 예산 안의 결과로 읽습니다. 낮은 보상이 나오면 어떤 특징과 우선순위가 그 행동을 골랐는지 후보를 비교합니다. 이 과정을 통해 점수 함수를 수정하는 일과 환경 규칙 또는 모델 정보를 바꾸는 일을 분리할 수 있습니다.",
+      "codes": [
+        {
+          "label": "독립 구성과 기준 정책 실행",
+          "language": "bash",
+          "text": "python -m pybind11 --cmakedir\ncmake -S docs/learn/checkpoints/155-heuristic/bindings -B out/study-155 -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=/path/to/python -Dpybind11_DIR=/path/to/pybind11/share/cmake/pybind11\ncmake --build out/study-155 --config Release -j2\nctest --test-dir out/study-155 -C Release --output-on-failure\n/path/to/python docs/learn/checkpoints/155-heuristic/python/heuristic_demo.py --module-dir out/study-155/python/Release"
+        },
+        {
+          "label": "python/heuristic.py — 전체 평가·선택·어댑터",
+          "language": "python",
+          "file": "checkpoints/155-heuristic/python/heuristic.py",
+          "collapsed": true
+        },
+        {
+          "label": "python/heuristic_demo.py — 조건과 지표 기록",
+          "language": "python",
+          "file": "checkpoints/155-heuristic/python/heuristic_demo.py",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "155-1",
+      "question": "위에서 아래로 [1,0,0,1]인 한 열의 높이와 구멍 수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "높이 4, 구멍 2"
+        },
+        {
+          "id": "b",
+          "text": "높이 2, 구멍 1"
+        },
+        {
+          "id": "c",
+          "text": "높이 1, 구멍 0"
+        },
+        {
+          "id": "d",
+          "text": "높이 4, 구멍 1"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "높이 4, 구멍 2",
+      "explanation": "가장 위 점유 셀부터 바닥까지 높이는 4이고, 그 아래의 빈 셀 두 개를 모두 구멍으로 셉니다."
+    },
+    {
+      "id": "155-2",
+      "question": "높이 합이 같은 두 보드라면 최대 높이도 같나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "항상 같으므로 최대 높이 계수는 중복이다"
+        },
+        {
+          "id": "b",
+          "text": "줄 수를 알고 있으면 항상 같다"
+        },
+        {
+          "id": "c",
+          "text": "[4,0]과 [2,2]처럼 최대 높이는 다를 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "요철을 0으로 설정하면 언제나 같다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "[4,0]과 [2,2]처럼 최대 높이는 다를 수 있다",
+      "explanation": "합계는 분포를 모두 보존하지 않습니다. 최대 높이의 계수 0은 설정 선택이며 다른 특징으로 완전히 대체되었다는 증명이 아닙니다."
+    },
+    {
+      "id": "155-3",
+      "question": "생존 우선 정책에서 살아 있는 후보 점수는 -50, 종료 후보 점수는 20입니다. 무엇을 고르나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "점수 20인 종료 후보"
+        },
+        {
+          "id": "b",
+          "text": "살아 있는 후보"
+        },
+        {
+          "id": "c",
+          "text": "후보가 둘이라 None"
+        },
+        {
+          "id": "d",
+          "text": "두 점수의 평균 행동"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "살아 있는 후보",
+      "explanation": "사전식 키에서 생존 여부를 점수보다 먼저 비교합니다. 이 우선순위는 별도로 선택한 정책입니다."
+    },
+    {
+      "id": "155-4",
+      "question": "current bcts_score 안에 줄 가중치가 있고 상대가 line_weight × cleared를 더합니다. 줄 사건의 전체 계수는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "bcts_score의 계수만"
+        },
+        {
+          "id": "b",
+          "text": "line_weight만"
+        },
+        {
+          "id": "c",
+          "text": "항상 1"
+        },
+        {
+          "id": "d",
+          "text": "두 계수의 합"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "두 계수의 합",
+      "explanation": "두 항 모두 같은 줄 사건에 곱해집니다. 평가 함수를 재사용할 때 추가 항까지 포함한 전체 목표를 읽어야 합니다."
+    },
+    {
+      "id": "155-5",
+      "question": "튜닝에 쓴 소수 시드에서 기준 정책보다 좋은 점수를 얻었습니다. 적절한 다음 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 게임의 모든 조건에서 우위를 증명했다"
+        },
+        {
+          "id": "b",
+          "text": "다른 평가 시드와 동일한 규칙·정보·예산에서 원래 지표를 비교한다"
+        },
+        {
+          "id": "c",
+          "text": "기준 정책이 약하므로 환경 검사를 없앤다"
+        },
+        {
+          "id": "d",
+          "text": "시간 제한에 도달한 경기를 모두 패배로 바꾼다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "다른 평가 시드와 동일한 규칙·정보·예산에서 원래 지표를 비교한다",
+      "explanation": "시드에 맞춘 선택과 일반 성능은 다릅니다. 조건을 맞춘 별도 평가가 필요하며 수집 제한과 실제 종료도 구분합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "작은 이진 보드에서 높이·구멍·요철·우물 특징을 계산한다.",
+      "불변 계수와 생존 우선·동점 규칙으로 후보를 선택한다.",
+      "계획 상대를 연결하고 시드별 조건·원래 지표·후보 수를 기록한다."
+    ],
+    "failureChecks": [
+      "잘못된 보드/수치와 overflow를 거절하는지 확인한다.",
+      "탐색이 원본을 보존하고 실제 최고 키와 같은 행동을 고르는지 확인한다.",
+      "정확한 동점과 생존/종료가 섞인 후보, 같은 시드 재현을 검사한다."
+    ],
+    "expected": "휴리스틱의 구현과 평가 조건을 설명하고 정책 간 점수·정보·시간 의미의 차이를 진단한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek 특징 추출 초안 직접 검수 및 실제 Session/SimGame 후보·C++ 선택 대조",
+    "corrections": [
+      "보드 shape/비유한/소수 셀·줄 수와 비유한 상대 계수 거절",
+      "raw ghost 점유 해석을 현재 관측/C++와 동기화",
+      "최대 높이의 합계 포섭·특정 블록 전용 우물·공식/비트 동등성·성능 하한 단정 교정",
+      "현재 계수/선택 정책은 보존하고 학습 생존 우선/동점 기준의 차이 명시"
+    ]
+  },
+  "validation": [
+    "독립 확장·누적/새 특징·정책 CTest와 실제 대전 데모",
+    "현재 실제 C++ 선택/후보 적용·Python 별도 공식 및 기존 경계79회귀",
+    "C++ 런타임 동작 변경 없음; GPU·전체학습·Windows/macOS native 미검증"
+  ]
+}

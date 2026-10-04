@@ -530,7 +530,7 @@ std::vector<SimGame::Placement> SimGame::LegalPlacements() const
             // Slide horizontally to the target column offset.
             int delta = col - test.columnOffset;
             test.columnOffset += delta;
-            // Reject if the rotated & translated piece is invalid at spawn height.
+            // Reject if the rotated & translated piece is invalid at the live piece row.
             if (IsBlockOutside(test) || !BlockFits(test)) continue;
             // Hard drop simulation.
             while (IsBlockOutside(test) == false && BlockFits(test) == true)

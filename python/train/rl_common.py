@@ -102,64 +102,56 @@ def greedy_action(
     batch = obs_to_batch(obs, device)
     mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device)
     logits, _value = model(batch["board"], batch["current"], batch["next"])
+    if not torch.isfinite(logits.squeeze(0)[mask]).all():
+        raise ValueError("legal action values must be finite")
     return int(masked_argmax(logits.squeeze(0), mask).item())
 
 
 @torch.no_grad()
-def evaluate_greedy(
-    model: TetrisPolicyNet,
-    *,
-    episodes: int,
-    seed: int,
-    device: torch.device | str,
-    max_pieces: int,
-) -> dict[str, float]:
-    """Evaluate a policy by greedy legal placement on fixed seeds."""
-    if episodes <= 0:
-        return {
-            "avg_lines": float("nan"),
-            "avg_score": float("nan"),
-            "avg_pieces": float("nan"),
-            "episodes": 0.0,
-        }
-
+def evaluate_episodes(model, *, seeds, device, max_pieces, make_env=None):
+    """Greedy single-board evaluation with raw rows and explicit end reasons."""
+    if type(max_pieces) is not int or max_pieces <= 0:
+        raise ValueError('max_pieces must be positive')
+    seeds = list(seeds)
+    if not seeds or any(type(s) is not int or not 0 <= s <= 0xffffffff for s in seeds) or len(set(seeds)) != len(seeds):
+        raise ValueError('evaluation needs distinct uint32 seeds')
     was_training = model.training
-    model.eval()
-    env = TetrisPlacementEnv(seed=seed)
+    env = None
+    rows = []
+    try:
+        model.eval()
+        env = (make_env or TetrisPlacementEnv)()
+        for seed in seeds:
+            obs, info = env.reset(seed=seed)
+            reward_sum = 0.0
+            end = 'budget'
+            for piece in range(1, max_pieces + 1):
+                action = greedy_action(model, obs, info['legal_mask'], device)
+                obs, reward, term, trunc, info = env.step(action)
+                reward_sum += float(reward)
+                if term or trunc:
+                    end = 'terminated' if term else 'truncated'
+                    break
+            rows.append(dict(seed=seed, lines=int(info['lines']), score=int(info['score']),
+                             pieces=piece, reward=reward_sum, end=end))
+    finally:
+        model.train(was_training)
+        if env is not None:
+            env.close()
+    from train.evaluation_summary import summarize
+    summarize(rows)  # Reject nonfinite/invalid measurements before publication.
+    return rows
 
-    total_lines = 0.0
-    total_score = 0.0
-    total_pieces = 0.0
-    for ep in range(episodes):
-        obs, info = env.reset(seed=seed + ep)
-        lines = 0.0
-        score = 0.0
-        pieces = 0
-        while pieces < max_pieces:
-            mask_np = np.asarray(info["legal_mask"], dtype=bool)
-            if not mask_np.any():
-                break
-            action = greedy_action(model, obs, mask_np, device)
-            obs, reward, term, trunc, info = env.step(action)
-            lines += float(reward)
-            score = float(info.get("score", score))
-            pieces += 1
-            if term or trunc:
-                break
-        total_lines += lines
-        total_score += score
-        total_pieces += float(pieces)
 
-    if was_training:
-        model.train()
-
-    denom = float(episodes)
-    return {
-        "avg_lines": total_lines / denom,
-        "avg_score": total_score / denom,
-        "avg_pieces": total_pieces / denom,
-        "episodes": denom,
-    }
+def evaluate_greedy(model, *, episodes, seed, device, max_pieces):
+    """Legacy trainer aggregate; the zoo also retains every evaluation row."""
+    if episodes <= 0:
+        return dict(avg_lines=float('nan'), avg_score=float('nan'), avg_pieces=float('nan'), episodes=0.)
+    from train.evaluation_summary import summarize
+    summary = summarize(evaluate_episodes(model, seeds=range(seed,seed+episodes),
+                                          device=device, max_pieces=max_pieces))
+    return {**{'avg_'+key:summary['metrics'][key]['mean'] for key in ('lines','score','pieces')},
+            'episodes':float(summary['episodes'])}
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:
@@ -183,7 +175,11 @@ class LinearSchedule:
 
 
 class ReplayBuffer:
-    """Fixed-size numpy replay buffer for placement-level transitions."""
+    """Fixed-size owned transitions; done means termination, not truncation.
+
+    Entries are copied into slots. Sampling uses replacement. The caller keeps
+    episode reset boundaries separately from the bootstrap terminal flag.
+    """
 
     def __init__(self, capacity: int, n_actions: int = NUM_PLACEMENTS) -> None:
         if capacity <= 0:

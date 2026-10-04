@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.18)
+# This directory can also be configured alone, without graphics/server SDKs.
+project(study_python_boundary LANGUAGES CXX)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(PYBIND11_FINDPYTHON ON)
+find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(pybind11 2.11 CONFIG REQUIRED)
+
+pybind11_add_module(study_py study_py.cpp)
+target_include_directories(study_py PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+target_compile_features(study_py PRIVATE cxx_std_17)
+# Use one import directory for single- and multi-configuration generators.
+set_target_properties(study_py PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/python/$<CONFIG>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/python/$<CONFIG>")
+add_executable(binding_oracle ../tools/binding_oracle.cpp)
+target_include_directories(binding_oracle PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+target_compile_features(binding_oracle PRIVATE cxx_std_17)
+enable_testing()
+add_test(NAME python_binding_contract COMMAND "${Python_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tests/binding_contract.py"
+    --module-dir "$<TARGET_FILE_DIR:study_py>" --oracle "$<TARGET_FILE:binding_oracle>")
+set_tests_properties(python_binding_contract PROPERTIES TIMEOUT 30)

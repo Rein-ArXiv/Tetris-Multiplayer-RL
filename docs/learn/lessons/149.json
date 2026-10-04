@@ -1,0 +1,442 @@
+{
+  "id": "lesson-149",
+  "title": "바인딩: 규칙을 Python에서 다시 쓰지 않는 이유",
+  "shortTitle": "언어 경계·소유권·복사·ABI·호출 대조",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 누적 C++ 규칙은 직접 실행할 수 있지만 Python에서 호출할 인터페이스가 없습니다.",
+  "finish": "완료: 같은 Round를 소유한 Python 객체를 만들고 전이·복사·실패 계약을 C++ 직접 실행과 대조합니다.",
+  "objective": "규칙과 언어 변환의 책임을 분리하고, 소유권·스냅샷·호출 단위·ABI를 설명하며 실제 확장 모듈을 빌드한다.",
+  "prerequisites": [
+    "Round의 한 틱 전이와 입력 마스크",
+    "값 복사·RAII·예외와 실패 시 상태 보존",
+    "정규 직렬화·시드와 결정론"
+  ],
+  "recap": {
+    "points": [
+      "규칙 재현은 가능한 결과를 확인하고 사람의 의도 판단과는 범위가 다르다.",
+      "관찰 도구는 필요한 상태를 읽고 원래 경기·보상을 변경하지 않는다."
+    ],
+    "bridge": "이제 같은 C++ 규칙을 Python에서 호출할 수 있도록 언어 경계와 상태 소유권을 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "Python에게 규칙의 작성자가 아닌 호출자 역할을 준다",
+      "body": "C++ Round에는 충돌, 회전, 낙하, 고정, 난수와 점수 상태가 모여 있습니다. Python에서 학습 루프를 만들려면 이 상태를 읽고 행동을 적용할 수 있어야 합니다. 여기서 보드 이동을 Python으로 다시 구현하면 같은 버그를 두 번 고쳐야 하고, 수정 순서에 따라 학습과 게임의 규칙이 갈라질 수 있습니다.\n\n**바인딩(binding)**은 한 언어의 값과 호출을 다른 언어의 인터페이스에 연결하는 코드입니다. Python의 정수를 C++ 정수로 검사·변환하고, C++ 메서드를 실행한 뒤 결과나 예외를 Python 쪽 표현으로 돌려줍니다. 규칙은 Round에 두고 연결만 추가합니다.\n\n만들 경로는 `Python → study_py → Session → Round`입니다. Session은 C++ 상태의 소유자이자 작은 호출 계약이고, study_py는 Python 변환을 담당합니다. 게임 창·소켓·계정 DB를 호출할 이유가 없으므로 이 확장 모듈의 링크 의존성에서도 제외합니다.",
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "PYBIND11_MODULE",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "같은 규칙을 쓰면 모든 차이가 사라질까?",
+          "body": "규칙 구현을 공유해도 입력을 적용하는 순서, 한 행동의 시간 길이, 관측과 보상, 모델 버전이 다르면 결과가 달라질 수 있습니다. 규칙 공유는 중복 구현으로 인한 드리프트를 줄이는 선택입니다."
+        }
+      ]
+    },
+    {
+      "title": "한 번의 호출이 얼마나 진행하는지 정한다",
+      "body": "이 바인딩의 `step(mask)`는 **논리 틱 하나**입니다. 마스크를 해석한 뒤 Round.tick을 한 번 호출합니다. 벽시계 대기나 렌더링은 하지 않습니다. Python이 호출을 늦게 해도 그 한 호출이 여러 틱으로 늘어나지 않습니다.\n\n체크포인트의 예제 조건으로 자연 낙하 간격을 3틱으로 만들면, 빈 보드에서 중립 입력을 세 번 보냈을 때 누적 중력이 한 번 적용됩니다. 하드 드롭은 같은 틱 안에서 투영·고정까지 처리할 수 있으므로 호출 수와 잠근 피스 수는 같은 단위가 아닙니다.\n\n현재 게임 바인딩의 `submit_input()`과 `tick()`은 입력 적용과 시간 진행을 나눈 API입니다. 이 학습 Session은 이미 둘을 포함한 Round.tick을 호출하므로 그 뒤에 중력을 다시 호출하지 않습니다. `apply_placement()`처럼 배치 하나를 선택하는 API와도 호출 단위가 다릅니다. 단위를 정하지 않으면 학습 속도와 게임 내 입력 속도를 혼동하게 됩니다.",
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"submit_input\"",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "언어 경계가 소유할 상태를 작은 값 객체로 감싼다",
+      "body": "Session은 Round를 값으로 소유합니다. 생성자는 빈 보드와 시드, 낙하 간격으로 새 Round를 만듭니다. 시드는 C++ 난수 초기화로 전달되며 Python에서 별도의 피스 순서를 만들지 않습니다.\n\n`reset()`도 새 Round를 먼저 완성한 뒤 대입합니다. 간격이 유효하지 않아 예외가 나면 오른쪽 계산이 끝나지 않았으므로 기존 round_에 대입하지 않습니다. 이것이 이 reset의 **실패 시 상태 보존** 계약입니다. 정상적으로 초기화하면 보드뿐 아니라 난수·중력 카운터까지 새 게임 상태가 됩니다.\n\n생성과 변환에 실패할 때는 정상 게임과 비슷한 빈 객체를 돌려주지 않습니다. 잘못된 간격은 호출자 인자 오류이고, 유효한 조건으로 Round를 만들 수 없는 상황은 내부 상태 오류로 구분합니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 생성·reset",
+          "language": "cpp",
+          "text": "    explicit Session(std::uint64_t seed, int gravity_interval = 30)\n        : round_(make_round(seed, gravity_interval)) {}\n\n    // Rebuild from a fresh seeded Round; commit only after creation succeeds.\n    void reset(std::uint64_t seed, int gravity_interval) {\n        round_ = make_round(seed, gravity_interval);\n    }"
+        },
+        {
+          "label": "bindings/session.h — 상태를 완성한 뒤 반환",
+          "language": "cpp",
+          "text": "    static study_round::Round make_round(std::uint64_t seed, int gravity_interval) {\n        if (gravity_interval <= 0) {\n            throw std::invalid_argument(\"Session: gravity interval must be positive\");\n        }\n        const auto created =\n            study_round::Round::create_seeded(study_grid::Grid{}, seed, gravity_interval);\n        if (!created) {\n            throw std::runtime_error(\"Session: could not create seeded round\");\n        }\n        return *created;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "py::init<uint64_t>",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "입력을 좁히기 전에 검사하고 한 번만 진행한다",
+      "body": "Python 정수에는 C++ unsigned의 고정 폭이 없습니다. 바인딩에서 C++ 표현 범위를 검사한 다음, Session이 알려진 입력 비트만 포함하는지 검사합니다. 표현 가능한 수라고 해서 이 게임의 유효한 명령인 것은 아닙니다.\n\n예제의 256은 작은 정수로 표현할 수 있지만 입력 비트 계약 밖입니다. 먼저 한 바이트로 줄이면 0이 되어 중립 입력으로 둔갑합니다. 그래서 decode가 넓은 값에서 비트를 검사하도록 그대로 사용합니다. 좌우가 함께 들어온 마스크의 중립화도 공통 디코더가 담당합니다.\n\n그다음 후보 Round에 한 틱을 적용하고 성공한 상태만 반영합니다. Round 자체도 후보 상태를 쓰지만, 여기서는 예외를 Python에 노출하는 경계의 보존 계약이 드러나도록 Session에 후보를 둡니다. 값 복사 비용을 줄이려면 하위 함수의 원자성 계약을 확인하고 측정한 뒤 이 중복을 제거할 수 있습니다.\n\n게임 종료 뒤 정상 입력에는 `Step.stopped`가 돌아오고 상태는 유지됩니다. 종료한 객체에도 잘못된 마스크는 거절합니다. 종료와 입력 오류가 같은 뜻으로 섞이지 않게 처리 순서를 유지합니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 입력 검증과 전이",
+          "language": "cpp",
+          "text": "    study_round::Step step(unsigned mask) {\n        const auto intent = study_input::decode(mask);\n        if (!intent) {\n            throw std::invalid_argument(\"Session::step: unknown input mask bits\");\n        }\n        study_round::Round candidate = round_;\n        const auto result = candidate.tick(intent->horizontal, intent->clockwise,\n                                           intent->soft_drop, intent->hard_drop);\n        if (result == study_round::Step::invalid) {\n            throw std::runtime_error(\"Session::step: round rejected intent\");\n        }\n        round_ = std::move(candidate); // commit only on a valid result\n        return result;                 // Step::stopped is a valid outcome\n    }"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"submit_input\"",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "clone은 분기를 만들고 대입은 이름을 더한다",
+      "body": "Python에서 `branch = game`은 같은 객체를 가리키는 이름을 추가합니다. branch를 진행하면 game으로 보이는 상태도 바뀝니다. 여러 행동을 따로 시험하려면 독립적인 상태가 필요합니다.\n\n`clone()`은 Session을 값으로 반환하여 별도의 Round를 만듭니다. 난수 상태와 중력 카운터도 Round의 멤버이므로 함께 복사됩니다. 복사 직후에는 정규 상태가 같고, branch에만 하드 드롭을 보내면 원본은 유지됩니다. 원본에도 같은 입력을 보내면 다시 같은 상태가 됩니다.\n\n이 판단은 멤버의 소유 방식에 의존합니다. 포인터를 복사했다고 가리키는 데이터까지 복사되는 것은 아닙니다. Round에 공유 버퍼나 외부 핸들을 추가할 때는 clone의 계약도 다시 검토합니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 독립 상태 반환",
+          "language": "cpp",
+          "text": "    Session clone() const { return *this; }"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"clone\"",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "관측값은 읽은 시점의 복사본으로 돌려준다",
+      "body": "`grid()`는 잠긴 셀을 중첩 vector에 복사합니다. 바깥 인덱스는 행, 안쪽 인덱스는 열입니다. 평평한 보드의 행 우선 저장에서는 `row × columns + column`으로 셀을 찾습니다. 크기는 Grid의 선언에서 가져오므로 Python에 보드 크기를 다시 적지 않습니다.\n\npybind11의 STL 변환은 이 vector를 새 Python list들로 바꿉니다. Python list를 수정해도 Round가 바뀌지 않고, Round를 진행해도 과거 list가 바뀌지 않습니다. “독립적인 복사”와 “수정 불가능한 객체”는 다릅니다. list 자체는 여전히 수정할 수 있습니다.\n\n이 grid에는 잠긴 셀만 있습니다. 활성 피스·예고·난수·시간 카운터까지 담긴 게임 전체 상태로 해석하면 안 됩니다. 현재 소스의 NumPy 배열도 잠긴 그리드의 복사이며 반환 형식과 메모리 배치 계약이 다릅니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 셀 복사",
+          "language": "cpp",
+          "text": "    std::vector<std::vector<int>> grid() const {\n        const auto& cells = round_.board().cells();\n        std::vector<std::vector<int>> out(\n            static_cast<std::size_t>(study_grid::Grid::kRows),\n            std::vector<int>(static_cast<std::size_t>(study_grid::Grid::kColumns)));\n        for (int row = 0; row < study_grid::Grid::kRows; ++row) {\n            for (int column = 0; column < study_grid::Grid::kColumns; ++column) {\n                out[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)] =\n                    static_cast<int>(cells[static_cast<std::size_t>(\n                        row * study_grid::Grid::kColumns + column)]);\n            }\n        }\n        return out;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"grid\"",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "복사 비용은 어디에서 생길까?",
+          "body": "C++의 중첩 vector 할당과 Python list 변환이 필요합니다. 비용은 셀 수와 호출 횟수에 따라 달라집니다. 내부 메모리 뷰는 복사를 줄일 수 있지만 소유자 수명·쓰기 권한·상태 갱신 계약이 추가됩니다."
+        }
+      ]
+    },
+    {
+      "title": "검증에는 화면이 아니라 정규 상태 바이트를 쓴다",
+      "body": "보드 그림이 같아도 난수 위치나 중력 카운터가 다르면 다음 입력 결과는 달라집니다. 누적 정규 직렬화가 보드·활성 피스·난수·카운터를 정해진 순서로 기록하므로 언어 경계의 비교에 재사용합니다. 인코더가 용량 부족을 보고하면 불완전한 값을 정상 바이트로 내보내지 않습니다.\n\nC++ vector를 만든 뒤 Python bytes 생성자가 데이터를 복사합니다. 생성자에 주소와 길이를 함께 전달하므로 중간에 0바이트가 있어도 문자열 끝으로 잘리지 않습니다. 함수가 끝나 vector가 사라져도 Python bytes는 남습니다.\n\n두 경로의 bytes 전체를 비교하면 해시 충돌을 별도로 고려할 필요가 없습니다. 다만 이 직렬화는 비교용 상태 규약입니다. 객체의 메모리 덤프도 아니고, 역직렬화 기능이 없는 이 API에서 게임 복구 명령도 아닙니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 정규 상태 복사",
+          "language": "cpp",
+          "text": "    std::vector<std::uint8_t> state_bytes() const {\n        const auto state = study_hash::state_bytes(round_);\n        if (!state.ok()) {\n            throw std::runtime_error(\"Session::state_bytes: encoder overflow\");\n        }\n        return std::vector<std::uint8_t>(state.data(), state.data() + state.size());\n    }"
+        },
+        {
+          "label": "bindings/study_py.cpp — Python bytes 생성",
+          "language": "cpp",
+          "text": "        .def(\"state_bytes\", [](const Session& session) {\n            const auto data = session.state_bytes();\n            return py::bytes(reinterpret_cast<const char*>(data.data()), data.size());\n        }, \"A copied canonical state, for comparison rather than restore.\");"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "\"state_hash\"",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "확장 모듈에 이름·타입·호출 계약을 등록한다",
+      "body": "`PYBIND11_MODULE(study_py, m)`은 Python이 가져올 모듈의 초기화 진입점을 만듭니다. `py::class_<Session>`은 C++ 타입을 Python 클래스에 연결하고 `.def()`는 공개할 생성자와 메서드를 등록합니다. 호출 경계에서 Python 객체와 C++ 인자를 변환하는 코드가 만들어집니다.\n\n`Step`은 의미가 있는 열거형으로 등록합니다. 숫자를 외워서 종료를 판별하지 않고 `sim.Step.stopped`처럼 이름으로 비교합니다. 입력 비트와 보드 크기도 C++ 선언을 모듈 속성으로 노출합니다. Python 예제는 비트 숫자를 다시 적는 대신 `sim.DROP`을 사용합니다.\n\nSession에는 Python 객체가 들어 있지 않습니다. 바인딩 구현만 pybind11 헤더를 포함하므로 Session의 소유권과 규칙 호출은 C++ 실행파일에서도 따로 검사할 수 있습니다.",
+      "codes": [
+        {
+          "label": "bindings/study_py.cpp",
+          "language": "cpp",
+          "file": "checkpoints/149-python-binding/bindings/study_py.cpp",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "PYBIND11_MODULE",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "API와 ABI를 구별하며 모듈을 빌드한다",
+      "body": "**API**는 Session.step 같은 호출의 이름·인자·결과 계약입니다. **ABI**는 컴파일된 코드가 함수·타입·모듈 초기화를 연결하는 바이너리 수준의 규약입니다. 같은 Python 소스라도 다른 OS·CPU·Python 런타임용 확장 파일을 그대로 가져다 쓸 수 있다고 가정하면 안 됩니다.\n\n`pybind11_add_module`은 실행파일 대신 Python이 동적으로 불러올 확장 모듈을 만듭니다. 플랫폼과 Python 구성에 맞는 파일 이름·접미사는 빌드 도구가 정합니다. 파일의 모듈 이름과 등록 이름도 맞아야 합니다.\n\nCMake에는 실행할 Python과 그 환경에 설치한 pybind11 위치를 함께 전달합니다. 이 체크포인트의 bindings 디렉터리는 단독으로 configure할 수 있어 GUI·서버 SDK 없이 누적 Round 헤더만 컴파일합니다. 전체 체크포인트에서는 `STUDY_BUILD_PY=ON`으로 같은 하위 디렉터리를 포함합니다. 소스를 두 군데 복사해 별도 규칙을 만들지 않습니다.",
+      "codes": [
+        {
+          "label": "bindings/CMakeLists.txt",
+          "language": "cmake",
+          "file": "checkpoints/149-python-binding/bindings/CMakeLists.txt",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "pybind11_add_module",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "인자 오류와 내부 오류를 Python 예외로 전달한다",
+      "body": "`py::arg(...).noconvert()`는 문자열이나 실수를 정수로 묵시 변환하는 호출을 허용하지 않겠다는 선택입니다. Python 정수가 대상 C++ 폭을 벗어나도 호출 전에 실패합니다. noconvert가 게임의 유효 비트나 양수 간격까지 검사하지는 않으므로 Session의 검사가 필요합니다.\n\n기본 pybind11 변환에서 `std::invalid_argument`는 Python `ValueError`로, `std::runtime_error`는 `RuntimeError`로 전달됩니다. 매개변수 형식·범위 변환이 불가능하면 `TypeError`가 납니다. 예상한 예외를 잡아 학습 호출의 잘못된 설정을 구분할 수 있습니다.\n\n실습에서는 실패 전 bytes를 저장하고 잘못된 마스크·간격·시드를 준 뒤 같은 bytes인지 확인합니다. 예외가 났다는 사실만 확인하면 예외 직전에 상태가 바뀐 오류를 놓칠 수 있습니다.",
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "py::arg(\"seed\")",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "Python bool도 정수의 한 종류다",
+          "body": "이 바인딩의 정수 변환은 bool을 별도로 거절하는 엄격한 스키마가 아닙니다. True를 입력 명령으로 쓰지 말고 공개된 비트 상수를 사용합니다. 외부 요청 스키마에서 bool까지 거절해야 한다면 그 조건을 별도로 구현하고 검사합니다."
+        }
+      ]
+    },
+    {
+      "title": "GIL을 유지하는 범위를 명시한다",
+      "body": "일반적인 GIL 기반 CPython에서는 **GIL(Global Interpreter Lock)**을 가진 스레드가 Python 객체를 조작합니다. 이 바인딩은 호출 중 GIL을 해제하지 않습니다. `grid()`의 Python list 변환과 bytes 생성도 같은 호출 안에서 수행됩니다.\n\n따라서 Python 스레드를 늘리는 것만으로 이 확장의 계산이 동시에 실행되지는 않습니다. 각 Session의 상태가 독립이라는 소유권 성질과, 실제 계산이 병렬로 실행된다는 실행 성질을 구분합니다.\n\n계산 구간에서 GIL을 해제하려면 Python 객체를 만지는 구간과 분리하고 같은 Session에 두 스레드가 진입할 수 있는지도 검토해야 합니다. GIL 해제가 C++ 멤버의 데이터 경쟁까지 막아주지는 않습니다. 이 모듈은 free-threaded Python 지원을 선언하지 않습니다.",
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "공식 계약을 더 읽기",
+          "body": "[pybind11의 GIL 설명](https://pybind11.readthedocs.io/en/stable/advanced/misc.html#global-interpreter-lock-gil)은 Python에서 들어온 호출과 명시적인 해제의 관계를 설명합니다. [반환 정책](https://pybind11.readthedocs.io/en/stable/advanced/functions.html#return-value-policies)은 C++ 객체를 Python에 돌려줄 때의 소유권을 다룹니다."
+        }
+      ]
+    },
+    {
+      "title": "직접 빌드하고 Python에서 상태를 진행한다",
+      "body": "실습에는 C++17 컴파일러, CMake 3.18 이상, Python 개발 헤더와 pybind11이 필요합니다. 사용할 가상환경에서 pybind11을 설치하고 그 Python의 절대 경로를 CMake에 줍니다. 별도의 Python 환경을 활성화했다면 새 빌드 디렉터리를 사용해 이전 캐시의 인터프리터와 섞이지 않게 합니다.\n\n아래는 저장소 루트에서 실행하는 POSIX 셸 예입니다. Windows에서도 CMake 인자는 같지만 변수·줄바꿈 문법은 셸에 맞춥니다. `--config Release`는 다중 구성 생성기의 출력 구성을 선택하며, 예제 CMake는 확장 파일을 `python/Release`에 모읍니다.\n\n직접 확장 모듈을 가져올 때는 파일 자체가 있는 디렉터리를 검색 경로에 추가합니다. demo.py의 --module-dir로 경로를 지정하면 작업 디렉터리나 전역 PYTHONPATH에 의존하지 않습니다.",
+      "codes": [
+        {
+          "label": "격리 환경과 빌드",
+          "language": "sh",
+          "text": "python3 -m venv /tmp/study-binding-env\n/tmp/study-binding-env/bin/python -m pip install pybind11==3.0.1\nSTUDY_PYTHON=/tmp/study-binding-env/bin/python\nSTUDY_PYBIND=$($STUDY_PYTHON -m pybind11 --cmakedir)\ncmake -S docs/learn/checkpoints/149-python-binding/bindings -B out/study-149 \\\n  -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=\"$STUDY_PYTHON\" \\\n  -Dpybind11_DIR=\"$STUDY_PYBIND\"\ncmake --build out/study-149 --config Release -j2\nctest --test-dir out/study-149 -C Release --output-on-failure\n$STUDY_PYTHON docs/learn/checkpoints/149-python-binding/bindings/demo.py \\\n  --module-dir out/study-149/python/Release"
+        },
+        {
+          "label": "bindings/demo.py",
+          "language": "python",
+          "file": "checkpoints/149-python-binding/bindings/demo.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/sim/__init__.py",
+        "symbol": "from tetris_py import",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "독립 상태와 실패 보존을 실행 결과로 확인한다",
+      "body": "demo.py는 원본과 복제본을 만든 뒤 복제본만 진행합니다. 첫 출력은 독립 분기라 상태가 다르다는 뜻입니다. 원본에 같은 하드 드롭을 적용한 다음 출력은 상태가 같다는 뜻입니다. 진행 전 저장한 보드 list는 빈 보드로 남아 있어야 합니다.\n\n마지막에는 간격 0으로 reset을 시도합니다. ValueError를 잡고 비교한 정규 상태는 호출 전과 같아야 합니다. 출력 네 줄의 판단이 모두 True인지 확인한 뒤, `branch = game`으로 바꾸면 어느 관찰이 달라지는지 예상해 봅니다.\n\nImportError가 나면 모듈이 실제로 생성된 디렉터리, 선택한 Python 버전, 빌드 로그를 순서대로 확인합니다. native 확장 파일을 찾았지만 불러오지 못하는 경우에는 CPU·Python ABI나 공유 라이브러리 의존성도 확인합니다. 모듈 파일 이름만 바꿔 호환성을 해결할 수는 없습니다."
+    },
+    {
+      "title": "C++ 직접 호출과 매 전이의 결과를 대조한다",
+      "body": "binding_oracle은 Session을 사용하지 않고 Round를 직접 생성합니다. 같은 시드·간격·마스크열을 명령행으로 받아 각 전이 뒤 Step, 점수, 종료 상태, 정규 바이트를 출력합니다. Python 검사는 같은 입력을 Session에 주고 결과를 한 줄씩 비교합니다.\n\n중립 입력만 주는 경우는 중력 진행 횟수를, 모든 허용 비트 조합은 디코딩과 인자 전달을, 반복 하드 드롭은 고정과 종료 뒤 동작을 드러냅니다. 시드의 정수 경계도 포함하여 변환 폭의 문제를 확인합니다.\n\n두 경로가 Round를 공유하므로 이 검사는 바인딩의 누락·중복 호출·잘못된 전달을 찾는 데 적합합니다. Round 자체에 같은 오류가 있으면 양쪽이 함께 틀릴 수 있습니다. 규칙 회귀와 바인딩 대조가 서로 다른 오류를 맡는 이유입니다.",
+      "codes": [
+        {
+          "label": "tools/binding_oracle.cpp",
+          "language": "cpp",
+          "file": "checkpoints/149-python-binding/tools/binding_oracle.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/binding_contract.py",
+          "language": "python",
+          "file": "checkpoints/149-python-binding/tests/binding_contract.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "SimGame::StateHash",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    },
+    {
+      "title": "현재 코드의 참조를 과거 관측으로 저장하지 않는다",
+      "body": "현재 `current_block()`과 `ghost_block()`은 SimGame 내부 멤버를 `reference_internal`로 노출합니다. 반환 객체를 Python이 사용하는 동안 부모 SimGame의 수명을 유지합니다. 그 멤버의 값은 게임 진행에 따라 바뀔 수 있습니다.\n\n`def_readonly`는 Python에서 필드 대입을 막습니다. C++ 게임이 그 멤버를 갱신하는 것까지 막지는 않으므로 읽기 전용 참조를 과거 관측의 스냅샷으로 저장하면 안 됩니다. 값을 저장하려면 필요한 필드를 복사합니다. `grid()`와 값으로 반환하는 `next_block()`은 또 다른 반환 계약입니다.\n\n지금 만든 Session은 내부 참조를 공개하지 않아 수명 관계가 단순합니다. 현재 소스와 비교할 때 함수 이름을 일치시키는 것보다 호출 단위·소유권·복사 여부를 먼저 대조합니다. Python에서 실행 가능한 규칙 객체가 있다고 서버의 보상 권한을 얻는 것은 아닙니다. 봇전 보상은 공식 조건의 서버 재현과 저장 경계를 계속 따릅니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h",
+          "language": "cpp",
+          "file": "checkpoints/149-python-binding/bindings/session.h",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": "py::return_value_policy::reference_internal",
+        "invariant": "Python에서 규칙을 다시 쓰지 않고 C++ 상태 전이를 호출한다. 소유권·복사·참조·호출 단위를 명시한다.",
+        "mayDiffer": "학습 Session은 누적 Round의 한 틱을 호출하며 grid는 중첩 list 복사다. 현재 SimGame은 NumPy grid와 내부 블록 참조, 별도의 placement/frame API를 제공한다. 두 구현의 정규 상태 형식도 다르다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "149-1",
+      "question": "학습 Session.step 안에서 Round.tick을 호출한 뒤 “시간도 진행해야 한다”며 한 번 더 호출했습니다. 문제의 원인은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Python이 C++ 정수를 저장할 수 없음"
+        },
+        {
+          "id": "b",
+          "text": "논리 틱을 포함한 호출에 시간 진행을 중복 적용함"
+        },
+        {
+          "id": "c",
+          "text": "clone이 항상 원본과 같은 주소를 사용함"
+        },
+        {
+          "id": "d",
+          "text": "GIL이 두 호출을 자동 병합함"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "논리 틱을 포함한 호출에 시간 진행을 중복 적용함",
+      "explanation": "Session.step의 단위는 논리 틱 하나입니다. Round.tick에 시간 진행이 포함되므로 한 번 더 호출하면 의도한 입력 일정과 다른 상태가 됩니다."
+    },
+    {
+      "id": "149-2",
+      "question": "before = game.grid()로 받은 중첩 list의 셀을 바꿨습니다. 이 학습 바인딩에서 기대할 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "C++ 보드도 같은 값으로 바뀐다"
+        },
+        {
+          "id": "b",
+          "text": "복사본 자체도 읽기 전용이라 예외가 난다"
+        },
+        {
+          "id": "c",
+          "text": "Python list만 바뀌고 C++ 상태는 유지된다"
+        },
+        {
+          "id": "d",
+          "text": "게임의 난수만 초기화된다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "Python list만 바뀌고 C++ 상태는 유지된다",
+      "explanation": "grid는 독립적인 값 복사입니다. 반환된 list의 수정 가능성과 원본으로부터의 독립성은 서로 다른 성질입니다."
+    },
+    {
+      "id": "149-3",
+      "question": "현재 소스의 block = game.current_block()을 저장한 뒤 게임을 한 칸 내렸습니다. readonly 필드인 block.row_offset이 바뀔 수 있는 이유는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "readonly는 Python 대입을 막고 C++ 멤버 갱신은 막지 않기 때문"
+        },
+        {
+          "id": "b",
+          "text": "reference_internal이 매 프레임 새 복사본을 만들기 때문"
+        },
+        {
+          "id": "c",
+          "text": "부모를 삭제하면 자동으로 블록이 떨어지기 때문"
+        },
+        {
+          "id": "d",
+          "text": "모든 Python 정수가 C++ 메모리를 공유하기 때문"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "readonly는 Python 대입을 막고 C++ 멤버 갱신은 막지 않기 때문",
+      "explanation": "반환 값은 내부 멤버 참조입니다. reference_internal은 부모 수명을 연결하고, readonly는 Python setter를 제공하지 않습니다. 어느 쪽도 과거 값의 스냅샷을 만들지는 않습니다."
+    },
+    {
+      "id": "149-4",
+      "question": "직접 C++ 실행과 Python 바인딩 실행의 모든 비교 바이트가 같습니다. 이 검사로 가장 직접 확인한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든 OS용 확장 파일의 호환성"
+        },
+        {
+          "id": "b",
+          "text": "서버의 보상 지급 권한"
+        },
+        {
+          "id": "c",
+          "text": "공유한 Round 규칙 전체의 정답성"
+        },
+        {
+          "id": "d",
+          "text": "검사한 입력열에서 두 호출 경로의 상태 일치"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "검사한 입력열에서 두 호출 경로의 상태 일치",
+      "explanation": "검사는 그 입력열의 호출 경계를 대조합니다. 공유한 규칙의 오류는 양쪽에 함께 나타날 수 있고, 다른 OS·모델·보상 권한은 별도의 계약입니다."
+    },
+    {
+      "id": "149-5",
+      "question": "reset(seed, 0)이 ValueError를 던졌을 때 실패 보존 계약을 확인하는 가장 적절한 검사는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "예외 메시지 길이를 확인한다"
+        },
+        {
+          "id": "b",
+          "text": "실패 전후의 정규 상태 바이트를 비교한다"
+        },
+        {
+          "id": "c",
+          "text": "원본과 복제본의 Python 이름을 비교한다"
+        },
+        {
+          "id": "d",
+          "text": "CMake 빌드 디렉터리를 지운다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "실패 전후의 정규 상태 바이트를 비교한다",
+      "explanation": "예외가 발생했다는 사실만으로 상태 불변은 증명되지 않습니다. 기존 게임을 유지해야 하는 실패이므로 호출 전후의 상태를 함께 확인합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "선택한 Python 환경과 pybind11로 study_py와 직접 호출 oracle을 빌드한다.",
+      "demo에서 원본·복제본·과거 관측의 변화를 예상하고 실행한다.",
+      "중립·복합·종료 입력열을 두 경로에 주고 전이별 정규 바이트를 비교한다."
+    ],
+    "failureChecks": [
+      "알 수 없는 비트와 변환 범위 밖 정수에 예외가 나고 상태가 보존되는지 확인한다.",
+      "실패한 reset 뒤 난수·보드·카운터가 그대로인지 확인한다.",
+      "복사본의 수정과 원본 소멸이 다른 객체의 수명을 깨지 않는지 확인한다."
+    ],
+    "expected": "Python이 누적 C++ 규칙을 호출하고, 독립적인 관측·분기와 명시적인 오류 계약을 확인한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek 소규모 Session 초안을 실제 헤더와 대조·수정하고 실제 확장/직접 C++ 경로를 검사",
+    "corrections": [
+      "초안의 존재하지 않는 begin/end를 data/size로 교정하고 입력/해시 정의 헤더 추가",
+      "규칙 공유가 모든 학습/실전 차이를 제거한다는 현재 주석 교정",
+      "복사 비용의 무조건적 단정과 고정 보드 크기 docstring 교정"
+    ]
+  },
+  "validation": [
+    "실제 Linux CPython 확장 빌드·직접 Round oracle과 매 전이 bytes/점수/종료/Step 일치",
+    "seed·간격·입력조합·종료·snapshot·clone·reset·정수 변환과 실패 상태 보존 검사 통과",
+    "네이티브 Session ASan/UBSan 통과; Python 런타임은 비계측",
+    "현재 tetris_py를 별도 새 빌드하여 복사·내부 참조/부모 수명·clone·정수 경계4회귀 통과",
+    "148 누적 파일 보존·인라인7/현재심볼 대조 통과; Windows/macOS native와free-threadedPython 미검증"
+  ]
+}

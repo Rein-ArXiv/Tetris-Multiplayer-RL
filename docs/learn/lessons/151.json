@@ -1,0 +1,456 @@
+{
+  "id": "lesson-151",
+  "title": "행동: 매 틱 입력과 최종 배치",
+  "shortTitle": "행동 인덱스·입력 경로·시간·합법 마스크·유한 기울기",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: Session에서 관측을 만들지만 정책이 선택할 행동의 의미와 실행 경로는 연결되지 않았습니다.",
+  "finish": "완료: 목표 라벨을 실제 입력 틱으로 실행하고 실패 보존·마스크·확률과 기울기를 검증합니다.",
+  "objective": "좌표 라벨과 실행 경로를 구별하고 누적 규칙 위에서 행동 계획·Python 마스크·안전한 확률 계산을 구현한다.",
+  "prerequisites": [
+    "값 소유 Session과 clone·정규 상태 비교",
+    "Round의 입력 틱·회전·중력·잠금",
+    "관측 스키마·NumPy 배열·CPU 텐서"
+  ],
+  "recap": {
+    "points": [
+      "관측은 전체 상태에서 선택한 정보이며 같은 관측에 다른 상태가 대응할 수 있다.",
+      "축·종류 순서·dtype·메모리 관계가 모델 입력의 계약을 이룬다."
+    ],
+    "bridge": "입력 관측에 이어 정책이 내보내는 행동의 의미와 실행 시간을 정의합니다."
+  },
+  "sections": [
+    {
+      "title": "행동은 값과 실행 규칙을 함께 정한다",
+      "body": "정책이 숫자 하나를 냈다고 게임이 움직이지는 않습니다. 그 숫자가 무엇을 뜻하고, 어느 상태에서 허용되며, 얼마나 시간을 진행시키는지 환경이 정해야 합니다. **행동 공간(action space)**은 선택할 수 있는 값의 집합이고, 상태 전이는 그 값을 실행하는 규칙입니다.\n\n매 틱 입력은 지금 왼쪽으로 이동할지, 회전할지, 기다릴지 고릅니다. 최종 배치는 목표 열과 방향을 고릅니다. 후자는 정책의 결정 빈도를 줄일 수 있지만 목표까지 가는 입력과 시간 처리가 필요합니다.\n\n이번에는 목표를 입력열로 바꾸고 실제 Round.tick으로 실행합니다. 원점 열·방향 인덱스, 성공한 경로만 남기는 마스크, Python의 확률 계산을 차례로 만듭니다. 실제 게임의 즉시 배치 API도 옆에서 읽으며 서로 다른 전이 계약을 구분합니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement",
+        "invariant": "행동을 해석하는 규칙과 실패 시 상태 보존을 명시하고 열거·적용의 계약을 대조한다.",
+        "mayDiffer": "현재 SimGame은 현재 행의 끝점을 직접 바꾸어 수직 낙하한다. 학습 Round는 실제 입력 틱을 실행하고 경로 실패를 거절한다. 같은 행동 이름이 같은 전이를 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "좌표의 원점과 방향 라벨을 정의한다",
+      "body": "피스는 원점과 그에 대한 셀 오프셋으로 표현됩니다. 원점 열은 가장 왼쪽 셀의 열과 같을 수도, 다를 수도 있습니다. 예를 들어 모든 셀의 지역 열이 1 이상이면 원점이 음수여도 셀 자체는 보드 안에 있을 수 있습니다.\n\n여기서는 행동 도메인의 원점 열을 `0 ≤ column < kColumns`로 정합니다. 따라서 물리적으로 보드 안에 들어갈 수 있는 모든 원점 위치를 행동에 포함한다고 주장하지 않습니다. 도메인은 보드 충돌 조건과 별도로 선택한 설계입니다.\n\n방향 라벨은 90도 회전 단계를 세므로 한 바퀴의 단계 수를 kOrientations에 둡니다. 이는 피스 종류나 콘텐츠 개수를 세는 값이 아닙니다. 정사각형처럼 방향을 바꿔도 모양이 같은 피스도 각 단계의 라벨을 유지합니다.",
+      "codes": [
+        {
+          "label": "simulation/action_space.h — 행동 도메인",
+          "language": "cpp",
+          "text": "inline constexpr int kOrientations = 4;\ninline constexpr int kColumns = study_grid::Grid::kColumns;\n\nstatic_assert(kColumns > 0, \"grid must have at least one column\");\nstatic_assert(kColumns <= INT_MAX / kOrientations,\n              \"kColumns * kOrientations would overflow int\");\n\ninline constexpr int kCount = kColumns * kOrientations;\n\n// Quarter-turn orientations are labels, not shapes: geometrically duplicate\n// shapes keep distinct orientation labels and remain separate actions.\nstruct Target {\n  int column;\n  int quarter;\n};"
+        }
+      ],
+      "reference": {
+        "path": "bot/placement.h",
+        "symbol": "encode_action(int col, int rot)",
+        "invariant": "C++와 Python이 같은 원점·회전 순서로 행동 인덱스를 해석한다.",
+        "mayDiffer": "현재 상수 이름과 입력 마스크는 별도 스키마를 따른다. 학습 API는 action_schema로 범위를 공개하고 순수 변환에서 범위를 검사한다."
+      }
+    },
+    {
+      "title": "곱집합을 한 정수로 접고 다시 편다",
+      "body": "열의 수를 C, 방향 라벨 수를 R이라 하면 가능한 라벨은 C×R개입니다. `(column, quarter)`를 `column * R + quarter`로 접습니다. 나눗셈의 몫은 열, 나머지는 방향이 됩니다.\n\n작은 예제에서 C=3, R=2라면 `(2,1)`은 5이고 `5 / 2`의 몫 2와 나머지 1로 복원합니다. 이 숫자는 설명용 도메인이며 실제 보드 크기를 고정한 것이 아닙니다. **전단사(bijection)**는 유효 좌표 쌍 하나와 인덱스 하나가 서로 정확히 대응한다는 뜻입니다.\n\n범위를 먼저 확인하고 곱합니다. static_assert는 선언된 도메인의 곱이 int에 들어가는지 확인하고, encode는 호출자가 준 값이 그 도메인에 있는지 확인합니다. 둘은 서로 다른 경계를 검사합니다. decode도 나눗셈 전에 음수와 상한을 거절합니다.",
+      "codes": [
+        {
+          "label": "simulation/action_space.h — 양방향 변환",
+          "language": "cpp",
+          "text": "inline constexpr std::optional<int> encode(int column, int quarter) noexcept {\n  if (column < 0 || quarter < 0) {\n    return std::nullopt;\n  }\n  if (column >= kColumns || quarter >= kOrientations) {\n    return std::nullopt;\n  }\n  return column * kOrientations + quarter;\n}\n\ninline constexpr std::optional<Target> decode(int action) noexcept {\n  if (action < 0 || action >= kCount) {\n    return std::nullopt;\n  }\n  return Target{action / kOrientations, action % kOrientations};\n}"
+        }
+      ],
+      "reference": {
+        "path": "bot/placement.h",
+        "symbol": "encode_action(int col, int rot)",
+        "invariant": "C++와 Python이 같은 원점·회전 순서로 행동 인덱스를 해석한다.",
+        "mayDiffer": "현재 상수 이름과 입력 마스크는 별도 스키마를 따른다. 학습 API는 action_schema로 범위를 공개하고 순수 변환에서 범위를 검사한다."
+      }
+    },
+    {
+      "title": "끝점이 비어 있어도 가는 길은 막힐 수 있다",
+      "body": "보드 한가운데에 위부터 아래까지 세로 벽이 있고 피스가 오른쪽에 있다고 생각합니다. 왼쪽의 목표 위치는 비어 있습니다. 피스를 목표 열로 바로 옮겨 충돌만 검사하면 놓을 수 있지만, 왼쪽 키를 반복하면 벽을 통과할 수 없습니다.\n\n현재 SimGame::LegalPlacements는 살아 있는 피스를 복사하고 방향·열을 직접 바꾼 뒤 현재 행의 끝점과 수직 낙하를 검사합니다. 중간 이동 경로를 틱별로 재생하지 않습니다. ApplyPlacement는 그 배치를 즉시 고정합니다.\n\n학습용 planner는 실제 입력을 복사한 Round에 넣습니다. 벽을 넘어야 하는 목표는 경로가 실패하므로 마스크에서 제외합니다. **끝점 합법성**과 **선택한 경로의 성공 여부**에 같은 이름을 붙여 혼동하지 않는 것이 핵심입니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement",
+        "invariant": "행동을 해석하는 규칙과 실패 시 상태 보존을 명시하고 열거·적용의 계약을 대조한다.",
+        "mayDiffer": "현재 SimGame은 현재 행의 끝점을 직접 바꾸어 수직 낙하한다. 학습 Round는 실제 입력 틱을 실행하고 경로 실패를 거절한다. 같은 행동 이름이 같은 전이를 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "결과 상태와 입력열을 한 계획에 묶는다",
+      "body": "Plan에는 성공한 결과 Round와 그 결과를 만든 입력 마스크 배열을 보관합니다. 입력열은 설명과 재현을 위한 증거이고, 결과 상태는 적용할 값입니다.\n\n먼저 원본을 복사합니다. 이후 시도는 candidate에서만 진행하므로 회전이 막히거나 중력 때문에 잠겨도 호출자의 상태를 되돌릴 필요가 없습니다. 성공한 계획만 호출자에게 돌려줍니다. 값 복사를 이용한 **실패 원자성**입니다.\n\n각 입력은 기존 decode를 거쳐 Round.tick으로 들어갑니다. 새로운 충돌 규칙이나 중력 규칙을 Python에 복제하지 않습니다. 입력열에 넣는 마스크는 planner가 선택한 알려진 상수라 decode 성공을 전제로 역참조할 수 있습니다.",
+      "codes": [
+        {
+          "label": "simulation/action_plan.h — 복사본에서 한 틱 실행",
+          "language": "cpp",
+          "text": "struct Plan {\n    study_round::Round result;\n    std::vector<study_input::Mask> inputs;\n};\n\n// This route family rotates clockwise, translates, then drops. It is not BFS\n// over every reachable placement. Each input consumes a real Round tick.\ninline std::optional<Plan> plan(const study_round::Round& start, int action) {\n    const auto target=decode(action);\n    if(!target || start.finished() || !start.active())return std::nullopt;\n    Plan candidate{start,{}};\n    auto tick=[&](study_input::Mask mask) {\n        const auto intent=*study_input::decode(mask);\n        const auto result=candidate.result.tick(intent.horizontal,intent.clockwise,\n                                                intent.soft_drop,intent.hard_drop);\n        candidate.inputs.push_back(mask);\n        return result;\n    };\n    const auto continued=[](study_round::Step step) {\n        return step==study_round::Step::waiting || step==study_round::Step::changed;\n    };"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement",
+        "invariant": "행동을 해석하는 규칙과 실패 시 상태 보존을 명시하고 열거·적용의 계약을 대조한다.",
+        "mayDiffer": "현재 SimGame은 현재 행의 끝점을 직접 바꾸어 수직 낙하한다. 학습 Round는 실제 입력 틱을 실행하고 경로 실패를 거절한다. 같은 행동 이름이 같은 전이를 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "회전이 끝난 원점에서 수평 이동을 계산한다",
+      "body": "목표 방향까지 필요한 시계 방향 회전 수는 `(target - current + R) % R`입니다. 현재 방향이 마지막 라벨이고 목표가 첫 라벨이면 한 번만 회전합니다.\n\n회전마다 예상한 방향으로 실제 바뀌었는지 확인합니다. Step이 waiting 또는 changed일 때만 준비를 계속합니다. 피스가 잠겨 새 피스로 바뀌었다면 그 다음 입력을 같은 목표의 준비 동작으로 적용하면 안 됩니다.\n\n벽 차기는 회전을 성립시키려고 원점을 옮길 수 있습니다. 그러므로 수평 이동 횟수를 회전 전 원점에서 미리 계산하지 않고, 회전이 끝난 candidate의 현재 원점에서 목표까지 한 칸씩 진행합니다. 이동 후 원점이 정확히 한 칸 바뀌지 않으면 실패입니다.\n\n성공한 이동은 매번 목표까지의 열 차이를 하나 줄입니다. 차이는 음수가 아닌 정수이므로 반복이 끝납니다. 이것이 종료를 설명하는 **감소량(loop variant)**입니다.",
+      "codes": [
+        {
+          "label": "simulation/action_plan.h — 준비 입력과 종료 조건",
+          "language": "cpp",
+          "text": "    const int turns=(target->quarter-start.quarter()+kOrientations)%kOrientations;\n    for(int i=0;i<turns;++i) {\n        const int expected=(candidate.result.quarter()+1)%kOrientations;\n        if(!continued(tick(study_input::rotate)) || candidate.result.quarter()!=expected)\n            return std::nullopt; // Blocked rotation or a lock before the intended drop.\n    }\n    // Rotation kicks may change the origin: derive translation from that result.\n    while(candidate.result.active()->origin.column!=target->column) {\n        const int before=candidate.result.active()->origin.column;\n        const int direction=before<target->column?1:-1;\n        if(!continued(tick(direction>0?study_input::right:study_input::left)) ||\n           candidate.result.active()->origin.column!=before+direction)\n            return std::nullopt;\n    }"
+        }
+      ],
+      "reference": {
+        "path": "bot/placement.cpp",
+        "symbol": "std::vector<uint8_t> expand_placement",
+        "invariant": "배치 라벨을 입력 마스크의 순서로 전개하며 순서와 상태 전이를 구분한다.",
+        "mayDiffer": "현재 전개 함수는 순수 입력열 생성기다. 학습 planner는 회전 뒤 실제 원점·중력·충돌 결과를 읽으며 성공 여부를 판정한다."
+      }
+    },
+    {
+      "title": "마지막 드롭과 준비 중 잠금을 구분한다",
+      "body": "준비가 끝나면 드롭 한 틱을 적용합니다. 정상 결과는 locked 또는 game_over입니다. 게임 종료도 배치를 실행한 결과일 수 있으므로 계획 성공과 경기 생존을 같은 bool로 합치지 않습니다.\n\n중력 간격이 짧고 피스가 바닥에 닿아 있다면, 회전하는 준비 틱에 먼저 잠길 수 있습니다. 그 계획은 거절합니다. 반면 현재 방향·현재 열을 곧바로 드롭하는 라벨은 성공할 수 있습니다. tests/action_contract.cpp의 바닥 예제가 이 차이를 보여 줍니다.\n\n이 planner는 회전 → 이동 → 드롭 경로군만 검사합니다. 내린 뒤 옆으로 밀기, 이동 후 늦게 회전하기, 여러 방향으로 돌아가기까지 찾으려면 별도의 탐색 상태와 전이 집합이 필요합니다.",
+      "codes": [
+        {
+          "label": "simulation/action_plan.h — 드롭과 열거",
+          "language": "cpp",
+          "text": "    const auto last=tick(study_input::drop);\n    if(last!=study_round::Step::locked && last!=study_round::Step::game_over)\n        return std::nullopt;\n    return candidate;\n}\n\ninline std::vector<int> legal_actions(const study_round::Round& round) {\n    std::vector<int> actions;\n    for(int action=0;action<kCount;++action)\n        if(plan(round,action))actions.push_back(action);\n    return actions;\n}"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "경로가 없으면 게임 오버인가?",
+          "body": "이 마스크가 비었다는 것은 선택한 경로군에서 성공한 행동이 없다는 뜻입니다. Round.finished()와 별도로 확인합니다. 종료하지 않은 상태라면 행동 공간 제한·잘못된 호출 시점·planner 오류를 조사해야 합니다. 탐색 범위를 제한한 알고리즘의 실패를 전체 게임의 불가능성으로 일반화하지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "조회는 읽기 전용, 적용은 현재 상태에서 다시 검증한다",
+      "body": "legal_actions는 각 라벨의 계획을 시험하고 성공한 인덱스만 반환합니다. 조회는 원본 상태를 바꾸지 않습니다. Python은 이 결과로 마스크를 만들고 행동을 선택합니다.\n\n마스크를 만든 뒤 게임을 진행하면 그 마스크가 낡을 수 있습니다. apply_action은 전달된 번호를 현재 상태에서 다시 계획하므로 과거 조회 결과만 믿고 적용하지 않습니다. 여기서는 한 Session을 한 소유자가 순서대로 호출합니다. 조회와 적용을 다른 스레드에서 병렬 호출해도 안전하다는 보장은 없습니다.\n\n성공 시 계획의 결과를 교체하고 소모한 틱 수, 마지막 삭제 줄 수, 종료 여부를 반환합니다. action_trace는 같은 상태에서 계획한 입력열을 값으로 복사합니다. 이를 clone에 step으로 재생하면 전체 상태 바이트가 같아야 합니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 조회·계획·적용",
+          "language": "cpp",
+          "text": "    std::vector<int> legal_actions() const { return study_actions::legal_actions(round_); }\n    std::vector<study_input::Mask> action_trace(int action) const {\n        const auto selected=study_actions::plan(round_,action);\n        if(!selected)throw std::invalid_argument(\"action has no route from this state\");\n        return selected->inputs;\n    }\n    struct ActionResult { std::size_t ticks; int lines; bool ended; };\n    ActionResult apply_action(int action) {\n        const auto selected=study_actions::plan(round_,action);\n        if(!selected)throw std::invalid_argument(\"action has no route from this state\");\n        round_=selected->result;\n        return {selected->inputs.size(),round_.last_cleared(),round_.finished()};\n    }"
+        }
+      ],
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement",
+        "invariant": "행동을 해석하는 규칙과 실패 시 상태 보존을 명시하고 열거·적용의 계약을 대조한다.",
+        "mayDiffer": "현재 SimGame은 현재 행의 끝점을 직접 바꾸어 수직 낙하한다. 학습 Round는 실제 입력 틱을 실행하고 경로 실패를 거절한다. 같은 행동 이름이 같은 전이를 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "행동 하나가 소비하는 시간도 결과다",
+      "body": "배치 행동 하나에 포함된 틱 수는 목표와 현재 상태에 따라 달라집니다. Session.apply_action은 이 틱들을 한 함수 호출에서 빠르게 계산합니다. 논리 시간이 여러 틱 흘렀다고 현실 시간에서 그만큼 기다리지는 않습니다.\n\n화면에서 봇이 너무 빠르게 움직이는 문제는 입력열을 실제 게임 루프에 어떤 간격으로 공급할지와 연결됩니다. 정책의 결정 단위, 규칙의 논리 틱, 화면의 시간 간격을 따로 정의해야 합니다.\n\n학습 목표도 시간 기준에 영향을 받습니다. 할인율 γ를 배치 한 번마다 적용하면 배치 결정 단위를 기준으로 미래를 평가합니다. 틱마다 할인하는 목표를 쓴다면 d틱 행동 뒤의 미래 가치에는 γ의 d제곱을 적용하고, 그 사이의 보상도 틱 기준으로 모아야 합니다. 지속시간이 있는 행동을 다루는 **semi-Markov 관점**입니다. 여기서는 먼저 d를 잃지 않도록 결과에 보관합니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement",
+        "invariant": "행동을 해석하는 규칙과 실패 시 상태 보존을 명시하고 열거·적용의 계약을 대조한다.",
+        "mayDiffer": "현재 SimGame은 현재 행의 끝점을 직접 바꾸어 수직 낙하한다. 학습 Round는 실제 입력 틱을 실행하고 경로 실패를 거절한다. 같은 행동 이름이 같은 전이를 뜻하지 않는다."
+      }
+    },
+    {
+      "title": "Python은 스키마에서 인덱스와 마스크를 만든다",
+      "body": "action_schema는 열 수·방향 수·전체 라벨 수·버전을 제공합니다. Python이 별도의 콘텐츠 개수를 적지 않고 같은 범위를 읽게 합니다. 다만 같은 크기와 버전 문자열이 실제 의미까지 저절로 보증하지는 않으므로 좌표와 실행 규칙도 계약에 남깁니다.\n\nPython에서 `mask[-1]`은 마지막 원소입니다. 따라서 잘못된 음수 행동을 넣기 전에 decode로 범위를 검사합니다. float와 bool도 행동 좌표로 허용하지 않습니다. bool은 Python에서 정수의 하위 타입이므로 명시적으로 배제합니다.\n\nlegal_mask는 C++가 반환한 행동 목록을 bool 배열에 표시할 뿐 충돌 규칙을 다시 구현하지 않습니다. mask를 만드는 시점과 적용할 Session의 시점이 같도록 호출 순서를 관리합니다.",
+      "codes": [
+        {
+          "label": "python/actions.py — 음수 인덱스와 범위",
+          "language": "python",
+          "text": "def decode(action,schema):\n    columns,orientations=dimensions(schema)\n    action=integer(action)\n    if not 0 <= action < columns*orientations:\n        raise ValueError(\"action outside domain\")\n    return divmod(action,orientations)\n\n\ndef legal_mask(session,schema):\n    columns,orientations=dimensions(schema)\n    mask=np.zeros(columns*orientations,dtype=np.bool_)\n    for action in session.legal_actions():\n        decode(action,schema)  # Do not allow a negative Python index to alias the end.\n        mask[action]=True\n    return mask"
+        },
+        {
+          "label": "python/actions.py",
+          "language": "python",
+          "file": "checkpoints/151-actions/python/actions.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/common/action_mask.py",
+        "symbol": "def legal_mask",
+        "invariant": "규칙 계층이 열거한 행동을 같은 인덱스의 bool 마스크로 바꾼다.",
+        "mayDiffer": "현재 함수는 PyTorch CPU tensor를 바로 만든다. 학습 함수는 NumPy bool 배열을 만들며 분포 계산을 할 때만 torch를 불러온다."
+      }
+    },
+    {
+      "title": "마스크 위에 확률 분포를 정의한다",
+      "body": "정책의 **logit**은 정규화 전 점수입니다. 합법한 인덱스 집합을 L이라 하면 `p(a)=exp(z(a))/sum(exp(z(b)), b∈L)`로 확률을 만듭니다. log-softmax는 그 확률의 로그를 계산합니다.\n\n불법 logit을 음의 무한대로 채우면 지수 값이 0이 됩니다. 합법 logit이 유한하고 L이 비어 있지 않을 때 불법 확률은 0, 합법 확률의 합은 1입니다. 예를 들어 `[0,100,0]`에서 가운데가 불법이면 양 끝의 확률이 각각 절반입니다. 불법 점수가 매우 커도 선택에 영향을 주지 않습니다.\n\n모든 마스크가 False라면 정규화할 대상이 없습니다. logits에 작은 eps를 더해도 이 문제는 해결되지 않습니다. dtype·shape·device와 합법 값의 유한성을 확인하고 빈 행은 명시적으로 거절합니다. 배치에서는 행마다 이 조건이 성립해야 합니다.\n\n유한한 입력값끼리의 차이도 자료형 범위를 넘으면 로그 확률이 무한대가 될 수 있습니다. 정규화 결과의 합법 항도 유한한지 검사합니다. 극단적인 수치 범위는 NaN을 다음 계산으로 퍼뜨리기 전에 오류로 드러냅니다.",
+      "codes": [
+        {
+          "label": "python/actions.py — 분포의 전제 검사",
+          "language": "python",
+          "text": "def masked_log_softmax(logits,mask):\n    import torch\n    if not logits.is_floating_point() or mask.dtype != torch.bool:\n        raise TypeError(\"floating logits and bool mask required\")\n    if logits.ndim < 1 or logits.shape[-1] == 0 or logits.shape != mask.shape:\n        raise ValueError(\"matching nonempty action axis required\")\n    if logits.device != mask.device:\n        raise ValueError(\"same device required\")\n    if not mask.any(dim=-1).all():\n        raise ValueError(\"no legal action in a row\")\n    if not torch.isfinite(logits.masked_select(mask)).all():\n        raise ValueError(\"legal logits must be finite\")\n    logp = torch.log_softmax(logits.masked_fill(~mask,float(\"-inf\")),dim=-1)\n    if not torch.isfinite(logp.masked_select(mask)).all():\n        raise ValueError(\"normalized legal log probabilities must be finite\")\n    return logp"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "def masked_entropy",
+        "invariant": "합법 행동 위에서 정규화하고 정의되지 않은 수치 연산을 실행하기 전에 제거한다.",
+        "mayDiffer": "현재 PPO와 정책경사는 공통 함수를 사용한다. 학습 체크포인트는 모델 훈련 없이 작은 logits로 같은 값·기울기 계약을 실험한다."
+      }
+    },
+    {
+      "title": "값을 가리는 시점이 역전파에도 영향을 준다",
+      "body": "엔트로피 `H=-sum(p log p)`는 분포의 불확실성을 나타냅니다. 수학에서는 p가 0으로 갈 때 p log p의 극한이 0입니다. 하지만 부동소수점에서 `0 * -inf`는 NaN입니다.\n\n곱셈 뒤 불법 항을 where로 0으로 바꾸면 화면에 출력한 합계는 정상처럼 보일 수 있습니다. 그래도 자동 미분은 이미 실행한 곱셈 그래프를 따라 기울기를 계산하므로 NaN이 남을 수 있습니다. **잘못된 연산을 수행하기 전에 피연산자를 바꿔야 합니다.**\n\n불법 logp를 곱셈 전에 0으로 치환합니다. 그 항의 확률도 0이므로 곱은 0입니다. 합법 항은 원래 값을 유지합니다. tests/action_binding.py에서는 엔트로피 값과 logits.grad를 둘 다 검사합니다. 현재 학습 코드의 회귀는 합법 좌표만 따로 모은 작은 분포의 기울기와도 대조합니다.",
+      "codes": [
+        {
+          "label": "python/actions.py — 미분 그래프를 안전하게 구성",
+          "language": "python",
+          "text": "def entropy(logp,mask):\n    # Mask the operand before multiplication so the backward graph avoids 0 * -inf.\n    safe=logp.masked_fill(~mask,0.0)\n    return -(logp.exp()*safe).sum(dim=-1)"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "def masked_entropy",
+        "invariant": "합법 행동 위에서 정규화하고 정의되지 않은 수치 연산을 실행하기 전에 제거한다.",
+        "mayDiffer": "현재 PPO와 정책경사는 공통 함수를 사용한다. 학습 체크포인트는 모델 훈련 없이 작은 logits로 같은 값·기울기 계약을 실험한다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "자동 미분에서 나중에 마스킹하면 부족한 이유",
+          "body": "[PyTorch의 잘못된 연산과 역전파 설명](https://docs.pytorch.org/docs/stable/notes/autograd.html#division-by-zero-in-autograd)은 0으로 나누기를 예로 듭니다. 이 실습에서는 0과 음의 무한대의 곱이 같은 종류의 계산 그래프 문제를 만듭니다. 결과 텐서를 가리는 것과 잘못된 연산 자체를 피하는 것을 구분합니다."
+        }
+      ]
+    },
+    {
+      "title": "같은 모양의 라벨도 확률과 시간을 가질 수 있다",
+      "body": "정사각형의 방향 라벨들이 같은 모양을 만들어도 마스크가 자동으로 하나만 남기지는 않습니다. 라벨을 합치려면 인코딩, 모델 출력 해석, 실행 규칙까지 합친 행동의 의미로 바꾸어야 합니다.\n\n같은 결과에 이르는 라벨이 여러 개라면 결과의 확률은 각 라벨 확률의 합입니다. 라벨 엔트로피에는 결과를 고르는 불확실성뿐 아니라 그 그룹 안에서 어느 라벨을 고르는지의 불확실성도 들어갑니다. 그룹 내부가 균등할 때만 그 부분이 그룹 크기의 로그가 됩니다.\n\n우리의 틱 기반 계획에서는 방향을 맞추느라 소비한 시간이 다를 수 있습니다. 같은 모양으로 끝나더라도 중력·난수 소비·점수 이력 등 전체 상태가 같은지는 별도로 비교해야 합니다. 도형 동등성, 보드 동등성, 전체 상태 동등성을 한 가지로 취급하지 않습니다.",
+      "reference": {
+        "path": "python/common/action_mask.py",
+        "symbol": "Legal action masks",
+        "invariant": "마스크는 합법성을 나타내며 기하학적으로 중복된 방향을 자동 합치지 않는다.",
+        "mayDiffer": "현재 즉시 배치의 동등 그룹과 틱 기반 행동의 동등 그룹은 다를 수 있다. 학습 planner는 경로 시간까지 상태 전이에 반영한다."
+      }
+    },
+    {
+      "title": "누적 파일에 연결하고 실험을 실행한다",
+      "body": "기준 프로젝트는 관측 바인딩 위에 action_space.h·action_plan.h·actions.py를 추가합니다. Session과 바인딩 공개 메서드, 바인딩 CMake의 검사 타깃을 확장합니다. 규칙의 Round.tick은 그대로 사용합니다.\n\nC++17·CMake·Python 개발 헤더·pybind11·NumPy·CPU PyTorch가 설치된 가상환경을 사용합니다. 선택한 Python의 절대 경로를 STUDY_PYTHON으로 지정합니다. 아래는 저장소 루트의 POSIX 셸 예입니다. Windows에서는 가상환경의 Scripts/python.exe와 해당 셸 변수·줄바꿈 문법을 사용하고 --config Release를 유지합니다. 확장 모듈은 실행할 OS·CPU·Python에 맞춰 빌드합니다.\n\naction_demo.py는 한 합법 행동을 골라 적용하고 clone에는 같은 입력열을 한 틱씩 재생합니다. 상태 비교와 거절 후 보존이 True인지 확인합니다. 출력한 틱 수는 계산한 규칙 전이 수입니다.",
+      "codes": [
+        {
+          "label": "빌드와 실행",
+          "language": "sh",
+          "text": "STUDY_PYTHON=/path/to/venv/bin/python\nSTUDY_PYBIND=$($STUDY_PYTHON -m pybind11 --cmakedir)\ncmake -S docs/learn/checkpoints/151-actions/bindings -B out/study-151 \\\n  -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=\"$STUDY_PYTHON\" \\\n  -Dpybind11_DIR=\"$STUDY_PYBIND\"\ncmake --build out/study-151 --config Release -j2\nctest --test-dir out/study-151 -C Release --output-on-failure\n$STUDY_PYTHON docs/learn/checkpoints/151-actions/python/action_demo.py \\\n  --module-dir out/study-151/python/Release"
+        },
+        {
+          "label": "simulation/action_plan.h",
+          "language": "cpp",
+          "file": "checkpoints/151-actions/simulation/action_plan.h",
+          "collapsed": true
+        },
+        {
+          "label": "bindings/session.h",
+          "language": "cpp",
+          "file": "checkpoints/151-actions/bindings/session.h",
+          "collapsed": true
+        },
+        {
+          "label": "bindings/study_py.cpp",
+          "language": "cpp",
+          "file": "checkpoints/151-actions/bindings/study_py.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "python/action_demo.py",
+          "language": "python",
+          "file": "checkpoints/151-actions/python/action_demo.py",
+          "collapsed": true
+        }
+      ]
+    },
+    {
+      "title": "실패 예제로 계약의 경계를 확인한다",
+      "body": "인덱스 검사는 모든 유효 좌표의 encode/decode 왕복과 음수·상한·큰 정수 거절을 확인합니다. 실제 게임 검사는 여러 시드와 낙하 간격에서 열거된 모든 행동을 복사본에 적용합니다.\n\n벽 예제에서는 끝점이 비어 있어도 입력 경로가 막혀 거절되어야 합니다. 바닥 예제에서는 준비 틱의 잠금을 거절하고 즉시 드롭은 허용해야 합니다. 실패 전후에는 점수나 그리드만 보지 않고 정규 상태 바이트를 비교합니다.\n\nPython 검사는 C++ 마스크와 적용 가능성이 일치하는지, 반환된 입력열을 step으로 재생한 상태와 일괄 적용 상태가 같은지 확인합니다. 현재 게임의 tests/action_codec_dump.cpp 검사는 두 언어의 실제 전개 함수 출력까지 비교합니다. 이는 문자열이나 Python 복제품 두 개를 비교하는 것보다 강하지만 물리 경로의 성공 여부와는 별개입니다.",
+      "codes": [
+        {
+          "label": "tests/action_contract.cpp",
+          "language": "cpp",
+          "file": "checkpoints/151-actions/tests/action_contract.cpp",
+          "collapsed": true
+        },
+        {
+          "label": "tests/action_binding.py",
+          "language": "python",
+          "file": "checkpoints/151-actions/tests/action_binding.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "tests/placement_contract_test.cpp",
+        "symbol": "int main()",
+        "invariant": "열거·적용·실패 보존을 검사하고 끝점 API와 입력 재생의 차이를 의도한 fixture로 드러낸다.",
+        "mayDiffer": "현재 게임은 즉시 배치가 벽 너머 끝점을 허용하는 사례를 보존한다. 학습 planner는 같은 형태의 목표를 입력 경로 실패로 거절한다."
+      }
+    },
+    {
+      "title": "변경할 때 함께 움직여야 할 계약을 남긴다",
+      "body": "열 수와 방향 라벨 수는 스키마에서 읽습니다. 인덱스 순서를 바꾸거나 행동 라벨을 추가하면 모델 출력의 의미, 저장된 정책, C++ 해독기, 마스크를 함께 검토합니다. 출력 크기가 같다는 이유만으로 호환된다고 판단하지 않습니다.\n\n경로만 바꾸어도 행동의 지속시간과 다음 상태가 달라질 수 있습니다. 그때는 같은 라벨 수를 유지할 수 있지만 이미 학습한 정책이 겪는 전이가 바뀝니다. 반대로 화면에서 입력을 보여 주는 간격만 바꿀 때도 실제 논리 틱과 상대의 입력이 어떻게 진행되는지 확인해야 합니다.\n\n여기서 유지할 핵심은 **라벨의 의미 → 현재 상태의 허용 여부 → 실제 실행 → 결과와 시간**을 한 계약으로 연결하는 것입니다. 정책은 그 계약 위에서 선택하고, 보상은 실행 결과를 어떤 목표로 평가할지 정합니다.",
+      "reference": {
+        "path": "src/sim_game.cpp",
+        "symbol": "int SimGame::ApplyPlacement",
+        "invariant": "행동을 해석하는 규칙과 실패 시 상태 보존을 명시하고 열거·적용의 계약을 대조한다.",
+        "mayDiffer": "현재 SimGame은 현재 행의 끝점을 직접 바꾸어 수직 낙하한다. 학습 Round는 실제 입력 틱을 실행하고 경로 실패를 거절한다. 같은 행동 이름이 같은 전이를 뜻하지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "151-1",
+      "question": "설명용 도메인의 방향 수 R=3에서 (열=2, 방향=1)을 인코딩한 값과 역변환은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "7 → 몫 2·나머지 1"
+        },
+        {
+          "id": "b",
+          "text": "6 → 몫 2·나머지 0"
+        },
+        {
+          "id": "c",
+          "text": "5 → 몫 1·나머지 2"
+        },
+        {
+          "id": "d",
+          "text": "3 → 몫 1·나머지 0"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "7 → 몫 2·나머지 1",
+      "explanation": "열 우선 인덱스는 2×3+1입니다. 나눗셈의 몫과 나머지는 유효 범위의 원래 좌표 쌍을 복원합니다."
+    },
+    {
+      "id": "151-2",
+      "question": "목표 끝점과 낙하 경로는 비었지만 현재 피스와 목표 사이에 세로 벽이 있습니다. 적절한 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 API는 같은 최종 배치를 반드시 만든다"
+        },
+        {
+          "id": "b",
+          "text": "입력 마스크가 같으면 벽을 통과한다"
+        },
+        {
+          "id": "c",
+          "text": "즉시 끝점 배치는 허용될 수 있지만 틱 경로는 실패할 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "피스 원점 열만 음수로 만들면 모든 경로가 열린다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "즉시 끝점 배치는 허용될 수 있지만 틱 경로는 실패할 수 있다",
+      "explanation": "끝점 검사에는 중간 수평 경로가 포함되지 않습니다. 학습 planner는 매 틱 실제 이동 결과를 확인해 막힌 경로를 거절합니다."
+    },
+    {
+      "id": "151-3",
+      "question": "배치 준비 중 회전 틱에서 중력으로 피스가 잠겼습니다. 이 planner가 해야 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새 피스에도 남은 입력을 계속 적용"
+        },
+        {
+          "id": "b",
+          "text": "원본을 유지하고 해당 계획을 거절"
+        },
+        {
+          "id": "c",
+          "text": "게임이 끝나지 않았으므로 무조건 성공"
+        },
+        {
+          "id": "d",
+          "text": "마스크 없이 임의의 행동을 샘플"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "원본을 유지하고 해당 계획을 거절",
+      "explanation": "준비 단계에서는 같은 활성 피스를 목표로 조작해야 합니다. 잠금은 그 전제를 끝내므로 복사본 계획을 버리고 원본 상태를 보존합니다."
+    },
+    {
+      "id": "151-4",
+      "question": "엔트로피 합은 유한한데 역전파 기울기가 NaN입니다. 불법 항의 p=0, logp=-inf일 때 적절한 수정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "곱셈 뒤 출력만 0으로 가린다"
+        },
+        {
+          "id": "b",
+          "text": "logits에 같은 작은 상수를 더한다"
+        },
+        {
+          "id": "c",
+          "text": "NaN 기울기를 로그에서 숨긴다"
+        },
+        {
+          "id": "d",
+          "text": "불법 logp를 곱셈 전에 0으로 치환한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "불법 logp를 곱셈 전에 0으로 치환한다",
+      "explanation": "0×-inf를 먼저 계산하면 잘못된 연산이 미분 그래프에 남습니다. 피연산자를 먼저 바꿔 수학적 극한의 0항을 유한한 연산으로 구현합니다."
+    },
+    {
+      "id": "151-5",
+      "question": "Round.finished()는 False인데 제한된 경로군의 마스크가 전부 False입니다. 먼저 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "빈 분포에서 softmax로 하나를 선택"
+        },
+        {
+          "id": "b",
+          "text": "모든 logit에 eps를 더해 진행"
+        },
+        {
+          "id": "c",
+          "text": "분포 생성을 멈추고 경로 제한·호출 시점·구현 오류를 구분"
+        },
+        {
+          "id": "d",
+          "text": "전체 게임의 모든 도달 위치가 불가능하다고 단정"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "분포 생성을 멈추고 경로 제한·호출 시점·구현 오류를 구분",
+      "explanation": "선택한 경로군의 실패는 게임 전체의 종료 판정과 다릅니다. 빈 합법 집합 위에는 정규화된 행동 분포를 만들 수 없습니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "도메인 상수에서 열·방향 인코딩과 역변환을 만든다.",
+      "Round 복사본에서 실제 틱 계획을 실행하고 성공한 행동을 마스크로 공개한다.",
+      "Python에서 마스크 위의 분포와 엔트로피를 계산한다."
+    ],
+    "failureChecks": [
+      "벽 너머 끝점·준비 중 잠금·음수와 상한 행동 거절을 확인한다.",
+      "계획 적용과 같은 입력열 재생의 전체 상태가 일치하는지 비교한다.",
+      "빈 마스크 거절과 엔트로피 값·기울기의 유한성을 함께 확인한다."
+    ],
+    "expected": "행동의 라벨·경로·시간을 설명하고 현재 즉시 배치 API와 학습용 틱 계획의 계약 차이를 구별한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek의 선택 인코딩 초안을 검수하고 Round 및 현재 SimGame·두 언어 전개·PyTorch 미분을 직접 대조",
+    "corrections": [
+      "끝점 합법성과 틱 경로 도달 가능성을 구분",
+      "회전 후 원점에서 이동 계산·준비 중 잠금 거절",
+      "현재 PPO/정책경사의 0×-inf 역전파 NaN을 재현 후 피연산자 선마스킹으로 수정",
+      "Part8의 스폰 행·T-spin 정의·중복 엔트로피 상수 증가 단정 교정"
+    ]
+  },
+  "validation": [
+    "실제 확장 모듈과 누적/새 행동 CTest 통과",
+    "현재 C++/Python 인코딩·입력 전개 전체 도메인 및 배치 보존/벽 fixture 검사",
+    "PPO·정책경사의 엔트로피 값/기울기 및 실제 모델 1회 갱신 검사",
+    "Windows/macOS native·GPU·Colab 전체 학습·ONNX 미검증"
+  ]
+}

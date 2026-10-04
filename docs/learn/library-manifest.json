@@ -32,8 +32,8 @@
     },
     "part4": {
       "path": "docs/blog/part4-game-wrapper-and-loop.md",
-      "sha256": "972b875ad1f68f831db0fdb19d6ce8bbdec8c479a42f4f9d7be69b3923376898",
-      "lines": 2552,
+      "sha256": "5c863fd2b56fcf285fea565f2e3a5ed459606807d714a056d9923f951fe29033",
+      "lines": 2565,
       "codeBlocks": 63
     },
     "part5": {
@@ -56,19 +56,19 @@
     },
     "part8": {
       "path": "docs/blog/part8-python-rl.md",
-      "sha256": "c1cf95ea6896146562fec7c1ea9f611a871955f01ef73db4d8317fb352e8409f",
-      "lines": 2139,
-      "codeBlocks": 74
+      "sha256": "9f67c4d92346c75cf58eebdd388f802c0140e12ef7e1a9d373ba968ac5fdc8a1",
+      "lines": 2105,
+      "codeBlocks": 64
     },
     "part9": {
       "path": "docs/blog/part9-rl-onnx-bot.md",
-      "sha256": "b01234247230ce05270d87c8af9175017f9ee5180fd09990e4f077b4abfcd9ab",
-      "lines": 1715,
-      "codeBlocks": 52
+      "sha256": "b87f6be2a70946045edee200f769be6b9a4a2ee26e1ceec94b98f57282e718d3",
+      "lines": 1677,
+      "codeBlocks": 46
     },
     "part10": {
       "path": "docs/blog/part10-meta-and-ranking.md",
-      "sha256": "feb5d14214df920db9c68cab66c4ea90798cf37791d02b520aa7da46bccf4569",
+      "sha256": "74e95d118521093f0254c62a0c5a2f5075c42a1efbfe2c2bfbf1b8889977916f",
       "lines": 3262,
       "codeBlocks": 71
     },
@@ -86,7 +86,7 @@
     },
     "part13": {
       "path": "docs/blog/part13-structure-and-build-reference.md",
-      "sha256": "4b7c2cba83d0f5afb3aabab5b640659176d64dca38628a453906e99baae3c16f",
+      "sha256": "89f5faef6b4a420b5d4c1d75a137e943a575182ef2670e263fa1d4f2341d9ffd",
       "lines": 1633,
       "codeBlocks": 35
     },
@@ -98,8 +98,8 @@
     },
     "part15": {
       "path": "docs/blog/part15-release-polishing.md",
-      "sha256": "ecd4ff087e6f3484eaca21700a9228089b903545de5d9920364f3c83841df619",
-      "lines": 386,
+      "sha256": "11aeff88fe4566b2e98755507afbbe1c09ce09f7c4928e6daa0233d5f6bcb743",
+      "lines": 426,
       "codeBlocks": 10
     },
     "part16": {
@@ -128,8 +128,8 @@
     },
     "bots-and-colab": {
       "path": "docs/bots-and-colab.md",
-      "sha256": "b1fa220ca2665a5a4b75f520311798a00970f041834ced6912f26e5ceb77c2bd",
-      "lines": 208,
+      "sha256": "2202457386b1285925df6e1ac48b0ea29b9e18e0b2d260a5e7cb58b0211a0c5e",
+      "lines": 223,
       "codeBlocks": 6
     },
     "code-review": {
@@ -171,8 +171,8 @@
   },
   "sources": {
     "CMakeLists.txt": {
-      "sha256": "1972f65b4d9d49f9f6d141e8611b4182610ba272dfbecedf65135981fa3c0881",
-      "lines": 828
+      "sha256": "cd34e676487562ce79429281bfa17597169176096df1b3ace14ee444ea0952e0",
+      "lines": 846
     },
     "audio/audio.cpp": {
       "sha256": "afe333792ae9134d7046a8684a5223c0a501709391352a9df2b566c9be4659c9",
@@ -206,36 +206,64 @@
       "sha256": "c3270aaea59f329c4dda685168b61cbc74f5cb50aede8d499f6d8e30a7cfc5c0",
       "lines": 45
     },
+    "bindings/tetris_py.cpp": {
+      "sha256": "21e3906ab1975df84eacf8efccf6d7360ae279e220e012ecb3cebbf95e4f3174",
+      "lines": 174
+    },
     "bot/bot_onnx.cpp": {
-      "sha256": "bcce544b2b7e8718ae7ff70d3ed5e0b9b22b00a897c103548cae02bcc0992ac3",
-      "lines": 206
+      "sha256": "452701e62890099e6483cb69db17b0ed8a554793f6fad0259cc974aae349bf9a",
+      "lines": 197
     },
     "bot/bot_onnx.h": {
-      "sha256": "c9e683c10bdfb60adcfe05998ffde5ceec16a978af359cd101717849541cfb5d",
-      "lines": 56
+      "sha256": "ad07734963fb195319e1ad9a032dfc950b92a2d08874541f6a9aaac7a7aeff18",
+      "lines": 51
     },
     "bot/controller.h": {
-      "sha256": "7d5d4e0eeea21017a0a53f4a331cfcdcc6b0e826c2bb448800344da0d98773d8",
-      "lines": 47
+      "sha256": "33e10f919cefaa00df1c6bcf8ad3e071d7824ded98ff367626c4dda3919c2c76",
+      "lines": 72
+    },
+    "bot/opponent_profile.h": {
+      "sha256": "1bf65db740e1185c3d83d394cec441422762d02bb00cd513d96b72ec85906b72",
+      "lines": 57
     },
     "bot/opponents.cpp": {
-      "sha256": "b805285f7eaaf98127d309820c7985a9a6c4a48da5a11df26a4f66e5089fdbfc",
-      "lines": 110
+      "sha256": "7657a8bbf09ecbafb390edbffe798d31d650564cc7bf71bc6826096267701390",
+      "lines": 108
     },
     "bot/opponents.h": {
-      "sha256": "96a25847ca1873c9041fa9f16a023625758d8f885a706b71b78fb46f46d2022a",
-      "lines": 23
+      "sha256": "97212b6bf098e279658645365150bc2abcd11e9b504deee7944eb2de0a28c3fa",
+      "lines": 24
+    },
+    "bot/pacing.h": {
+      "sha256": "081fe79b4692267c8392885461a67f742e98c55047c5e0c55b10e3033a8eb162",
+      "lines": 101
     },
     "bot/placement.cpp": {
-      "sha256": "bc117e9d89905511035017b6497789bc0513925d0d2ca85d7c1fff1dda90f5b1",
-      "lines": 134
+      "sha256": "2082c33e934792cf85a41245f9fcdf977d5a9734ac1be6fe0dadbe2888cd2c1e",
+      "lines": 144
     },
     "bot/placement.h": {
-      "sha256": "165848251bbce53422aa158cc580ffee3d9f7803eacb8def9273243a1468a0e0",
-      "lines": 74
+      "sha256": "b9d02f6b2da89ea78c5e4e1449306e04f65f83b06b05148752edd7ec6b5baaa8",
+      "lines": 75
+    },
+    "bot/policy_choice.h": {
+      "sha256": "be34fccfc7f16112682767a3b9d32131a8ce4b61da11f3f9920b8c551ec8b16b",
+      "lines": 45
+    },
+    "bot/policy_decision.h": {
+      "sha256": "1a5699d3bd790ceb0099fa0b220d49424cb86e0fca3444ee416080a9e3a42192",
+      "lines": 38
+    },
+    "bot/reward_catalog.h": {
+      "sha256": "6cce3cce13050f1be3095942661abd25fb1d40c35ec51f84164302ab0048adac",
+      "lines": 24
     },
     "bot/reward_replay.h": {
-      "sha256": "ff0b84663ec5ff5f5111e592a31215121b188ba13679ad1a2877167adacc1b62",
+      "sha256": "8186eefb99f734d7af68c5c728865e907c03af86a00c18a953fd22f5b0645eea",
+      "lines": 69
+    },
+    "bot/run_status.h": {
+      "sha256": "88022f29dd3054e964d37bbd8d4489fcf5b491f65c4d9f21b5180dd1333ed45c",
       "lines": 52
     },
     "core/constants.h": {
@@ -299,8 +327,8 @@
       "lines": 43
     },
     "meta/bot_challenges.cpp": {
-      "sha256": "98a8986e6476bca44378f7e69e11e347fd91ed96cb96c946dfefa362e422d2fe",
-      "lines": 109
+      "sha256": "29fa0345725412031f23f1861979001373d28a9351298992e943c4bac3a4051e",
+      "lines": 148
     },
     "meta/credentials.cpp": {
       "sha256": "884fb179b8b29e1c48f7020c936bd719487b0d112dc2adfc2911a1e22cb71583",
@@ -327,11 +355,11 @@
       "lines": 61
     },
     "meta/http_client.cpp": {
-      "sha256": "3bbc7968e71281a1ec75b54f833bb37a44e60609eca37423740facbbc6742cb1",
-      "lines": 476
+      "sha256": "64964ca4770f7c32321fe2a3c4dfd409fda34404295dbf7a47955435559a01f9",
+      "lines": 480
     },
     "meta/http_client.h": {
-      "sha256": "6fb8aa039d6cf878a94f17c7e34cf3d7798d3ffe5bea21443279765dc143d0d1",
+      "sha256": "be29745e449723686113e563834f5bb2f499387dcfb4827a4785a7eb92dff6e5",
       "lines": 140
     },
     "meta/json_input.h": {
@@ -471,68 +499,116 @@
       "lines": 587
     },
     "python/common/__init__.py": {
-      "sha256": "e9189b1baf9441e72327ae5b80cbbeb2b2e4f33051d0a939c31c1b0ced7d2dd7",
+      "sha256": "072c00168c6cad6106000bf94d8173c126d51354ddcd495e42f3b925bae50a18",
       "lines": 46
     },
     "python/common/action_mask.py": {
-      "sha256": "4960f9f001e2118d8d2e22d19d02963935eb4c546cbe994f8ea9879d5a6e4654",
+      "sha256": "9076c8d07cc47623b20704571f52c600ee3c79620949fc8adff99327301f3474",
       "lines": 47
     },
+    "python/common/atomic_save.py": {
+      "sha256": "f94994d770d2a15dad2142d5c7cff45bf09d64aca6200cd018cdd1a5c0e2cad3",
+      "lines": 49
+    },
     "python/common/checkpoint.py": {
-      "sha256": "fa41d9a5e90a398abc3d2bee6a2e17aa1aa084e9ac9e546e4ad7e33472eebadd",
-      "lines": 84
+      "sha256": "72531d7e7a77c4e1621113680dd0a0d23e083ea0ae6c38d93fc79511dec58578",
+      "lines": 110
     },
     "python/common/env.py": {
-      "sha256": "d2b8c36a29ce353900d2cce17cb23ccd82e56f5e7f8e09d8356dce306923f9f6",
-      "lines": 131
+      "sha256": "93547b75bebf3b6a53c4b9629b94a421ceb02e6396b5d4cc3b16d50120d2af81",
+      "lines": 138
     },
     "python/common/env_versus.py": {
-      "sha256": "f5231016006457907fbec43a8cfbbabf32d4b5faf79274ab99b108df8b65f701",
-      "lines": 287
+      "sha256": "171e0348ffdaf746560b03883a10000d611126635588bd566de4068020aabfb9",
+      "lines": 317
     },
     "python/common/features.py": {
-      "sha256": "bdbc9d2db89d3cf3d6dbba2a5e625127318dcdbff51171384f5e6335833c8955",
-      "lines": 119
+      "sha256": "f8eeb008fb5cecad7316664c5772c2a33fefa67ff889aca2203fd4df2937ae8b",
+      "lines": 153
+    },
+    "python/common/gym_contract.py": {
+      "sha256": "dd23effc5a4a87bd72b41bbd1c66b27822f46a54ab5c5835e50499f04cb731e8",
+      "lines": 58
+    },
+    "python/common/model_contract.py": {
+      "sha256": "08edf2a65c2cca728cdeafd34a24000d7008f193ecefbbe9a8c82c60507b9f51",
+      "lines": 95
     },
     "python/common/models.py": {
-      "sha256": "c7287555c9be9059bfe483fc62c71c62fef41f77eed4c7234b816911f156e55b",
-      "lines": 107
+      "sha256": "dde4fca729642353d28474f5ee2b6fe5e85061ce88bf211adb2040ba0501e5bb",
+      "lines": 138
     },
     "python/common/obs.py": {
-      "sha256": "bf95562f3dc6c862c9307aa505b9f6fc41f05088a93d6685e9ac268bd4b22fa9",
-      "lines": 64
+      "sha256": "fc58612fe998c365f3e70f588e505ec175c1dbbfbc86d30b6e42a1f7bf089600",
+      "lines": 62
     },
-    "python/netbot/__init__.py": {
-      "sha256": "c2e4f470d01d4e112742f566c473ac29020299128c897ff80923b999791d71d0",
-      "lines": 12
+    "python/common/ppo_loss.py": {
+      "sha256": "3b86798970438372432530aab007099c89470f20ef5d376758a794e1961cfbb8",
+      "lines": 33
+    },
+    "python/common/returns.py": {
+      "sha256": "7b89d0160366b4bfde333c747cd468832651d103d9617ae687adbd0c8f676589",
+      "lines": 118
+    },
+    "python/common/versus_reward.py": {
+      "sha256": "8f9e8cb7b27fb1fb575dfcf10a7e8142582a61ee93d8a588b5475fc9f83baf47",
+      "lines": 73
+    },
+    "python/netbot/expansion_contract.py": {
+      "sha256": "ba73b43ead2a9f7df27c84cba97ea7fea06dae9dc16a7fee6b0f8c2ea8881b6a",
+      "lines": 21
     },
     "python/netbot/export_onnx.py": {
-      "sha256": "93322036b43051645a7e2c7dff00626a308a6e4a1007d8523ddbc5a1d34a474b",
-      "lines": 116
+      "sha256": "21baf19f67ba517671ff2570f5f2530696c1deb0b3eb64668a3ef8ab3748a784",
+      "lines": 59
     },
     "python/netbot/framing.py": {
       "sha256": "68ca4d8d3b795b4917b62ccd63eed1c22b3da87178d9914f901d39853b84dc88",
       "lines": 269
     },
     "python/netbot/input_expander.py": {
-      "sha256": "afbd708bb64be78d76445cd185d3e89a3acb371fa4759200f5e0136bf124acf6",
-      "lines": 91
+      "sha256": "d76939703ba23462d660c27eaec250b4b229409cf74770f5cec949d873d06205",
+      "lines": 94
+    },
+    "python/netbot/onnx_contract.py": {
+      "sha256": "f1e9cdd4281c1537a1309e80ab96128b2483c921396cc83757cc7df292b314d6",
+      "lines": 123
+    },
+    "python/netbot/onnx_pipeline.py": {
+      "sha256": "d377552753dc14798aa94401616b64f49272f2389089f5ecba2006d44dd0f719",
+      "lines": 135
+    },
+    "python/sim/__init__.py": {
+      "sha256": "1f0b3e82fd7162c51817eb02ea4f0143f879379e1067fa7ae1e94b8be48cd128",
+      "lines": 54
     },
     "python/tests/determinism_reference.py": {
       "sha256": "47492c70e5fc39e071e07dc4525626c71866bc2ca9f58c6030a3f370e55c4e69",
       "lines": 95
     },
     "python/tests/make_onnx_fixtures.py": {
-      "sha256": "cef41de19f716ffe81228698d98776e526770a0464a54c5e01135f21b5f469cd",
-      "lines": 21
+      "sha256": "d43ef81bb6a69550c5e00d8176d5f72cd0485d80658d8fff45b1980564c31263",
+      "lines": 29
     },
     "python/tests/test_account_security.py": {
       "sha256": "77caebf6774f33c444d72b6ed6449cf5e03b49657c384179e135da66fe51123a",
       "lines": 564
     },
+    "python/tests/test_action_codec_parity.py": {
+      "sha256": "ef192c9f2fef3390b2bb340ac54746628d0dc71f04547e6639462990a69819d1",
+      "lines": 22
+    },
+    "python/tests/test_binding_boundary.py": {
+      "sha256": "90aab7f407d402c5f7b4f140a7cd1cd095291054c7b833706bf7a634c4176673",
+      "lines": 87
+    },
+    "python/tests/test_checkpoint_integrity.py": {
+      "sha256": "fb6d5559bc80228e632fd5eec14dcb44f1239771775a7767f8458cce00138bbe",
+      "lines": 101
+    },
     "python/tests/test_checkpoint_roundtrip.py": {
-      "sha256": "2045dada002f26ca6d685ef4ea9e21d4e50e4e7e8f9d2d57d9ab4004da2baa80",
-      "lines": 95
+      "sha256": "b2a62e1c8894ad38aa0f1fb71d2a6d4e3b8cc253739313929728bcd207beb471",
+      "lines": 85
     },
     "python/tests/test_determinism_crossplatform.py": {
       "sha256": "8afa7bc3cbfad8c387126ee526cd7b8dd5a1ad2900fe5c138e8f39ebcd100f41",
@@ -542,6 +618,18 @@
       "sha256": "06ebf565a951f89d8497ec5b6a01d4f2632647a44c851adad019a61b360f3b95",
       "lines": 205
     },
+    "python/tests/test_gym_contract.py": {
+      "sha256": "f7c31807629d5ce96f64594f6c6898d6af67b56399e10e7a03b694f68ac558de",
+      "lines": 107
+    },
+    "python/tests/test_heuristic_contract.py": {
+      "sha256": "478d30539b4d8fd6cf696231114b9844af3a50386c7c16d72f314dec51e90662",
+      "lines": 92
+    },
+    "python/tests/test_masked_distribution.py": {
+      "sha256": "82c09cc70f5dfb9c53e20c6d96d1409fe2444be27ab41418f022d0f1c1d14104",
+      "lines": 80
+    },
     "python/tests/test_match_summary_crosscheck.py": {
       "sha256": "9623d8950cb0b9a4d12803ab7bfaf7e060169aaeb571b1a46ea0ea80423edd97",
       "lines": 591
@@ -550,9 +638,21 @@
       "sha256": "a1ccd9ada0db89547f47278a346a637e5059287b3d13b89510aa3e7840193661",
       "lines": 828
     },
+    "python/tests/test_observation_parity.py": {
+      "sha256": "0faf191182cb1477de021f8be05b4e272fcd477808e8523a8889a5e95346d750",
+      "lines": 116
+    },
     "python/tests/test_placement_parity.py": {
-      "sha256": "152c0f28d8edc4b38e363edda3f2a183ca0d300cb68cb9c3b319602d6b53a8f0",
-      "lines": 101
+      "sha256": "94e128085e544993dc0929e2f8e0344df47ee2c1c570e880991027c8e982d486",
+      "lines": 95
+    },
+    "python/tests/test_policy_contract.py": {
+      "sha256": "844445985656473d825362c3611d29e7383372c0c2d1da3a390412ce80e3debf",
+      "lines": 87
+    },
+    "python/tests/test_ppo_contract.py": {
+      "sha256": "79bc9fe22f5adc118d2efc73c8ed541040f4298c56578d6f99c8df3dfbd11c2c",
+      "lines": 148
     },
     "python/tests/test_relay_adversarial.py": {
       "sha256": "5b937800a3556007262b6212b99505950b38e5fe273ac75d96acdee4a40fe8fe",
@@ -566,6 +666,14 @@
       "sha256": "a4f59e277a654df8ce88af7bfc0351ad14b66ec966630cb6365c208921623c23",
       "lines": 243
     },
+    "python/tests/test_returns_contract.py": {
+      "sha256": "a48a51cec2701b4b6960de145793bb82a3cd011f94c27ff167b1790a88afbfb5",
+      "lines": 63
+    },
+    "python/tests/test_reward_contract.py": {
+      "sha256": "d1a51f3d6825a89259820bb64776001191fba2a45228ad552599717181f54c68",
+      "lines": 96
+    },
     "python/tests/test_room_smoke.py": {
       "sha256": "0ae77ce9364f1214e1e0afa8e4d25215fa9d66c676e0215046f667541b54a73e",
       "lines": 190
@@ -578,13 +686,21 @@
       "sha256": "dd9d3d562fbb302ec3850cc67adc7240f4e77a22da6e2d13bdcab7adbbb0f70a",
       "lines": 25
     },
+    "python/tests/test_versus_boundary.py": {
+      "sha256": "5a7989ad7636129cf2ea6d7759c3c87c65623395c6e94fe04808a911d60fbaff",
+      "lines": 114
+    },
     "python/tests/test_versus_env.py": {
       "sha256": "dcf6f3ed161b89de2d63261a8e37911e60c7eb1d386b4a398df737de481e7324",
       "lines": 137
     },
+    "python/tools/opponent_profile.py": {
+      "sha256": "94ce18e90d5d6cf778f4f5c5de17a1c9855f632cf118d7f11bd8099b3df4729b",
+      "lines": 147
+    },
     "python/tools/package_opponents.py": {
-      "sha256": "4acdf64c043828e192ff78aee7bbf337719ea0f513f6fc557ffb8f1cfb49869e",
-      "lines": 65
+      "sha256": "13cf37fb8b066a07a48456e819f0767b55625e655a76b7750d61031c6c3f752c",
+      "lines": 66
     },
     "python/tools/relay_capacity.py": {
       "sha256": "51b2c9417691fe239e41b6d78c3b51a3f5f84bdc2aa10f01990c717987b081da",
@@ -594,25 +710,45 @@
       "sha256": "37e858bc91671410b863e13e63216d4d4b3f64d77028cc26f3493338e627e149",
       "lines": 923
     },
-    "python/train/cbmpi_tetris.py": {
-      "sha256": "4eda7fabe6ec4969f1661eb7a411cba4e0595bf571a4a87dc3dc4b904a193dee",
-      "lines": 386
+    "python/train/colab_runtime.py": {
+      "sha256": "d43182b078a348566c448db4f1212b24003baa25008b1be8b5d877dffc9c0586",
+      "lines": 245
     },
     "python/train/dqn_tetris.py": {
-      "sha256": "c0ed2121e88502fca3553daf6bfd82f53401b898b91e7b761c25b9da2333cb10",
-      "lines": 292
+      "sha256": "bb30ddfe69e3a3035a6a0a905fa5fe6bf274ef9802dd2c6ed21cac974a4d8664",
+      "lines": 313
+    },
+    "python/train/evaluation_summary.py": {
+      "sha256": "70a04d1c4e3b5e7b16b23451c1057cf10b20ca050175cd4424a5f09f5874898c",
+      "lines": 84
+    },
+    "python/train/model_zoo.py": {
+      "sha256": "f658af723191c635479a9de652fb233b91ac1c85b0e9de5aadf4d6e89f2ac2f9",
+      "lines": 82
     },
     "python/train/muzero_tetris.py": {
-      "sha256": "a797578668a9f1484281c33a826b302be03d56915f405c70f530df8e3e663dac",
-      "lines": 538
+      "sha256": "e02854903b86f1c716bf86c51b0bea8590fb798a04affdfee69c6e32af5d04ef",
+      "lines": 606
+    },
+    "python/train/policy_gradient_tetris.py": {
+      "sha256": "681691a88bc3041a50c4bec154654ea6b3031af144f6276012554f3ebce6812c",
+      "lines": 470
     },
     "python/train/ppo_tetris.py": {
-      "sha256": "eda9124d86600c0b5aa774dc4f7c28fad340262e600ea93b26a8c9eddfc9ba60",
-      "lines": 461
+      "sha256": "688d57d7737713509fadbf9ed4b686918246bb65aea17fe0db6bd09d82cee2c2",
+      "lines": 486
+    },
+    "python/train/process_runner.py": {
+      "sha256": "f890dfbec20a798ae216c9208e1bf3e202db9c0404b9b8fe7cffa41d8f3a51ea",
+      "lines": 76
     },
     "python/train/rl_common.py": {
-      "sha256": "f9ae4749dd8b38ecf64df350bb9062e77a37037c17a18e73096d87666f305914",
-      "lines": 278
+      "sha256": "325319c69ca5a24a0c5b782ae90e03fc5e7f3a106faef7003ed83db591c1fd9c",
+      "lines": 274
+    },
+    "python/train/training_commands.py": {
+      "sha256": "e655e04df9f0e45715e13e4a18f354e6ef344cacccd8d6f1fb41f1275adad104",
+      "lines": 67
     },
     "renderer/font_raster_policy.h": {
       "sha256": "e23b3ace4282517c8c43e92642cade0b71eb82f0abc5b345f11ed0ffe9db3ce8",
@@ -863,8 +999,8 @@
       "lines": 30
     },
     "src/main.cpp": {
-      "sha256": "9d84e33277cd9f4ae077fdb642697f9f628fe8ca635820483191693ab324912c",
-      "lines": 3281
+      "sha256": "b658138001515c8528836abd61b3d481344889c2fb6ba77bc6e05b288db4678f",
+      "lines": 3292
     },
     "src/position.cpp": {
       "sha256": "6639db4a4217587ab65eeee0ea575fbc04c9f222ad3ecfd090e6ae319e2a8730",
@@ -891,16 +1027,24 @@
       "lines": 105
     },
     "src/sim_game.cpp": {
-      "sha256": "99fd64bbd8ecbdc830297f018b5f2c44bedc2e7de97af13fe23d40a08a6004b6",
+      "sha256": "890b7fa6e4ba4924958e9d241e565be6a6ee4a7019fb7aee53a183c8b91db0e5",
       "lines": 584
     },
     "src/sim_game.h": {
-      "sha256": "a9846b01a6442474c8da7c198d0545e5946528a3a6e205892e5056c94c01de64",
-      "lines": 176
+      "sha256": "aa7161eae4aacb9ef7c23affa751ff1f1079fb6acaf9991a3e179aa6df5c2b43",
+      "lines": 177
     },
     "src/sim_grid.h": {
       "sha256": "d39199b27ae24a93016e2f59b94d143f20009667dab2be02410dc48ede67550c",
       "lines": 103
+    },
+    "tests/action_codec_dump.cpp": {
+      "sha256": "d4ccc36b844a7f453f931fc49b2db57b97634df0cfb92585cae93a19fb330bee",
+      "lines": 19
+    },
+    "tests/bot_onnx_contract_test.cpp": {
+      "sha256": "224d4bfb3f83290779781c558fa897871fa0c1f6150030b35fa6657cc59f47f6",
+      "lines": 29
     },
     "tests/game_tickets_test.cpp": {
       "sha256": "858678c5b2ec3598be1b396ae0471003cb02577319cc2d57e0950d8bee212f3a",
@@ -910,9 +1054,17 @@
       "sha256": "fab2a17f482ebb607b6605f74a3e4c28ffa956f08943f479ef7097436836bbe5",
       "lines": 125
     },
+    "tests/heuristic_dump.cpp": {
+      "sha256": "ba255ad097faf049b1d118f82d2d0d0d0a7ee33b424faad208c7386a303d1607",
+      "lines": 34
+    },
     "tests/input_message_test.cpp": {
       "sha256": "50374f38266e5c5ee4a098d8149aaf40c52546c42318fe76a142716c19a25617",
       "lines": 33
+    },
+    "tests/input_route_test.cpp": {
+      "sha256": "fa22a9b04cb72504068847abbbc5bb927705804b36570407b3470b3e5e333f67",
+      "lines": 40
     },
     "tests/json_input_test.cpp": {
       "sha256": "48e2caf6f631634949eef52aac2a48a3f5aa4532e16481bdf154f92e7ec13721",
@@ -945,6 +1097,14 @@
     "tests/loop_primitives_test.cpp": {
       "sha256": "923bcbac2cfaa5dcb36f02cfe0347a6e924f9fa0bc168f705bb6ded3347c51a5",
       "lines": 250
+    },
+    "tests/observation_dump.cpp": {
+      "sha256": "fb62fa31e490d4fd8d9b8c88766ebe863db0a26ee1b98c0235b4ccd93de12556",
+      "lines": 48
+    },
+    "tests/placement_contract_test.cpp": {
+      "sha256": "3c181350b011130427c9f6227b466ce345a22d05c07df4d0daf94520ab0ea449",
+      "lines": 44
     },
     "tests/ranked_game_test.cpp": {
       "sha256": "773c22b818547207c2ff5839540659febf21377d38cf342bb301bfe43078263b",

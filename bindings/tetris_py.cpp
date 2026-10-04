@@ -2,7 +2,8 @@
 //
 // 게임 규칙을 Python으로 다시 구현하지 않고 C++ SimGame을 그대로 노출한다.
 // 학습할 때와 실제로 플레이할 때의 규칙이 갈라지면 sim-to-real gap이 생기는데,
-// 구현이 하나뿐이면 그 문제가 아예 없다.
+// 규칙 구현의 중복을 없애면 드리프트 원인을 줄일 수 있다.
+// 입력 전개·시간·관측·보상·모델 버전의 차이는 별도로 검증해야 한다.
 //
 // 두 가지 방식의 API를 제공한다.
 //   - placement 단위: RL 학습용. "몇 번 열에 몇 번 회전해서 떨어뜨릴지"를 한 번에 지정
@@ -18,7 +19,7 @@
 //   for p in g.legal_placements():
 //       print(p.col, p.rot)
 //   g.apply_placement(4, 0)
-//   arr = g.grid()                # (20, 10) int32 NumPy 배열 (복사본)
+//   arr = g.grid()                # (g.ROWS, g.COLS) int32 NumPy 배열 (복사본)
 //   h   = g.state_hash()          # C++ SimGame::StateHash()와 비트 단위로 동일
 //
 // 아래 docstring들은 Python 쪽 help()에 그대로 노출되므로 영어로 둔다.
@@ -122,7 +123,7 @@ PYBIND11_MODULE(tetris_py, m)
             // 내부 버퍼를 참조로 넘기지 않고 복사한다.
             // 참조를 넘기면 다음 착수 때 Python이 들고 있던 배열의 내용이
             // 조용히 바뀌어, replay buffer에 쌓아둔 관측이 전부 오염된다.
-            // 200개짜리 복사는 학습 속도에 영향을 주지 않는다.
+            // 복사 비용은 보드 크기와 호출 빈도에 비례한다. 처리량은 별도로 측정한다.
             const auto& raw = g.Grid();
             auto arr = py::array_t<int32_t>({SimGrid::kRows, SimGrid::kCols});
             auto buf = arr.mutable_unchecked<2>();
@@ -130,7 +131,7 @@ PYBIND11_MODULE(tetris_py, m)
                 for (int c = 0; c < SimGrid::kCols; ++c)
                     buf(r, c) = raw[r][c];
             return arr;
-        }, "Return the 20x10 grid as a numpy int32 array (copied).")
+        }, "Return the ROWS x COLS grid as a numpy int32 array (copied).")
 
         .def("current_block",
              &SimGame::CurrentBlock,

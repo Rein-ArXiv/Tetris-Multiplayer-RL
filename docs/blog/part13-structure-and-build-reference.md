@@ -254,9 +254,9 @@ Windows 에서는 Visual Studio 를 설치하면 위 항목이 SDK 에 들어 �
 저장소 루트에는 `pyproject.toml` 이 있다. 로컬 기본 환경은 가볍게 유지하고, PyTorch/Gymnasium/ONNX 는 학습·export extra 로만 설치한다. 저사양 배포 머신에서 torch 를 끌어오지 않기 위해서다.
 
 ```text
-pyproject.toml                 → numpy 기본, pytest/pybind11 dev, torch/gymnasium/onnx/onnxscript extra
+pyproject.toml                 → numpy 기본, pytest/pybind11 dev, torch/gymnasium/onnx/onnxscript/onnxruntime extra
 python/requirements.txt        → pip fallback: numpy, pytest
-python/requirements-colab.txt  → requirements.txt + pybind11 + torch + gymnasium + onnx + onnxscript
+python/requirements-colab.txt  → requirements.txt + pybind11 + torch + gymnasium + onnx + onnxscript + onnxruntime
 ```
 
 루트 `pyproject.toml` 의 핵심은 다음이다.
@@ -276,6 +276,7 @@ train = [
 export = [
     "onnx>=1.14",
     "onnxscript>=0.1",
+    "onnxruntime>=1.16",
     "torch>=2.1",
 ]
 ```
@@ -290,7 +291,7 @@ export = [
 uv sync --dev --extra train --extra export
 ```
 
-`train` 과 `export` 를 나눈 것도 같은 이유다. 학습만 할 거면 `onnx`/`onnxscript` 가 필요 없고, 이미 있는 `.pt` 를 변환만 할 거면 `gymnasium` 이 필요 없다. `requirements-colab.txt` 는 이 둘을 합친 pip 용 폴백이다 — Colab 런타임에는 uv 가 기본으로 없기 때문에 남겨 뒀다.
+`train` 과 `export` 를 나눈 것도 같은 이유다. 학습만 할 거면 ONNX export 도구와 Python ONNX Runtime이 필요 없고, 이미 있는 `.pt` 를 변환만 할 거면 `gymnasium` 이 필요 없다. 변환 경로의 `onnxruntime`는 후보의 CPU 출력/행동 대조에 사용한다. `requirements-colab.txt` 는 이 둘을 합친 pip 용 폴백이다 — Colab 런타임에는 uv 가 기본으로 없기 때문에 남겨 뒀다.
 
 ### 2.4 타깃별 의존성 매트릭스
 
@@ -805,8 +806,7 @@ if (TETRIS_BUILD_PY)
     # cmake 4.0+ removed FindPythonInterp/FindPythonLibs; tell pybind11 to use
     # the modern FindPython instead.
     set(PYBIND11_FINDPYTHON ON)
-    # pybind11: prefer find_package (pip-installed), fall back to add_subdirectory
-    # if a vendored pybind11 checkout is provided.
+    # Locate the selected Python environment's pybind11 CMake package.
     find_package(pybind11 CONFIG QUIET)
     if (NOT pybind11_FOUND)
         message(FATAL_ERROR

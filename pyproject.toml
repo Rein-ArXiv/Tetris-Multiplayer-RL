@@ -16,6 +16,7 @@ train = [
 export = [
     "onnx>=1.14",
     "onnxscript>=0.1",
+    "onnxruntime>=1.16",
     "torch>=2.1",
 ]
 

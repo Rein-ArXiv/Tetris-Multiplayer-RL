@@ -2,7 +2,7 @@
 
 The trained policy and rule-based baseline pick a target placement
 ``(col, rot)``, while the C++ game loop consumes one input bitmask per tick.
-This parity helper converts a placement into the same single-tick sequence
+This bounded command encoder converts a placement into the same per-tick sequence
 used by ``bot/placement.cpp`` (rotate -> translate -> hard-drop).
 
 If a policy proposes an illegal placement, :func:`fallback_placement` returns
@@ -13,6 +13,8 @@ C++ implementation; the runtime in-process bot uses the C++ implementation.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from common import NUM_COLS, NUM_ROTATIONS
+from .expansion_contract import validate_expansion
 
 # core/input.h의 비트값을 그대로 베껴 쓴다. 값이 하나라도 어긋나면
 # C++ bot과 Python이 같은 placement를 다른 키 입력으로 풀게 된다.
@@ -32,17 +34,19 @@ def expand_placement(
     cur_rot: int,
     tgt_col: int,
     tgt_rot: int,
-    num_rotations: int = 4,
+    num_rotations: int = NUM_ROTATIONS,
 ) -> list[int]:
-    """Build a frame-mask sequence that walks ``(cur_col, cur_rot)`` to
-    ``(tgt_col, tgt_rot)`` and then hard drops.
+    """Encode rotate/translate/drop requests in the native command domain.
 
-    Rotations always go forward (the C++ block class only has ``Rotate`` /
-    ``UndoRotation`` and rotation is the cheap operation, so 1-3 rotates is
-    fine even if 1 backwards rotate would be shorter).
+    This helper has no board or gravity state: it does not prove arrival.
+    Invalid types/domains are rejected before arithmetic or allocation.
+
+    The shared input protocol exposes clockwise rotation. The normalized
+    difference chooses that many clockwise requests; collisions are checked
+    by the live controller, not by this encoder.
     """
-    if num_rotations <= 0:
-        raise ValueError(f"num_rotations must be positive, got {num_rotations}")
+    cur_col, cur_rot, tgt_col, tgt_rot, num_rotations = validate_expansion(
+        cur_col, cur_rot, tgt_col, tgt_rot, num_rotations, NUM_COLS, NUM_ROTATIONS)
     seq: list[int] = []
 
     rot_steps = (tgt_rot - cur_rot) % num_rotations
@@ -67,9 +71,8 @@ def expand_placement(
 def fallback_placement(sim: "SimGame") -> tuple[int, int] | None:
     """Cheap fallback: pick the first legal placement (lowest col, lowest rot).
 
-    Used when the chosen placement's expanded sequence fails validation, or
-    when the policy returns an action whose mask bit is False (which the
-    masking layer should prevent, but defensive code costs nothing here).
+    This helper is opt-in; the encoder never calls it automatically.
+    Native legal_placements checks endpoints, not every intervening key step.
     """
     placements = sim.legal_placements()
     if not placements:

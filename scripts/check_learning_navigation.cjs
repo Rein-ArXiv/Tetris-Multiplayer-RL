@@ -5,7 +5,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM, VirtualConsole } = require('jsdom');
-const root = process.argv[2] ? path.resolve(process.argv[2]) : path.resolve(__dirname, '../docs/learn');
+const args=process.argv.slice(2);
+const focus=args.find(arg=>arg.startsWith('--lesson='))?.slice('--lesson='.length);
+if(focus!==undefined) assert(/^lesson-[1-9]\d*$/.test(focus),'use a lesson ID such as lesson-161');
+const paths=args.filter(arg=>!arg.startsWith('--lesson='));
+assert(paths.length<=1 && args.filter(arg=>arg.startsWith('--lesson=')).length<=1,'one root and one optional lesson');
+const root = paths[0] ? path.resolve(paths[0]) : path.resolve(__dirname, '../docs/learn');
 const read = name => fs.readFileSync(path.join(root, name), 'utf8');
 const stored = {
   answers: {'1-1': '기존 서술 답안', '999-1': '보존할 미래 답안'},
@@ -96,7 +101,8 @@ function boot(hash, url='https://example.test/project/learn/', blockedStorage=fa
   assert.match(d.querySelector('button[data-source]').textContent,/배포본/);
   const codeCopy=d.querySelector('[data-copy]');codeCopy.click();await Promise.resolve();assert(t.copied().length>10);
   d.querySelector('[data-copy-answers]').click();await Promise.resolve();assert.match(t.copied(),/기존 서술/);
-  for(const id of available){route('#'+id);assert.equal(t.count(),1);assert.equal(d.getElementById(id).hidden,false);assert.equal(d.querySelectorAll('[id]').length,new Set([...d.querySelectorAll('[id]')].map(n=>n.id)).size,'unique IDs');}
+  if(focus) assert(available.includes(focus),'focused lesson must be published');
+  for(const id of (focus ? [focus] : available)){route('#'+id);assert.equal(t.count(),1);assert.equal(d.getElementById(id).hidden,false);assert.equal(d.querySelectorAll('[id]').length,new Set([...d.querySelectorAll('[id]')].map(n=>n.id)).size,'unique IDs');}
   const source=d.querySelector('button[data-source]');source.click();await new Promise(r=>setTimeout(r,0));
   assert.equal(d.getElementById('reference-reader').hidden,false);assert(d.getElementById('reader-body').textContent.length>0);
   if(w.LEARNING_LIBRARY.sources['web/ranking/index.html']) {
@@ -139,5 +145,5 @@ function boot(hash, url='https://example.test/project/learn/', blockedStorage=fa
     assert(fresh.d.getElementById('resume-reading').hidden);
     assert.equal(fresh.count(),1);assert.match(fresh.d.getElementById('storage-status').textContent,/저장 불가/);assert.deepEqual(fresh.errors,[]);fresh.dom.window.close();
   }
-  console.log('DOM contracts passed: all published lessons; single mount, anchors, metadata, search, saved answers, delegation, copies, static references, file URL/storage failure.');
+  console.log(`DOM contracts passed: ${focus ? 'focused '+focus : 'all published lessons'}; single mount, anchors, metadata, search, saved answers, delegation, copies, static references, file URL/storage failure.`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

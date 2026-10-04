@@ -9,14 +9,14 @@ Colab-training to local-inference boundary:
 - ``action_mask`` — placement-level legal-action masks
 - ``features``    — hand-crafted Tetris features (BCTS) for rule-based baselines
 - ``checkpoint``  — ``save_checkpoint`` / ``load_checkpoint`` with arch-version
-  guarding so a Colab arch change cannot be silently loaded at ONNX-export time
+  and I/O revisions, constructor configuration, and strict weight validation
 - ``env``         — Gymnasium-compatible env so external RL frameworks (CleanRL,
   SB3, LightZero, RLlib) can plug in without bespoke glue
 - ``env_versus`` — two-board garbage environment with scripted/policy opponents
 
-The placement action space is fixed at ``COLS * ROTATIONS == 10 * 4 == 40``.
-Pieces with fewer than 4 distinct rotations (O, and the 2-state pieces) still
-enumerate all 4, so the mask keeps several *duplicate* actions that differ in
+The placement action space uses ``NUM_COLS * NUM_ROTATIONS`` labels.
+Pieces with rotational symmetry still enumerate the shared orientation domain,
+so the mask keeps *duplicate* actions that differ in
 index but land identically. This is deliberate: the action index must mean the
 same thing in C++ and Python, which rules out compacting the space per piece.
 """

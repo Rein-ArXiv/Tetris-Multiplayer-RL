@@ -4,10 +4,9 @@ Both Colab training and the ONNX export CLI import the **same** ``TetrisPolicyNe
 class from this module — that's the contract that lets a checkpoint trained on
 Colab Linux export cleanly for the C++ in-game bot.
 
-If you change the architecture, **bump ``ARCH_VERSION``**. ``checkpoint.py``
-verifies that the loaded checkpoint's recorded version matches the current
-class, and raises a hard error otherwise. That way a silent shape mismatch
-cannot turn into a confused-policy bug at game time.
+``ARCH_VERSION`` is an explicit compatibility marker, not automatic schema
+inference. Strict state loading checks keys/shapes; matching shapes alone cannot
+prove that observation channels or action labels still mean the same thing.
 """
 
 from __future__ import annotations
@@ -16,26 +15,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .model_contract import positive_size, validate_policy_inputs
+
 from . import BOARD_ROWS, BOARD_COLS, NUM_PIECE_TYPES, NUM_PLACEMENTS
 
 
 class TetrisPolicyNet(nn.Module):
-    """Shared trunk + policy/value heads.
+    """Shared spatial features with action scores and a scalar value head.
 
-    Input contract (matches ``common.obs.build_observation``)::
+    Canonical input: board (B, board_channels, BOARD_ROWS, BOARD_COLS),
+    current/next (B, n_piece_types). The normal observation path uses float32
+    binary occupancy and piece-id-minus-one one-hot vectors. BHW is an optional
+    single-channel batch alias, not a general unbatched CHW input.
 
-        board   : (B, 1, 20, 10) float32, occupancy in {0.0, 1.0}
-        current : (B, 7) float32, one-hot of current piece id - 1
-        next    : (B, 7) float32, one-hot of next piece id - 1
-
-    Output::
-
-        policy_logits : (B, 40) float32 — over (col * 4 + rot) placements
-        value         : (B,)    float32 — scalar state value
-
-    Bump ``ARCH_VERSION`` whenever any of the above shapes, the layer stack, or
-    the layer ordering changes. The checkpoint loader treats a version mismatch
-    as a hard failure.
+    Outputs: action scores (B, n_placements), value (B,). Actor-critic training
+    interprets the scores as policy logits; their meaning depends on the loss.
+    Eager forward checks metadata against model dtype/device. Observation value
+    validation belongs to the encoder; tracing captures only tensor operations.
     """
 
     ARCH_VERSION = 1
@@ -49,13 +45,20 @@ class TetrisPolicyNet(nn.Module):
         n_piece_types: int = NUM_PIECE_TYPES,
     ) -> None:
         super().__init__()
+        board_channels = positive_size(board_channels, "board_channels")
+        hidden = positive_size(hidden, "hidden")
+        n_placements = positive_size(n_placements, "n_placements")
+        n_piece_types = positive_size(n_piece_types, "n_piece_types")
+        if not isinstance(conv_channels, (tuple, list)) or not conv_channels:
+            raise ValueError("conv_channels must be a nonempty sequence")
+        conv_channels = tuple(positive_size(c, "conv_channels") for c in conv_channels)
         self.board_channels = board_channels
         self.conv_channels = conv_channels
         self.hidden = hidden
         self.n_placements = n_placements
         self.n_piece_types = n_piece_types
 
-        # 보드를 훑는 conv 스택. 20x10을 그대로 이미지처럼 다룬다.
+        # Stride 1 and padding 1 preserve the configured spatial axes.
         layers: list[nn.Module] = []
         in_ch = board_channels
         for out_ch in conv_channels:
@@ -84,8 +87,16 @@ class TetrisPolicyNet(nn.Module):
         current: torch.Tensor,
         next: torch.Tensor,  # noqa: A002 - matches obs key name
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not isinstance(board, torch.Tensor):
+            raise TypeError("board must be a tensor")
         if board.dim() == 3:
-            board = board.unsqueeze(1)  # (B, 20, 10) -> (B, 1, 20, 10)
+            board = board.unsqueeze(1)  # BHW -> NCHW; checked below in eager mode.
+        if not torch.jit.is_tracing():
+            validate_policy_inputs(
+                board, current, next, channels=self.board_channels,
+                rows=BOARD_ROWS, cols=BOARD_COLS, pieces=self.n_piece_types,
+                parameter=self.trunk[0].weight,
+            )
         h = self.trunk(board)
         h = h.flatten(1)
         h = torch.cat([h, current, next], dim=-1)
@@ -98,10 +109,30 @@ class TetrisPolicyNet(nn.Module):
 def masked_log_softmax(
     logits: torch.Tensor, mask: torch.Tensor, eps: float = 1e-9
 ) -> torch.Tensor:
-    """Apply a boolean legal-action ``mask`` to ``logits`` then log-softmax.
+    """Normalize finite legal logits; reject empty legal rows and schema mismatch.
 
-    Setting illegal logits to ``-inf`` makes their softmax probability zero,
-    so sampling and ``argmax`` only ever pick legal placements.
+    ``eps`` remains accepted for caller compatibility. Adding the same constant
+    cannot repair an empty distribution and is not a probability floor.
     """
+    del eps
+    if not logits.is_floating_point() or mask.dtype != torch.bool:
+        raise TypeError("logits must be floating point and mask must be bool")
+    if logits.ndim < 1 or logits.shape[-1] == 0 or logits.shape != mask.shape:
+        raise ValueError("logits and mask must have the same nonempty action axis")
+    if logits.device != mask.device:
+        raise ValueError("logits and mask must be on the same device")
+    if not mask.any(dim=-1).all():
+        raise ValueError("each row must have at least one legal action")
+    if not torch.isfinite(logits.masked_select(mask)).all():
+        raise ValueError("legal logits must be finite")
     masked = logits.masked_fill(~mask, float("-inf"))
-    return F.log_softmax(masked + eps, dim=-1)
+    logp = F.log_softmax(masked, dim=-1)
+    if not torch.isfinite(logp.masked_select(mask)).all():
+        raise ValueError("normalized legal log probabilities must be finite")
+    return logp
+
+
+def masked_entropy(logp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Entropy of masked_log_softmax output; avoid 0 * -inf before autograd."""
+    safe_logp = logp.masked_fill(~mask, 0.0)
+    return -(logp.exp() * safe_logp).sum(dim=-1)

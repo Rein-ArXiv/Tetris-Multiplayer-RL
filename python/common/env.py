@@ -1,23 +1,10 @@
-"""Gymnasium-compatible environment wrapping ``SimGame``.
+"""Gymnasium environment over SimGame's instant placement API.
 
-Exposes the placement-level action space (40 discrete actions ==
-10 cols * 4 rotations) so external RL frameworks (CleanRL, SB3, LightZero,
-RLlib) can train on Tetris without bespoke glue code.
-
-Action / observation contract::
-
-    action_space      = Discrete(40)         # encode_action(col, rot)
-    observation_space = Dict(
-        board   = Box(0, 1, (1, 20, 10), float32),
-        current = Box(0, 1, (7,),        float32),
-        next    = Box(0, 1, (7,),        float32),
-    )
-    info["legal_mask"] = bool array of shape (40,)  # set on every step
-
-The reward is the number of lines cleared by the placement (0..4). Illegal
-placements are masked out via ``info["legal_mask"]``; the env still tolerates
-them defensively (returns 0 reward and does not advance the sim) so a buggy
-exploration policy doesn't crash the rollout.
+Spaces derive from the shared observation/action schema. An in-domain blocked
+placement is a zero-reward self-loop; malformed or out-of-domain actions raise.
+Explicit reset seeds reproduce a native episode; later unseeded resets draw
+new native seeds from the environment RNG. The action space has its own RNG.
+Use a TimeLimit wrapper when an external decision budget is required.
 """
 
 from __future__ import annotations
@@ -38,6 +25,7 @@ except ImportError:  # pragma: no cover - gymnasium is optional at import time
 from . import BOARD_COLS, BOARD_ROWS, NUM_PIECE_TYPES, NUM_PLACEMENTS
 from .action_mask import decode_action, legal_mask
 from .obs import build_observation
+from .gym_contract import optional_seed, action_index, draw_seed
 
 
 class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
@@ -57,7 +45,11 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         from sim import SimGame  # noqa: PLC0415
 
         self._SimGame = SimGame
-        self._seed = seed if seed is not None else 0
+        self._initial_seed = optional_seed(seed)
+        self._seed = self._initial_seed
+        self._has_reset = False
+        self._needs_reset = True
+        self.render_mode = None
         self.sim: SimGame | None = None
 
         self.action_space = spaces.Discrete(NUM_PLACEMENTS)
@@ -88,23 +80,29 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        if seed is not None:
-            self._seed = seed
+        if options is not None and (not isinstance(options, dict) or options):
+            raise ValueError("reset options are not supported")
+        seed = optional_seed(seed)
+        effective = seed if seed is not None else (self._initial_seed if not self._has_reset else None)
+        super().reset(seed=effective)
+        self._seed = effective if effective is not None else draw_seed(self.np_random)
         self.sim = self._SimGame(self._seed)
+        self._has_reset = True
+        self._needs_reset = False
         return self._observation(), self._info()
 
     def step(
         self, action: int
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        assert self.sim is not None, "Call reset() before step()"
-
-        col, rot = decode_action(int(action))
+        if self._needs_reset:
+            raise gym.error.ResetNeeded("Call reset() before starting or continuing an episode")
+        action = action_index(action, NUM_PLACEMENTS)
+        col, rot = decode_action(action)
         cleared = self.sim.apply_placement(col, rot)
 
         if cleared < 0:
-            # 불법 수가 오면 판을 건드리지 않고 보상 0만 돌려준다.
-            # legal_mask를 제대로 쓰면 여기 올 일이 없지만, 마스킹을 빠뜨린
-            # 학습 코드가 조용히 이상한 상태로 가는 것보다는 낫다.
+            # 도메인 안이지만 현재 보드에서 막힌 배치는 상태를 보존한다.
+            # 정상 배치도 줄을 지우지 않으면 보상이 0이므로 info로 구별한다.
             reward = 0.0
             terminated = self.sim.game_over()
         else:
@@ -112,7 +110,14 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
             terminated = self.sim.game_over()
 
         truncated = False
-        return self._observation(), reward, terminated, truncated, self._info()
+        self._needs_reset = terminated
+        info = self._info()
+        info["action_applied"] = cleared >= 0
+        return self._observation(), reward, terminated, truncated, info
+
+    def close(self) -> None:
+        self.sim = None
+        self._needs_reset = True
 
     # --- 내부 헬퍼 ---
     def _observation(self) -> dict[str, np.ndarray]:
@@ -126,6 +131,8 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         assert self.sim is not None
         return {
             "legal_mask": legal_mask(self.sim).numpy(),
+            "episode_seed": self._seed,
             "score": self.sim.score(),
+            "lines": self.sim.total_lines_cleared(),
             "state_hash": self.sim.state_hash(),
         }

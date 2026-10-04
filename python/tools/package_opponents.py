@@ -6,7 +6,12 @@ import argparse
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
-import re
+import sys
+
+# Allow the documented direct-script invocation and normal module imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.opponent_profile import split_profile_line
 import zipfile
 
 
@@ -15,21 +20,17 @@ def package(root: Path, out: Path) -> None:
     config = root / "assets/opponents.cfg"
     members = {"assets/opponents.cfg": config}
     ids = set()
-    for number, line in enumerate(config.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip() or line.lstrip().startswith("#"):
+    for number, line in enumerate(config.read_text(encoding="utf-8").split('\n'), 1):
+        try:
+            fields = split_profile_line(line)
+        except ValueError as error:
+            raise ValueError(f"line {number}: {error}") from error
+        if fields is None:
             continue
-        fields = [s.strip() for s in line.split("|")]
-        if len(fields) != 9:
-            raise ValueError(f"line {number}: expected 9 fields")
         identity, name, model, icon, portrait, difficulty, interval, think, minimum = fields
-        if not re.fullmatch(r"[a-z0-9_-]{1,32}", identity) or identity in ids:
-            raise ValueError(f"line {number}: invalid or duplicate identity")
+        if identity in ids:
+            raise ValueError(f"line {number}: duplicate identity")
         ids.add(identity)
-        if not name or len(name.encode("utf-8")) > 96:
-            raise ValueError(f"line {number}: invalid name")
-        for value, low, high in ((interval, 1, 30), (think, 0, 180), (minimum, 1, 600)):
-            if not re.fullmatch(r"[0-9]+", value) or not low <= int(value) <= high:
-                raise ValueError(f"line {number}: invalid pacing")
         for asset, folder, extensions in ((model, "model", {".onnx"}), (icon, "assets", {".png", ".jpg", ".jpeg"}), (portrait, "assets", {".png", ".jpg", ".jpeg"})):
             if not asset or asset == "@heuristic":
                 if asset == "@heuristic" and folder != "model":

@@ -68,9 +68,9 @@ RL 프로젝트에서 가장 흔한 선택은 "학습용 시뮬레이터를 Pyth
 | 가비지 주입 위치 | 잠금 시점에 바닥에서 밀어 올린다 |
 | 라인 클리어 후 점수·레벨 | 레벨이 중력 틱 수를 바꾸고, 그게 다시 관측에 영향을 준다 |
 
-여섯 개 중 하나만 틀려도 학습된 정책이 실전에서 다른 보드를 보게 된다. 그리고 이 종류의 버그는 **조용하다** — 예외도, 크래시도 없고, 단지 봇이 이상하게 둔다.
+이 계약 중 하나가 달라도 학습된 정책이 실전에서 다른 보드를 보게 된다. 그리고 이 종류의 버그는 **조용하다** — 예외도, 크래시도 없고, 단지 봇이 이상하게 둔다.
 
-저장소가 이 결정을 코드 주석 곳곳에 못 박아 놓았다. 세 자리만 짚는다.
+관련 코드 주석에서 각 계층의 책임을 확인한다.
 
 **현재 소스 발췌 — `bindings/tetris_py.cpp`**
 
@@ -79,7 +79,8 @@ RL 프로젝트에서 가장 흔한 선택은 "학습용 시뮬레이터를 Pyth
 //
 // 게임 규칙을 Python으로 다시 구현하지 않고 C++ SimGame을 그대로 노출한다.
 // 학습할 때와 실제로 플레이할 때의 규칙이 갈라지면 sim-to-real gap이 생기는데,
-// 구현이 하나뿐이면 그 문제가 아예 없다.
+// 규칙 구현의 중복을 없애면 드리프트 원인을 줄일 수 있다.
+// 입력 전개·시간·관측·보상·모델 버전의 차이는 별도로 검증해야 한다.
 //
 // 두 가지 방식의 API를 제공한다.
 //   - placement 단위: RL 학습용. "몇 번 열에 몇 번 회전해서 떨어뜨릴지"를 한 번에 지정
@@ -94,10 +95,9 @@ RL 프로젝트에서 가장 흔한 선택은 "학습용 시뮬레이터를 Pyth
 
 This module is the **only** Python place that converts a ``SimGame`` snapshot
 into a network input. The C++ in-game bot's ``observe()`` (bot/placement.cpp)
-mirrors this contract. There is not yet a direct Python-vs-C++ observation
-parity test, so schema changes must update both implementations and be checked
-with an ONNX smoke test. Keeping the conversion in one spot per language
-prevents the classic "trained on one format, deployed on another" failure.
+mirrors this contract. ``test_observation_parity.py`` compares actual CPU
+observations from both paths. Schema changes must update both implementations;
+model input and ONNX integration checks remain separate.
 ```
 
 (패키지 docstring 첫 문단)
@@ -111,9 +111,9 @@ This package is the **single source of truth** for everything that crosses the
 Colab-training to local-inference boundary:
 ```
 
-`single source of truth`(`common/__init__.py`) 와 `trained on one format, deployed on another`(`common/obs.py`) — 패키지 경계와 관측 변환기가 각자의 자리에서 같은 결정을 반복해 말한다. 바인딩은 이 실패 모드를 **구조적으로 불가능하게** 만든다. `sim_game.cpp` 를 고치면 게임과 학습 환경이 같은 커밋에서 함께 바뀐다.
+`single source of truth`(`common/__init__.py`) 와 `trained on one format, deployed on another`(`common/obs.py`) — 패키지 경계와 관측 변환기가 각자의 자리에서 같은 결정을 반복해 말한다. 바인딩은 규칙의 중복 구현을 없앤다. 같은 커밋의 `sim_game.cpp`를 사용해 두 실행물을 다시 빌드해야 수정된 규칙을 공유한다. Python과 C++의 관측 변환·입력 전개는 여전히 별도 코드이므로 각 계약의 대조 검사가 필요하다.
 
-그 대가는 두 가지다. 첫째, 학습을 시작하기 전에 C++ 툴체인과 pybind11 로 네이티브 모듈을 빌드해야 한다 (Colab 노트북이 이 단계를 자동화한다). 둘째, 프로세스당 하나의 sim 이라 벡터화 env 를 쓰려면 멀티프로세싱이 필요하다. 이 프로젝트의 학습기는 그래서 단일 동기 env 로 시작한다(§9.3).
+그 대가는 두 가지다. 첫째, 학습을 시작하기 전에 C++ 툴체인과 pybind11 로 네이티브 모듈을 빌드해야 한다 (Colab 노트북이 이 단계를 자동화한다). 둘째, 언어 변환과 관측 복사 비용이 든다. 한 프로세스에 여러 SimGame을 만들 수 있으며, 독립 환경을 순서대로 진행하는 벡터화도 가능하다. 실제 계산 병렬화는 GIL·C++ 상태 소유권·프로세스 간 통신 비용을 고려해 별도로 선택한다. 이 프로젝트의 기본 학습 루프는 단일 동기 환경을 사용한다(§9.3).
 
 ### 1.2 그렇다면 무엇은 언어를 넘는가
 
@@ -128,12 +128,12 @@ C++에서 Python으로의 바인딩 방법은 여러 가지다:
 
 | 방법 | 장점 | 단점 |
 |------|------|------|
-| ctypes / cffi | Python 표준, 별도 빌드 불필요 | C API만 가능, 클래스 노출 어려움 |
+| ctypes / cffi | C ABI로 노출된 라이브러리와 연결 | C++ 클래스에는 C 형태의 래퍼가 필요하며, 네이티브 라이브러리 빌드는 별도다. ctypes는 표준 라이브러리, cffi는 별도 패키지다 |
 | Cython | 성숙, 성능 좋음 | 별도 언어 문법 학습 필요 |
-| **pybind11** | C++11 네이티브, 헤더 전용, numpy 통합 | CMake 설정 필요 |
+| **pybind11** | C++ 클래스·반환 정책·NumPy 변환 지원 | 확장 모듈을 컴파일할 빌드 설정 필요 |
 | SWIG | 다중 언어 | 코드 생성 복잡, C++ 템플릿 제한 |
 
-pybind11의 결정적 장점: C++ 클래스를 그대로 Python에 노출할 수 있고, numpy 배열과의 변환이 간단하다. 헤더 전용이므로 `pip install pybind11` 후 바로 사용 가능하고, `py::return_value_policy` 로 수명 정책을 선언적으로 지정할 수 있다 — 이 프로젝트에서는 그게 §2.4 의 dangling pointer 방어에 직결된다.
+pybind11의 결정적 장점: C++ 클래스를 그대로 Python에 노출할 수 있고, numpy 배열과의 변환이 간단하다. 헤더 전용이라는 말은 별도 pybind11 실행 라이브러리를 링크하지 않는다는 뜻이다. 실제 확장 모듈은 컴파일해야 한다. `py::return_value_policy`로 반환 객체의 소유권을 지정하며, 내부 블록 참조의 부모 수명은 §2.5에서, 독립적인 배열 복사는 §2.4에서 다룬다.
 
 ### 1.4 CMakeLists 확장
 
@@ -149,8 +149,7 @@ if (TETRIS_BUILD_PY)
     # cmake 4.0+ removed FindPythonInterp/FindPythonLibs; tell pybind11 to use
     # the modern FindPython instead.
     set(PYBIND11_FINDPYTHON ON)
-    # pybind11: prefer find_package (pip-installed), fall back to add_subdirectory
-    # if a vendored pybind11 checkout is provided.
+    # Locate the selected Python environment's pybind11 CMake package.
     find_package(pybind11 CONFIG QUIET)
     if (NOT pybind11_FOUND)
         message(FATAL_ERROR
@@ -184,7 +183,7 @@ cmake --build build --target tetris_py
 cp build/tetris_py*.so python/sim/          # Windows: build\Release\tetris_py*.pyd
 ```
 
-`python/sim/` 은 `__init__.py` 가 들어 있는 얇은 래퍼 패키지다. 빌드 산출물을 그 안에 떨어뜨리면 `from sim import SimGame` 이 동작한다.
+`python/sim/__init__.py`는 네이티브 모듈을 다시 노출하는 얇은 래퍼다. 빌드 산출물을 그 안에 떨어뜨리면 `from sim import SimGame` 이 동작한다.
 
 ---
 
@@ -266,7 +265,7 @@ PYBIND11_MODULE(tetris_py, m)
 
 `apply_placement` 는 학습이 쓰는 원자적 API (한 번 호출 = 한 피스 확정), `submit_input`/`tick` 은 Part 6 의 lockstep 경로와 프레임 단위로 같은 상태를 만드는지 검증하는 API 다. 둘 다 같은 `SimGame` 을 건드리지만 목적이 다르다 — 주석이 `Retained for frame-level parity/equivalence tests` 라고 그 목적을 명시한다.
 
-`clone()` 은 값 복사 생성자를 그대로 노출한 것이다. 이걸 필요로 하는 학습기는 현재 하나뿐인데(CBMPI-style), 그 하나가 없으면 아예 동작하지 않는다 — 자세한 비교는 [Part 9](./part9-rl-onnx-bot.md) 의 알고리즘 비교 표에 있다.
+`clone()`은 값 복사 생성자를 노출한다. 후보 행동을 별도의 상태에서 평가하는 탐색에 쓰며 RNG와 카운터도 함께 복사한다. 참조나 외부 자원을 멤버로 추가한다면 복사 생성이 여전히 독립된 분기를 만드는지 검토한다. 사용 맥락은 [Part 9](./part9-rl-onnx-bot.md)의 알고리즘 비교 표와 연결된다.
 
 ### 2.3 전투 · 가비지 API — 2-보드 학습의 배선
 
@@ -306,7 +305,7 @@ PYBIND11_MODULE(tetris_py, m)
             // 내부 버퍼를 참조로 넘기지 않고 복사한다.
             // 참조를 넘기면 다음 착수 때 Python이 들고 있던 배열의 내용이
             // 조용히 바뀌어, replay buffer에 쌓아둔 관측이 전부 오염된다.
-            // 200개짜리 복사는 학습 속도에 영향을 주지 않는다.
+            // 복사 비용은 보드 크기와 호출 빈도에 비례한다. 처리량은 별도로 측정한다.
             const auto& raw = g.Grid();
             auto arr = py::array_t<int32_t>({SimGrid::kRows, SimGrid::kCols});
             auto buf = arr.mutable_unchecked<2>();
@@ -314,7 +313,7 @@ PYBIND11_MODULE(tetris_py, m)
                 for (int c = 0; c < SimGrid::kCols; ++c)
                     buf(r, c) = raw[r][c];
             return arr;
-        }, "Return the 20x10 grid as a numpy int32 array (copied).")
+        }, "Return the ROWS x COLS grid as a numpy int32 array (copied).")
 ```
 
 참조를 반환했다면 이런 코드가 조용히 틀린다.
@@ -327,7 +326,7 @@ game.apply_placement(4, 0)   # SimGame 내부 상태 변경
 # arr 이 "배치 이전" 이 아니라 "배치 이후" 를 보여준다 — replay buffer 가 통째로 오염
 ```
 
-리플레이 버퍼는 관측을 나중에 다시 꺼내 쓴다. 참조를 담아두면 버퍼 전체가 "가장 최근 보드" 하나를 가리키게 되고, 학습은 완전히 무의미해진다. 게다가 `SimGame` 이 먼저 소멸되면 dangling pointer 다. 200개 int(800바이트) 복사 비용은 학습 처리량 대비 무시할 수 있으므로 안전한 복사를 선택했다.
+리플레이 버퍼는 관측을 나중에 다시 꺼내 쓴다. 같은 내부 버퍼를 가리키는 뷰를 저장하면 다음 상태 변경이 과거 관측에도 보인다. 소유자의 수명까지 연결하지 않은 뷰는 객체 소멸 뒤 유효하지 않다. 현재 `grid()`는 새 배열에 값을 복사하여 두 문제를 피한다. 복사 비용은 `ROWS × COLS × sizeof(int32_t)`와 호출 빈도에 따라 달라지므로 처리량은 측정한다. 복사한 배열을 Python에서 다시 수정할 수 있다는 사실과 C++ 원본으로부터 독립이라는 사실은 구분한다.
 
 ### 2.5 `reference_internal` 은 무엇을 보장하고 무엇을 보장하지 않는가
 
@@ -347,7 +346,7 @@ game.apply_placement(4, 0)   # SimGame 내부 상태 변경
              "Copy of the first piece in the preview queue.")
 ```
 
-`reference_internal` 은 pybind11 에서 `reference + keep_alive<0, 1>` 와 같다. "반환된 자식 객체가 살아 있는 동안 부모(`self`, 여기서는 `SimGame`)도 살려 둔다" 는 뜻이다. 즉 **수명 문제는 이 정책이 이미 해결했다.**
+`reference_internal` 은 pybind11 에서 `reference + keep_alive<0, 1>` 와 같다. "반환된 자식 객체가 살아 있는 동안 부모(`self`, 여기서는 `SimGame`)도 살려 둔다" 는 뜻이다. 현재 `CurrentBlock()`과 `GhostBlock()`이 반환하는 멤버 참조는 이 부모 수명 관계를 따른다. 다만 컨테이너 재할당처럼 C++ 쪽에서 참조 대상 자체를 무효화하는 설계를 추가한다면 별도 검토가 필요하다.
 
 **예시(실제 저장소에는 없음)**
 
@@ -375,6 +374,19 @@ print(block.id)                # 같은 참조인데 값이 바뀌었다 — 이
 
 ---
 
+### 2.6 언어 경계와 동일성 검증
+
+바인딩은 Python 객체·인자를 C++ 호출로 연결하고 결과를 Python 값으로 바꾼다. 규칙을 공유하면 중복 구현에서 생기는 차이를 줄이지만, placement 호출과 매 틱 입력은 서로 다른 호출 계약이다. 관측·보상·시간·입력 전개까지 같다는 결론은 별도 대조가 필요하다.
+
+현재 바인딩은 호출 중 GIL을 해제하지 않는다. 일반적인 GIL 기반 CPython에서는 Python 스레드가 바인딩을 호출하는 것만으로 여러 시뮬레이션이 동시에 계산되지 않는다. GIL 해제는 Python 객체 접근과 같은 C++ 객체에 대한 동시 변경을 함께 검토한 뒤 적용한다. 이는 free-threaded Python 지원 선언과도 별개다.
+
+학습 실습은 누적 `Round`를 가진 `Session`을 만들어 `step(mask)` 한 번을 규칙의 한 틱에 연결한다. 관측과 분기는 값 복사로 반환하고, 잘못된 인자와 실패한 reset은 기존 상태를 보존한다. C++ 직접 호출과 Python 호출에 같은 시드·입력열을 주어 매 전이의 정규 바이트를 비교한다. 이 비교는 두 호출 경로가 일치한다는 근거이며, 두 경로가 함께 사용하는 규칙 자체의 정확성은 규칙 회귀로 별도 확인한다.
+
+현재 소스에서는 `grid()` 복사와 `current_block()`의 살아 있는 내부 참조를 구별한다. `readonly` 속성은 Python의 대입을 막지만, 게임 진행으로 바뀌는 멤버의 값을 고정하지 않는다. `python/tests/test_binding_boundary.py`가 복사본·참조·부모 수명·clone을 확인한다.
+
+공식 계약: [pybind11 반환 정책](https://pybind11.readthedocs.io/en/stable/advanced/functions.html#return-value-policies), [GIL](https://pybind11.readthedocs.io/en/stable/advanced/misc.html#global-interpreter-lock-gil).
+
+
 ## 3. 관측 공간 설계
 
 ### 3.1 관측 구성
@@ -391,9 +403,11 @@ def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
     """
     import torch
 
-    raw = np.asarray(sim.grid(), dtype=np.float32)  # (20, 10)
+    raw = np.asarray(sim.grid(), dtype=np.float32)
+    if raw.shape != (BOARD_ROWS, BOARD_COLS):
+        raise ValueError(f"board shape {raw.shape} does not match {(BOARD_ROWS, BOARD_COLS)}")
     occupied = ((raw > 0) & (raw != 8)).astype(np.float32)
-    board = occupied[None, :, :]  # (1, 20, 10)
+    board = occupied[None, :, :]  # channel, row, column; no batch axis yet
 
     current = _piece_one_hot(sim.current_block_id())
     nxt = _piece_one_hot(sim.next_block_id())
@@ -407,9 +421,9 @@ def build_observation(sim: "SimGame") -> dict[str, torch.Tensor]:
 
 | 키 | 형태 | 내용 |
 |----|------|------|
-| `board` | `(1, 20, 10)` float32 | 점유맵: 1 = 잠긴 블록, 0 = 빈칸 |
-| `current` | `(7,)` float32 | 현재 블록 ID의 one-hot |
-| `next` | `(7,)` float32 | preview 큐 첫 번째 다음 블록 ID의 one-hot |
+| `board` | `(1, BOARD_ROWS, BOARD_COLS)` float32 | 점유맵: 1 = 잠긴 블록, 0 = 빈칸 |
+| `current` | `(NUM_PIECE_TYPES,)` float32 | 현재 블록 ID의 one-hot |
+| `next` | `(NUM_PIECE_TYPES,)` float32 | preview 큐 첫 번째 다음 블록 ID의 one-hot |
 
 ### 3.2 함수 안의 `import torch` 는 스타일이 아니라 설계다
 
@@ -427,44 +441,46 @@ uv run python -m pytest python/tests/test_framing_parity.py -q
 
 ### 3.3 설계 결정
 
-**고스트 블록 제외**: 고스트(id=8)는 현재 블록의 하드 드롭 위치 프리뷰다. 정책이 이미 합법적 배치(placement)를 결정하므로, 고스트 정보는 중복이다. `(raw > 0) & (raw != 8)`로 필터링한다. C++ 쪽 `bot/placement.cpp::observe` 도 문자 그대로 같은 조건식을 쓴다 — 이 한 줄이 학습-실행 격차의 최후 방어선이다.
+**점유맵과 화면의 구분**: `SimGame.Grid()`는 잠긴 셀을 담고 현재 피스와 고스트는 별도 멤버다. 현재 관측의 `(raw > 0) & (raw != 8)`은 표시 ID를 제외하는 기존 schema를 유지한다. 관측에 그리기 결과를 합친 뒤 이 조건만으로 모든 표현을 제거할 수 있다고 가정하지 않는다.
 
-**현재 블록의 위치/회전 제외**: placement-level API에서 정책은 "이 블록을 어디에 놓을 것인가"를 결정한다. 현재 블록의 중간 상태(떨어지는 중의 위치/회전)는 이 API에서 무관하다. 블록 **종류**(id)만 필요하므로 one-hot으로 충분하다.
+**피스 종류의 one-hot**: 종류 ID는 크기나 우열을 뜻하지 않는다. `NUM_PIECE_TYPES`와 ID 순서로 원-핫 벡터를 만든다. 같은 길이여도 종류와 인덱스의 대응이 바뀌면 모델 입력 의미가 바뀐다. 현재 구현의 알려지지 않은 ID는 기존 호환 동작대로 전부 0이며 정상 one-hot과 구별한다.
 
-**float32 점유맵**: 원본 그리드는 0~8 int이지만, CNN 입력으로는 이진 점유맵(0/1)이 적합하다. 블록 색상(1~7)은 게임 진행에 무관한 시각적 속성이므로 제거한다.
+**축·자료형·배치**: `board`의 첫 축은 채널이다. 한 게임의 CHW에 `unsqueeze(0)`를 적용하면 NCHW가 된다. 여러 게임은 `stack`으로 새 배치 축에 묶는다. 행·열을 reshape로 뒤집으면 전치와 다른 의미가 되므로 배열의 크기만이 아니라 셀 대응도 검사한다. C++ observe의 평평한 출력은 `row * kBoardCols + column` 순서다.
 
-**관측에 없는 것**: 받을 예정인 가비지(`pending_garbage()`), 레벨, 점수는 관측에 넣지 않았다. 단일 보드 학습에서는 의미가 없고, §6 의 versus 환경에서도 관측 schema 를 단일 보드와 **동일하게** 유지해야 같은 `TetrisPolicyNet` 을 재사용할 수 있기 때문이다. 경쟁 신호는 관측이 아니라 `info` dict 와 보상으로 전달한다.
+**일부 상태만 보는 관측**: 현재 위치/회전·시간·예고 나머지·대기 가비지·난수 상태는 관측에서 빠져 있다. placement 호출은 주로 피스 배치를 정하는 결정 경계를 쓰지만, 누락 정보가 모든 행동에서 무관하다는 뜻은 아니다. 같은 보드와 피스라도 대기 가비지가 다르면 같은 배치 뒤 보드가 달라질 수 있다. 이를 완전한 Markov 상태라고 설명하지 않는다. 가비지·레벨 등이 단일 보드에서는 모두 무의미하다는 기존 설명도 맞지 않는다.
+
+**모델이 받는 입력**: schema를 유지하면 같은 입력 크기의 네트워크를 사용할 수 있지만, versus에서 숨긴 정보의 영향까지 해결되지는 않는다. `info`와 보상에 기록한 정보는 정책 함수의 입력으로 연결하지 않는 한 그 시점의 행동 선택에 직접 제공되지 않는다. 채널/필드/종류 순서를 바꾸면 모델과 체크포인트·내보내기·C++ 소비자 계약도 함께 갱신한다.
+
+### 3.4 복사한 관측과 공유하는 텐서
+
+현재 함수의 점유맵은 새 NumPy 배열이다. `torch.from_numpy`는 그 배열과 CPU 저장소를 공유하므로 텐서와 배열의 변경은 서로 보인다. 이 저장소는 C++ 게임의 그리드와는 독립이다. 같은 관측을 재사용하면서 원본 보존이 필요하면 `clone()` 또는 명시적 배열 복사를 쓴다. CPU 텐서 생성은 GPU 업로드가 아니며, 장치 이동과 배치 구성은 호출자의 별도 책임이다.
+
+`python/tests/test_observation_parity.py`는 `tests/observation_dump.cpp`가 호출한 실제 `bot::observe`와 새 네이티브 바인딩의 `build_observation`을 비교한다. 같은 시드·입력·가비지 요청과 상태 해시를 먼저 대조하고 형상·dtype·메모리 순서·원소를 검사한다. 관측의 shape 불일치는 Python에서 ValueError로, C++ schema/SimGrid 크기 불일치는 컴파일 시 거절한다. 이 검사는 ONNX 추론이나 학습 성능까지 검증하지 않는다.
+
+```sh
+cmake --build build --target observation_dump tetris_py
+# 아래 두 값은 실제 새 빌드의 확장 모듈 디렉터리와 실행파일 경로다.
+TETRIS_PY_MODULE_DIR=/path/to/build TETRIS_OBSERVATION_DUMP=/path/to/build/observation_dump \
+  python -m pytest python/tests/test_observation_parity.py -q
+```
+
+공식 계약: [PyTorch from_numpy](https://docs.pytorch.org/docs/stable/generated/torch.from_numpy.html), [NumPy stack](https://numpy.org/doc/stable/reference/generated/numpy.stack.html).
 
 ---
 
 ## 4. 행동 공간 설계
 
-### 4.1 배치 수준 행동
+### 4.1 배치 인덱스와 좌표의 의미
 
-**현재 소스 발췌 — `python/common/__init__.py`**
+행동 공간은 `NUM_COLS * NUM_ROTATIONS`개의 라벨이다. 열은 피스의 **원점 열**이며 가장 왼쪽 셀의 열과 다를 수 있다. 회전 라벨은 방향 상태를 가리킨다. 서로 다른 라벨이 같은 도형을 표현해도 인덱스는 유지한다.
 
-```python
-NUM_COLS = 10
-NUM_ROTATIONS = 4
-NUM_PLACEMENTS = NUM_COLS * NUM_ROTATIONS  # 40
-
-# 블록 종류 수. ID는 0이 아니라 1부터 시작한다(src/sim_blocks.h 기준).
-NUM_PIECE_TYPES = 7
-
-# 보드 크기. SimGrid::kRows / kCols와 어긋나면 관측 텐서 shape이 안 맞는다.
-BOARD_ROWS = 20
-BOARD_COLS = 10
-```
-
-40개 이산 행동: 10열 x 4회전. 인코딩:
-
-$$\text{action} = \text{col} \times 4 + \text{rot}$$
+인코딩은 `col * NUM_ROTATIONS + rot`, 역변환은 같은 회전 수로 나눈 몫과 나머지다. 아래 순수 산술 함수는 유효 범위의 인수를 전제로 한다. 외부 입력에서는 범위와 정수형을 먼저 검사해야 한다. Python의 음수 인덱스는 배열 끝을 가리키므로 특히 주의한다.
 
 **현재 소스 발췌 — `python/common/action_mask.py`**
 
 ```python
 def encode_action(col: int, rot: int) -> int:
-    """Map a ``(col, rot)`` placement to a flat action index in ``[0, 40)``."""
+    """Map a ``(col, rot)`` placement in the valid domain to a flat index."""
     return col * NUM_ROTATIONS + rot
 
 
@@ -488,82 +504,25 @@ def legal_mask(sim: "SimGame") -> torch.Tensor:
     return mask
 ```
 
-이 수식(`col * 4 + rot`)은 C++ `bot/placement.h::encode_action` 과 **반드시** 같아야 한다. 다르면 같은 배치가 두 언어에서 다른 인덱스를 받고, 학습된 정책이 실행 시 완전히 엉뚱한 수를 둔다. Part 9 가 이 대칭성을 다시 짚는다.
+C++ `bot/placement.h::encode_action`도 같은 순서를 사용한다. 모델 출력 길이가 같아도 열·회전 순서가 바뀌면 다른 행동으로 해석된다. `tests/action_codec_dump.cpp`와 `python/tests/test_action_codec_parity.py`는 실제 C++ 함수를 호출해 Python 인코딩·디코딩·입력 전개와 전체 유효 좌표 조합을 대조한다.
 
-### 4.2 합법 행동 마스크와 O 블록의 중복
+### 4.2 끝점 합법성과 입력 경로 합법성
 
-40개 행동이 모두 항상 유효하지는 않다. `sim.legal_placements()` 가 C++ 쪽에서 회전 → 이동 → 하드 드롭을 실제로 시뮬레이션해 유효한 조합만 반환한다.
+`SimGame::LegalPlacements()`는 현재 피스를 복사하고, 목표 방향과 원점 열로 즉시 바꾼 뒤 **현재 행에서의 끝점**이 유효한지 검사한다. 이후 수직으로 내려 착지 위치를 구한다. 중간 회전·수평 이동 경로를 틱별로 재생하거나 벽 차기를 탐색하지 않는다.
 
-여기서 흔한 오해를 하나 정정한다. "O 블록(정사각형)은 회전이 하나뿐이므로 합법 행동이 10개다" 라는 서술은 **틀렸다.** `LegalPlacements()` 는 회전 수를 피스 모양이 아니라 `cells` 배열 크기로 정한다.
+따라서 이 메서드가 반환하는 합법성은 **즉시 배치 API의 합법성**이다. 피스와 목적지 사이에 세로 벽이 있어도 끝점과 낙하 경로가 비어 있으면 배치가 가능할 수 있다. 같은 목표를 좌우 키 입력으로 실행하면 벽에 막힌다. `tests/placement_contract_test.cpp`의 벽 fixture가 두 결과를 구분한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp`**
+`ApplyPlacement`는 유효한 배치를 적용하고 삭제 줄 수를 반환한다. 정상 배치에서 삭제가 없으면 0이며, 거절은 -1이다. 검증을 통과하기 전에는 실제 게임 상태를 변경하지 않는다. 테스트는 열거된 배치의 적용과 잘못된 좌표 거절, 원본 상태 보존을 함께 확인한다.
 
-```cpp
-    const int numRotations = static_cast<int>(currentBlock.cells.size());
-    for (int rot = 0; rot < numRotations; rot++)
-```
+### 4.3 중복 라벨과 확률 마스크
 
-그리고 O 블록은 **동일한 cells 를 4번 등록**한다.
+정사각형처럼 여러 방향 라벨이 같은 모양을 나타내는 피스도 있다. 마스크는 잘못된 배치만 제거하며 같은 모양을 자동으로 합치지 않는다. 출력 크기를 피스마다 바꾸지 않고 같은 인코딩을 유지하기 위한 선택이다.
 
-**현재 소스 발췌 — `src/sim_blocks.h`**
+같은 결과에 이르는 라벨들의 확률은 **합쳐서** 그 결과의 확률이 된다. 라벨 엔트로피는 결과 그룹을 고르는 불확실성과 그룹 내부 라벨을 고르는 불확실성을 모두 포함한다. 중복 라벨이 있다고 항상 일정한 값만큼 엔트로피가 증가하는 것은 아니다. 그룹 내부 확률까지 균등할 때 그 부분이 그룹 크기의 로그가 된다. 틱 입력 경로에서는 회전에 쓴 시간도 달라질 수 있으므로 같은 도형을 곧바로 같은 전체 상태로 취급하지 않는다.
 
-```cpp
-class SimOBlock : public SimBlock
-{
-public:
-    SimOBlock()
-    {
-        id = 4;
-        cells[0] = {Position(0, 0), Position(0, 1), Position(1, 0), Position(1, 1)};
-        cells[1] = {Position(0, 0), Position(0, 1), Position(1, 0), Position(1, 1)};
-        cells[2] = {Position(0, 0), Position(0, 1), Position(1, 0), Position(1, 1)};
-        cells[3] = {Position(0, 0), Position(0, 1), Position(1, 0), Position(1, 1)};
-        Move(0, 4);
-    }
-};
-```
+합법 행동 수는 상태마다 `legal_mask(sim).sum()`으로 확인한다. 빈 보드나 특정 시드의 측정값을 모든 상태의 비율로 일반화하지 않는다. 마스크의 목적은 현재 계약에서 허용한 행동들 위에 확률 분포를 정의하는 것이다.
 
-결과적으로 O 블록의 합법 배치는 빈 보드에서 **36개**(9열 × 4회전)다. 4개씩 묶인 9개의 중복 그룹이며, 같은 그룹의 네 액션은 결과 보드가 완전히 동일하다.
-
-이 중복을 제거하지 않은 이유는 **인덱스 대칭**이다. 액션 공간을 피스별로 줄이면 `encode_action` 이 피스에 따라 달라지고, C++ 런타임과 Python 학습이 같은 수식을 공유할 수 없게 된다. 40 고정 + 마스크가 훨씬 단순하다.
-
-대가는 정책 분포의 희석이다. O 블록 차례에 정책은 사실상 9개의 선택지를 36개 슬롯에 나눠 담아야 하고, 엔트로피 보너스가 그 중복 위에서도 작동한다. 학습 정합성이 깨지지는 않는다 — 네 중복 액션은 모두 같은 다음 상태로 가므로 value 추정도 같은 값으로 수렴한다. 다만 O 블록에서 정책 엔트로피가 구조적으로 `log 4` 만큼 부풀어 보인다는 점은 로그를 읽을 때 알고 있어야 한다.
-
-이 동작을 코드 주석이 한동안 반대로 적고 있었다. `python/common/__init__.py` 와 `python/common/action_mask.py` 의 docstring 이 둘 다 `the legal mask zeros those out` — "중복 회전은 마스크가 0으로 만든다" 고 썼는데, 마스크는 그런 일을 하지 않는다. 불법 배치만 거를 뿐 **중복은 그대로 남긴다.**
-
-지금은 두 docstring 모두 실제 동작과 인덱스 대칭이라는 이유까지 함께 적도록 고쳐져 있다.
-
-**현재 소스 발췌 — `python/common/action_mask.py`**
-
-```python
-"""Legal action masks for the placement-level action space.
-
-The action space is fixed at ``NUM_PLACEMENTS == NUM_COLS * NUM_ROTATIONS == 40``,
-encoded as ``action_index = col * NUM_ROTATIONS + rot``.
-
-The mask zeros out placements that are out of bounds or blocked, so the policy
-can never sample an illegal move. It does **not** deduplicate: a piece whose
-rotations are not all distinct (O has one shape, I/S/Z have two) keeps every
-rotation index that lands legally, so the same resulting board can be reachable
-through more than one action. That dilutes the policy distribution slightly but
-keeps the action index identical on both sides of the pybind11 boundary.
-"""
-```
-
-주석이 코드와 반대를 말하는 것은 주석이 없는 것보다 나쁘다. 이 경우 읽는 사람은 "중복은 처리됐구나" 하고 넘어가고, 나중에 O 블록에서 엔트로피가 이상하게 높은 것을 보고도 원인을 딴 데서 찾게 된다.
-
-### 4.3 합법 액션 수 — 실측
-
-마스킹의 필요성을 "행동의 절반이 불법이라서" 로 설명하는 것은 실측과 맞지 않는다. 네이티브 모듈로 직접 세어 보면 이렇다.
-
-- 빈 보드 기준: I 블록 31개, O 블록 36개, 나머지 다섯 피스 33개.
-- 시드 1~50, 각 최대 60 배치를 **무작위 합법 배치**로 진행한 949 상태의 평균: **31.85 / 40**. 피스별 평균은 I 29.5 ~ O 35.2 범위.
-- 스택이 높아진 말기 상태에서 최소 4개까지 떨어진다.
-
-즉 통상 구간에서 불법 비율은 20~25% 수준이다. 마스킹이 필요한 진짜 이유는 "샘플의 절반이 낭비" 가 아니라 다음 두 가지다.
-
-1. **불법 행동은 0 보상 no-op 다.** `TetrisPlacementEnv.step` 은 `cleared < 0` 이면 sim 을 진행시키지 않고 0 을 돌려준다(§5.2). 에이전트가 그 행동을 반복하면 에피소드가 진행되지 않은 채 rollout 슬롯만 소모된다. gradient 는 "아무것도 안 하는 행동" 을 학습하게 되고, 이건 신호가 아니라 잡음이다.
-2. **마스킹 없이는 확률이 새 나간다.** 학습 후반에 정책이 날카로워져도, 불법 행동에 남은 잔여 확률은 사라지지 않는다. `-inf` 마스킹은 그 확률을 **정확히 0** 으로 만들어 남은 확률 질량 전부를 합법 행동 위에 재정규화한다. 이건 탐색 효율의 문제가 아니라 분포의 정의 문제다.
+`masked_log_softmax`는 불법 logit을 음의 무한대로 바꾼다. 합법 logit이 유한하고 합법 행동이 하나 이상이면 지수 변환 후 불법 확률은 0이며 나머지 확률의 합은 1이다. 전부 False인 행에는 정규화할 분포가 없으므로 예외로 거절한다. 환경은 종료·잘못된 호출·행동 공간의 제한 중 원인을 판별해야 한다.
 
 **현재 소스 발췌 — `python/common/models.py`**
 
@@ -571,53 +530,50 @@ keeps the action index identical on both sides of the pybind11 boundary.
 def masked_log_softmax(
     logits: torch.Tensor, mask: torch.Tensor, eps: float = 1e-9
 ) -> torch.Tensor:
-    """Apply a boolean legal-action ``mask`` to ``logits`` then log-softmax.
+    """Normalize finite legal logits; reject empty legal rows and schema mismatch.
 
-    Setting illegal logits to ``-inf`` makes their softmax probability zero,
-    so sampling and ``argmax`` only ever pick legal placements.
+    ``eps`` remains accepted for caller compatibility. Adding the same constant
+    cannot repair an empty distribution and is not a probability floor.
     """
+    del eps
+    if not logits.is_floating_point() or mask.dtype != torch.bool:
+        raise TypeError("logits must be floating point and mask must be bool")
+    if logits.ndim < 1 or logits.shape[-1] == 0 or logits.shape != mask.shape:
+        raise ValueError("logits and mask must have the same nonempty action axis")
+    if logits.device != mask.device:
+        raise ValueError("logits and mask must be on the same device")
+    if not mask.any(dim=-1).all():
+        raise ValueError("each row must have at least one legal action")
+    if not torch.isfinite(logits.masked_select(mask)).all():
+        raise ValueError("legal logits must be finite")
     masked = logits.masked_fill(~mask, float("-inf"))
-    return F.log_softmax(masked + eps, dim=-1)
+    logp = F.log_softmax(masked, dim=-1)
+    if not torch.isfinite(logp.masked_select(mask)).all():
+        raise ValueError("normalized legal log probabilities must be finite")
+    return logp
+
+
+def masked_entropy(logp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Entropy of masked_log_softmax output; avoid 0 * -inf before autograd."""
+    safe_logp = logp.masked_fill(~mask, 0.0)
+    return -(logp.exp() * safe_logp).sum(dim=-1)
 ```
 
-### 4.4 placement-level 액션의 대가
+엔트로피는 `-sum(p * log(p))`지만 컴퓨터에서 불법 항의 `0 * -inf`를 계산하면 NaN이다. 곱한 **뒤** `where`로 가려도 역전파는 잘못된 곱셈 그래프를 통과할 수 있다. `masked_entropy`는 log 확률의 불법 항을 **곱하기 전에** 0으로 치환한다. 수학의 `lim(p→0) p log(p)=0`을 계산 순서로 구현한 것이다. `python/tests/test_masked_distribution.py`는 PPO와 정책경사 함수의 값뿐 아니라 기울기를 합법 좌표만 따로 계산한 기준과 대조한다.
 
-placement-level 을 택한 이득은 명확하다. 프레임 단위 액션이면 한 피스를 놓기까지 20-30 틱을 예측해야 하고, 그 중 실제 의사결정은 하나뿐이다. placement 단위는 그 의사결정을 한 스텝으로 묶는다. 게다가 BCTS·Dellacherie 같은 고전 알고리즘이 전부 placement-level 이라 벤치마크 호환성이 공짜로 따라온다.
+### 4.4 행동의 시간과 도달 범위
 
-대가는 잘 언급되지 않으니 여기 적는다.
+매 틱 행동은 회전·이동·대기를 각각 결정한다. 최종 배치 행동은 여러 결정을 목표 좌표 하나로 묶어 정책의 결정 빈도를 줄인다. 그 사이를 어떻게 실행할지는 환경의 별도 계약이다.
 
-**1. 중력 타이밍과 soft drop 을 표현할 수 없다.** 액션은 "어디에 놓을지" 만 말하고, "언제/얼마나 천천히" 는 `expand_placement`(§12.4)가 기계적으로 정한다. 20G 상황이나 lock delay 를 이용한 기교는 액션 공간 밖이다.
+현재 `ApplyPlacement`는 중간 `Tick`을 호출하지 않는다. 반면 `expand_placement`는 회전 → 수평 이동 → 하드 드롭의 입력열을 만든다. 두 언어에서 입력열이 같다는 검사는 충돌·중력까지 포함한 최종 상태의 동등성을 증명하지 않는다. 회전의 벽 차기로 원점이 변하거나 준비 입력 중 피스가 잠겨도 차이가 생길 수 있다.
 
-**2. T-spin 이 표현되지 않는다.** T-spin 은 "회전으로 진입해야만 도달 가능한 위치" 다. 액션이 최종 `(col, rot)` 만 지정하고 도달 경로는 회전 → 이동 → 하드 드롭으로 고정돼 있으므로, 회전으로 끼워 넣는 배치는 애초에 열거되지 않는다.
+T-spin 판정도 최종 좌표만으로 설명할 수 없다. 현재 규칙은 마지막 회전 이력과 주변 셀 조건 등을 사용하며, `ApplyPlacement`는 마지막 회전 플래그를 지운다. `tests/sim_t_spin_test.cpp`는 입력 회전·드롭과 배치 API를 구분한다. T-spin을 단순히 “회전으로만 갈 수 있는 위치”로 정의하면 이 계약을 놓친다.
 
-**3. tuck / slide 배치가 액션 공간에서 아예 배제된다.** 이건 구조적이다. `LegalPlacements()` 는 회전·이동을 **spawn 높이에서 먼저 검증**하고, 통과한 것만 하드 드롭한다.
+현재 열거는 살아 있는 피스의 행에서 시작한다. 통상 생성 직후 배치하는 환경에서는 그 행이 스폰 행이지만, 매 틱 입력 뒤 호출하면 달라진다. 수직 낙하 중 옆으로 밀거나 늦게 회전하는 경로는 탐색하지 않는다. 모든 도달 가능한 배치가 필요하면 위치·방향뿐 아니라 시간과 잠금 상태까지 포함한 경로 탐색을 설계해야 한다.
 
-**현재 소스 발췌 — `src/sim_game.cpp`**
+HTML 강의의 행동 체크포인트는 누적 `Round::tick`을 복사본에서 실제로 실행해 회전 → 이동 → 드롭 경로가 성공하는 라벨만 허용한다. 준비 틱에서 잠기면 거절하고, 성공한 입력열과 결과를 함께 보관한다. 이 경로군도 전체 도달 가능성을 탐색하는 것은 아니다. 기존 즉시 배치 API와의 차이를 유지한 채 학습·실행 의미를 비교한다.
 
-```cpp
-            // Start from a fresh copy of the live piece.
-            SimBlock test = currentBlock;
-            // Rotate in place to the target rotation.
-            while (test.rotationState != rot)
-            {
-                test.Rotate();
-            }
-            // Slide horizontally to the target column offset.
-            int delta = col - test.columnOffset;
-            test.columnOffset += delta;
-            // Reject if the rotated & translated piece is invalid at spawn height.
-            if (IsBlockOutside(test) || !BlockFits(test)) continue;
-            // Hard drop simulation.
-            while (IsBlockOutside(test) == false && BlockFits(test) == true)
-            {
-                test.rowOffset++;
-            }
-            test.rowOffset--;
-```
-
-`Reject if the rotated & translated piece is invalid at spawn height` 한 줄이 "오버행 아래로 밀어 넣는 수" 를 전부 제거한다. 사람이 두는 테트리스에서는 스택이 높아졌을 때 이런 수가 승부를 가르지만, 이 액션 공간에서는 존재하지 않는다. 학습된 정책의 상한이 여기서 한 번 잘린다.
-
-이 세 가지는 "그래서 잘못된 선택" 이라는 뜻이 아니다. **아는 채로 감수한 비용**이며, 나중에 액션 공간을 확장할 때 어디를 건드려야 하는지를 알려준다 — `LegalPlacements()` 의 spawn-height reject 를 완화하고, `expand_placement` 에 경로 탐색을 넣으면 된다. 그 순간 C++/Python 양쪽과 ONNX 출력 차원이 함께 바뀐다는 것도 같이 알아야 한다.
+행동 의미를 바꾸면 학습과 배포 양쪽 계약을 재검토한다. 라벨 수를 바꾸면 모델 출력 형상도 바뀐다. 같은 라벨에 대한 경로만 바꾸면 출력 길이는 유지될 수 있지만, 전이·시간·보상의 의미는 달라질 수 있다.
 
 ---
 
@@ -645,7 +601,11 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         from sim import SimGame  # noqa: PLC0415
 
         self._SimGame = SimGame
-        self._seed = seed if seed is not None else 0
+        self._initial_seed = optional_seed(seed)
+        self._seed = self._initial_seed
+        self._has_reset = False
+        self._needs_reset = True
+        self.render_mode = None
         self.sim: SimGame | None = None
 
         self.action_space = spaces.Discrete(NUM_PLACEMENTS)
@@ -670,7 +630,7 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         )
 ```
 
-표준 Gymnasium 인터페이스를 따르므로, CleanRL, Stable Baselines3, RLlib 등 어떤 RL 프레임워크든 바로 연결 가능하다. `gymnasium` 자체도 optional import 라 (`_HAS_GYM`), 설치돼 있지 않으면 생성자에서 명확한 `ImportError` 를 던진다 — 모듈 import 시점에 죽지 않는다.
+Gymnasium의 reset/step과 spaces 계약을 제공한다. 다른 RL 프레임워크에 연결할 때는 Dict 관측·합법 마스크 전달·종료 처리·환경 생성 방식도 맞춰야 한다. `gymnasium` 자체도 optional import 라 (`_HAS_GYM`), 설치돼 있지 않으면 생성자에서 명확한 `ImportError` 를 던진다 — 모듈 import 시점에 죽지 않는다.
 
 ### 5.2 step()
 
@@ -680,15 +640,15 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
     def step(
         self, action: int
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        assert self.sim is not None, "Call reset() before step()"
-
-        col, rot = decode_action(int(action))
+        if self._needs_reset:
+            raise gym.error.ResetNeeded("Call reset() before starting or continuing an episode")
+        action = action_index(action, NUM_PLACEMENTS)
+        col, rot = decode_action(action)
         cleared = self.sim.apply_placement(col, rot)
 
         if cleared < 0:
-            # 불법 수가 오면 판을 건드리지 않고 보상 0만 돌려준다.
-            # legal_mask를 제대로 쓰면 여기 올 일이 없지만, 마스킹을 빠뜨린
-            # 학습 코드가 조용히 이상한 상태로 가는 것보다는 낫다.
+            # 도메인 안이지만 현재 보드에서 막힌 배치는 상태를 보존한다.
+            # 정상 배치도 줄을 지우지 않으면 보상이 0이므로 info로 구별한다.
             reward = 0.0
             terminated = self.sim.game_over()
         else:
@@ -696,10 +656,13 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
             terminated = self.sim.game_over()
 
         truncated = False
-        return self._observation(), reward, terminated, truncated, self._info()
+        self._needs_reset = terminated
+        info = self._info()
+        info["action_applied"] = cleared >= 0
+        return self._observation(), reward, terminated, truncated, info
 ```
 
-**보상 = 클리어된 줄 수 (0~4)**. 이 단순한 보상 함수가 작동하는 이유: 라인을 많이 클리어하면 높은 보상, 게임 오버되면 에피소드 종료(미래 보상 상실). 에이전트는 자연스럽게 "오래 생존하면서 많이 클리어"하는 전략을 학습한다.
+**보상 = 이번 배치에서 삭제한 줄 수**. 종료까지의 할인된 줄 보상이 학습 목표다. 생존은 미래의 줄 보상을 얻는 데 도움이 될 수 있지만, 이 정의만으로 특정 전략의 습득이나 성능을 보장하지는 않는다.
 
 보상을 단순하게 둔 이유는 **피처 엔지니어링을 보상 엔지니어링으로 옮기는 함정**을 피하기 위함이다. "구멍 하나당 -0.5, 높이 편차 -0.1" 같은 dense reward 를 설계하면 결국 §10 의 BCTS 평가 함수를 reward 공간에서 다시 짜는 셈이 된다. 다만 이 희박함이 학습 초기에 실제 문제가 되므로, PPO 학습기는 env 밖에서 shaping 항을 더하는 절충을 택했다(§9.4). **env 자체의 계약은 순수하게 유지**하고 shaping 은 학습기 쪽 옵션으로 둔 것이 중요하다 — 평가 지표가 오염되지 않는다.
 
@@ -712,12 +675,49 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
         assert self.sim is not None
         return {
             "legal_mask": legal_mask(self.sim).numpy(),
+            "episode_seed": self._seed,
             "score": self.sim.score(),
+            "lines": self.sim.total_lines_cleared(),
             "state_hash": self.sim.state_hash(),
         }
 ```
 
-`legal_mask`는 매 step마다 반환된다. 정책이 이 마스크를 사용해 불법 행동을 필터링한다. `state_hash`는 디버깅 용도이자 **환경 결정론의 증거**다 — 같은 시드와 같은 행동 열이면 같은 해시 열이 나와야 한다.
+보상이 0이어도 유효한 배치가 없었다는 뜻은 아니다. 줄을 지우지 않은 정상 배치도 0이다. 행동 공간 안의 라벨이 현재 보드에서 막혔으면 두 환경 모두 보드를 보존하고 보상 0을 반환한다. `info["action_applied"]`가 정상 배치와 이를 구별한다. 대전은 이 요청도 결정 횟수에 포함해 제한 우회를 막는다. 단일 환경 자체에는 횟수 제한이 없으며 필요하면 `TimeLimit`으로 감싼다. 타입·범위가 잘못된 행동은 상태 변경 전에 `ValueError`로 거절한다.
+
+`legal_mask`는 매 step마다 반환된다. 정책이 이 마스크를 사용해 불법 행동을 필터링한다. `state_hash`는 상태 비교용 진단값이다. 같은 초기화·행동 열에서 해시 열을 비교하면 결정론 회귀를 찾을 수 있다. 유한 해시의 일치만으로 모든 상태의 동등성이 증명되는 것은 아니다.
+
+`lines`는 현재 에피소드의 누적 삭제 줄 수다. 보상에 공격·승패·shaping이 포함되는 경로에서도 원래 줄 지표를 보상에서 역산하지 않고 읽는다.
+
+### 5.4 초기화·난수·종료의 호출 계약
+
+**현재 소스 발췌 — `python/common/env.py`**
+
+```python
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        if options is not None and (not isinstance(options, dict) or options):
+            raise ValueError("reset options are not supported")
+        seed = optional_seed(seed)
+        effective = seed if seed is not None else (self._initial_seed if not self._has_reset else None)
+        super().reset(seed=effective)
+        self._seed = effective if effective is not None else draw_seed(self.np_random)
+        self.sim = self._SimGame(self._seed)
+        self._has_reset = True
+        self._needs_reset = False
+        return self._observation(), self._info()
+```
+
+`super().reset(seed=effective)`가 환경의 `np_random`을 준비한다. 명시적인 시드는 네이티브 `SimGame`에도 그대로 전달하여 같은 판을 재현한다. 생성자 시드는 처음 `reset()`에 사용한다. 이후 시드 없는 `reset()`은 환경 난수열에서 다음 네이티브 시드를 뽑는다. 따라서 같은 시드를 다시 명시하면 에피소드뿐 아니라 그 뒤 초기화 순서도 재현할 수 있고, 단순 `reset()`을 반복하면 매번 처음 판으로 되돌아가지 않는다. 시드는 네이티브의 uint64 범위를 따른다.
+
+`python/common/gym_contract.py`는 bool·소수·문자열을 정수 행동으로 조용히 바꾸지 않도록 타입과 범위를 검사한다. Python/NumPy 정수 스칼라와 0차원 정수 배열은 받을 수 있다. `reset`의 options는 None 또는 빈 dict만 지원한다. `action_space.sample()`의 난수 발생기는 환경과 별도이므로 샘플링 행동까지 재현하려면 `action_space.seed()`도 호출한다.
+
+초기화 전·종료 후·close 후의 `step()`은 `ResetNeeded`로 거절한다. `close()`는 반복 호출할 수 있으며 다시 사용하려면 reset한다. `terminated`는 게임 규칙의 종료, `truncated`는 외부 수집 경계다. 어느 하나라도 참이면 수집기는 다음 에피소드로 넘어가되, 가치 부트스트랩을 없애는 기준은 진짜 종료 여부다. 시간 제한으로 멈췄다면 마지막 전이의 관측으로 미래 가치를 계산한다. reset 뒤 새 판의 관측과 섞으면 다른 에피소드의 값을 연결하게 된다.
+
+`TimeLimit` 같은 바깥 래퍼의 제한은 원래 환경이 알지 못한다. 호출자는 가장 바깥 step 결과의 두 플래그를 확인한다. `python/tests/test_gym_contract.py`는 실제 바인딩을 지정하고 공식 `check_env`, 시드열, 행동 거절, 종료 뒤 재호출, 랜덤 상대 재현과 제한을 검사한다. 이것은 훈련기에서 리턴을 올바르게 계산한다는 증명과는 별개다.
 
 ---
 
@@ -727,7 +727,7 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
 
 `TetrisPlacementEnv` 로 학습한 정책은 "혼자 오래 살아남으며 줄을 지우는" 법을 배운다. 그런데 이 게임의 실제 승부는 Part 6 이 만든 **가비지 교환**이다 — 줄을 지우면 상대 보드 바닥에 쓰레기 줄이 올라온다. 혼자 두는 환경에는 그 압력이 아예 없으므로, 단일 보드 정책은 "공격" 이라는 개념 자체를 학습하지 못한다.
 
-`python/common/env_versus.py` 가 그 간극을 메운다. 두 개의 `SimGame` 을 두고 한쪽은 학습 에이전트가, 다른 쪽은 상대(opponent)가 조종하며, §2.3 의 가비지 API로 공격을 서로 라우팅한다. 모듈 도입부가 이 배선이 C++ 게임의 미러링임을 명시한다.
+`python/common/env_versus.py` 가 그 간극을 메운다. 두 개의 `SimGame` 을 두고 한쪽은 학습 에이전트가, 다른 쪽은 상대(opponent)가 조종하며, §2.3 의 가비지 API로 공격을 서로 라우팅한다. 공격량 차분과 수신 큐라는 네이티브 전투 원시 연산을 사용한다. A 배치 뒤 B가 응답하는 순서는 이 학습 환경의 턴제 근사이며, 실시간 게임의 틱 배선 전체와 동일하다는 뜻은 아니다.
 
 **현재 소스 발췌 — `python/common/env_versus.py`**
 
@@ -736,20 +736,18 @@ class TetrisPlacementEnv(gym.Env if _HAS_GYM else object):  # type: ignore[misc]
 
 This is the garbage-trading counterpart to ``common.env.TetrisPlacementEnv``.
 The learning agent controls board A; an *opponent* controls board B. Line
-clears send garbage to the other board, exactly mirroring the C++ game's
-combat wiring (``src/main.cpp``: take the ``attack_lines_sent()`` delta after a
-placement and route it to the other board's ``add_pending_garbage()``; the
-garbage is injected at the receiving board's next lock — ``SimGame::LockBlock``).
+clears produce an ``attack_lines_sent()`` delta, queued through the other
+board's ``add_pending_garbage()`` and injected at its next lock. These are the
+same native combat primitives used by the game. This environment's ordered
+A-then-B placement schedule is a turn-based approximation of real-time play.
 
 Design goals:
 
-* **Drop-in for existing single-agent trainers.** The observation is identical
-  to ``TetrisPlacementEnv`` (the agent's own ``board``/``current``/``next``), so
-  ``common.models.TetrisPolicyNet`` and the PPO/DQN/A2C/CEM loops train against
-  it unchanged. The competitive pressure arrives *through the board* (received
-  garbage raises the agent's stack) and *through the reward* (attack sent +
-  win/loss bonus). Extra competitive signals live in ``info`` for wrappers that
-  want them.
+* **Shared observation schema.** The agent's own ``board``/``current``/``next``
+  match ``TetrisPlacementEnv`` and ``common.models.TetrisPolicyNet``. Trainers
+  still need to select the environment and handle reward/termination semantics.
+  Received garbage changes the board; attack and win/loss terms change reward.
+  Extra competitive signals live in ``info`` for wrappers that need them.
 * **Self-play ready.** Pass any ``opponent`` — a scripted heuristic
   (``GreedyBCTSOpponent``, the default), random legal play
   (``RandomLegalOpponent``), or a snapshot of the current policy via
@@ -757,9 +755,9 @@ Design goals:
 
 Action / observation contract (agent side)::
 
-    action_space      = Discrete(40)                      # encode_action(col, rot)
+    action_space      = Discrete(NUM_PLACEMENTS)                      # encode_action(col, rot)
     observation_space = Dict(board, current, next)        # same as single-player
-    info["legal_mask"]        = bool (40,)
+    info["legal_mask"]        = bool (NUM_PLACEMENTS,)
     info["incoming_garbage"]  = int   # queued on the agent's board
     info["agent_attack"]      = int   # lines the agent sent this step
     info["opp_attack"]        = int   # lines the opponent sent this step
@@ -768,16 +766,17 @@ Action / observation contract (agent side)::
 Reward per step = ``lines_cleared + attack_weight * attack_sent``; on the
 terminal step ``+win_bonus`` if only the opponent topped out, ``-loss_penalty``
 if the agent topped out (including a simultaneous top-out). Treating a mutual
-top-out as a loss prevents the learning agent from exploiting suicidal attacks.
+top-out as a loss penalizes mutual failure; it does not prove that all
+suicidal attack strategies have negative total return.
 """
 ```
 
-핵심 설계 결정은 첫 번째 bullet 이다. **관측 schema 를 단일 보드와 동일하게 유지한다.** 상대 보드를 관측에 넣으면 `TetrisPolicyNet` 의 입력 차원이 바뀌고, 그러면 `ARCH_VERSION` 을 올려야 하고, ONNX 입출력 계약(Part 9)도 바뀌고, C++ `observe()` 도 바뀌어야 한다. 대신 경쟁 압력을 **보드를 통해** (받은 가비지가 내 스택을 올린다) 와 **보상을 통해** (보낸 공격 + 승패 보너스) 전달한다. 덕분에 기존 PPO/DQN/A2C/CEM 루프가 코드 수정 없이 versus 환경을 학습할 수 있다.
+핵심 설계 결정은 첫 번째 bullet 이다. **관측 schema 를 단일 보드와 동일하게 유지한다.** 상대 보드를 관측에 넣으면 `TetrisPolicyNet` 의 입력 차원이 바뀌고, 그러면 `ARCH_VERSION` 을 올려야 하고, ONNX 입출력 계약(Part 9)도 바뀌고, C++ `observe()` 도 바뀌어야 한다. 대신 경쟁 압력을 **보드를 통해** (받은 가비지가 내 스택을 올린다) 와 **보상을 통해** (보낸 공격 + 승패 보너스) 전달한다. 정책망의 입력 형상을 유지하면서 환경 생성과 보상·종료 처리의 차이를 연결할 수 있다. 상대 상태의 생략은 여전히 부분 관측을 만든다.
 
 ```mermaid
 graph TB
-    Agent["학습 에이전트<br/>TetrisPolicyNet"] -->|action 0..39| SimA["simA (보드 A)"]
-    Opp["opponent<br/>GreedyBCTS / RandomLegal / Policy"] -->|action 0..39| SimB["simB (보드 B)"]
+    Agent["학습 에이전트<br/>TetrisPolicyNet"] -->|행동 라벨| SimA["simA (보드 A)"]
+    Opp["opponent<br/>GreedyBCTS / RandomLegal / Policy"] -->|행동 라벨| SimB["simB (보드 B)"]
     SimA -->|attack_lines_sent 델타| GB["add_pending_garbage"]
     GB --> SimB
     SimB -->|attack_lines_sent 델타| GA["add_pending_garbage"]
@@ -787,17 +786,21 @@ graph TB
     R --> Agent
 ```
 
-### 6.2 상대 3종
+### 6.2 교체할 수 있는 상대 정책
 
 **현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 class VersusOpponent:
-    """Decides one placement for a board. Return an encoded action (0..39) or
-    ``None`` if the board has no legal move (treated as a pass)."""
+    """Decides one placement for a board. Return an encoded action in the schema domain or
+    ``None`` only if the board has no legal move. The environment supplies a
+    disposable clone, so mutations to the argument are never committed."""
 
     def reset(self) -> None:  # noqa: D401 - optional hook
         """Called on env reset. Override to reset per-episode state."""
+
+    def reseed(self, seed: int) -> None:
+        """Override when a custom opponent owns randomness used during an episode."""
 
     def act(self, sim: Any) -> Optional[int]:
         raise NotImplementedError
@@ -809,6 +812,9 @@ class RandomLegalOpponent(VersusOpponent):
     def __init__(self, seed: int | None = None) -> None:
         self._rng = random.Random(seed)
 
+    def reseed(self, seed: int) -> None:
+        self._rng.seed(seed)
+
     def act(self, sim: Any) -> Optional[int]:
         placements = sim.legal_placements()
         if not placements:
@@ -817,18 +823,21 @@ class RandomLegalOpponent(VersusOpponent):
         return encode_action(int(p.col), int(p.rot))
 ```
 
-기본 상대는 1-ply 그리디 BCTS다. §10 의 `bcts_score()` 를 실제로 **선택 루프에 연결하는 유일한 Python 구현체**이기도 하다.
+기본 상대는 한 배치 뒤의 결과를 평가하는 그리디 BCTS다. `bcts_score()`를 후보 선택 루프에 연결한다. 환경 초기화는 상대의 `reseed(seed)`와 `reset()`을 호출한다. 랜덤 상대는 reseed에서 자체 난수 발생기를 초기화하고, 사용자 정의 확률 정책도 자신이 소유한 난수·에피소드 상태를 이 계약에 맞춰 관리해야 한다.
 
 **현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
 class GreedyBCTSOpponent(VersusOpponent):
-    """One-ply Dellacherie/BCTS greedy: clone the board, try every legal
-    placement, keep the one with the best post-placement BCTS score. A solid,
-    dependency-light sparring partner (the same evaluator CBMPI improves on)."""
+    """One-ply board evaluator: clone each legal placement and keep its best score.
+
+    line_weight adds to the rows_cleared coefficient already in bcts_score.
+    Equal scores keep the first native placement; terminal states have no
+    separate priority. These are policy choices, not performance guarantees.
+    """
 
     def __init__(self, line_weight: float = 1.0) -> None:
-        self._line_weight = line_weight
+        self._line_weight = finite_coefficient(line_weight, "line_weight")
 
     def act(self, sim: Any) -> Optional[int]:
         placements = sim.legal_placements()
@@ -843,6 +852,8 @@ class GreedyBCTSOpponent(VersusOpponent):
                 continue
             board = np.asarray(child.grid(), dtype=np.float32)
             score = self._line_weight * float(cleared) + bcts_score(board, cleared)
+            if not np.isfinite(score):
+                raise ValueError("greedy evaluation is not finite")
             if score > best_score:
                 best_score = score
                 best_action = encode_action(int(p.col), int(p.rot))
@@ -869,7 +880,7 @@ class PolicyOpponent(VersusOpponent):
         mask = legal_mask(sim).numpy()
         if not mask.any():
             return None
-        return int(self._policy_fn(obs, mask))
+        return action_index(self._policy_fn(obs, mask), NUM_PLACEMENTS)
 ```
 
 `policy_fn` 이 콜러블이므로 얼려둔 체크포인트든, 현재 학습 중인 네트워크의 복사본이든 그대로 넣을 수 있다. 관측을 상대 보드 기준으로 다시 만드는 것이 포인트다 — 상대도 자기 보드를 자기 시점에서 본다.
@@ -882,69 +893,66 @@ class PolicyOpponent(VersusOpponent):
     def step(
         self, action: int
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        assert self.simA is not None, "Call reset() before step()"
+        if self._needs_reset:
+            raise gym.error.ResetNeeded("Call reset() before starting or continuing an episode")
+        action = action_index(action, NUM_PLACEMENTS)
+        # Preserve committed boards. A callback can advance its own RNG, so any
+        # later failure requires reset rather than retrying an ambiguous episode.
+        self._needs_reset = True
+        candidate_a = self.simA.clone()
+        candidate_b = self.simB.clone()
+        col, rot = decode_action(action)
+        attack_before_a = candidate_a.attack_lines_sent()
+        cleared = candidate_a.apply_placement(col, rot)
+        agent_attack = opp_attack = 0
 
-        col, rot = decode_action(int(action))
-        cleared = self.simA.apply_placement(col, rot)
+        if cleared >= 0:
+            agent_attack = candidate_a.attack_lines_sent() - attack_before_a
+            if agent_attack > 0 and not candidate_b.game_over():
+                candidate_b.add_pending_garbage(agent_attack)
 
-        if cleared < 0:
-            # 불법 수면 내 보드는 그대로 두고 넘어간다.
-            # 상대는 계속 두므로 결과적으로 한 수를 손해 보는 셈이다.
-            return (
-                self._observation(self.simA),
-                0.0,
-                self.simA.game_over(),
-                False,
-                self._info(0, 0),
-            )
+            # The policy sees its own board after incoming attack has been queued.
+            # Give it an isolated copy; policy-side mutations are never committed.
+            if not candidate_b.game_over():
+                opp_action = self._opponent.act(candidate_b.clone())
+                mask = legal_mask(candidate_b).numpy()
+                if opp_action is None:
+                    if mask.any():
+                        raise ValueError("opponent passed despite having legal actions")
+                else:
+                    opp_action = action_index(opp_action, NUM_PLACEMENTS)
+                    if not mask[opp_action]:
+                        raise ValueError("opponent returned a blocked action")
+                    attack_before_b = candidate_b.attack_lines_sent()
+                    bc, br = decode_action(opp_action)
+                    if candidate_b.apply_placement(bc, br) < 0:
+                        raise RuntimeError("opponent action disagreed with legal mask")
+                    opp_attack = candidate_b.attack_lines_sent() - attack_before_b
+                    if opp_attack > 0 and not candidate_a.game_over():
+                        candidate_a.add_pending_garbage(opp_attack)
 
-        # 이번 수로 보낸 공격을 상대 보드에 쌓는다.
-        # 누적값의 차이를 쓰는 이유는 SimGame이 총합만 들고 있기 때문이다.
-        agent_attack = self.simA.attack_lines_sent() - self._last_attack_a
-        self._last_attack_a = self.simA.attack_lines_sent()
-        if agent_attack > 0:
-            self.simB.add_pending_garbage(agent_attack)
-
-        # 상대도 한 수 둔다. 그쪽 공격은 반대로 내 보드에 쌓인다.
-        opp_attack = 0
-        if not self.simB.game_over():
-            opp_action = self._opponent.act(self.simB)
-            if opp_action is not None:
-                bc, br = decode_action(int(opp_action))
-                if self.simB.apply_placement(bc, br) >= 0:
-                    opp_attack = self.simB.attack_lines_sent() - self._last_attack_b
-                    self._last_attack_b = self.simB.attack_lines_sent()
-                    if opp_attack > 0:
-                        self.simA.add_pending_garbage(opp_attack)
-
-        a_dead = self.simA.game_over()
-        b_dead = self.simB.game_over()
-
-        reward = float(cleared) + self.attack_weight * float(agent_attack)
+        a_dead, b_dead = candidate_a.game_over(), candidate_b.game_over()
+        reward = (versus_reward(cleared, agent_attack, a_dead, b_dead,
+                                self.attack_weight, self.win_bonus, self.loss_penalty)
+                  if cleared >= 0 else 0.0)
         terminated = a_dead or b_dead
-        if terminated:
-            reward += _terminal_bonus(
-                a_dead, b_dead, self.win_bonus, self.loss_penalty
-            )
-            # 둘 다 동시에 죽으면 패배로 친다.
-            # 무승부를 인정하면 '같이 죽자'는 전략이 이득이 되어 버린다.
-
-        self._pieces += 1
-        truncated = self._pieces >= self.max_pieces
-        return (
-            self._observation(self.simA),
-            reward,
-            terminated,
-            truncated,
-            self._info(agent_attack, opp_attack),
-        )
+        decisions = self._pieces + 1
+        truncated = decisions >= self.max_pieces
+        obs = self._observation(candidate_a)
+        info = self._info(agent_attack, opp_attack, sim_a=candidate_a,
+                          sim_b=candidate_b, decisions=decisions)
+        info["action_applied"] = cleared >= 0
+        self.simA, self.simB = candidate_a, candidate_b
+        self._pieces = decisions
+        self._needs_reset = terminated or truncated
+        return obs, reward, terminated, truncated, info
 ```
 
 보상은 세 항의 합이다.
 
 $$r = \text{cleared} + w_{\text{attack}} \cdot \text{attack} + \begin{cases} +\text{win\_bonus} & \text{상대만 탑아웃} \\ -\text{loss\_penalty} & \text{에이전트 탑아웃} \\ 0 & \text{그 외}\end{cases}$$
 
-기본값은 `attack_weight=0.5`, `win_bonus=10.0`, `loss_penalty=10.0`, `max_pieces=2000`. 한 스텝 = 에이전트 한 피스 + 상대 한 피스이므로 두 보드가 같은 속도로 진행한다(실시간이 아니라 턴제 근사).
+`attack_weight`·`win_bonus`·`loss_penalty`는 생성자에서 정하는 보상 정책이다. `max_pieces`는 호환을 위해 남긴 옵션 이름이며, 현재는 도메인 안의 step 요청 횟수를 센다. 막힌 배치도 한 결정을 소비한다. 유효한 배치에서 플레이어를 먼저 실행하고 살아 있는 상대가 한 번 응답하는 턴제 근사이므로 실시간 동시 진행과는 다르다. 규칙 종료와 횟수 제한이 같은 전이에서 발생하면 두 플래그가 모두 참일 수 있다.
 
 승패 처리에 미묘한 결정이 하나 숨어 있다.
 
@@ -955,40 +963,54 @@ def _terminal_bonus(
     a_dead: bool, b_dead: bool, win_bonus: float, loss_penalty: float
 ) -> float:
     """Terminal reward from the learning agent's perspective."""
-    if b_dead and not a_dead:
-        return float(win_bonus)
-    if a_dead:
-        return -float(loss_penalty)
-    return 0.0
+    return versus_reward(0, 0, a_dead, b_dead, 0.0, win_bonus, loss_penalty)
 ```
 
-`if a_dead:` 가 두 번째 분기다 — **동시 탑아웃은 패배로 친다.** 무승부를 0으로 두면 에이전트가 "어차피 죽을 거면 상대도 같이 죽이는" 자폭 전략에 보상을 받는다. 모듈 docstring 의 `Treating a mutual top-out as a loss prevents the learning agent from exploiting suicidal attacks.` 가 그 의도를 못 박고, §6.3 의 `step()` 발췌에 보이는 호출부 옆 한국어 주석("무승부를 인정하면 '같이 죽자'는 전략이 이득이 되어 버린다")이 같은 판단을 반복한다.
+`python/common/versus_reward.py`의 순수 계산은 A가 죽었으면 동시 탑아웃을 포함해 패배 항을 더한다. 이는 이 환경의 보상 설계다. 공격·삭제 줄 보상까지 합친 총 리턴에서 모든 자폭 전략을 배제한다는 보장은 없다. 실제 게임의 무승부 판정 및 계정 BP 지급 규칙과도 분리해서 읽는다.
 
-### 6.4 info 로 나가는 경쟁 신호
+### 6.4 실패한 공동 전이를 반영하지 않는다
+
+하나의 대전 step은 A의 배치, A→B 공격 전달, B의 선택·배치, B→A 공격 전달, 보상·출력 구성으로 이루어진다. A가 탑아웃해도 이 순서 안에서 살아 있는 B의 응답을 수행한 뒤 승패를 판정한다. 상대가 이미 끝났으면 공격을 큐에 넣거나 행동을 요청하지 않는다. 이렇게 응답 시점을 정의해야 동시 탑아웃과 종료 항을 일관되게 해석할 수 있다.
+
+환경은 두 SimGame의 복사본을 만들고 이 순서를 실행한다. 상대에는 B 복사본을 다시 복사해 전달한다. 상대가 후보 탐색을 위해 인수를 수정해도 실제로 반영할 B는 달라지지 않는다. 반환 행동은 정수 도메인과 현재 B의 마스크를 다시 검사한다. None은 합법 행동이 없을 때만 허용하며, 소수·문자열을 정수로 바꾸거나 막힌 배치를 무시하지 않는다. PolicyOpponent가 만드는 관측도 B 기준이다.
+
+보상과 관측·info 구성까지 성공한 뒤 두 보드와 결정 횟수를 함께 반영한다. `env.simA`·`env.simB`는 성공 시 새 객체를 가리키므로, 바깥 코드에서 보드 참조를 저장했다면 그 참조는 과거 상태다. 현재 상태는 환경에서 다시 조회한다. 실패하면 기존 두 보드와 카운터는 유지하지만, 상대 정책이 이미 소비한 난수나 외부 부작용은 되돌리지 못한다. 따라서 `_needs_reset`을 유지해 같은 에피소드의 재시도를 거절한다. reset 훅이 실패했을 때도 진행 가능한 상태로 남기지 않는다. 이것은 같은 프로세스의 협력 코드에 대한 상태 경계이며 임의 Python 코드를 격리하는 보안 장치는 아니다.
+
+보상 계수는 `finite_coefficient`로 실제 유한 수인지 확인하고, 전이의 합산 결과도 유한한지 검사한다. 유한한 큰 계수라도 공격량과 곱하면 overflow할 수 있으므로 생성자 검사만으로 충분하지 않다. `python/tests/test_versus_boundary.py`가 잘못된 상대 반환·콜백 예외/수정·수치 경계를 검사한다.
+
+### 6.5 info 로 나가는 경쟁 신호
 
 **현재 소스 발췌 — `python/common/env_versus.py`**
 
 ```python
-    def _info(self, agent_attack: int, opp_attack: int) -> dict[str, Any]:
-        assert self.simA is not None and self.simB is not None
+    def _info(self, agent_attack: int, opp_attack: int, *,
+              sim_a=None, sim_b=None, decisions=None) -> dict[str, Any]:
+        sim_a = self.simA if sim_a is None else sim_a
+        sim_b = self.simB if sim_b is None else sim_b
+        decisions = self._pieces if decisions is None else decisions
+        assert sim_a is not None and sim_b is not None
         return {
-            "legal_mask": legal_mask(self.simA).numpy(),
-            "score": self.simA.score(),
-            "state_hash": self.simA.state_hash(),
-            "incoming_garbage": self.simA.pending_garbage(),
+            "legal_mask": legal_mask(sim_a).numpy(),
+            "episode_seed": self._seed,
+            "opponent_seed": self._opp_seed,
+            "decisions": decisions,
+            "score": sim_a.score(),
+            "lines": sim_a.total_lines_cleared(),
+            "state_hash": sim_a.state_hash(),
+            "incoming_garbage": sim_a.pending_garbage(),
             "agent_attack": int(agent_attack),
             "opp_attack": int(opp_attack),
-            "opp_alive": not self.simB.game_over(),
-            "agent_lines": self.simA.total_lines_cleared(),
-            "opp_lines": self.simB.total_lines_cleared(),
+            "opp_alive": not sim_b.game_over(),
+            "agent_lines": sim_a.total_lines_cleared(),
+            "opp_lines": sim_b.total_lines_cleared(),
         }
 ```
 
-`legal_mask`·`score`·`state_hash` 는 `TetrisPlacementEnv` 와 동일하고, `incoming_garbage` 이하가 versus 전용이다. 관측을 건드리지 않고 여기에 실은 것이 §6.1 의 설계 결정이다 — 이 신호를 쓰고 싶은 래퍼는 `info` 에서 꺼내 관측에 붙이면 되고, 안 쓰는 학습기는 그냥 무시한다.
+`legal_mask`·`episode_seed`·`score`·`lines`·`state_hash`는 단일 환경과 의미가 같고, `decisions`는 이번 에피소드의 결정 횟수다. `opponent_seed`를 명시하면 그 상대 보드 시드를 reset마다 유지한다. 생략하면 플레이어 시드의 다음 uint64 값을 쓰며 최댓값에서는 0으로 순환한다. 상대 정책의 reseed에도 이 값을 전달한다. 따라서 환경 안의 랜덤 상대는 자신의 생성자 시드보다 환경의 초기화 정책을 따른다. 나머지 `incoming_garbage` 이하가 versus 전용이다. 관측을 건드리지 않고 여기에 실은 것이 §6.1 의 설계 결정이다 — 이 신호를 쓰고 싶은 래퍼는 `info` 에서 꺼내 관측에 붙이면 되고, 안 쓰는 학습기는 그냥 무시한다.
 
-### 6.5 trainer 에서 versus 를 고르기 — PPO 의 `--env`
+### 6.6 trainer 에서 versus 를 고르기 — PPO 의 `--env`
 
-관측 schema 를 단일 보드와 동일하게 유지한 결정(§6.1)이 여기서 회수된다. 환경이 바뀌어도 rollout 루프는 그대로이므로, 학습기에 필요한 것은 "어느 환경을 생성할 것인가" 라는 분기 하나다. PPO trainer 가 그 분기를 CLI 옵션으로 노출한다.
+관측 schema 를 단일 보드와 동일하게 유지한 결정(§6.1)이 여기서 회수된다. 같은 관측 형상을 받을 수 있으므로 환경 생성 분기를 추가할 수 있다. 보상 지표와 종료·수집 경계 처리도 별도로 점검해야 한다. PPO trainer 가 그 분기를 CLI 옵션으로 노출한다.
 
 **현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
@@ -1050,7 +1072,15 @@ uv run python -m pytest python/tests/test_versus_env.py -q
 
 ## 7. CNN 정책 네트워크
 
-### 7.1 아키텍처
+### 7.1 형상과 의미의 계약
+
+`python/common/models.py`의 `TetrisPolicyNet`은 보드 특징을 피스 정보와 합쳐 행동 점수와 스칼라 가치를 만든다. H/W는 BOARD_ROWS/BOARD_COLS, K는 피스 종류 수, A는 배치 라벨 수, B는 배치의 표본 수다. 관측 생성 경로의 보드는 `(B,1,H,W)`, current/next는 각각 `(B,K)`인 float32다. 현재 one-hot 위치는 피스 ID에서 1을 뺀 값이다. 학습 체크포인트의 카탈로그 순서와 같은 순서라고 가정하지 않는다.
+
+`python/common/model_contract.py`의 `validate_policy_inputs`는 행·열·각 피스 폭·배치 크기를 각각 확인한다. 같은 원소 수라도 H/W 전치는 공간 의미를 바꾸고, current의 부족한 폭을 next에 더한 입력도 잘못된 계약이다. 입력은 모델 파라미터와 dtype/device가 같아야 한다. 모델을 `.double()`로 변환했다면 입력도 함께 변환한다. 정상 관측 경로는 float32이며 모델·입력은 `.to(device)`로 같은 장치에 놓는다.
+
+`build_observation`은 native 보드를 이진 점유로 변환하고 피스 ID를 one-hot 위치에 대응시킨다. 현재 `_piece_one_hot`은 범위 밖 ID를 전부 0인 벡터로 남기는 호환 규칙을 유지한다. 따라서 현재 관측 생성기가 임의 입력의 모든 의미 오류를 거절한다고 가정하지 않는다. 학습 체크포인트의 encode는 ID를 엄격하게 검사한다. 모델의 메타데이터 검사에는 GPU 동기화를 유발할 수 있는 전체 값 reduction을 넣지 않는다. 따라서 이 메타데이터 검사가 임의 NaN 입력이나 손상된 가중치까지 검출한다는 뜻은 아니다. 추론 분포를 만드는 `masked_log_softmax`는 합법 logit의 유한성을 확인한다. `python/tests/test_policy_contract.py`가 메타데이터·역전파·추적 경계를 검사한다.
+
+### 7.2 네트워크 구성
 
 **현재 소스 발췌 — `python/common/models.py`**
 
@@ -1064,13 +1094,20 @@ uv run python -m pytest python/tests/test_versus_env.py -q
         n_piece_types: int = NUM_PIECE_TYPES,
     ) -> None:
         super().__init__()
+        board_channels = positive_size(board_channels, "board_channels")
+        hidden = positive_size(hidden, "hidden")
+        n_placements = positive_size(n_placements, "n_placements")
+        n_piece_types = positive_size(n_piece_types, "n_piece_types")
+        if not isinstance(conv_channels, (tuple, list)) or not conv_channels:
+            raise ValueError("conv_channels must be a nonempty sequence")
+        conv_channels = tuple(positive_size(c, "conv_channels") for c in conv_channels)
         self.board_channels = board_channels
         self.conv_channels = conv_channels
         self.hidden = hidden
         self.n_placements = n_placements
         self.n_piece_types = n_piece_types
 
-        # 보드를 훑는 conv 스택. 20x10을 그대로 이미지처럼 다룬다.
+        # Stride 1 and padding 1 preserve the configured spatial axes.
         layers: list[nn.Module] = []
         in_ch = board_channels
         for out_ch in conv_channels:
@@ -1094,266 +1131,233 @@ uv run python -m pytest python/tests/test_versus_env.py -q
         self.value_head = nn.Linear(hidden, 1)
 ```
 
-레이어 스택이 하드코딩이 아니라 `conv_channels` 튜플 루프라는 점에 주의한다. 기본값 `(32, 64, 64)` 로 3-Conv 스택이 만들어지고, `flat = 64 * 20 * 10 = 12800`, `fuse` 첫 Linear 입력은 `12800 + 14 = 12814` 다. 인자를 바꾸면 구조가 바뀌므로 **`ARCH_VERSION` 도 함께 올려야 한다**(§7.3).
+생성자는 양의 정수 크기와 비어 있지 않은 conv_channels를 요구한다. bool을 정수 크기로 받지 않는다. Conv의 마지막 채널 수를 C, MLP 폭을 D라 하면 flatten의 폭은 `C×H×W`, 결합 입력은 `C×H×W + 2K`다. 파라미터 개수는 생성한 모델의 `parameters()`에서 계산한다.
 
 ```mermaid
 graph TB
-    subgraph "입력"
-        A["board (B,1,20,10)"]
-        B["current (B,7)"]
-        C["next (B,7)"]
-    end
-    subgraph "Conv 트렁크"
-        D["Conv2d(1→32) + ReLU"]
-        E["Conv2d(32→64) + ReLU"]
-        F["Conv2d(64→64) + ReLU"]
-    end
-    subgraph "융합"
-        G["Flatten: (B, 12800)"]
-        H["Concat: (B, 12814)"]
-        I["Linear(12814→256) + ReLU"]
-        J["Linear(256→256) + ReLU"]
-    end
-    subgraph "출력"
-        K["Policy: Linear(256→40)"]
-        L["Value: Linear(256→1)"]
-    end
-
-    A --> D --> E --> F --> G
-    G --> H
-    B --> H
-    C --> H
-    H --> I --> J
-    J --> K
-    J --> L
+    A["board: B,Cin,H,W"] --> T["Conv + ReLU 반복"]
+    T --> F["flatten: B,Cout×H×W"]
+    F --> J["concat: B,Cout×H×W+2K"]
+    B["current: B,K"] --> J
+    C["next: B,K"] --> J
+    J --> M["공유 MLP: B,D"]
+    M --> P["행동 점수: B,A"]
+    M --> V["상태 가치: B"]
 ```
 
-### 7.2 설계 결정
+커널·padding·stride를 함께 읽는다. 이 스택은 커널3, padding1, stride1로 H/W를 유지한다. 공유 필터는 지역 패턴을 학습할 수 있고 MLP는 펼친 모든 위치와 피스 벡터를 조합한다. 특정 채널이 구멍이나 높이를 반드시 인식한다고 단정하지 않는다. 피스 정보를 공간 전체에 반복하는 방법도 가능하지만 이 구현은 flatten 뒤 결합을 선택했다. 실제 효율·성능은 같은 조건에서 비교한다. 현재 next 입력은 미리보기의 첫 피스다.
 
-**Conv2d(kernel=3, padding=1)**: 3x3 커널로 인접 셀의 패턴(빈 행, 높이 차이, 구멍)을 감지한다. `padding=1`로 공간 차원을 보존한다. 테트리스 보드는 20x10으로 작아서 풀링 없이 전체 해상도를 유지한다.
+### 7.3 순전파와 출력 해석
 
-**현재/다음 블록을 concat으로 융합**: 블록 정보를 CNN 입력 채널로 추가하는 방법도 있지만, one-hot 벡터 7개를 20x10 전체에 브로드캐스트하면 파라미터 대비 정보가 희박하다. flatten 후 concat이 더 효율적이다. 현재 학습 입력은 preview 큐의 첫 번째 next 만 쓰며, 3-piece preview 전체를 정책에 넣고 싶으면 `next_block_ids()` 를 별도 feature 로 확장한다.
-
-**Actor-Critic 구조**: policy head(40개 logit)와 value head(스칼라)를 공유 트렁크에서 분기한다. PPO/A2C 같은 actor-critic policy gradient 알고리즘은 이 구조를 그대로 쓰고, DQN/DDQN 계열은 `policy_logits` 를 Q-value 로 해석한다. 즉 같은 `TetrisPolicyNet` 체크포인트 형식을 유지하면서 여러 알고리즘을 붙일 수 있다. 이 "형식 하나, 알고리즘 여럿" 계약이 이 프로젝트의 배포 파이프라인 전체를 지탱한다 — 알고리즘별 차이는 [Part 9](./part9-rl-onnx-bot.md) 의 비교 표에 있다.
-
-### 7.3 ARCH_VERSION 가드
-
-**예시(실제 저장소에는 없음)**
+**현재 소스 발췌 — `python/common/models.py`**
 
 ```python
-ARCH_VERSION = 1
+    def forward(
+        self,
+        board: torch.Tensor,
+        current: torch.Tensor,
+        next: torch.Tensor,  # noqa: A002 - matches obs key name
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not isinstance(board, torch.Tensor):
+            raise TypeError("board must be a tensor")
+        if board.dim() == 3:
+            board = board.unsqueeze(1)  # BHW -> NCHW; checked below in eager mode.
+        if not torch.jit.is_tracing():
+            validate_policy_inputs(
+                board, current, next, channels=self.board_channels,
+                rows=BOARD_ROWS, cols=BOARD_COLS, pieces=self.n_piece_types,
+                parameter=self.trunk[0].weight,
+            )
+        h = self.trunk(board)
+        h = h.flatten(1)
+        h = torch.cat([h, current, next], dim=-1)
+        h = self.fuse(h)
+        policy_logits = self.policy_head(h)
+        value = self.value_head(h).squeeze(-1)
+        return policy_logits, value
 ```
 
-아키텍처가 바뀔 때마다 이 값을 증가시킨다. 체크포인트 로더가 이 값을 검증한다.
+BHW 입력은 단일 채널 배치의 호환 표현이다. 일반적인 CHW 한 표본을 자동 구분해 주는 API가 아니므로 호출자는 NCHW를 만드는 편이 명확하다. flatten(1)은 배치 축을 남긴다. 가치 head의 마지막 크기1 축만 squeeze하여 B=1에서도 `(B,)`를 유지한다.
 
-아키텍처를 바꾸고 `ARCH_VERSION`을 올리지 않으면: Colab에서 학습한 가중치가 엉뚱한 레이어에 로드되어, 모델이 의미 없는 행동을 출력한다. PyTorch의 `load_state_dict`는 키 이름을 기준으로 매칭하므로, 같은 이름이면 shape이 달라도 에러 없이 로드되는 조합이 존재한다(이후 forward pass에서 shape mismatch 로 드러나거나, 최악의 경우 우연히 shape 이 맞아 조용히 잘못된 정책이 배포된다).
+PPO/A2C에서는 행동 점수를 **logit**으로 해석한다. 현재 합법 마스크를 적용하고 정규화해야 정책 확률이 된다. 가치 출력은 선택한 보상·할인·정책 아래의 리턴 추정치이며 값의 범위를 승률처럼 제한하지 않는다. DQN 계열 trainer는 같은 행동 출력 배열을 Q 추정치로 학습하므로 텐서 이름만 보고 확률/상태 가치와 동일시하지 않는다. 알고리즘에 따른 의미는 손실과 선택 코드를 함께 읽는다.
+
+두 head의 손실은 공유 파라미터로 역전파된다. `backward()`는 gradient를 누적하고 optimizer.step()이 파라미터를 갱신한다. 평가 시 `eval()`은 모듈 모드를, `no_grad()`는 그래프 기록을 제어한다. 현재 구조에 dropout/batchnorm이 없어도 두 역할을 혼동하지 않는다.
+
+### 7.4 호환성과 내보내기의 범위
+
+ARCH_VERSION은 사람이 관리하는 호환성 표식이다. `load_checkpoint`는 기록된 버전·클래스를 대조하고 `load_state_dict(strict=True)`는 키와 텐서 크기를 검사한다. 일반 파라미터의 크기가 다르면 로드 단계에서 오류가 난다. 반면 채널 순서나 행동 라벨 뜻을 바꾸면서 크기를 유지한 변경은 shape 검사로 검출할 수 없다. 스키마의 의미와 버전을 함께 관리해야 한다.
+
+현재 모델 파일은 생성자 config와 보드 축·관측/행동 의미 버전을 기록한다. 로더는 기록한 구성을 생성하고 키·shape·float32/유한성을 검사한다. format_version이 없는 과거 파일만 기본 생성자로 읽는다. 이 호환 경로에서 과거에 저장하지 않은 비기본 설정을 추론하지 않는다. Python shape 검증 추가는 정상 계산 그래프와 파라미터 키를 바꾸지 않으므로 이번 변경에서 ARCH_VERSION은 유지한다.
+
+현재 legacy ONNX export가 사용하는 tracing 중에는 Python 메타데이터 검사를 건너뛴다. 추적할 예제 입력은 올바른 스키마로 준비하고, 그래프 호출자는 별도의 입력 계약을 지켜야 한다. eager 실행의 예외 메시지가 ONNX 런타임에 실린다고 생각하면 안 된다. TorchScript 추적의 출력 대조도 ONNX Runtime 실행 검증을 대신하지 않는다.
 
 ---
 
 ## 8. 체크포인트 시스템
 
-### 8.1 무엇을 방어하는가
+### 8.1 가중치 재사용과 학습 재개
 
-모듈 docstring 이 이 파일의 존재 이유를 한 문단으로 적어 놓았다.
+`python/common/checkpoint.py`의 파일은 모델을 추론하거나 새 학습의 출발점으로 재사용하는 형식이다. `state_dict`와 모델 생성자 구성, 명시적인 버전·입출력 의미 계약을 저장한다. `training_steps` 같은 주석을 함께 기록해도 optimizer·난수·환경 진행 상태가 저절로 복구되지는 않는다.
+
+| 목적 | 필요한 정보 | 현재 프로젝트의 범위 |
+|---|---|---|
+| 추론 | 모델 구성·가중치·입출력 의미 | load_checkpoint가 eval 모델 반환 |
+| warm start | 위 모델과 새로운 훈련 설정 | PPO/정책경사 --resume; 새 Adam·난수·환경 |
+| 중단 지점 재개 | 모델 외에 optimizer·난수·환경·수집/스케줄 진행 | 별도의 전체 훈련 스냅샷 필요 |
+
+가중치가 같아도 Adam의 모멘트나 다음 행동의 난수가 다르면 이후 업데이트는 달라진다. `--resume` 이름만으로 완전 재개를 추론하지 않는다. 현재 해당 CLI의 도움말과 시작 로그는 weights-only warm start임을 표시하며, 지정한 파일이 없으면 실패한다.
+
+### 8.2 파일 형상과 의미를 버전으로 묶는다
+
+체크포인트 메타데이터는 파일 형식 format_version, 그래프 arch_version, 클래스 이름, 생성자 config, io_contract로 나눈다. config에는 채널·은닉층·출력/피스 축 구성이 들어간다. io_contract는 보드 행열 및 사람이 관리하는 관측/행동 의미 버전을 담는다. 의미를 바꾸면 버전도 바꾸는 변경 규칙이 필요하다. 같은 크기의 배열만으로 라벨의 뜻을 자동 검출할 수는 없다.
+
+`extra`는 실험 이름·코드 revision·학습량 같은 일반 주석이다. 예약 필드를 덮어쓰지 못하며 weights_only로 읽을 수 있는 유한한 기본 자료만 허용한다. 현재 모델 형식은 canonical TetrisPolicyNet의 dense float32 가중치를 대상으로 한다. 다른 dtype·클래스 지원은 별도의 명시적 호환성 변경이다.
 
 **현재 소스 발췌 — `python/common/checkpoint.py`**
 
 ```python
-"""Save / load wrappers with arch-version guarding.
-
-The single point of failure for the Colab-train -> local-deploy workflow is a
-silent architecture change: someone bumps a layer size in ``models.py``,
-forgets to bump ``ARCH_VERSION``, retrains in Colab, downloads the .pt file,
-and ``export_onnx`` loads it (because the keys happen to align) and ships a
-confused policy to the in-game bot.
-
-The save/load helpers here:
-
-1. Embed an ``arch_version`` and the model class name in every checkpoint
-2. Refuse to load a checkpoint whose recorded version differs from the current
-   ``TetrisPolicyNet.ARCH_VERSION`` — fail loud, never silent
-
-Bump ``TetrisPolicyNet.ARCH_VERSION`` whenever you change the network
-shape or layer order.
-"""
+def save_checkpoint(model: TetrisPolicyNet, path: str | Path,
+                    extra: dict[str, Any] | None = None) -> None:
+    """Synchronous single-writer save; do not update the model during this call."""
+    if type(model) is not TetrisPolicyNet:
+        raise TypeError("Only the canonical TetrisPolicyNet can use this format")
+    extra = {} if extra is None else extra
+    if type(extra) is not dict or not _plain_metadata(extra):
+        raise TypeError("extra must contain plain finite metadata")
+    if RESERVED.intersection(extra):
+        raise ValueError("extra contains reserved checkpoint metadata")
+    state = model.state_dict()
+    _check_weights(state)
+    payload = {"state_dict": state, CHECKPOINT_META_KEY: {
+        **extra, "format_version": FORMAT_VERSION,
+        "arch_version": TetrisPolicyNet.ARCH_VERSION, "class": "TetrisPolicyNet",
+        "config": model_config(model), "io_contract": dict(IO_CONTRACT),
+    }}
+    atomic_torch_save(payload, path)
 ```
 
-### 8.2 저장
+### 8.3 저장 중 실패와 파일 교체
 
-**현재 소스 발췌 — `python/common/checkpoint.py`**
+목적지 파일을 바로 열어 쓰면 디스크 오류가 기존 정상 파일까지 잘라 버릴 수 있다. 같은 디렉터리에 임시 파일을 만들고 직렬화·flush·파일 fsync·close를 마친 뒤 os.replace로 바꾼다. 교체 전 실패하면 기존 파일을 유지하고 임시 파일을 정리한다.
+
+**현재 소스 발췌 — `python/common/atomic_save.py`**
 
 ```python
-CHECKPOINT_META_KEY = "__meta__"
+def atomic_torch_save(payload, path):
+    """Serialize ``payload`` to ``path`` atomically using ``torch.save``.
 
-
-def save_checkpoint(
-    model: TetrisPolicyNet,
-    path: str | Path,
-    extra: dict[str, Any] | None = None,
-) -> None:
-    """Save a model state_dict together with arch version metadata.
-
-    ``extra`` is merged into the metadata dict — use it for things like
-    optimizer step count, replay buffer hash, training run id. None of those
-    affect loading; they're for debugging.
+    Args:
+        payload: Any object pickleable by ``torch.save``.
+        path: Destination file path.
     """
-    payload = {
-        "state_dict": model.state_dict(),
-        CHECKPOINT_META_KEY: {
-            "arch_version": TetrisPolicyNet.ARCH_VERSION,
-            "class": "TetrisPolicyNet",
-            **(extra or {}),
-        },
-    }
-    torch.save(payload, str(path))
+    dest = Path(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp"
+    )
+    try:
+        try:
+            stream = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream as fh:
+            torch.save(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 ```
 
-메타 키가 리터럴 `"__meta__"` 가 아니라 상수 `CHECKPOINT_META_KEY` 다. 테스트가 이 상수를 import 해서 payload 를 직접 조립하므로(§8.4), 키 이름을 바꾸면 테스트와 코드가 함께 움직인다.
+이 경로는 한 작성자가 동기적으로 저장하는 계약이다. 저장하는 동안 모델을 업데이트하면 서로 다른 순간의 텐서가 섞일 수 있다. state_dict의 텐서 참조를 dict에 담는 것만으로 불변 스냅샷이 생기지 않는다. 별도 저장 스레드를 쓰려면 학습을 멈춰 복사하거나 동기화한 복사본을 넘겨야 한다.
 
-`extra` 는 로딩에 영향을 주지 않는 디버깅용 필드다 — 학습 스텝 수, run id, git SHA 같은 것. 로더가 알 수 없는 키를 만나도 무시하도록 설계돼 있다.
+파일 교체의 원자성과 전원 장애 후 영속성은 구별한다. 이 helper는 부모 디렉터리 fsync까지 수행하지 않으며 모든 파일시스템·전원 장애의 내구성을 보장하지 않는다. 한 파일의 교체가 모델·로그·다른 파일 전체를 묶는 트랜잭션도 아니다.
 
-### 8.3 로드 — 검증 네 단계
+### 8.4 CPU에서 검증하고 후보 모델을 만든다
 
 **현재 소스 발췌 — `python/common/checkpoint.py`**
 
 ```python
-def load_checkpoint(
-    path: str | Path,
-    device: str | torch.device = "cpu",
-) -> TetrisPolicyNet:
-    """Load a checkpoint, raising ``RuntimeError`` on arch-version mismatch."""
-    payload = torch.load(str(path), map_location=device, weights_only=True)
+def load_checkpoint(path: str | Path, device: str | torch.device = "cpu") -> TetrisPolicyNet:
+    """Validate on CPU, build a candidate, then return an eval-mode model.
+
+    Files without format_version are the historical default-configuration format.
+    weights_only limits unpickling; it is not an authenticity or resource-limit check.
+    """
+    payload = torch.load(str(path), map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or "state_dict" not in payload:
         raise RuntimeError("Checkpoint does not contain a TetrisPolicyNet state_dict.")
-    state_dict = payload["state_dict"]
-    if not isinstance(state_dict, dict):
-        raise RuntimeError("Checkpoint state_dict is not a mapping.")
-    meta = payload.get(CHECKPOINT_META_KEY, {})
+    meta = payload.get(CHECKPOINT_META_KEY)
     if not isinstance(meta, dict):
         raise RuntimeError("Checkpoint metadata is not a mapping.")
     recorded = meta.get("arch_version")
-    if recorded != TetrisPolicyNet.ARCH_VERSION:
-        raise RuntimeError(
-            f"Checkpoint arch_version {recorded!r} does not match current "
-            f"TetrisPolicyNet.ARCH_VERSION {TetrisPolicyNet.ARCH_VERSION!r}. "
-            "Either retrain with the new architecture or roll common/models.py "
-            "back to the version this checkpoint was trained against."
-        )
+    if type(recorded) is not int or recorded != TetrisPolicyNet.ARCH_VERSION:
+        raise RuntimeError(f"Checkpoint arch_version {recorded!r} is incompatible.")
     if meta.get("class") != "TetrisPolicyNet":
-        raise RuntimeError(
-            f"Checkpoint class {meta.get('class')!r} != 'TetrisPolicyNet'. "
-            "This loader only handles the canonical policy network."
-        )
-
-    model = TetrisPolicyNet()
-    model.load_state_dict(state_dict)
-    model.to(device).eval()
-    return model
+        raise RuntimeError("Checkpoint class must be TetrisPolicyNet.")
+    config = {}
+    if "format_version" in meta:
+        version = meta["format_version"]
+        if type(version) is not int or version != FORMAT_VERSION:
+            raise RuntimeError("Unsupported checkpoint format_version.")
+        contract = meta.get("io_contract")
+        if (not isinstance(contract, dict) or set(contract) != set(IO_CONTRACT)
+                or any(type(contract[k]) is not int or contract[k] != v for k,v in IO_CONTRACT.items())):
+            raise RuntimeError("Checkpoint io_contract differs from this runtime.")
+        config = meta.get("config")
+        if not isinstance(config, dict) or set(config) != CONFIG_KEYS:
+            raise RuntimeError("Checkpoint config is incomplete or contains unknown fields.")
+    elif "config" in meta or "io_contract" in meta:
+        raise RuntimeError("Checkpoint config requires format_version.")
+    _check_weights(payload["state_dict"])
+    try:
+        model = TetrisPolicyNet(**config)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Invalid checkpoint config") from exc
+    model.load_state_dict(payload["state_dict"], strict=True)
+    return model.to(device).eval()
 ```
 
-검증이 네 단계다. 하나씩 왜 필요한지 본다.
+map_location="cpu"는 저장 장치가 CUDA였더라도 먼저 CPU로 읽게 한다. 형식/클래스/구성/의미 계약과 가중치를 검사하고 strict=True로 키·크기를 대조한 뒤 요청 장치로 옮긴다. 새 후보 모델을 반환하므로 로딩 도중 오류가 이미 사용 중인 모델에 일부 가중치를 덮어쓰지 않는다. 반환 모델은 eval 상태이고 훈련기는 train으로 전환한다.
 
-1. **payload 가 dict 이고 `state_dict` 키를 가지는가.** `torch.save(model)` (모델 객체 통째로)나 옵티마이저 state 만 저장한 파일을 잘못 넘기는 사고를 막는다.
-2. **`state_dict` 가 mapping 인가 / `meta` 가 mapping 인가.** `weights_only=True` 로 로드하므로 임의 객체는 애초에 들어올 수 없지만, 리스트나 텐서가 그 자리에 있는 파일은 여전히 가능하다. `load_state_dict` 에 넘기기 전에 타입을 좁힌다.
-3. **`arch_version` 일치.** §7.3 의 조용한 shape mismatch 방어.
-4. **`class == "TetrisPolicyNet"`.** 이 검사가 왜 따로 필요한가? `arch_version` 은 **이 클래스의** 버전 번호다. 미래에 `TetrisDuelingNet` 같은 다른 네트워크 클래스가 생기고 그것도 `ARCH_VERSION = 1` 을 쓰면, 버전 검사만으로는 통과해 버린다. 그 다음 줄 `model = TetrisPolicyNet()` 이 무조건 정책망을 만들기 때문에, 로더는 **잘못된 그래프에 다른 클래스의 가중치를 로드**하려 시도한다. `class` 필드는 "이 체크포인트가 어떤 네트워크 것인가" 를 버전과 독립적으로 기록해 그 경로를 막는다.
+format_version이 없는 과거 모델 파일은 기본 구성·기록된 arch_version/class를 기준으로 읽는다. 새 형식의 필드가 누락됐는데 과거 형식으로 조용히 해석하는 경로는 거절한다. weights_only=True는 역직렬화 가능한 객체 범위를 제한하지만 출처 인증이나 파일 크기·메모리 사용량 제한을 대신하지 않는다. 신뢰한 모델 산출물을 사용한다.
 
-`map_location=device` 는 크로스 플랫폼 이식의 핵심이다. Colab(Linux, CUDA)에서 학습한 모델을 로컬(CPU)에서 로드할 때 GPU 텐서를 CPU로 자동 매핑한다. 이게 없으면 CUDA 없는 머신에서 `RuntimeError: Attempting to deserialize object on a CUDA device` 로 죽는다.
+### 8.5 전체 훈련 스냅샷의 저장 경계
 
-### 8.4 게이트가 요구하는 것
+학습 체크포인트 `158-training-checkpoint`는 별도 CPU 실습으로 TrainingRun을 만든다. PPO의 한 rollout 업데이트가 끝나고 gradient를 비운 지점만 저장한다. 이때 재사용 중인 미니배치가 없으므로 모델·Adam·실험 설정·진행 카운터·Torch RNG·수집기의 에피소드 통계·환경 상태를 묶는다. 실패한 advance는 run을 저장 불가능 상태로 두며 부분 업데이트를 성공 스냅샷으로 취급하지 않는다.
 
-체크포인트 round-trip 계약은 `python/tests/test_checkpoint_roundtrip.py`가 검증한다. 특히 잘못된 클래스와 오래된 아키텍처를 거부하는 경로를 각각 직접 밟는다.
+환경은 현재 에피소드 seed와 성공한 행동 열로 복원하고 native state_bytes를 대조한다. 향후 에피소드 seed를 고를 NumPy Generator 상태는 별도로 저장한다. 이 실습에서는 현재 경기 행동을 재실행하는 동안 정책을 다시 표집하지 않는다. 환경 전체를 관측 텐서로 복원하지도 않는다. 같은 실행 규칙과 입력 순서가 숨은 bag·진행 상태까지 재현하는 구조다.
 
-**현재 소스 발췌 — `python/tests/test_checkpoint_roundtrip.py`**
+이 방식은 단일 동기 환경·완료된 업데이트 경계를 위한 것이다. 업데이트 도중 재개하려면 고정 rollout·old logp·미니배치 순서와 위치·남은 gradient도 계약에 추가해야 한다. 대전 상대 상태·비동기 환경·CUDA RNG·scheduler·AMP scaler 등이 있으면 각각 저장 범위를 확장한다. 원자적 파일 쓰기와 별개로 **어느 순간의 상태를 모두 보관했는가**가 재개 계약의 중심이다.
 
-```python
-def test_class_mismatch_raises(tmp_path: Path) -> None:
-    model = TetrisPolicyNet()
-    path = tmp_path / "wrong_class.pt"
-    payload = {
-        "state_dict": model.state_dict(),
-        CHECKPOINT_META_KEY: {
-            "arch_version": TetrisPolicyNet.ARCH_VERSION,
-            "class": "SomethingElseNet",
-        },
-    }
-    torch.save(payload, str(path))
+### 8.6 실패 주입과 이어서 실행한 결과를 검사한다
 
-    with pytest.raises(RuntimeError, match="class"):
-        load_checkpoint(path)
-```
+`python/tests/test_checkpoint_integrity.py`는 비기본 모델 구성, 예약 메타데이터, 잘못된 버전/의미/shape/dtype/수치 및 저장·동기화·교체 실패를 검사한다. `python/tests/test_checkpoint_roundtrip.py`는 모델 가중치 왕복과 클래스/버전 호환성의 기본 경로를 담당한다.
 
-`arch_version` 은 **일치**시키고 `class` 만 틀린 payload 다. 즉 `class` 검사가 없으면 이 테스트는 통과하지 못한다. 로더를 §8.3 그대로 구현해야 게이트가 열린다.
+전체 훈련 재개 실습에서는 첫 업데이트 뒤 저장하고, 연속 실행의 다음 rollout/업데이트와 별도 프로세스 복원의 다음 rollout/업데이트를 대조한다. 행동만 같다는 검사보다 모델·Adam·난수·환경 bytes·카운터까지 비교하는 쪽이 누락을 더 잘 드러낸다. 같은 버전·장치·연산 조건을 고정한 비교이며 OS·라이브러리·장치가 달라진 경우의 비트 단위 동일성을 보장하는 문구로 확대하지 않는다.
 
 ---
 
 ## 9. PPO baseline 학습 루프
 
-여기까지 관측·행동·환경·정책망·체크포인트를 모두 갖췄다. `python/train/ppo_tetris.py`는 이것들을 묶는 첫 학습 baseline이다. 저장소의 DQN/DDQN, CBMPI-style, REINFORCE, A2C, n-step actor-critic, CEM, MuZero-style 학습기도 표본 효율·안정성·구현 복잡도는 다르지만, 배포 가능한 trainer가 같은 `TetrisPolicyNet` 체크포인트를 저장한다는 계약은 공유한다. 이 절은 그 공통 경계를 가장 선명하게 보여 주는 PPO 루프를 기준으로 설명한다.
+### 9.1 수집·목표 계산·업데이트·평가
 
-학습 명령을 돌리려면 torch/gymnasium 이 필요하다. 저장소 루트에서는 `uv sync --dev --extra train`, Colab 에서는 노트북 setup 셀이 `pip install -r python/requirements-colab.txt` 로 설치한다. §12 의 패리티 테스트만 돌릴 거라면 `uv sync --dev` 로 충분하다.
+`python/train/ppo_tetris.py`는 현재 정책으로 행동을 표집하고, 그 rollout의 확률·가치·보상을 고정해 여러 미니배치 갱신에 사용한다. 수집 중에는 gradient를 기록하지 않는다. 업데이트 동안 old log 확률과 리턴 표적을 다시 계산해 덮어쓰지 않는다. 새로운 rollout은 갱신한 정책으로 모은다.
 
-### 9.1 왜 PPO인가
+| 책임 | 입력과 보관할 값 | 변경하는 것 |
+|---|---|---|
+| 수집 | 관측·그 상태의 마스크·행동·old logp·가치·보상·실제 끝 관측 가치·두 종료 플래그 | 훈련 환경 상태 |
+| GAE | 고정한 전이 배열·할인·lambda | advantage·리턴 표적 |
+| 업데이트 | 같은 표본/마스크와 고정 표적 | 모델·optimizer 상태 |
+| 평가 | 별도 환경·고정 시드·행동 예산·greedy 선택 | 평가 환경 상태 |
 
-정책 학습 알고리즘은 크게 두 갈래다.
+총 결정 예산에 맞춰 마지막 rollout의 길이를 줄인다. 피스 입력 폭은 모델 설정에서 읽는다. 비어 있는 살아 있는 관측의 마스크는 조용히 새 판으로 바꾸지 않고 환경 계약 오류로 드러낸다.
 
-| 계열 | 예 | 특징 |
-|------|-----|------|
-| Value 기반 | DQN | 이산 행동·리플레이 버퍼·target net. 합법 마스크가 까다롭다 |
-| Policy gradient | A2C, PPO | actor-critic 구조 그대로. 마스킹된 분포에서 바로 샘플 |
-
-이 프로젝트는 §7의 `TetrisPolicyNet`(policy head + value head)을 그대로 학습 대상으로 쓴다. PPO는 그 actor-critic 구조에 정확히 맞고, **clipped surrogate objective**로 한 번의 rollout을 여러 epoch 재사용해도 정책이 급격히 망가지지 않는다 — 단일 동기 env(샘플이 비싼 구조)에서 샘플 효율이 중요하기 때문이다. `ppo_tetris.py`는 프레임워크의 정책 클래스가 아니라 **이 저장소의 `TetrisPolicyNet`을 직접** 학습한다. 그래야 체크포인트를 별도 가중치 변환 없이 `export_onnx`로 내보낼 수 있다.
-
-학습 흐름은 네 단계 사이클이다: **rollout → advantage(GAE) → loss → update**.
-
-```mermaid
-graph LR
-    A["env rollout<br/>T=2048 step"] --> B["GAE(λ)<br/>advantage/return"]
-    B --> C["clipped PPO loss<br/>K epoch x minibatch"]
-    C --> D["Adam update"]
-    D --> A
-```
-
-### 9.2 하이퍼파라미터
-
-`build_argparser()`의 기본값이 베이스라인 설정이다.
-
-**현재 소스 발췌 — `python/train/ppo_tetris.py`**
-
-```python
-    p.add_argument("--steps", type=int, default=1_000_000, help="total env steps")
-    p.add_argument("--rollout", type=int, default=2048, help="steps per PPO update")
-    p.add_argument("--epochs", type=int, default=4, help="PPO epochs per update")
-    p.add_argument("--minibatch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--lam", type=float, default=0.95, help="GAE lambda")
-    p.add_argument("--clip", type=float, default=0.2, help="PPO clip epsilon")
-    p.add_argument("--ent-coef", type=float, default=0.01)
-    p.add_argument("--vf-coef", type=float, default=0.5)
-    p.add_argument("--max-grad-norm", type=float, default=0.5)
-    p.add_argument("--shaping-coef", type=float, default=0.5,
-                   help="weight on dense board-feature shaping (0 = pure lines)")
-```
-
-| 인자 | 기본값 | 의미 |
-|------|--------|------|
-| `--steps` | 1,000,000 | 총 env 스텝 수 |
-| `--rollout` | 2048 | 한 업데이트당 모으는 env 스텝 수 (T) |
-| `--epochs` | 4 | 같은 rollout을 재사용하는 PPO epoch 수 |
-| `--minibatch` | 256 | epoch 내 미니배치 크기 |
-| `--lr` | 3e-4 | Adam 학습률 |
-| `--gamma` | 0.99 | 할인율 |
-| `--lam` | 0.95 | GAE λ |
-| `--clip` | 0.2 | PPO clip ε |
-| `--ent-coef` | 0.01 | 엔트로피 보너스 계수 |
-| `--vf-coef` | 0.5 | value loss 계수 |
-| `--max-grad-norm` | 0.5 | gradient clipping 상한 |
-| `--shaping-coef` | 0.5 | dense 보상 shaping 가중치 (0 = 라인만) |
-
-### 9.3 Rollout — 한 env로 T 스텝 수집
-
-학습기는 벡터화 없이 **단일 동기 env**로 시작한다. 매 스텝, 합법 마스크를 적용한 정책 분포에서 행동을 샘플하고, transition을 버퍼에 쌓는다.
+### 9.2 합법 분포에서 수집하고 실제 끝 관측을 보관한다
 
 **현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
@@ -1361,14 +1365,7 @@ graph LR
         for t in range(T):
             mask_np = info["legal_mask"]
             if not mask_np.any():
-                # 둘 곳이 없다는 것은 게임이 끝났다는 뜻이다.
-                # 여기 도달했다면 terminal 처리 후 reset을 빠뜨린 것이다.
-                # reset하고 이 슬롯을 새 transition으로 다시 채운다.
-                # 빈 채로 두면 전부 불법인 마스크가 남고, 그 상태로 PPO 갱신에
-                # 들어가면 logit이 전부 -inf가 되어 NaN이 퍼진다.
-                obs, info = env.reset()
-                ep_ret, ep_len, ep_lines = 0.0, 0, 0
-                mask_np = info["legal_mask"]
+                raise RuntimeError("live rollout observation has no legal action; check environment termination")
 
             batch = to_batch(obs, device)
             mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device).unsqueeze(0)
@@ -1382,155 +1379,169 @@ graph LR
             next_obs, reward, term, trunc, next_info = env.step(a)
             shaped = shaping_reward(next_obs["board"], args.shaping_coef)
             total_r = float(reward) + shaped
+
+            boards[t] = batch["board"][0]
+            currents[t] = batch["current"][0]
+            nexts[t] = batch["next"][0]
+            masks[t] = mask[0]
+            actions[t] = action[0]
+            logps[t] = logp[0]
+            values[t] = value[0]
+            rewards[t] = total_r
+            terminated[t] = bool(term)
+            boundaries[t] = bool(term or trunc)
+            # Bootstrap from the actual transition endpoint, never from reset().
+            if not term:
+                with torch.no_grad():
+                    endpoint = to_batch(next_obs, device)
+                    _, next_value = model(endpoint["board"], endpoint["current"], endpoint["next"])
+                    next_values[t] = next_value[0]
 ```
 
-`masked_log_softmax`(§4.3)로 만든 분포에서 `torch.multinomial`로 샘플하므로 **항상 합법 배치만** 뽑힌다. 방어 분기 주석이 그 마스킹이 왜 필수인지도 알려준다 — 전부 불법인 슬롯을 버퍼에 남기면 PPO 업데이트에서 NaN logits 가 나온다.
+단일 보드는 즉시 배치 API의 결정이고 대전은 A 배치 뒤 B 응답까지 포함한 결정이다. 현재 trainer의 gamma는 이 결정마다 적용된다. 학습 체크포인트의 실제 틱 경로와 정보·전이 시간의 의미를 맞춰야 한다.
 
-매 transition의 보상은 env 보상(`reward`, 라인 클리어 수)에 **shaping 항**(`shaped`)을 더한 값이다. shaping은 높이·구멍·표면 굴곡 같은 중간 신호를 주되, 종료와 라인 클리어라는 환경 보상의 목적을 뒤집지 않는 작은 계수로 제한한다.
+terminated는 미래 가치 항을 제거한다. truncated는 마지막 상태에서 이어질 미래 가치를 남기되 에피소드 trace를 끊는다. 두 플래그를 합친 done 하나로 두 역할을 처리하면 외부 제한의 가치를 잃거나 새 경기 보상을 앞 경기에 붙이게 된다.
 
-### 9.4 Dense 보상 shaping
+### 9.3 GAE의 두 마스크
 
-§5.2의 env 보상은 "이번 배치로 클리어된 줄 수(0~4)"뿐이라 학습 초기에 극도로 희박하다. 갓 초기화된 정책은 첫 라인 클리어까지 수천 배치를 헛돈다. `ppo_tetris.py`는 라인 클리어 전에도 gradient를 주기 위해 **보드 특성 기반 dense shaping**을 기본으로 더한다.
+`python/common/returns.py`의 gae_targets는 실제 전이 끝의 next_values를 받는다. discount d와 lambda에 대해 `delta = reward + d×bootstrap - value`, `advantage = delta + d×lambda×다음 trace`다. bootstrap은 terminated일 때만 0이고 다음 trace는 boundary에서 0이다. 마지막 carry를 0으로 시작하므로 수집 구간 끝을 실제 게임 종료로 바꿀 필요가 없다.
+
+**현재 소스 발췌 — `python/common/returns.py`**
+
+```python
+    zeros = torch.zeros((), dtype=dtype, device=device)
+    bootstraps = torch.where(terminated, zeros, next_values)
+    deltas = rewards + discounts * bootstraps - values
+
+    advantages = torch.empty_like(values)
+    carry = zeros
+    for t in range(length - 1, -1, -1):
+        carry = deltas[t] + discounts[t] * lam * torch.where(boundaries[t], zeros, carry)
+        advantages[t] = carry
+
+    returns = advantages + values
+    if not torch.isfinite(advantages).all() or not torch.isfinite(returns).all():
+        raise ValueError('GAE targets overflowed')
+    return advantages, returns
+```
+
+예제 조건으로 보상2, discount0.9, 실제 끝 가치7이면 시간 제한의 TD 표적은 8.3이다. 진짜 종료의 표적은 2다. reset 상태 가치가100이어도 이 전이의 표적에 들어가면 안 된다. `python/tests/test_returns_contract.py`와 `python/tests/test_ppo_contract.py`가 경계·실제 수집 endpoint·한 표본 배치·예산을 분리해 검사한다.
+
+표준화는 rollout에서 한 번 계산한 advantage에 적용한다. 표본이 하나면 원래 값을 유지한다. 나머지는 모집단 표준편차를 사용한다. 값·형상·할인 범위 및 계산 overflow를 검사하고, 반환한 표적은 미분 그래프에서 분리한다.
+
+### 9.4 보상과 원래 지표를 나눈다
+
+환경 보상에 더하는 shaping_reward는 도착 보드의 구멍·높이·요철에 대한 반복 벌점이다. 잠재함수의 차이가 아니므로 계수가 작다고 최적 정책 보존을 보장하지 않는다. 현재 단일 환경 보상은 삭제 줄 수지만 대전은 공격·승패 항도 포함한다. 모든 경로의 줄 수를 reward에서 계산하면 잘못된 지표가 된다.
 
 **현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
-_W_HOLE = 0.03
-_W_HEIGHT = 0.005
-_W_BUMP = 0.003
-
-
-def board_features(board: np.ndarray) -> tuple[int, int, int]:
-    """Return (holes, aggregate_height, bumpiness) for a (1,20,10) occupancy."""
-    b = board.reshape(BOARD_ROWS, BOARD_COLS) > 0.5
-    holes = 0
-    heights = np.zeros(BOARD_COLS, dtype=np.int64)
-    for c in range(BOARD_COLS):
-        col = b[:, c]
-        filled = np.flatnonzero(col)
-        if filled.size == 0:
-            continue
-        top = int(filled[0])                 # 0 = top row
-        heights[c] = BOARD_ROWS - top
-        holes += int(np.count_nonzero(~col[top:]))
-    agg_height = int(heights.sum())
-    bumpiness = int(np.abs(np.diff(heights)).sum())
-    return holes, agg_height, bumpiness
-
-
 def shaping_reward(board: np.ndarray, coef: float) -> float:
+    coef = float(coef)
+    if not np.isfinite(coef):
+        raise ValueError("shaping coefficient must be finite")
     if coef == 0.0:
         return 0.0
     holes, agg_height, bumpiness = board_features(board)
     penalty = _W_HOLE * holes + _W_HEIGHT * agg_height + _W_BUMP * bumpiness
-    return -coef * penalty
+    reward = -coef * penalty
+    if not np.isfinite(reward):
+        raise ValueError("shaping reward is not finite")
+    return reward
 ```
 
-penalty는 구멍 수·전체 높이·울퉁불퉁함의 가중합이고, 최종 shaping 보상은 `-coef * penalty`(낮은 스택·적은 구멍·평평한 표면을 선호). 기본 `--shaping-coef 0.5`라서 학습 보상은 `라인 클리어 + 0.5 * (-penalty)`다. `--shaping-coef 0`을 주면 순수 라인 클리어 보상으로 돌아간다(노트북의 `ppo_sparse` 프리셋이 정확히 이 값을 준다). 보상 함수를 단순히 두려는 입장(§5.2)과, 학습을 실제로 돌리기 위한 dense 신호 사이의 절충이다. 평가(`evaluate_policy`)는 의도적으로 shaping 없이 **raw 게임 지표만** 보고하므로 shaping 실험들끼리 비교가 깨지지 않는다.
+학습용 RewardSpec은 별도의 잠재함수 차이 설계이며 env가 반환한 전이별 discount를 GAE에도 적용한다. gamma의 단위가 결정인지 틱인지, lambda의 감소 단위가 결정인지 함께 기록한다. 현재 trainer의 반복 벌점과 학습 예제의 잠재함수를 같은 구현이라고 설명하지 않는다.
 
-### 9.5 GAE(λ) — advantage 추정
+### 9.5 확률비와 잘린 대리 목적
 
-rollout이 끝나면 마지막 상태의 가치를 bootstrap하고, 시간 역순으로 GAE(Generalized Advantage Estimation)를 누적한다.
+`python/common/ppo_loss.py`의 clipped_policy_loss는 수집한 행동의 확률비를 `exp(new_logp-old_logp)`로 구한다. old logp와 advantage는 고정 표적으로 취급한다. 최소화 손실은 `max(-A×ratio, -A×clamp(ratio,1-epsilon,1+epsilon))`이다.
+
+**현재 소스 발췌 — `python/common/ppo_loss.py`**
+
+```python
+    # Rollout targets and behavior-policy probabilities remain fixed across epochs.
+    log_ratio = new_logp - old_logp.detach()
+    ratio = log_ratio.exp()
+    if not torch.isfinite(log_ratio).all() or not torch.isfinite(ratio).all():
+        raise ValueError('policy ratio overflowed')
+    advantage = advantages.detach()
+    ordinary = -advantage * ratio
+    clipped = -advantage * ratio.clamp(1 - clip, 1 + clip)
+    loss = torch.maximum(ordinary, clipped).mean()
+    with torch.no_grad():
+        approximate_kl = ((ratio - 1) - log_ratio).mean()
+        clip_fraction = ((ratio - 1).abs() > clip).float().mean()
+    if not torch.isfinite(loss) or not torch.isfinite(approximate_kl):
+        raise ValueError('PPO objective overflowed')
+    return loss, approximate_kl, clip_fraction
+```
+
+양의 advantage에서는 확률을 지나치게 늘려 얻는 목적 개선이 잘리고, 음의 advantage에서는 확률을 지나치게 줄여 얻는 개선이 잘린다. 반대 방향으로 나빠지는 변화에는 gradient가 남는다. ratio를 범위 안에 강제로 투영하는 제약과 다르다. 공유 파라미터·가치 손실·여러 갱신 때문에 정책 이동을 상수 하나로 보장하지 않는다.
+
+approximate_kl과 clip_fraction은 표집된 행동에서 계산한 진단값이다. 전체 상태·행동의 보증이 아니다. 현재 로그의 kl_last/clip_last는 마지막 미니배치의 값이며 학습 체크포인트는 관측한 미니배치 값을 표본 수로 가중 평균한다.
+
+### 9.6 손실과 gradient 갱신
 
 **현재 소스 발췌 — `python/train/ppo_tetris.py`**
 
 ```python
-        advantages = torch.zeros(T, device=device)
-        lastgae = torch.zeros((), device=device)
-        for t in reversed(range(T)):
-            nonterminal = 1.0 - dones[t]
-            nextval = last_value if t == T - 1 else values[t + 1]
-            delta = rewards[t] + args.gamma * nextval * nonterminal - values[t]
-            lastgae = delta + args.gamma * args.lam * nonterminal * lastgae
-            advantages[t] = lastgae
-        returns = advantages + values
-        adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-```
-
-`delta`는 한 스텝 TD 오차 `r + γV(s') - V(s)`이고, `lastgae`가 `γλ`로 감쇠하며 미래 delta를 누적해 advantage를 만든다. `nonterminal`(= `1 - done`)이 에피소드 경계에서 누적을 끊는다. `returns = advantages + values`가 value head의 학습 타깃이고, advantage는 미니배치 학습 전에 정규화한다.
-
-### 9.6 PPO clipped objective와 결합 손실
-
-advantage가 준비되면 같은 rollout을 `--epochs`번, `--minibatch` 단위로 돌며 정책을 갱신한다. 핵심은 **importance ratio를 [1-ε, 1+ε]로 clip**하는 PPO surrogate다.
-
-**현재 소스 발췌 — `python/train/ppo_tetris.py`**
-
-```python
-                ratio = (new_logp - logps[jt]).exp()
-                mb_adv = adv[jt]
-                pg1 = -mb_adv * ratio
-                pg2 = -mb_adv * torch.clamp(ratio, 1 - args.clip, 1 + args.clip)
-                pg_loss = torch.max(pg1, pg2).mean()
-
                 v_loss = 0.5 * (value - returns[jt]).pow(2).mean()
                 ent_loss = entropy.mean()
 
                 loss = pg_loss + args.vf_coef * v_loss - args.ent_coef * ent_loss
-```
-
-`ratio`는 갱신된 정책과 수집 당시 정책의 확률 비. clip하지 않은 `pg1`과 clip한 `pg2` 중 **더 나쁜(큰)** 쪽을 취하므로, 정책이 한 업데이트에서 너무 멀리 이동하면 이득이 잘려 보수적으로 학습된다. `v_loss`(`0.5 * (value - returns)^2`)는 `--vf-coef 0.5`로, 엔트로피 보너스는 `--ent-coef 0.01`로 가중된다 — 엔트로피는 **빼서** 더 높은 엔트로피(탐색 유지)를 보상한다.
-
-### 9.7 update — backward + grad clip
-
-**현재 소스 발췌 — `python/train/ppo_tetris.py`**
-
-```python
-                opt.zero_grad()
+                if not torch.isfinite(loss):
+                    raise ValueError("PPO loss is not finite")
+                opt.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm, error_if_nonfinite=True)
                 opt.step()
 ```
 
-`clip_grad_norm_`(`--max-grad-norm 0.5`)으로 gradient 폭주를 막은 뒤 Adam(`--lr 3e-4`)으로 한 스텝. 이 네 줄이 한 미니배치의 갱신이고, `--epochs`(4) x (T/minibatch = 2048/256 = 8) = 32회 반복이 한 PPO 업데이트를 이룬다.
+가치 오차·엔트로피 계수는 설정이다. optimizer는 각 미니배치에서 gradient를 계산하고 갱신한다. 미니배치의 마지막 조각과 마지막 rollout도 실제 길이를 사용한다. 유한하지 않은 loss나 gradient는 step 전에 거절한다. gradient norm clipping은 이번 gradient의 크기를 조절하는 별도의 처리이며 정책 확률비 클리핑과 같지 않다.
 
-### 9.8 공통 기반 — `python/train/rl_common.py`
+CLI의 steps/rollout/epochs/minibatch는 양의 정수, 할인·lambda는 유효 범위의 유한 값이어야 한다. save_every=0은 주기 저장만 끄고 마지막 저장은 유지한다. 기본 수치는 build_argparser를 기준으로 읽으며 조정값을 실험 설정으로 보관한다.
 
-trainer마다 rollout 루프는 다르지만, 그 아래의 부품은 공유한다.
+### 9.7 별도 환경에서 평가한다
 
-**현재 소스 발췌 — `python/train/rl_common.py`**
+현재 PPO의 evaluate_policy는 별도 환경과 고정 시드에서 greedy 행동을 고른다. 환경의 누적 lines/score, 결정 수, 환경 보상 합을 분리하고 종료·truncation·평가 예산 중단도 센다. 실패 경로에서도 모델의 원래 모드를 되돌리고 평가 환경을 닫는다. 훈련 상태에 평가 행동을 실행하지 않는다.
 
-```python
-"""Shared helpers for the hand-rolled Colab training scripts.
+단일 환경의 eval_best는 avg_lines, 대전의 eval_best는 avg_reward를 기준으로 고른다. 대전 보상 설정·상대·예산을 고정한 비교이며 사람 상대 승률의 보증이 아니다. 평가 시드에서 후보를 고르면 그 시드는 검증 자료이므로 최종 보고에는 별도 시드 묶음을 두는 편이 좋다.
 
-The scripts in ``python/train`` intentionally train the canonical
-``common.models.TetrisPolicyNet`` whenever the output is meant for deployment.
-This module keeps the small pieces of glue in one place: import path setup,
-numpy observation batching, legal-action masking, greedy evaluation, and a
-simple replay buffer.
-"""
-```
+### 9.8 다른 정책경사 수집기의 경계
 
-여기 들어 있는 것: `ensure_python_root()`(스크립트/모듈 양쪽 실행에서 `python/` 을 sys.path 에 넣는다), `obs_to_batch()`, 마스킹 헬퍼, `evaluate_greedy()`(shaping 없는 순수 평가), `ReplayBuffer`, `LinearSchedule`, `soft_update`, `bcts_shaped_reward`. DQN 계열은 리플레이 버퍼와 스케줄을, 정책 그래디언트 계열은 배칭과 평가를 쓴다.
+`python/train/policy_gradient_tetris.py`의 A2C/n-step 수집도 같은 두 마스크를 사용하며 lambda1로 구간 리턴을 만든다. 실제 종료에서는 미래 가치0, 외부 제한에서는 마지막 상태 가치로 끝을 잇고 다음 에피소드의 보상은 끊는다. progress가 에피소드 길이를 rollout 사이에서 이어 세므로 수집 구간을 바꿔도 max_pieces 제한이 사라지지 않는다.
 
-`ensure_python_root()` 가 모듈 상단에서 **즉시 호출**된 뒤 `from common import ...` 가 오는 구조라 import 순서가 중요하다 — 그래서 그 아래 import 들에 `# noqa: E402` 가 붙어 있다.
+REINFORCE 경로는 실제 종료의 에피소드 리턴을 쓰고 외부 예산/제한에서는 가치 tail을 붙인다. 이 제한 경로는 순수한 완결 에피소드 Monte Carlo와 구분한다. 표집에 temperature를 적용했으면 업데이트의 log 확률에도 같은 값을 적용한다. 알고리즘 이름만으로 모든 trainer의 수집 경계나 배포 의미가 같다고 가정하지 않는다.
 
-### 9.9 학습 실행
+### 9.9 실행과 저장의 범위
 
 ```bash
-# python/ 디렉터리에서 (torch 설치된 환경)
-python -m train.ppo_tetris --steps 1000000 --out checkpoints/run.pt
-
-# 이어 학습
-python -m train.ppo_tetris --resume checkpoints/run.pt --steps 500000
+# python/ 디렉터리, 해당 Python용 native 확장이 준비된 환경
+python -m train.ppo_tetris --steps 64 --rollout 32 --minibatch 16 --epochs 1 --eval-episodes 1 --eval-max-pieces 32 --out checkpoints/smoke.pt
 ```
 
-학습기는 주기적으로(`--eval-every`) greedy 평가를 돌려 `avg_lines`/`avg_score`/ `avg_pieces`를 찍고, 체크포인트 세 개를 저장한다.
-
-| 파일 | 내용 |
-|---|---|
-| `checkpoints/run.pt` | 가장 최근 정책 |
-| `checkpoints/run.best.pt` | shaping 포함 학습 리턴이 최고였던 시점 |
-| `checkpoints/run.eval_best.pt` | shaping 없는 greedy 평가가 최고였던 시점 |
-
-배포에 쓸 것은 원칙적으로 `*.eval_best.pt` 다 — shaping 은 학습용 보조 신호이고 실제 게임 성능이 아니기 때문이다. 이 `.pt`는 §8의 로더를 거쳐 [Part 9](./part9-rl-onnx-bot.md)에서 ONNX로 export된다.
+위 숫자는 실행 경로를 확인할 짧은 예제 예산이다. 유한한 loss와 저장 성공은 게임 실력의 증거가 아니다. 실제 긴 학습은 시드·보상·모델 구성·학습 설정과 평가 조건을 함께 기록한다. 현재 resume은 모델 가중치를 읽고 새 Adam을 만드는 warm start이며 optimizer/RNG/수집 상태의 완전 복구와 다르다.
 
 ---
 
-## 10. BCTS 휴리스틱 베이스라인
+## 10. 손수 만든 휴리스틱 기준 정책
 
-### 10.1 손수 만든 평가 함수
+### 10.1 특징과 평가식을 분리한다
 
-RL 학습 전에, 손으로 설계한 평가 함수로 "괜찮은" 수준의 AI를 만들 수 있다. `python/common/features.py` 가 특성 계산과 가중치를 제공한다.
+`python/common/features.py`는 배치 뒤 보드의 특징을 계산하고 선형 점수를 만든다. 특징은 입력을 요약한 수치이며 정책의 가치 함수와 같은 의미를 자동으로 갖지는 않는다. `bcts_score`라는 이름은 저장소의 BCTS-inspired 평가기를 가리킨다. 특정 논문 구현이나 최적 가중치를 완전히 재현한다고 주장하지 않는다.
+
+| 특징 | 정의 | 해석할 때의 경계 |
+|---|---|---|
+| aggregate_height | 각 열의 가장 위 점유 셀에서 바닥까지 높이를 합함 | 같은 합도 서로 다른 최대 높이를 가질 수 있음 |
+| bumpiness | 인접 열 높이 차이의 절대값 합 | 표면의 거칠기이며 구멍 위치는 표현하지 않음 |
+| holes | 같은 열에서 점유 셀보다 아래에 있는 빈 셀 수 | 바로 붙은 아래 칸만 세는 것이 아님 |
+| max_height | 가장 높은 열의 높이 | 계수 0은 설정 선택이며 합계 높이와 같은 특징이 아님 |
+| rows_cleared | 이번 행동에서 삭제한 줄 수 | 최종 보드만으로 되살릴 수 없는 전이 사건 |
+| wells | 양옆 표면보다 낮은 깊이 d의 삼각합 d(d+1)/2 | 가장자리는 보드 높이를 벽으로 사용, 실제 삽입 경로·도형 판정은 생략 |
+
+현재 배열 API는 공유 스키마의 행·열과 유한한 비음수 정수 셀을 받는다. 이진 관측과 raw 블록 ID를 받을 수 있고 표시용 ghost ID는 점유에서 제외한다. 잘못된 shape·NaN·소수 셀·소수 줄 수를 먼저 거절한다. `python/tests/test_heuristic_contract.py`는 이 경계와 구멍·우물·최대 높이의 작은 사례를 확인한다.
+
+### 10.2 계수의 숫자와 정책의 의미를 구별한다
 
 **현재 소스 발췌 — `python/common/features.py`**
 
@@ -1539,7 +1550,7 @@ BCTS_WEIGHTS = {
     "aggregate_height": -0.510066,
     "bumpiness":        -0.184483,
     "holes":            -0.35663,
-    "max_height":        0.0,      # subsumed by aggregate_height
+    "max_height":        0.0,      # disabled by this configuration; distinct from the height sum
     "rows_cleared":      0.760666,
     "wells":            -0.1,
 }
@@ -1547,56 +1558,36 @@ BCTS_WEIGHTS = {
 
 def bcts_score(board: np.ndarray, rows_cleared: int) -> float:
     feats = all_features(board, rows_cleared)
-    return float(sum(BCTS_WEIGHTS[k] * v for k, v in feats.items()))
+    try:
+        score = float(sum(BCTS_WEIGHTS[k] * v for k, v in feats.items()))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("feature weights must produce a finite score") from exc
+    if not math.isfinite(score):
+        raise ValueError("feature score is not finite")
+    return score
 ```
 
-특성의 의미:
+가중치는 이 저장소에서 사용하는 평가 설정이다. 이름이나 소수점 자릿수만으로 원전·최적성·학습 방법을 단정할 수 없다. 가중치를 바꾸면 후보의 순위도 달라질 수 있으므로 평가 기록에 함께 남긴다. 특징의 단위를 바꾸면 계수의 의미도 다시 맞춰야 한다.
 
-| 특성 | 계산 | 의미 |
-|------|------|------|
-| `aggregate_height` | 모든 열의 높이 합 | 높을수록 위험 (음의 가중치) |
-| `bumpiness` | 인접 열 높이 차이의 절대값 합 | 울퉁불퉁할수록 비효율 |
-| `holes` | 위에 채워진 셀이 있는 빈칸 수 | 구멍은 라인 클리어를 방해 |
-| `wells` | 우물 깊이의 삼각합 (`d(d+1)/2`) | 깊은 우물은 I 블록 전용 |
-| `max_height` | 가장 높은 열 | 가중치 0 — `aggregate_height` 에 포섭 |
-| `rows_cleared` | 클리어된 줄 수 | 유일한 양의 가중치 |
+Python 평가에는 wells 항이 있고, `GreedyBCTSOpponent`는 `line_weight * cleared`를 추가한다. 따라서 줄 사건의 유효 계수는 BCTS_WEIGHTS의 rows_cleared 계수와 line_weight의 합이다. 이를 모르고 둘을 조정하면 줄 보상을 의도보다 크게 셀 수 있다. 기본 공식을 임의로 삭제하지 않고 두 역할을 명시한다.
 
-`wells` 가 단순 깊이 합이 아니라 삼각합인 이유는 원본 BCTS 정식화를 따르기 때문이다 — 깊이 3짜리 우물 하나(6점)가 깊이 1짜리 셋(3점)보다 훨씬 나쁘다.
+C++ `eval_board`는 자신의 명시된 특징과 계수로 평가하며 Python의 우물 항과 추가 줄 가중치를 포함하지 않는다. 일부 계수 리터럴이 같아도 점수·선택 행동이 같다는 결론으로 이어지지 않는다. `tests/heuristic_dump.cpp`는 실제 C++ 선택을 실행하고, Python 회귀가 같은 SimGame 후보의 각 언어별 공식·첫 동점 선택·원본 보존을 대조한다. 두 정책이 실제로 다른 행동을 고르는 사례도 확인한다.
 
-### 10.2 가중치의 출처 — 무엇을 단정할 수 있는가
+### 10.3 후보 생성·복사 실행·평가·동점 선택
 
-이 네 개의 소수점 여섯 자리 숫자(`-0.510066`, `0.760666`, `-0.35663`, `-0.184483`)는 온라인에서 널리 인용되는 선형 평가 가중치다. 한때 이 저장소의 두 주석이 같은 숫자에 서로 다른 이름표를 붙이고 있었는데(한쪽은 특정 구현체 이름, 다른 쪽은 특정 저자 이름), 지금은 양쪽 다 같은 표현으로 통일돼 있다 — `features.py` 의 `BCTS_WEIGHTS` 위 주석은 `널리 쓰이는 Tetris 휴리스틱 가중치` 라고 적고, C++ 평가 함수(`bot/placement.cpp` 의 `eval_board`) 주석도 `널리 쓰이는 Tetris 휴리스틱 가중치다` 라고 적는다. 구체적으로 남긴 귀속은 특성 **집합** 하나다: `features.py` 모듈 docstring 이 BCTS = "Building Controllers for Tetris"(Thiery & Scherrer, 2009) 계열로 못 박는다.
+특징 계산만으로 행동이 나오지는 않는다. 현재 `GreedyBCTSOpponent.act`와 `bot::heuristic_placement`는 합법 배치를 열거하고 원본의 복사본마다 배치를 적용한 뒤 결과 점수를 비교한다. 원본 상태를 진행하지 않고 가상의 다음 상태를 조사하는 한 배치 깊이 탐색이다.
 
-이 신중함에는 이유가 있다. Dellacherie(2003)는 이 계열 선형 평가의 특성 집합을 정립한 쪽이고, "Building Controllers for Tetris" 는 그 특성 집합에 BCTS 라는 이름과 체계적 가중치 탐색을 붙인 논문이다. 그런데 위 숫자 자체가 어느 쪽에서 온 값인지는 **이 저장소 안의 근거만으로는 확정할 수 없다** — 커뮤니티에서 여러 경로로 재인용되며 원전 표기가 흐려진 값이기 때문이다. 검증할 수 없는 출처를 특정 이름으로 단정한 주석은 언젠가 틀린 인용이 되므로, "누구의 값인지" 대신 "어떤 성질의 값인지"(널리 쓰이는 휴리스틱, 학습이 아니라 손으로 맞춘 값)만 적는 쪽으로 정리됐다.
+현재 두 선택 루프는 점수가 엄격히 더 클 때만 최고값을 교체하므로 동점에서는 native 열거 순서의 첫 배치를 유지한다. 지금 `SimGame::LegalPlacements`의 순서는 방향 바깥 반복과 열 안쪽 반복이다. fallback의 (col,rot) 사전순 선택과 구별한다. 열거 순서를 바꾸면 평가식이 같아도 동점 결과가 달라질 수 있다.
 
-그래서 이 문서도 다음만 단정한다: 특성 집합은 BCTS 계열이고, 네 개의 여섯 자리 가중치는 Python(`features.py`)과 C++(`bot/placement.cpp`)에서 **비트 단위로 같은 값**이다. 그 일치가 이 프로젝트에서 실제로 중요한 성질이다 — 이름표는 흐려져도, 학습용 상대와 인게임 봇이 같은 평가 축 위에 있다는 사실은 확인 가능한 계약이다. 두 구현이 동일 함수는 아니라는 점만 주의한다: Python `bcts_score` 는 `wells`(-0.1) 항까지 더하지만 C++ `eval_board` 는 네 특성만 쓴다 — 그 차이는 [Part 9](./part9-rl-onnx-bot.md) 의 휴리스틱 절에서 다시 짚는다.
+현재 선택기에는 별도의 생존 우선순위가 없다. 높이 벌점이 탑아웃을 피하도록 유도할 수는 있지만 살아 있는 후보를 언제나 먼저 고르는 계약은 아니다. HTML의 GreedyPolicy 체크포인트는 이 선택을 prefer_survival로 분리하고, 생존 여부→점수→작은 행동 라벨 순으로 비교한다. 동일 점수의 비교는 정확한 부동소수점 값 기준이며 다른 플랫폼의 반올림 차이에 대한 동등성을 자동 보장하지 않는다.
 
-### 10.3 이 파일에는 선택 루프가 없다
+### 10.4 기준 정책과 평가의 조건
 
-주의할 점 하나. `features.py` 는 `bcts_score()` 라는 **평가 함수만** 제공한다. "각 합법 배치를 시뮬레이션해 최고점을 고른다" 는 **선택 루프는 이 파일에 없다.** 그 루프를 실제로 갖고 있는 구현체는 두 개다.
+휴리스틱은 구현 결과와 학습 정책을 비교할 기준이다. 성능의 보장된 하한이 아니며, 이기지 못했다는 이유만으로 훈련 버그라고 판정하지 않는다. 규칙·시드·상대·실행 시간 단위·결정 예산·지표를 맞추어 차이의 원인을 조사한다.
 
-| 구현체 | 위치 | 용도 |
-|---|---|---|
-| `GreedyBCTSOpponent.act` | `python/common/env_versus.py` (§6.2) | versus 환경의 기본 상대 |
-| `bot::heuristic_placement` | `bot/placement.cpp` | 인게임 봇 — [Part 9](./part9-rl-onnx-bot.md) 에서 소개 |
+전체 SimGame 복사본으로 탐색하는 정책은 관측 배열만 받는 정책보다 많은 상태 정보에 접근할 수 있다. 자기 보드만 보는 정책과 상대 보드까지 보는 정책, 깊이가 다른 탐색을 같은 이름의 봇으로 묶지 않는다. 보상과 원래 줄·공격·승패 지표도 나누어 기록한다. 횟수 제한으로 끝난 경기를 자동 패배로 세지 않는다.
 
-이 문서의 경계는 평가 함수와 그것을 쓰는 학습용 상대까지다. 인게임 경로에서는 `bot/placement.cpp`가 같은 특징량·합법 배치 계약을 C++ 선택 루프로 구현하고 `src/main.cpp`의 BotSingle 세션이 호출한다.
-
-### 10.4 휴리스틱을 베이스라인 하한으로 쓰는 이유
-
-학습 없이도 1-ply 그리디 BCTS 는 상당히 많은 줄을 클리어한다. 이것이 RL 학습의 **베이스라인 하한**이 된다: 학습된 정책이 이 휴리스틱을 이기지 못하면 학습 파이프라인 어딘가에 버그가 있다고 봐야 한다. `features.py` 모듈 docstring 이 그 용법을 명시한다.
-
-**현재 소스 발췌 — `python/common/features.py`**
-
-```python
-1. As a sanity check: a linear combination of these features beats random play
-   by orders of magnitude. If your trained policy can't outscore the BCTS
-   baseline, training has a bug.
-2. As a board evaluator inside training loops (``bcts_score`` is used by the
-   CBMPI/DQN reward shaping in python/train/).
-```
-
-두 번째 용법이 CBMPI-style 학습기의 핵심이다 — 그 학습기는 BCTS 평가를 **개선 대상**으로 삼아 정책을 그 위로 끌어올린다.
+튜닝에 쓴 시드에서 계수를 고른 뒤 같은 시드로만 성능을 보고하면 그 표본에 맞춘 선택을 일반 성능처럼 보일 수 있다. 튜닝용·최종 평가용 시드를 분리하고 같은 조건의 정책 쌍을 비교한다. 적은 실행의 평균은 조건부 관찰이며 장기 승률 보증이 아니다.
 
 ---
 
@@ -1857,20 +1848,11 @@ def test_parse_frames_drops_malformed_zero_length_frame() -> None:
 
 이 밖에 `test_framing_parity.py`는 대표 메시지 round-trip, 한 바이트 모자란 partial buffer, 체크섬 손상 drop, cap 초과 시 `FramingError`(버퍼 폐기 + 오염 전 프레임의 `frames` 전달), `MsgType` 정수값 고정, UTF-8 CHAT 통과를 잠근다. 길이에는 type 한 바이트가 포함되고 checksum은 **payload에만** 적용된다. 불완전 프레임은 버퍼에 남고 과대 선언은 스트림 전체를 폐기한다는 wire 규약을 Python 고정 벡터로 검증한다. 실제 C++ 구현과의 직접 비교는 `scripts/check_learning_framing.py`가 별도로 수행한다(Part6 §2.7).
 
-### 12.4 `expand_placement` — placement 를 프레임 마스크로
+### 12.4 `expand_placement` — placement를 입력 요청으로
 
-정책이 "이 블록은 `(col=4, rot=2)` 에 놓자" 라고 결정하면, lockstep 와이어에 태우려면 **프레임 단위 마스크 시퀀스**로 풀어야 한다. 그 전개 규칙을 확정하는 자리가 이 모듈이다. 규칙은 여기(Python)서 정의되고, [Part 9](./part9-rl-onnx-bot.md) 가 같은 규칙의 C++ 포트를 만들어 인게임 봇의 런타임 경로에 넣는다. `python/tests/test_placement_parity.py` 의 docstring 이 그 방향을 명시한다 — `The C++ port at bot/placement.cpp is byte-for-byte identical to the Python implementation here.`
-
-**현재 소스 발췌 — `python/netbot/input_expander.py`**
-
-```python
-INPUT_NONE = 0
-INPUT_LEFT = 1 << 0
-INPUT_RIGHT = 1 << 1
-INPUT_DOWN = 1 << 2
-INPUT_ROTATE = 1 << 3
-INPUT_DROP = 1 << 4
-```
+정책 목표를 시계 회전 → 수평 이동 → 하드 드롭 요청으로 바꾼다. 입력 비트 규약은
+core/input.h와 맞추고 폭은 common의 schema를 따른다. 순수 인코더에는 보드 상태가
+없으므로 요청이 실제로 성공하는지는 실행 경계에서 별도로 확인한다.
 
 **현재 소스 발췌 — `python/netbot/input_expander.py`**
 
@@ -1880,17 +1862,19 @@ def expand_placement(
     cur_rot: int,
     tgt_col: int,
     tgt_rot: int,
-    num_rotations: int = 4,
+    num_rotations: int = NUM_ROTATIONS,
 ) -> list[int]:
-    """Build a frame-mask sequence that walks ``(cur_col, cur_rot)`` to
-    ``(tgt_col, tgt_rot)`` and then hard drops.
+    """Encode rotate/translate/drop requests in the native command domain.
 
-    Rotations always go forward (the C++ block class only has ``Rotate`` /
-    ``UndoRotation`` and rotation is the cheap operation, so 1-3 rotates is
-    fine even if 1 backwards rotate would be shorter).
+    This helper has no board or gravity state: it does not prove arrival.
+    Invalid types/domains are rejected before arithmetic or allocation.
+
+    The shared input protocol exposes clockwise rotation. The normalized
+    difference chooses that many clockwise requests; collisions are checked
+    by the live controller, not by this encoder.
     """
-    if num_rotations <= 0:
-        raise ValueError(f"num_rotations must be positive, got {num_rotations}")
+    cur_col, cur_rot, tgt_col, tgt_rot, num_rotations = validate_expansion(
+        cur_col, cur_rot, tgt_col, tgt_rot, num_rotations, NUM_COLS, NUM_ROTATIONS)
     seq: list[int] = []
 
     rot_steps = (tgt_rot - cur_rot) % num_rotations
@@ -1912,17 +1896,12 @@ def expand_placement(
     return seq
 ```
 
-순서는 **회전 × n → 이동 × m → 하드 드롭**. 이 순서가 중요하다.
+validate_expansion은 Integral만 받고 bool·소수·문자열은 거절한다. 열과 회전 범위를
+확인한 뒤 Python int로 정규화하므로 잘못된 입력이 거대한 목록이나 묵시적 반올림으로
+이어지지 않는다. 현재 원점은 지역 좌표 때문에 음수일 수 있지만 정책 목표는 행동
+공간의 도메인에 있어야 한다. 허용 범위와 실제 충돌 가능성은 서로 다른 계약이다.
 
-**1. 회전 먼저.** `SimGame.LegalPlacements()` 가 반환하는 `(col, rot)` 은 회전 적용 **후** 최종 상태 기준이다. 회전을 끝내놓고 이동을 시작해야 `tgt_col` 의 해석이 흔들리지 않는다 — 특히 I 블록은 회전 전후로 bounding box 가 2×4 ↔ 4×2 로 바뀌어 "현재 열" 의 의미가 달라진다.
-
-**2. 항상 전방 회전.** `(tgt_rot - cur_rot) % num_rotations` 는 Python 에서 항상 음이 아닌 나머지를 준다. `cur_rot=3, tgt_rot=1` 이면 `(1-3)%4 = 2`. 역회전 비트를 만들면 lockstep 입력 비트가 하나 늘고 상태 전이가 하나 늘어나는데, 아끼는 것은 최대 2틱이다. 결정론 관점에서 "전방만" 규칙이 단순해서 리플레이/해시 검증도 쉽다.
-
-**3. 하드 드롭으로 마무리.** 소프트 드롭(`INPUT_DOWN`)을 쓰면 잠금 타이밍이 중력 틱 수에 좌우되어 "이 placement 를 확정하는 데 몇 틱이 필요한가" 가 보드 상태에 따라 들쭉날쭉해진다. 하드 드롭은 1틱에 결정적으로 끝난다.
-
-`num_rotations` 기본값 4 는 테트로미노에 맞춘 것이고, 테스트가 인공적으로 `num_rotations=2` 를 넣어 모듈로 로직을 검증할 수 있게 파라미터로 열려 있다. 0 이하는 즉시 `ValueError` 다.
-
-### 12.5 `fallback_placement` — 규칙과 소비자
+### 12.5 `fallback_placement` — 호출자가 선택하는 별도 정책
 
 **현재 소스 발췌 — `python/netbot/input_expander.py`**
 
@@ -1930,9 +1909,8 @@ def expand_placement(
 def fallback_placement(sim: "SimGame") -> tuple[int, int] | None:
     """Cheap fallback: pick the first legal placement (lowest col, lowest rot).
 
-    Used when the chosen placement's expanded sequence fails validation, or
-    when the policy returns an action whose mask bit is False (which the
-    masking layer should prevent, but defensive code costs nothing here).
+    This helper is opt-in; the encoder never calls it automatically.
+    Native legal_placements checks endpoints, not every intervening key step.
     """
     placements = sim.legal_placements()
     if not placements:
@@ -1942,33 +1920,21 @@ def fallback_placement(sim: "SimGame") -> tuple[int, int] | None:
     return p.col, p.rot
 ```
 
-"가장 작은 열, 가장 작은 회전" 은 합법 배치가 하나라도 있으면 항상 존재한다. 이 규칙의 실전 소비자는 Python 이 아니라 [Part 9](./part9-rl-onnx-bot.md) 가 만들 C++ 포트다 — ONNX 추론이 실패하거나 합법 logit 이 전부 -inf 인 비정상 상황에서 인게임 봇이 이 규칙으로 물러난다. 이 장에서는 규칙과 그 이유만 확정하고, 호출 지점의 배선은 Part 9 가 잇는다.
+fallback은 호출자가 명시적으로 선택하는 helper다. expander가 오류를 만났을 때
+자동 호출하지 않는다. 여기의 legal_placements는 배치 끝점 후보를 뜻하므로, 반환된
+목표를 실제 틱 입력으로 수행할 수 있는지도 확인해야 한다. 빈 후보는 None이다.
 
-"첫 번째 합법 수" 는 보통 왼쪽 벽 근처에 회전 0 으로 세우기가 나온다. 매우 나쁜 수지만 최소한 합법이고, **봇이 입력 없이 얼어붙는 것보다 낫다** — 얼어붙으면 상대가 시간 초과로 이기고, 나쁜 수를 두면 봇이 그냥 진다. 테스트 사이클에는 후자가 훨씬 친화적이다.
+### 12.6 요청 패리티와 실제 틱 재생
 
-### 12.6 이 패리티 테스트가 정확히 무엇을 지키는가
+`test_placement_parity`는 손계산 요청과 회전/이동/드롭 순서를 검사한다.
+`test_action_codec_parity`는 C++ action_codec_dump를 실행해 같은 입력 도메인의
+인코딩·디코딩·마스크 열을 Python과 직접 대조한다. type/domain 거절은
+`test_expansion_contract`가 검사한다.
 
-솔직하게 적어야 하는 부분이다. `python/netbot/__init__.py` 와 `input_expander.py` 의 docstring 이 이 모듈의 위치를 명시한다.
-
-**현재 소스 발췌 — `python/netbot/input_expander.py`**
-
-```python
-If a policy proposes an illegal placement, :func:`fallback_placement` returns
-the first legal placement. Regression tests keep this module aligned with the
-C++ implementation; the runtime in-process bot uses the C++ implementation.
-```
-
-즉 **런타임은 이 Python 코드를 한 줄도 실행하지 않는다.** `test_placement_parity.py` 도 C++ 함수를 호출해서 비교하지 않는다 — 손으로 계산한 진리표와 구조적 불변식 (회전 → 수평 이동 → 하드 드롭 순서, 마지막 원소는 항상 `INPUT_DROP`, 길이 = 회전 수 + 이동 칸 수 + 1)을 Python 구현에 대해 검증할 뿐이다.
-
-그러면 이 테스트가 지키는 것은 정확히 무엇인가?
-
-**"사람이 두 구현을 수동 동기화할 때의 회귀 감지" 다. 그 이상은 아니다.**
-
-시나리오는 이렇다. 누군가 C++ 포트(`bot/placement.cpp` 의 `expand_placement`)의 회전 방향 규칙을 바꾼다. 1차 정의인 Python 쪽을 같이 안 고치면 — 아무 일도 안 일어난다. 게임은 C++ 만 쓰니까 잘 돌아간다. 반대로 Python 쪽 정의를 고치면 진리표 테스트가 실패해서 "C++ 포트도 같이 봐야 한다" 는 신호가 뜬다. 즉 **Python 쪽을 건드릴 때만** 알람이 울리는 비대칭 보호막이다.
-
-진짜 양방향 보호를 원하면 `expand_placement` 를 pybind11 로 노출해 두 구현의 출력을 직접 대조하면 된다. 현재는 그 바인딩이 없다. 이 한계를 알고 쓰는 것이 "테스트가 있으니 안전하다" 고 오해하는 것보다 낫다.
-
----
+현재 C++ Controller는 실제 상태의 복사본에서 다음 조작이 가능한지 확인하고,
+막힌 요청이나 목표와 다른 상태의 드롭을 취소한다. 입력 사이의 중력·새 스폰과
+가비지 때문에 원래 목표의 실행 조건은 달라질 수 있다. 요청 열의 일치, 동작의
+성공, 학습 placement API와 실제 틱 결과의 일치는 각각 따로 비교한다.
 
 ## 오류와 함정
 

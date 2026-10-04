@@ -318,8 +318,7 @@ if (TETRIS_BUILD_PY)
     # cmake 4.0+ removed FindPythonInterp/FindPythonLibs; tell pybind11 to use
     # the modern FindPython instead.
     set(PYBIND11_FINDPYTHON ON)
-    # pybind11: prefer find_package (pip-installed), fall back to add_subdirectory
-    # if a vendored pybind11 checkout is provided.
+    # Locate the selected Python environment's pybind11 CMake package.
     find_package(pybind11 CONFIG QUIET)
     if (NOT pybind11_FOUND)
         message(FATAL_ERROR
@@ -667,6 +666,21 @@ if (TETRIS_BUILD_TEST)
 endif()
 
 if (TETRIS_BUILD_TEST)
+    foreach(action_target action_codec_dump placement_contract_test heuristic_dump input_route_test)
+        add_executable(${action_target} tests/${action_target}.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
+        target_include_directories(${action_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    endforeach()
+    add_test(NAME placement_contract COMMAND placement_contract_test)
+    add_test(NAME input_route COMMAND input_route_test)
+    add_executable(observation_dump tests/observation_dump.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(observation_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(run_status_test tests/run_status_test.cpp)
+    add_test(NAME run_status COMMAND run_status_test)
+    add_executable(policy_decision_test tests/policy_decision_test.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
+    target_include_directories(policy_decision_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME policy_decision COMMAND policy_decision_test)
+    add_executable(opponent_profile_dump tests/opponent_profile_dump.cpp)
+    target_include_directories(opponent_profile_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_executable(bot_controller_test tests/bot_controller_test.cpp bot/placement.cpp bot/opponents.cpp ${TETRIS_SIM_SOURCES})
     target_include_directories(bot_controller_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME bot_controller COMMAND bot_controller_test)
@@ -690,6 +704,10 @@ if (TETRIS_BUILD_META AND TETRIS_BUILD_BOT)
 endif()
 
 if (TETRIS_BUILD_TEST)
+    add_executable(bot_pacing_test tests/bot_pacing_test.cpp)
+    add_test(NAME bot_pacing COMMAND bot_pacing_test)
+    add_executable(policy_choice_test tests/policy_choice_test.cpp)
+    add_test(NAME policy_choice COMMAND policy_choice_test)
     add_executable(bot_replay_test tests/bot_replay_test.cpp bot/placement.cpp ${TETRIS_SIM_SOURCES})
     target_include_directories(bot_replay_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME bot_replay COMMAND bot_replay_test)

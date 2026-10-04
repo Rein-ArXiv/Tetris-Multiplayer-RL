@@ -1,0 +1,441 @@
+{
+  "id": "lesson-161",
+  "title": "ONNX export: 학습 상태와 배포 계약",
+  "shortTitle": "계산 그래프·opset·고정 형상·추적·수치 대조·원자 교체",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 저장된 모델 후보를 Python에서 비교할 수 있지만 게임이 사용할 추론 파일의 계약과 검증 절차가 연결되지 않았습니다.",
+  "finish": "완료: 실제 관측을 모아 고정 입출력 ONNX 그래프를 만들고 구조·수치·행동 검사를 통과한 파일만 공개합니다.",
+  "objective": "학습 checkpoint와 추론 그래프를 구분하고, export부터 runtime 대조와 파일 교체까지 각 단계의 보장을 설명한다.",
+  "prerequisites": [
+    "모델 파일과 관측·행동 schema",
+    "공통 조건의 모델 평가와 원자료",
+    "파일 교체·소유권·실패 정리"
+  ],
+  "recap": {
+    "points": [
+      "학습량과 알고리즘 이름은 실제 난이도 등급이 아니다.",
+      "공통 시드·예산·지표를 정하고 개별 종료 이유를 남긴다.",
+      "출력 형상 호환성과 학습된 값의 의미는 별도로 확인한다."
+    ],
+    "bridge": "선택한 후보의 forward를 다른 실행 환경으로 옮기고 같은 입력에 대한 결과를 비교합니다."
+  },
+  "sections": [
+    {
+      "title": "학습 상태에서 추론 계산을 골라낸다",
+      "body": "모델 후보를 골랐습니다. 이제 게임 프로세스가 Python 학습 코드를 실행하지 않고 관측을 넣어 행동 점수를 얻도록 계산을 옮깁니다. **내보내기(export)**는 배포할 forward 계산과 그 계산이 사용하는 가중치를 별도 표현으로 저장하는 작업입니다.\n\nTrainingRun의 checkpoint에는 optimizer, 난수 위치, 환경과 수집 진행 정보도 있습니다. ONNX 산출물에는 이 실습의 추론 그래프와 가중치를 담습니다. 훈련 상태 파일과 배포 모델을 용도에 맞춰 보관합니다.\n\n`161-onnx-export`는 누적 코드를 유지하고 export_policy, onnx_pipeline, onnx_contract를 추가합니다. 저장 상태에서 새 모델을 읽고 실제 관측 사례를 모은 뒤, 임시 그래프를 검사하고 최종 파일로 교체합니다.",
+      "reference": {
+        "path": "python/netbot/export_onnx.py",
+        "symbol": "def export",
+        "invariant": "학습 상태와 배포 추론 산출물의 계약을 구별한다.",
+        "mayDiffer": "현재 exporter는 model-only canonical checkpoint를 읽는다. 실습은 CPU TrainingRun을 복원해 그 모델을 선택한다."
+      }
+    },
+    {
+      "title": "배포 경계를 이름·형상·타입·의미로 적는다",
+      "body": "텐서는 다차원 배열입니다. shape는 축의 길이, dtype은 각 원소의 표현을 정합니다. 같은 바이트 개수라도 축이 다르면 연산의 해석이 달라집니다. 보드는 배치·채널·행·열 순서로 전달하고 current와 next는 각 피스 표현을 담습니다.\n\n현재 배포 프로토콜은 한 보드의 결정을 한 번에 계산하므로 배치 축을1로 정합니다. 보드 크기, 피스 폭, 행동 폭은 schema에서 읽습니다. 순서는 forward의 인자와 graph input, Runtime에 주는 이름/값 대응이 일치해야 합니다. 정책 점수는 policy_logits, 상태 가치는 value로 구별합니다.\n\n이름·dtype·shape가 같아도 행 방향이나 피스 ID 순서, 행동 인덱스 해석이 다르면 다른 게임 모델입니다. 실습 메타데이터에는 관측/행동 schema도 기록합니다. 다만 기록해 놓는 것과 수신 코드가 실제로 검사하는 것은 별개이므로 로더의 검사 범위를 확인해야 합니다.",
+      "codes": [
+        {
+          "label": "schema에서 고정 입출력 규격 생성",
+          "language": "python",
+          "text": "            schema=run.model.schema\n            inputs=[('board',(1,1,schema.rows,schema.cols)),\n                    ('current',(1,schema.pieces)),('next',(1,schema.pieces))]\n            outputs=[('policy_logits',(1,schema.actions)),('value',(1,))]"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/export_onnx.py",
+        "symbol": "INPUT_SPECS=",
+        "invariant": "내보내기와 런타임의 이름·순서·형상·관측 의미가 일치한다.",
+        "mayDiffer": "현재 게임은 common 상수와 BotOnnx 계약을 대조한다. 실습의 피스/행동 의미와 교환하지 않는다."
+      }
+    },
+    {
+      "title": "ONNX 그래프 안에서 데이터가 흐르는 방식",
+      "body": "ONNX 모델의 graph에는 입력, 출력, 연산 node와 고정 데이터가 있습니다. node는 입력 텐서 이름을 받아 출력 텐서 이름을 만듭니다. 이름으로 연결한 의존 관계를 따라 Runtime이 계산합니다.\n\n정책망의 Conv는 공간 특성을 계산하고, 활성화는 비선형 변환을 적용하며, 평탄화와 연결 뒤 Linear 계열 연산이 행동 점수를 만듭니다. exporter는 이를 ONNX가 정의한 연산과 속성으로 표현합니다. 최적화나 표현 변환으로 연산이 합쳐지거나 나뉠 수 있습니다.\n\n학습된 가중치는 initializer 같은 고정 텐서로 들어갑니다. 추론 입력 목록에 가중치를 다시 노출하면 호출자가 교체 가능한 입력이 되므로, 이 배포 경로는 initializer와 graph input의 이름 중복을 거절합니다. 파일을 열어 가중치가 있다는 사실만 확인하는 것보다 실제 입력 경계를 검사하는 편이 정확합니다.",
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def export_checked",
+        "invariant": "실제 사용할 파일 후보를 검사하고 성공한 후보만 공개한다.",
+        "mayDiffer": "현재 프로젝트는 canonical 모델과 게임 상수를 사용한다. 누적 실습은 study_py의 관측/행동 규약과 TrainingRun 모델을 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "그래프·연산·텐서의 표현",
+          "body": "[ONNX 개념 문서](https://onnx.ai/onnx/intro/concepts.html)는 그래프의 입력·출력·node·initializer와 연산 집합을 설명합니다. 이 실습의 검사기는 그 표현 중 게임의 호출 경계에 필요한 조건을 확인합니다."
+        }
+      ]
+    },
+    {
+      "title": "IR 버전과 opset은 무엇의 버전인가",
+      "body": "IR 버전은 모델을 표현하는 규약의 버전입니다. opset은 연산 domain 안에서 사용할 연산 정의의 버전입니다. 예를 들어 한 연산의 입력이나 속성 규칙이 바뀌면 같은 이름이라도 어떤 opset의 의미를 따르는지 알아야 합니다. exporter의 Python 패키지 버전과도 서로 다른 값입니다.\n\n내보내기 도구가 그래프를 만들 수 있고, checker가 표현을 받아들이며, 배포 Runtime이 필요한 연산을 실행할 수 있어야 합니다. opset은 대상 Runtime과의 호환성을 기준으로 선택합니다. 이 실습의 기본값은 확인할 실행 경로를 정한 설정이며, 변경할 때에는 실제 대상 Runtime과 다시 대조합니다.\n\nexport_checked는 양의 정수 opset을 요구하고 만들어진 graph의 기본 domain import가 요청값인지 확인합니다. 지원하지 않는 조합은 변환 또는 로드 단계에서 실패합니다. 잘못된 버전을 조용히 다른 버전으로 바꿔 성공이라고 기록하지 않습니다.",
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def export_checked",
+        "invariant": "실제 사용할 파일 후보를 검사하고 성공한 후보만 공개한다.",
+        "mayDiffer": "현재 프로젝트는 canonical 모델과 게임 상수를 사용한다. 누적 실습은 study_py의 관측/행동 규약과 TrainingRun 모델을 사용한다."
+      }
+    },
+    {
+      "title": "추적한 계산과 일반 Python 실행을 구분한다",
+      "body": "이 경로는 torch.onnx.export에 Dynamo 선택 인자가 있으면 False를 지정해 TorchScript 기반 경로를 사용합니다. 입력 예제는 그래프를 추적하고 형상을 정하는 데 사용합니다. 추적 대상은 forward의 Tensor 계산입니다.\n\nTensor 값에 따라 Python if 분기를 타는 forward가 있다면 하나의 예제에서 지나간 경로가 다른 모든 입력의 분기를 표현한다고 가정할 수 없습니다. 현재 정책은 Tensor 연산으로 이어지는 고정 구조입니다.\n\nmodel_contract의 Python shape 검사는 eager 호출 경계의 검사입니다. 추적 중에는 그 호스트 검사를 생략하므로 ONNX 파일에 같은 Python 예외 처리가 들어가지 않습니다. 그래서 만들어진 그래프의 metadata와 Runtime 입력을 별도로 검사합니다. exporter를 다른 방식으로 바꿀 때에도 이 검사들은 유지할 수 있습니다.",
+      "codes": [
+        {
+          "label": "내보내기 경로와 이름·가중치 옵션",
+          "language": "python",
+          "text": "            kwargs=dict(input_names=[n for n,_ in input_specs],output_names=[n for n,_ in output_specs],\n                        opset_version=opset,export_params=True,keep_initializers_as_inputs=False,\n                        dynamic_axes=None,do_constant_folding=True,training=torch.onnx.TrainingMode.EVAL)\n            parameters=inspect.signature(torch.onnx.export).parameters\n            if 'dynamo' in parameters:kwargs['dynamo']=False\n            if 'external_data' in parameters:kwargs['external_data']=False\n            torch.onnx.export(model,tuple(torch.from_numpy(a) for a in cases[0]['inputs']),str(candidate),**kwargs)"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def export_checked",
+        "invariant": "실제 사용할 파일 후보를 검사하고 성공한 후보만 공개한다.",
+        "mayDiffer": "현재 프로젝트는 canonical 모델과 게임 상수를 사용한다. 누적 실습은 study_py의 관측/행동 규약과 TrainingRun 모델을 사용한다."
+      }
+    },
+    {
+      "title": "eval·no_grad·고정 가중치·상수 접힘의 차이",
+      "body": "eval은 모드에 따라 동작하는 층을 추론 모드로 바꿉니다. no_grad는 연산을 미분 그래프에 기록하지 않는 문맥입니다. 이 정책에는 Dropout과 BatchNorm이 없지만, 그래프 비교는 명시적인 eval 상태에서 수행하고 원래 모드는 finally에서 복원합니다.\n\nexport_params는 가중치를 그래프 산출물에 포함시키는 선택입니다. keep_initializers_as_inputs=False는 고정 가중치를 매 호출 입력으로 요구하지 않는 선택입니다. 출력은 고정된 가중치와 매번 달라지는 관측을 함께 사용해 계산됩니다.\n\n**상수 접힘(constant folding)**은 필요한 입력이 모두 상수인 계산을 미리 수행하는 최적화입니다. Conv와 Linear가 고정 가중치를 가진다는 이유로 그 연산의 전체 결과를 미리 계산할 수는 없습니다. 관측이 런타임 입력으로 남기 때문입니다. exporter 버전에 따라 최적화 옵션의 적용 방식도 달라질 수 있어 실제 산출물로 확인합니다.",
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def export_checked",
+        "invariant": "실제 사용할 파일 후보를 검사하고 성공한 후보만 공개한다.",
+        "mayDiffer": "현재 프로젝트는 canonical 모델과 게임 상수를 사용한다. 누적 실습은 study_py의 관측/행동 규약과 TrainingRun 모델을 사용한다."
+      }
+    },
+    {
+      "title": "고정 배치와 가변 배치는 다른 호출 계약이다",
+      "body": "고정 shape의 그래프는 정해진 형상의 텐서를 입력으로 받습니다. 이 실습은 한 관측의 추론 계약을 선택합니다. 모델 학습 때 미니배치 크기가 여러 값이었다는 사실이 배포 그래프의 배치 축도 자동으로 가변이라는 뜻은 아닙니다.\n\n가변 축을 선언하려면 입력뿐 아니라 관련 출력과 계산의 형상 관계, Runtime의 호출 코드도 함께 설계해야 합니다.\n\nONNX의 dim_value는 명시한 정수 차원입니다. dim_param은 기호 이름으로 표현한 차원이며, shape 필드 자체가 없으면 rank도 알려져 있지 않습니다. 아래 검사는 이들을 구별합니다. Python에서 빈 목록을 읽었다고 항상 스칼라라고 해석하지 않는 이유도 여기에 있습니다.",
+      "codes": [
+        {
+          "label": "필드 존재 여부와 고정 차원 검사",
+          "language": "python",
+          "text": "def _fixed_dims(value_info):\n    \"\"\"Return the tuple of dim_value dimensions, rejecting symbolic/unknown.\"\"\"\n    if not value_info.type.tensor_type.HasField(\"shape\"):\n        raise ValueError(f\"{value_info.name!r} has unknown tensor rank\")\n    dims = []\n    for i, dim in enumerate(value_info.type.tensor_type.shape.dim):\n        if dim.HasField(\"dim_value\"):\n            dims.append(dim.dim_value)\n        elif dim.HasField(\"dim_param\") and dim.dim_param:\n            raise ValueError(\n                f\"{value_info.name!r} dimension {i} is symbolic \"\n                f\"({dim.dim_param!r}); only fixed dim_value dimensions are allowed\"\n            )\n        else:\n            raise ValueError(\n                f\"{value_info.name!r} dimension {i} has no fixed dim_value\"\n            )\n    return tuple(dims)"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_contract.py",
+        "symbol": "def _fixed_dims",
+        "invariant": "알 수 없는 형상과 명시한 고정 형상을 구별한다.",
+        "mayDiffer": "현재 C++ 로더는 fixed float32 shape를 요구하며 가변 배치를 지원하는 호출자가 아니다."
+      }
+    },
+    {
+      "title": "실제 관측과 합법 마스크를 검증 자료로 소유한다",
+      "body": "실습의 collect_cases는 새 RoundEnv를 정한 seed로 reset하고, 현재 정책이 고른 합법 행동으로 조금씩 진행합니다. 각 행동 전 관측과 그 상태의 legal_mask를 복사해 사례에 넣습니다. 종료하면 그 판의 수집을 멈춥니다.\n\n배열을 참조만 저장했다가 환경이 같은 버퍼를 다시 채우면, 검사하려던 관측이 나중 상태로 바뀔 수 있습니다. batch_of와 cases의 복사가 자료의 소유권을 분명하게 합니다. 이 자료를 동일한 입력으로 두 실행기에 전달합니다.\n\n현재 프로젝트의 기본 CLI는 synthetic tensor probes를 사용합니다. 형상과 수치 연결을 확인하기 위해 구성한 배열입니다. 실제 관측을 전달하는 cases 경로와 누적 실습의 native 수집 경로는 검증 자료의 출처를 더 분명하게 합니다.",
+      "codes": [
+        {
+          "label": "행동 전 관측 복사와 종료 경계",
+          "language": "python",
+          "text": "                cases.append(dict(inputs=[batch[key].numpy().copy() for key in ('board','current','next')],\n                                  legal_mask=np.array(info['legal_mask'],copy=True)))\n                obs,_,term,trunc,info=env.step(action)\n                if term or trunc:break\n    finally:\n        env.close()"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def validate_cases",
+        "invariant": "검증할 입력과 마스크를 소유하고 shape/dtype/유한성을 확인한다.",
+        "mayDiffer": "현재 기본 CLI의 합성 사례와 실제 native 사례의 출처를 구분해 기록한다."
+      }
+    },
+    {
+      "title": "검사는 서로 다른 질문에 답한다",
+      "body": "입출력 metadata 검사는 이름·순서·개수·tensor 종류·dtype·rank·차원을 대조합니다. ONNX checker는 그래프의 표현과 연산 연결에 관한 규칙을 검사합니다. 그 다음 실제 Runtime을 만들어 선택한 provider에서 모델을 실행합니다.\n\n각 검사의 질문을 좁고 정확하게 두면 실패 위치를 이해할 수 있습니다. 이름이 바뀌었으면 연결 계약을, 연산을 지원하지 않으면 exporter/Runtime 조합을, 수치가 다르면 변환과 실행 결과를 살펴봅니다.\n\n기존 checkpoint의 모델 용량을 읽은 뒤 배포 경계와 맞는지 먼저 확인하는 것도 같은 원리입니다. 현재 exporter는 행동 출력 폭이 다른 모델을 그래프 변환 전에 거절합니다. 그래프 자체가 문법적으로 유효하다는 사실과 게임이 사용할 수 있다는 사실을 혼동하지 않습니다.",
+      "codes": [
+        {
+          "label": "정해진 입출력 경계 대조",
+          "language": "python",
+          "text": "    for role, values, specs in (\n        (\"input\", graph.input, input_specs),\n        (\"output\", graph.output, output_specs),\n    ):\n        if len(values) != len(specs):\n            raise ValueError(\n                f\"graph has {len(values)} {role}(s), expected {len(specs)}\"\n            )\n        for value_info, (name, dims) in zip(values, specs):\n            _check_value(value_info, name, dims, role)"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_contract.py",
+        "symbol": "def validate_io",
+        "invariant": "그래프 문법과 별개로 제품의 호출 경계를 확인한다.",
+        "mayDiffer": "현재 canonical exporter는 native 게임 상수도 변환 전에 대조한다."
+      }
+    },
+    {
+      "title": "부동소수점 결과는 허용오차로 대조한다",
+      "body": "같은 수학 연산이라도 연산 순서, 커널 구현, 최적화에 따라 마지막 비트가 다를 수 있습니다. 비교기는 우선 PyTorch와 ONNX Runtime의 출력 shape·float32 타입·유한성을 확인하고 원소별 차이를 대조합니다. NaN이나 infinity가 있어도 우연히 argmax가 나오는 것을 정상 추론으로 받아들이지 않습니다.\n\n허용 조건은 `abs(actual-reference) <= atol + rtol × abs(reference)`입니다. atol은0 근처에서도 허용할 절대 차이, rtol은 기준 값의 크기에 비례한 차이입니다. 허용오차는 검사 목적과 실행 환경에 맞춰 선택할 수치 검증 설정입니다.\n\n검사 결과에는 이번 사례 수, 최대 절대 오차, 사용한 허용오차와 provider를 남깁니다. 오차가 작았다는 판단은 검사한 모델·입력·실행 환경의 범위에서 읽습니다.",
+      "codes": [
+        {
+          "label": "출력 계약·유한성·원소별 허용오차",
+          "language": "python",
+          "text": "        for reference,got,(name,shape) in zip(expected,actual,output_specs,strict=True):\n            reference=reference.detach().cpu().numpy()\n            if (reference.dtype != np.float32 or got.dtype != np.float32\n                    or reference.shape != tuple(shape) or got.shape != tuple(shape)\n                    or not np.isfinite(reference).all() or not np.isfinite(got).all()):\n                raise ValueError('invalid runtime output: '+name)\n            np.testing.assert_allclose(got,reference,rtol=rtol,atol=atol,err_msg=name)\n            max_error=max(max_error,float(np.max(np.abs(got-reference))))"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def compare_outputs",
+        "invariant": "실제 실행한 출력의 형상과 유한성 및 허용오차를 확인한다.",
+        "mayDiffer": "현재 검증 provider는 CPU이며 대상 OS의 C++ 실행을 대신하지 않는다."
+      }
+    },
+    {
+      "title": "수치가 가까워도 행동 순서는 바뀔 수 있다",
+      "body": "argmax는 값의 작은 변화에 항상 부드럽게 반응하는 함수가 아닙니다. 이 계산 예의 합법 점수가0과0.0000001인데 두 실행기에서 순서가 뒤집혔다고 생각해 봅시다. 각 값의 차이는 작은 허용오차 안에 있을 수 있지만 선택 행동은 바뀝니다.\n\n그래서 같은 마스크로 불법 행동을 제외한 뒤 선택 인덱스를 따로 비교합니다. 이 검사에서 차이가 나면 허용오차를 넓혀 숫자 검사만 통과시키지 않고 후보를 거절합니다. 어떤 관측에서 선택이 달라졌는지 확인할 근거가 생깁니다.\n\n정수 기반 게임 규칙의 재현성과 부동소수점 모델의 출력 일치는 다른 경계입니다. 실제 선택된 입력을 기록하고 같은 규칙에 재생하는 계약과, 서로 다른 실행기에서 정책을 다시 계산했을 때 같은 입력이 나오는지를 구분해야 합니다.",
+      "codes": [
+        {
+          "label": "합법 argmax의 독립 검사",
+          "language": "python",
+          "text": "        legal=case['legal_mask']\n        expected_action=int(np.argmax(np.where(legal,expected[0].detach().cpu().numpy()[0],-np.inf)))\n        actual_action=int(np.argmax(np.where(legal,actual[0][0],-np.inf)))\n        if actual_action != expected_action:\n            raise ValueError('legal argmax changed despite numeric tolerance')"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def compare_outputs",
+        "invariant": "텐서의 근사 일치와 실제 선택 행동 일치를 별도로 확인한다.",
+        "mayDiffer": "마스크는 같은 상태에서 만든 것을 두 출력에 적용한다."
+      }
+    },
+    {
+      "title": "하나의 파일로 배포할 가중치를 확인한다",
+      "body": "ONNX는 큰 가중치를 외부 데이터 파일에 둘 수 있습니다. 그래프 파일만 복사했는데 필요한 weight 파일이 빠지면 배포 산출물이 완전하지 않습니다. 외부 파일 경로를 품은 그래프와, 그래프·가중치가 하나에 들어 있는 파일은 교체와 배포의 단위도 다릅니다.\n\n이 경로는 단일 파일을 선택합니다. load_external_data=False로 그래프를 읽고 TensorProto가 external data를 참조하는지 검사합니다. initializer뿐 아니라 중첩된 속성의 TensorProto도 찾도록 protobuf 메시지를 순회합니다. 예상하지 않은 동반 파일이 생겨도 공개 전에 거절합니다.\n\n외부 가중치가 필요한 모델을 지원하려면 경로·manifest·묶음 검증·교체 순서를 포함한 다른 배포 계약을 설계해야 합니다. 현재 작은 정책망은 내장 가중치 파일로 관리합니다.",
+      "codes": [
+        {
+          "label": "중첩 TensorProto의 외부 데이터 검사",
+          "language": "python",
+          "text": "def ensure_embedded(message):\n    \"\"\"Walk protobuf messages so nested tensors cannot hide external weights.\"\"\"\n    if isinstance(message, onnx.TensorProto):\n        if message.data_location == onnx.TensorProto.EXTERNAL or message.external_data:\n            raise ValueError('deployment requires embedded tensor data in one ONNX file')\n    for descriptor, value in message.ListFields():\n        if descriptor.type == descriptor.TYPE_MESSAGE:\n            children = (value,) if isinstance(value,Message) else value\n            for child in children:\n                ensure_embedded(child)"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def ensure_embedded",
+        "invariant": "실제로 공개하는 파일 단위와 그래프의 데이터 의존성을 일치시킨다.",
+        "mayDiffer": "현재 exporter는 단일 ONNX 파일만 지원하며 외부 데이터 묶음은 거절한다."
+      }
+    },
+    {
+      "title": "검사된 임시 후보를 목적지로 교체한다",
+      "body": "처음부터 기존 policy.onnx에 쓰면 변환이나 검사 도중 실패했을 때 정상 모델이 사라질 수 있습니다. 목적지와 같은 파일시스템의 임시 디렉터리에서 후보를 만들고 구조·입출력·실행 검사를 모두 마친 뒤 교체합니다.\n\nfsync는 후보 파일의 쓰기를 동기화하는 요청이고 os.replace는 이름이 가리키는 파일을 교체하는 커밋 지점입니다. 교체 전 예외이면 TemporaryDirectory가 임시 자료를 정리하고 기존 목적지는 그대로 남습니다. source와 destination이 같은 경로인 실수도 시작 전에 거절합니다.\n\n이 계약은 단일 작성자를 전제로 합니다. 후보를 검사하는 동안 다른 작성자가 같은 목적지나 입력 모델을 갱신하지 않도록 실행을 관리합니다.",
+      "codes": [
+        {
+          "label": "검사 → 파일 동기화 → 이름 교체",
+          "language": "python",
+          "text": "            graph=onnx.load(str(candidate),load_external_data=False)\n            ensure_embedded(graph)\n            validate_io(graph,input_specs,output_specs)\n            imports={item.domain:item.version for item in graph.opset_import}\n            if imports.get('') != opset:\n                raise ValueError('exported opset differs from request')\n            if metadata:\n                onnx.helper.set_model_props(graph,metadata)\n            onnx.checker.check_model(graph,full_check=True)\n            onnx.save_model(graph,str(candidate),save_as_external_data=False)\n            evidence=compare_outputs(model,candidate,cases,input_specs,output_specs)\n            if {p.name for p in Path(folder).iterdir()} != {'candidate.onnx'}:\n                raise ValueError('export created unexpected companion files')\n            with candidate.open('r+b') as stream:\n                stream.flush();os.fsync(stream.fileno())\n            os.replace(candidate,out)"
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def export_checked",
+        "invariant": "실제 사용할 파일 후보를 검사하고 성공한 후보만 공개한다.",
+        "mayDiffer": "현재 프로젝트는 canonical 모델과 게임 상수를 사용한다. 누적 실습은 study_py의 관측/행동 규약과 TrainingRun 모델을 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "misconception",
+          "title": "파일 교체와 전원 장애 내구성",
+          "body": "이 절차는 후보 파일을 fsync하고 이름을 원자적으로 바꿉니다. 부모 디렉터리의 동기화까지 수행하지 않으므로 전원 장애 이후 내구성 보장과는 구분합니다."
+        }
+      ]
+    },
+    {
+      "title": "출처와 실행 조건을 남긴다",
+      "body": "실습은 입력 checkpoint의 해시를 로드 전후 대조하고 실제 native 모듈 경로를 확인합니다. graph metadata에는 관측/행동 규약과 checkpoint 해시를 넣습니다. 반환 기록에는 ONNX 파일 해시, 선택 코드와 확장 식별값, 수치 대조 결과가 있습니다.\n\n파일 이름이 같아도 내용은 바뀔 수 있습니다. 해시는 어떤 파일을 비교했는지 연결하는 값입니다. 메타데이터의 버전 역시 읽는 쪽이 계약에 맞게 검사해야 의미가 있습니다.\n\nexport_checkpoint는 CPU RNG 범위를 소유하고 새 TrainingRun을 읽습니다. 실제 검증은 그 모델의 eval forward로 수행하며 학습 수집기나 optimizer를 진행시키지 않습니다. 필요한 자료를 읽고 난 뒤 run은 finally에서 닫습니다.",
+      "codes": [
+        {
+          "label": "161-onnx-export/python/export_policy.py — 완성 실행기",
+          "language": "python",
+          "file": "checkpoints/161-onnx-export/python/export_policy.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/export_onnx.py",
+        "symbol": "def export",
+        "invariant": "모델 파일·그래프·의미 규약을 식별값으로 연결한다.",
+        "mayDiffer": "현재 C++ 이름/형상 검사가 metadata의 의미 버전까지 검사하는 것으로 확대하지 않는다."
+      }
+    },
+    {
+      "title": "성공 사례와 실패 경계를 함께 실행한다",
+      "body": "실습 README의 명령으로 현재 Python용 study_py를 빌드하고 저장된 training.pt를 입력으로 지정합니다. seed와 probe-pieces는 검사할 관측 집합을 정하는 예제 설정입니다. 모델마다 같은 관측 수가 반드시 수집되는 것은 아니므로 실제 사례 수를 기록합니다.\n\n정상 경로에서는 실제 학습 업데이트를 거친 모델을 내보내고 native 관측에서 출력과 행동을 대조합니다. 실패 경로에서는 symbolic shape, 다른 출력 타입이나 이름, external tensor, 수치 불일치, 목적지 교체 실패를 확인합니다. 기존 목적지의 바이트와 임시 파일 정리도 함께 검사합니다.\n\n완료 후에는 훈련 상태 파일과 검사한 추론 파일이 별개로 남습니다.",
+      "codes": [
+        {
+          "label": "161-onnx-export/python/onnx_pipeline.py — 완성 변환 파이프라인",
+          "language": "python",
+          "file": "checkpoints/161-onnx-export/python/onnx_pipeline.py",
+          "collapsed": true
+        },
+        {
+          "label": "161-onnx-export/python/onnx_contract.py — 완성 형식 검사",
+          "language": "python",
+          "file": "checkpoints/161-onnx-export/python/onnx_contract.py",
+          "collapsed": true
+        },
+        {
+          "label": "161-onnx-export/tests/onnx_export_contract.py — 실제 관측 검사",
+          "language": "python",
+          "file": "checkpoints/161-onnx-export/tests/onnx_export_contract.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/netbot/onnx_pipeline.py",
+        "symbol": "def export_checked",
+        "invariant": "실제 사용할 파일 후보를 검사하고 성공한 후보만 공개한다.",
+        "mayDiffer": "현재 프로젝트는 canonical 모델과 게임 상수를 사용한다. 누적 실습은 study_py의 관측/행동 규약과 TrainingRun 모델을 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "misconception",
+          "title": "검사한 사례에서 보장하는 범위",
+          "body": "실행 성공, 검사한 관측의 수치·행동 일치, 전체 상태 공간의 동일성, 실제 게임 성능은 서로 다른 질문입니다. 보고서의 모델·입력·provider 범위 안에서 결과를 해석합니다."
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "161-1",
+      "question": "추론용 ONNX 파일만 남아 있습니다. 직접 복구할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "저장 당시 optimizer와 RNG"
+        },
+        {
+          "id": "b",
+          "text": "수집 중이던 환경 상태"
+        },
+        {
+          "id": "c",
+          "text": "파일에 담긴 추론 그래프와 가중치"
+        },
+        {
+          "id": "d",
+          "text": "전체 훈련 재개 지점"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "파일에 담긴 추론 그래프와 가중치",
+      "explanation": "이 export는 추론 산출물을 만듭니다. 학습 재개는 별도의 TrainingRun checkpoint 계약입니다."
+    },
+    {
+      "id": "161-2",
+      "question": "ONNX checker를 통과한 모델의 행동 출력 폭이 게임 계약과 다릅니다. 판단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "checker 통과면 사용 가능"
+        },
+        {
+          "id": "b",
+          "text": "게임 입출력 계약 검사에서 거절해야 한다"
+        },
+        {
+          "id": "c",
+          "text": "부족한 출력을0으로 채운다"
+        },
+        {
+          "id": "d",
+          "text": "마스크 길이를 임의로 바꾼다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "게임 입출력 계약 검사에서 거절해야 한다",
+      "explanation": "ONNX 표현이 유효한 것과 게임의 관측/행동 경계에 맞는 것은 다른 조건입니다."
+    },
+    {
+      "id": "161-3",
+      "question": "두 실행기의 출력이 allclose를 통과했습니다. 합법 행동도 반드시 같을까요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "항상 같다"
+        },
+        {
+          "id": "b",
+          "text": "float32면 항상 같다"
+        },
+        {
+          "id": "c",
+          "text": "가중치 해시가 있으면 항상 같다"
+        },
+        {
+          "id": "d",
+          "text": "가까운 값의 순서가 바뀔 수 있어 argmax를 별도로 대조한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "가까운 값의 순서가 바뀔 수 있어 argmax를 별도로 대조한다",
+      "explanation": "근사 수치 일치는 최대값의 인덱스 일치를 보장하지 않습니다. 같은 마스크를 적용한 실제 선택을 검사합니다."
+    },
+    {
+      "id": "161-4",
+      "question": "변환 후 수치 비교에서 실패했습니다. 기존 정책 파일을 보존하려면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "검사 전부터 목적지에 직접 쓴다"
+        },
+        {
+          "id": "b",
+          "text": "실패를 무시한다"
+        },
+        {
+          "id": "c",
+          "text": "임시 후보를 검사하고 성공 후 목적지를 교체한다"
+        },
+        {
+          "id": "d",
+          "text": "기존 파일을 먼저 삭제한다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "임시 후보를 검사하고 성공 후 목적지를 교체한다",
+      "explanation": "검사와 공개를 분리하면 변환·검사 실패가 이전 정상 파일을 손상시키지 않습니다."
+    },
+    {
+      "id": "161-5",
+      "question": "추적 입력 하나에서 Python if의 한쪽만 실행됐습니다. 일반적으로 무엇을 가정할 수 없나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "추적 경로에 연산이 있다는 것"
+        },
+        {
+          "id": "b",
+          "text": "다른 모든 입력의 분기까지 그래프가 표현한다는 것"
+        },
+        {
+          "id": "c",
+          "text": "그래프를 검사할 수 있다는 것"
+        },
+        {
+          "id": "d",
+          "text": "실제 입력을 추가로 대조할 수 있다는 것"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "다른 모든 입력의 분기까지 그래프가 표현한다는 것",
+      "explanation": "추적된 경로와 임의의 Python 프로그램 전체 의미는 다릅니다. 입력 의존 제어 흐름의 표현과 검증을 별도로 설계해야 합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "누적 코드에 export 실행기와 그래프 계약 검사기를 추가한다.",
+      "저장된 모델로 실제 native 관측 사례를 수집하고 임시 ONNX를 만든다.",
+      "구조·입출력·수치·합법 선택 검사를 마친 뒤 파일을 교체한다."
+    ],
+    "failureChecks": [
+      "같은 입력/출력 경로와 잘못된 배포 shape를 거절한다.",
+      "수치 허용오차와 선택 행동 차이를 별도로 확인한다.",
+      "변환·검사·교체 전 실패에서 이전 파일과 임시 정리를 확인한다."
+    ],
+    "expected": "검사한 입력 집합과 실행 환경을 근거로 새 추론 파일을 원래 모델과 비교하고 공개할 수 있다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek metadata 검사 초안 검토, 실제 PyTorch/ONNX Runtime와 native 관측 대조",
+    "corrections": [
+      "기존 목적지 직접 export와 원본 경로 덮어쓰기 방지",
+      "고정 dtype/shape·external data·실제 수치와 선택 검사 추가",
+      "constant folding·추적 입력·checker 성공의 의미 교정"
+    ]
+  },
+  "validation": [
+    "현재 실제 게임 관측의 PyTorch↔CPU ONNX Runtime 출력/합법 선택 비교",
+    "누적 native 계약과 ONNX export/실패 보존 검사",
+    "대상 OS C++ 실행·GPU·장기 플레이 성능·모든 입력 동등성 미검증"
+  ]
+}

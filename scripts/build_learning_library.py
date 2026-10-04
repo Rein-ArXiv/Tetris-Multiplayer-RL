@@ -21,19 +21,43 @@ ROOT = Path(__file__).resolve().parents[1]
 BLOG = ROOT / "docs/blog"
 DEST = ROOT / "docs/learn/library.js"
 REPORT = ROOT / "docs/learn/library-manifest.json"
-SOURCE_ROOTS = {"src", "core", "renderer", "platform", "audio", "net", "server", "meta", "bot", "python", "tests", "scripts", "web"}
+SOURCE_ROOTS = {"bindings", "src", "core", "renderer", "platform", "audio", "net", "server", "meta", "bot", "python", "tests", "scripts", "web"}
 SOURCE_EXTENSIONS = {".cpp", ".h", ".hpp", ".c", ".py", ".sh", ".ps1", ".html"}
 
 
 def source_allowed(path: Path) -> bool:
     """Never enumerate user credentials, databases, .git or local settings."""
-    if path.is_symlink() or not path.is_file():
+    try:
+        rel = path.relative_to(ROOT)
+    except ValueError:
         return False
-    rel = path.relative_to(ROOT)
+    if not rel.parts or any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
+        return False
+    # Reject symlinked parents as well as the final component; snapshots stay
+    # inside the named repository path, without following external targets.
+    if path.resolve() != path or not path.is_file():
+        return False
     return rel.as_posix() == "CMakeLists.txt" or (
         rel.parts[0] in SOURCE_ROOTS and path.suffix in SOURCE_EXTENSIONS
-        and not any(part.startswith(".") or part == "__pycache__" for part in rel.parts)
     )
+
+
+def lesson_source_paths(directory: Path) -> set[Path]:
+    """A reviewed lesson's explicit code reference survives prose reorganization."""
+    sources = set()
+    for manuscript in sorted(directory.glob("*.json")):
+        lesson = json.loads(manuscript.read_text(encoding="utf-8"))
+        if lesson.get("state") != "reviewed":
+            continue
+        for section in lesson.get("sections", []):
+            reference = section.get("reference")
+            if not reference:
+                continue
+            name = reference.get("path")
+            if not isinstance(name, str) or not source_allowed(ROOT / name):
+                raise ValueError(f"Invalid lesson source reference in {manuscript.name}: {name!r}")
+            sources.add(ROOT / name)
+    return sources
 
 
 def build() -> tuple[str, str]:
@@ -42,11 +66,11 @@ def build() -> tuple[str, str]:
     paths += sorted(p for p in (ROOT / "docs").glob("*.md") if p.name not in {"learning-companion.md", "README.md"})
     docs = {}
     path_to_doc = {p.resolve(): ("part" + re.search(r"part(\d+)", p.name)[1] if re.match(r"part\d+-", p.name) else p.stem) for p in paths}
-    source_paths = {ROOT / "CMakeLists.txt"}
+    source_paths = {ROOT / "CMakeLists.txt"} | lesson_source_paths(ROOT / "docs/learn/lessons")
     # Only source files actually named in the teaching corpus become browser data.
     for path in paths:
         text = path.read_text(encoding="utf-8")
-        for candidate in re.findall(r"(?:src|core|renderer|platform|audio|net|server|meta|bot|python|tests|scripts|web)/[\w./-]+\.(?:cpp|hpp|h|c|py|sh|ps1|html)\b", text):
+        for candidate in re.findall(r"(?:bindings|src|core|renderer|platform|audio|net|server|meta|bot|python|tests|scripts|web)/[\w./-]+\.(?:cpp|hpp|h|c|py|sh|ps1|html)\b", text):
             resolved = ROOT / candidate
             if source_allowed(resolved):
                 source_paths.add(resolved)

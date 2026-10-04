@@ -413,8 +413,10 @@ constexpr float SECONDS_PER_TICK = 1.0f / static_cast<float>(TICKS_PER_SECOND);
                 myBp=r.reward->bp;
                 botRewardStatus=r.reward->awarded_bp ? "+"+std::to_string(r.reward->awarded_bp)+" BP earned" : "Daily bot BP limit reached";
             } else {
-                botClaimRetryable=r.status==0 || r.status==429 || r.status>=500;
-                botRewardStatus=botClaimRetryable ? "BP not confirmed - retry below" : "Victory could not be verified";
+                const bool policyUnavailable=r.reason=="policy_unavailable" || r.reason=="model_unavailable";
+                botClaimRetryable=!policyUnavailable && (r.status==0 || r.status==429 || r.status>=500);
+                botRewardStatus=policyUnavailable ? "Opponent policy unavailable - no BP awarded"
+                    : botClaimRetryable ? "BP not confirmed - retry below" : "Victory could not be verified";
             }
         }
 
@@ -1022,10 +1024,18 @@ Down이 적용될 수 있다. 키를 전부 뗀 뒤 조작을 받는 정책은 �
 ```cpp
                 const uint8_t botMask = botController.next(gameBot->sim,
                     [&](const SimGame& sim, int& col, int& rot) {
-                        bool ok = botUsesHeuristic ? bot::heuristic_placement(sim, col, rot)
-                            : (botOnnx.IsLoaded() && botOnnx.Infer(sim, col, rot));
-                        return ok || bot::fallback_placement(sim, col, rot);
+                        const auto primary=[&](const SimGame& state,int& c,int& r) {
+                            return botUsesHeuristic ? bot::heuristic_placement(state,c,r)
+                                : (botOnnx.IsLoaded() && botOnnx.Infer(state,c,r));
+                        };
+                        const auto decision=bot::choose_policy(sim,primary,bot::fallback_placement,true,col,rot);
+                        botRun.observe(decision.fault);
+                        return decision.selected();
                     });
+                if(botRun.degraded()) {
+                    botTicket.clear();botReplay.clear();
+                    botRewardStatus="Practice - opponent policy failed; no BP";
+                }
 
                 if(!botTicket.empty()) {
                     if(botReplay.size()<bot::kMaxRewardTicks)botReplay.push_back(inputMask);
@@ -1043,13 +1053,16 @@ Down이 적용될 수 있다. 키를 전부 뗀 뒤 조작을 받는 정책은 �
 
 ```
 
-세 덩어리로 읽힌다.
+입력 결정·보상 적격성·규칙 진행·표현의 경계를 나누어 읽는다.
 
 1. **봇 입력 페이싱.** `bot::Controller`가 생각 시간·입력 간격·최소 배치 시간을 틱 단위로 관리한다. 새 피스에서는 큐를 비워 이전 계획이 넘어오지 않는다. 프레임 단위로 기다리면 FPS가 높은 기기에서 봇만 빨라지므로 시뮬레이션 틱으로 센다.
-2. **가비지 교환.** 두 `SimGame` 은 서로를 모른다. 연결은 `AttackLinesSent()` 누적치의 **델타**를 읽어 반대편 `AddPendingGarbage()` 로 넣는 이 다섯 줄뿐이다. 누적치의 델타를 쓰는 이유는 `LockBlock` 이 한 틱에 여러 줄을 보낼 수도, 캐치업으로 여러 틱이 한 프레임에 돌 수도 있기 때문이다 — 같은 판의 누적값이 단조 증가하고 기준값을 제때 갱신할 때 "지난번에 읽은 값"으로 새 증가분을 구분할 수 있다. 새 경기에는 기준값도 리셋해야 하며, int 상한에서 누적값이 포화되면 이후 증가분은 보존되지 않는다. 양쪽 판을 먼저 진행하고 가비지를 교환하므로 이번 틱의 공격은 다음 고정부터 적용될 수 있다.
+2. **가비지 교환.** 두 `SimGame` 은 서로를 모른다. 연결은 `AttackLinesSent()` 누적치의 **델타**를 읽어 반대편 `AddPendingGarbage()` 로 넣는 `exchange_garbage` 호출이 담당한다. 누적치의 델타를 쓰는 이유는 `LockBlock` 이 한 틱에 여러 줄을 보낼 수도, 캐치업으로 여러 틱이 한 프레임에 돌 수도 있기 때문이다 — 같은 판의 누적값이 단조 증가하고 기준값을 제때 갱신할 때 "지난번에 읽은 값"으로 새 증가분을 구분할 수 있다. 새 경기에는 기준값도 리셋해야 하며, int 상한에서 누적값이 포화되면 이후 증가분은 보존되지 않는다. 양쪽 판을 먼저 진행하고 가비지를 교환하므로 이번 틱의 공격은 다음 고정부터 적용될 수 있다.
 3. **연출 소비.** 두 보드가 각자의 `Callout` 과 `ShakeState` 를 갖고 같은 `apply_fx` 람다를 탄다(부록 A).
 
-이 세 책임은 Net 모드에도 유지된다 (`src/main.cpp`). 차이는 상대 입력이 `botController.next()` 대신 `session.GetRemoteInput(simTick, ri)` 에서 온다는 것뿐이다. Part 9의 봇을 "네트워크 대신 추론에서 입력이 나오는 피어" 로 취급할 수 있는 이유가 여기 있다.
+정책 오류가 기록되면 botTicket과 입력 증명을 비우고 무보상 연습임을 표시한다.
+이 표시는 서버 검증을 대체하지 않으며, 복구된 다음 추론으로 과거 실패를 지우지 않는다.
+
+입력·규칙·표현의 책임은 Net 모드에도 유지된다 (`src/main.cpp`). 차이는 상대 입력이 `botController.next()` 대신 `session.GetRemoteInput(simTick, ri)` 에서 온다는 것뿐이다. Part 9의 봇을 "네트워크 대신 추론에서 입력이 나오는 피어" 로 취급할 수 있는 이유가 여기 있다.
 
 Part 4 체크포인트의 시뮬 단계는 Single 분기 하나뿐이므로 `botController`, 상대 프로필, `lastAttackHuman/Bot` 은 아직 선언조차 없다. [Part 9](./part9-rl-onnx-bot.md) 가 `bot::heuristic_placement` / `bot::expand_placement` 와 함께 이 블록 전체를 도입한다.
 

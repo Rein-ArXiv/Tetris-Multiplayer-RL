@@ -3,10 +3,12 @@
 #include <cstdlib>
 #include <iostream>
 
+static bool fallback_fixture=false;
 static bool pick(const SimGame& s,int& c,int& r) {
-    return bot::heuristic_placement(s,c,r) || bot::fallback_placement(s,c,r);
+    return fallback_fixture ? bot::fallback_placement(s,c,r) : bot::heuristic_placement(s,c,r);
 }
 int main(int argc,char** argv) {
+    fallback_fixture=argc>2 && std::string(argv[2])=="fallback";
     const uint64_t seed=argc>1?std::stoull(argv[1]):42;
     bot::Opponent enemyProfile;
     enemyProfile.inputIntervalTicks=1;enemyProfile.thinkTicks=0;enemyProfile.minPieceTicks=1;

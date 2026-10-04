@@ -920,10 +920,10 @@ int main(int argc, char** argv)
     std::unique_ptr<Game> gameBot;
     bot::BotOnnx botOnnx;
     bot::Controller botController;
+    bot::RunStatus botRun;
     BotEntry selectedOpponent;
-    // 봇 로스터 — model/*.onnx 와 model/bots/*.onnx 를 스캔한다. 10개 이상
-    // 모델을 떨궈두어도 선택 화면에서 스크롤/압축 표시된다. 표시 이름과 기본
-    // 속도는 model/bots.cfg 로 덮어쓸 수 있다.
+    // Explicit character profiles own identity, artwork, policy and pacing.
+    // Legacy model discovery appends unregistered policies for local selection.
     std::vector<BotEntry> botRoster = bot::discover_opponents();
     // Load each image once. Failed images use the existing built-in bot icon.
     std::unordered_map<std::string, ImageHandle> opponentImages;
@@ -990,7 +990,7 @@ int main(int argc, char** argv)
     BotMatchResult botMatchResult = BotMatchResult::None;
     int lastAttackHuman = 0, lastAttackBot = 0;
     struct BotStartResult { std::optional<meta::client::BotChallenge> challenge; int status=0; };
-    struct BotClaimResult { std::optional<meta::client::BotReward> reward; int status=0; };
+    struct BotClaimResult { std::optional<meta::client::BotReward> reward; int status=0; std::string reason; };
     std::future<BotStartResult> botStartOp;
     std::future<BotClaimResult> botClaimOp;
     std::string botTicket, botRewardStatus;
@@ -1003,6 +1003,7 @@ int main(int argc, char** argv)
         gameSingle=std::make_unique<Game>(seed);
         gameBot=std::make_unique<Game>(seed);
         botController.reset(selectedOpponent.inputIntervalTicks,selectedOpponent.thinkTicks,selectedOpponent.minPieceTicks);
+        botRun.reset(botTicket.empty()?bot::Mode::practice:bot::Mode::reward);
         botReplay.clear(); botClaimSent=false; botClaimRetryable=false;
         botMatchResult=BotMatchResult::None;
         lastAttackHuman=lastAttackBot=0;
@@ -1022,14 +1023,14 @@ int main(int argc, char** argv)
         }
     };
     auto claimBotReward = [&]() {
-        if(!metaClient || botTicket.empty() || botClaimOp.valid())return;
+        if(!metaClient || !botRun.reward_eligible() || botTicket.empty() || botClaimOp.valid())return;
         std::string hex;hex.reserve(botReplay.size()*2);
         constexpr char digits[]="0123456789abcdef";
         for(auto mask:botReplay){hex+=digits[mask>>4];hex+=digits[mask&15];}
         auto* mc=metaClient.get();auto token=authToken;auto ticket=botTicket;
         botClaimSent=true;botClaimRetryable=false;botRewardStatus="Checking victory...";
         botClaimOp=std::async(std::launch::async,[mc,token,ticket,hex] {
-            BotClaimResult r;r.reward=mc->claim_bot_reward(token,ticket,hex,&r.status);return r;
+            BotClaimResult r;r.reward=mc->claim_bot_reward(token,ticket,hex,&r.status,&r.reason);return r;
         });
     };
 
@@ -1176,8 +1177,10 @@ int main(int argc, char** argv)
                 myBp=r.reward->bp;
                 botRewardStatus=r.reward->awarded_bp ? "+"+std::to_string(r.reward->awarded_bp)+" BP earned" : "Daily bot BP limit reached";
             } else {
-                botClaimRetryable=r.status==0 || r.status==429 || r.status>=500;
-                botRewardStatus=botClaimRetryable ? "BP not confirmed - retry below" : "Victory could not be verified";
+                const bool policyUnavailable=r.reason=="policy_unavailable" || r.reason=="model_unavailable";
+                botClaimRetryable=!policyUnavailable && (r.status==0 || r.status==429 || r.status>=500);
+                botRewardStatus=policyUnavailable ? "Opponent policy unavailable - no BP awarded"
+                    : botClaimRetryable ? "BP not confirmed - retry below" : "Victory could not be verified";
             }
         }
 
@@ -1404,10 +1407,18 @@ int main(int argc, char** argv)
             {
                 const uint8_t botMask = botController.next(gameBot->sim,
                     [&](const SimGame& sim, int& col, int& rot) {
-                        bool ok = botUsesHeuristic ? bot::heuristic_placement(sim, col, rot)
-                            : (botOnnx.IsLoaded() && botOnnx.Infer(sim, col, rot));
-                        return ok || bot::fallback_placement(sim, col, rot);
+                        const auto primary=[&](const SimGame& state,int& c,int& r) {
+                            return botUsesHeuristic ? bot::heuristic_placement(state,c,r)
+                                : (botOnnx.IsLoaded() && botOnnx.Infer(state,c,r));
+                        };
+                        const auto decision=bot::choose_policy(sim,primary,bot::fallback_placement,true,col,rot);
+                        botRun.observe(decision.fault);
+                        return decision.selected();
                     });
+                if(botRun.degraded()) {
+                    botTicket.clear();botReplay.clear();
+                    botRewardStatus="Practice - opponent policy failed; no BP";
+                }
 
                 if(!botTicket.empty()) {
                     if(botReplay.size()<bot::kMaxRewardTicks)botReplay.push_back(inputMask);
@@ -1710,7 +1721,7 @@ int main(int argc, char** argv)
         }
 
         // ── 봇 선택 화면 ─────────────────────────────────────────────────────
-        //   model/*.onnx + model/bots/*.onnx 로스터에서 상대 봇을 고른다.
+        //   명시 캐릭터와 자동 탐색 모델의 로스터에서 상대를 고른다.
         //   선택 시 그 모델을 로드하고
         //   성공하면 BotSingle 로 진입. (알고리즘별 모델을 떨궈두면 여기에 나열됨.)
         if (app == AppMode::BotSelect)
@@ -1722,7 +1733,7 @@ int main(int argc, char** argv)
                     selectedOpponent.inputIntervalTicks=r.challenge->input_ticks;
                     selectedOpponent.thinkTicks=r.challenge->think_ticks;
                     selectedOpponent.minPieceTicks=r.challenge->min_piece_ticks;
-                    botRewardStatus="Win for 10 BP (daily max 100)";
+                    botRewardStatus="Reward match - BP after server verification";
                     beginBotRound(r.challenge->seed);
                 } else {
                     botStartFailed = true;

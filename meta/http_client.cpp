@@ -460,14 +460,18 @@ std::optional<BotChallenge> MetaClient::start_bot_challenge(const std::string& t
     if(id.size()!=32 || !seed || *seed<0 || !interval || *interval<1 || *interval>30 || !think || *think<0 || *think>180 || !minimum || *minimum<1 || *minimum>600)return std::nullopt;
     return BotChallenge{id,static_cast<uint64_t>(*seed),static_cast<int>(*interval),static_cast<int>(*think),static_cast<int>(*minimum)};
 }
-std::optional<BotReward> MetaClient::claim_bot_reward(const std::string& token,const std::string& ticket,const std::string& inputs,int* status) {
+std::optional<BotReward> MetaClient::claim_bot_reward(const std::string& token,const std::string& ticket,const std::string& inputs,int* status,std::string* server_error) {
     if(status)*status=0;
+    if(server_error)server_error->clear();
     if(!valid_)return std::nullopt;
     const auto body="{\"token\":\""+proto::json_escape(token)+"\",\"ticket\":\""+proto::json_escape(ticket)+"\",\"inputs_hex\":\""+proto::json_escape(inputs)+"\"}";
     auto r=post_json(*this,host_,port_,https_,"/v1/bots/claim",{},body,10);
     if(!r)return std::nullopt;
     if(status)*status=r->status;
-    if(r->status!=200)return std::nullopt;
+    if(r->status!=200) {
+        if(server_error)*server_error=proto::find_string(r->body,"error");
+        return std::nullopt;
+    }
     auto earned=proto::find_int(r->body,"awarded_bp"),bp=proto::find_int(r->body,"bp");
     if(!earned || *earned<0 || *earned>10 || !bp || *bp<0 || *bp>2147483647)return std::nullopt;
     return BotReward{static_cast<int>(*earned),static_cast<int>(*bp)};

@@ -1,14 +1,14 @@
 """Legal action masks for the placement-level action space.
 
-The action space is fixed at ``NUM_PLACEMENTS == NUM_COLS * NUM_ROTATIONS == 40``,
-encoded as ``action_index = col * NUM_ROTATIONS + rot``.
+The action domain has NUM_COLS * NUM_ROTATIONS labels, encoded as
+``action_index = col * NUM_ROTATIONS + rot``. Labels describe the piece origin
+and orientation, not a searched input route.
 
-The mask zeros out placements that are out of bounds or blocked, so the policy
-can never sample an illegal move. It does **not** deduplicate: a piece whose
-rotations are not all distinct (O has one shape, I/S/Z have two) keeps every
-rotation index that lands legally, so the same resulting board can be reachable
-through more than one action. That dilutes the policy distribution slightly but
-keeps the action index identical on both sides of the pybind11 boundary.
+The mask marks entries returned by SimGame.legal_placements(). It retains
+geometrically duplicate orientations. Probability of an equivalent outcome is
+the sum over its labels; label entropy can include within-group uncertainty.
+A policy must apply the mask to finite legal logits and handle an empty mask
+before sampling. This endpoint mask does not prove tick-input reachability.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def encode_action(col: int, rot: int) -> int:
-    """Map a ``(col, rot)`` placement to a flat action index in ``[0, 40)``."""
+    """Map a ``(col, rot)`` placement in the valid domain to a flat index."""
     return col * NUM_ROTATIONS + rot
 
 

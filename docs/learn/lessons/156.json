@@ -1,0 +1,444 @@
+{
+  "id": "lesson-156",
+  "title": "정책 네트워크: 입력 형상과 출력 의미",
+  "shortTitle": "NCHW·합성곱·정책/가치·자동 미분·추적 경계",
+  "state": "reviewed",
+  "version": "1.0.1",
+  "start": "시작: 관측·합법 행동·환경과 비교할 휴리스틱이 있지만 학습할 표현을 가진 정책 함수는 없습니다.",
+  "finish": "완료: native 관측에서 정책/가치를 계산하는 작은 모델과 입력 계약을 만들고 실제 행동·gradient 갱신까지 연결합니다.",
+  "objective": "텐서 축에서 공간 특징·피스 결합·정책/가치 출력을 추적하고, shape 오류·마스킹·미분/갱신·내보내기 경계의 차이를 설명한다.",
+  "prerequisites": [
+    "관측의 축·피스 one-hot·CPU Tensor",
+    "합법 행동 마스크와 log 확률",
+    "환경 보상·리턴과 휴리스틱 기준 정책"
+  ],
+  "recap": {
+    "points": [
+      "보드 특징과 전이에서 생긴 줄 사건을 구별한다.",
+      "후보를 복사해 평가하고 동점·종료 우선순위를 명시한다.",
+      "정책을 비교할 때 정보·규칙·계산 예산을 맞춘다."
+    ],
+    "bridge": "이제 관측을 변환하는 가중치를 모델 파라미터로 두고 정책 출력과 가치 출력을 함께 만듭니다."
+  },
+  "sections": [
+    {
+      "title": "손으로 고른 특징에서 학습할 표현으로",
+      "body": "보드의 높이·구멍·표면을 수치로 만들고 후보를 비교할 수 있습니다. 이제 관측을 받아 **행동별 점수와 상태 가치**를 계산하는 함수를 만듭니다. 함수 안의 가중치를 자료로 조정할 수 있도록 PyTorch의 nn.Module로 구성합니다.\n\n휴리스틱이 정한 특징 대신, 작은 공간 필터와 완전연결층이 중간 표현을 계산합니다. **파라미터(parameter)**는 학습 과정에서 바꾸는 수치입니다. 층의 개수·폭과 관측 축은 모델을 만들 때 정하는 구성입니다. 이 둘을 구별해야 가중치를 읽었는데 모델 모양이 맞지 않는 문제를 진단할 수 있습니다.\n\n산출물은 `156-policy-network`입니다. 규칙·환경·관측·합법 행동은 그대로 사용하고 Python 모델을 덧붙입니다. 실제 관측을 넣어 합법 행동을 한 번 실행하고, 짧은 합성 표적 실험으로 두 head의 gradient가 공유 층까지 도달하는지 확인합니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    },
+    {
+      "title": "NCHW에서 각 축의 뜻을 고정한다",
+      "body": "**텐서(tensor)**는 여기서 축마다 의미를 가진 수치 배열입니다. board의 축은 NCHW 순서입니다. N은 한 번에 계산할 표본 수 B, C는 채널, H/W는 행·열입니다. 관측의 잠긴 점유 보드는 한 채널입니다. current와 next는 각각 `(B,K)`이며 K는 피스 어휘의 길이입니다.\n\n**배치(batch)**는 같은 계약을 가진 표본을 묶은 것입니다. 서로 다른 경기의 관측도 함께 넣을 수 있습니다. 배치 축을 시간 축으로 해석하거나, 한 표본의 CHW를 NCHW로 착각하면 계산 대상이 달라집니다. `stack_batch`가 표본 축을 만들고 `to_tensors`가 CPU 배열을 Tensor로 연결합니다.\n\nPolicySchema는 native 관측·행동 스키마를 대조해 크기를 가져옵니다. actions는 열 수와 회전 라벨 수의 곱이고, pieces는 실제 카탈로그 길이입니다. 두 스키마의 열 수가 다르면 결합을 거절합니다. 피스 순서는 encode가 만든 one-hot의 순서를 유지합니다.",
+      "codes": [
+        {
+          "label": "python/policy_network.py — 스키마의 구성",
+          "language": "python",
+          "text": "@dataclass(frozen=True)\nclass PolicySchema:\n    rows: int\n    cols: int\n    pieces: int\n    actions: int\n\n    def __post_init__(self):\n        for name in ('rows', 'cols', 'pieces', 'actions'):\n            object.__setattr__(self, name, positive_size(getattr(self, name), name))\n\n    @classmethod\n    def from_native(cls, observation, action):\n        if observation['version'] != 1:\n            raise ValueError('unsupported observation schema')\n        columns, orientations = dimensions(action)\n        ids = tuple(positive_size(x, 'piece id') for x in observation['piece_ids'])\n        if len(set(ids)) != len(ids):\n            raise ValueError('piece ids must be unique')\n        if observation['cols'] != columns:\n            raise ValueError('observation/action column mismatch')\n        return cls(observation['rows'], columns, len(ids), columns * orientations)"
+        }
+      ],
+      "reference": {
+        "path": "python/common/obs.py",
+        "symbol": "def build_observation",
+        "invariant": "관측을 의미 있는 축과 유한한 값으로 만들고 표본 축을 별도로 추가한다.",
+        "mayDiffer": "현재 피스 ID-1 순서와 학습 카탈로그 순서가 다르다. 관측 schema와 가중치의 결합을 확인해야 한다. 현재 _piece_one_hot은 범위 밖 ID를 영벡터로 남긴다. 학습 encode는 알 수 없는 ID를 거절한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "같은 크기와 같은 뜻은 다르다",
+          "body": "one-hot의 위치를 바꾸면서 K를 그대로 두면 shape 검사도 통과합니다. 학습 체크포인트는 카탈로그 순서, 현재 프로젝트는 피스 ID-1 순서를 사용합니다. 모델이 기대한 의미와 실제 관측 순서의 대응이 필요합니다."
+        }
+      ]
+    },
+    {
+      "title": "원소 수가 맞아도 잘못된 입력을 찾는다",
+      "body": "직사각형 보드의 H/W를 뒤집는다고 원소 수가 달라지지는 않습니다. flatten 뒤의 길이만 검사하면 이 잘못된 보드가 끝까지 통과할 수 있습니다. 피스 벡터도 current에서 한 값을 빼고 next에 하나 더하면 합친 길이는 같습니다. 각 필드의 축을 계산 전에 확인해야 하는 이유입니다.\n\nvalidate_policy_inputs는 비어 있지 않은 NCHW와 각각의 `(B,K)`를 요구합니다. 또한 입력이 부동소수점 Tensor이고 모델 파라미터와 dtype/device가 같은지 검사합니다. **dtype**은 원소의 수치 표현이고, **device**는 저장·연산할 장치입니다. float64 입력과 float32 모델, CPU 입력과 GPU 모델을 암묵적으로 맞춰 주지는 않습니다.\n\n모델 구성 크기는 생성 시 positive_size로 검사합니다. Python bool도 정수의 하위 타입이므로 별도로 거절합니다. 이진 점유·유효한 피스 ID는 관측 생성기가 검사하고, 모델 경계에서는 메타데이터를 검사합니다. 값 전체를 읽는 연산을 매 forward마다 추가하면 GPU 결과를 호스트가 기다리는 비용이 생길 수 있습니다.",
+      "codes": [
+        {
+          "label": "python/model_contract.py — 개별 축 검사",
+          "language": "python",
+          "text": "    if board.dim() != 4:\n        raise ValueError(f'board must be 4D NCHW, got {board.dim()} dimensions')\n    batch = board.shape[0]\n    if batch <= 0:\n        raise ValueError('board must be nonempty (batch must be positive)')\n    board_shape = tuple(board.shape)\n    if board_shape != (batch, channels, rows, cols):\n        raise ValueError(\n            f'board must have shape (B, {channels}, {rows}, {cols}), got {board_shape}'\n        )\n\n    for name, tensor in (('current', current), ('next_piece', next_piece)):\n        if tensor.dim() != 2:\n            raise ValueError(\n                f'{name} must be 2D (B, {pieces}), got {tensor.dim()} dimensions'\n            )\n        tensor_shape = tuple(tensor.shape)\n        if tensor_shape != (batch, pieces):\n            raise ValueError(\n                f'{name} must have shape (B, {pieces}), got {tensor_shape}'\n            )"
+        }
+      ],
+      "reference": {
+        "path": "python/common/model_contract.py",
+        "symbol": "def validate_policy_inputs",
+        "invariant": "행·열·피스 폭·배치·dtype·device를 각각 검사한다. 관측 값의 의미와 추적 그래프 검증은 별도 경계다.",
+        "mayDiffer": "현재 모델은 BHW 호환 입력을 먼저 NCHW로 만든다. 학습 모델은 명시적인 NCHW만 받는다."
+      }
+    },
+    {
+      "title": "작은 필터로 이웃 셀을 함께 본다",
+      "body": "**합성곱 층(convolution layer)**은 같은 작은 필터를 공간 위치마다 적용합니다. 이 체크포인트의 필터는 3×3이고 한 칸씩 이동합니다. 한 출력값은 그 위치 주변 입력과 필터 가중치의 곱을 더하고 bias를 더한 값입니다. 여러 입력 채널이 있으면 그 채널의 기여도 합칩니다. PyTorch Conv2d는 필터를 뒤집지 않는 교차상관 방식으로 계산합니다.\n\n필터가 이동하는 간격이 stride, 경계 밖을 덧대는 폭이 padding입니다. 여기서는 stride1·padding1로 행·열을 유지합니다. 일반적으로 dilation1일 때 출력 높이는 `floor((H + 2P - Kh) / S) + 1`입니다. Kh는 커널 높이입니다. 예제 조건 Kh=3, P=1, S=1을 대입하면 H가 됩니다.\n\n입력 채널을 Cin, 출력 채널을 Cout라 할 때 groups1·bias 포함 필터의 파라미터 수는 `Cout × (Cin × Kh × Kw + 1)`입니다. 같은 가중치를 여러 위치에서 재사용하므로 보드의 셀마다 별도의 필터를 만들지 않습니다. 실제 각 채널이 무엇을 감지하는지는 학습 결과에 달려 있습니다.",
+      "codes": [
+        {
+          "label": "python/policy_network.py — 공간 특징 층",
+          "language": "python",
+          "text": "        layers = []\n        input_channels = 1  # This observation schema has one locked-occupancy plane.\n        for output_channels in channels:\n            layers.extend((nn.Conv2d(input_channels, output_channels, 3, padding=1),\n                           nn.ReLU()))\n            input_channels = output_channels\n        self.trunk = nn.Sequential(*layers)"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "Conv2d의 축과 크기 공식",
+          "body": "[PyTorch Conv2d 계약](https://docs.pytorch.org/docs/2.8/generated/torch.nn.Conv2d.html)에서 입력·필터 축, stride/padding/dilation에 따른 출력 크기를 확인할 수 있습니다. 이 실습은 groups1과 dilation1을 사용합니다."
+        }
+      ]
+    },
+    {
+      "title": "비선형성과 수용 영역을 연결한다",
+      "body": "Conv 뒤의 **ReLU**는 음수 값을 0으로 바꾸고 양수는 유지합니다. 선형·아핀 변환만 여러 번 합성하면 하나의 아핀 변환으로 표현할 수 있습니다. 중간의 비선형 함수가 입력에 따라 다른 반응을 만들 여지를 줍니다. ReLU의 음수 영역에서는 해당 경로의 미분이 0이므로 모든 파라미터가 매 표본에서 똑같이 학습되지는 않습니다.\n\n**수용 영역(receptive field)**은 한 특징값이 영향을 받을 수 있는 입력 영역입니다. stride1인 3×3 층을 연속으로 놓으면 이론적 공간 범위는 층마다 두 칸씩 늘어납니다. 예제 조건으로 한 층은 3×3, 두 층은 5×5 범위를 봅니다. 경계의 일부는 padding이며, 실제 영향 크기는 가중치와 활성화에 따라 달라집니다.\n\n이 모델은 지역 특징을 만든 뒤 전체 위치를 펼쳐 MLP에 연결합니다. 따라서 최종 head는 멀리 떨어진 열의 특징도 조합할 수 있습니다. 층 수를 늘렸다는 사실만으로 더 좋은 정책이나 더 정확한 구멍 검출을 보장하지는 않습니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    },
+    {
+      "title": "flatten은 배치 축을 남기고 펼친다",
+      "body": "trunk 출력이 `(B,C,H,W)`라면 `flatten(1)`은 첫 축을 남기고 나머지를 합쳐 `(B,C×H×W)`로 만듭니다. 시작 축을 0으로 두면 경기 표본까지 한 벡터에 섞입니다. 배치를 늘렸더니 Linear의 입력이 맞지 않는다면 flatten의 시작 축을 확인합니다.\n\nflatten은 값을 다시 학습하거나 위치를 평균내는 연산이 아닙니다. 각 위치의 값이 정해진 순서로 이어집니다. 뒤의 Linear는 그 순서를 전제로 서로 다른 가중치를 둡니다. 행·열을 바꾼 입력에 똑같은 의미를 부여하지 못하는 이유도 여기에 있습니다.\n\n**stride(메모리 간격)**는 Tensor에서 각 축을 한 칸 이동할 때 저장소에서 몇 원소 분량을 건너가는지를 나타냅니다. 이는 Conv의 이동 stride와 다른 문맥입니다. 전치 배열은 연속 배치가 아닐 수 있고, flatten/reshape는 필요한 경우 복사할 수 있습니다. reshape로 모양을 맞췄다는 사실만으로 의미가 올바른지 증명할 수는 없습니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    },
+    {
+      "title": "피스 정보와 보드 특징을 결합한다",
+      "body": "보드가 같아도 현재 피스가 다르면 합법 행동과 유리한 배치가 달라집니다. 공간 특징에 current와 next를 마지막 축으로 이어 붙입니다. 마지막 Conv 채널 수를 C, 피스 벡터 폭을 K라 할 때 결합 폭은 `C×H×W + 2K`입니다. 코드가 이 식으로 Linear의 입력 폭을 만듭니다.\n\n**완전연결층(Linear)**은 각 출력에 모든 입력의 가중합과 bias를 제공합니다. 입력 폭 F, 출력 폭 D라면 파라미터 수는 `D×F + D`입니다. 공간 특징을 전부 펼치므로 첫 Linear의 크기는 보드 크기와 마지막 채널 수에 직접 영향을 받습니다. 공간 필터의 숫자만 보고 모델의 전체 크기를 추측하기 어렵습니다.\n\n**MLP**는 완전연결층과 활성화 함수를 조합한 다층 신경망입니다. 여기서는 보드·피스를 결합한 벡터를 공유 표현으로 바꿉니다. 그 뒤 정책 head와 가치 head가 같은 표현을 받아 서로 다른 출력을 계산합니다.",
+      "codes": [
+        {
+          "label": "python/policy_network.py — 결합과 두 head",
+          "language": "python",
+          "text": "        flat = channels[-1] * schema.rows * schema.cols\n        self.fuse = nn.Sequential(\n            nn.Linear(flat + 2 * schema.pieces, hidden), nn.ReLU(),\n            nn.Linear(hidden, hidden), nn.ReLU(),\n        )\n        self.policy_head = nn.Linear(hidden, schema.actions)\n        self.value_head = nn.Linear(hidden, 1)"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    },
+    {
+      "title": "행동 점수와 상태 가치의 단위를 구별한다",
+      "body": "정책 head는 행동 라벨마다 실수 하나를 내놓습니다. 이 **logit**은 정규화하기 전의 점수입니다. 음수도 가능하고 합이 1일 필요도 없습니다. 같은 행의 모든 합법 logit에 같은 상수를 더해도 softmax 확률은 같습니다. 절대값 하나를 독립적인 성공 확률로 읽으면 안 됩니다.\n\n가치 head는 표본마다 실수 하나를 내놓습니다. actor-critic 학습에서 **상태 가치 V**는 선택한 정책·보상·할인 아래에서 기대하는 리턴을 추정합니다. 보상에 공격량과 종료 보너스를 섞었다면 가치의 의미도 그 목표를 따릅니다. 관측에 숨은 상태가 있다면 그 관측을 조건으로 한 추정이라는 제한도 남습니다.\n\n가치 head의 출력은 `(B,1)`입니다. `squeeze(-1)`로 마지막 축만 없애 `(B,)`를 유지합니다. 인자 없는 squeeze는 B=1일 때 배치 축까지 없앨 수 있으므로 작은 배치에서만 깨지는 버그가 됩니다.",
+      "codes": [
+        {
+          "label": "python/policy_network.py — 전체 순전파",
+          "language": "python",
+          "text": "    def forward(self, board, current, next_piece):\n        # Python metadata checks are not assertions embedded in an exported graph.\n        if not torch.jit.is_tracing():\n            validate_policy_inputs(\n                board, current, next_piece, channels=1,\n                rows=self.schema.rows, cols=self.schema.cols,\n                pieces=self.schema.pieces, parameter=self.trunk[0].weight,\n            )\n        spatial = self.trunk(board).flatten(1)\n        shared = self.fuse(torch.cat((spatial, current, next_piece), dim=-1))\n        return self.policy_head(shared), self.value_head(shared).squeeze(-1)"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "같은 출력 배열을 Q값으로 학습할 수도 있다",
+          "body": "현재 프로젝트의 DQN 계열은 행동 출력에 행동 가치 Q의 목표를 적용합니다. 배열 이름이 policy_logits여도 실제 의미는 손실에 달려 있습니다. 이 체크포인트는 actor-critic의 logit/상태 가치 의미로 설명합니다."
+        }
+      ]
+    },
+    {
+      "title": "합법 마스크를 통과한 분포로 선택한다",
+      "body": "신경망은 현재 막힌 행동에도 점수를 출력합니다. 규칙이 계산한 합법 마스크를 적용한 뒤 정규화합니다. 불법 logit을 -∞로 바꾸면 그 행동의 확률은 0이 됩니다. 모든 행동이 막힌 상태에서는 확률분포를 만들 수 없으므로 환경의 종료·선택 경계에서 처리합니다.\n\n예제 조건으로 점수 `[2, 100, 1]`과 마스크 `[참, 거짓, 참]`을 생각해 봅시다. 두 번째 행동은 가장 큰 점수라도 선택 대상에서 빠집니다. argmax는 남은 첫 행동을 선택하고, 확률 표집은 첫 행동과 세 번째 행동을 각 확률에 따라 고릅니다. 두 선택 방식은 평가 조건으로 구별해 기록합니다.\n\n데모는 `masked_log_softmax`를 재사용하고 argmax를 적용합니다. 같은 최고값이면 작은 인덱스를 선택하는 연산 규칙을 따릅니다. 선택한 행동을 실제 Session에 적용하여 네트워크 출력·라벨·규칙 실행이 연결되었는지 확인합니다.",
+      "codes": [
+        {
+          "label": "python/policy_demo.py — 평가와 합법 선택",
+          "language": "python",
+          "text": "    model.eval()\n    with torch.no_grad():\n        logits, value = model(*batch)\n        logp = masked_log_softmax(logits, mask)\n        actions = logp.argmax(dim=-1)\n    event = sessions[0].apply_action(int(actions[0]))"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "def masked_log_softmax",
+        "invariant": "규칙 마스크를 적용한 합법 점수만 정규화하고 빈 분포와 비유한 값을 거절한다.",
+        "mayDiffer": "학습 데모는 argmax로 선택한다. 현재 trainer는 알고리즘에 따라 표집/탐욕 선택과 온도 등을 사용한다."
+      }
+    },
+    {
+      "title": "계산 그래프와 gradient를 따라간다",
+      "body": "**계산 그래프**는 입력·파라미터에서 출력·손실까지 어떤 연산이 이어졌는지를 표현합니다. **미분**은 값을 조금 바꿀 때 결과가 얼마나 변하는지를 나타내고, 여러 입력에 대한 미분을 모은 것이 gradient입니다. 자동 미분은 기록한 연산에 연쇄법칙을 적용해 파라미터별 gradient를 계산합니다.\n\n정책 손실을 Lp, 가치 손실을 Lv라 하면 `L = Lp + c×Lv`의 공유 파라미터 gradient는 `∂Lp/∂θ + c×∂Lv/∂θ`입니다. 두 목적의 영향이 같은 trunk에서 합쳐집니다. 가치 head를 붙였다는 이유만으로 정책이 좋아지는 것은 아니며 c와 학습 자료도 영향을 줍니다.\n\n데모의 `-chosen_logp`는 선택한 행동의 확률을 높이는 방향이고 `(value-target)²`는 주어진 표적에 가치를 가깝게 하는 방향입니다. 엔트로피 항은 합법 분포가 지나치게 한쪽에 몰리는 것을 완화하는 방향으로 더합니다. 여기의 표적은 모두 1인 **연결 확인용 합성값**입니다. 환경 리턴이나 PPO의 추정량으로 만든 목표가 아니므로 이 한 번의 업데이트를 게임 학습 성과로 읽지 않습니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    },
+    {
+      "title": "미분 계산과 파라미터 갱신을 분리한다",
+      "body": "`zero_grad(set_to_none=True)`는 전에 누적된 gradient를 비웁니다. `loss.backward()`는 gradient를 계산·누적합니다. 아직 모델 파라미터는 그대로입니다. `optimizer.step()`이 그 gradient와 최적화 규칙으로 파라미터를 바꿉니다. SGD의 기본 갱신은 `θ ← θ - 학습률 × gradient`입니다.\n\n이 구분으로 검사를 만들 수 있습니다. 순전파 전 파라미터를 복사해 두고 backward 뒤에는 값이 같음을 확인합니다. trunk와 두 head에 유한한 gradient가 도착했는지 확인하고, step 뒤에는 적어도 일부 파라미터가 달라졌는지 봅니다. 모든 개별 파라미터의 gradient가 반드시 0이 아니어야 한다고 검사하면 ReLU·마스크의 정상적인 0 gradient도 실패로 처리합니다.\n\n`gather(1, actions[:,None])`는 각 표본이 고른 행동의 log 확률만 꺼냅니다. actions에 크기1의 마지막 축을 붙여 행별 인덱스 배열을 만들고 마지막 축만 squeeze합니다. 표본과 행동 축을 구별한 채 손실까지 연결하는 작은 예입니다.",
+      "codes": [
+        {
+          "label": "python/policy_demo.py — 한 번의 진단 업데이트",
+          "language": "python",
+          "text": "    model.train()\n    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)\n    logits, value = model(*batch)\n    logp = masked_log_softmax(logits, mask)\n    chosen_logp = logp.gather(1, actions[:, None]).squeeze(-1)\n    target_value = torch.ones_like(value)\n    loss = -chosen_logp.mean() + (value - target_value).square().mean()\n    loss -= 0.01 * entropy(logp, mask).mean()\n    optimizer.zero_grad(set_to_none=True)\n    loss.backward()\n    if not all(p.grad is not None and torch.isfinite(p.grad).all()\n               for p in model.parameters()):\n        raise RuntimeError('nonfinite or disconnected gradient')\n    optimizer.step()"
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    },
+    {
+      "title": "eval과 no_grad, CPU와 GPU의 역할을 나눈다",
+      "body": "`model.eval()`은 모듈의 학습/평가 모드를 바꿉니다. `torch.no_grad()`는 그 범위에서 자동 미분 그래프를 기록하지 않게 합니다. 현재 작은 모델에는 dropout이나 batchnorm이 없어 eval만으로 계산값이 바뀌지는 않지만, 학습/평가 호출 의도는 명시합니다.\n\nCPU 관측을 Tensor로 바꿨다고 GPU로 올라가지는 않습니다. GPU를 사용할 때는 모델과 입력을 같은 장치에 `.to(device)`로 배치합니다. NumPy에서 만든 CPU Tensor는 배열과 저장소를 공유할 수 있고, 장치 이동은 별도의 전송·저장 비용을 가집니다. 반환된 Tensor를 실제 호출에 사용해야 합니다.\n\n이 실습은 CPU에서 작은 배치를 계산합니다. GPU는 더 많은 계산을 병렬로 수행할 수 있지만 작은 단일 추론에서는 전송·실행 준비 비용도 고려해야 합니다. 장치가 빨라졌다는 이유로 정책의 행동 의미나 규칙의 재현 계약이 바뀌지는 않습니다.",
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "평가 모드에서도 미분이 생기는 이유",
+          "body": "[PyTorch 자동 미분과 평가 모드](https://docs.pytorch.org/docs/2.8/notes/autograd.html#evaluation-mode-nn-module-eval)는 eval과 gradient 기록을 별개로 정의합니다. 검사에서 eval만 켰을 때 value.requires_grad는 참이고 no_grad 안에서는 거짓인지 대조합니다."
+        }
+      ]
+    },
+    {
+      "title": "호스트 검사와 내보낼 계산 그래프를 구분한다",
+      "body": "forward에는 입력 메타데이터 검사와 Tensor 계산이 함께 보입니다. **eager 실행**은 Python에서 연산을 즉시 수행하므로 잘못된 축에 예외를 낼 수 있습니다. **추적(tracing)**은 예제 입력으로 수행한 Tensor 연산을 그래프로 기록합니다. 임의 Python 분기와 예외를 전부 미래 입력의 검사로 옮겨 주는 것은 아닙니다.\n\n학습 모델은 torch.jit.is_tracing()일 때 호스트 검사를 건너뛰고 Tensor 경로를 기록합니다. 따라서 traced 모델에 원소 수가 같은 전치 보드를 넣으면 Python의 행·열 거절을 기대할 수 없습니다. 배포 호출자는 입력 이름·축·타입·의미를 별도로 보장해야 합니다.\n\n현재 프로젝트의 legacy ONNX 내보내기도 같은 구분을 사용합니다. 추적 입력의 순서는 board/current/next이고 출력은 행동 점수/value입니다. Python 모델과 추적 그래프의 정상 입력 출력이 같은지 확인하는 검사는 유용하지만, 다른 포맷·런타임에서의 입력 계약과 수치 검사를 대신하지 않습니다.",
+      "reference": {
+        "path": "python/common/model_contract.py",
+        "symbol": "def validate_policy_inputs",
+        "invariant": "행·열·피스 폭·배치·dtype·device를 각각 검사한다. 관측 값의 의미와 추적 그래프 검증은 별도 경계다.",
+        "mayDiffer": "현재 모델은 BHW 호환 입력을 먼저 NCHW로 만든다. 학습 모델은 명시적인 NCHW만 받는다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "더미 입력의 값과 관측의 값",
+          "body": "형상 추적용 더미는 one-hot 전체가 0일 수도 있습니다. 그것이 유효한 경기 관측이라는 뜻은 아닙니다. 관측 생성 경로와 실제 상태의 출력 대조를 별도로 유지합니다."
+        }
+      ]
+    },
+    {
+      "title": "가중치 형상과 스키마의 의미를 함께 보존한다",
+      "body": "모델의 `state_dict`에는 이름이 붙은 파라미터와 등록 버퍼가 담깁니다. Conv 필터·Linear 가중치를 같은 구조에 다시 로드하면 계산을 재현할 기반이 됩니다. strict loading은 키와 파라미터 크기를 대조합니다. 일반 파라미터의 크기가 다르면 로드 단계에서 오류가 납니다.\n\n하지만 같은 크기의 피스 벡터에서 피스 순서만 바꾼 경우는 크기 검사로 알아낼 수 없습니다. 행동 라벨의 의미나 보상 목표도 가중치 배열의 모양만으로 복구되지 않습니다. 버전은 이런 의미의 호환성을 사람이 관리하기 위한 표식입니다.\n\n현재 load_checkpoint는 기록한 TetrisPolicyNet 구성과 의미 버전을 검증해 생성합니다. 과거 파일만 기본 구성을 사용합니다. 이 실습의 작은 용량·native schema·카탈로그 순서를 가진 PolicyNet 가중치를 현재 배포 모델에 바로 넣을 수 없습니다. 공통으로 배우는 것은 축의 구성과 책임 분리이고, 실제 교환에는 같은 구성과 의미의 계약이 필요합니다.",
+      "reference": {
+        "path": "python/common/checkpoint.py",
+        "symbol": "def load_checkpoint",
+        "invariant": "가중치의 키/크기 검사와 관측·행동 의미의 호환성을 구별한다.",
+        "mayDiffer": "현재 로더는 TetrisPolicyNet 구성과 입출력 의미 버전을 복원한다. 이 실습의 작은 PolicyNet과 native 카탈로그 인코딩은 별도 계약이다."
+      }
+    },
+    {
+      "title": "실제 관측과 실패 입력으로 계약을 검사한다",
+      "body": "작은 합성 배열만 넣으면 실제 관측의 피스 순서나 배치 구성을 놓칠 수 있습니다. tests/policy_contract.py는 native Session에서 관측과 합법 마스크를 얻습니다. 한 번에 넣은 배치 결과와 한 표본씩 넣은 결과를 허용 오차 안에서 비교합니다. 불법 확률이 0인지, 합법 확률의 합이 1인지, 선택이 실제로 실행되는지도 확인합니다.\n\n실패 입력은 정상 입력과 비슷하게 만듭니다. H/W 전치, 합친 폭만 맞는 피스 벡터, 빈 배치, 다른 표본 수, 잘못된 rank·dtype·device를 넣습니다. 메타데이터가 틀렸을 때 연산 도중의 긴 오류 대신 해당 필드 경계에서 거절하는지 확인합니다.\n\n학습 연결 검사는 유한한 gradient·갱신 전후 값·두 head와 trunk를 대상으로 합니다. 추적 검사는 정상 출력 일치와 호스트 검사의 부재를 함께 확인합니다. 검사마다 무엇을 증명하는지 나누어 두면 shape 검사 하나를 학습 성능이나 배포 전체의 보증으로 확대하지 않게 됩니다.",
+      "reference": {
+        "path": "python/tests/test_policy_contract.py",
+        "symbol": "def test_reject_same_area_transposed_board",
+        "invariant": "실제 잘못된 축과 분포·gradient·추적 경계를 각각 검사한다.",
+        "mayDiffer": "현재 테스트는 TetrisPolicyNet과 기본 체크포인트 계약을, 학습 테스트는 누적 native Session과 작은 PolicyNet을 연결한다."
+      }
+    },
+    {
+      "title": "파일을 연결하고 작은 실행을 마친다",
+      "body": "추가 파일은 `python/policy_network.py`, `python/model_contract.py`, `python/policy_demo.py`, `tests/policy_contract.py`입니다. bindings/CMakeLists.txt에 Python 검사 하나를 등록합니다. 누적 C++ 규칙과 환경을 복사한 뒤 새 Python 계층을 올리므로 게임 루프에 torch 의존성을 넣지 않습니다.\n\n체크포인트 README의 가상환경·바인딩 빌드 절차로 실행합니다. policy_demo는 입력/출력 형상, 실제 파라미터 개수, 선택한 행동과 진행한 틱, 한 번 업데이트의 진단 손실을 출력합니다. 파라미터 개수는 고정 안내 문구 대신 `sum(p.numel() for p in model.parameters())`로 계산합니다.\n\n현재 소스 보기에서는 같은 책임을 가진 TetrisPolicyNet을 비교합니다. 공간 특징·피스 결합·두 head는 유지되고, 용량 설정·관측 순서·훈련 목표는 명시적인 차이입니다. 출력 이름만 보는 대신 입력 생성부터 선택까지 한 경로를 따라가며 읽습니다.",
+      "codes": [
+        {
+          "label": "실행 — 경로는 자신의 가상환경에 맞춘다",
+          "language": "bash",
+          "text": "python3 scripts/check_learning_policy_network.py --python /path/to/python\n/path/to/python docs/learn/checkpoints/156-policy-network/python/policy_demo.py --module-dir out/learning-checkpoints/156-policy-network-check/native/python/Release"
+        },
+        {
+          "label": "python/policy_network.py — 완성 파일",
+          "language": "python",
+          "file": "checkpoints/156-policy-network/python/policy_network.py",
+          "collapsed": true
+        },
+        {
+          "label": "python/model_contract.py — 완성 파일",
+          "language": "python",
+          "file": "checkpoints/156-policy-network/python/model_contract.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/common/models.py",
+        "symbol": "class TetrisPolicyNet",
+        "invariant": "공간 특징·피스 결합·공유 표현·두 head를 나누고 입력 축과 출력 의미를 명시한다.",
+        "mayDiffer": "현재 모델은 공유 상수와 자체 용량 설정을 사용한다. 학습 모델은 native schema와 작은 CPU 실습 설정을 쓴다. 피스 one-hot 순서도 다르므로 가중치를 바로 교환하지 않는다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "156-1",
+      "options": [
+        {
+          "id": "a",
+          "text": "원소 수가 같으니 그대로 허용한다"
+        },
+        {
+          "id": "b",
+          "text": "각 입력의 행·열 축을 스키마와 비교한다"
+        },
+        {
+          "id": "c",
+          "text": "출력 확률의 합만 비교한다"
+        },
+        {
+          "id": "d",
+          "text": "배치 수를 두 배로 만들어 본다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "각 입력의 행·열 축을 스키마와 비교한다",
+      "explanation": "원소 수는 공간 의미를 보존하지 않습니다. 행과 열을 별도로 검사해야 같은 면적의 잘못된 입력을 거절할 수 있습니다.",
+      "question": "직사각형 보드의 H/W를 바꾸었는데 flatten 길이는 같습니다. 필요한 검사는?"
+    },
+    {
+      "id": "156-2",
+      "options": [
+        {
+          "id": "a",
+          "text": "squeeze()"
+        },
+        {
+          "id": "b",
+          "text": "flatten(0).sum()"
+        },
+        {
+          "id": "c",
+          "text": "squeeze(-1)"
+        },
+        {
+          "id": "d",
+          "text": "value[0,0]"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "squeeze(-1)",
+      "explanation": "마지막 크기1 축만 없애야 배치 축이 남습니다. 인자 없는 squeeze는 배치도 사라지게 할 수 있습니다.",
+      "question": "B=1인 value head 출력 (B,1)을 (B,)로 유지하려면?"
+    },
+    {
+      "id": "156-3",
+      "options": [
+        {
+          "id": "a",
+          "text": "0"
+        },
+        {
+          "id": "b",
+          "text": "1"
+        },
+        {
+          "id": "c",
+          "text": "2"
+        },
+        {
+          "id": "d",
+          "text": "확률 합이 103인 라벨"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "0",
+      "explanation": "불법인 가운데 행동은 점수가 커도 제외합니다. 남은 첫 행동의 점수가 세 번째보다 크므로 인덱스0을 선택합니다.",
+      "question": "합법 마스크가 [참,거짓,참]이고 logit이 [2,100,1]입니다. 마스크 뒤 argmax의 라벨은?"
+    },
+    {
+      "id": "156-4",
+      "options": [
+        {
+          "id": "a",
+          "text": "파라미터가 이미 gradient만큼 바뀐다"
+        },
+        {
+          "id": "b",
+          "text": "관측이 자동으로 다음 경기로 바뀐다"
+        },
+        {
+          "id": "c",
+          "text": "모델이 자동으로 eval 모드가 된다"
+        },
+        {
+          "id": "d",
+          "text": "파라미터의 gradient가 계산·누적된다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "파라미터의 gradient가 계산·누적된다",
+      "explanation": "backward는 미분을 누적하고 optimizer.step이 파라미터를 갱신합니다. 입력 환경 진행·평가 모드는 각각 별도 호출입니다.",
+      "question": "zero_grad 후 loss.backward까지만 수행했습니다. 기본 SGD의 step은 아직 호출하지 않았습니다. 무엇이 바뀌나요?"
+    },
+    {
+      "id": "156-5",
+      "options": [
+        {
+          "id": "a",
+          "text": "모든 trace가 행·열을 자동 복원한다"
+        },
+        {
+          "id": "b",
+          "text": "Python 메타데이터 검사가 추적 경로에서 제외되었기 때문이다"
+        },
+        {
+          "id": "c",
+          "text": "eval이 합법 마스크를 삭제했기 때문이다"
+        },
+        {
+          "id": "d",
+          "text": "value가 스칼라이면 어떤 입력도 정확하기 때문이다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Python 메타데이터 검사가 추적 경로에서 제외되었기 때문이다",
+      "explanation": "추적 결과는 Tensor 계산 경로입니다. 호스트 예외가 입력 계약으로 내장되었다고 가정하지 말고 배포 호출 경계에서도 형상·의미를 확인해야 합니다.",
+      "question": "eager 모델은 전치 보드를 거절하지만 이 체크포인트의 추적 그래프는 받아들입니다. 원인은?"
+    }
+  ],
+  "practice": {
+    "steps": [
+      "native schema로 모델 크기를 정하고 NCHW 배치를 만든다.",
+      "Conv·피스 결합·공유 MLP·두 head를 연결한다.",
+      "합법 선택을 실제 Session에 적용하고 합성 표적으로 gradient 갱신을 확인한다."
+    ],
+    "failureChecks": [
+      "같은 면적의 전치 보드와 합친 폭만 맞는 피스 입력을 거절한다.",
+      "B=1의 가치 축, 확률 합·불법 확률0, 배치/표본 계산 일치를 확인한다.",
+      "backward/step 전후와 eager/trace 검사 범위를 대조한다."
+    ],
+    "expected": "형상과 의미를 따라 모델을 읽고 정상 계산·입력 오류·gradient 연결·내보내기 책임을 각각 진단한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek metadata helper 초안 직접 검수, 실제 native 관측/행동·CPU autograd·현재 모델 회귀",
+    "corrections": [
+      "현재 forward의 같은 면적 전치·보상된 피스 폭·빈 배치 허용 교정",
+      "생성자 크기와 입력 dtype/device 경계 명시",
+      "Part의 strict load shape 및 ARCH_VERSION 과장·고정 크기 설명 교정",
+      "추적 그래프에 Python validator가 실린다는 오개념 방지",
+      "158의 현재 모델 로더 구성 저장·복원 반영. CP156 안정 코드는 유지."
+    ]
+  },
+  "validation": [
+    "독립 확장·누적 CTest11·실제 관측/행동과 CPU gradient demo 통과",
+    "현재 모델·마스킹·기본 체크포인트31회귀 통과",
+    "TorchScript trace 정상 출력 대조; ONNX Runtime·CUDA·전체훈련·Windows/macOS native 미검증"
+  ]
+}

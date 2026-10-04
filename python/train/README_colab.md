@@ -10,32 +10,42 @@ need PyTorch.
 
 ## Workflow
 
-`train_model_zoo_colab.ipynb` is the single entry point. Open it in Colab (or
-the VSCode Colab extension) and run from the top:
+Use `train_model_zoo_colab.ipynb` as the training/export entry point. `setup_colab.ipynb`
+only prepares the headless extension and runs a CPU integration probe.
 
-1. Set `REPO_URL` to your fork and `ALGO` to the algorithm you want.
-2. The setup cells clone the repo, install deps from
-   `python/requirements-colab.txt`, build `tetris_py.so` from the same C++
-   sources used by the game, and run an import smoke test
-   (`from sim import SimGame`, `from common.models import TetrisPolicyNet`).
-3. The remaining cells train, export `.onnx`, update `assets/opponents.cfg`, and
-   download the artifacts.
-4. Put the downloaded `.onnx` under local `model/bots/` for the in-game bot
-   roster. The game still scans legacy `model/*.onnx`, but `model/bots/*.onnx`
-   is the preferred layout when you have many models.
+1. Select the repository and optionally a full commit SHA. Existing checkouts are
+   not pulled/reset automatically; preserve local changes before changing revision.
+2. Install through the kernel's `sys.executable -m pip`. `prepare_native` selects
+   that Python in CMake and builds in a new isolated directory. Existing build trees
+   and loaded extensions are not deleted or overwritten.
+3. Run the fresh-process smoke. It verifies the actual extension path/hash, native
+   clone/step, observation/model update and model checkpoint round trip.
+4. Select an explicit `smoke` experiment and a new RUN_NAME. Each run gets a directory
+   with a command/source/environment manifest, streamed log, checkpoints and result record.
+5. A `long` run requires SMOKE_RUN pointing to a successful matching algorithm/preparation.
+   New source, dependencies or preparation require a new smoke. Use a different RUN_NAME.
+6. Export from the completed run and download the opponent bundle. Deployment only
+   needs inference assets and ONNX Runtime, not the training Python environment.
 
-Checkpoints embed the architecture version, so `load_checkpoint` (used by the
-export CLI) refuses stale architectures with a `RuntimeError` instead of
-silently loading wrong-shape weights.
+A notebook's saved cells are separate from kernel memory and runtime files.
+With USE_DRIVE enabled, run directories (including logs/records) are stored below
+MyDrive/tetris-checkpoints. A completed write is not a guarantee about remote
+synchronization or power-loss durability. Interrupted runs without a result record
+have an unknown outcome; inspect their logs and checkpoint before choosing a new run.
 
-To run trainers manually instead, execute any command from the sections below
-inside the notebook runtime (after the setup cells), or in your own notebook
-after `import sys; sys.path.insert(0, '/content/Tetris-Multiplayer-RL/python')`.
+The current PPO/policy-gradient `--resume` option is a weights-only warm start:
+new optimizer, RNG, environment and counters. Model files include constructor
+configuration and explicit graph/I/O compatibility revisions. Full training resume
+also needs optimizer, RNG, environment and collection/schedule state.
+
+The notebook uses `train/colab_runtime.py`, `process_runner.py` and
+`training_commands.py`; these can be tested without a remote Colab session. CPU
+smoke is not GPU execution, ONNX validation, cross-platform parity or policy quality.
 
 ## Competitive versus environment
 
 `common.env_versus.TetrisVersusEnv` provides a two-board, garbage-trading
-Gymnasium environment. Its agent observation and 40-action mask match
+Gymnasium environment. Its agent observation and placement mask match
 `TetrisPlacementEnv`, so it can reuse `TetrisPolicyNet`. Available opponents
 are `GreedyBCTSOpponent` (default), `RandomLegalOpponent`, and
 `PolicyOpponent` for a frozen policy snapshot.
@@ -76,14 +86,15 @@ both before raising.
 Common fixes:
 
 - Re-run the setup/dependency cell after `git pull`. It installs `torch`,
-  `onnx`, and `onnxscript` from `python/requirements-colab.txt`.
+  `onnx`, `onnxscript`, and `onnxruntime` from `python/requirements-colab.txt`.
 - Run export from `/content/Tetris-Multiplayer-RL/python`, or use
   `train_model_zoo_colab.ipynb`, which sets the working directory explicitly.
 - If the message says `checkpoint not found`, finish the training cell first or
   export the latest `checkpoints/<run>.pt` instead of a missing
   `checkpoints/<run>.eval_best.pt`.
-- If `SimGame.clone()` is missing, delete `build/` and `python/sim/tetris_py*.so`
-  and rebuild the native module. The setup notebook already does this.
+- If the native API is missing, prepare a new isolated build and repeat the fresh-process
+  smoke. Compare the actual module path/hash; replacing a library file does not replace
+  the module already loaded in a running kernel.
 
 ## Baseline PPO
 
@@ -135,7 +146,7 @@ machine commands, not deployment-machine commands.
 ### DQN / Double DQN
 
 `dqn_tetris.py` treats `TetrisPolicyNet.policy_logits` as Q-values over the
-40 placement actions. `--target-mode dqn` uses the classic target-network max;
+shared placement-action domain. `--target-mode dqn` uses the classic target-network max;
 `--target-mode ddqn` uses Double DQN online-argmax/target-gather targets. The
 value head is unused. The saved `.pt` is still a canonical `TetrisPolicyNet`
 checkpoint, so export is identical to PPO.
@@ -399,3 +410,23 @@ uses a native MuZero-style model for training and writes a deployable
 `TetrisPolicyNet` only through the distillation step. External frameworks are
 still fine as long as their final export path writes the canonical checkpoint
 or an ONNX file with the same input/output contract.
+
+## 모델 비교 기록
+
+`train.model_zoo`를 준비한 native 모듈의 `train.colab_runtime launch` 경로로 실행한다.
+같은 `--seeds`, `--max-pieces`, `--split validation` 조건에서 canonical .pt 또는
+MuZero의 증류 .policy.pt를 비교하고 새로운 `--out` 경로에 JSON을 저장한다.
+보고서의 개별 시드 결과·종료 이유·모델 해시를 확인한다. 후보 선택을 마친 뒤 별도로
+정한 test 시드를 사용한다. 학습량·훈련 loss·알고리즘 이름은 난이도 등급이 아니다.
+MuZero native 저장 파일은 직접 게임 모델로 평가하지 않는다.
+DQN·MuZero·CEM·CBMPI의 --resume도 가중치 warm start이며 완전한 학습 재개가 아니다.
+
+## Checked ONNX artifact
+
+The exporter now checks fixed float32 I/O, embedded weights, ONNX structure,
+and CPU Runtime outputs/greedy choices before replacing the destination.
+It needs `onnxruntime` on the export machine. Default CLI cases are synthetic
+tensor probes; `export(..., cases=...)` accepts actual observations with legal masks.
+These finite checks do not establish playing strength or all-state equivalence.
+Failed export/check/replace leaves the previous model intact; the input checkpoint
+cannot also be the output path. C++ platform validation is still a separate step.

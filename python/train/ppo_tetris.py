@@ -28,7 +28,6 @@ export cleanly to ONNX. It is not the final high-performance trainer; tune
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -48,24 +47,30 @@ from common import BOARD_COLS, BOARD_ROWS  # noqa: E402
 from common.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from common.env import TetrisPlacementEnv  # noqa: E402
 from common.env_versus import TetrisVersusEnv  # noqa: E402
-from common.models import TetrisPolicyNet, masked_log_softmax  # noqa: E402
+from common.models import TetrisPolicyNet, masked_log_softmax, masked_entropy  # noqa: E402
+from common.ppo_loss import clipped_policy_loss
+from common.returns import gae_targets, normalize_advantages  # noqa: E402
+from common.model_contract import positive_size  # noqa: E402
 
 
 # --- 보상 shaping (선택) ---
-# 환경이 주는 보상은 지운 줄 수(0~4)뿐이다. 문제는 이게 너무 드물다는 것이다.
-# 갓 시작한 정책은 첫 줄을 지우기까지 수천 수를 두는데, 그동안 받는 보상이
-# 전부 0이라 무엇이 나은 행동인지 배울 단서가 없다.
-# 그래서 판을 낮고 평평하게, 구멍 없이 유지하면 조금씩 점수를 주어
-# 줄을 지우기 전에도 방향을 잡게 한다.
-# --shaping-coef 로 세기를 조절하고, 0이면 순수 보상만 쓴다.
+# 환경 보상에 보드 벌점을 매 전이마다 추가하는 선택적 학습 목적이다.
+# 보상이 드문 구간에 신호를 주지만 작은 계수도 원래 최적 정책의 보존을 보장하지 않는다.
+# 잠재함수의 차이가 아니라 방문한 보드마다 반복되는 벌점이다.
+# 원래 줄/공격/승패 지표는 shaping을 더하지 않은 평가에서 따로 비교한다.
 _W_HOLE = 0.03
 _W_HEIGHT = 0.005
 _W_BUMP = 0.003
 
 
 def board_features(board: np.ndarray) -> tuple[int, int, int]:
-    """Return (holes, aggregate_height, bumpiness) for a (1,20,10) occupancy."""
-    b = board.reshape(BOARD_ROWS, BOARD_COLS) > 0.5
+    """Return holes, aggregate height and bumpiness for schema-sized binary occupancy."""
+    array = np.asarray(board)
+    if array.shape not in ((BOARD_ROWS, BOARD_COLS), (1, BOARD_ROWS, BOARD_COLS)):
+        raise ValueError("board shape does not match the observation schema")
+    if array.dtype.kind not in "buif" or not np.isfinite(array).all() or not np.isin(array, [0, 1]).all():
+        raise ValueError("board must contain finite binary occupancy")
+    b = array.reshape(BOARD_ROWS, BOARD_COLS) > 0
     holes = 0
     heights = np.zeros(BOARD_COLS, dtype=np.int64)
     for c in range(BOARD_COLS):
@@ -82,11 +87,17 @@ def board_features(board: np.ndarray) -> tuple[int, int, int]:
 
 
 def shaping_reward(board: np.ndarray, coef: float) -> float:
+    coef = float(coef)
+    if not np.isfinite(coef):
+        raise ValueError("shaping coefficient must be finite")
     if coef == 0.0:
         return 0.0
     holes, agg_height, bumpiness = board_features(board)
     penalty = _W_HOLE * holes + _W_HEIGHT * agg_height + _W_BUMP * bumpiness
-    return -coef * penalty
+    reward = -coef * penalty
+    if not np.isfinite(reward):
+        raise ValueError("shaping reward is not finite")
+    return reward
 
 
 # --- 평가 ---
@@ -94,8 +105,7 @@ def _logp_entropy(logits: torch.Tensor, mask: torch.Tensor):
     """Masked log-probs + per-row entropy, NaN-safe for illegal actions."""
     logp = masked_log_softmax(logits, mask)          # (B, A); -inf on illegal
     probs = logp.exp()                               # 0 on illegal
-    ent_terms = torch.where(mask, probs * logp, torch.zeros_like(probs))
-    entropy = -ent_terms.sum(-1)                     # (B,)
+    entropy = masked_entropy(logp, mask)             # (B,); finite backward too
     return logp, probs, entropy
 
 
@@ -140,71 +150,92 @@ def evaluate_policy(
             "avg_lines": float("nan"),
             "avg_score": float("nan"),
             "avg_pieces": float("nan"),
+            "avg_reward": float("nan"),
             "episodes": 0.0,
         }
 
+    positive_size(max_pieces, "max_pieces")
     was_training = model.training
-    model.eval()
-
-    env = make_env(env_kind, seed)
-    lines_total = 0.0
-    score_total = 0.0
-    pieces_total = 0.0
-
-    for ep in range(episodes):
-        obs, info = env.reset(seed=seed + ep)
-        lines = 0.0
-        score = 0.0
-        pieces = 0
-
-        while pieces < max_pieces:
-            mask_np = info["legal_mask"]
-            if not mask_np.any():
-                break
-
-            batch = to_batch(obs, device)
-            mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device)
-            logits, _value = model(batch["board"], batch["current"], batch["next"])
-            masked_logits = logits.squeeze(0).masked_fill(~mask, float("-inf"))
-            if torch.isinf(masked_logits).all():
-                break
-
-            action = int(torch.argmax(masked_logits).item())
-            obs, reward, term, trunc, info = env.step(action)
-            lines += float(reward)
-            score = float(info.get("score", score))
-            pieces += 1
-
-            if term or trunc:
-                break
-
-        lines_total += lines
-        score_total += score
-        pieces_total += float(pieces)
-
-    if was_training:
-        model.train()
-
+    env = None
+    lines_total = score_total = pieces_total = reward_total = 0.0
+    ended_count = truncated_count = cutoff_count = 0
+    try:
+        model.eval()
+        env = make_env(env_kind, seed)
+        for ep in range(episodes):
+            obs, info = env.reset(seed=seed + ep)
+            pieces = 0
+            episode_reward = 0.0
+            term = trunc = False
+            while pieces < max_pieces:
+                mask_np = info["legal_mask"]
+                if not mask_np.any():
+                    raise RuntimeError("live evaluation observation has no legal action")
+                batch = to_batch(obs, device)
+                mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device).unsqueeze(0)
+                logits, _ = model(batch["board"], batch["current"], batch["next"])
+                action = int(masked_log_softmax(logits, mask).argmax(-1).item())
+                obs, reward, term, trunc, info = env.step(action)
+                episode_reward += float(reward)
+                pieces += 1
+                if term or trunc:
+                    break
+            ended_count += int(term)
+            truncated_count += int(trunc)
+            cutoff_count += int(pieces == max_pieces and not (term or trunc))
+            lines_total += float(info["lines"])
+            score_total += float(info["score"])
+            pieces_total += pieces
+            reward_total += episode_reward
+    finally:
+        model.train(was_training)
+        if env is not None:
+            env.close()
     denom = float(episodes)
     return {
         "avg_lines": lines_total / denom,
         "avg_score": score_total / denom,
         "avg_pieces": pieces_total / denom,
+        "avg_reward": reward_total / denom,
+        "terminated_episodes": ended_count,
+        "truncated_episodes": truncated_count,
+        "budget_cutoffs": cutoff_count,
         "episodes": denom,
     }
 
 
 # --- 학습 루프 ---
+def validate_train_args(args):
+    for name in ('steps', 'rollout', 'epochs', 'minibatch', 'eval_max_pieces'):
+        positive_size(getattr(args, name), name)
+    for name in ('save_every', 'eval_every', 'eval_episodes'):
+        value = getattr(args, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(name + ' must be a nonnegative integer')
+    for name in ('gamma', 'lam'):
+        value = getattr(args, name)
+        if isinstance(value, bool) or not np.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(name + ' must be finite and in [0,1]')
+    for name in ('lr', 'clip', 'max_grad_norm'):
+        value = getattr(args, name)
+        if isinstance(value, bool) or not np.isfinite(value) or value <= 0:
+            raise ValueError(name + ' must be finite and positive')
+    for name in ('ent_coef', 'vf_coef'):
+        value = getattr(args, name)
+        if isinstance(value, bool) or not np.isfinite(value) or value < 0:
+            raise ValueError(name + ' must be finite and nonnegative')
+    if not np.isfinite(args.shaping_coef):
+        raise ValueError('shaping_coef must be finite')
+
+
 def train(args: argparse.Namespace) -> None:
+    validate_train_args(args)
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    env = make_env(args.env, args.seed)
-    print(f"[ppo] env={args.env}")
-
-    if args.resume and os.path.exists(args.resume):
-        print(f"[ppo] resuming from {args.resume}")
+    if args.resume:
+        print(f"[ppo] warm start weights from {args.resume}; optimizer/RNG/environment restart")
         model = load_checkpoint(args.resume, device=device)
         model.train()
     else:
@@ -214,42 +245,40 @@ def train(args: argparse.Namespace) -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    env = make_env(args.env, args.seed)
+    print(f"[ppo] env={args.env}")
     obs, info = env.reset(seed=args.seed)
     ep_ret, ep_len, ep_lines = 0.0, 0, 0
     ep_returns: list[float] = []
     ep_lengths: list[int] = []
     ep_lineclears: list[int] = []
     best_mean = -1e9
-    best_eval_lines = -1e9
+    best_eval_score = -float("inf")
+    selection_metric = "avg_reward" if args.env == "versus" else "avg_lines"
 
-    T = args.rollout
     global_step = 0
     update = 0
     t_start = time.time()
 
     while global_step < args.steps:
+        T = min(args.rollout, args.steps - global_step)
         # rollout 버퍼. 환경을 하나만 동기로 돌리므로 배열 하나면 충분하다.
         boards = torch.zeros(T, 1, BOARD_ROWS, BOARD_COLS, device=device)
-        currents = torch.zeros(T, 7, device=device)
-        nexts = torch.zeros(T, 7, device=device)
+        currents = torch.zeros(T, model.n_piece_types, device=device)
+        nexts = torch.zeros(T, model.n_piece_types, device=device)
         masks = torch.zeros(T, model.n_placements, dtype=torch.bool, device=device)
         actions = torch.zeros(T, dtype=torch.long, device=device)
         logps = torch.zeros(T, device=device)
         values = torch.zeros(T, device=device)
         rewards = torch.zeros(T, device=device)
-        dones = torch.zeros(T, device=device)
+        terminated = torch.zeros(T, dtype=torch.bool, device=device)
+        boundaries = torch.zeros(T, dtype=torch.bool, device=device)
+        next_values = torch.zeros(T, device=device)
 
         for t in range(T):
             mask_np = info["legal_mask"]
             if not mask_np.any():
-                # 둘 곳이 없다는 것은 게임이 끝났다는 뜻이다.
-                # 여기 도달했다면 terminal 처리 후 reset을 빠뜨린 것이다.
-                # reset하고 이 슬롯을 새 transition으로 다시 채운다.
-                # 빈 채로 두면 전부 불법인 마스크가 남고, 그 상태로 PPO 갱신에
-                # 들어가면 logit이 전부 -inf가 되어 NaN이 퍼진다.
-                obs, info = env.reset()
-                ep_ret, ep_len, ep_lines = 0.0, 0, 0
-                mask_np = info["legal_mask"]
+                raise RuntimeError("live rollout observation has no legal action; check environment termination")
 
             batch = to_batch(obs, device)
             mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device).unsqueeze(0)
@@ -272,11 +301,18 @@ def train(args: argparse.Namespace) -> None:
             logps[t] = logp[0]
             values[t] = value[0]
             rewards[t] = total_r
-            dones[t] = 1.0 if (term or trunc) else 0.0
+            terminated[t] = bool(term)
+            boundaries[t] = bool(term or trunc)
+            # Bootstrap from the actual transition endpoint, never from reset().
+            if not term:
+                with torch.no_grad():
+                    endpoint = to_batch(next_obs, device)
+                    _, next_value = model(endpoint["board"], endpoint["current"], endpoint["next"])
+                    next_values[t] = next_value[0]
 
             ep_ret += total_r
             ep_len += 1
-            ep_lines += int(reward)           # reward == lines cleared this placement
+            ep_lines = int(next_info["lines"])
             global_step += 1
 
             obs, info = next_obs, next_info
@@ -287,29 +323,14 @@ def train(args: argparse.Namespace) -> None:
                 ep_ret, ep_len, ep_lines = 0.0, 0, 0
                 obs, info = env.reset()
 
-        # rollout이 끝난 지점의 가치. 잘려나간 뒷부분을 이 값으로 대신한다.
-        with torch.no_grad():
-            if info["legal_mask"].any():
-                b = to_batch(obs, device)
-                _, last_value = model(b["board"], b["current"], b["next"])
-                last_value = last_value[0]
-            else:
-                last_value = torch.zeros((), device=device)
+        advantages, returns = gae_targets(
+            rewards, values, next_values, torch.full_like(rewards, args.gamma),
+            terminated, boundaries, args.lam,
+        )
+        adv = normalize_advantages(advantages)
 
-        # GAE(λ)로 advantage와 return을 구한다.
-        advantages = torch.zeros(T, device=device)
-        lastgae = torch.zeros((), device=device)
-        for t in reversed(range(T)):
-            nonterminal = 1.0 - dones[t]
-            nextval = last_value if t == T - 1 else values[t + 1]
-            delta = rewards[t] + args.gamma * nextval * nonterminal - values[t]
-            lastgae = delta + args.gamma * args.lam * nonterminal * lastgae
-            advantages[t] = lastgae
-        returns = advantages + values
-        adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        # 같은 rollout을 K epoch 동안 재사용한다. PPO의 clipping이 있어서
-        # 여러 번 돌려도 정책이 한 번에 크게 망가지지 않는다.
+        # Reuse this rollout for bounded epochs; clipping is an objective term,
+        # not a hard guarantee on policy movement or gradient magnitude.
         idx = np.arange(T)
         mb = args.minibatch
         pg_loss = v_loss = ent_loss = torch.zeros((), device=device)
@@ -323,19 +344,19 @@ def train(args: argparse.Namespace) -> None:
                 logp_row, _, entropy = _logp_entropy(logits, masks[jt])
                 new_logp = logp_row.gather(-1, actions[jt].unsqueeze(-1)).squeeze(-1)
 
-                ratio = (new_logp - logps[jt]).exp()
-                mb_adv = adv[jt]
-                pg1 = -mb_adv * ratio
-                pg2 = -mb_adv * torch.clamp(ratio, 1 - args.clip, 1 + args.clip)
-                pg_loss = torch.max(pg1, pg2).mean()
+                pg_loss, approximate_kl, clip_fraction = clipped_policy_loss(
+                    new_logp, logps[jt], adv[jt], args.clip,
+                )
 
                 v_loss = 0.5 * (value - returns[jt]).pow(2).mean()
                 ent_loss = entropy.mean()
 
                 loss = pg_loss + args.vf_coef * v_loss - args.ent_coef * ent_loss
-                opt.zero_grad()
+                if not torch.isfinite(loss):
+                    raise ValueError("PPO loss is not finite")
+                opt.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm, error_if_nonfinite=True)
                 opt.step()
 
         update += 1
@@ -353,6 +374,7 @@ def train(args: argparse.Namespace) -> None:
             f"[ppo] upd {update:>5} step {global_step:>9}  "
             f"ep_ret {mret:8.3f}  ep_len {mlen:7.1f}  lines/ep {mlines:7.2f}  "
             f"pg {pg_loss.item():+.3f} v {v_loss.item():.3f} ent {ent_loss.item():.3f}  "
+            f"kl_last {approximate_kl.item():.4f} clip_last {clip_fraction.item():.3f}  "
             f"{sps} step/s",
             flush=True,
         )
@@ -376,8 +398,8 @@ def train(args: argparse.Namespace) -> None:
                 f"episodes {int(eval_stats['episodes'])}",
                 flush=True,
             )
-            if eval_stats["avg_lines"] > best_eval_lines:
-                best_eval_lines = eval_stats["avg_lines"]
+            if eval_stats[selection_metric] > best_eval_score:
+                best_eval_score = eval_stats[selection_metric]
                 save_checkpoint(
                     model,
                     out_path.with_suffix(".eval_best.pt"),
@@ -385,6 +407,8 @@ def train(args: argparse.Namespace) -> None:
                         "training_steps": global_step,
                         "update": update,
                         "eval_avg_lines": eval_stats["avg_lines"],
+                        "eval_avg_reward": eval_stats["avg_reward"],
+                        "selection_metric": selection_metric,
                         "eval_avg_score": eval_stats["avg_score"],
                         "eval_avg_pieces": eval_stats["avg_pieces"],
                         "eval_episodes": int(eval_stats["episodes"]),
@@ -393,7 +417,7 @@ def train(args: argparse.Namespace) -> None:
                 )
 
         # 체크포인트 저장
-        if update % args.save_every == 0:
+        if args.save_every > 0 and update % args.save_every == 0:
             save_checkpoint(model, out_path, extra={"training_steps": global_step,
                                                     "update": update})
             if ep_returns and mret > best_mean:
@@ -418,6 +442,7 @@ def train(args: argparse.Namespace) -> None:
             f"episodes {int(final_eval['episodes'])}",
             flush=True,
         )
+    env.close()
     print(f"[ppo] done. saved {out_path} ({global_step} steps)")
 
 
@@ -437,7 +462,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--shaping-coef", type=float, default=0.5,
                    help="weight on dense board-feature shaping (0 = pure lines)")
     p.add_argument("--out", type=str, default="checkpoints/run.pt")
-    p.add_argument("--resume", type=str, default="", help="checkpoint to resume from")
+    p.add_argument("--resume", type=str, default="", help="weights-only warm start; new optimizer, RNG and environment")
     p.add_argument("--save-every", type=int, default=10, help="updates between saves")
     p.add_argument("--eval-every", type=int, default=10,
                    help="PPO updates between greedy eval runs (0 = disable periodic eval)")

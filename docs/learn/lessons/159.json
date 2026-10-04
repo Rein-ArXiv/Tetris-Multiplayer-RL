@@ -1,0 +1,395 @@
+{
+  "id": "lesson-159",
+  "title": "Colab 실행: smoke에서 긴 학습으로",
+  "shortTitle": "커널·ABI·새 프로세스·명령·실험 기록·저장",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: CPU 훈련 상태를 저장·복원할 수 있지만 설치와 빌드, 실행 조건, 실패 기록이 한 흐름으로 묶이지 않았습니다.",
+  "finish": "완료: 현재 Python의 확장을 준비하고 새 작업 프로세스를 실행하며 smoke·설정·로그·산출물 근거를 연결합니다.",
+  "objective": "노트북/프로세스/파일의 수명을 구분하고, 같은 준비 조건에서 검증한 작은 작업을 긴 실험의 시작 조건으로 연결한다.",
+  "prerequisites": [
+    "Python 바인딩과 모델·환경 계약",
+    "업데이트 경계의 학습 상태 저장",
+    "프로세스·파일·예외와 반환값"
+  ],
+  "recap": {
+    "points": [
+      "가중치만 읽는 warm start와 전체 학습 재개는 저장 범위가 다르다.",
+      "모델·optimizer·난수·환경은 일관된 경계에서 저장한다.",
+      "새 후보를 검증한 뒤 저장 상태를 공개한다."
+    ],
+    "bridge": "이제 그 실행을 준비하고 시작하며, 실패하거나 런타임이 사라진 뒤에도 판단할 기록을 남깁니다."
+  },
+  "sections": [
+    {
+      "title": "노트북 파일과 실행 상태의 수명이 다르다",
+      "body": "저장 파일로 TrainingRun을 다시 만들 수 있게 되었으므로, 이제 그 훈련을 실행하는 환경을 준비합니다. 노트북은 설치·빌드·검사·학습 명령을 묶는 입구입니다. 브라우저에서 셀을 저장하는 일과 학습 상태를 저장하는 일은 서로 다른 대상에 쓰는 작업입니다.\n\n| 대상 | 담고 있는 것 | 다시 실행할 때 확인할 것 |\n|---|---|---|\n| 노트북 파일 | 셀 코드·문장·저장한 출력 | 어떤 revision과 설정을 사용했는가 |\n| Python 커널 | 변수·import한 모듈·객체 | 현재 셀이 어떤 과거 상태를 재사용하는가 |\n| 런타임 디스크 | 빌드 파일·임시 데이터·학습 산출물 | 머신이 사라져도 필요한 파일이 남는가 |\n| 별도 저장소 | 명시적으로 저장한 파일 | 쓰기가 완료됐는가, 복원에 충분한가 |\n\nColab의 실행 머신은 런타임 수명과 자원 정책의 영향을 받습니다. 노트북 파일이 남아 있어도 머신의 패키지와 학습 객체가 그대로 남는다고 가정하지 않습니다. `159-colab-workflow`에서는 준비한 확장을 사용하는 새 작업 프로세스와 실행 기록을 만듭니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "Colab의 저장과 자원 조건",
+          "body": "[Colab 공식 FAQ](https://research.google.com/colaboratory/faq.html)는 노트북 공유와 실행 머신의 파일을 구분하고, 런타임 수명·자원 가용성이 달라질 수 있다고 설명합니다. 특정 GPU나 고정 실행 시간을 코드의 전제로 두지 않습니다."
+        }
+      ]
+    },
+    {
+      "title": "셀의 순서 대신 입력과 완료 상태를 확인한다",
+      "body": "노트북에서는 아래 셀을 먼저 실행하거나 위 셀의 설정만 다시 실행할 수 있습니다. 화면의 위아래 순서가 실행 의존성을 보장하지는 않습니다. 설치가 실패했는데 이전 세션의 모듈이 남아 있으면 다음 셀의 import가 성공할 수도 있습니다.\n\n준비 결과는 모듈 경로·해시·소스 revision·Python 정보 같은 명시적인 자료로 돌려줍니다. 준비를 다시 시작할 때 성공 표시를 먼저 비우고, 모든 단계가 통과해야 새 자료를 넣습니다. 학습을 시작할 때도 준비 자료가 현재 파일과 같은지 다시 확인합니다.\n\n코드나 의존성을 바꾸고 오래된 smoke 성공 변수를 그대로 쓰는 경로는 거절합니다. 이 검사 자료는 내부 실행의 일관성을 확인하는 값입니다. 외부 사용자의 진술을 인증하는 서버 보안 토큰과는 역할이 다릅니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      }
+    },
+    {
+      "title": "현재 Python을 설치와 빌드의 기준으로 삼는다",
+      "body": "Python 실행 파일의 경로는 환경 선택의 일부입니다. 터미널 PATH가 고른 python, pip가 설치하는 환경, 노트북 커널이 실행하는 Python이 다르면 설치 성공 메시지 뒤에 모듈을 찾지 못할 수 있습니다. `sys.executable`은 현재 프로세스의 인터프리터를 가리킵니다.\n\n현재 notebook은 그 경로로 `-m pip`와 pybind11 조회를 실행하고 CMake의 Python_EXECUTABLE도 같은 값으로 지정합니다. C++ 확장은 Python 개발헤더와 연결 규약에 맞게 빌드해야 합니다. **ABI**는 바이너리끼리 함수·객체 표현을 주고받는 규약이며, Python 코드 파일처럼 아무 인터프리터에나 그대로 옮겨 실행할 수 있는 계약이 아닙니다.\n\n실습의 identity는 실행 Python이 인식하는 EXTENSION_SUFFIXES로 확장을 찾습니다. 파일명은 첫 후보를 무조건 선택하는 대신 정확히 하나인지 확인합니다. 그 파일의 실제 import와 규칙 실행은 새 프로세스에서 다시 검사합니다.",
+      "codes": [
+        {
+          "label": "identity — Python ABI와 실제 확장",
+          "language": "python",
+          "text": "def identity(module_dir):\n    directory = Path(module_dir).resolve()\n    matches = [directory/('study_py'+suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES\n               if (directory/('study_py'+suffix)).is_file()]\n    if len(matches) != 1:\n        raise ValueError('select one freshly built extension for this Python')\n    return dict(source=source_hash(), module=str(matches[0]), module_hash=hash_file(matches[0]),\n                python=sys.executable, python_version=sys.version.split()[0],\n                packages={name:importlib.metadata.version(name) for name in ('torch','numpy','gymnasium')})"
+        }
+      ],
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      }
+    },
+    {
+      "title": "소스 revision과 실제 빌드 결과를 연결한다",
+      "body": "같은 Git commit 이름이라도 로컬 수정이 있으면 파일 내용이 달라질 수 있습니다. commit은 기준 이력을, 소스 해시는 선택한 실제 파일 내용을 식별합니다. 모델을 비교할 때에는 코드뿐 아니라 보상·학습 설정·데이터/시드도 함께 남겨야 합니다.\n\n현재 prepare_native는 새 빌드 폴더를 만들고 빌드 전후 소스 해시를 대조합니다. 빌드 도중 소스가 바뀌었으면 하나의 일관된 입력으로 만들어졌다고 기록하지 않습니다. 기존 build 폴더와 사용 중인 확장을 삭제하지 않아 다른 실행의 산출물을 건드리지 않습니다.\n\n학습 실습의 source_hash는 누적 코드 경로와 내용을 정렬된 순서로 넣습니다. 해시가 같다는 것은 같은 계산에 넣은 바이트가 같다는 강한 비교 근거입니다. 해시만 따로 적었다고 그 파일이 실제 컴파일에 쓰였음까지 자동 증명되는 것은 아니므로 빌드 과정·모듈 위치도 연결합니다.",
+      "codes": [
+        {
+          "label": "source_hash — 순서가 정해진 입력 기록",
+          "language": "python",
+          "text": "def source_hash():\n    state = hashlib.sha256()\n    for path in sorted(p for p in CP.rglob('*') if p.is_file() and p.suffix in ('.py','.h','.cpp')\n                       and '__pycache__' not in p.parts):\n        state.update(path.relative_to(CP).as_posix().encode()+b'\\0'+path.read_bytes()+b'\\0')\n    return state.hexdigest()"
+        }
+      ],
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      }
+    },
+    {
+      "title": "파일을 바꿔도 이미 import한 모듈은 남는다",
+      "body": "Python은 import한 모듈을 프로세스의 sys.modules에 보관합니다. 같은 이름을 다시 import하면 보관한 객체를 재사용할 수 있습니다. 디스크의 .so 파일을 새로 썼다는 사실만으로 그 프로세스가 이미 로드한 기계어와 객체가 교체되는 것은 아닙니다.\n\n확장의 이전 객체가 살아 있는 동안 파일을 덮어쓰고 재로드하려 하면 타입·객체·라이브러리 수명을 함께 다뤄야 합니다. 준비와 smoke를 별도 프로세스로 나누면 새 실행에서 어떤 파일을 읽었는지 직접 확인할 수 있습니다.\n\nworker는 전달받은 확장 폴더를 먼저 선택하고 실제 study_py.__file__이 기록과 같은지 검사합니다. 현재 프로젝트의 launch 경로도 tetris_py를 먼저 확인한 뒤 trainer 모듈을 실행합니다. 경로만 맞는 검사에 규칙 step·모델 업데이트를 더하여 실행 계약까지 확인합니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      }
+    },
+    {
+      "title": "smoke는 짧은 실제 경로를 실행한다",
+      "body": "smoke는 비용을 작게 제한해 준비와 연결이 동작하는지 확인하는 실행입니다. import 목록만 출력하는 것으로 끝내지 않고, 실제 환경에서 합법 행동을 실행하고 모델 gradient를 계산해 optimizer를 갱신하고 저장 파일을 다시 읽습니다.\n\n반환값의 의미도 검사해야 합니다. 현재 SimGame.apply_placement는 삭제 줄 수를 반환하고 실패는 음수입니다. 줄을 지우지 않은 성공의0을 Python의 false처럼 취급하면 정상 배치를 실패로 오판합니다. 계약의 단위와 실패 표시를 읽어 조건을 작성합니다.\n\nCPU smoke, 선택 알고리즘의 짧은 훈련, ONNX 변환과 실행은 각각 다른 경로입니다. 작은 loss가 유한하고 파일이 생겼다는 사실은 장기 학습 안정성이나 봇의 실력에 대한 점수가 아닙니다. 확인한 단계와 아직 실행하지 않은 단계를 분리해 읽습니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      }
+    },
+    {
+      "title": "CPU 시뮬레이션과 GPU 모델 계산을 구분한다",
+      "body": "Colab에서 GPU 런타임을 골라도 모든 코드가 자동으로 GPU로 옮겨지지는 않습니다. C++ SimGame의 규칙은 CPU에서 실행되고, PyTorch 모델과 입력 텐서를 선택한 장치로 옮겼을 때 해당 연산이 그 장치에서 수행됩니다. 서로 다른 장치의 텐서를 섞으면 연산 계약 오류가 날 수 있습니다.\n\n현재 trainer의 device 선택과 모델·입력 이동을 확인합니다. CPU smoke의 cuda_available 출력은 GPU 사용 가능성 정보이고 GPU에서 학습 연산을 실행한 증거는 아닙니다. 실제 학습 로그와 장치·메모리 상태를 함께 확인해야 합니다.\n\n이 누적 실습은 CPU 재개의 계산 조건을 유지합니다. GPU로 확장할 때에는 CUDA 난수 상태, 연산의 재현성, 장치 간 저장·로드와 메모리 예산을 추가로 설계합니다. 모델 미니배치를 키워도 환경 수집이 CPU 병목이면 전체 처리량이 같은 비율로 늘지는 않습니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def prepare_native",
+        "invariant": "실행할 Python과 실제 빌드/모듈의 식별값을 고정하고 실패를 뒤 단계로 넘기지 않는다.",
+        "mayDiffer": "현재 프로젝트는 tetris_py를 독립 빌드하고 GPU 사용 여부를 trainer가 결정한다. 누적 실습은 study_py와 CPU TrainingRun을 사용한다."
+      }
+    },
+    {
+      "title": "명령은 셸 문장이 아니라 인자 배열로 넘긴다",
+      "body": "부모 프로세스는 실행할 프로그램과 인자 배열을 자식에게 넘깁니다. shell=True로 하나의 문자열을 해석하면 공백·따옴표·특수문자가 셸 문법이 됩니다. 인자 배열은 파일 경로의 공백도 한 인자로 전달할 수 있어 실행 계약을 더 직접적으로 표현합니다.\n\n명령의 첫 원소는 sys.executable입니다. `-u`는 자식 Python의 출력 버퍼링을 줄여 진행 로그가 오래 묶이지 않도록 합니다. 현재 작업 디렉터리 cwd는 명령에서 사용하는 상대 경로의 기준이며, 실행 파일을 선택하는 것과 별개입니다.\n\n실습은 preset을 허용 목록으로 검사합니다. 오타를 long으로 해석하지 않습니다. run 이름도 경로 구분자를 포함하지 않게 검사하고 기존 폴더가 있으면 시작하지 않습니다. 예산 값은 PRESETS의 설정으로 읽으며 smoke 예산을 봇 실력의 등급으로 설명하지 않습니다.",
+      "codes": [
+        {
+          "label": "launch — 설정 검증과 실행 인자",
+          "language": "python",
+          "text": "def launch(*, module_dir, output_root, name, preset, smoke_run=None):\n    if preset not in PRESETS or not re.fullmatch(r'[a-z0-9_-]{1,64}', name):\n        raise ValueError('unknown preset or invalid run name')\n    contract = identity(module_dir)\n    if preset == 'long':\n        if smoke_run is None:\n            raise ValueError('long needs a matching successful smoke directory')\n        before = json.loads((Path(smoke_run)/'manifest.json').read_text())\n        done = json.loads((Path(smoke_run)/'result.json').read_text())\n        if before['preset'] != 'smoke' or before['contract'] != contract or done['status'] != 'success':\n            raise ValueError('smoke contract mismatch')\n    directory = Path(output_root).resolve()/name\n    directory.mkdir(parents=True, exist_ok=False)\n    command = [sys.executable, '-u', str(Path(__file__).resolve()), 'worker',\n               '--module-dir', str(Path(module_dir).resolve()), '--directory', str(directory)]"
+        }
+      ],
+      "reference": {
+        "path": "python/train/training_commands.py",
+        "symbol": "def command_for",
+        "invariant": "지원하는 이름을 검사하고 실제 작업 예산을 명령 인자로 명시한다.",
+        "mayDiffer": "현재 모델 zoo의 알고리즘별 예산은 설정이다. 실습은 CPU PPO의 작은 smoke/long 예제 편성만 가진다."
+      }
+    },
+    {
+      "title": "run 폴더가 하나의 실험을 소유한다",
+      "body": "각 실험은 새 디렉터리를 소유합니다. 동일 이름이 이미 있으면 mkdir이 실패하도록 하여 이전 checkpoint·로그와 새 실험이 섞이지 않게 합니다. 재사용할 가중치나 재개 파일이 있다면 그 입력과 새 실행의 관계를 명시해야 합니다.\n\nmanifest.json에는 명령·예산·소스/모듈/Python 식별값과 시작 시각을 넣습니다. 이것은 **무엇을 실행하려 했는가**의 기록입니다. train.log는 실행 중 출력을, result.json은 **어떻게 끝났는가**를 기록합니다. 역할이 다른 파일을 분리하면 실행 도중 강제 종료됐을 때도 성공을 섣불리 추정하지 않을 수 있습니다.\n\n학습 파일은 하나의 모델/훈련 상태를 담습니다. 이름이 같거나 같은 폴더에 있다는 이유만으로 어떤 설정에서 만들어졌는지 알 수 없으므로 manifest와 산출물 해시를 연결합니다. 이것은 실험 비교와 오류 진단에 쓰는 근거입니다.",
+      "codes": [
+        {
+          "label": "명령 기록과 종료 결과 분리",
+          "language": "python",
+          "text": "    manifest = dict(started_at=datetime.now(timezone.utc).isoformat(), preset=preset,\n                    budget=PRESETS[preset], contract=contract, command=command)\n    write_once(directory/'manifest.json', manifest)\n    try:\n        run_logged(command, cwd=CP, log_path=directory/'train.log')\n        checkpoint = directory/'training.pt'\n        if not checkpoint.is_file():\n            raise RuntimeError('worker did not save the training state')\n        write_once(directory/'result.json', dict(status='success', checkpoint_hash=hash_file(checkpoint)))\n    except BaseException as error:\n        write_once(directory/'result.json', dict(status='failed', error_type=type(error).__name__))\n        raise\n    return directory"
+        }
+      ],
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def run_experiment",
+        "invariant": "실험별 새 디렉터리에 설정/실행 근거와 결과를 구분해 저장한다.",
+        "mayDiffer": "현재 notebook은 알고리즘별 명령과 모델 파일을 사용한다. 학습 실습은 하나의 CPU PPO와 전체 TrainingRun 체크포인트를 저장한다."
+      }
+    },
+    {
+      "title": "출력 파이프를 읽고 종료 코드를 전달한다",
+      "body": "자식의 stdout/stderr를 파이프로 받으면 부모가 출력 바이트를 읽어야 합니다. 파이프의 버퍼는 유한하므로 읽지 않은 채 자식 종료만 기다리면 자식이 쓰기에서 막힐 수 있습니다. 여기서는 두 출력을 합쳐 줄 단위로 계속 읽고 화면과 파일에 보냅니다.\n\n화면 출력과 파일 기록은 각각 실패할 수 있습니다. 자식이 살아 있는데 부모가 읽기를 포기하면 작업이 남을 수 있으므로 예외·중단 시 직접 자식을 종료하고 정해진 유예 뒤에도 끝나지 않으면 kill/wait로 정리합니다. 출력 읽기뿐 아니라 마지막 wait의 중단도 같은 정리 범위에 둡니다.\n\n종료 코드는 프로세스가 보고한 결과입니다.0 이외에는 CalledProcessError를 올립니다.0이어도 기대한 checkpoint 파일이 없다면 실험 성공 조건이 충족되지 않았으므로 부모가 실패로 처리합니다. 성공 판정은 프로세스 종료와 산출물 조건을 함께 읽습니다.",
+      "codes": [
+        {
+          "label": "run_logged — 실행·소비·종료·정리",
+          "language": "python",
+          "text": "    log_file = open(log_path, \"x\", encoding=\"utf-8\", errors=\"replace\")\n    try:\n        proc = subprocess.Popen(\n            argv,\n            cwd=cwd,\n            env=env,\n            shell=False,\n            stdout=subprocess.PIPE,\n            stderr=subprocess.STDOUT,\n            text=True,\n            encoding=\"utf-8\",\n            errors=\"replace\",\n            bufsize=1,\n        )\n        try:\n            for line in proc.stdout:\n                sys.stdout.write(line)\n                sys.stdout.flush()\n                log_file.write(line)\n                log_file.flush()\n            returncode = proc.wait()\n        except BaseException:\n            _terminate_direct_child(proc)\n            raise\n        finally:\n            proc.stdout.close()\n    finally:\n        log_file.close()"
+        }
+      ],
+      "reference": {
+        "path": "python/train/process_runner.py",
+        "symbol": "def run_logged",
+        "invariant": "인자 배열로 직접 자식을 실행하고 출력·종료 상태·정리를 호출자에게 전달한다.",
+        "mayDiffer": "직접 자식만 정리한다. 프로세스 그룹·서비스 재시작·원격 동기화까지 맡는 실행 관리자는 아니다."
+      },
+      "notes": [
+        {
+          "kind": "reference",
+          "title": "직접 자식의 범위",
+          "body": "[Python subprocess 문서](https://docs.python.org/3/library/subprocess.html#subprocess.run)의 인자 배열·returncode·파이프 계약을 함께 봅니다. 이 helper는 직접 자식만 정리합니다. 자식이 만든 전체 프로세스 그룹의 종료나 서비스 재시작 정책은 별도 설계입니다."
+        }
+      ]
+    },
+    {
+      "title": "학습 상태를 정해진 경계마다 기록한다",
+      "body": "worker는 새 프로세스에서 모델·환경을 만들고, 남은 예산만큼 수집/갱신합니다. 한 업데이트가 끝나면 TrainingRun.save를 호출합니다. 저장 이후의 다음 작업 도중 실패하면 마지막 완성된 checkpoint가 복원 기준입니다.\n\n진행 로그에는 실제 결정 수·업데이트 수·완료한 에피소드 수와 loss를 기록합니다. 아직 에피소드가 끝나지 않았다면 평균 경기 성적은 계산할 자료가 없습니다. 자료가 없다는 표시와 학습 수치가 비유한 값이 된 오류를 같은 의미로 읽지 않습니다.\n\n파일 쓰기 빈도는 잃을 수 있는 진행량과 I/O 비용을 함께 바꿉니다. 네트워크 저장소에 너무 자주 작은 파일을 쓰면 지연이 커질 수 있습니다. 이 실습은 저장 경계를 관찰하기 쉽도록 매 업데이트에 저장하며, 긴 실험에서는 작업량과 저장 장치에 맞춰 주기를 선택합니다.",
+      "codes": [
+        {
+          "label": "worker — 남은 예산과 업데이트 후 저장",
+          "language": "python",
+          "text": "    import torch\n    from training_checkpoint import TrainingRun\n    torch.set_num_threads(1)\n    run = TrainingRun()\n    try:\n        budget = manifest['budget']\n        while run.decisions < budget:\n            data, metrics = run.advance(min(run.config.rollout, budget-run.decisions))\n            run.save(directory/'training.pt')\n            print(json.dumps(dict(decisions=run.decisions, updates=run.updates,\n                                  episodes=len(run.collector.completed), metrics=metrics),allow_nan=False),flush=True)\n        print('worker completed',run.decisions,flush=True)\n    finally:\n        run.close()"
+        }
+      ],
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def run_experiment",
+        "invariant": "실험별 새 디렉터리에 설정/실행 근거와 결과를 구분해 저장한다.",
+        "mayDiffer": "현재 notebook은 알고리즘별 명령과 모델 파일을 사용한다. 학습 실습은 하나의 CPU PPO와 전체 TrainingRun 체크포인트를 저장한다."
+      }
+    },
+    {
+      "title": "smoke의 완료 기록으로 긴 실행을 허용한다",
+      "body": "long을 고르기 전에 어떤 smoke가 성공했는지 확인합니다. 같은 알고리즘·코드·확장·Python·패키지 조합으로 실행한 결과인지 비교합니다. 단순한 true 변수는 그 출처를 잃기 쉽지만 manifest/result를 함께 읽으면 바뀐 조건을 드러낼 수 있습니다.\n\n이 실습은 같은 contract의 smoke 폴더를 요구합니다. 현재 프로젝트는 알고리즘도 함께 비교합니다. 다른 모델 family나 다른 소스에서 통과한 작은 실행을 현재 긴 실행의 근거로 재사용하지 않습니다. 준비나 의존성이 바뀌면 새 smoke 기록을 만듭니다.\n\nsmoke 기록은 앞서 확인한 경로의 근거입니다. 예산이 커지면서 생길 수 있는 메모리 누적·성능 저하·정책 불안정까지 제거한 보증서는 아닙니다. 긴 실행에서도 중간 저장과 지표 관찰이 필요합니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def run_experiment",
+        "invariant": "실험별 새 디렉터리에 설정/실행 근거와 결과를 구분해 저장한다.",
+        "mayDiffer": "현재 notebook은 알고리즘별 명령과 모델 파일을 사용한다. 학습 실습은 하나의 CPU PPO와 전체 TrainingRun 체크포인트를 저장한다."
+      }
+    },
+    {
+      "title": "Drive 저장과 배포 산출물을 나눈다",
+      "body": "Drive 마운트 아래에 run 폴더를 두면 그 경로에 checkpoint와 실험 기록을 씁니다. 노트북 저장만으로 런타임의 임의 파일이 전부 올라가는 구조는 아닙니다. 기록할 경로와 파일을 코드에서 지정해야 합니다.\n\n파일 교체의 원자성, 원격 동기화, 전원 장애 뒤 보존은 다른 조건입니다. 마운트 저장소의 동작까지 로컬 파일 helper만으로 보증하지 않습니다. 완료 기록이 없는 실행은 결과 미확인으로 보고 로그와 마지막 checkpoint를 확인합니다.\n\n학습 run에는 PyTorch 상태와 실험 기록이 있고, 게임 배포에는 ONNX·상대 설정·그림 등이 필요합니다. 학습 디렉터리와 배포 ZIP의 구성을 구별합니다. 현재 notebook의 export 셀은 선택한 설정과 완료 run을 대조하고 그 모델을 내보냅니다. 모델을 읽었다는 사실과 게임의 추론 결과가 맞다는 검사는 별도로 이어집니다.",
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def run_experiment",
+        "invariant": "실험별 새 디렉터리에 설정/실행 근거와 결과를 구분해 저장한다.",
+        "mayDiffer": "현재 notebook은 알고리즘별 명령과 모델 파일을 사용한다. 학습 실습은 하나의 CPU PPO와 전체 TrainingRun 체크포인트를 저장한다."
+      }
+    },
+    {
+      "title": "실패를 주입하고 작은 실제 작업으로 마무리한다",
+      "body": "검사에서는 자식이 출력한 뒤 실패 코드를 반환하게 하고 로그가 남는지 확인합니다. 같은 로그나 run 이름으로 재실행하면 기존 자료를 덮어쓰지 않아야 합니다. 잘못된 preset·미확인 long·다른 알고리즘의 smoke는 프로세스를 시작하기 전에 거절합니다.\n\n실제 native 모듈을 사용하는 CPU worker는 짧은 예산을 진행하고 훈련 상태 파일을 남깁니다. result의 해시를 실제 파일과 비교하고 로그의 마지막 결정 수가 명시한 예산과 일치하는지 확인합니다. 별도 프로세스의 파일 경로와 기록으로 성공을 설명할 수 있어야 합니다.\n\nREADME 순서로 바인딩을 빌드하고 experiment.py launch를 실행합니다. 현재 프로젝트의 Colab notebook은 같은 준비·실행·검증 경계를 여러 알고리즘으로 확장합니다. 셀을 많이 쌓는 것보다 각 단계가 받아야 할 입력, 만들어야 할 출력, 실패 시 남길 상태를 먼저 정하는 것이 이 구조의 중심입니다.",
+      "codes": [
+        {
+          "label": "빌드 후 실행할 감독자",
+          "language": "bash",
+          "text": "python3 scripts/check_learning_colab_workflow.py --python /path/to/python\n/path/to/python docs/learn/checkpoints/159-colab-workflow/python/experiment.py launch --module-dir out/study-159/python/Release --output-root out/study-experiments --name first-smoke --preset smoke"
+        },
+        {
+          "label": "python/experiment.py — 완성된 실행 흐름",
+          "language": "python",
+          "file": "checkpoints/159-colab-workflow/python/experiment.py",
+          "collapsed": true
+        },
+        {
+          "label": "python/process_runner.py — 출력과 직접 자식 수명",
+          "language": "python",
+          "file": "checkpoints/159-colab-workflow/python/process_runner.py",
+          "collapsed": true
+        }
+      ],
+      "reference": {
+        "path": "python/train/colab_runtime.py",
+        "symbol": "def run_experiment",
+        "invariant": "실험별 새 디렉터리에 설정/실행 근거와 결과를 구분해 저장한다.",
+        "mayDiffer": "현재 notebook은 알고리즘별 명령과 모델 파일을 사용한다. 학습 실습은 하나의 CPU PPO와 전체 TrainingRun 체크포인트를 저장한다."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "159-1",
+      "question": "노트북 파일을 저장한 뒤 런타임이 사라졌습니다. 그 사실만으로 보존됐다고 말할 수 있는 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "커널의 optimizer 객체"
+        },
+        {
+          "id": "b",
+          "text": "저장한 노트북 셀과 출력"
+        },
+        {
+          "id": "c",
+          "text": "런타임의 모든 .pt 파일"
+        },
+        {
+          "id": "d",
+          "text": "메모리에 로드된 확장"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "저장한 노트북 셀과 출력",
+      "explanation": "노트북 파일·커널·런타임 디스크·별도 저장소는 수명이 다릅니다. 필요한 모델 파일은 따로 저장해야 합니다."
+    },
+    {
+      "id": "159-2",
+      "question": "새 확장을 빌드했는데 같은 커널이 오래된 함수를 보여 줍니다. 우선 확인할 원인은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "C++ 규칙이 자동으로 GPU에 옮겨졌다"
+        },
+        {
+          "id": "b",
+          "text": "현재 모델이 반드시 잘못 학습됐다"
+        },
+        {
+          "id": "c",
+          "text": "이미 import한 모듈 객체가 프로세스에 남아 있다"
+        },
+        {
+          "id": "d",
+          "text": "preset 이름이 너무 짧다"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "이미 import한 모듈 객체가 프로세스에 남아 있다",
+      "explanation": "파일 교체와 메모리 모듈 교체는 다릅니다. 새 프로세스에서 실제 __file__과 해시를 확인합니다."
+    },
+    {
+      "id": "159-3",
+      "question": "smoke를 쓰려다가 smkoe를 입력했습니다. 설정 처리의 올바른 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "long으로 자동 선택"
+        },
+        {
+          "id": "b",
+          "text": "예산을 최대로 늘린다"
+        },
+        {
+          "id": "c",
+          "text": "이전 결과 폴더를 지운다"
+        },
+        {
+          "id": "d",
+          "text": "알 수 없는 preset으로 거절한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "알 수 없는 preset으로 거절한다",
+      "explanation": "오타를 비용이 큰 실행으로 해석하지 않습니다. 지원하는 이름을 명시적으로 검사합니다."
+    },
+    {
+      "id": "159-4",
+      "question": "자식 종료 코드가0이지만 기대한 checkpoint가 없습니다. 부모가 내릴 판정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "산출물 조건이 충족되지 않아 실패"
+        },
+        {
+          "id": "b",
+          "text": "모델 학습 성공"
+        },
+        {
+          "id": "c",
+          "text": "GPU 검증 성공"
+        },
+        {
+          "id": "d",
+          "text": "실제 봇 난이도 확정"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "산출물 조건이 충족되지 않아 실패",
+      "explanation": "프로세스가 보고한 성공과 작업의 산출물 조건을 함께 확인해야 합니다."
+    },
+    {
+      "id": "159-5",
+      "question": "성공한 PPO smoke 기록으로 다른 알고리즘의 long을 시작하려고 합니다. 필요한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 파일 이름만 쓰기"
+        },
+        {
+          "id": "b",
+          "text": "현재 알고리즘과 준비 조건에 맞는 smoke 기록"
+        },
+        {
+          "id": "c",
+          "text": "노트북 출력 숨기기"
+        },
+        {
+          "id": "d",
+          "text": "로그 삭제"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "현재 알고리즘과 준비 조건에 맞는 smoke 기록",
+      "explanation": "다른 학습 경로의 성공은 현재 알고리즘의 준비·연결 근거가 아닙니다. 코드·모듈·실행 조건도 함께 대조합니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "현재 Python과 native 확장의 경로·해시를 연결한다.",
+      "새 작업 프로세스의 명령·출력·종료와 산출물을 기록한다.",
+      "성공한 smoke와 현재 조건을 대조하고 새 run 이름으로 긴 작업을 준비한다."
+    ],
+    "failureChecks": [
+      "오타 preset·다른 알고리즘/준비 상태·중복 이름을 시작 전에 거절한다.",
+      "자식 실패·마지막 wait 중단·산출물 누락을 구분한다.",
+      "노트북 저장과 실제 파일 저장, CPU 검사와 GPU 실행의 범위를 설명한다."
+    ],
+    "expected": "어떤 코드와 환경으로 무엇을 실행했고 무엇이 남았는지 파일과 종료 상태를 근거로 설명한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek 실행 helper 초안 검수와 실제 fresh native/PPO 및 CPU child contract",
+    "corrections": [
+      "잘못된 preset이 long으로 흐르던 경로 거절",
+      "커널 Python·독립 빌드·새 프로세스 native 경로 대조 및 상태 게이트",
+      "기존 build 삭제/무조건 pull 제거, run별 기록과 long smoke 대조",
+      "0줄 배치 성공과 출력/최종 wait의 실패 정리 구분"
+    ]
+  },
+  "validation": [
+    "누적 native CTest14 및 새 프로세스 실험/기록 계약 통과",
+    "현재 독립 native 재빌드·CPU 모델 smoke·짧은 실제 PPO/manifest 경로 통과",
+    "원격 Colab·Drive·GPU·ONNX·장기 학습·Windows/macOS native 미검증"
+  ]
+}

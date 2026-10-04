@@ -3234,7 +3234,7 @@
         {
           "id": "unit-149",
           "title": "바인딩: 규칙을 Python에서 다시 쓰지 않는 이유",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3243,12 +3243,18 @@
           "lessonId": "lesson-149",
           "previous": "unit-148",
           "next": "unit-150",
-          "validation": []
+          "validation": [
+            "실제 Linux CPython 확장 빌드·직접 Round oracle과 매 전이 bytes/점수/종료/Step 일치",
+            "seed·간격·입력조합·종료·snapshot·clone·reset·정수 변환과 실패 상태 보존 검사 통과",
+            "네이티브 Session ASan/UBSan 통과; Python 런타임은 비계측",
+            "현재 tetris_py를 별도 새 빌드하여 복사·내부 참조/부모 수명·clone·정수 경계4회귀 통과",
+            "148 누적 파일 보존·인라인7/현재심볼 대조 통과; Windows/macOS native와free-threadedPython 미검증"
+          ]
         },
         {
           "id": "unit-150",
           "title": "관측: 보드 상태를 텐서로",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3257,12 +3263,18 @@
           "lessonId": "lesson-150",
           "previous": "unit-149",
           "next": "unit-151",
-          "validation": []
+          "validation": [
+            "실제 확장모듈 및 누적 바인딩/새 NumPy·CPU PyTorch 관측 계약 CTest 통과",
+            "비대칭 축·불연속ID·실제모든종류/고정/종료·복사/배치/공유수명·숨긴카운터 검사",
+            "새 C++ snapshot ASan/UBSan 통과(Python/PyTorch 비계측)",
+            "현재실제 C++/Python 관측·가비지후 분기·shape거절 및이전바인딩9회귀 통과",
+            "Windows/macOSnative·CUDA·ONNX·Colab학습 미검증"
+          ]
         },
         {
           "id": "unit-151",
           "title": "행동: 매 틱 입력과 최종 배치",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3271,12 +3283,17 @@
           "lessonId": "lesson-151",
           "previous": "unit-150",
           "next": "unit-152",
-          "validation": []
+          "validation": [
+            "실제 확장 모듈과 누적/새 행동 CTest 통과",
+            "현재 C++/Python 인코딩·입력 전개 전체 도메인 및 배치 보존/벽 fixture 검사",
+            "PPO·정책경사의 엔트로피 값/기울기 및 실제 모델 1회 갱신 검사",
+            "Windows/macOS native·GPU·Colab 전체 학습·ONNX 미검증"
+          ]
         },
         {
           "id": "unit-152",
           "title": "보상: 점수와 정책의 목표",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3285,12 +3302,17 @@
           "lessonId": "lesson-152",
           "previous": "unit-151",
           "next": "unit-153",
-          "validation": []
+          "validation": [
+            "실제 확장 모듈·누적 바인딩/관측/행동 및 새 보상 계약 검사",
+            "순수 상쇄·할인·종료·수치 거절과 실제 Round 원본 보존/입력 재생 대조",
+            "현재 단일/대전 환경 보상 사건 및 PPO 입력 오류 회귀",
+            "전체 모델 학습·GPU·ONNX·Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-153",
           "title": "Gym 환경: reset·step·종료",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3299,12 +3321,16 @@
           "lessonId": "lesson-153",
           "previous": "unit-152",
           "next": "unit-154",
-          "validation": []
+          "validation": [
+            "독립 확장 빌드·누적 CTest와 실제 Gym 계약 검사",
+            "현재 단일/대전 환경 공식 checker·시드열·종료/행동/보상 회귀",
+            "전체 모델 학습·GPU·ONNX·Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-154",
           "title": "두 보드 환경: 상대와 함께 진행",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3313,12 +3339,17 @@
           "lessonId": "lesson-154",
           "previous": "unit-153",
           "next": "unit-155",
-          "validation": []
+          "validation": [
+            "실제 확장과 누적/두 보드 Python·C++ CTest",
+            "실제 공격 생성·직접 참조 실행·큐 수신 시점·상대 관측/변경 격리",
+            "현재 단일/대전 및 상대 오류·보상·기울기·바인딩 회귀59통과",
+            "새 Session C++ ASan/UBSan; Python/전체학습/GPU/Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-155",
           "title": "휴리스틱: 비교할 기준 정책",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3327,12 +3358,16 @@
           "lessonId": "lesson-155",
           "previous": "unit-154",
           "next": "unit-156",
-          "validation": []
+          "validation": [
+            "독립 확장·누적/새 특징·정책 CTest와 실제 대전 데모",
+            "현재 실제 C++ 선택/후보 적용·Python 별도 공식 및 기존 경계79회귀",
+            "C++ 런타임 동작 변경 없음; GPU·전체학습·Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-156",
           "title": "정책 네트워크: 입력 형상과 출력 의미",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3341,12 +3376,16 @@
           "lessonId": "lesson-156",
           "previous": "unit-155",
           "next": "unit-157",
-          "validation": []
+          "validation": [
+            "독립 확장·누적 CTest11·실제 관측/행동과 CPU gradient demo 통과",
+            "현재 모델·마스킹·기본 체크포인트31회귀 통과",
+            "TorchScript trace 정상 출력 대조; ONNX Runtime·CUDA·전체훈련·Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-157",
           "title": "PPO: 수집·업데이트·평가를 구분",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3355,12 +3394,16 @@
           "lessonId": "lesson-157",
           "previous": "unit-156",
           "next": "unit-158",
-          "validation": []
+          "validation": [
+            "독립 확장·누적 CTest12 및 실제 CPU PPO demo 통과",
+            "현재 모델/환경/종료/GAE/손실 회귀 및 실제 단일/대전 CLI smoke",
+            "짧은 역전파/저장 경로 검증; 장기 성능·Colab·CUDA·ONNX·Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-158",
           "title": "학습 체크포인트: 다시 시작할 정보",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3369,12 +3412,16 @@
           "lessonId": "lesson-158",
           "previous": "unit-157",
           "next": "unit-159",
-          "validation": []
+          "validation": [
+            "누적 CTest의 기존12검사 및 새 checkpoint 계약 통과; 새 프로세스의 rollout·모델·Adam·환경·RNG 정확히 대조",
+            "현재 checkpoint/모델/PPO/Gym/보상/대전127회귀와 실제 native warm start→업데이트→새 형식 저장/로드 통과",
+            "CPU 동일 실행 조건의 짧은 재개 검증; CUDA·Colab·장기 학습·Windows/macOS native·전원 장애 내구성 미검증"
+          ]
         },
         {
           "id": "unit-159",
           "title": "Colab 실행: smoke에서 긴 학습으로",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3383,12 +3430,16 @@
           "lessonId": "lesson-159",
           "previous": "unit-158",
           "next": "unit-160",
-          "validation": []
+          "validation": [
+            "누적 native CTest14 및 새 프로세스 실험/기록 계약 통과",
+            "현재 독립 native 재빌드·CPU 모델 smoke·짧은 실제 PPO/manifest 경로 통과",
+            "원격 Colab·Drive·GPU·ONNX·장기 학습·Windows/macOS native 미검증"
+          ]
         },
         {
           "id": "unit-160",
           "title": "모델 zoo: 난이도와 실험 기록",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3397,12 +3448,17 @@
           "lessonId": "lesson-160",
           "previous": "unit-159",
           "next": "unit-161",
-          "validation": []
+          "validation": [
+            "누적 native CTest와 새 프로세스 모델 비교 검사",
+            "현재 DQN/DDQN/MuZero 짧은 CPU 갱신·증류·평가 실행",
+            "장기 성능·GPU·원격 Colab·ONNX·실제 대전 난이도 미검증"
+          ],
+          "deliverable": "동일 평가 조건의 모델 후보·원자료·종료 사유·짝 비교 보고서"
         },
         {
           "id": "unit-161",
           "title": "ONNX export: 학습 상태와 배포 계약",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3411,12 +3467,17 @@
           "lessonId": "lesson-161",
           "previous": "unit-160",
           "next": "unit-162",
-          "validation": []
+          "validation": [
+            "현재 실제 게임 관측의 PyTorch↔CPU ONNX Runtime 출력/합법 선택 비교",
+            "누적 native 계약과 ONNX export/실패 보존 검사",
+            "대상 OS C++ 실행·GPU·장기 플레이 성능·모든 입력 동등성 미검증"
+          ],
+          "deliverable": "실제 관측의 수치·행동 대조를 통과한 단일 ONNX 추론 파일"
         },
         {
           "id": "unit-162",
           "title": "C++ 추론: Env·Session·텐서 수명",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3425,12 +3486,18 @@
           "lessonId": "lesson-162",
           "previous": "unit-161",
           "next": "unit-163",
-          "validation": []
+          "validation": [
+            "독립 누적 native CTest와 C++ ONNX Runtime의 실제 관측·PyTorch 출력/선택 대조",
+            "현재 wrapper의 잘못된 수치 성공과 오류 문자열 잔존 수정 전후 재현",
+            "C++ 신규 경계 ASan/UBSan; 외부 Runtime 비계측",
+            "Windows/macOS native·CUDA·장기 성능·전체 입력 동등성 미검증"
+          ],
+          "deliverable": "소유권과 실패 계약을 갖춘 C++ 동기 추론기·실제 모델 비교 실행기"
         },
         {
           "id": "unit-163",
           "title": "입력 전개: 배치를 사람처럼 조작",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3439,12 +3506,18 @@
           "lessonId": "lesson-163",
           "previous": "unit-162",
           "next": "unit-164",
-          "validation": []
+          "validation": [
+            "누적 native CTest와 새 경로의 발행/확인·상태 비교 검사",
+            "현재 벽 fixture의 잘못된 드롭 수정 전후 재현·Controller/보상 replay 회귀",
+            "C++/Python 요청 전개 전체 명령 표 및 타입/도메인 검사",
+            "새 C++ 경로 ASan/UBSan; Windows/macOS native·장기 난이도 미검증"
+          ],
+          "deliverable": "입력 발행과 실제 전이 확인을 분리한 경로 실행기"
         },
         {
           "id": "unit-164",
           "title": "속도 조절: 빠른 추론과 빠른 손",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3453,12 +3526,18 @@
           "lessonId": "lesson-164",
           "previous": "unit-163",
           "next": "unit-165",
-          "validation": []
+          "validation": [
+            "누적 native CTest19·실제 C++ ONNX와 Python 선택/상태881프레임 대조",
+            "현재 Controller 수정 전후13438틱 입력·상태·해시 대조",
+            "새 게이트와 실행기 ASan/UBSan/LSan 통과",
+            "Windows/macOS native·장기 난이도 미검증; 외부 ORT1.18.1 기존 누수 한계 유지"
+          ],
+          "deliverable": "실제 정책과 Session을 연결한 틱 간격 실행기"
         },
         {
           "id": "unit-165",
           "title": "캐릭터: 정책·일러스트·아이콘을 분리",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3467,12 +3546,18 @@
           "lessonId": "lesson-165",
           "previous": "unit-164",
           "next": "unit-166",
-          "validation": []
+          "validation": [
+            "실제 C++/Python 프로필 파서와 패키징 회귀",
+            "독립 누적 native CTest·표시 독립성/선택 스냅샷 검사",
+            "실제 공유 ONNX 모델과 Python/native 상태 대조",
+            "Windows/macOS native·GUI 이미지·장기 난이도 미검증"
+          ],
+          "deliverable": "표시와 행동이 분리된 캐릭터 카탈로그·실제 정책 선택 실행기"
         },
         {
           "id": "unit-166",
           "title": "fallback: 실패를 숨기지 않는 연습 모드",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             8,
             9,
@@ -3481,7 +3566,13 @@
           "lessonId": "lesson-166",
           "previous": "unit-165",
           "next": "unit-167",
-          "validation": []
+          "validation": [
+            "root 정책/Controller/정상 replay 회귀 및 실제 HTTP/DB13검사 통과",
+            "누적 native CTest21·두 보드 독립 Duel 및 실제 모델/NaN621프레임 대조",
+            "새 정책/카탈로그/Match ASan/UBSan/LSan·클라이언트 구문 검사",
+            "외부 ORT1.18.1 알려진 누수·대상 OS/GUI·장기 난이도·모델 버전 자동 협상 한계 유지"
+          ],
+          "deliverable": "실패 출처를 유지하는 두 보드 실행기·엄격 재현과 보상 미지급 경계"
         }
       ]
     },

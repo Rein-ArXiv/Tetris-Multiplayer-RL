@@ -1,0 +1,404 @@
+{
+  "id": "lesson-154",
+  "title": "두 보드 환경: 상대와 함께 진행",
+  "shortTitle": "공동 전이·공격 큐·상대 계약·실패 보존",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 환경이 단일 Session의 초기화·행동·종료를 관리합니다.",
+  "finish": "완료: 두 Session과 상대 정책을 한 결정으로 연결하고 공격·승패·실패 반영 경계를 검사합니다.",
+  "objective": "두 보드의 실행 순서와 수신 시점, 상대의 정보·반환 계약, 공동 전이의 성공 경계를 구현하고 설명한다.",
+  "prerequisites": [
+    "Gym spaces·reset·step·수명 계약",
+    "후보 상태 실행과 성공 후 반영",
+    "가비지 수신 큐·잠금·종료와 보상"
+  ],
+  "recap": {
+    "points": [
+      "행동의 정적 범위와 현재 합법성을 구별한다.",
+      "환경·행동 샘플러·상대 RNG의 소유권을 명시한다.",
+      "규칙 종료와 외부 수집 제한의 플래그를 따로 보존한다."
+    ],
+    "bridge": "환경이 소유할 상태를 두 보드와 상대 정책으로 넓히고 하나의 결정에 포함할 실행 순서를 정합니다."
+  },
+  "sections": [
+    {
+      "title": "하나의 결정에 두 규칙 객체를 참여시킨다",
+      "body": "단일 환경은 Session 하나를 소유하고 행동을 실행합니다. 대전 환경에는 A와 B의 Session이 있고, A는 학습 중인 정책이, B는 교체할 수 있는 상대 정책이 선택합니다. 학습기는 여전히 A의 관측을 받아 행동 하나를 보내지만 그 결과에는 B의 응답도 포함됩니다.\n\n이제 환경 상태는 A의 보드만으로 설명되지 않습니다. B의 보드와 다음 피스, 양쪽 수신 큐, 상대 정책의 에피소드 상태도 A의 미래에 영향을 줍니다. 두 객체를 필드에 넣는 일보다 중요한 것은 **어떤 순서로 읽고 바꿀 것인지**를 정하는 일입니다.\n\nVersusEnv는 RoundEnv의 스키마·시드·출력 복사·수명 계약을 이어받습니다. 새 책임은 상대 초기화, 공동 전이의 순서, 공격 라우팅과 대전 보상입니다. 네이티브 규칙의 줄 삭제·가비지 삽입을 Python에서 다시 계산하지 않습니다.",
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def step(",
+        "invariant": "대전의 실행 순서와 공격 전달·종료·상태 반영 경계를 명시한다.",
+        "mayDiffer": "현재 환경은 즉시 배치 SimGame을 쓰고 학습 환경은 실제 틱 경로 Session을 쓴다. 두 환경 모두 A 배치 뒤 B가 응답하는 결정 단위를 사용한다."
+      }
+    },
+    {
+      "title": "A 배치 뒤 B 응답이라는 스케줄을 선택한다",
+      "body": "이 실습의 한 step은 `A 배치 → A 공격을 B 큐에 추가 → B 배치 → B 공격을 A 큐에 추가 → 종료 판정`입니다. 이런 실행 순서의 규칙을 **스케줄(schedule)**이라고 부릅니다. 같은 연산을 모두 한 번 실행해도 순서가 달라지면 결과가 달라질 수 있습니다.\n\n가비지는 받는 보드의 잠금에서 주입됩니다. A의 공격은 바로 뒤 B 배치의 잠금에 도착하고, B의 공격은 A가 다음 결정을 실행할 때 주입됩니다. 한 step 안에서 두 보드가 경험하는 위치가 다릅니다. 그래서 한 번씩 행동한다는 사실만으로 동시 진행이나 선후공 대칭을 주장할 수 없습니다.\n\n현재 실시간 게임과 비교할 때는 공격 큐 API가 같다는 점과 시간 스케줄이 같다는 점을 구별합니다. 실시간 동시 입력을 학습하려면 양쪽 입력을 같은 논리 시계에 맞추는 별도 결정을 해야 합니다. 여기서는 배치 단위 정책을 비교하기 위해 순서가 있는 결정을 택합니다.",
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def step(",
+        "invariant": "대전의 실행 순서와 공격 전달·종료·상태 반영 경계를 명시한다.",
+        "mayDiffer": "현재 환경은 즉시 배치 SimGame을 쓰고 학습 환경은 실제 틱 경로 Session을 쓴다. 두 환경 모두 A 배치 뒤 B가 응답하는 결정 단위를 사용한다."
+      }
+    },
+    {
+      "title": "누적 공격량을 이번 사건으로 바꾼다",
+      "body": "규칙은 지금까지 보낸 공격 총계를 가지고 있습니다. 공격 전 총계가 u, 배치 뒤 총계가 v이면 이번 공격은 `v-u`입니다. **누적량**과 **증분(delta)**의 차이입니다. 매번 총계 v를 상대에게 보내면 과거 공격까지 다시 지급됩니다.\n\n이 차분은 배치 직전과 직후의 같은 후보에서 읽습니다. 환경의 오래된 복제 카운터를 진실의 원천으로 추가하면 reset이나 다른 상태 교체 때 동기화할 값이 늘어납니다. 규칙 객체의 총계를 한 전이 안에서 직접 비교하면 그 부담을 줄일 수 있습니다.\n\n총계가 포화하는 규칙에서는 차분도 그 포화 정책의 한계를 갖습니다. 구현을 볼 때 정수형만 보고 무한히 증가한다고 가정하지 않습니다. 이 체크포인트는 규칙의 기존 공격 총계와 수신 큐 상한을 그대로 사용합니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — A의 배치와 증분",
+          "language": "python",
+          "text": "            before_a = a.attack_sent()\n            event = a.apply_action(action)\n            ticks_a, lines = event['ticks'], event['lines']\n            attack_a = a.attack_sent() - before_a\n            if attack_a and not b.finished():\n                b.add_garbage(attack_a)"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def step(",
+        "invariant": "대전의 실행 순서와 공격 전달·종료·상태 반영 경계를 명시한다.",
+        "mayDiffer": "현재 환경은 즉시 배치 SimGame을 쓰고 학습 환경은 실제 틱 경로 Session을 쓴다. 두 환경 모두 A 배치 뒤 B가 응답하는 결정 단위를 사용한다."
+      }
+    },
+    {
+      "title": "가비지 큐는 즉시 보드 수정과 다르다",
+      "body": "`add_garbage(rows)`는 수신량을 큐에 더합니다. 이 순간 잠긴 셀이 올라가지는 않습니다. 피스가 잠길 때 규칙이 큐를 읽고 줄 삽입·넘침·다음 피스 생성 조건을 처리합니다. **예약된 사건**과 **적용된 상태**를 구분해야 합니다.\n\n바인딩에 공격 총계, 대기 수신량, 마지막 주입량을 노출합니다. 이 값들은 같은 의미가 아닙니다. last_garbage는 잠금에서 실제 주입한 양이고 pending_garbage는 앞으로 적용할 양입니다. 보낸 공격이 큐 상한을 넘거나 이미 끝난 보드로 향하면 보낸 양과 실제 주입량이 다를 수 있습니다.\n\nSession은 살아 있는 라운드에 음수가 아닌 수신량만 추가합니다. Round의 add_garbage가 거절하면 예외를 내고 원본을 유지합니다. 큐 상한·홀 선택·넘침 판정은 규칙 쪽 책임입니다. Python 환경은 어느 보드로 언제 전달할지를 책임집니다.",
+      "codes": [
+        {
+          "label": "bindings/session.h — 규칙 큐를 언어 경계에 노출",
+          "language": "cpp",
+          "text": "    void add_garbage(int rows) {\n        auto candidate = round_;\n        if (!candidate.add_garbage(rows))\n            throw std::invalid_argument(\"garbage requires a live round and nonnegative rows\");\n        round_ = std::move(candidate);\n    }\n    std::uint64_t attack_sent() const noexcept { return round_.attack_sent(); }\n    int pending_garbage() const noexcept { return round_.pending_garbage(); }\n    int last_garbage() const noexcept { return round_.last_garbage(); }"
+        }
+      ],
+      "reference": {
+        "path": "bindings/tetris_py.cpp",
+        "symbol": ".def(\"add_pending_garbage\"",
+        "invariant": "환경은 네이티브 수신 큐를 연결하고 삽입 규칙을 중복 구현하지 않는다.",
+        "mayDiffer": "현재 바인딩은 SimGame의 add_pending_garbage를 노출한다. 학습 Session은 잘못된 수신 요청을 예외로 거절하며 기존 Round의 큐 상한을 따른다."
+      }
+    },
+    {
+      "title": "상대 정책에는 상대 시점의 입력을 준다",
+      "body": "학습 정책이 A의 관측을 받는다고 해서 상대에게도 그 관측을 넘길 수는 없습니다. B가 둘 행동은 B의 피스와 보드에서 합법이어야 합니다. `observe(b, schema)`와 B의 legal_mask를 만들어 상대의 act에 전달합니다.\n\n이 설계에서 상대는 `(obs, mask) → action`이라는 작은 계약을 가집니다. 기본 RandomOpponent는 합법 라벨 중 하나를 무작위로 고릅니다. 같은 인터페이스에 규칙 기반 정책이나 학습된 정책을 연결할 수 있습니다. 상대의 품질과 환경 계약의 정확성은 별도로 평가합니다.\n\n관측 배열과 마스크는 상대가 수정할 수 있는 Python 객체입니다. 권위 있는 합법 마스크를 보존하고 복사본을 전달합니다. 상대가 마스크를 모두 True로 바꾸더라도 그 값으로 자신의 행동을 정당화할 수 없습니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 최소 상대 정책",
+          "language": "python",
+          "text": "class RandomOpponent:\n    \"\"\"Own the opponent's sampling RNG; the environment reseeds each episode.\"\"\"\n    def reseed(self, seed):\n        self._rng = np.random.default_rng(seed)\n\n    def reset(self):\n        pass\n\n    def act(self, obs, mask):\n        actions = np.flatnonzero(mask)\n        return int(self._rng.choice(actions)) if actions.size else None"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class PolicyOpponent",
+        "invariant": "상대는 자기 보드의 관측·합법 행동을 기준으로 선택한다. 반환값을 환경 경계에서 검증한다.",
+        "mayDiffer": "현재 일반 상대는 버려지는 SimGame 복사본을 받는다. 학습 환경은 복사한 관측 배열과 마스크만 전달한다."
+      }
+    },
+    {
+      "title": "전달하는 정보가 정책의 능력 범위를 정한다",
+      "body": "A의 관측은 단일 환경과 같은 board·current·next 형상을 유지합니다. 그래서 같은 정책망 입력을 사용할 수 있지만, B의 보드와 대기 공격량 등은 입력에 포함되지 않습니다. 보상이 경쟁을 반영한다는 사실이 숨긴 상태를 관측 가능하게 만들지는 않습니다.\n\n이런 환경은 정책 관측만으로 전체 상태를 알기 어려운 **부분 관측** 문제입니다. 같은 A 보드·피스라도 B가 곧 큰 공격을 보내는 상태와 그렇지 않은 상태의 미래는 다를 수 있습니다. info에 상대 진단 상태를 넣어도 정책이 읽지 않으면 입력에는 들어가지 않습니다.\n\n반대로 탐색 상대에게 네이티브 복사본 전체를 주면 관측 배열보다 많은 정보를 사용할 수 있습니다. 현재 GreedyBCTSOpponent는 그런 방식으로 후보를 시험합니다. 상대 사이의 승률을 비교할 때는 알고리즘 이름뿐 아니라 사용할 수 있는 정보와 계산 예산도 기록해야 합니다.",
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class PolicyOpponent",
+        "invariant": "상대는 자기 보드의 관측·합법 행동을 기준으로 선택한다. 반환값을 환경 경계에서 검증한다.",
+        "mayDiffer": "현재 일반 상대는 버려지는 SimGame 복사본을 받는다. 학습 환경은 복사한 관측 배열과 마스크만 전달한다."
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "상대가 바뀌면 환경도 바뀐다",
+          "body": "고정 상대를 둔 동안에는 그 상대 정책을 환경 전이의 일부로 볼 수 있습니다. 훈련 도중 상대를 바꾸면 같은 A 행동의 결과 분포도 달라집니다. 자기 대전에서 상대 스냅샷과 평가 상대를 기록하는 이유입니다."
+        }
+      ]
+    },
+    {
+      "title": "상대의 반환값을 실행 전에 다시 검증한다",
+      "body": "상대가 float 1.8을 돌려주면 int로 바꾸어 1을 실행할까요? 그러면 정책 버그가 정상 행동처럼 숨겨집니다. action_index로 타입과 정적 범위를 확인한 뒤, 보존한 B의 마스크로 현재 합법성까지 검사합니다.\n\nNone도 의미를 정해야 합니다. 여기서는 합법 행동이 없을 때의 패스에만 사용합니다. 합법 행동이 있는데 None을 반환하면 정책 오류로 거절합니다. 합법 행동이 없는 살아 있는 판은 제한한 경로군의 막힘일 수도 있으므로 환경이 임의로 탑아웃을 만들어서는 안 됩니다.\n\n기본 상대도 이 경계를 통과합니다. 정책이 같은 저장소 안에 있다는 사실은 모든 버전과 실패 경로에서 올바른 값을 반환한다는 보장이 아닙니다. 잘못된 반환을 어느 호출에서 발견했는지 분명하게 만드는 것이 검사의 목적입니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 상대의 복사 입력과 반환 검사",
+          "language": "python",
+          "text": "                # Keep authoritative legality separate from the policy's mutable arrays.\n                mask = legal_mask(b, self._action_schema)\n                choice = self._opponent.act(observe(b, self._observation_schema), mask.copy())\n                if choice is None:\n                    if mask.any():\n                        raise ValueError('opponent passed despite legal actions')\n                else:\n                    choice = action_index(choice, self.action_space.n)\n                    if not mask[choice]:\n                        raise ValueError('opponent returned a blocked action')"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "class PolicyOpponent",
+        "invariant": "상대는 자기 보드의 관측·합법 행동을 기준으로 선택한다. 반환값을 환경 경계에서 검증한다.",
+        "mayDiffer": "현재 일반 상대는 버려지는 SimGame 복사본을 받는다. 학습 환경은 복사한 관측 배열과 마스크만 전달한다."
+      }
+    },
+    {
+      "title": "두 보드를 하나의 성공 경계로 묶는다",
+      "body": "A를 원본에 실행한 뒤 상대가 예외를 던졌다고 합시다. 학습기는 step 결과를 받지 못했는데 A는 이미 움직였고 B는 멈춰 있습니다. 같은 행동을 다시 보내도 처음 요청과 다른 상태에서 실행됩니다.\n\n**원자적 반영**은 이 공동 전이를 반영하거나, 반영 전 보드를 유지하는 경계를 뜻합니다. a와 b 복사본을 만들고 배치·공격 전달·보상·관측을 모두 계산합니다. 성공한 뒤 두 Session과 결정 횟수를 함께 바꿉니다. 현재 대전 환경도 같은 방식으로 후보 SimGame을 사용합니다.\n\n외부에서 `old = env.simA`처럼 보드 참조를 저장했다면 성공한 step 뒤 old는 과거 상태를 계속 가리킵니다. 객체 참조를 가지고 있다는 것과 환경의 현재 상태를 조회한다는 것은 다릅니다. 새로운 상태는 환경에서 다시 받아야 합니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 공동 전이의 반영 지점",
+          "language": "python",
+          "text": "        terminated = a.finished() or b.finished()\n        reward = (versus_reward(lines, attack_a, a.finished(), b.finished(),\n                                self._attack_weight, self._win_bonus, self._loss_penalty)\n                  if applied else 0.)\n        steps = self._steps + 1\n        truncated = self._max_steps is not None and steps >= self._max_steps\n        obs, info = self._versus_output(a, b, steps, applied, attack_a, attack_b,\n                                       ticks_a, ticks_b, lines)\n        self._session, self._other, self._steps = a, b, steps\n        self._needs_reset = terminated or truncated\n        return obs, reward, terminated, truncated, info"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def step(",
+        "invariant": "대전의 실행 순서와 공격 전달·종료·상태 반영 경계를 명시한다.",
+        "mayDiffer": "현재 환경은 즉시 배치 SimGame을 쓰고 학습 환경은 실제 틱 경로 Session을 쓴다. 두 환경 모두 A 배치 뒤 B가 응답하는 결정 단위를 사용한다."
+      }
+    },
+    {
+      "title": "보드 롤백과 정책의 외부 부작용을 구별한다",
+      "body": "복사본을 버리면 두 보드는 보존할 수 있습니다. 그러나 상대 정책이 이미 소비한 RNG, 로그 파일, 다른 객체 변경까지 자동으로 되돌아가지는 않습니다. 같은 판에서 재시도해도 상대의 다음 선택이 달라질 수 있습니다.\n\n그래서 유효한 플레이어 행동을 받은 뒤 공동 전이를 시작할 때 `_needs_reset=True`로 잠급니다. 모든 계산이 성공해야 진행 가능 여부를 다시 설정합니다. 상대 예외·잘못된 반환·보상 수치 오류가 나면 잠금이 남아 reset을 요구합니다. 타입·범위가 잘못된 플레이어 행동은 이 경계 전에 거절하므로 정상 에피소드를 불필요하게 무효화하지 않습니다.\n\n현재 일반 상대에게는 B 후보를 한 번 더 복사해서 넘깁니다. 상대가 인수에 가비지를 추가해도 실제 후보에 반영되지 않습니다. 하지만 같은 프로세스에서 실행하는 Python 콜백의 임의 외부 접근까지 차단하는 보안 샌드박스는 아닙니다. 실행할 상대 코드는 신뢰 가능한 코드라는 전제가 있습니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 호출 경계와 실패 잠금",
+          "language": "python",
+          "text": "    def step(self, action):\n        if self._needs_reset:\n            raise gym.error.ResetNeeded('reset required before a versus decision')\n        action = action_index(action, self.action_space.n)\n        self._needs_reset = True\n        a, b = self._session.clone(), self._other.clone()\n        applied = bool(legal_mask(a, self._action_schema)[action])"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def step(",
+        "invariant": "대전의 실행 순서와 공격 전달·종료·상태 반영 경계를 명시한다.",
+        "mayDiffer": "현재 환경은 즉시 배치 SimGame을 쓰고 학습 환경은 실제 틱 경로 Session을 쓴다. 두 환경 모두 A 배치 뒤 B가 응답하는 결정 단위를 사용한다."
+      }
+    },
+    {
+      "title": "승패 항은 공동 전이의 끝에서 한 번 계산한다",
+      "body": "줄 삭제와 공격 사건을 얻은 뒤 대전 보상은 `lines + attack_weight × attack`에 종료 항을 더합니다. B만 종료하면 승리 항, A가 종료하면 동시 종료를 포함해 패배 항을 적용합니다. 공개 경기의 무승부·BP 지급과 독립적인 학습 목적입니다.\n\n이 스케줄은 A가 종료해도 살아 있는 B의 이번 응답을 실행한 뒤 두 종료 상태를 읽습니다. 따라서 같은 공동 결정에서 양쪽이 종료할 수 있습니다. 이미 끝난 수신자에게 새 공격을 큐에 추가하지 않으며, 종료 결과를 반환한 뒤 추가 step은 거절합니다.\n\n계수가 유한해도 큰 공격량과의 곱이나 승리 항의 합이 비유한 수가 될 수 있습니다. 생성자에서 계수를 검사하고 순수 보상 함수에서 계산 결과도 검사합니다. 보상 계산에 실패하면 후보 보드를 반영하지 않습니다. 부호는 실험 목적의 선택이며 유한성 검사만으로 좋은 목표가 되는 것은 아닙니다.",
+      "codes": [
+        {
+          "label": "python/versus_reward.py — 기본 보상과 종료 항",
+          "language": "python",
+          "text": "    weight = finite_coefficient(attack_weight, \"attack_weight\")\n    win = finite_coefficient(win_bonus, \"win_bonus\")\n    loss = finite_coefficient(loss_penalty, \"loss_penalty\")\n\n    try:\n        reward = float(lines) + weight * float(attack)\n    except OverflowError as exc:\n        raise ValueError(\"reward overflowed while converting inputs\") from exc\n\n    if b_dead and not a_dead:\n        reward += win\n    if a_dead:\n        reward -= loss\n\n    if not math.isfinite(reward):\n        raise ValueError(\"reward is not finite: {!r}\".format(reward))\n    return reward"
+        }
+      ],
+      "reference": {
+        "path": "python/common/versus_reward.py",
+        "symbol": "def versus_reward",
+        "invariant": "전이의 줄·공격·종료 사건으로 보상을 계산하고 계수와 결과의 유한성을 확인한다.",
+        "mayDiffer": "현재와 학습의 순수 보상 계산식은 같다. 각 규칙이 만드는 공격량과 배치 지속시간은 다를 수 있다."
+      }
+    },
+    {
+      "title": "막힌 행동과 두 논리 시계의 의미를 정한다",
+      "body": "A의 라벨이 도메인 안이지만 현재 막혔으면 두 보드를 유지하고 상대를 호출하지 않습니다. 보상은 0이며 결정 횟수는 하나 소비합니다. 무효 행동으로 외부 예산을 피하지 않게 하는 계약입니다.\n\n유효한 공동 결정에서는 A의 입력 틱 수와 B의 입력 틱 수가 다를 수 있습니다. info의 ticks와 opponent_ticks로 따로 기록합니다. 단순히 둘을 더한 값을 실시간 경과라고 부를 수는 없습니다. 이 실행은 양쪽을 같은 시간축에서 교대로 tick한 것이 아니기 때문입니다.\n\n대전 보상은 공동 결정 단위를 사용합니다. 단일 환경의 tick 기반 RewardSpec은 받지 않고, info에도 그 시계의 discount를 넣지 않습니다. 수집기가 공동 결정마다 정한 γ를 사용할 수는 있지만, 실시간 할인으로 확장하려면 양쪽을 진행시키는 공통 시계부터 정의해야 합니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 서로 다른 전이 정보",
+          "language": "python",
+          "text": "    def _versus_output(self, a, b, decisions, applied=None, attack_a=0, attack_b=0,\n                       ticks_a=0, ticks_b=0, lines=0):\n        obs, info = self._output(a, self._episode_seed, decisions, applied, ticks_a)\n        # A joint decision has two separate logical clocks, not one shared tick.\n        info.pop('discount')\n        info.pop('reward_terms')\n        info.update(opponent_seed=self._other_seed, opponent_state=b.state_bytes(),\n                    agent_attack=attack_a, opp_attack=attack_b, lines_cleared=lines,\n                    opponent_ticks=ticks_b, incoming_garbage=a.pending_garbage(),\n                    opp_alive=not b.finished())\n        return obs, info"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def step(",
+        "invariant": "대전의 실행 순서와 공격 전달·종료·상태 반영 경계를 명시한다.",
+        "mayDiffer": "현재 환경은 즉시 배치 SimGame을 쓰고 학습 환경은 실제 틱 경로 Session을 쓴다. 두 환경 모두 A 배치 뒤 B가 응답하는 결정 단위를 사용한다."
+      }
+    },
+    {
+      "title": "에피소드 시작에 보드와 정책을 함께 초기화한다",
+      "body": "reset은 A의 시드 정책을 적용하고 B의 Session을 만듭니다. 상대 시드를 명시하면 그 값을 유지하고, 생략하면 A 시드의 다음 uint64 값을 사용합니다. 상대의 reseed로 난수 흐름을 초기화하고 reset으로 에피소드 상태를 정리합니다.\n\n학습된 상대가 순환 신경망의 은닉 상태를 가지고 있다면 그 상태도 에피소드 경계의 일부입니다. RNG만 초기화하고 은닉 상태를 남기면 같은 보드 시드에서 같은 행동열이 나오지 않을 수 있습니다. 상대 계약은 어떤 상태를 초기화해야 하는지 구현체가 책임지도록 합니다.\n\n상대 reset 훅이 실패하면 환경을 진행 가능 상태로 두지 않습니다. close는 A와 B를 모두 놓습니다. 최대 결정 횟수는 수집 예산이므로 truncated이고, 어느 보드든 규칙상 끝났으면 terminated입니다. 두 조건이 겹치면 두 플래그를 모두 보존합니다.",
+      "codes": [
+        {
+          "label": "python/versus_env.py — 보드와 상대의 초기화",
+          "language": "python",
+          "text": "    def reset(self):\n        pass\n\n    def act(self, obs, mask):\n        actions = np.flatnonzero(mask)\n        return int(self._rng.choice(actions)) if actions.size else None\n\n\nclass VersusEnv(RoundEnv):\n    def __init__(self, *, opponent=None, opponent_seed=None, attack_weight=0.5,\n                 win_bonus=10., loss_penalty=10., **kwargs):\n        if 'reward_spec' in kwargs:\n            raise ValueError('versus uses its own decision-level reward contract')\n        super().__init__(**kwargs)\n        self._opponent = opponent if opponent is not None else RandomOpponent()\n        self._fixed_other_seed = optional_seed(opponent_seed)\n        self._other = None\n        self._attack_weight = finite_coefficient(attack_weight, 'attack_weight')\n        self._win_bonus = finite_coefficient(win_bonus, 'win_bonus')\n        self._loss_penalty = finite_coefficient(loss_penalty, 'loss_penalty')\n\n    def _versus_output(self, a, b, decisions, applied=None, attack_a=0, attack_b=0,\n                       ticks_a=0, ticks_b=0, lines=0):\n        obs, info = self._output(a, self._episode_seed, decisions, applied, ticks_a)\n        # A joint decision has two separate logical clocks, not one shared tick.\n        info.pop('discount')\n        info.pop('reward_terms')\n        info.update(opponent_seed=self._other_seed, opponent_state=b.state_bytes(),\n                    agent_attack=attack_a, opp_attack=attack_b, lines_cleared=lines,\n                    opponent_ticks=ticks_b, incoming_garbage=a.pending_garbage(),\n                    opp_alive=not b.finished())\n        return obs, info\n\n    def reset(self, *, seed=None, options=None):\n        super().reset(seed=seed, options=options)\n        self._needs_reset = True\n        self._other_seed = (self._fixed_other_seed if self._fixed_other_seed is not None\n                            else (self._episode_seed + 1) % (1 << 64))\n        other = self._sim.Session(self._other_seed, self._interval)\n        self._opponent.reseed(self._other_seed)\n        self._opponent.reset()\n        result = self._versus_output(self._session, other, 0)\n        self._other = other\n        self._needs_reset = False\n        return result"
+        }
+      ],
+      "reference": {
+        "path": "python/common/env_versus.py",
+        "symbol": "    def reset(",
+        "invariant": "양쪽 규칙과 상대의 에피소드 상태를 초기화하고 실패한 초기화를 진행 상태로 취급하지 않는다.",
+        "mayDiffer": "현재 기본 상대는 그리디 평가기, 학습 환경의 기본 상대는 마스크 기반 랜덤 정책이다. 사용자 정의 상대의 RNG·은닉 상태 초기화는 해당 정책 책임이다."
+      }
+    },
+    {
+      "title": "실제 공격이 발생하는 경로로 전달을 검증한다",
+      "body": "공격 라우팅 테스트에서 “공격이 있었다면 비교한다”만 쓰면, 모든 게임이 공격 없이 끝나도 검사에 통과할 수 있습니다. 확인할 사건이 실제로 일어났는지를 먼저 보장해야 합니다. 이 실습의 회귀는 네이티브 후보 평가로 줄 삭제가 일어나는 입력을 선택하고 실제 공격 총량이 양수인지도 검사합니다.\n\n독립적인 참조 실행은 두 Session을 복사한 뒤 A 배치, B 큐 추가, B 배치, A 큐 추가를 직접 수행합니다. 환경 step과 양쪽 정규 상태 bytes를 비교합니다. 이어서 B가 이번 잠금에서 수신했는지, A에는 B 공격이 다음 잠금용으로 남아 있는지도 확인합니다.\n\n큐의 상한이 적용되면 단순히 보낸 합과 받은 합이 항상 같다고 검증할 수는 없습니다. 테스트 조건 안에서 상한과 종료로 버린 양을 구분합니다. 상대 오류 테스트는 예외뿐 아니라 두 보드·카운터의 보존과 reset 요구까지 검사합니다.",
+      "reference": {
+        "path": "python/tests/test_versus_boundary.py",
+        "symbol": "def test_reward_overflow_does_not_commit_actual_attack",
+        "invariant": "실제 공격·오류 경로가 실행되는 fixture로 공동 전이의 보존과 수신 의미를 검증한다.",
+        "mayDiffer": "현재 검사는 SimGame의 공격과 승리 보상 합산 overflow를 만들고 보드 보존을 확인한다. 학습 검사는 Session의 수신 시점과 직접 참조 실행도 대조한다."
+      }
+    },
+    {
+      "title": "두 보드 실행을 빌드하고 관찰한다",
+      "body": "bindings에 Session의 전투 접근자를 추가했으므로 확장모듈을 다시 빌드합니다. 이전 모듈을 import하면 add_garbage 같은 메서드를 찾을 수 없습니다. 선택한 가상환경 Python과 새 module-dir을 명시합니다. 의존성·OS별 Python 경로는 체크포인트 README에 정리되어 있습니다.\n\nversus_demo는 현재 마스크의 한 행동을 선택해 결정 횟수·양쪽 공격·각자 소비한 틱·보상을 출력합니다. 한 결정 안에서도 ticks가 다를 수 있음을 관찰하고 종료 또는 예산 경계에서 멈춥니다. 이 선택 규칙은 강한 상대를 만드는 정책이 아니라 환경 흐름을 보는 도구입니다.\n\n관측과 입력 형상을 유지하면서도 상대 정보·실행 순서·보상 목표가 바뀌었다는 점을 확인합니다. 같은 신경망이 값을 받을 수 있다는 사실과 같은 의미의 과제를 학습한다는 사실을 구별하면, 새 상대나 콘텐츠를 연결할 때 수정할 경계를 찾기 쉬워집니다.",
+      "codes": [
+        {
+          "label": "독립 바인딩 빌드와 실행",
+          "language": "bash",
+          "text": "python -m pybind11 --cmakedir\ncmake -S docs/learn/checkpoints/154-versus/bindings -B out/study-154 -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=/path/to/python -Dpybind11_DIR=/path/to/pybind11/share/cmake/pybind11\ncmake --build out/study-154 --config Release -j2\nctest --test-dir out/study-154 -C Release --output-on-failure\n/path/to/python docs/learn/checkpoints/154-versus/python/versus_demo.py --module-dir out/study-154/python/Release"
+        },
+        {
+          "label": "python/versus_env.py — 전체 공동 전이",
+          "language": "python",
+          "file": "checkpoints/154-versus/python/versus_env.py",
+          "collapsed": true
+        },
+        {
+          "label": "tests/versus_contract.py — 실제 두 보드 회귀",
+          "language": "python",
+          "file": "checkpoints/154-versus/tests/versus_contract.py",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "154-1",
+      "question": "A 배치→B 응답 순서이며 가비지는 수신자의 잠금에서 주입됩니다. B가 보낸 공격은 살아 있는 A에 언제 적용되나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "B의 공격 총계를 읽기 전에"
+        },
+        {
+          "id": "b",
+          "text": "A가 다음 피스를 잠글 때"
+        },
+        {
+          "id": "c",
+          "text": "방금 끝난 A 배치를 과거로 되돌릴 때"
+        },
+        {
+          "id": "d",
+          "text": "reset할 때만"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "A가 다음 피스를 잠글 때",
+      "explanation": "B가 응답할 때 A의 이번 잠금은 끝났습니다. 공격은 A의 큐에 남았다가 다음 잠금에서 적용됩니다."
+    },
+    {
+      "id": "154-2",
+      "question": "상대가 자기 마스크 배열을 모두 True로 고친 뒤 원래 막힌 행동을 반환했습니다. 환경은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "수정된 마스크를 믿고 실행한다"
+        },
+        {
+          "id": "b",
+          "text": "가까운 합법 행동으로 자동 이동한다"
+        },
+        {
+          "id": "c",
+          "text": "상대의 승리로 판정한다"
+        },
+        {
+          "id": "d",
+          "text": "보존한 원래 마스크로 거절하고 reset을 요구한다"
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "보존한 원래 마스크로 거절하고 reset을 요구한다",
+      "explanation": "상대에게는 복사본을 전달하고 실행 권한을 판정하는 마스크는 환경이 유지합니다. 공동 전이가 실패하면 후보를 버리고 에피소드를 재초기화합니다."
+    },
+    {
+      "id": "154-3",
+      "question": "상대가 RNG를 한 번 소비한 뒤 예외를 냈습니다. 두 보드를 후보 복사본에서 실행했다면?",
+      "options": [
+        {
+          "id": "a",
+          "text": "두 보드는 보존할 수 있지만 상대 RNG까지 자동 복구되지는 않는다"
+        },
+        {
+          "id": "b",
+          "text": "외부 파일 쓰기까지 자동으로 취소된다"
+        },
+        {
+          "id": "c",
+          "text": "같은 판에서 재시도하면 반드시 같은 행동이 나온다"
+        },
+        {
+          "id": "d",
+          "text": "A만 반영해도 완전한 공동 전이다"
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "두 보드는 보존할 수 있지만 상대 RNG까지 자동 복구되지는 않는다",
+      "explanation": "보드 상태의 소유권과 상대 정책의 외부 상태는 다릅니다. 그래서 실패 후 재시도를 허용하지 않고 reset 경계를 요구합니다."
+    },
+    {
+      "id": "154-4",
+      "question": "보낸 공격 총계가 6에서 8로 늘었습니다. 상대에게 이번에 전달할 양은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "8"
+        },
+        {
+          "id": "b",
+          "text": "6"
+        },
+        {
+          "id": "c",
+          "text": "2"
+        },
+        {
+          "id": "d",
+          "text": "14"
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "2",
+      "explanation": "같은 배치 전후의 누적량 차이가 이번 사건입니다. 총계를 다시 보내면 과거 공격을 중복 전달합니다. 수신 큐의 수용량은 별도 규칙입니다."
+    },
+    {
+      "id": "154-5",
+      "question": "A 관측의 shape를 그대로 유지했습니다. 무엇을 결론 낼 수 있나요?",
+      "options": [
+        {
+          "id": "a",
+          "text": "상대 상태도 정책이 자동 관측한다"
+        },
+        {
+          "id": "b",
+          "text": "동일 입력 형상의 정책망에 연결할 수 있지만 전이·정보·보상 의미는 따로 확인한다"
+        },
+        {
+          "id": "c",
+          "text": "실시간 게임과 두 보드의 시간축이 같아졌다"
+        },
+        {
+          "id": "d",
+          "text": "모든 단일 보드 학습기가 코드 변경 없이 대전 목표를 정확히 계산한다"
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "동일 입력 형상의 정책망에 연결할 수 있지만 전이·정보·보상 의미는 따로 확인한다",
+      "explanation": "형상 호환성은 연결 조건의 일부입니다. 부분 관측, 상대 스케줄, 보상 지표와 종료 처리는 별도 의미 계약입니다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "Session의 누적 공격·수신 큐·주입량을 바인딩에 연결한다.",
+      "상대 시점 관측과 복사 마스크로 행동을 요청하고 반환을 검사한다.",
+      "두 후보에서 순서대로 실행한 뒤 보상·출력 성공 시 함께 반영한다."
+    ],
+    "failureChecks": [
+      "실제 공격이 발생하는 fixture로 두 상태와 수신 잠금 시점을 대조한다.",
+      "잘못된 상대 반환·콜백 수정/예외·보상 overflow에서 보드 보존과 reset 요구를 확인한다.",
+      "같은 시드의 상대 행동열·종료 후 재호출·막힌 결정 예산을 검사한다."
+    ],
+    "expected": "동시 진행과 순서 있는 배치 근사를 구별하고 대전 상태의 소유권·보상·실패 경계를 검증한다."
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek 순수 보상 초안 직접 검수, 현재 versus 오류 재현·후보 반영 및 네이티브 두 보드 대조",
+    "corrections": [
+      "소수 상대 행동 암묵 변환·잘못된 패스/막힌 행동 무시 제거",
+      "상대 실패/인수 수정에 대한 두 후보 보존과 reset 요구",
+      "계수/결과 비유한 보상 거절",
+      "전투 원시 연산 공유와 실시간 스케줄 동일성 단정 구별"
+    ]
+  },
+  "validation": [
+    "실제 확장과 누적/두 보드 Python·C++ CTest",
+    "실제 공격 생성·직접 참조 실행·큐 수신 시점·상대 관측/변경 격리",
+    "현재 단일/대전 및 상대 오류·보상·기울기·바인딩 회귀59통과",
+    "새 Session C++ ASan/UBSan; Python/전체학습/GPU/Windows/macOS native 미검증"
+  ]
+}

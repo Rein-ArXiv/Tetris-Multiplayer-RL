@@ -36,11 +36,12 @@ public:
     };
     // Enumerates (col, rot) in the fixed action domain col=0..kCols-1.
     // Some negative origins fit rotated pieces, but are not enumerated here;
-    // ApplyPlacement can accept them. Each candidate lands via
-    // rotate-then-translate-then-hard-drop. col is the piece's columnOffset
+    // ApplyPlacement can accept them. Candidates relocate the rotated shape
+    // directly, then project downward; no intermediate key route or Tick runs. col is the piece's columnOffset
     // after moving, rot is the target rotation state.
     std::vector<Placement> LegalPlacements() const;
-    // Applies a placement decision atomically (rotate -> translate -> hard drop -> lock).
+    // Atomically commits a geometric endpoint (rotate -> relocate -> project -> lock).
+    // This API does not consume intermediate key requests or gravity ticks.
     // Returns the number of lines cleared, or -1 if the placement is illegal.
     int ApplyPlacement(int col, int rot);
 

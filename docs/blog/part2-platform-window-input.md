@@ -1148,13 +1148,15 @@ inline int logical_mouse_axis(int coordinate, int offset, int extent, int logica
     std::int64_t result = numerator / extent;
     if (numerator < 0 && numerator % extent != 0) --result;
     return static_cast<int>(std::clamp(result,
-        static_cast<std::int64_t>(std::numeric_limits<int>::min()),
-        static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+        static_cast<std::int64_t>((std::numeric_limits<int>::min)()),
+        static_cast<std::int64_t>((std::numeric_limits<int>::max)())));
 }
 } // namespace platform_detail
 ```
 
 뺄셈 전에 64비트로 올리고, 곱셈도 64비트로 처리한다. 이 함수는 최대 32비트 int를 전제로 하며 반환 int 범위를 넘는 값만 포화시킨다. 유효하지 않은 크기는 -1로 돌려준다. 캡처된 마우스의 창 밖 좌표도 다루되, OS 이벤트의 좌표 단위 자체를 바꾸는 함수는 아니다.
+
+> **Windows 헤더와 전처리:** `(std::numeric_limits<int>::min)()`처럼 함수 이름을 괄호로 감싸면 Windows의 함수형 `min`/`max` 매크로가 확장되지 않는다. 이름 공간 표기만으로는 전처리 매크로와 구별되지 않으므로, 공용 헤더에서는 이 형태로 표준 함수를 호출한다.
 
 ### 8.3 논리 해상도는 고정, 창만 커진다
 

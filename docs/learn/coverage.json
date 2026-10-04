@@ -8502,8 +8502,8 @@
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "11. HTTP 방어선",
       "startLine": 1756,
-      "endLine": 1934,
-      "sha256": "67a22b3c03d45a762ee72ebccaf026d6629736927b01c536a6cfc27694f46f7e",
+      "endLine": 1953,
+      "sha256": "bcb2137e422878444d26423edeca599347e8870557af59a5cbf8f41eebe8f79b",
       "candidateUnits": [
         "unit-099",
         "unit-100",
@@ -8536,15 +8536,15 @@
         "lesson-139"
       ],
       "state": "partial",
-      "note": " 139: §11.2 CSPRNG 실패·hex·충돌 확률·CRYPTO_memcmp와 volatile 한계를 재구성. 다른 HTTP 방어선 전체는 미대응."
+      "note": " 139: §11.2 CSPRNG 실패·hex·충돌 확률·CRYPTO_memcmp와 volatile 한계를 재구성. 다른 HTTP 방어선 전체는 미대응.; HTTP 조기 응답의 미소비 본문/keep-alive 경계와 제한 배수·연결 종료 계약을 교정했다. 이 추가 운영 경계의 강의 전체 대응을 완료로 주장하지 않는다."
     },
     {
       "id": "part10--section-13",
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "12. guest 토큰 — 위협 모델",
-      "startLine": 1935,
-      "endLine": 2063,
+      "startLine": 1954,
+      "endLine": 2082,
       "sha256": "0e876cd1d88e72e1472b87f544a5f12ced5b0a30fce36cc6428e9447eee5ee7c",
       "candidateUnits": [
         "unit-099",
@@ -8585,8 +8585,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "13. `MetaClient` — 클라이언트와 relay 가 공유하는 HTTP 래퍼",
-      "startLine": 2064,
-      "endLine": 2553,
+      "startLine": 2083,
+      "endLine": 2572,
       "sha256": "76f0e363ab51aa4256f08b5400e6010649f4374ea6774ee3f4e5061579b7f12c",
       "candidateUnits": [
         "unit-099",
@@ -8630,8 +8630,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "14. 클라이언트 부트스트랩 — 저장과 인증을 구분한다",
-      "startLine": 2554,
-      "endLine": 2656,
+      "startLine": 2573,
+      "endLine": 2675,
       "sha256": "3f38873c4e4baed35cbd732551c332d613abffbfb878125bcc7dd5804fc842e4",
       "candidateUnits": [
         "unit-099",
@@ -8673,8 +8673,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "15. Customize 화면 — 프로필과 아이콘 상점 연결",
-      "startLine": 2657,
-      "endLine": 2799,
+      "startLine": 2676,
+      "endLine": 2818,
       "sha256": "7ab03831a68c85068aa89db946f28d20fb30d1af88e65b6cfc63d25d2679ad4c",
       "candidateUnits": [
         "unit-122",
@@ -8692,8 +8692,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "16. relay 쪽 연동 (1) — 인증된 입장 정보",
-      "startLine": 2800,
-      "endLine": 2902,
+      "startLine": 2819,
+      "endLine": 2921,
       "sha256": "a87023ba6b531dde6a4eb5a99b4580bd73b28985dc6dcb9521ff438c618aa2ee",
       "candidateUnits": [
         "unit-108",
@@ -8710,8 +8710,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "17. relay 쪽 연동 (2) — 서버가 계산한 결과만 저장한다",
-      "startLine": 2903,
-      "endLine": 3029,
+      "startLine": 2922,
+      "endLine": 3048,
       "sha256": "5fb247a2989b263ddb73a48aeff5a2c80d1d555ec6652f4ae2d13012b58aa657",
       "candidateUnits": [
         "unit-099",
@@ -8753,8 +8753,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "18. 랭킹 웹 페이지",
-      "startLine": 3030,
-      "endLine": 3096,
+      "startLine": 3049,
+      "endLine": 3115,
       "sha256": "280f2fd89c6f7290e81248c9e060ee8fa12fb330bbcd617389ee13a7bfbe44ad",
       "candidateUnits": [
         "unit-099",
@@ -8795,8 +8795,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "19. wire 이름과 사용자 용어",
-      "startLine": 3097,
-      "endLine": 3112,
+      "startLine": 3116,
+      "endLine": 3131,
       "sha256": "dd5dd124d71a1f22787054786b88d02c983fba1670730768c6cae32f6912fc22",
       "candidateUnits": [
         "unit-115",
@@ -8813,8 +8813,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "20. 실행과 수동 검증",
-      "startLine": 3113,
-      "endLine": 3194,
+      "startLine": 3132,
+      "endLine": 3213,
       "sha256": "d5bfb90689c5e3171c971cbcfed35fc513b32222b124b080c876da888d35e836",
       "candidateUnits": [
         "unit-109",
@@ -8832,8 +8832,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "21. 자동 검증",
-      "startLine": 3195,
-      "endLine": 3218,
+      "startLine": 3214,
+      "endLine": 3237,
       "sha256": "8996269c0e89d28f7588eb1ebf2c1c300bafd3f57f5acbcb1ffa1252e9e0f506",
       "candidateUnits": [
         "unit-113",
@@ -8851,8 +8851,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 3219,
-      "endLine": 3233,
+      "startLine": 3238,
+      "endLine": 3252,
       "sha256": "f1aabf01fbb4c3ae9cb71c3faa1fbe66d2d51e5f561016e614a33c87e1bd6294",
       "candidateUnits": [
         "unit-109",
@@ -8870,8 +8870,8 @@
       "part": 10,
       "path": "docs/blog/part10-meta-and-ranking.md",
       "title": "수동 테스트",
-      "startLine": 3234,
-      "endLine": 3262,
+      "startLine": 3253,
+      "endLine": 3281,
       "sha256": "38c15ac72fe49bd9bc32d71cb465f4df5c037b77f5a0cf96b76fbab0c96b35da",
       "candidateUnits": [
         "unit-119",

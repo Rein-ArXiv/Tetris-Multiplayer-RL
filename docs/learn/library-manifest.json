@@ -68,8 +68,8 @@
     },
     "part10": {
       "path": "docs/blog/part10-meta-and-ranking.md",
-      "sha256": "74e95d118521093f0254c62a0c5a2f5075c42a1efbfe2c2bfbf1b8889977916f",
-      "lines": 3262,
+      "sha256": "1a4c4cc57c8a1afb4559c2b7cc2dc9ee35eab5e89e6dc54b46e7ea43d7914c20",
+      "lines": 3281,
       "codeBlocks": 71
     },
     "part11": {
@@ -171,8 +171,8 @@
   },
   "sources": {
     "CMakeLists.txt": {
-      "sha256": "b7a0cbe2e759575353e5475f65b4ed1d52a36ad0bc008f56173ceda5343e079f",
-      "lines": 826
+      "sha256": "35f00a8232766b85958e7b5bbf99a3bc305d6b54b42c0888f9d2be4b0dde330c",
+      "lines": 833
     },
     "CMakePresets.json": {
       "sha256": "1b7a477dcd5fd572b525d2c3cdec430a9ecfc0a62a869f41eb0fd960e9b48e6c",
@@ -643,8 +643,8 @@
       "lines": 591
     },
     "python/tests/test_meta_db_smoke.py": {
-      "sha256": "a1ccd9ada0db89547f47278a346a637e5059287b3d13b89510aa3e7840193661",
-      "lines": 828
+      "sha256": "7561c9ad64945b16caa0b07d0e2ab0cab3452522acdd60493378aade9b418051",
+      "lines": 886
     },
     "python/tests/test_observation_parity.py": {
       "sha256": "0faf191182cb1477de021f8be05b4e272fcd477808e8523a8889a5e95346d750",
@@ -1077,6 +1077,10 @@
     "tests/heuristic_dump.cpp": {
       "sha256": "ba255ad097faf049b1d118f82d2d0d0d0a7ee33b424faad208c7386a303d1607",
       "lines": 34
+    },
+    "tests/http_early_response_test.cpp": {
+      "sha256": "10f971ae2eb67e51deba314d9f4d4197f13c773fccfb2d5f1cadc2aab2e30247",
+      "lines": 46
     },
     "tests/input_message_test.cpp": {
       "sha256": "50374f38266e5c5ee4a098d8149aaf40c52546c42318fe76a142716c19a25617",

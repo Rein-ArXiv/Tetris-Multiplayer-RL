@@ -13,6 +13,7 @@ Run::
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import socket
@@ -20,6 +21,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 from pathlib import Path
 
@@ -826,3 +828,59 @@ def test_distinct_matches_same_pair_are_not_economy_capped(meta_server):
     status, second = _post(f"{base}/v1/auth/verify", {"token": a["token"]})
     assert status == 200 and second["bp"] == first["bp"] * 2
     assert second["xp"] == first["xp"] * 2
+
+
+@pytest.mark.parametrize("body", [b"x", b"x" * (64 * 1024)], ids=["small", "at-limit"])
+def test_rate_limited_body_preserves_http_connection(meta_server, body):
+    """A rejected POST must not become the next request or reset the 429 body."""
+    for _ in range(10):
+        assert _post(f"{meta_server}/v1/guest")[0] == 200
+    address = urlsplit(meta_server)
+    conn = http.client.HTTPConnection(address.hostname, address.port, timeout=5)
+    try:
+        conn.request("POST", "/v1/guest", body=body,
+                     headers={"Content-Type": "application/json"})
+        original_socket = conn.sock
+        assert original_socket is not None
+        response = conn.getresponse()
+        assert response.status == 429
+        assert response.getheader("Retry-After") == "60"
+        length = int(response.getheader("Content-Length"))
+        received = response.read(length)
+        assert len(received) == length
+        assert json.loads(received) == {"error": "rate_limited"}
+        assert response.read(1) == b""
+        assert conn.sock is original_socket
+        conn.request("GET", "/healthz")
+        assert conn.sock is original_socket  # Reconnecting would hide the bug.
+        response = conn.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"ok": True}
+        assert conn.sock is original_socket
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("framing", [
+    {"Content-Length": "65537"},
+    {"Transfer-Encoding": "chunked"},
+    {"Content-Length": "invalid"},
+])
+def test_rate_limited_unsupported_body_closes_without_waiting(meta_server, framing):
+    """Do not drain unbounded/ambiguous bodies or reuse their stream as HTTP."""
+    for _ in range(10):
+        assert _post(f"{meta_server}/v1/guest")[0] == 200
+    address = urlsplit(meta_server)
+    conn = http.client.HTTPConnection(address.hostname, address.port, timeout=2)
+    try:
+        conn.putrequest("POST", "/v1/guest")
+        for key, value in framing.items():
+            conn.putheader(key, value)
+        conn.endheaders()  # No body: rejection must not wait for these bytes.
+        response = conn.getresponse()
+        assert response.status == 429
+        assert response.getheader("Connection") == "close"
+        assert json.loads(response.read()) == {"error": "rate_limited"}
+        assert conn.sock is None
+    finally:
+        conn.close()

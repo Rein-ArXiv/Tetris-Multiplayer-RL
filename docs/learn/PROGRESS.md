@@ -1,5 +1,7 @@
 # 연속 집필 진행 기록
 
+- 2026-10-04 최신: main30d2eb3과 Pages workflow 공개 확인 완료. Windows CI의429 미소비본문/연결 재사용 오류를 별도 수정했다. 수정 전 Linux400재현, 수정 후 C++경계·실제서버106검사·공개168기준 정적검사 통과. CI hotfix push 뒤 원격Windows 결과 확인 필요.169는 실제CP검사를 마쳤고 사이트검수 진행 중, 단원13 계속.
+
 ## 작업 계약
 
 2026-09-21 사용자가 차시 제작 → 검수 → 다음 차시 제작을 턴 단위로 계속 요청했다.
@@ -17,6 +19,8 @@ REVIEW_LOG.md를 확인하고 이미 검토한 차시를 중복 생성하지 않
 - 2026-10-03: 매 큰 단원 완료 시 커밋. course-plan의 modules 기준이다. 당시134~148 단원을 다음 경계로 지정했으며, 이후 경계는 아래 현재 상태를 따른다. 개별 차시 커밋/자동 푸시/공개 범위 확대는 하지 않는다. DeepSeek 선택 초안과 직접 검수 분담 유지.
 
 ## 현재 상태
+
+- main/Pages 통합 완료: **30d2eb38e77ad0ff1f07f448d8df7cf09aca8432**를main/origin에커밋·푸시했다. **Learning site37225195663 build/deploy성공**, Pages Sourceworkflow전환확인. 실제HTTPS에서release8956e73123f7a264의manifest와15자산해시가로컬과일치하며lesson-168포함확인(out/learning-jobs/main-pages-live-verification.json). 현재검수강의는공개됨. 다음큰단원main푸시도사이트검사후자동배포. 제품CI최신은**37225195676 (30d2eb3)**이고 Windows순차빌드수정의직전검사37224758450도진행중이라둘의실패로그를먼저확인한다. 전체제품CI통과는아직주장하지않음. 이메모는배포후운영기록으로다음작업커밋에포함한다.
 
 - 2026-10-04 최신 요청: main과 Pages 통합. 개발은 이미main이며166까지 원격 반영돼 있음을 확인했다. gh-pages는 오래된 정적 배포 브랜치다. 검수된167~168·관련 제품/Part 개선을main에 함께 커밋하고, Pages Source를GitHub Actions로 전환해 main의 학습사이트 검사 성공 후 최신 reviewed강의를 공개한다. 이 요청이 과거공개1~55동결보다 우선한다. gh-pages 이력과알수없는 :memory:.ses는보존. 작업결과는 Learning site배포 및 실제HTTPS manifest/hash로 확인한다.
 

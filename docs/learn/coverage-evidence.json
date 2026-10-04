@@ -1641,8 +1641,8 @@
     "lessons": [
       "lesson-139"
     ],
-    "note": " 139: §11.2 CSPRNG 실패·hex·충돌 확률·CRYPTO_memcmp와 volatile 한계를 재구성. 다른 HTTP 방어선 전체는 미대응.",
-    "sha256": "67a22b3c03d45a762ee72ebccaf026d6629736927b01c536a6cfc27694f46f7e"
+    "note": " 139: §11.2 CSPRNG 실패·hex·충돌 확률·CRYPTO_memcmp와 volatile 한계를 재구성. 다른 HTTP 방어선 전체는 미대응.; HTTP 조기 응답의 미소비 본문/keep-alive 경계와 제한 배수·연결 종료 계약을 교정했다. 이 추가 운영 경계의 강의 전체 대응을 완료로 주장하지 않는다.",
+    "sha256": "bcb2137e422878444d26423edeca599347e8870557af59a5cbf8f41eebe8f79b"
   },
   "part17--section-05": {
     "sha256": "e534d9184aef6d190488f282af3508dbd193bb3f3e9f5aedfb07d203516ac985",

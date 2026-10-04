@@ -7021,3 +7021,18 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - Pages설정은legacy/gh-pages였고 main 워크플로는수동배포전용이었다. main push 및 수동실행에서 학습사이트검사성공뒤배포하도록조건수정. PR은배포제외. DeepSeek에는조건명세만전달했으며step_start/text외도구없음; 조건을직접검토했다. GitHub공식Pages API의workflow/legacy구분확인.
 - README/학습안내/DEPLOYMENT와집필계약을새공개정책에맞췄다. PUBLICATION은고정된오래된공개수치를현재상태로보이지않도록이전배포이력을중첩보존하고현재배포증거위치를Actions와실제manifest로안내한다. 과거진행기록은이력이며상단최신요청이우선한다.
 -167/168스니펫·현재심볼·누적보존재검사통과. 에셋복사검사는처음PATH에Ninja가없어구성실패했으나기존/tmp/study161-python의검증용Ninja를명시해재실행한다. SDK준비4검사통과. 기존의실제역할빌드/추론/설치이동검증은167·168항목을따른다.
+
+- **통합·공개 결과:** 30d2eb3을main에일반커밋·푸시했다. 본문/코드/Part/공유빌드설정및Pages조건을함께반영. 신규누적체크포인트의기존라이선스/trailing whitespace는직전누적파일바이트보존을확인하고원문유지; 나머지변경diff검사통과. Ninja경로를준검사2통과, SDK4·Part·Markdown27·허용목록5·누적스니펫·834객관식·집중DOM·재현정적배포검사통과.
+- PagesAPI를workflow로전환했고환경은이미main배포를허용했다(추가보호완화없음). Learning site37225195663의build/deploy성공. HTTPSmanifest+모든15자산이release8956e73123f7a264의길이/SHA-256과일치,마지막lesson-168확인. main-pages-live-verification.json에커밋·배포run·검사파일기록. gh-pages삭제/강제푸시/수동GUI검사없음.
+- 제품CI37225195676은별도진행중이며이공개검사로Windows서버회귀통과를대신주장하지않는다. 직전6b30039 run37224758450의순차빌드검사결과도이어확인. 다음학습작업은169 준비메모에서계속한다.
+
+## 2026-10-04 — Windows 429 응답 본문과 HTTP 연결 경계
+
+- main30d2eb3 및 이전6b30039의 제품 CI는 Windows thread-model smoke에서만 실패. 세 실패는 모두 요청 제한429의 JSON 응답을 읽다 WinError10054가 발생했다. 컴파일/CTest·다른 OS·CPU 학습은 성공. 배포 성공과 제품 CI 성공은 분리한다.
+- cpp-httplib0.18.5의 pre-routing Handled 경로가 POST 본문을 남긴 채 응답함을 확인. Linux에서도 수정 전 서버로 429 뒤 같은 소켓의 health 요청이400이 되는 새 회귀 실패를 재현(ci-http-before.log). Windows에서만 발생하는 현상으로 축소하지 않았다.
+- 로컬 httplib 보강: 단일 정상 Content-Length·설정 상한/64KiB 상한 이내 본문만 제한 배수. JSON/압축 해석이나 거절된 라우트 실행 없음. 읽기 사이2초기한과 개별 소켓 읽기timeout의 차이를 기록. TE/중복/잘못된/큰 길이·미완료 읽기는 연결 재사용을 중지. 응답의Connection:close가 실제 처리 루프 종료로 이어지고 close 헤더는 하나만 쓴다. 이 경계 밖 전송 중인 악성 본문의 응답 수신까지 보장하지 않는다. 의존성 README에 업그레이드 보존 계약 추가.
+- DeepSeek에는 선택된 테스트 명세만 전달(ci-rate-body-events). step_start/text뿐. 초안의 _post fixture 오인, 상한을 넘긴 multi-buffer 입력, 잘못된health경로를 직접 수정. 새 pytest는 작은/상한 본문 뒤 동일 socket의health200, unsupported framing은 본문을 보내기 전429/close를 검사. C++BufferStream으로 문법·중복·overflow·한도·부족한입력·다음요청보존 검사.
+- 초기 새 테스트는 close헤더중복을 잡아 수정. 전체 검사에서 구형build-secure/wss_probe를 자동 선택해 pending계정 검사3실패가 생겼으며 최신 검증 빌드 경로를 명시하여 재검사한다. 조기CTest는 빌드 완료 전이라Not Run이었고 실제 빌드 종료 뒤 통과했다.
+- CI 수정은 검수완료main의 별도 스냅샷에서 원문/소스/coverage/강의 번들을 생성했다. 진행중169 및 Linux릴리스 변경을 공개 자료에 섞지 않는다. Part10HTTP방어선 절만 내용/해시 갱신, 대응은 partial 유지. Part/834객관식·정적상대자산/허용목록/해시/재현ZIP검사 통과(ci-http-site.log). 현재Windows수정본 원격실행 결과는 후속 확인한다.
+
+- 최종 로컬: 최신 검증 probe를 명시한 계정/입장권/meta 전체106검사 통과(ci-http-final.log), C++조기본문 경계CTest 통과. 정적release9b53b953160ad711. Windows 원격 성공은 아직 확인 전이다.

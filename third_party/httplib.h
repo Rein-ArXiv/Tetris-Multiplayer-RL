@@ -4306,6 +4306,36 @@ inline void skip_content_with_length(Stream &strm, uint64_t len) {
   }
 }
 
+// Local integration patch: early handled requests have not consumed their body.
+// Drain only a small, unambiguous fixed-length body before replying; otherwise
+// the next keep-alive request is misframed, or closing with unread input can
+// reset the peer's connection before it receives the complete response.
+inline bool discard_handled_request_body(Stream &strm, const Request &req,
+                                        size_t payload_max_length) {
+  if (req.has_header("Transfer-Encoding")) { return false; }
+  if (!req.has_header("Content-Length")) { return true; }
+  if (req.get_header_value_count("Content-Length") != 1) { return false; }
+  const auto text = req.get_header_value("Content-Length");
+  if (text.empty()) { return false; }
+  const auto limit = (std::min)(payload_max_length, size_t{64 * 1024});
+  uint64_t length = 0;
+  for (const auto ch : text) {
+    if (ch < '0' || ch > '9') { return false; }
+    const auto digit = static_cast<unsigned>(ch - '0');
+    if (digit > limit || length > (limit - digit) / 10) { return false; }
+    length = length * 10 + digit;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  // The deadline is checked between reads; one read still uses the configured
+  // stream timeout. Do not decompress, parse JSON, or run the rejected route.
+  return read_content_with_length(
+      strm, length,
+      [deadline](uint64_t, uint64_t) {
+        return std::chrono::steady_clock::now() < deadline;
+      },
+      [](const char *, size_t, uint64_t, uint64_t) { return true; });
+}
+
 inline bool read_content_without_length(Stream &strm,
                                         ContentReceiverWithProgress out) {
   char buf[CPPHTTPLIB_RECV_BUFSIZ];
@@ -6515,6 +6545,7 @@ inline bool Server::write_response_core(Stream &strm, bool close_connection,
 
   // Prepare additional headers
   if (close_connection || req.get_header_value("Connection") == "close") {
+    res.headers.erase("Connection");
     res.set_header("Connection", "close");
   } else {
     std::string s = "timeout=";
@@ -6916,6 +6947,9 @@ inline bool Server::listen_internal() {
 inline bool Server::routing(Request &req, Response &res, Stream &strm) {
   if (pre_routing_handler_ &&
       pre_routing_handler_(req, res) == HandlerResponse::Handled) {
+    if (!detail::discard_handled_request_body(strm, req, payload_max_length_)) {
+      res.set_header("Connection", "close");
+    }
     return true;
   }
 
@@ -7259,6 +7293,11 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
     }
   }
 #endif
+  // A handled request whose body could not be drained must not be reused.
+  if (res.get_header_value("Connection") == "close") {
+    connection_closed = true;
+    close_connection = true;
+  }
   if (routed) {
     if (res.status == -1) {
       res.status = req.ranges.empty() ? StatusCode::OK_200

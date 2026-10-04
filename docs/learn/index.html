@@ -79,7 +79,7 @@
     <article id="lesson-1" data-view>
       <header><p class="eyebrow">LESSON 01 · 실행 파일의 시작</p><h1>첫 번째 프로그램을<br>직접 실행하기.</h1><p class="lead">파일 두 개에서 출발합니다. 오늘의 결과는 화면 대신 문장 한 줄입니다.</p><div class="tags"><span class="tag">C++17</span><span class="tag neutral">컴파일 · 링크 · 프로세스</span></div></header>
       <nav class="jump-links" aria-label="이 차시 안에서 이동"><a href="#lesson-1--goal">학습 목표</a><a href="#lesson-1--cs">CS 이해</a><a href="#lesson-1--build">구현</a><a href="#lesson-1--connect">코드 연결</a><a href="#lesson-1--quiz">확인 문제</a></nav>
-      <section id="lesson-1--goal"><p class="section-number">01 / 목표</p><h2>내 소스가 실행되는 경로 확보하기</h2><p>이후 블록·창·서버가 늘어나도 출발점은 같습니다. 작성한 소스가 어떤 과정을 거쳐 실행되는지 알아야, 실패했을 때 마지막으로 작동했던 상태와 비교할 수 있습니다.</p><div class="learning-goals">
+      <section id="lesson-1--goal"><p class="section-number">01 / 목표</p><h2>내 소스가 실행되는 경로 확보하기</h2><p>이 강의는 게임 엔진이 맡는 일을 작은 실행 가능한 단계로 분해하며 배웁니다. 직접 구현은 학습을 위한 선택입니다. 엔진을 사용하는 프로젝트에서도 게임 규칙을 화면·소리와 분리해 설계할 수 있습니다.</p><p>이후 블록·창·서버가 늘어나도 출발점은 같습니다. 작성한 소스가 어떤 과정을 거쳐 실행되는지 알아야, 실패했을 때 마지막으로 작동했던 상태와 비교할 수 있습니다.</p><div class="learning-goals">
   <h3>이번 차시의 학습 목표</h3>
   <dl>
     <dt>출발점</dt>
@@ -113,6 +113,16 @@ int main()
     std::cout &lt;&lt; "tetris project skeleton\n";
     return 0;
 }</code></pre></div>
+        <h3>먼저 도구를 준비하기</h3>
+        <p>이 콘솔 실습에 필요한 것은 <strong>C++17을 지원하는 컴파일러와 CMake</strong>입니다. 편집기는 소스를 작성하고, 컴파일러는 소스를 번역합니다. VS Code 같은 편집기를 설치한 것만으로 C++ 컴파일러가 준비되지는 않습니다. 아래에서 자신의 환경에 해당하는 항목을 펼쳐 준비한 뒤, 연습 디렉터리에서 빌드를 시작하세요.</p>
+        <details class="lesson-note"><summary><span class="note-kind">도구 준비</span><span class="note-title">Linux · Ubuntu/Debian</span></summary><div class="note-body"><p>패키지 관리자로 컴파일러·빌드 도구와 CMake를 설치합니다. 이 명령은 프로젝트 소스를 바꾸지 않고 시스템의 개발 도구를 설치합니다.</p><pre><code>sudo apt update
+sudo apt install build-essential cmake
+g++ --version
+cmake --version</code></pre><p>Fedora 계열은 <code>sudo dnf install gcc-c++ cmake</code>로 대응하는 도구를 설치합니다. 배포판에 따라 패키지 이름과 설치 권한이 다릅니다.</p></div></details>
+        <details class="lesson-note"><summary><span class="note-kind">도구 준비</span><span class="note-title">macOS · Command Line Tools</span></summary><div class="note-body"><p><code>xcode-select --install</code>로 Apple의 C++ 도구를 준비합니다. Homebrew를 사용한다면 <code>brew install cmake</code>로 CMake를 설치할 수 있습니다. <code>brew</code>가 없다면 <a href="https://brew.sh/" target="_blank" rel="noopener noreferrer">Homebrew 설치 안내</a>나 <a href="https://cmake.org/download/" target="_blank" rel="noopener noreferrer">CMake 설치본</a> 중 사용할 방법을 먼저 선택합니다.</p><pre><code>clang++ --version
+cmake --version</code></pre><p>이 콘솔 프로그램은 그래픽 컨텍스트나 OpenGL 드라이버를 사용하지 않습니다. 컴파일러 준비와 그래픽 실행 조건은 별도로 확인합니다.</p></div></details>
+        <details class="lesson-note"><summary><span class="note-kind">도구 준비</span><span class="note-title">Windows · Visual Studio 도구</span></summary><div class="note-body"><p><a href="https://visualstudio.microsoft.com/downloads/" target="_blank" rel="noopener noreferrer">Visual Studio 또는 Build Tools</a> 설치 관리자에서 <strong>C++를 사용한 데스크톱 개발</strong>을 선택하고 MSVC·Windows SDK·CMake 도구가 포함됐는지 확인합니다. 설치된 도구의 <strong>x64 Native Tools Command Prompt</strong>에서 <code>cmake --version</code>을 실행하세요.</p><p>개발자 터미널은 컴파일러와 SDK 경로를 환경 변수에 설정합니다. 일반 터미널에서 명령을 찾지 못하더라도 설치 자체가 실패했다고 단정하지 말고, 어떤 터미널 환경에서 실행했는지 확인합니다. 아래 구성 명령의 출력에서 C++ 컴파일러를 찾았는지도 확인하세요.</p></div></details>
+        <p class="reference">이 체크포인트의 <code>cmake_minimum_required</code>는 사용하는 CMake의 최소 버전을, <code>CMAKE_CXX_STANDARD</code>는 컴파일할 언어 표준을 지정합니다. 서로 다른 버전 조건입니다. SDL·OpenGL·Python은 이 문장 출력 실습의 필수 도구가 아닙니다.</p>
         <h3>빌드하고 실행하기</h3><p>터미널의 현재 위치를 방금 만든 <code>tetris-study</code> 디렉터리로 옮긴 뒤 실행합니다. 아래는 Linux에서 기본 단일 구성 생성기를 사용하는 경우입니다.</p>
         <div class="codebox"><div class="codebar"><span>터미널 · 연습 디렉터리에서</span><button type="button" data-copy="build-code">복사</button></div><pre><code id="build-code">cmake -B build
 cmake --build build
@@ -122,7 +132,7 @@ cmake --build build
         <h3>직접 바꿔 볼 것</h3><p>문장을 원하는 내용으로 바꾸고 다시 빌드·실행하세요. 달라지지 않으면 수정한 소스 위치와 실행한 파일 위치를 비교합니다. 저장, 빌드, 실행은 서로 다른 단계입니다.</p>
         <details><summary>막혔다면: 어느 단계의 오류인가?</summary><dl><dt>구성·생성</dt><dd>컴파일러를 찾았는지, CMakeLists.txt와 소스 경로가 맞는지 확인합니다.</dd><dt>컴파일</dt><dd>오류가 가리키는 문법·선언·타입과 헤더 경로를 확인합니다.</dd><dt>링크</dt><dd>호출한 함수의 정의가 소스 목록 또는 연결한 라이브러리에 포함됐는지 확인합니다.</dd><dt>실행</dt><dd>실행 파일 위치와 작업 디렉터리, 런타임 파일을 확인합니다.</dd></dl></details>
       </section>
-      <section id="lesson-1--connect"><p class="section-number">04 / 현재 프로젝트 연결</p><h2>작은 빌드 파일은 어디로 자랄까?</h2><button type="button" data-source="CMakeLists.txt" data-needle="set(TETRIS_SIM_SOURCES">현재 CMakeLists.txt를 옆에서 보기</button><p>완성형 저장소의 <code>CMakeLists.txt</code>를 열고 다음 세 이름만 찾아보세요. 전체 옵션을 한 번에 이해할 필요는 없습니다.</p><dl><dt><code>TETRIS_SIM_SOURCES</code></dt><dd>여러 산출물이 공유하는 게임 규칙 소스 목록입니다.</dd><dt><code>TETRIS_GAME_COMMON</code></dt><dd>클라이언트에 들어갈 공통 소스 목록입니다.</dd><dt><code>add_executable(tetris ...)</code></dt><dd>플랫폼별 구현까지 모아 게임 실행 파일을 만드는 지점입니다.</dd></dl><div class="callout"><strong>목록과 타깃은 다릅니다</strong><p><code>TETRIS_SIM_SOURCES</code>는 소스 목록입니다. 이 변수를 선언하는 것만으로 독립 라이브러리가 생기지는 않습니다.</p></div></section>
+      <section id="lesson-1--connect"><p class="section-number">04 / 현재 프로젝트 연결</p><h2>작은 빌드 파일은 어디로 자랄까?</h2><button type="button" data-source="CMakeLists.txt" data-needle="set(TETRIS_SIM_SOURCES">현재 CMakeLists.txt를 옆에서 보기</button><p>완성형 저장소의 <code>CMakeLists.txt</code>를 열고 다음 세 이름만 찾아보세요. 전체 옵션을 한 번에 이해할 필요는 없습니다.</p><dl><dt><code>TETRIS_SIM_SOURCES</code></dt><dd>여러 산출물이 공유하는 게임 규칙 소스 목록입니다.</dd><dt><code>TETRIS_GAME_COMMON</code></dt><dd>클라이언트에 들어갈 공통 소스 목록입니다.</dd><dt><code>add_executable(tetris ...)</code></dt><dd>플랫폼별 구현까지 모아 게임 실행 파일을 만드는 지점입니다.</dd></dl><p>이 최소 CMakeLists에는 <code>TETRIS_BUILD_*</code> 옵션이 없습니다. 완성형 저장소의 옵션을 연습 폴더에 전달해도 아직 없는 타깃을 만들거나 선택할 수는 없습니다. 옵션은 지금 사용하는 빌드 파일이 선언한 것을 기준으로 읽습니다.</p><div class="callout"><strong>목록과 타깃은 다릅니다</strong><p><code>TETRIS_SIM_SOURCES</code>는 소스 목록입니다. 이 변수를 선언하는 것만으로 독립 라이브러리가 생기지는 않습니다.</p></div></section>
       <details id="lesson-1--quiz" class="lesson-disclosure"><summary><h2>확인 문제</h2></summary><p class="section-number">05 / 확인 문제</p><p>각 문제에서 하나를 선택하고 확인을 누르세요. 정답과 해설이 바로 아래에 표시됩니다. 다른 선택으로 다시 풀 수도 있습니다.</p><p class="reference">선택과 확인 결과는 이 브라우저에 저장됩니다. 학습 완료 표시는 직접 관리합니다.</p>
         <div id="lesson-1-questions"></div>
         <div class="actions"><button type="button" id="copy-answers" data-copy-answers="lesson-1">답안 전체 복사</button><label class="completion"><input type="checkbox" id="lesson-complete" data-complete="lesson-1"> 1차시 학습 완료로 표시</label></div><p class="reference">문제의 정오 확인과 학습 완료 표시는 별개입니다. 해설을 읽고 이해했는지 돌아본 뒤 완료를 표시하세요.</p>

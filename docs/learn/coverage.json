@@ -15,9 +15,14 @@
         "unit-005"
       ],
       "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "lessons": [
+        "lesson-1",
+        "lesson-9",
+        "lesson-10",
+        "lesson-167"
+      ],
+      "state": "covered",
+      "note": "표제/빈 프로젝트 진입은1의도입·현재소스보기,플랫폼선택은9·10,현재역할/지원대상은167과CMake조건을대조. 원문의문서목차는참고패널로유지. Reactordefault와servers프리셋을혼동하지않음."
     },
     {
       "id": "part0--section-01",
@@ -26,16 +31,25 @@
       "title": "이번 Part의 구현 계약",
       "startLine": 9,
       "endLine": 18,
-      "sha256": "185ab877b417dc849d89de3105204d3d0101b4c5848364b53aa5e4d2f6021286",
+      "sha256": "0bc95b952944f395a6c338cf150c9ec53270662cc99da45fda0188f4fa6df91a",
       "candidateUnits": [
+        "unit-001",
+        "unit-002",
+        "unit-003",
         "unit-004",
         "unit-005",
-        "unit-009"
+        "unit-006",
+        "unit-007",
+        "unit-008",
+        "unit-009",
+        "unit-010"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-1"
+      ],
+      "state": "covered",
+      "note": "1의학습목표·별도연습폴더·파일2개·도구준비·구성/빌드/실행·기대출력으로전체최소구현계약대응. HTML내스니펫을추출해실제새CMake빌드/정확출력검증."
     },
     {
       "id": "part0--section-02",
@@ -44,16 +58,28 @@
       "title": "들어가며 — 왜 엔진을 쓰지 않는가",
       "startLine": 19,
       "endLine": 50,
-      "sha256": "784b42d5c587d1c427f0042c8d9d2daf1445ad0d499cdd88820b9ff1f4e8f51b",
+      "sha256": "75deb6adc013c3a47e743eb8e3e64730b1f443e7b38de6d8d41b13cc351b728a",
       "candidateUnits": [
+        "unit-001",
+        "unit-002",
+        "unit-003",
+        "unit-004",
+        "unit-005",
+        "unit-006",
+        "unit-007",
+        "unit-008",
         "unit-009",
-        "unit-010",
-        "unit-003"
+        "unit-010"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-1",
+        "lesson-4",
+        "lesson-9",
+        "lesson-175"
+      ],
+      "state": "partial",
+      "note": "자체구현의학습목적·엔진에서도규칙분리가능·의존/소유/호출과대역의범위를대조. 원문의결정론전체전제·DrawText폰트파이프라인세부는관련단원내용대조가남음. 엔진선택의절대적단정을교정."
     },
     {
       "id": "part0--section-03",
@@ -62,17 +88,27 @@
       "title": "1. 엔진이 해주던 일을 누가 대신하는가",
       "startLine": 51,
       "endLine": 71,
-      "sha256": "190aba0005806a61b86ef18e519ee3e6151521bbafefc8df763eacb746f640dd",
+      "sha256": "35889a7b5933ee2678bf7b2db9d4837a61c103742b69c01c2d2149af6fbda2b0",
       "candidateUnits": [
+        "unit-001",
         "unit-002",
         "unit-003",
+        "unit-004",
+        "unit-005",
         "unit-006",
-        "unit-009"
+        "unit-007",
+        "unit-008",
+        "unit-009",
+        "unit-010"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-4",
+        "lesson-10",
+        "lesson-167"
+      ],
+      "state": "partial",
+      "note": "역할표의창/플랫폼·파일경계·빌드산출물은직접대조. 그래픽·소리·네트워크·학습각파이프라인의전체대응은해당단원대조대상. 고정틱수치를영구설계로설명하지않게교정."
     },
     {
       "id": "part0--section-04",
@@ -80,112 +116,158 @@
       "path": "docs/blog/part0-project-setup.md",
       "title": "2. 준비물",
       "startLine": 72,
-      "endLine": 169,
-      "sha256": "9c74f011f9b06b11756b30bcb84a9ee62de15d56470b60af25183025699a54d3",
+      "endLine": 170,
+      "sha256": "917f2db1195ae8e15f9f66c45367445da09cfc1b46e9e8ea8d37f495187bdc36",
       "candidateUnits": [
         "unit-001",
+        "unit-002",
+        "unit-003",
+        "unit-004",
         "unit-005",
+        "unit-006",
+        "unit-007",
+        "unit-008",
+        "unit-009",
         "unit-010"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-1",
+        "lesson-2",
+        "lesson-10",
+        "lesson-11",
+        "lesson-167",
+        "lesson-168"
+      ],
+      "state": "partial",
+      "note": "1에OS별컴파일러/CMake준비·편집기구별·개발자터미널·언어표준vs도구버전추가. SDL Config우선탐색은2·10,GL요청/실제확인은11,SDK/ABI/공유의존은168과대조. Windows무DLL·OpenSSL자동강등·NumPy누락·모든Mac지원단정교정. Python/Colab준비세부와완성형모든역할설치는후속대조가남음."
     },
     {
       "id": "part0--section-05",
       "part": 0,
       "path": "docs/blog/part0-project-setup.md",
       "title": "3. 파일을 어떻게 나눌 것인가",
-      "startLine": 170,
-      "endLine": 189,
-      "sha256": "5ab1bd40a323b4f16d3f4195bc7e4e26f08623900af8533296cc1ddeb8949a1a",
+      "startLine": 171,
+      "endLine": 190,
+      "sha256": "98fed0ff2edcbf92c89f1c0256801bf8b2677e81ba889fc2d6bcd4cdf42485ae",
       "candidateUnits": [
+        "unit-001",
+        "unit-002",
+        "unit-003",
         "unit-004",
-        "unit-005"
+        "unit-005",
+        "unit-006",
+        "unit-007",
+        "unit-008",
+        "unit-009",
+        "unit-010"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [
         "lesson-4",
-        "lesson-9"
+        "lesson-5",
+        "lesson-9",
+        "lesson-175"
       ],
-      "state": "partial",
-      "note": "번역 단위·공개 계약·파일 내부 상태를 구현. 전체 프로젝트 파일 구성은 후속 강의; 9차시에서 동일 호출자에 대한 빌드 시 구현 선택과 대역의 검증 한계를 연결"
+      "state": "covered",
+      "note": "4의파일/호출/상태분리,5의타깃요구/링크와inline헤더반례메모,9의동일호출자/선택의존/대역,175의세가지의존화살표로경계설계설명을재구성. 규칙소스가표현헤더함수를호출해도빌드되는실제작은반례로무조건링크오류주장을교정."
     },
     {
       "id": "part0--section-06",
       "part": 0,
       "path": "docs/blog/part0-project-setup.md",
       "title": "4. 첫 체크포인트 — 툴체인이 도는지 확인한다",
-      "startLine": 190,
-      "endLine": 241,
+      "startLine": 191,
+      "endLine": 242,
       "sha256": "74229907a32ba68b96b601ec0f9a27bc6c3ab830beca9993018546a3715a572a",
       "candidateUnits": [
         "unit-001"
       ],
       "routingState": "draft",
       "lessons": [
-        "lesson-1"
+        "lesson-1",
+        "lesson-167"
       ],
-      "state": "partial",
-      "note": "첫 실행 파일·빌드·검증을 재구성. 원문 전체 구현 계약 대응은 추가 검토 필요"
+      "state": "covered",
+      "note": "최소CMakeLists와main,요구C++표준,구성·빌드·실행·예상출력·생성기별경로를1에대응. CXX에서C CXX로늘어나는서비스/SQLite단계는167의역할빌드설명과연결. HTML기준스니펫의실제빌드확인."
     },
     {
       "id": "part0--section-07",
       "part": 0,
       "path": "docs/blog/part0-project-setup.md",
       "title": "5. 체크포인트의 빌드 규칙",
-      "startLine": 242,
-      "endLine": 251,
-      "sha256": "c8f1d50a005166d162f225ab263607bd4c92f2d06fd77df03b5daf9073695b30",
+      "startLine": 243,
+      "endLine": 252,
+      "sha256": "8efdad30ef7ddad3e1b64848255984b3b6e38f7f925c916034eec2669c21f16b",
       "candidateUnits": [
         "unit-001",
-        "unit-005"
+        "unit-002",
+        "unit-003",
+        "unit-004",
+        "unit-005",
+        "unit-006",
+        "unit-007",
+        "unit-008",
+        "unit-009",
+        "unit-010"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [
         "lesson-1",
-        "lesson-2",
         "lesson-5",
-        "lesson-9"
+        "lesson-9",
+        "lesson-167"
       ],
-      "state": "partial",
-      "note": "타깃·컴파일 요구·정적 아카이브·최종 링크를 설명. 배포 및 전체 빌드 옵션은 후속 강의; 9차시에서 동일 호출자에 대한 빌드 시 구현 선택과 대역의 검증 한계를 연결"
+      "state": "covered",
+      "note": "1의최소옵션vs완성형옵션구별,5의소스와타깃함께확장·단계별실험,9의선택구현/별도캐시,167의역할타깃으로대응. 없는TETRIS_BUILD옵션으로중간체크포인트를고를수있다는원문오류교정."
     },
     {
       "id": "part0--section-08",
       "part": 0,
       "path": "docs/blog/part0-project-setup.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 252,
-      "endLine": 258,
-      "sha256": "250d0a75435c6b85f6fff87caf1b71fab8aa43b5b864fc24843a94fb06c9958e",
+      "startLine": 253,
+      "endLine": 259,
+      "sha256": "4fbcea10b910d230a2221aed716f1087971b026b9772eb4ed108fcf759802c24",
       "candidateUnits": [
         "unit-001",
+        "unit-002",
+        "unit-003",
         "unit-004",
-        "unit-005"
+        "unit-005",
+        "unit-006",
+        "unit-007",
+        "unit-008",
+        "unit-009",
+        "unit-010"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-1",
+        "lesson-4",
+        "lesson-5"
+      ],
+      "state": "partial",
+      "note": "콘솔완성조건·툴체인준비와그래픽검증의구별·의존경계는대응. 전체엔진대체역할의세부파이프라인대조는남으므로요약전체를완료로올리지않음."
     },
     {
       "id": "part0--section-09",
       "part": 0,
       "path": "docs/blog/part0-project-setup.md",
       "title": "수동 테스트",
-      "startLine": 259,
-      "endLine": 278,
+      "startLine": 260,
+      "endLine": 279,
       "sha256": "cc2a1547c95bce2ef257bcf7e74b0b0c6e545b753325f936ebaf895cc9f03bb1",
       "candidateUnits": [
         "unit-001",
         "unit-005"
       ],
       "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "lessons": [
+        "lesson-1"
+      ],
+      "state": "partial",
+      "note": "콘솔빌드/실행/기대문구/변경실험은직접실행대응. 선택Python환경과결정론골든의후속진입은관련149/규칙단원내용대조가남음."
     },
     {
       "id": "part1--section-00",
@@ -1301,8 +1383,8 @@
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "1. 이 계층이 소유하는 것과 소유하지 않는 것",
       "startLine": 35,
-      "endLine": 103,
-      "sha256": "4f1b7cda4e36fc4ab7c8f6ab21815eb25cbe66fe0815e42455c272ef4e44e0c2",
+      "endLine": 102,
+      "sha256": "aeca82d186769ff8c3bd210e651c0d0ac651e00b47c398922ff8e3f2b4cb0409",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1340,18 +1422,19 @@
         "lesson-10",
         "lesson-11",
         "lesson-12",
-        "lesson-47"
+        "lesson-47",
+        "lesson-5"
       ],
       "state": "partial",
-      "note": "창/컨텍스트를 플랫폼에 모은다는 설계와 분리 불가능이라는 단정을 구별. 12차시 조회 경계 연결.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다."
+      "note": "창/컨텍스트를 플랫폼에 모은다는 설계와 분리 불가능이라는 단정을 구별. 12차시 조회 경계 연결.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다. 2026-10-04: 기초 단원 재대조: 2/6의 획득·해제/후보 소유자, 4/5의 번역 단위·타깃 경계, 9/10의 선택 구현과 의미 계약을 본문·체크포인트와 확인. 공유 알고리즘과 공유 가변 상태를 구별하고 엔진·헬퍼 선택의 단정을 교정. GL 로더·렌더 결정성의 전체 대조는 그래픽스 단원에 남음."
     },
     {
       "id": "part2--section-04",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "2. `platform.h` — 공개 계약",
-      "startLine": 104,
-      "endLine": 292,
+      "startLine": 103,
+      "endLine": 291,
       "sha256": "de40b756d4b18a6b06f1c4aff370367b260000de858f0c0db432b25b6067d15f",
       "candidateUnits": [
         "unit-001",
@@ -1394,15 +1477,15 @@
         "lesson-47"
       ],
       "state": "partial",
-      "note": "12차시 주소 조회 선언을 재구성. 마우스/viewport 등 전체 계약은 후속.; 23차시 present의 요청/완료 의미와 진단 API를 부분 대조. 전체 플랫폼 계약은 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다."
+      "note": "12차시 주소 조회 선언을 재구성. 마우스/viewport 등 전체 계약은 후속.; 23차시 present의 요청/완료 의미와 진단 API를 부분 대조. 전체 플랫폼 계약은 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다. 2026-10-04: 기초 단원 재대조: 공통 선언, 수명·호출 순서·실패 결과, 키 조회/문자 소비를 4/7/8/9/10과 대응. 완성형 헤더의 GL·마우스·표시 API 전체는 각 기능 단원 대조에 남음."
     },
     {
       "id": "part2--section-05",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "3. GL 컨텍스트 — 이 계층의 새 책임",
-      "startLine": 293,
-      "endLine": 375,
+      "startLine": 292,
+      "endLine": 374,
       "sha256": "01f8d554a2b931dce0c22478ce654c6977b417d54e2e208135e46f4aa2c12ef5",
       "candidateUnits": [
         "unit-001",
@@ -1443,9 +1526,9 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "4. Win32: 창과 3.3 Core 컨텍스트 만들기",
-      "startLine": 376,
-      "endLine": 764,
-      "sha256": "e6748c07ab89f112d8ba0e4d2bc252672f3c454aa33f30dd1eab5fbd57440b6d",
+      "startLine": 375,
+      "endLine": 763,
+      "sha256": "1a1b3e7715c152437f648c53191e7073476aa8f388c21f636a016587598e6948",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1481,40 +1564,63 @@
         "lesson-47"
       ],
       "state": "partial",
-      "note": "12차시에서 WGL 주소 필터 재사용·current 실패 처리와 15경로 반환값 모델 검사. bootstrap/픽셀 포맷/DPI 전체 강의 및 네이티브 검증은 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다."
+      "note": "12차시에서 WGL 주소 필터 재사용·current 실패 처리와 15경로 반환값 모델 검사. bootstrap/픽셀 포맷/DPI 전체 강의 및 네이티브 검증은 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다. 2026-10-04: 기초 단원 재대조: 10의 클래스 등록·후보 주소·생성 중 콜백·실패 정리와 대조. WGL current 삭제 단정을 공식 API로 교정하고 WGL과 SDL 생성 경로를 구별. DPI/픽셀 포맷/WGL 확장 전체 대조는 그래픽스 단원에 남음."
     },
     {
       "id": "part2--section-07",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "5. `window_proc` — 모든 입력이 들어오는 한 곳",
-      "startLine": 765,
-      "endLine": 915,
-      "sha256": "6975b94742457ebe7fcb365f91e720b3cc785371f20672a64254a2ce55547584",
+      "startLine": 764,
+      "endLine": 914,
+      "sha256": "880db96bf0cd29ae2b84e75941f2f0118c271f95b6a3ca16bdf55480142ab085",
       "candidateUnits": [
+        "unit-001",
+        "unit-002",
         "unit-003",
+        "unit-004",
+        "unit-005",
+        "unit-006",
         "unit-007",
         "unit-008",
-        "unit-010"
+        "unit-009",
+        "unit-010",
+        "unit-011",
+        "unit-012",
+        "unit-013",
+        "unit-014",
+        "unit-015",
+        "unit-016",
+        "unit-017",
+        "unit-018",
+        "unit-019",
+        "unit-020",
+        "unit-021",
+        "unit-022",
+        "unit-023",
+        "unit-024",
+        "unit-047"
       ],
-      "routingState": "draft",
+      "routingState": "needs-review",
       "lessons": [
         "lesson-10",
         "lesson-47",
         "lesson-68",
-        "lesson-70"
+        "lesson-70",
+        "lesson-7",
+        "lesson-8"
       ],
       "state": "partial",
-      "note": "키·시스템 기본 처리·포커스 취소·닫기/파괴/스레드 종료를 대조. 마우스 좌표·DPI 상세는 후속.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다.; 68차시 완성: 메뉴 시작 버튼을 누적하며 즉시모드 상태 소유/반복 비용·창→논리 변환·반열린 hit-test·level/edge·첫 press 좌표·취소·앱 전이시 한 번 소비를 재구성했다. 복합 위젯/슬라이더/키보드 커서 등 남은 내용은 기존 부분 대응 상태를 유지한다.; 70에서 Win32 버튼 down/up의 좌표 갱신 누락을 교정하고 부호 있는 메시지 좌표·최신 위치 계약을 설명했다. 학습 SDL의 resize 사건 취소와는 별도 정책이다."
+      "note": "키·시스템 기본 처리·포커스 취소·닫기/파괴/스레드 종료를 대조. 마우스 좌표·DPI 상세는 후속.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다.; 68차시 완성: 메뉴 시작 버튼을 누적하며 즉시모드 상태 소유/반복 비용·창→논리 변환·반열린 hit-test·level/edge·첫 press 좌표·취소·앱 전이시 한 번 소비를 재구성했다. 복합 위젯/슬라이더/키보드 커서 등 남은 내용은 기존 부분 대응 상태를 유지한다.; 70에서 Win32 버튼 down/up의 좌표 갱신 누락을 교정하고 부호 있는 메시지 좌표·최신 위치 계약을 설명했다. 학습 SDL의 resize 사건 취소와는 별도 정책이다. 2026-10-04: 기초 단원 재대조: 메시지 펌프·콜백 스레드/재진입, 기본 시스템 키 처리, 닫기/파괴/종료 신호, 문자 인코딩·소비를 7/8/10과 확인. 학습 W 함수와 현재 A 함수 명칭의 혼동 교정. 마우스 capture·휠·DPI 등은 UI/그래픽스 단원 대조에 남음. DeepSeek 후보를 직접 검토해 남아 있던 마우스 취소 스냅샷 설명과 null 배경 브러시의 인과 오류도 교정."
     },
     {
       "id": "part2--section-08",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "6. 입력 상태 모델 — level, edge, 그리고 프레임 경계",
-      "startLine": 916,
-      "endLine": 995,
-      "sha256": "56e55e2325fbbdc61a280f8a2f4c73033022bf9a1ef55d7a4d14f029319ae1a1",
+      "startLine": 915,
+      "endLine": 994,
+      "sha256": "3c7047c2596be75c104f6ef68e77ff0a07916900cc694f83817a7e69e481a163",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1550,16 +1656,16 @@
         "lesson-68"
       ],
       "state": "partial",
-      "note": "Win32 메시지 펌프 이전 스냅샷과 SDL 입력 정책 비교, 동기 콜백과 큐 사건 수 구분. 포커스 취소 정책의 현재 구현·사건 주입 검증 한계를 갱신함.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다.; 68차시 완성: 메뉴 시작 버튼을 누적하며 즉시모드 상태 소유/반복 비용·창→논리 변환·반열린 hit-test·level/edge·첫 press 좌표·취소·앱 전이시 한 번 소비를 재구성했다. 복합 위젯/슬라이더/키보드 커서 등 남은 내용은 기존 부분 대응 상태를 유지한다."
+      "note": "Win32 메시지 펌프 이전 스냅샷과 SDL 입력 정책 비교, 동기 콜백과 큐 사건 수 구분. 포커스 취소 정책의 현재 구현·사건 주입 검증 한계를 갱신함.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다.; 68차시 완성: 메뉴 시작 버튼을 누적하며 즉시모드 상태 소유/반복 비용·창→논리 변환·반열린 hit-test·level/edge·첫 press 좌표·취소·앱 전이시 한 번 소비를 재구성했다. 복합 위젯/슬라이더/키보드 커서 등 남은 내용은 기존 부분 대응 상태를 유지한다. 2026-10-04: Win32의s_mouse도KeyEdges인현재코드와대조해이전상태복사라는잔존설명을교정. 초기7체크포인트와현재사건래치의차이표시는유지. 2026-10-04: 기초 단원 재대조: 7/10의 끝점 비교·짧은 전이 손실·반복 조회·포커스 취소를 실제 체크포인트와 비교. 7에 취소 후 repeat-only down이 새 눌림으로 복원되는 한계를 사이드 메모로 추가. 현재 KeyEdges의 사건 누적/반복 무시와 초기 학습 구현을 구별. 틱 소비 전체 대조는 게임 루프 단원에 남음."
     },
     {
       "id": "part2--section-09",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
-      "title": "7. 문자 입력 — 64칸 링버퍼",
-      "startLine": 996,
-      "endLine": 1021,
-      "sha256": "d0acf93489a031dfd87b2bf14eecb49f6d987bd8013de0c533d60d71b5562e13",
+      "title": "7. 문자 입력 — 원형 버퍼",
+      "startLine": 995,
+      "endLine": 1020,
+      "sha256": "9ef7d0a359f535b2c244db74d0647d8c7b48c25feead337195c60e2f8602193a",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1592,17 +1698,17 @@
         "lesson-8",
         "lesson-10"
       ],
-      "state": "partial",
-      "note": "UTF-8 제목과 UTF-16 문자 사건/ASCII 큐 경계를 구분. IME 편집은 미구현."
+      "state": "covered",
+      "note": "8의키vs문자·UTF8바이트/코드포인트/화면단위·ASCII선택·생산/소비수명·순환/empty/full·한칸비움·drop-newest·소비함수·O(1)·포화검사와10의WM_CHAR/TranslateMessage및인코딩설명을직접대조. 현재Win32큐소비/입력분기와한글렌더링vs입력/IME미완성범위를확인. 원문배열고정개수를N칸/N-1개규칙으로바꾸고현재소스발췌는보존. 용량을변경한전체제품기능이나Unicode편집기완성을주장하지않음."
     },
     {
       "id": "part2--section-10",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "8. 논리 해상도와 레터박스",
-      "startLine": 1022,
-      "endLine": 1219,
-      "sha256": "bc89b6f46dfbcf56b2c0a148c470d97f0cf30f622e0d99beba451d2014b1b867",
+      "startLine": 1021,
+      "endLine": 1218,
+      "sha256": "a755b42b01146ea54a98fee9d8839313fa4e4760ee48f4946c6950adc931de47",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1636,15 +1742,15 @@
         "lesson-70"
       ],
       "state": "partial",
-      "note": "; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 70에서 창/drawable/논리 단위·확정 viewport·역변환 순서·음수floor·홀수 여백 원점·프레임 기준 변경을 재구성하고 독립 계산/픽셀검사에 연결했다."
+      "note": "; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 70에서 창/drawable/논리 단위·확정 viewport·역변환 순서·음수floor·홀수 여백 원점·프레임 기준 변경을 재구성하고 독립 계산/픽셀검사에 연결했다. 2026-10-04: SimGrid행·열과platform/renderer논리화면좌표를섞은도입문교정,해상도숫자는계산예시로한정. 범위전체대조완료로올리지않음."
     },
     {
       "id": "part2--section-11",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "9. 프레임 표시 — `platform_present`",
-      "startLine": 1220,
-      "endLine": 1254,
+      "startLine": 1219,
+      "endLine": 1253,
       "sha256": "9ea9363327871ce9e158c5c39bab2e7cdaa9b7f868a428ca5ec81cf2fdbf2da3",
       "candidateUnits": [
         "unit-001",
@@ -1685,8 +1791,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "10. 시간 — 델타타임 클램프와 페이싱",
-      "startLine": 1255,
-      "endLine": 1375,
+      "startLine": 1254,
+      "endLine": 1374,
       "sha256": "17d7a87d265b8efa85fb1beaf10d7f6f61ffc3875c729ccdf025c4555f48fff1",
       "candidateUnits": [
         "unit-001",
@@ -1722,16 +1828,16 @@
         "lesson-23"
       ],
       "state": "partial",
-      "note": "QPC 정수 차이·주파수·Sleep 목표와 정밀도의 차이. 실제 고정 스텝·VSync 검토는 후속.; 23차시 swap interval 요청/보고·CPU 시간·소프트웨어페이싱 구별. 고주사율/대기위치 단정 보정. 전체 타이밍 정책은 후속."
+      "note": "QPC 정수 차이·주파수·Sleep 목표와 정밀도의 차이. 실제 고정 스텝·VSync 검토는 후속.; 23차시 swap interval 요청/보고·CPU 시간·소프트웨어페이싱 구별. 고주사율/대기위치 단정 보정. 전체 타이밍 정책은 후속. 2026-10-04: 기초 단원 재대조: 3/10의 정수 카운터 차이·단위 변환·블로킹/폴링·측정/대기 구별 확인. 완성형 dt 클램프·swap interval·고정틱 연결 전체는 그래픽스/게임 루프 단원에 남음."
     },
     {
       "id": "part2--section-13",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "11. 종료 순서",
-      "startLine": 1376,
-      "endLine": 1438,
-      "sha256": "427f0c6a3af8610e9f4d6944026fe45f94d43371e6e9fe6dbe68244bc49ff5d5",
+      "startLine": 1375,
+      "endLine": 1439,
+      "sha256": "b6f13636977fe2cc9041f8477a7c9bcba02b817d870f8b12c1b1c17d24891d75",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1768,15 +1874,15 @@
         "lesson-47"
       ],
       "state": "partial",
-      "note": "SDL의 GL→창→SDL 종료 의존 관계를 RAII와 비교. WGL/DC 상세 및 renderer 객체 정리 구현은 후속.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다."
+      "note": "SDL의 GL→창→SDL 종료 의존 관계를 RAII와 비교. WGL/DC 상세 및 renderer 객체 정리 구현은 후속.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다. 2026-10-04: 기초 단원 재대조: 2/6의 의존 자원 순서·실패 반환·RAII·재초기화와 10의 DestroyWindow 콜백 중 소유자 수명 확인. current 삭제 및 모든 해제 단계가 일렬의 필수 의존이라는 오개념 교정. GL 자원/DC/renderer 종료 전체는 그래픽스 단원에 남음. 제품 단일 세션과 학습 체크포인트 재초기화 계약 차이를 명시. 제품 재초기화 기능 추가로 범위를 넓히지 않음."
     },
     {
       "id": "part2--section-14",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "12. SDL2 백엔드",
-      "startLine": 1439,
-      "endLine": 1675,
+      "startLine": 1440,
+      "endLine": 1676,
       "sha256": "e83a7b44ded4433430eb01a5eef14c9c91c3dd378b4ea965592cdd3cedfc0c4b",
       "candidateUnits": [
         "unit-001",
@@ -1815,18 +1921,19 @@
         "lesson-11",
         "lesson-24",
         "lesson-47",
-        "lesson-68"
+        "lesson-68",
+        "lesson-9"
       ],
       "state": "partial",
-      "note": "SDL GL 속성 요청·생성·current·오류 반환 검사 및 호출자 종료를 11차시에 연결. 실제 소스 발췌 갱신. 마우스·리사이즈·전체 시간 정책은 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다.; 68차시 완성: 메뉴 시작 버튼을 누적하며 즉시모드 상태 소유/반복 비용·창→논리 변환·반열린 hit-test·level/edge·첫 press 좌표·취소·앱 전이시 한 번 소비를 재구성했다. 복합 위젯/슬라이더/키보드 커서 등 남은 내용은 기존 부분 대응 상태를 유지한다."
+      "note": "SDL GL 속성 요청·생성·current·오류 반환 검사 및 호출자 종료를 11차시에 연결. 실제 소스 발췌 갱신. 마우스·리사이즈·전체 시간 정책은 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 47차시에서 사건별 KeyEdges와 프레임/틱의 취소·수집·소비 경계를 대조했다. 변경된 키 저장소 명칭·공개 선언·생성/종료·사건 펌프 발췌를 검토했으며 해당 절의 다른 주제는 기존 부분 대응 범위를 유지한다.; 68집필 중 현재 소스를 재검토: mouse KeyEdges 사건 누적·초기화/종료 reset·Win32 정상/강제 capture 해제 구별, GUI int64 hit 경계와 즉시모드 상태/비용 설명을 교정했다. 입력 기반을 구현하는 단계에서 기존 부분 대응을 재검토했다.; 68차시 완성: 메뉴 시작 버튼을 누적하며 즉시모드 상태 소유/반복 비용·창→논리 변환·반열린 hit-test·level/edge·첫 press 좌표·취소·앱 전이시 한 번 소비를 재구성했다. 복합 위젯/슬라이더/키보드 커서 등 남은 내용은 기존 부분 대응 상태를 유지한다. 2026-10-04: 기초 단원 재대조: SDL 사건 큐·키 매핑·문자·선택 백엔드 계약을 2/3/7/8/9/10과 확인. 모든 플랫폼 함수 전체의 대응 완료는 아니며 GL·마우스·표시 계약은 관련 단원에 남음."
     },
     {
       "id": "part2--section-15",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "13. SDL 백엔드의 플랫폼별 예외",
-      "startLine": 1676,
-      "endLine": 1751,
+      "startLine": 1677,
+      "endLine": 1752,
       "sha256": "d746d694b7090455cf296fc3494097190c3354d48a5b5e1696094a47179e78fb",
       "candidateUnits": [
         "unit-001",
@@ -1858,18 +1965,21 @@
       "routingState": "needs-review",
       "lessons": [
         "lesson-2",
-        "lesson-3"
+        "lesson-3",
+        "lesson-5",
+        "lesson-9",
+        "lesson-10"
       ],
       "state": "partial",
-      "note": " 2026-10-03: 학습 콘솔 main/SDL 준비·Config 탐색과 OS 검증 범위 보완. 초기 강의와 누적 진단 코드 교정; macOS 번들/전체화면 원문 전체는 별도 범위."
+      "note": " 2026-10-03: 학습 콘솔 main/SDL 준비·Config 탐색과 OS 검증 범위 보완. 초기 강의와 누적 진단 코드 교정; macOS 번들/전체화면 원문 전체는 별도 범위. 2026-10-04: 기초 단원 재대조: 콘솔 진입점 SDL_MAIN_HANDLED/SDL_SetMainReady, StudySDL2 사용 요구와 Config 우선/pkg-config 대안을 2/5/9/10 및 실제 CMake로 확인. 번들 작업 경로·전체화면은 배포/그래픽스 단원에 남음."
     },
     {
       "id": "part2--section-16",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "14. CMakeLists 확장",
-      "startLine": 1752,
-      "endLine": 1839,
+      "startLine": 1753,
+      "endLine": 1840,
       "sha256": "d92df2f937d81b6e688878fdabd5bc117fbe3d94bd86550fc73bbaff59eff3d6",
       "candidateUnits": [
         "unit-001",
@@ -1901,18 +2011,20 @@
       "routingState": "needs-review",
       "lessons": [
         "lesson-10",
-        "lesson-12"
+        "lesson-12",
+        "lesson-5",
+        "lesson-9"
       ],
       "state": "partial",
-      "note": "GL 로더 타깃과 SDL 헤더 없는 테스트 연결. 링크 필요성과 런타임 GL 조회를 구별. 전체 빌드/배포는 후속."
+      "note": "GL 로더 타깃과 SDL 헤더 없는 테스트 연결. 링크 필요성과 런타임 GL 조회를 구별. 전체 빌드/배포는 후속. 2026-10-04: 기초 단원 재대조: 5/9/10의 타깃 사용 요구·단일 백엔드 선택·대상 OS와 옵션 구별 확인. 이 Part 데모의 GL 직접 호출·필수 링크 및 완성형 역할 구성 전체는 그래픽스/배포 단원에 남음."
     },
     {
       "id": "part2--section-17",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "15. Part 2 체크포인트 데모",
-      "startLine": 1840,
-      "endLine": 2019,
+      "startLine": 1841,
+      "endLine": 2020,
       "sha256": "fe8e78e91b6bad71b2bbf9734eea60645f3d9abc77e5182846f9f1f6cf2601cd",
       "candidateUnits": [
         "unit-001",
@@ -1953,8 +2065,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 2020,
-      "endLine": 2031,
+      "startLine": 2021,
+      "endLine": 2032,
       "sha256": "ea084b281bc591cf894463182716f7945f26c7559373d361f09dee7ee520b8a3",
       "candidateUnits": [
         "unit-002",
@@ -1972,8 +2084,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "수동 테스트",
-      "startLine": 2032,
-      "endLine": 2066,
+      "startLine": 2033,
+      "endLine": 2067,
       "sha256": "9897a92c45c85f1137f542c4dca9874b8c415e9817876c3c2535c5cf3f780819",
       "candidateUnits": [
         "unit-002",
@@ -1993,8 +2105,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "마무리",
-      "startLine": 2067,
-      "endLine": 2074,
+      "startLine": 2068,
+      "endLine": 2075,
       "sha256": "14f842f4c62a9754571da3f62ed2829745bb2aec1f4e250f1a75f62148ff4707",
       "candidateUnits": [
         "unit-011",

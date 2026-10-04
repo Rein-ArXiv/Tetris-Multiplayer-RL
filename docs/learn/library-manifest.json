@@ -8,8 +8,8 @@
     },
     "part0": {
       "path": "docs/blog/part0-project-setup.md",
-      "sha256": "73b81b401c52589d630cc5e3a24cf60974d80631b188c9b984ed4c4d52151245",
-      "lines": 278,
+      "sha256": "98e28a9159692cdc7a28200216e32452b0f7f4ee2d75bc7b19e56a45234b2576",
+      "lines": 279,
       "codeBlocks": 15
     },
     "part1": {
@@ -20,8 +20,8 @@
     },
     "part2": {
       "path": "docs/blog/part2-platform-window-input.md",
-      "sha256": "9a021d9b27ef52b3131ff2d0cc08ed9767e9a112365b3b13774679bf84dc99de",
-      "lines": 2074,
+      "sha256": "a11722e1abe6afc0221af63e521da528062b9fd1c97529ea6b3a5b5c3070faa8",
+      "lines": 2075,
       "codeBlocks": 52
     },
     "part3": {

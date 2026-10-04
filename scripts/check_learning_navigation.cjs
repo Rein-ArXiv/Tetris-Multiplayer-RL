@@ -116,7 +116,11 @@ function boot(hash, url='https://example.test/project/learn/', blockedStorage=fa
     assert.equal(t.copied(),w.LEARNING_LIBRARY.sources['web/ranking/index.html'].text);
     htmlSource.remove();
   }
-  route('#lesson-1');d.getElementById('reader-close').click();
+  const replacementId=available.find(id=>id!==source.closest('article').id);
+  assert(replacementId,'focus restoration needs a different published lesson');
+  route('#'+replacementId);
+  assert(!source.isConnected,'lesson replacement must detach the original opener');
+  d.getElementById('reader-close').click();
   assert.equal(d.getElementById('reference-reader').hidden,true);
   assert.equal(d.activeElement.id,'content','closing a reference after lesson replacement restores focus');
   route('#roadmap');assert.equal(t.count(),0);assert.equal(d.getElementById('roadmap').hidden,false);

@@ -10,7 +10,7 @@
 
 - **선행 상태:** 빈 디렉터리 하나. 그 외에는 아무것도 전제하지 않는다.
 - **이번 Part의 파일:** 최소 `CMakeLists.txt`와 스텁 `src/main.cpp`.
-- **연결점:** 이 장의 `CMakeLists.txt`는 실행 파일이 없는 최소 뼈대다. 규칙, 플랫폼,
+- **연결점:** 이 장의 `CMakeLists.txt`는 문장 한 줄을 출력할 실행 타깃만 선언한 최소 뼈대다. 규칙, 플랫폼,
   renderer, server 같은 상태 소유자가 생길 때 해당 target/source 목록이 함께 확장된다.
 - **완료 게이트:** `cmake -B build && cmake --build build && ./build/tetris` 가 `tetris project skeleton` 한 줄을 출력한다.
 
@@ -22,13 +22,13 @@
 
 이 시리즈는 반대로 간다. 창은 Windows 에서 Win32 API 로 직접 만들고, macOS/Linux 에서는 SDL2 에 **창·입력·OpenGL 컨텍스트 생성만** 맡긴다. 도형·텍스트·이미지는 직접 짠 **OpenGL 3.3 Core 2D 렌더러**가 그린다 — 정점 셰이더와 조각 셰이더 한 벌, 그리고 사각형·글자·이미지를 모두 "텍스처를 입힌 사각형" 으로 환원해 한 번에 내보내는 배처가 전부다. 오디오는 XAudio2 또는 SDL audio, 폰트 래스터화는 단일 헤더 `stb_truetype`, 네트워킹은 소켓 API 순정이다.
 
-**왜 그렇게 하는가.** 이 시리즈가 만드는 것이 단순한 테트리스가 아니기 때문이다. 목표는 **두 대의 컴퓨터가 같은 시드와 같은 입력으로 완전히 같은 게임을 돌리는 lockstep 멀티플레이**이고, 그 위에 **강화학습 봇**을 얹는 것이다. 이 두 목표가 엔진이 주는 편의와 정면으로 부딪힌다.
+**왜 그렇게 하는가.** 이 시리즈가 만드는 것이 단순한 테트리스가 아니기 때문이다. 목표는 **두 대의 컴퓨터가 같은 시드와 같은 입력으로 완전히 같은 게임을 돌리는 lockstep 멀티플레이**이고, 그 위에 **강화학습 봇**을 얹는 것이다. 규칙의 시간·입력·난수와 실행 순서를 직접 정의하고, 같은 규칙을 화면 없이도 실행하는 것이 설계의 중심이다.
 
 ### 결정론 — 이것이 가장 큰 이유다
 
 lockstep 멀티플레이는 "같은 입력을 같은 순서로 넣으면 두 기계의 상태가 비트 단위로 같다" 는 전제 위에 선다. 상태를 통째로 주고받지 않고 **입력만** 주고받기 때문이다. 이 전제가 한 프레임이라도 깨지면 두 화면이 조용히 갈라진다.
 
-엔진 위에서 이 보장을 얻기는 어렵다. 물리 엔진은 프레임 시간에 따라 결과가 달라지고, 입력 시스템은 내부적으로 큐잉·보간을 하며, 코루틴이나 프레임 콜백·고정 스텝 콜백의 실행 순서는 엔진 버전에 따라 바뀔 수 있다. 그것들이 잘못됐다는 뜻이 아니라, **부드러운 화면을 위해 설계된 것**이라 비트 단위 재현성과는 목표가 다르다는 뜻이다.
+엔진을 사용할 때도 규칙을 별도의 고정 틱 모델로 두고 입력 순서와 난수 상태를 관리할 수 있다. 주의할 것은 실제로 의존하는 계약이다. 렌더 프레임의 경과시간, 외부 물리 결과, 콜백의 도착 순서를 그대로 규칙 입력으로 쓰면 실행 환경에 따라 결과가 달라질 수 있다. 이 프로젝트는 그 경계를 직접 구현하면서 배우기 위해 자체 시뮬레이션을 선택했다.
 
 그래서 이 프로젝트는 게임 규칙을 `SimGame` 이라는 클래스 하나에 가두고, 그 안에서는 부동소수를 시간 계산에 쓰지 않으며, 난수도 직접 만든 것을 쓴다. [Part 1](./part1-deterministic-simulation.md) 의 골든 해시 테스트가 그 경계를 지킨다.
 
@@ -44,7 +44,7 @@ lockstep 멀티플레이는 "같은 입력을 같은 순서로 넣으면 두 기
 
 ### 대가
 
-정직하게 적자면 대가가 크다. 엔진이 몇 분 만에 주는 것을 이 시리즈는 여러 장에 걸쳐 만든다. 에디터도, 씬 그래프도, 애셋 파이프라인도, 애니메이션 시스템도 없다. 3D 가 필요하거나, 파티클이 필요하거나, 여러 플랫폼에 빠르게 출시해야 한다면 이 접근은 틀린 선택이다.
+정직하게 적자면 대가가 크다. 엔진이 몇 분 만에 주는 것을 이 시리즈는 여러 장에 걸쳐 만든다. 에디터도, 씬 그래프도, 애셋 파이프라인도, 애니메이션 시스템도 없다. 3D·파티클·여러 플랫폼의 빠른 출시가 목적이면 엔진의 자원 관리와 제작 도구를 재사용하는 편이 유리할 수 있다. 직접 구현의 학습 효과와 개발·유지 비용을 함께 비교해야 한다.
 
 **이 시리즈는 "엔진을 쓰지 말라" 고 주장하지 않는다.** 엔진이 대신 해주던 일들이 실제로 무엇인지 한 번 열어 보는 것이 목적이다.
 
@@ -59,7 +59,7 @@ lockstep 멀티플레이는 "같은 입력을 같은 순서로 넣으면 두 기
 | 스프라이트·도형 렌더링 | 직접 짠 OpenGL 3.3 Core 2D 렌더러 (셰이더 한 벌 + 정점 배처) | [Part 3](./part3-rendering-and-ui.md) |
 | 폰트 렌더링 | `stb_truetype` 로 CPU 래스터화 + 직접 만든 글리프 아틀라스 텍스처 | Part 3 |
 | UI 위젯 | 즉시모드 GUI 직접 구현 | Part 3, [Part 11](./part11-settings-and-options.md) |
-| 게임 루프·타이밍 | 60Hz 고정 스텝 누산기 직접 구현 | [Part 4](./part4-game-wrapper-and-loop.md) |
+| 게임 루프·타이밍 | 정책에 정한 틱 간격의 고정 스텝 누산기 | [Part 4](./part4-game-wrapper-and-loop.md) |
 | 오디오 재생·믹싱 | XAudio2 / SDL audio 콜백에서 직접 믹스 | [Part 5](./part5-audio.md) |
 | 네트워킹 | TCP 소켓 + 직접 설계한 프레이밍 | [Part 6](./part6-lockstep-networking.md) |
 | 매치메이킹 서버 | 직접 만든 릴레이 | [Part 7](./part7-relay-server.md) |
@@ -75,10 +75,10 @@ lockstep 멀티플레이는 "같은 입력을 같은 순서로 넣으면 두 기
 
 ### 2.1 Windows
 
-1. [Visual Studio 2026 Community](https://visualstudio.microsoft.com/) 설치. 설치 관리자에서 **"C++를 사용한 데스크톱 개발"** 워크로드를 체크한다. MSVC 컴파일러, Windows SDK, CMake 통합이 전부 여기 들어 있다.
+1. [Visual Studio 또는 Build Tools](https://visualstudio.microsoft.com/downloads/) 설치. 설치 관리자에서 **"C++를 사용한 데스크톱 개발"** 워크로드를 체크한다. MSVC 컴파일러, Windows SDK, CMake 통합이 전부 여기 들어 있다.
 2. Git for Windows.
 
-Windows 에서는 이 두 개면 게임 클라이언트를 끝까지 만들 수 있다. 창(Win32), OpenGL(`opengl32.lib`), 이미지 디코딩(GDI+), 오디오(XAudio2), 소켓(WinSock2)이 전부 Windows SDK 에 이미 들어 있어서 **추가로 설치할 라이브러리가 없다.** OpenGL 개발 패키지도 따로 받을 것이 없다 — `opengl32.lib` 이 SDK 에 포함돼 있다. 이것이 Win32 백엔드를 유지하는 이유 중 하나다 — 배포할 때 동봉할 DLL 이 없다.
+이 최소 콘솔 체크포인트에는 C++ 도구와 CMake면 충분하다. 완성 게임의 기본 Win32 경로는 창·OpenGL 링크 라이브러리(`opengl32.lib`)·GDI+·XAudio2·WinSock2 등 Windows SDK 기능을 사용한다. SDL 백엔드, 암호화 통신, 서버, 모델 추론을 선택하면 해당 의존성을 추가한다. SDK에 링크 라이브러리가 있다는 사실은 GPU 드라이버의 기능 지원이나 배포 DLL 불필요를 뜻하지 않는다. [MSVC 런타임 배포 조건](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170)과 사용한 공유 라이브러리도 따로 확인한다.
 
 확인:
 
@@ -86,7 +86,7 @@ Windows 에서는 이 두 개면 게임 클라이언트를 끝까지 만들 수 
 cmake --version
 ```
 
-Visual Studio 를 설치했는데 `cmake` 를 못 찾는다면 일반 PowerShell 대신 **x64 Native Tools Command Prompt for VS 2026** 를 열면 된다.
+Visual Studio 를 설치했는데 `cmake` 를 못 찾는다면 일반 PowerShell 대신 **설치한 Visual Studio의 x64 Native Tools Command Prompt** 를 열면 된다.
 
 ### 2.2 Linux (Ubuntu/Debian 기준)
 
@@ -131,7 +131,7 @@ Linux 에서 미리 확인하려면:
 glxinfo | grep "OpenGL core profile version"
 ```
 
-`3.3` 이상이면 된다. `glxinfo` 가 없다면 `mesa-utils`(Debian/Ubuntu) 또는 `glx-utils`(Fedora) 를 설치하면 들어 있다. macOS 는 10.9 이후 모든 버전이 3.3 Core 를 제공하고, Windows 는 GPU 제조사 드라이버를 최신으로 유지하면 된다.
+`glxinfo`의 출력은 해당 표시 연결에서 제공하는 기능을 확인하는 단서다. `glxinfo`가 없다면 `mesa-utils`(Debian/Ubuntu) 또는 `glx-utils`(Fedora)를 설치한다. 운영체제 버전이나 드라이버가 최신이라는 사실만으로 모든 GPU·가상 환경의 지원을 보장할 수는 없다. [macOS의 컨텍스트 생성 계약](https://developer.apple.com/library/archive/documentation/GraphicsImaging/Conceptual/OpenGL-MacProgGuide/opengl_contexts/opengl_contexts.html)처럼 필요한 프로파일을 요청하고, 실제 생성 성공과 얻은 버전·필수 진입점을 프로그램에서 확인해야 한다.
 
 원격 데스크톱이나 헤드리스 VM 에서는 이 조건이 깨지기 쉽다. 다만 그런 환경에서 돌리는 것은 대개 릴레이 서버([Part 7](./part7-relay-server.md))나 결정론 테스트인데, 둘 다 화면을 만들지 않으므로 GL 이 없어도 빌드되고 실행된다.
 
@@ -155,7 +155,7 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 uv sync --dev
 ```
 
-`--dev` 는 `pytest` 와 `pybind11` 까지만 깐다. **PyTorch 는 들어오지 않는다.** 학습은 Colab 에서 하고 배포 머신에는 torch 를 두지 않는다는 방침이라, 무거운 것들은 별도 extra 로 분리해 뒀다. 학습을 직접 돌릴 때가 되면 [Part 8](./part8-python-rl.md) 에서 안내한다.
+`uv sync --dev`는 프로젝트의 기본 의존성에 개발 그룹을 더한다. 현재 `pyproject.toml`의 기본 의존성에는 NumPy가 있고, 개발 그룹에는 pytest와 pybind11이 있다. train/export extra나 다른 기본 그룹을 추가하지 않은 이 구성에는 PyTorch가 포함되지 않는다. 학습·내보내기에 필요한 무거운 의존성은 extra로 분리하며, Colab 작업에서는 그 환경에 맞는 그룹을 별도로 설치한다.
 
 ### 2.6 기능별 선택 의존성
 
@@ -163,9 +163,10 @@ uv sync --dev
 
 | 준비물 | 언제 | 왜 지금 아닌가 |
 |---|---|---|
-| ONNX Runtime | [Part 9](./part9-rl-onnx-bot.md) | 바이너리가 수백 MB 라 필요할 때 받는다 |
+| ONNX Runtime | 모델 추론을 켤 때 ([Part 9](./part9-rl-onnx-bot.md)) | 대상 OS·CPU와 빌드 구성이 맞는 SDK를 선택한다 |
 | PyTorch / Gymnasium | [Part 8](./part8-python-rl.md) | 학습할 때만 필요하고, 대개 Colab 에서 한다 |
-| OpenSSL | [Part 10](./part10-meta-and-ranking.md) | 있으면 HTTPS 가 켜지고 없으면 HTTP 로 동작한다 |
+| OpenSSL | meta 서버의 자격증명 해시, 클라이언트의 HTTPS, WSS | meta와 WSS 타깃은 필수 의존성으로 요구한다. 클라이언트 HTTPS 지원은 선택 기능이며 URL과 빌드 설정을 함께 확인한다 |
+| Boost 헤더 | WSS 클라이언트·게이트웨이 | `TETRIS_BUILD_WSS`를 켜면 Beast/Asio 코드의 헤더가 필요하다 |
 
 ## 3. 파일을 어떻게 나눌 것인가
 
@@ -181,9 +182,9 @@ graph BT
 
 화살표는 "안다(의존한다)" 방향이다. 위로 갈수록 아는 것이 줄어들고, 맨 위의 게임 규칙은 아래에 무엇이 있는지 전혀 모른다.
 
-말은 당연해 보이지만 지키기 어렵다. "게임 오버가 됐으니 여기서 소리를 내자" 는 한 줄이 규칙 코드에 들어가는 순간 방향이 깨진다. 그러면 소리 없이 규칙만 테스트할 수 없게 되고, 규칙을 Python 에 노출할 수도 없게 된다.
+규칙 코드가 게임 오버 순간 오디오 장치를 직접 호출하면 규칙의 실행 조건에 장치와 그 구현이 따라붙는다. 대역으로 시험할 수는 있지만 준비와 의존성이 늘어난다. 규칙은 게임 오버라는 사실을 결과로 내보내고, 바깥의 표현 계층이 소리를 선택하게 하면 같은 규칙을 헤드리스 검사와 Python 바인딩에서 재사용하기 쉽다.
 
-이 프로젝트는 그 경계를 **최상위 디렉터리와 빌드 타깃**으로 강제한다. 규칙 코드가 들어갈 디렉터리는 렌더링 코드가 들어갈 디렉터리를 include 하지 않는다. 규칙만 모아 빌드하는 타깃도 따로 있어서, 경계를 어기면 **링크 에러로 즉시 드러난다.**
+이 프로젝트는 **디렉터리·소스 목록·빌드 타깃**으로 의존 방향을 드러낸다. 규칙만 모은 실행 타깃에서 장치 함수의 정의를 빼면 미해결 심볼을 찾을 수 있다. 다만 헤더에 구현된 함수를 포함하거나 잘못된 의존성을 함께 링크하면 빌드가 성공해도 설계 경계를 넘을 수 있다. 독립 빌드 검사와 함께 include 방향·호출 관계를 검토해야 한다. [CMake 링크 요구사항](https://cmake.org/cmake/help/latest/command/target_link_libraries.html)은 빌드 관계를 전달하는 계약이며 소스 접근을 금지하는 권한 체계가 아니다.
 
 지금 디렉터리를 미리 만들 필요는 없다. 이 체크포인트는 실제로 사용하는 파일만 두며, §1의 표는 책임 경계를 설명하는 지도다. 완성형 파일 배치는 [구조·빌드 레퍼런스](./part13-structure-and-build-reference.md)에서 조회한다.
 
@@ -245,14 +246,14 @@ tetris project skeleton
 
 그래서 **매 장 끝에서 빌드가 성공하고 무언가 실행된다.** 이것이 이 시리즈의 규칙이다. 열 장을 만든 뒤에야 처음 실행해 보는 일은 없다. 각 장의 마지막에 빌드 명령과 기대 결과가 적혀 있으니 그대로 따라가면 된다.
 
-빌드 명령은 보유한 소스와 검증 대상에 따라 달라진다. 중간 체크포인트에서는 아직 만들지 않은 클라이언트·relay·meta 타깃을 `TETRIS_BUILD_GAME`, `TETRIS_BUILD_RELAY`, `TETRIS_BUILD_META` 옵션으로 끄고, 확인하려는 타깃만 켠다. 이 원칙을 지키면 CMake가 존재하지 않는 소스를 찾는 구성 오류와 실제 컴파일 오류를 구분할 수 있다.
+빌드 명령은 보유한 소스와 해당 체크포인트가 선언한 옵션에 따라 달라진다. 이 장의 최소 CMakeLists에는 `TETRIS_BUILD_*` 옵션이 없으므로 그대로 실행 타깃 하나를 빌드한다. 완성형 저장소에서 일부 역할만 만들 때는 그 저장소가 선언한 `TETRIS_BUILD_GAME`, `TETRIS_BUILD_RELAY`, `TETRIS_BUILD_META` 등을 선택한다. 선언되지 않은 `-D` 변수를 추가해도 없는 소스나 타깃이 생기지 않는다. 현재 CMakeLists가 무엇을 선언했는지 먼저 확인해야 구성 오류와 컴파일 오류를 구분할 수 있다.
 
 [구조·빌드 레퍼런스](./part13-structure-and-build-reference.md)는 완성형 디렉터리 지도, 빌드 옵션, 변경 유형별 파일 소유권을 모아 둔 조회용 문서다. 여기의 최소 체크포인트와 완성형 빌드를 혼합하지 않도록, 설정의 의미를 확인할 때만 참조한다.
 
 ## 이 장에서 완성된 것
 
 - Windows / Linux / macOS 중 자기 환경에 C++17 툴체인과 CMake 가 준비됐다.
-- SDL2와 OpenGL 개발 패키지를 설치했고, 이 기계의 드라이버가 OpenGL 3.3 Core를 제공하는지 확인했다.
+- 그래픽용 개발 패키지와 드라이버 기능은 창·렌더러 실습의 별도 준비라는 점을 구분했다. 콘솔 체크포인트의 성공을 그래픽 실행 검증으로 세지 않는다.
 - 최소 `CMakeLists.txt`와 스텁 `src/main.cpp`로 configure → build → 실행이 성공한다.
 - 완성 구조에서 각 엔진 역할을 어느 모듈이 맡는지, 직접 구현하는 이유가 무엇인지 알고 있다.
 

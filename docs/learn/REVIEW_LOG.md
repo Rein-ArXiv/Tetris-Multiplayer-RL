@@ -7161,3 +7161,28 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - e0b2255의CI37237579127에서 새페어링회귀를포함한1990검사/37subtests가통과했으나Windows기본통합중계정서버fixture1건이PORT공지5초기한으로실패. stderr는opening db만있었고process종료관찰이아닌대기시간초과후테스트가종료시킨경우다. DB내부의어느작업/외부I/O원인이느렸는지는이로그로확정하지않는다.
 - SQLitebusy대기자체가5초이며프로세스시작/스키마쓰기도준비예산에포함되므로테스트helper의기본총기한을30초로조정. 고정sleep추가·실패skip·검사재시도없음. 빠른서버는즉시반환하고PORT+health공통절대기한,조기종료/정리/비밀제거는유지. 제품의서버제한설정은변경하지않음.
 - DeepSeek선택명세module13-readiness-events.jsonl(43583exit0,step_start/text만)의가상시계초안에서가상의API/반환예외/정밀한기한단정을실제helper계약으로교정. 가상6초시작성공·PORT없는기한·HTTP단계남은예산·프로세스조기실패4검사와실제HTTP계정/실패진단/호출자예외3검사통과. 페어링4회귀도통과. 실제원격결과는수정푸시후확인한다. 새차시/범위감사는없으며마감후paused조건유지.
+
+## 2026-10-04 — 재개 후 첫 내용 대조: 준비·빌드·입력 경계
+
+- 사용자가 남은 작업을 계속 요청했다. 계획된177차시는모두reviewed였지만 원문344절은8covered/204partial/132unassigned. 이는집필누락의직접개수가아니므로기초단원부터실제본문을대조했다. 원문순서를새강의순서로강제하거나차시수를먼저늘리지않는다.
+- Part0전체와1·4·5·9·10·11·167·168·175의관련본문/현재CMake·pyproject를대조. 1의도구설치안내누락을OS별접힘안내로보완:편집기vs컴파일러,언어표준vsCMake버전,개발자터미널환경,최소옵션vs완성형옵션. 스니펫·질문ID/보기의의미는유지했다.
+- Part0의무조건Win32무DLL/OpenSSL없으면HTTP강등/uv dev구성누락/모든MacGL보장/경계위반시항상링크실패/없는체크포인트옵션안내/그래픽검증완료과장교정. 자체규칙의학습목적과엔진사용의선택을구분. Microsoft런타임배포·Apple컨텍스트·CMake링크요구공식자료와실제옵션대조. 5에inline헤더의잘못된의존이빌드를통과하는메모,10에실제SDL Config우선탐색반영. 기준코드/공개된문항의미는유지.
+- DeepSeek coverage-part0-events.jsonl(42170exit0,step_start/text)은선택Part0와관련강의본문만검토. 도구/키/전체저장소전송없음. Reactor가모든OS기본OFF라는후보는프리셋과CMake기본값을혼동하므로기각. 나머지의존성/초기설명후보는직접대조후반영.
+- Part2의마우스이전표복사설명은현재s_mouse KeyEdges와불일치하여교정. 문자큐는선언된배열N칸에서실효N-1계약으로설명하고현재소스발췌는보존. SimGame행/열을표현좌표해상도와혼동한도입문도교정. 문자입력절은8·10의본문/현재입력소비계약과직접대조해covered,입력래치/논리화면절은부분대응유지.
+- 1의HTML스니펫을추출해새CMake빌드/정확한출력검사,원치않는inline헤더의존이컴파일·링크·실행되는반례검사통과(coverage-part0-build.log). 05-library/08-text/10-win32의실제Linux빌드·SDL수명/입력30경로통과. 후자는Windows네이티브창검사가아님.
+- focused lesson1 DOM검사에서고정lesson1로이동해놓고차시교체를가정한검사오류재현. DeepSeek선택JS명세coverage-navigation-events.jsonl(89094exit0,step_start/text)의초안을Node assert API로교정하고다른실제차시를선택/원래버튼분리검사하도록수정. 제품UI변경없음. focused1와전체177차시자동DOM검사통과. 객관식879·Markdown27·Part발췌/링크·정적허용목록/해시/ZIP통과. 수동화면검사없음.
+- 직접대조한Part0각절및Part2문자절의근거와미확인범위를coverage-evidence에갱신. 총covered14지만전체완료아님. 다음은module01의Part2자원소유/콜백/입력/종료·선택백엔드계약과기초차시대조. 이큰단원의내용대조가아직진행중이므로개별교정커밋/푸시는하지않았다. 기존 :memory:.ses 제외.
+
+
+## 2026-10-04 — 프로그램과 창 단원 내용 대조 마감
+
+- 기초 단원의 실행·이벤트 큐·번역 단위·링크·소유권·입력·문자·대역·Win32 콜백을 Part0/2의 관련 설명과 대조했다. 강의의 의미 계약은 이미 다뤄져 있어 새 차시를 추가하지 않았다. GL·DPI·마우스·틱 소비 등 다른 단원과 겹치는 원문 절은 미확인 범위를 명시하고 partial을 유지했다.
+- Part2의 “공개 헤더 하나만 공유”를 현재 KeyEdges 알고리즘 재사용과 백엔드별 상태 소유로 바로잡았다. 엔진·헬퍼 사용을 결정론/학습 불가능으로 연결하던 단정을 제거했다. Microsoft 공식 계약에 따라 호출 스레드의 current 컨텍스트 삭제와 다른 스레드의 current 컨텍스트 삭제를 구별하고, WGL 전용 절차를 SDL/macOS에 일반화한 설명을 고쳤다. API 계약과 코드의 명시적 정리 정책을 구분했다.
+- 7차시에 포커스 취소 후 자동 반복이 초기 끝점 비교 구현에서 새 눌림으로 복원될 수 있음을 접힌 사이드 메모로 보완했다. 실제 CP07 SDL 큐에 취소와 repeat-only down을 넣어 held/pressed 복원을 확인했다(coverage-repeat.log). 제품 SDL 회귀의 같은 조건은 무시되는 것을 확인했다. 학습 코드와 현재 코드의 의도적인 단계 차이를 보존했다.
+- 10차시에서 현재 제품의 DefWindowProcA와 학습 구현의 DefWindowProcW를 구별했다. 1·5·7·10의 변경은 설명/메모이며 문제 ID·정답 의미·기준 C++ 구현을 변경하지 않았다.
+- 02/03 체크포인트는 성공했으나 첫 검사 호출의 04 경로명을 잘못 입력해 명령이 중단됐다. 정확한 04-modules와 06-ownership/07-keys/09-backends를 다시 지정하여 37개 수명/입력 경로가 통과했다. 앞선 05/08/10의 30개 경로와 함께 기초 단원의 Linux 빌드를 확인했다. 네이티브 Windows/macOS GUI 성공으로 확대하지 않는다.
+- 전체177 DOM 검사 뒤 추가된 7차시 메모는 focused DOM으로 재확인했다. 879객관식, Part 발췌·링크, Markdown27 검사 통과. 최종 정적 검사에서 coverage 변경 후 lessons.js 재생성 누락을 검출했고 library/coverage/lessons를 갱신하여 최종 release6f0d44d2335ce8df의 허용목록·상대자산·해시·재현 ZIP이 통과했다(coverage-module01-site.log). 수동 화면 검사는 수행하지 않았다.
+- 커밋·푸시 후 Pages와 해당 커밋 CI를 확인한다. 다음 내용 대조 대상은 “GPU로 첫 도형 그리기” 단원이다. 원문 전체 내용 대조는 아직 완료하지 않았다. 기존 :memory:.ses는 제외한다.
+
+- DeepSeek의 기초 플랫폼 대조 `coverage-platform-events.jsonl`은 정상 종료(12133, step_start/text만). 승인된 선택 원문·관련 강의 본문만 보냈다. current 삭제와 배경 브러시 인과 오류, 남아 있던 마우스 취소 스냅샷 문장을 직접 확인해 반영했다. WGL 조회 폴백 누락 후보는 원문 §4.6/12에 이미 있어 기각했다. 재초기화 후보는 현재 제품과 학습 체크포인트를 섞은 판단이므로 제품 기능 변경 대신 단일 세션/재초기화 계약 차이를 원문에 적었다. 공식 WM_ERASEBKGND 계약과 실제 null 클래스 브러시를 대조했다.
+- 추가 원문 교정 후 library/coverage/lessons를 다시 생성했다. 최종 배포 release는 `70722b75b1682ab7`이며 정적 허용목록·상대자산·해시·재현 ZIP이 통과했다(`coverage-module01-site-final.log`). 앞의 `6f0d44d2335ce8df`는 추가 교정 전 중간 결과다.

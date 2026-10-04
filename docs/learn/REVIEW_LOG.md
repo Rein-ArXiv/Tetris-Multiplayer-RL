@@ -7155,3 +7155,9 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - 실패 로그에는 실제 paired/forwarding과 양 연결 유지가 있는데 관찰 helper가 페어링을 못 찾았다. 수신 timestamp > 시작timestamp는 같은 시계 값의 새 이벤트를 놓칠 수 있다. 페어링 관찰만 명령 전 잠금 아래 캡처한 목록 커서로 전환하고, 실제 경과시간/레이트 판정은 그대로 유지했다. 서버 성공 로그와 검사 관찰 실패를 구분하도록 오류 문구도 교정했다. 원격 로그에 수신timestamp 자체는 없어 당시 동률을 직접 측정했다고 주장하지 않는다.
 - DeepSeek에 저장소 코드 없이 작은 회귀 명세만 전송(module13-pairing-events.jsonl,67230exit0,step_start/text). 초안의 없는 import·timeout=None 가정·반환형 오류를 고쳐 실제 parser/reader를 쓰는4검사 작성. 동일timestamp의 새 이벤트,기존/소비 이벤트 제외,reader thread 전달 통과. 실제 Linux 리액터 백프레셔 검사도 통과(module13-pairing-socket.log).
 - 변경된 현재 소스 뷰어 snapshot을 갱신하고 원격 최종 확인을 이어간다. 이 수정은 단원 마감 CI 범위이며 새 차시/추가coverage감사는 시작하지 않는다. 최종 성공 후 사용자 요청대로 paused.
+
+## 2026-10-04 — 단원 마감 CI의 준비 대기 시간
+
+- e0b2255의CI37237579127에서 새페어링회귀를포함한1990검사/37subtests가통과했으나Windows기본통합중계정서버fixture1건이PORT공지5초기한으로실패. stderr는opening db만있었고process종료관찰이아닌대기시간초과후테스트가종료시킨경우다. DB내부의어느작업/외부I/O원인이느렸는지는이로그로확정하지않는다.
+- SQLitebusy대기자체가5초이며프로세스시작/스키마쓰기도준비예산에포함되므로테스트helper의기본총기한을30초로조정. 고정sleep추가·실패skip·검사재시도없음. 빠른서버는즉시반환하고PORT+health공통절대기한,조기종료/정리/비밀제거는유지. 제품의서버제한설정은변경하지않음.
+- DeepSeek선택명세module13-readiness-events.jsonl(43583exit0,step_start/text만)의가상시계초안에서가상의API/반환예외/정밀한기한단정을실제helper계약으로교정. 가상6초시작성공·PORT없는기한·HTTP단계남은예산·프로세스조기실패4검사와실제HTTP계정/실패진단/호출자예외3검사통과. 페어링4회귀도통과. 실제원격결과는수정푸시후확인한다. 새차시/범위감사는없으며마감후paused조건유지.

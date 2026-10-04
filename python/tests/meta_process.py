@@ -28,7 +28,7 @@ def local_meta_server(
     binary: Path,
     database: Path,
     secret: str,
-    timeout: float = 5,
+    timeout: float = 30,
 ) -> Iterator[str]:
     """
     Run the repository's LOCAL test meta server for the duration of the block.
@@ -36,6 +36,9 @@ def local_meta_server(
     Yields the base URL (http://127.0.0.1:<port>). Intended for tests only, not
     production. The parent never reserves a free port; the child binds port 0
     and announces the chosen port, avoiding the reserve/close race.
+    The single startup deadline covers process creation, schema initialization
+    and HTTP readiness. SQLite alone may wait five seconds for a lock; loaded
+    CI storage also needs time for schema writes. Fast starts return immediately.
     """
     binary = Path(binary).resolve()
     database = Path(database).resolve()

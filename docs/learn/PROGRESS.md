@@ -24,6 +24,8 @@ REVIEW_LOG.md를 확인하고 이미 검토한 차시를 중복 생성하지 않
 
 ## 현재 상태
 
+- 2026-10-04 추가마감: e0b2255/Pages37237579116·실자산1e623d7feffc0e34확인. CI37237579127은Windows기본통합중meta의PORT공지5초기한1오류(1990passed/37subtests). 테스트helper총준비기한30초로교정,가상기한4/페어링4/실제HTTP3검사통과. 제품제한이나skip/retry변경없음. 수정커밋의원격결과확인후paused,새집필없음.
+
 - 2026-10-04 단원 공개4431898/Pages37235561503·실자산0dc17f28a8faad2f 확인. 제품CI37235561549는Windows기본통합까지통과했으나리액터페어링로그관찰1실패. 실제paired로그존재,동일시계값의새로그를놓칠수있는엄격대소비교를목록커서로교정하고4회귀/실제백프레셔검사통과. 최종수정푸시후원격검사확인만남았으며그뒤goal paused. 새집필없음.
 
 - 2026-10-04 단원 마감: module13의177까지 reviewed. 종합 체크포인트의 실제 RULES/ARCHITECTURE/CONTENT/SHUTDOWN 8CTest·SERVICE HTTP복구·증거계약 통과. 제품 전체 빌드·38CTest·관련177pytest/37subtests, 단원167~177 스니펫·전체177차시DOM·879객관식·Part/Markdown·정적release0dc17f28a8faad2f 통과. 미래 문제를177로 고정했던 테스트를 현재 목록에서 계산하도록 교정했다. 모든 집필/DeepSeek 작업 종료. 다음은 main 단원 커밋·푸시와 해당 리비전의 CI(Windows 포함)/Pages 실자산 확인만이며, 그 뒤 사용자 요청대로 goal paused. 원격 결과는 out/learning-jobs/module13-deployment-verification.json에 별도 보관한다. 전체 원문 coverage는 여전히 부분적이므로 전체 goal 완료로 표시하지 않는다. :memory:.ses 제외, 기존 읽기 서버 유지.

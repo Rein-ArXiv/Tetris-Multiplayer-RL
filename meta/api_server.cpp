@@ -511,9 +511,21 @@ bool ApiServer::listen(const std::string& host, int port)
             set_json(res, 200, proto::leaderboard_response(out));
         });
 
-    std::fprintf(stderr, "[meta] HTTP listening on %s:%d\n", host.c_str(), port);
-    bool ok = svr.listen(host, port);
-    if (!ok) std::fprintf(stderr, "[meta] listen failed on %s:%d\n", host.c_str(), port);
+    // Let the child own an ephemeral listener without reserving and releasing
+    // a port in its parent. The PORT announcement is not an HTTP health check.
+    const int bound_port = port == 0 ? svr.bind_to_any_port(host)
+        : svr.bind_to_port(host, port) ? port : -1;
+    if (bound_port <= 0) {
+        std::fprintf(stderr, "[meta] bind failed on %s:%d\n", host.c_str(), port);
+        return false;
+    }
+    if (port == 0) {
+        std::printf("PORT %d\n", bound_port);
+        std::fflush(stdout);
+    }
+    std::fprintf(stderr, "[meta] HTTP bound on %s:%d\n", host.c_str(), bound_port);
+    bool ok = svr.listen_after_bind();
+    if (!ok) std::fprintf(stderr, "[meta] listen failed on %s:%d\n", host.c_str(), bound_port);
     return ok;
 }
 

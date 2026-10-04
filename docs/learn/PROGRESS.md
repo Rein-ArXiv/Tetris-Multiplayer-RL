@@ -1,5 +1,9 @@
 # 연속 집필 진행 기록
 
+- 2026-10-04 사용자 최신 중지 조건: 현재 큰 단원 module13 「배포와 유지보수」(167~177)를 완료·검수·커밋·푸시하고 Pages 배포를 확인한 뒤 goal을 paused로 변경한다. 177까지 로컬 집필·검수를 마쳤으며, 단원 완료 뒤 추가 범위 감사/신규 작업을 자동 시작하지 않는다. 조건 완료 전에는 중지하지 않는다.
+
+- 2026-10-04 최신(progress):169 Linux서버 실행·준비·DB재시작 강의검수완료. 로컬839문제/집중DOM/Part/스니펫/실제SERVICE/릴리스5검사·정적releasec35518537f0bb39c통과. 다음170Windows이전. module13경계에서강의커밋·푸시,goal계속. HTTP/WindowsCI hotfix024b1f7는별도로main푸시했고Pages37227049106/실제자산9b53b953160ad711검증완료. 제품CI37227049100은진행중으로결과추적필요. :memory:.ses제외,모든169외부초안작업완료,기존로컬서버유지.
+
 - 2026-10-04 최신: main30d2eb3과 Pages workflow 공개 확인 완료. Windows CI의429 미소비본문/연결 재사용 오류를 별도 수정했다. 수정 전 Linux400재현, 수정 후 C++경계·실제서버106검사·공개168기준 정적검사 통과. CI hotfix push 뒤 원격Windows 결과 확인 필요.169는 실제CP검사를 마쳤고 사이트검수 진행 중, 단원13 계속.
 
 ## 작업 계약
@@ -19,6 +23,24 @@ REVIEW_LOG.md를 확인하고 이미 검토한 차시를 중복 생성하지 않
 - 2026-10-03: 매 큰 단원 완료 시 커밋. course-plan의 modules 기준이다. 당시134~148 단원을 다음 경계로 지정했으며, 이후 경계는 아래 현재 상태를 따른다. 개별 차시 커밋/자동 푸시/공개 범위 확대는 하지 않는다. DeepSeek 선택 초안과 직접 검수 분담 유지.
 
 ## 현재 상태
+
+- 2026-10-04 단원 마감: module13의177까지 reviewed. 종합 체크포인트의 실제 RULES/ARCHITECTURE/CONTENT/SHUTDOWN 8CTest·SERVICE HTTP복구·증거계약 통과. 제품 전체 빌드·38CTest·관련177pytest/37subtests, 단원167~177 스니펫·전체177차시DOM·879객관식·Part/Markdown·정적release0dc17f28a8faad2f 통과. 미래 문제를177로 고정했던 테스트를 현재 목록에서 계산하도록 교정했다. 모든 집필/DeepSeek 작업 종료. 다음은 main 단원 커밋·푸시와 해당 리비전의 CI(Windows 포함)/Pages 실자산 확인만이며, 그 뒤 사용자 요청대로 goal paused. 원격 결과는 out/learning-jobs/module13-deployment-verification.json에 별도 보관한다. 전체 원문 coverage는 여전히 부분적이므로 전체 goal 완료로 표시하지 않는다. :memory:.ses 제외, 기존 읽기 서버 유지.
+
+- 2026-10-04 최신(progress):176 콘텐츠확장 완료. 다음177종합복습후단원마감. 실제CONTENT/표현불변/정책입력/참조ZIP검사·제품패키징/프로필37검사37subtests(skip없음)·보상권한2HTTP통과. 설정외부링크·재독불일치·부분ZIP/게시경쟁·dot경로교정. 인라인7·874객관식·집중DOM·Part·정적release5127b82a1022b661통과. 모든176작업종료,177새파일/외부작업없음.177완료·단원검사·main커밋·푸시·원격WindowsCI/Pages확인후goal paused;전체coverage추가감사는시작하지않음. :memory:.ses제외.
+
+- 2026-10-04 최신(progress):175 변경경계/SOLID 완료. 다음176 콘텐츠추가,177복습뒤단원마감. 누적화면/봇Character namespace충돌을실제재현후분리;ARCHITECTURE·표현·설정3CTest와widget구문통과. Part13 relay서버재현누락교정. 인라인7·869객관식·집중DOM·Part/Markdown·정적release5a5dc72d27d988b9통과. 모든175작업종료,176새파일/외부작업없음.177완료·단원커밋·푸시·원격WindowsCI/Pages확인후goal paused. :memory:.ses제외.
+
+- 2026-10-04 최신(progress):174 릴리스 검사 완료. 다음175 아키텍처/변경위치/SOLID,176콘텐츠추가,177복습. 실제 RULES/SERVICE·계정복구·선언반례 통과; 인라인9·864객관식·집중DOM·Part·정적release45820fec0a4bce3f 통과. DeepSeek 평가기·문제 초안 검수완료,모든174작업종료.175새파일/외부작업없음.177단원완료후커밋·푸시·원격WindowsCI/Pages확인후paused조건유지. :memory:.ses제외.
+
+- 2026-10-04 최신(progress):173 백업/복구 완료. 다음174 릴리스 검사. 실제 CP/제품 키회전 전후 복원과 백업24검사·859객관식·집중DOM·Part·인라인9·정적releasee0ad285306815371 통과. 백업 도구의 링크/sidecar/외래키/기한/게시/보존 오류와 Part의 옛WAL 혼합 복구 순서 교정. 모든173 작업 종료,174 새파일/외부작업 없음.177까지 끝내고 단원 커밋·푸시·CI/Pages 확인 뒤 goal paused; 중간 차시에서 중지하지 않음. :memory:.ses 제외.
+
+- 2026-10-04 최신(progress):172 종료/SIGPIPE/소켓소유/워커정리 제작·검수완료. 다음173 백업과복구. 실제논블로킹설정실패가종료를막는문제를재현하고제품relay/reactor/Session교정. 로컬854문제·집중DOM·Part·인라인7·실제신호/루프백/워커/제품3CTest·활성경기종료·정적releasebfe4afcd171fdea6 통과. 모든172작업종료,173새파일/외부작업없음. 현재제품수정본빌드는out/ci-http-fix(CMAKE_HOME_DIRECTORY=ROOT);out/ci-repair/build는과거snapshot이므로수정본증거로사용하지말것. 원격Windows기동2오류·170Unicode의실제Windows검증은단원푸시뒤확인필요.177까지완료/검수/커밋/푸시/Pages확인후goal paused. :memory:.ses제외·기존읽기서버유지.
+
+- 2026-10-04 최신(progress):171 비공개 파일 게시/내구성 강의 제작·검수 완료. 다음172 종료/SIGPIPE/소켓소유/워커정리. 로컬849문제·집중DOM·Part·인라인5·학습/제품 실제writer 실패주입·정적release5f24fff9297e85a8 통과. 모든171 외부/검사 종료,172파일/외부작업 없음. CI port0/기동진단 보강은 로컬109검사 통과했으나 원격Windows기동2오류의 원인확정/해결증거는 아직 없음. 170Unicode와함께단원푸시확인필요. module13의177까지완료·검수·커밋·푸시·Pages확인후goal paused로중지. :memory:.ses제외,기존읽기서버유지.
+
+- 2026-10-04 진행: CI37227049100 최종 Windows 서버 실패. 기존429/연결재사용 회귀는 통과, 다른 OS/클라이언트/학습 성공. Windows 통합검사2건은 meta 기동 fixture에서 종료 원인 없이 실패하여 원인 미확정. 제품 meta 포트0 공지와 실패 stderr 진단을 추가하고 부모 포트 예약 경쟁을 제거했다. 실제 로컬HTTP/보안109검사 통과(ci-meta-fixture-tests.log). 해당 변경과170 Unicode 코드는 아직 로컬이며 다음 단원 푸시로 Windows 결과 확인.171 집필 진행 중;177까지 완료 후 중지 조건 유지.
+
+- 2026-10-04:170 Windows이전 제작·검수완료(progress). 다음171 비공개파일/원자교체. main024b1f7의CI37227049100은Windows서버thread-model smoke중(나머지성공),170Unicode변환코드는아직로컬이며단원푸시뒤Windows네이티브회귀확인필요. 로컬844문제·집중DOM·실제SERVICE/UnicodeDB재시작·meta50HTTP·정적release320944393f8fc299통과. 단원13의177까지끝내고커밋·푸시·Pages확인후goal paused로중지하라는최신지시유지. 외부초안/로컬검사모두종료,기존서버유지, :memory:.ses제외.
 
 - main/Pages 통합 완료: **30d2eb38e77ad0ff1f07f448d8df7cf09aca8432**를main/origin에커밋·푸시했다. **Learning site37225195663 build/deploy성공**, Pages Sourceworkflow전환확인. 실제HTTPS에서release8956e73123f7a264의manifest와15자산해시가로컬과일치하며lesson-168포함확인(out/learning-jobs/main-pages-live-verification.json). 현재검수강의는공개됨. 다음큰단원main푸시도사이트검사후자동배포. 제품CI최신은**37225195676 (30d2eb3)**이고 Windows순차빌드수정의직전검사37224758450도진행중이라둘의실패로그를먼저확인한다. 전체제품CI통과는아직주장하지않음. 이메모는배포후운영기록으로다음작업커밋에포함한다.
 

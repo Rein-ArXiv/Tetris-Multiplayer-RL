@@ -15,6 +15,7 @@ import subprocess
 import time
 import pytest
 from netbot.framing import MsgType, build_frame, parse_frames
+from .meta_process import local_meta_server, MetaServerStartupError
 from .test_meta_db_smoke import _find_meta_bin, _free_port, _post, _wait_listen
 
 SECRET = "secure-integration-test-only"
@@ -38,15 +39,9 @@ def meta(tmp_path):
     binary = _find_meta_bin()
     if not binary:
         pytest.skip("meta not built")
-    port = _free_port()
-    process = subprocess.Popen([str(binary.resolve()), "--http", f"127.0.0.1:{port}",
-                               "--db", str(tmp_path / "meta.db"), "--relay-secret", SECRET],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    try:
-        assert _wait_listen(port)
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        process.terminate(); process.communicate(timeout=10)
+    with local_meta_server(binary, tmp_path / "meta.db", SECRET) as base:
+        yield base
+
 
 
 def guest(meta):
@@ -387,3 +382,27 @@ def test_pending_ticket_does_not_survive_meta_restart(tmp_path):
         assert consume(base, pending)[0] == 401
         assert _post(base + "/v1/auth/verify", {"token": account})[0] == 200
         assert consume(base, ticket(base, account))[0] == 200
+
+
+def test_meta_startup_failure_reports_child_reason(tmp_path):
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("meta not built")
+    with pytest.raises(MetaServerStartupError) as failed:
+        with local_meta_server(binary, tmp_path / "missing" / "meta.db", SECRET):
+            pytest.fail("invalid DB parent unexpectedly started")
+    message = str(failed.value)
+    assert "db open failed" in message
+    assert "exit code: 1" in message
+    assert SECRET not in message
+
+
+def test_meta_process_preserves_caller_exception(tmp_path):
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("meta not built")
+    class CallerFailure(Exception):
+        pass
+    with pytest.raises(CallerFailure, match="caller failed"):
+        with local_meta_server(binary, tmp_path / "meta.db", SECRET):
+            raise CallerFailure("caller failed")

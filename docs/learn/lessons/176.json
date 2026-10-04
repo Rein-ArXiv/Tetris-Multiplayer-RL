@@ -1,0 +1,386 @@
+{
+  "id": "lesson-176",
+  "title": "최종 실습: 캐릭터 등록에서 배포 파일까지",
+  "shortTitle": "안정 ID·카드·pacing·패키지·서버 보상",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 카탈로그와 경기 부품은 있지만 새 상대를 선택·실행·포장하는 변경 절차가 흩어져 있습니다.",
+  "finish": "완료: 새 연습 상대를 등록하고 카드·실제 틱·정확한 콘텐츠 ZIP과 서버 보상 경계를 함께 확인합니다.",
+  "objective": "표현과 행동을 구분해 콘텐츠를 확장하고 필요한 파일만 포장하며 로컬 선택을 서버 권한으로 오인하지 않는다.",
+  "prerequisites": [
+    "Character 값과 정책 주입",
+    "틱 게이트와 실제 경기 진행",
+    "파일 게시와 서버 판정"
+  ],
+  "recap": {
+    "points": [
+      "표현·행동·저장은 서로 다른 이유로 바뀐다.",
+      "선택 값과 빌린 참조, 외부 자원의 수명은 다르다.",
+      "대체 구현은 성공과 실패의 의미 계약도 지켜야 한다."
+    ],
+    "bridge": "이 경계를 실제 캐릭터 추가에 적용하고 선택부터 배포까지 따라갑니다."
+  },
+  "sections": [
+    {
+      "title": "추가할 콘텐츠와 그대로 둘 계약을 정하기",
+      "body": "연습 상대 미라를 추가하겠습니다. 독립된 ID와 표시 이름을 두고 기존 그림을 재사용하며, 같은 로컬 정책에 다른 입력 속도를 적용합니다. 핵심 규칙과 보드 크기를 바꾸지 않고 선택 가능한 콘텐츠를 늘리는 실습입니다.\n\n산출물은 프로필 설정, 화면에 전달할 카드 자료, 선택한 프로필로 경기하는 작은 실행기, 참조 파일만 포함하는 ZIP입니다. `content_demo`는 카드 자료와 틱별 입력을 콘솔에 출력해 연결을 관찰하게 합니다. 실제 게임의 렌더러는 이 자료의 글자·경로를 자신의 글꼴·이미지 자원 계층에 전달합니다.\n\n연습 정책을 추가했다고 서버의 보상 목록이 바뀌지는 않습니다. 이 실습은 practice 모드로 실행하고 보상 적격 상태가 계속 false인지 검사합니다. 공용 BP를 주는 공식 상대는 서버에 별도로 설치하고 서버가 정한 조건으로 재현해야 합니다.",
+      "reference": {
+        "path": "bot/opponents.cpp",
+        "symbol": "discover_opponents",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      }
+    },
+    {
+      "title": "표시 이름과 저장할 ID를 분리하기",
+      "body": "ID는 선택 기록·설정·서버 요청이 같은 대상을 가리키기 위한 이름입니다. 표시 이름은 번역하거나 바꿀 수 있습니다. 화면에 미라라고 보이더라도 선택은 `mira`로 수행합니다. 이름을 바꿀 때 기록이 다른 사람이나 다른 정책을 가리키지 않게 합니다.\n\n배열의 위치도 영속 식별자로 쓰기 어렵습니다. 목록 중간에 새 상대가 들어오면 뒤의 인덱스가 바뀝니다. UI는 현재 목록의 인덱스로 그릴 수 있지만 선택을 보관하거나 전송할 때는 그 항목의 안정적인 ID를 사용합니다.\n\nID를 계속 유지하며 모델이나 pacing을 바꾸면 과거 기록과 현재 행동이 달라질 수 있습니다. ID는 대상의 정체성을, 버전·모델 지문·실행 조건은 특정 실행을 식별합니다. 리플레이 재현이 필요한 시스템은 이 둘을 함께 보관해야 합니다.",
+      "reference": {
+        "path": "bot/opponent_profile.h",
+        "symbol": "parse_opponent_profile",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      }
+    },
+    {
+      "title": "프로필 한 행을 추가하고 전체 후보를 검증하기",
+      "body": "`assets/opponents.cfg`에 기존 상대를 보존하고 새 행을 추가합니다. 필드는 ID, 이름, 모델 선택, 아이콘, 초상화, 표시 난이도, 입력 간격, 생각 틱, 최소 배치 틱의 순서입니다. 아래 값은 이번 콘텐츠의 설정이며 엔진의 고정 수치가 아닙니다.\n\n파서는 각 필드의 문법을 검사하고 Catalog는 ID 중복과 빈 목록을 검사합니다. 전체 후보가 성공해야 새 목록으로 채택합니다. 일부 행을 건너뛰어 원래 의도와 다른 목록을 성공으로 반환하는 흐름을 피합니다.\n\n프로필 문법과 파일 경로 보안은 다른 단계입니다. 파서는 로컬 텍스트를 해석하고, 패키징 도구는 실제 참조 파일이 허용한 폴더와 형식 안에 있는지 검사합니다. 각 단계의 성공이 다음 단계에서 사용할 수 있는 전제를 만듭니다.",
+      "reference": {
+        "path": "bot/opponent_profile.h",
+        "symbol": "parse_opponent_profile",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "연습 상대 프로필",
+          "language": "text",
+          "text": "# id|name|model|icon|portrait|difficulty|input ticks|think ticks|min piece ticks\n# Checkpoint practice policy and existing placeholder art; labels are not skill measurements.\nrook|Rook|@heuristic|assets/bot.png|assets/opponent.png|기본 연습|6|18|60\nmira|미라|@heuristic|assets/player.png|assets/opponent.png|천천히 생각하기|9|30|90"
+        }
+      ]
+    },
+    {
+      "title": "화면에 필요한 값만 카드 자료로 투영하기",
+      "body": "UI 목록에는 모델 객체나 경기 상태가 필요하지 않습니다. ID와 이름, 그림 경로, 표시 난이도만 복사한 Card를 만듭니다. 이런 읽기 전용 표현을 만들면 화면이 경기 진행 상태를 우연히 변경할 경로가 줄어듭니다.\n\n카드는 문자열을 소유합니다. Catalog를 교체해도 이미 만든 카드의 문자열은 살아 있습니다. 목록 변경 때 한 번 만든 값을 화면에 보관하고, 매 렌더 프레임마다 같은 문자열을 다시 복사하지 않습니다. 반면 그림 경로를 소유한다는 것은 GPU 텍스처를 소유한다는 뜻이 아닙니다.\n\n이미지 캐시는 경로를 읽어 디코딩하고, 렌더러는 GPU 핸들과 컨텍스트 수명을 관리합니다. 카드의 ID로 선택을 처리하고 경로는 표시 자원 로딩에만 사용합니다. 사용자 입력 경로를 임의로 읽는 플러그인 시스템으로 확장하려면 이 로컬 콘텐츠 계약을 다시 설계해야 합니다.",
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "소유하는 카드 값과 목록 투영",
+          "language": "cpp",
+          "text": "struct Card {\n    std::string id, name, icon, portrait, difficulty;"
+        }
+      ]
+    },
+    {
+      "title": "선택 값으로 경기 구성하기",
+      "body": "실행기는 파일을 열고 전체 Catalog를 만든 뒤 `select(id)`로 독립된 Character 값을 얻습니다. 표시 이름으로 검색하면 이름 변경과 번역이 동작을 바꾸므로 ID를 사용합니다. 알 수 없는 ID는 오류로 처리해 다른 상대를 몰래 선택하지 않습니다.\n\n선택한 값의 pacing으로 Driver를 준비하고 practice 모드의 Match를 만듭니다. 이 실행기는 로컬 `@heuristic`만 지원하므로 다른 모델 경로는 시작 전에 거절합니다. ONNX 경로를 조용히 이 휴리스틱으로 바꾸면 사용자는 골랐던 상대와 다른 상대를 만나게 됩니다.\n\n모델을 쓰는 조립 지점에서는 추론 Session을 먼저 준비하고 관측·행동 계약을 확인한 뒤 같은 Picker 계약으로 연결합니다. 모델 로드와 화면 그림 로드는 실패 이유와 대체 정책이 다르므로 각각 처리합니다.",
+      "reference": {
+        "path": "bot/policy_decision.h",
+        "symbol": "Decision choose_policy",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "지원하는 정책과 경기 모드를 명시",
+          "language": "cpp",
+          "text": "        if (chosen.behavior.model != \"@heuristic\")\n            throw std::invalid_argument(\"this practice host supports only its local heuristic\");\n        study_match::Match match(77, chosen, bot::Mode::practice);"
+        }
+      ]
+    },
+    {
+      "title": "연습 정책은 무엇을 최적화하는가",
+      "body": "실습의 휴리스틱은 합법 행동을 열거하고, 각 행동을 복사한 Session에 적용한 뒤 후보 보드를 평가합니다. 지운 줄은 보상하고 총 높이·빈 구멍·열 높이 차이는 비용으로 둡니다. 같은 점수면 먼저 열거된 행동을 유지하므로 동점 처리도 결정적입니다.\n\n평가 가중치는 이 작은 연습 정책의 선택입니다. 특정 가중치가 보편적인 난이도나 최적 플레이를 뜻하지 않습니다. 제품의 휴리스틱과 이름이 같아도 구현과 관측 계약을 대조하기 전에는 같은 정책으로 재현된다고 간주하지 않습니다.\n\n복사본의 apply_action은 선택 결과를 미리 평가하는 데 사용합니다. 실제 경기에서는 Driver가 틱별 입력을 내보내고 자연 낙하와 충돌을 함께 진행합니다. 후보 평가에서 행동 전체를 적용하는 경로와 실제 경기에서 손 조작을 전개하는 경로를 구분합니다.",
+      "reference": {
+        "path": "bot/placement.cpp",
+        "symbol": "heuristic_placement",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "후보 복사본과 평가 결과 채택",
+          "language": "cpp",
+          "text": "        const long score = result.lines * 20L - height * 2 - holes * 8 - bump;\n        if (!found || score > best) { found = true; best = score; action = candidate; }\n    }"
+        }
+      ]
+    },
+    {
+      "title": "추론 시간과 입력 시간표를 각각 조절하기",
+      "body": "정책이 빠르게 선택을 끝내더라도 Driver는 pacing 게이트가 허용하는 틱에 입력을 냅니다. 생각 시간, 입력 간격, 최소 배치 시간은 서로 다른 제한입니다. 프로필의 표시 난이도 문자열을 바꾸는 것으로 이 시간표가 바뀌지는 않습니다.\n\n동기 추론이 오래 걸리면 실제 벽시계의 프레임 지연은 늘 수 있습니다. 논리 틱을 기준으로 한다는 설명이 성능 문제를 지우지는 않습니다. 같은 초기 상태·입력·정책 선택과 틱 진행을 보존할 때 재현 경계를 유지할 수 있습니다. 모델을 비동기로 바꾸면 결과를 채택할 관측 버전과 기한도 설계해야 합니다.\n\n출력 로그에서 decision은 정책을 호출한 틱, mask는 실제로 발행한 입력입니다. 정책을 한 번 호출한 뒤 여러 틱에 걸쳐 이동·회전·드롭이 나올 수 있습니다. 둘을 같은 횟수나 같은 속도로 해석하면 봇 속도 조절을 잘못하게 됩니다.",
+      "reference": {
+        "path": "bot/controller.h",
+        "symbol": "uint8_t next",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "실제 경기 틱과 발행 입력 관찰",
+          "language": "cpp",
+          "text": "        for (int tick = 0; tick < budget && !match.finished(); ++tick) {\n            // Synthetic human input keeps the demonstration independent of window events.\n            const auto input = tick % 17 == 16 ? study_input::drop : 0;\n            const auto frame = match.tick(input, study_practice::pick, false);\n            if (frame.bot.decision_attempted || frame.bot.mask)\n                std::cout << \"tick \" << tick << \" decision \" << frame.bot.decision_attempted\n                          << \" mask \" << unsigned(frame.bot.mask) << '\\n';\n        }"
+        }
+      ]
+    },
+    {
+      "title": "표현만 바꾼 두 실행을 상태로 비교하기",
+      "body": "선택한 Character를 복사해 이름·그림 경로·난이도 표시만 바꿉니다. 같은 시드와 입력을 주고 동일한 정책으로 두 경기를 진행하며 매 틱 인간/봇 보드의 상태 바이트와 발행 입력을 비교합니다. 표시 변경이 규칙 상태에 들어왔는지 확인하는 검사입니다.\n\n검사는 실제 정책 결정과 입력 발행을 관찰해야 합니다. 대기 틱만 몇 번 실행해 같은 상태라고 확인하면 정책이 연결된 경계를 지나지 않았을 수 있습니다. sawDecision과 sawInput을 끝에서 확인하여 그런 빈 검사를 막습니다.\n\n목록 재로딩도 검사합니다. 중복 ID가 있는 후보는 거절되고 현재 목록은 유지되어야 합니다. 유효한 새 목록을 채택해도 이미 선택한 값과 카드 자료는 유지됩니다. 모든 입력의 동등성을 증명하는 검사는 아니며, 변경할 표현 경계를 실제 경기 경로로 통과시키는 회귀 근거입니다.",
+      "reference": {
+        "path": "bot/controller.h",
+        "symbol": "template<class Picker>",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "표현 변경과 실제 입력을 함께 관찰",
+          "language": "cpp",
+          "text": "    bool sawDecision = false, sawInput = false;\n    for (int tick=0; tick<150 && !one.finished(); ++tick) {\n        const auto human = tick%17==16 ? study_input::drop : 0;\n        const auto a=one.tick(human,study_practice::pick,false);\n        const auto b=two.tick(human,study_practice::pick,false);\n        require(a.bot.mask==b.bot.mask && a.source==b.source);\n        require(one.human().state_bytes()==two.human().state_bytes());\n        require(one.enemy().state_bytes()==two.enemy().state_bytes());\n        require(!one.status().reward_eligible() && !two.status().reward_eligible());\n        sawDecision |= a.bot.decision_attempted; sawInput |= a.bot.mask!=0;\n    }\n    require(sawDecision && sawInput);"
+        }
+      ]
+    },
+    {
+      "title": "패키지 목록은 설정에서 따라가며 만들기",
+      "body": "배포에 필요한 파일은 검증한 프로필에서 참조를 따라가며 모읍니다. 같은 그림이나 모델을 여러 캐릭터가 쓰면 ZIP에는 한 번만 넣습니다. 폴더 전체를 압축하면 학습 체크포인트·임시 데이터·사용하지 않는 모델까지 섞일 수 있습니다.\n\n설정 파일도 root 밖을 가리키는 링크이면 거절합니다. 설정은 한 번 바이트로 읽어 해석하고, 그 바이트를 ZIP에 그대로 넣습니다. 검사 후 파일을 다시 읽으면 중간에 바뀐 설정이 다른 파일 목록과 함께 묶일 수 있습니다.\n\n참조 파일의 상대 경로는 허용 폴더·확장자·실제 위치를 검사합니다. `..`, 절대 경로, 플랫폼 구분자를 악용한 다른 위치 참조를 거절합니다. 파서가 문자열을 받아들였다는 사실이 패키징할 파일을 허가하는 것은 아닙니다.",
+      "reference": {
+        "path": "python/tools/package_opponents.py",
+        "symbol": "def package",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "검사할 설정 내용을 먼저 고정",
+          "language": "python",
+          "text": "    root = root.resolve()\n    config = (root / \"assets/opponents.cfg\").resolve()\n    if not config.is_relative_to(root) or not config.is_file():\n        raise ValueError(\"missing or external opponent config\")\n    config_bytes = config.read_bytes()\n    members = {}"
+        }
+      ]
+    },
+    {
+      "title": "완성 ZIP과 정확한 바이트의 해시를 함께 게시하기",
+      "body": "ZIP을 최종 이름으로 바로 열면 중간 쓰기 실패 뒤에도 그 이름의 불완전 파일이 남습니다. 같은 부모에 만든 임시 ZIP에서 중앙 디렉터리까지 닫고 파일을 동기화한 뒤, 하드 링크로 새 이름을 붙입니다. 목적지가 이미 있으면 실패하며 다른 게시자의 파일을 지우지 않습니다.\n\n설정과 각 참조 파일의 실제 아카이브 바이트로 SHA-256을 계산합니다. manifest는 파일 이름과 지문을 연결합니다. 파일 순서와 ZIP 메타데이터를 고정하면 같은 입력과 압축 구현에서 같은 아카이브를 만들 수 있습니다. 서로 다른 압축 구현까지 바이트 일치를 보장하는 뜻은 아닙니다.\n\n출력 부모는 애플리케이션이 관리하는 경로이고 원본 트리는 패키징 동안 고정한다는 전제가 있습니다. 하드 링크 미지원 파일시스템은 실패로 보고합니다. 게시의 원자성과 전원 손실 뒤 디렉터리 항목의 내구성도 구분해야 하므로, 운영 저장소 정책은 별도로 확인합니다.",
+      "reference": {
+        "path": "python/tools/package_opponents.py",
+        "symbol": "def publish_archive",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "완성 파일만 덮어쓰기 없이 게시",
+          "language": "python",
+          "text": "            raw.flush()\n            os.fsync(raw.fileno())\n        # Same-parent hard link is atomic/no-overwrite. Unsupported filesystems fail.\n        os.link(temporary, out)\n    finally:\n        temporary.unlink(missing_ok=True)"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "오해 점검",
+          "title": "파일 해시는 제작자의 서명이 아니다",
+          "body": "공격자가 ZIP과 manifest를 모두 바꿀 수 있다면 서로 맞는 새 해시도 만들 수 있습니다. 신뢰하는 배포 경로·서명·릴리스 기록은 파일 일관성 검사와 다른 역할입니다."
+        }
+      ]
+    },
+    {
+      "title": "로컬 상대와 공식 보상 상대를 나누어 등록하기",
+      "body": "클라이언트는 사용자가 만든 연습 상대를 실행할 수 있습니다. 공용 BP는 서버가 허용한 카탈로그와 모델로 발급한 도전 조건을 기준으로 판정해야 합니다. 사용자가 보낸 모델 경로·입력 속도·보상 금액을 서버 정책으로 채택하면 더 쉬운 상대를 만들고 보상을 요구할 수 있습니다.\n\n제품 서버는 준비된 카탈로그에서 opponent_id를 찾고, 그 항목의 정책·pacing과 서버가 만든 시드를 티켓에 연결합니다. 모르는 ID는 거절합니다. 결과 청구는 해당 사용자와 티켓, 실제 입력 이력의 재현과 DB 영수증을 통과해야 합니다. 클라이언트의 practice 표시나 reward_eligible 값은 사용성 정보이며 서버 권한의 근거가 아닙니다.\n\n공식 상대를 교체할 때는 진행 중 티켓의 모델·설정 조건도 유지할지, 새 티켓부터 적용할지 정해야 합니다. 표시 이름은 쉽게 바꿀 수 있어도 재현 정책과 보상 경제의 변경은 별도의 배포 결정입니다.",
+      "reference": {
+        "path": "meta/bot_challenges.cpp",
+        "symbol": "read_reward_catalog",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      }
+    },
+    {
+      "title": "실행·포장·반례를 하나의 추가 절차로 묶기",
+      "body": "CONTENT 역할을 빌드하고 미라를 ID로 선택해 실행합니다. 검사기는 실제 정책 호출과 틱 입력을 확인하고 practice의 보상 적격 상태를 거짓으로 유지하는지 봅니다. ZIP을 만든 뒤 목록을 다시 읽어 필요한 파일만 포함했는지와 각 파일의 해시를 대조합니다.\n\n파일은 새 이름에 출력합니다. 같은 이름의 기존 ZIP, 외부 설정 링크, 없는 자산, 압축 중 실패, 게시 경쟁을 각각 검사하면 정상 실행에서 보이지 않는 배포 실수를 찾을 수 있습니다. 실패한 작업의 정리는 자신이 만든 임시 파일에만 적용합니다.\n\n새 콘텐츠를 더할 때 유지할 순서는 식별자와 동작 정의 → 전체 프로필 검증 → 선택과 표현 연결 → 실제 틱 검사 → 참조 파일 포장 → 서버 공식 등록 여부 결정입니다. 캐릭터 수나 그림 수는 카탈로그에서 따라가며, 코드 안의 고정된 목록 크기로 새 항목을 누락시키지 않게 합니다.",
+      "reference": {
+        "path": "python/tools/package_opponents.py",
+        "symbol": "def package",
+        "invariant": "콘텐츠의 식별·표현·행동·배포 파일·서버 권한을 구분하고 선택한 조건을 유지한다.",
+        "mayDiffer": "실습은 누적 규칙의 로컬 휴리스틱과 기존 그림을 사용합니다. 제품의 모델·그림·속도 값은 달라도 등록과 선택, 실행 및 보상 권한의 경계는 비교할 수 있습니다."
+      },
+      "codes": [
+        {
+          "label": "콘텐츠 역할과 실제 패키지 검사",
+          "language": "bash",
+          "text": "python3 scripts/check_learning_content_extension.py"
+        },
+        {
+          "label": "직접 선택하고 새 ZIP 만들기",
+          "language": "bash",
+          "text": "out/learning-checkpoints/176-content-extension-check/content_demo docs/learn/checkpoints/176-content-extension/assets/opponents.cfg mira 150\npython3 docs/learn/checkpoints/176-content-extension/operations/package_content.py --out /tmp/study-opponents-new.zip"
+        },
+        {
+          "label": "선택과 연습 실행 전체",
+          "language": "cpp",
+          "file": "checkpoints/176-content-extension/tools/content_demo.cpp"
+        },
+        {
+          "label": "패키징 전체",
+          "language": "python",
+          "file": "checkpoints/176-content-extension/operations/package_content.py"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "176-1",
+      "question": "캐릭터를 영속적으로 식별해야 할 때 가장 안전한 설계는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "표시 이름(닉네임)을 저장소의 기본 키로 사용해 사람이 읽기 쉽게 한다."
+        },
+        {
+          "id": "b",
+          "text": "변경되지 않는 안정적 character ID를 저장·비교 키로 쓰고, 표시 라벨은 언제든 바뀔 수 있는 UI 전용 값으로 취급한다."
+        },
+        {
+          "id": "c",
+          "text": "표시 라벨과 character ID를 항상 동일하게 유지하도록 라벨 변경을 금지한다."
+        },
+        {
+          "id": "d",
+          "text": "클라이언트가 보낸 표시 이름을 신뢰해 서버 저장소의 캐릭터를 찾는다."
+        }
+      ],
+      "correctOptionId": "b",
+      "explanation": "표시 라벨은 지역화·리네임으로 바뀌므로 식별 키로 부적합하다. 안정적 character ID가 아카이브·매칭·보상의 기준이 되어야 표시 변경과 무관하게 동일 개체를 추적할 수 있다.",
+      "answer": "변경되지 않는 안정적 character ID를 저장·비교 키로 쓰고, 표시 라벨은 언제든 바뀔 수 있는 UI 전용 값으로 취급한다."
+    },
+    {
+      "id": "176-2",
+      "question": "pacing tick과 추론(inference) 속도의 관계에 대한 설명으로 옳은 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "추론이 빨라지면 pacing tick 간격도 자동으로 줄어든다."
+        },
+        {
+          "id": "b",
+          "text": "pacing tick은 추론 속도에 종속되므로 결정적 재현이 불가능하다."
+        },
+        {
+          "id": "c",
+          "text": "pacing tick은 표시 라벨처럼 언제든 재정의해도 저장된 리플레이에 영향이 없다."
+        },
+        {
+          "id": "d",
+          "text": "논리 틱의 입력 제한과 추론의 벽시계 비용을 구분하고, 같은 재현 조건에서 입력 시간표를 확인한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "explanation": "pacing은 논리 틱에서 입력을 제한하지만 느린 동기 추론은 실제 지연을 만들 수 있다. 같은 초기 상태·입력·정책 결과·틱 진행이 재현의 전제이며 하드웨어 성능 문제가 저절로 사라지지는 않는다.",
+      "answer": "논리 틱의 입력 제한과 추론의 벽시계 비용을 구분하고, 같은 재현 조건에서 입력 시간표를 확인한다."
+    },
+    {
+      "id": "176-3",
+      "question": "패키지에 설정을 포함할 때 'captured config 일관성'을 보장하는 방법은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "캡처한 config_bytes를 가공 없이 assets/opponents.cfg 항목으로 그대로 포함하고, 아카이브된 바로 그 바이트의 sha256을 opponents-manifest.json에 기록한다."
+        },
+        {
+          "id": "b",
+          "text": "설정을 다시 읽어 최신 값으로 덮어쓴 뒤 해시는 생략한다."
+        },
+        {
+          "id": "c",
+          "text": "설정 파일 경로만 manifest에 적고 내용은 런타임에 읽는다."
+        },
+        {
+          "id": "d",
+          "text": "설정을 사람이 읽는 요약으로 변환해 넣고 해시는 표시 라벨 기준으로 계산한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "explanation": "캡처 시점의 바이트를 변형 없이 넣고, 실제 아카이브된 바로 그 바이트로 해시를 계산해야 재현과 무결성 확인이 가능하다. 재독이나 요약 변환은 일관성을 깨뜨린다.",
+      "answer": "캡처한 config_bytes를 가공 없이 assets/opponents.cfg 항목으로 그대로 포함하고, 아카이브된 바로 그 바이트의 sha256을 opponents-manifest.json에 기록한다."
+    },
+    {
+      "id": "176-4",
+      "question": "staged ZIP 게시가 실패했을 때 기존 릴리스를 보존하는 올바른 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "실패 시 out 대상을 삭제하고 처음부터 다시 만든다."
+        },
+        {
+          "id": "b",
+          "text": "os.replace로 임시 파일을 out 위에 덮어써 항상 최신 상태로 만든다."
+        },
+        {
+          "id": "c",
+          "text": "같은 부모 디렉터리에 mkstemp로 만든 임시 ZIP만 정리하고, os.link로 원자적·비덮어쓰기 게시하며 replace 폴백을 두지 않아 기존 out은 그대로 둔다."
+        },
+        {
+          "id": "d",
+          "text": "임시 파일을 남겨 두고 다음 실행에서 이어서 게시한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "explanation": "no-overwrite 원자 게시와 자신이 소유한 temp만 unlink하는 규칙이 실패 시 기존 릴리스를 보존한다. replace 폴백이나 대상 삭제는 기존 릴리스를 훼손할 수 있다.",
+      "answer": "같은 부모 디렉터리에 mkstemp로 만든 임시 ZIP만 정리하고, os.link로 원자적·비덮어쓰기 게시하며 replace 폴백을 두지 않아 기존 out은 그대로 둔다."
+    },
+    {
+      "id": "176-5",
+      "question": "클라이언트 캐릭터 등록과 서버 보상 권위에 대한 옳은 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "클라이언트가 등록한 표시 이름을 근거로 서버가 보상을 지급한다."
+        },
+        {
+          "id": "b",
+          "text": "로컬 등록과 공식 보상 등록을 구분하며 서버가 준비한 정책·티켓·재현·저장 계약으로 지급한다."
+        },
+        {
+          "id": "c",
+          "text": "manifest에 sha256이 있으면 서버 보상 로직을 생략해도 된다."
+        },
+        {
+          "id": "d",
+          "text": "서버는 클라이언트가 제공한 해시를 신뢰해 보상을 확정한다."
+        }
+      ],
+      "correctOptionId": "b",
+      "explanation": "등록/표시와 보상 권위를 분리해야 하며, 신뢰 경계는 서버에 있다. 해시·manifest는 일관성 검사 수단일 뿐 서명이나 모델 검증, 보상 권위를 대체하지 않는다.",
+      "answer": "로컬 등록과 공식 보상 등록을 구분하며 서버가 준비한 정책·티켓·재현·저장 계약으로 지급한다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "새 ID를 가진 프로필을 추가하고 전체 목록 검사와 선택을 실행한다.",
+      "표시 자료만 바꾼 실행의 상태·입력과 실제 정책 호출을 대조한다.",
+      "새 ZIP의 목록과 해시를 검증하고 로컬 등록과 서버 공식 등록 절차를 나눈다."
+    ],
+    "expected": "규칙을 수정하지 않는 콘텐츠 확장의 경계와 서버 보상에 필요한 별도 근거를 설명한다.",
+    "failureChecks": [
+      "중복 ID나 잘못된 프로필이 현재 목록을 부분 교체하지 않는다.",
+      "실패한 ZIP 작업이 기존 배포물이나 다른 게시자의 파일을 지우지 않는다.",
+      "클라이언트가 보낸 모델·속도·금액을 서버 보상 정책으로 채택하지 않는다."
+    ]
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "선택 DeepSeek ZIP 게시/객관식 초안·현재 패키징 교정·누적 경기/ZIP/제품 HTTP 검사",
+    "corrections": [
+      "fchmod Windows 비호환 및 fd수명",
+      "모든모델동시메모리보관 제거",
+      "설정바이트 재독 불일치와 외부링크 거절",
+      "빈 PurePosixPath 경계",
+      "추론속도와 재현조건의 과도한 보장 교정"
+    ]
+  },
+  "validation": [
+    "Linux CONTENT fresh빌드·새ID선택/실제결정·입력·표현독립/재로딩 계약과 실제 ZIP 파일·해시 대조 통과",
+    "제품 패키징13검사 및 실제서버 미등록상대/기본보상비활성2HTTP검사 통과",
+    "실제화면·대상Windows/macOS·새학습모델성능·운영공식카탈로그변경은 별도"
+  ]
+}

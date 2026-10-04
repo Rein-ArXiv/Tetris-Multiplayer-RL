@@ -377,6 +377,15 @@ if (TETRIS_BUILD_TEST)
         target_link_libraries(worker_group_test PRIVATE Threads::Threads)
     endif()
 
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(socket_ownership_test tests/learning/socket_ownership.cpp)
+        target_include_directories(socket_ownership_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(socket_ownership_test PRIVATE Threads::Threads)
+        target_link_options(socket_ownership_test PRIVATE
+            -Wl,--wrap=close -Wl,--wrap=setsockopt -Wl,--wrap=fcntl)
+        add_test(NAME socket_ownership COMMAND socket_ownership_test)
+    endif()
+
     add_executable(worker_lifetime_test tests/learning/worker_lifetime.cpp)
     target_include_directories(worker_lifetime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     if (NOT WIN32)
@@ -594,6 +603,7 @@ if (TETRIS_BUILD_META)
 
     add_executable(tetris_meta
         meta/main.cpp
+        platform/utf8_arguments.cpp
         meta/database.cpp
         meta/credentials.cpp
         meta/api_server.cpp
@@ -625,6 +635,9 @@ if (TETRIS_BUILD_META)
     if (WIN32)
         # BCryptGenRandom is the fail-closed CSPRNG used for guest tokens.
         target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)
+        if(MINGW)
+            target_link_options(tetris_meta PRIVATE -municode)
+        endif()
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_meta PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -702,6 +715,11 @@ if (TETRIS_BUILD_TEST)
             target_link_libraries(http_early_response_test PRIVATE ws2_32)
         endif()
         add_test(NAME http_early_response COMMAND http_early_response_test)
+        if(WIN32)
+            add_executable(utf8_arguments_test tests/utf8_arguments_test.cpp platform/utf8_arguments.cpp)
+            target_include_directories(utf8_arguments_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+            add_test(NAME utf8_arguments COMMAND utf8_arguments_test)
+        endif()
         # Fault-injected digest implementation is compiled only into this test.
         add_executable(account_change_exception_test tests/account_change_exception_test.cpp meta/database.cpp ${TETRIS_SQLITE3_SOURCE})
         target_include_directories(account_change_exception_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/third_party)

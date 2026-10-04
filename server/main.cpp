@@ -27,6 +27,8 @@
 
 namespace {
 
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "signal handler requires lock-free atomic<bool>");
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
@@ -196,7 +198,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     // Nonblocking accept lets the loop observe the shutdown flag.
-    net::tcp_set_nonblocking(g_listen_sock);
+    if (!net::tcp_set_nonblocking(g_listen_sock)) {
+        RLOG_ERROR("listen nonblocking setup failed");
+        net::tcp_close(g_listen_sock);
+        g_listen_sock = {};
+        net::net_shutdown();
+        return 1;
+    }
     RLOG_INFO("[relay] listening on 0.0.0.0:" << port);
     RLOG_INFO("[relay] local IP: " << net::get_local_ip());
     RLOG_INFO("[relay] Ctrl+C to stop");

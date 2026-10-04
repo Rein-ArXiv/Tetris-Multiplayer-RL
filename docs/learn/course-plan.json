@@ -3621,7 +3621,7 @@
         {
           "id": "unit-169",
           "title": "Linux 서버: 실행 순서와 포트 경계",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3630,12 +3630,17 @@
           "lessonId": "lesson-169",
           "previous": "unit-168",
           "next": "unit-170",
-          "validation": []
+          "validation": [
+            "실제 누적 SERVICE 빌드·포트0 바인딩·HTTP 준비·점유 포트 거절·같은 DB 재시작/다른 DB 거절·호출자 예외 뒤 자식 회수 통과",
+            "조기 종료·공지 누락/초과/문법·잘못된 UTF-8/JSON형·본문 초과·503 재시도·잘못된 기한 fixture 통과",
+            "Linux 릴리스 옵션/SDK경로/SONAME 별칭·필수 Runtime/패치 실패·지원하지 않는 호스트 거절5검사 통과",
+            "인라인7·현재 참조 심볼·누적 파일 보존 검사 통과; 실제 systemd 설치·공개게임서비스·다른 OS 실행은 별도"
+          ]
         },
         {
           "id": "unit-170",
           "title": "Windows 이전: 경로·소켓·파일 권한",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3644,12 +3649,18 @@
           "lessonId": "lesson-170",
           "previous": "unit-169",
           "next": "unit-171",
-          "validation": []
+          "validation": [
+            "실제 Linux SERVICE 빌드·한글/공백/이모지 DB 생성·cwd 분리·재시작 계정 동일성 통과",
+            "LF/CRLF 정상과 공백/NUL/추가토큰/문법/포트범위 음성검사 통과",
+            "제품 meta 재빌드와 전체 meta HTTP50검사 통과: Unicode DB 경로 재시작 포함",
+            "현재 WindowsAPI는 공식 계약/코드로 검토; Windows 전용 변환 CTest·Unicode HTTP회귀는 단원 푸시 CI에서 실제 검증 필요",
+            "인라인6·현재 참조·누적 보존 검사 통과; 실제 Windows 서비스 설치/권한 이전/MinGW 링크 실행은 별도"
+          ]
         },
         {
           "id": "unit-171",
           "title": "비공개 파일: 권한과 원자적 교체",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3658,12 +3669,17 @@
           "lessonId": "lesson-171",
           "previous": "unit-170",
           "next": "unit-172",
-          "validation": []
+          "validation": [
+            "Linux STORAGE fresh빌드·학습/실제 제품 writer Unicode경로·0600·기존FD/새open·잘못된모드/디렉터리목적지·임시정리 통과",
+            "학습/제품 실제 writer 부분쓰기·EINTR·ENOSPC·파일fsync·rename·부모fsync 오류 주입 결과 대조 통과",
+            "인라인5·현재심볼·누적파일보존·실제writer본문 일치 통과",
+            "Windows ACL/공유모드·MinGW·실제 전원손실·네트워크파일시스템은 별도 검증"
+          ]
         },
         {
           "id": "unit-172",
           "title": "종료: SIGPIPE·소켓 소유권·워커 정리",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3672,12 +3688,18 @@
           "lessonId": "lesson-172",
           "previous": "unit-171",
           "next": "unit-173",
-          "validation": []
+          "validation": [
+            "Linux SHUTDOWN fresh빌드·자체정지/실제SIGINT·SIGTERM·닫힌수락·캡처소멸·I/Ojoin·peerEOF 통과",
+            "StopGate 선행정지/반복정지·예외 경로 정리2CTest 및 학습/제품 WorkerGroup 수명계약 통과",
+            "제품 실제relay/reactor/wss_probe 재빌드·소켓소유/모드실패·worker3CTest·활성경기종료pytest 통과",
+            "기존relay 모드설정실패 주입시 SIGTERM종료지연 재현; 수정relay/ reactor 기동거절 확인",
+            "인라인7·현재참조·누적파일보존 통과; Windows콘솔/네이티브종료·다른OS·장시간부하/업무전송완료는 별도"
+          ]
         },
         {
           "id": "unit-173",
           "title": "백업과 복구: DB·키·설정의 일관성",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3686,12 +3708,16 @@
           "lessonId": "lesson-173",
           "previous": "unit-172",
           "next": "unit-174",
-          "validation": []
+          "validation": [
+            "Linux SERVICE 빌드 및 실제 HTTP 키 교체 전후 복원·계정/인벤토리 대조 통과",
+            "제품 백업 경로·잠금·외래 키·게시 경합·동기화·보존 정책 회귀 검사",
+            "Windows 네이티브 복구·실제 전원 장애·원격 보관·운영 경로 전환은 별도"
+          ]
         },
         {
           "id": "unit-174",
           "title": "릴리스 검사: 단위·통합·GUI·부하를 구분",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3700,12 +3726,16 @@
           "lessonId": "lesson-174",
           "previous": "unit-173",
           "next": "unit-175",
-          "validation": []
+          "validation": [
+            "누적 RULES/SERVICE 실제 빌드·규칙 계약·HTTP 복구 결과 수집",
+            "누락/생략/중복/다른후보/환경/범위/문법 계약 검사",
+            "GUI와 부하는 not_run으로 기록; Windows/macOS 네이티브는 별도"
+          ]
         },
         {
           "id": "unit-175",
           "title": "아키텍처 읽기: 변경 위치와 SOLID의 한계",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3714,12 +3744,15 @@
           "lessonId": "lesson-175",
           "previous": "unit-174",
           "next": "unit-176",
-          "validation": []
+          "validation": [
+            "Linux ARCHITECTURE fresh Release빌드·경계/표현/설정3CTest; 두 Character 타입의 동일 소스 파일 포함 충돌 재현·namespace분리 교정",
+            "인라인7·현재참조·누적보존 검사; 대상 GUI/ONNX/DB 통합은 이 역할의 검사 범위 밖"
+          ]
         },
         {
           "id": "unit-176",
           "title": "최종 실습: 새 콘텐츠를 안전하게 추가",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             12,
             13,
@@ -3728,12 +3761,16 @@
           "lessonId": "lesson-176",
           "previous": "unit-175",
           "next": "unit-177",
-          "validation": []
+          "validation": [
+            "Linux CONTENT fresh빌드·새ID선택/실제결정·입력·표현독립/재로딩 계약과 실제 ZIP 파일·해시 대조 통과",
+            "제품 패키징13검사 및 실제서버 미등록상대/기본보상비활성2HTTP검사 통과",
+            "실제화면·대상Windows/macOS·새학습모델성능·운영공식카탈로그변경은 별도"
+          ]
         },
         {
           "id": "unit-177",
           "title": "전체 구현 복습과 다음 프로젝트 설계",
-          "state": "outline",
+          "state": "reviewed",
           "referenceParts": [
             13,
             15,
@@ -3743,7 +3780,10 @@
           "lessonId": "lesson-177",
           "previous": "unit-176",
           "next": null,
-          "validation": []
+          "validation": [
+            "Linux최종누적RULES/ARCHITECTURE/CONTENT/SHUTDOWN/SERVICE fresh빌드·등록8CTest와실제HTTP계정복원·선언반례통과",
+            "인라인3·현재심볼·최종누적보존통과;GUI픽셀/모델장기성능/공개서버용량은별도"
+          ]
         }
       ]
     }

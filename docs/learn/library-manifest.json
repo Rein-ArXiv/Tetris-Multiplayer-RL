@@ -44,14 +44,14 @@
     },
     "part6": {
       "path": "docs/blog/part6-lockstep-networking.md",
-      "sha256": "ba74a5f4263e391d49dc397deb757ad361ff438c5c3bd4ca647d4be659fb1aa4",
-      "lines": 3738,
+      "sha256": "55197b864ac65a47f83a3eabe3a4b28f3e8049c0a32d0b8f718de0e4fd625a8c",
+      "lines": 3745,
       "codeBlocks": 93
     },
     "part7": {
       "path": "docs/blog/part7-relay-server.md",
-      "sha256": "c529c8c8359ad3e858e67f1d9bc79db25008e4363c731a3f6aa34f9a1b4ce5dc",
-      "lines": 4810,
+      "sha256": "f98eda7bc6073650d1aedc02f0368446b73d1664b3207ff8fd2f45d7424ff4a1",
+      "lines": 4818,
       "codeBlocks": 67
     },
     "part8": {
@@ -68,8 +68,8 @@
     },
     "part10": {
       "path": "docs/blog/part10-meta-and-ranking.md",
-      "sha256": "1a4c4cc57c8a1afb4559c2b7cc2dc9ee35eab5e89e6dc54b46e7ea43d7914c20",
-      "lines": 3281,
+      "sha256": "c11cd6726e9cfd59efd315a5bf106384e71999067a055b97367b6cc49ebe5dab",
+      "lines": 3287,
       "codeBlocks": 71
     },
     "part11": {
@@ -80,14 +80,14 @@
     },
     "part12": {
       "path": "docs/blog/part12-hardening-and-release.md",
-      "sha256": "28f393504cf0c56ca1d49702532a1bcc9282c54d38266ee316958a895dc7cb8c",
-      "lines": 1866,
+      "sha256": "f5bd464eff017080531963ed87e0373938a1c1604d218d5393055befb0854106",
+      "lines": 1955,
       "codeBlocks": 51
     },
     "part13": {
       "path": "docs/blog/part13-structure-and-build-reference.md",
-      "sha256": "577adae779dd1aa5da23c05d7ddf35a2438fe4e7f0058feb311bb99a62190058",
-      "lines": 1692,
+      "sha256": "41a25fea8f30acae7a76dce18758df639203dcfd8951f087effc09f4b416060f",
+      "lines": 1705,
       "codeBlocks": 36
     },
     "part14": {
@@ -98,8 +98,8 @@
     },
     "part15": {
       "path": "docs/blog/part15-release-polishing.md",
-      "sha256": "11aeff88fe4566b2e98755507afbbe1c09ce09f7c4928e6daa0233d5f6bcb743",
-      "lines": 426,
+      "sha256": "431604f64c544b48eb6c74e00161333f3ef6b4a4fa88f2ed0ead8931a92f9075",
+      "lines": 428,
       "codeBlocks": 10
     },
     "part16": {
@@ -128,7 +128,7 @@
     },
     "bots-and-colab": {
       "path": "docs/bots-and-colab.md",
-      "sha256": "2202457386b1285925df6e1ac48b0ea29b9e18e0b2d260a5e7cb58b0211a0c5e",
+      "sha256": "7b9bb3eafc939c2da93304890cd8b83f9b0ef336e2de990d60c123036c968643",
       "lines": 223,
       "codeBlocks": 6
     },
@@ -152,14 +152,14 @@
     },
     "public-server-deployment": {
       "path": "docs/public-server-deployment.md",
-      "sha256": "1d2b97c43cf22c0c39adfaf2c950b8e8251aa64fb2ba6c7f36701e0c2b5ae0e2",
-      "lines": 203,
+      "sha256": "af577ed39d124bf43bfafaf439b554ffd6611d10c9fcae1469b40550f06a2d9a",
+      "lines": 209,
       "codeBlocks": 7
     },
     "release-readiness": {
       "path": "docs/release-readiness.md",
-      "sha256": "b4648c552c0427887f15c97a92052b7738005f0ec8ef94bad2942c8fd4d69d07",
-      "lines": 164,
+      "sha256": "cf3f7313a8b22568d96a37f00af7c492d33966bb48202c867c6c69c3381ad8b0",
+      "lines": 170,
       "codeBlocks": 4
     },
     "start-here": {
@@ -171,8 +171,8 @@
   },
   "sources": {
     "CMakeLists.txt": {
-      "sha256": "35f00a8232766b85958e7b5bbf99a3bc305d6b54b42c0888f9d2be4b0dde330c",
-      "lines": 833
+      "sha256": "84a94c02580d09370296d00afc01d95f2bbcd9e8debb107890867aed22b01d9f",
+      "lines": 851
     },
     "CMakePresets.json": {
       "sha256": "1b7a477dcd5fd572b525d2c3cdec430a9ecfc0a62a869f41eb0fd960e9b48e6c",
@@ -314,6 +314,14 @@
       "sha256": "d771860faf8fe2135198d9528319d0f7f8e97ffaa4d6418d0e37b74031d0719c",
       "lines": 105
     },
+    "deploy/systemd/tetris-meta.service": {
+      "sha256": "c78994f706cb07c8e84a1a72f194a1fae9652d56155846ad881ece016fd1fd6f",
+      "lines": 61
+    },
+    "deploy/systemd/tetris-wss.service": {
+      "sha256": "231446b4722510cf3aeb2a6ecb4b451a45b0fb883ec7376c2c6471fbf1f6b896",
+      "lines": 29
+    },
     "meta/account_client.cpp": {
       "sha256": "6eea10b6761e26c2442153b0d2da8cddc38956c2ca6a3570d7e7903266deea0b",
       "lines": 232
@@ -327,8 +335,8 @@
       "lines": 89
     },
     "meta/api_server.cpp": {
-      "sha256": "615e6870ec0b464c324bf22132ea2c80e337ea97fa895c93e82ccdb0bf4f55d2",
-      "lines": 520
+      "sha256": "fac98d2ec2ef25cff33db8f4e06d041fabd53072a36787bd638b54a4ac2c300f",
+      "lines": 532
     },
     "meta/api_server.h": {
       "sha256": "0960c5821f42a0e1410e9d00931f412976f4152619bab5462adc690b0e939e86",
@@ -383,8 +391,8 @@
       "lines": 60
     },
     "meta/main.cpp": {
-      "sha256": "0335ac570d92ae79c5ae05f8e0325246b67a06c6cbfd129b57c0c175b15bb7b4",
-      "lines": 181
+      "sha256": "325a53e2ba9184b74474d25bae13ebc236e0a134884cc8ba9e83f3a30a4d54f0",
+      "lines": 204
     },
     "meta/match_response.h": {
       "sha256": "5b643a0555c0bcbce6d90cfad02dd8ee2005bd3b751ce04c4f2f613830270e59",
@@ -393,6 +401,10 @@
     "meta/private_file.cpp": {
       "sha256": "6bd7a9b25739714db283a06bbc18865a129c701ae6fb28c56a6280d6b87825cd",
       "lines": 150
+    },
+    "meta/private_file.h": {
+      "sha256": "d527c6b5ffe93a7473dc7eed9bca7c6905e5bc7332b08bc7845c29aa0839b5a2",
+      "lines": 29
     },
     "meta/profile_response.h": {
       "sha256": "cd7bf2421f83999c6f85e0eca9fe372862eb5f5735c4c4f6560c50e48b55e0eb",
@@ -455,19 +467,19 @@
       "lines": 352
     },
     "net/session.cpp": {
-      "sha256": "e6c743cb0961ff569d63bdcf0dc58e94d6e2fbe403ae9da5f29d02899d52664e",
-      "lines": 1313
+      "sha256": "e461c33c50c432a3c0293378bb4201e0520d195acf756e999bf68e67f855c668",
+      "lines": 1320
     },
     "net/session.h": {
       "sha256": "6673f507faa783a9817922fc9eedd6822ae33d1ea7ad44a0e5b7f36bee0d5688",
       "lines": 302
     },
     "net/socket.cpp": {
-      "sha256": "7996efee6ce3785fde31ef25693c882bad4b1c708068702a0e1c2ad952127659",
-      "lines": 609
+      "sha256": "f0093d9fbdb0d897a6432ca0d72cd3b5f472a6bca570e6ae901c031a4cdbd595",
+      "lines": 610
     },
     "net/socket.h": {
-      "sha256": "3f8713e3ed8dd97d39f902092e1eb41ab74470c1b2c3e76fbd3706af229115c8",
+      "sha256": "4e827473097497100033257ea4236faea87437e772facdbdbafbcfb58ce449e1",
       "lines": 92
     },
     "net/stream_transport.h": {
@@ -501,6 +513,14 @@
     "platform/user_data.h": {
       "sha256": "341f7bbb63ffa1f0182f9510bdcc203ad23100d060a2a517a7cad5b4c8e77ea7",
       "lines": 9
+    },
+    "platform/utf8_arguments.cpp": {
+      "sha256": "e88d1de7a6f8143650b785c5a952a0d8add19b3d4b4a6128f0037513f1481838",
+      "lines": 84
+    },
+    "platform/utf8_arguments.h": {
+      "sha256": "c6118b5b6d24d98fdc1115c8489f19c14567c087c7a291ec875584fe251ec005",
+      "lines": 19
     },
     "platform/win32.cpp": {
       "sha256": "5e3b20aaa816326b7534c5f02a17bb8846d0003e771a2c0c41402d8c267b8127",
@@ -643,8 +663,8 @@
       "lines": 591
     },
     "python/tests/test_meta_db_smoke.py": {
-      "sha256": "7561c9ad64945b16caa0b07d0e2ab0cab3452522acdd60493378aade9b418051",
-      "lines": 886
+      "sha256": "8925ad99b760ad13788ba9c0062a387f1808fa76ad6a5618d72a422dd1f51c4e",
+      "lines": 921
     },
     "python/tests/test_observation_parity.py": {
       "sha256": "0faf191182cb1477de021f8be05b4e272fcd477808e8523a8889a5e95346d750",
@@ -687,8 +707,8 @@
       "lines": 190
     },
     "python/tests/test_secure_admission.py": {
-      "sha256": "9a3186b9ce904906f2c7a15c55d8a5a5f41314ca1c217ffece7f9bce58526f91",
-      "lines": 389
+      "sha256": "3a3a5a42c0e0954a2b56ff0db141c3b802750d4060917c7c8a9226af60d0b184",
+      "lines": 408
     },
     "python/tests/test_training_scripts_static.py": {
       "sha256": "dd9d3d562fbb302ec3850cc67adc7240f4e77a22da6e2d13bdcab7adbbb0f70a",
@@ -707,8 +727,8 @@
       "lines": 147
     },
     "python/tools/package_opponents.py": {
-      "sha256": "13cf37fb8b066a07a48456e819f0767b55625e655a76b7750d61031c6c3f752c",
-      "lines": 66
+      "sha256": "68e493f7f688475a386ce4f9da03bca9c68e599c9e04aad0e0c672a8b3a46e0f",
+      "lines": 104
     },
     "python/tools/relay_capacity.py": {
       "sha256": "51b2c9417691fe239e41b6d78c3b51a3f5f84bdc2aa10f01990c717987b081da",
@@ -823,16 +843,20 @@
       "lines": 66
     },
     "scripts/backup_meta_db.py": {
-      "sha256": "910c11ac95135e42795d011910aa1b1c3de52a161d2f4ff04757eccbcd2515b4",
-      "lines": 46
+      "sha256": "961b9b0de82321bb8647b30493cc73d49274dd9d7fedbaaa7a37b814b7240e70",
+      "lines": 92
     },
     "scripts/backup_meta_db.sh": {
-      "sha256": "0c3f4d33e68a4169c87643dac3344728067a7664c97b7a43e363945ebf52d580",
-      "lines": 81
+      "sha256": "eaaf7a3e0fa43626171f37ee1a3c18048ccf6c5f2997d82f05a2b4e438760dc2",
+      "lines": 91
     },
     "scripts/check_build_roles.py": {
       "sha256": "779e74c1a81d5e350d8e367787081cdb013906f908e4876c1a4dff5dc9dba40e",
       "lines": 55
+    },
+    "scripts/check_learning_batch.py": {
+      "sha256": "411a58d58345e7c2269a1d095efed44219c10bbd3bfef11fde79dfb6583b9edd",
+      "lines": 87
     },
     "scripts/check_learning_dependencies.py": {
       "sha256": "e343da9d825b89e2259251bc8b6fed0b38b90bc608e593c395805555bde67432",
@@ -842,9 +866,21 @@
       "sha256": "70bc4670f813875902aeab4a5cd759ddb48e6f69399219f208003d5dec9b90f5",
       "lines": 151
     },
+    "scripts/check_learning_release_evidence.py": {
+      "sha256": "2dcc0b24c6ab8e01a2b89f9c3fa0c443078322d5414e915b7f9eb6bc9acb8fbb",
+      "lines": 57
+    },
     "scripts/check_learning_serialization.py": {
       "sha256": "26bedd091a658ca5b263fc5ef5bededce099b88f19ed8f891f6644141776880a",
       "lines": 82
+    },
+    "scripts/check_learning_system_review.py": {
+      "sha256": "4b3d45b2944fab1eeddedb730fcc55ff89a4cb5bda1893c3f7a7b2faf3f71d5a",
+      "lines": 57
+    },
+    "scripts/check_learning_windows_port.py": {
+      "sha256": "b65cd79c5131481806bf92d4bd01a4d86458faf09edee2ef0d5485d47eece933",
+      "lines": 100
     },
     "scripts/check_part_docs.py": {
       "sha256": "51cf34e85c74cb642055c9eb8e351b0eb1608b30eddfb82225ff07749d058ed2",
@@ -863,16 +899,20 @@
       "lines": 147
     },
     "scripts/release_linux.sh": {
-      "sha256": "678f404f84f69b5d5a2302a2a7b187dbb8a0b7719534dbc8b88b121c45a5d2c1",
-      "lines": 115
+      "sha256": "6fc3f33cabff5f6ebc6a5783d9ecb3c6a052bebde08e5b1441e8bc96f2ec194b",
+      "lines": 120
+    },
+    "scripts/release_linux_common.sh": {
+      "sha256": "15d890b0921ae8e5619431544a1a7ec4262f308bc0357430c912e4b381c6d5f0",
+      "lines": 40
     },
     "scripts/release_macos.sh": {
       "sha256": "534b54ae5f86ee53561d44db05c22a52c3fae48f6a47532c24d77e12e492b04c",
       "lines": 137
     },
     "scripts/release_server_linux.sh": {
-      "sha256": "a5ea3cb1465db983ca72c81ab4c4b8ac192b149fafbf255d7dd978b8d3e76e10",
-      "lines": 96
+      "sha256": "85eb7240a80787acc3a38cded8f26ff51127f063737d5044420bfb7e73b74036",
+      "lines": 104
     },
     "scripts/release_win.ps1": {
       "sha256": "ed6a931ee8cedf72cb83880b2b77ab78471b21d0040925a4e599b830c04f4910",
@@ -895,8 +935,8 @@
       "lines": 102
     },
     "server/main.cpp": {
-      "sha256": "1eee6999e0bcba64a6755ec74a5d74ce2c64b65041b4feebbd812804b2969942",
-      "lines": 312
+      "sha256": "9aaeae551d41703c5ada2a75049786e9f83c204017471f7f355888e5f2187028",
+      "lines": 320
     },
     "server/match_seed.h": {
       "sha256": "3951283a7ae621809e39479bcb4a254fe2427d09727c3af52c1649cd99f438c7",
@@ -939,8 +979,8 @@
       "lines": 128
     },
     "server/reactor_relay.cpp": {
-      "sha256": "3f8c273a0a32ab37b55e49efed3ba4150e3e3c5a71441c8809ced744ca527ea6",
-      "lines": 2672
+      "sha256": "894cbf192621bace5a27645ff0a2c2e76d30463c19f456b19fd53301c0522a0f",
+      "lines": 2679
     },
     "server/relay.cpp": {
       "sha256": "e31f0995ad613606c3acb3d9d3aee03632876ab490ca54a403f592f1c90f33cc",
@@ -1113,6 +1153,10 @@
     "tests/learning/room_code.cpp": {
       "sha256": "60b10811ec6da46bec7e77a7cf2786cb3c42fad5f8ace00291dd4b58d4994539",
       "lines": 49
+    },
+    "tests/learning/socket_ownership.cpp": {
+      "sha256": "f976fd45e489328c02f1e3e18041c8f7da92900039b6bd419cef6b109e115cc0",
+      "lines": 65
     },
     "tests/learning/worker_lifetime.cpp": {
       "sha256": "5c57bf476063cdc1e65fdb8c435d0b8bff84c2ecacb4a560a0c16464c0b14332",

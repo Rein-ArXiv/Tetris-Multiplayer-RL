@@ -567,6 +567,8 @@ cmake --build build --target worker_group_test
 
 namespace {
 
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "signal handler requires lock-free atomic<bool>");
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
@@ -736,7 +738,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     // Nonblocking accept lets the loop observe the shutdown flag.
-    net::tcp_set_nonblocking(g_listen_sock);
+    if (!net::tcp_set_nonblocking(g_listen_sock)) {
+        RLOG_ERROR("listen nonblocking setup failed");
+        net::tcp_close(g_listen_sock);
+        g_listen_sock = {};
+        net::net_shutdown();
+        return 1;
+    }
     RLOG_INFO("[relay] listening on 0.0.0.0:" << port);
     RLOG_INFO("[relay] local IP: " << net::get_local_ip());
     RLOG_INFO("[relay] Ctrl+C to stop");
@@ -854,7 +862,7 @@ int main(int argc, char** argv) {
 
 주목할 부분을 짚는다.
 
-**시그널 처리.** `SIGINT`/`SIGTERM` 핸들러는 `g_running = false` 만 한다. 핸들러 안에서 `tcp_close()` 나 `shared_ptr` 접근을 하지 않는다 — 둘 다 async-signal-safe 가 아니다. listen 소켓은 `tcp_set_nonblocking()` 으로 전환돼 있고 accept 루프가 10ms 간격으로 폴링하므로, 플래그만 바꿔도 곧 루프를 빠져나온다. 실제 소켓 정리는 루프를 나온 뒤 일반 스레드 문맥에서 한다. Windows 에서는 `SIGBREAK` 도 같은 핸들러에 등록한다 — 콘솔 `CTRL_BREAK_EVENT` 가 CRT 를 거쳐 `SIGBREAK` 로 도착하므로, 테스트 하네스가 `TerminateProcess`(핸들러가 실행될 기회 자체가 없다) 대신 이 이벤트로 우아한 종료 시퀀스 전체를 검증할 수 있다. 종료 경로는 검증할 수 없으면 없는 것과 같다는 원칙의 플랫폼별 각론이다.
+**시그널 처리.** `SIGINT`/`SIGTERM` 핸들러는 `g_running = false` 만 한다. 핸들러 안에서 `tcp_close()` 나 `shared_ptr` 접근을 하지 않는다 — 둘 다 async-signal-safe 가 아니다. listen 소켓은 `tcp_set_nonblocking()`의 성공을 확인한 뒤 폴링하며, accept 루프가 정지 플래그를 읽으면 루프를 빠져나온다. 전환 실패는 기동 실패로 처리한다. 반복의 대기 간격은 OS 스케줄링을 포함한 종료 시간 보장이 아니다. 실제 소켓 정리는 루프를 나온 뒤 일반 스레드 문맥에서 한다. Windows 에서는 `SIGBREAK` 도 같은 핸들러에 등록한다 — 콘솔 `CTRL_BREAK_EVENT` 가 CRT 를 거쳐 `SIGBREAK` 로 도착하므로, 테스트 하네스가 `TerminateProcess`(핸들러가 실행될 기회 자체가 없다) 대신 이 이벤트로 우아한 종료 시퀀스 전체를 검증할 수 있다. 종료 경로는 검증할 수 없으면 없는 것과 같다는 원칙의 플랫폼별 각론이다.
 
 **matcher 스레드의 이중 예외 방어.** 람다 **안쪽**에 `try/catch` 가 있고, `std::thread` 생성 자체도 `try/catch` 로 감쌌다. matcher 는 `WorkerGroup` 소속이 아니라 직접 만든 `std::thread` 이므로 `WorkerGroup` 의 예외 격리가 적용되지 않는다. 그래서 각각을 따로 막는다.
 

@@ -155,6 +155,15 @@ def main():
             '165-characters': 'characters',
             '166-policy-fallback': 'policy_fallback',
             '167-build-targets': 'build_targets', '168-dependencies': 'dependencies',
+            '169-linux-service': 'linux_service',
+            '170-windows-port': 'windows_port',
+            '171-private-publication': 'private_publication',
+            '172-shutdown': 'shutdown',
+            '173-backup-restore': 'backup_restore',
+            '174-release-evidence': 'release_evidence',
+            '175-change-boundaries': 'change_boundaries',
+            '176-content-extension': 'content_extension',
+            '177-system-review': 'system_review',
         }
         if name in later_checks:
             script = ROOT / f'scripts/check_learning_{later_checks[name]}.py'

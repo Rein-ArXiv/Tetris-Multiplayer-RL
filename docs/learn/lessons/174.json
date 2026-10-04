@@ -1,0 +1,378 @@
+{
+  "id": "lesson-174",
+  "title": "릴리스 검사: 무엇을 확인했는지 보존하기",
+  "shortTitle": "오라클·검사 범위·후보 지문·미실행·부하",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 실행한 검사 결과가 흩어져 있고 다른 환경의 성공이나 미실행을 한눈에 구분하기 어렵습니다.",
+  "finish": "완료: 후보·환경·범위를 묶은 기록을 평가하고 실제 규칙·계정 성공과 화면·부하 미실행을 구분합니다.",
+  "objective": "검사의 오라클과 적용 범위를 설명하고 누락·생략·오래된 후보가 준비 완료로 합쳐지는 오류를 막는다.",
+  "prerequisites": [
+    "실행 파일과 빌드 구성",
+    "HTTP 통합 검사와 자식 프로세스 수명",
+    "해시의 입력 범위와 식별 역할"
+  ],
+  "recap": {
+    "points": [
+      "구조 검사와 계정 상태 검증은 범위가 다르다.",
+      "정상 파일을 복원해도 폐기 상태가 과거로 돌아갈 수 있다.",
+      "실행할 대상과 복구할 시점을 함께 확인한다."
+    ],
+    "bridge": "이 구분을 전체 릴리스 검사에 적용해, 성공이라는 표시가 무엇의 성공인지 보존합니다."
+  },
+  "sections": [
+    {
+      "title": "검사 결과를 한 문장으로 줄일 때 사라지는 정보",
+      "body": "규칙 검사가 통과하고 계정 API도 응답했습니다. 이 결과만 보고 Windows 창의 배율이나 태블릿의 첫 로딩, 동시 접속 한계를 확인했다고 말할 수 있을까요? 검사가 어떤 질문에 답했는지를 보존해야 합니다.\n\n이번에는 `release_evidence.py`에 검사 선언을 평가하는 함수를 만들고, `release_drill.py`에서 실제 규칙 실행과 계정 복구 결과를 모읍니다. 화면과 부하 검사를 요구 목록에 두되 실행하지 않은 항목은 `not_run`으로 남깁니다. 전체 준비 판정은 그 차이를 유지합니다.\n\n도구의 출력은 배포 승인이나 테스트 실행의 진위를 인증하는 서명이 아닙니다. 호출자가 제공한 기록을 명시한 규칙으로 분류하는 학습 도구입니다. 자동화가 판단할 수 있는 범위와 사람이 확인할 근거를 함께 설계합니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      }
+    },
+    {
+      "title": "단위·통합·화면·부하는 서로 다른 축을 관찰한다",
+      "body": "단위 검사는 작은 구성요소에 입력을 주고 결과나 불변식을 관찰합니다. 예를 들어 잘못된 입력 마스크를 주었을 때 상태 바이트가 보존되는지 비교합니다. 실패 범위를 좁히기 쉽고 많은 경계 입력을 반복할 수 있습니다.\n\n통합 검사는 구성요소가 실제로 연결된 계약을 봅니다. 서비스 프로세스를 시작하고 HTTP로 계정을 만든 뒤 DB를 복원해 다시 인증하는 검사는 경로·프로세스·직렬화·저장소가 함께 작동해야 합니다. 라이브러리 함수의 성공만으로 이 경계를 대신할 수 없습니다.\n\nGUI 검사는 실제 창·GPU 출력·입력·접근성 등의 관찰을 포함합니다. 헤드리스 DOM 검사는 탐색과 이벤트 연결의 일부를 확인하지만 대상 기기의 픽셀·터치·배율 체감까지 검사하지 않습니다. 부하 검사는 정해진 요청 패턴과 자원 한도 아래에서 지연·처리량·오류·회복을 관찰합니다. 분류 이름은 테스트 파일 크기가 아니라 우리가 어떤 근거를 얻었는지 설명해야 합니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      }
+    },
+    {
+      "title": "오라클: 결과를 무엇과 비교할 것인가",
+      "body": "테스트 오라클은 관찰한 결과가 맞는지 판단하는 기준입니다. 같은 함수를 두 번 호출해 같은 값이 나왔다고 확인하면 반복성은 볼 수 있지만 알고리즘 자체의 오류를 놓칠 수 있습니다. 기대 결과를 구현과 다른 근거에서 얻어야 검사가 강해집니다.\n\n순수 규칙에는 작은 손계산 사례와 다른 표현의 참조 구현을, 직렬화에는 정해진 바이트 배열을, 동시성에는 완료 순서를 드러내는 게이트를 사용할 수 있습니다. 누적 규칙 실행기는 경기 래퍼의 상태를 직접 Duel 전이와 대조합니다. 계정 복구 검사는 DB 행만 읽는 데서 끝내지 않고 실제 허용/거절 API를 함께 호출합니다.\n\n골든 해시는 지정한 입력에서 과거 관찰과 달라졌는지 알려 주는 회귀 오라클입니다. 구현을 바꾸고 새 출력으로 기준 파일을 무조건 덮어쓰면 검사가 오류까지 승인하게 됩니다. 의도한 규칙 변경인지 먼저 판단하고 변경 이유와 비교 범위를 기록합니다. 해시 일치는 포함하지 않은 필드나 충돌 가능성까지 없애는 완전한 상태 동등성 증명은 아닙니다.",
+      "reference": {
+        "path": "tests/sim_hash_dump.cpp",
+        "symbol": "StateHash()",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      }
+    },
+    {
+      "title": "후보를 소스 이름과 실행 파일 내용으로 식별하기",
+      "body": "테스트를 실행한 뒤 코드를 수정했다면 이전 통과는 어느 후보의 근거일까요? 기록에는 소스 식별자와 실제 검사한 산출물의 해시가 함께 필요합니다. 커밋 ID만 적으면 미커밋 변경이나 다른 빌드 옵션을 놓칠 수 있습니다.\n\n실습은 체크포인트 파일의 상대 이름과 내용을 정렬해 소스 지문을 만듭니다. 파일 이름과 바이트 길이를 각각 앞에 붙여 경계를 구분합니다. 단순히 두 문자열을 이어 붙이면 `ab`+`c`와 `a`+`bc` 같은 서로 다른 분할이 같은 입력 바이트가 될 수 있기 때문입니다. 실행한 규칙·서비스 바이너리도 구분된 이름으로 묶어 별도 지문을 만듭니다.\n\n해시는 바이트 식별 도구입니다. 그 파일이 정말 해당 소스로 빌드됐는지, 누가 기록을 만들었는지까지 증명하지 않습니다. 빌드 출처·컴파일러·옵션·공유 라이브러리·모델과 자산 목록은 실제 릴리스 기록에서 함께 관리해야 합니다. 이 실습의 산출물 지문 범위는 전달한 실행 파일들로 제한됩니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "파일 경계를 포함하는 지문",
+          "language": "python",
+          "text": "def fingerprint(paths):\n    digest = hashlib.sha256()\n    for label, path in paths:\n        # Labels and contents are framed; paths on the local disk are not identities.\n        encoded = label.encode('utf-8')\n        digest.update(len(encoded).to_bytes(8, 'big'))\n        digest.update(encoded)\n        data = path.read_bytes()\n        digest.update(len(data).to_bytes(8, 'big'))\n        digest.update(data)\n    return digest.hexdigest()"
+        }
+      ]
+    },
+    {
+      "title": "요구 목록은 결과를 본 뒤 줄이는 통계가 아니다",
+      "body": "검사를 실행하기 전에 필요한 대상과 범위를 정합니다. 요구 항목에는 고유 ID, 환경 이름, 검사 범위를 둡니다. 같은 ID로 GUI를 요구해 놓고 단위 검사 성공을 제출하면 범위 불일치로 분류해야 합니다. 다른 운영체제에서의 성공도 현재 대상의 성공으로 바뀌지 않습니다.\n\n실습에서는 규칙·계정·화면·부하를 요구하고, 수집기는 규칙과 계정만 실행합니다. 로컬 환경 이름은 OS/CPU 조합을 사용합니다. 실제 배포에는 컴파일러·드라이버·브라우저·배포 설정까지 구별할 필요가 있으므로 팀이 의미를 정한 환경 식별자를 사용해야 합니다.\n\n필수 목록을 비운 뒤 “모두 통과했다”고 계산하는 실수를 막습니다. 논리학의 공허한 참처럼 `all([])`은 true이지만, 우리 도구에서 아무 요구도 없는 상태는 준비 완료가 아닙니다. 요구 목록 자체가 비어 있지 않다는 조건을 따로 둡니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "실행 범위와 전체 요구 목록",
+          "language": "python",
+          "text": "    requirements = [dict(id='rules', scope='unit', environment=environment),\n                    dict(id='accounts', scope='integration', environment=environment),\n                    dict(id='display', scope='gui', environment=environment),\n                    dict(id='capacity', scope='load', environment=environment)]"
+        }
+      ]
+    },
+    {
+      "title": "네 가지 실행 상태와 두 가지 부적합 상태",
+      "body": "수집한 실행 상태는 `passed`, `failed`, `skipped`, `not_run`입니다. passed는 그 검사가 실제 실행되어 기준을 만족했다고 기록한 상태이고, failed는 실행 또는 관찰이 기준을 만족하지 못한 상태입니다. skipped는 조건 때문에 실행에서 제외된 상태, not_run은 실행 기록이 없는 상태입니다.\n\n평가기는 기록이 다른 소스·산출물을 가리키면 `stale`, 요구한 환경·범위가 다르면 `mismatch`로 분류합니다. stale은 시간이 오래 지났다는 뜻이 아니라 지금 후보에 적용할 수 없다는 뜻입니다. 방금 실행했어도 다른 바이너리를 검사했다면 stale입니다.\n\n이 상태들을 숫자 점수로 더해 평균을 내지 않습니다. 보안 필수 검사가 하나 실패했는데 쉬운 검사 여러 개가 통과했다고 준비 완료가 되면 안 됩니다. 필수 항목이 각각 유효한 성공인지 확인하는 논리 조건을 사용합니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "허용하는 선언 상태와 범위",
+          "language": "python",
+          "text": "RECORD_STATUSES = frozenset({'passed', 'failed', 'skipped', 'not_run'})\nSCOPES = frozenset({'unit', 'integration', 'gui', 'load'})\nDECISION_STALE = 'stale'\nDECISION_NOT_RUN = 'not_run'\nSHA256_RE = re.compile(r'^[0-9a-f]{64}$')"
+        }
+      ]
+    },
+    {
+      "title": "기록의 문법과 의미를 먼저 검증하기",
+      "body": "외부 JSON이나 수작업 기록을 입력받는다면 필드의 존재만으로 충분하지 않습니다. 문자열 형식, 공백만 있는 환경 이름, 중복 ID, 잘못된 상태를 거절합니다. 같은 ID의 두 기록 중 마지막 값을 조용히 선택하면 앞의 실패가 뒤의 성공에 가려질 수 있습니다.\n\nSHA-256은 이 기록 형식에서 소문자 16진 문자열로 표현합니다. 문자열 전체가 정확한 형식이어야 합니다. 정규식의 줄 끝 앵커와 `match`를 조합하면 마지막 줄바꿈을 허용하는 경우가 있어 `fullmatch`로 전체 입력을 검사합니다.\n\n통과나 실패를 주장한 기록에는 비어 있지 않은 근거 설명을 요구합니다. 그러나 근거 문자열을 코드처럼 실행하거나 경로처럼 자동으로 열지 않습니다. 구조 검사와 실행 출처의 신뢰는 구분합니다. 이 함수는 입력을 수정하지 않고 새로운 판정 목록을 만들어 반환합니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "해시 문자열 전체 형식 검사",
+          "language": "python",
+          "text": "def _require_sha256(value: Any, field: str) -> str:\n    '''Return value when it is exactly 64 lowercase hex chars.'''\n    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):\n        raise ValueError(f'{field} must be exactly 64 lowercase hex chars')\n    return value"
+        },
+        {
+          "label": "기록 ID 중복 거절",
+          "language": "python",
+          "text": "        rec_id = _require_text(record['id'], f'record {index} id')\n        if rec_id in by_id:\n            raise ValueError(f'duplicate record id: {rec_id!r}')"
+        }
+      ]
+    },
+    {
+      "title": "누락·다른 후보·다른 범위를 순서대로 분류하기",
+      "body": "요구 목록의 순서대로 ID를 조회합니다. 기록이 없으면 not_run으로 남깁니다. 요구하지 않은 성공 기록을 찾아 대신 채우지 않습니다. 그 다음 소스와 산출물 지문을 확인하고, 마지막으로 환경과 범위를 비교합니다.\n\n분류 순서는 진단의 우선순위이기도 합니다. 다른 후보의 기록이면 환경 이름이 같더라도 현재 후보의 성공 근거가 아닙니다. 후보가 일치해도 실행 범위가 다르면 mismatch입니다. 이 모든 조건이 맞아야 선언된 실행 상태를 최종 목록에 전달합니다.\n\n준비 판정은 비어 있지 않은 요구 목록의 모든 최종 상태가 passed일 때만 참입니다. skipped를 “실패 아님”으로 해석해 true에 포함하지 않습니다. 생략이 타당한지는 제품 정책에서 요구 목록을 정할 때 근거와 함께 결정해야 합니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "각 요구 항목의 적용 가능성 검사",
+          "language": "python",
+          "text": "    for requirement in clean_requirements:\n        req_id = requirement['id']\n        record = by_id.get(req_id)\n        if record is None:\n            decisions.append({'id': req_id, 'status': DECISION_NOT_RUN,\n                              'reason': 'missing required check'})\n            continue\n        # A declaration only applies to the exact candidate it names.\n        if (record['revision'] != candidate_revision\n                or record['artifact_sha256'] != artifact_sha256):\n            decisions.append({'id': req_id, 'status': DECISION_STALE,\n                              'reason': 'revision or artifact digest mismatch'})\n            continue\n        if any(record[field] != requirement[field] for field in ('environment', 'scope')):\n            decisions.append({'id': req_id, 'status': 'mismatch',\n                              'reason': 'environment or scope mismatch'})\n            continue\n        decisions.append({'id': req_id, 'status': record['status'],\n                          'reason': 'declared evidence for candidate'})"
+        },
+        {
+          "label": "공허한 성공과 생략 성공을 막는 최종 조건",
+          "language": "python",
+          "text": "    ready = bool(clean_requirements) and all(\n        d['status'] == 'passed' for d in decisions)"
+        }
+      ]
+    },
+    {
+      "title": "종료 코드 0을 성공으로 읽을 수 있는 전제",
+      "body": "고정된 계약 실행기는 검사 실패 시 0이 아닌 코드로 종료하고, 0이면 지정한 검사가 실행되어 통과하도록 만들었습니다. 수집기는 이 실행 파일의 종료 상태와 출력 해시를 기록합니다. 출력 해시는 같은 출력인지 식별하는 값이고, 원문 로그를 대신 분석해 주지는 않습니다.\n\n일반 테스트 도구는 테스트가 전부 생략되어도 0을 반환할 수 있습니다. 따라서 “프로세스가 성공적으로 끝남”과 “필수 검사가 실제로 실행됨”의 연결은 도구마다 확인해야 합니다. CTest에는 등록된 검사와 실행 필터를, pytest에는 수집/실행/생략 결과를 함께 확인해야 합니다.\n\n시간 상한을 넘으면 실패로 기록합니다. 임의의 자식 프로세스 트리를 부모 하나만 kill하면 손자 서비스가 남을 수 있으므로 실제 HTTP 복구 실습은 이 프로세스 안에서 자식 소유를 관리하는 helper를 호출합니다. 제한과 정리의 책임은 실행 구조에 맞게 둡니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "직접 소유하는 계약 실행기의 결과",
+          "language": "python",
+          "text": "def run_contract(argv):\n    try:\n        result = subprocess.run(argv, text=True, encoding='utf-8', errors='replace',\n                                capture_output=True, timeout=40)\n    except subprocess.TimeoutExpired:\n        return 'failed', 'time budget exceeded'\n    except OSError as error:\n        return 'failed', 'process startup error: ' + type(error).__name__\n    # Fixed commands are contract executables whose zero status means checks ran.\n    # This rule must not be reused for arbitrary test runners that allow all-skip.\n    status = 'passed' if result.returncode == 0 else 'failed'\n    output = (result.stdout + result.stderr).encode('utf-8')\n    return status, f'exit={result.returncode}; output_sha256={hashlib.sha256(output).hexdigest()}'"
+        }
+      ]
+    },
+    {
+      "title": "검사 도중 바뀐 산출물의 성공을 버리기",
+      "body": "소스와 바이너리의 지문은 실행 전후에 비교합니다. 검사를 기다리는 동안 다른 터미널에서 재빌드하면 실행된 파일과 나중에 배포할 파일이 달라질 수 있기 때문입니다. 소스 목록도 다시 열거해 추가·삭제된 파일을 놓치지 않습니다.\n\n전후 지문 비교는 일반적인 동시 수정 실수를 감지하는 장치입니다. 그 사이 파일이 바뀌었다가 원래 내용으로 돌아오는 경우까지 추적하는 잠금이나 서명은 아닙니다. 실제 릴리스에서는 검사할 후보를 별도의 불변 디렉터리나 빌드 산출물로 고정하고, 검증한 그 산출물을 배포하는 흐름이 더 분명합니다.\n\n수집기가 실패하면 실행되지 않은 나머지를 성공으로 채우지 않습니다. 부분 보고서를 사용하려면 어떤 단계까지 기록되었는지 구분하고, 다음 실행이 같은 후보인지 다시 확인해야 합니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "소스 재열거와 실행 파일 재확인",
+          "language": "python",
+          "text": "    # Re-enumerate to notice added/deleted source files as well as changed bytes.\n    after = sorted((p.relative_to(checkpoint).as_posix(), p)\n                   for p in checkpoint.rglob('*')\n                   if p.is_file() and '__pycache__' not in p.parts)\n    if fingerprint(artifacts) != artifact or fingerprint(after) != revision.split(':', 1)[1]:\n        raise RuntimeError('candidate changed during checks')"
+        }
+      ]
+    },
+    {
+      "title": "부하 검사에는 요청 분포와 회복 관찰이 필요하다",
+      "body": "부하를 “동시에 많이 연결했다”로만 기록하면 다른 사람이 결과를 재현하기 어렵습니다. 연결 수와 요청률, 요청 본문 크기, 정상/잘못된 요청의 비율, 인증·DB·모델 추론 경로, 준비 시간과 측정 구간을 정해야 합니다. 짧은 healthz 반복은 값비싼 보상 재현 경로의 용량을 보여 주지 않습니다.\n\n평균 지연은 느린 일부 요청을 가릴 수 있습니다. 분포의 상위 지연, 오류/거절 비율, 메모리·FD·스레드 사용량을 함께 봅니다. 요청이 쌓이는 동안 성공 개수만 세면 끝나지 못한 요청의 비용을 놓칠 수 있습니다. 과부하를 제거한 뒤 대기열이 줄고 정상 처리로 돌아오는지도 확인합니다.\n\n여기서 부하 항목은 실행하지 않아 not_run으로 남깁니다. 독자는 자신의 허가된 로컬·스테이징 환경에서 부하 프로파일과 합격 기준을 먼저 정한 뒤 결과를 연결할 수 있습니다. 공개 서버의 실제 사용자 트래픽을 임의로 발생시키는 기능은 이 수집기에 넣지 않습니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      }
+    },
+    {
+      "title": "명령을 실행하고 전체 판정과 부분 성공을 읽기",
+      "body": "검사기는 RULES와 SERVICE를 각각 빌드합니다. 규칙 계약 실행과 합성 계정의 HTTP 복구가 성공하면 이 둘은 passed가 됩니다. 화면과 부하 기록은 없으므로 not_run이고 전체 ready는 false입니다. 도구가 정상 동작했기 때문에 생기는 의도한 결과입니다.\n\n계약 검사에서는 기록 누락, 다른 해시, 다른 환경, GUI를 단위 검사로 대체한 기록, 중복 ID, 잘못된 문자열을 넣습니다. 단순히 현재 정상 경로의 출력을 복제하는 대신 준비 판정이 잘못 참이 될 반례를 확인합니다.\n\n유지할 핵심은 후보·환경·범위·실행 상태를 연결하는 것입니다. 필요한 검사 목록과 실제 대상 기기는 제품 요구에 따라 바뀝니다. 단위/통합 결과를 확보한 뒤 대상 화면과 운영 부하를 별도로 채우는 순서가 각 검사의 비용과 진단 범위를 명확하게 만듭니다.",
+      "reference": {
+        "path": "scripts/check_learning_release_evidence.py",
+        "symbol": "def main",
+        "invariant": "검사 결과를 실제 대상·환경·관찰 범위에 연결하고 미실행을 성공으로 합치지 않는다.",
+        "mayDiffer": "현재 저장소의 검사 목록과 CI 환경은 달라집니다. 기준 실습은 누적 규칙 실행기와 계정 서비스의 결과를 분류합니다."
+      },
+      "codes": [
+        {
+          "label": "역할별 실제 검사와 보고서 확인",
+          "language": "bash",
+          "text": "python3 scripts/check_learning_release_evidence.py"
+        },
+        {
+          "label": "검사 선언 평가기 전체",
+          "language": "python",
+          "file": "checkpoints/174-release-evidence/operations/release_evidence.py"
+        },
+        {
+          "label": "실제 결과 수집기 전체",
+          "language": "python",
+          "file": "checkpoints/174-release-evidence/operations/release_drill.py"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "174-1",
+      "question": "요구사항 목록의 검사 ID에 해당하는 record가 하나도 없을 때 평가 결과로 옳은 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "status는 not_run이며 ready는 false가 된다"
+        },
+        {
+          "id": "b",
+          "text": "해당 검사는 자동으로 passed 처리된다"
+        },
+        {
+          "id": "c",
+          "text": "다른 ID의 record로 대체해 통과시킬 수 있다"
+        },
+        {
+          "id": "d",
+          "text": "artifact 해시만 맞으면 stale로 표시된다"
+        }
+      ],
+      "correctOptionId": "a",
+      "explanation": "필수 검사가 누락되면 not_run으로 분류되고 passed가 아니므로 ready는 false다. 서로 다른 ID의 record는 요구사항을 대체하지 못한다.",
+      "answer": "status는 not_run이며 ready는 false가 된다"
+    },
+    {
+      "id": "174-2",
+      "question": "record의 status가 passed이지만 revision 또는 artifact_sha256이 후보와 다르면 어떻게 분류하는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "failed로 강등된다"
+        },
+        {
+          "id": "b",
+          "text": "passed로 인정되어 ready를 true로 만든다"
+        },
+        {
+          "id": "c",
+          "text": "stale로 분류되어 ready 판정에 passed로 기여하지 못한다"
+        },
+        {
+          "id": "d",
+          "text": "중복 ID로 간주해 ValueError를 던진다"
+        }
+      ],
+      "correctOptionId": "c",
+      "explanation": "선언은 후보의 revision과 digest에 정확히 일치할 때만 적용된다. 불일치는 stale이며 다른 record의 passed로 대체될 수 없다.",
+      "answer": "stale로 분류되어 ready 판정에 passed로 기여하지 못한다"
+    },
+    {
+      "id": "174-3",
+      "question": "화면 검사 ID에 같은 후보의 성공 기록을 제출했지만 scope는 unit이다. 평가기가 할 일은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "후보 해시가 같으므로 화면 검사도 passed로 처리한다."
+        },
+        {
+          "id": "b",
+          "text": "기록 범위가 요구와 달라 mismatch로 남긴다."
+        },
+        {
+          "id": "c",
+          "text": "실행 기록이 있으므로 화면 항목을 요구 목록에서 제거한다."
+        },
+        {
+          "id": "d",
+          "text": "단위 검사를 한 번 더 실행해 GUI 성공으로 바꾼다."
+        }
+      ],
+      "correctOptionId": "b",
+      "explanation": "같은 후보를 검사했어도 관찰 범위가 다르면 요구를 충족하지 못한다. 환경과 범위는 후보 해시와 별도로 대조한다.",
+      "answer": "기록 범위가 요구와 달라 mismatch로 남긴다."
+    },
+    {
+      "id": "174-4",
+      "question": "healthz를 짧게 반복해 모두 성공했다. 보상 재현 요청의 동시 처리 용량을 판단하려면 무엇이 더 필요한가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "같은 healthz 결과를 load 범위로 이름만 바꾸면 된다."
+        },
+        {
+          "id": "b",
+          "text": "CPU 평균 사용률만 확인하면 DB와 추론 지연도 추정할 수 있다."
+        },
+        {
+          "id": "c",
+          "text": "보상 경로의 요청 분포·자원·지연·거절·회복을 정한 조건으로 측정한다."
+        },
+        {
+          "id": "d",
+          "text": "요청을 빠르게 보낼수록 실제 사용자 분포와 무관하게 용량이 확정된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "explanation": "검사할 경로와 부하 분포가 달라지면 비용도 달라진다. 평균 성공 개수에 더해 지연 분포·끝나지 않은 요청·오류·회복을 관찰해야 한다.",
+      "answer": "보상 경로의 요청 분포·자원·지연·거절·회복을 정한 조건으로 측정한다."
+    },
+    {
+      "id": "174-5",
+      "question": "pytest가 종료 코드 0을 반환했지만 필요한 검사가 모두 skipped였다. 어떤 판정이 맞는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "테스트 도구가 정상 종료했으므로 필수 검사도 passed다."
+        },
+        {
+          "id": "b",
+          "text": "생략된 검사를 제외하면 남은 실패가 없으므로 준비 완료다."
+        },
+        {
+          "id": "c",
+          "text": "같은 코드로 다시 실행하면 실행 여부를 보지 않고 성공으로 바꿔도 된다."
+        },
+        {
+          "id": "d",
+          "text": "도구 종료와 검사 실행은 다르며 skipped인 필수 항목은 준비 완료에 기여하지 못한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "explanation": "종료 코드 0은 도구의 정책에 따라 생략과 함께 반환될 수 있다. 필요한 검사가 실제 실행됐는지 확인하고 skipped를 passed로 합치지 않는다.",
+      "answer": "도구 종료와 검사 실행은 다르며 skipped인 필수 항목은 준비 완료에 기여하지 못한다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "검사기를 실행해 규칙/계정의 passed와 화면/부하의 not_run을 확인한다.",
+      "기록의 해시·환경·범위를 하나씩 바꿔 stale과 mismatch를 예측한다.",
+      "실제 배포 대상의 GUI/부하 요구를 관찰 가능한 입력과 합격 기준으로 작성한다."
+    ],
+    "expected": "부분 검사 성공을 보존하면서 전체 준비 판정이 부족한 근거를 드러내도록 만든다.",
+    "failureChecks": [
+      "중복 ID와 공백/잘못된 형식은 기록 단계에서 거절한다.",
+      "생략된 필수 검사를 passed로 계산하지 않는다.",
+      "검사 뒤 바뀐 실행 파일에 이전 기록을 붙이지 않는다."
+    ]
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "DeepSeek 평가기/객관식 초안 직접 검토·범위 계약 보강·실제 누적 실행",
+    "corrections": [
+      "SHA256 마지막 줄바꿈 거절",
+      "unhashable 입력 타입 검사",
+      "요구 환경/범위 대조",
+      "자식 소유와 timeout 경계",
+      "소스 목록 재열거",
+      "Part의 오래된 ONNX/정점 검사 및 해시 범위 설명 교정"
+    ]
+  },
+  "validation": [
+    "누적 RULES/SERVICE 실제 빌드·규칙 계약·HTTP 복구 결과 수집",
+    "누락/생략/중복/다른후보/환경/범위/문법 계약 검사",
+    "GUI와 부하는 not_run으로 기록; Windows/macOS 네이티브는 별도"
+  ]
+}

@@ -66,7 +66,7 @@ static TcpSocket make_owned(NativeSocket fd) {
     return s;
 }
 
-// [NET] 네트워킹 초기화(Windows 전용)
+// [NET] Winsock 초기화와 POSIX SIGPIPE 정책을 설정한다.
 bool net_init() {
     if (g_inited)
         return true;
@@ -78,7 +78,8 @@ bool net_init() {
 #else
     // POSIX: writing to a closed peer can raise SIGPIPE and terminate the whole
     // relay/client process before send() returns EPIPE. Treat it as an I/O error.
-    std::signal(SIGPIPE, SIG_IGN);
+    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return false;
     g_inited = true;
     return true;
 #endif
@@ -456,8 +457,8 @@ void tcp_close(TcpSocket& s) {
 }
 
 // [NET] 소켓을 논블로킹 모드로 전환(public 래퍼).
-void tcp_set_nonblocking(const TcpSocket& s) {
-    if (s.valid()) set_nonblocking(s.fd());
+bool tcp_set_nonblocking(const TcpSocket& s) {
+    return s.valid() && set_nonblocking(s.fd());
 }
 
 // [NET] 커널 송신 버퍼 상한을 지정한다.

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path, PurePosixPath
 import sys
 
@@ -15,12 +17,55 @@ from tools.opponent_profile import split_profile_line
 import zipfile
 
 
+def publish_archive(out: Path, config_bytes: bytes, members: dict[str, Path]) -> None:
+    """Publish complete bytes without overwrite, from a trusted frozen source tree.
+
+    Config was captured/validated by the caller. Hashes describe archived bytes;
+    they do not authenticate a publisher or validate model behavior. The parent
+    is application-owned; directory durability after power loss is separate.
+    """
+    out = Path(out)  # Preserve a final symlink as an existing name, never resolve it.
+    if os.path.lexists(out):
+        raise FileExistsError(out)
+    config_name, manifest_name = 'assets/opponents.cfg', 'opponents-manifest.json'
+    if {config_name, manifest_name} & members.keys():
+        raise ValueError('reserved archive member')
+    fd, name = tempfile.mkstemp(prefix='.opponents-', suffix='.tmp', dir=out.parent)
+    temporary = Path(name)
+    try:
+        # mkstemp supplies owner-only mode on POSIX; Windows uses the parent ACL.
+        with os.fdopen(fd, 'w+b') as raw:
+            hashes = {}
+            with zipfile.ZipFile(raw, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                def write(member, data):
+                    info = zipfile.ZipInfo(member, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.create_system = 3
+                    info.external_attr = 0o100600 << 16
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(info, data)
+                for member in sorted([config_name, *members]):
+                    data = config_bytes if member == config_name else members[member].read_bytes()
+                    write(member, data)
+                    hashes[member] = hashlib.sha256(data).hexdigest()
+                write(manifest_name, (json.dumps({'format': 1, 'sha256': hashes},
+                                                 sort_keys=True, indent=2) + '\n').encode('utf-8'))
+            raw.flush()
+            os.fsync(raw.fileno())
+        # Same-parent hard link is atomic/no-overwrite. Unsupported filesystems fail.
+        os.link(temporary, out)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def package(root: Path, out: Path) -> None:
     root = root.resolve()
-    config = root / "assets/opponents.cfg"
-    members = {"assets/opponents.cfg": config}
+    config = (root / "assets/opponents.cfg").resolve()
+    if not config.is_relative_to(root) or not config.is_file():
+        raise ValueError("missing or external opponent config")
+    config_bytes = config.read_bytes()
+    members = {}
     ids = set()
-    for number, line in enumerate(config.read_text(encoding="utf-8").split('\n'), 1):
+    for number, line in enumerate(config_bytes.decode("utf-8").split('\n'), 1):
         try:
             fields = split_profile_line(line)
         except ValueError as error:
@@ -39,7 +84,7 @@ def package(root: Path, out: Path) -> None:
                     raise ValueError("model cannot be empty")
                 continue
             path = PurePosixPath(asset)
-            if path.is_absolute() or ".." in path.parts or "\\" in asset or path.parts[0] != folder or path.suffix.lower() not in extensions:
+            if not path.parts or path.is_absolute() or ".." in path.parts or "\\" in asset or path.parts[0] != folder or path.suffix.lower() not in extensions:
                 raise ValueError(f"unsafe or unsupported asset path: {asset}")
             local = (root / asset).resolve()
             if not local.is_relative_to(root) or not local.is_file():
@@ -47,15 +92,8 @@ def package(root: Path, out: Path) -> None:
             members[asset] = local
     if not ids:
         raise ValueError("no opponents configured")
-    # Exclusive creation prevents accidental replacement of a previous release.
-    with zipfile.ZipFile(out, "x", compression=zipfile.ZIP_DEFLATED) as archive:
-        hashes = {}
-        for name, local in sorted(members.items()):
-            data = local.read_bytes()
-            archive.writestr(name, data)
-            hashes[name] = hashlib.sha256(data).hexdigest()
-        archive.writestr("opponents-manifest.json", json.dumps({"format": 1, "sha256": hashes}, indent=2) + "\n")
-    print(f"Packaged {len(ids)} opponents, {len(members)} files: {out}")
+    publish_archive(out, config_bytes, members)
+    print(f"Packaged {len(ids)} opponents, {len(members) + 1} files: {out}")
 
 
 if __name__ == "__main__":

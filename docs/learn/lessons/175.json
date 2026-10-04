@@ -1,0 +1,371 @@
+{
+  "id": "lesson-175",
+  "title": "아키텍처 읽기: 변경 이유와 행동 계약",
+  "shortTitle": "의존·소유·SOLID·스냅샷·예외 경계",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 구현된 기능은 많지만 새로운 요청이 어느 상태와 계약을 바꾸는지 한 번에 파악하기 어렵습니다.",
+  "finish": "완료: 표현·정책·진행·저장의 변경 지도를 만들고 누적 코드의 경계를 실행기로 확인합니다.",
+  "objective": "의존·호출·소유를 구분하고 SOLID를 실제 변경 이유와 실패 계약에 적용한다.",
+  "prerequisites": [
+    "정책 콜백과 템플릿",
+    "값/참조 수명과 예외 보장",
+    "서버 판정과 거래 경계"
+  ],
+  "recap": {
+    "points": [
+      "검사 성공은 특정 후보·환경·범위의 근거다.",
+      "독립적인 오라클과 실패 입력이 회귀 검사의 의미를 만든다.",
+      "미실행과 생략을 성공으로 합치지 않는다."
+    ],
+    "bridge": "이제 그 증거를 이용해 변경할 책임과 보존할 계약을 찾아갑니다."
+  },
+  "sections": [
+    {
+      "title": "파일 목록에서 변경의 경로로 넘어가기",
+      "body": "큰 저장소를 처음부터 끝까지 순서대로 읽으면 정의는 많이 보았는데 실제 변경 위치는 찾기 어려울 수 있습니다. 작은 요청 하나를 정하고 입력 → 정책 → 상태 전이 → 외부 효과를 따라가면 읽을 범위가 생깁니다.\n\n예를 들어 “적의 이름과 초상화를 바꾼다”는 요청은 표시 자료와 자산 경로를, “생각 시간을 바꾼다”는 요청은 틱 기준 입력 제어를, “승리 보상을 바꾼다”는 요청은 서버 판정과 DB 거래를 가리킵니다. 같은 적 캐릭터라는 화면 영역에서도 변경 책임은 다릅니다.\n\n이번 산출물은 변경 경계를 실행으로 확인하는 `architecture_contract`입니다. 새 상속 계층을 만드는 대신 누적 Character·Driver·Match를 조합해 표현 변경의 독립성, 정책 실패, 예외와 외부 효과를 관찰합니다. 변경 계획을 세울 때 사용할 코드 지도와 반례 검사를 함께 만듭니다.",
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      }
+    },
+    {
+      "title": "세 가지 화살표를 다른 뜻으로 그리기",
+      "body": "컴파일 의존은 어떤 선언과 헤더가 필요한지를, 실행 호출은 어느 함수가 실제로 다른 함수를 부르는지를, 소유 관계는 누가 자원의 수명을 끝내는지를 나타냅니다. 모두 화살표로 그릴 수 있지만 같은 관계가 아닙니다.\n\nMatch는 두 Session과 Driver를 값으로 소유합니다. tick은 호출자가 건넨 정책을 호출하지만 정책 객체를 멤버에 저장하지 않습니다. 정책이 모델을 참조하는 람다라면 모델의 수명은 호출자가 해당 호출 동안 보장합니다. 콜백을 나중 실행할 큐에 저장하는 설계로 바꾸면 이 수명 계약도 다시 정해야 합니다.\n\ninclude 목록만 보고 실행 의존 전체를 증명할 수는 없습니다. 함수 포인터나 콜백은 호출 대상이 코드 밖에서 결정됩니다. 반대로 어떤 자료형의 정의를 포함했다고 반드시 그 라이브러리의 런타임 기능을 사용한 것은 아닙니다. 빌드 타깃·호출 위치·멤버/캡처 소유를 나누어 확인합니다.",
+      "reference": {
+        "path": "bot/controller.h",
+        "symbol": "template<class Picker>",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "Match가 값으로 소유하는 상태",
+          "language": "cpp",
+          "text": "private:\n    study_python::Session human_,enemy_;\n    study_paced::Driver driver_;\n    bot::RunStatus status_;\n    std::uint64_t humanDelivered_=0,enemyDelivered_=0;"
+        }
+      ]
+    },
+    {
+      "title": "SRP: 한 클래스가 아니라 함께 바뀌는 이유를 찾기",
+      "body": "단일 책임 원칙(SRP)을 “함수가 하나여야 한다”로 읽으면 작은 클래스가 많아져도 변경은 여러 곳에 흩어질 수 있습니다. 서로 다른 요구 때문에 바뀌는 정책을 구별하는 데 사용합니다. 캐릭터의 표시와 입력 행동은 같은 목록에 있어도 변경 이유가 다릅니다.\n\nAppearance는 이름·아이콘·초상화·난이도 표시를 묶고 Behavior는 모델 경로와 pacing을 묶습니다. 둘을 같은 Character 값에 담는 것은 선택 결과를 운반하기 위한 조합입니다. 렌더링이 Behavior의 내부 틱 상태를 직접 변경하거나, 입력 Driver가 초상화 파일을 열기 시작하면 책임 경계가 흔들립니다.\n\n응집도는 함께 쓰이고 함께 바뀌는 내용이 모여 있는 정도입니다. 결합도는 변경할 때 다른 영역의 구체적 사정을 알아야 하는 정도입니다. 이름을 나누는 것보다 실제 호출과 상태 변경이 이 분리를 지키는지가 중요합니다.\n\n합성 과정에서 화면용 정적 카탈로그와 봇 프로필이 모두 study_characters::Character를 선언하면 한 소스 파일에 함께 포함할 수 없습니다. 화면용 자료를 `study_character_art`로 옮기고 설정·메뉴·이미지 호출자도 함께 바꿉니다. 봇 프로필의 `study_characters`는 유지합니다. 이는 이름 충돌을 해결하면서 서로 다른 자료의 역할을 드러내는 수정입니다. 이제 두 헤더를 같은 검사기에 포함해 이 경계를 컴파일합니다.",
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "표현과 행동을 구별한 선택 값",
+          "language": "cpp",
+          "text": "struct Appearance {\n    std::string name, icon, portrait, difficulty;\n};\nstruct Behavior {\n    std::string model;\n    bot::Pacing pacing;\n};\nstruct Character {\n    std::string id;\n    Appearance appearance;\n    Behavior behavior;\n};"
+        }
+      ]
+    },
+    {
+      "title": "OCP: 어떤 변경을 데이터로 열어 두었는가",
+      "body": "개방-폐쇄 원칙(OCP)은 예상한 확장에 대해 핵심 동작을 계속 수정하지 않아도 되도록 경계를 두는 관점입니다. 캐릭터 한 명을 추가할 때 Catalog의 행을 늘리고 같은 파서를 사용할 수 있다면 그 확장축은 데이터로 열려 있습니다.\n\n모든 변경이 설정 파일 한 줄로 끝나야 한다는 뜻은 아닙니다. 블록 모양이나 보드 규칙을 바꾸면 합법 행동·직렬화·모델 관측·서버 재현의 계약이 함께 달라질 수 있습니다. 기존 인터페이스가 새 의미를 표현하지 못하면 버전을 바꾸고 관련 호출자를 수정하는 것이 맞습니다.\n\n확장 지점에는 거절 규칙도 필요합니다. 잘못된 행을 조용히 건너뛰어 일부 캐릭터만 남기면 사용자가 고른 ID가 다른 대상을 가리킬 수 있습니다. Catalog는 후보 전체를 검증한 뒤 값으로 반환하고, 호출자가 성공한 후보만 채택하게 합니다.",
+      "reference": {
+        "path": "bot/opponent_profile.h",
+        "symbol": "parse_opponent_profile",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "전체 후보를 만든 뒤 반환",
+          "language": "cpp",
+          "text": "        if(input.bad() || (input.fail() && !input.eof()))throw std::runtime_error(\"profile read failed\");\n        if(candidate.entries_.empty())throw std::invalid_argument(\"empty character catalog\");\n        return candidate;\n    }"
+        }
+      ]
+    },
+    {
+      "title": "LSP: 같은 시그니처보다 강한 행동 계약",
+      "body": "리스코프 치환 원칙(LSP)은 대체 구현이 호출자가 의존하는 행동 계약을 깨뜨리지 않아야 한다는 관점입니다. 상속 계층뿐 아니라 정책 콜백을 교체할 때도 같은 질문을 할 수 있습니다. 컴파일되는 콜백이라고 게임이 사용할 수 있는 정책이 되는 것은 아닙니다.\n\nPicker는 주어진 관측에서 사용할 행동을 선택하고, 선택하지 못하면 false를 반환합니다. true와 함께 범위 밖 행동을 내놓는 구현은 호출자가 원하는 성공 계약을 지키지 못합니다. Match는 반환값과 실제 합법 행동 목록을 함께 검사해 그런 구현의 결과를 실패 상태로 바꿉니다.\n\n대체 정책마다 실력이 같아야 하는 것은 아닙니다. 보존할 것은 입력/출력 의미와 실패 계약이며, 선택 품질은 평가 문제입니다. 서버와 클라이언트가 같은 경기를 재현해야 하는 경로에서는 모델·전처리·선택 규칙의 일치까지 별도 계약으로 필요합니다.",
+      "reference": {
+        "path": "bot/policy_decision.h",
+        "symbol": "Decision choose_policy",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "정책의 성공과 합법 행동을 함께 확인",
+          "language": "cpp",
+          "text": "            int selected=-1;bool ok=false;\n            try {ok=primary(observed,selected);}catch(const std::exception&) {}\n            if(ok && std::find(legal.begin(),legal.end(),selected)!=legal.end()) {\n                frame.source=Source::primary;action=selected;return true;\n            }"
+        }
+      ]
+    },
+    {
+      "title": "ISP: 호출자에게 필요한 계약의 크기",
+      "body": "인터페이스 분리 원칙(ISP)은 호출자가 쓰지 않는 기능에 의존하도록 묶지 않는 관점입니다. Driver가 필요한 것은 관측에 대한 선택 동작입니다. 모델 학습·파일 저장·GPU 장치 설정까지 포함한 거대한 객체를 받게 만들 필요가 없습니다.\n\n현재 선택 계약은 호출 가능한 객체 하나로 표현됩니다. 반대로 Session은 규칙 전이와 상태 조회를 함께 제공하는 값입니다. 메서드 수가 많다는 이유만으로 무조건 둘로 나누면 상태 불변식과 소유권을 호출자가 더 많이 관리해야 할 수 있습니다.\n\n분리할 때는 실제 사용자를 봅니다. 렌더러는 읽기 전용 뷰를, 진행자는 상태 변경 기능을 필요로 할 수 있습니다. 작은 인터페이스를 만들었다면 참조가 가리키는 원본의 수명과 동시 접근 조건도 설명해야 합니다. 작은 표면만으로 안전이 따라오지는 않습니다.",
+      "reference": {
+        "path": "bot/controller.h",
+        "symbol": "uint8_t next",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      }
+    },
+    {
+      "title": "DIP: 고수준 정책이 구체적인 추론기에 매이지 않게",
+      "body": "의존 역전 원칙(DIP)은 핵심 동작이 바깥 기술의 구체적인 세부에 묶이지 않도록 필요한 계약을 중심에 두는 관점입니다. Match는 ONNX Session을 직접 만들거나 파일 경로를 열지 않습니다. 호출자가 준비한 선택 동작을 받아 경기의 입력과 실패 정책을 조합합니다.\n\nC++의 template 콜백, 함수 포인터, std::function, 순수 가상 인터페이스는 서로 다른 표현 수단입니다. 런타임 교체, 컴파일 비용, 코드 크기, 소유권 요구에 따라 고릅니다. virtual을 추가했다고 DIP가 완성되거나 template이면 DIP를 적용할 수 없는 것은 아닙니다.\n\n객체 생성과 연결은 바깥 조립 지점에 둡니다. 그곳은 파일·모델·설정을 알아도 되지만 규칙 전이 안에서 OS 자원을 만들지는 않습니다. 역할별 CMake 빌드에서 순수 규칙 실행기가 GUI·DB·추론 SDK 없이 만들어지는지 보면 이 경계의 일부를 실행 가능한 근거로 확인할 수 있습니다.",
+      "reference": {
+        "path": "bot/controller.h",
+        "symbol": "template<class Picker>",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "정책을 저장하지 않고 호출에 주입",
+          "language": "cpp",
+          "text": "    template<class Picker> Frame tick(unsigned humanMask,Picker&& primary,bool allowFallback) {\n        if(finished())throw std::logic_error(\"match already finished\");"
+        }
+      ]
+    },
+    {
+      "title": "값 스냅샷과 뷰의 수명을 구별하기",
+      "body": "Catalog의 select는 Character를 값으로 반환합니다. 선택한 경기의 설정은 그 시점의 값으로 남고, 목록을 다시 읽어도 이미 선택한 이름·모델 경로가 저절로 바뀌지 않습니다. 재로딩이 진행 중 경기의 조건을 바꿔 버리는 문제를 줄입니다.\n\n반면 entries는 내부 vector의 const 참조를 반환합니다. 그 참조를 Catalog보다 오래 보관하거나, Catalog를 교체한 뒤 그대로 사용하는 코드는 안전하지 않습니다. const는 수정 경로를 제한하지만 수명을 연장하지 않습니다.\n\n모델 경로 문자열을 복사했다고 모델 파일의 내용까지 고정한 것은 아닙니다. 실제 모델 Session을 준비하고 버전/내용 식별자를 묶는 책임은 조립 지점과 배포에 남아 있습니다. 복사된 값, 빌려 보는 뷰, 외부 파일의 수명을 별도로 읽습니다.",
+      "reference": {
+        "path": "bot/opponents.h",
+        "symbol": "struct Opponent",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "선택은 값, 목록 조회는 참조",
+          "language": "cpp",
+          "text": "    Character select(const std::string& id) const {\n        for(const auto& entry:entries_)if(entry.id==id)return entry;\n        throw std::out_of_range(\"unknown character identity\");\n    }\n    const std::vector<Character>& entries() const noexcept {return entries_;}"
+        }
+      ]
+    },
+    {
+      "title": "후보 상태 교체가 되돌릴 수 있는 범위",
+      "body": "Driver는 현재 상태와 자신을 복사한 후보에서 전이를 계산하고, 마지막에 noexcept 이동 대입으로 채택합니다. 계산 중 예외가 전파되면 실제 Session과 Driver의 후보는 버려집니다. 이 구조의 예외 보장은 관리하는 객체의 상태에 관한 것입니다.\n\n정책 콜백이 외부 카운터를 증가시키거나 파일을 썼다면 후보 폐기로 그 효과가 되돌아가지는 않습니다. 콜백의 외부 효과까지 포함한 트랜잭션이 필요하면 효과를 분리해 반환하거나 별도의 저장 프로토콜을 설계해야 합니다. 실습은 정책이 카운터를 증가시킨 뒤 예외를 던질 때 상태 바이트는 보존되어도 카운터는 증가한 채 남는 것을 확인합니다.\n\nMatch는 std::exception 계열의 정책 예외를 받아 정책 실패로 바꾸고, 로컬 보상 적격 상태에 기록합니다. 이때는 예외가 밖으로 전파되어 경기 전체가 롤백되는 경로가 아닙니다. 내부 진행을 계속할지와 실패를 어떤 결과로 바꿀지를 계층마다 구분해야 합니다.",
+      "reference": {
+        "path": "bot/policy_decision.h",
+        "symbol": "catch(const std::exception&)",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "Driver의 후보 계산과 마지막 채택",
+          "language": "cpp",
+          "text": "        auto next=*this;\n        auto candidate=live.clone();\n        const auto result=next.advance(candidate,picker);\n        next.expected_=candidate.state_bytes();\n        static_assert(std::is_nothrow_move_assignable_v<study_python::Session>);\n        static_assert(std::is_nothrow_move_assignable_v<Driver>);\n        live=std::move(candidate);\n        *this=std::move(next);"
+        }
+      ]
+    },
+    {
+      "title": "보상 판정은 클라이언트의 좋은 설계 밖에도 경계가 있다",
+      "body": "클라이언트의 RunStatus가 reward_eligible을 정확히 계산하더라도 그것을 서버의 지급 권한으로 사용할 수는 없습니다. 사용자가 실행 파일이나 메모리를 바꾸면 로컬 상태를 바꿀 수 있기 때문입니다. 함수가 깔끔하고 책임이 나뉘어 있다는 사실과 신뢰할 수 있는 주체가 판정한다는 사실은 다릅니다.\n\n제품의 ranked relay는 서버가 정한 시드와 입력을 재현하고, meta는 인증된 경로의 결과를 거래로 저장합니다. 봇 보상도 서버 정책과 재현 경로가 필요합니다. 상태 전이의 결정성, 통신 신뢰, 중복 지급 방지는 서로 이어지지만 하나의 인터페이스로 대체되지 않습니다.\n\nDatabase는 계정·상점·결과 관련 기능을 한 연결과 잠금 경계 안에 모읍니다. 기능이 늘어나면 읽기 어렵다는 비용이 있지만, 메서드를 파일별로 흩어 놓는 것만으로 개선되지는 않습니다. 거래가 함께 지켜야 할 불변식과 잠금 소유를 유지하며 변경 이유에 맞춰 나누어야 합니다.",
+      "reference": {
+        "path": "meta/database.cpp",
+        "symbol": "Database::saveBotWin",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      }
+    },
+    {
+      "title": "변경 요청마다 읽을 코드와 증거를 짝짓기",
+      "body": "| 요청 | 먼저 읽을 경계 | 확인할 증거 |\n| --- | --- | --- |\n| 캐릭터 이름·그림 | 표시 자료, 자산 로더, 선택 값 | 동일 입력의 규칙 상태 보존과 대상 화면 |\n| 입력 속도 | Pacing, Driver/Controller | 실제 틱별 입력과 자연 낙하 처리 |\n| 모델 교체 | 관측·행동 계약, 추론 어댑터 | 출력/합법 선택 대조와 실패 표시 |\n| 새 보상 | 서버 판정, 카탈로그, DB 거래 | 중복·동시 요청·응답 유실 |\n| 보드 규칙 | 전이, 직렬화, 서버 재현, 학습 환경 | 버전 호환·양언어 패리티·이력 재현 |\n\n변경 범위는 파일 수로 결정하지 않습니다. 작은 enum 변경 하나도 wire 값이나 저장된 ID의 의미를 바꿀 수 있습니다. 반대로 표시 문자열 변경은 많은 화면에 나타나더라도 규칙 상태를 바꾸지 않을 수 있습니다.\n\n주석에는 코드가 바로 말해 주는 동작보다 전제·소유자·호출 순서·실패 이후 상태를 남깁니다. “값을 대입한다” 대신 “진행 중 선택을 바꾸지 않도록 값으로 보관한다”가 유지보수에 필요한 이유를 전달합니다. 주석도 실제 코드와 함께 검토해야 하는 계약입니다.",
+      "reference": {
+        "path": "server/ranked_game.h",
+        "symbol": "class RankedGame",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      }
+    },
+    {
+      "title": "설계의 경계를 실행기로 확인하기",
+      "body": "ARCHITECTURE 역할은 SDL·DB·ONNX 구현을 연결하지 않고 누적 규칙과 경기 구성의 계약을 실행합니다. 표현만 바꾼 두 캐릭터의 상태를 비교하고, 잘못된 입력·정책 실패·외부 효과를 각각 관찰합니다. 컴파일 의존의 독립성과 행동 계약의 일부를 같은 실습에서 볼 수 있습니다.\n\n검사 통과를 저장소 전체가 SOLID를 준수한다는 인증으로 읽지는 않습니다. 템플릿 때문에 커지는 빌드 비용, 큰 조립 함수의 가독성, 헤더에 모인 구현, DB 거래의 결합은 실제 변경을 통해 계속 평가해야 합니다. 원칙은 분리 여부를 판단하는 질문이며 점수를 매기는 체크리스트가 아닙니다.\n\n핵심은 바뀌는 이유를 찾고, 누가 상태를 소유하며, 어떤 실패를 어떤 호출자가 처리하는지 설명하는 것입니다. 개선은 그 설명이 어려운 경계부터 작은 반례 검사와 함께 진행합니다. 이미 명확한 경계에 추상화 층을 더하는 것이 목적이 되지 않게 합니다.",
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "if (TETRIS_BUILD_TEST)",
+        "invariant": "변경 이유·의존 방향·행동 계약·상태 소유권을 함께 읽는다.",
+        "mayDiffer": "기준 코드는 책임을 작게 드러내고 제품은 여러 운영 경로를 연결합니다. 함수 배치와 클래스 수보다 호출 전제와 실패 이후 상태를 비교합니다."
+      },
+      "codes": [
+        {
+          "label": "변경 경계 역할과 계약 검사",
+          "language": "bash",
+          "text": "python3 scripts/check_learning_change_boundaries.py"
+        },
+        {
+          "label": "누적 경기 구성 전체",
+          "language": "cpp",
+          "file": "checkpoints/175-change-boundaries/bot/policy_match.h"
+        },
+        {
+          "label": "변경 경계 검사 전체",
+          "language": "cpp",
+          "file": "checkpoints/175-change-boundaries/tests/architecture_contract.cpp"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "175-1",
+      "question": "이름·초상화 변경 때마다 입력 Driver도 고쳐야 한다. SRP 관점에서 먼저 조사할 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Driver의 public 메서드 수가 하나를 넘는지 확인한다."
+        },
+        {
+          "id": "b",
+          "text": "표시 자료의 변경이 입력 제어와 결합된 이유와 데이터 흐름을 확인한다."
+        },
+        {
+          "id": "c",
+          "text": "모든 캐릭터를 별도의 상속 클래스로 바꾼다."
+        },
+        {
+          "id": "d",
+          "text": "표시와 입력 코드를 같은 큰 함수로 합쳐 수정 횟수를 줄인다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "표시 자료의 변경이 입력 제어와 결합된 이유와 데이터 흐름을 확인한다.",
+      "explanation": "변경 이유가 다른 표현과 입력 제어가 어떤 값·호출로 결합되어 있는지 찾는다. 메서드 수나 상속 유무는 그 자체로 책임 분리의 증거가 아니다."
+    },
+    {
+      "id": "175-2",
+      "question": "정책 콜백이 컴파일되고 true를 반환하지만 합법 목록에 없는 행동을 내놓는다. 어떤 판단이 맞는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "컴파일됐으므로 대체 구현의 행동 계약도 충족했다."
+        },
+        {
+          "id": "b",
+          "text": "true이면 합법 행동 검사 없이 진행해야 확장이 가능하다."
+        },
+        {
+          "id": "c",
+          "text": "모든 대체 정책은 원래 모델과 같은 행동을 골라야 한다."
+        },
+        {
+          "id": "d",
+          "text": "반환 형식과 성공의 의미는 다르며 Match가 잘못된 선택을 실패로 분류해야 한다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "반환 형식과 성공의 의미는 다르며 Match가 잘못된 선택을 실패로 분류해야 한다.",
+      "explanation": "성공은 호출자가 사용할 수 있는 합법 행동을 포함해야 한다. 모델 실력이나 정확한 선택이 같아야 한다는 뜻은 아니며, 컴파일 성공만으로 의미 계약은 증명되지 않는다."
+    },
+    {
+      "id": "175-3",
+      "question": "추론 SDK를 바꾸면서 Match의 진행 순서는 유지하려 한다. 어떤 연결이 현재 경계에 맞는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "바깥에서 추론기를 준비해 같은 선택 계약의 콜백을 전달한다."
+        },
+        {
+          "id": "b",
+          "text": "Match의 헤더에서 새 SDK의 파일 로딩 API를 직접 호출한다."
+        },
+        {
+          "id": "c",
+          "text": "모든 전역 상태를 SDK 객체 하나로 합친다."
+        },
+        {
+          "id": "d",
+          "text": "가상 기반 클래스를 추가하면 입력·실패 계약 검토는 생략한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "바깥에서 추론기를 준비해 같은 선택 계약의 콜백을 전달한다.",
+      "explanation": "호출자가 준비한 선택 동작을 전달하면 진행 정책과 구체 SDK 연결을 구분할 수 있다. 템플릿/가상 함수는 표현 선택이며 행동과 수명 계약은 따로 검토한다."
+    },
+    {
+      "id": "175-4",
+      "question": "선택한 Character를 값으로 보관한 뒤 Catalog를 다시 읽었다. 어떤 설명이 정확한가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "보관한 값의 모델 경로는 디스크 모델 내용까지 불변으로 만든다."
+        },
+        {
+          "id": "b",
+          "text": "entries의 const 참조도 Catalog 교체 뒤 수명을 보장한다."
+        },
+        {
+          "id": "c",
+          "text": "선택 값은 유지되지만 외부 모델 파일의 내용·수명은 별도로 고정해야 한다."
+        },
+        {
+          "id": "d",
+          "text": "Match가 전달받은 Character 전체를 멤버로 저장하므로 모든 표시 자원도 소유한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "선택 값은 유지되지만 외부 모델 파일의 내용·수명은 별도로 고정해야 한다.",
+      "explanation": "Catalog::select의 반환값은 독립 값이다. Match는 이 값에서 pacing을 복사해 Driver를 만들며 Character 전체나 외부 파일을 소유하지 않는다. 구성 값과 자원의 수명을 나누어 읽는다."
+    },
+    {
+      "id": "175-5",
+      "question": "Driver::tick에서 정책이 외부 카운터를 늘린 뒤 예외를 던졌다. 예외가 Driver 밖으로 전파되는 경로의 결과는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Session과 Driver 후보, 외부 카운터가 모두 이전 상태가 된다."
+        },
+        {
+          "id": "b",
+          "text": "Session과 Driver 후보는 채택되지 않지만 외부 카운터 증가는 남는다."
+        },
+        {
+          "id": "c",
+          "text": "Driver가 모든 정책 예외를 실패 상태로 바꾸므로 전파되지 않는다."
+        },
+        {
+          "id": "d",
+          "text": "Session은 후보 단계마다 직접 바뀌고 Driver만 되돌아간다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Session과 Driver 후보는 채택되지 않지만 외부 카운터 증가는 남는다.",
+      "explanation": "Driver의 후보 상태와 noexcept 채택 경계는 관리하는 내부 객체에 적용된다. 임의의 콜백 외부 효과는 자동 복구되지 않는다. Match가 정책 예외를 잡아 실패로 전환하는 경로와 구분해야 한다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "ARCHITECTURE 계약을 빌드하고 표현 변경·잘못된 입력·정책 예외의 결과를 확인한다.",
+      "Match의 소유 화살표와 정책 호출 화살표를 따로 그린다.",
+      "새 캐릭터·모델 교체·규칙 변경 중 하나를 골라 변경 이유와 검증 범위를 작성한다."
+    ],
+    "expected": "클래스 개수 대신 상태·수명·실패 계약을 근거로 변경 경계를 설명한다.",
+    "failureChecks": [
+      "const 참조가 원본 수명을 연장한다고 해석하지 않는다.",
+      "후보 상태 폐기가 콜백의 외부 효과까지 되돌린다고 가정하지 않는다.",
+      "클라이언트의 보상 적격 상태를 서버 지급 권한으로 사용하지 않는다."
+    ]
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "선택 DeepSeek 경계 검사/문제 초안·누적 소유/실패 코드 대조",
+    "corrections": [
+      "SRP를 메서드 수와 구분",
+      "LSP의 의미/실패 계약",
+      "값 스냅샷과 외부 모델 버전 구분",
+      "후보 상태와 콜백 외부 효과 구분",
+      "relay 서버 시뮬레이션 누락 문서 교정",
+      "DeepSeek require의 잘못된 noreturn 제거",
+      "표현 fixture에서 실제 정책 호출 관찰",
+      "Match는 Character 전체를 보관하지 않음",
+      "Driver 예외 전파와 Match 실패 처리의 커밋 구분",
+      "화면 카탈로그와 봇 프로필의 동일 namespace/type 충돌을 실제 합성으로 재현·분리"
+    ]
+  },
+  "validation": [
+    "Linux ARCHITECTURE fresh Release빌드·경계/표현/설정3CTest; 두 Character 타입의 동일 소스 파일 포함 충돌 재현·namespace분리 교정",
+    "인라인7·현재참조·누적보존 검사; 대상 GUI/ONNX/DB 통합은 이 역할의 검사 범위 밖"
+  ]
+}

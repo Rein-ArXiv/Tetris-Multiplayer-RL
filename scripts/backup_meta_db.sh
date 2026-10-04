@@ -1,81 +1,91 @@
 #!/usr/bin/env bash
-# SQLite meta DB 백업.
-#
-# 사용법:
-#   ./scripts/backup_meta_db.sh /srv/tetris/db/tetris.db /srv/tetris/backups
-#
-# 실행 중인 WAL DB도 일관되게 복사하도록 sqlite3 온라인 백업 API(.backup)를
-# 사용하고, 완성된 스냅샷의 무결성을 확인한다.
+# Linux archive/retention wrapper for the portable SQLite snapshot helper.
+# Requires Python sqlite3, GNU tar/sort, hard links and flock. Output is private.
 set -euo pipefail
 umask 077
 
 DB="${1:-/srv/tetris/db/tetris.db}"
 OUT_DIR="${2:-/srv/tetris/backups}"
-TS="$(date -u +%Y%m%dT%H%M%SZ)"
-# 같은 초에 수동 실행과 timer가 겹쳐도 snapshot 이름이 충돌하지 않게 PID를 붙인다.
-BASE="tetris-$TS-$$"
-
-if [ ! -f "$DB" ]; then
+KEEP="${KEEP:-14}"
+if [[ ! "$KEEP" =~ ^[0-9]+$ ]]; then
+    echo '[backup_meta_db] KEEP must be a positive decimal integer.' >&2
+    exit 2
+fi
+while [[ ${#KEEP} -gt 1 && "$KEEP" == 0* ]]; do KEEP="${KEEP#0}"; done
+if [[ "$KEEP" == 0 || ${#KEEP} -gt 9 ]]; then
+    echo '[backup_meta_db] KEEP must be in 1..999999999.' >&2
+    exit 2
+fi
+if [[ ! -f "$DB" ]]; then
     echo "[backup_meta_db] DB not found: $DB" >&2
     exit 1
 fi
-
-case "$DB" in
-    /*) DB_ABS="$DB" ;;
-    *)  DB_ABS="$PWD/$DB" ;;
-esac
-
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT_DIR"
-
-if ! command -v sqlite3 >/dev/null 2>&1; then
-    echo "[backup_meta_db] sqlite3 CLI is required for a consistent online backup." >&2
-    echo "[backup_meta_db] Install sqlite3, or stop tetris_meta before making an offline copy." >&2
+# Serialize publication and retention in this output directory. SQLite itself
+# coordinates an online source; this lock does not pause application writers.
+exec {LOCK_FD}>"$OUT_DIR/.tetris-backup.lock"
+if ! flock -n "$LOCK_FD"; then
+    echo '[backup_meta_db] Another archive operation owns this directory.' >&2
     exit 1
 fi
-
-OUT_DB="$OUT_DIR/$BASE.db"
-(
-    cd "$OUT_DIR"
-    # BASE는 스크립트가 만든 안전한 이름이다. 호출자가 준 경로는 sqlite
-    # dot-command 문자열에 넣지 않고 DB_ABS argv와 cd 대상으로만 사용한다.
-    sqlite3 "$DB_ABS" ".backup '$BASE.db'"
-)
-
-INTEGRITY="$(sqlite3 "$OUT_DB" 'PRAGMA integrity_check;')"
-if [ "$INTEGRITY" != "ok" ]; then
-    echo "[backup_meta_db] integrity_check failed for $OUT_DB: $INTEGRITY" >&2
-    exit 1
-fi
-
-tar -czf "$OUT_DIR/$BASE.tar.gz" -C "$OUT_DIR" "$BASE.db"
-
-# tar.gz 에 스냅샷이 들어갔으니 중간 산출물 .db 는 지운다. 남겨두면 백업마다
-# 압축본 + 비압축 원본이 이중으로 쌓여 디스크가 두 배로 소모된다. 삭제 실패는
-# 경고만 남긴다 — 백업 본체는 이미 성공했으므로 여기서 스크립트를 죽이지 않는다.
-rm -f -- "$OUT_DB" || echo "[backup_meta_db] warning: could not remove $OUT_DB" >&2
-
-# ── 보존 정책 ─────────────────────────────────────────────────────────────────
-# 최근 백업 KEEP개(기본 14, 환경변수 KEEP 로 조정)만 남기고 오래된 tar.gz 를
-# 삭제한다. 정리는 부가 작업이므로 어떤 실패도 백업 성공을 뒤집어선 안 된다
-# (set -e 아래에서 if ! ... 로 감싸 실패를 흡수한다).
-KEEP="${KEEP:-14}"
-case "$KEEP" in
-    ''|*[!0-9]*)
-        # 숫자가 아니면 산술 확장에서 스크립트가 죽으므로 기본값으로 대체.
-        echo "[backup_meta_db] warning: invalid KEEP='$KEEP'; using 14" >&2
-        KEEP=14
-        ;;
-esac
-prune_old_backups() {
-    # 파일명은 이 스크립트가 만든 UTC 타임스탬프 형식뿐이라 공백/개행이 없고,
-    # ls -1t(수정시각 내림차순) 기준 KEEP+1 번째부터가 "오래된" 백업이다.
-    ls -1t "$OUT_DIR"/tetris-*.tar.gz 2>/dev/null | tail -n +"$((KEEP + 1))" |
-    while IFS= read -r old; do
-        rm -f -- "$old" || echo "[backup_meta_db] warning: failed to prune $old" >&2
-    done
+BASE="tetris-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+STAGE="$(mktemp -d "$OUT_DIR/.tetris-stage.XXXXXX")"
+cleanup() {
+    rm -f -- "$STAGE/$BASE.db" "$STAGE/archive.tar.gz" "$STAGE/retention.list" || \
+        echo '[backup_meta_db] warning: staging cleanup failed.' >&2
+    rmdir -- "$STAGE" 2>/dev/null || \
+        echo '[backup_meta_db] warning: private staging directory remains.' >&2
 }
-if ! prune_old_backups; then
-    echo "[backup_meta_db] warning: retention cleanup failed (backup itself is OK)" >&2
-fi
+trap cleanup EXIT
+python3 "$SCRIPT_DIR/backup_meta_db.py" "$DB" "$STAGE/$BASE.db"
+tar -czf "$STAGE/archive.tar.gz" -C "$STAGE" "$BASE.db"
+# Publish only a complete archive. A late sync failure may leave this file;
+# no retention runs unless publication and its immediate-parent sync succeed.
+python3 - "$STAGE/archive.tar.gz" "$OUT_DIR/$BASE.tar.gz" <<'PY'
+import os
+from pathlib import Path
+import sys
+source, target = map(Path, sys.argv[1:])
+with source.open('r+b') as stream:
+    os.fsync(stream.fileno())
+os.link(source, target)
+fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
 
-echo "[backup_meta_db] Done: $OUT_DIR/$BASE.tar.gz (integrity_check=ok)"
+prune_old_backups() {
+    local out_dir="$1" base="$2" keep="$3"
+    local -a candidates=() sorted=()
+    local path name
+    [[ -f "$out_dir/$base.tar.gz" && ! -L "$out_dir/$base.tar.gz" ]] || {
+        echo '[backup_meta_db] warning: current archive missing; retention skipped.' >&2
+        return 0
+    }
+    for path in "$out_dir"/tetris-*.tar.gz; do
+        [[ -f "$path" && ! -L "$path" ]] || continue
+        name="${path##*/}"
+        [[ "$name" =~ ^tetris-[0-9]{8}T[0-9]{6}Z-[0-9]+[.]tar[.]gz$ ]] || continue
+        [[ "$name" == "$base.tar.gz" ]] || candidates+=("$name")
+    done
+    ((${#candidates[@]})) || return 0
+    # Check the whole sort before deleting anything; preserve path boundaries.
+    if ! printf '%s\0' "${candidates[@]}" | LC_ALL=C sort -zr > "$STAGE/retention.list"; then
+        echo '[backup_meta_db] warning: retention sort failed; nothing pruned.' >&2
+        return 0
+    fi
+    while IFS= read -r -d '' name; do sorted+=("$name"); done < "$STAGE/retention.list"
+    local i
+    # Keep the new completed archive plus newest named UTC snapshots.
+    # Same-second snapshots use the filename as a deterministic tie breaker.
+    for ((i=keep-1; i<${#sorted[@]}; ++i)); do
+        rm -f -- "$out_dir/${sorted[i]}" || \
+            echo '[backup_meta_db] warning: old archive could not be pruned.' >&2
+    done
+    return 0
+}
+prune_old_backups "$OUT_DIR" "$BASE" "$KEEP"
+printf '[backup_meta_db] Done: %s/%s.tar.gz (checked snapshot)\n' "$OUT_DIR" "$BASE"

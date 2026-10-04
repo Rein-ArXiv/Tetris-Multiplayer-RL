@@ -37,7 +37,9 @@ def source_allowed(path: Path) -> bool:
     # inside the named repository path, without following external targets.
     if path.resolve() != path or not path.is_file():
         return False
-    return rel.as_posix() in {"CMakeLists.txt", "CMakePresets.json", "cmake/TetrisOnnxRuntime.cmake"} or (
+    return rel.as_posix() in {"CMakeLists.txt", "CMakePresets.json", "cmake/TetrisOnnxRuntime.cmake",
+        "deploy/systemd/tetris-meta.service", "deploy/systemd/tetris-relay.service",
+        "deploy/systemd/tetris-wss.service"} or (
         rel.parts[0] in SOURCE_ROOTS and path.suffix in SOURCE_EXTENSIONS
     )
 

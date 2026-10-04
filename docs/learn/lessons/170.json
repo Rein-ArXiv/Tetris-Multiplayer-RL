@@ -1,0 +1,404 @@
+{
+  "id": "lesson-170",
+  "title": "Windows 이전: 경로의 바이트와 네이티브 자원",
+  "shortTitle": "wmain·UTF-8·인자 수명·CRLF·SOCKET·권한 경계",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 로컬 계정 실행기는 Linux의 인자 표현과 LF 공지를 기준으로 동작합니다.",
+  "finish": "완료: Windows 넓은 인자를 UTF-8로 전달하고 LF/CRLF 공지를 해석하며 Unicode DB의 재시작을 확인합니다.",
+  "objective": "OS 이전에서 유지할 업무 계약과 바꿔야 할 표현·수명 경계를 구분하고 실제 경로 실패를 진단한다.",
+  "prerequisites": [
+    "로컬 서비스의 기동·준비·DB 재시작",
+    "문자 인코딩과 소유한 자원의 수명",
+    "타깃 빌드와 동적 라이브러리"
+  ],
+  "recap": {
+    "points": [
+      "프로세스 시작·포트 공지·HTTP 준비는 서로 다른 증거다.",
+      "실행 파일과 DB 경로를 분리하면 현재 작업 디렉터리의 영향을 줄일 수 있다.",
+      "실행기는 자신이 시작한 자식의 수명을 책임진다."
+    ],
+    "bridge": "같은 서비스 계약을 다른 OS로 옮길 때 문자열 표현과 자원 경계를 명시합니다."
+  },
+  "sections": [
+    {
+      "title": "옮기는 것은 실행 파일 하나보다 크다",
+      "body": "계정 서비스의 책임은 HTTP 요청을 받아 계정을 읽고 저장하는 일입니다. Linux에서 Windows로 옮겨도 요청 경로와 토큰의 의미, SQLite에 기록할 상태는 유지되어야 합니다. 달라지는 것은 프로세스 진입점, 파일 이름의 표현, 동적 라이브러리 로딩, 소켓 자원의 생성·종료 같은 운영체제 경계입니다.\n\n이번 실습은 같은 계정 서비스에 **명령행 경로 변환**과 **줄바꿈을 명시한 포트 공지 해석**을 추가합니다. 한글·공백·이모지가 들어 있는 경로로 DB를 열고, 프로세스를 다시 시작한 뒤 같은 계정을 조회합니다. 기존 경로가 우연히 ASCII만 사용해서 감춰졌던 전제를 드러내는 실험입니다.\n\n게임 클라이언트와 서버의 OS가 같아야 하는 것은 아닙니다. 통신하는 양쪽은 주소·TLS·메시지 형식·인증·버전 계약을 맞춥니다. 각 기기에서 실행하는 바이너리는 그 기기의 OS와 CPU에 맞게 준비합니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "static int run",
+        "invariant": "HTTP·DB 업무 로직과 플랫폼 진입점의 책임을 분리한다.",
+        "mayDiffer": "제품은 운영 인자와 보안 정책을 추가로 검사합니다. 실습 서비스는 숫자 루프백에서만 실행합니다."
+      }
+    },
+    {
+      "title": "같은 소스와 같은 바이너리는 다르다",
+      "body": "소스가 여러 OS에서 컴파일된다는 것은 컴파일러가 각 대상의 실행 파일을 만들 수 있다는 뜻입니다. Linux ELF 실행 파일과 Windows PE 실행 파일은 로더가 기대하는 형식부터 다릅니다. CPU가 모두 x64여도 Linux 실행 파일을 그대로 복사해 Windows 서버로 사용할 수는 없습니다.\n\nWindows에서는 Visual Studio 같은 다중 구성 생성기가 빌드 시 `Release` 또는 `Debug`를 선택합니다. 단일 구성 생성기는 구성할 때의 `CMAKE_BUILD_TYPE`을 사용합니다. 따라서 프로그램을 찾을 때도 자신이 선택한 생성기의 산출물 경로를 확인해야 합니다.\n\n| 경계 | 확인할 것 |\n| --- | --- |\n| 소스 → 목적 파일 | 대상 컴파일러·헤더·컴파일 옵션 |\n| 목적 파일 → 실행 파일 | 대상 라이브러리·진입점·심볼 |\n| 실행 파일 → 실행 중인 프로세스 | DLL·시스템 런타임·실행 권한 |\n| 프로세스 → 계정 상태 | DB 경로·접근 권한·스키마 |\n\n`Release` 폴더의 존재는 API 요청 성공의 증거가 아닙니다. 구성·링크·로딩·요청을 각각 관찰하면 실패 원인을 좁힐 수 있습니다.",
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)",
+        "invariant": "실제 대상에 필요한 시스템 라이브러리를 링크한다.",
+        "mayDiffer": "생성기와 설치 위치는 선택 사항이며 SDK·DLL의 CPU와 ABI는 대상에 맞아야 합니다."
+      }
+    },
+    {
+      "title": "글자·코드 포인트·코드 단위·바이트",
+      "body": "문자열이라는 말만으로는 메모리 표현을 알 수 없습니다. Unicode 코드 포인트는 문자를 구별하는 번호이고, 인코딩은 그 번호를 코드 단위와 바이트로 나타내는 규칙입니다. UTF-8은 8비트 코드 단위를, UTF-16은 16비트 코드 단위를 사용합니다.\n\n예를 들어 `한`은 U+D55C입니다. UTF-8에서는 `ED 95 9C`라는 세 바이트이고, UTF-16에서는 하나의 코드 단위 `D55C`입니다. `🎮`인 U+1F3AE는 UTF-8 네 바이트, UTF-16 두 코드 단위 `D83C DFAE`로 표현됩니다. UTF-16의 이런 두 코드 단위 조합을 서로게이트 쌍이라고 합니다.\n\n따라서 글자 수를 바이트 버퍼의 크기로 그대로 사용할 수 없습니다. Windows의 넓은 API는 UTF-16을 사용하지만 C++의 `wchar_t` 폭과 의미를 모든 플랫폼에서 동일하다고 가정해서도 안 됩니다. 변환 함수의 입력 길이가 코드 단위인지 바이트인지 확인해야 합니다.",
+      "reference": {
+        "path": "platform/utf8_arguments.cpp",
+        "symbol": "WideCharToMultiByte",
+        "invariant": "입력 코드 단위 수와 출력 바이트 수를 구분한다.",
+        "mayDiffer": "이 어댑터는 Windows 넓은 인자만 다룹니다. 텍스트 정규화나 화면에 보이는 글자 수 계산은 별도입니다."
+      }
+    },
+    {
+      "title": "컴파일 옵션과 실행 시 인자 인코딩",
+      "body": "`/utf-8`은 MSVC가 소스를 해석하고 좁은 문자열 리터럴을 만드는 문자 집합을 정합니다. C++ 파일 안의 한국어 문자열을 올바른 바이트로 만드는 일과, 프로세스 시작 때 운영체제가 전달한 인자를 해석하는 일은 서로 다른 경계입니다.\n\nWindows에서 `main`의 좁은 `argv`를 SQLite에 그대로 넘기면 시스템의 코드 페이지와 SQLite의 UTF-8 계약이 충돌할 수 있습니다. ASCII 경로는 두 표현에서 같아 문제가 숨겨지지만, 한글이나 이모지가 들어가면 잘못된 경로가 되거나 DB 열기에 실패할 수 있습니다.\n\n여기서는 `wmain`으로 넓은 인자를 받고, 경계에서 한 번 UTF-8로 변환한 뒤 공통 `run`에 전달합니다. SQLite의 `sqlite3_open`은 Windows에서도 UTF-8 파일 이름을 받습니다. POSIX 진입점은 OS가 전달한 인자 바이트를 유지하며, 실습 경로는 UTF-8로 표현 가능한 이름을 사용합니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "int wmain",
+        "invariant": "Windows 명령행의 UTF-16을 업무 코드가 사용하는 UTF-8로 명시 변환한다.",
+        "mayDiffer": "운영 코드의 다른 파일 API까지 이 변환이 대신 처리하지 않습니다. API마다 경로 계약을 확인합니다."
+      },
+      "notes": [
+        {
+          "kind": "공식 계약",
+          "title": "인코딩 계약을 확인할 위치",
+          "body": "[Microsoft의 main/wmain 설명](https://learn.microsoft.com/en-us/cpp/cpp/main-function-command-line-args)과 [SQLite의 파일 이름 인코딩](https://www.sqlite.org/c3ref/open.html)을 함께 읽으면 진입점과 DB API 사이에 변환이 필요한 이유를 확인할 수 있습니다."
+        }
+      ]
+    },
+    {
+      "title": "출력 크기를 먼저 묻고 정확한 버퍼를 만든다",
+      "body": "변환 함수는 Windows의 `WideCharToMultiByte`를 사용합니다. `CP_UTF8`로 목적 인코딩을 명시하고, `WC_ERR_INVALID_CHARS`로 잘못된 UTF-16을 거절합니다. 인식할 수 없는 문자를 대체 문자로 바꾼 경로는 원래 사용자가 지정한 파일과 달라질 수 있기 때문입니다.\n\n첫 호출은 출력 버퍼 없이 필요한 UTF-8 바이트 수를 구합니다. 그 길이만큼 문자열을 만든 뒤 두 번째 호출로 실제 바이트를 채웁니다. 반환값도 기대한 길이와 비교합니다. 입력 길이는 마지막 NUL을 제외한 코드 단위 수이고 출력 길이는 바이트 수입니다.\n\n빈 인자는 길이 0인 문자열로 따로 보존합니다. 빈 값이 인자 목록에서 사라지면 그 뒤 인자들의 위치가 달라집니다. 또한 `size_t`로 얻은 길이를 Windows API의 `int`로 줄이기 전에 표현 범위를 검사합니다.",
+      "reference": {
+        "path": "platform/utf8_arguments.cpp",
+        "symbol": "const int utf8_length",
+        "invariant": "코드 단위 길이·출력 바이트 길이·실패 반환을 각각 검사한다.",
+        "mayDiffer": "입력 문자열을 경로나 옵션으로 해석하는 일은 호출자의 공통 파서가 수행합니다."
+      },
+      "codes": [
+        {
+          "label": "필요한 바이트 수 조회와 변환",
+          "language": "cpp",
+          "text": "        const int utf8_length = ::WideCharToMultiByte(\n            CP_UTF8, WC_ERR_INVALID_CHARS, arg, source_length,\n            nullptr, 0, nullptr, nullptr);\n        if (utf8_length <= 0) {\n            throw std::runtime_error(kConversionError);\n        }\n\n        std::string converted(static_cast<std::size_t>(utf8_length), '\\0');\n\n        // Second call: perform the conversion into the exact buffer size.\n        const int written = ::WideCharToMultiByte(\n            CP_UTF8, WC_ERR_INVALID_CHARS, arg, source_length,\n            converted.data(), utf8_length, nullptr, nullptr);\n        if (written != utf8_length) {\n            throw std::runtime_error(kConversionError);\n        }\n\n        result.push_back(std::move(converted));"
+        }
+      ]
+    },
+    {
+      "title": "문자열 소유자와 char* 뷰의 수명",
+      "body": "공통 파서가 `char**`를 받으므로 UTF-8 문자열들로부터 포인터 배열을 만듭니다. 여기서 포인터 배열은 문자열을 소유하지 않습니다. `strings`가 문자 바이트를 소유하고, `arguments`는 그 바이트를 가리키는 빌린 주소만 보관합니다.\n\n문자열 벡터를 완성한 뒤 포인터를 모으는 순서가 중요합니다. 포인터를 미리 저장해 놓고 벡터를 계속 늘리면 재할당과 문자열 이동 때문에 주소가 유효하지 않게 될 수 있습니다. 작은 문자열 최적화처럼 문자열 저장 위치에 영향을 주는 구현도 있으므로 우연히 주소가 같았던 실험에 기대지 않습니다.\n\n`run`이 끝날 때까지 소유 벡터를 유지하고, 그동안 원소를 추가하거나 문자열을 수정하지 않습니다. 마지막에는 관례대로 널 포인터를 덧붙입니다. 이 방식은 문자 인코딩과 별개인 **소유권·주소 안정성** 문제도 함께 해결합니다.\n\n실습의 `guarded_run`은 공통 `run`에서 나온 예외를 고정된 오류 메시지와 종료 코드로 바꾸는 얇은 경계입니다. 문자열과 포인터의 소유는 진입점에 남아 있습니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "arguments.reserve(strings.size() + 1)",
+        "invariant": "포인터 뷰보다 소유 문자열이 오래 살아 있고 주소를 바꾸지 않는다.",
+        "mayDiffer": "나중에 파서가 vector<string>을 직접 받도록 바뀌면 포인터 뷰 자체를 없앨 수도 있습니다."
+      },
+      "codes": [
+        {
+          "label": "공통 run을 호출하는 Windows 진입점",
+          "language": "cpp",
+          "text": "int wmain(int argc, wchar_t** argv) {\n    try {\n        auto strings = platform::utf8_arguments(argc, argv);\n        // Construct the borrowed pointers after the owning strings stop moving.\n        std::vector<char*> arguments;\n        arguments.reserve(strings.size() + 1);\n        for (auto& value : strings) arguments.push_back(value.data());\n        arguments.push_back(nullptr);\n        return guarded_run(argc, arguments.data());\n    } catch (const std::exception&) {\n        std::fprintf(stderr, \"command line initialization failed\\n\");\n        return 1;\n    }\n}"
+        }
+      ]
+    },
+    {
+      "title": "진입점을 바꾸면 링크 계약도 바뀐다",
+      "body": "진입점 함수는 일반적인 업무 함수와 달리 런타임 시작 코드가 호출합니다. MSVC의 콘솔 프로그램은 `wmain`에 맞는 시작 코드를 선택합니다. MinGW에서는 넓은 인자 진입점을 선택하는 `-municode` 링크 옵션을 설정합니다. 소스에 함수만 추가했는데도 링크가 실패할 수 있는 이유입니다.\n\n플랫폼별 변환 코드는 별도 `.cpp`에 두고 Windows 헤더도 그 안으로 제한합니다. 공개 헤더는 문자열과 벡터로 계약을 표현하므로 계정 파서가 Windows 헤더의 매크로·소켓 선언 순서까지 알 필요가 없습니다. `NOMINMAX`와 `WIN32_LEAN_AND_MEAN`은 Windows 헤더를 읽기 전에 설정합니다.\n\nSERVICE 역할에는 변환 구현을 실행 파일의 소스로 추가합니다. 운영체제의 인자 표현을 바꾸는 코드가 DB 테이블이나 HTTP 라우트 안으로 흩어지지 않게 하는 구성입니다.",
+      "reference": {
+        "path": "CMakeLists.txt",
+        "symbol": "target_link_options(tetris_meta PRIVATE -municode)",
+        "invariant": "플랫폼 진입점과 시작 코드의 링크 선택을 맞춘다.",
+        "mayDiffer": "컴파일러 계열별 선택이며 모든 Windows 도구가 같은 옵션 이름을 쓰지는 않습니다."
+      },
+      "codes": [
+        {
+          "label": "SERVICE 실행 파일과 MinGW 시작 코드",
+          "language": "cmake",
+          "text": "  add_executable(study_account_db \"${STUDY_SOURCE}/meta/account_service.cpp\"\n    \"${STUDY_SOURCE}/platform/utf8_arguments.cpp\")\n  target_link_libraries(study_account_db PRIVATE study_accounts)\n  if(MINGW)\n    target_link_options(study_account_db PRIVATE -municode)\n  endif()"
+        }
+      ]
+    },
+    {
+      "title": "같은 한 줄도 파일의 바이트는 달라질 수 있다",
+      "body": "C++에서 `printf(\"PORT %d\\n\", port)`로 출력하더라도 Windows의 텍스트 모드에서는 줄 끝이 CRLF 두 바이트로 기록될 수 있습니다. Linux의 LF만 허용한 정규식은 같은 포트 공지를 잘못된 입력으로 판단합니다.\n\n읽은 문자열 전체에 `strip()`을 적용하는 방법은 편하지만, 앞의 공백이나 포트 뒤의 불필요한 공백까지 정상화합니다. 이번 프로토콜이 허용하는 차이는 줄 끝뿐입니다. 따라서 `\\r?\\n`으로 LF 또는 CRLF를 명시하고 `fullmatch`로 전체 문법을 검사합니다.\n\n숫자 범위 검사도 유지합니다. 예를 들어 `PORT 0`, `PORT 01`, 두 번 들어간 CR, NUL, 줄 뒤의 다른 토큰은 거절합니다. 이식성이 좋아진다는 것은 아무 입력이나 느슨하게 받아들인다는 뜻이 아니라 **허용할 변형을 정확히 정한다**는 뜻입니다.",
+      "reference": {
+        "path": "scripts/check_learning_windows_port.py",
+        "symbol": "def parser_contract",
+        "invariant": "텍스트 모드의 줄 끝 차이만 허용하고 입력 문법은 유지한다.",
+        "mayDiffer": "운영 서비스의 로그 형식과 이 학습용 PORT 공지 프로토콜은 독립적으로 관리됩니다."
+      },
+      "codes": [
+        {
+          "label": "LF/CRLF만 허용하는 공지 해석",
+          "language": "python",
+          "text": "def parse_port_line(line: bytes) -> int:\n    \"\"\"Accept only the announced line ending variants, not arbitrary whitespace.\"\"\"\n    match = re.fullmatch(rb\"PORT ([1-9][0-9]{0,4})\\r?\\n\", line)\n    if match is None:\n        raise RuntimeError(\"service reported an invalid port line\")\n    port = int(match[1])\n    if not 1 <= port <= 65535:\n        raise RuntimeError(\"service port out of range\")\n    return port"
+        }
+      ]
+    },
+    {
+      "title": "실행 파일 경로·인자 경로·작업 디렉터리",
+      "body": "Python 실행기는 프로그램과 인자를 리스트의 원소로 전달합니다. 문자열 한 줄을 셸에 넘겨 다시 해석시키지 않으므로 공백이 들어 있는 DB 경로도 하나의 인자로 남습니다. Windows에서 Python은 Unicode 프로세스 API를 사용해 인자를 전달하며, 자식의 `wmain`이 이를 받습니다.\n\n실행 파일과 DB 경로는 부모 쪽에서 절대 경로로 확정하고 자식의 작업 디렉터리는 별도 임시 위치로 정합니다. 이 조건에서 같은 DB가 열려야 경로 처리가 우연한 현재 위치에 기대지 않는다고 말할 수 있습니다. 경로 구분자만 슬래시에서 역슬래시로 바꾸는 것으로 인코딩·기준 디렉터리 문제까지 해결되지는 않습니다.\n\nPython의 `terminate()` 의미도 OS마다 다릅니다. Linux에서는 종료 신호를 보내지만 Windows에서는 강제 프로세스 종료 API를 사용합니다. 실습의 정리는 소유한 자식을 회수하는 계약이며, 처리 중 요청을 모두 마치는 정상 종료를 뜻하지 않습니다.",
+      "reference": {
+        "path": "scripts/check_learning_windows_port.py",
+        "symbol": "def actual_service",
+        "invariant": "같은 경로의 상태를 재시작 후 다시 확인하며 프로세스 수명은 호출자가 소유한다.",
+        "mayDiffer": "개별 OS의 정상 종료 프로토콜이나 서비스 관리자 설치는 별도 책임입니다."
+      },
+      "codes": [
+        {
+          "label": "셸 없이 경로를 전달하는 공통 실행기",
+          "language": "python",
+          "text": "                proc = subprocess.Popen(\n                    [str(executable), \"0\", str(database)],\n                    cwd=tmp,                  # private, owned working directory\n                    stdout=sink,\n                    stderr=subprocess.STDOUT,\n                )"
+        }
+      ]
+    },
+    {
+      "title": "빌드하고 한글 경로로 계정을 다시 열어 보기",
+      "body": "체크포인트 `170-windows-port`의 SERVICE 역할을 빌드합니다. 아래 PowerShell 예는 Visual Studio 생성기의 Release 위치를 사용합니다. OpenSSL은 선택한 Windows 대상에 맞는 개발 파일과 실행용 DLL이 필요하며, vcpkg 도구 체인을 쓰는 경우 구성 단계에서 지정합니다.\n\nDB 디렉터리는 미리 만들고, 보조가 기동과 준비 확인을 마친 뒤 종료되는 것을 관찰합니다. 실제 계정 생성·재시작 조회는 검증 스크립트가 별도 임시 경로에서 수행합니다. 기존 운영 DB를 실험 입력으로 사용하지 않습니다.",
+      "reference": {
+        "path": "scripts/check_learning_windows_port.py",
+        "symbol": "--binary",
+        "invariant": "빌드 산출물의 정확한 위치를 선택하고 실제 HTTP와 DB 파일을 검사한다.",
+        "mayDiffer": "Ninja 같은 생성기는 실행 파일이 Release 하위에 있지 않을 수 있으므로 --binary로 실제 경로를 지정합니다."
+      },
+      "codes": [
+        {
+          "label": "Windows PowerShell에서 SERVICE 빌드",
+          "language": "powershell",
+          "text": "cmake -S docs/learn/checkpoints/170-windows-port/roles -B out/study170 -DSTUDY_ROLE=SERVICE\ncmake --build out/study170 --config Release --target study_account_db\nNew-Item -ItemType Directory -Force \"out/서버 데이터\" | Out-Null\npython docs/learn/checkpoints/170-windows-port/operations/local_service.py out/study170/Release/study_account_db.exe \"out/서버 데이터/계정.sqlite\"\npython scripts/check_learning_windows_port.py --binary out/study170/Release/study_account_db.exe"
+        },
+        {
+          "label": "Linux에서 같은 서비스 계약 확인",
+          "language": "bash",
+          "text": "cmake -S docs/learn/checkpoints/170-windows-port/roles -B out/study170 -DSTUDY_ROLE=SERVICE -DCMAKE_BUILD_TYPE=Release\ncmake --build out/study170 --target study_account_db\npython3 scripts/check_learning_windows_port.py --binary out/study170/study_account_db"
+        }
+      ]
+    },
+    {
+      "title": "SOCKET을 int로 줄이면 생기는 문제",
+      "body": "공개 네트워크 API가 모든 OS의 소켓을 `int`로 보관하면 Windows에서 핸들의 일부 비트가 사라질 수 있습니다. POSIX의 파일 디스크립터는 부호 있는 정수지만 Winsock의 `SOCKET`은 포인터 크기의 부호 없는 값입니다. x64라는 CPU 이름만으로 C++의 모든 정수형 폭을 결정할 수 없습니다.\n\n누적 소켓 계층은 Windows에서 `uintptr_t`, POSIX에서 `int`를 선택하고 실패 센티널도 구별합니다. POSIX에서는 0도 유효한 디스크립터입니다. Windows에서는 `INVALID_SOCKET`에 해당하는 값을 비교해야 하므로 부호 검사만으로 유효성을 판정할 수 없습니다.\n\n생성한 자원을 반환하는 함수도 짝이 맞아야 합니다. 소켓에는 Windows의 `closesocket`을 쓰고, 일반 Win32 파일 핸들에는 `CloseHandle`을 사용합니다. 숫자처럼 보이는 핸들도 어떤 API가 만들었는지에 따라 해제 계약이 달라집니다.",
+      "reference": {
+        "path": "net/native_socket.h",
+        "symbol": "using NativeSocket",
+        "invariant": "플랫폼별 핸들 폭과 실패 센티널을 보존한다.",
+        "mayDiffer": "게임 연결의 소유 방식과 실습의 이동 전용 Socket 구조는 다르지만 네이티브 표현 계약은 같습니다."
+      },
+      "codes": [
+        {
+          "label": "Runtime 내부의 플랫폼별 핸들 선언",
+          "language": "cpp",
+          "text": "#ifdef _WIN32\n    using Native = std::uintptr_t;                              // SOCKET-sized\n    static constexpr Native kInvalid = ~static_cast<Native>(0); // INVALID_SOCKET\n#else\n    using Native = int;                                         // file descriptor\n    static constexpr Native kInvalid = -1; // never 0: 0 is a valid descriptor\n#endif"
+        }
+      ]
+    },
+    {
+      "title": "초기화 수명과 소켓 수명을 분리하기",
+      "body": "Winsock은 사용 전에 `WSAStartup`이 성공해야 하고, 그 성공으로 얻은 사용 참조는 `WSACleanup`으로 반환합니다. 소켓을 쓰는 동안 그 기반을 먼저 정리하면 남은 I/O가 올바르게 끝날 수 없습니다.\n\n누적 실습은 `Runtime`을 먼저 만들고 소켓 소유자를 나중에 만듭니다. 같은 블록의 지역 변수는 역순으로 파괴되므로 소켓이 먼저 닫히고 Runtime이 뒤에 정리됩니다. 업무 로직에 이 초기화·종료 호출을 계속 흩어 쓰는 대신 수명 범위를 한 곳에 모읍니다.\n\nHTTP 계정 서비스는 사용 중인 HTTP 라이브러리가 담당하는 소켓 초기화 계약을 따릅니다. 직접 만든 소켓 계층의 Runtime을 그 옆에 무조건 추가하는 것이 해법은 아닙니다. **어느 계층이 시작 참조와 소켓을 소유하는지**를 먼저 확인합니다.",
+      "reference": {
+        "path": "net/socket.cpp",
+        "symbol": "bool net_init()",
+        "invariant": "소켓 사용 전 초기화와 모든 사용자 종료 뒤 정리 순서를 유지한다.",
+        "mayDiffer": "제품은 명시적 초기화/종료 호출을 사용합니다. 실습 Runtime의 자동 수명과 호출 책임을 비교합니다."
+      }
+    },
+    {
+      "title": "파일을 옮겼다고 접근 권한도 옮겨진 것은 아니다",
+      "body": "Linux의 `0600`은 파일 소유자의 읽기·쓰기 권한을 나타내는 모드 비트입니다. Windows의 NTFS는 사용자나 그룹의 SID와 접근 제어 항목으로 허용 대상을 표현합니다. 같은 숫자를 적었다고 같은 사용자만 읽을 수 있는 상태가 되었다고 판단할 수 없습니다.\n\n계정 자격 증명 파일을 다루는 현재 코드는 Windows에서 보호된 DACL을 구성하고 현재 사용자와 SYSTEM에 권한을 줍니다. 이는 개인 클라이언트 파일의 정책입니다. 서버 DB는 실제로 서비스를 실행하는 계정, 부모 디렉터리, 백업 위치까지 포함한 별도 권한 설계가 필요합니다.\n\n파일 이름을 올바르게 변환한 것과 그 파일을 누가 읽을 수 있는지는 독립적인 계약입니다. 경로 테스트가 통과해도 접근 권한 검증을 대신하지 않습니다. 또한 SQLite의 WAL이 사용 중일 때 DB 본체 파일 하나만 복사하면 최신 상태가 함께 이동하지 않을 수 있으므로 일관된 스냅샷을 준비해야 합니다.",
+      "reference": {
+        "path": "meta/private_file.cpp",
+        "symbol": "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+        "invariant": "운영체제의 실제 접근 제어 모델로 민감한 파일의 독자를 제한한다.",
+        "mayDiffer": "클라이언트 자격 증명용 DACL을 서버 DB 전체의 운영 권한 정책으로 확대하지 않습니다."
+      }
+    },
+    {
+      "title": "테스트를 경계에 맞게 나누기",
+      "body": "줄바꿈 해석은 바이트 입력만으로 검사할 수 있습니다. LF와 CRLF는 같은 포트가 되고, 불필요한 공백과 범위 밖 수치는 실패해야 합니다. Windows의 문자 변환은 넓은 인자에 빈 문자열·공백·한글·서로게이트 쌍을 넣고 정확한 UTF-8 바이트를 비교합니다. 잘못된 서로게이트는 거절합니다.\n\n그 다음에는 실제 프로세스로 연결합니다. 한글·공백·이모지가 포함된 디렉터리에 계정 DB를 만들고, 프로세스를 종료한 뒤 같은 DB로 다시 시작합니다. 저장한 토큰으로 같은 계정을 조회하고, 요청한 정확한 파일이 생성되었는지도 확인합니다. 엉뚱한 이름의 DB가 열렸는데 HTTP만 성공한 경우를 놓치지 않기 위해서입니다.\n\n빌드에서 플랫폼 분기가 선택됐다는 사실과 대상 OS에서 실제 API를 호출했다는 사실은 구별합니다. 어떤 검사가 실패하면 바이트 변환, 파일 선택, 소켓 기동, HTTP 응답, 계정 지속성 중 어디에서 계약이 끊겼는지 좁혀 봅니다.",
+      "reference": {
+        "path": "python/tests/test_meta_db_smoke.py",
+        "symbol": "def test_unicode_database_path_survives_restart",
+        "invariant": "실제 진입점부터 SQLite 파일과 HTTP 계정 조회까지 한 경로를 검증한다.",
+        "mayDiffer": "현재 제품의 테스트 URL/응답 상태는 학습용 서비스와 다르며 각 프로토콜의 계약을 따릅니다."
+      }
+    },
+    {
+      "title": "완성된 변환과 실행기를 다시 연결하기",
+      "body": "Windows의 넓은 인자 → 엄격한 UTF-8 문자열 → 수명이 유지되는 인자 뷰 → 공통 파서 → SQLite 파일 이름 순서로 따라갑니다. 반대 방향의 공지는 C++ 출력 → LF 또는 CRLF 바이트 → 엄격한 PORT 해석 → 숫자 루프백 HTTP 확인으로 연결됩니다.\n\n서버를 다른 OS로 옮기는 작업에서는 각 경계의 책임을 보존합니다. 경로 인코딩은 진입점에서, DB 상태는 지정한 저장소에서, 네트워크 핸들은 소유한 계층에서 처리합니다. 코드 곳곳에서 문자열과 핸들을 임시 변환하는 대신, 경계마다 하나의 명시적인 계약을 둡니다.",
+      "reference": {
+        "path": "platform/utf8_arguments.h",
+        "symbol": "utf8_arguments",
+        "invariant": "운영체제 표현 변환과 업무 파싱을 분리한다.",
+        "mayDiffer": "콘텐츠·포트·배포 경로가 바뀌어도 표현과 수명 경계는 유지됩니다."
+      },
+      "codes": [
+        {
+          "label": "Windows 인자 변환 전체 구현",
+          "language": "cpp",
+          "file": "checkpoints/170-windows-port/platform/utf8_arguments.cpp"
+        },
+        {
+          "label": "LF/CRLF를 처리하는 실행 보조 전체",
+          "language": "python",
+          "file": "checkpoints/170-windows-port/operations/local_service.py"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "170-1",
+      "question": "Windows로 포팅한 앱을 MSVC /utf-8로 빌드한다. 진입점은 main(int argc, char** argv)이고 argv[1]을 그대로 sqlite3_open()에 넘겨 DB 경로로 쓴다. 한글 경로를 주면 엉뚱한 파일이 만들어지거나 열기에 실패한다. 원인과 수정으로 가장 알맞은 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "/utf-8은 런타임 argv까지 UTF-8로 바꾸므로 sqlite3_open에 별도 UTF-8 플래그를 넘기지 않은 것이 원인이다."
+        },
+        {
+          "id": "b",
+          "text": "/utf-8은 소스와 좁은 문자열 리터럴의 문자 집합에만 적용되고 런타임 argv는 Windows ANSI 코드페이지일 수 있다. wmain으로 UTF-16 인자를 받아 WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS)로 UTF-8로 변환한 뒤 sqlite3_open에 넘긴다."
+        },
+        {
+          "id": "c",
+          "text": "문제는 콘솔 출력 인코딩이므로 SetConsoleOutputCP(CP_UTF8)만 호출하면 argv도 UTF-8로 전달된다."
+        },
+        {
+          "id": "d",
+          "text": "argv는 항상 UTF-16이므로 (char*)argv[1]로 재해석한 바이트를 그대로 경로로 쓰면 된다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "/utf-8은 소스와 좁은 문자열 리터럴의 문자 집합에만 적용되고 런타임 argv는 Windows ANSI 코드페이지일 수 있다. wmain으로 UTF-16 인자를 받아 WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS)로 UTF-8로 변환한 뒤 sqlite3_open에 넘긴다.",
+      "explanation": "/utf-8은 컴파일 시 소스 파일과 좁은 문자열 리터럴의 인코딩을 정할 뿐, 프로세스에 전달되는 argv 바이트를 보장하지 않는다. Windows에서 좁은 argv는 활성 ANSI 코드페이지일 수 있어 한글 경로가 깨진다. UTF-16 진입점 wmain으로 받아 CP_UTF8로 변환하면 SQLite가 기대하는 UTF-8 경로가 된다."
+    },
+    {
+      "id": "170-2",
+      "question": "인자 문자열을 owned 벡터에 추가하는 중 각 원소의 data()를 별도 포인터 배열에 저장했다. 이후 owned의 용량이 늘어 원소들이 이동했는데도 저장해 둔 포인터를 파서에 넘기고 있다. 주소 안정성을 지키는 수정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "nullptr을 마지막에 넣으면 vector<char*>가 재할당되어 첫 번째 포인터부터 무효가 되기 때문이다."
+        },
+        {
+          "id": "b",
+          "text": "std::string::data()는 호출할 때마다 새 버퍼를 반환하므로 토큰 수와 무관하게 항상 무효하다."
+        },
+        {
+          "id": "c",
+          "text": "파서가 인자를 복사하지 않기 때문이며, 각 문자열을 const char* 변수에 저장해 두면 해결된다."
+        },
+        {
+          "id": "d",
+          "text": "문자열들을 먼저 모두 채운 뒤 data() 포인터 배열을 만들고, 파서가 사용하는 동안 소유 문자열을 추가·이동·수정하지 않는다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "문자열들을 먼저 모두 채운 뒤 data() 포인터 배열을 만들고, 파서가 사용하는 동안 소유 문자열을 추가·이동·수정하지 않는다.",
+      "explanation": "벡터 재할당으로 문자열 객체가 이동하면 이미 얻은 문자 포인터가 유지된다고 일반적으로 보장할 수 없다. 특히 작은 문자열이 객체 내부에 저장되는 경우 주소가 달라질 수 있다. 모든 문자열의 data()가 반드시 무효가 된다고 단정하는 대신, 소유자 구성이 끝난 후 포인터 뷰를 만들고 그 수명을 유지한다."
+    },
+    {
+      "id": "170-3",
+      "question": "PORT 공지를 읽는 Python 코드가 line.strip()으로 양끝 공백을 없앤 뒤 숫자를 해석한다. 이 때문에 PORT 8080 뒤에 불필요한 공백이 들어간 줄도 정상 처리된다. LF 또는 CRLF 줄 끝만 허용하려면 어떻게 고쳐야 하는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "원본 바이트 전체에 PORT·숫자·LF 또는 CRLF 문법을 검사하고, 일치한 숫자를 변환한 뒤 포트 범위를 확인한다."
+        },
+        {
+          "id": "b",
+          "text": "int()가 포트의 유효 범위와 줄 끝 문법까지 검사하므로 strip() 뒤 int()만 호출한다."
+        },
+        {
+          "id": "c",
+          "text": "NUL 바이트는 문자열의 끝으로 처리되므로 뒤에 붙은 추가 바이트는 검사하지 않아도 된다."
+        },
+        {
+          "id": "d",
+          "text": "CR만 있는 줄도 Windows에서는 정상적인 줄 종료이므로 LF가 없어도 허용해야 한다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "원본 바이트 전체에 PORT·숫자·LF 또는 CRLF 문법을 검사하고, 일치한 숫자를 변환한 뒤 포트 범위를 확인한다.",
+      "explanation": "strip()은 허용하지 않은 앞뒤 공백도 지워 입력이 처음부터 문법에 맞았는지 알 수 없게 만든다. 원본 줄에 fullmatch를 적용해 LF/CRLF만 허용하고, 숫자 변환 후 포트 범위도 확인한다. CR 단독·NUL·줄 뒤 추가 토큰은 거절한다."
+    },
+    {
+      "id": "170-4",
+      "question": "Windows 소켓 래퍼가 socket() 결과를 int에 저장하고 fd < 0으로 실패를 검사한 뒤 close(fd)를 호출한다. 핸들 표현과 종료 계약을 보존하는 수정은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "실패 판정은 fd == 0으로 바꾸고, 닫기는 close와 CloseHandle을 모두 호출해 확실히 정리한다."
+        },
+        {
+          "id": "b",
+          "text": "WSAStartup을 각 소켓 생성 직전에 호출하고, 첫 소켓을 닫는 즉시 WSACleanup을 호출한다."
+        },
+        {
+          "id": "c",
+          "text": "SOCKET은 부호 없는 포인터 크기 정수형이라 fd < 0은 실패 판정으로 부적절하고 0도 유효한 값일 수 있다. 실패는 INVALID_SOCKET과의 비교로 판정하고 closesocket으로 닫으며, 모든 소켓이 닫힐 때까지 성공한 WSAStartup 상태를 유지한다."
+        },
+        {
+          "id": "d",
+          "text": "fd를 long으로만 바꾸면 되고, 닫기는 close 대신 CloseHandle을 쓰면 소켓에도 적용된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "SOCKET은 부호 없는 포인터 크기 정수형이라 fd < 0은 실패 판정으로 부적절하고 0도 유효한 값일 수 있다. 실패는 INVALID_SOCKET과의 비교로 판정하고 closesocket으로 닫으며, 모든 소켓이 닫힐 때까지 성공한 WSAStartup 상태를 유지한다.",
+      "explanation": "SOCKET을 int로 줄이면 유효 핸들의 상위 비트와 실패 표식의 의미가 손상될 수 있다. 원래 Windows SOCKET 표현에서는 INVALID_SOCKET을 비교하고 closesocket으로 반환한다. POSIX에서도 0은 실패 표식이 아니다. 성공한 Winsock 초기화 참조는 이를 사용하는 소켓들의 수명이 끝난 뒤 반환한다."
+    },
+    {
+      "id": "170-5",
+      "question": "동료가 Linux 실행 파일과 chmod 600으로 보호한 계정 DB를 Windows 서버로 복사했으니 이전이 끝났다고 말한다. 다음 확인으로 가장 알맞은 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "파일 이름의 슬래시를 역슬래시로 바꾸면 실행 형식과 권한도 Windows용으로 변환된다."
+        },
+        {
+          "id": "b",
+          "text": "Windows 대상 실행 파일과 필요한 DLL을 준비하고, 실제 서비스 계정의 NTFS 접근 권한·정확한 DB 경로·재시작 후 계정 조회를 확인한다."
+        },
+        {
+          "id": "c",
+          "text": "DB 파일에 Linux 모드 600이 있었으므로 Windows에서도 같은 사용자만 읽을 수 있다."
+        },
+        {
+          "id": "d",
+          "text": "HTTP 경로가 같다면 실행 파일 형식과 DLL을 확인할 필요가 없다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "Windows 대상 실행 파일과 필요한 DLL을 준비하고, 실제 서비스 계정의 NTFS 접근 권한·정확한 DB 경로·재시작 후 계정 조회를 확인한다.",
+      "explanation": "Linux 실행 형식과 Windows 실행 형식·로더 계약은 다르다. NTFS의 사용자·그룹 권한도 POSIX 모드 숫자와 같다고 가정할 수 없다. 대상 바이너리, 런타임, 서비스 실행 계정의 권한과 DB 지속성을 각각 확인한다. 클라이언트 자격 증명용 DACL 정책을 서버 DB에 그대로 복사하지 않는다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "SERVICE 역할에서 대상 플랫폼의 실행 파일을 만들고 실제 산출물 경로를 선택한다.",
+      "LF/CRLF와 잘못된 PORT 입력을 해석 함수에 넣어 허용 경계를 확인한다.",
+      "한글·공백·이모지 경로의 새 DB에서 계정을 생성하고 재시작 뒤 같은 계정을 조회한다."
+    ],
+    "expected": "인코딩 오류·경로 선택·라이브러리 로딩·HTTP 준비·권한을 서로 다른 실패 경계로 설명한다.",
+    "failureChecks": [
+      "문자열 벡터를 포인터 뷰를 만든 뒤 변경하지 않는다.",
+      "줄 끝 이식성을 추가해도 공백·범위·추가 토큰 검사는 유지한다.",
+      "다른 OS용 바이너리나 파일 권한 숫자를 그대로 옮기는 것으로 이전 완료를 판정하지 않는다."
+    ]
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "선택 DeepSeek 변환/문제 초안·공식 Windows/SQLite 계약·실제 Unicode DB 재시작 대조",
+    "corrections": [
+      "/utf-8과 런타임 argv 구분",
+      "문자열 소유와 포인터 뷰 수명",
+      "LF/CRLF 변형과 느슨한 공백 정규화 구분"
+    ]
+  },
+  "validation": [
+    "실제 Linux SERVICE 빌드·한글/공백/이모지 DB 생성·cwd 분리·재시작 계정 동일성 통과",
+    "LF/CRLF 정상과 공백/NUL/추가토큰/문법/포트범위 음성검사 통과",
+    "제품 meta 재빌드와 전체 meta HTTP50검사 통과: Unicode DB 경로 재시작 포함",
+    "현재 WindowsAPI는 공식 계약/코드로 검토; Windows 전용 변환 CTest·Unicode HTTP회귀는 단원 푸시 CI에서 실제 검증 필요",
+    "인라인6·현재 참조·누적 보존 검사 통과; 실제 Windows 서비스 설치/권한 이전/MinGW 링크 실행은 별도"
+  ]
+}

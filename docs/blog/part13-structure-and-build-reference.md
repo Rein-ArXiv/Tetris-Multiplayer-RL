@@ -352,7 +352,7 @@ CMake 3.15 는 `find_package` 의 `CONFIG` 모드, `target_link_libraries` 의 �
 
 `project(tetris CXX C)` 의 `C` 는 주석이 설명하듯 `tetris_meta` 타깃만을 위한 것이다. 현재 구성은 루트에서 두 언어를 무조건 선언하므로 `TETRIS_BUILD_META=OFF`인 빌드에서도 C 컴파일러를 찾는다. 이것은 이 프로젝트의 구성 선택이다. `enable_language`가 언제나 루트에서만 허용되는 것은 아니며, 해당 언어를 직간접으로 사용하는 타깃들의 가장 높은 공통 디렉터리에서 활성화해야 한다. [CMake 언어 활성화 규칙](https://cmake.org/cmake/help/latest/command/enable_language.html)을 참고한다. C 컴파일러가 없는 희귀한 환경에서는 이 줄이 첫 실패 지점이 된다.
 
-MSVC 의 `/utf-8` 는 소스/실행 인코딩 모두 UTF-8 로 설정하는 플래그다. 이 저장소는 C++ 주석이 한국어로 많이 적혀 있고, MSVC 가 기본으로 가정하는 시스템 로케일(CP949 등)에서 컴파일하면 `warning C4819` 가 쏟아진다. `/utf-8` 하나로 전부 해결.
+MSVC의 `/utf-8`은 소스 해석 문자 집합과 좁은 문자열 리터럴의 실행 문자 집합을 UTF-8로 지정한다. 한국어 소스의 기본 코드 페이지 오인을 줄이지만, 런타임 `argv`·환경 변수·파일 API의 인코딩까지 바꾸는 옵션은 아니다. Windows meta 진입점은 `wmain`의 UTF-16 인자를 `platform/utf8_arguments.cpp`에서 엄격한 UTF-8로 변환한 뒤 SQLite에 전달한다. 빈 인자·공백·한글 경로를 보존하며 변환할 수 없는 입력은 대체 문자로 바꾸지 않고 거절한다.
 
 `tetris_wss_gateway`에는 MSVC에서만 `/bigobj`를 적용한다. Beast/Asio의 TLS 템플릿 인스턴스가 많아 기본 COFF 오브젝트의 섹션 수 한도를 넘을 수 있기 때문이다. 이 옵션은 오브젝트 파일 형식의 한도를 늘리며 프로그램의 송수신 제한이나 서버 메모리 예산은 바꾸지 않는다.
 
@@ -762,7 +762,7 @@ x64/aarch64 폴더를 선택하고, Windows는 지원하는 x64 import library�
 - macOS: `@executable_path/../Frameworks` — `Tetris.app/Contents/MacOS/tetris` 에서 `Tetris.app/Contents/Frameworks/libSDL2.dylib` 를 찾아간다.
 - Linux: `$ORIGIN/lib` — 실행 파일과 같은 폴더의 `lib/libSDL2.so` 를 찾아간다.
 
-Windows 는 rpath 개념이 없다 — DLL 은 "실행 파일과 같은 폴더" 를 자동으로 뒤지므로 배포 번들에서 DLL 을 `tetris.exe` 옆에 두기만 하면 된다.
+Windows에서는 ELF의 RPATH 대신 DLL 검색 규칙을 사용한다. 이 번들은 필요한 앱 로컬 DLL을 exe 옆에 배치한다. DLL의 대상 아키텍처와 간접 의존성도 맞아야 하며, 시스템 DLL·명시적 로더 설정 등에는 별도 규칙이 있으므로 옆에 파일이 있다는 사실만으로 실행 호환성을 보장하지 않는다.
 
 ### 3.5 `copy_assets` 커스텀 타깃
 
@@ -885,6 +885,15 @@ if (TETRIS_BUILD_TEST)
     if (NOT WIN32)
         find_package(Threads REQUIRED)
         target_link_libraries(worker_group_test PRIVATE Threads::Threads)
+    endif()
+
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(socket_ownership_test tests/learning/socket_ownership.cpp)
+        target_include_directories(socket_ownership_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(socket_ownership_test PRIVATE Threads::Threads)
+        target_link_options(socket_ownership_test PRIVATE
+            -Wl,--wrap=close -Wl,--wrap=setsockopt -Wl,--wrap=fcntl)
+        add_test(NAME socket_ownership COMMAND socket_ownership_test)
     endif()
 
     add_executable(worker_lifetime_test tests/learning/worker_lifetime.cpp)
@@ -1021,7 +1030,7 @@ if (TETRIS_BUILD_RELAY)
 endif()
 ```
 
-주목: 소스 목록에 `src/`가 없다. relay는 `SimGame`을 실행하지 않으며 `net/session.cpp`도 링크하지 않는다. 두 모드 모두 프레임 경계를 훑어 서버 전용 타입(`net::is_server_only_type`)은 걸러 내고, unranked 매치는 통과한 프레임의 내용을 보지 않고 원본 byte를 그대로 전달하며, ranked 매치에서만 `MATCH_SUMMARY`를 검증·가로챈다. meta API를 호출할 수 있어야 하므로 `third_party/httplib.h`는 relay 단독 빌드에도 필요하고, HTTPS를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
+relay 타깃은 `${TETRIS_SIM_SOURCES}`를 통해 순수 시뮬레이션 소스를 링크한다. `net/session.cpp`와 GUI·오디오 구현은 링크하지 않는다. 두 relay 구현은 서버 전용 프레임 타입을 걸러 내며, ranked 경기에서는 `server/ranked_game.h`의 `RankedGame`이 서버가 정한 초기 상태와 입력으로 두 `SimGame`을 진행해 결과를 검증한다. 프레임 전달과 서버 권위 판정은 별도의 책임이다. unranked 전달 경로의 동작을 ranked 판정의 보안 근거로 사용하면 안 된다. meta API를 호출할 수 있어야 하므로 `third_party/httplib.h`는 relay 단독 빌드에도 필요하고, HTTPS를 쓰려면 OpenSSL 링크 블록도 함께 붙는다.
 
 실행 인자는 `--port PORT` 와 meta 연동용 `--meta URL` / `--meta-secret SECRET` 이다(secret 은 환경변수 `TETRIS_RELAY_SECRET` 로도 줄 수 있고, `--meta` 를 줬는데 secret 이 없으면 기동을 거부한다). 기본 포트는 `7777` 이지만, 저장소의 relay/room smoke 테스트는 `7788` 을 하드코딩하고 있다 — [Part 7](./part7-relay-server.md) 의 테스트 절차를 따를 때 포트를 맞춰야 한다.
 
@@ -1054,6 +1063,7 @@ if (TETRIS_BUILD_META)
 
     add_executable(tetris_meta
         meta/main.cpp
+        platform/utf8_arguments.cpp
         meta/database.cpp
         meta/credentials.cpp
         meta/api_server.cpp
@@ -1085,6 +1095,9 @@ if (TETRIS_BUILD_META)
     if (WIN32)
         # BCryptGenRandom is the fail-closed CSPRNG used for guest tokens.
         target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)
+        if(MINGW)
+            target_link_options(tetris_meta PRIVATE -municode)
+        endif()
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_meta PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -1659,21 +1672,21 @@ uv run python -m pytest python/tests/test_placement_parity.py python/tests/test_
 
 | 계약 | 어기면 | 지키는 테스트 |
 |---|---|---|
-| `StateHash()` 가 시뮬 상태 전부를 덮는다 | DESYNC 를 감지 못 함 | `sim_hash_dump` diff |
+| 동기화 해시의 포함 범위·직렬화·비교 시점이 일치한다 | 서로 다른 상태를 놓치거나 같은 진행을 불일치로 판단 | `sim_hash_dump` diff, bag 포함 진단 해시는 별도 버전 |
 | C++ 과 Python 의 placement/관측 로직이 같다 | 학습한 봇이 게임에서 다르게 행동 | `test_placement_parity.py` |
 | C++ 과 Python 의 wire 포맷이 같다 | 프레임 파싱 실패 | `test_framing_parity.py` |
-| ONNX 입출력 이름·shape | 봇이 조용히 휴리스틱으로 폴백 | 없음 — 봇 선택 화면 육안 확인 |
+| ONNX 입출력 이름·shape·수치 계약 | 추론 실패 또는 잘못된 선택 | `bot_onnx_contract_test`와 export 대조; UI 실패 표시는 별도 확인 |
 | 체크포인트 `ARCH_VERSION` | 구조가 다른 가중치가 조용히 로드됨 | `test_checkpoint_roundtrip.py` |
 | 설정이 결정론에 영향을 주지 않는다 | 설정이 다른 두 클라이언트가 DESYNC | `sim_hash_dump` diff |
 | `MsgType` 값을 재사용하지 않는다 | 구버전과 붙었을 때 메시지 오해석 | 없음 — 리뷰로 지킨다 |
 | 셰이더의 `layout(location = N)` 과 `glVertexAttribPointer` 인덱스가 같다 | 화면이 조용히 깨진다 (색 자리에 좌표 등) | 없음 — 실행해서 눈으로 확인 |
-| `kFloatsPerVertex` 가 실제 push 하는 float 개수와 같다 | 정점이 어긋나 삼각형이 화면을 가로지른다 | 없음 — 실행해서 눈으로 확인 |
+| `kFloatsPerVertex` 가 실제 push 하는 float 개수와 같다 | 정점이 어긋나 삼각형이 화면을 가로지른다 | `scripts/check_learning_batch.py`의 현재 정점 배열 검사; 대상 GPU 출력은 별도 |
 
-테스트 칸이 비어 있는 네 줄을 짚어 둘 만하다. 자동으로 지킬 수 없는 것이 남아 있고, 그건 알고 있는 편이 낫다.
+자동 검사가 있는 계약도 입력·환경 범위가 정해져 있다. 단위 검사 통과, 실제 통신 성공, 대상 GPU의 출력 확인, 장시간 부하를 별도 증거로 기록한다. 검사 생략이나 미실행을 성공에 합치지 않는다. 리비전과 실행 파일·모델·자산의 식별 정보가 바뀌면 과거 성공을 새 후보의 검증으로 재사용하지 않는다.
 
 **GL 쪽 두 줄이 특히 지독하다.** 정점 버퍼는 타입 없는 `float` 배열이라, C++이 밀어 넣은 값과 셰이더가 읽는 속성을 이어주는 것은 사람이 맞춰 놓은 location·size·offset·stride뿐이다. 어긋나도 GL은 에러를 내지 않고 다른 바이트를 읽으며, `glGetError()`도 조용하다. 링커는 사용자 기계의 드라이버가 런타임에 컴파일하는 셰이더를 보지 못한다. 정점 작성 코드, stride/offset 선언, attribute location, 셰이더 입력을 한 변경으로 맞추고 렌더 데모에서 실제 픽셀을 확인해야 한다.
 
-**여기 없는 계약도 하나 짚어 둔다 — "렌더 출력이 어디서나 같다" 는 계약은 없다.** GPU 래스터화 규칙은 벤더·드라이버·창 크기에 따라 경계 픽셀이 달라질 수 있고, 이 프로젝트는 그것을 검사하지 않는다. lockstep 이 desync 검출에 쓰는 것은 `SimGame::StateHash()` 이고 그 해시는 grid·블록·RNG·점수만 먹는다. 두 결정성은 처음부터 별개였다 — **잃은 것은 픽셀 단위 재현성이고, 잃지 않은 것은 게임 진행의 재현성이다.** 멀티플레이가 기대는 것은 후자뿐이다.
+**여기 없는 계약도 하나 짚어 둔다 — "렌더 출력이 어디서나 같다" 는 계약은 없다.** GPU 래스터화 규칙은 벤더·드라이버·창 크기에 따라 경계 픽셀이 달라질 수 있고, 이 프로젝트는 그것을 검사하지 않는다. lockstep 이 desync 검출에 쓰는 것은 `SimGame::StateHash()` 이고 그 해시는 그리드·현재/예고 블록·RNG·점수와 진행/전투 상태를 직렬화한다. 호환용 `StateHash()`에는 남은 bag이 빠져 있고 `DiagnosticStateHashV2()`는 bag까지 포함하므로 목적과 버전을 구분한다. 해시 일치는 충돌 가능성이나 누락 필드까지 제거하는 완전한 동등성 증명은 아니다. 두 결정성은 처음부터 별개였다 — **잃은 것은 픽셀 단위 재현성이고, 잃지 않은 것은 게임 진행의 재현성이다.** 멀티플레이가 기대는 것은 후자뿐이다.
 
 전체 회귀는 [Part 12](./part12-hardening-and-release.md) 의 검증 절에 한 세트로 정리돼 있다.
 

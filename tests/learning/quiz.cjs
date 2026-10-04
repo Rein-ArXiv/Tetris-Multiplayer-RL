@@ -52,7 +52,11 @@ function boot(seed, fail=false){
     radios.find(r=>r.dataset.choice===id&&r.value===value).emit('change');};
   return {node,radios,checks,clears,feedback,legacy,complete,storage,select};
 }
-const seed={answers:{'1-1':'이전 서술 답안 <img src=x>','177-5':'미래 서술 답안'},complete:true,completedLessons:{'lesson-177':true},choices:{'177-5':'c'},confirmedChoices:{'177-5':'c'}};
+// A future-record fixture must stay outside the authored corpus as it grows.
+const futureNumber=1+Math.max(...questions.map(q=>Number(q.id.split('-')[0])));
+const futureQuestion=`${futureNumber}-1`, futureLesson=`lesson-${futureNumber}`;
+assert.ok(!questions.some(q=>q.id===futureQuestion));
+const seed={answers:{'1-1':'이전 서술 답안 <img src=x>',[futureQuestion]:'미래 서술 답안'},complete:true,completedLessons:{[futureLesson]:true},choices:{[futureQuestion]:'c'},confirmedChoices:{[futureQuestion]:'c'}};
 const h=boot(seed);
 assert.equal(h.complete.checked,true);
 assert.equal(h.legacy[0].inner.textContent,seed.answers['1-1']);
@@ -72,7 +76,7 @@ for(const q of questions){
  check.emit('click');assert.match(h.feedback[q.id].text,/맞았습니다/);
 }
 const saved=JSON.parse(h.storage.raw);
-assert.deepEqual(saved.answers,seed.answers);assert.equal(saved.choices['177-5'],'c');assert.equal(saved.completedLessons['lesson-177'],true);
+assert.deepEqual(saved.answers,seed.answers);assert.equal(saved.choices[futureQuestion],'c');assert.equal(saved.completedLessons[futureLesson],true);
 const reloaded=boot(saved);
 assert.equal(reloaded.complete.checked,true,'manual completion survives reload');
 reloaded.complete.checked=false;reloaded.complete.emit('change');

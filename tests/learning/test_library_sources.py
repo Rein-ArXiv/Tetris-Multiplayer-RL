@@ -37,6 +37,11 @@ class Sources(unittest.TestCase):
    (folder/name).write_text('# local fixture')
   self.assertTrue(library.source_allowed(folder/'TetrisOnnxRuntime.cmake'))
   self.assertFalse(library.source_allowed(folder/'private-toolchain.cmake'))
+ def test_only_public_systemd_units_are_source(self):
+  folder=self.root/'deploy/systemd';folder.mkdir(parents=True)
+  for name in ('tetris-meta.service','tetris-relay.service','tetris-wss.service','meta.env','private.service'):
+   (folder/name).write_text('fixture')
+   self.assertEqual(library.source_allowed(folder/name),name in ('tetris-meta.service','tetris-relay.service','tetris-wss.service'))
  def test_reject_symlink_files_and_parent_directories(self):
   outside=Path(self.temp.name)/'outside';outside.mkdir();(outside/'model.py').write_text('private = 1\n')
   (self.root/'python/link.py').symlink_to(outside/'model.py')

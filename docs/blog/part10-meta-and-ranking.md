@@ -141,6 +141,7 @@ if (TETRIS_BUILD_META)
 
     add_executable(tetris_meta
         meta/main.cpp
+        platform/utf8_arguments.cpp
         meta/database.cpp
         meta/credentials.cpp
         meta/api_server.cpp
@@ -172,6 +173,9 @@ if (TETRIS_BUILD_META)
     if (WIN32)
         # BCryptGenRandom is the fail-closed CSPRNG used for guest tokens.
         target_link_libraries(tetris_meta PRIVATE ws2_32 bcrypt)
+        if(MINGW)
+            target_link_options(tetris_meta PRIVATE -municode)
+        endif()
     else()
         find_package(Threads REQUIRED)
         target_link_libraries(tetris_meta PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -2026,10 +2030,12 @@ TETRIS_RELAY_SECRET=change-this-long-random-secret
 
 로컬 개발에서는 secret 없이 띄우고 싶을 수 있다. 그때는 **명시적 플래그**가 필요하다.
 
+Windows에서는 `wmain`으로 받은 UTF-16 인자를 UTF-8로 변환한 뒤 아래 공통 `run`을 호출한다. SQLite의 `sqlite3_open`은 Windows에서도 파일 이름을 UTF-8로 해석한다. POSIX 진입점은 전달받은 인자 바이트를 유지하며, `/utf-8` 컴파일 옵션을 런타임 경로 변환으로 혼동하지 않는다. 인자 문자열을 소유한 벡터는 `run`이 끝날 때까지 유지한다.
+
 **현재 소스 발췌 — `meta/main.cpp`**
 
 ```cpp
-int main(int argc, char** argv)
+static int run(int argc, char** argv)
 {
     const Args args = parse_args(argc, argv);
 

@@ -331,7 +331,7 @@ meta 프로세스 *내부* 의 나머지 하드닝은 Part 10 에서 이미 구�
 따라서 `O_TRUNC`로 목적지를 먼저 비우던 구현을 같은 폴더의 임시 파일에 완성한 뒤
 교체하는 방식으로 바꿨다. POSIX는 파일 0600·fsync·rename·부모 fsync를 사용한다.
 Windows는 현재 사용자와 SYSTEM만 허용하는 보호된 DACL, FlushFileBuffers,
-MoveFileEx의 교체·WRITE_THROUGH를 사용한다. 부분 쓰기·EINTR도 처리한다.
+MoveFileEx의 교체·WRITE_THROUGH를 사용한다. POSIX 쓰기 루프는 부분 쓰기와 EINTR을 처리하고, Windows 경로는 요청한 전체 길이가 쓰였는지 검사한다.
 
 **현재 소스 발췌 — `meta/private_file.cpp`**
 
@@ -437,6 +437,24 @@ bool write_private_file(const std::string &path, const std::string &contents) {
 }
 ```
 
+저장의 **공개 시점**과 **내구성 확인**을 구분한다. POSIX에서 같은 파일시스템의
+`rename`이 성공하면 새로 여는 독자는 완성된 새 파일을 본다. 이미 열어 둔 파일
+디스크립터는 기존 파일을 계속 가리킬 수 있다. 뒤따르는 부모 디렉터리 `fsync`가
+실패하면 함수는 `false`를 반환하지만 새 내용은 이미 보일 수 있다. 따라서 `false`를
+“아무것도 바뀌지 않음”이나 자동 롤백으로 해석하지 않는다. 반환값은 요청한 저장
+절차의 완료를 확인했는지 나타내며, 실패 후에는 저널과 현재 파일을 함께 대조한다.
+
+이 함수는 여러 파일을 한 번에 커밋하지 않으며 읽기·수정·교체를 직렬화하지도 않는다.
+협력하는 작성자가 같은 잠금을 유지해야 갱신 유실을 막을 수 있다. 파일을 둘러싼
+디렉터리는 앱이 관리하고 다른 사용자가 바꿀 수 없는 위치여야 한다. `mkstemp`의
+배타적 생성이나 파일 권한만으로 적대적인 부모 경로 변경까지 막지는 못한다.
+새 상위 디렉터리들을 만들었을 때 그 조상 디렉터리까지 재귀적으로 동기화하는
+코드도 아니다. 운영 폴더를 미리 준비하는 절차와 개별 파일 게시를 구별한다.
+
+실패 단계는 완성된 임시 파일의 동기화 전·교체 전·부모 동기화 시점으로 나누어
+주입할 수 있다. 이는 해당 반환 오류에서 파일과 임시 파일이 어떻게 남는지 확인하는
+검사다. 실제 전원 손실·저장장치·파일시스템별 복구 검증을 대신하지 않는다.
+
 파일 암호화나 같은 사용자 권한의 악성 프로그램 격리가 아니다. 다른 사용자에게
 우발적으로 읽히는 위험과 저장 도중 키가 잘리는 위험을 줄인다. 변경 전체는
 `AccountFileLock`으로 직렬화하고, 서버 변경 전에 새 키가 든 pending을 내구성 있게 쓴다.
@@ -463,14 +481,14 @@ Windows의 Roaming 프로필은 조직 설정에 따라 동기화될 수 있으�
 
 ### 6.1 SIGPIPE — 죽은 소켓에 쓸 때
 
-relay 의 핵심 루프는 한 소켓에서 읽어 다른 소켓에 쓰는 것이다 ([Part 7](./part7-relay-server.md)). 그런데 상대가 게임을 끄거나 네트워크가 끊긴 직후, 이미 닫힌 TCP 소켓에 `write` 하면 POSIX 는 **`SIGPIPE` 시그널** 을 보낸다. 이 시그널의 기본 처리는 *프로세스 종료* 다. 즉 클라이언트 하나가 끊긴 순간 relay 전체가 죽어 다른 모든 매치까지 끊긴다.
+relay 의 핵심 루프는 한 소켓에서 읽어 다른 소켓에 쓰는 것이다 ([Part 7](./part7-relay-server.md)). 상대의 수신 경로가 닫힌 뒤 소켓에 쓰면 POSIX에서 **`SIGPIPE` 시그널** 이 발생할 수 있다. 이 시그널의 기본 처리는 *프로세스 종료* 다. 즉 클라이언트 하나가 끊긴 순간 relay 전체가 죽어 다른 모든 매치까지 끊긴다.
 
-해결은 시그널을 무시하는 것이다. 무시하면 `send` 는 `-1` 과 `errno=EPIPE` 를 반환하고, relay 는 그 매치만 정리하고 계속 돈다. 등록 위치가 중요하다 — `server/main.cpp` 가 아니라 `net/socket.cpp` 의 `net_init()` 안이다. 소켓을 쓰는 모든 프로세스(relay 든 game 클라이언트든)가 `net_init()` 을 거치므로, 무시 설정을 네트워킹 초기화에 묶어 두면 한 곳에서 모든 바이너리가 보호된다.
+해결은 시그널을 무시하는 것이다. 해당 오류에서 프로세스 전체의 기본 종료를 피하고, relay가 송신 반환값을 보고 그 연결을 정리하도록 한다. 등록 위치가 중요하다 — `server/main.cpp` 가 아니라 `net/socket.cpp` 의 `net_init()` 안이다. 소켓을 쓰는 모든 프로세스(relay 든 game 클라이언트든)가 `net_init()` 을 거치므로, 무시 설정을 네트워킹 초기화에 묶어 두면 한 곳에서 모든 바이너리가 보호된다.
 
 **현재 소스 발췌 — `net/socket.cpp`**
 
 ```cpp
-// [NET] 네트워킹 초기화(Windows 전용)
+// [NET] Winsock 초기화와 POSIX SIGPIPE 정책을 설정한다.
 bool net_init() {
     if (g_inited)
         return true;
@@ -482,14 +500,20 @@ bool net_init() {
 #else
     // POSIX: writing to a closed peer can raise SIGPIPE and terminate the whole
     // relay/client process before send() returns EPIPE. Treat it as an I/O error.
-    std::signal(SIGPIPE, SIG_IGN);
+    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return false;
     g_inited = true;
     return true;
 #endif
 }
 ```
 
-`SIG_IGN` 으로 무시하면 끊긴 소켓에 `send` 해도 시그널이 발생하지 않고 `EPIPE` 만 돌아온다. 추가로 POSIX `send` 호출에는 `MSG_NOSIGNAL` 플래그를 줘 호출 단위로도 시그널을 억제한다(§8.2 의 `tcp_send_all`). 이중 방어다.
+`SIG_IGN`은 해당 시그널의 기본 종료 동작을 무시하도록 하는 프로세스 전체 정책이다.
+`MSG_NOSIGNAL`이 있는 플랫폼에서는 개별 `send` 호출에서도 SIGPIPE 생성을 억제한다.
+전자는 시그널 처리 방침, 후자는 호출별 옵션이며 적용 범위가 다르다. 상대 단절 뒤
+모든 호출이 즉시 EPIPE로 끝나는 것은 아니다. 버퍼에 쓰기가 수락되거나 다른 소켓
+오류가 먼저 보고될 수 있으므로 실제 반환값과 오류를 처리한다. send 성공도
+상대 응용 프로그램이 메시지를 처리했다는 확인은 아니다.
 
 ### 6.2 시그널 핸들러는 플래그만 내린다
 
@@ -498,6 +522,8 @@ SIGINT/SIGTERM 은 `server/main.cpp` 가 등록한다. 핸들러가 하는 일�
 **현재 소스 발췌 — `server/main.cpp`**
 
 ```cpp
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "signal handler requires lock-free atomic<bool>");
 std::atomic<bool> g_running{true};
 net::TcpSocket    g_listen_sock{};  // 논블로킹 listen 소켓 (accept 폴링)
 
@@ -513,7 +539,7 @@ void signalHandler(int /*sig*/) {
 }
 ```
 
-`kMaxConnWorkers`(256)는 프로세스 전체의 연결 setup 스레드 상한이다 — 연결당 detached 스레드를 만들므로 상한이 없으면 connect 플러딩만으로 메모리와 핸들이 고갈된다. 초과분은 즉시 close 한다.
+`kMaxConnWorkers`는 프로세스 전체의 연결 setup 스레드 상한이다 — 연결당 detached 스레드를 만들므로 상한이 없으면 connect 플러딩만으로 메모리와 핸들이 고갈된다. 초과분은 즉시 close 한다.
 
 그 아래에 per-IP 예산이 **둘** 있다. 처음에는 하나였는데, 하나로는 두 가지를 동시에 지킬 수 없다는 것이 나중에 드러났다.
 
@@ -522,7 +548,7 @@ void signalHandler(int /*sig*/) {
 
 두 상한은 독립적으로 검사한다. 어느 하나라도 못 얻으면 그 연결은 거절이다.
 
-시그널 핸들러 안에서는 *async-signal-safe* 한 연산만 허용된다. 핸들러는 임의 시점에 다른 코드를 끊고 들어오므로 `malloc`, `mutex`, 그리고 내부에서 참조 카운트를 조작하는 `shared_ptr` 연산 등은 데드락이나 메모리 손상을 일으킬 수 있다. 가장 보수적인 POSIX 형태는 `volatile sig_atomic_t` 플래그다. 현재 코드는 일반 플랫폼에서 lock-free 로 동작하는 `std::atomic<bool>` store 만 사용하는데, 이 선택은 "핸들러에서 복잡한 정리를 하지 않는다" 는 운영 패턴의 일부로 이해해야 한다.
+시그널 핸들러 안에서는 *async-signal-safe* 한 연산만 허용된다. 핸들러는 임의 시점에 다른 코드를 끊고 들어오므로 `malloc`, `mutex`, 그리고 내부에서 참조 카운트를 조작하는 `shared_ptr` 연산 등은 데드락이나 메모리 손상을 일으킬 수 있다. 가장 보수적인 POSIX 형태는 `volatile sig_atomic_t` 플래그다. 현재 코드는 `std::atomic<bool>::is_always_lock_free`를 정적 검사하고 lock-free store만 수행한다. 이 전제를 만족하지 않는 대상은 컴파일 단계에서 거절하며, 일반 스레드 문맥에서 대기자 깨우기와 자원 정리를 수행한다.
 
 등록은 플랫폼별로 한 곳 다르다. Windows 콘솔에는 SIGTERM 에 해당하는 신호가 사실상 없고, `CTRL_BREAK_EVENT` 를 CRT 가 `SIGBREAK` 로 전달한다. 이것까지 등록해 두어야 Windows 에서도 "핸들러가 실행될 기회 자체가 없는" `TerminateProcess` 가 아니라 우아한 종료 경로를 밟을 수 있고, Python 통합 테스트가 그 경로를 검증할 수 있다.
 
@@ -539,7 +565,7 @@ void signalHandler(int /*sig*/) {
 #endif
 ```
 
-핵심은 **핸들러가 listen 소켓을 닫지 않는다** 는 것이다. `tcp_close()` 는 `shared_ptr` 를 읽으므로 시그널 핸들러에서 부르면 안전하지 않다(§7). 대신 listen 소켓을 *논블로킹* 으로 만들어 두고, accept 루프가 폴링하면서 매 회 `g_running` 을 확인한다.
+핵심은 **핸들러가 listen 소켓을 닫지 않는다** 는 것이다. `tcp_close()` 는 `shared_ptr` 를 읽으므로 시그널 핸들러에서 부르면 안전하지 않다(§7). 대신 listen 소켓의 *논블로킹 전환 성공*을 확인하고, accept 루프가 폴링하면서 매 회 `g_running` 을 확인한다. 전환에 실패하면 소켓을 정리하고 기동을 거절한다. blocking accept의 취소 동작을 플랫폼 공통 계약으로 가정하지 않는다.
 
 **현재 소스 발췌 — `server/main.cpp`**
 
@@ -551,10 +577,16 @@ void signalHandler(int /*sig*/) {
         return 1;
     }
     // Nonblocking accept lets the loop observe the shutdown flag.
-    net::tcp_set_nonblocking(g_listen_sock);
+    if (!net::tcp_set_nonblocking(g_listen_sock)) {
+        RLOG_ERROR("listen nonblocking setup failed");
+        net::tcp_close(g_listen_sock);
+        g_listen_sock = {};
+        net::net_shutdown();
+        return 1;
+    }
 ```
 
-accept 루프는 대기 연결이 없으면(논블로킹 accept 가 빈 소켓을 돌려주면) 10ms 자고 재폴링한다. 연결이 들어오면 워커에 넘기기 전에 **peer IP 별 입장 예산**을 먼저 확인한다.
+accept 루프는 대기 연결이 없으면 정해 둔 짧은 간격을 기다린 뒤 재폴링한다. 이 간격은 스케줄링 지연이나 다른 처리 시간을 포함한 종료 기한이 아니다. 연결이 들어오면 워커에 넘기기 전에 **peer IP 별 입장 예산**을 먼저 확인한다.
 
 **현재 소스 발췌 — `server/main.cpp`**
 
@@ -750,8 +782,10 @@ private:
 1. `beginShutdown()` / `stopAccepting()` — **신규 유입 차단**. 이후 새 lobby, forwarder, connection worker 는 생성되지 않는다.
 2. `tcp_close(g_listen_sock)` + 재대입 — listen 소켓의 마지막 참조를 버려 실제 fd 를 닫는다. `tcp_close` 는 shutdown 만 하므로 재대입이 있어야 close 된다(§7.3).
 3. `mm.shutdown()` / `rr.shutdown()` — 매치메이커와 룸 레지스트리의 대기자를 깨운다.
-4. `matcher.join()` → `connWorkers.wait()` → `waitForShutdown()` — **역순 drain**. 워커가 `mm`/`rr` 을 raw reference 로 들고 있으므로, 스택에 있는 `mm`/`rr` 이 파괴되기 전에 모든 워커가 끝나야 한다. `waitForShutdown()` 은 `relay.cpp` 의 전역 `WorkerGroup`(§8.4)까지 비운다.
-5. `net_shutdown()` — 마지막.
+4. `matcher.join()` → `connWorkers.wait()` → `waitForShutdown()` — **사용자 수명 종료 확인**. 워커가 `mm`/`rr` 을 raw reference 로 들고 있으므로, 스택에 있는 `mm`/`rr` 이 파괴되기 전에 모든 워커가 끝나야 한다. `waitForShutdown()` 은 `relay.cpp` 의 전역 `WorkerGroup`(§8.4)까지 비운다.
+5. `net_shutdown()` — 소켓 사용자와 소유자를 정리한 뒤 실행한다.
+
+`WorkerGroup::wait()`는 콜백 실행과 캡처 객체의 소멸까지 기다린다. detached OS 스레드의 thread_local 소멸자까지 모두 끝났다는 join 계약은 아니다. 그런 종료까지 필요하면 join 가능한 스레드 소유권을 사용한다. stopAccepting만으로 대기 중 콜백이 취소되지 않으므로 먼저 대기 조건과 I/O를 해제해야 한다.
 
 이 순서를 지키지 않으면 종료 중 use-after-free가 난다. relay/meta smoke 테스트는 활성 연결이 있는 상태에서 종료 신호를 보내고, 프로세스가 워커를 drain한 뒤 정상 종료하는지 자동으로 확인한다.
 
@@ -764,7 +798,7 @@ sequenceDiagram
     participant M as matcher / mm / rr
     U->>H: SIGINT / SIGTERM
     H->>H: g_running.store(false)
-    Note over L: 다음 폴링(≤10ms)에서<br/>g_running 확인
+    Note over L: 다음 루프에서 g_running 확인<br/>스케줄링 지연은 별도
     L->>L: 루프 break
     L->>W: beginShutdown() / stopAccepting()
     L->>L: tcp_close(listen) + 참조 해제
@@ -1426,13 +1460,25 @@ cmake --build build-release --config Release --target tetris
 | `scripts/release_macos.sh` | `dist/tetris-macos.tar.gz` | `Tetris.app`(기본 호스트 아키텍처, universal은 양쪽 의존성 준비 후 지정) + 동봉 dylib |
 | `scripts/release_win.ps1` | `dist\tetris-win-x64.zip` | `tetris.exe` + `Font\` + `Sounds\` + (있으면) `assets\`·`model\` + (`-Sdl2` 시) `SDL2.dll` + (`-Bot` 시) `onnxruntime.dll` |
 
-Linux/macOS 번들은 공유 라이브러리를 `lib/` 에 담고 rpath 를 `$ORIGIN/lib` 로 박아, 사용자가 SDL2 를 따로 설치하지 않아도 압축만 풀면 실행된다. Windows 는 rpath 개념이 없어 DLL 을 exe 옆에 두는 것으로 같은 효과를 낸다 — 그래서 `SDL2.dll` 과 `onnxruntime.dll` 이 zip 루트에 들어간다.
+Linux 번들은 실행 파일 옆 `lib/`와 `$ORIGIN/lib`를 사용한다. macOS 앱은 `Contents/Frameworks`에 라이브러리를 넣고 `@executable_path/../Frameworks` 및 install name을 맞춘다. Windows 번들은 DLL을 exe 옆에 둔다. 이 배치는 동봉한 직접 의존성의 로더 경로를 해결하며, 대상 OS의 시스템 런타임·그래픽 드라이버·간접 의존성까지 모두 호환됨을 뜻하지 않는다. 대상 환경에서 설치 결과를 실행해 확인한다.
 
 ```bash
 RELAY_ENDPOINT=wss://play.example.com:8443/play \
 META_URL=https://api.example.com \
 ./scripts/release_linux.sh
 ```
+
+Linux 클라이언트·서버 스크립트는 `scripts/release_linux_common.sh`에서 지원하는
+참/거짓 표기를 먼저 `1`/`0`으로 정규화한다. `ON`, `TRUE`, `YES`, `Y`와 대응하는
+거짓 표기를 대소문자 없이 받아들이며, 다른 값은 빌드 전에 거절한다. CMake의 옵션은
+켜졌는데 셸의 번들 분기는 꺼진 상태가 되는 불일치를 방지한다. 이 스크립트는 native
+Linux x64 번들 전용이므로 다른 호스트/CPU를 x64 이름으로 포장하지 않는다.
+
+`ORT_ROOT`를 지정하면 같은 SDK 경로를 CMake의 `TETRIS_ORT_ROOT`와 Runtime 복사에
+사용한다. BOT를 켰을 때 필수 Runtime 누락·복사 실패는 배포 실패다. `patchelf`가
+설치되어 패치를 수행한다면 패치 실패도 숨기지 않는다. 중간 실패 시 임시 번들이나
+과거 압축 파일이 남을 수 있으므로 명령의 실패 상태를 확인하고 오래된 산출물을 새
+릴리스로 취급하지 않는다. 원자적 릴리스 교체와 대상 환경 실행 검사는 별도 단계다.
 
 ### 10.3 서버 번들과 `TETRIS_ENABLE_HTTPS`
 
@@ -1447,6 +1493,7 @@ CMAKE_ARGS=(
     -DCMAKE_BUILD_TYPE=Release
     -DTETRIS_BUILD_GAME=OFF
     "-DTETRIS_BUILD_BOT=$BOT"
+    "-DTETRIS_ORT_ROOT=$ORT_ROOT"
     "-DTETRIS_BUILD_WSS=$WSS"
     -DTETRIS_BUILD_RELAY=ON
     -DTETRIS_BUILD_REACTOR=ON
@@ -1564,6 +1611,12 @@ WantedBy=multi-user.target
 
 **(2) 파일시스템 격리.** `ProtectSystem=strict` 는 `/usr`, `/boot`, `/etc` 를 포함한 파일시스템 전체를 read-only 로 보이게 하고, `ProtectHome=true` 는 사용자 home 을 아예 숨긴다. `PrivateTmp=true` 는 `/tmp` 를 프로세스 전용 네임스페이스로 분리한다. 그러면 meta 가 SQLite 를 쓸 수 없게 되므로 `ReadWritePaths=/srv/tetris` 로 딱 한 디렉터리만 예외를 둔다. relay unit 에는 이 예외가 **없다** — relay 는 디스크에 아무 것도 쓰지 않기 때문이다. unit 을 수정할 때는 DB, working directory, 인증서 등 실제 write/read 경로가 이 sandbox 정책과 일치하는지 반드시 함께 검증해야 한다.
 
+`After=`는 함께 시작되는 유닛의 순서이며 상대 유닛을 자동으로 시작시키는 선언이
+아니다. `Wants=`/`Requires=`와 구분한다. `Type=simple`의 시작 판정은 응용 프로그램의
+HTTP 준비 완료보다 앞설 수 있다. `/healthz`가 응답하는지 확인해도 그 경로가 수행하지
+않는 DB 쓰기·모델 실행·하위 서비스 요청의 성공까지 보장하지 않는다. 각 서비스가
+실제 요청 실패를 처리하고 필요한 준비 조건을 기한 안에 확인해야 한다.
+
 **(3) secret 주입.** `EnvironmentFile=/etc/tetris/meta.env` 다. `Environment=` 로 unit 안에 직접 쓰지 않는 이유가 있다 — unit 파일은 `systemctl cat` 으로 누구나 읽을 수 있고 보통 git 에 들어간다. secret 은 별도 파일로 빼서 권한을 조인다.
 
 **현재 소스 발췌 — `deploy/systemd/tetris-meta.env.example`**
@@ -1599,43 +1652,79 @@ relay unit 은 `ReadWritePaths` 가 없고 `ExecStart` 가 다를 뿐 구조가 
 
 ### 11.2 백업과 복구
 
-영속 상태는 meta의 SQLite DB에 모인다. 하지만 WAL 모드로 열린 저장소의 물리 파일은 `.db`, `-wal`, `-shm`으로 나뉠 수 있으므로 실행 중인 `.db` 하나를 복사해서는 안 된다. `scripts/backup_meta_db.sh`는 `sqlite3` CLI의 온라인 backup API(`.backup`)로 논리적으로 일관된 단일 DB 스냅샷을 만들고, 복사본에 `PRAGMA integrity_check`가 `ok`를 반환한 뒤에만 아카이브한다. CLI가 없으면 위험한 순차 파일 복사로 폴백하지 않고 실패한다.
+WAL 모드에서는 커밋된 최신 페이지가 DB 본체가 아니라 `-wal`에 있을 수 있다.
+실행 중인 `.db` 하나를 복사하거나 `.db`·WAL을 서로 다른 시각에 복사하면 일관된
+백업이 되지 않을 수 있다. `scripts/backup_meta_db.py`는 SQLite Online Backup API로
+사적인 임시 DB를 만들고 `integrity_check`와 `foreign_key_check`를 검사한다.
+연결을 닫은 뒤 단일 파일로 게시하며 기존 목적지·심볼릭 링크·남아 있는 sidecar를 거절한다.
 
 ```bash
+python3 scripts/backup_meta_db.py /srv/tetris/db/tetris.db /safe/backup/checked.db
 ./scripts/backup_meta_db.sh /srv/tetris/db/tetris.db /srv/tetris/backups
 ```
 
-backup API는 페이지를 복사하는 동안 SQLite의 동시성 규칙을 따르면서 일관된 스냅샷을 만들므로 meta가 떠 있는 상태에서도 사용할 수 있다. Termux 환경에는 먼저 `pkg install sqlite`로 CLI를 설치하고, cron이나 별도 스케줄러가 스크립트의 종료 코드를 확인하게 한다. 파일 복사만 할 수 있는 비상 상황이라면 meta를 먼저 완전히 멈춘 뒤 오프라인 복사하고, 복원 연습에서 무결성을 검증한다.
+첫 명령은 Linux/Windows에서 사용할 단일 DB 스냅샷을 만든다. 두 번째 Linux 래퍼는
+같은 Python 도구로 검사한 DB를 압축한다. Python의 sqlite3 모듈, GNU tar/sort,
+하드 링크, flock이 필요하다. SQLite CLI 부재를 원시 파일 복사로 우회하지 않는다.
+출력 폴더는 운영자가 소유·관리하는 비공개 경로여야 하며 Windows에서는 디렉터리 ACL도
+따로 준비한다. 폴더 잠금은 아카이브 게시·보존 정리를 직렬화한다. 원본의 동시 쓰기는
+SQLite가 조정하므로 이 잠금이 meta의 업무 쓰기를 중지시키는 것은 아니다.
 
-스크립트는 만들기만 하지 않고 **치우기까지** 한다. 아카이브(`tar.gz`)가 완성되면 중간 산출물 `.db` 스냅샷을 지운다 — 남겨두면 백업마다 압축본과 비압축 원본이 이중으로 쌓여 디스크가 두 배로 소모된다. 그리고 보존 정책으로 최근 `KEEP` 개(기본 14, 환경변수 `KEEP` 로 조정)의 `tar.gz` 만 남기고 오래된 것을 삭제한다. 보존 정책이 스케줄러 설정이 아니라 백업 스크립트 자신 안에 있는 것이 요점이다 — 정리를 별도 작업으로 빼면 백업만 이관되고 정리는 잊히는 배포가 반드시 생기고, 정리 없는 백업은 저장 공간이 작은 호스트(Termux 단말이 정확히 그렇다)에서 디스크를 채워 **백업이 백업 대상을 죽이는** 결말이 된다. 실패 방향도 본작업과 반대다: 스냅샷 생성·무결성 검증은 fail-closed(하나라도 실패하면 스크립트 실패)지만, 정리는 부가 작업이므로 어떤 실패도 이미 성공한 백업을 뒤집지 않고 경고만 남긴다.
+스냅샷의 일관성과 가장 최신 상태라는 주장은 다르다. 최종 이전용 백업에는 신규 입장과
+relay의 결과 쓰기를 중단하고 관련 작업을 마친 뒤 정한 전환 시점을 적용한다.
+검사기의 협력 기한은 페이지 복사 사이와 SQL 진행 콜백에서 확인한다. 임의 파일시스템
+호출을 강제로 끊는 실시간 상한이 아니다. 실패 시 완성본을 게시하지 않는 것이 원칙이지만,
+게시 후 부모 동기화 실패에는 온전한 결과가 남을 수 있어 반환 실패를 자동 롤백으로 보지 않는다.
 
-스크립트가 다루지 않는 쪽이 **복구** 다. 절차는 다음과 같다.
+Linux 래퍼는 사적인 임시 폴더 안에서 압축을 끝내고 파일 동기화 뒤 하드 링크로 최종
+이름을 게시한다. 압축 실패 시 새 완성본이나 보존 정리를 진행하지 않는다. `KEEP`은
+스크립트가 검사하는 양의 10진 정수 정책이다. 0·잘못된 값·산술 범위 밖 값은 시작 전에
+거절하고 선행 0은 정규화한다. 방금 만든 아카이브를 반드시 남기며, 나머지는 도구가
+생성한 UTC 이름 형식의 일반 파일만 정렬해 보존한다. 같은 초의 파일은 이름으로 순서를
+정한다. 심볼릭 링크·다른 이름의 파일은 삭제 후보가 아니다. 정리 실패는 경고로 남기고
+이미 완성한 백업의 성공과 구별한다. 압축과 스냅샷은 같은 장치에만 보관하지 말고,
+다른 기기의 보호된 보관소와 복원 연습을 운영 정책으로 둔다.
+
+**복구는 깨끗한 디렉터리에서 시작한다.** 백업 파일을 곧바로 서비스의 기존 DB 위에
+덮어쓰지 않는다. SQLite 구조 검사 통과 뒤에도 앱 스키마·계정 ID·재화·인벤토리·영수증과
+키 버전을 점검해야 한다. 과거 DB로 되돌리면 그 이후의 키 폐기와 보상 지급 기록도
+되돌아간다. 폐기됐던 키가 다시 유효해지는 위험을 별도 복구·재폐기 절차로 처리한 뒤 공개한다.
+
+다음은 신뢰하는 단일 스냅샷 `checked.db`를 가지고 기본 systemd DB 경로를 교체하는
+Linux 절차다. 아카이브는 먼저 별도의 비공개 작업 폴더에서 내용과 파일 이름을 확인해
+스냅샷을 꺼낸다. 새 스냅샷은 기존 DB의 WAL/SHM과 같은 폴더에서 열지 않는다.
 
 ```bash
-# 1) 먼저 멈춘다. 라이브 DB 를 덮어쓰면서 meta 가 돌고 있으면 안 된다.
+# 신규 입장 차단과 relay 종료/결과 처리를 마친 뒤 meta 및 다른 DB 작성자를 멈춘다.
+set -euo pipefail
 sudo systemctl stop tetris-meta
 
-# 2) 현재 상태를 옆으로 치운다 (복구가 잘못됐을 때 되돌릴 유일한 수단)
-sudo mv /srv/tetris/db/tetris.db /srv/tetris/db/tetris.db.bad
+# 원본 스냅샷 대신 새 복원본을 검사한다. 실패하면 현재 운영 폴더는 그대로 남는다.
+SNAPSHOT=/safe/backup/checked.db
+RESTORE_DIR="$(sudo mktemp -d /srv/tetris/restore.XXXXXX)"
+sudo python3 /opt/tetris/scripts/backup_meta_db.py "$SNAPSHOT" "$RESTORE_DIR/tetris.db"
+sudo chown tetris:tetris "$RESTORE_DIR" "$RESTORE_DIR/tetris.db"
 
-# 3) 백업 아카이브에서 꺼낸다. 마지막 숫자는 백업 프로세스 PID라 실행마다 다르다.
-tar -xzf /srv/tetris/backups/tetris-20260726T031500Z-12345.tar.gz -C /tmp
-sudo install -o tetris -g tetris -m 0600 \
-     /tmp/tetris-20260726T031500Z-12345.db /srv/tetris/db/tetris.db
-
-# 4) 무결성 확인 — 여기서 ok 가 안 나오면 그 백업은 못 쓴다
-sudo -u tetris sqlite3 /srv/tetris/db/tetris.db 'PRAGMA integrity_check;'
-
-# 5) 남은 WAL/SHM 잔재 제거 후 기동
-sudo rm -f /srv/tetris/db/tetris.db-wal /srv/tetris/db/tetris.db-shm
+# 여기서 격리된 검증 환경으로 스키마/계정/키 버전과 실행 설정을 확인한다.
+# 검증용 서버도 종료한 뒤 기본 unit의 고정 DB 경로로 폴더 전체를 전환한다.
+OLD_DIR="/srv/tetris/db.before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+sudo test ! -e "$OLD_DIR"
+sudo mv -T -- /srv/tetris/db "$OLD_DIR"
+sudo mv -T -- "$RESTORE_DIR" /srv/tetris/db
 sudo systemctl start tetris-meta
 ```
 
-세 가지를 놓치기 쉽다.
+기존 DB 본체와 WAL·SHM·journal을 폴더째 보존하므로 되돌림 자료가 분리되지 않는다.
+두 번의 폴더 이동은 단일 원자적 교환이 아니다. 중간 실패 때는 자동 재기동하지 말고
+현재 디렉터리 상태를 확인한다. 기존 WAL만 먼저 지우거나 새 DB를 옛 WAL 옆에서
+열어 검사하는 순서는 피한다. 기존 상태를 폐기하는 시점은 복구 확인·보존 정책으로 정한다.
 
-- **파일 소유자.** `install -o tetris -g tetris` 를 빼먹으면 root 소유 파일이 되고, `User=tetris` 로 도는 meta 가 열지 못한다. `ProtectSystem=strict` 때문에 오류 메시지가 권한 문제인지 경로 문제인지 헷갈리기 쉽다.
-- **WAL/SHM 잔재.** 새 `.db` 옆에 옛 `-wal` 이 남아 있으면 SQLite 가 그것을 적용하려 들어 상태가 섞인다. 반드시 지운다.
-- **마이그레이션 방향.** `meta/database.cpp` 의 스키마 부트스트랩은 `PRAGMA user_version` 과 `schema_migrations` 테이블을 **둘 다** 확인해 elo→RP 리베이스를 한 번만 적용한다(`PRAGMA user_version` 이 `.dump`/`.restore` 에 보존되지 않기 때문에 마커 테이블을 함께 둔 것이다). 방향은 앞으로만 있고 **down 마이그레이션은 없다.** 새 스키마의 meta 가 한 번 열어 버린 DB 는 옛 바이너리로 되돌릴 수 없다. 그래서 meta 를 업그레이드하기 직전에 반드시 백업을 뜨고, 롤백은 "옛 바이너리 + 업그레이드 직전 백업" 쌍으로만 한다.
+실행 파일·스키마 마이그레이션·설정·모델/콘텐츠 카탈로그 버전을 복구 기록에 함께 남긴다.
+TLS 개인 키와 relay secret은 일반 로그나 공개 manifest에 넣지 않고 별도로 보호한다.
+현재 meta는 DB 스키마를 자동으로 앞으로 올리므로 원본 백업 자체를 새 바이너리로
+열지 않는다. 롤백은 호환되는 실행 파일과 해당 시점의 복원본을 함께 준비하며,
+`user_version`과 마이그레이션 마커를 확인한다. SQL dump 재실행과 Backup API의
+페이지 스냅샷은 헤더 메타데이터 보존에서도 차이가 있다.
 
 ### 11.3 소형 리눅스 relay + 저전력 Android(Termux) meta의 용량과 장애 경계
 

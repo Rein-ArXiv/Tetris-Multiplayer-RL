@@ -46,6 +46,13 @@ int main() {
     auto listener=net::tcp_listen(0,1,true); CHECK(listener.valid());
     sockaddr_in addr{}; socklen_t len=sizeof(addr);
     CHECK(getsockname(listener.fd(),reinterpret_cast<sockaddr*>(&addr),&len)==0);
+    net::TcpSocket invalid;
+    CHECK(!net::tcp_set_nonblocking(invalid));
+    fail_mode=true;
+    CHECK(!net::tcp_set_nonblocking(listener));
+    fail_mode=false;
+    CHECK(net::tcp_set_nonblocking(listener));
+    CHECK((::fcntl(listener.fd(),F_GETFL) & O_NONBLOCK) != 0);
     fail_mode=true; closes=0;
     CHECK(!net::tcp_connect("127.0.0.1",ntohs(addr.sin_port)).valid());
     CHECK(closes==1);

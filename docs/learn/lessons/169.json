@@ -1,0 +1,415 @@
+{
+  "id": "lesson-169",
+  "title": "Linux 서버: 실행 경로·포트·준비 상태",
+  "shortTitle": "프로세스·cwd·루프백·PORT 공지·HTTP 준비·DB 재시작",
+  "state": "reviewed",
+  "version": "1.0.0",
+  "start": "시작: 빌드한 서비스 실행 파일은 있지만 기동 성공과 요청 준비를 구분하는 실행 보조가 없습니다.",
+  "finish": "완료: 별도 DB 경로로 자식을 시작하고 포트 공지·HTTP 준비를 확인한 뒤 소유한 프로세스를 정리합니다.",
+  "objective": "실행 경로와 접속 경계를 설명하고 기동·준비·지속성 실패를 실제 서비스로 구별한다.",
+  "prerequisites": [
+    "실행 파일·공유 라이브러리·설치 경로",
+    "HTTP 계정 서비스와 SQLite 지속성",
+    "프로세스 실행과 예외 정리"
+  ],
+  "recap": {
+    "points": [
+      "헤더·링크 입력·실행용 라이브러리는 필요한 시점이 다르다.",
+      "설치 트리의 로더 경로와 실제 실행 입력을 함께 확인한다.",
+      "SDK 파일 존재와 대상 환경에서의 실행 성공은 서로 다른 증거다."
+    ],
+    "bridge": "설치된 서비스가 프로세스로 시작되는 순서와 실제 요청을 받을 준비를 연결합니다."
+  },
+  "sections": [
+    {
+      "title": "실행 파일을 만들었는데 접속은 왜 실패할까?",
+      "body": "서버 실행 파일이 있어도 다른 프로그램이 곧바로 요청을 보낼 수 있는 것은 아닙니다. 운영체제가 프로세스를 만들고, 프로그램이 설정과 DB를 열고, 소켓을 바인딩한 뒤 요청 처리 루프에 들어가야 합니다. 시작 메시지가 보이는 시점과 요청을 처리할 수 있는 시점 사이에는 간격이 있습니다.\n\n이번에는 누적 계정 서비스를 실제 자식 프로세스로 실행하는 작은 보조를 만듭니다. 실행 파일은 빌드 폴더에 두고, DB는 호출자가 정한 별도 경로에 둡니다. 서비스가 선택한 포트를 받아 HTTP 준비 응답을 확인하고, 필요한 작업을 마치면 우리가 시작한 프로세스를 회수합니다.\n\n여기서 만드는 것은 Linux의 로컬 학습 실행기입니다. 같은 계정 서비스를 다루면서 **산출물의 위치**, **프로세스의 상태**, **접속 지점**, **데이터의 수명**을 각각 관찰합니다. 제품의 meta·relay·WSS 기동 설정은 같은 관점으로 소스 뷰어에서 비교합니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "int main(",
+        "invariant": "설정·DB 초기화와 HTTP 수신의 시작은 순서가 있는 별도 단계다.",
+        "mayDiffer": "제품의 인자 이름과 서비스 구성은 다를 수 있습니다. 실행 파일 존재를 준비 완료로 해석하지 않습니다."
+      }
+    },
+    {
+      "title": "바이너리·설정·상태는 수명이 다르다",
+      "body": "빌드 결과는 다시 만들거나 버전을 교체할 수 있습니다. 설정은 실행 환경이 선택한 주소·포트·정책을 전달합니다. DB는 사용자의 누적 상태이므로 실행 파일 교체 때 함께 지워서는 안 됩니다. 파일을 종류별로 나누는 이유는 이름을 예쁘게 정리하려는 것이 아니라 **교체·쓰기·보존의 권한을 다르게 주기 위해서**입니다.\n\n| 자료 | 예시 역할 | 바뀌는 시점 |\n| --- | --- | --- |\n| 실행 파일·읽기 전용 자산 | 프로그램과 표시 자료 | 새 버전 배포 |\n| 실행 설정 | 수신 주소·서비스 URL·인증서 경로 | 운영 환경 변경 |\n| 가변 상태 | 계정 DB·저널 | 서비스 요청 처리 |\n\nLinux 프로세스의 현재 작업 디렉터리(cwd)는 상대 경로를 해석하는 기준입니다. 실행 파일이 `/opt/study/bin`에 있다고 해서 `accounts.sqlite`가 그곳에 생기는 것은 아닙니다. 같은 프로그램을 다른 디렉터리에서 실행하면 다른 DB를 열 수 있습니다.\n\n보조는 실행 파일과 DB를 부모 쪽에서 먼저 절대 경로로 확정합니다. 그 뒤 자식의 cwd를 임시 디렉터리로 바꿉니다. 이렇게 해도 같은 DB를 다시 열 수 있다면 데이터 선택이 우연한 cwd에 기대지 않는지 확인할 수 있습니다.",
+      "reference": {
+        "path": "deploy/systemd/tetris-meta.service",
+        "symbol": "WorkingDirectory=/opt/tetris",
+        "invariant": "실행 작업 디렉터리와 가변 DB 경로를 명시하고 쓰기 권한을 분리한다.",
+        "mayDiffer": "배포 디렉터리·계정 이름은 환경별 선택입니다. 작업 디렉터리와 파일 소유권 계약을 따로 확인합니다."
+      },
+      "codes": [
+        {
+          "label": "기준 실행 보조: cwd 변경 전에 두 경로를 확정",
+          "language": "python",
+          "text": "    executable = Path(executable).resolve()\n    database = Path(database).resolve()"
+        }
+      ]
+    },
+    {
+      "title": "주소와 포트는 누구의 소켓을 고르는가?",
+      "body": "IP 주소는 접속 대상 호스트와 인터페이스를 고르는 데 사용되고, TCP 포트는 그 호스트 안에서 수신 소켓을 찾는 데 사용됩니다. 서버의 `bind`는 **로컬 수신 범위**를 정하고, 클라이언트의 `connect`는 **도달하려는 원격 지점**을 정합니다. 서버가 bind한 문자열을 그대로 클라이언트에 복사하면 의미가 달라질 수 있습니다.\n\n`127.0.0.1`은 그 주소를 사용하는 기기 자신의 IPv4 루프백입니다. 노트북에서 실행한 클라이언트에 이 주소를 넣으면 Linux 서버가 아니라 노트북 자신에게 연결합니다. `0.0.0.0`은 서버 bind에서 모든 로컬 IPv4 인터페이스를 뜻하는 와일드카드입니다. 원격 클라이언트 설정에는 실제 서버 IP나 공개 도메인을 사용합니다.\n\n서로 독립적인 두 서버가 같은 수신 주소·포트를 일반적인 설정으로 점유하려 하면 두 번째 bind가 실패합니다. 이때 다른 프로세스를 무작정 종료하지 말고, 어느 프로그램이 그 주소를 소유해야 하는지 확인합니다. 공유 포트 옵션은 여러 프로세스의 요청 분배까지 고려하는 별도 설계입니다.\n\n리스너가 열렸다는 사실만으로 외부에서 접근할 수 있는 것은 아닙니다. 대상 주소, 라우팅, 방화벽, TLS, 응용 프로토콜의 조건도 맞아야 합니다.",
+      "reference": {
+        "path": "server/reactor_relay.cpp",
+        "symbol": "--loopback-only",
+        "invariant": "내부 릴레이의 수신 범위를 제한하고 외부 접속 경로를 분리한다.",
+        "mayDiffer": "포트 번호나 접속 정책은 배포 설정입니다. loopback의 의미는 접속하는 프로세스의 호스트를 기준으로 판단합니다."
+      },
+      "notes": [
+        {
+          "title": "루프백과 인증의 역할",
+          "body": "루프백 바인딩은 원격 네트워크 노출을 줄입니다. 같은 기기의 다른 프로세스가 접속할 가능성은 남으므로 토큰·릴레이 비밀값 검증과 같은 응용 계층의 인증을 대신하지 않습니다.",
+          "kind": "오해 점검"
+        }
+      ]
+    },
+    {
+      "title": "공개 입구와 내부 서비스 경로를 그려 보기",
+      "body": "제품의 요청 경로를 연결별로 나누면 포트 설정을 이해하기 쉽습니다. 웹 클라이언트의 계정 요청은 HTTPS 공개 입구를 거쳐 내부 meta HTTP로 전달됩니다. 대전 연결은 WSS 게이트웨이를 거쳐 내부 TCP 릴레이로 이어집니다. 릴레이는 필요한 인증·정산 요청을 meta에 보냅니다.\n\n| 연결 | 접속하는 쪽이 알아야 할 주소 | 확인할 계약 |\n| --- | --- | --- |\n| 클라이언트 → 계정 API 입구 | 공개 HTTPS URL | 인증서 이름·HTTP 경로·계정 인증 |\n| 클라이언트 → 게임 입구 | 공개 WSS URL | TLS·WebSocket·입장 티켓 |\n| 게이트웨이 → 내부 relay | 같은 호스트의 내부 TCP 주소 | 바인딩 범위·프레임 전달 |\n| relay → meta | 보호된 내부 API URL | 공유 인증과 응답 처리 |\n\n같은 호스트에서는 내부 연결을 루프백에 묶을 수 있습니다. 서비스를 다른 호스트로 옮기면 루프백 주소의 의미부터 바뀝니다. 주소만 바꾸는 일에 더해 두 호스트 사이의 보호된 전송 경로와 인증 설정을 함께 맞춰야 합니다.\n\n학습 웹사이트인 GitHub Pages는 강의와 소스 스냅샷을 제공하는 별도의 정적 사이트입니다. Pages 배포가 게임의 meta·relay 프로세스를 시작시키지는 않습니다.",
+      "reference": {
+        "path": "server/wss_gateway.cpp",
+        "symbol": "--backend-port",
+        "invariant": "공개 TLS 연결과 내부 TCP 연결은 서로 다른 소켓과 설정을 사용한다.",
+        "mayDiffer": "공개 포트·도메인·프록시 배치는 달라질 수 있습니다. 연결마다 누가 어느 주소로 접속하는지 추적합니다."
+      }
+    },
+    {
+      "title": "누적 서비스의 시작 순서를 읽기",
+      "body": "계정 서비스는 DB를 열고 스키마와 상점 자료를 준비한 뒤 HTTP 라우트를 등록합니다. 그 다음 루프백에 bind하고 실제 포트를 표준 출력으로 알린 뒤 수신 루프를 실행합니다. 포트를 출력할 때 `fflush`를 호출해야 부모가 출력 버퍼에 머문 메시지를 기다리지 않습니다.\n\n포트 인자로 `0`을 주면 이 서비스는 `bind_to_any_port`를 사용합니다. 운영체제가 비어 있는 포트를 선택하고 **그 소켓에 곧바로 할당**합니다. 부모가 임시 소켓으로 빈 번호를 찾았다가 닫고 자식에게 알려주는 방식에서는 그 사이 다른 프로세스가 번호를 차지할 수 있습니다. 자식이 자신의 리스너를 직접 만드는 방식은 그 검사와 사용 사이의 간격을 없앱니다.\n\n`PORT` 한 줄은 포트 선택과 bind에 대한 공지입니다. 그 줄 다음에 수신 루프 진입이 있으므로, 부모는 공지만으로 HTTP 준비 완료를 선언하지 않습니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "meta::Database",
+        "invariant": "DB 초기화의 성공을 확인한 뒤 서비스 수신을 시작한다.",
+        "mayDiffer": "제품 CLI는 고정된 운영 포트를 입력받으며 학습용 PORT 공지를 제공하지 않습니다. 포트 0은 기준 서비스의 실습 계약입니다."
+      },
+      "codes": [
+        {
+          "label": "기준 C++ 서비스: 바인딩 후 포트 공지와 수신 루프",
+          "language": "cpp",
+          "text": "    const int port=requested==0 ? http.bind_to_any_port(\"127.0.0.1\")\n        : http.bind_to_port(\"127.0.0.1\",requested) ? requested : -1;\n    if(port<=0)return 1;\n    std::printf(\"PORT %d\\n\",port);std::fflush(stdout);\n    return http.listen_after_bind() ? 0 : 1;"
+        }
+      ]
+    },
+    {
+      "title": "SERVICE 역할로 빌드하고 데이터 경로를 정하기",
+      "body": "체크포인트 `169-linux-service`에서 SERVICE 역할을 선택합니다. 그래픽 장치나 학습 프레임워크를 요구하지 않고 누적 HTTP·SQLite 계정 서비스를 빌드합니다. 필요한 C/C++ 도구와 OpenSSL 개발 파일은 이 역할의 빌드 입력입니다.\n\n실습 DB 디렉터리는 실행 파일과 별도로 만듭니다. 아래 명령은 기동·HTTP 준비 확인·정리를 한 번 수행합니다. 명령이 종료되면 출력된 주소의 프로세스도 종료됩니다. 데이터를 살펴보거나 다시 실행할 때는 같은 DB 경로를 사용합니다.\n\n서버를 직접 실행해 두려면 `study_account_db`에 포트와 DB 경로를 전달합니다. `0`을 사용했다면 출력된 실제 포트로 다른 터미널에서 `/healthz`를 요청합니다. 프롬프트가 돌아오지 않는 것은 프로세스가 수신 루프를 실행하고 있기 때문입니다.",
+      "reference": {
+        "path": "CMakePresets.json",
+        "symbol": "\"name\": \"servers\"",
+        "invariant": "빌드할 역할과 실제 서비스 실행 인자를 분리한다.",
+        "mayDiffer": "제품 servers 프리셋의 타깃과 누적 SERVICE 타깃은 다릅니다. 각각의 CMake 계약과 CLI를 확인합니다."
+      },
+      "codes": [
+        {
+          "label": "체크포인트 디렉터리에서: 기동 검사를 한 번 수행",
+          "language": "bash",
+          "text": "cmake -S roles -B build-service -DSTUDY_ROLE=SERVICE -DCMAKE_BUILD_TYPE=Release\ncmake --build build-service --target study_account_db --parallel 2\nmkdir -p study-state\npython3 operations/local_service.py build-service/study_account_db \"$PWD/study-state/accounts.sqlite\""
+        }
+      ]
+    },
+    {
+      "title": "자식을 실행할 때는 문자열 명령 대신 인자 배열",
+      "body": "Python의 `Popen`은 새 프로세스를 시작하고 부모에게 그 프로세스를 나타내는 객체를 돌려줍니다. 반환됐다는 사실은 C++의 DB 초기화나 HTTP 준비가 끝났다는 뜻이 아닙니다. 이후 `poll()`로 종료 여부를 확인해야 합니다.\n\n실행 파일과 인자를 배열의 원소로 전달하면 경로 안의 공백을 셸 문법과 섞지 않습니다. 여기서는 셸을 중간에 실행하지 않습니다. `cwd`는 자식의 작업 디렉터리만 정하고, 이미 절대 경로로 확정한 실행 파일·DB는 그대로 사용합니다.\n\n자식의 출력은 우리가 소유한 임시 파일로 보냅니다. 읽지 않는 PIPE를 그대로 연결하면 출력 버퍼가 차는 순간 자식이 멈출 수 있습니다. 이 작은 서비스의 공지는 파일에서 확인하고, 부모가 별도로 파일을 열어 읽습니다. 읽기와 쓰기에 같은 열린 파일의 위치를 공유하지 않도록 하는 선택입니다. 장기 운영 로그에는 용량·회전·보관 정책도 따로 필요합니다.",
+      "reference": {
+        "path": "python/train/process_runner.py",
+        "symbol": "subprocess.Popen",
+        "invariant": "자식의 입출력과 실패 상태를 부모의 수명 관리 안에 둔다.",
+        "mayDiffer": "학습 프로세스 실행기는 출력 로그를 계속 읽습니다. 여기서는 짧은 로컬 서비스 기동과 포트 공지에 필요한 파일 방식을 사용합니다."
+      },
+      "codes": [
+        {
+          "label": "기준 실행 보조: 소유한 임시 출력 파일과 직접 실행",
+          "language": "python",
+          "text": "            with open(log_path, \"wb\") as sink:\n                proc = subprocess.Popen(\n                    [str(executable), \"0\", str(database)],\n                    cwd=tmp,                  # private, owned working directory\n                    stdout=sink,\n                    stderr=subprocess.STDOUT,\n                )"
+        }
+      ]
+    },
+    {
+      "title": "공지 한 줄도 입력 문법과 길이를 가진다",
+      "body": "부모가 해석할 공지는 `PORT <숫자>\\n` 한 줄입니다. 길이를 무제한 읽으면 잘못된 프로그램이 출력하는 임의의 긴 데이터를 계속 보관할 수 있습니다. 보조는 읽기 한도를 정하고, 줄이 완성되지 않았으면 자식 종료와 기한을 확인합니다.\n\n완성된 줄은 정규식으로 전체 문법을 검사하고, 포트의 수치 범위도 검사합니다. `PORT 0`이나 뒤에 다른 토큰이 붙은 줄을 정상 endpoint로 쓰지 않습니다. 공지 경로에서 임의 로그를 먼저 출력하도록 C++ 코드를 바꾼다면 부모와 자식의 계약도 함께 바꿔야 합니다.\n\n읽은 포트는 고정된 숫자 루프백 호스트와 결합합니다. 자식 출력에 호스트 URL까지 임의로 넣고 외부 주소를 따라가게 만들지 않습니다. 공지는 신뢰한 실행 파일의 로컬 프로토콜이며, 최종 준비 확인은 별도 HTTP 요청으로 수행합니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "bool parse_endpoint",
+        "invariant": "문자열 문법과 숫자 범위를 확인한 뒤 접속 설정에 사용한다.",
+        "mayDiffer": "제품의 HOST:PORT 입력 문법과 학습용 PORT 출력 문법은 각각의 계약입니다. 정규식 형태를 공용 프로토콜이라고 가정하지 않습니다."
+      },
+      "codes": [
+        {
+          "label": "기준 실행 보조: 전체 줄 문법과 포트 범위",
+          "language": "python",
+          "text": "            line = _read_port_line(log_path, proc, deadline)\n            match = re.fullmatch(rb\"PORT ([1-9][0-9]{0,4})\\n\", line)\n            if match is None:\n                raise RuntimeError(\"service reported an invalid port line\")\n            port = int(match[1])\n            if not 1 <= port <= 65535:\n                raise RuntimeError(\"service port out of range\")"
+        }
+      ]
+    },
+    {
+      "title": "전체 기한과 개별 I/O timeout 구분하기",
+      "body": "준비 확인을 무한 반복하면 잘못된 실행 파일이나 실패한 초기화를 기다리는 부모도 끝나지 않습니다. 시작할 때 `monotonic()` 기준의 마감 시점을 정합니다. 벽시계는 시간 동기화로 값이 바뀔 수 있지만 단조 시계는 경과 시간 비교에 적합합니다.\n\n각 확인 시도는 먼저 자식이 종료됐는지 보고, 남은 준비 시간을 계산합니다. HTTP 연결에도 작은 timeout을 줍니다. 아직 수신 루프가 준비되지 않아 연결이 거절되거나 일시적인 오류가 나면 마감 시점 안에서 다시 확인합니다. 일시적 준비 불가 응답인 503도 같은 범위에서 재시도합니다.\n\n**이 코드의 마감은 시도 사이와 성공 판정 직전에 확인합니다.** 소켓 timeout은 각각의 blocking I/O가 기다리는 한도입니다. 상대가 바이트를 계속 조금씩 보내는 응답 전체를 같은 마감에 강제로 끊는 감시 장치는 아닙니다. 신뢰한 짧은 로컬 응답에 사용하는 보조라는 범위를 지키며, 느린 원격 응답의 전체 제한이 필요하면 취소 가능한 I/O 설계를 적용해야 합니다.",
+      "reference": {
+        "path": "python/train/process_runner.py",
+        "symbol": "timeout",
+        "invariant": "프로세스나 I/O의 실패를 끝없이 기다리지 않도록 기다림의 범위와 종료 경로를 정한다.",
+        "mayDiffer": "학습 자식의 실행 제한과 HTTP 준비 확인의 기한은 적용 대상이 다릅니다. timeout이라는 같은 이름만으로 보장 범위를 같게 보지 않습니다."
+      },
+      "codes": [
+        {
+          "label": "기준 실행 보조: 남은 기한과 개별 HTTP 대기",
+          "language": "python",
+          "text": "        remaining = deadline - time.monotonic()\n        if remaining <= 0:\n            raise RuntimeError(\"service deadline exceeded\")\n\n        # Explicit numeric host/port: http.client never consults environment\n        # proxies, so loopback traffic stays local.\n        conn = http.client.HTTPConnection(\n            _LOOPBACK, port, timeout=min(_HTTP_TIMEOUT_MAX, remaining)\n        )"
+        }
+      ]
+    },
+    {
+      "title": "정상 응답을 어디까지 검사할 것인가?",
+      "body": "TCP 연결이 성공하면 연결 지점까지 도달했다는 사실을 알 수 있습니다. HTTP 준비 확인에서는 한 단계 더 나아가 요청 경로와 상태 코드, 응답 본문을 확인합니다. 크기 한도를 넘는 본문, 잘못된 JSON, 기대와 다른 자료형을 성공으로 간주하지 않습니다.\n\n기준 서비스의 `/healthz`는 JSON 객체의 `ok`에 참을 담습니다. Python에서는 `True == 1`이 참이므로 `payload.get(\"ok\") is True`처럼 기대한 불리언 값을 검사합니다. 메모리에 무한히 읽지 않도록 본문 크기도 제한합니다.\n\n이 응답은 그 핸들러가 실행됐다는 증거입니다. `/healthz`는 DB에 쓰거나 모델을 실행하지 않습니다. 따라서 계정 생성·DB 지속성·하위 API와 같은 기능은 필요한 별도 요청으로 검사합니다. 준비 확인 직후에도 프로세스가 종료될 수 있으므로 실제 요청의 오류 처리 역시 유지합니다.",
+      "reference": {
+        "path": "meta/api_server.cpp",
+        "symbol": "// ------- GET /healthz",
+        "invariant": "준비 확인이 실제로 실행한 동작의 범위만 근거로 판단한다.",
+        "mayDiffer": "health 응답의 내용은 확장될 수 있습니다. 검사하지 않는 DB 쓰기나 하위 서비스까지 정상이라고 확대 해석하지 않습니다."
+      },
+      "codes": [
+        {
+          "label": "기준 실행 보조: 응답 크기·구문·자료형 확인",
+          "language": "python",
+          "text": "        if status != 200:\n            raise RuntimeError(\"health check returned a non-200 status\")\n        if len(body) >= _BODY_LIMIT:\n            raise RuntimeError(\"health check body exceeded the size limit\")\n        try:\n            payload = json.loads(body)\n        except (json.JSONDecodeError, UnicodeDecodeError):\n            raise RuntimeError(\"health check body was not valid JSON\")\n        if not isinstance(payload, dict) or payload.get(\"ok\") is not True:\n            raise RuntimeError(\"health check body was not an object with ok=true\")"
+        }
+      ]
+    },
+    {
+      "title": "성공과 예외가 같은 정리 경로를 지나게 하기",
+      "body": "`local_service`는 컨텍스트 관리자입니다. `yield` 이전에는 준비를 확인하고, 호출자는 `with` 본문 안에서 서비스 주소를 사용합니다. 본문이 끝나거나 예외를 던지면 보조의 `finally`가 실행됩니다. 자식의 수명 범위가 코드 블록으로 드러납니다.\n\n정리 대상은 이 보조가 만든 `Popen` 객체뿐입니다. 주소에 우연히 다른 프로그램이 있다고 해서 그 프로세스를 찾아 종료하지 않습니다. 살아 있는 자식에게 종료 신호를 보내고 기다리며, 정리 기한을 넘으면 강제 종료 후 다시 회수합니다. `wait()`는 종료를 기다리고 부모가 종료 상태를 가져오는 작업입니다.\n\n이 학습 C++ 서비스에는 응용 수준의 정상 종료 알림이 없습니다. 따라서 `terminate()`를 호출한 것을 진행 중인 모든 요청이 완료되는 graceful shutdown이라고 부르지 않습니다. DB 보존과 프로세스 회수, 요청을 비우는 종료 정책은 각각 확인할 계약입니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "현재 meta에는 별도의 graceful-stop 핸들러가 없다",
+        "invariant": "실제 구현된 종료 계약과 부모의 프로세스 회수를 구분한다.",
+        "mayDiffer": "운영 종료에서는 신규 요청 차단·처리 중 작업·백업 시점을 함께 설계합니다. 자식 종료 호출 하나로 그 절차를 대체하지 않습니다."
+      },
+      "codes": [
+        {
+          "label": "기준 실행 보조: 자신이 만든 프로세스만 회수",
+          "language": "python",
+          "text": "        finally:\n            # Signal only our own Popen; other listeners are untouched.\n            if proc is not None and proc.poll() is None:\n                proc.terminate()\n                try:\n                    proc.wait(timeout=_TERM_GRACE)\n                except subprocess.TimeoutExpired:\n                    proc.kill()\n                    proc.wait(timeout=_TERM_GRACE)"
+        }
+      ]
+    },
+    {
+      "title": "실행 파일을 다시 시작해도 계정은 남는가?",
+      "body": "새 임시 DB로 계정 서비스를 시작하고 테스트용 계정을 하나 생성합니다. 응답 토큰은 검사 프로그램의 메모리 안에서만 보관합니다. 컨텍스트를 나와 자식을 종료한 뒤 같은 DB 경로로 다시 시작하고, 보관한 토큰으로 프로필을 조회합니다.\n\n이 검사는 두 번째 프로세스가 첫 프로세스의 메모리에 기대지 않고 DB에 저장된 계정을 읽는지 보여 줍니다. 반대로 DB 경로를 다른 디렉터리로 바꾸면 별도의 빈 저장소가 만들어질 수 있습니다. 실행 파일 교체 때문에 계정이 사라졌다고 판단하기 전에 실제 열린 DB 경로부터 확인할 이유입니다.\n\n포트 점유 실패, 포트 공지 없이 종료, 잘못된 포트 공지, 준비되지 않은 HTTP, 응답 크기 초과도 각각 실패 경로로 실행해 봅니다. 실패를 관찰한 뒤 테스트 자식이 남아 있지 않은지까지 확인합니다. 계정 토큰이나 전체 자식 로그를 오류 메시지에 붙일 필요는 없습니다.",
+      "reference": {
+        "path": "meta/main.cpp",
+        "symbol": "std::string db_path",
+        "invariant": "영속 상태의 선택은 명시한 DB 경로와 저장 계층의 계약에 달려 있다.",
+        "mayDiffer": "파일명·저장 방식은 달라질 수 있습니다. 프로세스 재시작과 데이터 초기화는 같은 사건이 아닙니다."
+      }
+    },
+    {
+      "title": "systemd의 순서와 응용 프로그램의 준비는 다르다",
+      "body": "운영에서는 터미널을 열어 두는 대신 서비스 관리자가 프로세스를 시작·재시작·기록합니다. `ExecStart`는 실행할 프로그램과 인자를, `WorkingDirectory`는 상대 경로의 기준을, `User`는 실행 권한의 주체를 정합니다. 제품의 meta 유닛은 프로그램 경로와 DB 경로를 분리하고 쓰기 가능한 경로를 제한합니다.\n\n`After=B.service`는 A와 B의 시작 작업이 함께 있을 때 순서를 정합니다. B를 시작 작업에 포함시키는 `Wants`·`Requires`와 다른 관계입니다. 또한 제품의 `Type=simple`은 프로그램의 HTTP 준비 완료를 시작 판정으로 기다리지 않습니다. 같은 순서대로 프로세스를 만들었어도 실제 첫 요청은 실패할 수 있습니다.\n\n준비 알림을 정확히 서비스 관리자에게 전달하려면 프로그램이 해당 계약을 구현해야 합니다. 예를 들어 `Type=notify`는 응용 프로그램의 준비 알림과 함께 설계합니다. 설정 단어만 바꾸어서 준비 검사가 생기지는 않습니다. 우리 실습은 부모가 명시한 로컬 준비 조건을 직접 확인하는 작은 사례입니다.",
+      "reference": {
+        "path": "deploy/systemd/tetris-wss.service",
+        "symbol": "After=network-online.target tetris-relay.service",
+        "invariant": "유닛 시작 순서와 실제 요청 처리 가능 상태를 각각 판단한다.",
+        "mayDiffer": "유닛 의존성과 서비스 타입은 운영 설계에 따라 달라집니다. After나 Requires만으로 HTTP 준비를 증명하지 않습니다."
+      },
+      "notes": [
+        {
+          "title": "실습에서는 시스템 서비스를 설치하지 않습니다",
+          "body": "체크포인트 실행 보조는 현재 사용자가 소유한 임시 자식만 실행합니다. 제품 유닛 설치는 실행 계정·디렉터리 권한·비밀 파일·인증서를 준비한 별도 운영 작업입니다.",
+          "kind": "오해 점검"
+        }
+      ]
+    },
+    {
+      "title": "빌드 옵션과 번들 내용에도 하나의 계약이 필요하다",
+      "body": "`BOT=ON`을 CMake에 넘겨 모델 추론이 켜졌는데, 셸은 `BOT`가 문자열 `1`일 때만 Runtime을 복사한다면 어떤 일이 생길까요? 빌드는 성공해도 배포 디렉터리에서 실행할 때 필수 라이브러리가 빠질 수 있습니다. 같은 옵션이 두 단계에서 다른 의미로 해석된 것입니다.\n\n제품의 Linux 릴리스 스크립트는 허용한 참·거짓 표기를 먼저 정규화하고, 그 결과를 구성·빌드 대상·Runtime 복사에 공통으로 사용합니다. `ORT_ROOT`를 지정하면 링크에 사용하는 SDK 경로와 번들에 복사하는 경로도 같게 전달합니다. 필수 파일 누락과 수행한 경로 패치의 실패는 성공 상태로 숨기지 않습니다.\n\n현재 Linux 번들 스크립트는 native x64 패키지입니다. 다른 CPU에서 실행했다고 x64로 자동 변환되는 것이 아닙니다. 대상 선택과 공유 라이브러리 배치가 맞아도 시스템 런타임과 드라이버 호환성은 실제 대상 환경에서 확인합니다. 번들 생성과 서비스 기동을 별도의 검증 단계로 두는 이유입니다.",
+      "reference": {
+        "path": "scripts/release_linux_common.sh",
+        "symbol": "release_bool()",
+        "invariant": "하나의 선택이 빌드와 배포 구성에서 같은 의미로 해석되게 한다.",
+        "mayDiffer": "지원 플랫폼과 허용 표기는 달라질 수 있습니다. 정규화한 선택·대상 SDK·실제 포함 파일의 일치를 확인합니다."
+      },
+      "notes": [
+        {
+          "title": "실패한 배포 명령 뒤에 남은 파일",
+          "body": "현재 스크립트는 배포 트리의 원자적 교체까지 구현하지 않습니다. 실패 시 중간 디렉터리나 과거 압축이 남을 수 있으므로 종료 상태를 확인하고 과거 파일을 새 성공 산출물로 쓰지 않습니다.",
+          "kind": "오해 점검"
+        }
+      ]
+    },
+    {
+      "title": "완성 보조와 실제 서비스 설정을 나란히 읽기",
+      "body": "완성 보조를 열어 경로 확정 → 자식 생성 → 포트 공지 → HTTP 준비 → 호출자 작업 → 정리 순서로 읽습니다. 본문에서 다룬 작은 코드 조각들이 한 수명 범위 안에 연결됩니다.\n\n제품의 서비스 유닛과 비교할 때는 함수 이름을 일대일로 찾기보다 같은 책임을 찾습니다. 누가 프로세스를 소유하는지, 어떤 경로의 DB를 여는지, 누가 접속 주소를 결정하는지, 어떤 응답을 준비의 증거로 삼는지 확인합니다. 시작에 성공한 뒤의 연결 단절과 처리 중인 요청은 실제 서비스의 오류·종료 정책으로 이어집니다.",
+      "reference": {
+        "path": "deploy/systemd/tetris-meta.service",
+        "symbol": "ExecStart=",
+        "invariant": "실행 인자·상태 위치·권한·재시작 정책을 운영자가 확인할 수 있게 드러낸다.",
+        "mayDiffer": "학습의 단일 자식 보조와 운영 서비스 관리자는 규모와 책임이 다릅니다. 학습용 코드를 공용 서버 관리자로 그대로 간주하지 않습니다."
+      },
+      "codes": [
+        {
+          "label": "기준 전체 파일 — operations/local_service.py",
+          "language": "python",
+          "file": "checkpoints/169-linux-service/operations/local_service.py",
+          "collapsed": true
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "169-1",
+      "question": "서비스의 실행 파일은 /srv/account/bin/account이고 설정은 /srv/account/config/app.json이다. 코드는 \"config/app.json\"을 연다. systemd의 WorkingDirectory=/srv로 실행하면 설정을 찾지 못하지만, 터미널에서 cd /srv/account 후 실행하면 성공한다. 어떤 수정이 경로 계약을 분명하게 만드는가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "상대 경로는 항상 실행 파일 위치를 기준으로 하므로 바이너리 디렉터리로 WorkingDirectory를 바꿔야 한다."
+        },
+        {
+          "id": "b",
+          "text": "SQLite는 상대 경로를 지원하지 않으므로 DB 경로만 절대 경로로 바꾸면 설정 문제도 함께 해결된다."
+        },
+        {
+          "id": "c",
+          "text": "상대 경로는 프로세스의 WorkingDirectory를 기준으로 풀리므로 설정/상태 경로를 절대 경로로 고정하거나 WorkingDirectory를 의도한 기준 디렉터리로 맞춰야 한다."
+        },
+        {
+          "id": "d",
+          "text": "systemd는 WorkingDirectory를 무시하고 항상 / 를 기준으로 상대 경로를 해석한다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "상대 경로는 프로세스의 WorkingDirectory를 기준으로 풀리므로 설정/상태 경로를 절대 경로로 고정하거나 WorkingDirectory를 의도한 기준 디렉터리로 맞춰야 한다.",
+      "explanation": "상대 경로 해석 기준은 프로세스의 현재 작업 디렉터리(WorkingDirectory)다. 실행 파일/설정/상태 경로를 분리하는 구조라면 각 경로를 절대 경로로 명시하거나 기준 디렉터리를 정확히 지정해야 하며, 실행 파일 위치가 기준이라고 가정하면 안 된다."
+    },
+    {
+      "id": "169-2",
+      "question": "배포 구조는 공개 WSS 프런트가 0.0.0.0:443 에서 TLS를 처리하고, 내부 릴레이는 127.0.0.1:9000 에만 바인딩된다. 다른 호스트의 클라이언트 설정에 내부 릴레이 주소 wss://127.0.0.1:9000 을 넣었더니 연결이 되지 않는다. 원인으로 가장 정확한 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "127.0.0.1 은 와일드카드 바인드라서 서버가 모든 인터페이스에서 수신하지만 클라이언트가 포트를 잘못 적었다."
+        },
+        {
+          "id": "b",
+          "text": "클라이언트가 접속한 127.0.0.1 은 서버가 아니라 그 클라이언트 자신의 호스트를 가리키므로, 클라이언트는 외부에서 도달 가능한 공개 프런트 URL을 사용해야 한다."
+        },
+        {
+          "id": "c",
+          "text": "내부 릴레이를 0.0.0.0:9000 으로 바꿔 공개하면 클라이언트의 127.0.0.1 이 서버로 라우팅된다."
+        },
+        {
+          "id": "d",
+          "text": "WSS는 루프백 주소로만 연결할 수 있는 프로토콜이므로 어떤 주소를 써도 원격 접속은 불가능하다."
+        }
+      ],
+      "correctOptionId": "b",
+      "answer": "클라이언트가 접속한 127.0.0.1 은 서버가 아니라 그 클라이언트 자신의 호스트를 가리키므로, 클라이언트는 외부에서 도달 가능한 공개 프런트 URL을 사용해야 한다.",
+      "explanation": "127.0.0.1은 주소를 사용하는 호스트 자신의 루프백이다. 다른 기기의 클라이언트도 자기 자신에게 접속하므로, 서버의 공개 프런트 도메인과 포트를 사용해야 한다. 공개 WSS 프런트와 내부 TCP 릴레이의 프로토콜도 구분한다."
+    },
+    {
+      "id": "169-3",
+      "question": "계정 서비스 인스턴스가 이미 0.0.0.0:9000 에 바인딩되어 정상 동작 중이다. 같은 서비스 실행 파일을 별도로 한 번 더 실행했더니 곧바로 'Address already in use' 로 실패했다. 또한 어떤 운영자는 클라이언트 목적지 주소로 0.0.0.0:9000 을 지정하려 한다. 가장 정확한 설명은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "0.0.0.0 은 클라이언트 목적지로 쓸 수 있는 실제 라우팅 주소이며, 두 번째 실패는 방화벽 때문이다."
+        },
+        {
+          "id": "b",
+          "text": "0.0.0.0 바인드는 여러 서버가 같은 포트를 공유하도록 허용하므로 두 번째 실패는 일시적이며 재시도하면 성공한다."
+        },
+        {
+          "id": "c",
+          "text": "같은 포트 충돌은 SO_REUSEPORT 를 켜면 어떤 경우에도 해결되므로 0.0.0.0 을 목적지로 쓰는 것도 맞다."
+        },
+        {
+          "id": "d",
+          "text": "별도의 포트 공유 설정이 없는 이 서비스는 같은 주소/포트를 동시에 점유할 수 없다. 독립 인스턴스는 다른 포트를 쓰고, 클라이언트에는 실제 서버 주소를 지정한다. 0.0.0.0은 IPv4 와일드카드 바인드 주소다."
+        }
+      ],
+      "correctOptionId": "d",
+      "answer": "별도의 포트 공유 설정이 없는 이 서비스는 같은 주소/포트를 동시에 점유할 수 없다. 독립 인스턴스는 다른 포트를 쓰고, 클라이언트에는 실제 서버 주소를 지정한다. 0.0.0.0은 IPv4 와일드카드 바인드 주소다.",
+      "explanation": "일반적으로 두 서버가 같은 주소/포트에 동시에 바인딩할 수 없으므로 이미 사용 중인 포트를 점유하면 실패한다. 0.0.0.0 은 IPv4 와일드카드 바인드로 서버가 모든 로컬 인터페이스에서 수신하겠다는 의미이며, 클라이언트가 접속 목적지로 지정하는 주소가 아니다."
+    },
+    {
+      "id": "169-4",
+      "question": "계정 서비스는 SQLite를 초기화한 뒤 바인딩하고, 실제 임의(ephemeral) 포트를 로그로 알린 다음 수신 루프를 시작한다. 운영자가 HTTP /healthz 가 {\"ok\":true} 를 반환하는 것을 보고 'DB 쓰기와 하위 서비스까지 정상'이라고 보고했다. 가장 정확한 평가는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "HTTP /healthz 200 은 해당 핸들러가 응답했다는 증거일 뿐이며, DB 쓰기나 하위 서비스 정상 여부의 증거가 아니다. 프로세스 생성, PORT 공지 읽기, TCP 연결, HTTP 헬스는 서로 다른 증거다."
+        },
+        {
+          "id": "b",
+          "text": "health 가 ok 를 반환하면 서비스 초기화 순서상 DB 초기화가 끝났으므로 DB 쓰기까지 보장된다."
+        },
+        {
+          "id": "c",
+          "text": "ephemeral 포트를 로그로 알렸다면 그 자체로 원격 클라이언트가 연결 가능하다는 증거다."
+        },
+        {
+          "id": "d",
+          "text": "TCP 연결 성공은 HTTP 핸들러와 DB 쓰기 모두를 검증하므로 health 확인은 불필요하다."
+        }
+      ],
+      "correctOptionId": "a",
+      "answer": "HTTP /healthz 200 은 해당 핸들러가 응답했다는 증거일 뿐이며, DB 쓰기나 하위 서비스 정상 여부의 증거가 아니다. 프로세스 생성, PORT 공지 읽기, TCP 연결, HTTP 헬스는 서로 다른 증거다.",
+      "explanation": "프로세스 생성, PORT 공지 확인, TCP connect 성공, HTTP health 200 은 각각 다른 수준의 증거다. 계정 서비스가 SQLite 초기화 후 바인딩하고 실제 임의 포트를 알린 뒤 수신 루프에 들어가더라도, {\"ok\":true} 만으로 DB 쓰기나 하위 서비스 정상이 증명되지는 않는다."
+    },
+    {
+      "id": "169-5",
+      "question": "계정 서비스 A는 데이터 저장 서비스 B에 의존한다. 유닛 A에는 After=B.service 를, B에는 Type=simple 을 설정했다. 재부팅 후 A가 B보다 늦게 시작되었는데도 B의 리스너가 준비되기 전에 A가 연결을 시도해 실패했다. 가장 정확한 진단은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "Type=simple 이면 프로세스 생성 즉시 준비 완료로 간주되므로 A의 실패는 B 버그이며 systemd와 무관하다."
+        },
+        {
+          "id": "b",
+          "text": "After= 를 Requires= 로 바꾸면 B의 리스너 준비까지 자동으로 기다려 준다."
+        },
+        {
+          "id": "c",
+          "text": "After=는 두 유닛이 시작될 때 순서를 정하며, Type=simple인 B의 HTTP 준비 완료를 기다리는 계약은 없다. A는 필요한 응답을 기한 안에 확인하고 아직 준비되지 않았다면 정해진 정책으로 재시도해야 한다."
+        },
+        {
+          "id": "d",
+          "text": "A와 B를 같은 유닛으로 합치면 순서 문제가 사라지므로 의존성 문제가 근본적으로 해결된다."
+        }
+      ],
+      "correctOptionId": "c",
+      "answer": "After=는 두 유닛이 시작될 때 순서를 정하며, Type=simple인 B의 HTTP 준비 완료를 기다리는 계약은 없다. A는 필요한 응답을 기한 안에 확인하고 아직 준비되지 않았다면 정해진 정책으로 재시도해야 한다.",
+      "explanation": "After=는 순서 관계이고, 상대 유닛을 함께 시작시키는 요구사항과도 별개다. Type=simple의 시작 판정은 응용 프로그램의 HTTP 준비 완료가 아니다. 준비 확인을 하더라도 이후 서비스가 내려갈 수 있으므로 요청 실패 처리도 필요하다. Type=notify를 쓰려면 프로그램의 준비 알림 구현이 필요하고, 소켓 활성화도 프로그램 지원과 별도 설계가 필요하다."
+    }
+  ],
+  "practice": {
+    "steps": [
+      "SERVICE 역할을 빌드하고 실행 파일과 별도의 DB 경로를 선택한다.",
+      "직접 실행에서 PORT 공지와 /healthz 응답을 관찰한 뒤 실행 보조의 기동·정리 흐름을 따라간다.",
+      "같은 DB로 계정 생성 후 재시작 조회를 확인하고 포트 점유·잘못된 공지·준비 실패를 구분한다."
+    ],
+    "expected": "프로세스 생성·bind·HTTP 준비·영속 상태를 다른 증거로 설명하고 자신이 시작한 자식만 회수한다.",
+    "failureChecks": [
+      "작업 디렉터리를 바꿔도 선택한 DB가 같고 다른 DB 경로는 별도의 상태임을 확인한다.",
+      "이미 사용 중인 포트나 준비 실패 때문에 다른 프로세스를 종료하지 않는다.",
+      "health 응답만으로 DB 쓰기나 하위 서비스까지 정상이라고 판정하지 않는다."
+    ]
+  },
+  "review": {
+    "date": "2026-10-04",
+    "method": "선택 DeepSeek 실행 보조/문제 초안 직접 검토·실제 누적 서비스 HTTP/SQLite·Linux 배포 분기 회귀",
+    "corrections": [
+      "PORT 공지와 HTTP 준비 구분",
+      "소켓 inactivity timeout과 전체 응답 기한 구분",
+      "cwd 문제 전제와 systemd 순서/준비 의미 교정"
+    ]
+  },
+  "validation": [
+    "실제 누적 SERVICE 빌드·포트0 바인딩·HTTP 준비·점유 포트 거절·같은 DB 재시작/다른 DB 거절·호출자 예외 뒤 자식 회수 통과",
+    "조기 종료·공지 누락/초과/문법·잘못된 UTF-8/JSON형·본문 초과·503 재시도·잘못된 기한 fixture 통과",
+    "Linux 릴리스 옵션/SDK경로/SONAME 별칭·필수 Runtime/패치 실패·지원하지 않는 호스트 거절5검사 통과",
+    "인라인7·현재 참조 심볼·누적 파일 보존 검사 통과; 실제 systemd 설치·공개게임서비스·다른 OS 실행은 별도"
+  ]
+}

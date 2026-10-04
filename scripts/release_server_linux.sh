@@ -13,15 +13,18 @@
 #     deploy/
 #     scripts/backup_meta_db.sh
 #
-# 연결당 스레드 모델(tetris_relay)은 번들에 넣지 않는다. 교재용 참조 구현이고
-# 빈 방 256개로 서버가 멎는 알려진 결함이 있어 배포 대상이 아니다 — systemd 유닛도
-# tetris_relay_reactor 를 기동한다.
+# 배포는 이벤트 루프 모델(tetris_relay_reactor)을 선택한다. systemd 유닛도
+# 같은 실행 파일을 기동하며, 연결당 스레드 모델은 비교용 빌드로 유지한다.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/release_linux_common.sh"
+require_linux_x64
+ORT_ROOT="${ORT_ROOT:-$ROOT/third_party/onnxruntime}"
+case "$ORT_ROOT" in /*) ;; *) ORT_ROOT="$PWD/$ORT_ROOT" ;; esac
 BUILD="$ROOT/build-server-release"
-BOT="${BOT:-0}"
-WSS="${WSS:-1}"
+BOT="$(release_bool BOT "${BOT:-0}")"
+WSS="$(release_bool WSS "${WSS:-1}")"
 DIST="$ROOT/dist"
 BUNDLE="$DIST/tetris-server-linux-x64"
 
@@ -37,6 +40,7 @@ CMAKE_ARGS=(
     -DCMAKE_BUILD_TYPE=Release
     -DTETRIS_BUILD_GAME=OFF
     "-DTETRIS_BUILD_BOT=$BOT"
+    "-DTETRIS_ORT_ROOT=$ORT_ROOT"
     "-DTETRIS_BUILD_WSS=$WSS"
     -DTETRIS_BUILD_RELAY=ON
     -DTETRIS_BUILD_REACTOR=ON
@@ -74,7 +78,11 @@ cp -R "$ROOT/assets" "$BUNDLE/assets"
 if [ -d "$ROOT/model" ]; then cp -R "$ROOT/model" "$BUNDLE/model"; fi
 if [ "$BOT" = "1" ]; then
     mkdir -p "$BUNDLE/lib"
-    cp "$ROOT/third_party/onnxruntime/lib/linux-x64/"libonnxruntime.so* "$BUNDLE/lib/"
+    if [ ! -f "$ORT_ROOT/lib/linux-x64/libonnxruntime.so" ]; then
+        echo >&2 "[release_server_linux] Required ONNX Runtime missing: $ORT_ROOT/lib/linux-x64/libonnxruntime.so"
+        exit 1
+    fi
+    cp -P "$ORT_ROOT/lib/linux-x64/"libonnxruntime.so* "$BUNDLE/lib/"
 fi
 
 # TLS shared libraries are runtime dependencies, including the crypto dependency
@@ -93,4 +101,4 @@ tar -czf "$TAR" -C "$DIST" "tetris-server-linux-x64"
 
 echo "[release_server_linux] Done: $TAR"
 echo "  Bundle contents:"
-find "$BUNDLE" -maxdepth 3 | head -40
+find "$BUNDLE" -maxdepth 3 | sed -n '1,40p'

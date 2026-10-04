@@ -328,6 +328,8 @@ constexpr size_t kRateBurstBytes = 16 * kMaxBytesPerSecond;   // ≈16초분
 constexpr auto   kMaxPauseDuration =
     std::chrono::seconds(kRateBurstBytes / kMaxBytesPerSecond);   // 16초
 
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "signal handler requires lock-free atomic<bool>");
 std::atomic<bool> g_running{true};
 
 void on_signal(int) { g_running.store(false); }
@@ -545,7 +547,12 @@ public:
             RLOG_ERROR("[relay] port " << port << " listen 실패");
             return false;
         }
-        net::tcp_set_nonblocking(listen_);
+        if (!net::tcp_set_nonblocking(listen_)) {
+            RLOG_ERROR("[relay] listen nonblocking setup failed");
+            net::tcp_close(listen_);
+            listen_ = {};
+            return false;
+        }
         if (!reactor_->add(listen_.fd(), net::kRead, &listen_token_)) {
             RLOG_ERROR("[relay] listen fd 등록 실패");
             return false;

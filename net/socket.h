@@ -76,8 +76,8 @@ bool tcp_send_all(const TcpSocket& s, const void* data, size_t len);
 // 그동안 호출자 스레드를 점유하므로 이벤트 루프는 보류 버퍼와 이 함수를 쓴다.
 bool tcp_send_some(const TcpSocket& s, const void* data, size_t len, size_t& out_sent);
 bool tcp_recv_some(const TcpSocket& s, std::vector<uint8_t>& outBuf);  // 양수 수신만 누적. true에는 WouldBlock도 포함; 연결 생존 증명 아님.
-void tcp_close(TcpSocket& s);  // shutdown(SHUT_RDWR) 으로 피어/폴러(recv)를 EOF 로 깨운다. 실제 ::close 는 마지막 TcpSocket 복사본 소멸 시 RAII 로 일어난다(멱등).
-void tcp_set_nonblocking(const TcpSocket& s);  // 소켓을 논블로킹으로 전환. listen 소켓 accept 폴링용(shutdown 은 블로킹 accept 를 깨우지 못하므로).
+void tcp_close(TcpSocket& s);  // 원시 소켓은 shutdown으로 송수신 종료를 요청한다. 실제 close는 마지막 소유자 소멸 때 수행하며 I/O의 EOF/오류는 호출자가 판정한다.
+bool tcp_set_nonblocking(const TcpSocket& s);  // 성공 여부를 확인한 뒤 accept를 폴링한다. shutdown에 의한 blocking accept 취소는 플랫폼 간 계약이 아니다.
 void tcp_set_sndbuf(const TcpSocket& s, int bytes);  // 커널 송신 버퍼 상한. 안 읽는 상대를 커널이 대신 흡수하지 못하게 묶는다(backpressure 가시성).
 std::string tcp_peer_ip(const TcpSocket& s);   // 로그·밴용 숫자형 peer IP (전체 주소)
 // per-IP 상한이 셀 버킷 키. IPv4 는 주소 그대로, IPv6 는 접두사로 묶는다

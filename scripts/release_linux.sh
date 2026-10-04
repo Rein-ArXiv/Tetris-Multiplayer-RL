@@ -20,15 +20,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/release_linux_common.sh"
+require_linux_x64
+ORT_ROOT="${ORT_ROOT:-$ROOT/third_party/onnxruntime}"
+case "$ORT_ROOT" in /*) ;; *) ORT_ROOT="$PWD/$ORT_ROOT" ;; esac
 BUILD="$ROOT/build-release"
 DIST="$ROOT/dist"
 BUNDLE="$DIST/tetris-linux-x64"
-BOT="${BOT:-0}"
-WSS="${WSS:-1}"
+BOT="$(release_bool BOT "${BOT:-0}")"
+WSS="$(release_bool WSS "${WSS:-1}")"
 RELAY_ENDPOINT="${RELAY_ENDPOINT:-127.0.0.1:7777}"
 META_URL="${META_URL:-}"
-DEBUG_UI="${DEBUG_UI:-0}"
-NET_TRACE="${NET_TRACE:-0}"
+DEBUG_UI="$(release_bool DEBUG_UI "${DEBUG_UI:-0}")"
+NET_TRACE="$(release_bool NET_TRACE "${NET_TRACE:-0}")"
 
 # ── CMake 구성 ──────────────────────────────────────────────────────────────
 CMAKE_ARGS=(
@@ -43,6 +47,7 @@ CMAKE_ARGS=(
 )
 CMAKE_ARGS+=(
     "-DTETRIS_BUILD_BOT=$BOT"
+    "-DTETRIS_ORT_ROOT=$ORT_ROOT"
     "-DTETRIS_BUILD_WSS=$WSS"
     "-DTETRIS_ENABLE_DEBUG_UI=$DEBUG_UI"
     "-DTETRIS_ENABLE_NET_TRACE=$NET_TRACE"
@@ -83,17 +88,17 @@ fi
 
 # ONNX Runtime (BOT 빌드 시)
 if [ "$BOT" = "1" ]; then
-    ORT_DIR="$ROOT/third_party/onnxruntime/lib/linux-x64"
-    if [ -d "$ORT_DIR" ]; then
-        cp "$ORT_DIR"/libonnxruntime.so* "$BUNDLE/lib/" 2>/dev/null || true
-    else
-        echo "[release_linux] WARNING: $ORT_DIR not found — bundling without ORT."
+    ORT_DIR="$ORT_ROOT/lib/linux-x64"
+    if [ ! -f "$ORT_DIR/libonnxruntime.so" ]; then
+        echo >&2 "[release_linux] Required ONNX Runtime missing: $ORT_DIR/libonnxruntime.so"
+        exit 1
     fi
+    cp -P "$ORT_DIR"/libonnxruntime.so* "$BUNDLE/lib/"
 fi
 
 # ── rpath 패치 (빌드 CMake 에서도 설정하지만 안전 장치) ────────────────────
 if command -v patchelf &>/dev/null; then
-    patchelf --set-rpath '$ORIGIN/lib' "$BUNDLE/tetris" 2>/dev/null || true
+    patchelf --set-rpath '$ORIGIN/lib' "$BUNDLE/tetris"
 fi
 
 # TLS shared libraries are runtime dependencies, including the crypto dependency
@@ -112,4 +117,4 @@ TAR="$DIST/tetris-linux-x64.tar.gz"
 tar -czf "$TAR" -C "$DIST" "tetris-linux-x64"
 echo "[release_linux] Done: $TAR"
 echo "  Bundle contents:"
-find "$BUNDLE" -maxdepth 2 | head -25
+find "$BUNDLE" -maxdepth 2 | sed -n '1,25p'

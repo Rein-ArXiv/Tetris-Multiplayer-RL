@@ -1023,9 +1023,16 @@ void Session::acceptThread(uint16_t port)
         listening = false;
         return;
     }
-    // listen 소켓을 논블로킹으로 — tcp_close 는 shutdown 만 하므로 블로킹 accept 를
-    // 깨우지 못한다. quit 를 폴링하며 accept 해 Close() 시 정상 종료시킨다.
-    tcp_set_nonblocking(listenSock);
+    // Blocking accept cancellation is not portable. Only enter the polling
+    // loop after nonblocking setup succeeds, so quit remains observable.
+    if (!tcp_set_nonblocking(listenSock)) {
+        NET_WARN("[NET] Listen nonblocking setup failed");
+        std::lock_guard<std::mutex> lk(sockMu_);
+        tcp_close(listenSock);
+        listenSock = {};
+        listening = false;
+        return;
+    }
     NET_TRACE("[NET] Listening on port " << port << ", waiting for connection...");
     TcpSocket client;
     while (!quit.load()) {

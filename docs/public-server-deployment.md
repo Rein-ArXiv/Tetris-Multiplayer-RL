@@ -158,6 +158,12 @@ OpenSSL 런타임도 묶지만, 대상 OS의 CA 저장소·DLL/dylib·아키텍�
 python scripts/backup_meta_db.py /srv/tetris/db/tetris.db /safe/backup/tetris-snapshot.db
 ```
 
+복원은 기존 DB와 WAL/SHM이 없는 새 디렉터리에서 검사한 뒤 전환한다. 기존 상태는
+본체와 부속 파일을 함께 보존한다. 구조 무결성·외래 키 검사와 별개로 계정/인벤토리·
+스키마·키 버전을 확인한다. 오래된 스냅샷은 키 폐기와 지급 기록도 되돌리므로
+노출된 키의 재폐기 및 중복 지급 방지 정책을 결정하기 전 공개하지 않는다.
+
+
 Windows에 같은 버전의 meta·relay·gateway를 빌드하고, OpenSSL DLL과 도메인 인증서를
 준비한다. reactor는 IOCP 단일 루프를 쓴다. systemd는 사용할 수 없으므로 Windows
 서비스 등록과 계정 ACL을 별도로 준비한다. DB·secret은 옮기되 메모리 입장권과 진행

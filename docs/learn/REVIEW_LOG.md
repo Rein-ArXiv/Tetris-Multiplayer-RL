@@ -7036,3 +7036,115 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - CI 수정은 검수완료main의 별도 스냅샷에서 원문/소스/coverage/강의 번들을 생성했다. 진행중169 및 Linux릴리스 변경을 공개 자료에 섞지 않는다. Part10HTTP방어선 절만 내용/해시 갱신, 대응은 partial 유지. Part/834객관식·정적상대자산/허용목록/해시/재현ZIP검사 통과(ci-http-site.log). 현재Windows수정본 원격실행 결과는 후속 확인한다.
 
 - 최종 로컬: 최신 검증 probe를 명시한 계정/입장권/meta 전체106검사 통과(ci-http-final.log), C++조기본문 경계CTest 통과. 정적release9b53b953160ad711. Windows 원격 성공은 아직 확인 전이다.
+
+## 2026-10-04 — 169차시 Linux 서비스의 실행·준비·지속성
+
+- 본문15절·5문제·인라인7·기본접힘 전체Python보조를 검토.169-linux-service는168누적 파일을README외 바이트보존하고 operations/local_service.py만 추가한다. 프로세스/기동/포트공지/TCP/HTTP준비/DB쓰기 증거를 분리, cwd와DB수명·bind/connect·외부WSS/내부루프백·Pages정적사이트·systemd순서·프로세스소유/정리 경계를 설명한다. 시스템 설정을 실제 설치한 것처럼 쓰지 않는다.
+- 선택 명세 DeepSeek보조/문제/셸정규화 초안에서 stdout/DB초기화 설명·PORT문법/크기·UTF8/JSON bool·503·개별I/Otimeout·cwd모순·systemd단정 등을 직접 교정. 질문의설정경로/loopback/두번째독립인스턴스를 바로잡고준비응답의JSON표기와PORT줄바꿈표시를 수정. 초안/logs는169-*파일에 보존. 추가 저장소/설정/키 전송 없음.
+- 실제SERVICE새빌드와HTTP/SQLite검사:자식bindport0→공지→health→계정생성→회수→같은DB다시시작/동일계정조회,다른DB인증거절,점유포트실패,호출자예외뒤회수 통과. 조기종료/공지누락/문법/초과/응답초과/잘못된UTF8/숫자ok/503재시도/기한오류fixture 통과. 최종169-service-final.log. 큰로그/원격느린peer의총벽시각보장·응용요청gracefulshutdown·systemd설치·타OS는증명하지않았다.
+- Linux릴리스의BOT/WSS=ON과셸문자열1비교불일치를공유BOOL정규화로수정. 같은ORT_ROOT를CMake와Runtime복사에전달, nativeLinuxx64조건선확인,필수Runtime누락/실행한patchelf실패는비성공.경로공백/SONAMEsymlink보존,오래된threadrelaydeadlock주석수정,pipefail에서find|head의SIGPIPE가능성제거. 5개fixture검사통과; 전체패키지의대상OS실행이나원자적출력을주장하지않는다.
+- Part12릴리스/운영설명과현재발췌갱신. Linux $ORIGIN/lib를macOS에도그대로설명하던오류를Contents/Frameworks/@executable_path로교정. systemd After/요구관계/Type=simple의준비판정은공식systemd.service.xml/systemd.unit.xml과대조(공식HTML403후공식GitHub문서확인). Part12세관련절에169partial추가,완료범위과대확대없음.
+- source뷰어는명시된deploy/systemd의세service파일만허용. env나임의service파일제외6검사통과. 외부의설정정보를수집하지않는다.
+- 스니펫7/현재참조/누적보존, Part/대응해시,839객관식,집중169 DOM/공통탐색·저장·file URL/정적소스,Markdown27,허용목록/상대자산/해시/재현ZIP통과. 초기unittest패턴은해당파일이없어0tests/exit5;정확한check_learning_markdown.py로27검사실행. 수동브라우저/스크린샷검사없음. 정적releasec35518537f0bb39c,169-navigation.log·169-site.log. 169는로컬검수완료이며단원마감에서커밋한다.
+- 공개main hotfix024b1f7는169를포함하지않는검수168스냅샷이다. Learning site37227049106성공,실제HTTPSmanifest와모든자산이9b53b953160ad711과일치(ci-http-live-verification.json). 제품CI37227049100은진행중,Windows실제성공은계속확인해야한다.
+- 다음170: Windows이전의프로세스인자/Unicode경로/CRLF/소켓초기화/핸들폭/Win32계정파일ACL을읽되171의원자교체심화와역할을분리한다. 169PORT의LF계약을대상별stdout동작과연결하고빌드구성/실행경로와CI실제증거를구분한다. 신규170원고·외부작업은아직없다.
+
+## 2026-10-04 — 170차시 Windows 표현 경계와 Unicode DB 경로
+
+- 이전 goal턴은progress:main/Pages통합·HTTP429미소비본문회귀교정·169검수완료. 이번턴은170원고·누적CP·제품Windows진입점·문서실제교정까지진행했다.
+- 사용자 최신 조건을기록:현재module13 「배포와유지보수」167~177을마치고단원검수/커밋/푸시/Pages확인뒤goal paused. 조건완료전중지하지않고이후작업을자동시작하지않는다.
+- 원고15절·5문제·인라인6·전체변환/실행기접힘. Unicode코드포인트/UTF16코드단위/UTF8바이트, /utf-8와runtimeargv,변환크기조회/실제변환,문자열소유와char*뷰수명, wmain/MinGW링크,LF/CRLF엄격문법,NativeSocket폭/센티널/반환API,WSA초기화수명,NTFS/POSIX권한경계를연결했다. 특정소스숫자를전체강의범위상수로설명하지않는다.
+- DeepSeek170-cli/170-quiz명세응답은step_start/text만,도구없음. CLI초안은NOMINMAX경계에더해numeric_limits macro-safe호출로교정. 질문초안의reserve(n)이항상capacity=n이라는전제·문자열이동후모든data포인터가반드시깨진다는단정·Pythonstrip과C++stoi혼합·잘못된PORT=형식·정수형변경후부호설명·OS별timeout이항상같다는주장·chmod를실행파일에붙인불필요한전제를직접수정했다. 외부응답/검토JSON은170-*파일에보존,계정/설정/저장소전체전송없음.
+- 실제제품:meta/main.cpp의Windows wmain→platform/utf8_arguments→UTF8인자뷰→공통run. CMake에변환소스및MinGW -municode 추가. Windows전용utf8_arguments_test는ASCII/빈값/공백/한글/보충문자/역슬래시의정확한바이트,음수argc/null/잘못된surrogate거절을검사하도록등록. Linux는mainargv바이트를그대로사용. 다른애플리케이션의모든파일API/환경변수변환까지확대하지않았다.
+- 공식Microsoft main/wmain·WideCharToMultiByte와SQLite open계약을확인. SQLite는Windows에서도UTF8파일이름을요구하므로좁은argv를그대로넘기던경계를수정. 제품PythonHTTP회귀에한글/공백/이모지DB경로,정확한파일생성,재시작동일계정조회를추가. 실제Linuxmeta재빌드와전체50meta검사통과(170-root-build/tests.log). Windows네이티브API/MinGW링크는로컬검증불가이며다음단원푸시CI에서별도확인해야한다.
+- CP170은169의README/meta/account_service/rolesCMake/operationslocalservice만변경,나머지바이트보존. 플랫폼변환두파일은현재root와동일내용이고후속스니펫/현재레퍼런스계약은분리. parser는LF/CRLF만받고음수/0/초과/leadingzero/공백/NUL/CR단독/추가토큰을거절. C++서비스의정상Linux새빌드와Unicode/공백/cwd변경/DB재시작계약통과(170-cp.log). 강제프로세스정리를gracefulshutdown으로설명하지않는다.
+- Part10공통run및CMake발췌,Part13진입점소스/MinGW링크·/utf8설명교정. DLL을exe옆에두면항상실행된다는단정제거. Part10두절/Part13CMake절해시검토갱신,Part12권한·핸들절170partial추가.전체원자교체/모든OS배포완료로확대하지않음. 현재발췌검사통과.
+- 844객관식·집중170 DOM/공통탐색·답안저장·정적뷰어/fileURL,Markdown27·허용목록6·인라인6/현재참조/누적보존·Part·정적상대자산/해시/재현ZIP통과. 최종release320944393f8fc299,170-navigation/site.log. 수동브라우저/스크린샷없음. 최초통합검사map추가는공백패턴불일치로실패했고정확한기존행을기준으로추가했다. 새원고작성전CP실검사는완료했고이후snippet-only로원고대응을확인했다.
+- 원격024b1f7 CI37227049100은Linux/macOS서버·모든클라이언트·CPUtraining성공,Windows서버thread-model smoke진행중. 이는170미커밋Unicode변환의실행증거가아니다. 새169/170은단원마감전개별커밋하지않았다.
+- 다음171사전확인:CP settings/private_file.h는이미directory fsync실패가publication뒤일수있음을명시. root meta/private_file.h는원자교체설명만있고실패후상태를구분하지않는다. boolfalse가항상기존파일보존을뜻한다고강의/문서를쓰지말것. CP local_account_store/journal_store는PrivateWriter주입점이있으며현재rootPOSIX rename→dir fsync와Windows보호DACL/MoveFileEx를함께검토한다. 가능한검사는임시사용자데이터에만수행하고171에서예외경계/동시writer/권한/지속성의구분을실제로구현·시험한다. 신규171원고/외부작업없음.
+
+## 2026-10-04 — CI 기동 실패의 진단과 포트 소유
+
+- 원격37227049100 Windows thread smoke:1961통과·53skip·37subtests,meta 기동fixture2오류. 이전429 본문/연결 재사용은 통과;다른 서버OS·클라이언트·학습job성공. stderr가 버려져 실패원인은 확정할 수 없다.
+- meta의 port0를 bind_to_any_port로 직접 할당하고 PORT 공지 후 listen_after_bind. 부모가 임시 포트를 예약했다 닫는 경쟁을 없앴다. 고정포트 정책은 유지. 공지는 HTTP준비와 분리.
+- 선택 명세만 DeepSeek에 전달해 local_meta_server 초안 수신(ci-meta-fixture-events.jsonl,text/step_start). 전체stderr읽기·정리실패무시·포트원문노출·길이초과health·deadline후성공을 직접 교정. 자식소유/범위제한진단/비밀치환/UTF8JSON엄격bool/기동실패와호출자예외 분리.
+- 제품meta 재빌드 및 test_secure_admission/test_meta_db_smoke/test_account_security 실제109검사 통과. 존재하지 않는DB부모의 실제exit1/DB오류 진단, 호출자예외 보존 포함. out/learning-jobs/ci-meta-fixture-tests.log. 원격 Windows 원인 해결을 아직 주장하지 않는다.
+
+## 2026-10-04 — 171차시 비공개 파일의 게시와 완료 확인
+
+- CP171은170 누적 파일을 README/roles CMake 외 보존. STORAGE 역할과 private_publish 진단기를 추가하고 기존 writer의 본문은 바꾸지 않았다. 실제 제품 함수와 namespace 제외 본문 일치를 확인한다.
+- DeepSeek에 선택 실습 명세만 전달(171-private-events.jsonl,session63112 exit0,text/step_start). 소스 진단기와5문제 초안을 받았다. Windows 인자 변환이 catch 밖인 부분을 보강하고 반복 오답/정답 길이 단서를 직접 고쳤다. 도구 탐색·실행 이벤트 없음.
+- 원고14절·5문제·인라인5. FD/open-file-description/inode와경로,배타적 임시 생성,0600/DACL/신뢰부모,부분쓰기/EINTR,가시성/내구성,게시후false,읽기수정전체잠금/갱신유실,다중파일저널,고정진단,OS별계약을 연결. 새 조상 디렉터리 동기화·정리실패·실제전원손실 경계를 명시했다.
+- 제품private_file.h의 반환 계약을 명시하고 Part12§5에 false가 롤백이 아닌 이유·협력잠금·부모경로·동기화 범위를 반영. Windows 쓰기는 전체길이 확인, POSIX는 부분쓰기/EINTR 루프임을 구분했다. 해당 원문절만 partial 해시/대응 갱신.
+- fresh STORAGE CMake빌드와 실제 제품 writer 별도 링크. 둘 모두 실제 Unicode경로·0600·기존FD와새open·잘못된모드/디렉터리목적지·임시정리 통과. Linux주입 short/EINTR 성공은B전체, ENOSPC/file-sync/rename오류는A전체, directory-sync오류는false+B전체. 증거171-publication.log,82172 exit0. 실제전원손실/WindowsACL/공유모드/MinGW실행/원격FS는 별도.
+- 인라인 참조의 multiline symbol은 생성기 계약에 맞게 단일검색 문자열로 교정했다. 849객관식·집중171 DOM·Markdown27·현재Part발췌·소스허용6검사·누적파일보존·실제writer본문 일치·diff통과.
+- 정적release5f24fff9297e85a8,16파일 허용목록/상대자산/hash/재현ZIP통과(171-site.log). 사용자 요청에 따라 수동브라우저검사 생략. 아직단원중이므로커밋/푸시없음. 모든171 외부/검사 종료.
+- 다음172 종료/SIGPIPE/소켓소유/워커정리. Part12의 “256고정”, “polling≤10ms보장”, “SIG_IGN이면시그널발생없음/EPIPE만” 문구는 실제계약보다 강해 교정 필요. net_init의Windows전용주석도POSIX정책을누락한다. signalHandler의atomic<bool> lock-free전제와 tcp_set_nonblocking 반환미확인 경계를 검토할 것. 현재는읽기만했고172새파일/외부호출없음.
+
+## 2026-10-04 — 172차시 종료 요청과 자원 수명
+
+- 직전171은 실제코드/문서/실패증거/원고를 바꾼 progress. 최신중지조건 유지:module13의177완료·커밋·푸시·Pages확인후paused.
+- CP172는171의README/rolesCMake 외보존. StopGate와 ShutdownDrain, 실제루프백shutdown_demo,선행정지/예외경로stop_gate_contract 추가. 기존ThreadLink/WorkerGroup을사용하며 소켓의단독I/O소유→캡처소멸→join→peerEOF를 연결. 14절/5문제/인라인7.
+- DeepSeek 선택게이트명세172-gate-events.jsonl,2962 exit0,step_start/text만. predicate/mutex의 lost-wake조건을교정하고전부a였던문제를새상황/다른오답/분산답으로다시편집. volatile sig_atomic_t를일반멀티스레드동기화처럼제시하지않음. 함수추가헤더오류는send_socket.h 직접포함으로교정.
+- 실제제품오류:tcp_set_nonblocking이OS실패를버렸음. bool반환으로 바꾸고relay/reactor/Session의 리스너루프진입전 실패정리·기동중단. 두relay signalatomic lock-free전제static_assert,net_init SIGPIPE정책설정실패확인/오래된Windows전용주석교정. tcp_close주석을송수신종료요청/마지막소유자반환으로정확화.
+- Linuxsocket_ownership CTest에 invalid/실패/성공모드·O_NONBLOCK확인을추가하고CMake등록. Part6/7/12/13현재발췌·ARCHITECTURE반영. SIGPIPE항상EPIPE/무시하면생성없음·고정워커숫자본문·polling≤기한보장·task drain=OSjoin의과도한설명교정. 해당5개절만부분대응/hash갱신.
+- 처음out/ci-repair/build는과거별도source를가리킨것을CMAKE_HOME_DIRECTORY로확인. 이것을수정본빌드증거로쓰지않음. 실제ROOT인out/ci-http-fix에relay/WSS옵션을켜고기존Boost헤더경로를명시한뒤relay/reactor/wss_probe/worker를실제재빌드(172-root-build-actual.log). 최초Boost미지정실패도구분.
+- CMakeSHUTDOWN2CTest(self-stop/선행정지·예외capturedrain),실제SIGTERM/SIGINT출력READY→TASKS_DRAINED→PEER_EOF,학습/제품WorkerGroup수명검사통과(172-runtime-final.log,42679exit0). 사용자요청에따라수동화면없음. WindowsCTRL_BREAK/ACL/네이티브실행은아직별도.
+- root socket_ownership/worker_group/worker_lifetime3CTest통과(172-regression-ctest.log). 실제수정relay활성경기SIGTERM회귀1pytest통과(172-root-signal.log). listener_mode_fault Linux주입으로과거relay가SIGTERM후blocking accept에남는문제를재현,수정relay/reactor는기동exit1+명시진단(172-listener-fault.log). fixture는테스트전용이며일반fcntl호환라이브러리가아님.
+- 854객관식·집중172DOM·Markdown27·Part현재발췌·허용소스6검사·인라인7/누적보존·diff통과. 정적releasebfe4afcd171fdea6,16파일허용목록/상대자산/hash/재현ZIP통과(172-site.log). 모든172외부/빌드/검사완료. 단원중이므로아직커밋/푸시없음.
+- 다음173 백업/복구. 실제scripts/backup_meta_db.py와.sh가존재하므로다시구현전계약확인. Part12§11.2의운영복구명령/WAL/SHM보관·삭제범위·기존DB복구·키폐기상태되돌림을현재코드와대조할것.173새파일/외부호출은없다. 원격Windows의meta기동2오류는진단+port0로컬109검사완료상태로단원푸시뒤원격확인필요.
+
+## 2026-10-04 — 173차시 온라인 백업과 격리 복구
+
+- 사용자 중지 조건 유지: module13의177까지 검수·커밋·푸시·Pages 확인 후 paused. 173은 중간 progress이며 단원 커밋 전이다.
+- CP173은 README 외 누적 파일을 보존하고 sqlite_snapshot/recovery_drill을 추가. 14절·5문제·인라인9. 페이지/WAL/체크포인트, 일관성과 최신성/RPO/RTO, 연결과 트랜잭션 수명, 협력적 기한, 구조/외래 키/업무 검사, no-overwrite 게시, 보존 정책, 새 경로 복원, 폐기/영수증 되돌림을 연결했다.
+- DeepSeek 선택 명세173-backup-events.jsonl(55546 exit0,step_start/text만)에서 보존 함수와 문제 초안 수신. sort/find 실패 은폐·잠금 누락·입력 정수 경계와 과도한 정답/오답 단정을 교정. 설정·개인 키·운영 DB 전송 없음.
+- 실제 Python 백업의 dangling symlink/옛 sidecar 거절, read-only source, 외래 키 검사, 단계별 deadline, 닫힌 standalone DB·파일fsync·hardlink no-overwrite·즉시 부모fsync. Windows ACL/부모sync·새 조상 내구성/임의 I/O 강제기한은 별도. 게시 후 예외는 완성 파일이 남을 수 있다.
+- Linux wrapper의 KEEP=0/선행0/범위·비완성tar최종노출·포괄삭제/줄바꿈경로·동시prune 개선. 단독 출력 잠금, 임시 압축 후 게시, 성공 후 정확한 파일명만 정리. 현재 산출물 항상 보존. Python sqlite3/GNU tar·sort/flock 의존성을 문서에 명시.
+- Part12의 옛 WAL이 남은 경로에 복원본을 열던 위험 순서 교정: 새 디렉터리 검사, 옛 DB/부속 파일 전체 보관, 비원자적 경로 전환 실패 시 서비스 중지 유지. Part15/public-server-deployment/release-readiness에도 반영. 해당 Part 두 절의 부분 대응만 갱신.
+- 첫 CP 실검사에서 서비스 기본 저널을 WAL이라고 가정해 실패. 실습 시작 전에 WAL을 명시 설정하고 연결을 closing으로 닫아 교정. 새 C++ SERVICE 빌드·최신/과거 복원본 실제 HTTP 계정·인벤토리·허용/거절 키 통과(173-drill-final.log). 현재 제품 meta에서도 실제 회전/복원 대조. 백업/보존/게시경합/파일vs디렉터리fsync/잠금/음성입력24검사 통과(173-product-backup.log). 운영 경로 전환/실제 전원손실/원격저장/Windows네이티브는 실행하지 않음.
+- 인라인9·누적보존·현재심볼·Part 발췌·허용소스6·Markdown27·859객관식·집중173 DOM·정적 허용목록/상대자산/hash/재현ZIP 통과. releasee0ad285306815371(173-site.log). 수동화면검사 없음. 모든173 작업 종료.
+- 다음174 릴리스 검사의 증거 범위: 단위/통합/GUI/부하와 pass/skip/not-run을 나누고 빌드·리비전·실행환경을 묶는 실습. 175 변경 경계/SOLID,176 새콘텐츠,177 종합 복습 뒤 단원 마감. Windows CI 기동 오류 진단 개선은 단원 푸시 후 실제 확인 필요.
+
+## 2026-10-04 — 174차시 릴리스 검사의 대상과 범위
+
+- CP174은 README 외 누적 파일 보존. operations/release_evidence.py(선언 평가), release_drill.py(실제 규칙/HTTP 복구 수집), evidence_contract.py(반례) 추가. 12절·5문제·인라인9. 오라클/골든 회귀의 한계, 소스·실행 파일 지문, 실행환경/범위/요구 목록, passed/failed/skipped/not_run과 stale/mismatch, all([]), 실행 종료와 검사 실행, 자식 소유, 부하 분포/회복을 연결.
+- DeepSeek174-evidence-events.jsonl 세션26098 exit0, step_start/text만. 선택 명세에서 평가기와 문제 초안 수신. 정규식match/$의 마지막 줄바꿈 허용·unhashable 상태 타입·환경/범위 대조 누락을 직접 교정. 요구 항목을 구조화하고 mismatch 분류. 문제의 용어 재진술·편중 답·과도한 오답을 상황 문제로 고쳤다. 설정/키/전체저장소 전송 없음.
+- 실제 RULES/SERVICE fresh build, policy_match_contract와 실제 임시 HTTP 복구 통과(174-runtime.log). 선언 계약의 누락/중복/다른리비전·해시/다른환경·범위/빈정책/형식/생략·실패 통과. 검사 뒤 파일 재열거와 지문 대조. 자식 생성 Python helper를 외부 부모timeout으로만kill하지 않고 현재 프로세스에서 소유 helper 호출.
+- 최종 README/원고 반영 뒤 수집만 다시 실행해 report.json 최종소스 지문 갱신. records는규칙/계정passed, decisions는passed/ passed/not_run/not_run,readyfalse. 화면·부하·전체배포출처·공유라이브러리·서명은 검사했다고 주장하지 않는다. 지문전후비교는동시변경일부감지일뿐불변후보잠금은아님.
+- Part13의ONNX검사없음/정점검사없음/StateHash전상태포함·고정빈검사개수·해시필드열거누락 교정. 실제 StateHash호환범위와 DiagnosticStateHashV2 bag범위를 구분. Part15의골든일치=렌더링만변경증명 단정 교정. 변경된 Part 두 절만부분대응 갱신.
+- 인라인9·현재심볼·누적보존·Part검사·864객관식·집중174DOM·정적허용목록/상대자산/hash/재현ZIP 통과. 최종release45820fec0a4bce3f(174-site.log). 모든174 외부/검사 종료. 수동화면 없음, 아직단원중으로커밋없음.
+- 다음175 아키텍처 읽기와변경위치/SOLID한계. 불필요한인터페이스를 새로만들기보다 누적 Match의정책주입/Character의표현·행동분리/서비스저장경계의실제계약을읽고검사가능한변경을준비한다.176콘텐츠추가,177종합복습후단원검수·커밋·푸시·WindowsCI/Pages확인후goal paused.175새파일/외부작업은없다.
+
+## 2026-10-04 — 175차시 변경 이유·소유·행동 계약
+
+- 직전 goal턴은173/174의실제코드·문서·실행증거를완성한progress. 최신중지조건은177단원완료/커밋/푸시/CI·Pages확인후paused이며아직미충족.
+- 175원고12절·5문제·인라인7. 컴파일의존/호출/소유,응집/결합,SRP변경이유/OCP확장축/LSP성공·실패계약/ISP호출자표면/DIP주입표현,값/뷰/외부자원수명,Driver후보보장과외부콜백효과,Match예외처리와서버지급신뢰를실제누적코드로연결. 저장소전체SOLID인증으로확대하지않음.
+- DeepSeek선택헤더3개+명세175-boundary-events.jsonl,2969exit0,step_start/text만. 초안의require에잘못붙은noreturn은UB가될수있어실행전제거. 표현fixture가정책을전혀호출하지않던pacing수정후관찰추가. Match가Character전체를소유한다는오답·처리된정책예외가내부롤백된다는오답·질문JSON필드불일치를직접교정. Driver전파예외시내부보존/외부카운터유지의독립반례추가. 외부전송은선택학습코드이며키/설정없음.
+- 실제누적합성오류발견:content/characters.h와bot/characters.h가study_characters::Character중복선언. 같은소스파일에포함해컴파일실패재현(175-name-collision-before.log). 화면자료namespace를study_character_art로분리하고메뉴/설정/자산/표현검사8파일의정확한이름치환확인. 봇프로필namespace유지. architecture_contract에두헤더동시포함해재발검사. 제품의root동명오류라고과장하지않음;학습누적체크포인트문제.
+- roles ARCHITECTURE추가. 실제freshRelease빌드와architecture/character_art/settings3CTest통과(175-runtime-final.log). 양쪽표현·입력상태대조,거절정책/잘못된입력/Driver내부보존·외부효과/Match실패전환을검사. 변경된widget_render는SDL헤더로C++구문검사통과(175-widget-compile.log);실제창/픽셀실행은아님. 이전누적파일은README/roles/명시된namespace치환외보존.
+- Part13의relay가SimGame을링크/실행하지않는다는오래된설명교정. 실제TETRIS_SIM_SOURCES+RankedGame의서버초기상태/양보드재현과전달책임을구분. 해당Part절partial해시만갱신.
+- 인라인7·현재심볼·보존/이름치환·Part현재발췌·Markdown27·869객관식·집중175DOM·정적허용목록/상대자산/hash/재현ZIP통과. release5a5dc72d27d988b9(175-site.log). 모든외부/빌드/검사종료,수동화면없음. 아직단원중으로커밋없음.
+- 다음176콘텐츠추가실습:캐릭터프로필/표시/모델·pacing/패키징/보상카탈로그경계를실제작은추가로연결할것. root assets/opponents.cfg에는기존heuristic예시,CP175 bot/characters.h에는동적카탈로그가있고 content/characters.h에는화면용정적카탈로그가있다. 둘은이번에namespace분리되었으므로혼동하지말것. 기존이미지/정책을재사용한교재콘텐츠로확장경계를드러내며실제장기성능·새이미지검증으로주장하지않는다.176새파일/외부작업없음.177복습후단원마감에서rootCI미해결Windows기동2오류/Unicode경로와Pages를실제원격확인한다.
+
+## 2026-10-04 — 176차시 새 캐릭터·실제 입력·콘텐츠 패키지
+
+- 직전175는누적타입충돌과아키텍처설명을교정한progress. 최신중지조건유지:177마감/커밋/푸시/CI·Pages확인후paused. 아직충족전.
+- CP176은README/roles외누적파일보존. assets/opponents.cfg에mira추가,client/opponent_cards.h의소유하는표현자료,bot/practice_picker.h의기존경기검사평가식을읽기좋게분리,content_demo/계약,고정된Python프로필코덱/패키저추가. 12절·5문제·인라인7. 안정ID/버전,전체후보검증,표현자료/자원소유,선택과지원정책,평가복사본/실제틱,pacing/벽시계,파일포장/게시/권한을연결.
+- 로컬휴리스틱은이학습체크포인트의평가식이며제품정책과같다고주장하지않음. 기존그림재사용,콘솔호스트는카드자료와틱을관찰하는조립실습;새GUI/학습모델실력검증으로확대하지않음. practice만실행하며서버공식카탈로그는수정하지않음. Windows인자는기존utf8_arguments/wmain·MinGWmunicode계약으로연결.
+- DeepSeek176-package-events.jsonl,45059exit0,step_start/text만. 선택게시명세/문제초안수신. fchmod Windows비호환·fd소유전오류·모든모델동시메모리보관·추론시간과재현의과도한단정·질문options형식교정. 키/설정/전체저장소전송없음.
+- 실제제품python/tools/package_opponents.py:설정도root밖링크거절,읽고검증한동일설정바이트포장,빈PurePosixPath의IndexError교정,파일별동일바이트hash,고정ZIP메타데이터/정렬,같은부모private임시ZIP완성/fsync뒤hardlink no-overwrite,소유임시파일만정리. 기존/경쟁출력/끊어진링크보존. 부모신뢰·원본고정·하드링크지원전제;모델검증/제작자인증/부모전원내구성보장아님. Part15및bots-and-colab반영,해당Part절partial갱신.
+- 실제freshCONTENT빌드/CTest,두프로필의정책호출과발행입력·practice미적격,표현변경시양보드/입력일치,실패재로딩보존·카드수명통과. 실제참조PNG/config만포함한ZIP과전체manifest바이트대조통과(176-runtime.log). Windows네이티브/실제화면은별도.
+- 제품패키징13검사(외부config링크·검사후파일변경·ZIP쓰기실패·게시경쟁·끊어진출력링크·같은입력재현·dot경로포함)통과. 첫프로필검사는native미지정1skip이었음. 실제ROOT빌드out/ci-http-fix에서opponent_profile_dump재빌드해지정후37검사+37subtests/skip없음(176-package-profile-final.log). 제품meta실제HTTP의미등록상대/임의model·속도·보상필드거절과기본보상비활성2검사통과(176-reward-boundary.log).
+- 인라인7·현재심볼·누적보존·Part·874객관식·집중176DOM·정적허용목록/상대자산/hash/재현ZIP통과. 최종release5127b82a1022b661(176-site.log). 모든176작업종료,수동화면없음. 아직단원중으로커밋없음.
+- 다음177종합복습과다음프로젝트설계. 기존코드의입력→고정틱→규칙→표현/통신→서버판정→저장→배포경계를종합하고자료/플랫폼/실행증거의범위를유지한다. 새주제를넓히지말고마지막확인문제도즉시해설. 그뒤module13전체/관련제품검사,main단원커밋·푸시,원격WindowsCI기동/Unicode와Pages실자산검증후goal paused. 전체원문coverage는여전히partial이므로fullgoal완료라고표시하지않음.177새파일/외부작업없음.
+
+## 2026-10-04 — 177차시 종합 복습과 단원 마감
+
+- CP177은 README 외 CP176 누적 코드를 그대로 보존. 12절·5문제·인라인3으로 입력/고정틱/규칙/CPU·GPU/재현·해시/통신·서버권한/저장·종료·복구의 연결과 다음 프로젝트의 설계 질문을 정리했다. 새로운 주제로 범위를 넓히지 않았다.
+- DeepSeek177-quiz-events.jsonl(57755 exit0, step_start/text만)의 선택 명세 문제 초안을 검수. edge/held 혼동, 상태 해시에서 픽셀 동일성을 추론하는 오류, 응답 유실 시 서버 영수증의 소유권, 복원 뒤 폐기 기록이 사라질 가능성을 교정. 키/설정/전체 저장소 전송 없음.
+- 실제 fresh RULES/ARCHITECTURE/CONTENT/SHUTDOWN 빌드의8CTest와 SERVICE의 격리 HTTP복구, evidence_contract 통과(177-runtime.log). SERVICE에 빈 CTest 통과를 대신 쓰지 않는다. 전체 GUI/부하/모든 OS 실행 증거로 확대하지 않는다.
+- 단원 전체167~177 스니펫·누적보존/현재심볼 검사, 전체177차시 자동DOM 탐색,879객관식,Part 발췌/링크,Markdown27,허용소스6,Linux릴리스5 검사 통과. 수동 화면 검사는 요청대로 생략. 객관식 검사의 미작성 미래 ID를177에 고정한 오류를 발견해 실제 문제 목록에서 다음 번호를 계산하도록 수정; 최종 quiz 재검사 통과.
+- 현재 제품 ROOT 빌드 out/ci-http-fix 전체 빌드와38CTest, 관련 실제 제품177pytest/37subtests 통과(module13-root-build.log, module13-root-ctest.log, module13-product-tests.log). out/ci-repair의 과거 snapshot과 구분한다.
+- 정적 release0dc17f28a8faad2f,허용목록/상대자산/해시/재현ZIP 통과(module13-site.log). 이 기록 시점 원격 CI/Pages는 단원 커밋·푸시 뒤 확인할 단계이며 성공을 선기록하지 않는다. 최종 원격 결과는 out/learning-jobs/module13-deployment-verification.json에 보관.
+- 최신 사용자 중지 조건: 이번 단원 main 커밋·푸시/원격Windows포함CI·Pages실자산 확인 후 goal paused. 전체 coverage 추가감사나 새 집필은 시작하지 않는다. :memory:.ses는 기존 미추적 파일로 제외한다.

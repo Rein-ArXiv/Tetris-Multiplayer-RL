@@ -884,3 +884,38 @@ def test_rate_limited_unsupported_body_closes_without_waiting(meta_server, frami
         assert conn.sock is None
     finally:
         conn.close()
+
+
+def test_unicode_database_path_survives_restart(tmp_path):
+    """The native argv -> SQLite path boundary must preserve non-ACP names."""
+    binary = _find_meta_bin()
+    if not binary:
+        pytest.skip("meta not built; set TETRIS_META_BIN")
+    directory = tmp_path / "서버 데이터 \U0001f3ae"
+    directory.mkdir()
+    database = directory / "계정 저장.sqlite"
+    identity = None
+    for phase in ("create", "reopen"):
+        port = _free_port()
+        with (directory / (phase + ".log")).open("wb") as log:
+            process = subprocess.Popen(
+                [str(binary.resolve()), "--db", str(database.resolve()),
+                 "--http", f"127.0.0.1:{port}", "--allow-public-matches"],
+                cwd=directory, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                assert _wait_listen(port), "meta did not start with the Unicode DB path"
+                base = f"http://127.0.0.1:{port}"
+                if phase == "create":
+                    status, identity = _post(base + "/v1/guest")
+                    assert status == 200
+                else:
+                    status, profile = _post(base + "/v1/auth/verify", {"token": identity["token"]})
+                    assert status == 200 and profile["player_id"] == identity["player_id"]
+                assert database.is_file(), "SQLite did not open the exact requested path"
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)

@@ -15,6 +15,7 @@
 
 #include "api_server.h"
 #include "database.h"
+#include "platform/utf8_arguments.h"
 
 #include <charconv>
 #include <cstdio>
@@ -58,7 +59,7 @@ bool parse_endpoint(const std::string& s, std::string& host, int& port)
     if (res.ec != std::errc{} || res.ptr != last) return false;
     port = parsed_port;
     host = parsed_host;
-    if (port < 1 || port > 65535) return false;
+    if (port < 0 || port > 65535) return false;
     return true;
 }
 
@@ -74,6 +75,7 @@ void print_usage()
         "Defaults:\n"
         "  --db    tetris.db\n"
         "  --http  127.0.0.1:8080\n"
+        "          Port 0 selects an available port and prints PORT <number>.\n"
         "\n"
         "Security:\n"
         "  --bot-rewards          Enable server-verified PvE BP (assets/opponents.cfg).\n"
@@ -132,7 +134,7 @@ Args parse_args(int argc, char** argv)
 
 } // namespace
 
-int main(int argc, char** argv)
+static int run(int argc, char** argv)
 {
     const Args args = parse_args(argc, argv);
 
@@ -179,3 +181,24 @@ int main(int argc, char** argv)
     }
     return 0;
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    try {
+        auto strings = platform::utf8_arguments(argc, argv);
+        // Construct the borrowed pointers after the owning strings stop moving.
+        std::vector<char*> arguments;
+        arguments.reserve(strings.size() + 1);
+        for (auto& value : strings) arguments.push_back(value.data());
+        arguments.push_back(nullptr);
+        return run(argc, arguments.data());
+    } catch (const std::exception&) {
+        std::fprintf(stderr, "command line initialization failed\n");
+        return 1;
+    }
+}
+#else
+int main(int argc, char** argv) {
+    return run(argc, argv);
+}
+#endif

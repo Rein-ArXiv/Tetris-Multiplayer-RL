@@ -912,14 +912,15 @@
     "note": "종류와 동시 재생 수·포화 정책·시작 순열·모든 참조 해제·OS 비동기 종료와 세션 핸들을 재구성. 기기별 성능 실측과 모든 콘텐츠 예산은 별도다.; 81차시: 고정 풀·빈자리/포화 선점·실패 후 비복원·모든 OS 읽기 종료를 구현."
   },
   "part6--section-03": {
-    "sha256": "9c15e8e9a21a29a0c4bb8a6e152c2503c9b505ddf6734f5cda3d39678a9377c5",
+    "sha256": "c4966bca86a2fbd1afbfb19a1343f3441121efafd6b406f65806682fcfe4dec8",
     "state": "partial",
     "lessons": [
       "lesson-83",
       "lesson-84",
-      "lesson-87"
+      "lesson-87",
+      "lesson-172"
     ],
-    "note": "프로세스·끝점·소켓 핸들·수락된 연결·단일/공유 소유권·Winsock 수명·바인드 정책·오류 보존 재구성. 전체 스트림 누적 I/O와 동시성은 후속 차시 범위.; 84에서 실제 반환량·좁은 길이 변환·부분 진행 보존·EINTR/EOF/WouldBlock을 재구성. 전체 프레이밍/비동기 송신 정책은 후속 범위.; Winsock취소는POSIX신호인터럽트와달리상위로보고,WSAEINPROGRESS를WouldBlock으로간주하지않음. 87에서 논블로킹 전제·진행 보존·무진행/전체 마감시간·계층별 수락을 재구성. 연결 전체 수명과 비동기 큐는 후속 범위."
+    "note": "프로세스·끝점·소켓 핸들·수락된 연결·단일/공유 소유권·Winsock 수명·바인드 정책·오류 보존 재구성. 전체 스트림 누적 I/O와 동시성은 후속 차시 범위.; 84에서 실제 반환량·좁은 길이 변환·부분 진행 보존·EINTR/EOF/WouldBlock을 재구성. 전체 프레이밍/비동기 송신 정책은 후속 범위.; Winsock취소는POSIX신호인터럽트와달리상위로보고,WSAEINPROGRESS를WouldBlock으로간주하지않음. 87에서 논블로킹 전제·진행 보존·무진행/전체 마감시간·계층별 수락을 재구성. 연결 전체 수명과 비동기 큐는 후속 범위.; 172: 논블로킹 설정 성공 반환과 shutdown/실제close의 책임을 대조. 다른 소절 전체의 대응 완료로 확대하지 않음."
   },
   "part6--section-04": {
     "sha256": "fdfa64a1a5564e82d6274aba68a8bdd71ab244fb87da9b1ef1d696b9e64eddd4",
@@ -975,16 +976,17 @@
     "note": " 87에서 무진행 제한과 전체 deadline, 스레드 간 프로세스 자원 공유, 보류 송신의 성공 의미를 대조. 이벤트 루프 및 고/저수위 큐 구현은 후속 범위.; 132에서9.2~9.5를FIFO/부분송신/high-low/CAS선예약/할당실패반환/관심재확인/정체만기로재구성.실제메서드12경로와운영5회귀,느린수신실습대응.신규byte_budget초안의total+=amount오류교정.메모리/RSS/플랫폼버퍼동등/양쪽pause=교착/임의구간rate상한단정교정.9.6로그원자성/운영관측전체는후속운영영역검토를남겨partial유지.; 146차시에서 판정/저장/송신/수신 의미와 같은 FIFO의 부분 송신, 유한 배수 종료, 결과 발행 재진입, 미확인 RP 보존을 연결. 현재 수정된 코드 발췌·소유권 설명을 대조했으며 절 전체의 기존 부분 대응 범위는 유지한다."
   },
   "part6--section-06": {
-    "sha256": "bcff48595030202948289ff8e873f17eca4a03848ac85f33a2a1c99a973e9264",
+    "sha256": "bdf7e05bf90802943f7725534432ac82b4cdc68fe56160e0c42a038db4f948a9",
     "state": "partial",
     "lessons": [
       "lesson-88",
       "lesson-89",
       "lesson-92",
       "lesson-95",
-      "lesson-97"
+      "lesson-97",
+      "lesson-172"
     ],
-    "note": " 88에서 연결/준비 상태 구분·소켓/파서 소유·양방향 종료·시작 가드·join과 재시작을 재구성. SEED 전체 협상과 경기 수명은 후속 범위. 89에서 시드/카운트다운/입력지연·로컬역할과수신자배정·connected/ready·HELLO/OFFER/ACK와현재엔진의차이를대조. 모든협상권한/경기동기화구현완료는아님. 92에서 역할 순서 해시 결합으로 변경된 문구/예시를 대조 갱신. 이 절의 전체 구현 완료를 뜻하지 않음.; 95: Close와 시작 경로의 pendingSendBytes 초기화를 대조. join 뒤 초기화 및 활성 전송 예산 유지 설명을 추가. 전체 협상 수명은 기존 미대응 범위 유지.; 97: Session 시작/Close의 비교 창 clear와 현재 발췌를 대조. round-id 없는 재유입 경계는 남음."
+    "note": " 88에서 연결/준비 상태 구분·소켓/파서 소유·양방향 종료·시작 가드·join과 재시작을 재구성. SEED 전체 협상과 경기 수명은 후속 범위. 89에서 시드/카운트다운/입력지연·로컬역할과수신자배정·connected/ready·HELLO/OFFER/ACK와현재엔진의차이를대조. 모든협상권한/경기동기화구현완료는아님. 92에서 역할 순서 해시 결합으로 변경된 문구/예시를 대조 갱신. 이 절의 전체 구현 완료를 뜻하지 않음.; 95: Close와 시작 경로의 pendingSendBytes 초기화를 대조. join 뒤 초기화 및 활성 전송 예산 유지 설명을 추가. 전체 협상 수명은 기존 미대응 범위 유지.; 97: Session 시작/Close의 비교 창 clear와 현재 발췌를 대조. round-id 없는 재유입 경계는 남음.; 172: Session listener 설정 실패시 수명정리/기동중단 현재발췌 교정. 다른 소절 전체의 대응 완료로 확대하지 않음."
   },
   "part7--section-12": {
     "sha256": "2acaeefbbfb31c91ab520d448f4f27cfe6e0178ffd12657d831b4494100dcf86",
@@ -1002,9 +1004,10 @@
     "lessons": [
       "lesson-88",
       "lesson-95",
-      "lesson-97"
+      "lesson-97",
+      "lesson-170"
     ],
-    "note": " 88에서 숫자핸들 재사용·값/공유 소유·인스턴스 잠금·shutdown→join→참조해제를 설명하고 폴링 accept/블로킹 연결 수립 한계를 교정. 전체 동시성 경합/서버 워커 운영 검토 완료는 아님.; 95: Close의 join 뒤 큐/바이트 초기화 발췌 대조. 플랫폼별 shutdown이 모든 블로킹 경로를 즉시 해제한다는 과도한 설명 교정. 전체 동시성 검토 완료를 뜻하지 않음.; 97: Close의 join 뒤 비교 창 clear 발췌 갱신. 전체 fd 수명 검토 완료는 아님."
+    "note": "88에서 숫자핸들 재사용·값/공유 소유·인스턴스 잠금·shutdown→join→참조해제를 설명하고 폴링 accept/블로킹 연결 수립 한계를 교정. 전체 동시성 경합/서버 워커 운영 검토 완료는 아님.; 95: Close의 join 뒤 큐/바이트 초기화 발췌 대조. 플랫폼별 shutdown이 모든 블로킹 경로를 즉시 해제한다는 과도한 설명 교정. 전체 동시성 검토 완료를 뜻하지 않음.; 97: Close의 join 뒤 비교 창 clear 발췌 갱신. 전체 fd 수명 검토 완료는 아님.; 170에서SOCKET폭/실패센티널/해제API와Winsock사용수명을연결했다. fd재사용경합전체증명을추가한것은아니다."
   },
   "part6--section-10": {
     "sha256": "f0ff97bc641b20ae06a47161378bdb064634afb59638e3e6f4c9fc2ad037ccd5",
@@ -1169,24 +1172,28 @@
     "note": "101차시: 예약·상한·callable 생성 실패·본문 예외·캡처 소멸 전후·조건 변수·detach/join·접수중단/drain을 누적구현과 현재코드로 대조. 현재 capture cleanup 이전 완료통지 교정, 이전순서 회귀실패/수정후통과. OS 자원오류·TLS와 모든 서버경로의 완전검증은 아님."
   },
   "part7--section-06": {
-    "sha256": "966c4b5de708898f6a26c29f156129b9b1ef2c723362253bb0a146d61907aabd",
+    "sha256": "cf1e6a038415e40ce2791077b9d12e3793a897bf2a3df253df5d7ae7f28e71d1",
     "state": "partial",
     "lessons": [
-      "lesson-101"
+      "lesson-101",
+      "lesson-172"
     ],
-    "note": "101차시: main의 mm/rr/MetaClient·group 선언 및 종료 순서를 대조해 접수중단·깨우기·join·drain·자료파괴를 설명. 추적작업의 참조수명 조건으로 한정하여 use-after-free 전면보장 표현 교정. IP예산·로그·전체엔트리 구현은 별도."
+    "note": "101차시: main의 mm/rr/MetaClient·group 선언 및 종료 순서를 대조해 접수중단·깨우기·join·drain·자료파괴를 설명. 추적작업의 참조수명 조건으로 한정하여 use-after-free 전면보장 표현 교정. IP예산·로그·전체엔트리 구현은 별도.; 172: relay의 lock-free시그널전제·논블로킹설정실패·정리순서를 대조. 다른 소절 전체의 대응 완료로 확대하지 않음."
   },
   "part13--section-04": {
-    "sha256": "33b09bca8c0001f1a497c64a179bcbe0e4146fb92f52bf6e507147773ac03e5c",
+    "sha256": "80b2f3890c664715b2b8fe6139774ae6859788f7daabc1796029c504e4e3a22e",
     "state": "partial",
     "lessons": [
       "lesson-101",
       "lesson-102",
       "lesson-103",
       "lesson-109",
-      "lesson-167"
+      "lesson-167",
+      "lesson-170",
+      "lesson-172",
+      "lesson-175"
     ],
-    "note": "101차시: 현재 CMake의 worker_lifetime 회귀 타깃·스레드링크 연결을 검토하고 발췌 갱신. 누적 학습 타깃은 worker_contract/probe로 재구성. 전체 CMake옵션·빌드조합 재구성은 남음. 102: 실제 매칭 큐 회귀 타깃의 추가와 현재 CMake 발췌를 대조했다. 전체 빌드 옵션 대응은 기존 부분 범위를 유지한다. 103: 공통 room_code 소스·bcrypt 링크·room_code 회귀 타깃의 현재 발췌를 대조했다. 다른 빌드 옵션의 기존 부분 범위를 유지한다. 109: 메타 실행 옵션에서 무인증 개발 모드의 숫자loopback 제한을 교정했다. root CMake 전체 해부는 부분 대응으로 유지한다.; 149차시 대조에서 바인딩 grid 설명/CMake 탐색 주석의 현행 발췌만 동기화했다. 기존 대응 범위를 유지한다. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다. 167: 구성/빌드/실행·역할 분기·소스 재사용·PUBLIC/PRIVATE/INTERFACE·자산 DAG·현재 프리셋을 실제 빌드로 대조했다. 모든 플랫폼 링크 및 기능 확장의 세부는 부분 대응이다. 168: 공통 SDK 타깃·대상 CPU 선택·필수 입력 검사·개발/설치 경로 분리를 현재 코드와 동기화. 기존 부분 대응 범위는 유지."
+    "note": "101차시: 현재 CMake의 worker_lifetime 회귀 타깃·스레드링크 연결을 검토하고 발췌 갱신. 누적 학습 타깃은 worker_contract/probe로 재구성. 전체 CMake옵션·빌드조합 재구성은 남음. 102: 실제 매칭 큐 회귀 타깃의 추가와 현재 CMake 발췌를 대조했다. 전체 빌드 옵션 대응은 기존 부분 범위를 유지한다. 103: 공통 room_code 소스·bcrypt 링크·room_code 회귀 타깃의 현재 발췌를 대조했다. 다른 빌드 옵션의 기존 부분 범위를 유지한다. 109: 메타 실행 옵션에서 무인증 개발 모드의 숫자loopback 제한을 교정했다. root CMake 전체 해부는 부분 대응으로 유지한다.; 149차시 대조에서 바인딩 grid 설명/CMake 탐색 주석의 현행 발췌만 동기화했다. 기존 대응 범위를 유지한다. 167 준비: 현재 게임의 자산 선행 의존성과 작업 디렉터리 설명을 동기화했다. 중간 체크포인트와 구분하고 기존 partial 범위를 유지한다. 167: 구성/빌드/실행·역할 분기·소스 재사용·PUBLIC/PRIVATE/INTERFACE·자산 DAG·현재 프리셋을 실제 빌드로 대조했다. 모든 플랫폼 링크 및 기능 확장의 세부는 부분 대응이다. 168: 공통 SDK 타깃·대상 CPU 선택·필수 입력 검사·개발/설치 경로 분리를 현재 코드와 동기화. 기존 부분 대응 범위는 유지.; 170에서/utf-8의컴파일시문자집합과런타임argv를구분하고meta소스/MinGW진입점발췌를갱신했다. DLL파일존재를실행호환성보장으로설명하던단정도교정했다.; 172: Linux 소켓소유/모드 실패 CTest타깃 현재CMake발췌 갱신. 다른 소절 전체의 대응 완료로 확대하지 않음.; 175에서 실제 컴파일 의존/호출/소유와 SOLID 행동 계약을 대조. relay가 SimGame을 링크·실행하지 않는다는 오래된 문구를 서버 재현 코드에 맞춰 교정."
   },
   "part7--section-08": {
     "state": "partial",
@@ -1238,10 +1245,11 @@
   "part12--section-07": {
     "state": "partial",
     "lessons": [
-      "lesson-107"
+      "lesson-107",
+      "lesson-172"
     ],
-    "note": "; 107차시: 이 절 중 IpAdmission RAII·실패반납 발췌만 대조. 객체/제어블록 할당을 등록전으로 옮기고 map삽입실패·중복후보 정리·최종참조반납을 설명. SIGPIPE/신호/전체종료·운영상한은 이 차시 대응 밖.",
-    "sha256": "3a9e27679bb8d89659a752e0075834032d3d64dd00aab68b01150dc8d8d657ff"
+    "note": "; 107차시: 이 절 중 IpAdmission RAII·실패반납 발췌만 대조. 객체/제어블록 할당을 등록전으로 옮기고 map삽입실패·중복후보 정리·최종참조반납을 설명. SIGPIPE/신호/전체종료·운영상한은 이 차시 대응 밖.; 172: SIGPIPE정책/오류·시그널일반문맥·잠금과대기해제·task drain과join/TLS범위·polling기한오개념을 실제신호/결함주입 실습으로 재구성. 다른 소절 전체의 대응 완료로 확대하지 않음.",
+    "sha256": "efd00df0af111f0af46366c51388e06e9c853a5b28012eba6c5a04f1b04bac7e"
   },
   "part14--section-13": {
     "state": "partial",
@@ -1297,18 +1305,20 @@
   },
   "part10--section-03": {
     "lessons": [
-      "lesson-109"
+      "lesson-109",
+      "lesson-170"
     ],
-    "note": "109: meta 별도 타깃과 호출자/서버에 필요한 의존성, 공유 헤더와 실행 중 객체 공유의 차이를 다뤘다. 전체 root CMake 옵션은 후속 범위다.",
-    "sha256": "cdd8f1894aa5d70e61c374f0ad4dc76523cca6b7d6d6ba903bdea11c623fc875",
+    "note": "109: meta 별도 타깃과 호출자/서버에 필요한 의존성, 공유 헤더와 실행 중 객체 공유의 차이를 다뤘다. 전체 root CMake 옵션은 후속 범위다.; 170의Windows진입점과컴파일러별시작코드링크선택을추가하고현재CMake발췌를대조했다.",
+    "sha256": "f55dece6fb7cd778f429986d657e95cbc193969ea5845e1e62e2a5b89d65c36f",
     "state": "partial"
   },
   "part10--section-13": {
     "lessons": [
-      "lesson-109"
+      "lesson-109",
+      "lesson-170"
     ],
-    "note": "109: 메타 main의 DB 초기화→API 주입→listen과 빌린 참조의 수명, 숫자loopback 개발모드 시작 검사를 다뤘다. 토큰 위협 모델 전체는 미대응이다.",
-    "sha256": "0e876cd1d88e72e1472b87f544a5f12ced5b0a30fce36cc6428e9447eee5ee7c",
+    "note": "109: 메타 main의 DB 초기화→API 주입→listen과 빌린 참조의 수명, 숫자loopback 개발모드 시작 검사를 다뤘다. 토큰 위협 모델 전체는 미대응이다.; 170에서wmain→UTF-8→SQLite파일경로를연결했다. 공통run과Windows진입점을구분했으며 토큰위협모델전체대응은별도다.",
+    "sha256": "fdcaed3f5d78bd9b5171608c897ac9b510e1b8af51f696a262940ee0a4f39e29",
     "state": "partial"
   },
   "part12--section-05": {
@@ -1576,11 +1586,12 @@
   },
   "part12--section-10": {
     "lessons": [
-      "lesson-135"
+      "lesson-135",
+      "lesson-169"
     ],
     "state": "partial",
     "sha256": "acca0c8f1008fc25d59a42f4a9138ebaa961ac8e6d43e5882a5834a733a2740e",
-    "note": ";135:API/게임의주소·수명·TLS종단·지원빌드분리와체인/peer/SAN검증을재구성.실제HTTPS SAN충돌/CN-only허용재현뒤GET/POST수정검사.HTTPS CA파일대체/WSS추가설명교정.Part16§4비동기수명전체및실제프록시배포는미검증이므로partial."
+    "note": "135:API/게임의주소·수명·TLS종단·지원빌드분리와체인/peer/SAN검증을재구성.실제HTTPS SAN충돌/CN-only허용재현뒤GET/POST수정검사.HTTPS CA파일대체/WSS추가설명교정.Part16§4비동기수명전체및실제프록시배포는미검증이므로partial.; 169에서 공개HTTPS/WSS 입구와 내부루프백 연결·주소의 호스트 기준 의미·정적학습사이트와 게임서버 기동의 차이를 연결했다. 프록시 전체 설정/공개 운영 검증은 별도."
   },
   "part16--section-02": {
     "lessons": [
@@ -1927,10 +1938,11 @@
   "part15--section-06": {
     "state": "partial",
     "lessons": [
-      "lesson-164"
+      "lesson-164",
+      "lesson-176"
     ],
-    "note": "; 관측/행동 형상을 스키마 상수로 표현하고 로컬 학습 금지처럼 읽힐 문장을 교정했다. 전체 배포/모델 운영은 부분 대응이다.",
-    "sha256": "5ed3d0ba6593eebec5500319783b8a702ce513382cb46ee48f0d8af900e66c98"
+    "note": "; 관측/행동 형상을 스키마 상수로 표현하고 로컬 학습 금지처럼 읽힐 문장을 교정했다. 전체 배포/모델 운영은 부분 대응이다.; 176에서 새캐릭터 ID/표현/정책/pacing/참조파일패키지/서버공식보상경계를 연결. 설정 외부링크·검사후재독·부분ZIP 게시·빈경로 오류를 실제도구에서 교정. 운영공식콘텐츠배포와새모델학습은별도.",
+    "sha256": "bde80d1edefe966904b20c445892961f19892b12927ad1dbc2f3a254f0201099"
   },
   "part9--section-03": {
     "state": "partial",
@@ -1955,5 +1967,39 @@
       "lesson-168"
     ],
     "note": " 168의 API/ABI·타깃 SDK·헤더/링크/로더·실제 설치 이동/모델 대조. 다른 SDK 확보·전체 제품 의존성 조합은 부분 대응."
+  },
+  "part12--section-11": {
+    "state": "partial",
+    "lessons": [
+      "lesson-169"
+    ],
+    "note": "168의 설치/ABI 경계와169의 Linux native x64 번들·BOOL/SDK 경로 계약·Runtime/패치 실패 검사를 연결. 수정한 현재 릴리스 스크립트 발췌·OS별 로더 경로 설명을 대조했다. macOS/Windows 제품 패키지 실행은 별도.",
+    "sha256": "e3d46f983b524ddfecf7278f98216c52430b2cb4c07590e40ec0fce0239942ac"
+  },
+  "part12--section-12": {
+    "state": "partial",
+    "lessons": [
+      "lesson-169",
+      "lesson-173"
+    ],
+    "note": "169에서 WorkingDirectory/실행 경로/DB 수명·After/Wants/Requires/Type=simple과 HTTP 준비를 재구성했다. 실제 자식/SQLite 재시작은 검사했고 systemd 설치·DB 백업/복구 전체는 아직 대응 완료가 아니다.; 173에서 온라인 백업/구조·외래 키·업무 검사/단독 새 경로 복원/폐기 상태 되돌림을 구현하고 Part 복구 순서를 교정. 실제 운영 이전·원격 보관 자동화는 별도.",
+    "sha256": "d3c292dee52f37f4e74b095ac7c04cf68cef601f5fd9f68ed365aefbc864ba7d"
+  },
+  "part12--section-06": {
+    "state": "partial",
+    "lessons": [
+      "lesson-170",
+      "lesson-171"
+    ],
+    "note": "170에서POSIX모드와NTFS ACL·클라이언트자격증명정책과서버DB권한의경계를설명했다. 비공개파일생성/원자교체의전체구현은아직별도대응이다.; 171에서 비공개 후보·부분쓰기·파일/부모 동기화·FD와 이름·게시후 false·협력잠금/다중파일 저널의 범위를 구현·실패주입으로 연결. 새 조상 디렉터리와 정리 실패·OS 차이를 한정. 다른 소절의 전체 대응은 아직 부분.",
+    "sha256": "e7455137a353211850163a9c134497a8abfc1d0c357c11a8697f26e598a59572"
+  },
+  "part15--section-08": {
+    "lessons": [
+      "lesson-173"
+    ],
+    "note": "; 173에서 온라인 백업/구조·외래 키·업무 검사/단독 새 경로 복원/폐기 상태 되돌림을 구현하고 Part 복구 순서를 교정. 실제 운영 이전·원격 보관 자동화는 별도.",
+    "sha256": "ffe7c7c934d109824b321f30ecbf41f4463d200831ff5ddb984a2e297f0c8a96",
+    "state": "partial"
   }
 }

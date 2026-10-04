@@ -115,3 +115,16 @@ def test_daily_receipts_zero_award_and_atomic_failure(server, earned_today, over
     with sqlite3.connect(db_path) as db:
         assert db.execute("SELECT awarded_bp FROM bot_rewards WHERE ticket=?", (challenge["ticket"],)).fetchall() == [(expected,)]
         assert db.execute("SELECT bp FROM players WHERE id=?", (player,)).fetchone()[0] == expected
+
+
+def test_client_profile_fields_do_not_admit_an_unregistered_opponent(server):
+    url, token, _, _, db_path = server
+    # A client can register arbitrary local practice content. Only the server's
+    # prepared catalog chooses reward policies, regardless of extra JSON fields.
+    status, body = _post(url + '/v1/bots/challenge', {
+        'token': token, 'opponent_id': 'mira', 'model': '@heuristic',
+        'input_ticks': 1, 'think_ticks': 0, 'min_piece_ticks': 1, 'awarded_bp': 999})
+    assert status == 404 and body['error'] == 'unknown_opponent'
+    with sqlite3.connect(db_path) as db:
+        assert db.execute('SELECT COUNT(*) FROM bot_rewards').fetchone()[0] == 0
+        assert db.execute('SELECT SUM(bp) FROM players').fetchone()[0] == 0

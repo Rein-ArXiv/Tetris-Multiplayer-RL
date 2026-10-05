@@ -3,7 +3,7 @@
   "title": "설정 저장: 기본값·검증·복구",
   "shortTitle": "후보 파싱·파일 상태·교체와 복구",
   "state": "reviewed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "start": "시작: 장식 표시와 캐릭터 선택은 실행 중 메모리에만 남아 재실행하면 기본값으로 돌아갑니다.",
   "finish": "완료: 설정 파일을 검증해 복원하고 실제 변경을 저장하며, 손상된 원본과 저장 실패를 구분해 처리합니다.",
   "objective": "논리 값과 직렬화, 기본값과 파일 상태, 원자적 교체와 영속성 확인을 구별하고 재시작·실패·복구 경로를 검사합니다.",
@@ -175,12 +175,17 @@
     },
     {
       "title": "현재 게임의 관대한 파서와 비교한다",
-      "body": "현재 게임은 잘못된 줄만 건너뛰고 유효한 줄을 적용하는 정책입니다. 학습의 문서 전체 거절·버전 검사·저장 보호 게이트와 구별해야 합니다. 정책이 다르더라도 숫자 전체를 읽었는지, 구형 키가 기존 값을 잘못 바꾸지 않는지, 물리적 줄을 정확히 나누는지는 확인할 수 있습니다.\n\n정수 파서는 Windows와 Linux의 long 크기 차이를 피하도록 long long으로 변환하는 strtoll의 끝 포인터가 문자열 끝인지와 ERANGE를 확인합니다. `12junk`와 변환 범위를 넘는 수는 현재 값을 유지합니다. 유효한 정수 150은 볼륨 범위 0~100으로 자릅니다. 문법 오류와 정상 숫자의 범위 조정은 다른 단계입니다.\n\n구형 `bgm` 키는 bool 파싱 성공 여부를 optional로 받고, 성공한 경우에만 0/100으로 변환합니다. `bgm_vol=37` 뒤의 `bgm=oops`는 37을 유지합니다. ‘실패 시 기본값’이라고 설명하면 앞에서 읽은 유효 값도 초기화한다고 오해할 수 있어, **호출자가 넘긴 현재 값 유지**라고 읽습니다.\n\n루트 로더는 전체 16 KiB·물리적 줄 255바이트를 제한하고, 저장은 공통 임시 파일 writer를 사용합니다. 루트 UI는 저장 오류를 stderr로 알리며 학습 Session의 invalid 파일 보호까지 구현한 것은 아닙니다.",
+      "body": "현재 게임은 잘못된 줄만 건너뛰고 유효한 줄을 적용하는 정책입니다. 학습의 문서 전체 거절·버전 검사·저장 보호 게이트와 구별해야 합니다. 정책이 다르더라도 숫자 전체를 읽었는지, 구형 키가 기존 값을 잘못 바꾸지 않는지, 물리적 줄을 정확히 나누는지는 확인할 수 있습니다.\n\n정수 파서는 Windows와 Linux의 long 크기 차이를 피하도록 long long으로 변환하는 strtoll의 끝 포인터가 문자열 끝인지와 ERANGE를 확인합니다. `12junk`와 변환 범위를 넘는 수는 현재 값을 유지합니다. 유효한 정수 150은 볼륨 범위 0~100으로 자릅니다. 문법 오류와 정상 숫자의 범위 조정은 다른 단계입니다.\n\n구형 `bgm` 키는 bool 파싱 성공 여부를 optional로 받고, 성공한 경우에만 0/100으로 변환합니다. `bgm_vol=37` 뒤의 `bgm=oops`는 37을 유지합니다. ‘실패 시 기본값’이라고 설명하면 앞에서 읽은 유효 값도 초기화한다고 오해할 수 있어, **호출자가 넘긴 현재 값 유지**라고 읽습니다.\n\n루트 로더는 전체 16 KiB·물리적 줄 255바이트를 제한하고, 저장은 공통 임시 파일 writer를 사용합니다. 루트 UI는 저장 오류를 stderr로 알리며 학습 Session의 invalid 파일 보호까지 구현한 것은 아닙니다.\n\n**저장된 창 크기는 실행 환경에서도 검증합니다.** 파서가 목록 범위 안의 프리셋을 읽어도 큰 모니터에서 저장한 창이 작은 화면에 들어간다는 뜻은 아닙니다. 플랫폼이 창을 준비한 뒤 표시 영역을 조회하고, 유효한 설정 후보를 그 영역에 맞춰 다시 제한한 다음 크기를 요청합니다. 파일에 쓸 사용자의 선택과 이번 실행에서 적용할 후보를 구별하면, 일시적인 조회 실패 때문에 원래 설정을 잃지 않을 수 있습니다.\n\n현재 SDL 경로는 창의 display index → usable bounds 순서로 작업 영역을 구합니다. 패널·독 등을 뺀 영역 조회가 실패하면 desktop mode의 전체 크기를 시도합니다. Win32 경로는 SPI_GETWORKAREA와 기본 화면 크기를 사용하며 현재 창이 놓인 모니터를 별도로 선택하지 않습니다. 창 크기는 창 좌표 단위로 비교합니다. 고해상도 화면의 drawable 크기나 게임의 논리 좌표를 그대로 비교에 넣으면 단위가 달라질 수 있습니다.\n\n현재 `max_window_scale()`은 조회값이 양수가 아니면 목록의 마지막 인덱스를 허용하고, 들어가는 항목이 없어도 첫 프리셋을 선택합니다. 아래 설명용 함수는 이 두 경우를 각각 `unknown_area`, `no_candidate`로 남겨 호출자가 구별하게 합니다. 학습 Config의 저장 형식과 체크포인트를 바꾸는 코드는 아닙니다. 창 설정을 확장할 때 필요한 환경 검증만 따로 구현한 예입니다.\n\n먼저 요청 인덱스를 검사한 뒤, 요청한 항목부터 목록 앞쪽으로 내려가며 양변이 들어가는 후보를 찾습니다. 목록 순서는 선호 순서이고 개수는 배열 타입에서 얻습니다. 결과가 `selected`일 때만 해당 크기로 `platform_set_window_size`를 호출합니다. 나머지 상태에서는 현재 창과 저장값을 유지하고 선택 불가 이유를 표시하는 정책을 둘 수 있습니다. `selected`는 후보 계산의 성공이며, void인 플랫폼 크기 요청의 성공 확인은 별도입니다.\n\n시작 흐름은 **창 준비 → 파일 후보 검증 → 표시 영역 조회 → 환경에 맞는 후보 선택 → 창 크기 요청 → 전체화면·표시 설정 적용**입니다. 전체화면에서 창 모드로 돌아올 때나 모니터가 바뀐 뒤에도 적용 직전에 다시 조회해야 합니다. 현재 제품은 시작 시 제한과 설정 메뉴의 상한 조회를 사용하므로 모든 화면 이동에 자동 대응한다고 해석하지 않습니다.",
       "codes": [
         {
           "label": "정수 변환이 전체 입력을 소비했는지 확인한다",
           "language": "cpp",
           "text": "errno = 0;\nlong long n = std::strtoll(s.c_str(), &end, 10);\nif (end == s.c_str() || end != s.c_str() + s.size() || errno == ERANGE)\n    return fallback;\n// 유효하게 변환된 정수에만 설정 범위 clamp를 적용한다."
+        },
+        {
+          "label": "설명용 확장: 저장값과 환경을 바꾸지 않고 창 크기 후보 고르기",
+          "language": "cpp",
+          "text": "#include <array>\n#include <cstddef>\n\nstruct WindowSize {\n    int width;\n    int height;\n};\n\nenum class ChoiceState {\n    selected,\n    invalid_setting,\n    unknown_area,\n    no_candidate\n};\n\nstruct WindowChoice {\n    ChoiceState state;\n    std::size_t index = 0;\n};\n\ntemplate <std::size_t N>\nWindowChoice choose_window_preset(const std::array<WindowSize, N>& presets,\n                                  int requested,\n                                  WindowSize area)\n{\n    // requested가 음수이거나 목록 범위 밖이면 무효 설정.\n    if (requested < 0 || static_cast<std::size_t>(requested) >= N) {\n        return WindowChoice{ChoiceState::invalid_setting, 0};\n    }\n\n    // 창 영역의 한 변이라도 0 이하이면 알 수 없는 영역.\n    if (area.width <= 0 || area.height <= 0) {\n        return WindowChoice{ChoiceState::unknown_area, 0};\n    }\n\n    // requested 인덱스에서 0까지 역순 검사. unsigned 언더플로 방지.\n    std::size_t remaining = static_cast<std::size_t>(requested) + 1;\n    while (remaining > 0) {\n        const std::size_t i = --remaining;\n        const WindowSize& s = presets[i];\n        if (s.width > 0 && s.height > 0 &&\n            s.width <= area.width && s.height <= area.height) {\n            return WindowChoice{ChoiceState::selected, i};\n        }\n    }\n\n    return WindowChoice{ChoiceState::no_candidate, 0};\n}"
         }
       ],
       "reference": {
@@ -188,7 +193,14 @@
         "symbol": "static GameSettings load_settings(",
         "invariant": "유효한 설정 값과 오류 입력을 구별하고 파일을 읽는 경계를 명시한다.",
         "mayDiffer": "현재 게임은 줄별 관대한 적용, 학습은 문서 전체 후보 검증과 저장 보호를 사용한다."
-      }
+      },
+      "notes": [
+        {
+          "kind": "concept",
+          "title": "작업 영역에 맞는 수치와 실제 창이 들어가는 조건",
+          "body": "이 함수는 전달받은 영역과 프리셋의 가로·세로만 비교합니다. desktop-mode fallback에는 작업 표시줄 영역이 포함될 수 있고, Win32는 client 크기에 제목 표시줄·테두리를 더해 outer 크기를 만듭니다. 외곽 창까지 들어감을 보장하려면 플랫폼에서 현재 모니터·DPI·창 스타일을 기준으로 장식을 포함한 크기를 검증하거나 사용할 수 있는 client 크기를 제공해야 합니다. 고정 여백을 공통 설정 코드에 박아 넣으면 DPI나 테마가 바뀔 때 맞지 않습니다.\n\n관찰할 입력은 세 종류입니다. 큰 프리셋이 맞지 않지만 작은 후보는 있는 경우, 영역 조회가 실패한 경우, 최소 후보도 맞지 않는 경우입니다. 뒤의 두 경우를 첫 프리셋 하나로 합치면 호출자가 원인을 알 수 없습니다."
+        }
+      ]
     },
     {
       "title": "정상 저장만 검사하면 놓치는 경우를 넣는다",
@@ -420,7 +432,7 @@
     "expected": "설정을 재실행 사이에 유지하고, 파싱·적용·저장·복구 실패를 각각의 상태와 파일 증거로 진단한다."
   },
   "review": {
-    "date": "2026-09-29",
+    "date": "2026-10-05",
     "method": "DeepSeek 설정 헤더/구성 후보 직접 검토; 실제 root파서 반례·파일 오류주입·Linux/Microsoft 파일 API 대조",
     "draftJob": "out/learning-jobs/073-outline-events.jsonl",
     "corrections": [
@@ -430,7 +442,8 @@
       "Session에는없는 동일bool setter예시를 실제 Action/끝점/unchanged로 교정",
       "설정 변경횟수제한이파일손상을막는다는 인과를 불필요쓰기감소와 임시파일보존으로 분리",
       "원자성만있고내구성은없다는 단정을 fsync확인과실패시점·플랫폼별범위로 교정",
-      "store::save 단독은읽기상태gate를강제하지않고Session책임임을명시"
+      "store::save 단독은읽기상태gate를강제하지않고Session책임임을명시",
+      "표시 영역 조회·fallback·창 설정의 환경 검증과 현재 구현 한계를 보완. DeepSeek 순수 선택 함수의 역순 루프를 래핑 없이 교정하고 컴파일·경계 사례를 검수."
     ]
   },
   "validation": [

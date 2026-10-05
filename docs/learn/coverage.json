@@ -1788,8 +1788,8 @@
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "8. 논리 해상도와 레터박스",
       "startLine": 1021,
-      "endLine": 1218,
-      "sha256": "a755b42b01146ea54a98fee9d8839313fa4e4760ee48f4946c6950adc931de47",
+      "endLine": 1220,
+      "sha256": "e55023d7778ecba9189c0d6b17133de859eefbc31327ac695edbb021ec2fae4d",
       "candidateUnits": [
         "unit-001",
         "unit-002",
@@ -1821,18 +1821,19 @@
       "lessons": [
         "lesson-24",
         "lesson-70",
-        "lesson-19"
+        "lesson-19",
+        "lesson-73"
       ],
       "state": "partial",
-      "note": "; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 70에서 창/drawable/논리 단위·확정 viewport·역변환 순서·음수floor·홀수 여백 원점·프레임 기준 변경을 재구성하고 독립 계산/픽셀검사에 연결했다. 2026-10-04: SimGrid행·열과platform/renderer논리화면좌표를섞은도입문교정,해상도숫자는계산예시로한정. 범위전체대조완료로올리지않음. 2026-10-05: 논리→clip→viewport 및 window/drawable 역매핑·정수 경계·작업영역/화면 크기 차이를 대조. 24의 내림/optional 정책과 제품 반올림/int 정책은 의도적인 차이. §8.4 디스플레이 작업영역 조회와 저장된 크기 제한은 설정 단원 대조·보완 대상으로 남긴다."
+      "note": "; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 70에서 창/drawable/논리 단위·확정 viewport·역변환 순서·음수floor·홀수 여백 원점·프레임 기준 변경을 재구성하고 독립 계산/픽셀검사에 연결했다. 2026-10-04: SimGrid행·열과platform/renderer논리화면좌표를섞은도입문교정,해상도숫자는계산예시로한정. 범위전체대조완료로올리지않음. 2026-10-05: 논리→clip→viewport 및 window/drawable 역매핑·정수 경계·작업영역/화면 크기 차이를 대조. 24의 내림/optional 정책과 제품 반올림/int 정책은 의도적인 차이. §8.4 디스플레이 작업영역 조회와 저장된 크기 제한은 설정 단원 대조·보완 대상으로 남긴다. 2026-10-05: 57의 프레임 수명/빈 viewport 배처 reset,73의 창 표시 영역/fallback/저장 설정 재검증·장식/좌표 한계를 현재 소스와 대조해 보완. 기존 절의 다른 주제는 전체 완료로 확대하지 않음."
     },
     {
       "id": "part2--section-11",
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "9. 프레임 표시 — `platform_present`",
-      "startLine": 1219,
-      "endLine": 1253,
+      "startLine": 1221,
+      "endLine": 1255,
       "sha256": "9ea9363327871ce9e158c5c39bab2e7cdaa9b7f868a428ca5ec81cf2fdbf2da3",
       "candidateUnits": [
         "unit-001",
@@ -1876,8 +1877,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "10. 시간 — 델타타임 클램프와 페이싱",
-      "startLine": 1254,
-      "endLine": 1374,
+      "startLine": 1256,
+      "endLine": 1376,
       "sha256": "17d7a87d265b8efa85fb1beaf10d7f6f61ffc3875c729ccdf025c4555f48fff1",
       "candidateUnits": [
         "unit-001",
@@ -1920,8 +1921,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "11. 종료 순서",
-      "startLine": 1375,
-      "endLine": 1439,
+      "startLine": 1377,
+      "endLine": 1441,
       "sha256": "b6f13636977fe2cc9041f8477a7c9bcba02b817d870f8b12c1b1c17d24891d75",
       "candidateUnits": [
         "unit-001",
@@ -1966,8 +1967,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "12. SDL2 백엔드",
-      "startLine": 1440,
-      "endLine": 1676,
+      "startLine": 1442,
+      "endLine": 1678,
       "sha256": "e83a7b44ded4433430eb01a5eef14c9c91c3dd378b4ea965592cdd3cedfc0c4b",
       "candidateUnits": [
         "unit-001",
@@ -2017,8 +2018,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "13. SDL 백엔드의 플랫폼별 예외",
-      "startLine": 1677,
-      "endLine": 1752,
+      "startLine": 1679,
+      "endLine": 1754,
       "sha256": "d746d694b7090455cf296fc3494097190c3354d48a5b5e1696094a47179e78fb",
       "candidateUnits": [
         "unit-001",
@@ -2063,8 +2064,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "14. CMakeLists 확장",
-      "startLine": 1753,
-      "endLine": 1840,
+      "startLine": 1755,
+      "endLine": 1842,
       "sha256": "d92df2f937d81b6e688878fdabd5bc117fbe3d94bd86550fc73bbaff59eff3d6",
       "candidateUnits": [
         "unit-001",
@@ -2108,8 +2109,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "15. Part 2 체크포인트 데모",
-      "startLine": 1841,
-      "endLine": 2020,
+      "startLine": 1843,
+      "endLine": 2022,
       "sha256": "fe8e78e91b6bad71b2bbf9734eea60645f3d9abc77e5182846f9f1f6cf2601cd",
       "candidateUnits": [
         "unit-001",
@@ -2150,8 +2151,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "이 장에서 완성된 것",
-      "startLine": 2021,
-      "endLine": 2032,
+      "startLine": 2023,
+      "endLine": 2034,
       "sha256": "ea084b281bc591cf894463182716f7945f26c7559373d361f09dee7ee520b8a3",
       "candidateUnits": [
         "unit-002",
@@ -2169,8 +2170,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "수동 테스트",
-      "startLine": 2033,
-      "endLine": 2067,
+      "startLine": 2035,
+      "endLine": 2069,
       "sha256": "9897a92c45c85f1137f542c4dca9874b8c415e9817876c3c2535c5cf3f780819",
       "candidateUnits": [
         "unit-002",
@@ -2190,8 +2191,8 @@
       "part": 2,
       "path": "docs/blog/part2-platform-window-input.md",
       "title": "마무리",
-      "startLine": 2068,
-      "endLine": 2075,
+      "startLine": 2070,
+      "endLine": 2077,
       "sha256": "14f842f4c62a9754571da3f62ed2829745bb2aec1f4e250f1a75f62148ff4707",
       "candidateUnits": [
         "unit-011",
@@ -2884,7 +2885,7 @@
         "lesson-67"
       ],
       "state": "partial",
-      "note": "18차시에서 drawable 픽셀·viewport/clear 구분·빈 영역 시 GL 상태 명시를 연결하고 실제 renderer_begin 경로를 보정. 좌표계·레터박스·마우스 역매핑 상세는 후속.; 19차시에서 clip/w/NDC·viewport·논리 UI 단위를 수치와 픽셀로 연결. SDF·레터박스·입력 역매핑 전체는 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님. 57차시에서 유효 Layout의 논리 사각형을 GL 하단 원점 시저로 투영하고 바깥 반올림・산술 범위를 설명.; 70에서 입력과 그림의 같은 layout 공유·GL 아래 여백·픽셀 중심 표본을 결합했다. 기존 GPU 구현 전체의 대응은 부분 상태를 유지한다. 2026-10-05: clip/NDC/창 좌표·원점·viewport/scissor·입력 역변환을 18/19/24와 대조. 0크기 프레임의 제품 배치 불변식은 56–57 대조에서, 미리 구운 글리프의 render_scale·재래스터화는 64–67 대조에서 확인할 범위로 남음."
+      "note": "18차시에서 drawable 픽셀·viewport/clear 구분·빈 영역 시 GL 상태 명시를 연결하고 실제 renderer_begin 경로를 보정. 좌표계·레터박스·마우스 역매핑 상세는 후속.; 19차시에서 clip/w/NDC·viewport·논리 UI 단위를 수치와 픽셀로 연결. SDF·레터박스·입력 역매핑 전체는 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님. 57차시에서 유효 Layout의 논리 사각형을 GL 하단 원점 시저로 투영하고 바깥 반올림・산술 범위를 설명.; 70에서 입력과 그림의 같은 layout 공유·GL 아래 여백·픽셀 중심 표본을 결합했다. 기존 GPU 구현 전체의 대응은 부분 상태를 유지한다. 2026-10-05: clip/NDC/창 좌표·원점·viewport/scissor·입력 역변환을 18/19/24와 대조. 0크기 프레임의 제품 배치 불변식은 56–57 대조에서, 미리 구운 글리프의 render_scale·재래스터화는 64–67 대조에서 확인할 범위로 남음. 2026-10-05: 57의 프레임 수명/빈 viewport 배처 reset,73의 창 표시 영역/fallback/저장 설정 재검증·장식/좌표 한계를 현재 소스와 대조해 보완. 기존 절의 다른 주제는 전체 완료로 확대하지 않음."
     },
     {
       "id": "part3--section-11",

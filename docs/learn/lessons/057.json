@@ -3,7 +3,7 @@
   "title": "flush 경계: 텍스처와 상태 변경",
   "shortTitle": "제출 경계·상태와 자원 수명",
   "state": "reviewed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "start": "시작: 위치와 색상을 CPU에 모아 하나의 불투명 배치로 제출합니다.",
   "finish": "완료: 시저 영역·용량·프레임 종료에서 순서를 보존하며 묶음을 제출하고, 자원 해제 전 미제출 사용을 처리합니다.",
   "objective": "지연 실행의 상태·수명 문제를 예측하고, 제출 경계와 실패 처리·픽셀 좌표 변환을 실제 게임 경로에 구현합니다.",
@@ -13,13 +13,14 @@
     "GameView와 화면 상태·자원 소유"
   ],
   "review": {
-    "date": "2026-09-23",
+    "date": "2026-10-05",
     "method": "DeepSeek 좌표 helper 및 문제 상황 초안 검토; 실제 상태 경계·해제 수명·공식 GL 계약과 대조",
     "draftJob": "out/learning-jobs/057-clip-events.jsonl",
     "quizJob": "out/learning-jobs/057-quiz-events.jsonl",
     "corrections": [
       "문제 초안의 append에 clip 전달·존재하지 않는 Stream.submit 표현을 실제 API로 교정",
-      "이미지 핸들과 GL 이름 구별, 실패의 원자성 범위와 호출자의 scene 결과 검사 명시"
+      "이미지 핸들과 GL 이름 구별, 실패의 원자성 범위와 호출자의 scene 결과 검사 명시",
+      "전역 배처의 빈 viewport 초기화와 프레임 로컬 Stream 수명 차이를 현재 코드와 대조해 보완"
     ]
   },
   "validation": [
@@ -241,6 +242,13 @@
           "language": "cpp",
           "file": "checkpoints/57-flush-boundaries/src/main.cpp",
           "collapsed": true
+        }
+      ],
+      "notes": [
+        {
+          "title": "빈 표시 영역에서도 전역 배처의 상태를 맞춘다",
+          "kind": "concept",
+          "body": "학습 main은 유효한 Layout에서만 프레임마다 새 Stream을 만들고 finish한 뒤 그 수명을 끝냅니다. Layout이 없으면 Stream도 없으므로 이전 프레임의 미제출 정점이나 텍스처 선택을 이어받지 않습니다.\n\n현재 렌더러는 전역 정점 큐를 사용하고, 표시 영역이 비어도 게임 코드가 draw_*를 계속 호출합니다. 따라서 renderer_begin은 vw 또는 vh가 0 이하이면 다음 상태를 먼저 설정합니다.\n\n```cpp\ngl_Viewport(0, 0, 0, 0);\ngl_UseProgram(s_prog);\ns_verts.clear();\ns_batch_tex = s_white;\n```\n\n빈 viewport를 GL에 명시해야 이전 프레임의 그릴 영역이 남지 않습니다. 크기가 0이어도 draw 명령 자체를 생략하는 것은 아니므로, 처음부터 빈 표시 영역으로 시작한 경우에도 뒤의 flush가 사용할 프로그램을 바인딩합니다.\n\n큐와 배치 텍스처는 함께 새 프레임의 상태로 돌립니다. 남아 있던 정점을 버리고 기본 흰 텍스처를 선택해야 이전 배치의 자료나 공유 텍스처 선택이 다음 요청에 이어지지 않습니다. 이 초기화는 이전 묶음을 제출하는 flush와 다릅니다. 그 뒤 draw_*가 새로 쌓은 정점은 renderer_end의 flush가 빈 viewport로 제출하고 큐를 비우므로 프레임마다 누적되지 않습니다. 프레임마다 Stream을 새로 만드는 학습 경로와, 계속 살아 있는 전역 배처를 초기화하는 현재 경로는 배처의 수명에 맞춰 상태를 정리하는 두 방식입니다."
         }
       ]
     },

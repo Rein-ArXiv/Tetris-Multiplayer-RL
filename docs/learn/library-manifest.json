@@ -20,8 +20,8 @@
     },
     "part2": {
       "path": "docs/blog/part2-platform-window-input.md",
-      "sha256": "2859e62818f6cda4837038cc0a8da0d649efd5c986b0c5ed53dd0e15ab0793fe",
-      "lines": 2075,
+      "sha256": "a16e4b508f9e68fa3782a7626340e16c46021901236ed2d8a7dadac0130d421d",
+      "lines": 2077,
       "codeBlocks": 52
     },
     "part3": {
@@ -499,8 +499,8 @@
       "lines": 22
     },
     "platform/platform.h": {
-      "sha256": "d1ee3ced808cbe0647dea30b3644d20887cff27ab2995eb4f7a90b4ee8ccb98d",
-      "lines": 159
+      "sha256": "a6781e9d2ad58bf86a619c8282df984c9a11a9bf630892db6bad5917818e7e8f",
+      "lines": 160
     },
     "platform/sdl.cpp": {
       "sha256": "da35afee745f346fdee3ccc40f08303241a367af3e6207ca1736a59981cff006",

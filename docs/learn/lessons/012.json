@@ -3,7 +3,7 @@
   "title": "GL 함수 주소: 선언에서 실제 호출까지",
   "shortTitle": "함수 주소와 호출 규약",
   "state": "reviewed",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "start": "시작: SDL 창과 컨텍스트를 만들 수 있지만 애플리케이션에는 GL 함수를 호출할 테이블이 없습니다.",
   "finish": "완료: 함수 주소 세 개를 정확한 타입으로 조회해 버전·프로파일·장치 정보를 읽습니다. 누락된 주소를 모두 보고하고 실패한 테이블은 공개하지 않습니다.",
   "objective": "이름, 선언, 링크, 실행 중 주소 조회를 하나의 호출 흐름으로 연결합니다. 작은 GL 로더를 직접 만들며 호출 규약·포인터 수명·기능 지원 검사의 역할을 구분합니다.",
@@ -27,11 +27,17 @@
       "지원되지 않는 이름에도 non-null 가능하다는 SDL 계약 반영",
       "SDL 설정 조회와 실제 GL 버전 조회 차이를 실험해 11차시 v1.0.1로 정정",
       "32비트 Windows GL 호출 규약과 WGL 직접 조회 우회 경로 보강",
-      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분"
+      "2026-10-03: 현재 구현의 가변 수치는 정책·자료구조·계산식으로 설명하고 고정 실습 조건과 구분",
+      "2026-10-05: Part3 §4 대조에서 빠진 X-매크로의 단일 목록·extern/정의/조회 확장, #/##와 인자 괄호를 설명용 세 함수로 보완. 기존 차시 절·체크포인트·문항 ID 유지."
     ],
     "learnerProseEdit": {
       "date": "2026-09-21",
       "note": "집필자 검수 보고는 내부 기록에만 유지. 학습 본문은 구현 원리·실행 방법·예상 결과로 정리. 문항 ID와 코드 유지."
+    },
+    "xMacroAudit": {
+      "date": "2026-10-05",
+      "scope": "lesson-12 기존 로더 절의 설명·스니펫만 보완. renderer/gl_api.h·cpp의 GL_FUNCS 전처리 방식과 대조.",
+      "validation": "Linux C++17 -Wall -Wextra -Werror -pedantic 컴파일·실행, 전처리 결과의 extern 선언·조회 문자열 확인, 체크포인트 세 포인터 서명과 static_assert 비교, 정상 typed 호출·각 슬롯/전체 누락 뒤 세 이름 조회·null resolver 경로 통과. 작업 증거: out/learning-jobs/gpu-contract-audit-012/. 누적 체크포인트나 제품 로더 변경은 없음."
     }
   },
   "recap": {
@@ -116,19 +122,29 @@
     },
     {
       "title": "실패를 모두 모으되 불완전한 테이블은 버린다",
-      "body": "첫 번째 조회가 실패해도 두 번째와 세 번째 이름을 확인해야 로그가 전체 누락 상황을 보여 줍니다. 그렇다고 일부만 채워진 포인터를 사용자에게 넘기지는 않습니다. 로더 입구에서 out을 비우고, 지역 `candidate`에 채운 뒤 모두 성공했을 때만 대입합니다.\n\n아래는 `ok = resolve_slot(...) && ok`입니다. 왼쪽 조회가 매번 실행되므로 ok가 이미 false여도 다음 이름을 검사합니다. 순서를 `ok && resolve_slot(...)`로 바꾸면 첫 실패 뒤의 조회는 생략됩니다. 논리 결과가 같아 보여도 부수 효과인 **어떤 이름을 실제로 조회했는가**가 달라집니다.\n\n| 누락 | 조회 횟수 | 결과 | 호출자에게 남는 테이블 |\n| --- | --- | --- | --- |\n| 없음 | 3 | true | 세 주소 모두 저장 |\n| GetString만 | 3 | false | 모두 nullptr |\n| 세 함수 모두 | 3 | false | 모두 nullptr |\n| 조회 함수 자체가 없음 | 0 | false | 모두 nullptr |\n\n실패 후에도 옛 테이블을 유지하는 정책을 설계할 수는 있습니다. 하지만 그러려면 옛 컨텍스트의 수명이 아직 유효하다는 보장도 필요합니다. 이 실습은 세션 하나와 테이블 하나로 한정하고 재로딩 실패 시 비웁니다. 다중 스레드에서 동시에 읽는 테이블을 안전하게 교체하는 알고리즘은 아닙니다.",
+      "body": "첫 번째 조회가 실패해도 두 번째와 세 번째 이름을 확인해야 로그가 전체 누락 상황을 보여 줍니다. 그렇다고 일부만 채워진 포인터를 사용자에게 넘기지는 않습니다. 로더 입구에서 out을 비우고, 지역 `candidate`에 채운 뒤 모두 성공했을 때만 대입합니다.\n\n아래는 `ok = resolve_slot(...) && ok`입니다. 왼쪽 조회가 매번 실행되므로 ok가 이미 false여도 다음 이름을 검사합니다. 순서를 `ok && resolve_slot(...)`로 바꾸면 첫 실패 뒤의 조회는 생략됩니다. 논리 결과가 같아 보여도 부수 효과인 **어떤 이름을 실제로 조회했는가**가 달라집니다.\n\n| 누락 | 조회 횟수 | 결과 | 호출자에게 남는 테이블 |\n| --- | --- | --- | --- |\n| 없음 | 3 | true | 세 주소 모두 저장 |\n| GetString만 | 3 | false | 모두 nullptr |\n| 세 함수 모두 | 3 | false | 모두 nullptr |\n| 조회 함수 자체가 없음 | 0 | false | 모두 nullptr |\n\n실패 후에도 옛 테이블을 유지하는 정책을 설계할 수는 있습니다. 하지만 그러려면 옛 컨텍스트의 수명이 아직 유효하다는 보장도 필요합니다. 이 실습은 세션 하나와 테이블 하나로 한정하고 재로딩 실패 시 비웁니다. 다중 스레드에서 동시에 읽는 테이블을 안전하게 교체하는 알고리즘은 아닙니다.\n\n함수가 늘어나면 같은 이름과 타입을 선언·정의·조회 목록 세 곳에 반복하게 됩니다. 선언에는 넣었지만 조회에서 빠뜨리면 슬롯은 nullptr로 남습니다. 현재 렌더러는 **X-매크로**로 목록을 한 번 적고, 그 목록에 서로 다른 작업 매크로를 적용해 이 세 코드를 만듭니다. 전처리는 C++ 컴파일 전에 토큰을 펼치는 단계이며, 실행 중 목록을 순회하는 기능은 아닙니다.\n\n아래 `STUDY_QUERY_FUNCS(X)`는 지금 배우는 조회 함수만 넣은 설명용 축약입니다. **체크포인트에 붙여 넣을 변경 지시가 아닙니다.** 누적 코드는 GlApi와 candidate 로더를 그대로 사용합니다. 현재 소스의 전역 슬롯 방식이 어떻게 만들어지는지 비교하기 위해 선언과 정의 자리도 한 코드 블록에 모았습니다. 실제 파일 구성에서는 extern 선언은 헤더에, nullptr로 초기화하는 정의와 로더는 구현 파일 한 곳에 둡니다.\n\n목록의 한 항목은 `반환형, 이름, (매개변수 목록)`입니다. `(GLenum, GLint*)`의 괄호는 매개변수 두 개를 **매크로 인자 args 하나**로 묶습니다. 괄호를 빼면 쉼표가 X의 인자 구분자로 읽혀, 세 인자를 받는 작업 매크로에 네 인자를 넘기게 됩니다. 줄 끝의 역슬래시는 매크로 정의가 다음 줄로 이어진다는 표시입니다.\n\n`QUERY_DECLARE`를 넣으면 함수 포인터의 extern 선언, `QUERY_DEFINE`를 넣으면 그 포인터 변수의 정의가 나옵니다. `STUDY_GL_CALL`은 두 확장 모두에 남으므로 호출 규약도 같은 타입의 일부가 됩니다. `##`는 토큰을 붙여 `gl_`와 `GetIntegerv`에서 식별자 `gl_GetIntegerv`를 만듭니다. `#name`은 전달한 이름 토큰을 문자열 `\"GetIntegerv\"`로 바꾸고, 옆의 `\"gl\"`과 이어진 문자열 리터럴은 컴파일 때 `\"glGetIntegerv\"`가 됩니다. 식별자와 드라이버 조회 문자열은 용도가 다르므로 접두사도 다릅니다.\n\n목록에 `QUERY_LOAD`를 적용하면 각 포인터에 주소를 넣는 문장이 펼쳐집니다. `decltype(gl_##name)`은 선언한 반환형·인자·호출 규약을 그대로 재사용합니다. 한 이름이 없어 ok가 false가 되어도 다음 펼친 문장은 계속 실행하므로 전체 누락을 확인합니다. 사용이 끝난 작업 매크로를 undef하면 그 임시 이름이 뒤의 코드에 남지 않습니다. 공통 목록은 다른 작업에도 펼칠 수 있도록 유지합니다.\n\n이 예의 전역 슬롯은 실패할 때 일부가 채워질 수 있습니다. 따라서 false를 받은 호출자는 그 슬롯을 호출하지 않습니다. 체크포인트의 ‘실패하면 out 전체를 비움’과 구별하세요. 목록을 한곳으로 모으는 방식과 실패 결과를 공개하는 정책은 독립적인 선택입니다. X-매크로도 목록에 적은 타입의 오타나 실제 기능 지원까지 증명하지는 않습니다. 포인터 타입·조회 문자열·current 컨텍스트 검사는 계속 필요합니다. 함수가 적을 때는 지금의 명시적 코드가 읽기 쉽고, 목록이 커지면 반복되는 선언과 로딩의 누락을 줄이는 방식이 유용합니다.",
       "codes": [
         {
           "label": "로더 전체 · 성공 후 테이블 공개",
           "language": "cpp",
           "text": "bool load(GlApi& out, Resolver resolver)\n{\n    // Clear first: a previous successful load must not survive a new attempt.\n    out = GlApi{};\n\n    if (resolver == nullptr) {\n        std::fprintf(stderr, \"[GL] load called with a null resolver.\\n\");\n        return false;\n    }\n\n    // Fill a local candidate. `out` stays cleared unless every slot resolves.\n    GlApi candidate;\n    bool ok = true;\n    ok = resolve_slot(candidate.GetString,   resolver, \"glGetString\") && ok;\n    ok = resolve_slot(candidate.GetIntegerv, resolver, \"glGetIntegerv\") && ok;\n    ok = resolve_slot(candidate.GetError,    resolver, \"glGetError\") && ok;\n\n    if (!ok) {\n        return false; // candidate is discarded; `out` remains cleared.\n    }\n\n    out = candidate; // all slots valid: publish at once.\n    return true;\n}"
+        },
+        {
+          "label": "설명용 비교 · 같은 함수 목록에서 선언·정의·조회 만들기 (체크포인트 변경 아님)",
+          "language": "cpp",
+          "text": "// 설명용: GLenum, GLint, Resolver, STUDY_GL_CALL은 앞의 선언을 사용한다.\n#define STUDY_QUERY_FUNCS(X) \\\n    X(const unsigned char*, GetString,   (GLenum)) \\\n    X(void,                 GetIntegerv, (GLenum, GLint*)) \\\n    X(GLenum,               GetError,    (void))\n\n// 헤더의 선언 자리\n#define QUERY_DECLARE(ret, name, args) extern ret (STUDY_GL_CALL* gl_##name) args;\nSTUDY_QUERY_FUNCS(QUERY_DECLARE)\n#undef QUERY_DECLARE\n\n// 구현 파일 한 곳의 정의 자리\n#define QUERY_DEFINE(ret, name, args) ret (STUDY_GL_CALL* gl_##name) args = nullptr;\nSTUDY_QUERY_FUNCS(QUERY_DEFINE)\n#undef QUERY_DEFINE\n\nbool load_query_example(Resolver resolver) {\n    if (resolver == nullptr) return false;\n    bool ok = true;\n#define QUERY_LOAD(ret, name, args) \\\n    gl_##name = reinterpret_cast<decltype(gl_##name)>(resolver(\"gl\" #name)); \\\n    if (gl_##name == nullptr) ok = false;\n    STUDY_QUERY_FUNCS(QUERY_LOAD)\n#undef QUERY_LOAD\n    return ok; // false라면 일부 채워진 전역 슬롯도 사용하지 않는다.\n}"
+        },
+        {
+          "label": "전처리 결과의 한 항목 · GetIntegerv를 세 작업으로 펼친 예",
+          "language": "cpp",
+          "text": "// QUERY_DECLARE\nextern void (STUDY_GL_CALL* gl_GetIntegerv)(GLenum, GLint*);\n// QUERY_DEFINE\nvoid (STUDY_GL_CALL* gl_GetIntegerv)(GLenum, GLint*) = nullptr;\n// QUERY_LOAD: \"gl\" \"GetIntegerv\"는 하나의 조회 문자열로 이어진다.\ngl_GetIntegerv = reinterpret_cast<decltype(gl_GetIntegerv)>(\n    resolver(\"gl\" \"GetIntegerv\"));\nif (gl_GetIntegerv == nullptr) ok = false;"
         }
       ],
       "reference": {
         "path": "renderer/gl_api.cpp",
         "symbol": "bool gl_load_functions()",
         "invariant": "필요한 주소를 모두 검사하고 실패하면 GL 사용을 시작하지 않는다.",
-        "mayDiffer": "현재 게임은 전역 슬롯에 채우며 false를 받은 호출자가 렌더러 초기화를 중단한다. 학습 예제는 out 전체를 비운다.",
+        "mayDiffer": "현재 게임은 전역 슬롯에 채우며 false를 받은 호출자가 렌더러 초기화를 중단한다. 학습 예제는 out 전체를 비운다. 현재 GL_FUNCS는 한 목록을 선언·정의·조회로 펼치며, 설명용 축약도 전역 슬롯 방식이다. 안정적인 체크포인트 자체는 명시적 GlApi 멤버와 candidate를 유지한다.",
         "omitted": "다중 컨텍스트·동시 테이블 교체"
       }
     },

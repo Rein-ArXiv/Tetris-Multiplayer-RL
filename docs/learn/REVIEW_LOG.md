@@ -7186,3 +7186,22 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 
 - DeepSeek의 기초 플랫폼 대조 `coverage-platform-events.jsonl`은 정상 종료(12133, step_start/text만). 승인된 선택 원문·관련 강의 본문만 보냈다. current 삭제와 배경 브러시 인과 오류, 남아 있던 마우스 취소 스냅샷 문장을 직접 확인해 반영했다. WGL 조회 폴백 누락 후보는 원문 §4.6/12에 이미 있어 기각했다. 재초기화 후보는 현재 제품과 학습 체크포인트를 섞은 판단이므로 제품 기능 변경 대신 단일 세션/재초기화 계약 차이를 원문에 적었다. 공식 WM_ERASEBKGND 계약과 실제 null 클래스 브러시를 대조했다.
 - 추가 원문 교정 후 library/coverage/lessons를 다시 생성했다. 최종 배포 release는 `70722b75b1682ab7`이며 정적 허용목록·상대자산·해시·재현 ZIP이 통과했다(`coverage-module01-site-final.log`). 앞의 `6f0d44d2335ce8df`는 추가 교정 전 중간 결과다.
+
+
+## 2026-10-05 — GPU 첫 도형 단원 최종 대조
+
+- 편성된 강의의 집필은 완료됐고, 이번 작업은 단원별 최종 대조다. AUTHORING의 오래된 “전체 재집필 진행 중” 문구를 교정하고 마감 조건을 고정했다. 확인한 내용을 변경 근거 없이 반복해서 검수하거나 새 강의 수를 늘리지 않는다.
+- 사용자의 모델 분담 승인을 적용했다. sol은 11–17의 수명·로더·버퍼·셰이더와 일부 원문 절 전체 대응을, terra는 18–24의 좌표·래스터화·블렌딩·표시·DPI를, luna는 Windows CI 실패를 담당했다. 서로 다른 범위를 읽었으며 책임자가 결과를 확인했다. DeepSeek는 확인된 Part3 교정 명세에 따른 문장 초안만 받았다(`gpu-editorial-events.jsonl`, 정상 종료37578, step_start/text). 키·설정·전체 저장소는 보내지 않았다. 토큰 절감량은 측정하지 않았으며 모델 사용만 기록한다.
+- 강의의 기존 구현·문항에서는 추가 오류를 확인하지 않았다. 원문 전체 절을 대조하면서 본문에서 빠진 OS 오류 표시와 X-매크로를 찾았다. 11은 stderr/OS 메시지·부모 없는 호출·표시 실패 계약을 보완했다. 12는 한 목록에서 extern 선언·정의·조회 확장, #/##·인자 괄호·호출 규약·실패 정책을 설명용 코드로 추가했다. 기존 절/문제 ID와 누적 체크포인트는 유지했다.
+- X-매크로 설명용 예는 Linux C++17 warnings-as-errors로 컴파일·실행하고 전처리 결과를 확인했다. 타입 서명·resolver 이름·정상 호출·각/전체 누락·null resolver를 검증했다(`gpu-contract-audit-012/`). 원문 GL_FUNCS의 전역 슬롯 방식과 학습 checkpoint의 candidate 방식은 별도 정책으로 설명했다.
+- Part3의 CPU AA/VSync 불가능·창 생성만 이식 비용·프로세스 전체 GL 상태·GPU 셰이더 코어/표시 하드웨어 일반화·draw_rect 반환 시 미제출·오프셋 변경 flush 문장을 교정했다. WGL 공식 NULL 실패와 방어적 sentinel 검사를 구별했다. GL 부록 A의 동일 구현 반복성과 구현 간 픽셀 차이, 스크린샷 회귀 가능성, CPU 정수 구현의 전제, Vulkan의 플랫폼·자원·좌표 계약을 확인했다. DeepSeek가 되풀이한 엔진 내부 관찰 불가능·모든 GPU 하드웨어 단정은 채택하지 않았다. 공식 Khronos/Microsoft/SDL/Mesa 자료와 실제 소스를 근거로 편집했다.
+- GL 로더의 학습/제품 검사와 WGL 소스 모형 15경로, 실제 Mesa offscreen 조회 통과(`gpu-loader-audit.log`). 래스터화의 CPU 예측·GL 픽셀 비교·잘못된 샘플 중심 반례 통과(`gpu-raster-audit.log`). 이 결과를 물리 GPU/네이티브 OS 화면 검증으로 확대하지 않는다.
+- 879객관식, Part 구조/발췌/링크, Markdown27, 변경된11/12 집중 DOM, 정적 허용목록·상대자산·해시·재현 ZIP 통과. 최종 release `2e16e9849ddefadc` (`gpu-site.log`). 수동 화면 검사는 수행하지 않았다.
+- Part2 GL 컨텍스트/프레임 표시 및 Part3 함수 로더의 전체 대응 근거를 기록했다. 작업영역·저장 창 크기 제한은 설정 단원, 빈 viewport의 배치 불변식과 글리프 배율은 표현 단원에 남긴다. 제목 일치만으로 원문 전체를 covered로 바꾸지 않았다. 다음 큰 단원은 보드와 규칙이며, 재집필이 아닌 내용 대조를 이어간다.
+
+## 2026-10-05 — Windows CI의 WSS 검사 수신 경계
+
+- 직전 cbf577d의 CI37243123290에서 Windows 서버 통합만 실패했다. 컴파일/CTest 및 다른 OS·클라이언트·CPU 학습은 성공. 빈 `gh --log-failed` 결과 대신 job111555623471 원본 로그를 받았다. 실패는 `test_native_wss_ticket_and_certificate_validation[tetris_relay]`의 ROOM_INFO 없음이며, 도구 반환은0이었다. 당시 응답 바이트는 로그에 없어 실제 분할 여부를 확정하지 않는다.
+- `tests/wss_probe.cpp`가 첫 nonempty 전송 조각에 바로 성공·종료하는 결함을 확인했다. 게이트웨이는 백엔드 바이트 스트림의 일부를 별도 WS 메시지로 전달할 수 있으므로 게임 프레임 완료까지 누적해야 한다. 공통 parse_frames로 누적·해석하며 ROOM_INFO/SERVER_REJECT, 원래 총5초 기한, EOF/잘못된 프레임과 수신 상한을 구별했다. 인증 실패를 재시도하거나 skip하지 않았다. 제품 네트워크 코드는 변경하지 않았다.
+- TLS/WS 대역이 게임 프레임을 두 메시지로 나누는 회귀를 추가했다. EOF·소켓 기한·worker 정리를 제한하고 실패 메시지에는 임의 응답 본문 대신 종류·바이트 수를 기록한다. 기존 티켓/인증서 두 릴레이 경로+분할 회귀3검사 및 전체 `test_secure_admission.py`26검사 통과(`gpu-wss-regression.log`). out/ci-http-fix의 실제 probe 재빌드 완료. 원격 Windows 성공 여부는 이번 단원 푸시 후 확인한다.
+- 현재 작업은 단원 커밋·푸시/배포 확인으로 마감한다. 기존 미추적 :memory:.ses는 제외한다.

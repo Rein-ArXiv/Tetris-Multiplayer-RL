@@ -159,12 +159,16 @@
     "note": "GL 로더 타깃과 SDL 헤더 없는 테스트 연결. 링크 필요성과 런타임 GL 조회를 구별. 전체 빌드/배포는 후속. 2026-10-04: 기초 단원 재대조: 5/9/10의 타깃 사용 요구·단일 백엔드 선택·대상 OS와 옵션 구별 확인. 이 Part 데모의 GL 직접 호출·필수 링크 및 완성형 역할 구성 전체는 그래픽스/배포 단원에 남음."
   },
   "part2--section-05": {
-    "state": "partial",
+    "state": "covered",
     "lessons": [
-      "lesson-11"
+      "lesson-11",
+      "lesson-12",
+      "lesson-16",
+      "lesson-17",
+      "lesson-18"
     ],
-    "sha256": "01f8d554a2b931dce0c22478ce654c6977b417d54e2e208135e46f4aa2c12ef5",
-    "note": "창·컨텍스트·current·요청/실제 속성·기능 하한·실패 정책을 재구성. 창 없는 GL·소프트웨어 구현·셰이더 성공 과장을 수정. 네이티브 오류 대화상자 상세는 후속."
+    "sha256": "bd3e33edd531825faab398e22f0da842ece7b153a250fc5a163664f0495f6693",
+    "note": "창·컨텍스트·current·요청/실제 속성·기능 하한·실패 정책을 재구성. 창 없는 GL·소프트웨어 구현·셰이더 성공 과장을 수정. 네이티브 오류 대화상자 상세는 후속. 2026-10-05: 창/컨텍스트/current와 공유 가능 자원, 필수 기능 요청/실제 조건 검사, 실패/보고 경로를 대조. 11에 GL 없는 오류 보고·부모 없는 메시지박스·stderr 병행과 메시지 표시 실패를 보완했다. 12/16–18의 함수 로딩·컴파일·그리기 전제까지 연결. 실기 표시 검증과 API 설명 범위를 구별."
   },
   "part2--section-17": {
     "state": "partial",
@@ -175,12 +179,17 @@
     "note": "GL 조회·전체 누락 보고·호출 규약·실패 정리를 재구성하고 원문 예제의 ABI/종료 누락 보정. 실제 clear/표시 데모는 후속."
   },
   "part3--section-06": {
-    "state": "partial",
+    "state": "covered",
     "lessons": [
-      "lesson-12"
+      "lesson-12",
+      "lesson-13",
+      "lesson-14",
+      "lesson-15",
+      "lesson-16",
+      "lesson-17"
     ],
-    "sha256": "e253bea7a786c5ec813738f36eb765ea53223892a4e9c2967e57a2475efce735",
-    "note": "12차시에서 타입·호출 규약·주소 변환·로더·컨텍스트 수명·non-null과 지원을 재구성. 원문 X-매크로의 전체 확장 과정/전체 상수는 후속."
+    "sha256": "3e9ca6a027e624e0fa3f6ad9ab002730633dc9693925a037c686ede3cda121ff",
+    "note": "12차시에서 타입·호출 규약·주소 변환·로더·컨텍스트 수명·non-null과 지원을 재구성. 원문 X-매크로의 전체 확장 과정/전체 상수는 후속. 2026-10-05: 12의 타입/호출규약/주입 resolver/실패 집계/current/기능/주소 수명 및 WGL 폴백을 소스와 대조. 빠진 GL_FUNCS 단일 목록의 extern·정의·조회 생성, #/##·괄호·undef를 설명용 코드로 보완하고 실제 C++ 컴파일·전처리·타입·누락 검사를 수행. 기본 checkpoint 유지. WGL 공식 NULL 실패와 sentinel 방어를 원문에서 구별."
   },
   "part3--section-08": {
     "sha256": "2397824cd7be7a8d99b366f83c7df5205dd54438ad0206fb7f4b5865340dc2e2",
@@ -227,26 +236,31 @@
     "note": "14~17차시에서 VBO·VAO·소스 컴파일·프로그램 링크와 상태/로그·수명/선택을 재구성. 17차시는 stage 인터페이스·생성0 처리·detach/delete 구별을 현재 helper와 대조. 텍스처·uniform·전체 초기화/프레임 흐름은 후속. 18차시에서 프레임 clear/draw/present·draw 반환과 픽셀 읽기/표시 구별을 연결. VSync/동기화 상세와 전체 콘텐츠 초기화는 후속.; 22차시 RGB/alpha 별도 계수·투명 중간 결과·선형값 조건을 재구성. 전체 초기화/종료 대응은 후속.; 23차시 glb_flush와 glFlush·GL완료와 표시완료를 구별. 전체 생명주기 대응은 후속. 57차시에서 부모 종료 전에 잔여 큐를 제출하는 순서와 컨텍스트 수명을 보강. 62차시에서 draw_rect_rounded의 NaN 큐 유입 수정, 유한값 clamp·radius<1 직각 근사, 양수 크기 계약을 대조했다. 초기화/종료 등 절의 다른 계약은 기존 대응 범위를 유지한다."
   },
   "part3--section-10": {
-    "sha256": "169e42c914247c553a3eb6fcc413726ad2f712d3f65103f281f327a8ca8d4e1a",
+    "sha256": "f93a03b633cfbc54526c937784e3a379a4b268f8b636f256516f81807e47c139",
     "state": "partial",
     "lessons": [
       "lesson-18",
       "lesson-19",
       "lesson-24",
       "lesson-57",
-      "lesson-70"
+      "lesson-70",
+      "lesson-67"
     ],
-    "note": "18차시에서 drawable 픽셀·viewport/clear 구분·빈 영역 시 GL 상태 명시를 연결하고 실제 renderer_begin 경로를 보정. 좌표계·레터박스·마우스 역매핑 상세는 후속.; 19차시에서 clip/w/NDC·viewport·논리 UI 단위를 수치와 픽셀로 연결. SDF·레터박스·입력 역매핑 전체는 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님. 57차시에서 유효 Layout의 논리 사각형을 GL 하단 원점 시저로 투영하고 바깥 반올림・산술 범위를 설명.; 70에서 입력과 그림의 같은 layout 공유·GL 아래 여백·픽셀 중심 표본을 결합했다. 기존 GPU 구현 전체의 대응은 부분 상태를 유지한다."
+    "note": "18차시에서 drawable 픽셀·viewport/clear 구분·빈 영역 시 GL 상태 명시를 연결하고 실제 renderer_begin 경로를 보정. 좌표계·레터박스·마우스 역매핑 상세는 후속.; 19차시에서 clip/w/NDC·viewport·논리 UI 단위를 수치와 픽셀로 연결. SDF·레터박스·입력 역매핑 전체는 후속.; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님. 57차시에서 유효 Layout의 논리 사각형을 GL 하단 원점 시저로 투영하고 바깥 반올림・산술 범위를 설명.; 70에서 입력과 그림의 같은 layout 공유·GL 아래 여백·픽셀 중심 표본을 결합했다. 기존 GPU 구현 전체의 대응은 부분 상태를 유지한다. 2026-10-05: clip/NDC/창 좌표·원점·viewport/scissor·입력 역변환을 18/19/24와 대조. 0크기 프레임의 제품 배치 불변식은 56–57 대조에서, 미리 구운 글리프의 render_scale·재래스터화는 64–67 대조에서 확인할 범위로 남음."
   },
   "part3--section-04": {
-    "sha256": "b564167043f25f74badf9c2078daf3ffc0e009117bb39196565d327af3355864",
+    "sha256": "c0e0a8e1bc680fe50963df2b06269239369bdd3152b56e57b9dda9649c954f6a",
     "state": "partial",
     "lessons": [
       "lesson-20",
       "lesson-23",
-      "lesson-56"
+      "lesson-56",
+      "lesson-13",
+      "lesson-18",
+      "lesson-21",
+      "lesson-24"
     ],
-    "note": "; 20차시 샘플·edge·보간·fragment/discard 연결. 물리 하드웨어 전체·SDF·텍스처·블렌딩 전체 대응은 미완료.; 창크기와 제출비용/역압력·표시 동기화의 단정 보정. 전체 래스터 경로 검토는 남음. 56차시에서 호출→배처→제출 도식의 flush 조건을 현재 구현과 대조했다. 기존 래스터화 부분 대응 범위를 유지한다."
+    "note": "; 20차시 샘플·edge·보간·fragment/discard 연결. 물리 하드웨어 전체·SDF·텍스처·블렌딩 전체 대응은 미완료.; 창크기와 제출비용/역압력·표시 동기화의 단정 보정. 전체 래스터 경로 검토는 남음. 56차시에서 호출→배처→제출 도식의 flush 조건을 현재 구현과 대조했다. 기존 래스터화 부분 대응 범위를 유지한다. 2026-10-05: 래스터/프래그먼트·CPU 제출/GL 구현·화면 출력 구별 확인. 컨텍스트 상태/하드웨어 역할 및 소프트웨어 렌더링 단정 교정. glb_rect가 기존 배치를 제출할 수 있어 반환 시 아무 draw도 없다는 주장 삭제. 제품 배처·글리프 세부는 표현 단원에 남음."
   },
   "part3--section-19": {
     "state": "partial",
@@ -268,20 +282,24 @@
     "sha256": "760f58e0476d06e83c492c994f0e46264af69b6856a4d2ac71d1e8fcd1d0e3f4"
   },
   "part2--section-11": {
-    "state": "partial",
+    "state": "covered",
     "lessons": [
-      "lesson-23"
+      "lesson-23",
+      "lesson-11",
+      "lesson-18",
+      "lesson-24"
     ],
-    "note": "; 23차시 버퍼교체·current 세션·표시완료 경계를 재구성. 포인터교환만 한다는 단정 제거. Win32실행 대조는 남음.",
+    "note": "; 23차시 버퍼교체·current 세션·표시완료 경계를 재구성. 포인터교환만 한다는 단정 제거. Win32실행 대조는 남음. 2026-10-05: double-buffer 요청/확인, 플랫폼 소유 swap, 제출/완료/합성기/scanout 구별, SDL void와 Win32 BOOL, 백버퍼 재그리기 및 letterbox clear를 11/18/23/24 전체 본문·실습과 대조. 과거 CPU 복사 경로를 새 실습으로 재제작할 필요는 없으며 현재 책임은 대응됨.",
     "sha256": "9ea9363327871ce9e158c5c39bab2e7cdaa9b7f868a428ca5ec81cf2fdbf2da3"
   },
   "part2--section-10": {
     "state": "partial",
     "lessons": [
       "lesson-24",
-      "lesson-70"
+      "lesson-70",
+      "lesson-19"
     ],
-    "note": "; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 70에서 창/drawable/논리 단위·확정 viewport·역변환 순서·음수floor·홀수 여백 원점·프레임 기준 변경을 재구성하고 독립 계산/픽셀검사에 연결했다. 2026-10-04: SimGrid행·열과platform/renderer논리화면좌표를섞은도입문교정,해상도숫자는계산예시로한정. 범위전체대조완료로올리지않음.",
+    "note": "; 24차시 창/drawable/논리 공간·정수 fit·홀수 여백·scissor·마우스 역변환 연결. 각 절 전체의 플랫폼/렌더링 범위 완료는 아님.; 70에서 창/drawable/논리 단위·확정 viewport·역변환 순서·음수floor·홀수 여백 원점·프레임 기준 변경을 재구성하고 독립 계산/픽셀검사에 연결했다. 2026-10-04: SimGrid행·열과platform/renderer논리화면좌표를섞은도입문교정,해상도숫자는계산예시로한정. 범위전체대조완료로올리지않음. 2026-10-05: 논리→clip→viewport 및 window/drawable 역매핑·정수 경계·작업영역/화면 크기 차이를 대조. 24의 내림/optional 정책과 제품 반올림/int 정책은 의도적인 차이. §8.4 디스플레이 작업영역 조회와 저장된 크기 제한은 설정 단원 대조·보완 대상으로 남긴다.",
     "sha256": "a755b42b01146ea54a98fee9d8839313fa4e4760ee48f4946c6950adc931de47"
   },
   "part11--section-06": {
@@ -683,12 +701,15 @@
     "note": "57~60차시에서 미제출 사용과 해제 순서, RGBA8 저장소/업로드 실패 정리, 64비트 발급번호 핸들·공통 조회·소유/등록/clear를 재구성했다. 61차시는 공개 회전 API의 유한 각도 계약과 갱신된 헤더 발췌를 대조했다. 필터·포맷 등 이미지 경로 전체를 이 절 하나로 완료 처리하지 않고 부분 대응을 유지한다."
   },
   "part3--section-21": {
-    "sha256": "a2a71a71433a319e345f8e5d8e0b2f4bc5fc5e44384cc87e0d18d5d3b1e138b6",
+    "sha256": "cef9765f9b21b2947dad9fc9a3a3dd3c37690163ec67603bc01e0e680cb020b5",
     "state": "partial",
     "lessons": [
-      "lesson-57"
+      "lesson-57",
+      "lesson-14",
+      "lesson-23",
+      "lesson-56"
     ],
-    "note": " 57차시에서 상태 경계별 draw・입력 복사 비용・구워진 오프셋과 공유 상태의 차이를 설명. 실제 화면 성능 측정 전체는 미완료."
+    "note": " 57차시에서 상태 경계별 draw・입력 복사 비용・구워진 오프셋과 공유 상태의 차이를 설명. 실제 화면 성능 측정 전체는 미완료. 2026-10-05: 기초 GPU 대조 중 오프셋 변경 자체가 flush 경계라는 남은 문장을 제품의 CPU 정점 좌표 저장 방식에 맞게 교정. 배칭/글리프 성능 절의 전체 구현 대응은 표현 단원에 남음."
   },
   "part3--section-18": {
     "sha256": "f47c5fd211e70ac803d4fe89835999dec3cce408977e39c5a12f49b2d2b44deb",
@@ -2084,5 +2105,53 @@
       "lesson-1"
     ],
     "note": "콘솔빌드/실행/기대문구/변경실험은직접실행대응. 선택Python환경과결정론골든의후속진입은관련149/규칙단원내용대조가남음."
+  },
+  "part3--section-03": {
+    "sha256": "6b9e1956791474e12c8f28a7b2a2a4002172e7c2d58dc5d8165fadcfff013751",
+    "state": "partial",
+    "lessons": [
+      "lesson-11",
+      "lesson-13",
+      "lesson-18",
+      "lesson-20",
+      "lesson-23"
+    ],
+    "note": " 2026-10-05: GPU 기초 단원 재대조: 공통 API/자원/그리기 책임과 구현 선택. CPU AA·동기화 불가능, 이식 비용 창 생성 한정 등의 잘못된 단정 교정. 배처·텍스트 구현 세부는 표현 단원 대조에 남음."
+  },
+  "part3--section-05": {
+    "sha256": "7bbbec2bac268ea3238c487bd687dcda6ff58b5951b36f548d7bebd101b2af98",
+    "state": "partial",
+    "lessons": [
+      "lesson-11",
+      "lesson-12",
+      "lesson-16",
+      "lesson-17"
+    ],
+    "note": " 2026-10-05: 필요 기능에 따른 Core 요청·셰이더 버전·함수 조회 대조. 출시연도로 모든 GPU 지원을 보장하거나 가변 draw 횟수로 API 선택을 단정한 설명 교정. 실제 배포별 지원 조건은 배포 단원에서 교차 확인."
+  },
+  "part3--section-22": {
+    "sha256": "5d07a6f07e0fe2329c5abc2aeff8efcbee99c74430e2de8f2c5311f89f8d8e3a",
+    "state": "partial",
+    "lessons": [
+      "lesson-20",
+      "lesson-21",
+      "lesson-22",
+      "lesson-23",
+      "lesson-52",
+      "lesson-53"
+    ],
+    "note": " 2026-10-05: GPU 단원 검토 중 OpenGL 같은 구현의 반복성과 구현 간 픽셀 불일치를 구별. screenshot 회귀 불가능·보편 픽셀오차·top-left 보편성·폴더만으로 의존 강제를 교정. 규칙 상태 해시/동일초기상태 계약의 전체 대조는 규칙/재현성 단원에 남음."
+  },
+  "part3--section-23": {
+    "sha256": "75b232efea97643ad3781e30d85dfea39130e01501e6a775e00d45236f76f777",
+    "state": "partial",
+    "lessons": [
+      "lesson-13",
+      "lesson-19",
+      "lesson-22",
+      "lesson-23",
+      "lesson-175"
+    ],
+    "note": " 2026-10-05: 확장 전망의 고정 draw count와 단순 GLSL 컴파일/renderer 파일 교체만으로 Vulkan 이전이 된다는 단정을 교정. 플랫폼 surface와 초기화·자원·좌표 계약 변경을 명시. 이 확장 전망은 새 Vulkan 구현 강의를 요구하지 않으며 아키텍처 단원에서 설계 비교 범위를 대조한다."
   }
 }

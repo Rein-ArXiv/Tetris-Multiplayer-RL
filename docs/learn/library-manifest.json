@@ -20,14 +20,14 @@
     },
     "part2": {
       "path": "docs/blog/part2-platform-window-input.md",
-      "sha256": "a11722e1abe6afc0221af63e521da528062b9fd1c97529ea6b3a5b5c3070faa8",
+      "sha256": "2859e62818f6cda4837038cc0a8da0d649efd5c986b0c5ed53dd0e15ab0793fe",
       "lines": 2075,
       "codeBlocks": 52
     },
     "part3": {
       "path": "docs/blog/part3-rendering-and-ui.md",
-      "sha256": "bfb92b074d55ae0cbd08de76b2e35adf476fd339bdcaffaf9ba78ef7c15fffa5",
-      "lines": 3421,
+      "sha256": "9a41120aff9258ff78b4a85d2c977875f06d1d09eba21a46da91a57118f2be3e",
+      "lines": 3409,
       "codeBlocks": 85
     },
     "part4": {
@@ -707,8 +707,8 @@
       "lines": 190
     },
     "python/tests/test_secure_admission.py": {
-      "sha256": "3a3a5a42c0e0954a2b56ff0db141c3b802750d4060917c7c8a9226af60d0b184",
-      "lines": 408
+      "sha256": "392441f88a50ff8ecbe48616e104b83056c71527652bf0447e696d962d517fb2",
+      "lines": 518
     },
     "python/tests/test_training_scripts_static.py": {
       "sha256": "dd9d3d562fbb302ec3850cc67adc7240f4e77a22da6e2d13bdcab7adbbb0f70a",

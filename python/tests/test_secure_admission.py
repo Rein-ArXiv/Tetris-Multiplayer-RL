@@ -7,11 +7,13 @@ import concurrent.futures
 import hashlib
 import os
 from pathlib import Path
+import select
 import socket
 import ssl
 import struct
 import sys
 import subprocess
+import threading
 import time
 import pytest
 from netbot.framing import MsgType, build_frame, parse_frames
@@ -214,12 +216,120 @@ def test_native_wss_ticket_and_certificate_validation(stack, tmp_path):
     assert untrusted.returncode == 4
     result = subprocess.run([str(probe), f"wss://localhost:{port}/play", str(payload)], env=env, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert any(kind == MsgType.ROOM_INFO for kind, _ in parse_frames(bytearray(result.stdout)))
+    pending = bytearray(result.stdout)
+    response_frames = parse_frames(pending)
+    assert any(kind == MsgType.ROOM_INFO for kind, _ in response_frames), (
+        f"expected ROOM_INFO; received types={[int(kind) for kind, _ in response_frames]}, "
+        f"response_bytes={len(result.stdout)}, incomplete_bytes={len(pending)}, "
+        f"stderr={result.stderr!r}")
     # Consumed credentials and account credentials are rejected by both relays.
     for bad in [value, account]:
         payload.write_bytes(room_create(bad))
         result = subprocess.run([str(probe), f"wss://localhost:{port}/play", str(payload)], env=env, capture_output=True, timeout=10)
         assert result.returncode == 6, (result.returncode, result.stderr)
+
+
+def test_native_wss_probe_waits_for_fragmented_game_frame(certificates, tmp_path):
+    """The gateway may deliver one Tetris frame across multiple WSS messages."""
+    payload = tmp_path / "first-frame.bin"
+    payload.write_bytes(room_create(""))
+    expected = build_frame(MsgType.ROOM_INFO, b"\x05ABCDE\x00\x01")
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(7.0)
+    port = listener.getsockname()[1]
+    server_error = []
+    state = {"closed_after_fragment": False}
+
+    def recv_exact(stream, count):
+        data = bytearray()
+        while len(data) < count:
+            chunk = stream.recv(count - len(data))
+            if not chunk:
+                raise ConnectionError("client closed during WebSocket request")
+            data.extend(chunk)
+        return bytes(data)
+
+    def recv_client_message(stream):
+        first, second = recv_exact(stream, 2)
+        size = second & 0x7f
+        if size == 126:
+            size = struct.unpack("!H", recv_exact(stream, 2))[0]
+        elif size == 127:
+            size = struct.unpack("!Q", recv_exact(stream, 8))[0]
+        assert second & 0x80, "client WebSocket frames must be masked"
+        mask = recv_exact(stream, 4)
+        encoded = recv_exact(stream, size)
+        return first & 0x0f, bytes(value ^ mask[i % 4] for i, value in enumerate(encoded))
+
+    def send_server_message(stream, data):
+        size = len(data)
+        if size < 126:
+            header = bytes((0x82, size))
+        elif size < 65536:
+            header = bytes((0x82, 126)) + struct.pack("!H", size)
+        else:
+            header = bytes((0x82, 127)) + struct.pack("!Q", size)
+        stream.sendall(header + data)
+
+    def serve():
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certificates / "cert.pem", certificates / "key.pem")
+            raw, _ = listener.accept()
+            raw.settimeout(5.0)
+            with context.wrap_socket(raw, server_side=True) as stream:
+                request = bytearray()
+                while not request.endswith(b"\r\n\r\n"):
+                    part = stream.recv(1)
+                    if not part:
+                        raise ConnectionError("client closed during WebSocket upgrade")
+                    request.extend(part)
+                key = next(line.split(b":", 1)[1].strip() for line in request.split(b"\r\n")
+                           if line.lower().startswith(b"sec-websocket-key:"))
+                accept = base64.b64encode(hashlib.sha1(
+                    key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+                stream.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                               b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                               b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+                opcode, _ = recv_client_message(stream)
+                assert opcode == 2
+                split = 3
+                send_server_message(stream, expected[:split])
+
+                # Old probe exits on this first nonempty transport read. The fixed
+                # probe stays connected while the peer's remaining fragment arrives.
+                ready, _, _ = select.select([stream], [], [], 1.0)
+                if ready:
+                    try:
+                        state["closed_after_fragment"] = stream.recv(1) == b""
+                    except (ssl.SSLError, OSError):
+                        state["closed_after_fragment"] = True
+                if not state["closed_after_fragment"]:
+                    send_server_message(stream, expected[split:])
+        except Exception as exc:
+            server_error.append(exc)
+        finally:
+            listener.close()
+
+    worker = threading.Thread(target=serve, daemon=True)
+    worker.start()
+    env = dict(os.environ, TETRIS_CA_FILE=str(certificates / "cert.pem"))
+    try:
+        result = subprocess.run([str(executable("wss_probe")), f"wss://localhost:{port}/play", str(payload)],
+                                env=env, capture_output=True, timeout=10)
+    finally:
+        listener.close()
+        worker.join(timeout=6)
+    assert not worker.is_alive(), "mock WSS peer did not finish"
+    assert not server_error, repr(server_error)
+    assert not state["closed_after_fragment"], "probe closed before receiving the complete game frame"
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected, (
+        f"expected {len(expected)} response bytes, got {len(result.stdout)}; "
+        f"prefix={result.stdout[:3].hex()}")
 
 
 def test_browser_origin_fragmentation_ping_and_raw_token_rejection(stack):

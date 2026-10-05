@@ -18,23 +18,13 @@
 #   머신에서 코어를 먹는다. nproc 없이는 "왜 3배가 아닌가" 를 설명할 수 없다.
 
 #
-# 트리거가 왜 둘인가
-#   workflow_dispatch 가 본래 의도한 트리거다. 다만 dispatch API 는 워크플로를
-#   기본 브랜치에서 찾는다 — 아직 main 에 없는 파일은 브랜치에 있어도 "없는
-#   워크플로" 가 되어 손으로 돌릴 수가 없다. 그래서 이 파일과 벤치 도구가 바뀔
-#   때만 걸리는 좁은 path 필터를 push 에 걸어 둔다. 매 push 마다 도는 것과는
-#   다르다 — 서버 코드나 문서를 고쳐도 이 워크플로는 깨어나지 않는다. 반복
-#   측정은 새 push 가 아니라 같은 커밋의 재실행(rerun)으로 얻는다. main 에
-#   올라간 뒤에는 push 트리거를 지우고 dispatch 만 남기면 된다.
+# 실행 방식
+#   main에 통합된 벤치마크는 workflow_dispatch로 필요할 때 실행한다.
+#   일반 코드·문서 변경으로 성능 측정을 자동 실행하지 않는다.
 
 name: relay shard bench
 
 on:
-  push:
-    branches: ["reactor/event-loop"]
-    paths:
-      - ".github/workflows/relay-shard-bench.yml"
-      - "python/tools/relay_shard_bench.py"
   workflow_dispatch:
     inputs:
       repeats:

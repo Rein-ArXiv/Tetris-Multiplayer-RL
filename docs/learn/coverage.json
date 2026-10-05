@@ -313,16 +313,47 @@
       "title": "들어가며",
       "startLine": 16,
       "endLine": 31,
-      "sha256": "03c2faeb053f9450a440eb2279116a1d786259c5dd0f3c01d3ed27add92c56ee",
+      "sha256": "f4642e8d6490bebb98726711b197f29d9c0579b5327d09841265760f5677f683",
       "candidateUnits": [
         "unit-025",
+        "unit-026",
+        "unit-027",
+        "unit-028",
+        "unit-029",
+        "unit-030",
+        "unit-031",
+        "unit-032",
+        "unit-033",
+        "unit-034",
+        "unit-035",
+        "unit-036",
+        "unit-037",
+        "unit-038",
+        "unit-039",
+        "unit-040",
+        "unit-041",
+        "unit-042",
+        "unit-043",
         "unit-044",
-        "unit-054"
+        "unit-045",
+        "unit-046",
+        "unit-048",
+        "unit-049",
+        "unit-050",
+        "unit-051",
+        "unit-052",
+        "unit-053",
+        "unit-054",
+        "unit-055"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-25",
+        "lesson-31",
+        "lesson-52"
+      ],
+      "state": "partial",
+      "note": " 2026-10-05: 규칙·초기 상태·입력 순서의 전제를 도입과 대조. 학습순서와 모듈 분리를 구별하며 세부 RNG/해시·대상 빌드는 관련 단원에서 이어 대조."
     },
     {
       "id": "part1--section-03",
@@ -331,7 +362,7 @@
       "title": "1. 아키텍처 개요",
       "startLine": 32,
       "endLine": 157,
-      "sha256": "3ff439b0b4d224a195c1a5206a5a87f391ae612ee57ec31dd3505d877466ef53",
+      "sha256": "0b1424d6adc78a176d706a51d3f506ede68e53e6046dbcff348da614fcecbe87",
       "candidateUnits": [
         "unit-025",
         "unit-026",
@@ -368,10 +399,11 @@
       "lessons": [
         "lesson-25",
         "lesson-28",
-        "lesson-48"
+        "lesson-48",
+        "lesson-31"
       ],
       "state": "partial",
-      "note": "; 25차시 규칙 상태/화면 분리·row/column의 순서를 연결. 입력/결정론 전체는 후속. 28차시에서 행열 교환은 일반적인 90도 회전이 아닌 반사임을 보완하고 원문 교정. 전체 입력/결정론은 후속.; 40차시: 실제 주기/cooldown 및 생성자 초기화 설명·현재 발췌 변경 대조.; 48차시에서 비트 규약·OR/AND/NOT·정수 승격·축소 전 유효성 검사·표현과 의미의 변환을 재구성. 구조체 메모리와 전송/파일 표현의 차이 교정."
+      "note": "; 25차시 규칙 상태/화면 분리·row/column의 순서를 연결. 입력/결정론 전체는 후속. 28차시에서 행열 교환은 일반적인 90도 회전이 아닌 반사임을 보완하고 원문 교정. 전체 입력/결정론은 후속.; 40차시: 실제 주기/cooldown 및 생성자 초기화 설명·현재 발췌 변경 대조.; 48차시에서 비트 규약·OR/AND/NOT·정수 승격·축소 전 유효성 검사·표현과 의미의 변환을 재구성. 구조체 메모리와 전송/파일 표현의 차이 교정. 2026-10-05: 보드·형상·독립 규칙 타깃 및 관측/갱신 경계를25–34와 확인. 화면 우선이면 자동 검사가 불가능하다는 단정 교정. RNG·해시 전체는 시간 단원 범위."
     },
     {
       "id": "part1--section-04",
@@ -1134,7 +1166,7 @@
       "title": "오류와 함정",
       "startLine": 2596,
       "endLine": 2710,
-      "sha256": "1229e6e1b7938de364542d30b7a875da8a407e3b08d98e7edc8c7e4a9c11587f",
+      "sha256": "a1cd7cc0f41c554e40765f4f88505f4521fdcf6602ff88eeb4305c1b05ab8b72",
       "candidateUnits": [
         "unit-025",
         "unit-026",
@@ -1170,10 +1202,14 @@
       "routingState": "needs-review",
       "lessons": [
         "lesson-49",
-        "lesson-51"
+        "lesson-51",
+        "lesson-29",
+        "lesson-33",
+        "lesson-34",
+        "lesson-39"
       ],
       "state": "partial",
-      "note": "49차시에서 RNG 공유 함정 중 조각·가비지 스트림 구별과 RngState 값 반환을 대조. 다른 함정들의 전체 강의 대응은 아직 검토하지 않음.; 51차시에서 스트림 공유 함정의 플레이어/복제본 혼동과 즉시 해시 탐지 단정을 교정했다. 전체 함정의 대응 완료를 뜻하지 않는다."
+      "note": "49차시에서 RNG 공유 함정 중 조각·가비지 스트림 구별과 RngState 값 반환을 대조. 다른 함정들의 전체 강의 대응은 아직 검토하지 않음.; 51차시에서 스트림 공유 함정의 플레이어/복제본 혼동과 즉시 해시 탐지 단정을 교정했다. 전체 함정의 대응 완료를 뜻하지 않는다. 2026-10-05: 25–43 본문/체크포인트 대조. 고스트 별도 값과 격자 호환분기의 차이, 렌더 쓰기 경계를 교정. RNG·부동소수·framing 예시는 관련 단원에서 대조."
     },
     {
       "id": "part1--section-21",
@@ -1274,16 +1310,49 @@
       "title": "이 장에서 완성된 것",
       "startLine": 3299,
       "endLine": 3315,
-      "sha256": "f6e46f2853a1033e2eee582e2b5cffcb6ff539b37027eb3c391b351e6e1fc0ab",
+      "sha256": "120b8ed917c1278499334b56cc7113a6b864f4ce976bac7f5a9d7cedc150914e",
       "candidateUnits": [
         "unit-025",
+        "unit-026",
+        "unit-027",
+        "unit-028",
+        "unit-029",
+        "unit-030",
+        "unit-031",
+        "unit-032",
+        "unit-033",
+        "unit-034",
+        "unit-035",
+        "unit-036",
+        "unit-037",
+        "unit-038",
+        "unit-039",
+        "unit-040",
+        "unit-041",
+        "unit-042",
+        "unit-043",
         "unit-044",
-        "unit-054"
+        "unit-045",
+        "unit-046",
+        "unit-048",
+        "unit-049",
+        "unit-050",
+        "unit-051",
+        "unit-052",
+        "unit-053",
+        "unit-054",
+        "unit-055"
       ],
-      "routingState": "draft",
-      "lessons": [],
-      "state": "unassigned",
-      "note": "후보 차시만 존재하며 내용 대응은 아직 검토하지 않음"
+      "routingState": "needs-review",
+      "lessons": [
+        "lesson-25",
+        "lesson-33",
+        "lesson-39",
+        "lesson-42",
+        "lesson-52"
+      ],
+      "state": "partial",
+      "note": " 2026-10-05: 현재 코드와 요약 대조: bag을 제외하는 기존 해시·순서 유지 행 압축·의존 방향과 공개 가변 상태·합쳐지는 이벤트의 소비 계약을 구별. 전체 Part 구현 범위 대응은 관련 단원별 확인을 유지."
     },
     {
       "id": "part1--section-24",

@@ -14,8 +14,8 @@
     },
     "part1": {
       "path": "docs/blog/part1-deterministic-simulation.md",
-      "sha256": "1293ab17a22c2ed0e8802207244ae8ebe04ca7e61263eadb232c06b58471df65",
-      "lines": 3395,
+      "sha256": "0099653ce692e5c333c9b4aabbc46386d0d96851c2e656c64798790e65557c2f",
+      "lines": 3399,
       "codeBlocks": 87
     },
     "part2": {
@@ -32,7 +32,7 @@
     },
     "part4": {
       "path": "docs/blog/part4-game-wrapper-and-loop.md",
-      "sha256": "0dc94c99d872aa6791d5cede4c013aae5ca9f2ebcea47ddffb45c6d99d5174f6",
+      "sha256": "f3c50116133decd93315eaee31bb701c35097583a70d1aae53c06fc037b68a0d",
       "lines": 2565,
       "codeBlocks": 63
     },

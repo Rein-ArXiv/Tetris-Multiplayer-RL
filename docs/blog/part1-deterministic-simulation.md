@@ -1363,76 +1363,77 @@ Game::SubmitInput은 회전·드롭 사운드를, Game::Tick은 행 삭제·가�
 
 > 임의의 두 `SimGame` 인스턴스가 동일한 시드로 시작되어 동일한 `SubmitInput(mask)` / `Tick()` / `AddPendingGarbage(n)` 시퀀스를 받으면, 매 호출 후의 `StateHash()`는 비트 단위로 일치해야 한다.
 
-이 조건은 모든 플랫폼(Windows MSVC, Linux GCC, Colab), 모든 컴파일러 버전, 모든 최적화 레벨에서 성립해야 한다.
+이 조건은 프로젝트가 지원하고 실제로 검증한 빌드 구성에서 성립해야 한다. Windows/MSVC와 Linux/GCC 등 기록된 환경의 결과는 그 환경들에 대한 근거이지, 검증하지 않은 모든 컴파일러 버전·플래그·최적화 조합까지 보장하지는 않는다. 비교할 때는 같은 규칙 버전, 시드, 입력과 틱 경계, 그리고 규칙 연산의 의미를 사용해야 한다.
 
 이 보장을 깨는 경로는 예상외로 많다:
 
-- 부동소수 사용 → 컴파일러별 반올림 차이
-- std 라이브러리의 비결정적 구현 (uniform_int_distribution)
-- 시스템 콜(`std::chrono::now()`, `rand()`)
+- 규칙 경계에 부동소수 연산·임계값 비교를 두면, 연산 순서나 구현 차이가 상태 전이를 바꿀 가능성
+- 표준 라이브러리의 구현·버전이 고정되지 않은 난수 분포 (예: `uniform_int_distribution`)
+- 벽시계 조회(`std::chrono::steady_clock::now()`)나 공유 난수 상태(`rand()`)를 규칙 갱신에 사용
 - 메모리 주소 의존(`reinterpret_cast<uintptr_t>(&x)`)
 - 스레드 순서에 따른 경쟁 조건
 
 아래 11.2~11.7은 이 함정들을 구체적으로 다룬다.
 
-### 11.2 일방향 참조: 외부가 sim을 건드리지 않는다
+### 11.2 의존 방향과 상태를 바꾸는 경계
 
-sim 은 외부 레이어를 모른다. 외부 레이어(렌더/오디오/네트/인풋 수집)는 sim을 **읽기만** 한다.
+sim은 화면·오디오·네트워크 구현을 모른다. 외부 계층은 규칙 API로 상태 전이를 요청하고,
+관측 접근자로 결과를 읽는다. **의존이 한 방향이라는 말과 외부에서 쓰기를 전혀 하지
+않는다는 말은 다르다.** 다음은 현재 공개 API의 역할이다.
 
-허용되는 쓰기 경로는 정확히 네 가지:
+| 경계 | 호출 또는 상태 | 역할 |
+| --- | --- | --- |
+| 초기화 | `SimGame(seed)` | 초기 규칙 상태 구성 |
+| 틱 단위 진행 | `SubmitInput(mask)`, `Tick()`, `MoveBlockDown()` | 정해진 순서로 입력·시간 전이 적용 |
+| 배치 단위 진행 | `ApplyPlacement(col, rot)` | RL용 합법 배치 검증 후 한 번에 고정 |
+| 상대 판의 영향 | `AddPendingGarbage(rows)` | 합의된 전달 경계에서 가비지 요청 누적 |
+| 관측 | `Grid()`, `CurrentBlock()`, `Score()` 등 | 규칙 상태를 읽어 표시·기록·학습에 사용 |
+| 사건 소비 | 사운드 bool과 연출 결과 필드 | 각 소비자가 정해진 시점에 읽고 지움 |
 
-1. 생성자에서 시드 주입: `SimGame(seed)`
-2. 입력 제출: `SubmitInput(mask)`, `Tick()`, `MoveBlockDown()`
-3. 가비지 추가: `AddPendingGarbage(rows)`
-4. 이벤트 플래그 소비 후 리셋: `sim.rotateSoundEvent = false` 등 (mutable 플래그만)
-
-그 외에는 모두 금지. 특히:
-
-- `sim.score = 0` 금지 — 시나리오가 더 복잡해지면 `score` 도 계산된 값이어야 한다.
-- `sim.sim_grid.grid[5][3] = 7` 금지 — 물론 이것은 `sim_grid`가 private 이므로 컴파일러가 막는다.
-- `const_cast<SimBlock&>(sim.CurrentBlock())` 금지 — 뒷문을 뚫으려 하면 리뷰에서 거부.
+현재 `score`, `gameOver`, 레벨 관련 필드는 공개되어 있고 `Game`은 점수·종료 상태를
+참조 멤버로 연결한다. 이는 호환을 위해 남은 접근 경계다. 타입만으로 모든 외부 변경을
+차단한다고 설명해서는 안 된다. 반면 `sim_grid`, RNG, 현재 블록은 private이고 관측
+접근자는 읽기 전용 참조 또는 값 복사로 노출한다.
 
 ```mermaid
 graph TB
-    subgraph Sim["SimGame (단일 진리원)"]
+    subgraph Sim["SimGame — 규칙 상태의 소유자"]
         S1["sim_grid<br/>currentBlock"]
         S2["rng / garbageRng<br/>pendingGarbage"]
     end
-
-    Input["입력을 넣는 쪽<br/>지금은 테스트 스크립트"]
-    Output["상태를 읽는 쪽<br/>지금은 해시 덤프"]
-
-    Input -- "write: SubmitInput / Tick" --> Sim
-    Sim -- "read: Grid() / StateHash()" --> Output
+    Caller["게임 루프 / 테스트 / 학습 어댑터"]
+    View["표현과 기록"]
+    Caller -- "규칙 API로 전이 요청" --> Sim
+    Sim -- "관측 접근자로 결과 제공" --> Caller
+    Sim -- "관측값 / 사건 보고" --> View
 ```
 
-입력을 넣는 쪽은 쓰기만 하고, 상태를 읽는 쪽은 읽기만 한다. 두 방향이 한 모듈에서 섞이는 순간 "누가 이 값을 바꿨는지" 를 추적할 수 없게 되고, 그러면 결정론도 무너진다.
+한 어댑터가 입력을 넣고 결과를 읽는 것은 자연스럽다. 추적해야 하는 것은 **어느 규칙
+상태를 어떤 경계에서 바꿨는가**다. 표시할 때마다 점수를 고치거나 관측 참조를
+`const_cast`로 바꾸면 이 호출 계약을 우회한다. 새 규칙은 전용 API에 모으고, 외부
+사건 소비는 규칙 상태 변경과 분리한다. 사건 필드의 보존·덮어쓰기 시점은 §10.6을 따른다.
 
-이 경계에는 테스트 프로그램뿐 아니라 렌더링 클라이언트, 네트워크 세션, Python 바인딩도 연결된다. 어느 소비자도 `SimGame` 상태를 우회해 건드리지 않으며, 위 네 가지 허용 목록이 모든 연결의 공통 계약이다.
+### 11.3 규칙 타이머는 정수 틱으로
 
-### 11.3 부동소수 금지
+현재 `SimGame`의 규칙 상태와 좌표·카운터·타이머는 정수로 표현한다. 이는 이 프로젝트의 재현성 설계 선택이다. 게임 바깥의 프레임 시간 경계까지 부동소수를 금지한다는 뜻은 아니다. 예를 들어 메인 루프의 시간 누산기와 `SECONDS_PER_TICK`은 초 단위 프레임 시간을 다루며, `SimGame`은 전달된 논리 틱을 기준으로 규칙을 진행한다.
 
-`SimGame` 내부에 `float` 또는 `double`은 **한 개도 없다**. 모든 좌표, 카운터, 타이머는 정수다.
+규칙을 수정할 때는 `src/sim_*.h`와 `src/sim_game.cpp`의 상태 표현·연산·임계값 비교를 함께 검토한다.
 
-검증: `src/sim_*.h`와 `src/sim_game.cpp`에서 `float`/`double`/`.f` 리터럴을 검색하면 결과가 없어야 한다.
+부동소수 연산 자체가 본질적으로 비결정적인 것은 아니다. 다만 규칙 경계에서 부동소수 결과를 비교할 때는 빌드·연산 경로에 따라 결과가 달라질 수 있는 조건을 통제해야 한다. 예를 들면:
 
-이유는 단순하다. IEEE 754 부동소수 연산의 결과는 **명목상** 결정적이지만, 실제로는:
-
-- `-ffast-math` 같은 최적화 플래그가 연산 순서를 재배치
-- x87의 확장 정밀도 중간값과 SSE의 타입별 32/64비트 연산 등, 연산 경로에 따른 정밀도 차이
-- `sin`/`cos`/`pow`는 libm 구현에 따라 ULP 단위로 다른 값을 반환
+- `-ffast-math` 같은 플래그가 허용하는 재결합·연산 변형
+- x87 확장 정밀도 중간값 등 선택된 실행 경로의 정밀도 차이
+- `sin`/`cos`/`pow` 같은 함수의 플랫폼별 라이브러리 구현 차이
 
 작은 오차가 항상 커지는 것은 아니다. 다만 값이 충돌 경계나 타이머 임계값 근처에 있다면
 작은 차이도 비교 결과를 바꾸고, 이후 서로 다른 상태 전이를 선택하게 할 수 있다.
-정수 사용은 이 프로젝트의 재현성 설계 선택이지 모든 부동소수점 연산이 비결정적이라는 뜻은 아니다.
-
-예외는 "결정론과 무관한 레이어"에만 허용된다:
+프레임 시간 측정·누산은 바깥 루프의 책임이고, 규칙은 고정된 틱 경계에서 정수 상태를 갱신한다. 렌더링·오디오처럼 규칙 결과를 바꾸지 않는 표현 계층에서는 부동소수를 사용할 수 있다:
 
 - 렌더러(화면 좌표): 부동소수 자유롭게 사용
 - 오디오 믹싱: 자유
 - 타임스탬프 로깅: 자유
 
-sim 내부는 금지.
+규칙 결과에 영향을 주는 부동소수 상태를 추가한다면, 지원 빌드에서 동일한 틱 경계 결과가 유지되는지 별도로 입증해야 한다.
 
 중력 타이머도 정수다:
 
@@ -1463,14 +1464,17 @@ dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 
 legacy에 포함되는 상태:
 
-- 그리드 (800 bytes)
+- 그리드 각 셀을 행 우선 순서로 인코딩한 값
 - currentBlock의 id/rot/row/col
 - nextBlocks preview 큐 전체의 size + 각 id/rot/row/col
 - piece RNG state
 - garbage RNG state
 - score, gameOver 플래그
 - gravityCounterTicks, dropIntervalTicks
+- softDropCounterTicks, totalLinesCleared, level, lastMoveWasRotate
 - attackLinesSent, pendingGarbage
+
+현재 구현은 누적 제거량 `totalLinesCleared`와 이에 따라 갱신되는 `level`을 모두 명시적으로 해시한다. `lastMoveWasRotate`는 이후 T-spin 판정에 쓰인다. `gravityCounterTicks`, `dropIntervalTicks`, `softDropCounterTicks` 역시 이후 규칙 전이에 영향을 준다.
 
 빠뜨리기 쉬운 것들:
 
@@ -2653,13 +2657,13 @@ std::vector<SimBlock> SimGame::GetAllBlocks() const
 
 **주의할 호환 코드:** `IsCellEmpty()`에는 레거시 고스트 ID를 빈칸으로 취급하는 분기가 남아 있다. 현재 고스트를 그리드에 저장한다는 뜻은 아니다. `IsRowFull()`은 0인 셀을 기준으로 빈칸을 판정하므로, 그 분기만 믿고 표시 데이터를 보드에 넣어서도 안 된다.
 
-### (6) 부동소수 실수: 중력 타이머를 float로
+### (6) 재현 가능한 함정: 규칙 타이머를 부동소수로 누적
 
-**증상:** 로컬에서는 잘 동작하지만 상대 피어와 연결하면 서서히 desync. 정확히 어느 순간에 갈라지는지 일정하지 않다.
+**재현 가능한 실패 유형:** 시간 기반 규칙 타이머를 프레임 `deltaSeconds`로 누적하고, 그 결과를 임계값과 비교하면 특정 입력·시간 시퀀스와 빌드 조건에서 경계 통과 틱이 달라질 수 있다.
 
-**원인:** 중력 타이머 로직을 "시간 기반"으로 작성한 초기 버전에서 `gravityCounter += deltaSeconds;` 형태였다. MSVC와 GCC의 `float` 연산이 특정 시퀀스에서 ULP 단위로 다른 값을 내놓고, 누적되며 `gravityCounter >= dropInterval` 분기가 다른 틱에서 트리거.
+**원인:** 같은 논리 시간을 표현하더라도 부동소수 누적값과 임계값 비교에 규칙 전이의 시점을 맡기면, 지원 빌드 사이의 연산 경로 차이를 통제하기 어려워진다. 부동소수 사용만으로 반드시 불일치가 생기는 것은 아니다.
 
-**해결:** 부동소수를 완전히 제거. `gravityCounterTicks` 는 단순 `int`로 카운트. 0.5초 = 30틱을 직접 상수로 박는다:
+**현재 설계:** `SimGame`의 중력 타이머는 `gravityCounterTicks`로 세고, 낙하 간격은 `dropIntervalTicks`로 표현한다. 초 단위 프레임 시간은 바깥 루프에서 논리 틱으로 변환한다. 따라서 부동소수를 프로그램 전체에서 제거하는 것이 아니라 규칙 타이머의 표현을 틱으로 고정한다:
 
 설명용 축약 — 실제 코드는 §12.6 의 생성자
 
@@ -2670,7 +2674,7 @@ gravityCounterTicks(0),
 dropIntervalTicks(TICKS_PER_SECOND / 2) // default: drop every 0.5s
 ```
 
-**재발 방지:** sim 디렉터리에서 `float`/`double` 문자열을 금지어로 설정하고, CI에서 grep 체크.
+**검토 방법:** 규칙 상태·전이에 부동소수 누산이나 임계값 비교가 새로 들어왔는지 코드 리뷰에서 확인하고, 필요하면 지원 빌드와 동일한 틱 경계를 비교하는 회귀 검증을 추가한다.
 
 ### (7) 외부 상태 주입: 렌더에서 sim 수정
 

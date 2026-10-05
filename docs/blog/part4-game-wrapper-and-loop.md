@@ -11,7 +11,7 @@
   - [Part 2](./part2-platform-window-input.md) 의 `platform/platform.h` 와 백엔드 한 개 (`platform/win32.cpp` 또는 `platform/sdl.cpp`) — `platform_begin_frame`, `platform_key_pressed`, `platform_key_down`, `platform_present`, `platform_end_frame`.
   - [Part 3](./part3-rendering-and-ui.md) 의 `renderer/renderer.cpp`, `renderer/gl_api.cpp`, `renderer/text_gl.cpp`, `renderer/image_gl.cpp`, `renderer/shake.cpp`, `src/gui.cpp`, `src/colors.cpp`.
 - **이번 Part의 파일:** `src/game.h`, `src/game.cpp`, `src/main.cpp`(본체), `core/replay.h`, `core/replay.cpp`, 그리고 `CMakeLists.txt` 의 `tetris` 타깃 확장.
-- **연결점:** `Game` 이 `SimGame` 을 멤버로 소유하고 `draw_rect`/`draw_text` 로 위임한다. `main.cpp` 가 `platform_begin_frame()` 의 dt 를 받아 `SECONDS_PER_TICK` 어큐뮬레이터로 나누고, `Game::SubmitInput` / `Game::Tick` 을 정확히 60 Hz 로 호출한다. 렌더는 `renderer_begin` → 드로우 → `renderer_end` → `platform_end_frame` 순.
+- **연결점:** `Game` 이 `SimGame` 을 멤버로 소유하고 `draw_rect`/`draw_text` 로 위임한다. `main.cpp` 가 `platform_begin_frame()` 의 dt 를 받아 `SECONDS_PER_TICK` 어큐뮬레이터로 나누고, 누적 시간에 따라 `Game::SubmitInput` / `Game::Tick` 을 `SECONDS_PER_TICK` 길이의 고정 논리 틱으로 호출한다(렌더 프레임마다 0회 또는 여러 틱일 수 있다). 렌더는 `renderer_begin` → 드로우 → `renderer_end` → `platform_end_frame` 순.
 - **완료 게이트:**
   1. `cmake -S . -B build -DTETRIS_USE_SDL2=ON && cmake --build build` 가 성공하고 저장소 루트에서 `./build/tetris` 가 뜬다.
   2. 메뉴에서 `Single Play` 를 고르면 보드가 뜨고, 톱아웃하면 `GAME OVER` 팝업과 `[R] Restart` / `[Q] Go to Title` 이 나온다. `R` 로 같은 시드의 새 판이 시작된다.

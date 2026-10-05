@@ -47,6 +47,7 @@
 #include <atomic>
 #include <charconv>
 #include <csignal>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -532,6 +533,15 @@ public:
         : meta_(meta), meta_note_(std::move(meta_note))
     {
 
+    }
+
+    ~RelayLoop() {
+        // An exception can bypass run's normal continuation/connection drain.
+        // Finish worker reads/wakes first, then cancel and reap reactor I/O while
+        // the sockets and connection tokens are still alive. This only releases
+        // resources; it does not claim failed continuations were applied.
+        if (offload_) offload_->shutdown();
+        reactor_.reset();
     }
 
     bool init(uint16_t port) {
@@ -2612,68 +2622,92 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::unique_ptr<meta::client::MetaClient> meta;
-    std::string note = "meta=none (unranked mode)";
-    if (!meta_url.empty()) {
-        // secret 없이 ranked 로 뜨면 meta 가 POST /v1/matches 를 거절하므로 경기
-        // 결과를 하나도 저장하지 못한다. 그 상태로 조용히 도는 대신 기동을 거부한다.
-        if (meta_secret.empty()) {
-            RLOG_ERROR("[relay] refusing to start: --meta set but no relay secret. "
-                       << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
-                       << "POST /v1/matches without it).");
-            net::net_shutdown();
-            return 2;
+    // Declared before every network owner: cleanup runs after their destruction,
+    // including setup failures and loops that exit through an exception.
+    struct NetworkLifetime {
+        ~NetworkLifetime() { net::net_shutdown(); }
+    } network_lifetime;
+
+    try {
+
+        std::unique_ptr<meta::client::MetaClient> meta;
+        std::string note = "meta=none (unranked mode)";
+        if (!meta_url.empty()) {
+            // secret 없이 ranked 로 뜨면 meta 가 POST /v1/matches 를 거절하므로 경기
+            // 결과를 하나도 저장하지 못한다. 그 상태로 조용히 도는 대신 기동을 거부한다.
+            if (meta_secret.empty()) {
+                RLOG_ERROR("[relay] refusing to start: --meta set but no relay secret. "
+                           << "Set --meta-secret or TETRIS_RELAY_SECRET (meta rejects "
+                           << "POST /v1/matches without it).");
+                return 2;
+            }
+            meta = std::make_unique<meta::client::MetaClient>(meta_url, meta_secret);
+            if (!meta->valid()) {
+                RLOG_ERROR("[relay] invalid --meta URL: " << meta_url);
+                return 2;
+            }
+            note = "meta=" + meta_url;
         }
-        meta = std::make_unique<meta::client::MetaClient>(meta_url, meta_secret);
-        if (!meta->valid()) {
-            RLOG_ERROR("[relay] invalid --meta URL: " << meta_url);
-            net::net_shutdown();
-            return 2;
-        }
-        note = "meta=" + meta_url;
-    }
 
-    // 앞단 루프 하나 + 포워딩 샤드 (loops-1)개 — 포워딩의 실효 병렬도가 loops-1
-    // 인 이유가 이것이다. --loops 1 이면 단일 루프 모드로 앞단이 포워딩까지 직접
-    // 한다 — 이 저장소 규모에서는 그쪽이 기본이다.
-    relay::RelayLoop front(meta.get(), note);
-    if (!front.init(port)) {
-        net::net_shutdown();
-        return 1;
-    }
-    RLOG_INFO("[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
-              << " sessions=" << relay::IpAdmission::session_limit());
-
-    if (loops > 1 && !front.can_shard()) {
-        // 소켓을 다른 완료 포트로 옮길 수 없는 백엔드(IOCP)에서는 인계가 성립하지
-        // 않는다. 조용히 반쯤 도는 대신 이유를 밝히고 단일 루프로 물러선다.
-        RLOG_INFO("[relay] 이 플랫폼의 reactor 백엔드는 루프 간 소켓 이동을 "
-                  "지원하지 않아 단일 루프로 실행합니다");
-        loops = 1;
-    }
-
-    std::vector<std::unique_ptr<relay::RelayLoop>> shards;
-    std::vector<relay::RelayLoop*>                 shard_ptrs;
-    for (int i = 1; i < loops; ++i) {
-        auto s = std::make_unique<relay::RelayLoop>(meta.get(), note);
-        if (!s->init_shard((size_t)i)) {
-            net::net_shutdown();
+        // 앞단 루프 하나 + 포워딩 샤드 (loops-1)개 — 포워딩의 실효 병렬도가 loops-1
+        // 인 이유가 이것이다. --loops 1 이면 단일 루프 모드로 앞단이 포워딩까지 직접
+        // 한다 — 이 저장소 규모에서는 그쪽이 기본이다.
+        relay::RelayLoop front(meta.get(), note);
+        if (!front.init(port)) {
             return 1;
         }
-        shard_ptrs.push_back(s.get());
-        shards.push_back(std::move(s));
+        RLOG_INFO("[relay] per-IP limits: handshakes=" << relay::kMaxHandshakesPerIp
+                  << " sessions=" << relay::IpAdmission::session_limit());
+
+        if (loops > 1 && !front.can_shard()) {
+            // 소켓을 다른 완료 포트로 옮길 수 없는 백엔드(IOCP)에서는 인계가 성립하지
+            // 않는다. 조용히 반쯤 도는 대신 이유를 밝히고 단일 루프로 물러선다.
+            RLOG_INFO("[relay] 이 플랫폼의 reactor 백엔드는 루프 간 소켓 이동을 "
+                      "지원하지 않아 단일 루프로 실행합니다");
+            loops = 1;
+        }
+
+        std::vector<std::unique_ptr<relay::RelayLoop>> shards;
+        std::vector<relay::RelayLoop*>                 shard_ptrs;
+        for (int i = 1; i < loops; ++i) {
+            auto s = std::make_unique<relay::RelayLoop>(meta.get(), note);
+            if (!s->init_shard((size_t)i)) {
+                return 1;
+            }
+            shard_ptrs.push_back(s.get());
+            shards.push_back(std::move(s));
+        }
+        front.set_shards(shard_ptrs);
+        if (!shard_ptrs.empty()) {
+            RLOG_INFO("[relay] forwarding shards: " << shard_ptrs.size());
+        }
+
+        std::vector<std::thread> threads;
+        threads.reserve(shard_ptrs.size()); // Allocation failure precedes any run thread.
+        std::atomic<bool> failed{false};
+        try {
+            for (auto* s : shard_ptrs) threads.emplace_back([s, &failed] {
+                try { s->run(); }
+                catch (...) {
+                    failed.store(true);
+                    relay::g_running.store(false);
+                    // Fixed, allocation-free diagnostics; exception text may contain
+                    // request data and another allocation failure must not skip join.
+                    std::fputs("[relay] shard loop failed; stopping all loops\n", stderr);
+                }
+            });
+            front.run(); // 앞단은 이 스레드에서 돈다
+        } catch (...) {
+            failed.store(true);
+            relay::g_running.store(false);
+            std::fputs("[relay] loop startup or front loop failed; stopping all loops\n", stderr);
+        }
+        relay::g_running.store(false);
+        for (auto& th : threads) if (th.joinable()) th.join();
+        return failed.load() ? 1 : 0;
+    } catch (...) {
+        relay::g_running.store(false);
+        std::fputs("[relay] loop setup failed\n", stderr);
+        return 1;
     }
-    front.set_shards(shard_ptrs);
-    if (!shard_ptrs.empty()) {
-        RLOG_INFO("[relay] forwarding shards: " << shard_ptrs.size());
-    }
-
-    std::vector<std::thread> threads;
-    for (auto* s : shard_ptrs) threads.emplace_back([s] { s->run(); });
-
-    front.run();                       // 앞단은 이 스레드에서 돈다
-    for (auto& th : threads) th.join(); // g_running 이 내려가면 샤드도 함께 빠져나온다
-
-    net::net_shutdown();
-    return 0;
 }

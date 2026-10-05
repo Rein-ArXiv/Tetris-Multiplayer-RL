@@ -3096,6 +3096,57 @@ clear하는 것만으로 수동 atomic 회계가 복구되지는 않는다.
 있게 한다. 실제 종료 시간은 실행 중인 외부 작업이 반환하는 시간에도 영향을 받는다.
 샤드 객체와 Reactor는 자신을 깨울 수 있는 모든 생산자·작업 스레드보다 오래 살아 있어야 한다.
 
+### 10.6 일부 스레드만 시작됐을 때의 소유권
+
+`std::thread`를 만드는 요청도 실패할 수 있다. 샤드를 순서대로 시작하다 뒤의 생성이
+예외를 던지면, 앞에서 시작한 스레드는 계속 실행 중이다. 이때 joinable인 스레드 객체를
+담은 vector가 바로 소멸하면 `std::terminate`가 호출된다. 자원을 준비한 만큼 되돌리는
+책임은 여러 스레드를 소유하는 호출자에게 있다.
+
+현재 main은 컨테이너 용량을 먼저 확보하고, 생성과 앞단 루프를 예외 경계 안에서 실행한다.
+샤드 함수의 예외는 그 스레드 안에서 잡는다. 실패가 기록되면 공통 종료 플래그를 내리고,
+시작된 스레드를 모두 join한 뒤 실패 상태로 반환한다. 예외 메시지에 요청 데이터가 섞일
+수 있어 진단은 고정 문구를 사용한다. 종료 플래그는 의사를 전달하며, 각 루프의 유한
+poll 대기가 그 의사를 다시 확인할 기회를 제공한다.
+
+**현재 소스 발췌 — `server/reactor_relay.cpp`**
+
+```cpp
+        std::vector<std::thread> threads;
+        threads.reserve(shard_ptrs.size()); // Allocation failure precedes any run thread.
+        std::atomic<bool> failed{false};
+        try {
+            for (auto* s : shard_ptrs) threads.emplace_back([s, &failed] {
+                try { s->run(); }
+                catch (...) {
+                    failed.store(true);
+                    relay::g_running.store(false);
+                    // Fixed, allocation-free diagnostics; exception text may contain
+                    // request data and another allocation failure must not skip join.
+                    std::fputs("[relay] shard loop failed; stopping all loops\n", stderr);
+                }
+            });
+            front.run(); // 앞단은 이 스레드에서 돈다
+        } catch (...) {
+            failed.store(true);
+            relay::g_running.store(false);
+            std::fputs("[relay] loop startup or front loop failed; stopping all loops\n", stderr);
+        }
+        relay::g_running.store(false);
+        for (auto& th : threads) if (th.joinable()) th.join();
+        return failed.load() ? 1 : 0;
+```
+
+네트워크 초기화의 짝도 이 순서에 포함된다. main의 `NetworkLifetime`은 다른 네트워크
+소유자보다 먼저 선언되어 가장 나중에 소멸한다. `RelayLoop`는 정상 drain을 건너뛴 예외
+경로에서도 오프로드 워커를 join하고 Reactor를 먼저 정리한다. IOCP의 취소·완료 회수
+동안 소켓과 연결 토큰은 살아 있어야 하므로, 그 뒤에 연결 멤버를 파괴하고 마지막에
+`net_shutdown`을 실행한다.
+
+정상 종료는 수락한 결과 저장과 continuation 적용을 마친다. 예외 종료의 자원 회수는
+그 후속 적용까지 성공했다는 뜻은 아니다. 운영자는 실패 종료를 구별하고, 결과 저장의
+확정 여부는 DB 영수증과 해당 작업의 재시도 계약으로 판단한다.
+
 샤딩의 이익은 측정으로 확인한다. 앞단 CPU, 샤드별 경기 수/처리 시간, 인계 대기량,
 전체 큐 예산, p95/p99 지연을 함께 비교한다. 기본값은 단일 루프이며, 코어가 많다는
 사실만으로 인계 비용과 부하 편차를 감수할 이유가 생기는 것은 아니다.

@@ -10960,8 +10960,8 @@
       "path": "docs/blog/part14-event-loop-scaling.md",
       "title": "10. 여러 루프로 나누기 — 무엇을 나눌 수 있는가",
       "startLine": 2813,
-      "endLine": 3102,
-      "sha256": "d546c0b1d039599c7df80811e89c37c0a500069869349a12a0b6c197ab2e9cf2",
+      "endLine": 3153,
+      "sha256": "0bcf78724f06b3cf870b7dcb91f599ac2f8ecfffdc0a396a867d7a9b2097f596",
       "candidateUnits": [
         "unit-107",
         "unit-124",
@@ -10980,15 +10980,15 @@
         "lesson-133"
       ],
       "state": "covered",
-      "note": "133에서10.1~10.5전체재구성/대조:공유인덱스와경기분할·두연결/채널소유·관심/타이머·포인터이동과메모리공개·제한우편함/깨우기·등록실패/해제실패·대상역할·만기정책·라운드로빈한계·프로세스격리대안·측정·종료수락차단/회계.현재RelayLoop10경로와라이브샤딩4경기,누적실습2스레드로검사.공유상태없음/인덱스분할불가/장르별서버단정/ET유실설명교정.성능개선이나모든플랫폼운영검증을뜻하지않음."
+      "note": "133에서10.1~10.5전체재구성/대조:공유인덱스와경기분할·두연결/채널소유·관심/타이머·포인터이동과메모리공개·제한우편함/깨우기·등록실패/해제실패·대상역할·만기정책·라운드로빈한계·프로세스격리대안·측정·종료수락차단/회계.현재RelayLoop10경로와라이브샤딩4경기,누적실습2스레드로검사.공유상태없음/인덱스분할불가/장르별서버단정/ET유실설명교정.성능개선이나모든플랫폼운영검증을뜻하지않음. 2026-10-05: 단원 최종대조에서 샤드 부분시작 실패를 실제 pthread 생성 오류로 재현. 이미 시작한 스레드 join과 front/worker 예외, 오프로드·reactor·소켓·네트워크수명을 제품/Part/133 메모에 보완. Linux 실제 실패주입과 정상 다중루프 종료 확인; Windows 실행은 원격CI로 구별."
     },
     {
       "id": "part14--section-12",
       "part": 14,
       "path": "docs/blog/part14-event-loop-scaling.md",
       "title": "11. 플랫폼이 그은 선",
-      "startLine": 3103,
-      "endLine": 3236,
+      "startLine": 3154,
+      "endLine": 3287,
       "sha256": "114b1500421f2352c4fa1f9c3271b777bd8d84556be2724a298123dd2eb043d2",
       "candidateUnits": [
         "unit-107",
@@ -11016,8 +11016,8 @@
       "part": 14,
       "path": "docs/blog/part14-event-loop-scaling.md",
       "title": "12. 오류와 함정",
-      "startLine": 3237,
-      "endLine": 3672,
+      "startLine": 3288,
+      "endLine": 3723,
       "sha256": "5e34460c1441191286f7114ebc00612855a4a16a14aba94a47ac49364152c519",
       "candidateUnits": [
         "unit-107",
@@ -11047,8 +11047,8 @@
       "part": 14,
       "path": "docs/blog/part14-event-loop-scaling.md",
       "title": "13. 확인한 계약",
-      "startLine": 3673,
-      "endLine": 3693,
+      "startLine": 3724,
+      "endLine": 3744,
       "sha256": "26a8a68b315a27f926472ef3dbd095ac1b968185e56a9cf06aa2cfd9be6c7603",
       "candidateUnits": [
         "unit-107",
@@ -11075,8 +11075,8 @@
       "part": 14,
       "path": "docs/blog/part14-event-loop-scaling.md",
       "title": "14. 검증",
-      "startLine": 3694,
-      "endLine": 3827,
+      "startLine": 3745,
+      "endLine": 3878,
       "sha256": "47e883d3bc36c9e4179b48aa2b41f0886cad87b33585f475af87e7ea4bb8c7fc",
       "candidateUnits": [
         "unit-127",

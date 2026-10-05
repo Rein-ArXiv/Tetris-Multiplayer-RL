@@ -1,0 +1,200 @@
+name: Release build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x64 bundle
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Confirm checked-out commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install release build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-dev libssl-dev libsdl2-dev libgl1-mesa-dev patchelf
+      # The release scripts own their build layout and default localhost endpoints.
+      - name: Build client bundle
+        shell: bash
+        run: ./scripts/release_linux.sh
+      - name: Check bundled runtime dependencies
+        shell: bash
+        run: |
+          test -s dist/tetris-linux-x64/Font/NanumGothic.ttf
+          test -s dist/tetris-linux-x64/Sounds/music.mp3
+          ldd dist/tetris-linux-x64/tetris | tee dist/linux-dependencies.txt
+          ! grep -q 'not found' dist/linux-dependencies.txt
+      - name: Stage client artifact and build information
+        shell: bash
+        run: |
+          mkdir -p release-output/linux-client
+          cp dist/tetris-linux-x64.tar.gz dist/linux-dependencies.txt release-output/linux-client/
+          printf 'version=sha-%s\nsource_sha=%s\nplatform=linux-x64\n' "$GITHUB_SHA" "$GITHUB_SHA" \
+            > release-output/linux-client/BUILD-INFO.txt
+          cp docs/client-release.md release-output/linux-client/CLIENT-RELEASE.md
+      - name: Upload Linux client bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tetris-linux-x64-${{ github.sha }}
+          path: release-output/linux-client/
+          if-no-files-found: error
+          compression-level: 0
+
+  windows:
+    name: Windows x64 bundle
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Confirm checked-out commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install TLS dependencies
+        shell: bash
+        run: |
+          vcpkg install boost-beast:x64-windows openssl:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
+      # release_win.ps1 uses the Visual Studio multi-config output layout.
+      - name: Build client bundle
+        shell: pwsh
+        run: ./scripts/release_win.ps1 -BuildJobs 1
+      - name: Check required bundle files
+        shell: pwsh
+        run: |
+          foreach ($file in @("tetris.exe", "Font/NanumGothic.ttf", "Sounds/music.mp3")) {
+            if (-not (Test-Path "dist/tetris-win-x64/$file")) { throw "Missing bundle file: $file" }
+          }
+          foreach ($pattern in @("libssl*.dll", "libcrypto*.dll")) {
+            if (-not (Get-ChildItem dist/tetris-win-x64 -Filter $pattern)) { throw "Missing TLS runtime: $pattern" }
+          }
+      - name: Stage bundle and build information
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-output/windows | Out-Null
+          Copy-Item dist/tetris-win-x64.zip release-output/windows/
+          @(
+            "version=sha-$env:GITHUB_SHA"
+            "source_sha=$env:GITHUB_SHA"
+            "platform=windows-x64"
+          ) | Set-Content release-output/windows/BUILD-INFO.txt
+          Copy-Item docs/client-release.md release-output/windows/CLIENT-RELEASE.md
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tetris-windows-x64-${{ github.sha }}
+          path: release-output/windows/
+          if-no-files-found: error
+          compression-level: 0
+
+  macos:
+    name: macOS ${{ matrix.label }} bundle
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub-hosted runner labels confirmed by the maintainer on 2026-10-05.
+          - runner: macos-14
+            arch: arm64
+            label: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+            label: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Confirm checked-out commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install release build dependencies
+        shell: bash
+        run: |
+          brew install boost openssl@3 sdl2
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Build application bundle
+        shell: bash
+        run: ARCHS="${{ matrix.arch }}" ./scripts/release_macos.sh
+      - name: Stage bundle and build information
+        shell: bash
+        run: |
+          mkdir -p release-output/macos-${{ matrix.label }}
+          cp dist/tetris-macos.tar.gz release-output/macos-${{ matrix.label }}/tetris-macos-${{ matrix.label }}.tar.gz
+          printf 'version=sha-%s\nsource_sha=%s\nplatform=macos-%s\n' "$GITHUB_SHA" "$GITHUB_SHA" "${{ matrix.label }}" \
+            > release-output/macos-${{ matrix.label }}/BUILD-INFO.txt
+          cp docs/client-release.md release-output/macos-${{ matrix.label }}/CLIENT-RELEASE.md
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tetris-macos-${{ matrix.label }}-${{ github.sha }}
+          path: release-output/macos-${{ matrix.label }}/
+          if-no-files-found: error
+          compression-level: 0
+
+  learning-site:
+    name: Learning site ZIP
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Confirm checked-out commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install static-site renderer
+        shell: bash
+        run: python -m pip install markdown-it-py==3.0.0
+      - name: Build static learning-site ZIP
+        shell: bash
+        run: |
+          python scripts/build_learning_library.py
+          python scripts/build_learning_coverage.py
+          python scripts/build_learning_lessons.py
+          python scripts/build_learning_site.py > site-result.txt
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('site-result.txt').read_text().splitlines()[-1])
+          Path('site-archive-path.txt').write_text(result['zip'] + '\n')
+          PY
+      - name: Stage site ZIP and build information
+        shell: bash
+        run: |
+          mkdir -p release-output/learning-site
+          cp "$(cat site-archive-path.txt)" release-output/learning-site/tetris-learning-site.zip
+          printf 'version=sha-%s\nsource_sha=%s\nplatform=static-learning-site\n' "$GITHUB_SHA" "$GITHUB_SHA" \
+            > release-output/learning-site/BUILD-INFO.txt
+          cp docs/client-release.md release-output/learning-site/CLIENT-RELEASE.md
+      - name: Upload learning-site ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: tetris-learning-site-${{ github.sha }}
+          path: release-output/learning-site/
+          if-no-files-found: error
+          compression-level: 0

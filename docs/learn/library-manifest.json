@@ -132,6 +132,12 @@
       "lines": 223,
       "codeBlocks": 6
     },
+    "client-release": {
+      "path": "docs/client-release.md",
+      "sha256": "91a92eec477f905c7e295ec567709aa17e21b6bcba044f15fdcfb3e31a4a6f8f",
+      "lines": 46,
+      "codeBlocks": 0
+    },
     "code-review": {
       "path": "docs/code-review.md",
       "sha256": "d1d2836f2e5f687b8b89975efc17a5678967b1b1dcc68aeb7b48418a1b715a7f",
@@ -907,16 +913,16 @@
       "lines": 40
     },
     "scripts/release_macos.sh": {
-      "sha256": "534b54ae5f86ee53561d44db05c22a52c3fae48f6a47532c24d77e12e492b04c",
-      "lines": 137
+      "sha256": "a3e0701dc0fca76a1500ea814370730bbccf0392eac72648b833dae29ee1c4d5",
+      "lines": 196
     },
     "scripts/release_server_linux.sh": {
       "sha256": "85eb7240a80787acc3a38cded8f26ff51127f063737d5044420bfb7e73b74036",
       "lines": 104
     },
     "scripts/release_win.ps1": {
-      "sha256": "ed6a931ee8cedf72cb83880b2b77ab78471b21d0040925a4e599b830c04f4910",
-      "lines": 138
+      "sha256": "41772650e4bec93fe5bfa5669ed1a72603fbf56d156988639db6f077cd3822b5",
+      "lines": 140
     },
     "server/byte_budget.h": {
       "sha256": "a2f6c49c9b6c6fdc322e643ca48bf53c2969eafec0c993e2a800721afebf6ac1",

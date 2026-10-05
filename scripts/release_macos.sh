@@ -12,6 +12,11 @@
 # 산출물: dist/tetris-macos.tar.gz (내부에 Tetris.app)
 set -euo pipefail
 
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo >&2 "[release_macos] Run this script on macOS."
+    exit 1
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build-release"
 DIST="$ROOT/dist"
@@ -68,8 +73,8 @@ sed "s/@PROJECT_VERSION@/$VERSION/g" \
 cp "$BUILD/tetris"          "$APP/Contents/MacOS/"
 
 # 에셋
-cp -R "$ROOT/Font/"   "$APP/Contents/Resources/Font/"
-cp -R "$ROOT/Sounds/" "$APP/Contents/Resources/Sounds/"
+cp -R "$ROOT/Font/."   "$APP/Contents/Resources/Font/"
+cp -R "$ROOT/Sounds/." "$APP/Contents/Resources/Sounds/"
 if [ -d "$ROOT/assets" ]; then
     cp -R "$ROOT/assets" "$APP/Contents/Resources/assets"
 fi
@@ -84,6 +89,8 @@ SDL2_DYLIB="$(otool -L "$APP/Contents/MacOS/tetris" \
 if [ -n "$SDL2_DYLIB" ] && [ -f "$SDL2_DYLIB" ]; then
     cp "$SDL2_DYLIB" "$APP/Contents/Frameworks/"
     SDL2_NAME="$(basename "$SDL2_DYLIB")"
+    chmod u+w "$APP/Contents/Frameworks/$SDL2_NAME"
+    install_name_tool -id "@rpath/$SDL2_NAME" "$APP/Contents/Frameworks/$SDL2_NAME"
     install_name_tool -change "$SDL2_DYLIB" \
         "@executable_path/../Frameworks/$SDL2_NAME" \
         "$APP/Contents/MacOS/tetris"
@@ -93,12 +100,20 @@ fi
 if [ "$BOT" = "1" ]; then
     ORT_DYLIB="$ROOT/third_party/onnxruntime/lib/osx-universal2/libonnxruntime.dylib"
     if [ -f "$ORT_DYLIB" ]; then
-        cp "$ORT_DYLIB" "$APP/Contents/Frameworks/"
-        install_name_tool -change "@rpath/libonnxruntime.dylib" \
-            "@executable_path/../Frameworks/libonnxruntime.dylib" \
-            "$APP/Contents/MacOS/tetris" 2>/dev/null || true
+        ORT_REFERENCE="$(otool -L "$APP/Contents/MacOS/tetris" | awk '$1 ~ /\/libonnxruntime[^/]*\.dylib$/ {print $1}')"
+        if [ -z "$ORT_REFERENCE" ]; then
+            echo >&2 "[release_macos] ONNX Runtime link reference missing."
+            exit 1
+        fi
+        ORT_NAME="$(basename "$ORT_REFERENCE")"
+        cp -L "$ORT_DYLIB" "$APP/Contents/Frameworks/$ORT_NAME"
+        chmod u+w "$APP/Contents/Frameworks/$ORT_NAME"
+        install_name_tool -id "@rpath/$ORT_NAME" "$APP/Contents/Frameworks/$ORT_NAME"
+        install_name_tool -change "$ORT_REFERENCE" \
+            "@executable_path/../Frameworks/$ORT_NAME" "$APP/Contents/MacOS/tetris"
     else
-        echo "[release_macos] WARNING: $ORT_DYLIB not found — bundling without ORT."
+        echo >&2 "[release_macos] Required ONNX Runtime dylib missing."
+        exit 1
     fi
 fi
 
@@ -128,10 +143,54 @@ done
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
     "$APP/Contents/MacOS/tetris" 2>/dev/null || true
 
+# Reject dependencies that would work only on the build host. Inspect every
+# bundled dylib as well as the executable so transitive dependencies are checked.
+shopt -s nullglob
+APP_REAL="$(cd "$APP" && pwd -P)"
+BINARIES=("$APP/Contents/Frameworks/"*.dylib "$APP/Contents/MacOS/tetris")
+for binary in "${BINARIES[@]}"; do
+    # CMake may also retain absolute build-host library directories as rpaths.
+    rpaths="$(otool -l "$binary" | awk '/cmd LC_RPATH/ {rpath=1; next} rpath && $1 == "path" {print $2; rpath=0}')"
+    while IFS= read -r rpath; do
+        case "$rpath" in
+            /System/Library/*|/usr/lib/*) ;;
+            /*) install_name_tool -delete_rpath "$rpath" "$binary" ;;
+        esac
+    done <<< "$rpaths"
+    dependencies="$(otool -L "$binary" | tail -n +2 | awk '{print $1}')"
+    while IFS= read -r reference; do
+        case "$reference" in
+            /System/Library/*|/usr/lib/*) continue ;;
+            @rpath/*) resolved="$APP/Contents/Frameworks/${reference#@rpath/}" ;;
+            @executable_path/*) resolved="$APP/Contents/MacOS/${reference#@executable_path/}" ;;
+            @loader_path/*) resolved="$(dirname "$binary")/${reference#@loader_path/}" ;;
+            *) echo >&2 "[release_macos] Non-bundled dependency: $reference"; exit 1 ;;
+        esac
+        if [ ! -f "$resolved" ]; then
+            echo >&2 "[release_macos] Missing bundled dependency: $reference"
+            exit 1
+        fi
+        resolved_dir="$(cd "$(dirname "$resolved")" && pwd -P)"
+        case "$resolved_dir/" in
+            "$APP_REAL/"*) ;;
+            *) echo >&2 "[release_macos] Dependency escapes bundle: $reference"; exit 1 ;;
+        esac
+    done <<< "$dependencies"
+done
+
+# Mach-O edits invalidate existing signatures. Sign from the inside out; this
+# is an ad-hoc development bundle, without an Apple distribution identity.
+for binary in "${BINARIES[@]}"; do
+    codesign --force --sign - "$binary"
+    codesign --verify --strict "$binary"
+done
+codesign --force --sign - "$APP"
+codesign --verify --deep --strict "$APP"
+
 # ── tar.gz 생성 ──────────────────────────────────────────────────────────────
 mkdir -p "$DIST"
 TAR="$DIST/tetris-macos.tar.gz"
 tar -czf "$TAR" -C "$DIST" "Tetris.app"
 echo "[release_macos] Done: $TAR"
 echo "  .app layout:"
-find "$APP" -maxdepth 4 | head -30
+find "$APP" -maxdepth 4 | sed -n '1,30p'

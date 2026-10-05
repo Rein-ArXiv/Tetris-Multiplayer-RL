@@ -23,7 +23,9 @@ param(
     [string]$MetaUrl = "",
     [switch]$DebugUi,
     [switch]$NetTrace,
-    [string]$TlsRuntimeDir = ""
+    [string]$TlsRuntimeDir = "",
+    [ValidateRange(1, 64)]
+    [int]$BuildJobs = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,7 +78,7 @@ cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { Write-Error "CMake configure failed."; exit 1 }
 
 Write-Host "[release_win] CMake build (Release) ..."
-cmake --build $BuildDir --config Release -j --target tetris
+cmake --build $BuildDir --config Release --parallel $BuildJobs --target tetris
 if ($LASTEXITCODE -ne 0) { Write-Error "CMake build failed."; exit 1 }
 
 # ── 산출물 수집 ──────────────────────────────────────────────────────────────

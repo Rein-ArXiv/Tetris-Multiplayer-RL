@@ -7231,3 +7231,18 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - 원안의 void resize를 적용 성공으로 읽힐 표현, 정렬 가정과 음수 인덱스 위험을 기각했다. DeepSeek flash에 순수 선택 함수 명세만 보내고, 반환 코드를 실제 컴파일·경계 사례로 확인했다(settings-choice-material/events/header/check). 역순 종료 때 unsigned 래핑까지 피하도록 remaining 루프로 교정했다. 성공 결과는 환경 후보 계산일 뿐 실제 창 크기 요청 성공이나 외곽 fit 보장이 아니다.
 - Part2§8.4의 조회0이면 선택없음이라는 인과를 실제 max_window_scale와 맞췄다. Win32가 현재 창 monitor를 선택한다는 오해와 작업영역 fallback/창 장식 보장을 구별하고 platform.h 설명도 동기화했다. 제품 동작 변경 없음.
 - 선택 함수 C++17 warnings-as-errors·유효/잘못된/빈 목록·미측정·맞는 후보 없음·순서가 다른 목록 통과. 처음 LSan은 격리 ptrace 제약으로 시작 실패했고 같은 바이너리를 격리 밖에서 ASan/UBSan/LSan으로 정상 검증했다. 수동 화면 검사 없음. 집중57/73 DOM,879객관식,Part 구조/발췌/링크,Markdown27,정적허용목록/상대자산/해시/재현ZIP 통과(ui-nav57/73.log,ui-site.log).
+
+
+## 2026-10-05 — 소리 단원 최종 대조
+
+- sol이74–82·Part5·SDL/XAudio2·공통 디코더·Game을 대조했다.74의 오래된 후단 검사만 있다는 설명을 교정했다. 압축 입력 할당 전 file_bytes 검사와 PCM append 전 pcm_bytes 검사, 장치API길이 검사를 분리하고 전체 메모리 상한 보장으로 확대하지 않았다. 가변 기본 예산의 숫자를 반복 고정하지 않는다.
+- 76에 sharedMusicUsers/musicUser와 장치 init/shutdown참조가 서로 다른 수명이라는 설명을 보완했다. 유효 음악 핸들을 얻은 Game만 참여하고 마지막 음악 사용자가 stop/unload한다. 참여 영수증은 재생 성공이나 한번만 재생 보장이 아니다. 실제 생성자는 각각 재생을 요청한다. 책임자가 현재 source와 발췌를 대조했다.
+- 기존 섹션/문항 ID와 체크포인트 불변.74/76 집중DOM,879객관식,Markdown27,Part발췌/링크,정적허용목록·상대자산·해시·재현ZIP 통과(audio-nav74/76.log,audio-site.log). 제품동작이 바뀌지 않아 오디오장치검사/화면검사를 반복하지 않았다.
+- module05 공개34c48c2의 Pages37283712084 성공 및 실제15자산이 release291b8fd2c483f57c와 일치한다(coverage-module05-deployment.json).
+
+## 2026-10-05 — 변경 없는 서버·계정 단원의 대조 기록
+
+- 네트워크 입력(83–98): luna가 Part6/7과프레이밍·Session·main을 대조. 불완전꼬리·입력배치/틱상한·safeTick과실제입력존재·같은틱해시순서·남은바이트인계 확인. 회차ID/이미전송된프레임취소 제한은이미설명. 추가수정없음.
+- 서버에서 만나기(99–108): luna가 Part7/10과 WorkerGroup·서버종료·Matchmaker·RoomRegistry·로비·forwarder·결과저장을 대조. 소유권·슬롯/세대·송신게이트·잔여버퍼·유한작업경계·잠금과HTTP/DB멱등성이설명과맞음. 수신후상한검사의한계는이미기록. 추가수정없음.
+- 계정과보상(109–123): terra가 Part17/18과meta계층·계정UI를 대조. 토큰/공개ID·트랜잭션·최초영수증·응답유실과같은요청재개·서버소유가격/보상권한·UI문맥을확인. 학습스냅샷과현재복구/티켓확장은명시적차이. 추가수정없음.
+- 모두 읽기전용 대조이며 DB·비밀설정·네트워크·테스트실행없음. 학습순서/설계를바꾸기위한재작성은하지않았다.

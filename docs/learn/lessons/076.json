@@ -240,8 +240,8 @@
       "notes": [
         {
           "kind": "concept",
-          "title": "공유 음원과 재생 위치",
-          "body": "Game 재시작에서 BGM PCM과 장치를 재사용해도 audio_play_music을 다시 요청하면 처음부터 재생할 수 있습니다. 자원 재사용은 데이터 준비 비용을 줄이고, 재생 위치 정책은 음악의 진행을 결정합니다. 둘을 별도 계약으로 읽으세요."
+          "title": "공유 음악의 사용자 수와 장치 참조 수",
+          "body": "현재 Game은 장치와 음악 PCM의 수명을 서로 다른 수로 관리합니다. 오디오 모듈의 s_refCount는 audio_init과 audio_shutdown 호출의 짝을 셉니다. Game은 audioInitCalled로 그 호출을 했다는 사실을 기억하므로 초기화가 실패했어도 자신의 shutdown을 호출합니다. 반면 sharedMusicUsers는 유효한 공유 음악 핸들을 사용하는 Game 수입니다. 음악 핸들이 없으면 먼저 로드를 시도하고, 성공해서 sharedMusic이 0이 아닌 경우에만 수를 늘리고 musicUser를 true로 둡니다.\n\n아래는 현재 생성자와 소멸자의 음악 관련 분기입니다. musicUser는 재생을 들었다는 증거가 아니라, 이 Game이 공유 음악 사용에 참여해 사용자 수를 한 번 늘렸다는 영수증입니다.\n\n```cpp\n// Game 생성자: audio_init()이 성공한 분기 안\nif (sharedMusic == 0) {\n    sharedMusic = audio_load_sound(\"Sounds/music.mp3\");\n}\nif (sharedMusic != 0) {\n    ++sharedMusicUsers;\n    musicUser = true;\n    audio_play_music(sharedMusic);\n}\n\n// Game 소멸자: 이 Game이 얻은 음악 사용 몫만 반환\nif (musicUser) {\n    if (sharedMusicUsers > 0) --sharedMusicUsers;\n    if (sharedMusicUsers == 0 && sharedMusic != 0) {\n        audio_stop_music();\n        audio_unload_sound(sharedMusic);\n        sharedMusic = 0;\n    }\n    musicUser = false;\n}\n```\n\n두 Game이 같은 음악을 사용하면 사용자 수는 2입니다. 한 Game이 사라져도 남은 사용자 때문에 PCM을 해제하지 않고, 마지막 음악 사용자가 사라질 때만 정지·언로드하고 공유 핸들을 0으로 되돌립니다. 음악 로드에 실패한 Game은 장치 초기화 호출의 몫은 가질 수 있어도 musicUser가 false이므로 음악 사용자 수를 늘리거나 줄이지 않습니다. 공유 핸들이 계속 0이면 다른 Game의 생성자가 로드를 다시 시도할 수 있습니다.\n\n이 카운트는 음악 PCM을 유지하는 계약이며 재생 명령을 한 번으로 합치는 장치가 아닙니다. 유효한 공유 핸들을 얻은 각 생성자는 audio_play_music을 호출하므로, 두 Game이 PCM을 공유해도 재생 요청은 각각 일어납니다. Game 재시작에서 음악 PCM과 장치를 재사용하는 경우에도 다시 요청한 음악은 처음부터 재생할 수 있습니다. 자원 재사용과 재생 위치 정책을 따로 읽어야 합니다. 학습 Player는 공유 BGM을 구현하지 않으므로 이 메모는 현재 Game의 수명 관리와 비교하는 설명입니다."
         }
       ]
     },
@@ -446,7 +446,7 @@
     "expected": "음원·보이스·장치의 서로 다른 수명과 상태를 구별하고, 빌린 주소가 유효한 구간과 안전한 해제 조건을 코드에서 추적한다."
   },
   "review": {
-    "date": "2026-09-29",
+    "date": "2026-10-05",
     "method": "DeepSeek 선택 자료 후보 직접 검토, SDL2 및 XAudio2 공식 수명 계약 대조",
     "draftJob": "out/learning-jobs/076-playback-events.jsonl",
     "corrections": [
@@ -457,7 +457,8 @@
       "동일 true 적용에 따른 음악 되감기 교정",
       "Windows 언로드의 시간 제한 폴링을 DestroyVoice 완료 경계로 변경",
       "Part의 gapless 단정·unique_ptr 내부 순서·컨테이너 교체만으로 동기화 해결 설명 교정",
-      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03)."
+      "SDL console 진입점·명시적 준비와 Config 우선 탐색, GL 진단의 forward-compatible 요청을 누적 코드와 맞춤(2026-10-03).",
+      "최종 단원 대조에서 MP3 입력/출력 예산과 공유 음악/장치 수명의 설명을 현재 구현에 맞춰 보완"
     ]
   },
   "validation": [

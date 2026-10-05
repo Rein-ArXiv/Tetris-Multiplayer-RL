@@ -1,11 +1,10 @@
 """Live PvE proof and exactly-once BP tests. No training or model dependency."""
-from pathlib import Path
-import os
 import subprocess
 import sqlite3
 import time
 import pytest
-from .test_meta_db_smoke import _find_meta_bin, _free_port, _wait_listen, _post, meta_server
+from .meta_process import local_meta_server
+from .test_meta_db_smoke import _find_meta_bin, _post, meta_server
 
 
 @pytest.fixture
@@ -17,21 +16,19 @@ def server(tmp_path):
     (tmp_path / "assets").mkdir()
     # A deliberately fast opponent tops out quickly; the normal roster is slower.
     (tmp_path / "assets/opponents.cfg").write_text("rush|Rush|@heuristic|||Test|1|0|1\n")
-    port = _free_port()
-    process = subprocess.Popen([str(binary), "--db", str(tmp_path / "meta.db"),
-                               "--http", f"127.0.0.1:{port}", "--relay-secret", "test-secret", "--bot-rewards"],
-                              cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    try:
-        assert _wait_listen(port), process.poll()
-        url = f"http://127.0.0.1:{port}"
+
+    with local_meta_server(
+        binary,
+        tmp_path / "meta.db",
+        "test-secret",
+        cwd=tmp_path,
+        extra_args=("--bot-rewards",),
+    ) as url:
         def guest():
             status, body = _post(url + "/v1/guest")
             assert status == 200
             return body["token"]
         yield url, guest(), guest(), binary, tmp_path / "meta.db"
-    finally:
-        process.terminate()
-        process.communicate(timeout=10)
 
 
 def start(url, token):

@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from .meta_process import local_meta_server
 
 
 def _find_meta_bin() -> Path | None:
@@ -111,25 +112,12 @@ def meta_server(tmp_path, request):
     bin_path = _find_meta_bin()
     if not bin_path:
         pytest.skip("tetris_meta binary not built (set TETRIS_META_BIN to override)")
-    port = _free_port()
     db = tmp_path / "test.db"
-    proc = subprocess.Popen(
-        [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}",
-         "--allow-public-matches"] +
-        (["--trust-loopback-proxy"] if getattr(request, "param", False) else []),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    try:
-        if not _wait_listen(port, timeout_s=5.0):
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            pytest.fail(f"tetris_meta did not listen on :{port}\n{stderr}")
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    extra_args = ["--allow-public-matches"]
+    if getattr(request, "param", False):
+        extra_args.append("--trust-loopback-proxy")
+    with local_meta_server(bin_path, db, extra_args=extra_args) as base:
+        yield base
 
 
 def test_guest_then_verify(meta_server):
@@ -208,19 +196,9 @@ def test_matches_requires_relay_secret_when_configured(tmp_path):
     bin_path = _find_meta_bin()
     if not bin_path:
         pytest.skip("tetris_meta binary not built (set TETRIS_META_BIN to override)")
-    port = _free_port()
     db = tmp_path / "secret.db"
     secret = "test-relay-secret"
-    proc = subprocess.Popen(
-        [str(bin_path), "--db", str(db), "--http", f"127.0.0.1:{port}",
-         "--relay-secret", secret],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    try:
-        if not _wait_listen(port, timeout_s=5.0):
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            pytest.fail(f"tetris_meta did not listen on :{port}\n{stderr}")
-        base = f"http://127.0.0.1:{port}"
+    with local_meta_server(bin_path, db, secret) as base:
         _, p1 = _post(f"{base}/v1/guest")
         _, p2 = _post(f"{base}/v1/guest")
         payload = {
@@ -240,12 +218,6 @@ def test_matches_requires_relay_secret_when_configured(tmp_path):
                            headers={"X-Relay-Secret": secret})
         assert code == 200
         assert body["a"]["delta"] == 16   # 0(RP) 동률, K=32 → 승자 +16
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
 
 
 def test_draw_keeps_elo(meta_server):
@@ -481,27 +453,12 @@ def test_elo_rp_migration_on_legacy_db(tmp_path):
     con.close()
 
     def _run_once(db_path):
-        port = _free_port()
-        proc = subprocess.Popen(
-            [str(bin_path), "--db", str(db_path), "--http", f"127.0.0.1:{port}",
-             "--allow-public-matches"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        if not _wait_listen(port, timeout_s=5.0):
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            proc.kill()
-            pytest.fail(f"tetris_meta did not listen on :{port}\n{stderr}")
-        try:
-            base = f"http://127.0.0.1:{port}"
+        with local_meta_server(
+            bin_path, db_path, extra_args=("--allow-public-matches",)
+        ) as base:
             _, hi = _post(f"{base}/v1/auth/verify", {"token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
             _, lo = _post(f"{base}/v1/auth/verify", {"token": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
             return hi, lo
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
 
     # 1차 기동: 1500 → 300, 1100 → max(0,-100) = 0. xp/level 은 새 컬럼 기본값.
     hi, lo = _run_once(db)
@@ -639,41 +596,24 @@ def test_meta_restart_keeps_committed_match(tmp_path):
     db = tmp_path / "restart.db"
     env = dict(os.environ)
     env.pop("TETRIS_RELAY_SECRET", None)
-    def start():
-        port = _free_port()
-        process = subprocess.Popen([str(binary), "--db", str(db), "--http", f"127.0.0.1:{port}",
-                                    "--allow-public-matches"],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        if not _wait_listen(port):
-            process.kill(); process.wait(timeout=3)
-            pytest.fail("meta restart readiness failed")
-        return process, f"http://127.0.0.1:{port}"
-    def stop(process):
-        if process.poll() is None:
-            process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill(); process.wait(timeout=3)
-    first, base = start()
-    try:
+    with local_meta_server(
+        binary, db, extra_args=("--allow-public-matches",), env=env
+    ) as base:
         _, a = _post(f"{base}/v1/guest")
         _, b = _post(f"{base}/v1/guest")
         record = {"match_uuid": _match_uuid(), "player_a": a["player_id"], "player_b": b["player_id"],
                   "winner": a["player_id"], "score_a": 10, "score_b": 5, "lines_a": 4, "lines_b": 2, "duration_s": 30}
         code, receipt = _post(f"{base}/v1/matches", record)
         assert code == 200
-    finally:
-        stop(first)
-    second, base = start()
-    try:
+    with local_meta_server(
+        binary, db, extra_args=("--allow-public-matches",), env=env
+    ) as base:
         assert _get(f"{base}/healthz") == (200, {"ok": True})
         code, retry = _post(f"{base}/v1/matches", record)
         assert code == 200 and retry == receipt
         code, saved = _post(f"{base}/v1/auth/verify", {"token": a["token"]})
         assert code == 200
         assert (saved["elo"], saved["bp"], saved["xp"]) == (16, 30, 100)
-    finally:
-        stop(second)
 
 
 @pytest.mark.parametrize("bad_winner", ["missing", "101", 1.5, True, [], {}, 18446744073709551615])
@@ -713,22 +653,10 @@ def test_ownership_index_upgrade_keeps_rows(tmp_path):
 
     @contextlib.contextmanager
     def running():
-        port = _free_port()
-        with (tmp_path / "index-server.log").open("w") as log:
-            proc = subprocess.Popen([str(binary), "--db", str(db), "--http",
-                                     f"127.0.0.1:{port}", "--allow-public-matches"],
-                                    stdout=log, stderr=log)
-        try:
-            assert _wait_listen(port), "meta did not start"
-            yield f"http://127.0.0.1:{port}"
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
+        with local_meta_server(
+            binary, db, extra_args=("--allow-public-matches",)
+        ) as base:
+            yield base
 
     with running() as base:
         status, guest = _post(f"{base}/v1/guest")
@@ -896,26 +824,14 @@ def test_unicode_database_path_survives_restart(tmp_path):
     database = directory / "계정 저장.sqlite"
     identity = None
     for phase in ("create", "reopen"):
-        port = _free_port()
-        with (directory / (phase + ".log")).open("wb") as log:
-            process = subprocess.Popen(
-                [str(binary.resolve()), "--db", str(database.resolve()),
-                 "--http", f"127.0.0.1:{port}", "--allow-public-matches"],
-                cwd=directory, stdout=log, stderr=subprocess.STDOUT)
-            try:
-                assert _wait_listen(port), "meta did not start with the Unicode DB path"
-                base = f"http://127.0.0.1:{port}"
-                if phase == "create":
-                    status, identity = _post(base + "/v1/guest")
-                    assert status == 200
-                else:
-                    status, profile = _post(base + "/v1/auth/verify", {"token": identity["token"]})
-                    assert status == 200 and profile["player_id"] == identity["player_id"]
-                assert database.is_file(), "SQLite did not open the exact requested path"
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3)
+        with local_meta_server(
+            binary, database, cwd=directory,
+            extra_args=("--allow-public-matches",),
+        ) as base:
+            if phase == "create":
+                status, identity = _post(base + "/v1/guest")
+                assert status == 200
+            else:
+                status, profile = _post(base + "/v1/auth/verify", {"token": identity["token"]})
+                assert status == 200 and profile["player_id"] == identity["player_id"]
+            assert database.is_file(), "SQLite did not open the exact requested path"

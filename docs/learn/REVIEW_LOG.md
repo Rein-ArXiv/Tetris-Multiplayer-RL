@@ -7262,3 +7262,12 @@ releasebd17bf00e142bbb6.공개55차시동결,커밋/푸시/배포없음.
 - terra:167–177·배포 Parts·CMake/CI·Linux/Windows 패키지·systemd·백업복구·콘텐츠/소스 허용목록을 대조했다. 단일 writer·내구성·경로·수명/대상OS의 적용범위가 구별돼 있고 추가 오류는 발견하지 못했다. 모두 읽기전용, 새 테스트·학습·네트워크·DB·비밀설정 접근 없음.
 - 이 단원별 오류 대조를 원문 모든 H2의 세부 대응 완료와 혼동하지 않는다. network/service-audit-coverage 제안은 실제 운영/OS 미실행을 콘텐츠 미완료와 섞은 항목이 있어 자동 적용하지 않았다. 대응표의 기존 부분 상태와 미대조 범위는 보존한다.
 - 이전 WSS 수정의 원격 CI37281580489 전체7잡 성공. 소리8fd3645의 Pages37284141915 및 실제15자산 release3348fed80137d4e9 일치 확인. 후속 문서50fbaeb의 CI37282630109는 별도로 실패하여 추가 진단 중이며 이전 성공으로 덮어 기록하지 않는다.
+
+
+## 2026-10-05 — Windows CI의 meta 준비 확인 통일
+
+- CI37282630109의 Windows thread-model smoke에서 test_daily_receipts_zero_award_and_atomic_failure[0-True] 준비가 실패했다. 1995검사는 통과했고 자식은 살아 있었지만 기존5초 안에 listener를 관찰하지 못했다. 당시 stderr가 폐기되어 지연 원인이나 포트 충돌을 확정할 수 없다. 로그는 ci-37282630109-windows.log에 보존했다.
+- luna가 bot_rewards와 정상 meta DB fixture를 기존 local_meta_server에 연결했다. 자식이 포트0을 바인딩한 뒤 PORT를 공지하고 /healthz까지 확인한다. 총30초 기한·실패시 종료/회수·크기가 제한된 로그 진단을 재사용한다. 기존 살아 있는 PIPE의 무기한 read 경로도 제거했다. 요청/보상 검사를 재시도하거나 skip하지 않는다.
+- helper에 keyword-only cwd/extra_args/env를 추가했다. 인증·공개 경기·프록시 옵션, 비밀을 제거한 재시작 환경, 한글 작업/DB 경로를 보존한다. secret 생략 시 실제 자식 환경의 값을 진단에서 가리며 명시 빈 환경을 상속 환경과 혼동하지 않는다. 의도적 기동 거부 검사는 유지한다. 제품 코드 변경 없음.
+- 관련 전체62검사 통과(exit0,32.21초); 마지막 변환 경로의 집중18검사도 통과(exit0,24.59초,meta-readiness-final.log). 가상시계 기한 검사와 긴 실패 로그의 비밀 가림·자식 정리 검사가 포함된다. 책임자가 옵션/인증/재시작 동작과 diff를 검수했다.
+- 리액터 커밋1b5dae5의 Pages37285246106 성공, 실제15자산 release a13e19fafb33e6cb 일치 확인(coverage-module10-deployment.json). 원격 Linux의 새 부분시작/예외종료 회귀 단계는 통과했다. 이 기록 시점의 Windows 및 이번 fixture 수정 원격 결과는 아직 미확정이다.

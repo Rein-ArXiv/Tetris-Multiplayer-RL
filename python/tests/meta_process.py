@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, Mapping, Optional, Sequence, Tuple
 
 _PORT_LINE = re.compile(rb"PORT ([1-9][0-9]{0,4})\r?\n")
 _PORT_READ_LIMIT = 256
@@ -27,8 +27,12 @@ class MetaServerStartupError(RuntimeError):
 def local_meta_server(
     binary: Path,
     database: Path,
-    secret: str,
+    secret: Optional[str] = None,
     timeout: float = 30,
+    *,
+    cwd: Optional[Path] = None,
+    extra_args: Sequence[str] = (),
+    env: Optional[Mapping[str, str]] = None,
 ) -> Iterator[str]:
     """
     Run the repository's LOCAL test meta server for the duration of the block.
@@ -39,6 +43,8 @@ def local_meta_server(
     The single startup deadline covers process creation, schema initialization
     and HTTP readiness. SQLite alone may wait five seconds for a lock; loaded
     CI storage also needs time for schema writes. Fast starts return immediately.
+    ``cwd``, ``env`` and ``extra_args`` are keyword-only; extra args must not
+    override the helper-owned port, DB, or secret options.
     """
     binary = Path(binary).resolve()
     database = Path(database).resolve()
@@ -53,19 +59,31 @@ def local_meta_server(
 
         argv = [
             os.fspath(binary),
+            *extra_args,
             "--http", "127.0.0.1:0",
             "--db", os.fspath(database),
-            "--relay-secret", secret,
         ]
+        if secret is not None:
+            argv.extend(("--relay-secret", secret))
 
         with out_path.open("wb") as out_f, err_path.open("wb") as err_f:
-            proc = subprocess.Popen(argv, stdout=out_f, stderr=err_f)
+            proc = subprocess.Popen(
+                argv,
+                cwd=os.fspath(cwd) if cwd is not None else None,
+                env=dict(env) if env is not None else None,
+                stdout=out_f,
+                stderr=err_f,
+            )
 
         try:
             port, reason = _await_ready(proc, out_path, deadline)
             if port is None:
                 _shutdown(proc)
-                diagnostic = _diagnostic(proc, err_path, secret)
+                effective_secret = secret
+                if effective_secret is None:
+                    effective_env = env if env is not None else os.environ
+                    effective_secret = effective_env.get("TETRIS_RELAY_SECRET", "")
+                diagnostic = _diagnostic(proc, err_path, effective_secret)
                 raise MetaServerStartupError(
                     f"local meta server not ready: {reason}\n{diagnostic}"
                 )

@@ -208,18 +208,23 @@ const questionNode = (q) => {
     const status = el('span', '', 'nav-status'); status.dataset.lessonStatus = lesson.id; status.hidden = true; entry.append(status); nav.append(entry);
   }
   const count = available.size;
-  document.querySelectorAll('[data-course-status]').forEach(node => { node.textContent = `현재 ${count}개 차시를 읽을 수 있습니다. 나머지는 집필 중입니다. 원문 전체 통합과 강의 집필 완료는 구분합니다.`; });
+  const unpublished = bundle.coursePlan.modules.flatMap(module => module.units).filter(unit => !available.has(unit.lessonId)).length;
+  document.querySelectorAll('[data-course-status]').forEach(node => {
+    node.textContent = unpublished
+      ? `현재 ${count}개 차시를 읽을 수 있습니다. 편성된 차시 중 ${unpublished}개는 아직 공개되지 않았습니다.`
+      : `현재 편성된 모든 차시를 읽을 수 있습니다. 총 ${count}개 차시입니다.`;
+  });
   const coverage = el('section'); coverage.id = 'coverage-progress';
   const rows = bundle.coverage.sections;
-  coverage.append(el('h2', '원문 전체를 어떻게 따라가고 있나?'), el('p', `${rows.length}개 원문 절을 추적합니다. ${rows.filter(r => r.state === 'covered').length}개 절은 전체 내용 대응 검토를 마쳤고, ${rows.filter(r => r.state === 'partial').length}개 절은 일부가 강의에 연결됐습니다. 차시를 집필했다는 사실만으로 원문 전체를 다뤘다고 표시하지 않습니다.`));
+  coverage.append(el('h2', '원문·강의 찾아보기'), el('p', '원문 절에서 관련 강의로 이동하는 참고 색인입니다. 본문 대조 상태는 편집 기록이며, 강의의 집필 상태나 나의 학습 진도와는 별개입니다.'));
   for (const part of [...new Set(rows.map(row => row.part))].sort((a, b) => a - b)) {
-    const details = el('details'); details.append(el('summary', `Part ${part} · 원문 절과 집필 상태`));
+    const details = el('details'); details.append(el('summary', `Part ${part} · 원문과 관련 강의`));
     const list = el('ul');
     for (const row of rows.filter(r => r.part === part)) {
       const item = el('li');
       const button = el('button', row.title, 'text-button'); button.type = 'button'; button.dataset.doc = `part${part}`;
       if (row.title !== '표제와 도입') button.dataset.docTitle = row.title;
-      item.append(button, document.createTextNode(` — ${{unassigned:'대응 검토 전',partial:'일부 연결',covered:'대응 검토 완료','needs-review':'원문 변경·재검토 필요'}[row.state] || row.state}`));
+      item.append(button, document.createTextNode(` — ${{unassigned:'본문 대조 기록 없음',partial:'본문 대조 일부 완료',covered:'절 전체 대응 확인','needs-review':'원문 변경·대응 재확인 필요'}[row.state] || row.state}`));
       for (const lesson of row.lessons) if (available.has(lesson)) item.append(document.createTextNode(' · '), link(`${lesson.split('-')[1]}차시로 이동`, lesson));
       if (row.routingState === 'draft') {
         item.append(el('p', `제목 기반 집필 후보: ${row.candidateUnits.map(id => `${Number(id.split('-')[1])}차시`).join(', ')} · 본문 대조 전`, 'reference'));

@@ -663,8 +663,8 @@
       "lines": 591
     },
     "python/tests/test_meta_db_smoke.py": {
-      "sha256": "8925ad99b760ad13788ba9c0062a387f1808fa76ad6a5618d72a422dd1f51c4e",
-      "lines": 921
+      "sha256": "7d3330ec2a684cf874c2ed40f8d2bbfbc8b42639a8d3c4d4b52ae1a4bf3cf505",
+      "lines": 837
     },
     "python/tests/test_observation_parity.py": {
       "sha256": "0faf191182cb1477de021f8be05b4e272fcd477808e8523a8889a5e95346d750",

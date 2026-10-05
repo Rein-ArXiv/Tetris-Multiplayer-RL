@@ -30,8 +30,8 @@
   const coursePlan = window.LEARNING_LESSONS?.coursePlan;
   if (coursePlan) {
     const plan = document.createElement('section');
-    const title = document.createElement('h2'); title.textContent = '세부 강의 편성안';
-    const intro = document.createElement('p'); intro.textContent = '구현 주제와 마지막 해설을 의존성 순서대로 편성했습니다. 링크가 있는 차시만 본문이 제공되며, 나머지는 집필 예정입니다. CS 깊이를 위해 필요한 경우 차시를 더 나눕니다.';
+    const title = document.createElement('h2'); title.textContent = '강의 구성';
+    const intro = document.createElement('p'); intro.textContent = '프로그램을 만들어 가는 순서와 개념의 의존 관계에 따라 구성했습니다. 단원을 펼쳐 구현 주제를 살펴보고, 제목을 선택해 강의로 이동하세요.';
     plan.append(title, intro);
     for (const module of coursePlan.modules) {
       const details = document.createElement('details');
@@ -43,7 +43,7 @@
         // Availability comes from reviewed data, not the currently mounted article.
         if (window.LEARNING_COURSE?.has(unit.lessonId)) {
           const link = document.createElement('a'); link.href = `#${unit.lessonId}`; link.textContent = unit.title; li.append(link);
-        } else li.textContent = `${unit.title} · 집필 예정`;
+        } else li.textContent = `${unit.title} · 공개 전`;
         list.append(li);
       }
       details.append(summary, list); plan.append(details);
